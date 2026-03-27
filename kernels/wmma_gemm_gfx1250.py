@@ -224,8 +224,8 @@ def compile_wmma_gemm_tdm(
         c_rsrc = buffer_ops.create_buffer_resource(arg_c, num_records_bytes=c_nrec)
 
         # --- TDM async copy helpers (MCAST-aware) ---
-        def copy_a_to_lds(k_base, lds_a_mem_ref):
-            desc = tdm_ops.make_tensor_descriptor_2d(
+        def make_desc_a(lds_a_mem_ref, k_base):
+            return tdm_ops.make_tensor_descriptor_2d(
                 global_ptr=arg_a, lds_memref=lds_a_mem_ref,
                 global_offset=(blk_m, k_base),
                 tensor_shape=(tile_m, tile_k), strides=(K, 1),
@@ -233,10 +233,9 @@ def compile_wmma_gemm_tdm(
                 pad_interval=tile_k, pad_amount=LDS_PAD_A,
                 num_warps=num_warps,
                 workgroup_mask=a_mcast_mask)
-            tdm_ops.tensor_load_2d(desc)
 
-        def copy_b_to_lds(k_base, lds_b_mem_ref):
-            desc = tdm_ops.make_tensor_descriptor_2d(
+        def make_desc_b(lds_b_mem_ref, k_base):
+            return tdm_ops.make_tensor_descriptor_2d(
                 global_ptr=arg_b, lds_memref=lds_b_mem_ref,
                 global_offset=(k_base, blk_n),
                 tensor_shape=(tile_k, tile_n), strides=(N, 1),
@@ -244,7 +243,6 @@ def compile_wmma_gemm_tdm(
                 pad_interval=tile_n, pad_amount=LDS_PAD_B,
                 num_warps=num_warps,
                 workgroup_mask=b_mcast_mask)
-            tdm_ops.tensor_load_2d(desc)
 
         # --- LDS load helpers ---
         def _precompute_a_lane_bases(lds_ptr):
@@ -507,31 +505,96 @@ def compile_wmma_gemm_tdm(
                 for_store=True,
             )
 
+        # Precompute LDS addresses for all stages
+        stages_a_lds_addr = []
+        stages_b_lds_addr = []
+        for i in range_constexpr(num_buffers):
+            stages_a_lds_addr.append(vector.extract(make_desc_a(stages_a_mem[i], arith.index(0)).dgroup0, static_position=[1], dynamic_position=[]))
+            stages_b_lds_addr.append(vector.extract(make_desc_b(stages_b_mem[i], arith.index(0)).dgroup0, static_position=[1], dynamic_position=[]))
+
+        # Create initial descriptors (pointing to tile 0)
+        desc_a_init = make_desc_a(stages_a_mem[0], arith.index(0))
+        desc_b_init = make_desc_b(stages_b_mem[0], arith.index(0))
+        
+        dgroup0_a = desc_a_init.dgroup0
+        dgroup0_b = desc_b_init.dgroup0
+        
+        dgroup1_a = desc_a_init.dgroup1
+        dgroup1_b = desc_b_init.dgroup1
+        
+        adv_a_bytes = arith.index(tile_k * elem_bytes)
+        adv_b_bytes = arith.index(tile_k * N * elem_bytes)
+
         # Prologue: load first (num_buffers - 1) tiles into stages 0..(num_buffers-2)
         for i in range_constexpr(pre_loaded):
-            copy_a_to_lds(arith.index(i * tile_k), stages_a_mem[i])
-            copy_b_to_lds(arith.index(i * tile_k), stages_b_mem[i])
+            dgroup0_a = vector.insert(stages_a_lds_addr[i], dgroup0_a, static_position=[1], dynamic_position=[])
+            dgroup0_b = vector.insert(stages_b_lds_addr[i], dgroup0_b, static_position=[1], dynamic_position=[])
+            
+            desc_a = tdm_ops.TDMDescriptor2D(dgroup0_a, dgroup1_a)
+            desc_b = tdm_ops.TDMDescriptor2D(dgroup0_b, dgroup1_b)
+            
+            tdm_ops.tensor_load_2d(desc_a)
+            tdm_ops.tensor_load_2d(desc_b)
+            
+            dgroup0_a = tdm_ops.advance_tdm_descriptor(desc_a, adv_a_bytes).dgroup0
+            dgroup0_b = tdm_ops.advance_tdm_descriptor(desc_b, adv_b_bytes).dgroup0
+            
         pipeline_fence(outstanding=2 * (num_buffers - 2), use_cluster=use_cluster)
+
+        def _select_base(bases_list, stage_idx):
+            if len(bases_list) == 1:
+                return bases_list[0]
+            if len(bases_list) == 2:
+                is_zero = arith.cmpi(arith.CmpIPredicate.eq, stage_idx, arith.index(0))
+                return arith.select(is_zero, bases_list[0], bases_list[1])
+            result = bases_list[-1]
+            _n = len(bases_list)
+            for ii in range_constexpr(_n - 1):
+                i = _n - 2 - ii
+                is_i = arith.cmpi(arith.CmpIPredicate.eq, stage_idx, arith.index(i))
+                result = arith.select(is_i, bases_list[i], result)
+            return result
 
         # Main loop: each iteration covers num_buffers K-tiles
         main_end = loop_iters * num_buffers * tile_k
 
         if loop_iters > 0:
-            for iv, state in range(0, main_end, num_buffers * tile_k, init=list(accs)):
-                accs_in = list(state)
+            init_args = list(accs) + [dgroup0_a, dgroup0_b]
+            
+            for iv, state in range(0, main_end, num_buffers * tile_k, init=init_args):
+                accs_in = list(state[:n_accs])
+                cur_dgroup0_a = state[n_accs]
+                cur_dgroup0_b = state[n_accs + 1]
+                
                 for s in range_constexpr(num_buffers):
                     _load_stage = (s + num_buffers - 1) % num_buffers
-                    _load_k_off = (s + num_buffers - 1) * tile_k
-                    copy_a_to_lds(iv + arith.index(_load_k_off), stages_a_mem[_load_stage])
-                    copy_b_to_lds(iv + arith.index(_load_k_off), stages_b_mem[_load_stage])
+                    
+                    lds_a = _select_base(stages_a_lds_addr, arith.index(_load_stage))
+                    lds_b = _select_base(stages_b_lds_addr, arith.index(_load_stage))
+                    
+                    next_dgroup0_a = vector.insert(lds_a, cur_dgroup0_a, static_position=[1], dynamic_position=[])
+                    next_dgroup0_b = vector.insert(lds_b, cur_dgroup0_b, static_position=[1], dynamic_position=[])
+                    
+                    desc_a = tdm_ops.TDMDescriptor2D(next_dgroup0_a, dgroup1_a)
+                    desc_b = tdm_ops.TDMDescriptor2D(next_dgroup0_b, dgroup1_b)
+                    
+                    tdm_ops.tensor_load_2d(desc_a)
+                    tdm_ops.tensor_load_2d(desc_b)
+                    
+                    cur_dgroup0_a = tdm_ops.advance_tdm_descriptor(desc_a, adv_a_bytes).dgroup0
+                    cur_dgroup0_b = tdm_ops.advance_tdm_descriptor(desc_b, adv_b_bytes).dgroup0
+
                     _l2_prefetch(iv + arith.index(s * tile_k))
                     rocdl.sched_barrier(0)
                     accs_in = compute_tile(accs_in, stages_a[s], stages_b[s])
                     hot_loop_scheduler()
                     pipeline_fence(outstanding=2 * (num_buffers - 2),
                                    use_cluster=use_cluster)
-                results = yield list(accs_in)
-            accs = list(results)
+                results = yield list(accs_in) + [cur_dgroup0_a, cur_dgroup0_b]
+            
+            accs = list(results[:n_accs])
+            dgroup0_a = results[n_accs]
+            dgroup0_b = results[n_accs + 1]
 
         # Tail: handle remaining tiles using the compile-time plan
         if loop_iters == 0 and use_cluster:
@@ -539,9 +602,18 @@ def compile_wmma_gemm_tdm(
         _extra_j = 0
         for _load_stage, _compute_stage, _outstanding in tail_plan:
             if _load_stage is not None:
-                _k_off = (_tail_start + pre_loaded + _extra_j) * tile_k
-                copy_a_to_lds(arith.index(_k_off), stages_a_mem[_load_stage])
-                copy_b_to_lds(arith.index(_k_off), stages_b_mem[_load_stage])
+                dgroup0_a = vector.insert(stages_a_lds_addr[_load_stage], dgroup0_a, static_position=[1], dynamic_position=[])
+                dgroup0_b = vector.insert(stages_b_lds_addr[_load_stage], dgroup0_b, static_position=[1], dynamic_position=[])
+                
+                desc_a = tdm_ops.TDMDescriptor2D(dgroup0_a, dgroup1_a)
+                desc_b = tdm_ops.TDMDescriptor2D(dgroup0_b, dgroup1_b)
+                
+                tdm_ops.tensor_load_2d(desc_a)
+                tdm_ops.tensor_load_2d(desc_b)
+                
+                dgroup0_a = tdm_ops.advance_tdm_descriptor(desc_a, adv_a_bytes).dgroup0
+                dgroup0_b = tdm_ops.advance_tdm_descriptor(desc_b, adv_b_bytes).dgroup0
+                
                 _extra_j += 1
             if _outstanding == -1:
                 if use_tdm_store:
