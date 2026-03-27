@@ -219,7 +219,7 @@ def compile_mxfp4_gemm(
         i32_n: fx.Int32,
     ):
         # Disable VALU stall for back-to-back WMMA
-        # enable_wmma_pipeline()
+        enable_wmma_pipeline()
 
         # Wave 0 warms I-cache (~40 KB, 10 pages)
         if inst_prefetch:
@@ -931,7 +931,7 @@ def compile_mxfp4_gemm(
                  out_dtype, inst_prefetch, wave_specialized_tdm,
                  use_scale_opsel)
 
-    @flyc.jit
+    @flyc.jit(compile_hints={"expert_scheduling_mode": True})
     def launch_mxfp4_gemm(
         arg_c: fx.Tensor,
         arg_a: fx.Tensor,
