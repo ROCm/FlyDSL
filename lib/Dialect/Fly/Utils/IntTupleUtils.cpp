@@ -220,12 +220,15 @@ IntTupleValueAdaptor IntTupleBuilder<IntTupleValueAdaptor>::add(IntTupleValueAda
                                                                 IntTupleValueAdaptor rhs) const {
   if (lhs.isLeafInt() && rhs.isLeafInt()) {
     auto retAttr = attrBuilder.add(lhs.attr, rhs.attr);
+    if (retAttr.isStatic()) {
+      return materializeConstantTuple(retAttr);
+    }
     auto cmpType = getCommonIntType(lhs.attr, rhs.attr);
-    return IntTupleValueAdaptor{arith::AddIOp::create(builder, loc,
+    return IntTupleValueAdaptor(arith::AddIOp::create(builder, loc,
                                                       extendToIntType(lhs.value, cmpType),
                                                       extendToIntType(rhs.value, cmpType))
                                     .getResult(),
-                                retAttr};
+                                retAttr);
   } else {
     assert(lhs.isLeafBasis() || lhs.isLeafStaticValue(0) || !lhs.isLeaf());
     assert(rhs.isLeafBasis() || rhs.isLeafStaticValue(0) || !rhs.isLeaf());
@@ -244,6 +247,9 @@ IntTupleValueAdaptor IntTupleBuilder<IntTupleValueAdaptor>::add(IntTupleValueAda
 IntTupleValueAdaptor IntTupleBuilder<IntTupleValueAdaptor>::sub(IntTupleValueAdaptor lhs,
                                                                 IntTupleValueAdaptor rhs) const {
   auto retAttr = attrBuilder.sub(lhs.attr, rhs.attr);
+  if (retAttr.isStatic()) {
+    return materializeConstantTuple(retAttr);
+  }
   auto cmpType = getCommonIntType(lhs.attr, rhs.attr);
   return IntTupleValueAdaptor{arith::SubIOp::create(builder, loc,
                                                     extendToIntType(lhs.value, cmpType),
@@ -255,6 +261,9 @@ IntTupleValueAdaptor IntTupleBuilder<IntTupleValueAdaptor>::sub(IntTupleValueAda
 IntTupleValueAdaptor IntTupleBuilder<IntTupleValueAdaptor>::mul(IntTupleValueAdaptor lhs,
                                                                 IntTupleValueAdaptor rhs) const {
   auto retAttr = attrBuilder.mul(lhs.attr, rhs.attr);
+  if (retAttr.isStatic()) {
+    return materializeConstantTuple(retAttr);
+  }
   auto cmpType = getCommonIntType(lhs.attr, rhs.attr);
   return IntTupleValueAdaptor{arith::MulIOp::create(builder, loc,
                                                     extendToIntType(lhs.value, cmpType),
@@ -266,6 +275,9 @@ IntTupleValueAdaptor IntTupleBuilder<IntTupleValueAdaptor>::mul(IntTupleValueAda
 IntTupleValueAdaptor IntTupleBuilder<IntTupleValueAdaptor>::div(IntTupleValueAdaptor lhs,
                                                                 IntTupleValueAdaptor rhs) const {
   auto retAttr = attrBuilder.div(lhs.attr, rhs.attr);
+  if (retAttr.isStatic()) {
+    return materializeConstantTuple(retAttr);
+  }
   auto cmpType = getCommonIntType(lhs.attr, rhs.attr);
   return IntTupleValueAdaptor{arith::DivSIOp::create(builder, loc,
                                                      extendToIntType(lhs.value, cmpType),
@@ -277,6 +289,9 @@ IntTupleValueAdaptor IntTupleBuilder<IntTupleValueAdaptor>::div(IntTupleValueAda
 IntTupleValueAdaptor IntTupleBuilder<IntTupleValueAdaptor>::mod(IntTupleValueAdaptor lhs,
                                                                 IntTupleValueAdaptor rhs) const {
   auto retAttr = attrBuilder.mod(lhs.attr, rhs.attr);
+  if (retAttr.isStatic()) {
+    return materializeConstantTuple(retAttr);
+  }
   auto cmpType = getCommonIntType(lhs.attr, rhs.attr);
   return IntTupleValueAdaptor{arith::RemSIOp::create(builder, loc,
                                                      extendToIntType(lhs.value, cmpType),
@@ -289,6 +304,9 @@ IntTupleValueAdaptor
 IntTupleBuilder<IntTupleValueAdaptor>::logicalAnd(IntTupleValueAdaptor lhs,
                                                   IntTupleValueAdaptor rhs) const {
   auto retAttr = attrBuilder.logicalAnd(lhs.attr, rhs.attr);
+  if (retAttr.isStatic()) {
+    return materializeConstantTuple(retAttr);
+  }
   auto retType = getIntType(retAttr);
   // (lhs != 0) && (rhs != 0)
   auto lhsBool = arith::CmpIOp::create(
@@ -306,6 +324,9 @@ IntTupleValueAdaptor
 IntTupleBuilder<IntTupleValueAdaptor>::logicalOr(IntTupleValueAdaptor lhs,
                                                  IntTupleValueAdaptor rhs) const {
   auto retAttr = attrBuilder.logicalOr(lhs.attr, rhs.attr);
+  if (retAttr.isStatic()) {
+    return materializeConstantTuple(retAttr);
+  }
   auto retType = getIntType(retAttr);
   // (lhs != 0) || (rhs != 0)
   auto lhsBool = arith::CmpIOp::create(
@@ -322,6 +343,9 @@ IntTupleBuilder<IntTupleValueAdaptor>::logicalOr(IntTupleValueAdaptor lhs,
 IntTupleValueAdaptor
 IntTupleBuilder<IntTupleValueAdaptor>::logicalNot(IntTupleValueAdaptor val) const {
   auto retAttr = attrBuilder.logicalNot(val.attr);
+  if (retAttr.isStatic()) {
+    return materializeConstantTuple(retAttr);
+  }
   auto retType = getIntType(retAttr);
   auto zero = arith::ConstantIntOp::create(builder, loc, getIntType(val.attr), 0).getResult();
   // !(val) == (val == 0)
@@ -333,6 +357,9 @@ IntTupleBuilder<IntTupleValueAdaptor>::logicalNot(IntTupleValueAdaptor val) cons
 IntTupleValueAdaptor IntTupleBuilder<IntTupleValueAdaptor>::lt(IntTupleValueAdaptor lhs,
                                                                IntTupleValueAdaptor rhs) const {
   auto retAttr = attrBuilder.lt(lhs.attr, rhs.attr);
+  if (retAttr.isStatic()) {
+    return materializeConstantTuple(retAttr);
+  }
   auto cmpType = getCommonIntType(lhs.attr, rhs.attr);
   auto retType = getIntType(retAttr);
   auto cmp = arith::CmpIOp::create(builder, loc, arith::CmpIPredicate::slt,
@@ -345,6 +372,9 @@ IntTupleValueAdaptor IntTupleBuilder<IntTupleValueAdaptor>::lt(IntTupleValueAdap
 IntTupleValueAdaptor IntTupleBuilder<IntTupleValueAdaptor>::le(IntTupleValueAdaptor lhs,
                                                                IntTupleValueAdaptor rhs) const {
   auto retAttr = attrBuilder.le(lhs.attr, rhs.attr);
+  if (retAttr.isStatic()) {
+    return materializeConstantTuple(retAttr);
+  }
   auto cmpType = getCommonIntType(lhs.attr, rhs.attr);
   auto retType = getIntType(retAttr);
   auto cmp = arith::CmpIOp::create(builder, loc, arith::CmpIPredicate::sle,
@@ -357,6 +387,9 @@ IntTupleValueAdaptor IntTupleBuilder<IntTupleValueAdaptor>::le(IntTupleValueAdap
 IntTupleValueAdaptor IntTupleBuilder<IntTupleValueAdaptor>::gt(IntTupleValueAdaptor lhs,
                                                                IntTupleValueAdaptor rhs) const {
   auto retAttr = attrBuilder.gt(lhs.attr, rhs.attr);
+  if (retAttr.isStatic()) {
+    return materializeConstantTuple(retAttr);
+  }
   auto cmpType = getCommonIntType(lhs.attr, rhs.attr);
   auto retType = getIntType(retAttr);
   auto cmp = arith::CmpIOp::create(builder, loc, arith::CmpIPredicate::sgt,
@@ -369,6 +402,9 @@ IntTupleValueAdaptor IntTupleBuilder<IntTupleValueAdaptor>::gt(IntTupleValueAdap
 IntTupleValueAdaptor IntTupleBuilder<IntTupleValueAdaptor>::ge(IntTupleValueAdaptor lhs,
                                                                IntTupleValueAdaptor rhs) const {
   auto retAttr = attrBuilder.ge(lhs.attr, rhs.attr);
+  if (retAttr.isStatic()) {
+    return materializeConstantTuple(retAttr);
+  }
   auto cmpType = getCommonIntType(lhs.attr, rhs.attr);
   auto retType = getIntType(retAttr);
   auto cmp = arith::CmpIOp::create(builder, loc, arith::CmpIPredicate::sge,
@@ -381,6 +417,9 @@ IntTupleValueAdaptor IntTupleBuilder<IntTupleValueAdaptor>::ge(IntTupleValueAdap
 IntTupleValueAdaptor IntTupleBuilder<IntTupleValueAdaptor>::eq(IntTupleValueAdaptor lhs,
                                                                IntTupleValueAdaptor rhs) const {
   auto retAttr = attrBuilder.eq(lhs.attr, rhs.attr);
+  if (retAttr.isStatic()) {
+    return materializeConstantTuple(retAttr);
+  }
   auto cmpType = getCommonIntType(lhs.attr, rhs.attr);
   auto retType = getIntType(retAttr);
   auto cmp = arith::CmpIOp::create(builder, loc, arith::CmpIPredicate::eq,
@@ -393,6 +432,9 @@ IntTupleValueAdaptor IntTupleBuilder<IntTupleValueAdaptor>::eq(IntTupleValueAdap
 IntTupleValueAdaptor IntTupleBuilder<IntTupleValueAdaptor>::ne(IntTupleValueAdaptor lhs,
                                                                IntTupleValueAdaptor rhs) const {
   auto retAttr = attrBuilder.ne(lhs.attr, rhs.attr);
+  if (retAttr.isStatic()) {
+    return materializeConstantTuple(retAttr);
+  }
   auto cmpType = getCommonIntType(lhs.attr, rhs.attr);
   auto retType = getIntType(retAttr);
   auto cmp = arith::CmpIOp::create(builder, loc, arith::CmpIPredicate::ne,
@@ -405,6 +447,9 @@ IntTupleValueAdaptor IntTupleBuilder<IntTupleValueAdaptor>::ne(IntTupleValueAdap
 IntTupleValueAdaptor IntTupleBuilder<IntTupleValueAdaptor>::min(IntTupleValueAdaptor lhs,
                                                                 IntTupleValueAdaptor rhs) const {
   auto retAttr = attrBuilder.min(lhs.attr, rhs.attr);
+  if (retAttr.isStatic()) {
+    return materializeConstantTuple(retAttr);
+  }
   auto cmpType = getCommonIntType(lhs.attr, rhs.attr);
   return IntTupleValueAdaptor{arith::MinSIOp::create(builder, loc,
                                                      extendToIntType(lhs.value, cmpType),
@@ -416,6 +461,9 @@ IntTupleValueAdaptor IntTupleBuilder<IntTupleValueAdaptor>::min(IntTupleValueAda
 IntTupleValueAdaptor IntTupleBuilder<IntTupleValueAdaptor>::max(IntTupleValueAdaptor lhs,
                                                                 IntTupleValueAdaptor rhs) const {
   auto retAttr = attrBuilder.max(lhs.attr, rhs.attr);
+  if (retAttr.isStatic()) {
+    return materializeConstantTuple(retAttr);
+  }
   auto cmpType = getCommonIntType(lhs.attr, rhs.attr);
   return IntTupleValueAdaptor{arith::MaxSIOp::create(builder, loc,
                                                      extendToIntType(lhs.value, cmpType),
@@ -428,6 +476,9 @@ IntTupleValueAdaptor
 IntTupleBuilder<IntTupleValueAdaptor>::safeDiv(IntTupleValueAdaptor lhs,
                                                IntTupleValueAdaptor rhs) const {
   auto retAttr = attrBuilder.safeDiv(lhs.attr, rhs.attr);
+  if (retAttr.isStatic()) {
+    return materializeConstantTuple(retAttr);
+  }
   auto cmpType = getCommonIntType(lhs.attr, rhs.attr);
   return IntTupleValueAdaptor{arith::DivSIOp::create(builder, loc,
                                                      extendToIntType(lhs.value, cmpType),
@@ -440,6 +491,9 @@ IntTupleValueAdaptor
 IntTupleBuilder<IntTupleValueAdaptor>::ceilDiv(IntTupleValueAdaptor lhs,
                                                IntTupleValueAdaptor rhs) const {
   auto retAttr = attrBuilder.ceilDiv(lhs.attr, rhs.attr);
+  if (retAttr.isStatic()) {
+    return materializeConstantTuple(retAttr);
+  }
   auto cmpType = getCommonIntType(lhs.attr, rhs.attr);
   return IntTupleValueAdaptor{arith::CeilDivSIOp::create(builder, loc,
                                                          extendToIntType(lhs.value, cmpType),
@@ -452,6 +506,9 @@ IntTupleValueAdaptor
 IntTupleBuilder<IntTupleValueAdaptor>::shapeDiv(IntTupleValueAdaptor lhs,
                                                 IntTupleValueAdaptor rhs) const {
   auto retAttr = attrBuilder.shapeDiv(lhs.attr, rhs.attr);
+  if (retAttr.isStatic()) {
+    return materializeConstantTuple(retAttr);
+  }
   auto cmpType = getCommonIntType(lhs.attr, rhs.attr);
   return IntTupleValueAdaptor{arith::CeilDivSIOp::create(builder, loc,
                                                          extendToIntType(lhs.value, cmpType),
