@@ -38,8 +38,8 @@ declare_mlir_python_extension(FlyPythonSources.Core.fly
   ROOT_DIR "${PROJECT_SOURCE_DIR}/lib/Bindings/Python"
   PYTHON_BINDINGS_LIBRARY nanobind
   SOURCES
+    TiledOpTraits.cpp
     FlyExtension.cpp
-    DLTensorAdaptor.h
   PRIVATE_LINK_LIBS
     LLVMSupport
 )
