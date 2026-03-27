@@ -342,13 +342,11 @@ def _dump_llvmir(*, dump_dir: Path, asm: str, stage_name: str = "16_llvm_ir"):
 
         mlir_translate = shutil.which("mlir-translate")
         if mlir_translate is None:
-            for candidate in [
-                "/llvm-project/mlir_install/bin/mlir-translate",
-                "/llvm-project/mlir_install_v23/bin/mlir-translate",
-            ]:
-                if Path(candidate).exists():
-                    mlir_translate = candidate
-                    break
+            # Search within the Python package's _mlir_libs directory
+            _mlir_libs = Path(__file__).resolve().parent.parent / "_mlir" / "_mlir_libs"
+            pkg_candidate = _mlir_libs / "mlir-translate"
+            if pkg_candidate.exists():
+                mlir_translate = str(pkg_candidate)
 
         if mlir_translate is None:
             log().debug("[dump_llvmir] mlir-translate not found")

@@ -215,6 +215,9 @@ add_custom_target(CopyFlyPythonSources ALL
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
     "$<TARGET_FILE:mlir_float16_utils>"
     "${_MLIR_LIBS_DIR}/$<TARGET_FILE_NAME:mlir_float16_utils>"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    "${MLIR_INSTALL_PREFIX}/bin/mlir-translate"
+    "${_MLIR_LIBS_DIR}/mlir-translate"
   COMMENT "Copying python/flydsl sources to build/python_packages/flydsl"
   DEPENDS FlyPythonModules
 )
