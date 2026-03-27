@@ -1,15 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
+from typing import overload
+
 from .._mlir import ir
 from .._mlir.dialects import arith as _arith
 from .._mlir.dialects import fly
 from .._mlir.dialects.fly import (
-    # Enum Attributes
     AddressSpace,
     CachePolicy,
     CopyAtomType,
-    # Type
     CopyOpUniversalCopyType,
     IntTupleType,
     LayoutType,
@@ -22,17 +22,19 @@ from .._mlir.extras import types as T
 from .meta import traced_op
 from .typing import Int32
 
-UniversalCopy = lambda bit_size: CopyOpUniversalCopyType.get(bit_size)  # noqa: E731
-UniversalCopy32b = lambda: CopyOpUniversalCopyType.get(32)  # noqa: E731
-UniversalCopy64b = lambda: CopyOpUniversalCopyType.get(64)  # noqa: E731
-UniversalCopy128b = lambda: CopyOpUniversalCopyType.get(128)  # noqa: E731
+UniversalCopy = lambda bit_size: CopyOpUniversalCopyType.get(bit_size)
+UniversalCopy8b = lambda: CopyOpUniversalCopyType.get(8)
+UniversalCopy16b = lambda: CopyOpUniversalCopyType.get(16)
+UniversalCopy32b = lambda: CopyOpUniversalCopyType.get(32)
+UniversalCopy64b = lambda: CopyOpUniversalCopyType.get(64)
+UniversalCopy128b = lambda: CopyOpUniversalCopyType.get(128)
 
-UniversalFMA = lambda ty: MmaAtomUniversalFMAType.get(ty.ir_type)  # noqa: E731
+UniversalFMA = lambda ty: MmaAtomUniversalFMAType.get(ty.ir_type)
 
 # __all__ = [
 #     # Maybe remove it in the future
 #     "T",
-#     "arith",
+#     # "arith",
 #     # Enum Attributes
 #     "AddressSpace",
 #     "CachePolicy",
@@ -44,40 +46,43 @@ UniversalFMA = lambda ty: MmaAtomUniversalFMAType.get(ty.ir_type)  # noqa: E731
 #     "MmaAtomUniversalFMAType",
 #     "PointerType",
 #     "SwizzleType",
+#     "ComposedLayoutType",
+#     "CoordTensorType",
 #     # DSL functions
 #     "const_expr",
 #     "range_constexpr",
 #     "rank",
 #     "depth",
 #     "static",
+#     "make_int_tuple",
+#     "make_shape",
+#     "make_stride",
+#     "make_coord",
+#     "make_layout",
+#     "make_identity_layout",
+#     "make_view",
+#     "get_scalar",
+#     "get_shape",
+#     "get_stride",
+#     "get_layout",
+#     "get_iter",
 #     "int_tuple_add",
 #     "int_tuple_sub",
 #     "int_tuple_mul",
 #     "int_tuple_div",
 #     "int_tuple_product",
 #     "int_tuple_product_each",
-#     "make_identity_tensor",
-#     "make_identity_layout",
-#     "make_shape",
-#     "make_stride",
-#     "make_coord",
-#     "make_int_tuple",
-#     "make_layout",
-#     "size",
-#     "get_scalar",
-#     "get_shape",
-#     "get_stride",
-#     "slice",
-#     "crd2idx",
-#     "composition",
-#     "complement",
-#     "right_inverse",
-#     "coalesce",
-#     "zip",
 #     "select",
 #     "group",
 #     "append",
 #     "prepend",
+#     "slice",
+#     "size",
+#     "crd2idx",
+#     "coalesce",
+#     "composition",
+#     "complement",
+#     "right_inverse",
 #     "logical_divide",
 #     "zipped_divide",
 #     "tiled_divide",
@@ -88,24 +93,21 @@ UniversalFMA = lambda ty: MmaAtomUniversalFMAType.get(ty.ir_type)  # noqa: E731
 #     "flat_product",
 #     "block_product",
 #     "raked_product",
-#     "make_copy_atom",
 #     "make_mma_atom",
-#     "make_tile",
-#     "mma_atom_call",
+#     "make_copy_atom",
 #     "copy_atom_call",
+#     "mma_atom_call",
 #     "make_tiled_copy",
+#     "copy",
+#     "gemm",
+#     "add_offset",
 #     "memref_alloca",
-#     "memref_load",
-#     "memref_store",
 #     "memref_load_vec",
 #     "memref_store_vec",
-#     "get_layout",
-#     "get_iter",
-#     "make_view",
-#     "add_offset",
-#     "gemm",
-#     "copy",
+#     "memref_load",
+#     "memref_store",
 #     "printf",
+#     "make_tile",
 # ]
 
 
@@ -194,8 +196,19 @@ def make_ordered_layout(shape, order, loc=None, ip=None):
     return fly.make_ordered_layout(shape, order, loc=loc, ip=ip)
 
 
+@overload
+def make_composed_layout(inner, offset, outer, loc=None, ip=None): ...
+@overload
+def make_composed_layout(inner, outer, loc=None, ip=None): ...
+
+
 @traced_op
-def make_composed_layout(inner, offset, outer, loc=None, ip=None):
+def make_composed_layout(inner, offset_or_outer, outer=None, loc=None, ip=None):
+    if outer is None:
+        outer = offset_or_outer
+        offset = make_int_tuple(0, loc=loc, ip=ip)
+    else:
+        offset = offset_or_outer
     return fly.make_composed_layout(inner, offset, outer, loc=loc, ip=ip)
 
 
@@ -642,11 +655,19 @@ def mma_make_fragment(operand_id, tiled_mma, input, loc=None, ip=None):
 
 @traced_op
 def copy(copy_atom, src, dst, *, pred=None, loc=None, ip=None):
+    from .derived import ThrCopy
+
+    if isinstance(copy_atom, ThrCopy):
+        copy_atom = copy_atom.tiled_copy
     return fly.copy(copy_atom, src, dst, pred=pred, loc=loc, ip=ip)
 
 
 @traced_op
 def gemm(mma_atom, d, a, b, c, loc=None, ip=None):
+    from .derived import ThrMma
+
+    if isinstance(mma_atom, ThrMma):
+        mma_atom = mma_atom.tiled_mma
     return fly.gemm(mma_atom, d, a, b, c, loc=loc, ip=ip)
 
 

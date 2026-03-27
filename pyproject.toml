@@ -29,6 +29,7 @@ ignore = [
   "E501",  # line too long (handled by formatter)
   "F403",
   "F405",
+  "E731",
 ]
 
 [tool.ruff.lint.isort]

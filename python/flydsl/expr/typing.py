@@ -2,6 +2,7 @@
 # Copyright (c) 2025 FlyDSL Project Contributors
 
 import ctypes
+from functools import cached_property
 from typing import Generic, TypeVar
 
 from flydsl.runtime.device import get_rocm_arch
@@ -36,6 +37,7 @@ from .numeric import (
     Uint64,
     as_numeric,
 )
+from .primitive import IntTupleType, LayoutType, MemRefType, SwizzleType
 
 
 def _vec(n: int, elem: ir.Type) -> ir.Type:
@@ -260,16 +262,46 @@ class Constexpr(Generic[ValueT]):
     pass
 
 
-class IntTuple:
-    pass
+class BuiltinDslType(ir.Value):
+    def __init__(self, value):
+        super().__init__(value)
+
+    def __str__(self):
+        type_str = self.type.__str__()
+        return f"{type(self).__name__}{type_str[type_str.find('<') : type_str.rfind('>') + 1]}"
+
+    def __repr__(self):
+        return f"{type(self).__name__}<{super().__str__()}>"
+
+    @classmethod
+    def __fly_construct__(cls, values):
+        return cls(values[0])
+
+    def __fly_values__(self):
+        return [self]
 
 
-class Basis:
-    pass
+@ir.register_value_caster(IntTupleType.static_typeid, replace=True)
+class IntTuple(BuiltinDslType): ...
 
 
-class Layout:
-    pass
+@ir.register_value_caster(LayoutType.static_typeid, replace=True)
+class Layout(BuiltinDslType):
+    @cached_property
+    def shape(self) -> IntTuple:
+        from .primitive import get_shape
+
+        return get_shape(self)
+
+    def __getitem__(self, indices):
+        from .._mlir.dialects.fly import has_none
+        from .primitive import crd2idx, make_int_tuple, slice
+
+        coord = make_int_tuple(indices)
+        if has_none(coord):
+            return slice(self, coord)
+        else:
+            return crd2idx(coord, self)
 
 
 class ComposedLayout:
@@ -280,23 +312,52 @@ class CoordTensor:
     pass
 
 
-class Swizzle:
-    pass
+@ir.register_value_caster(SwizzleType.static_typeid, replace=True)
+class Swizzle(BuiltinDslType):
+    @cached_property
+    def mask(self) -> int:
+        return self.type.mask
+
+    @cached_property
+    def base(self) -> int:
+        return self.type.base
+
+    @cached_property
+    def shift(self) -> int:
+        return self.type.shift
 
 
-class Tensor:
-    def __init__(self, value: ir.Value):
-        self.value = value
+@ir.register_value_caster(MemRefType.static_typeid, replace=True)
+class Tensor(BuiltinDslType):
+    @property
+    def element_type(self):
+        return self.type.element_type
 
-    def __str__(self):
-        return f"Tensor({self.value})"
+    @cached_property
+    def layout(self) -> Layout:
+        from .primitive import get_layout
 
-    @classmethod
-    def __fly_construct__(cls, values):
-        return Tensor(values[0])
+        return get_layout(self)
 
-    def __fly_values__(self):
-        return [self.value]
+    def __getitem__(self, indices):
+        from .._mlir.dialects.fly import has_none
+        from .primitive import make_int_tuple, memref_load, slice
+
+        coord = make_int_tuple(indices)
+        if has_none(coord):
+            return slice(self, coord)
+        else:
+            return memref_load(self, coord)
+
+    def load_vec(self):
+        from .primitive import memref_load_vec
+
+        return memref_load_vec(self)
+
+    def store_vec(self, vector):
+        from .primitive import memref_store_vec
+
+        return memref_store_vec(vector, self)
 
 
 class Stream:
