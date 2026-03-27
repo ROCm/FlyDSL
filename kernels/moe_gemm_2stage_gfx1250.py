@@ -1,8 +1,13 @@
-"""gfx1250 MoE 2-stage wrappers with FP4 support.
+"""gfx1250 MoE 2-stage kernels and wrappers.
 
-For `in_dtype="fp4"`, stage1/stage2 GEMM are dispatched to the validated
-`mxfp4_gemm_gfx1250` backend (`wmma_scale_f32_32x16x128_f4`) and stitched with
-MoE routing (sorted ids / expert ids) on the host side.
+Target architecture: AMD RDNA4 `gfx1250`.
+Supported input dtypes: `fp16`, `fp8`, and `fp4`.
+
+- `fp16`: stage1/stage2 support single-kernel inline paths (route-pack + TDM + WMMA + epilog),
+  with fallback migration modes.
+- `fp8`: stage1/stage2 dispatch to validated `mxfp8_gemm_gfx1250` backend.
+- `fp4`: stage1/stage2 dispatch to validated `mxfp4_gemm_gfx1250` backend
+  (`wmma_scale_f32_32x16x128_f4`).
 """
 
 from __future__ import annotations
