@@ -22,15 +22,13 @@ Typical usage::
 
 from .._mlir import ir
 from .._mlir.dialects._fly_enum_gen import MmaOperand
+from .meta import traced_op
 from .primitive import *
-from .typing import Layout, Tensor
+from .typing import Tensor, TiledCopy, TiledMma
 
 __all__ = [
     # Tiled Operation
-    "CopyAtom",
     "MmaAtom",
-    "TiledCopy",
-    "TiledMma",
     "ThrCopy",
     "ThrMma",
     "make_layout_tv",
@@ -58,51 +56,6 @@ class Atom:
 
     def __fly_values__(self):
         return [self.value]
-
-
-class CopyAtom:
-    """Atom describing a single hardware copy instruction.
-
-    Wraps the thread-value layouts that define how threads cooperate
-    to perform a single copy operation (e.g., ``UniversalCopy(128)``
-    for 128-bit copies).
-
-    Properties:
-        thr_layout: Thread layout of the copy atom.
-        tv_layout_src: Thread-value layout for the source.
-        tv_layout_dst: Thread-value layout for the destination.
-        tv_layout_ref: Thread-value reference layout.
-    """
-
-    def __init__(self, value: ir.Value):
-        self.value = value
-        self.atom_ty = self.value.type
-
-    @classmethod
-    def __fly_construct__(cls, values):
-        return cls(values[0])
-
-    def __fly_values__(self):
-        return [self.value]
-
-    def __str__(self):
-        return f"CopyAtom({self.atom_ty})"
-
-    @property
-    def thr_layout(self):
-        return static(self.atom_ty.thr_layout)
-
-    @property
-    def tv_layout_src(self):
-        return static(self.atom_ty.tv_layout_src)
-
-    @property
-    def tv_layout_dst(self):
-        return static(self.atom_ty.tv_layout_dst)
-
-    @property
-    def tv_layout_ref(self):
-        return static(self.atom_ty.tv_layout_ref)
 
 
 class MmaAtom(Atom):
@@ -141,110 +94,6 @@ class MmaAtom(Atom):
         return static(self.atom_ty.tv_layout_c)
 
 
-class TiledCopy:
-    """Tiled copy operation composed from a CopyAtom repeated across threads.
-
-    Use ``fx.make_tiled_copy(copy_atom, layout_tv, tile_mn)`` to construct.
-    Call ``get_slice(thr_idx)`` to obtain a per-thread ``ThrCopy`` view for
-    partitioning source/destination tensors.
-
-    Properties:
-        tiled_tv_layout_S: Full tiled thread-value layout for source.
-        tiled_tv_layout_D: Full tiled thread-value layout for destination.
-    """
-
-    def __init__(self, value):
-        self.value = value
-        self.tiled_copy_ty = self.value.type
-
-    @classmethod
-    def __fly_construct__(cls, values):
-        return cls(values[0])
-
-    def __fly_values__(self):
-        return [self.value]
-
-    def __str__(self):
-        return f"TiledCopy({self.tiled_copy_ty})"
-
-    def get_slice(self, thr_idx):
-        return ThrCopy(self, thr_idx)
-
-    def thr_slice(self, thr_idx):
-        return self.get_slice(thr_idx)
-
-    @property
-    def tiled_tv_layout_S(self):
-        return static(self.tiled_copy_ty.tiled_tv_layout_src)
-
-    @property
-    def tiled_tv_layout_D(self):
-        return static(self.tiled_copy_ty.tiled_tv_layout_dst)
-
-
-class TiledMma:
-    """Tiled MMA operation composed from an MmaAtom repeated across threads.
-
-    Use ``fx.make_tiled_mma(mma_atom, ...)`` to construct. Call
-    ``get_slice(thr_idx)`` to obtain a per-thread ``ThrMma`` view for
-    partitioning A, B, C operands.
-
-    Properties:
-        tile_size_mnk: The tiled (M, N, K) size.
-        thr_layout_vmnk: Thread layout in (V, M, N, K) order.
-        tiled_tv_layout_A/B/C: Full tiled thread-value layouts for operands.
-    """
-
-    def __init__(self, value):
-        self.value = value
-        self.tiled_mma_ty = self.value.type
-
-    @classmethod
-    def __fly_construct__(cls, values):
-        return cls(values[0])
-
-    def __fly_values__(self):
-        return [self.value]
-
-    def __str__(self):
-        return f"TiledMma({self.tiled_mma_ty})"
-
-    def get_slice(self, thr_idx):
-        return ThrMma(self, thr_idx)
-
-    def thr_slice(self, thr_idx):
-        return self.get_slice(thr_idx)
-
-    def make_fragment_A(self, a: Tensor):
-        return mma_make_fragment(MmaOperand.A, self.value, a)
-
-    def make_fragment_B(self, b: Tensor):
-        return mma_make_fragment(MmaOperand.B, self.value, b)
-
-    def make_fragment_C(self, c: Tensor):
-        return mma_make_fragment(MmaOperand.C, self.value, c)
-
-    @property
-    def tile_size_mnk(self):
-        return static(self.tiled_mma_ty.tile_size_mnk)
-
-    @property
-    def thr_layout_vmnk(self):
-        return static(self.tiled_mma_ty.thr_layout_vmnk)
-
-    @property
-    def tiled_tv_layout_A(self):
-        return static(self.tiled_mma_ty.tiled_tv_layout_a)
-
-    @property
-    def tiled_tv_layout_B(self):
-        return static(self.tiled_mma_ty.tiled_tv_layout_b)
-
-    @property
-    def tiled_tv_layout_C(self):
-        return static(self.tiled_mma_ty.tiled_tv_layout_c)
-
-
 class ThrCopy(TiledCopy):
     """Per-thread view of a TiledCopy for partitioning source/destination tensors.
 
@@ -253,7 +102,7 @@ class ThrCopy(TiledCopy):
     """
 
     def __init__(self, tiled_copy: TiledCopy, thr_idx):
-        super().__init__(tiled_copy.value)
+        super().__init__(tiled_copy)
         self.tiled_copy = tiled_copy
         self._thr_idx = thr_idx
         self._thr_idx_int = make_int_tuple(self.thr_idx)
@@ -262,14 +111,17 @@ class ThrCopy(TiledCopy):
     def thr_idx(self):
         return self._thr_idx
 
-    def partition_S(self, src: Tensor):
-        return tiled_copy_partition_src(self.value, src, self._thr_idx_int)
+    @traced_op
+    def partition_S(self, src: Tensor, loc=None, ip=None):
+        return tiled_copy_partition_src(self, src, self._thr_idx_int, loc=loc, ip=ip)
 
-    def partition_D(self, dst: Tensor):
-        return tiled_copy_partition_dst(self.value, dst, self._thr_idx_int)
+    @traced_op
+    def partition_D(self, dst: Tensor, loc=None, ip=None):
+        return tiled_copy_partition_dst(self, dst, self._thr_idx_int, loc=loc, ip=ip)
 
-    def retile(self, t: Tensor):
-        return tiled_copy_retile(self.value, t)
+    @traced_op
+    def retile(self, t: Tensor, loc=None, ip=None):
+        return tiled_copy_retile(self, t, loc=loc, ip=ip)
 
 
 class ThrMma(TiledMma):
@@ -280,7 +132,7 @@ class ThrMma(TiledMma):
     """
 
     def __init__(self, tiled_mma: TiledMma, thr_idx):
-        super().__init__(tiled_mma.value)
+        super().__init__(tiled_mma)
         self.tiled_mma = tiled_mma
         self._thr_idx = thr_idx
         self._thr_idx_int = make_int_tuple(self.thr_idx)
@@ -289,14 +141,17 @@ class ThrMma(TiledMma):
     def thr_idx(self):
         return self._thr_idx
 
-    def partition_A(self, a: Tensor):
-        return tiled_mma_partition(MmaOperand.A, self.tiled_mma.value, a, self._thr_idx_int)
+    @traced_op
+    def partition_A(self, a: Tensor, loc=None, ip=None):
+        return tiled_mma_partition(MmaOperand.A, self.tiled_mma, a, self._thr_idx_int, loc=loc, ip=ip)
 
-    def partition_B(self, b: Tensor):
-        return tiled_mma_partition(MmaOperand.B, self.tiled_mma.value, b, self._thr_idx_int)
+    @traced_op
+    def partition_B(self, b: Tensor, loc=None, ip=None):
+        return tiled_mma_partition(MmaOperand.B, self.tiled_mma, b, self._thr_idx_int, loc=loc, ip=ip)
 
-    def partition_C(self, c: Tensor):
-        return tiled_mma_partition(MmaOperand.C, self.tiled_mma.value, c, self._thr_idx_int)
+    @traced_op
+    def partition_C(self, c: Tensor, loc=None, ip=None):
+        return tiled_mma_partition(MmaOperand.C, self.tiled_mma, c, self._thr_idx_int, loc=loc, ip=ip)
 
 
 def make_layout_tv(thr_layout, val_layout, loc=None, ip=None):
@@ -321,7 +176,7 @@ def make_layout_tv(thr_layout, val_layout, loc=None, ip=None):
 
 def make_tiled_copy_A(copy_atom, tiled_mma):
     """Create a TiledCopy matched to operand A of *tiled_mma*."""
-    layout_tv = tiled_mma.tiled_tv_layout_A
+    layout_tv = tiled_mma.tv_layout_A_tiled
     tile_size = tiled_mma.tile_size_mnk
     tile_mn = make_tile(
         [
@@ -334,7 +189,7 @@ def make_tiled_copy_A(copy_atom, tiled_mma):
 
 def make_tiled_copy_B(copy_atom, tiled_mma):
     """Create a TiledCopy matched to operand B of *tiled_mma*."""
-    layout_tv = tiled_mma.tiled_tv_layout_B
+    layout_tv = tiled_mma.tv_layout_B_tiled
     tile_size = tiled_mma.tile_size_mnk
     tile_mn = make_tile(
         [
@@ -347,7 +202,7 @@ def make_tiled_copy_B(copy_atom, tiled_mma):
 
 def make_tiled_copy_C(copy_atom, tiled_mma):
     """Create a TiledCopy matched to operand C of *tiled_mma*."""
-    layout_tv = tiled_mma.tiled_tv_layout_C
+    layout_tv = tiled_mma.tv_layout_C_tiled
     tile_size = tiled_mma.tile_size_mnk
     tile_mn = make_tile(
         [

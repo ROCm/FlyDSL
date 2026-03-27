@@ -8,6 +8,7 @@ from flydsl.runtime.device import get_rocm_arch
 
 from .._mlir import ir
 from .._mlir.dialects import gpu
+from .meta import traced_op
 from .numeric import (
     BFloat16,
     Boolean,
@@ -30,12 +31,13 @@ from .numeric import (
     Int16,
     Int32,
     Int64,
+    Numeric,
     Uint8,
     Uint16,
     Uint32,
     Uint64,
-    as_numeric,
 )
+from .primitive import *
 
 
 def _vec(n: int, elem: ir.Type) -> ir.Type:
@@ -245,11 +247,16 @@ __all__ = [
     "Uint32",
     "Uint64",
     "Constexpr",
+    "IntTuple",
+    "Layout",
+    "Swizzle",
+    "ComposedLayout",
     "Tensor",
+    "CopyAtom",
+    "TiledCopy",
+    "TiledMma",
     "Stream",
     "Tuple3D",
-    # Utility functions
-    "as_numeric",
 ]
 
 
@@ -260,43 +267,424 @@ class Constexpr(Generic[ValueT]):
     pass
 
 
-class IntTuple:
-    pass
-
-
-class Basis:
-    pass
-
-
-class Layout:
-    pass
-
-
-class ComposedLayout:
-    pass
-
-
-class CoordTensor:
-    pass
-
-
-class Swizzle:
-    pass
-
-
-class Tensor:
-    def __init__(self, value: ir.Value):
-        self.value = value
+class BuiltinDslType(ir.Value):
+    def __init__(self, value):
+        super().__init__(value)
 
     def __str__(self):
-        return f"Tensor({self.value})"
+        type_str = self.type.__str__()
+        return f"{type(self).__name__}{type_str[type_str.find('<') : type_str.rfind('>') + 1]}"
+
+    def __repr__(self):
+        return f"{type(self).__name__}<{super().__str__()}>"
 
     @classmethod
     def __fly_construct__(cls, values):
-        return Tensor(values[0])
+        return cls(values[0])
 
     def __fly_values__(self):
-        return [self.value]
+        return [self]
+
+
+@ir.register_value_caster(IntTupleType.static_typeid, replace=True)
+class IntTuple(BuiltinDslType):
+    @property
+    def rank(self) -> int:
+        return self.type.rank
+
+    @property
+    def depth(self) -> int:
+        return self.type.depth
+
+    @property
+    def is_leaf(self) -> bool:
+        return self.type.is_leaf
+
+    @property
+    def is_static(self) -> bool:
+        return self.type.is_static
+
+    @property
+    def get_static_leaf_int(self) -> int:
+        if not self.type.is_leaf or not self.type.is_static:
+            raise ValueError("IntTuple is not a static leaf")
+        return self.type.get_static_leaf_int
+
+    @traced_op
+    def __getitem__(self, mode, loc=None, ip=None):
+        if isinstance(mode, int):
+            mode = [mode]
+        if self.rank <= mode[0]:
+            raise IndexError(f"Index {mode[0]} out of range for int tuple with rank {self.rank}")
+        return get_(self, mode, loc=loc, ip=ip)
+
+
+@ir.register_value_caster(LayoutType.static_typeid, replace=True)
+class Layout(BuiltinDslType):
+    @property
+    def rank(self) -> int:
+        return self.type.rank
+
+    @property
+    def depth(self) -> int:
+        return self.type.depth
+
+    @property
+    def is_leaf(self) -> bool:
+        return self.type.is_leaf
+
+    @property
+    def is_static(self) -> bool:
+        return self.type.is_static
+
+    @property
+    def is_static_shape(self) -> bool:
+        return self.type.is_static_shape
+
+    @property
+    def is_static_stride(self) -> bool:
+        return self.type.is_static_stride
+
+    @property
+    @traced_op
+    def shape(self, loc=None, ip=None) -> IntTuple:
+        return get_shape(self, loc=loc, ip=ip)
+
+    @property
+    @traced_op
+    def stride(self, loc=None, ip=None) -> IntTuple:
+        return get_stride(self, loc=loc, ip=ip)
+
+    @traced_op
+    def __getitem__(self, mode, loc=None, ip=None):
+        if isinstance(mode, int):
+            mode = [mode]
+        if self.rank <= mode[0]:
+            raise IndexError(f"Index {mode[0]} out of range for layout with rank {self.rank}")
+        return get_(self, mode, loc=loc, ip=ip)
+
+    @traced_op
+    def __call__(self, *coord, loc=None, ip=None):
+        if not isinstance(coord, IntTuple):
+            coord = make_int_tuple(coord, loc=loc, ip=ip)
+
+        if has_none(coord):
+            return slice(self, coord, loc=loc, ip=ip)
+        else:
+            return crd2idx(coord, self, loc=loc, ip=ip)
+
+    @traced_op
+    def get_hier_coord(self, index, loc=None, ip=None):
+        return idx2crd(index, self, loc=loc, ip=ip)
+
+    @traced_op
+    def get_flat_coord(self, index, loc=None, ip=None):
+        return get_flat_coord(index, self, loc=loc, ip=ip)
+
+    @traced_op
+    def get_1d_coord(self, index, loc=None, ip=None):
+        return get_1d_coord(index, self, loc=loc, ip=ip)
+
+
+@ir.register_value_caster(SwizzleType.static_typeid, replace=True)
+class Swizzle(BuiltinDslType):
+    @property
+    def mask(self) -> int:
+        return self.type.mask
+
+    @property
+    def base(self) -> int:
+        return self.type.base
+
+    @property
+    def shift(self) -> int:
+        return self.type.shift
+
+
+@ir.register_value_caster(ComposedLayoutType.static_typeid, replace=True)
+class ComposedLayout(BuiltinDslType):
+    @property
+    def rank(self) -> int:
+        return self.type.rank
+
+    @property
+    def depth(self) -> int:
+        return self.type.depth
+
+    @property
+    def is_leaf(self) -> bool:
+        return self.type.is_leaf
+
+    @property
+    def is_static(self) -> bool:
+        return self.type.is_static
+
+    @property
+    def is_static_outer(self) -> bool:
+        return self.type.is_static_outer
+
+    @property
+    def is_static_inner(self) -> bool:
+        return self.type.is_static_inner
+
+    @property
+    def is_static_offset(self) -> bool:
+        return self.type.is_static_offset
+
+    @property
+    def shape(self) -> IntTuple:
+        return get_shape(self)
+
+    @property
+    def stride(self) -> IntTuple:
+        raise TypeError("ComposedLayout doesn't have a meaningful stride")
+
+    @property
+    @traced_op
+    def inner(self, loc=None, ip=None):
+        return composed_get_inner(self, loc=loc, ip=ip)
+
+    @property
+    @traced_op
+    def offset(self, loc=None, ip=None) -> IntTuple:
+        return composed_get_offset(self, loc=loc, ip=ip)
+
+    @property
+    @traced_op
+    def outer(self, loc=None, ip=None) -> Layout:
+        return composed_get_outer(self, loc=loc, ip=ip)
+
+    @traced_op
+    def __getitem__(self, mode, loc=None, ip=None):
+        if isinstance(mode, int):
+            mode = [mode]
+        if self.rank <= mode[0]:
+            raise IndexError(f"Index {mode[0]} out of range for composed layout with rank {self.rank}")
+        return get_(self, mode, loc=loc, ip=ip)
+
+    @traced_op
+    def __call__(self, *coord, loc=None, ip=None):
+        if not isinstance(coord, IntTuple):
+            coord = make_int_tuple(coord, loc=loc, ip=ip)
+
+        if has_none(coord):
+            return slice(self, coord, loc=loc, ip=ip)
+        else:
+            return crd2idx(coord, self, loc=loc, ip=ip)
+
+
+@ir.register_value_caster(PointerType.static_typeid, replace=True)
+class Pointer(BuiltinDslType):
+    @property
+    def element_type(self):
+        return Numeric.from_ir_type(self.type.element_type)
+
+    @property
+    def dtype(self):
+        return self.element_type
+
+    @property
+    def value_type(self):
+        return self.element_type
+
+    @property
+    def address_space(self):
+        return AddressSpace(self.type.address_space)
+
+    @property
+    def memspace(self):
+        return self.address_space
+
+    @property
+    def alignment(self):
+        return self.type.alignment
+
+
+@ir.register_value_caster(MemRefType.static_typeid, replace=True)
+@ir.register_value_caster(CoordTensorType.static_typeid, replace=True)
+class Tensor(BuiltinDslType):
+    @property
+    def element_type(self):
+        if isinstance(self.type, CoordTensorType):
+            raise TypeError("CoordTensor doesn't have an element type")
+        return Numeric.from_ir_type(self.type.element_type)
+
+    @property
+    def dtype(self):
+        return self.element_type
+
+    @property
+    def value_type(self):
+        return self.element_type
+
+    @property
+    def address_space(self):
+        return AddressSpace(self.type.address_space)
+
+    @property
+    def memspace(self):
+        return self.address_space
+
+    @property
+    def alignment(self):
+        return self.type.alignment
+
+    @property
+    def leading_dim(self):
+        return self.type.leading_dim
+
+    @property
+    def layout(self) -> Layout:
+        return get_layout(self)
+
+    @property
+    def shape(self) -> IntTuple:
+        return self.layout.shape
+
+    @property
+    def stride(self) -> IntTuple:
+        return self.layout.stride
+
+    @traced_op
+    def __getitem__(self, coord, loc=None, ip=None):
+        if not isinstance(coord, IntTuple):
+            coord = make_int_tuple(coord, loc=loc, ip=ip)
+
+        if has_none(coord):
+            return slice(self, coord, loc=loc, ip=ip)
+        else:
+            return memref_load(self, coord, loc=loc, ip=ip)
+
+    @traced_op
+    def __setitem__(self, coord, value, loc=None, ip=None):
+        if not isinstance(coord, IntTuple):
+            coord = make_int_tuple(coord, loc=loc, ip=ip)
+
+        if has_none(coord):
+            self.__getitem__(coord, loc=loc, ip=ip).store(value, loc=loc, ip=ip)
+        else:
+            memref_store(value, self, coord, loc=loc, ip=ip)
+
+    @traced_op
+    def load(self, loc=None, ip=None):
+        return memref_load_vec(self, loc=loc, ip=ip)
+
+    @traced_op
+    def store(self, vector, loc=None, ip=None):
+        return memref_store_vec(vector, self, loc=loc, ip=ip)
+
+    @traced_op
+    def fill(self, value, loc=None, ip=None):
+        pass
+
+
+@ir.register_value_caster(CopyAtomType.static_typeid, replace=True)
+class CopyAtom(BuiltinDslType):
+    @property
+    def val_bits(self):
+        return self.type.val_bits
+
+    @property
+    def thr_layout(self):
+        return static(self.type.thr_layout)
+
+    @property
+    def thr_id(self):
+        return self.thr_layout
+
+    @property
+    def layout_src_tv(self):
+        return static(self.type.tv_layout_src)
+
+    @property
+    def layout_dst_tv(self):
+        return static(self.type.tv_layout_dst)
+
+    @property
+    def layout_ref_tv(self):
+        return static(self.type.tv_layout_ref)
+
+
+@ir.register_value_caster(TiledCopyType.static_typeid, replace=True)
+class TiledCopy(BuiltinDslType):
+    @property
+    def tile_mn(self):
+        return static(self.type.tile_mn)
+
+    @property
+    def layout_tv_tiled(self):
+        return static(self.type.layout_thr_val)
+
+    @property
+    def layout_src_tv_tiled(self):
+        return static(self.type.tiled_tv_layout_src)
+
+    @property
+    def layout_dst_tv_tiled(self):
+        return static(self.type.tiled_tv_layout_dst)
+
+    def get_slice(self, thr_idx):
+        from .derived import ThrCopy
+
+        return ThrCopy(self, thr_idx)
+
+    def thr_slice(self, thr_idx):
+        return self.get_slice(thr_idx)
+
+
+@ir.register_value_caster(TiledMmaType.static_typeid, replace=True)
+class TiledMma(BuiltinDslType):
+    @property
+    def mma_atom(self):
+        return self.type.mma_atom
+
+    @property
+    def atom_layout(self):
+        return static(self.type.atom_layout)
+
+    @property
+    def permutation_mnk(self):
+        return static(self.type.permutation)
+
+    @property
+    def tile_size_mnk(self):
+        return static(self.type.tile_size_mnk)
+
+    @property
+    def thr_layout_vmnk(self):
+        return static(self.type.thr_layout_vmnk)
+
+    @property
+    def tv_layout_A_tiled(self):
+        return static(self.type.tiled_tv_layout_a)
+
+    @property
+    def tv_layout_B_tiled(self):
+        return static(self.type.tiled_tv_layout_b)
+
+    @property
+    def tv_layout_C_tiled(self):
+        return static(self.type.tiled_tv_layout_c)
+
+    def get_slice(self, thr_idx):
+        from .derived import ThrMma
+
+        return ThrMma(self, thr_idx)
+
+    def thr_slice(self, thr_idx):
+        return self.get_slice(thr_idx)
+
+    @traced_op
+    def make_fragment_A(self, a: Tensor, loc=None, ip=None):
+        return mma_make_fragment(MmaOperand.A, self, a, loc=loc, ip=ip)
+
+    @traced_op
+    def make_fragment_B(self, b: Tensor, loc=None, ip=None):
+        return mma_make_fragment(MmaOperand.B, self, b, loc=loc, ip=ip)
+
+    @traced_op
+    def make_fragment_C(self, c: Tensor, loc=None, ip=None):
+        return mma_make_fragment(MmaOperand.C, self, c, loc=loc, ip=ip)
 
 
 class Stream:
