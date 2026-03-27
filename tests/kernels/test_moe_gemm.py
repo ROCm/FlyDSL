@@ -1391,14 +1391,17 @@ def run_moe_stage2(
         pytest.param(129, 1024, 256, 8, 2, 32, 128, 128, 128, 128, False, id="M"),
         # Large (aiter-style) mainly for perf smoke; reference is too expensive here.
         pytest.param(333, 4096, 2048, 17, 9, 64, 128, 128, 256, 128, False, id="L", marks=pytest.mark.large_shape),
-    # FP4-compatible shape (model_dim >= 256, tile_k >= 256, tile_k2 >= 256).
-    # NOTE: To fit within GPU memory during tests, we reduce batch sizes and sequence lengths
-    pytest.param(64, 512, 256, 4, 2, 32, 128, 256, 128, 256, False, id="FP4-S"),
-    pytest.param(128, 1024, 256, 8, 2, 64, 128, 256, 256, 256, False, id="FP4-M"),
-    pytest.param(256, 1024, 256, 8, 2, 128, 128, 256, 256, 256, False, id="FP4-L", marks=pytest.mark.large_shape),
-]
+        # FP4-compatible shape (model_dim >= 256, tile_k >= 256, tile_k2 >= 256).
+        # NOTE: To fit within GPU memory during tests, we reduce batch sizes and sequence lengths
+        pytest.param(64, 512, 256, 4, 2, 32, 128, 256, 128, 256, False, id="FP4-S"),
+        pytest.param(128, 1024, 256, 8, 2, 64, 128, 256, 256, 256, False, id="FP4-M"),
+        pytest.param(256, 1024, 256, 8, 2, 128, 128, 256, 256, 256, False, id="FP4-L", marks=pytest.mark.large_shape),
+    ],
 )
-@pytest.mark.parametrize("in_dtype", ["fp8", "fp16", "bf16", "int8", "int8smooth", "int4", "int4_bf16", "fp4"])
+@pytest.mark.parametrize("in_dtype", [
+    "fp8", "fp16", "bf16", "int8", "int8smooth", "int4", "int4_bf16",
+    pytest.param("fp4", marks=pytest.mark.skipif("gfx95" not in ARCH, reason="FP4 requires gfx950+")),
+])
 @pytest.mark.parametrize("out_dtype", ["f16", "f32"], ids=["out_f16", "out_f32"])
 @pytest.mark.parametrize("use_reduce", [False, True], ids=["atomic", "reduce"])
 @pytest.mark.parametrize("use_valid_mask", [False, True], ids=["nomask", "mask"])
@@ -1760,7 +1763,10 @@ class _TorchReduceWrapper:
         pytest.param(1024, 4096, 256, 32, 8, 128, 256, 256, id="FP4-bench-L", marks=pytest.mark.large_shape),
     ],
 )
-@pytest.mark.parametrize("in_dtype", ["fp8", "fp4"])
+@pytest.mark.parametrize("in_dtype", [
+    "fp8",
+    pytest.param("fp4", marks=pytest.mark.skipif("gfx95" not in ARCH, reason="FP4 requires gfx950+")),
+])
 def test_moe_stage2_standalone(
     tokens: int,
     model_dim: int,
