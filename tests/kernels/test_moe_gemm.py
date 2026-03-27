@@ -383,21 +383,29 @@ def run_moe_stage1(
         blocks,
     ) = routing
 
-    if in_dtype not in ("fp8", "fp16", "bf16", "int8", "int8smooth", "int4", "int4_bf16"):
+    _valid = ("fp8", "fp16", "bf16", "int8", "int8smooth", "int4", "int4_bf16", "int4_fp8")
+    if in_dtype not in _valid:
         raise ValueError(
-            f"in_dtype must be one of ('fp8','fp16','bf16','int8','int8smooth','int4','int4_bf16'), got {in_dtype!r}"
+            f"in_dtype must be one of {_valid}, got {in_dtype!r}"
         )
     is_int4 = in_dtype == "int4"
     is_int4_bf16 = in_dtype == "int4_bf16"  # W4A16: bf16 activations, packed int4 weights
+    is_int4_fp8 = in_dtype == "int4_fp8"
+    w_is_int4 = is_int4 or is_int4_bf16 or is_int4_fp8
     is_int8 = in_dtype in ("int8", "int8smooth", "int4")
     is_int8smooth = in_dtype == "int8smooth"
 
     # Quantize inputs / weights.
-    if in_dtype == "fp8":
-        x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=DTYPE_FP8)  # [tokens,K], [tokens,1]
-        w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=DTYPE_FP8)  # [E,2*inter,K], [E,2*inter,1]
+    if in_dtype in ("fp8", "int4_fp8"):
+        if is_int4_fp8:
+            x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=DTYPE_FP8)
+            w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.int8, dtypeMax=7)
+            w2_q, _scale_w2_unused = pertoken_quant(w2_fp32, quant_dtype=torch.int8, dtypeMax=7)
+        else:
+            x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=DTYPE_FP8)  # [tokens,K], [tokens,1]
+            w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=DTYPE_FP8)  # [E,2*inter,K], [E,2*inter,1]
     # w2 is not used by our kernel, but required by aiter stage1 API
-        w2_q, _scale_w2_unused = pertoken_quant(w2_fp32, quant_dtype=DTYPE_FP8)
+            w2_q, _scale_w2_unused = pertoken_quant(w2_fp32, quant_dtype=DTYPE_FP8)
     elif in_dtype == "fp16":
         x_q = x_fp32.to(torch.float16)
         w1_q = w1_fp32.to(torch.float16)
@@ -448,8 +456,8 @@ def run_moe_stage1(
         w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.int8, dtypeMax=7)
         w2_q, _scale_w2_unused = pertoken_quant(w2_fp32, quant_dtype=torch.int8, dtypeMax=7)
 
-    # --- Groupwise scale for W4A16 ---
-    use_groupwise_scale = is_int4_bf16 and group_size > 0
+    # --- Groupwise scale for int4 variants ---
+    use_groupwise_scale = (is_int4_bf16 or is_int4 or is_int4_fp8) and group_size > 0
     scale_w1_groups = None  # [E, K//group_size, 2*inter_dim] for kernel (Opt 0 layout)
     if use_groupwise_scale:
         N_total = 2 * inter_dim
@@ -482,9 +490,9 @@ def run_moe_stage1(
         if is_int8smooth
         else x_q.contiguous().view(tokens, model_dim)
     )
-    # Pack weights for int4 variants (W4A8 and W4A16).
-    # Both use the same interleaved packing: [ (v4<<4)|v0, (v5<<4)|v1, (v6<<4)|v2, (v7<<4)|v3 ]
-    use_packed_int4 = is_int4 or is_int4_bf16
+    # Pack weights for int4 variants (W4A8, W4A16, W4A_FP8).
+    # All use the same interleaved packing: [ (v4<<4)|v0, (v5<<4)|v1, (v6<<4)|v2, (v7<<4)|v3 ]
+    use_packed_int4 = w_is_int4
     w_kernel = (
         _pack_shuffled_int8_to_packed_int4_no_perm(w1_shuffled_flat) if use_packed_int4 else w1_shuffled_flat
     ).contiguous()
@@ -579,8 +587,8 @@ def run_moe_stage1(
             scale_w1_groups=scale_w1_groups,
         )
 
-        rtol = 0.5 if (is_int4 or is_int4_bf16) else 0.25
-        atol = 0.5 if (is_int4 or is_int4_bf16) else 0.25
+        rtol = 0.5 if w_is_int4 else 0.25
+        atol = 0.5 if w_is_int4 else 0.25
         assert verify_output(out.to(torch.float32), ref, rtol=rtol, atol=atol)
 
     # Note: kernel launches full expert-block range; effective work is gated by num_valid_ids.
@@ -819,20 +827,28 @@ def run_moe_stage2(
     # NOTE: routing uses `moe_sorting` output directly (no host trim/pad). Extra launched blocks
     # are gated by `num_valid_ids` inside the kernels.
 
-    if in_dtype not in ("fp8", "fp16", "bf16", "int8", "int8smooth", "int4", "int4_bf16"):
+    _valid = ("fp8", "fp16", "bf16", "int8", "int8smooth", "int4", "int4_bf16", "int4_fp8")
+    if in_dtype not in _valid:
         raise ValueError(
-            f"in_dtype must be one of ('fp8','fp16','bf16','int8','int8smooth','int4','int4_bf16'), got {in_dtype!r}"
+            f"in_dtype must be one of {_valid}, got {in_dtype!r}"
         )
     is_int4 = in_dtype == "int4"
     is_int4_bf16 = in_dtype == "int4_bf16"  # W4A16: bf16 activations, packed int4 weights
+    is_int4_fp8 = in_dtype == "int4_fp8"
+    w_is_int4 = is_int4 or is_int4_bf16 or is_int4_fp8
     is_int8 = in_dtype in ("int8", "int8smooth", "int4")
     is_int8smooth = in_dtype == "int8smooth"
 
     # Quantize inputs / weights.
-    if in_dtype == "fp8":
-        x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=DTYPE_FP8)
-        w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=DTYPE_FP8)
-        w2_q, scale_w2 = pertoken_quant(w2_fp32, quant_dtype=DTYPE_FP8)
+    if in_dtype in ("fp8", "int4_fp8"):
+        if is_int4_fp8:
+            x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=DTYPE_FP8)
+            w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.int8, dtypeMax=7)
+            w2_q, scale_w2 = pertoken_quant(w2_fp32, quant_dtype=torch.int8, dtypeMax=7)
+        else:
+            x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=DTYPE_FP8)
+            w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=DTYPE_FP8)
+            w2_q, scale_w2 = pertoken_quant(w2_fp32, quant_dtype=DTYPE_FP8)
     elif in_dtype == "fp16":
         x_q = x_fp32.to(torch.float16)
         w1_q = w1_fp32.to(torch.float16)
@@ -869,8 +885,8 @@ def run_moe_stage2(
         w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.int8, dtypeMax=7)
         w2_q, scale_w2 = pertoken_quant(w2_fp32, quant_dtype=torch.int8, dtypeMax=7)
 
-    # --- Groupwise scale for W4A16 (stage 2) ---
-    use_groupwise_scale = is_int4_bf16 and group_size > 0
+    # --- Groupwise scale for int4 variants (stage 2) ---
+    use_groupwise_scale = (is_int4_bf16 or is_int4 or is_int4_fp8) and group_size > 0
     scale_w2_groups = None  # [E, inter_dim//group_size, model_dim] Opt 0 layout
     if use_groupwise_scale:
         num_groups_s2 = inter_dim // group_size
@@ -914,7 +930,7 @@ def run_moe_stage2(
             inter_dim=inter_dim,
             doweight_stage1=bool(doweight_stage1),
         )  # [tokens, topk, inter] fp32
-        if in_dtype == "fp8":
+        if in_dtype in ("fp8", "int4_fp8"):
             a2_q, a2_scale = pertoken_quant(out1_ref, quant_dtype=DTYPE_FP8)
         elif in_dtype == "fp16":
             a2_q = out1_ref.to(torch.float16)
@@ -937,9 +953,9 @@ def run_moe_stage2(
     w2_shuffled_flat = w2_shuffled.view(experts * model_dim, inter_dim)
     scale_w2_flat = None if scale_w2 is None else scale_w2.view(experts * model_dim, 1)
 
-    # For W4A8 and W4A16, pack preshuffled int8 weights into packed int4 bytes.
-    # Both use the same interleaved packing: [ (v4<<4)|v0, (v5<<4)|v1, (v6<<4)|v2, (v7<<4)|v3 ]
-    use_packed_int4 = is_int4 or is_int4_bf16
+    # For int4 variants (W4A8, W4A16, W4A_FP8), pack preshuffled int8 weights into packed int4 bytes.
+    # All use the same interleaved packing: [ (v4<<4)|v0, (v5<<4)|v1, (v6<<4)|v2, (v7<<4)|v3 ]
+    use_packed_int4 = w_is_int4
     w2_kernel = w2_shuffled_flat
     if use_packed_int4:
         w2_kernel = _pack_shuffled_int8_to_packed_int4_no_perm(w2_shuffled_flat)
@@ -965,10 +981,12 @@ def run_moe_stage2(
     out_s = str(out_dtype).strip().lower()
     if out_s in ("f16", "fp16", "half"):
         out_torch_dtype = torch.float16
+    elif out_s in ("bf16", "bfloat16"):
+        out_torch_dtype = torch.bfloat16
     elif out_s in ("f32", "fp32", "float"):
         out_torch_dtype = torch.float32
     else:
-        raise ValueError(f"out_dtype must be 'f16' or 'f32', got {out_dtype!r}")
+        raise ValueError(f"out_dtype must be 'f16', 'bf16', or 'f32', got {out_dtype!r}")
 
     out = torch.zeros((tokens, model_dim), device=device, dtype=out_torch_dtype)
     out_perf = torch.zeros_like(out)
@@ -990,6 +1008,10 @@ def run_moe_stage2(
     is_reduce_exe = (getattr(exe, "mode", None) == MoeGemm2Mode.REDUCE) or bool(use_reduce)
 
     def launch(o, x, w, sx, sw, st, eids, sw_sorted):
+        # Atomic accumulation mode adds to output; must zero between launches
+        # to avoid multi-run overflow (especially for f16 atomics).
+        if not is_reduce_exe:
+            o.zero_()
         stream = torch.cuda.current_stream()
         valid_mask = None
         if is_reduce_exe and bool(use_valid_mask):
@@ -1088,7 +1110,7 @@ def run_moe_stage2(
     a2_elem_bytes = 2 if in_dtype in ("int4_bf16", "bf16", "fp16") else 1  # bf16/fp16 activations
     bytes_moved += tokens * topk * inter_dim * a2_elem_bytes  # a2 (logical)
     bytes_moved += (experts * model_dim * inter_dim) // (2 if is_int4 else 1)  # w2 (packed for int4)
-    bytes_moved += tokens * model_dim * (2 if out_torch_dtype == torch.float16 else 4)  # out
+    bytes_moved += tokens * model_dim * (2 if out_torch_dtype in (torch.float16, torch.bfloat16) else 4)  # out
     bytes_moved += tokens * topk * 4  # a2_scale f32 (logical)
     bytes_moved += experts * model_dim * 4  # w2_scale f32 (1D)
     bytes_moved += int(sorted_weights.numel()) * 4
@@ -1203,8 +1225,8 @@ def run_moe_stage2(
         pytest.param(333, 4096, 2048, 17, 9, 64, 128, 128, 256, 128, False, id="L", marks=pytest.mark.large_shape),
     ],
 )
-@pytest.mark.parametrize("in_dtype", ["fp8", "fp16", "bf16", "int8", "int8smooth", "int4", "int4_bf16"])
-@pytest.mark.parametrize("out_dtype", ["f16", "f32"], ids=["out_f16", "out_f32"])
+@pytest.mark.parametrize("in_dtype", ["fp8", "fp16", "bf16", "int8", "int8smooth", "int4", "int4_bf16", "int4_fp8"])
+@pytest.mark.parametrize("out_dtype", ["f16", "bf16", "f32"], ids=["out_f16", "out_bf16", "out_f32"])
 @pytest.mark.parametrize("use_reduce", [False, True], ids=["atomic", "reduce"])
 @pytest.mark.parametrize("use_valid_mask", [False, True], ids=["nomask", "mask"])
 @pytest.mark.parametrize("test_graph", [
@@ -1249,8 +1271,8 @@ def test_moe_gemm_2stage(
     out_s = str(out_dtype).strip().lower()
     if bool(use_reduce) and out_s in ("f32", "fp32", "float"):
         pytest.skip("reduce mode does not support out_dtype='f32' (compile_moe_gemm2(accumulate=False) forbids it).")
-    if group_size > 0 and in_dtype != "int4_bf16":
-        pytest.skip("groupwise scale only applies to int4_bf16")
+    if group_size > 0 and in_dtype not in ("int4_bf16", "int4", "int4_fp8"):
+        pytest.skip("groupwise scale only applies to int4_bf16, int4, int4_fp8")
     device = torch.device("cuda")
     # torch.manual_seed(int(seed))
 
@@ -1323,7 +1345,7 @@ def test_moe_gemm_2stage(
         # a2_q = torch.ones_like(out1_fp16, dtype=torch.float32) / 5
         # w2_fp32 = torch.ones_like(w2_fp32, dtype=torch.float32) / 10
         a2_scale = None
-    elif in_dtype == "fp8":
+    elif in_dtype in ("fp8", "int4_fp8"):
         out1_fp32 = out1_fp16.to(torch.float32)
         a2_q, a2_scale = pertoken_quant(out1_fp32, quant_dtype=DTYPE_FP8)
     elif in_dtype == "fp16":
