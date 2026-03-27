@@ -18,7 +18,6 @@ _embedded = _repo / "build" / "python_packages" / "flydsl"
 _embedded2 = _repo / ".flir" / "build" / "python_packages" / "flydsl"
 _embedded_pick = _embedded if _embedded.exists() else _embedded2
 if _embedded_pick.exists():
-    os.environ.setdefault("FLYDSL_USE_EMBEDDED_MLIR", "1")
     sys.path.insert(0, str(_embedded_pick))
 _src_py = _repo / "python"
 if _src_py.exists():
@@ -240,6 +239,7 @@ def _dist_worker(
     skip_check: bool,
     allreduce_impl: str,
     mode: str,
+    save_trace: bool,
     result_dict: dict,
 ):
     """Worker function for distributed allreduce testing.
@@ -291,9 +291,6 @@ def _dist_worker(
     else:
         raise ValueError(f"unsupported dtype_str: {dtype_str}")
 
-    # Set backend - always use aiter for multi-GPU
-    os.environ["FLYDSL_CUSTOM_ALL_REDUCE_BACKEND"] = "aiter"
-    # Set aiter impl from parameter (can be "flydsl" or "aiter")
     os.environ["FLYDSL_AITER_IMPL"] = allreduce_impl
 
     torch.manual_seed(0)  # Same seed for all ranks
@@ -369,7 +366,8 @@ def _dist_worker(
                 for _ in range(num_iters):
                     _run_eager()
                 torch.cuda.synchronize()
-            prof.export_chrome_trace(f"profiler_trace_{rank}_{allreduce_impl}_eager.json")
+            if save_trace:
+                prof.export_chrome_trace(f"profiler_trace_{rank}_{allreduce_impl}_eager.json")
             perf_df = get_trace_perf(prof, num_iters)
             avg_name = "[avg us/iter]"
             if avg_name in perf_df.index and "device_time_sum" in perf_df.columns:
@@ -526,7 +524,9 @@ def run_all_tests(
     skip_check: bool = False,
     allreduce_impl: str = "flydsl",
     mode: str = "eager",
+    save_trace: bool = False,
     configs: list = None,
+    output_csv: str = None,
 ):
     """Run all accuracy and performance tests, collect results and save to CSV.
     
@@ -595,7 +595,7 @@ def run_all_tests(
             # Spawn processes
             mp.spawn(
                 _dist_worker,
-                args=(world_size, shape, dtype_str, port, num_iters, num_warmup, skip_check, allreduce_impl, mode, result_dict),
+                args=(world_size, shape, dtype_str, port, num_iters, num_warmup, skip_check, allreduce_impl, mode, save_trace, result_dict),
                 nprocs=world_size,
                 join=True,
             )
@@ -652,7 +652,7 @@ def run_all_tests(
     # Convert to DataFrame and save to CSV
     if all_results:
         df = pd.DataFrame(all_results)
-        csv_filename = "flydsl_allreduce_perf.csv"
+        csv_filename = output_csv if output_csv else "flydsl_allreduce_perf.csv"
         df.to_csv(csv_filename, index=False)
         print("\n" + "=" * 80)
         print(f"Results saved to: {csv_filename}")
@@ -713,11 +713,22 @@ if __name__ == "__main__":
         help="Allreduce implementation (default: flydsl)",
     )
     parser.add_argument(
+        "--save_trace",
+        action="store_true",
+        help="Save profiler chrome trace JSON files (default: disabled)",
+    )
+    parser.add_argument(
         "--mode",
         type=str,
         default="eager",
         choices=["eager", "cudagraph"],
         help="Test mode: eager or cudagraph (default: eager)",
+    )
+    parser.add_argument(
+        "--output_csv",
+        type=str,
+        default=None,
+        help="Path to save CSV results (default: flydsl_allreduce_perf.csv)",
     )
     args = parser.parse_args()
     
@@ -747,5 +758,7 @@ if __name__ == "__main__":
         skip_check=args.skip_check,
         allreduce_impl=args.allreduce_impl,
         mode=args.mode,
+        save_trace=args.save_trace,
         configs=configs,
+        output_csv=args.output_csv,
     )

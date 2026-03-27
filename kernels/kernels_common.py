@@ -47,13 +47,6 @@ def _create_llvm_ptr(value, address_space: int = 1):
     return _llvm.IntToPtrOp(ptr_type, value).result
 
 
-def stream_i64_to_llvm_ptr(stream_i64_value):
-    """Convert stream pointer (i64) to !llvm.ptr for use as gpu.launch_func async_object."""
-    value = buffer_ops._unwrap_value(stream_i64_value)
-    ptr_type = ir.Type.parse("!llvm.ptr")
-    return _llvm.IntToPtrOp(ptr_type, value).result
-
-
 def stream_ptr_to_async_token(stream_ptr_value, loc=None, ip=None):
     stream_llvm_ptr = _create_llvm_ptr(stream_ptr_value)
 
