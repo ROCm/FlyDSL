@@ -117,18 +117,6 @@ def lds_store_b128_raw(lds_base_idx, byte_offset, data):
     llvm_dialect.store(data, ptr_val)
 
 
-def enable_wmma_pipeline():
-    """Enable back-to-back WMMA issue (SCHED_MODE bit[4] = DISABLE_VALU_STALL).
-
-    hwreg(26, 4, 1) = HW_REG_SCHED_MODE, offset=4, size=1.
-    """
-    llvm_dialect.inline_asm(
-        None, [],
-        "s_setreg_imm32_b32 hwreg(26, 4, 1), 1",
-        "", has_side_effects=True,
-    )
-
-
 def pipeline_fence(outstanding=0, use_cluster=False):
     """Fused READY+REUSE fence for gfx1250 multi-buffer pipeline.
 
@@ -222,7 +210,6 @@ __all__ = [
     "lds_load_b128_raw",
     "lds_store_b128_raw",
     # Pipeline
-    "enable_wmma_pipeline",
     "pipeline_fence",
     # Epilogue
     "store_acc_vec8_to_lds",

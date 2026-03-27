@@ -17,7 +17,7 @@ from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 
 from flydsl.expr import idx2crd
 from kernels.gemm_gfx1250_common import (
-    enable_wmma_pipeline, get_lds_memref, pipeline_fence,
+    get_lds_memref, pipeline_fence,
     store_acc_vec8_to_buffer, store_acc_vec8_to_lds,
 )
 from kernels.pipeline_utils import make_tail_plan
@@ -186,7 +186,7 @@ def compile_wmma_gemm_tdm(
         i32_m: fx.Int32,
         i32_n: fx.Int32,
     ):
-        enable_wmma_pipeline()
+        rocdl.disable_xdl_arb_stall()
 
         tx = gpu.thread_id("x")
         bx = gpu.block_id("x")
