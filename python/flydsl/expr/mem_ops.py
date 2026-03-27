@@ -11,7 +11,6 @@ Provides wrappers around GFX942 inline assembly instructions for:
   memory type including regular ``hipMalloc`` / IPC-mapped addresses)
 - **Cached** vector loads/stores (16-byte / ``v4i32``)
 - Device-side pointer access
-- Spin-wait synchronization on signal buffers
 
 All functions operate on raw ``ir.Value`` (i32/i64/vector<4xi32>).
 
@@ -22,13 +21,12 @@ Example::
     val = mem_ops.load_i32_uncached(addr)
     mem_ops.store_i32_uncached_flush(peer_addr, flag)
     data = mem_ops.load_v4i32(data_addr)
-    mem_ops.poll_until_ge(signal_addr, target)
 """
 
 from __future__ import annotations
 
 from .._mlir import ir
-from .._mlir.dialects import arith as _arith, llvm, rocdl, scf
+from .._mlir.dialects import arith as _arith, llvm, rocdl
 from .meta import traced_op
 from .typing import T
 
@@ -174,30 +172,6 @@ def load_device_ptr(array_base_i64, index):
     return llvm.LoadOp(i64, ptr).result
 
 
-# ---------------------------------------------------------------------------
-# Synchronization
-# ---------------------------------------------------------------------------
-
-@traced_op
-def poll_until_ge(addr_i64, target_i32):
-    """Spin-wait until the uncached i32 value at *addr* >= *target*.
-
-    Continuously issues ``load_i32_uncached`` in a ``scf.while`` loop.
-    Used for cross-GPU barrier synchronization on signal buffers.
-    """
-    i32 = T.i32
-    init_cur = load_i32_uncached(addr_i64)
-    w = scf.WhileOp([i32], [init_cur])
-    before = ir.Block.create_at_start(w.before, [i32])
-    after = ir.Block.create_at_start(w.after, [i32])
-    with ir.InsertionPoint(before):
-        cur = before.arguments[0]
-        need_wait = _arith.CmpIOp(_arith.CmpIPredicate.ult, cur, target_i32).result
-        scf.ConditionOp(need_wait, [cur])
-    with ir.InsertionPoint(after):
-        scf.YieldOp([load_i32_uncached(addr_i64)])
-
-
 __all__ = [
     # Uncached i32 (system-scope coherent)
     "load_i32_uncached",
@@ -210,6 +184,4 @@ __all__ = [
     "store_v4i32_nt",
     # Pointer helpers
     "load_device_ptr",
-    # Synchronization
-    "poll_until_ge",
 ]
