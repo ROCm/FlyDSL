@@ -839,14 +839,13 @@ class JitFunction:
                 original_ir,
             )
 
-            # Always keep a reference to the latest compilation result so
-            # flyc.compile() can retrieve it even when caching is disabled.
-            self._last_compiled = (cache_key, compiled_func)
-
-            # Keep compiled artifacts alive within the process even when disk
-            # cache is disabled. This preserves code object lifetime for
-            # profiler/roctracer teardown and enables fast same-process reuse.
+            # Always keep compiled_func in memory so the ExecutionEngine
+            # (and its JIT code pages) stays alive across calls.  Without
+            # this, repeated calls with FLYDSL_RUNTIME_ENABLE_CACHE=0 would
+            # GC the old artifact, freeing GPU code while kernels may still
+            # be in flight — causing SIGSEGV.
             self._mem_cache[cache_key] = compiled_func
+
             if use_disk_cache and self.cache_manager and not env.debug.dump_ir:
                 str_key = self._cache_key_to_str(cache_key)
                 self.cache_manager.set(str_key, compiled_func)
