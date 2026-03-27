@@ -26,17 +26,17 @@ import math
 from dataclasses import dataclass
 from typing import Optional, Sequence, Tuple, Union
 
-from .._mlir import ir
-from .._mlir.dialects import (
+from ..._mlir import ir
+from ..._mlir.dialects import (
     arith as std_arith,
     llvm as llvm_dialect,
     memref as memref_dialect,
     rocdl,
 )
-from ..expr import arith, vector
-from ..expr.arith import _to_raw as _raw
-from ..expr.typing import T
-from ..expr.utils.arith import ArithValue as _ArithValue
+from .. import arith, vector
+from ..arith import _to_raw as _raw
+from ..typing import T
+from ..utils.arith import ArithValue as _ArithValue
 
 __all__ = [
     "TDMDescriptor2D",
@@ -217,7 +217,7 @@ def make_tensor_descriptor_2d(
     Returns:
         TDMDescriptor2D with dgroup0 and dgroup1 ready for tensor_load_2d.
     """
-    from .._mlir.dialects import fly as _fly_d
+    from ..._mlir.dialects import fly as _fly_d
 
     outer_size, inner_size = tensor_shape
     outer_stride, inner_stride = strides
@@ -234,7 +234,7 @@ def make_tensor_descriptor_2d(
     if num_warps > 1:
         # Auto-acquire SGPR wave_id via hardware register (TTMP8[29:25]).
         # This keeps the entire descriptor address chain in SALU,
-        from . import rocdl as _rocdl_ext
+        from .. import rocdl as _rocdl_ext
         _wid_i32 = _rocdl_ext.wave_id()
         wave_id = arith.index_cast(T.index, _wid_i32)
         warp_coord_outer = wave_id % arith.index(warps_dim0)
@@ -301,7 +301,7 @@ def make_tensor_descriptor_2d(
     tile_d1 = bpw_outer  # block dim1 per warp
 
     # Padding can be applied to the LDS address when copying from memory to LDS,
-    #  but not when copying from LDS to memory 
+    #  but not when copying from LDS to memory
     #  (there is no "de-padding" operation; padding is ignored).
     if for_store and pad_interval > 0 and pad_amount > 0:
         tile_d0 += pad_amount
@@ -486,7 +486,7 @@ def l2_prefetch_tile(
         block_threads: Total threads in the workgroup.
         scope:         Prefetch scope (default: SE = L2).
     """
-    from .._mlir.dialects import (
+    from ..._mlir.dialects import (
         fly as _fly_d,
         llvm as llvm_dialect,
     )
