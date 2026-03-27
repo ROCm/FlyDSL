@@ -8,7 +8,7 @@ Memory ordering uses GFX942 inline assembly for XGMI/HBM visibility.
 from __future__ import annotations
 
 import flydsl.compiler as flyc
-from flydsl.expr import arith as ea, gpu, range_constexpr, signal_ops
+from flydsl.expr import arith as ea, gpu, range_constexpr, mem_ops
 from flydsl._mlir.dialects import gpu as _raw_gpu
 from flydsl.expr.typing import T, Int32, Int64, Stream
 from flydsl.expr.buffer_ops import _unwrap_value
@@ -58,7 +58,7 @@ def _signal_start_sync(*, lane_i32, rank_i32, bid_i32, self_sg_i64, sgs_i64, ngp
 
     flag_addr = (self_sg_i64 + ea.constant(_SG_FLAG_OFF_B, type=i64)
                  + arith.ExtUIOp(i64, bid_i32).result * ea.constant(4, type=i64))
-    flag = signal_ops.ld_uncached_u32(flag_addr) + ea.constant(1, type=i32)
+    flag = mem_ops.load_i32_uncached(flag_addr) + ea.constant(1, type=i32)
 
     bid8 = bid_i32 * ea.constant(8, type=i32)
     lin_lane = bid8 + lane_i32
@@ -71,16 +71,16 @@ def _signal_start_sync(*, lane_i32, rank_i32, bid_i32, self_sg_i64, sgs_i64, ngp
     is_lane = arith.CmpIOp(arith.CmpIPredicate.ult, lane_i32, ea.constant(ngpus, type=i32)).result
     if_op = scf.IfOp(is_lane, results_=[], has_else=False)
     with ir.InsertionPoint(if_op.then_block):
-        peer_sg = signal_ops.select_by_lane(lane_i32, sgs_i64)
-        signal_ops.st_xgmi_u32(peer_sg + start_rank_off, flag)
-        signal_ops.spin_wait_ge(start_wait_addr, flag)
+        peer_sg = ea.select_by_index(lane_i32, sgs_i64)
+        mem_ops.store_i32_uncached_flush(peer_sg + start_rank_off, flag)
+        mem_ops.poll_until_ge(start_wait_addr, flag)
         scf.YieldOp([])
 
     gpu.barrier()
     is_t0 = arith.CmpIOp(arith.CmpIPredicate.eq, lane_i32, ea.constant(0, type=i32)).result
     if_t0 = scf.IfOp(is_t0, results_=[], has_else=False)
     with ir.InsertionPoint(if_t0.then_block):
-        signal_ops.st_local_u32(flag_addr, flag)
+        mem_ops.store_i32(flag_addr, flag)
         scf.YieldOp([])
     return flag_addr
 
@@ -105,7 +105,7 @@ def _signal_end_sync(*, lane_i32, rank_i32, bid_i32, self_sg_i64, sgs_i64,
     gpu.barrier()
     flag_addr = (self_sg_i64 + ea.constant(_SG_FLAG_OFF_B, type=i64)
                  + arith.ExtUIOp(i64, bid_i32).result * ea.constant(4, type=i64))
-    flag = signal_ops.ld_uncached_u32(flag_addr) + ea.constant(1, type=i32)
+    flag = mem_ops.load_i32_uncached(flag_addr) + ea.constant(1, type=i32)
 
     bid8 = bid_i32 * ea.constant(8, type=i32)
     lin_lane = bid8 + lane_i32
@@ -118,17 +118,17 @@ def _signal_end_sync(*, lane_i32, rank_i32, bid_i32, self_sg_i64, sgs_i64,
     is_lane = arith.CmpIOp(arith.CmpIPredicate.ult, lane_i32, ea.constant(ngpus, type=i32)).result
     if_op = scf.IfOp(is_lane, results_=[], has_else=False)
     with ir.InsertionPoint(if_op.then_block):
-        peer_sg = signal_ops.select_by_lane(lane_i32, sgs_i64)
+        peer_sg = ea.select_by_index(lane_i32, sgs_i64)
         if need_wbl2:
-            signal_ops.st_xgmi_u32(peer_sg + end_rank_off, flag)
+            mem_ops.store_i32_uncached_flush(peer_sg + end_rank_off, flag)
         else:
-            signal_ops.st_signal_u32(peer_sg + end_rank_off, flag)
+            mem_ops.store_i32_uncached(peer_sg + end_rank_off, flag)
         # AIter-like polling sequence:
         #   global_load_dword ... sc1
         #   s_waitcnt
         #   buffer_inv sc1
         #   cmp / loop
-        init_cur = signal_ops.ld_uncached_u32(end_wait_addr)
+        init_cur = mem_ops.load_i32_uncached(end_wait_addr)
         w = scf.WhileOp([i32], [init_cur])
         wb = ir.Block.create_at_start(w.before, [i32])
         wa = ir.Block.create_at_start(w.after, [i32])
@@ -137,7 +137,7 @@ def _signal_end_sync(*, lane_i32, rank_i32, bid_i32, self_sg_i64, sgs_i64,
             need_wait = arith.CmpIOp(arith.CmpIPredicate.ult, cur, flag).result
             scf.ConditionOp(need_wait, [cur])
         with ir.InsertionPoint(wa):
-            nxt = signal_ops.ld_uncached_u32(end_wait_addr)
+            nxt = mem_ops.load_i32_uncached(end_wait_addr)
             llvm.InlineAsmOp(None, [], "buffer_inv sc1", "", has_side_effects=True)
             rocdl.s_waitcnt(0)
             scf.YieldOp([nxt])
@@ -147,7 +147,7 @@ def _signal_end_sync(*, lane_i32, rank_i32, bid_i32, self_sg_i64, sgs_i64,
     is_t0 = arith.CmpIOp(arith.CmpIPredicate.eq, lane_i32, ea.constant(0, type=i32)).result
     if_t0 = scf.IfOp(is_t0, results_=[], has_else=False)
     with ir.InsertionPoint(if_t0.then_block):
-        signal_ops.st_local_u32(flag_addr, flag)
+        mem_ops.store_i32(flag_addr, flag)
         scf.YieldOp([])
 
 
@@ -240,8 +240,8 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
         in_ptrs_i64 = _unwrap_value(in_ptrs)
         out_ptr_i64 = _unwrap_value(out_ptr)
 
-        sgs         = [signal_ops.load_ptr_from_array(sg_ptrs_i64, ea.constant(i, type=i32)) for i in range(8)]
-        in_ptrs_arr = [signal_ops.load_ptr_from_array(in_ptrs_i64, ea.constant(i, type=i32)) for i in range(8)]
+        sgs         = [mem_ops.load_device_ptr(sg_ptrs_i64, ea.constant(i, type=i32)) for i in range(8)]
+        in_ptrs_arr = [mem_ops.load_device_ptr(in_ptrs_i64, ea.constant(i, type=i32)) for i in range(8)]
 
         # Declare LDS (shared memory)
         smem_sym = f"allreduce_1s_smem_ws{world_size}_t{threads}"
@@ -281,9 +281,9 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
             parity = afor.arguments[1]
 
             # Each warp loads data from its rank into shared memory
-            in_base = signal_ops.select_by_lane(warp_id, in_ptrs_arr)
+            in_base = ea.select_by_index(warp_id, in_ptrs_arr)
             off16 = arith.ExtUIOp(i64, p).result * ea.constant(16, type=i64)
-            raw = signal_ops.ld_global_16b(in_base + off16)
+            raw = mem_ops.load_v4i32(in_base + off16)
             sm_base = parity * ea.constant(threads, type=i32)
             sm_idx = ea.index_cast(idx, sm_base + lane_i32)
             memref.StoreOp(raw, smem, [sm_idx])
@@ -311,7 +311,7 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
                     from flydsl._mlir.dialects import llvm
                     out_bits = llvm.BitcastOp(v4i32, acc.truncf(v8half)).result
                 dst_off = arith.ExtUIOp(i64, p).result * ea.constant(16, type=i64)
-                signal_ops.st_global_16b(out_ptr_i64 + dst_off, out_bits)
+                mem_ops.store_v4i32(out_ptr_i64 + dst_off, out_bits)
                 scf.YieldOp([])
 
             gpu.barrier()
@@ -356,9 +356,9 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
         tmp_ptrs_i64 = _unwrap_value(tmp_ptrs)
         out_ptr_i64 = _unwrap_value(out_ptr)
 
-        sgs = [signal_ops.load_ptr_from_array(sg_ptrs_i64, ea.constant(i, type=i32)) for i in range(8)]
-        in_ptrs_arr = [signal_ops.load_ptr_from_array(in_ptrs_i64, ea.constant(i, type=i32)) for i in range(8)]
-        tmp_ptrs_arr = [signal_ops.load_ptr_from_array(tmp_ptrs_i64, ea.constant(i, type=i32)) for i in range(8)]
+        sgs = [mem_ops.load_device_ptr(sg_ptrs_i64, ea.constant(i, type=i32)) for i in range(8)]
+        in_ptrs_arr = [mem_ops.load_device_ptr(in_ptrs_i64, ea.constant(i, type=i32)) for i in range(8)]
+        tmp_ptrs_arr = [mem_ops.load_device_ptr(tmp_ptrs_i64, ea.constant(i, type=i32)) for i in range(8)]
 
         # Compute pack range for this rank's reduce-scatter partition
         start_p = rank_i32 * ea.constant(part_p, type=i32)
@@ -403,8 +403,8 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
             cur = a1.arguments[0]
             parity = a1.arguments[1]
             # Each warp loads its rank's input slice
-            in_base = signal_ops.select_by_lane(warp_id, in_ptrs_arr)
-            raw = signal_ops.ld_global_16b(in_base + arith.ExtUIOp(i64, cur).result * ea.constant(16, type=i64))
+            in_base = ea.select_by_index(warp_id, in_ptrs_arr)
+            raw = mem_ops.load_v4i32(in_base + arith.ExtUIOp(i64, cur).result * ea.constant(16, type=i64))
             sm_base = parity * ea.constant(threads, type=i32)
             sm_idx = ea.index_cast(idx, sm_base + lane_i32)
             memref.StoreOp(raw, smem, [sm_idx])
@@ -432,7 +432,7 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
                     from flydsl._mlir.dialects import llvm
                     out_raw = llvm.BitcastOp(v4i32, acc.truncf(v8half)).result
                 rel_p = cur - start_p
-                signal_ops.st_global_16b(tmp_out_i64 + arith.ExtUIOp(i64, rel_p).result * ea.constant(16, type=i64),
+                mem_ops.store_v4i32(tmp_out_i64 + arith.ExtUIOp(i64, rel_p).result * ea.constant(16, type=i64),
                         out_raw)
                 scf.YieldOp([])
 
@@ -461,10 +461,10 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
                     dst_rank = arith.AndIOp(sum_rw, ea.constant(world_size - 1, type=i32)).result
                 else:
                     dst_rank = arith.RemUIOp(sum_rw, ea.constant(world_size, type=i32)).result
-                tmp_base = signal_ops.select_by_lane(warp_id, tmp_ptrs_arr)
-                raw = signal_ops.ld_global_16b(tmp_base + arith.ExtUIOp(i64, cur).result * ea.constant(16, type=i64))
+                tmp_base = ea.select_by_index(warp_id, tmp_ptrs_arr)
+                raw = mem_ops.load_v4i32(tmp_base + arith.ExtUIOp(i64, cur).result * ea.constant(16, type=i64))
                 dst_pack = dst_rank * ea.constant(part_p, type=i32) + cur
-                signal_ops.st_global_16b(out_ptr_i64 + arith.ExtUIOp(i64, dst_pack).result * ea.constant(16, type=i64),
+                mem_ops.store_v4i32(out_ptr_i64 + arith.ExtUIOp(i64, dst_pack).result * ea.constant(16, type=i64),
                         raw)
                 scf.YieldOp([cur + stride_pack2])
         else:
@@ -491,10 +491,10 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
                     ifp = scf.IfOp(ok, results_=[], has_else=False)
                     with ir.InsertionPoint(ifp.then_block):
                         src_off = arith.ExtUIOp(i64, cur).result * ea.constant(16, type=i64)
-                        raw = signal_ops.ld_global_16b(tmp_ptrs_arr[p] + src_off)
+                        raw = mem_ops.load_v4i32(tmp_ptrs_arr[p] + src_off)
                         dst_pack_idx = ea.constant(p * part_p, type=i32) + cur
                         dst_off = arith.ExtUIOp(i64, dst_pack_idx).result * ea.constant(16, type=i64)
-                        signal_ops.st_global_16b(out_ptr_i64 + dst_off, raw)
+                        mem_ops.store_v4i32(out_ptr_i64 + dst_off, raw)
                         scf.YieldOp([])
                 scf.YieldOp([cur + stride_i32])
 
@@ -536,8 +536,8 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
         out_ptrs_i64 = _unwrap_value(out_ptrs)
         tmp_ptrs_i64 = _unwrap_value(tmp_ptrs)
 
-        sgs = [signal_ops.load_ptr_from_array(sg_ptrs_i64, ea.constant(i, type=i32)) for i in range(8)]
-        out_ptrs_arr = [signal_ops.load_ptr_from_array(out_ptrs_i64, ea.constant(i, type=i32)) for i in range(8)]
+        sgs = [mem_ops.load_device_ptr(sg_ptrs_i64, ea.constant(i, type=i32)) for i in range(8)]
+        out_ptrs_arr = [mem_ops.load_device_ptr(out_ptrs_i64, ea.constant(i, type=i32)) for i in range(8)]
 
         tnum_gpu_i32 = ea.constant(tnum_gpu, type=i32)
         log2_tnum = int(math.log2(tnum_gpu))
@@ -558,7 +558,7 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
                 alignment=16,
             )
         smem = memref.GetGlobalOp(smem_ty, smem_sym_wm).result
-        tmp_out_i64 = signal_ops.load_ptr_from_array(tmp_ptrs_i64, rank_i32)
+        tmp_out_i64 = mem_ops.load_device_ptr(tmp_ptrs_i64, rank_i32)
 
         # ---- Stage 1: scatter local input to REMOTE tmp buffers ----
         start_w = warp_id * ea.constant(part_p, type=i32)
@@ -582,10 +582,10 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
         with ir.InsertionPoint(as1):
             cur = as1.arguments[0]
             stride_s1 = as1.arguments[1]
-            raw = signal_ops.ld_global_16b(inp_ptr_i64 + arith.ExtUIOp(i64, cur).result * ea.constant(16, type=i64))
+            raw = mem_ops.load_v4i32(inp_ptr_i64 + arith.ExtUIOp(i64, cur).result * ea.constant(16, type=i64))
             rel_idx = cur - start_w
             dst_off = rank_i32 * ea.constant(part_p, type=i32) + rel_idx
-            dst_tmp = signal_ops.load_ptr_from_array(tmp_ptrs_i64, warp_id)
+            dst_tmp = mem_ops.load_device_ptr(tmp_ptrs_i64, warp_id)
             tmp_addr = dst_tmp + arith.ExtUIOp(i64, dst_off).result * ea.constant(16, type=i64)
             is_tmp_null = arith.CmpIOp(arith.CmpIPredicate.eq, dst_tmp, ea.constant(0, type=i64)).result
             tmp_low4 = arith.AndIOp(tmp_addr, ea.constant(0xF, type=i64)).result
@@ -595,7 +595,7 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
             with ir.InsertionPoint(if_tmp_ok.then_block):
                 scf.YieldOp([])
             with ir.InsertionPoint(if_tmp_ok.else_block):
-                signal_ops.st_global_16b(tmp_addr, raw)
+                mem_ops.store_v4i32(tmp_addr, raw)
                 scf.YieldOp([])
             scf.YieldOp([cur + stride_s1, stride_s1])
 
@@ -629,7 +629,7 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
                     ir.IntegerAttr.get(ir.IntegerType.get_signless(32), 0)
                 )).result])
             with ir.InsertionPoint(raw_if.else_block):
-                scf.YieldOp([signal_ops.ld_global_16b(load_addr)])
+                scf.YieldOp([mem_ops.load_v4i32(load_addr)])
             raw = raw_if.results[0]
 
             sm_idx = ea.index_cast(idx, lane_i32)
@@ -682,7 +682,7 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
             with ir.InsertionPoint(if_out_ok.then_block):
                 scf.YieldOp([])
             with ir.InsertionPoint(if_out_ok.else_block):
-                signal_ops.st_global_16b(out_addr, out_raw)
+                mem_ops.store_v4i32(out_addr, out_raw)
                 scf.YieldOp([])
 
             scf.YieldOp([cur + stride_s2, stride_s2])
