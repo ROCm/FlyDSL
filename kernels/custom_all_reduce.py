@@ -8,6 +8,7 @@ from contextlib import contextmanager
 import torch
 
 _AITER_KMAXBLOCKS = 80
+_DEFAULT_MAX_SIZE = 8192 * 1024 * 8 * 2  # 128 MB, matches aiter default
 
 
 def meta_size() -> int:
@@ -29,7 +30,7 @@ def _is_weak_contiguous(t) -> bool:
 _FLYDSL_AITER_GLOO_GROUP = None
 
 
-def init_custom_ar(meta, rank_data, handles, offsets, rank: int, full_nvlink: bool, out=None):
+def init_custom_ar(meta, rank_data, handles, offsets, rank: int, full_nvlink: bool, out=None, max_size: int = _DEFAULT_MAX_SIZE):
     """Initialize allreduce with AIter or FlyDSL backend.
 
     Backend controlled by env var FLYDSL_AITER_IMPL:
@@ -65,7 +66,6 @@ def init_custom_ar(meta, rank_data, handles, offsets, rank: int, full_nvlink: bo
             _FLYDSL_AITER_GLOO_GROUP = dist.group.WORLD
 
     dev = getattr(rank_data, "device", None) or torch.device(f"cuda:{rank}")
-    max_size = int(os.environ.get("FLYDSL_AITER_MAX_SIZE_BYTES", str(64 * 1024 * 1024)))
 
     if impl == "flydsl":
         return FlyDSLAllreduce(
@@ -291,7 +291,6 @@ class FlyDSLAllreduce:
 
         self._exe_cache = {}
         self._threads = 512
-        self._max_spin = int(os.environ.get("FLYDSL_AITER_SIGNAL_MAX_SPIN", "20000000"))
         self._grid_x_cache = {}
 
         self._reuse_out_default = str(os.environ.get("FLYDSL_AITER_REUSE_OUT", "0")).strip().lower() in {"1", "true", "yes", "y"}
@@ -395,7 +394,7 @@ class FlyDSLAllreduce:
         except Exception:
             pass
 
-    _SUPPORTED_WORLD_SIZES = {2, 4, 8}
+    _SUPPORTED_WORLD_SIZES = {2, 4, 6, 8}
     _SUPPORTED_DTYPES = {torch.float32, torch.float16, torch.bfloat16}
 
     def should_custom_ar(self, inp, *, open_fp8_quant: bool = False) -> bool:
@@ -671,9 +670,6 @@ class FlyDSLAllreduce:
                 use_write_mode=True,
                 stream_ptr=stream_ptr,
             )
-            # torch.cuda.current_stream().synchronize()
-            # import torch.distributed as dist
-            # dist.barrier(group=self.group)
             out.view(torch.uint8)[:bytes_n].copy_(self.output_buffer[:bytes_n])
         else:
             self.input_buffer[:bytes_n].copy_(inp.view(torch.uint8))

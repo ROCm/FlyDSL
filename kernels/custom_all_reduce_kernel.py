@@ -73,7 +73,16 @@ def _signal_start_sync(*, lane_i32, rank_i32, bid_i32, self_sg_i64, sgs_i64, ngp
     with ir.InsertionPoint(if_op.then_block):
         peer_sg = ea.select_by_index(lane_i32, sgs_i64)
         mem_ops.store_i32_uncached_flush(peer_sg + start_rank_off, flag)
-        mem_ops.poll_until_ge(start_wait_addr, flag)
+        init_cur = mem_ops.load_i32_uncached(start_wait_addr)
+        w = scf.WhileOp([i32], [init_cur])
+        wb = ir.Block.create_at_start(w.before, [i32])
+        wa = ir.Block.create_at_start(w.after, [i32])
+        with ir.InsertionPoint(wb):
+            cur = wb.arguments[0]
+            need_wait = arith.CmpIOp(arith.CmpIPredicate.ult, cur, flag).result
+            scf.ConditionOp(need_wait, [cur])
+        with ir.InsertionPoint(wa):
+            scf.YieldOp([mem_ops.load_i32_uncached(start_wait_addr)])
         scf.YieldOp([])
 
     gpu.barrier()
@@ -168,7 +177,7 @@ def _set_workgroup_size(threads: int):
 # Main entry point
 # ---------------------------------------------------------------------------
 
-def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: int = 256):
+def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: int = 512):
     """Build and return compiled allreduce launcher functions.
 
     Captures compile-time constants as closures, returns a dict with:
@@ -749,7 +758,7 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
 
     # Unique function names per (N, dtype_str, world_size, threads) to prevent
     # file-cache collisions (N is baked into kernel body, not the cache key).
-    _suffix = f"_N{N}_{dtype_str}_ws{world_size}_t{threads}_rev20260326"
+    _suffix = f"_N{N}_{dtype_str}_ws{world_size}_t{threads}"
     run_1stage_arr.func.__name__        = f"run_1stage_arr{_suffix}"
     run_2stage_arr.func.__name__        = f"run_2stage_arr{_suffix}"
     run_2stage_write_mode.func.__name__ = f"run_2stage_write_mode{_suffix}"
