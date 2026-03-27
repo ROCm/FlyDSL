@@ -5,6 +5,7 @@ import ctypes
 import hashlib
 import inspect
 import os
+import re
 import pickle
 import pkgutil
 import threading
@@ -225,13 +226,12 @@ def _jit_function_cache_key(func: Callable) -> str:
 
 def _stage_label_from_fragment(fragment: str) -> str:
     """Make a stable, filename-friendly label from a pipeline fragment."""
-    import re as _re
 
     base = fragment.strip()
     if base.startswith("gpu.module(") and base.endswith(")"):
         base = base[len("gpu.module(") : -1].strip()
     base = base.split("{", 1)[0].strip()
-    base = _re.sub(r"[^0-9A-Za-z]+", "_", base).strip("_").lower()
+    base = re.sub(r"[^0-9A-Za-z]+", "_", base).strip("_").lower()
     return base or "stage"
 
 
@@ -251,9 +251,8 @@ def _extract_isa_text(mlir_asm: str) -> str:
     newline, ``\\09`` for tab, ``\\22`` for double-quote).  This function
     locates that string and un-escapes it so the output is a normal ``.s`` file.
     """
-    import re as _re
 
-    m = _re.search(r'assembly\s*=\s*"', mlir_asm)
+    m = re.search(r'assembly\s*=\s*"', mlir_asm)
     if not m:
         return mlir_asm
 
@@ -288,6 +287,87 @@ def _extract_isa_text(mlir_asm: str) -> str:
         i += 1
 
     return "".join(chars)
+
+
+def _dump_llvmir(*, dump_dir: Path, asm: str, stage_name: str = "16_llvm_ir"):
+    """Dump LLVM IR (.ll) via mlir-translate --mlir-to-llvmir.
+
+    Extracts the gpu.module kernel from the reconcile-unrealized-casts MLIR,
+    wraps it as a standalone LLVM dialect module, and translates to LLVM IR.
+    """
+    import subprocess
+    import shutil
+
+    try:
+        lines = asm.splitlines(keepends=True)
+
+        gpu_start = None
+        gpu_end = None
+        data_layout = ""
+        for i, line in enumerate(lines):
+            if "gpu.module" in line and "llvm.data_layout" in line:
+                gpu_start = i
+                m = re.search(r'llvm\.data_layout\s*=\s*"([^"]*)"', line)
+                if m:
+                    data_layout = m.group(1)
+            if gpu_start is not None and gpu_end is None and i > gpu_start:
+                stripped = line.strip()
+                if stripped.startswith("} loc("):
+                    indent = len(line) - len(line.lstrip())
+                    if indent == 2:
+                        gpu_end = i
+                        break
+
+        if gpu_start is None or gpu_end is None:
+            log().debug("[dump_llvmir] Could not find gpu.module boundaries")
+            return None
+
+        out_lines = []
+        out_lines.append(
+            'module attributes {llvm.data_layout = "' + data_layout
+            + '", llvm.target_triple = "amdgcn-amd-amdhsa"} {\n'
+        )
+        for line in lines[gpu_start + 1 : gpu_end]:
+            out_lines.append(line.replace("gpu.kernel, ", ""))
+        out_lines.append("}\n")
+        for line in lines:
+            if line.startswith("#loc"):
+                out_lines.append(line)
+
+        standalone_mlir = "".join(out_lines)
+
+        dump_dir.mkdir(parents=True, exist_ok=True)
+        mlir_tmp = dump_dir / f"{stage_name}_input.mlir"
+        mlir_tmp.write_text(standalone_mlir, encoding="utf-8")
+
+        mlir_translate = shutil.which("mlir-translate")
+        if mlir_translate is None:
+            for candidate in [
+                "/llvm-project/mlir_install/bin/mlir-translate",
+                "/llvm-project/mlir_install_v23/bin/mlir-translate",
+            ]:
+                if Path(candidate).exists():
+                    mlir_translate = candidate
+                    break
+
+        if mlir_translate is None:
+            log().debug("[dump_llvmir] mlir-translate not found")
+            return None
+
+        out_ll = dump_dir / f"{stage_name}.ll"
+        result = subprocess.run(
+            [mlir_translate, "--mlir-to-llvmir", str(mlir_tmp), "-o", str(out_ll)],
+            capture_output=True, text=True, timeout=60,
+        )
+        if result.returncode != 0:
+            log().debug(f"[dump_llvmir] mlir-translate failed: {result.stderr[:500]}")
+            return None
+
+        mlir_tmp.unlink(missing_ok=True)
+        return out_ll
+    except Exception as exc:
+        log().debug(f"[dump_llvmir] failed: {exc}")
+        return None
 
 
 def _dump_isa(*, dump_dir: Path, ctx: ir.Context, asm: str, verify: bool, stage_name: str = "15_final_isa"):
@@ -338,10 +418,9 @@ def _infer_kernel_names_from_asm(asm: str) -> list:
 
 
 def _sanitize_path_component(s: str) -> str:
-    import re as _re
 
     s = str(s).strip()
-    return _re.sub(r"[^A-Za-z0-9_.-]+", "_", s) if s else "unknown"
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", s) if s else "unknown"
 
 
 def _pipeline_fragments(backend) -> list:
@@ -405,6 +484,17 @@ class MlirCompiler:
                 )
                 if isa_out is not None:
                     print(f"[flydsl.compile] dump {isa_stage} -> {isa_out}")
+
+                # Dump LLVM IR via mlir-translate
+                if asm_for_isa is not None:
+                    llvmir_stage = f"{stage_num_base + len(fragments) + 1:02d}_llvm_ir"
+                    llvmir_out = _dump_llvmir(
+                        dump_dir=dump_dir,
+                        asm=asm_for_isa,
+                        stage_name=llvmir_stage,
+                    )
+                    if llvmir_out is not None:
+                        print(f"[flydsl.compile] dump {llvmir_stage} -> {llvmir_out}")
         else:
             pipeline = f"builtin.module({','.join(fragments)})"
             pm = PassManager.parse(pipeline)
