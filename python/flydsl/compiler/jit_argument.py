@@ -81,7 +81,8 @@ def _is_constexpr_annotation(annotation) -> bool:
 
 def _is_type_param_annotation(annotation) -> bool:
     """Check if annotation is Type, Type[T]."""
-    return annotation is Type or get_origin(annotation) is Type
+    origin = get_origin(annotation)
+    return annotation is Type or origin is Type or origin is type
 
 
 def convert_to_jit_arguments(

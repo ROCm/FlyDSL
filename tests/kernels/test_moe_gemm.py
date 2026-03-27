@@ -9,6 +9,7 @@ import math
 import os
 import sys
 from typing import Tuple, Optional, List
+import flydsl.compiler as flyc
 
 import pytest
 import torch
@@ -570,16 +571,17 @@ def run_moe_stage1(
         )
         bias_dummy = torch.empty((0,), device=device, dtype=torch.float32)
 
+        def _s1_args_fp4(o, x, w, sx, sw, st, eids, sw_sorted):
+            return (o, x, w, sx, sw, st, eids, sw_sorted,
+                    num_valid_ids, bias_dummy,
+                    tokens, inter_dim * 2, model_dim, int(blocks),
+                    torch.cuda.current_stream())
+
+        compiled_exe = flyc.compile(exe, *_s1_args_fp4(out, x_q, w_kernel, scale_x_1d, scale_w1_1d,
+                                                       sorted_token_ids, sorted_expert_ids, sorted_weights_1d))
+
         def launch(o, x, w, sx, sw, st, eids, sw_sorted):
-            stream = torch.cuda.current_stream()
-            exe(
-                o, x, w, sx, sw,
-                st, eids, sw_sorted,
-                num_valid_ids,  # arg_max_token_ids
-                bias_dummy,     # arg_bias
-                tokens, inter_dim * 2, model_dim, int(blocks),
-                stream,
-            )
+            compiled_exe(*_s1_args_fp4(o, x, w, sx, sw, st, eids, sw_sorted))
     else:
         exe = compile_moe_gemm1(
             model_dim=model_dim,
@@ -595,24 +597,16 @@ def run_moe_stage1(
             use_cshuffle_epilog=False,
         )
 
+        def _s1_args(o, x, w, sx, sw, st, eids, sw_sorted):
+            return (o, x, w, sx, sw, st, eids, sw_sorted,
+                    num_valid_ids, tokens, inter_dim, model_dim, int(blocks),
+                    torch.cuda.current_stream())
+
+        compiled_exe = flyc.compile(exe, *_s1_args(out, x_q, w_kernel, scale_x_1d, scale_w1_1d,
+                                                  sorted_token_ids, sorted_expert_ids, sorted_weights_1d))
+
         def launch(o, x, w, sx, sw, st, eids, sw_sorted):
-            stream = torch.cuda.current_stream()
-            exe(
-                o,
-                x,
-                w,
-                sx,
-                sw,
-                st,
-                eids,
-                sw_sorted,
-                num_valid_ids,
-                tokens,
-                inter_dim,
-                model_dim,
-                int(blocks),
-                stream,
-            )
+            compiled_exe(*_s1_args(o, x, w, sx, sw, st, eids, sw_sorted))
 
     _, us = run_perftest(
         launch,
@@ -1128,32 +1122,39 @@ def run_moe_stage2(
             )
             dummy_mask = torch.empty((0, topk), device=device, dtype=torch.uint8)
 
+            def _s2_args_fp4_interm(interm, x, w, sx, sw, st, eids, sw_sorted):
+                return (interm.view(-1), x, w, sx, sw, st, eids, sw_sorted,
+                        num_valid_ids, bias_dummy, tokens, model_dim, inter_dim, int(blocks),
+                        torch.cuda.current_stream())
+
+            _dummy_interm = torch.empty(tokens * topk, model_dim, device=device, dtype=torch.float16)
+            compiled_exe = flyc.compile(exe, *_s2_args_fp4_interm(
+                _dummy_interm, a2_q.view(-1), w2_kernel.view(-1),
+                a2_scale_1d, w2_scale_1d, sorted_token_ids,
+                sorted_expert_ids, sorted_weights_1d))
+
             def launch(o, x, w, sx, sw, st, eids, sw_sorted):
                 stream = torch.cuda.current_stream()
                 intermediate = torch.empty(
                     tokens * topk, model_dim, device=device, dtype=torch.float16
                 )
-                exe(
-                    intermediate.view(-1), x, w, sx, sw,
-                    st, eids, sw_sorted,
-                    num_valid_ids, bias_dummy,
-                    tokens, model_dim, inter_dim, int(blocks),
-                    stream,
-                )
+                compiled_exe(*_s2_args_fp4_interm(intermediate, x, w, sx, sw, st, eids, sw_sorted))
                 X = intermediate.view(tokens, topk, model_dim)
                 Y = o.view(tokens, model_dim)
                 reduce_exe(X, Y, dummy_mask, tokens, stream)
         else:
+            def _s2_args_fp4(o, x, w, sx, sw, st, eids, sw_sorted):
+                return (o, x, w, sx, sw, st, eids, sw_sorted,
+                        num_valid_ids, bias_dummy, tokens, model_dim, inter_dim, int(blocks),
+                        torch.cuda.current_stream())
+
+            compiled_exe = flyc.compile(exe, *_s2_args_fp4(
+                out_perf, a2_q.view(-1), w2_kernel.view(-1),
+                a2_scale_1d, w2_scale_1d, sorted_token_ids,
+                sorted_expert_ids, sorted_weights_1d))
+
             def launch(o, x, w, sx, sw, st, eids, sw_sorted):
-                stream = torch.cuda.current_stream()
-                exe(
-                    o, x, w, sx, sw,
-                    st, eids, sw_sorted,
-                    num_valid_ids,  # arg_num_valid_ids
-                    bias_dummy,     # arg_bias
-                    tokens, model_dim, inter_dim, int(blocks),
-                    stream,
-                )
+                compiled_exe(*_s2_args_fp4(o, x, w, sx, sw, st, eids, sw_sorted))
     else:
         exe = compile_fn(
             model_dim=model_dim,
@@ -1171,48 +1172,33 @@ def run_moe_stage2(
     is_reduce_exe = (getattr(exe, "mode", None) == MoeGemm2Mode.REDUCE) or bool(use_reduce)
 
     if not is_fp4:
+        def _s2_args_atomic(o, x, w, sx, sw, st, eids, sw_sorted):
+            return (o, x, w, sx, sw, st, eids, sw_sorted,
+                    num_valid_ids, tokens, model_dim, inter_dim, int(blocks),
+                    torch.cuda.current_stream())
+
+        # In reduce mode, exe is a _MoeGemm2ReduceWrapper (not a JitFunction),
+        # so flyc.compile is not applicable.  The wrapper internally dispatches
+        # to two separate JitFunctions (gemm2 + reduce).
+        if not is_reduce_exe:
+            compiled_exe = flyc.compile(exe, *_s2_args_atomic(
+                out_perf, a2_q.view(-1), w2_kernel.view(-1),
+                a2_scale_1d, w2_scale_1d, sorted_token_ids,
+                sorted_expert_ids, sorted_weights_1d))
+
         def launch(o, x, w, sx, sw, st, eids, sw_sorted):
-            stream = torch.cuda.current_stream()
-            valid_mask = None
-            if is_reduce_exe and bool(use_valid_mask):
-                # Default: non-EP (all ones). EP mode can be emulated by passing expert_mask.
-                valid_mask = get_topk_valid_mask(topk_ids, expert_mask=None).contiguous()
             if is_reduce_exe:
+                stream = torch.cuda.current_stream()
+                valid_mask = None
+                if bool(use_valid_mask):
+                    valid_mask = get_topk_valid_mask(topk_ids, expert_mask=None).contiguous()
                 exe(
-                    o,
-                    x,
-                    w,
-                    sx,
-                    sw,
-                    st,
-                    eids,
-                    sw_sorted,
-                    num_valid_ids,
-                    tokens,
-                    model_dim,
-                    inter_dim,
-                    int(blocks),
-                    valid_mask,
-                    stream,
+                    o, x, w, sx, sw, st, eids, sw_sorted,
+                    num_valid_ids, tokens, model_dim, inter_dim, int(blocks),
+                    valid_mask, stream,
                 )
             else:
-                # Atomic mode does not take valid_mask.
-                exe(
-                    o,
-                    x,
-                    w,
-                    sx,
-                    sw,
-                    st,
-                    eids,
-                    sw_sorted,
-                    num_valid_ids,
-                    tokens,
-                    model_dim,
-                    inter_dim,
-                    int(blocks),
-                    stream,
-                )
+                compiled_exe(*_s2_args_atomic(o, x, w, sx, sw, st, eids, sw_sorted))
  
     # NOTE: stage2 uses atomic-add into `out`, so we cannot reuse the same output buffer
     # across perf iterations for correctness. Time into a dedicated buffer, then run
