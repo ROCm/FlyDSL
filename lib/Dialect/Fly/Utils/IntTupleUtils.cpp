@@ -224,11 +224,11 @@ IntTupleValueAdaptor IntTupleBuilder<IntTupleValueAdaptor>::add(IntTupleValueAda
       return materializeConstantTuple(retAttr);
     }
     auto cmpType = getCommonIntType(lhs.attr, rhs.attr);
-    return IntTupleValueAdaptor(arith::AddIOp::create(builder, loc,
+    return IntTupleValueAdaptor{arith::AddIOp::create(builder, loc,
                                                       extendToIntType(lhs.value, cmpType),
                                                       extendToIntType(rhs.value, cmpType))
                                     .getResult(),
-                                retAttr);
+                                retAttr};
   } else {
     assert(lhs.isLeafBasis() || lhs.isLeafStaticValue(0) || !lhs.isLeaf());
     assert(rhs.isLeafBasis() || rhs.isLeafStaticValue(0) || !rhs.isLeaf());
