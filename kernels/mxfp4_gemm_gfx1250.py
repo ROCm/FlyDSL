@@ -939,7 +939,7 @@ def compile_mxfp4_gemm(
                  out_dtype, inst_prefetch, wave_specialized_tdm,
                  use_scf_loop, use_scale_opsel)
 
-    @flyc.jit
+    @flyc.jit(compile_hints={"expert_scheduling_mode": True})
     def launch_mxfp4_gemm(
         arg_c: fx.Tensor,
         arg_a: fx.Tensor,
