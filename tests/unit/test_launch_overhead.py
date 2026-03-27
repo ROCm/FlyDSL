@@ -136,18 +136,27 @@ def main():
     c = torch.empty_like(a)
     stream = torch.cuda.current_stream()
 
-    # ── FlyDSL warmup (triggers JIT compilation on first call) ──
-    vecAdd(a, b, c, SIZE, SIZE, BLOCK, VEC, stream=stream)
+    # ── FlyDSL: compile once, then benchmark ──
+    compiled = flyc.compile(vecAdd, a, b, c, SIZE, SIZE, BLOCK, VEC, stream)
     torch.cuda.synchronize()
 
     # verify correctness
+    c.zero_()
+    compiled(a, b, c, SIZE, SIZE, BLOCK, VEC, stream)
+    torch.cuda.synchronize()
     ref = a + b
     err = (c - ref).abs().max().item()
     assert err < 1e-5, f"FlyDSL correctness failed: max_err={err}"
 
-    # ── Bench FlyDSL ──
+    # ── Bench flyc.compile'd function ──
+    compiled_us = bench_wallclock(
+        lambda: compiled(a, b, c, SIZE, SIZE, BLOCK, VEC, stream),
+        n_iters=N_ITERS,
+    )
+
+    # ── Bench @flyc.jit (implicit path) ──
     flydsl_us = bench_wallclock(
-        lambda: vecAdd(a, b, c, SIZE, SIZE, BLOCK, VEC, stream=stream),
+        lambda: vecAdd(a, b, c, SIZE, SIZE, BLOCK, VEC, stream),
         n_iters=N_ITERS,
     )
 
@@ -172,75 +181,13 @@ def main():
 
     # ── Results ──
     print()
-    print(f"  {'Framework':<20s} {'Dispatch (µs)':>14s} {'vs PyTorch':>12s}")
-    print("  " + "-" * 48)
-    print(f"  {'PyTorch (torch.add)':<20s} {torch_us:>14.1f} {'1.00x':>12s}")
-    print(f"  {'FlyDSL (@flyc.jit)':<20s} {flydsl_us:>14.1f} {flydsl_us / torch_us:>11.1f}x")
+    print(f"  {'Framework':<25s} {'Dispatch (µs)':>14s} {'vs PyTorch':>12s}")
+    print("  " + "-" * 53)
+    print(f"  {'PyTorch (torch.add)':<25s} {torch_us:>14.1f} {'1.00x':>12s}")
+    print(f"  {'FlyDSL (flyc.compile)':<25s} {compiled_us:>14.1f} {compiled_us / torch_us:>11.1f}x")
+    print(f"  {'FlyDSL (@flyc.jit)':<25s} {flydsl_us:>14.1f} {flydsl_us / torch_us:>11.1f}x")
     if triton_us is not None:
-        print(f"  {'Triton (@triton.jit)':<20s} {triton_us:>14.1f} {triton_us / torch_us:>11.1f}x")
-    print()
-
-    # ── Layered breakdown for FlyDSL ──
-    print("─" * 70)
-    print("FlyDSL layered breakdown:")
-
-    # L0: full @flyc.jit call (same as above)
-    print(f"  L0 @flyc.jit call:              {flydsl_us:>8.1f} µs")
-
-    # L1: CompiledArtifact.__call__ (bypass JitFunction, call cached artifact directly)
-    jf = vecAdd  # JitFunction instance
-    # Force cache population
-    jf(a, b, c, SIZE, SIZE, BLOCK, VEC, stream=stream)
-    torch.cuda.synchronize()
-
-    # Get the cached CompiledArtifact
-    import inspect
-    sig = inspect.signature(jf.func)
-    bound = sig.bind(a, b, c, SIZE, SIZE, BLOCK, VEC, stream=stream)
-    bound.apply_defaults()
-    jf._ensure_sig()
-    cache_key = jf._make_cache_key(bound.arguments)
-    artifact = jf._mem_cache.get(cache_key)
-
-    if artifact is not None:
-        from flydsl.compiler.jit_argument import convert_to_jit_arguments
-        from flydsl.compiler.jit_function import _ensure_stream_arg
-        from flydsl._mlir import ir
-        from flydsl.compiler.protocol import fly_pointers
-
-        # Build jit_args once for L1 benchmark (needs MLIR context for TensorAdaptor)
-        ctx = ir.Context()
-        ctx.load_all_available_dialects()
-        ctx.__enter__()
-        _, jit_args, _, _ = convert_to_jit_arguments(sig, bound)
-        _ensure_stream_arg(jit_args)
-
-        l1_us = bench_wallclock(
-            lambda: artifact(*jit_args),
-            n_iters=N_ITERS,
-        )
-        print(f"  L1 CompiledArtifact.__call__:    {l1_us:>8.1f} µs")
-
-        # L2: raw ctypes func_exe (bypass everything)
-        all_c_ptrs = []
-        for arg in jit_args:
-            all_c_ptrs.extend(fly_pointers(arg))
-
-        func_exe = artifact._get_func_exe()
-        packed = artifact._packer.pack(all_c_ptrs)
-
-        l2_us = bench_wallclock(
-            lambda: func_exe(packed),
-            n_iters=N_ITERS,
-        )
-        print(f"  L2 raw ctypes call:             {l2_us:>8.1f} µs")
-
-        ctx.__exit__(None, None, None)
-
-        print(f"  ──────────────────────────────────────────")
-        print(f"  JitFunction overhead (L0-L1):   {flydsl_us - l1_us:>8.1f} µs")
-        print(f"  Artifact overhead   (L1-L2):    {l1_us - l2_us:>8.1f} µs")
-
+        print(f"  {'Triton (@triton.jit)':<25s} {triton_us:>14.1f} {triton_us / torch_us:>11.1f}x")
     print()
 
 
