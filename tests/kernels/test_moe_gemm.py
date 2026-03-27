@@ -32,7 +32,12 @@ from tests.kernels.test_ref import torch_moe_gemm1, torch_moe_gemm2
 from tests.utils import pertoken_quant, shuffle_weight, shuffle_scale_for_int4
 from tests.test_common import verify_output, run_perftest
 from flydsl.runtime.device import get_rocm_arch
-from tests.kernels.utils import fp4_utils
+try:
+    from tests.kernels.utils import fp4_utils
+    HAS_FP4_UTILS = True
+except ImportError:
+    fp4_utils = None
+    HAS_FP4_UTILS = False
 
 ARCH = get_rocm_arch()
 # GFX950 (MI350) and newer typically use OCP standard float8_e4m3fn
@@ -78,10 +83,16 @@ from kernels.moe_gemm_2stage import (
     compile_moe_reduction,
     MoeGemm2Mode,
 )
-from kernels.mixed_moe_gemm_2stage import (
-    compile_mixed_moe_gemm1,
-    compile_mixed_moe_gemm2,
-)
+try:
+    from kernels.mixed_moe_gemm_2stage import (
+        compile_mixed_moe_gemm1,
+        compile_mixed_moe_gemm2,
+    )
+    HAS_MIXED_MOE = True
+except ImportError:
+    compile_mixed_moe_gemm1 = None
+    compile_mixed_moe_gemm2 = None
+    HAS_MIXED_MOE = False
 
 logging.basicConfig(level=logging.INFO)
 
@@ -401,6 +412,8 @@ def run_moe_stage1(
 
     # Quantize inputs / weights.
     if in_dtype == "fp4":
+        if not HAS_FP4_UTILS:
+            pytest.skip("fp4_utils not available (triton not installed)")
         if "gfx95" not in ARCH:
             pytest.skip(f"FP4 MFMA requires gfx950+, got {ARCH}")
         x_fp4, x_scale_raw = _per_1x32_fp4_quant(x_fp32)
@@ -934,6 +947,8 @@ def run_moe_stage2(
         w2_q, scale_w2 = pertoken_quant(w2_fp32, quant_dtype=torch.int8, dtypeMax=7)
         scale_x = None
     elif in_dtype == "fp4":
+        if not HAS_FP4_UTILS:
+            pytest.skip("fp4_utils not available (triton not installed)")
         if "gfx95" not in ARCH:
             pytest.skip(f"FP4 MFMA requires gfx950+, got {ARCH}")
         # FP4: quantize W2 only here; A2 is provided via a2_fp8_in from stage1 output
@@ -1432,6 +1447,8 @@ def test_moe_gemm_2stage(
     if group_size > 0 and in_dtype != "int4_bf16":
         pytest.skip("groupwise scale only applies to int4_bf16")
     if in_dtype == "fp4":
+        if not HAS_FP4_UTILS or not HAS_MIXED_MOE:
+            pytest.skip("FP4 dependencies not available (triton/mixed_moe_gemm not installed)")
         if "gfx95" not in ARCH:
             pytest.skip(f"FP4 MFMA requires gfx950+, got {ARCH}")
         if bool(use_valid_mask):
@@ -1769,6 +1786,8 @@ def test_moe_stage2_standalone(
     """
     is_fp4 = in_dtype == "fp4"
     if is_fp4:
+        if not HAS_FP4_UTILS or not HAS_MIXED_MOE:
+            pytest.skip("FP4 dependencies not available (triton/mixed_moe_gemm not installed)")
         if "gfx95" not in ARCH:
             pytest.skip(f"FP4 requires gfx950+, got {ARCH}")
         if inter_dim < 256 or tile_k < 256:
