@@ -820,12 +820,14 @@ class JitFunction:
                 original_ir,
             )
 
-            # Always keep a reference to the latest compilation result so
-            # flyc.compile() can retrieve it even when caching is disabled.
-            self._last_compiled = (cache_key, compiled_func)
+            # Always keep compiled_func in memory so the ExecutionEngine
+            # (and its JIT code pages) stays alive across calls.  Without
+            # this, repeated calls with FLYDSL_RUNTIME_ENABLE_CACHE=0 would
+            # GC the old artifact, freeing GPU code while kernels may still
+            # be in flight — causing SIGSEGV.
+            self._mem_cache[cache_key] = compiled_func
 
             if use_cache:
-                self._mem_cache[cache_key] = compiled_func
                 if self.cache_manager and not env.debug.dump_ir:
                     str_key = self._cache_key_to_str(cache_key)
                     self.cache_manager.set(str_key, compiled_func)
@@ -833,20 +835,18 @@ class JitFunction:
             result = compiled_func(*jit_args)
 
             # Build CallState so subsequent calls skip DLPack.
-            # Only when caching is enabled -- otherwise compiled_func will be
-            # GC'd and the function pointer inside CallState becomes dangling,
-            # causing a SIGSEGV on the next call with the same cache_key.
-            if use_cache:
-                try:
-                    state = _build_call_state(
-                        sig,
-                        args_tuple,
-                        compiled_func._get_func_exe(),
-                    )
-                    if state is not None:
-                        self._call_state_cache[cache_key] = state
-                except Exception:
-                    pass
+            # compiled_func is now always retained in _mem_cache, so the
+            # function pointer inside CallState will not dangle.
+            try:
+                state = _build_call_state(
+                    sig, args_tuple,
+                    compiled_func._get_func_exe(),
+                )
+                if state is not None:
+                    self._call_state_cache[cache_key] = state
+            except Exception:
+                pass
+
 
             return result
 

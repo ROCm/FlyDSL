@@ -66,7 +66,6 @@ extern "C" void mgpuLaunchKernel(hipFunction_t function, intptr_t gridX,
                                             stream, params, extra));
 }
 
-
 extern "C" hipStream_t mgpuStreamCreate() {
   hipStream_t stream = nullptr;
   HIP_REPORT_IF_ERROR(hipStreamCreate(&stream));
