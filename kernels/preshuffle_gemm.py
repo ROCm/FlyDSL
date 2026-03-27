@@ -36,6 +36,97 @@ from kernels.mfma_preshuffle_pipeline import (
 from kernels.mfma_epilogues import mfma_epilog
 
 
+_TILE_PRELOAD_TABLE = {
+    # (tile_m, tile_n, tile_k): (dsrd_preload, dvmem_preload)
+    # ── tile_m = 16 ──
+    (16, 64, 256):  (2, 2),
+    (16, 64, 512):  (8, 8),
+    (16, 128, 256): (2, 2),
+    (16, 128, 512): (2, 2),
+    (16, 192, 256): (2, 2),
+    (16, 256, 256): (2, 2),
+    (16, 256, 512): (2, 2),
+    (16, 512, 256): (2, 2),
+    # ── tile_m = 32 ──
+    (32, 64, 128):  (6, 6),
+    (32, 64, 256):  (6, 6),
+    (32, 64, 512):  (2, 2),
+    (32, 128, 128): (6, 6),
+    (32, 128, 256): (6, 6),
+    (32, 192, 128): (6, 6),
+    (32, 192, 256): (6, 6),
+    (32, 256, 128): (6, 6),
+    (32, 256, 256): (6, 6),
+    # ── tile_m = 48 ──
+    (48, 64, 128):  (8, 8),
+    (48, 64, 256):  (2, 2),
+    (48, 128, 256): (6, 6),
+    (48, 192, 256): (6, 6),
+    (48, 256, 256): (6, 6),
+    # ── tile_m = 64 ──
+    (64, 64, 128):  (4, 4),
+    (64, 64, 256):  (4, 4),
+    (64, 128, 128): (8, 8),
+    (64, 128, 256): (8, 8),
+    (64, 192, 128): (8, 8),
+    (64, 192, 256): (8, 8),
+    (64, 256, 64):  (8, 8),
+    (64, 256, 128): (8, 8),
+    (64, 256, 256): (8, 8),
+    # ── tile_m = 80 ──
+    (80, 64, 256):  (4, 4),
+    (80, 128, 256): (8, 8),
+    (80, 192, 256): (8, 8),
+    (80, 256, 256): (8, 8),
+    # ── tile_m = 96 ──
+    (96, 64, 128):  (6, 6),
+    (96, 64, 256):  (6, 6),
+    (96, 128, 128): (8, 8),
+    (96, 128, 256): (6, 6),
+    (96, 192, 128): (8, 8),
+    (96, 192, 256): (8, 8),
+    (96, 256, 128): (8, 8),
+    (96, 256, 256): (8, 8),
+    # ── tile_m = 112 ──
+    (112, 64, 256):  (8, 8),
+    (112, 128, 256): (4, 4),
+    (112, 192, 256): (8, 8),
+    (112, 256, 256): (8, 8),
+    # ── tile_m = 128 ──
+    (128, 64, 128):  (6, 6),
+    (128, 64, 256):  (8, 8),
+    (128, 128, 64):  (4, 4),
+    (128, 128, 128): (8, 8),
+    (128, 128, 256): (4, 4),
+    (128, 192, 128): (8, 8),
+    (128, 192, 256): (8, 8),
+    (128, 256, 128): (6, 6),
+    (128, 256, 256): (4, 4),
+    # ── tile_m = 160 ──
+    (160, 192, 128): (8, 8),
+    # ── tile_m = 192 ──
+    (192, 64, 128):  (6, 6),
+    (192, 128, 128): (6, 6),
+    # ── tile_m = 224 ──
+    (224, 64, 128):  (4, 4),
+    (224, 128, 128): (6, 6),
+    (224, 192, 128): (6, 6),
+    # ── tile_m = 256 ──
+    (256, 64, 128):  (4, 4),
+    (256, 128, 128): (6, 6),
+    (256, 192, 128): (6, 6),
+    (256, 256, 128): (4, 4),
+}
+
+_TILE_PRELOAD_DEFAULT = (0, 0)
+
+
+def _get_preload(tile_m, tile_n, tile_k):
+    """Look up (dsrd_preload, dvmem_preload) from the tile table."""
+    return _TILE_PRELOAD_TABLE.get(
+        (int(tile_m), int(tile_n), int(tile_k)), _TILE_PRELOAD_DEFAULT)
+
+
 def compile_preshuffle_gemm_a8(
     *,
     M: int = 0,
@@ -50,8 +141,8 @@ def compile_preshuffle_gemm_a8(
     use_cshuffle_epilog: bool = False,
     waves_per_eu: Optional[int] = None,
     use_async_copy: bool = False,
-    dsrd_preload: int = 2,
-    dvmem_preload: int = 2
+    dsrd_preload: int = -1,
+    dvmem_preload: int = -1
 ):
     """Compile the preshuffle GEMM kernel using the @flyc.kernel API.
 
@@ -65,13 +156,18 @@ def compile_preshuffle_gemm_a8(
         out_dtype: Output element type, "fp16" or "bf16" (default: "fp16").
         waves_per_eu: Occupancy hint (None = default, 1-4 = limit occupancy).
         use_async_copy: Use async DMA for A tile global-to-LDS transfer.
-        dsrd_preload: Initial LDS-read preload count for the async-copy scheduler.
-        dvmem_preload: Initial global-load preload count for the async-copy scheduler.
+        dsrd_preload: Initial LDS-read preload count (-1 = auto from _TILE_PRELOAD_TABLE).
+        dvmem_preload: Initial global-load preload count (-1 = auto from _TILE_PRELOAD_TABLE).
     """
-    if dsrd_preload < 0:
-        raise ValueError(f"dsrd_preload must be >= 0, got {dsrd_preload!r}")
-    if dvmem_preload < 0:
-        raise ValueError(f"dvmem_preload must be >= 0, got {dvmem_preload!r}")
+    if dsrd_preload < 0 or dvmem_preload < 0:
+        if in_dtype in ("fp8", "int8") and str(get_hip_arch()) == "gfx950":
+            computed_dsrd, computed_dvmem = _get_preload(tile_m, tile_n, tile_k)
+        else:
+            computed_dsrd, computed_dvmem = _TILE_PRELOAD_DEFAULT
+        if dsrd_preload < 0:
+            dsrd_preload = computed_dsrd
+        if dvmem_preload < 0:
+            dvmem_preload = computed_dvmem
     if in_dtype not in ("fp8", "int8", "int4", "fp16", "bf16", "fp4"):
         raise ValueError(
             "in_dtype must be one of ('fp8','int8','int4','fp16','bf16','fp4'), "
@@ -970,8 +1066,14 @@ def compile_preshuffle_gemm_a8(
                 # print("mfma_total, dswr_tail, dstr_advance", mfma_total, dswr_tail, dstr_advance)
                 dsrd_preload_eff = min(int(dsrd_preload), num_ds_load)
                 dvmem_preload_eff = min(int(dvmem_preload), num_gmem_loads)
-                vmem_schedule = _build_scheduler(num_gmem_loads - dvmem_preload_eff, mfma_total)
-                dsrd_schedule = _build_scheduler(num_ds_load - dsrd_preload_eff, mfma_total)
+                vmem_remaining = num_gmem_loads - dvmem_preload_eff
+                dsrd_remaining = num_ds_load - dsrd_preload_eff
+                if vmem_remaining > 0 and vmem_remaining < mfma_total:
+                    vmem_schedule = (_build_scheduler(vmem_remaining, vmem_remaining)
+                                     + [0] * (mfma_total - vmem_remaining))
+                else:
+                    vmem_schedule = _build_scheduler(vmem_remaining, mfma_total)
+                dsrd_schedule = _build_scheduler(dsrd_remaining, mfma_total)
                 dswr_start = max(mfma_total - dswr_tail - dstr_advance, 0)
                 last_dsrd_mfma_idx = -1
                 for sched_idx in range_constexpr(mfma_total):
