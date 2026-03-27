@@ -9,6 +9,7 @@ import math
 import os
 import sys
 from typing import Tuple, Optional, List
+import flydsl.compiler as flyc
 
 import pytest
 import torch
@@ -523,24 +524,16 @@ def run_moe_stage1(
         use_cshuffle_epilog=False,
     )
 
+    def _s1_args(o, x, w, sx, sw, st, eids, sw_sorted):
+        return (o, x, w, sx, sw, st, eids, sw_sorted,
+                num_valid_ids, tokens, inter_dim, model_dim, int(blocks),
+                torch.cuda.current_stream())
+
+    compiled_exe = flyc.compile(exe, *_s1_args(out, x_q, w_kernel, scale_x_1d, scale_w1_1d,
+                                              sorted_token_ids, sorted_expert_ids, sorted_weights_1d))
+
     def launch(o, x, w, sx, sw, st, eids, sw_sorted):
-        stream = torch.cuda.current_stream()
-        exe(
-            o,
-            x,
-            w,
-            sx,
-            sw,
-            st,
-            eids,
-            sw_sorted,
-            num_valid_ids,
-            tokens,
-            inter_dim,
-            model_dim,
-            int(blocks),
-            stream,
-        )
+        compiled_exe(*_s1_args(o, x, w, sx, sw, st, eids, sw_sorted))
 
     _, us = run_perftest(
         launch,
@@ -989,48 +982,33 @@ def run_moe_stage2(
     )
     is_reduce_exe = (getattr(exe, "mode", None) == MoeGemm2Mode.REDUCE) or bool(use_reduce)
 
+    def _s2_args_atomic(o, x, w, sx, sw, st, eids, sw_sorted):
+        return (o, x, w, sx, sw, st, eids, sw_sorted,
+                num_valid_ids, tokens, model_dim, inter_dim, int(blocks),
+                torch.cuda.current_stream())
+
+    # In reduce mode, exe is a _MoeGemm2ReduceWrapper (not a JitFunction),
+    # so flyc.compile is not applicable.  The wrapper internally dispatches
+    # to two separate JitFunctions (gemm2 + reduce).
+    if not is_reduce_exe:
+        compiled_exe = flyc.compile(exe, *_s2_args_atomic(
+            out_perf, a2_q.view(-1), w2_kernel.view(-1),
+            a2_scale_1d, w2_scale_1d, sorted_token_ids,
+            sorted_expert_ids, sorted_weights_1d))
+
     def launch(o, x, w, sx, sw, st, eids, sw_sorted):
-        stream = torch.cuda.current_stream()
-        valid_mask = None
-        if is_reduce_exe and bool(use_valid_mask):
-            # Default: non-EP (all ones). EP mode can be emulated by passing expert_mask.
-            valid_mask = get_topk_valid_mask(topk_ids, expert_mask=None).contiguous()
         if is_reduce_exe:
+            stream = torch.cuda.current_stream()
+            valid_mask = None
+            if bool(use_valid_mask):
+                valid_mask = get_topk_valid_mask(topk_ids, expert_mask=None).contiguous()
             exe(
-                o,
-                x,
-                w,
-                sx,
-                sw,
-                st,
-                eids,
-                sw_sorted,
-                num_valid_ids,
-                tokens,
-                model_dim,
-                inter_dim,
-                int(blocks),
-                valid_mask,
-                stream,
+                o, x, w, sx, sw, st, eids, sw_sorted,
+                num_valid_ids, tokens, model_dim, inter_dim, int(blocks),
+                valid_mask, stream,
             )
         else:
-            # Atomic mode does not take valid_mask.
-            exe(
-                o,
-                x,
-                w,
-                sx,
-                sw,
-                st,
-                eids,
-                sw_sorted,
-                num_valid_ids,
-                tokens,
-                model_dim,
-                inter_dim,
-                int(blocks),
-                stream,
-            )
+            compiled_exe(*_s2_args_atomic(o, x, w, sx, sw, st, eids, sw_sorted))
  
     # NOTE: stage2 uses atomic-add into `out`, so we cannot reuse the same output buffer
     # across perf iterations for correctness. Time into a dedicated buffer, then run
