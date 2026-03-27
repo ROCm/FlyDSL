@@ -262,7 +262,7 @@ Type CoordTensorType::parse(AsmParser &parser) {
 void CoordTensorType::print(AsmPrinter &printer) const {
   printer << "<";
   printer.printStrippedAttrOrType(getBase());
-  printer << ",";
+  printer << ", ";
   Attribute layoutAttr = getLayout();
   if (auto layout = dyn_cast<LayoutAttr>(layoutAttr))
     printer.printStrippedAttrOrType(layout);
@@ -306,11 +306,11 @@ static LogicalResult parseAlignAndSwizzle(AsmParser &parser, Type elemTy, AlignA
 static void printAlignAndSwizzle(AsmPrinter &printer, Type elemTy, AlignAttr alignment,
                                  SwizzleAttr swizzle, MLIRContext *ctx) {
   if (alignment != AlignAttr::getTrivialAlignment(elemTy)) {
-    printer << ",";
+    printer << ", ";
     printer.printStrippedAttrOrType(alignment);
   }
   if (swizzle != SwizzleAttr::getTrivialSwizzle(ctx)) {
-    printer << ",";
+    printer << ", ";
     printer.printStrippedAttrOrType(swizzle);
   }
 }
@@ -332,7 +332,7 @@ Type PointerType::parse(AsmParser &parser) {
 }
 
 void PointerType::print(AsmPrinter &printer) const {
-  printer << "<" << getElemTy() << ",";
+  printer << "<" << getElemTy() << ", ";
   printer.printStrippedAttrOrType(getAddressSpace());
   printAlignAndSwizzle(printer, getElemTy(), getAlignment(), getSwizzle(), getContext());
   printer << ">";
@@ -360,7 +360,7 @@ Type MemRefType::parse(AsmParser &parser) {
 }
 
 void MemRefType::print(AsmPrinter &printer) const {
-  printer << "<" << getElemTy() << ",";
+  printer << "<" << getElemTy() << ", ";
   printer.printStrippedAttrOrType(getAddressSpace());
   printer << ", ";
   Attribute layoutAttr = getLayout();

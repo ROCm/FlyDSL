@@ -60,7 +60,7 @@ func.func @test_get_layout(%ptr: !fly.ptr<f32, global>) -> !fly.layout<(4,8):(1,
 
 // get_iter forwards the iterator (ptr) from make_view; all Fly ops are eliminated.
 // CHECK-LABEL: @test_get_iter
-// CHECK-SAME: (%[[PTR:.*]]: !fly.ptr<f32,global>)
+// CHECK-SAME: (%[[PTR:.*]]: !fly.ptr<f32, global>)
 func.func @test_get_iter(%ptr: !fly.ptr<f32, global>) -> !fly.ptr<f32, global> {
   %s = fly.make_int_tuple() : () -> !fly.int_tuple<(4, 8)>
   %d = fly.make_int_tuple() : () -> !fly.int_tuple<(1, 4)>
