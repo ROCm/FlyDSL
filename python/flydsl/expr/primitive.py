@@ -655,19 +655,11 @@ def mma_make_fragment(operand_id, tiled_mma, input, loc=None, ip=None):
 
 @traced_op
 def copy(copy_atom, src, dst, *, pred=None, loc=None, ip=None):
-    from .derived import ThrCopy
-
-    if isinstance(copy_atom, ThrCopy):
-        copy_atom = copy_atom.tiled_copy
     return fly.copy(copy_atom, src, dst, pred=pred, loc=loc, ip=ip)
 
 
 @traced_op
 def gemm(mma_atom, d, a, b, c, loc=None, ip=None):
-    from .derived import ThrMma
-
-    if isinstance(mma_atom, ThrMma):
-        mma_atom = mma_atom.tiled_mma
     return fly.gemm(mma_atom, d, a, b, c, loc=loc, ip=ip)
 
 

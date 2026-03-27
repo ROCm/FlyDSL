@@ -297,7 +297,11 @@ class Layout(BuiltinDslType):
         from .._mlir.dialects.fly import has_none
         from .primitive import crd2idx, make_int_tuple, slice
 
-        coord = make_int_tuple(indices)
+        if isinstance(indices, IntTuple):
+            coord = indices
+        else:
+            coord = make_int_tuple(indices)
+
         if has_none(coord):
             return slice(self, coord)
         else:
@@ -343,7 +347,11 @@ class Tensor(BuiltinDslType):
         from .._mlir.dialects.fly import has_none
         from .primitive import make_int_tuple, memref_load, slice
 
-        coord = make_int_tuple(indices)
+        if isinstance(indices, IntTuple):
+            coord = indices
+        else:
+            coord = make_int_tuple(indices)
+
         if has_none(coord):
             return slice(self, coord)
         else:
