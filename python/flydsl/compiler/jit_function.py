@@ -600,6 +600,7 @@ class JitFunction:
         self._call_state_cache = {}  # cache_key -> CallState
         self._sig = None  # lazy: set on first call
         self._mem_cache = {}
+        self._last_compiled = None  # (cache_key, CompiledArtifact) for compile()
 
     def _ensure_sig(self):
         """Initialize signature + param metadata on first call (not at decoration time)."""
@@ -794,6 +795,10 @@ class JitFunction:
                 original_ir,
             )
 
+            # Always keep a reference to the latest compilation result so
+            # flyc.compile() can retrieve it even when caching is disabled.
+            self._last_compiled = (cache_key, compiled_func)
+
             if use_cache:
                 self._mem_cache[cache_key] = compiled_func
                 if self.cache_manager and not env.debug.dump_ir:
@@ -836,3 +841,89 @@ def jit(func: Optional[Callable] = None) -> JitFunction:
     if func is None:
         return lambda f: JitFunction(f)
     return JitFunction(func)
+
+
+class CompiledFunction:
+    """Pre-compiled callable returned by ``flyc.compile()``.
+
+    All MLIR compilation, signature analysis, and argument metadata resolution
+    happen once at ``compile()`` time.  The ``__call__`` hot path does only:
+
+    1. Update pre-allocated ctypes storage (data_ptr / scalar extraction)
+    2. Invoke the JIT'd C function pointer
+
+    No ``inspect.Signature.bind``, no ``_make_cache_key``, no cache lookup.
+    Accepts **positional arguments only** (same count and order as the
+    original ``@flyc.jit`` function).
+    """
+
+    __slots__ = ("_call_state", "_keepalive")
+
+    def __init__(self, call_state, keepalive):
+        self._call_state = call_state
+        self._keepalive = keepalive  # prevent GC of CompiledArtifact / ExecutionEngine
+
+    def __call__(self, *args):
+        return self._call_state(args)
+
+
+def compile(func, *args) -> CompiledFunction:
+    """Pre-compile a ``@flyc.jit`` function, returning a fast callable.
+
+    Usage::
+
+        compiled_fn = flyc.compile(launch_gemm, c, a, b, sa, sb, M, N, stream)
+
+        # Hot loop — minimal dispatch overhead (~5 µs):
+        for ...:
+            compiled_fn(c, a, b, sa, sb, M, N, stream)
+
+    All arguments (including ``stream``) must be **positional**.
+    The returned :class:`CompiledFunction` also accepts only positional args.
+
+    Constexpr values are baked in at compile time and ignored on subsequent
+    calls; only runtime values (data pointers, scalars, stream) may change.
+    """
+    if not isinstance(func, JitFunction):
+        raise TypeError(
+            f"flyc.compile() expects a @flyc.jit function, got {type(func).__name__}"
+        )
+
+    jf = func
+
+    # Trigger compilation through the normal JitFunction path.
+    jf(*args)
+
+    # Retrieve the CallState (already built by __call__ above).
+    sig = jf._sig  # guaranteed initialized after __call__
+    bound = sig.bind(*args)
+    bound.apply_defaults()
+    cache_key = jf._make_cache_key(bound.arguments)
+    args_tuple = tuple(bound.arguments.values())
+
+    # Look up the CompiledArtifact.  We must hold a direct reference to it
+    # because it owns the ExecutionEngine and GPU code objects — if it gets
+    # GC'd, the function pointer inside CallState becomes dangling.
+    artifact = jf._mem_cache.get(cache_key)
+    if artifact is None:
+        # Cache disabled — retrieve from _last_compiled (set unconditionally
+        # by __call__).  This does not alter __call__'s caching semantics.
+        last = jf._last_compiled
+        if last is not None and last[0] == cache_key:
+            artifact = last[1]
+    if artifact is None:
+        raise RuntimeError(
+            "flyc.compile(): compilation succeeded but no cached artifact found."
+        )
+
+    call_state = jf._call_state_cache.get(cache_key)
+    if call_state is None:
+        call_state = _build_call_state(sig, args_tuple, artifact._get_func_exe())
+    if call_state is None:
+        raise RuntimeError(
+            "flyc.compile(): failed to build CallState.  "
+            "One or more argument types do not support the fast dispatch path "
+            "(missing _reusable_slot_spec)."
+        )
+
+    return CompiledFunction(call_state, artifact)
