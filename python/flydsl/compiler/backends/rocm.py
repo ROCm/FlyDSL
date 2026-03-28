@@ -72,7 +72,6 @@ class RocmBackend(BaseBackend):
     def native_lib_patterns(self) -> List[str]:
         return [
             "_mlirDialectsFly*.so",
-            "_mlirDialectsFlyROCDL*.so",
             "libFly*.so",
             "libfly_jit_runtime.so",
             "libmlir_rocm_runtime.so",
