@@ -22,6 +22,7 @@ import torch
 # -----------------------------------------------------------------------------
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 _PYTHON_CANDIDATES = [
+    os.path.join(_REPO_ROOT, "python"),
     os.path.join(_REPO_ROOT, "build", "python_packages"),
     _REPO_ROOT,
 ]
@@ -577,11 +578,14 @@ def run_moe_stage1(
                     tokens, inter_dim * 2, model_dim, int(blocks),
                     torch.cuda.current_stream())
 
-        compiled_exe = flyc.compile(exe, *_s1_args_fp4(out, x_q, w_kernel, scale_x_1d, scale_w1_1d,
-                                                       sorted_token_ids, sorted_expert_ids, sorted_weights_1d))
-
-        def launch(o, x, w, sx, sw, st, eids, sw_sorted):
-            compiled_exe(*_s1_args_fp4(o, x, w, sx, sw, st, eids, sw_sorted))
+        if hasattr(flyc, 'compile'):
+            compiled_exe = flyc.compile(exe, *_s1_args_fp4(out, x_q, w_kernel, scale_x_1d, scale_w1_1d,
+                                                           sorted_token_ids, sorted_expert_ids, sorted_weights_1d))
+            def launch(o, x, w, sx, sw, st, eids, sw_sorted):
+                compiled_exe(*_s1_args_fp4(o, x, w, sx, sw, st, eids, sw_sorted))
+        else:
+            def launch(o, x, w, sx, sw, st, eids, sw_sorted):
+                exe(*_s1_args_fp4(o, x, w, sx, sw, st, eids, sw_sorted))
     else:
         exe = compile_moe_gemm1(
             model_dim=model_dim,
@@ -602,11 +606,14 @@ def run_moe_stage1(
                     num_valid_ids, tokens, inter_dim, model_dim, int(blocks),
                     torch.cuda.current_stream())
 
-        compiled_exe = flyc.compile(exe, *_s1_args(out, x_q, w_kernel, scale_x_1d, scale_w1_1d,
-                                                  sorted_token_ids, sorted_expert_ids, sorted_weights_1d))
-
-        def launch(o, x, w, sx, sw, st, eids, sw_sorted):
-            compiled_exe(*_s1_args(o, x, w, sx, sw, st, eids, sw_sorted))
+        if hasattr(flyc, 'compile'):
+            compiled_exe = flyc.compile(exe, *_s1_args(out, x_q, w_kernel, scale_x_1d, scale_w1_1d,
+                                                      sorted_token_ids, sorted_expert_ids, sorted_weights_1d))
+            def launch(o, x, w, sx, sw, st, eids, sw_sorted):
+                compiled_exe(*_s1_args(o, x, w, sx, sw, st, eids, sw_sorted))
+        else:
+            def launch(o, x, w, sx, sw, st, eids, sw_sorted):
+                exe(*_s1_args(o, x, w, sx, sw, st, eids, sw_sorted))
 
     _, us = run_perftest(
         launch,
@@ -1127,34 +1134,49 @@ def run_moe_stage2(
                         num_valid_ids, bias_dummy, tokens, model_dim, inter_dim, int(blocks),
                         torch.cuda.current_stream())
 
-            _dummy_interm = torch.empty(tokens * topk, model_dim, device=device, dtype=torch.float16)
-            compiled_exe = flyc.compile(exe, *_s2_args_fp4_interm(
-                _dummy_interm, a2_q.view(-1), w2_kernel.view(-1),
-                a2_scale_1d, w2_scale_1d, sorted_token_ids,
-                sorted_expert_ids, sorted_weights_1d))
+            if hasattr(flyc, 'compile'):
+                _dummy_interm = torch.empty(tokens * topk, model_dim, device=device, dtype=torch.float16)
+                compiled_exe = flyc.compile(exe, *_s2_args_fp4_interm(
+                    _dummy_interm, a2_q.view(-1), w2_kernel.view(-1),
+                    a2_scale_1d, w2_scale_1d, sorted_token_ids,
+                    sorted_expert_ids, sorted_weights_1d))
 
-            def launch(o, x, w, sx, sw, st, eids, sw_sorted):
-                stream = torch.cuda.current_stream()
-                intermediate = torch.empty(
-                    tokens * topk, model_dim, device=device, dtype=torch.float16
-                )
-                compiled_exe(*_s2_args_fp4_interm(intermediate, x, w, sx, sw, st, eids, sw_sorted))
-                X = intermediate.view(tokens, topk, model_dim)
-                Y = o.view(tokens, model_dim)
-                reduce_exe(X, Y, dummy_mask, tokens, stream)
+                def launch(o, x, w, sx, sw, st, eids, sw_sorted):
+                    stream = torch.cuda.current_stream()
+                    intermediate = torch.empty(
+                        tokens * topk, model_dim, device=device, dtype=torch.float16
+                    )
+                    compiled_exe(*_s2_args_fp4_interm(intermediate, x, w, sx, sw, st, eids, sw_sorted))
+                    X = intermediate.view(tokens, topk, model_dim)
+                    Y = o.view(tokens, model_dim)
+                    reduce_exe(X, Y, dummy_mask, tokens, stream)
+            else:
+                def launch(o, x, w, sx, sw, st, eids, sw_sorted):
+                    stream = torch.cuda.current_stream()
+                    intermediate = torch.empty(
+                        tokens * topk, model_dim, device=device, dtype=torch.float16
+                    )
+                    exe(*_s2_args_fp4_interm(intermediate, x, w, sx, sw, st, eids, sw_sorted))
+                    X = intermediate.view(tokens, topk, model_dim)
+                    Y = o.view(tokens, model_dim)
+                    reduce_exe(X, Y, dummy_mask, tokens, stream)
         else:
             def _s2_args_fp4(o, x, w, sx, sw, st, eids, sw_sorted):
                 return (o, x, w, sx, sw, st, eids, sw_sorted,
                         num_valid_ids, bias_dummy, tokens, model_dim, inter_dim, int(blocks),
                         torch.cuda.current_stream())
 
-            compiled_exe = flyc.compile(exe, *_s2_args_fp4(
-                out_perf, a2_q.view(-1), w2_kernel.view(-1),
-                a2_scale_1d, w2_scale_1d, sorted_token_ids,
-                sorted_expert_ids, sorted_weights_1d))
+            if hasattr(flyc, 'compile'):
+                compiled_exe = flyc.compile(exe, *_s2_args_fp4(
+                    out_perf, a2_q.view(-1), w2_kernel.view(-1),
+                    a2_scale_1d, w2_scale_1d, sorted_token_ids,
+                    sorted_expert_ids, sorted_weights_1d))
 
-            def launch(o, x, w, sx, sw, st, eids, sw_sorted):
-                compiled_exe(*_s2_args_fp4(o, x, w, sx, sw, st, eids, sw_sorted))
+                def launch(o, x, w, sx, sw, st, eids, sw_sorted):
+                    compiled_exe(*_s2_args_fp4(o, x, w, sx, sw, st, eids, sw_sorted))
+            else:
+                def launch(o, x, w, sx, sw, st, eids, sw_sorted):
+                    exe(*_s2_args_fp4(o, x, w, sx, sw, st, eids, sw_sorted))
     else:
         exe = compile_fn(
             model_dim=model_dim,
@@ -1180,11 +1202,13 @@ def run_moe_stage2(
         # In reduce mode, exe is a _MoeGemm2ReduceWrapper (not a JitFunction),
         # so flyc.compile is not applicable.  The wrapper internally dispatches
         # to two separate JitFunctions (gemm2 + reduce).
-        if not is_reduce_exe:
+        if not is_reduce_exe and hasattr(flyc, 'compile'):
             compiled_exe = flyc.compile(exe, *_s2_args_atomic(
                 out_perf, a2_q.view(-1), w2_kernel.view(-1),
                 a2_scale_1d, w2_scale_1d, sorted_token_ids,
                 sorted_expert_ids, sorted_weights_1d))
+        elif not is_reduce_exe:
+            compiled_exe = exe
 
         def launch(o, x, w, sx, sw, st, eids, sw_sorted):
             if is_reduce_exe:
@@ -1198,7 +1222,10 @@ def run_moe_stage2(
                     valid_mask, stream,
                 )
             else:
-                compiled_exe(*_s2_args_atomic(o, x, w, sx, sw, st, eids, sw_sorted))
+                if hasattr(flyc, 'compile'):
+                    compiled_exe(*_s2_args_atomic(o, x, w, sx, sw, st, eids, sw_sorted))
+                else:
+                    exe(*_s2_args_atomic(o, x, w, sx, sw, st, eids, sw_sorted))
  
     # NOTE: stage2 uses atomic-add into `out`, so we cannot reuse the same output buffer
     # across perf iterations for correctness. Time into a dedicated buffer, then run
@@ -1379,9 +1406,9 @@ def run_moe_stage2(
         pytest.param(333, 4096, 2048, 17, 9, 64, 128, 128, 256, 128, False, id="L", marks=pytest.mark.large_shape),
         # FP4-compatible shape (model_dim >= 256, tile_k >= 256, tile_k2 >= 256).
         # NOTE: To fit within GPU memory during tests, we reduce batch sizes and sequence lengths
-        pytest.param(64, 512, 256, 4, 2, 32, 128, 256, 128, 256, False, id="FP4-S"),
-        pytest.param(128, 1024, 256, 8, 2, 64, 128, 256, 256, 256, False, id="FP4-M"),
-        pytest.param(256, 1024, 256, 8, 2, 128, 128, 256, 256, 256, False, id="FP4-L", marks=pytest.mark.large_shape),
+        pytest.param(64, 512, 256, 4, 2, 32, 128, 256, 128, 256, False, id="FP4-S", marks=pytest.mark.skipif("gfx95" not in ARCH, reason="FP4 shape requires gfx950+")),
+        pytest.param(128, 1024, 256, 8, 2, 64, 128, 256, 256, 256, False, id="FP4-M", marks=pytest.mark.skipif("gfx95" not in ARCH, reason="FP4 shape requires gfx950+")),
+        pytest.param(256, 1024, 256, 8, 2, 128, 128, 256, 256, 256, False, id="FP4-L", marks=[pytest.mark.large_shape, pytest.mark.skipif("gfx95" not in ARCH, reason="FP4 shape requires gfx950+")]),
     ],
 )
 @pytest.mark.parametrize("in_dtype", [
@@ -1744,9 +1771,9 @@ class _TorchReduceWrapper:
         pytest.param(1, 5120, 1536, 16, 6, 16, 128, 256, id="EP-K6-decode-bs1"),
         pytest.param(8, 5120, 1536, 16, 6, 64, 128, 128, id="EP-K6-decode-bs8"),
         # FP4-compatible shapes (inter_dim >= 256, tile_k >= 256)
-        pytest.param(128, 1024, 256, 8, 2, 32, 256, 256, id="FP4-bench-S"),
-        pytest.param(512, 4096, 256, 32, 8, 64, 256, 256, id="FP4-bench-M", marks=pytest.mark.large_shape),
-        pytest.param(1024, 4096, 256, 32, 8, 128, 256, 256, id="FP4-bench-L", marks=pytest.mark.large_shape),
+        pytest.param(128, 1024, 256, 8, 2, 32, 256, 256, id="FP4-bench-S", marks=pytest.mark.skipif("gfx95" not in ARCH, reason="FP4 shape requires gfx950+")),
+        pytest.param(512, 4096, 256, 32, 8, 64, 256, 256, id="FP4-bench-M", marks=[pytest.mark.large_shape, pytest.mark.skipif("gfx95" not in ARCH, reason="FP4 shape requires gfx950+")]),
+        pytest.param(1024, 4096, 256, 32, 8, 128, 256, 256, id="FP4-bench-L", marks=[pytest.mark.large_shape, pytest.mark.skipif("gfx95" not in ARCH, reason="FP4 shape requires gfx950+")]),
     ],
 )
 @pytest.mark.parametrize("in_dtype", [
