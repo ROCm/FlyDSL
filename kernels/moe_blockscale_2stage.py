@@ -742,6 +742,10 @@ def compile_moe_blockscale_gemm1(
                                 s_a_v4 = s_a_vec4_list[mi]
                                 for ni in range_constexpr(num_acc_n):
                                     acc_idx = mi * num_acc_n + ni
+                                    s_wg_bc = vector.broadcast(T.f32x4, s_w_gate_vals[ni])
+                                    s_wu_bc = vector.broadcast(T.f32x4, s_w_up_vals[ni])
+                                    scale_g = ArithValue(s_a_v4) * ArithValue(s_wg_bc)
+                                    scale_u = ArithValue(s_a_v4) * ArithValue(s_wu_bc)
                                     bg128 = _pack128(bg0_p0[ni], bg0_p1[ni], bg1_p0[ni], bg1_p1[ni])
                                     bu128 = _pack128(bu0_p0[ni], bu0_p1[ni], bu1_p0[ni], bu1_p1[ni])
                                     blk_g = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
@@ -752,14 +756,10 @@ def compile_moe_blockscale_gemm1(
                                         mfma_res_ty,
                                         [a128, bu128, acc_init,
                                          0, 0, 0, 0x7F7F7F7F, 0, 0x7F7F7F7F])
-                                    tmp_g = ArithValue(blk_g) * ArithValue(s_a_v4)
-                                    tmp_u = ArithValue(blk_u) * ArithValue(s_a_v4)
-                                    s_wg_bc = vector.broadcast(T.f32x4, s_w_gate_vals[ni])
-                                    s_wu_bc = vector.broadcast(T.f32x4, s_w_up_vals[ni])
                                     current_gate[acc_idx] = math_dialect.fma(
-                                        tmp_g, s_wg_bc, current_gate[acc_idx])
+                                        blk_g, scale_g, current_gate[acc_idx])
                                     current_up[acc_idx] = math_dialect.fma(
-                                        tmp_u, s_wu_bc, current_up[acc_idx])
+                                        blk_u, scale_u, current_up[acc_idx])
                     else:
                         mfma_fn = (
                             mfma_i32_k32
@@ -788,6 +788,10 @@ def compile_moe_blockscale_gemm1(
                                 s_a_v4 = s_a_vec4_list[mi]
                                 for ni in range_constexpr(num_acc_n):
                                     acc_idx = mi * num_acc_n + ni
+                                    s_wg_bc = vector.broadcast(T.f32x4, s_w_gate_vals[ni])
+                                    s_wu_bc = vector.broadcast(T.f32x4, s_w_up_vals[ni])
+                                    scale_g = ArithValue(s_a_v4) * ArithValue(s_wg_bc)
+                                    scale_u = ArithValue(s_a_v4) * ArithValue(s_wu_bc)
                                     blk_g = acc_init
                                     blk_u = acc_init
                                     for ku_local in range_constexpr(ku_per_sb_s1):
@@ -802,14 +806,10 @@ def compile_moe_blockscale_gemm1(
                                             a0, a1 = lds_load_packs_k64(row_a_lds + arith.index(mi * 16), col_base, lds_base)
                                         blk_g = mfma_k64(blk_g, a0, a1, b_gate_packs0[ni], b_gate_packs1[ni])
                                         blk_u = mfma_k64(blk_u, a0, a1, b_up_packs0[ni], b_up_packs1[ni])
-                                    tmp_g = ArithValue(blk_g) * ArithValue(s_a_v4)
-                                    tmp_u = ArithValue(blk_u) * ArithValue(s_a_v4)
-                                    s_wg_bc = vector.broadcast(T.f32x4, s_w_gate_vals[ni])
-                                    s_wu_bc = vector.broadcast(T.f32x4, s_w_up_vals[ni])
                                     current_gate[acc_idx] = math_dialect.fma(
-                                        tmp_g, s_wg_bc, current_gate[acc_idx])
+                                        blk_g, scale_g, current_gate[acc_idx])
                                     current_up[acc_idx] = math_dialect.fma(
-                                        tmp_u, s_wu_bc, current_up[acc_idx])
+                                        blk_u, scale_u, current_up[acc_idx])
                     return current_gate, current_up
 
                 def compute_tile(
@@ -1888,15 +1888,15 @@ def compile_moe_blockscale_gemm2(
                                 s_a_v4 = s_a_vec4_list[mi]
                                 for ni in range_constexpr(num_acc_n):
                                     acc_idx = mi * num_acc_n + ni
+                                    s_w_bc = vector.broadcast(T.f32x4, s_w_vals[ni])
+                                    scale = ArithValue(s_a_v4) * ArithValue(s_w_bc)
                                     b128 = _pack128(b0_p0[ni], b0_p1[ni], b1_p0[ni], b1_p1[ni])
                                     blk = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
                                         mfma_res_ty,
                                         [a128, b128, acc_init,
                                          0, 0, 0, 0x7F7F7F7F, 0, 0x7F7F7F7F])
-                                    tmp = ArithValue(blk) * ArithValue(s_a_v4)
-                                    s_w_bc = vector.broadcast(T.f32x4, s_w_vals[ni])
                                     current_acc[acc_idx] = math_dialect.fma(
-                                        tmp, s_w_bc, current_acc[acc_idx])
+                                        blk, scale, current_acc[acc_idx])
                     else:
                         mfma_fn = (
                             mfma_i32_k32
@@ -1924,6 +1924,8 @@ def compile_moe_blockscale_gemm2(
                             for mi in range_constexpr(m_repeat):
                                 for ni in range_constexpr(num_acc_n):
                                     acc_idx = mi * num_acc_n + ni
+                                    s_w_bc = vector.broadcast(T.f32x4, s_w_vals[ni])
+                                    scale = ArithValue(s_a_vec4_list[mi]) * ArithValue(s_w_bc)
                                     blk = acc_init
                                     for ku_local in range_constexpr(ku_per_sb_s2):
                                         ku = sb * ku_per_sb_s2 + ku_local
@@ -1935,10 +1937,8 @@ def compile_moe_blockscale_gemm2(
                                         else:
                                             a0, a1 = lds_load_packs_k64(row_a_lds + arith.index(mi * 16), col_base, lds_base)
                                         blk = mfma_k64(blk, a0, a1, b_packs0[ni], b_packs1[ni])
-                                    tmp = ArithValue(blk) * ArithValue(s_a_vec4_list[mi])
-                                    s_w_bc = vector.broadcast(T.f32x4, s_w_vals[ni])
                                     current_acc[acc_idx] = math_dialect.fma(
-                                        tmp, s_w_bc, current_acc[acc_idx])
+                                        blk, scale, current_acc[acc_idx])
                     return current_acc
 
                 def compute_tile(acc_in, b_tile_in, lds_base, *, prefetch_epilogue: bool = False, a0_prefetch=None):
