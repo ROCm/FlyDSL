@@ -39,7 +39,7 @@ def _flydsl_key() -> str:
     Covers:
       1. All Python source files under flydsl.compiler.*, flydsl.expr.*,
          flydsl.runtime.*, flydsl.utils.*
-      2. Native shared libraries (_fly*.so, libFly*.so, libfly_jit_runtime.so,
+      2. Native shared libraries (_mlirDialectsFly*.so, libFly*.so, libfly_jit_runtime.so,
          libmlir_rocm_runtime.so)
       3. flydsl.__version__
 

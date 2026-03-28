@@ -529,7 +529,7 @@ struct PyTiledMmaType : PyConcreteType<PyTiledMmaType> {
 // Module definition
 // =============================================================================
 
-NB_MODULE(_fly, m) {
+NB_MODULE(_mlirDialectsFly, m) {
   m.doc() = "MLIR Python FlyDSL Extension";
 
   // -------------------------------------------------------------------------

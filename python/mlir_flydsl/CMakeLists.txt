@@ -29,11 +29,11 @@ declare_mlir_dialect_python_bindings(
 # These symbols are already provided by FlyPythonCAPI.so (via MLIRCPIFly's transitive
 # dependencies in EMBED_CAPI_LINK_LIBS). Statically linking them here creates DUPLICATE
 # TypeID static variables, causing "storage uniquer isn't initialized" errors at runtime.
-# The COMMON_CAPI_LINK_LIBS FlyPythonCAPI in add_mlir_python_modules ensures _fly.so
+# The COMMON_CAPI_LINK_LIBS FlyPythonCAPI in add_mlir_python_modules ensures _mlirDialectsFly.so
 # links to FlyPythonCAPI.so, which provides all needed symbols.
 
 declare_mlir_python_extension(FlyPythonSources.Core.fly
-  MODULE_NAME _fly
+  MODULE_NAME _mlirDialectsFly
   ADD_TO_PARENT FlyPythonSources
   ROOT_DIR "${PROJECT_SOURCE_DIR}/lib/Bindings/Python"
   PYTHON_BINDINGS_LIBRARY nanobind
@@ -45,7 +45,7 @@ declare_mlir_python_extension(FlyPythonSources.Core.fly
 )
 
 declare_mlir_python_extension(FlyPythonSources.Core.fly_rocdl
-  MODULE_NAME _fly_rocdl
+  MODULE_NAME _mlirDialectsFlyROCDL
   ADD_TO_PARENT FlyPythonSources
   ROOT_DIR "${PROJECT_SOURCE_DIR}/lib/Bindings/Python"
   PYTHON_BINDINGS_LIBRARY nanobind
@@ -123,7 +123,7 @@ add_mlir_python_common_capi_library(FlyPythonCAPI
 #   1. -fvisibility=hidden  — hide symbols compiled by FlyDSL itself
 #   2. Version script       — controls the FINAL exported symbol set:
 #                             exports mlir C API + mlir:: C++ symbols
-#                             (needed by _fly.so, _mlir.so, etc.),
+#                             (needed by _mlirDialectsFly.so, _mlir.so, etc.),
 #                             hides everything else (llvm::, LLVM C API).
 #
 # NOTE: Triton uses --exclude-libs,ALL because it ships a single
@@ -176,8 +176,8 @@ add_custom_command(
     '${Python3_EXECUTABLE}' -m nanobind.stubgen \
       -q -r \
       -m flydsl._mlir._mlir_libs._mlir \
-      -m flydsl._mlir._mlir_libs._fly \
-      -m flydsl._mlir._mlir_libs._fly_rocdl \
+      -m flydsl._mlir._mlir_libs._mlirDialectsFly \
+      -m flydsl._mlir._mlir_libs._mlirDialectsFlyROCDL \
       -m flydsl._mlir._mlir_libs._mlirDialectsGPU \
       -m flydsl._mlir._mlir_libs._mlirDialectsLLVM \
       -O '${_MLIR_LIBS_DIR}' \
