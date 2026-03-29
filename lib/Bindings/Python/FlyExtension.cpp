@@ -10,14 +10,14 @@
 #include "mlir/Bindings/Python/NanobindAdaptors.h"
 #include "mlir/CAPI/IR.h"
 #include "mlir/CAPI/Wrap.h"
-
-#include <mlir/IR/BuiltinAttributes.h>
-#include <mlir/IR/BuiltinTypes.h>
-#include <mlir/IR/MLIRContext.h>
-#include <mlir/IR/Value.h>
+#include "mlir/IR/BuiltinAttributes.h"
+#include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/MLIRContext.h"
+#include "mlir/IR/Value.h"
 
 #include "flydsl-c/FlyDialect.h"
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
+#include "flydsl/Dialect/Fly/Utils/IntTupleUtils.h"
 #include "flydsl/Dialect/Fly/Utils/IntUtils.h"
 
 #include "DLTensorAdaptor.h"
@@ -91,6 +91,14 @@ int32_t depth(MlirValue int_or_tuple) {
   if (auto t = ::mlir::dyn_cast<::mlir::fly::MemRefType>(ty))
     return ::mlir::cast<::mlir::fly::NestedAttrInterface>(t.getLayout()).depth();
   throw std::invalid_argument("Unsupported type for depth()");
+}
+
+bool has_none(MlirValue int_or_tuple) {
+  ::mlir::Value val = unwrap(int_or_tuple);
+  ::mlir::Type ty = val.getType();
+  if (auto t = ::mlir::dyn_cast<::mlir::fly::IntTupleType>(ty))
+    return ::mlir::fly::intTupleHasNone(t.getAttr());
+  throw std::invalid_argument("has_none() expected IntTupleType");
 }
 
 /// Convert nb::handle (Python int|tuple|IntTupleType) to IntTupleAttr.
@@ -580,6 +588,8 @@ NB_MODULE(_mlirDialectsFly, m) {
         nb::sig("def rank(int_or_tuple: " MAKE_MLIR_PYTHON_QUALNAME("ir.Value") ") -> int"));
   m.def("depth", &depth, "int_or_tuple"_a,
         nb::sig("def depth(int_or_tuple: " MAKE_MLIR_PYTHON_QUALNAME("ir.Value") ") -> int"));
+  m.def("has_none", &has_none, "int_or_tuple"_a,
+        nb::sig("def has_none(int_or_tuple: " MAKE_MLIR_PYTHON_QUALNAME("ir.Value") ") -> bool"));
 
   // -------------------------------------------------------------------------
   // Bind Fly dialect types (PyConcreteType pattern)
