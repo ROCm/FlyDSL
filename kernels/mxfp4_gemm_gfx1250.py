@@ -486,42 +486,63 @@ def compile_mxfp4_gemm(
         def _a_streaming_compute(accs, a_buf, a_bases, b_frags, b_scales,
                                  a_scales, ks, emit_filler=None,
                                  next_bs_info=None):
-            """Stream A fragments per-wm group, interleaved with WMMA_SCALE.
+            """Half-based A-streaming: 4-WMMA bursts, 2 waits per K-subtile.
+
+            Splits wmma_m_rep iterations into two halves:
+              Half 0 (wm=0..half-1): pre-load 2 A-frags, wait, 4 WMMAs
+              Half 1 (wm=half..end): load during Half 0 coexec, wait, 4 WMMAs
 
             next_bs_info: optional (b_buf, b_bases, bs_buf, bs_bases,
                           as_buf, as_bases, next_ks) -- issues B+scale loads
-                          during last wm's WMMAs for K-subtile overlap.
+                          after Half 1 for K-subtile overlap.
                           When set, returns (accs, next_b, next_bs, next_as).
             """
             next_result = None
             _half_wm = wmma_m_rep // 2
-            a_frag = load_a_frag(a_buf, a_bases[0], ks)
-            for wm in range_constexpr(wmma_m_rep):
-                is_last = (wm == wmma_m_rep - 1)
-                if not is_last:
-                    a_next = load_a_frag(a_buf, a_bases[wm + 1], ks)
-                if is_last:
-                    rocdl.s_wait_dscnt(0)
-                    if emit_filler is not None:
-                        rocdl.sched_barrier(0)
-                        emit_filler()
-                    if next_bs_info is not None:
-                        nb_buf, nb_bases, nbs_buf, nbs_bases, \
-                            nas_buf, nas_bases, n_ks = next_bs_info
-                        next_result = _load_b_and_scales(
-                            nb_buf, nb_bases, nbs_buf, nbs_bases,
-                            nas_buf, nas_bases, n_ks)
-                elif wm == _half_wm and next_bs_info is not None:
-                    rocdl.s_wait_dscnt(4)
-                else:
-                    rocdl.s_wait_dscnt(2)
+
+            # ── Pre-load Half 0 A-frags (2 frags = 4 ds_load) ──
+            a_frags_h0 = [load_a_frag(a_buf, a_bases[wm], ks)
+                          for wm in range_constexpr(_half_wm)]
+
+            # Wait for B+scales (loaded by caller) + Half 0 A-frags
+            rocdl.s_wait_dscnt(0)
+
+            # ── Half 0: 4 consecutive WMMAs (wm=0..half_wm-1) ──
+            for wm in range_constexpr(_half_wm):
                 for wn_raw in range_constexpr(wmma_n_rep):
                     wn = (wmma_n_rep - 1 - wn_raw) if (wm % 2 == 1) else wn_raw
-                    _emit_wmma(accs, wm, wn, a_frag, b_frags,
+                    _emit_wmma(accs, wm, wn, a_frags_h0[wm], b_frags,
                                a_scales, b_scales)
-                if not is_last:
-                    a_frag = a_next
+
+            # Load Half 1 A-frags (interleaved in Half 0 WMMA coexec)
+            a_frags_h1 = [load_a_frag(a_buf, a_bases[_half_wm + h], ks)
+                          for h in range_constexpr(_half_wm)]
+
+            # Wait for Half 1 A-frags (expected near-zero stall:
+            # 4 WMMAs above provide ~16-32 cycles of hiding time)
+            rocdl.s_wait_dscnt(0)
+
+            # ── Half 1: 4 consecutive WMMAs (wm=half_wm..wmma_m_rep-1) ──
+            for h in range_constexpr(_half_wm):
+                wm = _half_wm + h
+                is_last = (wm == wmma_m_rep - 1)
+
+                if is_last and emit_filler is not None:
+                    rocdl.sched_barrier(0)
+                    emit_filler()
+
+                for wn_raw in range_constexpr(wmma_n_rep):
+                    wn = (wmma_n_rep - 1 - wn_raw) if (wm % 2 == 1) else wn_raw
+                    _emit_wmma(accs, wm, wn, a_frags_h1[h], b_frags,
+                               a_scales, b_scales)
+
+            # Transition: next K-subtile B+scale prefetch
             if next_bs_info is not None:
+                nb_buf, nb_bases, nbs_buf, nbs_bases, \
+                    nas_buf, nas_bases, n_ks = next_bs_info
+                next_result = _load_b_and_scales(
+                    nb_buf, nb_bases, nbs_buf, nbs_bases,
+                    nas_buf, nas_bases, n_ks)
                 return accs, next_result
             return accs
 
@@ -560,34 +581,21 @@ def compile_mxfp4_gemm(
             return current_accs
 
         def hot_loop_scheduler():
-            # interleaving: distribute ds_loads evenly across WMMAs
-            total_wmma = wmma_m_rep * wmma_n_rep * k_wmma_steps
-            total_dsrd = ((wmma_m_rep * 2 + wmma_n_rep * 4 + 2)
-                          * k_wmma_steps)
+            _half_wm = wmma_m_rep // 2
+            _half_wmma = _half_wm * wmma_n_rep  # WMMAs per half
 
-            rocdl.sched_barrier(0)
-
-            # Prologue: prime the ds_load pipeline
-            rocdl.sched_dsrd(4)
-            rocdl.sched_mfma(1)
-
-            # Main interleave: 2 WMMA per iteration
-            remaining_dsrd = total_dsrd - 4
-            remaining_wmma = total_wmma - 1
-            sche_iters = remaining_wmma // 2
-
-            for sche_i in range_constexpr(sche_iters):
-                # ceil-distribute remaining_dsrd across sche_iters
-                n_dsrd = ((remaining_dsrd * (sche_i + 1) + sche_iters - 1)
-                          // sche_iters
-                          - (remaining_dsrd * sche_i + sche_iters - 1)
-                          // sche_iters)
-                rocdl.sched_dsrd(n_dsrd)
-                rocdl.sched_mfma(2)
-
-            # Tail: remaining odd WMMA
-            if remaining_wmma % 2 == 1:
-                rocdl.sched_mfma(1)
+            for _ks in range_constexpr(k_wmma_steps):
+                if _ks == 0:
+                    # B+scales(10) + Half 0 A-frags(half_wm * 2)
+                    rocdl.sched_dsrd(wmma_n_rep * 4 + 2 + _half_wm * 2)
+                else:
+                    # Only Half 0 A-frags (B+scales already counted)
+                    rocdl.sched_dsrd(_half_wm * 2)
+                rocdl.sched_mfma(_half_wmma)         # Half 0 WMMAs
+                rocdl.sched_dsrd(_half_wm * 2)       # Half 1 A-frag loads
+                rocdl.sched_mfma(_half_wmma)         # Half 1 WMMAs
+                if _ks < k_wmma_steps - 1:
+                    rocdl.sched_dsrd(wmma_n_rep * 4 + 2)  # next ks B+scales
 
             rocdl.sched_barrier(0)
 
@@ -852,6 +860,7 @@ def compile_mxfp4_gemm(
                 cur_as = _select_base(stages_as_idx, s_idx)
                 cur_bs = _select_base(stages_bs_idx, s_idx)
 
+                rocdl.sched_barrier(0)
                 accs_in = compute_tile(accs_in, cur_a, cur_b, cur_as, cur_bs)
                 hot_loop_scheduler()
                 pipeline_fence(
