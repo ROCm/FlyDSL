@@ -786,6 +786,10 @@ class JitFunction:
             compiled_module = MlirCompiler.compile(module, arch=backend.target.arch, func_name=self.func.__name__)
 
             if env.compile.compile_only:
+                # No ExecutionEngine on this path — validate pairing without DeviceRuntime init.
+                from ..runtime.device_runtime import ensure_compile_runtime_pairing_from_env
+
+                ensure_compile_runtime_pairing_from_env(backend.target.backend)
                 print(f"[flydsl] COMPILE_ONLY=1, compilation succeeded (arch={backend.target.arch})")
                 return None
 

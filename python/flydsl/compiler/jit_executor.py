@@ -85,6 +85,10 @@ class CompiledArtifact:
             if self._engine is not None:
                 return
 
+            # Validate compile backend vs device runtime before loading ExecutionEngine.
+            from ..runtime.device_runtime import get_device_runtime
+            get_device_runtime()
+
             # Create context and immediately exit the with-block, but
             # keep a reference so the context is not garbage-collected.
             # Destroying the context while ExecutionEngine still holds

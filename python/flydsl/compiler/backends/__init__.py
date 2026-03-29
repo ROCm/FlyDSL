@@ -68,6 +68,12 @@ def get_backend(name: Optional[str] = None, *, arch: str = "") -> BaseBackend:
 
     *name* defaults to ``FLYDSL_COMPILE_BACKEND`` env var (or ``'rocm'``).
     *arch* overrides the auto-detected architecture when non-empty.
+
+    Compile/runtime pairing (``FLYDSL_COMPILE_BACKEND`` vs ``FLYDSL_RUNTIME_KIND``)
+    is validated for ``COMPILE_ONLY=1`` via
+    :func:`flydsl.runtime.device_runtime.ensure_compile_runtime_pairing_from_env`
+    and when first initializing the device runtime for execution via
+    :func:`flydsl.runtime.device_runtime.get_device_runtime`, not here.
     """
     if name is None:
         name = compile_backend_name()

@@ -255,6 +255,10 @@ class RuntimeEnvManager(EnvManager):
 
     env_prefix = "RUNTIME"
 
+    kind = OptStr(
+        "rocm",
+        description="Device runtime kind (must match FLYDSL_COMPILE_BACKEND; e.g. rocm for HIP)",
+    )
     cache_dir = OptStr(str(Path.home() / ".flydsl" / "cache"), description="Directory for caching compiled kernels")
     enable_cache = OptBool(True, description="Enable kernel caching")
 
