@@ -53,8 +53,9 @@ class CompiledArtifact:
         compiled_module: ir.Module,
         func_name: str,
         source_ir: str = None,
+        ir_text_override: str = None,
     ):
-        self._ir_text = str(compiled_module)
+        self._ir_text = ir_text_override if ir_text_override is not None else str(compiled_module)
         self._entry = func_name
         self._source_ir = source_ir
         self._module = None
@@ -102,6 +103,12 @@ class CompiledArtifact:
             func_ptr = self._engine.raw_lookup(self._entry)
             self._func_exe = ctypes.CFUNCTYPE(None, ctypes.c_void_p)(func_ptr)
         return self._func_exe
+
+    def _get_raw_func_ptr(self):
+        """Return raw C function pointer (int64) for direct C++ dispatch."""
+        if self._engine is None:
+            self._ensure_engine()
+        return self._engine.raw_lookup(self._entry)
 
     def __call__(self, *args, **kwargs):
         func_exe = self._get_func_exe()

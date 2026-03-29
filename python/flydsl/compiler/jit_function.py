@@ -634,6 +634,8 @@ class JitFunction:
         self._call_state_cache = {}  # cache_key -> CallState
         self._sig = None  # lazy: set on first call
         self._mem_cache = {}
+        self._tvm_ffi_dispatch = None   # TVMFFIDispatcher or None
+        self._tvm_ffi_cache_key = None  # cache_key for current dispatcher
 
     def _ensure_sig(self):
         """Initialize signature + param metadata on first call (not at decoration time)."""
@@ -717,9 +719,35 @@ class JitFunction:
         """Convert tuple cache key to string for disk cache."""
         return str(cache_key)
 
+    def _try_build_tvm_ffi_dispatch(self, sig, args_tuple, compiled_func, cache_key):
+        """Attempt to build a TVMFFIDispatcher for hot-path dispatch."""
+        try:
+            from .tvm_ffi_dispatch import build_tvm_ffi_dispatcher
+            dispatcher = build_tvm_ffi_dispatcher(sig, args_tuple, compiled_func)
+            if dispatcher is not None:
+                self._tvm_ffi_dispatch = dispatcher
+                self._tvm_ffi_cache_key = cache_key
+        except Exception as e:
+            log().debug(f"TVMFFIDispatcher build failed: {e}")
+
     def __call__(self, *args, **kwargs):
         if ir.Context.current is not None:
             return self.func(*args, **kwargs)
+
+        # Ultra-fast path: TVM FFI dispatcher with guard validation.
+        # The guard checks compile-affecting parameters (constexpr values,
+        # tensor dtypes, type params).  If they changed, we fall through
+        # to the slow path which will recompile and rebuild the dispatcher.
+        dispatch = self._tvm_ffi_dispatch
+        if dispatch is not None:
+            try:
+                ok, result = dispatch.prepare_and_call(args, kwargs)
+                if ok:
+                    return result
+                # Guard failed: compile-affecting args changed, fall through
+            except Exception as e:
+                log().debug(f"TVMFFIDispatcher call failed, falling back: {e}")
+                self._tvm_ffi_dispatch = None
 
         self._ensure_sig()
         self._ensure_cache_manager()
@@ -758,6 +786,9 @@ class JitFunction:
                 state = None
             if state is not None:
                 self._call_state_cache[cache_key] = state
+                # Also try to build TVM FFI dispatcher for next time
+                if env.runtime.enable_tvm_ffi:
+                    self._try_build_tvm_ffi_dispatch(sig, args_tuple, cached_func, cache_key)
                 return state(args_tuple)
 
             # Fallback: run through DLPack (should not happen for static layout)
@@ -816,10 +847,23 @@ class JitFunction:
                 print(f"[flydsl] COMPILE_ONLY=1, compilation succeeded (arch={chip})")
                 return None
 
+            # Inject TVM FFI wrapper into compiled module IR
+            ir_text_override = None
+            if env.runtime.enable_tvm_ffi:
+                try:
+                    from .tvm_ffi_dispatch import inject_tvm_ffi_wrapper, _slot_specs_from_sig
+                    ffi_slot_specs = _slot_specs_from_sig(sig, args_tuple)
+                    if ffi_slot_specs is not None:
+                        ir_text = str(compiled_module)
+                        ir_text_override = inject_tvm_ffi_wrapper(ir_text, self.func.__name__, ffi_slot_specs)
+                except Exception as e:
+                    log().debug(f"TVM FFI wrapper injection failed: {e}")
+
             compiled_func = CompiledArtifact(
                 compiled_module,
                 self.func.__name__,
                 original_ir,
+                ir_text_override=ir_text_override,
             )
 
             if use_cache:
@@ -844,6 +888,15 @@ class JitFunction:
                         self._call_state_cache[cache_key] = state
                 except Exception:
                     pass
+
+            # Build TVM FFI dispatcher for next time.
+            # Works with or without caching — the dispatcher keeps the engine
+            # alive via tvm_ffi.Function's keep_alive_object reference.
+            # We also store compiled_func in _mem_cache to prevent GC.
+            if env.runtime.enable_tvm_ffi:
+                if not use_cache:
+                    self._mem_cache[cache_key] = compiled_func
+                self._try_build_tvm_ffi_dispatch(sig, args_tuple, compiled_func, cache_key)
 
             return result
 

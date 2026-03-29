@@ -256,6 +256,7 @@ class RuntimeEnvManager(EnvManager):
 
     cache_dir = OptStr(str(Path.home() / ".flydsl" / "cache"), description="Directory for caching compiled kernels")
     enable_cache = OptBool(True, description="Enable kernel caching")
+    enable_tvm_ffi = OptBool(False, description="Enable TVM FFI fast dispatch path (opt-in)")
 
 
 compile = CompileEnvManager()
