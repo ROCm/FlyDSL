@@ -13,10 +13,21 @@ on:
         description: 'Skip promote job (build + test only)'
         type: boolean
         default: false
+      release_type:
+        description: 'Release type (determines S3 bucket)'
+        type: choice
+        options:
+          - 'nightlies'
+          - 'devreleases'
+        default: 'nightlies'
       docker_image:
         description: 'Docker base image for build and test'
         type: string
         default: "rocm/pytorch:rocm7.2_ubuntu22.04_py3.10_pytorch_release_2.8.0"
+      python_versions:
+        description: 'Space-separated Python versions to build wheels for'
+        type: string
+        default: "3.10 3.12"
 concurrency:
   group: ${{ github.workflow }}-${{ github.sha }}
   cancel-in-progress: true
@@ -25,8 +36,9 @@ jobs:
   build:
     uses: ./.github/workflows/build-whl.yaml
     with:
-      release_type: ${{ github.event_name == 'schedule' && 'nightlies' || 'devreleases' }}
+      release_type: ${{ inputs.release_type || 'nightlies' }}
       docker_image: ${{ inputs.docker_image || 'rocm/pytorch:rocm7.2_ubuntu22.04_py3.10_pytorch_release_2.8.0' }}
+      python_versions: ${{ inputs.python_versions || '3.10 3.12' }}
     permissions:
       id-token: write
       contents: read
@@ -47,7 +59,7 @@ jobs:
           && !(inputs.skip_promote || false) }}
     uses: ./.github/workflows/promote.yaml
     with:
-      release_type: ${{ github.event_name == 'schedule' && 'nightlies' || 'devreleases' }}
+      release_type: ${{ inputs.release_type || 'nightlies' }}
       wheel_names: ${{ needs.build.outputs.wheel_names }}
     permissions:
       id-token: write
