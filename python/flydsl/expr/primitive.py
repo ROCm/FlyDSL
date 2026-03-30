@@ -513,7 +513,10 @@ def idx2crd(idx, layout, loc=None, ip=None):
             coords[i] = c
         for i in range(ndims):
             if coords[i] is None:
-                coords[i] = remaining
+                if strides[i] == 0:
+                    coords[i] = _arith.ConstantOp(T.index(), 0).result
+                else:
+                    coords[i] = remaining
         return coords
 
     # Fallback: fly dialect path
