@@ -738,22 +738,6 @@ def compile_moe_blockscale_gemm1(
                     current_up = list(acc_up_in)
                     mfma_res_ty = vec4_f32
 
-                    def _do_scale_fma(block_gate_accs, block_up_accs, combined_gate, combined_up):
-                        for mi in range_constexpr(m_repeat):
-                            for ni in range_constexpr(num_acc_n):
-                                acc_idx = mi * num_acc_n + ni
-                                new_g_elems = []
-                                new_u_elems = []
-                                for ii in range_constexpr(4):
-                                    bg_i = vector.extract(block_gate_accs[acc_idx], static_position=[ii], dynamic_position=[])
-                                    bu_i = vector.extract(block_up_accs[acc_idx],   static_position=[ii], dynamic_position=[])
-                                    g_cur = vector.extract(current_gate[acc_idx], static_position=[ii], dynamic_position=[])
-                                    u_cur = vector.extract(current_up[acc_idx],   static_position=[ii], dynamic_position=[])
-                                    new_g_elems.append(math_dialect.fma(bg_i, combined_gate[mi][ni][ii], g_cur))
-                                    new_u_elems.append(math_dialect.fma(bu_i, combined_up[mi][ni][ii],   u_cur))
-                                current_gate[acc_idx] = vector.from_elements(vec4_f32, new_g_elems)
-                                current_up[acc_idx]   = vector.from_elements(vec4_f32, new_u_elems)
-
                     if _is_gfx950:
                         vec4_i64 = T.vec(4, T.i64)
                         vec8_i32 = T.vec(8, T.i32)
@@ -764,8 +748,6 @@ def compile_moe_blockscale_gemm1(
 
                         for sb in range_constexpr(sb_per_tile_s1):
                             combined_gate, combined_up = pre_scales[sb]
-                            block_gate_accs = [acc_init] * (num_acc_n * m_repeat)
-                            block_up_accs = [acc_init] * (num_acc_n * m_repeat)
                             ku0 = sb * ku_per_sb_s1
                             ku1 = ku0 + 1
                             bg0_p0, bg0_p1 = b_gate_tile_in[ku0]
@@ -786,15 +768,27 @@ def compile_moe_blockscale_gemm1(
                                     acc_idx = mi * num_acc_n + ni
                                     bg128 = _pack128(bg0_p0[ni], bg0_p1[ni], bg1_p0[ni], bg1_p1[ni])
                                     bu128 = _pack128(bu0_p0[ni], bu0_p1[ni], bu1_p0[ni], bu1_p1[ni])
-                                    block_gate_accs[acc_idx] = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
+                                    # MFMA into zero accumulator
+                                    mfma_gate = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
                                         mfma_res_ty,
-                                        [a128, bg128, block_gate_accs[acc_idx],
+                                        [a128, bg128, acc_init,
                                          0, 0, 0, 0x7F7F7F7F, 0, 0x7F7F7F7F])
-                                    block_up_accs[acc_idx] = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
+                                    mfma_up = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
                                         mfma_res_ty,
-                                        [a128, bu128, block_up_accs[acc_idx],
+                                        [a128, bu128, acc_init,
                                          0, 0, 0, 0x7F7F7F7F, 0, 0x7F7F7F7F])
-                            _do_scale_fma(block_gate_accs, block_up_accs, combined_gate, combined_up)
+                                    # Inline scale FMA: current += mfma_result * scale
+                                    new_g_elems = []
+                                    new_u_elems = []
+                                    for ii in range_constexpr(4):
+                                        bg_i = vector.extract(mfma_gate, static_position=[ii], dynamic_position=[])
+                                        bu_i = vector.extract(mfma_up,   static_position=[ii], dynamic_position=[])
+                                        g_cur = vector.extract(current_gate[acc_idx], static_position=[ii], dynamic_position=[])
+                                        u_cur = vector.extract(current_up[acc_idx],   static_position=[ii], dynamic_position=[])
+                                        new_g_elems.append(math_dialect.fma(bg_i, combined_gate[mi][ni][ii], g_cur))
+                                        new_u_elems.append(math_dialect.fma(bu_i, combined_up[mi][ni][ii],   u_cur))
+                                    current_gate[acc_idx] = vector.from_elements(vec4_f32, new_g_elems)
+                                    current_up[acc_idx]   = vector.from_elements(vec4_f32, new_u_elems)
                     else:
                         mfma_fn = (
                             mfma_i32_k32
@@ -819,8 +813,8 @@ def compile_moe_blockscale_gemm1(
 
                         for sb in range_constexpr(sb_per_tile_s1):
                             combined_gate, combined_up = pre_scales[sb]
-                            block_gate_accs = [acc_init] * (num_acc_n * m_repeat)
-                            block_up_accs = [acc_init] * (num_acc_n * m_repeat)
+                            sb_gate_accs = [acc_init] * (num_acc_n * m_repeat)
+                            sb_up_accs   = [acc_init] * (num_acc_n * m_repeat)
                             for ku_local in range_constexpr(ku_per_sb_s1):
                                 ku = sb * ku_per_sb_s1 + ku_local
                                 b_gate_packs0, b_gate_packs1 = b_gate_tile_in[ku]
@@ -836,9 +830,23 @@ def compile_moe_blockscale_gemm1(
                                         a0, a1 = lds_load_packs_k64(curr_row_a_lds, col_base, lds_base)
                                     for ni in range_constexpr(num_acc_n):
                                         acc_idx = mi * num_acc_n + ni
-                                        block_gate_accs[acc_idx] = mfma_k64(block_gate_accs[acc_idx], a0, a1, b_gate_packs0[ni], b_gate_packs1[ni])
-                                        block_up_accs[acc_idx] = mfma_k64(block_up_accs[acc_idx], a0, a1, b_up_packs0[ni], b_up_packs1[ni])
-                            _do_scale_fma(block_gate_accs, block_up_accs, combined_gate, combined_up)
+                                        sb_gate_accs[acc_idx] = mfma_k64(sb_gate_accs[acc_idx], a0, a1, b_gate_packs0[ni], b_gate_packs1[ni])
+                                        sb_up_accs[acc_idx] = mfma_k64(sb_up_accs[acc_idx], a0, a1, b_up_packs0[ni], b_up_packs1[ni])
+                            # Inline scale FMA after all ku_local steps
+                            for mi in range_constexpr(m_repeat):
+                                for ni in range_constexpr(num_acc_n):
+                                    acc_idx = mi * num_acc_n + ni
+                                    new_g_elems = []
+                                    new_u_elems = []
+                                    for ii in range_constexpr(4):
+                                        bg_i = vector.extract(sb_gate_accs[acc_idx], static_position=[ii], dynamic_position=[])
+                                        bu_i = vector.extract(sb_up_accs[acc_idx],   static_position=[ii], dynamic_position=[])
+                                        g_cur = vector.extract(current_gate[acc_idx], static_position=[ii], dynamic_position=[])
+                                        u_cur = vector.extract(current_up[acc_idx],   static_position=[ii], dynamic_position=[])
+                                        new_g_elems.append(math_dialect.fma(bg_i, combined_gate[mi][ni][ii], g_cur))
+                                        new_u_elems.append(math_dialect.fma(bu_i, combined_up[mi][ni][ii],   u_cur))
+                                    current_gate[acc_idx] = vector.from_elements(vec4_f32, new_g_elems)
+                                    current_up[acc_idx]   = vector.from_elements(vec4_f32, new_u_elems)
                     return current_gate, current_up
 
                 def compute_tile(
@@ -933,45 +941,15 @@ def compile_moe_blockscale_gemm1(
 
                 # ── scf.for loop helpers ─────────────────────────────────────
                 n_accs_half = m_repeat * num_acc_n  # 4 per gate/up
-                _n_btile_half = k_unroll * 2 * num_acc_n  # 16 per gate/up
 
-                def _flat_btile_half(b_tile):
-                    """Flatten one B tile (gate or up) to list of i64."""
-                    flat = []
-                    for packs0, packs1 in b_tile:
-                        flat.extend(packs0)
-                        flat.extend(packs1)
-                    return flat
-
-                def _unflat_btile_half(flat):
-                    """Unflatten i64 list to B tile format."""
-                    bt = []
-                    idx = 0
-                    for _ in range_constexpr(k_unroll):
-                        p0 = [flat[idx + ni] for ni in range_constexpr(num_acc_n)]
-                        idx += num_acc_n
-                        p1 = [flat[idx + ni] for ni in range_constexpr(num_acc_n)]
-                        idx += num_acc_n
-                        bt.append((p0, p1))
-                    return bt
-
-                def _pack_loop_state(ag, au, bg_flat, bu_flat, a0pf):
-                    """Pack all loop-carried values into a flat list."""
-                    return (list(ag) + list(au) +
-                            list(bg_flat) + list(bu_flat) +
-                            [a0pf[0], a0pf[1]])
+                def _pack_loop_state(ag, au):
+                    return list(ag) + list(au)
 
                 def _unpack_loop_state(vals):
-                    """Unpack flat list into named state variables."""
                     n = n_accs_half
-                    nb = _n_btile_half
                     ag = list(vals[:n])
                     au = list(vals[n:2*n])
-                    bg = _unflat_btile_half(list(vals[2*n:2*n+nb]))
-                    bu = _unflat_btile_half(list(vals[2*n+nb:2*n+2*nb]))
-                    off = 2*n + 2*nb
-                    a0pf = (vals[off], vals[off+1])
-                    return ag, au, bg, bu, a0pf
+                    return ag, au
 
                 # ---------------- 2-stage pipeline (ping-pong LDS + B tile prefetch) ----------------
                 lds_tile_elems = arith.index(tile_m * lds_stride)
@@ -993,19 +971,13 @@ def compile_moe_blockscale_gemm1(
                 # Prologue: prefetch tile0, store to LDS(cur), sync.
                 k0 = fx.Index(0)
                 x_regs0 = load_x_tile(k0)
-                b_gate_cur = load_b_tile(k0, n_blk_gate, n_intra_gate)
-                b_up_cur = load_b_tile(k0, n_blk_up, n_intra_up)
                 store_x_tile_to_lds(x_regs0, lds_base_cur)
                 gpu.barrier()
-    
+
                 # Loop-carried ping/pong state.
                 lds_base_pong = lds_base_cur  # current/compute
                 lds_base_ping = lds_base_nxt  # next/load+store
-    
-                # Cross-tile A0 LDS prefetch (default-on): prefetch the first A-pack (K64) for the
-                # tile we are about to compute from LDS, to overlap with upcoming VMEM.
-                a0_prefetch_pong = lds_load_packs_k64(row_a_lds, col_offset_base_bytes, lds_base_pong)
-    
+
                 # scf.for ping-pong main loop (2 tiles per iteration), leaving 2 tail tiles.
                 c2_tile_k = arith.index(tile_k * 2)
                 c_tile_k = arith.index(tile_k)
@@ -1013,48 +985,42 @@ def compile_moe_blockscale_gemm1(
                 pair_iters = max((total_tiles - 2) // 2, 0)
                 c_k_main = pair_iters * tile_k * 2  # Python int: stop value for scf.for
 
-                # Build initial loop state from prologue values.
-                init_state = _pack_loop_state(
-                    acc_gate, acc_up,
-                    _flat_btile_half(b_gate_cur), _flat_btile_half(b_up_cur),
-                    a0_prefetch_pong,
-                )
+                # Build initial loop state (only accumulators).
+                init_state = _pack_loop_state(acc_gate, acc_up)
 
                 for k_iv, inner in range(0, c_k_main, tile_k * 2, init=init_state):
-                    (acc_gate_in, acc_up_in,
-                     b_gate_in, b_up_in, a0pf_in) = _unpack_loop_state(inner)
+                    acc_gate_in, acc_up_in = _unpack_loop_state(inner)
 
-                    # ---- stage 0: prefetch+store ping, compute pong ----
-                    # Issue scale loads FIRST so their latency hides behind heavy tile VMEM.
+                    # ---- stage 0: load B tiles + a0_prefetch for pong, compute pong ----
                     pre_scales_pong_s0 = load_scales_s1(k_iv)
+                    b_gate_pong = load_b_tile(k_iv, n_blk_gate, n_intra_gate)
+                    b_up_pong = load_b_tile(k_iv, n_blk_up, n_intra_up)
                     next_k1 = k_iv + c_tile_k
                     x_regs_ping = load_x_tile(next_k1)
-                    b_gate_ping = load_b_tile(next_k1, n_blk_gate, n_intra_gate)
-                    b_up_ping = load_b_tile(next_k1, n_blk_up, n_intra_up)
+
+                    a0pf_pong = lds_load_packs_k64(row_a_lds, col_offset_base_bytes, lds_base_pong)
 
                     acc_gate_s0, acc_up_s0 = compute_tile_bs_s1(
                         acc_gate_in,
                         acc_up_in,
-                        b_gate_in,
-                        b_up_in,
+                        b_gate_pong,
+                        b_up_pong,
                         lds_base_pong,
                         pre_scales_pong_s0,
-                        a0_prefetch=a0pf_in,
+                        a0_prefetch=a0pf_pong,
                     )
                     store_x_tile_to_lds(x_regs_ping, lds_base_ping)
                     hot_loop_scheduler()
                     gpu.barrier()
 
-                    # Cross-tile prefetch for the ping tile we are about to compute.
-                    a0_prefetch_ping_s0 = lds_load_packs_k64(row_a_lds, col_offset_base_bytes, lds_base_ping)
-
-                    # ---- stage 1: prefetch+store pong, compute ping ----
-                    # Issue scale loads FIRST so their latency hides behind heavy tile VMEM.
+                    # ---- stage 1: load B tiles + a0_prefetch for ping, compute ping ----
                     pre_scales_ping_s1 = load_scales_s1(next_k1)
+                    b_gate_ping = load_b_tile(next_k1, n_blk_gate, n_intra_gate)
+                    b_up_ping = load_b_tile(next_k1, n_blk_up, n_intra_up)
                     next_k2 = k_iv + c2_tile_k
                     x_regs_pong = load_x_tile(next_k2)
-                    b_gate_next = load_b_tile(next_k2, n_blk_gate, n_intra_gate)
-                    b_up_next = load_b_tile(next_k2, n_blk_up, n_intra_up)
+
+                    a0pf_ping = lds_load_packs_k64(row_a_lds, col_offset_base_bytes, lds_base_ping)
 
                     acc_gate_s1, acc_up_s1 = compute_tile_bs_s1(
                         acc_gate_s0,
@@ -1063,61 +1029,55 @@ def compile_moe_blockscale_gemm1(
                         b_up_ping,
                         lds_base_ping,
                         pre_scales_ping_s1,
-                        a0_prefetch=a0_prefetch_ping_s0,
+                        a0_prefetch=a0pf_ping,
                     )
                     store_x_tile_to_lds(x_regs_pong, lds_base_pong)
                     hot_loop_scheduler()
                     gpu.barrier()
 
-                    # Cross-tile prefetch for the next pong tile.
-                    a0_prefetch_pong_new = lds_load_packs_k64(row_a_lds, col_offset_base_bytes, lds_base_pong)
-
-                    # Yield new state for next iteration.
-                    results = yield _pack_loop_state(
-                        acc_gate_s1, acc_up_s1,
-                        _flat_btile_half(b_gate_next), _flat_btile_half(b_up_next),
-                        a0_prefetch_pong_new,
-                    )
+                    results = yield _pack_loop_state(acc_gate_s1, acc_up_s1)
 
                 # Unpack final loop state.
-                (acc_gate, acc_up,
-                 b_gate_cur, b_up_cur, a0_prefetch_pong) = _unpack_loop_state(results)
+                acc_gate, acc_up = _unpack_loop_state(results)
 
-                # Tail: 2 remaining tiles.
+                # Tail tile 0 (pong)
                 k_tail0 = k_in - c2_tile_k
-                # Issue scale loads FIRST so their latency hides behind heavy tile VMEM.
                 pre_scales_tail0 = load_scales_s1(k_tail0)
+                b_gate_tail0 = load_b_tile(k_tail0, n_blk_gate, n_intra_gate)
+                b_up_tail0 = load_b_tile(k_tail0, n_blk_up, n_intra_up)
                 k_tail1 = k_in - c_tile_k
                 x_regs_ping = load_x_tile(k_tail1)
-                b_gate_ping = load_b_tile(k_tail1, n_blk_gate, n_intra_gate)
-                b_up_ping = load_b_tile(k_tail1, n_blk_up, n_intra_up)
+
+                a0pf_tail0 = lds_load_packs_k64(row_a_lds, col_offset_base_bytes, lds_base_pong)
 
                 acc_gate, acc_up = compute_tile_bs_s1(
                     acc_gate,
                     acc_up,
-                    b_gate_cur,
-                    b_up_cur,
+                    b_gate_tail0,
+                    b_up_tail0,
                     lds_base_pong,
                     pre_scales_tail0,
-                    a0_prefetch=a0_prefetch_pong,
+                    a0_prefetch=a0pf_tail0,
                 )
                 store_x_tile_to_lds(x_regs_ping, lds_base_ping)
                 hot_loop_scheduler()
                 gpu.barrier()
 
-                # Cross-tile prefetch for the final ping tile.
-                a0_prefetch_ping = lds_load_packs_k64(row_a_lds, col_offset_base_bytes, lds_base_ping)
-
-                # Epilogue: compute last tile (blockscale already dequantized).
+                # Tail tile 1 (ping)
                 pre_scales_tail1 = load_scales_s1(k_tail1)
+                b_gate_tail1 = load_b_tile(k_tail1, n_blk_gate, n_intra_gate)
+                b_up_tail1 = load_b_tile(k_tail1, n_blk_up, n_intra_up)
+
+                a0pf_tail1 = lds_load_packs_k64(row_a_lds, col_offset_base_bytes, lds_base_ping)
+
                 acc_gate, acc_up = compute_tile_bs_s1(
                     acc_gate,
                     acc_up,
-                    b_gate_ping,
-                    b_up_ping,
+                    b_gate_tail1,
+                    b_up_tail1,
                     lds_base_ping,
                     pre_scales_tail1,
-                    a0_prefetch=a0_prefetch_ping,
+                    a0_prefetch=a0pf_tail1,
                 )
     
                 # Store epilogue to out[t, slot, inter]
