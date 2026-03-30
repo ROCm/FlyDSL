@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2025 FlyDSL Project Contributors
 
-#ifndef FLYDSL_CONVERSION_PASSES
-#define FLYDSL_CONVERSION_PASSES
-
 include "mlir/Pass/PassBase.td"
 
 def FlyToROCDLConversionPass : Pass<"convert-fly-to-rocdl"> {
@@ -31,5 +28,3 @@ def FlyROCDLClusterAttrPass : Pass<"fly-rocdl-cluster-attr"> {
     "LLVM::LLVMDialect"
   ];
 }
-
-#endif // FLYDSL_CONVERSION_PASSES

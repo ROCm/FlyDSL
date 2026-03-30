@@ -4,7 +4,7 @@ add_mlir_conversion_library(MLIRFlyToROCDL
   DEPENDS
   MLIRFlyIncGen
   MLIRFlyROCDLIncGen
-  FlyConversionPassIncGen
+  FlyToROCDLPassIncGen
 
   LINK_LIBS PUBLIC
   MLIRFlyDialect
