@@ -427,9 +427,6 @@ def compile_moe_blockscale_gemm1(
                     # buffer). That's OK as long as we never use an out-of-range token id to index X.
                     fused_i = buffer_ops.buffer_load(sorted_rsrc, sorted_row_i, vec_width=1, dtype=i32)
                     t_raw = fused_i & mask24
-                    # NOTE: aiter moe_sorting uses sentinel token_id == tokens for padding.
-                    # Do NOT rely on buffer OOB semantics for X loads; explicitly mask to a safe row.
-                    t_valid_i32 = arith.cmpi(arith.CmpIPredicate.ult, t_raw, tokens_i32)
                     if x_is_token_slot:
                         s_raw = fused_i >> 24
                         # X is indexed by token-slot in **slot-major** order:
@@ -437,13 +434,10 @@ def compile_moe_blockscale_gemm1(
                         # This matches CK's moe_smoothquant output layout.
                         row_ts_i32 = s_raw * tokens_i32 + t_raw
                         row_ts_idx = arith.index_cast(T.index, row_ts_i32)
-                        # Apply bounds check to token-slot index
-                        row_ts_safe = t_valid_i32.select(row_ts_idx, fx.Index(0))
-                        x_row_base_div4.append(row_ts_safe * c_k_div4)
+                        x_row_base_div4.append(row_ts_idx * c_k_div4)
                     else:
                         t_idx = arith.index_cast(T.index, t_raw)
-                        t_safe = t_valid_i32.select(t_idx, fx.Index(0))
-                        x_row_base_div4.append(t_safe * c_k_div4)
+                        x_row_base_div4.append(t_idx * c_k_div4)
     
                 vec1_i32 = T.vec(1, i32)
                 vec2_i32 = T.vec(2, i32)
@@ -661,21 +655,16 @@ def compile_moe_blockscale_gemm1(
 
                 # Pre-decode sorted token IDs (constant across all K-tiles)
                 _pre_t_safe_idx = []
-                _pre_t_valid    = []
                 for _mi in range_constexpr(m_repeat):
-                    _mi_safe, _mi_valid = [], []
+                    _mi_safe = []
                     for _ii in range_constexpr(4):
                         _row_in_tile = arith.index(_mi * 16) + row_off_base + fx.Index(_ii)
                         _sorted_row  = bx_m + _row_in_tile
                         _fused_pre   = buffer_ops.buffer_load(sorted_rsrc, _sorted_row, vec_width=1, dtype=i32)
                         _t_id_pre    = _fused_pre & mask24
-                        _t_valid_pre = arith.cmpi(arith.CmpIPredicate.ult, _t_id_pre, tokens_i32)
-                        _t_safe_pre  = _t_valid_pre.select(_t_id_pre, fx.Int32(0))
-                        _t_safe_idx_pre = arith.index_cast(T.index, _t_safe_pre)
-                        _mi_safe.append(_t_safe_idx_pre)
-                        _mi_valid.append(_t_valid_pre)
+                        _t_idx_pre   = arith.index_cast(T.index, _t_id_pre)
+                        _mi_safe.append(_t_idx_pre)
                     _pre_t_safe_idx.append(_mi_safe)
-                    _pre_t_valid.append(_mi_valid)
 
                 # Pre-compute N-block indices for scale_w (constant per CTA)
                 _pre_n_block_gate = []
@@ -696,10 +685,8 @@ def compile_moe_blockscale_gemm1(
                             s_a_row = []
                             for ii in range_constexpr(4):
                                 t_safe_idx = _pre_t_safe_idx[mi][ii]
-                                t_valid    = _pre_t_valid[mi][ii]
                                 sa_idx = sa_base_offset + t_safe_idx
                                 s_a_val = buffer_ops.buffer_load(sx_rsrc, sa_idx, vec_width=1, dtype=f32)
-                                s_a_val = arith.select(t_valid, s_a_val, fx.Float32(0.0))
                                 s_a_row.append(s_a_val)
                             s_a_vecs.append(s_a_row)
 
@@ -713,20 +700,17 @@ def compile_moe_blockscale_gemm1(
                             s_w_up = buffer_ops.buffer_load(sw_rsrc, sw_up_idx, vec_width=1, dtype=f32)
                             s_w_up_vals.append(s_w_up)
 
-                        # Combined: list of 4 f32 scalars per (mi, ni) — NOT vec4
                         combined_gate = []
                         combined_up = []
                         for mi in range_constexpr(m_repeat):
+                            s_a_vec4 = vector.from_elements(vec4_f32, s_a_vecs[mi])
                             mi_gate = []
                             mi_up = []
                             for ni in range_constexpr(num_acc_n):
-                                cg_elems = []
-                                cu_elems = []
-                                for ii in range_constexpr(4):
-                                    cg_elems.append(ArithValue(s_a_vecs[mi][ii]) * ArithValue(s_w_gate_vals[ni]))
-                                    cu_elems.append(ArithValue(s_a_vecs[mi][ii]) * ArithValue(s_w_up_vals[ni]))
-                                mi_gate.append(cg_elems)  # list of 4 f32 scalars
-                                mi_up.append(cu_elems)    # list of 4 f32 scalars
+                                s_wg_bc = vector.broadcast(vec4_f32, s_w_gate_vals[ni])
+                                s_wu_bc = vector.broadcast(vec4_f32, s_w_up_vals[ni])
+                                mi_gate.append(ArithValue(s_a_vec4) * ArithValue(s_wg_bc))
+                                mi_up.append(ArithValue(s_a_vec4) * ArithValue(s_wu_bc))
                             combined_gate.append(mi_gate)
                             combined_up.append(mi_up)
                         all_combined.append((combined_gate, combined_up))
@@ -768,27 +752,19 @@ def compile_moe_blockscale_gemm1(
                                     acc_idx = mi * num_acc_n + ni
                                     bg128 = _pack128(bg0_p0[ni], bg0_p1[ni], bg1_p0[ni], bg1_p1[ni])
                                     bu128 = _pack128(bu0_p0[ni], bu0_p1[ni], bu1_p0[ni], bu1_p1[ni])
-                                    # MFMA into zero accumulator
-                                    mfma_gate = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
+                                    # MFMA into zero accumulator, then vec4 scale FMA
+                                    blk_g = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
                                         mfma_res_ty,
                                         [a128, bg128, acc_init,
                                          0, 0, 0, 0x7F7F7F7F, 0, 0x7F7F7F7F])
-                                    mfma_up = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
+                                    blk_u = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
                                         mfma_res_ty,
                                         [a128, bu128, acc_init,
                                          0, 0, 0, 0x7F7F7F7F, 0, 0x7F7F7F7F])
-                                    # Inline scale FMA: current += mfma_result * scale
-                                    new_g_elems = []
-                                    new_u_elems = []
-                                    for ii in range_constexpr(4):
-                                        bg_i = vector.extract(mfma_gate, static_position=[ii], dynamic_position=[])
-                                        bu_i = vector.extract(mfma_up,   static_position=[ii], dynamic_position=[])
-                                        g_cur = vector.extract(current_gate[acc_idx], static_position=[ii], dynamic_position=[])
-                                        u_cur = vector.extract(current_up[acc_idx],   static_position=[ii], dynamic_position=[])
-                                        new_g_elems.append(math_dialect.fma(bg_i, combined_gate[mi][ni][ii], g_cur))
-                                        new_u_elems.append(math_dialect.fma(bu_i, combined_up[mi][ni][ii],   u_cur))
-                                    current_gate[acc_idx] = vector.from_elements(vec4_f32, new_g_elems)
-                                    current_up[acc_idx]   = vector.from_elements(vec4_f32, new_u_elems)
+                                    current_gate[acc_idx] = math_dialect.fma(
+                                        blk_g, combined_gate[mi][ni], current_gate[acc_idx])
+                                    current_up[acc_idx] = math_dialect.fma(
+                                        blk_u, combined_up[mi][ni], current_up[acc_idx])
                     else:
                         mfma_fn = (
                             mfma_i32_k32
@@ -832,21 +808,14 @@ def compile_moe_blockscale_gemm1(
                                         acc_idx = mi * num_acc_n + ni
                                         sb_gate_accs[acc_idx] = mfma_k64(sb_gate_accs[acc_idx], a0, a1, b_gate_packs0[ni], b_gate_packs1[ni])
                                         sb_up_accs[acc_idx] = mfma_k64(sb_up_accs[acc_idx], a0, a1, b_up_packs0[ni], b_up_packs1[ni])
-                            # Inline scale FMA after all ku_local steps
+                            # Vec4 scale FMA after all ku_local steps
                             for mi in range_constexpr(m_repeat):
                                 for ni in range_constexpr(num_acc_n):
                                     acc_idx = mi * num_acc_n + ni
-                                    new_g_elems = []
-                                    new_u_elems = []
-                                    for ii in range_constexpr(4):
-                                        bg_i = vector.extract(sb_gate_accs[acc_idx], static_position=[ii], dynamic_position=[])
-                                        bu_i = vector.extract(sb_up_accs[acc_idx],   static_position=[ii], dynamic_position=[])
-                                        g_cur = vector.extract(current_gate[acc_idx], static_position=[ii], dynamic_position=[])
-                                        u_cur = vector.extract(current_up[acc_idx],   static_position=[ii], dynamic_position=[])
-                                        new_g_elems.append(math_dialect.fma(bg_i, combined_gate[mi][ni][ii], g_cur))
-                                        new_u_elems.append(math_dialect.fma(bu_i, combined_up[mi][ni][ii],   u_cur))
-                                    current_gate[acc_idx] = vector.from_elements(vec4_f32, new_g_elems)
-                                    current_up[acc_idx]   = vector.from_elements(vec4_f32, new_u_elems)
+                                    current_gate[acc_idx] = math_dialect.fma(
+                                        sb_gate_accs[acc_idx], combined_gate[mi][ni], current_gate[acc_idx])
+                                    current_up[acc_idx] = math_dialect.fma(
+                                        sb_up_accs[acc_idx], combined_up[mi][ni], current_up[acc_idx])
                     return current_gate, current_up
 
                 def compute_tile(
@@ -1710,14 +1679,7 @@ def compile_moe_blockscale_gemm2(
                     fused_i = buffer_ops.buffer_load(sorted_rsrc, sorted_row_i, vec_width=1, dtype=i32)
                     t_i32 = fused_i & mask24
                     s_i32 = fused_i >> 24
-                    # aiter moe_sorting uses sentinel token_id == tokens for padding.
-                    # Do NOT rely on buffer OOB semantics for A2/scale loads; explicitly mask.
-                    t_valid = arith.cmpi(arith.CmpIPredicate.ult, t_i32, tokens_i32)
-                    s_valid = arith.cmpi(arith.CmpIPredicate.ult, s_i32, topk_i32)
-                    ts_valid = t_valid & s_valid
-                    t_safe = ts_valid.select(t_i32, fx.Int32(0))
-                    s_safe = ts_valid.select(s_i32, fx.Int32(0))
-                    row_ts_i32 = t_safe * topk_i32 + s_safe
+                    row_ts_i32 = t_i32 * topk_i32 + s_i32
                     row_ts_idx = arith.index_cast(T.index, row_ts_i32)
                     # Base row offset in dword units: row_ts_idx * (k_in/4)
                     x_row_base_div4.append(row_ts_idx * c_k_div4)
@@ -1896,26 +1858,18 @@ def compile_moe_blockscale_gemm2(
 
                 # Pre-decode sorted token IDs for stage2 (constant across all K-tiles)
                 _pre_ts_safe_idx_s2 = []
-                _pre_t_valid_s2     = []
                 for _mi in range_constexpr(m_repeat):
-                    _mi_safe, _mi_valid = [], []
+                    _mi_safe = []
                     for _ii in range_constexpr(4):
                         _row_in_tile = arith.index(_mi * 16) + row_off_base_s2 + fx.Index(_ii)
                         _sorted_row  = bx_m + _row_in_tile
                         _fused_pre   = buffer_ops.buffer_load(sorted_rsrc, _sorted_row, vec_width=1, dtype=i32)
                         _t_id_pre    = _fused_pre & mask24
                         _s_id_pre    = _fused_pre >> 24
-                        _t_valid_pre = arith.cmpi(arith.CmpIPredicate.ult, _t_id_pre, tokens_i32)
-                        _s_valid_pre = arith.cmpi(arith.CmpIPredicate.ult, _s_id_pre, topk_i32)
-                        _ts_valid_pre = _t_valid_pre & _s_valid_pre
-                        _t_safe_pre  = _ts_valid_pre.select(_t_id_pre, fx.Int32(0))
-                        _s_safe_pre  = _ts_valid_pre.select(_s_id_pre, fx.Int32(0))
-                        _ts_i32_pre  = _t_safe_pre * topk_i32 + _s_safe_pre
-                        _ts_safe_idx_pre = arith.index_cast(T.index, _ts_i32_pre)
-                        _mi_safe.append(_ts_safe_idx_pre)
-                        _mi_valid.append(_ts_valid_pre)
+                        _ts_i32_pre  = _t_id_pre * topk_i32 + _s_id_pre
+                        _ts_idx_pre  = arith.index_cast(T.index, _ts_i32_pre)
+                        _mi_safe.append(_ts_idx_pre)
                     _pre_ts_safe_idx_s2.append(_mi_safe)
-                    _pre_t_valid_s2.append(_mi_valid)
 
                 # Pre-compute N-block indices for scale_w (constant per CTA)
                 _pre_n_block_s2 = []
@@ -1936,10 +1890,8 @@ def compile_moe_blockscale_gemm2(
                             s_a_row = []
                             for ii in range_constexpr(4):
                                 ts_safe_idx = _pre_ts_safe_idx_s2[mi][ii]
-                                t_valid     = _pre_t_valid_s2[mi][ii]
                                 sa_idx = sa_base_offset + ts_safe_idx
                                 s_a_val = buffer_ops.buffer_load(sx_rsrc, sa_idx, vec_width=1, dtype=f32)
-                                s_a_val = arith.select(t_valid, s_a_val, fx.Float32(0.0))
                                 s_a_row.append(s_a_val)
                             s_a_vecs.append(s_a_row)
 
