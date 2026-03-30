@@ -20,9 +20,7 @@ KV cache layouts:
     KeyCache:   [num_blocks, KH, D//x, block_size, x]  (x=16, x-packed)
     ValueCache: [num_blocks, KH, D, block_size]         (dim-major)
 
-Uses FlyDSL layout API (make_layout, crd2idx) for address computation,
-replacing manual byte-offset arithmetic. Paired-half RoPE offset uses
-arith (piecewise, not expressible as affine layout stride).
+
 """
 
 import flydsl.compiler as flyc
@@ -197,11 +195,12 @@ def build_fused_rope_cache_module(
             cos_e = vector.bitcast(vec_type_e, cos_raw) if vec_dwords != VEC_WIDTH else cos_raw.bitcast(vec_type_e)
             sin_e = vector.bitcast(vec_type_e, sin_raw) if vec_dwords != VEC_WIDTH else sin_raw.bitcast(vec_type_e)
 
-            # -- Paired-half load (arith — piecewise offset, not layout-expressible) --
+            # -- Paired-half load via layout (partner vec position, same layout) --
             is_first_half = arith.cmpi(arith.CmpIPredicate.ult, tid, fx.Int32(vecs_per_half))
-            pair_off_first = q_bytes + (half_dim * elem_bytes)
-            pair_off_second = q_bytes - (half_dim * elem_bytes)
-            pair_bytes = arith.select(is_first_half, pair_off_first, pair_off_second)
+            pair_tid = arith.select(is_first_half, tid + vecs_per_half, tid - vecs_per_half)
+            pair_coord = (pid_t, fx.Int32(pid_hq), pair_tid)
+            pair_elem_off = _crd2idx_i32(pair_coord, q_layout)
+            pair_bytes = ArithValue(pair_elem_off) * elem_bytes
             pair_dw = pair_bytes >> fx.Int32(2)
             pair_raw = buffer_ops.buffer_load(q_rsrc, pair_dw, vec_width=vec_dwords, dtype=T.i32)
             pair_e = vector.bitcast(vec_type_e, pair_raw) if vec_dwords != VEC_WIDTH else pair_raw.bitcast(vec_type_e)
@@ -283,11 +282,12 @@ def build_fused_rope_cache_module(
             cos_e = vector.bitcast(vec_type_e, cos_raw) if vec_dwords != VEC_WIDTH else cos_raw.bitcast(vec_type_e)
             sin_e = vector.bitcast(vec_type_e, sin_raw) if vec_dwords != VEC_WIDTH else sin_raw.bitcast(vec_type_e)
 
-            # -- Paired-half load (arith — piecewise offset) --
+            # -- Paired-half load via layout (partner vec position, same layout) --
             is_first_half = arith.cmpi(arith.CmpIPredicate.ult, tid, fx.Int32(vecs_per_half))
-            pair_off_first = kv_bytes + (half_dim * elem_bytes)
-            pair_off_second = kv_bytes - (half_dim * elem_bytes)
-            pair_bytes = arith.select(is_first_half, pair_off_first, pair_off_second)
+            pair_tid = arith.select(is_first_half, tid + vecs_per_half, tid - vecs_per_half)
+            pair_coord = (pid_t, fx.Int32(pid_hk), pair_tid)
+            pair_elem_off = _crd2idx_i32(pair_coord, kv_layout)
+            pair_bytes = ArithValue(pair_elem_off) * elem_bytes
             pair_dw = pair_bytes >> fx.Int32(2)
             pair_raw = buffer_ops.buffer_load(k_rsrc, pair_dw, vec_width=vec_dwords, dtype=T.i32)
             pair_e = vector.bitcast(vec_type_e, pair_raw) if vec_dwords != VEC_WIDTH else pair_raw.bitcast(vec_type_e)
