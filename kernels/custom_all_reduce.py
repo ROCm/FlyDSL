@@ -104,6 +104,35 @@ class FlyDSLAllreduce:
     _HIP_IPC_MEM_LAZY_ENABLE_PEER_ACCESS = 0x1
     _hip = None
     _hipIpcMemHandle_t = None
+    _gpu_arch = None  # cached GPU arch name (e.g. 'gfx942' for CDNA3)
+
+    @classmethod
+    def _get_gpu_arch(cls) -> str:
+        """Return current GPU architecture name (cached).
+
+        Mirrors aiter C++ logic: use arch.find("gfx942") to decide write-mode.
+        """
+        if cls._gpu_arch is not None:
+            return cls._gpu_arch
+        arch = ""
+        try:
+            props = torch.cuda.get_device_properties(torch.cuda.current_device())
+            arch = getattr(props, "gcnArchName", "") or ""
+        except Exception:
+            pass
+        if not arch:
+            try:
+                import subprocess
+                r = subprocess.run(["rocminfo"], capture_output=True, text=True, timeout=10)
+                for line in r.stdout.splitlines():
+                    if "Name:" in line and "gfx" in line.lower():
+                        arch = line.split(":")[-1].strip()
+                        break
+            except Exception:
+                pass
+        cls._gpu_arch = arch
+        return arch
+
 
     @classmethod
     def _load_hip(cls):
@@ -285,9 +314,20 @@ class FlyDSLAllreduce:
         self._graph_out = None
         self._graph_use_write_mode = False
         self._gpu_graph_in_ptrs_array = torch.tensor(rotated_input_buf_ptrs, dtype=torch.int64, device=self.device)
-        self._graph_in_bases = []
+        self._graph_in_bases = []  # flat list of opened peer IPC base ptrs (for cleanup)
         self._gpu_graph_out_ptrs_array = torch.tensor(self._output_buffer_ptrs[:8], dtype=torch.int64, device=self.device)
         self._graph_out_bases = []
+        # List-based cudagraph registration: [(tensor, per_call_ptrs, rotated), ...]
+        #   rotated=True  → inp, rotate by rank before writing ptrs
+        #   rotated=False → out (write-mode), use rank-order ptrs
+        # ONE collective registers all entries at once after capture.
+        self._pending_graph_entries: list = []
+        # Per-capture cache: data_ptr -> per_call_ptrs tensor already queued.
+        # Prevents duplicate pending entries when the same tensor appears in
+        # multiple allreduce calls within one graph capture.
+        self._graph_ptrs_cache: dict = {}
+        # Cache for eagerly-registered user output IPC ptrs (key: data_ptr int)
+        self._out_ptrs_cache: dict | None = None
 
         self._exe_cache = {}
         self._threads = 512
@@ -298,10 +338,22 @@ class FlyDSLAllreduce:
 
     def close(self):
         """Release IPC memory handles for peer GPU buffers."""
-        for bases in [self._meta_bases, self._input_buffer_bases, self._output_buffer_bases, self._graph_in_bases, self._graph_out_bases]:
+        for bases in [self._meta_bases, self._input_buffer_bases, self._output_buffer_bases, self._graph_out_bases]:
             for b in bases:
                 if b is not None:
                     self._close_mem_handle(int(b))
+        # _graph_in_bases is a flat list of opened peer IPC bases
+        for b in self._graph_in_bases:
+            if b is not None:
+                self._close_mem_handle(int(b))
+        # eager write-mode out-ptrs cache
+        if self._out_ptrs_cache:
+            for b in self._out_ptrs_cache.get('bases', []):
+                try:
+                    self._close_mem_handle(int(b))
+                except Exception:
+                    pass
+            self._out_ptrs_cache = None
         self._meta_bases = []
         self._input_buffer_bases = []
         self._output_buffer_bases = []
@@ -316,10 +368,15 @@ class FlyDSLAllreduce:
             self._graph_inp = None
             self._graph_out = None
             self._graph_use_write_mode = False
+            self._pending_graph_entries = []  # reset per-capture list
+            self._graph_ptrs_cache = {}       # reset per-capture ptrs cache
             yield
         finally:
             self._IS_CAPTURING = False
-            if self._graph_inp is not None and not self._graph_use_write_mode:
+            # List-based batch registration: one collective for all captured tensors.
+            # Covers BOTH write-mode (out entries, rotated=False) and
+            # non-write-mode (inp entries, rotated=True).
+            if self._pending_graph_entries:
                 self._register_graph_tensors()
 
     @classmethod
@@ -341,52 +398,136 @@ class FlyDSLAllreduce:
         cls._hip_check(err, what="hipPointerGetAttribute(RANGE_START_ADDR)")
         return int(base.value)
 
-    def _register_graph_tensors(self):
-        """Exchange IPC handles for captured tensors; update pointer arrays for replay."""
+    def _exchange_out_ptrs(self, out: "torch.Tensor") -> "torch.Tensor":
+        """Register user output tensor via IPC and return gpu_out_ptrs_array.
+
+        Result is in rank-order (NOT rotated), matching write-mode kernel expectation.
+        Cached by data_ptr so repeated eager calls with the same buffer are free.
+        """
+        ptr = int(out.data_ptr())
+        if self._out_ptrs_cache is not None and self._out_ptrs_cache.get("ptr") == ptr:
+            return self._out_ptrs_cache["arr"]
+
         ws, rk = self.world_size, self.rank
+        alloc_base = self._get_alloc_base_ptr(ptr)
+        off = ptr - alloc_base
+        handle = self._get_mem_handle_bytes(alloc_base)
+        all_out = self._gather_object_list_via_broadcast(self.group, (handle, off))
 
-        inp = self._graph_inp
-        if inp is not None:
-            alloc_base = self._get_alloc_base_ptr(int(inp.data_ptr()))
-            off = int(inp.data_ptr()) - alloc_base
-            my_handle = self._get_mem_handle_bytes(alloc_base)
-            all_graph_in = self._gather_object_list_via_broadcast(self.group, (my_handle, off))
+        out_ptrs = [0] * 8
+        new_bases: list = []
+        for r in range(ws):
+            hb, o = all_out[r]
+            if r == rk:
+                out_ptrs[r] = ptr
+            else:
+                peer_base = int(self._open_mem_handle(bytes(hb)))
+                new_bases.append(peer_base)
+                out_ptrs[r] = peer_base + o
+        for i in range(ws, 8):
+            out_ptrs[i] = out_ptrs[0]
 
-            self._graph_in_bases = [None] * self.world_size
-            graph_in_ptrs = [0] * 8
-            for r in range(self.world_size):
-                hb, o = all_graph_in[r]
-                if r == self.rank:
-                    graph_in_ptrs[r] = int(inp.data_ptr())
+        arr = torch.tensor(out_ptrs[:8], dtype=torch.int64, device=self.device)
+
+        # Release old cached bases before replacing
+        if self._out_ptrs_cache:
+            for b in self._out_ptrs_cache.get("bases", []):
+                try:
+                    self._close_mem_handle(int(b))
+                except Exception:
+                    pass
+        self._out_ptrs_cache = {"ptr": ptr, "arr": arr, "bases": new_bases}
+        return arr
+
+    def _get_or_create_graph_ptrs(self, tensor, rotated: bool):
+        """Return per-call ptrs tensor for cudagraph recording.
+
+        Checks two caches in priority order:
+        1. _out_ptrs_cache (write-mode only): IPC-registered real ptrs from
+           warmup; if the out address is already known, use it immediately
+           without queuing any deferred registration.
+        2. _graph_ptrs_cache: per-call placeholder tensors already queued this
+           capture; reuse instead of creating a duplicate pending entry.
+        If neither hits, allocate a new placeholder, enqueue in
+        _pending_graph_entries, and store in _graph_ptrs_cache.
+
+        Args:
+            tensor:  inp tensor (rotated=True) or out tensor (rotated=False).
+            rotated: True  -> rotate ptrs by rank (inp, non-write-mode).
+                     False -> rank-order ptrs (out, write-mode).
+        """
+        ptr = int(tensor.data_ptr())
+
+        # Write-mode out: check IPC registration cache first.
+        if not rotated:
+            _ipc = self._out_ptrs_cache
+            if _ipc is not None and _ipc.get("ptr") == ptr:
+                return _ipc["arr"]
+
+        # Check per-capture graph ptrs cache.
+        cached = self._graph_ptrs_cache.get(ptr)
+        if cached is not None:
+            return cached
+
+        # First occurrence: allocate placeholder and queue for batch registration.
+        per_call_ptrs = torch.empty(8, dtype=torch.int64, device=self.device)
+        self._pending_graph_entries.append((tensor, per_call_ptrs, rotated))
+        self._graph_ptrs_cache[ptr] = per_call_ptrs
+        return per_call_ptrs
+
+    def _register_graph_tensors(self):
+        """Batch-register IPC handles for all captured input tensors in ONE collective.
+
+        Compared to the old two-collective approach (one for inp, one for out),
+        this collects all (handle, offset) pairs into a single list and calls
+        _gather_object_list_via_broadcast once, reducing inter-rank synchronisation.
+
+        Each entry in self._pending_graph_entries is (inp, per_call_in_ptrs) where
+        per_call_in_ptrs is the per-call GPU tensor that was passed to _run_kernel
+        during graph recording and whose values are updated here for replay.
+        """
+        ws, rk = self.world_size, self.rank
+        entries = self._pending_graph_entries
+        if not entries:
+            return
+
+        # 1. Collect handle+offset for EVERY captured inp into ONE list
+        my_handle_list = []
+        for tensor, _, _rotated in entries:
+            alloc_base = self._get_alloc_base_ptr(int(tensor.data_ptr()))
+            off = int(tensor.data_ptr()) - alloc_base
+            handle = self._get_mem_handle_bytes(alloc_base)
+            my_handle_list.append((handle, off))
+
+        # 2. ONE collective — each rank sends its full list, receives all others'
+        all_ranks_handles = self._gather_object_list_via_broadcast(
+            self.group, my_handle_list
+        )
+
+        # 3. For each entry, build pointer array and update in-place
+        #    rotated=True  → inp: rotate by rank  (read from peer GPU inputs)
+        #    rotated=False → out: rank-order (write-mode broadcasts to all outs)
+        self._graph_in_bases = []  # flat list of opened peer bases (for cleanup)
+        for entry_idx, (tensor, per_call_ptrs, rotated) in enumerate(entries):
+            ptrs = [0] * 8
+            for r in range(ws):
+                hb, o = all_ranks_handles[r][entry_idx]
+                if r == rk:
+                    ptrs[r] = int(tensor.data_ptr())
                 else:
                     peer_base = int(self._open_mem_handle(bytes(hb)))
-                    self._graph_in_bases[r] = peer_base
-                    graph_in_ptrs[r] = peer_base + o
-            for i in range(self.world_size, 8):
-                graph_in_ptrs[i] = graph_in_ptrs[0]
-            rotated_in = [graph_in_ptrs[(rk + i) % ws] for i in range(8)]
-            self._gpu_graph_in_ptrs_array.copy_(torch.tensor(rotated_in, dtype=torch.int64, device=self.device))
+                    self._graph_in_bases.append(peer_base)
+                    ptrs[r] = peer_base + o
+            for i in range(ws, 8):
+                ptrs[i] = ptrs[0]
+            if rotated:
+                final = [ptrs[(rk + i) % ws] for i in range(8)]
+            else:
+                final = ptrs[:8]
+            per_call_ptrs.copy_(
+                torch.tensor(final, dtype=torch.int64, device=self.device)
+            )
 
-        out = self._graph_out
-        if out is not None:
-            alloc_base = self._get_alloc_base_ptr(int(out.data_ptr()))
-            off = int(out.data_ptr()) - alloc_base
-            my_handle = self._get_mem_handle_bytes(alloc_base)
-            all_graph_out = self._gather_object_list_via_broadcast(self.group, (my_handle, off))
-
-            self._graph_out_bases = [None] * self.world_size
-            graph_out_ptrs = [0] * 8
-            for r in range(self.world_size):
-                hb, o = all_graph_out[r]
-                if r == self.rank:
-                    graph_out_ptrs[r] = int(out.data_ptr())
-                else:
-                    peer_base = int(self._open_mem_handle(bytes(hb)))
-                    self._graph_out_bases[r] = peer_base
-                    graph_out_ptrs[r] = peer_base + o
-            for i in range(self.world_size, 8):
-                graph_out_ptrs[i] = graph_out_ptrs[0]
-            self._gpu_graph_out_ptrs_array.copy_(torch.tensor(graph_out_ptrs[:8], dtype=torch.int64, device=self.device))
 
     def __del__(self):
         try:
@@ -394,7 +535,7 @@ class FlyDSLAllreduce:
         except Exception:
             pass
 
-    _SUPPORTED_WORLD_SIZES = {2, 4, 6, 8}
+    _SUPPORTED_WORLD_SIZES = {2, 4, 8}
     _SUPPORTED_DTYPES = {torch.float32, torch.float16, torch.bfloat16}
 
     def should_custom_ar(self, inp, *, open_fp8_quant: bool = False) -> bool:
@@ -609,7 +750,13 @@ class FlyDSLAllreduce:
             bytes_n = int(inp.numel()) * int(inp.element_size())
         N = int(out.numel())
 
-        use_write_mode = (bytes_n > 512 * 4096 * 2 and self.world_size == 8)
+        # Write-mode only on CDNA3 (gfx942), ws=8, large tensors
+        # mirrors aiter: arch.find("gfx942") != string::npos
+        use_write_mode = (
+            bytes_n > 512 * 4096 * 2
+            and self.world_size == 8
+            and "gfx942" in self._get_gpu_arch()
+        )
 
         if self._IS_CAPTURING:
             if torch.cuda.is_current_stream_capturing():
@@ -621,45 +768,26 @@ class FlyDSLAllreduce:
                     self._graph_use_write_mode = True
                     self._run_kernel(
                         N, dtype_str,
-                        # Keep write-mode graph path on stable pre-registered
-                        # output buffers to avoid graph-time IPC out-pointer
-                        # remapping issues.
-                        gpu_out_ptrs_array=self._gpu_output_buffer_ptrs_array,
+                        gpu_out_ptrs_array=self._get_or_create_graph_ptrs(out, False),
                         inp_ptr=int(inp.data_ptr()),
                         use_write_mode=True,
                         stream_ptr=stream_ptr,
                     )
-                    out.view(torch.uint8)[:bytes_n].copy_(self.output_buffer[:bytes_n])
                 else:
                     self._graph_use_write_mode = False
                     self._run_kernel(
                         N, dtype_str,
-                        gpu_in_ptrs_array=self._gpu_graph_in_ptrs_array,
+                        gpu_in_ptrs_array=self._get_or_create_graph_ptrs(inp, True),
                         out_ptr=int(out.data_ptr()),
                         use_write_mode=False,
                         stream_ptr=stream_ptr,
                     )
                 return out
             else:
-                if use_write_mode:
-                    self._run_kernel(
-                        N, dtype_str,
-                        gpu_out_ptrs_array=self._gpu_output_buffer_ptrs_array,
-                        inp_ptr=int(inp.data_ptr()),
-                        use_write_mode=True,
-                        stream_ptr=stream_ptr,
-                    )
-                    out.view(torch.uint8)[:bytes_n].copy_(self.output_buffer[:bytes_n])
-                else:
-                    self.input_buffer[:bytes_n].copy_(inp.view(torch.uint8))
-                    self._run_kernel(
-                        N, dtype_str,
-                        gpu_in_ptrs_array=self._gpu_input_buffer_ptrs_array,
-                        out_ptr=int(self.output_buffer.data_ptr()),
-                        use_write_mode=False,
-                        stream_ptr=stream_ptr,
-                    )
-                    out.view(torch.uint8)[:bytes_n].copy_(self.output_buffer[:bytes_n])
+                # IS_CAPTURING=True but stream is not recording: warmup-inside-capture
+                # is not a supported usage path. Return zeros to keep all ranks in sync
+                # without issuing any kernel or collective.
+                out.zero_()
                 return out
 
         if use_write_mode:

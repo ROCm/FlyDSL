@@ -64,6 +64,7 @@ def cmpf(predicate, lhs, rhs, **kwargs):
     return _mlir_arith.cmpf(predicate, _to_raw(lhs), _to_raw(rhs), **kwargs)
 
 
+@traced_op
 def select_by_index(index_val, values):
     """Select one of *values* by integer *index_val* via chained ``arith.select``.
 
