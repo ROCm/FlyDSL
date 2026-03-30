@@ -7,13 +7,16 @@ import subprocess
 from typing import Optional
 
 
+_ROCM_AGENT_TIMEOUT_S = int(os.environ.get("FLYDSL_ROCM_AGENT_TIMEOUT", "300"))
+
+
 def _arch_from_rocm_agent_enumerator() -> Optional[str]:
     """Query rocm_agent_enumerator (standard ROCm tool) for the first GPU arch."""
     try:
         out = subprocess.check_output(
             ["rocm_agent_enumerator", "-name"],
             text=True,
-            timeout=5,
+            timeout=_ROCM_AGENT_TIMEOUT_S,
             stderr=subprocess.DEVNULL,
         )
         for line in out.splitlines():
@@ -41,6 +44,30 @@ def get_rocm_arch() -> str:
         return arch.split(":", 1)[0]
 
     return "gfx942"
+
+
+@functools.lru_cache(maxsize=None)
+def get_rocm_device_count() -> int:
+    """Best-effort ROCm visible GPU count via ``rocm_agent_enumerator`` (standard ROCm tool).
+
+    Uses the same invocation as :func:`_arch_from_rocm_agent_enumerator`. Returns 0
+    when the tool is unavailable or no discrete GPU agents are reported.
+    """
+    try:
+        out = subprocess.check_output(
+            ["rocm_agent_enumerator", "-name"],
+            text=True,
+            timeout=5,
+            stderr=subprocess.DEVNULL,
+        )
+        n = 0
+        for line in out.splitlines():
+            name = line.strip()
+            if name.startswith("gfx") and name != "gfx000":
+                n += 1
+        return n
+    except Exception:
+        return 0
 
 
 def is_rdna_arch(arch: Optional[str] = None) -> bool:
