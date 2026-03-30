@@ -2273,7 +2273,7 @@ def compile_moe_blockscale_gemm2(
                     # stable path here.)
                     out_base_idx = None
                     if out_is_bf16:
-                        out_base_idx = memref.extract_aligned_pointer_as_index(arg_out)
+                        out_base_idx = buffer_ops.extract_memref_base_index(arg_out)
 
                     def write_row_to_lds(
                         *,

@@ -75,6 +75,7 @@ __all__ = [
     'buffer_load',
     'buffer_store',
     'BufferResourceDescriptor',
+    'extract_memref_base_index',
 ]
 
 
@@ -136,6 +137,22 @@ def create_llvm_ptr(value, address_space: int = 0) -> ir.Value:
         value = _unwrap_value(std_arith.IndexCastOp(i64_type, value).result)
     ptr_type = ir.Type.parse(f'!llvm.ptr<{address_space}>')
     return llvm.IntToPtrOp(ptr_type, value).result
+
+
+def extract_memref_base_index(memref_val) -> ir.Value:
+    """Extract the base address of a fly.memref as an index value.
+
+    On gfx942 the ISA has global_atomic_pk_add_bf16 but NOT
+    buffer_atomic_pk_add_bf16, so bf16 output atomics must use
+    llvm.atomicrmw with a raw pointer instead of buffer atomics.
+    This helper returns the base address as an index so kernel
+    code can compute the target pointer with normal arithmetic.
+    """
+    raw_val = _unwrap_value(memref_val)
+    from .._mlir.dialects import fly as _fly
+    return _unwrap_value(
+        _fly.extract_aligned_pointer_as_index(ir.IndexType.get(), raw_val)
+    )
 
 
 def get_element_ptr(

@@ -817,13 +817,32 @@ public:
   LogicalResult matchAndRewrite(ExtractAlignedPointerAsIndexOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
     // fly.memref is a bare pointer; after type conversion the operand is llvm.ptr<AS>.
-    // Cast to the result type (e.g. llvm.ptr<0>) if address spaces differ.
+    // Convert to the result type requested by the op.
     Value src = adaptor.getSource();
     Type resultType = getTypeConverter()->convertType(op.getResult().getType());
     if (!resultType)
       resultType = op.getResult().getType();
-    if (src.getType() != resultType)
-      src = LLVM::AddrSpaceCastOp::create(rewriter, op.getLoc(), resultType, src);
+    if (src.getType() != resultType) {
+      if (isa<LLVM::LLVMPointerType>(src.getType()) &&
+          (isa<IntegerType>(resultType) || isa<IndexType>(resultType))) {
+        // ptr -> integer/index: needed when kernel code requires a numeric base
+        // address for pointer arithmetic (e.g. bf16 global atomics on gfx942,
+        // which lacks buffer_atomic_pk_add_bf16 and must use
+        // global_atomic_pk_add_bf16 with a raw pointer).
+        //
+        // PtrToIntOp requires an integer result, so for IndexType we lower
+        // through i64 and insert an index_cast.
+        Type intType = isa<IndexType>(resultType) ? rewriter.getI64Type()
+                                                  : resultType;
+        src = LLVM::PtrToIntOp::create(rewriter, op.getLoc(), intType, src);
+        if (isa<IndexType>(resultType))
+          src = arith::IndexCastOp::create(rewriter, op.getLoc(), resultType,
+                                           src);
+      } else {
+        // ptr -> ptr (different address space): cast between address spaces.
+        src = LLVM::AddrSpaceCastOp::create(rewriter, op.getLoc(), resultType, src);
+      }
+    }
     rewriter.replaceOp(op, src);
     return success();
   }
