@@ -11,6 +11,7 @@ from typing import List
 from .._mlir import ir
 from .._mlir.dialects import arith, scf
 from ..expr import const_expr
+from ..expr.numeric import _unwrap_value, _wrap_like
 from ..utils import env, log
 
 
@@ -232,32 +233,155 @@ class ReplaceIfWithDispatch(Transformer):
 
     @staticmethod
     def _to_i1(cond):
-        if hasattr(cond, "ir_value"):
-            return cond.ir_value()
-        return cond
+        return _unwrap_value(cond)
 
     @staticmethod
-    def scf_if_dispatch(cond, then_fn, else_fn=None):
-        if not ReplaceIfWithDispatch._is_dynamic(cond):
-            # compile-time evaluation
-            if cond:
-                then_fn()
-            elif else_fn is not None:
-                else_fn()
-            return
+    def _normalize_state_values(state_names, state_values):
+        state_names = tuple(state_names or ())
+        state_values = tuple(state_values or ())
+        if len(state_names) != len(state_values):
+            raise ValueError(
+                "state_names and state_values must have the same length, "
+                f"got {len(state_names)} and {len(state_values)}"
+            )
+        return state_names, state_values
 
-        has_else = else_fn is not None
-        loc = ir.Location.unknown()
-        if_op = scf.IfOp(ReplaceIfWithDispatch._to_i1(cond), [], has_else=has_else, loc=loc)
-        with ir.InsertionPoint(if_op.regions[0].blocks[0]):
-            then_fn()
-            scf.YieldOp([])
-        if has_else:
-            if len(if_op.regions[1].blocks) == 0:
-                if_op.regions[1].blocks.append(*[])
-            with ir.InsertionPoint(if_op.regions[1].blocks[0]):
-                else_fn()
+    @staticmethod
+    def _normalize_branch_result(branch_result, state_names, state_map, branch_label):
+        if not state_names:
+            return []
+
+        if isinstance(branch_result, dict):
+            result_map = dict(branch_result)
+        elif branch_result is None:
+            result_map = {}
+        elif len(state_names) == 1 and not isinstance(branch_result, (list, tuple)):
+            result_map = {state_names[0]: branch_result}
+        elif isinstance(branch_result, (list, tuple)) and len(branch_result) == len(state_names):
+            result_map = dict(zip(state_names, branch_result))
+        else:
+            raise TypeError(
+                f"{branch_label} must return dict/tuple/list for stateful dispatch; got {type(branch_result).__name__}"
+            )
+
+        values = []
+        for name in state_names:
+            if name in result_map:
+                values.append(result_map[name])
+            elif name in state_map:
+                values.append(state_map[name])
+            else:
+                raise NameError(
+                    f"variable '{name}' is not available before if/else and is not assigned in {branch_label}"
+                )
+        return values
+
+    @staticmethod
+    def _unwrap_mlir_values(values, state_names, branch_label):
+        raw_values = []
+        for name, value in zip(state_names, values):
+            raw = _unwrap_value(value)
+            if not isinstance(raw, ir.Value):
+                raise TypeError(
+                    f"if/else variable '{name}' in {branch_label} is {type(raw).__name__}, "
+                    "not an MLIR Value. Only MLIR Values can be yielded from dynamic if/else branches."
+                )
+            raw_values.append(raw)
+        return raw_values
+
+    @staticmethod
+    def _pack_dispatch_results(results, state_values):
+        if not results:
+            return None
+        wrapped = [_wrap_like(v, exemplar) for v, exemplar in zip(results, state_values)]
+        if len(wrapped) == 1:
+            return wrapped[0]
+        return tuple(wrapped)
+
+    @staticmethod
+    def scf_if_dispatch(cond, then_fn, else_fn=None, *, state_names=(), state_values=()):
+        state_names, state_values = ReplaceIfWithDispatch._normalize_state_values(state_names, state_values)
+        state_map = {name: value for name, value in zip(state_names, state_values)}
+
+        if not ReplaceIfWithDispatch._is_dynamic(cond):
+            taken = then_fn if cond else else_fn
+            if taken is None:
+                return None
+            result = taken(*state_values)
+            if not state_names:
+                return None
+            values = ReplaceIfWithDispatch._normalize_branch_result(
+                result, state_names, state_map, "selected branch"
+            )
+            if len(values) == 1:
+                return values[0]
+            return tuple(values)
+
+        cond_i1 = ReplaceIfWithDispatch._to_i1(cond)
+        if not isinstance(cond_i1, ir.Value):
+            raise TypeError(f"dynamic if condition must lower to ir.Value, got {type(cond_i1).__name__}")
+
+        if not state_names:
+            has_else = else_fn is not None
+            if_op = scf.IfOp(cond_i1, [], has_else=has_else, loc=ir.Location.unknown())
+            with ir.InsertionPoint(if_op.regions[0].blocks[0]):
+                then_fn()
                 scf.YieldOp([])
+            if has_else:
+                if len(if_op.regions[1].blocks) == 0:
+                    if_op.regions[1].blocks.append(*[])
+                with ir.InsertionPoint(if_op.regions[1].blocks[0]):
+                    else_fn()
+                    scf.YieldOp([])
+            return None
+
+        if else_fn is None:
+            else_fn = lambda *args: {}
+
+        state_raw = []
+        for name, value in zip(state_names, state_values):
+            raw = _unwrap_value(value)
+            if not isinstance(raw, ir.Value):
+                raise TypeError(
+                    f"state variable '{name}' is {type(raw).__name__}, not an MLIR Value; "
+                    "stateful dynamic if requires MLIR-backed values."
+                )
+            state_raw.append(raw)
+
+        result_types = [v.type for v in state_raw]
+        if_op = scf.IfOp(cond_i1, result_types, has_else=True, loc=ir.Location.unknown())
+
+        with ir.InsertionPoint(if_op.regions[0].blocks[0]):
+            then_result = then_fn(*state_values)
+            then_values = ReplaceIfWithDispatch._normalize_branch_result(
+                then_result, state_names, state_map, "then-branch"
+            )
+            then_raw = ReplaceIfWithDispatch._unwrap_mlir_values(then_values, state_names, "then-branch")
+            for name, expect_ty, got in zip(state_names, result_types, then_raw):
+                if got.type != expect_ty:
+                    raise TypeError(
+                        f"if/else variable '{name}' type mismatch in then-branch: "
+                        f"expected {expect_ty}, got {got.type}"
+                    )
+            scf.YieldOp(then_raw)
+
+        if len(if_op.regions[1].blocks) == 0:
+            if_op.regions[1].blocks.append(*[])
+        with ir.InsertionPoint(if_op.regions[1].blocks[0]):
+            else_result = else_fn(*state_values)
+            else_values = ReplaceIfWithDispatch._normalize_branch_result(
+                else_result, state_names, state_map, "else-branch"
+            )
+            else_raw = ReplaceIfWithDispatch._unwrap_mlir_values(else_values, state_names, "else-branch")
+            for name, expect_ty, got in zip(state_names, result_types, else_raw):
+                if got.type != expect_ty:
+                    raise TypeError(
+                        f"if/else variable '{name}' type mismatch in else-branch: "
+                        f"expected {expect_ty}, got {got.type}"
+                    )
+            scf.YieldOp(else_raw)
+
+        return ReplaceIfWithDispatch._pack_dispatch_results(list(if_op.results), state_values)
 
     @classmethod
     def rewrite_globals(cls):
@@ -274,17 +398,171 @@ class ReplaceIfWithDispatch(Transformer):
     def _could_be_dynamic(test_node):
         """Check if an if-condition AST could produce an MLIR Value at runtime.
 
-        Calls to RewriteBoolOps helpers (dsl_not_, dsl_and_, dsl_or_) and
-        Python builtins are NOT considered dynamic — they just wrap Python-level
-        boolean logic. Only calls to user/MLIR functions can produce Values.
+        Layer-by-layer recursive check:
+        1) classify current node if possible,
+        2) otherwise recurse into direct children,
+        3) use a conservative fallback for unresolved expression nodes.
         """
-        for child in ast.walk(test_node):
-            if isinstance(child, ast.Call):
-                func = child.func
-                if isinstance(func, ast.Name) and func.id in ReplaceIfWithDispatch._REWRITE_HELPER_NAMES:
-                    continue
+        def _is_literal_expr(node):
+            if isinstance(node, ast.Constant):
                 return True
-        return False
+            if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
+                return all(_is_literal_expr(e) for e in node.elts)
+            if isinstance(node, ast.Dict):
+                return all(
+                    (k is None or _is_literal_expr(k)) and _is_literal_expr(v)
+                    for k, v in zip(node.keys, node.values)
+                )
+            return False
+
+        def _classify_current(node):
+            if _is_literal_expr(node):
+                return False
+            if isinstance(node, ast.Name):
+                # Plain names can be static symbols (constexpr params, local bools, etc.).
+                return None
+            if isinstance(node, ast.Call):
+                func = node.func
+                if isinstance(func, ast.Name) and func.id in ReplaceIfWithDispatch._REWRITE_HELPER_NAMES:
+                    return None
+                return True
+            return None
+
+        def _visit(node):
+            current = _classify_current(node)
+            if current is True:
+                return True
+            if current is False:
+                return False
+
+            for child in ast.iter_child_nodes(node):
+                if _visit(child):
+                    return True
+
+            # If this expression cannot be proven static from itself or children,
+            # keep dynamic handling conservative.
+            if isinstance(node, ast.expr) and not isinstance(node, ast.Name):
+                return True
+            return False
+
+        return _visit(test_node)
+
+    @staticmethod
+    def _collect_assigned_vars(stmts):
+        assigned = []
+
+        def add_name(name):
+            if isinstance(name, str) and name not in assigned:
+                assigned.append(name)
+
+        class AssignCollector(ast.NodeVisitor):
+            def _collect_target(self, target):
+                if isinstance(target, ast.Name):
+                    add_name(target.id)
+                elif isinstance(target, (ast.Tuple, ast.List)):
+                    for elt in target.elts:
+                        self._collect_target(elt)
+                elif isinstance(target, ast.Starred):
+                    self._collect_target(target.value)
+                elif isinstance(target, ast.Subscript):
+                    self._collect_target(target.value)
+                elif isinstance(target, ast.Attribute):
+                    if isinstance(target.value, ast.Name):
+                        add_name(target.value.id)
+
+            def visit_Assign(self, node):
+                for target in node.targets:
+                    self._collect_target(target)
+                self.visit(node.value)
+
+            def visit_AugAssign(self, node):
+                self._collect_target(node.target)
+                self.visit(node.value)
+
+            def visit_AnnAssign(self, node):
+                self._collect_target(node.target)
+                if node.value is not None:
+                    self.visit(node.value)
+
+            def visit_For(self, node):
+                self._collect_target(node.target)
+                self.generic_visit(node)
+
+            def visit_AsyncFor(self, node):
+                self._collect_target(node.target)
+                self.generic_visit(node)
+
+            def visit_With(self, node):
+                for item in node.items:
+                    if item.optional_vars is not None:
+                        self._collect_target(item.optional_vars)
+                self.generic_visit(node)
+
+            def visit_AsyncWith(self, node):
+                for item in node.items:
+                    if item.optional_vars is not None:
+                        self._collect_target(item.optional_vars)
+                self.generic_visit(node)
+
+            def visit_ExceptHandler(self, node):
+                if node.name:
+                    add_name(node.name)
+                self.generic_visit(node)
+
+            def visit_NamedExpr(self, node):
+                self._collect_target(node.target)
+                self.visit(node.value)
+
+            def visit_MatchAs(self, node):
+                if node.name:
+                    add_name(node.name)
+                self.generic_visit(node)
+
+            def visit_MatchStar(self, node):
+                if node.name:
+                    add_name(node.name)
+                self.generic_visit(node)
+
+            def visit_MatchMapping(self, node):
+                if node.rest:
+                    add_name(node.rest)
+                self.generic_visit(node)
+
+            def visit_Call(self, node):
+                if isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name):
+                    # Only treat typical mutating methods as writes.
+                    if node.func.attr in {
+                        "append",
+                        "extend",
+                        "insert",
+                        "pop",
+                        "remove",
+                        "clear",
+                        "sort",
+                        "reverse",
+                        "add",
+                        "discard",
+                        "update",
+                        "setdefault",
+                    }:
+                        add_name(node.func.value.id)
+                self.generic_visit(node)
+
+        collector = AssignCollector()
+        collector.visit(ast.Module(body=stmts, type_ignores=[]))
+        return assigned
+
+    @staticmethod
+    def _state_value_expr(name):
+        return ast.Call(
+            func=ast.Attribute(
+                value=ast.Call(func=ast.Name(id="locals", ctx=ast.Load()), args=[], keywords=[]),
+                attr="get",
+                ctx=ast.Load(),
+            ),
+            args=[ast.Constant(value=name), ast.Constant(value=None)],
+            keywords=[],
+        )
 
     def visit_If(self, node: ast.If) -> List[ast.AST]:
         if _is_constexpr(node.test):
@@ -299,10 +577,25 @@ class ReplaceIfWithDispatch(Transformer):
         ReplaceIfWithDispatch._counter += 1
 
         then_name = f"__then_{uid}"
+        then_vars = self._collect_assigned_vars(node.body)
+        else_vars = self._collect_assigned_vars(node.orelse)
+        state_names = list(then_vars)
+        for var in else_vars:
+            if var not in state_names:
+                state_names.append(var)
+
+        fn_args = [ast.arg(arg=v, annotation=None) for v in state_names]
+        def _state_return_node():
+            return ast.Return(
+                value=ast.Dict(
+                    keys=[ast.Constant(value=v) for v in state_names],
+                    values=[ast.Name(id=v, ctx=ast.Load()) for v in state_names],
+                )
+            )
         then_func = ast.FunctionDef(
             name=then_name,
-            args=ast.arguments(posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[]),
-            body=node.body,
+            args=ast.arguments(posonlyargs=[], args=fn_args, kwonlyargs=[], kw_defaults=[], defaults=[]),
+            body=list(node.body) + ([_state_return_node()] if state_names else []),
             decorator_list=[],
             type_params=[],
         )
@@ -311,14 +604,58 @@ class ReplaceIfWithDispatch(Transformer):
         then_func = ast.fix_missing_locations(then_func)
 
         dispatch_args = [node.test, ast.Name(then_name, ctx=ast.Load())]
+        dispatch_keywords = []
+        if state_names:
+            dispatch_keywords.extend(
+                [
+                    ast.keyword(
+                        arg="state_names",
+                        value=ast.Tuple(elts=[ast.Constant(value=v) for v in state_names], ctx=ast.Load()),
+                    ),
+                    ast.keyword(
+                        arg="state_values",
+                        value=ast.Tuple(
+                            elts=[self._state_value_expr(v) for v in state_names],
+                            ctx=ast.Load(),
+                        ),
+                    ),
+                ]
+            )
         result = [then_func]
 
+        else_name = None
         if node.orelse:
             else_name = f"__else_{uid}"
             else_func = ast.FunctionDef(
                 name=else_name,
-                args=ast.arguments(posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[]),
-                body=node.orelse,
+                args=ast.arguments(
+                    posonlyargs=[],
+                    args=[ast.arg(arg=v, annotation=None) for v in state_names],
+                    kwonlyargs=[],
+                    kw_defaults=[],
+                    defaults=[],
+                ),
+                body=list(node.orelse) + ([_state_return_node()] if state_names else []),
+                decorator_list=[],
+                type_params=[],
+            )
+            setattr(else_func, _ASTREWRITE_MARKER, True)
+            else_func = ast.copy_location(else_func, node)
+            else_func = ast.fix_missing_locations(else_func)
+            dispatch_args.append(ast.Name(else_name, ctx=ast.Load()))
+            result.append(else_func)
+        elif state_names:
+            else_name = f"__else_{uid}"
+            else_func = ast.FunctionDef(
+                name=else_name,
+                args=ast.arguments(
+                    posonlyargs=[],
+                    args=[ast.arg(arg=v, annotation=None) for v in state_names],
+                    kwonlyargs=[],
+                    kw_defaults=[],
+                    defaults=[],
+                ),
+                body=[_state_return_node()],
                 decorator_list=[],
                 type_params=[],
             )
@@ -328,12 +665,22 @@ class ReplaceIfWithDispatch(Transformer):
             dispatch_args.append(ast.Name(else_name, ctx=ast.Load()))
             result.append(else_func)
 
-        dispatch_call = ast.Expr(
-            value=ast.Call(func=ast.Name("scf_if_dispatch", ctx=ast.Load()), args=dispatch_args, keywords=[])
+        dispatch_value = ast.Call(
+            func=ast.Name("scf_if_dispatch", ctx=ast.Load()),
+            args=dispatch_args,
+            keywords=dispatch_keywords,
         )
-        dispatch_call = ast.copy_location(dispatch_call, node)
-        dispatch_call = ast.fix_missing_locations(dispatch_call)
-        result.append(dispatch_call)
+        if state_names:
+            if len(state_names) == 1:
+                target = ast.Name(id=state_names[0], ctx=ast.Store())
+            else:
+                target = ast.Tuple(elts=[ast.Name(id=v, ctx=ast.Store()) for v in state_names], ctx=ast.Store())
+            dispatch_stmt = ast.Assign(targets=[target], value=dispatch_value)
+        else:
+            dispatch_stmt = ast.Expr(value=dispatch_value)
+        dispatch_stmt = ast.copy_location(dispatch_stmt, node)
+        dispatch_stmt = ast.fix_missing_locations(dispatch_stmt)
+        result.append(dispatch_stmt)
 
         return result
 

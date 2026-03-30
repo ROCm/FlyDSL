@@ -213,6 +213,40 @@ def _extract_arith(val, signed):
     return v.with_signedness(signed) if isinstance(v, ArithValue) else v
 
 
+def _unwrap_value(value):
+    """Convert FlyDSL wrappers to raw MLIR values when possible."""
+    if isinstance(value, ir.Value):
+        return value
+    if hasattr(value, "__fly_values__"):
+        values = value.__fly_values__()
+        if len(values) == 1:
+            return values[0]
+    if hasattr(value, "ir_value"):
+        return value.ir_value()
+    return value
+
+
+def _wrap_like(value, exemplar=None):
+    """Wrap an MLIR value back to a FlyDSL wrapper when possible."""
+    if not isinstance(value, ir.Value):
+        return value
+
+    if exemplar is not None:
+        if isinstance(exemplar, Numeric):
+            return type(exemplar)(value)
+        ctor = getattr(type(exemplar), "__fly_construct__", None)
+        if ctor is not None:
+            try:
+                return ctor([value])
+            except Exception:
+                pass
+
+    try:
+        return Numeric.from_ir_type(value.type)(value)
+    except Exception:
+        return value
+
+
 def _make_binop(op, promote=True, widen_bool=False, swap=False):
     """Create a binary-operator closure for Numeric subclasses."""
     def _apply(lhs, rhs, *, loc=None, ip=None):
