@@ -184,3 +184,27 @@ def test_ast_rewrite_keeps_semantics_for_static_bool():
     assert sample(True) == 2
     assert sample(False) == 3
     assert called["n"] in (0, 2)
+
+
+def test_ast_rewrite_does_not_rewrite_static_string_compare():
+    called = {"n": 0}
+
+    def sample(dtype_str):
+        out = 0
+        if dtype_str == "f32":
+            out = 1
+        else:
+            out = 2
+        return out
+
+    ASTRewriter.transform(sample)
+    original_dispatch = sample.__globals__["scf_if_dispatch"]
+
+    def traced_dispatch(*args, **kwargs):
+        called["n"] += 1
+        return original_dispatch(*args, **kwargs)
+
+    sample.__globals__["scf_if_dispatch"] = traced_dispatch
+    assert sample("f32") == 1
+    assert sample("bf16") == 2
+    assert called["n"] == 0

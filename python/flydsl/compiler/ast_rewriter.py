@@ -223,6 +223,10 @@ class RewriteBoolOps(Transformer):
 class ReplaceIfWithDispatch(Transformer):
     _counter = 0
 
+    def __init__(self, context, first_lineno):
+        super().__init__(context=context, first_lineno=first_lineno)
+        self._visible_name_stack = []
+
     @staticmethod
     def _is_dynamic(cond):
         if isinstance(cond, ir.Value):
@@ -236,15 +240,15 @@ class ReplaceIfWithDispatch(Transformer):
         return _unwrap_value(cond)
 
     @staticmethod
-    def _normalize_state_values(state_names, state_values):
-        state_names = tuple(state_names or ())
-        state_values = tuple(state_values or ())
-        if len(state_names) != len(state_values):
+    def _normalize_named_values(names, values, names_label="names", values_label="values"):
+        names = tuple(names or ())
+        values = tuple(values or ())
+        if len(names) != len(values):
             raise ValueError(
-                "state_names and state_values must have the same length, "
-                f"got {len(state_names)} and {len(state_values)}"
+                f"{names_label} and {values_label} must have the same length, "
+                f"got {len(names)} and {len(values)}"
             )
-        return state_names, state_values
+        return names, values
 
     @staticmethod
     def _normalize_branch_result(branch_result, state_names, state_map, branch_label):
@@ -299,47 +303,116 @@ class ReplaceIfWithDispatch(Transformer):
         return tuple(wrapped)
 
     @staticmethod
-    def scf_if_dispatch(cond, then_fn, else_fn=None, *, state_names=(), state_values=()):
-        state_names, state_values = ReplaceIfWithDispatch._normalize_state_values(state_names, state_values)
-        state_map = {name: value for name, value in zip(state_names, state_values)}
+    def _collect_result_dict(result_names, local_vars):
+        return {name: local_vars[name] for name in result_names}
+
+    @staticmethod
+    def _pack_named_values(names, values):
+        if not names:
+            return None
+        if len(names) == 1:
+            return values[0]
+        return tuple(values)
+
+    @staticmethod
+    def _merge_partial_results(base_names, base_values, part_names, part_values):
+        merged = {name: value for name, value in zip(base_names, base_values)}
+        merged.update({name: value for name, value in zip(part_names, part_values)})
+        return [merged[name] for name in base_names]
+
+    @staticmethod
+    def _call_branch(fn, result_names, state_values):
+        sig = inspect.signature(fn)
+        params = list(sig.parameters.values())
+        pos_params = [
+            p
+            for p in params
+            if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        ]
+        has_varargs = any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in params)
+        if has_varargs or len(pos_params) >= len(state_values) + 1:
+            return fn(result_names, *state_values)
+        return fn(*state_values)
+
+    @staticmethod
+    def scf_if_dispatch(
+        cond,
+        then_fn,
+        else_fn=None,
+        *,
+        arg_names=(),
+        arg_values=(),
+        result_names=(),
+        result_values=(),
+        state_names=(),
+        state_values=(),
+        auto_else=False,
+    ):
+        # Backward compatibility: old call-sites pass state_* only.
+        if not arg_names and state_names:
+            arg_names = state_names
+        if not arg_values and state_values:
+            arg_values = state_values
+        if not result_names:
+            result_names = arg_names
+        if not result_values and result_names:
+            arg_map = {name: value for name, value in zip(arg_names, arg_values)}
+            result_values = tuple(arg_map.get(name, None) for name in result_names)
+
+        arg_names, arg_values = ReplaceIfWithDispatch._normalize_named_values(
+            arg_names, arg_values, "arg_names", "arg_values"
+        )
+        result_names, result_values = ReplaceIfWithDispatch._normalize_named_values(
+            result_names, result_values, "result_names", "result_values"
+        )
+        # Only variables with an incoming value can be scf.if results/yields.
+        effective_result_pairs = [
+            (name, value)
+            for name, value in zip(result_names, result_values)
+            if _unwrap_value(value) is not None
+        ]
+        effective_result_names = tuple(name for name, _ in effective_result_pairs)
+        effective_result_values = tuple(value for _, value in effective_result_pairs)
+        effective_result_map = {name: value for name, value in effective_result_pairs}
 
         if not ReplaceIfWithDispatch._is_dynamic(cond):
             taken = then_fn if cond else else_fn
             if taken is None:
-                return None
-            result = taken(*state_values)
-            if not state_names:
-                return None
-            values = ReplaceIfWithDispatch._normalize_branch_result(
-                result, state_names, state_map, "selected branch"
+                return ReplaceIfWithDispatch._pack_named_values(result_names, result_values)
+            result = ReplaceIfWithDispatch._call_branch(taken, effective_result_names, arg_values)
+            if not effective_result_names:
+                return ReplaceIfWithDispatch._pack_named_values(result_names, result_values)
+            partial_values = ReplaceIfWithDispatch._normalize_branch_result(
+                result, effective_result_names, effective_result_map, "selected branch"
             )
-            if len(values) == 1:
-                return values[0]
-            return tuple(values)
+            merged_values = ReplaceIfWithDispatch._merge_partial_results(
+                result_names, result_values, effective_result_names, partial_values
+            )
+            return ReplaceIfWithDispatch._pack_named_values(result_names, merged_values)
 
         cond_i1 = ReplaceIfWithDispatch._to_i1(cond)
         if not isinstance(cond_i1, ir.Value):
             raise TypeError(f"dynamic if condition must lower to ir.Value, got {type(cond_i1).__name__}")
 
-        if not state_names:
+        if not effective_result_names:
             has_else = else_fn is not None
             if_op = scf.IfOp(cond_i1, [], has_else=has_else, loc=ir.Location.unknown())
             with ir.InsertionPoint(if_op.regions[0].blocks[0]):
-                then_fn()
+                ReplaceIfWithDispatch._call_branch(then_fn, effective_result_names, arg_values)
                 scf.YieldOp([])
             if has_else:
                 if len(if_op.regions[1].blocks) == 0:
                     if_op.regions[1].blocks.append(*[])
                 with ir.InsertionPoint(if_op.regions[1].blocks[0]):
-                    else_fn()
+                    ReplaceIfWithDispatch._call_branch(else_fn, effective_result_names, arg_values)
                     scf.YieldOp([])
-            return None
+            return ReplaceIfWithDispatch._pack_named_values(result_names, result_values)
 
         if else_fn is None:
             else_fn = lambda *args: {}
 
         state_raw = []
-        for name, value in zip(state_names, state_values):
+        for name, value in zip(effective_result_names, effective_result_values):
             raw = _unwrap_value(value)
             if not isinstance(raw, ir.Value):
                 raise TypeError(
@@ -352,12 +425,12 @@ class ReplaceIfWithDispatch(Transformer):
         if_op = scf.IfOp(cond_i1, result_types, has_else=True, loc=ir.Location.unknown())
 
         with ir.InsertionPoint(if_op.regions[0].blocks[0]):
-            then_result = then_fn(*state_values)
+            then_result = ReplaceIfWithDispatch._call_branch(then_fn, effective_result_names, arg_values)
             then_values = ReplaceIfWithDispatch._normalize_branch_result(
-                then_result, state_names, state_map, "then-branch"
+                then_result, effective_result_names, effective_result_map, "then-branch"
             )
-            then_raw = ReplaceIfWithDispatch._unwrap_mlir_values(then_values, state_names, "then-branch")
-            for name, expect_ty, got in zip(state_names, result_types, then_raw):
+            then_raw = ReplaceIfWithDispatch._unwrap_mlir_values(then_values, effective_result_names, "then-branch")
+            for name, expect_ty, got in zip(effective_result_names, result_types, then_raw):
                 if got.type != expect_ty:
                     raise TypeError(
                         f"if/else variable '{name}' type mismatch in then-branch: "
@@ -368,12 +441,12 @@ class ReplaceIfWithDispatch(Transformer):
         if len(if_op.regions[1].blocks) == 0:
             if_op.regions[1].blocks.append(*[])
         with ir.InsertionPoint(if_op.regions[1].blocks[0]):
-            else_result = else_fn(*state_values)
+            else_result = ReplaceIfWithDispatch._call_branch(else_fn, effective_result_names, arg_values)
             else_values = ReplaceIfWithDispatch._normalize_branch_result(
-                else_result, state_names, state_map, "else-branch"
+                else_result, effective_result_names, effective_result_map, "else-branch"
             )
-            else_raw = ReplaceIfWithDispatch._unwrap_mlir_values(else_values, state_names, "else-branch")
-            for name, expect_ty, got in zip(state_names, result_types, else_raw):
+            else_raw = ReplaceIfWithDispatch._unwrap_mlir_values(else_values, effective_result_names, "else-branch")
+            for name, expect_ty, got in zip(effective_result_names, result_types, else_raw):
                 if got.type != expect_ty:
                     raise TypeError(
                         f"if/else variable '{name}' type mismatch in else-branch: "
@@ -381,13 +454,24 @@ class ReplaceIfWithDispatch(Transformer):
                     )
             scf.YieldOp(else_raw)
 
-        return ReplaceIfWithDispatch._pack_dispatch_results(list(if_op.results), state_values)
+        partial_wrapped = ReplaceIfWithDispatch._pack_dispatch_results(
+            list(if_op.results), effective_result_values
+        )
+        if len(effective_result_names) == 1:
+            partial_values = [partial_wrapped]
+        else:
+            partial_values = list(partial_wrapped)
+        merged_values = ReplaceIfWithDispatch._merge_partial_results(
+            result_names, result_values, effective_result_names, partial_values
+        )
+        return ReplaceIfWithDispatch._pack_named_values(result_names, merged_values)
 
     @classmethod
     def rewrite_globals(cls):
         return {
             "const_expr": const_expr,
             "scf_if_dispatch": cls.scf_if_dispatch,
+            "scf_if_collect_results": cls._collect_result_dict,
         }
 
     _REWRITE_HELPER_NAMES = {"dsl_not_", "dsl_and_", "dsl_or_",
@@ -401,7 +485,7 @@ class ReplaceIfWithDispatch(Transformer):
         Layer-by-layer recursive check:
         1) classify current node if possible,
         2) otherwise recurse into direct children,
-        3) use a conservative fallback for unresolved expression nodes.
+        3) unresolved nodes default to static (no forced rewrite).
         """
         def _is_literal_expr(node):
             if isinstance(node, ast.Constant):
@@ -439,10 +523,8 @@ class ReplaceIfWithDispatch(Transformer):
                 if _visit(child):
                     return True
 
-            # If this expression cannot be proven static from itself or children,
-            # keep dynamic handling conservative.
-            if isinstance(node, ast.expr) and not isinstance(node, ast.Name):
-                return True
+            # If this expression cannot be proven dynamic from itself or children,
+            # keep it static to avoid over-rewriting unrelated Python control flow.
             return False
 
         return _visit(test_node)
@@ -564,6 +646,82 @@ class ReplaceIfWithDispatch(Transformer):
             keywords=[],
         )
 
+    @staticmethod
+    def _collect_defined_names(stmt):
+        defined = []
+
+        def add_name(name):
+            if isinstance(name, str) and name not in defined:
+                defined.append(name)
+
+        class DefCollector(ast.NodeVisitor):
+            def _collect_target(self, target):
+                if isinstance(target, ast.Name):
+                    add_name(target.id)
+                elif isinstance(target, (ast.Tuple, ast.List)):
+                    for elt in target.elts:
+                        self._collect_target(elt)
+                elif isinstance(target, ast.Starred):
+                    self._collect_target(target.value)
+
+            def visit_Assign(self, node):
+                for target in node.targets:
+                    self._collect_target(target)
+
+            def visit_AugAssign(self, node):
+                self._collect_target(node.target)
+
+            def visit_AnnAssign(self, node):
+                self._collect_target(node.target)
+
+            def visit_For(self, node):
+                self._collect_target(node.target)
+
+            def visit_AsyncFor(self, node):
+                self._collect_target(node.target)
+
+            def visit_With(self, node):
+                for item in node.items:
+                    if item.optional_vars is not None:
+                        self._collect_target(item.optional_vars)
+
+            def visit_AsyncWith(self, node):
+                for item in node.items:
+                    if item.optional_vars is not None:
+                        self._collect_target(item.optional_vars)
+
+            def visit_ExceptHandler(self, node):
+                if node.name:
+                    add_name(node.name)
+
+            def visit_NamedExpr(self, node):
+                self._collect_target(node.target)
+
+        DefCollector().visit(stmt)
+        return defined
+
+    def visit_FunctionDef(self, node: ast.FunctionDef):
+        if getattr(node, _ASTREWRITE_MARKER, False):
+            return node
+
+        visible = {arg.arg for arg in node.args.posonlyargs + node.args.args + node.args.kwonlyargs}
+        self._visible_name_stack.append(visible)
+        new_body = []
+        try:
+            for stmt in node.body:
+                transformed = self.visit(stmt)
+                if isinstance(transformed, list):
+                    new_body.extend(transformed)
+                else:
+                    new_body.append(transformed)
+                for name in self._collect_defined_names(stmt):
+                    visible.add(name)
+        finally:
+            self._visible_name_stack.pop()
+
+        node.body = new_body
+        return node
+
     def visit_If(self, node: ast.If) -> List[ast.AST]:
         if _is_constexpr(node.test):
             node.test = _unwrap_constexpr(node.test)
@@ -579,23 +737,33 @@ class ReplaceIfWithDispatch(Transformer):
         then_name = f"__then_{uid}"
         then_vars = self._collect_assigned_vars(node.body)
         else_vars = self._collect_assigned_vars(node.orelse)
-        state_names = list(then_vars)
+        arg_names = list(then_vars)
         for var in else_vars:
-            if var not in state_names:
-                state_names.append(var)
+            if var not in arg_names:
+                arg_names.append(var)
 
-        fn_args = [ast.arg(arg=v, annotation=None) for v in state_names]
+        # result_names: only carry variables visible before this if.
+        result_names = list(arg_names)
+        if self._visible_name_stack:
+            visible = self._visible_name_stack[-1]
+            result_names = [name for name in result_names if name in visible]
+
+        fn_args = [ast.arg(arg="__ret_names", annotation=None)] + [ast.arg(arg=v, annotation=None) for v in arg_names]
         def _state_return_node():
             return ast.Return(
-                value=ast.Dict(
-                    keys=[ast.Constant(value=v) for v in state_names],
-                    values=[ast.Name(id=v, ctx=ast.Load()) for v in state_names],
+                value=ast.Call(
+                    func=ast.Name(id="scf_if_collect_results", ctx=ast.Load()),
+                    args=[
+                        ast.Name(id="__ret_names", ctx=ast.Load()),
+                        ast.Call(func=ast.Name(id="locals", ctx=ast.Load()), args=[], keywords=[]),
+                    ],
+                    keywords=[],
                 )
             )
         then_func = ast.FunctionDef(
             name=then_name,
             args=ast.arguments(posonlyargs=[], args=fn_args, kwonlyargs=[], kw_defaults=[], defaults=[]),
-            body=list(node.body) + ([_state_return_node()] if state_names else []),
+            body=list(node.body) + ([_state_return_node()] if result_names else []),
             decorator_list=[],
             type_params=[],
         )
@@ -605,17 +773,33 @@ class ReplaceIfWithDispatch(Transformer):
 
         dispatch_args = [node.test, ast.Name(then_name, ctx=ast.Load())]
         dispatch_keywords = []
-        if state_names:
+        if arg_names:
             dispatch_keywords.extend(
                 [
                     ast.keyword(
-                        arg="state_names",
-                        value=ast.Tuple(elts=[ast.Constant(value=v) for v in state_names], ctx=ast.Load()),
+                        arg="arg_names",
+                        value=ast.Tuple(elts=[ast.Constant(value=v) for v in arg_names], ctx=ast.Load()),
                     ),
                     ast.keyword(
-                        arg="state_values",
+                        arg="arg_values",
                         value=ast.Tuple(
-                            elts=[self._state_value_expr(v) for v in state_names],
+                            elts=[self._state_value_expr(v) for v in arg_names],
+                            ctx=ast.Load(),
+                        ),
+                    ),
+                ]
+            )
+        if result_names:
+            dispatch_keywords.extend(
+                [
+                    ast.keyword(
+                        arg="result_names",
+                        value=ast.Tuple(elts=[ast.Constant(value=v) for v in result_names], ctx=ast.Load()),
+                    ),
+                    ast.keyword(
+                        arg="result_values",
+                        value=ast.Tuple(
+                            elts=[self._state_value_expr(v) for v in result_names],
                             ctx=ast.Load(),
                         ),
                     ),
@@ -624,18 +808,19 @@ class ReplaceIfWithDispatch(Transformer):
         result = [then_func]
 
         else_name = None
+        synthesized_else = False
         if node.orelse:
             else_name = f"__else_{uid}"
             else_func = ast.FunctionDef(
                 name=else_name,
                 args=ast.arguments(
                     posonlyargs=[],
-                    args=[ast.arg(arg=v, annotation=None) for v in state_names],
+                    args=[ast.arg(arg="__ret_names", annotation=None)] + [ast.arg(arg=v, annotation=None) for v in arg_names],
                     kwonlyargs=[],
                     kw_defaults=[],
                     defaults=[],
                 ),
-                body=list(node.orelse) + ([_state_return_node()] if state_names else []),
+                body=list(node.orelse) + ([_state_return_node()] if result_names else []),
                 decorator_list=[],
                 type_params=[],
             )
@@ -644,13 +829,14 @@ class ReplaceIfWithDispatch(Transformer):
             else_func = ast.fix_missing_locations(else_func)
             dispatch_args.append(ast.Name(else_name, ctx=ast.Load()))
             result.append(else_func)
-        elif state_names:
+        elif result_names:
             else_name = f"__else_{uid}"
+            synthesized_else = True
             else_func = ast.FunctionDef(
                 name=else_name,
                 args=ast.arguments(
                     posonlyargs=[],
-                    args=[ast.arg(arg=v, annotation=None) for v in state_names],
+                    args=[ast.arg(arg="__ret_names", annotation=None)] + [ast.arg(arg=v, annotation=None) for v in arg_names],
                     kwonlyargs=[],
                     kw_defaults=[],
                     defaults=[],
@@ -665,16 +851,19 @@ class ReplaceIfWithDispatch(Transformer):
             dispatch_args.append(ast.Name(else_name, ctx=ast.Load()))
             result.append(else_func)
 
+        if synthesized_else:
+            dispatch_keywords.append(ast.keyword(arg="auto_else", value=ast.Constant(value=True)))
+
         dispatch_value = ast.Call(
             func=ast.Name("scf_if_dispatch", ctx=ast.Load()),
             args=dispatch_args,
             keywords=dispatch_keywords,
         )
-        if state_names:
-            if len(state_names) == 1:
-                target = ast.Name(id=state_names[0], ctx=ast.Store())
+        if result_names and else_name is not None:
+            if len(result_names) == 1:
+                target = ast.Name(id=result_names[0], ctx=ast.Store())
             else:
-                target = ast.Tuple(elts=[ast.Name(id=v, ctx=ast.Store()) for v in state_names], ctx=ast.Store())
+                target = ast.Tuple(elts=[ast.Name(id=v, ctx=ast.Store()) for v in result_names], ctx=ast.Store())
             dispatch_stmt = ast.Assign(targets=[target], value=dispatch_value)
         else:
             dispatch_stmt = ast.Expr(value=dispatch_value)
