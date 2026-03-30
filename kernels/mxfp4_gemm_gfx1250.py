@@ -57,6 +57,7 @@ def compile_mxfp4_gemm(
     inst_prefetch: bool = False,
     wave_specialized_tdm: bool = False,
     use_scale_opsel: bool = False,
+    b_preshuffle: bool = False,
 ):
     """Compile an MXFP4 GEMM kernel with TDM async copy and multi-stage buffering.
 
@@ -282,6 +283,18 @@ def compile_mxfp4_gemm(
 
         def make_desc_b(memref, k_base):
             k_packed_off = k_base / arith.index(PACK_FACTOR)
+            if b_preshuffle:
+                return tdm_ops.make_tensor_descriptor_2d(
+                    global_ptr=arg_b, lds_memref=memref,
+                    global_offset=(blk_n / arith.index(16),
+                                   k_packed_off * arith.index(16)),
+                    tensor_shape=(N // 16, K_packed * 16),
+                    strides=(K_packed * 16, 1),
+                    tile_shape=(tile_n // 16, packed_tile_k * 16),
+                    elem_bytes=1,
+                    pad_interval=0, pad_amount=0,
+                    num_warps=num_warps,
+                    workgroup_mask=b_mcast_mask)
             return tdm_ops.make_tensor_descriptor_2d(
                 global_ptr=arg_b, lds_memref=memref,
                 global_offset=(blk_n, k_packed_off),
@@ -389,6 +402,21 @@ def compile_mxfp4_gemm(
             lane16 -> N-row, lane_kgrp -> K-half.
             Each 32-col WMMA needs 2 groups of 16 N-rows -> 2 bases per wn.
             """
+            if b_preshuffle:
+                # Preshuffled: LDS has 16x16 byte tiles packed contiguously.
+                # Each N-group (16 rows) occupies packed_tile_k * 16 bytes.
+                # kgrp selects K-half (tiles 0-1 vs tiles 2-3 within a K-subtile).
+                # lane16 selects the row within the N-group (stride 16 bytes).
+                _ngroup_stride = packed_tile_k * 16
+                _n_group_base = warp_tile_n * wave_n_idx // arith.index(16)
+                row_off = lane16 * arith.index(16)
+                k_tile_off = lane_kgrp * arith.index(512)   # 2 tiles * 256 bytes
+                bases = []
+                for wn_half in range_constexpr(wmma_n_rep * 2):
+                    ngroup_off = _n_group_base * arith.index(_ngroup_stride) \
+                        + arith.index(wn_half * _ngroup_stride)
+                    bases.append(ngroup_off + row_off + k_tile_off)
+                return lds_ptr, bases
             row_base = (warp_n_base + lane16) * arith.index(lds_b_stride_bytes)
             k_half_off = lane_kgrp * arith.index(32)
             bases = []
@@ -403,13 +431,25 @@ def compile_mxfp4_gemm(
             Returns vector<16xi32> via 4 x ds_load_b128.
             b_lane_bases: list of 2*wmma_n_rep pre-computed bases.
             """
-            k_byte_off = arith.index(ks * WMMA_K // PACK_FACTOR)
-            base0 = b_lane_bases[wn * 2] + k_byte_off
-            v0 = lds_load_b128_raw(lds_buffer, base0)
-            v1 = lds_load_b128_raw(lds_buffer, base0 + arith.index(16))
-            base1 = b_lane_bases[wn * 2 + 1] + k_byte_off
-            v2 = lds_load_b128_raw(lds_buffer, base1)
-            v3 = lds_load_b128_raw(lds_buffer, base1 + arith.index(16))
+            if b_preshuffle:
+                # Preshuffled: each K-tile is 256 bytes (16 rows x 16 bytes).
+                # kgrp already in base selects K-half (tiles 0-1 vs 2-3).
+                # ks selects which K-subtile (group of 4 K-tiles = 1024 bytes).
+                k_subtile_off = arith.index(ks * 4 * 256)
+                base0 = b_lane_bases[wn * 2] + k_subtile_off
+                v0 = lds_load_b128_raw(lds_buffer, base0)
+                v1 = lds_load_b128_raw(lds_buffer, base0 + arith.index(256))
+                base1 = b_lane_bases[wn * 2 + 1] + k_subtile_off
+                v2 = lds_load_b128_raw(lds_buffer, base1)
+                v3 = lds_load_b128_raw(lds_buffer, base1 + arith.index(256))
+            else:
+                k_byte_off = arith.index(ks * WMMA_K // PACK_FACTOR)
+                base0 = b_lane_bases[wn * 2] + k_byte_off
+                v0 = lds_load_b128_raw(lds_buffer, base0)
+                v1 = lds_load_b128_raw(lds_buffer, base0 + arith.index(16))
+                base1 = b_lane_bases[wn * 2 + 1] + k_byte_off
+                v2 = lds_load_b128_raw(lds_buffer, base1)
+                v3 = lds_load_b128_raw(lds_buffer, base1 + arith.index(16))
             v01 = vector.shuffle(v0, v1, list(range(8)))
             v23 = vector.shuffle(v2, v3, list(range(8)))
             return vector.shuffle(v01, v23, list(range(16)))
@@ -488,9 +528,15 @@ def compile_mxfp4_gemm(
                                  next_bs_info=None):
             """Half-based A-streaming: 4-WMMA bursts, 2 waits per K-subtile.
 
-            Splits wmma_m_rep iterations into two halves:
-              Half 0 (wm=0..half-1): pre-load 2 A-frags, wait, 4 WMMAs
-              Half 1 (wm=half..end): load during Half 0 coexec, wait, 4 WMMAs
+            Structure per K-subtile:
+              Pre-load A_h0 (2 frags = 4 ds_load)
+              wait(0) — B+scales+A_h0 all ready
+              Half 0: 4 consecutive WMMAs
+              Load A_h1 (4 ds_load) in Half 0 WMMA coexec
+              wait(0) — A_h1 ready (expected near-zero stall)
+              sched_barrier(0) — isolate Half 1 from subsequent loads
+              Half 1: 4 consecutive WMMAs
+              next_bs_info loads after Half 1 (if applicable)
 
             next_bs_info: optional (b_buf, b_bases, bs_buf, bs_bases,
                           as_buf, as_bases, next_ks) -- issues B+scale loads
@@ -665,9 +711,17 @@ def compile_mxfp4_gemm(
             tdm_ops.l2_prefetch_tile(
                 arg_a, (blk_m, pf_k_packed), (tile_m, packed_tile_k), (K_packed, 1),
                 elem_bytes=1, thread_id=tx, block_threads=block_threads)
-            tdm_ops.l2_prefetch_tile(
-                arg_b, (blk_n, pf_k_packed), (tile_n, packed_tile_k), (K_packed, 1),
-                elem_bytes=1, thread_id=tx, block_threads=block_threads)
+            if b_preshuffle:
+                tdm_ops.l2_prefetch_tile(
+                    arg_b,
+                    (blk_n / arith.index(16), pf_k_packed * arith.index(16)),
+                    (tile_n // 16, packed_tile_k * 16),
+                    (K_packed * 16, 1),
+                    elem_bytes=1, thread_id=tx, block_threads=block_threads)
+            else:
+                tdm_ops.l2_prefetch_tile(
+                    arg_b, (blk_n, pf_k_packed), (tile_n, packed_tile_k), (K_packed, 1),
+                    elem_bytes=1, thread_id=tx, block_threads=block_threads)
 
         acc_zero = arith.constant_vector(0.0, T.vec(16, T.f32))
         accs = [acc_zero] * n_accs
@@ -783,7 +837,7 @@ def compile_mxfp4_gemm(
         dgroup1_bs = desc_bs_init.dgroup1
         
         adv_a_bytes = arith.index(tile_k // PACK_FACTOR)
-        adv_b_bytes = arith.index(tile_k // PACK_FACTOR)
+        adv_b_bytes = arith.index(packed_tile_k * 16 if b_preshuffle else packed_tile_k)
         adv_as_bytes = arith.index(tile_k // SCALE_BLOCK * wmma_m_rep)
         adv_bs_bytes = arith.index(tile_k // SCALE_BLOCK * b_scale_load_rep)
 
@@ -938,7 +992,7 @@ def compile_mxfp4_gemm(
                  num_buffers, effective_waves_per_eu, l2_prefetch_distance,
                  cluster_m, cluster_n, use_tdm_store,
                  out_dtype, inst_prefetch, wave_specialized_tdm,
-                 use_scale_opsel)
+                 use_scale_opsel, b_preshuffle)
 
     @flyc.jit(compile_hints={"expert_scheduling_mode": True})
     def launch_mxfp4_gemm(
