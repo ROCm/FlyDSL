@@ -30,28 +30,64 @@ from flydsl.expr import arith, vector, range_constexpr
 from flydsl.expr.arith import ArithValue
 from flydsl.expr.typing import T
 from flydsl.expr import buffer_ops
-from flydsl._mlir import ir
+from kernels.kernels_common import dtype_to_elem_type
+from kernels.mfma_preshuffle_pipeline import crd2idx
 
 
 WARP_SIZE = 64
 VEC_WIDTH = 8
 
 
-def _crd2idx_i32(coord, layout):
-    """crd2idx → scalar i32 (unwraps int_tuple, casts to i32 for buffer offset math)."""
-    result = fx.crd2idx(coord, layout)
-    scalar = fx.get_scalar(result)
-    if isinstance(scalar, ir.Value) and isinstance(scalar.type, ir.IndexType):
-        scalar = arith.index_cast(T.i32, scalar)
-    return scalar
+def _layout_to_dword_off(coord, layout, elem_bytes):
+    """Coordinate → dword offset for buffer_load/buffer_store.
+
+    crd2idx(coord, layout) → element offset (index) → byte offset (i32) → dword offset (i32).
+    """
+    elem_off = arith.index_cast(T.i32, crd2idx(coord, layout))
+    return (ArithValue(elem_off) * elem_bytes) >> fx.Int32(2)
 
 
-def dtype_to_elem_type(dtype_str: str):
-    if dtype_str == "f16":
-        return T.f16
-    if dtype_str == "bf16":
-        return T.bf16
-    raise ValueError(f"unsupported dtype: {dtype_str!r} (expected 'bf16' or 'f16')")
+def _apply_neox_rope(qk_rsrc, qk_dw, cos_rsrc, sin_rsrc, cos_dw,
+                     pair_rsrc, pair_dw, is_first_half,
+                     vec_dwords, vec_type_e, i32_vec_ty):
+    """Load, rotate (NeoX), and return the rotated vector as i32.
+
+    Performs:
+      out[first_half]  = qk * cos - pair * sin
+      out[second_half] = qk * cos + pair * sin
+
+    Args:
+        qk_rsrc:       buffer resource for Q or K
+        qk_dw:         dword offset of the current thread's vec in qk_rsrc
+        cos_rsrc:      buffer resource for CosCache
+        sin_rsrc:      buffer resource for SinCache
+        cos_dw:        dword offset into cos/sin (shared for both halves)
+        pair_rsrc:     buffer resource for the paired-half vec (same as qk_rsrc)
+        pair_dw:       dword offset of the partner vec in pair_rsrc
+        is_first_half: i1 predicate — true when tid < vecs_per_half
+        vec_dwords:    number of i32 dwords per vector load
+        vec_type_e:    MLIR vector type in element dtype (e.g. vec<8xbf16>)
+        i32_vec_ty:    MLIR vector type in i32 (e.g. vec<4xi32>)
+
+    Returns:
+        rot_i32: rotated vector as i32 vector, ready for buffer_store
+    """
+    def _load_e(rsrc, dw):
+        raw = buffer_ops.buffer_load(rsrc, dw, vec_width=vec_dwords, dtype=T.i32)
+        return vector.bitcast(vec_type_e, raw) if vec_dwords != VEC_WIDTH else raw.bitcast(vec_type_e)
+
+    qk_e   = _load_e(qk_rsrc,   qk_dw)
+    cos_e  = _load_e(cos_rsrc,  cos_dw)
+    sin_e  = _load_e(sin_rsrc,  cos_dw)
+    pair_e = _load_e(pair_rsrc, pair_dw)
+
+    # NeoX sign: first half uses -sin, second half uses +sin
+    qk_cos   = ArithValue(qk_e) * ArithValue(cos_e)
+    pair_sin = ArithValue(pair_e) * ArithValue(sin_e)
+    sin_term = arith.select(is_first_half, arith.negf(pair_sin), pair_sin)
+    rot_e    = ArithValue(qk_cos) + ArithValue(sin_term)
+
+    return vector.bitcast(i32_vec_ty, rot_e) if vec_dwords != VEC_WIDTH else rot_e.bitcast(i32_vec_ty)
 
 
 def build_fused_rope_cache_module(
@@ -88,9 +124,9 @@ def build_fused_rope_cache_module(
         raise NotImplementedError("Partial rotation not yet supported")
     if dtype_str not in ("bf16", "f16"):
         raise ValueError(
-            f"dtype_str must be 'bf16' or 'f16', got {dtype_str!r}"
+            f"dtype_str must be 'bf16' or 'f16', got {dtype_str!r} "
+            f"(f32 is not supported: kernel uses 2-byte elem_bytes and vec8 vectorization)"
         )
-
     half_dim = rotary_dim // 2
     elem_bytes = 2  # bf16 and f16 are both 2 bytes
     vec_dwords = (VEC_WIDTH * elem_bytes) // 4  # 4 dwords for vec8 of 2-byte elements
@@ -178,45 +214,26 @@ def build_fused_rope_cache_module(
 
             # -- Q address via crd2idx --
             q_coord = (pid_t, fx.Int32(pid_hq), tid)
-            q_elem_off = _crd2idx_i32(q_coord, q_layout)
-            q_bytes = ArithValue(q_elem_off) * elem_bytes
-            q_dw = q_bytes >> fx.Int32(2)
+            q_dw = _layout_to_dword_off(q_coord, q_layout, elem_bytes)
 
             # -- cos/sin address via crd2idx --
+            # tid % vecs_per_half wraps second-half threads [vecs_per_half, vecs_per_head)
+            # back to [0, vecs_per_half): NeoX uses the same cos/sin for both halves;
+            # only the sign of the sin term differs (handled by is_first_half select below).
             cos_vec_idx = tid % vecs_per_half
             cos_coord = (pos_val, fx.Int32(cos_vec_idx))
-            cos_elem_off = _crd2idx_i32(cos_coord, cos_sin_layout)
-            cos_bytes = ArithValue(cos_elem_off) * elem_bytes
-            cos_dw = cos_bytes >> fx.Int32(2)
+            cos_dw = _layout_to_dword_off(cos_coord, cos_sin_layout, elem_bytes)
 
-            # Load Q, cos, sin
-            q_raw = buffer_ops.buffer_load(q_rsrc, q_dw, vec_width=vec_dwords, dtype=T.i32)
-            cos_raw = buffer_ops.buffer_load(cos_rsrc, cos_dw, vec_width=vec_dwords, dtype=T.i32)
-            sin_raw = buffer_ops.buffer_load(sin_rsrc, cos_dw, vec_width=vec_dwords, dtype=T.i32)
-            q_e = vector.bitcast(vec_type_e, q_raw) if vec_dwords != VEC_WIDTH else q_raw.bitcast(vec_type_e)
-            cos_e = vector.bitcast(vec_type_e, cos_raw) if vec_dwords != VEC_WIDTH else cos_raw.bitcast(vec_type_e)
-            sin_e = vector.bitcast(vec_type_e, sin_raw) if vec_dwords != VEC_WIDTH else sin_raw.bitcast(vec_type_e)
-
-            # -- Paired-half load via layout (partner vec position, same layout) --
+            # -- Paired-half load + NeoX rotation --
             is_first_half = arith.cmpi(arith.CmpIPredicate.ult, tid, fx.Int32(vecs_per_half))
             pair_tid = arith.select(is_first_half, tid + vecs_per_half, tid - vecs_per_half)
             pair_coord = (pid_t, fx.Int32(pid_hq), pair_tid)
-            pair_elem_off = _crd2idx_i32(pair_coord, q_layout)
-            pair_bytes = ArithValue(pair_elem_off) * elem_bytes
-            pair_dw = pair_bytes >> fx.Int32(2)
-            pair_raw = buffer_ops.buffer_load(q_rsrc, pair_dw, vec_width=vec_dwords, dtype=T.i32)
-            pair_e = vector.bitcast(vec_type_e, pair_raw) if vec_dwords != VEC_WIDTH else pair_raw.bitcast(vec_type_e)
-
-            # -- NeoX rotation (arith — real math) --
-            # first_half:  out = q*cos - pair*sin
-            # second_half: out = q*cos + pair*sin
-            q_cos = ArithValue(q_e) * ArithValue(cos_e)
-            pair_sin = ArithValue(pair_e) * ArithValue(sin_e)
-            neg_pair_sin = arith.negf(pair_sin)
-            sin_term = arith.select(is_first_half, neg_pair_sin, pair_sin)
-            rot_e = ArithValue(q_cos) + ArithValue(sin_term)
-
-            rot_i32 = vector.bitcast(i32_vec_ty, rot_e) if vec_dwords != VEC_WIDTH else rot_e.bitcast(i32_vec_ty)
+            pair_dw = _layout_to_dword_off(pair_coord, q_layout, elem_bytes)
+            rot_i32 = _apply_neox_rope(
+                q_rsrc, q_dw, cos_rsrc, sin_rsrc, cos_dw,
+                q_rsrc, pair_dw, is_first_half,
+                vec_dwords, vec_type_e, i32_vec_ty,
+            )
             buffer_ops.buffer_store(rot_i32, qo_rsrc, q_dw)
 
     # ----- Kernel 2: K RoPE + KV cache write -----
@@ -265,44 +282,26 @@ def build_fused_rope_cache_module(
 
             # -- K/V address via crd2idx --
             kv_coord = (pid_t, fx.Int32(pid_hk), tid)
-            kv_elem_off = _crd2idx_i32(kv_coord, kv_layout)
-            kv_bytes = ArithValue(kv_elem_off) * elem_bytes
-            k_dw = kv_bytes >> fx.Int32(2)
+            k_dw = _layout_to_dword_off(kv_coord, kv_layout, elem_bytes)
 
             # -- cos/sin address via crd2idx --
+            # tid % vecs_per_half wraps second-half threads [vecs_per_half, vecs_per_head)
+            # back to [0, vecs_per_half): NeoX uses the same cos/sin for both halves;
+            # only the sign of the sin term differs (handled by is_first_half select below).
             cos_vec_idx = tid % vecs_per_half
             cos_coord = (pos_val, fx.Int32(cos_vec_idx))
-            cos_elem_off = _crd2idx_i32(cos_coord, cos_sin_layout)
-            cos_bytes = ArithValue(cos_elem_off) * elem_bytes
-            cos_dw = cos_bytes >> fx.Int32(2)
+            cos_dw = _layout_to_dword_off(cos_coord, cos_sin_layout, elem_bytes)
 
-            # Load K, V, cos, sin
-            k_raw = buffer_ops.buffer_load(k_rsrc, k_dw, vec_width=vec_dwords, dtype=T.i32)
-            cos_raw = buffer_ops.buffer_load(cos_rsrc, cos_dw, vec_width=vec_dwords, dtype=T.i32)
-            sin_raw = buffer_ops.buffer_load(sin_rsrc, cos_dw, vec_width=vec_dwords, dtype=T.i32)
-            k_e = vector.bitcast(vec_type_e, k_raw) if vec_dwords != VEC_WIDTH else k_raw.bitcast(vec_type_e)
-            cos_e = vector.bitcast(vec_type_e, cos_raw) if vec_dwords != VEC_WIDTH else cos_raw.bitcast(vec_type_e)
-            sin_e = vector.bitcast(vec_type_e, sin_raw) if vec_dwords != VEC_WIDTH else sin_raw.bitcast(vec_type_e)
-
-            # -- Paired-half load via layout (partner vec position, same layout) --
+            # -- Paired-half load + NeoX rotation --
             is_first_half = arith.cmpi(arith.CmpIPredicate.ult, tid, fx.Int32(vecs_per_half))
             pair_tid = arith.select(is_first_half, tid + vecs_per_half, tid - vecs_per_half)
             pair_coord = (pid_t, fx.Int32(pid_hk), pair_tid)
-            pair_elem_off = _crd2idx_i32(pair_coord, kv_layout)
-            pair_bytes = ArithValue(pair_elem_off) * elem_bytes
-            pair_dw = pair_bytes >> fx.Int32(2)
-            pair_raw = buffer_ops.buffer_load(k_rsrc, pair_dw, vec_width=vec_dwords, dtype=T.i32)
-            pair_e = vector.bitcast(vec_type_e, pair_raw) if vec_dwords != VEC_WIDTH else pair_raw.bitcast(vec_type_e)
-
-            # -- K RoPE rotation (arith — real math) --
-            k_cos = ArithValue(k_e) * ArithValue(cos_e)
-            pair_sin = ArithValue(pair_e) * ArithValue(sin_e)
-            neg_pair_sin = arith.negf(pair_sin)
-            sin_term = arith.select(is_first_half, neg_pair_sin, pair_sin)
-            k_rot_e = ArithValue(k_cos) + ArithValue(sin_term)
-
-            # Store k_out
-            k_rot_i32 = vector.bitcast(i32_vec_ty, k_rot_e) if vec_dwords != VEC_WIDTH else k_rot_e.bitcast(i32_vec_ty)
+            pair_dw = _layout_to_dword_off(pair_coord, kv_layout, elem_bytes)
+            k_rot_i32 = _apply_neox_rope(
+                k_rsrc, k_dw, cos_rsrc, sin_rsrc, cos_dw,
+                k_rsrc, pair_dw, is_first_half,
+                vec_dwords, vec_type_e, i32_vec_ty,
+            )
             buffer_ops.buffer_store(k_rot_i32, ko_rsrc, k_dw)
 
             # --- KV Cache write ---
@@ -325,9 +324,7 @@ def build_fused_rope_cache_module(
                          VEC_WIDTH),
                     )
                     kc_coord = (pid_t_slot, pid_b, pid_hk, tid)
-                    kc_elem_off = _crd2idx_i32(kc_coord, kc_flash_layout)
-                    kc_bytes = ArithValue(kc_elem_off) * elem_bytes
-                    kc_dw = kc_bytes >> fx.Int32(2)
+                    kc_dw = _layout_to_dword_off(kc_coord, kc_flash_layout, elem_bytes)
 
                     buffer_ops.buffer_store(k_rot_i32, kc_rsrc, kc_dw)
                     # value_cache: same layout
@@ -347,13 +344,14 @@ def build_fused_rope_cache_module(
                          1),
                     )
                     kc_coord_nf = (pid_t_slot, pid_hk, dim_group, pid_b, dim_within)
-                    kc_elem_off_nf = _crd2idx_i32(kc_coord_nf, kc_nf_layout)
-                    kc_bytes_nf = ArithValue(kc_elem_off_nf) * elem_bytes
-                    kc_dw_nf = kc_bytes_nf >> fx.Int32(2)
+                    kc_dw_nf = _layout_to_dword_off(kc_coord_nf, kc_nf_layout, elem_bytes)
 
                     buffer_ops.buffer_store(k_rot_i32, kc_rsrc, kc_dw_nf)
 
                     # -- Non-flash value_cache: [num_blocks, KH, D, BS] scalar stores --
+                    # Scalar stores required: stride-1 dim is block_size (not D), so
+                    # consecutive elements along D are block_size apart in memory —
+                    # a vector store would scatter across non-contiguous addresses.
                     v_e = vector.bitcast(vec_type_e, v_raw) if vec_dwords != VEC_WIDTH else v_raw.bitcast(vec_type_e)
 
                     vc_nf_layout = fx.make_layout(
@@ -367,7 +365,7 @@ def build_fused_rope_cache_module(
                         v_scalar = vector.extract(v_e, static_position=[vi])
                         d_idx = ArithValue(tid) * VEC_WIDTH + vi
                         vc_coord = (pid_t_slot, pid_hk, d_idx, pid_b)
-                        vc_elem_off = _crd2idx_i32(vc_coord, vc_nf_layout)
+                        vc_elem_off = arith.index_cast(T.i32, crd2idx(vc_coord, vc_nf_layout))
                         buffer_ops.buffer_store(v_scalar, vc_rsrc, vc_elem_off)
 
     @flyc.jit
