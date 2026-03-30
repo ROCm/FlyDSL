@@ -620,7 +620,7 @@ class CallState:
 class JitFunction:
     def __init__(self, func: Callable, compile_hints: Optional[dict] = None):
         self.func = ASTRewriter.transform(func)
-        self.compile_hints = compile_hints or {}
+        self.compile_hints = dict(compile_hints) if compile_hints is not None else {}
         self.manager_key = None
         self.cache_manager = None
         self._call_state_cache = {}  # cache_key -> CallState
@@ -774,65 +774,64 @@ class JitFunction:
                 _ensure_stream_arg(jit_args)
                 return cached_func(*jit_args)
 
-        with ir.Context() as ctx:
-            with CompilationContext.compile_hints(self.compile_hints):
-                param_names, jit_args, dsl_types, constexpr_values = convert_to_jit_arguments(sig, bound)
-                has_user_stream = _ensure_stream_arg(jit_args)
-                ir_types = fly_types(jit_args)
-                loc = ir.Location.unknown(ctx)
+        with ir.Context() as ctx, CompilationContext.compile_hints(self.compile_hints):
+            param_names, jit_args, dsl_types, constexpr_values = convert_to_jit_arguments(sig, bound)
+            has_user_stream = _ensure_stream_arg(jit_args)
+            ir_types = fly_types(jit_args)
+            loc = ir.Location.unknown(ctx)
 
-                log().info(f"jit_args={jit_args}")
-                log().info(f"dsl_types={dsl_types}")
+            log().info(f"jit_args={jit_args}")
+            log().info(f"dsl_types={dsl_types}")
 
-                module = ir.Module.create(loc=loc)
-                module.operation.attributes["gpu.container_module"] = ir.UnitAttr.get()
+            module = ir.Module.create(loc=loc)
+            module.operation.attributes["gpu.container_module"] = ir.UnitAttr.get()
 
-                func_tracker = FuncLocationTracker(self.func)
+            func_tracker = FuncLocationTracker(self.func)
 
-                with ir.InsertionPoint(module.body), loc:
-                    backend = get_backend()
-                    gpu_module = create_gpu_module("kernels", targets=backend.gpu_module_targets())
+            with ir.InsertionPoint(module.body), loc:
+                backend = get_backend()
+                gpu_module = create_gpu_module("kernels", targets=backend.gpu_module_targets())
 
-                    func_op = func.FuncOp(self.func.__name__, (ir_types, []))
-                    func_op.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()
-                    if self.compile_hints.get("expert_scheduling_mode"):
-                        func_op.attributes["passthrough"] = ir.ArrayAttr.get([
-                            ir.ArrayAttr.get([
-                                ir.StringAttr.get("amdgpu-expert-scheduling-mode"),
-                                ir.StringAttr.get("true")
-                            ])
+                func_op = func.FuncOp(self.func.__name__, (ir_types, []))
+                func_op.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()
+                if self.compile_hints.get("expert_scheduling_mode"):
+                    func_op.attributes["passthrough"] = ir.ArrayAttr.get([
+                        ir.ArrayAttr.get([
+                            ir.StringAttr.get("amdgpu-expert-scheduling-mode"),
+                            ir.StringAttr.get("true")
                         ])
-                    entry_block = func_op.add_entry_block()
+                    ])
+                entry_block = func_op.add_entry_block()
 
-                    with CompilationContext.create(func_tracker) as comp_ctx:
-                        comp_ctx.gpu_module_op = gpu_module
-                        comp_ctx.gpu_module_body = get_gpu_module_body(gpu_module)
+                with CompilationContext.create(func_tracker) as comp_ctx:
+                    comp_ctx.gpu_module_op = gpu_module
+                    comp_ctx.gpu_module_body = get_gpu_module_body(gpu_module)
 
-                        with ir.InsertionPoint(entry_block):
-                            ir_args = list(func_op.regions[0].blocks[0].arguments)
-                            if not has_user_stream:
-                                comp_ctx.stream_arg = ir_args[-1]
-                            user_jit_args = jit_args[: len(param_names)]
-                            dsl_args = fly_construct(dsl_types, user_jit_args, ir_args)
-                            log().info(f"dsl_args={dsl_args}")
-                            named_args = dict(zip(param_names, dsl_args))
-                            named_args.update(constexpr_values)
-                            self.func(**named_args)
-                            func.ReturnOp([])
+                    with ir.InsertionPoint(entry_block):
+                        ir_args = list(func_op.regions[0].blocks[0].arguments)
+                        if not has_user_stream:
+                            comp_ctx.stream_arg = ir_args[-1]
+                        user_jit_args = jit_args[: len(param_names)]
+                        dsl_args = fly_construct(dsl_types, user_jit_args, ir_args)
+                        log().info(f"dsl_args={dsl_args}")
+                        named_args = dict(zip(param_names, dsl_args))
+                        named_args.update(constexpr_values)
+                        self.func(**named_args)
+                        func.ReturnOp([])
 
-                original_ir = module.operation.get_asm(enable_debug_info=True)
+            original_ir = module.operation.get_asm(enable_debug_info=True)
 
-                compiled_module = MlirCompiler.compile(module, arch=backend.target.arch, func_name=self.func.__name__)
+            compiled_module = MlirCompiler.compile(module, arch=backend.target.arch, func_name=self.func.__name__)
 
-                if env.compile.compile_only:
-                    print(f"[flydsl] COMPILE_ONLY=1, compilation succeeded (arch={backend.target.arch})")
-                    return None
+            if env.compile.compile_only:
+                print(f"[flydsl] COMPILE_ONLY=1, compilation succeeded (arch={backend.target.arch})")
+                return None
 
-                compiled_func = CompiledArtifact(
-                    compiled_module,
-                    self.func.__name__,
-                    original_ir,
-                )
+            compiled_func = CompiledArtifact(
+                compiled_module,
+                self.func.__name__,
+                original_ir,
+            )
 
             # Always keep a reference to the latest compilation result so
             # flyc.compile() can retrieve it even when caching is disabled.
@@ -844,7 +843,7 @@ class JitFunction:
                     str_key = self._cache_key_to_str(cache_key)
                     self.cache_manager.set(str_key, compiled_func)
 
-                result = compiled_func(*jit_args)
+            result = compiled_func(*jit_args)
 
             # Build CallState so subsequent calls skip DLPack.
             # Only when caching is enabled -- otherwise compiled_func will be
