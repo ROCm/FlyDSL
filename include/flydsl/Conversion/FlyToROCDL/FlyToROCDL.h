@@ -8,6 +8,7 @@
 
 namespace mlir {
 #define GEN_PASS_DECL_FLYTOROCDLCONVERSIONPASS
+#define GEN_PASS_DECL_FLYROCDLCLUSTERATTRPASS
 #include "flydsl/Conversion/Passes.h.inc"
 } // namespace mlir
 

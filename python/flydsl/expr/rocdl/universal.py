@@ -8,6 +8,7 @@ from ..._mlir.dialects._fly_enum_gen import AddressSpace
 from ..._mlir.dialects.fly import LayoutType, PointerType
 from ..._mlir.dialects.fly import MemRefType as FlyMemRefType
 from ..._mlir.dialects.fly_rocdl import CopyOpCDNA3BufferCopyType, MmaAtomCDNA3_MFMAType
+from ..._mlir._mlir_libs._mlirDialectsFlyROCDL import MmaAtomGFX1250_WMMAType
 from ..primitive import (
     get_iter,
     get_layout,
@@ -30,6 +31,15 @@ def MFMA(m, n, k, elem_ty_ab, elem_ty_acc=None):
     else:
         ty_acc = elem_ty_acc.ir_type if hasattr(elem_ty_acc, "ir_type") else elem_ty_acc
     return MmaAtomCDNA3_MFMAType.get(m, n, k, ty_ab, ty_ab, ty_acc)
+
+
+def WMMA(m, n, k, elem_ty_ab, elem_ty_acc=None):
+    ty_ab = elem_ty_ab.ir_type if hasattr(elem_ty_ab, "ir_type") else elem_ty_ab
+    if elem_ty_acc is None:
+        ty_acc = ir.F32Type.get()
+    else:
+        ty_acc = elem_ty_acc.ir_type if hasattr(elem_ty_acc, "ir_type") else elem_ty_acc
+    return MmaAtomGFX1250_WMMAType.get(m, n, k, ty_ab, ty_ab, ty_acc)
 
 
 def make_buffer_tensor(tensor: Tensor) -> Tensor:

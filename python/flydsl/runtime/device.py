@@ -7,13 +7,16 @@ import subprocess
 from typing import Optional
 
 
+_ROCM_AGENT_TIMEOUT_S = int(os.environ.get("FLYDSL_ROCM_AGENT_TIMEOUT", "300"))
+
+
 def _arch_from_rocm_agent_enumerator() -> Optional[str]:
     """Query rocm_agent_enumerator (standard ROCm tool) for the first GPU arch."""
     try:
         out = subprocess.check_output(
             ["rocm_agent_enumerator", "-name"],
             text=True,
-            timeout=5,
+            timeout=_ROCM_AGENT_TIMEOUT_S,
             stderr=subprocess.DEVNULL,
         )
         for line in out.splitlines():
