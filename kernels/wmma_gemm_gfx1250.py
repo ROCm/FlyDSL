@@ -119,7 +119,7 @@ def compile_wmma_gemm_tdm(
             f"{num_buffers}-stage buffering requires num_k_tiles >= {num_buffers}, "
             f"got {num_k_tiles} (K={K}, tile_k={tile_k})")
 
-    gpu_arch = str(get_hip_arch(timeout_s=300))
+    gpu_arch = str(get_hip_arch())
     assert gpu_arch.startswith("gfx1250"), f"Expected gfx1250, got {gpu_arch}"
 
     wmma_op = rocdl.wmma_f32_16x16x32_f16 if is_f16 else rocdl.wmma_f32_16x16x32_bf16

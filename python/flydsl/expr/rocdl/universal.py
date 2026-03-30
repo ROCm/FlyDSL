@@ -8,7 +8,7 @@ from ..._mlir.dialects._fly_enum_gen import AddressSpace
 from ..._mlir.dialects.fly import LayoutType, PointerType
 from ..._mlir.dialects.fly import MemRefType as FlyMemRefType
 from ..._mlir.dialects.fly_rocdl import CopyOpCDNA3BufferCopyType, MmaAtomCDNA3_MFMAType
-from ..._mlir._mlir_libs._fly_rocdl import MmaAtomGFX1250_WMMAType
+from ..._mlir._mlir_libs._mlirDialectsFlyROCDL import MmaAtomGFX1250_WMMAType
 from ..primitive import (
     get_iter,
     get_layout,

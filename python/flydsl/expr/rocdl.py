@@ -17,8 +17,8 @@ Example:
     >>> rocdl.barrier()
 """
 
-from .._mlir._mlir_libs._fly_rocdl import CopyOpCDNA3BufferCopyType, MmaAtomCDNA3_MFMAType
-from .._mlir._mlir_libs._fly_rocdl import MmaAtomGFX1250_WMMAType
+from .._mlir._mlir_libs._mlirDialectsFlyROCDL import CopyOpCDNA3BufferCopyType, MmaAtomCDNA3_MFMAType
+from .._mlir._mlir_libs._mlirDialectsFlyROCDL import MmaAtomGFX1250_WMMAType
 from .._mlir.dialects.rocdl import *  # noqa: F401,F403
 from .._mlir.extras import types as T
 
