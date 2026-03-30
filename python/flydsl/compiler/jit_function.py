@@ -39,7 +39,7 @@ def _flydsl_key() -> str:
     Covers:
       1. All Python source files under flydsl.compiler.*, flydsl.expr.*,
          flydsl.runtime.*, flydsl.utils.*
-      2. Native shared libraries (_fly*.so, libFly*.so, libfly_jit_runtime.so,
+      2. Native shared libraries (_mlirDialectsFly*.so, libFly*.so, libfly_jit_runtime.so,
          libmlir_rocm_runtime.so)
       3. flydsl.__version__
 
@@ -344,6 +344,20 @@ def _sanitize_path_component(s: str) -> str:
     return _re.sub(r"[^A-Za-z0-9_.-]+", "_", s) if s else "unknown"
 
 
+def _extract_llvm_ir(module: ir.Module):
+    """Extract LLVM IR text from the gpu.module inside *module* (must already be in LLVM dialect)."""
+    try:
+        from .._mlir._mlir_libs._mlirDialectsLLVM import translate_module_to_llvmir
+
+        for op in module.body.operations:
+            if op.operation.name == "gpu.module":
+                return translate_module_to_llvmir(op.operation)
+        return None
+    except Exception as exc:
+        log().debug(f"[extract_llvm_ir] failed: {exc}")
+        return None
+
+
 def _pipeline_fragments(backend) -> list:
     """Return the MLIR pass-pipeline fragments for *backend*."""
     from .kernel_function import CompilationContext
@@ -379,8 +393,12 @@ class MlirCompiler:
             print(f"[flydsl.compile] dump 00_origin -> {out}")
 
             asm_for_isa = None
+            llir = None
             stage_num_base = 1
             for idx, frag in enumerate(fragments):
+                if frag.strip().startswith("gpu-module-to-binary"):
+                    llir = _extract_llvm_ir(module)
+
                 stage_num = stage_num_base + idx
                 stage_name = f"{stage_num:02d}_{_stage_label_from_fragment(frag)}"
                 pm = PassManager.parse(f"builtin.module({frag})")
@@ -394,8 +412,15 @@ class MlirCompiler:
                 if frag.strip() == "reconcile-unrealized-casts":
                     asm_for_isa = stage_asm
 
+            next_stage = stage_num_base + len(fragments)
+            if llir is not None:
+                ll_name = f"{next_stage:02d}_llvm_ir"
+                (dump_dir / f"{ll_name}.ll").write_text(llir, encoding="utf-8")
+                print(f"[flydsl.compile] dump {ll_name} -> {dump_dir / f'{ll_name}.ll'}")
+                next_stage += 1
+
             if asm_for_isa is not None:
-                isa_stage = f"{stage_num_base + len(fragments):02d}_final_isa"
+                isa_stage = f"{next_stage:02d}_final_isa"
                 isa_out = _dump_isa(
                     dump_dir=dump_dir,
                     ctx=module.context,

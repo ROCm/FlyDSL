@@ -8,7 +8,7 @@ from typing import Callable, Dict, List, Optional, Tuple, Type, get_origin
 
 import torch
 
-from .._mlir._mlir_libs._fly import DLTensorAdaptor
+from .._mlir._mlir_libs._mlirDialectsFly import DLTensorAdaptor
 from ..expr.typing import Boolean, Constexpr, Float32, Int32, Stream, Tensor
 from .protocol import DslType, JitArgument
 

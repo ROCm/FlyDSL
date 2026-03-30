@@ -60,7 +60,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          docker exec flydsl_test bash -c "apt-get update && apt-get install -y cmake build-essential"
+          docker exec flydsl_test bash -c "apt-get update && apt-get install -y cmake build-essential patchelf"
           docker exec flydsl_test bash -c "python3 -m pip install -U pip setuptools wheel"
           docker exec flydsl_test bash -c "python3 -m pip install ninja>=1.11.1"
           docker exec flydsl_test bash -c "python3 -m pip install -U 'hypothesis>=6.82.0'"
