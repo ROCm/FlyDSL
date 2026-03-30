@@ -102,14 +102,6 @@ def _unwrap_value(value):
     return value
 
 
-def _create_i64_constant(value: int) -> ir.Value:
-    """Create i64 constant using standard MLIR arith dialect."""
-    i64_type = T.i64()
-    attr = ir.IntegerAttr.get(i64_type, value)
-    op = std_arith.ConstantOp(i64_type, attr)
-    return op.result
-
-
 def _create_i32_constant(value: int) -> ir.Value:
     """Create i32 constant using standard MLIR arith dialect."""
     i32_type = T.i32()

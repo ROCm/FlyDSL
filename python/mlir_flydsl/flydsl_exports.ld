@@ -5,7 +5,7 @@
  *
  * Only exports:
  *   - mlir* C API functions (used by Python extension modules)
- *   - mlir:: C++ symbols (used by _fly.so, _mlir.so, etc.)
+ *   - mlir:: C++ symbols (used by _mlirDialectsFly.so, _mlir.so, etc.)
  *   - PyInit_* Python module initializers
  */
 FLYDSL_0.1 {
@@ -17,7 +17,7 @@ FLYDSL_0.1 {
     PyInit_*;
 
     /* mlir:: C++ namespace — needed by extension modules
-     * (_fly.so, _mlir.so, _mlirDialectsGPU.so, etc.)
+     * (_mlirDialectsFly.so, _mlir.so, _mlirDialectsGPU.so, etc.)
      * Covers: mlir::fly::*, mlir::fly_rocdl::*, mlir::python::*,
      *         mlir::detail::*, mlir::*Type, mlir::*Attr, etc.
      */

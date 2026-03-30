@@ -5,11 +5,7 @@
 
 #include "flydsl/Conversion/Passes.h"
 #include "flydsl/Dialect/FlyROCDL/IR/Dialect.h"
-#include "mlir/CAPI/IR.h"
 #include "mlir/CAPI/Registration.h"
-
-using namespace mlir;
-using namespace mlir::fly_rocdl;
 
 MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(FlyROCDL, fly_rocdl, mlir::fly_rocdl::FlyROCDLDialect)
 
