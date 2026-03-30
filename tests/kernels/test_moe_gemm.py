@@ -34,12 +34,13 @@ from tests.kernels.test_ref import torch_moe_gemm1, torch_moe_gemm2
 from tests.utils import pertoken_quant, shuffle_weight, shuffle_scale_for_int4
 from tests.test_common import verify_output, run_perftest
 from flydsl.runtime.device import get_rocm_arch
-try:
-    from tests.kernels.utils import fp4_utils
-    HAS_FP4_UTILS = True
-except ImportError:
-    fp4_utils = None
-    HAS_FP4_UTILS = False
+def _import_fp4_utils():
+    """Lazy import of fp4_utils (requires triton). Call inside fp4 branches."""
+    try:
+        from tests.kernels.utils import fp4_utils
+        return fp4_utils
+    except ImportError:
+        return None
 
 ARCH = get_rocm_arch()
 # GFX950 (MI350) and newer typically use OCP standard float8_e4m3fn
@@ -85,16 +86,10 @@ from kernels.moe_gemm_2stage import (
     compile_moe_reduction,
     MoeGemm2Mode,
 )
-try:
-    from kernels.mixed_moe_gemm_2stage import (
-        compile_mixed_moe_gemm1,
-        compile_mixed_moe_gemm2,
-    )
-    HAS_MIXED_MOE = True
-except ImportError:
-    compile_mixed_moe_gemm1 = None
-    compile_mixed_moe_gemm2 = None
-    HAS_MIXED_MOE = False
+from kernels.mixed_moe_gemm_2stage import (
+    compile_mixed_moe_gemm1,
+    compile_mixed_moe_gemm2,
+)
 
 logging.basicConfig(level=logging.INFO)
 
@@ -414,7 +409,8 @@ def run_moe_stage1(
 
     # Quantize inputs / weights.
     if in_dtype == "fp4":
-        if not HAS_FP4_UTILS:
+        from tests.kernels.utils import fp4_utils
+        if fp4_utils is None:
             pytest.skip("fp4_utils not available (triton not installed)")
         if "gfx95" not in ARCH:
             pytest.skip(f"FP4 MFMA requires gfx950+, got {ARCH}")
@@ -948,7 +944,8 @@ def run_moe_stage2(
         w2_q, scale_w2 = pertoken_quant(w2_fp32, quant_dtype=torch.int8, dtypeMax=7)
         scale_x = None
     elif in_dtype == "fp4":
-        if not HAS_FP4_UTILS:
+        from tests.kernels.utils import fp4_utils
+        if fp4_utils is None:
             pytest.skip("fp4_utils not available (triton not installed)")
         if "gfx95" not in ARCH:
             pytest.skip(f"FP4 MFMA requires gfx950+, got {ARCH}")
@@ -1463,7 +1460,8 @@ def test_moe_gemm_2stage(
     if group_size > 0 and in_dtype != "int4_bf16":
         pytest.skip("groupwise scale only applies to int4_bf16")
     if in_dtype == "fp4":
-        if not HAS_FP4_UTILS or not HAS_MIXED_MOE:
+        from tests.kernels.utils import fp4_utils
+        if fp4_utils is None:
             pytest.skip("FP4 dependencies not available (triton/mixed_moe_gemm not installed)")
         if "gfx95" not in ARCH:
             pytest.skip(f"FP4 MFMA requires gfx950+, got {ARCH}")
@@ -1623,6 +1621,7 @@ def _per_1x32_fp4_quant(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
 
     Returns (x_fp4, scale_e8m0) where x_fp4.shape[-1] == x.shape[-1] // 2.
     """
+    fp4_utils = _import_fp4_utils()
     block_size = 32
     F4E2M1_MAX = 6.0
     MAX_POW2 = int(torch.log2(torch.tensor(F4E2M1_MAX, dtype=torch.float32)).item())
@@ -1805,7 +1804,8 @@ def test_moe_stage2_standalone(
     """
     is_fp4 = in_dtype == "fp4"
     if is_fp4:
-        if not HAS_FP4_UTILS or not HAS_MIXED_MOE:
+        fp4_utils = _import_fp4_utils()
+        if fp4_utils is None:
             pytest.skip("FP4 dependencies not available (triton/mixed_moe_gemm not installed)")
         if "gfx95" not in ARCH:
             pytest.skip(f"FP4 requires gfx950+, got {ARCH}")

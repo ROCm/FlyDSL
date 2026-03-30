@@ -626,34 +626,19 @@ if [ "${RUN_MOE}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
         SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
         shape_moe="t${tokens}-d${model_dim}x${inter_dim}-e${experts}k${topk}"
 
-        # Parse both stages and emit a combined row
-        combined="$(python3 - "${log}" "${shape_moe}" <<'PY'
-import re, sys
-log_path, shape = sys.argv[1], sys.argv[2]
-with open(log_path, "r", errors="ignore") as f:
-    txt = f.read()
-# stage1: "FlyDSL MoE stage1[fp4]: 2889.7 us, 749.10 TFLOPS(...), 0.257 TB/s ..."
-m1 = None
-for m1 in re.finditer(r"FlyDSL MoE stage1\[([^\]]+)\]:\s*([0-9.]+)\s*us,\s*([0-9.]+)\s*TFLOPS.*?([0-9.]+)\s*TB/s", txt):
-    pass
-# stage2: "FlyDSL MoE stage2 [...] fp4 ... | ... | 3244.1 us, 333.63 TFLOPS, 0.233 TB/s"
-m2 = None
-for m2 in re.finditer(r"FlyDSL MoE stage2 \[[^\]]+\].*?\|\s*.*?\|\s*([0-9.]+)\s*us,\s*([0-9.]+)\s*TFLOPS,\s*([0-9.]+)\s*TB/s", txt):
-    pass
-if m1 and m2:
-    dt = m1.group(1)
-    us1, tf1, tb1 = float(m1.group(2)), float(m1.group(3)), float(m1.group(4))
-    us2, tf2, tb2 = float(m2.group(1)), float(m2.group(2)), float(m2.group(3))
-    total_us = us1 + us2
-    combined_tf = (tf1 * us1 + tf2 * us2) / total_us
-    combined_tb = (tb1 * us1 + tb2 * us2) / total_us
-    print(f"moe_fp4\t{shape}\t{dt}\t{combined_tb:.3f}\t{combined_tf:.3f}")
-else:
-    print(f"moe_fp4\t{shape}\tfp4\t-\t-")
-PY
-)"
-        set -- $combined
-        _emit_row "$1" "$2" "$3" "$4" "$5"
+        dt_s1="$(grep -Eo 'FlyDSL MoE stage1\[[^]]+\]:' "${log}" | tail -1 | cut -d'[' -f2 | cut -d']' -f1 || true)"
+        tf_s1="$(grep -Eo 'FlyDSL MoE stage1\[[^]]+\]:.* ([0-9.]+) TFLOPS' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
+        tb_s1="$(grep -Eo 'FlyDSL MoE stage1\[[^]]+\]:.* ([0-9.]+) TB/s' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
+        if [ -n "${dt_s1}" ] && [ -n "${tf_s1}" ] && [ -n "${tb_s1}" ]; then
+          _emit_row "moe_fp4_s1" "${shape_moe}" "${dt_s1}" "${tb_s1}" "${tf_s1}"
+        fi
+
+        dt_s2="$(grep -Eo 'FlyDSL MoE stage2\[[^]]+\]:' "${log}" | tail -1 | cut -d'[' -f2 | cut -d']' -f1 || true)"
+        tf_s2="$(grep -Eo 'FlyDSL MoE stage2\[[^]]+\]:.* ([0-9.]+) TFLOPS' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
+        tb_s2="$(grep -Eo 'FlyDSL MoE stage2\[[^]]+\]:.* ([0-9.]+) TB/s' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
+        if [ -n "${dt_s2}" ] && [ -n "${tf_s2}" ] && [ -n "${tb_s2}" ]; then
+          _emit_row "moe_fp4_s2" "${shape_moe}" "${dt_s2}" "${tb_s2}" "${tf_s2}"
+        fi
       fi
     else
       # Skip gracefully on unsupported architectures
