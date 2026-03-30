@@ -7,13 +7,16 @@ import subprocess
 from typing import Optional
 
 
-def _arch_from_rocm_agent_enumerator(timeout_s: int = 5) -> Optional[str]:
+_ROCM_AGENT_TIMEOUT_S = int(os.environ.get("FLYDSL_ROCM_AGENT_TIMEOUT", "300"))
+
+
+def _arch_from_rocm_agent_enumerator() -> Optional[str]:
     """Query rocm_agent_enumerator (standard ROCm tool) for the first GPU arch."""
     try:
         out = subprocess.check_output(
             ["rocm_agent_enumerator", "-name"],
             text=True,
-            timeout=timeout_s,
+            timeout=_ROCM_AGENT_TIMEOUT_S,
             stderr=subprocess.DEVNULL,
         )
         for line in out.splitlines():
@@ -26,7 +29,7 @@ def _arch_from_rocm_agent_enumerator(timeout_s: int = 5) -> Optional[str]:
 
 
 @functools.lru_cache(maxsize=None)
-def get_rocm_arch(timeout_s: int = 5) -> str:
+def get_rocm_arch() -> str:
     """Best-effort ROCm GPU arch string (e.g. 'gfx942')."""
     env = os.environ.get("FLYDSL_GPU_ARCH") or os.environ.get("HSA_OVERRIDE_GFX_VERSION")
     if env:
@@ -36,7 +39,7 @@ def get_rocm_arch(timeout_s: int = 5) -> str:
             parts = env.split(".")
             return f"gfx{parts[0]}{parts[1]}{parts[2]}"
 
-    arch = _arch_from_rocm_agent_enumerator(timeout_s=timeout_s)
+    arch = _arch_from_rocm_agent_enumerator()
     if arch:
         return arch.split(":", 1)[0]
 

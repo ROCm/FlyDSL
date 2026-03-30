@@ -101,7 +101,7 @@ def test_mxfp4_gemm(M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp,
                      inst_prefetch=False, 
                      waves_per_eu=None):
     """MXFP4 GEMM correctness unit test."""
-    arch = str(get_rocm_arch(timeout_s=300))
+    arch = str(get_rocm_arch())
     if arch != "gfx1250":
         pytest.skip(f"WMMA_SCALE requires gfx1250, got {arch}")
 

@@ -108,8 +108,6 @@ extern "C" void mgpuLaunchClusterKernel(hipFunction_t function,
             static_cast<int>(err), static_cast<long>(clusterX),
             static_cast<long>(clusterY), static_cast<long>(clusterZ));
     HIP_REPORT_IF_ERROR(err);
-    HIP_REPORT_IF_ERROR(hipModuleLaunchKernel(function, 0, 0, 0, 0, 0, 0, smem,
-                                              stream, params, extra));
     return;
   }
 
