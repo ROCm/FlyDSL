@@ -370,6 +370,7 @@ def build_fused_rope_cache_module(
 
     @flyc.jit
     def launch_fused_rope_cache(
+        # Scalar stores required: stride-1 dim is block_size (not D)
         Q: fx.Tensor,
         K: fx.Tensor,
         V: fx.Tensor,
