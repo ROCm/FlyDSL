@@ -54,7 +54,7 @@ def test_wmma_gemm_tdm(in_dtype, M, N, K, tile_m, tile_n, tile_k,
                         out_dtype=None, use_tdm_store=True,
                         cluster_m=1, cluster_n=1):
     """Non-cluster GEMM correctness test."""
-    arch = str(get_rocm_arch(timeout_s=300))
+    arch = str(get_rocm_arch())
     if arch != "gfx1250":
         pytest.skip(f"WMMA requires gfx1250, got {arch}")
 

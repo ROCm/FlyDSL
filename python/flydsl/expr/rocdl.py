@@ -542,19 +542,32 @@ def lds_transpose_load(result_type, lds_memref, elem_offset, elem_bytes):
 
 __all__ = [
     # Thread/Block/Grid IDs and dimensions
-    'workitem_id_x', 'workitem_id_y', 'workitem_id_z',
-    'workgroup_id_x', 'workgroup_id_y', 'workgroup_id_z', 
-    'workgroup_dim_x', 'workgroup_dim_y', 'workgroup_dim_z',
-    'grid_dim_x', 'grid_dim_y', 'grid_dim_z',
-    'wavefrontsize',
-    'wave_id',
-
+    "workitem_id_x",
+    "workitem_id_y",
+    "workitem_id_z",
+    "workgroup_id_x",
+    "workgroup_id_y",
+    "workgroup_id_z",
+    "workgroup_dim_x",
+    "workgroup_dim_y",
+    "workgroup_dim_z",
+    "grid_dim_x",
+    "grid_dim_y",
+    "grid_dim_z",
+    "wavefrontsize",
+    "wave_id",
     # Synchronization
-    'barrier', 's_barrier', 's_barrier_signal', 's_barrier_wait',
-    's_waitcnt', 's_wait_loadcnt', 's_wait_storecnt',
-    's_wait_dscnt', 's_wait_expcnt', 's_wait_asynccnt',
-    'disable_xdl_arb_stall',
-    
+    "barrier",
+    "s_barrier",
+    "s_barrier_signal",
+    "s_barrier_wait",
+    "s_waitcnt",
+    "s_wait_loadcnt",
+    "s_wait_storecnt",
+    "s_wait_dscnt",
+    "s_wait_expcnt",
+    "s_wait_asynccnt",
+    "disable_xdl_arb_stall",
     # Matrix operations - MFMA (Matrix Fused Multiply-Add)
     'mfma_f32_32x32x8f16', 'mfma_f32_16x16x16f16',
     'mfma_f32_16x16x16bf16_1k',
@@ -569,15 +582,19 @@ __all__ = [
     'mfma_scale_f32_16x16x128_f8f6f4_op',
     
     # Matrix operations - WMMA (Wave Matrix Multiply-Accumulate)
-    'wmma_f32_16x16x16_f16', 'wmma_f32_16x16x16_bf16',
-    'wmma_f16_16x16x16_f16', 'wmma_bf16_16x16x16_bf16',
-    'wmma_i32_16x16x16_iu8', 'wmma_i32_16x16x16_iu4',
-    'wmma_f32_16x16x16_fp8_fp8', 'wmma_f32_16x16x16_fp8_bf8',
-    'wmma_f32_16x16x16_bf8_fp8', 'wmma_f32_16x16x16_bf8_bf8',
-    'wmma_i32_16x16x32_iu4',
-    'wmma_scale_f32_16x16x128_f8f6f4',   # gfx1250 WMMA_SCALE 16x16x128 (FP4/FP6/FP8)
-    'wmma_scale_f32_32x16x128_f4',        # gfx1250 WMMA_SCALE 32x16x128 (FP4 only)
-    
+    "wmma_f32_16x16x16_f16",
+    "wmma_f32_16x16x16_bf16",
+    "wmma_f16_16x16x16_f16",
+    "wmma_bf16_16x16x16_bf16",
+    "wmma_i32_16x16x16_iu8",
+    "wmma_i32_16x16x16_iu4",
+    "wmma_f32_16x16x16_fp8_fp8",
+    "wmma_f32_16x16x16_fp8_bf8",
+    "wmma_f32_16x16x16_bf8_fp8",
+    "wmma_f32_16x16x16_bf8_bf8",
+    "wmma_i32_16x16x32_iu4",
+    "wmma_scale_f32_16x16x128_f8f6f4",   # gfx1250 WMMA_SCALE 16x16x128 (FP4/FP6/FP8)
+    "wmma_scale_f32_32x16x128_f4",        # gfx1250 WMMA_SCALE 32x16x128 (FP4 only)
     # Matrix operations - SMFMAC (Sparse Matrix FMA)
     'smfmac_f32_32x32x16_f16', 'smfmac_f32_32x32x16_bf16',
     'smfmac_i32_32x32x32_i8',
@@ -617,26 +634,26 @@ __all__ = [
     'BufferCopy', 'BufferCopy32b', 'BufferCopy64b', 'BufferCopy128b',
 
     # MMA atom types
-    'MmaAtomCDNA3_MFMAType', 'MFMA',
-    'MmaAtomGFX1250_WMMAType', 'WMMA',
-
+    "MmaAtomCDNA3_MFMAType",
+    "MFMA",
+    "MmaAtomGFX1250_WMMAType",
+    "WMMA",
     # Convenience wrappers
-    'make_buffer_tensor',
-    'lds_transpose_load',       # memref-level wrapper for gfx1250 ds_load_tr16_b128
-
+    "make_buffer_tensor",
+    "lds_transpose_load",       # memref-level wrapper for gfx1250 ds_load_tr16_b128
     # gfx1250 TDM - descriptor-driven tile copy (preferred over per-lane)
-    'tensor_load_to_lds',       # 4-group, up to 5D tensor
-    'tensor_load_to_lds_d2',    # 2-group, up to 2D tensor
-    'tensor_store_from_lds',    # 4-group store
-    'tensor_store_from_lds_d2', # 2-group store
-    's_wait_tensorcnt',
-
+    "tensor_load_to_lds",       # 4-group, up to 5D tensor
+    "tensor_load_to_lds_d2",    # 2-group, up to 2D tensor
+    "tensor_store_from_lds",    # 4-group store
+    "tensor_store_from_lds_d2", # 2-group store
+    "s_wait_tensorcnt",
     # gfx1250 L2 prefetch
-    'global_prefetch',          # per-lane 1-byte prefetch hint
-
+    "global_prefetch",          # per-lane 1-byte prefetch hint
     # Cluster (gfx1250 workgroup clustering)
-    'cluster_workgroup_id_x', 'cluster_workgroup_id_y', 'cluster_workgroup_id_z',
-    'cluster_load_async_to_lds',   # per-lane MCAST load (Global → LDS)
+    "cluster_workgroup_id_x",
+    "cluster_workgroup_id_y",
+    "cluster_workgroup_id_z",
+    "cluster_load_async_to_lds",   # per-lane MCAST load (Global → LDS)
 ]
 
 

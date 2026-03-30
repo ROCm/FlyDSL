@@ -9,17 +9,6 @@ using namespace mlir::fly;
 
 namespace gfx1250 {
 
-static int getElemBits(Type ty) {
-  if (ty.isF32() || ty.isInteger(32))
-    return 32;
-  if (ty.isF16() || ty.isBF16())
-    return 16;
-  if (isa<Float8E4M3FNUZType>(ty) || isa<Float8E5M2FNUZType>(ty) ||
-      ty.isInteger(8))
-    return 8;
-  return 0;
-}
-
 // A/B matrix register layout for GFX1250 WMMA (wave32).
 //
 // The A matrix is M×K (M=16, K varies by instruction). The 32 lanes split
@@ -42,7 +31,7 @@ static int getElemBits(Type ty) {
 LayoutAttr getThrValLayoutAB(MLIRContext *ctx, int32_t K, Type elemTy) {
   auto getContext = [&]() { return ctx; };
 
-  int elemBits = getElemBits(elemTy);
+  int elemBits = elemTy.getIntOrFloatBitWidth();
   int valsPerLane = K / 2;
 
   if (elemBits == 32) {
@@ -78,7 +67,7 @@ LayoutAttr getThrValLayoutAB(MLIRContext *ctx, int32_t K, Type elemTy) {
 LayoutAttr getThrValLayoutCD(MLIRContext *ctx, Type elemTyAcc) {
   auto getContext = [&]() { return ctx; };
 
-  int elemBits = getElemBits(elemTyAcc);
+  int elemBits = elemTyAcc.getIntOrFloatBitWidth();
   if (elemBits >= 32) {
     return FxLayout(FxShape(FxThr(16, 2), FxVal(8)),
                     FxStride(FxThr(16, 8), FxVal(1)));
@@ -95,11 +84,16 @@ namespace mlir::fly_rocdl {
 bool MmaAtomGFX1250_WMMAType::isStatic() const { return true; }
 
 Value MmaAtomGFX1250_WMMAType::rebuildStaticValue(OpBuilder &builder, Location loc,
-                                                Value currentValue) const {
+                                                   Value currentValue) const {
   if (currentValue && isa<MakeMmaAtomOp>(currentValue.getDefiningOp()))
     return nullptr;
   return MakeMmaAtomOp::create(builder, loc, Type(*this));
 }
+
+Type MmaAtomGFX1250_WMMAType::getValTypeA() const { return getElemTyA(); }
+Type MmaAtomGFX1250_WMMAType::getValTypeB() const { return getElemTyB(); }
+Type MmaAtomGFX1250_WMMAType::getValTypeC() const { return getElemTyAcc(); }
+Type MmaAtomGFX1250_WMMAType::getValTypeD() const { return getElemTyAcc(); }
 
 Attribute MmaAtomGFX1250_WMMAType::getThrLayout() const {
   return FxLayout(FxC(32), FxC(1));
@@ -109,11 +103,6 @@ Attribute MmaAtomGFX1250_WMMAType::getShapeMNK() const {
   return IntTupleAttr::get(
       ArrayAttr::get(getContext(), {FxC(getM()), FxC(getN()), FxC(getK())}));
 }
-
-Type MmaAtomGFX1250_WMMAType::getValTypeA() const { return getElemTyA(); }
-Type MmaAtomGFX1250_WMMAType::getValTypeB() const { return getElemTyB(); }
-Type MmaAtomGFX1250_WMMAType::getValTypeC() const { return getElemTyAcc(); }
-Type MmaAtomGFX1250_WMMAType::getValTypeD() const { return getElemTyAcc(); }
 
 Attribute MmaAtomGFX1250_WMMAType::getThrValLayoutA() const {
   return gfx1250::getThrValLayoutAB(getContext(), getK(), getElemTyA());

@@ -8,7 +8,7 @@ from ..._mlir.dialects._fly_enum_gen import AddressSpace
 from ..._mlir.dialects.fly import LayoutType, PointerType
 from ..._mlir.dialects.fly import MemRefType as FlyMemRefType
 from ..._mlir.dialects.fly_rocdl import CopyOpCDNA3BufferCopyType, MmaAtomCDNA3_MFMAType
-from ..._mlir._mlir_libs._fly_rocdl import MmaAtomGFX1250_WMMAType
+from ..._mlir._mlir_libs._mlirDialectsFlyROCDL import MmaAtomGFX1250_WMMAType
 from ..primitive import (
     get_iter,
     get_layout,
@@ -72,7 +72,8 @@ def make_buffer_tensor(tensor: Tensor) -> Tensor:
 
     stride_val = arith.ConstantOp(T.i16(), ir.IntegerAttr.get(T.i16(), 0)).result
     num_records_val = arith.ConstantOp(T.i64(), ir.IntegerAttr.get(T.i64(), num_records_bytes)).result
-    flags_val_int = (7 << 12) | (4 << 15)
+    from ..buffer_ops import _get_buffer_flags
+    flags_val_int = _get_buffer_flags()
     flags_val = arith.ConstantOp(T.i32(), ir.IntegerAttr.get(T.i32(), flags_val_int)).result
 
     src_ptr_ty = PointerType(ptr.type)

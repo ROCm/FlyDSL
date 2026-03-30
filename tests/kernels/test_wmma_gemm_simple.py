@@ -41,9 +41,7 @@ if not torch.cuda.is_available():
     ],
 )
 def test_wmma_gemm(in_dtype, M, N, K, tile_m, tile_n, tile_k, block_threads):
-    # rocm_agent_enumerator is very slow on AM simulator,
-    # set large timeout to avoid timeout and fallback to gfx942
-    arch = str(get_rocm_arch(timeout_s=300))
+    arch = str(get_rocm_arch())
     if arch != "gfx1250":
         pytest.skip(f"WMMA requires gfx1250, got {arch}")
     print(f"Running WMMA GEMM test with: M={M}, N={N}, K={K}, "

@@ -81,13 +81,12 @@ func.func @test_alloca_load_store() -> f32 {
 
   %idx_store = fly.make_int_tuple() : () -> !fly.int_tuple<2>
   %cst = arith.constant 42.0 : f32
-  // CHECK: llvm.getelementptr
+  // CHECK: %[[GEP:.*]] = llvm.getelementptr
   // CHECK: llvm.store
   fly.memref.store(%cst, %mem, %idx_store) : (f32, !fly.memref<f32, register, 8:1>, !fly.int_tuple<2>) -> ()
 
   %idx_load = fly.make_int_tuple() : () -> !fly.int_tuple<2>
-  // CHECK: llvm.getelementptr
-  // CHECK: %[[LOADED:.*]] = llvm.load
+  // CHECK: %[[LOADED:.*]] = llvm.load %[[GEP]]
   %val = fly.memref.load(%mem, %idx_load) : (!fly.memref<f32, register, 8:1>, !fly.int_tuple<2>) -> f32
 
   // CHECK: return %[[LOADED]]

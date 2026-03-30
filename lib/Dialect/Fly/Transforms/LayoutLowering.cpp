@@ -9,12 +9,14 @@
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/IR/Attributes.h"
 #include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/Dominance.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/IR/SymbolTable.h"
 #include "mlir/IR/Value.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Support/LLVM.h"
+#include "mlir/Transforms/CSE.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "llvm/ADT/SmallPtrSet.h"
@@ -1775,6 +1777,9 @@ public:
   using OpRewritePattern<MmaMakeFragmentOp>::OpRewritePattern;
 
   LogicalResult matchAndRewrite(MmaMakeFragmentOp op, PatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    auto *ctx = rewriter.getContext();
+
     auto tiledMmaTy = dyn_cast<TiledMmaType>(op.getTiledMma().getType());
     if (!tiledMmaTy)
       return failure();
@@ -1799,7 +1804,13 @@ public:
       break;
     }
 
-    rewriter.replaceOpWithNewOp<MakeFragmentLikeOp>(op, op.getInput(), TypeAttr::get(elemTy));
+    IntTupleAttr zeroAttr = IntTupleAttr::getLeafStatic(ctx, 0);
+    Value coord = MakeIntTupleOp::create(rewriter, loc, IntTupleType::get(zeroAttr), ValueRange{});
+
+    Value partitioned = TiledMmaPartitionOp::create(rewriter, loc, op.getOperandId(),
+                                                    op.getTiledMma(), op.getInput(), coord);
+
+    rewriter.replaceOpWithNewOp<MakeFragmentLikeOp>(op, partitioned, TypeAttr::get(elemTy));
     return success();
   }
 };
@@ -2107,6 +2118,10 @@ public:
 
     if (failed(applyPatternsGreedily(getOperation(), std::move(patterns))))
       signalPassFailure();
+
+    IRRewriter rewriter(context);
+    DominanceInfo domInfo(getOperation());
+    eliminateCommonSubExpressions(rewriter, domInfo, getOperation());
   }
 };
 

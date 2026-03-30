@@ -398,8 +398,8 @@ class KernelLauncher:
                 kernel_operands,
                 async_dependencies=async_deps,
                 dynamic_shared_memory_size=smem_val,
-                loc=launch_loc,
                 cluster_size=cluster_size,
+                loc=launch_loc,
                 ip=None,
             )
 
