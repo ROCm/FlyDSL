@@ -16,7 +16,7 @@ from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 
 from flydsl.expr import idx2crd
-from kernels.gemm_gfx1250_common import (
+from kernels.gemm_common_gfx1250 import (
     get_lds_memref, pipeline_fence,
     store_acc_vec8_to_buffer, store_acc_vec8_to_lds,
 )
