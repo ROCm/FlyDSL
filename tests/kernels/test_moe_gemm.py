@@ -1476,6 +1476,18 @@ class _TorchReduceWrapper:
         return self._mode
 
 
+@pytest.mark.parametrize("use_reduce", [False, True], ids=["atomic", "reduce"])
+def test_moe_gemm_2stage_bf16_out(use_reduce):
+    """Smoke test for bf16 output atomics (gfx942: global atomic, gfx950+: buffer atomic)."""
+    test_moe_gemm_2stage(
+        tokens=64, model_dim=256, inter_dim=128, experts=4, topk=2,
+        tile_m=16, tile_n1=64, tile_k1=128, tile_n2=64, tile_k2=128,
+        doweight_stage1=False, in_dtype="fp8", out_dtype="bf16",
+        use_reduce=use_reduce, use_valid_mask=False, test_graph=False,
+        group_size=-1, num_iters=2, num_warmup=1,
+    )
+
+
 @pytest.mark.parametrize(
     "tokens, model_dim, inter_dim, experts, topk, tile_m, tile_n, tile_k",
     [
