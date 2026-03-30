@@ -33,13 +33,6 @@ from tests.kernels.test_ref import torch_moe_gemm1, torch_moe_gemm2
 from tests.utils import pertoken_quant, shuffle_weight, shuffle_scale_for_int4
 from tests.test_common import verify_output, run_perftest
 from flydsl.runtime.device import get_rocm_arch
-def _import_fp4_utils():
-    """Lazy import of fp4_utils (requires triton). Call inside fp4 branches."""
-    try:
-        from tests.kernels.utils import fp4_utils
-        return fp4_utils
-    except ImportError:
-        return None
 
 ARCH = get_rocm_arch()
 # GFX950 (MI350) and newer typically use OCP standard float8_e4m3fn
@@ -1588,7 +1581,7 @@ def _per_1x32_fp4_quant(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
 
     Returns (x_fp4, scale_e8m0) where x_fp4.shape[-1] == x.shape[-1] // 2.
     """
-    fp4_utils = _import_fp4_utils()
+    from tests.kernels.utils import fp4_utils
     block_size = 32
     F4E2M1_MAX = 6.0
     MAX_POW2 = int(torch.log2(torch.tensor(F4E2M1_MAX, dtype=torch.float32)).item())
@@ -1771,9 +1764,7 @@ def test_moe_stage2_standalone(
     """
     is_fp4 = in_dtype == "fp4"
     if is_fp4:
-        fp4_utils = _import_fp4_utils()
-        if fp4_utils is None:
-            pytest.skip("FP4 dependencies not available (triton/mixed_moe_gemm not installed)")
+        from tests.kernels.utils import fp4_utils
         if "gfx95" not in ARCH:
             pytest.skip(f"FP4 requires gfx950+, got {ARCH}")
         if inter_dim < 256 or tile_k < 256:
