@@ -130,7 +130,7 @@ struct PyCopyOpCDNA3BufferCopyType : PyConcreteType<PyCopyOpCDNA3BufferCopyType>
 } // namespace python
 } // namespace mlir
 
-NB_MODULE(_fly_rocdl, m) {
+NB_MODULE(_mlirDialectsFlyROCDL, m) {
   m.doc() = "MLIR Python FlyROCDL Extension";
 
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyMmaAtomCDNA3_MFMAType::bind(m);
