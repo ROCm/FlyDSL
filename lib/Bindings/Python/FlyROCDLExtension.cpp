@@ -15,6 +15,7 @@
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/IR/Value.h"
 
+#include "flydsl-c/FlyROCDLDialect.h"
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
 #include "flydsl/Dialect/FlyROCDL/IR/Dialect.h"
 
