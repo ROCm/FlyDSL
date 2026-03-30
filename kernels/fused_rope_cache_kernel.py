@@ -131,11 +131,13 @@ def build_fused_rope_cache_module(
 
     # Layout shape/stride tuples (plain Python ints) — materialized as
     # fx.make_layout inside each kernel where an MLIR context is active.
-    _q_shape = (1, num_q_heads, vecs_per_head)
+    # None is used for dynamic/unknown extents (token count, position range,
+    # block count) so the layout shape matches the actual indexing domain.
+    _q_shape = (None, num_q_heads, vecs_per_head)
     _q_stride = (num_q_heads * head_dim, head_dim, VEC_WIDTH)
-    _kv_shape = (1, num_kv_heads, vecs_per_head)
+    _kv_shape = (None, num_kv_heads, vecs_per_head)
     _kv_stride = (num_kv_heads * head_dim, head_dim, VEC_WIDTH)
-    _cos_shape = (1, vecs_per_half)
+    _cos_shape = (None, vecs_per_half)
     _cos_stride = (half_dim, VEC_WIDTH)
 
     # ----- Kernel 1: Q RoPE -----
@@ -316,7 +318,7 @@ def build_fused_rope_cache_module(
                 if flash_layout:
                     # -- Flash KV cache: [num_blocks, BS, KH, D] via crd2idx --
                     kc_flash_layout = fx.make_layout(
-                        (1, block_size, num_kv_heads, vecs_per_head),
+                        (None, block_size, num_kv_heads, vecs_per_head),
                         (block_size * num_kv_heads * head_dim,
                          num_kv_heads * head_dim,
                          head_dim,
@@ -337,7 +339,7 @@ def build_fused_rope_cache_module(
                     dim_within = d_start % x_size
 
                     kc_nf_layout = fx.make_layout(
-                        (1, num_kv_heads, head_dim // x_size, block_size, x_size),
+                        (None, num_kv_heads, head_dim // x_size, block_size, x_size),
                         (num_kv_heads * (head_dim // x_size) * block_size * x_size,
                          (head_dim // x_size) * block_size * x_size,
                          block_size * x_size,
@@ -355,7 +357,7 @@ def build_fused_rope_cache_module(
                     v_e = vector.bitcast(vec_type_e, v_raw) if vec_dwords != VEC_WIDTH else v_raw.bitcast(vec_type_e)
 
                     vc_nf_layout = fx.make_layout(
-                        (1, num_kv_heads, head_dim, block_size),
+                        (None, num_kv_heads, head_dim, block_size),
                         (num_kv_heads * head_dim * block_size,
                          head_dim * block_size,
                          block_size,
