@@ -19,7 +19,7 @@ from .._mlir.passmanager import PassManager
 from ..expr.typing import Stream
 from ..utils import env, log
 from .ast_rewriter import ASTRewriter
-from .backends import get_backend
+from .backends import compile_backend_name, get_backend
 from .jit_argument import convert_to_jit_arguments
 from .jit_executor import CompiledArtifact
 from .kernel_function import (
@@ -727,6 +727,11 @@ class JitFunction:
         cache_key = self._make_cache_key(bound.arguments)
 
         args_tuple = tuple(bound.arguments.values())
+
+        # Compile/runtime pairing at JIT entry (not in CompiledArtifact / ExecutionEngine init).
+        from ..runtime.device_runtime import ensure_compile_runtime_pairing_from_env
+
+        ensure_compile_runtime_pairing_from_env(compile_backend_name())
 
         # Fast path: reuse pre-built CallState (no ctypes alloc, no DLPack)
         call_state = self._call_state_cache.get(cache_key)

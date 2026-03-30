@@ -46,7 +46,8 @@ class RocmBackend(BaseBackend):
             "convert-fly-to-rocdl",
             "canonicalize",
             f"gpu.module(convert-scf-to-cf,cse,"
-            f"convert-gpu-to-rocdl{{chipset={chip} index-bitwidth=0 runtime=HIP use-bare-ptr-memref-call-conv=true}})",
+            f"convert-gpu-to-rocdl{{chipset={chip} index-bitwidth=0 runtime=HIP use-bare-ptr-memref-call-conv=true}},"
+            f"fly-rocdl-cluster-attr)",
             f"rocdl-attach-target{{O=2 abi=600 chip={chip} correct-sqrt=true daz=false fast=false features= "
             f"finite-only=false module= triple=amdgcn-amd-amdhsa unsafe-math=false wave64={wave64}}}",
             "convert-scf-to-cf",
