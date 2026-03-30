@@ -32,21 +32,6 @@ if not torch.cuda.is_available():
 SCALE_BLOCK = 32
 
 
-def preshuffle_b_data(b_packed: torch.Tensor, N: int, K: int) -> torch.Tensor:
-    """Preshuffle B data into 16x16 byte tiles for WMMA friendly loads.
-
-    Rearranges B[N, K//2] (uint8) so that each group of 16 N-rows x 16 K-bytes
-    is stored contiguously as a 256-byte tile.  Tiles are ordered
-    (N-group-major, K-tile-minor).
-    """
-    K_bytes = K // 2
-    b = b_packed.view(N, K_bytes)
-    # [N, K/2] -> [N/16, 16, K/32, 16] -> [N/16, K/32, 16, 16] -> [N, K/2]
-    b = b.view(N // 16, 16, K_bytes // 16, 16)
-    b = b.permute(0, 2, 1, 3).contiguous()
-    return b.view(N, K_bytes)
-
-
 def preshuffle_e8m0_scale(scale: torch.Tensor, warp_tile: int,
                           scale_k_per_tile: int = 4,
                           WMMA_DIM: int = 16) -> torch.Tensor:
@@ -112,8 +97,7 @@ def test_mxfp4_gemm(M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp,
                      l2_prefetch_distance=0,
                      cluster_m=1, cluster_n=1,
                      inst_prefetch=False,
-                     waves_per_eu=None,
-                     b_preshuffle=False):
+                     waves_per_eu=None):
     """MXFP4 GEMM correctness unit test."""
     arch = str(get_rocm_arch(timeout_s=300))
     if arch != "gfx1250":
@@ -155,8 +139,7 @@ def test_mxfp4_gemm(M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp,
     b_scale = preshuffle_e8m0_scale(b_scale, tile_n // n_warp,
                                     scale_k_per_tile=skt, WMMA_DIM=16)
 
-    if b_preshuffle:
-        b_packed = preshuffle_b_data(b_packed, N, K)
+    b_packed = fp4_utils.preshuffle_b_16x16(b_packed, N, K // 2)
 
     a_gpu = a_packed.cuda()
     b_gpu = b_packed.cuda()
@@ -177,7 +160,6 @@ def test_mxfp4_gemm(M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp,
         inst_prefetch=inst_prefetch,
         wave_specialized_tdm=wave_specialized_tdm,
         use_scale_opsel=use_scale_opsel,
-        b_preshuffle=b_preshuffle,
     )
     launch_fn(
         c_gpu.contiguous().view(-1),
@@ -278,8 +260,6 @@ if __name__ == "__main__":
     parser.add_argument("--waves-per-eu", type=int, default=None)
     parser.add_argument("--use-scale-opsel", action="store_true", default=False,
                         help="Enable scale opsel half-select")
-    parser.add_argument("--b-preshuffle", action="store_true", default=False,
-                        help="Enable B data 16x16 tile preshuffle")
     args = parser.parse_args()
 
     test_mxfp4_gemm(
@@ -290,7 +270,6 @@ if __name__ == "__main__":
         out_dtype=args.out_dtype,
         wave_specialized_tdm=args.wave_spec_tdm,
         use_scale_opsel=args.use_scale_opsel,
-        b_preshuffle=args.b_preshuffle,
         m_warp=args.m_warp,
         n_warp=args.n_warp,
         l2_prefetch_distance=args.l2_prefetch_distance,

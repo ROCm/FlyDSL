@@ -32,7 +32,7 @@ DS_LOADS_PER_FRAG = 4  # 4 × ds_load_b128 = 64 bytes per lane
 
 # LDS padding in bytes (4 DWORDs = 16 bytes)
 LDS_PAD_A_BYTES = 16
-LDS_PAD_B_BYTES = 16
+LDS_PAD_B_BYTES = 0  # B uses 16x16 tile preshuffle — no padding needed
 LDS_PAD_D_BYTES = 16
 
 _STAGE_NAMES = ("ping", "pong", "pang", "pung")
@@ -56,13 +56,12 @@ def compile_mxfp8_gemm(
     use_scale_opsel: bool = True,
     use_tdm_store: bool = True,
     out_dtype: str = "f32",
-    b_preshuffle: bool = False,
 ):
     """Compile an MXFP8 GEMM kernel with TDM async copy and multi-stage buffering.
 
     Data layout:
         A: [M, K] uint8 FP8/E4M3, row-major
-        B: [N, K] uint8 FP8/E4M3, row-major
+        B: [N, K] uint8 FP8/E4M3, preshuffled (16x16 byte tiles)
         scale_A: [M, K//32] uint8 E8M0 (preshuffled)
         scale_B: [N, K//32] uint8 E8M0 (preshuffled)
 
@@ -87,8 +86,6 @@ def compile_mxfp8_gemm(
 
     num_warps = m_warp * n_warp
     block_threads = num_warps * WAVE_SIZE
-
-    _lds_pad_b = 0 if b_preshuffle else LDS_PAD_B_BYTES
 
     # FP8: no packing, tile_k bytes per row in LDS
     packed_tile_k = tile_k  # 1 byte per FP8 element
@@ -132,15 +129,14 @@ def compile_mxfp8_gemm(
     n_accs = wmma_m_rep * wmma_n_rep
 
     lds_a_stride_bytes = packed_tile_k + LDS_PAD_A_BYTES
-    lds_b_stride_bytes = packed_tile_k + _lds_pad_b
-    # Element-based strides (f16 = 2 bytes each) for vector LDS load/store
     lds_a_stride = lds_a_stride_bytes // 2
-    lds_b_stride = lds_b_stride_bytes // 2
 
     lds_a_data_bytes = tile_m * lds_a_stride_bytes
-    lds_b_data_bytes = tile_n * lds_b_stride_bytes
-    lds_a_scale_bytes = tile_m * scale_k_per_tile
-    lds_b_scale_bytes = tile_n * scale_k_per_tile
+    lds_b_data_bytes = tile_n * packed_tile_k  # B preshuffle: no padding
+    # Guard bytes avoid boundary over-read from trailing ds_load_b128 scale loads.
+    _scale_guard_bytes = 16
+    lds_a_scale_bytes = tile_m * scale_k_per_tile + _scale_guard_bytes
+    lds_b_scale_bytes = tile_n * scale_k_per_tile + _scale_guard_bytes
     interleaved_scale_cols_a = wmma_m_rep * scale_k_per_tile
     interleaved_scale_cols_b = wmma_n_rep * scale_k_per_tile
 
@@ -254,26 +250,16 @@ def compile_mxfp8_gemm(
                 workgroup_mask=a_mcast_mask)
 
         def make_desc_b(memref, k_base):
-            if b_preshuffle:
-                return tdm_ops.make_tensor_descriptor_2d(
-                    global_ptr=arg_b, lds_memref=memref,
-                    global_offset=(blk_n / arith.index(16),
-                                   k_base * arith.index(16)),
-                    tensor_shape=(N // 16, K_packed * 16),
-                    strides=(K_packed * 16, 1),
-                    tile_shape=(tile_n // 16, packed_tile_k * 16),
-                    elem_bytes=1,
-                    pad_interval=0, pad_amount=0,
-                    num_warps=num_warps,
-                    workgroup_mask=b_mcast_mask)
+            # B preshuffle: [N/16, K*16] with 16x16 byte tiles
             return tdm_ops.make_tensor_descriptor_2d(
                 global_ptr=arg_b, lds_memref=memref,
-                global_offset=(blk_n, k_base),
-                tensor_shape=(tile_n, packed_tile_k),
-                strides=(K_packed, 1),
-                tile_shape=(tile_n, packed_tile_k),
+                global_offset=(blk_n / arith.index(16),
+                               k_base * arith.index(16)),
+                tensor_shape=(N // 16, K_packed * 16),
+                strides=(K_packed * 16, 1),
+                tile_shape=(tile_n // 16, packed_tile_k * 16),
                 elem_bytes=1,
-                pad_interval=packed_tile_k, pad_amount=_lds_pad_b,
+                pad_interval=0, pad_amount=0,
                 num_warps=num_warps,
                 workgroup_mask=b_mcast_mask)
 
@@ -344,47 +330,39 @@ def compile_mxfp8_gemm(
             return vector.shuffle(v01, v23, list(range(16)))
 
         def _precompute_b_lane_bases(lds_ptr):
-            """Precompute per-wn B fragment lane base addresses (in f16 elements)."""
+            """Precompute per-wn B fragment lane base addresses (in f16 elements).
+
+            B preshuffle: 16x16 byte tiles packed contiguously.
+            Each N-group (16 rows) = packed_tile_k * 8 f16 elements.
+            kgrp selects K-half (4 tiles each), lane16 selects row.
+            """
             lds_buffer = get_lds_memref(lds_ptr)
-            if b_preshuffle:
-                # Preshuffled: 16x16 byte tiles packed contiguously.
-                # Each N-group (16 rows) = packed_tile_k * 16 bytes = packed_tile_k * 8 f16.
-                # kgrp selects K-half: 4 tiles for kgrp=0, next 4 for kgrp=1.
-                # lane16 selects row within N-group (stride 16 bytes = 8 f16).
-                _ngroup_stride_f16 = packed_tile_k * 8  # in f16 units
-                _n_group_base = warp_tile_n * wave_n_idx // arith.index(16)
-                row_off = lane16 * arith.index(8)  # 16 bytes = 8 f16
-                k_tile_off = lane_kgrp * arith.index(4 * 128)  # 4 tiles * 256B = 512 f16
-                bases = []
-                for wn in range_constexpr(wmma_n_rep):
-                    ngroup_off = _n_group_base * arith.index(_ngroup_stride_f16) \
-                        + arith.index(wn * _ngroup_stride_f16)
-                    bases.append(ngroup_off + row_off + k_tile_off)
-                return lds_buffer, bases
-            row_base = (warp_n_base + lane16) * arith.index(lds_b_stride)
-            k_half_off = lane_kgrp * arith.index(32)  # 32 elems = 64 bytes
+            _ngroup_stride_f16 = packed_tile_k * 8
+            _n_group_base = arith.index(warp_tile_n // 16) * wave_n_idx
+            row_off = lane16 * arith.index(8)   # 16 bytes = 8 f16
+            k_tile_off = lane_kgrp * arith.index(512)  # 4 tiles * 128 f16
             bases = []
             for wn in range_constexpr(wmma_n_rep):
-                base = row_base + arith.index(wn * WMMA_N * lds_b_stride) + k_half_off
-                bases.append(base)
+                ngroup_off = _n_group_base * arith.index(_ngroup_stride_f16) \
+                    + arith.index(wn * _ngroup_stride_f16)
+                bases.append(ngroup_off + row_off + k_tile_off)
             return lds_buffer, bases
 
         def load_b_frag(lds_buffer, b_lane_base, ks):
-            """Load one 128x16 FP8 B-fragment from LDS."""
-            if b_preshuffle:
-                # Preshuffled: K-subtile = 8 K-tiles, 4 per kgrp half.
-                # Tile stride = 256 bytes = 128 f16.
-                # K-subtile offset = ks * 8 tiles * 128 f16 = ks * 1024 f16.
-                k_subtile_off = arith.index(ks * 1024)
-                base = b_lane_base + k_subtile_off
-                v0 = lds_load_b128(lds_buffer, base)
-                v1 = lds_load_b128(lds_buffer, base + arith.index(128))
-                v2 = lds_load_b128(lds_buffer, base + arith.index(256))
-                v3 = lds_load_b128(lds_buffer, base + arith.index(384))
-                v01 = vector.shuffle(v0, v1, list(range(8)))
-                v23 = vector.shuffle(v2, v3, list(range(8)))
-                return vector.shuffle(v01, v23, list(range(16)))
-            return load_a_frag(lds_buffer, b_lane_base, ks)
+            """Load one 128x16 FP8 B-fragment from preshuffled LDS.
+
+            K-subtile = 8 K-tiles (4 per kgrp half).
+            Tile stride = 256 bytes = 128 f16 elements.
+            """
+            k_subtile_off = arith.index(ks * 1024)
+            base = b_lane_base + k_subtile_off
+            v0 = lds_load_b128(lds_buffer, base)
+            v1 = lds_load_b128(lds_buffer, base + arith.index(128))
+            v2 = lds_load_b128(lds_buffer, base + arith.index(256))
+            v3 = lds_load_b128(lds_buffer, base + arith.index(384))
+            v01 = vector.shuffle(v0, v1, list(range(8)))
+            v23 = vector.shuffle(v2, v3, list(range(8)))
+            return vector.shuffle(v01, v23, list(range(16)))
 
         # --- Scale loading ---
         def _precompute_scale_lane_bases(lds_ptr, warp_base, reps, interleaved_cols):
@@ -625,17 +603,12 @@ def compile_mxfp8_gemm(
             tdm_ops.l2_prefetch_tile(
                 arg_a, (blk_m, pf_k), (tile_m, packed_tile_k), (K_packed, 1),
                 elem_bytes=1, thread_id=tx, block_threads=block_threads)
-            if b_preshuffle:
-                tdm_ops.l2_prefetch_tile(
-                    arg_b,
-                    (blk_n / arith.index(16), pf_k * arith.index(16)),
-                    (tile_n // 16, packed_tile_k * 16),
-                    (K_packed * 16, 1),
-                    elem_bytes=1, thread_id=tx, block_threads=block_threads)
-            else:
-                tdm_ops.l2_prefetch_tile(
-                    arg_b, (blk_n, pf_k), (tile_n, packed_tile_k), (K_packed, 1),
-                    elem_bytes=1, thread_id=tx, block_threads=block_threads)
+            tdm_ops.l2_prefetch_tile(
+                arg_b,
+                (blk_n / arith.index(16), pf_k * arith.index(16)),
+                (tile_n // 16, packed_tile_k * 16),
+                (K_packed * 16, 1),
+                elem_bytes=1, thread_id=tx, block_threads=block_threads)
 
         # ====== Multi-stage pipeline ======
         acc_zero = arith.constant_vector(0.0, T.vec(8, T.f32))
@@ -735,7 +708,7 @@ def compile_mxfp8_gemm(
         dgroup1_bs = desc_bs_init.dgroup1
         
         adv_a_bytes = arith.index(tile_k // PACK_FACTOR)
-        adv_b_bytes = arith.index(packed_tile_k * 16 if b_preshuffle else packed_tile_k)
+        adv_b_bytes = arith.index(packed_tile_k * 16)
         adv_as_bytes = arith.index(tile_k // SCALE_BLOCK * wmma_m_rep)
         adv_bs_bytes = arith.index(tile_k // SCALE_BLOCK * wmma_n_rep)
 
@@ -892,7 +865,7 @@ def compile_mxfp8_gemm(
     cache_tag = (K, tile_m, tile_n, tile_k, m_warp, n_warp,
                  num_buffers, effective_waves_per_eu, l2_prefetch_distance,
                  cluster_m, cluster_n, use_tdm_store,
-                 out_dtype, b_preshuffle)
+                 out_dtype)
 
     @flyc.jit
     def launch_mxfp8_gemm(
