@@ -238,7 +238,9 @@ def _as_i8(t: torch.Tensor) -> torch.Tensor:
         pytest.param(8, 256, 512, 512, id="eight-groups-larger", marks=pytest.mark.large_shape),
     ],
 )
-def test_grouped_fp8_gemm_correctness(num_groups, m_per_group, n, k):
+def test_grouped_fp8_gemm_correctness(num_groups, m_per_group, n, k,
+                                      tile_m=128, tile_n=128, tile_k=128,
+                                      out_dtype="bf16"):
     """Test grouped FP8 GEMM correctness against PyTorch reference."""
     scale_block_k = 128
     scale_block_n = 128
@@ -253,12 +255,12 @@ def test_grouped_fp8_gemm_correctness(num_groups, m_per_group, n, k):
         n=n,
         k=k,
         num_groups=num_groups,
-        tile_m=128,
-        tile_n=128,
-        tile_k=128,
+        tile_m=tile_m,
+        tile_n=tile_n,
+        tile_k=tile_k,
         scale_block_k=scale_block_k,
         scale_block_n=scale_block_n,
-        out_dtype="bf16",
+        out_dtype=out_dtype,
     )
 
     # Launch wrapper
@@ -291,7 +293,10 @@ def test_grouped_fp8_gemm_correctness(num_groups, m_per_group, n, k):
         pytest.param(8, 512, 1024, 1024, id="perf-8g-512m", marks=pytest.mark.large_shape),
     ],
 )
-def test_grouped_fp8_gemm_performance(num_groups, m_per_group, n, k):
+def test_grouped_fp8_gemm_performance(num_groups, m_per_group, n, k,
+                                      tile_m=128, tile_n=128, tile_k=128,
+                                      out_dtype="bf16",
+                                      num_iters=20, num_warmup=3):
     """Benchmark grouped FP8 GEMM performance."""
     scale_block_k = 128
     scale_block_n = 128
@@ -306,12 +311,12 @@ def test_grouped_fp8_gemm_performance(num_groups, m_per_group, n, k):
         n=n,
         k=k,
         num_groups=num_groups,
-        tile_m=128,
-        tile_n=128,
-        tile_k=128,
+        tile_m=tile_m,
+        tile_n=tile_n,
+        tile_k=tile_k,
         scale_block_k=scale_block_k,
         scale_block_n=scale_block_n,
-        out_dtype="bf16",
+        out_dtype=out_dtype,
     )
 
     stream = torch.cuda.current_stream()
@@ -327,8 +332,8 @@ def test_grouped_fp8_gemm_performance(num_groups, m_per_group, n, k):
         scale_a.contiguous().view(-1),
         scale_b.contiguous().view(-1),
         grouped_layout.contiguous(),
-        num_iters=20,
-        num_warmup=3,
+        num_iters=num_iters,
+        num_warmup=num_warmup,
     )
 
     flops = 2 * M * n * k
@@ -369,5 +374,10 @@ if __name__ == "__main__":
     m_list = [args.m_per_group] if args.m_per_group > 0 else [128, 256, 512, 1024]
 
     for m_per_group in m_list:
-        test_grouped_fp8_gemm_correctness(args.num_groups, m_per_group, args.N, args.K)
-        test_grouped_fp8_gemm_performance(args.num_groups, m_per_group, args.N, args.K)
+        test_grouped_fp8_gemm_correctness(args.num_groups, m_per_group, args.N, args.K,
+                                          tile_m=args.tile_m, tile_n=args.tile_n,
+                                          tile_k=args.tile_k, out_dtype=args.out_dtype)
+        test_grouped_fp8_gemm_performance(args.num_groups, m_per_group, args.N, args.K,
+                                          tile_m=args.tile_m, tile_n=args.tile_n,
+                                          tile_k=args.tile_k, out_dtype=args.out_dtype,
+                                          num_iters=args.num_iters, num_warmup=args.num_warmup)
