@@ -15,8 +15,15 @@ from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 
+try:
+    from flydsl.runtime.device import supports_bf16_global_atomics
+except ImportError:
+    # Backward compatibility for runtime.device versions that only expose get_rocm_arch.
+    def supports_bf16_global_atomics(arch: str) -> bool:
+        return str(arch).startswith(("gfx94", "gfx95", "gfx12"))
+
 from flydsl._mlir import ir
-from flydsl._mlir.dialects import llvm, scf, memref
+from flydsl._mlir.dialects import scf, memref, llvm
 
 from kernels.mfma_preshuffle_pipeline import (
     _buffer_load_vec,
@@ -1669,6 +1676,11 @@ def compile_mixed_moe_gemm2(
     )
     pad_k = 0 if _ck_lds128 else 8
     lds_stride = tile_k + pad_k
+    # gfx950+ has buffer_atomic_pk_add_bf16; gfx942 uses global atomics via raw pointer.
+    _has_buffer_atomic_bf16 = str(gpu_arch).startswith(("gfx95", "gfx12"))
+    _needs_global_atomic_bf16 = out_is_bf16 and not _has_buffer_atomic_bf16
+    if out_is_bf16 and not supports_bf16_global_atomics(gpu_arch):
+        raise ValueError(f"out_dtype='bf16' requires bf16 global atomics, got arch={gpu_arch!r}")
 
     if out_is_f32:
         # Match origin/dev_a16w4: f32 output uses scalar atomics and does NOT use the CShuffle epilogue.
@@ -2684,6 +2696,20 @@ def compile_mixed_moe_gemm2(
                 # ---------------- Epilogue: LDS CShuffle + atomic half2 (x2) ----------------
                 # Reuse the shared helper so GEMM / MoE kernels share the exact same CShuffle skeleton.
 
+                model_i32 = fx.Int32(model_dim)
+                zero_i32 = fx.Int32(0)
+                c2_i32 = fx.Int32(2)
+                mask_even_i32 = fx.Int32(0xFFFFFFFE)
+
+                def atomic_add_f16x2(val_f16x2, byte_off_i32):
+                    rocdl.raw_ptr_buffer_atomic_fadd(
+                        val_f16x2,
+                        out_rsrc,
+                        byte_off_i32,
+                        zero_i32,
+                        zero_i32,
+                    )
+
                 sw_pf = None
                 tw_pf = None
                 bias_pf = None
@@ -2699,11 +2725,9 @@ def compile_mixed_moe_gemm2(
                         "FLYDSL_MOE_STAGE2_CSHUFFLE=1 but lds_out is not allocated/aliased."
                     )
 
-                # Precompute the output base address (i64 index) for ALL paths.
-                # Both accumulate=True (global atomic) and accumulate=False (global store)
-                # need 64-bit addressing to avoid i32 offset overflow when
-                # tokens * model_dim * elem_bytes > INT32_MAX (~150K tokens for model_dim=7168).
-                out_base_idx = buffer_ops.extract_base_index(arg_out)
+                out_base_idx = None
+                if _needs_global_atomic_bf16:
+                    out_base_idx = buffer_ops.extract_base_index(arg_out)
 
                 def write_row_to_lds(
                     *,
@@ -2774,58 +2798,42 @@ def compile_mixed_moe_gemm2(
 
                     return (fused2, row_valid)
 
-                def _idx_to_llvm_ptr(idx_val, addr_space=1):
-                    """Convert an index-typed byte address to !llvm.ptr<addr_space>."""
-                    idx_v = idx_val._value if hasattr(idx_val, "_value") else idx_val
-                    i64_v = arith.index_cast(T.i64, idx_v)
-                    i64_raw = i64_v._value if hasattr(i64_v, "_value") else i64_v
-                    ptr_ty = ir.Type.parse(f"!llvm.ptr<{addr_space}>")
-                    return llvm.inttoptr(ptr_ty, i64_raw)
-
                 def store_pair(*, row_local, row, row_ctx, col_pair0, col_g0, frag):
                     fused = row_ctx
                     t = fused & mask24_i32
                     s = fused >> 24
-                    t_idx = arith.index_cast(T.index, t)
-                    s_idx = arith.index_cast(T.index, s)
-                    n_byte_stride = arith.constant(
-                        model_dim * out_elem_bytes, index=True
-                    )
-                    if bool(accumulate):
-                        row_byte_base = out_base_idx + t_idx * n_byte_stride
-                    else:
-                        row_byte_base = (
-                            out_base_idx
-                            + (t_idx * fx.Index(topk) + s_idx)
-                            * n_byte_stride
-                        )
+                    idx0 = t * model_i32
                     if not bool(accumulate):
-                        # ---- 64-bit global store path (avoids i32 offset overflow) ----
-                        col_idx = col_g0
-                        byte_off_col = col_idx * arith.constant(
-                            out_elem_bytes, index=True
-                        )
-                        ptr_addr_idx = row_byte_base + byte_off_col
-                        out_ptr_v = _idx_to_llvm_ptr(ptr_addr_idx)
-                        frag_v = frag._value if hasattr(frag, "_value") else frag
-                        llvm.StoreOp(frag_v, out_ptr_v, alignment=4)
+                        ts = t * topk_i32_v + s
+                        idx0 = ts * model_i32
+                    col_i32 = arith.index_cast(T.i32, col_g0)
+                    idx_elem = idx0 + col_i32
+                    idx_elem_even = idx_elem & mask_even_i32
+                    if _needs_global_atomic_bf16:
+                        if bool(accumulate):
+                            byte_off = idx_elem_even * c2_i32
+                            byte_off_idx = arith.index_cast(T.index, byte_off)
+                            ptr_addr_idx = out_base_idx + byte_off_idx
+                            out_ptr = buffer_ops.create_llvm_ptr(ptr_addr_idx, address_space=1)
+                            out_ptr_v = out_ptr._value if hasattr(out_ptr, "_value") else out_ptr
+                            frag_v = frag._value if hasattr(frag, "_value") else frag
+
+                            llvm.AtomicRMWOp(
+                                llvm.AtomicBinOp.fadd,
+                                out_ptr_v,
+                                frag_v,
+                                llvm.AtomicOrdering.monotonic,
+                                syncscope="agent",
+                                alignment=4,
+                            )
+                        else:
+                            buffer_ops.buffer_store(frag, out_rsrc, idx_elem_even)
                     else:
-                        # ---- accumulate=True: 64-bit global atomic path ----
-                        col_idx = col_g0
-                        byte_off_col = col_idx * arith.constant(
-                            out_elem_bytes, index=True
-                        )
-                        ptr_addr_idx = row_byte_base + byte_off_col
-                        out_ptr_v = _idx_to_llvm_ptr(ptr_addr_idx)
-                        frag_v = frag._value if hasattr(frag, "_value") else frag
-                        llvm.AtomicRMWOp(
-                            llvm.AtomicBinOp.fadd,
-                            out_ptr_v,
-                            frag_v,
-                            llvm.AtomicOrdering.monotonic,
-                            syncscope="agent",
-                            alignment=4,
-                        )
+                        byte_off = idx_elem_even * c2_i32
+                        if bool(accumulate):
+                            atomic_add_f16x2(frag, byte_off)
+                        else:
+                            buffer_ops.buffer_store(frag, out_rsrc, idx_elem_even)
 
                 c_shuffle_epilog(
                     arith=arith,
@@ -2845,9 +2853,7 @@ def compile_mixed_moe_gemm2(
                     by_n=by_n,
                     n_tile_base=n_tile_base,
                     lds_out=lds_out,
-                    frag_elem_type=(
-                        ir.BF16Type.get() if out_is_bf16 else ir.F16Type.get()
-                    ),
+                    frag_elem_type=(T.bf16 if out_is_bf16 else T.f16),
                     write_row_to_lds=write_row_to_lds,
                     precompute_row=precompute_row,
                     store_pair=store_pair,
