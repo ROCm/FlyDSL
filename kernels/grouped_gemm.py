@@ -15,7 +15,8 @@ Block scaling granularity (matching DeepGEMM):
   - A: (1, 128) - per-token, per-128-K-elements
   - B: (128, 128) - per-128-N, per-128-K block
 
-This is Step 0 (baseline): single-buffered LDS, no advanced optimizations.
+Optimizations applied:
+  - LDS ping-pong double buffering for A tiles
 """
 
 import functools
@@ -69,6 +70,7 @@ def compile_grouped_fp8_gemm(
     """
     gpu_arch = get_hip_arch()
     _is_gfx950 = str(gpu_arch).startswith("gfx95")
+
     allocator = SmemAllocator(None, arch=gpu_arch, global_sym_name="smem_grouped_gemm")
 
     # Validate parameters
@@ -95,18 +97,19 @@ def compile_grouped_fp8_gemm(
     sb_per_tile = tile_k // scale_block_k  # scale blocks per K-tile
     k_unroll = tile_k // 64  # K64-byte micro-steps (for K32 MFMA pairs)
 
-    # LDS allocation (single-buffered for baseline)
+    # LDS allocation: 2x for ping-pong double buffer
     lds_a_bytes = tile_m * tile_k * elem_bytes
-    lds_alloc_bytes = lds_a_bytes
+    lds_total_bytes = 2 * lds_a_bytes
     lds_alloc_offset = allocator._align(allocator.ptr, 16)
-    allocator.ptr = lds_alloc_offset + lds_alloc_bytes
+    allocator.ptr = lds_alloc_offset + lds_total_bytes
+    lds_tile_elems = tile_m * tile_k  # element offset between ping and pong
 
     # Module name for caching
     module_name = (
         f"grouped_fp8_gemm_{out_dtype}"
         f"_n{n}_k{k}_g{num_groups}"
         f"_t{tile_m}x{tile_n}x{tile_k}"
-        f"_baseline"
+        f"_pingpong"
     ).replace("-", "_")
 
     # Thread -> tile element mapping for A loads
@@ -153,11 +156,13 @@ def compile_grouped_fp8_gemm(
         lane_div_16 = fx.get(coord_lane16, 0)
         lane_mod_16 = fx.get(coord_lane16, 1)
 
-        # LDS setup
+        # LDS setup: single memref for both ping-pong buffers
         base_ptr = allocator.get_base()
-        lds_a = SmemPtr(base_ptr, lds_alloc_offset, T.f8, shape=(tile_m * tile_k,)).get()
+        lds_a = SmemPtr(base_ptr, lds_alloc_offset, T.f8, shape=(2 * tile_m * tile_k,)).get()
         lds_stride = tile_k
         layout_lds = fx.make_layout((tile_m, tile_k), stride=(lds_stride, 1))
+        lds_base_pong = fx.Index(0)
+        lds_base_ping = fx.Index(lds_tile_elems)
 
         # Buffer resources
         a_nbytes = m_in * k_in
@@ -232,14 +237,10 @@ def compile_grouped_fp8_gemm(
             layout_a_tile = fx.make_layout((tile_m, tile_k_div16), stride=(tile_k_div16, 1))
             loads_per_thread = bytes_per_thread_a // 16  # 16-byte loads
 
-            # Main K-loop
-            c_scale_block_k = fx.Index(scale_block_k)
-            c_tile_k = fx.Index(tile_k)
-
-            for k_tile_idx in range_constexpr(num_k_tiles):
-                k_base = fx.Index(k_tile_idx * tile_k)
-
-                # ===== Load A tile to LDS =====
+            # ── Helper: load A tile to LDS ──────────────────────────────
+            def load_a_tile(k_tile_idx_py, lds_base):
+                """Load A[bx_m : bx_m+tile_m, k_base : k_base+tile_k] into lds_a at lds_base."""
+                k_base = fx.Index(k_tile_idx_py * tile_k)
                 for load_idx in range_constexpr(loads_per_thread):
                     lin_idx = tx * fx.Index(loads_per_thread) + fx.Index(load_idx)
                     coord = fx.idx2crd(lin_idx, layout_a_tile)
@@ -247,26 +248,24 @@ def compile_grouped_fp8_gemm(
                     col_local_16 = fx.get(coord, 1)
                     col_local = col_local_16 * fx.Index(16)
 
-                    # Global A index
                     row_global = bx_m + row_local
                     a_idx = row_global * k_in + k_base + col_local
 
-                    # Load 16 bytes (16 FP8 elements);
-                    # buffer_load internally multiplies offset by element size, so we divide index by 4 for i32
                     a_vec = buffer_ops.buffer_load(a_rsrc, a_idx // fx.Index(4), vec_width=4, dtype=T.i32)
 
-                    # Store to LDS
                     lds_coord = (row_local, col_local)
-                    lds_idx = crd2idx(lds_coord, layout_lds)
+                    lds_idx = crd2idx(lds_coord, layout_lds) + lds_base
                     a_vec_f8 = vector.bitcast(T.vec(16, T.f8), a_vec)
                     vector.store(a_vec_f8, lds_a, [lds_idx])
 
-                gpu.barrier()
+            # ── Helper: compute one K-tile from LDS ─────────────────────
+            def compute_tile(accs_in, k_tile_idx_py, lds_base):
+                """Compute MFMA tiles for one K-tile, return updated accumulators."""
+                current_accs = list(accs_in)
+                k_base = fx.Index(k_tile_idx_py * tile_k)
 
-                # ===== Compute MFMA tiles =====
-                # For each scale block in this K-tile
                 for sb in range_constexpr(sb_per_tile):
-                    kb = fx.Index(k_tile_idx * sb_per_tile + sb)  # Global K-block index
+                    kb = fx.Index(k_tile_idx_py * sb_per_tile + sb)
 
                     # Load scale_a for this K-block (per-token scale)
                     # scale_a layout: [scale_k, M] transposed
@@ -299,7 +298,7 @@ def compile_grouped_fp8_gemm(
 
                     for ku_local in range_constexpr(ku_per_sb):
                         ku = sb * ku_per_sb + ku_local
-                        k_offset_bytes = ku * 64  # Byte offset within tile
+                        k_offset_bytes = ku * 64
 
                         for mi in range_constexpr(m_repeat):
                             # Load A from LDS (16 bytes = 2 x 8 bytes for K32 MFMA pair)
@@ -308,7 +307,7 @@ def compile_grouped_fp8_gemm(
 
                             # Load 16 bytes and split into two i64 for K32 MFMAs
                             lds_coord_a = (row_a_lds, col_a_base)
-                            lds_idx_a = crd2idx(lds_coord_a, layout_lds)
+                            lds_idx_a = crd2idx(lds_coord_a, layout_lds) + lds_base
                             a16 = vector.load_op(T.vec(16, T.f8), lds_a, [lds_idx_a])
                             a_i64x2 = vector.bitcast(T.i64x2, a16)
                             a0 = vector.extract(a_i64x2, static_position=[0], dynamic_position=[])
@@ -349,9 +348,28 @@ def compile_grouped_fp8_gemm(
                                 s_a_v4 = s_a_vecs[mi]
                                 s_b_bc = vector.broadcast(T.f32x4, s_b_vals[ni])
                                 scaled = ArithValue(mfma_result) * ArithValue(s_a_v4)
-                                accs[acc_idx] = math_dialect.fma(scaled, s_b_bc, accs[acc_idx])
+                                current_accs[acc_idx] = math_dialect.fma(scaled, s_b_bc, current_accs[acc_idx])
 
+                return current_accs
+
+            # ===== Ping-pong K-loop =====
+            # Prologue: load first tile into pong
+            load_a_tile(0, lds_base_pong)
+            gpu.barrier()
+
+            for k_pair in range_constexpr(0, num_k_tiles, 2):
+                # Load next tile into ping while computing current from pong
+                if k_pair + 1 < num_k_tiles:
+                    load_a_tile(k_pair + 1, lds_base_ping)
+                accs = compute_tile(accs, k_pair, lds_base_pong)
                 gpu.barrier()
+
+                # Load next tile into pong while computing current from ping
+                if k_pair + 1 < num_k_tiles:
+                    if k_pair + 2 < num_k_tiles:
+                        load_a_tile(k_pair + 2, lds_base_pong)
+                    accs = compute_tile(accs, k_pair + 1, lds_base_ping)
+                    gpu.barrier()
 
             # ===== Epilogue: store results =====
             c_n = n_in
