@@ -251,8 +251,9 @@ def compile_grouped_fp8_gemm(
                     row_global = bx_m + row_local
                     a_idx = row_global * k_in + k_base + col_local
 
-                    # Load 16 bytes (16 FP8 elements)
-                    a_vec = buffer_ops.buffer_load(a_rsrc, a_idx, vec_width=4, dtype=T.i32)
+                    # Load 16 bytes (16 FP8 elements);
+                    # buffer_load internally multiplies offset by element size, so we divide index by 4 for i32
+                    a_vec = buffer_ops.buffer_load(a_rsrc, a_idx // fx.Index(4), vec_width=4, dtype=T.i32)
 
                     # Store to LDS
                     lds_coord = (row_local, col_local)
@@ -322,10 +323,11 @@ def compile_grouped_fp8_gemm(
                                 b_col = by_n + n_tile_base + arith.index(ni * 16) + lane_mod_16
                                 b_k_base = k_base + fx.Index(k_offset_bytes) + lane_div_16 * fx.Index(16)
 
-                                b_idx0 = b_group_off + b_col * k_in + b_k_base
-                                b_idx1 = b_idx0 + fx.Index(8)
+                                b_byte_off = b_group_off + b_col * k_in + b_k_base
+                                b_idx0 = b_byte_off // fx.Index(4)
+                                b_idx1 = b_idx0 + fx.Index(2)  # +2 i32 elements = +8 bytes
 
-                                # Load 8 bytes each for the two K32 MFMAs
+                                # Load 8 bytes each for the two K32 MFMAs; offset in i32 elements
                                 b0_i32x2 = buffer_ops.buffer_load(b_rsrc, b_idx0, vec_width=2, dtype=T.i32)
                                 b1_i32x2 = buffer_ops.buffer_load(b_rsrc, b_idx1, vec_width=2, dtype=T.i32)
 
