@@ -21,8 +21,6 @@ def crd2idx(crd, layout):
     result = fx.crd2idx(crd, layout)
     if isinstance(result, ir.Value) and str(result.type).startswith("!fly.int_tuple"):
         scalar = fx.get_scalar(result)
-    else:
-        scalar = result
     if isinstance(scalar, ir.Value) and not isinstance(scalar.type, ir.IndexType):
         scalar = _arith.IndexCastOp(T.index, scalar).result
     return scalar
@@ -35,6 +33,17 @@ def swizzle_xor16(row, col, k_blocks16):
     """
     rem = row % k_blocks16
     return col ^ (rem * 16)
+
+
+def lds_row_major_idx(row, col, row_stride, base=None):
+    """Linearize a 2D LDS coordinate with explicit index arithmetic."""
+    idx = row * row_stride + col
+    return idx if base is None else idx + base
+
+
+def split_row_major_2d(index, minor_extent):
+    """Split a linear row-major index into (major, minor)."""
+    return index // minor_extent, index % minor_extent
 
 
 def _buffer_load_vec(buffer_ops, vector, rsrc, idx, *, elem_type, vec_elems, elem_bytes, offset_in_bytes):
@@ -541,12 +550,14 @@ def lds_load_pack_k32(
 __all__ = [
     "PreshuffleBLayout",
     "buffer_copy_gmem16_dwordx4",
+    "lds_row_major_idx",
     "lds_load_pack_k32",
     "lds_store_4b_xor16",
     "lds_store_8b_xor16",
     "lds_store_16b_xor16",
     "make_preshuffle_b_layout",
     "load_b_pack_k32",
+    "split_row_major_2d",
     "swizzle_xor16",
     "tile_chunk_coord_i32",
 ]
