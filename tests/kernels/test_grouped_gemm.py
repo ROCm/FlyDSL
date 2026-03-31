@@ -383,12 +383,24 @@ def test_grouped_fp8_gemm_performance(num_groups, m_per_group, n, k):
 
 
 if __name__ == "__main__":
-    # Run basic correctness test
-    print("=" * 60)
-    print("Running grouped FP8 GEMM tests")
-    print("=" * 60)
+    import argparse
 
-    test_grouped_fp8_gemm_correctness(1, 128, 128, 128)
-    test_grouped_fp8_gemm_correctness(4, 128, 256, 256)
+    parser = argparse.ArgumentParser(
+        description="Grouped FP8 GEMM benchmark",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("--num_groups", type=int, default=4)
+    parser.add_argument("--m_per_group", type=int, default=256)
+    parser.add_argument("-N", type=int, default=512)
+    parser.add_argument("-K", type=int, default=512)
+    parser.add_argument("--tile_m", type=int, default=128)
+    parser.add_argument("--tile_n", type=int, default=128)
+    parser.add_argument("--tile_k", type=int, default=128)
+    parser.add_argument("--out_dtype", type=str, default="bf16", choices=["bf16", "f16"])
+    parser.add_argument("--num_iters", type=int, default=100)
+    parser.add_argument("--num_warmup", type=int, default=5)
+    args = parser.parse_args()
 
-    print("\nAll tests passed!")
+    torch.set_default_device("cuda")
+    test_grouped_fp8_gemm_correctness(args.num_groups, args.m_per_group, args.N, args.K)
+    test_grouped_fp8_gemm_performance(args.num_groups, args.m_per_group, args.N, args.K)
