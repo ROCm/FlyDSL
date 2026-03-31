@@ -354,7 +354,7 @@ if __name__ == "__main__":
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--num_groups", type=int, default=4)
-    parser.add_argument("--m_per_group", type=int, default=256,
+    parser.add_argument("--m_per_group", type=int, default=0,
                         help="Approx M rows per group (0 = sweep [128, 256, 512, 1024])")
     parser.add_argument("-N", type=int, default=512)
     parser.add_argument("-K", type=int, default=512)
