@@ -34,7 +34,6 @@ if not torch.cuda.is_available():
 from kernels.flash_attn_func import (
     KERNEL_NAME,
     build_flash_attn_func_module,
-    select_flash_attn_func_path,
 )
 from tests.test_common import run_perftest
 
@@ -198,10 +197,6 @@ def run_config(
 ):
     device = "cuda"
     results = {}
-    active_path = select_flash_attn_func_path(
-        num_heads=num_heads, head_dim=head_dim, causal=causal, dtype_str=dtype_str
-    )
-    results["active_path"] = active_path
 
     if seq_len % 128 != 0:
         results["err"] = f"seq_len ({seq_len}) must be divisible by 128 for flash_attn_func"
@@ -264,7 +259,6 @@ def run_config(
 
     if verbose:
         tag = f"B={B} S={S} H={H} D={D}"
-        print(f"  [{tag}] active_path = {active_path}")
         result_md5 = compute_md5(o_flat)
         ref_md5 = compute_md5(ref_flat)
         print(f"  [{tag}] result_md5 = {result_md5}")
@@ -682,7 +676,7 @@ def main():
                             warmup=args.warmup, iters=args.iters,
                             seed=args.seed, dtype_str=dtype_str,
                         )
-                        path = r.get("active_path", "unknown")
+                        path = ""
                         if "err" in r:
                             print(_fmt_normal_row(cfg, path, "ERROR", r))
                             all_passed = False

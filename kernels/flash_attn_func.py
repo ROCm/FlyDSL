@@ -16,19 +16,16 @@ Block:  (256,) -- 4 waves of 64 on AMD (wave64).
 Requires: head_dim % 32 == 0, head_dim >= 64, seq_len % 128 == 0.
 """
 
-import functools
 import math
 import os
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.compiler.llvm_options import llvm_options
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, buffer_ops, gpu, range_constexpr, rocdl, vector
 from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
-from flydsl.utils import env
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import memref as _memref, scf, fly as _fly, llvm as _llvm, math as math_dialect
 
@@ -42,18 +39,6 @@ def _waitcnt_vm_n(n):
     rocdl.s_waitcnt(val)
 
 
-def select_flash_attn_func_path(num_heads, head_dim, causal=True, dtype_str="f16"):
-    """Select active flash_attn_func path tag for build-time specialization."""
-    override = os.getenv("FLYDSL_FLASH_ATTN_FUNC_PATH", "auto").strip().lower()
-    if override == "n32":
-        return "N32"
-    if override == "n128":
-        return "N128"
-    if dtype_str in ("f16", "bf16") and causal and head_dim == 128:
-        return "N128"
-    return "N32"
-
-
 def build_flash_attn_func_module_primary(
     num_heads,
     head_dim,
@@ -65,6 +50,7 @@ def build_flash_attn_func_module_primary(
     unsafe_fp_math=True,
     fast_fp_math=True,
     daz=True,
+    path_tag="auto",
 ):
     """Build the flash_attn_func launcher using the post-refactor FlyDSL API."""
     gpu_arch = get_hip_arch()
@@ -78,9 +64,12 @@ def build_flash_attn_func_module_primary(
     NUM_WAVES = flat_work_group_size // WARP_SIZE
     BLOCK_SIZE = flat_work_group_size
     ROWS_PER_WAVE = BLOCK_M // NUM_WAVES  # 32
-    PATH_TAG = select_flash_attn_func_path(
-        num_heads, head_dim, causal=causal, dtype_str=dtype_str
-    )
+    if path_tag.upper() in ("N32", "N128"):
+        PATH_TAG = path_tag.upper()
+    elif dtype_str in ("f16", "bf16") and causal and head_dim == 128:
+        PATH_TAG = "N128"
+    else:
+        PATH_TAG = "N32"
     BLOCK_N_OUT = 128 if PATH_TAG == "N128" else BLOCK_N
     N_SUBTILES = BLOCK_N_OUT // BLOCK_N
     ENABLE_PREFETCH_3BUF = (
@@ -176,25 +165,6 @@ def build_flash_attn_func_module_primary(
     )
     lds_kv_offset = allocator._align(allocator.ptr, 16)
     allocator.ptr = lds_kv_offset + LDS_KV_TOTAL_SIZE * 2
-
-    _cache_tag = (
-        PATH_TAG,
-        NUM_HEADS,
-        HEAD_DIM,
-        CAUSAL,
-        dtype_str,
-        ENABLE_PREFETCH_3BUF,
-        ENABLE_DMA,
-        ENABLE_LDS_VEC16,
-        REDUCE_MODE,
-        NUM_PREFETCH_K,
-        NUM_PREFETCH_V,
-        waves_per_eu,
-        flat_work_group_size,
-        unsafe_fp_math,
-        fast_fp_math,
-        daz,
-    )
 
     @flyc.kernel
     def flash_attn_func_kernel(
@@ -1016,7 +986,6 @@ def build_flash_attn_func_module_primary(
         seq_len: fx.Int32,
         stream: fx.Stream = fx.Stream(None),
     ):
-        _ = _cache_tag
         allocator.finalized = False
         ctx = CompilationContext.get_current()
         with ir.InsertionPoint(ctx.gpu_module_body):
@@ -1074,24 +1043,20 @@ def build_flash_attn_func_module_primary(
             stream=stream,
         )
 
-    FMHA_LLVM_OPTS = {
-        "enable-post-misched": False,
-        "lsr-drop-solution": True,
-    }
     _fmha_compile_hints = {
         "fast_fp_math": fast_fp_math,
         "unsafe_fp_math": unsafe_fp_math,
+        "llvm_options": {
+            "enable-post-misched": False,
+            "lsr-drop-solution": True,
+        },
     }
-    _inner = launch_flash_attn_func
 
-    @functools.wraps(_inner)
-    def _with_llvm_opts(*args, **kwargs):
-        with llvm_options(FMHA_LLVM_OPTS), CompilationContext.compile_hints(
-            _fmha_compile_hints
-        ):
-            return _inner(*args, **kwargs)
+    def _launch(*args, **kwargs):
+        with CompilationContext.compile_hints(_fmha_compile_hints):
+            return launch_flash_attn_func(*args, **kwargs)
 
-    return _with_llvm_opts
+    return _launch
 
 
 build_flash_attn_func_module = build_flash_attn_func_module_primary

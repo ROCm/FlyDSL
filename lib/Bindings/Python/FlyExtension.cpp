@@ -764,7 +764,6 @@ NB_MODULE(_mlirDialectsFly, m) {
       },
       "name"_a, "value"_a,
       "Set an LLVM int cl::opt at runtime; returns the previous value.");
-
   m.def(
       "set_llvm_option_str",
       [](const std::string &name, const std::string &value) -> std::string {

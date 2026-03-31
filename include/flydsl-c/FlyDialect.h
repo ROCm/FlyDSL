@@ -14,7 +14,6 @@ extern "C" {
 MLIR_DECLARE_CAPI_DIALECT_REGISTRATION(Fly, fly);
 
 MLIR_CAPI_EXPORTED void mlirRegisterFlyPasses(void);
-
 #ifdef __cplusplus
 }
 #endif
