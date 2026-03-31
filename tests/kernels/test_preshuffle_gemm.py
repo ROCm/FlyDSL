@@ -12,6 +12,7 @@ This file is the correctness + perf harness.
 import os
 import sys
 import logging
+import flydsl.compiler as flyc
 
 import torch
 import torch.nn.functional as F
@@ -95,6 +96,8 @@ def test_mfma_a8_flyc_preshuffle(
     run_aiter_bench: bool = DEFAULT_RUN_AITER_BENCH,
     use_cshuffle_epilog: bool = False,
     waves_per_eu: int = 0,
+    dsrd_preload: int = 2,
+    dvmem_preload: int = 2,
 ):
     """Preshuffle GEMM using the @flyc.kernel / @flyc.jit API."""
     if use_async_copy and get_rocm_arch() not in ("gfx942", "gfx950"):
@@ -120,9 +123,14 @@ def test_mfma_a8_flyc_preshuffle(
         lds_stage=lds_stage,
         use_cshuffle_epilog=bool(use_cshuffle_epilog),
         use_async_copy=bool(use_async_copy),
+        dsrd_preload=int(dsrd_preload),
+        dvmem_preload=int(dvmem_preload),
         waves_per_eu=_wpe,
     )
-    print(f"✓ Kernel prepared (lds_stage={lds_stage}, async_copy={use_async_copy}, waves_per_eu={_wpe})")
+    print(
+        f"✓ Kernel prepared (lds_stage={lds_stage}, async_copy={use_async_copy}, "
+        f"waves_per_eu={_wpe}, dsrd_preload={dsrd_preload}, dvmem_preload={dvmem_preload})"
+    )
 
     size_c = M * N
     size_a = M * K
@@ -192,16 +200,18 @@ def test_mfma_a8_flyc_preshuffle(
     def _as_i8(t):
         return t.view(torch.int8) if "float8" in str(t.dtype) else t
 
+    def _gemm_args(c, a, b, sa, sb):
+        return (c.contiguous().view(-1),
+                _as_i8(a.contiguous().view(-1)),
+                _as_i8(b.contiguous().view(-1)),
+                sa.contiguous().view(-1) if sa.numel() > 0 else sa,
+                sb.contiguous().view(-1) if sb.numel() > 0 else sb,
+                M, N, torch.cuda.current_stream())
+
+    compiled_fn = flyc.compile(launch_fn, *_gemm_args(c_out_raw, a_q, b_input, sa_flat, sb_flat))
+
     def launch_kernel(c, a, b, sa, sb):
-        launch_fn(
-            c.contiguous().view(-1),
-            _as_i8(a.contiguous().view(-1)),
-            _as_i8(b.contiguous().view(-1)),
-            sa.contiguous().view(-1) if sa.numel() > 0 else sa,
-            sb.contiguous().view(-1) if sb.numel() > 0 else sb,
-            M, N,
-            torch.cuda.current_stream(),
-        )
+        compiled_fn(*_gemm_args(c, a, b, sa, sb))
 
     bench_iters = max(2, int(bench_iters))
     bench_warmup = int(bench_warmup)
@@ -280,6 +290,8 @@ def test_mfma_w4_flyc_preshuffle(
     use_cshuffle_epilog: bool = False,
     waves_per_eu: int = 0,
     use_async_copy: bool = False,
+    dsrd_preload: int = 2,
+    dvmem_preload: int = 2,
 ):
     """FP4 (MXFP4) preshuffle GEMM — gfx950 only."""
     if get_rocm_arch() != "gfx950":
@@ -301,8 +313,13 @@ def test_mfma_w4_flyc_preshuffle(
         use_cshuffle_epilog=bool(use_cshuffle_epilog),
         waves_per_eu=_wpe,
         use_async_copy=bool(use_async_copy),
+        dsrd_preload=int(dsrd_preload),
+        dvmem_preload=int(dvmem_preload),
     )
-    print(f"✓ Compiled (lds_stage={lds_stage}, async_copy={use_async_copy}, waves_per_eu={_wpe})")
+    print(
+        f"✓ Compiled (lds_stage={lds_stage}, async_copy={use_async_copy}, "
+        f"waves_per_eu={_wpe}, dsrd_preload={dsrd_preload}, dvmem_preload={dvmem_preload})"
+    )
 
     device = torch.device("cuda")
     M_align_32 = (M + 31) // 32 * 32
@@ -343,16 +360,18 @@ def test_mfma_w4_flyc_preshuffle(
             return t
         return t.view(torch.uint8)
 
+    def _w4_args(c, a, b, sa, sb):
+        return (c.contiguous().view(-1),
+                _to_bytes(a).contiguous().view(-1),
+                _to_bytes(b).contiguous().view(-1),
+                _to_bytes(sa).contiguous().view(-1),
+                _to_bytes(sb).contiguous().view(-1),
+                M, N, torch.cuda.current_stream())
+
+    compiled_fn = flyc.compile(launch_fn, *_w4_args(c_out, a_q, b_shuffled, scale_a, scale_b_shuffled))
+
     def launch_kernel(c, a, b, sa, sb):
-        launch_fn(
-            c.contiguous().view(-1),
-            _to_bytes(a).contiguous().view(-1),
-            _to_bytes(b).contiguous().view(-1),
-            _to_bytes(sa).contiguous().view(-1),
-            _to_bytes(sb).contiguous().view(-1),
-            M, N,
-            torch.cuda.current_stream(),
-        )
+        compiled_fn(*_w4_args(c, a, b, sa, sb))
 
     bench_iters = max(2, int(bench_iters))
     _, us = run_perftest(
@@ -389,6 +408,8 @@ if __name__ == "__main__":
     parser.add_argument("--tile_n", type=int, default=64)
     parser.add_argument("--tile_k", type=int, default=256)
     parser.add_argument("--lds_stage", type=int, default=DEFAULT_LDS_STAGE, choices=[1, 2])
+    parser.add_argument("--dsrd_preload", type=int, default=2)
+    parser.add_argument("--dvmem_preload", type=int, default=2)
     parser.add_argument("--num_iters", type=int, default=DEFAULT_BENCH_ITERS)
     parser.add_argument("--num_warmup", type=int, default=DEFAULT_BENCH_WARMUP)
     parser.add_argument("--flyc", action="store_true", default=True)
@@ -414,6 +435,8 @@ if __name__ == "__main__":
                 use_async_copy=bool(args.use_async_copy),
                 test_graph=bool(args.test_graph),
                 lds_stage=args.lds_stage,
+                dsrd_preload=args.dsrd_preload,
+                dvmem_preload=args.dvmem_preload,
                 bench_iters=args.num_iters,
                 bench_warmup=args.num_warmup,
                 run_aiter_bench=bool(args.run_aiter_bench),
@@ -434,6 +457,8 @@ if __name__ == "__main__":
                 use_cshuffle_epilog=bool(args.use_cshuffle_epilog),
                 waves_per_eu=int(args.waves_per_eu),
                 use_async_copy=bool(args.use_async_copy),
+                dsrd_preload=args.dsrd_preload,
+                dvmem_preload=args.dvmem_preload,
             )
     except pytest.skip.Exception as e:
         print(f"Skipped: {e}")

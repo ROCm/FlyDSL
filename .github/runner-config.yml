@@ -17,3 +17,7 @@ runners:
   linux-flydsl-mi355-8:
     gpu_arch: MI355
     gpu_count: 8
+
+  linux-flydsl-navi-2:
+    gpu_arch: gfx1201
+    gpu_count: 4

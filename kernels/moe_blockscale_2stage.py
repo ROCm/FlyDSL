@@ -742,6 +742,7 @@ def compile_moe_blockscale_gemm1(
                                 a2, a3 = lds_load_packs_k64(curr_row, col1, lds_base)
                                 a128 = _pack128(a0, a1, a2, a3)
                                 s_a_v4 = s_a_vec4_list[mi]
+                                pending_gate_up = None
                                 for ni in range_constexpr(num_acc_n):
                                     acc_idx = mi * num_acc_n + ni
                                     bg128 = _pack128(bg0_p0[ni], bg0_p1[ni], bg1_p0[ni], bg1_p1[ni])
@@ -754,14 +755,28 @@ def compile_moe_blockscale_gemm1(
                                         mfma_res_ty,
                                         [a128, bu128, acc_init,
                                          0, 0, 0, 0x7F7F7F7F, 0, 0x7F7F7F7F])
-                                    tmp_g = ArithValue(blk_g) * ArithValue(s_a_v4)
-                                    tmp_u = ArithValue(blk_u) * ArithValue(s_a_v4)
-                                    s_wg_bc = vector.broadcast(T.f32x4, s_w_gate_vals[ni])
-                                    s_wu_bc = vector.broadcast(T.f32x4, s_w_up_vals[ni])
-                                    current_gate[acc_idx] = math_dialect.fma(
-                                        tmp_g, s_wg_bc, current_gate[acc_idx])
-                                    current_up[acc_idx] = math_dialect.fma(
-                                        tmp_u, s_wu_bc, current_up[acc_idx])
+                                    rocdl.sched_barrier(0)
+                                    if pending_gate_up is not None:
+                                        prev_acc_idx, prev_blk_g, prev_blk_u, prev_ni = pending_gate_up
+                                        s_wg_bc = vector.broadcast(T.f32x4, s_w_gate_vals[prev_ni])
+                                        s_wu_bc = vector.broadcast(T.f32x4, s_w_up_vals[prev_ni])
+                                        scale_g = ArithValue(s_a_v4) * ArithValue(s_wg_bc)
+                                        scale_u = ArithValue(s_a_v4) * ArithValue(s_wu_bc)
+                                        current_gate[prev_acc_idx] = math_dialect.fma(
+                                            prev_blk_g, scale_g, current_gate[prev_acc_idx])
+                                        current_up[prev_acc_idx] = math_dialect.fma(
+                                            prev_blk_u, scale_u, current_up[prev_acc_idx])
+                                    pending_gate_up = (acc_idx, blk_g, blk_u, ni)
+                                if pending_gate_up is not None:
+                                    prev_acc_idx, prev_blk_g, prev_blk_u, prev_ni = pending_gate_up
+                                    s_wg_bc = vector.broadcast(T.f32x4, s_w_gate_vals[prev_ni])
+                                    s_wu_bc = vector.broadcast(T.f32x4, s_w_up_vals[prev_ni])
+                                    scale_g = ArithValue(s_a_v4) * ArithValue(s_wg_bc)
+                                    scale_u = ArithValue(s_a_v4) * ArithValue(s_wu_bc)
+                                    current_gate[prev_acc_idx] = math_dialect.fma(
+                                        prev_blk_g, scale_g, current_gate[prev_acc_idx])
+                                    current_up[prev_acc_idx] = math_dialect.fma(
+                                        prev_blk_u, scale_u, current_up[prev_acc_idx])
                     else:
                         mfma_fn = (
                             mfma_i32_k32
@@ -804,14 +819,14 @@ def compile_moe_blockscale_gemm1(
                                             a0, a1 = lds_load_packs_k64(row_a_lds + arith.index(mi * 16), col_base, lds_base)
                                         blk_g = mfma_k64(blk_g, a0, a1, b_gate_packs0[ni], b_gate_packs1[ni])
                                         blk_u = mfma_k64(blk_u, a0, a1, b_up_packs0[ni], b_up_packs1[ni])
-                                    tmp_g = ArithValue(blk_g) * ArithValue(s_a_v4)
-                                    tmp_u = ArithValue(blk_u) * ArithValue(s_a_v4)
                                     s_wg_bc = vector.broadcast(T.f32x4, s_w_gate_vals[ni])
                                     s_wu_bc = vector.broadcast(T.f32x4, s_w_up_vals[ni])
+                                    scale_g = ArithValue(s_a_v4) * ArithValue(s_wg_bc)
+                                    scale_u = ArithValue(s_a_v4) * ArithValue(s_wu_bc)
                                     current_gate[acc_idx] = math_dialect.fma(
-                                        tmp_g, s_wg_bc, current_gate[acc_idx])
+                                        blk_g, scale_g, current_gate[acc_idx])
                                     current_up[acc_idx] = math_dialect.fma(
-                                        tmp_u, s_wu_bc, current_up[acc_idx])
+                                        blk_u, scale_u, current_up[acc_idx])
                     return current_gate, current_up
 
                 def compute_tile(
@@ -1305,6 +1320,10 @@ def compile_moe_blockscale_gemm2(
     _ck_lds128 = os.environ.get("FLYDSL_CK_LDS128", "1") in ("1", "true", "True", "YES", "yes")
     pad_k = 0 if _ck_lds128 else 8
     lds_stride = tile_k + pad_k
+    # gfx950+ has buffer_atomic_pk_add_bf16 → bf16 can use buffer atomics (same as f16).
+    # gfx942 only has global_atomic_pk_add_bf16 → must use global atomics with raw pointer.
+    _has_buffer_atomic_bf16 = str(gpu_arch).startswith(("gfx95", "gfx12"))
+    _needs_global_atomic_bf16 = out_is_bf16 and not _has_buffer_atomic_bf16
     if out_is_bf16:
         if not (gpu_arch.startswith("gfx942") or gpu_arch.startswith("gfx950") or gpu_arch.startswith("gfx12")):
             raise ValueError(f"out_dtype='bf16' requires bf16 global atomics (gfx942/gfx950/gfx12), got arch={gpu_arch!r}")
@@ -1888,6 +1907,7 @@ def compile_moe_blockscale_gemm2(
                                 a2, a3 = lds_load_packs_k64(curr_row, col1, lds_base)
                                 a128 = _pack128(a0, a1, a2, a3)
                                 s_a_v4 = s_a_vec4_list[mi]
+                                pending_acc = None
                                 for ni in range_constexpr(num_acc_n):
                                     acc_idx = mi * num_acc_n + ni
                                     b128 = _pack128(b0_p0[ni], b0_p1[ni], b1_p0[ni], b1_p1[ni])
@@ -1895,10 +1915,20 @@ def compile_moe_blockscale_gemm2(
                                         mfma_res_ty,
                                         [a128, b128, acc_init,
                                          0, 0, 0, 0x7F7F7F7F, 0, 0x7F7F7F7F])
-                                    tmp = ArithValue(blk) * ArithValue(s_a_v4)
-                                    s_w_bc = vector.broadcast(T.f32x4, s_w_vals[ni])
-                                    current_acc[acc_idx] = math_dialect.fma(
-                                        tmp, s_w_bc, current_acc[acc_idx])
+                                    rocdl.sched_barrier(0)
+                                    if pending_acc is not None:
+                                        prev_acc_idx, prev_blk, prev_ni = pending_acc
+                                        s_w_bc = vector.broadcast(T.f32x4, s_w_vals[prev_ni])
+                                        scale = ArithValue(s_a_v4) * ArithValue(s_w_bc)
+                                        current_acc[prev_acc_idx] = math_dialect.fma(
+                                            prev_blk, scale, current_acc[prev_acc_idx])
+                                    pending_acc = (acc_idx, blk, ni)
+                                if pending_acc is not None:
+                                    prev_acc_idx, prev_blk, prev_ni = pending_acc
+                                    s_w_bc = vector.broadcast(T.f32x4, s_w_vals[prev_ni])
+                                    scale = ArithValue(s_a_v4) * ArithValue(s_w_bc)
+                                    current_acc[prev_acc_idx] = math_dialect.fma(
+                                        prev_blk, scale, current_acc[prev_acc_idx])
                     else:
                         mfma_fn = (
                             mfma_i32_k32
@@ -1937,10 +1967,10 @@ def compile_moe_blockscale_gemm2(
                                         else:
                                             a0, a1 = lds_load_packs_k64(row_a_lds + arith.index(mi * 16), col_base, lds_base)
                                         blk = mfma_k64(blk, a0, a1, b_packs0[ni], b_packs1[ni])
-                                    tmp = ArithValue(blk) * ArithValue(s_a_vec4_list[mi])
                                     s_w_bc = vector.broadcast(T.f32x4, s_w_vals[ni])
+                                    scale = ArithValue(s_a_vec4_list[mi]) * ArithValue(s_w_bc)
                                     current_acc[acc_idx] = math_dialect.fma(
-                                        tmp, s_w_bc, current_acc[acc_idx])
+                                        blk, scale, current_acc[acc_idx])
                     return current_acc
 
                 def compute_tile(acc_in, b_tile_in, lds_base, *, prefetch_epilogue: bool = False, a0_prefetch=None):
@@ -2244,12 +2274,11 @@ def compile_moe_blockscale_gemm2(
                             "FLYDSL_MOE_STAGE2_CSHUFFLE=1 but lds_out is not allocated/aliased."
                         )
 
-                    # For bf16 global atomics, precompute the output base address once.
-                    # (We still need an inttoptr per atomic unless we can rely on GEPOp; keep the
-                    # stable path here.)
+                    # For bf16 global atomics (gfx942 only), precompute the output base address.
+                    # gfx950+ has buffer_atomic_pk_add_bf16, so bf16 uses buffer atomics there.
                     out_base_idx = None
-                    if out_is_bf16:
-                        _out_raw = arg_out.value if hasattr(arg_out, "value") else arg_out; _out_ptr = _fly_dialect.extract_aligned_pointer_as_index(ir.Type.parse("!llvm.ptr"), _out_raw); out_base_idx = arith.index_cast(T.index, llvm.PtrToIntOp(T.i64, _out_ptr).result)
+                    if _needs_global_atomic_bf16:
+                        out_base_idx = buffer_ops.extract_base_index(arg_out)
 
                     def write_row_to_lds(
                         *,
@@ -2306,10 +2335,9 @@ def compile_moe_blockscale_gemm2(
                         col_i32 = arith.index_cast(T.i32, col_g0)
                         idx_elem = idx0 + col_i32
                         idx_elem_even = idx_elem & mask_even_i32
-                        if out_is_bf16:
+                        if _needs_global_atomic_bf16:
+                            # gfx942: no buffer_atomic_pk_add_bf16, use global atomicrmw fadd
                             if bool(accumulate):
-                                # Use global atomicrmw fadd on <2 x bf16> (CK path).
-                                # Row-valid gating is handled at the row level by c_shuffle_epilog via `precompute_row`.
                                 byte_off = idx_elem_even * c2_i32
                                 byte_off_idx = arith.index_cast(T.index, byte_off)
                                 ptr_addr_idx = out_base_idx + byte_off_idx
@@ -2325,9 +2353,9 @@ def compile_moe_blockscale_gemm2(
                                     alignment=4,
                                 )
                             else:
-                                # Scatter store (no atomic): store bf16x(e_vec) directly via buffer store.
                                 buffer_ops.buffer_store(frag, out_rsrc, idx_elem_even)
                         else:
+                            # f16, or bf16 on gfx950+ (has buffer_atomic_pk_add_bf16)
                             byte_off = idx_elem_even * c2_i32
                             if bool(accumulate):
                                 atomic_add_f16x2(frag, byte_off)

@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2025 FlyDSL Project Contributors
 
-
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/DialectImplementation.h"
 #include "mlir/IR/OpImplementation.h"
@@ -956,10 +955,15 @@ FLY_INFER_RETURN_TYPES(Crd2IdxOp) {
         layoutCrd2Idx(layoutBuilder, coordAttr, static_cast<Attribute>(composedTy.getAttr()));
     inferredReturnTypes.assign({IntTupleType::get(result)});
     return success();
+  } else if (auto swizzleTy = dyn_cast<SwizzleType>(operands[1].getType())) {
+    IntTupleAttr result = builder.applySwizzle(coordAttr, swizzleTy.getAttr());
+    inferredReturnTypes.assign({IntTupleType::get(result)});
+    return success();
   }
 
   return emitOptionalError(location,
-                           "Crd2IdxOp: expected LayoutType or ComposedLayoutType for layout, got ",
+                           "Crd2IdxOp: expected LayoutType, ComposedLayoutType or SwizzleType "
+                           "for layout, got ",
                            operands[1].getType());
 }
 
@@ -1779,6 +1783,55 @@ FLY_INFER_RETURN_TYPES(ApplySwizzleOp) {
   return success();
 }
 
+FLY_INFER_RETURN_TYPES(DecompositionOp) {
+  Type tensorTy = operands[0].getType();
+
+  Attribute layoutAttr;
+  if (auto memrefTy = dyn_cast<fly::MemRefType>(tensorTy))
+    layoutAttr = memrefTy.getLayout();
+  else if (auto coordTensorTy = dyn_cast<CoordTensorType>(tensorTy))
+    layoutAttr = coordTensorTy.getLayout();
+  else
+    return emitOptionalError(location, "DecompositionOp: expected TensorLikeType, got ", tensorTy);
+
+  if (isa<LayoutAttr>(layoutAttr)) {
+    inferredReturnTypes.assign({tensorTy});
+    return success();
+  }
+
+  auto composed = dyn_cast<ComposedLayoutAttr>(layoutAttr);
+  if (!composed)
+    return emitOptionalError(
+        location, "DecompositionOp: expected LayoutAttr or ComposedLayoutAttr, got ", layoutAttr);
+
+  LayoutBuilder<LayoutAttr> builder(context);
+  Attribute inner = composed.getInner();
+  IntTupleAttr offset = composed.getOffset();
+  LayoutAttr outer = composed.getOuter();
+
+  IntTupleAttr iterOffset;
+  if (auto swizzleInner = dyn_cast<SwizzleAttr>(inner))
+    iterOffset = builder.applySwizzle(offset, swizzleInner);
+  else
+    iterOffset = layoutCrd2Idx(builder, offset, inner);
+
+  if (auto memrefTy = dyn_cast<fly::MemRefType>(tensorTy)) {
+    int32_t valDiv = memrefTy.getValueDivisibility();
+    IntAttr offsetInt = iterOffset.extractIntFromLeaf();
+    int32_t offsetDiv =
+        offsetInt.isStatic() ? std::abs(offsetInt.getValue()) : offsetInt.getDivisibility();
+    int32_t newValDiv = (offsetDiv == 0) ? valDiv : utils::divisibilityAdd(valDiv, offsetDiv);
+    inferredReturnTypes.assign({fly::MemRefType::get(
+        memrefTy.getElemTy(), memrefTy.getAddressSpace(), outer,
+        AlignAttr::get(memrefTy.getElemTy(), newValDiv), memrefTy.getSwizzle())});
+  } else {
+    auto coordTensorTy = cast<CoordTensorType>(tensorTy);
+    IntTupleAttr newBase = intTupleAdd(builder, coordTensorTy.getBase(), iterOffset);
+    inferredReturnTypes.assign({CoordTensorType::get(newBase, outer)});
+  }
+  return success();
+}
+
 FLY_INFER_RETURN_TYPES(PtrLoadOp) {
   if (auto ptrTy = dyn_cast<PointerType>(operands[0].getType())) {
     inferredReturnTypes.assign({ptrTy.getElemTy()});
@@ -1798,7 +1851,28 @@ FLY_INFER_RETURN_TYPES(MemRefLoadOp) {
     return success();
   }
   if (auto coordTensorTy = dyn_cast<CoordTensorType>(operands[0].getType())) {
-    inferredReturnTypes.push_back(IntTupleType::get(coordTensorTy.getBase()));
+    auto indicesTy = dyn_cast<IntTupleType>(operands[1].getType());
+    if (!indicesTy)
+      return emitOptionalError(location, "MemRefLoadOp: expected IntTupleType for indices, got ",
+                               operands[1].getType());
+
+    IntTupleBuilder<IntTupleAttr> builder(context);
+    IntTupleAttr baseAttr = coordTensorTy.getBase();
+    IntTupleAttr indicesAttr = indicesTy.getAttr();
+    Attribute layoutAttr = coordTensorTy.getLayout();
+
+    IntTupleAttr offsetAttr;
+    if (auto layout = dyn_cast<LayoutAttr>(layoutAttr)) {
+      offsetAttr = layoutCrd2Idx(builder, indicesAttr, layout.getShape(), layout.getStride());
+    } else if (auto composed = dyn_cast<ComposedLayoutAttr>(layoutAttr)) {
+      LayoutBuilder<LayoutAttr> layoutBuilder(context);
+      offsetAttr = layoutCrd2Idx(layoutBuilder, indicesAttr, static_cast<Attribute>(composed));
+    } else {
+      return emitOptionalError(location, "MemRefLoadOp: unsupported layout type in CoordTensor");
+    }
+
+    IntTupleAttr resultAttr = intTupleAdd(builder, baseAttr, offsetAttr);
+    inferredReturnTypes.push_back(IntTupleType::get(resultAttr));
     return success();
   }
   return emitOptionalError(location, "MemRefLoadOp: expected MemRefType or CoordTensorType, got ",

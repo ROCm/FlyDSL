@@ -42,14 +42,59 @@ def get_gpu_module_body(module_op: gpu.GPUModuleOp):
     return module_op.regions[0].blocks[0]
 
 
+def _validate_known_block_size(value):
+    """Validate and normalize *known_block_size* to a list of 3 positive ints.
+
+    Returns ``None`` when *value* is ``None`` (attribute should be omitted).
+
+    Raises:
+        TypeError: if *value* is not a sequence of integers.
+        ValueError: if the length is not 3 or any element is not positive.
+    """
+    if value is None:
+        return None
+
+    try:
+        elems = list(value)
+    except TypeError:
+        raise TypeError(
+            f"known_block_size must be a sequence of 3 positive integers, got {type(value).__name__}"
+        ) from None
+
+    if len(elems) != 3:
+        raise ValueError(
+            f"known_block_size must have exactly 3 elements (x, y, z), got {len(elems)}"
+        )
+
+    for i, v in enumerate(elems):
+        if not isinstance(v, int):
+            raise TypeError(
+                f"known_block_size[{i}] must be an int, got {type(v).__name__}"
+            )
+        if v <= 0:
+            raise ValueError(
+                f"known_block_size[{i}] must be positive, got {v}"
+            )
+
+    return elems
+
+
 def create_gpu_func(
     sym_name: str,
     function_type: ir.TypeAttr,
     *,
+    known_block_size=None,
     loc=None,
     ip=None,
 ) -> gpu.GPUFuncOp:
-    return gpu.GPUFuncOp(function_type, sym_name=sym_name, kernel=True, loc=loc, ip=ip)
+    return gpu.GPUFuncOp(
+        function_type,
+        sym_name=sym_name,
+        kernel=True,
+        known_block_size=known_block_size,
+        loc=loc,
+        ip=ip,
+    )
 
 
 # =============================================================================
@@ -253,10 +298,30 @@ class KernelLauncher:
         kernel_name: str,
         kernel_args: Tuple,
         call_location: Optional[ir.Location] = None,
+        known_block_size: Optional[List[int]] = None,
     ):
         self._kernel_name = kernel_name
         self._kernel_args = kernel_args
         self._call_location = call_location
+        self._known_block_size = known_block_size
+
+    def _check_block_vs_known(self, block_dims: Tuple) -> None:
+        """Warn when statically-known *block* dims disagree with *known_block_size*."""
+        if self._known_block_size is None:
+            return
+        labels = ("x", "y", "z")
+        for i, (launch_val, declared) in enumerate(zip(block_dims, self._known_block_size)):
+            if isinstance(launch_val, int) and launch_val != declared:
+                import warnings
+                warnings.warn(
+                    f"launch block {labels[i]}={launch_val} differs from "
+                    f"known_block_size {labels[i]}={declared} declared on "
+                    f"kernel '{self._kernel_name}'. "
+                    f"This produces an internally-inconsistent IR and is "
+                    f"undefined behavior on AMDGPU.",
+                    stacklevel=3,
+                )
+                return  # one warning per launch is enough
 
     def launch(
         self,
@@ -265,6 +330,7 @@ class KernelLauncher:
         block: DimType = (1, 1, 1),
         smem: Union[int, ir.Value] = 0,
         stream: Optional[ir.Value] = None,
+        cluster: Optional[DimType] = None,
     ) -> None:
         """Emit gpu.launch_func operation with the given configuration.
 
@@ -273,6 +339,8 @@ class KernelLauncher:
             block: Block dimensions (x, y, z). Can be int, ir.Value, tuple, or list.
             smem: Dynamic shared memory size in bytes. Can be int or ir.Value.
             stream: CUDA/HIP stream as ir.Value. None means default stream.
+            cluster: Cluster dimensions (x, y, z) for workgroup clustering.
+                     None means no clustering. Enables MCAST and cluster barriers.
         """
         launch_loc = create_caller_location(depth=2)
 
@@ -282,6 +350,8 @@ class KernelLauncher:
 
         grid_dims = _normalize_dim(grid)
         block_dims = _normalize_dim(block)
+
+        self._check_block_vs_known(block_dims)
 
         with launch_loc:
             grid_x = _to_index_value(grid_dims[0])
@@ -312,6 +382,15 @@ class KernelLauncher:
 
             async_deps = [stream_val] if stream_val is not None else None
 
+            cluster_size = None
+            if cluster is not None:
+                cx, cy, cz = _normalize_dim(cluster)
+                cluster_size = (
+                    _to_index_value(cx),
+                    _to_index_value(cy),
+                    _to_index_value(cz),
+                )
+
             gpu.LaunchFuncOp(
                 ["kernels", self._kernel_name],
                 (grid_x, grid_y, grid_z),
@@ -319,6 +398,7 @@ class KernelLauncher:
                 kernel_operands,
                 async_dependencies=async_deps,
                 dynamic_shared_memory_size=smem_val,
+                cluster_size=cluster_size,
                 loc=launch_loc,
                 ip=None,
             )
@@ -336,10 +416,11 @@ class KernelFunction:
     configuring and launching the kernel.
     """
 
-    def __init__(self, func: Callable, some_args=None, name: Optional[str] = None):
+    def __init__(self, func: Callable, some_args=None, name: Optional[str] = None, known_block_size=None):
         self._func = ASTRewriter.transform(func)
         self._some_args = some_args
         self._name = name
+        self._known_block_size = _validate_known_block_size(known_block_size)
         self._kernel_name: Optional[str] = None
         self._location_tracker = FuncLocationTracker(func)
 
@@ -389,7 +470,11 @@ class KernelFunction:
         with ir.InsertionPoint(ctx.gpu_module_body):
             func_type = ir.FunctionType.get(kernel_arg_types, [])
             with kernel_loc:
-                gpu_func = create_gpu_func(self._kernel_name, ir.TypeAttr.get(func_type))
+                gpu_func = create_gpu_func(
+                    self._kernel_name,
+                    ir.TypeAttr.get(func_type),
+                    known_block_size=self._known_block_size,
+                )
             gpu_func.regions[0].blocks.append(*kernel_arg_types)
             entry_block = gpu_func.regions[0].blocks[0]
 
@@ -417,7 +502,7 @@ class KernelFunction:
 
         kernel_args = self._emit_kernel(ctx, args, kwargs)
 
-        return KernelLauncher(self._kernel_name, kernel_args, call_loc)
+        return KernelLauncher(self._kernel_name, kernel_args, call_loc, self._known_block_size)
 
 
 # =============================================================================
@@ -425,7 +510,13 @@ class KernelFunction:
 # =============================================================================
 
 
-def kernel(func: Optional[Callable] = None, *, some_args=None, name: Optional[str] = None) -> KernelFunction:
+def kernel(
+    func: Optional[Callable] = None,
+    *,
+    some_args=None,
+    name: Optional[str] = None,
+    known_block_size=None,
+) -> KernelFunction:
     """Decorator for GPU kernel functions.
 
     Usage:
@@ -439,6 +530,11 @@ def kernel(func: Optional[Callable] = None, *, some_args=None, name: Optional[st
         def my_kernel(a: Tensor):
             ...
 
+        # With known block size (required when block > 256 on AMDGPU):
+        @kernel(known_block_size=[512, 1, 1])
+        def my_kernel(a: Tensor):
+            ...
+
     The decorated function can be called inside a @jit function to
     define the kernel, then .launch(config) is called to emit the launch op.
 
@@ -447,10 +543,14 @@ def kernel(func: Optional[Callable] = None, *, some_args=None, name: Optional[st
         some_args: Optional kernel-specific arguments
         name: Optional kernel name override; shown in profiler instead of the
               Python function name. Tile/dtype info can be embedded here.
+        known_block_size: Optional list of [x, y, z] block dimensions. Sets
+              the ``known_block_size`` attribute on the GPU function, which the
+              AMDGPU backend uses to derive ``max_flat_workgroup_size``.
+              Required when block size exceeds 256 threads.
 
     Returns:
         KernelFunction wrapper
     """
     if func is None:
-        return lambda f: KernelFunction(f, some_args=some_args, name=name)
-    return KernelFunction(func, some_args=some_args, name=name)
+        return lambda f: KernelFunction(f, some_args=some_args, name=name, known_block_size=known_block_size)
+    return KernelFunction(func, some_args=some_args, name=name, known_block_size=known_block_size)
