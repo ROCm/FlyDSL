@@ -107,9 +107,7 @@ def compile_moe_fp4_gemm1(
     if tile_k % 128 != 0:
         raise ValueError(f"tile_k must be divisible by 128 for MXFP4, got tile_k={tile_k}")
     if model_dim < tile_k * 2:
-        raise ValueError(
-            f"model_dim ({model_dim}) must be >= 2*tile_k ({tile_k*2}) for ping-pong pipeline"
-        )
+        raise ValueError(f"model_dim ({model_dim}) must be >= 2*tile_k ({tile_k * 2}) for ping-pong pipeline")
 
     # MXFP4: 2 elements per byte (E2M1 packed)
     fp4_pack = 2
@@ -120,25 +118,21 @@ def compile_moe_fp4_gemm1(
     a_elem_bytes = 2  # BF16
     a_tile_k_bytes = tile_k * a_elem_bytes
     if a_tile_k_bytes % 64 != 0:
-        raise ValueError(
-            f"tile_k * a_elem_bytes ({a_tile_k_bytes}) must be divisible by 64"
-        )
+        raise ValueError(f"tile_k * a_elem_bytes ({a_tile_k_bytes}) must be divisible by 64")
 
     _out_is_bf16 = out_dtype == "bf16"
 
     # MXFP4 quantization parameters
-    _quant_block_k = 32          # 1 scale per 32 elements in K (MXFP4 standard)
+    _quant_block_k = 32  # 1 scale per 32 elements in K (MXFP4 standard)
     _fp4_pack_M = 2
     _fp4_pack_N = 2
     _fp4_pack_K = 2
     _K1_outer = model_dim // (_quant_block_k * 4 * _fp4_pack_K)  # outer K loop count for scales
-    _fp4_scale_chunk_k = _quant_block_k * 4 * _fp4_pack_K        # 256: elements per scale chunk
-    _stride_k0_elems = 64                                          # elements per K0 block
+    _fp4_scale_chunk_k = _quant_block_k * 4 * _fp4_pack_K  # 256: elements per scale chunk
+    _stride_k0_elems = 64  # elements per K0 block
 
     if use_cshuffle_epilog is None:
-        use_cshuffle_epilog = os.environ.get("FLYDSL_MOE_STAGE1_CSHUFFLE", "1") in (
-            "1", "true", "True", "YES", "yes"
-        )
+        use_cshuffle_epilog = os.environ.get("FLYDSL_MOE_STAGE1_CSHUFFLE", "1") in ("1", "true", "True", "YES", "yes")
     use_cshuffle_epilog = bool(use_cshuffle_epilog)
     if out_dtype != "f16" and use_cshuffle_epilog:
         raise ValueError("CShuffle epilogue currently supports only f16 output; set out_dtype='f16'")
@@ -149,15 +143,11 @@ def compile_moe_fp4_gemm1(
     total_threads = 256
     bytes_a_per_tile = tile_m * tile_k * a_elem_bytes
     if bytes_a_per_tile % total_threads != 0:
-        raise ValueError(
-            f"tile_m * tile_k * 2 ({bytes_a_per_tile}) must be divisible by {total_threads}"
-        )
+        raise ValueError(f"tile_m * tile_k * 2 ({bytes_a_per_tile}) must be divisible by {total_threads}")
     bytes_per_thread_a = bytes_a_per_tile // total_threads
     a_load_bytes = 16
     if bytes_per_thread_a % a_load_bytes != 0:
-        raise ValueError(
-            f"bytes_per_thread_a ({bytes_per_thread_a}) must be divisible by {a_load_bytes}"
-        )
+        raise ValueError(f"bytes_per_thread_a ({bytes_per_thread_a}) must be divisible by {a_load_bytes}")
     num_a_loads = bytes_per_thread_a // a_load_bytes
 
     # LDS: A tiles in ping-pong (BF16, not packed). lds_stride = tile_k (XOR16 swizzle, no padding)
@@ -180,9 +170,7 @@ def compile_moe_fp4_gemm1(
     _wpe_tag = f"_wpe{waves_per_eu}" if waves_per_eu is not None else ""
     _epi_tag = "cshuffle" if _use_cshuffle_epilog else "direct"
     module_name = (
-        f"moe_fp4_gemm1_{activation}_{out_dtype}_{_epi_tag}"
-        f"_t{tile_m}x{tile_n}x{tile_k}{_wpe_tag}"
-        f"_abi1"
+        f"moe_fp4_gemm1_{activation}_{out_dtype}_{_epi_tag}_t{tile_m}x{tile_n}x{tile_k}{_wpe_tag}_abi1"
     ).replace("-", "_")
 
     # ── Kernel function ────────────────────────────────────────────────────────
@@ -261,8 +249,8 @@ def compile_moe_fp4_gemm1(
         # ── Thread/wave decomposition ──────────────────────────────────────
         tx = gpu.thread_id("x")
         # Block → N (x), M / expert-block (y): matches aiter MoE launch convention
-        by = gpu.block_id("x")   # N tile index
-        bx = gpu.block_id("y")   # M tile index (sorted expert block)
+        by = gpu.block_id("x")  # N tile index
+        bx = gpu.block_id("y")  # M tile index (sorted expert block)
 
         bx_m = bx * fx.Index(tile_m)
 
@@ -278,9 +266,7 @@ def compile_moe_fp4_gemm1(
         with _if_then(_if_blk):
             # ── LDS allocation ─────────────────────────────────────────────
             base_ptr = allocator.get_base()
-            lds_a_ptr = SmemPtr(
-                base_ptr, lds_alloc_offset, T.bf16, shape=(lds_total_elems,)
-            )
+            lds_a_ptr = SmemPtr(base_ptr, lds_alloc_offset, T.bf16, shape=(lds_total_elems,))
             lds_a = lds_a_ptr.get()
             lds_out = (
                 SmemPtr(base_ptr, lds_a_ptr.byte_offset, T.f16, shape=(tile_m * tile_n,)).get()
@@ -307,7 +293,8 @@ def compile_moe_fp4_gemm1(
             sorted_rsrc = buffer_ops.create_buffer_resource(arg_sorted_token_ids, max_size=False)
             sorted_w_rsrc = buffer_ops.create_buffer_resource(arg_sorted_weights, max_size=False)
             expert_rsrc = buffer_ops.create_buffer_resource(
-                arg_expert_ids, max_size=False,
+                arg_expert_ids,
+                max_size=False,
                 num_records_bytes=arith.index_cast(T.i64, size_expert_ids_in * fx.Index(4)),
             )
 
@@ -342,9 +329,7 @@ def compile_moe_fp4_gemm1(
             # Compute k_div4 for load indexing
             c_k_div4 = (k_in * fx.Index(a_elem_bytes)) // fx.Index(4)
             tile_k_dwords = (tile_k * a_elem_bytes) // 4
-            layout_a_tile_div4_inner = fx.make_layout(
-                (tile_m, tile_k_dwords), (tile_k_dwords, 1)
-            )
+            layout_a_tile_div4_inner = fx.make_layout((tile_m, tile_k_dwords), (tile_k_dwords, 1))
             tx_i32_base = tx * fx.Index(4)  # 4 dwords = 16 bytes per chunk
 
             x_row_base_div4 = []
@@ -486,14 +471,10 @@ def compile_moe_fp4_gemm1(
             for ni in range_constexpr(_n_packed):
                 gate_n_base = by_n + n_tile_base + arith.index(ni * _fp4_pack_N * 16)
                 mni_gate = (expert_off_idx + gate_n_base) // arith.index(_fp4_pack_N * 16)
-                _scale_b_gate_base.append(
-                    mni_gate * arith.index(_scale_row_stride_elems) + _scale_lane_elem_off
-                )
+                _scale_b_gate_base.append(mni_gate * arith.index(_scale_row_stride_elems) + _scale_lane_elem_off)
                 up_n_base = gate_n_base + inter_idx
                 mni_up = (expert_off_idx + up_n_base) // arith.index(_fp4_pack_N * 16)
-                _scale_b_up_base.append(
-                    mni_up * arith.index(_scale_row_stride_elems) + _scale_lane_elem_off
-                )
+                _scale_b_up_base.append(mni_up * arith.index(_scale_row_stride_elems) + _scale_lane_elem_off)
 
             def load_fp4_scales(base_k_scale_idx):
                 """Load B (gate + up) FP4 scales for given K scale index.
@@ -527,7 +508,8 @@ def compile_moe_fp4_gemm1(
 
             def load_a_16(idx_elem):
                 return buffer_copy_gmem16_dwordx4(
-                    buffer_ops, vector,
+                    buffer_ops,
+                    vector,
                     elem_type=T.bf16,
                     idx_i32=idx_elem,
                     rsrc=x_rsrc,
@@ -556,7 +538,8 @@ def compile_moe_fp4_gemm1(
                     col_a_local_i32 = x_col_local_i32[i]
                     col_local_bytes = col_a_local_i32 * fx.Index(4)
                     lds_store_16b_xor16(
-                        arith, vector,
+                        arith,
+                        vector,
                         lds_memref=lds_a,
                         vec16_ty=vec8_bf16,
                         layout_lds=layout_lds,
@@ -582,8 +565,10 @@ def compile_moe_fp4_gemm1(
 
             # ── MFMA compute tile (FP4 scaled) ────────────────────────────────
             def compute_tile_fp4(
-                acc_gate_in, acc_up_in,
-                b_gate_tile, b_up_tile,
+                acc_gate_in,
+                acc_up_in,
+                b_gate_tile,
+                b_up_tile,
                 lds_base_offset,
                 fp4_scales,
                 *,
@@ -619,9 +604,7 @@ def compile_moe_fp4_gemm1(
                                 if (a0_prefetch is not None) and (ku128 == 0) and (mi_idx == 0):
                                     a0, a1 = a0_prefetch
                                 else:
-                                    a0, a1 = lds_load_packs_k64(
-                                        curr_row_a_lds, col_offset_base_bytes, lds_base_offset
-                                    )
+                                    a0, a1 = lds_load_packs_k64(curr_row_a_lds, col_offset_base_bytes, lds_base_offset)
                                 # Build a128: [a0, a1, 0, 0] as i32x8
                                 a128 = _pack_i64x4_to_i32x8(a0, a1, c0_i64, c0_i64)
 
@@ -634,17 +617,31 @@ def compile_moe_fp4_gemm1(
 
                                     gate_list[acc_idx] = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
                                         mfma_res_ty,
-                                        [a128, b_gate_128, gate_list[acc_idx],
-                                         _fp4_cbsz, _fp4_blgp,
-                                         imxdl, a_scale_fixed,
-                                         inxdl, b_gate_scale_val],
+                                        [
+                                            a128,
+                                            b_gate_128,
+                                            gate_list[acc_idx],
+                                            _fp4_cbsz,
+                                            _fp4_blgp,
+                                            imxdl,
+                                            a_scale_fixed,
+                                            inxdl,
+                                            b_gate_scale_val,
+                                        ],
                                     )
                                     up_list[acc_idx] = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
                                         mfma_res_ty,
-                                        [a128, b_up_128, up_list[acc_idx],
-                                         _fp4_cbsz, _fp4_blgp,
-                                         imxdl, a_scale_fixed,
-                                         inxdl, b_up_scale_val],
+                                        [
+                                            a128,
+                                            b_up_128,
+                                            up_list[acc_idx],
+                                            _fp4_cbsz,
+                                            _fp4_blgp,
+                                            imxdl,
+                                            a_scale_fixed,
+                                            inxdl,
+                                            b_up_scale_val,
+                                        ],
                                     )
 
                 return gate_list, up_list
@@ -657,8 +654,13 @@ def compile_moe_fp4_gemm1(
                     return
                 mfma_group = _n_packed
                 mfma_total = (
-                    k_unroll_packed * _m_repeat_packed * _n_packed
-                    * _fp4_pack_K * _fp4_pack_M * _fp4_pack_N * 2  # gate + up
+                    k_unroll_packed
+                    * _m_repeat_packed
+                    * _n_packed
+                    * _fp4_pack_K
+                    * _fp4_pack_M
+                    * _fp4_pack_N
+                    * 2  # gate + up
                 )
                 mfma_per_iter = 2 * mfma_group
                 sche_iters = 0 if mfma_per_iter == 0 else (mfma_total // mfma_per_iter)
@@ -724,8 +726,13 @@ def compile_moe_fp4_gemm1(
                 sc_ping = load_fp4_scale_chunk(fx.Index(k_chunk1 * _fp4_scale_chunk_k))
 
                 acc_gate, acc_up = compute_tile_fp4(
-                    acc_gate, acc_up, b_gate_cur, b_up_cur, lds_base_pong,
-                    sc0, a0_prefetch=a0_prefetch_pong,
+                    acc_gate,
+                    acc_up,
+                    b_gate_cur,
+                    b_up_cur,
+                    lds_base_pong,
+                    sc0,
+                    a0_prefetch=a0_prefetch_pong,
                 )
                 a0_prefetch_pong = None
                 store_a_tile_to_lds(a_tile_ping, lds_base_ping)
@@ -740,8 +747,13 @@ def compile_moe_fp4_gemm1(
                 sc_pong_new = load_fp4_scale_chunk(fx.Index(k_chunk2 * _fp4_scale_chunk_k))
 
                 acc_gate, acc_up = compute_tile_fp4(
-                    acc_gate, acc_up, b_gate_ping, b_up_ping, lds_base_ping,
-                    sc_ping, a0_prefetch=a0_prefetch_ping,
+                    acc_gate,
+                    acc_up,
+                    b_gate_ping,
+                    b_up_ping,
+                    lds_base_ping,
+                    sc_ping,
+                    a0_prefetch=a0_prefetch_ping,
                 )
                 a0_prefetch_ping = None
                 store_a_tile_to_lds(a_tile_pong_new, lds_base_pong)
@@ -768,8 +780,13 @@ def compile_moe_fp4_gemm1(
             sc_tail1 = load_fp4_scale_chunk(fx.Index(_k_tail1 * _fp4_scale_chunk_k))
 
             acc_gate, acc_up = compute_tile_fp4(
-                acc_gate, acc_up, b_gate_cur, b_up_cur, lds_base_pong,
-                sc_tail0, a0_prefetch=a0_prefetch_pong,
+                acc_gate,
+                acc_up,
+                b_gate_cur,
+                b_up_cur,
+                lds_base_pong,
+                sc_tail0,
+                a0_prefetch=a0_prefetch_pong,
             )
             store_a_tile_to_lds(a_tile_ping, lds_base_ping)
             hot_loop_scheduler()
@@ -777,8 +794,13 @@ def compile_moe_fp4_gemm1(
             a0_prefetch_ping = lds_load_packs_k64(row_a_lds, col_offset_base_bytes, lds_base_ping)
 
             acc_gate, acc_up = compute_tile_fp4(
-                acc_gate, acc_up, b_gate_ping, b_up_ping, lds_base_ping,
-                sc_tail1, a0_prefetch=a0_prefetch_ping,
+                acc_gate,
+                acc_up,
+                b_gate_ping,
+                b_up_ping,
+                lds_base_ping,
+                sc_tail1,
+                a0_prefetch=a0_prefetch_ping,
             )
 
             # ── Epilogue ───────────────────────────────────────────────────────
@@ -788,9 +810,7 @@ def compile_moe_fp4_gemm1(
                 if lds_out is None:
                     raise RuntimeError("CShuffle epilogue enabled but lds_out is not allocated.")
 
-                def write_row_to_lds(
-                    *, mi, ii, row_in_tile, row, row_base_lds, col_base_local, num_acc_n, lds_out
-                ):
+                def write_row_to_lds(*, mi, ii, row_in_tile, row, row_base_lds, col_base_local, num_acc_n, lds_out):
                     fused2 = buffer_ops.buffer_load(sorted_rsrc, row, vec_width=1, dtype=T.i32)
                     t2 = fused2 & mask24_i32
                     s2 = fused2 >> fx.Int32(24)
@@ -835,12 +855,22 @@ def compile_moe_fp4_gemm1(
 
                 mfma_epilog(
                     use_cshuffle=True,
-                    arith=arith, vector=vector, gpu=gpu, scf=scf,
+                    arith=arith,
+                    vector=vector,
+                    gpu=gpu,
+                    scf=scf,
                     range_constexpr=range_constexpr,
-                    tile_m=tile_m, tile_n=tile_n, e_vec=4,
-                    m_repeat=m_repeat, num_acc_n=num_acc_n,
-                    tx=tx, lane_div_16=lane_div_16, lane_mod_16=lane_mod_16,
-                    bx_m=bx_m, by_n=by_n, n_tile_base=n_tile_base,
+                    tile_m=tile_m,
+                    tile_n=tile_n,
+                    e_vec=4,
+                    m_repeat=m_repeat,
+                    num_acc_n=num_acc_n,
+                    tx=tx,
+                    lane_div_16=lane_div_16,
+                    lane_mod_16=lane_mod_16,
+                    bx_m=bx_m,
+                    by_n=by_n,
+                    n_tile_base=n_tile_base,
                     lds_out=lds_out,
                     frag_elem_type=T.f16,
                     write_row_to_lds=write_row_to_lds,
@@ -879,9 +909,12 @@ def compile_moe_fp4_gemm1(
 
                 mfma_epilog(
                     use_cshuffle=False,
-                    arith=arith, range_constexpr=range_constexpr,
-                    m_repeat=m_repeat, lane_div_16=lane_div_16,
-                    bx_m=bx_m, body_row=_store_row,
+                    arith=arith,
+                    range_constexpr=range_constexpr,
+                    m_repeat=m_repeat,
+                    lane_div_16=lane_div_16,
+                    bx_m=bx_m,
+                    body_row=_store_row,
                 )
 
     # ── Host launcher ──────────────────────────────────────────────────────────
@@ -920,9 +953,19 @@ def compile_moe_fp4_gemm1(
         gy = size_expert_ids_in
 
         moe_fp4_gemm1_kernel(
-            arg_out, arg_x, arg_w, arg_scale_x, arg_scale_w,
-            arg_sorted_token_ids, arg_expert_ids, arg_sorted_weights, arg_max_token_ids,
-            i32_tokens_in, i32_inter_in, i32_k_in, i32_size_expert_ids_in,
+            arg_out,
+            arg_x,
+            arg_w,
+            arg_scale_x,
+            arg_scale_w,
+            arg_sorted_token_ids,
+            arg_expert_ids,
+            arg_sorted_weights,
+            arg_max_token_ids,
+            i32_tokens_in,
+            i32_inter_in,
+            i32_k_in,
+            i32_size_expert_ids_in,
         ).launch(
             grid=(gx, gy, 1),
             block=(256, 1, 1),

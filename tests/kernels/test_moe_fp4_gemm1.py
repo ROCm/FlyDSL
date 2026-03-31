@@ -39,8 +39,7 @@ _MXFP4_MFMA_ARCHS = ("gfx950",)
 ARCH = str(get_rocm_arch())
 if not any(ARCH.startswith(a) for a in _MXFP4_MFMA_ARCHS):
     pytest.skip(
-        f"MoE FP4 GEMM requires scaled MXFP4 MFMA support "
-        f"({', '.join(_MXFP4_MFMA_ARCHS)}), got {ARCH}.",
+        f"MoE FP4 GEMM requires scaled MXFP4 MFMA support ({', '.join(_MXFP4_MFMA_ARCHS)}), got {ARCH}.",
         allow_module_level=True,
     )
 
@@ -48,6 +47,7 @@ from kernels.moe_fp4_gemm1 import compile_moe_fp4_gemm1
 
 
 # ── MoE routing helper (same as test_moe_gemm.py) ────────────────────────────
+
 
 def moe_sorting_torch(
     topk_ids: torch.Tensor,
@@ -75,12 +75,10 @@ def moe_sorting_torch(
         tokens_num = int(token_id.numel())
         blocks = (tokens_num + block_size - 1) // block_size
         tokens_padded = blocks * block_size
-        sorted_ids[sorted_ids_begin : sorted_ids_begin + tokens_num] = (
-            (topk_id.to(torch.int32) << 24) | token_id.to(torch.int32)
+        sorted_ids[sorted_ids_begin : sorted_ids_begin + tokens_num] = (topk_id.to(torch.int32) << 24) | token_id.to(
+            torch.int32
         )
-        sorted_weights[sorted_ids_begin : sorted_ids_begin + tokens_num] = topk_weights[
-            token_id, topk_id
-        ].float()
+        sorted_weights[sorted_ids_begin : sorted_ids_begin + tokens_num] = topk_weights[token_id, topk_id].float()
         sorted_ids_begin += tokens_padded
         sorted_expert_ids[sorted_expert_ids_begin : sorted_expert_ids_begin + blocks] = int(expert_id)
         sorted_expert_ids_begin += blocks
@@ -92,12 +90,13 @@ def moe_sorting_torch(
 
 # ── Reference implementation ─────────────────────────────────────────────────
 
+
 def torch_moe_fp4_gemm1_ref(
-    x: torch.Tensor,           # [tokens, model_dim] bf16
-    w: torch.Tensor,           # [experts, 2*inter_dim, model_dim] fp4 (packed i8)
-    scale_w: torch.Tensor,     # [experts, 2*inter_dim, model_dim//32] fp32 (E8M0)
-    topk_ids: torch.Tensor,    # [tokens, topk] int64
-    topk_weights: torch.Tensor, # [tokens, topk] float32
+    x: torch.Tensor,  # [tokens, model_dim] bf16
+    w: torch.Tensor,  # [experts, 2*inter_dim, model_dim] fp4 (packed i8)
+    scale_w: torch.Tensor,  # [experts, 2*inter_dim, model_dim//32] fp32 (E8M0)
+    topk_ids: torch.Tensor,  # [tokens, topk] int64
+    topk_weights: torch.Tensor,  # [tokens, topk] float32
     *,
     inter_dim: int,
     out_dtype: torch.dtype = torch.bfloat16,
@@ -118,9 +117,9 @@ def torch_moe_fp4_gemm1_ref(
         w_e_i8 = w[e]  # [2*inter_dim, model_dim//2] i8
         w_e_f32 = fp4_utils.mxfp4_to_f32(w_e_i8)  # [2*inter_dim, model_dim]
         # Apply E8M0 scales: scale_w[e] shape [2*inter_dim, model_dim//32]
-        sc_e = fp4_utils.e8m0_to_f32(scale_w[e])   # [2*inter_dim, model_dim//32]
+        sc_e = fp4_utils.e8m0_to_f32(scale_w[e])  # [2*inter_dim, model_dim//32]
         sc_e_expanded = sc_e.repeat_interleave(32, dim=1)  # [2*inter_dim, model_dim]
-        w_e_scaled = w_e_f32 * sc_e_expanded        # [2*inter_dim, model_dim]
+        w_e_scaled = w_e_f32 * sc_e_expanded  # [2*inter_dim, model_dim]
         w_dq_list.append(w_e_scaled)
 
     # Output: [tokens, topk, inter_dim] in out_dtype
@@ -134,16 +133,16 @@ def torch_moe_fp4_gemm1_ref(
     for tok_i in range(tokens):
         for slot_i in range(topk):
             e = int(topk_ids[tok_i, slot_i].item())
-            w_e = w_dq_list[e]                          # [2*inter_dim, model_dim]
-            gate_w = w_e[:inter_dim]                    # [inter_dim, model_dim]
-            up_w = w_e[inter_dim:]                      # [inter_dim, model_dim]
-            x_tok = x_f32[tok_i]                        # [model_dim]
-            gate = x_tok @ gate_w.T                     # [inter_dim]
-            up = x_tok @ up_w.T                         # [inter_dim]
+            w_e = w_dq_list[e]  # [2*inter_dim, model_dim]
+            gate_w = w_e[:inter_dim]  # [inter_dim, model_dim]
+            up_w = w_e[inter_dim:]  # [inter_dim, model_dim]
+            x_tok = x_f32[tok_i]  # [model_dim]
+            gate = x_tok @ gate_w.T  # [inter_dim]
+            up = x_tok @ up_w.T  # [inter_dim]
             if activation == "swiglu":
                 y = _swish(gate) * up
             else:
-                y = torch.sigmoid(gate) * gate * up     # silu: same as swiglu
+                y = torch.sigmoid(gate) * gate * up  # silu: same as swiglu
             if doweight:
                 y = y * float(topk_weights[tok_i, slot_i].item())
             out[tok_i, slot_i] = y.to(out_dtype)
@@ -152,6 +151,7 @@ def torch_moe_fp4_gemm1_ref(
 
 
 # ── Test helpers ──────────────────────────────────────────────────────────────
+
 
 def _prepare_fp4_weights(w_fp32: torch.Tensor):
     """Quantize and shuffle weight tensor [N, K] → packed FP4 + scales."""
@@ -191,18 +191,16 @@ def run_moe_fp4_gemm1_test(
     topk_ids = torch.zeros((tokens, topk), dtype=torch.int64, device=device)
     for i in range(tokens):
         topk_ids[i] = torch.randperm(experts, device=device)[:topk]
-    topk_weights = torch.softmax(
-        torch.randn(tokens, topk, device=device, dtype=torch.float32), dim=-1
-    )
+    topk_weights = torch.softmax(torch.randn(tokens, topk, device=device, dtype=torch.float32), dim=-1)
 
     # Random FP32 weights for each expert [2*inter_dim, model_dim]
     w_fp32 = torch.randn(experts, 2 * inter_dim, model_dim, device=device, dtype=torch.float32)
 
     # Quantize and shuffle per-expert weight tiles
-    w_q_all = []        # [experts, 2*inter_dim, model_dim//2] i8 (unshuffled, for reference)
-    scale_all = []      # [experts, 2*inter_dim, model_dim//32] e8m0 (unshuffled)
-    w_shuf_all = []     # [experts, 2*inter_dim, model_dim//2] i8 (shuffled, for kernel)
-    sc_shuf_all = []    # shuffled scales
+    w_q_all = []  # [experts, 2*inter_dim, model_dim//2] i8 (unshuffled, for reference)
+    scale_all = []  # [experts, 2*inter_dim, model_dim//32] e8m0 (unshuffled)
+    w_shuf_all = []  # [experts, 2*inter_dim, model_dim//2] i8 (shuffled, for kernel)
+    sc_shuf_all = []  # shuffled scales
     for e in range(experts):
         w_q, sc, w_shuf, sc_shuf = _prepare_fp4_weights(w_fp32[e])
         w_q_all.append(w_q)
@@ -218,9 +216,15 @@ def run_moe_fp4_gemm1_test(
 
     # Reference output
     ref_out = torch_moe_fp4_gemm1_ref(
-        x, w_q_stacked, scale_stacked, topk_ids, topk_weights,
-        inter_dim=inter_dim, out_dtype=torch_out_dtype,
-        activation=activation, doweight=doweight,
+        x,
+        w_q_stacked,
+        scale_stacked,
+        topk_ids,
+        topk_weights,
+        inter_dim=inter_dim,
+        out_dtype=torch_out_dtype,
+        activation=activation,
+        doweight=doweight,
     )  # [tokens, topk, inter_dim]
 
     # MoE routing (sorted format)
@@ -243,9 +247,16 @@ def run_moe_fp4_gemm1_test(
 
     # Compile kernel
     launch_fn = compile_moe_fp4_gemm1(
-        model_dim=model_dim, inter_dim=inter_dim, experts=experts, topk=topk,
-        tile_m=tile_m, tile_n=tile_n, tile_k=tile_k,
-        out_dtype=out_dtype_str, activation=activation, doweight_stage1=doweight,
+        model_dim=model_dim,
+        inter_dim=inter_dim,
+        experts=experts,
+        topk=topk,
+        tile_m=tile_m,
+        tile_n=tile_n,
+        tile_k=tile_k,
+        out_dtype=out_dtype_str,
+        activation=activation,
+        doweight_stage1=doweight,
         use_cshuffle_epilog=False,
     )
 
@@ -260,10 +271,10 @@ def run_moe_fp4_gemm1_test(
             sorted_expert_ids,
             sorted_weights,
             num_valid_ids[:1].contiguous(),
-            tokens,                     # i32_tokens_in
-            inter_dim,                  # i32_inter_in
-            model_dim,                  # i32_k_in
-            size_expert_ids,            # i32_size_expert_ids_in
+            tokens,  # i32_tokens_in
+            inter_dim,  # i32_inter_in
+            model_dim,  # i32_k_in
+            size_expert_ids,  # i32_size_expert_ids_in
             torch.cuda.current_stream(),
         )
 
@@ -279,14 +290,14 @@ def run_moe_fp4_gemm1_test(
         f"  tile=({tile_m},{tile_n},{tile_k}), activation={activation}\n"
         f"  max_err={((kernel_out.float() - ref_out.float()).abs().max().item()):.4f}"
     )
-    print(f"[PASS] tokens={tokens}, model_dim={model_dim}, inter_dim={inter_dim}, "
-          f"experts={experts}, topk={topk}, tile=({tile_m},{tile_n},{tile_k}), "
-          f"activation={activation}")
+    print(
+        f"[PASS] tokens={tokens}, model_dim={model_dim}, inter_dim={inter_dim}, "
+        f"experts={experts}, topk={topk}, tile=({tile_m},{tile_n},{tile_k}), "
+        f"activation={activation}"
+    )
 
     if bench_iters > 0:
-        _, us = run_perftest(
-            compiled_fn, num_iters=bench_iters, num_warmup=bench_warmup
-        )
+        _, us = run_perftest(compiled_fn, num_iters=bench_iters, num_warmup=bench_warmup)
         # Approximate FLOPS: 2 * tokens * 2*inter_dim * model_dim
         flops = 2 * tokens * 2 * inter_dim * model_dim
         tflops = flops / (us / 1e6) / 1e12
@@ -294,6 +305,7 @@ def run_moe_fp4_gemm1_test(
 
 
 # ── Pytest parametrize ────────────────────────────────────────────────────────
+
 
 @pytest.mark.parametrize("activation", ["swiglu", "silu"])
 @pytest.mark.parametrize(
@@ -305,13 +317,16 @@ def run_moe_fp4_gemm1_test(
         pytest.param(64, 512, 256, 4, 2, 64, 128, 256, marks=pytest.mark.large_shape),
     ],
 )
-def test_moe_fp4_gemm1(
-    tokens, model_dim, inter_dim, experts, topk, tile_m, tile_n, tile_k, activation
-):
+def test_moe_fp4_gemm1(tokens, model_dim, inter_dim, experts, topk, tile_m, tile_n, tile_k, activation):
     run_moe_fp4_gemm1_test(
-        tokens=tokens, model_dim=model_dim, inter_dim=inter_dim,
-        experts=experts, topk=topk,
-        tile_m=tile_m, tile_n=tile_n, tile_k=tile_k,
+        tokens=tokens,
+        model_dim=model_dim,
+        inter_dim=inter_dim,
+        experts=experts,
+        topk=topk,
+        tile_m=tile_m,
+        tile_n=tile_n,
+        tile_k=tile_k,
         activation=activation,
         out_dtype_str="bf16",
     )
