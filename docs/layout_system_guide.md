@@ -125,19 +125,6 @@ idx = fx.crd2idx(coord, layout)
 coord = fx.idx2crd(idx, layout)
 ```
 
-### Pure-Arith Helpers (`kernels/layout_utils.py`)
-
-For static-stride layouts, `layout_utils` provides lightweight helpers that parse layout type strings and emit pure arith ops:
-
-```python
-from kernels.layout_utils import crd2idx, idx2crd, get as layout_get
-
-# Parses '(4,64):(64,1)' from the type and emits arith ops
-flat_idx = crd2idx([row, col], layout_value)
-coords = idx2crd(flat_idx, layout_value)
-dim_val = layout_get(int_tuple, 0)
-```
-
 ### Example
 
 For layout `((8, 16), (1, 8))` (8x16, column-major):
@@ -499,7 +486,7 @@ Which layout operation do I need?
 ├── Coordinate mapping?
 │   ├── Coord → memory index → crd2idx(coord, layout)
 │   ├── Memory index → coord → idx2crd(idx, layout)
-│   └── Static-stride shortcut → layout_utils.crd2idx(crd, layout)
+│   └── Tuple shortcut → fx.crd2idx([c0, c1], layout)
 │
 ├── Combining layouts?
 │   ├── Sequential mapping → composition(A, B)
@@ -528,7 +515,6 @@ Which layout operation do I need?
 | `python/flydsl/expr/primitive.py` | All layout functions: construction, query, algebra, divide, product, copy, gemm |
 | `python/flydsl/expr/derived.py` | `CopyAtom`, `MmaAtom`, `TiledCopy` wrapper classes |
 | `python/flydsl/expr/typing.py` | `IntTupleType`, `LayoutType`, type definitions |
-| `kernels/layout_utils.py` | Pure-arith helpers: `crd2idx`, `idx2crd`, `get` for static layouts |
 | `include/flydsl/Dialect/Fly/IR/FlyOps.td` | Fly dialect op definitions |
 | `lib/Dialect/Fly/IR/FlyOps.cpp` | Type inference for composition, product, divide (Fly) |
 | `include/flydsl/Dialect/Fly/Utils/LayoutUtils.h` | Layout algebra algorithms (composition, product, divide) |

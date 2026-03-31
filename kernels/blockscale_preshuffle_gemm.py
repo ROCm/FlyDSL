@@ -21,10 +21,10 @@ from flydsl.expr import arith, gpu, buffer_ops, vector, rocdl
 from flydsl.expr.arith import ArithValue
 from flydsl.expr.typing import T
 
-from kernels.layout_utils import crd2idx, idx2crd, get as layout_get
 
 from kernels.mfma_preshuffle_pipeline import (
     buffer_copy_gmem16_dwordx4,
+    crd2idx,
     lds_store_16b_xor16,
     lds_store_8b_xor16,
     make_preshuffle_b_layout,
@@ -234,14 +234,14 @@ def compile_blockscale_preshuffle_gemm(
         # ---- Wave / lane decomposition ----
         wave_size = 64
         layout_wave_lane = fx.make_layout((4, wave_size), (64, 1))
-        coord_wave_lane = idx2crd(tx, layout_wave_lane)
-        wave_id = layout_get(coord_wave_lane, 0)
-        lane_id = layout_get(coord_wave_lane, 1)
+        coord_wave_lane = fx.idx2crd(tx, layout_wave_lane)
+        wave_id = fx.get(coord_wave_lane, 0)
+        lane_id = fx.get(coord_wave_lane, 1)
 
         layout_lane16 = fx.make_layout((4, 16), (16, 1))
-        coord_lane16 = idx2crd(lane_id, layout_lane16)
-        lane_div_16 = layout_get(coord_lane16, 0)
-        lane_mod_16 = layout_get(coord_lane16, 1)
+        coord_lane16 = fx.idx2crd(lane_id, layout_lane16)
+        lane_div_16 = fx.get(coord_lane16, 0)
+        lane_mod_16 = fx.get(coord_lane16, 1)
 
         row_a_lds = lane_mod_16
         col_offset_base = lane_div_16 * kpack_elems
@@ -442,13 +442,11 @@ def compile_blockscale_preshuffle_gemm(
         mfma_res_ty = T.f32x4
 
         if _is_gfx950:
-            vec4_i64 = T.vec(4, T.i64)
-            vec8_i32 = T.vec(8, T.i32)
             c0_i64 = arith.constant(0, type=T.i64)
 
             def pack_i64x4_to_i32x8(x0, x1, x2, x3):
-                v4 = vector.from_elements(vec4_i64, [x0, x1, x2, x3])
-                return vector.bitcast(vec8_i32, v4)
+                v4 = vector.from_elements(T.vec(4, T.i64), [x0, x1, x2, x3])
+                return vector.bitcast(T.vec(8, T.i32), v4)
         else:
             mfma_fn = rocdl.mfma_f32_16x16x32_fp8_fp8
 
@@ -494,10 +492,9 @@ def compile_blockscale_preshuffle_gemm(
                     )
                     s_b_vals.append(s_b_val)
 
-                vec4_f32 = T.f32x4
                 s_b_vecs = []
                 for ni in range_constexpr(num_acc_n):
-                    s_b_vecs.append(vector.broadcast(vec4_f32, s_b_vals[ni]))
+                    s_b_vecs.append(vector.broadcast(T.f32x4, s_b_vals[ni]))
 
                 combined_scales = []
                 for mi in range_constexpr(m_repeat):

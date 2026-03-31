@@ -445,9 +445,9 @@ def constant(value, *, type=None, index=False, loc=None, ip=None):
     elif isinstance(value, float):
         mlir_type = T.f32()
     elif isinstance(value, bool):
-        mlir_type = ir.IntegerType.get_signless(1)
+        mlir_type = T.bool()
     elif isinstance(value, int):
-        mlir_type = ir.IntegerType.get_signless(32)
+        mlir_type = T.i32()
     else:
         raise ValueError(f"unsupported constant type: {builtins.type(value)}")
     if isinstance(mlir_type, (ir.F16Type, ir.F32Type, ir.F64Type, ir.BF16Type)):

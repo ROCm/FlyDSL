@@ -53,13 +53,9 @@ def gemm_kernel(
     copy_src_B = thr_copy_B.partition_S(bB)
     copy_dst_C = thr_copy_C.partition_S(bC)
 
-    partition_A = thr_mma.partition_A(bA)
-    partition_B = thr_mma.partition_B(bB)
-    partition_C = thr_mma.partition_C(bC)
-
-    frag_A = thr_mma.make_fragment_A(partition_A)
-    frag_B = thr_mma.make_fragment_B(partition_B)
-    frag_C = thr_mma.make_fragment_C(partition_C)
+    frag_A = thr_mma.make_fragment_A(bA)
+    frag_B = thr_mma.make_fragment_B(bB)
+    frag_C = thr_mma.make_fragment_C(bC)
 
     copy_frag_A = thr_copy_A.retile(frag_A)
     copy_frag_B = thr_copy_B.retile(frag_B)
