@@ -143,18 +143,11 @@ def compile_mixed_moe_gemm1(
                 "(or `rocdl.mfma_i32_16x16x32_i8`)."
             )
 
-    def _x_elem_type():
-        if is_f4_b:
-            return T.f8 if is_f8_a else T.i8
-        return T.f16 if is_f16 else (T.i8 if is_int8 else T.f8)
-
     def _w_elem_type():
         if is_f4_b:
             return T.i8
         return T.f16 if is_f16 else (T.i8 if is_int8 else T.f8)
 
-    def _scale_elem_type():
-        return T.i32
 
     def _x_lds_elem_type():
         return T.f16 if is_f16_a else (T.i8 if is_int8 else T.f8)
@@ -165,13 +158,6 @@ def compile_mixed_moe_gemm1(
     def _out_lds_elem_type():
         return T.f32
 
-    def _out_vec_type():
-        return T.bf16x1 if out_dtype == "bf16" else T.f16x1
-
-    # size_out = tokens * topk * inter_dim
-    # size_x = tokens * model_dim
-    # # W is packed int4 for W4A8: 2 values per byte.
-    # size_w = (experts * (2 * inter_dim) * model_dim) // 2 if is_int4 else (experts * (2 * inter_dim) * model_dim)
 
     total_threads = 256
     bytes_x_per_tile = int(tile_m) * int(tile_k) * int(a_elem_bytes)
@@ -181,13 +167,6 @@ def compile_mixed_moe_gemm1(
             f"{total_threads}: tile_m={tile_m}, tile_k={tile_k}, elem_bytes={a_elem_bytes}"
         )
     bytes_per_thread_x = bytes_x_per_tile // total_threads
-    # Keep MoE stage1 X gmem->LDS pipeline consistent with the optimized GEMM kernel:
-    # split into <=16B pieces and use buffer-load dwordx4 for gmem prefetch.
-    # (Compute the split lens inside the kernel so the code matches GEMM structure.)
-
-    # CK-style LDS128 mode (same idea as test_preshuffle_gemm.py):
-    # - LDS stride == tile_k (no extra padding) + XOR16 swizzle
-    # - Use ds_{read,write}_b128 (16B) and extract 8B halves for MFMA steps
     _ck_lds128 = os.environ.get("FLYDSL_CK_LDS128", "1") in (
         "1",
         "true",
@@ -227,7 +206,6 @@ def compile_mixed_moe_gemm1(
     allocator.ptr = lds_alloc_offset + lds_alloc_bytes
 
     if True:
-
         @flyc.kernel
         def moe_gemm1(
             arg_out: fx.Tensor,
@@ -274,20 +252,15 @@ def compile_mixed_moe_gemm1(
             _arith_max = getattr(arith, "maximum", None) or getattr(arith, "maximumf")
 
             def swiglu(gate, up, alpha=1.702, limit=7.0):
-                limit_v = arith.constant(limit, type=T.f32)
-                neg_limit_v = arith.constant(-limit, type=T.f32)
-                alpha_v = arith.constant(alpha, type=T.f32)
-                log2e_neg_v = arith.constant(-1.4426950408889634, type=T.f32)
-                one_v = arith.constant(1.0, type=T.f32)
-                gate = _arith_min(gate, limit_v)
-                up = _arith_min(up, limit_v)
-                up = _arith_max(up, neg_limit_v)
+                gate = _arith_min(gate, limit)
+                up = _arith_min(up, limit)
+                up = _arith_max(up, -limit)
 
-                t = gate * alpha_v * log2e_neg_v  # -log2(e)
+                t = gate * alpha * (-1.4426950408889634)  # -log2(e)
                 emu = rocdl.exp2(T.f32, t)
-                den = one_v + emu
+                den = 1.0 + emu
                 sig = rocdl.rcp(T.f32, den)
-                return gate * sig * (up + one_v)
+                return gate * sig * (up + 1.0)
 
             acc_init = (
                 arith.constant_vector(0, vec4_i32)
@@ -1669,10 +1642,6 @@ def compile_mixed_moe_gemm2(
                 "(or `rocdl.mfma_i32_16x16x32_i8`)."
             )
 
-    def _x_elem_type():
-        if is_f4_b:
-            return T.f8 if is_f8_a else T.i8
-        return T.f16 if is_f16_a else (T.i8 if is_int8 else T.f8)
 
     def _w_elem_type():
         if is_f4_b:
@@ -1821,12 +1790,6 @@ def compile_mixed_moe_gemm2(
             _c_k0 = (
                 k_in * fx.Index(int(a_elem_bytes))
             ) // arith.index(64)
-
-            def check_c_n_valid_gate(base_n):
-                return arith.cmpi(arith.CmpIPredicate.ult, base_n, model_dim - model_dim_pad)
-
-            def check_c_k_valid_gate(base_k):
-                return arith.cmpi(arith.CmpIPredicate.ult, base_k, inter_dim - inter_dim_pad)
 
             # A&B's scale preshuffle layout
             # For fp4, k_in is already packed (inter_dim // a_elem_vec_pack), so we need original inter_dim
@@ -2601,8 +2564,6 @@ def compile_mixed_moe_gemm2(
                 a0_prefetch_pong = lds_load_packs_k64(
                     row_a_lds, col_offset_base, lds_base_pong
                 )
-                # a0_prefetch_pong = lds_load_packs_k64(0, 0, lds_base_pong)
-
                 # Main loop: process K tiles in 2-tile ping-pong steps.
                 #
                 # IMPORTANT: for odd number of K tiles, leave **1** tail tile; for even, leave **2**.
@@ -2732,17 +2693,6 @@ def compile_mixed_moe_gemm2(
                 mask24_i32 = arith.constant(0xFFFFFF)
                 topk_i32_v = topk_i32
 
-                zero_i32 = arith.constant(0)
-
-                def atomic_add_f16x2(val_f16x2, byte_off_i32):
-                    rocdl.raw_ptr_buffer_atomic_fadd(
-                        val_f16x2,
-                        out_rsrc,
-                        byte_off_i32,
-                        zero_i32,
-                        zero_i32,
-                    )
-
                 # Weight scales for the N tile (col_g depends on lane/wave/by but not on (t,s)).
                 if lds_out is None:
                     raise RuntimeError(
@@ -2753,14 +2703,7 @@ def compile_mixed_moe_gemm2(
                 # Both accumulate=True (global atomic) and accumulate=False (global store)
                 # need 64-bit addressing to avoid i32 offset overflow when
                 # tokens * model_dim * elem_bytes > INT32_MAX (~150K tokens for model_dim=7168).
-                from flydsl._mlir.dialects import fly as _fly
-
-                _llvm_ptr_ty = ir.Type.parse("!llvm.ptr")
-                out_base_ptr = _fly.extract_aligned_pointer_as_index(
-                    _llvm_ptr_ty, arg_out
-                )
-                out_base_i64 = llvm.ptrtoint(T.i64, out_base_ptr)
-                out_base_idx = arith.index_cast(T.index, out_base_i64)
+                out_base_idx = buffer_ops.extract_base_index(arg_out)
 
                 def write_row_to_lds(
                     *,
