@@ -655,9 +655,9 @@ if [ "${RUN_MOE}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
       _emit_row "moe_gemm1" "${shape_moe}" "${dt_s1}" "${tb_s1}" "${tf_s1}"
     fi
 
-    dt_s2="$(grep -Eo 'FlyDSL MoE stage2\[[^]]+\]:' "${log}" | tail -1 | cut -d'[' -f2 | cut -d']' -f1 || true)"
-    tf_s2="$(grep -Eo 'FlyDSL MoE stage2\[[^]]+\]:.* ([0-9.]+) TFLOPS' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
-    tb_s2="$(grep -Eo 'FlyDSL MoE stage2\[[^]]+\]:.* ([0-9.]+) TB/s' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
+    dt_s2="$(grep -Eo 'FlyDSL MoE stage2 \[[^]]+\] [^ ]+' "${log}" | tail -1 | awk '{print $NF}' || true)"
+    tf_s2="$(grep -Eo 'FlyDSL MoE stage2 .* ([0-9.]+) TFLOPS' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
+    tb_s2="$(grep -Eo 'FlyDSL MoE stage2 .* ([0-9.]+) TB/s' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
     if [ -n "${dt_s2}" ] && [ -n "${tf_s2}" ] && [ -n "${tb_s2}" ]; then
       _emit_row "moe_gemm2" "${shape_moe}" "${dt_s2}" "${tb_s2}" "${tf_s2}"
     fi
@@ -704,9 +704,9 @@ if [ "${RUN_MOE}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
           _emit_row "moe_fp4_s1" "${shape_moe}" "${dt_s1}" "${tb_s1}" "${tf_s1}"
         fi
 
-        dt_s2="$(grep -Eo 'FlyDSL MoE stage2\[[^]]+\]:' "${log}" | tail -1 | cut -d'[' -f2 | cut -d']' -f1 || true)"
-        tf_s2="$(grep -Eo 'FlyDSL MoE stage2\[[^]]+\]:.* ([0-9.]+) TFLOPS' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
-        tb_s2="$(grep -Eo 'FlyDSL MoE stage2\[[^]]+\]:.* ([0-9.]+) TB/s' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
+        dt_s2="$(grep -Eo 'FlyDSL MoE stage2 \[[^]]+\] [^ ]+' "${log}" | tail -1 | awk '{print $NF}' || true)"
+        tf_s2="$(grep -Eo 'FlyDSL MoE stage2 .* ([0-9.]+) TFLOPS' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
+        tb_s2="$(grep -Eo 'FlyDSL MoE stage2 .* ([0-9.]+) TB/s' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
         if [ -n "${dt_s2}" ] && [ -n "${tf_s2}" ] && [ -n "${tb_s2}" ]; then
           _emit_row "moe_fp4_s2" "${shape_moe}" "${dt_s2}" "${tb_s2}" "${tf_s2}"
         fi

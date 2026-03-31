@@ -487,9 +487,6 @@ def cosize(layout, loc=None, ip=None):
     return fly.cosize(layout, loc=loc, ip=ip)
 
 
-import re as _re
-
-
 def _to_i32(v):
     """Cast index-type ir.Value to i32 (required by fly.make_int_tuple)."""
     if isinstance(v, ir.Value) and isinstance(v.type, ir.IndexType):

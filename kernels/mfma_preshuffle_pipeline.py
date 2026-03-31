@@ -19,8 +19,7 @@ import flydsl.expr as fx
 def crd2idx(crd, layout):
     """crd2idx returning an index-type scalar (unwraps fly.int_tuple)."""
     result = fx.crd2idx(crd, layout)
-    if isinstance(result, ir.Value) and str(result.type).startswith("!fly.int_tuple"):
-        scalar = fx.get_scalar(result)
+    scalar = fx.get_scalar(result)
     if isinstance(scalar, ir.Value) and not isinstance(scalar.type, ir.IndexType):
         scalar = _arith.IndexCastOp(T.index, scalar).result
     return scalar
