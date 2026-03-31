@@ -340,10 +340,8 @@ def test_grouped_fp8_gemm_performance(num_groups, m_per_group, n, k):
     total_bytes = bytes_a + bytes_b + bytes_d + bytes_scales
     bandwidth_tbs = total_bytes / (us / 1e6) / 1e12
 
-    print(f"\nPerformance: num_groups={num_groups}, M={M}, N={n}, K={k}")
-    print(f"  Time: {us:.2f} us")
-    print(f"  TFLOPS: {tflops:.2f}")
-    print(f"  Bandwidth: {bandwidth_tbs:.2f} TB/s")
+    print(f"\n  [{num_groups} groups, M={M}, N={n}, K={k}]")
+    print(f"  Throughput: {us:.1f} us, {tflops:.2f} TFLOPS, BW: {bandwidth_tbs:.3f} TB/s")
 
 
 if __name__ == "__main__":
