@@ -24,16 +24,19 @@ _ods_wmma_scale_f32_16x16x128_f8f6f4 = (
 _ods_wmma_scale_f32_32x16x128_f4 = (
     globals().get("wmma_scale_f32_32x16x128_f4", None)
 )
-_ods_wave_id = wave_id  # ODS: wave_id(res, ...) -> i32
-_ods_cluster_workgroup_id_x = cluster_workgroup_id_x
-_ods_cluster_workgroup_id_y = cluster_workgroup_id_y
-_ods_cluster_workgroup_id_z = cluster_workgroup_id_z
-_ods_cluster_load_async_to_lds_b8 = cluster_load_async_to_lds_b8
-_ods_cluster_load_async_to_lds_b32 = cluster_load_async_to_lds_b32
-_ods_cluster_load_async_to_lds_b64 = cluster_load_async_to_lds_b64
-_ods_cluster_load_async_to_lds_b128 = cluster_load_async_to_lds_b128
-_ods_s_wait_asynccnt = s_wait_asynccnt
+_ods_wave_id = globals().get("wave_id", None)  # ODS: wave_id(res, ...) -> i32
+_ods_cluster_workgroup_id_x = globals().get("cluster_workgroup_id_x", None)
+_ods_cluster_workgroup_id_y = globals().get("cluster_workgroup_id_y", None)
+_ods_cluster_workgroup_id_z = globals().get("cluster_workgroup_id_z", None)
+_ods_cluster_load_async_to_lds_b8 = globals().get("cluster_load_async_to_lds_b8", None)
+_ods_cluster_load_async_to_lds_b32 = globals().get("cluster_load_async_to_lds_b32", None)
+_ods_cluster_load_async_to_lds_b64 = globals().get("cluster_load_async_to_lds_b64", None)
+_ods_cluster_load_async_to_lds_b128 = globals().get("cluster_load_async_to_lds_b128", None)
+_ods_s_wait_asynccnt = globals().get("s_wait_asynccnt", None)
 _ods_mfma_f32_32x32x8f16 = mfma_f32_32x32x8f16
+_ods_mfma_f32_32x32x16_f16 = globals().get("mfma_f32_32x32x16_f16", None)
+_ods_mfma_f32_32x32x8bf16_1k = globals().get("mfma_f32_32x32x8bf16_1k", None)
+_ods_mfma_f32_32x32x16_bf16 = globals().get("mfma_f32_32x32x16_bf16", None)
 _ods_mfma_f32_16x16x16f16 = mfma_f32_16x16x16f16
 _ods_mfma_f32_16x16x16bf16_1k = globals().get("mfma_f32_16x16x16bf16_1k", None)
 _ods_mfma_f32_16x16x32_fp8_fp8 = mfma_f32_16x16x32_fp8_fp8
@@ -238,6 +241,8 @@ def wave_id():
     Returns:
         i32 value (SGPR) with the wave ID within the workgroup.
     """
+    if _ods_wave_id is None:
+        raise AttributeError("ROCDL op not found: wave_id")
     from ..._mlir import ir
     i32 = ir.IntegerType.get_signless(32)
     return _ods_wave_id(i32)
@@ -245,6 +250,8 @@ def wave_id():
 
 def cluster_workgroup_id_x():
     """Get workgroup position within cluster along X (SGPR, gfx1250). """
+    if _ods_cluster_workgroup_id_x is None:
+        raise AttributeError("ROCDL op not found: cluster_workgroup_id_x")
     from ..._mlir import ir
     i32 = ir.IntegerType.get_signless(32)
     return _ods_cluster_workgroup_id_x(i32)
@@ -252,6 +259,8 @@ def cluster_workgroup_id_x():
 
 def cluster_workgroup_id_y():
     """Get workgroup position within cluster along Y (SGPR, gfx1250). """
+    if _ods_cluster_workgroup_id_y is None:
+        raise AttributeError("ROCDL op not found: cluster_workgroup_id_y")
     from ..._mlir import ir
     i32 = ir.IntegerType.get_signless(32)
     return _ods_cluster_workgroup_id_y(i32)
@@ -259,6 +268,8 @@ def cluster_workgroup_id_y():
 
 def cluster_workgroup_id_z():
     """Get workgroup position within cluster along Z (SGPR, gfx1250). """
+    if _ods_cluster_workgroup_id_z is None:
+        raise AttributeError("ROCDL op not found: cluster_workgroup_id_z")
     from ..._mlir import ir
     i32 = ir.IntegerType.get_signless(32)
     return _ods_cluster_workgroup_id_z(i32)
@@ -295,6 +306,8 @@ def cluster_load_async_to_lds(global_ptr, lds_ptr, size_bytes, offset=0, cpol=0,
 
 def s_wait_asynccnt(count=0):
     """Wait for outstanding async load/store operations (ASYNCcnt counter)."""
+    if _ods_s_wait_asynccnt is None:
+        raise AttributeError("ROCDL op not found: s_wait_asynccnt")
     _ods_s_wait_asynccnt(count)
 
 
