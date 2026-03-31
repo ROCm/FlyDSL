@@ -1076,10 +1076,12 @@ def run_moe_stage2(
     out_s = str(out_dtype).strip().lower()
     if out_s in ("f16", "fp16", "half"):
         out_torch_dtype = torch.float16
+    elif out_s in ("bf16", "bfloat16"):
+        out_torch_dtype = torch.bfloat16
     elif out_s in ("f32", "fp32", "float"):
         out_torch_dtype = torch.float32
     else:
-        raise ValueError(f"out_dtype must be 'f16' or 'f32', got {out_dtype!r}")
+        raise ValueError(f"out_dtype must be 'f16', 'bf16', or 'f32', got {out_dtype!r}")
 
     out = torch.zeros((tokens, model_dim), device=device, dtype=out_torch_dtype)
     out_perf = torch.zeros_like(out)
@@ -1724,6 +1726,18 @@ class _TorchReduceWrapper:
         return self._mode
 
 
+@pytest.mark.parametrize("use_reduce", [False, True], ids=["atomic", "reduce"])
+def test_moe_gemm_2stage_bf16_out(use_reduce):
+    """Smoke test for bf16 output atomics (gfx942: global atomic, gfx950+: buffer atomic)."""
+    test_moe_gemm_2stage(
+        tokens=64, model_dim=256, inter_dim=128, experts=4, topk=2,
+        tile_m=16, tile_n1=64, tile_k1=128, tile_n2=64, tile_k2=128,
+        doweight_stage1=False, in_dtype="fp8", out_dtype="bf16",
+        use_reduce=use_reduce, use_valid_mask=False, test_graph=False,
+        group_size=-1, num_iters=2, num_warmup=1,
+    )
+
+
 @pytest.mark.parametrize(
     "tokens, model_dim, inter_dim, experts, topk, tile_m, tile_n, tile_k",
     [
@@ -1909,8 +1923,8 @@ if __name__ == "__main__":
         "--out_dtype",
         type=str,
         default="f16",
-        choices=["f16", "f32"],
-        help="Stage2 output dtype: f16 (half2 atomics) or f32 (scalar fp32 atomics).",
+        choices=["f16", "bf16", "f32"],
+        help="Stage2 output dtype: f16 (half2 atomics), bf16 (bf16 atomics), or f32 (scalar fp32 atomics).",
     )
     parser.add_argument("--use_valid_mask", type=_str2bool, nargs="?", const=True, default=False, help="Use valid mask for optimization when reduce or not.")
 
