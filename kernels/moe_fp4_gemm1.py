@@ -91,10 +91,14 @@ def compile_moe_fp4_gemm1(
                       sorted_token_ids, expert_ids, sorted_weights, max_token_ids,
                       tokens, inter, k, size_expert_ids, stream)
     """
+    # mfma_scale_f32_16x16x128_f8f6f4 (scaled MXFP4 MFMA) is available on CDNA4+.
+    # Extend this tuple when future architectures gain the same instruction.
+    _MXFP4_MFMA_ARCHS = ("gfx950",)
     gpu_arch = get_hip_arch()
-    if not str(gpu_arch).startswith("gfx950"):
+    if not any(str(gpu_arch).startswith(a) for a in _MXFP4_MFMA_ARCHS):
         raise RuntimeError(
-            f"MoE FP4 GEMM requires gfx950 (MI350), got {gpu_arch}"
+            f"MoE FP4 GEMM requires an architecture with scaled MXFP4 MFMA support "
+            f"({', '.join(_MXFP4_MFMA_ARCHS)}), got {gpu_arch}"
         )
     if activation not in ("swiglu", "silu"):
         raise ValueError(f"activation must be 'swiglu' or 'silu', got {activation!r}")

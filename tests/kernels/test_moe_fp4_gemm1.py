@@ -35,9 +35,14 @@ logging.basicConfig(level=logging.INFO)
 if not torch.cuda.is_available():
     pytest.skip("CUDA/ROCm not available.", allow_module_level=True)
 
+_MXFP4_MFMA_ARCHS = ("gfx950",)
 ARCH = str(get_rocm_arch())
-if not ARCH.startswith("gfx950"):
-    pytest.skip(f"MoE FP4 GEMM requires gfx950, got {ARCH}.", allow_module_level=True)
+if not any(ARCH.startswith(a) for a in _MXFP4_MFMA_ARCHS):
+    pytest.skip(
+        f"MoE FP4 GEMM requires scaled MXFP4 MFMA support "
+        f"({', '.join(_MXFP4_MFMA_ARCHS)}), got {ARCH}.",
+        allow_module_level=True,
+    )
 
 from kernels.moe_fp4_gemm1 import compile_moe_fp4_gemm1
 
