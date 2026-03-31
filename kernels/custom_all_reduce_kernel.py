@@ -210,6 +210,17 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
     # Vectorized gather path: requires perfect partition + no world_size=6
     vec_ok = (num_packs % world_size == 0) and (world_size != 6)
 
+    # Adaptive LDS buffer strategy for 2-stage Stage 1:
+    #   Single buffer (8KB, 2 barriers/iter): halves LDS usage, doubles block
+    #   occupancy per CU, improves latency-hiding for many-iteration workloads.
+    #   Double buffer (16KB, 1 barrier/iter): saves 1 barrier per iteration,
+    #   better for small tensors where the kernel runs only 1-2 iterations and
+    #   occupancy is already saturated by register usage rather than LDS.
+    # Threshold: use single buffer when estimated iterations per block >= 3.
+    _est_iters_2stage = max(1, (max(1, part_p) + _MAX_BLOCKS * tnum_gpu - 1)
+                            // (_MAX_BLOCKS * tnum_gpu))
+    _use_single_buf_2stage = (_est_iters_2stage >= 3)
+
     # -----------------------------------------------------------------------
     # GPU Kernel: 1-stage arr (full allreduce in one pass, CUDAGraph-compatible)
     # -----------------------------------------------------------------------
@@ -323,7 +334,11 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
                 mem_ops.store_v4i32(out_ptr_i64 + dst_off, out_bits)
                 scf.YieldOp([])
 
-            gpu.barrier()
+            # No barrier 2 needed: parity double-buffer ensures next iteration
+            # writes to the opposite smem half, so warp-0 reads from parity_N half
+            # are disjoint from all-warp writes to (1-parity_N) half in the next
+            # iteration. The barrier at the top of the next iteration guarantees
+            # warp-0 finishes before any thread reads the new data.
             scf.YieldOp([p + stride_pack, ea.constant(1, type=i32) - parity])
 
         # NOTE: aiter 1-stage does NOT use end_sync (commented out in upstream).
@@ -347,7 +362,11 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
         idx = ir.IndexType.get()
         v4i32 = T.i32x4
         lds_space = gpu.lds_space()
-        smem_ty = ir.MemRefType.get([2 * threads], v4i32, memory_space=lds_space)
+        # Adaptive LDS: single buffer (8KB) for large tensors (est_iters >= 3),
+        # double buffer (16KB) for small tensors (est_iters < 3). See comment
+        # near _use_single_buf_2stage definition for rationale.
+        smem_slots = threads if _use_single_buf_2stage else 2 * threads
+        smem_ty = ir.MemRefType.get([smem_slots], v4i32, memory_space=lds_space)
         if is_f32:
             v4f32 = T.f32x4
         else:
@@ -385,8 +404,9 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
         tid_pack = bid_i32 * tnum_gpu_i32 + lane_id
         stride_pack = ea.index_cast(i32, _raw_gpu.grid_dim("x")) * tnum_gpu_i32
 
-        # Declare LDS (shared memory) via memref.GlobalOp
-        smem_sym = f"allreduce_smem_ws{world_size}_t{threads}"
+        # Declare LDS via memref.GlobalOp
+        _buf_tag = "1b" if _use_single_buf_2stage else "2b"
+        smem_sym = f"allreduce_smem_ws{world_size}_t{threads}_{_buf_tag}"
         _gpu_module_body_block = gpu_func_op.operation.block
         with ir.InsertionPoint.at_block_begin(_gpu_module_body_block):
             memref.GlobalOp(
@@ -400,34 +420,31 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
         tmp_out_i64 = tmp_ptrs_arr[0]
 
         # ---- Stage 1: reduce-scatter ----
-        idx_p = start_p + tid_pack
-        loop1 = scf.WhileOp([i32, i32], [idx_p, ea.constant(0, type=i32)])
-        b1 = ir.Block.create_at_start(loop1.before, [i32, i32])
-        a1 = ir.Block.create_at_start(loop1.after, [i32, i32])
-        with ir.InsertionPoint(b1):
-            cur = b1.arguments[0]
-            cond = arith.CmpIOp(arith.CmpIPredicate.ult, cur, end_p).result
-            scf.ConditionOp(cond, [cur, b1.arguments[1]])
-        with ir.InsertionPoint(a1):
-            cur = a1.arguments[0]
-            parity = a1.arguments[1]
-            # Each warp loads its rank's input slice
+        # Two implementations selected at compile time via _use_single_buf_2stage:
+        #   Single-buffer (large tensor): 8KB LDS, 2 barriers/iter, higher occupancy.
+        #   Double-buffer (small tensor): 16KB LDS, 1 barrier/iter (parity trick).
+
+        def _build_reduce_body(cur, smem_base_expr=None):
+            """Emit reduce body: load → smem → barrier1 → warp0 reduce → [barrier2]."""
             in_base = ea.select_by_index(warp_id, in_ptrs_arr)
             raw = mem_ops.load_v4i32(in_base + arith.ExtUIOp(i64, cur).result * ea.constant(16, type=i64))
-            sm_base = parity * ea.constant(threads, type=i32)
-            sm_idx = ea.index_cast(idx, sm_base + lane_i32)
+            if smem_base_expr is None:
+                sm_idx = ea.index_cast(idx, lane_i32)
+            else:
+                sm_idx = ea.index_cast(idx, smem_base_expr + lane_i32)
             memref.StoreOp(raw, smem, [sm_idx])
-            gpu.barrier()
+            gpu.barrier()  # barrier 1: all warps have written smem
 
-            # Warp 0 reduces across all warps and stores to tmp
             is_w0 = arith.CmpIOp(arith.CmpIPredicate.eq, warp_id, ea.constant(0, type=i32)).result
             ifw0 = scf.IfOp(is_w0, results_=[], has_else=False)
             with ir.InsertionPoint(ifw0.then_block):
                 acc = None
                 for wi in range_constexpr(world_size):
-                    sm_i_idx = ea.index_cast(
-                        idx, ea.constant(wi, type=i32) * tnum_gpu_i32 + lane_id + sm_base)
-                    raw_i = memref.LoadOp(smem, [sm_i_idx]).result
+                    if smem_base_expr is None:
+                        sm_r_idx = ea.index_cast(idx, ea.constant(wi, type=i32) * tnum_gpu_i32 + lane_id)
+                    else:
+                        sm_r_idx = ea.index_cast(idx, ea.constant(wi, type=i32) * tnum_gpu_i32 + lane_id + smem_base_expr)
+                    raw_i = memref.LoadOp(smem, [sm_r_idx]).result
                     if is_f32:
                         vf = vector.BitCastOp(v4f32, raw_i).result
                         acc = vf if acc is None else acc + vf
@@ -445,7 +462,40 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
                         out_raw)
                 scf.YieldOp([])
 
-            scf.YieldOp([cur + stride_pack, ea.constant(1, type=i32) - parity])
+        idx_p = start_p + tid_pack
+        if _use_single_buf_2stage:
+            # Single buffer: 8KB LDS, 2 barriers per iteration (matches aiter layout).
+            loop1 = scf.WhileOp([i32], [idx_p])
+            b1 = ir.Block.create_at_start(loop1.before, [i32])
+            a1 = ir.Block.create_at_start(loop1.after, [i32])
+            with ir.InsertionPoint(b1):
+                cur = b1.arguments[0]
+                cond = arith.CmpIOp(arith.CmpIPredicate.ult, cur, end_p).result
+                scf.ConditionOp(cond, [cur])
+            with ir.InsertionPoint(a1):
+                cur = a1.arguments[0]
+                _build_reduce_body(cur, smem_base_expr=None)
+                gpu.barrier()  # barrier 2: protect smem before next iter's writes
+                scf.YieldOp([cur + stride_pack])
+        else:
+            # Double buffer: 16KB LDS, 1 barrier per iteration (parity trick).
+            # The parity alternates between the two smem halves so warp-0 reads
+            # from half-A while all warps write the next pack to half-B.
+            loop1 = scf.WhileOp([i32, i32], [idx_p, ea.constant(0, type=i32)])
+            b1 = ir.Block.create_at_start(loop1.before, [i32, i32])
+            a1 = ir.Block.create_at_start(loop1.after, [i32, i32])
+            with ir.InsertionPoint(b1):
+                cur = b1.arguments[0]
+                cond = arith.CmpIOp(arith.CmpIPredicate.ult, cur, end_p).result
+                scf.ConditionOp(cond, [cur, b1.arguments[1]])
+            with ir.InsertionPoint(a1):
+                cur = a1.arguments[0]
+                parity = a1.arguments[1]
+                sm_base = parity * ea.constant(threads, type=i32)
+                _build_reduce_body(cur, smem_base_expr=sm_base)
+                # No barrier 2: parity ensures next iteration writes to opposite
+                # smem half, so warp-0 reads and all-warp writes are disjoint.
+                scf.YieldOp([cur + stride_pack, ea.constant(1, type=i32) - parity])
 
         _signal_end_sync(lane_i32=lane_i32, rank_i32=rank_i32, bid_i32=bid_i32,
                          self_sg_i64=self_sg_i64, sgs_i64=sgs, ngpus=world_size)
