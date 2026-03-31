@@ -1100,14 +1100,6 @@ def run_moe_stage2(
         bias_dummy = torch.empty((0,), device=device, dtype=torch.float32)
 
         if bool(use_reduce):
-            reduce_exe = compile_moe_reduction(
-                topk=topk,
-                model_dim=model_dim,
-                dtype_str="f16",
-                use_mask=False,
-            )
-            dummy_mask = torch.empty((0, topk), device=device, dtype=torch.uint8)
-
             def _s2_args_fp4_interm(interm, x, w, sx, sw, st, eids, sw_sorted):
                 return (interm.view(-1), x, w, sx, sw, st, eids, sw_sorted,
                         num_valid_ids, bias_dummy, tokens, model_dim, inter_dim, int(blocks),
@@ -1120,14 +1112,12 @@ def run_moe_stage2(
                 sorted_expert_ids, sorted_weights_1d))
 
             def launch(o, x, w, sx, sw, st, eids, sw_sorted):
-                stream = torch.cuda.current_stream()
                 intermediate = torch.empty(
                     tokens * topk, model_dim, device=device, dtype=torch.float16
                 )
                 compiled_exe(*_s2_args_fp4_interm(intermediate, x, w, sx, sw, st, eids, sw_sorted))
                 X = intermediate.view(tokens, topk, model_dim)
-                Y = o.view(tokens, model_dim)
-                reduce_exe(X, Y, dummy_mask, tokens, stream)
+                torch.sum(X, dim=1, out=o.view(tokens, model_dim))
         else:
             def _s2_args_fp4(o, x, w, sx, sw, st, eids, sw_sorted):
                 return (o, x, w, sx, sw, st, eids, sw_sorted,
