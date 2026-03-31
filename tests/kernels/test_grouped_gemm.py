@@ -235,7 +235,7 @@ def _as_i8(t: torch.Tensor) -> torch.Tensor:
         pytest.param(1, 128, 128, 128, id="single-group-small"),
         pytest.param(2, 128, 128, 128, id="two-groups-small"),
         pytest.param(4, 128, 256, 256, id="four-groups-medium"),
-        pytest.param(8, 256, 512, 512, id="eight-groups-larger"),
+        pytest.param(8, 256, 512, 512, id="eight-groups-larger", marks=pytest.mark.large_shape),
     ],
 )
 def test_grouped_fp8_gemm_correctness(num_groups, m_per_group, n, k):
@@ -288,7 +288,7 @@ def test_grouped_fp8_gemm_correctness(num_groups, m_per_group, n, k):
 @pytest.mark.parametrize(
     "num_groups,m_per_group,n,k",
     [
-        pytest.param(8, 512, 1024, 1024, id="perf-8g-512m"),
+        pytest.param(8, 512, 1024, 1024, id="perf-8g-512m", marks=pytest.mark.large_shape),
     ],
 )
 def test_grouped_fp8_gemm_performance(num_groups, m_per_group, n, k):
