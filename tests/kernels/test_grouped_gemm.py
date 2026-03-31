@@ -153,11 +153,11 @@ def torch_grouped_gemm_ref(
     b_scaled = b_scaled * scale_b.view(num_groups, nblk_n, 1, nblk_k, 1)
     b_scaled = b_scaled.view(num_groups, N, K)
 
-    # Compute grouped GEMM (on CPU to avoid hipBLAS issues with small/irregular shapes)
+    # Compute grouped GEMM on CPU (hipBLAS on this ROCm version can't handle these shapes)
     a_scaled_cpu = a_scaled.cpu()
     b_scaled_cpu = b_scaled.cpu()
     grouped_layout_cpu = grouped_layout.cpu()
-    d = torch.zeros(M, N, dtype=torch.float32)
+    d = torch.zeros(M, N, dtype=torch.float32, device="cpu")
     for g in range(num_groups):
         mask = grouped_layout_cpu == g
         if mask.any():
