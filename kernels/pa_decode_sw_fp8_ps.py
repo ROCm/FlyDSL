@@ -79,6 +79,9 @@ def compile_pa_decode_ps(
     softmax_scale=None,
     trans_v=False,
     needs_mask=True,
+    query_group_size=QUERY_GROUP_SIZE,
+    per_token_kv=False,
+    sliding_window: int = 0,
 ):
     """Compile a PS-mode PA decode kernel.
 
@@ -96,11 +99,15 @@ def compile_pa_decode_ps(
     CompilationContext._compile_hints.data = {}
 
     # LDS allocation
+    # Extra LDS for cross-warp v_scale_max reduction (per_token_kv only):
+    # NUM_WARPS floats per lane16id slot, aligned to same layout as softmax data.
+    LDS_VMAX_BYTES = NUM_WARPS * MFMA_N * 4 if per_token_kv else 0  # 256 or 0
+    LDS_SOFTMAX_TOTAL = LDS_SOFTMAX_BYTES + LDS_VMAX_BYTES
     allocator = SmemAllocator(None, arch=arch, global_sym_name="pa_ps_smem")
     logits_off = 0
     allocator.ptr = LDS_LOGITS_BYTES
     softmax_off = LDS_LOGITS_BYTES
-    allocator.ptr += LDS_SOFTMAX_BYTES
+    allocator.ptr += LDS_SOFTMAX_TOTAL
 
     # ── @flyc.kernel ─────────────────────────────────────────────────
     @flyc.kernel
@@ -118,6 +125,7 @@ def compile_pa_decode_ps(
         work_indptr_ptr: fx.Tensor,   # [num_sm + 1] int32
         work_info_ptr: fx.Tensor,     # [num_work, 8] int32 (flattened to 1D)
         kv_page_indices_ptr: fx.Tensor,  # [total_pages] int32
+        kv_indptr_ptr: fx.Tensor,     # [num_seqs + 1] int32 — prefix sum of pages per seq
         stride_q_seq: Int32,
         stride_q_head: Int32,
         stride_k_block: Int32,
@@ -128,6 +136,8 @@ def compile_pa_decode_ps(
         stride_out_head: Int32,
         stride_po_partial: Int32,     # stride for partial_output partial dim (nhead * head_dim)
         stride_pl_partial: Int32,     # stride for partial_lse partial dim (nhead)
+        stride_ks_block: Int32,       # key_scale stride for block dim (num_kv_heads * KV_BLOCK_SIZE); 0 for per-tensor
+        stride_ks_head: Int32,        # key_scale stride for head dim (KV_BLOCK_SIZE); 0 for per-tensor
     ):
         tid = gpu.thread_idx.x
         cu_id = gpu.block_idx.x  # CU index (0..num_sm-1)
@@ -150,6 +160,7 @@ def compile_pa_decode_ps(
         wi_rsrc = buffer_ops.create_buffer_resource(work_indptr_ptr, max_size=True)
         winfo_rsrc = buffer_ops.create_buffer_resource(work_info_ptr, max_size=True)
         kpi_rsrc = buffer_ops.create_buffer_resource(kv_page_indices_ptr, max_size=True)
+        kvindptr_rsrc = buffer_ops.create_buffer_resource(kv_indptr_ptr, max_size=True)
 
         qs_rsrc = buffer_ops.create_buffer_resource(query_scale_ptr, max_size=True)
         ks_rsrc = buffer_ops.create_buffer_resource(key_scale_ptr, max_size=True)
@@ -161,7 +172,7 @@ def compile_pa_decode_ps(
         # ── LDS views ──
         smem_base = allocator.get_base()
         logits_lds_i32 = SmemPtr(smem_base, logits_off, T.i32, shape=(LDS_LOGITS_BYTES // 4,)).get()
-        softmax_lds_f32 = SmemPtr(smem_base, softmax_off, T.f32, shape=(LDS_SOFTMAX_BYTES // 4,)).get()
+        softmax_lds_f32 = SmemPtr(smem_base, softmax_off, T.f32, shape=(LDS_SOFTMAX_TOTAL // 4,)).get()
         logits_lds_i64 = SmemPtr(smem_base, logits_off, T.i64, shape=(LDS_LOGITS_BYTES // 8,)).get()
 
         # ── Constants ──
@@ -170,7 +181,8 @@ def compile_pa_decode_ps(
         c_vb = stride_v_block
         c_vh = stride_v_head
 
-        _scale = arith.constant(_softmax_scale, type=T.f32) * q_scale_val * k_scale_val
+        _softmax_q_scale = arith.constant(_softmax_scale, type=T.f32) * q_scale_val
+        _scale = _softmax_q_scale * k_scale_val  # per-tensor only; per-token uses per-token k_scale
         c_w = arith.constant(WARP_SIZE, type=T.i32)
         NEG_INF = arith.constant(float("-inf"), type=T.f32)
         ZERO_F = arith.constant(0.0, type=T.f32)
@@ -208,19 +220,33 @@ def compile_pa_decode_ps(
             kv_end = buffer_ops.buffer_load(winfo_rsrc, info_base + arith.constant(5, type=T.i32), vec_width=1, dtype=T.i32)
             q_head_range = buffer_ops.buffer_load(winfo_rsrc, info_base + arith.constant(7, type=T.i32), vec_width=1, dtype=T.i32)
 
+            # Absolute token offset for the first page of this work item within its sequence.
+            # kv_start is an absolute index into kv_page_indices; kv_indptr[batch_idx] is
+            # the page index where this sequence starts.  Their difference * KV_BLOCK_SIZE
+            # gives the token offset from sequence start to the first token we process.
+            kv_indptr_batch = buffer_ops.buffer_load(kvindptr_rsrc, batch_idx, vec_width=1, dtype=T.i32)
+            kv_start_abs_tok = (kv_start - kv_indptr_batch) * c_bs
+
             # Derive kv_head from q_head_range
             q_head_start = q_head_range & arith.constant(0xFFFF, type=T.i32)
-            kv_h = q_head_start // arith.constant(QUERY_GROUP_SIZE, type=T.i32)
+            kv_h = q_head_start // arith.constant(query_group_size, type=T.i32)
 
             # Context length for this sequence
             context_len = buffer_ops.buffer_load(cl_rsrc, batch_idx, vec_width=1, dtype=T.i32)
-
+            # ── Prologue: load first block's tile 0 K data ──
+            first_phys_block = buffer_ops.buffer_load(kpi_rsrc, kv_start,
+                                                       vec_width=1, dtype=T.i32)
             # Head offsets for K and V cache
             _k_head_off = kv_h * c_kh
             _v_head_off = kv_h * c_vh
 
             # ── Q load for this work item ──
-            q_base = batch_idx * stride_q_seq + (kv_h * arith.constant(QUERY_GROUP_SIZE, type=T.i32) + local_qhead_idx) * stride_q_head
+            # Clamp local_qhead_idx into [0, query_group_size) so threads whose
+            # local_qhead_idx >= query_group_size load from a valid Q head.
+            # Their LDS write address still uses the original local_qhead_idx,
+            # so the LDS read (indexed by lane16id) picks up the wrapped Q data.
+            local_qhead_idx_for_q = local_qhead_idx % arith.constant(query_group_size, type=T.i32)
+            q_base = batch_idx * stride_q_seq + (kv_h * arith.constant(query_group_size, type=T.i32) + local_qhead_idx_for_q) * stride_q_head
             q_off = q_base + lane16id * arith.constant(FP8_ELEMS_16B, type=T.i32)
             q_vec = buffer_ops.buffer_load(q_rsrc, q_off // arith.constant(4, type=T.i32), vec_width=4, dtype=T.i32)
             offset1 = lane16id // arith.constant(4, type=T.i32)
@@ -252,6 +278,7 @@ def compile_pa_decode_ps(
                     q_frags.append(vector.extract(q_v1, static_position=[0]))
 
             # ── Tiles per block constant for tile-based loop (SP3-matching) ──
+            c_tpb_step = arith.constant(TILES_PER_BLOCK, type=T.i32)
             c_four = arith.constant(4, type=T.i32)
 
             # ── Pre-computed thread-invariant offset components ──
@@ -307,6 +334,16 @@ def compile_pa_decode_ps(
                 arith.constant(w * MFMA_N, type=T.i32) + lane16id) for w in range(NUM_WARPS)]
             _sm_rd_sum_offs = [arith.index_cast(T.index,
                 arith.constant(NUM_WARPS * MFMA_N + w * MFMA_N, type=T.i32) + lane16id) for w in range(NUM_WARPS)]
+            # Per-token v_scale_max cross-warp offsets (written in _qk_and_intra_softmax,
+            # read in _cross_warp_softmax_and_prob_pack after the barrier).
+            # Layout: float32 index = 2*NUM_WARPS*MFMA_N + warp_id*MFMA_N + lane16id
+            if per_token_kv:
+                _sm_vmax_wr_off = arith.index_cast(T.index,
+                    arith.constant(2 * NUM_WARPS * MFMA_N, type=T.i32)
+                    + warp_id * arith.constant(MFMA_N, type=T.i32) + lane16id)
+                _sm_vmax_rd_offs = [arith.index_cast(T.index,
+                    arith.constant(2 * NUM_WARPS * MFMA_N + w * MFMA_N, type=T.i32) + lane16id)
+                    for w in range(NUM_WARPS)]
 
             # ════════════════════════════════════════════════════════
             # Helper: load K data for one tile using pre-computed block base
@@ -417,12 +454,7 @@ def compile_pa_decode_ps(
 
                 # V data passed in as v_ops_all[vhe][vt] = vec4<i32>
                 v_data_prefetched = v_ops_all
-                # ── K prefetch for next tile (after prob pack, overlaps PV) ──
-                if prefetch_k_block is not None:
-                    k_prefetched = _load_k_flat_ps(prefetch_k_block, prefetch_k_tile_off)
-                else:
-                    k_prefetched = None
-                
+
                 # ── QK MFMA ──
                 d_out = []
                 for td in range_constexpr(TLOOP):
@@ -536,14 +568,18 @@ def compile_pa_decode_ps(
                     pk_vec = vector.from_elements(T.vec(1, T.i32), [pk])
                     vector.store(pk_vec, logits_lds_i32, [arith.index_cast(T.index, i32_off)])
 
+                # ── K prefetch for next tile (after prob pack, overlaps PV) ──
+                if prefetch_k_block is not None:
+                    k_prefetched = _load_k_flat_ps(prefetch_k_block, prefetch_k_tile_off)
+                else:
+                    k_prefetched = None
 
-
-                # ── V prefetch for next tile (flat i64 for loop state) ──
+                # ── V prefetch for next tile ──
                 if prefetch_v_block is not None:
-                    v_prefetched = _load_v_flat_ps(prefetch_v_block, prefetch_v_tile_off)
+                    v_prefetched = _load_v_ops(prefetch_v_block, prefetch_v_tile_off)
                 else:
                     v_prefetched = None
-                
+
                 # ── PV MFMA ──
                 pv_results = [arith.constant_vector(0.0, T.f32x4)
                               for _ in range_constexpr(VHELOOP)]
@@ -582,91 +618,409 @@ def compile_pa_decode_ps(
                             pv_results[vhe] = tmp_out
                 out0 = out0 + pv_results[0] * vector.broadcast(T.f32x4, v_scale_val)
                 out1 = out1 + pv_results[1] * vector.broadcast(T.f32x4, v_scale_val)
-                
                 return running_max, running_sum, out0, out1, k_prefetched, v_prefetched
 
+            # ── Phase helpers for barrier-merged pipeline ──
+
+            def _qk_and_intra_softmax(k_ops, partition_start, v_block_base_dw, tile_token_offset_i32, phys_block=None):
+                """Phase 1: QK MFMA + intra-warp softmax + LDS write max/sum.
+                Returns (d_out, v_ops, v_scale_vecs) where v_scale_vecs is a list of f32x4
+                for each td (per-token mode) or None (per-tensor mode).
+                """
+                va_dws = []
+                for vt in range_constexpr(VTLOOP):
+                    vhe_data = []
+                    for vhe in range_constexpr(VHELOOP):
+                        v_token_in_block = tile_token_offset_i32 + _v_tok_thread_off[vt]
+                        if trans_v:
+                            vt_group = v_token_in_block // arith.constant(FP8_ELEMS_16B, type=T.i32)
+                            va_dw = v_block_base_dw + vt_group * arith.constant(HEAD_SIZE * FP8_ELEMS_16B // 4, type=T.i32) + _vhead_elem_dw[vhe]
+                        else:
+                            va_dw = v_block_base_dw + _vhead_elem_dw[vhe] + v_token_in_block // c_four
+                        vhe_data.append(va_dw)
+                    va_dws.append(vhe_data)
+
+                # Per-token: pre-load k_scale and v_scale for all td steps
+                # (issued early to overlap with QK MFMA for memory latency hiding)
+                if per_token_kv:
+                    # scale tensor layout: [num_blocks, num_kv_heads, kv_block_size, 1] in f32
+                    # stride_ks_block = key_scale.stride(0), stride_ks_head = key_scale.stride(1)
+                    scale_block_base = phys_block * stride_ks_block + kv_h * stride_ks_head
+                    # token base for this warp: tile_off + warp_id*64 + rowid*4 (thread-invariant)
+                    _kv_tok_base_pt = tile_token_offset_i32 + _kv_tok_thread_base
+                    k_scale_vecs = []
+                    v_scale_vecs = []
+                    for td in range_constexpr(TLOOP):
+                        tok_off = _kv_tok_base_pt + arith.constant(td * MFMA_N, type=T.i32)
+                        k_scale_vecs.append(buffer_ops.buffer_load(ks_rsrc, scale_block_base + tok_off,
+                                                                    vec_width=4, dtype=T.f32))
+                        v_scale_vecs.append(buffer_ops.buffer_load(vs_rsrc, scale_block_base + tok_off,
+                                                                    vec_width=4, dtype=T.f32))
+                else:
+                    v_scale_vecs = None
+
+                v_results = []
+                d_out = []
+                for td in range_constexpr(TLOOP):
+                    vhe_data = []
+                    acc = arith.constant_vector(0.0, T.f32x4)
+                    for k_step in range_constexpr(QKHELOOP * 2):
+                        if k_step % 2 == 0:
+                            v_4xi32 = buffer_ops.buffer_load(
+                                v_rsrc, va_dws[td][k_step // 2],
+                                vec_width=4, dtype=T.i32)
+                            vhe_data.append(v_4xi32)
+                        acc = rocdl.mfma_f32_16x16x32_fp8_fp8(
+                            T.f32x4, [k_ops[td][k_step], q_frags[k_step], acc, 0, 0, 0])
+                    v_results.append(vhe_data)
+                    if per_token_kv:
+                        # per-token: scale by (softmax_scale * q_scale) * k_scale_per_token
+                        d_out.append(acc * k_scale_vecs[td] * vector.broadcast(T.f32x4, _softmax_q_scale))
+                    else:
+                        d_out.append(acc * vector.broadcast(T.f32x4, _scale))
+
+                # Pre-compute kv_tok base for this tile (add compile-time td*MFMA_N+i offsets)
+                kv_tok_base = partition_start + _kv_tok_thread_base if needs_mask else None
+                # Sliding window lower bound: valid tok must satisfy tok > context_len - sliding_window.
+                # seq_start = context_len - sliding_window (exclusive lower bound).
+                # For query at position context_len (generation decode):
+                #   pos_diff = context_len - kv_tok, valid when 0 <= pos_diff < sliding_window
+                #   → kv_tok > context_len - sliding_window  (same as tok > seq_start)
+                if needs_mask and sliding_window > 0:
+                    seq_start = context_len - arith.constant(sliding_window, type=T.i32)
+                qk_max = NEG_INF
+                for td in range_constexpr(TLOOP):
+                    for i in range_constexpr(4):
+                        s = vector.extract(d_out[td], static_position=[i], dynamic_position=[])
+                        if needs_mask:
+                            kv_tok = kv_tok_base + arith.constant(td * MFMA_N + i, type=T.i32)
+                            s = arith.select(kv_tok < context_len, s, NEG_INF)
+                            if sliding_window > 0:
+                                s = arith.select(kv_tok > seq_start, s, NEG_INF)
+                        qk_max = qk_max.maximumf(s)
+                for sh in [32, 16]:
+                    qk_max = qk_max.maximumf(qk_max.shuffle_xor(arith.constant(sh, type=T.i32), c_w))
+                vector.store(vector.from_elements(T.vec(1, T.f32), [qk_max]), softmax_lds_f32, [_sm_max_off])
+                exp_sum = ZERO_F
+                for td in range_constexpr(TLOOP):
+                    for i in range_constexpr(4):
+                        s = vector.extract(d_out[td], static_position=[i], dynamic_position=[])
+                        diff = s - qk_max
+                        p = (diff * arith.constant(LOG2E, type=T.f32)).exp2(fastmath=arith.FastMathFlags.fast)
+                        if needs_mask:
+                            kv_tok = kv_tok_base + arith.constant(td * MFMA_N + i, type=T.i32)
+                            p = arith.select(kv_tok < context_len, p, ZERO_F)
+                            if sliding_window > 0:
+                                p = arith.select(kv_tok > seq_start, p, ZERO_F)
+                        exp_sum = exp_sum + p
+                        d_out[td] = vector.insert(p, d_out[td], static_position=[i], dynamic_position=[])
+                for sh in [32, 16]:
+                    exp_sum = exp_sum + exp_sum.shuffle_xor(arith.constant(sh, type=T.i32), c_w)
+                vector.store(vector.from_elements(T.vec(1, T.f32), [exp_sum]), softmax_lds_f32, [_sm_sum_off])
+
+                # Per-token: write per-warp v_scale_max to LDS for cross-warp reduction.
+                # All 64 threads in the warp have the same v_max_warp after shuffle reduction;
+                # each writes to its own lane16id slot.  The cross-warp read happens after
+                # the barrier (in _cross_warp_softmax_and_prob_pack) using _sm_vmax_rd_offs.
+                if per_token_kv:
+                    v_max_warp = ZERO_F
+                    for td in range_constexpr(TLOOP):
+                        for i in range_constexpr(4):
+                            vs = vector.extract(v_scale_vecs[td], static_position=[i], dynamic_position=[])
+                            if needs_mask:
+                                kv_tok = kv_tok_base + arith.constant(td * MFMA_N + i, type=T.i32)
+                                vs = arith.select(kv_tok < context_len, vs, ZERO_F)
+                                if sliding_window > 0:
+                                    vs = arith.select(kv_tok > seq_start, vs, ZERO_F)
+                            v_max_warp = v_max_warp.maximumf(vs)
+                    for sh in [32, 16]:
+                        v_max_warp = v_max_warp.maximumf(
+                            v_max_warp.shuffle_xor(arith.constant(sh, type=T.i32), c_w))
+                    vector.store(vector.from_elements(T.vec(1, T.f32), [v_max_warp]),
+                                 softmax_lds_f32, [_sm_vmax_wr_off])
+
+                return d_out, v_results, v_scale_vecs
+
+            def _cross_warp_softmax_and_prob_pack(d_out, rmax, rsum, o0, o1, v_scale_vecs=None):
+                """Phase 2: Cross-warp reduction + online softmax + prob pack to LDS.
+                ASSUMES barrier already called to make softmax LDS visible.
+                When needs_mask=False, removes -inf guards (partition_max always finite).
+                The rmax > NEG_INF guard is also safe to remove: exp2((-inf - x)*LOG2E) = 0.0 in IEEE754.
+
+                Per-token V scale (per_token_kv=True): v_scale_vecs[td] = f32x4 of per-token v_scale.
+                Uses a tile-wide (256-token) v_scale_max read from LDS (all 4 warps wrote their
+                per-warp v_max in _qk_and_intra_softmax before the barrier).  This is required
+                because _pv_mfma reads ALL warps' probabilities from LDS and applies a single
+                v_correction — so all warps must normalize with the SAME v_max.
+
+                Returns (rmax, rsum, o0, o1, v_correction) where v_correction is the factor to
+                multiply the PV MFMA output by: v_scale_max/FP8_MAX for per-token, v_scale_val for per-tensor.
+                """
+                partition_max = NEG_INF
+                partition_sum = ZERO_F
+                warp_rescale_factors = []
+                for w in range_constexpr(NUM_WARPS):
+                    w_max = vector.extract(vector.load_op(T.vec(1, T.f32), softmax_lds_f32, [_sm_rd_max_offs[w]]), static_position=[0])
+                    partition_max = partition_max.maximumf(w_max)
+                    warp_rescale_factors.append(w_max)
+                for w in range_constexpr(NUM_WARPS):
+                    diff_w = warp_rescale_factors[w] - partition_max
+                    if needs_mask:
+                        diff_w = arith.select(partition_max > NEG_INF, diff_w, ZERO_F)
+                    wf = (diff_w * arith.constant(LOG2E, type=T.f32)).exp2(fastmath=arith.FastMathFlags.fast)
+                    w_sum = vector.extract(vector.load_op(T.vec(1, T.f32), softmax_lds_f32, [_sm_rd_sum_offs[w]]), static_position=[0])
+                    partition_sum = partition_sum + w_sum * wf
+                    warp_rescale_factors[w] = wf
+                my_warp_rescale = warp_rescale_factors[0]
+                for w in range_constexpr(1, NUM_WARPS):
+                    my_warp_rescale = arith.select(
+                        warp_id == arith.constant(w, type=T.i32),
+                        warp_rescale_factors[w], my_warp_rescale)
+                new_rmax = rmax.maximumf(partition_max)
+                if needs_mask:
+                    accum_scale = arith.select(rmax > NEG_INF,
+                        ((rmax - new_rmax) * arith.constant(LOG2E, type=T.f32)).exp2(fastmath=arith.FastMathFlags.fast),
+                        ZERO_F)
+                    part_to_new = arith.select(partition_max > NEG_INF,
+                        ((partition_max - new_rmax) * arith.constant(LOG2E, type=T.f32)).exp2(fastmath=arith.FastMathFlags.fast),
+                        ZERO_F)
+                else:
+                    # Safe without guards: exp2(-inf * LOG2E) = 0.0 in IEEE754
+                    accum_scale = ((rmax - new_rmax) * arith.constant(LOG2E, type=T.f32)).exp2(fastmath=arith.FastMathFlags.fast)
+                    part_to_new = ((partition_max - new_rmax) * arith.constant(LOG2E, type=T.f32)).exp2(fastmath=arith.FastMathFlags.fast)
+                rsum = accum_scale * rsum + partition_sum * part_to_new
+                rmax = new_rmax
+                o0 = o0 * vector.broadcast(T.f32x4, accum_scale)
+                o1 = o1 * vector.broadcast(T.f32x4, accum_scale)
+                if per_token_kv and v_scale_vecs is not None:
+                    # Cross-warp v_scale_max: read all warps' per-warp v_max from LDS.
+                    # Each warp wrote its per-warp v_max in _qk_and_intra_softmax (before
+                    # the barrier), so this read is safe after the barrier.
+                    # Using a tile-wide (256-token) v_max ensures all 4 warps' probs in LDS
+                    # share the same normalization factor, which is required because _pv_mfma
+                    # reads ALL warps' probabilities and applies a single v_correction.
+                    v_max_global = ZERO_F
+                    for w in range_constexpr(NUM_WARPS):
+                        w_vmax = vector.extract(
+                            vector.load_op(T.vec(1, T.f32), softmax_lds_f32, [_sm_vmax_rd_offs[w]]),
+                            static_position=[0])
+                        v_max_global = v_max_global.maximumf(w_vmax)
+                    v_max_safe = v_max_global + arith.constant(1e-8, type=T.f32)
+                    c_fp8_max = arith.constant(FP8_MAX, type=T.f32)
+                    norm_factor = c_fp8_max / v_max_safe
+                    # Normalize probs by per-tile partition_max (not running new_rmax).
+                    # This keeps packed FP8 probs in [0, FP8_MAX] range for every tile,
+                    # matching Gluon's per-partition normalization for best FP8 precision.
+                    # part_to_new = exp(partition_max - new_rmax) is absorbed into v_correction
+                    # so that the accumulated output still represents sum(exp(qk_i - new_rmax) * V).
+                    prob_scale = my_warp_rescale  # = exp(qk_max_warp - partition_max)
+                    v_correction = v_max_global / c_fp8_max * part_to_new
+                    for td in range_constexpr(TLOOP):
+                        # Apply per-tile softmax renormalization and normalize v_scale to FP8 range
+                        vs_normalized = v_scale_vecs[td] * vector.broadcast(T.f32x4, norm_factor)
+                        d_out[td] = d_out[td] * vector.broadcast(T.f32x4, prob_scale) * vs_normalized
+                else:
+                    prob_scale = my_warp_rescale * part_to_new
+                    v_correction = v_scale_val
+                    for td in range_constexpr(TLOOP):
+                        d_out[td] = d_out[td] * vector.broadcast(T.f32x4, prob_scale)
+
+                for td in range_constexpr(TLOOP):
+                    p0 = vector.extract(d_out[td], static_position=[0], dynamic_position=[])
+                    p1 = vector.extract(d_out[td], static_position=[1], dynamic_position=[])
+                    p2 = vector.extract(d_out[td], static_position=[2], dynamic_position=[])
+                    p3 = vector.extract(d_out[td], static_position=[3], dynamic_position=[])
+                    lo = rocdl.cvt_pk_fp8_f32(T.i32, p0, p1, arith.constant(0, type=T.i32), False)
+                    pk = rocdl.cvt_pk_fp8_f32(T.i32, p2, p3, lo, True)
+                    byte_base = _prob_wr_thread_base + arith.constant(td * MFMA_N * PROB_ROW_STRIDE_BYTES, type=T.i32)
+                    i32_off = byte_base // c_four
+                    pk_vec = vector.from_elements(T.vec(1, T.i32), [pk])
+                    vector.store(pk_vec, logits_lds_i32, [arith.index_cast(T.index, i32_off)])
+                return rmax, rsum, o0, o1, v_correction
+
+            def _pv_mfma(v_ops, o0, o1, v_correction):
+                """Phase 3: LDS read probs + PV MFMA.
+                ASSUMES barrier already called to make prob LDS visible.
+                Reads prob data from LDS and executes PV MFMAs.
+                v_correction: scalar to multiply PV output by.
+                  Per-tensor: v_scale_val (constant).
+                  Per-token: v_scale_max/FP8_MAX (per-warp, computed in _cross_warp_softmax_and_prob_pack).
+                """
+                pv_results = [arith.constant_vector(0.0, T.f32x4) for _ in range_constexpr(VHELOOP)]
+                v_i64s = []
+                p_i64s = []
+                for vhe in range_constexpr(VHELOOP):
+                    for vt in range_constexpr(VTLOOP):
+                        v_4xi32 = v_ops[vt][vhe]
+                        for j in range_constexpr(2):
+                            v_i64 = _pack_i32_pair_to_i64(
+                                vector.extract(v_4xi32, static_position=[j * 2]),
+                                vector.extract(v_4xi32, static_position=[j * 2 + 1]))
+                            v_i64s.append(v_i64)
+                            # p_byte = vt*2560 + _pv_prob_read_base + j*8
+                            p_byte = (arith.constant(vt * 4 * MFMA_N * PROB_ROW_STRIDE_BYTES, type=T.i32)
+                                      + _pv_prob_read_base
+                                      + arith.constant(j * 8, type=T.i32))
+                            p_i32_idx = p_byte // c_four
+                            pw0 = vector.extract(vector.load_op(T.vec(1, T.i32), logits_lds_i32,
+                                [arith.index_cast(T.index, p_i32_idx)]), static_position=[0])
+                            pw1 = vector.extract(vector.load_op(T.vec(1, T.i32), logits_lds_i32,
+                                [arith.index_cast(T.index, p_i32_idx + c_one)]), static_position=[0])
+                            p_i64 = _pack_i32_pair_to_i64(pw0, pw1)
+                            p_i64s.append(p_i64)
+                for vhe in range_constexpr(VHELOOP):
+                    tmp_out = arith.constant_vector(0.0, T.f32x4)
+                    for vt in range_constexpr(VTLOOP):
+                        for j in range_constexpr(2):
+                            tmp_out = rocdl.mfma_f32_16x16x32_fp8_fp8(
+                                T.f32x4, [v_i64s[vhe * VTLOOP * 2 + vt * 2 + j], p_i64s[vhe * VTLOOP * 2 + vt * 2 + j], tmp_out, 0, 0, 0])
+                            pv_results[vhe] = tmp_out
+                o0 = o0 + pv_results[0] * vector.broadcast(T.f32x4, v_correction)
+                o1 = o1 + pv_results[1] * vector.broadcast(T.f32x4, v_correction)
+                return o0, o1
+
             # ════════════════════════════════════════════════════════
-            # Inner KV loop — 1 tile per iteration (4x longer loop)
-            # Each iteration: QK → barrier → cross-warp softmax + prob pack
-            #                 → barrier → PV MFMA
-            # 2 barriers per tile
+            # Inner KV loop — barrier-merged pipeline
+            # Tiles overlap: barrier₂(N) merged with barrier₁(N+1)
+            # 5 barriers per block instead of 8
             # ════════════════════════════════════════════════════════
             def _unwrap(v):
                 return v.ir_value() if hasattr(v, 'ir_value') else v
 
-            def _pack_state_1t(rmax, rsum, o0, o1, k_flat, v_flat):
-                return [_unwrap(v) for v in [rmax, rsum, o0, o1] + k_flat + v_flat]
+            def _pack_state(rmax, rsum, o0, o1, k0_flat, k1_flat, k2_flat, k3_flat):
+                return [_unwrap(v) for v in [rmax, rsum, o0, o1] + k0_flat + k1_flat + k2_flat + k3_flat]
 
-            def _unpack_state_1t(state):
-                return (state[0], state[1], state[2], state[3],
-                        list(state[4:4 + _N_K]),
-                        list(state[4 + _N_K:4 + _N_K + _N_V]))
+            def _unpack_state(state):
+                return state[0], state[1], state[2], state[3], list(state[4:4 + _N_K]), list(state[4 + _N_K:4 + _N_K * 2]), list(state[4 + _N_K * 2:4 + _N_K * 3]), list(state[4 + _N_K * 3:4 + _N_K * 4])
 
-            # ── Prologue: load first tile's K + V data ──
-            first_phys_block = buffer_ops.buffer_load(kpi_rsrc, kv_start,
-                                                       vec_width=1, dtype=T.i32)
+            def _process_block(phys_block, block_idx_in_work, rmax, rsum, o0, o1,
+                               k0_ops, k1_ops, k2_ops, k3_ops,
+                               next_k_base=None, next_tile_zero_off=None):
+                """Process one 1024-token block with barrier-merged pipeline.
+                5 barriers per block instead of 8.
+                next_k_base = pre-computed (next_phys_block * c_kb + _k_head_off) // 4
+                Returns (rmax, rsum, o0, o1, k_next_flat).
+                """
+
+
+                # base_pstart: absolute token index of tile 0 of this block within the sequence.
+                # kv_start_abs_tok converts from work-item-relative to sequence-absolute offsets,
+                # which is required for correct masking (kv_tok < context_len).
+                base_pstart = kv_start_abs_tok + block_idx_in_work * c_tpb_step * c_cps
+
+                pstart = [
+                    base_pstart,
+                    base_pstart + c_cps,
+                    base_pstart + c_cps * arith.constant(2, type=T.i32),
+                    base_pstart + c_cps * arith.constant(3, type=T.i32),
+                ]
+
+                # Pre-compute per-block K/V base addresses (shared by tiles 1-3)
+                # k_base = (phys_block * c_kb + _k_head_off) // c_four
+                v_base = (phys_block * c_vb + _v_head_off) // c_four
+                # ═══ Tile 0: QK + softmax write ═══
+                d_out_0, v0_ops, vs0 = _qk_and_intra_softmax(k0_ops, pstart[0], v_base, c_zero, phys_block)
+                gpu.barrier()  # BARRIER A: tile 0 softmax LDS visible
+                rmax, rsum, o0, o1, vc0 = _cross_warp_softmax_and_prob_pack(d_out_0, rmax, rsum, o0, o1, vs0)
+
+                # ═══ Tile 1: QK before tile 0 PV barrier ═══
+                d_out_1, v1_ops, vs1 = _qk_and_intra_softmax(k1_ops, pstart[1], v_base, c_256, phys_block)
+                # K prefetch for next block (base pre-computed by caller)
+                if next_k_base is not None:
+                    k0_next_flat = _load_k_flat_ps(next_k_base, next_tile_zero_off)
+                else:
+                    k0_next_flat = None
+                gpu.barrier()  # BARRIER B: tile 0 probs + tile 1 softmax visible
+                o0, o1 = _pv_mfma(v0_ops, o0, o1, vc0)  # tile 0 PV
+                rmax, rsum, o0, o1, vc1 = _cross_warp_softmax_and_prob_pack(d_out_1, rmax, rsum, o0, o1, vs1)
+
+                # ═══ Tile 2 ═══
+                d_out_2, v2_ops, vs2 = _qk_and_intra_softmax(k2_ops, pstart[2], v_base, c_512, phys_block)
+                if next_k_base is not None:
+                    k1_next_flat = _load_k_flat_ps(next_k_base, c_256)
+                else:
+                    k1_next_flat = None
+                gpu.barrier()  # BARRIER C: tile 1 probs + tile 2 softmax visible
+                o0, o1 = _pv_mfma(v1_ops, o0, o1, vc1)  # tile 1 PV
+                rmax, rsum, o0, o1, vc2 = _cross_warp_softmax_and_prob_pack(d_out_2, rmax, rsum, o0, o1, vs2)
+
+                # ═══ Tile 3 ═══
+                d_out_3, v3_ops, vs3 = _qk_and_intra_softmax(k3_ops, pstart[3], v_base, c_768, phys_block)
+                if next_k_base is not None:
+                    k2_next_flat = _load_k_flat_ps(next_k_base, c_512)
+                else:
+                    k2_next_flat = None
+                gpu.barrier()  # BARRIER D: tile 2 probs + tile 3 softmax visible
+                o0, o1 = _pv_mfma(v2_ops, o0, o1, vc2)  # tile 2 PV
+                rmax, rsum, o0, o1, vc3 = _cross_warp_softmax_and_prob_pack(d_out_3, rmax, rsum, o0, o1, vs3)
+
+                if next_k_base is not None:
+                    k3_next_flat = _load_k_flat_ps(next_k_base, c_768)
+                else:
+                    k3_next_flat = None
+                gpu.barrier()  # BARRIER E: tile 3 probs visible
+                o0, o1 = _pv_mfma(v3_ops, o0, o1, vc3)  # tile 3 PV
+
+                return rmax, rsum, o0, o1, k0_next_flat, k1_next_flat, k2_next_flat, k3_next_flat
+
+
             c_zero = arith.constant(0, type=T.i32)
+            c_256 = arith.constant(KV_COMPUTE_BLOCK, type=T.i32)
+            c_512 = arith.constant(KV_COMPUTE_BLOCK * 2, type=T.i32)
+            c_768 = arith.constant(KV_COMPUTE_BLOCK * 3, type=T.i32)
 
             first_k_base = (first_phys_block * c_kb + _k_head_off) // c_four
-            k_init_flat = _load_k_flat_ps(first_k_base, c_zero)
+            k0_flat = _load_k_flat_ps(first_k_base, c_zero)
+            k1_flat = _load_k_flat_ps(first_k_base, c_256)
+            k2_flat = _load_k_flat_ps(first_k_base, c_512)
+            k3_flat = _load_k_flat_ps(first_k_base, c_768)
 
-            first_v_base = (first_phys_block * c_vb + _v_head_off) // c_four
-            v_init_flat = _load_v_flat_ps(first_v_base, c_zero)
-
-            init_state = _pack_state_1t(
+            init_state = _pack_state(
                 NEG_INF, ZERO_F,
                 arith.constant_vector(0.0, T.f32x4),
                 arith.constant_vector(0.0, T.f32x4),
-                k_init_flat, v_init_flat)
+                k0_flat, k1_flat, k2_flat, k3_flat)
 
-            # Loop over tiles: total_tiles = num_blocks * TILES_PER_BLOCK
+            # Unified loop: ALL blocks (0..N-1), uniform body (no peeling).
+            # K prefetch on last iter uses clamped index (same block — harmless).
             num_blocks_in_work = kv_end - kv_start
-            num_tiles_in_work = num_blocks_in_work * c_tpb
-            last_tile_idx_val = num_tiles_in_work - c_one
+            last_block_idx_val = num_blocks_in_work - c_one
             _loop_start = arith.index(0)
-            _loop_stop = arith.index_cast(T.index, arith.unwrap(num_tiles_in_work))
+            _loop_stop = arith.index_cast(T.index, arith.unwrap(num_blocks_in_work))
             _loop_step = arith.index(1)
 
-            for it, state in range(_loop_start, _loop_stop, _loop_step,
+            for ib, state in range(_loop_start, _loop_stop, _loop_step,
                                    init=init_state):
-                running_max, running_sum, out0, out1, k_flat, v_flat = _unpack_state_1t(state)
-                tile_idx = arith.index_cast(T.i32, it)
+                running_max, running_sum, out0, out1, k0_flat, k1_flat, k2_flat, k3_flat = _unpack_state(state)
+                block_idx = arith.index_cast(T.i32, ib)
 
-                # Unflatten prefetched K and V data
-                k_ops = _unflatten_k(k_flat)
-                v_ops = _unflatten_v(v_flat)  # [vhe][vt]
-
-                # Partition start = global tile index * KV_COMPUTE_BLOCK
-                partition_start = tile_idx * c_cps
-
-                # Next tile prefetch addresses
-                next_tile_idx_raw = tile_idx + c_one
-                next_tile_idx_clamped = arith.select(
-                    next_tile_idx_raw < num_tiles_in_work, next_tile_idx_raw, last_tile_idx_val)
-                next_block_idx = next_tile_idx_clamped // c_tpb
-                next_tile_in_block = next_tile_idx_clamped % c_tpb
+                phys_block = buffer_ops.buffer_load(kpi_rsrc,
+                    kv_start + block_idx, vec_width=1, dtype=T.i32)
+                # Clamp next index: min(block_idx + 1, last_block_idx)
+                next_idx_raw = block_idx + c_one
+                next_idx_clamped = arith.select(
+                    next_idx_raw < num_blocks_in_work, next_idx_raw, last_block_idx_val)
                 next_phys_block = buffer_ops.buffer_load(kpi_rsrc,
-                    kv_start + next_block_idx, vec_width=1, dtype=T.i32)
+                    kv_start + next_idx_clamped, vec_width=1, dtype=T.i32)
+                # Pre-compute next block's K base address
                 next_k_base = (next_phys_block * c_kb + _k_head_off) // c_four
-                next_v_base = (next_phys_block * c_vb + _v_head_off) // c_four
-                next_tile_token_offset = next_tile_in_block * c_cps
 
-                # Full tile: QK → barrier → cross-warp softmax + prob pack
-                #          → K/V prefetch → barrier → PV MFMA
-                running_max, running_sum, out0, out1, k_next_flat, v_next_flat = \
-                    _compute_partition_ps(
-                        None, None, partition_start, k_ops, v_ops,
-                        running_max, running_sum, out0, out1,
-                        prefetch_k_block=next_k_base,
-                        prefetch_k_tile_off=next_tile_token_offset,
-                        prefetch_v_block=next_v_base,
-                        prefetch_v_tile_off=next_tile_token_offset)
+                k0_ops = _unflatten_k(k0_flat)
+                k1_ops = _unflatten_k(k1_flat)
+                k2_ops = _unflatten_k(k2_flat)
+                k3_ops = _unflatten_k(k3_flat)
+                # V tile 0 loaded inline — issue early so loads overlap with QK MFMA
+                # v_base = (phys_block * c_vb + _v_head_off) // c_four
+                
+                running_max, running_sum, out0, out1, k0_next_flat, k1_next_flat, k2_next_flat, k3_next_flat = _process_block(
+                    phys_block, block_idx, running_max, running_sum, out0, out1,
+                    k0_ops, k1_ops, k2_ops, k3_ops, next_k_base=next_k_base,
+                    next_tile_zero_off=c_zero)
 
-                results = yield _pack_state_1t(running_max, running_sum, out0, out1,
-                                               k_next_flat, v_next_flat)
+                results = yield _pack_state(running_max, running_sum, out0, out1, k0_next_flat, k1_next_flat, k2_next_flat, k3_next_flat)
 
-            # All tiles processed
-            running_max, running_sum, out0, out1, _, _ = _unpack_state_1t(results)
+            # No epilogue — all blocks processed in the loop
+            running_max, running_sum, out0, out1, _, _, _, _ = _unpack_state(results)
 
             # ── Output: branch on partial_idx ──
             is_direct = partial_idx == arith.constant(-1, type=T.i32)
@@ -687,8 +1041,10 @@ def compile_pa_decode_ps(
                 hs_base = (arith.constant(vhe * NUM_WARPS * MFMA_N, type=T.i32)
                            + warp_id * arith.constant(MFMA_N, type=T.i32)
                            + rowid * arith.constant(4, type=T.i32))
-                qgs_pos = lane16id
-                qhead = kv_h * arith.constant(QUERY_GROUP_SIZE, type=T.i32) + qgs_pos
+                # Wrap lane16id into [0, query_group_size) so threads beyond QGS
+                # write to the same location as their partner (idempotent, correct).
+                qgs_pos = lane16id % arith.constant(query_group_size, type=T.i32)
+                qhead = kv_h * arith.constant(query_group_size, type=T.i32) + qgs_pos
 
                 out_base = (batch_idx * stride_out_seq
                             + qhead * stride_out_head
@@ -715,7 +1071,7 @@ def compile_pa_decode_ps(
             from flydsl._mlir.dialects import math as _mlir_math
             log_sum = _mlir_math.log(safe_sum_lse, fastmath=arith.FastMathFlags.fast)
             lse_val = running_max + log_sum
-            qhead_lse = kv_h * arith.constant(QUERY_GROUP_SIZE, type=T.i32) + lane16id
+            qhead_lse = kv_h * arith.constant(query_group_size, type=T.i32) + lane16id % arith.constant(query_group_size, type=T.i32)
             pl_off = po_idx * stride_pl_partial + qhead_lse
             lse_as_i32 = arith.bitcast(T.i32, lse_val)
             buffer_ops.buffer_store(lse_as_i32, pl_rsrc,
@@ -725,12 +1081,13 @@ def compile_pa_decode_ps(
     @flyc.jit
     def launch_pa_decode_ps(out, po, pl, q, kc, vc, cl,
                             qs, ks, vs,
-                            work_indptr, work_info, kv_page_indices,
+                            work_indptr, work_info, kv_page_indices, kv_indptr,
                             s_q_seq, s_q_head,
                             s_k_block, s_k_head,
                             s_v_block, s_v_head,
                             s_out_seq, s_out_head,
                             s_po_partial, s_pl_partial,
+                            s_ks_block, s_ks_head,
                             num_sm,
                             stream: fx.Stream = fx.Stream(None)):
         allocator.finalized = False
@@ -739,11 +1096,12 @@ def compile_pa_decode_ps(
             allocator.finalize()
         pa_decode_ps_kernel(
             out, po, pl, q, kc, vc, cl, qs, ks, vs,
-            work_indptr, work_info, kv_page_indices,
+            work_indptr, work_info, kv_page_indices, kv_indptr,
             s_q_seq, s_q_head, s_k_block, s_k_head,
             s_v_block, s_v_head,
             s_out_seq, s_out_head,
             s_po_partial, s_pl_partial,
+            s_ks_block, s_ks_head,
         ).launch(
             grid=(num_sm, 1, 1),
             block=(BLOCK_THREADS, 1, 1), stream=stream)
@@ -853,6 +1211,7 @@ def pa_decode_ps_launch(
     key_scale: torch.Tensor = None,
     value_scale: torch.Tensor = None,
     *,
+    sliding_window: int = 0,
     metadata: dict = None,
     stream=None,
 ) -> str:
@@ -874,6 +1233,9 @@ def pa_decode_ps_launch(
     if not isinstance(value_scale, torch.Tensor):
         value_scale = torch.tensor([float(value_scale or 1.0)], device=dev, dtype=torch.float32)
 
+    # Detect per-token vs per-tensor quantization from scale tensor dimensionality
+    per_token_kv = key_scale.ndim > 1  # per-tensor: shape [1]; per-token: shape [blocks, heads, block_size, 1]
+
     if metadata is None:
         metadata = get_pa_metadata(
             query, key_cache, context_lengths, kv_indptr,
@@ -887,8 +1249,20 @@ def pa_decode_ps_launch(
     stride_pl_partial = metadata['stride_pl_partial']
     num_sm = metadata['num_sm']
 
+    query_group_size = num_query_heads // num_kv_heads
     compiled = compile_pa_decode_ps(
-        softmax_scale=softmax_scale, trans_v=trans_v)
+        softmax_scale=softmax_scale, trans_v=trans_v, query_group_size=query_group_size,
+        per_token_kv=per_token_kv, sliding_window=sliding_window)
+
+    # Strides for key_scale/value_scale (same shape → same strides)
+    # Per-token: key_scale.stride(0) = num_kv_heads * KV_BLOCK_SIZE, stride(1) = KV_BLOCK_SIZE
+    # Per-tensor: strides unused; pass 0
+    if per_token_kv:
+        stride_ks_block = key_scale.stride(0)
+        stride_ks_head = key_scale.stride(1)
+    else:
+        stride_ks_block = 0
+        stride_ks_head = 0
 
     s = stream or torch.cuda.current_stream()
 
@@ -896,12 +1270,13 @@ def pa_decode_ps_launch(
         output, partial_output, partial_lse,
         query, key_cache, value_cache,
         context_lengths, query_scale, key_scale, value_scale,
-        work_indptr, work_info_flat, kv_page_indices,
+        work_indptr, work_info_flat, kv_page_indices, kv_indptr,
         query.stride(0), query.stride(1),
         key_cache.stride(0), key_cache.stride(1),
         value_cache.stride(0), value_cache.stride(1),
         output.stride(0), output.stride(1),
         stride_po_partial, stride_pl_partial,
+        stride_ks_block, stride_ks_head,
         num_sm, s)
 
     from aiter.ops.attention import pa_reduce_v1
