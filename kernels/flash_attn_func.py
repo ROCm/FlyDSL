@@ -16,11 +16,13 @@ Block:  (256,) -- 4 waves of 64 on AMD (wave64).
 Requires: head_dim % 32 == 0, head_dim >= 64, seq_len % 128 == 0.
 """
 
+import functools
 import math
 import os
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
+from flydsl.compiler.llvm_options import llvm_options
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, buffer_ops, gpu, range_constexpr, rocdl, vector
 from flydsl.expr.typing import T
@@ -43,9 +45,9 @@ def _waitcnt_vm_n(n):
 def select_flash_attn_func_path(num_heads, head_dim, causal=True, dtype_str="f16"):
     """Select active flash_attn_func path tag for build-time specialization."""
     override = os.getenv("FLYDSL_FLASH_ATTN_FUNC_PATH", "auto").strip().lower()
-    if override in ("N32",):
+    if override == "n32":
         return "N32"
-    if override in ("N128",):
+    if override == "n128":
         return "N128"
     if dtype_str in ("f16", "bf16") and causal and head_dim == 128:
         return "N128"
@@ -65,8 +67,6 @@ def build_flash_attn_func_module_primary(
     daz=True,
 ):
     """Build the flash_attn_func launcher using the post-refactor FlyDSL API."""
-    env.compile.unsafe_fp_math = unsafe_fp_math
-    env.compile.fast_fp_math = fast_fp_math
     gpu_arch = get_hip_arch()
 
     BLOCK_M = 256
@@ -1074,7 +1074,24 @@ def build_flash_attn_func_module_primary(
             stream=stream,
         )
 
-    return launch_flash_attn_func
+    FMHA_LLVM_OPTS = {
+        "enable-post-misched": False,
+        "lsr-drop-solution": True,
+    }
+    _fmha_compile_hints = {
+        "fast_fp_math": fast_fp_math,
+        "unsafe_fp_math": unsafe_fp_math,
+    }
+    _inner = launch_flash_attn_func
+
+    @functools.wraps(_inner)
+    def _with_llvm_opts(*args, **kwargs):
+        with llvm_options(FMHA_LLVM_OPTS), CompilationContext.compile_hints(
+            _fmha_compile_hints
+        ):
+            return _inner(*args, **kwargs)
+
+    return _with_llvm_opts
 
 
 build_flash_attn_func_module = build_flash_attn_func_module_primary

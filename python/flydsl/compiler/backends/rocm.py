@@ -37,8 +37,8 @@ class RocmBackend(BaseBackend):
         chip = self.target.arch
         waves_per_eu = compile_hints.get("waves_per_eu")
         maxnreg = compile_hints.get("maxnreg")
-        fast_fp_math = env.compile.fast_fp_math
-        unsafe_fp_math = env.compile.unsafe_fp_math
+        fast_fp_math = compile_hints.get("fast_fp_math", env.compile.fast_fp_math)
+        unsafe_fp_math = compile_hints.get("unsafe_fp_math", env.compile.unsafe_fp_math)
 
         bin_cli_opts = []
         if env.debug.enable_debug_info:
