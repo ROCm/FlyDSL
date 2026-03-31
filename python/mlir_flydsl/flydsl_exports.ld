@@ -16,6 +16,9 @@ FLYDSL_0.1 {
     /* Python module initializers */
     PyInit_*;
 
+    /* Selective LLVM C API symbols needed by kernel scripts */
+    LLVMParseCommandLineOptions;
+
     /* mlir:: C++ namespace — needed by extension modules
      * (_mlirDialectsFly.so, _mlir.so, _mlirDialectsGPU.so, etc.)
      * Covers: mlir::fly::*, mlir::fly_rocdl::*, mlir::python::*,
