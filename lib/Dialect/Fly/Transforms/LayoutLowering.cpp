@@ -64,16 +64,38 @@ Value castPrintfArg(PatternRewriter &rewriter, Location loc, Value value, std::s
   }
   if (auto floatTy = dyn_cast<FloatType>(type)) {
     if (floatTy.getWidth() <= 32) {
-      format += "%f";
+      format += "%.2f";
       if (floatTy.getWidth() < 32) {
         return arith::ExtFOp::create(rewriter, loc, rewriter.getF32Type(), value);
       }
       return value;
     }
-    format += "%lf";
+    format += "%.2lf";
     if (floatTy.getWidth() != 64) {
       return arith::ExtFOp::create(rewriter, loc, rewriter.getF64Type(), value);
     }
+    return value;
+  }
+  return nullptr;
+}
+
+Value castVectorElementPrintfArg(PatternRewriter &rewriter, Location loc, Value value,
+                                 std::string &format) {
+  Type type = value.getType();
+  if (auto intTy = dyn_cast<IntegerType>(type)) {
+    format += "%d";
+    if (intTy.getWidth() < 32)
+      return arith::ExtSIOp::create(rewriter, loc, rewriter.getI32Type(), value);
+    if (intTy.getWidth() > 32)
+      return arith::TruncIOp::create(rewriter, loc, rewriter.getI32Type(), value);
+    return value;
+  }
+  if (auto floatTy = dyn_cast<FloatType>(type)) {
+    format += "%.2f";
+    if (floatTy.getWidth() < 32)
+      return arith::ExtFOp::create(rewriter, loc, rewriter.getF32Type(), value);
+    if (floatTy.getWidth() > 32)
+      return arith::TruncFOp::create(rewriter, loc, rewriter.getF32Type(), value);
     return value;
   }
   return nullptr;
@@ -86,6 +108,26 @@ bool appendScalarPrintfArg(PatternRewriter &rewriter, Location loc, Value value,
     return false;
   }
   args.push_back(casted);
+  return true;
+}
+
+bool appendVectorPrintf(PatternRewriter &rewriter, Location loc, Value value, std::string &format,
+                        SmallVectorImpl<Value> &args) {
+  auto vectorTy = dyn_cast<VectorType>(value.getType());
+  if (!vectorTy || vectorTy.getRank() != 1 || vectorTy.isScalable() || !vectorTy.hasStaticShape())
+    return false;
+
+  format += "[";
+  for (int64_t i = 0, e = vectorTy.getDimSize(0); i < e; ++i) {
+    if (i > 0)
+      format += ", ";
+    Value element = vector::ExtractOp::create(rewriter, loc, value, i);
+    Value casted = castVectorElementPrintfArg(rewriter, loc, element, format);
+    if (!casted)
+      return false;
+    args.push_back(casted);
+  }
+  format += "]";
   return true;
 }
 
@@ -1323,6 +1365,8 @@ public:
           valFormat += ":";
           appendIntTuplePrintf(rewriter, loc, layoutBuilder.getStride(layout), valFormat, args);
         }
+      } else if (isa<VectorType>(val.getType())) {
+        appendVectorPrintf(rewriter, loc, val, valFormat, args);
       } else {
         appendScalarPrintfArg(rewriter, loc, val, valFormat, args);
       }
