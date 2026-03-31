@@ -27,6 +27,7 @@ for _p in reversed(_PYTHON_CANDIDATES):
 
 from kernels.grouped_gemm import compile_grouped_fp8_gemm
 from flydsl.runtime.device import get_rocm_arch
+from tests.test_common import run_perftest, verify_output
 
 logging.basicConfig(level=logging.INFO)
 
@@ -260,37 +261,28 @@ def test_grouped_fp8_gemm_correctness(num_groups, m_per_group, n, k):
         out_dtype="bf16",
     )
 
-    # Launch kernel
+    # Launch wrapper
     stream = torch.cuda.current_stream()
-    launch_fn(
+
+    def launch_kernel(d, a, b, sa, sb, gl):
+        launch_fn(d, a, b, sa, sb, gl, M, n, k, num_groups, stream)
+
+    launch_kernel(
         d.contiguous().view(-1),
         _as_i8(a_fp8.contiguous().view(-1)),
         _as_i8(b_fp8.contiguous().view(-1)),
         scale_a.contiguous().view(-1),
         scale_b.contiguous().view(-1),
         grouped_layout.contiguous(),
-        M,
-        n,
-        k,
-        num_groups,
-        stream,
     )
-
-    # Synchronize and check results
     torch.cuda.synchronize()
 
-    # Compute error metrics
-    diff = (d.float() - ref_d.float()).abs()
-    max_diff = diff.max().item()
-    mean_diff = diff.mean().item()
-    rel_diff = (diff / (ref_d.float().abs() + 1e-6)).max().item()
-
-    print(f"\nTest: num_groups={num_groups}, M={M}, N={n}, K={k}")
-    print(f"  max_diff={max_diff:.6f}, mean_diff={mean_diff:.6f}, rel_diff={rel_diff:.6f}")
-
-    # FP8 has limited precision, so we use relatively loose tolerances
-    assert max_diff < 0.5, f"max_diff {max_diff} exceeds threshold 0.5"
-    assert rel_diff < 0.2, f"rel_diff {rel_diff} exceeds threshold 0.2"
+    # Verify correctness
+    c_out_f32 = d.to(torch.float32)
+    c_ref = ref_d.to(torch.float32)
+    msg = f"num_groups={num_groups}, M={M}, N={n}, K={k}"
+    passed = verify_output(c_out_f32, c_ref, rtol=1e-2, atol=1e-2, msg=msg)
+    assert passed, f"Correctness check failed for {msg}"
 
 
 @pytest.mark.parametrize(
@@ -324,62 +316,34 @@ def test_grouped_fp8_gemm_performance(num_groups, m_per_group, n, k):
 
     stream = torch.cuda.current_stream()
 
-    # Warmup
-    for _ in range(5):
-        launch_fn(
-            d.contiguous().view(-1),
-            _as_i8(a_fp8.contiguous().view(-1)),
-            _as_i8(b_fp8.contiguous().view(-1)),
-            scale_a.contiguous().view(-1),
-            scale_b.contiguous().view(-1),
-            grouped_layout.contiguous(),
-            M,
-            n,
-            k,
-            num_groups,
-            stream,
-        )
-    torch.cuda.synchronize()
+    def launch_kernel(d, a, b, sa, sb, gl):
+        launch_fn(d, a, b, sa, sb, gl, M, n, k, num_groups, stream)
 
-    # Benchmark
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
-    num_iters = 100
+    _, us = run_perftest(
+        launch_kernel,
+        d.contiguous().view(-1),
+        _as_i8(a_fp8.contiguous().view(-1)),
+        _as_i8(b_fp8.contiguous().view(-1)),
+        scale_a.contiguous().view(-1),
+        scale_b.contiguous().view(-1),
+        grouped_layout.contiguous(),
+        num_iters=20,
+        num_warmup=3,
+    )
 
-    start_event.record()
-    for _ in range(num_iters):
-        launch_fn(
-            d.contiguous().view(-1),
-            _as_i8(a_fp8.contiguous().view(-1)),
-            _as_i8(b_fp8.contiguous().view(-1)),
-            scale_a.contiguous().view(-1),
-            scale_b.contiguous().view(-1),
-            grouped_layout.contiguous(),
-            M,
-            n,
-            k,
-            num_groups,
-            stream,
-        )
-    end_event.record()
-    torch.cuda.synchronize()
-
-    elapsed_ms = start_event.elapsed_time(end_event) / num_iters
     flops = 2 * M * n * k
-    tflops = flops / (elapsed_ms * 1e9)
-
-    # Estimate memory bandwidth
+    tflops = flops / (us / 1e6) / 1e12
     bytes_a = M * k  # FP8
     bytes_b = num_groups * n * k  # FP8
     bytes_d = M * n * 2  # BF16
     bytes_scales = (k // scale_block_k) * M * 4 + num_groups * (n // scale_block_n) * (k // scale_block_k) * 4
     total_bytes = bytes_a + bytes_b + bytes_d + bytes_scales
-    bandwidth_gbs = total_bytes / (elapsed_ms * 1e6)
+    bandwidth_tbs = total_bytes / (us / 1e6) / 1e12
 
     print(f"\nPerformance: num_groups={num_groups}, M={M}, N={n}, K={k}")
-    print(f"  Time: {elapsed_ms * 1000:.2f} us")
+    print(f"  Time: {us:.2f} us")
     print(f"  TFLOPS: {tflops:.2f}")
-    print(f"  Bandwidth: {bandwidth_gbs:.2f} GB/s")
+    print(f"  Bandwidth: {bandwidth_tbs:.2f} TB/s")
 
 
 if __name__ == "__main__":
