@@ -354,7 +354,8 @@ if __name__ == "__main__":
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--num_groups", type=int, default=4)
-    parser.add_argument("--m_per_group", type=int, default=256)
+    parser.add_argument("--m_per_group", type=int, default=256,
+                        help="Approx M rows per group (0 = sweep [128, 256, 512, 1024])")
     parser.add_argument("-N", type=int, default=512)
     parser.add_argument("-K", type=int, default=512)
     parser.add_argument("--tile_m", type=int, default=128)
@@ -366,5 +367,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     torch.set_default_device("cuda")
-    test_grouped_fp8_gemm_correctness(args.num_groups, args.m_per_group, args.N, args.K)
-    test_grouped_fp8_gemm_performance(args.num_groups, args.m_per_group, args.N, args.K)
+
+    m_list = [args.m_per_group] if args.m_per_group > 0 else [128, 256, 512, 1024]
+
+    for m_per_group in m_list:
+        test_grouped_fp8_gemm_correctness(args.num_groups, m_per_group, args.N, args.K)
+        test_grouped_fp8_gemm_performance(args.num_groups, m_per_group, args.N, args.K)
