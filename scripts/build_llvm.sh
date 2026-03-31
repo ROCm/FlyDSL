@@ -7,7 +7,36 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 BASE_DIR="$(cd "${REPO_ROOT}/.." && pwd)"
-LLVM_SRC_DIR="$BASE_DIR/llvm-project"
+
+# Place llvm-project on the data disk for better I/O and space,
+# and keep a symlink under the workspace for convenience.
+DATA_DISK_LLVM="/data/llvm-project"
+LLVM_LINK="$BASE_DIR/llvm-project"
+
+LLVM_SRC_DIR="$DATA_DISK_LLVM"
+
+if [ ! -d "$DATA_DISK_LLVM" ]; then
+    mkdir -p "$DATA_DISK_LLVM"
+fi
+
+if [ -L "$LLVM_LINK" ]; then
+    # Already a symlink — verify it points to the right place
+    CURRENT_TARGET="$(readlink -f "$LLVM_LINK")"
+    if [ "$CURRENT_TARGET" != "$(readlink -f "$DATA_DISK_LLVM")" ]; then
+        echo "Updating symlink $LLVM_LINK -> $DATA_DISK_LLVM"
+        rm -f "$LLVM_LINK"
+        ln -s "$DATA_DISK_LLVM" "$LLVM_LINK"
+    fi
+elif [ -d "$LLVM_LINK" ]; then
+    # A real directory exists — move it to the data disk
+    echo "Moving existing $LLVM_LINK to $DATA_DISK_LLVM ..."
+    rsync -a --remove-source-files "$LLVM_LINK/" "$DATA_DISK_LLVM/"
+    rm -rf "$LLVM_LINK"
+    ln -s "$DATA_DISK_LLVM" "$LLVM_LINK"
+else
+    ln -s "$DATA_DISK_LLVM" "$LLVM_LINK"
+fi
+
 LLVM_BUILD_DIR="$LLVM_SRC_DIR/build-flydsl"
 LLVM_INSTALL_DIR="${LLVM_INSTALL_DIR:-$LLVM_SRC_DIR/mlir_install}"
 LLVM_INSTALL_TGZ="${LLVM_INSTALL_TGZ:-$LLVM_SRC_DIR/mlir_install.tgz}"
@@ -77,7 +106,7 @@ NANOBIND_DIR=$(python3 -c "import nanobind; import os; print(os.path.dirname(nan
 cmake -G "$GENERATOR" \
     -S "$LLVM_SRC_DIR/llvm" \
     -B "$LLVM_BUILD_DIR" \
-    -DLLVM_ENABLE_PROJECTS="mlir;clang" \
+    -DLLVM_ENABLE_PROJECTS="mlir;clang;lld" \
     -DLLVM_TARGETS_TO_BUILD="X86;NVPTX;AMDGPU" \
     -DLLVM_ENABLE_RUNTIMES="compiler-rt" \
     -DCMAKE_BUILD_TYPE=Release \

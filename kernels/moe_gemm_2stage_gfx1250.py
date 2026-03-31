@@ -2108,7 +2108,7 @@ def _compile_fp4_stage1_single_kernel(
             for wm in range_constexpr(wmma_m_rep)
         ]
         bs_bases = [
-            (warp_n_base + lane16) * arith.index(int(scale_k_per_tile)) + arith.index(wn * WMMA_N * int(scale_k_per_tile))
+            (warp_n_base + lane16 + lane_kgrp * arith.index(WMMA_N)) * arith.index(int(scale_k_per_tile)) + arith.index(wn * WMMA_N * int(scale_k_per_tile))
             for wn in range_constexpr(wmma_n_rep * 2)
         ]
 
@@ -2535,7 +2535,7 @@ def _compile_fp4_stage2_single_kernel(
             for wm in range_constexpr(wmma_m_rep)
         ]
         bs_bases = [
-            (warp_n_base + lane16) * arith.index(int(scale_k_per_tile)) + arith.index(wn * WMMA_N * int(scale_k_per_tile))
+            (warp_n_base + lane16 + lane_kgrp * arith.index(WMMA_N)) * arith.index(int(scale_k_per_tile)) + arith.index(wn * WMMA_N * int(scale_k_per_tile))
             for wn in range_constexpr(wmma_n_rep * 2)
         ]
 

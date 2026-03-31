@@ -3,6 +3,23 @@
 
 import torch
 import torch.nn.functional as F
+from tests.kernels.utils.fp4_utils import mxfp4_to_f32, e8m0_to_f32
+
+
+def _is_fp4_packed(data, scale):
+    """Detect FP4 packed format: data has K//2 cols, scale has K//32 cols."""
+    return (scale is not None
+            and scale.ndim >= 2
+            and scale.shape[-1] > 1
+            and data.shape[-1] == scale.shape[-1] * 16)
+
+
+def _dequant_fp4(packed, scale_e8m0):
+    """Dequantize FP4 packed [*, K//2] + E8M0 scale [*, K//32] → float32 [*, K]."""
+    f32_vals = mxfp4_to_f32(packed)
+    scale_f32 = e8m0_to_f32(scale_e8m0).repeat_interleave(32, dim=-1)
+    return f32_vals * scale_f32
+
 
 def torch_moe_gemm1(
     x_fp8: torch.Tensor,
@@ -39,18 +56,25 @@ def torch_moe_gemm1(
     else:
         experts = int(w1_fp8_flat.shape[0])
 
-    x = x_fp8.to(torch.float32) if scale_x is None else (x_fp8.to(torch.float32) * scale_x)
+    if _is_fp4_packed(x_fp8, scale_x):
+        x = _dequant_fp4(x_fp8, scale_x)
+        model_dim = x.shape[-1]
+    else:
+        x = x_fp8.to(torch.float32) if scale_x is None else (x_fp8.to(torch.float32) * scale_x)
 
-    if group_size > 0 and scale_w1_groups is not None:
-        # Group-wise dequantization: w_dequant[e,n,k] = w_int[e,n,k] * scale[e, k//group_size, n]
-        # Scale layout: [E, num_groups, N] (Opt 0: cache-friendly)
+    if _is_fp4_packed(w1_fp8_flat, scale_w1_flat):
+        w1_dequant = _dequant_fp4(
+            w1_fp8_flat.reshape(-1, w1_fp8_flat.shape[-1]),
+            scale_w1_flat.reshape(-1, scale_w1_flat.shape[-1]),
+        )
+        w1 = w1_dequant.view(experts, 2 * inter_dim, model_dim)
+    elif group_size > 0 and scale_w1_groups is not None:
         w1 = w1_fp8_flat.to(torch.float32).view(experts, 2 * inter_dim, model_dim)
         num_groups = model_dim // group_size
         for g in range(num_groups):
             k_s, k_e = g * group_size, (g + 1) * group_size
             w1[:, :, k_s:k_e] *= scale_w1_groups[:, g, :].unsqueeze(-1)
     else:
-        # Per-row dequantization.
         w1 = (
             w1_fp8_flat.to(torch.float32)
             if scale_w1_flat is None
@@ -112,18 +136,29 @@ def torch_moe_gemm2(
         experts = int(w2_fp8.shape[0] // model_dim)
 
     # Dequantize inputs.
-    a2 = a2_fp8.to(torch.float32) if scale_a2 is None else (a2_fp8.to(torch.float32) * scale_a2)
+    if a2_fp8.ndim == 3 and scale_a2 is not None and _is_fp4_packed(
+            a2_fp8.view(-1, a2_fp8.shape[-1]), scale_a2.view(-1, scale_a2.shape[-1])):
+        a2_flat = a2_fp8.view(-1, a2_fp8.shape[-1])
+        s_flat = scale_a2.view(-1, scale_a2.shape[-1])
+        a2 = _dequant_fp4(a2_flat, s_flat).view(tokens, topk, -1)
+        inter_dim = a2.shape[-1]
+    else:
+        a2 = a2_fp8.to(torch.float32) if scale_a2 is None else (a2_fp8.to(torch.float32) * scale_a2)
 
-    if group_size > 0 and scale_w2_groups is not None:
-        # Group-wise dequantization: w_dequant[e,n,k] = w_int[e,n,k] * scale[e, k//group_size, n]
-        # Scale layout: [E, num_groups, N] (Opt 0: cache-friendly)
+    if w2_fp8.ndim >= 2 and scale_w2 is not None and _is_fp4_packed(
+            w2_fp8.reshape(-1, w2_fp8.shape[-1]), scale_w2.reshape(-1, scale_w2.shape[-1])):
+        w2_dequant = _dequant_fp4(
+            w2_fp8.reshape(-1, w2_fp8.shape[-1]),
+            scale_w2.reshape(-1, scale_w2.shape[-1]),
+        )
+        w2 = w2_dequant.view(experts, model_dim, inter_dim)
+    elif group_size > 0 and scale_w2_groups is not None:
         w2 = w2_fp8.to(torch.float32).view(experts, model_dim, inter_dim)
         num_groups = inter_dim // group_size
         for g in range(num_groups):
             k_s, k_e = g * group_size, (g + 1) * group_size
             w2[:, :, k_s:k_e] *= scale_w2_groups[:, g, :].unsqueeze(-1)
     else:
-        # Per-row dequantization.
         w2 = w2_fp8.to(torch.float32) if scale_w2 is None else (w2_fp8.to(torch.float32) * scale_w2)
         w2 = w2.view(experts, model_dim, inter_dim)
 
