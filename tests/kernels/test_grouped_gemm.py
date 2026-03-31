@@ -62,8 +62,8 @@ def quantize_to_fp8(x: torch.Tensor, scale_block_k: int = 128) -> tuple[torch.Te
     # Compute per-block max (for scale)
     x_amax = x_blocks.abs().amax(dim=2).clamp(min=1e-12)
 
-    # FP8 E4M3 max value is 448
-    scale = x_amax / 448.0
+    fp8_max = torch.finfo(DTYPE_FP8).max
+    scale = x_amax / fp8_max
 
     # Quantize
     x_scaled = x_blocks / scale.unsqueeze(2)
@@ -98,8 +98,8 @@ def quantize_b_to_fp8(
     # Compute per-block max
     b_amax = b_blocks.abs().amax(dim=(2, 4)).clamp(min=1e-12)
 
-    # Scale factors [num_groups, nblk_n, nblk_k]
-    scale = b_amax / 448.0
+    fp8_max = torch.finfo(DTYPE_FP8).max
+    scale = b_amax / fp8_max
 
     # Quantize
     b_scaled = b_blocks / scale.view(num_groups, nblk_n, 1, nblk_k, 1)
@@ -152,14 +152,17 @@ def torch_grouped_gemm_ref(
     b_scaled = b_scaled * scale_b.view(num_groups, nblk_n, 1, nblk_k, 1)
     b_scaled = b_scaled.view(num_groups, N, K)
 
-    # Compute grouped GEMM
-    d = torch.zeros(M, N, dtype=torch.float32, device=a.device)
+    # Compute grouped GEMM (on CPU to avoid hipBLAS issues with small/irregular shapes)
+    a_scaled_cpu = a_scaled.cpu()
+    b_scaled_cpu = b_scaled.cpu()
+    grouped_layout_cpu = grouped_layout.cpu()
+    d = torch.zeros(M, N, dtype=torch.float32)
     for g in range(num_groups):
-        mask = grouped_layout == g
+        mask = grouped_layout_cpu == g
         if mask.any():
-            d[mask] = a_scaled[mask] @ b_scaled[g].T
+            d[mask] = a_scaled_cpu[mask] @ b_scaled_cpu[g].T
 
-    return d.to(torch.bfloat16)
+    return d.to(torch.bfloat16).to(a.device)
 
 
 def generate_grouped_gemm_inputs(
