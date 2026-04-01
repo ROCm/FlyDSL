@@ -100,6 +100,7 @@ def _run_mxscale_gemm_test(
     wave_specialized_tdm=False, use_scale_opsel=False,
     l2_prefetch_distance=0, cluster_m=1, cluster_n=1,
     inst_prefetch=False, waves_per_eu=None,
+    expert_sched_mode=True,
 ):
     """Unified test body for FP4 and FP8."""
     is_fp4 = data_format == "fp4"
@@ -193,6 +194,7 @@ def _run_mxscale_gemm_test(
         inst_prefetch=inst_prefetch,
         wave_specialized_tdm=wave_specialized_tdm,
         use_scale_opsel=use_scale_opsel,
+        expert_sched_mode=expert_sched_mode,
     )
     launch_fn(
         c_gpu.contiguous().view(-1),
@@ -363,6 +365,8 @@ if __name__ == "__main__":
     parser.add_argument("--wave-spec-tdm", action="store_true", default=False)
     parser.add_argument("--waves-per-eu", type=int, default=None)
     parser.add_argument("--use-scale-opsel", action="store_true", default=False)
+    parser.add_argument("--disable-expert-sched-mode", dest="expert_sched_mode",
+                        action="store_false", default=True)
     args = parser.parse_args()
 
     _run_mxscale_gemm_test(
@@ -380,4 +384,5 @@ if __name__ == "__main__":
         cluster_n=args.cluster_n,
         inst_prefetch=args.inst_prefetch,
         waves_per_eu=args.waves_per_eu,
+        expert_sched_mode=args.expert_sched_mode,
     )

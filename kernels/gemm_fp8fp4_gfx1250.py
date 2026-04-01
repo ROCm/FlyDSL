@@ -58,6 +58,7 @@ def compile_mxscale_gemm(
     inst_prefetch: bool = False,
     wave_specialized_tdm: bool = False,
     use_scale_opsel: bool = False,
+    expert_sched_mode: bool = True,
 ):
     """Compile an MXFP4 or MXFP8 GEMM kernel with TDM async copy.
 
@@ -1095,6 +1096,11 @@ def compile_mxscale_gemm(
             stream=stream,
             cluster=cluster_arg,
         )
+
+    if expert_sched_mode:
+        launch_mxscale_gemm.compile_hints["llvm_options"] = {
+            "amdgpu-expert-scheduling-mode": True,
+        }
 
     return launch_mxscale_gemm
 
