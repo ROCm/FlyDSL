@@ -1,13 +1,16 @@
 """gfx1250 MoE 2-stage kernels and wrappers.
 
 Target architecture: AMD RDNA4 `gfx1250`.
-Supported input dtypes: `fp16`, `fp8`, and `fp4`.
+Supported input dtypes: `fp16`, `fp8`, `fp4`, and `a8w4`.
 
 - `fp16`: stage1/stage2 support single-kernel inline paths
   (route-pack + TDM + WMMA + epilog), with fallback migration modes.
 - `fp8`: stage1/stage2 support single-kernel inline paths
   (route-pack + TDM + WMMA_SCALE + epilog), and keep phase1 fallback
   to validated `mxfp8_gemm_gfx1250` backend.
+- `a8w4`: stage1/stage2 reuse the fp8 activation path but consume FP4-packed
+  weights with E8M0 block scales via the same gfx1250 `WMMA_SCALE` instruction
+  family, aligned with `kernels/gemm_fp8fp4_gfx1250.py`.
 - `fp4`: stage1/stage2 support single-kernel inline paths
   (route-pack + TDM + WMMA_SCALE + epilog), and keep phase1 fallback
   to validated `mxfp4_gemm_gfx1250` backend
@@ -936,6 +939,7 @@ def _compile_fp8_stage1_single_kernel(
     doweight_stage1: bool,
     out_dtype: str,
     waves_per_eu: int | None,
+    data_format: str = "fp8",
 ):
     """Compile fp8 stage1 single kernel (route-pack + TDM + WMMA_SCALE + epilog)."""
     import flydsl.compiler as flyc
@@ -948,12 +952,18 @@ def _compile_fp8_stage1_single_kernel(
     from flydsl.expr.typing import T
     from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr, get_op_result_or_value
 
+    if data_format not in ("fp8", "a8w4"):
+        raise ValueError(f"data_format must be 'fp8' or 'a8w4', got {data_format!r}")
+    is_a8w4 = data_format == "a8w4"
+
     WMMA_M, WMMA_N, WMMA_K = 16, 16, 128
     SCALE_BLOCK = 32
     SCALES_PER_WMMA = WMMA_K // SCALE_BLOCK
     WAVE_SIZE = 32
     LDS_PAD_A_BYTES = 16
-    LDS_PAD_B_BYTES = 16
+    LDS_PAD_B_BYTES = 0
+    PACK_FACTOR_A = 1
+    PACK_FACTOR_B = 2 if is_a8w4 else 1
 
     if out_dtype not in ("f16", "bf16"):
         raise ValueError(f"fp8 stage1 single kernel supports out_dtype in ('f16','bf16'), got {out_dtype!r}")
@@ -966,6 +976,8 @@ def _compile_fp8_stage1_single_kernel(
 
     K = int(model_dim)
     N = int(inter_dim)
+    K_packed_b = K // PACK_FACTOR_B
+    packed_tile_k_b = int(tile_k) // PACK_FACTOR_B
     K_scale = K // SCALE_BLOCK
     scale_k_per_tile = int(tile_k) // SCALE_BLOCK
     block_threads = int(m_warp) * int(n_warp) * WAVE_SIZE
@@ -976,16 +988,24 @@ def _compile_fp8_stage1_single_kernel(
     k_wmma_steps = int(tile_k) // WMMA_K
     n_accs = wmma_m_rep * wmma_n_rep
     num_k_tiles = K // int(tile_k)
+    b_scale_load_rep = wmma_n_rep
+    b_scale_load_rep = wmma_n_rep
+    interleaved_scale_cols_b = b_scale_load_rep * scale_k_per_tile
+    b_scale_load_rep = wmma_n_rep
+    interleaved_scale_cols_b = b_scale_load_rep * scale_k_per_tile
 
     if wmma_m_rep <= 0 or wmma_n_rep <= 0:
         raise ValueError(f"Invalid warp tiling for fp8 stage1 single kernel: wmma_m_rep={wmma_m_rep}, wmma_n_rep={wmma_n_rep}")
 
     lds_a_stride_bytes = int(tile_k) + LDS_PAD_A_BYTES
-    lds_b_stride_bytes = int(tile_k) + LDS_PAD_B_BYTES
+    lds_b_stride_bytes = int(packed_tile_k_b) + LDS_PAD_B_BYTES
     lds_a_data_bytes = int(tile_m) * lds_a_stride_bytes
     lds_b_data_bytes = int(tile_n) * lds_b_stride_bytes
     lds_a_scale_bytes = int(tile_m) * scale_k_per_tile
     lds_b_scale_bytes = int(tile_n) * scale_k_per_tile
+    interleaved_scale_cols_a = wmma_m_rep * scale_k_per_tile
+    interleaved_scale_cols_a = wmma_m_rep * scale_k_per_tile
+    interleaved_scale_cols_a = wmma_m_rep * scale_k_per_tile
 
     alloc = SmemAllocator(None, arch=str(get_hip_arch()), global_sym_name="moe_fp8_s1_single")
     off_ag = alloc._align(alloc.ptr, 16)
@@ -1037,7 +1057,7 @@ def _compile_fp8_stage1_single_kernel(
         x_nbytes = tokens_idx * arith.index(K)
         sx_nbytes = tokens_idx * arith.index(K_scale)
         w_rows = arith.index(int(experts * (2 * N)))
-        w_nbytes = w_rows * arith.index(K)
+        w_nbytes = w_rows * arith.index(K_packed_b)
         sw_nbytes = w_rows * arith.index(K_scale)
 
         sorted_rsrc = buffer_ops.create_buffer_resource(arg_sorted_token_ids, max_size=False, num_records_bytes=sorted_nbytes)
@@ -1141,7 +1161,16 @@ def _compile_fp8_stage1_single_kernel(
                     sx_idx = tok * arith.constant(K_scale, type=T.i32) + arith.index_cast(T.i32, ksc_off)
                     sx_idx_safe = arith.select(ok, sx_idx, arith.constant(0, type=T.i32))
                     sx_val = arith.select(ok, buffer_ops.buffer_load(sx_rsrc, sx_idx_safe, vec_width=1, dtype=T.i8), arith.constant(127, type=T.i8))
-                    lds_idx = row * arith.index(int(scale_k_per_tile)) + ksc
+                    lane_row = row % arith.index(WMMA_M)
+                    wm_idx = row / arith.index(WMMA_M)
+                    ksc_blk = ksc / arith.index(SCALES_PER_WMMA)
+                    ksc_sub = ksc % arith.index(SCALES_PER_WMMA)
+                    lds_idx = (
+                        lane_row * arith.index(interleaved_scale_cols_a)
+                        + ksc_blk * arith.index(wmma_m_rep * SCALES_PER_WMMA)
+                        + wm_idx * arith.index(SCALES_PER_WMMA)
+                        + ksc_sub
+                    )
                     v1 = vector.from_elements(T.vec(1, T.i8), [sx_val])
                     vector.store(v1, lds_as, [lds_idx], alignment=1)
                     scf.YieldOp([])
@@ -1151,22 +1180,22 @@ def _compile_fp8_stage1_single_kernel(
             n_off = eid_row + blk_n + arith.index(up_shift)
             desc_b = tdm_ops.make_tensor_descriptor_2d(
                 global_ptr=arg_w, lds_memref=lds_b_mem,
-                global_offset=(n_off, k_base),
-                tensor_shape=(int(tile_n), int(tile_k)),
-                strides=(K, 1),
-                tile_shape=(int(tile_n), int(tile_k)),
+                global_offset=(n_off / arith.index(16), (k_base / arith.index(PACK_FACTOR_B)) * arith.index(16)),
+                tensor_shape=(int(experts * (2 * N) // 16), int(K_packed_b * 16)),
+                strides=(K_packed_b * 16, 1),
+                tile_shape=(int(tile_n // 16), int(packed_tile_k_b * 16)),
                 elem_bytes=1,
-                pad_interval=int(tile_k), pad_amount=LDS_PAD_B_BYTES,
+                pad_interval=0, pad_amount=0,
                 num_warps=int(m_warp) * int(n_warp),
                 workgroup_mask=0)
             tdm_ops.tensor_load_2d(desc_b)
             k_scale_off = k_base / arith.index(SCALE_BLOCK)
             desc_bs = tdm_ops.make_tensor_descriptor_2d(
                 global_ptr=arg_scale_w, lds_memref=lds_bs_mem,
-                global_offset=(n_off, k_scale_off),
-                tensor_shape=(int(tile_n), int(scale_k_per_tile)),
-                strides=(K_scale, 1),
-                tile_shape=(int(tile_n), int(scale_k_per_tile)),
+                global_offset=(n_off / arith.index(b_scale_load_rep), k_scale_off * arith.index(b_scale_load_rep)),
+                tensor_shape=(WMMA_M * n_warp, interleaved_scale_cols_b),
+                strides=(b_scale_load_rep * K_scale, 1),
+                tile_shape=(WMMA_M * n_warp, interleaved_scale_cols_b),
                 elem_bytes=1,
                 pad_interval=0, pad_amount=0,
                 num_warps=int(m_warp) * int(n_warp),
@@ -1187,11 +1216,30 @@ def _compile_fp8_stage1_single_kernel(
             return llvm_dialect.load(vec4_i32_ty, ptr_val)
 
         def load_data_frag(lds_buffer, lane_base, ks):
-            byte_off = lane_base + arith.index(ks * WMMA_K)
+            byte_off = lane_base + arith.index(ks * WMMA_K // PACK_FACTOR_A)
             v0 = _lds_load_b128(lds_buffer, byte_off)
-            v1 = _lds_load_b128(lds_buffer, byte_off + arith.index(16))
-            v2 = _lds_load_b128(lds_buffer, byte_off + arith.index(32))
-            v3 = _lds_load_b128(lds_buffer, byte_off + arith.index(48))
+            v1 = _lds_load_b128(lds_buffer, byte_off + arith.index(32))
+            v2 = _lds_load_b128(lds_buffer, byte_off + arith.index(64))
+            v3 = _lds_load_b128(lds_buffer, byte_off + arith.index(96))
+            v01 = vector.shuffle(v0, v1, list(range(8)))
+            v23 = vector.shuffle(v2, v3, list(range(8)))
+            return vector.shuffle(v01, v23, list(range(16)))
+
+        def load_b_frag(lds_buffer, b_lane_bases, wn, ks):
+            if is_a8w4:
+                _num_tiles = WMMA_K // PACK_FACTOR_B // 16
+                k_subtile_off = arith.index(ks * _num_tiles * 256)
+                base0 = b_lane_bases[wn] + k_subtile_off
+                v0 = _lds_load_b128(lds_buffer, base0)
+                v1 = _lds_load_b128(lds_buffer, base0 + arith.index(512))
+                return vector.shuffle(v0, v1, list(range(8)))
+            _num_tiles = WMMA_K // PACK_FACTOR_B // 16
+            k_subtile_off = arith.index(ks * _num_tiles * 256)
+            base0 = b_lane_bases[wn] + k_subtile_off
+            v0 = _lds_load_b128(lds_buffer, base0)
+            v1 = _lds_load_b128(lds_buffer, base0 + arith.index(512))
+            v2 = _lds_load_b128(lds_buffer, base0 + arith.index(1024))
+            v3 = _lds_load_b128(lds_buffer, base0 + arith.index(1536))
             v01 = vector.shuffle(v0, v1, list(range(8)))
             v23 = vector.shuffle(v2, v3, list(range(8)))
             return vector.shuffle(v01, v23, list(range(16)))
@@ -1211,20 +1259,45 @@ def _compile_fp8_stage1_single_kernel(
 
         def _precompute_a_data_bases():
             row_base = (warp_m_base + lane16) * arith.index(lds_a_stride_bytes)
-            k_half_off = lane_kgrp * arith.index(64)
+            k_half_off = lane_kgrp * arith.index(16)
             return [row_base + arith.index(wm * WMMA_M * lds_a_stride_bytes) + k_half_off for wm in range_constexpr(wmma_m_rep)]
 
-        def _precompute_b_data_bases(lds_stride):
-            row_base = (warp_n_base + lane16) * arith.index(lds_stride)
-            k_half_off = lane_kgrp * arith.index(64)
-            return [row_base + arith.index(wn * WMMA_N * lds_stride) + k_half_off for wn in range_constexpr(wmma_n_rep)]
+        def _precompute_b_data_bases():
+            _ngroup_stride = packed_tile_k_b * 16
+            _n_group_base = arith.index(warp_tile_n // 16) * wave_n_idx
+            row_off = lane16 * arith.index(16)
+            k_tile_off = lane_kgrp * arith.index(256)
+            bases = []
+            for wn in range_constexpr(wmma_n_rep):
+                ngroup_off = _n_group_base * arith.index(_ngroup_stride) + arith.index(wn * _ngroup_stride)
+                bases.append(ngroup_off + row_off + k_tile_off)
+            return bases
 
-        def _precompute_scale_bases(is_a: bool):
-            if is_a:
-                row_base = (warp_m_base + lane16) * arith.index(int(scale_k_per_tile))
-                return [row_base + arith.index(wm * WMMA_M * int(scale_k_per_tile)) for wm in range_constexpr(wmma_m_rep)]
-            row_base = (warp_n_base + lane16) * arith.index(int(scale_k_per_tile))
-            return [row_base + arith.index(wn * WMMA_N * int(scale_k_per_tile)) for wn in range_constexpr(wmma_n_rep)]
+        def _precompute_a_scale_lane_bases():
+            warp_lds_row = warp_m_base / arith.index(wmma_m_rep) + lane16
+            base = warp_lds_row * arith.index(interleaved_scale_cols_a)
+            return [base]
+
+        def _precompute_b_scale_lane_bases():
+            warp_lds_row = warp_n_base / arith.index(b_scale_load_rep) + lane16
+            base = warp_lds_row * arith.index(interleaved_scale_cols_b)
+            if is_a8w4:
+                base = base + lane_kgrp * arith.index(SCALES_PER_WMMA)
+            return [base]
+
+        def load_scale_b128(lds_buffer, scale_base, reps, ks=0):
+            ks_byte_off = ks * reps * SCALES_PER_WMMA
+            eff_base = scale_base if ks_byte_off == 0 else scale_base + arith.index(ks_byte_off)
+            num_loads = (reps + 3) // 4
+            vecs = []
+            for ld in range_constexpr(num_loads):
+                off = eff_base if ld == 0 else eff_base + arith.index(ld * 16)
+                vecs.append(_lds_load_b128(lds_buffer, off))
+            results = []
+            for i in range_constexpr(reps):
+                vi = vector.extract(vecs[i // 4], static_position=[i % 4], dynamic_position=[])
+                results.append(vi)
+            return results
 
         acc_zero = arith.constant_vector(0.0, T.vec(8, T.f32))
         acc_g = [acc_zero] * n_accs
@@ -1233,10 +1306,10 @@ def _compile_fp8_stage1_single_kernel(
         _if_blk = scf.IfOp(block_ok)
         with ir.InsertionPoint(_if_blk.then_block):
             a_data_bases = _precompute_a_data_bases()
-            b_data_bases = _precompute_b_data_bases(lds_b_stride_bytes)
-            as_bases = _precompute_scale_bases(True)
-            bs_bases = _precompute_scale_bases(False)
-            bsu_bases = _precompute_scale_bases(False)
+            b_data_bases = _precompute_b_data_bases()
+            as_bases = _precompute_a_scale_lane_bases()
+            bs_bases = _precompute_b_scale_lane_bases()
+            bsu_bases = _precompute_b_scale_lane_bases()
 
             for kt in range_constexpr(num_k_tiles):
                 k_base = fx.Index(kt * int(tile_k))
@@ -1248,22 +1321,22 @@ def _compile_fp8_stage1_single_kernel(
                 gpu.barrier()
 
                 for ks in range_constexpr(k_wmma_steps):
-                    b_g = [load_data_frag(lds_bg, b_data_bases[wn], ks) for wn in range_constexpr(wmma_n_rep)]
-                    b_u = [load_data_frag(lds_bu, b_data_bases[wn], ks) for wn in range_constexpr(wmma_n_rep)]
-                    bs_g = [load_scale_i32(lds_bs, bs_bases[wn], ks) for wn in range_constexpr(wmma_n_rep)]
-                    bs_u = [load_scale_i32(lds_bsu, bsu_bases[wn], ks) for wn in range_constexpr(wmma_n_rep)]
-                    as_v = [load_scale_i32(lds_as, as_bases[wm], ks) for wm in range_constexpr(wmma_m_rep)]
+                    b_g = [load_b_frag(lds_bg, b_data_bases, wn, ks) for wn in range_constexpr(wmma_n_rep)]
+                    b_u = [load_b_frag(lds_bu, b_data_bases, wn, ks) for wn in range_constexpr(wmma_n_rep)]
+                    as_v = load_scale_b128(lds_as, as_bases[0], wmma_m_rep, ks)
+                    bs_g = load_scale_b128(lds_bs, bs_bases[0], b_scale_load_rep, ks)
+                    bs_u = load_scale_b128(lds_bsu, bsu_bases[0], b_scale_load_rep, ks)
                     for wm in range_constexpr(wmma_m_rep):
                         a_frag = load_data_frag(lds_ag, a_data_bases[wm], ks)
                         for wn in range_constexpr(wmma_n_rep):
                             idx = wm * wmma_n_rep + wn
                             acc_g[idx] = rocdl.wmma_scale_f32_16x16x128_f8f6f4(
                                 T.vec(8, T.f32), b_g[wn], a_frag, acc_g[idx], bs_g[wn], as_v[wm],
-                                fmtA=0, fmtB=0, scaleAType=0, scaleBType=0
+                                fmtA=4 if is_a8w4 else 0, fmtB=0, scaleAType=0, scaleBType=0
                             )
                             acc_u[idx] = rocdl.wmma_scale_f32_16x16x128_f8f6f4(
                                 T.vec(8, T.f32), b_u[wn], a_frag, acc_u[idx], bs_u[wn], as_v[wm],
-                                fmtA=0, fmtB=0, scaleAType=0, scaleBType=0
+                                fmtA=4 if is_a8w4 else 0, fmtB=0, scaleAType=0, scaleBType=0
                             )
                 gpu.barrier()
 
@@ -1352,6 +1425,7 @@ def _compile_fp8_stage1_single_kernel(
 @functools.lru_cache(maxsize=32)
 def _compile_fp8_stage2_single_kernel(
     *,
+    model_dim: int,
     inter_dim: int,
     experts: int,
     topk: int,
@@ -1365,6 +1439,7 @@ def _compile_fp8_stage2_single_kernel(
     out_dtype: str,
     accumulate: bool,
     waves_per_eu: int | None,
+    data_format: str = "fp8",
 ):
     """Compile fp8 stage2 single kernel (route-pack + TDM + WMMA_SCALE + epilog)."""
     import flydsl.compiler as flyc
@@ -1377,12 +1452,18 @@ def _compile_fp8_stage2_single_kernel(
     from flydsl.expr.typing import T
     from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr, get_op_result_or_value
 
+    if data_format not in ("fp8", "a8w4"):
+        raise ValueError(f"data_format must be 'fp8' or 'a8w4', got {data_format!r}")
+    is_a8w4 = data_format == "a8w4"
+
     WMMA_M, WMMA_N, WMMA_K = 16, 16, 128
     SCALE_BLOCK = 32
     SCALES_PER_WMMA = WMMA_K // SCALE_BLOCK
     WAVE_SIZE = 32
     LDS_PAD_A_BYTES = 16
-    LDS_PAD_B_BYTES = 16
+    LDS_PAD_B_BYTES = 0
+    PACK_FACTOR_A = 1
+    PACK_FACTOR_B = 2 if is_a8w4 else 1
 
     if out_dtype not in ("f16", "bf16"):
         raise ValueError(f"fp8 stage2 single kernel supports out_dtype in ('f16','bf16'), got {out_dtype!r}")
@@ -1394,6 +1475,9 @@ def _compile_fp8_stage2_single_kernel(
         raise ValueError(f"tile_k={tile_k} must be divisible by {SCALE_BLOCK}")
 
     K = int(inter_dim)
+    N_total = int(model_dim)
+    K_packed_b = K // PACK_FACTOR_B
+    packed_tile_k_b = int(tile_k) // PACK_FACTOR_B
     K_scale = K // SCALE_BLOCK
     scale_k_per_tile = int(tile_k) // SCALE_BLOCK
     block_threads = int(m_warp) * int(n_warp) * WAVE_SIZE
@@ -1404,16 +1488,19 @@ def _compile_fp8_stage2_single_kernel(
     k_wmma_steps = int(tile_k) // WMMA_K
     n_accs = wmma_m_rep * wmma_n_rep
     num_k_tiles = K // int(tile_k)
+    b_scale_load_rep = wmma_n_rep
+    interleaved_scale_cols_b = b_scale_load_rep * scale_k_per_tile
 
     if wmma_m_rep <= 0 or wmma_n_rep <= 0:
         raise ValueError(f"Invalid warp tiling for fp8 stage2 single kernel: wmma_m_rep={wmma_m_rep}, wmma_n_rep={wmma_n_rep}")
 
     lds_a_stride_bytes = int(tile_k) + LDS_PAD_A_BYTES
-    lds_b_stride_bytes = int(tile_k) + LDS_PAD_B_BYTES
+    lds_b_stride_bytes = int(packed_tile_k_b) + LDS_PAD_B_BYTES
     lds_a_data_bytes = int(tile_m) * lds_a_stride_bytes
     lds_b_data_bytes = int(tile_n) * lds_b_stride_bytes
     lds_a_scale_bytes = int(tile_m) * scale_k_per_tile
     lds_b_scale_bytes = int(tile_n) * scale_k_per_tile
+    interleaved_scale_cols_a = wmma_m_rep * scale_k_per_tile
 
     alloc = SmemAllocator(None, arch=str(get_hip_arch()), global_sym_name="moe_fp8_s2_single")
     off_a = alloc._align(alloc.ptr, 16)
@@ -1471,7 +1558,7 @@ def _compile_fp8_stage2_single_kernel(
         x_nbytes = x_rows * arith.index(K)
         sx_nbytes = x_rows * arith.index(K_scale)
         w_rows = arith.index(int(experts)) * n_idx
-        w_nbytes = w_rows * arith.index(K)
+        w_nbytes = w_rows * arith.index(K_packed_b)
         sw_nbytes = w_rows * arith.index(K_scale)
         out_nbytes = tokens_idx * n_idx * arith.index(2)
         if not bool(accumulate):
@@ -1579,7 +1666,16 @@ def _compile_fp8_stage2_single_kernel(
                     sx_idx = ts * arith.constant(K_scale, type=T.i32) + arith.index_cast(T.i32, ksc_off)
                     sx_idx_safe = arith.select(load_ok, sx_idx, arith.constant(0, type=T.i32))
                     sx_val = arith.select(load_ok, buffer_ops.buffer_load(sx_rsrc, sx_idx_safe, vec_width=1, dtype=T.i8), arith.constant(127, type=T.i8))
-                    lds_idx = row * arith.index(int(scale_k_per_tile)) + ksc
+                    lane_row = row % arith.index(WMMA_M)
+                    wm_idx = row / arith.index(WMMA_M)
+                    ksc_blk = ksc / arith.index(SCALES_PER_WMMA)
+                    ksc_sub = ksc % arith.index(SCALES_PER_WMMA)
+                    lds_idx = (
+                        lane_row * arith.index(interleaved_scale_cols_a)
+                        + ksc_blk * arith.index(wmma_m_rep * SCALES_PER_WMMA)
+                        + wm_idx * arith.index(SCALES_PER_WMMA)
+                        + ksc_sub
+                    )
                     v1 = vector.from_elements(T.vec(1, T.i8), [sx_val])
                     vector.store(v1, lds_as, [lds_idx], alignment=1)
                     scf.YieldOp([])
@@ -1589,22 +1685,22 @@ def _compile_fp8_stage2_single_kernel(
             n_off = eid_idx * n_idx + blk_n
             desc_b = tdm_ops.make_tensor_descriptor_2d(
                 global_ptr=arg_w, lds_memref=lds_b,
-                global_offset=(n_off, k_base),
-                tensor_shape=(int(tile_n), int(tile_k)),
-                strides=(K, 1),
-                tile_shape=(int(tile_n), int(tile_k)),
+                global_offset=(n_off / arith.index(16), (k_base / arith.index(PACK_FACTOR_B)) * arith.index(16)),
+                tensor_shape=(int(N_total // 16), int(K_packed_b * 16)),
+                strides=(int(K_packed_b * 16), 1),
+                tile_shape=(int(tile_n // 16), int(packed_tile_k_b * 16)),
                 elem_bytes=1,
-                pad_interval=int(tile_k), pad_amount=LDS_PAD_B_BYTES,
+                pad_interval=0, pad_amount=0,
                 num_warps=int(m_warp) * int(n_warp),
                 workgroup_mask=0)
             tdm_ops.tensor_load_2d(desc_b)
             k_scale_off = k_base / arith.index(SCALE_BLOCK)
             desc_bs = tdm_ops.make_tensor_descriptor_2d(
                 global_ptr=arg_scale_w, lds_memref=lds_bs,
-                global_offset=(n_off, k_scale_off),
-                tensor_shape=(int(tile_n), int(scale_k_per_tile)),
-                strides=(K_scale, 1),
-                tile_shape=(int(tile_n), int(scale_k_per_tile)),
+                global_offset=(n_off / arith.index(b_scale_load_rep), k_scale_off * arith.index(b_scale_load_rep)),
+                tensor_shape=(WMMA_M * n_warp, interleaved_scale_cols_b),
+                strides=(b_scale_load_rep * K_scale, 1),
+                tile_shape=(WMMA_M * n_warp, interleaved_scale_cols_b),
                 elem_bytes=1,
                 pad_interval=0, pad_amount=0,
                 num_warps=int(m_warp) * int(n_warp),
@@ -1625,11 +1721,30 @@ def _compile_fp8_stage2_single_kernel(
             return llvm_dialect.load(vec4_i32_ty, ptr_val)
 
         def load_data_frag(lds_buffer, lane_base, ks):
-            byte_off = lane_base + arith.index(ks * WMMA_K)
+            byte_off = lane_base + arith.index(ks * WMMA_K // PACK_FACTOR_A)
             v0 = _lds_load_b128(lds_buffer, byte_off)
-            v1 = _lds_load_b128(lds_buffer, byte_off + arith.index(16))
-            v2 = _lds_load_b128(lds_buffer, byte_off + arith.index(32))
-            v3 = _lds_load_b128(lds_buffer, byte_off + arith.index(48))
+            v1 = _lds_load_b128(lds_buffer, byte_off + arith.index(32))
+            v2 = _lds_load_b128(lds_buffer, byte_off + arith.index(64))
+            v3 = _lds_load_b128(lds_buffer, byte_off + arith.index(96))
+            v01 = vector.shuffle(v0, v1, list(range(8)))
+            v23 = vector.shuffle(v2, v3, list(range(8)))
+            return vector.shuffle(v01, v23, list(range(16)))
+
+        def load_b_frag(lds_buffer, b_lane_bases, wn, ks):
+            if is_a8w4:
+                _num_tiles = WMMA_K // PACK_FACTOR_B // 16
+                k_subtile_off = arith.index(ks * _num_tiles * 256)
+                base0 = b_lane_bases[wn] + k_subtile_off
+                v0 = _lds_load_b128(lds_buffer, base0)
+                v1 = _lds_load_b128(lds_buffer, base0 + arith.index(512))
+                return vector.shuffle(v0, v1, list(range(8)))
+            _num_tiles = WMMA_K // PACK_FACTOR_B // 16
+            k_subtile_off = arith.index(ks * _num_tiles * 256)
+            base0 = b_lane_bases[wn] + k_subtile_off
+            v0 = _lds_load_b128(lds_buffer, base0)
+            v1 = _lds_load_b128(lds_buffer, base0 + arith.index(512))
+            v2 = _lds_load_b128(lds_buffer, base0 + arith.index(1024))
+            v3 = _lds_load_b128(lds_buffer, base0 + arith.index(1536))
             v01 = vector.shuffle(v0, v1, list(range(8)))
             v23 = vector.shuffle(v2, v3, list(range(8)))
             return vector.shuffle(v01, v23, list(range(16)))
@@ -1649,20 +1764,45 @@ def _compile_fp8_stage2_single_kernel(
 
         def _precompute_a_data_bases():
             row_base = (warp_m_base + lane16) * arith.index(lds_a_stride_bytes)
-            k_half_off = lane_kgrp * arith.index(64)
+            k_half_off = lane_kgrp * arith.index(16)
             return [row_base + arith.index(wm * WMMA_M * lds_a_stride_bytes) + k_half_off for wm in range_constexpr(wmma_m_rep)]
 
         def _precompute_b_data_bases():
-            row_base = (warp_n_base + lane16) * arith.index(lds_b_stride_bytes)
-            k_half_off = lane_kgrp * arith.index(64)
-            return [row_base + arith.index(wn * WMMA_N * lds_b_stride_bytes) + k_half_off for wn in range_constexpr(wmma_n_rep)]
+            _ngroup_stride = packed_tile_k_b * 16
+            _n_group_base = arith.index(warp_tile_n // 16) * wave_n_idx
+            row_off = lane16 * arith.index(16)
+            k_tile_off = lane_kgrp * arith.index(256)
+            bases = []
+            for wn in range_constexpr(wmma_n_rep):
+                ngroup_off = _n_group_base * arith.index(_ngroup_stride) + arith.index(wn * _ngroup_stride)
+                bases.append(ngroup_off + row_off + k_tile_off)
+            return bases
 
-        def _precompute_scale_bases(is_a):
-            row_base = (warp_m_base + lane16) * arith.index(int(scale_k_per_tile)) if is_a else (
-                (warp_n_base + lane16) * arith.index(int(scale_k_per_tile))
-            )
-            reps = wmma_m_rep if is_a else wmma_n_rep
-            return [row_base + arith.index(wi * WMMA_M * int(scale_k_per_tile)) for wi in range_constexpr(reps)]
+        def _precompute_a_scale_lane_bases():
+            warp_lds_row = warp_m_base / arith.index(wmma_m_rep) + lane16
+            base = warp_lds_row * arith.index(interleaved_scale_cols_a)
+            return [base]
+
+        def _precompute_b_scale_lane_bases():
+            warp_lds_row = warp_n_base / arith.index(b_scale_load_rep) + lane16
+            base = warp_lds_row * arith.index(interleaved_scale_cols_b)
+            if is_a8w4:
+                base = base + lane_kgrp * arith.index(SCALES_PER_WMMA)
+            return [base]
+
+        def load_scale_b128(lds_buffer, scale_base, reps, ks=0):
+            ks_byte_off = ks * reps * SCALES_PER_WMMA
+            eff_base = scale_base if ks_byte_off == 0 else scale_base + arith.index(ks_byte_off)
+            num_loads = (reps + 3) // 4
+            vecs = []
+            for ld in range_constexpr(num_loads):
+                off = eff_base if ld == 0 else eff_base + arith.index(ld * 16)
+                vecs.append(_lds_load_b128(lds_buffer, off))
+            results = []
+            for i in range_constexpr(reps):
+                vi = vector.extract(vecs[i // 4], static_position=[i % 4], dynamic_position=[])
+                results.append(vi)
+            return results
 
         acc_zero = arith.constant_vector(0.0, T.vec(8, T.f32))
         acc = [acc_zero] * n_accs
@@ -1671,8 +1811,8 @@ def _compile_fp8_stage2_single_kernel(
         with ir.InsertionPoint(_if_blk.then_block):
             a_data_bases = _precompute_a_data_bases()
             b_data_bases = _precompute_b_data_bases()
-            as_bases = _precompute_scale_bases(True)
-            bs_bases = _precompute_scale_bases(False)
+            as_bases = _precompute_a_scale_lane_bases()
+            bs_bases = _precompute_b_scale_lane_bases()
 
             for kt in range_constexpr(num_k_tiles):
                 k_base = fx.Index(kt * int(tile_k))
@@ -1682,16 +1822,16 @@ def _compile_fp8_stage2_single_kernel(
                 tdm_ops.tensor_wait(0)
                 gpu.barrier()
                 for ks in range_constexpr(k_wmma_steps):
-                    b_v = [load_data_frag(lds_b, b_data_bases[wn], ks) for wn in range_constexpr(wmma_n_rep)]
-                    bs_v = [load_scale_i32(lds_bs, bs_bases[wn], ks) for wn in range_constexpr(wmma_n_rep)]
-                    as_v = [load_scale_i32(lds_as, as_bases[wm], ks) for wm in range_constexpr(wmma_m_rep)]
+                    b_v = [load_b_frag(lds_b, b_data_bases, wn, ks) for wn in range_constexpr(wmma_n_rep)]
+                    as_v = load_scale_b128(lds_as, as_bases[0], wmma_m_rep, ks)
+                    bs_v = load_scale_b128(lds_bs, bs_bases[0], b_scale_load_rep, ks)
                     for wm in range_constexpr(wmma_m_rep):
                         a_frag = load_data_frag(lds_a, a_data_bases[wm], ks)
                         for wn in range_constexpr(wmma_n_rep):
                             idx = wm * wmma_n_rep + wn
                             acc[idx] = rocdl.wmma_scale_f32_16x16x128_f8f6f4(
                                 T.vec(8, T.f32), b_v[wn], a_frag, acc[idx], bs_v[wn], as_v[wm],
-                                fmtA=0, fmtB=0, scaleAType=0, scaleBType=0
+                                fmtA=4 if is_a8w4 else 0, fmtB=0, scaleAType=0, scaleBType=0
                             )
                 gpu.barrier()
 
@@ -2697,7 +2837,7 @@ def compile_moe_gemm1(
     if waves_per_eu is not None and int(waves_per_eu) < 1:
         raise ValueError(f"waves_per_eu must be >= 1, got {waves_per_eu!r}")
 
-    if in_dtype not in ("fp4", "fp8", "fp16"):
+    if in_dtype not in ("fp4", "fp8", "fp16", "a8w4"):
         return _compile_with_optional_wpe(
             _compile_moe_gemm1_base,
             dict(
@@ -2740,7 +2880,7 @@ def compile_moe_gemm1(
             waves_per_eu=waves_per_eu,
         )
 
-    if in_dtype == "fp8":
+    if in_dtype in ("fp8", "a8w4"):
         single_tile_m, single_tile_n, single_m_warp, single_n_warp = _pick_fp16_single_launch_shape(
             route_tile_m, int(tile_n)
         )
@@ -2758,6 +2898,7 @@ def compile_moe_gemm1(
             doweight_stage1=bool(doweight_stage1),
             out_dtype=out_dtype,
             waves_per_eu=waves_per_eu,
+            data_format=in_dtype,
         )
 
     if out_dtype not in ("f16", "bf16"):
@@ -2804,7 +2945,7 @@ def compile_moe_gemm2(
     if waves_per_eu is not None and int(waves_per_eu) < 1:
         raise ValueError(f"waves_per_eu must be >= 1, got {waves_per_eu!r}")
 
-    if in_dtype not in ("fp4", "fp8", "fp16"):
+    if in_dtype not in ("fp4", "fp8", "fp16", "a8w4"):
         return _compile_with_optional_wpe(
             _compile_moe_gemm2_base,
             dict(
@@ -2846,11 +2987,12 @@ def compile_moe_gemm2(
             waves_per_eu=waves_per_eu,
         )
 
-    if in_dtype == "fp8":
+    if in_dtype in ("fp8", "a8w4"):
         single_tile_m, single_tile_n, single_m_warp, single_n_warp = _pick_fp16_single_launch_shape(
             route_tile_m, int(tile_n)
         )
         return _compile_fp8_stage2_single_kernel(
+            model_dim=int(model_dim),
             inter_dim=int(inter_dim),
             experts=int(experts),
             topk=int(topk),
@@ -2864,6 +3006,7 @@ def compile_moe_gemm2(
             out_dtype=out_dtype,
             accumulate=bool(accumulate),
             waves_per_eu=waves_per_eu,
+            data_format=in_dtype,
         )
 
     single_tile_m = _align_up(route_tile_m, 16)
@@ -2906,7 +3049,7 @@ def compile_moe_gemm2_ex(
     zero_intermediate: bool = True,
 ):
     _require_gfx1250()
-    if in_dtype in ("fp4", "fp8", "fp16"):
+    if in_dtype in ("fp4", "fp8", "fp16", "a8w4"):
         if mode == MoeGemm2Mode.REDUCE:
             gemm2_exe = compile_moe_gemm2(
                 model_dim=model_dim,
