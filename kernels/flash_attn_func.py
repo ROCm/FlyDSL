@@ -1,17 +1,19 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+
 """flash_attn_func kernel builder for FlyDSL.
 
-Aggressive flash_attn_func path:
-- True MFMA32 remap: `mfma_f32_32x32x8f16` for both GEMM stages.
-- Tile shape: BLOCK_M=128, BLOCK_N=32, 4 waves (256 threads).
+- True MFMA32 remap: `mfma_f32_32x32x16bf16` / `mfma_f32_32x32x16f16` for both GEMM stages.
+- Tile shape: BLOCK_M=256, BLOCK_N=64, 8 waves (512 threads).
 - Per-wave Q rows: 32.
 - GEMM1 uses `K @ Q^T` so S/P live in MFMA32 register layout.
 - Online softmax over KV dimension is done in registers.
 - P is kept in registers and fed directly to GEMM2 (`V^T @ P`) without LDS roundtrip.
-- K and V^T use separate LDS regions (single-buffered per iteration).
+- K and V use separate LDS regions with DMA-to-LDS prefetch and XOR swizzle.
 
 Layout: Q/K/V/O are 1D flattened from BSHD (batch, seq_len, num_heads, head_dim).
 Grid:   (batch * num_q_tiles * num_heads,) where num_q_tiles = seq_len / BLOCK_M.
-Block:  (256,) -- 4 waves of 64 on AMD (wave64).
+Block:  (512,) -- 8 waves of 64 on AMD (wave64).
 
 Requires: head_dim % 32 == 0, head_dim >= 64, seq_len % 128 == 0.
 """
@@ -24,18 +26,36 @@ import flydsl.expr as fx
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, buffer_ops, gpu, range_constexpr, rocdl, vector
 from flydsl.expr.typing import T
+from kernels.kernels_common import dtype_to_elem_type
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import memref as _memref, scf, fly as _fly, llvm as _llvm, math as math_dialect
 
+# ---- Module-level constants ----
 
 KERNEL_NAME = "flash_attn_func_kernel"
+
+_LOG2E = math.log2(math.e)  # 1.4426950408889634
+
+_LLVM_GEP_DYNAMIC = -2147483648  # LLVM kDynamicIndex sentinel (0x80000000 as signed i32)
+
+def _llvm_ptr_ty():
+    return ir.Type.parse("!llvm.ptr")
+
+
+def _llvm_lds_ptr_ty():
+    return ir.Type.parse("!llvm.ptr<3>")
+
+_VMCNT_LO_MASK = 0xF
+_LGKMCNT_EXPCNT_BASE = 0x3F70
+_VMCNT_HI_SHIFT = 14
+_VMCNT_HI_MASK = 0x3
 
 
 def _waitcnt_vm_n(n):
     """Emit s_waitcnt vmcnt(n) only (lgkmcnt=63, expcnt=7)."""
-    val = (n & 0xF) | 0x3F70 | (((n >> 4) & 0x3) << 14)
+    val = (n & _VMCNT_LO_MASK) | _LGKMCNT_EXPCNT_BASE | (((n >> 4) & _VMCNT_HI_MASK) << _VMCNT_HI_SHIFT)
     rocdl.s_waitcnt(val)
 
 
@@ -174,14 +194,15 @@ def build_flash_attn_func_module_primary(
         O: fx.Tensor,
         seq_len: fx.Int32,
     ):
-        elem_type = T.bf16 if dtype_str == "bf16" else T.f16
+        elem_type = dtype_to_elem_type(dtype_str)
         compute_type = T.f32
-        llvm_ptr_ty = ir.Type.parse("!llvm.ptr")
-        q_ptr = _fly.extract_aligned_pointer_as_index(llvm_ptr_ty, Q)
-        k_ptr = _fly.extract_aligned_pointer_as_index(llvm_ptr_ty, K)
-        v_ptr = _fly.extract_aligned_pointer_as_index(llvm_ptr_ty, V)
-        o_ptr = _fly.extract_aligned_pointer_as_index(llvm_ptr_ty, O)
+        q_ptr = _fly.extract_aligned_pointer_as_index(_llvm_ptr_ty(), Q)
+        k_ptr = _fly.extract_aligned_pointer_as_index(_llvm_ptr_ty(), K)
+        v_ptr = _fly.extract_aligned_pointer_as_index(_llvm_ptr_ty(), V)
+        o_ptr = _fly.extract_aligned_pointer_as_index(_llvm_ptr_ty(), O)
 
+        # All FP operations use aggressive fast-math (no NaN/Inf checks, reassociation).
+        # The unsafe_fp_math/fast_fp_math builder params control LLVM-level attributes only.
         fm_fast = arith.FastMathFlags.fast
         v4f16_type = T.vec(4, elem_type)
         vxf16_type = T.vec(VEC_WIDTH, elem_type)
@@ -192,7 +213,7 @@ def build_flash_attn_func_module_primary(
         _mfma_zero = ir.IntegerAttr.get(ir.IntegerType.get_signless(32), 0)
         def _mfma(ods_fn, a, b, c):
             return ods_fn(v16f32_type, a, b, c, _mfma_zero, _mfma_zero, _mfma_zero).result
-        def do_mfma(a, b, c):
+        def mfma_acc(a, b, c):
             if dtype_str == "bf16":
                 if USE_K16:
                     return _mfma(rocdl.mfma_f32_32x32x16_bf16, a, b, c)
@@ -233,7 +254,6 @@ def build_flash_attn_func_module_primary(
         tr_col_half = (lane % 32) // 16  # 0 or 1: first/second 16-column half
 
         # ---- ds_read_b64_tr_b16 helper ----
-        lds_ptr_ty = ir.Type.parse("!llvm.ptr<3>")
 
         def ds_read_tr_v4f16(lds_elem_idx):
             """Read v4f16 from LDS with hardware transpose.
@@ -247,7 +267,7 @@ def build_flash_attn_func_module_primary(
             """
             byte_offset = lds_elem_idx * 2 + lds_kv_offset
             byte_i64 = arith.index_cast(T.i64, byte_offset)
-            ptr = _llvm.IntToPtrOp(lds_ptr_ty, byte_i64).result
+            ptr = _llvm.IntToPtrOp(_llvm_lds_ptr_ty(), byte_i64).result
             return rocdl.ds_read_tr16_b64(v4f16_type, ptr).result
 
         # ---- Wave offsets ----
@@ -255,10 +275,10 @@ def build_flash_attn_func_module_primary(
 
         # ---- Decompose block_id ----
         head_idx = block_id % NUM_HEADS
-        temp = block_id // NUM_HEADS
+        batch_q_tile_id = block_id // NUM_HEADS
         num_q_tiles = (seq_len_v + BLOCK_M - 1) // BLOCK_M
-        q_tile_idx = temp % num_q_tiles
-        batch_idx = temp // num_q_tiles
+        q_tile_idx = batch_q_tile_id % num_q_tiles
+        batch_idx = batch_q_tile_id // num_q_tiles
         q_start = q_tile_idx * BLOCK_M
 
         # ---- Cooperative load decomposition ----
@@ -271,20 +291,18 @@ def build_flash_attn_func_module_primary(
             token = batch_idx * seq_len_v + token_idx
             return token * STRIDE_TOKEN + head_idx * HEAD_DIM + col
 
-        _GEP_DYNAMIC = -2147483648  # LLVM's kDynamicIndex sentinel (0x80000000 as signed i32)
-
         def _gep_load(base_ptr, elem_idx, vec_type):
             idx_i64 = arith.index_cast(T.i64, elem_idx)
-            gep = _llvm.GEPOp(llvm_ptr_ty, base_ptr, [idx_i64],
-                              rawConstantIndices=[_GEP_DYNAMIC],
+            gep = _llvm.GEPOp(_llvm_ptr_ty(), base_ptr, [idx_i64],
+                              rawConstantIndices=[_LLVM_GEP_DYNAMIC],
                               elem_type=elem_type,
                               noWrapFlags=0)
             return _llvm.LoadOp(vec_type, gep.result).result
 
         def _gep_store(val, base_ptr, elem_idx):
             idx_i64 = arith.index_cast(T.i64, elem_idx)
-            gep = _llvm.GEPOp(llvm_ptr_ty, base_ptr, [idx_i64],
-                              rawConstantIndices=[_GEP_DYNAMIC],
+            gep = _llvm.GEPOp(_llvm_ptr_ty(), base_ptr, [idx_i64],
+                              rawConstantIndices=[_LLVM_GEP_DYNAMIC],
                               elem_type=elem_type,
                               noWrapFlags=0)
             _llvm.StoreOp(val, gep.result)
@@ -445,7 +463,7 @@ def build_flash_attn_func_module_primary(
         if ENABLE_DMA:
             from flydsl._mlir.dialects import llvm
             k_rsrc = buffer_ops.create_buffer_resource(K, max_size=True)
-            _lds_ptr_ty = ir.Type.parse("!llvm.ptr<3>")
+            _lds_ptr_ty = _llvm_lds_ptr_ty()
             DMA_BYTES = 16  # buffer_load_dwordx4 = 16 bytes per lane
             DMA_BATCH_BYTES = BLOCK_SIZE * DMA_BYTES
             K_TILE_BYTES = BLOCK_N * K_STRIDE * 2
@@ -551,7 +569,7 @@ def build_flash_attn_func_module_primary(
         c_neg_inf = arith.constant(float("-inf"), type=compute_type)
         c_zero_f = arith.constant(0.0, type=compute_type)
         c_one_f = arith.constant(1.0, type=compute_type)
-        c_sm_scale_log2e = arith.constant(sm_scale * 1.4426950408889634, type=compute_type)
+        c_sm_scale_log2e = arith.constant(sm_scale * _LOG2E, type=compute_type)
         c_zero_v16f32 = arith.constant_vector(0.0, v16f32_type)
         width_i32 = arith.constant(WARP_SIZE, type=T.i32)
         shuf_32_i32 = arith.constant(32, type=T.i32)
@@ -653,6 +671,7 @@ def build_flash_attn_func_module_primary(
 
                 # ==== GEMM1: bulk-read all K packs, then pipeline MFMAs ====
                 k_hi_offset = K_SUB_N * K_STRIDE
+                # XOR swizzle: col ^ ((row & 0x7) << 4) avoids LDS bank conflicts
                 k_swz_mask = (lane_mod_32 & arith.index(0x7)) << arith.index(4)
 
                 def _k_idx_lo(ks):
@@ -664,10 +683,10 @@ def build_flash_attn_func_module_primary(
                     return (k_base + k_hi_offset
                             + lane_mod_32 * K_STRIDE + (col ^ k_swz_mask))
 
-                PREFETCH_K = 2
+                _QK_PREFETCH_DEPTH = 2
                 k_packs_lo = [None] * K_STEPS_QK
                 k_packs_hi = [None] * K_STEPS_QK
-                for p in range_constexpr(PREFETCH_K):
+                for p in range_constexpr(_QK_PREFETCH_DEPTH):
                     k_packs_lo[p] = vector.load_op(
                         mfma_pack_type, lds_kv, [_k_idx_lo(p)])
                     k_packs_hi[p] = vector.load_op(
@@ -680,17 +699,17 @@ def build_flash_attn_func_module_primary(
                 s_acc_lo = c_zero_v16f32
                 s_acc_hi = c_zero_v16f32
                 for ks in range_constexpr(K_STEPS_QK):
-                    s_acc_lo = do_mfma(
+                    s_acc_lo = mfma_acc(
                         k_packs_lo[ks], q_b_packs[ks], s_acc_lo)
-                    s_acc_hi = do_mfma(
+                    s_acc_hi = mfma_acc(
                         k_packs_hi[ks], q_b_packs[ks], s_acc_hi)
-                    if ks + PREFETCH_K < K_STEPS_QK:
-                        k_packs_lo[ks + PREFETCH_K] = vector.load_op(
+                    if ks + _QK_PREFETCH_DEPTH < K_STEPS_QK:
+                        k_packs_lo[ks + _QK_PREFETCH_DEPTH] = vector.load_op(
                             mfma_pack_type, lds_kv,
-                            [_k_idx_lo(ks + PREFETCH_K)])
-                        k_packs_hi[ks + PREFETCH_K] = vector.load_op(
+                            [_k_idx_lo(ks + _QK_PREFETCH_DEPTH)])
+                        k_packs_hi[ks + _QK_PREFETCH_DEPTH] = vector.load_op(
                             mfma_pack_type, lds_kv,
-                            [_k_idx_hi(ks + PREFETCH_K)])
+                            [_k_idx_hi(ks + _QK_PREFETCH_DEPTH)])
 
                 # ==== Online softmax over 64 KV positions ====
                 s_raw_lo = []
@@ -716,6 +735,7 @@ def build_flash_attn_func_module_primary(
                         _m_lo = []
                         _m_hi = []
                         for r in range_constexpr(16):
+                            # MFMA 32x32 register remap: 16 elements -> (row, col)
                             r_off_i32 = arith.constant(
                                 (r % 4) + (r // 4) * 8, type=T.i32)
                             lane_off_i32 = arith.MulIOp(
@@ -917,9 +937,9 @@ def build_flash_attn_func_module_primary(
                     dc, pks = _steps[si]
                     if si + 1 < TOTAL_PV:
                         v_lo_nxt, v_hi_nxt = _read_v_pack(si + 1)
-                    o_accs[dc] = do_mfma(
+                    o_accs[dc] = mfma_acc(
                         v_lo_cur, p_packs_lo[pks], o_accs[dc])
-                    o_accs[dc] = do_mfma(
+                    o_accs[dc] = mfma_acc(
                         v_hi_cur, p_packs_hi[pks], o_accs[dc])
                     if not USE_HW_TR and dc == 0 and pks < D_CHUNKS - 1:
                         o_accs[pks + 1] = arith.MulFOp(
@@ -1028,10 +1048,6 @@ def build_flash_attn_func_module_primary(
                 ir.StringAttr.get("unsafe-fp-math"),
                 ir.StringAttr.get("true"),
             ]))
-        # passthrough_entries.append(ir.ArrayAttr.get([
-        #    ir.StringAttr.get("amdgpu-gemm-schedule-opt"),
-        #    ir.StringAttr.get("true"),
-        # ]))
         for op in ctx.gpu_module_body.operations:
             if getattr(op, "OPERATION_NAME", None) == "gpu.func":
                 op.attributes["passthrough"] = ir.ArrayAttr.get(passthrough_entries)
