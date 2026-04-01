@@ -20,8 +20,10 @@ if _PYFLYDSL_SRC not in sys.path:
 
 from kernels.hgemm_splitk import hgemm_splitk_, hgemm_shuffle_b
 from tests.test_common import run_perftest, verify_output
+from flydsl.runtime.device import get_rocm_arch
 
 logging.basicConfig(level=logging.INFO)
+ARCH = str(get_rocm_arch())
 
 if not torch.cuda.is_available():
     pytest.skip("CUDA/ROCm not available. Skipping GPU tests.", allow_module_level=True)
@@ -69,6 +71,10 @@ def test_mfma_flyc_preshuffle_splitk_hgemm(
     bench_iters: int = DEFAULT_BENCH_ITERS,
     bench_warmup: int = DEFAULT_BENCH_WARMUP,
 ):
+    global ARCH
+    if not (ARCH in ["gfx950", "gfx942"]):
+        pytest.skip(f"Skip hgemm test: ARCH={ARCH}")
+    
     print("=" * 80)
     print(
         f"[flyc] MFMA {dtype.upper()} SplitK-HGEMM Test"
