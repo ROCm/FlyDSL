@@ -36,20 +36,10 @@ SCALE_BLOCK = 32
 
 def preshuffle_e8m0_scale(scale: torch.Tensor, warp_tile: int,
                           scale_k_per_tile: int = 4,
-                          WMMA_DIM: int = 16,
-                          byte_swap: bool = False) -> torch.Tensor:
-    """Preshuffle E8M0 scale: optional byte swap + interleave for ds_load_b128.
-
-    Args:
-        byte_swap: True for FP4 (reorder [0,2,1,3]), False for FP8 (identity).
-    """
+                          WMMA_DIM: int = 16) -> torch.Tensor:
+    """Preshuffle E8M0 scale: optional byte swap + interleave for WMMA access."""
     _, K_scale = scale.shape
     assert K_scale % 4 == 0, f"K_scale must be divisible by 4, got {K_scale}"
-
-    if byte_swap:
-        grouped = scale.view(-1, K_scale // 4, 4)
-        scale = grouped[:, :, [0, 2, 1, 3]].contiguous().view(-1, K_scale)
-
     SCALES_PER_WMMA = 4
     wmma_rep = warp_tile // WMMA_DIM
     k_groups = K_scale // scale_k_per_tile

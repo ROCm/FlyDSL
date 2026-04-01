@@ -504,7 +504,6 @@ def cluster_load_async_to_lds(global_ptr, lds_ptr, size_bytes, offset=0, cpol=0,
 
 def disable_xdl_arb_stall():
     """Disable WMMA multicycle arbitration stall by setting SCHED_MODE bit 4."""
-    from .._mlir import ir as _ir
     from .._mlir.dialects import llvm as _llvm
     from . import arith as _arith
     from .typing import T
@@ -512,7 +511,7 @@ def disable_xdl_arb_stall():
     # hwreg encoding: ID=26(SCHED_MODE), Offset=4, Size=1 -> 282
     imm_val = _arith.unwrap(_arith.constant(282, type=T.i32))
     val_val = _arith.unwrap(_arith.constant(1, type=T.i32))
-    
+
     _llvm.call_intrinsic(None, "llvm.amdgcn.s.setreg", [imm_val, val_val], [], [])
 
 

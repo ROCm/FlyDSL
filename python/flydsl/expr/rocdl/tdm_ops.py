@@ -47,6 +47,7 @@ __all__ = [
     "compute_padding_encoding",
     "compute_warp_distribution",
     "l2_prefetch_tile",
+    "advance_tdm_descriptor",
 ]
 
 

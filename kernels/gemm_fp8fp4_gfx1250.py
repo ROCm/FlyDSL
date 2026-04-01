@@ -31,7 +31,6 @@ SCALE_BLOCK = 32
 SCALES_PER_WMMA = WMMA_K // SCALE_BLOCK  # 4
 
 LDS_PAD_A_BYTES = 16
-LDS_PAD_B_BYTES = 0
 LDS_PAD_D_BYTES = 16
 
 _STAGE_NAMES = ("ping", "pong", "pang", "pung")
@@ -1051,7 +1050,7 @@ def compile_mxscale_gemm(
                  num_buffers, effective_waves_per_eu, l2_prefetch_distance,
                  cluster_m, cluster_n, use_tdm_store,
                  out_dtype, inst_prefetch, wave_specialized_tdm,
-                 use_scale_opsel)
+                 use_scale_opsel, expert_sched_mode)
 
     @flyc.jit
     def launch_mxscale_gemm(
