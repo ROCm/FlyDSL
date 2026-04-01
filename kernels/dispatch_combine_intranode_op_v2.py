@@ -84,6 +84,13 @@ class FlyDSLDispatchCombineIntraNodeOpV2:
             self._p2p_out_tok[pe]  = ms.shmem_ptr_p2p(self.shmem_disp_out_tok.data_ptr(), r, pe)
             self._p2p_recv_num[pe] = ms.shmem_ptr_p2p(self.shmem_recv_tok_num.data_ptr(), r, pe)
 
+        # 预计算 combine P2P 地址表（消除内核中 ptr_p2p extern 调用开销）
+        self._p2p_comb_inp = torch.zeros(npes, dtype=torch.int64, device=self._dev)
+        self._p2p_xdb_mem  = torch.zeros(npes, dtype=torch.int64, device=self._dev)
+        for pe in range(npes):
+            self._p2p_comb_inp[pe] = ms.shmem_ptr_p2p(self.shmem_comb_inp_tok.data_ptr(), r, pe)
+            self._p2p_xdb_mem[pe]  = ms.shmem_ptr_p2p(self.shmem_xdev_bar_mem.data_ptr(), r, pe)
+
         # 创建 @flyc.jit launcher（首次调用时自动编译 + shmem_module_init）
         _disp_wpb = config.warp_num_per_block
         print(f"[v2] Rank {r}: creating v2 dispatch jit (warp_per_block={_disp_wpb})...")
@@ -142,6 +149,9 @@ class FlyDSLDispatchCombineIntraNodeOpV2:
         self._fx_p2p_out_idx  = fx.Int64(self._p2p_out_idx.data_ptr())
         self._fx_p2p_out_tok  = fx.Int64(self._p2p_out_tok.data_ptr())
         self._fx_p2p_recv_num = fx.Int64(self._p2p_recv_num.data_ptr())
+        # combine P2P 地址数组
+        self._fx_p2p_comb_inp = fx.Int64(self._p2p_comb_inp.data_ptr())
+        self._fx_p2p_xdb_mem  = fx.Int64(self._p2p_xdb_mem.data_ptr())
 
     def _alloc_buffers(self):
         cfg  = self.cfg
@@ -269,6 +279,8 @@ class FlyDSLDispatchCombineIntraNodeOpV2:
             self._fx_comb_bar,
             self._fx_trecv,
             self._fx_tis,
+            self._fx_p2p_comb_inp,
+            self._fx_p2p_xdb_mem,
             cur_tok,
             total_recv_val,
         )
