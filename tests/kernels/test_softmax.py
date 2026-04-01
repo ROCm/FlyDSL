@@ -15,8 +15,6 @@ Implementation based on high-performance C++ kernel logic:
 import os
 
 import pytest
-pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
-
 try:
     import torch
 except ImportError:
