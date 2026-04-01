@@ -515,6 +515,27 @@ def load_v4i32_global(addr_i64: Any) -> ir.Value:
     return llvm.LoadOp(v4i32, gptr, alignment=4).result
 
 
+def load_v4i32_global_nt(addr_i64: Any) -> ir.Value:
+    """Load 128-bit (4 × i32) vector from global addrspace(1) with nontemporal hint.
+
+    Same as load_v4i32_global but sets nontemporal=True, generating ``global_load_dwordx4 nt``.
+    Use for write-once/read-once data (e.g. combine token copy) to avoid L2 cache pollution.
+
+    NOTE: Do NOT use for XGMI P2P reads — nt forces L2 bypass on P2P paths, causing ~13x slowdown.
+
+    Args:
+        addr_i64: i64 integer address in global (addrspace 1) memory.
+
+    Returns:
+        ``vector<4xi32>`` value.
+    """
+    from .._mlir.ir import VectorType
+    v4i32 = VectorType.get([4], _i32())
+    ptr_global_ty = llvm.PointerType.get(address_space=1)
+    gptr = llvm.IntToPtrOp(ptr_global_ty, _unwrap(addr_i64)).result
+    return llvm.LoadOp(v4i32, gptr, alignment=4, nontemporal=ir.BoolAttr.get(True)).result
+
+
 def store_v4i32_global(vec: Any, addr_i64: Any) -> None:
     """Store 128-bit (4 × i32) vector to a global (addrspace 1) address.
 
@@ -532,6 +553,22 @@ def store_v4i32_global(vec: Any, addr_i64: Any) -> None:
     ptr_global_ty = llvm.PointerType.get(address_space=1)
     gptr = llvm.IntToPtrOp(ptr_global_ty, addr_val).result
     llvm.StoreOp(vec_val, gptr, alignment=4)
+
+
+def store_v4i32_global_nt(vec: Any, addr_i64: Any) -> None:
+    """Store 128-bit (4 × i32) vector to global addrspace(1) with nontemporal hint.
+
+    Same as store_v4i32_global but sets nontemporal=True, generating ``global_store_dwordx4 nt``.
+
+    Args:
+        vec:      ``vector<4xi32>`` value.
+        addr_i64: Destination i64 integer address.
+    """
+    vec_val  = _unwrap(vec)
+    addr_val = _unwrap(addr_i64)
+    ptr_global_ty = llvm.PointerType.get(address_space=1)
+    gptr = llvm.IntToPtrOp(ptr_global_ty, addr_val).result
+    llvm.StoreOp(vec_val, gptr, alignment=4, nontemporal=ir.BoolAttr.get(True))
 
 
 # ---------------------------------------------------------------------------
@@ -563,6 +600,30 @@ def load_i32_global_at(base_i64: Any, offset: Any) -> ir.Value:
     addr = llvm.AddOp(base, byte_off, ir.Attribute.parse("#llvm.overflow<none>")).result
     ptr  = _to_ptr_global(addr)
     return llvm.LoadOp(_i32(), ptr, alignment=4).result
+
+
+def load_i32_global_nt_at(base_i64: Any, offset: Any) -> ir.Value:
+    """Load i32 from ``base_i64 + offset * 4`` using global addrspace(1) with nontemporal hint."""
+    base = _unwrap(base_i64)
+    off  = _unwrap(offset)
+    off64 = llvm.ZExtOp(_i64(), off).res if off.type == _i32() else off
+    byte_off = llvm.MulOp(off64, _const_i64(4), ir.Attribute.parse("#llvm.overflow<none>")).result
+    addr = llvm.AddOp(base, byte_off, ir.Attribute.parse("#llvm.overflow<none>")).result
+    ptr  = _to_ptr_global(addr)
+    return llvm.LoadOp(_i32(), ptr, alignment=4, nontemporal=ir.BoolAttr.get(True)).result
+
+
+def store_i32_global_nt_at(base_i64: Any, offset: Any, val: Any) -> None:
+    """Store i32 to ``base_i64 + offset * 4`` using global addrspace(1) with nontemporal hint."""
+    base = _unwrap(base_i64)
+    off  = _unwrap(offset)
+    val_ = _unwrap(val)
+    off64 = llvm.ZExtOp(_i64(), off).res if off.type == _i32() else off
+    byte_off = llvm.MulOp(off64, _const_i64(4), ir.Attribute.parse("#llvm.overflow<none>")).result
+    addr = llvm.AddOp(base, byte_off, ir.Attribute.parse("#llvm.overflow<none>")).result
+    ptr_global_ty = llvm.PointerType.get(address_space=1)
+    gptr = llvm.IntToPtrOp(ptr_global_ty, addr).result
+    llvm.StoreOp(val_, gptr, alignment=4, nontemporal=ir.BoolAttr.get(True))
 
 
 def load_f32_global_at(base_i64: Any, offset: Any) -> ir.Value:
@@ -614,6 +675,41 @@ def atomic_add_i32_global_at(addr_i64: Any, val: Any) -> ir.Value:
         val_,
         llvm.AtomicOrdering.monotonic,
     ).res
+
+
+def atomic_add_i64_global_at(addr_i64: Any, val: Any) -> ir.Value:
+    """Atomic fetch-add i64 at i64 address using global addrspace(1).
+
+    Like atomic_add_i64_at but generates global_atomic_add_u64 instead of
+    flat_atomic_add_u64.
+    """
+    addr = _unwrap(addr_i64)
+    val_ = _unwrap(val)
+    ptr  = _to_ptr_global(addr)
+    return llvm.AtomicRMWOp(
+        llvm.AtomicBinOp.add,
+        ptr,
+        val_,
+        llvm.AtomicOrdering.monotonic,
+    ).res
+
+
+def store_i64_global_system(addr_i64: Any, val: Any) -> None:
+    """Atomic store i64 with system scope using global addrspace(1).
+
+    Like store_i64_system but generates global_store_dwordx2 instead of
+    flat_store_b64.  For P2P (XGMI) cross-device barrier signaling.
+    """
+    addr_val = _unwrap(addr_i64)
+    val_val  = _unwrap(val)
+    ptr_global_ty = llvm.PointerType.get(address_space=1)
+    gptr = llvm.IntToPtrOp(ptr_global_ty, addr_val).result
+    llvm.StoreOp(
+        val_val, gptr,
+        alignment=8,
+        ordering=llvm.AtomicOrdering.monotonic,
+        syncscope="one-as",
+    )
 
 
 def load_i32_at(base_i64: Any, offset: Any) -> ir.Value:
