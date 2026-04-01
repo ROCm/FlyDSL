@@ -230,15 +230,13 @@ class TestKnownBlockSizeValidation:
 
 
 class TestKnownBlockSizeLaunchMismatch:
-    """Verify that a warning is emitted when launch block != known_block_size."""
+    """Verify that errors are raised for invalid block size at launch time."""
 
     @pytest.fixture(autouse=True)
     def _setup(self):
         self.x = torch.zeros(64, device="cuda", dtype=torch.float32)
 
-    def test_matching_block_no_warning(self):
-        import warnings
-
+    def test_matching_block_no_error(self):
         @flyc.kernel(known_block_size=[256, 1, 1])
         def _kn_match(x: fx.Tensor):
             pass
@@ -247,13 +245,9 @@ class TestKnownBlockSizeLaunchMismatch:
         def _launch_match(x: fx.Tensor, stream: fx.Stream = fx.Stream(None)):
             _kn_match(x).launch(grid=(1, 1, 1), block=(256, 1, 1), stream=stream)
 
-        with warnings.catch_warnings():
-            warnings.simplefilter("error")
-            _launch_match(self.x, stream=torch.cuda.current_stream())
+        _launch_match(self.x, stream=torch.cuda.current_stream())
 
-    def test_no_known_block_size_no_warning(self):
-        import warnings
-
+    def test_no_known_block_size_within_limit_no_error(self):
         @flyc.kernel
         def _kn_none(x: fx.Tensor):
             pass
@@ -262,6 +256,28 @@ class TestKnownBlockSizeLaunchMismatch:
         def _launch_any(x: fx.Tensor, stream: fx.Stream = fx.Stream(None)):
             _kn_none(x).launch(grid=(1, 1, 1), block=(256, 1, 1), stream=stream)
 
-        with warnings.catch_warnings():
-            warnings.simplefilter("error")
-            _launch_any(self.x, stream=torch.cuda.current_stream())
+        _launch_any(self.x, stream=torch.cuda.current_stream())
+
+    def test_mismatch_raises(self):
+        @flyc.kernel(known_block_size=[256, 1, 1])
+        def _kn_256(x: fx.Tensor):
+            pass
+
+        @flyc.jit
+        def _launch_wrong(x: fx.Tensor, stream: fx.Stream = fx.Stream(None)):
+            _kn_256(x).launch(grid=(1, 1, 1), block=(512, 1, 1), stream=stream)
+
+        with pytest.raises(ValueError, match="differs from known_block_size"):
+            _launch_wrong(self.x, stream=torch.cuda.current_stream())
+
+    def test_no_known_block_size_exceeds_256_raises(self):
+        @flyc.kernel
+        def _kn_none(x: fx.Tensor):
+            pass
+
+        @flyc.jit
+        def _launch_big(x: fx.Tensor, stream: fx.Stream = fx.Stream(None)):
+            _kn_none(x).launch(grid=(1, 1, 1), block=(512, 1, 1), stream=stream)
+
+        with pytest.raises(ValueError, match="exceeds the AMDGPU default"):
+            _launch_big(self.x, stream=torch.cuda.current_stream())
