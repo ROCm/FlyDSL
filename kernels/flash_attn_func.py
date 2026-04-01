@@ -1043,6 +1043,10 @@ def build_flash_attn_func_module_primary(
             stream=stream,
         )
 
+    # Best MI355X FMHA numbers so far were measured with ROCm/llvm-project
+    # `felix/tune_fmha` at c8cf6da4367c010c7cbbb7789a9c4349e7407619.
+    # Other LLVM revisions can compile/run this kernel, but usually leave a
+    # few percent of peak throughput on the table.
     _fmha_compile_hints = {
         "fast_fp_math": fast_fp_math,
         "unsafe_fp_math": unsafe_fp_math,
