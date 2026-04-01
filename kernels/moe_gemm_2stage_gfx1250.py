@@ -1178,14 +1178,17 @@ def _compile_fp8_stage1_single_kernel(
                     sx_idx = tok * arith.constant(K_scale, type=T.i32) + arith.index_cast(T.i32, ksc_off)
                     sx_idx_safe = arith.select(ok, sx_idx, arith.constant(0, type=T.i32))
                     sx_val = arith.select(ok, buffer_ops.buffer_load(sx_rsrc, sx_idx_safe, vec_width=1, dtype=T.i8), arith.constant(127, type=T.i8))
-                    lane_row = row % arith.index(WMMA_M)
-                    wm_idx = row / arith.index(WMMA_M)
+                    warp_row_idx = row / arith.index(warp_tile_m)
+                    local_row = row % arith.index(warp_tile_m)
+                    lane_row = local_row % arith.index(WMMA_M)
+                    local_wm_idx = local_row / arith.index(WMMA_M)
+                    global_lds_row = warp_row_idx * arith.index(WMMA_M) + lane_row
                     ksc_blk = ksc / arith.index(SCALES_PER_WMMA)
                     ksc_sub = ksc % arith.index(SCALES_PER_WMMA)
                     lds_idx = (
-                        lane_row * arith.index(interleaved_scale_cols_a)
+                        global_lds_row * arith.index(interleaved_scale_cols_a)
                         + ksc_blk * arith.index(wmma_m_rep * SCALES_PER_WMMA)
-                        + wm_idx * arith.index(SCALES_PER_WMMA)
+                        + local_wm_idx * arith.index(SCALES_PER_WMMA)
                         + ksc_sub
                     )
                     v1 = vector.from_elements(T.vec(1, T.i8), [sx_val])
@@ -1206,18 +1209,40 @@ def _compile_fp8_stage1_single_kernel(
                 num_warps=int(m_warp) * int(n_warp),
                 workgroup_mask=0)
             tdm_ops.tensor_load_2d(desc_b)
-            k_scale_off = k_base / arith.index(SCALE_BLOCK)
-            desc_bs = tdm_ops.make_tensor_descriptor_2d(
-                global_ptr=arg_scale_w, lds_memref=lds_bs_mem,
-                global_offset=(n_off / arith.index(b_scale_load_rep), k_scale_off * arith.index(b_scale_load_rep)),
-                tensor_shape=(WMMA_M * n_warp, interleaved_scale_cols_b),
-                strides=(b_scale_load_rep * K_scale, 1),
-                tile_shape=(WMMA_M * n_warp, interleaved_scale_cols_b),
-                elem_bytes=1,
-                pad_interval=0, pad_amount=0,
-                num_warps=int(m_warp) * int(n_warp),
-                workgroup_mask=0)
-            tdm_ops.tensor_load_2d(desc_bs)
+            total_bs = int(tile_n * scale_k_per_tile)
+            rounds_bs = (total_bs + block_threads - 1) // block_threads
+            for it in range(rounds_bs):
+                elem = tx + fx.Index(it * block_threads)
+                in_range = arith.cmpi(
+                    arith.CmpIPredicate.ult,
+                    arith.index_cast(T.i32, elem),
+                    arith.constant(total_bs, type=T.i32),
+                )
+                _if_bs = scf.IfOp(in_range)
+                with ir.InsertionPoint(_if_bs.then_block):
+                    n_local = elem // arith.index(int(scale_k_per_tile))
+                    ksc = elem % arith.index(int(scale_k_per_tile))
+                    k_scale_base = k_base / arith.index(SCALE_BLOCK)
+                    sw_idx = arith.index_cast(T.i32,
+                        (n_off + n_local) * arith.index(K_scale) + k_scale_base + ksc)
+                    sw_val = buffer_ops.buffer_load(
+                        sw_rsrc, sw_idx, vec_width=1, dtype=T.i8)
+                    wave_n = n_local / arith.index(warp_tile_n)
+                    sub_n = n_local % arith.index(warp_tile_n)
+                    wn_idx = sub_n / arith.index(WMMA_N)
+                    lane_row = sub_n % arith.index(WMMA_N)
+                    ksc_blk = ksc / arith.index(SCALES_PER_WMMA)
+                    ksc_sub = ksc % arith.index(SCALES_PER_WMMA)
+                    warp_lds_row = wave_n * arith.index(WMMA_N) + lane_row
+                    lds_idx = (
+                        warp_lds_row * arith.index(interleaved_scale_cols_b)
+                        + ksc_blk * arith.index(b_scale_load_rep * SCALES_PER_WMMA)
+                        + wn_idx * arith.index(SCALES_PER_WMMA)
+                        + ksc_sub
+                    )
+                    v1 = vector.from_elements(T.vec(1, T.i8), [sw_val])
+                    vector.store(v1, lds_bs_mem, [lds_idx], alignment=1)
+                    scf.YieldOp([])
 
         def _lds_load_b128(lds_buffer, byte_offset):
             from flydsl._mlir.dialects import llvm as _llvm, memref as _memref
@@ -1683,14 +1708,17 @@ def _compile_fp8_stage2_single_kernel(
                     sx_idx = ts * arith.constant(K_scale, type=T.i32) + arith.index_cast(T.i32, ksc_off)
                     sx_idx_safe = arith.select(load_ok, sx_idx, arith.constant(0, type=T.i32))
                     sx_val = arith.select(load_ok, buffer_ops.buffer_load(sx_rsrc, sx_idx_safe, vec_width=1, dtype=T.i8), arith.constant(127, type=T.i8))
-                    lane_row = row % arith.index(WMMA_M)
-                    wm_idx = row / arith.index(WMMA_M)
+                    warp_row_idx = row / arith.index(warp_tile_m)
+                    local_row = row % arith.index(warp_tile_m)
+                    lane_row = local_row % arith.index(WMMA_M)
+                    local_wm_idx = local_row / arith.index(WMMA_M)
+                    global_lds_row = warp_row_idx * arith.index(WMMA_M) + lane_row
                     ksc_blk = ksc / arith.index(SCALES_PER_WMMA)
                     ksc_sub = ksc % arith.index(SCALES_PER_WMMA)
                     lds_idx = (
-                        lane_row * arith.index(interleaved_scale_cols_a)
+                        global_lds_row * arith.index(interleaved_scale_cols_a)
                         + ksc_blk * arith.index(wmma_m_rep * SCALES_PER_WMMA)
-                        + wm_idx * arith.index(SCALES_PER_WMMA)
+                        + local_wm_idx * arith.index(SCALES_PER_WMMA)
                         + ksc_sub
                     )
                     v1 = vector.from_elements(T.vec(1, T.i8), [sx_val])
@@ -1711,18 +1739,40 @@ def _compile_fp8_stage2_single_kernel(
                 num_warps=int(m_warp) * int(n_warp),
                 workgroup_mask=0)
             tdm_ops.tensor_load_2d(desc_b)
-            k_scale_off = k_base / arith.index(SCALE_BLOCK)
-            desc_bs = tdm_ops.make_tensor_descriptor_2d(
-                global_ptr=arg_scale_w, lds_memref=lds_bs,
-                global_offset=(n_off / arith.index(b_scale_load_rep), k_scale_off * arith.index(b_scale_load_rep)),
-                tensor_shape=(WMMA_M * n_warp, interleaved_scale_cols_b),
-                strides=(b_scale_load_rep * K_scale, 1),
-                tile_shape=(WMMA_M * n_warp, interleaved_scale_cols_b),
-                elem_bytes=1,
-                pad_interval=0, pad_amount=0,
-                num_warps=int(m_warp) * int(n_warp),
-                workgroup_mask=0)
-            tdm_ops.tensor_load_2d(desc_bs)
+            total_bs = int(tile_n * scale_k_per_tile)
+            rounds_bs = (total_bs + block_threads - 1) // block_threads
+            for it in range(rounds_bs):
+                elem = tx + fx.Index(it * block_threads)
+                in_range = arith.cmpi(
+                    arith.CmpIPredicate.ult,
+                    arith.index_cast(T.i32, elem),
+                    arith.constant(total_bs, type=T.i32),
+                )
+                _if_bs = scf.IfOp(in_range)
+                with ir.InsertionPoint(_if_bs.then_block):
+                    n_local = elem // arith.index(int(scale_k_per_tile))
+                    ksc = elem % arith.index(int(scale_k_per_tile))
+                    k_scale_base = k_base / arith.index(SCALE_BLOCK)
+                    sw_idx = arith.index_cast(T.i32,
+                        (n_off + n_local) * arith.index(K_scale) + k_scale_base + ksc)
+                    sw_val = buffer_ops.buffer_load(
+                        sw_rsrc, sw_idx, vec_width=1, dtype=T.i8)
+                    wave_n = n_local / arith.index(warp_tile_n)
+                    sub_n = n_local % arith.index(warp_tile_n)
+                    wn_idx = sub_n / arith.index(WMMA_N)
+                    lane_row = sub_n % arith.index(WMMA_N)
+                    ksc_blk = ksc / arith.index(SCALES_PER_WMMA)
+                    ksc_sub = ksc % arith.index(SCALES_PER_WMMA)
+                    warp_lds_row = wave_n * arith.index(WMMA_N) + lane_row
+                    lds_idx = (
+                        warp_lds_row * arith.index(interleaved_scale_cols_b)
+                        + ksc_blk * arith.index(b_scale_load_rep * SCALES_PER_WMMA)
+                        + wn_idx * arith.index(SCALES_PER_WMMA)
+                        + ksc_sub
+                    )
+                    v1 = vector.from_elements(T.vec(1, T.i8), [sw_val])
+                    vector.store(v1, lds_bs, [lds_idx], alignment=1)
+                    scf.YieldOp([])
 
         def _lds_load_b128(lds_buffer, byte_offset):
             from flydsl._mlir.dialects import llvm as _llvm, memref as _memref
@@ -2899,7 +2949,7 @@ def compile_moe_gemm1(
 
     if in_dtype in ("fp8", "a8w4"):
         single_tile_m, single_tile_n, single_m_warp, single_n_warp = _pick_fp16_single_launch_shape(
-            route_tile_m, int(tile_n)
+            route_tile_m, int(tile_n), max_total_warps=8,
         )
         return _compile_fp8_stage1_single_kernel(
             model_dim=int(model_dim),
@@ -3006,7 +3056,7 @@ def compile_moe_gemm2(
 
     if in_dtype in ("fp8", "a8w4"):
         single_tile_m, single_tile_n, single_m_warp, single_n_warp = _pick_fp16_single_launch_shape(
-            route_tile_m, int(tile_n)
+            route_tile_m, int(tile_n), max_total_warps=8,
         )
         return _compile_fp8_stage2_single_kernel(
             model_dim=int(model_dim),

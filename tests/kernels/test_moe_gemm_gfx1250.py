@@ -784,7 +784,7 @@ def run_moe_stage1(
     sorted_weights_1d = sorted_weights.contiguous().view(-1)  # [sorted_size]
 
     # Output: [tokens, topk, inter_dim] fp16
-    out = torch.empty((tokens, topk, inter_dim), device=device, dtype=torch.float16)
+    out = torch.zeros((tokens, topk, inter_dim), device=device, dtype=torch.float16)
 
     from kernels.moe_gemm_2stage_gfx1250 import compile_moe_gemm1
     exe = compile_moe_gemm1(
@@ -1868,6 +1868,8 @@ def test_moe_gemm_2stage(
     """
     if (not bool(use_reduce)) and bool(use_valid_mask):
         pytest.skip("valid_mask is only used in reduce mode (atomic mode ignores it).")
+    if out_dtype in ("f32", "fp32", "float") and in_dtype in ("fp4", "fp8", "a8w4", "fp16"):
+        pytest.skip(f"gfx1250 {in_dtype} kernels only support out_dtype f16/bf16, not f32.")
     if in_dtype in ("fp4", "a8w4"):
         # Keep fp4 in the main parameterized matrix, but only run the small shape
         # to avoid excessive compile/runtime during broad CI sweeps.
