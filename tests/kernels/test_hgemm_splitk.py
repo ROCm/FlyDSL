@@ -32,7 +32,7 @@ try:
 except Exception:
     HAS_AITER = False
 
-DEFAULT_BENCH_ITERS = 20
+DEFAULT_BENCH_ITERS = 50
 DEFAULT_BENCH_WARMUP = 3
 
 
@@ -131,7 +131,7 @@ def test_mfma_flyc_preshuffle_splitk_hgemm(
     tflops = flops / (us / 1e6) / 1e12
     tbps = bytes_moved / 1e12 / (us / 1e6)
     speedup = ref_us / us
-    print(f"[flyc] Throughput: {us:.1f} us, {tflops:.2f} TFLOPS, BW: {tbps:.3f} TB/s, Torch(us): {ref_us:.1f}, Speedup: {speedup:.1f}")
+    print(f"[flyc] Throughput: {us:.1f} us, {tflops:.2f} TFLOPS, BW: {tbps:.3f} TB/s, Torch(us): {ref_us:.1f}, Speedup: {speedup:.3f}")
 
 
 if __name__ == "__main__":
