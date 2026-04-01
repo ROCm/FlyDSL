@@ -17,6 +17,7 @@ Block scaling granularity (matching DeepGEMM):
 
 Optimizations applied:
   - LDS ping-pong double buffering for A tiles
+  - XOR swizzle for LDS bank conflict avoidance
 """
 
 import functools
@@ -36,7 +37,12 @@ from flydsl._mlir.dialects import math as math_dialect
 from flydsl.expr.typing import T
 from flydsl.expr.arith import ArithValue
 
-from kernels.mfma_preshuffle_pipeline import crd2idx
+from kernels.mfma_preshuffle_pipeline import (
+    crd2idx,
+    lds_store_16b_xor16,
+    swizzle_xor16,
+    tile_chunk_coord_i32,
+)
 
 
 @functools.lru_cache(maxsize=128)
@@ -113,8 +119,13 @@ def compile_grouped_fp8_gemm(
     ).replace("-", "_")
 
     # Thread -> tile element mapping for A loads
+    tile_k_bytes = tile_k * elem_bytes
+    tile_k_dwords = tile_k_bytes // 4
     bytes_a_per_tile = tile_m * tile_k * elem_bytes
     bytes_per_thread_a = bytes_a_per_tile // total_threads
+    a_load_bytes = 16  # 16-byte loads (dwordx4)
+    chunk_i32_a = a_load_bytes // 4  # 4 dwords per load
+    num_a_loads = bytes_per_thread_a // a_load_bytes
 
     @flyc.kernel(name=module_name)
     def grouped_fp8_gemm_kernel(
@@ -232,31 +243,58 @@ def compile_grouped_fp8_gemm(
                 n_blk = col_base // c_scale_block_n
                 n_block_for_scale.append(n_blk)
 
-            # A load mapping: thread -> (row, col) in tile
-            tile_k_div16 = tile_k // 16
-            layout_a_tile = fx.make_layout((tile_m, tile_k_div16), stride=(tile_k_div16, 1))
-            loads_per_thread = bytes_per_thread_a // 16  # 16-byte loads
+            # A load mapping: thread -> (row, col_i32) in tile (dword-indexed K)
+            layout_a_tile_div4 = fx.make_layout(
+                (tile_m, tile_k_dwords), stride=(tile_k_dwords, 1)
+            )
+            c_chunk_a = fx.Index(chunk_i32_a)
+            tx_i32_base = tx * c_chunk_a
+            _k_div4_factor = k_in // fx.Index(4)
+            k_blocks16 = arith.index(tile_k_bytes // 16)
+            c4_bytes = fx.Index(4)
 
-            # ── Helper: load A tile to LDS ──────────────────────────────
+            # Precompute per-load tile coordinates (row_local, col_local_i32)
+            a_row_local = []
+            a_col_local_i32 = []
+            for i in range_constexpr(num_a_loads):
+                row_local, col_local_i32 = tile_chunk_coord_i32(
+                    arith, tx_i32_base=tx_i32_base, i=i,
+                    total_threads=total_threads,
+                    layout_tile_div4=layout_a_tile_div4,
+                    chunk_i32=chunk_i32_a,
+                )
+                a_row_local.append(row_local)
+                a_col_local_i32.append(col_local_i32)
+
+            # ── Helper: load A tile to LDS with XOR swizzle ─────────────
             def load_a_tile(k_tile_idx_py, lds_base):
-                """Load A[bx_m : bx_m+tile_m, k_base : k_base+tile_k] into lds_a at lds_base."""
-                k_base = fx.Index(k_tile_idx_py * tile_k)
-                for load_idx in range_constexpr(loads_per_thread):
-                    lin_idx = tx * fx.Index(loads_per_thread) + fx.Index(load_idx)
-                    coord = fx.idx2crd(lin_idx, layout_a_tile)
-                    row_local = fx.get(coord, 0)
-                    col_local_16 = fx.get(coord, 1)
-                    col_local = col_local_16 * fx.Index(16)
+                """Load A tile from global to LDS with XOR16 swizzle."""
+                base_k_div4 = fx.Index(k_tile_idx_py * tile_k_dwords)
+                for i in range_constexpr(num_a_loads):
+                    row_global = bx_m + a_row_local[i]
+                    idx_i32 = row_global * _k_div4_factor + base_k_div4 + a_col_local_i32[i]
+                    a_vec = buffer_ops.buffer_load(a_rsrc, idx_i32, vec_width=4, dtype=T.i32)
+                    lds_store_16b_xor16(
+                        arith, vector,
+                        lds_memref=lds_a, vec16_ty=T.f8x16,
+                        layout_lds=layout_lds,
+                        row_local=a_row_local[i],
+                        col_local_i32=a_col_local_i32[i],
+                        tx_c4=c4_bytes, k_blocks16=k_blocks16,
+                        lds_base=lds_base,
+                        vec_part_i32x4=a_vec, elem_bytes=elem_bytes,
+                    )
 
-                    row_global = bx_m + row_local
-                    a_idx = row_global * k_in + k_base + col_local
-
-                    a_vec = buffer_ops.buffer_load(a_rsrc, a_idx // fx.Index(4), vec_width=4, dtype=T.i32)
-
-                    lds_coord = (row_local, col_local)
-                    lds_idx = crd2idx(lds_coord, layout_lds) + lds_base
-                    a_vec_f8 = vector.bitcast(T.vec(16, T.f8), a_vec)
-                    vector.store(a_vec_f8, lds_a, [lds_idx])
+            # ── Helper: load A K64 pack from LDS with XOR swizzle ────────
+            def lds_load_packs_k64(curr_row_a_lds, col_base_bytes, lds_base):
+                """Load 16B from LDS with XOR16 swizzle, return two i64 halves."""
+                col_base_swz_bytes = swizzle_xor16(curr_row_a_lds, col_base_bytes, k_blocks16)
+                idx_a16 = crd2idx((curr_row_a_lds, col_base_swz_bytes), layout_lds) + lds_base
+                loaded_a16 = vector.load_op(T.vec(16, T.f8), lds_a, [idx_a16])
+                a_i64x2 = vector.bitcast(T.i64x2, loaded_a16)
+                a0 = vector.extract(a_i64x2, static_position=[0], dynamic_position=[])
+                a1 = vector.extract(a_i64x2, static_position=[1], dynamic_position=[])
+                return a0, a1
 
             # ── Helper: compute one K-tile from LDS ─────────────────────
             def compute_tile(accs_in, k_tile_idx_py, lds_base):
@@ -301,17 +339,10 @@ def compile_grouped_fp8_gemm(
                         k_offset_bytes = ku * 64
 
                         for mi in range_constexpr(m_repeat):
-                            # Load A from LDS (16 bytes = 2 x 8 bytes for K32 MFMA pair)
+                            # Load A from LDS with XOR swizzle (16 bytes = 2 x 8 bytes for K32 MFMA pair)
                             row_a_lds = lane_mod_16 + arith.index(mi * 16)
-                            col_a_base = lane_div_16 * fx.Index(16) + fx.Index(k_offset_bytes)
-
-                            # Load 16 bytes and split into two i64 for K32 MFMAs
-                            lds_coord_a = (row_a_lds, col_a_base)
-                            lds_idx_a = crd2idx(lds_coord_a, layout_lds) + lds_base
-                            a16 = vector.load_op(T.vec(16, T.f8), lds_a, [lds_idx_a])
-                            a_i64x2 = vector.bitcast(T.i64x2, a16)
-                            a0 = vector.extract(a_i64x2, static_position=[0], dynamic_position=[])
-                            a1 = vector.extract(a_i64x2, static_position=[1], dynamic_position=[])
+                            col_a_base_bytes = lane_div_16 * fx.Index(16) + fx.Index(k_offset_bytes)
+                            a0, a1 = lds_load_packs_k64(row_a_lds, col_a_base_bytes, lds_base)
 
                             for ni in range_constexpr(num_acc_n):
                                 acc_idx = mi * num_acc_n + ni
