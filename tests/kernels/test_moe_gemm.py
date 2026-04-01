@@ -489,7 +489,8 @@ def run_moe_stage1(
         # FP4: preshuffle via float4_e2m1fn_x2 view, scale as uint8.
         w1_shuffled = shuffle_weight(w1_q.view(torch.float4_e2m1fn_x2))
         w_kernel = w1_shuffled.view(torch.uint8).contiguous()
-        w1_q_flat = None  # not used for fp4 reference
+        w1_q_flat = w1_q.view(experts * (2 * inter_dim), model_dim // 2).contiguous()
+        scale_w1_flat = scale_w1.view(experts * (2 * inter_dim), model_dim // 32).contiguous()
         # Weight scale: e8m0_shuffle (no MoE sorting needed for weights).
         scale_w1_1d = fp4_utils.e8m0_shuffle(scale_w1).view(torch.uint8).contiguous()
         # Activation scale: must be sorted by MoE routing order.
@@ -608,14 +609,7 @@ def run_moe_stage1(
     torch.cuda.synchronize()
 
     if not bool(skip_ref):
-        if is_fp4:
-            # FP4 has very low precision; skip torch reference, just check finite ratio
-            finite_count = torch.isfinite(out).sum().item()
-            total = out.numel()
-            finite_ratio = finite_count / total
-            assert finite_ratio > 0.9, f"stage1 fp4: too many non-finite values: {finite_ratio:.1%} finite"
-            logging.info(f"[fp4] stage1 finite ratio: {finite_ratio:.1%}")
-        elif is_int8smooth:
+        if is_int8smooth:
             # x_q is slot-major [topk, tokens, K]; convert to [tokens, topk, K] for ref.
             x_ref = x_q.view(topk, tokens, model_dim).permute(1, 0, 2).contiguous()
             sx_ref = scale_x.view(topk, tokens, 1).permute(1, 0, 2).contiguous()
@@ -637,9 +631,15 @@ def run_moe_stage1(
                 inter_dim=inter_dim, doweight_stage1=doweight_stage1,
                 group_size=group_size, scale_w1_groups=scale_w1_groups,
             )
-            rtol = 0.5 if (is_int4 or is_int4_bf16) else 0.25
-            atol = 0.5 if (is_int4 or is_int4_bf16) else 0.25
-            assert verify_output(out.to(torch.float32), ref, rtol=rtol, atol=atol)
+            rtol = 0.5 if (is_int4 or is_int4_bf16 or is_fp4) else 0.25
+            atol = 0.5 if (is_int4 or is_int4_bf16 or is_fp4) else 0.25
+            assert verify_output(
+                out.to(torch.float32),
+                ref,
+                rtol=rtol,
+                atol=atol,
+                logits_diff_threshold=0.5 if is_fp4 else 2e-3,
+            )
 
     # Note: kernel launches full expert-block range; effective work is gated by num_valid_ids.
     flops = 2 * tokens * topk * (2 * inter_dim) * model_dim
@@ -972,6 +972,7 @@ def run_moe_stage2(
         if a2_fp8_in is not None and a2_scale_in is not None:
             a2_q = a2_fp8_in  # already FP4 [tokens*topk, inter_dim//2]
             a2_scale_raw = a2_scale_in  # raw e8m0 [tokens*topk, inter_dim//32]
+            a2_scale = a2_scale_raw
         else:
             raise RuntimeError(
                 "run_moe_stage2(in_dtype='fp4') requires a2_fp8_in and a2_scale_in "
@@ -1215,27 +1216,19 @@ def run_moe_stage2(
     torch.cuda.synchronize()
 
     if not bool(skip_ref):
-        if is_fp4:
-            # FP4 has very low precision; skip torch reference, just check finite ratio
-            finite_count = torch.isfinite(out).sum().item()
-            total = out.numel()
-            finite_ratio = finite_count / total
-            assert finite_ratio > 0.9, f"stage2 fp4: too many non-finite values: {finite_ratio:.1%} finite"
-            logging.info(f"[fp4] stage2 finite ratio: {finite_ratio:.1%}")
-        else:
-            ref2 = torch_moe_gemm2(
-                a2_q,
-                w2_q,
-                a2_scale,
-                scale_w2,
-                topk_ids.to(torch.int64),
-                topk_weights,
-                model_dim=model_dim,
-                doweight_stage2=doweight_stage2,
-                group_size=group_size,
-                scale_w2_groups=scale_w2_groups,
-            )
-            assert verify_output(out.to(torch.float32), ref2, rtol=0.5, atol=0.5)
+        ref2 = torch_moe_gemm2(
+            a2_q,
+            w2_q,
+            a2_scale,
+            scale_w2,
+            topk_ids.to(torch.int64),
+            topk_weights,
+            model_dim=model_dim,
+            doweight_stage2=doweight_stage2,
+            group_size=group_size,
+            scale_w2_groups=scale_w2_groups,
+        )
+        assert verify_output(out.to(torch.float32), ref2, rtol=0.5, atol=0.5)
 
     # Launches full expert-block range; effective work is gated by num_valid_ids.
     flops = 2 * tokens * topk * model_dim * inter_dim
@@ -1764,7 +1757,7 @@ def test_moe_stage2_standalone(
     1. Atomic mode: direct accumulation with atomics
     2. Reduce mode (torch): GEMM2 + torch.sum reduction
     3. Reduce mode (FlyDSL): GEMM2 + FlyDSL reduce kernel
-    For FP4: only atomic mode (reduce not supported).
+    For FP4: atomic mode + torch reduce mode.
     """
     is_fp4 = in_dtype == "fp4"
     if is_fp4:
@@ -1804,12 +1797,19 @@ def test_moe_stage2_standalone(
         torch.manual_seed(seed)
         a2_fp32 = torch.randn((tokens * topk, inter_dim), device=device, dtype=torch.float32) * 0.2
         a2_fp4, a2_scale = _per_1x32_fp4_quant(a2_fp32)
-        # FP4 only supports atomic mode
+        # FP4 supports atomic mode and torch-based reduce mode.
         run_moe_stage2(
             **common_args,
             a2_fp8_in=a2_fp4,
             a2_scale_in=a2_scale,
             kernel_name="moe_gemm2_atomic_fp4",
+        )
+        run_moe_stage2(
+            **common_args,
+            a2_fp8_in=a2_fp4,
+            a2_scale_in=a2_scale,
+            use_reduce=True,
+            kernel_name="moe_gemm2_reduce_torch_fp4",
         )
         return
 
