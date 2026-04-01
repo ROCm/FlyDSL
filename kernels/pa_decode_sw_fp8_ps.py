@@ -1309,6 +1309,13 @@ def pa_decode_ps_launch(
         stride_po_ql, stride_pl_ql,
         num_sm, s)
 
+    # Fix NaN from fastmath in fully-masked partitions (sliding window):
+    # exp2(-inf - (-inf)) produces NaN with fastmath ninf flag.
+    # Also clamp -inf LSE (pa_reduce_v1 does not handle -inf correctly).
+    output.nan_to_num_(0.0)
+    partial_output.nan_to_num_(0.0)
+    partial_lse.clamp_(min=-1e30)
+
     from aiter.ops.attention import pa_reduce_v1
     pa_reduce_v1(
         partial_output[query_length:],
