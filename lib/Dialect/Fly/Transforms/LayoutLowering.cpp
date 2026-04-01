@@ -2051,6 +2051,173 @@ public:
   }
 };
 
+class MemRefLoadVecOpLowering : public OpRewritePattern<MemRefLoadVecOp> {
+public:
+  using OpRewritePattern<MemRefLoadVecOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(MemRefLoadVecOp op, PatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    auto *ctx = rewriter.getContext();
+    auto memrefTy = dyn_cast<fly::MemRefType>(op.getMemref().getType());
+    if (!memrefTy)
+      return failure();
+
+    auto layoutAttr = dyn_cast<LayoutAttr>(memrefTy.getLayout());
+    if (!layoutAttr)
+      return failure();
+    if (!layoutAttr.isStaticShape())
+      return failure();
+
+    IntTupleBuilder<IntTupleAttr> attrBuilder(ctx);
+    IntTupleAttr shapeAttr = layoutAttr.getShape();
+
+    auto resVecTy = dyn_cast<VectorType>(op.getResult().getType());
+    if (!resVecTy)
+      return failure();
+
+    Value memref = op.getMemref();
+    Value iter = GetIterOp::create(rewriter, loc, memref);
+    Value layout = GetLayoutOp::create(rewriter, loc, memref);
+
+    // Flatten shape to get all leaf dims; first leaf is the contiguous vector width.
+    IntTupleAttr flatShape = intTupleFlatten(attrBuilder, shapeAttr);
+    IntTupleAttr firstLeafShape = flatShape.isLeaf() ? flatShape : flatShape.at(0);
+    int64_t vecWidth = firstLeafShape.getLeafAsInt().getValue();
+
+    // Remaining flat dims (everything after the first leaf).
+    int32_t flatRank = flatShape.rank();
+    if (flatRank == 1) {
+      Value loaded = PtrLoadOp::create(rewriter, loc, resVecTy, iter);
+      rewriter.replaceOp(op, loaded);
+      return success();
+    }
+    SmallVector<Attribute> restFlatElems;
+    for (int32_t i = 1; i < flatRank; ++i)
+      restFlatElems.push_back(flatShape.at(i));
+    IntTupleAttr restFlatShape = restFlatElems.size() == 1
+        ? cast<IntTupleAttr>(restFlatElems[0])
+        : IntTupleAttr::get(ArrayAttr::get(ctx, restFlatElems));
+
+    int64_t numChunks = intTupleProduct(attrBuilder, restFlatShape).getLeafAsInt().getValue();
+
+    auto zeroAttr = rewriter.getZeroAttr(resVecTy.getElementType());
+    auto denseAttr = DenseElementsAttr::get(resVecTy, zeroAttr);
+    Value result = arith::ConstantOp::create(rewriter, loc, resVecTy, denseAttr);
+
+    VectorType chunkVecTy = VectorType::get({vecWidth}, resVecTy.getElementType());
+
+    for (int64_t i = 0; i < numChunks; ++i) {
+      // Compute column-major coordinate over the rest flat dims.
+      IntTupleAttr restCoord = layoutIdx2CrdColMajor(
+          attrBuilder, attrBuilder.materializeConstantLeaf(i), restFlatShape);
+
+      // Build full flat coordinate: (0, restCoord...) and unflatten to original shape structure.
+      SmallVector<Attribute> flatCoordElems;
+      flatCoordElems.push_back(attrBuilder.materializeConstantLeaf(0));
+      if (restCoord.isLeaf()) {
+        flatCoordElems.push_back(restCoord);
+      } else {
+        for (int32_t j = 0; j < restCoord.rank(); ++j)
+          flatCoordElems.push_back(restCoord.at(j));
+      }
+      IntTupleAttr flatCoord = IntTupleAttr::get(ArrayAttr::get(ctx, flatCoordElems));
+      IntTupleAttr coordAttr = intTupleUnflatten(attrBuilder, flatCoord, shapeAttr);
+
+      Value coord = MakeIntTupleOp::create(rewriter, loc, IntTupleType::get(coordAttr), ValueRange{});
+      Value offset = Crd2IdxOp::create(rewriter, loc, coord, layout);
+      Value ptr = AddOffsetOp::create(rewriter, loc, iter, offset);
+      Value chunkVec = PtrLoadOp::create(rewriter, loc, chunkVecTy, ptr);
+      result = vector::InsertStridedSliceOp::create(
+                   rewriter, loc, chunkVec, result,
+                   ArrayRef<int64_t>{i * vecWidth}, ArrayRef<int64_t>{1})
+                   .getResult();
+    }
+
+    rewriter.replaceOp(op, result);
+    return success();
+  }
+};
+
+class MemRefStoreVecOpLowering : public OpRewritePattern<MemRefStoreVecOp> {
+public:
+  using OpRewritePattern<MemRefStoreVecOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(MemRefStoreVecOp op, PatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    auto *ctx = rewriter.getContext();
+    auto memrefTy = dyn_cast<fly::MemRefType>(op.getMemref().getType());
+    if (!memrefTy)
+      return failure();
+
+    auto layoutAttr = dyn_cast<LayoutAttr>(memrefTy.getLayout());
+    if (!layoutAttr)
+      return failure();
+    if (!layoutAttr.isStaticShape())
+      return failure();
+
+    IntTupleBuilder<IntTupleAttr> attrBuilder(ctx);
+    IntTupleAttr shapeAttr = layoutAttr.getShape();
+
+    Value vec = op.getVector();
+    Value memref = op.getMemref();
+    Value iter = GetIterOp::create(rewriter, loc, memref);
+    Value layout = GetLayoutOp::create(rewriter, loc, memref);
+
+    // Flatten shape to get all leaf dims; first leaf is the contiguous vector width.
+    IntTupleAttr flatShape = intTupleFlatten(attrBuilder, shapeAttr);
+    IntTupleAttr firstLeafShape = flatShape.isLeaf() ? flatShape : flatShape.at(0);
+    if (!firstLeafShape.isLeafInt() || !firstLeafShape.isStatic())
+      return failure();
+    int64_t vecWidth = firstLeafShape.getLeafAsInt().getValue();
+
+    // Remaining flat dims (everything after the first leaf).
+    int32_t flatRank = flatShape.rank();
+    if (flatRank == 1) {
+      PtrStoreOp::create(rewriter, loc, vec, iter);
+      rewriter.eraseOp(op);
+      return success();
+    }
+    SmallVector<Attribute> restFlatElems;
+    for (int32_t i = 1; i < flatRank; ++i)
+      restFlatElems.push_back(flatShape.at(i));
+    IntTupleAttr restFlatShape = restFlatElems.size() == 1
+        ? cast<IntTupleAttr>(restFlatElems[0])
+        : IntTupleAttr::get(ArrayAttr::get(ctx, restFlatElems));
+    int64_t numChunks = intTupleProduct(attrBuilder, restFlatShape).getLeafAsInt().getValue();
+
+    for (int64_t i = 0; i < numChunks; ++i) {
+      // Compute column-major coordinate over the rest flat dims.
+      IntTupleAttr restCoord = layoutIdx2CrdColMajor(
+          attrBuilder, attrBuilder.materializeConstantLeaf(i), restFlatShape);
+
+      // Build full flat coordinate: (0, restCoord...) and unflatten to original shape structure.
+      SmallVector<Attribute> flatCoordElems;
+      flatCoordElems.push_back(attrBuilder.materializeConstantLeaf(0));
+      if (restCoord.isLeaf()) {
+        flatCoordElems.push_back(restCoord);
+      } else {
+        for (int32_t j = 0; j < restCoord.rank(); ++j)
+          flatCoordElems.push_back(restCoord.at(j));
+      }
+      IntTupleAttr flatCoord = IntTupleAttr::get(ArrayAttr::get(ctx, flatCoordElems));
+      IntTupleAttr coordAttr = intTupleUnflatten(attrBuilder, flatCoord, shapeAttr);
+
+      Value coord = MakeIntTupleOp::create(rewriter, loc, IntTupleType::get(coordAttr), ValueRange{});
+      Value offset = Crd2IdxOp::create(rewriter, loc, coord, layout);
+      Value ptr = AddOffsetOp::create(rewriter, loc, iter, offset);
+      Value chunkVec = vector::ExtractStridedSliceOp::create(
+                           rewriter, loc, vec,
+                           ArrayRef<int64_t>{i * vecWidth},
+                           ArrayRef<int64_t>{vecWidth}, ArrayRef<int64_t>{1})
+                           .getResult();
+      PtrStoreOp::create(rewriter, loc, chunkVec, ptr);
+    }
+
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
 class MemRefAllocaOpLowering : public OpRewritePattern<MemRefAllocaOp> {
 public:
   using OpRewritePattern<MemRefAllocaOp>::OpRewritePattern;
@@ -2151,6 +2318,7 @@ public:
     patterns.add<ExpandCopyOpLowering, ExpandGemmOpLowering>(context);
 
     // MemRef/Ptr operations
+    patterns.add<MemRefLoadVecOpLowering, MemRefStoreVecOpLowering>(context);
     patterns.add<MemRefAllocaOpLowering>(context);
 
     // Utility ops
