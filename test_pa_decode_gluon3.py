@@ -1358,6 +1358,7 @@ def run_flydsl_ps_kernel(
     value_scale,  # float or torch.Tensor (per-token: same shape as key_scale)
     metadata: dict = None,
     sliding_window: int = 0,
+    block_tables: torch.Tensor = None,
 ) -> None:
     """Run FlyDSL PA decode kernel with Persistent Scheduling."""
     for _ in range(5):
@@ -1370,6 +1371,7 @@ def run_flydsl_ps_kernel(
             value_scale=value_scale,
             sliding_window=sliding_window,
             metadata=metadata,
+            block_tables=block_tables,
         )
 
 
@@ -2269,6 +2271,7 @@ def run_pa_gluon_test(
                 fdps_v_scale,
                 metadata=_ps_metadata,
                 sliding_window=sliding_window,
+                block_tables=block_tables,
             )
 
             # For query_length > 1 (MTP), output has shape [batch * query_length, num_q_heads, head_size]
