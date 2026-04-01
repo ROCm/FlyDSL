@@ -28,6 +28,7 @@ for _p in reversed(_PYTHON_CANDIDATES):
 from kernels.grouped_gemm import compile_grouped_fp8_gemm
 from flydsl.runtime.device import get_rocm_arch
 from tests.test_common import run_perftest, verify_output
+from tests.utils import shuffle_weight
 
 logging.basicConfig(level=logging.INFO)
 
@@ -216,12 +217,15 @@ def generate_grouped_gemm_inputs(
     # Output buffer
     d = torch.zeros(M, n, dtype=torch.bfloat16, device=device)
 
-    # Reference output
+    # Reference output (uses unshuffled B)
     ref_d = torch_grouped_gemm_ref(
         a_fp8, scale_a, b_fp8, scale_b, grouped_layout, scale_block_k, scale_block_n
     )
 
-    return a_fp8, scale_a, b_fp8, scale_b, grouped_layout, d, ref_d, M
+    # Preshuffle B for kernel (applied per-group, batch dim folded automatically)
+    b_shuffled = shuffle_weight(b_fp8, layout=(16, 16))
+
+    return a_fp8, scale_a, b_shuffled, scale_b, grouped_layout, d, ref_d, M
 
 
 def _as_i8(t: torch.Tensor) -> torch.Tensor:

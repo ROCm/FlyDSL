@@ -18,6 +18,7 @@ Block scaling granularity (matching DeepGEMM):
 Optimizations applied:
   - LDS ping-pong double buffering for A tiles
   - XOR swizzle for LDS bank conflict avoidance
+  - Preshuffle B layout with load_b_pack_k32
 """
 
 import functools
@@ -40,6 +41,8 @@ from flydsl.expr.arith import ArithValue
 from kernels.mfma_preshuffle_pipeline import (
     crd2idx,
     lds_store_16b_xor16,
+    load_b_pack_k32,
+    make_preshuffle_b_layout,
     swizzle_xor16,
     tile_chunk_coord_i32,
 )
@@ -102,6 +105,7 @@ def compile_grouped_fp8_gemm(
     scale_n = n // scale_block_n
     sb_per_tile = tile_k // scale_block_k  # scale blocks per K-tile
     k_unroll = tile_k // 64  # K64-byte micro-steps (for K32 MFMA pairs)
+    kpack_bytes = 16  # 16-byte packs for FP8
 
     # LDS allocation: 2x for ping-pong double buffer
     lds_a_bytes = tile_m * tile_k * elem_bytes
@@ -243,6 +247,27 @@ def compile_grouped_fp8_gemm(
                 n_blk = col_base // c_scale_block_n
                 n_block_for_scale.append(n_blk)
 
+            # B preshuffle layout: total N = num_groups * N (all groups concatenated)
+            c_n_total = num_groups_in * n_in
+            b_layout = make_preshuffle_b_layout(
+                arith, c_n=c_n_total, c_k=k_in,
+                kpack_bytes=kpack_bytes, elem_bytes=elem_bytes,
+            )
+            layout_b = b_layout.layout_b
+
+            # Decompose global N column into (n_blk, n_intra) for preshuffle layout
+            c_n0 = c_n_total // fx.Index(16)
+            c_n0_i32 = arith.index_cast(T.i32, c_n0)
+            layout_n_blk_intra = fx.make_layout((c_n0_i32, 16), stride=(16, 1))
+            n_blk_list = []
+            n_intra_list = []
+            group_n_off = group_idx * n_in  # N-offset for this group in concatenated B
+            for ni in range_constexpr(num_acc_n):
+                col_global = group_n_off + by_n + n_tile_base + arith.index(ni * 16) + lane_mod_16
+                coord_ni = fx.idx2crd(col_global, layout_n_blk_intra)
+                n_blk_list.append(fx.get(coord_ni, 0))
+                n_intra_list.append(fx.get(coord_ni, 1))
+
             # A load mapping: thread -> (row, col_i32) in tile (dword-indexed K)
             layout_a_tile_div4 = fx.make_layout(
                 (tile_m, tile_k_dwords), stride=(tile_k_dwords, 1)
@@ -296,11 +321,46 @@ def compile_grouped_fp8_gemm(
                 a1 = vector.extract(a_i64x2, static_position=[1], dynamic_position=[])
                 return a0, a1
 
-            # ── Helper: compute one K-tile from LDS ─────────────────────
-            def compute_tile(accs_in, k_tile_idx_py, lds_base):
+            # ── Helper: load one B pack (K32 micro-step) ────────────────
+            def load_b_pack(base_k, ki_step, ni):
+                return load_b_pack_k32(
+                    buffer_ops, arith, vector,
+                    arg_b=arg_b, b_rsrc=b_rsrc,
+                    layout_b=layout_b,
+                    base_k=base_k, ki_step=ki_step,
+                    n_blk=n_blk_list[ni],
+                    n_intra=n_intra_list[ni],
+                    lane_div_16=lane_div_16,
+                    elem_type=T.f8,
+                    kpack_bytes=kpack_bytes,
+                    elem_bytes=elem_bytes,
+                )
+
+            # ── Helper: prefetch entire B tile (gmem -> regs) ───────────
+            def load_b_tile(base_k):
+                """Load all B packs for one K-tile.
+
+                Returns list of length k_unroll, each entry is
+                (packs_half0[ni], packs_half1[ni]) for one K64 micro-step.
+                """
+                b_tile = []
+                for ku in range_constexpr(k_unroll):
+                    packs0 = []
+                    packs1 = []
+                    for ni in range_constexpr(num_acc_n):
+                        ki0 = (ku * 2) + 0
+                        ki1 = (ku * 2) + 1
+                        b0 = load_b_pack(base_k, ki0, ni)
+                        b1 = load_b_pack(base_k, ki1, ni)
+                        packs0.append(b0)
+                        packs1.append(b1)
+                    b_tile.append((packs0, packs1))
+                return b_tile
+
+            # ── Helper: compute one K-tile from LDS + B tile ────────────
+            def compute_tile(accs_in, k_tile_idx_py, lds_base, b_tile_in):
                 """Compute MFMA tiles for one K-tile, return updated accumulators."""
                 current_accs = list(accs_in)
-                k_base = fx.Index(k_tile_idx_py * tile_k)
 
                 for sb in range_constexpr(sb_per_tile):
                     kb = fx.Index(k_tile_idx_py * sb_per_tile + sb)
@@ -331,15 +391,14 @@ def compile_grouped_fp8_gemm(
                         s_b_vals.append(s_b_val)
 
                     # MFMA computation for this scale block
-                    # K64 micro-steps within scale block
                     ku_per_sb = scale_block_k // 64
 
                     for ku_local in range_constexpr(ku_per_sb):
                         ku = sb * ku_per_sb + ku_local
                         k_offset_bytes = ku * 64
+                        b_packs0, b_packs1 = b_tile_in[ku]
 
                         for mi in range_constexpr(m_repeat):
-                            # Load A from LDS with XOR swizzle (16 bytes = 2 x 8 bytes for K32 MFMA pair)
                             row_a_lds = lane_mod_16 + arith.index(mi * 16)
                             col_a_base_bytes = lane_div_16 * fx.Index(16) + fx.Index(k_offset_bytes)
                             a0, a1 = lds_load_packs_k64(row_a_lds, col_a_base_bytes, lds_base)
@@ -347,33 +406,10 @@ def compile_grouped_fp8_gemm(
                             for ni in range_constexpr(num_acc_n):
                                 acc_idx = mi * num_acc_n + ni
 
-                                # Load B from global memory
-                                # B layout: [num_groups, N, K] with K-major
-                                b_group_off = group_idx * (n_in * k_in)
-                                b_col = by_n + n_tile_base + arith.index(ni * 16) + lane_mod_16
-                                b_k_base = k_base + fx.Index(k_offset_bytes) + lane_div_16 * fx.Index(16)
-
-                                b_byte_off = b_group_off + b_col * k_in + b_k_base
-                                b_idx0 = b_byte_off // fx.Index(4)
-                                b_idx1 = b_idx0 + fx.Index(2)  # +2 i32 elements = +8 bytes
-
-                                # Load 8 bytes each for the two K32 MFMAs; offset in i32 elements
-                                b0_i32x2 = buffer_ops.buffer_load(b_rsrc, b_idx0, vec_width=2, dtype=T.i32)
-                                b1_i32x2 = buffer_ops.buffer_load(b_rsrc, b_idx1, vec_width=2, dtype=T.i32)
-
-                                b0_i64 = vector.extract(
-                                    vector.bitcast(T.vec(1, T.i64), b0_i32x2),
-                                    static_position=[0], dynamic_position=[]
-                                )
-                                b1_i64 = vector.extract(
-                                    vector.bitcast(T.vec(1, T.i64), b1_i32x2),
-                                    static_position=[0], dynamic_position=[]
-                                )
-
-                                # Two K32 MFMAs
+                                # Two K32 MFMAs using preshuffle B packs
                                 mfma_fn = rocdl.mfma_f32_16x16x32_fp8_fp8
-                                mfma_mid = mfma_fn(T.f32x4, [a0, b0_i64, acc_init, 0, 0, 0])
-                                mfma_result = mfma_fn(T.f32x4, [a1, b1_i64, mfma_mid, 0, 0, 0])
+                                mfma_mid = mfma_fn(T.f32x4, [a0, b_packs0[ni], acc_init, 0, 0, 0])
+                                mfma_result = mfma_fn(T.f32x4, [a1, b_packs1[ni], mfma_mid, 0, 0, 0])
 
                                 # Apply scales: accum += mfma_result * scale_a * scale_b
                                 s_a_v4 = s_a_vecs[mi]
@@ -384,22 +420,25 @@ def compile_grouped_fp8_gemm(
                 return current_accs
 
             # ===== Ping-pong K-loop =====
-            # Prologue: load first tile into pong
+            # Prologue: load first A tile and B tile
             load_a_tile(0, lds_base_pong)
+            b_tile_pong = load_b_tile(fx.Index(0))
             gpu.barrier()
 
             for k_pair in range_constexpr(0, num_k_tiles, 2):
-                # Load next tile into ping while computing current from pong
+                # Load next A+B into ping while computing current from pong
                 if k_pair + 1 < num_k_tiles:
                     load_a_tile(k_pair + 1, lds_base_ping)
-                accs = compute_tile(accs, k_pair, lds_base_pong)
+                    b_tile_ping = load_b_tile(fx.Index((k_pair + 1) * tile_k))
+                accs = compute_tile(accs, k_pair, lds_base_pong, b_tile_pong)
                 gpu.barrier()
 
-                # Load next tile into pong while computing current from ping
+                # Load next A+B into pong while computing current from ping
                 if k_pair + 1 < num_k_tiles:
                     if k_pair + 2 < num_k_tiles:
                         load_a_tile(k_pair + 2, lds_base_pong)
-                    accs = compute_tile(accs, k_pair + 1, lds_base_ping)
+                        b_tile_pong = load_b_tile(fx.Index((k_pair + 2) * tile_k))
+                    accs = compute_tile(accs, k_pair + 1, lds_base_ping, b_tile_ping)
                     gpu.barrier()
 
             # ===== Epilogue: store results =====
