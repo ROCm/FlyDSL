@@ -9,6 +9,7 @@ import sys
 import argparse
 import csv
 import hashlib
+import math
 import random
 from pathlib import Path
 import logging
@@ -294,7 +295,7 @@ def run_aiter_bench(
     batch, seq_len, nheads, head_dim, dtype, causal,
     warmup, iters, seed=DEFAULT_SEED, backend="ck",
 ):
-    """Run CK or ASM kernel via aiter and return {tflops, max_err, us}."""
+    """Run true CK or true ASM kernel via aiter and return {tflops, max_err, us}."""
     try:
         import aiter
     except ImportError:
@@ -303,7 +304,6 @@ def run_aiter_bench(
     if backend == "asm" and dtype != torch.bfloat16:
         return {"skip": True}
 
-    os.environ["AITER_BF16_FWD_BACKEND"] = backend
     results = {}
     setup_seed(seed)
     torch.cuda.empty_cache()
@@ -312,13 +312,60 @@ def run_aiter_bench(
     q = torch.empty(B, S, H, D, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
     k = torch.empty(B, S, H, D, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
     v = torch.empty(B, S, H, D, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
+    softmax_scale = 1.0 / math.sqrt(D)
+
+    if backend == "ck":
+        def aiter_forward():
+            return aiter.mha_fwd(
+                q,
+                k,
+                v,
+                0.0,
+                softmax_scale,
+                causal,
+                -1,
+                -1,
+                0,
+                True,
+                False,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+    elif backend == "asm":
+        def aiter_forward():
+            return aiter.fmha_v3_fwd(
+                q,
+                k,
+                v,
+                0.0,
+                softmax_scale,
+                causal,
+                -1,
+                -1,
+                True,
+                False,
+                2,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+    else:
+        return {"err": f"unsupported backend: {backend}"}
 
     try:
-        out = aiter.flash_attn_func(
-            q, k, v, 0.0, None, causal, (-1, -1),
-            None, None, True,
-            return_lse=True, return_attn_probs=True, how_v3_bf16_cvt=2,
-        )[0]
+        out = aiter_forward()[0]
         torch.cuda.synchronize()
     except Exception as e:
         import traceback; traceback.print_exc()
@@ -330,11 +377,7 @@ def run_aiter_bench(
 
     try:
         def bench_fn():
-            aiter.flash_attn_func(
-                q, k, v, 0.0, None, causal, (-1, -1),
-                None, None, True,
-                return_lse=True, return_attn_probs=True, how_v3_bf16_cvt=2,
-            )
+            aiter_forward()
 
         _, us = run_perftest(bench_fn, num_iters=iters, num_warmup=warmup)
         s_eff = S / 2.0 if causal else float(S)
