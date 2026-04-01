@@ -74,7 +74,7 @@ def _apply_neox_rope(qk_rsrc, qk_dw, cos_rsrc, sin_rsrc, cos_dw,
     """
     def _load_e(rsrc, dw):
         raw = buffer_ops.buffer_load(rsrc, dw, vec_width=vec_dwords, dtype=T.i32)
-        return vector.bitcast(vec_type_e, raw) if vec_dwords != VEC_WIDTH else raw.bitcast(vec_type_e)
+        return vector.bitcast(vec_type_e, raw)
 
     qk_e   = _load_e(qk_rsrc,   qk_dw)
     cos_e  = _load_e(cos_rsrc,  cos_dw)
@@ -87,7 +87,7 @@ def _apply_neox_rope(qk_rsrc, qk_dw, cos_rsrc, sin_rsrc, cos_dw,
     sin_term = arith.select(is_first_half, arith.negf(pair_sin), pair_sin)
     rot_e    = ArithValue(qk_cos) + ArithValue(sin_term)
 
-    return vector.bitcast(i32_vec_ty, rot_e) if vec_dwords != VEC_WIDTH else rot_e.bitcast(i32_vec_ty)
+    return vector.bitcast(i32_vec_ty, rot_e)
 
 
 def build_fused_rope_cache_module(
@@ -352,7 +352,7 @@ def build_fused_rope_cache_module(
                     # Scalar stores required: stride-1 dim is block_size (not D), so
                     # consecutive elements along D are block_size apart in memory —
                     # a vector store would scatter across non-contiguous addresses.
-                    v_e = vector.bitcast(vec_type_e, v_raw) if vec_dwords != VEC_WIDTH else v_raw.bitcast(vec_type_e)
+                    v_e = vector.bitcast(vec_type_e, v_raw)
 
                     vc_nf_layout = fx.make_layout(
                         (None, num_kv_heads, head_dim, block_size),
@@ -370,7 +370,6 @@ def build_fused_rope_cache_module(
 
     @flyc.jit
     def launch_fused_rope_cache(
-        # Scalar stores required: stride-1 dim is block_size (not D)
         Q: fx.Tensor,
         K: fx.Tensor,
         V: fx.Tensor,
