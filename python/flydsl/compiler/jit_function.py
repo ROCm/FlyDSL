@@ -359,12 +359,14 @@ def _extract_llvm_ir(module: ir.Module):
         return None
 
 
-def _pipeline_fragments(backend) -> list:
-    """Return the MLIR pass-pipeline fragments for *backend*."""
+def _pipeline_fragments(backend) -> tuple:
+    """Return the MLIR pass-pipeline fragments and llvm_options for *backend*."""
     from .kernel_function import CompilationContext
 
     hints = CompilationContext.get_compile_hints()
-    return backend.pipeline_fragments(compile_hints=hints)
+    fragments = backend.pipeline_fragments(compile_hints=hints)
+    llvm_opts = hints.get("llvm_options")
+    return fragments, llvm_opts
 
 
 class MlirCompiler:
@@ -375,7 +377,10 @@ class MlirCompiler:
         backend = get_backend(arch=arch)
 
         module = ir.Module.parse(module.operation.get_asm(enable_debug_info=env.debug.enable_debug_info))
-        fragments = _pipeline_fragments(backend)
+        fragments, llvm_opts = _pipeline_fragments(backend)
+
+        from .llvm_options import llvm_options as _llvm_options
+        _llvm_ctx = _llvm_options(llvm_opts) if llvm_opts else nullcontext()
 
         if env.debug.print_origin_ir:
             log().info(f"Origin IR: \n{module}")
@@ -383,60 +388,61 @@ class MlirCompiler:
         dump_enabled = env.debug.dump_ir
         dump_dir = Path(env.debug.dump_dir).resolve()
 
-        if dump_enabled:
-            asm = module.operation.get_asm(enable_debug_info=True)
-            kernel_names = _infer_kernel_names_from_asm(asm)
-            subdir = kernel_names[0] if len(kernel_names) == 1 else (func_name or "module")
-            dump_dir = dump_dir / _sanitize_path_component(subdir)
-            print(f"[flydsl.compile] FLYDSL_DUMP_IR=1 dir={dump_dir}")
+        with _llvm_ctx:
+            if dump_enabled:
+                asm = module.operation.get_asm(enable_debug_info=True)
+                kernel_names = _infer_kernel_names_from_asm(asm)
+                subdir = kernel_names[0] if len(kernel_names) == 1 else (func_name or "module")
+                dump_dir = dump_dir / _sanitize_path_component(subdir)
+                print(f"[flydsl.compile] FLYDSL_DUMP_IR=1 dir={dump_dir}")
 
-            out = _dump_ir("00_origin", dump_dir=dump_dir, asm=asm)
-            print(f"[flydsl.compile] dump 00_origin -> {out}")
+                out = _dump_ir("00_origin", dump_dir=dump_dir, asm=asm)
+                print(f"[flydsl.compile] dump 00_origin -> {out}")
 
-            asm_for_isa = None
-            llir = None
-            stage_num_base = 1
-            for idx, frag in enumerate(fragments):
-                if frag.strip().startswith("gpu-module-to-binary"):
-                    llir = _extract_llvm_ir(module)
+                asm_for_isa = None
+                llir = None
+                stage_num_base = 1
+                for idx, frag in enumerate(fragments):
+                    if frag.strip().startswith("gpu-module-to-binary"):
+                        llir = _extract_llvm_ir(module)
 
-                stage_num = stage_num_base + idx
-                stage_name = f"{stage_num:02d}_{_stage_label_from_fragment(frag)}"
-                pm = PassManager.parse(f"builtin.module({frag})")
+                    stage_num = stage_num_base + idx
+                    stage_name = f"{stage_num:02d}_{_stage_label_from_fragment(frag)}"
+                    pm = PassManager.parse(f"builtin.module({frag})")
+                    pm.enable_verifier(env.debug.enable_verifier)
+                    pm.run(module.operation)
+
+                    stage_asm = module.operation.get_asm(enable_debug_info=True)
+                    out = _dump_ir(stage_name, dump_dir=dump_dir, asm=stage_asm)
+                    print(f"[flydsl.compile] dump {stage_name} -> {out}")
+
+                    if frag.strip() == "reconcile-unrealized-casts":
+                        asm_for_isa = stage_asm
+
+                next_stage = stage_num_base + len(fragments)
+                if llir is not None:
+                    ll_name = f"{next_stage:02d}_llvm_ir"
+                    (dump_dir / f"{ll_name}.ll").write_text(llir, encoding="utf-8")
+                    print(f"[flydsl.compile] dump {ll_name} -> {dump_dir / f'{ll_name}.ll'}")
+                    next_stage += 1
+
+                if asm_for_isa is not None:
+                    isa_stage = f"{next_stage:02d}_final_isa"
+                    isa_out = _dump_isa(
+                        dump_dir=dump_dir,
+                        ctx=module.context,
+                        asm=asm_for_isa,
+                        verify=env.debug.enable_verifier,
+                        stage_name=isa_stage,
+                    )
+                    if isa_out is not None:
+                        print(f"[flydsl.compile] dump {isa_stage} -> {isa_out}")
+            else:
+                pipeline = f"builtin.module({','.join(fragments)})"
+                pm = PassManager.parse(pipeline)
                 pm.enable_verifier(env.debug.enable_verifier)
+                pm.enable_ir_printing(print_after_all=env.debug.print_after_all)
                 pm.run(module.operation)
-
-                stage_asm = module.operation.get_asm(enable_debug_info=True)
-                out = _dump_ir(stage_name, dump_dir=dump_dir, asm=stage_asm)
-                print(f"[flydsl.compile] dump {stage_name} -> {out}")
-
-                if frag.strip() == "reconcile-unrealized-casts":
-                    asm_for_isa = stage_asm
-
-            next_stage = stage_num_base + len(fragments)
-            if llir is not None:
-                ll_name = f"{next_stage:02d}_llvm_ir"
-                (dump_dir / f"{ll_name}.ll").write_text(llir, encoding="utf-8")
-                print(f"[flydsl.compile] dump {ll_name} -> {dump_dir / f'{ll_name}.ll'}")
-                next_stage += 1
-
-            if asm_for_isa is not None:
-                isa_stage = f"{next_stage:02d}_final_isa"
-                isa_out = _dump_isa(
-                    dump_dir=dump_dir,
-                    ctx=module.context,
-                    asm=asm_for_isa,
-                    verify=env.debug.enable_verifier,
-                    stage_name=isa_stage,
-                )
-                if isa_out is not None:
-                    print(f"[flydsl.compile] dump {isa_stage} -> {isa_out}")
-        else:
-            pipeline = f"builtin.module({','.join(fragments)})"
-            pm = PassManager.parse(pipeline)
-            pm.enable_verifier(env.debug.enable_verifier)
-            pm.enable_ir_printing(print_after_all=env.debug.print_after_all)
-            pm.run(module.operation)
 
         return module
 

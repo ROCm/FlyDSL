@@ -166,7 +166,7 @@ def build_flash_attn_func_module_primary(
     lds_kv_offset = allocator._align(allocator.ptr, 16)
     allocator.ptr = lds_kv_offset + LDS_KV_TOTAL_SIZE * 2
 
-    @flyc.kernel
+    @flyc.kernel(known_block_size=[BLOCK_SIZE, 1, 1])
     def flash_attn_func_kernel(
         Q: fx.Tensor,
         K: fx.Tensor,
@@ -1049,6 +1049,10 @@ def build_flash_attn_func_module_primary(
     _fmha_compile_hints = {
         "fast_fp_math": fast_fp_math,
         "unsafe_fp_math": unsafe_fp_math,
+        "llvm_options": {
+            "enable-post-misched": False,
+            "lsr-drop-solution": True,
+        },
     }
 
     def _launch(*args, **kwargs):

@@ -78,6 +78,7 @@ declare_mlir_python_extension(FlyPythonSources.RegisterEverything
     MLIRCAPIIR
     MLIRCPIFly
     MLIRCPIFlyROCDL
+    MLIRCPILLVMOption
     MLIRCAPIArith
     MLIRCAPIGPU
     MLIRCAPILLVM
