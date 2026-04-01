@@ -11,6 +11,8 @@ import sys
 import pytest
 import torch
 
+pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
+
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 _PYFLIR_SRC = os.path.join(_REPO_ROOT, "flydsl", "src")
 if _REPO_ROOT not in sys.path:
