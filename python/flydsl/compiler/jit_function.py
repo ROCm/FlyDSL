@@ -8,6 +8,7 @@ import os
 import pickle
 import pkgutil
 import threading
+import time
 import types
 from functools import lru_cache
 from pathlib import Path
@@ -93,7 +94,7 @@ def _flydsl_key() -> str:
                         h.update(chunk)
                 contents.append(h.hexdigest())
 
-    key = f"flydsl:{flydsl.__version__}:{backend.hash()}-" + "-".join(contents)
+    key = f"flydsl:{flydsl.__version__}:O{env.compile.opt_level}:{backend.hash()}-" + "-".join(contents)
     log().debug(f"flydsl_key: {hashlib.sha256(key.encode()).hexdigest()[:16]}")
     return key
 
@@ -369,6 +370,12 @@ def _pipeline_fragments(backend) -> list:
 class MlirCompiler:
     @classmethod
     def compile(cls, module: ir.Module, *, arch: str = "", func_name: str = "") -> ir.Module:
+        compile_start = time.monotonic()
+        display_name = func_name or "unknown"
+        log().info(f"[flydsl.compile] start compiling '{display_name}' (arch={arch or 'auto'}, O={env.compile.opt_level})")
+        import sys
+        print(f"[flydsl.compile] compiling '{display_name}' ...", end="", flush=True, file=sys.stderr)
+
         module.operation.verify()
 
         backend = get_backend(arch=arch)
@@ -387,10 +394,10 @@ class MlirCompiler:
             kernel_names = _infer_kernel_names_from_asm(asm)
             subdir = kernel_names[0] if len(kernel_names) == 1 else (func_name or "module")
             dump_dir = dump_dir / _sanitize_path_component(subdir)
-            print(f"[flydsl.compile] FLYDSL_DUMP_IR=1 dir={dump_dir}")
+            print(f"\n[flydsl.compile] FLYDSL_DUMP_IR=1 dir={dump_dir}", file=sys.stderr)
 
             out = _dump_ir("00_origin", dump_dir=dump_dir, asm=asm)
-            print(f"[flydsl.compile] dump 00_origin -> {out}")
+            print(f"[flydsl.compile] dump 00_origin -> {out}", file=sys.stderr)
 
             asm_for_isa = None
             llir = None
@@ -401,13 +408,15 @@ class MlirCompiler:
 
                 stage_num = stage_num_base + idx
                 stage_name = f"{stage_num:02d}_{_stage_label_from_fragment(frag)}"
+                stage_start = time.monotonic()
                 pm = PassManager.parse(f"builtin.module({frag})")
                 pm.enable_verifier(env.debug.enable_verifier)
                 pm.run(module.operation)
+                stage_elapsed = time.monotonic() - stage_start
 
                 stage_asm = module.operation.get_asm(enable_debug_info=True)
                 out = _dump_ir(stage_name, dump_dir=dump_dir, asm=stage_asm)
-                print(f"[flydsl.compile] dump {stage_name} -> {out}")
+                print(f"[flydsl.compile] dump {stage_name} -> {out} ({stage_elapsed:.1f}s)", file=sys.stderr)
 
                 if frag.strip() == "reconcile-unrealized-casts":
                     asm_for_isa = stage_asm
@@ -416,7 +425,7 @@ class MlirCompiler:
             if llir is not None:
                 ll_name = f"{next_stage:02d}_llvm_ir"
                 (dump_dir / f"{ll_name}.ll").write_text(llir, encoding="utf-8")
-                print(f"[flydsl.compile] dump {ll_name} -> {dump_dir / f'{ll_name}.ll'}")
+                print(f"[flydsl.compile] dump {ll_name} -> {dump_dir / f'{ll_name}.ll'}", file=sys.stderr)
                 next_stage += 1
 
             if asm_for_isa is not None:
@@ -429,13 +438,17 @@ class MlirCompiler:
                     stage_name=isa_stage,
                 )
                 if isa_out is not None:
-                    print(f"[flydsl.compile] dump {isa_stage} -> {isa_out}")
+                    print(f"[flydsl.compile] dump {isa_stage} -> {isa_out}", file=sys.stderr)
         else:
             pipeline = f"builtin.module({','.join(fragments)})"
             pm = PassManager.parse(pipeline)
             pm.enable_verifier(env.debug.enable_verifier)
             pm.enable_ir_printing(print_after_all=env.debug.print_after_all)
             pm.run(module.operation)
+
+        elapsed = time.monotonic() - compile_start
+        print(f" done ({elapsed:.1f}s)", flush=True, file=sys.stderr)
+        log().info(f"[flydsl.compile] finished '{display_name}' in {elapsed:.1f}s")
 
         return module
 
@@ -744,11 +757,15 @@ class JitFunction:
         use_cache = env.runtime.enable_cache
         if use_cache:
             cached_func = self._mem_cache.get(cache_key)
-            if cached_func is None and not env.debug.dump_ir:
+            if cached_func is not None:
+                log().debug(f"[flydsl.cache] memory hit for '{self.func.__name__}'")
+            elif not env.debug.dump_ir:
                 str_key = self._cache_key_to_str(cache_key)
                 cached_func = self.cache_manager.get(str_key) if self.cache_manager else None
                 if cached_func is not None:
                     self._mem_cache[cache_key] = cached_func
+                    import sys
+                    print(f"[flydsl.cache] disk hit for '{self.func.__name__}'", flush=True, file=sys.stderr)
 
         if cached_func is not None:
             # Build CallState via JitArgument registry (same dispatch as compile path)

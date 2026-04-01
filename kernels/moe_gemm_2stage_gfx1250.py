@@ -64,7 +64,8 @@ def _align_up(v: int, a: int) -> int:
     return ((int(v) + int(a) - 1) // int(a)) * int(a)
 
 
-def _pick_fp16_single_launch_shape(route_tile_m: int, route_tile_n: int) -> tuple[int, int, int, int]:
+def _pick_fp16_single_launch_shape(route_tile_m: int, route_tile_n: int,
+                                    max_total_warps: int = 0) -> tuple[int, int, int, int]:
     """Pick launch shape for fp16 stage1 single-kernel path.
 
     Single-kernel path should follow route tile size (not backend-expanded 128x*)
@@ -78,6 +79,8 @@ def _pick_fp16_single_launch_shape(route_tile_m: int, route_tile_n: int) -> tupl
         if (tile_m // mw) % 16 != 0:
             continue
         for nw in (8, 4, 2, 1):
+            if max_total_warps > 0 and mw * nw > max_total_warps:
+                continue
             if tile_n % nw != 0:
                 continue
             if (tile_n // nw) % 16 != 0:
@@ -284,21 +287,29 @@ def _compile_fp16_stage1_single_kernel(
 
         def copy_b_to_lds(k_base, lds_memref, up_shift):
             eid_idx = arith.index_cast(T.index, eid_i32)
-            n_off = eid_idx * arith.index(n_total) + blk_n + arith.index(up_shift)
-            desc = tdm_ops.make_tensor_descriptor_2d(
-                global_ptr=arg_w,
-                lds_memref=lds_memref,
-                global_offset=(k_base, n_off),
-                tensor_shape=(int(tile_k), int(tile_n)),
-                strides=(1, int(model_dim)),
-                tile_shape=(int(tile_k), int(tile_n)),
-                elem_bytes=elem_bytes,
-                pad_interval=int(tile_n),
-                pad_amount=LDS_PAD_B,
-                num_warps=int(m_warp) * int(n_warp),
-                workgroup_mask=0,
-            )
-            tdm_ops.tensor_load_2d(desc)
+            n_base = eid_idx * arith.index(n_total) + blk_n + arith.index(up_shift)
+            total = int(tile_k) * int(tile_n)
+            rounds = (total + block_threads - 1) // block_threads
+            for it in range(rounds):
+                elem = tx + fx.Index(it * block_threads)
+                in_range = arith.cmpi(
+                    arith.CmpIPredicate.ult,
+                    arith.index_cast(T.i32, elem),
+                    arith.constant(total, type=T.i32),
+                )
+                _if_elem = scf.IfOp(in_range)
+                with ir.InsertionPoint(_if_elem.then_block):
+                    k_local = elem // arith.index(int(tile_n))
+                    n_local = elem % arith.index(int(tile_n))
+                    w_idx = (n_base + n_local) * arith.index(int(model_dim)) + k_base + k_local
+                    w_val = buffer_ops.buffer_load(
+                        w_rsrc, arith.index_cast(T.i32, w_idx),
+                        vec_width=1, dtype=T.f16,
+                    )
+                    lds_idx = k_local * arith.index(lds_b_stride) + n_local
+                    v1 = vector.from_elements(T.vec(1, T.f16), [w_val])
+                    vector.store(v1, lds_memref, [lds_idx], alignment=2)
+                    scf.YieldOp([])
 
         def _precompute_a_lane_bases():
             row_stride_off = (warp_m_base + lane16) * arith.index(lds_a_stride)
@@ -351,7 +362,6 @@ def _compile_fp16_stage1_single_kernel(
                 pack_a_to_lds(k_base)
                 copy_b_to_lds(k_base, lds_bg, 0)
                 copy_b_to_lds(k_base, lds_bu, int(inter_dim))
-                tdm_ops.tensor_wait(0)
                 gpu.barrier()
 
                 for ks in range_constexpr(k_wmma_steps):
@@ -686,21 +696,29 @@ def _compile_fp16_stage2_single_kernel(
 
         def copy_b_to_lds(k_base):
             eid_idx = arith.index_cast(T.index, eid_i32)
-            n_off = eid_idx * n_idx + blk_n
-            desc = tdm_ops.make_tensor_descriptor_2d(
-                global_ptr=arg_w,
-                lds_memref=lds_b,
-                global_offset=(k_base, n_off),
-                tensor_shape=(int(tile_k), int(tile_n)),
-                strides=(1, int(inter_dim)),
-                tile_shape=(int(tile_k), int(tile_n)),
-                elem_bytes=elem_bytes,
-                pad_interval=int(tile_n),
-                pad_amount=LDS_PAD_B,
-                num_warps=int(m_warp) * int(n_warp),
-                workgroup_mask=0,
-            )
-            tdm_ops.tensor_load_2d(desc)
+            n_base = eid_idx * n_idx + blk_n
+            total = int(tile_k) * int(tile_n)
+            rounds = (total + block_threads - 1) // block_threads
+            for it in range(rounds):
+                elem = tx + fx.Index(it * block_threads)
+                in_range = arith.cmpi(
+                    arith.CmpIPredicate.ult,
+                    arith.index_cast(T.i32, elem),
+                    arith.constant(total, type=T.i32),
+                )
+                _if_elem = scf.IfOp(in_range)
+                with ir.InsertionPoint(_if_elem.then_block):
+                    k_local = elem // arith.index(int(tile_n))
+                    n_local = elem % arith.index(int(tile_n))
+                    w_idx = (n_base + n_local) * arith.index(int(inter_dim)) + k_base + k_local
+                    w_val = buffer_ops.buffer_load(
+                        w_rsrc, arith.index_cast(T.i32, w_idx),
+                        vec_width=1, dtype=T.f16,
+                    )
+                    lds_idx = k_local * arith.index(lds_b_stride) + n_local
+                    v1 = vector.from_elements(T.vec(1, T.f16), [w_val])
+                    vector.store(v1, lds_b, [lds_idx], alignment=2)
+                    scf.YieldOp([])
 
         def _precompute_a_lane_bases():
             row_stride_off = (warp_m_base + lane16) * arith.index(lds_a_stride)
@@ -752,7 +770,6 @@ def _compile_fp16_stage2_single_kernel(
                 k_base = fx.Index(kt * int(tile_k))
                 pack_a_to_lds(k_base)
                 copy_b_to_lds(k_base)
-                tdm_ops.tensor_wait(0)
                 gpu.barrier()
 
                 for ks in range_constexpr(k_wmma_steps):
@@ -2862,7 +2879,7 @@ def compile_moe_gemm1(
         if out_dtype not in ("f16", "bf16"):
             raise ValueError(f"fp16 stage1 supports out_dtype in ('f16','bf16'), got {out_dtype!r}")
         single_tile_m, single_tile_n, single_m_warp, single_n_warp = _pick_fp16_single_launch_shape(
-            route_tile_m, int(tile_n)
+            route_tile_m, int(tile_n), max_total_warps=8,
         )
         return _compile_fp16_stage1_single_kernel(
             model_dim=int(model_dim),
@@ -2969,7 +2986,7 @@ def compile_moe_gemm2(
     route_tile_m = int(tile_m)
     if in_dtype == "fp16":
         single_tile_m, single_tile_n, single_m_warp, single_n_warp = _pick_fp16_single_launch_shape(
-            route_tile_m, int(tile_n)
+            route_tile_m, int(tile_n), max_total_warps=8,
         )
         return _compile_fp16_stage2_single_kernel(
             inter_dim=int(inter_dim),

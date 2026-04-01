@@ -617,22 +617,21 @@ def run_moe_stage1(
 
     # Quantize inputs / weights.
     if in_dtype == "fp4":
-        x_q = fp4_utils.random_fp4_packed(tokens, model_dim, device=device)
-        w1_q = fp4_utils.random_fp4_packed(experts * (2 * inter_dim), model_dim, device=device).view(
-            experts, 2 * inter_dim, model_dim // 2
-        )
-        w2_q = fp4_utils.random_fp4_packed(experts * model_dim, inter_dim, device=device).view(
-            experts, model_dim, inter_dim // 2
-        )
-        scale_x = fp4_utils.random_e8m0(tokens, model_dim // 32, device=device)
-        scale_w1 = fp4_utils.random_e8m0(experts * (2 * inter_dim), model_dim // 32, device=device).view(
-            experts, 2 * inter_dim, model_dim // 32
-        )
+        # Quantize fp32 inputs to fp4+e8m0 to keep values in a range that avoids
+        # fp16 overflow after the silu(gate)*up epilogue.
+        x_fp4, scale_x_raw, _ = fp4_utils.per_1x32_f4_quant(x_fp32)
+        x_q = x_fp4.view(torch.uint8)
+        scale_x = scale_x_raw.view(torch.uint8).view(tokens, model_dim // 32)
+        w1_fp4, scale_w1_raw, _ = fp4_utils.per_1x32_f4_quant(w1_fp32.view(-1, model_dim))
+        w1_q = w1_fp4.view(torch.uint8).view(experts, 2 * inter_dim, model_dim // 2)
+        scale_w1 = scale_w1_raw.view(torch.uint8).view(experts, 2 * inter_dim, model_dim // 32)
+        w2_fp4, _, _ = fp4_utils.per_1x32_f4_quant(w2_fp32.view(-1, inter_dim))
+        w2_q = w2_fp4.view(torch.uint8).view(experts, model_dim, inter_dim // 2)
     elif in_dtype == "fp8":
-        x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=DTYPE_FP8)  # [tokens,K], [tokens,1]
-        w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=DTYPE_FP8)  # [E,2*inter,K], [E,2*inter,1]
-    # w2 is not used by our kernel, but required by aiter stage1 API
-        w2_q, _scale_w2_unused = pertoken_quant(w2_fp32, quant_dtype=DTYPE_FP8)
+        # gfx1250 WMMA_SCALE requires per-block-of-32 e8m0 microscaling, not per-row scales.
+        x_q, scale_x = _per_1x32_fp8_quant(x_fp32)        # [tokens,K] uint8, [tokens, K//32] uint8
+        w1_q, scale_w1 = _per_1x32_fp8_quant(w1_fp32)      # [E,2*inter,K] uint8, [E,2*inter, K//32] uint8
+        w2_q, _scale_w2_unused = _per_1x32_fp8_quant(w2_fp32)
     elif in_dtype == "a8w4":
         x_q, scale_x = _per_1x32_fp8_quant(x_fp32)
         w1_q, scale_w1, _ = fp4_utils.per_1x32_f4_quant(w1_fp32)
@@ -713,8 +712,11 @@ def run_moe_stage1(
 
     # Preshuffle weights on the *unpacked* tensor.
     uses_fp4_weight_layout = is_fp4 or is_a8w4
-    w1_shuffled = w1_q if uses_fp4_weight_layout else shuffle_weight(w1_q)
-    w2_shuffled = w2_q if uses_fp4_weight_layout else (shuffle_weight(w2_q) if in_dtype == "fp8" else None)
+    # gfx1250 native kernels (fp4, fp8, a8w4, fp16) use TDM/transpose-load and
+    # handle weight layout internally — skip the MFMA-style shuffle_weight.
+    uses_native_gfx1250 = in_dtype in ("fp4", "fp8", "a8w4", "fp16")
+    w1_shuffled = w1_q if (uses_fp4_weight_layout or uses_native_gfx1250) else shuffle_weight(w1_q)
+    w2_shuffled = w2_q if (uses_fp4_weight_layout or uses_native_gfx1250) else (shuffle_weight(w2_q) if in_dtype == "fp8" else None)
     if in_dtype in ("fp8", "a8w4"):
         _single_tile_m, _single_tile_n, _single_m_warp, _single_n_warp = _pick_fp16_single_launch_shape(tile_m, tile_n)
         _warp_tile_n = _single_tile_n // _single_n_warp
@@ -733,6 +735,7 @@ def run_moe_stage1(
         ).view(w1_rows, model_dim // 32)
 
     # Flatten W1 for our FlyDSL kernel (treat expert dim as part of N).
+    uses_block_scale = in_dtype in ("fp8", "a8w4", "fp4")
     if uses_fp4_weight_layout:
         w1_shuffled_flat = w1_shuffled.view(experts * (2 * inter_dim), model_dim // 2)
         w1_q_flat = w1_q.view(experts * (2 * inter_dim), model_dim // 2)
@@ -741,8 +744,9 @@ def run_moe_stage1(
     else:
         w1_shuffled_flat = w1_shuffled.view(experts * (2 * inter_dim), model_dim)
         w1_q_flat = w1_q.view(experts * (2 * inter_dim), model_dim)
-        scale_w1_ref_flat = None if scale_w1 is None else scale_w1.view(experts * (2 * inter_dim), 1)
-        scale_w1_kernel_flat = None if scale_w1_kernel is None else scale_w1_kernel.view(experts * (2 * inter_dim), 1)
+        scale_cols = model_dim // 32 if uses_block_scale else 1
+        scale_w1_ref_flat = None if scale_w1 is None else scale_w1.view(experts * (2 * inter_dim), scale_cols)
+        scale_w1_kernel_flat = None if scale_w1_kernel is None else scale_w1_kernel.view(experts * (2 * inter_dim), scale_cols)
 
     # No host-side padding: keep tensors contiguous and rely on kernel-side resource sizes / early-exit.
     x_q = (
@@ -851,6 +855,12 @@ def run_moe_stage1(
             # x_q is slot-major [topk, tokens, K]; convert to [tokens, topk, K] for ref.
             x_ref = x_q.view(topk, tokens, model_dim).permute(1, 0, 2).contiguous()
             sx_ref = scale_x.view(topk, tokens, 1).permute(1, 0, 2).contiguous()
+        elif in_dtype == "fp8":
+            x_ref = _dequant_blockscale_fp8(x_q.view(tokens, model_dim), scale_x.view(tokens, model_dim // 32))
+            sx_ref = None
+        elif is_fp4:
+            x_ref = _dequant_blockscale_fp4(x_q.view(tokens, model_dim // 2), scale_x.view(tokens, model_dim // 32), model_dim)
+            sx_ref = None
         else:
             x_ref = x_q
             sx_ref = scale_x
@@ -860,6 +870,30 @@ def run_moe_stage1(
                 w1_q_flat,
                 sx_ref,
                 scale_w1_ref_flat,
+                topk_ids.to(torch.int64),
+                topk_weights,
+                inter_dim=inter_dim,
+                doweight_stage1=doweight_stage1,
+            )
+        elif in_dtype == "fp8":
+            w_ref_f32 = _dequant_blockscale_fp8(w1_q_flat, scale_w1_ref_flat)
+            ref = torch_moe_gemm1(
+                x_ref,
+                w_ref_f32,
+                sx_ref,
+                None,
+                topk_ids.to(torch.int64),
+                topk_weights,
+                inter_dim=inter_dim,
+                doweight_stage1=doweight_stage1,
+            )
+        elif is_fp4:
+            w_ref_f32 = _dequant_blockscale_fp4(w1_q_flat, scale_w1_ref_flat, model_dim)
+            ref = torch_moe_gemm1(
+                x_ref,
+                w_ref_f32,
+                sx_ref,
+                None,
                 topk_ids.to(torch.int64),
                 topk_weights,
                 inter_dim=inter_dim,
@@ -879,7 +913,7 @@ def run_moe_stage1(
                 scale_w1_groups=scale_w1_groups,
             )
 
-        rtol = 0.5 if (is_int4 or is_int4_bf16 or is_a8w4) else 0.25
+        rtol = 0.5 if (is_int4 or is_int4_bf16 or is_a8w4 or is_fp4) else 0.25
         atol = 0.5 if (is_int4 or is_int4_bf16 or is_a8w4) else 0.25
         _maybe_debug_a8w4_stage1_failure(
             in_dtype=in_dtype,
@@ -1143,24 +1177,20 @@ def run_moe_stage2(
 
     # Quantize inputs / weights.
     if in_dtype == "fp4":
-        x_q = fp4_utils.random_fp4_packed(tokens, model_dim, device=device)
-        w1_q = fp4_utils.random_fp4_packed(experts * (2 * inter_dim), model_dim, device=device).view(
-            experts, 2 * inter_dim, model_dim // 2
-        )
-        w2_q = fp4_utils.random_fp4_packed(experts * model_dim, inter_dim, device=device).view(
-            experts, model_dim, inter_dim // 2
-        )
-        scale_x = fp4_utils.random_e8m0(tokens, model_dim // 32, device=device)
-        scale_w1 = fp4_utils.random_e8m0(experts * (2 * inter_dim), model_dim // 32, device=device).view(
-            experts, 2 * inter_dim, model_dim // 32
-        )
-        scale_w2 = fp4_utils.random_e8m0(experts * model_dim, inter_dim // 32, device=device).view(
-            experts, model_dim, inter_dim // 32
-        )
+        x_fp4, scale_x_raw, _ = fp4_utils.per_1x32_f4_quant(x_fp32)
+        x_q = x_fp4.view(torch.uint8)
+        scale_x = scale_x_raw.view(torch.uint8).view(tokens, model_dim // 32)
+        w1_fp4, scale_w1_raw, _ = fp4_utils.per_1x32_f4_quant(w1_fp32.view(-1, model_dim))
+        w1_q = w1_fp4.view(torch.uint8).view(experts, 2 * inter_dim, model_dim // 2)
+        scale_w1 = scale_w1_raw.view(torch.uint8).view(experts, 2 * inter_dim, model_dim // 32)
+        w2_fp4, scale_w2_raw, _ = fp4_utils.per_1x32_f4_quant(w2_fp32.view(-1, inter_dim))
+        w2_q = w2_fp4.view(torch.uint8).view(experts, model_dim, inter_dim // 2)
+        scale_w2 = scale_w2_raw.view(torch.uint8).view(experts, model_dim, inter_dim // 32)
     elif in_dtype == "fp8":
-        x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=DTYPE_FP8)
-        w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=DTYPE_FP8)
-        w2_q, scale_w2 = pertoken_quant(w2_fp32, quant_dtype=DTYPE_FP8)
+        # gfx1250 WMMA_SCALE requires per-block-of-32 e8m0 microscaling.
+        x_q, scale_x = _per_1x32_fp8_quant(x_fp32)
+        w1_q, scale_w1 = _per_1x32_fp8_quant(w1_fp32)
+        w2_q, scale_w2 = _per_1x32_fp8_quant(w2_fp32)
     elif in_dtype == "a8w4":
         x_q, scale_x = _per_1x32_fp8_quant(x_fp32)
         w1_q, scale_w1, _ = fp4_utils.per_1x32_f4_quant(w1_fp32)
@@ -1226,8 +1256,9 @@ def run_moe_stage2(
 
     # Preshuffle weights on the *unpacked* tensor.
     uses_fp4_weight_layout = is_fp4 or is_a8w4
-    w1_shuffled = w1_q if uses_fp4_weight_layout else shuffle_weight(w1_q)
-    w2_shuffled = w2_q if uses_fp4_weight_layout else shuffle_weight(w2_q)
+    uses_native_gfx1250 = in_dtype in ("fp4", "fp8", "a8w4", "fp16")
+    w1_shuffled = w1_q if (uses_fp4_weight_layout or uses_native_gfx1250) else shuffle_weight(w1_q)
+    w2_shuffled = w2_q if (uses_fp4_weight_layout or uses_native_gfx1250) else shuffle_weight(w2_q)
     if in_dtype in ("fp8", "a8w4"):
         _single_tile_m, _single_tile_n, _single_m_warp, _single_n_warp = _pick_fp16_single_launch_shape(tile_m, tile_n)
         _warp_tile_n = _single_tile_n // _single_n_warp
@@ -1257,6 +1288,9 @@ def run_moe_stage2(
         elif is_a8w4:
             w1_q_flat = w1_q.view(experts * (2 * inter_dim), model_dim // 2)
             scale_w1_flat = None if scale_w1 is None else scale_w1.view(experts * (2 * inter_dim), model_dim // 32)
+        elif in_dtype == "fp8":
+            w1_q_flat = w1_q.view(experts * (2 * inter_dim), model_dim)
+            scale_w1_flat = None if scale_w1 is None else scale_w1.view(experts * (2 * inter_dim), model_dim // 32)
         else:
             w1_q_flat = w1_q.view(experts * (2 * inter_dim), model_dim)
             scale_w1_flat = None if scale_w1 is None else scale_w1.view(experts * (2 * inter_dim), 1)
@@ -1266,18 +1300,29 @@ def run_moe_stage2(
                 "run_moe_stage2(skip_ref=True) requires providing a2_fp8_in and a2_scale_in "
                 "(so we don't have to run the huge torch reference stage1)."
             )
-        out1_ref = torch_moe_gemm1(
-            x_q,
-            w1_q_flat,
-            scale_x,
-            scale_w1_flat,
-            topk_ids.to(torch.int64),
-            topk_weights,
-            inter_dim=inter_dim,
-            doweight_stage1=bool(doweight_stage1),
-        )  # [tokens, topk, inter] fp32
         if in_dtype == "fp8":
-            a2_q, a2_scale = pertoken_quant(out1_ref, quant_dtype=DTYPE_FP8)
+            # fp8 block-scale: dequantize for reference computation.
+            x_dequant = _dequant_blockscale_fp8(x_q.view(-1, model_dim), scale_x.reshape(-1, model_dim // 32))
+            w1_dequant = _dequant_blockscale_fp8(w1_q_flat, scale_w1_flat)
+            out1_ref = torch_moe_gemm1(
+                x_dequant, w1_dequant, None, None,
+                topk_ids.to(torch.int64), topk_weights,
+                inter_dim=inter_dim, doweight_stage1=bool(doweight_stage1),
+            )
+        else:
+            out1_ref = torch_moe_gemm1(
+                x_q,
+                w1_q_flat,
+                scale_x,
+                scale_w1_flat,
+                topk_ids.to(torch.int64),
+                topk_weights,
+                inter_dim=inter_dim,
+                doweight_stage1=bool(doweight_stage1),
+            )
+        # [tokens, topk, inter] fp32
+        if in_dtype == "fp8":
+            a2_q, a2_scale = _per_1x32_fp8_quant(out1_ref)
         elif in_dtype == "a8w4":
             a2_q, a2_scale = _per_1x32_fp8_quant(out1_ref)
         elif in_dtype == "fp4":
@@ -1301,14 +1346,16 @@ def run_moe_stage2(
             a2_q, a2_scale = pertoken_quant(out1_ref, quant_dtype=torch.int8)
 
     # Flatten weights/scales for the kernel.
+    uses_block_scale_s2 = in_dtype in ("fp8", "a8w4", "fp4")
     if uses_fp4_weight_layout:
         w2_shuffled_flat = w2_shuffled.view(experts * model_dim, inter_dim // 2)
         scale_w2_ref_flat = None if scale_w2 is None else scale_w2.view(experts * model_dim, inter_dim // 32)
         scale_w2_kernel_flat = None if scale_w2_kernel is None else scale_w2_kernel.view(experts * model_dim, inter_dim // 32)
     else:
         w2_shuffled_flat = w2_shuffled.view(experts * model_dim, inter_dim)
-        scale_w2_ref_flat = None if scale_w2 is None else scale_w2.view(experts * model_dim, 1)
-        scale_w2_kernel_flat = None if scale_w2_kernel is None else scale_w2_kernel.view(experts * model_dim, 1)
+        scale_cols_s2 = inter_dim // 32 if uses_block_scale_s2 else 1
+        scale_w2_ref_flat = None if scale_w2 is None else scale_w2.view(experts * model_dim, scale_cols_s2)
+        scale_w2_kernel_flat = None if scale_w2_kernel is None else scale_w2_kernel.view(experts * model_dim, scale_cols_s2)
 
     # For W4A8 and W4A16, pack preshuffled int8 weights into packed int4 bytes.
     # Both use the same interleaved packing: [ (v4<<4)|v0, (v5<<4)|v1, (v6<<4)|v2, (v7<<4)|v3 ]
@@ -1493,6 +1540,33 @@ def run_moe_stage2(
                 topk_weights,
                 model_dim=model_dim,
                 doweight_stage2=doweight_stage2,
+            )
+        elif in_dtype == "fp8":
+            a2_dequant = _dequant_blockscale_fp8(a2_q.view(-1, inter_dim), a2_scale.reshape(-1, inter_dim // 32))
+            a2_dequant = a2_dequant.view(a2_q.shape[0], a2_q.shape[1], inter_dim)
+            w2_dequant = _dequant_blockscale_fp8(
+                w2_q.view(experts * model_dim, inter_dim),
+                scale_w2.view(experts * model_dim, inter_dim // 32),
+            )
+            ref2 = torch_moe_gemm2(
+                a2_dequant, w2_dequant.view_as(w2_q), None, None,
+                topk_ids.to(torch.int64), topk_weights,
+                model_dim=model_dim, doweight_stage2=doweight_stage2,
+            )
+        elif is_fp4:
+            a2_dequant = _dequant_blockscale_fp4(
+                a2_q.view(-1, inter_dim // 2), a2_scale.reshape(-1, inter_dim // 32), inter_dim
+            )
+            a2_dequant = a2_dequant.view(a2_q.shape[0], a2_q.shape[1], inter_dim)
+            w2_dequant = _dequant_blockscale_fp4(
+                w2_q.view(experts * model_dim, inter_dim // 2),
+                scale_w2.view(experts * model_dim, inter_dim // 32),
+                inter_dim,
+            )
+            ref2 = torch_moe_gemm2(
+                a2_dequant, w2_dequant.view(experts, model_dim, inter_dim), None, None,
+                topk_ids.to(torch.int64), topk_weights,
+                model_dim=model_dim, doweight_stage2=doweight_stage2,
             )
         else:
             ref2 = torch_moe_gemm2(
@@ -1889,12 +1963,14 @@ def test_moe_gemm_2stage(
             # a2_q = torch.ones_like(out1_fp16, dtype=torch.float32) / 5
             # w2_fp32 = torch.ones_like(w2_fp32, dtype=torch.float32) / 10
             a2_scale = None
+    elif in_dtype == "fp4":
+        out1_fp32 = out1_fp16.to(torch.float32)
+        a2_fp4, a2_scale_raw, _ = fp4_utils.per_1x32_f4_quant(out1_fp32.view(-1, inter_dim))
+        a2_q = a2_fp4.view(torch.uint8).view(tokens, topk, inter_dim // 2)
+        a2_scale = a2_scale_raw.view(torch.uint8).view(tokens, topk, inter_dim // 32)
     elif in_dtype in ("fp8", "a8w4"):
         out1_fp32 = out1_fp16.to(torch.float32)
-        if in_dtype == "fp8":
-            a2_q, a2_scale = pertoken_quant(out1_fp32, quant_dtype=DTYPE_FP8)
-        else:
-            a2_q, a2_scale = _per_1x32_fp8_quant(out1_fp32)
+        a2_q, a2_scale = _per_1x32_fp8_quant(out1_fp32)
     elif in_dtype == "fp16":
         a2_q = out1_fp16
         a2_scale = None
