@@ -306,22 +306,32 @@ class KernelLauncher:
         self._known_block_size = known_block_size
 
     def _check_block_vs_known(self, block_dims: Tuple) -> None:
-        """Warn when statically-known *block* dims disagree with *known_block_size*."""
+        """Raise when statically-known *block* dims are invalid for AMDGPU."""
         if self._known_block_size is None:
+            # Without known_block_size the AMDGPU backend assumes
+            # max_flat_workgroup_size = 256.  Error if the launch exceeds that.
+            if all(isinstance(v, int) for v in block_dims):
+                total = block_dims[0] * block_dims[1] * block_dims[2]
+                if total > 256:
+                    raise ValueError(
+                        f"launch block size {block_dims[0]}x{block_dims[1]}x{block_dims[2]}"
+                        f" = {total} threads exceeds the AMDGPU default "
+                        f"max_flat_workgroup_size of 256. "
+                        f"Add known_block_size=[{block_dims[0]}, {block_dims[1]}, {block_dims[2]}] "
+                        f"to @kernel for kernel '{self._kernel_name}'."
+                    )
             return
+
         labels = ("x", "y", "z")
         for i, (launch_val, declared) in enumerate(zip(block_dims, self._known_block_size)):
             if isinstance(launch_val, int) and launch_val != declared:
-                import warnings
-                warnings.warn(
+                raise ValueError(
                     f"launch block {labels[i]}={launch_val} differs from "
                     f"known_block_size {labels[i]}={declared} declared on "
                     f"kernel '{self._kernel_name}'. "
                     f"This produces an internally-inconsistent IR and is "
-                    f"undefined behavior on AMDGPU.",
-                    stacklevel=3,
+                    f"undefined behavior on AMDGPU."
                 )
-                return  # one warning per launch is enough
 
     def launch(
         self,

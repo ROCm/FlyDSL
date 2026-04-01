@@ -32,6 +32,7 @@ include_directories(SYSTEM ${LLVM_INCLUDE_DIRS})
 include_directories(SYSTEM ${MLIR_INCLUDE_DIRS})
 include_directories(${PROJECT_SOURCE_DIR}/include)
 include_directories(${PROJECT_BINARY_DIR}/include)
+include_directories(${PROJECT_SOURCE_DIR}/lib/CAPI)
 
 include_directories(${PROJECT_SOURCE_DIR}/thirdparty/dlpack/include)
 include_directories(${PROJECT_SOURCE_DIR}/thirdparty/tvm-ffi/include)

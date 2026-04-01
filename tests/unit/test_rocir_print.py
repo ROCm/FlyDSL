@@ -17,7 +17,10 @@ from flydsl._mlir.ir import (
     Module,
 )
 from flydsl._mlir.passmanager import PassManager
-from flydsl.compiler.kernel_function import create_gpu_func, create_gpu_module, get_gpu_module_body
+from flydsl.compiler.kernel_function import create_gpu_module, get_gpu_module_body, create_gpu_func
+import pytest
+
+pytestmark = [pytest.mark.l1a_compile_no_target_dialect]
 
 
 def _build_cpu_module(build_fn):

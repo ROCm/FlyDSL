@@ -1318,6 +1318,10 @@ def compile_moe_blockscale_gemm2(
     _ck_lds128 = os.environ.get("FLYDSL_CK_LDS128", "1") in ("1", "true", "True", "YES", "yes")
     pad_k = 0 if _ck_lds128 else 8
     lds_stride = tile_k + pad_k
+    # gfx950+ has buffer_atomic_pk_add_bf16 → bf16 can use buffer atomics (same as f16).
+    # gfx942 only has global_atomic_pk_add_bf16 → must use global atomics with raw pointer.
+    _has_buffer_atomic_bf16 = str(gpu_arch).startswith(("gfx95", "gfx12"))
+    _needs_global_atomic_bf16 = out_is_bf16 and not _has_buffer_atomic_bf16
     if out_is_bf16:
         if not (gpu_arch.startswith("gfx942") or gpu_arch.startswith("gfx950") or gpu_arch.startswith("gfx12")):
             raise ValueError(f"out_dtype='bf16' requires bf16 global atomics (gfx942/gfx950/gfx12), got arch={gpu_arch!r}")
@@ -2268,12 +2272,11 @@ def compile_moe_blockscale_gemm2(
                             "FLYDSL_MOE_STAGE2_CSHUFFLE=1 but lds_out is not allocated/aliased."
                         )
 
-                    # For bf16 global atomics, precompute the output base address once.
-                    # (We still need an inttoptr per atomic unless we can rely on GEPOp; keep the
-                    # stable path here.)
+                    # For bf16 global atomics (gfx942 only), precompute the output base address.
+                    # gfx950+ has buffer_atomic_pk_add_bf16, so bf16 uses buffer atomics there.
                     out_base_idx = None
-                    if out_is_bf16:
-                        out_base_idx = memref.extract_aligned_pointer_as_index(arg_out)
+                    if _needs_global_atomic_bf16:
+                        out_base_idx = buffer_ops.extract_base_index(arg_out)
 
                     def write_row_to_lds(
                         *,
@@ -2330,10 +2333,9 @@ def compile_moe_blockscale_gemm2(
                         col_i32 = arith.index_cast(T.i32, col_g0)
                         idx_elem = idx0 + col_i32
                         idx_elem_even = idx_elem & mask_even_i32
-                        if out_is_bf16:
+                        if _needs_global_atomic_bf16:
+                            # gfx942: no buffer_atomic_pk_add_bf16, use global atomicrmw fadd
                             if bool(accumulate):
-                                # Use global atomicrmw fadd on <2 x bf16> (CK path).
-                                # Row-valid gating is handled at the row level by c_shuffle_epilog via `precompute_row`.
                                 byte_off = idx_elem_even * c2_i32
                                 byte_off_idx = arith.index_cast(T.index, byte_off)
                                 ptr_addr_idx = out_base_idx + byte_off_idx
@@ -2349,9 +2351,9 @@ def compile_moe_blockscale_gemm2(
                                     alignment=4,
                                 )
                             else:
-                                # Scatter store (no atomic): store bf16x(e_vec) directly via buffer store.
                                 buffer_ops.buffer_store(frag, out_rsrc, idx_elem_even)
                         else:
+                            # f16, or bf16 on gfx950+ (has buffer_atomic_pk_add_bf16)
                             byte_off = idx_elem_even * c2_i32
                             if bool(accumulate):
                                 atomic_add_f16x2(frag, byte_off)

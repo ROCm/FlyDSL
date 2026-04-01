@@ -18,6 +18,8 @@ from flydsl._mlir.ir import (
 from flydsl._mlir.dialects.fly import IntTupleType
 from flydsl._mlir.dialects import fly, arith, func
 
+pytestmark = [pytest.mark.l1b_target_dialect, pytest.mark.rocm_lower]
+
 
 FLY_PIPELINE = (
     "builtin.module("
