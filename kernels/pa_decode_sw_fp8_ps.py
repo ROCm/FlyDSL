@@ -1380,11 +1380,40 @@ def pa_decode_ps_launch(
         exp_sums.nan_to_num_(0.0)
         max_logits.nan_to_num_(nan=float('-inf'))
 
-        # Reduce: merge partitions into final output
-        _sw_reduce_partitions(
-            output, exp_sums, max_logits, temporary_output,
-            context_lengths, query_length, query_group_size,
-            max_context_partition_num, sliding_window, context_partition_size)
+        # Reduce: use Gluon reduce kernel for merging partitions
+        from aiter.ops.triton.gluon.pa_decode_gluon import (
+            _paged_attention_decode_v2_reduce_kernel_wrapper,
+        )
+        head_size = query.shape[-1]
+        output_5d = output.reshape(
+            batch_size, query_length, num_kv_heads, query_group_size, head_size)
+        reduce_grid = (batch_size, num_kv_heads, 1)
+        _paged_attention_decode_v2_reduce_kernel_wrapper(
+            reduce_grid,
+            output_5d,
+            exp_sums,
+            max_logits,
+            temporary_output,
+            context_lengths,
+            None,  # sinks
+            output_5d.stride(0),
+            output_5d.stride(1),
+            output_5d.stride(2),
+            output_5d.stride(3),
+            exp_sums.stride(0),
+            exp_sums.stride(1),
+            exp_sums.stride(2),
+            temporary_output.stride(0),
+            temporary_output.stride(1),
+            temporary_output.stride(2),
+            temporary_output.stride(3),
+            query_seq_len=query_length,
+            query_group_size=query_group_size,
+            head_size=head_size,
+            CONTEXT_PARTITION_SIZE=context_partition_size,
+            PS=True,
+            context_partition_num=max_context_partition_num,
+        )
         return "ps_sw_partitioned"
     else:
         compiled = compile_pa_decode_ps(
