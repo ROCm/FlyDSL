@@ -5,6 +5,8 @@
 import sys, os, torch, math, logging, random, gc
 import pytest
 
+pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
+
 sys.path.insert(0, 'build-fly/python_packages'); sys.path.insert(1, '.')
 os.environ['FLYDSL_RUNTIME_ENABLE_CACHE'] = '1'
 logging.basicConfig(level=logging.INFO, format='%(message)s')

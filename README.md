@@ -108,6 +108,8 @@ bash scripts/run_tests.sh
 bash scripts/run_benchmark.sh
 ```
 
+**Test layout, pytest markers, and environment variables** used by the suite are documented in [**`tests/README.md`**](tests/README.md) .
+
 ### Quick reference
 
 ```bash
