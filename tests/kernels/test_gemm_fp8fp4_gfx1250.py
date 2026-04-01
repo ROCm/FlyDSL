@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unified MXFP4/MXFP8 GEMM correctness tests for gfx1250.
+"""Unified MXFP4/MXFP8/A8W4 GEMM correctness tests for gfx1250.
 
 Kernel implementation: kernels/gemm_fp8fp4_gfx1250.py
 """
@@ -62,10 +62,11 @@ def random_fp8_data(rows: int, cols: int, *, device="cpu") -> torch.Tensor:
     return torch.randint(0, 126, (rows, cols), dtype=torch.uint8, device=device)
 
 
-def _reference_scaled_gemm(a, b, a_scale, b_scale, M, N, K, convert_fn):
+def _reference_scaled_gemm(a, b, a_scale, b_scale, M, N, K,
+                           convert_fn, convert_fn_b=None):
     """Reference scaled GEMM: D = (A * A_scale) @ (B * B_scale)^T."""
     a_f32 = convert_fn(a.view(torch.uint8))[:M, :K]
-    b_f32 = convert_fn(b.view(torch.uint8))[:N, :K]
+    b_f32 = (convert_fn_b or convert_fn)(b.view(torch.uint8))[:N, :K]
     a_sc = fp4_utils.e8m0_to_f32(a_scale.view(torch.uint8))
     b_sc = fp4_utils.e8m0_to_f32(b_scale.view(torch.uint8))
     a_sc_exp = a_sc.repeat_interleave(SCALE_BLOCK, dim=-1)[:M, :K]
@@ -78,29 +79,17 @@ def reference_mxfp4_gemm(a_packed, b_packed, a_scale, b_scale, M, N, K):
                                   M, N, K, fp4_utils.mxfp4_to_f32)
 
 
-def reference_mxfp8_gemm_standard(a, b, a_scale, b_scale, M, N, K):
+def reference_mxfp8_gemm(a, b, a_scale, b_scale, M, N, K):
+    """Standard FP8 reference with SCALE_BLOCK=32."""
     return _reference_scaled_gemm(a, b, a_scale, b_scale,
                                   M, N, K, fp4_utils.fp8_e4m3_to_f32)
 
 
-def reference_mxfp8_gemm_simulator(a, b, a_scale, b_scale, M, N, K):
-    """Simulator reference: 16-element cycling scale (matches AM simulator)."""
-    a_f32 = fp4_utils.fp8_e4m3_to_f32(a.view(torch.uint8))[:M, :K]
-    b_f32 = fp4_utils.fp8_e4m3_to_f32(b.view(torch.uint8))[:N, :K]
-    a_sc = fp4_utils.e8m0_to_f32(a_scale.view(torch.uint8))
-    b_sc = fp4_utils.e8m0_to_f32(b_scale.view(torch.uint8))
-    TILE_K = 128
-    a_sc_exp = torch.zeros(M, K, dtype=torch.float32)
-    b_sc_exp = torch.zeros(N, K, dtype=torch.float32)
-    for k in range(K):
-        tile_idx = k // TILE_K
-        byte_idx = (k % TILE_K % 64) // 16
-        scale_col = tile_idx * 4 + byte_idx
-        if scale_col < a_sc.shape[1]:
-            a_sc_exp[:, k] = a_sc[:, scale_col]
-        if scale_col < b_sc.shape[1]:
-            b_sc_exp[:, k] = b_sc[:, scale_col]
-    return torch.matmul(a_f32 * a_sc_exp, (b_f32 * b_sc_exp).T)
+def reference_a8w4_gemm(a_fp8, b_fp4, a_scale, b_scale, M, N, K):
+    """Standard A8W4 reference: FP8 activation + FP4 weight, SCALE_BLOCK=32."""
+    return _reference_scaled_gemm(a_fp8, b_fp4, a_scale, b_scale, M, N, K,
+                                  fp4_utils.fp8_e4m3_to_f32,
+                                  convert_fn_b=fp4_utils.mxfp4_to_f32)
 
 
 def _run_mxscale_gemm_test(
@@ -112,13 +101,17 @@ def _run_mxscale_gemm_test(
 ):
     """Unified test body for FP4 and FP8."""
     is_fp4 = data_format == "fp4"
+    is_a8w4 = data_format == "a8w4"
 
     arch = str(get_rocm_arch())
     if arch != "gfx1250":
         pytest.skip(f"WMMA_SCALE requires gfx1250, got {arch}")
 
-    if wave_specialized_tdm or use_scale_opsel:
-        pytest.skip("Simulator does not support wave-specialized TDM or scale opsel")
+    if wave_specialized_tdm:
+        pytest.skip("Simulator does not support wave-specialized TDM")
+
+    if use_scale_opsel and is_fp4:
+        pytest.skip("FP4 32x16 WMMA scaleBType op_sel ignored by AM simulator")
 
     num_k_tiles = K // tile_k
     if num_buffers > 1 and num_k_tiles < num_buffers:
@@ -134,7 +127,7 @@ def _run_mxscale_gemm_test(
 
     torch.manual_seed(0)
 
-    fmt_name = "MXFP4" if is_fp4 else "MXFP8"
+    fmt_name = "A8W4" if is_a8w4 else ("MXFP4" if is_fp4 else "MXFP8")
     mcast_str = f", cluster=({cluster_m},{cluster_n})" \
         if cluster_m > 1 or cluster_n > 1 else ""
     tdm_str = ", tdm_store" if use_tdm_store else ", buffer_store"
@@ -143,7 +136,10 @@ def _run_mxscale_gemm_test(
           f"{mcast_str}{tdm_str}, preshuffle, out={out_dtype}")
 
     # Generate data
-    if is_fp4:
+    if is_a8w4:
+        a = random_fp8_data(M, K)       # FP8 activation
+        b = fp4_utils.random_fp4_packed(N, K)  # FP4 weight
+    elif is_fp4:
         a = fp4_utils.random_fp4_packed(M, K)
         b = fp4_utils.random_fp4_packed(N, K)
     else:
@@ -153,11 +149,12 @@ def _run_mxscale_gemm_test(
     b_scale = fp4_utils.random_e8m0(N, K // SCALE_BLOCK)
 
     # Reference
-    if is_fp4:
+    if is_a8w4:
+        ref = reference_a8w4_gemm(a, b, a_scale, b_scale, M, N, K)
+    elif is_fp4:
         ref = reference_mxfp4_gemm(a, b, a_scale, b_scale, M, N, K)
     else:
-        ref = reference_mxfp8_gemm_simulator(a, b, a_scale, b_scale, M, N, K)
-        ref_std = reference_mxfp8_gemm_standard(a, b, a_scale, b_scale, M, N, K)
+        ref = reference_mxfp8_gemm(a, b, a_scale, b_scale, M, N, K)
 
     print(f"Ref stats: min={ref.min():.2f}, max={ref.max():.2f}, "
           f"mean={ref.mean():.2f}, std={ref.std():.2f}")
@@ -166,13 +163,11 @@ def _run_mxscale_gemm_test(
     skt = tile_k // SCALE_BLOCK
     warp_tile_m = tile_m // m_warp
     warp_tile_n = tile_n // n_warp
-    a_scale = preshuffle_e8m0_scale(a_scale, warp_tile_m,
-                                    scale_k_per_tile=skt, byte_swap=is_fp4)
-    b_scale = preshuffle_e8m0_scale(b_scale, warp_tile_n,
-                                    scale_k_per_tile=skt, byte_swap=is_fp4)
+    a_scale = preshuffle_e8m0_scale(a_scale, warp_tile_m, scale_k_per_tile=skt)
+    b_scale = preshuffle_e8m0_scale(b_scale, warp_tile_n, scale_k_per_tile=skt)
 
     # Preshuffle B data
-    K_packed = K // 2 if is_fp4 else K
+    K_packed = K // 2 if (is_fp4 or is_a8w4) else K
     b = fp4_utils.preshuffle_b_16x16(b, N, K_packed)
 
     # Upload & launch
@@ -230,21 +225,14 @@ def _run_mxscale_gemm_test(
         c_out_f.flatten().unsqueeze(0), ref_f.flatten().unsqueeze(0)).item()
     print(f"Cosine similarity: {cos_sim:.6f}")
 
-    if not is_fp4:
-        ref_std_f = ref_std.float()
-        if out_dtype in ("bf16", "f16"):
-            ref_std_f = ref_std.to(torch_out_dtype).float()
-        cos_std = torch.nn.functional.cosine_similarity(
-            c_out_f.flatten().unsqueeze(0), ref_std_f.flatten().unsqueeze(0)).item()
-        print(f"Cosine vs standard ref: {cos_std:.6f}")
-
-    # Format-specific tolerances
+    # Tolerances: FP4 is exact; FP8/A8W4 have FP accumulation error
     if is_fp4:
         if out_dtype in ("bf16", "f16"):
             torch.testing.assert_close(c_out_f, ref_f, rtol=1e-3, atol=1e-2)
         else:
             torch.testing.assert_close(c_out_f, ref_f, rtol=1e-5, atol=1e-8)
     else:
+        # FP8 and A8W4: standard SCALE_BLOCK=32 reference
         if out_dtype in ("bf16", "f16"):
             torch.testing.assert_close(c_out_f, ref_f, rtol=1e-2, atol=5e-2)
         else:
@@ -289,13 +277,37 @@ def test_mxfp4_gemm(M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp,
 )
 @pytest.mark.parametrize("num_buffers", [2, 3])
 @pytest.mark.parametrize("use_tdm_store", [True, False])
+@pytest.mark.parametrize("use_scale_opsel", [True, False])
 @pytest.mark.parametrize("out_dtype", ["f32", "bf16"])
 def test_mxfp8_gemm(M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp,
-                     num_buffers, use_tdm_store, out_dtype):
+                     num_buffers, use_tdm_store, out_dtype, use_scale_opsel):
     _run_mxscale_gemm_test(
         "fp8", M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp,
         num_buffers, use_tdm_store, out_dtype,
-        l2_prefetch_distance=2)
+        l2_prefetch_distance=2,
+        use_scale_opsel=use_scale_opsel)
+
+
+@pytest.mark.parametrize(
+    "M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp",
+    [
+        (128, 128, 256, 128, 128, 128, 2, 2),
+        (128, 128, 512, 128, 128, 128, 2, 2),
+        (128, 128, 1024, 128, 128, 128, 2, 2),
+        (1024, 1024, 1024, 128, 256, 128, 2, 4),
+    ],
+)
+@pytest.mark.parametrize("num_buffers", [2, 3])
+@pytest.mark.parametrize("use_tdm_store", [True, False])
+@pytest.mark.parametrize("use_scale_opsel", [True, False])
+@pytest.mark.parametrize("out_dtype", ["f32", "bf16"])
+def test_a8w4_gemm(M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp,
+                    num_buffers, use_tdm_store, out_dtype, use_scale_opsel):
+    _run_mxscale_gemm_test(
+        "a8w4", M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp,
+        num_buffers, use_tdm_store, out_dtype,
+        l2_prefetch_distance=2,
+        use_scale_opsel=use_scale_opsel)
 
 
 @pytest.mark.parametrize(
@@ -329,7 +341,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-format", type=str, default="fp4",
-                        choices=["fp4", "fp8"])
+                        choices=["fp4", "fp8", "a8w4"])
     parser.add_argument("-M", type=int, default=128)
     parser.add_argument("-N", type=int, default=128)
     parser.add_argument("-K", type=int, default=256)

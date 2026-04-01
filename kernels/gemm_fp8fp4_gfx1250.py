@@ -1,7 +1,8 @@
-"""Unified MXFP4/MXFP8 GEMM kernel for gfx1250.
+"""Unified MXFP4/MXFP8/A8W4 GEMM kernel for gfx1250.
 
-Supports both FP4 (E2M1) and FP8 (E4M3) data with E8M0 block scales via
-V_WMMA_SCALE instructions.  Select precision with ``data_format="fp4"|"fp8"``.
+Supports FP4 (E2M1), FP8 (E4M3) and A8W4 (FP8 activation + FP4 weight)
+data with E8M0 block scales via V_WMMA_SCALE instructions.
+Select precision with ``data_format="fp4"|"fp8"|"a8w4"``.
 """
 
 import flydsl.compiler as flyc
@@ -72,10 +73,11 @@ def compile_mxscale_gemm(
     Returns a JitFunction:
         launch_fn(arg_c, arg_a, arg_b, arg_a_scale, arg_b_scale, M, N, stream)
     """
-    if data_format not in ("fp4", "fp8"):
-        raise ValueError(f"data_format must be 'fp4' or 'fp8', got {data_format!r}")
+    if data_format not in ("fp4", "fp8", "a8w4"):
+        raise ValueError(f"data_format must be 'fp4', 'fp8', or 'a8w4', got {data_format!r}")
 
     is_fp4 = data_format == "fp4"
+    is_a8w4 = data_format == "a8w4"
 
     if out_dtype not in ("f32", "bf16", "f16"):
         raise ValueError(f"out_dtype must be 'f32', 'bf16', or 'f16', got {out_dtype!r}")
@@ -101,14 +103,26 @@ def compile_mxscale_gemm(
             f"wave_specialized_tdm requires num_warps >= 4, got {num_warps}")
 
     # ── Format-dependent compile-time constants ──
-    PACK_FACTOR = 2 if is_fp4 else 1
+    # A8W4: activation is FP8 (PACK_FACTOR_A=1), weight is FP4 (PACK_FACTOR_B=2)
+    if is_a8w4:
+        PACK_FACTOR_A = 1   # FP8 activation
+        PACK_FACTOR_B = 2   # FP4 weight
+    elif is_fp4:
+        PACK_FACTOR_A = 2
+        PACK_FACTOR_B = 2
+    else:
+        PACK_FACTOR_A = 1
+        PACK_FACTOR_B = 1
+
     WMMA_N_EFF = 32 if is_fp4 else 16   # N-cols covered per WMMA instruction
     ACC_VEC_SIZE = 16 if is_fp4 else 8   # accumulator vector width
     DS_LOADS_PER_A_FRAG = 2 if is_fp4 else 4
 
-    packed_tile_k = tile_k // PACK_FACTOR
+    packed_tile_k_a = tile_k // PACK_FACTOR_A
+    packed_tile_k_b = tile_k // PACK_FACTOR_B
     scale_k_per_tile = tile_k // SCALE_BLOCK
-    K_packed = K // PACK_FACTOR
+    K_packed_a = K // PACK_FACTOR_A
+    K_packed_b = K // PACK_FACTOR_B
     K_scale = K // SCALE_BLOCK
 
     if K % tile_k != 0:
@@ -119,8 +133,10 @@ def compile_mxscale_gemm(
         raise ValueError(f"tile_m must be a multiple of {WMMA_M}, got {tile_m}")
     if tile_n % WMMA_N != 0:
         raise ValueError(f"tile_n must be a multiple of {WMMA_N}, got {tile_n}")
-    if packed_tile_k % 4 != 0:
-        raise ValueError(f"packed_tile_k must be a multiple of 4, got {packed_tile_k}")
+    if packed_tile_k_a % 4 != 0:
+        raise ValueError(f"packed_tile_k_a must be a multiple of 4, got {packed_tile_k_a}")
+    if packed_tile_k_b % 4 != 0:
+        raise ValueError(f"packed_tile_k_b must be a multiple of 4, got {packed_tile_k_b}")
     if scale_k_per_tile % 4 != 0:
         raise ValueError(
             f"scale_k_per_tile must be a multiple of 4 (tile_k >= 128), got {scale_k_per_tile}")
@@ -149,10 +165,10 @@ def compile_mxscale_gemm(
     # FP4 A/B swap: BScale rep derived from WMMA_M, not WMMA_N_EFF
     b_scale_load_rep = warp_tile_n // WMMA_M if is_fp4 else wmma_n_rep
 
-    lds_a_stride_bytes = packed_tile_k + LDS_PAD_A_BYTES
+    lds_a_stride_bytes = packed_tile_k_a + LDS_PAD_A_BYTES
 
     lds_a_data_bytes = tile_m * lds_a_stride_bytes
-    lds_b_data_bytes = tile_n * packed_tile_k
+    lds_b_data_bytes = tile_n * packed_tile_k_b
     _scale_guard_bytes = 16
     lds_a_scale_bytes = tile_m * scale_k_per_tile + _scale_guard_bytes
     lds_b_scale_bytes = tile_n * scale_k_per_tile + _scale_guard_bytes
@@ -290,28 +306,28 @@ def compile_mxscale_gemm(
         c_rsrc = buffer_ops.create_buffer_resource(arg_c, num_records_bytes=c_nrec)
 
         def make_desc_a(memref, k_base):
-            k_packed_off = k_base / arith.index(PACK_FACTOR)
+            k_packed_off = k_base / arith.index(PACK_FACTOR_A)
             return tdm_ops.make_tensor_descriptor_2d(
                 global_ptr=arg_a, lds_memref=memref,
                 global_offset=(blk_m, k_packed_off),
-                tensor_shape=(tile_m, packed_tile_k),
-                strides=(K_packed, 1),
-                tile_shape=(tile_m, packed_tile_k),
+                tensor_shape=(tile_m, packed_tile_k_a),
+                strides=(K_packed_a, 1),
+                tile_shape=(tile_m, packed_tile_k_a),
                 elem_bytes=1,
-                pad_interval=packed_tile_k, pad_amount=LDS_PAD_A_BYTES,
+                pad_interval=packed_tile_k_a, pad_amount=LDS_PAD_A_BYTES,
                 num_warps=num_warps,
                 workgroup_mask=a_mcast_mask)
 
         def make_desc_b(memref, k_base):
-            # B preshuffle: [N/16, K_packed*16] with 16x16 byte tiles
-            k_packed_off = k_base / arith.index(PACK_FACTOR)
+            # B preshuffle: [N/16, K_packed_b*16] with 16x16 byte tiles
+            k_packed_off = k_base / arith.index(PACK_FACTOR_B)
             return tdm_ops.make_tensor_descriptor_2d(
                 global_ptr=arg_b, lds_memref=memref,
                 global_offset=(blk_n / arith.index(16),
                                k_packed_off * arith.index(16)),
-                tensor_shape=(N // 16, K_packed * 16),
-                strides=(K_packed * 16, 1),
-                tile_shape=(tile_n // 16, packed_tile_k * 16),
+                tensor_shape=(N // 16, K_packed_b * 16),
+                strides=(K_packed_b * 16, 1),
+                tile_shape=(tile_n // 16, packed_tile_k_b * 16),
                 elem_bytes=1,
                 pad_interval=0, pad_amount=0,
                 num_warps=num_warps,
@@ -374,9 +390,9 @@ def compile_mxscale_gemm(
         def _precompute_a_lane_bases(lds_ptr):
             """Precompute per-wm A fragment lane base addresses (byte offsets)."""
             row_base = (warp_m_base + lane16) * arith.index(lds_a_stride_bytes)
-            # FP4: 32 bytes per K-half (64 FP4 = 32 bytes)
-            # FP8: 64 bytes per K-half (64 FP8 = 64 bytes)
-            k_half_off = lane_kgrp * arith.index(64 // PACK_FACTOR)
+            # K-dimension interleaving: kgrp0/kgrp1 read alternating 128-bit chunks
+            # All formats: kgrp offset = 16 bytes (one ds_load_b128 width)
+            k_half_off = lane_kgrp * arith.index(16)
             bases = []
             for wm in range_constexpr(wmma_m_rep):
                 base = row_base + arith.index(wm * WMMA_M * lds_a_stride_bytes) + k_half_off
@@ -405,17 +421,23 @@ def compile_mxscale_gemm(
             """Load one A-fragment from LDS.
 
             FP4: vec<8xi32> via 2 × ds_load_b128 (32 bytes per lane).
-            FP8: vec<16xi32> via 4 × ds_load_b128 (64 bytes per lane).
+            FP8/A8W4: vec<16xi32> via 4 × ds_load_b128 (64 bytes per lane).
+              Interleaved K layout:
+              kgrp0 reads bytes [0:15],[32:47],[64:79],[96:111] (stride=32)
+              kgrp1 reads bytes [16:31],[48:63],[80:95],[112:127] (stride=32)
             """
-            k_byte_off = arith.index(ks * WMMA_K // PACK_FACTOR)
+            k_byte_off = arith.index(ks * WMMA_K // PACK_FACTOR_A)
             byte_off = a_lane_base + k_byte_off
             v0 = lds_load_b128_raw(lds_buffer, byte_off)
-            v1 = lds_load_b128_raw(lds_buffer, byte_off + arith.index(16))
             if is_fp4:
+                # Interleaved stride=32: +0, +32
+                v1 = lds_load_b128_raw(lds_buffer, byte_off + arith.index(32))
                 return vector.shuffle(v0, v1, list(range(8)))
             else:
-                v2 = lds_load_b128_raw(lds_buffer, byte_off + arith.index(32))
-                v3 = lds_load_b128_raw(lds_buffer, byte_off + arith.index(48))
+                # Interleaved stride=32: +0, +32, +64, +96
+                v1 = lds_load_b128_raw(lds_buffer, byte_off + arith.index(32))
+                v2 = lds_load_b128_raw(lds_buffer, byte_off + arith.index(64))
+                v3 = lds_load_b128_raw(lds_buffer, byte_off + arith.index(96))
                 v01 = vector.shuffle(v0, v1, list(range(8)))
                 v23 = vector.shuffle(v2, v3, list(range(8)))
                 return vector.shuffle(v01, v23, list(range(16)))
@@ -425,13 +447,17 @@ def compile_mxscale_gemm(
 
             FP4: 2 bases per wn (32-col WMMA = 2 N-groups of 16).
             FP8: 1 base per wn (16-col WMMA = 1 N-group).
+            A8W4: 1 base per wn (16-col WMMA, FP4 packed weight).
+
+            K-dimension interleaving for FP8/A8W4:
+              kgrp0 and kgrp1 read alternating 16x16 tiles (stride = 2 tiles).
+              kgrp offset = 1 tile = 256 bytes.
             """
-            _ngroup_stride = packed_tile_k * 16
+            _ngroup_stride = packed_tile_k_b * 16
             _n_group_base = arith.index(warp_tile_n // 16) * wave_n_idx
             row_off = lane16 * arith.index(16)
-            # FP4: 2 tiles per kgrp half → 512B;  FP8: 4 tiles → 1024B
-            _tiles_per_kgrp_half = (WMMA_K // PACK_FACTOR) // 16 // 2
-            k_tile_off = lane_kgrp * arith.index(_tiles_per_kgrp_half * 256)
+            # All formats: interleaved — kgrp offset = 1 tile = 256 bytes
+            k_tile_off = lane_kgrp * arith.index(256)
             bases = []
             if is_fp4:
                 for wn_half in range_constexpr(wmma_n_rep * 2):
@@ -439,6 +465,7 @@ def compile_mxscale_gemm(
                         + arith.index(wn_half * _ngroup_stride)
                     bases.append(ngroup_off + row_off + k_tile_off)
             else:
+                # FP8 and A8W4: 1 base per wn (16-col WMMA)
                 for wn in range_constexpr(wmma_n_rep):
                     ngroup_off = _n_group_base * arith.index(_ngroup_stride) \
                         + arith.index(wn * _ngroup_stride)
@@ -450,34 +477,56 @@ def compile_mxscale_gemm(
 
             FP4: 32x128 → vec<16xi32> from 2 N-groups (bases[wn*2], bases[wn*2+1]).
             FP8: 16x128 → vec<16xi32> from 1 N-group (bases[wn]).
+            A8W4: 16x128 FP4 → vec<8xi32> from 1 N-group (bases[wn]).
+
+            K-dimension interleaving (FP8/A8W4):
+              Stride = 2 tiles = 512 bytes between loads.
+              kgrp0 reads tiles 0,2,4,6; kgrp1 reads tiles 1,3,5,7.
             """
-            # Tiles per K-subtile per kgrp half
-            _tiles_per_sub = WMMA_K // PACK_FACTOR // 16 // 2
-            k_subtile_off = arith.index(ks * _tiles_per_sub * 2 * 256)
             if is_fp4:
+                # FP4: 2 N-groups per wn, 4 tiles per N-group
+                # Interleaved stride=512 (2 tiles): kgrp0→tiles 0,2; kgrp1→tiles 1,3
+                _num_tiles = WMMA_K // PACK_FACTOR_B // 16  # 4 tiles total per N-group
+                k_subtile_off = arith.index(ks * _num_tiles * 256)
                 base0 = b_lane_bases[wn * 2] + k_subtile_off
                 v0 = lds_load_b128_raw(lds_buffer, base0)
-                v1 = lds_load_b128_raw(lds_buffer, base0 + arith.index(256))
+                v1 = lds_load_b128_raw(lds_buffer, base0 + arith.index(512))
                 base1 = b_lane_bases[wn * 2 + 1] + k_subtile_off
                 v2 = lds_load_b128_raw(lds_buffer, base1)
-                v3 = lds_load_b128_raw(lds_buffer, base1 + arith.index(256))
-            else:
+                v3 = lds_load_b128_raw(lds_buffer, base1 + arith.index(512))
+                v01 = vector.shuffle(v0, v1, list(range(8)))
+                v23 = vector.shuffle(v2, v3, list(range(8)))
+                return vector.shuffle(v01, v23, list(range(16)))
+            elif is_a8w4:
+                # A8W4: FP4 weight, 4 tiles per N-group
+                # Interleaved stride=512: kgrp0→tiles 0,2; kgrp1→tiles 1,3
+                _num_tiles = WMMA_K // PACK_FACTOR_B // 16  # 4 tiles total
+                k_subtile_off = arith.index(ks * _num_tiles * 256)
                 base0 = b_lane_bases[wn] + k_subtile_off
                 v0 = lds_load_b128_raw(lds_buffer, base0)
-                v1 = lds_load_b128_raw(lds_buffer, base0 + arith.index(256))
-                v2 = lds_load_b128_raw(lds_buffer, base0 + arith.index(512))
-                v3 = lds_load_b128_raw(lds_buffer, base0 + arith.index(768))
-            v01 = vector.shuffle(v0, v1, list(range(8)))
-            v23 = vector.shuffle(v2, v3, list(range(8)))
-            return vector.shuffle(v01, v23, list(range(16)))
+                v1 = lds_load_b128_raw(lds_buffer, base0 + arith.index(512))
+                return vector.shuffle(v0, v1, list(range(8)))
+            else:
+                # FP8: 8 tiles per N-group
+                # Interleaved stride=512: kgrp0→tiles 0,2,4,6; kgrp1→tiles 1,3,5,7
+                _num_tiles = WMMA_K // PACK_FACTOR_B // 16  # 8 tiles total
+                k_subtile_off = arith.index(ks * _num_tiles * 256)
+                base0 = b_lane_bases[wn] + k_subtile_off
+                v0 = lds_load_b128_raw(lds_buffer, base0)
+                v1 = lds_load_b128_raw(lds_buffer, base0 + arith.index(512))
+                v2 = lds_load_b128_raw(lds_buffer, base0 + arith.index(1024))
+                v3 = lds_load_b128_raw(lds_buffer, base0 + arith.index(1536))
+                v01 = vector.shuffle(v0, v1, list(range(8)))
+                v23 = vector.shuffle(v2, v3, list(range(8)))
+                return vector.shuffle(v01, v23, list(range(16)))
 
         def _precompute_scale_lane_bases(lds_ptr, warp_base, reps,
                                          interleaved_cols):
             """Precompute scale lane bases (byte offsets)."""
             warp_lds_row = warp_base / arith.index(reps) + lane16
             base = warp_lds_row * arith.index(interleaved_cols)
-            if is_fp4:
-                # FP4: always add lane_kgrp offset (no opsel on BScale)
+            if is_fp4 or is_a8w4:
+                # FP4/A8W4: always add lane_kgrp offset (no opsel on BScale)
                 base = base + lane_kgrp * arith.index(SCALES_PER_WMMA)
             else:
                 # FP8: conditional on opsel
@@ -511,14 +560,14 @@ def compile_mxscale_gemm(
                                            b_scale_load_rep, ks)
             a_scales_all = load_scale_b128(as_buf, as_bases[0], wmma_m_rep, ks)
             if is_fp4:
-                # FP4: BScale not downsampled (A/B swap, scaleAType=0 fixed)
+                # FP4 32x16: scaleAType=0 fixed (no op_sel on BScale)
                 b_scales = b_scales_all
                 if use_scale_opsel:
                     a_scales = a_scales_all[::2]
                 else:
                     a_scales = a_scales_all
             else:
-                # FP8: both scales optionally downsampled by opsel
+                # FP8/A8W4 16x16: both scales support op_sel
                 if use_scale_opsel:
                     b_scales = b_scales_all[::2]
                     a_scales = a_scales_all[::2]
@@ -547,7 +596,7 @@ def compile_mxscale_gemm(
                     scaleBType=a_opsel,
                 )
             else:
-                # 16x16 WMMA: standard operand order
+                # 16x16x128 WMMA: A8W4 (fmtA=FP4) or FP8 (fmtA=FP8)
                 if use_scale_opsel:
                     b_scale_idx = wn // 2
                     b_opsel = wn % 2
@@ -558,7 +607,7 @@ def compile_mxscale_gemm(
                     T.vec(8, T.f32),
                     b_frags[wn], a_frag, accs[idx],
                     b_scales[b_scale_idx], a_scales[a_scale_idx],
-                    fmtA=0, fmtB=0,
+                    fmtA=4 if is_a8w4 else 0, fmtB=0,
                     scaleAType=b_opsel, scaleBType=a_opsel,
                 )
 
@@ -638,7 +687,7 @@ def compile_mxscale_gemm(
         def hot_loop_scheduler():
             _half_wm = wmma_m_rep // 2
             _half_wmma = _half_wm * wmma_n_rep
-            _b_loads_per_frag = 4  # B frag always 4 × ds_load_b128
+            _b_loads_per_frag = 2 if is_a8w4 else 4
 
             for _ks in range_constexpr(k_wmma_steps):
                 if _ks == 0:
@@ -710,16 +759,17 @@ def compile_mxscale_gemm(
             if _effective_l2_pf <= 0:
                 return
             pf_k = k_base + arith.index(_effective_l2_pf * tile_k)
-            pf_k_packed = pf_k / arith.index(PACK_FACTOR)
+            pf_k_packed_a = pf_k / arith.index(PACK_FACTOR_A)
+            pf_k_packed_b = pf_k / arith.index(PACK_FACTOR_B)
             tdm_ops.l2_prefetch_tile(
-                arg_a, (blk_m, pf_k_packed),
-                (tile_m, packed_tile_k), (K_packed, 1),
+                arg_a, (blk_m, pf_k_packed_a),
+                (tile_m, packed_tile_k_a), (K_packed_a, 1),
                 elem_bytes=1, thread_id=tx, block_threads=block_threads)
             tdm_ops.l2_prefetch_tile(
                 arg_b,
-                (blk_n / arith.index(16), pf_k_packed * arith.index(16)),
-                (tile_n // 16, packed_tile_k * 16),
-                (K_packed * 16, 1),
+                (blk_n / arith.index(16), pf_k_packed_b * arith.index(16)),
+                (tile_n // 16, packed_tile_k_b * 16),
+                (K_packed_b * 16, 1),
                 elem_bytes=1, thread_id=tx, block_threads=block_threads)
 
         # ====== Multi-stage pipeline ======
@@ -836,8 +886,8 @@ def compile_mxscale_gemm(
         dgroup1_as = desc_as_init.dgroup1
         dgroup1_bs = desc_bs_init.dgroup1
 
-        adv_a_bytes = arith.index(tile_k // PACK_FACTOR)
-        adv_b_bytes = arith.index(packed_tile_k * 16)
+        adv_a_bytes = arith.index(tile_k // PACK_FACTOR_A)
+        adv_b_bytes = arith.index(packed_tile_k_b * 16)
         adv_as_bytes = arith.index(tile_k // SCALE_BLOCK * wmma_m_rep)
         adv_bs_bytes = arith.index(tile_k // SCALE_BLOCK * b_scale_load_rep)
 
@@ -1051,5 +1101,7 @@ def compile_mxscale_gemm(
 
 compile_mxfp4_gemm = lambda **kw: compile_mxscale_gemm(data_format="fp4", **kw)
 compile_mxfp8_gemm = lambda **kw: compile_mxscale_gemm(data_format="fp8", **kw)
+compile_a8w4_gemm = lambda **kw: compile_mxscale_gemm(data_format="a8w4", **kw)
 
-__all__ = ["compile_mxscale_gemm", "compile_mxfp4_gemm", "compile_mxfp8_gemm"]
+__all__ = ["compile_mxscale_gemm", "compile_mxfp4_gemm", "compile_mxfp8_gemm",
+           "compile_a8w4_gemm"]
