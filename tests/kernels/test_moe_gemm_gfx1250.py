@@ -714,7 +714,7 @@ def run_moe_stage1(
     uses_fp4_weight_layout = is_fp4 or is_a8w4
     # gfx1250 native kernels (fp4, fp8, a8w4, fp16) use TDM/transpose-load and
     # handle weight layout internally — skip the MFMA-style shuffle_weight.
-    uses_native_gfx1250 = in_dtype in ("fp4", "fp8", "a8w4", "fp16")
+    uses_native_gfx1250 = in_dtype in ("fp4", "fp8", "a8w4", "fp16", "bf16")
     w1_shuffled = w1_q if (uses_fp4_weight_layout or uses_native_gfx1250) else shuffle_weight(w1_q)
     w2_shuffled = w2_q if (uses_fp4_weight_layout or uses_native_gfx1250) else (shuffle_weight(w2_q) if in_dtype == "fp8" else None)
     if in_dtype in ("fp8", "a8w4"):
@@ -1256,7 +1256,7 @@ def run_moe_stage2(
 
     # Preshuffle weights on the *unpacked* tensor.
     uses_fp4_weight_layout = is_fp4 or is_a8w4
-    uses_native_gfx1250 = in_dtype in ("fp4", "fp8", "a8w4", "fp16")
+    uses_native_gfx1250 = in_dtype in ("fp4", "fp8", "a8w4", "fp16", "bf16")
     w1_shuffled = w1_q if (uses_fp4_weight_layout or uses_native_gfx1250) else shuffle_weight(w1_q)
     w2_shuffled = w2_q if (uses_fp4_weight_layout or uses_native_gfx1250) else shuffle_weight(w2_q)
     if in_dtype in ("fp8", "a8w4"):
@@ -1868,7 +1868,7 @@ def test_moe_gemm_2stage(
     """
     if (not bool(use_reduce)) and bool(use_valid_mask):
         pytest.skip("valid_mask is only used in reduce mode (atomic mode ignores it).")
-    if out_dtype in ("f32", "fp32", "float") and in_dtype in ("fp4", "fp8", "a8w4", "fp16"):
+    if out_dtype in ("f32", "fp32", "float") and in_dtype in ("fp4", "fp8", "a8w4", "fp16", "bf16"):
         pytest.skip(f"gfx1250 {in_dtype} kernels only support out_dtype f16/bf16, not f32.")
     if in_dtype in ("fp4", "a8w4"):
         # Keep fp4 in the main parameterized matrix, but only run the small shape

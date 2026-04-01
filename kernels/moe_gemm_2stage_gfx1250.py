@@ -98,6 +98,23 @@ def _compile_with_optional_wpe(fn, kwargs: dict[str, Any]):
     return fn(**kwargs)
 
 
+def _bf16_to_f16_wrapper(fp16_exe, x_arg: int, w_arg: int):
+    """Wrap a compiled fp16 kernel to accept bf16 inputs by converting them to fp16 on the host."""
+    import torch
+
+    def wrapper(*args, **kwargs):
+        args = list(args)
+        for idx in (x_arg, w_arg):
+            if idx < len(args) and hasattr(args[idx], 'dtype') and args[idx].dtype == torch.bfloat16:
+                args[idx] = args[idx].to(torch.float16)
+        return fp16_exe(*args, **kwargs)
+
+    for attr in ('mode',):
+        if hasattr(fp16_exe, attr):
+            setattr(wrapper, attr, getattr(fp16_exe, attr))
+    return wrapper
+
+
 @functools.lru_cache(maxsize=64)
 def _compile_fp16_stage1_single_kernel(
     *,
@@ -2904,7 +2921,7 @@ def compile_moe_gemm1(
     if waves_per_eu is not None and int(waves_per_eu) < 1:
         raise ValueError(f"waves_per_eu must be >= 1, got {waves_per_eu!r}")
 
-    if in_dtype not in ("fp4", "fp8", "fp16", "a8w4"):
+    if in_dtype not in ("fp4", "fp8", "fp16", "bf16", "a8w4"):
         return _compile_with_optional_wpe(
             _compile_moe_gemm1_base,
             dict(
@@ -2925,13 +2942,13 @@ def compile_moe_gemm1(
         )
 
     route_tile_m = int(tile_m)
-    if in_dtype == "fp16":
+    if in_dtype in ("fp16", "bf16"):
         if out_dtype not in ("f16", "bf16"):
-            raise ValueError(f"fp16 stage1 supports out_dtype in ('f16','bf16'), got {out_dtype!r}")
+            raise ValueError(f"{in_dtype} stage1 supports out_dtype in ('f16','bf16'), got {out_dtype!r}")
         single_tile_m, single_tile_n, single_m_warp, single_n_warp = _pick_fp16_single_launch_shape(
             route_tile_m, int(tile_n), max_total_warps=8,
         )
-        return _compile_fp16_stage1_single_kernel(
+        fp16_exe = _compile_fp16_stage1_single_kernel(
             model_dim=int(model_dim),
             inter_dim=int(inter_dim),
             experts=int(experts),
@@ -2946,6 +2963,9 @@ def compile_moe_gemm1(
             out_dtype=out_dtype,
             waves_per_eu=waves_per_eu,
         )
+        if in_dtype == "bf16":
+            return _bf16_to_f16_wrapper(fp16_exe, x_arg=1, w_arg=2)
+        return fp16_exe
 
     if in_dtype in ("fp8", "a8w4"):
         single_tile_m, single_tile_n, single_m_warp, single_n_warp = _pick_fp16_single_launch_shape(
@@ -3012,7 +3032,7 @@ def compile_moe_gemm2(
     if waves_per_eu is not None and int(waves_per_eu) < 1:
         raise ValueError(f"waves_per_eu must be >= 1, got {waves_per_eu!r}")
 
-    if in_dtype not in ("fp4", "fp8", "fp16", "a8w4"):
+    if in_dtype not in ("fp4", "fp8", "fp16", "bf16", "a8w4"):
         return _compile_with_optional_wpe(
             _compile_moe_gemm2_base,
             dict(
@@ -3034,11 +3054,11 @@ def compile_moe_gemm2(
         )
 
     route_tile_m = int(tile_m)
-    if in_dtype == "fp16":
+    if in_dtype in ("fp16", "bf16"):
         single_tile_m, single_tile_n, single_m_warp, single_n_warp = _pick_fp16_single_launch_shape(
             route_tile_m, int(tile_n), max_total_warps=8,
         )
-        return _compile_fp16_stage2_single_kernel(
+        fp16_exe = _compile_fp16_stage2_single_kernel(
             inter_dim=int(inter_dim),
             experts=int(experts),
             topk=int(topk),
@@ -3053,6 +3073,9 @@ def compile_moe_gemm2(
             accumulate=bool(accumulate),
             waves_per_eu=waves_per_eu,
         )
+        if in_dtype == "bf16":
+            return _bf16_to_f16_wrapper(fp16_exe, x_arg=1, w_arg=2)
+        return fp16_exe
 
     if in_dtype in ("fp8", "a8w4"):
         single_tile_m, single_tile_n, single_m_warp, single_n_warp = _pick_fp16_single_launch_shape(
@@ -3116,7 +3139,7 @@ def compile_moe_gemm2_ex(
     zero_intermediate: bool = True,
 ):
     _require_gfx1250()
-    if in_dtype in ("fp4", "fp8", "fp16", "a8w4"):
+    if in_dtype in ("fp4", "fp8", "fp16", "bf16", "a8w4"):
         if mode == MoeGemm2Mode.REDUCE:
             gemm2_exe = compile_moe_gemm2(
                 model_dim=model_dim,
