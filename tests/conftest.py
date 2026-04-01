@@ -109,13 +109,14 @@ def pytest_addoption(parser):
 
 
 def pytest_configure(config):
-    """Register custom markers and apply FlyDSL env overrides."""
-    config.addinivalue_line(
-        "markers",
-        "large_shape: marks tests with large shapes that are slow to run (deselect with '-m \"not large_shape\"')",
-    )
+    """Apply FlyDSL env overrides from CLI options.
+
+    Note: marker registration lives in pytest.ini (single source of truth).
+    """
     backend = config.getoption("--flydsl-compile-backend")
     arch = config.getoption("--flydsl-compile-arch")
+    # Intentionally set process-level env vars so downstream code (env.py)
+    # picks them up. The pytest process exits after the session, so no cleanup needed.
     if backend:
         os.environ["FLYDSL_COMPILE_BACKEND"] = backend
     if arch:

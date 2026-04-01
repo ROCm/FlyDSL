@@ -23,6 +23,7 @@ from tests.kernels.benchmark_common import (
     print_perf_table,
 )
 import pytest
+
 pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
 
 try:
