@@ -1480,10 +1480,6 @@ def compile_pa_decode_ps_sw(
 
             context_len = buffer_ops.buffer_load(cl_rsrc, batch_idx, vec_width=1, dtype=T.i32)
 
-            # Gluon-style: sequence_start_idx = context_length - SLIDING_WINDOW
-            # seq_start is computed once per work item (runtime value from compile-time constant)
-            seq_start = context_len - arith.constant(sliding_window, type=T.i32)
-
             first_phys_block = buffer_ops.buffer_load(kpi_rsrc, kv_start, vec_width=1, dtype=T.i32)
             _k_head_off = kv_h * c_kh
             _v_head_off = kv_h * c_vh
@@ -1875,6 +1871,8 @@ def compile_pa_decode_ps_sw(
                 qhi_pos = _lane_pair % arith.constant(query_group_size, type=T.i32)
                 # MTP causal bound for this lane's qi_val token
                 causal_bound = context_len + arith.constant(1 - query_length, type=T.i32) + qi_val
+                # MTP sliding window lower bound: per-qi to match each token's position
+                seq_start = causal_bound - arith.constant(sliding_window, type=T.i32)
 
                 # ── local_qhead_idx pair for Q loading ──
                 _lqh_pair_raw = local_qhead_idx + arith.constant(_g_off, type=T.i32)
