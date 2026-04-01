@@ -1961,9 +1961,11 @@ def compile_pa_decode_ps_sw(
                       + kv_h * stride_es_head
                       + partition_idx * stride_es_part
                       + eqgs_lane)
-            buffer_ops.buffer_store(running_sum, es_rsrc,
+            es_i32 = arith.bitcast(T.i32, running_sum)
+            ml_i32 = arith.bitcast(T.i32, running_max)
+            buffer_ops.buffer_store(es_i32, es_rsrc,
                 es_off * arith.constant(4, type=T.i32), offset_is_bytes=True)
-            buffer_ops.buffer_store(running_max, ml_rsrc,
+            buffer_ops.buffer_store(ml_i32, ml_rsrc,
                 es_off * arith.constant(4, type=T.i32), offset_is_bytes=True)
 
     @flyc.jit
