@@ -189,20 +189,19 @@ def build_flash_attn_func_module_primary(
         v16f32_type = T.vec(16, compute_type)
         mfma_pack_type = v8f16_type if USE_K16 else v4f16_type
         MFMA_LANE_K = 8 if USE_K16 else 4
+        _mfma_zero = ir.IntegerAttr.get(ir.IntegerType.get_signless(32), 0)
+        def _mfma(ods_fn, a, b, c):
+            return ods_fn(v16f32_type, a, b, c, _mfma_zero, _mfma_zero, _mfma_zero).result
         def do_mfma(a, b, c):
             if dtype_str == "bf16":
                 if USE_K16:
-                    return rocdl.mfma_f32_32x32x16_bf16(
-                        v16f32_type, [a, b, c, 0, 0, 0])
+                    return _mfma(rocdl.mfma_f32_32x32x16_bf16, a, b, c)
                 a = vector.bitcast(T.i16x4, a)
                 b = vector.bitcast(T.i16x4, b)
-                return rocdl.mfma_f32_32x32x8bf16_1k(
-                    v16f32_type, [a, b, c, 0, 0, 0])
+                return _mfma(rocdl.mfma_f32_32x32x8bf16_1k, a, b, c)
             if USE_K16:
-                return rocdl.mfma_f32_32x32x16f16(
-                    v16f32_type, [a, b, c, 0, 0, 0])
-            return rocdl.mfma_f32_32x32x8f16(
-                v16f32_type, [a, b, c, 0, 0, 0])
+                return _mfma(rocdl.mfma_f32_32x32x16_f16, a, b, c)
+            return _mfma(rocdl.mfma_f32_32x32x8f16, a, b, c)
 
         seq_len_v = arith.index_cast(T.index, seq_len)
 
@@ -1050,10 +1049,6 @@ def build_flash_attn_func_module_primary(
     _fmha_compile_hints = {
         "fast_fp_math": fast_fp_math,
         "unsafe_fp_math": unsafe_fp_math,
-        "llvm_options": {
-            "enable-post-misched": False,
-            "lsr-drop-solution": True,
-        },
     }
 
     def _launch(*args, **kwargs):

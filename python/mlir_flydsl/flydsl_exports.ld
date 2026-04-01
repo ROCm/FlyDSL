@@ -12,7 +12,6 @@ FLYDSL_0.1 {
   global:
     /* MLIR C API (un-mangled, lowercase mlir prefix) */
     mlir*;
-    flydsl*;
 
     /* Python module initializers */
     PyInit_*;
