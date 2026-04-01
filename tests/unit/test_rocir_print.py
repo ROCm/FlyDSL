@@ -13,6 +13,9 @@ from flydsl._mlir.dialects import arith, func, gpu
 from flydsl._mlir.passmanager import PassManager
 from flydsl.compiler.kernel_function import create_gpu_module, get_gpu_module_body, create_gpu_func
 import flydsl.expr as fx
+import pytest
+
+pytestmark = [pytest.mark.l1a_compile_no_target_dialect]
 
 
 def _build_cpu_module(build_fn):

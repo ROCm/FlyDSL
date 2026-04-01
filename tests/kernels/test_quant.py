@@ -22,6 +22,8 @@ import argparse
 import numpy as np
 import pytest
 
+pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
+
 _RUN_QUANT = os.environ.get("FLYDSL_RUN_QUANT", "").strip().lower() in ("1", "true", "yes", "on")
 if not _RUN_QUANT:
     _reason = "Per-token quant benchmark temporarily disabled (set FLYDSL_RUN_QUANT=1 to enable)."

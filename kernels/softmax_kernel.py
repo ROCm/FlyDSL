@@ -30,21 +30,11 @@ from flydsl.expr import buffer_ops
 KERNEL_NAME = "softmax_kernel"
 
 import math
-from kernels.kernels_common import get_warp_size
+from kernels.kernels_common import dtype_to_elem_type, get_warp_size
 
 BLOCK_THREADS = 256
 WARP_SIZE = get_warp_size()
 VEC_WIDTH = 8
-
-
-def dtype_to_elem_type(dtype_str: str):
-    if dtype_str == "f32":
-        return T.f32
-    if dtype_str == "f16":
-        return T.f16
-    if dtype_str == "bf16":
-        return T.bf16
-    raise ValueError(f"unsupported dtype: {dtype_str}")
 
 
 def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):

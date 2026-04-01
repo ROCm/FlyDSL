@@ -9,6 +9,7 @@ import pickle
 import pkgutil
 import threading
 import types
+from contextlib import nullcontext
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set
@@ -358,12 +359,14 @@ def _extract_llvm_ir(module: ir.Module):
         return None
 
 
-def _pipeline_fragments(backend) -> list:
-    """Return the MLIR pass-pipeline fragments for *backend*."""
+def _pipeline_fragments(backend) -> tuple:
+    """Return the MLIR pass-pipeline fragments and llvm_options for *backend*."""
     from .kernel_function import CompilationContext
 
     hints = CompilationContext.get_compile_hints()
-    return backend.pipeline_fragments(compile_hints=hints)
+    fragments = backend.pipeline_fragments(compile_hints=hints)
+    llvm_opts = hints.get("llvm_options")
+    return fragments, llvm_opts
 
 
 class MlirCompiler:
@@ -374,7 +377,10 @@ class MlirCompiler:
         backend = get_backend(arch=arch)
 
         module = ir.Module.parse(module.operation.get_asm(enable_debug_info=env.debug.enable_debug_info))
-        fragments = _pipeline_fragments(backend)
+        fragments, llvm_opts = _pipeline_fragments(backend)
+
+        from .llvm_options import llvm_options as _llvm_options
+        _llvm_ctx = _llvm_options(llvm_opts) if llvm_opts else nullcontext()
 
         if env.debug.print_origin_ir:
             log().info(f"Origin IR: \n{module}")
@@ -382,60 +388,61 @@ class MlirCompiler:
         dump_enabled = env.debug.dump_ir
         dump_dir = Path(env.debug.dump_dir).resolve()
 
-        if dump_enabled:
-            asm = module.operation.get_asm(enable_debug_info=True)
-            kernel_names = _infer_kernel_names_from_asm(asm)
-            subdir = kernel_names[0] if len(kernel_names) == 1 else (func_name or "module")
-            dump_dir = dump_dir / _sanitize_path_component(subdir)
-            print(f"[flydsl.compile] FLYDSL_DUMP_IR=1 dir={dump_dir}")
+        with _llvm_ctx:
+            if dump_enabled:
+                asm = module.operation.get_asm(enable_debug_info=True)
+                kernel_names = _infer_kernel_names_from_asm(asm)
+                subdir = kernel_names[0] if len(kernel_names) == 1 else (func_name or "module")
+                dump_dir = dump_dir / _sanitize_path_component(subdir)
+                print(f"[flydsl.compile] FLYDSL_DUMP_IR=1 dir={dump_dir}")
 
-            out = _dump_ir("00_origin", dump_dir=dump_dir, asm=asm)
-            print(f"[flydsl.compile] dump 00_origin -> {out}")
+                out = _dump_ir("00_origin", dump_dir=dump_dir, asm=asm)
+                print(f"[flydsl.compile] dump 00_origin -> {out}")
 
-            asm_for_isa = None
-            llir = None
-            stage_num_base = 1
-            for idx, frag in enumerate(fragments):
-                if frag.strip().startswith("gpu-module-to-binary"):
-                    llir = _extract_llvm_ir(module)
+                asm_for_isa = None
+                llir = None
+                stage_num_base = 1
+                for idx, frag in enumerate(fragments):
+                    if frag.strip().startswith("gpu-module-to-binary"):
+                        llir = _extract_llvm_ir(module)
 
-                stage_num = stage_num_base + idx
-                stage_name = f"{stage_num:02d}_{_stage_label_from_fragment(frag)}"
-                pm = PassManager.parse(f"builtin.module({frag})")
+                    stage_num = stage_num_base + idx
+                    stage_name = f"{stage_num:02d}_{_stage_label_from_fragment(frag)}"
+                    pm = PassManager.parse(f"builtin.module({frag})")
+                    pm.enable_verifier(env.debug.enable_verifier)
+                    pm.run(module.operation)
+
+                    stage_asm = module.operation.get_asm(enable_debug_info=True)
+                    out = _dump_ir(stage_name, dump_dir=dump_dir, asm=stage_asm)
+                    print(f"[flydsl.compile] dump {stage_name} -> {out}")
+
+                    if frag.strip() == "reconcile-unrealized-casts":
+                        asm_for_isa = stage_asm
+
+                next_stage = stage_num_base + len(fragments)
+                if llir is not None:
+                    ll_name = f"{next_stage:02d}_llvm_ir"
+                    (dump_dir / f"{ll_name}.ll").write_text(llir, encoding="utf-8")
+                    print(f"[flydsl.compile] dump {ll_name} -> {dump_dir / f'{ll_name}.ll'}")
+                    next_stage += 1
+
+                if asm_for_isa is not None:
+                    isa_stage = f"{next_stage:02d}_final_isa"
+                    isa_out = _dump_isa(
+                        dump_dir=dump_dir,
+                        ctx=module.context,
+                        asm=asm_for_isa,
+                        verify=env.debug.enable_verifier,
+                        stage_name=isa_stage,
+                    )
+                    if isa_out is not None:
+                        print(f"[flydsl.compile] dump {isa_stage} -> {isa_out}")
+            else:
+                pipeline = f"builtin.module({','.join(fragments)})"
+                pm = PassManager.parse(pipeline)
                 pm.enable_verifier(env.debug.enable_verifier)
+                pm.enable_ir_printing(print_after_all=env.debug.print_after_all)
                 pm.run(module.operation)
-
-                stage_asm = module.operation.get_asm(enable_debug_info=True)
-                out = _dump_ir(stage_name, dump_dir=dump_dir, asm=stage_asm)
-                print(f"[flydsl.compile] dump {stage_name} -> {out}")
-
-                if frag.strip() == "reconcile-unrealized-casts":
-                    asm_for_isa = stage_asm
-
-            next_stage = stage_num_base + len(fragments)
-            if llir is not None:
-                ll_name = f"{next_stage:02d}_llvm_ir"
-                (dump_dir / f"{ll_name}.ll").write_text(llir, encoding="utf-8")
-                print(f"[flydsl.compile] dump {ll_name} -> {dump_dir / f'{ll_name}.ll'}")
-                next_stage += 1
-
-            if asm_for_isa is not None:
-                isa_stage = f"{next_stage:02d}_final_isa"
-                isa_out = _dump_isa(
-                    dump_dir=dump_dir,
-                    ctx=module.context,
-                    asm=asm_for_isa,
-                    verify=env.debug.enable_verifier,
-                    stage_name=isa_stage,
-                )
-                if isa_out is not None:
-                    print(f"[flydsl.compile] dump {isa_stage} -> {isa_out}")
-        else:
-            pipeline = f"builtin.module({','.join(fragments)})"
-            pm = PassManager.parse(pipeline)
-            pm.enable_verifier(env.debug.enable_verifier)
-            pm.enable_ir_printing(print_after_all=env.debug.print_after_all)
-            pm.run(module.operation)
 
         return module
 
@@ -618,8 +625,9 @@ class CallState:
 
 
 class JitFunction:
-    def __init__(self, func: Callable):
+    def __init__(self, func: Callable, compile_hints: Optional[dict] = None):
         self.func = ASTRewriter.transform(func)
+        self.compile_hints = dict(compile_hints) if compile_hints is not None else {}
         self.manager_key = None
         self.cache_manager = None
         self._call_state_cache = {}  # cache_key -> CallState
@@ -773,7 +781,9 @@ class JitFunction:
                 _ensure_stream_arg(jit_args)
                 return cached_func(*jit_args)
 
-        with ir.Context() as ctx:
+        _hints_ctx = CompilationContext.compile_hints(self.compile_hints) if self.compile_hints else nullcontext()
+
+        with ir.Context() as ctx, _hints_ctx:
             param_names, jit_args, dsl_types, constexpr_values = convert_to_jit_arguments(sig, bound)
             has_user_stream = _ensure_stream_arg(jit_args)
             ir_types = fly_types(jit_args)
@@ -897,7 +907,7 @@ class CompiledFunction:
         return self._call_state(args)
 
 
-def compile(func, *args) -> CompiledFunction:
+def _compile_impl(func, *args) -> CompiledFunction:
     """Pre-compile a ``@flyc.jit`` function, returning a fast callable.
 
     Usage::
@@ -921,7 +931,6 @@ def compile(func, *args) -> CompiledFunction:
 
     jf = func
 
-    # Trigger compilation through the normal JitFunction path.
     jf(*args)
 
     # Retrieve the CallState (already built by __call__ above).
@@ -957,3 +966,36 @@ def compile(func, *args) -> CompiledFunction:
         )
 
     return CompiledFunction(call_state, artifact)
+
+
+class CompileCallable:
+    """Subscriptable compile callable.
+
+    Usage::
+
+        flyc.compile(launch, *args)                          # no hints
+        flyc.compile[{"fast_fp_math": True}](launch, *args)  # with hints
+        flyc.compile[hints](launch)                          # deferred
+    """
+
+    def __init__(self, compile_hints: Optional[dict] = None):
+        self._compile_hints = compile_hints
+
+    def __getitem__(self, hints: dict) -> "CompileCallable":
+        """``flyc.compile[{...}]`` → new CompileCallable with compile hints."""
+        if not isinstance(hints, dict):
+            raise TypeError(
+                f"flyc.compile[...] expects a dict of compile hints, got {type(hints).__name__}"
+            )
+        return CompileCallable(compile_hints=hints)
+
+    def __call__(self, func, *args):
+        if self._compile_hints and isinstance(func, JitFunction):
+            func.compile_hints = {**func.compile_hints, **self._compile_hints}
+        if not args:
+            # No args → just return the (hinted) function for deferred compilation
+            return func
+        return _compile_impl(func, *args)
+
+
+compile = CompileCallable()

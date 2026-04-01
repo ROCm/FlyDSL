@@ -12,6 +12,8 @@
 #include "DLTensorAdaptor.h"
 #include "TiledOpTraits.h"
 
+#include "LlvmConfig/llvm.h"
+
 #include <cstdint>
 #include <vector>
 
@@ -732,4 +734,51 @@ NB_MODULE(_mlirDialectsFly, m) {
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly::PyMmaAtomUniversalFMAType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly::PyTiledCopyType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly::PyTiledMmaType::bind(m);
+
+  m.def(
+      "set_llvm_option_bool",
+      [](const std::string &name, bool value) -> bool {
+        bool oldValue = false;
+        int rc = flydslSetLLVMOptionBool(name.c_str(), value, &oldValue);
+        if (rc == 1)
+          throw std::runtime_error("Unknown LLVM option: " + name);
+        if (rc == 2)
+          throw std::runtime_error("LLVM option '" + name +
+                                   "' is not a bool option");
+        return oldValue;
+      },
+      "name"_a, "value"_a,
+      "Set an LLVM bool cl::opt at runtime; returns the previous value.");
+
+  m.def(
+      "set_llvm_option_int",
+      [](const std::string &name, int value) -> int {
+        int oldValue = 0;
+        int rc = flydslSetLLVMOptionInt(name.c_str(), value, &oldValue);
+        if (rc == 1)
+          throw std::runtime_error("Unknown LLVM option: " + name);
+        if (rc == 2)
+          throw std::runtime_error("LLVM option '" + name +
+                                   "' is not an int option");
+        return oldValue;
+      },
+      "name"_a, "value"_a,
+      "Set an LLVM int cl::opt at runtime; returns the previous value.");
+
+  m.def(
+      "set_llvm_option_str",
+      [](const std::string &name, const std::string &value) -> std::string {
+        char *oldValue = nullptr;
+        int rc = flydslSetLLVMOptionStr(name.c_str(), value.c_str(), &oldValue);
+        if (rc == 1)
+          throw std::runtime_error("Unknown LLVM option: " + name);
+        if (rc == 2)
+          throw std::runtime_error("LLVM option '" + name +
+                                   "' is not a string option");
+        std::string result(oldValue ? oldValue : "");
+        flydslFreeLLVMOptionStr(oldValue);
+        return result;
+      },
+      "name"_a, "value"_a,
+      "Set an LLVM string cl::opt at runtime; returns the previous value.");
 }
