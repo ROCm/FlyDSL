@@ -26,7 +26,9 @@ from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm, scf, memref
+from flydsl._mlir.dialects import fly as _fly_dialect
 from flydsl._mlir.dialects import math as math_dialect
+from kernels.kernels_common import _create_llvm_ptr
 from flydsl.expr.typing import T
 from flydsl.expr.arith import ArithValue
 
@@ -2339,7 +2341,7 @@ def compile_moe_blockscale_gemm2(
                                 byte_off = idx_elem_even * c2_i32
                                 byte_off_idx = arith.index_cast(T.index, byte_off)
                                 ptr_addr_idx = out_base_idx + byte_off_idx
-                                out_ptr = buffer_ops.create_llvm_ptr(ptr_addr_idx, address_space=1)
+                                out_ptr = _create_llvm_ptr(ptr_addr_idx, address_space=1)
                                 out_ptr_v = out_ptr._value if hasattr(out_ptr, "_value") else out_ptr
                                 frag_v = frag._value if hasattr(frag, "_value") else frag
                                 llvm.AtomicRMWOp(
