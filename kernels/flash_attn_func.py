@@ -1059,6 +1059,14 @@ def build_flash_attn_func_module_primary(
         with CompilationContext.compile_hints(_fmha_compile_hints):
             return launch_flash_attn_func(*args, **kwargs)
 
+    def _compile(Q, K, V, O, batch_size, seq_len, stream=None):
+        with CompilationContext.compile_hints(_fmha_compile_hints):
+            return flyc.compile(
+                launch_flash_attn_func, Q, K, V, O, batch_size, seq_len,
+                fx.Stream(stream))
+
+    _launch.compile = _compile
+
     return _launch
 
 
