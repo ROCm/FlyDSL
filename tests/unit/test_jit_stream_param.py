@@ -10,8 +10,6 @@ Validates end-to-end that:
 """
 import pytest
 
-pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
-
 try:
     import torch
 except ImportError:
