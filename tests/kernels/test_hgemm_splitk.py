@@ -18,7 +18,7 @@ if _REPO_ROOT not in sys.path:
 if _PYFLYDSL_SRC not in sys.path:
     sys.path.insert(0, _PYFLYDSL_SRC)
 
-from kernels.hgemm_splitk import hgemm_splitk_
+from kernels.hgemm_splitk import hgemm_splitk_, hgemm_shuffle_b
 from tests.test_common import run_perftest, verify_output
 
 logging.basicConfig(level=logging.INFO)
@@ -83,6 +83,8 @@ def test_mfma_flyc_preshuffle_splitk_hgemm(
     device = torch.device("cuda")
     a_fp32 = torch.rand(m, k, device=device, dtype=torch.float32)
     b_fp32_t = torch.rand(n, k, device=device, dtype=torch.float32)
+    a_fp32.uniform_(-1, 1)
+    b_fp32_t.uniform_(-1, 1)
     a_q = a_fp32.to(torch_dtype)
     b_q = b_fp32_t.to(torch_dtype)
 
@@ -105,12 +107,17 @@ def test_mfma_flyc_preshuffle_splitk_hgemm(
         'SPLIT_K': SPLIT_K,
     }
 
+    b_q = hgemm_shuffle_b(b_q)
+    print(f"✓ B shuffled")
+    hgemm_splitk_(a_q, b_q, c_out, shuffle_b=False, hgemm_kwargs=kwargs)
+    print(f"✓ Kernel prepared: {kwargs}")
+
     _, us = run_perftest(
         hgemm_splitk_,
         a_q,
         b_q,
         c_out,
-        True, # shuffle_b
+        False, # shuffle_b
         kwargs,
         num_iters=bench_iters,
         num_warmup=bench_warmup,
