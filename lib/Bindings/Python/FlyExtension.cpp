@@ -22,7 +22,7 @@
 #include "DLTensorAdaptor.h"
 #include "TiledOpTraits.h"
 
-#include "../../CAPI/LlvmConfig/llvm.h"
+#include "LlvmConfig/llvm.h"
 
 #include <cstdint>
 #include <vector>
@@ -582,8 +582,11 @@ NB_MODULE(_mlirDialectsFly, m) {
       [](const std::string &name, bool value) -> bool {
         bool oldValue = false;
         int rc = flydslSetLLVMOptionBool(name.c_str(), value, &oldValue);
-        if (rc != 0)
-          throw std::runtime_error("Unknown LLVM bool option: " + name);
+        if (rc == 1)
+          throw std::runtime_error("Unknown LLVM option: " + name);
+        if (rc == 2)
+          throw std::runtime_error("LLVM option '" + name +
+                                   "' is not a bool option");
         return oldValue;
       },
       "name"_a, "value"_a,
@@ -594,8 +597,11 @@ NB_MODULE(_mlirDialectsFly, m) {
       [](const std::string &name, int value) -> int {
         int oldValue = 0;
         int rc = flydslSetLLVMOptionInt(name.c_str(), value, &oldValue);
-        if (rc != 0)
-          throw std::runtime_error("Unknown LLVM int option: " + name);
+        if (rc == 1)
+          throw std::runtime_error("Unknown LLVM option: " + name);
+        if (rc == 2)
+          throw std::runtime_error("LLVM option '" + name +
+                                   "' is not an int option");
         return oldValue;
       },
       "name"_a, "value"_a,
@@ -606,8 +612,11 @@ NB_MODULE(_mlirDialectsFly, m) {
       [](const std::string &name, const std::string &value) -> std::string {
         char *oldValue = nullptr;
         int rc = flydslSetLLVMOptionStr(name.c_str(), value.c_str(), &oldValue);
-        if (rc != 0)
-          throw std::runtime_error("Unknown LLVM string option: " + name);
+        if (rc == 1)
+          throw std::runtime_error("Unknown LLVM option: " + name);
+        if (rc == 2)
+          throw std::runtime_error("LLVM option '" + name +
+                                   "' is not a string option");
         std::string result(oldValue ? oldValue : "");
         flydslFreeLLVMOptionStr(oldValue);
         return result;

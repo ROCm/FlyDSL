@@ -11,7 +11,7 @@ extern "C" {
 #endif
 
 /// Set an LLVM cl::opt value at runtime and return the previous value.
-/// Returns 0 on success, non-zero if the option was not found.
+/// Returns 0 on success, 1 if the option was not found, 2 on type mismatch.
 MLIR_CAPI_EXPORTED int flydslSetLLVMOptionBool(const char *name, bool value,
                                                bool *oldValue);
 MLIR_CAPI_EXPORTED int flydslSetLLVMOptionInt(const char *name, int value,

@@ -72,7 +72,7 @@ class TestLLVMOptionBindings:
 
     def test_unknown_option_raises(self):
         _fly = self._get_fly()
-        with pytest.raises(RuntimeError, match="Unknown LLVM bool option"):
+        with pytest.raises(RuntimeError, match="Unknown LLVM option"):
             _fly.set_llvm_option_bool("this-option-does-not-exist-xyz", True)
 
 
