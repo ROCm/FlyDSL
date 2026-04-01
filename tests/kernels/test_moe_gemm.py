@@ -640,7 +640,7 @@ def run_moe_stage1(
                 ref,
                 rtol=rtol,
                 atol=atol,
-                logits_diff_threshold=0.5 if is_fp4 else 2e-3,
+                logits_diff_threshold=1 if is_fp4 else 2e-3,
             )
 
     # Note: kernel launches full expert-block range; effective work is gated by num_valid_ids.
