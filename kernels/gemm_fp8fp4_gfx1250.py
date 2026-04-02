@@ -780,18 +780,41 @@ def compile_mxscale_gemm(
                 lds_as, warp_m_base, wmma_m_rep, interleaved_scale_cols_a)
             bs_buf, bs_bases = _precompute_scale_lane_bases(
                 lds_bs, warp_n_base, b_scale_load_rep, interleaved_scale_cols_b)
+            _b_half_scale_loads = (_bank_half_b_scale_rep + 3) // 4
 
             def _fp4_get_a_scale_and_opsel(a_scales_all, wm_idx):
                 if use_scale_opsel:
                     return a_scales_all[(wm_idx // 2) * 2], wm_idx % 2
                 return a_scales_all[wm_idx], 0
 
-            def _emit_group(group_base, wm_base, a_frags, b_frags, a_scales,
-                            b_scales, emit_filler_now=False):
+            def _load_a_group(wm_base, wm_count, ks):
+                return [
+                    load_a_frag(a_buf, a_bases[wm_base + wm_local], ks)
+                    for wm_local in range_constexpr(wm_count)
+                ]
+
+            def _load_b_half(wn_base, ks):
+                return [
+                    load_b_frag(b_buf, b_bases, wn_base + wn_local, ks)
+                    for wn_local in range_constexpr(_bank_half_wn)
+                ]
+
+            def _load_b_half_bundle(wn_base, rep_start, ks):
+                b_frags = _load_b_half(wn_base, ks)
+                b_scales = load_scale_slice_b128(
+                    bs_buf, bs_bases[0],
+                    b_scale_load_rep, rep_start,
+                    _bank_half_b_scale_rep, ks)
+                return b_frags, b_scales
+
+            def _emit_group_rows(group_base, wm_base, a_frags, b_frags, a_scales,
+                                 b_scales, row_start, row_count,
+                                 emit_filler_now=False):
                 if emit_filler_now and emit_filler is not None:
                     rocdl.sched_barrier(0)
                     emit_filler()
-                for wm_local in range_constexpr(_bank_half_wm):
+                for row_offset in range_constexpr(row_count):
+                    wm_local = row_start + row_offset
                     a_frag = a_frags[wm_local]
                     global_wm = wm_base + wm_local
                     a_scale, a_opsel = _fp4_get_a_scale_and_opsel(
@@ -807,62 +830,81 @@ def compile_mxscale_gemm(
                             scaleBType=a_opsel,
                         )
 
+            def _emit_group(group_base, wm_base, a_frags, b_frags, a_scales,
+                            b_scales, emit_filler_now=False):
+                _emit_group_rows(
+                    group_base, wm_base,
+                    a_frags, b_frags,
+                    a_scales, b_scales,
+                    0, _bank_half_wm,
+                    emit_filler_now=emit_filler_now,
+                )
+
+            b_left_frags, b_left_scales = _load_b_half_bundle(0, 0, 0)
+
             for ks in range_constexpr(k_wmma_steps):
                 is_last_ks = ks == k_wmma_steps - 1
-                a_frags_all = [load_a_frag(a_buf, a_bases[wm], ks)
-                               for wm in range_constexpr(wmma_m_rep)]
                 a_scales_all = load_scale_b128(as_buf, as_bases[0],
                                                wmma_m_rep, ks)
 
-                b_left_frags = [
-                    load_b_frag(b_buf, b_bases, wn, ks)
-                    for wn in range_constexpr(_bank_half_wn)
-                ]
-                b_left_scales = load_scale_slice_b128(
-                    bs_buf, bs_bases[0],
-                    b_scale_load_rep, 0, _bank_half_b_scale_rep, ks)
-                rocdl.s_wait_dscnt(0)
+                a_top_frags = _load_a_group(0, _bank_half_wm, ks)
+                a_bottom_frags = _load_a_group(_bank_half_wm, _bank_half_wm, ks)
+
+                # Keep the next A half in flight while the first quadrant computes.
+                rocdl.s_wait_dscnt(_bank_half_wm * DS_LOADS_PER_A_FRAG)
 
                 _emit_group(
                     0, 0,
-                    a_frags_all[:_bank_half_wm],
-                    b_left_frags,
-                    a_scales_all,
-                    b_left_scales,
-                )
-                _emit_group(
-                    _bank_group_size, _bank_half_wm,
-                    a_frags_all[_bank_half_wm:],
+                    a_top_frags,
                     b_left_frags,
                     a_scales_all,
                     b_left_scales,
                 )
 
-                b_right_frags = [
-                    load_b_frag(b_buf, b_bases, _bank_half_wn + wn, ks)
-                    for wn in range_constexpr(_bank_half_wn)
-                ]
-                b_right_scales = load_scale_slice_b128(
-                    bs_buf, bs_bases[0],
-                    b_scale_load_rep, _bank_half_b_scale_rep,
-                    _bank_half_b_scale_rep, ks)
-                rocdl.s_wait_dscnt(0)
+                b_right_frags, b_right_scales = _load_b_half_bundle(
+                    _bank_half_wn, _bank_half_b_scale_rep, ks)
+
+                # Hold only the next B half outstanding while the second
+                # quadrant consumes the current left-half fragments.
+                rocdl.s_wait_dscnt(_bank_half_wn * 4 + _b_half_scale_loads)
+
+                _emit_group(
+                    _bank_group_size, _bank_half_wm,
+                    a_bottom_frags,
+                    b_left_frags,
+                    a_scales_all,
+                    b_left_scales,
+                )
+
+                if not is_last_ks:
+                    next_left_frags, next_left_scales = _load_b_half_bundle(
+                        0, 0, ks + 1)
+                    # Older right-half loads must be ready before consuming
+                    # them, while the next ks left-half preload can remain in
+                    # flight under the final two quadrants.
+                    rocdl.s_wait_dscnt(_bank_half_wn * 4 + _b_half_scale_loads)
+                else:
+                    rocdl.s_wait_dscnt(0)
 
                 _emit_group(
                     _bank_group_size * 2, 0,
-                    a_frags_all[:_bank_half_wm],
+                    a_top_frags,
                     b_right_frags,
                     a_scales_all,
                     b_right_scales,
                 )
                 _emit_group(
                     _bank_group_size * 3, _bank_half_wm,
-                    a_frags_all[_bank_half_wm:],
+                    a_bottom_frags,
                     b_right_frags,
                     a_scales_all,
                     b_right_scales,
                     emit_filler_now=is_last_ks,
                 )
+
+                if not is_last_ks:
+                    b_left_frags = next_left_frags
+                    b_left_scales = next_left_scales
 
             return current_accs
 
@@ -889,15 +931,23 @@ def compile_mxscale_gemm(
             _a_scale_loads = (wmma_m_rep + 3) // 4
             _b_half_loads = _bank_half_wn * 4
             _b_half_scale_loads = (_bank_half_b_scale_rep + 3) // 4
-            _col_half_wmma = wmma_m_rep * _bank_half_wn
+            _group_wmma = _bank_group_size
+            _right_half_loads = _b_half_loads + _b_half_scale_loads
 
             for _ks in range_constexpr(k_wmma_steps):
-                rocdl.sched_dsrd(
-                    _a_all_loads + _a_scale_loads
-                    + _b_half_loads + _b_half_scale_loads)
-                rocdl.sched_mfma(_col_half_wmma)
-                rocdl.sched_dsrd(_b_half_loads + _b_half_scale_loads)
-                rocdl.sched_mfma(_col_half_wmma)
+                if _ks == 0:
+                    rocdl.sched_dsrd(
+                        _a_all_loads + _a_scale_loads
+                        + _b_half_loads + _b_half_scale_loads)
+                else:
+                    rocdl.sched_dsrd(_a_all_loads + _a_scale_loads)
+                rocdl.sched_mfma(_group_wmma)
+                rocdl.sched_dsrd(_right_half_loads)
+                rocdl.sched_mfma(_group_wmma)
+                if _ks < k_wmma_steps - 1:
+                    rocdl.sched_dsrd(_right_half_loads)
+                rocdl.sched_mfma(_group_wmma)
+                rocdl.sched_mfma(_group_wmma)
             rocdl.sched_barrier(0)
 
         def compute_tile_scheduled(accs_in, lds_a, lds_b, lds_as, lds_bs,
