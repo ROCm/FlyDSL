@@ -715,3 +715,38 @@ def raw_ptr_buffer_load_lds(rsrc, lds_ptr, size, voffset, soffset, offset, aux, 
     return _op(
         _to_ir(rsrc), _to_ir(lds_ptr), _to_ir(size), _to_ir(voffset), _to_ir(soffset), _to_ir(offset), _to_ir(aux), **kw
     )
+
+
+def cvt_off_f32_i4(src_i32, nibble_offset):
+    """gfx950: v_cvt_off_f32_i4 vdst, vsrc, offset.
+
+    Extract signed int4 at nibble_offset (0-7) from src_i32 and convert to f32.
+    """
+    from .._mlir.dialects import llvm as _llvm
+    from .._mlir import ir
+
+    return _llvm.inline_asm(
+        ir.F32Type.get(),
+        [_to_ir(src_i32)],
+        f"v_cvt_off_f32_i4 $0, $1, {int(nibble_offset)}",
+        "=v,v",
+        has_side_effects=False,
+    )
+
+
+def cvt_pk_bf16_f32(src_a_f32, src_b_f32):
+    """gfx950: v_cvt_pk_bf16_f32 vdst, vsrc0, vsrc1.
+
+    Pack two f32 values into 2xbf16 in i32.
+    dst[15:0] = bf16(src_a), dst[31:16] = bf16(src_b).
+    """
+    from .._mlir.dialects import llvm as _llvm
+    from .._mlir import ir
+
+    return _llvm.inline_asm(
+        ir.IntegerType.get_signless(32),
+        [_to_ir(src_a_f32), _to_ir(src_b_f32)],
+        "v_cvt_pk_bf16_f32 $0, $1, $2",
+        "=v,v,v",
+        has_side_effects=False,
+    )

@@ -189,6 +189,8 @@ def compile_moe_gemm1(
     # so epilogue can skip weight scale multiplication (uses 1.0 for sw).
     # For W4A8/W4A_FP8 groupwise: still need scale_x in epilogue.
 
+    use_gfx950_cvt = is_int4_bf16 and "gfx95" in get_hip_arch()
+
     mfma_i32_k32 = None
     if is_int8:
         mfma_i32_k32 = getattr(rocdl, "mfma_i32_16x16x32i8", None) or getattr(
@@ -669,7 +671,7 @@ def compile_moe_gemm1(
                             packs0, packs1 = [], []
                             for ni in range_constexpr(num_acc_n):
                                 packed32, scale_val = raw_data[ku][ni]
-                                b0, b1 = unpack_b_w4a16_groupwise(packed32, scale_val, arith, vector)
+                                b0, b1 = unpack_b_w4a16_groupwise(packed32, scale_val, arith, vector, use_gfx950_cvt=use_gfx950_cvt)
                                 packs0.append(b0)
                                 packs1.append(b1)
                             b_tile.append((packs0, packs1))
@@ -695,7 +697,7 @@ def compile_moe_gemm1(
                             packs0 = []
                             packs1 = []
                             for ni in range_constexpr(num_acc_n):
-                                b0, b1 = unpack_b_w4a16(raw_data[ku][ni], arith, vector)
+                                b0, b1 = unpack_b_w4a16(raw_data[ku][ni], arith, vector, use_gfx950_cvt=use_gfx950_cvt)
                                 packs0.append(b0)
                                 packs1.append(b1)
                             b_tile.append((packs0, packs1))
@@ -1576,6 +1578,8 @@ def compile_moe_gemm2(
     num_groups = inter_dim // group_size if use_groupwise_scale else 1
     scale_w_size_stage2 = experts * model_dim * num_groups
 
+    use_gfx950_cvt = is_int4_bf16 and "gfx95" in get_hip_arch()
+
     mfma_i32_k32 = None
     if is_int8:
         mfma_i32_k32 = getattr(rocdl, "mfma_i32_16x16x32i8", None) or getattr(
@@ -2082,7 +2086,7 @@ def compile_moe_gemm2(
                             packs0, packs1 = [], []
                             for ni in range_constexpr(num_acc_n):
                                 packed32, scale_val = raw_data[ku][ni]
-                                b0, b1 = unpack_b_w4a16_groupwise(packed32, scale_val, arith, vector)
+                                b0, b1 = unpack_b_w4a16_groupwise(packed32, scale_val, arith, vector, use_gfx950_cvt=use_gfx950_cvt)
                                 packs0.append(b0)
                                 packs1.append(b1)
                             b_tile.append((packs0, packs1))
@@ -2108,7 +2112,7 @@ def compile_moe_gemm2(
                             packs0 = []
                             packs1 = []
                             for ni in range_constexpr(num_acc_n):
-                                b0, b1 = unpack_b_w4a16(raw_data[ku][ni], arith, vector)
+                                b0, b1 = unpack_b_w4a16(raw_data[ku][ni], arith, vector, use_gfx950_cvt=use_gfx950_cvt)
                                 packs0.append(b0)
                                 packs1.append(b1)
                             b_tile.append((packs0, packs1))

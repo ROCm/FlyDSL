@@ -223,12 +223,64 @@ def load_b_raw_w4a16(
     return packed32
 
 
-def unpack_b_w4a16(packed32, arith, vector, scale_val=None):
+def _int4_to_bf16x4_i64_gfx950(packed32, nibble_offsets, arith, vector, scale_val=None):
+    """Convert 4 int4 nibbles to 4 bf16 packed as i64 using gfx950 instructions.
+
+    v_cvt_off_f32_i4 converts bits[3:0] to f32 as (signed_int4 / 16.0),
+    so we multiply by (16 * scale) to recover the true scaled value.
+    v_cvt_pk_bf16_f32 packs two f32 → 2×bf16.
+    """
+    from flydsl.expr import rocdl
+    from flydsl._mlir.dialects._arith_ops_gen import MulFOp as _MulFOp
+
+    _uw = _arith._to_raw
+    _av = _arith.ArithValue
+
+    # v_cvt_off_f32_i4 outputs value/16, so effective_scale = 16 * scale (or just 16 if no scale)
+    c16 = fx.Float32(16.0)
+    if scale_val is not None:
+        effective_scale = scale_val * c16
+    else:
+        effective_scale = c16
+    raw_scale = _uw(effective_scale)
+
+    f32_vals = []
+    for nib in nibble_offsets:
+        if nib == 0:
+            shifted = packed32
+        else:
+            shifted = packed32 >> fx.Int32(nib * 4)
+        v = rocdl.cvt_off_f32_i4(shifted)
+        v = _MulFOp(v, raw_scale).result
+        f32_vals.append(v)
+
+    c16_shift = fx.Int32(16)
+    c_ffff0000 = fx.Int32(0xFFFF0000)
+    bf16_vals = []
+    for v in f32_vals:
+        bits_i32 = arith.bitcast(T.i32, _av(v))
+        bf16_vals.append(bits_i32)
+    i32_lo = (bf16_vals[0] >> c16_shift) | (bf16_vals[1] & c_ffff0000)
+    i32_hi = (bf16_vals[2] >> c16_shift) | (bf16_vals[3] & c_ffff0000)
+
+    v2 = vector.from_elements(T.vec(2, T.i32), [i32_lo, i32_hi])
+    v64 = vector.bitcast(T.vec(1, T.i64), v2)
+    return vector.extract(v64, static_position=[0], dynamic_position=[])
+
+
+def unpack_b_w4a16(packed32, arith, vector, scale_val=None, use_gfx950_cvt=False):
     """Phase 2 of W4A16 B load: unpack int4->int8 + convert int8->bf16.
 
     Takes raw packed32 from load_b_raw_w4a16 and produces (b0, b1) --
     two i64 values each containing 4 bf16 for one MFMA.
+
+    When use_gfx950_cvt=True, uses v_cvt_off_f32_i4 + v_cvt_pk_bf16_f32
+    for ~2x fewer VALU instructions.
     """
+    if use_gfx950_cvt:
+        b0 = _int4_to_bf16x4_i64_gfx950(packed32, [0, 2, 4, 6], arith, vector, scale_val)
+        b1 = _int4_to_bf16x4_i64_gfx950(packed32, [1, 3, 5, 7], arith, vector, scale_val)
+        return (b0, b1)
     even, odd = _unpack_int4_to_int8_pair(packed32)
     b0 = _i8x4_in_i32_to_bf16x4_i64(even, arith, vector, scale_val=scale_val)
     b1 = _i8x4_in_i32_to_bf16x4_i64(odd, arith, vector, scale_val=scale_val)
@@ -573,9 +625,9 @@ def load_b_raw_w4a16_groupwise(
     return (packed32, scale_val)
 
 
-def unpack_b_w4a16_groupwise(packed32, scale_val, arith, vector):
+def unpack_b_w4a16_groupwise(packed32, scale_val, arith, vector, use_gfx950_cvt=False):
     """Phase 2 of W4A16 groupwise: unpack + scale + convert to bf16."""
-    return unpack_b_w4a16(packed32, arith, vector, scale_val=scale_val)
+    return unpack_b_w4a16(packed32, arith, vector, scale_val=scale_val, use_gfx950_cvt=use_gfx950_cvt)
 
 
 # ---------------------------------------------------------------------------
