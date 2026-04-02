@@ -243,7 +243,7 @@ def _run_mxscale_gemm_test(
         (128, 128, 256, 128, 128, 128, 2, 2),
         (128, 128, 512, 128, 128, 128, 2, 2),
         (128, 128, 1024, 128, 128, 128, 2, 2),
-        (1024, 1024, 1024, 128, 256, 128, 2, 4),
+        (1024, 1024, 1024, 256, 256, 256, 2, 2),
     ],
 )
 @pytest.mark.parametrize("num_buffers", [2, 3, 4])
@@ -336,15 +336,15 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-format", type=str, default="fp4",
                         choices=["fp4", "fp8", "a8w4"])
-    parser.add_argument("-M", type=int, default=128)
-    parser.add_argument("-N", type=int, default=128)
-    parser.add_argument("-K", type=int, default=256)
-    parser.add_argument("--tile-m", type=int, default=128)
-    parser.add_argument("--tile-n", type=int, default=128)
-    parser.add_argument("--tile-k", type=int, default=128)
+    parser.add_argument("-M", type=int, default=1024)
+    parser.add_argument("-N", type=int, default=1024)
+    parser.add_argument("-K", type=int, default=1024)
+    parser.add_argument("--tile-m", type=int, default=256)
+    parser.add_argument("--tile-n", type=int, default=256)
+    parser.add_argument("--tile-k", type=int, default=256)
     parser.add_argument("--m-warp", type=int, default=2)
     parser.add_argument("--n-warp", type=int, default=2)
-    parser.add_argument("--num-buffers", type=int, default=2, choices=[2, 3, 4])
+    parser.add_argument("--num-buffers", type=int, default=4, choices=[2, 3, 4])
     parser.add_argument("--l2-prefetch-distance", type=int, default=0)
     parser.add_argument("--cluster-m", type=int, default=1)
     parser.add_argument("--cluster-n", type=int, default=1)
