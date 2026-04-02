@@ -2112,8 +2112,13 @@ public:
       int32_t loop_k = get_static_product(aLayoutAttr.getShape().at(2));
       assert(loop_k == get_static_product(bLayoutAttr.getShape().at(2)) && "Mismatch in loop_k");
 
+      // the accumulator source: c on first visit, d on subsequent visits.
+      SmallVector<bool> mnVisited(loop_m * loop_n, false);
+
       auto emitMmaCall = [&](int32_t m, int32_t n, int32_t k) {
-        Value cSrc = (k == 0) ? c : d;
+        bool &visited = mnVisited[m * loop_n + n];
+        Value cSrc = visited ? d : c;
+        visited = true;
           Value aSlice = SliceOp::create(rewriter, loc, a, getSliceCoord({m, k}));
             Value bSlice = SliceOp::create(rewriter, loc, b, getSliceCoord({n, k}));
             Value cSlice = SliceOp::create(rewriter, loc, cSrc, getSliceCoord({m, n}));
@@ -2147,9 +2152,7 @@ public:
 
         for (int32_t i = 0; i < totalIters; ++i) {
           IntTupleAttr iAttr = IntTupleAttr::getLeafStatic(ctx, i);
-          // crd2idx: map flat iteration coord through traversal layout
           IntTupleAttr linearIdx = layoutCrd2Idx(attrBuilder, iAttr, tvShape, tvStride);
-          // idx2crd: recover (m, n, k) in natural col-major space
           IntTupleAttr coord = layoutIdx2Crd(attrBuilder, linearIdx, naturalShape, naturalStride);
           int32_t m = coord.at(0).getLeafAsInt().getValue();
           int32_t n = coord.at(1).getLeafAsInt().getValue();
