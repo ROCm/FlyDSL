@@ -1,6 +1,3 @@
-# SPDX-License-Identifier: MIT
-# Copyright (C) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
-
 """FlyDSL Paged Attention Decode with Persistent Scheduling — FP8.
 
 Extends pa_decode_sw_fp8.py with persistent scheduling (PS) mode:
@@ -24,6 +21,11 @@ from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl._mlir import ir
 from flydsl.compiler.kernel_function import CompilationContext
+try:
+    from flydsl.autotune import autotune, Config
+except ImportError:
+    pass
+from flydsl._mlir.dialects import arith as _mlir_arith
 
 # ── Kernel geometry constants ────────────────────────────────────────
 QUERY_GROUP_SIZE = 16
@@ -61,6 +63,16 @@ _N_V = VHELOOP * VTLOOP * 2  # 16
 
 # Tiles per block (1024 tokens / 256 tokens per tile = 4, matches SP3 kNumBlockTiles)
 TILES_PER_BLOCK = KV_BLOCK_SIZE // KV_COMPUTE_BLOCK  # 4
+
+_PACKED_FP8_QUERY_DTYPES = tuple(
+    dtype
+    for dtype in (
+        torch.uint8,
+        getattr(torch, "float8_e4m3fnuz", None),
+        getattr(torch, "float8_e4m3fn", None),
+    )
+    if dtype is not None
+)
 
 
 def _pack_i32_pair_to_i64(a_i32, b_i32):
@@ -167,6 +179,7 @@ def compile_pa_decode_ps(
     query_group_size=QUERY_GROUP_SIZE,
     per_token_kv=False,
     query_length: int = 1,
+    query_input_dtype: str = "packed_fp8",
 ):
     """Compile a PS-mode PA decode kernel.
 
@@ -174,6 +187,8 @@ def compile_pa_decode_ps(
     because PS mode uses dynamic work distribution. Grid = (num_sm, 1, 4).
     """
     arch = get_hip_arch()
+    query_packed_fp8 = query_input_dtype == "packed_fp8"
+    query_load_is_bf16 = query_input_dtype == "bf16"
     if softmax_scale is None:
         softmax_scale = 1.0 / (HEAD_SIZE ** 0.5)
     _softmax_scale = float(softmax_scale)
@@ -234,7 +249,6 @@ def compile_pa_decode_ps(
         lane4id = tid & arith.constant(3, type=T.i32)
         rowid = (tid >> arith.constant(4, type=T.i32)) & arith.constant(3, type=T.i32)
         warp_id = tid >> arith.constant(6, type=T.i32)
-        laneid = tid & arith.constant(63, type=T.i32)
 
         # ── Buffer resources ──
         q_rsrc = buffer_ops.create_buffer_resource(query_ptr, max_size=True)
@@ -278,7 +292,6 @@ def compile_pa_decode_ps(
         c_tpb = arith.constant(TILES_PER_BLOCK, type=T.i32)
 
         local_qhead_idx = warp_id * arith.constant(4, type=T.i32) + rowid
-        row_head_elem = rowid * arith.constant(FP8_ELEMS_16B, type=T.i32)
 
         # ── Work loop bounds ──
         work_start = buffer_ops.buffer_load(wi_rsrc, cu_id, vec_width=1, dtype=T.i32)
@@ -287,7 +300,6 @@ def compile_pa_decode_ps(
         # ════════════════════════════════════════════════════════════
         # Outer work loop — iterate over assigned work items
         # Each work item = one (batch, kv_head_range, kv_page_range)
-        # Uses a dummy loop-carried value since scf.for requires at least one
         # ════════════════════════════════════════════════════════════
         _work_start_idx = arith.index_cast(T.index, arith.unwrap(work_start))
         _work_end_idx = arith.index_cast(T.index, arith.unwrap(work_end))
@@ -300,8 +312,6 @@ def compile_pa_decode_ps(
             info_base = work_idx * arith.constant(8, type=T.i32)
             batch_idx = buffer_ops.buffer_load(winfo_rsrc, info_base, vec_width=1, dtype=T.i32)
             partial_idx = buffer_ops.buffer_load(winfo_rsrc, info_base + c_one, vec_width=1, dtype=T.i32)
-            # q_start = buffer_ops.buffer_load(winfo_rsrc, info_base + arith.constant(2, type=T.i32), vec_width=1, dtype=T.i32)
-            # q_end = buffer_ops.buffer_load(winfo_rsrc, info_base + arith.constant(3, type=T.i32), vec_width=1, dtype=T.i32)
             kv_start = buffer_ops.buffer_load(winfo_rsrc, info_base + arith.constant(4, type=T.i32), vec_width=1, dtype=T.i32)
             kv_end = buffer_ops.buffer_load(winfo_rsrc, info_base + arith.constant(5, type=T.i32), vec_width=1, dtype=T.i32)
             q_head_range = buffer_ops.buffer_load(winfo_rsrc, info_base + arith.constant(7, type=T.i32), vec_width=1, dtype=T.i32)
@@ -325,8 +335,6 @@ def compile_pa_decode_ps(
             # Head offsets for K and V cache
             _k_head_off = kv_h * c_kh
             _v_head_off = kv_h * c_vh
-
-            # Q load is now done inside the mtp_g loop below
 
             # ── Tiles per block constant for tile-based loop (SP3-matching) ──
             c_four = arith.constant(4, type=T.i32)
@@ -419,6 +427,43 @@ def compile_pa_decode_ps(
                             vector.extract(k4, static_position=[2]),
                             vector.extract(k4, static_position=[3])))
                 return k_flat
+
+            def _load_q_words(q_base_elem):
+                if query_packed_fp8:
+                    q_off = q_base_elem + lane16id * arith.constant(FP8_ELEMS_16B, type=T.i32)
+                    q_vec = buffer_ops.buffer_load(
+                        q_rsrc,
+                        q_off // arith.constant(4, type=T.i32),
+                        vec_width=4,
+                        dtype=T.i32,
+                    )
+                    return [
+                        vector.extract(q_vec, static_position=[0], dynamic_position=[]),
+                        vector.extract(q_vec, static_position=[1], dynamic_position=[]),
+                        vector.extract(q_vec, static_position=[2], dynamic_position=[]),
+                        vector.extract(q_vec, static_position=[3], dynamic_position=[]),
+                    ]
+
+                q_elem = q_base_elem + lane16id * arith.constant(FP8_ELEMS_16B, type=T.i32)
+                q_words = []
+                for qwi in range_constexpr(4):
+                    q_src = buffer_ops.buffer_load(
+                        q_rsrc,
+                        q_elem + arith.constant(qwi * 4, type=T.i32),
+                        vec_width=4,
+                        dtype=T.bf16 if query_load_is_bf16 else T.f16,
+                    )
+                    q_f32 = _mlir_arith.ExtFOp(T.f32x4, q_src).result
+                    p0 = vector.extract(q_f32, static_position=[0], dynamic_position=[])
+                    p1 = vector.extract(q_f32, static_position=[1], dynamic_position=[])
+                    p2 = vector.extract(q_f32, static_position=[2], dynamic_position=[])
+                    p3 = vector.extract(q_f32, static_position=[3], dynamic_position=[])
+                    lo = rocdl.cvt_pk_fp8_f32(
+                        T.i32, p0, p1, arith.constant(0, type=T.i32), False
+                    )
+                    pk = rocdl.cvt_pk_fp8_f32(T.i32, p2, p3, lo, True)
+                    q_words.append(pk)
+                return q_words
 
             def _unflatten_k(k_flat):
                 return [[k_flat[td * (QKHELOOP * 2) + j]
@@ -1030,16 +1075,11 @@ def compile_pa_decode_ps(
                     SmemPtr._view_cache = None
                 q_row = batch_idx * arith.constant(query_length, type=T.i32) + qi_for_q
                 q_base = q_row * stride_q_seq + (kv_h * arith.constant(query_group_size, type=T.i32) + local_qhead_idx_for_q) * stride_q_head
-                q_off = q_base + lane16id * arith.constant(FP8_ELEMS_16B, type=T.i32)
-                q_vec = buffer_ops.buffer_load(q_rsrc, q_off // arith.constant(4, type=T.i32), vec_width=4, dtype=T.i32)
                 offset1 = lane16id // arith.constant(4, type=T.i32)
                 lds_q_base = (offset1 * arith.constant(2048, type=T.i32)
                               + lane4id * arith.constant(512, type=T.i32)
                               + local_qhead_idx * arith.constant(32, type=T.i32))
-                q_w0 = vector.extract(q_vec, static_position=[0], dynamic_position=[])
-                q_w1 = vector.extract(q_vec, static_position=[1], dynamic_position=[])
-                q_w2 = vector.extract(q_vec, static_position=[2], dynamic_position=[])
-                q_w3 = vector.extract(q_vec, static_position=[3], dynamic_position=[])
+                q_w0, q_w1, q_w2, q_w3 = _load_q_words(q_base)
                 v01 = vector.from_elements(T.vec(2, T.i32), [q_w0, q_w1])
                 v23 = vector.from_elements(T.vec(2, T.i32), [q_w2, q_w3])
                 lds_q_i32 = lds_q_base // arith.constant(4, type=T.i32)
@@ -1276,6 +1316,77 @@ def get_pa_metadata(
         'stride_pl_ql': stride_pl_ql,
         'query_length': query_length,
     }
+
+
+
+def _sw_reduce_partitions(output, exp_sums, max_logits, temporary_output,
+                           context_lengths, query_length, query_group_size,
+                           max_context_partition_num, sliding_window, context_partition_size):
+    """Reduce partitioned attention outputs into final output.
+
+    Implements online softmax reduction across context partitions:
+    output = sum(exp(ml_i - ml_max) * tmp_out_i) / sum(exp(ml_i - ml_max) * es_i)
+    """
+    batch_size = context_lengths.shape[0]
+    num_kv_heads = exp_sums.shape[1]
+    head_size = temporary_output.shape[-1]
+    eqgs = query_length * query_group_size
+
+    # Process on GPU via PyTorch ops
+    # max_logits: [batch, kv_heads, parts, eqgs]
+    # exp_sums:   [batch, kv_heads, parts, eqgs]
+    # tmp_out:    [batch, kv_heads, parts, eqgs, head_size]
+
+    # Global max across partitions
+    global_max = max_logits.max(dim=2, keepdim=True).values  # [B, H, 1, E]
+
+    # Rescale factors: exp(ml - global_max)
+    rescale = torch.exp(max_logits - global_max)  # [B, H, P, E]
+    rescale = rescale.nan_to_num(0.0)  # handle -inf - (-inf) = NaN
+
+    # Weight = exp_sums * rescale (total probability mass per partition)
+    weights = exp_sums * rescale  # [B, H, P, E]
+
+    # Total weight across partitions
+    total_weight = weights.sum(dim=2, keepdim=True)  # [B, H, 1, E]
+    total_weight = total_weight.clamp(min=1e-30)
+
+    # Weighted sum of normalized outputs: sum(weight_p * tmp_out_p)
+    weighted_out = (temporary_output.float() * weights.unsqueeze(-1)).sum(dim=2)  # [B, H, E, D]
+
+    # Final normalized output
+    result = weighted_out / total_weight.squeeze(2).unsqueeze(-1)  # [B, H, E, D]
+
+    # Reshape to output format: [batch*ql, num_q_heads, head_size]
+    # result is [B, num_kv_heads, ql*qgs, head_size]
+    # output is [B*ql, num_kv_heads*qgs, head_size]
+    result_reshaped = result.reshape(batch_size, num_kv_heads, query_length, query_group_size, head_size)
+    result_reshaped = result_reshaped.permute(0, 2, 1, 3, 4).reshape(
+        batch_size * query_length, num_kv_heads * query_group_size, head_size)
+    output.copy_(result_reshaped.to(output.dtype))
+
+
+def _is_unit_query_scale(query_scale) -> bool:
+    if query_scale is None:
+        return True
+    if isinstance(query_scale, torch.Tensor):
+        return query_scale.numel() == 1 and math.isclose(float(query_scale.item()), 1.0)
+    return math.isclose(float(query_scale), 1.0)
+
+
+def _get_query_input_dtype(query: torch.Tensor) -> str:
+    if query.dtype in _PACKED_FP8_QUERY_DTYPES:
+        return "packed_fp8"
+    if query.dtype == torch.bfloat16:
+        return "bf16"
+    if query.dtype == torch.float16:
+        return "f16"
+    raise ValueError(
+        f"Unsupported query dtype for pa_decode_ps_launch: {query.dtype}. "
+        "Expected packed FP8/uint8, bf16, or f16."
+    )
+
+
 def pa_decode_ps_launch(
     output: torch.Tensor,
     query: torch.Tensor,
@@ -1307,8 +1418,14 @@ def pa_decode_ps_launch(
     num_query_heads = query.shape[1]
     num_kv_heads = key_cache.shape[1]
     trans_v = len(value_cache.shape) == 5
+    query_input_dtype = _get_query_input_dtype(query)
 
     dev = query.device
+    if query_input_dtype != "packed_fp8" and not _is_unit_query_scale(query_scale):
+        raise ValueError(
+            "Non-packed query inputs require query_scale == 1.0. "
+            "For scaled query quantization, pass a pre-quantized packed FP8 query."
+        )
     if not isinstance(query_scale, torch.Tensor):
         query_scale = torch.tensor([float(query_scale or 1.0)], device=dev, dtype=torch.float32)
     if not isinstance(key_scale, torch.Tensor):
@@ -1373,7 +1490,8 @@ def pa_decode_ps_launch(
         compiled_sw = compile_pa_decode_ps_sw(
             sliding_window=sliding_window,
             softmax_scale=softmax_scale, trans_v=trans_v, query_group_size=query_group_size,
-            per_token_kv=per_token_kv, query_length=query_length)
+            per_token_kv=per_token_kv, query_length=query_length,
+            query_input_dtype=query_input_dtype)
 
         compiled_sw['launch'](
             exp_sums, max_logits, temporary_output,
@@ -1433,7 +1551,8 @@ def pa_decode_ps_launch(
     else:
         compiled = compile_pa_decode_ps(
             softmax_scale=softmax_scale, trans_v=trans_v, query_group_size=query_group_size,
-            per_token_kv=per_token_kv, query_length=query_length)
+            per_token_kv=per_token_kv, query_length=query_length,
+            query_input_dtype=query_input_dtype)
 
     stride_po_ql = metadata.get('stride_po_ql', num_query_heads * query.shape[-1])
     stride_pl_ql = metadata.get('stride_pl_ql', num_query_heads)
@@ -1491,6 +1610,7 @@ def compile_pa_decode_ps_sw(
     query_group_size=QUERY_GROUP_SIZE,
     per_token_kv=False,
     query_length: int = 1,
+    query_input_dtype: str = "packed_fp8",
 ):
     """Compile a Gluon-style partitioned PA decode kernel for sliding window.
 
@@ -1500,6 +1620,8 @@ def compile_pa_decode_ps_sw(
     """
     assert sliding_window > 0, "Use compile_pa_decode_ps for sliding_window=0"
     arch = get_hip_arch()
+    query_packed_fp8 = query_input_dtype == "packed_fp8"
+    query_load_is_bf16 = query_input_dtype == "bf16"
     if softmax_scale is None:
         softmax_scale = 1.0 / (HEAD_SIZE ** 0.5)
     _softmax_scale = float(softmax_scale)
@@ -1684,6 +1806,43 @@ def compile_pa_decode_ps_sw(
                         vector.extract(k4, static_position=[2]),
                         vector.extract(k4, static_position=[3])))
             return k_flat
+
+        def _load_q_words(q_base_elem):
+            if query_packed_fp8:
+                q_off = q_base_elem + lane16id * arith.constant(FP8_ELEMS_16B, type=T.i32)
+                q_vec = buffer_ops.buffer_load(
+                    q_rsrc,
+                    q_off // arith.constant(4, type=T.i32),
+                    vec_width=4,
+                    dtype=T.i32,
+                )
+                return [
+                    vector.extract(q_vec, static_position=[0], dynamic_position=[]),
+                    vector.extract(q_vec, static_position=[1], dynamic_position=[]),
+                    vector.extract(q_vec, static_position=[2], dynamic_position=[]),
+                    vector.extract(q_vec, static_position=[3], dynamic_position=[]),
+                ]
+
+            q_elem = q_base_elem + lane16id * arith.constant(FP8_ELEMS_16B, type=T.i32)
+            q_words = []
+            for qwi in range_constexpr(4):
+                q_src = buffer_ops.buffer_load(
+                    q_rsrc,
+                    q_elem + arith.constant(qwi * 4, type=T.i32),
+                    vec_width=4,
+                    dtype=T.bf16 if query_load_is_bf16 else T.f16,
+                )
+                q_f32 = _mlir_arith.ExtFOp(T.f32x4, q_src).result
+                p0 = vector.extract(q_f32, static_position=[0], dynamic_position=[])
+                p1 = vector.extract(q_f32, static_position=[1], dynamic_position=[])
+                p2 = vector.extract(q_f32, static_position=[2], dynamic_position=[])
+                p3 = vector.extract(q_f32, static_position=[3], dynamic_position=[])
+                lo = rocdl.cvt_pk_fp8_f32(
+                    T.i32, p0, p1, arith.constant(0, type=T.i32), False
+                )
+                pk = rocdl.cvt_pk_fp8_f32(T.i32, p2, p3, lo, True)
+                q_words.append(pk)
+            return q_words
 
         def _unflatten_k(k_flat):
             return [[k_flat[td * (QKHELOOP * 2) + j]
@@ -1939,16 +2098,11 @@ def compile_pa_decode_ps_sw(
                 SmemPtr._view_cache = None
             q_row = batch_idx * arith.constant(query_length, type=T.i32) + qi_for_q
             q_base = q_row * stride_q_seq + (kv_h * arith.constant(query_group_size, type=T.i32) + local_qhead_idx_for_q) * stride_q_head
-            q_off = q_base + lane16id * arith.constant(FP8_ELEMS_16B, type=T.i32)
-            q_vec = buffer_ops.buffer_load(q_rsrc, q_off // arith.constant(4, type=T.i32), vec_width=4, dtype=T.i32)
             offset1 = lane16id // arith.constant(4, type=T.i32)
             lds_q_base = (offset1 * arith.constant(2048, type=T.i32)
                           + lane4id * arith.constant(512, type=T.i32)
                           + local_qhead_idx * arith.constant(32, type=T.i32))
-            q_w0 = vector.extract(q_vec, static_position=[0], dynamic_position=[])
-            q_w1 = vector.extract(q_vec, static_position=[1], dynamic_position=[])
-            q_w2 = vector.extract(q_vec, static_position=[2], dynamic_position=[])
-            q_w3 = vector.extract(q_vec, static_position=[3], dynamic_position=[])
+            q_w0, q_w1, q_w2, q_w3 = _load_q_words(q_base)
             v01 = vector.from_elements(T.vec(2, T.i32), [q_w0, q_w1])
             v23 = vector.from_elements(T.vec(2, T.i32), [q_w2, q_w3])
             lds_q_i32 = lds_q_base // arith.constant(4, type=T.i32)
