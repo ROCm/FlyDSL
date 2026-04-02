@@ -55,11 +55,13 @@ def _addptr(base, offset, elem_bytes=2):
     return _ArithValue(std_arith.AddIOp(base_val, byte_offset).result)
 
 
-def _make_tdm_desc(base_addr_i64, shapes, strides, elem_bytes=2, tile_shape=None, num_warps=1):
+def _make_tdm_desc(base_addr_i64, shapes, strides, elem_bytes=2, tile_shape=None, num_warps=1, pad_interval=0, pad_amount=0):
     """Construct a TDM descriptor from a raw i64 byte address + shapes + strides.
 
     tile_shape: (outer_tile, inner_tile) static tile dimensions for the TDM descriptor.
     num_warps: number of warps in the workgroup (for per-warp distribution).
+    pad_interval: padded_shared interval in elements (0 = no padding).
+    pad_amount: padded_shared pad amount in elements (0 = no padding).
     Returns a TDMDescriptor2D (dgroup0, dgroup1) with per-warp metadata.
     """
     i32 = ir.IntegerType.get_signless(32)
@@ -117,7 +119,15 @@ def _make_tdm_desc(base_addr_i64, shapes, strides, elem_bytes=2, tile_shape=None
 
     # GROUP1: config + tensor dims + tile (using per-warp dims)
     data_size_code = int(math.log2(elem_bytes))
-    g1_s0_upper = (data_size_code << 16)
+    if pad_interval > 0 and pad_amount > 0:
+        elem_bits = elem_bytes * 8
+        interval_dw = pad_interval * elem_bits // 32
+        amount_dw = pad_amount * elem_bits // 32
+        enc_interval = int(math.log2(interval_dw)) - 1 if interval_dw > 0 else 0
+        enc_amount = amount_dw - 1 if amount_dw > 0 else 0
+        g1_s0_upper = (data_size_code << 16) | (1 << 20) | (enc_interval << 22) | (enc_amount << 25)
+    else:
+        g1_s0_upper = (data_size_code << 16)
     g1_s0 = arith.constant(g1_s0_upper, type=T.i32)
     # Per-warp dims: dim0=innermost=bpw_inner, dim1=outermost=bpw_outer
     # Matches tdm_ops.make_tensor_descriptor_2d encoding
@@ -142,13 +152,14 @@ def _make_tdm_desc(base_addr_i64, shapes, strides, elem_bytes=2, tile_shape=None
     desc._warps_dim0 = warps_dim0
     desc._tile_inner = _tile_inner
     desc._num_warps = num_warps
+    desc._pad_amount = pad_amount
     return desc
 
 
 # _lds_alloc removed — LDS allocation now uses SmemAllocator/SmemPtr
 
 
-def _tdm_copy_to_lds(desc, offsets, dst, elem_bytes=2):
+def _tdm_copy_to_lds(desc, offsets, dst, elem_bytes=2, pred=None):
     """TDM async copy from global to LDS.
 
     Creates an updated descriptor with:
@@ -160,8 +171,17 @@ def _tdm_copy_to_lds(desc, offsets, dst, elem_bytes=2):
     i32 = ir.IntegerType.get_signless(32)
     i64 = ir.IntegerType.get_signless(64)
 
-    # Get LDS byte address from dst memref
+    # Get LDS byte address from dst memref (or _LdsSubview)
+    _sub_elem_off = None
+    if isinstance(dst, _LdsSubview):
+        _sub_elem_off = dst.elem_offset  # i32 element offset
+        dst = dst.base_mr
     lds_base_idx = memref_dialect.extract_aligned_pointer_as_index(dst)
+    # Add sub-buffer element offset (from _memdesc_index_subview) as bytes
+    if _sub_elem_off is not None:
+        _off_idx = arith.index_cast(T.index, _sub_elem_off)
+        _off_bytes = _off_idx * arith.index(elem_bytes)
+        lds_base_idx = std_arith.AddIOp(lds_base_idx, _off_bytes).result
 
     # Add per-warp LDS offset
     _nw = getattr(desc, "_num_warps", 1)
@@ -172,8 +192,10 @@ def _tdm_copy_to_lds(desc, offsets, dst, elem_bytes=2):
         _wci = _wid / arith.index(desc._warps_dim0)
         _woo = _wco * arith.index(desc._bpw_outer)
         _woi = _wci * arith.index(desc._bpw_inner)
-        # LDS inner stride = tile_inner (no padding in current codegen)
-        _lds_warp_elem = _woo * arith.index(desc._tile_inner) + _woi
+        # LDS inner stride = tile_inner + pad_amount (padded row width)
+        _pad_amt = getattr(desc, "_pad_amount", 0)
+        _lds_inner_stride = desc._tile_inner + _pad_amt
+        _lds_warp_elem = _woo * arith.index(_lds_inner_stride) + _woi
         _lds_warp_bytes = _lds_warp_elem * arith.index(elem_bytes)
         lds_base_idx = std_arith.AddIOp(lds_base_idx,
             std_arith.IndexCastOp(ir.IndexType.get(), _lds_warp_bytes).result
@@ -183,7 +205,7 @@ def _tdm_copy_to_lds(desc, offsets, dst, elem_bytes=2):
     lds_addr_i32 = std_arith.IndexCastOp(i32, lds_base_idx).result
 
     # Build updated dgroup0 with correct LDS address
-    g0_s0 = _vec_d.extract(desc.dgroup0, [], [0])
+    g0_s0 = pred if pred is not None else _vec_d.extract(desc.dgroup0, [], [0])
     g0_s1 = lds_addr_i32  # LDS target address (includes per-warp offset)
 
     # Apply outer + inner offsets to global address
@@ -306,6 +328,141 @@ def _scf_yield_(vals):
     _scf_dialect.YieldOp(raw)
 
 
+class _LdsSubview:
+    """Wrapper for a sub-buffer view into a multi-buffered LDS memref.
+
+    Carries the base memref and an element offset so that both _tdm_copy_to_lds
+    (which extracts the raw pointer) and _lds_load_gf2 (which loads by index)
+    can correctly address the sub-buffer.
+    """
+    def __init__(self, base_mr, elem_offset_i32):
+        self.base_mr = base_mr  # the full LDS memref
+        self.elem_offset = elem_offset_i32  # i32 element offset within it
+        # Expose .type so code expecting a memref-like object can inspect it
+        self.type = base_mr.type
+
+
+def _memdesc_index_subview(memref_or_tuple, idx, buffer_size, pad_interval=0, pad_amount=0):
+    """Create a sub-view of a multi-buffered LDS memref at buffer idx.
+
+    memref_or_tuple: the full LDS memref (or (memref, transposed) tuple).
+    idx: buffer index (i32 or Python int).
+    buffer_size: number of elements per buffer (unpadded).
+    pad_interval: padded_shared interval in elements (0 = no padding).
+    pad_amount: padded_shared pad amount in elements (0 = no padding).
+    Returns the base memref (idx==0) or an _LdsSubview with element offset.
+    """
+    # Unwrap possible tuple
+    if isinstance(memref_or_tuple, tuple):
+        base_mr = memref_or_tuple[0]
+    else:
+        base_mr = memref_or_tuple
+
+    # If idx is a compile-time 0, return the base memref (no offset needed)
+    is_zero = False
+    if isinstance(idx, int) and idx == 0:
+        is_zero = True
+    elif isinstance(idx, ir.Value):
+        try:
+            is_zero = ir.IntegerAttr(idx.owner.attributes["value"]).value == 0
+        except:
+            pass
+
+    if is_zero:
+        return base_mr
+
+    # Compute element offset as i32 for downstream consumers
+    if isinstance(idx, int):
+        off_i32 = arith.constant(idx * buffer_size, type=T.i32)
+    else:
+        idx_i32 = idx if str(getattr(idx, "type", "")) == "i32" else arith.index_cast(T.i32, idx)
+        off_i32 = idx_i32 * arith.constant(buffer_size, type=T.i32)
+
+    # Apply padded_shared padding adjustment: off += (off >> log2(interval)) << log2(amount)
+    if pad_interval > 0 and pad_amount > 0:
+        _pi_shift = int(math.log2(pad_interval))
+        _pa_shift = int(math.log2(pad_amount))
+        pad_off = (off_i32 >> arith.constant(_pi_shift, type=T.i32)) << arith.constant(_pa_shift, type=T.i32)
+        off_i32 = off_i32 + pad_off
+
+    return _LdsSubview(base_mr, off_i32)
+
+
+def _lds_load_gf2(lds_ref, reg_offsets, lane_bases, warp_bases, n_elems, elem_dtype, pad_interval=0, pad_amount=0):
+    """Load n_elems from LDS using GF(2) XOR-based addressing.
+
+    Each thread's per-element offset = lane_contribution XOR warp_contribution XOR reg_offset[i].
+    reg_offsets: list of per-register-element byte offsets (length = n_elems).
+    lane_bases: GF(2) basis vectors for lane_id bits.
+    warp_bases: GF(2) basis vectors for warp_id bits.
+    pad_interval: padded_shared interval in elements (0 = no padding).
+    pad_amount: padded_shared pad amount in elements (0 = no padding).
+    """
+    from flydsl._mlir.dialects import memref as _mr_d
+    from flydsl._mlir.dialects import vector as _vec_dialect
+
+    # Unwrap LDS memref from possible (memref, transposed) tuple or _LdsSubview
+    _sub_elem_off = None  # i32 element offset for sub-buffer
+    if isinstance(lds_ref, tuple):
+        inner = lds_ref[0]
+        if isinstance(inner, _LdsSubview):
+            _sub_elem_off = inner.elem_offset
+            lds_flat = inner.base_mr
+        else:
+            lds_flat = inner
+    elif isinstance(lds_ref, _LdsSubview):
+        _sub_elem_off = lds_ref.elem_offset
+        lds_flat = lds_ref.base_mr
+    else:
+        lds_flat = lds_ref
+
+    tid = arith.index_cast(T.i32, gpu.thread_id("x"))
+    lane = tid & arith.constant(31, type=T.i32)
+    warp = (tid >> arith.constant(5, type=T.i32)) & arith.constant(3, type=T.i32)
+
+    # Compute GF(2) lane contribution: XOR of (lane_bit_i * lane_bases[i])
+    lane_c = arith.constant(0, type=T.i32)
+    for bit, basis in enumerate(lane_bases):
+        if basis == 0:
+            continue
+        lane_bit = (lane >> arith.constant(bit, type=T.i32)) & arith.constant(1, type=T.i32)
+        lane_c = lane_c ^ (lane_bit * arith.constant(basis, type=T.i32))
+
+    # Compute GF(2) warp contribution
+    warp_c = arith.constant(0, type=T.i32)
+    for bit, basis in enumerate(warp_bases):
+        if basis == 0:
+            continue
+        warp_bit = (warp >> arith.constant(bit, type=T.i32)) & arith.constant(1, type=T.i32)
+        warp_c = warp_c ^ (warp_bit * arith.constant(basis, type=T.i32))
+
+    thr_base = lane_c ^ warp_c
+
+    # Load each element from LDS at element offset = thr_base XOR reg_offsets[i]
+    # For sub-buffer views, add the element offset AFTER the XOR (not before)
+    # reg_offsets are element offsets (not byte offsets) from the C++ LinearLayout
+    raw_dtype = elem_dtype
+    if hasattr(raw_dtype, "ir_type"):
+        raw_dtype = raw_dtype.ir_type()
+    vec_type = ir.VectorType.get([n_elems], raw_dtype)
+    # Pre-compute padding shift amounts (compile-time constants)
+    _pad_i_shift = int(math.log2(pad_interval)) if pad_interval > 0 else 0
+    _pad_a_shift = int(math.log2(pad_amount)) if pad_amount > 0 else 0
+    elems = []
+    for i in range(n_elems):
+        elem_off = thr_base ^ arith.constant(reg_offsets[i], type=T.i32)
+        # Apply padded_shared padding adjustment: off += (off >> log2(interval)) << log2(amount)
+        if pad_interval > 0 and pad_amount > 0:
+            pad_off = (elem_off >> arith.constant(_pad_i_shift, type=T.i32)) << arith.constant(_pad_a_shift, type=T.i32)
+            elem_off = elem_off + pad_off
+        if _sub_elem_off is not None:
+            elem_off = elem_off + _sub_elem_off
+        idx = arith.index_cast(T.index, elem_off)
+        val = _mr_d.load(lds_flat, [idx])
+        elems.append(val)
+    return vector.from_elements(vec_type, elems)
+
+
 def _wmma_gemm_full(a_data, b_lds_ref, c_vec, ab_dtype,
                      tile_m=128, tile_n=128, tile_k=128,
                      warps_m=4, warps_n=1, WMMA_M=16, WMMA_N=16, WMMA_K=32):
@@ -334,12 +491,21 @@ def _wmma_gemm_full(a_data, b_lds_ref, c_vec, ab_dtype,
     elem_ty = raw_ab
 
     # Unwrap values
-    a_v = a_data.ir_value() if hasattr(a_data, "ir_value") else a_data
+    _a_sub_off = None  # i32 element offset for A sub-buffer
+    if isinstance(a_data, _LdsSubview):
+        _a_sub_off = a_data.elem_offset
+        a_v = a_data.base_mr
+    else:
+        a_v = a_data.ir_value() if hasattr(a_data, "ir_value") else a_data
     c_v = c_vec.ir_value() if hasattr(c_vec, "ir_value") else c_vec
 
-    # Check if a_data is a flat register vector (VectorType) vs LDS memref (MemRefType).
+    # Check if a_data/b_lds_ref are flat register vectors (VectorType) vs LDS memref.
     # Both VectorType and MemRefType have .shape/.element_type, so use isinstance.
     a_is_vec = isinstance(a_v.type, ir.VectorType)
+
+    # Check if B is already a pre-loaded register vector (from fly.lds_load with GF(2) offsets)
+    b_raw = b_lds_ref.ir_value() if hasattr(b_lds_ref, "ir_value") else (b_lds_ref if isinstance(b_lds_ref, ir.Value) else None)
+    b_is_vec = b_raw is not None and isinstance(b_raw.type, ir.VectorType)
 
     # ── CuTE layout definitions ──
     # Thread layout: (warps_m, warps_n, kgrp=2, lane=16)
@@ -379,44 +545,68 @@ def _wmma_gemm_full(a_data, b_lds_ref, c_vec, ab_dtype,
         c_slice = vector.from_elements(wmma_result_type, c_slice_list)
         accs.append(c_slice)
 
-    # Get LDS memref for B operand
+    # Get B operand: pre-loaded register vector or LDS memref
     # b_lds_ref may be a (memref, transposed=True) tuple from memdesc_trans
+    # or an _LdsSubview from _memdesc_index_subview
     b_transposed = False
-    if isinstance(b_lds_ref, tuple):
-        b_lds_flat, b_transposed = b_lds_ref
-    else:
-        b_lds_flat = b_lds_ref
+    _b_sub_off = None  # i32 element offset for sub-buffer
+    if not b_is_vec:
+        if isinstance(b_lds_ref, tuple):
+            b_inner = b_lds_ref[0]
+            b_transposed = b_lds_ref[1] if len(b_lds_ref) > 1 else False
+            if isinstance(b_inner, _LdsSubview):
+                _b_sub_off = b_inner.elem_offset
+                b_lds_flat = b_inner.base_mr
+            else:
+                b_lds_flat = b_inner
+        elif isinstance(b_lds_ref, _LdsSubview):
+            _b_sub_off = b_lds_ref.elem_offset
+            b_lds_flat = b_lds_ref.base_mr
+        else:
+            b_lds_flat = b_lds_ref
 
     a_frag_type = ir.VectorType.get([16], elem_ty)
     b_frag_type = ir.VectorType.get([16], elem_ty)
 
-    # LDS layouts for crd2idx-based offset computation
-    if b_transposed:
-        # B stored as B^T[n, k] row-major: layout (tile_n, tile_k):(tile_k, 1)
-        layout_lds_b = fx.make_layout((tile_n, tile_k), (tile_k, 1))
-    else:
-        # B stored row-major B[k, n]: layout (tile_k, tile_n):(tile_n, 1)
-        layout_lds_b = fx.make_layout((tile_k, tile_n), (tile_n, 1))
+    # LDS layouts for crd2idx-based offset computation (only needed when B is memref)
+    if not b_is_vec:
+        if b_transposed:
+            layout_lds_b = fx.make_layout((tile_n, tile_k), (tile_k, 1))
+        else:
+            layout_lds_b = fx.make_layout((tile_k, tile_n), (tile_n, 1))
     layout_lds_a = fx.make_layout((tile_m, tile_k), (tile_k, 1))
 
     for ks in range(k_wmma_steps):
         k_step = arith.index(ks * WMMA_K)
 
-        # Load B fragments from LDS for each N-tile in this warp
+        # Load B fragments
         b_frags = []
-        for wn in range(wmma_n_rep):
-            n_off = warp_n_off + arith.index(wn * WMMA_N)
-            vals = []
-            for k0 in range(2):
-                for k1 in range(8):
-                    kk = k_step + (arith.index(k0 * 2) + lane_kgrp) * arith.index(8) + arith.index(k1)
-                    if b_transposed:
-                        off = _crd2idx((n_off + lane16, kk), layout_lds_b)
-                    else:
-                        off = _crd2idx((kk, n_off + lane16), layout_lds_b)
-                    val = _mr_d.load(b_lds_flat, [off])
-                    vals.append(val)
-            b_frags.append(vector.from_elements(b_frag_type, vals))
+        if b_is_vec:
+            # B is pre-loaded register vector (dot_op opIdx=1 layout)
+            # Layout: [wn * (k_wmma_steps * 16) + ks * 16 + 0..15]
+            for wn in range(wmma_n_rep):
+                b_start = wn * (k_wmma_steps * 16) + ks * 16
+                b_vals = []
+                for j in range(16):
+                    b_vals.append(_vec_dialect.extract(b_raw, [], [b_start + j]))
+                b_frags.append(vector.from_elements(b_frag_type, b_vals))
+        else:
+            # B is LDS memref — load per-element with crd2idx addressing
+            for wn in range(wmma_n_rep):
+                n_off = warp_n_off + arith.index(wn * WMMA_N)
+                vals = []
+                for k0 in range(2):
+                    for k1 in range(8):
+                        kk = k_step + (arith.index(k0 * 2) + lane_kgrp) * arith.index(8) + arith.index(k1)
+                        if b_transposed:
+                            off = _crd2idx((n_off + lane16, kk), layout_lds_b)
+                        else:
+                            off = _crd2idx((kk, n_off + lane16), layout_lds_b)
+                        if _b_sub_off is not None:
+                            off = off + arith.index_cast(T.index, _b_sub_off)
+                        val = _mr_d.load(b_lds_flat, [off])
+                        vals.append(val)
+                b_frags.append(vector.from_elements(b_frag_type, vals))
 
         # For each M-tile, extract A fragment and call WMMA
         for wm in range(wmma_m_rep):
@@ -436,7 +626,9 @@ def _wmma_gemm_full(a_data, b_lds_ref, c_vec, ab_dtype,
                     for k1 in range(8):
                         kk = k_step + (arith.index(k0 * 2) + lane_kgrp) * arith.index(8) + arith.index(k1)
                         off = _crd2idx((m_off + lane16, kk), layout_lds_a)
-                        a_vals.append(_mr_d.load(a_data, [off]))
+                        if _a_sub_off is not None:
+                            off = off + arith.index_cast(T.index, _a_sub_off)
+                        a_vals.append(_mr_d.load(a_v, [off]))
                 a_frag = vector.from_elements(a_frag_type, a_vals)
 
             for wn in range(wmma_n_rep):
@@ -461,7 +653,17 @@ def _wmma_gemm_full(a_data, b_lds_ref, c_vec, ab_dtype,
 
 
 def _crd2idx(crd, layout):
-    """CuTE crd2idx: (coord, layout) → index-typed scalar offset."""
+    """CuTE crd2idx: (coord_or_index, layout) → index-typed scalar offset.
+
+    Accepts a scalar i32 (auto-converts to int_tuple) or a tuple coordinate.
+    """
+    # Auto-convert scalar i32 to int_tuple for fx.crd2idx
+    if isinstance(crd, ir.Value) and not str(crd.type).startswith("!fly.int_tuple"):
+        crd_i32 = crd
+        if str(crd.type) != "i32":
+            crd_i32 = std_arith.IndexCastOp(ir.IntegerType.get_signless(32), crd).result
+        IntTupleTy, dyncElems = _fly_d.infer_int_tuple_type(crd_i32)
+        crd = _fly_d.make_int_tuple(IntTupleTy, dyncElems)
     result = fx.crd2idx(crd, layout)
     scalar = fx.get_scalar(result)
     if isinstance(scalar, ir.Value) and not isinstance(scalar.type, ir.IndexType):
@@ -481,6 +683,65 @@ def _idx2crd(idx, layout):
         IntTupleTy, dyncElems = _fly_d.infer_int_tuple_type(idx_i32)
         idx = _fly_d.make_int_tuple(IntTupleTy, dyncElems)
     return fx.idx2crd(idx, layout)
+
+
+def _make_reg_offset_vec(base, reg_shape, reg_stride):
+    """Build vector<n x i32> of register offsets from CuTE layout pattern.
+
+    offset[i] = base + crd2idx(i, make_layout(reg_shape, reg_stride))
+
+    Example: _make_reg_offset_vec(base, (8, 8), (1, 16))
+    → vector<64 x i32> with [base, base+1, ..., base+7, base+16, ..., base+119]
+    """
+    n = 1
+    for s in reg_shape:
+        n *= s
+
+    def _flat_offset(i):
+        off = 0
+        for s, d in zip(reg_shape, reg_stride):
+            off += (i % s) * d
+            i //= s
+        return off
+
+    elems = []
+    for i in range(n):
+        o = _flat_offset(i)
+        elems.append(base + o if o != 0 else base)
+    return vector.from_elements(T.vec(n, T.i32), elems)
+
+
+def _shuffle_repeat_each(src, n_repeat):
+    """Repeat each element n_repeat times: [a,b,...] → [a,a,..., b,b,..., ...]"""
+    from flydsl._mlir.dialects import vector as _vec_dialect
+    sv = src.ir_value() if hasattr(src, "ir_value") else src
+    n = sv.type.shape[0]
+    mask = []
+    for i in range(n):
+        mask.extend([i] * n_repeat)
+    return _vec_dialect.shuffle(src, src, mask)
+
+
+def _shuffle_repeat_block(src, n_repeat):
+    """Repeat entire vector n_repeat times: [a,b,c] → [a,b,c, a,b,c, ...]"""
+    from flydsl._mlir.dialects import vector as _vec_dialect
+    sv = src.ir_value() if hasattr(src, "ir_value") else src
+    n = sv.type.shape[0]
+    mask = list(range(n)) * n_repeat
+    return _vec_dialect.shuffle(src, src, mask)
+
+
+def _shuffle_select_repeat(src, indices, n_repeat):
+    """Select elements at given indices, repeat each n_repeat times.
+
+    Example: _shuffle_select_repeat(v, [0, 16], n_repeat=64)
+    → [v[0],v[0],...(64×), v[16],v[16],...(64×)]
+    """
+    from flydsl._mlir.dialects import vector as _vec_dialect
+    mask = []
+    for idx in indices:
+        mask.extend([idx] * n_repeat)
+    return _vec_dialect.shuffle(src, src, mask)
 
 
 def _buffer_load_dot_op_a(memref_ptr, offsets, masks, n_elems, elem_dtype,
@@ -561,21 +822,17 @@ def _buffer_store_vec(data_vec, memref_ptr, offsets, masks, n_elems, elem_dtype)
 
 
 
-# SmemAllocator: total LDS = 131072 bytes
+# SmemAllocator: total LDS = 143312 bytes
 _lds_allocator = SmemAllocator(None, arch="gfx1250", global_sym_name="kernel_smem")
-_lds_allocator.ptr = 131072
+_lds_allocator.ptr = 143312
 
 _LDS_OFFSET__v27 = 0  # byte offset
-_LDS_ELEMS__v27 = 32768  # total elements
-_LDS_OFFSET__v34 = 65536  # byte offset
-_LDS_ELEMS__v34 = 32768  # total elements
+_LDS_ELEMS__v27 = 34808  # total elements
+_LDS_OFFSET__v34 = 69616  # byte offset
+_LDS_ELEMS__v34 = 36848  # total elements
 
 @flyc.kernel
 def attn_fwd_kernel(Q: fx.Tensor, K: fx.Tensor, V: fx.Tensor, O: fx.Tensor, stride_qz: fx.Int32, stride_qh: fx.Int32, stride_qm: fx.Int32, stride_kz: fx.Int32, stride_kh: fx.Int32, stride_kn: fx.Int32, stride_vz: fx.Int32, stride_vh: fx.Int32, stride_vn: fx.Int32, stride_oz: fx.Int32, stride_oh: fx.Int32, stride_om: fx.Int32):
-    Q = Q.value
-    K = K.value
-    V = V.value
-    O = O.value
     stride_qz = stride_qz.ir_value()
     stride_qh = stride_qh.ir_value()
     stride_qm = stride_qm.ir_value()
@@ -592,75 +849,75 @@ def attn_fwd_kernel(Q: fx.Tensor, K: fx.Tensor, V: fx.Tensor, O: fx.Tensor, stri
     # Get LDS base memref from SmemAllocator
     _lds_base = _lds_allocator.get_base()
     
-    cst = arith.constant_vector(1.44269502, T.vec(128, T.f32))
-    cst_0 = arith.constant_vector(0.0883883461, T.vec(128, T.f32))
-    cst_1 = arith.constant_vector(1.44269502, T.vec(2, T.f32))
-    cst_2 = arith.constant_vector(0.0883883461, T.vec(2, T.f32))
-    cst_3 = arith.constant_vector(float('-inf'), T.vec(128, T.f32))
+    LOG2E_128 = arith.constant_vector(1.44269502, T.vec(128, T.f32))
+    SM_SCALE_128 = arith.constant_vector(0.0883883461, T.vec(128, T.f32))
+    LOG2E_2 = arith.constant_vector(1.44269502, T.vec(2, T.f32))
+    SM_SCALE_2 = arith.constant_vector(0.0883883461, T.vec(2, T.f32))
+    NEG_INF_128 = arith.constant_vector(float('-inf'), T.vec(128, T.f32))
     cst_4 = arith.constant_vector(1024, T.vec(64, T.i32))
     c1_i32 = arith.constant(1, type=T.i32)
-    cst_5 = arith.constant_vector(1.0, T.vec(16, T.f32))
+    ONES_16 = arith.constant_vector(1.0, T.vec(16, T.f32))
     c0_i32 = arith.constant(0, type=T.i32)
-    cst_6 = arith.constant_vector(0.0, T.vec(128, T.f32))
-    cst_7 = arith.constant_vector(1.0, T.vec(2, T.f32))
-    cst_8 = arith.constant_vector(float('-inf'), T.vec(2, T.f32))
+    ZEROS_128 = arith.constant_vector(0.0, T.vec(128, T.f32))
+    ONES_2 = arith.constant_vector(1.0, T.vec(2, T.f32))
+    NEG_INF_2 = arith.constant_vector(float('-inf'), T.vec(2, T.f32))
     cst_9 = arith.constant_vector(1024, T.vec(16, T.i32))
     cst_10 = arith.constant_vector(1024, T.vec(32, T.i32))
     c1_i64 = arith.constant(1, type=T.i64)
     c1024_i32 = arith.constant(1024, type=T.i32)
     c128_i32 = arith.constant(128, type=T.i32)
-    _v0 = arith.index_cast(T.i32, gpu.block_id("x"))
-    _v1 = arith.index_cast(T.i32, gpu.block_id("y"))
-    _v2 = arith.index_cast(T.i32, gpu.block_id("z"))
-    _v3 = _v2 * c128_i32
-    _v4 = stride_qz * _v0
-    _v5 = stride_qh * _v1
+    bid_x = arith.index_cast(T.i32, gpu.block_id("x"))
+    bid_y = arith.index_cast(T.i32, gpu.block_id("y"))
+    bid_z = arith.index_cast(T.i32, gpu.block_id("z"))
+    _v3 = bid_z * c128_i32
+    _v4 = stride_qz * bid_x
+    _v5 = stride_qh * bid_y
     _v6 = _v4 + _v5
     thread_id_x = gpu.thread_id("x")
-    _v7 = arith.index_cast(T.i32, thread_id_x) if str(getattr(thread_id_x, "type", "")) != str(T.i32) else thread_id_x
-    _v8_layout = fx.make_layout((2, 2, 2, 2, 2, 2, 2), (1, 2, 4, 8, 0, 16, 32))
-    _v8_base = (_v7 % 2) * 1 + ((_v7 // 2) % 2) * 2 + ((_v7 // 4) % 2) * 4 + ((_v7 // 8) % 2) * 8 + ((_v7 // 16) % 2) * 0 + ((_v7 // 32) % 2) * 16 + ((_v7 // 64) % 2) * 32
+    tid = arith.index_cast(T.i32, thread_id_x) if str(getattr(thread_id_x, "type", "")) != str(T.i32) else thread_id_x
+    # _v8_layout = fx.make_layout((2, 2, 2, 2, 2, 2, 2), (1, 2, 4, 8, 0, 16, 32))
+    _v8_base = (tid % 2) * 1 + ((tid // 2) % 2) * 2 + ((tid // 4) % 2) * 4 + ((tid // 8) % 2) * 8 + ((tid // 16) % 2) * 0 + ((tid // 32) % 2) * 16 + ((tid // 64) % 2) * 32
     _v8 = vector.from_elements(T.vec(2, T.i32), [_v8_base, _v8_base + 64])
     _v9 = vector.broadcast(T.vec(2, T.i32), _v3)
     _v10 = _v9 + _v8
-    _v11 = vector.shuffle(_v10, _v10, [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1])
+    _v11 = _shuffle_repeat_each(_v10, n_repeat=16)
     _v12 = vector.broadcast(T.vec(32, T.i32), stride_qm)
     _v13 = _v12 * _v11
     _v14 = vector.broadcast(T.vec(32, T.i32), _v6)
     _v15 = _v14 + _v13
     thread_id_x_11 = gpu.thread_id("x")
-    _v16 = arith.index_cast(T.i32, thread_id_x_11) if str(getattr(thread_id_x_11, "type", "")) != str(T.i32) else thread_id_x_11
-    _v17_layout = fx.make_layout((2, 2, 2, 2, 2, 2, 2), (0, 0, 0, 0, 8, 0, 0))
-    _v17_base = (_v16 % 2) * 0 + ((_v16 // 2) % 2) * 0 + ((_v16 // 4) % 2) * 0 + ((_v16 // 8) % 2) * 0 + ((_v16 // 16) % 2) * 8 + ((_v16 // 32) % 2) * 0 + ((_v16 // 64) % 2) * 0
-    _v17 = vector.from_elements(T.vec(64, T.i32), [_v17_base, _v17_base + 1, _v17_base + 2, _v17_base + 3, _v17_base + 4, _v17_base + 5, _v17_base + 6, _v17_base + 7, _v17_base + 16, _v17_base + 17, _v17_base + 18, _v17_base + 19, _v17_base + 20, _v17_base + 21, _v17_base + 22, _v17_base + 23, _v17_base + 32, _v17_base + 33, _v17_base + 34, _v17_base + 35, _v17_base + 36, _v17_base + 37, _v17_base + 38, _v17_base + 39, _v17_base + 48, _v17_base + 49, _v17_base + 50, _v17_base + 51, _v17_base + 52, _v17_base + 53, _v17_base + 54, _v17_base + 55, _v17_base + 64, _v17_base + 65, _v17_base + 66, _v17_base + 67, _v17_base + 68, _v17_base + 69, _v17_base + 70, _v17_base + 71, _v17_base + 80, _v17_base + 81, _v17_base + 82, _v17_base + 83, _v17_base + 84, _v17_base + 85, _v17_base + 86, _v17_base + 87, _v17_base + 96, _v17_base + 97, _v17_base + 98, _v17_base + 99, _v17_base + 100, _v17_base + 101, _v17_base + 102, _v17_base + 103, _v17_base + 112, _v17_base + 113, _v17_base + 114, _v17_base + 115, _v17_base + 116, _v17_base + 117, _v17_base + 118, _v17_base + 119])
-    _v18 = vector.shuffle(_v15, _v15, [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16])
-    _v19 = vector.shuffle(_v17, _v17, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63])
+    tid = arith.index_cast(T.i32, thread_id_x_11) if str(getattr(thread_id_x_11, "type", "")) != str(T.i32) else thread_id_x_11
+    # _v17_layout = fx.make_layout((2, 2, 2, 2, 2, 2, 2), (0, 0, 0, 0, 8, 0, 0))
+    _v17_base = (tid % 2) * 0 + ((tid // 2) % 2) * 0 + ((tid // 4) % 2) * 0 + ((tid // 8) % 2) * 0 + ((tid // 16) % 2) * 8 + ((tid // 32) % 2) * 0 + ((tid // 64) % 2) * 0
+    _v17 = _make_reg_offset_vec(_v17_base, (8, 8), (1, 16))
+    _v18 = _shuffle_select_repeat(_v15, [0, 16], n_repeat=64)
+    _v19 = _shuffle_repeat_block(_v17, n_repeat=2)
     _v20 = _v18 + _v19
-    _v21 = stride_kz * _v0
+    _v21 = stride_kz * bid_x
     _v22 = _addptr(K, _v21, elem_bytes=2)  # addptr
-    _v23 = stride_kh * _v1
+    _v23 = stride_kh * bid_y
     _v24 = _addptr(_v22, _v23, elem_bytes=2)  # addptr
     _v25 = arith.extsi(T.i64, stride_kn)
-    _v26 = _make_tdm_desc(_v24, [c1024_i32, c128_i32], [_v25, c1_i64], elem_bytes=2, tile_shape=(128, 128), num_warps=1)
+    _v26 = _make_tdm_desc(_v24, [c1024_i32, c128_i32], [_v25, c1_i64], elem_bytes=2, tile_shape=(128, 128), pad_interval=128, pad_amount=8, num_warps=1)
     _v27 = SmemPtr(_lds_base, _LDS_OFFSET__v27, T.bf16, shape=(_LDS_ELEMS__v27,)).get()  # LDS alloc via SmemAllocator
-    _v28 = stride_vz * _v0
+    _v28 = stride_vz * bid_x
     _v29 = _addptr(V, _v28, elem_bytes=2)  # addptr
-    _v30 = stride_vh * _v1
+    _v30 = stride_vh * bid_y
     _v31 = _addptr(_v29, _v30, elem_bytes=2)  # addptr
     _v32 = arith.extsi(T.i64, stride_vn)
-    _v33 = _make_tdm_desc(_v31, [c1024_i32, c128_i32], [_v32, c1_i64], elem_bytes=2, tile_shape=(128, 128), num_warps=1)
+    _v33 = _make_tdm_desc(_v31, [c1024_i32, c128_i32], [_v32, c1_i64], elem_bytes=2, tile_shape=(128, 128), pad_interval=128, pad_amount=16, num_warps=1)
     _v34 = SmemPtr(_lds_base, _LDS_OFFSET__v34, T.bf16, shape=(_LDS_ELEMS__v34,)).get()  # LDS alloc via SmemAllocator
     _v35 = _v11 < cst_10
-    _v36 = vector.shuffle(_v35, _v35, [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16])
+    _v36 = _shuffle_select_repeat(_v35, [0, 16], n_repeat=64)
     _v37 = _buffer_load_dot_op_a(Q, _v20, _v36, 128, T.bf16,
                                       tile_m=128, tile_k=128, warps_m=4, warps_n=1, stride_m=stride_qm)
-    _v38 = stride_oz * _v0
-    _v39 = stride_oh * _v1
+    _v38 = stride_oz * bid_x
+    _v39 = stride_oh * bid_y
     _v40 = _v38 + _v39
     thread_id_x_12 = gpu.thread_id("x")
-    _v41 = arith.index_cast(T.i32, thread_id_x_12) if str(getattr(thread_id_x_12, "type", "")) != str(T.i32) else thread_id_x_12
-    _v42_layout = fx.make_layout((2, 2, 2, 2, 2, 2, 2), (1, 2, 4, 8, 0, 16, 32))
-    _v42_base = (_v41 % 2) * 1 + ((_v41 // 2) % 2) * 2 + ((_v41 // 4) % 2) * 4 + ((_v41 // 8) % 2) * 8 + ((_v41 // 16) % 2) * 0 + ((_v41 // 32) % 2) * 16 + ((_v41 // 64) % 2) * 32
+    tid = arith.index_cast(T.i32, thread_id_x_12) if str(getattr(thread_id_x_12, "type", "")) != str(T.i32) else thread_id_x_12
+    # _v42_layout = fx.make_layout((2, 2, 2, 2, 2, 2, 2), (1, 2, 4, 8, 0, 16, 32))
+    _v42_base = (tid % 2) * 1 + ((tid // 2) % 2) * 2 + ((tid // 4) % 2) * 4 + ((tid // 8) % 2) * 8 + ((tid // 16) % 2) * 0 + ((tid // 32) % 2) * 16 + ((tid // 64) % 2) * 32
     _v42 = vector.from_elements(T.vec(2, T.i32), [_v42_base, _v42_base + 64])
     _v43 = vector.broadcast(T.vec(2, T.i32), _v3)
     _v44 = _v43 + _v42
@@ -670,31 +927,33 @@ def attn_fwd_kernel(Q: fx.Tensor, K: fx.Tensor, V: fx.Tensor, O: fx.Tensor, stri
     _v48 = vector.broadcast(T.vec(16, T.i32), _v40)
     _v49 = _v48 + _v47
     thread_id_x_13 = gpu.thread_id("x")
-    _v50 = arith.index_cast(T.i32, thread_id_x_13) if str(getattr(thread_id_x_13, "type", "")) != str(T.i32) else thread_id_x_13
-    _v51_layout = fx.make_layout((2, 2, 2, 2, 2, 2, 2), (0, 0, 0, 0, 8, 0, 0))
-    _v51_base = (_v50 % 2) * 0 + ((_v50 // 2) % 2) * 0 + ((_v50 // 4) % 2) * 0 + ((_v50 // 8) % 2) * 0 + ((_v50 // 16) % 2) * 8 + ((_v50 // 32) % 2) * 0 + ((_v50 // 64) % 2) * 0
-    _v51 = vector.from_elements(T.vec(64, T.i32), [_v51_base, _v51_base + 1, _v51_base + 2, _v51_base + 3, _v51_base + 4, _v51_base + 5, _v51_base + 6, _v51_base + 7, _v51_base + 16, _v51_base + 17, _v51_base + 18, _v51_base + 19, _v51_base + 20, _v51_base + 21, _v51_base + 22, _v51_base + 23, _v51_base + 32, _v51_base + 33, _v51_base + 34, _v51_base + 35, _v51_base + 36, _v51_base + 37, _v51_base + 38, _v51_base + 39, _v51_base + 48, _v51_base + 49, _v51_base + 50, _v51_base + 51, _v51_base + 52, _v51_base + 53, _v51_base + 54, _v51_base + 55, _v51_base + 64, _v51_base + 65, _v51_base + 66, _v51_base + 67, _v51_base + 68, _v51_base + 69, _v51_base + 70, _v51_base + 71, _v51_base + 80, _v51_base + 81, _v51_base + 82, _v51_base + 83, _v51_base + 84, _v51_base + 85, _v51_base + 86, _v51_base + 87, _v51_base + 96, _v51_base + 97, _v51_base + 98, _v51_base + 99, _v51_base + 100, _v51_base + 101, _v51_base + 102, _v51_base + 103, _v51_base + 112, _v51_base + 113, _v51_base + 114, _v51_base + 115, _v51_base + 116, _v51_base + 117, _v51_base + 118, _v51_base + 119])
-    _v52 = vector.shuffle(_v49, _v49, [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8])
-    _v53 = vector.shuffle(_v51, _v51, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63])
+    tid = arith.index_cast(T.i32, thread_id_x_13) if str(getattr(thread_id_x_13, "type", "")) != str(T.i32) else thread_id_x_13
+    # _v51_layout = fx.make_layout((2, 2, 2, 2, 2, 2, 2), (0, 0, 0, 0, 8, 0, 0))
+    _v51_base = (tid % 2) * 0 + ((tid // 2) % 2) * 0 + ((tid // 4) % 2) * 0 + ((tid // 8) % 2) * 0 + ((tid // 16) % 2) * 8 + ((tid // 32) % 2) * 0 + ((tid // 64) % 2) * 0
+    _v51 = _make_reg_offset_vec(_v51_base, (8, 8), (1, 16))
+    _v52 = _shuffle_select_repeat(_v49, [0, 8], n_repeat=64)
+    _v53 = _shuffle_repeat_block(_v51, n_repeat=2)
     _v54 = _v52 + _v53
     _v55 = _v45 < cst_9
-    _for_ctx__v56_3 = _SCFForCtx(c0_i32, c1024_i32, c128_i32, [cst_8, cst_7, cst_6])
+    _for_ctx__v56_3 = _SCFForCtx(c0_i32, c1024_i32, c128_i32, [NEG_INF_2, ONES_2, ZEROS_128])
     with _for_ctx__v56_3 as (_iv_index, [arg17, arg18, arg19]):
         arg16 = arith.index_cast(T.i32, _iv_index)
-        _v62 = _v27  # memdesc_index[c0_i32]
-        _v63 = _tdm_copy_to_lds(_v26, (arg16, c0_i32), _v62)
+        _v62 = _memdesc_index_subview(_v27, c0_i32, 16384, pad_interval=128, pad_amount=8)
+        _v63 = _tdm_copy_to_lds(_v26, (arg16, c0_i32), _v62, elem_bytes=2)
         _v64 = tdm_ops.tensor_wait(0)
         gpu.barrier()  # TDM is async; barrier ensures LDS visible to all waves
+        gpu.barrier()
         _v65 = (_v62, True)  # memdesc_trans → (memref, transposed=True)
-        _v66 = _v65  # fly.lds_load with precomputed offsets → passthrough
+        # fly.lds_load with pre-computed LinearLayout offsets (512 elements)
+        _v66 = _lds_load_gf2(_v65, [0, 1, 2, 3, 4, 5, 6, 7, 16, 17, 18, 19, 20, 21, 22, 23, 32, 33, 34, 35, 36, 37, 38, 39, 48, 49, 50, 51, 52, 53, 54, 55, 64, 65, 66, 67, 68, 69, 70, 71, 80, 81, 82, 83, 84, 85, 86, 87, 96, 97, 98, 99, 100, 101, 102, 103, 112, 113, 114, 115, 116, 117, 118, 119, 2048, 2049, 2050, 2051, 2052, 2053, 2054, 2055, 2064, 2065, 2066, 2067, 2068, 2069, 2070, 2071, 2080, 2081, 2082, 2083, 2084, 2085, 2086, 2087, 2096, 2097, 2098, 2099, 2100, 2101, 2102, 2103, 2112, 2113, 2114, 2115, 2116, 2117, 2118, 2119, 2128, 2129, 2130, 2131, 2132, 2133, 2134, 2135, 2144, 2145, 2146, 2147, 2148, 2149, 2150, 2151, 2160, 2161, 2162, 2163, 2164, 2165, 2166, 2167, 4096, 4097, 4098, 4099, 4100, 4101, 4102, 4103, 4112, 4113, 4114, 4115, 4116, 4117, 4118, 4119, 4128, 4129, 4130, 4131, 4132, 4133, 4134, 4135, 4144, 4145, 4146, 4147, 4148, 4149, 4150, 4151, 4160, 4161, 4162, 4163, 4164, 4165, 4166, 4167, 4176, 4177, 4178, 4179, 4180, 4181, 4182, 4183, 4192, 4193, 4194, 4195, 4196, 4197, 4198, 4199, 4208, 4209, 4210, 4211, 4212, 4213, 4214, 4215, 6144, 6145, 6146, 6147, 6148, 6149, 6150, 6151, 6160, 6161, 6162, 6163, 6164, 6165, 6166, 6167, 6176, 6177, 6178, 6179, 6180, 6181, 6182, 6183, 6192, 6193, 6194, 6195, 6196, 6197, 6198, 6199, 6208, 6209, 6210, 6211, 6212, 6213, 6214, 6215, 6224, 6225, 6226, 6227, 6228, 6229, 6230, 6231, 6240, 6241, 6242, 6243, 6244, 6245, 6246, 6247, 6256, 6257, 6258, 6259, 6260, 6261, 6262, 6263, 8192, 8193, 8194, 8195, 8196, 8197, 8198, 8199, 8208, 8209, 8210, 8211, 8212, 8213, 8214, 8215, 8224, 8225, 8226, 8227, 8228, 8229, 8230, 8231, 8240, 8241, 8242, 8243, 8244, 8245, 8246, 8247, 8256, 8257, 8258, 8259, 8260, 8261, 8262, 8263, 8272, 8273, 8274, 8275, 8276, 8277, 8278, 8279, 8288, 8289, 8290, 8291, 8292, 8293, 8294, 8295, 8304, 8305, 8306, 8307, 8308, 8309, 8310, 8311, 10240, 10241, 10242, 10243, 10244, 10245, 10246, 10247, 10256, 10257, 10258, 10259, 10260, 10261, 10262, 10263, 10272, 10273, 10274, 10275, 10276, 10277, 10278, 10279, 10288, 10289, 10290, 10291, 10292, 10293, 10294, 10295, 10304, 10305, 10306, 10307, 10308, 10309, 10310, 10311, 10320, 10321, 10322, 10323, 10324, 10325, 10326, 10327, 10336, 10337, 10338, 10339, 10340, 10341, 10342, 10343, 10352, 10353, 10354, 10355, 10356, 10357, 10358, 10359, 12288, 12289, 12290, 12291, 12292, 12293, 12294, 12295, 12304, 12305, 12306, 12307, 12308, 12309, 12310, 12311, 12320, 12321, 12322, 12323, 12324, 12325, 12326, 12327, 12336, 12337, 12338, 12339, 12340, 12341, 12342, 12343, 12352, 12353, 12354, 12355, 12356, 12357, 12358, 12359, 12368, 12369, 12370, 12371, 12372, 12373, 12374, 12375, 12384, 12385, 12386, 12387, 12388, 12389, 12390, 12391, 12400, 12401, 12402, 12403, 12404, 12405, 12406, 12407, 14336, 14337, 14338, 14339, 14340, 14341, 14342, 14343, 14352, 14353, 14354, 14355, 14356, 14357, 14358, 14359, 14368, 14369, 14370, 14371, 14372, 14373, 14374, 14375, 14384, 14385, 14386, 14387, 14388, 14389, 14390, 14391, 14400, 14401, 14402, 14403, 14404, 14405, 14406, 14407, 14416, 14417, 14418, 14419, 14420, 14421, 14422, 14423, 14432, 14433, 14434, 14435, 14436, 14437, 14438, 14439, 14448, 14449, 14450, 14451, 14452, 14453, 14454, 14455], [128, 256, 512, 1024, 8], [0, 0], 512, T.bf16, pad_interval=128, pad_amount=8)
         # GEMM: wmma_16x16x32 (16x16x32) — tiled WMMA, warps_m=4 warps_n=1
-        _v67 = _wmma_gemm_full(_v37, _v66, cst_6, T.bf16, warps_m=4, warps_n=1)
+        _v67 = _wmma_gemm_full(_v37, _v66, ZEROS_128, T.bf16, tile_m=128, tile_n=128, tile_k=128, warps_m=4, warps_n=1)
         _v68 = vector.broadcast(T.vec(64, T.i32), arg16)
         _v69 = _v68 + _v51
         _v70 = _v69 < cst_4
-        _v71 = vector.shuffle(_v70, _v70, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63])
-        _v72 = arith.select(_v71, _v67, cst_3)
-        cst_14 = arith.constant_vector(0.0, T.vec(2, T.f32))
+        _v71 = _shuffle_repeat_block(_v70, n_repeat=2)
+        _v72 = arith.select(_v71, _v67, NEG_INF_128)
+        ZEROS_2 = arith.constant_vector(0.0, T.vec(2, T.f32))
         _v73 = vector.extract(_v72, static_position=[0])
         c1 = arith.constant(1, type=T.index)
         c64 = arith.constant(64, type=T.index)
@@ -709,7 +968,7 @@ def attn_fwd_kernel(Q: fx.Tensor, K: fx.Tensor, V: fx.Tensor, O: fx.Tensor, stri
             _v153 = arith.maxnumf(arg21, _v152)
             _scf_yield_([_v153])
         _v74 = _for_ctx__v74.results[0]
-        _v75 = vector.insert(_v74, cst_14, static_position=[0], dynamic_position=[])
+        _v75 = vector.insert(_v74, ZEROS_2, static_position=[0], dynamic_position=[])
         _v76 = vector.extract(_v72, static_position=[64])
         c1_16 = arith.constant(1, type=T.index)
         c64_17 = arith.constant(64, type=T.index)
@@ -727,9 +986,9 @@ def attn_fwd_kernel(Q: fx.Tensor, K: fx.Tensor, V: fx.Tensor, O: fx.Tensor, stri
         _v78 = vector.insert(_v77, _v75, static_position=[1], dynamic_position=[])
         _v79 = vector.extract(_v78, static_position=[0])
         thread_id_x_19 = gpu.thread_id("x")
-        _v80 = arith.index_cast(T.i32, thread_id_x_19) if str(getattr(thread_id_x_19, "type", "")) != str(T.i32) else thread_id_x_19
+        tid = arith.index_cast(T.i32, thread_id_x_19) if str(getattr(thread_id_x_19, "type", "")) != str(T.i32) else thread_id_x_19
         c32_i32 = arith.constant(32, type=T.i32)
-        _v81 = _v80 % c32_i32
+        _v81 = tid % c32_i32
         c16_i32 = arith.constant(16, type=T.i32)
         _v82 = _v81 ^ c16_i32
         c2_i32 = arith.constant(2, type=T.i32)
@@ -741,9 +1000,9 @@ def attn_fwd_kernel(Q: fx.Tensor, K: fx.Tensor, V: fx.Tensor, O: fx.Tensor, stri
         _v88 = vector.insert(_v87, _v78, static_position=[0], dynamic_position=[])
         _v89 = vector.extract(_v88, static_position=[1])
         thread_id_x_20 = gpu.thread_id("x")
-        _v90 = arith.index_cast(T.i32, thread_id_x_20) if str(getattr(thread_id_x_20, "type", "")) != str(T.i32) else thread_id_x_20
+        tid = arith.index_cast(T.i32, thread_id_x_20) if str(getattr(thread_id_x_20, "type", "")) != str(T.i32) else thread_id_x_20
         c32_i32_21 = arith.constant(32, type=T.i32)
-        _v91 = _v90 % c32_i32_21
+        _v91 = tid % c32_i32_21
         c16_i32_22 = arith.constant(16, type=T.i32)
         _v92 = _v91 ^ c16_i32_22
         c2_i32_23 = arith.constant(2, type=T.i32)
@@ -754,19 +1013,19 @@ def attn_fwd_kernel(Q: fx.Tensor, K: fx.Tensor, V: fx.Tensor, O: fx.Tensor, stri
         _v97 = arith.maxnumf(_v89, _v96)
         _v98 = vector.insert(_v97, _v88, static_position=[1], dynamic_position=[])
         _v99 = arith.maxnumf(arg17, _v98)
-        _v100 = _v99 * cst_2
-        _v101 = _v100 * cst_1
-        _v102 = _v72 * cst_0
-        _v103 = _v102 * cst
+        _v100 = _v99 * SM_SCALE_2
+        _v101 = _v100 * LOG2E_2
+        _v102 = _v72 * SM_SCALE_128
+        _v103 = _v102 * LOG2E_128
         _v104 = vector.shuffle(_v101, _v101, [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1])
-        _v105 = vector.shuffle(_v104, _v104, [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8])
+        _v105 = _shuffle_select_repeat(_v104, [0, 8], n_repeat=64)
         _v106 = _v103 - _v105
         _v107 = math_dialect.exp2(_v106)
-        _v108 = arg17 * cst_2
-        _v109 = _v108 * cst_1
+        _v108 = arg17 * SM_SCALE_2
+        _v109 = _v108 * LOG2E_2
         _v110 = _v109 - _v101
         _v111 = math_dialect.exp2(_v110)
-        cst_24 = arith.constant_vector(0.0, T.vec(2, T.f32))
+        ZEROS_2 = arith.constant_vector(0.0, T.vec(2, T.f32))
         _v112 = vector.extract(_v107, static_position=[0])
         c1_25 = arith.constant(1, type=T.index)
         c64_26 = arith.constant(64, type=T.index)
@@ -781,7 +1040,7 @@ def attn_fwd_kernel(Q: fx.Tensor, K: fx.Tensor, V: fx.Tensor, O: fx.Tensor, stri
             _v153 = arg21 + _v152
             _scf_yield_([_v153])
         _v113 = _for_ctx__v113.results[0]
-        _v114 = vector.insert(_v113, cst_24, static_position=[0], dynamic_position=[])
+        _v114 = vector.insert(_v113, ZEROS_2, static_position=[0], dynamic_position=[])
         _v115 = vector.extract(_v107, static_position=[64])
         c1_28 = arith.constant(1, type=T.index)
         c64_29 = arith.constant(64, type=T.index)
@@ -799,9 +1058,9 @@ def attn_fwd_kernel(Q: fx.Tensor, K: fx.Tensor, V: fx.Tensor, O: fx.Tensor, stri
         _v117 = vector.insert(_v116, _v114, static_position=[1], dynamic_position=[])
         _v118 = vector.extract(_v117, static_position=[0])
         thread_id_x_31 = gpu.thread_id("x")
-        _v119 = arith.index_cast(T.i32, thread_id_x_31) if str(getattr(thread_id_x_31, "type", "")) != str(T.i32) else thread_id_x_31
+        tid = arith.index_cast(T.i32, thread_id_x_31) if str(getattr(thread_id_x_31, "type", "")) != str(T.i32) else thread_id_x_31
         c32_i32_32 = arith.constant(32, type=T.i32)
-        _v120 = _v119 % c32_i32_32
+        _v120 = tid % c32_i32_32
         c16_i32_33 = arith.constant(16, type=T.i32)
         _v121 = _v120 ^ c16_i32_33
         c2_i32_34 = arith.constant(2, type=T.i32)
@@ -813,9 +1072,9 @@ def attn_fwd_kernel(Q: fx.Tensor, K: fx.Tensor, V: fx.Tensor, O: fx.Tensor, stri
         _v127 = vector.insert(_v126, _v117, static_position=[0], dynamic_position=[])
         _v128 = vector.extract(_v127, static_position=[1])
         thread_id_x_35 = gpu.thread_id("x")
-        _v129 = arith.index_cast(T.i32, thread_id_x_35) if str(getattr(thread_id_x_35, "type", "")) != str(T.i32) else thread_id_x_35
+        tid = arith.index_cast(T.i32, thread_id_x_35) if str(getattr(thread_id_x_35, "type", "")) != str(T.i32) else thread_id_x_35
         c32_i32_36 = arith.constant(32, type=T.i32)
-        _v130 = _v129 % c32_i32_36
+        _v130 = tid % c32_i32_36
         c16_i32_37 = arith.constant(16, type=T.i32)
         _v131 = _v130 ^ c16_i32_37
         c2_i32_38 = arith.constant(2, type=T.i32)
@@ -826,27 +1085,29 @@ def attn_fwd_kernel(Q: fx.Tensor, K: fx.Tensor, V: fx.Tensor, O: fx.Tensor, stri
         _v136 = _v128 + _v135
         _v137 = vector.insert(_v136, _v127, static_position=[1], dynamic_position=[])
         _v138 = vector.shuffle(_v111, _v111, [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1])
-        _v139 = vector.shuffle(_v138, _v138, [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8])
+        _v139 = _shuffle_select_repeat(_v138, [0, 8], n_repeat=64)
         _v140 = arg19 * _v139
         _v141 = arith.truncf(T.vec(128, T.bf16), _v107)
         _v142 = arg18 * _v111
         _v143 = _v142 + _v137
-        _v144 = _v34  # memdesc_index[c0_i32]
-        _v145 = _tdm_copy_to_lds(_v33, (arg16, c0_i32), _v144)
+        _v144 = _memdesc_index_subview(_v34, c0_i32, 16384, pad_interval=128, pad_amount=16)
+        _v145 = _tdm_copy_to_lds(_v33, (arg16, c0_i32), _v144, elem_bytes=2)
         _v146 = tdm_ops.tensor_wait(0)
         gpu.barrier()  # TDM is async; barrier ensures LDS visible to all waves
-        _v147 = _v144  # fly.lds_load with precomputed offsets → passthrough
+        gpu.barrier()
+        # fly.lds_load with pre-computed LinearLayout offsets (512 elements)
+        _v147 = _lds_load_gf2(_v144, [0, 128, 256, 384, 512, 640, 768, 896, 2048, 2176, 2304, 2432, 2560, 2688, 2816, 2944, 4096, 4224, 4352, 4480, 4608, 4736, 4864, 4992, 6144, 6272, 6400, 6528, 6656, 6784, 6912, 7040, 8192, 8320, 8448, 8576, 8704, 8832, 8960, 9088, 10240, 10368, 10496, 10624, 10752, 10880, 11008, 11136, 12288, 12416, 12544, 12672, 12800, 12928, 13056, 13184, 14336, 14464, 14592, 14720, 14848, 14976, 15104, 15232, 16, 144, 272, 400, 528, 656, 784, 912, 2064, 2192, 2320, 2448, 2576, 2704, 2832, 2960, 4112, 4240, 4368, 4496, 4624, 4752, 4880, 5008, 6160, 6288, 6416, 6544, 6672, 6800, 6928, 7056, 8208, 8336, 8464, 8592, 8720, 8848, 8976, 9104, 10256, 10384, 10512, 10640, 10768, 10896, 11024, 11152, 12304, 12432, 12560, 12688, 12816, 12944, 13072, 13200, 14352, 14480, 14608, 14736, 14864, 14992, 15120, 15248, 32, 160, 288, 416, 544, 672, 800, 928, 2080, 2208, 2336, 2464, 2592, 2720, 2848, 2976, 4128, 4256, 4384, 4512, 4640, 4768, 4896, 5024, 6176, 6304, 6432, 6560, 6688, 6816, 6944, 7072, 8224, 8352, 8480, 8608, 8736, 8864, 8992, 9120, 10272, 10400, 10528, 10656, 10784, 10912, 11040, 11168, 12320, 12448, 12576, 12704, 12832, 12960, 13088, 13216, 14368, 14496, 14624, 14752, 14880, 15008, 15136, 15264, 48, 176, 304, 432, 560, 688, 816, 944, 2096, 2224, 2352, 2480, 2608, 2736, 2864, 2992, 4144, 4272, 4400, 4528, 4656, 4784, 4912, 5040, 6192, 6320, 6448, 6576, 6704, 6832, 6960, 7088, 8240, 8368, 8496, 8624, 8752, 8880, 9008, 9136, 10288, 10416, 10544, 10672, 10800, 10928, 11056, 11184, 12336, 12464, 12592, 12720, 12848, 12976, 13104, 13232, 14384, 14512, 14640, 14768, 14896, 15024, 15152, 15280, 64, 192, 320, 448, 576, 704, 832, 960, 2112, 2240, 2368, 2496, 2624, 2752, 2880, 3008, 4160, 4288, 4416, 4544, 4672, 4800, 4928, 5056, 6208, 6336, 6464, 6592, 6720, 6848, 6976, 7104, 8256, 8384, 8512, 8640, 8768, 8896, 9024, 9152, 10304, 10432, 10560, 10688, 10816, 10944, 11072, 11200, 12352, 12480, 12608, 12736, 12864, 12992, 13120, 13248, 14400, 14528, 14656, 14784, 14912, 15040, 15168, 15296, 80, 208, 336, 464, 592, 720, 848, 976, 2128, 2256, 2384, 2512, 2640, 2768, 2896, 3024, 4176, 4304, 4432, 4560, 4688, 4816, 4944, 5072, 6224, 6352, 6480, 6608, 6736, 6864, 6992, 7120, 8272, 8400, 8528, 8656, 8784, 8912, 9040, 9168, 10320, 10448, 10576, 10704, 10832, 10960, 11088, 11216, 12368, 12496, 12624, 12752, 12880, 13008, 13136, 13264, 14416, 14544, 14672, 14800, 14928, 15056, 15184, 15312, 96, 224, 352, 480, 608, 736, 864, 992, 2144, 2272, 2400, 2528, 2656, 2784, 2912, 3040, 4192, 4320, 4448, 4576, 4704, 4832, 4960, 5088, 6240, 6368, 6496, 6624, 6752, 6880, 7008, 7136, 8288, 8416, 8544, 8672, 8800, 8928, 9056, 9184, 10336, 10464, 10592, 10720, 10848, 10976, 11104, 11232, 12384, 12512, 12640, 12768, 12896, 13024, 13152, 13280, 14432, 14560, 14688, 14816, 14944, 15072, 15200, 15328, 112, 240, 368, 496, 624, 752, 880, 1008, 2160, 2288, 2416, 2544, 2672, 2800, 2928, 3056, 4208, 4336, 4464, 4592, 4720, 4848, 4976, 5104, 6256, 6384, 6512, 6640, 6768, 6896, 7024, 7152, 8304, 8432, 8560, 8688, 8816, 8944, 9072, 9200, 10352, 10480, 10608, 10736, 10864, 10992, 11120, 11248, 12400, 12528, 12656, 12784, 12912, 13040, 13168, 13296, 14448, 14576, 14704, 14832, 14960, 15088, 15216, 15344], [1, 2, 4, 8, 1024], [0, 0], 512, T.bf16, pad_interval=128, pad_amount=16)
         _v148 = _v141  # P→A: direct passthrough (flat_idx_C == flat_idx_A for this WMMA config)
         # GEMM: wmma_16x16x32 (16x16x32) — tiled WMMA, warps_m=4 warps_n=1
-        _v149 = _wmma_gemm_full(_v148, _v147, _v140, T.bf16, warps_m=4, warps_n=1)
+        _v149 = _wmma_gemm_full(_v148, _v147, _v140, T.bf16, tile_m=128, tile_n=128, tile_k=128, warps_m=4, warps_n=1)
         _scf_yield_([_v99, _v143, _v149])
     _v56_r0 = _for_ctx__v56_3.results[0]
     _v56_r1 = _for_ctx__v56_3.results[1]
     _v56_r2 = _for_ctx__v56_3.results[2]
     _v57 = vector.shuffle(_v56_r1, _v56_r1, [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1])
-    _v58 = cst_5 / _v57
-    _v59 = vector.shuffle(_v58, _v58, [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8])
+    _v58 = ONES_16 / _v57
+    _v59 = _shuffle_select_repeat(_v58, [0, 8], n_repeat=64)
     _v60 = _v56_r2 * _v59
-    _v61 = vector.shuffle(_v55, _v55, [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8])
+    _v61 = _shuffle_select_repeat(_v55, [0, 8], n_repeat=64)
     _buffer_store_vec(_v60, O, _v54, _v61, 128, T.f32)
     return
