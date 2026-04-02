@@ -1398,25 +1398,28 @@ def pa_decode_ps_launch(
     s = stream or torch.cuda.current_stream()
 
     if sliding_window > 0:
-        # Gluon-style grid: (batch, kv_heads, max_context_partition_num)
+        # Launch one CTA per 256-token tile inside each 1024-token physical block:
+        # grid = (batch, kv_heads, max_context_partition_num * 4).
         batch_size = context_lengths.shape[0]
         head_size = query.shape[-1]
         eqgs = query_length * query_group_size
-        context_partition_size = KV_BLOCK_SIZE  # 1024
+        physical_partition_size = KV_BLOCK_SIZE
+        context_partition_size = KV_COMPUTE_BLOCK
 
         if max_context_partition_num == 0:
             max_context_partition_num = (
-                (sliding_window + context_partition_size - 1) // context_partition_size
+                (sliding_window + physical_partition_size - 1) // physical_partition_size
             ) + 1
+        total_context_partition_num = max_context_partition_num * TILES_PER_BLOCK
 
         if exp_sums is None:
-            exp_sums = torch.empty(batch_size, num_kv_heads, max_context_partition_num, eqgs,
+            exp_sums = torch.empty(batch_size, num_kv_heads, total_context_partition_num, eqgs,
                                     device=dev, dtype=torch.float32)
         if max_logits is None:
-            max_logits = torch.full((batch_size, num_kv_heads, max_context_partition_num, eqgs),
+            max_logits = torch.full((batch_size, num_kv_heads, total_context_partition_num, eqgs),
                                      float('-inf'), device=dev, dtype=torch.float32)
         if temporary_output is None:
-            temporary_output = torch.zeros(batch_size, num_kv_heads, max_context_partition_num,
+            temporary_output = torch.zeros(batch_size, num_kv_heads, total_context_partition_num,
                                             eqgs, head_size, device=dev, dtype=torch.bfloat16)
 
         compiled_sw = compile_pa_decode_ps_sw(
@@ -1476,7 +1479,7 @@ def pa_decode_ps_launch(
             head_size=head_size,
             CONTEXT_PARTITION_SIZE=context_partition_size,
             PS=True,
-            context_partition_num=max_context_partition_num,
+            context_partition_num=total_context_partition_num,
         )
         return "ps_sw_partitioned"
     else:
@@ -1525,10 +1528,10 @@ def pa_decode_ps_launch(
 
 # =====================================================================
 # =====================================================================
-# compile_pa_decode_ps_sw — Sliding Window kernel with Gluon-style grid
-# Grid = (batch_size, num_kv_heads, max_context_partition_num)
-# Each block handles one (batch, kv_head, context_partition).
-# Each partition covers KV_BLOCK_SIZE=1024 tokens (1 physical block, 4 tiles).
+# compile_pa_decode_ps_sw — Sliding Window kernel with split grid-z
+# Grid = (batch_size, num_kv_heads, max_context_partition_num * 4)
+# Each block handles one (batch, kv_head, physical_block, 256-token sub-tile).
+# Each physical KV block contributes 4 partial slots to the reduce stage.
 # Uses block_tables for physical block lookup instead of kv_page_indices.
 # Output: exp_sums, max_logits, temporary_output -> reduced by a separate kernel.
 # =====================================================================
@@ -1543,8 +1546,8 @@ def compile_pa_decode_ps_sw(
 ):
     """Compile a Gluon-style partitioned PA decode kernel for sliding window.
 
-    Grid = (batch_size, num_kv_heads, max_context_partition_num).
-    Each GPU block processes one context partition (= 1 physical KV block = 4 tiles).
+    Grid = (batch_size, num_kv_heads, max_context_partition_num * 4).
+    Each GPU block processes one 256-token sub-partition inside a 1024-token KV block.
     sliding_window is a compile-time constant.
     """
     assert sliding_window > 0, "Use compile_pa_decode_ps for sliding_window=0"
@@ -1639,24 +1642,28 @@ def compile_pa_decode_ps_sw(
         c_one = arith.constant(1, type=T.i32)
         c_bs = arith.constant(_bs, type=T.i32)
         c_four = arith.constant(4, type=T.i32)
+        c_tpb = arith.constant(TILES_PER_BLOCK, type=T.i32)
 
         local_qhead_idx = warp_id * arith.constant(4, type=T.i32) + rowid
 
         # ── Context length and partition mapping ──
         context_len = buffer_ops.buffer_load(cl_rsrc, batch_idx, vec_width=1, dtype=T.i32)
+        sequence_partition_idx = partition_idx // c_tpb
+        block_split_idx = partition_idx % c_tpb
+        tile_token_offset = block_split_idx * c_cps
         _c_sw = arith.constant(sliding_window, type=T.i32)
         seq_start_global = context_len - _c_sw
         partition_offset = seq_start_global // c_bs
         partition_offset = arith.select(partition_offset > arith.constant(0, type=T.i32),
                                          partition_offset, arith.constant(0, type=T.i32))
-        seq_partition_idx_raw = partition_offset + partition_idx
+        seq_partition_idx_raw = partition_offset + sequence_partition_idx
         # Check if this partition is valid (within context range)
         num_blocks_for_seq = (context_len + c_bs - c_one) // c_bs
         _is_valid = seq_partition_idx_raw < num_blocks_for_seq
         # Clamp for safe memory access (invalid partitions will be skipped below)
         seq_partition_idx = arith.select(_is_valid, seq_partition_idx_raw,
                                           arith.constant(0, type=T.i32))
-        kv_seq_start = seq_partition_idx * c_bs
+        kv_seq_start = seq_partition_idx * c_bs + tile_token_offset
         # For invalid partitions, set context_len to 0 so all tokens get masked
         context_len = arith.select(_is_valid, context_len, arith.constant(0, type=T.i32))
 
@@ -1945,42 +1952,17 @@ def compile_pa_decode_ps_sw(
             o1 = o1 + pv_results[1] * vector.broadcast(T.f32x4, v_correction)
             return o0, o1
 
-        def _process_block(rmax, rsum, o0, o1, k0_ops, k1_ops, k2_ops, k3_ops):
-            """Process one 1024-token block (4 tiles) with barrier-merged pipeline."""
-            c_zero_local = arith.constant(0, type=T.i32)
-            c_256_local = arith.constant(KV_COMPUTE_BLOCK, type=T.i32)
-            c_512_local = arith.constant(KV_COMPUTE_BLOCK * 2, type=T.i32)
-            c_768_local = arith.constant(KV_COMPUTE_BLOCK * 3, type=T.i32)
-            pstart = [
-                kv_seq_start,
-                kv_seq_start + c_256_local,
-                kv_seq_start + c_512_local,
-                kv_seq_start + c_768_local,
-            ]
+        def _process_block_split(rmax, rsum, o0, o1, tile_token_offset_i32, k_ops):
+            """Process one 256-token tile inside the selected physical block."""
             v_base = (phys_block * c_vb + _v_head_off) // c_four
-            d_out_0, v0_ops, vs0 = _qk_and_intra_softmax(k0_ops, pstart[0], v_base, c_zero_local, phys_block)
+            d_out_0, v0_ops, vs0 = _qk_and_intra_softmax(
+                k_ops, kv_seq_start, v_base, tile_token_offset_i32, phys_block
+            )
             gpu.barrier()
             rmax, rsum, o0, o1, vc0 = _cross_warp_softmax_and_prob_pack(d_out_0, rmax, rsum, o0, o1, vs0)
-            d_out_1, v1_ops, vs1 = _qk_and_intra_softmax(k1_ops, pstart[1], v_base, c_256_local, phys_block)
             gpu.barrier()
             o0, o1 = _pv_mfma(v0_ops, o0, o1, vc0)
-            rmax, rsum, o0, o1, vc1 = _cross_warp_softmax_and_prob_pack(d_out_1, rmax, rsum, o0, o1, vs1)
-            d_out_2, v2_ops, vs2 = _qk_and_intra_softmax(k2_ops, pstart[2], v_base, c_512_local, phys_block)
-            gpu.barrier()
-            o0, o1 = _pv_mfma(v1_ops, o0, o1, vc1)
-            rmax, rsum, o0, o1, vc2 = _cross_warp_softmax_and_prob_pack(d_out_2, rmax, rsum, o0, o1, vs2)
-            d_out_3, v3_ops, vs3 = _qk_and_intra_softmax(k3_ops, pstart[3], v_base, c_768_local, phys_block)
-            gpu.barrier()
-            o0, o1 = _pv_mfma(v2_ops, o0, o1, vc2)
-            rmax, rsum, o0, o1, vc3 = _cross_warp_softmax_and_prob_pack(d_out_3, rmax, rsum, o0, o1, vs3)
-            gpu.barrier()
-            o0, o1 = _pv_mfma(v3_ops, o0, o1, vc3)
             return rmax, rsum, o0, o1
-
-        c_zero = arith.constant(0, type=T.i32)
-        c_256 = arith.constant(KV_COMPUTE_BLOCK, type=T.i32)
-        c_512 = arith.constant(KV_COMPUTE_BLOCK * 2, type=T.i32)
-        c_768 = arith.constant(KV_COMPUTE_BLOCK * 3, type=T.i32)
 
         # ── MTP groups ──
         _mtp_groups = math.ceil(query_length * query_group_size / 16)
@@ -2041,21 +2023,17 @@ def compile_pa_decode_ps_sw(
 
             # ── Load K for the single block ──
             k_base = (phys_block * c_kb + _k_head_off) // c_four
-            k0_flat = _load_k_flat_ps(k_base, c_zero)
-            k1_flat = _load_k_flat_ps(k_base, c_256)
-            k2_flat = _load_k_flat_ps(k_base, c_512)
-            k3_flat = _load_k_flat_ps(k_base, c_768)
+            k0_flat = _load_k_flat_ps(k_base, tile_token_offset)
             k0_ops = _unflatten_k(k0_flat)
-            k1_ops = _unflatten_k(k1_flat)
-            k2_ops = _unflatten_k(k2_flat)
-            k3_ops = _unflatten_k(k3_flat)
 
-            # ── Process the single block ──
-            running_max, running_sum, out0, out1 = _process_block(
+            # ── Process this CTA's 256-token tile ──
+            running_max, running_sum, out0, out1 = _process_block_split(
                 NEG_INF, ZERO_F,
                 arith.constant_vector(0.0, T.f32x4),
                 arith.constant_vector(0.0, T.f32x4),
-                k0_ops, k1_ops, k2_ops, k3_ops)
+                tile_token_offset,
+                k0_ops,
+            )
             SmemPtr._view_cache = None
 
             # ── Normalize and write output ──
@@ -2117,7 +2095,7 @@ def compile_pa_decode_ps_sw(
             s_bt_seq,
             s_ks_block, s_ks_head,
         ).launch(
-            grid=(gx, gy, gz),
+            grid=(gx, gy, gz * TILES_PER_BLOCK),
             block=(BLOCK_THREADS, 1, 1), stream=stream)
 
     return {
