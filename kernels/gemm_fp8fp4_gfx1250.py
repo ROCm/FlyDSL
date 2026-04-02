@@ -31,7 +31,6 @@ SCALE_BLOCK = 32
 SCALES_PER_WMMA = WMMA_K // SCALE_BLOCK  # 4
 
 LDS_PAD_A_BYTES = 16
-LDS_PAD_B_BYTES = 0
 LDS_PAD_D_BYTES = 16
 
 _STAGE_NAMES = ("ping", "pong", "pang", "pung")

@@ -1,3 +1,7 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+
+
 """gfx1250 MoE 2-stage kernels and wrappers.
 
 Target architecture: AMD RDNA4 `gfx1250`.
