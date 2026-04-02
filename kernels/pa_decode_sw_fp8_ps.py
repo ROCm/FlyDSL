@@ -24,6 +24,11 @@ from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl._mlir import ir
 from flydsl.compiler.kernel_function import CompilationContext
+try:
+    from flydsl.autotune import autotune, Config
+except ImportError:
+    pass
+from flydsl._mlir.dialects import arith as _mlir_arith
 
 # ── Kernel geometry constants ────────────────────────────────────────
 QUERY_GROUP_SIZE = 16
@@ -1276,6 +1281,56 @@ def get_pa_metadata(
         'stride_pl_ql': stride_pl_ql,
         'query_length': query_length,
     }
+
+
+
+def _sw_reduce_partitions(output, exp_sums, max_logits, temporary_output,
+                           context_lengths, query_length, query_group_size,
+                           max_context_partition_num, sliding_window, context_partition_size):
+    """Reduce partitioned attention outputs into final output.
+
+    Implements online softmax reduction across context partitions:
+    output = sum(exp(ml_i - ml_max) * tmp_out_i) / sum(exp(ml_i - ml_max) * es_i)
+    """
+    batch_size = context_lengths.shape[0]
+    num_kv_heads = exp_sums.shape[1]
+    head_size = temporary_output.shape[-1]
+    eqgs = query_length * query_group_size
+
+    # Process on GPU via PyTorch ops
+    # max_logits: [batch, kv_heads, parts, eqgs]
+    # exp_sums:   [batch, kv_heads, parts, eqgs]
+    # tmp_out:    [batch, kv_heads, parts, eqgs, head_size]
+
+    # Global max across partitions
+    global_max = max_logits.max(dim=2, keepdim=True).values  # [B, H, 1, E]
+
+    # Rescale factors: exp(ml - global_max)
+    rescale = torch.exp(max_logits - global_max)  # [B, H, P, E]
+    rescale = rescale.nan_to_num(0.0)  # handle -inf - (-inf) = NaN
+
+    # Weight = exp_sums * rescale (total probability mass per partition)
+    weights = exp_sums * rescale  # [B, H, P, E]
+
+    # Total weight across partitions
+    total_weight = weights.sum(dim=2, keepdim=True)  # [B, H, 1, E]
+    total_weight = total_weight.clamp(min=1e-30)
+
+    # Weighted sum of normalized outputs: sum(weight_p * tmp_out_p)
+    weighted_out = (temporary_output.float() * weights.unsqueeze(-1)).sum(dim=2)  # [B, H, E, D]
+
+    # Final normalized output
+    result = weighted_out / total_weight.squeeze(2).unsqueeze(-1)  # [B, H, E, D]
+
+    # Reshape to output format: [batch*ql, num_q_heads, head_size]
+    # result is [B, num_kv_heads, ql*qgs, head_size]
+    # output is [B*ql, num_kv_heads*qgs, head_size]
+    result_reshaped = result.reshape(batch_size, num_kv_heads, query_length, query_group_size, head_size)
+    result_reshaped = result_reshaped.permute(0, 2, 1, 3, 4).reshape(
+        batch_size * query_length, num_kv_heads * query_group_size, head_size)
+    output.copy_(result_reshaped.to(output.dtype))
+
+
 def pa_decode_ps_launch(
     output: torch.Tensor,
     query: torch.Tensor,
