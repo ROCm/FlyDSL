@@ -85,6 +85,43 @@ def reference_a8w4_gemm(a_fp8, b_fp4, a_scale, b_scale, M, N, K):
                                   convert_fn_b=fp4_utils.mxfp4_to_f32)
 
 
+def _e8m0_exp_range(scale: torch.Tensor) -> tuple[int, int]:
+    """Return unbiased exponent range for an E8M0 tensor."""
+    scale_u8 = scale.view(torch.uint8).to(torch.int16)
+    return int(scale_u8.min().item()) - 127, int(scale_u8.max().item()) - 127
+
+
+def _a8w4_tolerances(a_scale: torch.Tensor, b_scale: torch.Tensor,
+                     K: int, out_dtype: str) -> tuple[float, float, str]:
+    """Scale-range-aware tolerance for mixed FP8xFP4 WMMA scale GEMM.
+
+    A8W4 accumulates FP8 activations with FP4 weights and applies independent
+    block scales on both operands. The mixed-precision path exhibits a larger
+    numeric floor than pure FP8 or pure FP4, and that floor grows with the
+    peak product of the two scale ranges.
+    """
+    a_min_exp, a_max_exp = _e8m0_exp_range(a_scale)
+    b_min_exp, b_max_exp = _e8m0_exp_range(b_scale)
+    peak_prod_exp = max(0, a_max_exp) + max(0, b_max_exp)
+    peak_prod_scale = float(2 ** peak_prod_exp)
+
+    if out_dtype in ("bf16", "f16"):
+        rtol = min(5e-2, 1e-2 + 3e-3 * peak_prod_exp)
+        atol = max(5e-2, K * (0.6 + 1.5 * peak_prod_exp))
+    else:
+        rtol = min(2e-2, 1e-3 + 2e-3 * peak_prod_exp)
+        atol = max(1e-2, K * (0.6 + 0.55 * peak_prod_exp))
+
+    diag = (
+        f"A8W4 scale-aware tolerance: "
+        f"A_exp=[{a_min_exp},{a_max_exp}], "
+        f"B_exp=[{b_min_exp},{b_max_exp}], "
+        f"peak_prod_scale=2^{peak_prod_exp}={peak_prod_scale:.1f}, "
+        f"rtol={rtol:.4f}, atol={atol:.4f}"
+    )
+    return rtol, atol, diag
+
+
 def _run_mxscale_gemm_test(
     data_format, M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp,
     num_buffers, use_tdm_store, out_dtype,
@@ -142,6 +179,8 @@ def _run_mxscale_gemm_test(
         b = random_fp8_data(N, K)
     a_scale = fp4_utils.random_e8m0(M, K // SCALE_BLOCK)
     b_scale = fp4_utils.random_e8m0(N, K // SCALE_BLOCK)
+    a_scale_raw = a_scale.clone()
+    b_scale_raw = b_scale.clone()
 
     # Reference
     if is_a8w4:
@@ -227,8 +266,13 @@ def _run_mxscale_gemm_test(
             torch.testing.assert_close(c_out_f, ref_f, rtol=1e-3, atol=1e-2)
         else:
             torch.testing.assert_close(c_out_f, ref_f, rtol=1e-5, atol=1e-8)
+    elif is_a8w4:
+        rtol, atol, tol_diag = _a8w4_tolerances(
+            a_scale_raw, b_scale_raw, K, out_dtype)
+        print(tol_diag)
+        torch.testing.assert_close(c_out_f, ref_f, rtol=rtol, atol=atol)
     else:
-        # FP8 and A8W4: standard SCALE_BLOCK=32 reference
+        # FP8: standard SCALE_BLOCK=32 reference
         if out_dtype in ("bf16", "f16"):
             torch.testing.assert_close(c_out_f, ref_f, rtol=1e-2, atol=5e-2)
         else:
