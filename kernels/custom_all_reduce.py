@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+
 """Custom all-reduce kernel + Python-facing shim.
 
 Provides FlyDSL-generated allreduce kernels following the AIter signal
@@ -751,7 +754,6 @@ class FlyDSLAllreduce:
         N = int(out.numel())
 
         # Write-mode only on CDNA3 (gfx942), ws=8, large tensors
-        # mirrors aiter: arch.find("gfx942") != string::npos
         use_write_mode = (
             bytes_n > 512 * 4096 * 2
             and self.world_size == 8

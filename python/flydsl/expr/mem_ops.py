@@ -172,6 +172,16 @@ def load_device_ptr(array_base_i64, index):
     return llvm.LoadOp(i64, ptr).result
 
 
+@traced_op
+def invalidate_l1():
+    """Invalidate L1 scalar cache (``buffer_inv sc1``).
+
+    Use inside a polling loop after a remote-visible load to discard stale
+    L1 cache lines so the next iteration sees fresh data from L2/HBM.
+    """
+    llvm.InlineAsmOp(None, [], "buffer_inv sc1", "", has_side_effects=True)
+
+
 __all__ = [
     # Uncached i32 (system-scope coherent)
     "load_i32_uncached",
@@ -182,6 +192,8 @@ __all__ = [
     "load_v4i32",
     "store_v4i32",
     "store_v4i32_nt",
+    # Cache control
+    "invalidate_l1",
     # Pointer helpers
     "load_device_ptr",
 ]
