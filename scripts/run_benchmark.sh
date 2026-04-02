@@ -114,6 +114,15 @@ MOE_SHAPES='
 64,6144,1024,128,8,16,64,256,64,256
 '
 
+# MoE FP4 shapes (requires --in_dtype fp4, gfx950 only): same format as MOE_SHAPES
+MOE_FP4_SHAPES='
+16384,7168,256,257,9,64,256,256,256,256
+32768,7168,256,257,9,64,256,256,256,256
+16,7168,2048,32,8,64,256,256,256,256
+128,7168,2048,32,8,64,256,256,256,256
+2048,7168,2048,32,8,64,256,256,256,256
+8192,7168,2048,32,8,64,256,256,256,256
+'
 
 # Memory bound threshold (M or tokens <= threshold => memory bound)
 MEMORY_BOUND_THRESHOLD=512
@@ -650,11 +659,72 @@ if [ "${RUN_MOE}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
       _emit_row "moe_gemm1" "${shape_moe}" "${dt_s1}" "${tb_s1}" "${tf_s1}"
     fi
 
-    dt_s2="$(grep -Eo 'FlyDSL MoE stage2\[[^]]+\]:' "${log}" | tail -1 | cut -d'[' -f2 | cut -d']' -f1 || true)"
-    tf_s2="$(grep -Eo 'FlyDSL MoE stage2\[[^]]+\]:.* ([0-9.]+) TFLOPS' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
-    tb_s2="$(grep -Eo 'FlyDSL MoE stage2\[[^]]+\]:.* ([0-9.]+) TB/s' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
+    dt_s2="$(grep -Eo 'FlyDSL MoE stage2 \[[^]]+\] [^ ]+' "${log}" | tail -1 | awk '{print $NF}' || true)"
+    tf_s2="$(grep -Eo 'FlyDSL MoE stage2 .* ([0-9.]+) TFLOPS' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
+    tb_s2="$(grep -Eo 'FlyDSL MoE stage2 .* ([0-9.]+) TB/s' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
     if [ -n "${dt_s2}" ] && [ -n "${tf_s2}" ] && [ -n "${tb_s2}" ]; then
       _emit_row "moe_gemm2" "${shape_moe}" "${dt_s2}" "${tb_s2}" "${tf_s2}"
+    fi
+  done
+
+  # MoE FP4 (gfx950 only)
+  for shape in $MOE_FP4_SHAPES; do
+    [ -z "$shape" ] && continue
+    oldIFS=$IFS
+    IFS=,
+    # shellcheck disable=SC2086 # intentional word-splitting on IFS=,
+    set -- $shape
+    IFS=$oldIFS
+    tokens=$1; model_dim=$2; inter_dim=$3; experts=$4; topk=$5; tile_m=$6; tile_n=$7; tile_k=$8; tile_n2=$9; tile_k2=${10}
+    dtype="fp4"
+    log="${BENCH_LOG_DIR}/moe_fp4_t${tokens}_md${model_dim}_id${inter_dim}_e${experts}_k${topk}.log"
+    if python3 tests/kernels/test_moe_gemm.py \
+      --in_dtype fp4 \
+      -dim "$model_dim,$inter_dim" \
+      -t "$tokens" \
+      -e "$experts" \
+      -k "$topk" \
+      --num_warmup 10 \
+      --num_iters 100 \
+      --tile_m "$tile_m" \
+      --tile_n "$tile_n" \
+      --tile_k "$tile_k" \
+      --tile_n2 "$tile_n2" \
+      --tile_k2 "$tile_k2" \
+      --skip_ref false \
+      --compare_aiter_ck false >"${log}" 2>&1; then
+      # Check if test was skipped due to architecture
+      if grep -q "requires gfx950\|Skipping FP4" "${log}"; then
+        shape_moe="t${tokens}-d${model_dim}x${inter_dim}-e${experts}k${topk}"
+        _emit_row "moe_fp4" "${shape_moe}" "${dtype}" "skip" "skip"
+      else
+        SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+        shape_moe="t${tokens}-d${model_dim}x${inter_dim}-e${experts}k${topk}"
+
+        dt_s1="$(grep -Eo 'FlyDSL MoE stage1\[[^]]+\]:' "${log}" | tail -1 | cut -d'[' -f2 | cut -d']' -f1 || true)"
+        tf_s1="$(grep -Eo 'FlyDSL MoE stage1\[[^]]+\]:.* ([0-9.]+) TFLOPS' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
+        tb_s1="$(grep -Eo 'FlyDSL MoE stage1\[[^]]+\]:.* ([0-9.]+) TB/s' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
+        if [ -n "${dt_s1}" ] && [ -n "${tf_s1}" ] && [ -n "${tb_s1}" ]; then
+          _emit_row "moe_fp4_s1" "${shape_moe}" "${dt_s1}" "${tb_s1}" "${tf_s1}"
+        fi
+
+        dt_s2="$(grep -Eo 'FlyDSL MoE stage2 \[[^]]+\] [^ ]+' "${log}" | tail -1 | awk '{print $NF}' || true)"
+        tf_s2="$(grep -Eo 'FlyDSL MoE stage2 .* ([0-9.]+) TFLOPS' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
+        tb_s2="$(grep -Eo 'FlyDSL MoE stage2 .* ([0-9.]+) TB/s' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
+        if [ -n "${dt_s2}" ] && [ -n "${tf_s2}" ] && [ -n "${tb_s2}" ]; then
+          _emit_row "moe_fp4_s2" "${shape_moe}" "${dt_s2}" "${tb_s2}" "${tf_s2}"
+        fi
+      fi
+    else
+      # Skip gracefully on unsupported architectures
+      if grep -q "requires gfx950\|Skipping FP4\|not supported" "${log}" 2>/dev/null; then
+        shape_moe="t${tokens}-d${model_dim}x${inter_dim}-e${experts}k${topk}"
+        _emit_row "moe_fp4" "${shape_moe}" "${dtype}" "skip" "skip"
+      else
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+        echo "moe fp4 failed. Log: ${log}" >&2
+        _show_fail_log "${log}" "moe_fp4"
+      fi
     fi
   done
 fi

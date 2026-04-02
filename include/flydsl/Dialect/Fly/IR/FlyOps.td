@@ -427,7 +427,7 @@ def Fly_DecompositionOp : Fly_Op<"decomposition", [Pure, DeclareOpInterfaceMetho
   let results = (outs Fly_TensorLikeType:$result);
 }
 
-def Fly_PtrLoadOp : Fly_Op<"ptr.load", [DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
+def Fly_PtrLoadOp : Fly_Op<"ptr.load", []> {
   let arguments = (ins Fly_IteratorLikeType:$ptr);
   let results = (outs AnyType:$result);
 }

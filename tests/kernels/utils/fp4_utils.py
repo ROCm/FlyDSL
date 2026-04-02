@@ -727,3 +727,15 @@ def per_1x32_f4_quant(x, scale=None, quant_dtype=fp4x2, shuffle=False):
         scale = e8m0_shuffle(scale)
     return y_fp4, scale.view(fp8_e8m0), y
 
+
+def preshuffle_b_16x16(b: Tensor, rows: int, cols: int) -> Tensor:
+    """Preshuffle B data into 16x16 byte tiles for WMMA-friendly LDS loads.
+
+    Works for both FP4 (cols = K//2) and FP8 (cols = K).
+    """
+    assert rows % 16 == 0, f"rows must be a multiple of 16, got {rows}"
+    assert cols % 16 == 0, f"cols must be a multiple of 16, got {cols}"
+    b = b.view(rows, cols)
+    b = b.view(rows // 16, 16, cols // 16, 16)
+    b = b.permute(0, 2, 1, 3).contiguous()
+    return b.view(rows, cols)
