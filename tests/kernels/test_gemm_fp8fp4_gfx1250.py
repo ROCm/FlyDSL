@@ -5,6 +5,7 @@ Kernel implementation: kernels/gemm_fp8fp4_gfx1250.py
 """
 
 import os
+import re
 import sys
 
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
@@ -91,6 +92,7 @@ def _run_mxscale_gemm_test(
     l2_prefetch_distance=0, cluster_m=1, cluster_n=1,
     inst_prefetch=False, waves_per_eu=None,
     expert_sched_mode=True,
+    return_launch_fn=False,
 ):
     """Unified test body for FP4 and FP8."""
     is_fp4 = data_format == "fp4"
@@ -233,6 +235,28 @@ def _run_mxscale_gemm_test(
             atol = max(1e-2, K * 0.6)
             torch.testing.assert_close(c_out_f, ref_f, rtol=1e-3, atol=atol)
     print("PASSED")
+    if return_launch_fn:
+        return launch_fn
+
+
+def _get_latest_artifact(launch_fn):
+    """Return the most recent CompiledArtifact produced by a JIT launch."""
+    last_compiled = getattr(launch_fn, "_last_compiled", None)
+    if last_compiled is not None:
+        return last_compiled[1]
+
+    mem_cache = getattr(launch_fn, "_mem_cache", None)
+    if mem_cache:
+        newest_key = next(reversed(mem_cache))
+        return mem_cache[newest_key]
+
+    raise AssertionError("expected launch_fn to have a compiled artifact")
+
+
+def _extract_i64_metadata(compiled_ir: str, key: str) -> int:
+    match = re.search(rf"{key}\s*=\s*(\d+)\s*:\s*i64", compiled_ir)
+    assert match is not None, f"{key} not found in compiled IR:\n{compiled_ir}"
+    return int(match.group(1))
 
 
 # ── pytest parametrized tests ──
@@ -259,6 +283,29 @@ def test_mxfp4_gemm(M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp,
         num_buffers, use_tdm_store, out_dtype,
         wave_specialized_tdm=wave_specialized_tdm,
         use_scale_opsel=use_scale_opsel)
+
+
+@pytest.mark.parametrize("out_dtype", ["bf16", "f16"])
+def test_mxfp4_metadata_and_spill_regression(out_dtype):
+    launch_fn = _run_mxscale_gemm_test(
+        "fp4",
+        1024, 1024, 1024,
+        256, 256, 256,
+        2, 2,
+        num_buffers=4,
+        use_tdm_store=True,
+        out_dtype=out_dtype,
+        return_launch_fn=True,
+    )
+    artifact = _get_latest_artifact(launch_fn)
+
+    assert "known_block_size = array<i32: 128, 1, 1>" in artifact.source_ir, (
+        f"expected known_block_size metadata in source IR:\n{artifact.source_ir}"
+    )
+
+    compiled_ir = artifact.ir
+    assert _extract_i64_metadata(compiled_ir, "max_flat_workgroup_size") == 128
+    assert _extract_i64_metadata(compiled_ir, "vgpr_spill_count") == 0
 
 
 @pytest.mark.parametrize(
