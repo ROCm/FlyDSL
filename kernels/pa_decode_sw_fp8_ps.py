@@ -613,16 +613,36 @@ def compile_pa_decode_ps(
                     # scale tensor layout: [num_blocks, num_kv_heads, kv_block_size, 1] in f32
                     # stride_ks_block = key_scale.stride(0), stride_ks_head = key_scale.stride(1)
                     scale_block_base = phys_block * stride_ks_block + kv_h * stride_ks_head
-                    # token base for this warp: tile_off + warp_id*64 + rowid*4 (thread-invariant)
-                    _kv_tok_base_pt = tile_token_offset_i32 + _kv_tok_thread_base
+                    # Each lane loads one token scale from the 16-token strip for this td,
+                    # then row-local ds_bpermute reconstructs the 4-token vector needed by MFMA.
+                    _scale_tok_base_pt = tile_token_offset_i32 + _k_tok_thread_base
+                    _scale_src_lane_base = rowid * arith.constant(20, type=T.i32)
                     k_scale_vecs = []
                     v_scale_vecs = []
                     for td in range_constexpr(TLOOP):
-                        tok_off = _kv_tok_base_pt + arith.constant(td * MFMA_N, type=T.i32)
-                        k_scale_vecs.append(buffer_ops.buffer_load(ks_rsrc, scale_block_base + tok_off,
-                                                                    vec_width=1, dtype=T.f32))
-                        v_scale_vecs.append(buffer_ops.buffer_load(vs_rsrc, scale_block_base + tok_off,
-                                                                    vec_width=1, dtype=T.f32))
+                        tok_off = _scale_tok_base_pt + arith.constant(td * MFMA_N, type=T.i32)
+                        k_scale_lane = buffer_ops.buffer_load(
+                            ks_rsrc, scale_block_base + tok_off, vec_width=1, dtype=T.f32
+                        )
+                        v_scale_lane = buffer_ops.buffer_load(
+                            vs_rsrc, scale_block_base + tok_off, vec_width=1, dtype=T.f32
+                        )
+                        k_scale_i32 = arith.bitcast(T.i32, k_scale_lane)
+                        v_scale_i32 = arith.bitcast(T.i32, v_scale_lane)
+                        k_scale_vals = []
+                        v_scale_vals = []
+                        for i in range_constexpr(4):
+                            bcast_addr = (_scale_src_lane_base + arith.constant(i, type=T.i32)) * c_four
+                            sk_i32 = rocdl.ds_bpermute(
+                                T.i32, arith.unwrap(bcast_addr), arith.unwrap(k_scale_i32)
+                            )
+                            sv_i32 = rocdl.ds_bpermute(
+                                T.i32, arith.unwrap(bcast_addr), arith.unwrap(v_scale_i32)
+                            )
+                            k_scale_vals.append(arith.bitcast(T.f32, sk_i32))
+                            v_scale_vals.append(arith.bitcast(T.f32, sv_i32))
+                        k_scale_vecs.append(vector.from_elements(T.f32x4, k_scale_vals))
+                        v_scale_vecs.append(vector.from_elements(T.f32x4, v_scale_vals))
                 else:
                     v_scale_vecs = None
 
@@ -642,7 +662,13 @@ def compile_pa_decode_ps(
                     v_results.append(vhe_data)
                     if per_token_kv:
                         # per-token: scale by (softmax_scale * q_scale) * k_scale_per_token
-                        d_out.append(acc * vector.broadcast(T.f32x4, k_scale_vecs[td] * _softmax_q_scale))
+                        d_out.append(
+                            acc
+                            * (
+                                k_scale_vecs[td]
+                                * vector.broadcast(T.f32x4, _softmax_q_scale)
+                            )
+                        )
                     else:
                         d_out.append(acc * vector.broadcast(T.f32x4, _scale))
 
@@ -679,10 +705,13 @@ def compile_pa_decode_ps(
                     v_max_warp = ZERO_F
                     for td in range_constexpr(TLOOP):
                         vs = v_scale_vecs[td]
-                        if needs_mask or query_length > 1:
-                            kv_tok = kv_tok_base + arith.constant(td * MFMA_N, type=T.i32)
-                            vs = arith.select(kv_tok < causal_bound, vs, ZERO_F)
-                        v_max_warp = v_max_warp.maximumf(vs)
+                        for i in range_constexpr(4):
+                            if needs_mask or query_length > 1:
+                                kv_tok = kv_tok_base + arith.constant(td * MFMA_N + i, type=T.i32)
+                                vs_i = vector.extract(vs, static_position=[i], dynamic_position=[])
+                                vs_i = arith.select(kv_tok < causal_bound, vs_i, ZERO_F)
+                                vs = vector.insert(vs_i, vs, static_position=[i], dynamic_position=[])
+                        v_max_warp = v_max_warp.maximumf(vector.reduction(T.f32, "maxnumf", vs))
                     for sh in [32, 16]:
                         v_max_warp = v_max_warp.maximumf(
                             v_max_warp.shuffle_xor(arith.constant(sh, type=T.i32), c_w))
@@ -767,7 +796,10 @@ def compile_pa_decode_ps(
                     v_correction = v_max_global / c_fp8_max * part_to_new
                     for td in range_constexpr(TLOOP):
                         # Apply per-tile softmax renormalization and normalize v_scale to FP8 range
-                        d_out[td] = d_out[td] * vector.broadcast(T.f32x4, prob_scale * v_scale_vecs[td] * norm_factor)
+                        d_out[td] = d_out[td] * (
+                            v_scale_vecs[td]
+                            * vector.broadcast(T.f32x4, prob_scale * norm_factor)
+                        )
                 else:
                     prob_scale = my_warp_rescale * part_to_new
                     v_correction = v_scale_val
@@ -1686,15 +1718,34 @@ def compile_pa_decode_ps_sw(
                 va_dws.append(vhe_data)
             if per_token_kv:
                 scale_block_base = phys_block_arg * stride_ks_block + kv_h * stride_ks_head
-                _kv_tok_base_pt = tile_token_offset_i32 + _kv_tok_thread_base
+                _scale_tok_base_pt = tile_token_offset_i32 + _k_tok_thread_base
+                _scale_src_lane_base = rowid * arith.constant(20, type=T.i32)
                 k_scale_vecs = []
                 v_scale_vecs = []
                 for td in range_constexpr(TLOOP):
-                    tok_off = _kv_tok_base_pt + arith.constant(td * MFMA_N, type=T.i32)
-                    k_scale_vecs.append(buffer_ops.buffer_load(ks_rsrc, scale_block_base + tok_off,
-                                                                vec_width=1, dtype=T.f32))
-                    v_scale_vecs.append(buffer_ops.buffer_load(vs_rsrc, scale_block_base + tok_off,
-                                                                vec_width=1, dtype=T.f32))
+                    tok_off = _scale_tok_base_pt + arith.constant(td * MFMA_N, type=T.i32)
+                    k_scale_lane = buffer_ops.buffer_load(
+                        ks_rsrc, scale_block_base + tok_off, vec_width=1, dtype=T.f32
+                    )
+                    v_scale_lane = buffer_ops.buffer_load(
+                        vs_rsrc, scale_block_base + tok_off, vec_width=1, dtype=T.f32
+                    )
+                    k_scale_i32 = arith.bitcast(T.i32, k_scale_lane)
+                    v_scale_i32 = arith.bitcast(T.i32, v_scale_lane)
+                    k_scale_vals = []
+                    v_scale_vals = []
+                    for i in range_constexpr(4):
+                        bcast_addr = (_scale_src_lane_base + arith.constant(i, type=T.i32)) * c_four
+                        sk_i32 = rocdl.ds_bpermute(
+                            T.i32, arith.unwrap(bcast_addr), arith.unwrap(k_scale_i32)
+                        )
+                        sv_i32 = rocdl.ds_bpermute(
+                            T.i32, arith.unwrap(bcast_addr), arith.unwrap(v_scale_i32)
+                        )
+                        k_scale_vals.append(arith.bitcast(T.f32, sk_i32))
+                        v_scale_vals.append(arith.bitcast(T.f32, sv_i32))
+                    k_scale_vecs.append(vector.from_elements(T.f32x4, k_scale_vals))
+                    v_scale_vecs.append(vector.from_elements(T.f32x4, v_scale_vals))
             else:
                 v_scale_vecs = None
             v_results = []
@@ -1710,7 +1761,13 @@ def compile_pa_decode_ps_sw(
                         T.f32x4, [k_ops[td][k_step], q_frags[k_step], acc, 0, 0, 0])
                 v_results.append(vhe_data)
                 if per_token_kv:
-                    d_out.append(acc * vector.broadcast(T.f32x4, k_scale_vecs[td] * _softmax_q_scale))
+                    d_out.append(
+                        acc
+                        * (
+                            k_scale_vecs[td]
+                            * vector.broadcast(T.f32x4, _softmax_q_scale)
+                        )
+                    )
                 else:
                     d_out.append(acc * vector.broadcast(T.f32x4, _scale))
             kv_tok_base = partition_start + _kv_tok_thread_base
@@ -1743,10 +1800,13 @@ def compile_pa_decode_ps_sw(
                 v_max_warp = ZERO_F
                 for td in range_constexpr(TLOOP):
                     vs = v_scale_vecs[td]
-                    kv_tok = kv_tok_base + arith.constant(td * MFMA_N, type=T.i32)
-                    vs = arith.select(kv_tok < causal_bound, vs, ZERO_F)
-                    vs = arith.select(kv_tok > seq_start, vs, ZERO_F)
-                    v_max_warp = v_max_warp.maximumf(vs)
+                    for i in range_constexpr(4):
+                        kv_tok = kv_tok_base + arith.constant(td * MFMA_N + i, type=T.i32)
+                        vs_i = vector.extract(vs, static_position=[i], dynamic_position=[])
+                        vs_i = arith.select(kv_tok < causal_bound, vs_i, ZERO_F)
+                        vs_i = arith.select(kv_tok > seq_start, vs_i, ZERO_F)
+                        vs = vector.insert(vs_i, vs, static_position=[i], dynamic_position=[])
+                    v_max_warp = v_max_warp.maximumf(vector.reduction(T.f32, "maxnumf", vs))
                 for sh in [32, 16]:
                     v_max_warp = v_max_warp.maximumf(
                         v_max_warp.shuffle_xor(arith.constant(sh, type=T.i32), c_w))
@@ -1798,7 +1858,10 @@ def compile_pa_decode_ps_sw(
                 prob_scale = my_warp_rescale
                 v_correction = v_max_global / c_fp8_max * part_to_new
                 for td in range_constexpr(TLOOP):
-                    d_out[td] = d_out[td] * vector.broadcast(T.f32x4, prob_scale * v_scale_vecs[td] * norm_factor)
+                    d_out[td] = d_out[td] * (
+                        v_scale_vecs[td]
+                        * vector.broadcast(T.f32x4, prob_scale * norm_factor)
+                    )
             else:
                 prob_scale = my_warp_rescale * part_to_new
                 v_correction = v_scale_val
@@ -1901,7 +1964,7 @@ def compile_pa_decode_ps_sw(
             qi_val = arith.select(_qi_raw < _c_ql_m1, _qi_raw, _c_ql_m1)
             qhi_pos = _lane_pair % arith.constant(query_group_size, type=T.i32)
             causal_bound = context_len + arith.constant(1 - query_length, type=T.i32) + qi_val
-            seq_start = causal_bound - arith.constant(sliding_window, type=T.i32)
+            seq_start = context_len - arith.constant(sliding_window, type=T.i32) + qi_val
 
             _lqh_pair_raw = local_qhead_idx + arith.constant(_g_off, type=T.i32)
             _lqh_pair = arith.select(_lqh_pair_raw < _c_total_pairs, _lqh_pair_raw, _c_pair_max)
