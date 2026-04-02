@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-
 _BASE_VERSION = "0.1.1"
 
 # FFM simulator compatibility shim (no-op outside simulator sessions).
