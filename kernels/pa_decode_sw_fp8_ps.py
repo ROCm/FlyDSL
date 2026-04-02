@@ -1374,8 +1374,9 @@ def pa_decode_ps_launch(
         context_partition_size = KV_BLOCK_SIZE  # 1024
 
         if max_context_partition_num == 0:
-            import triton
-            max_context_partition_num = triton.cdiv(sliding_window, context_partition_size) + 1
+            max_context_partition_num = (
+                (sliding_window + context_partition_size - 1) // context_partition_size
+            ) + 1
 
         if exp_sums is None:
             exp_sums = torch.empty(batch_size, num_kv_heads, max_context_partition_num, eqgs,
