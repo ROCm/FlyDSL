@@ -26,7 +26,7 @@ for _p in reversed(_PYTHON_CANDIDATES):
         sys.path.insert(0, _p)
 
 # Assuming the previous kernel code was saved here
-from kernels.masked_grouped_gemm import compile_masked_grouped_fp8_gemm
+from kernels.grouped_gemm_blockscale_masked import compile_masked_grouped_fp8_gemm
 from flydsl.runtime.device import get_rocm_arch
 from tests.test_common import run_perftest, verify_output
 from tests.utils import shuffle_weight
