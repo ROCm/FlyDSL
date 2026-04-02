@@ -333,14 +333,24 @@ def raw_ptr_buffer_load_lds(rsrc, lds_ptr, size, voffset, soffset, offset, aux, 
                _to_ir(soffset), _to_ir(offset), _to_ir(aux), **kw)
 
 
-def cvt_off_f32_i4(src_i32):
-    """gfx9xx: v_cvt_off_f32_i4 vdst, vsrc.
+def cvt_off_f32_i4(src_i32, byte_sel=None):
+    """gfx9xx: v_cvt_off_f32_i4 — convert low nibble (bits[3:0]) to f32.
 
-    Convert the least significant 4 bits (signed int4) of src_i32 to f32.
-    To extract other nibbles, shift src_i32 right before calling.
+    With byte_sel=0..3, uses SDWA to select the byte before conversion,
+    avoiding an explicit shift.  byte_sel=None uses the plain VOP1 form.
     """
     from ..._mlir.dialects import llvm as _llvm
     from ..._mlir import ir
+
+    if byte_sel is not None:
+        sel = ["BYTE_0", "BYTE_1", "BYTE_2", "BYTE_3"][int(byte_sel)]
+        return _llvm.inline_asm(
+            ir.F32Type.get(),
+            [_to_ir(src_i32)],
+            f"v_cvt_off_f32_i4_sdwa $0, $1 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:{sel}",
+            "=v,v",
+            has_side_effects=False,
+        )
     return _llvm.inline_asm(
         ir.F32Type.get(),
         [_to_ir(src_i32)],

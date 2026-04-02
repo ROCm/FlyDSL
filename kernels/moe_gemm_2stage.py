@@ -2579,39 +2579,73 @@ def compile_moe_gemm2(
                     k_main2_py = 0
     
                 c2_tile_k = arith.index(tile_k * 2)
+                c_tile_k_s2 = arith.index(tile_k)
                 pair_iters = k_main2_py // (int(tile_k) * 2)
-                for pair_i in range_constexpr(pair_iters):
-                    k_iv = arith.index(pair_i * (tile_k * 2))
-                    next_k1 = k_iv + tile_k
+
+                b_has_scales_s2 = is_int4_groupwise or is_int4_fp8_groupwise
+                _lk2 = 4 if b_has_scales_s2 else 2
+                _vbt2 = k_unroll * _lk2 * num_acc_n
+                _n_acc2 = m_repeat * num_acc_n
+                _p_b2 = _n_acc2
+                _p_a02 = _p_b2 + _vbt2
+
+                def _flatten_bt2(bt):
+                    flat = []
+                    for entry in bt:
+                        for lst in entry:
+                            flat.extend(lst if isinstance(lst, (list, tuple)) else [lst])
+                    return flat
+
+                def _unflatten_bt2(vals):
+                    bt, idx = [], 0
+                    for _ku in range_constexpr(k_unroll):
+                        entry = []
+                        for _li in range_constexpr(_lk2):
+                            entry.append(list(vals[idx:idx + num_acc_n]))
+                            idx += num_acc_n
+                        bt.append(tuple(entry))
+                    return bt
+
+                init_s2 = list(acc) + _flatten_bt2(b_cur) + list(a0_prefetch_pong)
+
+                for pair_iv, state in range(0, pair_iters, 1, init=init_s2):
+                    _ac = list(state[:_n_acc2])
+                    _bc = _unflatten_bt2(list(state[_p_b2:_p_a02]))
+                    _a0 = (state[_p_a02], state[_p_a02 + 1])
+
+                    k_iv = pair_iv * (c_tile_k_s2 + c_tile_k_s2)
+
+                    next_k1 = k_iv + c_tile_k_s2
                     x_regs_ping = load_x_tile(next_k1)
-                    b_ping = load_b_tile(next_k1)
-    
-                    acc, _ = compute_tile(acc, b_cur, lds_base_pong, a0_prefetch=a0_prefetch_pong)
-                    a0_prefetch_pong = None
+                    _bp = load_b_tile(next_k1)
+
+                    _ac, _ = compute_tile(_ac, _bc, lds_base_pong, a0_prefetch=_a0)
                     store_x_tile_to_lds(x_regs_ping, lds_base_ping)
                     hot_loop_scheduler()
                     gpu.barrier()
-    
-                    # Cross-tile prefetch for the ping tile we are about to compute.
-                    a0_prefetch_ping = lds_load_packs_k64(row_a_lds, col_offset_base_bytes, lds_base_ping)
-    
-                    next_k2 = k_iv + c2_tile_k
+
+                    _a0p = lds_load_packs_k64(row_a_lds, col_offset_base_bytes, lds_base_ping)
+
+                    next_k2 = k_iv + c_tile_k_s2 + c_tile_k_s2
                     x_regs_pong = load_x_tile(next_k2)
-                    b_next = load_b_tile(next_k2)
-    
-                    acc, _ = compute_tile(acc, b_ping, lds_base_ping, a0_prefetch=a0_prefetch_ping)
-                    a0_prefetch_ping = None
+                    _bn = load_b_tile(next_k2)
+
+                    _ac, _ = compute_tile(_ac, _bp, lds_base_ping, a0_prefetch=_a0p)
                     store_x_tile_to_lds(x_regs_pong, lds_base_pong)
                     hot_loop_scheduler()
                     gpu.barrier()
-    
-                    # Cross-tile prefetch for the next pong tile.
-                    a0_prefetch_pong = lds_load_packs_k64(row_a_lds, col_offset_base_bytes, lds_base_pong)
-    
-                    b_cur = b_next
-    
+
+                    _a0n = lds_load_packs_k64(row_a_lds, col_offset_base_bytes, lds_base_pong)
+
+                    loop_res2 = yield list(_ac) + _flatten_bt2(_bn) + list(_a0n)
+
+                SmemPtr._view_cache = None
+                if pair_iters > 0:
+                    acc = list(loop_res2[:_n_acc2])
+                    b_cur = _unflatten_bt2(list(loop_res2[_p_b2:_p_a02]))
+                    a0_prefetch_pong = (loop_res2[_p_a02], loop_res2[_p_a02 + 1])
+
                 if odd_k_tiles:
-                    # Tail: single remaining tile (already in `b_cur` / `lds_base_pong`).
                     acc, epilogue_pf = compute_tile(
                         acc,
                         b_cur,
@@ -2620,18 +2654,15 @@ def compile_moe_gemm2(
                         a0_prefetch=a0_prefetch_pong,
                     )
                 else:
-                    # Tail: 2 remaining tiles.
                     k_tail1 = k_in - tile_k
                     x_regs_ping = load_x_tile(k_tail1)
                     b_ping = load_b_tile(k_tail1)
-    
+
                     acc, _ = compute_tile(acc, b_cur, lds_base_pong, a0_prefetch=a0_prefetch_pong)
-                    a0_prefetch_pong = None
                     store_x_tile_to_lds(x_regs_ping, lds_base_ping)
                     hot_loop_scheduler()
                     gpu.barrier()
-    
-                    # Epilogue tile with sw prefetch.
+
                     a0_prefetch_ping = lds_load_packs_k64(row_a_lds, col_offset_base_bytes, lds_base_ping)
                     acc, epilogue_pf = compute_tile(
                         acc, b_ping, lds_base_ping, prefetch_epilogue=True, a0_prefetch=a0_prefetch_ping

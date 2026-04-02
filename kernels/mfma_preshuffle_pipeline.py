@@ -184,11 +184,13 @@ def load_b_raw_w4a16(
     lane_div_16: ir.Value,
     elem_type: ir.Type,
     kpack_bytes: int = 8,
+    use_dwordx2: bool = False,
 ):
-    """Phase 1 of W4A16 B load: issue buffer_load_dword, return raw packed i32.
+    """Phase 1 of W4A16 B load.
 
-    Same address calculation as the int4 unpack path in load_b_pack_k32
-    but using ku-based indexing for 2-phase latency hiding.
+    Default: issue buffer_load_dword (4B), return raw packed i32.
+    use_dwordx2=True: issue buffer_load_dwordx2 (8B = full kpack),
+    return (packed32_lo, packed32_hi) for 2 MFMA K-halves.
     """
     if kpack_bytes != 8:
         raise ValueError(f"W4A16 requires kpack_bytes=8, got {kpack_bytes!r}")
@@ -199,6 +201,25 @@ def load_b_raw_w4a16(
     c4_idx = fx.Index(4)
 
     k0_base = base_k // c64
+
+    if use_dwordx2:
+        k1_layout_offset = ku * 2
+        total_k1 = fx.Index(k1_layout_offset) + (lane_div_16 // c2_idx)
+        k0 = k0_base + (total_k1 // c4_idx)
+        k1_local = total_k1 % c4_idx
+
+        coord_pack = (n_blk, k0, k1_local, n_intra, fx.Index(0))
+        idx_pack = crd2idx(coord_pack, layout_b)
+
+        b8 = _buffer_load_vec(
+            buffer_ops, vector, b_rsrc, idx_pack,
+            elem_type=elem_type, vec_elems=8, elem_bytes=1, offset_in_bytes=True,
+        )
+        i32x2 = vector.bitcast(T.vec(2, T.i32), b8)
+        packed_lo = vector.extract(i32x2, static_position=[0], dynamic_position=[])
+        packed_hi = vector.extract(i32x2, static_position=[1], dynamic_position=[])
+        return (packed_lo, packed_hi)
+
     k1_layout_offset = ku * 2
     lane_div_32 = lane_div_16 // c2_idx
     total_k1 = fx.Index(k1_layout_offset) + lane_div_32
@@ -226,9 +247,10 @@ def load_b_raw_w4a16(
 def _int4_to_bf16x4_i64_gfx950(packed32, nibble_offsets, arith, vector, scale_val=None):
     """Convert 4 int4 nibbles to 4 bf16 packed as i64 using gfx950 instructions.
 
-    v_cvt_off_f32_i4 converts bits[3:0] to f32 as (signed_int4 / 16.0),
-    so we multiply by (16 * scale) to recover the true scaled value.
-    v_cvt_pk_bf16_f32 packs two f32 → 2×bf16.
+    Uses v_cvt_off_f32_i4_sdwa with byte_sel to avoid per-nibble shifts.
+    Even nibbles (0,2,4,6) → SDWA BYTE_0/1/2/3 on original src.
+    Odd nibbles (1,3,5,7)  → SDWA BYTE_0/1/2/3 on (src >> 4).
+    Only 1 shift total instead of 7.
     """
     from flydsl.expr import rocdl
     from flydsl._mlir.dialects._arith_ops_gen import MulFOp as _MulFOp
@@ -236,7 +258,6 @@ def _int4_to_bf16x4_i64_gfx950(packed32, nibble_offsets, arith, vector, scale_va
     _uw = _arith._to_raw
     _av = _arith.ArithValue
 
-    # v_cvt_off_f32_i4 outputs value/16, so effective_scale = 16 * scale (or just 16 if no scale)
     c16 = fx.Float32(16.0)
     if scale_val is not None:
         effective_scale = scale_val * c16
@@ -244,13 +265,14 @@ def _int4_to_bf16x4_i64_gfx950(packed32, nibble_offsets, arith, vector, scale_va
         effective_scale = c16
     raw_scale = _uw(effective_scale)
 
+    src_even = packed32
+    src_odd = packed32 >> fx.Int32(4)
+
     f32_vals = []
     for nib in nibble_offsets:
-        if nib == 0:
-            shifted = packed32
-        else:
-            shifted = packed32 >> fx.Int32(nib * 4)
-        v = rocdl.cvt_off_f32_i4(shifted)
+        byte_idx = nib // 2
+        src = src_odd if (nib % 2) else src_even
+        v = rocdl.cvt_off_f32_i4(src, byte_sel=byte_idx)
         v = _MulFOp(v, raw_scale).result
         f32_vals.append(v)
 
