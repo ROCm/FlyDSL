@@ -310,6 +310,13 @@ class IntTuple(BuiltinDslType):
             raise ValueError("IntTuple is not a static leaf")
         return self.type.get_static_leaf_int
 
+    def to_py_value(self):
+        if not self.is_static:
+            raise ValueError("IntTuple is not static")
+        if self.is_leaf:
+            return self.get_static_leaf_int
+        return tuple(get_(self, i).to_py_value() for i in range(self.rank))
+
     @traced_op
     def __getitem__(self, mode, loc=None, ip=None):
         if isinstance(mode, int):
