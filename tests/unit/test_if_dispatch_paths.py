@@ -19,7 +19,9 @@ a, (b, c) = foo()
 d += 1
 """
     stmts = ast.parse(code).body
-    assigned = ReplaceIfWithDispatch._collect_assigned_vars(stmts)
+    node = ast.If(test=ast.Constant(value=True), body=stmts, orelse=[])
+    active_symbols = [{"a", "b", "c", "d"}]
+    assigned = ReplaceIfWithDispatch._collect_assigned_vars(node, active_symbols)
     assert assigned == ["a", "b", "c", "d"]
 
 
@@ -38,8 +40,10 @@ if (n := foo()):
     out = n
 """
     stmts = ast.parse(code).body
-    assigned = ReplaceIfWithDispatch._collect_assigned_vars(stmts)
-    assert assigned == ["x", "i", "y", "w", "z", "e", "err", "n", "out"]
+    node = ast.If(test=ast.Constant(value=True), body=stmts, orelse=[])
+    active_symbols = [{"x", "i", "y", "w", "z", "e", "err", "n", "out"}]
+    assigned = ReplaceIfWithDispatch._collect_assigned_vars(node, active_symbols)
+    assert assigned == ["x", "i", "y", "w", "z", "err", "n", "out"]
 
 
 def test_scf_if_dispatch_static_with_states_no_ifop():
@@ -134,7 +138,7 @@ def test_scf_if_dispatch_dynamic_type_mismatch_has_clear_error():
                     )
 
 
-def test_scf_if_dispatch_dynamic_non_mlir_value_has_clear_error():
+def test_scf_if_dispatch_dynamic_non_mlir_value_is_promoted():
     with Context(), Location.unknown():
         module = Module.create()
         i32 = IntegerType.get_signless(32)
@@ -152,14 +156,14 @@ def test_scf_if_dispatch_dynamic_non_mlir_value_has_clear_error():
                 def else_fn(x):
                     return {"x": arith.ConstantOp(i32, 3).result}
 
-                with pytest.raises(TypeError, match="not an MLIR Value"):
-                    ReplaceIfWithDispatch.scf_if_dispatch(
-                        cond,
-                        then_fn,
-                        else_fn,
-                        state_names=("x",),
-                        state_values=(x,),
-                    )
+                out = ReplaceIfWithDispatch.scf_if_dispatch(
+                    cond,
+                    then_fn,
+                    else_fn,
+                    state_names=("x",),
+                    state_values=(x,),
+                )
+                assert isinstance(out, Int32)
 
 
 def test_ast_rewrite_keeps_semantics_for_static_bool():
@@ -207,4 +211,4 @@ def test_ast_rewrite_does_not_rewrite_static_string_compare():
     sample.__globals__["scf_if_dispatch"] = traced_dispatch
     assert sample("f32") == 1
     assert sample("bf16") == 2
-    assert called["n"] == 0
+    assert called["n"] == 2

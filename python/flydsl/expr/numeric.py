@@ -217,6 +217,11 @@ def _unwrap_value(value):
     """Convert FlyDSL wrappers to raw MLIR values when possible."""
     if isinstance(value, ir.Value):
         return value
+    if isinstance(value, (bool, int, float)):
+        try:
+            return as_numeric(value).ir_value()
+        except Exception:
+            return value
     if hasattr(value, "__fly_values__"):
         values = value.__fly_values__()
         if len(values) == 1:

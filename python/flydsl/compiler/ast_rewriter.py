@@ -2,6 +2,7 @@
 # Copyright (c) 2025 FlyDSL Project Contributors
 
 import ast
+import contextlib
 import difflib
 import inspect
 import types
@@ -72,7 +73,7 @@ class ASTRewriter:
             orig_code = ast.unparse(module) if env.debug.ast_diff else None
             func_node = module.body[0]
             rewriter = transformer_ctor(context=context, first_lineno=f.__code__.co_firstlineno - 1)
-            func_node = rewriter.generic_visit(func_node)
+            func_node = rewriter.visit(func_node)
             if env.debug.ast_diff:
                 new_code = ast.unparse(func_node)
                 diff = list(
@@ -126,17 +127,135 @@ class ASTRewriter:
 _ASTREWRITE_MARKER = "_flydsl_ast_rewriter_generated_"
 
 
+class SymbolScopeTracker:
+    def __init__(self):
+        self.scopes = []
+        self.callables = []
+
+    def record_symbol(self, name: str):
+        if not self.scopes:
+            return
+        if name == "_":
+            return
+        self.scopes[-1].add(name)
+
+    def record_callable(self, name: str):
+        if not self.callables:
+            return
+        self.callables[-1].add(name)
+
+    def snapshot_symbol_scopes(self):
+        return self.scopes.copy()
+
+    def snapshot_callable_scopes(self):
+        return self.callables.copy()
+
+    @contextlib.contextmanager
+    def function_scope(self):
+        self.scopes.append(set())
+        self.callables.append(set())
+        try:
+            yield
+        finally:
+            self.scopes.pop()
+            self.callables.pop()
+
+    @contextlib.contextmanager
+    def control_flow_scope(self):
+        self.scopes.append(set())
+        try:
+            yield
+        finally:
+            self.scopes.pop()
+
+
 class Transformer(ast.NodeTransformer):
     def __init__(self, context, first_lineno):
         super().__init__()
         self.context = context
         self.first_lineno = first_lineno
+        self.symbol_scopes = SymbolScopeTracker()
+
+    def _record_target_symbols(self, target):
+        if isinstance(target, ast.Name):
+            self.symbol_scopes.record_symbol(target.id)
+        elif isinstance(target, (ast.Tuple, ast.List)):
+            for t in target.elts:
+                self._record_target_symbols(t)
+        elif isinstance(target, ast.Starred):
+            self._record_target_symbols(target.value)
+
+    def _visit_stmt_block(self, stmts):
+        new_stmts = []
+        for stmt in stmts:
+            transformed = self.visit(stmt)
+            if isinstance(transformed, list):
+                new_stmts.extend(transformed)
+            else:
+                new_stmts.append(transformed)
+        return new_stmts
 
     def visit_FunctionDef(self, node: ast.FunctionDef):
         if getattr(node, _ASTREWRITE_MARKER, False):
             return node
-        node = self.generic_visit(node)
+
+        with self.symbol_scopes.function_scope():
+            for arg in node.args.posonlyargs:
+                self.symbol_scopes.record_symbol(arg.arg)
+            for arg in node.args.args:
+                self.symbol_scopes.record_symbol(arg.arg)
+            for arg in node.args.kwonlyargs:
+                self.symbol_scopes.record_symbol(arg.arg)
+            node = self.generic_visit(node)
+
         return node
+
+    def visit_Assign(self, node: ast.Assign):
+        for target in node.targets:
+            self._record_target_symbols(target)
+        return self.generic_visit(node)
+
+    def visit_AugAssign(self, node: ast.AugAssign):
+        self._record_target_symbols(node.target)
+        return self.generic_visit(node)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign):
+        self._record_target_symbols(node.target)
+        return self.generic_visit(node)
+
+    def visit_For(self, node: ast.For):
+        self._record_target_symbols(node.target)
+        node.iter = self.visit(node.iter)
+        with self.symbol_scopes.control_flow_scope():
+            node.body = self._visit_stmt_block(node.body)
+        if node.orelse:
+            with self.symbol_scopes.control_flow_scope():
+                node.orelse = self._visit_stmt_block(node.orelse)
+        return node
+
+    def visit_If(self, node: ast.If):
+        node.test = self.visit(node.test)
+        with self.symbol_scopes.control_flow_scope():
+            node.body = self._visit_stmt_block(node.body)
+        if node.orelse:
+            with self.symbol_scopes.control_flow_scope():
+                node.orelse = self._visit_stmt_block(node.orelse)
+        return node
+
+    def visit_While(self, node: ast.While):
+        node.test = self.visit(node.test)
+        with self.symbol_scopes.control_flow_scope():
+            node.body = self._visit_stmt_block(node.body)
+        if node.orelse:
+            with self.symbol_scopes.control_flow_scope():
+                node.orelse = self._visit_stmt_block(node.orelse)
+        return node
+
+    def visit_With(self, node: ast.With):
+        for item in node.items:
+            if item.optional_vars is not None:
+                self._record_target_symbols(item.optional_vars)
+        return self.generic_visit(node)
 
 
 @ASTRewriter.register
@@ -222,10 +341,6 @@ class RewriteBoolOps(Transformer):
 @ASTRewriter.register
 class ReplaceIfWithDispatch(Transformer):
     _counter = 0
-
-    def __init__(self, context, first_lineno):
-        super().__init__(context=context, first_lineno=first_lineno)
-        self._visible_name_stack = []
 
     @staticmethod
     def _is_dynamic(cond):
@@ -340,8 +455,6 @@ class ReplaceIfWithDispatch(Transformer):
         then_fn,
         else_fn=None,
         *,
-        arg_names=(),
-        arg_values=(),
         result_names=(),
         result_values=(),
         state_names=(),
@@ -349,19 +462,10 @@ class ReplaceIfWithDispatch(Transformer):
         auto_else=False,
     ):
         # Backward compatibility: old call-sites pass state_* only.
-        if not arg_names and state_names:
-            arg_names = state_names
-        if not arg_values and state_values:
-            arg_values = state_values
-        if not result_names:
-            result_names = arg_names
-        if not result_values and result_names:
-            arg_map = {name: value for name, value in zip(arg_names, arg_values)}
-            result_values = tuple(arg_map.get(name, None) for name in result_names)
-
-        arg_names, arg_values = ReplaceIfWithDispatch._normalize_named_values(
-            arg_names, arg_values, "arg_names", "arg_values"
-        )
+        if not result_names and state_names:
+            result_names = state_names
+        if not result_values and state_values:
+            result_values = state_values
         result_names, result_values = ReplaceIfWithDispatch._normalize_named_values(
             result_names, result_values, "result_names", "result_values"
         )
@@ -379,7 +483,7 @@ class ReplaceIfWithDispatch(Transformer):
             taken = then_fn if cond else else_fn
             if taken is None:
                 return ReplaceIfWithDispatch._pack_named_values(result_names, result_values)
-            result = ReplaceIfWithDispatch._call_branch(taken, effective_result_names, arg_values)
+            result = ReplaceIfWithDispatch._call_branch(taken, effective_result_names, result_values)
             if not effective_result_names:
                 return ReplaceIfWithDispatch._pack_named_values(result_names, result_values)
             partial_values = ReplaceIfWithDispatch._normalize_branch_result(
@@ -398,13 +502,13 @@ class ReplaceIfWithDispatch(Transformer):
             has_else = else_fn is not None
             if_op = scf.IfOp(cond_i1, [], has_else=has_else, loc=ir.Location.unknown())
             with ir.InsertionPoint(if_op.regions[0].blocks[0]):
-                ReplaceIfWithDispatch._call_branch(then_fn, effective_result_names, arg_values)
+                ReplaceIfWithDispatch._call_branch(then_fn, effective_result_names, result_values)
                 scf.YieldOp([])
             if has_else:
                 if len(if_op.regions[1].blocks) == 0:
                     if_op.regions[1].blocks.append(*[])
                 with ir.InsertionPoint(if_op.regions[1].blocks[0]):
-                    ReplaceIfWithDispatch._call_branch(else_fn, effective_result_names, arg_values)
+                    ReplaceIfWithDispatch._call_branch(else_fn, effective_result_names, result_values)
                     scf.YieldOp([])
             return ReplaceIfWithDispatch._pack_named_values(result_names, result_values)
 
@@ -425,7 +529,7 @@ class ReplaceIfWithDispatch(Transformer):
         if_op = scf.IfOp(cond_i1, result_types, has_else=True, loc=ir.Location.unknown())
 
         with ir.InsertionPoint(if_op.regions[0].blocks[0]):
-            then_result = ReplaceIfWithDispatch._call_branch(then_fn, effective_result_names, arg_values)
+            then_result = ReplaceIfWithDispatch._call_branch(then_fn, effective_result_names, result_values)
             then_values = ReplaceIfWithDispatch._normalize_branch_result(
                 then_result, effective_result_names, effective_result_map, "then-branch"
             )
@@ -441,7 +545,7 @@ class ReplaceIfWithDispatch(Transformer):
         if len(if_op.regions[1].blocks) == 0:
             if_op.regions[1].blocks.append(*[])
         with ir.InsertionPoint(if_op.regions[1].blocks[0]):
-            else_result = ReplaceIfWithDispatch._call_branch(else_fn, effective_result_names, arg_values)
+            else_result = ReplaceIfWithDispatch._call_branch(else_fn, effective_result_names, result_values)
             else_values = ReplaceIfWithDispatch._normalize_branch_result(
                 else_result, effective_result_names, effective_result_map, "else-branch"
             )
@@ -505,6 +609,8 @@ class ReplaceIfWithDispatch(Transformer):
             if isinstance(node, ast.Name):
                 # Plain names can be static symbols (constexpr params, local bools, etc.).
                 return None
+            if isinstance(node, ast.Compare):
+                return True
             if isinstance(node, ast.Call):
                 func = node.func
                 if isinstance(func, ast.Name) and func.id in ReplaceIfWithDispatch._REWRITE_HELPER_NAMES:
@@ -530,109 +636,74 @@ class ReplaceIfWithDispatch(Transformer):
         return _visit(test_node)
 
     @staticmethod
-    def _collect_assigned_vars(stmts):
-        assigned = []
+    def _collect_assigned_vars(node: ast.If, active_symbols):
+        write_args = []
+        invoked_args = []
 
-        def add_name(name):
-            if isinstance(name, str) and name not in assigned:
-                assigned.append(name)
+        def add_unique(items, name):
+            if isinstance(name, str) and name not in items:
+                items.append(name)
 
-        class AssignCollector(ast.NodeVisitor):
-            def _collect_target(self, target):
-                if isinstance(target, ast.Name):
-                    add_name(target.id)
-                elif isinstance(target, (ast.Tuple, ast.List)):
-                    for elt in target.elts:
-                        self._collect_target(elt)
-                elif isinstance(target, ast.Starred):
-                    self._collect_target(target.value)
-                elif isinstance(target, ast.Subscript):
-                    self._collect_target(target.value)
-                elif isinstance(target, ast.Attribute):
-                    if isinstance(target.value, ast.Name):
-                        add_name(target.value.id)
+        def in_active_symbols(name):
+            return any(name in symbol_scope for symbol_scope in active_symbols)
+
+        class RegionAnalyzer(ast.NodeVisitor):
+            force_store = False
+
+            @staticmethod
+            def _get_call_base(func_node):
+                if isinstance(func_node, ast.Attribute):
+                    if isinstance(func_node.value, ast.Attribute):
+                        return RegionAnalyzer._get_call_base(func_node.value)
+                    if isinstance(func_node.value, ast.Name):
+                        return func_node.value.id
+                return None
+
+            def visit_Name(self, node):
+                if isinstance(node.ctx, ast.Store) or self.force_store:
+                    add_unique(write_args, node.id)
+
+            def visit_Subscript(self, node):
+                if isinstance(node.ctx, ast.Store):
+                    self.force_store = True
+                    self.visit(node.value)
+                    self.force_store = False
+                    self.visit(node.slice)
+                else:
+                    self.generic_visit(node)
 
             def visit_Assign(self, node):
+                self.force_store = True
                 for target in node.targets:
-                    self._collect_target(target)
+                    self.visit(target)
+                self.force_store = False
                 self.visit(node.value)
 
             def visit_AugAssign(self, node):
-                self._collect_target(node.target)
+                self.force_store = True
+                self.visit(node.target)
+                self.force_store = False
                 self.visit(node.value)
-
-            def visit_AnnAssign(self, node):
-                self._collect_target(node.target)
-                if node.value is not None:
-                    self.visit(node.value)
-
-            def visit_For(self, node):
-                self._collect_target(node.target)
-                self.generic_visit(node)
-
-            def visit_AsyncFor(self, node):
-                self._collect_target(node.target)
-                self.generic_visit(node)
-
-            def visit_With(self, node):
-                for item in node.items:
-                    if item.optional_vars is not None:
-                        self._collect_target(item.optional_vars)
-                self.generic_visit(node)
-
-            def visit_AsyncWith(self, node):
-                for item in node.items:
-                    if item.optional_vars is not None:
-                        self._collect_target(item.optional_vars)
-                self.generic_visit(node)
-
-            def visit_ExceptHandler(self, node):
-                if node.name:
-                    add_name(node.name)
-                self.generic_visit(node)
-
-            def visit_NamedExpr(self, node):
-                self._collect_target(node.target)
-                self.visit(node.value)
-
-            def visit_MatchAs(self, node):
-                if node.name:
-                    add_name(node.name)
-                self.generic_visit(node)
-
-            def visit_MatchStar(self, node):
-                if node.name:
-                    add_name(node.name)
-                self.generic_visit(node)
-
-            def visit_MatchMapping(self, node):
-                if node.rest:
-                    add_name(node.rest)
-                self.generic_visit(node)
 
             def visit_Call(self, node):
-                if isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name):
-                    # Only treat typical mutating methods as writes.
-                    if node.func.attr in {
-                        "append",
-                        "extend",
-                        "insert",
-                        "pop",
-                        "remove",
-                        "clear",
-                        "sort",
-                        "reverse",
-                        "add",
-                        "discard",
-                        "update",
-                        "setdefault",
-                    }:
-                        add_name(node.func.value.id)
+                base_name = RegionAnalyzer._get_call_base(node.func)
+                if base_name is not None and base_name != "self":
+                    add_unique(invoked_args, base_name)
+
                 self.generic_visit(node)
 
-        collector = AssignCollector()
-        collector.visit(ast.Module(body=stmts, type_ignores=[]))
-        return assigned
+        analyzer = RegionAnalyzer()
+        analyzer.visit(ast.Module(body=node.body, type_ignores=[]))
+        if node.orelse:
+            analyzer.visit(ast.Module(body=node.orelse, type_ignores=[]))
+
+        invoked_args = [name for name in invoked_args if name not in write_args]
+        write_args = [name for name in write_args if in_active_symbols(name)]
+        invoked_args = [name for name in invoked_args if in_active_symbols(name)]
+        print(f"write_args: {write_args}")
+        print(f"invoked_args: {invoked_args}")
+        print(f"active_symbols: {active_symbols}")
+        return write_args + invoked_args
 
     @staticmethod
     def _state_value_expr(name):
@@ -646,232 +717,138 @@ class ReplaceIfWithDispatch(Transformer):
             keywords=[],
         )
 
-    @staticmethod
-    def _collect_defined_names(stmt):
-        defined = []
-
-        def add_name(name):
-            if isinstance(name, str) and name not in defined:
-                defined.append(name)
-
-        class DefCollector(ast.NodeVisitor):
-            def _collect_target(self, target):
-                if isinstance(target, ast.Name):
-                    add_name(target.id)
-                elif isinstance(target, (ast.Tuple, ast.List)):
-                    for elt in target.elts:
-                        self._collect_target(elt)
-                elif isinstance(target, ast.Starred):
-                    self._collect_target(target.value)
-
-            def visit_Assign(self, node):
-                for target in node.targets:
-                    self._collect_target(target)
-
-            def visit_AugAssign(self, node):
-                self._collect_target(node.target)
-
-            def visit_AnnAssign(self, node):
-                self._collect_target(node.target)
-
-            def visit_For(self, node):
-                self._collect_target(node.target)
-
-            def visit_AsyncFor(self, node):
-                self._collect_target(node.target)
-
-            def visit_With(self, node):
-                for item in node.items:
-                    if item.optional_vars is not None:
-                        self._collect_target(item.optional_vars)
-
-            def visit_AsyncWith(self, node):
-                for item in node.items:
-                    if item.optional_vars is not None:
-                        self._collect_target(item.optional_vars)
-
-            def visit_ExceptHandler(self, node):
-                if node.name:
-                    add_name(node.name)
-
-            def visit_NamedExpr(self, node):
-                self._collect_target(node.target)
-
-        DefCollector().visit(stmt)
-        return defined
-
-    def visit_FunctionDef(self, node: ast.FunctionDef):
-        if getattr(node, _ASTREWRITE_MARKER, False):
-            return node
-
-        visible = {arg.arg for arg in node.args.posonlyargs + node.args.args + node.args.kwonlyargs}
-        self._visible_name_stack.append(visible)
-        new_body = []
-        try:
-            for stmt in node.body:
-                transformed = self.visit(stmt)
-                if isinstance(transformed, list):
-                    new_body.extend(transformed)
-                else:
-                    new_body.append(transformed)
-                for name in self._collect_defined_names(stmt):
-                    visible.add(name)
-        finally:
-            self._visible_name_stack.pop()
-
-        node.body = new_body
-        return node
-
     def visit_If(self, node: ast.If) -> List[ast.AST]:
+        active_symbols_before_if = self.symbol_scopes.snapshot_symbol_scopes()
         if _is_constexpr(node.test):
             node.test = _unwrap_constexpr(node.test)
-            node = self.generic_visit(node)
+            node = super().visit_If(node)
             return node
         if not self._could_be_dynamic(node.test):
-            node = self.generic_visit(node)
+            node = super().visit_If(node)
             return node
-        node = self.generic_visit(node)
-        uid = ReplaceIfWithDispatch._counter
-        ReplaceIfWithDispatch._counter += 1
+        with self.symbol_scopes.control_flow_scope():
+            node.test = self.visit(node.test)
+            with self.symbol_scopes.control_flow_scope():
+                node.body = self._visit_stmt_block(node.body)
+            if node.orelse:
+                with self.symbol_scopes.control_flow_scope():
+                    node.orelse = self._visit_stmt_block(node.orelse)
+            uid = ReplaceIfWithDispatch._counter
+            ReplaceIfWithDispatch._counter += 1
 
-        then_name = f"__then_{uid}"
-        then_vars = self._collect_assigned_vars(node.body)
-        else_vars = self._collect_assigned_vars(node.orelse)
-        arg_names = list(then_vars)
-        for var in else_vars:
-            if var not in arg_names:
-                arg_names.append(var)
+            then_name = f"__then_{uid}"
+            result_names = self._collect_assigned_vars(node, active_symbols_before_if)
 
-        # result_names: only carry variables visible before this if.
-        result_names = list(arg_names)
-        if self._visible_name_stack:
-            visible = self._visible_name_stack[-1]
-            result_names = [name for name in result_names if name in visible]
+            fn_args = [ast.arg(arg="__ret_names", annotation=None)] + [ast.arg(arg=v, annotation=None) for v in result_names]
 
-        fn_args = [ast.arg(arg="__ret_names", annotation=None)] + [ast.arg(arg=v, annotation=None) for v in arg_names]
-        def _state_return_node():
-            return ast.Return(
-                value=ast.Call(
-                    func=ast.Name(id="scf_if_collect_results", ctx=ast.Load()),
-                    args=[
-                        ast.Name(id="__ret_names", ctx=ast.Load()),
-                        ast.Call(func=ast.Name(id="locals", ctx=ast.Load()), args=[], keywords=[]),
-                    ],
-                    keywords=[],
+            def _state_return_node():
+                return ast.Return(
+                    value=ast.Call(
+                        func=ast.Name(id="scf_if_collect_results", ctx=ast.Load()),
+                        args=[
+                            ast.Name(id="__ret_names", ctx=ast.Load()),
+                            ast.Call(func=ast.Name(id="locals", ctx=ast.Load()), args=[], keywords=[]),
+                        ],
+                        keywords=[],
+                    )
                 )
-            )
-        then_func = ast.FunctionDef(
-            name=then_name,
-            args=ast.arguments(posonlyargs=[], args=fn_args, kwonlyargs=[], kw_defaults=[], defaults=[]),
-            body=list(node.body) + ([_state_return_node()] if result_names else []),
-            decorator_list=[],
-            type_params=[],
-        )
-        setattr(then_func, _ASTREWRITE_MARKER, True)
-        then_func = ast.copy_location(then_func, node)
-        then_func = ast.fix_missing_locations(then_func)
 
-        dispatch_args = [node.test, ast.Name(then_name, ctx=ast.Load())]
-        dispatch_keywords = []
-        if arg_names:
-            dispatch_keywords.extend(
-                [
-                    ast.keyword(
-                        arg="arg_names",
-                        value=ast.Tuple(elts=[ast.Constant(value=v) for v in arg_names], ctx=ast.Load()),
-                    ),
-                    ast.keyword(
-                        arg="arg_values",
-                        value=ast.Tuple(
-                            elts=[self._state_value_expr(v) for v in arg_names],
-                            ctx=ast.Load(),
-                        ),
-                    ),
-                ]
-            )
-        if result_names:
-            dispatch_keywords.extend(
-                [
-                    ast.keyword(
-                        arg="result_names",
-                        value=ast.Tuple(elts=[ast.Constant(value=v) for v in result_names], ctx=ast.Load()),
-                    ),
-                    ast.keyword(
-                        arg="result_values",
-                        value=ast.Tuple(
-                            elts=[self._state_value_expr(v) for v in result_names],
-                            ctx=ast.Load(),
-                        ),
-                    ),
-                ]
-            )
-        result = [then_func]
-
-        else_name = None
-        synthesized_else = False
-        if node.orelse:
-            else_name = f"__else_{uid}"
-            else_func = ast.FunctionDef(
-                name=else_name,
-                args=ast.arguments(
-                    posonlyargs=[],
-                    args=[ast.arg(arg="__ret_names", annotation=None)] + [ast.arg(arg=v, annotation=None) for v in arg_names],
-                    kwonlyargs=[],
-                    kw_defaults=[],
-                    defaults=[],
-                ),
-                body=list(node.orelse) + ([_state_return_node()] if result_names else []),
+            then_func = ast.FunctionDef(
+                name=then_name,
+                args=ast.arguments(posonlyargs=[], args=fn_args, kwonlyargs=[], kw_defaults=[], defaults=[]),
+                body=list(node.body) + ([_state_return_node()] if result_names else []),
                 decorator_list=[],
                 type_params=[],
             )
-            setattr(else_func, _ASTREWRITE_MARKER, True)
-            else_func = ast.copy_location(else_func, node)
-            else_func = ast.fix_missing_locations(else_func)
-            dispatch_args.append(ast.Name(else_name, ctx=ast.Load()))
-            result.append(else_func)
-        elif result_names:
-            else_name = f"__else_{uid}"
-            synthesized_else = True
-            else_func = ast.FunctionDef(
-                name=else_name,
-                args=ast.arguments(
-                    posonlyargs=[],
-                    args=[ast.arg(arg="__ret_names", annotation=None)] + [ast.arg(arg=v, annotation=None) for v in arg_names],
-                    kwonlyargs=[],
-                    kw_defaults=[],
-                    defaults=[],
-                ),
-                body=[_state_return_node()],
-                decorator_list=[],
-                type_params=[],
+            setattr(then_func, _ASTREWRITE_MARKER, True)
+            then_func = ast.copy_location(then_func, node)
+            then_func = ast.fix_missing_locations(then_func)
+
+            dispatch_args = [node.test, ast.Name(then_name, ctx=ast.Load())]
+            dispatch_keywords = []
+            if result_names:
+                dispatch_keywords.extend(
+                    [
+                        ast.keyword(
+                            arg="result_names",
+                            value=ast.Tuple(elts=[ast.Constant(value=v) for v in result_names], ctx=ast.Load()),
+                        ),
+                        ast.keyword(
+                            arg="result_values",
+                            value=ast.Tuple(
+                                elts=[self._state_value_expr(v) for v in result_names],
+                                ctx=ast.Load(),
+                            ),
+                        ),
+                    ]
+                )
+            result = [then_func]
+
+            else_name = None
+            synthesized_else = False
+            if node.orelse:
+                else_name = f"__else_{uid}"
+                else_func = ast.FunctionDef(
+                    name=else_name,
+                    args=ast.arguments(
+                        posonlyargs=[],
+                        args=[ast.arg(arg="__ret_names", annotation=None)] + [ast.arg(arg=v, annotation=None) for v in result_names],
+                        kwonlyargs=[],
+                        kw_defaults=[],
+                        defaults=[],
+                    ),
+                    body=list(node.orelse) + ([_state_return_node()] if result_names else []),
+                    decorator_list=[],
+                    type_params=[],
+                )
+                setattr(else_func, _ASTREWRITE_MARKER, True)
+                else_func = ast.copy_location(else_func, node)
+                else_func = ast.fix_missing_locations(else_func)
+                dispatch_args.append(ast.Name(else_name, ctx=ast.Load()))
+                result.append(else_func)
+            elif result_names:
+                else_name = f"__else_{uid}"
+                synthesized_else = True
+                else_func = ast.FunctionDef(
+                    name=else_name,
+                    args=ast.arguments(
+                        posonlyargs=[],
+                        args=[ast.arg(arg="__ret_names", annotation=None)] + [ast.arg(arg=v, annotation=None) for v in result_names],
+                        kwonlyargs=[],
+                        kw_defaults=[],
+                        defaults=[],
+                    ),
+                    body=[_state_return_node()],
+                    decorator_list=[],
+                    type_params=[],
+                )
+                setattr(else_func, _ASTREWRITE_MARKER, True)
+                else_func = ast.copy_location(else_func, node)
+                else_func = ast.fix_missing_locations(else_func)
+                dispatch_args.append(ast.Name(else_name, ctx=ast.Load()))
+                result.append(else_func)
+
+            if synthesized_else:
+                dispatch_keywords.append(ast.keyword(arg="auto_else", value=ast.Constant(value=True)))
+
+            dispatch_value = ast.Call(
+                func=ast.Name("scf_if_dispatch", ctx=ast.Load()),
+                args=dispatch_args,
+                keywords=dispatch_keywords,
             )
-            setattr(else_func, _ASTREWRITE_MARKER, True)
-            else_func = ast.copy_location(else_func, node)
-            else_func = ast.fix_missing_locations(else_func)
-            dispatch_args.append(ast.Name(else_name, ctx=ast.Load()))
-            result.append(else_func)
-
-        if synthesized_else:
-            dispatch_keywords.append(ast.keyword(arg="auto_else", value=ast.Constant(value=True)))
-
-        dispatch_value = ast.Call(
-            func=ast.Name("scf_if_dispatch", ctx=ast.Load()),
-            args=dispatch_args,
-            keywords=dispatch_keywords,
-        )
-        if result_names and else_name is not None:
-            if len(result_names) == 1:
-                target = ast.Name(id=result_names[0], ctx=ast.Store())
+            if result_names and else_name is not None:
+                if len(result_names) == 1:
+                    target = ast.Name(id=result_names[0], ctx=ast.Store())
+                else:
+                    target = ast.Tuple(elts=[ast.Name(id=v, ctx=ast.Store()) for v in result_names], ctx=ast.Store())
+                dispatch_stmt = ast.Assign(targets=[target], value=dispatch_value)
             else:
-                target = ast.Tuple(elts=[ast.Name(id=v, ctx=ast.Store()) for v in result_names], ctx=ast.Store())
-            dispatch_stmt = ast.Assign(targets=[target], value=dispatch_value)
-        else:
-            dispatch_stmt = ast.Expr(value=dispatch_value)
-        dispatch_stmt = ast.copy_location(dispatch_stmt, node)
-        dispatch_stmt = ast.fix_missing_locations(dispatch_stmt)
-        result.append(dispatch_stmt)
+                dispatch_stmt = ast.Expr(value=dispatch_value)
+            dispatch_stmt = ast.copy_location(dispatch_stmt, node)
+            dispatch_stmt = ast.fix_missing_locations(dispatch_stmt)
+            result.append(dispatch_stmt)
 
-        return result
+            return result
 
 
 @ASTRewriter.register
@@ -949,9 +926,16 @@ class InsertEmptyYieldForSCFFor(Transformer):
             node.iter.func = ast.Name(id="scf_range", ctx=ast.Load())
         line = ast.dump(node.iter)
         if "for_" in line or "scf.for_" in line or "scf_range" in line:
-            node = self.generic_visit(node)
+            node.iter = self.visit(node.iter)
+            with self.symbol_scopes.control_flow_scope():
+                if isinstance(node.target, ast.Name):
+                    self.symbol_scopes.record_symbol(node.target.id)
+                node.body = self._visit_stmt_block(node.body)
+            if node.orelse:
+                with self.symbol_scopes.control_flow_scope():
+                    node.orelse = self._visit_stmt_block(node.orelse)
             new_yield = ast.Expr(ast.Yield(value=None))
-            if not self._is_yield(node.body[-1]):
+            if node.body and not self._is_yield(node.body[-1]):
                 last_statement = node.body[-1]
                 assert last_statement.end_lineno is not None, (
                     f"last_statement {ast.unparse(last_statement)} must have end_lineno"
@@ -1045,37 +1029,38 @@ class CanonicalizeWhile(Transformer):
     def visit_While(self, node: ast.While) -> List[ast.AST]:
         if _is_constexpr(node.test):
             node.test = _unwrap_constexpr(node.test)
-            node = self.generic_visit(node)
+            node = super().visit_While(node)
             return node
-        node = self.generic_visit(node)
-        if isinstance(node.test, ast.NamedExpr):
-            test = node.test.value
-        else:
-            test = node.test
-        w = ast.Call(func=ast.Name("scf_while_gen", ctx=ast.Load()), args=[test], keywords=[])
-        w = ast.copy_location(w, node)
-        assign = ast.Assign(
-            targets=[ast.Name(f"w_{node.lineno}", ctx=ast.Store())],
-            value=w,
-        )
-        assign = ast.fix_missing_locations(ast.copy_location(assign, node))
+        with self.symbol_scopes.control_flow_scope():
+            node = super().visit_While(node)
+            if isinstance(node.test, ast.NamedExpr):
+                test = node.test.value
+            else:
+                test = node.test
+            w = ast.Call(func=ast.Name("scf_while_gen", ctx=ast.Load()), args=[test], keywords=[])
+            w = ast.copy_location(w, node)
+            assign = ast.Assign(
+                targets=[ast.Name(f"w_{node.lineno}", ctx=ast.Store())],
+                value=w,
+            )
+            assign = ast.fix_missing_locations(ast.copy_location(assign, node))
 
-        next_ = ast.Call(
-            func=ast.Name("next", ctx=ast.Load()),
-            args=[
-                ast.Name(f"w_{node.lineno}", ctx=ast.Load()),
-                ast.Constant(False, kind="bool"),
-            ],
-            keywords=[],
-        )
-        next_ = ast.fix_missing_locations(ast.copy_location(next_, node))
-        if isinstance(node.test, ast.NamedExpr):
-            node.test.value = next_
-        else:
-            new_test = ast.NamedExpr(target=ast.Name(f"__init__{node.lineno}", ctx=ast.Store()), value=next_)
-            new_test = ast.copy_location(new_test, node)
-            node.test = new_test
+            next_ = ast.Call(
+                func=ast.Name("next", ctx=ast.Load()),
+                args=[
+                    ast.Name(f"w_{node.lineno}", ctx=ast.Load()),
+                    ast.Constant(False, kind="bool"),
+                ],
+                keywords=[],
+            )
+            next_ = ast.fix_missing_locations(ast.copy_location(next_, node))
+            if isinstance(node.test, ast.NamedExpr):
+                node.test.value = next_
+            else:
+                new_test = ast.NamedExpr(target=ast.Name(f"__init__{node.lineno}", ctx=ast.Store()), value=next_)
+                new_test = ast.copy_location(new_test, node)
+                node.test = new_test
 
-        node = ast.fix_missing_locations(node)
-        assign = ast.fix_missing_locations(assign)
-        return [assign, node]
+            node = ast.fix_missing_locations(node)
+            assign = ast.fix_missing_locations(assign)
+            return [assign, node]
