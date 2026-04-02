@@ -23,6 +23,8 @@ import torch
 import torch.nn.functional as F
 import pytest
 
+pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
+
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 _PYTHON_CANDIDATES = [
     os.path.join(_REPO_ROOT, "build", "python_packages"),

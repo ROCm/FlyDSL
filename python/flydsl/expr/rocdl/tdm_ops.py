@@ -47,6 +47,7 @@ __all__ = [
     "compute_padding_encoding",
     "compute_warp_distribution",
     "l2_prefetch_tile",
+    "advance_tdm_descriptor",
 ]
 
 
@@ -562,4 +563,3 @@ def advance_tdm_descriptor(desc: TDMDescriptor2D, byte_offset) -> TDMDescriptor2
     new_dgroup0 = vector.insert(new_hi, new_dgroup0, static_position=[3], dynamic_position=[])
     
     return TDMDescriptor2D(new_dgroup0, desc.dgroup1)
-

@@ -10,6 +10,8 @@ import os
 import numpy as np
 import pytest
 
+pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
+
 try:
     import torch
 except ImportError:

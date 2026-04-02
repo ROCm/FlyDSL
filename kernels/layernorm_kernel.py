@@ -30,23 +30,13 @@ KERNEL_NAME = "layernorm"
 EPS = 1e-5
 
 import math
-from kernels.kernels_common import get_warp_size
+from kernels.kernels_common import dtype_to_elem_type, get_warp_size
 
 BLOCK_THREADS = 256
 WARP_SIZE = get_warp_size()
 VEC_WIDTH = 8
 USE_NONTEMPORAL = True
 VEC_ALIGN = 16
-
-
-def dtype_to_elem_type(dtype_str: str):
-    if dtype_str == "f32":
-        return T.f32
-    if dtype_str == "f16":
-        return T.f16
-    if dtype_str == "bf16":
-        return T.bf16
-    raise ValueError(f"unsupported dtype: {dtype_str}")
 
 
 def build_layernorm_module(M: int, N: int, dtype_str: str):

@@ -27,7 +27,7 @@
 namespace mlir {
 #define GEN_PASS_DEF_FLYTOROCDLCONVERSIONPASS
 #define GEN_PASS_DEF_FLYROCDLCLUSTERATTRPASS
-#include "flydsl/Conversion/Passes.h.inc"
+#include "flydsl/Conversion/FlyToROCDL/Passes.h.inc"
 } // namespace mlir
 
 using namespace mlir;
@@ -316,53 +316,6 @@ public:
   }
 };
 
-class MemRefLoadVecOpLowering : public OpConversionPattern<MemRefLoadVecOp> {
-public:
-  using OpConversionPattern<MemRefLoadVecOp>::OpConversionPattern;
-
-  LogicalResult matchAndRewrite(MemRefLoadVecOp op, OpAdaptor adaptor,
-                                ConversionPatternRewriter &rewriter) const override {
-    auto loc = op.getLoc();
-    Value input = adaptor.getMemref();
-
-    auto ptrTy = dyn_cast<LLVM::LLVMPointerType>(input.getType());
-    if (!ptrTy)
-      return failure();
-
-    auto resVecTy = dyn_cast<VectorType>(op.getResult().getType());
-    if (!resVecTy)
-      return failure();
-
-    Value loaded = LLVM::LoadOp::create(rewriter, loc, resVecTy, input);
-    rewriter.replaceOp(op, loaded);
-    return success();
-  }
-};
-
-class MemRefStoreVecOpLowering : public OpConversionPattern<MemRefStoreVecOp> {
-public:
-  using OpConversionPattern<MemRefStoreVecOp>::OpConversionPattern;
-
-  LogicalResult matchAndRewrite(MemRefStoreVecOp op, OpAdaptor adaptor,
-                                ConversionPatternRewriter &rewriter) const override {
-    auto loc = op.getLoc();
-    Value dest = adaptor.getMemref();
-    Value valueToStore = adaptor.getVector();
-
-    auto ptrTy = dyn_cast<LLVM::LLVMPointerType>(dest.getType());
-    if (!ptrTy)
-      return failure();
-
-    auto vecTy = dyn_cast<VectorType>(valueToStore.getType());
-    if (!vecTy)
-      return failure();
-
-    LLVM::StoreOp::create(rewriter, loc, valueToStore, dest);
-    rewriter.eraseOp(op);
-    return success();
-  }
-};
-
 class PtrLoadOpLowering : public OpConversionPattern<PtrLoadOp> {
 public:
   using OpConversionPattern<PtrLoadOp>::OpConversionPattern;
@@ -376,20 +329,32 @@ public:
     if (!flyPtrTy)
       return failure();
 
-    Type elemTy = flyPtrTy.getElemTy();
+    Type loadTy = op.getResult().getType();
+
+    if (auto vecTy = dyn_cast<VectorType>(loadTy)) {
+      auto swizzle = flyPtrTy.getSwizzle();
+      if (!swizzle.isTrivialSwizzle()) {
+        int64_t vecBytes = vecTy.getNumElements() *
+                           vecTy.getElementType().getIntOrFloatBitWidth() / 8;
+        int64_t baseBytes = int64_t{1} << swizzle.getBase();
+        if (baseBytes % vecBytes != 0)
+          return rewriter.notifyMatchFailure(
+              op, "vector ptr.load byte size must divide swizzle base granularity");
+      }
+    }
 
     if (flyPtrTy.getAddressSpace().getValue() == AddressSpace::BufferDesc) {
       BufferFatPtr bp(flyPtrTy, ptr);
       Value zero = arith::ConstantIntOp::create(rewriter, loc, 0, 32);
       ArrayAttr noAttrs;
       Value loaded = ROCDL::RawPtrBufferLoadOp::create(
-          rewriter, loc, elemTy, bp.bufferRsrc(rewriter, loc), bp.swizzleByteOffset(rewriter, loc),
+          rewriter, loc, loadTy, bp.bufferRsrc(rewriter, loc), bp.swizzleByteOffset(rewriter, loc),
           zero, zero, noAttrs, noAttrs, noAttrs);
       rewriter.replaceOp(op, loaded);
       return success();
     } else {
       ptr = applySwizzleOnPtr(rewriter, loc, ptr, flyPtrTy.getSwizzle());
-      Value loaded = LLVM::LoadOp::create(rewriter, loc, elemTy, ptr);
+      Value loaded = LLVM::LoadOp::create(rewriter, loc, loadTy, ptr);
       rewriter.replaceOp(op, loaded);
       return success();
     }
@@ -409,6 +374,18 @@ public:
     auto flyPtrTy = dyn_cast<fly::PointerType>(op.getPtr().getType());
     if (!flyPtrTy)
       return failure();
+
+    if (auto vecTy = dyn_cast<VectorType>(value.getType())) {
+      auto swizzle = flyPtrTy.getSwizzle();
+      if (!swizzle.isTrivialSwizzle()) {
+        int64_t vecBytes = vecTy.getNumElements() *
+                           vecTy.getElementType().getIntOrFloatBitWidth() / 8;
+        int64_t baseBytes = int64_t{1} << swizzle.getBase();
+        if (baseBytes % vecBytes != 0)
+          return rewriter.notifyMatchFailure(
+              op, "vector ptr.store byte size must divide swizzle base granularity");
+      }
+    }
 
     if (flyPtrTy.getAddressSpace().getValue() == AddressSpace::BufferDesc) {
       BufferFatPtr bp(flyPtrTy, ptr);
@@ -1063,7 +1040,6 @@ public:
                                                                                   context);
     patterns.add<AddOffsetOpLowering>(typeConverter, context);
     patterns.add<MakeViewOpLowering>(typeConverter, context);
-    patterns.add<MemRefLoadVecOpLowering, MemRefStoreVecOpLowering>(typeConverter, context);
     patterns.add<PtrLoadOpLowering, PtrStoreOpLowering>(typeConverter, context);
     patterns.add<CopyAtomCallLowering, MmaAtomCallLowering>(typeConverter, context);
     patterns.add<GpuLaunchFuncOpLowering>(typeConverter, context);

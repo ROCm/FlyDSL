@@ -21,6 +21,8 @@ import flydsl  # noqa: E402,F401 -- preload system comgr before torch/HIP loads 
 import pytest
 import torch
 
+pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
+
 from flydsl.runtime.device import get_rocm_arch
 from kernels.wmma_gemm_gfx1250 import compile_wmma_gemm_tdm
 from tests.test_common import verify_output

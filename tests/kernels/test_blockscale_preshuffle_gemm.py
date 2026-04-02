@@ -14,6 +14,8 @@ import torch
 import torch.nn.functional as F
 import pytest
 
+pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
+
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
