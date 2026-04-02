@@ -1103,70 +1103,94 @@ def compile_moe_gemm1(
                 # tile we are about to compute from LDS, to overlap with upcoming VMEM.
                 a0_prefetch_pong = lds_load_packs_k64(row_a_lds, col_offset_base_bytes, lds_base_pong)
     
-                # Unrolled ping-pong main loop (2 tiles per iteration), leaving 2 tail tiles.
-                # Keep this as constexpr expansion to avoid SCF child-region dominance issues
-                # when carrying MFMA accumulators/prefetch values into the tail section.
+                # Ping-pong main loop (2 tiles per iteration), leaving 2 tail tiles.
+                # Uses scf.for with loop-carried accumulators, B-tile prefetch, and A0 LDS prefetch.
                 c2_tile_k = arith.index(tile_k * 2)
+                c_tile_k = arith.index(tile_k)
                 total_tiles = int(model_dim) // int(tile_k)
                 pair_iters = max((total_tiles - 2) // 2, 0)
 
-                for pair_i in range_constexpr(pair_iters):
-                    k_iv = arith.index(pair_i * (tile_k * 2))
+                b_has_scales = is_int4_groupwise or is_int4_fp8_groupwise
+                _lists_per_ku = 4 if b_has_scales else 2
+                _vals_per_bt = k_unroll * _lists_per_ku * num_acc_n
+
+                def _flatten_bt(bt):
+                    flat = []
+                    for entry in bt:
+                        for lst in entry:
+                            flat.extend(lst if isinstance(lst, (list, tuple)) else [lst])
+                    return flat
+
+                def _unflatten_bt(vals):
+                    bt, idx = [], 0
+                    for _ku in range_constexpr(k_unroll):
+                        entry = []
+                        for _li in range_constexpr(_lists_per_ku):
+                            entry.append(list(vals[idx:idx + num_acc_n]))
+                            idx += num_acc_n
+                        bt.append(tuple(entry))
+                    return bt
+
+                init_state = (
+                    list(acc_gate) + list(acc_up)
+                    + _flatten_bt(b_gate_cur) + _flatten_bt(b_up_cur)
+                    + list(a0_prefetch_pong)
+                )
+
+                _n_acc = m_repeat * num_acc_n
+                _p_bg = 2 * _n_acc
+                _p_bu = _p_bg + _vals_per_bt
+                _p_a0 = _p_bu + _vals_per_bt
+
+                for pair_iv, state in range(0, pair_iters, 1, init=init_state):
+                    _ag = list(state[:_n_acc])
+                    _au = list(state[_n_acc:_p_bg])
+                    _bg = _unflatten_bt(list(state[_p_bg:_p_bu]))
+                    _bu = _unflatten_bt(list(state[_p_bu:_p_a0]))
+                    _a0pf = (state[_p_a0], state[_p_a0 + 1])
+
+                    k_iv = pair_iv * (c_tile_k + c_tile_k)
+
                     # ---- stage 0: prefetch+store ping, compute pong ----
-                    next_k1 = k_iv + tile_k
+                    next_k1 = k_iv + c_tile_k
                     x_regs_ping = load_x_tile(next_k1)
-                    b_gate_ping = load_b_tile(next_k1, n_blk_gate, n_intra_gate)
-                    b_up_ping = load_b_tile(next_k1, n_blk_up, n_intra_up)
-    
-                    acc_gate, acc_up, _ = compute_tile(
-                        acc_gate,
-                        acc_up,
-                        b_gate_cur,
-                        b_up_cur,
-                        lds_base_pong,
-                        a0_prefetch=a0_prefetch_pong,
-                    )
-                    a0_prefetch_pong = None
+                    _bg_ping = load_b_tile(next_k1, n_blk_gate, n_intra_gate)
+                    _bu_ping = load_b_tile(next_k1, n_blk_up, n_intra_up)
+
+                    _ag, _au, _ = compute_tile(_ag, _au, _bg, _bu, lds_base_pong, a0_prefetch=_a0pf)
                     store_x_tile_to_lds(x_regs_ping, lds_base_ping)
                     hot_loop_scheduler()
                     gpu.barrier()
-    
-                    # Cross-tile prefetch for the ping tile we are about to compute.
-                    a0_prefetch_ping = lds_load_packs_k64(row_a_lds, col_offset_base_bytes, lds_base_ping)
-    
+
+                    _a0pf_ping = lds_load_packs_k64(row_a_lds, col_offset_base_bytes, lds_base_ping)
+
                     # ---- stage 1: prefetch+store pong, compute ping ----
-                    next_k2 = k_iv + c2_tile_k
+                    next_k2 = k_iv + c_tile_k + c_tile_k
                     x_regs_pong = load_x_tile(next_k2)
-                    b_gate_next = load_b_tile(next_k2, n_blk_gate, n_intra_gate)
-                    b_up_next = load_b_tile(next_k2, n_blk_up, n_intra_up)
-    
-                    acc_gate, acc_up, _ = compute_tile(
-                        acc_gate,
-                        acc_up,
-                        b_gate_ping,
-                        b_up_ping,
-                        lds_base_ping,
-                        a0_prefetch=a0_prefetch_ping,
-                    )
-                    a0_prefetch_ping = None
+                    _bg_next = load_b_tile(next_k2, n_blk_gate, n_intra_gate)
+                    _bu_next = load_b_tile(next_k2, n_blk_up, n_intra_up)
+
+                    _ag, _au, _ = compute_tile(_ag, _au, _bg_ping, _bu_ping, lds_base_ping, a0_prefetch=_a0pf_ping)
                     store_x_tile_to_lds(x_regs_pong, lds_base_pong)
                     hot_loop_scheduler()
                     gpu.barrier()
-    
-                    # Cross-tile prefetch for the next pong tile.
-                    a0_prefetch_pong = lds_load_packs_k64(row_a_lds, col_offset_base_bytes, lds_base_pong)
-    
-                    # Advance pong state to next_k2 for next iteration.
-                    b_gate_cur = b_gate_next
-                    b_up_cur = b_up_next
-    
-                # Tail: 2 remaining tiles at (k_in - 2*tile_k) and (k_in - tile_k).
-                # Rebuild prefetch in the current block: values produced inside the `range(...)`
-                # loop body may live in a child region and cannot be used here.
-                k_tail0 = k_in - c2_tile_k
-                b_gate_cur = load_b_tile(k_tail0, n_blk_gate, n_intra_gate)
-                b_up_cur = load_b_tile(k_tail0, n_blk_up, n_intra_up)
-                a0_prefetch_pong = lds_load_packs_k64(row_a_lds, col_offset_base_bytes, lds_base_pong)
+
+                    _a0pf_new = lds_load_packs_k64(row_a_lds, col_offset_base_bytes, lds_base_pong)
+
+                    loop_results = yield (
+                        list(_ag) + list(_au)
+                        + _flatten_bt(_bg_next) + _flatten_bt(_bu_next)
+                        + list(_a0pf_new)
+                    )
+
+                # After scf.for: extract final state from yielded results.
+                SmemPtr._view_cache = None
+                if pair_iters > 0:
+                    acc_gate = list(loop_results[:_n_acc])
+                    acc_up = list(loop_results[_n_acc:_p_bg])
+                    b_gate_cur = _unflatten_bt(list(loop_results[_p_bg:_p_bu]))
+                    b_up_cur = _unflatten_bt(list(loop_results[_p_bu:_p_a0]))
+                    a0_prefetch_pong = (loop_results[_p_a0], loop_results[_p_a0 + 1])
                 k_tail1 = k_in - tile_k
                 x_regs_ping = load_x_tile(k_tail1)
                 b_gate_ping = load_b_tile(k_tail1, n_blk_gate, n_intra_gate)
