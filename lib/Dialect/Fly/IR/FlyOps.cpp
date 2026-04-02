@@ -1832,19 +1832,6 @@ FLY_INFER_RETURN_TYPES(DecompositionOp) {
   return success();
 }
 
-FLY_INFER_RETURN_TYPES(PtrLoadOp) {
-  if (auto ptrTy = dyn_cast<PointerType>(operands[0].getType())) {
-    inferredReturnTypes.assign({ptrTy.getElemTy()});
-    return success();
-  }
-  if (auto intTupleTy = dyn_cast<IntTupleType>(operands[0].getType())) {
-    inferredReturnTypes.assign({intTupleTy});
-    return success();
-  }
-  return emitOptionalError(location, "PtrLoadOp: expected PointerType or IntTupleType, got ",
-                           operands[0].getType());
-}
-
 FLY_INFER_RETURN_TYPES(MemRefLoadOp) {
   if (auto memrefTy = dyn_cast<MemRefType>(operands[0].getType())) {
     inferredReturnTypes.push_back(memrefTy.getElemTy());
@@ -1884,9 +1871,6 @@ FLY_INFER_RETURN_TYPES(MemRefLoadVecOp) {
   if (!memrefTy)
     return emitOptionalError(location, "MemRefLoadVecOp: expected MemRefType, got ",
                              operands[0].getType());
-  if (memrefTy.getAddressSpace().getValue() != AddressSpace::Register)
-    return emitOptionalError(location, "MemRefLoadVecOp: expected Register address space, got ",
-                             memrefTy.getAddressSpace());
   auto layoutAttr = dyn_cast<LayoutAttr>(memrefTy.getLayout());
   if (!layoutAttr)
     return emitOptionalError(location,
