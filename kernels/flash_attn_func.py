@@ -4,16 +4,18 @@
 """flash_attn_func kernel builder for FlyDSL.
 
 - True MFMA32 remap: `mfma_f32_32x32x16bf16` / `mfma_f32_32x32x16f16` for both GEMM stages.
-- Tile shape: BLOCK_M=256, BLOCK_N=64, 8 waves (512 threads).
+- Tile shape: BLOCK_M=128 or 256 (auto-selected), BLOCK_N=64.
+- BLOCK_M=128: 4 waves (256 threads), BLOCK_M=256: 8 waves (512 threads).
 - Per-wave Q rows: 32.
 - GEMM1 uses `K @ Q^T` so S/P live in MFMA32 register layout.
 - Online softmax over KV dimension is done in registers.
 - P is kept in registers and fed directly to GEMM2 (`V^T @ P`) without LDS roundtrip.
 - K and V use separate LDS regions with DMA-to-LDS prefetch and XOR swizzle.
+- For H>=32, both M=128 and M=256 variants are built and dispatched at runtime.
 
 Layout: Q/K/V/O are 1D flattened from BSHD (batch, seq_len, num_heads, head_dim).
 Grid:   (batch * num_q_tiles * num_heads,) where num_q_tiles = seq_len / BLOCK_M.
-Block:  (512,) -- 8 waves of 64 on AMD (wave64).
+Block:  (256,) or (512,) depending on BLOCK_M.
 
 Requires: head_dim % 32 == 0, head_dim >= 64, seq_len % 128 == 0.
 """
@@ -67,6 +69,7 @@ def build_flash_attn_func_module_primary(
     sm_scale=None,
     waves_per_eu=2,
     flat_work_group_size=None,
+    block_m=None,
     unsafe_fp_math=True,
     fast_fp_math=True,
     daz=True,
@@ -75,15 +78,48 @@ def build_flash_attn_func_module_primary(
     """Build the flash_attn_func launcher using the post-refactor FlyDSL API."""
     gpu_arch = get_hip_arch()
 
-    BLOCK_M = 256
     BLOCK_N = 64
     K_SUB_N = 32
     WARP_SIZE = 64
+
+    # Auto tile selection: for H>=32, build both M=128 and M=256 variants
+    # and dispatch at runtime based on B*S.
+    if block_m is None and num_heads >= 32:
+        _launcher_m128 = build_flash_attn_func_module_primary(
+            num_heads, head_dim, causal, dtype_str, sm_scale, waves_per_eu,
+            flat_work_group_size=256, block_m=128,
+            unsafe_fp_math=unsafe_fp_math, fast_fp_math=fast_fp_math,
+            daz=daz, path_tag=path_tag)
+        _launcher_m256 = build_flash_attn_func_module_primary(
+            num_heads, head_dim, causal, dtype_str, sm_scale, waves_per_eu,
+            flat_work_group_size=512, block_m=256,
+            unsafe_fp_math=unsafe_fp_math, fast_fp_math=fast_fp_math,
+            daz=daz, path_tag=path_tag)
+        _BS_THRESHOLD = 4096 * num_heads
+
+        def _auto_launch(*args, **kwargs):
+            B = args[4] if len(args) > 4 else kwargs.get('batch_size', 1)
+            S = args[5] if len(args) > 5 else kwargs.get('seq_len', 128)
+            bs = (B if isinstance(B, int) else 1) * (S if isinstance(S, int) else 128)
+            if bs * num_heads >= _BS_THRESHOLD:
+                return _launcher_m256(*args, **kwargs)
+            return _launcher_m128(*args, **kwargs)
+
+        return _auto_launch
+
+    if block_m is not None:
+        BLOCK_M = block_m
+    else:
+        BLOCK_M = 128
+
     if flat_work_group_size is None:
-        flat_work_group_size = 512  # only flat_work_group_size=512 is supported
+        if BLOCK_M <= 128:
+            flat_work_group_size = 256
+        else:
+            flat_work_group_size = 512
     NUM_WAVES = flat_work_group_size // WARP_SIZE
     BLOCK_SIZE = flat_work_group_size
-    ROWS_PER_WAVE = BLOCK_M // NUM_WAVES  # 32
+    ROWS_PER_WAVE = BLOCK_M // NUM_WAVES
     if path_tag.upper() in ("N32", "N128"):
         PATH_TAG = path_tag.upper()
     elif dtype_str in ("f16", "bf16") and causal and head_dim == 128:
@@ -127,8 +163,8 @@ def build_flash_attn_func_module_primary(
     assert BLOCK_M % NUM_WAVES == 0
     assert head_dim % 32 == 0, f"head_dim ({head_dim}) must be divisible by 32"
     assert head_dim >= 64, f"head_dim ({head_dim}) must be >= 64"
-    assert flat_work_group_size == 512, (
-        f"Only flat_work_group_size=512 is supported, got {flat_work_group_size}"
+    assert flat_work_group_size in (128, 256, 512), (
+        f"flat_work_group_size must be 128, 256, or 512, got {flat_work_group_size}"
     )
     assert dtype_str in ("f16", "bf16"), "flash_attn_func only supports f16 and bf16"
     assert BLOCK_N % 32 == 0
