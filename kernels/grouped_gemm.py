@@ -19,6 +19,7 @@ Optimizations applied:
   - LDS ping-pong double buffering for A tiles
   - XOR swizzle for LDS bank conflict avoidance
   - Preshuffle B layout with load_b_pack_k32
+  - A0 LDS prefetch (cross-tile, hides LDS read latency behind VMEM)
 """
 
 import functools
@@ -357,8 +358,12 @@ def compile_grouped_fp8_gemm(
                     b_tile.append((packs0, packs1))
                 return b_tile
 
+            # Base coordinates for A0 prefetch (mi=0, ku=0)
+            row_a_lds_base = lane_mod_16  # mi=0
+            col_offset_base_bytes = lane_div_16 * fx.Index(16)  # ku=0
+
             # ── Helper: compute one K-tile from LDS + B tile ────────────
-            def compute_tile(accs_in, k_tile_idx_py, lds_base, b_tile_in):
+            def compute_tile(accs_in, k_tile_idx_py, lds_base, b_tile_in, *, a0_prefetch=None):
                 """Compute MFMA tiles for one K-tile, return updated accumulators."""
                 current_accs = list(accs_in)
 
@@ -399,9 +404,13 @@ def compile_grouped_fp8_gemm(
                         b_packs0, b_packs1 = b_tile_in[ku]
 
                         for mi in range_constexpr(m_repeat):
-                            row_a_lds = lane_mod_16 + arith.index(mi * 16)
-                            col_a_base_bytes = lane_div_16 * fx.Index(16) + fx.Index(k_offset_bytes)
-                            a0, a1 = lds_load_packs_k64(row_a_lds, col_a_base_bytes, lds_base)
+                            # Use prefetched A0 for the very first iteration
+                            if a0_prefetch is not None and sb == 0 and ku_local == 0 and mi == 0:
+                                a0, a1 = a0_prefetch
+                            else:
+                                row_a_lds = lane_mod_16 + arith.index(mi * 16)
+                                col_a_base_bytes = lane_div_16 * fx.Index(16) + fx.Index(k_offset_bytes)
+                                a0, a1 = lds_load_packs_k64(row_a_lds, col_a_base_bytes, lds_base)
 
                             for ni in range_constexpr(num_acc_n):
                                 acc_idx = mi * num_acc_n + ni
@@ -425,21 +434,37 @@ def compile_grouped_fp8_gemm(
             b_tile_pong = load_b_tile(fx.Index(0))
             gpu.barrier()
 
+            # Prefetch first A pack from pong (hides LDS latency behind upcoming VMEM)
+            a0_prefetch_pong = lds_load_packs_k64(row_a_lds_base, col_offset_base_bytes, lds_base_pong)
+
             for k_pair in range_constexpr(0, num_k_tiles, 2):
                 # Load next A+B into ping while computing current from pong
                 if k_pair + 1 < num_k_tiles:
                     load_a_tile(k_pair + 1, lds_base_ping)
                     b_tile_ping = load_b_tile(fx.Index((k_pair + 1) * tile_k))
-                accs = compute_tile(accs, k_pair, lds_base_pong, b_tile_pong)
+                accs = compute_tile(accs, k_pair, lds_base_pong, b_tile_pong,
+                                    a0_prefetch=a0_prefetch_pong)
+                a0_prefetch_pong = None
                 gpu.barrier()
 
-                # Load next A+B into pong while computing current from ping
+                # Prefetch first A pack from ping
                 if k_pair + 1 < num_k_tiles:
+                    a0_prefetch_ping = lds_load_packs_k64(
+                        row_a_lds_base, col_offset_base_bytes, lds_base_ping)
+
+                    # Load next A+B into pong while computing current from ping
                     if k_pair + 2 < num_k_tiles:
                         load_a_tile(k_pair + 2, lds_base_pong)
                         b_tile_pong = load_b_tile(fx.Index((k_pair + 2) * tile_k))
-                    accs = compute_tile(accs, k_pair + 1, lds_base_ping, b_tile_ping)
+                    accs = compute_tile(accs, k_pair + 1, lds_base_ping, b_tile_ping,
+                                        a0_prefetch=a0_prefetch_ping)
+                    a0_prefetch_ping = None
                     gpu.barrier()
+
+                    # Prefetch first A pack from pong for next iteration
+                    if k_pair + 2 < num_k_tiles:
+                        a0_prefetch_pong = lds_load_packs_k64(
+                            row_a_lds_base, col_offset_base_bytes, lds_base_pong)
 
             # ===== Epilogue: store results =====
             c_n = n_in
