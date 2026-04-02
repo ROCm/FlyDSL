@@ -1623,16 +1623,16 @@ def run_pa_gluon_test(
         # print(f"Transformed quantized_values.shape={quantized_values.shape}")
 
     diff_tolerance = 5e-3
-    # if compute_type != aiter.dtypes.fp8 and not quant_q and not quant_kv:
-    #     diff_tolerance = 5e-4
-    # if kv_varlen:
-    #     diff_tolerance = 5e-2
-    #     if compute_type != aiter.dtypes.fp8 and not quant_q and not quant_kv:
-    #         diff_tolerance = 5e-3
-    # if sliding_window > 0:
-    #     diff_tolerance = max(diff_tolerance, 5e-2)
-    #     if kv_varlen:
-    #         diff_tolerance = 6e-2
+    if compute_type != aiter.dtypes.fp8 and not quant_q and not quant_kv:
+        diff_tolerance = 5e-4
+    if kv_varlen:
+        diff_tolerance = 5e-2
+        if compute_type != aiter.dtypes.fp8 and not quant_q and not quant_kv:
+            diff_tolerance = 5e-3
+    if sliding_window > 0:
+        diff_tolerance = max(diff_tolerance, 5e-2)
+        if kv_varlen:
+            diff_tolerance = 6e-2
 
     flash_style_diff_tolerance = 5e-4
     if quant_mode == "per_token" and (quant_q or quant_kv):
