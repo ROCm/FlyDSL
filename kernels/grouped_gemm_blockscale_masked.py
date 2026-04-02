@@ -158,7 +158,7 @@ def compile_masked_grouped_fp8_gemm(
         by = gpu.block_id("x")  # N-block index
         bx = gpu.block_id("y")  # M-block index
         bz = gpu.block_id("z")  # Group ID index
-        group_idx = arith.index_cast(T.index, bz)
+        group_idx = bz
 
         # Block positions
         bx_m = bx * fx.Index(tile_m)
