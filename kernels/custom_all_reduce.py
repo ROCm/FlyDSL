@@ -3,19 +3,19 @@
 
 """Custom all-reduce kernel + Python-facing shim.
 
-Provides FlyDSL-generated allreduce kernels following the AIter signal
+Provides FlyDSL-generated allreduce kernels with cross-GPU signal
 protocol for multi-GPU communication on ROCm.
 """
 
 from contextlib import contextmanager
 import torch
 
-_AITER_KMAXBLOCKS = 80
-_DEFAULT_MAX_SIZE = 8192 * 1024 * 8 * 2  # 128 MB, matches aiter default
+_KMAXBLOCKS = 80
+_DEFAULT_MAX_SIZE = 8192 * 1024 * 8 * 2  # 128 MB
 
 
 def meta_size() -> int:
-    """Return meta buffer size (for API compatibility with aiter)."""
+    """Return meta buffer size (for API compatibility)."""
     return 0
 
 
@@ -34,11 +34,11 @@ _FLYDSL_AITER_GLOO_GROUP = None
 
 
 def init_custom_ar(meta, rank_data, handles, offsets, rank: int, full_nvlink: bool, out=None, max_size: int = _DEFAULT_MAX_SIZE):
-    """Initialize allreduce with AIter or FlyDSL backend.
+    """Initialize allreduce backend.
 
     Backend controlled by env var FLYDSL_AITER_IMPL:
-    - "aiter" (default): use AIter kernel
-    - "flydsl": use FlyDSL kernel with AIter signal protocol
+    - "flydsl" (default): use FlyDSL kernel
+    - "aiter": use aiter kernel (requires aiter package)
     """
     import os
     import torch.distributed as dist
@@ -80,7 +80,6 @@ def init_custom_ar(meta, rank_data, handles, offsets, rank: int, full_nvlink: bo
             full_nvlink=bool(full_nvlink),
         )
 
-    # impl == "aiter"
     try:
         from aiter.dist.device_communicators.custom_all_reduce import CustomAllreduce as AIterCustomAllreduce
     except ModuleNotFoundError:
@@ -101,19 +100,27 @@ def init_custom_ar(meta, rank_data, handles, offsets, rank: int, full_nvlink: bo
 
 
 class FlyDSLAllreduce:
-    """FlyDSL kernels following AIter signal protocol on ROCm."""
+    """FlyDSL allreduce kernels with cross-GPU signal protocol on ROCm."""
 
     _HIP_IPC_HANDLE_BYTES = 64
     _HIP_IPC_MEM_LAZY_ENABLE_PEER_ACCESS = 0x1
+    _HIP_DEVICE_MALLOC_UNCACHED = 0x3
     _hip = None
     _hipIpcMemHandle_t = None
-    _gpu_arch = None  # cached GPU arch name (e.g. 'gfx942' for CDNA3)
+    _gpu_arch = None
+
+    # Signal struct layout (each field alignas(128)):
+    #   uint32_t start[_MAX_BLOCKS][8]  -> _MAX_BLOCKS * 8 * 4
+    #   uint32_t end[_MAX_BLOCKS][8]    -> _MAX_BLOCKS * 8 * 4
+    #   uint32_t _flag[_MAX_BLOCKS]     -> _MAX_BLOCKS * 4
+    # Struct size padded to 128-byte alignment.
+    _SIGNAL_SIZE = ((_KMAXBLOCKS * 8 * 4) * 2 + _KMAXBLOCKS * 4 + 127) & ~127
 
     @classmethod
     def _get_gpu_arch(cls) -> str:
         """Return current GPU architecture name (cached).
 
-        Mirrors aiter C++ logic: use arch.find("gfx942") to decide write-mode.
+        Uses arch name (e.g. 'gfx942') to decide write-mode eligibility.
         """
         if cls._gpu_arch is not None:
             return cls._gpu_arch
@@ -163,6 +170,12 @@ class FlyDSLAllreduce:
         cls._hip.hipIpcCloseMemHandle.argtypes = [ctypes.c_void_p]
         cls._hip.hipGetErrorString.restype = ctypes.c_char_p
         cls._hip.hipGetErrorString.argtypes = [ctypes.c_int]
+        cls._hip.hipExtMallocWithFlags.restype = ctypes.c_int
+        cls._hip.hipExtMallocWithFlags.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.c_size_t, ctypes.c_uint]
+        cls._hip.hipFree.restype = ctypes.c_int
+        cls._hip.hipFree.argtypes = [ctypes.c_void_p]
+        cls._hip.hipMemset.restype = ctypes.c_int
+        cls._hip.hipMemset.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_size_t]
         return cls._hip
 
     @classmethod
@@ -206,6 +219,29 @@ class FlyDSLAllreduce:
         err = hip.hipIpcCloseMemHandle(ctypes.c_void_p(int(base_ptr)))
         cls._hip_check(err, what="hipIpcCloseMemHandle")
 
+    @classmethod
+    def _alloc_uncached(cls, size: int) -> int:
+        """Allocate zero-initialised uncached device memory (hipDeviceMallocUncached).
+
+        Returns the raw device pointer as int.
+        """
+        import ctypes
+        hip = cls._load_hip()
+        buf = ctypes.c_void_p()
+        err = hip.hipExtMallocWithFlags(ctypes.byref(buf), ctypes.c_size_t(size),
+                                        ctypes.c_uint(cls._HIP_DEVICE_MALLOC_UNCACHED))
+        cls._hip_check(err, what="hipExtMallocWithFlags")
+        err = hip.hipMemset(buf, 0, ctypes.c_size_t(size))
+        cls._hip_check(err, what="hipMemset")
+        return int(buf.value)
+
+    @classmethod
+    def _free_device_mem(cls, ptr: int) -> None:
+        import ctypes
+        hip = cls._load_hip()
+        err = hip.hipFree(ctypes.c_void_p(ptr))
+        cls._hip_check(err, what="hipFree")
+
     @staticmethod
     def _gather_object_list_via_broadcast(group, shard_data):
         import torch.distributed as dist
@@ -221,7 +257,6 @@ class FlyDSLAllreduce:
     def __init__(self, *, group, device, max_size: int, world_size: int, rank: int, full_nvlink: bool):
         import os
         import torch.distributed as dist
-        import aiter as aiter_ops
 
         self.group = group
         self.device = device
@@ -235,15 +270,10 @@ class FlyDSLAllreduce:
         if self.world_size <= 1:
             raise ValueError("world_size must be > 1")
 
-        self.meta = aiter_ops.allocate_meta_buffer(int(aiter_ops.meta_size()) + int(self.max_size))
-        try:
-            self.meta.zero_()
-        except Exception:
-            pass
-        self._meta_size = int(aiter_ops.meta_size())
+        alloc_size = self._SIGNAL_SIZE + int(self.max_size)
+        self._meta_ptr = self._alloc_uncached(alloc_size)
 
-        my_meta_h = aiter_ops.get_meta_buffer_ipc_handle(self.meta)
-        my_meta_bytes = bytes(my_meta_h.detach().cpu().numpy().tobytes())
+        my_meta_bytes = self._get_mem_handle_bytes(self._meta_ptr)
         all_meta = self._gather_object_list_via_broadcast(self.group, (my_meta_bytes, 0))
 
         self._meta_bases = [None] * self.world_size
@@ -251,11 +281,11 @@ class FlyDSLAllreduce:
         self._tmp_ptrs = [0] * 8
         for r in range(self.world_size):
             hb, off = all_meta[r]
-            base_ptr = int(self.meta.data_ptr()) if r == self.rank else int(self._open_mem_handle(bytes(hb)))
+            base_ptr = self._meta_ptr if r == self.rank else int(self._open_mem_handle(bytes(hb)))
             if r != self.rank:
                 self._meta_bases[r] = base_ptr
             sg_ptr = base_ptr + off
-            tmp_ptr = sg_ptr + self._meta_size
+            tmp_ptr = sg_ptr + self._SIGNAL_SIZE
             if r < 8:
                 self._sg_ptrs[r] = sg_ptr
                 self._tmp_ptrs[r] = tmp_ptr
@@ -362,6 +392,12 @@ class FlyDSLAllreduce:
         self._output_buffer_bases = []
         self._graph_in_bases = []
         self._graph_out_bases = []
+        if getattr(self, '_meta_ptr', None):
+            try:
+                self._free_device_mem(self._meta_ptr)
+            except Exception:
+                pass
+            self._meta_ptr = None
 
     @contextmanager
     def capture(self):
@@ -639,7 +675,7 @@ class FlyDSLAllreduce:
         """Launch allreduce kernel (auto-selects 1-stage or 2-stage by data size)."""
         from flydsl.expr.typing import Int32, Int64, Stream
 
-        # Auto-select stage by data size (match aiter thresholds):
+        # Auto-select stage by data size:
         #   world_size == 2              → always 1-stage
         #   world_size <= 4, bytes < 160KB → 1-stage
         #   world_size <= 8, bytes < 80KB  → 1-stage
@@ -659,13 +695,13 @@ class FlyDSLAllreduce:
             pack_elems = 8 if dtype_str in ("f16", "bf16") else 4
             num_packs = int(N) // int(pack_elems)
             if _stage == "1":
-                # 1-stage: tnum_gpu threads per warp handle one pack each (match aiter)
+                # 1-stage: tnum_gpu threads per warp handle one pack each
                 tnum_gpu = self._threads // self.world_size
-                grid_x = int(max(1, min(_AITER_KMAXBLOCKS, (num_packs + tnum_gpu - 1) // tnum_gpu)))
+                grid_x = int(max(1, min(_KMAXBLOCKS, (num_packs + tnum_gpu - 1) // tnum_gpu)))
             else:
                 part_p = int(num_packs) // int(self.world_size)
                 tnum_gpu = self._threads // self.world_size
-                grid_x = int(max(1, min(_AITER_KMAXBLOCKS, (max(1, part_p) + tnum_gpu - 1) // tnum_gpu)))
+                grid_x = int(max(1, min(_KMAXBLOCKS, (max(1, part_p) + tnum_gpu - 1) // tnum_gpu)))
             self._grid_x_cache[(int(N), str(dtype_str), _stage)] = int(grid_x)
 
         if stream_ptr is None:

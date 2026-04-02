@@ -112,8 +112,7 @@ def _signal_end_sync(*, lane_i32, rank_i32, bid_i32, self_sg_i64, sgs_i64,
                            that L2 dirty lines reach HBM before the signal.
                    False → use st_signal_u32 (signal store only, no wbl2).
                            For nt data stores (st_nt_16b) which already bypass
-                           L2; matches aiter's end_sync<ngpus,true> with
-                           ATOMIC_RELAXED + MEMORY_SCOPE_SYSTEM.
+                           L2; uses ATOMIC_RELAXED + MEMORY_SCOPE_SYSTEM.
     """
 
 
@@ -234,7 +233,7 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
         in_ptrs: Int64,
         out_ptr: Int64,
     ):
-        """1-stage allreduce using shared memory (matches aiter pattern).
+        """1-stage allreduce using shared memory.
 
         Each warp loads data from one rank into shared memory, then warp 0
         reduces across all warps and writes the result to global memory.
@@ -336,8 +335,7 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
             # warp-0 finishes before any thread reads the new data.
             scf.YieldOp([p + stride_pack, ea.constant(1, type=i32) - parity])
 
-        # NOTE: aiter 1-stage does NOT use end_sync (commented out in upstream).
-        # Omitting end_sync here to match aiter behaviour and avoid hangs.
+        # 1-stage does not use end_sync to avoid hangs.
 
     # -----------------------------------------------------------------------
     # GPU Kernel: 2-stage arr (reduce-scatter + all-gather)
@@ -448,7 +446,7 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
 
         idx_p = start_p + tid_pack
         if _use_single_buf_2stage:
-            # Single buffer: 8KB LDS, 2 barriers per iteration (matches aiter layout).
+            # Single buffer: 8KB LDS, 2 barriers per iteration.
             loop1 = scf.WhileOp([i32], [idx_p])
             b1 = ir.Block.create_at_start(loop1.before, [i32])
             a1 = ir.Block.create_at_start(loop1.after, [i32])
@@ -695,10 +693,8 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
             dst_byte_off = dst_out_off.extui(i64) * ea.constant(16, type=i64)
 
             # Each warp writes its reduced partition directly to the target
-            # output via flat_store_dwordx4 nt, matching aiter's
-            # is_broadcast_reg_outptr=true path (__builtin_nontemporal_store).
-            # The nt hint bypasses L1/L2 and works for all memory types
-            # (regular hipMalloc IPC-mapped addresses included).
+            # output via flat_store_dwordx4 nt. The nt hint bypasses L1/L2
+            # and works for all memory types (including IPC-mapped addresses).
             dst_ptr = out_ptrs_arr[0]
             for w in range_constexpr(1, world_size):
                 is_warp_w = warp_id_local == ea.constant(w, type=i32)
