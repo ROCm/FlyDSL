@@ -61,6 +61,13 @@ def _waitcnt_vm_n(n):
     rocdl.s_waitcnt(val)
 
 
+def _asm(stmt):
+    """Emit inline asm that survives MLIR→LLVM lowering (rocdl ops get stripped)."""
+    from flydsl._mlir.dialects import llvm as _llvm_d
+    _void = ir.Type.parse("!llvm.void")
+    _llvm_d.InlineAsmOp(_void, [], stmt, "", has_side_effects=True, is_align_stack=False)
+
+
 def _waitcnt_lgkm0_vm_n(n):
     """Emit single s_waitcnt with lgkmcnt(0) + vmcnt(n) — HK pattern for clusters 1/3/5/7.
     Encodes both counters in one s_waitcnt instruction."""
@@ -71,31 +78,6 @@ def _waitcnt_lgkm0_vm_n(n):
     val = vm_lo | expcnt_7 | lgkm_0 | vm_hi
     rocdl.s_waitcnt(val)
 
-
-# ---- HipKittens-style scheduling barrier helpers ----
-# Match HipKittens' sched_barrier_pairs / sched_barrier_exp_pairs templates.
-# These force the hardware scheduler to interleave MFMA instructions with
-# VALU or EXP (transcendental) instructions to hide latency.
-_MASK_VALU = 0x002
-_MASK_MFMA = 0x008
-_MASK_EXP = 0x400
-
-
-def _sched_barrier_pairs(n_pairs, valu_cnt, group_id):
-    """Emit n_pairs of (1 MFMA + valu_cnt VALU) scheduling barriers."""
-    for _ in range_constexpr(n_pairs):
-        rocdl.sched_group_barrier(_MASK_MFMA, 1, group_id)
-        rocdl.sched_group_barrier(_MASK_VALU, valu_cnt, group_id)
-
-
-def _sched_barrier_exp_pairs(n_pairs, exp_cnt, group_id):
-    """Emit n_pairs of (1 MFMA + exp_cnt EXP) scheduling barriers."""
-    for _ in range_constexpr(n_pairs):
-        rocdl.sched_group_barrier(_MASK_MFMA, 1, group_id)
-        rocdl.sched_group_barrier(_MASK_EXP, exp_cnt, group_id)
-
-
-_RESCALE_THRESHOLD = 8.0
 
 
 def build_flash_attn_func_module_primary(
@@ -159,10 +141,8 @@ def build_flash_attn_func_module_primary(
     ROWS_PER_WAVE = BLOCK_M // NUM_WAVES
     if path_tag.upper() in ("N32", "N128"):
         PATH_TAG = path_tag.upper()
-    elif dtype_str in ("f16", "bf16") and causal and head_dim == 128:
-        PATH_TAG = "N128"
     else:
-        PATH_TAG = "N32"
+        PATH_TAG = "N128"
     BLOCK_N_OUT = 128 if PATH_TAG == "N128" else BLOCK_N
     N_SUBTILES = BLOCK_N_OUT // BLOCK_N
     ENABLE_PREFETCH_3BUF = (
@@ -279,6 +259,15 @@ def build_flash_attn_func_module_primary(
         # All FP operations use aggressive fast-math (no NaN/Inf checks, reassociation).
         # The unsafe_fp_math/fast_fp_math builder params control LLVM-level attributes only.
         fm_fast = arith.FastMathFlags.fast
+
+        # ---- f32 fast-math shorthand (like gemm's operator style) ----
+        def _sub(a, b): return arith.SubFOp(a, b, fastmath=fm_fast).result
+        def _mul(a, b): return arith.MulFOp(a, b, fastmath=fm_fast).result
+        def _add(a, b): return arith.AddFOp(a, b, fastmath=fm_fast).result
+        def _fmax(a, b): return arith.MaxNumFOp(a, b, fastmath=fm_fast).result
+        def _exp2(v): return arith.ArithValue(v).exp2(fastmath=fm_fast)
+        def _fma(a, b, c): return math_dialect.fma(a, b, c)
+
         v4f16_type = T.vec(4, elem_type)
         vxf16_type = T.vec(VEC_WIDTH, elem_type)
         v8f16_type = T.vec(8, elem_type)
@@ -356,11 +345,6 @@ def build_flash_attn_func_module_primary(
         batch_idx = batch_q_tile_id // num_q_tiles
         q_start = q_tile_idx * BLOCK_M
 
-        # ---- Cooperative load decomposition ----
-        load_row_in_batch = tid // THREADS_PER_ROW_LOAD
-        load_lane_in_row = tid % THREADS_PER_ROW_LOAD
-        load_col_base = load_lane_in_row * VEC_WIDTH
-
         # ---- Helper: global flat index ----
         def global_idx(token_idx, col):
             token = batch_idx * seq_len_v + token_idx
@@ -388,8 +372,6 @@ def build_flash_attn_func_module_primary(
         def load_global_mfma_pack(base_ptr, base_idx):
             return _gep_load(base_ptr, base_idx, mfma_pack_type)
 
-        def load_global_f16xN(base_ptr, base_idx):
-            return _gep_load(base_ptr, base_idx, vxf16_type)
 
         def bf16_trunc_pack_v4(f32_vals):
             """Pack 4 f32 values into v4bf16 via bitwise truncation (upper 16 bits).
@@ -436,105 +418,7 @@ def build_flash_attn_func_module_primary(
             mask = (row_idx & arith.index(0x7)) << arith.index(4)
             return col_idx ^ mask
 
-        # ---- Cooperative K load (row-major, XOR-swizzled) ----
-        def coop_load_k(tile_start, buf_id=0):
-            k_base = k_buf_base(buf_id)
-            for batch in range_constexpr(NUM_BATCHES_KV):
-                row_offset = batch * ROWS_PER_BATCH_LOAD
-                row_idx = tile_start + load_row_in_batch + row_offset
-                if KV_NEEDS_GUARD:
-                    row_valid = arith.cmpi(
-                        arith.CmpIPredicate.ult,
-                        load_row_in_batch,
-                        arith.index(BLOCK_N),
-                    )
-                    _if_k = scf.IfOp(row_valid)
-                    with ir.InsertionPoint(_if_k.then_block):
-                        g_idx = global_idx(row_idx, load_col_base)
-                        lds_row = load_row_in_batch + row_offset
-                        swz_col = _k_swizzle(lds_row, load_col_base)
-                        lds_idx = k_base + lds_row * K_STRIDE + swz_col
-                        vec = load_global_f16xN(k_ptr, g_idx)
-                        vector.store(vec, lds_kv, [lds_idx])
-                        scf.YieldOp([])
-                else:
-                    g_idx = global_idx(row_idx, load_col_base)
-                    lds_row = load_row_in_batch + row_offset
-                    swz_col = _k_swizzle(lds_row, load_col_base)
-                    lds_idx = k_base + lds_row * K_STRIDE + swz_col
-                    vec = load_global_f16xN(k_ptr, g_idx)
-                    vector.store(vec, lds_kv, [lds_idx])
-
-        # ---- Cooperative V load ----
-        def _v_store_row_major(v_base, lds_row, vec):
-            lds_idx = v_base + lds_row * V_STRIDE + load_col_base
-            vector.store(vec, lds_kv, [lds_idx])
-
-        _v1_type = T.vec(1, elem_type) if not USE_HW_TR else None
-
-        def _v_store_transposed(v_base, lds_row, vec):
-            for _e in range_constexpr(VEC_WIDTH):
-                elem = vector.extract(vec, static_position=[_e], dynamic_position=[])
-                vt_d = load_col_base + _e
-                vt_idx = v_base + vt_d * VT_STRIDE + lds_row
-                v1 = vector.from_elements(_v1_type, [elem])
-                vector.store(v1, lds_kv, [vt_idx])
-
-        _v_store_to_lds = _v_store_row_major if USE_HW_TR else _v_store_transposed
-
-        def coop_load_v(tile_start, buf_id=0):
-            v_base = v_buf_base(buf_id)
-            for batch in range_constexpr(NUM_BATCHES_KV):
-                row_offset = batch * ROWS_PER_BATCH_LOAD
-                row_idx = tile_start + load_row_in_batch + row_offset
-                if KV_NEEDS_GUARD:
-                    row_valid = arith.cmpi(
-                        arith.CmpIPredicate.ult,
-                        load_row_in_batch,
-                        arith.index(BLOCK_N),
-                    )
-                    _if_v = scf.IfOp(row_valid)
-                    with ir.InsertionPoint(_if_v.then_block):
-                        g_idx = global_idx(row_idx, load_col_base)
-                        lds_row = load_row_in_batch + row_offset
-                        vec = load_global_f16xN(v_ptr, g_idx)
-                        _v_store_to_lds(v_base, lds_row, vec)
-                        scf.YieldOp([])
-                else:
-                    g_idx = global_idx(row_idx, load_col_base)
-                    lds_row = load_row_in_batch + row_offset
-                    vec = load_global_f16xN(v_ptr, g_idx)
-                    _v_store_to_lds(v_base, lds_row, vec)
-
-        def coop_load_v_global(tile_start):
-            """Issue global loads for V, return vectors (non-blocking)."""
-            vecs = []
-            for batch in range_constexpr(NUM_BATCHES_KV):
-                row_offset = batch * ROWS_PER_BATCH_LOAD
-                row_idx = tile_start + load_row_in_batch + row_offset
-                g_idx = global_idx(row_idx, load_col_base)
-                vecs.append(load_global_f16xN(v_ptr, g_idx))
-            return vecs
-
-        def coop_store_v_lds(vecs, buf_id=0):
-            """Write previously-loaded V vectors to LDS."""
-            v_base = v_buf_base(buf_id)
-            for batch in range_constexpr(NUM_BATCHES_KV):
-                row_offset = batch * ROWS_PER_BATCH_LOAD
-                if KV_NEEDS_GUARD:
-                    row_valid = arith.cmpi(
-                        arith.CmpIPredicate.ult,
-                        load_row_in_batch,
-                        arith.index(BLOCK_N),
-                    )
-                    _if_v = scf.IfOp(row_valid)
-                    with ir.InsertionPoint(_if_v.then_block):
-                        lds_row = load_row_in_batch + row_offset
-                        _v_store_to_lds(v_base, lds_row, vecs[batch])
-                        scf.YieldOp([])
-                else:
-                    lds_row = load_row_in_batch + row_offset
-                    _v_store_to_lds(v_base, lds_row, vecs[batch])
+        # (Non-DMA cooperative load functions removed — DMA path only)
 
         # ---- DMA loading for K (buffer_load_dwordx4 ... lds) ----
         if ENABLE_DMA:
@@ -647,10 +531,10 @@ def build_flash_attn_func_module_primary(
             q_b_packs.append(arith.select(q_in_bounds, raw, c_zero_mfma_pack))
 
         # ---- Constants ----
-        c_neg_inf = arith.constant(float("-inf"), type=compute_type)
-        c_zero_f = arith.constant(0.0, type=compute_type)
-        c_one_f = arith.constant(1.0, type=compute_type)
-        c_sm_scale_log2e = arith.constant(sm_scale * _LOG2E, type=compute_type)
+        c_neg_inf = arith.constant(float("-inf"), type=T.f32)
+        c_zero_f = arith.constant(0.0, type=T.f32)
+        c_one_f = arith.constant(1.0, type=T.f32)
+        c_sm_scale_log2e = arith.constant(sm_scale * _LOG2E, type=T.f32)
         c_zero_v16f32 = arith.constant_vector(0.0, v16f32_type)
         width_i32 = arith.constant(WARP_SIZE, type=T.i32)
         shuf_32_i32 = arith.constant(32, type=T.i32)
@@ -673,15 +557,7 @@ def build_flash_attn_func_module_primary(
         else:
             kv_upper = seq_len_v
 
-        _use_dma_dbuf = ENABLE_DMA and not ENABLE_PREFETCH_3BUF
-
-        # HK stagger flag (HK L194)
-        _hk_enable_stagger = (NUM_WAVES >= 4 and _use_dma_dbuf)
-        if _hk_enable_stagger:
-            _stagger_flag = arith.cmpi(
-                arith.CmpIPredicate.uge, wave_id, arith.index(NUM_WAVES // 2))
-
-        # ---- K/V LDS index helpers (shared by all paths) ----
+        # ---- K/V LDS index helpers ----
         k_hi_offset = K_SUB_N * K_STRIDE
         k_swz_mask = (lane_mod_32 & arith.index(0x7)) << arith.index(4)
 
@@ -693,19 +569,24 @@ def build_flash_attn_func_module_primary(
             col = arith.index(ks * K_STEP_QK) + lane_div_32 * MFMA_LANE_K
             return kb + k_hi_offset + lane_mod_32 * K_STRIDE + (col ^ k_swz_mask)
 
-        def _read_all_k_packs(kb):
-            kp_lo = []; kp_hi = []
-            for ks in range_constexpr(K_STEPS_QK):
-                kp_lo.append(vector.load_op(mfma_pack_type, lds_kv, [_k_idx_lo_buf(ks, kb)]))
-                kp_hi.append(vector.load_op(mfma_pack_type, lds_kv, [_k_idx_hi_buf(ks, kb)]))
-            return kp_lo, kp_hi
+        _QK_PREFETCH_DEPTH = 2
 
-        def _do_qk_gemm(kp_lo, kp_hi):
+        def _do_qk_gemm_pipelined(kb):
+            kp_lo = [None] * K_STEPS_QK
+            kp_hi = [None] * K_STEPS_QK
+            for p in range_constexpr(_QK_PREFETCH_DEPTH):
+                kp_lo[p] = vector.load_op(mfma_pack_type, lds_kv, [_k_idx_lo_buf(p, kb)])
+                kp_hi[p] = vector.load_op(mfma_pack_type, lds_kv, [_k_idx_hi_buf(p, kb)])
             acc_lo = c_zero_v16f32
             acc_hi = c_zero_v16f32
             for ks in range_constexpr(K_STEPS_QK):
                 acc_lo = mfma_acc(kp_lo[ks], q_b_packs[ks], acc_lo)
                 acc_hi = mfma_acc(kp_hi[ks], q_b_packs[ks], acc_hi)
+                if ks + _QK_PREFETCH_DEPTH < K_STEPS_QK:
+                    kp_lo[ks + _QK_PREFETCH_DEPTH] = vector.load_op(
+                        mfma_pack_type, lds_kv, [_k_idx_lo_buf(ks + _QK_PREFETCH_DEPTH, kb)])
+                    kp_hi[ks + _QK_PREFETCH_DEPTH] = vector.load_op(
+                        mfma_pack_type, lds_kv, [_k_idx_hi_buf(ks + _QK_PREFETCH_DEPTH, kb)])
             return acc_lo, acc_hi
 
         def _extract_s_raw(s_acc_lo, s_acc_hi):
@@ -718,23 +599,21 @@ def build_flash_attn_func_module_primary(
         def _apply_causal_mask(s_raw_lo, s_raw_hi, kv_start):
             if not CAUSAL:
                 return s_raw_lo, s_raw_hi
-            kv_start_i32 = arith.index_cast(T.i32, kv_start)
-            lane_div_32_i32 = arith.index_cast(T.i32, lane_div_32)
-            q_start_i32 = arith.index_cast(T.i32, q_start)
-            max_kv_col_i32 = arith.AddIOp(kv_start_i32, arith.constant(BLOCK_N - 1, type=T.i32)).result
-            tile_needs_mask = arith.cmpi(arith.CmpIPredicate.ugt, max_kv_col_i32, q_start_i32)
+            kv_i32 = arith.index_cast(T.i32, kv_start)
+            ld32_i32 = arith.index_cast(T.i32, lane_div_32)
+            tile_needs_mask = arith.cmpi(
+                arith.CmpIPredicate.ugt,
+                kv_i32 + fx.Int32(BLOCK_N - 1),
+                arith.index_cast(T.i32, q_start))
             _mask_if = scf.IfOp(tile_needs_mask, [T.f32] * 32, has_else=True)
             with ir.InsertionPoint(_mask_if.then_block):
                 _m_lo = []; _m_hi = []
                 for r in range_constexpr(16):
-                    r_off_i32 = arith.constant((r % 4) + (r // 4) * 8, type=T.i32)
-                    lane_off_i32 = arith.MulIOp(lane_div_32_i32, arith.constant(4, type=T.i32)).result
-                    kv_col_lo = arith.AddIOp(arith.AddIOp(kv_start_i32, lane_off_i32).result, r_off_i32).result
-                    is_masked_lo = arith.cmpi(arith.CmpIPredicate.ugt, kv_col_lo, q_row_i32)
-                    _m_lo.append(arith.select(is_masked_lo, c_neg_inf, s_raw_lo[r]))
-                    kv_col_hi = arith.AddIOp(kv_col_lo, arith.constant(K_SUB_N, type=T.i32)).result
-                    is_masked_hi = arith.cmpi(arith.CmpIPredicate.ugt, kv_col_hi, q_row_i32)
-                    _m_hi.append(arith.select(is_masked_hi, c_neg_inf, s_raw_hi[r]))
+                    kv_col = kv_i32 + ld32_i32 * fx.Int32(4) + fx.Int32((r % 4) + (r // 4) * 8)
+                    is_lo = arith.cmpi(arith.CmpIPredicate.ugt, kv_col, q_row_i32)
+                    _m_lo.append(arith.select(is_lo, c_neg_inf, s_raw_lo[r]))
+                    is_hi = arith.cmpi(arith.CmpIPredicate.ugt, kv_col + fx.Int32(K_SUB_N), q_row_i32)
+                    _m_hi.append(arith.select(is_hi, c_neg_inf, s_raw_hi[r]))
                 scf.YieldOp(_m_lo + _m_hi)
             with ir.InsertionPoint(_mask_if.else_block):
                 scf.YieldOp(s_raw_lo + s_raw_hi)
@@ -742,42 +621,29 @@ def build_flash_attn_func_module_primary(
                     [_mask_if.results[16 + i] for i in range(16)])
 
         def _compute_max(s_raw_lo, s_raw_hi, m_old):
-            _mfm = {"fastmath": fm_fast}
             loc = s_raw_lo[0]
             for r in range_constexpr(15):
-                loc = arith.MaxNumFOp(loc, s_raw_lo[r + 1], **_mfm).result
+                loc = _fmax(loc, s_raw_lo[r + 1])
             for r in range_constexpr(16):
-                loc = arith.MaxNumFOp(loc, s_raw_hi[r], **_mfm).result
-            peer = reduction_peer(loc)
-            row = arith.MaxNumFOp(loc, peer, **_mfm).result
-            return arith.MaxNumFOp(m_old, row, **_mfm).result
+                loc = _fmax(loc, s_raw_hi[r])
+            return _fmax(m_old, _fmax(loc, reduction_peer(loc)))
 
         def _compute_softmax_full(s_raw_lo, s_raw_hi, m_new, m_old, l_old, o_accs_in):
-            corr_raw = arith.SubFOp(m_old, m_new, fastmath=fm_fast).result
-            corr_scaled = arith.MulFOp(corr_raw, c_sm_scale_log2e, fastmath=fm_fast).result
-            corr = arith.ArithValue(corr_scaled).exp2(fastmath=fm_fast)
+            corr = _exp2(_mul(_sub(m_old, m_new), c_sm_scale_log2e))
             corr_vec = vector.broadcast(v16f32_type, corr)
             o_out = list(o_accs_in)
             for dc in range_constexpr(D_CHUNKS):
-                o_out[dc] = arith.MulFOp(o_out[dc], corr_vec, fastmath=fm_fast).result
-            sc_max = arith.MulFOp(c_sm_scale_log2e, m_new, fastmath=fm_fast).result
-            neg_sc = arith.SubFOp(c_zero_f, sc_max, fastmath=fm_fast).result
+                o_out[dc] = _mul(o_out[dc], corr_vec)
+            neg_sc = _sub(c_zero_f, _mul(c_sm_scale_log2e, m_new))
             plo = []; phi = []; lsum = c_zero_f
             for r in range_constexpr(16):
-                d = math_dialect.fma(s_raw_lo[r], c_sm_scale_log2e, neg_sc)
-                p = arith.ArithValue(d).exp2(fastmath=fm_fast)
-                plo.append(p)
-                lsum = arith.AddFOp(lsum, p, fastmath=fm_fast).result
+                p = _exp2(_fma(s_raw_lo[r], c_sm_scale_log2e, neg_sc))
+                plo.append(p); lsum = _add(lsum, p)
             for r in range_constexpr(16):
-                d = math_dialect.fma(s_raw_hi[r], c_sm_scale_log2e, neg_sc)
-                p = arith.ArithValue(d).exp2(fastmath=fm_fast)
-                phi.append(p)
-                lsum = arith.AddFOp(lsum, p, fastmath=fm_fast).result
-            ps = reduction_peer(lsum)
-            ts = arith.AddFOp(lsum, ps, fastmath=fm_fast).result
-            lc = arith.MulFOp(corr, l_old, fastmath=fm_fast).result
-            ln = arith.AddFOp(lc, ts, fastmath=fm_fast).result
-            return plo, phi, m_new, ln, o_out
+                p = _exp2(_fma(s_raw_hi[r], c_sm_scale_log2e, neg_sc))
+                phi.append(p); lsum = _add(lsum, p)
+            l_new = _add(_mul(corr, l_old), _add(lsum, reduction_peer(lsum)))
+            return plo, phi, m_new, l_new, o_out
 
         def _pack_p_vals(p_vals_lo, p_vals_hi):
             if dtype_str == "bf16" and not USE_K16:
@@ -827,25 +693,7 @@ def build_flash_attn_func_module_primary(
                 vh = vector.load(v4f16_type, lds_kv, [v_hi_idx])
             return vl, vh
 
-        def _preload_v_packs(v_base_arg):
-            """Pre-load all V packs from LDS into registers (HK: load(v_reg, v_smem))."""
-            vp = []
-            for si in range_constexpr(TOTAL_PV):
-                vp.append(_read_v_pack_from(v_base_arg, si))
-            return vp
-
-        def _do_pv_gemm_from_regs(v_packs_all, pp_lo, pp_hi, o_accs_in):
-            """PV GEMM using pre-loaded V packs (HK: mma_AtB(o, v_reg, att_bf16))."""
-            o_out = list(o_accs_in)
-            for si in range_constexpr(TOTAL_PV):
-                dc, pks = _pv_steps[si]
-                vl, vh = v_packs_all[si]
-                o_out[dc] = mfma_acc(vl, pp_lo[pks], o_out[dc])
-                o_out[dc] = mfma_acc(vh, pp_hi[pks], o_out[dc])
-            return o_out
-
         def _do_pv_gemm(v_base_arg, pp_lo, pp_hi, o_accs_in):
-            """PV GEMM reading V from LDS on-the-fly (fallback path)."""
             o_out = list(o_accs_in)
             rocdl.s_setprio(1)
             vl_c, vh_c = _read_v_pack_from(v_base_arg, 0)
@@ -858,363 +706,67 @@ def build_flash_attn_func_module_primary(
                 if si + 1 < TOTAL_PV:
                     vl_c = vl_n; vh_c = vh_n
             rocdl.s_setprio(0)
-            _sched_barrier_pairs(TOTAL_PV, 5, 0)
-            rocdl.sched_barrier(0)
             return o_out
 
-        # ================================================================
-        # DMA path — HK-aligned 4-cluster pipeline, per-tile loop
-        # Like gemm's range(start, stop, step, init=...) pattern.
-        # Each iteration = 1 KV tile, step = BLOCK_N (not BLOCK_N_OUT).
-        # Prologue processes tile 0 (HK L260-315).
-        # Hot loop processes tiles 1..N-1 with 4 clusters per tile.
-        # Epilogue finishes last deferred softmax + PV.
-        #
-        # Per-tile cluster layout (HK L322-470):
-        #   Cluster 0: QK(carried k_packs) + finish_softmax(carried plo/dhi/corr)
-        #   Cluster 1: K DMA(t+2 → buf_id) + V read(v_buf[1-buf_id]) → v_packs
-        #   Cluster 2: PV(v_packs, p_packs) + partial_softmax(QK result)
-        #   Cluster 3: V DMA(t+1 → v_buf[1-buf_id]) + K read(k_buf[1-buf_id]) → k_packs
-        #
-        # Buffer: buf_id = t%2. K DMA→k_buf[buf_id], K read→k_buf[1-buf_id].
-        #         V read→v_buf[1-buf_id], V DMA→v_buf[1-buf_id].
-        # ================================================================
-        if _use_dma_dbuf:
-            # ---- Prologue: tile 0 (HK L260-315) ----
-            # DMA K[0]→k_buf[0]; wait; barrier  (HK L260-263)
-            coop_dma_k(arith.index(0), buf_id=0)
-            rocdl.s_waitcnt(0)
-            rocdl.sched_barrier(0)
-            gpu.barrier()
+        # ---- Pre-loop: DMA K[0..1] + V[0..1] into double buffers ----
+        coop_dma_k(arith.index(0), buf_id=0)
+        coop_dma_k(arith.index(BLOCK_N), buf_id=1)
+        coop_dma_v(arith.index(0), buf_id=0)
+        coop_dma_v(arith.index(BLOCK_N), buf_id=1)
+        rocdl.s_waitcnt(0)
+        gpu.barrier()
 
-            # DMA K[1]→k_buf[1]; DMA V[0]→v_buf[0]  (HK L272-274)
-            coop_dma_k(arith.index(BLOCK_N), buf_id=1)
-            coop_dma_v(arith.index(0), buf_id=0)
-            # K read from k_buf[0] = K[0]  (HK L275)
-            _pro_kp_lo, _pro_kp_hi = _read_all_k_packs(k_buf_base(0))
-            rocdl.sched_barrier(0)
-            rocdl.s_waitcnt(0)
-            rocdl.sched_barrier(0)
-            gpu.barrier()
+        _kv_last = arith.MaxSIOp(
+            arith.SubIOp(kv_upper, arith.index(BLOCK_N)).result,
+            arith.index(0)).result
 
-            # QK[0]  (HK L283-285)
-            _pro_s_lo, _pro_s_hi = _do_qk_gemm(_pro_kp_lo, _pro_kp_hi)
-            rocdl.sched_barrier(0)
-            _pro_sraw_lo, _pro_sraw_hi = _extract_s_raw(_pro_s_lo, _pro_s_hi)
-            _pro_sraw_lo, _pro_sraw_hi = _apply_causal_mask(
-                _pro_sraw_lo, _pro_sraw_hi, arith.index(0))
+        init_args = [c_neg_inf, c_zero_f]
+        for _ in range_constexpr(D_CHUNKS):
+            init_args.append(c_zero_v16f32)
 
-            # Partial softmax[0]: col_max, sub_col, exp2 first half (HK L294-297)
-            _pro_m = _compute_max(_pro_sraw_lo, _pro_sraw_hi, c_neg_inf)
-            _pro_sc = arith.MulFOp(c_sm_scale_log2e, _pro_m, fastmath=fm_fast).result
-            _pro_neg_sc = arith.SubFOp(c_zero_f, _pro_sc, fastmath=fm_fast).result
-            _init_plo = []
-            for _r in range_constexpr(16):
-                _d = math_dialect.fma(_pro_sraw_lo[_r], c_sm_scale_log2e, _pro_neg_sc)
-                _init_plo.append(arith.ArithValue(_d).exp2(fastmath=fm_fast))
-            _init_dhi = []
-            for _r in range_constexpr(16):
-                _init_dhi.append(math_dialect.fma(
-                    _pro_sraw_hi[_r], c_sm_scale_log2e, _pro_neg_sc))
-            rocdl.sched_barrier(0)
+        for kv_block_start, inner_iter_args, loop_results in scf.for_(
+            arith.index(0), kv_upper, arith.index(BLOCK_N_OUT),
+            iter_args=init_args,
+        ):
+            m_running = inner_iter_args[0]
+            l_running = inner_iter_args[1]
+            o_accs = [inner_iter_args[2 + i] for i in range_constexpr(D_CHUNKS)]
 
-            # Stagger  (HK L300-303)
-            if _hk_enable_stagger:
-                _stagger_if = scf.IfOp(_stagger_flag)
-                with ir.InsertionPoint(_stagger_if.then_block):
-                    rocdl.sched_barrier(0)
-                    gpu.barrier()
-                    scf.YieldOp([])
+            for kv_sub in range_constexpr(N_SUBTILES):
+                kv_start = kv_block_start + kv_sub * BLOCK_N
 
-            # K read from k_buf[1] = K[1]  (HK L307)
-            _init_kp_lo, _init_kp_hi = _read_all_k_packs(k_buf_base(1))
-            # DMA K[2]→k_buf[0]; DMA V[1]→v_buf[1]  (HK L309-311)
-            coop_dma_k(arith.index(2 * BLOCK_N), buf_id=0)
-            coop_dma_v(arith.index(BLOCK_N), buf_id=1)
-            rocdl.s_waitcnt(0)
-            rocdl.sched_barrier(0)
-            gpu.barrier()
-
-            # ---- Build init_state for per-tile loop ----
-            # Pack plo/dhi as v16f32 to reduce SSA count: 56 → 26 loop-carried values
-            _init_plo_vec = vector.from_elements(v16f32_type, _init_plo)
-            _init_dhi_vec = vector.from_elements(v16f32_type, _init_dhi)
-            _init_corr = c_zero_f
-            init_state = [_pro_m, c_zero_f]
-            for _ in range_constexpr(D_CHUNKS):
-                init_state.append(c_zero_v16f32)
-            for _ks in range_constexpr(K_STEPS_QK):
-                init_state.append(_init_kp_lo[_ks])
-            for _ks in range_constexpr(K_STEPS_QK):
-                init_state.append(_init_kp_hi[_ks])
-            init_state.append(_init_plo_vec)
-            init_state.append(_init_dhi_vec)
-            init_state.append(_init_corr)
-            init_state.append(arith.index(1))
-
-            results = init_state
-
-            # ---- Per-tile hot loop: tiles 1..N-1 (HK L320-471) ----
-            _loop_start = arith.MinSIOp(arith.index(BLOCK_N), kv_upper).result
-
-            for kv_tile, state in range(_loop_start, kv_upper, arith.index(BLOCK_N),
-                                        init=init_state):
-                _ci = 0
-                m_running = state[_ci]; _ci += 1
-                l_running = state[_ci]; _ci += 1
-                o_accs = [state[_ci + i] for i in range_constexpr(D_CHUNKS)]; _ci += D_CHUNKS
-                _kp_lo = [state[_ci + i] for i in range_constexpr(K_STEPS_QK)]; _ci += K_STEPS_QK
-                _kp_hi = [state[_ci + i] for i in range_constexpr(K_STEPS_QK)]; _ci += K_STEPS_QK
-                _plo_vec = state[_ci]; _ci += 1
-                _dhi_vec = state[_ci]; _ci += 1
-                _corr = state[_ci]; _ci += 1
-                _buf = state[_ci]
-                # Unpack v16f32 → individual f32 for element-wise ops
-                _plo = [vector.extract(_plo_vec, static_position=[_r], dynamic_position=[]) for _r in range(16)]
-                _dhi = [vector.extract(_dhi_vec, static_position=[_r], dynamic_position=[]) for _r in range(16)]
-
-                _alt_buf = arith.index(1) - _buf
-
-                # ==== Cluster 0: QK(k_packs) + finish_softmax(prev) (HK L322-339) ====
-                s_acc_lo, s_acc_hi = _do_qk_gemm(_kp_lo, _kp_hi)
-                # finish softmax: exp2 second half (HK L328/L400)
-                _phi = []
-                for _r in range_constexpr(16):
-                    _phi.append(arith.ArithValue(_dhi[_r]).exp2(fastmath=fm_fast))
-                # pending_scale: mul(norm_vec, scale_vec) (HK L329-331/L401-403)
-                _lc = arith.MulFOp(_corr, l_running, fastmath=fm_fast).result
-                # col_sum (HK L332/L404)
-                _lsum = c_zero_f
-                for _r in range_constexpr(16):
-                    _lsum = arith.AddFOp(_lsum, _plo[_r], fastmath=fm_fast).result
-                for _r in range_constexpr(16):
-                    _lsum = arith.AddFOp(_lsum, _phi[_r], fastmath=fm_fast).result
-                _ps = reduction_peer(_lsum)
-                _ts = arith.AddFOp(_lsum, _ps, fastmath=fm_fast).result
-                l_running = arith.AddFOp(_lc, _ts, fastmath=fm_fast).result
-                # copy att to bf16 → p_packs (HK L333-334/L405-406)
-                p_packs_lo, p_packs_hi = _pack_p_vals(_plo, _phi)
-                _sched_barrier_exp_pairs(6, 3, 0)
-                _sched_barrier_pairs(10, 5, 0)
-                rocdl.sched_barrier(0)
+                # ==== Cluster 0: K read + QK + softmax ====
+                rocdl.s_waitcnt(0)
                 gpu.barrier()
-                rocdl.sched_barrier(0)
-
-                # ==== Cluster 1: K DMA(t+2→buf) + V read(alt→regs) (HK L341-350) ====
-                _k_dma_tile = kv_tile + arith.index(2 * BLOCK_N)
-                _has_k = arith.cmpi(arith.CmpIPredicate.slt, _k_dma_tile, kv_upper)
-                _if_k = scf.IfOp(_has_k)
-                with ir.InsertionPoint(_if_k.then_block):
-                    coop_dma_k(_k_dma_tile, _buf)
-                    scf.YieldOp([])
-                # V read → regs (HK L345: load(v_reg, v_smem[0/1]))
-                _v_packs = _preload_v_packs(v_buf_base(_alt_buf))
-                # Extract QK result (causal mask applied in cluster 2 before softmax)
+                s_acc_lo, s_acc_hi = _do_qk_gemm_pipelined(k_buf_base(kv_sub))
                 s_raw_lo, s_raw_hi = _extract_s_raw(s_acc_lo, s_acc_hi)
-                s_raw_lo, s_raw_hi = _apply_causal_mask(s_raw_lo, s_raw_hi, kv_tile)
-                # HK L346-347: s_waitcnt lgkmcnt(0) vmcnt(4)
-                rocdl.s_waitcnt(0)
-                rocdl.sched_barrier(0)
-                gpu.barrier()
-                rocdl.sched_barrier(0)
-
-                # ==== Cluster 2: PV + partial_softmax (HK L352-381) ====
-                rocdl.s_setprio(1)
-                o_accs = _do_pv_gemm_from_regs(_v_packs, p_packs_lo, p_packs_hi, o_accs)
+                s_raw_lo, s_raw_hi = _apply_causal_mask(s_raw_lo, s_raw_hi, kv_start)
                 m_new = _compute_max(s_raw_lo, s_raw_hi, m_running)
-                _cr_raw = arith.SubFOp(m_running, m_new, fastmath=fm_fast).result
-                _cr_sc = arith.MulFOp(_cr_raw, c_sm_scale_log2e, fastmath=fm_fast).result
-                _corr = arith.ArithValue(_cr_sc).exp2(fastmath=fm_fast)
-                _corr_vec = vector.broadcast(v16f32_type, _corr)
-                for _dc in range_constexpr(D_CHUNKS):
-                    o_accs[_dc] = arith.MulFOp(o_accs[_dc], _corr_vec, fastmath=fm_fast).result
-                m_running = m_new
-                # sub_col + exp2 first half (HK L374-375)
-                _sc = arith.MulFOp(c_sm_scale_log2e, m_new, fastmath=fm_fast).result
-                _neg_sc = arith.SubFOp(c_zero_f, _sc, fastmath=fm_fast).result
-                _plo = []
-                for _r in range_constexpr(16):
-                    _d = math_dialect.fma(s_raw_lo[_r], c_sm_scale_log2e, _neg_sc)
-                    _plo.append(arith.ArithValue(_d).exp2(fastmath=fm_fast))
-                _dhi = []
-                for _r in range_constexpr(16):
-                    _dhi.append(math_dialect.fma(s_raw_hi[_r], c_sm_scale_log2e, _neg_sc))
-                _sched_barrier_pairs(6, 5, 0)
-                _sched_barrier_exp_pairs(6, 3, 0)
+                p_vals_lo, p_vals_hi, m_running, l_running, o_accs = \
+                    _compute_softmax_full(s_raw_lo, s_raw_hi, m_new, m_running, l_running, o_accs)
+                p_packs_lo, p_packs_hi = _pack_p_vals(p_vals_lo, p_vals_hi)
+
+                # ==== Cluster 1: K DMA (clamped) ====
+                gpu.barrier()
+                coop_dma_k(arith.MinSIOp(kv_start + BLOCK_N, _kv_last).result, 1 - kv_sub)
+
+                # ==== Cluster 2: V read + PV ====
+                gpu.barrier()
+                rocdl.s_setprio(1)
+                o_accs = _do_pv_gemm(v_buf_base(kv_sub), p_packs_lo, p_packs_hi, o_accs)
                 rocdl.s_setprio(0)
-                rocdl.sched_barrier(0)
+
+                # ==== Cluster 3: V DMA (clamped) ====
                 gpu.barrier()
-                rocdl.sched_barrier(0)
+                coop_dma_v(arith.MinSIOp(kv_start + 2 * BLOCK_N, _kv_last).result, kv_sub)
 
-                # ==== Cluster 3: V DMA(t+1→alt) + K read(alt→k_packs) (HK L383-392) ====
-                _v_dma_tile = kv_tile + arith.index(BLOCK_N)
-                _has_v = arith.cmpi(arith.CmpIPredicate.slt, _v_dma_tile, kv_upper)
-                _if_v = scf.IfOp(_has_v)
-                with ir.InsertionPoint(_if_v.then_block):
-                    coop_dma_v(_v_dma_tile, _alt_buf)
-                    scf.YieldOp([])
-                _kp_lo, _kp_hi = _read_all_k_packs(k_buf_base(_alt_buf))
-                # HK L388-389: s_waitcnt lgkmcnt(0) vmcnt(4)
-                rocdl.s_waitcnt(0)
-                rocdl.sched_barrier(0)
-                gpu.barrier()
-                rocdl.sched_barrier(0)
+            yield [m_running, l_running] + o_accs
 
-                # ==== Yield all loop-carried state (packed) ====
-                _plo_vec = vector.from_elements(v16f32_type, _plo)
-                _dhi_vec = vector.from_elements(v16f32_type, _dhi)
-                _yield = [m_running, l_running] + o_accs
-                for _ks in range_constexpr(K_STEPS_QK):
-                    _yield.append(_kp_lo[_ks])
-                for _ks in range_constexpr(K_STEPS_QK):
-                    _yield.append(_kp_hi[_ks])
-                _yield.append(_plo_vec)
-                _yield.append(_dhi_vec)
-                _yield.append(_corr)
-                _yield.append(_alt_buf)
-                results = yield _yield
+        o_finals = [loop_results[2 + dc] for dc in range_constexpr(D_CHUNKS)]
 
-            # ---- Epilogue: finish last deferred softmax + PV (HK L634-691) ----
-            _ci = 0
-            _ci += 2  # skip m, l
-            o_finals = [results[2 + dc] for dc in range_constexpr(D_CHUNKS)]
-            _ci = 2 + D_CHUNKS + 2 * K_STEPS_QK
-            _ep_plo_vec = results[_ci]; _ci += 1
-            _ep_dhi_vec = results[_ci]; _ci += 1
-            _ep_corr = results[_ci]; _ci += 1
-            _ep_buf = results[_ci]
-            _ep_plo = [vector.extract(_ep_plo_vec, static_position=[_r], dynamic_position=[]) for _r in range(16)]
-            _ep_dhi = [vector.extract(_ep_dhi_vec, static_position=[_r], dynamic_position=[]) for _r in range(16)]
-            _ep_alt = arith.index(1) - _ep_buf
-            # finish softmax for last tile
-            _ep_phi = []
-            for _r in range_constexpr(16):
-                _ep_phi.append(arith.ArithValue(_ep_dhi[_r]).exp2(fastmath=fm_fast))
-            _ep_lsum = c_zero_f
-            for _r in range_constexpr(16):
-                _ep_lsum = arith.AddFOp(_ep_lsum, _ep_plo[_r], fastmath=fm_fast).result
-            for _r in range_constexpr(16):
-                _ep_lsum = arith.AddFOp(_ep_lsum, _ep_phi[_r], fastmath=fm_fast).result
-            _ep_ps = reduction_peer(_ep_lsum)
-            _ep_ts = arith.AddFOp(_ep_lsum, _ep_ps, fastmath=fm_fast).result
-            _ep_lc = arith.MulFOp(_ep_corr, results[1], fastmath=fm_fast).result
-            _final_l = arith.AddFOp(_ep_lc, _ep_ts, fastmath=fm_fast).result
-            _ep_pp_lo, _ep_pp_hi = _pack_p_vals(_ep_plo, _ep_phi)
-            # PV for last tile using V from v_buf[alt]
-            rocdl.s_waitcnt(0)
-            gpu.barrier()
-            _ep_v_packs = _preload_v_packs(v_buf_base(_ep_alt))
-            rocdl.s_setprio(1)
-            o_finals = _do_pv_gemm_from_regs(_ep_v_packs, _ep_pp_lo, _ep_pp_hi, o_finals)
-            rocdl.s_setprio(0)
-            rocdl.sched_barrier(0)
-            gpu.barrier()
-
-            # HK post-loop stagger (HK L678-680)
-            if _hk_enable_stagger:
-                _not_stagger = arith.cmpi(
-                    arith.CmpIPredicate.ult, wave_id, arith.index(NUM_WAVES // 2))
-                _stagger_if2 = scf.IfOp(_not_stagger)
-                with ir.InsertionPoint(_stagger_if2.then_block):
-                    gpu.barrier()
-                    scf.YieldOp([])
-
-        # ================================================================
-        # Non-DMA-dbuf fallback paths (PREFETCH_3BUF or basic)
-        # ================================================================
-        else:
-            init_args = [c_neg_inf, c_zero_f]
-            for _ in range_constexpr(D_CHUNKS):
-                init_args.append(c_zero_v16f32)
-
-            for kv_block_start, inner_iter_args, loop_results in scf.for_(
-                arith.index(0), kv_upper, arith.index(BLOCK_N_OUT),
-                iter_args=init_args,
-            ):
-                m_running = inner_iter_args[0]
-                l_running = inner_iter_args[1]
-                o_accs = [inner_iter_args[2 + i] for i in range_constexpr(D_CHUNKS)]
-
-                if ENABLE_PREFETCH_3BUF:
-                    preload_k_count = min(NUM_PREFETCH_K, N_SUBTILES)
-                    for pre_k in range_constexpr(preload_k_count):
-                        pre_k_slot = CK_LDS_SEQ[pre_k % len(CK_LDS_SEQ)] % NUM_PREFETCH_K
-                        pre_k_start = kv_block_start + pre_k * BLOCK_N
-                        if ENABLE_DMA:
-                            coop_dma_k(pre_k_start, pre_k_slot)
-                        else:
-                            coop_load_k(pre_k_start, pre_k_slot)
-                    if ENABLE_DMA:
-                        rocdl.s_waitcnt(0)
-                    else:
-                        rocdl.sched_group_barrier(rocdl.mask_vmem_rd, 1, 0)
-                    gpu.barrier()
-
-                for kv_sub in range_constexpr(N_SUBTILES):
-                    kv_start = kv_block_start + kv_sub * BLOCK_N
-
-                    if ENABLE_PREFETCH_3BUF:
-                        k_slot = CK_LDS_SEQ[kv_sub % len(CK_LDS_SEQ)] % NUM_PREFETCH_K
-                    else:
-                        k_slot = 0
-                        coop_load_k(kv_start, k_slot)
-                        gpu.barrier()
-                    k_base = k_buf_base(k_slot)
-
-                    if not USE_HW_TR:
-                        _v_vecs_prefetch = coop_load_v_global(kv_start)
-
-                    s_acc_lo, s_acc_hi = _do_qk_gemm(*_read_all_k_packs(k_base))
-                    rocdl.sched_barrier(0)
-
-                    s_raw_lo, s_raw_hi = _extract_s_raw(s_acc_lo, s_acc_hi)
-                    s_raw_lo, s_raw_hi = _apply_causal_mask(s_raw_lo, s_raw_hi, kv_start)
-
-                    m_new = _compute_max(s_raw_lo, s_raw_hi, m_running)
-                    p_vals_lo, p_vals_hi, m_running, l_running, o_accs = \
-                        _compute_softmax_full(s_raw_lo, s_raw_hi, m_new, m_running, l_running, o_accs)
-                    p_packs_lo, p_packs_hi = _pack_p_vals(p_vals_lo, p_vals_hi)
-
-                    rocdl.sched_barrier(0)
-
-                    if ENABLE_PREFETCH_3BUF:
-                        v_slot = CK_LDS_SEQ[kv_sub % len(CK_LDS_SEQ)] % NUM_PREFETCH_V
-                        v_base = v_buf_base(v_slot)
-                        coop_load_v(kv_start, v_slot)
-                        rocdl.sched_group_barrier(rocdl.mask_dswr, 1, 0)
-                        gpu.barrier()
-                    elif ENABLE_DMA:
-                        v_base = v_buf_base(0)
-                        coop_dma_v(kv_start, 0)
-                        rocdl.s_waitcnt(0)
-                        gpu.barrier()
-                    else:
-                        v_base = v_buf_base(0)
-                        _waitcnt_vm_n(0)
-                        coop_store_v_lds(_v_vecs_prefetch, 0)
-                        rocdl.sched_group_barrier(rocdl.mask_dswr, 1, 0)
-                        gpu.barrier()
-
-                    o_accs = _do_pv_gemm(v_base, p_packs_lo, p_packs_hi, o_accs)
-
-                    if ENABLE_PREFETCH_3BUF and (kv_sub + min(NUM_PREFETCH_K, N_SUBTILES)) < N_SUBTILES:
-                        next_k_sub = kv_sub + min(NUM_PREFETCH_K, N_SUBTILES)
-                        next_k_start = kv_block_start + next_k_sub * BLOCK_N
-                        next_k_slot = CK_LDS_SEQ[next_k_sub % len(CK_LDS_SEQ)] % NUM_PREFETCH_K
-                        if ENABLE_DMA:
-                            coop_dma_k(next_k_start, next_k_slot)
-                        else:
-                            coop_load_k(next_k_start, next_k_slot)
-
-                yield [m_running, l_running] + o_accs
-
-            o_finals = [loop_results[2 + dc] for dc in range_constexpr(D_CHUNKS)]
 
         # ---- Normalize and store O (skip OOB rows for partial Q tiles) ----
-        if _use_dma_dbuf:
-            l_final = _final_l
-        else:
-            l_final = loop_results[1]
+        l_final = loop_results[1]
 
         inv_l = arith.DivFOp(
             c_one_f,
