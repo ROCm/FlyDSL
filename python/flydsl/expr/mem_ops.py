@@ -165,7 +165,7 @@ def load_device_ptr(array_base_i64, index):
     from . import arith as ea
 
     i64 = T.i64
-    if hasattr(index, 'type') and str(index.type) == 'i32':
+    if hasattr(index, 'type') and isinstance(index.type, ir.IntegerType) and index.type.width == 32:
         index = _arith.ExtUIOp(i64, index).result
     elem_addr = array_base_i64 + index * ea.constant(8, type=i64)
     ptr = llvm.IntToPtrOp(ir.Type.parse("!llvm.ptr"), elem_addr).result

@@ -17,12 +17,13 @@ from flydsl._mlir import ir
 from flydsl._mlir.dialects import scf
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 
-# Signal buffer layout offsets (bytes) within the per-rank signal buffer
-_SG_START_OFF_B = 0
-_SG_END_OFF_B = 2560
-_SG_FLAG_OFF_B = 5120
+from kernels.custom_all_reduce import _KMAXBLOCKS as _MAX_BLOCKS
 
-_MAX_BLOCKS = 80
+# Signal buffer layout offsets (bytes), derived from _MAX_BLOCKS.
+# start[_MAX_BLOCKS][8] of uint32 | end[_MAX_BLOCKS][8] of uint32 | flag[_MAX_BLOCKS] of uint32
+_SG_START_OFF_B = 0
+_SG_END_OFF_B = _MAX_BLOCKS * 8 * 4            # 2560 when _MAX_BLOCKS=80
+_SG_FLAG_OFF_B = _MAX_BLOCKS * 8 * 4 * 2       # 5120 when _MAX_BLOCKS=80
 
 
 # ---------------------------------------------------------------------------
@@ -112,8 +113,7 @@ def _signal_end_sync(*, lane_i32, rank_i32, bid_i32, self_sg_i64, sgs_i64,
                            that L2 dirty lines reach HBM before the signal.
                    False → use st_signal_u32 (signal store only, no wbl2).
                            For nt data stores (st_nt_16b) which already bypass
-                           L2; matches aiter's end_sync<ngpus,true> with
-                           ATOMIC_RELAXED + MEMORY_SCOPE_SYSTEM.
+                           L2; uses ATOMIC_RELAXED + MEMORY_SCOPE_SYSTEM.
     """
 
 
@@ -167,10 +167,15 @@ def _signal_end_sync(*, lane_i32, rank_i32, bid_i32, self_sg_i64, sgs_i64,
 # ---------------------------------------------------------------------------
 
 def _set_workgroup_size(threads: int):
-    """Set rocdl work group size attributes on the enclosing gpu.func."""
+    """Get the enclosing gpu.func and set rocdl.flat_work_group_size.
+
+    rocdl.reqd_work_group_size is set by the MLIR lowering from the
+    known_block_size attribute declared on the @flyc.kernel decorator;
+    setting it here as well would create a duplicate attribute in the
+    LLVMFuncOp and trigger a DictionaryAttr assertion failure.
+    """
     entry_block = ir.InsertionPoint.current.block
     gpu_func_op = entry_block.owner
-    gpu_func_op.operation.attributes["rocdl.reqd_work_group_size"] = ir.DenseI32ArrayAttr.get([threads, 1, 1])
     gpu_func_op.operation.attributes["rocdl.flat_work_group_size"] = ir.StringAttr.get(f"{threads},{threads}")
     return gpu_func_op
 
@@ -190,13 +195,20 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
     Args:
         N:          Total number of elements to reduce.
         dtype_str:  "f16" or "f32".
-        world_size: Number of GPUs (2, 4, 6, or 8).
+        world_size: Number of GPUs (2, 4, or 8).
         threads:    Threads per block (must be divisible by world_size).
     """
-    if world_size not in {2, 4, 6, 8}:
-        raise ValueError(f"world_size must be one of {{2,4,6,8}}, got {world_size}")
+    if world_size not in {2, 4, 8}:
+        raise ValueError(f"world_size must be one of {{2,4,8}}, got {world_size}")
     if threads <= 0 or threads % world_size != 0:
         raise ValueError(f"threads={threads} must be > 0 and divisible by world_size={world_size}")
+    tnum_gpu_check = threads // world_size
+    if tnum_gpu_check & (tnum_gpu_check - 1) != 0:
+        raise ValueError(
+            f"threads/world_size must be a power of 2, got "
+            f"threads={threads}, world_size={world_size}, "
+            f"threads/world_size={tnum_gpu_check}"
+        )
 
     pack_elems = _pack_elems(dtype_str)
     if N <= 0 or N % pack_elems != 0:
@@ -226,7 +238,7 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
     # -----------------------------------------------------------------------
     # GPU Kernel: 1-stage arr (full allreduce in one pass, CUDAGraph-compatible)
     # -----------------------------------------------------------------------
-    @flyc.kernel
+    @flyc.kernel(known_block_size=[threads, 1, 1])
     def allreduce_1stage_arr(
         rank: Int32,
         self_sg: Int64,
@@ -234,7 +246,7 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
         in_ptrs: Int64,
         out_ptr: Int64,
     ):
-        """1-stage allreduce using shared memory (matches aiter pattern).
+        """1-stage allreduce using shared memory.
 
         Each warp loads data from one rank into shared memory, then warp 0
         reduces across all warps and writes the result to global memory.
@@ -336,13 +348,12 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
             # warp-0 finishes before any thread reads the new data.
             scf.YieldOp([p + stride_pack, ea.constant(1, type=i32) - parity])
 
-        # NOTE: aiter 1-stage does NOT use end_sync (commented out in upstream).
-        # Omitting end_sync here to match aiter behaviour and avoid hangs.
+        # 1-stage does not use end_sync to avoid hangs.
 
     # -----------------------------------------------------------------------
     # GPU Kernel: 2-stage arr (reduce-scatter + all-gather)
     # -----------------------------------------------------------------------
-    @flyc.kernel
+    @flyc.kernel(known_block_size=[threads, 1, 1])
     def allreduce_2stage_arr(
         rank: Int32,
         self_sg: Int64,
@@ -448,7 +459,7 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
 
         idx_p = start_p + tid_pack
         if _use_single_buf_2stage:
-            # Single buffer: 8KB LDS, 2 barriers per iteration (matches aiter layout).
+            # Single buffer: 8KB LDS, 2 barriers per iteration.
             loop1 = scf.WhileOp([i32], [idx_p])
             b1 = ir.Block.create_at_start(loop1.before, [i32])
             a1 = ir.Block.create_at_start(loop1.after, [i32])
@@ -542,7 +553,7 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
     # GPU Kernel: 2-stage write-mode (large tensors, writes reduced result
     # directly to REMOTE output buffers via XGMI)
     # -----------------------------------------------------------------------
-    @flyc.kernel
+    @flyc.kernel(known_block_size=[threads, 1, 1])
     def allreduce_2stage_write_mode(
         rank: Int32,
         self_sg: Int64,
@@ -640,12 +651,22 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
 
         # ---- Stage 2: reduce local tmp and write to REMOTE outputs ----
         part_p_i32 = ea.constant(part_p, type=i32)
+        # The last rank's output partition has largest_part_p elements
+        # (= part_p + num_packs % world_size).  Use a runtime branch so that
+        # when num_packs is evenly divisible the overhead is minimal (same value).
+        is_last_rank_s2 = rank_i32 == ea.constant(world_size - 1, type=i32)
+        end_s2_if = scf.IfOp(is_last_rank_s2, results_=[i32], has_else=True)
+        with ir.InsertionPoint(end_s2_if.then_block):
+            scf.YieldOp([ea.constant(largest_part_p, type=i32)])
+        with ir.InsertionPoint(end_s2_if.else_block):
+            scf.YieldOp([part_p_i32])
+        end_s2 = end_s2_if.results[0]
         loop_s2 = scf.WhileOp([i32, i32], [tid_pack, stride_pack])
         bs2 = ir.Block.create_at_start(loop_s2.before, [i32, i32])
         as2 = ir.Block.create_at_start(loop_s2.after, [i32, i32])
         with ir.InsertionPoint(bs2):
             cur = bs2.arguments[0]
-            cond = _u(cur) < part_p_i32
+            cond = _u(cur) < end_s2
             scf.ConditionOp(cond, [cur, bs2.arguments[1]])
         with ir.InsertionPoint(as2):
             cur = as2.arguments[0]
@@ -695,10 +716,8 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
             dst_byte_off = dst_out_off.extui(i64) * ea.constant(16, type=i64)
 
             # Each warp writes its reduced partition directly to the target
-            # output via flat_store_dwordx4 nt, matching aiter's
-            # is_broadcast_reg_outptr=true path (__builtin_nontemporal_store).
-            # The nt hint bypasses L1/L2 and works for all memory types
-            # (regular hipMalloc IPC-mapped addresses included).
+            # output via flat_store_dwordx4 nt. The nt hint bypasses L1/L2
+            # and works for all memory types (including IPC-mapped addresses).
             dst_ptr = out_ptrs_arr[0]
             for w in range_constexpr(1, world_size):
                 is_warp_w = warp_id_local == ea.constant(w, type=i32)

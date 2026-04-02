@@ -3,19 +3,19 @@
 
 """Custom all-reduce kernel + Python-facing shim.
 
-Provides FlyDSL-generated allreduce kernels following the AIter signal
+Provides FlyDSL-generated allreduce kernels with cross-GPU signal
 protocol for multi-GPU communication on ROCm.
 """
 
 from contextlib import contextmanager
 import torch
 
-_AITER_KMAXBLOCKS = 80
-_DEFAULT_MAX_SIZE = 8192 * 1024 * 8 * 2  # 128 MB, matches aiter default
+_KMAXBLOCKS = 80
+_DEFAULT_MAX_SIZE = 8192 * 1024 * 8 * 2  # 128 MB
 
 
 def meta_size() -> int:
-    """Return meta buffer size (for API compatibility with aiter)."""
+    """Return meta buffer size (for API compatibility)."""
     return 0
 
 
@@ -34,21 +34,19 @@ _FLYDSL_AITER_GLOO_GROUP = None
 
 
 def init_custom_ar(meta, rank_data, handles, offsets, rank: int, full_nvlink: bool, out=None, max_size: int = _DEFAULT_MAX_SIZE):
-    """Initialize allreduce with AIter or FlyDSL backend.
+    """Initialize allreduce backend.
 
     Backend controlled by env var FLYDSL_AITER_IMPL:
-    - "aiter" (default): use AIter kernel
-    - "flydsl": use FlyDSL kernel with AIter signal protocol
+    - "flydsl" (default): use FlyDSL kernel
+    - "aiter": use aiter kernel (requires aiter package)
     """
     import os
     import torch.distributed as dist
 
     _ = meta
     world_size = len(offsets)
-    if world_size > 8:
-        raise ValueError("world size > 8 is not supported")
-    if world_size > 1 and (world_size % 2 != 0):
-        raise ValueError("Odd num gpus is not supported for now")
+    if world_size not in {2, 4, 8}:
+        raise ValueError(f"world_size must be one of {{2, 4, 8}}, got {world_size}")
     if world_size != len(handles):
         raise ValueError("handles length should equal to offsets length")
     if rank < 0 or rank >= world_size:
@@ -80,7 +78,6 @@ def init_custom_ar(meta, rank_data, handles, offsets, rank: int, full_nvlink: bo
             full_nvlink=bool(full_nvlink),
         )
 
-    # impl == "aiter"
     try:
         from aiter.dist.device_communicators.custom_all_reduce import CustomAllreduce as AIterCustomAllreduce
     except ModuleNotFoundError:
@@ -101,19 +98,27 @@ def init_custom_ar(meta, rank_data, handles, offsets, rank: int, full_nvlink: bo
 
 
 class FlyDSLAllreduce:
-    """FlyDSL kernels following AIter signal protocol on ROCm."""
+    """FlyDSL allreduce kernels with cross-GPU signal protocol on ROCm."""
 
     _HIP_IPC_HANDLE_BYTES = 64
     _HIP_IPC_MEM_LAZY_ENABLE_PEER_ACCESS = 0x1
+    _HIP_DEVICE_MALLOC_UNCACHED = 0x3
     _hip = None
     _hipIpcMemHandle_t = None
-    _gpu_arch = None  # cached GPU arch name (e.g. 'gfx942' for CDNA3)
+    _gpu_arch = None
+
+    # Signal struct layout (each field alignas(128)):
+    #   uint32_t start[_MAX_BLOCKS][8]  -> _MAX_BLOCKS * 8 * 4
+    #   uint32_t end[_MAX_BLOCKS][8]    -> _MAX_BLOCKS * 8 * 4
+    #   uint32_t _flag[_MAX_BLOCKS]     -> _MAX_BLOCKS * 4
+    # Struct size padded to 128-byte alignment.
+    _SIGNAL_SIZE = ((_KMAXBLOCKS * 8 * 4) * 2 + _KMAXBLOCKS * 4 + 127) & ~127
 
     @classmethod
     def _get_gpu_arch(cls) -> str:
         """Return current GPU architecture name (cached).
 
-        Mirrors aiter C++ logic: use arch.find("gfx942") to decide write-mode.
+        Uses arch name (e.g. 'gfx942') to decide write-mode eligibility.
         """
         if cls._gpu_arch is not None:
             return cls._gpu_arch
@@ -163,6 +168,12 @@ class FlyDSLAllreduce:
         cls._hip.hipIpcCloseMemHandle.argtypes = [ctypes.c_void_p]
         cls._hip.hipGetErrorString.restype = ctypes.c_char_p
         cls._hip.hipGetErrorString.argtypes = [ctypes.c_int]
+        cls._hip.hipExtMallocWithFlags.restype = ctypes.c_int
+        cls._hip.hipExtMallocWithFlags.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.c_size_t, ctypes.c_uint]
+        cls._hip.hipFree.restype = ctypes.c_int
+        cls._hip.hipFree.argtypes = [ctypes.c_void_p]
+        cls._hip.hipMemset.restype = ctypes.c_int
+        cls._hip.hipMemset.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_size_t]
         return cls._hip
 
     @classmethod
@@ -206,6 +217,29 @@ class FlyDSLAllreduce:
         err = hip.hipIpcCloseMemHandle(ctypes.c_void_p(int(base_ptr)))
         cls._hip_check(err, what="hipIpcCloseMemHandle")
 
+    @classmethod
+    def _alloc_uncached(cls, size: int) -> int:
+        """Allocate zero-initialised uncached device memory (hipDeviceMallocUncached).
+
+        Returns the raw device pointer as int.
+        """
+        import ctypes
+        hip = cls._load_hip()
+        buf = ctypes.c_void_p()
+        err = hip.hipExtMallocWithFlags(ctypes.byref(buf), ctypes.c_size_t(size),
+                                        ctypes.c_uint(cls._HIP_DEVICE_MALLOC_UNCACHED))
+        cls._hip_check(err, what="hipExtMallocWithFlags")
+        err = hip.hipMemset(buf, 0, ctypes.c_size_t(size))
+        cls._hip_check(err, what="hipMemset")
+        return int(buf.value)
+
+    @classmethod
+    def _free_device_mem(cls, ptr: int) -> None:
+        import ctypes
+        hip = cls._load_hip()
+        err = hip.hipFree(ctypes.c_void_p(ptr))
+        cls._hip_check(err, what="hipFree")
+
     @staticmethod
     def _gather_object_list_via_broadcast(group, shard_data):
         import torch.distributed as dist
@@ -221,7 +255,6 @@ class FlyDSLAllreduce:
     def __init__(self, *, group, device, max_size: int, world_size: int, rank: int, full_nvlink: bool):
         import os
         import torch.distributed as dist
-        import aiter as aiter_ops
 
         self.group = group
         self.device = device
@@ -232,18 +265,13 @@ class FlyDSLAllreduce:
 
         if not dist.is_initialized():
             raise RuntimeError("torch.distributed must be initialized")
-        if self.world_size <= 1:
-            raise ValueError("world_size must be > 1")
+        if self.world_size not in {2, 4, 8}:
+            raise ValueError(f"world_size must be one of {{2, 4, 8}}, got {self.world_size}")
 
-        self.meta = aiter_ops.allocate_meta_buffer(int(aiter_ops.meta_size()) + int(self.max_size))
-        try:
-            self.meta.zero_()
-        except Exception:
-            pass
-        self._meta_size = int(aiter_ops.meta_size())
+        alloc_size = self._SIGNAL_SIZE + int(self.max_size)
+        self._meta_ptr = self._alloc_uncached(alloc_size)
 
-        my_meta_h = aiter_ops.get_meta_buffer_ipc_handle(self.meta)
-        my_meta_bytes = bytes(my_meta_h.detach().cpu().numpy().tobytes())
+        my_meta_bytes = self._get_mem_handle_bytes(self._meta_ptr)
         all_meta = self._gather_object_list_via_broadcast(self.group, (my_meta_bytes, 0))
 
         self._meta_bases = [None] * self.world_size
@@ -251,11 +279,11 @@ class FlyDSLAllreduce:
         self._tmp_ptrs = [0] * 8
         for r in range(self.world_size):
             hb, off = all_meta[r]
-            base_ptr = int(self.meta.data_ptr()) if r == self.rank else int(self._open_mem_handle(bytes(hb)))
+            base_ptr = self._meta_ptr if r == self.rank else int(self._open_mem_handle(bytes(hb)))
             if r != self.rank:
                 self._meta_bases[r] = base_ptr
             sg_ptr = base_ptr + off
-            tmp_ptr = sg_ptr + self._meta_size
+            tmp_ptr = sg_ptr + self._SIGNAL_SIZE
             if r < 8:
                 self._sg_ptrs[r] = sg_ptr
                 self._tmp_ptrs[r] = tmp_ptr
@@ -317,16 +345,20 @@ class FlyDSLAllreduce:
         self._graph_out = None
         self._graph_use_write_mode = False
         self._gpu_graph_in_ptrs_array = torch.tensor(rotated_input_buf_ptrs, dtype=torch.int64, device=self.device)
-        self._graph_in_bases = []  # flat list of opened peer IPC base ptrs (for cleanup)
+        # Accumulated IPC base ptrs opened for cudagraph captures.
+        # New captures APPEND; handles are never closed until close() is called.
+        # This prevents UAF when multiple CUDAGraphs are captured on the same
+        # instance: old graphs remain valid even after re-capture.
+        self._graph_ipc_reg_list: list = []
         self._gpu_graph_out_ptrs_array = torch.tensor(self._output_buffer_ptrs[:8], dtype=torch.int64, device=self.device)
-        self._graph_out_bases = []
-        # List-based cudagraph registration: [(tensor, per_call_ptrs, rotated), ...]
+        # unreg_list: entries captured during graph recording, pending IPC registration.
+        # Format: [(tensor, per_call_ptrs, rotated), ...]
         #   rotated=True  → inp, rotate by rank before writing ptrs
         #   rotated=False → out (write-mode), use rank-order ptrs
-        # ONE collective registers all entries at once after capture.
-        self._pending_graph_entries: list = []
-        # Per-capture cache: data_ptr -> per_call_ptrs tensor already queued.
-        # Prevents duplicate pending entries when the same tensor appears in
+        # _register_graph_tensors processes and clears this list after each capture.
+        self._graph_ipc_unreg_list: list = []
+        # Per-capture dedup cache: data_ptr -> per_call_ptrs tensor already queued.
+        # Prevents duplicate unreg_list entries when the same tensor appears in
         # multiple allreduce calls within one graph capture.
         self._graph_ptrs_cache: dict = {}
         # Cache for eagerly-registered user output IPC ptrs (key: data_ptr int)
@@ -341,14 +373,17 @@ class FlyDSLAllreduce:
 
     def close(self):
         """Release IPC memory handles for peer GPU buffers."""
-        for bases in [self._meta_bases, self._input_buffer_bases, self._output_buffer_bases, self._graph_out_bases]:
+        for bases in [self._meta_bases, self._input_buffer_bases, self._output_buffer_bases]:
             for b in bases:
                 if b is not None:
                     self._close_mem_handle(int(b))
-        # _graph_in_bases is a flat list of opened peer IPC bases
-        for b in self._graph_in_bases:
+        # Release all IPC handles accumulated across all cudagraph captures.
+        for b in self._graph_ipc_reg_list:
             if b is not None:
-                self._close_mem_handle(int(b))
+                try:
+                    self._close_mem_handle(int(b))
+                except Exception:
+                    pass
         # eager write-mode out-ptrs cache
         if self._out_ptrs_cache:
             for b in self._out_ptrs_cache.get('bases', []):
@@ -360,8 +395,13 @@ class FlyDSLAllreduce:
         self._meta_bases = []
         self._input_buffer_bases = []
         self._output_buffer_bases = []
-        self._graph_in_bases = []
-        self._graph_out_bases = []
+        self._graph_ipc_reg_list = []
+        if getattr(self, '_meta_ptr', None):
+            try:
+                self._free_device_mem(self._meta_ptr)
+            except Exception:
+                pass
+            self._meta_ptr = None
 
     @contextmanager
     def capture(self):
@@ -371,15 +411,14 @@ class FlyDSLAllreduce:
             self._graph_inp = None
             self._graph_out = None
             self._graph_use_write_mode = False
-            self._pending_graph_entries = []  # reset per-capture list
-            self._graph_ptrs_cache = {}       # reset per-capture ptrs cache
+            # _graph_ipc_unreg_list is guaranteed empty here: _register_graph_tensors
+            # always clears it after processing.  Only reset the per-capture dedup cache.
+            self._graph_ptrs_cache = {}
             yield
         finally:
             self._IS_CAPTURING = False
-            # List-based batch registration: one collective for all captured tensors.
-            # Covers BOTH write-mode (out entries, rotated=False) and
-            # non-write-mode (inp entries, rotated=True).
-            if self._pending_graph_entries:
+            # Batch-register all captured tensors (clears unreg_list on completion).
+            if self._graph_ipc_unreg_list:
                 self._register_graph_tensors()
 
     @classmethod
@@ -452,7 +491,7 @@ class FlyDSLAllreduce:
         2. _graph_ptrs_cache: per-call placeholder tensors already queued this
            capture; reuse instead of creating a duplicate pending entry.
         If neither hits, allocate a new placeholder, enqueue in
-        _pending_graph_entries, and store in _graph_ptrs_cache.
+        _graph_ipc_unreg_list, and store in _graph_ptrs_cache.
 
         Args:
             tensor:  inp tensor (rotated=True) or out tensor (rotated=False).
@@ -472,25 +511,24 @@ class FlyDSLAllreduce:
         if cached is not None:
             return cached
 
-        # First occurrence: allocate placeholder and queue for batch registration.
+        # First occurrence: allocate placeholder and enqueue in unreg_list.
         per_call_ptrs = torch.empty(8, dtype=torch.int64, device=self.device)
-        self._pending_graph_entries.append((tensor, per_call_ptrs, rotated))
+        self._graph_ipc_unreg_list.append((tensor, per_call_ptrs, rotated))
         self._graph_ptrs_cache[ptr] = per_call_ptrs
         return per_call_ptrs
 
     def _register_graph_tensors(self):
-        """Batch-register IPC handles for all captured input tensors in ONE collective.
+        """Batch-register IPC handles for all entries in the unreg_list.
 
-        Compared to the old two-collective approach (one for inp, one for out),
-        this collects all (handle, offset) pairs into a single list and calls
-        _gather_object_list_via_broadcast once, reducing inter-rank synchronisation.
-
-        Each entry in self._pending_graph_entries is (inp, per_call_in_ptrs) where
-        per_call_in_ptrs is the per-call GPU tensor that was passed to _run_kernel
-        during graph recording and whose values are updated here for replay.
+        Drains _graph_ipc_unreg_list in one collective:
+          - Each rank sends its (handle, offset) list and receives all others'.
+          - For every entry, peer IPC handles are opened and written into the
+            per_call_ptrs GPU tensor recorded during capture.
+          - Opened base ptrs are appended to _graph_ipc_reg_list (released at close()).
+          - unreg_list is cleared when done so the next capture starts clean.
         """
         ws, rk = self.world_size, self.rank
-        entries = self._pending_graph_entries
+        entries = self._graph_ipc_unreg_list
         if not entries:
             return
 
@@ -507,10 +545,13 @@ class FlyDSLAllreduce:
             self.group, my_handle_list
         )
 
-        # 3. For each entry, build pointer array and update in-place
+        # 3. For each entry, build pointer array and update in-place.
         #    rotated=True  → inp: rotate by rank  (read from peer GPU inputs)
         #    rotated=False → out: rank-order (write-mode broadcasts to all outs)
-        self._graph_in_bases = []  # flat list of opened peer bases (for cleanup)
+        #
+        # IMPORTANT: do NOT close handles from previous captures here.
+        # Old CUDAGraphs may still reference those IPC mappings.  Handles
+        # are accumulated in _graph_ipc_reg_list and released only in close().
         for entry_idx, (tensor, per_call_ptrs, rotated) in enumerate(entries):
             ptrs = [0] * 8
             for r in range(ws):
@@ -519,7 +560,7 @@ class FlyDSLAllreduce:
                     ptrs[r] = int(tensor.data_ptr())
                 else:
                     peer_base = int(self._open_mem_handle(bytes(hb)))
-                    self._graph_in_bases.append(peer_base)
+                    self._graph_ipc_reg_list.append(peer_base)
                     ptrs[r] = peer_base + o
             for i in range(ws, 8):
                 ptrs[i] = ptrs[0]
@@ -530,6 +571,9 @@ class FlyDSLAllreduce:
             per_call_ptrs.copy_(
                 torch.tensor(final, dtype=torch.int64, device=self.device)
             )
+
+        # unreg_list fully processed → clear so next capture starts clean.
+        self._graph_ipc_unreg_list = []
 
 
     def __del__(self):
@@ -639,7 +683,7 @@ class FlyDSLAllreduce:
         """Launch allreduce kernel (auto-selects 1-stage or 2-stage by data size)."""
         from flydsl.expr.typing import Int32, Int64, Stream
 
-        # Auto-select stage by data size (match aiter thresholds):
+        # Auto-select stage by data size:
         #   world_size == 2              → always 1-stage
         #   world_size <= 4, bytes < 160KB → 1-stage
         #   world_size <= 8, bytes < 80KB  → 1-stage
@@ -659,13 +703,13 @@ class FlyDSLAllreduce:
             pack_elems = 8 if dtype_str in ("f16", "bf16") else 4
             num_packs = int(N) // int(pack_elems)
             if _stage == "1":
-                # 1-stage: tnum_gpu threads per warp handle one pack each (match aiter)
+                # 1-stage: tnum_gpu threads per warp handle one pack each
                 tnum_gpu = self._threads // self.world_size
-                grid_x = int(max(1, min(_AITER_KMAXBLOCKS, (num_packs + tnum_gpu - 1) // tnum_gpu)))
+                grid_x = int(max(1, min(_KMAXBLOCKS, (num_packs + tnum_gpu - 1) // tnum_gpu)))
             else:
                 part_p = int(num_packs) // int(self.world_size)
                 tnum_gpu = self._threads // self.world_size
-                grid_x = int(max(1, min(_AITER_KMAXBLOCKS, (max(1, part_p) + tnum_gpu - 1) // tnum_gpu)))
+                grid_x = int(max(1, min(_KMAXBLOCKS, (max(1, part_p) + tnum_gpu - 1) // tnum_gpu)))
             self._grid_x_cache[(int(N), str(dtype_str), _stage)] = int(grid_x)
 
         if stream_ptr is None:
@@ -735,23 +779,24 @@ class FlyDSLAllreduce:
                 if self._reuse_out_default:
                     self._cached_out = out
 
+        dtype_str = self._dtype_str(inp)
+        bytes_n = int(inp.numel()) * int(inp.element_size())
+        N = int(out.numel())
+
+        if int(inp.numel()) != N:
+            raise ValueError("inp.numel must equal out.numel")
+        if not _is_weak_contiguous(inp):
+            raise ValueError("input tensor must be weak-contiguous")
+        if not _is_weak_contiguous(out):
+            raise ValueError("output tensor must be weak-contiguous")
+        if dtype_str != self._dtype_str(out):
+            raise ValueError("inp/out dtype mismatch")
+
         if validate:
-            if int(inp.numel()) != int(out.numel()):
-                raise ValueError("inp.numel must equal out.numel")
-            if not _is_weak_contiguous(out):
-                raise ValueError("output tensor must be weak-contiguous")
-            dtype_str = self._dtype_str(inp)
-            if dtype_str != self._dtype_str(out):
-                raise ValueError("inp/out dtype mismatch")
-            bytes_n = int(inp.numel()) * int(inp.element_size())
             if bytes_n % 16 != 0:
                 raise ValueError("byte size must be multiple of 16")
-            if bytes_n > self.max_size:
-                raise ValueError(f"input bytes {bytes_n} exceed max_size {self.max_size}")
-        else:
-            dtype_str = self._dtype_str(inp)
-            bytes_n = int(inp.numel()) * int(inp.element_size())
-        N = int(out.numel())
+            if bytes_n > self.max_size // 2:
+                raise ValueError(f"input bytes {bytes_n} exceed max_size/2={self.max_size // 2}")
 
         # Write-mode only on CDNA3 (gfx942), ws=8, large tensors
         use_write_mode = (
@@ -786,9 +831,12 @@ class FlyDSLAllreduce:
                     )
                 return out
             else:
-                # IS_CAPTURING=True but stream is not recording: warmup-inside-capture
-                # is not a supported usage path. Return zeros to keep all ranks in sync
-                # without issuing any kernel or collective.
+                from flydsl.utils import log
+                log().warning(
+                    "custom_all_reduce called with _IS_CAPTURING=True but "
+                    "stream is not recording. Returning zeros — this is not "
+                    "a supported usage path."
+                )
                 out.zero_()
                 return out
 
