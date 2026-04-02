@@ -362,6 +362,18 @@ class ArithValue(ir.Value):
         """Truncate float precision (e.g. f32 → bf16)."""
         return arith.TruncFOp(target_type, self, loc=loc).result
 
+    def extui(self, target_type, *, loc=None):
+        """Zero-extend integer to wider type (e.g. i32 → i64)."""
+        return arith.ExtUIOp(target_type, self, loc=loc).result
+
+    def extsi(self, target_type, *, loc=None):
+        """Sign-extend integer to wider type (e.g. i32 → i64)."""
+        return arith.ExtSIOp(target_type, self, loc=loc).result
+
+    def trunci(self, target_type, *, loc=None):
+        """Truncate integer to narrower type (e.g. i64 → i32)."""
+        return arith.TruncIOp(target_type, self, loc=loc).result
+
     def bitcast(self, target_type, *, loc=None):
         """Reinterpret bits as different type (same bit width)."""
         return arith.BitcastOp(target_type, self, loc=loc).result

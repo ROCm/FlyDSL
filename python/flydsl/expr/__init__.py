@@ -7,5 +7,5 @@ from .primitive import *
 from .gpu import *
 from .derived import *
 
-from . import arith, vector, gpu, buffer_ops, rocdl
+from . import arith, vector, gpu, buffer_ops, rocdl, mem_ops
 from .rocdl import tdm_ops
