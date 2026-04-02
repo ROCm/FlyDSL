@@ -14,7 +14,7 @@ from flydsl.expr import arith, buffer_ops, gpu, range_constexpr, rocdl, tdm_ops,
 from flydsl.expr.arith import _to_raw as _raw
 from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
-from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
+from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr, check_smem_capacity
 
 from flydsl.expr import idx2crd
 from kernels.gemm_common_gfx1250 import (
@@ -175,39 +175,64 @@ def compile_mxscale_gemm(
     interleaved_scale_cols_a = wmma_m_rep * scale_k_per_tile
     interleaved_scale_cols_b = b_scale_load_rep * scale_k_per_tile
 
-    stage_allocators = []
-    stage_a_data_off = []
-    stage_b_data_off = []
-    stage_a_scale_off = []
-    stage_b_scale_off = []
+    def _align_up(value: int, align: int) -> int:
+        if value % align == 0:
+            return value
+        return (value + align - 1) // align * align
 
-    for i in range(num_buffers):
-        name = _STAGE_NAMES[i]
-        alloc = SmemAllocator(None, arch=gpu_arch,
-                              global_sym_name=f"mxscale_{data_format}_{name}")
-        off = alloc._align(alloc.ptr, 16)
-        stage_a_data_off.append(off)
-        alloc.ptr = off + lds_a_data_bytes
-
-        off = alloc._align(alloc.ptr, 16)
-        stage_b_data_off.append(off)
-        alloc.ptr = off + lds_b_data_bytes
-
-        off = alloc._align(alloc.ptr, 16)
-        stage_a_scale_off.append(off)
-        alloc.ptr = off + lds_a_scale_bytes
-
-        off = alloc._align(alloc.ptr, 16)
-        stage_b_scale_off.append(off)
-        alloc.ptr = off + lds_b_scale_bytes
-
-        stage_allocators.append(alloc)
+    # All pipeline stages share the same intra-stage layout. Keep that layout
+    # unchanged and only remap each logical stage to a physical base inside one
+    # LDS arena so TDM epilogue can alias the dead prefix of the arena.
+    stage_layout = SmemAllocator(
+        None, arch=gpu_arch, global_sym_name=f"mxscale_{data_format}_layout")
+    stage_a_data_rel_off = stage_layout._align(stage_layout.ptr, 16)
+    stage_layout.ptr = stage_a_data_rel_off + lds_a_data_bytes
+    stage_b_data_rel_off = stage_layout._align(stage_layout.ptr, 16)
+    stage_layout.ptr = stage_b_data_rel_off + lds_b_data_bytes
+    stage_a_scale_rel_off = stage_layout._align(stage_layout.ptr, 16)
+    stage_layout.ptr = stage_a_scale_rel_off + lds_a_scale_bytes
+    stage_b_scale_rel_off = stage_layout._align(stage_layout.ptr, 16)
+    stage_layout.ptr = stage_b_scale_rel_off + lds_b_scale_bytes
+    stage_bytes = _align_up(stage_layout.ptr, 128)
 
     pre_loaded = num_buffers - 1
     loop_iters = (num_k_tiles - pre_loaded) // num_buffers
     _tail_start = loop_iters * num_buffers
     extra = num_k_tiles - _tail_start - pre_loaded
     _base_tail_plan = make_tail_plan(num_buffers, pre_loaded, extra)
+
+    _last_compute_stage = _base_tail_plan[-1][1]
+
+    stage_pitch_bytes = _align_up(stage_bytes, 1024)
+    arena_alloc = SmemAllocator(
+        None,
+        arch=gpu_arch,
+        global_sym_name=(
+            f"mxscale_{data_format}_{tile_m}x{tile_n}x{tile_k}_"
+            f"{m_warp}x{n_warp}_{num_buffers}buf_arena"),
+    )
+
+    stage_phys_order = [i for i in range(num_buffers) if i != _last_compute_stage]
+    stage_phys_order.append(_last_compute_stage)
+    stage_base_off = [0] * num_buffers
+    for phys_i, logical_i in enumerate(stage_phys_order):
+        stage_base_off[logical_i] = phys_i * stage_pitch_bytes
+    arena_alloc.ptr = stage_pitch_bytes * num_buffers
+    arena_total_bytes = arena_alloc.ptr
+    dead_prefix_bytes = stage_base_off[_last_compute_stage]
+
+    stage_a_data_off = [
+        stage_base_off[i] + stage_a_data_rel_off for i in range(num_buffers)
+    ]
+    stage_b_data_off = [
+        stage_base_off[i] + stage_b_data_rel_off for i in range(num_buffers)
+    ]
+    stage_a_scale_off = [
+        stage_base_off[i] + stage_a_scale_rel_off for i in range(num_buffers)
+    ]
+    stage_b_scale_off = [
+        stage_base_off[i] + stage_b_scale_rel_off for i in range(num_buffers)
+    ]
 
     if use_tdm_store:
         lds_d_row_stride = warp_tile_n * elem_bytes_d + LDS_PAD_D_BYTES
@@ -217,10 +242,11 @@ def compile_mxscale_gemm(
         _lds_d_stride_elems = lds_d_row_stride // 2
         _warp_d_elems = warp_d_bytes // 2
         _n_col_d_elems = WMMA_N * elem_bytes_d // 2
-        _last_compute_stage = _base_tail_plan[-1][1]
-        d_reuse_stage = 1 if _last_compute_stage == 0 else 0
-        if total_d_bytes > stage_allocators[d_reuse_stage].ptr:
-            stage_allocators[d_reuse_stage].ptr = total_d_bytes
+        d_need_epilogue_fence = total_d_bytes > dead_prefix_bytes
+        if total_d_bytes > arena_total_bytes:
+            arena_total_bytes = total_d_bytes
+            arena_alloc.ptr = total_d_bytes
+        check_smem_capacity(arena_total_bytes, gpu_arch)
 
     TDM_LOADS_PER_STEP = 4
     tail_plan = [
@@ -781,25 +807,25 @@ def compile_mxscale_gemm(
         lds_a_scale_f16 = lds_a_scale_bytes // 2
         lds_b_scale_f16 = lds_b_scale_bytes // 2
 
-        base_ptrs = [sa.get_base() for sa in stage_allocators]
+        arena_base_ptr = arena_alloc.get_base()
 
         stages_a = [
-            SmemPtr(base_ptrs[i], stage_a_data_off[i], elem_ty_lds,
+            SmemPtr(arena_base_ptr, stage_a_data_off[i], elem_ty_lds,
                     shape=(lds_a_data_f16,))
             for i in range_constexpr(num_buffers)
         ]
         stages_b = [
-            SmemPtr(base_ptrs[i], stage_b_data_off[i], elem_ty_lds,
+            SmemPtr(arena_base_ptr, stage_b_data_off[i], elem_ty_lds,
                     shape=(lds_b_data_f16,))
             for i in range_constexpr(num_buffers)
         ]
         stages_as = [
-            SmemPtr(base_ptrs[i], stage_a_scale_off[i], elem_ty_lds,
+            SmemPtr(arena_base_ptr, stage_a_scale_off[i], elem_ty_lds,
                     shape=(lds_a_scale_f16,))
             for i in range_constexpr(num_buffers)
         ]
         stages_bs = [
-            SmemPtr(base_ptrs[i], stage_b_scale_off[i], elem_ty_lds,
+            SmemPtr(arena_base_ptr, stage_b_scale_off[i], elem_ty_lds,
                     shape=(lds_b_scale_f16,))
             for i in range_constexpr(num_buffers)
         ]
@@ -819,7 +845,7 @@ def compile_mxscale_gemm(
                          for i in range_constexpr(num_buffers)]
 
         if use_tdm_store:
-            d_lds_base_ptr = base_ptrs[d_reuse_stage]
+            d_lds_base_ptr = arena_base_ptr
             d_lds_f16_count = total_d_bytes // 2
             d_smem = SmemPtr(d_lds_base_ptr, d_output_off, elem_ty_lds,
                              shape=(d_lds_f16_count,))
@@ -1037,6 +1063,8 @@ def compile_mxscale_gemm(
                                use_cluster=use_cluster)
 
         if use_tdm_store:
+            if d_need_epilogue_fence:
+                pipeline_fence(outstanding=0, use_cluster=use_cluster)
             rocdl.sched_barrier(0)
             epilogue_lds_stores(accs, d_lds_buffer, d_lane_base)
             rocdl.s_wait_dscnt(0)
@@ -1066,10 +1094,8 @@ def compile_mxscale_gemm(
         _ = cache_tag
         ctx = CompilationContext.get_current()
         with ir.InsertionPoint(ctx.gpu_module_body):
-            for alloc in stage_allocators:
-                alloc.finalized = False
-            for alloc in stage_allocators:
-                alloc.finalize()
+            arena_alloc.finalized = False
+            arena_alloc.finalize()
 
         idx_m = arith.index_cast(T.index, i32_m.ir_value())
         idx_n = arith.index_cast(T.index, i32_n.ir_value())

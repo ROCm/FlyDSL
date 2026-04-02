@@ -13,7 +13,7 @@ from flydsl.expr import arith, buffer_ops, gpu, range_constexpr, rocdl, tdm_ops,
 from flydsl.expr.arith import _to_raw as _raw
 from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
-from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
+from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr, check_smem_capacity
 
 from flydsl.expr import idx2crd
 from kernels.gemm_common_gfx1250 import (
@@ -140,29 +140,55 @@ def compile_wmma_gemm_tdm(
     lds_a_elems = tile_m * lds_a_stride + LDS_PAD_A
     lds_b_elems = tile_k * lds_b_stride + LDS_PAD_B
 
-    buf_size_elems = lds_a_elems + lds_b_elems
-
     # --- LDS allocation (B-first: B at offset 0 for smaller ds_load offsets) ---
     num_warps = m_warp * n_warp
 
-    stage_allocators = []
-    stage_a_offsets = []
-    stage_b_offsets = []
-    for i in range(num_buffers):
-        name = _STAGE_NAMES[i]
-        alloc = SmemAllocator(None, arch=gpu_arch, global_sym_name=f"wmma_tdm_{name}")
-        off = alloc._align(alloc.ptr, 16)
-        alloc.ptr = off + buf_size_elems * elem_bytes
-        stage_allocators.append(alloc)
-        stage_b_offsets.append(off)
-        stage_a_offsets.append(off + lds_b_elems * elem_bytes)
+    def _align_up(value: int, align: int) -> int:
+        if value % align == 0:
+            return value
+        return (value + align - 1) // align * align
+
+    # Keep per-stage LDS layout unchanged; only remap logical stages to
+    # physical stage bases inside one arena to enable safe epilogue aliasing.
+    stage_layout = SmemAllocator(None, arch=gpu_arch, global_sym_name="wmma_tdm_layout")
+    stage_b_rel_off = stage_layout._align(stage_layout.ptr, 16)
+    stage_layout.ptr = stage_b_rel_off + lds_b_elems * elem_bytes
+    stage_a_rel_off = stage_layout._align(stage_layout.ptr, 16)
+    stage_layout.ptr = stage_a_rel_off + lds_a_elems * elem_bytes
+    stage_bytes = _align_up(stage_layout.ptr, 128)
 
     # Compile-time pipeline parameters
     pre_loaded = num_buffers - 1        # stages pre-loaded in prologue
     loop_iters = (num_k_tiles - pre_loaded) // num_buffers
     _tail_start = loop_iters * num_buffers  # index of first un-computed tile in tail
     extra = num_k_tiles - _tail_start - pre_loaded
-    tail_plan = _make_tail_plan(num_buffers, pre_loaded, extra)
+    _base_tail_plan = _make_tail_plan(num_buffers, pre_loaded, extra)
+    _last_compute_stage = _base_tail_plan[-1][1]
+
+    stage_pitch_bytes = _align_up(stage_bytes, 1024)
+    arena_alloc = SmemAllocator(
+        None,
+        arch=gpu_arch,
+        global_sym_name=(
+            f"wmma_tdm_{in_dtype}_{out_dtype}_{tile_m}x{tile_n}x{tile_k}_"
+            f"{m_warp}x{n_warp}_{num_buffers}buf_arena"),
+    )
+    stage_phys_order = [i for i in range(num_buffers) if i != _last_compute_stage]
+    stage_phys_order.append(_last_compute_stage)
+    stage_base_off = [0] * num_buffers
+    for phys_i, logical_i in enumerate(stage_phys_order):
+        stage_base_off[logical_i] = phys_i * stage_pitch_bytes
+    arena_alloc.ptr = stage_pitch_bytes * num_buffers
+    arena_total_bytes = arena_alloc.ptr
+    dead_prefix_bytes = stage_base_off[_last_compute_stage]
+
+    stage_b_offsets = [
+        stage_base_off[i] + stage_b_rel_off for i in range(num_buffers)
+    ]
+    stage_a_offsets = [
+        stage_base_off[i] + stage_a_rel_off for i in range(num_buffers)
+    ]
+    tail_plan = _base_tail_plan
 
     if use_tdm_store:
         lds_d_row_stride = warp_tile_n * elem_bytes_d + LDS_PAD_D_BYTES
@@ -173,10 +199,11 @@ def compile_wmma_gemm_tdm(
         _lds_d_stride_elems = lds_d_row_stride // 2
         _warp_d_elems = warp_d_bytes // 2
         _n_col_d_elems = WMMA_N * elem_bytes_d // 2
-        _last_compute_stage = tail_plan[-1][1]
-        d_reuse_stage = 1 if _last_compute_stage == 0 else 0
-        if total_d_bytes > stage_allocators[d_reuse_stage].ptr:
-            stage_allocators[d_reuse_stage].ptr = total_d_bytes
+        d_need_epilogue_fence = total_d_bytes > dead_prefix_bytes
+        if total_d_bytes > arena_total_bytes:
+            arena_total_bytes = total_d_bytes
+            arena_alloc.ptr = total_d_bytes
+        check_smem_capacity(arena_total_bytes, gpu_arch)
 
     @flyc.kernel
     def kernel_wmma_gemm_tdm(
@@ -453,14 +480,14 @@ def compile_wmma_gemm_tdm(
         acc_zero = arith.constant_vector(0.0, T.vec(8, T.f32))
         accs = [acc_zero] * n_accs
 
-        # Build per-stage SmemPtrs (one per pipeline stage)
-        base_ptrs = [sa.get_base() for sa in stage_allocators]
+        # Build per-stage SmemPtrs (all stages share one arena base)
+        arena_base_ptr = arena_alloc.get_base()
         stages_a = [
-            SmemPtr(base_ptrs[i], stage_a_offsets[i], elem_ty, shape=(lds_a_elems,))
+            SmemPtr(arena_base_ptr, stage_a_offsets[i], elem_ty, shape=(lds_a_elems,))
             for i in range_constexpr(num_buffers)
         ]
         stages_b = [
-            SmemPtr(base_ptrs[i], stage_b_offsets[i], elem_ty, shape=(lds_b_elems,))
+            SmemPtr(arena_base_ptr, stage_b_offsets[i], elem_ty, shape=(lds_b_elems,))
             for i in range_constexpr(num_buffers)
         ]
         stages_a_mem = [stages_a[i].get() for i in range_constexpr(num_buffers)]
@@ -468,7 +495,7 @@ def compile_wmma_gemm_tdm(
 
         # D output LDS setup for TDM store epilogue
         if use_tdm_store:
-            d_lds_base_ptr = base_ptrs[d_reuse_stage]
+            d_lds_base_ptr = arena_base_ptr
             d_lds_f16_count = total_d_bytes // elem_bytes
             d_smem = SmemPtr(d_lds_base_ptr, d_output_off, elem_ty,
                              shape=(d_lds_f16_count,))
@@ -637,6 +664,8 @@ def compile_wmma_gemm_tdm(
                                use_cluster=use_cluster)
 
         if use_tdm_store:
+            if d_need_epilogue_fence:
+                pipeline_fence(outstanding=0, use_cluster=use_cluster)
             epilogue_lds_stores(accs, d_lds_buffer, d_lane_base)
             rocdl.s_wait_dscnt(0)
             tdm_ops.tensor_store_2d(d_desc)
@@ -660,10 +689,8 @@ def compile_wmma_gemm_tdm(
         _ = cache_tag
         ctx = CompilationContext.get_current()
         with ir.InsertionPoint(ctx.gpu_module_body):
-            for alloc in stage_allocators:
-                alloc.finalized = False
-            for alloc in stage_allocators:
-                alloc.finalize()
+            arena_alloc.finalized = False
+            arena_alloc.finalize()
 
         idx_m = arith.index_cast(T.index, i32_m.ir_value())
         idx_n = arith.index_cast(T.index, i32_n.ir_value())
@@ -688,6 +715,10 @@ def compile_wmma_gemm_tdm(
             stream=stream,
             cluster=cluster_arg,
         )
+
+        launch_wmma_gemm_tdm.compile_hints["llvm_options"] = {
+            "amdgpu-expert-scheduling-mode": True,
+        }
 
     return launch_wmma_gemm_tdm
 
