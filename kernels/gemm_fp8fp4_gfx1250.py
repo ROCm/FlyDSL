@@ -97,6 +97,9 @@ def compile_mxscale_gemm(
 
     num_warps = m_warp * n_warp
     block_threads = num_warps * WAVE_SIZE
+    if block_threads > 1024:
+        raise ValueError(
+            f"block_threads must be <= 1024, got {block_threads}")
 
     if wave_specialized_tdm and num_warps < 4:
         raise ValueError(
@@ -273,7 +276,7 @@ def compile_mxscale_gemm(
                 n_sub = _wn
                 _sub_tiles.append((acc_idx, 0, m_off, n_sub))
 
-    @flyc.kernel
+    @flyc.kernel(known_block_size=[block_threads, 1, 1])
     def kernel_mxscale_gemm(
         arg_c: fx.Tensor,
         arg_a: fx.Tensor,
