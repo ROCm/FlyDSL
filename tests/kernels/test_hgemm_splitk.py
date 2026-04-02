@@ -6,6 +6,7 @@
 import os
 import sys
 import logging
+import flydsl.compiler as flyc
 
 import torch
 import torch.nn.functional as F
@@ -55,6 +56,8 @@ def run_torch_bench(a, b):
     "m, n, k, TILE_M, TILE_N, TILE_K, SPLIT_K",
     [
         (32, 384, 7168, 16, 128, 128, 8),
+        (4, 384, 7168, 16, 128, 128, 8),
+        (65, 1024, 8192, 64, 64, 128, 8),
         (4096, 4096, 4096, 128, 256, 64, 1),
     ]
 )
@@ -115,14 +118,17 @@ def test_mfma_flyc_preshuffle_splitk_hgemm(
 
     b_q = hgemm_shuffle_b(b_q)
     print(f"✓ B shuffled")
-    hgemm_splitk_(a_q, b_q, c_out, shuffle_b=False, hgemm_kwargs=kwargs)
+    hgemm_splitk_(c_out, a_q, b_q, False, kwargs, torch.cuda.current_stream())
     print(f"✓ Kernel prepared: {kwargs}")
 
+    def launch_kernel(c, a, b, shuffle_b, kwargs):
+        hgemm_splitk_(c, a, b, shuffle_b, kwargs, torch.cuda.current_stream())
+
     _, us = run_perftest(
-        hgemm_splitk_,
+        launch_kernel,
+        c_out,
         a_q,
         b_q,
-        c_out,
         False, # shuffle_b
         kwargs,
         num_iters=bench_iters,
