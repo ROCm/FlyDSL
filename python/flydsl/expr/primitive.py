@@ -760,8 +760,10 @@ def apply_swizzle(ptr, swizzle, loc=None, ip=None):
 
 
 @traced_op
-def ptr_load(ptr, loc=None, ip=None):
-    return fly.ptr_load(ptr, loc=loc, ip=ip)
+def ptr_load(ptr, result_type=None, loc=None, ip=None):
+    if result_type is None:
+        result_type = ptr.element_type
+    return fly.ptr_load(result_type.ir_type, ptr, loc=loc, ip=ip)
 
 
 @traced_op
