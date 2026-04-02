@@ -390,7 +390,11 @@ def Fly_CopyOp : Fly_Op<"copy"> {
   let assemblyFormat = "`(` $copyAtom `,` $src `,` $dst (`,` $pred^)? `)` attr-dict `:` functional-type(operands, results)";
 }
 def Fly_GemmOp : Fly_Op<"gemm"> {
-  let arguments = (ins AnyType:$mmaAtom, Fly_MemRef:$d, Fly_MemRef:$a, Fly_MemRef:$b, Fly_MemRef:$c);
+  let arguments = (ins AnyType:$mmaAtom, Fly_MemRef:$d, Fly_MemRef:$a, Fly_MemRef:$b, Fly_MemRef:$c,
+                       OptionalAttr<Fly_GemmTraversalOrderAttr>:$traversalOrder,
+                       Optional<Fly_Layout>:$traversalLayout);
+  let assemblyFormat = "`(` $mmaAtom `,` $d `,` $a `,` $b `,` $c `)` (`traversalLayout` `=` $traversalLayout^)? "
+                       "attr-dict `:` functional-type(operands, results)";
 }
 
 //===----------------------------------------------------------------------===//

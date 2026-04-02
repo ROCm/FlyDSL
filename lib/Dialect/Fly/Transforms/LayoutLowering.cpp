@@ -2016,33 +2016,213 @@ public:
     };
 
     if (aRank == 2 && bRank == 2) {
-      for (int32_t m = 0; m < loop_m; ++m) {
+      auto emitMmaCall2D = [&](int32_t m, int32_t n) {
         Value aSlice = SliceOp::create(rewriter, loc, a, getSliceCoord({m}));
-        for (int32_t n = 0; n < loop_n; ++n) {
           Value bSlice = SliceOp::create(rewriter, loc, b, getSliceCoord({n}));
           Value cSlice = SliceOp::create(rewriter, loc, c, getSliceCoord({m, n}));
           Value dSlice = SliceOp::create(rewriter, loc, d, getSliceCoord({m, n}));
           MmaAtomCall::create(rewriter, loc, mmaAtomVal, dSlice, aSlice, bSlice, cSlice);
+      };
+
+      int32_t totalIters = loop_m * loop_n;
+
+      auto naturalShape =
+          IntTupleAttr::get(ArrayAttr::get(ctx, {IntTupleAttr::getLeafStatic(ctx, loop_m),
+                                                 IntTupleAttr::getLeafStatic(ctx, loop_n)}));
+      auto naturalStride = IntTupleAttr::get(ArrayAttr::get(
+          ctx, {IntTupleAttr::getLeafStatic(ctx, 1), IntTupleAttr::getLeafStatic(ctx, loop_m)}));
+
+      Value traversalLayoutVal = op.getTraversalLayout();
+      if (traversalLayoutVal) {
+        LayoutAttr tvLayout = cast<LayoutType>(traversalLayoutVal.getType()).getAttr();
+        assert(tvLayout.isStaticShape() && tvLayout.isStaticStride() &&
+               "traversalLayout must be fully static");
+
+        IntTupleAttr tvShape = tvLayout.getShape();
+        IntTupleAttr tvStride = tvLayout.getStride();
+
+        LayoutBuilder<LayoutAttr> layoutBuilder(ctx);
+        int32_t tvCosize = layoutCosize(layoutBuilder, tvLayout).getLeafAsInt().getValue();
+        assert(tvCosize == totalIters && "traversalLayout cosize must equal loop_m * loop_n");
+
+        for (int32_t i = 0; i < totalIters; ++i) {
+          IntTupleAttr iAttr = IntTupleAttr::getLeafStatic(ctx, i);
+          IntTupleAttr linearIdx = layoutCrd2Idx(attrBuilder, iAttr, tvShape, tvStride);
+          IntTupleAttr coord = layoutIdx2Crd(attrBuilder, linearIdx, naturalShape, naturalStride);
+          int32_t m = coord.at(0).getLeafAsInt().getValue();
+          int32_t n = coord.at(1).getLeafAsInt().getValue();
+          emitMmaCall2D(m, n);
+        }
+      } else {
+        // Column-major: first letter = fastest (innermost).
+        // 2D has no K, so only M/N ordering matters.
+        // Dim indices: M=0, N=1.
+        // order[0]=outermost, order[1]=innermost.
+        SmallVector<int32_t, 2> order = {0, 1}; // default: N innermost
+        bool serpentine = false;
+        if (auto traversalOrder = op.getTraversalOrder()) {
+          switch (*traversalOrder) {
+          case GemmTraversalOrder::KMN:
+            [[fallthrough]];
+          case GemmTraversalOrder::MKN:
+            [[fallthrough]];
+          case GemmTraversalOrder::MNK:
+            order = {1, 0};
+            break;
+          case GemmTraversalOrder::KNM:
+            [[fallthrough]];
+          case GemmTraversalOrder::NKM:
+            [[fallthrough]];
+          case GemmTraversalOrder::NMK:
+            order = {0, 1};
+            break;
+          case GemmTraversalOrder::KMN_Serpentine:
+            [[fallthrough]];
+          case GemmTraversalOrder::MKN_Serpentine:
+            [[fallthrough]];
+          case GemmTraversalOrder::MNK_Serpentine:
+            order = {1, 0};
+            serpentine = true;
+            break;
+          case GemmTraversalOrder::KNM_Serpentine:
+            [[fallthrough]];
+          case GemmTraversalOrder::NKM_Serpentine:
+            [[fallthrough]];
+          case GemmTraversalOrder::NMK_Serpentine:
+            order = {0, 1};
+            serpentine = true;
+            break;
+          }
+        }
+
+        int32_t loopBounds[2] = {loop_m, loop_n};
+        int32_t idx[2] = {0, 0};
+        for (int32_t i0 = 0; i0 < loopBounds[order[0]]; ++i0) {
+          idx[order[0]] = i0;
+          for (int32_t i1 = 0; i1 < loopBounds[order[1]]; ++i1) {
+            idx[order[1]] = serpentine && (i0 & 1) ? loopBounds[order[1]] - 1 - i1 : i1;
+            emitMmaCall2D(idx[0], idx[1]);
+          }
         }
       }
+
       rewriter.eraseOp(op);
       return success();
     } else if (aRank == 3 && bRank == 3) {
       int32_t loop_k = get_static_product(aLayoutAttr.getShape().at(2));
       assert(loop_k == get_static_product(bLayoutAttr.getShape().at(2)) && "Mismatch in loop_k");
 
-      for (int32_t k = 0; k < loop_k; ++k) {
+      auto emitMmaCall = [&](int32_t m, int32_t n, int32_t k) {
         Value cSrc = (k == 0) ? c : d;
-        for (int32_t m = 0; m < loop_m; ++m) {
           Value aSlice = SliceOp::create(rewriter, loc, a, getSliceCoord({m, k}));
-          for (int32_t n = 0; n < loop_n; ++n) {
             Value bSlice = SliceOp::create(rewriter, loc, b, getSliceCoord({n, k}));
             Value cSlice = SliceOp::create(rewriter, loc, cSrc, getSliceCoord({m, n}));
             Value dSlice = SliceOp::create(rewriter, loc, d, getSliceCoord({m, n}));
             MmaAtomCall::create(rewriter, loc, mmaAtomVal, dSlice, aSlice, bSlice, cSlice);
+      };
+
+      Value traversalLayoutVal = op.getTraversalLayout();
+      if (traversalLayoutVal) {
+        LayoutAttr tvLayout = cast<LayoutType>(traversalLayoutVal.getType()).getAttr();
+        assert(tvLayout.isStaticShape() && tvLayout.isStaticStride() &&
+               "traversalLayout must be fully static");
+
+        int32_t totalIters = loop_m * loop_n * loop_k;
+
+        auto naturalShape =
+            IntTupleAttr::get(ArrayAttr::get(ctx, {IntTupleAttr::getLeafStatic(ctx, loop_m),
+                                                   IntTupleAttr::getLeafStatic(ctx, loop_n),
+                                                   IntTupleAttr::getLeafStatic(ctx, loop_k)}));
+        auto naturalStride = IntTupleAttr::get(ArrayAttr::get(
+            ctx, {IntTupleAttr::getLeafStatic(ctx, 1), IntTupleAttr::getLeafStatic(ctx, loop_m),
+                  IntTupleAttr::getLeafStatic(ctx, loop_m * loop_n)}));
+
+        IntTupleAttr tvShape = tvLayout.getShape();
+        IntTupleAttr tvStride = tvLayout.getStride();
+
+        LayoutBuilder<LayoutAttr> layoutBuilder(ctx);
+        int32_t tvCosize = layoutCosize(layoutBuilder, tvLayout).getLeafAsInt().getValue();
+        assert(tvCosize == totalIters &&
+               "traversalLayout cosize must equal loop_m * loop_n * loop_k");
+
+        for (int32_t i = 0; i < totalIters; ++i) {
+          IntTupleAttr iAttr = IntTupleAttr::getLeafStatic(ctx, i);
+          // crd2idx: map flat iteration coord through traversal layout
+          IntTupleAttr linearIdx = layoutCrd2Idx(attrBuilder, iAttr, tvShape, tvStride);
+          // idx2crd: recover (m, n, k) in natural col-major space
+          IntTupleAttr coord = layoutIdx2Crd(attrBuilder, linearIdx, naturalShape, naturalStride);
+          int32_t m = coord.at(0).getLeafAsInt().getValue();
+          int32_t n = coord.at(1).getLeafAsInt().getValue();
+          int32_t k = coord.at(2).getLeafAsInt().getValue();
+          emitMmaCall(m, n, k);
+        }
+      } else {
+        // ── traversalOrder enum path (or default NMK) ──
+        SmallVector<int32_t, 3> order = {2, 0, 1}; // NMK
+        bool serpentine = false;
+        if (auto traversalOrder = op.getTraversalOrder()) {
+          switch (*traversalOrder) {
+          case GemmTraversalOrder::KMN:
+            order = {1, 0, 2};
+            break;
+          case GemmTraversalOrder::KNM:
+            order = {0, 1, 2};
+            break;
+          case GemmTraversalOrder::MKN:
+            order = {1, 2, 0};
+            break;
+          case GemmTraversalOrder::MNK:
+            order = {2, 1, 0};
+            break;
+          case GemmTraversalOrder::NKM:
+            order = {0, 2, 1};
+            break;
+          case GemmTraversalOrder::NMK:
+            order = {2, 0, 1};
+            break;
+          case GemmTraversalOrder::KMN_Serpentine:
+            order = {1, 0, 2};
+            serpentine = true;
+            break;
+          case GemmTraversalOrder::KNM_Serpentine:
+            order = {0, 1, 2};
+            serpentine = true;
+            break;
+          case GemmTraversalOrder::MKN_Serpentine:
+            order = {1, 2, 0};
+            serpentine = true;
+            break;
+          case GemmTraversalOrder::MNK_Serpentine:
+            order = {2, 1, 0};
+            serpentine = true;
+            break;
+          case GemmTraversalOrder::NKM_Serpentine:
+            order = {0, 2, 1};
+            serpentine = true;
+            break;
+          case GemmTraversalOrder::NMK_Serpentine:
+            order = {2, 0, 1};
+            serpentine = true;
+            break;
+          }
+        }
+
+        int32_t loopBounds[3] = {loop_m, loop_n, loop_k};
+        int32_t idx[3] = {0, 0, 0};
+        for (int32_t i0 = 0; i0 < loopBounds[order[0]]; ++i0) {
+          idx[order[0]] = i0;
+          for (int32_t i1 = 0; i1 < loopBounds[order[1]]; ++i1) {
+            idx[order[1]] = serpentine && (i0 & 1) ? loopBounds[order[1]] - 1 - i1 : i1;
+            for (int32_t i2 = 0; i2 < loopBounds[order[2]]; ++i2) {
+              idx[order[2]] = serpentine && ((i0 * loopBounds[order[1]] + i1) & 1)
+                                  ? loopBounds[order[2]] - 1 - i2
+                                  : i2;
+              emitMmaCall(idx[0], idx[1], idx[2]);
+            }
           }
         }
       }
+
       rewriter.eraseOp(op);
       return success();
     } else {

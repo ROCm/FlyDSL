@@ -22,6 +22,7 @@ from .._mlir.dialects.fly import (
     SwizzleType,
     TiledCopyType,
     TiledMmaType,
+    GemmTraversalOrder,
     #
     has_none,
 )
@@ -36,6 +37,7 @@ __all__ = [
     "AddressSpace",
     "CachePolicy",
     "MmaOperand",
+    "GemmTraversalOrder",
     # Types
     "IntTupleType",
     "LayoutType",
@@ -718,8 +720,10 @@ def copy(copy_atom, src, dst, *, pred=None, loc=None, ip=None):
 
 
 @traced_op
-def gemm(mma_atom, d, a, b, c, loc=None, ip=None):
-    return fly.gemm(mma_atom, d, a, b, c, loc=loc, ip=ip)
+def gemm(mma_atom, d, a, b, c, *, traversal_order=None, traversal_layout=None, loc=None, ip=None):
+    if traversal_order is not None and traversal_layout is not None:
+        raise ValueError("Only one of 'traversal_order' or 'traversal_layout' can be specified, not both")
+    return fly.gemm(mma_atom, d, a, b, c, traversal_order=traversal_order, traversal_layout=traversal_layout, loc=loc, ip=ip)
 
 
 # ===----------------------------------------------------------------------=== #
