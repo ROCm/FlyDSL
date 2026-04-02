@@ -1,7 +1,7 @@
 """FlyDSL Paged Attention Decode with Persistent Scheduling — FP8.
 
 Extends pa_decode_sw_fp8.py with persistent scheduling (PS) mode:
-- Grid = (num_SM, 1, 1) instead of (batch_size, num_kv_heads, 1)
+- Grid = (num_SM, 1, 4) so each CTA handles one 256-token sub-tile of a 1024-token KV page
 - Outer work loop iterates over pre-computed worklist from get_pa_metadata_v1
 - Inner KV loop iterates pages from kv_page_indices instead of block_tables
 - Supports split-reduce for load balancing across CUs
@@ -71,6 +71,93 @@ def _pack_i32_pair_to_i64(a_i32, b_i32):
     return vector.extract(v1, static_position=[0])
 
 
+def _expand_pa_metadata_for_block_splits(
+    work_indptr: torch.Tensor,
+    work_info: torch.Tensor,
+    query_length: int,
+    *,
+    block_split_factor: int = TILES_PER_BLOCK,
+):
+    """Expand PA metadata so each 1024-token work tile reduces 4 block-split partials.
+
+    `get_pa_metadata_v1()` only materializes split partials and uses `partial_idx=-1`
+    for direct tiles that write final output directly. With `grid_z=4`, every work item
+    becomes four partials, so direct tiles must also participate in the reduce stage.
+    """
+
+    dev = work_info.device
+    valid_work = int(work_indptr[-1].item())
+    work_info_cpu = work_info[:valid_work].cpu()
+
+    if valid_work == 0:
+        empty_reduce_indptr = torch.zeros(1, dtype=torch.int32, device=dev)
+        empty_reduce_final_map = torch.empty((0, 2), dtype=torch.int32, device=dev)
+        empty_reduce_partial_map = torch.empty((0,), dtype=torch.int32, device=dev)
+        return work_info[:0].contiguous(), empty_reduce_indptr, empty_reduce_final_map, empty_reduce_partial_map
+
+    group_order = []
+    group_slot_keys = {}
+    group_slot_seen = {}
+    row_slot_keys = []
+
+    for wi in range(valid_work):
+        row = work_info_cpu[wi]
+        q_start = int(row[2].item())
+        q_end = int(row[3].item())
+        orig_partial_idx = int(row[1].item())
+        group_key = (q_start, q_end)
+        if group_key not in group_slot_keys:
+            group_order.append(group_key)
+            group_slot_keys[group_key] = []
+            group_slot_seen[group_key] = set()
+
+        if orig_partial_idx >= 0:
+            slot_key = ("split", orig_partial_idx)
+        else:
+            slot_key = ("direct", q_start, q_end)
+
+        if slot_key not in group_slot_seen[group_key]:
+            group_slot_seen[group_key].add(slot_key)
+            group_slot_keys[group_key].append(slot_key)
+        row_slot_keys.append(slot_key)
+
+    slot_id_by_key = {}
+    next_slot_id = 0
+    for group_key in group_order:
+        for slot_key in group_slot_keys[group_key]:
+            if slot_key not in slot_id_by_key:
+                slot_id_by_key[slot_key] = next_slot_id
+                next_slot_id += 1
+
+    for wi, slot_key in enumerate(row_slot_keys):
+        work_info_cpu[wi, 1] = slot_id_by_key[slot_key] * query_length
+
+    reduce_indptr_cpu = torch.zeros(len(group_order) + 1, dtype=torch.int32)
+    reduce_final_map_cpu = torch.empty((len(group_order), 2), dtype=torch.int32)
+    reduce_partial_map_entries = []
+    running = 0
+
+    for group_idx, group_key in enumerate(group_order):
+        q_start, q_end = group_key
+        reduce_final_map_cpu[group_idx, 0] = q_start
+        reduce_final_map_cpu[group_idx, 1] = q_end
+        for slot_key in group_slot_keys[group_key]:
+            slot_id = slot_id_by_key[slot_key]
+            base_row = slot_id * query_length * block_split_factor
+            for block_split_idx in range(block_split_factor):
+                reduce_partial_map_entries.append(base_row + block_split_idx * query_length)
+                running += 1
+        reduce_indptr_cpu[group_idx + 1] = running
+
+    work_info_out = work_info_cpu.to(device=dev).contiguous()
+    reduce_indptr = reduce_indptr_cpu.to(device=dev)
+    reduce_final_map = reduce_final_map_cpu.to(device=dev)
+    reduce_partial_map = torch.tensor(
+        reduce_partial_map_entries, dtype=torch.int32, device=dev
+    )
+    return work_info_out, reduce_indptr, reduce_final_map, reduce_partial_map
+
+
 # =====================================================================
 # compile_pa_decode_ps — Persistent Scheduling PA decode kernel
 # =====================================================================
@@ -86,7 +173,7 @@ def compile_pa_decode_ps(
     """Compile a PS-mode PA decode kernel.
 
     Unlike compile_pa_decode_sw, this does NOT bake in num_seqs/num_kv_heads/num_partitions
-    because PS mode uses dynamic work distribution. Grid = (num_sm, 1, 1).
+    because PS mode uses dynamic work distribution. Grid = (num_sm, 1, 4).
     """
     arch = get_hip_arch()
     if softmax_scale is None:
@@ -155,7 +242,6 @@ def compile_pa_decode_ps(
         q_rsrc = buffer_ops.create_buffer_resource(query_ptr, max_size=True)
         k_rsrc = buffer_ops.create_buffer_resource(key_cache_ptr, max_size=True)
         v_rsrc = buffer_ops.create_buffer_resource(value_cache_ptr, max_size=True)
-        out_rsrc = buffer_ops.create_buffer_resource(out_ptr, max_size=True)
         po_rsrc = buffer_ops.create_buffer_resource(partial_out_ptr, max_size=True)
         pl_rsrc = buffer_ops.create_buffer_resource(partial_lse_ptr, max_size=True)
         cl_rsrc = buffer_ops.create_buffer_resource(context_lengths_ptr, max_size=True)
@@ -245,7 +331,6 @@ def compile_pa_decode_ps(
             # Q load is now done inside the mtp_g loop below
 
             # ── Tiles per block constant for tile-based loop (SP3-matching) ──
-            c_tpb_step = arith.constant(TILES_PER_BLOCK, type=T.i32)
             c_four = arith.constant(4, type=T.i32)
 
             # ── Pre-computed thread-invariant offset components ──
@@ -861,103 +946,51 @@ def compile_pa_decode_ps(
                 return o0, o1
 
             # ════════════════════════════════════════════════════════
-            # Inner KV loop — barrier-merged pipeline
-            # Tiles overlap: barrier₂(N) merged with barrier₁(N+1)
-            # 5 barriers per block instead of 8
+            # Inner KV loop — one CTA processes one 256-token sub-tile
+            # across all 1024-token physical blocks in the work item.
             # ════════════════════════════════════════════════════════
             def _unwrap(v):
                 return v.ir_value() if hasattr(v, 'ir_value') else v
 
-            def _pack_state(rmax, rsum, o0, o1, k0_flat, k1_flat, k2_flat, k3_flat):
-                return [_unwrap(v) for v in [rmax, rsum, o0, o1] + k0_flat + k1_flat + k2_flat + k3_flat]
+            def _pack_state(rmax, rsum, o0, o1, k_flat):
+                return [_unwrap(v) for v in [rmax, rsum, o0, o1] + k_flat]
 
             def _unpack_state(state):
-                return state[0], state[1], state[2], state[3], list(state[4:4 + _N_K]), list(state[4 + _N_K:4 + _N_K * 2]), list(state[4 + _N_K * 2:4 + _N_K * 3]), list(state[4 + _N_K * 3:4 + _N_K * 4])
+                return state[0], state[1], state[2], state[3], list(state[4:4 + _N_K])
 
-            def _process_block(phys_block, block_idx_in_work, rmax, rsum, o0, o1,
-                               k0_ops, k1_ops, k2_ops, k3_ops,
-                               next_k_base=None, next_tile_zero_off=None):
-                """Process one 1024-token block with barrier-merged pipeline.
-                5 barriers per block instead of 8.
-                next_k_base = pre-computed (next_phys_block * c_kb + _k_head_off) // 4
-                Returns (rmax, rsum, o0, o1, k_next_flat).
-                """
-
-
-                # base_pstart: absolute token index of tile 0 of this block within the sequence.
-                # kv_start_abs_tok converts from work-item-relative to sequence-absolute offsets,
-                # which is required for correct masking (kv_tok < context_len).
-                base_pstart = kv_start_abs_tok + block_idx_in_work * c_tpb_step * c_cps
-
-                pstart = [
-                    base_pstart,
-                    base_pstart + c_cps,
-                    base_pstart + c_cps * arith.constant(2, type=T.i32),
-                    base_pstart + c_cps * arith.constant(3, type=T.i32),
-                ]
-
-                # Pre-compute per-block K/V base addresses (shared by tiles 1-3)
-                # k_base = (phys_block * c_kb + _k_head_off) // c_four
+            def _process_block_split(phys_block, block_idx_in_work, rmax, rsum, o0, o1,
+                                     tile_token_offset_i32, k_ops, next_k_base=None):
+                """Process one 256-token block split inside a 1024-token KV page."""
+                partition_start = kv_start_abs_tok + block_idx_in_work * c_bs + tile_token_offset_i32
                 v_base = (phys_block * c_vb + _v_head_off) // c_four
-                # ═══ Tile 0: QK + softmax write ═══
-                d_out_0, v0_ops, vs0 = _qk_and_intra_softmax(k0_ops, pstart[0], v_base, c_zero, phys_block)
-                gpu.barrier()  # BARRIER A: tile 0 softmax LDS visible
-                rmax, rsum, o0, o1, vc0 = _cross_warp_softmax_and_prob_pack(d_out_0, rmax, rsum, o0, o1, vs0)
-
-                # ═══ Tile 1: QK before tile 0 PV barrier ═══
-                d_out_1, v1_ops, vs1 = _qk_and_intra_softmax(k1_ops, pstart[1], v_base, c_256, phys_block)
-                # K prefetch for next block (base pre-computed by caller)
+                d_out, v_ops, v_scales = _qk_and_intra_softmax(
+                    k_ops, partition_start, v_base, tile_token_offset_i32, phys_block
+                )
                 if next_k_base is not None:
-                    k0_next_flat = _load_k_flat_ps(next_k_base, next_tile_zero_off)
+                    k_next_flat = _load_k_flat_ps(next_k_base, tile_token_offset_i32)
                 else:
-                    k0_next_flat = None
-                gpu.barrier()  # BARRIER B: tile 0 probs + tile 1 softmax visible
-                o0, o1 = _pv_mfma(v0_ops, o0, o1, vc0)  # tile 0 PV
-                rmax, rsum, o0, o1, vc1 = _cross_warp_softmax_and_prob_pack(d_out_1, rmax, rsum, o0, o1, vs1)
-
-                # ═══ Tile 2 ═══
-                d_out_2, v2_ops, vs2 = _qk_and_intra_softmax(k2_ops, pstart[2], v_base, c_512, phys_block)
-                if next_k_base is not None:
-                    k1_next_flat = _load_k_flat_ps(next_k_base, c_256)
-                else:
-                    k1_next_flat = None
-                gpu.barrier()  # BARRIER C: tile 1 probs + tile 2 softmax visible
-                o0, o1 = _pv_mfma(v1_ops, o0, o1, vc1)  # tile 1 PV
-                rmax, rsum, o0, o1, vc2 = _cross_warp_softmax_and_prob_pack(d_out_2, rmax, rsum, o0, o1, vs2)
-
-                # ═══ Tile 3 ═══
-                d_out_3, v3_ops, vs3 = _qk_and_intra_softmax(k3_ops, pstart[3], v_base, c_768, phys_block)
-                if next_k_base is not None:
-                    k2_next_flat = _load_k_flat_ps(next_k_base, c_512)
-                else:
-                    k2_next_flat = None
-                gpu.barrier()  # BARRIER D: tile 2 probs + tile 3 softmax visible
-                o0, o1 = _pv_mfma(v2_ops, o0, o1, vc2)  # tile 2 PV
-                rmax, rsum, o0, o1, vc3 = _cross_warp_softmax_and_prob_pack(d_out_3, rmax, rsum, o0, o1, vs3)
-
-                if next_k_base is not None:
-                    k3_next_flat = _load_k_flat_ps(next_k_base, c_768)
-                else:
-                    k3_next_flat = None
-                gpu.barrier()  # BARRIER E: tile 3 probs visible
-                o0, o1 = _pv_mfma(v3_ops, o0, o1, vc3)  # tile 3 PV
-
-                return rmax, rsum, o0, o1, k0_next_flat, k1_next_flat, k2_next_flat, k3_next_flat
+                    k_next_flat = None
+                gpu.barrier()
+                rmax, rsum, o0, o1, v_correction = _cross_warp_softmax_and_prob_pack(
+                    d_out, rmax, rsum, o0, o1, v_scales
+                )
+                gpu.barrier()
+                o0, o1 = _pv_mfma(v_ops, o0, o1, v_correction)
+                return rmax, rsum, o0, o1, k_next_flat
 
 
-            c_zero = arith.constant(0, type=T.i32)
-            c_256 = arith.constant(KV_COMPUTE_BLOCK, type=T.i32)
-            c_512 = arith.constant(KV_COMPUTE_BLOCK * 2, type=T.i32)
-            c_768 = arith.constant(KV_COMPUTE_BLOCK * 3, type=T.i32)
-
-            # Compute partial output row base.
-            # partial_idx from get_pa_metadata_v1 is pre-multiplied by query_length.
-            # Direct items: partial_idx=-1 -> write to scratch rows [0, ql)
-            # Split items: partial_idx=p*ql -> write to rows [p*ql + ql, p*ql + 2*ql)
+            # Metadata remaps every work tile into a partial slot shared across q-head ranges.
+            # grid_z then expands each slot into 4 block-split partials.
             c_ql = arith.constant(query_length, type=T.i32)
             c_zero_i32 = arith.constant(0, type=T.i32)
+            block_split_idx = gpu.block_idx.z
+            tile_token_offset = block_split_idx * c_cps
             _partial_ge_zero = partial_idx >= c_zero_i32
-            _po_row_base = arith.select(_partial_ge_zero, partial_idx + c_ql, c_zero_i32)
+            _po_row_base = arith.select(
+                _partial_ge_zero,
+                partial_idx * c_tpb + block_split_idx * c_ql + c_ql,
+                c_zero_i32,
+            )
 
             # Unified loop bounds (shared across mtp_g passes — blocks don't change per mtp_g)
             num_blocks_in_work = kv_end - kv_start
@@ -1030,23 +1063,20 @@ def compile_pa_decode_ps(
                         q_frags.append(vector.extract(q_v1, static_position=[0]))
                 SmemPtr._view_cache = None
 
-                # ── K init: load all 4 tiles of first block for this mtp_g pass ──
+                # ── K init: load this CTA's 256-token block split for the first block ──
                 first_k_base = (first_phys_block * c_kb + _k_head_off) // c_four
-                k0_flat = _load_k_flat_ps(first_k_base, c_zero)
-                k1_flat = _load_k_flat_ps(first_k_base, c_256)
-                k2_flat = _load_k_flat_ps(first_k_base, c_512)
-                k3_flat = _load_k_flat_ps(first_k_base, c_768)
+                k_flat = _load_k_flat_ps(first_k_base, tile_token_offset)
 
                 init_state = _pack_state(
                     NEG_INF, ZERO_F,
                     arith.constant_vector(0.0, T.f32x4),
                     arith.constant_vector(0.0, T.f32x4),
-                    k0_flat, k1_flat, k2_flat, k3_flat)
+                    k_flat,
+                )
 
-                # K prefetch on last iter uses clamped index (same block — harmless).
                 for ib, state in range(_loop_start_g, _loop_stop_g, _loop_step_g,
                                        init=init_state):
-                    running_max, running_sum, out0, out1, k0_flat, k1_flat, k2_flat, k3_flat = _unpack_state(state)
+                    running_max, running_sum, out0, out1, k_flat = _unpack_state(state)
                     block_idx = arith.index_cast(T.i32, ib)
 
                     phys_block = buffer_ops.buffer_load(kpi_rsrc,
@@ -1058,20 +1088,23 @@ def compile_pa_decode_ps(
                         kv_start + next_idx_clamped, vec_width=1, dtype=T.i32)
                     next_k_base = (next_phys_block * c_kb + _k_head_off) // c_four
 
-                    k0_ops = _unflatten_k(k0_flat)
-                    k1_ops = _unflatten_k(k1_flat)
-                    k2_ops = _unflatten_k(k2_flat)
-                    k3_ops = _unflatten_k(k3_flat)
+                    k_ops = _unflatten_k(k_flat)
 
-                    running_max, running_sum, out0, out1, k0_next_flat, k1_next_flat, k2_next_flat, k3_next_flat = _process_block(
-                        phys_block, block_idx, running_max, running_sum, out0, out1,
-                        k0_ops, k1_ops, k2_ops, k3_ops, next_k_base=next_k_base,
-                        next_tile_zero_off=c_zero)
+                    running_max, running_sum, out0, out1, k_next_flat = _process_block_split(
+                        phys_block,
+                        block_idx,
+                        running_max,
+                        running_sum,
+                        out0,
+                        out1,
+                        tile_token_offset,
+                        k_ops,
+                        next_k_base=next_k_base,
+                    )
 
-                    results = yield _pack_state(running_max, running_sum, out0, out1, k0_next_flat, k1_next_flat, k2_next_flat, k3_next_flat)
+                    results = yield _pack_state(running_max, running_sum, out0, out1, k_next_flat)
 
-                # All blocks processed in the loop
-                running_max, running_sum, out0, out1, _, _, _, _ = _unpack_state(results)
+                running_max, running_sum, out0, out1, _ = _unpack_state(results)
                 SmemPtr._view_cache = None
 
                 # ── Normalize output ──
@@ -1088,22 +1121,12 @@ def compile_pa_decode_ps(
                                + rowid * arith.constant(4, type=T.i32))
                     # qhi_pos: mtp_g-based head position within kv_head group
                     qhead = kv_h * arith.constant(query_group_size, type=T.i32) + qhi_pos
-                    # MTP: output row = batch_idx * query_length + qi_val
-                    out_row = batch_idx * arith.constant(query_length, type=T.i32) + qi_val
-                    out_base = (out_row * stride_out_seq
-                                + qhead * stride_out_head
-                                + hs_base)
                     _po_row = _po_row_base + qi_val
                     po_off = (_po_row * stride_po_ql
                               + qhead * arith.constant(HEAD_SIZE, type=T.i32)
                               + hs_base)
 
-                    out_bf16 = arith.trunc_f(T.vec(4, T.bf16), outelems_norm[vhe])
-                    out_i32 = vector.bitcast(T.vec(2, T.i32), out_bf16)
-                    buffer_ops.buffer_store(out_i32, out_rsrc,
-                        out_base * arith.constant(2, type=T.i32), offset_is_bytes=True)
-
-                    # pa_reduce_v1 expects normalized output
+                    # pa_reduce_v1 expects normalized partial output from every block split.
                     buffer_ops.buffer_store(outelems_norm[vhe], po_rsrc,
                         po_off * arith.constant(4, type=T.i32), offset_is_bytes=True)
 
@@ -1148,7 +1171,7 @@ def compile_pa_decode_ps(
             s_ks_block, s_ks_head,
             s_po_ql, s_pl_ql,
         ).launch(
-            grid=(num_sm, 1, 1),
+            grid=(num_sm, 1, TILES_PER_BLOCK),
             block=(BLOCK_THREADS, 1, 1), stream=stream)
 
     return {
@@ -1171,6 +1194,9 @@ def get_pa_metadata(
     num_kv_heads: int,
 ):
     """Compute PA metadata (worklist, reduce maps) via get_pa_metadata_v1.
+
+    Then expand each 1024-token work tile into 4 block-split partials so the PS
+    kernel can launch with `grid=(num_sm, 1, 4)` and still reuse `pa_reduce_v1`.
 
     Returns a dict with: work_indptr, work_info_flat, reduce_indptr,
     reduce_final_map, reduce_partial_map, num_sm, partial_output,
@@ -1216,6 +1242,11 @@ def get_pa_metadata(
         fast_mode=True, max_split_per_batch=-1,
     )
 
+    work_info, reduce_indptr, reduce_final_map, reduce_partial_map = (
+        _expand_pa_metadata_for_block_splits(
+            work_indptr, work_info, query_length, block_split_factor=TILES_PER_BLOCK
+        )
+    )
     work_info_flat = work_info.reshape(-1).contiguous()
 
     num_partials = reduce_partial_map.size(0)
