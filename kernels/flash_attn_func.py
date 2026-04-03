@@ -352,34 +352,23 @@ def build_flash_attn_func_module_primary(
         def load_global_f16xN(base_ptr, base_idx):
             return _gep_load(base_ptr, base_idx, vxf16_type)
 
+        def _cvt_pk_bf16_f32(a_f32, b_f32):
+            """Pack 2 f32 → 1 i32 (bf16x2) via v_cvt_pk_bf16_f32 (1 instruction)."""
+            return _llvm.InlineAsmOp(
+                T.i32, [a_f32, b_f32],
+                "v_cvt_pk_bf16_f32 $0, $1, $2", "=v,v,v",
+                has_side_effects=False, is_align_stack=False).result
+
         def bf16_trunc_pack_v4(f32_vals):
-            """Pack 4 f32 values into v4bf16 via bitwise truncation (upper 16 bits).
-            ~2 fewer instructions/element vs arith.TruncFOp round-to-nearest."""
             _v2i32 = T.vec(2, T.i32)
-            _c16 = arith.constant(16, type=T.i32)
-            _cmask = arith.constant(0xFFFF0000, type=T.i32)
-            a0 = arith.ArithValue(f32_vals[0]).bitcast(T.i32)
-            b0 = arith.ArithValue(f32_vals[1]).bitcast(T.i32)
-            p0 = arith.OrIOp(arith.AndIOp(b0, _cmask).result,
-                             arith.ShRUIOp(a0, _c16).result).result
-            a1 = arith.ArithValue(f32_vals[2]).bitcast(T.i32)
-            b1 = arith.ArithValue(f32_vals[3]).bitcast(T.i32)
-            p1 = arith.OrIOp(arith.AndIOp(b1, _cmask).result,
-                             arith.ShRUIOp(a1, _c16).result).result
+            p0 = _cvt_pk_bf16_f32(f32_vals[0], f32_vals[1])
+            p1 = _cvt_pk_bf16_f32(f32_vals[2], f32_vals[3])
             return vector.bitcast(v4f16_type, vector.from_elements(_v2i32, [p0, p1]))
 
         def bf16_trunc_pack_v8(f32_vals):
-            """Pack 8 f32 values into v8bf16 via bitwise truncation (upper 16 bits)."""
             _v4i32 = T.vec(4, T.i32)
-            _c16 = arith.constant(16, type=T.i32)
-            _cmask = arith.constant(0xFFFF0000, type=T.i32)
-            pairs = []
-            for j in range_constexpr(4):
-                a = arith.ArithValue(f32_vals[j * 2]).bitcast(T.i32)
-                b = arith.ArithValue(f32_vals[j * 2 + 1]).bitcast(T.i32)
-                p = arith.OrIOp(arith.AndIOp(b, _cmask).result,
-                                arith.ShRUIOp(a, _c16).result).result
-                pairs.append(p)
+            pairs = [_cvt_pk_bf16_f32(f32_vals[j*2], f32_vals[j*2+1])
+                     for j in range_constexpr(4)]
             return vector.bitcast(v8f16_type, vector.from_elements(_v4i32, pairs))
 
         def k_buf_base(buf_id):
@@ -621,6 +610,15 @@ def build_flash_attn_func_module_primary(
                 return arith.ArithValue(peer_i32).bitcast(compute_type)
             return arith.ArithValue(v_f32).shuffle_xor(shuf_32_i32, width_i32)
 
+        # ---- Alloca slots for causal mask (avoids 32 PHI copies from scf.IfOp) ----
+        if CAUSAL:
+            _one_i64 = arith.constant(1, type=T.i64)
+            _f32_attr = ir.TypeAttr.get(T.f32)
+            _mask_slot_lo = [_llvm.AllocaOp(_llvm_ptr_ty(), _one_i64, _f32_attr).result
+                             for _ in range_constexpr(16)]
+            _mask_slot_hi = [_llvm.AllocaOp(_llvm_ptr_ty(), _one_i64, _f32_attr).result
+                             for _ in range_constexpr(16)]
+
         # ---- KV loop upper bound ----
         _q_end = q_start + BLOCK_M
         if CAUSAL:
@@ -765,13 +763,13 @@ def build_flash_attn_func_module_primary(
                         arith.constant(BLOCK_N - 1, type=T.i32)).result
                     tile_needs_mask = arith.cmpi(
                         arith.CmpIPredicate.ugt, max_kv_col_i32, q_start_i32)
-                    _mask_if = scf.IfOp(
-                        tile_needs_mask, [T.f32] * 32, has_else=True)
+                    # Store defaults into alloca slots (no PHI copies)
+                    for r in range_constexpr(16):
+                        _llvm.StoreOp(s_raw_lo[r], _mask_slot_lo[r])
+                        _llvm.StoreOp(s_raw_hi[r], _mask_slot_hi[r])
+                    _mask_if = scf.IfOp(tile_needs_mask, [], has_else=False)
                     with ir.InsertionPoint(_mask_if.then_block):
-                        _m_lo = []
-                        _m_hi = []
                         for r in range_constexpr(16):
-                            # MFMA 32x32 register remap: 16 elements -> (row, col)
                             r_off_i32 = arith.constant(
                                 (r % 4) + (r // 4) * 8, type=T.i32)
                             lane_off_i32 = arith.MulIOp(
@@ -784,21 +782,23 @@ def build_flash_attn_func_module_primary(
                             is_masked_lo = arith.cmpi(
                                 arith.CmpIPredicate.ugt,
                                 kv_col_lo, q_row_i32)
-                            _m_lo.append(arith.select(
-                                is_masked_lo, c_neg_inf, s_raw_lo[r]))
+                            _llvm.StoreOp(arith.select(
+                                is_masked_lo, c_neg_inf, s_raw_lo[r]),
+                                _mask_slot_lo[r])
                             kv_col_hi = arith.AddIOp(
                                 kv_col_lo,
                                 arith.constant(K_SUB_N, type=T.i32)).result
                             is_masked_hi = arith.cmpi(
                                 arith.CmpIPredicate.ugt,
                                 kv_col_hi, q_row_i32)
-                            _m_hi.append(arith.select(
-                                is_masked_hi, c_neg_inf, s_raw_hi[r]))
-                        scf.YieldOp(_m_lo + _m_hi)
-                    with ir.InsertionPoint(_mask_if.else_block):
-                        scf.YieldOp(s_raw_lo + s_raw_hi)
-                    s_raw_lo = [_mask_if.results[i] for i in range(16)]
-                    s_raw_hi = [_mask_if.results[16 + i] for i in range(16)]
+                            _llvm.StoreOp(arith.select(
+                                is_masked_hi, c_neg_inf, s_raw_hi[r]),
+                                _mask_slot_hi[r])
+                        scf.YieldOp([])
+                    s_raw_lo = [_llvm.LoadOp(T.f32, _mask_slot_lo[r]).result
+                                for r in range_constexpr(16)]
+                    s_raw_hi = [_llvm.LoadOp(T.f32, _mask_slot_hi[r]).result
+                                for r in range_constexpr(16)]
 
                 _max_fm = {"fastmath": fm_fast}
                 local_max = s_raw_lo[0]
@@ -837,12 +837,56 @@ def build_flash_attn_func_module_primary(
                 l_new = arith.AddFOp(l_corr, tile_sum, fastmath=fm_fast).result
 
                 # ==== Rescale O accumulators ====
-                corr_vec = vector.broadcast(v16f32_type, corr)
-                if not USE_HW_TR:
-                    o_accs[0] = arith.MulFOp(o_accs[0], corr_vec, fastmath=fm_fast).result
+                if not CAUSAL:
+                    # Lazy rescale: skip exp2+mul_col when max doesn't change
+                    _RESCALE_THR = 8.0
+                    _diff_f = arith.SubFOp(m_new_raw, m_running, fastmath=fm_fast).result
+                    _ok = arith.CmpFOp(arith.CmpFPredicate.OLE, _diff_f,
+                                       arith.constant(_RESCALE_THR, type=T.f32)).result
+                    _ballot = rocdl.ballot(ir.IntegerType.get_signless(64), _ok)
+                    _all_ok = arith.cmpi(arith.CmpIPredicate.eq, _ballot,
+                                        arith.constant(-1, type=ir.IntegerType.get_signless(64)))
+                    _rif = scf.IfOp(_all_ok, [T.f32, T.f32] + [v16f32_type] * D_CHUNKS, has_else=True)
+                    with ir.InsertionPoint(_rif.then_block):
+                        # m_new ≈ m_old → corr ≈ 1 → skip rescale entirely
+                        # Use m_old for P computation consistency
+                        scf.YieldOp([m_running, l_running] + list(o_accs))
+                    with ir.InsertionPoint(_rif.else_block):
+                        # Full rescale: scale both l and o_accs
+                        _cv = vector.broadcast(v16f32_type, corr)
+                        _os = [arith.MulFOp(o_accs[dc], _cv, fastmath=fm_fast).result
+                               for dc in range_constexpr(D_CHUNKS)]
+                        _lc = arith.MulFOp(corr, l_running, fastmath=fm_fast).result
+                        scf.YieldOp([m_new_raw, _lc] + _os)
+                    m_new_raw = _rif.results[0]
+                    l_corr = _rif.results[1]
+                    o_accs = [_rif.results[2 + dc] for dc in range_constexpr(D_CHUNKS)]
+                    # Recompute P + l_new with effective max
+                    _eff_scaled = arith.MulFOp(c_sm_scale_log2e, m_new_raw, fastmath=fm_fast).result
+                    _eff_neg = arith.SubFOp(c_zero_f, _eff_scaled, fastmath=fm_fast).result
+                    p_vals_lo = []
+                    p_vals_hi = []
+                    local_sum = c_zero_f
+                    for r in range_constexpr(16):
+                        diff_lo = math_dialect.fma(s_raw_lo[r], c_sm_scale_log2e, _eff_neg)
+                        p_lo = arith.ArithValue(diff_lo).exp2(fastmath=fm_fast)
+                        p_vals_lo.append(p_lo)
+                        local_sum = arith.AddFOp(local_sum, p_lo, fastmath=fm_fast).result
+                    for r in range_constexpr(16):
+                        diff_hi = math_dialect.fma(s_raw_hi[r], c_sm_scale_log2e, _eff_neg)
+                        p_hi = arith.ArithValue(diff_hi).exp2(fastmath=fm_fast)
+                        p_vals_hi.append(p_hi)
+                        local_sum = arith.AddFOp(local_sum, p_hi, fastmath=fm_fast).result
+                    peer_sum = reduction_peer(local_sum)
+                    tile_sum = arith.AddFOp(local_sum, peer_sum, fastmath=fm_fast).result
+                    l_new = arith.AddFOp(l_corr, tile_sum, fastmath=fm_fast).result
                 else:
-                    for dc in range_constexpr(D_CHUNKS):
-                        o_accs[dc] = arith.MulFOp(o_accs[dc], corr_vec, fastmath=fm_fast).result
+                    corr_vec = vector.broadcast(v16f32_type, corr)
+                    if not USE_HW_TR:
+                        o_accs[0] = arith.MulFOp(o_accs[0], corr_vec, fastmath=fm_fast).result
+                    else:
+                        for dc in range_constexpr(D_CHUNKS):
+                            o_accs[dc] = arith.MulFOp(o_accs[dc], corr_vec, fastmath=fm_fast).result
 
                 if ENABLE_PREFETCH_3BUF and (kv_sub + preload_k_count) < N_SUBTILES:
                     next_k_sub = kv_sub + preload_k_count
