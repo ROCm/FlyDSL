@@ -274,7 +274,7 @@ def build_flash_attn_func_module_primary(
         def _mul(a, b): return arith.MulFOp(a, b, fastmath=fm_fast).result
         def _add(a, b): return arith.AddFOp(a, b, fastmath=fm_fast).result
         def _fmax(a, b): return arith.MaxNumFOp(a, b, fastmath=fm_fast).result
-        def _exp2(v): return arith.ArithValue(v).exp2(fastmath=fm_fast)
+        def _exp2(v): return rocdl.exp2(ir.F32Type.get(), v)
         def _fma(a, b, c): return math_dialect.fma(a, b, c)
 
         v4f16_type = T.vec(4, elem_type)
