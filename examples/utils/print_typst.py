@@ -18,8 +18,10 @@ OUTPUT_TYPST = "layout.typ"
 
 @flyc.jit
 def visualize():
+    mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 16, fx.Float16))
+
     tiled_mma = fx.make_tiled_mma(
-        fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 16, fx.Float16)),
+        mma_atom,
         fx.make_layout((1, 2, 1), (0, 1, 0)),
         fx.make_tile(16, 32, fx.make_layout((4, 4, 2), (1, 8, 4))),
     )
@@ -34,6 +36,7 @@ def visualize():
         tiled_mma,
     )
 
+    fx.utils.print_typst(mma_atom, file=OUTPUT_TYPST)
     fx.utils.print_typst(tiled_mma, file=OUTPUT_TYPST)
     fx.utils.print_typst(tiled_copy, file=OUTPUT_TYPST)
     fx.utils.print_typst(swizzle_layout, file=OUTPUT_TYPST)

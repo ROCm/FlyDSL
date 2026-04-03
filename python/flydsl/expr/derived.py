@@ -20,7 +20,6 @@ Typical usage::
     tAr = thr_mma.partition_A(sA)
 """
 
-from .._mlir import ir
 from .._mlir.dialects._fly_enum_gen import MmaOperand
 from .meta import traced_op
 from .primitive import *
@@ -28,7 +27,6 @@ from .typing import Tensor, TiledCopy, TiledMma
 
 __all__ = [
     # Tiled Operation
-    "MmaAtom",
     "ThrCopy",
     "ThrMma",
     "make_layout_tv",
@@ -37,61 +35,6 @@ __all__ = [
     "make_tiled_copy_B",
     "make_tiled_copy_C",
 ]
-
-
-class Atom:
-    """Base class for hardware instruction atoms (copy/MMA).
-
-    An atom wraps a single MLIR ``ir.Value`` that represents a hardware
-    instruction descriptor in the Fly dialect type system.
-    """
-
-    def __init__(self, value: ir.Value):
-        self.value = value
-        self.atom_ty = self.value.type
-
-    @classmethod
-    def __fly_construct__(cls, values):
-        return cls(values[0])
-
-    def __fly_values__(self):
-        return [self.value]
-
-
-class MmaAtom(Atom):
-    """Atom describing a single MMA (matrix multiply-accumulate) instruction.
-
-    Wraps MFMA instruction descriptors with thread-value layouts for
-    operands A, B, and C, plus the MNK shape of the instruction.
-
-    Properties:
-        thr_layout: Thread layout of the MMA atom.
-        shape_mnk: The (M, N, K) shape of the MMA instruction.
-        tv_layout_A/B/C: Thread-value layouts for operands A, B, C.
-    """
-
-    def __str__(self):
-        return f"MmaAtom({self.atom_ty})"
-
-    @property
-    def thr_layout(self):
-        return static(self.atom_ty.thr_layout)
-
-    @property
-    def shape_mnk(self):
-        return static(self.atom_ty.shape_mnk)
-
-    @property
-    def tv_layout_A(self):
-        return static(self.atom_ty.tv_layout_a)
-
-    @property
-    def tv_layout_B(self):
-        return static(self.atom_ty.tv_layout_b)
-
-    @property
-    def tv_layout_C(self):
-        return static(self.atom_ty.tv_layout_c)
 
 
 class ThrCopy(TiledCopy):

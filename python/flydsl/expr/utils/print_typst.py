@@ -110,6 +110,17 @@ def _typst_text_panel(lines: list[str]) -> str:
     return "\n".join(panel)
 
 
+def _mma_atom_text_lines(mma_atom) -> list[str]:
+    return [
+        "MMA Atom",
+        f"  Thr Layout:  {mma_atom.thr_layout}",
+        f"  Shape MNK:   {mma_atom.shape_mnk}",
+        f"  TV Layout A: {mma_atom.layout_A_tv}",
+        f"  TV Layout B: {mma_atom.layout_B_tv}",
+        f"  TV Layout C: {mma_atom.layout_C_tv}",
+    ]
+
+
 def _tiled_mma_text_lines(mma) -> list[str]:
     return [
         "Tiled MMA",
@@ -224,6 +235,34 @@ def _typst_layout(
     return _typst_text_panel([f"{layout_str}"]) + "\n\n" + _typst_grid_block(M, N, cells, title="Layout") + "\n"
 
 
+def _typst_mma_atom(
+    mma_atom,
+    color: Callable[[int, int], str],
+) -> str:
+    shape_mnk = mma_atom.shape_mnk
+    M, N, K = shape_mnk.to_py_value()
+
+    layout_A = mma_atom.layout_A_tv
+    layout_B = mma_atom.layout_B_tv
+    layout_C = mma_atom.layout_C_tv
+
+    cells_C = _tv_cells(layout_C, M, N, color)
+    cells_A = _tv_cells(layout_A, M, K, color)
+    cells_B = _tv_cells_B_top(layout_B, N, K, color)
+
+    doc = _typst_text_panel(_mma_atom_text_lines(mma_atom))
+
+    doc += "\n\n#grid(\n  columns: (auto, auto, auto),\n  rows: (auto, auto),\n  gutter: 12pt,\n  align: center + horizon,\n"
+    doc += "  [],\n  [\n"
+    doc += _typst_grid_block(K, N, cells_B, title="B (K x N)")
+    doc += "\n  ],\n  [],\n  [\n"
+    doc += _typst_grid_block(M, K, cells_A, title="A (M x K)")
+    doc += "\n  ],\n  [\n"
+    doc += _typst_grid_block(M, N, cells_C, title="C (M x N)")
+    doc += "\n  ],\n  [],\n)\n"
+    return doc
+
+
 def _typst_mma(
     mma,
     color: Callable[[int, int], str],
@@ -289,6 +328,7 @@ def print_typst(
     Dispatches based on the type of *arg*:
 
     * **Layout / ComposedLayout** -- index grid coloured by linear index.
+    * **MmaAtom** -- atom info text plus B-over-C / A-left-of-C TV grids.
     * **TiledMma** -- LayoutABC text plus a B-over-C / A-left-of-C view.
     * **TiledCopy** -- side-by-side Src, Dst thread-value grids.
 
@@ -296,24 +336,26 @@ def print_typst(
     separators; the Typst header is emitted only once.
 
     Args:
-        arg: A static Layout, ComposedLayout, TiledMma, or TiledCopy.
+        arg: A static Layout, ComposedLayout, MmaAtom, TiledMma, or TiledCopy.
         color: Optional colour function.  For Layout the signature is
-            ``(idx) -> hex``; for TiledMma/TiledCopy it is
+            ``(idx) -> hex``; for MmaAtom/TiledMma/TiledCopy it is
             ``(tid, vid) -> hex``.  Defaults to grayscale for Layout
             and pastel-by-thread for MMA/Copy.
         file: Output filename.  ``None`` -> ``sys.stdout``.
     """
-    from ..typing import ComposedLayout, Layout, TiledCopy, TiledMma
+    from ..typing import ComposedLayout, Layout, MmaAtom, TiledCopy, TiledMma
 
     if isinstance(arg, (Layout, ComposedLayout)):
         body = _typst_layout(arg, color or _color_bw)
+    elif isinstance(arg, MmaAtom):
+        body = _typst_mma_atom(arg, color or _color_tv)
     elif isinstance(arg, TiledMma):
         body = _typst_mma(arg, color or _color_tv)
     elif isinstance(arg, TiledCopy):
         body = _typst_copy(arg, color or _color_tv)
     else:
         raise ValueError(
-            f"print_typst expects Layout, ComposedLayout, TiledMma, or TiledCopy, got {type(arg).__name__}"
+            f"print_typst expects Layout, ComposedLayout, MmaAtom, TiledMma, or TiledCopy, got {type(arg).__name__}"
         )
 
     if file is None:

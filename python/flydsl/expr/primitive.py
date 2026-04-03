@@ -641,10 +641,9 @@ def tile_to_shape(block, trg_shape, ord_shape, loc=None, ip=None):
 
 
 @traced_op
-def make_mma_atom(atom_type, loc=None, ip=None):
-    from .derived import MmaAtom
-
-    return MmaAtom(fly.make_mma_atom(atom_type, loc=loc, ip=ip))
+def make_mma_atom(mma_op_type, loc=None, ip=None):
+    mma_atom_ty = MmaAtomType.get(mma_op=mma_op_type)
+    return fly.make_mma_atom(mma_atom_ty, loc=loc, ip=ip)
 
 
 @traced_op
@@ -662,7 +661,7 @@ def make_copy_atom(copy_op_type, elem_type, loc=None, ip=None):
         val_bits = elem_type
     else:
         raise TypeError(f"make_copy_atom: elem_type must be NumericType, ir.Type, or int, got {type(elem_type)}")
-    copy_atom_ty = CopyAtomType.get(copy_op_type, val_bits)
+    copy_atom_ty = CopyAtomType.get(copy_op=copy_op_type, val_bits=val_bits)
     return fly.make_copy_atom(copy_atom_ty, val_bits=val_bits, loc=loc, ip=ip)
 
 
