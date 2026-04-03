@@ -93,10 +93,17 @@ def load_op(result_type, memref, indices, *, loc=None, ip=None):
 def bitcast(result_type, source, *, loc=None, ip=None):
     """Wrapper around `vector.BitCastOp(...).result`."""
     from . import arith as _arith_ext
+    from .._mlir import ir as _ir
+
+    unwrapped = _arith_ext.unwrap(source, loc=loc)
+    # MLIR 23+ requires vector input for vector.bitcast; auto-wrap scalars.
+    if not isinstance(unwrapped.type, _ir.VectorType):
+        vec1_ty = _ir.VectorType.get([1], unwrapped.type)
+        unwrapped = _vector.FromElementsOp(vec1_ty, [unwrapped], loc=loc, ip=ip).result
 
     return _vector.BitCastOp(
         result_type,
-        _arith_ext.unwrap(source, loc=loc),
+        unwrapped,
         loc=loc,
         ip=ip,
     ).result

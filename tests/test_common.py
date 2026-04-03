@@ -179,7 +179,6 @@ def run_perftest(
     needTrace=False,
     **kwargs,
 ):
-
     @perftest(
         num_iters=num_iters,
         num_warmup=num_warmup,
