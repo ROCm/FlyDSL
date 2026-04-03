@@ -553,6 +553,9 @@ def compile_blockscale_preshuffle_gemm(
 
                         for mi in range_constexpr(m_repeat):
                             curr_row_a_lds = row_a_lds + (mi * 16)
+                            a0, a1 = lds_load_packs_k64(
+                                curr_row_a_lds, col_base, lds_buffer
+                            )
 
                             if (
                                 a0_prefetch is not None
@@ -561,10 +564,6 @@ def compile_blockscale_preshuffle_gemm(
                                 and mi == 0
                             ):
                                 a0, a1 = a0_prefetch
-                            else:
-                                a0, a1 = lds_load_packs_k64(
-                                    curr_row_a_lds, col_base, lds_buffer
-                                )
 
                             for ni in range_constexpr(num_acc_n):
                                 acc_idx = mi * num_acc_n + ni
@@ -732,6 +731,7 @@ def compile_blockscale_preshuffle_gemm(
         a0_prefetch_pong = prefetch_a0_pack(lds_a_pong)
 
         num_tiles = K // tile_k
+        final_accs = global_accs
 
         if (num_tiles % 2) == 1:
             for k_iv in range_constexpr(0, K - tile_k, tile_k * 2):

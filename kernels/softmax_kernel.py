@@ -96,7 +96,7 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
                     w = w.addf(peer, fastmath=fm_fast)
             return w
 
-        def block_reduce(val, mode):
+        def block_reduce(val, mode, s_red_buffer):
             if RED_SLOTS == 1:
                 return wave_reduce(val, mode)
 
@@ -108,25 +108,25 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
 
             if lane == fx.Int32(0):
                 wave_idx = arith.index_cast(T.index, wave)
-                s_red.store(w, [wave_idx])
+                SmemPtr.store(s_red_buffer, w, [wave_idx])
             gpu.barrier()
 
             if wave == fx.Int32(0):
                 in_range = lane < RED_SLOTS
                 lane_safe = in_range.select(lane, fx.Int32(0))
                 lane_safe_idx = arith.index_cast(T.index, lane_safe)
-                v = s_red.load([lane_safe_idx])
+                v = SmemPtr.load(s_red_buffer, [lane_safe_idx])
                 z = neutral
                 ww = in_range.select(v, z)
                 ww = wave_reduce(ww, mode)
 
                 if lane == fx.Int32(0):
                     c0_idx = fx.Index(0)
-                    s_red.store(ww, [c0_idx])
+                    SmemPtr.store(s_red_buffer, ww, [c0_idx])
             gpu.barrier()
 
             c0_idx = fx.Index(0)
-            return s_red.load([c0_idx])
+            return SmemPtr.load(s_red_buffer, [c0_idx])
 
         # ==================================================================
         # Fast path: N is a multiple of tile_cols
@@ -170,7 +170,7 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
                 red_max = vector.reduction(compute_type, vector.CombiningKind.MAXNUMF, x)
                 thread_max = thread_max.maximumf(red_max)
 
-            global_max = block_reduce(thread_max, "max")
+            global_max = block_reduce(thread_max, "max", s_red)
 
             # 2. Exp + local sum
             g_max_splat = vector.broadcast(vec_type_c, global_max)
@@ -186,7 +186,7 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
                 red_sum = vector.reduction(compute_type, vector.CombiningKind.ADD, exp_val, fastmath=fm_fast)
                 thread_sum = thread_sum + red_sum
 
-            global_sum = block_reduce(thread_sum, "sum")
+            global_sum = block_reduce(thread_sum, "sum", s_red)
 
             # 3. Normalize + store
             c_one = arith.constant(1.0, type=compute_type)
@@ -196,6 +196,7 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
             for tile_i in range_constexpr(num_tiles):
                 exp_vec = row_buffer[tile_i]
                 norm_vec = ArithValue(exp_vec) * ArithValue(inv_sum_splat)
+                out_e = norm_vec
 
                 if dtype_str == "f32":
                     out_e = norm_vec
@@ -253,7 +254,7 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
                 row_buffer.append((safe_val, is_valid))
                 thread_max = thread_max.maximumf(safe_val)
 
-            global_max = block_reduce(thread_max, "max")
+            global_max = block_reduce(thread_max, "max", s_red)
 
             # 2. Exp + sum
             thread_sum = c_zero_f
@@ -266,7 +267,7 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
                 thread_sum = thread_sum + safe_exp
                 new_buffer.append((exp_val, is_valid))
 
-            global_sum = block_reduce(thread_sum, "sum")
+            global_sum = block_reduce(thread_sum, "sum", s_red)
             c_one = arith.constant(1.0, type=compute_type)
             inv_sum = c_one / ArithValue(global_sum)
 
@@ -278,6 +279,7 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
                 buf_idx += 1
                 if arith.cmpi(arith.CmpIPredicate.ult, idx, Int32(N)):
                     norm_val = ArithValue(exp_val) * inv_sum
+                    out_e = norm_val
                     if dtype_str == "f32":
                         out_e = norm_val
                     else:
