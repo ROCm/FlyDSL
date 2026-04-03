@@ -13,6 +13,7 @@ from .._mlir.dialects.fly import (
     CoordTensorType,
     CopyAtomType,
     CopyOpUniversalCopyType,
+    GemmTraversalOrder,
     IntTupleType,
     LayoutType,
     MemRefType,
@@ -23,7 +24,6 @@ from .._mlir.dialects.fly import (
     SwizzleType,
     TiledCopyType,
     TiledMmaType,
-    GemmTraversalOrder,
     #
     has_none,
 )
