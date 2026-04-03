@@ -176,6 +176,115 @@ bool appendIntTuplePrintfStatic(IntTupleAttr attr, std::string &format) {
   return true;
 }
 
+struct ContigSegment {
+  int32_t idx;
+  int64_t vecWidth;
+};
+
+enum class ContigResult { Vector, Scalar, Invalid };
+
+std::pair<ContigResult, ContigSegment> findContigSegment(IntTupleBuilder<IntTupleAttr> &attrBuilder,
+                                                         IntTupleAttr shapeAttr,
+                                                         IntTupleAttr strideAttr) {
+  SmallVector<IntTupleAttr> flatShapeLeaves;
+  SmallVector<IntTupleAttr> flatStrideLeaves;
+  intTupleFlattenToVector(attrBuilder, shapeAttr, flatShapeLeaves);
+  intTupleFlattenToVector(attrBuilder, strideAttr, flatStrideLeaves);
+  assert(flatShapeLeaves.size() == flatStrideLeaves.size());
+
+  int32_t flatRank = static_cast<int32_t>(flatShapeLeaves.size());
+
+  int count = 0;
+  ContigSegment result{0, 0};
+
+  for (int32_t i = 0; i < flatRank; ++i) {
+    bool isStride1 =
+        flatStrideLeaves[i].isStatic() && flatStrideLeaves[i].getLeafAsInt().getValue() == 1;
+    if (isStride1) {
+      ++count;
+      if (count > 1)
+        return {ContigResult::Invalid, {}};
+      result = {i, flatShapeLeaves[i].getLeafAsInt().getValue()};
+    }
+  }
+
+  if (count == 0)
+    return {ContigResult::Scalar, {}};
+  return {ContigResult::Vector, result};
+}
+
+Value permuteLoadedVec(PatternRewriter &rewriter, Location loc, Value vec, IntTupleAttr flatShape,
+                       int32_t flatRank, int32_t contigIdx, int64_t vecWidth, int64_t numChunks) {
+  if (contigIdx == 0)
+    return vec;
+
+  auto elemTy = cast<VectorType>(vec.getType()).getElementType();
+  int32_t numPre = contigIdx;
+  int32_t numPost = flatRank - contigIdx - 1;
+
+  SmallVector<int64_t> intermediateShape;
+  for (int32_t i = flatRank - 1; i > contigIdx; --i)
+    intermediateShape.push_back(flatShape.at(i).getLeafAsInt().getValue());
+  for (int32_t i = contigIdx - 1; i >= 0; --i)
+    intermediateShape.push_back(flatShape.at(i).getLeafAsInt().getValue());
+  intermediateShape.push_back(vecWidth);
+
+  auto intermediateTy = VectorType::get(intermediateShape, elemTy);
+  Value shaped = vector::ShapeCastOp::create(rewriter, loc, intermediateTy, vec);
+
+  SmallVector<int64_t> perm;
+  for (int32_t i = 0; i < numPost; ++i)
+    perm.push_back(i);
+  perm.push_back(numPost + numPre);
+  for (int32_t i = 0; i < numPre; ++i)
+    perm.push_back(numPost + i);
+
+  SmallVector<int64_t> transposedShape;
+  for (auto p : perm)
+    transposedShape.push_back(intermediateShape[p]);
+  auto transposedTy = VectorType::get(transposedShape, elemTy);
+  Value transposed = vector::TransposeOp::create(rewriter, loc, transposedTy, shaped, perm);
+
+  auto flatTy = VectorType::get({numChunks * vecWidth}, elemTy);
+  return vector::ShapeCastOp::create(rewriter, loc, flatTy, transposed);
+}
+
+Value permuteForStore(PatternRewriter &rewriter, Location loc, Value vec, IntTupleAttr flatShape,
+                      int32_t flatRank, int32_t contigIdx, int64_t vecWidth, int64_t numChunks) {
+  if (contigIdx == 0)
+    return vec;
+
+  auto elemTy = cast<VectorType>(vec.getType()).getElementType();
+  int32_t numPre = contigIdx;
+  int32_t numPost = flatRank - contigIdx - 1;
+
+  SmallVector<int64_t> targetShape;
+  for (int32_t i = flatRank - 1; i > contigIdx; --i)
+    targetShape.push_back(flatShape.at(i).getLeafAsInt().getValue());
+  targetShape.push_back(vecWidth);
+  for (int32_t i = contigIdx - 1; i >= 0; --i)
+    targetShape.push_back(flatShape.at(i).getLeafAsInt().getValue());
+
+  auto targetTy = VectorType::get(targetShape, elemTy);
+  Value shaped = vector::ShapeCastOp::create(rewriter, loc, targetTy, vec);
+
+  SmallVector<int64_t> perm;
+  for (int32_t i = 0; i < numPost; ++i)
+    perm.push_back(i);
+  for (int32_t i = 0; i < numPre; ++i)
+    perm.push_back(numPost + 1 + i);
+  perm.push_back(numPost);
+
+  SmallVector<int64_t> transposedShape;
+  for (auto p : perm)
+    transposedShape.push_back(targetShape[p]);
+  auto transposedTy = VectorType::get(transposedShape, elemTy);
+  Value transposed = vector::TransposeOp::create(rewriter, loc, transposedTy, shaped, perm);
+
+  auto flatTy = VectorType::get({numChunks * vecWidth}, elemTy);
+  return vector::ShapeCastOp::create(rewriter, loc, flatTy, transposed);
+}
+
 //===----------------------------------------------------------------------===//
 // Constructors
 //===----------------------------------------------------------------------===//
@@ -2253,6 +2362,7 @@ public:
 
     IntTupleBuilder<IntTupleAttr> attrBuilder(ctx);
     IntTupleAttr shapeAttr = layoutAttr.getShape();
+    IntTupleAttr strideAttr = layoutAttr.getStride();
 
     auto resVecTy = dyn_cast<VectorType>(op.getResult().getType());
     if (!resVecTy)
@@ -2262,60 +2372,92 @@ public:
     Value iter = GetIterOp::create(rewriter, loc, memref);
     Value layout = GetLayoutOp::create(rewriter, loc, memref);
 
-    // Flatten shape to get all leaf dims; first leaf is the contiguous vector width.
     IntTupleAttr flatShape = intTupleFlatten(attrBuilder, shapeAttr);
-    IntTupleAttr firstLeafShape = flatShape.isLeaf() ? flatShape : flatShape.at(0);
-    int64_t vecWidth = firstLeafShape.getLeafAsInt().getValue();
-
-    // Remaining flat dims (everything after the first leaf).
     int32_t flatRank = flatShape.rank();
+
+    auto [contigResult, contigSeg] = findContigSegment(attrBuilder, shapeAttr, strideAttr);
+    if (contigResult == ContigResult::Invalid)
+      return failure();
+
+    Value result = arith::ConstantOp::create(rewriter, loc, rewriter.getZeroAttr(resVecTy));
+
+    if (contigResult == ContigResult::Scalar) {
+      int64_t totalElems = intTupleProduct(attrBuilder, shapeAttr).getLeafAsInt().getValue();
+
+      Type scalarTy = resVecTy.getElementType();
+      for (int64_t i = 0; i < totalElems; ++i) {
+        IntTupleAttr coordAttr =
+            layoutIdx2CrdColMajor(attrBuilder, attrBuilder.materializeConstantLeaf(i), shapeAttr);
+
+        Value coord =
+            MakeIntTupleOp::create(rewriter, loc, IntTupleType::get(coordAttr), ValueRange{});
+        Value offset = Crd2IdxOp::create(rewriter, loc, coord, layout);
+        Value ptr = AddOffsetOp::create(rewriter, loc, iter, offset);
+        Value scalar = PtrLoadOp::create(rewriter, loc, scalarTy, ptr);
+        result = vector::InsertOp::create(rewriter, loc, scalar, result, i);
+      }
+      rewriter.replaceOp(op, result);
+      return success();
+    }
+
+    int64_t vecWidth = contigSeg.vecWidth;
+    int32_t contigIdx = contigSeg.idx;
+
     if (flatRank == 1) {
       Value loaded = PtrLoadOp::create(rewriter, loc, resVecTy, iter);
       rewriter.replaceOp(op, loaded);
       return success();
     }
+
     SmallVector<Attribute> restFlatElems;
-    for (int32_t i = 1; i < flatRank; ++i)
-      restFlatElems.push_back(flatShape.at(i));
+    for (int32_t i = 0; i < flatRank; ++i) {
+      if (i == contigIdx)
+        continue;
+      restFlatElems.push_back(flatShape.isLeaf() ? flatShape : flatShape.at(i));
+    }
     IntTupleAttr restFlatShape = restFlatElems.size() == 1
-        ? cast<IntTupleAttr>(restFlatElems[0])
-        : IntTupleAttr::get(ArrayAttr::get(ctx, restFlatElems));
+                                     ? cast<IntTupleAttr>(restFlatElems[0])
+                                     : IntTupleAttr::get(ArrayAttr::get(ctx, restFlatElems));
 
     int64_t numChunks = intTupleProduct(attrBuilder, restFlatShape).getLeafAsInt().getValue();
-
-    auto zeroAttr = rewriter.getZeroAttr(resVecTy.getElementType());
-    auto denseAttr = DenseElementsAttr::get(resVecTy, zeroAttr);
-    Value result = arith::ConstantOp::create(rewriter, loc, resVecTy, denseAttr);
-
     VectorType chunkVecTy = VectorType::get({vecWidth}, resVecTy.getElementType());
 
     for (int64_t i = 0; i < numChunks; ++i) {
-      // Compute column-major coordinate over the rest flat dims.
-      IntTupleAttr restCoord = layoutIdx2CrdColMajor(
-          attrBuilder, attrBuilder.materializeConstantLeaf(i), restFlatShape);
+      IntTupleAttr restCoord =
+          layoutIdx2CrdColMajor(attrBuilder, attrBuilder.materializeConstantLeaf(i), restFlatShape);
 
-      // Build full flat coordinate: (0, restCoord...) and unflatten to original shape structure.
       SmallVector<Attribute> flatCoordElems;
-      flatCoordElems.push_back(attrBuilder.materializeConstantLeaf(0));
-      if (restCoord.isLeaf()) {
-        flatCoordElems.push_back(restCoord);
-      } else {
-        for (int32_t j = 0; j < restCoord.rank(); ++j)
-          flatCoordElems.push_back(restCoord.at(j));
+      int32_t restIdx = 0;
+      for (int32_t j = 0; j < flatRank; ++j) {
+        if (j == contigIdx) {
+          flatCoordElems.push_back(attrBuilder.materializeConstantLeaf(0));
+        } else {
+          if (restFlatElems.size() == 1) {
+            flatCoordElems.push_back(restCoord);
+          } else {
+            flatCoordElems.push_back(restCoord.isLeaf() ? restCoord : restCoord.at(restIdx));
+          }
+          ++restIdx;
+        }
       }
-      IntTupleAttr flatCoord = IntTupleAttr::get(ArrayAttr::get(ctx, flatCoordElems));
+      IntTupleAttr flatCoord = flatCoordElems.size() == 1
+                                   ? cast<IntTupleAttr>(flatCoordElems[0])
+                                   : IntTupleAttr::get(ArrayAttr::get(ctx, flatCoordElems));
       IntTupleAttr coordAttr = intTupleUnflatten(attrBuilder, flatCoord, shapeAttr);
 
-      Value coord = MakeIntTupleOp::create(rewriter, loc, IntTupleType::get(coordAttr), ValueRange{});
+      Value coord =
+          MakeIntTupleOp::create(rewriter, loc, IntTupleType::get(coordAttr), ValueRange{});
       Value offset = Crd2IdxOp::create(rewriter, loc, coord, layout);
       Value ptr = AddOffsetOp::create(rewriter, loc, iter, offset);
       Value chunkVec = PtrLoadOp::create(rewriter, loc, chunkVecTy, ptr);
-      result = vector::InsertStridedSliceOp::create(
-                   rewriter, loc, chunkVec, result,
-                   ArrayRef<int64_t>{i * vecWidth}, ArrayRef<int64_t>{1})
+      result = vector::InsertStridedSliceOp::create(rewriter, loc, chunkVec, result,
+                                                    ArrayRef<int64_t>{i * vecWidth},
+                                                    ArrayRef<int64_t>{1})
                    .getResult();
     }
 
+    result = permuteLoadedVec(rewriter, loc, result, flatShape, flatRank, contigIdx, vecWidth,
+                              numChunks);
     rewriter.replaceOp(op, result);
     return success();
   }
@@ -2340,59 +2482,89 @@ public:
 
     IntTupleBuilder<IntTupleAttr> attrBuilder(ctx);
     IntTupleAttr shapeAttr = layoutAttr.getShape();
+    IntTupleAttr strideAttr = layoutAttr.getStride();
 
     Value vec = op.getVector();
     Value memref = op.getMemref();
     Value iter = GetIterOp::create(rewriter, loc, memref);
     Value layout = GetLayoutOp::create(rewriter, loc, memref);
 
-    // Flatten shape to get all leaf dims; first leaf is the contiguous vector width.
     IntTupleAttr flatShape = intTupleFlatten(attrBuilder, shapeAttr);
-    IntTupleAttr firstLeafShape = flatShape.isLeaf() ? flatShape : flatShape.at(0);
-    if (!firstLeafShape.isLeafInt() || !firstLeafShape.isStatic())
-      return failure();
-    int64_t vecWidth = firstLeafShape.getLeafAsInt().getValue();
+    int32_t flatRank = flatShape.isLeaf() ? 1 : flatShape.rank();
 
-    // Remaining flat dims (everything after the first leaf).
-    int32_t flatRank = flatShape.rank();
+    auto [contigResult, contigSeg] = findContigSegment(attrBuilder, shapeAttr, strideAttr);
+    if (contigResult == ContigResult::Invalid)
+      return failure();
+
+    if (contigResult == ContigResult::Scalar) {
+      int64_t totalElems = intTupleProduct(attrBuilder, shapeAttr).getLeafAsInt().getValue();
+      for (int64_t i = 0; i < totalElems; ++i) {
+        IntTupleAttr coordAttr =
+            layoutIdx2CrdColMajor(attrBuilder, attrBuilder.materializeConstantLeaf(i), shapeAttr);
+        Value coord =
+            MakeIntTupleOp::create(rewriter, loc, IntTupleType::get(coordAttr), ValueRange{});
+        Value offset = Crd2IdxOp::create(rewriter, loc, coord, layout);
+        Value ptr = AddOffsetOp::create(rewriter, loc, iter, offset);
+        Value scalar = vector::ExtractOp::create(rewriter, loc, vec, i);
+        PtrStoreOp::create(rewriter, loc, scalar, ptr);
+      }
+      rewriter.eraseOp(op);
+      return success();
+    }
+
+    int64_t vecWidth = contigSeg.vecWidth;
+    int32_t contigIdx = contigSeg.idx;
+
     if (flatRank == 1) {
       PtrStoreOp::create(rewriter, loc, vec, iter);
       rewriter.eraseOp(op);
       return success();
     }
+
     SmallVector<Attribute> restFlatElems;
-    for (int32_t i = 1; i < flatRank; ++i)
-      restFlatElems.push_back(flatShape.at(i));
+    for (int32_t i = 0; i < flatRank; ++i) {
+      if (i == contigIdx)
+        continue;
+      restFlatElems.push_back(flatShape.isLeaf() ? flatShape : flatShape.at(i));
+    }
     IntTupleAttr restFlatShape = restFlatElems.size() == 1
-        ? cast<IntTupleAttr>(restFlatElems[0])
-        : IntTupleAttr::get(ArrayAttr::get(ctx, restFlatElems));
+                                     ? cast<IntTupleAttr>(restFlatElems[0])
+                                     : IntTupleAttr::get(ArrayAttr::get(ctx, restFlatElems));
     int64_t numChunks = intTupleProduct(attrBuilder, restFlatShape).getLeafAsInt().getValue();
 
-    for (int64_t i = 0; i < numChunks; ++i) {
-      // Compute column-major coordinate over the rest flat dims.
-      IntTupleAttr restCoord = layoutIdx2CrdColMajor(
-          attrBuilder, attrBuilder.materializeConstantLeaf(i), restFlatShape);
+    vec = permuteForStore(rewriter, loc, vec, flatShape, flatRank, contigIdx, vecWidth, numChunks);
 
-      // Build full flat coordinate: (0, restCoord...) and unflatten to original shape structure.
+    for (int64_t i = 0; i < numChunks; ++i) {
+      IntTupleAttr restCoord =
+          layoutIdx2CrdColMajor(attrBuilder, attrBuilder.materializeConstantLeaf(i), restFlatShape);
+
       SmallVector<Attribute> flatCoordElems;
-      flatCoordElems.push_back(attrBuilder.materializeConstantLeaf(0));
-      if (restCoord.isLeaf()) {
-        flatCoordElems.push_back(restCoord);
-      } else {
-        for (int32_t j = 0; j < restCoord.rank(); ++j)
-          flatCoordElems.push_back(restCoord.at(j));
+      int32_t restIdx = 0;
+      for (int32_t j = 0; j < flatRank; ++j) {
+        if (j == contigIdx) {
+          flatCoordElems.push_back(attrBuilder.materializeConstantLeaf(0));
+        } else {
+          if (restFlatElems.size() == 1) {
+            flatCoordElems.push_back(restCoord);
+          } else {
+            flatCoordElems.push_back(restCoord.isLeaf() ? restCoord : restCoord.at(restIdx));
+          }
+          ++restIdx;
+        }
       }
-      IntTupleAttr flatCoord = IntTupleAttr::get(ArrayAttr::get(ctx, flatCoordElems));
+      IntTupleAttr flatCoord = flatCoordElems.size() == 1
+                                   ? cast<IntTupleAttr>(flatCoordElems[0])
+                                   : IntTupleAttr::get(ArrayAttr::get(ctx, flatCoordElems));
       IntTupleAttr coordAttr = intTupleUnflatten(attrBuilder, flatCoord, shapeAttr);
 
-      Value coord = MakeIntTupleOp::create(rewriter, loc, IntTupleType::get(coordAttr), ValueRange{});
+      Value coord =
+          MakeIntTupleOp::create(rewriter, loc, IntTupleType::get(coordAttr), ValueRange{});
       Value offset = Crd2IdxOp::create(rewriter, loc, coord, layout);
       Value ptr = AddOffsetOp::create(rewriter, loc, iter, offset);
-      Value chunkVec = vector::ExtractStridedSliceOp::create(
-                           rewriter, loc, vec,
-                           ArrayRef<int64_t>{i * vecWidth},
-                           ArrayRef<int64_t>{vecWidth}, ArrayRef<int64_t>{1})
-                           .getResult();
+      Value chunkVec =
+          vector::ExtractStridedSliceOp::create(rewriter, loc, vec, ArrayRef<int64_t>{i * vecWidth},
+                                                ArrayRef<int64_t>{vecWidth}, ArrayRef<int64_t>{1})
+              .getResult();
       PtrStoreOp::create(rewriter, loc, chunkVec, ptr);
     }
 
