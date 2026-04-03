@@ -784,7 +784,7 @@ def run_pa_decode_ps_test(
             atol=gluon_tol,
             rtol=gluon_tol,
         )
-        
+
     kv_page_indices, kv_indptr = build_ps_page_data(
         block_tables_list,
         context_lengths,
@@ -831,7 +831,6 @@ def run_pa_decode_ps_test(
 
     flydsl_ps_time = measure_us(flydsl_ps_call)
     ps_tol = get_ps_tolerance(quant_mode)
-    ps_vs_gluon_tol = get_ps_vs_gluon_tolerance(ps_tol, gluon_tol)
     print("\nFlyDSL PS vs Torch:")
     err_flydsl_ps, flydsl_ps_diff = summarize_comparison(
         "FlyDSL PS vs Torch",
@@ -840,27 +839,18 @@ def run_pa_decode_ps_test(
         atol=ps_tol,
         rtol=ps_tol,
     )
-    print("\nFlyDSL PS vs Gluon:")
-    err_flydsl_ps_vs_gluon, flydsl_ps_vs_gluon_diff = summarize_comparison(
-        "FlyDSL PS vs Gluon",
-        flydsl_ps_output,
-        gluon_output,
-        atol=ps_vs_gluon_tol,
-        rtol=ps_vs_gluon_tol,
-    )
-    results["us_gluon"] = gluon_time
+    
+    if HAS_GLUON:
+        results["us_gluon"] = gluon_time
+        results["err_gluon"] = err_gluon
+        results["gluon_max_diff"] = float(gluon_diff["max_diff"])
+        results["gluon_max_diff_thr"] = float(gluon_diff["max_diff_thr"])
+
     results["us_flydsl_ps"] = flydsl_ps_time
-    results["err_gluon"] = err_gluon
     results["err_flydsl_ps"] = err_flydsl_ps
-    results["err_flydsl_ps_vs_gluon"] = err_flydsl_ps_vs_gluon
-    results["gluon_max_diff"] = float(gluon_diff["max_diff"])
-    results["gluon_max_diff_thr"] = float(gluon_diff["max_diff_thr"])
     results["flydsl_ps_max_diff"] = float(flydsl_ps_diff["max_diff"])
     results["flydsl_ps_max_diff_thr"] = float(flydsl_ps_diff["max_diff_thr"])
-    results["flydsl_ps_vs_gluon_max_diff"] = float(flydsl_ps_vs_gluon_diff["max_diff"])
-    results["flydsl_ps_vs_gluon_max_diff_thr"] = float(
-        flydsl_ps_vs_gluon_diff["max_diff_thr"]
-    )
+
     return results
 
 
