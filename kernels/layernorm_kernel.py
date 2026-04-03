@@ -102,16 +102,16 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
 
             if lane == fx.Int32(0):
                 wave_idx = arith.index_cast(T.index, wave)
-                s_sum.store(w0, [wave_idx])
-                s_sumsq.store(w1, [wave_idx])
+                SmemPtr.store(s_sum, w0, [wave_idx])
+                SmemPtr.store(s_sumsq, w1, [wave_idx])
             gpu.barrier()
 
             if wave == fx.Int32(0):
                 in_range = lane < RED_SLOTS
                 lane_safe = in_range.select(lane, fx.Int32(0))
                 lane_safe_idx = arith.index_cast(T.index, lane_safe)
-                v0 = s_sum.load([lane_safe_idx])
-                v1 = s_sumsq.load([lane_safe_idx])
+                v0 = SmemPtr.load(s_sum, [lane_safe_idx])
+                v1 = SmemPtr.load(s_sumsq, [lane_safe_idx])
                 z = fx.Float32(0.0)
                 ww0 = in_range.select(v0, z)
                 ww1 = in_range.select(v1, z)
@@ -120,12 +120,12 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
 
                 if lane == fx.Int32(0):
                     c0_idx = fx.Index(0)
-                    s_sum.store(ww0, [c0_idx])
-                    s_sumsq.store(ww1, [c0_idx])
+                    SmemPtr.store(s_sum, ww0, [c0_idx])
+                    SmemPtr.store(s_sumsq, ww1, [c0_idx])
             gpu.barrier()
 
             c0_idx = fx.Index(0)
-            return s_sum.load([c0_idx]), s_sumsq.load([c0_idx])
+            return SmemPtr.load(s_sum, [c0_idx]), SmemPtr.load(s_sumsq, [c0_idx])
 
         def compute_mean_rstd(sum_val, sumsq_val):
             from flydsl.expr.arith import ArithValue
@@ -240,6 +240,8 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
 
             # ── Pass 2: normalize + affine + store ───────────────────────
             for tile_i in range_constexpr(num_tiles_py):
+                g_next = g_cur
+                b_next = b_cur
                 if tile_i + 1 < num_tiles_py:
                     next_col_bytes = ArithValue(thr_col_bytes) + ((tile_i + 1) * tile_cols * elem_bytes)
                     g_e_next = _load_vec_buf(gamma_rsrc, next_col_bytes)
@@ -254,10 +256,6 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                         if dtype_str == "f32"
                         else b_e_next.extf(vec_type_c)
                     )
-                else:
-                    g_next = g_cur
-                    b_next = b_cur
-
                 x = in_local[tile_i]
                 if cache_as_elem:
                     x = x.extf(vec_type_c)
@@ -268,6 +266,7 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                 y = (x_av - mean_splat_av) * rstd_splat_av
                 y = (y * g_av) + b_av
                 y_val = y
+                out_e = y_val
 
                 if dtype_str == "bf16":
                     if USE_HW_CVT_PK_BF16_F32:
@@ -393,6 +392,7 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                     norm = diff * ArithValue(rstd)
                     scaled = norm * ArithValue(g)
                     y = scaled + ArithValue(b)
+                    y_e = y
                     if dtype_str == "bf16":
                         y_e = y.truncf(elem_type)
                     elif dtype_str == "f32":
