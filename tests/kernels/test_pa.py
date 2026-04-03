@@ -17,11 +17,16 @@ import pytest
 import torch
 import triton
 
-import aiter
-from aiter import dtypes
-from aiter import per_tensor_quant, pertoken_quant
-from aiter.ops.triton.gluon.pa_decode_gluon import get_recommended_splits
-from aiter.test_common import checkAllclose
+try:
+    import aiter
+    from aiter import dtypes
+    from aiter import per_tensor_quant, pertoken_quant
+    from aiter.ops.triton.gluon.pa_decode_gluon import get_recommended_splits
+    from aiter.test_common import checkAllclose
+
+    HAS_AITER = True
+except Exception:
+    HAS_AITER = False
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
@@ -1162,6 +1167,7 @@ def sliding_window_accuracy_test() -> None:
     parse_arg_and_run_test(output_tag="ps_sliding_window_accuracy")
 
 
+@pytest.mark.skipif(not HAS_AITER, reason="aiter not available")
 @pytest.mark.parametrize("case_set_name", CASE_SET_NAME_OPTIONS)
 def test_multi_case_set(case_set_name: str) -> None:
     if case_set_name == "normal_accuracy":
