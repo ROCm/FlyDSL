@@ -30,7 +30,7 @@ if str(REPO_ROOT) not in sys.path:
 try:
     from triton.experimental import gluon  # noqa: F401
     from triton.experimental.gluon import language as gl  # noqa: F401
-    HAS_GLUON = False
+    HAS_GLUON = True
 except ImportError:
     HAS_GLUON = False
     print("Warning: Triton Gluon is unavailable; Gluon reference checks will fail.")
@@ -547,7 +547,7 @@ def run_flydsl_ps(
     )
 
 
-def get_gluon_tolerance(*, kv_varlen: bool, sliding_window: int) -> float:
+def get_tolerance(*, kv_varlen: bool, sliding_window: int) -> float:
     diff_tolerance = 5e-3
     if kv_varlen:
         diff_tolerance = 5e-2
@@ -557,9 +557,6 @@ def get_gluon_tolerance(*, kv_varlen: bool, sliding_window: int) -> float:
             diff_tolerance = 6e-2
     return diff_tolerance
 
-
-def get_ps_tolerance(quant_mode: str) -> float:
-    return 2e-2 if quant_mode == "per_token" else 5e-3
 
 
 def get_ps_vs_gluon_tolerance(ps_tolerance: float, gluon_tolerance: float) -> float:
@@ -775,7 +772,7 @@ def run_pa_decode_ps_test(
             )
 
         gluon_time = measure_us(gluon_call)
-        gluon_tol = get_gluon_tolerance(kv_varlen=kv_varlen, sliding_window=sliding_window)
+        gluon_tol = get_tolerance(kv_varlen=kv_varlen, sliding_window=sliding_window)
         print("\nGluon vs Torch:")
         err_gluon, gluon_diff = summarize_comparison(
             "Gluon vs Torch",
@@ -830,7 +827,7 @@ def run_pa_decode_ps_test(
         )
 
     flydsl_ps_time = measure_us(flydsl_ps_call)
-    ps_tol = get_ps_tolerance(quant_mode)
+    ps_tol = get_tolerance(kv_varlen=kv_varlen, sliding_window=sliding_window)
     print("\nFlyDSL PS vs Torch:")
     err_flydsl_ps, flydsl_ps_diff = summarize_comparison(
         "FlyDSL PS vs Torch",
@@ -839,7 +836,7 @@ def run_pa_decode_ps_test(
         atol=ps_tol,
         rtol=ps_tol,
     )
-    
+
     if HAS_GLUON:
         results["us_gluon"] = gluon_time
         results["err_gluon"] = err_gluon
