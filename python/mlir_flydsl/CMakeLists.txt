@@ -56,10 +56,10 @@ declare_mlir_python_extension(FlyPythonSources.Core.fly_rocdl
 )
 
 # NOTE: Do NOT link MLIRFlyToROCDL or other C++ libs via PRIVATE_LINK_LIBS.
-# Doing so statically embeds a copy of MLIRPass (and its pass registry) into
+# Doing so statically embeds a copy of MLIRPass (and the pass registry) into
 # _mlirRegisterEverything.so. Passes registered via registerFlyPasses() then
 # go into that LOCAL registry, while PassManager.parse() queries the GLOBAL
-# registry in FlyPythonCAPI.so → "does not refer to a registered pass".
+# registry in FlyPythonCAPI.so -> "does not refer to a registered pass".
 #
 # Instead, pass registration is done through CAPI functions
 # (mlirRegisterFlyPasses, mlirRegisterFlyToROCDLConversionPass) defined in
@@ -121,8 +121,8 @@ add_mlir_python_common_capi_library(FlyPythonCAPI
 # (libamd_comgr.so).
 #
 # Strategy:
-#   1. -fvisibility=hidden  — hide symbols compiled by FlyDSL itself
-#   2. Version script       — controls the FINAL exported symbol set:
+#   1. -fvisibility=hidden  - hide symbols compiled by FlyDSL itself
+#   2. Version script       - controls the FINAL exported symbol set:
 #                             exports mlir C API + mlir:: C++ symbols
 #                             (needed by _mlirDialectsFly.so, _mlir.so, etc.),
 #                             hides everything else (llvm::, LLVM C API).
@@ -130,7 +130,7 @@ add_mlir_python_common_capi_library(FlyPythonCAPI
 # NOTE: Triton uses --exclude-libs,ALL because it ships a single
 # libtriton.so with no downstream consumers.  FlyDSL cannot use
 # --exclude-libs,ALL because GNU ld's --exclude-libs forces symbols
-# to LOCAL *before* the version script is evaluated — wildcard patterns
+# to LOCAL *before* the version script is evaluated - wildcard patterns
 # in the version script cannot re-export them.  The version script
 # alone is sufficient: its `local: *;` catch-all hides LLVM internals.
 # ---------------------------------------------------------------------------
@@ -168,6 +168,9 @@ add_mlir_python_modules(FlyPythonModules
 
 set(_FLYDSL_PYTHON_PACKAGES_DIR "${MLIR_BINARY_DIR}/python_packages")
 set(_MLIR_LIBS_DIR "${FlyPythonModules_ROOT_PREFIX}/_mlir_libs")
+set_target_properties(FlyJitRuntime PROPERTIES
+  LIBRARY_OUTPUT_DIRECTORY "${_MLIR_LIBS_DIR}")
+add_dependencies(FlyPythonCAPI FlyJitRuntime)
 set(_STUB_MARKER_FILE "${_MLIR_LIBS_DIR}/.stubs_generated")
 
 add_custom_command(
@@ -223,29 +226,3 @@ add_custom_target(CopyFlyPythonSources ALL
 )
 
 add_dependencies(CopyFlyPythonSources FlyPythonModules)
-
-
-################################################################################
-# FlyJitRuntime — thin ROCm runtime with GPU module caching
-################################################################################
-
-file(GLOB _ROCM_SEARCH_PATHS LIST_DIRECTORIES true "/opt/rocm*")
-list(SORT _ROCM_SEARCH_PATHS ORDER DESCENDING)
-find_package(hip REQUIRED CONFIG PATHS ${_ROCM_SEARCH_PATHS})
-
-add_library(FlyJitRuntime SHARED
-  ${PROJECT_SOURCE_DIR}/lib/Runtime/FlyRocmRuntimeWrappers.cpp
-)
-target_include_directories(FlyJitRuntime PRIVATE
-  ${LLVM_INCLUDE_DIRS}
-  ${MLIR_INCLUDE_DIRS}
-)
-target_compile_features(FlyJitRuntime PRIVATE cxx_std_17)
-target_link_libraries(FlyJitRuntime PRIVATE hip::host hip::amdhip64)
-set_target_properties(FlyJitRuntime PROPERTIES
-  OUTPUT_NAME "fly_jit_runtime"
-  LIBRARY_OUTPUT_DIRECTORY "${_MLIR_LIBS_DIR}"
-)
-add_dependencies(FlyPythonCAPI FlyJitRuntime)
-
-
