@@ -194,10 +194,6 @@ def compile_pa_decode_ps(
     _softmax_scale = float(softmax_scale)
     _bs = KV_BLOCK_SIZE  # 1024 for PS mode (matches SP3 kBlockSize)
 
-    # Note: waves_per_eu=4 causes agpr=0 regression on current build (0c1805f).
-    # Leave empty to let LLVM decide — gets agpr=128, vgpr=96, ~203us.
-    CompilationContext._compile_hints.data = {}
-
     # LDS allocation
     # Extra LDS for cross-warp v_scale_max reduction (per_token_kv only):
     # NUM_WARPS floats per lane16id slot, aligned to same layout as softmax data.

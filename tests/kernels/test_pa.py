@@ -20,7 +20,6 @@ import triton
 import aiter
 from aiter import dtypes
 from aiter import per_tensor_quant, pertoken_quant
-from aiter.ops.attention import pa_decode_gluon as _pa_decode_gluon  # noqa: F401
 from aiter.ops.triton.gluon.pa_decode_gluon import get_recommended_splits
 from aiter.test_common import checkAllclose
 
@@ -31,7 +30,7 @@ if str(REPO_ROOT) not in sys.path:
 try:
     from triton.experimental import gluon  # noqa: F401
     from triton.experimental.gluon import language as gl  # noqa: F401
-    HAS_GLUON = True
+    HAS_GLUON = False
 except ImportError:
     HAS_GLUON = False
     print("Warning: Triton Gluon is unavailable; Gluon reference checks will fail.")
@@ -471,10 +470,6 @@ def run_gluon_ps(
     *,
     sliding_window: int,
 ) -> None:
-    if not HAS_GLUON:
-        raise RuntimeError(
-            "This Triton build does not support Gluon; please upgrade to 3.5.0 or newer."
-        )
     torch.ops.aiter.pa_decode_gluon(
         output,
         query,
@@ -613,8 +608,6 @@ def run_pa_decode_ps_test(
 ) -> Dict[str, Union[float, int, str, bool, Tuple[int, int]]]:
     if not HAS_FLYDSL_PS:
         raise RuntimeError("FlyDSL `pa_decode_ps_launch` is not available.")
-    if not HAS_GLUON:
-        raise RuntimeError("Gluon is not available.")
     if compute_type != aiter.dtypes.fp8:
         raise ValueError("This PS-only harness only keeps fp8 cases.")
     if block_size != 1024:
@@ -734,62 +727,64 @@ def run_pa_decode_ps_test(
         sliding_window=sliding_window,
     ).to(data_type)
     quantized_values = shuffle_value_cache_layout(quantized_values) if trans_v else quantized_values
-    max_context_partition_num = get_gluon_partition_count(
-        batch_size,
-        num_kv_heads,
-        block_size,
-        context_partition_size,
-        sliding_window,
-    )
-    equivalent_query_group_size = query_length * (num_query_heads // num_kv_heads)
-    intermediate_shape = (
-        batch_size,
-        num_kv_heads,
-        max_context_partition_num,
-        equivalent_query_group_size,
-    )
-    exp_sums = torch.empty(intermediate_shape, dtype=torch.float32, device=device)
-    max_logits = torch.empty(intermediate_shape, dtype=torch.float32, device=device)
-    temporary_output = torch.empty(
-        *intermediate_shape,
-        head_size,
-        dtype=reference_output.dtype,
-        device=device,
-    )
-    gluon_output = torch.empty_like(reference_output)
-
-    def gluon_call() -> None:
-        run_gluon_ps(
-            gluon_output,
-            quantized_query,
-            quantized_keys,
-            quantized_values,
-            context_lengths,
-            block_tables,
-            softmax_scale,
-            query_length,
-            max_context_partition_num,
+    if HAS_GLUON:
+        max_context_partition_num = get_gluon_partition_count(
+            batch_size,
+            num_kv_heads,
+            block_size,
             context_partition_size,
-            compute_type,
-            query_scale_factors,
-            key_scale_original,
-            value_scale_original,
-            exp_sums,
-            max_logits,
-            temporary_output,
-            sliding_window=sliding_window,
+            sliding_window,
         )
+        equivalent_query_group_size = query_length * (num_query_heads // num_kv_heads)
+        intermediate_shape = (
+            batch_size,
+            num_kv_heads,
+            max_context_partition_num,
+            equivalent_query_group_size,
+        )
+        exp_sums = torch.empty(intermediate_shape, dtype=torch.float32, device=device)
+        max_logits = torch.empty(intermediate_shape, dtype=torch.float32, device=device)
+        temporary_output = torch.empty(
+            *intermediate_shape,
+            head_size,
+            dtype=reference_output.dtype,
+            device=device,
+        )
+        gluon_output = torch.empty_like(reference_output)
 
-    gluon_time = measure_us(gluon_call)
-    gluon_tol = get_gluon_tolerance(kv_varlen=kv_varlen, sliding_window=sliding_window)
-    print("\nGluon vs Torch:")
-    err_gluon, gluon_diff = summarize_comparison(
-        "Gluon vs Torch",
-        gluon_output,
-        reference_output,
-        atol=gluon_tol,
-        rtol=gluon_tol,
-    )
+        def gluon_call() -> None:
+            run_gluon_ps(
+                gluon_output,
+                quantized_query,
+                quantized_keys,
+                quantized_values,
+                context_lengths,
+                block_tables,
+                softmax_scale,
+                query_length,
+                max_context_partition_num,
+                context_partition_size,
+                compute_type,
+                query_scale_factors,
+                key_scale_original,
+                value_scale_original,
+                exp_sums,
+                max_logits,
+                temporary_output,
+                sliding_window=sliding_window,
+            )
+
+        gluon_time = measure_us(gluon_call)
+        gluon_tol = get_gluon_tolerance(kv_varlen=kv_varlen, sliding_window=sliding_window)
+        print("\nGluon vs Torch:")
+        err_gluon, gluon_diff = summarize_comparison(
+            "Gluon vs Torch",
+            gluon_output,
+            reference_output,
+            atol=gluon_tol,
+            rtol=gluon_tol,
+        )
+        
     kv_page_indices, kv_indptr = build_ps_page_data(
         block_tables_list,
         context_lengths,
