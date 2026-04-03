@@ -48,6 +48,7 @@ __all__ = [
     "compute_warp_distribution",
     "l2_prefetch_tile",
     "advance_tdm_descriptor",
+    "advance_tdm_descriptor_lo32",
 ]
 
 
@@ -562,4 +563,28 @@ def advance_tdm_descriptor(desc: TDMDescriptor2D, byte_offset) -> TDMDescriptor2
     new_dgroup0 = vector.insert(new_lo, dgroup0, static_position=[2], dynamic_position=[])
     new_dgroup0 = vector.insert(new_hi, new_dgroup0, static_position=[3], dynamic_position=[])
     
+    return TDMDescriptor2D(new_dgroup0, desc.dgroup1)
+
+
+def advance_tdm_descriptor_lo32(desc: TDMDescriptor2D, byte_offset_i32) -> TDMDescriptor2D:
+    """Fast descriptor advance that only updates the low 32 bits of the global address.
+
+    Emits 3 instructions (extract + add + insert) vs ~12 for the full 64-bit path.
+    Safe when the cumulative offset applied to any single descriptor never causes
+    dgroup0[2] (address bits [31:0]) to wrap past 2**32.  For typical GEMM tiling
+    (advance <= 256 B/tile, <= 1024 K-tiles) the maximum total is < 256 KB, so this
+    is always safe unless the base allocation sits within 256 KB of the 4 GB boundary.
+
+    Args:
+        desc: Source descriptor.
+        byte_offset_i32: Advance amount as an MLIR i32 value.
+    """
+    from .. import vector, arith
+    from ..typing import T
+
+    dgroup0 = desc.dgroup0
+    lo = vector.extract(dgroup0, static_position=[2], dynamic_position=[])
+    new_lo = arith.addi(lo, byte_offset_i32)
+    new_dgroup0 = vector.insert(new_lo, dgroup0,
+                                static_position=[2], dynamic_position=[])
     return TDMDescriptor2D(new_dgroup0, desc.dgroup1)
