@@ -819,7 +819,6 @@ def compile_pa_decode_ps(
                 # Between passes: barrier ensures prev pass's LDS prob-reads are done
                 if _mtp_g > 0:
                     gpu.barrier()
-                    SmemPtr._view_cache = None
                 q_row = batch_idx * arith.constant(query_length, type=T.i32) + qi_for_q
                 q_base = q_row * stride_q_seq + (kv_h * arith.constant(query_group_size, type=T.i32) + local_qhead_idx_for_q) * stride_q_head
                 offset1 = lane16id // arith.constant(4, type=T.i32)
@@ -852,7 +851,6 @@ def compile_pa_decode_ps(
                         q_v1 = vector.load_op(T.vec(1, T.i64), logits_lds_i64,
                             [arith.index_cast(T.index, lds_rd_base)])
                         q_frags.append(vector.extract(q_v1, static_position=[0]))
-                SmemPtr._view_cache = None
 
                 # ── K init: load this CTA's 256-token block split for the first block ──
                 first_k_base = (first_phys_block * c_kb + _k_head_off) // c_four
@@ -896,7 +894,6 @@ def compile_pa_decode_ps(
                     results = yield _pack_state(running_max, running_sum, out0, out1, k_next_flat)
 
                 running_max, running_sum, out0, out1, _ = _unpack_state(results)
-                SmemPtr._view_cache = None
 
                 # ── Normalize output ──
                 safe_sum = arith.select(running_sum > ZERO_F, running_sum,
@@ -1754,7 +1751,6 @@ def compile_pa_decode_ps_sw(
 
             if _mtp_g > 0:
                 gpu.barrier()
-                SmemPtr._view_cache = None
             q_row = batch_idx * arith.constant(query_length, type=T.i32) + qi_for_q
             q_base = q_row * stride_q_seq + (kv_h * arith.constant(query_group_size, type=T.i32) + local_qhead_idx_for_q) * stride_q_head
             offset1 = lane16id // arith.constant(4, type=T.i32)
@@ -1786,7 +1782,6 @@ def compile_pa_decode_ps_sw(
                     q_v1 = vector.load_op(T.vec(1, T.i64), logits_lds_i64,
                         [arith.index_cast(T.index, lds_rd_base)])
                     q_frags.append(vector.extract(q_v1, static_position=[0]))
-            SmemPtr._view_cache = None
 
             # ── Load K for the single block ──
             k_base = (phys_block * c_kb + _k_head_off) // c_four
@@ -1801,7 +1796,6 @@ def compile_pa_decode_ps_sw(
                 tile_token_offset,
                 k0_ops,
             )
-            SmemPtr._view_cache = None
 
             # ── Normalize and write output ──
             safe_sum = arith.select(running_sum > ZERO_F, running_sum, arith.constant(1.0, type=T.f32))
