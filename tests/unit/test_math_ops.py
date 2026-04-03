@@ -19,7 +19,7 @@ from flydsl._mlir import ir
 from flydsl._mlir.dialects import arith, func
 from flydsl._mlir.dialects import math as _raw_math
 from flydsl.expr import math as fly_math
-from flydsl.expr.numeric import Float32, Int32
+from flydsl.expr.numeric import Boolean, Float32, Int32
 
 
 # ---------------------------------------------------------------------------
@@ -360,7 +360,101 @@ def test_vector_type_ops():
 
 
 # ---------------------------------------------------------------------------
-# 10. End-to-end GPU tests
+# 10. Class invariance — Numeric type preservation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.l0_backend_agnostic
+def test_float32_class_invariance():
+    """Unary float ops: Float32 in → Float32 out."""
+    def build(x_raw):
+        x = Float32(x_raw)
+        y = fly_math.exp(x)
+        assert isinstance(y, Float32), f"exp: expected Float32, got {type(y).__name__}"
+        y = fly_math.sqrt(x)
+        assert isinstance(y, Float32), f"sqrt: expected Float32, got {type(y).__name__}"
+        y = fly_math.floor(x)
+        assert isinstance(y, Float32), f"floor: expected Float32, got {type(y).__name__}"
+
+    _build_module(build)
+
+
+@pytest.mark.l0_backend_agnostic
+def test_int32_class_invariance():
+    """Unary int ops: Int32 in → Int32 out."""
+    def build(xi_raw):
+        xi = Int32(xi_raw)
+        y = fly_math.absi(xi)
+        assert isinstance(y, Int32), f"absi: expected Int32, got {type(y).__name__}"
+        y = fly_math.ctlz(xi)
+        assert isinstance(y, Int32), f"ctlz: expected Int32, got {type(y).__name__}"
+
+    _build_module(build, arg_types=[lambda: ir.IntegerType.get_signless(32)])
+
+
+@pytest.mark.l0_backend_agnostic
+def test_predicate_returns_boolean():
+    """Predicate ops on Float32 → Boolean."""
+    def build(x_raw):
+        x = Float32(x_raw)
+        y = fly_math.isnan(x)
+        assert isinstance(y, Boolean), f"isnan: expected Boolean, got {type(y).__name__}"
+        y = fly_math.isinf(x)
+        assert isinstance(y, Boolean), f"isinf: expected Boolean, got {type(y).__name__}"
+
+    _build_module(build)
+
+
+@pytest.mark.l0_backend_agnostic
+def test_binary_class_invariance():
+    """Binary float ops: Float32 in → Float32 out."""
+    def build(x_raw):
+        x = Float32(x_raw)
+        y = fly_math.powf(x, x)
+        assert isinstance(y, Float32), f"powf: expected Float32, got {type(y).__name__}"
+        y = fly_math.atan2(x, x)
+        assert isinstance(y, Float32), f"atan2: expected Float32, got {type(y).__name__}"
+
+    _build_module(build)
+
+
+@pytest.mark.l0_backend_agnostic
+def test_ternary_class_invariance():
+    """Ternary float ops: Float32 in → Float32 out."""
+    def build(x_raw):
+        x = Float32(x_raw)
+        y = fly_math.fma(x, x, x)
+        assert isinstance(y, Float32), f"fma: expected Float32, got {type(y).__name__}"
+
+    _build_module(build)
+
+
+@pytest.mark.l0_backend_agnostic
+def test_sincos_class_invariance():
+    """sincos(Float32) → tuple of Float32."""
+    def build(x_raw):
+        x = Float32(x_raw)
+        results = fly_math.sincos(x)
+        assert isinstance(results, tuple), f"sincos: expected tuple, got {type(results).__name__}"
+        assert len(results) == 2
+        assert isinstance(results[0], Float32), f"sincos[0]: expected Float32, got {type(results[0]).__name__}"
+        assert isinstance(results[1], Float32), f"sincos[1]: expected Float32, got {type(results[1]).__name__}"
+
+    _build_module(build)
+
+
+@pytest.mark.l0_backend_agnostic
+def test_raw_value_passthrough():
+    """Raw ir.Value input should NOT be wrapped in Numeric."""
+    def build(x_raw):
+        y = fly_math.exp(x_raw)
+        assert not isinstance(y, Float32), f"raw input should not produce Float32, got {type(y).__name__}"
+
+    _build_module(build)
+
+
+# ---------------------------------------------------------------------------
+# 11. End-to-end GPU tests
 # ---------------------------------------------------------------------------
 
 try:
