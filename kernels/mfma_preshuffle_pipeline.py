@@ -108,6 +108,122 @@ def make_preshuffle_b_layout(
     return PreshuffleBLayout(layout_b=layout_b, kpack_bytes=kpack_bytes)
 
 
+@dataclass(frozen=True)
+class FlatBLayoutW4A16:
+    """Container returned by `make_flat_b_layout_w4a16`."""
+
+    layout_b: object
+    tile_k: int
+
+
+def make_flat_b_layout_w4a16(
+    arith,
+    *,
+    c_n: ir.Value,
+    c_k: ir.Value,
+    tile_k: int,
+) -> FlatBLayoutW4A16:
+    """Build flat B layout for W4A16 (int4_bf16) using CK-tile flat approach.
+
+    Pre-shuffled weight layout: [n0, k_lane, n_lane, k_packed_per_lane]
+    where k_packed_per_lane = K_packed // KLane = K // 8 (in bytes).
+
+    Each thread loads ``tile_k // 8`` contiguous bytes via a single
+    ``buffer_load_dwordx4`` (16B for tile_k=128), covering the entire K tile.
+    """
+    KLane = 4
+    NLane = 16
+    c16 = fx.Index(NLane)
+
+    n0 = c_n // c16
+    # k_packed_per_lane = K // (2 * KLane) = K // 8 (in packed int4 bytes)
+    c_k_packed_per_lane = c_k // fx.Index(2 * KLane)
+
+    # Strides (in packed bytes, innermost = 1):
+    #   [n0, k_lane=4, n_lane=16, k_packed_per_lane]
+    stride_kppl = fx.Index(1)
+    stride_nlane = c_k_packed_per_lane
+    stride_klane = fx.Index(NLane) * stride_nlane
+    stride_n0 = fx.Index(KLane) * stride_klane
+
+    n0_i32 = arith.index_cast(T.i32, n0)
+    c_kppl_i32 = arith.index_cast(T.i32, c_k_packed_per_lane)
+    stride_n0_i32 = arith.index_cast(T.i32, stride_n0)
+    stride_klane_i32 = arith.index_cast(T.i32, stride_klane)
+    stride_nlane_i32 = arith.index_cast(T.i32, stride_nlane)
+
+    layout_b = fx.make_layout(
+        (n0_i32, KLane, NLane, c_kppl_i32),
+        (stride_n0_i32, stride_klane_i32, stride_nlane_i32, 1),
+    )
+    return FlatBLayoutW4A16(layout_b=layout_b, tile_k=tile_k)
+
+
+def load_b_flat_w4a16(
+    buffer_ops,
+    arith,
+    *,
+    b_rsrc,
+    flat_layout,
+    n_blk: ir.Value,
+    n_intra: ir.Value,
+    lane_div_16: ir.Value,
+    base_k: ir.Value,
+    tile_k: int,
+):
+    """Load an entire K tile of B for one N column via buffer_load_dwordx4.
+
+    Returns a *list* of i32x4 values:
+    - tile_k=128 → [i32x4]        (1 × 16B = 16B per thread)
+    - tile_k=256 → [i32x4, i32x4] (2 × 16B = 32B per thread)
+
+    Each i32 element within an i32x4 covers one K64 micro-step.
+    """
+    load_bytes = tile_k // 8  # bytes per thread per K tile
+    num_loads = load_bytes // 16  # dwordx4 loads needed
+    if num_loads < 1 or load_bytes % 16 != 0:
+        raise ValueError(
+            f"Flat W4A16 load requires tile_k divisible by 128, "
+            f"got tile_k={tile_k} (load_bytes={load_bytes})"
+        )
+    # Offset within the flat layout: thread's K data starts at base_k // 8
+    k_offset = base_k // fx.Index(8)
+    coord = (n_blk, lane_div_16, n_intra, k_offset)
+    idx_bytes = crd2idx(coord, flat_layout.layout_b)
+    # Convert byte offset to dword offset for buffer_load
+    idx_dword = idx_bytes // fx.Index(4)
+    results = []
+    for i in range(num_loads):
+        idx_dword_i = idx_dword + fx.Index(i * 4) if i > 0 else idx_dword
+        results.append(buffer_ops.buffer_load(b_rsrc, idx_dword_i, vec_width=4, dtype=T.i32))
+    return results
+
+
+def extract_and_unpack_b_flat_w4a16(
+    b_raw_list,
+    ku: int,
+    arith,
+    vector,
+    *,
+    scale_val=None,
+    use_gfx950_cvt: bool = False,
+):
+    """Extract K64 step ``ku`` from flat-loaded B and unpack to 2x i64 (bf16).
+
+    ``b_raw_list`` is the list of i32x4 returned by :func:`load_b_flat_w4a16`.
+    For tile_k=128: list of 1 i32x4, ku in [0..3].
+    For tile_k=256: list of 2 i32x4, ku in [0..7] (ku//4 selects the i32x4).
+
+    Returns ``(b0, b1)`` — two i64 values, each holding 4 bf16 for one MFMA call.
+    """
+    load_idx = ku // 4
+    elem_idx = ku % 4
+    packed_i32 = vector.extract(b_raw_list[load_idx], static_position=[elem_idx], dynamic_position=[])
+    return unpack_b_w4a16(
+        packed_i32, arith, vector, scale_val=scale_val, use_gfx950_cvt=use_gfx950_cvt
+    )
+
+
 def _unpack_int4_to_int8_pair(packed32):
     """Split packed int4 dword into two int8 dwords (even/odd nibbles).
 

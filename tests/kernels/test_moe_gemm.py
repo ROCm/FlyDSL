@@ -30,7 +30,7 @@ for _p in reversed(_PYTHON_CANDIDATES):
         sys.path.insert(0, _p)
 
 from tests.kernels.test_ref import torch_moe_gemm1, torch_moe_gemm2
-from tests.utils import pertoken_quant, shuffle_weight, shuffle_scale_for_int4
+from tests.utils import pertoken_quant, shuffle_weight, shuffle_weight_flat_int4, shuffle_scale_for_int4
 from tests.test_common import verify_output, run_perftest
 from flydsl.runtime.device import get_rocm_arch
 from tests.kernels.utils import fp4_utils
@@ -327,6 +327,7 @@ def run_moe_stage1(
     test_graph: bool = False,
     # Optional override for pre-built groupwise scale tensor [E, K//group_size, 2*inter_dim] (Opt 0 layout).
     scale_w1_groups_in: Optional[torch.Tensor] = None,
+    use_flat_layout: bool = False,
 ):
     assert model_dim % 64 == 0
     assert model_dim % tile_k == 0
@@ -494,11 +495,16 @@ def run_moe_stage1(
     # Pack weights for int4 variants (W4A8, W4A16, W4A_FP8).
     # All use the same interleaved packing: [ (v4<<4)|v0, (v5<<4)|v1, (v6<<4)|v2, (v7<<4)|v3 ]
     use_packed_int4 = w_is_int4
-    w_kernel = (
-        _pack_shuffled_int8_to_packed_int4_no_perm(w1_shuffled_flat) if use_packed_int4 else w1_shuffled_flat
-    ).contiguous()
-    if not use_packed_int4:
-        w_kernel = w_kernel.view(experts * (2 * inter_dim), model_dim)
+    if is_int4_bf16 and use_flat_layout:
+        # W4A16 CK-tile flat layout: preshuffle + pack + flat reorder for fewer VMEM loads.
+        w_kernel = shuffle_weight_flat_int4(w1_q, tile_k=tile_k).view(-1).contiguous()
+    elif is_int4_bf16:
+        # W4A16: preshuffle + pack (same as other int4 variants)
+        w_kernel = _pack_shuffled_int8_to_packed_int4_no_perm(w1_shuffled_flat).contiguous()
+    elif use_packed_int4:
+        w_kernel = _pack_shuffled_int8_to_packed_int4_no_perm(w1_shuffled_flat).contiguous()
+    else:
+        w_kernel = w1_shuffled_flat.contiguous().view(experts * (2 * inter_dim), model_dim)
 
     # Flatten scales to 1D memrefs (fp16 path uses 0-sized scale tensors; kernel ignores them).
     if scale_x is None:
@@ -530,6 +536,7 @@ def run_moe_stage1(
         tile_k=tile_k,
         doweight_stage1=bool(doweight_stage1),
         use_cshuffle_epilog=False,
+        use_flat_layout=use_flat_layout,
     )
 
     def _s1_args(o, x, w, sx, sw, st, eids, sw_sorted):
@@ -954,14 +961,13 @@ def run_moe_stage2(
     # For int4 variants (W4A8, W4A16, W4A_FP8), pack preshuffled int8 weights into packed int4 bytes.
     # All use the same interleaved packing: [ (v4<<4)|v0, (v5<<4)|v1, (v6<<4)|v2, (v7<<4)|v3 ]
     use_packed_int4 = w_is_int4
-    w2_kernel = w2_shuffled_flat
-    if use_packed_int4:
-        w2_kernel = _pack_shuffled_int8_to_packed_int4_no_perm(w2_shuffled_flat)
-
-    w2_flat = w2_kernel.contiguous().view(-1)
-    w2_kernel = w2_flat
-    if not use_packed_int4:
-        w2_kernel = w2_kernel.view(experts * model_dim, inter_dim)
+    if is_int4_bf16:
+        # W4A16 flat layout: preshuffle + pack + flat reorder for fewer VMEM loads.
+        w2_kernel = shuffle_weight_flat_int4(w2_q, tile_k=tile_k).view(-1).contiguous()
+    elif use_packed_int4:
+        w2_kernel = _pack_shuffled_int8_to_packed_int4_no_perm(w2_shuffled_flat).contiguous().view(-1)
+    else:
+        w2_kernel = w2_shuffled_flat.contiguous().view(experts * model_dim, inter_dim)
 
     # Flatten scales to 1D memrefs (fp16 path uses 0-sized scale tensors; kernel ignores them).
     if a2_scale is None:
