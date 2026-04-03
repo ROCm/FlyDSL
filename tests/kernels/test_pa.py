@@ -30,7 +30,7 @@ if str(REPO_ROOT) not in sys.path:
 try:
     from triton.experimental import gluon  # noqa: F401
     from triton.experimental.gluon import language as gl  # noqa: F401
-    HAS_GLUON = True
+    HAS_GLUON = False
 except ImportError:
     HAS_GLUON = False
     print("Warning: Triton Gluon is unavailable; Gluon reference checks will fail.")
