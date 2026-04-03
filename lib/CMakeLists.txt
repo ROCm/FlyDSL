@@ -1,4 +1,6 @@
 add_subdirectory(Conversion)
 add_subdirectory(Dialect)
 add_subdirectory(CAPI)
-add_subdirectory(Runtime)
+if(FLYDSL_BUILD_ROCDL_STACK)
+  add_subdirectory(Runtime)
+endif()

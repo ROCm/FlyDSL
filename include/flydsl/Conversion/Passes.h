@@ -5,6 +5,8 @@
 #ifndef FLYDSL_CONVERSION_PASSES_H
 #define FLYDSL_CONVERSION_PASSES_H
 
+#ifdef FLYDSL_HAS_ROCDL_TARGET_STACK
+
 #include "flydsl/Conversion/FlyToROCDL/FlyToROCDL.h"
 
 namespace mlir {
@@ -13,5 +15,7 @@ namespace mlir {
 #include "flydsl/Conversion/FlyToROCDL/Passes.h.inc"
 
 } // namespace mlir
+
+#endif // FLYDSL_HAS_ROCDL_TARGET_STACK
 
 #endif // FLYDSL_CONVERSION_PASSES_H
