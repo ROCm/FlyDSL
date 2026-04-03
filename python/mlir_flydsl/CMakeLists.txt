@@ -20,6 +20,7 @@ declare_mlir_dialect_python_bindings(
   GEN_ENUM_BINDINGS
 )
 
+if(FLYDSL_BUILD_ROCDL_STACK)
 declare_mlir_dialect_python_bindings(
   ADD_TO_PARENT FlyPythonSources
   ROOT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/"
@@ -29,6 +30,7 @@ declare_mlir_dialect_python_bindings(
   DIALECT_NAME fly_rocdl
   GEN_ENUM_BINDINGS
 )
+endif()
 
 # NOTE: Do NOT link MLIRFlyDialect/MLIRFlyROCDLDialect here via PRIVATE_LINK_LIBS.
 # These symbols are already provided by FlyPythonCAPI.so (via MLIRCPIFly's transitive
@@ -49,6 +51,7 @@ declare_mlir_python_extension(FlyPythonSources.Core.fly
     LLVMSupport
 )
 
+if(FLYDSL_BUILD_ROCDL_STACK)
 declare_mlir_python_extension(FlyPythonSources.Core.fly_rocdl
   MODULE_NAME _mlirDialectsFlyROCDL
   ADD_TO_PARENT FlyPythonSources
@@ -59,6 +62,7 @@ declare_mlir_python_extension(FlyPythonSources.Core.fly_rocdl
   PRIVATE_LINK_LIBS
     LLVMSupport
 )
+endif()
 
 # NOTE: Do NOT link MLIRFlyToROCDL or other C++ libs via PRIVATE_LINK_LIBS.
 # Doing so statically embeds a copy of MLIRPass (and the pass registry) into
@@ -95,7 +99,11 @@ set(MLIRFlyDSLSources
   MLIRPythonSources.Dialects.func
   MLIRPythonSources.Dialects.cf
   MLIRPythonSources.Dialects.scf
-  MLIRPythonSources.Dialects.rocdl
+)
+if(FLYDSL_BUILD_ROCDL_STACK)
+  list(APPEND MLIRFlyDSLSources MLIRPythonSources.Dialects.rocdl)
+endif()
+list(APPEND MLIRFlyDSLSources
   MLIRPythonSources.Dialects.vector
   MLIRPythonSources.Dialects.llvm
   MLIRPythonSources.ExecutionEngine
@@ -162,22 +170,35 @@ add_mlir_python_modules(FlyPythonModules
 
 set(_FLYDSL_PYTHON_PACKAGES_DIR "${MLIR_BINARY_DIR}/python_packages")
 set(_MLIR_LIBS_DIR "${FlyPythonModules_ROOT_PREFIX}/_mlir_libs")
-set_target_properties(FlyJitRuntime PROPERTIES
-  LIBRARY_OUTPUT_DIRECTORY "${_MLIR_LIBS_DIR}")
-add_dependencies(FlyPythonCAPI FlyJitRuntime)
+if(TARGET FlyJitRuntime)
+  set_target_properties(FlyJitRuntime PROPERTIES
+    LIBRARY_OUTPUT_DIRECTORY "${_MLIR_LIBS_DIR}")
+  add_dependencies(FlyPythonCAPI FlyJitRuntime)
+endif()
 set(_STUB_MARKER_FILE "${_MLIR_LIBS_DIR}/.stubs_generated")
+
+set(_flydsl_stubgen_modules
+  flydsl._mlir._mlir_libs._mlir
+  flydsl._mlir._mlir_libs._mlirDialectsFly
+)
+if(FLYDSL_BUILD_ROCDL_STACK)
+  list(APPEND _flydsl_stubgen_modules flydsl._mlir._mlir_libs._mlirDialectsFlyROCDL)
+endif()
+list(APPEND _flydsl_stubgen_modules
+  flydsl._mlir._mlir_libs._mlirDialectsGPU
+  flydsl._mlir._mlir_libs._mlirDialectsLLVM
+)
+set(_flydsl_stubgen_m_flags "")
+foreach(_m IN LISTS _flydsl_stubgen_modules)
+  string(APPEND _flydsl_stubgen_m_flags " -m ${_m}")
+endforeach()
 
 add_custom_command(
   OUTPUT "${_STUB_MARKER_FILE}"
   COMMAND /bin/bash -c "\
     PYTHONPATH='${_FLYDSL_PYTHON_PACKAGES_DIR}' \
     '${Python3_EXECUTABLE}' -m nanobind.stubgen \
-      -q -r \
-      -m flydsl._mlir._mlir_libs._mlir \
-      -m flydsl._mlir._mlir_libs._mlirDialectsFly \
-      -m flydsl._mlir._mlir_libs._mlirDialectsFlyROCDL \
-      -m flydsl._mlir._mlir_libs._mlirDialectsGPU \
-      -m flydsl._mlir._mlir_libs._mlirDialectsLLVM \
+      -q -r${_flydsl_stubgen_m_flags} \
       -O '${_MLIR_LIBS_DIR}' \
     || echo 'Warning: nanobind.stubgen not available -- skipping stub generation'"
   COMMAND ${CMAKE_COMMAND} -E touch "${_STUB_MARKER_FILE}"
@@ -190,6 +211,19 @@ add_custom_target(FlyPythonStubs ALL
   DEPENDS "${_STUB_MARKER_FILE}"
 )
 
+if(FLYDSL_BUILD_ROCDL_STACK)
+  set(_FLY_COPY_ROCDL_TABLEGEN
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      "${MLIR_BINARY_DIR}/python/mlir_flydsl/dialects/_fly_rocdl_ops_gen.py"
+      "${MLIR_BINARY_DIR}/python_packages/flydsl/_mlir/dialects/_fly_rocdl_ops_gen.py"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      "${MLIR_BINARY_DIR}/python/mlir_flydsl/dialects/_fly_rocdl_enum_gen.py"
+      "${MLIR_BINARY_DIR}/python_packages/flydsl/_mlir/dialects/_fly_rocdl_enum_gen.py"
+  )
+else()
+  set(_FLY_COPY_ROCDL_TABLEGEN "")
+endif()
+
 add_custom_target(CopyFlyPythonSources ALL
   COMMAND ${CMAKE_COMMAND} -E copy_directory
     "${PROJECT_SOURCE_DIR}/python/flydsl"
@@ -201,12 +235,7 @@ add_custom_target(CopyFlyPythonSources ALL
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
     "${MLIR_BINARY_DIR}/python/mlir_flydsl/dialects/_fly_enum_gen.py"
     "${MLIR_BINARY_DIR}/python_packages/flydsl/_mlir/dialects/_fly_enum_gen.py"
-  COMMAND ${CMAKE_COMMAND} -E copy_if_different
-    "${MLIR_BINARY_DIR}/python/mlir_flydsl/dialects/_fly_rocdl_ops_gen.py"
-    "${MLIR_BINARY_DIR}/python_packages/flydsl/_mlir/dialects/_fly_rocdl_ops_gen.py"
-  COMMAND ${CMAKE_COMMAND} -E copy_if_different
-    "${MLIR_BINARY_DIR}/python/mlir_flydsl/dialects/_fly_rocdl_enum_gen.py"
-    "${MLIR_BINARY_DIR}/python_packages/flydsl/_mlir/dialects/_fly_rocdl_enum_gen.py"
+  ${_FLY_COPY_ROCDL_TABLEGEN}
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
     "$<TARGET_FILE:mlir_c_runner_utils>"
     "${_MLIR_LIBS_DIR}/libmlir_c_runner_utils.so"
