@@ -33,7 +33,6 @@ SCALES_PER_WMMA = WMMA_K // SCALE_BLOCK  # 4
 LDS_PAD_A_BYTES = 16
 LDS_PAD_D_BYTES = 16
 
-_STAGE_NAMES = ("ping", "pong", "pang", "pung")
 
 
 def compile_mxscale_gemm(
@@ -462,6 +461,23 @@ def compile_mxscale_gemm(
                 tdm_ops.tensor_load_2d(desc_b)
                 tdm_ops.tensor_load_2d(desc_as)
                 tdm_ops.tensor_load_2d(desc_bs)
+
+        if wave_specialized_tdm:
+            tdm_wave_id = rocdl.wave_id()
+            tdm_wave_is_a = arith.cmpi(
+                arith.CmpIPredicate.eq, tdm_wave_id,
+                arith.constant(0, type=T.i32))
+            tdm_wave_is_b = arith.cmpi(
+                arith.CmpIPredicate.eq, tdm_wave_id,
+                arith.constant(1, type=T.i32))
+            tdm_wave_is_as = arith.cmpi(
+                arith.CmpIPredicate.eq, tdm_wave_id,
+                arith.constant(2, type=T.i32))
+
+            def _select_wave_tdm_value(a_value, b_value, as_value, bs_value):
+                result = arith.select(tdm_wave_is_as, as_value, bs_value)
+                result = arith.select(tdm_wave_is_b, b_value, result)
+                return arith.select(tdm_wave_is_a, a_value, result)
 
         elem_ty_lds = T.f16
 
@@ -1161,127 +1177,67 @@ def compile_mxscale_gemm(
         desc_as_init = make_desc_as(stages_as_mem[0], arith.index(0))
         desc_bs_init = make_desc_bs(stages_bs_mem[0], arith.index(0))
 
-        dgroup0_a = desc_a_init.dgroup0
-        dgroup0_b = desc_b_init.dgroup0
-        dgroup0_as = desc_as_init.dgroup0
-        dgroup0_bs = desc_bs_init.dgroup0
-
-        dgroup1_a = desc_a_init.dgroup1
-        dgroup1_b = desc_b_init.dgroup1
-        dgroup1_as = desc_as_init.dgroup1
-        dgroup1_bs = desc_bs_init.dgroup1
-
         adv_a_i32 = arith.constant(tile_k // PACK_FACTOR_A, type=T.i32)
         adv_b_i32 = arith.constant(packed_tile_k_b * 16, type=T.i32)
         adv_as_i32 = arith.constant(tile_k // SCALE_BLOCK * wmma_m_rep, type=T.i32)
         adv_bs_i32 = arith.constant(tile_k // SCALE_BLOCK * b_scale_load_rep, type=T.i32)
 
+        if wave_specialized_tdm:
+            active_stage_lds_addr = [
+                _select_wave_tdm_value(
+                    stages_a_lds_addr[i],
+                    stages_b_lds_addr[i],
+                    stages_as_lds_addr[i],
+                    stages_bs_lds_addr[i],
+                )
+                for i in range_constexpr(num_buffers)
+            ]
+            active_dgroup0 = _select_wave_tdm_value(
+                desc_a_init.dgroup0,
+                desc_b_init.dgroup0,
+                desc_as_init.dgroup0,
+                desc_bs_init.dgroup0,
+            )
+            active_dgroup1 = _select_wave_tdm_value(
+                desc_a_init.dgroup1,
+                desc_b_init.dgroup1,
+                desc_as_init.dgroup1,
+                desc_bs_init.dgroup1,
+            )
+            active_adv_i32 = _select_wave_tdm_value(
+                adv_a_i32, adv_b_i32, adv_as_i32, adv_bs_i32)
+        else:
+            dgroup0_a = desc_a_init.dgroup0
+            dgroup0_b = desc_b_init.dgroup0
+            dgroup0_as = desc_as_init.dgroup0
+            dgroup0_bs = desc_bs_init.dgroup0
+
+            dgroup1_a = desc_a_init.dgroup1
+            dgroup1_b = desc_b_init.dgroup1
+            dgroup1_as = desc_as_init.dgroup1
+            dgroup1_bs = desc_bs_init.dgroup1
+
         # Prologue
-        for i in range_constexpr(pre_loaded):
-            dgroup0_a = vector.insert(stages_a_lds_addr[i], dgroup0_a,
-                                      static_position=[1], dynamic_position=[])
-            dgroup0_b = vector.insert(stages_b_lds_addr[i], dgroup0_b,
-                                      static_position=[1], dynamic_position=[])
-            dgroup0_as = vector.insert(stages_as_lds_addr[i], dgroup0_as,
-                                       static_position=[1], dynamic_position=[])
-            dgroup0_bs = vector.insert(stages_bs_lds_addr[i], dgroup0_bs,
-                                       static_position=[1], dynamic_position=[])
+        if wave_specialized_tdm:
+            for i in range_constexpr(pre_loaded):
+                active_dgroup0 = vector.insert(
+                    active_stage_lds_addr[i], active_dgroup0,
+                    static_position=[1], dynamic_position=[])
 
-            desc_a = tdm_ops.TDMDescriptor2D(dgroup0_a, dgroup1_a)
-            desc_b = tdm_ops.TDMDescriptor2D(dgroup0_b, dgroup1_b)
-            desc_as = tdm_ops.TDMDescriptor2D(dgroup0_as, dgroup1_as)
-            desc_bs = tdm_ops.TDMDescriptor2D(dgroup0_bs, dgroup1_bs)
-
-            issue_all_tdm_loads(desc_a, desc_b, desc_as, desc_bs)
-
-            dgroup0_a = tdm_ops.advance_tdm_descriptor_lo32(desc_a, adv_a_i32).dgroup0
-            dgroup0_b = tdm_ops.advance_tdm_descriptor_lo32(desc_b, adv_b_i32).dgroup0
-            dgroup0_as = tdm_ops.advance_tdm_descriptor_lo32(desc_as, adv_as_i32).dgroup0
-            dgroup0_bs = tdm_ops.advance_tdm_descriptor_lo32(desc_bs, adv_bs_i32).dgroup0
-
-        pipeline_fence(outstanding=TDM_LOADS_PER_STEP * (num_buffers - 2),
-                       use_cluster=use_cluster)
-
-        # Main loop
-        if loop_iters > 0:
-            total_main_tiles = loop_iters * num_buffers
-            init_args = list(accs) + [dgroup0_a, dgroup0_b, dgroup0_as, dgroup0_bs]
-
-            for tile_idx, state in range(0, total_main_tiles, 1, init=init_args):
-                accs_in = list(state[:n_accs])
-                cur_dgroup0_a = state[n_accs]
-                cur_dgroup0_b = state[n_accs + 1]
-                cur_dgroup0_as = state[n_accs + 2]
-                cur_dgroup0_bs = state[n_accs + 3]
-
-                k_off = tile_idx * arith.index(tile_k)
-                s_idx = tile_idx % arith.index(num_buffers)
-                load_s_idx = (tile_idx + arith.index(num_buffers - 1)) \
-                    % arith.index(num_buffers)
-
-                lds_a = _select_base(stages_a_lds_addr, load_s_idx)
-                lds_b = _select_base(stages_b_lds_addr, load_s_idx)
-                lds_as = _select_base(stages_as_lds_addr, load_s_idx)
-                lds_bs = _select_base(stages_bs_lds_addr, load_s_idx)
-
-                next_dg0_a = vector.insert(lds_a, cur_dgroup0_a,
-                                           static_position=[1], dynamic_position=[])
-                next_dg0_b = vector.insert(lds_b, cur_dgroup0_b,
-                                           static_position=[1], dynamic_position=[])
-                next_dg0_as = vector.insert(lds_as, cur_dgroup0_as,
-                                            static_position=[1], dynamic_position=[])
-                next_dg0_bs = vector.insert(lds_bs, cur_dgroup0_bs,
-                                            static_position=[1], dynamic_position=[])
-
-                desc_a = tdm_ops.TDMDescriptor2D(next_dg0_a, dgroup1_a)
-                desc_b = tdm_ops.TDMDescriptor2D(next_dg0_b, dgroup1_b)
-                desc_as = tdm_ops.TDMDescriptor2D(next_dg0_as, dgroup1_as)
-                desc_bs = tdm_ops.TDMDescriptor2D(next_dg0_bs, dgroup1_bs)
-
-                issue_all_tdm_loads(desc_a, desc_b, desc_as, desc_bs)
-
-                next_dg0_a = tdm_ops.advance_tdm_descriptor_lo32(desc_a, adv_a_i32).dgroup0
-                next_dg0_b = tdm_ops.advance_tdm_descriptor_lo32(desc_b, adv_b_i32).dgroup0
-                next_dg0_as = tdm_ops.advance_tdm_descriptor_lo32(desc_as, adv_as_i32).dgroup0
-                next_dg0_bs = tdm_ops.advance_tdm_descriptor_lo32(desc_bs, adv_bs_i32).dgroup0
-
-                _l2_prefetch(k_off)
-
-                cur_a = _select_base(stages_a_idx, s_idx)
-                cur_b = _select_base(stages_b_idx, s_idx)
-                cur_as = _select_base(stages_as_idx, s_idx)
-                cur_bs = _select_base(stages_bs_idx, s_idx)
-
-                rocdl.sched_barrier(0)
-                accs_in = compute_tile_scheduled(
-                    accs_in, cur_a, cur_b, cur_as, cur_bs)
-                pipeline_fence(
-                    outstanding=TDM_LOADS_PER_STEP * (num_buffers - 2),
-                    use_cluster=use_cluster)
-                hot_loop_scheduler_scheduled()
-                results = yield list(accs_in) + \
-                    [next_dg0_a, next_dg0_b, next_dg0_as, next_dg0_bs]
-
-            accs = list(results[:n_accs])
-            dgroup0_a = results[n_accs]
-            dgroup0_b = results[n_accs + 1]
-            dgroup0_as = results[n_accs + 2]
-            dgroup0_bs = results[n_accs + 3]
-
-        # Tail
-        if loop_iters == 0 and use_cluster:
-            gpu.cluster_barrier()
-        _extra_j = 0
-        epi_addrs_box = [None]
-        for _load_stage, _compute_stage, _outstanding in tail_plan:
-            if _load_stage is not None:
-                dgroup0_a = vector.insert(stages_a_lds_addr[_load_stage], dgroup0_a,
+                active_desc = tdm_ops.TDMDescriptor2D(
+                    active_dgroup0, active_dgroup1)
+                tdm_ops.tensor_load_2d(active_desc)
+                active_dgroup0 = tdm_ops.advance_tdm_descriptor_lo32(
+                    active_desc, active_adv_i32).dgroup0
+        else:
+            for i in range_constexpr(pre_loaded):
+                dgroup0_a = vector.insert(stages_a_lds_addr[i], dgroup0_a,
                                           static_position=[1], dynamic_position=[])
-                dgroup0_b = vector.insert(stages_b_lds_addr[_load_stage], dgroup0_b,
+                dgroup0_b = vector.insert(stages_b_lds_addr[i], dgroup0_b,
                                           static_position=[1], dynamic_position=[])
-                dgroup0_as = vector.insert(stages_as_lds_addr[_load_stage], dgroup0_as,
+                dgroup0_as = vector.insert(stages_as_lds_addr[i], dgroup0_as,
                                            static_position=[1], dynamic_position=[])
-                dgroup0_bs = vector.insert(stages_bs_lds_addr[_load_stage], dgroup0_bs,
+                dgroup0_bs = vector.insert(stages_bs_lds_addr[i], dgroup0_bs,
                                            static_position=[1], dynamic_position=[])
 
                 desc_a = tdm_ops.TDMDescriptor2D(dgroup0_a, dgroup1_a)
@@ -1296,7 +1252,154 @@ def compile_mxscale_gemm(
                 dgroup0_as = tdm_ops.advance_tdm_descriptor_lo32(desc_as, adv_as_i32).dgroup0
                 dgroup0_bs = tdm_ops.advance_tdm_descriptor_lo32(desc_bs, adv_bs_i32).dgroup0
 
-                _extra_j += 1
+        pipeline_fence(outstanding=TDM_LOADS_PER_STEP * (num_buffers - 2),
+                       use_cluster=use_cluster)
+
+        # Main loop
+        if loop_iters > 0:
+            total_main_tiles = loop_iters * num_buffers
+            if wave_specialized_tdm:
+                init_args = list(accs) + [active_dgroup0]
+
+                for tile_idx, state in range(0, total_main_tiles, 1, init=init_args):
+                    accs_in = list(state[:n_accs])
+                    cur_active_dgroup0 = state[n_accs]
+
+                    k_off = tile_idx * arith.index(tile_k)
+                    s_idx = tile_idx % arith.index(num_buffers)
+                    load_s_idx = (tile_idx + arith.index(num_buffers - 1)) \
+                        % arith.index(num_buffers)
+
+                    lds_active = _select_base(active_stage_lds_addr, load_s_idx)
+                    next_active_dg0 = vector.insert(
+                        lds_active, cur_active_dgroup0,
+                        static_position=[1], dynamic_position=[])
+                    active_desc = tdm_ops.TDMDescriptor2D(
+                        next_active_dg0, active_dgroup1)
+                    tdm_ops.tensor_load_2d(active_desc)
+                    next_active_dg0 = tdm_ops.advance_tdm_descriptor_lo32(
+                        active_desc, active_adv_i32).dgroup0
+
+                    _l2_prefetch(k_off)
+
+                    cur_a = _select_base(stages_a_idx, s_idx)
+                    cur_b = _select_base(stages_b_idx, s_idx)
+                    cur_as = _select_base(stages_as_idx, s_idx)
+                    cur_bs = _select_base(stages_bs_idx, s_idx)
+
+                    rocdl.sched_barrier(0)
+                    accs_in = compute_tile_scheduled(
+                        accs_in, cur_a, cur_b, cur_as, cur_bs)
+                    pipeline_fence(
+                        outstanding=TDM_LOADS_PER_STEP * (num_buffers - 2),
+                        use_cluster=use_cluster)
+                    hot_loop_scheduler_scheduled()
+                    results = yield list(accs_in) + [next_active_dg0]
+
+                accs = list(results[:n_accs])
+                active_dgroup0 = results[n_accs]
+            else:
+                init_args = list(accs) + [dgroup0_a, dgroup0_b, dgroup0_as, dgroup0_bs]
+
+                for tile_idx, state in range(0, total_main_tiles, 1, init=init_args):
+                    accs_in = list(state[:n_accs])
+                    cur_dgroup0_a = state[n_accs]
+                    cur_dgroup0_b = state[n_accs + 1]
+                    cur_dgroup0_as = state[n_accs + 2]
+                    cur_dgroup0_bs = state[n_accs + 3]
+
+                    k_off = tile_idx * arith.index(tile_k)
+                    s_idx = tile_idx % arith.index(num_buffers)
+                    load_s_idx = (tile_idx + arith.index(num_buffers - 1)) \
+                        % arith.index(num_buffers)
+
+                    lds_a = _select_base(stages_a_lds_addr, load_s_idx)
+                    lds_b = _select_base(stages_b_lds_addr, load_s_idx)
+                    lds_as = _select_base(stages_as_lds_addr, load_s_idx)
+                    lds_bs = _select_base(stages_bs_lds_addr, load_s_idx)
+
+                    next_dg0_a = vector.insert(lds_a, cur_dgroup0_a,
+                                               static_position=[1], dynamic_position=[])
+                    next_dg0_b = vector.insert(lds_b, cur_dgroup0_b,
+                                               static_position=[1], dynamic_position=[])
+                    next_dg0_as = vector.insert(lds_as, cur_dgroup0_as,
+                                                static_position=[1], dynamic_position=[])
+                    next_dg0_bs = vector.insert(lds_bs, cur_dgroup0_bs,
+                                                static_position=[1], dynamic_position=[])
+
+                    desc_a = tdm_ops.TDMDescriptor2D(next_dg0_a, dgroup1_a)
+                    desc_b = tdm_ops.TDMDescriptor2D(next_dg0_b, dgroup1_b)
+                    desc_as = tdm_ops.TDMDescriptor2D(next_dg0_as, dgroup1_as)
+                    desc_bs = tdm_ops.TDMDescriptor2D(next_dg0_bs, dgroup1_bs)
+
+                    issue_all_tdm_loads(desc_a, desc_b, desc_as, desc_bs)
+
+                    next_dg0_a = tdm_ops.advance_tdm_descriptor_lo32(desc_a, adv_a_i32).dgroup0
+                    next_dg0_b = tdm_ops.advance_tdm_descriptor_lo32(desc_b, adv_b_i32).dgroup0
+                    next_dg0_as = tdm_ops.advance_tdm_descriptor_lo32(desc_as, adv_as_i32).dgroup0
+                    next_dg0_bs = tdm_ops.advance_tdm_descriptor_lo32(desc_bs, adv_bs_i32).dgroup0
+
+                    _l2_prefetch(k_off)
+
+                    cur_a = _select_base(stages_a_idx, s_idx)
+                    cur_b = _select_base(stages_b_idx, s_idx)
+                    cur_as = _select_base(stages_as_idx, s_idx)
+                    cur_bs = _select_base(stages_bs_idx, s_idx)
+
+                    rocdl.sched_barrier(0)
+                    accs_in = compute_tile_scheduled(
+                        accs_in, cur_a, cur_b, cur_as, cur_bs)
+                    pipeline_fence(
+                        outstanding=TDM_LOADS_PER_STEP * (num_buffers - 2),
+                        use_cluster=use_cluster)
+                    hot_loop_scheduler_scheduled()
+                    results = yield list(accs_in) + \
+                        [next_dg0_a, next_dg0_b, next_dg0_as, next_dg0_bs]
+
+                accs = list(results[:n_accs])
+                dgroup0_a = results[n_accs]
+                dgroup0_b = results[n_accs + 1]
+                dgroup0_as = results[n_accs + 2]
+                dgroup0_bs = results[n_accs + 3]
+
+        # Tail
+        if loop_iters == 0 and use_cluster:
+            gpu.cluster_barrier()
+        epi_addrs_box = [None]
+        for _load_stage, _compute_stage, _outstanding in tail_plan:
+            if _load_stage is not None:
+                if wave_specialized_tdm:
+                    active_dgroup0 = vector.insert(
+                        active_stage_lds_addr[_load_stage], active_dgroup0,
+                        static_position=[1], dynamic_position=[])
+
+                    active_desc = tdm_ops.TDMDescriptor2D(
+                        active_dgroup0, active_dgroup1)
+                    tdm_ops.tensor_load_2d(active_desc)
+                    active_dgroup0 = tdm_ops.advance_tdm_descriptor_lo32(
+                        active_desc, active_adv_i32).dgroup0
+                else:
+                    dgroup0_a = vector.insert(stages_a_lds_addr[_load_stage], dgroup0_a,
+                                              static_position=[1], dynamic_position=[])
+                    dgroup0_b = vector.insert(stages_b_lds_addr[_load_stage], dgroup0_b,
+                                              static_position=[1], dynamic_position=[])
+                    dgroup0_as = vector.insert(stages_as_lds_addr[_load_stage], dgroup0_as,
+                                               static_position=[1], dynamic_position=[])
+                    dgroup0_bs = vector.insert(stages_bs_lds_addr[_load_stage], dgroup0_bs,
+                                               static_position=[1], dynamic_position=[])
+
+                    desc_a = tdm_ops.TDMDescriptor2D(dgroup0_a, dgroup1_a)
+                    desc_b = tdm_ops.TDMDescriptor2D(dgroup0_b, dgroup1_b)
+                    desc_as = tdm_ops.TDMDescriptor2D(dgroup0_as, dgroup1_as)
+                    desc_bs = tdm_ops.TDMDescriptor2D(dgroup0_bs, dgroup1_bs)
+
+                    issue_all_tdm_loads(desc_a, desc_b, desc_as, desc_bs)
+
+                    dgroup0_a = tdm_ops.advance_tdm_descriptor_lo32(desc_a, adv_a_i32).dgroup0
+                    dgroup0_b = tdm_ops.advance_tdm_descriptor_lo32(desc_b, adv_b_i32).dgroup0
+                    dgroup0_as = tdm_ops.advance_tdm_descriptor_lo32(desc_as, adv_as_i32).dgroup0
+                    dgroup0_bs = tdm_ops.advance_tdm_descriptor_lo32(desc_bs, adv_bs_i32).dgroup0
+
             if _outstanding == -1:
                 if use_tdm_store:
                     accs = compute_tile_scheduled(
