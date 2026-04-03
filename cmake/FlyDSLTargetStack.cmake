@@ -3,6 +3,8 @@
 #
 # Active Fly target lowering stack (one per build). Sets FLYDSL_TARGET_STACK and
 # stack-specific variables for other CMakeLists.
+#
+# How to add a stack: ADDING_TARGET_STACK.md (repository root)
 
 set(FLYDSL_TARGET_STACK "rocdl"
     CACHE STRING "Active Fly target lowering stack for this build (one stack per artifact).")
@@ -43,4 +45,7 @@ if(FLYDSL_TARGET_STACK STREQUAL "rocdl")
     MLIRCAPITransforms
     MLIRCAPIRegisterEverything
   )
+
+  set(FLYDSL_BUILD_CONFIG_BACKEND_IDS "\"rocm\", ")
+  set(FLYDSL_BUILD_CONFIG_RUNTIME_KINDS "\"rocm\", ")
 endif()

@@ -2,9 +2,9 @@
 
 Pytest configuration lives in [`pytest.ini`](pytest.ini) in this directory. Run pytest from the **repository root** (or pass `-c tests/pytest.ini`) so this file is picked up.
 
-## Test tiering (RFC 0003)
+## Test tiering
 
-The project uses a **layered model** so CI and contributors can select tests by dependency (CPU-only vs MLIR with ROCDL vs real GPU). The full specification is [**RFC 0003: Test tiering and multi-backend CI matrix**](https://github.com/ROCm/FlyDSL/issues/275).
+The project uses a **layered model** so CI and contributors can select tests by dependency (CPU-only vs MLIR with ROCDL vs real GPU). Background and design discussion: [GitHub issue #275 — test tiering and multi-backend CI matrix](https://github.com/ROCm/FlyDSL/issues/275).
 
 | Tier | Meaning |
 |------|---------|
@@ -89,5 +89,5 @@ export FLYDSL_RUNTIME_ENABLE_CACHE=0
 
 ## MLIR FileCheck tests
 
-`tests/mlir/**/*.mlir` checks are driven by **`scripts/run_tests.sh`** (FileCheck + `fly-opt`), not by pytest. Tiering for those may be documented in parallel in this README as the RFC rollout continues; see RFC open questions.
+`tests/mlir/**/*.mlir` checks are driven by **`scripts/run_tests.sh`** (FileCheck + `fly-opt`), not by pytest. Tiering for those may be documented in parallel in this README as the FileCheck runner and marker story evolve.
 
