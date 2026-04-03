@@ -114,6 +114,32 @@ def _load_q_words(q_rsrc, q_base_elem, lane16id, *, query_packed_fp8, query_load
     return q_words
 
 
+def _load_k_flat(
+    k_rsrc,
+    k_block_base_dw,
+    tile_token_offset_i32,
+    k_tok_thread_base,
+    c_tok_stride_dw,
+    k_he_off_dw,
+):
+    k_flat = []
+    tile_tok_base = tile_token_offset_i32 + k_tok_thread_base
+
+    for td in range_constexpr(TLOOP):
+        kbo = tile_tok_base + arith.constant(td * MFMA_N, type=T.i32)
+        kbo_dw = k_block_base_dw + kbo * c_tok_stride_dw
+        for qkhe in range_constexpr(QKHELOOP):
+            ka_dw = kbo_dw + k_he_off_dw[qkhe]
+            k4 = buffer_ops.buffer_load(k_rsrc, ka_dw, vec_width=4, dtype=T.i32)
+            k_flat.append(_pack_i32_pair_to_i64(
+                vector.extract(k4, static_position=[0]),
+                vector.extract(k4, static_position=[1])))
+            k_flat.append(_pack_i32_pair_to_i64(
+                vector.extract(k4, static_position=[2]),
+                vector.extract(k4, static_position=[3])))
+    return k_flat
+
+
 def _expand_pa_metadata_for_block_splits(
     work_indptr: torch.Tensor,
     work_info: torch.Tensor,
@@ -432,31 +458,6 @@ def compile_pa_decode_ps(
                     arith.constant(2 * NUM_WARPS * MFMA_N + w * MFMA_N, type=T.i32) + lane16id)
                     for w in range(NUM_WARPS)]
 
-            # ════════════════════════════════════════════════════════
-            # Helper: load K data for one tile using pre-computed block base
-            # k_block_base_dw = (phys_block * c_kb + _k_head_off) // 4
-            # tile_token_offset_i32 = token offset within block (0, 256, 512, 768)
-            # ════════════════════════════════════════════════════════
-            def _load_k_flat_ps(k_block_base_dw, tile_token_offset_i32):
-                """Load K data for one tile using pre-computed block base address."""
-                k_flat = []
-                tile_tok_base = tile_token_offset_i32 + _k_tok_thread_base
-
-                for td in range_constexpr(TLOOP):
-                    kbo = tile_tok_base + arith.constant(td * MFMA_N, type=T.i32)
-                    kbo_dw = k_block_base_dw + kbo * _c_tok_stride_dw
-                    for qkhe in range_constexpr(QKHELOOP):
-                        ka_dw = kbo_dw + _k_he_off_dw[qkhe]
-                        k4 = buffer_ops.buffer_load(k_rsrc, ka_dw,
-                                                    vec_width=4, dtype=T.i32)
-                        k_flat.append(_pack_i32_pair_to_i64(
-                            vector.extract(k4, static_position=[0]),
-                            vector.extract(k4, static_position=[1])))
-                        k_flat.append(_pack_i32_pair_to_i64(
-                            vector.extract(k4, static_position=[2]),
-                            vector.extract(k4, static_position=[3])))
-                return k_flat
-
             def _unflatten_k(k_flat):
                 return [[k_flat[td * (QKHELOOP * 2) + j]
                           for j in range(QKHELOOP * 2)]
@@ -756,14 +757,23 @@ def compile_pa_decode_ps(
                 d_out, v_ops, v_scales = _qk_and_intra_softmax(
                     k_ops, partition_start, v_base, tile_token_offset_i32, phys_block
                 )
-                if next_k_base is not None:
-                    k_next_flat = _load_k_flat_ps(next_k_base, tile_token_offset_i32)
-                else:
-                    k_next_flat = None
+
                 gpu.barrier()
                 rmax, rsum, o0, o1, v_correction = _cross_warp_softmax_and_prob_pack(
                     d_out, rmax, rsum, o0, o1, v_scales
                 )
+                if next_k_base is not None:
+                    k_next_flat = _load_k_flat(
+                        k_rsrc,
+                        next_k_base,
+                        tile_token_offset_i32,
+                        _k_tok_thread_base,
+                        _c_tok_stride_dw,
+                        _k_he_off_dw,
+                    )
+                else:
+                    k_next_flat = None
+
                 gpu.barrier()
                 o0, o1 = _pv_mfma(v_ops, o0, o1, v_correction)
                 return rmax, rsum, o0, o1, k_next_flat
@@ -854,7 +864,14 @@ def compile_pa_decode_ps(
 
                 # ── K init: load this CTA's 256-token block split for the first block ──
                 first_k_base = (first_phys_block * c_kb + _k_head_off) // c_four
-                k_flat = _load_k_flat_ps(first_k_base, tile_token_offset)
+                k_flat = _load_k_flat(
+                    k_rsrc,
+                    first_k_base,
+                    tile_token_offset,
+                    _k_tok_thread_base,
+                    _c_tok_stride_dw,
+                    _k_he_off_dw,
+                )
 
                 init_state = _pack_state(
                     NEG_INF, ZERO_F,
@@ -1331,7 +1348,7 @@ def compile_pa_decode_ps_sw(
     allocator.ptr += LDS_SOFTMAX_TOTAL
 
     @flyc.kernel
-    def pa_decode_ps_sw_kernel(
+    def pa_decode_sw_kernel(
         exp_sums_ptr: fx.Tensor,      # [batch, kv_heads, max_parts, eqgs] f32
         max_logits_ptr: fx.Tensor,    # [batch, kv_heads, max_parts, eqgs] f32
         tmp_out_ptr: fx.Tensor,       # [batch, kv_heads, max_parts, eqgs, head_size] bf16
@@ -1483,23 +1500,6 @@ def compile_pa_decode_ps_sw(
         # ════════════════════════════════════════════════════════
         # Helper functions (K load, V load, QK+softmax, PV MFMA)
         # ════════════════════════════════════════════════════════
-        def _load_k_flat_ps(k_block_base_dw, tile_token_offset_i32):
-            k_flat = []
-            tile_tok_base = tile_token_offset_i32 + _k_tok_thread_base
-            for td in range_constexpr(TLOOP):
-                kbo = tile_tok_base + arith.constant(td * MFMA_N, type=T.i32)
-                kbo_dw = k_block_base_dw + kbo * _c_tok_stride_dw
-                for qkhe in range_constexpr(QKHELOOP):
-                    ka_dw = kbo_dw + _k_he_off_dw[qkhe]
-                    k4 = buffer_ops.buffer_load(k_rsrc, ka_dw, vec_width=4, dtype=T.i32)
-                    k_flat.append(_pack_i32_pair_to_i64(
-                        vector.extract(k4, static_position=[0]),
-                        vector.extract(k4, static_position=[1])))
-                    k_flat.append(_pack_i32_pair_to_i64(
-                        vector.extract(k4, static_position=[2]),
-                        vector.extract(k4, static_position=[3])))
-            return k_flat
-
         def _unflatten_k(k_flat):
             return [[k_flat[td * (QKHELOOP * 2) + j]
                       for j in range(QKHELOOP * 2)]
@@ -1785,7 +1785,14 @@ def compile_pa_decode_ps_sw(
 
             # ── Load K for the single block ──
             k_base = (phys_block * c_kb + _k_head_off) // c_four
-            k0_flat = _load_k_flat_ps(k_base, tile_token_offset)
+            k0_flat = _load_k_flat(
+                k_rsrc,
+                k_base,
+                tile_token_offset,
+                _k_tok_thread_base,
+                _c_tok_stride_dw,
+                _k_he_off_dw,
+            )
             k0_ops = _unflatten_k(k0_flat)
 
             # ── Process this CTA's 256-token tile ──
@@ -1832,7 +1839,7 @@ def compile_pa_decode_ps_sw(
                 es_off * arith.constant(4, type=T.i32), offset_is_bytes=True)
 
     @flyc.jit
-    def launch_pa_decode_ps_sw(es, ml, to, q, kc, vc, bt, cl,
+    def launch_pa_decode_sw(es, ml, to, q, kc, vc, bt, cl,
                                qs, ks, vs,
                                s_q_seq, s_q_head,
                                s_k_block, s_k_head,
@@ -1847,7 +1854,7 @@ def compile_pa_decode_ps_sw(
         ctx = CompilationContext.get_current()
         with ir.InsertionPoint(ctx.gpu_module_body):
             allocator.finalize()
-        pa_decode_ps_sw_kernel(
+        pa_decode_sw_kernel(
             es, ml, to, q, kc, vc, bt, cl, qs, ks, vs,
             s_q_seq, s_q_head, s_k_block, s_k_head,
             s_v_block, s_v_head,
@@ -1860,8 +1867,8 @@ def compile_pa_decode_ps_sw(
             block=(BLOCK_THREADS, 1, 1), stream=stream)
 
     return {
-        'launch': launch_pa_decode_ps_sw,
-        'kernel': pa_decode_ps_sw_kernel,
+        'launch': launch_pa_decode_sw,
+        'kernel': pa_decode_sw_kernel,
         'allocator': allocator,
     }
 
