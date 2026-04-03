@@ -1649,6 +1649,7 @@ def compile_moe_gemm2(
     out_dtype: str = "f16",
     use_cshuffle_epilog: bool | None = None,
     accumulate: bool = True,
+    use_flat_layout: bool = True,
 ):
     """Compile stage2 kernel (`moe_gemm2`) and return the compiled executable.
 
@@ -1709,6 +1710,11 @@ def compile_moe_gemm2(
     is_int4_groupwise = is_int4 and use_groupwise_scale
     is_int4_fp8_groupwise = is_int4_fp8 and use_groupwise_scale
     is_int4_bf16_groupwise = is_int4_bf16 and use_groupwise_scale
+    if use_flat_layout and not is_int4_bf16:
+        raise ValueError(
+            f"use_flat_layout=True is only supported for in_dtype='int4_bf16' (W4A16). "
+            f"Got in_dtype={in_dtype!r}."
+        )
     # Stage2 K dimension is inter_dim (weight shape: [E, model_dim, inter_dim])
     num_groups = inter_dim // group_size if use_groupwise_scale else 1
     scale_w_size_stage2 = experts * model_dim * num_groups
@@ -1892,9 +1898,9 @@ def compile_moe_gemm2(
             # For packed int4 (W4A8/W4A16/W4A_FP8), kpack_bytes=8.
             kpack_bytes = 8 if w_is_int4 else 16
             w_elem_bytes = 1 if w_is_int4 else elem_bytes
-            # W4A16 (int4_bf16) uses flat B layout for fewer VMEM loads.
+            # B layout: flat (default for int4_bf16) or preshuffle.
             flat_b = None
-            if is_int4_bf16:
+            if use_flat_layout and is_int4_bf16:
                 flat_b = make_flat_b_layout_w4a16(
                     arith, c_n=c_n_total, c_k=k_in, tile_k=tile_k,
                 )
@@ -2203,7 +2209,7 @@ def compile_moe_gemm2(
                     For other dtypes:
                       Returns list of (packs0[ni], packs1[ni]) per K64 micro-step.
                     """
-                    if is_int4_bf16:
+                    if use_flat_layout and is_int4_bf16:
                         # CK-tile style: VMEM only — raw B loads + scale loads, NO dequant.
                         # Dequant happens inline inside compute_tile.
                         b_raw = []
@@ -2232,6 +2238,62 @@ def compile_moe_gemm2(
                                     ))
                                 scales.append(ku_scales)
                         return (b_raw, scales)
+                    elif is_int4_bf16_groupwise:
+                        # W4A16 groupwise preshuffle: 2-phase load+unpack with per-group scale
+                        raw_data = []
+                        for ku in range_constexpr(k_unroll):
+                            raw_ku = []
+                            for ni in range_constexpr(num_acc_n):
+                                packed32, scale_val = load_b_raw_w4a16_groupwise(
+                                    buffer_ops, arith, vector,
+                                    arg_b=arg_w, b_rsrc=w_rsrc, layout_b=layout_b,
+                                    base_k=base_k, ku=ku,
+                                    n_blk=n_blk_list[ni], n_intra=n_intra_list[ni],
+                                    lane_div_16=lane_div_16, elem_type=w_elem,
+                                    scale_rsrc=sw_rsrc,
+                                    expert_offset=expert_off_idx,
+                                    num_groups=num_groups,
+                                    group_size=group_size,
+                                    n_per_expert=model_dim,
+                                    kpack_bytes=kpack_bytes,
+                                )
+                                raw_ku.append((packed32, scale_val))
+                            raw_data.append(raw_ku)
+                        b_tile = []
+                        for ku in range_constexpr(k_unroll):
+                            packs0, packs1 = [], []
+                            for ni in range_constexpr(num_acc_n):
+                                packed32, scale_val = raw_data[ku][ni]
+                                b0, b1 = unpack_b_w4a16_groupwise(packed32, scale_val, arith, vector, use_gfx950_cvt=use_gfx950_cvt)
+                                packs0.append(b0)
+                                packs1.append(b1)
+                            b_tile.append((packs0, packs1))
+                        return b_tile
+                    elif is_int4_bf16:
+                        # W4A16 preshuffle: 2-phase load+unpack for VMEM latency hiding
+                        raw_data = []
+                        for ku in range_constexpr(k_unroll):
+                            raw_ku = []
+                            for ni in range_constexpr(num_acc_n):
+                                raw = load_b_raw_w4a16(
+                                    buffer_ops, arith, vector,
+                                    arg_b=arg_w, b_rsrc=w_rsrc, layout_b=layout_b,
+                                    base_k=base_k, ku=ku,
+                                    n_blk=n_blk_list[ni], n_intra=n_intra_list[ni],
+                                    lane_div_16=lane_div_16, elem_type=w_elem,
+                                    kpack_bytes=kpack_bytes,
+                                )
+                                raw_ku.append(raw)
+                            raw_data.append(raw_ku)
+                        b_tile = []
+                        for ku in range_constexpr(k_unroll):
+                            packs0, packs1 = [], []
+                            for ni in range_constexpr(num_acc_n):
+                                b0, b1 = unpack_b_w4a16(raw_data[ku][ni], arith, vector, use_gfx950_cvt=use_gfx950_cvt)
+                                packs0.append(b0)
+                                packs1.append(b1)
+                            b_tile.append((packs0, packs1))
+                        return b_tile
                     elif is_int4_groupwise:
                         # W4A8 groupwise: 8B K64 weight load + 2 scale loads + unpack
                         b_tile = []
@@ -2675,7 +2737,7 @@ def compile_moe_gemm2(
 
                 _n_acc2 = m_repeat * num_acc_n
 
-                if is_int4_bf16:
+                if use_flat_layout and is_int4_bf16:
                     # CK-tile style: carry raw i32x4 + f32 scales through loop
                     _nlpni2 = tile_k // 128  # i32x4 loads per N column
                     _raw_per_matrix2 = num_acc_n * _nlpni2  # i32x4 values

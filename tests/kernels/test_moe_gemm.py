@@ -740,6 +740,7 @@ def run_moe_stage2(
     test_graph: bool = False,
     # Optional override for pre-built groupwise scale tensor [E, inter_dim//group_size, model_dim] (Opt 0 layout).
     scale_w2_groups_in: Optional[torch.Tensor] = None,
+    use_flat_layout: bool = True,
 ):
     """MoE stage2 (gemm2): out2[t] = sum_{slot} ( out1[t,slot] @ W2[expert]^T ) with optional routed weight."""
 
@@ -961,9 +962,12 @@ def run_moe_stage2(
     # For int4 variants (W4A8, W4A16, W4A_FP8), pack preshuffled int8 weights into packed int4 bytes.
     # All use the same interleaved packing: [ (v4<<4)|v0, (v5<<4)|v1, (v6<<4)|v2, (v7<<4)|v3 ]
     use_packed_int4 = w_is_int4
-    if is_int4_bf16:
-        # W4A16 flat layout: preshuffle + pack + flat reorder for fewer VMEM loads.
+    if is_int4_bf16 and use_flat_layout:
+        # W4A16 CK-tile flat layout: preshuffle + pack + flat reorder for fewer VMEM loads.
         w2_kernel = shuffle_weight_flat_int4(w2_q, tile_k=tile_k).view(-1).contiguous()
+    elif is_int4_bf16:
+        # W4A16 preshuffle layout
+        w2_kernel = _pack_shuffled_int8_to_packed_int4_no_perm(w2_shuffled_flat).contiguous().view(-1)
     elif use_packed_int4:
         w2_kernel = _pack_shuffled_int8_to_packed_int4_no_perm(w2_shuffled_flat).contiguous().view(-1)
     else:
@@ -996,7 +1000,7 @@ def run_moe_stage2(
     out_perf = torch.zeros_like(out)
 
     doweight_stage2 = not bool(doweight_stage1)
-    exe = compile_fn(
+    _compile_kw = dict(
         model_dim=model_dim,
         inter_dim=inter_dim,
         experts=experts,
@@ -1009,6 +1013,10 @@ def run_moe_stage2(
         tile_k=tile_k,
         doweight_stage2=bool(doweight_stage2),
     )
+    # Pass use_flat_layout only to compile_moe_gemm2 (not to reduce-mode wrappers).
+    if compile_fn is compile_moe_gemm2:
+        _compile_kw["use_flat_layout"] = use_flat_layout
+    exe = compile_fn(**_compile_kw)
     is_reduce_exe = (getattr(exe, "mode", None) == MoeGemm2Mode.REDUCE) or bool(use_reduce)
 
     def _s2_args_atomic(o, x, w, sx, sw, st, eids, sw_sorted):
