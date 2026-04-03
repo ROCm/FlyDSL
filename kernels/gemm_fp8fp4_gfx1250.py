@@ -93,7 +93,7 @@ def compile_mxscale_gemm(
                 f"cluster_m * cluster_n must be <= 16, got {cluster_m}*{cluster_n}")
     effective_waves_per_eu = waves_per_eu
     if use_cluster and effective_waves_per_eu is None:
-        effective_waves_per_eu = 1
+        effective_waves_per_eu = 2
 
     num_warps = m_warp * n_warp
     block_threads = num_warps * WAVE_SIZE
@@ -289,14 +289,16 @@ def compile_mxscale_gemm(
     COMPUTE_SCHEDULE_FP4_COL_BAND = "fp4_col_band"
 
     def _pick_compute_schedule_kind():
-        # The FP4 col-band schedule is only useful for large/high-pressure
-        # accumulator shapes. Small tiles already stay below banked VGPR usage
-        # and do not benefit from the more specialized compute ordering.
+        # The FP4 col-band (quadrant) schedule reduces VGPR bank conflicts by
+        # splitting B loads into left/right halves and processing four quadrants
+        # (top-left, bottom-left, top-right, bottom-right).  This distributes
+        # accumulator writes across different VGPR bank groups and overlaps
+        # B-right loading with quadrant-1 WMMA compute.
         if not is_fp4:
             return COMPUTE_SCHEDULE_ROW_MAJOR_STREAMING
         if wmma_m_rep % 2 != 0 or wmma_n_rep % 2 != 0:
             return COMPUTE_SCHEDULE_ROW_MAJOR_STREAMING
-        if n_accs < 32:
+        if n_accs < 8:
             return COMPUTE_SCHEDULE_ROW_MAJOR_STREAMING
         return COMPUTE_SCHEDULE_FP4_COL_BAND
 
@@ -1169,10 +1171,10 @@ def compile_mxscale_gemm(
         dgroup1_as = desc_as_init.dgroup1
         dgroup1_bs = desc_bs_init.dgroup1
 
-        adv_a_bytes = arith.index(tile_k // PACK_FACTOR_A)
-        adv_b_bytes = arith.index(packed_tile_k_b * 16)
-        adv_as_bytes = arith.index(tile_k // SCALE_BLOCK * wmma_m_rep)
-        adv_bs_bytes = arith.index(tile_k // SCALE_BLOCK * b_scale_load_rep)
+        adv_a_i32 = arith.constant(tile_k // PACK_FACTOR_A, type=T.i32)
+        adv_b_i32 = arith.constant(packed_tile_k_b * 16, type=T.i32)
+        adv_as_i32 = arith.constant(tile_k // SCALE_BLOCK * wmma_m_rep, type=T.i32)
+        adv_bs_i32 = arith.constant(tile_k // SCALE_BLOCK * b_scale_load_rep, type=T.i32)
 
         # Prologue
         for i in range_constexpr(pre_loaded):
@@ -1192,10 +1194,10 @@ def compile_mxscale_gemm(
 
             issue_all_tdm_loads(desc_a, desc_b, desc_as, desc_bs)
 
-            dgroup0_a = tdm_ops.advance_tdm_descriptor(desc_a, adv_a_bytes).dgroup0
-            dgroup0_b = tdm_ops.advance_tdm_descriptor(desc_b, adv_b_bytes).dgroup0
-            dgroup0_as = tdm_ops.advance_tdm_descriptor(desc_as, adv_as_bytes).dgroup0
-            dgroup0_bs = tdm_ops.advance_tdm_descriptor(desc_bs, adv_bs_bytes).dgroup0
+            dgroup0_a = tdm_ops.advance_tdm_descriptor_lo32(desc_a, adv_a_i32).dgroup0
+            dgroup0_b = tdm_ops.advance_tdm_descriptor_lo32(desc_b, adv_b_i32).dgroup0
+            dgroup0_as = tdm_ops.advance_tdm_descriptor_lo32(desc_as, adv_as_i32).dgroup0
+            dgroup0_bs = tdm_ops.advance_tdm_descriptor_lo32(desc_bs, adv_bs_i32).dgroup0
 
         pipeline_fence(outstanding=TDM_LOADS_PER_STEP * (num_buffers - 2),
                        use_cluster=use_cluster)
@@ -1238,10 +1240,10 @@ def compile_mxscale_gemm(
 
                 issue_all_tdm_loads(desc_a, desc_b, desc_as, desc_bs)
 
-                next_dg0_a = tdm_ops.advance_tdm_descriptor(desc_a, adv_a_bytes).dgroup0
-                next_dg0_b = tdm_ops.advance_tdm_descriptor(desc_b, adv_b_bytes).dgroup0
-                next_dg0_as = tdm_ops.advance_tdm_descriptor(desc_as, adv_as_bytes).dgroup0
-                next_dg0_bs = tdm_ops.advance_tdm_descriptor(desc_bs, adv_bs_bytes).dgroup0
+                next_dg0_a = tdm_ops.advance_tdm_descriptor_lo32(desc_a, adv_a_i32).dgroup0
+                next_dg0_b = tdm_ops.advance_tdm_descriptor_lo32(desc_b, adv_b_i32).dgroup0
+                next_dg0_as = tdm_ops.advance_tdm_descriptor_lo32(desc_as, adv_as_i32).dgroup0
+                next_dg0_bs = tdm_ops.advance_tdm_descriptor_lo32(desc_bs, adv_bs_i32).dgroup0
 
                 _l2_prefetch(k_off)
 
@@ -1253,10 +1255,10 @@ def compile_mxscale_gemm(
                 rocdl.sched_barrier(0)
                 accs_in = compute_tile_scheduled(
                     accs_in, cur_a, cur_b, cur_as, cur_bs)
-                hot_loop_scheduler_scheduled()
                 pipeline_fence(
                     outstanding=TDM_LOADS_PER_STEP * (num_buffers - 2),
                     use_cluster=use_cluster)
+                hot_loop_scheduler_scheduled()
                 results = yield list(accs_in) + \
                     [next_dg0_a, next_dg0_b, next_dg0_as, next_dg0_bs]
 
@@ -1289,10 +1291,10 @@ def compile_mxscale_gemm(
 
                 issue_all_tdm_loads(desc_a, desc_b, desc_as, desc_bs)
 
-                dgroup0_a = tdm_ops.advance_tdm_descriptor(desc_a, adv_a_bytes).dgroup0
-                dgroup0_b = tdm_ops.advance_tdm_descriptor(desc_b, adv_b_bytes).dgroup0
-                dgroup0_as = tdm_ops.advance_tdm_descriptor(desc_as, adv_as_bytes).dgroup0
-                dgroup0_bs = tdm_ops.advance_tdm_descriptor(desc_bs, adv_bs_bytes).dgroup0
+                dgroup0_a = tdm_ops.advance_tdm_descriptor_lo32(desc_a, adv_a_i32).dgroup0
+                dgroup0_b = tdm_ops.advance_tdm_descriptor_lo32(desc_b, adv_b_i32).dgroup0
+                dgroup0_as = tdm_ops.advance_tdm_descriptor_lo32(desc_as, adv_as_i32).dgroup0
+                dgroup0_bs = tdm_ops.advance_tdm_descriptor_lo32(desc_bs, adv_bs_i32).dgroup0
 
                 _extra_j += 1
             if _outstanding == -1:
@@ -1316,9 +1318,9 @@ def compile_mxscale_gemm(
                     accs,
                     stages_a_idx[_compute_stage], stages_b_idx[_compute_stage],
                     stages_as_idx[_compute_stage], stages_bs_idx[_compute_stage])
-                hot_loop_scheduler_scheduled()
                 pipeline_fence(outstanding=_outstanding,
                                use_cluster=use_cluster)
+                hot_loop_scheduler_scheduled()
 
         accs = finalize_acc_layout(accs)
 

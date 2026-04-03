@@ -418,22 +418,225 @@ def test_mxfp4_gemm_mcast(M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp,
         cluster_m=cluster_m, cluster_n=cluster_n)
 
 
+def _bench_kernel_us(run_fn, warmup=10, iters=50, flush_l2=True):
+    """Per-iteration CUDA events timer with L2 flush, IQR outlier removal, median.
+
+    Follows the golden practices from benchmarks/gemm_gfx1250_benchmark.py:
+    - L2 flush between iterations via zero-fill of 2× L2 buffer
+    - Per-iteration event pairs (no inter-iteration sync on kernel)
+    - IQR outlier removal (if n >= 8), median latency
+    """
+    flush_buf = None
+    if flush_l2:
+        l2_bytes = getattr(
+            torch.cuda.get_device_properties(torch.cuda.current_device()),
+            "L2_cache_size", 4 * 1024 * 1024)
+        alloc_bytes = max(l2_bytes * 2, 8 * 1024 * 1024)
+        flush_buf = torch.empty(alloc_bytes, dtype=torch.uint8, device="cuda")
+
+    for _ in range(warmup):
+        if flush_buf is not None:
+            flush_buf.zero_()
+        run_fn()
+    torch.cuda.synchronize()
+
+    start_ev = [torch.cuda.Event(enable_timing=True) for _ in range(iters)]
+    end_ev = [torch.cuda.Event(enable_timing=True) for _ in range(iters)]
+
+    for i in range(iters):
+        if flush_buf is not None:
+            flush_buf.zero_()
+        start_ev[i].record()
+        run_fn()
+        end_ev[i].record()
+
+    torch.cuda.synchronize()
+
+    latencies = sorted(
+        start_ev[i].elapsed_time(end_ev[i]) * 1e3 for i in range(iters))
+
+    n = len(latencies)
+    if n >= 8:
+        q1, q3 = latencies[n // 4], latencies[3 * n // 4]
+        iqr = q3 - q1
+        lo, hi = q1 - 1.5 * iqr, q3 + 1.5 * iqr
+        filtered = [x for x in latencies if lo <= x <= hi]
+        if filtered:
+            latencies = filtered
+
+    del flush_buf
+    return latencies[len(latencies) // 2]
+
+
+def _run_benchmark(args):
+    """Benchmark mode: compile once, time kernel execution with proper methodology."""
+    import time
+
+    os.environ["FLYDSL_RUNTIME_ENABLE_CACHE"] = "1"
+
+    data_format = args.data_format
+    M, N, K = args.M, args.N, args.K
+    is_fp4 = data_format == "fp4"
+    is_a8w4 = data_format == "a8w4"
+    PACK_A = 1 if (not is_fp4 and not is_a8w4) else (1 if data_format == "fp8" else 2 if is_fp4 else 1)
+    PACK_B = 2 if (is_fp4 or is_a8w4) else 1
+
+    _dtype_map = {"f32": torch.float32, "bf16": torch.bfloat16, "f16": torch.float16}
+    torch_out_dtype = _dtype_map[args.out_dtype]
+    elem_bytes_d = 2 if args.out_dtype in ("bf16", "f16") else 4
+
+    tile_m, tile_n, tile_k = args.tile_m, args.tile_n, args.tile_k
+    fmt_name = "A8W4" if is_a8w4 else ("MXFP4" if is_fp4 else "MXFP8")
+
+    print("=" * 72)
+    print(f"  {fmt_name} GEMM Benchmark on gfx1250")
+    print(f"  PyTorch {torch.__version__}, Device: {torch.cuda.get_device_name(0)}")
+    print(f"  Shape: M={M}, N={N}, K={K}")
+    print(f"  Tile: ({tile_m}, {tile_n}, {tile_k}), warps=({args.m_warp}x{args.n_warp})")
+    print(f"  Buffers={args.num_buffers}, out={args.out_dtype}, "
+          f"opsel={args.use_scale_opsel}, inst_prefetch={args.inst_prefetch}")
+    print(f"  Warmup={args.warmup}, Iters={args.iters}, "
+          f"L2 flush={'ON' if not args.no_flush_l2 else 'OFF'}")
+    print("=" * 72)
+
+    torch.manual_seed(0)
+
+    if is_a8w4:
+        a = random_fp8_data(M, K)
+        b = fp4_utils.random_fp4_packed(N, K)
+    elif is_fp4:
+        a = fp4_utils.random_fp4_packed(M, K)
+        b = fp4_utils.random_fp4_packed(N, K)
+    else:
+        a = random_fp8_data(M, K)
+        b = random_fp8_data(N, K)
+
+    a_scale = fp4_utils.random_e8m0(M, K // SCALE_BLOCK)
+    b_scale = fp4_utils.random_e8m0(N, K // SCALE_BLOCK)
+
+    skt = tile_k // SCALE_BLOCK
+    warp_tile_m = tile_m // args.m_warp
+    warp_tile_n = tile_n // args.n_warp
+    a_scale = preshuffle_e8m0_scale(a_scale, warp_tile_m, scale_k_per_tile=skt)
+    b_scale = preshuffle_e8m0_scale(b_scale, warp_tile_n, scale_k_per_tile=skt)
+
+    K_packed = K // 2 if (is_fp4 or is_a8w4) else K
+    b = fp4_utils.preshuffle_b_16x16(b, N, K_packed)
+
+    a_gpu = a.cuda()
+    b_gpu = b.cuda()
+    as_gpu = a_scale.cuda()
+    bs_gpu = b_scale.cuda()
+    c_gpu = torch.zeros(M, N, dtype=torch_out_dtype, device="cuda")
+
+    print(f"\n[1/3] Compiling kernel...")
+    t0 = time.perf_counter()
+    launch_fn = compile_mxscale_gemm(
+        data_format=data_format,
+        M=M, N=N, K=K,
+        tile_m=tile_m, tile_n=tile_n, tile_k=tile_k,
+        m_warp=args.m_warp, n_warp=args.n_warp,
+        num_buffers=args.num_buffers,
+        waves_per_eu=args.waves_per_eu,
+        l2_prefetch_distance=args.l2_prefetch_distance,
+        cluster_m=args.cluster_m, cluster_n=args.cluster_n,
+        use_tdm_store=not args.no_tdm_store,
+        out_dtype=args.out_dtype,
+        inst_prefetch=args.inst_prefetch,
+        wave_specialized_tdm=args.wave_spec_tdm,
+        use_scale_opsel=args.use_scale_opsel,
+        expert_sched_mode=args.expert_sched_mode,
+    )
+
+    stream = torch.cuda.current_stream()
+
+    def run_kernel():
+        c_gpu.zero_()
+        launch_fn(
+            c_gpu.contiguous().view(-1),
+            a_gpu.contiguous().view(-1),
+            b_gpu.contiguous().view(-1),
+            as_gpu.contiguous().view(-1),
+            bs_gpu.contiguous().view(-1),
+            M, N, stream,
+        )
+
+    run_kernel()
+    torch.cuda.synchronize()
+    compile_ms = (time.perf_counter() - t0) * 1e3
+    print(f"      Compile + first launch: {compile_ms:.0f} ms")
+
+    print(f"[2/3] Warming up ({args.warmup} iters) + benchmarking ({args.iters} iters)...")
+    us = _bench_kernel_us(run_kernel, warmup=args.warmup, iters=args.iters,
+                          flush_l2=not args.no_flush_l2)
+
+    flops = 2.0 * M * N * K
+    time_s = us / 1e6
+    tflops = flops / time_s / 1e12 if time_s > 0 else 0.0
+
+    bytes_a = M * K // PACK_A
+    bytes_b = N * K // PACK_B
+    bytes_scale = (M + N) * (K // SCALE_BLOCK)
+    bytes_d = M * N * elem_bytes_d
+    read_bytes = bytes_a + bytes_b + bytes_scale
+    write_bytes = bytes_d
+    bytes_moved = read_bytes + write_bytes
+    bw_gbs = bytes_moved / 1e9 / time_s if time_s > 0 else 0.0
+    read_bw_gbs = read_bytes / 1e9 / time_s if time_s > 0 else 0.0
+    write_bw_gbs = write_bytes / 1e9 / time_s if time_s > 0 else 0.0
+
+    WMMA_K = 128
+    WMMA_N_EFF = 32 if is_fp4 else 16
+    wmma_m_rep = warp_tile_m // 16
+    wmma_n_rep = warp_tile_n // WMMA_N_EFF
+    k_wmma_steps = tile_k // WMMA_K
+    wmma_per_tile = wmma_m_rep * wmma_n_rep * k_wmma_steps
+    m_tiles = (M + tile_m - 1) // tile_m
+    n_tiles = (N + tile_n - 1) // tile_n
+    k_tiles = K // tile_k
+    total_wmma = m_tiles * n_tiles * k_tiles * wmma_per_tile
+    # Sequential WMMAs per workgroup (all k_tiles execute sequentially)
+    seq_wmma = k_tiles * wmma_per_tile
+    us_per_wmma = us / seq_wmma if seq_wmma > 0 else 0
+
+    print(f"\n[3/3] Results:")
+    print(f"      Kernel time:  {us:.1f} us ({us / 1e3:.4f} ms)")
+    print(f"      TFLOPS:       {tflops:.4f}")
+    print(f"      Bandwidth:    {bw_gbs:.1f} GB/s  "
+          f"(read: {read_bw_gbs:.1f} + write: {write_bw_gbs:.1f})")
+    print(f"      Bytes moved:  {bytes_moved / 1e6:.1f} MB  "
+          f"(A={bytes_a / 1e6:.1f} B={bytes_b / 1e6:.1f} "
+          f"scale={bytes_scale / 1e6:.1f} D={bytes_d / 1e6:.1f})")
+    print(f"      ---")
+    print(f"      WMMA/tile:    {wmma_per_tile} "
+          f"({wmma_m_rep}m × {wmma_n_rep}n × {k_wmma_steps}k)")
+    print(f"      Total tiles:  {m_tiles}×{n_tiles} spatial × {k_tiles} K-iters")
+    print(f"      Seq WMMA/WG:  {seq_wmma}")
+    print(f"      us/WMMA:      {us_per_wmma:.1f}")
+    if us_per_wmma > 1000:
+        print(f"      WARNING: {us_per_wmma/1000:.1f} ms/WMMA indicates "
+              f"WMMA_SCALE trap-handler emulation")
+    print("=" * 72)
+
+    return us, tflops, bw_gbs
+
+
 if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-format", type=str, default="fp4",
                         choices=["fp4", "fp8", "a8w4"])
-    parser.add_argument("-M", type=int, default=1024)
-    parser.add_argument("-N", type=int, default=1024)
-    parser.add_argument("-K", type=int, default=1024)
-    parser.add_argument("--tile-m", type=int, default=256)
+    parser.add_argument("-M", type=int, default=8192)
+    parser.add_argument("-N", type=int, default=8192)
+    parser.add_argument("-K", type=int, default=8192)
+    parser.add_argument("--tile-m", type=int, default=128)
     parser.add_argument("--tile-n", type=int, default=256)
     parser.add_argument("--tile-k", type=int, default=256)
     parser.add_argument("--m-warp", type=int, default=2)
     parser.add_argument("--n-warp", type=int, default=2)
     parser.add_argument("--num-buffers", type=int, default=4, choices=[2, 3, 4])
-    parser.add_argument("--l2-prefetch-distance", type=int, default=0)
+    parser.add_argument("--l2-prefetch-distance", type=int, default=2)
     parser.add_argument("--cluster-m", type=int, default=1)
     parser.add_argument("--cluster-n", type=int, default=1)
     parser.add_argument("--no-tdm-store", action="store_true", default=False)
@@ -445,22 +648,30 @@ if __name__ == "__main__":
     parser.add_argument("--use-scale-opsel", action="store_true", default=False)
     parser.add_argument("--disable-expert-sched-mode", dest="expert_sched_mode",
                         action="store_false", default=True)
+    parser.add_argument("--benchmark", action="store_true", default=False,
+                        help="Run benchmark mode (timing only, no correctness check)")
+    parser.add_argument("--warmup", type=int, default=5)
+    parser.add_argument("--iters", type=int, default=20)
+    parser.add_argument("--no-flush-l2", action="store_true", default=False)
     args = parser.parse_args()
 
-    _run_mxscale_gemm_test(
-        args.data_format,
-        args.M, args.N, args.K,
-        args.tile_m, args.tile_n, args.tile_k,
-        args.m_warp, args.n_warp,
-        num_buffers=args.num_buffers,
-        use_tdm_store=not args.no_tdm_store,
-        out_dtype=args.out_dtype,
-        wave_specialized_tdm=args.wave_spec_tdm,
-        use_scale_opsel=args.use_scale_opsel,
-        l2_prefetch_distance=args.l2_prefetch_distance,
-        cluster_m=args.cluster_m,
-        cluster_n=args.cluster_n,
-        inst_prefetch=args.inst_prefetch,
-        waves_per_eu=args.waves_per_eu,
-        expert_sched_mode=args.expert_sched_mode,
-    )
+    if args.benchmark:
+        _run_benchmark(args)
+    else:
+        _run_mxscale_gemm_test(
+            args.data_format,
+            args.M, args.N, args.K,
+            args.tile_m, args.tile_n, args.tile_k,
+            args.m_warp, args.n_warp,
+            num_buffers=args.num_buffers,
+            use_tdm_store=not args.no_tdm_store,
+            out_dtype=args.out_dtype,
+            wave_specialized_tdm=args.wave_spec_tdm,
+            use_scale_opsel=args.use_scale_opsel,
+            l2_prefetch_distance=args.l2_prefetch_distance,
+            cluster_m=args.cluster_m,
+            cluster_n=args.cluster_n,
+            inst_prefetch=args.inst_prefetch,
+            waves_per_eu=args.waves_per_eu,
+            expert_sched_mode=args.expert_sched_mode,
+        )
