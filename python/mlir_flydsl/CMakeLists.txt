@@ -1,5 +1,10 @@
 include(AddMLIRPython)
 
+configure_file(
+  "${CMAKE_CURRENT_SOURCE_DIR}/FlyRegisterEverything.cpp.in"
+  "${CMAKE_CURRENT_BINARY_DIR}/FlyRegisterEverything.cpp"
+  @ONLY)
+
 add_compile_definitions("MLIR_PYTHON_PACKAGE_PREFIX=flydsl.${MLIR_PYTHON_PACKAGE_PREFIX}.")
 
 declare_mlir_python_sources(FlyPythonSources)
@@ -71,22 +76,11 @@ declare_mlir_python_extension(FlyPythonSources.RegisterEverything
   ADD_TO_PARENT FlyPythonSources
   PYTHON_BINDINGS_LIBRARY nanobind
   SOURCES
-    FlyRegisterEverything.cpp
+    "${CMAKE_CURRENT_BINARY_DIR}/FlyRegisterEverything.cpp"
   PRIVATE_LINK_LIBS
     LLVMSupport
   EMBED_CAPI_LINK_LIBS
-    MLIRCAPIIR
-    MLIRCPIFly
-    MLIRCPIFlyROCDL
-    MLIRCPILLVMOption
-    MLIRCAPIArith
-    MLIRCAPIGPU
-    MLIRCAPILLVM
-    MLIRCAPIMath
-    MLIRCAPIVector
-    MLIRCAPIConversion
-    MLIRCAPITransforms
-    MLIRCAPIRegisterEverything
+    ${FLYDSL_REGISTER_EMBED_CAPI_LINK_LIBS}
 )
 
 

@@ -20,4 +20,25 @@ if(FLYDSL_TARGET_STACK STREQUAL "rocdl")
   set(FLYDSL_STACK_MLIR_TARGET_DIALECT_NAME "fly_rocdl")
   set(FLYDSL_STACK_CPP_TARGET_TOKEN "ROCDL")
   set(FLYDSL_STACK_UPSTREAM_MLIR_PY_DIALECT "rocdl")
+
+  set(FLYDSL_REGISTER_EXTRA_INCLUDES "#include \"flydsl-c/FlyROCDLDialect.h\"")
+  set(FLYDSL_REGISTER_TARGET_DIALECT_HANDLES [[    MlirDialectHandle flyROCDLHandle = mlirGetDialectHandle__fly_rocdl__();
+    mlirDialectHandleInsertDialect(flyROCDLHandle, registry);]])
+  set(FLYDSL_REGISTER_TARGET_PASSES [[  mlirRegisterFlyToROCDLConversionPass();
+  mlirRegisterFlyROCDLClusterAttrPass();]])
+
+  set(FLYDSL_REGISTER_EMBED_CAPI_LINK_LIBS
+    MLIRCAPIIR
+    MLIRCPIFly
+    MLIRCPIFlyROCDL
+    MLIRCPILLVMOption
+    MLIRCAPIArith
+    MLIRCAPIGPU
+    MLIRCAPILLVM
+    MLIRCAPIMath
+    MLIRCAPIVector
+    MLIRCAPIConversion
+    MLIRCAPITransforms
+    MLIRCAPIRegisterEverything
+  )
 endif()
