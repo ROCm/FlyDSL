@@ -1979,6 +1979,15 @@ public:
     int32_t bRank = bLayoutAttr.rank();
     int32_t cRank = cLayoutAttr.rank();
 
+    if (dRank == 1 && aRank == 1 && bRank == 1 && cRank == 1) {
+      MmaAtomCall::create(rewriter, loc, mmaAtomVal, d, a, b, c);
+      rewriter.eraseOp(op);
+      return success();
+    }
+
+    if (dRank != 3 || cRank != 3 || aRank < 2 || bRank < 2)
+      return failure();
+
     IntTupleBuilder<IntTupleAttr> attrBuilder(ctx);
     auto get_static_product = [&](IntTupleAttr shape) {
       return intTupleProduct(attrBuilder, shape).getLeafAsInt().getValue();
@@ -1991,15 +2000,6 @@ public:
     assert(loop_n == get_static_product(bLayoutAttr.getShape().at(1)) && "Mismatch in loop_n");
     assert(loop_m == get_static_product(cLayoutAttr.getShape().at(1)) && "Mismatch in loop_m");
     assert(loop_n == get_static_product(cLayoutAttr.getShape().at(2)) && "Mismatch in loop_n");
-
-    if (dRank == 1 && aRank == 1 && bRank == 1 && cRank == 1) {
-      MmaAtomCall::create(rewriter, loc, mmaAtomVal, d, a, b, c);
-      rewriter.eraseOp(op);
-      return success();
-    }
-
-    if (dRank != 3 || cRank != 3 || aRank < 2 || bRank < 2)
-      return failure();
 
     auto getSliceCoord = [&](ArrayRef<int32_t> idx) {
       SmallVector<Attribute> coordElems;

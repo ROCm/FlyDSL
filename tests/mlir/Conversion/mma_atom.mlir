@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2025 FlyDSL Project Contributors
-// RUN: %fly-opt %s --convert-fly-to-rocdl | FileCheck %s
+// RUN: %fly-opt %s --fly-rewrite-func-signature --fly-canonicalize --fly-layout-lowering --convert-fly-to-rocdl | FileCheck %s
 
 // MMA atom call lowering tests:
 //   fly.mma_atom_call -> rocdl.mfma intrinsic
