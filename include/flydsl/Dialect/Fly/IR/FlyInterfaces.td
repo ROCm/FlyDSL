@@ -60,7 +60,7 @@ def Fly_CopyOpTypeInterface : TypeInterface<"CopyOpTypeInterface", [Fly_MayStati
   ];
 }
 
-def Fly_MmaAtomTypeInterface : TypeInterface<"MmaAtomTypeInterface", [Fly_MayStaticTypeInterface]> {
+def Fly_MmaOpTypeInterface : TypeInterface<"MmaOpTypeInterface", [Fly_MayStaticTypeInterface]> {
   let cppNamespace = "::mlir::fly";
   let methods = [
     InterfaceMethod<"", "::mlir::Attribute", "getThrLayout", (ins)>,

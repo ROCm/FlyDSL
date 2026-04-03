@@ -4,6 +4,7 @@
 #include "mlir/IR/DialectImplementation.h"
 
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
+#include "flydsl/Dialect/Fly/Utils/IntTupleUtils.h"
 #include "flydsl/Dialect/Fly/Utils/LayoutUtils.h"
 #include "flydsl/Dialect/Fly/Utils/NormalForm.h"
 
@@ -372,33 +373,10 @@ void MemRefType::print(AsmPrinter &printer) const {
   printer << ">";
 }
 
-#include "flydsl/Dialect/Fly/Utils/ThrValLayoutMacro.h.inc"
-
 TileType TiledMmaType::getDefaultPermutationMNK(MLIRContext *ctx) {
   Attribute noneVal = IntAttr::getNone(ctx);
   SmallVector<Attribute> elems(3, noneVal);
   return TileType::get(ctx, TileAttr::get(ArrayAttr::get(ctx, elems)));
-}
-
-bool CopyOpUniversalCopyType::isStatic() const { return true; }
-
-Value CopyOpUniversalCopyType::rebuildStaticValue(OpBuilder &builder, Location loc,
-                                                  Value currentValue) const {
-  if (currentValue && isa<MakeCopyAtomOp>(currentValue.getDefiningOp()))
-    return nullptr;
-  return MakeCopyAtomOp::create(builder, loc, CopyAtomType::get(*this, getBitSize()), getBitSize());
-}
-
-Attribute CopyOpUniversalCopyType::getThrLayout() const { return FxLayout(FxC(1), FxC(1)); }
-
-Attribute CopyOpUniversalCopyType::getThrBitLayoutSrc() const {
-  return FxLayout(FxShape(FxC(1), FxC(getBitSize())), FxStride(FxC(1), FxC(1)));
-}
-Attribute CopyOpUniversalCopyType::getThrBitLayoutDst() const {
-  return FxLayout(FxShape(FxC(1), FxC(getBitSize())), FxStride(FxC(1), FxC(1)));
-}
-Attribute CopyOpUniversalCopyType::getThrBitLayoutRef() const {
-  return FxLayout(FxShape(FxC(1), FxC(getBitSize())), FxStride(FxC(1), FxC(1)));
 }
 
 bool CopyAtomType::isStatic() const {
@@ -429,66 +407,37 @@ Attribute CopyAtomType::getThrValLayoutRef() {
   return layoutRecast(builder, cast<LayoutAttr>(copyOp.getThrBitLayoutRef()), 1, getValBits());
 }
 
-bool MmaAtomUniversalFMAType::isStatic() const { return true; }
+bool MmaAtomType::isStatic() const {
+  auto mmaOp = dyn_cast<MmaOpTypeInterface>(getMmaOp());
+  if (!mmaOp)
+    return false;
+  return mmaOp.isStatic();
+}
 
-Value MmaAtomUniversalFMAType::rebuildStaticValue(OpBuilder &builder, Location loc,
-                                                  Value currentValue) const {
+Value MmaAtomType::rebuildStaticValue(OpBuilder &builder, Location loc, Value currentValue) const {
   if (currentValue && isa<MakeMmaAtomOp>(currentValue.getDefiningOp()))
     return nullptr;
   return MakeMmaAtomOp::create(builder, loc, Type(*this));
 }
 
-Attribute MmaAtomUniversalFMAType::getShapeMNK() const {
-  return IntTupleAttr::get(ArrayAttr::get(getContext(), {FxC(1), FxC(1), FxC(1)}));
+Attribute MmaAtomType::getThrLayout() const {
+  return cast<MmaOpTypeInterface>(getMmaOp()).getThrLayout();
 }
-
-Attribute MmaAtomUniversalFMAType::getThrLayout() const { return FxLayout(FxC(1), FxC(1)); }
-
-Type MmaAtomUniversalFMAType::getValTypeA() const { return getElemTy(); }
-Type MmaAtomUniversalFMAType::getValTypeB() const { return getElemTy(); }
-Type MmaAtomUniversalFMAType::getValTypeC() const { return getElemTy(); }
-Type MmaAtomUniversalFMAType::getValTypeD() const { return getElemTy(); }
-
-Attribute MmaAtomUniversalFMAType::getThrValLayoutA() const {
-  return FxLayout(FxShape(FxC(1), FxC(1)), FxStride(FxC(1), FxC(1)));
+Attribute MmaAtomType::getShapeMNK() const {
+  return cast<MmaOpTypeInterface>(getMmaOp()).getShapeMNK();
 }
-Attribute MmaAtomUniversalFMAType::getThrValLayoutB() const {
-  return FxLayout(FxShape(FxC(1), FxC(1)), FxStride(FxC(1), FxC(1)));
+Type MmaAtomType::getValTypeA() const { return cast<MmaOpTypeInterface>(getMmaOp()).getValTypeA(); }
+Type MmaAtomType::getValTypeB() const { return cast<MmaOpTypeInterface>(getMmaOp()).getValTypeB(); }
+Type MmaAtomType::getValTypeC() const { return cast<MmaOpTypeInterface>(getMmaOp()).getValTypeC(); }
+Type MmaAtomType::getValTypeD() const { return cast<MmaOpTypeInterface>(getMmaOp()).getValTypeD(); }
+Attribute MmaAtomType::getThrValLayoutA() const {
+  return cast<MmaOpTypeInterface>(getMmaOp()).getThrValLayoutA();
 }
-Attribute MmaAtomUniversalFMAType::getThrValLayoutC() const {
-  return FxLayout(FxShape(FxC(1), FxC(1)), FxStride(FxC(1), FxC(1)));
+Attribute MmaAtomType::getThrValLayoutB() const {
+  return cast<MmaOpTypeInterface>(getMmaOp()).getThrValLayoutB();
 }
-
-Type MmaAtomUniversalFMAType::parse(AsmParser &parser) {
-  Type elemTyA, elemTyB, elemTyC;
-  if (parser.parseLess())
-    return {};
-  int32_t m, n, k;
-  if (parseMNKDimensionList(parser, m, n, k))
-    return {};
-  if (m != 1 || n != 1 || k != 1) {
-    parser.emitError(parser.getCurrentLocation())
-        << "expected 1x1x1 dimensions for universal FMA, got " << m << "x" << n << "x" << k;
-    return {};
-  }
-  // Parse ", (elemTy, elemTy) -> elemTy>"
-  if (parser.parseComma() || parser.parseLParen() || parser.parseType(elemTyA) ||
-      parser.parseComma() || parser.parseType(elemTyB) || parser.parseRParen() ||
-      parser.parseArrow() || parser.parseType(elemTyC) || parser.parseGreater())
-    return {};
-  // For universal FMA, all element types should be the same
-  if (elemTyA != elemTyB || elemTyB != elemTyC) {
-    parser.emitError(parser.getCurrentLocation())
-        << "expected all element types to be the same for universal FMA";
-    return {};
-  }
-  return get(parser.getContext(), elemTyA);
-}
-
-void MmaAtomUniversalFMAType::print(AsmPrinter &printer) const {
-  printer << "<";
-  printMNKDimensionList(printer, 1, 1, 1);
-  printer << ", (" << getElemTy() << ", " << getElemTy() << ") -> " << getElemTy() << ">";
+Attribute MmaAtomType::getThrValLayoutC() const {
+  return cast<MmaOpTypeInterface>(getMmaOp()).getThrValLayoutC();
 }
 
 } // namespace mlir::fly

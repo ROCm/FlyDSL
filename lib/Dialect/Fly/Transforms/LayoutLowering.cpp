@@ -1656,7 +1656,7 @@ public:
     Value inputIter = makeViewOp.getIter();
     Value inputLayoutValue = makeViewOp.getLayout();
 
-    auto mmaAtom = dyn_cast<MmaAtomTypeInterface>(tiledMmaTy.getMmaAtom());
+    auto mmaAtom = dyn_cast<MmaAtomType>(tiledMmaTy.getMmaAtom());
     if (!mmaAtom)
       return failure();
 
@@ -1792,7 +1792,7 @@ public:
     if (!isNormalForm(cast<TypedValue<IntTupleType>>(shape)))
       return failure();
 
-    auto mmaAtom = dyn_cast<MmaAtomTypeInterface>(tiledMmaTy.getMmaAtom());
+    auto mmaAtom = dyn_cast<MmaAtomType>(tiledMmaTy.getMmaAtom());
     if (!mmaAtom)
       return failure();
 
@@ -1828,7 +1828,7 @@ public:
     if (!tiledMmaTy)
       return failure();
 
-    auto mmaAtom = dyn_cast<MmaAtomTypeInterface>(tiledMmaTy.getMmaAtom());
+    auto mmaAtom = dyn_cast<MmaAtomType>(tiledMmaTy.getMmaAtom());
     if (!mmaAtom)
       return failure();
 
@@ -1960,13 +1960,9 @@ public:
     auto *ctx = rewriter.getContext();
 
     Value mmaAtomVal = op.getMmaAtom();
-    MmaAtomTypeInterface mmaAtomTy;
     if (auto tiledMmaOp = mmaAtomVal.getDefiningOp<MakeTiledMmaOp>()) {
       mmaAtomVal = tiledMmaOp.getMmaAtom();
     }
-    mmaAtomTy = dyn_cast<MmaAtomTypeInterface>(mmaAtomVal.getType());
-    if (!mmaAtomTy)
-      return failure();
 
     Value d = op.getD();
     Value a = op.getA();
@@ -2018,10 +2014,10 @@ public:
     if (aRank == 2 && bRank == 2) {
       auto emitMmaCall2D = [&](int32_t m, int32_t n) {
         Value aSlice = SliceOp::create(rewriter, loc, a, getSliceCoord({m}));
-          Value bSlice = SliceOp::create(rewriter, loc, b, getSliceCoord({n}));
-          Value cSlice = SliceOp::create(rewriter, loc, c, getSliceCoord({m, n}));
-          Value dSlice = SliceOp::create(rewriter, loc, d, getSliceCoord({m, n}));
-          MmaAtomCall::create(rewriter, loc, mmaAtomVal, dSlice, aSlice, bSlice, cSlice);
+        Value bSlice = SliceOp::create(rewriter, loc, b, getSliceCoord({n}));
+        Value cSlice = SliceOp::create(rewriter, loc, c, getSliceCoord({m, n}));
+        Value dSlice = SliceOp::create(rewriter, loc, d, getSliceCoord({m, n}));
+        MmaAtomCall::create(rewriter, loc, mmaAtomVal, dSlice, aSlice, bSlice, cSlice);
       };
 
       int32_t totalIters = loop_m * loop_n;
@@ -2119,11 +2115,11 @@ public:
         bool &visited = mnVisited[m * loop_n + n];
         Value cSrc = visited ? d : c;
         visited = true;
-          Value aSlice = SliceOp::create(rewriter, loc, a, getSliceCoord({m, k}));
-            Value bSlice = SliceOp::create(rewriter, loc, b, getSliceCoord({n, k}));
-            Value cSlice = SliceOp::create(rewriter, loc, cSrc, getSliceCoord({m, n}));
-            Value dSlice = SliceOp::create(rewriter, loc, d, getSliceCoord({m, n}));
-            MmaAtomCall::create(rewriter, loc, mmaAtomVal, dSlice, aSlice, bSlice, cSlice);
+        Value aSlice = SliceOp::create(rewriter, loc, a, getSliceCoord({m, k}));
+        Value bSlice = SliceOp::create(rewriter, loc, b, getSliceCoord({n, k}));
+        Value cSlice = SliceOp::create(rewriter, loc, cSrc, getSliceCoord({m, n}));
+        Value dSlice = SliceOp::create(rewriter, loc, d, getSliceCoord({m, n}));
+        MmaAtomCall::create(rewriter, loc, mmaAtomVal, dSlice, aSlice, bSlice, cSlice);
       };
 
       Value traversalLayoutVal = op.getTraversalLayout();
@@ -2278,8 +2274,8 @@ public:
     for (int32_t i = 1; i < flatRank; ++i)
       restFlatElems.push_back(flatShape.at(i));
     IntTupleAttr restFlatShape = restFlatElems.size() == 1
-        ? cast<IntTupleAttr>(restFlatElems[0])
-        : IntTupleAttr::get(ArrayAttr::get(ctx, restFlatElems));
+                                     ? cast<IntTupleAttr>(restFlatElems[0])
+                                     : IntTupleAttr::get(ArrayAttr::get(ctx, restFlatElems));
 
     int64_t numChunks = intTupleProduct(attrBuilder, restFlatShape).getLeafAsInt().getValue();
 
@@ -2291,8 +2287,8 @@ public:
 
     for (int64_t i = 0; i < numChunks; ++i) {
       // Compute column-major coordinate over the rest flat dims.
-      IntTupleAttr restCoord = layoutIdx2CrdColMajor(
-          attrBuilder, attrBuilder.materializeConstantLeaf(i), restFlatShape);
+      IntTupleAttr restCoord =
+          layoutIdx2CrdColMajor(attrBuilder, attrBuilder.materializeConstantLeaf(i), restFlatShape);
 
       // Build full flat coordinate: (0, restCoord...) and unflatten to original shape structure.
       SmallVector<Attribute> flatCoordElems;
@@ -2306,13 +2302,14 @@ public:
       IntTupleAttr flatCoord = IntTupleAttr::get(ArrayAttr::get(ctx, flatCoordElems));
       IntTupleAttr coordAttr = intTupleUnflatten(attrBuilder, flatCoord, shapeAttr);
 
-      Value coord = MakeIntTupleOp::create(rewriter, loc, IntTupleType::get(coordAttr), ValueRange{});
+      Value coord =
+          MakeIntTupleOp::create(rewriter, loc, IntTupleType::get(coordAttr), ValueRange{});
       Value offset = Crd2IdxOp::create(rewriter, loc, coord, layout);
       Value ptr = AddOffsetOp::create(rewriter, loc, iter, offset);
       Value chunkVec = PtrLoadOp::create(rewriter, loc, chunkVecTy, ptr);
-      result = vector::InsertStridedSliceOp::create(
-                   rewriter, loc, chunkVec, result,
-                   ArrayRef<int64_t>{i * vecWidth}, ArrayRef<int64_t>{1})
+      result = vector::InsertStridedSliceOp::create(rewriter, loc, chunkVec, result,
+                                                    ArrayRef<int64_t>{i * vecWidth},
+                                                    ArrayRef<int64_t>{1})
                    .getResult();
     }
 
@@ -2364,14 +2361,14 @@ public:
     for (int32_t i = 1; i < flatRank; ++i)
       restFlatElems.push_back(flatShape.at(i));
     IntTupleAttr restFlatShape = restFlatElems.size() == 1
-        ? cast<IntTupleAttr>(restFlatElems[0])
-        : IntTupleAttr::get(ArrayAttr::get(ctx, restFlatElems));
+                                     ? cast<IntTupleAttr>(restFlatElems[0])
+                                     : IntTupleAttr::get(ArrayAttr::get(ctx, restFlatElems));
     int64_t numChunks = intTupleProduct(attrBuilder, restFlatShape).getLeafAsInt().getValue();
 
     for (int64_t i = 0; i < numChunks; ++i) {
       // Compute column-major coordinate over the rest flat dims.
-      IntTupleAttr restCoord = layoutIdx2CrdColMajor(
-          attrBuilder, attrBuilder.materializeConstantLeaf(i), restFlatShape);
+      IntTupleAttr restCoord =
+          layoutIdx2CrdColMajor(attrBuilder, attrBuilder.materializeConstantLeaf(i), restFlatShape);
 
       // Build full flat coordinate: (0, restCoord...) and unflatten to original shape structure.
       SmallVector<Attribute> flatCoordElems;
@@ -2385,14 +2382,14 @@ public:
       IntTupleAttr flatCoord = IntTupleAttr::get(ArrayAttr::get(ctx, flatCoordElems));
       IntTupleAttr coordAttr = intTupleUnflatten(attrBuilder, flatCoord, shapeAttr);
 
-      Value coord = MakeIntTupleOp::create(rewriter, loc, IntTupleType::get(coordAttr), ValueRange{});
+      Value coord =
+          MakeIntTupleOp::create(rewriter, loc, IntTupleType::get(coordAttr), ValueRange{});
       Value offset = Crd2IdxOp::create(rewriter, loc, coord, layout);
       Value ptr = AddOffsetOp::create(rewriter, loc, iter, offset);
-      Value chunkVec = vector::ExtractStridedSliceOp::create(
-                           rewriter, loc, vec,
-                           ArrayRef<int64_t>{i * vecWidth},
-                           ArrayRef<int64_t>{vecWidth}, ArrayRef<int64_t>{1})
-                           .getResult();
+      Value chunkVec =
+          vector::ExtractStridedSliceOp::create(rewriter, loc, vec, ArrayRef<int64_t>{i * vecWidth},
+                                                ArrayRef<int64_t>{vecWidth}, ArrayRef<int64_t>{1})
+              .getResult();
       PtrStoreOp::create(rewriter, loc, chunkVec, ptr);
     }
 

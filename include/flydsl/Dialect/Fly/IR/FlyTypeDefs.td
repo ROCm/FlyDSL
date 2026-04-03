@@ -263,6 +263,33 @@ def Fly_CopyAtom : Fly_Type<"CopyAtom", "copy_atom", [
   ];
 }
 
+def Fly_MmaAtom : Fly_Type<"MmaAtom", "mma_atom", [
+  DeclareTypeInterfaceMethods<Fly_MayStaticTypeInterface>
+]> {
+  let parameters = (ins
+    "Type":$mmaOp
+  );
+  let assemblyFormat = "`<` $mmaOp `>`";
+
+  let extraClassDeclaration = [{
+    ::mlir::Attribute getThrLayout() const;
+    ::mlir::Attribute getShapeMNK() const;
+    ::mlir::Type getValTypeA() const;
+    ::mlir::Type getValTypeB() const;
+    ::mlir::Type getValTypeC() const;
+    ::mlir::Type getValTypeD() const;
+    ::mlir::Attribute getThrValLayoutA() const;
+    ::mlir::Attribute getThrValLayoutB() const;
+    ::mlir::Attribute getThrValLayoutC() const;
+  }];
+
+  let builders = [
+    TypeBuilderWithInferredContext<(ins "Type":$mmaOp), [{
+      return $_get(mmaOp.getContext(), mmaOp);
+    }]>
+  ];
+}
+
 def Fly_CopyOpUniversalCopy : Fly_Type<"CopyOpUniversalCopy", "universal_copy", [
   DeclareTypeInterfaceMethods<Fly_MayStaticTypeInterface>,
   DeclareTypeInterfaceMethods<Fly_CopyOpTypeInterface>
@@ -273,9 +300,9 @@ def Fly_CopyOpUniversalCopy : Fly_Type<"CopyOpUniversalCopy", "universal_copy", 
   let assemblyFormat = "`<` $bitSize `>`";
 }
 
-def Fly_MmaAtomUniversalFMA : Fly_Type<"MmaAtomUniversalFMA", "universal_fma", [
+def Fly_MmaOpUniversalFMA : Fly_Type<"MmaOpUniversalFMA", "universal_fma", [
   DeclareTypeInterfaceMethods<Fly_MayStaticTypeInterface>,
-  DeclareTypeInterfaceMethods<Fly_MmaAtomTypeInterface>
+  DeclareTypeInterfaceMethods<Fly_MmaOpTypeInterface>
 ]> {
   let parameters = (ins "Type":$elemTy);
 

@@ -16,8 +16,9 @@ from .._mlir.dialects.fly import (
     IntTupleType,
     LayoutType,
     MemRefType,
-    MmaAtomUniversalFMAType,
+    MmaAtomType,
     MmaOperand,
+    MmaOpUniversalFMAType,
     PointerType,
     SwizzleType,
     TiledCopyType,
@@ -47,10 +48,11 @@ __all__ = [
     "MemRefType",
     "CoordTensorType",
     "CopyAtomType",
+    "MmaAtomType",
     "TiledCopyType",
     "TiledMmaType",
     "CopyOpUniversalCopyType",
-    "MmaAtomUniversalFMAType",
+    "MmaOpUniversalFMAType",
     # UniversalOps
     "UniversalCopy",
     "UniversalCopy8b",
@@ -174,7 +176,7 @@ UniversalCopy32b = lambda: CopyOpUniversalCopyType.get(32)
 UniversalCopy64b = lambda: CopyOpUniversalCopyType.get(64)
 UniversalCopy128b = lambda: CopyOpUniversalCopyType.get(128)
 
-UniversalFMA = lambda ty: MmaAtomUniversalFMAType.get(ty.ir_type)
+UniversalFMA = lambda ty: MmaOpUniversalFMAType.get(ty.ir_type)
 
 
 def const_expr(x):

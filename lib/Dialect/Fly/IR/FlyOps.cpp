@@ -1554,11 +1554,11 @@ FLY_INFER_RETURN_TYPES(TiledMmaPartitionOp) {
                              "TiledMmaPartitionOp: expected IntTupleType for operand #2, got ",
                              operands[2].getType());
 
-  auto mmaAtom = dyn_cast<MmaAtomTypeInterface>(tiledMmaTy.getMmaAtom());
+  auto mmaAtom = dyn_cast<MmaAtomType>(tiledMmaTy.getMmaAtom());
   if (!mmaAtom)
     return emitOptionalError(
         location,
-        "TiledMmaPartitionOp: TiledMmaType's mma atom does not implement MmaAtomTypeInterface");
+        "TiledMmaPartitionOp: TiledMmaType's mma atom is not a MmaAtomType");
 
   LayoutAttr atomLayout = tiledMmaTy.getAtomLayout().getAttr();
   TileAttr permutationMNK = tiledMmaTy.getPermutation().getAttr();
@@ -1602,10 +1602,10 @@ FLY_INFER_RETURN_TYPES(TiledMmaPartitionShapeOp) {
                              "TiledMmaPartitionShapeOp: expected IntTupleType for operand #1, got ",
                              operands[1].getType());
 
-  auto mmaAtom = dyn_cast<MmaAtomTypeInterface>(tiledMmaTy.getMmaAtom());
+  auto mmaAtom = dyn_cast<MmaAtomType>(tiledMmaTy.getMmaAtom());
   if (!mmaAtom)
-    return emitOptionalError(location, "TiledMmaPartitionShapeOp: TiledMmaType's mma atom does not "
-                                       "implement MmaAtomTypeInterface");
+    return emitOptionalError(location, "TiledMmaPartitionShapeOp: TiledMmaType's mma atom is not "
+                                       "a MmaAtomType");
 
   LayoutAttr atomLayout = tiledMmaTy.getAtomLayout().getAttr();
   TileAttr permutationMNK = tiledMmaTy.getPermutation().getAttr();
@@ -1641,11 +1641,11 @@ FLY_INFER_RETURN_TYPES(MmaMakeFragmentOp) {
                              "MmaMakeFragmentOp: expected MemRefType for operand #1, got ",
                              operands[1].getType());
 
-  auto mmaAtom = dyn_cast<MmaAtomTypeInterface>(tiledMmaTy.getMmaAtom());
+  auto mmaAtom = dyn_cast<MmaAtomType>(tiledMmaTy.getMmaAtom());
   if (!mmaAtom)
     return emitOptionalError(
         location,
-        "MmaMakeFragmentOp: TiledMmaType's mma atom does not implement MmaAtomTypeInterface");
+        "MmaMakeFragmentOp: TiledMmaType's mma atom is not a MmaAtomType");
 
   Type elemTy;
   switch (operandId) {
