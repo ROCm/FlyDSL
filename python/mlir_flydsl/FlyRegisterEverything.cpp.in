@@ -6,7 +6,7 @@
 #include "mlir/Bindings/Python/NanobindAdaptors.h"
 
 #include "flydsl-c/FlyDialect.h"
-#include "flydsl-c/FlyROCDLDialect.h"
+@FLYDSL_REGISTER_EXTRA_INCLUDES@
 
 NB_MODULE(_mlirRegisterEverything, m) {
   m.doc() = "MLIR All Upstream Dialects, Translations and Passes Registration";
@@ -16,14 +16,12 @@ NB_MODULE(_mlirRegisterEverything, m) {
 
     MlirDialectHandle flyHandle = mlirGetDialectHandle__fly__();
     mlirDialectHandleInsertDialect(flyHandle, registry);
-    MlirDialectHandle flyROCDLHandle = mlirGetDialectHandle__fly_rocdl__();
-    mlirDialectHandleInsertDialect(flyROCDLHandle, registry);
+@FLYDSL_REGISTER_TARGET_DIALECT_HANDLES@
   });
   m.def("register_llvm_translations",
         [](MlirContext context) { mlirRegisterAllLLVMTranslations(context); });
 
   mlirRegisterAllPasses();
   mlirRegisterFlyPasses();
-  mlirRegisterFlyToROCDLConversionPass();
-  mlirRegisterFlyROCDLClusterAttrPass();
+@FLYDSL_REGISTER_TARGET_PASSES@
 }

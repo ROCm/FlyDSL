@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from typing import Dict, Optional, Type
 
+from ... import _install_limits
 from ...utils import env
 from .base import DeviceRuntime
 from .rocm import RocmDeviceRuntime
@@ -115,6 +116,11 @@ def ensure_compile_runtime_pairing_from_env(compile_backend_id: str) -> None:
     :class:`DeviceRuntime`. Suitable for compiler paths (e.g. ``COMPILE_ONLY``)
     where initializing the runtime is unnecessary.
     """
+    _install_limits.ensure_compile_backend_in_build(compile_backend_id)
+    if _runtime_cls_override is None:
+        _install_limits.ensure_runtime_kind_in_build(
+            (env.runtime.kind or "rocm").strip().lower()
+        )
     expected = _expected_runtime_kind_for_compile_backend(compile_backend_id)
     actual = _selected_runtime_kind_from_env()
     if actual != expected:
