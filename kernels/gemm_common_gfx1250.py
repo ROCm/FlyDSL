@@ -82,6 +82,17 @@ def extract_lds_base_idx(smem_ptr):
     return _memref.extract_aligned_pointer_as_index(raw_memref)
 
 
+def _raw_lds_ptr(lds_base_idx, byte_offset):
+    """Materialize an LLVM LDS pointer from a pre-extracted byte base."""
+    from flydsl._mlir.dialects import llvm as _llvm
+    from flydsl.expr.arith import ArithValue as _AV
+
+    lds_ptr_ty = ir.Type.parse("!llvm.ptr<3>")
+    total_byte = _AV(lds_base_idx) + byte_offset
+    addr_i32 = _raw(arith.index_cast(T.i32, total_byte))
+    return _llvm.inttoptr(lds_ptr_ty, addr_i32)
+
+
 def lds_load_b128_raw(lds_base_idx, byte_offset):
     """Load 16 bytes from LDS using a pre-extracted base index (raw LLVM).
 
@@ -89,14 +100,16 @@ def lds_load_b128_raw(lds_base_idx, byte_offset):
         lds_base_idx: Index value from ``extract_lds_base_idx``.
         byte_offset: Byte offset (index-type) relative to the base.
     """
-    from flydsl._mlir.dialects import llvm as _llvm
-    from flydsl.expr.arith import ArithValue as _AV
-
-    lds_ptr_ty = ir.Type.parse("!llvm.ptr<3>")
-    total_byte = _AV(lds_base_idx) + byte_offset
-    addr_i32 = _raw(arith.index_cast(T.i32, total_byte))
-    ptr_val = _llvm.inttoptr(lds_ptr_ty, addr_i32)
+    ptr_val = _raw_lds_ptr(lds_base_idx, byte_offset)
     return llvm_dialect.load(ir.VectorType.get([4], ir.IntegerType.get_signless(32)), ptr_val)
+
+
+def lds_transpose_load_raw(result_type, lds_base_idx, byte_offset):
+    """Transpose-load 16 bytes from LDS using a pre-extracted base index."""
+    from flydsl._mlir.dialects import rocdl as _rocdl
+
+    ptr_val = _raw_lds_ptr(lds_base_idx, byte_offset)
+    return _rocdl.ds_load_tr16_b128(result_type, ptr_val)
 
 
 def lds_store_b128_raw(lds_base_idx, byte_offset, data):
@@ -107,13 +120,7 @@ def lds_store_b128_raw(lds_base_idx, byte_offset, data):
         byte_offset: Byte offset (index-type) relative to the base.
         data: Raw 128-bit LLVM value to store.
     """
-    from flydsl._mlir.dialects import llvm as _llvm
-    from flydsl.expr.arith import ArithValue as _AV
-
-    lds_ptr_ty = ir.Type.parse("!llvm.ptr<3>")
-    total_byte = _AV(lds_base_idx) + byte_offset
-    addr_i32 = _raw(arith.index_cast(T.i32, total_byte))
-    ptr_val = _llvm.inttoptr(lds_ptr_ty, addr_i32)
+    ptr_val = _raw_lds_ptr(lds_base_idx, byte_offset)
     llvm_dialect.store(data, ptr_val)
 
 
@@ -208,6 +215,7 @@ __all__ = [
     # Raw LLVM path
     "extract_lds_base_idx",
     "lds_load_b128_raw",
+    "lds_transpose_load_raw",
     "lds_store_b128_raw",
     # Pipeline
     "pipeline_fence",

@@ -160,6 +160,42 @@ def test_wmma_gemm_tdm_mcast(in_dtype, M, N, K, tile_m, tile_n, tile_k,
     )
 
 
+@pytest.mark.parametrize(
+    "in_dtype, out_dtype",
+    [
+        ("fp16", None),
+        ("bf16", None),
+        ("fp16", "f32"),
+    ],
+)
+def test_wmma_gemm_tdm_buffer_store_variants(in_dtype, out_dtype):
+    """Cover the delayed epilogue address-precompute path."""
+    test_wmma_gemm_tdm(
+        in_dtype,
+        256, 256, 512,
+        64, 256, 128,
+        num_buffers=2,
+        m_warp=2, n_warp=4,
+        l2_prefetch_distance=2,
+        out_dtype=out_dtype,
+        use_tdm_store=False,
+    )
+
+
+def test_wmma_gemm_tdm_mcast_tail():
+    """Exercise cluster mode with an even number of K tiles (tail includes a load)."""
+    test_wmma_gemm_tdm(
+        "fp16",
+        512, 512, 512,
+        128, 256, 128,
+        num_buffers=2,
+        m_warp=2, n_warp=4,
+        l2_prefetch_distance=2,
+        cluster_m=2,
+        cluster_n=2,
+    )
+
+
 if __name__ == "__main__":
     import argparse
 
