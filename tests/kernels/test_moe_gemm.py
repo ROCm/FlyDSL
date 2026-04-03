@@ -328,6 +328,7 @@ def run_moe_stage1(
     # Optional override for pre-built groupwise scale tensor [E, K//group_size, 2*inter_dim] (Opt 0 layout).
     scale_w1_groups_in: Optional[torch.Tensor] = None,
     use_flat_layout: bool = False,
+    use_cvt_pk_bf16: bool = False,
 ):
     assert model_dim % 64 == 0
     assert model_dim % tile_k == 0
@@ -537,6 +538,7 @@ def run_moe_stage1(
         doweight_stage1=bool(doweight_stage1),
         use_cshuffle_epilog=False,
         use_flat_layout=use_flat_layout,
+        use_cvt_pk_bf16=use_cvt_pk_bf16,
     )
 
     def _s1_args(o, x, w, sx, sw, st, eids, sw_sorted):
@@ -741,6 +743,7 @@ def run_moe_stage2(
     # Optional override for pre-built groupwise scale tensor [E, inter_dim//group_size, model_dim] (Opt 0 layout).
     scale_w2_groups_in: Optional[torch.Tensor] = None,
     use_flat_layout: bool = True,
+    use_cvt_pk_bf16: bool = False,
 ):
     """MoE stage2 (gemm2): out2[t] = sum_{slot} ( out1[t,slot] @ W2[expert]^T ) with optional routed weight."""
 
@@ -1016,6 +1019,7 @@ def run_moe_stage2(
     # Pass use_flat_layout only to compile_moe_gemm2 (not to reduce-mode wrappers).
     if compile_fn is compile_moe_gemm2:
         _compile_kw["use_flat_layout"] = use_flat_layout
+        _compile_kw["use_cvt_pk_bf16"] = use_cvt_pk_bf16
     exe = compile_fn(**_compile_kw)
     is_reduce_exe = (getattr(exe, "mode", None) == MoeGemm2Mode.REDUCE) or bool(use_reduce)
 

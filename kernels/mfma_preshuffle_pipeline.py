@@ -207,6 +207,7 @@ def extract_and_unpack_b_flat_w4a16(
     *,
     scale_val=None,
     use_gfx950_cvt: bool = False,
+    use_cvt_pk_bf16: bool = False,
 ):
     """Extract K64 step ``ku`` from flat-loaded B and unpack to 2x i64 (bf16).
 
@@ -219,8 +220,13 @@ def extract_and_unpack_b_flat_w4a16(
     load_idx = ku // 4
     elem_idx = ku % 4
     packed_i32 = vector.extract(b_raw_list[load_idx], static_position=[elem_idx], dynamic_position=[])
+    # NOTE: use_cvt_pk_bf16 is forced off for the flat layout path due to a
+    # backend miscompilation when v_cvt_pk_bf16_f32 is used within the deferred
+    # dequant pipeline (NaN/Inf output).  The bitmanip f32→bf16 truncation is
+    # equivalent for int4 dequant values and avoids the issue.
     return unpack_b_w4a16(
-        packed_i32, arith, vector, scale_val=scale_val, use_gfx950_cvt=use_gfx950_cvt
+        packed_i32, arith, vector, scale_val=scale_val, use_gfx950_cvt=use_gfx950_cvt,
+        use_cvt_pk_bf16=False,
     )
 
 
@@ -360,7 +366,7 @@ def load_b_raw_w4a16(
     return packed32
 
 
-def _int4_to_bf16x4_i64_gfx950(packed32, nibble_offsets, arith, vector, scale_val=None):
+def _int4_to_bf16x4_i64_gfx950(packed32, nibble_offsets, arith, vector, scale_val=None, use_cvt_pk_bf16=False):
     """Convert 4 int4 nibbles to 4 bf16 packed as i64 using gfx950 instructions.
 
     Uses v_cvt_off_f32_i4_sdwa with byte_sel to avoid per-nibble shifts.
@@ -392,32 +398,38 @@ def _int4_to_bf16x4_i64_gfx950(packed32, nibble_offsets, arith, vector, scale_va
         v = _MulFOp(v, raw_scale).result
         f32_vals.append(v)
 
-    c16_shift = fx.Int32(16)
-    c_ffff0000 = fx.Int32(0xFFFF0000)
-    bf16_vals = []
-    for v in f32_vals:
-        bits_i32 = arith.bitcast(T.i32, _av(v))
-        bf16_vals.append(bits_i32)
-    i32_lo = (bf16_vals[0] >> c16_shift) | (bf16_vals[1] & c_ffff0000)
-    i32_hi = (bf16_vals[2] >> c16_shift) | (bf16_vals[3] & c_ffff0000)
+    if use_cvt_pk_bf16:
+        # v_cvt_pk_bf16_f32: pack two f32 → 2xbf16 in i32 (round-to-nearest-even)
+        i32_lo = _av(rocdl.cvt_pk_bf16_f32(f32_vals[0], f32_vals[1]))
+        i32_hi = _av(rocdl.cvt_pk_bf16_f32(f32_vals[2], f32_vals[3]))
+    else:
+        c16_shift = fx.Int32(16)
+        c_ffff0000 = fx.Int32(0xFFFF0000)
+        bf16_vals = []
+        for v in f32_vals:
+            bits_i32 = arith.bitcast(T.i32, _av(v))
+            bf16_vals.append(bits_i32)
+        i32_lo = (bf16_vals[0] >> c16_shift) | (bf16_vals[1] & c_ffff0000)
+        i32_hi = (bf16_vals[2] >> c16_shift) | (bf16_vals[3] & c_ffff0000)
 
     v2 = vector.from_elements(T.vec(2, T.i32), [i32_lo, i32_hi])
     v64 = vector.bitcast(T.vec(1, T.i64), v2)
     return vector.extract(v64, static_position=[0], dynamic_position=[])
 
 
-def unpack_b_w4a16(packed32, arith, vector, scale_val=None, use_gfx950_cvt=False):
+def unpack_b_w4a16(packed32, arith, vector, scale_val=None, use_gfx950_cvt=False, use_cvt_pk_bf16=False):
     """Phase 2 of W4A16 B load: unpack int4->int8 + convert int8->bf16.
 
     Takes raw packed32 from load_b_raw_w4a16 and produces (b0, b1) --
     two i64 values each containing 4 bf16 for one MFMA.
 
-    When use_gfx950_cvt=True, uses v_cvt_off_f32_i4 + v_cvt_pk_bf16_f32
-    for ~2x fewer VALU instructions.
+    When use_gfx950_cvt=True, uses v_cvt_off_f32_i4 for int4->f32.
+    When use_cvt_pk_bf16=True, uses v_cvt_pk_bf16_f32 for f32->bf16 packing
+    instead of bit manipulation (truncation).
     """
     if use_gfx950_cvt:
-        b0 = _int4_to_bf16x4_i64_gfx950(packed32, [0, 2, 4, 6], arith, vector, scale_val)
-        b1 = _int4_to_bf16x4_i64_gfx950(packed32, [1, 3, 5, 7], arith, vector, scale_val)
+        b0 = _int4_to_bf16x4_i64_gfx950(packed32, [0, 2, 4, 6], arith, vector, scale_val, use_cvt_pk_bf16=use_cvt_pk_bf16)
+        b1 = _int4_to_bf16x4_i64_gfx950(packed32, [1, 3, 5, 7], arith, vector, scale_val, use_cvt_pk_bf16=use_cvt_pk_bf16)
         return (b0, b1)
     even, odd = _unpack_int4_to_int8_pair(packed32)
     b0 = _i8x4_in_i32_to_bf16x4_i64(even, arith, vector, scale_val=scale_val)
@@ -763,9 +775,9 @@ def load_b_raw_w4a16_groupwise(
     return (packed32, scale_val)
 
 
-def unpack_b_w4a16_groupwise(packed32, scale_val, arith, vector, use_gfx950_cvt=False):
+def unpack_b_w4a16_groupwise(packed32, scale_val, arith, vector, use_gfx950_cvt=False, use_cvt_pk_bf16=False):
     """Phase 2 of W4A16 groupwise: unpack + scale + convert to bf16."""
-    return unpack_b_w4a16(packed32, arith, vector, scale_val=scale_val, use_gfx950_cvt=use_gfx950_cvt)
+    return unpack_b_w4a16(packed32, arith, vector, scale_val=scale_val, use_gfx950_cvt=use_gfx950_cvt, use_cvt_pk_bf16=use_cvt_pk_bf16)
 
 
 # ---------------------------------------------------------------------------

@@ -117,6 +117,7 @@ def compile_moe_gemm1(
     out_dtype: str = "f16",
     use_cshuffle_epilog: bool | None = None,
     use_flat_layout: bool = False,
+    use_cvt_pk_bf16: bool = False,
 ):
     """Compile stage1 kernel (`moe_gemm1`) and return the compiled executable.
 
@@ -721,7 +722,7 @@ def compile_moe_gemm1(
                             packs0, packs1 = [], []
                             for ni in range_constexpr(num_acc_n):
                                 packed32, scale_val = raw_data[ku][ni]
-                                b0, b1 = unpack_b_w4a16_groupwise(packed32, scale_val, arith, vector, use_gfx950_cvt=use_gfx950_cvt)
+                                b0, b1 = unpack_b_w4a16_groupwise(packed32, scale_val, arith, vector, use_gfx950_cvt=use_gfx950_cvt, use_cvt_pk_bf16=use_cvt_pk_bf16)
                                 packs0.append(b0)
                                 packs1.append(b1)
                             b_tile.append((packs0, packs1))
@@ -746,7 +747,7 @@ def compile_moe_gemm1(
                         for ku in range_constexpr(k_unroll):
                             packs0, packs1 = [], []
                             for ni in range_constexpr(num_acc_n):
-                                b0, b1 = unpack_b_w4a16(raw_data[ku][ni], arith, vector, use_gfx950_cvt=use_gfx950_cvt)
+                                b0, b1 = unpack_b_w4a16(raw_data[ku][ni], arith, vector, use_gfx950_cvt=use_gfx950_cvt, use_cvt_pk_bf16=use_cvt_pk_bf16)
                                 packs0.append(b0)
                                 packs1.append(b1)
                             b_tile.append((packs0, packs1))
@@ -1202,6 +1203,7 @@ def compile_moe_gemm1(
                                 b0, b1 = extract_and_unpack_b_flat_w4a16(
                                     b_raw[ni], ku, arith, vector,
                                     scale_val=sv, use_gfx950_cvt=use_gfx950_cvt,
+                                    use_cvt_pk_bf16=use_cvt_pk_bf16,
                                 )
                                 packs0.append(b0)
                                 packs1.append(b1)
@@ -1650,6 +1652,7 @@ def compile_moe_gemm2(
     use_cshuffle_epilog: bool | None = None,
     accumulate: bool = True,
     use_flat_layout: bool = True,
+    use_cvt_pk_bf16: bool = False,
 ):
     """Compile stage2 kernel (`moe_gemm2`) and return the compiled executable.
 
@@ -2264,7 +2267,7 @@ def compile_moe_gemm2(
                             packs0, packs1 = [], []
                             for ni in range_constexpr(num_acc_n):
                                 packed32, scale_val = raw_data[ku][ni]
-                                b0, b1 = unpack_b_w4a16_groupwise(packed32, scale_val, arith, vector, use_gfx950_cvt=use_gfx950_cvt)
+                                b0, b1 = unpack_b_w4a16_groupwise(packed32, scale_val, arith, vector, use_gfx950_cvt=use_gfx950_cvt, use_cvt_pk_bf16=use_cvt_pk_bf16)
                                 packs0.append(b0)
                                 packs1.append(b1)
                             b_tile.append((packs0, packs1))
@@ -2289,7 +2292,7 @@ def compile_moe_gemm2(
                         for ku in range_constexpr(k_unroll):
                             packs0, packs1 = [], []
                             for ni in range_constexpr(num_acc_n):
-                                b0, b1 = unpack_b_w4a16(raw_data[ku][ni], arith, vector, use_gfx950_cvt=use_gfx950_cvt)
+                                b0, b1 = unpack_b_w4a16(raw_data[ku][ni], arith, vector, use_gfx950_cvt=use_gfx950_cvt, use_cvt_pk_bf16=use_cvt_pk_bf16)
                                 packs0.append(b0)
                                 packs1.append(b1)
                             b_tile.append((packs0, packs1))
@@ -2781,6 +2784,7 @@ def compile_moe_gemm2(
                                 b0, b1 = extract_and_unpack_b_flat_w4a16(
                                     b_raw[ni], ku, arith, vector,
                                     scale_val=sv, use_gfx950_cvt=use_gfx950_cvt,
+                                    use_cvt_pk_bf16=use_cvt_pk_bf16,
                                 )
                                 packs0.append(b0)
                                 packs1.append(b1)
