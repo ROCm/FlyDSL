@@ -170,7 +170,7 @@ def tiledMma(
     tiled_mma = fx.make_tiled_mma(
         fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 16, fx.Float16)),
         fx.make_layout((1, 4, 1), (0, 1, 0)),
-        fx.make_tile(16, 64, fx.make_layout((4, 4, 2), (1, 8, 4))),
+        fx.make_tile(None, None, fx.make_layout((4, 4, 2), (1, 8, 4))),
     )
 
     gemm_kernel(A, preshuffle_B, C, tiled_mma, tiled_copy_g2s_A).launch(

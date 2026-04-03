@@ -489,10 +489,4 @@ def Fly_ExtractAlignedPointerAsIndexOp : Fly_Op<"extract_aligned_pointer_as_inde
   let assemblyFormat = "$source attr-dict `:` type($source) `->` type($result)";
 }
 
-// TODO: TileAttr is always static, change to StaticOp
-def Fly_MakeTileOp: Fly_Op<"make_tile", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
-  let arguments = (ins Variadic<AnyTypeOf<[Fly_IntTuple, Fly_Layout]>>:$modes);
-  let results = (outs Fly_Tile:$result);
-}
-
 #endif // FLY_OPS
