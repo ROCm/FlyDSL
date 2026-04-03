@@ -6,9 +6,6 @@
 #include "mlir/IR/DialectImplementation.h"
 
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
-#include "flydsl/Dialect/Fly/Utils/BufferFatPtr.h"
-#include "flydsl/Dialect/Fly/Utils/LayoutUtils.h"
-
 #include "flydsl/Dialect/Fly/Utils/ThrValLayoutMacro.h.inc"
 
 namespace mlir::fly {
