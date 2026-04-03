@@ -79,6 +79,15 @@ def _waitcnt_lgkm0_vm_n(n):
     rocdl.s_waitcnt(val)
 
 
+# ---- Scheduling barrier constants (matching HipKitten masks) ----
+MASK_MFMA = 0x008
+MASK_VALU = 0x002
+MASK_EXP  = 0x400
+
+# ---- Lazy rescaling threshold (from flash-attention v3 / Dao-AILab) ----
+RESCALE_THRESHOLD = 8.0
+
+
 
 def build_flash_attn_func_module_primary(
     num_heads,
@@ -309,6 +318,7 @@ def build_flash_attn_func_module_primary(
         lane_mod_32 = lane % 32
         lane_div_32 = lane // 32  # 0/1
 
+
         # ---- ds_read_b64_tr_b16 lane decomposition ----
         # Hardware does 4×4 transpose within blocks of 16 lanes.
         # tr_k_group selects which of 4 K-rows within the block,
@@ -373,34 +383,28 @@ def build_flash_attn_func_module_primary(
             return _gep_load(base_ptr, base_idx, mfma_pack_type)
 
 
+        def _cvt_pk_bf16_f32(a_f32, b_f32):
+            """Pack 2 f32 → 1 i32 (bf16x2) via v_cvt_pk_bf16_f32 inline asm.
+            HK pattern: 1 instruction vs 3 (and+lshr+or) for bitwise truncation."""
+            _i32_ty = T.i32
+            result = _llvm.InlineAsmOp(
+                _i32_ty, [a_f32, b_f32],
+                "v_cvt_pk_bf16_f32 $0, $1, $2", "=v,v,v",
+                has_side_effects=False, is_align_stack=False).result
+            return result
+
         def bf16_trunc_pack_v4(f32_vals):
-            """Pack 4 f32 values into v4bf16 via bitwise truncation (upper 16 bits).
-            ~2 fewer instructions/element vs arith.TruncFOp round-to-nearest."""
+            """Pack 4 f32 → v4bf16 via v_cvt_pk_bf16_f32."""
             _v2i32 = T.vec(2, T.i32)
-            _c16 = arith.constant(16, type=T.i32)
-            _cmask = arith.constant(0xFFFF0000, type=T.i32)
-            a0 = arith.ArithValue(f32_vals[0]).bitcast(T.i32)
-            b0 = arith.ArithValue(f32_vals[1]).bitcast(T.i32)
-            p0 = arith.OrIOp(arith.AndIOp(b0, _cmask).result,
-                             arith.ShRUIOp(a0, _c16).result).result
-            a1 = arith.ArithValue(f32_vals[2]).bitcast(T.i32)
-            b1 = arith.ArithValue(f32_vals[3]).bitcast(T.i32)
-            p1 = arith.OrIOp(arith.AndIOp(b1, _cmask).result,
-                             arith.ShRUIOp(a1, _c16).result).result
+            p0 = _cvt_pk_bf16_f32(f32_vals[0], f32_vals[1])
+            p1 = _cvt_pk_bf16_f32(f32_vals[2], f32_vals[3])
             return vector.bitcast(v4f16_type, vector.from_elements(_v2i32, [p0, p1]))
 
         def bf16_trunc_pack_v8(f32_vals):
-            """Pack 8 f32 values into v8bf16 via bitwise truncation (upper 16 bits)."""
+            """Pack 8 f32 → v8bf16 via v_cvt_pk_bf16_f32."""
             _v4i32 = T.vec(4, T.i32)
-            _c16 = arith.constant(16, type=T.i32)
-            _cmask = arith.constant(0xFFFF0000, type=T.i32)
-            pairs = []
-            for j in range_constexpr(4):
-                a = arith.ArithValue(f32_vals[j * 2]).bitcast(T.i32)
-                b = arith.ArithValue(f32_vals[j * 2 + 1]).bitcast(T.i32)
-                p = arith.OrIOp(arith.AndIOp(b, _cmask).result,
-                                arith.ShRUIOp(a, _c16).result).result
-                pairs.append(p)
+            pairs = [_cvt_pk_bf16_f32(f32_vals[j*2], f32_vals[j*2+1])
+                     for j in range_constexpr(4)]
             return vector.bitcast(v8f16_type, vector.from_elements(_v4i32, pairs))
 
         def k_buf_base(buf_id):
@@ -536,12 +540,15 @@ def build_flash_attn_func_module_primary(
         c_one_f = arith.constant(1.0, type=T.f32)
         c_sm_scale_log2e = arith.constant(sm_scale * _LOG2E, type=T.f32)
         c_zero_v16f32 = arith.constant_vector(0.0, v16f32_type)
+        c_rescale_threshold = arith.constant(RESCALE_THRESHOLD, type=T.f32)
+        c_all_ones_i64 = arith.constant(-1, type=T.i64)
         width_i32 = arith.constant(WARP_SIZE, type=T.i32)
         shuf_32_i32 = arith.constant(32, type=T.i32)
         c4_i32 = arith.constant(4, type=T.i32)
         lane_i32 = arith.index_cast(T.i32, lane)
         lane_xor_32_i32 = arith.XOrIOp(lane_i32, shuf_32_i32).result
         lane_xor_32_byte = arith.MulIOp(lane_xor_32_i32, c4_i32).result
+
 
         def reduction_peer(v_f32):
             if REDUCE_MODE == "ds_bpermute":
@@ -605,20 +612,21 @@ def build_flash_attn_func_module_primary(
                 arith.CmpIPredicate.ugt,
                 kv_i32 + fx.Int32(BLOCK_N - 1),
                 arith.index_cast(T.i32, q_start))
-            _mask_if = scf.IfOp(tile_needs_mask, [T.f32] * 32, has_else=True)
+            # Store defaults into pre-allocated slots
+            for r in range_constexpr(16):
+                _llvm.StoreOp(s_raw_lo[r], _cond_slot_slo[r])
+                _llvm.StoreOp(s_raw_hi[r], _cond_slot_shi[r])
+            _mask_if = scf.IfOp(tile_needs_mask, [], has_else=False)
             with ir.InsertionPoint(_mask_if.then_block):
-                _m_lo = []; _m_hi = []
                 for r in range_constexpr(16):
                     kv_col = kv_i32 + ld32_i32 * fx.Int32(4) + fx.Int32((r % 4) + (r // 4) * 8)
                     is_lo = arith.cmpi(arith.CmpIPredicate.ugt, kv_col, q_row_i32)
-                    _m_lo.append(arith.select(is_lo, c_neg_inf, s_raw_lo[r]))
+                    _llvm.StoreOp(arith.select(is_lo, c_neg_inf, s_raw_lo[r]), _cond_slot_slo[r])
                     is_hi = arith.cmpi(arith.CmpIPredicate.ugt, kv_col + fx.Int32(K_SUB_N), q_row_i32)
-                    _m_hi.append(arith.select(is_hi, c_neg_inf, s_raw_hi[r]))
-                scf.YieldOp(_m_lo + _m_hi)
-            with ir.InsertionPoint(_mask_if.else_block):
-                scf.YieldOp(s_raw_lo + s_raw_hi)
-            return ([_mask_if.results[i] for i in range(16)],
-                    [_mask_if.results[16 + i] for i in range(16)])
+                    _llvm.StoreOp(arith.select(is_hi, c_neg_inf, s_raw_hi[r]), _cond_slot_shi[r])
+                scf.YieldOp([])
+            return ([_load_f32(_cond_slot_slo[r]) for r in range_constexpr(16)],
+                    [_load_f32(_cond_slot_shi[r]) for r in range_constexpr(16)])
 
         def _compute_max(s_raw_lo, s_raw_hi, m_old):
             loc = s_raw_lo[0]
@@ -628,13 +636,37 @@ def build_flash_attn_func_module_primary(
                 loc = _fmax(loc, s_raw_hi[r])
             return _fmax(m_old, _fmax(loc, reduction_peer(loc)))
 
-        def _compute_softmax_full(s_raw_lo, s_raw_hi, m_new, m_old, l_old, o_accs_in):
-            corr = _exp2(_mul(_sub(m_old, m_new), c_sm_scale_log2e))
-            corr_vec = vector.broadcast(v16f32_type, corr)
-            o_out = list(o_accs_in)
+        def _compute_softmax_lazy(s_raw_lo, s_raw_hi, m_new, m_old, l_old, o_accs_in):
+            """Lazy rescaling using alloca (no PHI copies for unchanged values)."""
+            diff = _sub(m_new, m_old)
+            ok_i1 = arith.CmpFOp(arith.CmpFPredicate.OLE, diff, c_rescale_threshold).result
+            ballot_mask = rocdl.ballot(T.i64, ok_i1)
+            all_ok = arith.cmpi(arith.CmpIPredicate.eq, ballot_mask, c_all_ones_i64)
+
+            # Store defaults (no-rescale path)
+            _llvm.StoreOp(m_old, _cond_slot_m)
+            _llvm.StoreOp(l_old, _cond_slot_l)
             for dc in range_constexpr(D_CHUNKS):
-                o_out[dc] = _mul(o_out[dc], corr_vec)
-            neg_sc = _sub(c_zero_f, _mul(c_sm_scale_log2e, m_new))
+                _llvm.StoreOp(o_accs_in[dc], _cond_slot_o[dc])
+
+            # Only else-branch modifies slots (HK pattern)
+            _rif = scf.IfOp(all_ok, [], has_else=True)
+            with ir.InsertionPoint(_rif.then_block):
+                scf.YieldOp([])
+            with ir.InsertionPoint(_rif.else_block):
+                _corr = _exp2(_mul(_sub(m_old, m_new), c_sm_scale_log2e))
+                _cv = vector.broadcast(v16f32_type, _corr)
+                _llvm.StoreOp(m_new, _cond_slot_m)
+                _llvm.StoreOp(_mul(l_old, _corr), _cond_slot_l)
+                for dc in range_constexpr(D_CHUNKS):
+                    _llvm.StoreOp(_mul(o_accs_in[dc], _cv), _cond_slot_o[dc])
+                scf.YieldOp([])
+
+            m_eff = _load_f32(_cond_slot_m)
+            l_eff = _load_f32(_cond_slot_l)
+            o_out = [_load_v16f32(_cond_slot_o[dc]) for dc in range_constexpr(D_CHUNKS)]
+
+            neg_sc = _sub(c_zero_f, _mul(c_sm_scale_log2e, m_eff))
             plo = []; phi = []; lsum = c_zero_f
             for r in range_constexpr(16):
                 p = _exp2(_fma(s_raw_lo[r], c_sm_scale_log2e, neg_sc))
@@ -642,8 +674,8 @@ def build_flash_attn_func_module_primary(
             for r in range_constexpr(16):
                 p = _exp2(_fma(s_raw_hi[r], c_sm_scale_log2e, neg_sc))
                 phi.append(p); lsum = _add(lsum, p)
-            l_new = _add(_mul(corr, l_old), _add(lsum, reduction_peer(lsum)))
-            return plo, phi, m_new, l_new, o_out
+            l_new = _add(l_eff, _add(lsum, reduction_peer(lsum)))
+            return plo, phi, m_eff, l_new, o_out
 
         def _pack_p_vals(p_vals_lo, p_vals_hi):
             if dtype_str == "bf16" and not USE_K16:
@@ -708,6 +740,20 @@ def build_flash_attn_func_module_primary(
             rocdl.s_setprio(0)
             return o_out
 
+        # ---- Scheduling barrier helpers (HK sched_barrier_pairs/exp_pairs) ----
+        def _sched_barrier_pairs(n_pairs, valu_cnt, sgid):
+            for _ in range_constexpr(n_pairs):
+                rocdl.sched_group_barrier(MASK_MFMA, 1, sgid)
+                rocdl.sched_group_barrier(MASK_VALU, valu_cnt, sgid)
+
+        def _sched_barrier_exp_pairs(n_pairs, exp_cnt, sgid):
+            for _ in range_constexpr(n_pairs):
+                rocdl.sched_group_barrier(MASK_MFMA, 1, sgid)
+                rocdl.sched_group_barrier(MASK_EXP, exp_cnt, sgid)
+
+        c_zero_i32 = arith.constant(0, type=T.i32)
+        c_one_i32 = arith.constant(1, type=T.i32)
+
         # ---- Pre-loop: DMA K[0..1] + V[0..1] into double buffers ----
         coop_dma_k(arith.index(0), buf_id=0)
         coop_dma_k(arith.index(BLOCK_N), buf_id=1)
@@ -720,53 +766,107 @@ def build_flash_attn_func_module_primary(
             arith.SubIOp(kv_upper, arith.index(BLOCK_N)).result,
             arith.index(0)).result
 
-        init_args = [c_neg_inf, c_zero_f]
-        for _ in range_constexpr(D_CHUNKS):
-            init_args.append(c_zero_v16f32)
+        # ---- Alloca-based loop state (matches C++ pattern: LLVM mem2reg promotes to registers) ----
+        _one_i64 = arith.constant(1, type=T.i64)
+        _ptr_ty = _llvm_ptr_ty()
+        _f32_attr = ir.TypeAttr.get(T.f32)
+        _i32_attr = ir.TypeAttr.get(T.i32)
+        _v16f32_attr = ir.TypeAttr.get(v16f32_type)
 
-        for kv_block_start, inner_iter_args, loop_results in scf.for_(
-            arith.index(0), kv_upper, arith.index(BLOCK_N_OUT),
-            iter_args=init_args,
-        ):
-            m_running = inner_iter_args[0]
-            l_running = inner_iter_args[1]
-            o_accs = [inner_iter_args[2 + i] for i in range_constexpr(D_CHUNKS)]
+        def _alloca_f32(init_val):
+            slot = _llvm.AllocaOp(_ptr_ty, _one_i64, _f32_attr).result
+            _llvm.StoreOp(init_val, slot)
+            return slot
+
+        def _alloca_i32(init_val):
+            slot = _llvm.AllocaOp(_ptr_ty, _one_i64, _i32_attr).result
+            _llvm.StoreOp(init_val, slot)
+            return slot
+
+        def _alloca_v16f32(init_val):
+            slot = _llvm.AllocaOp(_ptr_ty, _one_i64, _v16f32_attr).result
+            _llvm.StoreOp(init_val, slot)
+            return slot
+
+        def _load_f32(slot):
+            return _llvm.LoadOp(T.f32, slot).result
+
+        def _load_i32(slot):
+            return _llvm.LoadOp(T.i32, slot).result
+
+        def _load_v16f32(slot):
+            return _llvm.LoadOp(v16f32_type, slot).result
+
+        # Conditional state slots for alloca-based IfOp (avoids PHI copies)
+        _cond_slot_m = _alloca_f32(c_zero_f)
+        _cond_slot_l = _alloca_f32(c_zero_f)
+        _cond_slot_o = [_alloca_v16f32(c_zero_v16f32) for _ in range_constexpr(D_CHUNKS)]
+        _cond_slot_slo = [_alloca_f32(c_zero_f) for _ in range_constexpr(16)]
+        _cond_slot_shi = [_alloca_f32(c_zero_f) for _ in range_constexpr(16)]
+
+        # Loop state slots
+        slot_m = _alloca_f32(c_neg_inf)
+        slot_l = _alloca_f32(c_zero_f)
+        slot_o = [_alloca_v16f32(c_zero_v16f32) for _ in range_constexpr(D_CHUNKS)]
+
+        for kv_block_start in scf.for_(arith.index(0), kv_upper, arith.index(BLOCK_N_OUT)):
+            m_running = _load_f32(slot_m)
+            l_running = _load_f32(slot_l)
+            o_accs = [_load_v16f32(slot_o[dc]) for dc in range_constexpr(D_CHUNKS)]
 
             for kv_sub in range_constexpr(N_SUBTILES):
                 kv_start = kv_block_start + kv_sub * BLOCK_N
+                _sgid = kv_sub * 4 + 1
 
-                # ==== Cluster 0: K read + QK + softmax ====
+                # ==== Cluster 0: QK + softmax ====
+                rocdl.sched_barrier(0)
                 rocdl.s_waitcnt(0)
                 gpu.barrier()
+                rocdl.sched_barrier(0)
+
                 s_acc_lo, s_acc_hi = _do_qk_gemm_pipelined(k_buf_base(kv_sub))
                 s_raw_lo, s_raw_hi = _extract_s_raw(s_acc_lo, s_acc_hi)
                 s_raw_lo, s_raw_hi = _apply_causal_mask(s_raw_lo, s_raw_hi, kv_start)
                 m_new = _compute_max(s_raw_lo, s_raw_hi, m_running)
                 p_vals_lo, p_vals_hi, m_running, l_running, o_accs = \
-                    _compute_softmax_full(s_raw_lo, s_raw_hi, m_new, m_running, l_running, o_accs)
+                    _compute_softmax_lazy(s_raw_lo, s_raw_hi, m_new, m_running, l_running, o_accs)
                 p_packs_lo, p_packs_hi = _pack_p_vals(p_vals_lo, p_vals_hi)
 
-                # ==== Cluster 1: K DMA (clamped) ====
+                _sched_barrier_exp_pairs(6, 3, _sgid)
+                _sched_barrier_pairs(10, 5, _sgid)
+                rocdl.sched_barrier(0)
                 gpu.barrier()
-                coop_dma_k(arith.MinSIOp(kv_start + BLOCK_N, _kv_last).result, 1 - kv_sub)
 
-                # ==== Cluster 2: V read + PV ====
+                # ==== Cluster 1: K DMA (clamped) ====
+                rocdl.sched_barrier(0)
+                coop_dma_k(arith.MinSIOp(kv_start + BLOCK_N, _kv_last).result, 1 - kv_sub)
+                _asm("s_waitcnt lgkmcnt(0)")
+                _waitcnt_vm_n(NUM_DMA_K * 2)
+                rocdl.sched_barrier(0)
                 gpu.barrier()
+
+                # ==== Cluster 2: PV ====
+                rocdl.sched_barrier(0)
                 rocdl.s_setprio(1)
                 o_accs = _do_pv_gemm(v_buf_base(kv_sub), p_packs_lo, p_packs_hi, o_accs)
                 rocdl.s_setprio(0)
+                rocdl.sched_barrier(0)
+                gpu.barrier()
 
                 # ==== Cluster 3: V DMA (clamped) ====
-                gpu.barrier()
+                rocdl.sched_barrier(0)
                 coop_dma_v(arith.MinSIOp(kv_start + 2 * BLOCK_N, _kv_last).result, kv_sub)
+                _asm("s_waitcnt lgkmcnt(0)")
+                _waitcnt_vm_n(NUM_DMA_K * 2)
+                rocdl.sched_barrier(0)
 
-            yield [m_running, l_running] + o_accs
+            _llvm.StoreOp(m_running, slot_m)
+            _llvm.StoreOp(l_running, slot_l)
+            for dc in range_constexpr(D_CHUNKS):
+                _llvm.StoreOp(o_accs[dc], slot_o[dc])
 
-        o_finals = [loop_results[2 + dc] for dc in range_constexpr(D_CHUNKS)]
-
-
-        # ---- Normalize and store O (skip OOB rows for partial Q tiles) ----
-        l_final = loop_results[1]
+        o_finals = [_load_v16f32(slot_o[dc]) for dc in range_constexpr(D_CHUNKS)]
+        l_final = _load_f32(slot_l)
 
         inv_l = arith.DivFOp(
             c_one_f,
@@ -868,7 +968,7 @@ def build_flash_attn_func_module_primary(
         "fast_fp_math": fast_fp_math,
         "unsafe_fp_math": unsafe_fp_math,
         "llvm_options": {
-            "enable-post-misched": False,
+            "enable-post-misched": True,
             "lsr-drop-solution": True,
         },
     }
