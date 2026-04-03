@@ -603,27 +603,17 @@ class ReplaceIfWithDispatch(Transformer):
                 )
             return False
 
-        def _classify_current(node):
+        def _visit(node):
             if _is_literal_expr(node):
                 return False
-            if isinstance(node, ast.Name):
-                # Plain names can be static symbols (constexpr params, local bools, etc.).
-                return None
             if isinstance(node, ast.Compare):
                 return True
             if isinstance(node, ast.Call):
                 func = node.func
-                if isinstance(func, ast.Name) and func.id in ReplaceIfWithDispatch._REWRITE_HELPER_NAMES:
-                    return None
-                return True
-            return None
-
-        def _visit(node):
-            current = _classify_current(node)
-            if current is True:
-                return True
-            if current is False:
-                return False
+                if not (isinstance(func, ast.Name) and func.id in ReplaceIfWithDispatch._REWRITE_HELPER_NAMES):
+                    return True
+            # Plain names can be static symbols (constexpr params, local bools, etc.),
+            # and unknown nodes keep recursing into children.
 
             for child in ast.iter_child_nodes(node):
                 if _visit(child):
