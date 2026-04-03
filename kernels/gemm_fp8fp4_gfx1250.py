@@ -101,9 +101,9 @@ def compile_mxscale_gemm(
         raise ValueError(
             f"block_threads must be <= 1024, got {block_threads}")
 
-    if wave_specialized_tdm and num_warps < 4:
+    if wave_specialized_tdm and num_warps != 4:
         raise ValueError(
-            f"wave_specialized_tdm requires num_warps >= 4, got {num_warps}")
+            f"wave_specialized_tdm requires exactly 4 waves, got {num_warps}")
 
     # ── Format-dependent compile-time constants ──
     # A8W4: activation is FP8 (PACK_FACTOR_A=1), weight is FP4 (PACK_FACTOR_B=2)
@@ -183,6 +183,12 @@ def compile_mxscale_gemm(
             return value
         return (value + align - 1) // align * align
 
+    # TDM descriptors partition a tile cooperatively across ``num_warps`` by
+    # deriving per-wave offsets from ``wave_id``. In wave-specialized mode we
+    # dedicate one loader wave to each tensor (A/B/A_scale/B_scale), so each
+    # active loader wave must issue a full-tile descriptor by itself.
+    tdm_desc_num_warps = 1 if wave_specialized_tdm else num_warps
+
     # All pipeline stages share the same intra-stage layout. Keep that layout
     # unchanged and only remap each logical stage to a physical base inside one
     # LDS arena so TDM epilogue can alias the dead prefix of the arena.
@@ -251,7 +257,10 @@ def compile_mxscale_gemm(
             arena_alloc.ptr = total_d_bytes
         check_smem_capacity(arena_total_bytes, gpu_arch)
 
-    TDM_LOADS_PER_STEP = 4
+    # TENSORcnt is tracked per-wave in hardware. The regular path issues four
+    # tensor ops per wave per K-stage, while the wave-specialized path issues
+    # only one tensor op from each dedicated loader wave.
+    TDM_LOADS_PER_STEP = 1 if wave_specialized_tdm else 4
     tail_plan = [
         (ls, cs, o * TDM_LOADS_PER_STEP // 2 if o > 0 else o)
         for ls, cs, o in _base_tail_plan
@@ -383,7 +392,7 @@ def compile_mxscale_gemm(
                 tile_shape=(tile_m, packed_tile_k_a),
                 elem_bytes=1,
                 pad_interval=packed_tile_k_a, pad_amount=LDS_PAD_A_BYTES,
-                num_warps=num_warps,
+                num_warps=tdm_desc_num_warps,
                 workgroup_mask=a_mcast_mask)
 
         def make_desc_b(memref, k_base):
@@ -398,7 +407,7 @@ def compile_mxscale_gemm(
                 tile_shape=(tile_n // 16, packed_tile_k_b * 16),
                 elem_bytes=1,
                 pad_interval=0, pad_amount=0,
-                num_warps=num_warps,
+                num_warps=tdm_desc_num_warps,
                 workgroup_mask=b_mcast_mask)
 
         def make_desc_as(memref, k_base):
@@ -413,7 +422,7 @@ def compile_mxscale_gemm(
                 tile_shape=(WMMA_M * m_warp, interleaved_scale_cols_a),
                 elem_bytes=1,
                 pad_interval=0, pad_amount=0,
-                num_warps=num_warps,
+                num_warps=tdm_desc_num_warps,
                 workgroup_mask=a_mcast_mask)
 
         def make_desc_bs(memref, k_base):
@@ -428,23 +437,22 @@ def compile_mxscale_gemm(
                 tile_shape=(WMMA_M * n_warp, interleaved_scale_cols_b),
                 elem_bytes=1,
                 pad_interval=0, pad_amount=0,
-                num_warps=num_warps,
+                num_warps=tdm_desc_num_warps,
                 workgroup_mask=b_mcast_mask)
 
         def issue_all_tdm_loads(desc_a, desc_b, desc_as, desc_bs):
             if wave_specialized_tdm:
                 wid = rocdl.wave_id()
-                wid_mod4 = arith.remui(wid, arith.constant(4, type=T.i32))
-                if arith.cmpi(arith.CmpIPredicate.eq, wid_mod4,
+                if arith.cmpi(arith.CmpIPredicate.eq, wid,
                               arith.constant(0, type=T.i32)):
                     tdm_ops.tensor_load_2d(desc_a)
-                if arith.cmpi(arith.CmpIPredicate.eq, wid_mod4,
+                if arith.cmpi(arith.CmpIPredicate.eq, wid,
                               arith.constant(1, type=T.i32)):
                     tdm_ops.tensor_load_2d(desc_b)
-                if arith.cmpi(arith.CmpIPredicate.eq, wid_mod4,
+                if arith.cmpi(arith.CmpIPredicate.eq, wid,
                               arith.constant(2, type=T.i32)):
                     tdm_ops.tensor_load_2d(desc_as)
-                if arith.cmpi(arith.CmpIPredicate.eq, wid_mod4,
+                if arith.cmpi(arith.CmpIPredicate.eq, wid,
                               arith.constant(3, type=T.i32)):
                     tdm_ops.tensor_load_2d(desc_bs)
             else:

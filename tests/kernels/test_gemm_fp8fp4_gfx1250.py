@@ -139,9 +139,6 @@ def _run_mxscale_gemm_test(
     if arch != "gfx1250":
         pytest.skip(f"WMMA_SCALE requires gfx1250, got {arch}")
 
-    if wave_specialized_tdm:
-        pytest.skip("Simulator does not support wave-specialized TDM")
-
     if use_scale_opsel and is_fp4:
         pytest.skip("FP4 32x16 WMMA scaleBType op_sel ignored by AM simulator")
 
