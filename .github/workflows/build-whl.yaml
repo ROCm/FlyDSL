@@ -16,6 +16,11 @@ on:
         type: string
         required: false
         default: '3.10 3.12'
+      artifact_suffix:
+        description: 'Suffix for the artifact name to avoid collisions in matrix builds'
+        type: string
+        required: false
+        default: ''
     outputs:
       wheel_names:
         description: 'Space-separated list of built wheel filenames'
@@ -24,6 +29,8 @@ on:
 jobs:
   build:
     runs-on: linux-flydsl-mi325-1
+    env:
+      CONTAINER: flydsl_build${{ inputs.artifact_suffix && format('_{0}', inputs.artifact_suffix) || '' }}
     outputs:
       wheel_names: ${{ steps.collect-wheels.outputs.wheel_names }}
     permissions:
@@ -41,20 +48,20 @@ jobs:
             -v "${GITHUB_WORKSPACE}/flydsl:/flydsl" \
             --ipc=host --shm-size 16g \
             -w /flydsl \
-            --name flydsl_build \
+            --name $CONTAINER \
             ${{ inputs.docker_image }}
 
       - name: Install build dependencies
         run: |
-          docker exec flydsl_build bash -c "apt-get update && apt-get install -y cmake build-essential patchelf software-properties-common"
-          docker exec flydsl_build bash -c "add-apt-repository -y ppa:deadsnakes/ppa && apt-get update"
+          docker exec $CONTAINER bash -c "apt-get update && apt-get install -y cmake build-essential patchelf software-properties-common"
+          docker exec $CONTAINER bash -c "add-apt-repository -y ppa:deadsnakes/ppa && apt-get update"
           # Install Python versions that are not already in the Docker image
           for ver in ${{ inputs.python_versions }}; do
-            docker exec flydsl_build bash -c "command -v python${ver} || apt-get install -y python${ver} python${ver}-dev python${ver}-venv || true"
+            docker exec $CONTAINER bash -c "command -v python${ver} || apt-get install -y python${ver} python${ver}-dev python${ver}-venv || true"
           done
-          docker exec flydsl_build bash -c "python3 -m pip install -U pip setuptools wheel"
-          docker exec flydsl_build bash -c "python3 -m pip install ninja>=1.11.1"
-          docker exec flydsl_build bash -c "git config --global --add safe.directory '*'"
+          docker exec $CONTAINER bash -c "python3 -m pip install -U pip setuptools wheel"
+          docker exec $CONTAINER bash -c "python3 -m pip install ninja>=1.11.1"
+          docker exec $CONTAINER bash -c "git config --global --add safe.directory '*'"
 
       - name: Restore cached MLIR install tarball
         id: mlir-cache
@@ -66,23 +73,23 @@ jobs:
       - name: Use cached MLIR install tarball
         if: steps.mlir-cache.outputs.cache-hit == 'true'
         run: |
-          docker cp mlir_install.tgz flydsl_build:/tmp/mlir_install.tgz
-          docker exec flydsl_build bash -c "mkdir -p /llvm-project && tar -xzf /tmp/mlir_install.tgz -C /llvm-project"
-          docker exec flydsl_build bash -c "ls -la /llvm-project/mlir_install/lib/cmake/mlir"
+          docker cp mlir_install.tgz $CONTAINER:/tmp/mlir_install.tgz
+          docker exec $CONTAINER bash -c "mkdir -p /llvm-project && tar -xzf /tmp/mlir_install.tgz -C /llvm-project"
+          docker exec $CONTAINER bash -c "ls -la /llvm-project/mlir_install/lib/cmake/mlir"
 
       - name: Build LLVM
         if: steps.mlir-cache.outputs.cache-hit != 'true'
         run: |
-          docker exec flydsl_build bash -c "cd /flydsl && bash scripts/build_llvm.sh"
-          docker cp flydsl_build:/llvm-project/mlir_install.tgz ./mlir_install.tgz || true
+          docker exec $CONTAINER bash -c "cd /flydsl && bash scripts/build_llvm.sh"
+          docker cp $CONTAINER:/llvm-project/mlir_install.tgz ./mlir_install.tgz || true
 
       - name: Build wheels
         run: |
-          docker exec flydsl_build bash -c "export MLIR_PATH=/llvm-project/mlir_install && export ALLOW_ANY_GLIBC=1 && export FLYDSL_RELEASE_TYPE=${{ inputs.release_type }} && export PYTHON_VERSIONS='${{ inputs.python_versions }}' && cd /flydsl && bash scripts/build_wheels.sh"
-          docker cp flydsl_build:/flydsl/dist ./dist
+          docker exec $CONTAINER bash -c "export MLIR_PATH=/llvm-project/mlir_install && export ALLOW_ANY_GLIBC=1 && export FLYDSL_RELEASE_TYPE=${{ inputs.release_type }} && export PYTHON_VERSIONS='${{ inputs.python_versions }}' && cd /flydsl && bash scripts/build_wheels.sh"
+          docker cp $CONTAINER:/flydsl/dist ./dist
           # Copy fly-opt from the first built Python version's build dir
           FIRST_VER=$(echo "${{ inputs.python_versions }}" | awk '{print $1}' | tr -d '.')
-          docker cp flydsl_build:/flydsl/build-fly/build_py${FIRST_VER}/bin/fly-opt ./dist/fly-opt
+          docker cp $CONTAINER:/flydsl/build-fly/build_py${FIRST_VER}/bin/fly-opt ./dist/fly-opt
 
       - name: Collect wheel names
         id: collect-wheels
@@ -94,7 +101,7 @@ jobs:
       - name: Upload wheel artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: flydsl-wheels
+          name: flydsl-wheels${{ inputs.artifact_suffix && format('-{0}', inputs.artifact_suffix) || '' }}
           path: |
             dist/*.whl
             dist/fly-opt
@@ -130,5 +137,5 @@ jobs:
       - name: Clean up
         if: always()
         run: |
-          docker stop flydsl_build || true
-          docker rm flydsl_build || true
+          docker stop $CONTAINER || true
+          docker rm $CONTAINER || true
