@@ -20,13 +20,63 @@ on:
           - 'nightlies'
           - 'devreleases'
         default: 'nightlies'
+      docker_image:
+        description: 'Docker image override (leave empty for nightly defaults)'
+        type: string
+        default: ''
+      python_versions:
+        description: 'Python versions override, space-separated (leave empty for nightly defaults)'
+        type: string
+        default: ''
 concurrency:
   group: ${{ github.workflow }}-${{ github.sha }}
   cancel-in-progress: true
 
 jobs:
-  # ---- Build matrix: one job per docker / python-version group ----
+  # ==================================================================
+  # Manual dispatch: user picks docker_image + python_versions
+  # ==================================================================
+  build-custom:
+    if: ${{ inputs.docker_image != '' }}
+    uses: ./.github/workflows/build-whl.yaml
+    with:
+      release_type: ${{ inputs.release_type || 'nightlies' }}
+      docker_image: ${{ inputs.docker_image }}
+      python_versions: ${{ inputs.python_versions || '3.10 3.12' }}
+      artifact_suffix: "custom"
+    permissions:
+      id-token: write
+      contents: read
+
+  test-custom:
+    needs: build-custom
+    if: ${{ inputs.docker_image != '' && !(inputs.skip_tests || false) }}
+    uses: ./.github/workflows/test-whl.yaml
+    with:
+      docker_image: ${{ inputs.docker_image }}
+    permissions:
+      contents: read
+
+  promote-custom:
+    needs: [build-custom, test-custom]
+    if: >-
+      ${{ inputs.docker_image != ''
+          && github.repository_owner == 'ROCm'
+          && !(inputs.skip_promote || false) }}
+    uses: ./.github/workflows/promote.yaml
+    with:
+      release_type: ${{ inputs.release_type || 'nightlies' }}
+      wheel_names: ${{ needs.build-custom.outputs.wheel_names }}
+    permissions:
+      id-token: write
+      contents: read
+
+  # ==================================================================
+  # Nightly (schedule) or dispatch without docker_image override:
+  # builds all 4 Python versions across 3 docker images
+  # ==================================================================
   build-py310-py312:
+    if: ${{ inputs.docker_image == '' }}
     uses: ./.github/workflows/build-whl.yaml
     with:
       release_type: ${{ inputs.release_type || 'nightlies' }}
@@ -38,6 +88,7 @@ jobs:
       contents: read
 
   build-py313:
+    if: ${{ inputs.docker_image == '' }}
     uses: ./.github/workflows/build-whl.yaml
     with:
       release_type: ${{ inputs.release_type || 'nightlies' }}
@@ -49,6 +100,7 @@ jobs:
       contents: read
 
   build-py314:
+    if: ${{ inputs.docker_image == '' }}
     uses: ./.github/workflows/build-whl.yaml
     with:
       release_type: ${{ inputs.release_type || 'nightlies' }}
@@ -59,10 +111,9 @@ jobs:
       id-token: write
       contents: read
 
-  # ---- Test each build with its matching docker image ----
   test-py310-py312:
     needs: build-py310-py312
-    if: ${{ !(inputs.skip_tests || false) }}
+    if: ${{ inputs.docker_image == '' && !(inputs.skip_tests || false) }}
     uses: ./.github/workflows/test-whl.yaml
     with:
       docker_image: "rocm/pytorch:rocm7.2_ubuntu22.04_py3.10_pytorch_release_2.8.0"
@@ -71,7 +122,7 @@ jobs:
 
   test-py313:
     needs: build-py313
-    if: ${{ !(inputs.skip_tests || false) }}
+    if: ${{ inputs.docker_image == '' && !(inputs.skip_tests || false) }}
     uses: ./.github/workflows/test-whl.yaml
     with:
       docker_image: "rocm/pytorch:rocm7.2_ubuntu24.04_py3.13_pytorch_release_2.10.0"
@@ -80,18 +131,18 @@ jobs:
 
   test-py314:
     needs: build-py314
-    if: ${{ !(inputs.skip_tests || false) }}
+    if: ${{ inputs.docker_image == '' && !(inputs.skip_tests || false) }}
     uses: ./.github/workflows/test-whl.yaml
     with:
       docker_image: "rocm/pytorch:rocm7.2.1_ubuntu24.04_py3.14_pytorch_2.10.0"
     permissions:
       contents: read
 
-  # ---- Promote: collect all wheel names from every build job ----
-  promote:
+  promote-nightly:
     needs: [build-py310-py312, build-py313, build-py314, test-py310-py312, test-py313, test-py314]
     if: >-
-      ${{ github.repository_owner == 'ROCm'
+      ${{ inputs.docker_image == ''
+          && github.repository_owner == 'ROCm'
           && !(inputs.skip_promote || false) }}
     uses: ./.github/workflows/promote.yaml
     with:
