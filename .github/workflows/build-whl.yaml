@@ -51,13 +51,24 @@ jobs:
             --name $CONTAINER \
             ${{ inputs.docker_image }}
 
+      - name: Validate python_versions input
+        run: |
+          for ver in ${{ inputs.python_versions }}; do
+            if ! echo "$ver" | grep -qE '^[0-9]+\.[0-9]+$'; then
+              echo "Error: invalid python version '$ver' — must match X.Y (e.g. 3.12)" >&2
+              exit 1
+            fi
+          done
+
       - name: Install build dependencies
+        env:
+          PYTHON_VERSIONS: ${{ inputs.python_versions }}
         run: |
           docker exec $CONTAINER bash -c "apt-get update && apt-get install -y cmake build-essential patchelf software-properties-common"
           docker exec $CONTAINER bash -c "add-apt-repository -y ppa:deadsnakes/ppa && apt-get update"
           # Install Python versions that are not already in the Docker image
-          for ver in ${{ inputs.python_versions }}; do
-            docker exec $CONTAINER bash -c "command -v python${ver} || apt-get install -y python${ver} python${ver}-dev python${ver}-venv || true"
+          for ver in $PYTHON_VERSIONS; do
+            docker exec $CONTAINER bash -c "command -v python${ver} || apt-get install -y python${ver} python${ver}-dev python${ver}-venv"
           done
           docker exec $CONTAINER bash -c "python3 -m pip install -U pip setuptools wheel"
           docker exec $CONTAINER bash -c "python3 -m pip install ninja>=1.11.1"
@@ -84,11 +95,18 @@ jobs:
           docker cp $CONTAINER:/llvm-project/mlir_install.tgz ./mlir_install.tgz || true
 
       - name: Build wheels
+        env:
+          PYTHON_VERSIONS: ${{ inputs.python_versions }}
         run: |
-          docker exec $CONTAINER bash -c "export MLIR_PATH=/llvm-project/mlir_install && export ALLOW_ANY_GLIBC=1 && export FLYDSL_RELEASE_TYPE=${{ inputs.release_type }} && export PYTHON_VERSIONS='${{ inputs.python_versions }}' && cd /flydsl && bash scripts/build_wheels.sh"
+          docker exec \
+            -e MLIR_PATH=/llvm-project/mlir_install \
+            -e EXPECTED_GLIBC=2.35 \
+            -e FLYDSL_RELEASE_TYPE=${{ inputs.release_type }} \
+            -e PYTHON_VERSIONS="${PYTHON_VERSIONS}" \
+            $CONTAINER bash -c "cd /flydsl && bash scripts/build_wheels.sh"
           docker cp $CONTAINER:/flydsl/dist ./dist
           # Copy fly-opt from the first built Python version's build dir
-          FIRST_VER=$(echo "${{ inputs.python_versions }}" | awk '{print $1}' | tr -d '.')
+          FIRST_VER=$(echo "${PYTHON_VERSIONS}" | awk '{print $1}' | tr -d '.')
           docker cp $CONTAINER:/flydsl/build-fly/build_py${FIRST_VER}/bin/fly-opt ./dist/fly-opt
 
       - name: Collect wheel names

@@ -41,6 +41,13 @@ ALLOW_ANY_GLIBC="${ALLOW_ANY_GLIBC:-0}"
 
 PYTHON_VERSIONS="${PYTHON_VERSIONS:-3.10 3.12}"
 
+# Validate that PYTHON_VERSIONS contains at least one version.
+read -r -a _fly_python_versions <<< "${PYTHON_VERSIONS}"
+if [[ ${#_fly_python_versions[@]} -eq 0 ]]; then
+  echo "Error: PYTHON_VERSIONS is empty; set it to at least one Python version (e.g. '3.10')." >&2
+  exit 1
+fi
+
 VENV_ROOT="${VENV_ROOT:-${REPO_ROOT}/.venvs/release}"
 
 if [[ -z "${MLIR_PATH:-}" ]]; then
