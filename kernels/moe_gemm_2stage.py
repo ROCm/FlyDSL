@@ -200,6 +200,7 @@ def compile_moe_gemm1(
     # For W4A8/W4A_FP8 groupwise: still need scale_x in epilogue.
 
     use_gfx950_cvt = is_int4_bf16 and "gfx95" in get_hip_arch()
+    defer_scale16 = use_gfx950_cvt
 
     mfma_i32_k32 = None
     if is_int8:
@@ -722,7 +723,7 @@ def compile_moe_gemm1(
                             packs0, packs1 = [], []
                             for ni in range_constexpr(num_acc_n):
                                 packed32, scale_val = raw_data[ku][ni]
-                                b0, b1 = unpack_b_w4a16_groupwise(packed32, scale_val, arith, vector, use_gfx950_cvt=use_gfx950_cvt, use_cvt_pk_bf16=use_cvt_pk_bf16)
+                                b0, b1 = unpack_b_w4a16_groupwise(packed32, scale_val, arith, vector, use_gfx950_cvt=use_gfx950_cvt, use_cvt_pk_bf16=use_cvt_pk_bf16, defer_scale16=defer_scale16)
                                 packs0.append(b0)
                                 packs1.append(b1)
                             b_tile.append((packs0, packs1))
@@ -747,7 +748,7 @@ def compile_moe_gemm1(
                         for ku in range_constexpr(k_unroll):
                             packs0, packs1 = [], []
                             for ni in range_constexpr(num_acc_n):
-                                b0, b1 = unpack_b_w4a16(raw_data[ku][ni], arith, vector, use_gfx950_cvt=use_gfx950_cvt, use_cvt_pk_bf16=use_cvt_pk_bf16)
+                                b0, b1 = unpack_b_w4a16(raw_data[ku][ni], arith, vector, use_gfx950_cvt=use_gfx950_cvt, use_cvt_pk_bf16=use_cvt_pk_bf16, defer_scale16=defer_scale16)
                                 packs0.append(b0)
                                 packs1.append(b1)
                             b_tile.append((packs0, packs1))
@@ -1204,6 +1205,7 @@ def compile_moe_gemm1(
                                     b_raw[ni], ku, arith, vector,
                                     scale_val=sv, use_gfx950_cvt=use_gfx950_cvt,
                                     use_cvt_pk_bf16=use_cvt_pk_bf16,
+                                    defer_scale16=defer_scale16,
                                 )
                                 packs0.append(b0)
                                 packs1.append(b1)
@@ -1443,6 +1445,10 @@ def compile_moe_gemm1(
                             if is_int8 and not is_int4_groupwise:
                                 vg = arith.sitofp(T.f32, vg)
                                 vu = arith.sitofp(T.f32, vu)
+                            if defer_scale16:
+                                _c16 = fx.Float32(16.0)
+                                vg = vg * _c16
+                                vu = vu * _c16
                             vg = vg * sx * sw_gate
                             vu = vu * sx * sw_up
 
@@ -1561,6 +1567,10 @@ def compile_moe_gemm1(
                             if is_int8 and not is_int4_groupwise:
                                 vg = arith.sitofp(T.f32, vg)
                                 vu = arith.sitofp(T.f32, vu)
+                            if defer_scale16:
+                                _c16 = fx.Float32(16.0)
+                                vg = vg * _c16
+                                vu = vu * _c16
                             vg = vg * sx * sw_gate
                             vu = vu * sx * sw_up
 
@@ -1723,6 +1733,7 @@ def compile_moe_gemm2(
     scale_w_size_stage2 = experts * model_dim * num_groups
 
     use_gfx950_cvt = is_int4_bf16 and "gfx95" in get_hip_arch()
+    defer_scale16 = use_gfx950_cvt
 
     mfma_i32_k32 = None
     if is_int8:
@@ -2267,7 +2278,7 @@ def compile_moe_gemm2(
                             packs0, packs1 = [], []
                             for ni in range_constexpr(num_acc_n):
                                 packed32, scale_val = raw_data[ku][ni]
-                                b0, b1 = unpack_b_w4a16_groupwise(packed32, scale_val, arith, vector, use_gfx950_cvt=use_gfx950_cvt, use_cvt_pk_bf16=use_cvt_pk_bf16)
+                                b0, b1 = unpack_b_w4a16_groupwise(packed32, scale_val, arith, vector, use_gfx950_cvt=use_gfx950_cvt, use_cvt_pk_bf16=use_cvt_pk_bf16, defer_scale16=defer_scale16)
                                 packs0.append(b0)
                                 packs1.append(b1)
                             b_tile.append((packs0, packs1))
@@ -2292,7 +2303,7 @@ def compile_moe_gemm2(
                         for ku in range_constexpr(k_unroll):
                             packs0, packs1 = [], []
                             for ni in range_constexpr(num_acc_n):
-                                b0, b1 = unpack_b_w4a16(raw_data[ku][ni], arith, vector, use_gfx950_cvt=use_gfx950_cvt, use_cvt_pk_bf16=use_cvt_pk_bf16)
+                                b0, b1 = unpack_b_w4a16(raw_data[ku][ni], arith, vector, use_gfx950_cvt=use_gfx950_cvt, use_cvt_pk_bf16=use_cvt_pk_bf16, defer_scale16=defer_scale16)
                                 packs0.append(b0)
                                 packs1.append(b1)
                             b_tile.append((packs0, packs1))
@@ -2785,6 +2796,7 @@ def compile_moe_gemm2(
                                     b_raw[ni], ku, arith, vector,
                                     scale_val=sv, use_gfx950_cvt=use_gfx950_cvt,
                                     use_cvt_pk_bf16=use_cvt_pk_bf16,
+                                    defer_scale16=defer_scale16,
                                 )
                                 packs0.append(b0)
                                 packs1.append(b1)
@@ -2988,6 +3000,8 @@ def compile_moe_gemm2(
                             v = vector.extract(acc[acc_idx], static_position=[ii], dynamic_position=[])
                             if is_int8 and not is_int4_groupwise:
                                 v = arith.sitofp(T.f32, v)
+                            if defer_scale16:
+                                v = v * fx.Float32(16.0)
                             v = v * sx * sw
                             if doweight_stage2:
                                 v = v * tw
@@ -3063,6 +3077,8 @@ def compile_moe_gemm2(
                             v = vector.extract(acc[acc_idx], static_position=[ii], dynamic_position=[])
                             if is_int8 and not is_int4_groupwise:
                                 v = arith.sitofp(T.f32, v)
+                            if defer_scale16:
+                                v = v * fx.Float32(16.0)
                             v = v * sx * sw
                             if doweight_stage2:
                                 v = v * tw

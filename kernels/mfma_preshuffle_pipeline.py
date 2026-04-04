@@ -208,6 +208,7 @@ def extract_and_unpack_b_flat_w4a16(
     scale_val=None,
     use_gfx950_cvt: bool = False,
     use_cvt_pk_bf16: bool = False,
+    defer_scale16: bool = False,
 ):
     """Extract K64 step ``ku`` from flat-loaded B and unpack to 2x i64 (bf16).
 
@@ -226,7 +227,7 @@ def extract_and_unpack_b_flat_w4a16(
     # equivalent for int4 dequant values and avoids the issue.
     return unpack_b_w4a16(
         packed_i32, arith, vector, scale_val=scale_val, use_gfx950_cvt=use_gfx950_cvt,
-        use_cvt_pk_bf16=False,
+        use_cvt_pk_bf16=False, defer_scale16=defer_scale16,
     )
 
 
@@ -366,13 +367,17 @@ def load_b_raw_w4a16(
     return packed32
 
 
-def _int4_to_bf16x4_i64_gfx950(packed32, nibble_offsets, arith, vector, scale_val=None, use_cvt_pk_bf16=False):
+def _int4_to_bf16x4_i64_gfx950(packed32, nibble_offsets, arith, vector, scale_val=None, use_cvt_pk_bf16=False, defer_scale16=False):
     """Convert 4 int4 nibbles to 4 bf16 packed as i64 using gfx950 instructions.
 
     Uses v_cvt_off_f32_i4_sdwa with byte_sel to avoid per-nibble shifts.
     Even nibbles (0,2,4,6) → SDWA BYTE_0/1/2/3 on original src.
     Odd nibbles (1,3,5,7)  → SDWA BYTE_0/1/2/3 on (src >> 4).
     Only 1 shift total instead of 7.
+
+    When defer_scale16=True the ×16 correction for v_cvt_off_f32_i4 is NOT
+    applied here; the caller must multiply the accumulator by 16.0 in the
+    epilogue instead.
     """
     from flydsl.expr import rocdl
     from flydsl._mlir.dialects._arith_ops_gen import MulFOp as _MulFOp
@@ -380,12 +385,19 @@ def _int4_to_bf16x4_i64_gfx950(packed32, nibble_offsets, arith, vector, scale_va
     _uw = _arith._to_raw
     _av = _arith.ArithValue
 
-    c16 = fx.Float32(16.0)
-    if scale_val is not None:
-        effective_scale = scale_val * c16
+    if defer_scale16:
+        # Defer ×16 to epilogue.  Only multiply by group scale if present.
+        has_scale = scale_val is not None
+        if has_scale:
+            raw_scale = _uw(scale_val)
     else:
-        effective_scale = c16
-    raw_scale = _uw(effective_scale)
+        c16 = fx.Float32(16.0)
+        if scale_val is not None:
+            effective_scale = scale_val * c16
+        else:
+            effective_scale = c16
+        raw_scale = _uw(effective_scale)
+        has_scale = True
 
     src_even = packed32
     src_odd = packed32 >> fx.Int32(4)
@@ -395,7 +407,8 @@ def _int4_to_bf16x4_i64_gfx950(packed32, nibble_offsets, arith, vector, scale_va
         byte_idx = nib // 2
         src = src_odd if (nib % 2) else src_even
         v = rocdl.cvt_off_f32_i4(src, byte_sel=byte_idx)
-        v = _MulFOp(v, raw_scale).result
+        if has_scale:
+            v = _MulFOp(v, raw_scale).result
         f32_vals.append(v)
 
     if use_cvt_pk_bf16:
@@ -417,7 +430,7 @@ def _int4_to_bf16x4_i64_gfx950(packed32, nibble_offsets, arith, vector, scale_va
     return vector.extract(v64, static_position=[0], dynamic_position=[])
 
 
-def unpack_b_w4a16(packed32, arith, vector, scale_val=None, use_gfx950_cvt=False, use_cvt_pk_bf16=False):
+def unpack_b_w4a16(packed32, arith, vector, scale_val=None, use_gfx950_cvt=False, use_cvt_pk_bf16=False, defer_scale16=False):
     """Phase 2 of W4A16 B load: unpack int4->int8 + convert int8->bf16.
 
     Takes raw packed32 from load_b_raw_w4a16 and produces (b0, b1) --
@@ -426,10 +439,11 @@ def unpack_b_w4a16(packed32, arith, vector, scale_val=None, use_gfx950_cvt=False
     When use_gfx950_cvt=True, uses v_cvt_off_f32_i4 for int4->f32.
     When use_cvt_pk_bf16=True, uses v_cvt_pk_bf16_f32 for f32->bf16 packing
     instead of bit manipulation (truncation).
+    When defer_scale16=True, the ×16 correction is deferred to the epilogue.
     """
     if use_gfx950_cvt:
-        b0 = _int4_to_bf16x4_i64_gfx950(packed32, [0, 2, 4, 6], arith, vector, scale_val, use_cvt_pk_bf16=use_cvt_pk_bf16)
-        b1 = _int4_to_bf16x4_i64_gfx950(packed32, [1, 3, 5, 7], arith, vector, scale_val, use_cvt_pk_bf16=use_cvt_pk_bf16)
+        b0 = _int4_to_bf16x4_i64_gfx950(packed32, [0, 2, 4, 6], arith, vector, scale_val, use_cvt_pk_bf16=use_cvt_pk_bf16, defer_scale16=defer_scale16)
+        b1 = _int4_to_bf16x4_i64_gfx950(packed32, [1, 3, 5, 7], arith, vector, scale_val, use_cvt_pk_bf16=use_cvt_pk_bf16, defer_scale16=defer_scale16)
         return (b0, b1)
     even, odd = _unpack_int4_to_int8_pair(packed32)
     b0 = _i8x4_in_i32_to_bf16x4_i64(even, arith, vector, scale_val=scale_val)
@@ -775,9 +789,9 @@ def load_b_raw_w4a16_groupwise(
     return (packed32, scale_val)
 
 
-def unpack_b_w4a16_groupwise(packed32, scale_val, arith, vector, use_gfx950_cvt=False, use_cvt_pk_bf16=False):
+def unpack_b_w4a16_groupwise(packed32, scale_val, arith, vector, use_gfx950_cvt=False, use_cvt_pk_bf16=False, defer_scale16=False):
     """Phase 2 of W4A16 groupwise: unpack + scale + convert to bf16."""
-    return unpack_b_w4a16(packed32, arith, vector, scale_val=scale_val, use_gfx950_cvt=use_gfx950_cvt, use_cvt_pk_bf16=use_cvt_pk_bf16)
+    return unpack_b_w4a16(packed32, arith, vector, scale_val=scale_val, use_gfx950_cvt=use_gfx950_cvt, use_cvt_pk_bf16=use_cvt_pk_bf16, defer_scale16=defer_scale16)
 
 
 # ---------------------------------------------------------------------------
