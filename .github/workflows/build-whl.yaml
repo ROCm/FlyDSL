@@ -52,8 +52,14 @@ jobs:
             ${{ inputs.docker_image }}
 
       - name: Validate python_versions input
+        env:
+          PYTHON_VERSIONS: ${{ inputs.python_versions }}
         run: |
-          for ver in ${{ inputs.python_versions }}; do
+          if [[ -z "${PYTHON_VERSIONS}" ]]; then
+            echo "Error: python_versions is empty" >&2
+            exit 1
+          fi
+          for ver in ${PYTHON_VERSIONS}; do
             if ! echo "$ver" | grep -qE '^[0-9]+\.[0-9]+$'; then
               echo "Error: invalid python version '$ver' — must match X.Y (e.g. 3.12)" >&2
               exit 1
