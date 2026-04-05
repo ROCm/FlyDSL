@@ -1765,7 +1765,7 @@ public:
     Value inputIter = makeViewOp.getIter();
     Value inputLayoutValue = makeViewOp.getLayout();
 
-    auto mmaAtom = dyn_cast<MmaAtomTypeInterface>(tiledMmaTy.getMmaAtom());
+    auto mmaAtom = dyn_cast<MmaAtomType>(tiledMmaTy.getMmaAtom());
     if (!mmaAtom)
       return failure();
 
@@ -1901,7 +1901,7 @@ public:
     if (!isNormalForm(cast<TypedValue<IntTupleType>>(shape)))
       return failure();
 
-    auto mmaAtom = dyn_cast<MmaAtomTypeInterface>(tiledMmaTy.getMmaAtom());
+    auto mmaAtom = dyn_cast<MmaAtomType>(tiledMmaTy.getMmaAtom());
     if (!mmaAtom)
       return failure();
 
@@ -1937,7 +1937,7 @@ public:
     if (!tiledMmaTy)
       return failure();
 
-    auto mmaAtom = dyn_cast<MmaAtomTypeInterface>(tiledMmaTy.getMmaAtom());
+    auto mmaAtom = dyn_cast<MmaAtomType>(tiledMmaTy.getMmaAtom());
     if (!mmaAtom)
       return failure();
 
@@ -2069,13 +2069,9 @@ public:
     auto *ctx = rewriter.getContext();
 
     Value mmaAtomVal = op.getMmaAtom();
-    MmaAtomTypeInterface mmaAtomTy;
     if (auto tiledMmaOp = mmaAtomVal.getDefiningOp<MakeTiledMmaOp>()) {
       mmaAtomVal = tiledMmaOp.getMmaAtom();
     }
-    mmaAtomTy = dyn_cast<MmaAtomTypeInterface>(mmaAtomVal.getType());
-    if (!mmaAtomTy)
-      return failure();
 
     Value d = op.getD();
     Value a = op.getA();
@@ -2092,6 +2088,15 @@ public:
     int32_t bRank = bLayoutAttr.rank();
     int32_t cRank = cLayoutAttr.rank();
 
+    if (dRank == 1 && aRank == 1 && bRank == 1 && cRank == 1) {
+      MmaAtomCall::create(rewriter, loc, mmaAtomVal, d, a, b, c);
+      rewriter.eraseOp(op);
+      return success();
+    }
+
+    if (dRank != 3 || cRank != 3 || aRank < 2 || bRank < 2)
+      return failure();
+
     IntTupleBuilder<IntTupleAttr> attrBuilder(ctx);
     auto get_static_product = [&](IntTupleAttr shape) {
       return intTupleProduct(attrBuilder, shape).getLeafAsInt().getValue();
@@ -2104,15 +2109,6 @@ public:
     assert(loop_n == get_static_product(bLayoutAttr.getShape().at(1)) && "Mismatch in loop_n");
     assert(loop_m == get_static_product(cLayoutAttr.getShape().at(1)) && "Mismatch in loop_m");
     assert(loop_n == get_static_product(cLayoutAttr.getShape().at(2)) && "Mismatch in loop_n");
-
-    if (dRank == 1 && aRank == 1 && bRank == 1 && cRank == 1) {
-      MmaAtomCall::create(rewriter, loc, mmaAtomVal, d, a, b, c);
-      rewriter.eraseOp(op);
-      return success();
-    }
-
-    if (dRank != 3 || cRank != 3 || aRank < 2 || bRank < 2)
-      return failure();
 
     auto getSliceCoord = [&](ArrayRef<int32_t> idx) {
       SmallVector<Attribute> coordElems;
@@ -2127,10 +2123,10 @@ public:
     if (aRank == 2 && bRank == 2) {
       auto emitMmaCall2D = [&](int32_t m, int32_t n) {
         Value aSlice = SliceOp::create(rewriter, loc, a, getSliceCoord({m}));
-          Value bSlice = SliceOp::create(rewriter, loc, b, getSliceCoord({n}));
-          Value cSlice = SliceOp::create(rewriter, loc, c, getSliceCoord({m, n}));
-          Value dSlice = SliceOp::create(rewriter, loc, d, getSliceCoord({m, n}));
-          MmaAtomCall::create(rewriter, loc, mmaAtomVal, dSlice, aSlice, bSlice, cSlice);
+        Value bSlice = SliceOp::create(rewriter, loc, b, getSliceCoord({n}));
+        Value cSlice = SliceOp::create(rewriter, loc, c, getSliceCoord({m, n}));
+        Value dSlice = SliceOp::create(rewriter, loc, d, getSliceCoord({m, n}));
+        MmaAtomCall::create(rewriter, loc, mmaAtomVal, dSlice, aSlice, bSlice, cSlice);
       };
 
       int32_t totalIters = loop_m * loop_n;
@@ -2228,11 +2224,11 @@ public:
         bool &visited = mnVisited[m * loop_n + n];
         Value cSrc = visited ? d : c;
         visited = true;
-          Value aSlice = SliceOp::create(rewriter, loc, a, getSliceCoord({m, k}));
-            Value bSlice = SliceOp::create(rewriter, loc, b, getSliceCoord({n, k}));
-            Value cSlice = SliceOp::create(rewriter, loc, cSrc, getSliceCoord({m, n}));
-            Value dSlice = SliceOp::create(rewriter, loc, d, getSliceCoord({m, n}));
-            MmaAtomCall::create(rewriter, loc, mmaAtomVal, dSlice, aSlice, bSlice, cSlice);
+        Value aSlice = SliceOp::create(rewriter, loc, a, getSliceCoord({m, k}));
+        Value bSlice = SliceOp::create(rewriter, loc, b, getSliceCoord({n, k}));
+        Value cSlice = SliceOp::create(rewriter, loc, cSrc, getSliceCoord({m, n}));
+        Value dSlice = SliceOp::create(rewriter, loc, d, getSliceCoord({m, n}));
+        MmaAtomCall::create(rewriter, loc, mmaAtomVal, dSlice, aSlice, bSlice, cSlice);
       };
 
       Value traversalLayoutVal = op.getTraversalLayout();
@@ -2423,6 +2419,7 @@ public:
     VectorType chunkVecTy = VectorType::get({vecWidth}, resVecTy.getElementType());
 
     for (int64_t i = 0; i < numChunks; ++i) {
+      // Compute column-major coordinate over the rest flat dims.
       IntTupleAttr restCoord =
           layoutIdx2CrdColMajor(attrBuilder, attrBuilder.materializeConstantLeaf(i), restFlatShape);
 
@@ -2535,6 +2532,7 @@ public:
     vec = permuteForStore(rewriter, loc, vec, flatShape, flatRank, contigIdx, vecWidth, numChunks);
 
     for (int64_t i = 0; i < numChunks; ++i) {
+      // Compute column-major coordinate over the rest flat dims.
       IntTupleAttr restCoord =
           layoutIdx2CrdColMajor(attrBuilder, attrBuilder.materializeConstantLeaf(i), restFlatShape);
 

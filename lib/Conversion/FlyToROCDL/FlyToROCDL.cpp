@@ -334,8 +334,8 @@ public:
     if (auto vecTy = dyn_cast<VectorType>(loadTy)) {
       auto swizzle = flyPtrTy.getSwizzle();
       if (!swizzle.isTrivialSwizzle()) {
-        int64_t vecBytes = vecTy.getNumElements() *
-                           vecTy.getElementType().getIntOrFloatBitWidth() / 8;
+        int64_t vecBytes =
+            vecTy.getNumElements() * vecTy.getElementType().getIntOrFloatBitWidth() / 8;
         int64_t baseBytes = int64_t{1} << swizzle.getBase();
         if (baseBytes % vecBytes != 0)
           return rewriter.notifyMatchFailure(
@@ -378,8 +378,8 @@ public:
     if (auto vecTy = dyn_cast<VectorType>(value.getType())) {
       auto swizzle = flyPtrTy.getSwizzle();
       if (!swizzle.isTrivialSwizzle()) {
-        int64_t vecBytes = vecTy.getNumElements() *
-                           vecTy.getElementType().getIntOrFloatBitWidth() / 8;
+        int64_t vecBytes =
+            vecTy.getNumElements() * vecTy.getElementType().getIntOrFloatBitWidth() / 8;
         int64_t baseBytes = int64_t{1} << swizzle.getBase();
         if (baseBytes % vecBytes != 0)
           return rewriter.notifyMatchFailure(
@@ -536,10 +536,9 @@ public:
 
   LogicalResult matchAndRewrite(MmaAtomCall op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
-    Type mmaAtomType = op.getMmaAtom().getType();
-    if (!isa<MmaAtomTypeInterface>(mmaAtomType))
-      return rewriter.notifyMatchFailure(op,
-                                         "expected MmaAtomTypeInterface type for mmaAtom operand");
+    auto mmaAtomTy = dyn_cast<MmaAtomType>(op.getMmaAtom().getType());
+    if (!mmaAtomTy)
+      return rewriter.notifyMatchFailure(op, "expected MmaAtomType for mmaAtom operand");
 
     Location loc = op.getLoc();
 
@@ -553,11 +552,11 @@ public:
         !isa<LLVM::LLVMPointerType>(bPtr.getType()) || !isa<LLVM::LLVMPointerType>(cPtr.getType()))
       return rewriter.notifyMatchFailure(op, "expected llvm.ptr operands after type conversion");
 
-    if (auto universalFma = dyn_cast<MmaAtomUniversalFMAType>(mmaAtomType))
+    if (auto universalFma = dyn_cast<MmaOpUniversalFMAType>(mmaAtomTy.getMmaOp()))
       return lowerUniversalFMA(op, rewriter, loc, universalFma, dPtr, aPtr, bPtr, cPtr);
-    else if (auto cdna3Mfma = dyn_cast<fly_rocdl::MmaAtomCDNA3_MFMAType>(mmaAtomType))
+    else if (auto cdna3Mfma = dyn_cast<fly_rocdl::MmaOpCDNA3_MFMAType>(mmaAtomTy.getMmaOp()))
       return lowerCDNA3MFMA(op, rewriter, loc, cdna3Mfma, dPtr, aPtr, bPtr, cPtr);
-    else if (auto gfx1250Wmma = dyn_cast<fly_rocdl::MmaAtomGFX1250_WMMAType>(mmaAtomType))
+    else if (auto gfx1250Wmma = dyn_cast<fly_rocdl::MmaOpGFX1250_WMMAType>(mmaAtomTy.getMmaOp()))
       return lowerGFX1250WMMA(op, rewriter, loc, gfx1250Wmma, dPtr, aPtr, bPtr, cPtr);
 
     return rewriter.notifyMatchFailure(op, "unsupported MmaAtom type");
@@ -565,8 +564,8 @@ public:
 
 private:
   LogicalResult lowerUniversalFMA(MmaAtomCall op, ConversionPatternRewriter &rewriter, Location loc,
-                                  MmaAtomUniversalFMAType atomTy, Value dPtr, Value aPtr,
-                                  Value bPtr, Value cPtr) const {
+                                  MmaOpUniversalFMAType atomTy, Value dPtr, Value aPtr, Value bPtr,
+                                  Value cPtr) const {
     Type elemTy = atomTy.getElemTy();
 
     Value a = LLVM::LoadOp::create(rewriter, loc, elemTy, aPtr);
@@ -660,7 +659,7 @@ private:
   }
 
   LogicalResult lowerCDNA3MFMA(MmaAtomCall op, ConversionPatternRewriter &rewriter, Location loc,
-                               fly_rocdl::MmaAtomCDNA3_MFMAType atomTy, Value dPtr, Value aPtr,
+                               fly_rocdl::MmaOpCDNA3_MFMAType atomTy, Value dPtr, Value aPtr,
                                Value bPtr, Value cPtr) const {
     int32_t m = atomTy.getM();
     int32_t n = atomTy.getN();
@@ -798,19 +797,19 @@ private:
     Value res;
     if constexpr (Variant == WmmaVariant::ModsAllReuse) {
       res = WmmaOp::create(rewriter, loc, accTy,
-                            /*signA=*/false, a, /*signB=*/false, b,
-                            /*modC=*/(uint16_t)0, c)
+                           /*signA=*/false, a, /*signB=*/false, b,
+                           /*modC=*/(uint16_t)0, c)
                 .getResult();
     } else if constexpr (Variant == WmmaVariant::ModsC) {
       res = WmmaOp::create(rewriter, loc, accTy, a, b,
-                            /*modC=*/(uint16_t)0, c,
-                            /*reuseA=*/false, /*reuseB=*/false)
+                           /*modC=*/(uint16_t)0, c,
+                           /*reuseA=*/false, /*reuseB=*/false)
                 .getResult();
     } else {
       static_assert(Variant == WmmaVariant::ModsABClamp);
       res = WmmaOp::create(rewriter, loc, accTy,
-                            /*signA=*/false, a, /*signB=*/false, b, c,
-                            /*reuseA=*/false, /*reuseB=*/false, /*clamp=*/false)
+                           /*signA=*/false, a, /*signB=*/false, b, c,
+                           /*reuseA=*/false, /*reuseB=*/false, /*clamp=*/false)
                 .getResult();
     }
     LLVM::StoreOp::create(rewriter, loc, res, dPtr);
@@ -819,7 +818,7 @@ private:
   }
 
   LogicalResult lowerGFX1250WMMA(MmaAtomCall op, ConversionPatternRewriter &rewriter, Location loc,
-                                 fly_rocdl::MmaAtomGFX1250_WMMAType atomTy, Value dPtr, Value aPtr,
+                                 fly_rocdl::MmaOpGFX1250_WMMAType atomTy, Value dPtr, Value aPtr,
                                  Value bPtr, Value cPtr) const {
     int32_t m = atomTy.getM();
     int32_t n = atomTy.getN();
@@ -842,8 +841,8 @@ private:
 
 #define DISPATCH_WMMA(M_, K_, PRED, OP, VARIANT)                                                   \
   if (m == M_ && n == M_ && k == K_ && (PRED))                                                     \
-    return emitWmma<ROCDL::OP, WmmaVariant::VARIANT>(op, rewriter, loc, abTyA, abTyB, accTy,       \
-                                                     aPtr, bPtr, cPtr, dPtr);
+    return emitWmma<ROCDL::OP, WmmaVariant::VARIANT>(op, rewriter, loc, abTyA, abTyB, accTy, aPtr, \
+                                                     bPtr, cPtr, dPtr);
 
 #define DISPATCH_WMMA_FP8(K_, ACC_PRED, ACC_PREFIX)                                                \
   DISPATCH_WMMA(16, K_, isFP8(elemTyA) && isFP8(elemTyB) && ACC_PRED,                              \
@@ -1073,8 +1072,7 @@ public:
 
   void runOnOperation() override {
     getOperation()->walk([&](LLVM::LLVMFuncOp func) {
-      auto clusterAttr =
-          func->getAttrOfType<StringAttr>("rocdl.cluster_dims");
+      auto clusterAttr = func->getAttrOfType<StringAttr>("rocdl.cluster_dims");
       if (!clusterAttr)
         return;
 

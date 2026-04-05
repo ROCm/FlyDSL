@@ -612,6 +612,33 @@ class CopyAtom(BuiltinDslType):
         return static(self.type.tv_layout_ref)
 
 
+@ir.register_value_caster(MmaAtomType.static_typeid, replace=True)
+class MmaAtom(BuiltinDslType):
+    @property
+    def thr_layout(self):
+        return static(self.type.thr_layout)
+
+    @property
+    def thr_id(self):
+        return self.thr_layout
+
+    @property
+    def shape_mnk(self):
+        return static(self.type.shape_mnk)
+
+    @property
+    def layout_A_tv(self):
+        return static(self.type.tv_layout_a)
+
+    @property
+    def layout_B_tv(self):
+        return static(self.type.tv_layout_b)
+
+    @property
+    def layout_C_tv(self):
+        return static(self.type.tv_layout_c)
+
+
 @ir.register_value_caster(TiledCopyType.static_typeid, replace=True)
 class TiledCopy(BuiltinDslType):
     @property

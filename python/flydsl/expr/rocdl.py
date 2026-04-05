@@ -17,8 +17,8 @@ Example:
     >>> rocdl.barrier()
 """
 
-from .._mlir._mlir_libs._mlirDialectsFlyROCDL import CopyOpCDNA3BufferCopyType, MmaAtomCDNA3_MFMAType
-from .._mlir._mlir_libs._mlirDialectsFlyROCDL import MmaAtomGFX1250_WMMAType
+from .._mlir._mlir_libs._mlirDialectsFlyROCDL import CopyOpCDNA3BufferCopyType, MmaOpCDNA3_MFMAType
+from .._mlir._mlir_libs._mlirDialectsFlyROCDL import MmaOpGFX1250_WMMAType
 from .._mlir.dialects.rocdl import *  # noqa: F401,F403
 from .._mlir.extras import types as T
 
@@ -51,7 +51,7 @@ def MFMA(m, n, k, elem_type, elem_type_b=None, elem_type_acc=None):
     ty_acc = (
         ty if elem_type_acc is None else (elem_type_acc.ir_type if hasattr(elem_type_acc, "ir_type") else elem_type_acc)
     )
-    return MmaAtomCDNA3_MFMAType.get(m, n, k, ty, ty_b, ty_acc)
+    return MmaOpCDNA3_MFMAType.get(m, n, k, ty, ty_b, ty_acc)
 
 
 def WMMA(m, n, k, elem_type, elem_type_b=None, elem_type_acc=None):
@@ -74,7 +74,7 @@ def WMMA(m, n, k, elem_type, elem_type_b=None, elem_type_acc=None):
 
     ty_b = ty if elem_type_b is None else (elem_type_b.ir_type if hasattr(elem_type_b, 'ir_type') else elem_type_b)
     ty_acc = ty if elem_type_acc is None else (elem_type_acc.ir_type if hasattr(elem_type_acc, 'ir_type') else elem_type_acc)
-    return MmaAtomGFX1250_WMMAType.get(m, n, k, ty, ty_b, ty_acc)
+    return MmaOpGFX1250_WMMAType.get(m, n, k, ty, ty_b, ty_acc)
 
 
 def make_buffer_tensor(memref, alignment=4, loc=None, ip=None):
@@ -670,9 +670,9 @@ __all__ = [
     "BufferCopy64b",
     "BufferCopy128b",
     # MMA atom types
-    "MmaAtomCDNA3_MFMAType",
+    "MmaOpCDNA3_MFMAType",
     "MFMA",
-    "MmaAtomGFX1250_WMMAType",
+    "MmaOpGFX1250_WMMAType",
     "WMMA",
     # Convenience wrappers
     "make_buffer_tensor",

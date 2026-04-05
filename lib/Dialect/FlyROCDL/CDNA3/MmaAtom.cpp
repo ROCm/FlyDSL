@@ -32,35 +32,35 @@ namespace cdna4 {}
 
 namespace mlir::fly_rocdl {
 
-bool MmaAtomCDNA3_MFMAType::isStatic() const { return true; }
+bool MmaOpCDNA3_MFMAType::isStatic() const { return true; }
 
-Value MmaAtomCDNA3_MFMAType::rebuildStaticValue(OpBuilder &builder, Location loc,
-                                                Value currentValue) const {
+Value MmaOpCDNA3_MFMAType::rebuildStaticValue(OpBuilder &builder, Location loc,
+                                              Value currentValue) const {
   if (currentValue && isa<MakeMmaAtomOp>(currentValue.getDefiningOp()))
     return nullptr;
-  return MakeMmaAtomOp::create(builder, loc, Type(*this));
+  return MakeMmaAtomOp::create(builder, loc, MmaAtomType::get(*this));
 }
 
-Attribute MmaAtomCDNA3_MFMAType::getThrLayout() const { return FxLayout(FxC(64), FxC(1)); }
+Attribute MmaOpCDNA3_MFMAType::getThrLayout() const { return FxLayout(FxC(64), FxC(1)); }
 
-Attribute MmaAtomCDNA3_MFMAType::getShapeMNK() const {
+Attribute MmaOpCDNA3_MFMAType::getShapeMNK() const {
   return IntTupleAttr::get(ArrayAttr::get(getContext(), {FxC(getM()), FxC(getN()), FxC(getK())}));
 }
 
-Type MmaAtomCDNA3_MFMAType::getValTypeA() const { return getElemTyA(); }
-Type MmaAtomCDNA3_MFMAType::getValTypeB() const { return getElemTyB(); }
-Type MmaAtomCDNA3_MFMAType::getValTypeC() const { return getElemTyAcc(); }
-Type MmaAtomCDNA3_MFMAType::getValTypeD() const { return getElemTyAcc(); }
+Type MmaOpCDNA3_MFMAType::getValTypeA() const { return getElemTyA(); }
+Type MmaOpCDNA3_MFMAType::getValTypeB() const { return getElemTyB(); }
+Type MmaOpCDNA3_MFMAType::getValTypeC() const { return getElemTyAcc(); }
+Type MmaOpCDNA3_MFMAType::getValTypeD() const { return getElemTyAcc(); }
 
-Attribute MmaAtomCDNA3_MFMAType::getThrValLayoutA() const {
+Attribute MmaOpCDNA3_MFMAType::getThrValLayoutA() const {
   return cdna3::getThrValLayoutAB(getContext(), getM(), getN(), getK(), getElemTyA(), getElemTyB(),
                                   getElemTyAcc());
 }
-Attribute MmaAtomCDNA3_MFMAType::getThrValLayoutB() const {
+Attribute MmaOpCDNA3_MFMAType::getThrValLayoutB() const {
   return cdna3::getThrValLayoutAB(getContext(), getM(), getN(), getK(), getElemTyA(), getElemTyB(),
                                   getElemTyAcc());
 }
-Attribute MmaAtomCDNA3_MFMAType::getThrValLayoutC() const {
+Attribute MmaOpCDNA3_MFMAType::getThrValLayoutC() const {
   int M = getM();
   int N = getN();
 
@@ -72,9 +72,9 @@ Attribute MmaAtomCDNA3_MFMAType::getThrValLayoutC() const {
                   FxStride(FxThr(M, ValM0), FxVal(1, ValM0 * GroupM)));
 }
 
-LogicalResult MmaAtomCDNA3_MFMAType::verify(function_ref<InFlightDiagnostic()> emitError, int32_t m,
-                                            int32_t n, int32_t k, Type elemTyA, Type elemTyB,
-                                            Type elemTyAcc) {
+LogicalResult MmaOpCDNA3_MFMAType::verify(function_ref<InFlightDiagnostic()> emitError, int32_t m,
+                                          int32_t n, int32_t k, Type elemTyA, Type elemTyB,
+                                          Type elemTyAcc) {
   assert(m == n && "M and N must be equal");
   if (m != n) {
     return emitError() << "invalid MNK dimensions for CDNA3 MFMA: " << m << "x" << n << "x" << k;
