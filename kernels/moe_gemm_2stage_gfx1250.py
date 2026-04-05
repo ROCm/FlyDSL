@@ -709,6 +709,7 @@ def _compile_stage1_dense_kernel_impl(
     doweight_stage1: bool,
     out_dtype: str,
     waves_per_eu: int | None,
+    expert_sched_mode: bool = True,
 ):
     """Compile dense stage1 single kernel: route-pack + TDM + WMMA + epilog."""
     import flydsl.compiler as flyc
@@ -1077,6 +1078,11 @@ def _compile_stage1_dense_kernel_impl(
             ir=ir,
         )
 
+    if expert_sched_mode:
+        launch_fp16_stage1_single.compile_hints["llvm_options"] = {
+            "amdgpu-expert-scheduling-mode": True,
+        }
+
     return launch_fp16_stage1_single
 
 
@@ -1096,6 +1102,7 @@ def _compile_stage2_dense_kernel_impl(
     out_dtype: str,
     accumulate: bool,
     waves_per_eu: int | None,
+    expert_sched_mode: bool = True,
 ):
     """Compile fp16 stage2 single kernel: route-pack + TDM + WMMA + epilog."""
     import flydsl.compiler as flyc
@@ -1456,6 +1463,11 @@ def _compile_stage2_dense_kernel_impl(
             ir=ir,
         )
 
+    if expert_sched_mode:
+        launch_fp16_stage2_single.compile_hints["llvm_options"] = {
+            "amdgpu-expert-scheduling-mode": True,
+        }
+
     return launch_fp16_stage2_single
 
 
@@ -1476,6 +1488,7 @@ def _compile_stage1_mxscale_kernel_impl(
     out_dtype: str,
     waves_per_eu: int | None,
     data_format: str = "fp8",
+    expert_sched_mode: bool = True,
 ):
     """Compile mxscale stage1 single kernel (route-pack + TDM + WMMA_SCALE + epilog)."""
     import flydsl.compiler as flyc
@@ -2110,6 +2123,11 @@ def _compile_stage1_mxscale_kernel_impl(
             ir=ir,
         )
 
+    if expert_sched_mode:
+        launch_mxscale_stage1_single.compile_hints["llvm_options"] = {
+            "amdgpu-expert-scheduling-mode": True,
+        }
+
     return launch_mxscale_stage1_single
 
 
@@ -2131,6 +2149,7 @@ def _compile_stage2_mxscale_kernel_impl(
     accumulate: bool,
     waves_per_eu: int | None,
     data_format: str = "fp8",
+    expert_sched_mode: bool = True,
 ):
     """Compile mxscale stage2 single kernel (route-pack + TDM + WMMA_SCALE + epilog)."""
     import flydsl.compiler as flyc
@@ -2749,6 +2768,11 @@ def _compile_stage2_mxscale_kernel_impl(
             ir=ir,
         )
 
+    if expert_sched_mode:
+        launch_mxscale_stage2_single.compile_hints["llvm_options"] = {
+            "amdgpu-expert-scheduling-mode": True,
+        }
+
     return launch_mxscale_stage2_single
 
 
@@ -2767,6 +2791,7 @@ def _compile_moe_stage1_kernel(
     data_format: str,
     out_dtype: str,
     waves_per_eu: int | None,
+    expert_sched_mode: bool = True,
 ):
     if data_format not in ("fp16", "bf16", "fp4", "fp8", "a8w4"):
         raise ValueError(f"Unsupported stage1 data_format: {data_format!r}")
@@ -2791,6 +2816,7 @@ def _compile_moe_stage1_kernel(
             doweight_stage1=bool(doweight_stage1),
             out_dtype=out_dtype,
             waves_per_eu=waves_per_eu,
+            expert_sched_mode=expert_sched_mode,
         )
         if data_format == "bf16":
             return _bf16_to_f16_wrapper(exe, x_arg=1, w_arg=2)
@@ -2812,6 +2838,7 @@ def _compile_moe_stage1_kernel(
             out_dtype=out_dtype,
             waves_per_eu=waves_per_eu,
             data_format=data_format,
+            expert_sched_mode=expert_sched_mode,
         )
     raise ValueError(f"Unsupported stage1 data_format: {data_format!r}")
 
@@ -2831,6 +2858,7 @@ def _compile_moe_stage2_kernel(
     out_dtype: str,
     accumulate: bool,
     waves_per_eu: int | None,
+    expert_sched_mode: bool = True,
 ):
     if data_format not in ("fp16", "bf16", "fp4", "fp8", "a8w4"):
         raise ValueError(f"Unsupported stage2 data_format: {data_format!r}")
@@ -2856,6 +2884,7 @@ def _compile_moe_stage2_kernel(
             out_dtype=out_dtype,
             accumulate=bool(accumulate),
             waves_per_eu=waves_per_eu,
+            expert_sched_mode=expert_sched_mode,
         )
         if data_format == "bf16":
             return _bf16_to_f16_wrapper(exe, x_arg=1, w_arg=2)
@@ -2878,6 +2907,7 @@ def _compile_moe_stage2_kernel(
             accumulate=bool(accumulate),
             waves_per_eu=waves_per_eu,
             data_format=data_format,
+            expert_sched_mode=expert_sched_mode,
         )
     raise ValueError(f"Unsupported stage2 data_format: {data_format!r}")
 
@@ -2898,6 +2928,7 @@ def compile_moe_gemm1(
     out_dtype: str = "f16",
     use_cshuffle_epilog: bool | None = None,
     waves_per_eu: int | None = None,
+    expert_sched_mode: bool = True,
 ):
     _require_gfx1250()
     if waves_per_eu is not None and int(waves_per_eu) < 1:
@@ -2937,6 +2968,7 @@ def compile_moe_gemm1(
             data_format=in_dtype,
             out_dtype=out_dtype,
             waves_per_eu=waves_per_eu,
+            expert_sched_mode=expert_sched_mode,
         )
 
 
@@ -2957,6 +2989,7 @@ def compile_moe_gemm2(
     use_cshuffle_epilog: bool | None = None,
     accumulate: bool = True,
     waves_per_eu: int | None = None,
+    expert_sched_mode: bool = True,
 ):
     _require_gfx1250()
     if waves_per_eu is not None and int(waves_per_eu) < 1:
@@ -2998,6 +3031,7 @@ def compile_moe_gemm2(
             out_dtype=out_dtype,
             accumulate=bool(accumulate),
             waves_per_eu=waves_per_eu,
+            expert_sched_mode=expert_sched_mode,
         )
 
 
@@ -3019,6 +3053,7 @@ def compile_moe_gemm2_ex(
     mode: str = MoeGemm2Mode.ATOMIC,
     valid_mask=None,
     zero_intermediate: bool = True,
+    expert_sched_mode: bool = True,
 ):
     _require_gfx1250()
     if in_dtype in ("fp4", "fp8", "fp16", "bf16", "a8w4"):
@@ -3038,6 +3073,7 @@ def compile_moe_gemm2_ex(
                 use_cshuffle_epilog=use_cshuffle_epilog,
                 accumulate=False,
                 waves_per_eu=waves_per_eu,
+                expert_sched_mode=expert_sched_mode,
             )
             out_s = str(out_dtype).strip().lower()
             if out_s in ("f16", "fp16", "half"):
@@ -3078,6 +3114,7 @@ def compile_moe_gemm2_ex(
             use_cshuffle_epilog=use_cshuffle_epilog,
             accumulate=True,
             waves_per_eu=waves_per_eu,
+            expert_sched_mode=expert_sched_mode,
         )
 
     return _compile_with_optional_wpe(
