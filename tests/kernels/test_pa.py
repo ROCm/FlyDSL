@@ -12,12 +12,18 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
-import pandas as pd
 import pytest
 import torch
-import triton
 
 try:
+    import triton
+
+    HAS_TRITON = True
+except ImportError:
+    HAS_TRITON = False
+
+try:
+    import pandas as pd
     import aiter
     from aiter import dtypes
     from aiter import per_tensor_quant, pertoken_quant
@@ -28,6 +34,16 @@ try:
 except Exception:
     HAS_AITER = False
 
+# Check for the sliding-window reduce helper from aiter (only available with gluon support)
+try:
+    from aiter.ops.triton.gluon.pa_decode_gluon import (
+        _paged_attention_decode_v2_reduce_kernel_wrapper,
+    )
+
+    HAS_AITER_SW_REDUCE = True
+except Exception:
+    HAS_AITER_SW_REDUCE = False
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
@@ -35,10 +51,10 @@ if str(REPO_ROOT) not in sys.path:
 try:
     from triton.experimental import gluon  # noqa: F401
     from triton.experimental.gluon import language as gl  # noqa: F401
-    HAS_GLUON = False
+
+    HAS_GLUON = True
 except ImportError:
     HAS_GLUON = False
-    print("Warning: Triton Gluon is unavailable; Gluon reference checks will fail.")
 
 try:
     from kernels.pa_decode_fp8 import (
@@ -50,10 +66,7 @@ except ImportError as exc:
     HAS_FLYDSL_PS = False
     print(f"Warning: FlyDSL PA decode PS not available: {exc}")
 
-torch.set_default_device("cuda")
-torch.set_printoptions(sci_mode=False)
-
-TRITON_VERSION = triton.__version__
+TRITON_VERSION = triton.__version__ if HAS_TRITON else "unknown"
 TEST_NAME = "ps_accuracy"
 UNIFORM_RANGE = (-1, 1)
 
@@ -1060,7 +1073,7 @@ def run_multi_pa_decode_ps_test(
 
 
 def parse_arg_and_run_test(sample_rate0: float = None, *, output_tag: str = TEST_NAME) -> None:
-    print(f"Triton version: {triton.__version__}")
+    print(f"Triton version: {TRITON_VERSION}")
     parser = create_argument_parser()
     running_via_pytest = "pytest" in sys.argv[0] or sys.argv[0].endswith("py.test")
     args = parser.parse_args([] if running_via_pytest else None)
@@ -1095,11 +1108,12 @@ def parse_arg_and_run_test(sample_rate0: float = None, *, output_tag: str = TEST
         sample_rate=sample_rate,
         sliding_window_options=sliding_window_options,
     )
-    output_file = (
-        f"run_pa_decode_ps_test.{output_tag}.block_size_{block_sizes[0]}.triton.{TRITON_VERSION}.csv"
-    )
-    results_df.to_csv(output_file, index=False)
-    print(f"\nResults saved to {output_file}")
+    if not running_via_pytest:
+        output_file = (
+            f"run_pa_decode_ps_test.{output_tag}.block_size_{block_sizes[0]}.triton.{TRITON_VERSION}.csv"
+        )
+        results_df.to_csv(output_file, index=False)
+        print(f"\nResults saved to {output_file}")
     print(f"\nSummary:\n{results_df}")
     flydsl_errors = int(results_df["err_flydsl_ps"].sum())
 
@@ -1163,11 +1177,12 @@ def sliding_window_accuracy_test() -> None:
     TRANS_V_OPTIONS = [True]
     KV_VARLEN_OPTIONS = [True]
     BLOCK_SIZE_OPTIONS = [1024]
-    SLIDING_WINDOW_OPTIONS = [0, 128, 1023]
+    SLIDING_WINDOW_OPTIONS = [0, 128, 1023] if HAS_AITER_SW_REDUCE else [0]
     parse_arg_and_run_test(output_tag="ps_sliding_window_accuracy")
 
 
 @pytest.mark.skipif(not HAS_AITER, reason="aiter not available")
+@pytest.mark.skipif(not HAS_FLYDSL_PS, reason="FlyDSL PA decode PS not available")
 @pytest.mark.parametrize("case_set_name", CASE_SET_NAME_OPTIONS)
 def test_multi_case_set(case_set_name: str) -> None:
     if case_set_name == "normal_accuracy":
