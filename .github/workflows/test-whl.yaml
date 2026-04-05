@@ -26,7 +26,8 @@ jobs:
       - name: Download wheel artifacts
         uses: actions/download-artifact@v4
         with:
-          name: flydsl-wheels
+          pattern: flydsl-wheels-*
+          merge-multiple: true
           path: dist
 
       - name: Start GPU test container

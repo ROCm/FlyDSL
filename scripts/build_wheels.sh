@@ -8,7 +8,7 @@ cd "${REPO_ROOT}"
 
 usage() {
   cat <<'EOF'
-Build FlyDSL wheels for Python 3.10 and 3.12.
+Build FlyDSL wheels for specified Python versions.
 
 Usage:
   bash scripts/build_wheels.sh [--skip-build] [--install-deps]
@@ -17,8 +17,9 @@ Required env:
   MLIR_PATH    path to llvm-project build (defaults to ./llvm-project/mlir_install)
 
 Other knobs:
-  FLY_REBUILD=1|auto|0   (default: 1)
-  EXPECTED_GLIBC=2.35    (default: 2.35, set ALLOW_ANY_GLIBC=1 to skip check)
+  PYTHON_VERSIONS="3.10 3.12"  space-separated Python versions to build (default: "3.10 3.12")
+  FLY_REBUILD=1|auto|0        (default: 1)
+  EXPECTED_GLIBC=2.35         (default: 2.35, set ALLOW_ANY_GLIBC=1 to skip check)
 EOF
 }
 
@@ -38,15 +39,16 @@ FLY_REBUILD="${FLY_REBUILD:-1}"
 EXPECTED_GLIBC="${EXPECTED_GLIBC:-2.35}"
 ALLOW_ANY_GLIBC="${ALLOW_ANY_GLIBC:-0}"
 
-PY310_BIN="${PY310_BIN:-python3.10}"
-PY312_BIN="${PY312_BIN:-python3.12}"
+PYTHON_VERSIONS="${PYTHON_VERSIONS:-3.10 3.12}"
+
+# Validate that PYTHON_VERSIONS contains at least one version.
+read -r -a _fly_python_versions <<< "${PYTHON_VERSIONS}"
+if [[ ${#_fly_python_versions[@]} -eq 0 ]]; then
+  echo "Error: PYTHON_VERSIONS is empty; set it to at least one Python version (e.g. '3.10')." >&2
+  exit 1
+fi
 
 VENV_ROOT="${VENV_ROOT:-${REPO_ROOT}/.venvs/release}"
-VENV_310="${VENV_ROOT}/cp310"
-VENV_312="${VENV_ROOT}/cp312"
-
-FLY_BUILD_DIR_310="${FLY_BUILD_DIR_310:-build-fly/build_py310}"
-FLY_BUILD_DIR_312="${FLY_BUILD_DIR_312:-build-fly/build_py312}"
 
 if [[ -z "${MLIR_PATH:-}" ]]; then
   MLIR_PATH="${REPO_ROOT}/llvm-project/mlir_install"
@@ -116,23 +118,27 @@ ensure_glibc() {
 
 ensure_python_bins() {
   local missing=0
-  for py in "${PY310_BIN}" "${PY312_BIN}"; do
-    if ! command -v "${py}" >/dev/null 2>&1; then
-      echo "Missing: ${py}" >&2
+  for ver in ${PYTHON_VERSIONS}; do
+    local pybin="python${ver}"
+    if ! command -v "${pybin}" >/dev/null 2>&1; then
+      echo "Missing: ${pybin}" >&2
       missing=1
     fi
   done
 
   if [[ "${missing}" == "1" ]]; then
     local pkgs=()
-    command -v "${PY310_BIN}" >/dev/null 2>&1 || pkgs+=( python3.10 python3.10-dev python3.10-venv )
-    command -v "${PY312_BIN}" >/dev/null 2>&1 || pkgs+=( python3.12 python3.12-dev python3.12-venv )
+    for ver in ${PYTHON_VERSIONS}; do
+      local pybin="python${ver}"
+      command -v "${pybin}" >/dev/null 2>&1 || pkgs+=( "python${ver}" "python${ver}-dev" "python${ver}-venv" )
+    done
     [[ "${#pkgs[@]}" -eq 0 ]] || apt_install_if_possible "${pkgs[@]}" || true
   fi
 
-  for py in "${PY310_BIN}" "${PY312_BIN}"; do
-    if ! command -v "${py}" >/dev/null 2>&1; then
-      echo "Error: Python not found: ${py}" >&2
+  for ver in ${PYTHON_VERSIONS}; do
+    local pybin="python${ver}"
+    if ! command -v "${pybin}" >/dev/null 2>&1; then
+      echo "Error: Python not found: ${pybin}" >&2
       exit 1
     fi
   done
@@ -192,8 +198,13 @@ main() {
     rm -rf dist
     mkdir -p dist
 
-    build_one "${PY310_BIN}" "${VENV_310}" "${FLY_BUILD_DIR_310}" "cp310"
-    build_one "${PY312_BIN}" "${VENV_312}" "${FLY_BUILD_DIR_312}" "cp312"
+    for ver in ${PYTHON_VERSIONS}; do
+      local py_tag="cp${ver//./}"  # e.g., 3.13 -> cp313
+      local pybin="python${ver}"
+      local venv="${VENV_ROOT}/${py_tag}"
+      local build_dir="build-fly/build_py${ver//./}"  # e.g., build-fly/build_py313
+      build_one "${pybin}" "${venv}" "${build_dir}" "${py_tag}"
+    done
   fi
 
   echo ""
