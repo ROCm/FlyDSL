@@ -2,7 +2,7 @@
 
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm as llvm_dialect
-from flydsl.expr import arith, buffer_ops, gpu, tdm_ops, vector
+from flydsl.expr import arith, buffer_ops, gpu, rocdl, tdm_ops, vector
 from flydsl.expr.arith import _to_raw as _raw
 from flydsl.expr.typing import T
 from flydsl.utils.smem_allocator import (
@@ -82,6 +82,17 @@ def extract_lds_base_idx(smem_ptr):
     return _memref.extract_aligned_pointer_as_index(raw_memref)
 
 
+def _raw_lds_ptr(lds_base_idx, byte_offset):
+    """Materialize an LLVM LDS pointer from a pre-extracted byte base."""
+    from flydsl._mlir.dialects import llvm as _llvm
+    from flydsl.expr.arith import ArithValue as _AV
+
+    lds_ptr_ty = ir.Type.parse("!llvm.ptr<3>")
+    total_byte = _AV(lds_base_idx) + byte_offset
+    addr_i32 = _raw(arith.index_cast(T.i32, total_byte))
+    return _llvm.inttoptr(lds_ptr_ty, addr_i32)
+
+
 def lds_load_b128_raw(lds_base_idx, byte_offset):
     """Load 16 bytes from LDS using a pre-extracted base index (raw LLVM).
 
@@ -89,14 +100,16 @@ def lds_load_b128_raw(lds_base_idx, byte_offset):
         lds_base_idx: Index value from ``extract_lds_base_idx``.
         byte_offset: Byte offset (index-type) relative to the base.
     """
-    from flydsl._mlir.dialects import llvm as _llvm
-    from flydsl.expr.arith import ArithValue as _AV
-
-    lds_ptr_ty = ir.Type.parse("!llvm.ptr<3>")
-    total_byte = _AV(lds_base_idx) + byte_offset
-    addr_i32 = _raw(arith.index_cast(T.i32, total_byte))
-    ptr_val = _llvm.inttoptr(lds_ptr_ty, addr_i32)
+    ptr_val = _raw_lds_ptr(lds_base_idx, byte_offset)
     return llvm_dialect.load(ir.VectorType.get([4], ir.IntegerType.get_signless(32)), ptr_val)
+
+
+def lds_transpose_load_raw(result_type, lds_base_idx, byte_offset):
+    """Transpose-load 16 bytes from LDS using a pre-extracted base index."""
+    from flydsl._mlir.dialects import rocdl as _rocdl
+
+    ptr_val = _raw_lds_ptr(lds_base_idx, byte_offset)
+    return _rocdl.ds_load_tr16_b128(result_type, ptr_val)
 
 
 def lds_store_b128_raw(lds_base_idx, byte_offset, data):
@@ -107,13 +120,7 @@ def lds_store_b128_raw(lds_base_idx, byte_offset, data):
         byte_offset: Byte offset (index-type) relative to the base.
         data: Raw 128-bit LLVM value to store.
     """
-    from flydsl._mlir.dialects import llvm as _llvm
-    from flydsl.expr.arith import ArithValue as _AV
-
-    lds_ptr_ty = ir.Type.parse("!llvm.ptr<3>")
-    total_byte = _AV(lds_base_idx) + byte_offset
-    addr_i32 = _raw(arith.index_cast(T.i32, total_byte))
-    ptr_val = _llvm.inttoptr(lds_ptr_ty, addr_i32)
+    ptr_val = _raw_lds_ptr(lds_base_idx, byte_offset)
     llvm_dialect.store(data, ptr_val)
 
 
@@ -127,6 +134,37 @@ def pipeline_fence(outstanding=0, use_cluster=False):
         gpu.cluster_barrier()
     else:
         gpu.barrier()
+
+
+WGP_BARRIER_ID = -1
+
+
+def pipeline_fence_signal(outstanding=0, use_cluster=False):
+    """Signal half of a split barrier fence.
+
+    Issues ``s_wait_tensorcnt`` then ``s_barrier_signal -1``.
+    The matching ``pipeline_fence_wait`` must be called later
+    (typically mid-compute) before reading the LDS data.
+
+    When *use_cluster* is True the intra-WG barrier is still required
+    so that all waves' TDM loads are visible before any wave reads LDS.
+    The cluster barrier is layered on top for inter-WG synchronisation.
+    """
+    tdm_ops.tensor_wait(outstanding)
+    rocdl.s_barrier_signal(WGP_BARRIER_ID)
+    if use_cluster:
+        gpu.cluster_signal_once_per_wg()
+
+
+def pipeline_fence_wait(use_cluster=False):
+    """Wait half of a split barrier fence.
+
+    Issues ``s_barrier_wait -1``.  Must be preceded by a matching
+    ``pipeline_fence_signal`` from all waves in the workgroup.
+    """
+    rocdl.s_barrier_wait(WGP_BARRIER_ID)
+    if use_cluster:
+        gpu.cluster_wait()
 
 
 def store_acc_vec8_to_lds(memref, base_elem_off, imm_elem_off, acc_vec8,
@@ -208,6 +246,7 @@ __all__ = [
     # Raw LLVM path
     "extract_lds_base_idx",
     "lds_load_b128_raw",
+    "lds_transpose_load_raw",
     "lds_store_b128_raw",
     # Pipeline
     "pipeline_fence",
