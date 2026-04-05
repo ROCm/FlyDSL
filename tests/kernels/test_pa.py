@@ -1,322 +1,1197 @@
-# SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2025 FlyDSL Project Contributors
+# SPDX-License-Identifier: MIT
+# Copyright (C) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 
-"""PA Decode FP8 — FlyDSL vs Gluon, with Gluon reduce + one-shot + PS modes."""
-import sys, os, torch, math, logging, random, gc
+"""PS-only paged-attention regression harness."""
+
+from __future__ import annotations
+
+import argparse
+import random
+import sys
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple, Union
+
+import numpy as np
 import pytest
+import torch
 
-pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
+try:
+    import triton
 
-sys.path.insert(0, 'build-fly/python_packages'); sys.path.insert(1, '.')
-os.environ['FLYDSL_RUNTIME_ENABLE_CACHE'] = '1'
-logging.basicConfig(level=logging.INFO, format='%(message)s')
+    HAS_TRITON = True
+except ImportError:
+    HAS_TRITON = False
 
-aiter = pytest.importorskip("aiter", reason="aiter is not installed, skipping PA tests")
+try:
+    import pandas as pd
+    import aiter
+    from aiter import dtypes
+    from aiter import per_tensor_quant, pertoken_quant
+    from aiter.ops.triton.gluon.pa_decode_gluon import get_recommended_splits
+    from aiter.test_common import checkAllclose
 
-from tests.test_common import run_perftest, verify_output, checkAllclose
-from kernels.pa_decode_fp8 import build_pa_decode_module, BLOCK_THREADS, QUERY_GROUP_SIZE, HEAD_SIZE, KV_COMPUTE_BLOCK
-import kernels.pa_decode_fp8 as _pa
-from flydsl.compiler.kernel_function import CompilationContext
-from flydsl._mlir import ir as _ir
-import flydsl.compiler as flyc, flydsl.expr as fx
-from flydsl.expr import arith
-from flydsl.expr.typing import T
-from aiter.ops.triton.gluon.pa_decode_gluon import (
-    pa_decode_gluon, get_recommended_splits,
-    _paged_attention_decode_v2_reduce_kernel_wrapper,
-)
-from aiter import per_tensor_quant, dtypes as aiter_dtypes
+    HAS_AITER = True
+except Exception:
+    HAS_AITER = False
 
-CPSZ = 256; QG = QUERY_GROUP_SIZE
-fp8 = torch.float8_e4m3fnuz; bf16 = torch.bfloat16; dev = 'cuda'
+# Check for the sliding-window reduce helper from aiter (only available with gluon support)
+try:
+    from aiter.ops.triton.gluon.pa_decode_gluon import (
+        _paged_attention_decode_v2_reduce_kernel_wrapper,
+    )
+
+    HAS_AITER_SW_REDUCE = True
+except Exception:
+    HAS_AITER_SW_REDUCE = False
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+try:
+    from triton.experimental import gluon  # noqa: F401
+    from triton.experimental.gluon import language as gl  # noqa: F401
+
+    HAS_GLUON = True
+except ImportError:
+    HAS_GLUON = False
+
+try:
+    from kernels.pa_decode_fp8 import (
+        get_pa_metadata as flydsl_get_pa_metadata,
+        pa_decode_ps_launch as flydsl_ps_launch,
+    )
+    HAS_FLYDSL_PS = True
+except ImportError as exc:
+    HAS_FLYDSL_PS = False
+    print(f"Warning: FlyDSL PA decode PS not available: {exc}")
+
+TRITON_VERSION = triton.__version__ if HAS_TRITON else "unknown"
+TEST_NAME = "ps_accuracy"
 UNIFORM_RANGE = (-1, 1)
-SEED = 0
+
+STR_DTYPE_TO_TORCH_DTYPE = {
+    "half": torch.half,
+    "bfloat16": torch.bfloat16,
+    "float": torch.float,
+    "fp8": torch.uint8,
+}
+
+CASE_SET_NAME_OPTIONS = ["normal_accuracy", "sliding_window_accuracy"]
+
+COMPUTE_TYPE_OPTIONS = ["fp8"]
+KV_VARLEN_OPTIONS = [False, True]
+TRANS_V_OPTIONS = [True]
+CONTEXT_PARTITION_SIZE_OPTIONS = [256]
+QUANT_MODE_OPTIONS = ["per_token", "per_tensor"]
+HEAD_DIMENSION_OPTIONS = [128]
+BLOCK_SIZE_OPTIONS = [1024]
+HEAD_CONFIGURATIONS = [(8, 1), (16, 1)]
+QUERY_LENGTH_OPTIONS = [1, 2, 3, 4]
+CONTEXT_LENGTH_OPTIONS = [1027]
+BATCH_SIZE_OPTIONS = [3, 81]
+SLIDING_WINDOW_OPTIONS = [0]
 
 
-def setup_seed(seed):
+def setup_seed(seed: int) -> None:
     random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
 
 
-def create_kv_caches(num_blocks, block_size, num_kv_heads, head_size):
-    x = 16
-    key_shape = (num_blocks, num_kv_heads, head_size // x, block_size, x)
-    val_shape = (num_blocks, num_kv_heads, head_size, block_size)
-    kc = torch.empty(key_shape, dtype=bf16, device=dev)
-    vc = torch.empty(val_shape, dtype=bf16, device=dev)
-    kc.uniform_(*UNIFORM_RANGE)
-    vc.uniform_(*UNIFORM_RANGE)
-    return kc, vc
-
-
-def quantize_kv_per_tensor(key_cache, value_cache):
-    num_blocks, num_heads, head_dim, block_size = value_cache.shape
-    x = 16
-    kc_reshaped = (key_cache.permute(0, 1, 3, 2, 4)
-                   .reshape(num_blocks, num_heads, block_size, -1).contiguous())
-    kc_reshaped = (kc_reshaped.view(num_blocks, num_heads, block_size,
-                                     head_dim // x, x)
-                   .permute(0, 1, 3, 2, 4).contiguous())
-    q_keys, key_scale = per_tensor_quant(kc_reshaped, quant_dtype=aiter_dtypes.fp8)
-    q_vals, val_scale = per_tensor_quant(value_cache, quant_dtype=aiter_dtypes.fp8)
-    return q_keys, key_scale, q_vals, val_scale
-
-
-def torch_ref_attention(query, key_cache, value_cache, block_tables,
-                        context_lengths, key_scale, value_scale):
-    num_blocks, num_heads, head_dim, block_size = value_cache.shape
-    softmax_scale = 1.0 / math.sqrt(head_dim)
-    batch_size = query.shape[0]
-    num_query_heads = query.shape[1]
-    kc_flat = (key_cache.permute(0, 3, 1, 2, 4).contiguous().view(-1, num_heads, head_dim))
-    vc_flat = (value_cache.permute(0, 3, 1, 2).contiguous().view(-1, num_heads, head_dim))
-    kv_dtype = key_cache.dtype
-    outputs = []
-    for b in range(batch_size):
-        bt = block_tables[b]
-        ctx_len = context_lengths[b].item()
-        tok_idx = (bt.repeat_interleave(block_size)[:ctx_len] * block_size
-                   + torch.arange(ctx_len, device=dev) % block_size)
-        keys = kc_flat.view(torch.int8)[tok_idx].view(kv_dtype).float()
-        if key_scale is not None: keys = keys * key_scale.item()
-        vals = vc_flat.view(torch.int8)[tok_idx].view(kv_dtype).float()
-        if value_scale is not None: vals = vals * value_scale.item()
-        q_b = query[b].float()
-        qg = num_query_heads // num_heads
-        q_grouped = q_b.view(num_heads, qg, head_dim)
-        scores = torch.einsum('gqd,tgd->gqt', q_grouped, keys) * softmax_scale
-        attn = torch.softmax(scores, dim=-1)
-        out_b = torch.einsum('gqt,tgd->gqd', attn, vals)
-        outputs.append(out_b.reshape(num_query_heads, head_dim))
-    return torch.stack(outputs).to(query.dtype)
-
-
-def gluon_reduce(fd_out, fd_es, fd_ml, context_lengths, num_parts, ps_mode=False):
-    """Call Gluon's Triton reduce kernel on FlyDSL's partial outputs."""
-    batch_size, num_kv_heads, _, qg, head_size = fd_out.shape
-    output_5d = torch.empty(batch_size, 1, num_kv_heads, qg, head_size,
-                            dtype=bf16, device=dev)
-    grid = (batch_size, num_kv_heads, 1)
-    _paged_attention_decode_v2_reduce_kernel_wrapper(
-        grid, output_5d, fd_es, fd_ml, fd_out, context_lengths, None,
-        output_5d.stride(0), output_5d.stride(1),
-        output_5d.stride(2), output_5d.stride(3),
-        fd_es.stride(0), fd_es.stride(1), fd_es.stride(2),
-        fd_out.stride(0), fd_out.stride(1), fd_out.stride(2), fd_out.stride(3),
-        query_seq_len=1, query_group_size=qg,
-        HEAD_SIZE=head_size, CONTEXT_PARTITION_SIZE=CPSZ,
-        PS=ps_mode, context_partition_num=num_parts,
+def compare_arrays(
+    arr1: np.ndarray,
+    arr2: np.ndarray,
+    k: int = 5,
+    thresholds: List[float] = [0, 1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1e0, 1e1],
+) -> Dict[str, object]:
+    if arr1.shape != arr2.shape:
+        raise ValueError("Input arrays must have the same shape")
+    arr1 = arr1.astype(np.float32)
+    arr2 = arr2.astype(np.float32)
+    diff = np.abs(arr1 - arr2)
+    total_elements = arr1.size
+    result: Dict[str, object] = {
+        "top_k_diff": [],
+        "threshold_stats": [],
+        "max_diff": float(diff.max()),
+        "max_diff_thr": float((diff / (1.0 + np.abs(arr2))).max()),
+    }
+    flat_diff = diff.flatten()
+    top_k_indices = np.argpartition(flat_diff, -k)[-k:]
+    top_k_indices = top_k_indices[np.argsort(-flat_diff[top_k_indices])]
+    orig_indices = np.unravel_index(top_k_indices, diff.shape)
+    for i in range(k):
+        idx = tuple(dim[i] for dim in orig_indices)
+        result["top_k_diff"].append(
+            {
+                "value": float(diff[idx]),
+                "position": idx,
+                "arr1_value": float(arr1[idx]),
+                "arr2_value": float(arr2[idx]),
+            }
+        )
+    for i in range(len(thresholds) - 1):
+        lower = thresholds[i]
+        upper = thresholds[i + 1]
+        mask = (diff >= lower) & (diff < upper)
+        count = int(np.sum(mask))
+        result["threshold_stats"].append(
+            {
+                "range": f"[{lower:.1e}, {upper:.1e})",
+                "count": count,
+                "percentage": 100.0 * count / total_elements,
+            }
+        )
+    mask = diff >= thresholds[-1]
+    count = int(np.sum(mask))
+    result["threshold_stats"].append(
+        {
+            "range": f">={thresholds[-1]:.1e}",
+            "count": count,
+            "percentage": 100.0 * count / total_elements,
+        }
     )
-    return output_5d.reshape(batch_size, num_kv_heads, qg, head_size)
+    print(f"diff.abs.max={result['max_diff']}")
+    print(f"max_diff_thr={result['max_diff_thr']}")
+    return result
 
 
-def run_single(num_query_heads, num_kv_heads, batch_size, context_length,
-               block_size=16, trans_v=False, ps=True, quant_q=True,
-               num_iters=100, test_graph=False):
-    setup_seed(SEED)
-    head_size = HEAD_SIZE
-    softmax_scale = 1.0 / math.sqrt(head_size)
-    qg = num_query_heads // num_kv_heads
-    assert qg == QG, f"QG mismatch: {qg} != {QG}"
+def get_kv_cache_torch_dtype(
+    cache_dtype: Optional[Union[str, torch.dtype]],
+    model_dtype: Optional[Union[str, torch.dtype]] = None,
+) -> torch.dtype:
+    if isinstance(cache_dtype, str):
+        if cache_dtype == "auto":
+            if isinstance(model_dtype, str):
+                return STR_DTYPE_TO_TORCH_DTYPE[model_dtype]
+            if isinstance(model_dtype, torch.dtype):
+                return model_dtype
+            raise ValueError(f"Invalid model dtype: {model_dtype}")
+        if cache_dtype in ["half", "bfloat16", "float"]:
+            return STR_DTYPE_TO_TORCH_DTYPE[cache_dtype]
+        if cache_dtype == "fp8":
+            return torch.uint8
+        raise ValueError(f"Invalid kv cache dtype: {cache_dtype}")
+    if isinstance(cache_dtype, torch.dtype):
+        return cache_dtype
+    raise ValueError(f"Invalid kv cache dtype: {cache_dtype}")
 
-    max_ctx = max(16384, context_length)
-    max_blocks_per_seq = (max_ctx + block_size - 1) // block_size
-    total_blocks = max_blocks_per_seq * batch_size
-    blocks_per_seq = (context_length + block_size - 1) // block_size
-    num_parts = (context_length + CPSZ - 1) // CPSZ
-    _one_shot = (num_parts <= 1)
 
-    fd_num_splits = get_recommended_splits(batch_size, num_kv_heads) if ps else 0
+def create_kv_cache(
+    num_blocks: int,
+    block_size: int,
+    num_layers: int,
+    num_heads: int,
+    head_size: int,
+    cache_dtype: Optional[Union[str, torch.dtype]],
+    model_dtype: Optional[Union[str, torch.dtype]] = None,
+    seed: int = 0,
+    device: Optional[str] = "cuda",
+    itemsize: int = 1,
+) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
+    if cache_dtype == "fp8" and head_size % 16:
+        raise ValueError(f"Does not support fp8 key cache with head_size={head_size}")
+    torch_dtype = get_kv_cache_torch_dtype(cache_dtype, model_dtype)
+    elements_per_vector = 16 // itemsize
+    key_cache_shape = (
+        num_blocks,
+        num_heads,
+        head_size // elements_per_vector,
+        block_size,
+        elements_per_vector,
+    )
+    value_cache_shape = (num_blocks, num_heads, head_size, block_size)
+    key_caches: List[torch.Tensor] = []
+    value_caches: List[torch.Tensor] = []
+    setup_seed(seed)
+    for _ in range(num_layers):
+        key_cache = torch.empty(size=key_cache_shape, dtype=torch_dtype, device=device)
+        value_cache = torch.empty(size=value_cache_shape, dtype=torch_dtype, device=device)
+        key_cache.uniform_(*UNIFORM_RANGE)
+        value_cache.uniform_(*UNIFORM_RANGE)
+        key_caches.append(key_cache)
+        value_caches.append(value_cache)
+    return key_caches, value_caches
 
-    query = torch.empty(batch_size, num_query_heads, head_size, dtype=bf16, device=dev)
+
+def reference_masked_attention(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    softmax_scale: float,
+    output_dtype: torch.dtype,
+    *,
+    sliding_window: int = 0,
+) -> torch.Tensor:
+    query = query.to(torch.float32)
+    key = key.to(torch.float32)
+    value = value.to(torch.float32)
+    num_query_heads = query.shape[1]
+    num_kv_heads = key.shape[1]
+    s_q = query.shape[0]
+    s_k = key.shape[0]
+    key = key.repeat_interleave(num_query_heads // num_kv_heads, dim=1)
+    value = value.repeat_interleave(num_query_heads // num_kv_heads, dim=1)
+    attention_weights = torch.einsum("qhd,khd->hqk", query, key) * softmax_scale
+    causal_mask = torch.ones(s_q, s_k, dtype=torch.bool, device=query.device).tril(
+        diagonal=s_k - s_q
+    )
+    attention_weights = attention_weights.masked_fill(
+        ~causal_mask.unsqueeze(0), float(-3.4e38)
+    )
+    if sliding_window > 0:
+        if s_q == s_k:
+            query_positions = torch.arange(s_q, device=query.device)
+            key_positions = torch.arange(s_k, device=query.device)
+        else:
+            query_positions = torch.arange(s_k, s_k + s_q, device=query.device)
+            key_positions = torch.arange(s_k, device=query.device)
+        pos_diff = query_positions.unsqueeze(1) - key_positions.unsqueeze(0)
+        sliding_window_mask = (pos_diff < 0) | (pos_diff >= sliding_window)
+        attention_weights = attention_weights.masked_fill(
+            sliding_window_mask.unsqueeze(0), float("-inf")
+        )
+    attention_weights = torch.softmax(attention_weights, dim=-1)
+    output = torch.einsum("hqk,khd->qhd", attention_weights, value)
+    return output.to(output_dtype)
+
+
+def torch_mha_extend(
+    query: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    block_tables: torch.Tensor,
+    context_lengths: torch.Tensor,
+    query_output_indptr: torch.Tensor,
+    key_scale: Optional[torch.Tensor] = None,
+    value_scale: Optional[torch.Tensor] = None,
+    *,
+    sliding_window: int = 0,
+) -> torch.Tensor:
+    _, num_heads, head_size, block_size = value_cache.shape
+    softmax_scale = 1.0 / (head_size**0.5)
+    output_dtype = query.dtype
+    kv_dtype = key_cache.dtype
+    queries_split = torch.tensor_split(query, query_output_indptr.tolist()[1:])
+    key_cache_flat = (
+        key_cache.permute(0, 3, 1, 2, 4).contiguous().view(-1, num_heads, head_size)
+    )
+    value_cache_flat = (
+        value_cache.permute(0, 3, 1, 2).contiguous().view(-1, num_heads, head_size)
+    )
+    batch_size = query_output_indptr.shape[0] - 1
+    outputs = []
+    for batch_idx in range(batch_size):
+        current_query = queries_split[batch_idx]
+        current_block_table = block_tables[batch_idx]
+        current_context_length = context_lengths[batch_idx].item()
+        token_indices = (
+            current_block_table.repeat_interleave(block_size)[:current_context_length]
+            * block_size
+            + torch.arange(current_context_length, device=current_block_table.device)
+            % block_size
+        )
+        gathered_keys = (
+            key_cache_flat.view(torch.int8)[token_indices].view(kv_dtype).to(torch.float32)
+        )
+        if key_scale is not None:
+            gathered_keys *= key_scale[:, token_indices].t().unsqueeze(-1)
+        gathered_values = (
+            value_cache_flat.view(torch.int8)[token_indices].view(kv_dtype).to(torch.float32)
+        )
+        if value_scale is not None:
+            gathered_values *= value_scale[:, token_indices].t().unsqueeze(-1)
+        outputs.append(
+            reference_masked_attention(
+                current_query,
+                gathered_keys,
+                gathered_values,
+                softmax_scale,
+                output_dtype,
+                sliding_window=sliding_window,
+            )
+        )
+    return torch.cat(outputs)
+
+
+def quantize_kv_cache_symmetric(
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    quant_dtype: torch.dtype,
+) -> Tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+]:
+    num_blocks, num_heads, head_dim, block_size = value_cache.shape
+    total_tokens = num_blocks * block_size
+    key_cache_reshaped = (
+        key_cache.permute(0, 1, 3, 2, 4)
+        .reshape(num_blocks, num_heads, block_size, -1)
+        .contiguous()
+    )
+    value_cache_reshaped = (
+        value_cache.permute(0, 1, 3, 2)
+        .reshape(num_blocks, num_heads, block_size, -1)
+        .contiguous()
+    )
+    quantized_keys, key_scales_original = pertoken_quant(
+        key_cache_reshaped, quant_dtype=quant_dtype
+    )
+    quantized_values, value_scales_original = pertoken_quant(
+        value_cache_reshaped, quant_dtype=quant_dtype
+    )
+    elements_per_vector = 16 // quant_dtype.itemsize
+    quantized_keys = (
+        quantized_keys.view(
+            num_blocks,
+            num_heads,
+            block_size,
+            head_dim // elements_per_vector,
+            elements_per_vector,
+        )
+        .permute(0, 1, 3, 2, 4)
+        .contiguous()
+    )
+    quantized_values = (
+        quantized_values.view(num_blocks, num_heads, block_size, head_dim)
+        .permute(0, 1, 3, 2)
+        .contiguous()
+    )
+    key_scales_flat = (
+        key_scales_original.permute(1, 0, 2, 3).contiguous().view(num_heads, total_tokens)
+    )
+    value_scales_flat = (
+        value_scales_original.permute(1, 0, 2, 3).contiguous().view(num_heads, total_tokens)
+    )
+    return (
+        quantized_keys,
+        key_scales_flat,
+        quantized_values,
+        value_scales_flat,
+        key_scales_original,
+        value_scales_original,
+    )
+
+
+def quantize_kv_cache_per_tensor(
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    quant_dtype: torch.dtype,
+) -> Tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+]:
+    num_blocks, num_heads, head_dim, block_size = value_cache.shape
+    elements_per_vector = 16 // quant_dtype.itemsize
+    key_cache_reshaped = (
+        key_cache.permute(0, 1, 3, 2, 4)
+        .reshape(num_blocks, num_heads, block_size, -1)
+        .contiguous()
+    )
+    key_cache_reshaped = (
+        key_cache_reshaped.view(
+            num_blocks,
+            num_heads,
+            block_size,
+            head_dim // elements_per_vector,
+            elements_per_vector,
+        )
+        .permute(0, 1, 3, 2, 4)
+        .contiguous()
+    )
+    quantized_keys, key_scales_original = per_tensor_quant(
+        key_cache_reshaped, quant_dtype=quant_dtype
+    )
+    quantized_values, value_scales_original = per_tensor_quant(
+        value_cache, quant_dtype=quant_dtype
+    )
+    key_scales_flat = key_scales_original.expand(num_heads, num_blocks * block_size)
+    value_scales_flat = value_scales_original.expand(num_heads, num_blocks * block_size)
+    return (
+        quantized_keys,
+        key_scales_flat,
+        quantized_values,
+        value_scales_flat,
+        key_scales_original,
+        value_scales_original,
+    )
+
+
+def shuffle_value_cache_layout(value_cache: torch.Tensor) -> torch.Tensor:
+    elements_per_vector = 16 // value_cache.element_size()
+    num_blocks, num_kv_heads, head_size, block_size = value_cache.shape
+    value_cache_reshaped = value_cache.view(
+        num_blocks,
+        num_kv_heads,
+        head_size,
+        block_size // elements_per_vector,
+        elements_per_vector,
+    )
+    return value_cache_reshaped.permute(0, 1, 3, 2, 4).contiguous()
+
+
+def measure_us(fn, *, warmup: int = 1, iters: int = 3) -> float:
+    for _ in range(warmup):
+        fn()
+    torch.cuda.synchronize()
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
+    start.record()
+    for _ in range(iters):
+        fn()
+    end.record()
+    torch.cuda.synchronize()
+    return start.elapsed_time(end) * 1000.0 / iters
+
+
+def get_gluon_partition_count(
+    num_seqs: int,
+    num_kv_heads: int,
+    block_size: int,
+    context_partition_size: int,
+    sliding_window: int,
+) -> int:
+    if sliding_window > 0:
+        return triton.cdiv(sliding_window, context_partition_size) + 1
+    split_kv_blocks = triton.cdiv(block_size, context_partition_size)
+    return get_recommended_splits(num_seqs, num_kv_heads, split_kv_blocks)
+
+
+def run_gluon_ps(
+    output: torch.Tensor,
+    query: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    context_lengths: torch.Tensor,
+    block_tables: torch.Tensor,
+    softmax_scale: float,
+    query_length: int,
+    max_context_partition_num: int,
+    context_partition_size: int,
+    compute_type: torch.dtype,
+    query_scale: Optional[torch.Tensor],
+    key_scale: Optional[torch.Tensor],
+    value_scale: Optional[torch.Tensor],
+    exp_sums: torch.Tensor,
+    max_logits: torch.Tensor,
+    temporary_output: torch.Tensor,
+    *,
+    sliding_window: int,
+) -> None:
+    torch.ops.aiter.pa_decode_gluon(
+        output,
+        query,
+        key_cache,
+        value_cache,
+        context_lengths,
+        block_tables,
+        softmax_scale,
+        query_length,
+        max_context_partition_num,
+        context_partition_size,
+        compute_type,
+        query_scale,
+        key_scale,
+        value_scale,
+        exp_sums=exp_sums,
+        max_logits=max_logits,
+        temporary_output=temporary_output,
+        alibi_slopes=None,
+        sinks=None,
+        sliding_window=sliding_window,
+        ps=True,
+    )
+
+
+def build_ps_page_data(
+    block_tables_list: List[List[int]],
+    context_lengths: torch.Tensor,
+    block_size: int,
+    device: torch.device,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    batch_size = context_lengths.shape[0]
+    actual_blocks = (context_lengths + block_size - 1) // block_size
+    kv_indptr = torch.zeros(batch_size + 1, dtype=torch.int32, device=device)
+    kv_indptr[1:] = torch.cumsum(actual_blocks, dim=0)
+    kv_page_indices_list: List[int] = []
+    for batch_idx, num_blocks in enumerate(actual_blocks.tolist()):
+        kv_page_indices_list.extend(block_tables_list[batch_idx][:num_blocks])
+    kv_page_indices = torch.tensor(kv_page_indices_list, dtype=torch.int32, device=device)
+    return kv_page_indices, kv_indptr
+
+
+def run_flydsl_ps(
+    output: torch.Tensor,
+    query: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    context_lengths: torch.Tensor,
+    kv_page_indices: torch.Tensor,
+    kv_indptr: torch.Tensor,
+    softmax_scale: float,
+    query_scale: Union[float, torch.Tensor],
+    key_scale: Union[float, torch.Tensor],
+    value_scale: Union[float, torch.Tensor],
+    metadata: Dict[str, torch.Tensor],
+    *,
+    sliding_window: int,
+    block_tables: torch.Tensor,
+) -> None:
+    flydsl_ps_launch(
+        output,
+        query,
+        key_cache,
+        value_cache,
+        context_lengths,
+        kv_page_indices,
+        kv_indptr,
+        softmax_scale,
+        query_scale=query_scale,
+        key_scale=key_scale,
+        value_scale=value_scale,
+        sliding_window=sliding_window,
+        metadata=metadata,
+        block_tables=block_tables,
+    )
+
+
+def get_tolerance(*, kv_varlen: bool, sliding_window: int) -> float:
+    diff_tolerance = 5e-3
+    if kv_varlen:
+        diff_tolerance = 5e-2
+    if sliding_window > 0:
+        diff_tolerance = max(diff_tolerance, 5e-2)
+        if kv_varlen:
+            diff_tolerance = 6e-2
+    return diff_tolerance
+
+
+
+def get_ps_vs_gluon_tolerance(ps_tolerance: float, gluon_tolerance: float) -> float:
+    """Cross-check tolerance should not be stricter than the Gluon reference itself."""
+    return max(ps_tolerance, gluon_tolerance)
+
+
+def dtype_to_name(dtype: torch.dtype) -> str:
+    for name, candidate in dtypes.d_dtypes.items():
+        if candidate == dtype:
+            return name
+    return str(dtype)
+
+
+def summarize_comparison(
+    name: str,
+    actual: torch.Tensor,
+    expected: torch.Tensor,
+    *,
+    atol: float,
+    rtol: float,
+) -> Tuple[int, Dict[str, object]]:
+    err = checkAllclose(expected, actual, atol=atol, rtol=rtol, msg=f"[{name}]")
+    err = 1 if err > 0 else 0
+    diff_result = compare_arrays(
+        actual.to(torch.float32).detach().cpu().numpy(),
+        expected.to(torch.float32).detach().cpu().numpy(),
+    )
+    print(f"{name} {'PASSED' if err == 0 else 'FAILED'}")
+    return err, diff_result
+
+
+def run_pa_decode_ps_test(
+    context_length: int,
+    batch_size: int,
+    num_heads: Tuple[int, int],
+    head_size: int,
+    block_size: int,
+    compute_type: torch.dtype,
+    query_length: int,
+    quant_mode: str,
+    context_partition_size: int,
+    trans_v: bool,
+    kv_varlen: bool,
+    sliding_window: int,
+) -> Dict[str, Union[float, int, str, bool, Tuple[int, int]]]:
+    if not HAS_FLYDSL_PS:
+        raise RuntimeError("FlyDSL `pa_decode_ps_launch` is not available.")
+    if compute_type != aiter.dtypes.fp8:
+        raise ValueError("This PS-only harness only keeps fp8 cases.")
+    if block_size != 1024:
+        raise ValueError("This PS-only harness only keeps block_size=1024 cases.")
+    if head_size != 128:
+        raise ValueError("This PS-only harness only keeps head_size=128 cases.")
+    results: Dict[str, Union[float, int, str, bool, Tuple[int, int]]] = {
+        "compute_type": dtype_to_name(compute_type),
+        "quant_mode": quant_mode,
+        "trans_v": trans_v,
+        "kv_varlen": kv_varlen,
+        "context_partition_size": context_partition_size,
+        "block_size": block_size,
+        "num_heads": num_heads,
+        "context_length": context_length,
+        "batch_size": batch_size,
+        "query_length": query_length,
+        "head_size": head_size,
+        "sliding_window": sliding_window,
+        "quant_q": False,
+        "quant_kv": True,
+    }
+    seed = 123
+    setup_seed(seed)
+    device = torch.device("cuda:0")
+    torch.set_default_device(device)
+    num_query_heads, num_kv_heads = num_heads
+    if num_query_heads % num_kv_heads != 0:
+        raise ValueError("Query heads must be divisible by KV heads")
+    data_type = torch.bfloat16 if compute_type == aiter.dtypes.fp8 else compute_type
+    softmax_scale = 1.0 / (head_size**0.5)
+    total_queries = batch_size * query_length
+    query_output_indptr = torch.arange(
+        0,
+        (batch_size + 1) * query_length,
+        query_length,
+        dtype=torch.int32,
+        device=device,
+    )
+    qkv_tensor = torch.randn(
+        total_queries,
+        num_query_heads + 2 * num_kv_heads,
+        head_size,
+        dtype=data_type,
+        device=device,
+    )
+    query, key, value = torch.split(
+        qkv_tensor, [num_query_heads, num_kv_heads, num_kv_heads], dim=1
+    )
     query.uniform_(*UNIFORM_RANGE)
-    kc_bf16, vc_bf16 = create_kv_caches(total_blocks, block_size, num_kv_heads, head_size)
-    q_keys, key_scale, q_vals, val_scale = quantize_kv_per_tensor(kc_bf16, vc_bf16)
-
-    block_tables = torch.tensor(
-        [[random.randint(0, total_blocks - 1) for _ in range(blocks_per_seq)]
-         for _ in range(batch_size)],
-        dtype=torch.int32, device=dev)
-    context_lengths = torch.full((batch_size,), context_length, dtype=torch.int32, device=dev)
-
-    if quant_q:
-        quantized_query, q_scale = per_tensor_quant(query, quant_dtype=aiter_dtypes.fp8)
+    if kv_varlen:
+        kv_len_list = [random.randint(query_length, context_length) for _ in range(batch_size)]
     else:
-        quantized_query = query
-        q_scale = None
-
-    ref_out = torch_ref_attention(query, q_keys, q_vals, block_tables,
-                                  context_lengths, key_scale, val_scale)
-
-    # ── Gluon ───────────────────────────────────────────────────
-    gl_mp = get_recommended_splits(batch_size, num_kv_heads) if ps else num_parts
-    gl_inter = (batch_size, num_kv_heads, gl_mp, qg)
-    gl_es  = torch.empty(gl_inter, dtype=torch.float32, device=dev)
-    gl_ml  = torch.empty(gl_inter, dtype=torch.float32, device=dev)
-    gl_tmp = torch.empty(*gl_inter, head_size, dtype=bf16, device=dev)
-    gl_out = torch.empty(batch_size, num_query_heads, head_size, dtype=bf16, device=dev)
-
-    pa_decode_gluon(gl_out, quantized_query, q_keys, q_vals, context_lengths,
-                    block_tables, softmax_scale, 1, gl_mp, CPSZ, fp8,
-                    q_scale, key_scale, val_scale,
-                    gl_es, gl_ml, gl_tmp, None, ps=ps)
-    torch.cuda.synchronize()
-
-    # ── FlyDSL ──────────────────────────────────────────────────
-    if quant_q:
-        fd_query = quantized_query
-        _qs = q_scale.item()
+        kv_len_list = [context_length] * batch_size
+    context_lengths = torch.tensor(kv_len_list, dtype=torch.int32, device=device)
+    max_context_length = max(16384, context_length)
+    max_blocks_per_sequence = triton.cdiv(max_context_length, block_size)
+    total_blocks = max_blocks_per_sequence * batch_size
+    blocks_per_sequence = triton.cdiv(context_length, block_size)
+    block_tables_list: List[List[int]] = []
+    for _ in range(batch_size):
+        block_tables_list.append(
+            [random.randint(0, total_blocks - 1) for _ in range(blocks_per_sequence)]
+        )
+    block_tables = torch.tensor(block_tables_list, dtype=torch.int32, device=device)
+    key_caches, value_caches = create_kv_cache(
+        total_blocks,
+        block_size,
+        1,
+        num_kv_heads,
+        head_size,
+        "auto",
+        data_type,
+        seed,
+        str(device),
+        1,
+    )
+    key_cache = key_caches[0]
+    value_cache = value_caches[0]
+    query_scale_factors = None
+    quantized_query = query
+    if quant_mode == "per_token":
+        (
+            quantized_keys,
+            key_scale_factors_flat,
+            quantized_values,
+            value_scale_factors_flat,
+            key_scale_original,
+            value_scale_original,
+        ) = quantize_kv_cache_symmetric(
+            key_cache,
+            value_cache,
+            quant_dtype=aiter.dtypes.fp8,
+        )
     else:
-        fd_query, _fd_q_scale = per_tensor_quant(query, quant_dtype=aiter_dtypes.fp8)
-        _qs = _fd_q_scale.item()
+        (
+            quantized_keys,
+            key_scale_factors_flat,
+            quantized_values,
+            value_scale_factors_flat,
+            key_scale_original,
+            value_scale_original,
+        ) = quantize_kv_cache_per_tensor(
+            key_cache,
+            value_cache,
+            quant_dtype=aiter.dtypes.fp8,
+        )
+    reference_output = torch_mha_extend(
+        query,
+        quantized_keys,
+        quantized_values,
+        block_tables,
+        context_lengths,
+        query_output_indptr,
+        key_scale_factors_flat,
+        value_scale_factors_flat,
+        sliding_window=sliding_window,
+    ).to(data_type)
+    quantized_values = shuffle_value_cache_layout(quantized_values) if trans_v else quantized_values
+    if HAS_GLUON:
+        max_context_partition_num = get_gluon_partition_count(
+            batch_size,
+            num_kv_heads,
+            block_size,
+            context_partition_size,
+            sliding_window,
+        )
+        equivalent_query_group_size = query_length * (num_query_heads // num_kv_heads)
+        intermediate_shape = (
+            batch_size,
+            num_kv_heads,
+            max_context_partition_num,
+            equivalent_query_group_size,
+        )
+        exp_sums = torch.empty(intermediate_shape, dtype=torch.float32, device=device)
+        max_logits = torch.empty(intermediate_shape, dtype=torch.float32, device=device)
+        temporary_output = torch.empty(
+            *intermediate_shape,
+            head_size,
+            dtype=reference_output.dtype,
+            device=device,
+        )
+        gluon_output = torch.empty_like(reference_output)
 
-    grid_z = fd_num_splits if fd_num_splits > 0 else (1 if _one_shot else num_parts)
-    fd_kfn = build_pa_decode_module(batch_size, num_kv_heads, num_parts,
-                                     blocks_per_seq, kv_block_size=block_size,
-                                     trans_v=trans_v,
-                                     softmax_scale=softmax_scale,
-                                     query_scale=_qs,
-                                     key_scale=key_scale.item(),
-                                     value_scale=val_scale.item(),
-                                     one_shot=_one_shot,
-                                     ps_num_splits=fd_num_splits)
-    fd_al = _pa.allocator
-
-    if _one_shot:
-        fd_out = torch.zeros(batch_size, num_kv_heads, 1, qg, head_size, dtype=bf16, device=dev)
-        fd_es  = torch.zeros(1, dtype=torch.float32, device=dev)
-        fd_ml  = torch.zeros(1, dtype=torch.float32, device=dev)
-    else:
-        fd_out = torch.zeros(batch_size, num_kv_heads, num_parts, qg, head_size, dtype=bf16, device=dev)
-        fd_es  = torch.zeros(batch_size, num_kv_heads, num_parts, qg, dtype=torch.float32, device=dev)
-        fd_ml  = torch.full((batch_size, num_kv_heads, num_parts, qg), float('-inf'),
-                            dtype=torch.float32, device=dev)
-
-    _cache_tag = (batch_size, num_kv_heads, grid_z)
-
-    @flyc.jit
-    def fd_launch(out, es, ml, q, kc, vc, bt, cl: fx.Int32,
-                  gx: fx.Int32, gy: fx.Int32, gz: fx.Int32,
-                  stream: fx.Stream):
-        _ = _cache_tag
-        fd_al.finalized = False
-        ctx = CompilationContext.get_current()
-        with _ir.InsertionPoint(ctx.gpu_module_body):
-            fd_al.finalize()
-        grid_x = arith.index_cast(T.index, gx.ir_value())
-        grid_y = arith.index_cast(T.index, gy.ir_value())
-        grid_z_val = arith.index_cast(T.index, gz.ir_value())
-        fd_kfn(out, es, ml, q, kc, vc, bt, cl).launch(
-            grid=(grid_x, grid_y, grid_z_val),
-            block=(BLOCK_THREADS, 1, 1), stream=stream)
-
-    # Warmup (compilation happens here)
-    fd_launch(fd_out, fd_es, fd_ml, fd_query, q_keys, q_vals,
-              block_tables, context_length,
-              batch_size, num_kv_heads, grid_z,
-              torch.cuda.current_stream())
-    torch.cuda.synchronize()
-
-    if _one_shot:
-        fd_final = fd_out.squeeze(2)
-    else:
-        fd_final = gluon_reduce(fd_out, fd_es, fd_ml, context_lengths,
-                                num_parts, ps_mode=(fd_num_splits > 0))
-        torch.cuda.synchronize()
-
-    # ── Verify ──────────────────────────────────────────────────
-    diff_tol = 5e-2
-    fd_flat = fd_final.reshape(batch_size, num_query_heads, head_size).float()
-    gl_flat = gl_out.float()
-    ref_flat = ref_out.float()
-
-    err_gl = checkAllclose(ref_flat, gl_flat, atol=diff_tol, rtol=diff_tol,
-                           msg=f"[Ref vs Gluon]", printLog=False)
-    err_fd = checkAllclose(ref_flat, fd_flat, atol=diff_tol, rtol=diff_tol,
-                           msg=f"[Ref vs FlyDSL]", printLog=False)
-    gl_ok = err_gl < 0.05
-    fd_ok = err_fd < 0.05
-
-    mode_str = "one_shot" if _one_shot else (f"ps({fd_num_splits})" if fd_num_splits > 0 else "partitioned")
-
-    # ── Perf (GEMM-style: wrapper + run_perftest with tensor args) ──
-    if _one_shot:
-        def launch_fd(out, es, ml, q, kc, vc, bt):
-            fd_launch(out, es, ml, q, kc, vc, bt,
-                      context_length, batch_size, num_kv_heads, grid_z,
-                      torch.cuda.current_stream())
-    else:
-        fd_reduce_out = torch.empty(batch_size, 1, num_kv_heads, qg, head_size,
-                                    dtype=bf16, device=dev)
-        _reduce_grid = (batch_size, num_kv_heads, 1)
-        _is_ps = fd_num_splits > 0
-
-        def launch_fd(out, es, ml, q, kc, vc, bt):
-            fd_launch(out, es, ml, q, kc, vc, bt,
-                      context_length, batch_size, num_kv_heads, grid_z,
-                      torch.cuda.current_stream())
-            _paged_attention_decode_v2_reduce_kernel_wrapper(
-                _reduce_grid, fd_reduce_out,
-                es, ml, out, context_lengths, None,
-                fd_reduce_out.stride(0), fd_reduce_out.stride(1),
-                fd_reduce_out.stride(2), fd_reduce_out.stride(3),
-                es.stride(0), es.stride(1), es.stride(2),
-                out.stride(0), out.stride(1), out.stride(2), out.stride(3),
-                query_seq_len=1, query_group_size=qg,
-                HEAD_SIZE=head_size, CONTEXT_PARTITION_SIZE=CPSZ,
-                PS=_is_ps, context_partition_num=num_parts,
+        def gluon_call() -> None:
+            run_gluon_ps(
+                gluon_output,
+                quantized_query,
+                quantized_keys,
+                quantized_values,
+                context_lengths,
+                block_tables,
+                softmax_scale,
+                query_length,
+                max_context_partition_num,
+                context_partition_size,
+                compute_type,
+                query_scale_factors,
+                key_scale_original,
+                value_scale_original,
+                exp_sums,
+                max_logits,
+                temporary_output,
+                sliding_window=sliding_window,
             )
 
-    def launch_gl(out, q, kc, vc, bt):
-        pa_decode_gluon(out, q, kc, vc, context_lengths,
-                        bt, softmax_scale, 1, gl_mp, CPSZ, fp8,
-                        q_scale, key_scale, val_scale,
-                        gl_es, gl_ml, gl_tmp, None, ps=ps)
+        gluon_time = measure_us(gluon_call)
+        gluon_tol = get_tolerance(kv_varlen=kv_varlen, sliding_window=sliding_window)
+        print("\nGluon vs Torch:")
+        err_gluon, gluon_diff = summarize_comparison(
+            "Gluon vs Torch",
+            gluon_output,
+            reference_output,
+            atol=gluon_tol,
+            rtol=gluon_tol,
+        )
 
-    _, fd_us = run_perftest(launch_fd, fd_out, fd_es, fd_ml, fd_query,
-                            q_keys, q_vals, block_tables,
-                            num_iters=num_iters, num_warmup=5,
-                            testGraph=test_graph)
-    _, gl_us = run_perftest(launch_gl, gl_out, quantized_query, q_keys,
-                            q_vals, block_tables,
-                            num_iters=num_iters, num_warmup=5,
-                            testGraph=test_graph)
+    kv_page_indices, kv_indptr = build_ps_page_data(
+        block_tables_list,
+        context_lengths,
+        block_size,
+        device,
+    )
+    # Match Gluon's query path: launch with bf16 query and let the PS launcher
+    # cast to fp8 internally with a unit query scale.
+    flydsl_ps_query = query
+    flydsl_ps_q_scale = 1.0
+    ps_metadata = flydsl_get_pa_metadata(
+        flydsl_ps_query,
+        quantized_keys,
+        context_lengths,
+        kv_indptr,
+        num_query_heads,
+        num_kv_heads,
+    )
+    if key_scale_original.numel() == 1:
+        ps_key_scale: Union[float, torch.Tensor] = float(key_scale_original.item())
+        ps_value_scale: Union[float, torch.Tensor] = float(value_scale_original.item())
+    else:
+        ps_key_scale = key_scale_original
+        ps_value_scale = value_scale_original
+    flydsl_ps_output = torch.empty_like(reference_output)
 
-    torch.cuda.empty_cache(); gc.collect()
-    return fd_ok, gl_ok, fd_us, gl_us, mode_str, err_fd
+    def flydsl_ps_call() -> None:
+        run_flydsl_ps(
+            flydsl_ps_output,
+            flydsl_ps_query,
+            quantized_keys,
+            quantized_values,
+            context_lengths,
+            kv_page_indices,
+            kv_indptr,
+            softmax_scale,
+            flydsl_ps_q_scale,
+            ps_key_scale,
+            ps_value_scale,
+            ps_metadata,
+            sliding_window=sliding_window,
+            block_tables=block_tables,
+        )
+
+    flydsl_ps_time = measure_us(flydsl_ps_call)
+    ps_tol = get_tolerance(kv_varlen=kv_varlen, sliding_window=sliding_window)
+    print("\nFlyDSL PS vs Torch:")
+    err_flydsl_ps, flydsl_ps_diff = summarize_comparison(
+        "FlyDSL PS vs Torch",
+        flydsl_ps_output,
+        reference_output,
+        atol=ps_tol,
+        rtol=ps_tol,
+    )
+
+    if HAS_GLUON:
+        results["us_gluon"] = gluon_time
+        results["err_gluon"] = err_gluon
+        results["gluon_max_diff"] = float(gluon_diff["max_diff"])
+        results["gluon_max_diff_thr"] = float(gluon_diff["max_diff_thr"])
+
+    results["us_flydsl_ps"] = flydsl_ps_time
+    results["err_flydsl_ps"] = err_flydsl_ps
+    results["flydsl_ps_max_diff"] = float(flydsl_ps_diff["max_diff"])
+    results["flydsl_ps_max_diff_thr"] = float(flydsl_ps_diff["max_diff_thr"])
+
+    return results
 
 
-# ── Test configs ─────────────────────────────────────────────────
+def create_argument_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        formatter_class=argparse.RawTextHelpFormatter,
+        description="PS-only paged attention decode regression test",
+    )
+    parser.add_argument("--compute_type", type=str, default=None, help="Compute type")
+    parser.add_argument(
+        "-n",
+        "--num_heads",
+        type=dtypes.str2tuple,
+        default=None,
+        help="Number of heads as q_heads,kv_heads",
+    )
+    parser.add_argument(
+        "-q",
+        "--query_length",
+        type=int,
+        choices=QUERY_LENGTH_OPTIONS,
+        default=None,
+        help="Query length",
+    )
+    parser.add_argument("-c", "--context_length", type=int, default=None, help="Context length")
+    parser.add_argument("-b", "--batch_size", type=int, default=None, help="Batch size")
+    parser.add_argument("-d", "--head_dim", type=int, default=None, help="Head dimension")
+    parser.add_argument("--block_size", type=int, default=None, help="Block size")
+    parser.add_argument(
+        "--quant_mode",
+        type=str,
+        choices=["per_token", "per_tensor", "both"],
+        default=None,
+        help="KV quantization mode",
+    )
+    parser.add_argument(
+        "--trans_v",
+        type=lambda x: str(x).lower() == "true",
+        default=None,
+        help="Use transposed V layout for Gluon",
+    )
+    parser.add_argument(
+        "--kv_varlen",
+        type=lambda x: str(x).lower() == "true",
+        default=None,
+        help="Use variable KV lengths",
+    )
+    parser.add_argument(
+        "--context_partition_size",
+        type=int,
+        default=None,
+        help="Context partition size for Gluon reduce",
+    )
+    parser.add_argument(
+        "--sliding_window",
+        type=int,
+        default=None,
+        help="Sliding window size; 0 disables sliding window",
+    )
+    parser.add_argument(
+        "--sample_rate",
+        type=float,
+        default=1.0,
+        help="Randomly sample test cases from the selected case set",
+    )
+    return parser
+
+
+def process_arguments(args: argparse.Namespace) -> tuple:
+    compute_types = [dtypes.d_dtypes[key] for key in COMPUTE_TYPE_OPTIONS]
+    block_sizes = BLOCK_SIZE_OPTIONS
+    head_configs = HEAD_CONFIGURATIONS
+    context_lengths = CONTEXT_LENGTH_OPTIONS
+    batch_sizes = BATCH_SIZE_OPTIONS
+    head_sizes = HEAD_DIMENSION_OPTIONS
+    query_lengths = QUERY_LENGTH_OPTIONS
+    quant_modes = QUANT_MODE_OPTIONS
+    trans_v = TRANS_V_OPTIONS
+    kv_varlen = KV_VARLEN_OPTIONS
+    context_partition_sizes = CONTEXT_PARTITION_SIZE_OPTIONS
+    sliding_window_options = SLIDING_WINDOW_OPTIONS
+    if args.compute_type is not None:
+        compute_types = [dtypes.d_dtypes[args.compute_type]]
+    if args.num_heads is not None:
+        head_configs = [args.num_heads]
+    if args.query_length is not None:
+        query_lengths = [args.query_length]
+    if args.context_length is not None:
+        context_lengths = [args.context_length]
+    if args.batch_size is not None:
+        batch_sizes = [args.batch_size]
+    if args.head_dim is not None:
+        head_sizes = [args.head_dim]
+    if args.block_size is not None:
+        block_sizes = [args.block_size]
+    if args.quant_mode is not None:
+        quant_modes = ["per_token", "per_tensor"] if args.quant_mode == "both" else [args.quant_mode]
+    if args.trans_v is not None:
+        trans_v = [args.trans_v]
+    if args.kv_varlen is not None:
+        kv_varlen = [args.kv_varlen]
+    if args.context_partition_size is not None:
+        context_partition_sizes = [args.context_partition_size]
+    if args.sliding_window is not None:
+        sliding_window_options = [args.sliding_window]
+    return (
+        block_sizes,
+        head_configs,
+        context_lengths,
+        batch_sizes,
+        head_sizes,
+        query_lengths,
+        quant_modes,
+        trans_v,
+        kv_varlen,
+        compute_types,
+        context_partition_sizes,
+        args.sample_rate,
+        sliding_window_options,
+    )
+
+
+def _run_single_test(args: Tuple[Dict[str, object], int, int]) -> Dict[str, object]:
+    test_config, current, total = args
+    print(
+        f"\n[{current}/{total}] Testing: "
+        f"compute_type={test_config['compute_type']}, "
+        f"quant_mode={test_config['quant_mode']}, "
+        f"trans_v={test_config['trans_v']}, "
+        f"kv_varlen={test_config['kv_varlen']}, "
+        f"context_partition_size={test_config['context_partition_size']}, "
+        f"block_size={test_config['block_size']}, "
+        f"num_heads={test_config['num_heads']}, "
+        f"context_length={test_config['context_length']}, "
+        f"batch_size={test_config['batch_size']}, "
+        f"query_length={test_config['query_length']}, "
+        f"head_size={test_config['head_size']}, "
+        f"sliding_window={test_config['sliding_window']}"
+    )
+    return run_pa_decode_ps_test(**test_config)
+
+
+def run_multi_pa_decode_ps_test(
+    block_sizes: List[int],
+    head_configs: List[Tuple[int, int]],
+    context_lengths: List[int],
+    batch_sizes: List[int],
+    head_sizes: List[int],
+    query_lengths: List[int],
+    quant_modes: List[str],
+    trans_v: List[bool],
+    kv_varlen: List[bool],
+    compute_types: List[torch.dtype],
+    context_partition_sizes: List[int],
+    *,
+    sample_rate: float = 1.0,
+    sliding_window_options: List[int],
+) -> pd.DataFrame:
+    test_configs: List[Dict[str, object]] = []
+    for compute_type in compute_types:
+        for trans_v_mode in trans_v:
+            for kv_varlen_mode in kv_varlen:
+                for context_partition_size in context_partition_sizes:
+                    for quant_mode in quant_modes:
+                        for block_size in block_sizes:
+                            for head_size in head_sizes:
+                                for query_length in query_lengths:
+                                    for batch_size in batch_sizes:
+                                        for context_length in context_lengths:
+                                            for head_config in head_configs:
+                                                for sliding_window in sliding_window_options:
+                                                    test_configs.append(
+                                                        {
+                                                            "compute_type": compute_type,
+                                                            "quant_mode": quant_mode,
+                                                            "trans_v": trans_v_mode,
+                                                            "kv_varlen": kv_varlen_mode,
+                                                            "context_partition_size": context_partition_size,
+                                                            "block_size": block_size,
+                                                            "num_heads": head_config,
+                                                            "context_length": context_length,
+                                                            "batch_size": batch_size,
+                                                            "query_length": query_length,
+                                                            "head_size": head_size,
+                                                            "sliding_window": sliding_window,
+                                                        }
+                                                    )
+    total = len(test_configs)
+    print(f"\nTotal test cases: {total}")
+    if sample_rate < 1.0:
+        sampler = random.Random(1234)
+        test_configs = [cfg for cfg in test_configs if sampler.random() < sample_rate]
+        print(
+            f"Using random sampling: running {len(test_configs)} out of {total} cases "
+            f"(sample_rate={sample_rate:.2%})"
+        )
+    else:
+        print(f"Running all {total} cases")
+    if not test_configs:
+        raise RuntimeError("No test cases selected")
+    results = []
+    for idx, test_config in enumerate(test_configs):
+        results.append(_run_single_test((test_config, idx + 1, len(test_configs))))
+    return pd.DataFrame(results)
+
+
+def parse_arg_and_run_test(sample_rate0: float = None, *, output_tag: str = TEST_NAME) -> None:
+    print(f"Triton version: {TRITON_VERSION}")
+    parser = create_argument_parser()
+    running_via_pytest = "pytest" in sys.argv[0] or sys.argv[0].endswith("py.test")
+    args = parser.parse_args([] if running_via_pytest else None)
+    (
+        block_sizes,
+        head_configs,
+        context_lengths,
+        batch_sizes,
+        head_sizes,
+        query_lengths,
+        quant_modes,
+        trans_v,
+        kv_varlen,
+        compute_types,
+        context_partition_sizes,
+        sample_rate1,
+        sliding_window_options,
+    ) = process_arguments(args)
+    sample_rate = sample_rate1 if sample_rate0 is None else sample_rate0
+    results_df = run_multi_pa_decode_ps_test(
+        block_sizes,
+        head_configs,
+        context_lengths,
+        batch_sizes,
+        head_sizes,
+        query_lengths,
+        quant_modes,
+        trans_v,
+        kv_varlen,
+        compute_types,
+        context_partition_sizes,
+        sample_rate=sample_rate,
+        sliding_window_options=sliding_window_options,
+    )
+    if not running_via_pytest:
+        output_file = (
+            f"run_pa_decode_ps_test.{output_tag}.block_size_{block_sizes[0]}.triton.{TRITON_VERSION}.csv"
+        )
+        results_df.to_csv(output_file, index=False)
+        print(f"\nResults saved to {output_file}")
+    print(f"\nSummary:\n{results_df}")
+    flydsl_errors = int(results_df["err_flydsl_ps"].sum())
+
+    if flydsl_errors:
+        raise AssertionError(
+            f"{flydsl_errors} FlyDSL PS case(s) exceeded the Torch-reference tolerance"
+        )
+
+    print("\nAll PS-only tests passed!")
+
+
+def normal_accuracy_test() -> None:
+    global BLOCK_SIZE_OPTIONS
+    global QUERY_LENGTH_OPTIONS
+    global BATCH_SIZE_OPTIONS
+    global HEAD_CONFIGURATIONS
+    global CONTEXT_LENGTH_OPTIONS
+    global COMPUTE_TYPE_OPTIONS
+    global QUANT_MODE_OPTIONS
+    global HEAD_DIMENSION_OPTIONS
+    global TRANS_V_OPTIONS
+    global KV_VARLEN_OPTIONS
+    global CONTEXT_PARTITION_SIZE_OPTIONS
+    global SLIDING_WINDOW_OPTIONS
+    COMPUTE_TYPE_OPTIONS = ["fp8"]
+    CONTEXT_PARTITION_SIZE_OPTIONS = [256]
+    HEAD_DIMENSION_OPTIONS = [128]
+    HEAD_CONFIGURATIONS = [(8, 1), (16, 1)]
+    QUERY_LENGTH_OPTIONS = [1, 2, 3, 4]
+    QUANT_MODE_OPTIONS = ["per_token", "per_tensor"]
+    CONTEXT_LENGTH_OPTIONS = [1027]
+    BATCH_SIZE_OPTIONS = [3, 81]
+    TRANS_V_OPTIONS = [True]
+    KV_VARLEN_OPTIONS = [False, True]
+    BLOCK_SIZE_OPTIONS = [1024]
+    SLIDING_WINDOW_OPTIONS = [0]
+    parse_arg_and_run_test(output_tag="ps_normal_accuracy")
+
+
+def sliding_window_accuracy_test() -> None:
+    global BLOCK_SIZE_OPTIONS
+    global QUERY_LENGTH_OPTIONS
+    global BATCH_SIZE_OPTIONS
+    global HEAD_CONFIGURATIONS
+    global CONTEXT_LENGTH_OPTIONS
+    global COMPUTE_TYPE_OPTIONS
+    global QUANT_MODE_OPTIONS
+    global HEAD_DIMENSION_OPTIONS
+    global TRANS_V_OPTIONS
+    global KV_VARLEN_OPTIONS
+    global CONTEXT_PARTITION_SIZE_OPTIONS
+    global SLIDING_WINDOW_OPTIONS
+    COMPUTE_TYPE_OPTIONS = ["fp8"]
+    CONTEXT_PARTITION_SIZE_OPTIONS = [256]
+    HEAD_DIMENSION_OPTIONS = [128]
+    HEAD_CONFIGURATIONS = [(8, 1), (16, 1)]
+    QUERY_LENGTH_OPTIONS = [1, 2, 3, 4]
+    QUANT_MODE_OPTIONS = ["per_token"]
+    CONTEXT_LENGTH_OPTIONS = [8192]
+    BATCH_SIZE_OPTIONS = [128]
+    TRANS_V_OPTIONS = [True]
+    KV_VARLEN_OPTIONS = [True]
+    BLOCK_SIZE_OPTIONS = [1024]
+    SLIDING_WINDOW_OPTIONS = [0, 128, 1023] if HAS_AITER_SW_REDUCE else [0]
+    parse_arg_and_run_test(output_tag="ps_sliding_window_accuracy")
+
+
+@pytest.mark.skipif(not HAS_AITER, reason="aiter not available")
+@pytest.mark.skipif(not HAS_FLYDSL_PS, reason="FlyDSL PA decode PS not available")
+@pytest.mark.parametrize("case_set_name", CASE_SET_NAME_OPTIONS)
+def test_multi_case_set(case_set_name: str) -> None:
+    if case_set_name == "normal_accuracy":
+        normal_accuracy_test()
+    elif case_set_name == "sliding_window_accuracy":
+        sliding_window_accuracy_test()
+    else:
+        raise ValueError(f"Unsupported case set: {case_set_name}")
+
+
 if __name__ == "__main__":
-    import argparse
-    parser = argparse.ArgumentParser(description="PA Decode FP8 benchmark")
-    parser.add_argument("--test_graph", "-tg", action="store_true", default=False)
-    parser.add_argument("--num_iters", type=int, default=100)
-    args = parser.parse_args()
-
-    NH, NKV, BS = 16, 1, 1024
-    tv, qq = True, False
-
-    print(f"{'mode':>14} |  NH  NKV |   BS | batch |   CTX | tv qq |   FlyDSL   |   Gluon    | ratio | status")
-    print("-" * 100)
-
-    configs = [
-        (128, 8192, False),
-        (128, 8192, True),
-        (128, 4096, False),
-    ]
-
-    for batch, CTX, use_ps in configs:
-        try:
-            fd_ok, gl_ok, fd_us, gl_us, mode_str, err_fd = run_single(
-                NH, NKV, batch, CTX, block_size=BS, trans_v=tv, quant_q=qq,
-                ps=use_ps, num_iters=args.num_iters, test_graph=args.test_graph)
-            sp = gl_us / fd_us
-            fd_s = "PASS" if fd_ok else "FAIL"
-            gl_s = "PASS" if gl_ok else "FAIL"
-            print(f"{mode_str:>14} | {NH:>3} {NKV:>4} | {BS:>4} | {batch:>5} | {CTX:>5} |  T  F | {fd_us:>8.1f}us | {gl_us:>8.1f}us | {sp:>5.2f}x | {fd_s:>4} {gl_s:>4} (err={err_fd:.4f})")
-        except Exception as ex:
-            import traceback; traceback.print_exc()
-            print(f"{'ERROR':>14} | {NH:>3} {NKV:>4} | {BS:>4} | {batch:>5} | {CTX:>5} | ps={'T' if use_ps else 'F'} | EXCEPTION")
-    print("-" * 100)
+    sliding_window_accuracy_test()
