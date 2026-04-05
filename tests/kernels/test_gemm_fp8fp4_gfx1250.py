@@ -128,7 +128,7 @@ def _run_mxscale_gemm_test(
     wave_specialized_tdm=False, use_scale_opsel=False,
     l2_prefetch_distance=0, cluster_m=1, cluster_n=1,
     inst_prefetch=False, waves_per_eu=None,
-    expert_sched_mode=True,
+    expert_sched_mode=True, split_k=1,
     return_launch_fn=False,
 ):
     """Unified test body for FP4 and FP8."""
@@ -142,7 +142,13 @@ def _run_mxscale_gemm_test(
     if use_scale_opsel and is_fp4:
         pytest.skip("FP4 32x16 WMMA scaleBType op_sel ignored by AM simulator")
 
-    num_k_tiles = K // tile_k
+    if K % split_k != 0:
+        pytest.skip(f"K={K} must be divisible by split_k={split_k}")
+    local_k = K // split_k
+    if local_k % tile_k != 0:
+        pytest.skip(f"K/split_k={local_k} must be divisible by tile_k={tile_k}")
+
+    num_k_tiles = local_k // tile_k
     if num_buffers > 1 and num_k_tiles < num_buffers:
         pytest.skip(f"{num_buffers}-buf requires num_k_tiles >= {num_buffers}")
 
@@ -221,6 +227,7 @@ def _run_mxscale_gemm_test(
         out_dtype=out_dtype,
         inst_prefetch=inst_prefetch,
         wave_specialized_tdm=wave_specialized_tdm,
+        split_k=split_k,
         use_scale_opsel=use_scale_opsel,
         expert_sched_mode=expert_sched_mode,
     )
@@ -418,7 +425,7 @@ def test_mxfp4_gemm_mcast(M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp,
         cluster_m=cluster_m, cluster_n=cluster_n)
 
 
-def _bench_kernel_us(run_fn, warmup=10, iters=50, flush_l2=True):
+def _bench_kernel_us(run_fn, warmup=10, iters=50, flush_l2=True, prep_fn=None):
     """Per-iteration CUDA events timer with L2 flush, IQR outlier removal, median.
 
     Follows the golden practices from benchmarks/gemm_gfx1250_benchmark.py:
@@ -437,6 +444,8 @@ def _bench_kernel_us(run_fn, warmup=10, iters=50, flush_l2=True):
     for _ in range(warmup):
         if flush_buf is not None:
             flush_buf.zero_()
+        if prep_fn is not None:
+            prep_fn()
         run_fn()
     torch.cuda.synchronize()
 
@@ -446,6 +455,8 @@ def _bench_kernel_us(run_fn, warmup=10, iters=50, flush_l2=True):
     for i in range(iters):
         if flush_buf is not None:
             flush_buf.zero_()
+        if prep_fn is not None:
+            prep_fn()
         start_ev[i].record()
         run_fn()
         end_ev[i].record()
@@ -495,8 +506,11 @@ def _run_benchmark(args):
     print(f"  Tile: ({tile_m}, {tile_n}, {tile_k}), warps=({args.m_warp}x{args.n_warp})")
     print(f"  Buffers={args.num_buffers}, out={args.out_dtype}, "
           f"opsel={args.use_scale_opsel}, inst_prefetch={args.inst_prefetch}")
+    if args.split_k > 1:
+        print(f"  Split-K={args.split_k} (atomic accumulate, buffer-store epilogue)")
     print(f"  Warmup={args.warmup}, Iters={args.iters}, "
           f"L2 flush={'ON' if not args.no_flush_l2 else 'OFF'}")
+    print("  Zero fill: ON (outside timing)")
     print("=" * 72)
 
     torch.manual_seed(0)
@@ -531,6 +545,10 @@ def _run_benchmark(args):
 
     print(f"\n[1/3] Compiling kernel...")
     t0 = time.perf_counter()
+    use_tdm_store = not args.no_tdm_store
+    if args.split_k > 1 and use_tdm_store:
+        print("      Note: split-K forces buffer-store atomic epilogue; disabling TDM store.")
+        use_tdm_store = False
     launch_fn = compile_mxscale_gemm(
         data_format=data_format,
         M=M, N=N, K=K,
@@ -540,18 +558,22 @@ def _run_benchmark(args):
         waves_per_eu=args.waves_per_eu,
         l2_prefetch_distance=args.l2_prefetch_distance,
         cluster_m=args.cluster_m, cluster_n=args.cluster_n,
-        use_tdm_store=not args.no_tdm_store,
+        use_tdm_store=use_tdm_store,
         out_dtype=args.out_dtype,
         inst_prefetch=args.inst_prefetch,
         wave_specialized_tdm=args.wave_spec_tdm,
+        split_k=args.split_k,
         use_scale_opsel=args.use_scale_opsel,
         expert_sched_mode=args.expert_sched_mode,
+        atomic_barrier_enable=args.atomic_barrier_enable,
     )
 
     stream = torch.cuda.current_stream()
 
-    def run_kernel():
+    def prep_kernel():
         c_gpu.zero_()
+
+    def run_kernel():
         launch_fn(
             c_gpu.contiguous().view(-1),
             a_gpu.contiguous().view(-1),
@@ -561,6 +583,7 @@ def _run_benchmark(args):
             M, N, stream,
         )
 
+    prep_kernel()
     run_kernel()
     torch.cuda.synchronize()
     compile_ms = (time.perf_counter() - t0) * 1e3
@@ -568,7 +591,7 @@ def _run_benchmark(args):
 
     print(f"[2/3] Warming up ({args.warmup} iters) + benchmarking ({args.iters} iters)...")
     us = _bench_kernel_us(run_kernel, warmup=args.warmup, iters=args.iters,
-                          flush_l2=not args.no_flush_l2)
+                          flush_l2=not args.no_flush_l2, prep_fn=prep_kernel)
 
     flops = 2.0 * M * N * K
     time_s = us / 1e6
@@ -594,9 +617,10 @@ def _run_benchmark(args):
     m_tiles = (M + tile_m - 1) // tile_m
     n_tiles = (N + tile_n - 1) // tile_n
     k_tiles = K // tile_k
+    k_tiles_local = (K // args.split_k) // tile_k
     total_wmma = m_tiles * n_tiles * k_tiles * wmma_per_tile
     # Sequential WMMAs per workgroup (all k_tiles execute sequentially)
-    seq_wmma = k_tiles * wmma_per_tile
+    seq_wmma = k_tiles_local * wmma_per_tile
     us_per_wmma = us / seq_wmma if seq_wmma > 0 else 0
 
     print(f"\n[3/3] Results:")
@@ -610,7 +634,11 @@ def _run_benchmark(args):
     print(f"      ---")
     print(f"      WMMA/tile:    {wmma_per_tile} "
           f"({wmma_m_rep}m × {wmma_n_rep}n × {k_wmma_steps}k)")
-    print(f"      Total tiles:  {m_tiles}×{n_tiles} spatial × {k_tiles} K-iters")
+    if args.split_k > 1:
+        print(f"      Total tiles:  {m_tiles}×{n_tiles} spatial × "
+              f"{args.split_k} split-K × {k_tiles_local} local K-iters")
+    else:
+        print(f"      Total tiles:  {m_tiles}×{n_tiles} spatial × {k_tiles} K-iters")
     print(f"      Seq WMMA/WG:  {seq_wmma}")
     print(f"      us/WMMA:      {us_per_wmma:.1f}")
     if us_per_wmma > 1000:
@@ -636,6 +664,7 @@ if __name__ == "__main__":
     parser.add_argument("--m-warp", type=int, default=2)
     parser.add_argument("--n-warp", type=int, default=2)
     parser.add_argument("--num-buffers", type=int, default=4, choices=[2, 3, 4])
+    parser.add_argument("--split-k", type=int, default=1)
     parser.add_argument("--l2-prefetch-distance", type=int, default=2)
     parser.add_argument("--cluster-m", type=int, default=1)
     parser.add_argument("--cluster-n", type=int, default=1)
@@ -648,6 +677,9 @@ if __name__ == "__main__":
     parser.add_argument("--use-scale-opsel", action="store_true", default=False)
     parser.add_argument("--disable-expert-sched-mode", dest="expert_sched_mode",
                         action="store_false", default=True)
+    parser.add_argument("--atomic-barrier-enable", action="store_true", default=False,
+                        help="Enable TDM atomic_barrier_enable (hardware auto-barrier)")
+
     parser.add_argument("--benchmark", action="store_true", default=False,
                         help="Run benchmark mode (timing only, no correctness check)")
     parser.add_argument("--warmup", type=int, default=5)
@@ -658,15 +690,17 @@ if __name__ == "__main__":
     if args.benchmark:
         _run_benchmark(args)
     else:
+        use_tdm_store = not args.no_tdm_store and args.split_k == 1
         _run_mxscale_gemm_test(
             args.data_format,
             args.M, args.N, args.K,
             args.tile_m, args.tile_n, args.tile_k,
             args.m_warp, args.n_warp,
             num_buffers=args.num_buffers,
-            use_tdm_store=not args.no_tdm_store,
+            use_tdm_store=use_tdm_store,
             out_dtype=args.out_dtype,
             wave_specialized_tdm=args.wave_spec_tdm,
+            split_k=args.split_k,
             use_scale_opsel=args.use_scale_opsel,
             l2_prefetch_distance=args.l2_prefetch_distance,
             cluster_m=args.cluster_m,
