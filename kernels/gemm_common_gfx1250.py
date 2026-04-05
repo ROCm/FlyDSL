@@ -2,7 +2,7 @@
 
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm as llvm_dialect
-from flydsl.expr import arith, buffer_ops, gpu, tdm_ops, vector
+from flydsl.expr import arith, buffer_ops, gpu, rocdl, tdm_ops, vector
 from flydsl.expr.arith import _to_raw as _raw
 from flydsl.expr.typing import T
 from flydsl.utils.smem_allocator import (
@@ -134,6 +134,37 @@ def pipeline_fence(outstanding=0, use_cluster=False):
         gpu.cluster_barrier()
     else:
         gpu.barrier()
+
+
+WGP_BARRIER_ID = -1
+
+
+def pipeline_fence_signal(outstanding=0, use_cluster=False):
+    """Signal half of a split barrier fence.
+
+    Issues ``s_wait_tensorcnt`` then ``s_barrier_signal -1``.
+    The matching ``pipeline_fence_wait`` must be called later
+    (typically mid-compute) before reading the LDS data.
+
+    When *use_cluster* is True the intra-WG barrier is still required
+    so that all waves' TDM loads are visible before any wave reads LDS.
+    The cluster barrier is layered on top for inter-WG synchronisation.
+    """
+    tdm_ops.tensor_wait(outstanding)
+    rocdl.s_barrier_signal(WGP_BARRIER_ID)
+    if use_cluster:
+        gpu.cluster_signal_once_per_wg()
+
+
+def pipeline_fence_wait(use_cluster=False):
+    """Wait half of a split barrier fence.
+
+    Issues ``s_barrier_wait -1``.  Must be preceded by a matching
+    ``pipeline_fence_signal`` from all waves in the workgroup.
+    """
+    rocdl.s_barrier_wait(WGP_BARRIER_ID)
+    if use_cluster:
+        gpu.cluster_wait()
 
 
 def store_acc_vec8_to_lds(memref, base_elem_off, imm_elem_off, acc_vec8,

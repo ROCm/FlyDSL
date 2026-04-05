@@ -54,7 +54,8 @@ def test_wmma_gemm_tdm(in_dtype, M, N, K, tile_m, tile_n, tile_k,
                         num_buffers,
                         m_warp=2, n_warp=4, l2_prefetch_distance=2,
                         out_dtype=None, use_tdm_store=True,
-                        cluster_m=1, cluster_n=1):
+                        cluster_m=1, cluster_n=1,
+                        wave_specialized_tdm=False, inst_prefetch=False):
     """Non-cluster GEMM correctness test."""
     arch = str(get_rocm_arch())
     if arch != "gfx1250":
@@ -122,6 +123,8 @@ def test_wmma_gemm_tdm(in_dtype, M, N, K, tile_m, tile_n, tile_k,
         use_tdm_store=use_tdm_store,
         cluster_m=cluster_m,
         cluster_n=cluster_n,
+        wave_specialized_tdm=wave_specialized_tdm,
+        inst_prefetch=inst_prefetch,
     )
     launch_fn(
         c_pad.contiguous().view(-1),
@@ -209,11 +212,13 @@ if __name__ == "__main__":
     parser.add_argument("--m-warp", type=int, default=2)
     parser.add_argument("--n-warp", type=int, default=4)
     parser.add_argument("--dtype", type=str, default="bf16", choices=["fp16", "bf16"])
-    parser.add_argument("--num-buffers", type=int, default=2, choices=[2, 3])
+    parser.add_argument("--num-buffers", type=int, default=2, choices=[2, 3, 4])
     parser.add_argument("--l2-prefetch-distance", type=int, default=0)
     parser.add_argument("--cluster-m", type=int, default=1)
     parser.add_argument("--cluster-n", type=int, default=1)
     parser.add_argument("--no-tdm-store", action="store_true", default=False)
+    parser.add_argument("--wave-spec-tdm", action="store_true", default=False)
+    parser.add_argument("--inst-prefetch", action="store_true", default=False)
     args = parser.parse_args()
 
     test_wmma_gemm_tdm(
