@@ -509,79 +509,252 @@ def make_combine_kernel(
                 _expert_base.append(_ebase)
                 _expert_vld.append(vld_j)
 
-            # WarpAccum（全 8 load 一次发射 + store nt）
-            _nt_attr = BoolAttr.get(True)
-            for ec in range(as_index(lane), as_index(hpw_v2), as_index(64)):
-                ec       = idx_to_i32(ec)
-                glob_ec  = h_off + ec
-                if icmp_ult_i32(glob_ec, const_i32(n_elems)):
-                    elem_byte_off = zext_i32_to_i64(glob_ec) * 4
+            # WarpAccum — Fix A+B+D + Fix F(消除glob_ec<n_elems guard) +
+            #             Fix G(预计算slot B基地址) + Fix H(分离双槽主循环和单槽尾部)
+            _nt_attr  = BoolAttr.get(True)
+            _all_vld  = (npes >= experts_per_token)   # Fix B: 编译期判断，EP=8 k=8 恒True
 
-                    # Phase A: 先发射全部 8 个 expert load（flat_load_dword）
+            _use_wide = icmp_ult_i32(const_i32(895), hpw_v2)   # Fix D: hpw_v2 > 895
+            _if_wide  = _scf_d.IfOp(_lv_unwrap(_use_wide), [], has_else=True)
+
+            # ── step=128 路径（hpw_v2 > 895）────────────────────────────────────────
+            with _IP(_if_wide.then_block):
+                # Fix F: 安全上界 = min(hpw_v2, n_elems - h_off)
+                _n_rem_128   = const_i32(n_elems) - h_off
+                _adj_end_128 = select_i32(
+                    icmp_ult_i32(_n_rem_128, hpw_v2), _n_rem_128, hpw_v2)
+                # Fix G+I: 预计算 slot B/C/D 基地址（+256/+512/+768 bytes）
+                _const_256 = _llvm_d.ConstantOp(_i64t, _IA.get(_i64t, 256)).result
+                _const_512 = _llvm_d.ConstantOp(_i64t, _IA.get(_i64t, 512)).result
+                _const_768 = _llvm_d.ConstantOp(_i64t, _IA.get(_i64t, 768)).result
+                _expert_base_b, _expert_base_c, _expert_base_d = [], [], []
+                for _j_py in range_constexpr(experts_per_token):
+                    _expert_base_b.append(_llvm_d.AddOp(
+                        _expert_base[_j_py], _const_256, _ovf_none).result)
+                    _expert_base_c.append(_llvm_d.AddOp(
+                        _expert_base[_j_py], _const_512, _ovf_none).result)
+                    _expert_base_d.append(_llvm_d.AddOp(
+                        _expert_base[_j_py], _const_768, _ovf_none).result)
+
+                if n_i32 % 256 == 0 and warp_num_per_block < 16:
+                    # Fix I+K: 4-slot step=256，仅在 wpb<16 时使用
+                    # SIMD VMEM 队列分析：
+                    #   wpb=8:  2波/SIMD × 32 loads = 64/64 ★最优
+                    #   wpb=16: 4波/SIMD × 32 loads = 128/64 !! 溢出→stall
+                    # → wpb≥16 时走 2-slot，4波×16 loads=64/64 且有更多 wavefront 隐藏 ALU 延迟
+                    # Bug fix: hpw_v2 = ceil(n_i32/wpt_v2)，wpt_v2>1 时 hpw_v2 可能不整除256
+                    # （例如 BS=512 wpb=16 时 wpt_v2=3, hpw_v2=1195, 1195%256=171≠0）
+                    # 需要运行期检查，不对齐时回退 2-slot
+                    _hpw_rem256  = remui(hpw_v2, const_i32(256))
+                    _is_256aln   = icmp_ult_i32(_hpw_rem256, const_i32(1))  # hpw_v2%256==0
+                    _if_256aln   = _scf_d.IfOp(_lv_unwrap(_is_256aln), [], has_else=True)
+                    with _IP(_if_256aln.then_block):
+                      _quad_end_128 = _adj_end_128 - const_i32(192)
+                      for ec in range(as_index(lane), as_index(_quad_end_128), as_index(256)):
+                        ec       = idx_to_i32(ec)
+                        glob_ec  = h_off + ec
+                        elem_byte_off = zext_i32_to_i64(glob_ec) * 4
+                        # 先发射全部 32 个 NT load（最大化 XGMI 并发）
+                        _va, _vb, _vc, _vd = [], [], [], []
+                        for _j_py in range_constexpr(experts_per_token):
+                            _bj  = _expert_base[_j_py]
+                            _aa  = _llvm_d.AddOp(_bj, _lv_unwrap(elem_byte_off),
+                                                 _ovf_none).result
+                            _va.append(_llvm_d.LoadOp(
+                                _i32t, _llvm_d.IntToPtrOp(_ptr_g, _aa).result,
+                                alignment=4, nontemporal=_nt_attr).result)
+                            _ab  = _llvm_d.AddOp(_expert_base_b[_j_py],
+                                                 _lv_unwrap(elem_byte_off),
+                                                 _ovf_none).result
+                            _vb.append(_llvm_d.LoadOp(
+                                _i32t, _llvm_d.IntToPtrOp(_ptr_g, _ab).result,
+                                alignment=4, nontemporal=_nt_attr).result)
+                            _ac  = _llvm_d.AddOp(_expert_base_c[_j_py],
+                                                 _lv_unwrap(elem_byte_off),
+                                                 _ovf_none).result
+                            _vc.append(_llvm_d.LoadOp(
+                                _i32t, _llvm_d.IntToPtrOp(_ptr_g, _ac).result,
+                                alignment=4, nontemporal=_nt_attr).result)
+                            _ad  = _llvm_d.AddOp(_expert_base_d[_j_py],
+                                                 _lv_unwrap(elem_byte_off),
+                                                 _ovf_none).result
+                            _vd.append(_llvm_d.LoadOp(
+                                _i32t, _llvm_d.IntToPtrOp(_ptr_g, _ad).result,
+                                alignment=4, nontemporal=_nt_attr).result)
+                        # 累加 4 个 slot（Fix J: 消除 ZeroOp，用首个 expert 值初始化）
+                        if _all_vld:
+                            # EP=8 k=8: 全部有效，直接用 va[0]/vb[0]/vc[0]/vd[0] 初始化
+                            _acca = _arith_d.ExtFOp(
+                                _v2f32, _llvm_d.BitcastOp(_v2bf16, _va[0]).res).result
+                            _accb = _arith_d.ExtFOp(
+                                _v2f32, _llvm_d.BitcastOp(_v2bf16, _vb[0]).res).result
+                            _accc = _arith_d.ExtFOp(
+                                _v2f32, _llvm_d.BitcastOp(_v2bf16, _vc[0]).res).result
+                            _accd = _arith_d.ExtFOp(
+                                _v2f32, _llvm_d.BitcastOp(_v2bf16, _vd[0]).res).result
+                            for _j_py in range_constexpr(1, experts_per_token):
+                                _acca = _arith_d.AddFOp(_acca, _arith_d.ExtFOp(
+                                    _v2f32, _llvm_d.BitcastOp(_v2bf16, _va[_j_py]).res).result).result
+                                _accb = _arith_d.AddFOp(_accb, _arith_d.ExtFOp(
+                                    _v2f32, _llvm_d.BitcastOp(_v2bf16, _vb[_j_py]).res).result).result
+                                _accc = _arith_d.AddFOp(_accc, _arith_d.ExtFOp(
+                                    _v2f32, _llvm_d.BitcastOp(_v2bf16, _vc[_j_py]).res).result).result
+                                _accd = _arith_d.AddFOp(_accd, _arith_d.ExtFOp(
+                                    _v2f32, _llvm_d.BitcastOp(_v2bf16, _vd[_j_py]).res).result).result
+                        else:
+                            _acca = _llvm_d.ZeroOp(_v2f32).res
+                            _accb = _llvm_d.ZeroOp(_v2f32).res
+                            _accc = _llvm_d.ZeroOp(_v2f32).res
+                            _accd = _llvm_d.ZeroOp(_v2f32).res
+                            for _j_py in range_constexpr(experts_per_token):
+                                _fa  = _arith_d.ExtFOp(
+                                    _v2f32, _llvm_d.BitcastOp(_v2bf16, _va[_j_py]).res).result
+                                _fb  = _arith_d.ExtFOp(
+                                    _v2f32, _llvm_d.BitcastOp(_v2bf16, _vb[_j_py]).res).result
+                                _fc  = _arith_d.ExtFOp(
+                                    _v2f32, _llvm_d.BitcastOp(_v2bf16, _vc[_j_py]).res).result
+                                _fd  = _arith_d.ExtFOp(
+                                    _v2f32, _llvm_d.BitcastOp(_v2bf16, _vd[_j_py]).res).result
+                                _vld = _lv_unwrap(_expert_vld[_j_py])
+                                _z   = _llvm_d.ZeroOp(_v2f32).res
+                                _acca = _arith_d.AddFOp(
+                                    _acca, _llvm_d.SelectOp(_vld, _fa, _z).res).result
+                                _accb = _arith_d.AddFOp(
+                                    _accb, _llvm_d.SelectOp(_vld, _fb, _z).res).result
+                                _accc = _arith_d.AddFOp(
+                                    _accc, _llvm_d.SelectOp(_vld, _fc, _z).res).result
+                                _accd = _arith_d.AddFOp(
+                                    _accd, _llvm_d.SelectOp(_vld, _fd, _z).res).result
+                        _i32a = _llvm_d.BitcastOp(
+                            _i32t, _arith_d.TruncFOp(_v2bf16, _acca).result).res
+                        _i32b = _llvm_d.BitcastOp(
+                            _i32t, _arith_d.TruncFOp(_v2bf16, _accb).result).res
+                        _i32c = _llvm_d.BitcastOp(
+                            _i32t, _arith_d.TruncFOp(_v2bf16, _accc).result).res
+                        _i32d = _llvm_d.BitcastOp(
+                            _i32t, _arith_d.TruncFOp(_v2bf16, _accd).result).res
+                        # Fix J: 预计算输出基地址，4 次 store 共用 base + 常量偏移
+                        _out_off = zext_i32_to_i64(tok_id * n_i32 + glob_ec) * 4
+                        _out_base_i64 = _lv_unwrap(addr_comb_out + _out_off)
+                        _llvm_d.StoreOp(_i32a, _llvm_d.IntToPtrOp(
+                            _ptr_g, _out_base_i64).result,
+                            alignment=4, nontemporal=_nt_attr)
+                        _out_b_i64 = _llvm_d.AddOp(
+                            _out_base_i64, _const_256, _ovf_none).result
+                        _llvm_d.StoreOp(_i32b, _llvm_d.IntToPtrOp(
+                            _ptr_g, _out_b_i64).result,
+                            alignment=4, nontemporal=_nt_attr)
+                        _out_c_i64 = _llvm_d.AddOp(
+                            _out_base_i64, _const_512, _ovf_none).result
+                        _llvm_d.StoreOp(_i32c, _llvm_d.IntToPtrOp(
+                            _ptr_g, _out_c_i64).result,
+                            alignment=4, nontemporal=_nt_attr)
+                        _out_d_i64 = _llvm_d.AddOp(
+                            _out_base_i64, _const_768, _ovf_none).result
+                        _llvm_d.StoreOp(_i32d, _llvm_d.IntToPtrOp(
+                            _ptr_g, _out_d_i64).result,
+                            alignment=4, nontemporal=_nt_attr)
+                      _scf_d.YieldOp([])
+                    with _IP(_if_256aln.else_block):
+                      # 2-slot fallback: hpw_v2 不整除 256（如 wpt_v2=3 时 hpw_v2=1195）
+                      _dual_end_256fb = _adj_end_128 - const_i32(64)
+                      for ec in range(as_index(lane), as_index(_dual_end_256fb), as_index(128)):
+                        ec       = idx_to_i32(ec)
+                        glob_ec  = h_off + ec
+                        elem_byte_off = zext_i32_to_i64(glob_ec) * 4
+                        _va, _vb = [], []
+                        for _j_py in range_constexpr(experts_per_token):
+                            _bj  = _expert_base[_j_py]
+                            _aa  = _llvm_d.AddOp(_bj, _lv_unwrap(elem_byte_off),
+                                                 _ovf_none).result
+                            _va.append(_llvm_d.LoadOp(
+                                _i32t, _llvm_d.IntToPtrOp(_ptr_g, _aa).result,
+                                alignment=4, nontemporal=_nt_attr).result)
+                            _ab  = _llvm_d.AddOp(_expert_base_b[_j_py],
+                                                 _lv_unwrap(elem_byte_off),
+                                                 _ovf_none).result
+                            _vb.append(_llvm_d.LoadOp(
+                                _i32t, _llvm_d.IntToPtrOp(_ptr_g, _ab).result,
+                                alignment=4, nontemporal=_nt_attr).result)
+                        if _all_vld:
+                            _acca = _arith_d.ExtFOp(
+                                _v2f32, _llvm_d.BitcastOp(_v2bf16, _va[0]).res).result
+                            _accb = _arith_d.ExtFOp(
+                                _v2f32, _llvm_d.BitcastOp(_v2bf16, _vb[0]).res).result
+                            for _j_py in range_constexpr(1, experts_per_token):
+                                _acca = _arith_d.AddFOp(_acca, _arith_d.ExtFOp(
+                                    _v2f32, _llvm_d.BitcastOp(_v2bf16, _va[_j_py]).res).result).result
+                                _accb = _arith_d.AddFOp(_accb, _arith_d.ExtFOp(
+                                    _v2f32, _llvm_d.BitcastOp(_v2bf16, _vb[_j_py]).res).result).result
+                        else:
+                            _acca = _llvm_d.ZeroOp(_v2f32).res
+                            _accb = _llvm_d.ZeroOp(_v2f32).res
+                            for _j_py in range_constexpr(experts_per_token):
+                                _fa  = _arith_d.ExtFOp(
+                                    _v2f32, _llvm_d.BitcastOp(_v2bf16, _va[_j_py]).res).result
+                                _fb  = _arith_d.ExtFOp(
+                                    _v2f32, _llvm_d.BitcastOp(_v2bf16, _vb[_j_py]).res).result
+                                _vld = _lv_unwrap(_expert_vld[_j_py])
+                                _z   = _llvm_d.ZeroOp(_v2f32).res
+                                _acca = _arith_d.AddFOp(
+                                    _acca, _llvm_d.SelectOp(_vld, _fa, _z).res).result
+                                _accb = _arith_d.AddFOp(
+                                    _accb, _llvm_d.SelectOp(_vld, _fb, _z).res).result
+                        _i32a = _llvm_d.BitcastOp(
+                            _i32t, _arith_d.TruncFOp(_v2bf16, _acca).result).res
+                        _i32b = _llvm_d.BitcastOp(
+                            _i32t, _arith_d.TruncFOp(_v2bf16, _accb).result).res
+                        _out_off = zext_i32_to_i64(tok_id * n_i32 + glob_ec) * 4
+                        _out_base_i64 = _lv_unwrap(addr_comb_out + _out_off)
+                        _llvm_d.StoreOp(_i32a, _llvm_d.IntToPtrOp(
+                            _ptr_g, _out_base_i64).result,
+                            alignment=4, nontemporal=_nt_attr)
+                        _out_b_i64 = _llvm_d.AddOp(
+                            _out_base_i64, _const_256, _ovf_none).result
+                        _llvm_d.StoreOp(_i32b, _llvm_d.IntToPtrOp(
+                            _ptr_g, _out_b_i64).result,
+                            alignment=4, nontemporal=_nt_attr)
+                      _scf_d.YieldOp([])
+                _scf_d.YieldOp([])
+
+            # ── step=64 路径（hpw_v2 <= 895）────────────────────────────────────────
+            with _IP(_if_wide.else_block):
+                # Fix F: 安全上界，消除 if glob_ec < n_elems guard
+                _n_rem_64   = const_i32(n_elems) - h_off
+                _adj_end_64 = select_i32(
+                    icmp_ult_i32(_n_rem_64, hpw_v2), _n_rem_64, hpw_v2)
+                for ec in range(as_index(lane), as_index(_adj_end_64), as_index(64)):
+                    ec      = idx_to_i32(ec)
+                    glob_ec = h_off + ec
+                    elem_byte_off = zext_i32_to_i64(glob_ec) * 4
                     _vals = []
                     for _j_py in range_constexpr(experts_per_token):
-                        _src_addr = _llvm_d.AddOp(
+                        _aa = _llvm_d.AddOp(
                             _expert_base[_j_py], _lv_unwrap(elem_byte_off),
                             _ovf_none).result
-                        fptr      = _llvm_d.IntToPtrOp(_ptr_flat, _src_addr).result
-                        e32       = _llvm_d.LoadOp(_i32t, fptr, alignment=4).result
-                        _vals.append(e32)
-
-                    # Phase B: 累加（load 已全部发射，可并行返回）
+                        _vals.append(_llvm_d.LoadOp(  # Fix A: NT load
+                            _i32t, _llvm_d.IntToPtrOp(_ptr_g, _aa).result,
+                            alignment=4, nontemporal=_nt_attr).result)
                     acc = _llvm_d.ZeroOp(_v2f32).res
                     for _j_py in range_constexpr(experts_per_token):
-                        e_bf  = _llvm_d.BitcastOp(_v2bf16, _vals[_j_py]).res
-                        e_f32 = _arith_d.ExtFOp(_v2f32, e_bf).result
-                        z_f32 = _llvm_d.ZeroOp(_v2f32).res
-                        masked = _llvm_d.SelectOp(_lv_unwrap(_expert_vld[_j_py]),
-                                                  e_f32, z_f32).res
-                        acc   = _arith_d.AddFOp(acc, masked).result
-
-                    # bf16 round-to-nearest-even（匹配 Mori 的 v_bfe + v_add3 模式）
-                    # 算法：rounded = val + ((val >> 16) & 1) + 0x7FFF
-                    #        bf16 = rounded >> 16
-                    # Inf/NaN 特殊处理：若 exponent 全1 则不 round
-                    _acc_i32_vec = _llvm_d.BitcastOp(
-                        VectorType.get([2], _i32t), acc).res
-                    _c16   = _arith_d.ConstantOp(_i32t, _IA.get(_i32t, 16)).result
-                    _c1    = _arith_d.ConstantOp(_i32t, _IA.get(_i32t, 1)).result
-                    _c7fff = _arith_d.ConstantOp(_i32t, _IA.get(_i32t, 0x7FFF)).result
-                    _cmask = _arith_d.ConstantOp(
-                        _i32t, _IA.get(_i32t, 0xFFFF0000)).result
-                    _cexp  = _arith_d.ConstantOp(
-                        _i32t, _IA.get(_i32t, 0x7F800000)).result
-
-                    def _f32_to_bf16_rne(elem_i32):
-                        """f32 (as i32) → bf16 (upper 16 bits of rounded i32)"""
-                        # round_bit = (val >> 16) & 1
-                        _rb = _arith_d.AndIOp(
-                            _arith_d.ShRUIOp(elem_i32, _c16).result, _c1).result
-                        # rounded = val + round_bit + 0x7FFF
-                        _rnd = _arith_d.AddIOp(
-                            _arith_d.AddIOp(elem_i32, _rb).result, _c7fff).result
-                        # Inf/NaN check: (val & 0x7F800000) == 0x7F800000
-                        _exp = _arith_d.AndIOp(elem_i32, _cexp).result
-                        _is_inf = _arith_d.CmpIOp(
-                            _arith_d.CmpIPredicate.eq, _exp, _cexp).result
-                        # 若 Inf/NaN 则用原值（不 round），否则用 rounded
-                        return _arith_d.SelectOp(_is_inf, elem_i32, _rnd).result
-
-                    _elem0 = _llvm_d.ExtractElementOp(
-                        _acc_i32_vec,
-                        _arith_d.ConstantOp(_i32t, _IA.get(_i32t, 0)).result).res
-                    _elem1 = _llvm_d.ExtractElementOp(
-                        _acc_i32_vec,
-                        _arith_d.ConstantOp(_i32t, _IA.get(_i32t, 1)).result).res
-                    _rnd0  = _f32_to_bf16_rne(_elem0)
-                    _rnd1  = _f32_to_bf16_rne(_elem1)
-                    _lo    = _arith_d.ShRUIOp(_rnd0, _c16).result
-                    _hi    = _arith_d.AndIOp(_rnd1, _cmask).result
-                    i32_v  = _arith_d.OrIOp(_lo, _hi).result
-                    _out_byte_off = zext_i32_to_i64(tok_id * n_i32 + glob_ec) * 4
-                    _out_addr = addr_comb_out + _out_byte_off
-                    _out_ptr  = _llvm_d.IntToPtrOp(_ptr_g, _lv_unwrap(_out_addr)).result
-                    _llvm_d.StoreOp(i32_v, _out_ptr, alignment=4,
-                                    nontemporal=_nt_attr)
+                        _fa  = _arith_d.ExtFOp(
+                            _v2f32,
+                            _llvm_d.BitcastOp(_v2bf16, _vals[_j_py]).res).result
+                        if _all_vld:  # Fix B
+                            acc = _arith_d.AddFOp(acc, _fa).result
+                        else:
+                            _z   = _llvm_d.ZeroOp(_v2f32).res
+                            acc  = _arith_d.AddFOp(
+                                acc,
+                                _llvm_d.SelectOp(
+                                    _lv_unwrap(_expert_vld[_j_py]), _fa, _z).res).result
+                    _i32v = _llvm_d.BitcastOp(
+                        _i32t, _arith_d.TruncFOp(_v2bf16, acc).result).res
+                    _ob   = zext_i32_to_i64(tok_id * n_i32 + glob_ec) * 4
+                    _op   = _llvm_d.IntToPtrOp(
+                        _ptr_g, _lv_unwrap(addr_comb_out + _ob)).result
+                    _llvm_d.StoreOp(_i32v, _op, alignment=4, nontemporal=_nt_attr)
+                _scf_d.YieldOp([])
 
     ep_combine_intranode._allocator = allocator
     return ep_combine_intranode
@@ -607,8 +780,10 @@ def make_dispatch_jit(*, rank, npes, experts_per_rank, experts_per_token,
         warp_num_per_block=warp_num_per_block,
     )
 
-    _rank_id = rank  # expose rank as simple-type closure var → enters cache key
-    _npes_id = npes  # expose npes as simple-type closure var → enters cache key
+    _rank_id   = rank             # expose rank as simple-type closure var → enters cache key
+    _npes_id   = npes             # expose npes as simple-type closure var → enters cache key
+    _block_num = block_num        # must include in cache key (baked into wait_until_equals)
+    _wpb       = warp_num_per_block  # must include in cache key (baked into block_dim)
 
     @flyc.jit
     def dispatch_launch(
@@ -623,7 +798,7 @@ def make_dispatch_jit(*, rank, npes, experts_per_rank, experts_per_token,
         addr_p2p_out_tok: fx.Int64, addr_p2p_recv_num: fx.Int64,
         cur_tok: fx.Int32,
     ):
-        _ = (_rank_id, _npes_id)  # referenced to include in cache key
+        _ = (_rank_id, _npes_id, _block_num, _wpb)  # referenced to include in cache key
         kernel(addr_inp_tok, addr_idx, addr_wts,
                addr_out_tok, addr_out_wts, addr_out_idx,
                addr_tok_off, addr_recv_num, addr_dest_ctr,
@@ -655,8 +830,10 @@ def make_combine_jit(*, rank, npes, experts_per_token, hidden_dim,
         warp_num_per_block=warp_num_per_block,
     )
 
-    _rank_id = rank  # expose rank as simple-type closure var → enters cache key
-    _npes_id = npes  # expose npes as simple-type closure var → enters cache key
+    _rank_id   = rank             # expose rank as simple-type closure var → enters cache key
+    _npes_id   = npes             # expose npes as simple-type closure var → enters cache key
+    _block_num = block_num        # must include in cache key (baked into wait_until_equals)
+    _wpb       = warp_num_per_block  # must include in cache key (baked into block_dim)
 
     # 获取 kernel 内部闭包引用的 allocator（用于 finalize）
     _allocator = kernel._allocator
@@ -671,7 +848,7 @@ def make_combine_jit(*, rank, npes, experts_per_token, hidden_dim,
         addr_p2p_comb_inp: fx.Int64, addr_p2p_xdb_mem: fx.Int64,
         cur_tok: fx.Int32, total_recv_val: fx.Int32,
     ):
-        _ = (_rank_id, _npes_id)  # referenced to include in cache key
+        _ = (_rank_id, _npes_id, _block_num, _wpb)  # referenced to include in cache key
 
         # 在 gpu_module_body 中插入 LDS global 声明（对齐 rmsnorm_kernel 模式）
         from flydsl.compiler.kernel_function import CompilationContext
