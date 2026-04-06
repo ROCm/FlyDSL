@@ -64,9 +64,7 @@ def _dynamic_mxfp4_quant_kernel(
     bidy = fx.block_idx.y
     tidx = fx.thread_idx.x
 
-    fx.printf("[kernel] bid(x,y)={},{} tid(x)={}", bidx, bidy, tidx)
-
-    #fx.printf("[kernel] bid(x)={} tid(x)={}", bid, tid)
+    #fx.printf("[kernel] bid(x,y)={},{} tid(x)={}", bidx, bidy, tidx)
 
     x = fx.rocdl.make_buffer_tensor(x)
     x_fp4 = fx.rocdl.make_buffer_tensor(x_fp4)
@@ -100,10 +98,15 @@ def _dynamic_mxfp4_quant_kernel(
 
     fx.copy(copy_atom, partition_src, frag)
 
-    v = frag.load()
+    x_f = frag.load()
+
+    #calculate scale
+    #Abs works only on int types, so first bitcast to i16
     vec_i16_ty = T.vec(32, T.i16)
-    v = fx.vector.bitcast(vec_i16_ty, v)
+    v = fx.vector.bitcast(vec_i16_ty, x_f)
     v_abs = v & 0x7FFF #Abs value. Remove sign bit of float type
+
+    #Calculate Max and Scale(Calculations ported over from AITER Triton kernel)
     amax = fx.vector.reduction(T.i16, "maxsi", v_abs)
     vec_i32_ty = T.vec(1, T.i32)
     amax = fx.arith.extsi(T.i32, amax)
@@ -121,10 +124,89 @@ def _dynamic_mxfp4_quant_kernel(
     bs_e8m0 = fx.arith.trunci(fx.typing.Uint8.ir_type, bs_e8m0)
     ci_127 = fx.arith.constant(127, type=fx.typing.Uint8.ir_type)
     bs_e8m0 = fx.arith.addi(bs_e8m0,ci_127)
-    quant_scale = math.exp2(scale_e8m0_unbiased)
+    quant_scale = math.exp2(-scale_e8m0_unbiased)
 
+    # Compute quantized x
+    vec_f32_ty = T.vec(32, T.f32)
+    x_f32 = x_f.extf(vec_f32_ty)
+    
+    qx_fp32 = x_f32 * fx.vector.broadcast(vec_f32_ty,quant_scale)
 
-    frag.store(v)
+    # Convert quantized fp32 tensor to uint32 before converting to mxfp4 format
+    # Note: MXFP4  S:1-bit, E:2-bit, M:1-bit
+    #   Zeros: S000 -> +/-0
+    #   Denormal Numbers: S001 -> +/- 0.5
+    #   Normal Numbers:
+    #           S010 -> +/- 1.0
+    #           S011 -> +/- 1.5
+    #           S100 -> +/- 2.0
+    #           S101 -> +/- 3.0
+    #           S110 -> +/- 4.0
+    #           S111 -> +/- 6.0
+    EXP_BIAS_FP32 = fx.arith.constant(127)
+    EXP_BIAS_FP4 = fx.arith.constant(1)
+    EBITS_F32 = fx.arith.constant(8)
+    EBITS_FP4 = fx.arith.constant(2)
+    MBITS_F32 = fx.arith.constant(23)
+    MBITS_FP4 = fx.arith.constant(1)
+
+    max_normal = fx.arith.constant(6.0)
+    min_normal = fx.arith.constant(1.0)
+    vec_ui32_ty = T.vec(32, fx.typing.Uint32.ir_type)
+    qx = fx.vector.bitcast(vec_ui32_ty, qx_fp32)
+
+    # Extract sign
+    s = qx & 0x80000000
+
+    # Set everything to positive, will add sign back at the end
+    qx = qx ^ s
+
+    qx_fp32 = fx.vector.bitcast(vec_f32_ty, qx)
+
+    vecx32_i32_ty = T.vec(32, T.i32)
+    vecx32_b_ty = T.vec(32, fx.typing.Boolean.ir_type)
+    #vecx32_i1_ty = T.vec(32, T.i32)
+    saturate_mask = qx_fp32 >= fx.vector.broadcast(vec_f32_ty, max_normal)
+    saturate_mask_i32 = fx.arith.extui(vecx32_i32_ty, saturate_mask)
+    tmp = qx_fp32 < fx.vector.broadcast(vec_f32_ty,min_normal)
+    tmp = fx.arith.extui(vecx32_i32_ty, tmp)
+    #denormal_mask = (~saturate_mask_i32) & tmp
+    denormal_mask = (saturate_mask_i32) & tmp #Not on vector fails compilation
+    #normal_mask =  ~(saturate_mask | denormal_mask)
+    normal_mask =  (saturate_mask_i32 | denormal_mask)
+    denormal_mask = fx.arith.trunci(vecx32_b_ty, denormal_mask) #Convert to boolean for use in arith.select
+    normal_mask = fx.arith.trunci(vecx32_b_ty, normal_mask)#Convert to boolean for use in arith.select
+
+     # Denormal numbers
+    vecx32_ui32_ty = T.vec(32, fx.typing.Uint32.ir_type)
+    denorm_exp = (EXP_BIAS_FP32 - EXP_BIAS_FP4) + (MBITS_F32 - MBITS_FP4) + fx.arith.constant(1)
+    denorm_mask_int = denorm_exp << MBITS_F32
+    denorm_mask_float = fx.vector.bitcast(vec_f32_ty, fx.vector.broadcast(vecx32_i32_ty, denorm_mask_int))
+    denormal_x = qx_fp32 + denorm_mask_float
+    denormal_x = fx.vector.bitcast(vecx32_ui32_ty, denormal_x)
+    denormal_x = denormal_x - fx.vector.broadcast(vecx32_i32_ty, denorm_mask_int)
+    vecx32_ui8_ty = T.vec(32, fx.typing.Uint8.ir_type)
+    denormal_x = fx.arith.trunci(vecx32_ui8_ty, fx.arith.unwrap(denormal_x))
+
+    # Normal numbers
+    normal_x = qx_fp32
+    mant_odd = (qx >> fx.vector.broadcast(vecx32_i32_ty, (MBITS_F32 - MBITS_FP4))) & 1
+    val_to_add = ((EXP_BIAS_FP4 - EXP_BIAS_FP32) << MBITS_F32) + (1 << 21) - 1
+    normal_x += fx.vector.broadcast(vec_f32_ty, fx.arith.bitcast(T.f32, val_to_add))
+    normal_x = fx.vector.bitcast(vecx32_ui32_ty, normal_x) + fx.vector.broadcast(vecx32_ui32_ty, mant_odd)
+    normal_x = fx.arith.trunci(vecx32_ui8_ty, fx.arith.unwrap(normal_x))
+    
+    # Merge results
+    e2m1_value = fx.vector.broadcast(vecx32_ui8_ty, arith.trunci(fx.typing.Uint8.ir_type, fx.arith.constant(0x7)))
+    e2m1_value = fx.arith.select(normal_mask, normal_x, e2m1_value)
+    e2m1_value = fx.arith.select(denormal_mask, denormal_x, e2m1_value)
+
+    sign_lp = s >> fx.vector.broadcast(vecx32_ui32_ty,(MBITS_F32 + EBITS_F32 - MBITS_FP4 - EBITS_FP4))
+    sign_lp = fx.arith.trunci(vecx32_ui8_ty, fx.arith.unwrap(sign_lp))
+    
+    e2m1_value = e2m1_value | sign_lp
+
+    frag.store(e2m1_value)
     fx.copy(copy_atom, frag, partition_dst)
  
 @flyc.jit
@@ -154,7 +236,8 @@ def dynamic_mxfp4_quant(
 
     MXFP4_QUANT_BLOCK_SIZE = 32 #Fixed for MXFP4 format
     #x_fp4 = torch.empty((M, N // 2), dtype=torch.uint8, device=x.device)
-    x_fp4 = torch.empty((M, N), dtype=torch.bfloat16, device=x.device)
+    #x_fp4 = torch.empty((M, N ), dtype=torch.uint8, device=x.device)
+    x_fp4 = torch.empty((M, N), dtype=torch.uint16, device=x.device)
     blockscale_e8m0 = torch.empty(
         ((N + MXFP4_QUANT_BLOCK_SIZE - 1) // MXFP4_QUANT_BLOCK_SIZE, M),
         dtype=torch.uint8,
