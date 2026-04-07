@@ -2538,16 +2538,16 @@ def compile_moe_reduction(
             m_tokens = arith.index_cast(T.index, i32_m_tokens)
             c_topk = fx.Index(topk)
             c_model_dim = fx.Index(model_dim)
-            c_elem_bytes = arith.index(4 if dtype_str == "f32" else 2)
-            x_nbytes_idx = m_tokens * c_topk * c_model_dim * c_elem_bytes
-            y_nbytes_idx = m_tokens * c_model_dim * c_elem_bytes
             mask_nbytes_idx = m_tokens * c_topk
-            x_rsrc = buffer_ops.create_buffer_resource(
-                X, max_size=False, num_records_bytes=x_nbytes_idx
-            )
-            y_rsrc = buffer_ops.create_buffer_resource(
-                Y, max_size=False, num_records_bytes=y_nbytes_idx
-            )
+            elem_bits = 32 if dtype_str == "f32" else 16
+            use_vec_layout = elem_bits <= 16
+            # Buffer-backed tensors via layout API (f16/bf16 vector fast path)
+            if use_vec_layout:
+                X_buf = fx.rocdl.make_buffer_tensor(X)
+                Y_buf = fx.rocdl.make_buffer_tensor(Y)
+            # Scalar buffer resources for tail path and mask
+            x_rsrc = buffer_ops.create_buffer_resource(X, max_size=True)
+            y_rsrc = buffer_ops.create_buffer_resource(Y, max_size=True)
             mask_rsrc = buffer_ops.create_buffer_resource(
                 valid_mask, max_size=False, num_records_bytes=mask_nbytes_idx
             )
@@ -2584,36 +2584,83 @@ def compile_moe_reduction(
                     )
                     _if_full = scf.IfOp(end_ok, has_else=True)
                     with _if_then(_if_full):
-                        c0_i8 = arith.constant(0, type=i8_type())
-                        token_base = token_idx * c_topk
-                        for lane in range_constexpr(VEC_WIDTH):
-                            col = col_base + fx.Index(lane)
-                            a = arith.constant(0.0, type=compute_type())
+                        if use_vec_layout:
+                            # ── Vector path via layout API (topk vector loads) ──
+                            copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), elem_bits)
+                            vec_reg_ty = fx.MemRefType.get(
+                                elem_type(), fx.LayoutType.get(VEC_WIDTH, 1), fx.AddressSpace.Register
+                            )
+                            vec_reg_lay = fx.make_layout(VEC_WIDTH, 1)
+                            vec_type_c = T.vec(VEC_WIDTH, compute_type())
+                            vec_type_e = T.vec(VEC_WIDTH, elem_type())
+
+                            acc_vec = vector.broadcast(vec_type_c, arith.constant(0.0, type=compute_type()))
+                            c0_i8 = arith.constant(0, type=i8_type())
+
+                            tok_i32 = arith.index_cast(i32_type(), token_idx)
+                            tile_i32 = arith.index_cast(i32_type(), tile_idx)
+                            tid_i32 = arith.index_cast(i32_type(), tid)
+
                             for k in range_constexpr(topk):
-                                k_idx = fx.Index(k)
-                                x_idx = (token_base + k_idx) * c_model_dim + col
-                                x_idx_i32 = arith.index_cast(i32_type(), x_idx)
+                                k_i32 = fx.Int32(k)
+                                x_row_k = fx.slice(X_buf, (tok_i32, k_i32, None))
+                                x_tiled = fx.logical_divide(x_row_k, fx.make_layout(tile_cols, 1))
+                                x_tile = fx.slice(x_tiled, (None, tile_i32))
+                                x_div = fx.logical_divide(x_tile, fx.make_layout(VEC_WIDTH, 1))
+
+                                r = fx.memref_alloca(vec_reg_ty, vec_reg_lay)
+                                fx.copy_atom_call(copy_atom, fx.slice(x_div, (None, tid_i32)), r)
+                                vec_e = fx.memref_load_vec(r)
+
                                 if use_mask:
-                                    m_idx = token_base + k_idx
+                                    m_idx = token_idx * c_topk + fx.Index(k)
                                     m_idx_i32 = arith.index_cast(i32_type(), m_idx)
                                     mv = buffer_ops.buffer_load(mask_rsrc, m_idx_i32, vec_width=1, dtype=i8_type())
                                     mv_ok = arith.cmpi(arith.CmpIPredicate.ne, mv, c0_i8)
-                                    v = arith.select(
-                                        mv_ok,
-                                        buffer_ops.buffer_load(x_rsrc, x_idx_i32, vec_width=1, dtype=elem_type()),
-                                        arith.constant(0.0, type=elem_type()),
-                                    )
-                                else:
-                                    v = buffer_ops.buffer_load(x_rsrc, x_idx_i32, vec_width=1, dtype=elem_type())
-                                if dtype_str in ("f16", "bf16"):
-                                    v = arith.extf(compute_type(), v)
-                                a = a + v
-                            v = a
-                            if dtype_str in ("f16", "bf16"):
-                                v = arith.trunc_f(elem_type(), v)
-                            y_idx = token_idx * c_model_dim + col
-                            y_idx_i32 = arith.index_cast(i32_type(), y_idx)
-                            buffer_ops.buffer_store(v, y_rsrc, y_idx_i32)
+                                    zero_e = vector.broadcast(vec_type_e, arith.constant(0.0, type=elem_type()))
+                                    vec_e = arith.select(mv_ok, vec_e, zero_e)
+
+                                vec_c = arith.extf(vec_type_c, vec_e)
+                                acc_vec = arith.addf(acc_vec, vec_c)
+
+                            out_vec = arith.trunc_f(vec_type_e, acc_vec)
+
+                            y_row = fx.slice(Y_buf, (tok_i32, None))
+                            y_tiled = fx.logical_divide(y_row, fx.make_layout(tile_cols, 1))
+                            y_tile = fx.slice(y_tiled, (None, tile_i32))
+                            y_div = fx.logical_divide(y_tile, fx.make_layout(VEC_WIDTH, 1))
+
+                            r_out = fx.memref_alloca(vec_reg_ty, vec_reg_lay)
+                            fx.memref_store_vec(out_vec, r_out)
+                            fx.copy_atom_call(copy_atom, r_out, fx.slice(y_div, (None, tid_i32)))
+                        else:
+                            # f32 scalar fallback (no BufferCopy256b)
+                            c0_i8 = arith.constant(0, type=i8_type())
+                            token_base = token_idx * c_topk
+                            for lane in range_constexpr(VEC_WIDTH):
+                                col = col_base + fx.Index(lane)
+                                a = arith.constant(0.0, type=compute_type())
+                                for k in range_constexpr(topk):
+                                    k_idx = fx.Index(k)
+                                    x_idx = (token_base + k_idx) * c_model_dim + col
+                                    x_idx_i32 = arith.index_cast(i32_type(), x_idx)
+                                    if use_mask:
+                                        m_idx = token_base + k_idx
+                                        m_idx_i32 = arith.index_cast(i32_type(), m_idx)
+                                        mv = buffer_ops.buffer_load(mask_rsrc, m_idx_i32, vec_width=1, dtype=i8_type())
+                                        mv_ok = arith.cmpi(arith.CmpIPredicate.ne, mv, c0_i8)
+                                        v = arith.select(
+                                            mv_ok,
+                                            buffer_ops.buffer_load(x_rsrc, x_idx_i32, vec_width=1, dtype=elem_type()),
+                                            arith.constant(0.0, type=elem_type()),
+                                        )
+                                    else:
+                                        v = buffer_ops.buffer_load(x_rsrc, x_idx_i32, vec_width=1, dtype=elem_type())
+                                    a = a + v
+                                v = a
+                                y_idx = token_idx * c_model_dim + col
+                                y_idx_i32 = arith.index_cast(i32_type(), y_idx)
+                                buffer_ops.buffer_store(v, y_rsrc, y_idx_i32)
 
                     with _if_else(_if_full):
                         # Tail path: scalar load/store per lane.

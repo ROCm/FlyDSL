@@ -43,7 +43,7 @@ def WMMA(m, n, k, elem_ty_ab, elem_ty_acc=None):
     return MmaOpGFX1250_WMMAType.get(m, n, k, ty_ab, ty_ab, ty_acc)
 
 
-def make_buffer_tensor(tensor: Tensor) -> Tensor:
+def make_buffer_tensor(tensor: Tensor, max_size: bool = True) -> Tensor:
     def _elem_bit_width(elem_ty):
         if hasattr(elem_ty, "width"):
             return int(elem_ty.width)
@@ -59,7 +59,14 @@ def make_buffer_tensor(tensor: Tensor) -> Tensor:
     elem_bits = _elem_bit_width(elem_ty)
     elem_bytes = elem_bits // 8 if elem_bits > 0 else 1
 
-    if layout.is_static:
+    if max_size:
+        # Always use max buffer size to handle dynamic tensor shapes safely.
+        # The JIT cache may reuse a compiled kernel for tensors of different
+        # leading dimensions; a static num_records from the traced shape would
+        # silently truncate larger tensors.  This matches the behavior of
+        # buffer_ops.create_buffer_resource(max_size=True).
+        num_records_bytes = MAX_BUFFER_SIZE
+    elif layout.is_static:
         cosize = fly.cosize(layout)
         num_records_bytes = cosize.get_static_leaf_int * elem_bytes
         if num_records_bytes > MAX_BUFFER_SIZE:
