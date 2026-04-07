@@ -2,9 +2,9 @@
 
 Pytest configuration lives in [`pytest.ini`](pytest.ini) in this directory. Run pytest from the **repository root** (or pass `-c tests/pytest.ini`) so this file is picked up.
 
-## Test tiering (RFC 0003)
+## Test tiering
 
-The project uses a **layered model** so CI and contributors can select tests by dependency (CPU-only vs MLIR with ROCDL vs real GPU). The full specification is [**RFC 0003: Test tiering and multi-backend CI matrix**](https://github.com/ROCm/FlyDSL/issues/275).
+The project uses a **layered model** so CI and contributors can select tests by dependency (CPU-only vs MLIR with ROCDL vs real GPU). The full specification is [**RFC : Test tiering and multi-backend CI matrix**](https://github.com/ROCm/FlyDSL/issues/275).
 
 | Tier | Meaning |
 |------|---------|
