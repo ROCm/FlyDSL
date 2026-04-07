@@ -602,12 +602,12 @@ Produces numbered `.mlir` files per pipeline stage plus `final_isa.s`.
 |---|---|---|
 | `FLYDSL_DUMP_IR` | false | Dump IR at each stage |
 | `FLYDSL_DEBUG_ENABLE_DEBUG_INFO` | true | Emit DWARF debug info (source-to-asm mapping) |
-| `FLYDSL_RUNTIME_ENABLE_CACHE` | true | Enable kernel caching |
+| `FLYDSL_RUNTIME_ENABLE_CACHE` | true | Enable kernel disk caching (in-memory cache is always active) |
 | `FLYDSL_RUNTIME_CACHE_DIR` | ~/.flydsl/cache | Cache directory |
 | `FLYDSL_COMPILE_OPT_LEVEL` | 2 | Optimization level (0-3) |
 | `ARCH` | auto-detect | Override GPU architecture |
 
-### Disable Cache for Development
+### Disable Disk Cache for Development
 ```bash
 FLYDSL_RUNTIME_ENABLE_CACHE=0 python my_kernel.py
 ```
@@ -684,7 +684,7 @@ Pass raw `torch.Tensor` objects instead.
 
 2. **`buffer_ops.buffer_load` offset**: The `offset` parameter is in ELEMENTS, not bytes.
 
-3. **Cache stale after code changes**: Disable cache with `FLYDSL_RUNTIME_ENABLE_CACHE=0` or clear `~/.flydsl/cache/`.
+3. **Cache stale after code changes**: Disable disk cache with `FLYDSL_RUNTIME_ENABLE_CACHE=0` or clear `~/.flydsl/cache/`.
 
 4. **LDS overflow**: Check capacity (64KB on gfx942, 160KB on gfx950). Use `SmemAllocator` which tracks allocations.
 

@@ -327,7 +327,7 @@ Transforms Python control flow to MLIR ops at the AST level:
 | Variable | Default | Description |
 |---|---|---|
 | `FLYDSL_RUNTIME_CACHE_DIR` | `~/.flydsl/cache` | Directory for caching compiled kernels. |
-| `FLYDSL_RUNTIME_ENABLE_CACHE` | `true` | Enable kernel caching. |
+| `FLYDSL_RUNTIME_ENABLE_CACHE` | `true` | Enable kernel disk caching (in-memory cache is always active). |
 
 ### 5.4 Architecture Detection Priority
 

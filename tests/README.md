@@ -46,7 +46,7 @@ Use the same names as [`python/flydsl/utils/env.py`](../python/flydsl/utils/env.
 | Override GPU arch for compile | `ARCH` |
 | Compile without execution | `COMPILE_ONLY` |
 | JIT cache directory | `FLYDSL_RUNTIME_CACHE_DIR` |
-| Enable/disable JIT cache | `FLYDSL_RUNTIME_ENABLE_CACHE` (`0` / `false` to disable) |
+| Enable/disable JIT disk cache | `FLYDSL_RUNTIME_ENABLE_CACHE` (`0` / `false` to disable; in-memory cache remains active) |
 | IR dump | `FLYDSL_DUMP_IR`, `FLYDSL_DUMP_DIR` |
 | Device runtime kind | `FLYDSL_RUNTIME_KIND` |
 | ROCm arch hints (detection helpers) | `FLYDSL_GPU_ARCH`, `HSA_OVERRIDE_GFX_VERSION` |
@@ -81,7 +81,7 @@ python3 -m pytest tests/kernels/ tests/unit/ tests/python/examples/ -m "not larg
 # python3 -m pytest tests/ -m "l2_device" -v
 ```
 
-Disable JIT cache while iterating:
+Disable JIT disk cache while iterating (in-memory cache remains active):
 
 ```bash
 export FLYDSL_RUNTIME_ENABLE_CACHE=0

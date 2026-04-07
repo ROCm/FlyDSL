@@ -152,7 +152,7 @@ bash scripts/build.sh -j64
 
 - **Kernel cache issues** (stale results after code changes)
   - Clear: `rm -rf ~/.flydsl/cache`
-  - Or disable: `export FLYDSL_RUNTIME_ENABLE_CACHE=0`
+  - Or disable disk cache: `export FLYDSL_RUNTIME_ENABLE_CACHE=0` (in-memory cache remains active)
 
 ## 📐 Layout System
 

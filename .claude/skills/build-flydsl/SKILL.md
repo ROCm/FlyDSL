@@ -121,7 +121,7 @@ bash scripts/build.sh -j128
 
 # Clear kernel cache if stale results:
 rm -rf ~/.flydsl/cache
-# Or disable cache:
+# Or disable disk cache (in-memory cache remains active):
 export FLYDSL_RUNTIME_ENABLE_CACHE=0
 ```
 
