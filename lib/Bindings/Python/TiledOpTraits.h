@@ -14,13 +14,13 @@ LayoutAttr tiledCopyGetTiledThrValLayoutSrc(CopyAtomType copyAtom, LayoutAttr ti
 LayoutAttr tiledCopyGetTiledThrValLayoutDst(CopyAtomType copyAtom, LayoutAttr tiledLayoutThrVal,
                                             TileAttr tileMN);
 
-LayoutAttr tiledMmaGetTiledThrValLayout(MmaAtomTypeInterface mmaAtom, LayoutAttr atomLayoutMNK,
+LayoutAttr tiledMmaGetTiledThrValLayout(MmaAtomType mmaAtom, LayoutAttr atomLayoutMNK,
                                         TileAttr permutationMNK, MmaOperand operandId);
 
-IntTupleAttr tiledMmaGetTileSizeMNK(MmaAtomTypeInterface mmaAtom, LayoutAttr atomLayoutMNK,
+IntTupleAttr tiledMmaGetTileSizeMNK(MmaAtomType mmaAtom, LayoutAttr atomLayoutMNK,
                                     TileAttr permutationMNK);
 
-LayoutAttr tiledMmaGetThrLayoutVMNK(MmaAtomTypeInterface mmaAtom, LayoutAttr atomLayoutMNK);
+LayoutAttr tiledMmaGetThrLayoutVMNK(MmaAtomType mmaAtom, LayoutAttr atomLayoutMNK);
 
 } // namespace mlir::fly
 

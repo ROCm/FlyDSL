@@ -151,22 +151,6 @@ FLY_INFER_RETURN_TYPES(MakeLayoutOp) {
   return success();
 }
 
-FLY_INFER_RETURN_TYPES(MakeTileOp) {
-  SmallVector<Attribute> layouts;
-  for (auto op : operands) {
-    if (auto layoutType = dyn_cast<LayoutType>(op.getType())) {
-      layouts.push_back(layoutType.getAttr());
-    } else if (auto intTupleType = dyn_cast<IntTupleType>(op.getType())) {
-      layouts.push_back(intTupleType.getAttr());
-    } else {
-      return emitOptionalError(location, "MakeTileOp: operand has unsupported type ", op.getType(),
-                               ", expected LayoutType or IntTupleType");
-    }
-  }
-  auto tileAttr = TileAttr::get(ArrayAttr::get(context, layouts));
-  inferredReturnTypes.assign({TileType::get(context, tileAttr)});
-  return success();
-}
 
 FLY_INFER_RETURN_TYPES(MakeLayoutLikeOp) {
   auto layoutTy = dyn_cast<LayoutType>(operands[0].getType());
@@ -1554,11 +1538,11 @@ FLY_INFER_RETURN_TYPES(TiledMmaPartitionOp) {
                              "TiledMmaPartitionOp: expected IntTupleType for operand #2, got ",
                              operands[2].getType());
 
-  auto mmaAtom = dyn_cast<MmaAtomTypeInterface>(tiledMmaTy.getMmaAtom());
+  auto mmaAtom = dyn_cast<MmaAtomType>(tiledMmaTy.getMmaAtom());
   if (!mmaAtom)
     return emitOptionalError(
         location,
-        "TiledMmaPartitionOp: TiledMmaType's mma atom does not implement MmaAtomTypeInterface");
+        "TiledMmaPartitionOp: TiledMmaType's mma atom is not a MmaAtomType");
 
   LayoutAttr atomLayout = tiledMmaTy.getAtomLayout().getAttr();
   TileAttr permutationMNK = tiledMmaTy.getPermutation().getAttr();
@@ -1602,10 +1586,10 @@ FLY_INFER_RETURN_TYPES(TiledMmaPartitionShapeOp) {
                              "TiledMmaPartitionShapeOp: expected IntTupleType for operand #1, got ",
                              operands[1].getType());
 
-  auto mmaAtom = dyn_cast<MmaAtomTypeInterface>(tiledMmaTy.getMmaAtom());
+  auto mmaAtom = dyn_cast<MmaAtomType>(tiledMmaTy.getMmaAtom());
   if (!mmaAtom)
-    return emitOptionalError(location, "TiledMmaPartitionShapeOp: TiledMmaType's mma atom does not "
-                                       "implement MmaAtomTypeInterface");
+    return emitOptionalError(location, "TiledMmaPartitionShapeOp: TiledMmaType's mma atom is not "
+                                       "a MmaAtomType");
 
   LayoutAttr atomLayout = tiledMmaTy.getAtomLayout().getAttr();
   TileAttr permutationMNK = tiledMmaTy.getPermutation().getAttr();
@@ -1641,11 +1625,11 @@ FLY_INFER_RETURN_TYPES(MmaMakeFragmentOp) {
                              "MmaMakeFragmentOp: expected MemRefType for operand #1, got ",
                              operands[1].getType());
 
-  auto mmaAtom = dyn_cast<MmaAtomTypeInterface>(tiledMmaTy.getMmaAtom());
+  auto mmaAtom = dyn_cast<MmaAtomType>(tiledMmaTy.getMmaAtom());
   if (!mmaAtom)
     return emitOptionalError(
         location,
-        "MmaMakeFragmentOp: TiledMmaType's mma atom does not implement MmaAtomTypeInterface");
+        "MmaMakeFragmentOp: TiledMmaType's mma atom is not a MmaAtomType");
 
   Type elemTy;
   switch (operandId) {

@@ -214,12 +214,12 @@ def test_composition_static_vs_dynamic():
 
 
 def test_composition_bymode():
-    """Cell 13: By-mode composition using fly.make_tile."""
+    """Cell 13: By-mode composition using make_tile."""
     def build():
         layout = _L((9, (4, 8)), (59, (13, 1)))
         tile_m0 = _L((3,), (3,))
         tile_m1 = _L((2, 4), (1, 8))
-        tiler = fly.make_tile([tile_m0, tile_m1])
+        tiler = fx.make_tile(tile_m0, tile_m1)
         R = fly.logical_divide(layout, tiler)
         return [fly.size(R)]
     _build_and_verify("composition_bymode", build, [288])

@@ -68,7 +68,7 @@ Layout layoutTiledCopyThrValView(LayoutBuilder<Layout> &builder, CopyAtomType co
 }
 
 template <class Layout>
-Layout layoutTiledMmaThrValView(LayoutBuilder<Layout> &builder, MmaAtomTypeInterface mmaAtom,
+Layout layoutTiledMmaThrValView(LayoutBuilder<Layout> &builder, MmaAtomType mmaAtom,
                                 LayoutAttr tiledShape2D, IntTupleAttr atomShape2D,
                                 LayoutAttr atomLayoutThrVal, TileAttr permutation2D,
                                 Layout trgLayout) {
@@ -262,7 +262,7 @@ Layout layoutTiledCopyRetile(LayoutBuilder<Layout> &builder, CopyAtomType copyAt
 }
 
 template <class Layout>
-Layout layoutTiledMmaThrValOperandView(LayoutBuilder<Layout> &builder, MmaAtomTypeInterface mmaAtom,
+Layout layoutTiledMmaThrValOperandView(LayoutBuilder<Layout> &builder, MmaAtomType mmaAtom,
                                        LayoutAttr atomLayoutMNK, TileAttr permutationMNK,
                                        MmaOperand operandId, Layout trgLayout) {
   auto *ctx = atomLayoutMNK.getContext();

@@ -13,15 +13,18 @@ from .._mlir.dialects.fly import (
     CoordTensorType,
     CopyAtomType,
     CopyOpUniversalCopyType,
+    GemmTraversalOrder,
     IntTupleType,
     LayoutType,
     MemRefType,
-    MmaAtomUniversalFMAType,
+    MmaAtomType,
     MmaOperand,
+    MmaOpUniversalFMAType,
     PointerType,
     SwizzleType,
     TiledCopyType,
     TiledMmaType,
+    TileType,
     #
     has_none,
 )
@@ -36,8 +39,10 @@ __all__ = [
     "AddressSpace",
     "CachePolicy",
     "MmaOperand",
+    "GemmTraversalOrder",
     # Types
     "IntTupleType",
+    "TileType",
     "LayoutType",
     "SwizzleType",
     "ComposedLayoutType",
@@ -45,10 +50,11 @@ __all__ = [
     "MemRefType",
     "CoordTensorType",
     "CopyAtomType",
+    "MmaAtomType",
     "TiledCopyType",
     "TiledMmaType",
     "CopyOpUniversalCopyType",
-    "MmaAtomUniversalFMAType",
+    "MmaOpUniversalFMAType",
     # UniversalOps
     "UniversalCopy",
     "UniversalCopy8b",
@@ -172,7 +178,7 @@ UniversalCopy32b = lambda: CopyOpUniversalCopyType.get(32)
 UniversalCopy64b = lambda: CopyOpUniversalCopyType.get(64)
 UniversalCopy128b = lambda: CopyOpUniversalCopyType.get(128)
 
-UniversalFMA = lambda ty: MmaAtomUniversalFMAType.get(ty.ir_type)
+UniversalFMA = lambda ty: MmaOpUniversalFMAType.get(ty.ir_type)
 
 
 def const_expr(x):
@@ -637,10 +643,9 @@ def tile_to_shape(block, trg_shape, ord_shape, loc=None, ip=None):
 
 
 @traced_op
-def make_mma_atom(atom_type, loc=None, ip=None):
-    from .derived import MmaAtom
-
-    return MmaAtom(fly.make_mma_atom(atom_type, loc=loc, ip=ip))
+def make_mma_atom(mma_op_type, loc=None, ip=None):
+    mma_atom_ty = MmaAtomType.get(mma_op=mma_op_type)
+    return fly.make_mma_atom(mma_atom_ty, loc=loc, ip=ip)
 
 
 @traced_op
@@ -658,7 +663,7 @@ def make_copy_atom(copy_op_type, elem_type, loc=None, ip=None):
         val_bits = elem_type
     else:
         raise TypeError(f"make_copy_atom: elem_type must be NumericType, ir.Type, or int, got {type(elem_type)}")
-    copy_atom_ty = CopyAtomType.get(copy_op_type, val_bits)
+    copy_atom_ty = CopyAtomType.get(copy_op=copy_op_type, val_bits=val_bits)
     return fly.make_copy_atom(copy_atom_ty, val_bits=val_bits, loc=loc, ip=ip)
 
 
@@ -718,8 +723,10 @@ def copy(copy_atom, src, dst, *, pred=None, loc=None, ip=None):
 
 
 @traced_op
-def gemm(mma_atom, d, a, b, c, loc=None, ip=None):
-    return fly.gemm(mma_atom, d, a, b, c, loc=loc, ip=ip)
+def gemm(mma_atom, d, a, b, c, *, traversal_order=None, traversal_layout=None, loc=None, ip=None):
+    if traversal_order is not None and traversal_layout is not None:
+        raise ValueError("Only one of 'traversal_order' or 'traversal_layout' can be specified, not both")
+    return fly.gemm(mma_atom, d, a, b, c, traversal_order=traversal_order, traversal_layout=traversal_layout, loc=loc, ip=ip)
 
 
 # ===----------------------------------------------------------------------=== #
@@ -895,14 +902,20 @@ def assume(result_type, dst, src, loc=None, ip=None):
 
 @traced_op
 def make_tile(*args, loc=None, ip=None):
-    if len(args) == 1 and isinstance(args[0], (list, tuple)):
-        modes = args[0]
+    from .typing import Layout
+
+    def _resolve(m):
+        if isinstance(m, int) or m is None:
+            return m
+        if isinstance(m, tuple):
+            return tuple(_resolve(e) for e in m)
+        if isinstance(m, Layout):
+            return m.type
+        raise ValueError(f"make_tile: expected int, None, tuple, or Layout, got {type(m)}")
+
+    resolved = [_resolve(m) for m in args]
+    if len(resolved) == 1:
+        tile_type = TileType.get(resolved[0])
     else:
-        modes = args
-    resolved = []
-    for m in modes:
-        if isinstance(m, int):
-            resolved.append(make_layout(m, 1, loc=loc, ip=ip))
-        else:
-            resolved.append(m)
-    return fly.make_tile(resolved, loc=loc, ip=ip)
+        tile_type = TileType.get(resolved)
+    return static(tile_type, loc=loc, ip=ip)

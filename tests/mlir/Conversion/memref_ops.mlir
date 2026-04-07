@@ -208,6 +208,122 @@ func.func @test_store_vec_nested(%mem: !fly.memref<f32, register, ((4,2),3):((1,
   return
 }
 
+
+// CHECK-LABEL: @test_load_vec_stride1_dim1
+// CHECK-SAME: (%[[PTR:.*]]: !llvm.ptr<5>)
+func.func @test_load_vec_stride1_dim1(%mem: !fly.memref<f32, register, (2,4,3):(24,1,8)>) -> vector<24xf32> {
+  // 6 chunk loads (vecWidth=4, numChunks=6), col-major over restShape (2,3):
+  //   (0,0)→offset 0, (1,0)→offset 24, (0,1)→offset 8, (1,1)→offset 32, (0,2)→offset 16, (1,2)→offset 40
+  // CHECK: llvm.load %{{.*}} : !llvm.ptr<5> -> vector<4xf32>
+  // CHECK: vector.insert_strided_slice %{{.*}}, %{{.*}} {offsets = [0]
+  // CHECK: arith.constant 24
+  // CHECK: llvm.load %{{.*}} : !llvm.ptr<5> -> vector<4xf32>
+  // CHECK: vector.insert_strided_slice %{{.*}}, %{{.*}} {offsets = [4]
+  // CHECK: arith.constant 8
+  // CHECK: llvm.load %{{.*}} : !llvm.ptr<5> -> vector<4xf32>
+  // CHECK: vector.insert_strided_slice %{{.*}}, %{{.*}} {offsets = [8]
+  // CHECK: arith.constant 32
+  // CHECK: llvm.load %{{.*}} : !llvm.ptr<5> -> vector<4xf32>
+  // CHECK: vector.insert_strided_slice %{{.*}}, %{{.*}} {offsets = [12]
+  // CHECK: arith.constant 16
+  // CHECK: llvm.load %{{.*}} : !llvm.ptr<5> -> vector<4xf32>
+  // CHECK: vector.insert_strided_slice %{{.*}}, %{{.*}} {offsets = [16]
+  // CHECK: arith.constant 40
+  // CHECK: llvm.load %{{.*}} : !llvm.ptr<5> -> vector<4xf32>
+  // CHECK: vector.insert_strided_slice %{{.*}}, %{{.*}} {offsets = [20]
+  // Permute: shape_cast [24]→[3,2,4], transpose [0,2,1]→[3,4,2], shape_cast→[24]
+  // CHECK: vector.shape_cast %{{.*}} : vector<24xf32> to vector<3x2x4xf32>
+  // CHECK: vector.transpose %{{.*}}, [0, 2, 1] : vector<3x2x4xf32> to vector<3x4x2xf32>
+  // CHECK: vector.shape_cast %{{.*}} : vector<3x4x2xf32> to vector<24xf32>
+  %vec = fly.memref.load_vec(%mem) : (!fly.memref<f32, register, (2,4,3):(24,1,8)>) -> vector<24xf32>
+  return %vec : vector<24xf32>
+}
+
+// CHECK-LABEL: @test_store_vec_stride1_dim1
+// CHECK-SAME: (%[[PTR:.*]]: !llvm.ptr<5>, %[[VEC:.*]]: vector<24xf32>)
+func.func @test_store_vec_stride1_dim1(%mem: !fly.memref<f32, register, (2,4,3):(24,1,8)>, %vec: vector<24xf32>) {
+  // Reverse permute: shape_cast [24]→[3,4,2], transpose [0,2,1]→[3,2,4], shape_cast→[24]
+  // CHECK: vector.shape_cast %[[VEC]] : vector<24xf32> to vector<3x4x2xf32>
+  // CHECK: vector.transpose %{{.*}}, [0, 2, 1] : vector<3x4x2xf32> to vector<3x2x4xf32>
+  // CHECK: %[[PERM:.*]] = vector.shape_cast %{{.*}} : vector<3x2x4xf32> to vector<24xf32>
+  // 6 chunk stores
+  // CHECK: arith.constant 0
+  // CHECK: vector.extract_strided_slice %[[PERM]] {offsets = [0], sizes = [4]
+  // CHECK: llvm.store %{{.*}}, %{{.*}} : vector<4xf32>, !llvm.ptr<5>
+  // CHECK: arith.constant 24
+  // CHECK: vector.extract_strided_slice %[[PERM]] {offsets = [4], sizes = [4]
+  // CHECK: llvm.store %{{.*}}, %{{.*}} : vector<4xf32>, !llvm.ptr<5>
+  // CHECK: arith.constant 8
+  // CHECK: vector.extract_strided_slice %[[PERM]] {offsets = [8], sizes = [4]
+  // CHECK: llvm.store %{{.*}}, %{{.*}} : vector<4xf32>, !llvm.ptr<5>
+  // CHECK: arith.constant 32
+  // CHECK: vector.extract_strided_slice %[[PERM]] {offsets = [12], sizes = [4]
+  // CHECK: llvm.store %{{.*}}, %{{.*}} : vector<4xf32>, !llvm.ptr<5>
+  // CHECK: arith.constant 16
+  // CHECK: vector.extract_strided_slice %[[PERM]] {offsets = [16], sizes = [4]
+  // CHECK: llvm.store %{{.*}}, %{{.*}} : vector<4xf32>, !llvm.ptr<5>
+  // CHECK: arith.constant 40
+  // CHECK: vector.extract_strided_slice %[[PERM]] {offsets = [20], sizes = [4]
+  // CHECK: llvm.store %{{.*}}, %{{.*}} : vector<4xf32>, !llvm.ptr<5>
+  fly.memref.store_vec(%vec, %mem) : (vector<24xf32>, !fly.memref<f32, register, (2,4,3):(24,1,8)>) -> ()
+  return
+}
+
+// --- Scalar mode: no stride=1, (2,3):(4,8) → 6 scalar load/store ---
+// Column-major iteration: (0,0)→0, (1,0)→4, (0,1)→8, (1,1)→12, (0,2)→16, (1,2)→20
+
+// CHECK-LABEL: @test_load_vec_scalar
+// CHECK-SAME: (%[[PTR:.*]]: !llvm.ptr<5>)
+func.func @test_load_vec_scalar(%mem: !fly.memref<f32, register, (2,3):(4,8)>) -> vector<6xf32> {
+  // CHECK: %[[C0:.*]] = arith.constant 0 : i32
+  // CHECK: llvm.getelementptr %[[PTR]][%[[C0]]]
+  // CHECK: llvm.load %{{.*}} : !llvm.ptr<5> -> f32
+  // CHECK: vector.insert %{{.*}}, %{{.*}} [0]
+  // CHECK: arith.constant 4
+  // CHECK: llvm.load %{{.*}} : !llvm.ptr<5> -> f32
+  // CHECK: vector.insert %{{.*}}, %{{.*}} [1]
+  // CHECK: arith.constant 8
+  // CHECK: llvm.load %{{.*}} : !llvm.ptr<5> -> f32
+  // CHECK: vector.insert %{{.*}}, %{{.*}} [2]
+  // CHECK: arith.constant 12
+  // CHECK: llvm.load %{{.*}} : !llvm.ptr<5> -> f32
+  // CHECK: vector.insert %{{.*}}, %{{.*}} [3]
+  // CHECK: arith.constant 16
+  // CHECK: llvm.load %{{.*}} : !llvm.ptr<5> -> f32
+  // CHECK: vector.insert %{{.*}}, %{{.*}} [4]
+  // CHECK: arith.constant 20
+  // CHECK: llvm.load %{{.*}} : !llvm.ptr<5> -> f32
+  // CHECK: vector.insert %{{.*}}, %{{.*}} [5]
+  %vec = fly.memref.load_vec(%mem) : (!fly.memref<f32, register, (2,3):(4,8)>) -> vector<6xf32>
+  return %vec : vector<6xf32>
+}
+
+// CHECK-LABEL: @test_store_vec_scalar
+// CHECK-SAME: (%[[PTR:.*]]: !llvm.ptr<5>, %[[VEC:.*]]: vector<6xf32>)
+func.func @test_store_vec_scalar(%mem: !fly.memref<f32, register, (2,3):(4,8)>, %vec: vector<6xf32>) {
+  // CHECK: %[[C0:.*]] = arith.constant 0 : i32
+  // CHECK: llvm.getelementptr %[[PTR]][%[[C0]]]
+  // CHECK: vector.extract %[[VEC]][0]
+  // CHECK: llvm.store %{{.*}}, %{{.*}} : f32, !llvm.ptr<5>
+  // CHECK: arith.constant 4
+  // CHECK: vector.extract %[[VEC]][1]
+  // CHECK: llvm.store %{{.*}}, %{{.*}} : f32, !llvm.ptr<5>
+  // CHECK: arith.constant 8
+  // CHECK: vector.extract %[[VEC]][2]
+  // CHECK: llvm.store %{{.*}}, %{{.*}} : f32, !llvm.ptr<5>
+  // CHECK: arith.constant 12
+  // CHECK: vector.extract %[[VEC]][3]
+  // CHECK: llvm.store %{{.*}}, %{{.*}} : f32, !llvm.ptr<5>
+  // CHECK: arith.constant 16
+  // CHECK: vector.extract %[[VEC]][4]
+  // CHECK: llvm.store %{{.*}}, %{{.*}} : f32, !llvm.ptr<5>
+  // CHECK: arith.constant 20
+  // CHECK: vector.extract %[[VEC]][5]
+  // CHECK: llvm.store %{{.*}}, %{{.*}} : f32, !llvm.ptr<5>
+  fly.memref.store_vec(%vec, %mem) : (vector<6xf32>, !fly.memref<f32, register, (2,3):(4,8)>) -> ()
+  return
+}
+
 // -----
 
 // === End-to-End: Alloca + Load + Store Pipeline ===

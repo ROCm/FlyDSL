@@ -2,11 +2,11 @@
 # Copyright (c) 2025 FlyDSL Project Contributors
 
 from ..._mlir import ir
-from ..._mlir._mlir_libs._mlirDialectsFlyROCDL import MmaAtomGFX1250_WMMAType
+from ..._mlir._mlir_libs._mlirDialectsFlyROCDL import MmaOpGFX1250_WMMAType
 from ..._mlir.dialects import arith, fly
 from ..._mlir.dialects._fly_enum_gen import AddressSpace
 from ..._mlir.dialects.fly import PointerType
-from ..._mlir.dialects.fly_rocdl import CopyOpCDNA3BufferCopyType, MmaAtomCDNA3_MFMAType
+from ..._mlir.dialects.fly_rocdl import CopyOpCDNA3BufferCopyType, MmaOpCDNA3_MFMAType
 from ..._mlir.extras import types as T
 from ..primitive import (
     get_iter,
@@ -31,7 +31,7 @@ def MFMA(m, n, k, elem_ty_ab, elem_ty_acc=None):
         ty_acc = T.f32()
     else:
         ty_acc = elem_ty_acc.ir_type if hasattr(elem_ty_acc, "ir_type") else elem_ty_acc
-    return MmaAtomCDNA3_MFMAType.get(m, n, k, ty_ab, ty_ab, ty_acc)
+    return MmaOpCDNA3_MFMAType.get(m, n, k, ty_ab, ty_ab, ty_acc)
 
 
 def WMMA(m, n, k, elem_ty_ab, elem_ty_acc=None):
@@ -40,7 +40,7 @@ def WMMA(m, n, k, elem_ty_ab, elem_ty_acc=None):
         ty_acc = ir.F32Type.get()
     else:
         ty_acc = elem_ty_acc.ir_type if hasattr(elem_ty_acc, "ir_type") else elem_ty_acc
-    return MmaAtomGFX1250_WMMAType.get(m, n, k, ty_ab, ty_ab, ty_acc)
+    return MmaOpGFX1250_WMMAType.get(m, n, k, ty_ab, ty_ab, ty_acc)
 
 
 def make_buffer_tensor(tensor: Tensor) -> Tensor:

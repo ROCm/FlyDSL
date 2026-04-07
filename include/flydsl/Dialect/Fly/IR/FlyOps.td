@@ -390,7 +390,11 @@ def Fly_CopyOp : Fly_Op<"copy"> {
   let assemblyFormat = "`(` $copyAtom `,` $src `,` $dst (`,` $pred^)? `)` attr-dict `:` functional-type(operands, results)";
 }
 def Fly_GemmOp : Fly_Op<"gemm"> {
-  let arguments = (ins AnyType:$mmaAtom, Fly_MemRef:$d, Fly_MemRef:$a, Fly_MemRef:$b, Fly_MemRef:$c);
+  let arguments = (ins AnyType:$mmaAtom, Fly_MemRef:$d, Fly_MemRef:$a, Fly_MemRef:$b, Fly_MemRef:$c,
+                       OptionalAttr<Fly_GemmTraversalOrderAttr>:$traversalOrder,
+                       Optional<Fly_Layout>:$traversalLayout);
+  let assemblyFormat = "`(` $mmaAtom `,` $d `,` $a `,` $b `,` $c `)` (`traversalLayout` `=` $traversalLayout^)? "
+                       "attr-dict `:` functional-type(operands, results)";
 }
 
 //===----------------------------------------------------------------------===//
@@ -483,12 +487,6 @@ def Fly_ExtractAlignedPointerAsIndexOp : Fly_Op<"extract_aligned_pointer_as_inde
   let arguments = (ins Fly_MemRef:$source);
   let results = (outs AnyType:$result);
   let assemblyFormat = "$source attr-dict `:` type($source) `->` type($result)";
-}
-
-// TODO: TileAttr is always static, change to StaticOp
-def Fly_MakeTileOp: Fly_Op<"make_tile", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
-  let arguments = (ins Variadic<AnyTypeOf<[Fly_IntTuple, Fly_Layout]>>:$modes);
-  let results = (outs Fly_Tile:$result);
 }
 
 #endif // FLY_OPS

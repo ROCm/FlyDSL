@@ -17,7 +17,7 @@ def copy_kernel(
 
     block_m = 8
     block_n = 24
-    tile = fx.make_tile([fx.make_layout(block_m, 1), fx.make_layout(block_n, 1)])
+    tile = fx.make_tile(fx.make_layout(block_m, 1), fx.make_layout(block_n, 1))
 
     A = fx.rocdl.make_buffer_tensor(A)
     B = fx.rocdl.make_buffer_tensor(B)

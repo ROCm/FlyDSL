@@ -21,10 +21,10 @@ def FlyROCDL_Dialect : Dialect {
   let useDefaultTypePrinterParser = 1;
 }
 
-class FlyxROCL_MmaAtom<string typeName, string typeMnemonic, list<Trait> traits = []> 
+class FlyxROCL_MmaOp<string typeName, string typeMnemonic, list<Trait> traits = []> 
     : TypeDef<FlyROCDL_Dialect, typeName, !listconcat(traits, [
         DeclareTypeInterfaceMethods<Fly_MayStaticTypeInterface>, 
-        DeclareTypeInterfaceMethods<Fly_MmaAtomTypeInterface>
+        DeclareTypeInterfaceMethods<Fly_MmaOpTypeInterface>
       ])> {
   let mnemonic = typeMnemonic;
 }
