@@ -5,8 +5,12 @@ on:
     tags:
       - 'v*'
 
+env:
+  DEFAULT_DOCKER_IMAGE: rocm/pytorch:rocm7.2_ubuntu22.04_py3.10_pytorch_release_2.8.0
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   validate_tag:
@@ -16,7 +20,6 @@ jobs:
     outputs:
       package_version: ${{ steps.version.outputs.package_version }}
       tag_version: ${{ steps.version.outputs.tag_version }}
-      docker_image: ${{ steps.version.outputs.docker_image }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -32,21 +35,20 @@ jobs:
             exit 1
           fi
 
-          echo "package_version=${PACKAGE_VERSION}" >> "${GITHUB_OUTPUT}"
-          echo "tag_version=${TAG_VERSION}" >> "${GITHUB_OUTPUT}"
-          echo "docker_image=rocm/pytorch:rocm7.2_ubuntu22.04_py3.10_pytorch_release_2.8.0" >> "${GITHUB_OUTPUT}"
-
           if [ "${TAG_VERSION}" != "${PACKAGE_VERSION}" ]; then
             echo "Tag ${GITHUB_REF_NAME} does not match package version ${PACKAGE_VERSION}" >&2
             exit 1
           fi
+
+          echo "package_version=${PACKAGE_VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "tag_version=${TAG_VERSION}" >> "${GITHUB_OUTPUT}"
 
   build:
     needs: validate_tag
     uses: ./.github/workflows/build-whl.yaml
     with:
       release_type: release
-      docker_image: ${{ needs.validate_tag.outputs.docker_image }}
+      docker_image: ${{ env.DEFAULT_DOCKER_IMAGE }}
       upload_s3_staging: false
     permissions:
       contents: read
@@ -55,7 +57,7 @@ jobs:
     needs: [validate_tag, build]
     uses: ./.github/workflows/test-whl.yaml
     with:
-      docker_image: ${{ needs.validate_tag.outputs.docker_image }}
+      docker_image: ${{ env.DEFAULT_DOCKER_IMAGE }}
     permissions:
       contents: read
 
