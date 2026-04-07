@@ -698,6 +698,10 @@ class JitFunction:
         from .jit_argument import _is_constexpr_annotation, _is_type_param_annotation
         sig = self._sig
         key_parts = [("_target_", self._target)]
+        if self.compile_hints:
+            key_parts.append(("_hints_", tuple(sorted(
+                (k, str(v)) for k, v in self.compile_hints.items()
+            ))))
         for name, arg in bound_args.items():
             param = sig.parameters.get(name)
             ann = param.annotation if param else inspect.Parameter.empty
