@@ -38,6 +38,11 @@ def vecAddKernel(
 
     tile_elems = block_dim * vec_width
 
+    # Wrap in buffer-descriptor-backed tensors for AMD buffer load/store
+    A = fx.rocdl.make_buffer_tensor(A)
+    B = fx.rocdl.make_buffer_tensor(B)
+    C = fx.rocdl.make_buffer_tensor(C)
+
     tA = fx.logical_divide(A, fx.make_layout(tile_elems, 1))
     tB = fx.logical_divide(B, fx.make_layout(tile_elems, 1))
     tC = fx.logical_divide(C, fx.make_layout(tile_elems, 1))
@@ -50,11 +55,10 @@ def vecAddKernel(
     tB = fx.logical_divide(tB, fx.make_layout(vec_width, 1))
     tC = fx.logical_divide(tC, fx.make_layout(vec_width, 1))
 
-    copy_bits = vec_width * 32
     RABMemRefTy = fx.MemRefType.get(
         fx.T.f32(), fx.LayoutType.get(vec_width, 1), fx.AddressSpace.Register
     )
-    copyAtom = fx.make_copy_atom(fx.UniversalCopy(copy_bits), fx.Float32)
+    copyAtom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), fx.Float32)
 
     rA = fx.memref_alloca(RABMemRefTy, fx.make_layout(vec_width, 1))
     rB = fx.memref_alloca(RABMemRefTy, fx.make_layout(vec_width, 1))

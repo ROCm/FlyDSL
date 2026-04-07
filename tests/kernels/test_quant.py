@@ -92,15 +92,9 @@ def build_quant_module(N):
     num_tiles = (N + tile_cols - 1) // tile_cols
     RED_SLOTS = max(1, BLOCK_THREADS // WARP_SIZE)
 
-    elem_bytes_f16 = 2
-    elem_bytes_i8 = 1
-
     allocator = SmemAllocator(None, arch=arch)
     red_offset = allocator._align(allocator.ptr, 16)
     allocator.ptr = red_offset + RED_SLOTS * 4  # f32 scratch
-
-    vec_dwords_f16 = (VEC_WIDTH * elem_bytes_f16) // 4   # 4
-    vec_dwords_i8 = (VEC_WIDTH * elem_bytes_i8) // 4     # 2
 
     @flyc.kernel
     def quant_kernel(Input: fx.Tensor, Output: fx.Tensor, Scales: fx.Tensor):
@@ -152,18 +146,35 @@ def build_quant_module(N):
             c0_idx = arith.constant(0, index=True)
             return s_red.load([c0_idx])
 
-        # ── Buffer resources ─────────────────────────────────────────────
-        in_rsrc = buffer_ops.create_buffer_resource(Input, max_size=True)
-        out_rsrc = buffer_ops.create_buffer_resource(Output, max_size=True)
+        # ── Layout API: buffer-backed tensors ────────────────────────────
+        Input_buf = fx.rocdl.make_buffer_tensor(Input)
         scales_rsrc = buffer_ops.create_buffer_resource(Scales, max_size=True)
+        # i8 output: keep buffer_ops (BufferCopy64b unsupported by LLVM backend)
+        out_rsrc = buffer_ops.create_buffer_resource(Output, max_size=True)
 
-        vec_type_f16 = T.vec(VEC_WIDTH, T.f16)
-        vec_type_f32 = T.vec(VEC_WIDTH, T.f32)
+        # Slice row for this block, tile by VEC_WIDTH
+        row_in = fx.slice(Input_buf, (bid, None))
+        in_div = fx.logical_divide(row_in, fx.make_layout(VEC_WIDTH, 1))
 
-        row_soffset_in = ArithValue(bid) * (N * elem_bytes_f16)
+        # Copy atom for f16 loads: 8 x f16 = 128b
+        copy_atom_in = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), 16)
+
+        vec_reg_ty_f16 = fx.MemRefType.get(
+            T.f16, fx.LayoutType.get(VEC_WIDTH, 1), fx.AddressSpace.Register
+        )
+        vec_reg_lay = fx.make_layout(VEC_WIDTH, 1)
+
+        elem_bytes_i8 = 1
+        vec_dwords_i8 = (VEC_WIDTH * elem_bytes_i8) // 4  # 2
         row_soffset_out = ArithValue(bid) * (N * elem_bytes_i8)
-        thr_col_bytes_f16 = ArithValue(tid) * (VEC_WIDTH * elem_bytes_f16)
         thr_col_bytes_i8 = ArithValue(tid) * (VEC_WIDTH * elem_bytes_i8)
+
+        def _load_vec_f16(div_tensor, idx):
+            r = fx.memref_alloca(vec_reg_ty_f16, vec_reg_lay)
+            fx.copy_atom_call(copy_atom_in, fx.slice(div_tensor, (None, idx)), r)
+            return ArithValue(fx.memref_load_vec(r))
+
+        vec_type_f32 = T.vec(VEC_WIDTH, T.f32)
 
         # abs via sign-bit clearing (|x| = bitcast(bitcast(x, i32) & 0x7FFFFFFF, f32))
         i32_vec_ty = T.vec(VEC_WIDTH, T.i32)
@@ -175,16 +186,11 @@ def build_quant_module(N):
 
         # ── Pass 1: load f16 → f32, compute row max|val|, cache ──────────
         for tile_i in range_constexpr(num_tiles):
-            col_bytes = ArithValue(thr_col_bytes_f16) + (tile_i * tile_cols * elem_bytes_f16)
+            idx = tid + tile_i * BLOCK_THREADS
             col_end = ArithValue(tid) * VEC_WIDTH + (tile_i * tile_cols + VEC_WIDTH)
             is_valid = col_end <= N
 
-            dw_in = col_bytes.shrui(arith.constant(2, type=T.i32))
-            raw_data = buffer_ops.buffer_load(
-                in_rsrc, dw_in, vec_width=vec_dwords_f16,
-                dtype=T.i32, soffset_bytes=row_soffset_in, mask=is_valid,
-            )
-            vec_f16 = vector.bitcast(vec_type_f16, raw_data)
+            vec_f16 = _load_vec_f16(in_div, idx)
             vec_f32 = vec_f16.extf(vec_type_f32)
             cached_vecs.append(vec_f32)
 
