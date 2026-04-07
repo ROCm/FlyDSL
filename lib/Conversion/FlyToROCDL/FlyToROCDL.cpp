@@ -20,9 +20,9 @@
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
 #include "flydsl/Dialect/Fly/Utils/IntTupleUtils.h"
 #include "flydsl/Dialect/Fly/Utils/LayoutUtils.h"
+#include "flydsl/Dialect/Fly/Utils/PointerUtils.h"
 #include "flydsl/Dialect/FlyROCDL/IR/Dialect.h"
-
-#include "./BufferFatPtr.h"
+#include "flydsl/Dialect/FlyROCDL/Utils/BufferFatPtr.h"
 
 namespace mlir {
 #define GEN_PASS_DEF_FLYTOROCDLCONVERSIONPASS
@@ -49,22 +49,6 @@ unsigned mapToLLVMAddressSpace(AddressSpace addrSpace) {
     assert(false && "Unsupported address space");
     return 0;
   }
-}
-
-Value applySwizzleOnPtr(OpBuilder &b, Location loc, Value ptr, SwizzleAttr swizzle) {
-  if (swizzle.isTrivialSwizzle())
-    return ptr;
-  auto ptrTy = cast<LLVM::LLVMPointerType>(ptr.getType());
-  auto i64Ty = b.getI64Type();
-  Value ptrInt = LLVM::PtrToIntOp::create(b, loc, i64Ty, ptr);
-  int64_t bitMaskValue = ((int64_t{1} << swizzle.getMask()) - 1)
-                         << (swizzle.getBase() + swizzle.getShift());
-  Value bitMask = arith::ConstantIntOp::create(b, loc, i64Ty, bitMaskValue);
-  Value shiftAmt = arith::ConstantIntOp::create(b, loc, i64Ty, swizzle.getShift());
-  Value masked = arith::AndIOp::create(b, loc, ptrInt, bitMask);
-  Value shifted = arith::ShRUIOp::create(b, loc, masked, shiftAmt);
-  Value swizzled = arith::XOrIOp::create(b, loc, ptrInt, shifted);
-  return LLVM::IntToPtrOp::create(b, loc, ptrTy, swizzled);
 }
 
 class MakePtrOpLowering : public OpConversionPattern<MakePtrOp> {
@@ -353,7 +337,8 @@ public:
       rewriter.replaceOp(op, loaded);
       return success();
     } else {
-      ptr = applySwizzleOnPtr(rewriter, loc, ptr, flyPtrTy.getSwizzle());
+      ptr = applySwizzleOnPtr(rewriter, loc, cast<TypedValue<LLVM::LLVMPointerType>>(ptr),
+                              flyPtrTy.getSwizzle());
       Value loaded = LLVM::LoadOp::create(rewriter, loc, loadTy, ptr);
       rewriter.replaceOp(op, loaded);
       return success();
@@ -397,7 +382,8 @@ public:
       rewriter.eraseOp(op);
       return success();
     } else {
-      ptr = applySwizzleOnPtr(rewriter, loc, ptr, flyPtrTy.getSwizzle());
+      ptr = applySwizzleOnPtr(rewriter, loc, cast<TypedValue<LLVM::LLVMPointerType>>(ptr),
+                              flyPtrTy.getSwizzle());
       LLVM::StoreOp::create(rewriter, loc, value, ptr);
       rewriter.eraseOp(op);
       return success();
@@ -416,114 +402,36 @@ public:
     if (!copyAtom)
       return rewriter.notifyMatchFailure(op, "copyAtom is not CopyAtomType");
 
+    Value copyAtomVal = adaptor.getCopyAtom();
     Value src = adaptor.getSrc();
     Value dst = adaptor.getDst();
     Value pred = adaptor.getPred();
 
-    auto srcFlyTy = dyn_cast<fly::MemRefType>(op.getSrc().getType());
-    auto dstFlyTy = dyn_cast<fly::MemRefType>(op.getDst().getType());
-    if (!srcFlyTy || !dstFlyTy)
-      return rewriter.notifyMatchFailure(op, "expected Fly memref types on original op");
+    auto srcMemTy = dyn_cast<fly::MemRefType>(op.getSrc().getType());
+    auto dstMemTy = dyn_cast<fly::MemRefType>(op.getDst().getType());
 
-    if (srcFlyTy.getElemTy() != dstFlyTy.getElemTy())
+    if (!srcMemTy || !dstMemTy)
+      return rewriter.notifyMatchFailure(op, "expected MemRef types on original op");
+    if (srcMemTy.getElemTy() != dstMemTy.getElemTy())
       return rewriter.notifyMatchFailure(op, "src/dst element types mismatch");
 
     Location loc = op.getLoc();
-    Type copyOpType = copyAtom.getCopyOp();
 
-    auto emitCopyBody = [&](ConversionPatternRewriter &rewriter) -> LogicalResult {
-      if (isa<CopyOpUniversalCopyType>(copyOpType)) {
-        if (!isa<LLVM::LLVMPointerType>(src.getType()) ||
-            !isa<LLVM::LLVMPointerType>(dst.getType()))
-          return rewriter.notifyMatchFailure(op, "src/dst are not llvm.ptr for universal copy");
-        return lowerUniversalCopy(op, rewriter, loc, copyAtom, srcFlyTy, dstFlyTy, src, dst);
-      } else if (isa<fly_rocdl::CopyOpCDNA3BufferCopyType>(copyOpType))
-        return lowerCDNA3BufferCopy(op, rewriter, loc, copyAtom, srcFlyTy, dstFlyTy, src, dst);
-      return rewriter.notifyMatchFailure(op, "unsupported CopyOp type");
-    };
+    Type predMemTy = nullptr;
+    if (pred) {
+      predMemTy = dyn_cast<fly::MemRefType>(op.getPred().getType());
+      if (!predMemTy)
+        return rewriter.notifyMatchFailure(op, "pred is not a MemRef type");
+    }
 
     if (pred) {
-      auto predFlyTy = dyn_cast<fly::MemRefType>(op.getPred().getType());
-      if (!predFlyTy)
-        return rewriter.notifyMatchFailure(op, "pred is not a Fly memref type");
-      Type predElemTy = predFlyTy.getElemTy();
-      Value predVal = LLVM::LoadOp::create(rewriter, loc, predElemTy, pred);
-      auto ifOp = scf::IfOp::create(rewriter, loc, TypeRange{}, predVal, false);
-      rewriter.setInsertionPointToStart(&ifOp.getThenRegion().front());
-      return emitCopyBody(rewriter);
+      if (failed(copyAtom.emitAtomCall(rewriter, loc, copyAtomType, srcMemTy, dstMemTy, predMemTy,
+                                       copyAtomVal, src, dst, pred)))
+        return failure();
     } else {
-      return emitCopyBody(rewriter);
-    }
-  }
-
-private:
-  LogicalResult lowerUniversalCopy(CopyAtomCall op, ConversionPatternRewriter &rewriter,
-                                   Location loc, CopyAtomType copyAtomTy, fly::MemRefType srcFlyTy,
-                                   fly::MemRefType dstFlyTy, Value src, Value dst) const {
-    LayoutBuilder<LayoutAttr> attrBuilder(rewriter.getContext());
-
-    auto thrValLayoutSrc = dyn_cast<LayoutAttr>(copyAtomTy.getThrValLayoutSrc());
-    if (!thrValLayoutSrc)
-      return rewriter.notifyMatchFailure(op, "getThrValLayoutSrc returned null or non-LayoutAttr");
-    int32_t numValSrc =
-        intTupleProduct(attrBuilder, thrValLayoutSrc.getShape().at(1)).getLeafAsInt().getValue();
-
-    Type elemTy = srcFlyTy.getElemTy();
-    int32_t elemBits = elemTy.getIntOrFloatBitWidth();
-    Value srcPtr = applySwizzleOnPtr(rewriter, loc, src, srcFlyTy.getSwizzle());
-    Value dstPtr = applySwizzleOnPtr(rewriter, loc, dst, dstFlyTy.getSwizzle());
-    int32_t copyBytes = numValSrc * elemBits / 8;
-    Value len = arith::ConstantIntOp::create(rewriter, loc, copyBytes, /*width=*/32).getResult();
-    LLVM::MemcpyOp::create(rewriter, loc, dstPtr, srcPtr, len, /*isVolatile=*/false);
-
-    rewriter.eraseOp(op);
-    return success();
-  }
-
-  LogicalResult lowerCDNA3BufferCopy(CopyAtomCall op, ConversionPatternRewriter &rewriter,
-                                     Location loc, CopyAtomType copyAtomTy,
-                                     fly::MemRefType srcFlyTy, fly::MemRefType dstFlyTy, Value src,
-                                     Value dst) const {
-    LayoutBuilder<LayoutAttr> attrBuilder(rewriter.getContext());
-
-    auto thrValLayoutSrc = dyn_cast<LayoutAttr>(copyAtomTy.getThrValLayoutSrc());
-    if (!thrValLayoutSrc)
-      return rewriter.notifyMatchFailure(op, "getThrValLayoutSrc returned null");
-    int32_t numValSrc =
-        intTupleProduct(attrBuilder, thrValLayoutSrc.getShape().at(1)).getLeafAsInt().getValue();
-
-    Type elemTy = srcFlyTy.getElemTy();
-    int32_t vecWidth = numValSrc;
-    Type vecTy = vecWidth == 1 ? elemTy : VectorType::get({vecWidth}, elemTy);
-
-    AddressSpace srcAS = srcFlyTy.getAddressSpace().getValue();
-    AddressSpace dstAS = dstFlyTy.getAddressSpace().getValue();
-
-    bool srcIsBuffer = (srcAS == AddressSpace::BufferDesc);
-    bool dstIsBuffer = (dstAS == AddressSpace::BufferDesc);
-
-    if (srcIsBuffer == dstIsBuffer)
-      return rewriter.notifyMatchFailure(
-          op, "CDNA3 buffer copy requires exactly one side to be BufferDesc");
-
-    Value zero = arith::ConstantIntOp::create(rewriter, loc, 0, 32);
-    ArrayAttr noAttrs;
-
-    auto unpackBuffer = [&](Value val, fly::MemRefType flyTy) -> std::pair<Value, Value> {
-      BufferFatPtr bp(flyTy.getPointerType(), val);
-      return {bp.bufferRsrc(rewriter, loc), bp.swizzleByteOffset(rewriter, loc)};
-    };
-
-    if (srcIsBuffer) {
-      auto [srcRsrc, srcOff] = unpackBuffer(src, srcFlyTy);
-      Value loaded = ROCDL::RawPtrBufferLoadOp::create(rewriter, loc, vecTy, srcRsrc, srcOff, zero,
-                                                       zero, noAttrs, noAttrs, noAttrs);
-      LLVM::StoreOp::create(rewriter, loc, loaded, dst);
-    } else {
-      auto [dstRsrc, dstOff] = unpackBuffer(dst, dstFlyTy);
-      Value loaded = LLVM::LoadOp::create(rewriter, loc, vecTy, src);
-      ROCDL::RawPtrBufferStoreOp::create(rewriter, loc, loaded, dstRsrc, dstOff, zero, zero,
-                                         noAttrs, noAttrs, noAttrs);
+      if (failed(copyAtom.emitAtomCall(rewriter, loc, copyAtomType, srcMemTy, dstMemTy, copyAtomVal,
+                                       src, dst)))
+        return failure();
     }
     rewriter.eraseOp(op);
     return success();
@@ -552,335 +460,19 @@ public:
         !isa<LLVM::LLVMPointerType>(bPtr.getType()) || !isa<LLVM::LLVMPointerType>(cPtr.getType()))
       return rewriter.notifyMatchFailure(op, "expected llvm.ptr operands after type conversion");
 
-    if (auto universalFma = dyn_cast<MmaOpUniversalFMAType>(mmaAtomTy.getMmaOp()))
-      return lowerUniversalFMA(op, rewriter, loc, universalFma, dPtr, aPtr, bPtr, cPtr);
-    else if (auto cdna3Mfma = dyn_cast<fly_rocdl::MmaOpCDNA3_MFMAType>(mmaAtomTy.getMmaOp()))
-      return lowerCDNA3MFMA(op, rewriter, loc, cdna3Mfma, dPtr, aPtr, bPtr, cPtr);
-    else if (auto gfx1250Wmma = dyn_cast<fly_rocdl::MmaOpGFX1250_WMMAType>(mmaAtomTy.getMmaOp()))
-      return lowerGFX1250WMMA(op, rewriter, loc, gfx1250Wmma, dPtr, aPtr, bPtr, cPtr);
+    auto dMemTy = dyn_cast<fly::MemRefType>(op.getD().getType());
+    auto aMemTy = dyn_cast<fly::MemRefType>(op.getA().getType());
+    auto bMemTy = dyn_cast<fly::MemRefType>(op.getB().getType());
+    auto cMemTy = dyn_cast<fly::MemRefType>(op.getC().getType());
+    if (!dMemTy || !aMemTy || !bMemTy || !cMemTy)
+      return rewriter.notifyMatchFailure(op, "expected Fly memref types on original op");
 
-    return rewriter.notifyMatchFailure(op, "unsupported MmaAtom type");
-  }
+    if (failed(mmaAtomTy.emitAtomCall(rewriter, loc, mmaAtomTy, dMemTy, aMemTy, bMemTy, cMemTy,
+                                      adaptor.getMmaAtom(), dPtr, aPtr, bPtr, cPtr)))
+      return failure();
 
-private:
-  LogicalResult lowerUniversalFMA(MmaAtomCall op, ConversionPatternRewriter &rewriter, Location loc,
-                                  MmaOpUniversalFMAType atomTy, Value dPtr, Value aPtr, Value bPtr,
-                                  Value cPtr) const {
-    Type elemTy = atomTy.getElemTy();
-
-    Value a = LLVM::LoadOp::create(rewriter, loc, elemTy, aPtr);
-    Value b = LLVM::LoadOp::create(rewriter, loc, elemTy, bPtr);
-    Value c = LLVM::LoadOp::create(rewriter, loc, elemTy, cPtr);
-
-    Value mul = LLVM::FMulOp::create(rewriter, loc, elemTy, a, b);
-    Value res = LLVM::FAddOp::create(rewriter, loc, elemTy, mul, c);
-
-    LLVM::StoreOp::create(rewriter, loc, res, dPtr);
     rewriter.eraseOp(op);
     return success();
-  }
-
-  static bool isFP8(Type ty) { return isa<Float8E4M3FNUZType>(ty); }
-  static bool isBF8(Type ty) { return isa<Float8E5M2FNUZType>(ty); }
-  static bool isF8(Type ty) { return isFP8(ty) || isBF8(ty); }
-
-  static Type getMfmaABType(MLIRContext *ctx, Type elemTy, int32_t k = 0) {
-    if (elemTy.isF32())
-      return Float32Type::get(ctx);
-    if (elemTy.isF16())
-      return VectorType::get({4}, Float16Type::get(ctx));
-    if (elemTy.isBF16())
-      return VectorType::get({(k >= 16) ? 4 : 2}, IntegerType::get(ctx, 16));
-    if (isF8(elemTy))
-      return IntegerType::get(ctx, 64);
-    return nullptr;
-  }
-
-  static int64_t getMfmaAccVecSize(int32_t m, int32_t k, Type elemTyA) {
-    if (elemTyA.isF32()) {
-      if (m == 32 && k == 1)
-        return 32;
-      if (m == 32 && k == 2)
-        return 16;
-      if (m == 16 && k == 1)
-        return 16;
-      if (m == 16 && k == 4)
-        return 4;
-      if (m == 4 && k == 1)
-        return 4;
-    }
-    if (elemTyA.isF16()) {
-      if (m == 32 && k == 4)
-        return 32;
-      if (m == 32 && k == 8)
-        return 16;
-      if (m == 16 && k == 4)
-        return 16;
-      if (m == 16 && k == 16)
-        return 4;
-      if (m == 4 && k == 4)
-        return 4;
-    }
-    if (elemTyA.isBF16()) {
-      if (m == 32 && k == 2)
-        return 32;
-      if (m == 32 && k == 4)
-        return 16;
-      if (m == 16 && k == 2)
-        return 16;
-      if (m == 16 && k == 8)
-        return 4;
-      if (m == 16 && k == 16)
-        return 4;
-      if (m == 4 && k == 2)
-        return 4;
-    }
-    if (isF8(elemTyA)) {
-      if (m == 16 && k == 32)
-        return 4;
-      if (m == 32 && k == 16)
-        return 16;
-    }
-    return 0;
-  }
-
-  template <typename MfmaOp>
-  LogicalResult emitMfma(MmaAtomCall op, ConversionPatternRewriter &rewriter, Location loc,
-                         Type abTyA, Type abTyB, VectorType accTy, Value aPtr, Value bPtr,
-                         Value cPtr, Value dPtr) const {
-    Value a = LLVM::LoadOp::create(rewriter, loc, abTyA, aPtr);
-    Value b = LLVM::LoadOp::create(rewriter, loc, abTyB, bPtr);
-    Value c = LLVM::LoadOp::create(rewriter, loc, accTy, cPtr);
-    auto zeroAttr = rewriter.getI32IntegerAttr(0);
-    Value res = MfmaOp::create(rewriter, loc, accTy, a, b, c, zeroAttr, zeroAttr, zeroAttr);
-    LLVM::StoreOp::create(rewriter, loc, res, dPtr);
-    rewriter.eraseOp(op);
-    return success();
-  }
-
-  LogicalResult lowerCDNA3MFMA(MmaAtomCall op, ConversionPatternRewriter &rewriter, Location loc,
-                               fly_rocdl::MmaOpCDNA3_MFMAType atomTy, Value dPtr, Value aPtr,
-                               Value bPtr, Value cPtr) const {
-    int32_t m = atomTy.getM();
-    int32_t n = atomTy.getN();
-    int32_t k = atomTy.getK();
-    Type elemTyA = atomTy.getElemTyA();
-    Type elemTyB = atomTy.getElemTyB();
-    MLIRContext *ctx = rewriter.getContext();
-
-    Type abTyA = getMfmaABType(ctx, elemTyA, k);
-    Type abTyB = getMfmaABType(ctx, elemTyB, k);
-    if (!abTyA || !abTyB)
-      return rewriter.notifyMatchFailure(op, "unsupported element type for MFMA");
-
-    int64_t accVecSize = getMfmaAccVecSize(m, k, elemTyA);
-    if (accVecSize == 0)
-      return rewriter.notifyMatchFailure(op, "unsupported MNK combination for MFMA");
-
-    Type accElemTy = atomTy.getElemTyAcc();
-    VectorType accTy = VectorType::get({accVecSize}, accElemTy);
-
-#define DISPATCH_MFMA(M_, K_, PRED, OP)                                                            \
-  if (m == M_ && n == M_ && k == K_ && (PRED))                                                     \
-    return emitMfma<ROCDL::OP>(op, rewriter, loc, abTyA, abTyB, accTy, aPtr, bPtr, cPtr, dPtr);
-
-    DISPATCH_MFMA(32, 1, elemTyA.isF32(), mfma_f32_32x32x1f32)
-    DISPATCH_MFMA(16, 1, elemTyA.isF32(), mfma_f32_16x16x1f32)
-    DISPATCH_MFMA(4, 1, elemTyA.isF32(), mfma_f32_4x4x1f32)
-    DISPATCH_MFMA(32, 2, elemTyA.isF32(), mfma_f32_32x32x2f32)
-    DISPATCH_MFMA(16, 4, elemTyA.isF32(), mfma_f32_16x16x4f32)
-
-    DISPATCH_MFMA(32, 4, elemTyA.isF16(), mfma_f32_32x32x4f16)
-    DISPATCH_MFMA(16, 4, elemTyA.isF16(), mfma_f32_16x16x4f16)
-    DISPATCH_MFMA(4, 4, elemTyA.isF16(), mfma_f32_4x4x4f16)
-    DISPATCH_MFMA(32, 8, elemTyA.isF16(), mfma_f32_32x32x8f16)
-    DISPATCH_MFMA(16, 16, elemTyA.isF16(), mfma_f32_16x16x16f16)
-
-    DISPATCH_MFMA(32, 2, elemTyA.isBF16(), mfma_f32_32x32x2bf16)
-    DISPATCH_MFMA(16, 2, elemTyA.isBF16(), mfma_f32_16x16x2bf16)
-    DISPATCH_MFMA(4, 2, elemTyA.isBF16(), mfma_f32_4x4x2bf16)
-    DISPATCH_MFMA(32, 4, elemTyA.isBF16(), mfma_f32_32x32x4bf16)
-    DISPATCH_MFMA(16, 8, elemTyA.isBF16(), mfma_f32_16x16x8bf16)
-    DISPATCH_MFMA(16, 16, elemTyA.isBF16(), mfma_f32_16x16x16bf16_1k)
-
-    DISPATCH_MFMA(16, 32, isFP8(elemTyA) && isFP8(elemTyB), mfma_f32_16x16x32_fp8_fp8)
-    DISPATCH_MFMA(16, 32, isFP8(elemTyA) && isBF8(elemTyB), mfma_f32_16x16x32_fp8_bf8)
-    DISPATCH_MFMA(16, 32, isBF8(elemTyA) && isFP8(elemTyB), mfma_f32_16x16x32_bf8_fp8)
-    DISPATCH_MFMA(16, 32, isBF8(elemTyA) && isBF8(elemTyB), mfma_f32_16x16x32_bf8_bf8)
-    DISPATCH_MFMA(32, 16, isFP8(elemTyA) && isFP8(elemTyB), mfma_f32_32x32x16_fp8_fp8)
-    DISPATCH_MFMA(32, 16, isFP8(elemTyA) && isBF8(elemTyB), mfma_f32_32x32x16_fp8_bf8)
-    DISPATCH_MFMA(32, 16, isBF8(elemTyA) && isFP8(elemTyB), mfma_f32_32x32x16_bf8_fp8)
-    DISPATCH_MFMA(32, 16, isBF8(elemTyA) && isBF8(elemTyB), mfma_f32_32x32x16_bf8_bf8)
-
-#undef DISPATCH_MFMA
-
-    return rewriter.notifyMatchFailure(op, "no matching ROCDL MFMA intrinsic");
-  }
-
-  static Type getWmmaABType(MLIRContext *ctx, int32_t m, int32_t k, Type elemTy) {
-    if (m <= 0 || k <= 0)
-      return nullptr;
-
-    Type i32Ty = IntegerType::get(ctx, 32);
-
-    // fp8/bf8 WMMA operands are packed into i32 vectors.
-    if (isF8(elemTy)) {
-      if (k == 16)
-        return VectorType::get({2}, i32Ty);
-      if (k == 64)
-        return VectorType::get({8}, i32Ty);
-      if (k == 128)
-        return VectorType::get({16}, i32Ty);
-      return nullptr;
-    }
-
-    // Integer WMMA operands are packed into i32 vectors.
-    if (elemTy.isInteger(8)) {
-      if (k == 16 || k == 32)
-        return VectorType::get({4}, i32Ty);
-      if (k == 64)
-        return VectorType::get({8}, i32Ty);
-      return nullptr;
-    }
-
-    int64_t abElemsPerLane = static_cast<int64_t>(m) * static_cast<int64_t>(k) / 32;
-    if (abElemsPerLane <= 0 || (static_cast<int64_t>(m) * static_cast<int64_t>(k)) % 32 != 0)
-      return nullptr;
-    return VectorType::get({abElemsPerLane}, elemTy);
-  }
-
-  static int64_t getWmmaAccVecSize(int32_t m, int32_t k, Type elemTyA, Type elemTyB,
-                                   Type elemTyAcc) {
-    // Current backend wiring only dispatches ROCDL ops that exist in this
-    // MLIR version; keep sizing generic per supported WMMA shape/type family.
-    if (m != 16)
-      return 0;
-
-    // NOTE: rocdl.wmma.f64.16x16x4.f64 is not exposed in the current MLIR
-    // ROCDL dialect build, so f64 is intentionally not dispatched here.
-    if (k == 4 && elemTyA.isF32() && elemTyB.isF32() && elemTyAcc.isF32())
-      return 8;
-
-    if (k == 32 && elemTyA.isF16() && elemTyB.isF16() && elemTyAcc.isF32())
-      return 8;
-    if (k == 32 && elemTyA.isF16() && elemTyB.isF16() && elemTyAcc.isF16())
-      return 8;
-    if (k == 32 && elemTyA.isBF16() && elemTyB.isBF16() && elemTyAcc.isF32())
-      return 8;
-    if (k == 32 && elemTyA.isBF16() && elemTyB.isBF16() && elemTyAcc.isBF16())
-      return 8;
-
-    if (k == 64 && isF8(elemTyA) && isF8(elemTyB) && elemTyAcc.isF32())
-      return 8;
-    if (k == 64 && isF8(elemTyA) && isF8(elemTyB) && elemTyAcc.isF16())
-      return 8;
-    if (k == 128 && isF8(elemTyA) && isF8(elemTyB) && elemTyAcc.isF32())
-      return 8;
-    if (k == 128 && isF8(elemTyA) && isF8(elemTyB) && elemTyAcc.isF16())
-      return 8;
-
-    if (k == 64 && elemTyA.isInteger(8) && elemTyB.isInteger(8) && elemTyAcc.isInteger(32))
-      return 8;
-
-    return 0;
-  }
-
-  enum class WmmaVariant { ModsAllReuse, ModsC, ModsABClamp };
-
-  template <typename WmmaOp, WmmaVariant Variant>
-  LogicalResult emitWmma(MmaAtomCall op, ConversionPatternRewriter &rewriter, Location loc,
-                         Type abTyA, Type abTyB, VectorType accTy, Value aPtr, Value bPtr,
-                         Value cPtr, Value dPtr) const {
-    Value a = LLVM::LoadOp::create(rewriter, loc, abTyA, aPtr);
-    Value b = LLVM::LoadOp::create(rewriter, loc, abTyB, bPtr);
-    Value c = LLVM::LoadOp::create(rewriter, loc, accTy, cPtr);
-    Value res;
-    if constexpr (Variant == WmmaVariant::ModsAllReuse) {
-      res = WmmaOp::create(rewriter, loc, accTy,
-                           /*signA=*/false, a, /*signB=*/false, b,
-                           /*modC=*/(uint16_t)0, c)
-                .getResult();
-    } else if constexpr (Variant == WmmaVariant::ModsC) {
-      res = WmmaOp::create(rewriter, loc, accTy, a, b,
-                           /*modC=*/(uint16_t)0, c,
-                           /*reuseA=*/false, /*reuseB=*/false)
-                .getResult();
-    } else {
-      static_assert(Variant == WmmaVariant::ModsABClamp);
-      res = WmmaOp::create(rewriter, loc, accTy,
-                           /*signA=*/false, a, /*signB=*/false, b, c,
-                           /*reuseA=*/false, /*reuseB=*/false, /*clamp=*/false)
-                .getResult();
-    }
-    LLVM::StoreOp::create(rewriter, loc, res, dPtr);
-    rewriter.eraseOp(op);
-    return success();
-  }
-
-  LogicalResult lowerGFX1250WMMA(MmaAtomCall op, ConversionPatternRewriter &rewriter, Location loc,
-                                 fly_rocdl::MmaOpGFX1250_WMMAType atomTy, Value dPtr, Value aPtr,
-                                 Value bPtr, Value cPtr) const {
-    int32_t m = atomTy.getM();
-    int32_t n = atomTy.getN();
-    int32_t k = atomTy.getK();
-    Type elemTyA = atomTy.getElemTyA();
-    Type elemTyB = atomTy.getElemTyB();
-    Type elemTyAcc = atomTy.getElemTyAcc();
-    MLIRContext *ctx = rewriter.getContext();
-
-    Type abTyA = getWmmaABType(ctx, m, k, elemTyA);
-    Type abTyB = getWmmaABType(ctx, m, k, elemTyB);
-    if (!abTyA || !abTyB)
-      return rewriter.notifyMatchFailure(op, "unsupported A/B element packing for WMMA");
-
-    int64_t accVecSize = getWmmaAccVecSize(m, k, elemTyA, elemTyB, elemTyAcc);
-    if (accVecSize == 0)
-      return rewriter.notifyMatchFailure(op, "unsupported MNK/type combination for WMMA");
-
-    VectorType accTy = VectorType::get({accVecSize}, elemTyAcc);
-
-#define DISPATCH_WMMA(M_, K_, PRED, OP, VARIANT)                                                   \
-  if (m == M_ && n == M_ && k == K_ && (PRED))                                                     \
-    return emitWmma<ROCDL::OP, WmmaVariant::VARIANT>(op, rewriter, loc, abTyA, abTyB, accTy, aPtr, \
-                                                     bPtr, cPtr, dPtr);
-
-#define DISPATCH_WMMA_FP8(K_, ACC_PRED, ACC_PREFIX)                                                \
-  DISPATCH_WMMA(16, K_, isFP8(elemTyA) && isFP8(elemTyB) && ACC_PRED,                              \
-                wmma_##ACC_PREFIX##_16x16x##K_##_fp8_fp8, ModsC)                                   \
-  DISPATCH_WMMA(16, K_, isFP8(elemTyA) && isBF8(elemTyB) && ACC_PRED,                              \
-                wmma_##ACC_PREFIX##_16x16x##K_##_fp8_bf8, ModsC)                                   \
-  DISPATCH_WMMA(16, K_, isBF8(elemTyA) && isFP8(elemTyB) && ACC_PRED,                              \
-                wmma_##ACC_PREFIX##_16x16x##K_##_bf8_fp8, ModsC)                                   \
-  DISPATCH_WMMA(16, K_, isBF8(elemTyA) && isBF8(elemTyB) && ACC_PRED,                              \
-                wmma_##ACC_PREFIX##_16x16x##K_##_bf8_bf8, ModsC)
-
-    DISPATCH_WMMA(16, 4, elemTyA.isF32() && elemTyB.isF32() && elemTyAcc.isF32(),
-                  wmma_f32_16x16x4_f32, ModsAllReuse)
-
-    DISPATCH_WMMA(16, 32, elemTyA.isF16() && elemTyB.isF16() && elemTyAcc.isF32(),
-                  wmma_f32_16x16x32_f16, ModsAllReuse)
-    DISPATCH_WMMA(16, 32, elemTyA.isBF16() && elemTyB.isBF16() && elemTyAcc.isF32(),
-                  wmma_f32_16x16x32_bf16, ModsAllReuse)
-    DISPATCH_WMMA(16, 32, elemTyA.isF16() && elemTyB.isF16() && elemTyAcc.isF16(),
-                  wmma_f16_16x16x32_f16, ModsAllReuse)
-    DISPATCH_WMMA(16, 32, elemTyA.isBF16() && elemTyB.isBF16() && elemTyAcc.isBF16(),
-                  wmma_bf16_16x16x32_bf16, ModsAllReuse)
-
-    // bf16f32 WMMA requires C:f32 and D:bf16. Current MmaAtom interface carries
-    // one accumulator type, so mixed C/D typing is not representable yet.
-
-    DISPATCH_WMMA_FP8(64, elemTyAcc.isF32(), f32)
-    DISPATCH_WMMA_FP8(64, elemTyAcc.isF16(), f16)
-    DISPATCH_WMMA_FP8(128, elemTyAcc.isF32(), f32)
-    DISPATCH_WMMA_FP8(128, elemTyAcc.isF16(), f16)
-
-    DISPATCH_WMMA(16, 64, elemTyA.isInteger(8) && elemTyB.isInteger(8) && elemTyAcc.isInteger(32),
-                  wmma_i32_16x16x64_iu8, ModsABClamp)
-
-#undef DISPATCH_WMMA_FP8
-#undef DISPATCH_WMMA
-
-    return rewriter.notifyMatchFailure(op, "no matching ROCDL WMMA intrinsic");
   }
 };
 

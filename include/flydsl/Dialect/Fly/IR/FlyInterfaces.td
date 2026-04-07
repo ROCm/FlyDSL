@@ -56,7 +56,33 @@ def Fly_CopyOpTypeInterface : TypeInterface<"CopyOpTypeInterface", [Fly_MayStati
     InterfaceMethod<"", "::mlir::Attribute", "getThrLayout", (ins)>,
     InterfaceMethod<"", "::mlir::Attribute", "getThrBitLayoutSrc", (ins)>,
     InterfaceMethod<"", "::mlir::Attribute", "getThrBitLayoutDst", (ins)>,
-    InterfaceMethod<"", "::mlir::Attribute", "getThrBitLayoutRef", (ins)>
+    InterfaceMethod<"", "::mlir::Attribute", "getThrBitLayoutRef", (ins)>,
+    InterfaceMethod<
+      "Emit the lowering IR for a copy_atom_call with this CopyOp type.",
+      "::mlir::LogicalResult",
+      "emitAtomCall",
+      (ins "::mlir::OpBuilder &":$builder,
+           "::mlir::Location":$loc,
+           "::mlir::Type":$copyAtomTy,
+           "::mlir::Type":$srcMemTy,
+           "::mlir::Type":$dstMemTy,
+           "::mlir::Value":$atomVal,
+           "::mlir::Value":$src,
+           "::mlir::Value":$dst)>,
+    InterfaceMethod<
+      "Emit the lowering IR for a predicated copy_atom_call with this CopyOp type.",
+      "::mlir::LogicalResult",
+      "emitAtomCall",
+      (ins "::mlir::OpBuilder &":$builder,
+           "::mlir::Location":$loc,
+           "::mlir::Type":$copyAtomTy,
+           "::mlir::Type":$srcMemTy,
+           "::mlir::Type":$dstMemTy,
+           "::mlir::Type":$predMemTy,
+           "::mlir::Value":$atomVal,
+           "::mlir::Value":$src,
+           "::mlir::Value":$dst,
+           "::mlir::Value":$pred)>
   ];
 }
 
@@ -71,7 +97,23 @@ def Fly_MmaOpTypeInterface : TypeInterface<"MmaOpTypeInterface", [Fly_MayStaticT
     InterfaceMethod<"", "::mlir::Type", "getValTypeD", (ins)>,
     InterfaceMethod<"", "::mlir::Attribute", "getThrValLayoutA", (ins)>,
     InterfaceMethod<"", "::mlir::Attribute", "getThrValLayoutB", (ins)>,
-    InterfaceMethod<"", "::mlir::Attribute", "getThrValLayoutC", (ins)>
+    InterfaceMethod<"", "::mlir::Attribute", "getThrValLayoutC", (ins)>,
+    InterfaceMethod<
+      "Emit the lowering IR for an mma_atom_call with this MmaOp type.",
+      "::mlir::LogicalResult",
+      "emitAtomCall",
+      (ins "::mlir::OpBuilder &":$builder,
+           "::mlir::Location":$loc,
+           "::mlir::Type":$mmaAtomTy,
+           "::mlir::Type":$dMemTy,
+           "::mlir::Type":$aMemTy,
+           "::mlir::Type":$bMemTy,
+           "::mlir::Type":$cMemTy,
+           "::mlir::Value":$atomVal,
+           "::mlir::Value":$d,
+           "::mlir::Value":$a,
+           "::mlir::Value":$b,
+           "::mlir::Value":$c)>
   ];
 }
 

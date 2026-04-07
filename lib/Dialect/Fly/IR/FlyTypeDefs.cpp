@@ -407,6 +407,19 @@ Attribute CopyAtomType::getThrValLayoutRef() {
   return layoutRecast(builder, cast<LayoutAttr>(copyOp.getThrBitLayoutRef()), 1, getValBits());
 }
 
+LogicalResult CopyAtomType::emitAtomCall(OpBuilder &builder, Location loc, Type copyAtomTy,
+                                         Type srcMemTy, Type dstMemTy, Value atomVal, Value src, Value dst) const {
+  return cast<CopyOpTypeInterface>(getCopyOp()).emitAtomCall(builder, loc, copyAtomTy, srcMemTy,
+                                                             dstMemTy, atomVal, src, dst);
+}
+
+LogicalResult CopyAtomType::emitAtomCall(OpBuilder &builder, Location loc, Type copyAtomTy,
+                                         Type srcMemTy, Type dstMemTy, Type predMemTy, Value atomVal, Value src, Value dst,
+                                         Value pred) const {
+  return cast<CopyOpTypeInterface>(getCopyOp()).emitAtomCall(builder, loc, copyAtomTy, srcMemTy,
+                                                             dstMemTy, predMemTy, atomVal, src, dst, pred);
+}
+
 bool MmaAtomType::isStatic() const {
   auto mmaOp = dyn_cast<MmaOpTypeInterface>(getMmaOp());
   if (!mmaOp)
@@ -438,6 +451,13 @@ Attribute MmaAtomType::getThrValLayoutB() const {
 }
 Attribute MmaAtomType::getThrValLayoutC() const {
   return cast<MmaOpTypeInterface>(getMmaOp()).getThrValLayoutC();
+}
+
+LogicalResult MmaAtomType::emitAtomCall(OpBuilder &builder, Location loc, Type mmaAtomTy,
+                                        Type dMemTy, Type aMemTy, Type bMemTy, Type cMemTy, Value atomVal, Value d,
+                                        Value a, Value b, Value c) const {
+  return cast<MmaOpTypeInterface>(getMmaOp()).emitAtomCall(
+      builder, loc, mmaAtomTy, dMemTy, aMemTy, bMemTy, cMemTy, atomVal, d, a, b, c);
 }
 
 } // namespace mlir::fly
