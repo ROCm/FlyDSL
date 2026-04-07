@@ -5,9 +5,6 @@ on:
     tags:
       - 'v*'
 
-env:
-  DEFAULT_DOCKER_IMAGE: rocm/pytorch:rocm7.2_ubuntu22.04_py3.10_pytorch_release_2.8.0
-
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
@@ -48,7 +45,7 @@ jobs:
     uses: ./.github/workflows/build-whl.yaml
     with:
       release_type: release
-      docker_image: ${{ env.DEFAULT_DOCKER_IMAGE }}
+      docker_image: rocm/pytorch:rocm7.2_ubuntu22.04_py3.10_pytorch_release_2.8.0
       upload_s3_staging: false
     permissions:
       contents: read
@@ -57,7 +54,7 @@ jobs:
     needs: [validate_tag, build]
     uses: ./.github/workflows/test-whl.yaml
     with:
-      docker_image: ${{ env.DEFAULT_DOCKER_IMAGE }}
+      docker_image: rocm/pytorch:rocm7.2_ubuntu22.04_py3.10_pytorch_release_2.8.0
     permissions:
       contents: read
 
