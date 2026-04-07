@@ -75,6 +75,7 @@ class RocmBackend(BaseBackend):
             "convert-cf-to-llvm",
             "gpu-to-llvm{use-bare-pointers-for-host=true use-bare-pointers-for-kernels=true}",
             "convert-arith-to-llvm",
+            "convert-vector-to-llvm",
             "convert-func-to-llvm",
             "reconcile-unrealized-casts",
             *(

@@ -47,6 +47,7 @@ __all__ = [
     "compute_padding_encoding",
     "compute_warp_distribution",
     "l2_prefetch_tile",
+    "advance_tdm_descriptor",
 ]
 
 
@@ -525,3 +526,40 @@ def l2_prefetch_tile(
     # requires LLVM ISel support for gfx1250 global_prefetch_b8. If the LLVM
     # build lacks this pattern, the instruction will be silently dropped.
     rocdl.global_prefetch(ptr_val, scope)
+
+
+def advance_tdm_descriptor(desc: TDMDescriptor2D, byte_offset) -> TDMDescriptor2D:
+    """Advances the global address of a TDM descriptor by a byte offset."""
+    from .. import vector, arith
+    from ..typing import T
+    
+    dgroup0 = desc.dgroup0
+    
+    lo = vector.extract(dgroup0, static_position=[2], dynamic_position=[])
+    hi = vector.extract(dgroup0, static_position=[3], dynamic_position=[])
+    
+    lo_i64 = arith.extui(T.i64, lo)
+    hi_i64 = arith.extui(T.i64, hi)
+    
+    # Mask out the type field [31:30] from hi
+    hi_masked = arith.andi(hi_i64, arith.constant(0x3FFFFFFF, type=T.i64))
+    
+    # Combine to 64-bit address
+    addr_i64 = arith.ori(lo_i64, arith.shli(hi_masked, arith.constant(32, type=T.i64)))
+    
+    # Add offset
+    offset_i64 = arith.index_cast(T.i64, byte_offset) if getattr(byte_offset, 'type', None) != T.i64 else byte_offset
+    new_addr_i64 = arith.addi(addr_i64, offset_i64)
+    
+    # Split back
+    new_lo = arith.trunci(T.i32, new_addr_i64)
+    new_hi_raw = arith.trunci(T.i32, arith.shrui(new_addr_i64, arith.constant(32, type=T.i64)))
+    
+    # Restore type field (2 << 30)
+    new_hi = arith.ori(new_hi_raw, arith.constant(1 << 31, type=T.i32))
+    
+    # Insert back
+    new_dgroup0 = vector.insert(new_lo, dgroup0, static_position=[2], dynamic_position=[])
+    new_dgroup0 = vector.insert(new_hi, new_dgroup0, static_position=[3], dynamic_position=[])
+    
+    return TDMDescriptor2D(new_dgroup0, desc.dgroup1)

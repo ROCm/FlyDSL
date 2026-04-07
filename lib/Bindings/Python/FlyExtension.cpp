@@ -147,6 +147,54 @@ struct PyIntTupleType : PyConcreteType<PyIntTupleType> {
 };
 
 // ---------------------------------------------------------------------------
+// TileType
+// ---------------------------------------------------------------------------
+struct PyTileType : PyConcreteType<PyTileType> {
+  FLYDSL_REGISTER_TYPE_BINDING(::mlir::fly::TileType, "TileType");
+
+  static Attribute extractTileModeAttr(nb::handle mode, MLIRContext *ctx) {
+    if (mode.is_none())
+      return IntAttr::getNone(ctx);
+    if (PyLong_Check(mode.ptr()))
+      return IntAttr::getStatic(ctx, nb::cast<int32_t>(mode));
+    if (PyTuple_Check(mode.ptr())) {
+      SmallVector<Attribute> nested;
+      for (auto item : mode)
+        nested.push_back(extractTileModeAttr(nb::handle(item), ctx));
+      return TileAttr::get(ArrayAttr::get(ctx, nested));
+    }
+    if (nb::hasattr(mode, MLIR_PYTHON_CAPI_PTR_ATTR)) {
+      auto layoutTy = FLYDSL_EXTRACT_TYPE_FROM_NB_HANDLE(::mlir::fly::LayoutType, mode);
+      return layoutTy.getAttr();
+    }
+    throw std::invalid_argument("TileType.get: expected int, None, tuple, or LayoutType");
+  }
+
+  static void bindDerived(ClassTy &c) {
+    c.def_static(
+        "get",
+        [](nb::object modeOrModes, DefaultingPyMlirContext context) {
+          MLIRContext *ctx = unwrap(context.get()->get());
+          if (nb::isinstance<nb::list>(modeOrModes)) {
+            SmallVector<Attribute> attrs;
+            for (auto mode : nb::cast<nb::list>(modeOrModes))
+              attrs.push_back(extractTileModeAttr(nb::handle(mode), ctx));
+            auto tileAttr = TileAttr::get(ArrayAttr::get(ctx, attrs));
+            return PyTileType(context->getRef(), wrap(TileType::get(tileAttr)));
+          } else {
+            auto attr = extractTileModeAttr(modeOrModes, ctx);
+            auto tileAttr = TileAttr::get(attr);
+            return PyTileType(context->getRef(), wrap(TileType::get(tileAttr)));
+          }
+        },
+        "modes"_a, nb::kw_only(), "context"_a = nb::none(),
+        "Create a TileType from a list of modes or a single mode (leaf tile)");
+
+    c.def_prop_ro("rank", [](PyTileType &self) { return self.toCppType().rank(); });
+  }
+};
+
+// ---------------------------------------------------------------------------
 // LayoutType
 // ---------------------------------------------------------------------------
 struct PyLayoutType : PyConcreteType<PyLayoutType> {
@@ -472,28 +520,6 @@ struct PyCoordTensorType : PyConcreteType<PyCoordTensorType> {
 };
 
 // ---------------------------------------------------------------------------
-// CopyOpUniversalCopyType
-// ---------------------------------------------------------------------------
-struct PyCopyOpUniversalCopyType : PyConcreteType<PyCopyOpUniversalCopyType> {
-  FLYDSL_REGISTER_TYPE_BINDING(::mlir::fly::CopyOpUniversalCopyType, "CopyOpUniversalCopyType");
-
-  static void bindDerived(ClassTy &c) {
-    c.def_static(
-        "get",
-        [](int32_t bitSize, DefaultingPyMlirContext context) {
-          MLIRContext *ctx = unwrap(context.get()->get());
-          return PyCopyOpUniversalCopyType(context->getRef(),
-                                           wrap(CopyOpUniversalCopyType::get(ctx, bitSize)));
-        },
-        "bitSize"_a, nb::kw_only(), "context"_a = nb::none(),
-        "Create a CopyOpUniversalCopyType with bit size");
-
-    c.def_prop_ro("bit_size",
-                  [](PyCopyOpUniversalCopyType &self) { return self.toCppType().getBitSize(); });
-  }
-};
-
-// ---------------------------------------------------------------------------
 // CopyAtomType
 // ---------------------------------------------------------------------------
 struct PyCopyAtomType : PyConcreteType<PyCopyAtomType> {
@@ -529,43 +555,37 @@ struct PyCopyAtomType : PyConcreteType<PyCopyAtomType> {
 };
 
 // ---------------------------------------------------------------------------
-// MmaAtomUniversalFMAType
+// MmaAtomType
 // ---------------------------------------------------------------------------
-struct PyMmaAtomUniversalFMAType : PyConcreteType<PyMmaAtomUniversalFMAType> {
-  FLYDSL_REGISTER_TYPE_BINDING(::mlir::fly::MmaAtomUniversalFMAType, "MmaAtomUniversalFMAType");
+struct PyMmaAtomType : PyConcreteType<PyMmaAtomType> {
+  FLYDSL_REGISTER_TYPE_BINDING(::mlir::fly::MmaAtomType, "MmaAtomType");
 
   static void bindDerived(ClassTy &c) {
     c.def_static(
         "get",
-        [](PyType &elemTyObj, DefaultingPyMlirContext context) {
-          return PyMmaAtomUniversalFMAType(context->getRef(),
-                                           wrap(MmaAtomUniversalFMAType::get(unwrap(elemTyObj))));
+        [](PyType &mmaOp, DefaultingPyMlirContext context) {
+          return PyMmaAtomType(context->getRef(), wrap(MmaAtomType::get(unwrap(mmaOp))));
         },
-        "elem_ty"_a, nb::kw_only(), "context"_a = nb::none(),
-        "Create a MmaAtomUniversalFMAType with element type");
+        "mma_op"_a, nb::kw_only(), "context"_a = nb::none(),
+        "Create a MmaAtomType wrapping an MmaOpTypeInterface type");
 
-    c.def_prop_ro("elem_ty", [](PyMmaAtomUniversalFMAType &self) -> MlirType {
-      return wrap(self.toCppType().getElemTy());
+    c.def_prop_ro("mma_op", [](PyMmaAtomType &self) -> MlirType {
+      return wrap(self.toCppType().getMmaOp());
     });
-    c.def_prop_ro("thr_layout", [](PyMmaAtomUniversalFMAType &self) -> MlirType {
-      auto ty = cast<MmaAtomTypeInterface>(self.toCppType());
-      return wrap(LayoutType::get(cast<LayoutAttr>(ty.getThrLayout())));
+    c.def_prop_ro("thr_layout", [](PyMmaAtomType &self) -> MlirType {
+      return wrap(LayoutType::get(cast<LayoutAttr>(self.toCppType().getThrLayout())));
     });
-    c.def_prop_ro("shape_mnk", [](PyMmaAtomUniversalFMAType &self) -> MlirType {
-      auto ty = cast<MmaAtomTypeInterface>(self.toCppType());
-      return wrap(IntTupleType::get(cast<IntTupleAttr>(ty.getShapeMNK())));
+    c.def_prop_ro("shape_mnk", [](PyMmaAtomType &self) -> MlirType {
+      return wrap(IntTupleType::get(cast<IntTupleAttr>(self.toCppType().getShapeMNK())));
     });
-    c.def_prop_ro("tv_layout_a", [](PyMmaAtomUniversalFMAType &self) -> MlirType {
-      auto ty = cast<MmaAtomTypeInterface>(self.toCppType());
-      return wrap(LayoutType::get(cast<LayoutAttr>(ty.getThrValLayoutA())));
+    c.def_prop_ro("tv_layout_a", [](PyMmaAtomType &self) -> MlirType {
+      return wrap(LayoutType::get(cast<LayoutAttr>(self.toCppType().getThrValLayoutA())));
     });
-    c.def_prop_ro("tv_layout_b", [](PyMmaAtomUniversalFMAType &self) -> MlirType {
-      auto ty = cast<MmaAtomTypeInterface>(self.toCppType());
-      return wrap(LayoutType::get(cast<LayoutAttr>(ty.getThrValLayoutB())));
+    c.def_prop_ro("tv_layout_b", [](PyMmaAtomType &self) -> MlirType {
+      return wrap(LayoutType::get(cast<LayoutAttr>(self.toCppType().getThrValLayoutB())));
     });
-    c.def_prop_ro("tv_layout_c", [](PyMmaAtomUniversalFMAType &self) -> MlirType {
-      auto ty = cast<MmaAtomTypeInterface>(self.toCppType());
-      return wrap(LayoutType::get(cast<LayoutAttr>(ty.getThrValLayoutC())));
+    c.def_prop_ro("tv_layout_c", [](PyMmaAtomType &self) -> MlirType {
+      return wrap(LayoutType::get(cast<LayoutAttr>(self.toCppType().getThrValLayoutC())));
     });
   }
 };
@@ -621,37 +641,78 @@ struct PyTiledMmaType : PyConcreteType<PyTiledMmaType> {
     });
     c.def_prop_ro("tile_size_mnk", [](PyTiledMmaType &self) -> MlirType {
       auto ty = self.toCppType();
-      auto mmaAtom = cast<MmaAtomTypeInterface>(ty.getMmaAtom());
+      auto mmaAtom = cast<MmaAtomType>(ty.getMmaAtom());
       auto result = tiledMmaGetTileSizeMNK(mmaAtom, ty.getAtomLayout().getAttr(),
                                            ty.getPermutation().getAttr());
       return wrap(IntTupleType::get(result));
     });
     c.def_prop_ro("thr_layout_vmnk", [](PyTiledMmaType &self) -> MlirType {
       auto ty = self.toCppType();
-      auto mmaAtom = cast<MmaAtomTypeInterface>(ty.getMmaAtom());
+      auto mmaAtom = cast<MmaAtomType>(ty.getMmaAtom());
       auto result = tiledMmaGetThrLayoutVMNK(mmaAtom, ty.getAtomLayout().getAttr());
       return wrap(LayoutType::get(result));
     });
     c.def_prop_ro("tiled_tv_layout_a", [](PyTiledMmaType &self) -> MlirType {
       auto ty = self.toCppType();
-      auto mmaAtom = cast<MmaAtomTypeInterface>(ty.getMmaAtom());
+      auto mmaAtom = cast<MmaAtomType>(ty.getMmaAtom());
       auto result = tiledMmaGetTiledThrValLayout(mmaAtom, ty.getAtomLayout().getAttr(),
                                                  ty.getPermutation().getAttr(), MmaOperand::A);
       return wrap(LayoutType::get(result));
     });
     c.def_prop_ro("tiled_tv_layout_b", [](PyTiledMmaType &self) -> MlirType {
       auto ty = self.toCppType();
-      auto mmaAtom = cast<MmaAtomTypeInterface>(ty.getMmaAtom());
+      auto mmaAtom = cast<MmaAtomType>(ty.getMmaAtom());
       auto result = tiledMmaGetTiledThrValLayout(mmaAtom, ty.getAtomLayout().getAttr(),
                                                  ty.getPermutation().getAttr(), MmaOperand::B);
       return wrap(LayoutType::get(result));
     });
     c.def_prop_ro("tiled_tv_layout_c", [](PyTiledMmaType &self) -> MlirType {
       auto ty = self.toCppType();
-      auto mmaAtom = cast<MmaAtomTypeInterface>(ty.getMmaAtom());
+      auto mmaAtom = cast<MmaAtomType>(ty.getMmaAtom());
       auto result = tiledMmaGetTiledThrValLayout(mmaAtom, ty.getAtomLayout().getAttr(),
                                                  ty.getPermutation().getAttr(), MmaOperand::C);
       return wrap(LayoutType::get(result));
+    });
+  }
+};
+
+// ---------------------------------------------------------------------------
+// CopyOpUniversalCopyType
+// ---------------------------------------------------------------------------
+struct PyCopyOpUniversalCopyType : PyConcreteType<PyCopyOpUniversalCopyType> {
+  FLYDSL_REGISTER_TYPE_BINDING(::mlir::fly::CopyOpUniversalCopyType, "CopyOpUniversalCopyType");
+
+  static void bindDerived(ClassTy &c) {
+    c.def_static(
+        "get",
+        [](int32_t bitSize, DefaultingPyMlirContext context) {
+          MLIRContext *ctx = unwrap(context.get()->get());
+          return PyCopyOpUniversalCopyType(context->getRef(),
+                                           wrap(CopyOpUniversalCopyType::get(ctx, bitSize)));
+        },
+        "bitSize"_a, nb::kw_only(), "context"_a = nb::none(),
+        "Create a CopyOpUniversalCopyType with bit size");
+  }
+};
+
+// ---------------------------------------------------------------------------
+// MmaOpUniversalFMAType
+// ---------------------------------------------------------------------------
+struct PyMmaOpUniversalFMAType : PyConcreteType<PyMmaOpUniversalFMAType> {
+  FLYDSL_REGISTER_TYPE_BINDING(::mlir::fly::MmaOpUniversalFMAType, "MmaOpUniversalFMAType");
+
+  static void bindDerived(ClassTy &c) {
+    c.def_static(
+        "get",
+        [](PyType &elemTyObj, DefaultingPyMlirContext context) {
+          return PyMmaOpUniversalFMAType(context->getRef(),
+                                         wrap(MmaOpUniversalFMAType::get(unwrap(elemTyObj))));
+        },
+        "elem_ty"_a, nb::kw_only(), "context"_a = nb::none(),
+        "Create a MmaOpUniversalFMAType with element type");
+
+    c.def_prop_ro("elem_ty", [](PyMmaOpUniversalFMAType &self) -> MlirType {
+      return wrap(self.toCppType().getElemTy());
     });
   }
 };
@@ -723,17 +784,19 @@ NB_MODULE(_mlirDialectsFly, m) {
   // Bind Fly dialect types (PyConcreteType pattern)
   // -------------------------------------------------------------------------
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly::PyIntTupleType::bind(m);
+  ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly::PyTileType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly::PyLayoutType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly::PySwizzleType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly::PyComposedLayoutType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly::PyPointerType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly::PyMemRefType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly::PyCoordTensorType::bind(m);
-  ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly::PyCopyOpUniversalCopyType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly::PyCopyAtomType::bind(m);
-  ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly::PyMmaAtomUniversalFMAType::bind(m);
+  ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly::PyMmaAtomType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly::PyTiledCopyType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly::PyTiledMmaType::bind(m);
+  ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly::PyCopyOpUniversalCopyType::bind(m);
+  ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly::PyMmaOpUniversalFMAType::bind(m);
 
   m.def(
       "set_llvm_option_bool",
@@ -743,12 +806,10 @@ NB_MODULE(_mlirDialectsFly, m) {
         if (rc == 1)
           throw std::runtime_error("Unknown LLVM option: " + name);
         if (rc == 2)
-          throw std::runtime_error("LLVM option '" + name +
-                                   "' is not a bool option");
+          throw std::runtime_error("LLVM option '" + name + "' is not a bool option");
         return oldValue;
       },
-      "name"_a, "value"_a,
-      "Set an LLVM bool cl::opt at runtime; returns the previous value.");
+      "name"_a, "value"_a, "Set an LLVM bool cl::opt at runtime; returns the previous value.");
 
   m.def(
       "set_llvm_option_int",
@@ -758,12 +819,10 @@ NB_MODULE(_mlirDialectsFly, m) {
         if (rc == 1)
           throw std::runtime_error("Unknown LLVM option: " + name);
         if (rc == 2)
-          throw std::runtime_error("LLVM option '" + name +
-                                   "' is not an int option");
+          throw std::runtime_error("LLVM option '" + name + "' is not an int option");
         return oldValue;
       },
-      "name"_a, "value"_a,
-      "Set an LLVM int cl::opt at runtime; returns the previous value.");
+      "name"_a, "value"_a, "Set an LLVM int cl::opt at runtime; returns the previous value.");
 
   m.def(
       "set_llvm_option_str",
@@ -773,12 +832,10 @@ NB_MODULE(_mlirDialectsFly, m) {
         if (rc == 1)
           throw std::runtime_error("Unknown LLVM option: " + name);
         if (rc == 2)
-          throw std::runtime_error("LLVM option '" + name +
-                                   "' is not a string option");
+          throw std::runtime_error("LLVM option '" + name + "' is not a string option");
         std::string result(oldValue ? oldValue : "");
         flydslFreeLLVMOptionStr(oldValue);
         return result;
       },
-      "name"_a, "value"_a,
-      "Set an LLVM string cl::opt at runtime; returns the previous value.");
+      "name"_a, "value"_a, "Set an LLVM string cl::opt at runtime; returns the previous value.");
 }

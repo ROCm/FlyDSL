@@ -256,7 +256,7 @@ val_layout = fx.make_layout((VAL_M, VAL_N), (1, VAL_M))
 # Create tiled copy with vectorized atoms
 copy_atom = fx.make_copy_atom(fx.CopyAtomUniversalCopyType.get(32))
 layout_thr_val = fx.raked_product(thr_layout, val_layout)
-tile_mn = fx.make_tile([fx.make_layout(THR_M, 1), fx.make_layout(VAL_M, 1)])
+tile_mn = fx.make_tile(fx.make_layout(THR_M, 1), fx.make_layout(VAL_M, 1))
 tiled_copy = fx.make_tiled_copy(copy_atom, layout_thr_val, tile_mn)
 
 # Partition tensor across blocks and threads

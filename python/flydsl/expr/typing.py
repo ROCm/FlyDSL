@@ -253,6 +253,7 @@ __all__ = [
     "ComposedLayout",
     "Tensor",
     "CopyAtom",
+    "Tile",
     "TiledCopy",
     "TiledMma",
     "Stream",
@@ -310,6 +311,13 @@ class IntTuple(BuiltinDslType):
             raise ValueError("IntTuple is not a static leaf")
         return self.type.get_static_leaf_int
 
+    def to_py_value(self):
+        if not self.is_static:
+            raise ValueError("IntTuple is not static")
+        if self.is_leaf:
+            return self.get_static_leaf_int
+        return tuple(get_(self, i).to_py_value() for i in range(self.rank))
+
     @traced_op
     def __getitem__(self, mode, loc=None, ip=None):
         if isinstance(mode, int):
@@ -317,6 +325,13 @@ class IntTuple(BuiltinDslType):
         if self.rank <= mode[0]:
             raise IndexError(f"Index {mode[0]} out of range for int tuple with rank {self.rank}")
         return get_(self, mode, loc=loc, ip=ip)
+
+
+@ir.register_value_caster(TileType.static_typeid, replace=True)
+class Tile(BuiltinDslType):
+    @property
+    def rank(self) -> int:
+        return self.type.rank
 
 
 @ir.register_value_caster(LayoutType.static_typeid, replace=True)
@@ -603,6 +618,33 @@ class CopyAtom(BuiltinDslType):
     @property
     def layout_ref_tv(self):
         return static(self.type.tv_layout_ref)
+
+
+@ir.register_value_caster(MmaAtomType.static_typeid, replace=True)
+class MmaAtom(BuiltinDslType):
+    @property
+    def thr_layout(self):
+        return static(self.type.thr_layout)
+
+    @property
+    def thr_id(self):
+        return self.thr_layout
+
+    @property
+    def shape_mnk(self):
+        return static(self.type.shape_mnk)
+
+    @property
+    def layout_A_tv(self):
+        return static(self.type.tv_layout_a)
+
+    @property
+    def layout_B_tv(self):
+        return static(self.type.tv_layout_b)
+
+    @property
+    def layout_C_tv(self):
+        return static(self.type.tv_layout_c)
 
 
 @ir.register_value_caster(TiledCopyType.static_typeid, replace=True)

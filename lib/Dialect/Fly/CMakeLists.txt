@@ -2,6 +2,7 @@ add_mlir_dialect_library(MLIRFlyDialect
   IR/FlyDialect.cpp
   IR/FlyOps.cpp
   IR/FlyTypeDefs.cpp
+  IR/FlyUniversalOps.cpp
   IR/FlyAttrDefs.cpp
   Utils/IntUtils.cpp
   Utils/IntTupleUtils.cpp

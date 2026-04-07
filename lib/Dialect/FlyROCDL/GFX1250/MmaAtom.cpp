@@ -45,8 +45,7 @@ LayoutAttr getThrValLayoutAB(MLIRContext *ctx, int32_t K, Type elemTy) {
   // pos = (l%16)*1 + (l/16)*128 + val_within*16 [+ block*256]
   int numBlocks = valsPerLane / 8;
   if (numBlocks == 1) {
-    return FxLayout(FxShape(FxThr(16, 2), FxVal(8)),
-                    FxStride(FxThr(1, 128), FxVal(16)));
+    return FxLayout(FxShape(FxThr(16, 2), FxVal(8)), FxStride(FxThr(1, 128), FxVal(16)));
   }
   return FxLayout(FxShape(FxThr(16, 2), FxVal(8, numBlocks)),
                   FxStride(FxThr(1, 128), FxVal(16, 256)));
@@ -69,89 +68,76 @@ LayoutAttr getThrValLayoutCD(MLIRContext *ctx, Type elemTyAcc) {
 
   int elemBits = elemTyAcc.getIntOrFloatBitWidth();
   if (elemBits >= 32) {
-    return FxLayout(FxShape(FxThr(16, 2), FxVal(8)),
-                    FxStride(FxThr(16, 8), FxVal(1)));
+    return FxLayout(FxShape(FxThr(16, 2), FxVal(8)), FxStride(FxThr(16, 8), FxVal(1)));
   }
   // 16-bit: 4 VGPRs × 2 sub-elements = 8 values.
-  return FxLayout(FxShape(FxThr(16, 2), FxVal(4, 2)),
-                  FxStride(FxThr(16, 8), FxVal(2, 1)));
+  return FxLayout(FxShape(FxThr(16, 2), FxVal(4, 2)), FxStride(FxThr(16, 8), FxVal(2, 1)));
 }
 
 } // namespace gfx1250
 
 namespace mlir::fly_rocdl {
 
-bool MmaAtomGFX1250_WMMAType::isStatic() const { return true; }
+bool MmaOpGFX1250_WMMAType::isStatic() const { return true; }
 
-Value MmaAtomGFX1250_WMMAType::rebuildStaticValue(OpBuilder &builder, Location loc,
-                                                   Value currentValue) const {
+Value MmaOpGFX1250_WMMAType::rebuildStaticValue(OpBuilder &builder, Location loc,
+                                                Value currentValue) const {
   if (currentValue && isa<MakeMmaAtomOp>(currentValue.getDefiningOp()))
     return nullptr;
-  return MakeMmaAtomOp::create(builder, loc, Type(*this));
+  return MakeMmaAtomOp::create(builder, loc, MmaAtomType::get(*this));
 }
 
-Type MmaAtomGFX1250_WMMAType::getValTypeA() const { return getElemTyA(); }
-Type MmaAtomGFX1250_WMMAType::getValTypeB() const { return getElemTyB(); }
-Type MmaAtomGFX1250_WMMAType::getValTypeC() const { return getElemTyAcc(); }
-Type MmaAtomGFX1250_WMMAType::getValTypeD() const { return getElemTyAcc(); }
+Type MmaOpGFX1250_WMMAType::getValTypeA() const { return getElemTyA(); }
+Type MmaOpGFX1250_WMMAType::getValTypeB() const { return getElemTyB(); }
+Type MmaOpGFX1250_WMMAType::getValTypeC() const { return getElemTyAcc(); }
+Type MmaOpGFX1250_WMMAType::getValTypeD() const { return getElemTyAcc(); }
 
-Attribute MmaAtomGFX1250_WMMAType::getThrLayout() const {
-  return FxLayout(FxC(32), FxC(1));
+Attribute MmaOpGFX1250_WMMAType::getThrLayout() const { return FxLayout(FxC(32), FxC(1)); }
+
+Attribute MmaOpGFX1250_WMMAType::getShapeMNK() const {
+  return IntTupleAttr::get(ArrayAttr::get(getContext(), {FxC(getM()), FxC(getN()), FxC(getK())}));
 }
 
-Attribute MmaAtomGFX1250_WMMAType::getShapeMNK() const {
-  return IntTupleAttr::get(
-      ArrayAttr::get(getContext(), {FxC(getM()), FxC(getN()), FxC(getK())}));
-}
-
-Attribute MmaAtomGFX1250_WMMAType::getThrValLayoutA() const {
+Attribute MmaOpGFX1250_WMMAType::getThrValLayoutA() const {
   return gfx1250::getThrValLayoutAB(getContext(), getK(), getElemTyA());
 }
 
-Attribute MmaAtomGFX1250_WMMAType::getThrValLayoutB() const {
+Attribute MmaOpGFX1250_WMMAType::getThrValLayoutB() const {
   return gfx1250::getThrValLayoutAB(getContext(), getK(), getElemTyB());
 }
 
-Attribute MmaAtomGFX1250_WMMAType::getThrValLayoutC() const {
+Attribute MmaOpGFX1250_WMMAType::getThrValLayoutC() const {
   return gfx1250::getThrValLayoutCD(getContext(), getElemTyAcc());
 }
 
-LogicalResult
-MmaAtomGFX1250_WMMAType::verify(function_ref<InFlightDiagnostic()> emitError,
-                                int32_t m, int32_t n, int32_t k, Type elemTyA,
-                                Type elemTyB, Type elemTyAcc) {
+LogicalResult MmaOpGFX1250_WMMAType::verify(function_ref<InFlightDiagnostic()> emitError, int32_t m,
+                                            int32_t n, int32_t k, Type elemTyA, Type elemTyB,
+                                            Type elemTyAcc) {
   if (m != 16 || n != 16)
-    return emitError() << "GFX1250 WMMA requires M=N=16, got " << m << "x"
-                       << n;
+    return emitError() << "GFX1250 WMMA requires M=N=16, got " << m << "x" << n;
 
-  auto isF8 = [](Type ty) {
-    return isa<Float8E4M3FNUZType>(ty) || isa<Float8E5M2FNUZType>(ty);
-  };
+  auto isF8 = [](Type ty) { return isa<Float8E4M3FNUZType>(ty) || isa<Float8E5M2FNUZType>(ty); };
 
   bool valid = false;
 
   if (k == 4 && elemTyA.isF32() && elemTyB.isF32() && elemTyAcc.isF32())
     valid = true;
 
-  if (k == 32 && elemTyA.isF16() && elemTyB.isF16() &&
-      (elemTyAcc.isF32() || elemTyAcc.isF16()))
+  if (k == 32 && elemTyA.isF16() && elemTyB.isF16() && (elemTyAcc.isF32() || elemTyAcc.isF16()))
     valid = true;
-  if (k == 32 && elemTyA.isBF16() && elemTyB.isBF16() &&
-      (elemTyAcc.isF32() || elemTyAcc.isBF16()))
+  if (k == 32 && elemTyA.isBF16() && elemTyB.isBF16() && (elemTyAcc.isF32() || elemTyAcc.isBF16()))
     valid = true;
 
   if ((k == 64 || k == 128) && isF8(elemTyA) && isF8(elemTyB) &&
       (elemTyAcc.isF32() || elemTyAcc.isF16()))
     valid = true;
 
-  if (k == 64 && elemTyA.isInteger(8) && elemTyB.isInteger(8) &&
-      elemTyAcc.isInteger(32))
+  if (k == 64 && elemTyA.isInteger(8) && elemTyB.isInteger(8) && elemTyAcc.isInteger(32))
     valid = true;
 
   if (!valid) {
-    return emitError() << "unsupported GFX1250 WMMA configuration: " << m
-                       << "x" << n << "x" << k << " with A=" << elemTyA
-                       << ", B=" << elemTyB << ", Acc=" << elemTyAcc;
+    return emitError() << "unsupported GFX1250 WMMA configuration: " << m << "x" << n << "x" << k
+                       << " with A=" << elemTyA << ", B=" << elemTyB << ", Acc=" << elemTyAcc;
   }
   return success();
 }
