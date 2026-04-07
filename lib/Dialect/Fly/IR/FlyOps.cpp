@@ -151,22 +151,6 @@ FLY_INFER_RETURN_TYPES(MakeLayoutOp) {
   return success();
 }
 
-FLY_INFER_RETURN_TYPES(MakeTileOp) {
-  SmallVector<Attribute> layouts;
-  for (auto op : operands) {
-    if (auto layoutType = dyn_cast<LayoutType>(op.getType())) {
-      layouts.push_back(layoutType.getAttr());
-    } else if (auto intTupleType = dyn_cast<IntTupleType>(op.getType())) {
-      layouts.push_back(intTupleType.getAttr());
-    } else {
-      return emitOptionalError(location, "MakeTileOp: operand has unsupported type ", op.getType(),
-                               ", expected LayoutType or IntTupleType");
-    }
-  }
-  auto tileAttr = TileAttr::get(ArrayAttr::get(context, layouts));
-  inferredReturnTypes.assign({TileType::get(context, tileAttr)});
-  return success();
-}
 
 FLY_INFER_RETURN_TYPES(MakeLayoutLikeOp) {
   auto layoutTy = dyn_cast<LayoutType>(operands[0].getType());

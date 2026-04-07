@@ -992,7 +992,7 @@ public:
     target.addIllegalDialect<fly::FlyDialect, fly_rocdl::FlyROCDLDialect>();
 
     // Constructors
-    target.addLegalOp<StaticOp, MakeIntTupleOp, MakeLayoutOp, MakeTileOp, MakeComposedLayoutOp>();
+    target.addLegalOp<StaticOp, MakeIntTupleOp, MakeLayoutOp, MakeComposedLayoutOp>();
     target.addLegalOp<MakeMmaAtomOp, MakeCopyAtomOp, MakeTiledCopyOp, MakeTiledMmaOp>();
 
     FlyTypeConverter typeConverter;

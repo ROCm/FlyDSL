@@ -24,6 +24,7 @@ from .._mlir.dialects.fly import (
     SwizzleType,
     TiledCopyType,
     TiledMmaType,
+    TileType,
     #
     has_none,
 )
@@ -41,6 +42,7 @@ __all__ = [
     "GemmTraversalOrder",
     # Types
     "IntTupleType",
+    "TileType",
     "LayoutType",
     "SwizzleType",
     "ComposedLayoutType",
@@ -900,14 +902,20 @@ def assume(result_type, dst, src, loc=None, ip=None):
 
 @traced_op
 def make_tile(*args, loc=None, ip=None):
-    if len(args) == 1 and isinstance(args[0], (list, tuple)):
-        modes = args[0]
+    from .typing import Layout
+
+    def _resolve(m):
+        if isinstance(m, int) or m is None:
+            return m
+        if isinstance(m, tuple):
+            return tuple(_resolve(e) for e in m)
+        if isinstance(m, Layout):
+            return m.type
+        raise ValueError(f"make_tile: expected int, None, tuple, or Layout, got {type(m)}")
+
+    resolved = [_resolve(m) for m in args]
+    if len(resolved) == 1:
+        tile_type = TileType.get(resolved[0])
     else:
-        modes = args
-    resolved = []
-    for m in modes:
-        if isinstance(m, int):
-            resolved.append(make_layout(m, 1, loc=loc, ip=ip))
-        else:
-            resolved.append(m)
-    return fly.make_tile(resolved, loc=loc, ip=ip)
+        tile_type = TileType.get(resolved)
+    return static(tile_type, loc=loc, ip=ip)

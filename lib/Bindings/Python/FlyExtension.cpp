@@ -147,6 +147,54 @@ struct PyIntTupleType : PyConcreteType<PyIntTupleType> {
 };
 
 // ---------------------------------------------------------------------------
+// TileType
+// ---------------------------------------------------------------------------
+struct PyTileType : PyConcreteType<PyTileType> {
+  FLYDSL_REGISTER_TYPE_BINDING(::mlir::fly::TileType, "TileType");
+
+  static Attribute extractTileModeAttr(nb::handle mode, MLIRContext *ctx) {
+    if (mode.is_none())
+      return IntAttr::getNone(ctx);
+    if (PyLong_Check(mode.ptr()))
+      return IntAttr::getStatic(ctx, nb::cast<int32_t>(mode));
+    if (PyTuple_Check(mode.ptr())) {
+      SmallVector<Attribute> nested;
+      for (auto item : mode)
+        nested.push_back(extractTileModeAttr(nb::handle(item), ctx));
+      return TileAttr::get(ArrayAttr::get(ctx, nested));
+    }
+    if (nb::hasattr(mode, MLIR_PYTHON_CAPI_PTR_ATTR)) {
+      auto layoutTy = FLYDSL_EXTRACT_TYPE_FROM_NB_HANDLE(::mlir::fly::LayoutType, mode);
+      return layoutTy.getAttr();
+    }
+    throw std::invalid_argument("TileType.get: expected int, None, tuple, or LayoutType");
+  }
+
+  static void bindDerived(ClassTy &c) {
+    c.def_static(
+        "get",
+        [](nb::object modeOrModes, DefaultingPyMlirContext context) {
+          MLIRContext *ctx = unwrap(context.get()->get());
+          if (nb::isinstance<nb::list>(modeOrModes)) {
+            SmallVector<Attribute> attrs;
+            for (auto mode : nb::cast<nb::list>(modeOrModes))
+              attrs.push_back(extractTileModeAttr(nb::handle(mode), ctx));
+            auto tileAttr = TileAttr::get(ArrayAttr::get(ctx, attrs));
+            return PyTileType(context->getRef(), wrap(TileType::get(tileAttr)));
+          } else {
+            auto attr = extractTileModeAttr(modeOrModes, ctx);
+            auto tileAttr = TileAttr::get(attr);
+            return PyTileType(context->getRef(), wrap(TileType::get(tileAttr)));
+          }
+        },
+        "modes"_a, nb::kw_only(), "context"_a = nb::none(),
+        "Create a TileType from a list of modes or a single mode (leaf tile)");
+
+    c.def_prop_ro("rank", [](PyTileType &self) { return self.toCppType().rank(); });
+  }
+};
+
+// ---------------------------------------------------------------------------
 // LayoutType
 // ---------------------------------------------------------------------------
 struct PyLayoutType : PyConcreteType<PyLayoutType> {
@@ -736,6 +784,7 @@ NB_MODULE(_mlirDialectsFly, m) {
   // Bind Fly dialect types (PyConcreteType pattern)
   // -------------------------------------------------------------------------
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly::PyIntTupleType::bind(m);
+  ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly::PyTileType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly::PyLayoutType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly::PySwizzleType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly::PyComposedLayoutType::bind(m);
