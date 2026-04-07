@@ -603,11 +603,59 @@ class ReplaceIfWithDispatch(Transformer):
                 )
             return False
 
+        def _try_static_value(node):
+            if not _is_literal_expr(node):
+                return False, None
+            if isinstance(node, ast.Constant):
+                return True, node.value
+            try:
+                return True, ast.literal_eval(node)
+            except Exception:
+                return False, None
+
+        def _eval_static_compare_pair(lhs, op, rhs):
+            try:
+                if isinstance(op, ast.Eq):
+                    return lhs == rhs
+                if isinstance(op, ast.NotEq):
+                    return lhs != rhs
+                if isinstance(op, ast.Lt):
+                    return lhs < rhs
+                if isinstance(op, ast.LtE):
+                    return lhs <= rhs
+                if isinstance(op, ast.Gt):
+                    return lhs > rhs
+                if isinstance(op, ast.GtE):
+                    return lhs >= rhs
+                if isinstance(op, ast.Is):
+                    return lhs is rhs
+                if isinstance(op, ast.IsNot):
+                    return lhs is not rhs
+                if isinstance(op, ast.In):
+                    return lhs in rhs
+                if isinstance(op, ast.NotIn):
+                    return lhs not in rhs
+            except Exception:
+                return None
+            return None
+
         def _visit(node):
             if _is_literal_expr(node):
                 return False
             if isinstance(node, ast.Compare):
-                return True
+                compare_parts = [node.left, *node.comparators]
+                # Early static-false short-circuit for chain compare pairs like:
+                # left < c0 < c1 ... where any known static pair is False.
+                for i, op in enumerate(node.ops):
+                    lhs_node = compare_parts[i]
+                    rhs_node = compare_parts[i + 1]
+                    lhs_ok, lhs_val = _try_static_value(lhs_node)
+                    rhs_ok, rhs_val = _try_static_value(rhs_node)
+                    if lhs_ok and rhs_ok:
+                        pair_result = _eval_static_compare_pair(lhs_val, op, rhs_val)
+                        if pair_result is False:
+                            return False
+                return any(_visit(part) for part in compare_parts)
             if isinstance(node, ast.Call):
                 func = node.func
                 if not (isinstance(func, ast.Name) and func.id in ReplaceIfWithDispatch._REWRITE_HELPER_NAMES):
@@ -690,9 +738,9 @@ class ReplaceIfWithDispatch(Transformer):
         invoked_args = [name for name in invoked_args if name not in write_args]
         write_args = [name for name in write_args if in_active_symbols(name)]
         invoked_args = [name for name in invoked_args if in_active_symbols(name)]
-        print(f"write_args: {write_args}")
-        print(f"invoked_args: {invoked_args}")
-        print(f"active_symbols: {active_symbols}")
+        # print(f"write_args: {write_args}")
+        # print(f"invoked_args: {invoked_args}")
+        # print(f"active_symbols: {active_symbols}")
         return write_args + invoked_args
 
     @staticmethod

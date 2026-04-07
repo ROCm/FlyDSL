@@ -321,33 +321,33 @@ def compile_blockscale_preshuffle_gemm(
         c_chunk_a = fx.Index(chunk_i32_a)
         tx_i32_base = tx * c_chunk_a
 
-        def load_a(idx_i32):
-            if a_load_bytes == 16:
+        def load_a(idx_i32, a_load_bytes_v):
+            if a_load_bytes_v == 16:
                 return buffer_copy_gmem16_dwordx4(
                     buffer_ops, vector,
                     elem_type=T.f8, idx_i32=idx_i32,
                     rsrc=a_rsrc, vec_elems=16, elem_bytes=elem_bytes,
                 )
-            if a_load_bytes == 8:
+            if a_load_bytes_v == 8:
                 return buffer_ops.buffer_load(a_rsrc, idx_i32, vec_width=2, dtype=T.i32)
             return buffer_ops.buffer_load(a_rsrc, idx_i32, vec_width=1, dtype=T.i32)
 
-        def a_tile_chunk_coord_i32(i: int):
+        def a_tile_chunk_coord_i32(i: int, tx_i32_base_v, chunk_i32_a_v):
             return tile_chunk_coord_i32(
-                arith, tx_i32_base=tx_i32_base, i=i,
+                arith, tx_i32_base=tx_i32_base_v, i=i,
                 total_threads=total_threads,
                 layout_tile_div4=layout_a_tile_div4,
-                chunk_i32=chunk_i32_a,
+                chunk_i32=chunk_i32_a_v,
             )
 
-        def load_a_tile(base_k_div4):
+        def load_a_tile(base_k_div4, a_load_bytes_v, tx_i32_base_v, chunk_i32_a_v):
             parts = []
             for i in range_constexpr(num_a_loads):
-                row_a_local, col_a_local_i32 = a_tile_chunk_coord_i32(i)
+                row_a_local, col_a_local_i32 = a_tile_chunk_coord_i32(i, tx_i32_base_v, chunk_i32_a_v)
                 row_a_global = bx_m + row_a_local
                 idx_i32 = row_a_global * _k_div4_factor + (base_k_div4 + col_a_local_i32)
-                a_vec = load_a(idx_i32)
-                if a_load_bytes == 16:
+                a_vec = load_a(idx_i32, a_load_bytes_v)
+                if a_load_bytes_v == 16:
                     parts.append(vector.bitcast(T.i32x4, a_vec))
                 else:
                     parts.append(a_vec)
@@ -355,10 +355,10 @@ def compile_blockscale_preshuffle_gemm(
 
         c4_bytes = fx.Index(4)  # bytes per dword (always 4, used for LDS byte addressing)
 
-        def store_a_tile_to_lds(vec_a_parts, lds_buffer):
+        def store_a_tile_to_lds(vec_a_parts, lds_buffer, a_load_bytes_v, tx_i32_base_v, chunk_i32_a_v):
             for i in range_constexpr(num_a_loads):
-                row_a_local, col_a_local_i32 = a_tile_chunk_coord_i32(i)
-                if a_load_bytes == 16:
+                row_a_local, col_a_local_i32 = a_tile_chunk_coord_i32(i, tx_i32_base_v, chunk_i32_a_v)
+                if a_load_bytes_v == 16:
                     lds_store_16b_xor16(
                         arith, vector,
                         lds_memref=lds_buffer, vec16_ty=T.f8x16,
@@ -368,7 +368,7 @@ def compile_blockscale_preshuffle_gemm(
                         lds_base=fx.Index(0),
                         vec_part_i32x4=vec_a_parts[i], elem_bytes=elem_bytes,
                     )
-                elif a_load_bytes == 8:
+                elif a_load_bytes_v == 8:
                     lds_store_8b_xor16(
                         arith, vector,
                         lds_memref=lds_buffer, vec8_ty=T.f8x8,
@@ -431,9 +431,9 @@ def compile_blockscale_preshuffle_gemm(
             base_k_div4 = base_k // 4
             dma_a_tile_to_lds(base_k_div4, lds_buffer)
 
-        def prefetch_a_tile(base_k):
+        def prefetch_a_tile(base_k, a_load_bytes_v, tx_i32_base_v, chunk_i32_a_v):
             base_k_div4 = base_k // 4
-            return load_a_tile(base_k_div4)
+            return load_a_tile(base_k_div4, a_load_bytes_v, tx_i32_base_v, chunk_i32_a_v)
 
         def prefetch_b_tile(base_k):
             return load_b_tile(base_k)
@@ -714,17 +714,23 @@ def compile_blockscale_preshuffle_gemm(
         def prefetch_a0_pack(lds_buffer):
             return lds_load_packs_k64(row_a_lds, col_offset_base_bytes, lds_buffer)
 
-        def _load_a_to_lds(base_k, lds_buffer):
+        def _load_a_to_lds(base_k, lds_buffer, a_load_bytes_v, tx_i32_base_v, chunk_i32_a_v):
             if use_async_copy:
                 prefetch_a_to_lds(base_k, lds_buffer)
             else:
-                store_a_tile_to_lds(prefetch_a_tile(base_k), lds_buffer)
+                store_a_tile_to_lds(
+                    prefetch_a_tile(base_k, a_load_bytes_v, tx_i32_base_v, chunk_i32_a_v),
+                    lds_buffer,
+                    a_load_bytes_v,
+                    tx_i32_base_v,
+                    chunk_i32_a_v,
+                )
 
         # ── Main pipeline: prologue ───────────────────────────────────────
         k0 = fx.Index(0)
         b_tile_pong = prefetch_b_tile(k0)
         scales_pong = load_scales_for_tile(k0)
-        _load_a_to_lds(k0, lds_a_pong)
+        _load_a_to_lds(k0, lds_a_pong, a_load_bytes, tx_i32_base, chunk_i32_a)
         gpu.barrier()
         global_accs = [acc_init] * (num_acc_n * m_repeat)
 
@@ -737,7 +743,7 @@ def compile_blockscale_preshuffle_gemm(
             for k_iv in range_constexpr(0, K - tile_k, tile_k * 2):
                 _k = fx.Index(k_iv)
                 next_k1 = _k + tile_k
-                _load_a_to_lds(next_k1, lds_a_ping)
+                _load_a_to_lds(next_k1, lds_a_ping, a_load_bytes, tx_i32_base, chunk_i32_a)
                 b_tile_ping = prefetch_b_tile(next_k1)
                 scales_ping = load_scales_for_tile(next_k1)
 
@@ -754,7 +760,7 @@ def compile_blockscale_preshuffle_gemm(
                 a0_prefetch_ping = prefetch_a0_pack(lds_a_ping)
 
                 next_k2 = _k + tile_k * 2
-                _load_a_to_lds(next_k2, lds_a_pong)
+                _load_a_to_lds(next_k2, lds_a_pong, a_load_bytes, tx_i32_base, chunk_i32_a)
                 b_tile_pong = prefetch_b_tile(next_k2)
                 scales_pong = load_scales_for_tile(next_k2)
 
@@ -779,7 +785,7 @@ def compile_blockscale_preshuffle_gemm(
             for k_iv in range_constexpr(0, K - tile_k * 3, tile_k * 2):
                 _k = fx.Index(k_iv)
                 next_k1 = _k + tile_k
-                _load_a_to_lds(next_k1, lds_a_ping)
+                _load_a_to_lds(next_k1, lds_a_ping, a_load_bytes, tx_i32_base, chunk_i32_a)
                 b_tile_ping = prefetch_b_tile(next_k1)
                 scales_ping = load_scales_for_tile(next_k1)
 
@@ -796,7 +802,7 @@ def compile_blockscale_preshuffle_gemm(
                 a0_prefetch_ping = prefetch_a0_pack(lds_a_ping)
 
                 next_k2 = _k + tile_k * 2
-                _load_a_to_lds(next_k2, lds_a_pong)
+                _load_a_to_lds(next_k2, lds_a_pong, a_load_bytes, tx_i32_base, chunk_i32_a)
                 b_tile_pong = prefetch_b_tile(next_k2)
                 scales_pong = load_scales_for_tile(next_k2)
 
@@ -815,7 +821,7 @@ def compile_blockscale_preshuffle_gemm(
             last_k = arith.index(K - tile_k)
             second_last_k = arith.index(K - tile_k * 2)
 
-            _load_a_to_lds(last_k, lds_a_ping)
+            _load_a_to_lds(last_k, lds_a_ping, a_load_bytes, tx_i32_base, chunk_i32_a)
             b_tile_ping = prefetch_b_tile(last_k)
             scales_ping = load_scales_for_tile(last_k)
 

@@ -481,13 +481,13 @@ def compile_moe_gemm1(
     
                 vec4_x = T.vec(4, x_elem)
 
-                def load_x(idx_i32):
-                    """Load `x_load_bytes` bytes from X (gmem) into regs.
+                def load_x(idx_i32, x_load_bytes_v):
+                    """Load `x_load_bytes_v` bytes from X (gmem) into regs.
 
                     For 16B, keep the fast dwordx4 path. For 8B/4B, use byte offsets.
                     idx_i32 is in dword units; convert to element index for _buffer_load_vec.
                     """
-                    if x_load_bytes == 16:
+                    if x_load_bytes_v == 16:
                         idx_elem = idx_i32 if elem_bytes == 1 else (idx_i32 * fx.Index(2))
                         return buffer_copy_gmem16_dwordx4(
                             buffer_ops,
@@ -499,20 +499,21 @@ def compile_moe_gemm1(
                             elem_bytes=elem_bytes,
                         )
                     # For 8B/4B, load raw i32 dwords directly.
-                    if x_load_bytes == 8:
+                    if x_load_bytes_v == 8:
                         return buffer_ops.buffer_load(x_rsrc, idx_i32, vec_width=2, dtype=T.i32)
                     return buffer_ops.buffer_load(x_rsrc, idx_i32, vec_width=1, dtype=T.i32)
     
-                def load_x_tile(base_k):
+                def load_x_tile(base_k, x_load_bytes_v):
                     """Prefetch the per-thread X tile portion (gmem -> regs) for a given K base (in elements)."""
                     base_k_div4 = (base_k * arith.index(int(elem_bytes))) // fx.Index(4)
                     parts = []
                     for i in range_constexpr(num_x_loads):
                         idx_i32 = x_row_base_div4[i] + base_k_div4 + x_col_local_i32[i]
-                        x_vec = load_x(idx_i32)
-                        if x_load_bytes == 16:
+                        x_vec = load_x(idx_i32, x_load_bytes_v)
+                        print(f"x_load_bytes_v: {x_load_bytes_v}")
+                        if x_load_bytes_v == 16:
                             parts.append(vector.bitcast(T.i32x4, x_vec))
-                        elif x_load_bytes == 8:
+                        elif x_load_bytes_v == 8:
                             parts.append(x_vec)
                         else:
                             parts.append(x_vec)
@@ -651,11 +652,11 @@ def compile_moe_gemm1(
                 acc_up = [acc_init] * (num_acc_n * m_repeat)
     
                 # ---- Pipeline helpers: store X tile to LDS with ping-pong base ----
-                def store_x_tile_to_lds(vec_x_in_parts, lds_base):
+                def store_x_tile_to_lds(vec_x_in_parts, lds_base, x_load_bytes_v):
                     for i in range_constexpr(num_x_loads):
                         row_local = x_row_local[i]
                         col_local_i32 = x_col_local_i32[i]
-                        if x_load_bytes == 16:
+                        if x_load_bytes_v == 16:
                             lds_store_16b_xor16(
                                 arith,
                                 vector,
@@ -670,7 +671,7 @@ def compile_moe_gemm1(
                                 vec_part_i32x4=vec_x_in_parts[i],
                                 elem_bytes=elem_bytes,
                             )
-                        elif x_load_bytes == 8:
+                        elif x_load_bytes_v == 8:
                             lds_store_8b_xor16(
                                 arith,
                                 vector,
@@ -797,9 +798,12 @@ def compile_moe_gemm1(
                             mi_val = arith.index(mi * 16)
                             curr_row_a_lds = row_a_lds + mi_val
     
-                            a0, a1 = lds_load_packs_k64(curr_row_a_lds, col_base, lds_base)
+                            a0 = arith.constant(-1, type=T.i64)
+                            a1 = arith.constant(-1, type=T.i64)
                             if (a0_prefetch is not None) and (ku == 0) and (mi == 0):
                                 a0, a1 = a0_prefetch
+                            else:
+                                a0, a1 = lds_load_packs_k64(curr_row_a_lds, col_base, lds_base)
     
                             for ni in range_constexpr(num_acc_n):
                                 acc_idx = mi * num_acc_n + ni
@@ -857,10 +861,10 @@ def compile_moe_gemm1(
     
                 # Prologue: prefetch tile0, store to LDS(cur), sync.
                 k0 = fx.Index(0)
-                x_regs0 = load_x_tile(k0)
+                x_regs0 = load_x_tile(k0, x_load_bytes)
                 b_gate_cur = load_b_tile(k0, n_blk_gate, n_intra_gate)
                 b_up_cur = load_b_tile(k0, n_blk_up, n_intra_up)
-                store_x_tile_to_lds(x_regs0, lds_base_cur)
+                store_x_tile_to_lds(x_regs0, lds_base_cur, x_load_bytes)
                 gpu.barrier()
     
                 # Loop-carried ping/pong state.
@@ -882,7 +886,7 @@ def compile_moe_gemm1(
                     k_iv = arith.index(pair_i * (tile_k * 2))
                     # ---- stage 0: prefetch+store ping, compute pong ----
                     next_k1 = k_iv + tile_k
-                    x_regs_ping = load_x_tile(next_k1)
+                    x_regs_ping = load_x_tile(next_k1, x_load_bytes)
                     b_gate_ping = load_b_tile(next_k1, n_blk_gate, n_intra_gate)
                     b_up_ping = load_b_tile(next_k1, n_blk_up, n_intra_up)
     
@@ -895,7 +899,7 @@ def compile_moe_gemm1(
                         a0_prefetch=a0_prefetch_pong,
                     )
                     a0_prefetch_pong = None
-                    store_x_tile_to_lds(x_regs_ping, lds_base_ping)
+                    store_x_tile_to_lds(x_regs_ping, lds_base_ping, x_load_bytes)
                     hot_loop_scheduler()
                     gpu.barrier()
     
@@ -904,7 +908,7 @@ def compile_moe_gemm1(
     
                     # ---- stage 1: prefetch+store pong, compute ping ----
                     next_k2 = k_iv + c2_tile_k
-                    x_regs_pong = load_x_tile(next_k2)
+                    x_regs_pong = load_x_tile(next_k2, x_load_bytes)
                     b_gate_next = load_b_tile(next_k2, n_blk_gate, n_intra_gate)
                     b_up_next = load_b_tile(next_k2, n_blk_up, n_intra_up)
     
@@ -917,7 +921,7 @@ def compile_moe_gemm1(
                         a0_prefetch=a0_prefetch_ping,
                     )
                     a0_prefetch_ping = None
-                    store_x_tile_to_lds(x_regs_pong, lds_base_pong)
+                    store_x_tile_to_lds(x_regs_pong, lds_base_pong, x_load_bytes)
                     hot_loop_scheduler()
                     gpu.barrier()
     
@@ -936,7 +940,7 @@ def compile_moe_gemm1(
                 b_up_cur = load_b_tile(k_tail0, n_blk_up, n_intra_up)
                 a0_prefetch_pong = lds_load_packs_k64(row_a_lds, col_offset_base_bytes, lds_base_pong)
                 k_tail1 = k_in - tile_k
-                x_regs_ping = load_x_tile(k_tail1)
+                x_regs_ping = load_x_tile(k_tail1, x_load_bytes)
                 b_gate_ping = load_b_tile(k_tail1, n_blk_gate, n_intra_gate)
                 b_up_ping = load_b_tile(k_tail1, n_blk_up, n_intra_up)
     
@@ -949,7 +953,7 @@ def compile_moe_gemm1(
                     a0_prefetch=a0_prefetch_pong,
                 )
                 a0_prefetch_pong = None
-                store_x_tile_to_lds(x_regs_ping, lds_base_ping)
+                store_x_tile_to_lds(x_regs_ping, lds_base_ping, x_load_bytes)
                 hot_loop_scheduler()
                 gpu.barrier()
     
@@ -1052,6 +1056,7 @@ def compile_moe_gemm1(
                             )
 
                         # Sorted weight aligned with `row` (matches aiter moe_sorting output).
+                        tw = fx.Float32(1.0)
                         if doweight_stage1:
                             tw = buffer_ops.buffer_load(sorted_w_rsrc, row, vec_width=1, dtype=T.f32)
 
@@ -1168,6 +1173,7 @@ def compile_moe_gemm1(
                     idx0 = (t2 * topk_i32_v + s2) * inter_i32_local
 
                     # Sorted weight aligned with `row` (matches aiter moe_sorting output).
+                    tw = fx.Float32(1.0)
                     if doweight_stage1:
                         tw = buffer_ops.buffer_load(sorted_w_rsrc, row, vec_width=1, dtype=T.f32)
 
@@ -1664,8 +1670,8 @@ def compile_moe_gemm2(
 
                 vec4_x = T.vec(4, x_elem)
     
-                def load_x(idx_i32):
-                    if x_load_bytes == 16:
+                def load_x(idx_i32, x_load_bytes_v):
+                    if x_load_bytes_v == 16:
                         idx_elem = idx_i32 if elem_bytes == 1 else (idx_i32 * fx.Index(2))
                         return buffer_copy_gmem16_dwordx4(
                             buffer_ops,
@@ -1676,7 +1682,7 @@ def compile_moe_gemm2(
                             vec_elems=vec16_elems,
                             elem_bytes=elem_bytes,
                         )
-                    if x_load_bytes == 8:
+                    if x_load_bytes_v == 8:
                         return buffer_ops.buffer_load(x_rsrc, idx_i32, vec_width=2, dtype=T.i32)
                     return buffer_ops.buffer_load(x_rsrc, idx_i32, vec_width=1, dtype=T.i32)
 
@@ -1705,15 +1711,15 @@ def compile_moe_gemm2(
                     # Base row offset in dword units: row_ts_idx * (k_in/4)
                     x_row_base_div4.append(row_ts_idx * c_k_div4)
     
-                def load_x_tile(base_k):
+                def load_x_tile(base_k, x_load_bytes_v):
                     base_k_div4 = (base_k * arith.index(int(elem_bytes))) // fx.Index(4)
                     parts = []
                     for i in range_constexpr(num_x_loads):
                         idx_i32 = x_row_base_div4[i] + base_k_div4 + x_col_local_i32[i]
-                        x_vec = load_x(idx_i32)
-                        if x_load_bytes == 16:
+                        x_vec = load_x(idx_i32, x_load_bytes_v)
+                        if x_load_bytes_v == 16:
                             parts.append(vector.bitcast(T.i32x4, x_vec))
-                        elif x_load_bytes == 8:
+                        elif x_load_bytes_v == 8:
                             parts.append(vector.bitcast(T.vec(2, T.i32), x_vec))
                         else:
                             parts.append(vector.bitcast(T.vec(1, T.i32), x_vec))
@@ -1833,11 +1839,11 @@ def compile_moe_gemm2(
                     return b_tile
     
                 # ---- Pipeline helpers: store X tile to LDS with ping-pong base ----
-                def store_x_tile_to_lds(vec_x_in_parts, lds_base):
+                def store_x_tile_to_lds(vec_x_in_parts, lds_base, x_load_bytes_v):
                     for i in range_constexpr(num_x_loads):
                         row_local = x_row_local[i]
                         col_local_i32 = x_col_local_i32[i]
-                        if x_load_bytes == 16:
+                        if x_load_bytes_v == 16:
                             lds_store_16b_xor16(
                                 arith,
                                 vector,
@@ -1852,7 +1858,7 @@ def compile_moe_gemm2(
                                 vec_part_i32x4=vec_x_in_parts[i],
                                 elem_bytes=elem_bytes,
                             )
-                        elif x_load_bytes == 8:
+                        elif x_load_bytes_v == 8:
                             lds_store_8b_xor16(
                                 arith,
                                 vector,
@@ -1976,9 +1982,12 @@ def compile_moe_gemm2(
                             mi_val = arith.index(mi * 16)
                             curr_row_a_lds = row_a_lds + mi_val
     
-                            a0, a1 = lds_load_packs_k64(curr_row_a_lds, col_base, lds_base)
+                            a0 = arith.constant(-1, type=T.i64)
+                            a1 = arith.constant(-1, type=T.i64)
                             if (a0_prefetch is not None) and (ku == 0) and (mi == 0):
                                 a0, a1 = a0_prefetch
+                            else:
+                                a0, a1 = lds_load_packs_k64(curr_row_a_lds, col_base, lds_base)
     
                             for ni in range_constexpr(num_acc_n):
                                 acc_idx = mi * num_acc_n + ni
@@ -2078,9 +2087,9 @@ def compile_moe_gemm2(
                     rocdl.sched_barrier(0)
                 # Prologue.
                 k0 = fx.Index(0)
-                x_regs0 = load_x_tile(k0)
+                x_regs0 = load_x_tile(k0, x_load_bytes)
                 b_cur = load_b_tile(k0)
-                store_x_tile_to_lds(x_regs0, lds_base_cur)
+                store_x_tile_to_lds(x_regs0, lds_base_cur, x_load_bytes)
                 gpu.barrier()
     
                 acc = [acc_init] * (num_acc_n * m_repeat)
@@ -2108,12 +2117,12 @@ def compile_moe_gemm2(
                 for pair_i in range_constexpr(pair_iters):
                     k_iv = arith.index(pair_i * (tile_k * 2))
                     next_k1 = k_iv + tile_k
-                    x_regs_ping = load_x_tile(next_k1)
+                    x_regs_ping = load_x_tile(next_k1, x_load_bytes)
                     b_ping = load_b_tile(next_k1)
     
                     acc, _ = compute_tile(acc, b_cur, lds_base_pong, a0_prefetch=a0_prefetch_pong)
                     a0_prefetch_pong = None
-                    store_x_tile_to_lds(x_regs_ping, lds_base_ping)
+                    store_x_tile_to_lds(x_regs_ping, lds_base_ping, x_load_bytes)
                     hot_loop_scheduler()
                     gpu.barrier()
     
@@ -2121,12 +2130,12 @@ def compile_moe_gemm2(
                     a0_prefetch_ping = lds_load_packs_k64(row_a_lds, col_offset_base_bytes, lds_base_ping)
     
                     next_k2 = k_iv + c2_tile_k
-                    x_regs_pong = load_x_tile(next_k2)
+                    x_regs_pong = load_x_tile(next_k2, x_load_bytes)
                     b_next = load_b_tile(next_k2)
     
                     acc, _ = compute_tile(acc, b_ping, lds_base_ping, a0_prefetch=a0_prefetch_ping)
                     a0_prefetch_ping = None
-                    store_x_tile_to_lds(x_regs_pong, lds_base_pong)
+                    store_x_tile_to_lds(x_regs_pong, lds_base_pong, x_load_bytes)
                     hot_loop_scheduler()
                     gpu.barrier()
     
@@ -2147,12 +2156,12 @@ def compile_moe_gemm2(
                 else:
                     # Tail: 2 remaining tiles.
                     k_tail1 = k_in - tile_k
-                    x_regs_ping = load_x_tile(k_tail1)
+                    x_regs_ping = load_x_tile(k_tail1, x_load_bytes)
                     b_ping = load_b_tile(k_tail1)
     
                     acc, _ = compute_tile(acc, b_cur, lds_base_pong, a0_prefetch=a0_prefetch_pong)
                     a0_prefetch_pong = None
-                    store_x_tile_to_lds(x_regs_ping, lds_base_ping)
+                    store_x_tile_to_lds(x_regs_ping, lds_base_ping, x_load_bytes)
                     hot_loop_scheduler()
                     gpu.barrier()
     
@@ -2190,10 +2199,10 @@ def compile_moe_gemm2(
                     sw_pf, tw_pf = epilogue_pf
     
                 # Weight scales for the N tile (col_g depends on lane/wave/by but not on (t,s)).
+                sw_vals = []
                 if sw_pf is not None:
                     sw_vals = sw_pf
                 else:
-                    sw_vals = []
                     for ni in range_constexpr(num_acc_n):
                         col_g = col_g_list[ni]
                         row_w_idx = expert_off + col_g
@@ -2239,6 +2248,7 @@ def compile_moe_gemm2(
                             )
                         )
 
+                        tw = fx.Float32(1.0)
                         if doweight_stage2:
                             tw_idx = (mi * 4) + ii
                             if tw_pf is not None:
@@ -2319,6 +2329,7 @@ def compile_moe_gemm2(
                             )
                         )
 
+                        tw = fx.Float32(1.0)
                         if doweight_stage2:
                             tw_idx = (mi * 4) + ii
                             if tw_pf is not None:

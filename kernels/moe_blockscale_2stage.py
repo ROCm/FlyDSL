@@ -444,12 +444,12 @@ def compile_moe_blockscale_gemm1(
                 vec2_i32 = T.vec(2, T.i32)
                 vec4_x = T.vec(4, x_elem)
     
-                def load_x(idx_i32):
+                def load_x(idx_i32, x_load_bytes_v):
                     """Load `x_load_bytes` bytes from X (gmem) into regs.
     
                     For 16B, keep the fast dwordx4 path. For 8B/4B, use byte offsets.
                     """
-                    if x_load_bytes == 16:
+                    if x_load_bytes_v == 16:
                         idx_elem = idx_i32 if elem_bytes == 1 else (idx_i32 * fx.Index(2))
                         return buffer_copy_gmem16_dwordx4(
                             buffer_ops,
@@ -460,20 +460,20 @@ def compile_moe_blockscale_gemm1(
                             vec_elems=vec16_elems,
                             elem_bytes=elem_bytes,
                         )
-                    if x_load_bytes == 8:
+                    if x_load_bytes_v == 8:
                         return buffer_ops.buffer_load(x_rsrc, idx_i32, vec_width=2, dtype=T.i32)
                     return buffer_ops.buffer_load(x_rsrc, idx_i32, vec_width=1, dtype=T.i32)
 
-                def load_x_tile(base_k):
+                def load_x_tile(base_k, x_load_bytes_v):
                     """Prefetch the per-thread X tile portion (gmem -> regs) for a given K base (in elements)."""
                     base_k_div4 = (base_k * arith.index(int(elem_bytes))) // fx.Index(4)
                     parts = []
                     for i in range_constexpr(num_x_loads):
                         idx_i32 = x_row_base_div4[i] + base_k_div4 + x_col_local_i32[i]
-                        x_vec = load_x(idx_i32)
-                        if x_load_bytes == 16:
+                        x_vec = load_x(idx_i32, x_load_bytes_v)
+                        if x_load_bytes_v == 16:
                             parts.append(vector.bitcast(T.i32x4, x_vec))
-                        elif x_load_bytes == 8:
+                        elif x_load_bytes_v == 8:
                             parts.append(x_vec)
                         else:
                             parts.append(x_vec)
@@ -583,11 +583,11 @@ def compile_moe_blockscale_gemm1(
                 acc_up   = [arith.constant_vector(0.0, T.f32x4)] * (num_acc_n * m_repeat)
     
                 # ---- Pipeline helpers: store X tile to LDS with ping-pong base ----
-                def store_x_tile_to_lds(vec_x_in_parts, lds_base):
+                def store_x_tile_to_lds(vec_x_in_parts, lds_base, x_load_bytes_v):
                     for i in range_constexpr(num_x_loads):
                         row_local = x_row_local[i]
                         col_local_i32 = x_col_local_i32[i]
-                        if x_load_bytes == 16:
+                        if x_load_bytes_v == 16:
                             lds_store_16b_xor16(
                                 arith,
                                 vector,
@@ -602,7 +602,7 @@ def compile_moe_blockscale_gemm1(
                                 vec_part_i32x4=vec_x_in_parts[i],
                                 elem_bytes=elem_bytes,
                             )
-                        elif x_load_bytes == 8:
+                        elif x_load_bytes_v == 8:
                             lds_store_8b_xor16(
                                 arith,
                                 vector,
@@ -951,7 +951,7 @@ def compile_moe_blockscale_gemm1(
                     """One pipeline stage: load next tile data, compute current tile, store X to LDS."""
                     scale_fn = load_scales_s1
                     pre_scales = scale_fn(k_compute)
-                    x_regs_next = load_x_tile(k_next)
+                    x_regs_next = load_x_tile(k_next, x_load_bytes)
                     b_gate_cur = load_b_tile(k_compute, n_blk_gate, n_intra_gate)
                     b_up_cur = load_b_tile(k_compute, n_blk_up, n_intra_up)
 
@@ -959,15 +959,15 @@ def compile_moe_blockscale_gemm1(
                         acc_gate_in, acc_up_in,
                         b_gate_cur, b_up_cur,
                         lds_compute, pre_scales)
-                    store_x_tile_to_lds(x_regs_next, lds_store)
+                    store_x_tile_to_lds(x_regs_next, lds_store, x_load_bytes)
                     hot_loop_scheduler()
                     gpu.barrier()
                     return ag, au
 
                 # Prologue: prefetch tile0 X into LDS, sync.
                 k0 = fx.Index(0)
-                x_regs0 = load_x_tile(k0)
-                store_x_tile_to_lds(x_regs0, lds_base_cur)
+                x_regs0 = load_x_tile(k0, x_load_bytes)
+                store_x_tile_to_lds(x_regs0, lds_base_cur, x_load_bytes)
                 gpu.barrier()
 
                 lds_base_pong = lds_base_cur
@@ -1612,8 +1612,8 @@ def compile_moe_blockscale_gemm2(
                 vec2_i32 = T.vec(2, T.i32)
                 vec4_x = T.vec(4, x_elem)
 
-                def load_x(idx_i32):
-                    if x_load_bytes == 16:
+                def load_x(idx_i32, x_load_bytes_v):
+                    if x_load_bytes_v == 16:
                         idx_elem = idx_i32 if elem_bytes == 1 else (idx_i32 * fx.Index(2))
                         return buffer_copy_gmem16_dwordx4(
                             buffer_ops,
@@ -1624,7 +1624,7 @@ def compile_moe_blockscale_gemm2(
                             vec_elems=vec16_elems,
                             elem_bytes=elem_bytes,
                         )
-                    if x_load_bytes == 8:
+                    if x_load_bytes_v == 8:
                         return buffer_ops.buffer_load(x_rsrc, idx_i32, vec_width=2, dtype=T.i32)
                     return buffer_ops.buffer_load(x_rsrc, idx_i32, vec_width=1, dtype=T.i32)
     
@@ -1653,15 +1653,15 @@ def compile_moe_blockscale_gemm2(
                     # Base row offset in dword units: row_ts_idx * (k_in/4)
                     x_row_base_div4.append(row_ts_idx * c_k_div4)
     
-                def load_x_tile(base_k):
+                def load_x_tile(base_k, x_load_bytes_v):
                     base_k_div4 = (base_k * arith.index(int(elem_bytes))) // fx.Index(4)
                     parts = []
                     for i in range_constexpr(num_x_loads):
                         idx_i32 = x_row_base_div4[i] + base_k_div4 + x_col_local_i32[i]
-                        x_vec = load_x(idx_i32)
-                        if x_load_bytes == 16:
+                        x_vec = load_x(idx_i32, x_load_bytes_v)
+                        if x_load_bytes_v == 16:
                             parts.append(vector.bitcast(T.i32x4, x_vec))
-                        elif x_load_bytes == 8:
+                        elif x_load_bytes_v == 8:
                             parts.append(x_vec)
                         else:
                             parts.append(x_vec)
@@ -1754,11 +1754,11 @@ def compile_moe_blockscale_gemm2(
                     return b_tile
     
                 # ---- Pipeline helpers: store X tile to LDS with ping-pong base ----
-                def store_x_tile_to_lds(vec_x_in_parts, lds_base):
+                def store_x_tile_to_lds(vec_x_in_parts, lds_base, x_load_bytes_v):
                     for i in range_constexpr(num_x_loads):
                         row_local = x_row_local[i]
                         col_local_i32 = x_col_local_i32[i]
-                        if x_load_bytes == 16:
+                        if x_load_bytes_v == 16:
                             lds_store_16b_xor16(
                                 arith,
                                 vector,
@@ -1773,7 +1773,7 @@ def compile_moe_blockscale_gemm2(
                                 vec_part_i32x4=vec_x_in_parts[i],
                                 elem_bytes=elem_bytes,
                             )
-                        elif x_load_bytes == 8:
+                        elif x_load_bytes_v == 8:
                             lds_store_8b_xor16(
                                 arith,
                                 vector,
@@ -2117,9 +2117,9 @@ def compile_moe_blockscale_gemm2(
 
                 # Prologue.
                 k0 = fx.Index(0)
-                x_regs0 = load_x_tile(k0)
+                x_regs0 = load_x_tile(k0, x_load_bytes)
                 b_cur = load_b_tile(k0)
-                store_x_tile_to_lds(x_regs0, lds_base_cur)
+                store_x_tile_to_lds(x_regs0, lds_base_cur, x_load_bytes)
                 gpu.barrier()
     
                 acc = [arith.constant_vector(0.0, T.f32x4)] * (num_acc_n * m_repeat)
@@ -2149,12 +2149,12 @@ def compile_moe_blockscale_gemm2(
                     # Issue scale loads FIRST so their latency hides behind heavy tile VMEM.
                     pre_scales_pong = load_scales_s2(k_iv)
                     next_k1 = k_iv + tile_k
-                    x_regs_ping = load_x_tile(next_k1)
+                    x_regs_ping = load_x_tile(next_k1, x_load_bytes)
                     b_ping = load_b_tile(next_k1)
 
                     acc = compute_tile_bs_s2(acc, b_cur, lds_base_pong, pre_scales_pong, a0_prefetch=a0_prefetch_pong)
                     a0_prefetch_pong = None
-                    store_x_tile_to_lds(x_regs_ping, lds_base_ping)
+                    store_x_tile_to_lds(x_regs_ping, lds_base_ping, x_load_bytes)
                     hot_loop_scheduler()
                     gpu.barrier()
 
@@ -2164,12 +2164,12 @@ def compile_moe_blockscale_gemm2(
                     # Issue scale loads FIRST so their latency hides behind heavy tile VMEM.
                     pre_scales_ping = load_scales_s2(next_k1)
                     next_k2 = k_iv + c2_tile_k
-                    x_regs_pong = load_x_tile(next_k2)
+                    x_regs_pong = load_x_tile(next_k2, x_load_bytes)
                     b_next = load_b_tile(next_k2)
 
                     acc = compute_tile_bs_s2(acc, b_ping, lds_base_ping, pre_scales_ping, a0_prefetch=a0_prefetch_ping)
                     a0_prefetch_ping = None
-                    store_x_tile_to_lds(x_regs_pong, lds_base_pong)
+                    store_x_tile_to_lds(x_regs_pong, lds_base_pong, x_load_bytes)
                     hot_loop_scheduler()
                     gpu.barrier()
 
@@ -2195,12 +2195,12 @@ def compile_moe_blockscale_gemm2(
                     k_tail1 = k_in - tile_k
                     # Issue scale loads FIRST so their latency hides behind heavy tile VMEM.
                     pre_scales_tail0 = load_scales_s2(k_tail0)
-                    x_regs_ping = load_x_tile(k_tail1)
+                    x_regs_ping = load_x_tile(k_tail1, x_load_bytes)
                     b_ping = load_b_tile(k_tail1)
 
                     acc = compute_tile_bs_s2(acc, b_cur, lds_base_pong, pre_scales_tail0, a0_prefetch=a0_prefetch_pong)
                     a0_prefetch_pong = None
-                    store_x_tile_to_lds(x_regs_ping, lds_base_ping)
+                    store_x_tile_to_lds(x_regs_ping, lds_base_ping, x_load_bytes)
                     hot_loop_scheduler()
                     gpu.barrier()
 
