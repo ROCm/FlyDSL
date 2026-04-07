@@ -336,6 +336,7 @@ def compile_moe_blockscale_gemm1(
                 )
 
                 # fp16 path ignores scales completely (implicit scale=1.0).
+                x_load_bytes = 16
                 if is_f16:
                     sx_rsrc = None
                     sw_rsrc = None
@@ -364,6 +365,7 @@ def compile_moe_blockscale_gemm1(
                 # ---- X gmem->reg prefetch (match preshuffle GEMM mapping) ----
                 # Prefer 16B buffer-load (dwordx4). If the per-thread byte count isn't divisible by
                 # 16, fall back to 8B (dwordx2) or 4B (dword) loads. For fp16 we require 16B.
+                x_load_bytes = 16
                 if is_f16:
                     if bytes_per_thread_x % 16 != 0:
                         raise ValueError(
@@ -695,6 +697,8 @@ def compile_moe_blockscale_gemm1(
                         _sw_shared_n = (n_per_wave <= 128)
                         s_w_gate_vals = []
                         s_w_up_vals = []
+                        s_w_gate = fx.Float32(1.0)
+                        s_w_up = fx.Float32(1.0)
                         for ni in range_constexpr(num_acc_n):
                             if ni == 0 or not _sw_shared_n:
                                 sw_gate_idx = _pre_n_block_gate[ni] * c_nblk_k_w1 + kb
@@ -811,10 +815,14 @@ def compile_moe_blockscale_gemm1(
                                         b_up_packs0, b_up_packs1 = b_up_tile_in[ku]
                                         ki64 = arith.index(ku * 64)
                                         col_base = col_offset_base_bytes + ki64
+                                        a0 = arith.constant(-1, type=T.i64)
+                                        a1 = arith.constant(-1, type=T.i64)
                                         if (a0_prefetch is not None) and (sb == 0) and (ku_local == 0) and (mi == 0):
                                             a0, a1 = a0_prefetch
                                         else:
-                                            a0, a1 = lds_load_packs_k64(row_a_lds + arith.index(mi * 16), col_base, lds_base)
+                                            a0, a1 = lds_load_packs_k64(
+                                                row_a_lds + arith.index(mi * 16), col_base, lds_base
+                                            )
                                         blk_g = mfma_k64(blk_g, a0, a1, b_gate_packs0[ni], b_gate_packs1[ni])
                                         blk_u = mfma_k64(blk_u, a0, a1, b_up_packs0[ni], b_up_packs1[ni])
                                     s_wg_bc = vector.broadcast(T.f32x4, s_w_gate_vals[ni])
@@ -894,6 +902,8 @@ def compile_moe_blockscale_gemm1(
                             mi_val = arith.index(mi * 16)
                             curr_row_a_lds = row_a_lds + mi_val
     
+                            a0 = arith.constant(-1, type=T.i64)
+                            a1 = arith.constant(-1, type=T.i64)
                             if (a0_prefetch is not None) and (ku == 0) and (mi == 0):
                                 a0, a1 = a0_prefetch
                             else:
@@ -1956,10 +1966,14 @@ def compile_moe_blockscale_gemm2(
                                         b_packs0, b_packs1 = b_tile_in[ku]
                                         ki64 = arith.index(ku * 64)
                                         col_base = col_offset_base_bytes + ki64
+                                        a0 = arith.constant(-1, type=T.i64)
+                                        a1 = arith.constant(-1, type=T.i64)
                                         if (a0_prefetch is not None) and (sb == 0) and (ku_local == 0) and (mi == 0):
                                             a0, a1 = a0_prefetch
                                         else:
-                                            a0, a1 = lds_load_packs_k64(row_a_lds + arith.index(mi * 16), col_base, lds_base)
+                                            a0, a1 = lds_load_packs_k64(
+                                                row_a_lds + arith.index(mi * 16), col_base, lds_base
+                                            )
                                         blk = mfma_k64(blk, a0, a1, b_packs0[ni], b_packs1[ni])
                                     s_w_bc = vector.broadcast(T.f32x4, s_w_vals[ni])
                                     scale = ArithValue(s_a_vec4_list[mi]) * ArithValue(s_w_bc)
@@ -2031,6 +2045,8 @@ def compile_moe_blockscale_gemm2(
                             mi_val = arith.index(mi * 16)
                             curr_row_a_lds = row_a_lds + mi_val
     
+                            a0 = arith.constant(-1, type=T.i64)
+                            a1 = arith.constant(-1, type=T.i64)
                             if (a0_prefetch is not None) and (ku == 0) and (mi == 0):
                                 a0, a1 = a0_prefetch
                             else:

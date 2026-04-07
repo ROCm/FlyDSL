@@ -372,6 +372,7 @@ def compile_moe_gemm1(
                 )
 
                 # scale_x: fp16/bf16 path ignores (implicit scale=1.0); int4_bf16 also uses 1.0.
+                x_load_bytes = 16
                 if is_f16_or_bf16:
                     sx_rsrc = None
                 else:
@@ -796,10 +797,9 @@ def compile_moe_gemm1(
                             mi_val = arith.index(mi * 16)
                             curr_row_a_lds = row_a_lds + mi_val
     
+                            a0, a1 = lds_load_packs_k64(curr_row_a_lds, col_base, lds_base)
                             if (a0_prefetch is not None) and (ku == 0) and (mi == 0):
                                 a0, a1 = a0_prefetch
-                            else:
-                                a0, a1 = lds_load_packs_k64(curr_row_a_lds, col_base, lds_base)
     
                             for ni in range_constexpr(num_acc_n):
                                 acc_idx = mi * num_acc_n + ni
@@ -974,12 +974,12 @@ def compile_moe_gemm1(
                 topk_i32_v = topk_i32
                 inter_i32_v = fx.Int32(inter_dim)
                 mask24_i32 = fx.Int32(0xFFFFFF)
+                sw_gate_vals = []
+                sw_up_vals = []
 
                 if epilogue_pf is not None:
                     sw_gate_vals, sw_up_vals = epilogue_pf
                 else:
-                    sw_gate_vals = []
-                    sw_up_vals = []
                     for ni in range_constexpr(num_acc_n):
                         col_g = col_g_list[ni]
                         row_gate_idx = expert_off + col_g
@@ -1618,6 +1618,7 @@ def compile_moe_gemm2(
                 # ---- X gmem->reg prefetch (match preshuffle GEMM mapping) ----
                 # Prefer 16B buffer-load (dwordx4). If the per-thread byte count isn't divisible by
                 # 16, fall back to 8B (dwordx2) or 4B (dword) loads. For fp16/bf16 we require 16B.
+                x_load_bytes = 16
                 if is_f16_or_bf16:
                     if bytes_per_thread_x % 16 != 0:
                         raise ValueError(
@@ -1975,10 +1976,9 @@ def compile_moe_gemm2(
                             mi_val = arith.index(mi * 16)
                             curr_row_a_lds = row_a_lds + mi_val
     
+                            a0, a1 = lds_load_packs_k64(curr_row_a_lds, col_base, lds_base)
                             if (a0_prefetch is not None) and (ku == 0) and (mi == 0):
                                 a0, a1 = a0_prefetch
-                            else:
-                                a0, a1 = lds_load_packs_k64(curr_row_a_lds, col_base, lds_base)
     
                             for ni in range_constexpr(num_acc_n):
                                 acc_idx = mi * num_acc_n + ni
@@ -2603,15 +2603,17 @@ def compile_moe_reduction(
                                     )
                                 else:
                                     v = buffer_ops.buffer_load(x_rsrc, x_idx_i32, vec_width=1, dtype=elem_type())
+                                v_cast = v
                                 if dtype_str in ("f16", "bf16"):
-                                    v = arith.extf(compute_type(), v)
-                                a = a + v
+                                    v_cast = arith.extf(compute_type(), v)
+                                a = a + v_cast
                             v = a
+                            out_v = v
                             if dtype_str in ("f16", "bf16"):
-                                v = arith.trunc_f(elem_type(), v)
+                                out_v = arith.trunc_f(elem_type(), v)
                             y_idx = token_idx * c_model_dim + col
                             y_idx_i32 = arith.index_cast(i32_type(), y_idx)
-                            buffer_ops.buffer_store(v, y_rsrc, y_idx_i32)
+                            buffer_ops.buffer_store(out_v, y_rsrc, y_idx_i32)
 
                     with _if_else(_if_full):
                         # Tail path: scalar load/store per lane.
@@ -2646,9 +2648,10 @@ def compile_moe_reduction(
                                         v = buffer_ops.buffer_load(
                                             x_rsrc, x_idx_i32, vec_width=1, dtype=elem_type()
                                         )
+                                    v_cast = v
                                     if dtype_str in ("f16", "bf16"):
-                                        v = arith.extf(compute_type(), v)
-                                    a = a + v
+                                        v_cast = arith.extf(compute_type(), v)
+                                    a = a + v_cast
 
                                 out = a
                                 if dtype_str in ("f16", "bf16"):

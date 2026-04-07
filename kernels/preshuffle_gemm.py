@@ -359,6 +359,9 @@ def compile_preshuffle_gemm_a8(
         base_ptr_pong = allocator_pong.get_base()
         base_ptr_ping = allocator_ping.get_base()
 
+        lds_a_pong = None
+        lds_a_ping = None
+        lds_out = None
         if lds_stage == 2:
             lds_a_pong = SmemPtr(
                 base_ptr_pong, lds_pong_offset, _elem_type(), shape=(tile_m * tile_k,)
