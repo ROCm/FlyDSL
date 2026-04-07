@@ -20,7 +20,6 @@ from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 
 from flydsl._mlir import ir
-from flydsl.expr import buffer_ops
 
 
 KERNEL_NAME = "rmsnorm"
@@ -131,29 +130,37 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
             from flydsl.expr.arith import ArithValue
 
             num_tiles = N // tile_cols
-            elem_bytes = 4 if dtype_str == "f32" else 2
-            vec_dwords = (VEC_WIDTH * elem_bytes) // 4
 
             vec_type_c = T.vec(VEC_WIDTH, compute_type)
             vec_type_e = T.vec(VEC_WIDTH, elem_type)
 
-            in_rsrc = buffer_ops.create_buffer_resource(Input, max_size=True)
-            out_rsrc = buffer_ops.create_buffer_resource(Output, max_size=True)
-            gamma_rsrc = buffer_ops.create_buffer_resource(Gamma, max_size=True)
+            # ── Layout API: buffer-backed tensors + tiled access ─────
+            Input_buf = fx.rocdl.make_buffer_tensor(Input)
+            Output_buf = fx.rocdl.make_buffer_tensor(Output)
+            Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma)
 
-            row_soffset = ArithValue(bid) * (N * elem_bytes)
-            thr_col_bytes = ArithValue(tid) * (VEC_WIDTH * elem_bytes)
+            row_in = fx.slice(Input_buf, (bid, None))
+            row_out = fx.slice(Output_buf, (bid, None))
 
-            def _load_vec(rsrc, col_byte_off, soff=None):
-                dw = col_byte_off >> fx.Int32(2)
-                raw = buffer_ops.buffer_load(rsrc, dw, vec_width=vec_dwords, dtype=T.i32, soffset_bytes=soff)
-                if vec_dwords == VEC_WIDTH:
-                    return raw.bitcast(vec_type_e)
-                return vector.bitcast(vec_type_e, raw)
+            in_div = fx.logical_divide(row_in, fx.make_layout(VEC_WIDTH, 1))
+            out_div = fx.logical_divide(row_out, fx.make_layout(VEC_WIDTH, 1))
+            gamma_div = fx.logical_divide(Gamma_buf, fx.make_layout(VEC_WIDTH, 1))
 
-            def _store_vec(data, rsrc, col_byte_off, soff=None):
-                dw = col_byte_off >> fx.Int32(2)
-                buffer_ops.buffer_store(data, rsrc, dw, soffset_bytes=soff)
+            copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), elem_bits)
+            vec_reg_ty = fx.MemRefType.get(
+                elem_type, fx.LayoutType.get(VEC_WIDTH, 1), fx.AddressSpace.Register
+            )
+            vec_reg_lay = fx.make_layout(VEC_WIDTH, 1)
+
+            def _load_vec(div_tensor, idx):
+                r = fx.memref_alloca(vec_reg_ty, vec_reg_lay)
+                fx.copy_atom_call(copy_atom, fx.slice(div_tensor, (None, idx)), r)
+                return ArithValue(fx.memref_load_vec(r))
+
+            def _store_vec(val, div_tensor, idx):
+                r = fx.memref_alloca(vec_reg_ty, vec_reg_lay)
+                fx.memref_store_vec(val, r)
+                fx.copy_atom_call(copy_atom, r, fx.slice(div_tensor, (None, idx)))
 
             c_zero_f = arith.constant(0.0, type=compute_type)
             thread_sumsq = c_zero_f
@@ -163,8 +170,8 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
 
             # Pass 1: load + cache + sumsq
             for tile_i in range_constexpr(num_tiles):
-                col_bytes = ArithValue(thr_col_bytes) + (tile_i * tile_cols * elem_bytes)
-                vec_e = _load_vec(in_rsrc, col_bytes, soff=row_soffset)
+                idx = tid + tile_i * BLOCK_THREADS
+                vec_e = _load_vec(in_div, idx)
 
                 if cache_as_elem:
                     in_local.append(vec_e)
@@ -187,9 +194,9 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
 
             # Pass 2: normalize + gamma + store (reuse cached input)
             for tile_i in range_constexpr(num_tiles):
-                col_bytes = ArithValue(thr_col_bytes) + (tile_i * tile_cols * elem_bytes)
+                idx = tid + tile_i * BLOCK_THREADS
 
-                g_e = _load_vec(gamma_rsrc, col_bytes)
+                g_e = _load_vec(gamma_div, idx)
                 g = g_e if dtype_str == "f32" else g_e.extf(vec_type_c)
 
                 x = in_local[tile_i]
@@ -228,10 +235,8 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
                 else:
                     out_e = y_val.truncf(vec_type_e)
 
-                out_col = ArithValue(thr_col_bytes) + (tile_i * tile_cols * elem_bytes)
-                i32_vec_ty = T.vec(vec_dwords, T.i32)
-                out_vec = vector.bitcast(i32_vec_ty, out_e) if vec_dwords != VEC_WIDTH else out_e.bitcast(i32_vec_ty)
-                _store_vec(out_vec, out_rsrc, out_col, soff=row_soffset)
+                out_idx = tid + tile_i * BLOCK_THREADS
+                _store_vec(out_e, out_div, out_idx)
 
         else:
             # ==============================================================
@@ -239,15 +244,22 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
             # ==============================================================
             from flydsl.expr.arith import ArithValue
 
-            row_in = fx.slice(Input, (bid, None))
-            row_out = fx.slice(Output, (bid, None))
+            Input_buf = fx.rocdl.make_buffer_tensor(Input)
+            Output_buf = fx.rocdl.make_buffer_tensor(Output)
+            Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma)
 
-            copy_atom_s = fx.make_copy_atom(fx.UniversalCopy(elem_bits), elem_bits)
+            row_in = fx.slice(Input_buf, (bid, None))
+            row_out = fx.slice(Output_buf, (bid, None))
+
+            copy_atom_s = fx.make_copy_atom(
+                fx.rocdl.BufferCopy16b() if elem_bits <= 16 else fx.rocdl.BufferCopy32b(),
+                elem_bits,
+            )
             scalar_reg_ty = fx.MemRefType.get(elem_type, fx.LayoutType.get(1, 1), fx.AddressSpace.Register)
             scalar_reg_lay = fx.make_layout(1, 1)
 
             row_div = fx.logical_divide(row_in, fx.make_layout(1, 1))
-            gamma_div = fx.logical_divide(Gamma, fx.make_layout(1, 1))
+            gamma_div = fx.logical_divide(Gamma_buf, fx.make_layout(1, 1))
             out_div = fx.logical_divide(row_out, fx.make_layout(1, 1))
 
             def _load_scalar(divided_tensor, index):
