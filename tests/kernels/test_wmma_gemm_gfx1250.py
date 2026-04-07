@@ -5,6 +5,7 @@ Kernel implementation lives in `kernels/wmma_gemm_gfx1250.py`.
 This file is the correctness harness.
 """
 
+import argparse
 import os
 import sys
 
@@ -30,6 +31,14 @@ from tests.test_common import verify_output
 
 if not torch.cuda.is_available():
     pytest.skip("CUDA/ROCm not available. Skipping GPU tests.", allow_module_level=True)
+
+
+def _validate_pipeline_depth(*, K, tile_k, num_buffers):
+    num_k_tiles = K // tile_k
+    if num_k_tiles < num_buffers:
+        pytest.skip(
+            f"{num_buffers}-buffer requires num_k_tiles >= {num_buffers}, got {num_k_tiles}"
+        )
 
 
 @pytest.mark.parametrize("in_dtype", ["fp16", "bf16"])
@@ -61,9 +70,7 @@ def test_wmma_gemm_tdm(in_dtype, M, N, K, tile_m, tile_n, tile_k,
     if arch != "gfx1250":
         pytest.skip(f"WMMA requires gfx1250, got {arch}")
 
-    num_k_tiles = K // tile_k
-    if num_buffers == 3 and num_k_tiles < 3:
-        pytest.skip(f"Triple buffer requires num_k_tiles >= 3, got {num_k_tiles}")
+    _validate_pipeline_depth(K=K, tile_k=tile_k, num_buffers=num_buffers)
 
     lds_pad = 8
     elem_bytes = 2
@@ -100,7 +107,8 @@ def test_wmma_gemm_tdm(in_dtype, M, N, K, tile_m, tile_n, tile_k,
     print(
         f"Running WMMA GEMM TDM: M={M}, N={N}, K={K}, "
         f"dtype={in_dtype}, out={_eff_out}, bufs={num_buffers}, "
-        f"tdm_store={use_tdm_store}, cluster=({cluster_m},{cluster_n})"
+        f"tdm_store={use_tdm_store}, cluster=({cluster_m},{cluster_n}), "
+        f"wave_spec_tdm={wave_specialized_tdm}, inst_prefetch={inst_prefetch}"
     )
 
     a = torch.randn((M, K), dtype=torch_dtype, device='cpu').cuda()
@@ -213,9 +221,7 @@ def test_wmma_gemm_tdm_mcast_tail():
     )
 
 
-if __name__ == "__main__":
-    import argparse
-
+def _build_arg_parser():
     parser = argparse.ArgumentParser()
     parser.add_argument("-M", type=int, default=1024)
     parser.add_argument("-N", type=int, default=1024)
@@ -233,9 +239,14 @@ if __name__ == "__main__":
     parser.add_argument("--no-tdm-store", action="store_true", default=False)
     parser.add_argument("--wave-spec-tdm", action="store_true", default=False)
     parser.add_argument("--inst-prefetch", action="store_true", default=False)
-    args = parser.parse_args()
+    return parser
 
-    test_wmma_gemm_tdm(
+
+def _run_cli_args(args, runner=None):
+    if runner is None:
+        runner = test_wmma_gemm_tdm
+
+    runner(
         args.dtype, args.M, args.N, args.K,
         args.tile_m, args.tile_n, args.tile_k,
         num_buffers=args.num_buffers,
@@ -245,4 +256,12 @@ if __name__ == "__main__":
         use_tdm_store=not args.no_tdm_store,
         cluster_m=args.cluster_m,
         cluster_n=args.cluster_n,
+        wave_specialized_tdm=args.wave_spec_tdm,
+        inst_prefetch=args.inst_prefetch,
     )
+
+
+if __name__ == "__main__":
+    parser = _build_arg_parser()
+    args = parser.parse_args()
+    _run_cli_args(args)

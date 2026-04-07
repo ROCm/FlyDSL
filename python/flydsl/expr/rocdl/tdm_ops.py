@@ -214,6 +214,17 @@ def make_tensor_descriptor_2d(
                        int: compile-time constant folded into descriptor.
                        ir.Value (i32 SGPR): runtime mask, ORed with upper config bits.
                        0 = no multicast (default).
+        lds_byte_offset: Optional extra LDS byte offset applied after the per-wave
+                       LDS address is computed. Use this when multiple descriptors
+                       share the same LDS backing allocation.
+        for_store:      Build a descriptor for the LDS->global store path. When
+                       enabled, any LDS padding is folded into the tile extent
+                       because stores do not perform an implicit de-padding step.
+        atomic_barrier_enable: Set the descriptor's hardware auto-barrier bit.
+                       Leave this disabled unless the kernel is intentionally
+                       relying on TDM atomic-barrier semantics; this helper keeps
+                       the encoded atomic-barrier address at zero, so all
+                       participating waves must agree on that protocol.
 
     Returns:
         TDMDescriptor2D with dgroup0 and dgroup1 ready for tensor_load_2d.

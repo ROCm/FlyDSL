@@ -224,7 +224,7 @@ def compile_wmma_gemm_tdm(
         if total_d_bytes > arena_total_bytes:
             arena_total_bytes = total_d_bytes
             arena_alloc.ptr = total_d_bytes
-        check_smem_capacity(arena_total_bytes, gpu_arch)
+    check_smem_capacity(arena_total_bytes, gpu_arch)
 
     @flyc.kernel
     def kernel_wmma_gemm_tdm(

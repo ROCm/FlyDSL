@@ -278,7 +278,7 @@ def compile_mxscale_gemm(
         if total_d_bytes > arena_total_bytes:
             arena_total_bytes = total_d_bytes
             arena_alloc.ptr = total_d_bytes
-        check_smem_capacity(arena_total_bytes, gpu_arch)
+    check_smem_capacity(arena_total_bytes, gpu_arch)
 
     # TENSORcnt is tracked per-wave in hardware. The regular path issues four
     # tensor ops per wave per K-stage, while the wave-specialized path issues
