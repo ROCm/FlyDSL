@@ -248,12 +248,14 @@ FlyDSL provides tensor operations with layout-aware partitioning:
 # Create a buffer tensor from a tensor argument (AMD buffer descriptor)
 A = fx.rocdl.make_buffer_tensor(A)
 
-# Partition using layout algebra
+# Partition by block, then by thread. A second logical_divide is required before
+# slice(..., (None, tid)) so coord rank matches layout shape/stride rank.
 tA = fx.logical_divide(A, fx.make_layout(block_dim, 1))
 tA = fx.slice(tA, (None, bid))
+tA = fx.logical_divide(tA, fx.make_layout(1, 1))
+tA_thr = fx.slice(tA, (None, tid))
 
-# Register fragment
-frag = fx.make_fragment_like(partition_src)
+# Allocate register memrefs / copy_atom_call: see docs/quickstart.rst or examples/01-vectorAdd.py
 ```
 
 ### 5.2 Memory Hierarchy
@@ -336,11 +338,11 @@ AMD GPUs use MFMA (Matrix Fused Multiply-Add) instructions for matrix math. FlyD
 mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 4, fx.Float32))
 tiled_mma = fx.make_tiled_mma(mma_atom, fx.make_layout((2, 2, 1), (1, 2, 0)))
 
-# Partition and execute GEMM
+# Block-level tensor views bA, bB, bC (e.g. after zipped_divide + slice by block)
 thr_mma = tiled_mma.thr_slice(tid)
-frag_A = thr_mma.make_fragment_A(partition_A)
-frag_B = thr_mma.make_fragment_B(partition_B)
-frag_C = thr_mma.make_fragment_C(partition_C)
+frag_A = thr_mma.make_fragment_A(bA)
+frag_B = thr_mma.make_fragment_B(bB)
+frag_C = thr_mma.make_fragment_C(bC)
 fx.gemm(mma_atom, frag_C, frag_A, frag_B, frag_C)
 ```
 
@@ -422,7 +424,10 @@ launch(A_torch, B_torch, C_torch, ..., stream=torch.cuda.Stream())
 
 ## 10. Complete Example: GEMM with Layout Algebra
 
-This example shows how layout algebra concepts come together in a FlyDSL GEMM kernel. The layout algebra handles data distribution across threads and memory hierarchy; MFMA instructions handle the compute.
+This example matches `examples/03-tiledMma.py`: zipped divide and block slice, then
+`tiled_copy_*` + `thr_copy.retile` + `fx.copy` into fragments, `fx.gemm`, and copy out.
+(Use `thr_mma.make_fragment_*` on the block tiles `bA`/`bB`/`bC` directly—not
+`make_fragment_*` on `partition_*` outputs.)
 
 ```python
 import torch
@@ -444,30 +449,45 @@ def gemm_kernel(A: fx.Tensor, B: fx.Tensor, C: fx.Tensor):
     B = fx.rocdl.make_buffer_tensor(B)
     C = fx.rocdl.make_buffer_tensor(C)
 
-    bA = fx.slice(fx.zipped_divide(A, tileA), (None, bid))
-    bB = fx.slice(fx.zipped_divide(B, tileB), (None, bid))
-    bC = fx.slice(fx.zipped_divide(C, tileC), (None, bid))
+    bA = fx.zipped_divide(A, tileA)
+    bB = fx.zipped_divide(B, tileB)
+    bC = fx.zipped_divide(C, tileC)
 
-    # MFMA atom setup
+    bA = fx.slice(bA, (None, bid))
+    bB = fx.slice(bB, (None, bid))
+    bC = fx.slice(bC, (None, bid))
+
     mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 4, fx.Float32))
     tiled_mma = fx.make_tiled_mma(mma_atom, fx.make_layout((2, 2, 1), (1, 2, 0)))
     thr_mma = tiled_mma.thr_slice(tid)
 
-    # Tiled copies for A, B, C
     copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Float32)
     tiled_copy_A = fx.make_tiled_copy_A(copy_atom, tiled_mma)
     tiled_copy_B = fx.make_tiled_copy_B(copy_atom, tiled_mma)
+    tiled_copy_C = fx.make_tiled_copy_C(copy_atom, tiled_mma)
 
-    # Partition and copy to register fragments
-    frag_A = thr_mma.make_fragment_A(thr_mma.partition_A(bA))
-    frag_B = thr_mma.make_fragment_B(thr_mma.partition_B(bB))
-    frag_C = thr_mma.make_fragment_C(thr_mma.partition_C(bC))
+    thr_copy_A = tiled_copy_A.get_slice(tid)
+    thr_copy_B = tiled_copy_B.get_slice(tid)
+    thr_copy_C = tiled_copy_C.get_slice(tid)
 
-    # ... copy data to fragments, then GEMM ...
+    copy_src_A = thr_copy_A.partition_S(bA)
+    copy_src_B = thr_copy_B.partition_S(bB)
+    copy_dst_C = thr_copy_C.partition_S(bC)
+
+    frag_A = thr_mma.make_fragment_A(bA)
+    frag_B = thr_mma.make_fragment_B(bB)
+    frag_C = thr_mma.make_fragment_C(bC)
+
+    copy_frag_A = thr_copy_A.retile(frag_A)
+    copy_frag_B = thr_copy_B.retile(frag_B)
+    copy_frag_C = thr_copy_C.retile(frag_C)
+
+    fx.copy(copy_atom, copy_src_A, copy_frag_A, pred=None)
+    fx.copy(copy_atom, copy_src_B, copy_frag_B, pred=None)
+
     fx.gemm(mma_atom, frag_C, frag_A, frag_B, frag_C)
 
-    # Store result back to C
-    # ...
+    fx.copy(copy_atom, copy_frag_C, copy_dst_C, pred=None)
 
 @flyc.jit
 def tiledMma(A: fx.Tensor, B: fx.Tensor, C: fx.Tensor,
@@ -475,8 +495,8 @@ def tiledMma(A: fx.Tensor, B: fx.Tensor, C: fx.Tensor,
     gemm_kernel(A, B, C).launch(grid=(1, 1, 1), block=(256, 1, 1), stream=stream)
 ```
 
-See `examples/03-tiledMma.py` for a complete working GEMM example, and
-`kernels/preshuffle_gemm.py` for a production-quality GEMM implementation.
+See `examples/03-tiledMma.py` for the runnable script, and `kernels/preshuffle_gemm.py`
+for a production-quality GEMM implementation.
 
 ---
 
