@@ -40,8 +40,13 @@ FlyDSL/
 ├── kernels/                   # Python GPU kernels (importable as `kernels.*`)
 ├── tests/                     # pytest-based tests
 ├── CMakeLists.txt             # top-level CMake
+├── ADDING_TARGET_STACK.md     # maintainer guide: adding a Fly target stack (`FLYDSL_TARGET_STACK`)
 └── setup.py                   # Python packaging
 ```
+
+### Target stacks (contributors)
+
+Each build selects a single lowering stack via CMake cache variable **`FLYDSL_TARGET_STACK`** (today **`rocdl`** only). To add another stack or wire new dialects, passes, Python bindings, and JIT runtime pieces consistently, follow [**`ADDING_TARGET_STACK.md`**](ADDING_TARGET_STACK.md). It documents the descriptor in **`cmake/FlyDSLTargetStack.cmake`**, which CMake targets to gate, safe **`_mlirRegisterEverything`** linking, generated **`flydsl._build_config`**, and related tests.
 
 ## Getting started
 

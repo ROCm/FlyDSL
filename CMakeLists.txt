@@ -8,6 +8,9 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(FLY_UNITTEST "Build Fly Unit Tests" OFF)
 
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/FlyDSLTargetStack.cmake")
+message(STATUS "FLYDSL_TARGET_STACK: ${FLYDSL_TARGET_STACK}")
+
 find_package(MLIR REQUIRED CONFIG)
 
 message(STATUS "Found MLIR: ${MLIR_DIR}")
