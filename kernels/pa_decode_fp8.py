@@ -81,6 +81,33 @@ def _pack_i32_pair_to_i64(a_i32, b_i32):
     return vector.extract(v1, static_position=[0])
 
 
+def _compute_valid_block_limit(
+    context_len,
+    kv_start_abs_tok,
+    tile_token_offset,
+    num_blocks_in_work,
+    *,
+    block_size: int = KV_BLOCK_SIZE,
+):
+    """Return how many 1024-token physical blocks this 256-token split can touch."""
+    tile_start_tok = kv_start_abs_tok + tile_token_offset
+    remaining_tokens = context_len - tile_start_tok
+    if all(
+        isinstance(v, int)
+        for v in (context_len, kv_start_abs_tok, tile_token_offset, num_blocks_in_work)
+    ):
+        remaining_pos = max(remaining_tokens, 0)
+        valid_blocks = (remaining_pos + block_size - 1) // block_size
+        return min(valid_blocks, num_blocks_in_work)
+
+    c_zero_i32 = arith.constant(0, type=T.i32)
+    c_bs_i32 = arith.constant(block_size, type=T.i32)
+    c_one_i32 = arith.constant(1, type=T.i32)
+    remaining_pos = arith.select(remaining_tokens > c_zero_i32, remaining_tokens, c_zero_i32)
+    valid_blocks = (remaining_pos + c_bs_i32 - c_one_i32) // c_bs_i32
+    return arith.select(valid_blocks < num_blocks_in_work, valid_blocks, num_blocks_in_work)
+
+
 def _expand_pa_metadata_for_block_splits(
     work_indptr: torch.Tensor,
     work_info: torch.Tensor,
@@ -329,9 +356,6 @@ def compile_pa_decode_ps(
 
             # Context length for this sequence
             context_len = buffer_ops.buffer_load(cl_rsrc, batch_idx, vec_width=1, dtype=T.i32)
-            # ── Prologue: load first block's tile 0 K data ──
-            first_phys_block = buffer_ops.buffer_load(kpi_rsrc, kv_start,
-                                                       vec_width=1, dtype=T.i32)
             # Head offsets for K and V cache
             _k_head_off = kv_h * c_kh
             _v_head_off = kv_h * c_vh
@@ -1035,22 +1059,29 @@ def compile_pa_decode_ps(
                 c_zero_i32,
             )
 
-            # ── Early skip: if this block split has no valid tokens, write zeros and skip ──
-            _tile_start_tok = kv_start_abs_tok + tile_token_offset
-            _split_has_valid_tokens = _tile_start_tok < context_len
+            # Clip the block loop to physical blocks whose 256-token split still overlaps
+            # the sequence. Fully masked splits fall through to the zero/-inf writeback path.
+            num_blocks_in_work = kv_end - kv_start
+            last_block_idx_val = num_blocks_in_work - c_one
+            _valid_blocks_in_work = _compute_valid_block_limit(
+                context_len=context_len,
+                kv_start_abs_tok=kv_start_abs_tok,
+                tile_token_offset=tile_token_offset,
+                num_blocks_in_work=num_blocks_in_work,
+            )
+            _has_valid_blocks = _valid_blocks_in_work > c_zero_i32
+            _loop_start_g = arith.index(0)
+            _loop_stop_g = arith.index_cast(T.index, arith.unwrap(_valid_blocks_in_work))
+            _loop_step_g = arith.index(1)
+            _mtp_groups = math.ceil(query_length * query_group_size / 16)
+            _total_pairs = query_length * query_group_size
 
-            if _split_has_valid_tokens:
-                # Unified loop bounds (shared across mtp_g passes — blocks don't change per mtp_g)
-                num_blocks_in_work = kv_end - kv_start
-                last_block_idx_val = num_blocks_in_work - c_one
-                _loop_start_g = arith.index(0)
-                _loop_stop_g = arith.index_cast(T.index, arith.unwrap(num_blocks_in_work))
-                _loop_step_g = arith.index(1)
-
+            if _has_valid_blocks:
+                first_phys_block = buffer_ops.buffer_load(
+                    kpi_rsrc, kv_start, vec_width=1, dtype=T.i32
+                )
                 # ── MTP groups: Python compile-time loop — one MLIR KV-loop per group ──
                 # Use range_constexpr so AST rewriter keeps this as a plain Python loop
-                _mtp_groups = math.ceil(query_length * query_group_size / 16)
-                _total_pairs = query_length * query_group_size
                 for _mtp_g in range_constexpr(_mtp_groups):
                     _g_off = _mtp_g * 16  # compile-time offset into (qi, qhi) pair space
 
@@ -1189,8 +1220,6 @@ def compile_pa_decode_ps(
                 # ── Early skip path: write zero partial_out and -inf LSE ──
                 _neg_inf_i32 = arith.bitcast(T.i32, NEG_INF)
                 _zero_vec = arith.constant_vector(0.0, T.f32x4)
-                _mtp_groups = math.ceil(query_length * query_group_size / 16)
-                _total_pairs = query_length * query_group_size
                 for _mtp_g in range_constexpr(_mtp_groups):
                     _g_off = _mtp_g * 16
                     # Recompute qi_val, qhi_pos (same logic as the if-branch)
