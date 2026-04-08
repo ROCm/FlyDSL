@@ -8,10 +8,12 @@ from .._mlir.dialects import arith as _arith
 from .._mlir.dialects import fly
 from .._mlir.dialects.fly import (
     AddressSpace,
+    AtomicOp,
     CachePolicy,
     ComposedLayoutType,
     CoordTensorType,
     CopyAtomType,
+    CopyOpUniversalAtomicType,
     CopyOpUniversalCopyType,
     GemmTraversalOrder,
     IntTupleType,
@@ -36,6 +38,7 @@ __all__ = [
     "T",
     # "arith",
     # Enum Attributes
+    "AtomicOp",
     "AddressSpace",
     "CachePolicy",
     "MmaOperand",
@@ -54,6 +57,7 @@ __all__ = [
     "TiledCopyType",
     "TiledMmaType",
     "CopyOpUniversalCopyType",
+    "CopyOpUniversalAtomicType",
     "MmaOpUniversalFMAType",
     # UniversalOps
     "UniversalCopy",
@@ -62,6 +66,14 @@ __all__ = [
     "UniversalCopy32b",
     "UniversalCopy64b",
     "UniversalCopy128b",
+    "UniversalAtomic",
+    "UniversalAtomicAdd",
+    "UniversalAtomicMax",
+    "UniversalAtomicMin",
+    "UniversalAtomicAnd",
+    "UniversalAtomicOr",
+    "UniversalAtomicInc",
+    "UniversalAtomicDec",
     "UniversalFMA",
     # Constexpr functions
     "const_expr",
@@ -177,6 +189,15 @@ UniversalCopy16b = lambda: CopyOpUniversalCopyType.get(16)
 UniversalCopy32b = lambda: CopyOpUniversalCopyType.get(32)
 UniversalCopy64b = lambda: CopyOpUniversalCopyType.get(64)
 UniversalCopy128b = lambda: CopyOpUniversalCopyType.get(128)
+
+UniversalAtomic = lambda atomic_op, val_type: CopyOpUniversalAtomicType.get(int(atomic_op), val_type)
+UniversalAtomicAdd = lambda val_type: CopyOpUniversalAtomicType.get(int(AtomicOp.Add), val_type)
+UniversalAtomicMax = lambda val_type: CopyOpUniversalAtomicType.get(int(AtomicOp.Max), val_type)
+UniversalAtomicMin = lambda val_type: CopyOpUniversalAtomicType.get(int(AtomicOp.Min), val_type)
+UniversalAtomicAnd = lambda val_type: CopyOpUniversalAtomicType.get(int(AtomicOp.And), val_type)
+UniversalAtomicOr = lambda val_type: CopyOpUniversalAtomicType.get(int(AtomicOp.Or), val_type)
+UniversalAtomicInc = lambda val_type: CopyOpUniversalAtomicType.get(int(AtomicOp.Inc), val_type)
+UniversalAtomicDec = lambda val_type: CopyOpUniversalAtomicType.get(int(AtomicOp.Dec), val_type)
 
 UniversalFMA = lambda ty: MmaOpUniversalFMAType.get(ty.ir_type)
 
@@ -726,7 +747,9 @@ def copy(copy_atom, src, dst, *, pred=None, loc=None, ip=None):
 def gemm(mma_atom, d, a, b, c, *, traversal_order=None, traversal_layout=None, loc=None, ip=None):
     if traversal_order is not None and traversal_layout is not None:
         raise ValueError("Only one of 'traversal_order' or 'traversal_layout' can be specified, not both")
-    return fly.gemm(mma_atom, d, a, b, c, traversal_order=traversal_order, traversal_layout=traversal_layout, loc=loc, ip=ip)
+    return fly.gemm(
+        mma_atom, d, a, b, c, traversal_order=traversal_order, traversal_layout=traversal_layout, loc=loc, ip=ip
+    )
 
 
 # ===----------------------------------------------------------------------=== #

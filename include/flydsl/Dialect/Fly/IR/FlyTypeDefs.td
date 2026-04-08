@@ -308,6 +308,17 @@ def Fly_CopyOpUniversalCopy : Fly_Type<"CopyOpUniversalCopy", "universal_copy", 
   let assemblyFormat = "`<` $bitSize `>`";
 }
 
+def Fly_CopyOpUniversalAtomic : Fly_Type<"CopyOpUniversalAtomic", "universal_atomic", [
+  DeclareTypeInterfaceMethods<Fly_MayStaticTypeInterface>,
+  DeclareTypeInterfaceMethods<Fly_CopyOpTypeInterface>
+]> {
+  let parameters = (ins
+    "AtomicOpAttr":$atomicOp,
+    "Type":$valType
+  );
+  let assemblyFormat = "`<` $atomicOp `,` $valType `>`";
+}
+
 def Fly_MmaOpUniversalFMA : Fly_Type<"MmaOpUniversalFMA", "universal_fma", [
   DeclareTypeInterfaceMethods<Fly_MayStaticTypeInterface>,
   DeclareTypeInterfaceMethods<Fly_MmaOpTypeInterface>
