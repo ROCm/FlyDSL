@@ -260,7 +260,7 @@ def test_mfma_flyc_hgemm_ar(
         maxdiff_out = (output - ref_output).abs().max().item()
         max_diff_global = max(max_diff_global, maxdiff_out)
     print(f"max_diff_global:{max_diff_global}")
-    assert max_diff_global < 1e-2 * args.k * args.num_devices
+    assert max_diff_global < 1e-3 * args.k
 
     print("===================== [REF] =====================")
     ref_func(args, inputs, ref_outputs)

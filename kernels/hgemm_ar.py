@@ -117,6 +117,7 @@ def compile_hgemm_ar_kernel(
     BLOCK_N_WARPS: int = 4,
     B_PRE_SHUFFLE: bool = False,
     B_TO_LDS: bool = False,
+    USE_ATOMIC_ADD: bool = False,
 ):
     IS_SPLIT_K = SPLIT_K > 1
     BLOCK_K = TILE_K
@@ -306,7 +307,10 @@ def compile_hgemm_ar_kernel(
                     with ir.InsertionPoint(cond_boundary_if.then_block):
                         linear_byte_offset = C_.linear_offset((row_idx, n_offset + n_local_idx)) * DTYPE_BYTES
                         byte_offset_i64 = arith.index_cast(T.i64, linear_byte_offset)
-                        store_v4i32(self_tmp_ptr + byte_offset_i64, vec_i32x4)
+                        if USE_ATOMIC_ADD:
+                            store_v4i32_nt(self_out_ptr + byte_offset_i64, vec_i32x4)
+                        else:
+                            store_v4i32_nt(self_tmp_ptr + byte_offset_i64, vec_i32x4)
                         # C_.vec_store((row_idx, n_offset + n_local_idx), zero_vec, LDG_VEC_SIZE)
                         scf.YieldOp([])
                 scf.YieldOp([])
@@ -726,42 +730,84 @@ def compile_hgemm_ar_kernel(
         else:
             gpu.barrier()
 
-        # NOTE: Atomic impl is slow
+        if USE_ATOMIC_ADD:
+
+            # NOTE: Low performance for atomic impl
+            
+            _signal_start_sync(lane_i32=lane_i32, rank_i32=rank_i32, bid_i32=bid_i32, self_sg_i64=self_sg_i64, sgs_i64=sgs, ngpus=world_size)
+
+            for i in range_constexpr(LDG_REG_C_COUNT):
+                global_tid = BLOCK_THREADS * i + tid
+                m_local_idx = fx.Index(global_tid // LDG_C_X_THREADS)
+                n_local_idx = fx.Index(global_tid % LDG_C_X_THREADS * LDG_VEC_SIZE)
+                m_global_idx = m_offset + m_local_idx
+                cond_boundary = arith.cmpi(arith.CmpIPredicate.ult, m_global_idx, fx.Index(m))
+                cond_boundary_if = scf.IfOp(cond_boundary, results_=[], has_else=False)
+                with ir.InsertionPoint(cond_boundary_if.then_block):
+                    for wi in range_constexpr(world_size):
+                        out_memref = select_by_index(arith.constant(wi, type=T.i32), out_ptrs_arr)
+                        linear_bytes_offset = C_.linear_offset((m_global_idx, n_offset + n_local_idx)) * DTYPE_BYTES
+                        pk_val = cs_.vec_load((m_local_idx, n_local_idx), LDG_VEC_SIZE)
+                        # split to vec2s
+                        vec2_ty = T.vec(2, dtype_)
+                        for vec_idx in range_constexpr(LDG_VEC_SIZE // 2):
+                            e0 = vector.extract(pk_val, static_position=[vec_idx * 2], dynamic_position=[])
+                            e1 = vector.extract(pk_val, static_position=[vec_idx * 2 + 1], dynamic_position=[])
+                            pair = vector.from_elements(vec2_ty, [e0, e1])
+                            pair_byte_offset = arith.index_cast(T.i64, linear_bytes_offset + fx.Index(vec_idx * 2 * DTYPE_BYTES))
+                            pair_addr_i64 = llvm.AddOp(out_memref, pair_byte_offset, llvm.IntegerOverflowFlags(0)).result
+                            pair_ptr = llvm.IntToPtrOp(_ptr_type, pair_addr_i64).result
+                            pair_ptr_v = pair_ptr._value if hasattr(pair_ptr, "_value") else pair_ptr
+                            pair_v = pair._value if hasattr(pair, "_value") else pair
+                            llvm.AtomicRMWOp(
+                                llvm.AtomicBinOp.fadd,
+                                pair_ptr_v,
+                                pair_v,
+                                llvm.AtomicOrdering.monotonic,
+                                syncscope="agent",
+                                alignment=4,
+                            )
+                    # C_.vec_store((m_global_idx, n_offset + n_local_idx), vec, LDG_VEC_SIZE)
+                    scf.YieldOp([])
         
-        for i in range_constexpr(LDG_REG_C_COUNT):
-            global_tid = BLOCK_THREADS * i + tid
-            m_local_idx = fx.Index(global_tid // LDG_C_X_THREADS)
-            n_local_idx = fx.Index(global_tid % LDG_C_X_THREADS * LDG_VEC_SIZE)
-            m_global_idx = m_offset + m_local_idx
-            cond_boundary = arith.cmpi(arith.CmpIPredicate.ult, m_global_idx, fx.Index(m))
-            cond_boundary_if = scf.IfOp(cond_boundary, results_=[], has_else=False)
-            with ir.InsertionPoint(cond_boundary_if.then_block):
-                vec = cs_.vec_load((m_local_idx, n_local_idx), LDG_VEC_SIZE)
-                vec_i32x4 = vector.bitcast(T.i32x4, vec)
-                linear_bytes_offset = C_.linear_offset((m_global_idx, n_offset + n_local_idx)) * DTYPE_BYTES
-                store_v4i32(self_tmp_ptr + arith.index_cast(T.i64, linear_bytes_offset), vec_i32x4)
-                scf.YieldOp([])
-        
-        _signal_start_sync(lane_i32=lane_i32, rank_i32=rank_i32, bid_i32=bid_i32, self_sg_i64=self_sg_i64, sgs_i64=sgs, ngpus=world_size)
-        
-        for i in range_constexpr(LDG_REG_C_COUNT):
-            global_tid = BLOCK_THREADS * i + tid
-            m_local_idx = fx.Index(global_tid // LDG_C_X_THREADS)
-            n_local_idx = fx.Index(global_tid % LDG_C_X_THREADS * LDG_VEC_SIZE)
-            m_global_idx = m_offset + m_local_idx
-            cond_boundary = arith.cmpi(arith.CmpIPredicate.ult, m_global_idx, fx.Index(m))
-            cond_boundary_if = scf.IfOp(cond_boundary, results_=[], has_else=False)
-            with ir.InsertionPoint(cond_boundary_if.then_block):
-                linear_bytes_offset = C_.linear_offset((m_global_idx, n_offset + n_local_idx)) * DTYPE_BYTES
-                final_vec = arith.constant_vector(0.0, T.vec(LDG_VEC_SIZE, T.f32))
-                for wi in range_constexpr(world_size):
-                    vec_v4i32 = load_v4i32(select_by_index(arith.constant(wi, type=T.i32), tmp_ptrs_arr) + arith.index_cast(T.i64, linear_bytes_offset))
-                    vec = vector.bitcast(T.vec(LDG_VEC_SIZE, dtype_), vec_v4i32)
-                    final_vec = final_vec + vec.extf(T.vec(LDG_VEC_SIZE, T.f32))
-                final_vec_i32x4 = vector.bitcast(T.i32x4, final_vec.truncf(T.vec(LDG_VEC_SIZE, dtype_)))
-                store_v4i32(self_out_ptr + arith.index_cast(T.i64, linear_bytes_offset), final_vec_i32x4)
-                scf.YieldOp([])
-        
+        else:
+
+            # FIXME: For some reasons splitk doesn't work
+
+            for i in range_constexpr(LDG_REG_C_COUNT):
+                global_tid = BLOCK_THREADS * i + tid
+                m_local_idx = fx.Index(global_tid // LDG_C_X_THREADS)
+                n_local_idx = fx.Index(global_tid % LDG_C_X_THREADS * LDG_VEC_SIZE)
+                m_global_idx = m_offset + m_local_idx
+                cond_boundary = arith.cmpi(arith.CmpIPredicate.ult, m_global_idx, fx.Index(m))
+                cond_boundary_if = scf.IfOp(cond_boundary, results_=[], has_else=False)
+                with ir.InsertionPoint(cond_boundary_if.then_block):
+                    vec = cs_.vec_load((m_local_idx, n_local_idx), LDG_VEC_SIZE)
+                    vec_i32x4 = vector.bitcast(T.i32x4, vec)
+                    linear_bytes_offset = C_.linear_offset((m_global_idx, n_offset + n_local_idx)) * DTYPE_BYTES
+                    store_v4i32_nt(self_tmp_ptr + arith.index_cast(T.i64, linear_bytes_offset), vec_i32x4)
+                    scf.YieldOp([])
+            
+            _signal_start_sync(lane_i32=lane_i32, rank_i32=rank_i32, bid_i32=bid_i32, self_sg_i64=self_sg_i64, sgs_i64=sgs, ngpus=world_size)
+            
+            for i in range_constexpr(LDG_REG_C_COUNT):
+                global_tid = BLOCK_THREADS * i + tid
+                m_local_idx = fx.Index(global_tid // LDG_C_X_THREADS)
+                n_local_idx = fx.Index(global_tid % LDG_C_X_THREADS * LDG_VEC_SIZE)
+                m_global_idx = m_offset + m_local_idx
+                cond_boundary = arith.cmpi(arith.CmpIPredicate.ult, m_global_idx, fx.Index(m))
+                cond_boundary_if = scf.IfOp(cond_boundary, results_=[], has_else=False)
+                with ir.InsertionPoint(cond_boundary_if.then_block):
+                    linear_bytes_offset = C_.linear_offset((m_global_idx, n_offset + n_local_idx)) * DTYPE_BYTES
+                    final_vec = arith.constant_vector(0.0, T.vec(LDG_VEC_SIZE, T.f32))
+                    for wi in range_constexpr(world_size):
+                        vec_v4i32 = load_v4i32(select_by_index(arith.constant(wi, type=T.i32), tmp_ptrs_arr) + arith.index_cast(T.i64, linear_bytes_offset))
+                        vec = vector.bitcast(T.vec(LDG_VEC_SIZE, dtype_), vec_v4i32)
+                        final_vec = final_vec + vec.extf(T.vec(LDG_VEC_SIZE, T.f32))
+                    final_vec_i32x4 = vector.bitcast(T.i32x4, final_vec.truncf(T.vec(LDG_VEC_SIZE, dtype_)))
+                    store_v4i32(self_out_ptr + arith.index_cast(T.i64, linear_bytes_offset), final_vec_i32x4)
+                    scf.YieldOp([])
+            
         # _signal_end_sync(lane_i32=lane_i32, rank_i32=rank_i32, bid_i32=bid_i32, self_sg_i64=self_sg_i64, sgs_i64=sgs, ngpus=world_size)
         
         return
