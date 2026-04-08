@@ -2540,8 +2540,6 @@ def compile_moe_reduction(
             c_model_dim = fx.Index(model_dim)
             mask_nbytes_idx = m_tokens * c_topk
             elem_bits = 32 if dtype_str == "f32" else 16
-            copy_vec_width = 128 // elem_bits  # 8 for f16/bf16, 4 for f32
-            n_sub = VEC_WIDTH // copy_vec_width  # 1 for f16/bf16, 2 for f32
             # Buffer-backed tensors via layout API (all dtypes)
             X_buf = fx.rocdl.make_buffer_tensor(X)
             Y_buf = fx.rocdl.make_buffer_tensor(Y)
@@ -2583,18 +2581,13 @@ def compile_moe_reduction(
                     _if_full = scf.IfOp(end_ok, has_else=True)
                     with _if_then(_if_full):
                         # ── Vector path via layout API (all dtypes) ──
+                        # fx.copy auto-iterates when atom width < VEC_WIDTH
+                        # (e.g. f32: BufferCopy128b handles 4, fx.copy issues 2 calls for 8)
                         copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), elem_bits)
-                        copy_reg_ty = fx.MemRefType.get(
-                            elem_type(), fx.LayoutType.get(copy_vec_width, 1), fx.AddressSpace.Register
-                        )
-                        copy_reg_lay = fx.make_layout(copy_vec_width, 1)
-                        vec_type_c = T.vec(copy_vec_width, compute_type())
-                        vec_type_e = T.vec(copy_vec_width, elem_type())
+                        vec_type_c = T.vec(VEC_WIDTH, compute_type())
+                        vec_type_e = T.vec(VEC_WIDTH, elem_type())
 
-                        acc_vecs = [
-                            vector.broadcast(vec_type_c, arith.constant(0.0, type=compute_type()))
-                            for _ in range(n_sub)
-                        ]
+                        acc_vec = vector.broadcast(vec_type_c, arith.constant(0.0, type=compute_type()))
                         c0_i8 = arith.constant(0, type=i8_type())
 
                         tok_i32 = arith.index_cast(i32_type(), token_idx)
@@ -2602,59 +2595,43 @@ def compile_moe_reduction(
                         tid_i32 = arith.index_cast(i32_type(), tid)
 
                         for k in range_constexpr(topk):
-                            k_i32 = fx.Int32(k)
-                            x_row_k = fx.slice(X_buf, (tok_i32, k_i32, None))
-                            x_tiled = fx.logical_divide(x_row_k, fx.make_layout(tile_cols, 1))
-                            x_tile = fx.slice(x_tiled, (None, tile_i32))
-                            x_div = fx.logical_divide(x_tile, fx.make_layout(VEC_WIDTH, 1))
-                            x_thread = fx.slice(x_div, (None, tid_i32))
+                            # X[token, k, :] → tile → thread's VEC_WIDTH slice
+                            x_row = X_buf[tok_i32, fx.Int32(k), None]
+                            x_tiled = fx.logical_divide(x_row, fx.make_layout(tile_cols, 1))
+                            x_div = fx.logical_divide(x_tiled[None, tile_i32], fx.make_layout(VEC_WIDTH, 1))
+                            x_thread = x_div[None, tid_i32]
+
+                            frag = fx.make_fragment_like(x_thread)
+                            fx.copy(copy_atom, x_thread, frag)
+                            vec_e = fx.memref_load_vec(frag)
 
                             if use_mask:
                                 m_idx = token_idx * c_topk + fx.Index(k)
                                 m_idx_i32 = arith.index_cast(i32_type(), m_idx)
                                 mv = buffer_ops.buffer_load(mask_rsrc, m_idx_i32, vec_width=1, dtype=i8_type())
                                 mv_ok = arith.cmpi(arith.CmpIPredicate.ne, mv, c0_i8)
+                                zero_e = vector.broadcast(vec_type_e, arith.constant(0.0, type=elem_type()))
+                                vec_e = arith.select(mv_ok, vec_e, zero_e)
 
-                            # Subdivide when copy_atom width < VEC_WIDTH (f32: 2 x 4)
-                            if n_sub > 1:
-                                x_inner = fx.logical_divide(x_thread, fx.make_layout(copy_vec_width, 1))
-
-                            for si in range_constexpr(n_sub):
-                                src = fx.slice(x_inner, (None, fx.Int32(si))) if n_sub > 1 else x_thread
-
-                                r = fx.memref_alloca(copy_reg_ty, copy_reg_lay)
-                                fx.copy_atom_call(copy_atom, src, r)
-                                vec_e = fx.memref_load_vec(r)
-
-                                if use_mask:
-                                    zero_e = vector.broadcast(vec_type_e, arith.constant(0.0, type=elem_type()))
-                                    vec_e = arith.select(mv_ok, vec_e, zero_e)
-
-                                if elem_bits < 32:
-                                    vec_c = arith.extf(vec_type_c, vec_e)
-                                else:
-                                    vec_c = vec_e
-                                acc_vecs[si] = arith.addf(acc_vecs[si], vec_c)
+                            if elem_bits < 32:
+                                vec_c = arith.extf(vec_type_c, vec_e)
+                            else:
+                                vec_c = vec_e
+                            acc_vec = arith.addf(acc_vec, vec_c)
 
                         # ── Store results ──
-                        y_row = fx.slice(Y_buf, (tok_i32, None))
+                        out_vec = acc_vec
+                        if elem_bits < 32:
+                            out_vec = arith.trunc_f(vec_type_e, out_vec)
+
+                        y_row = Y_buf[tok_i32, None]
                         y_tiled = fx.logical_divide(y_row, fx.make_layout(tile_cols, 1))
-                        y_tile = fx.slice(y_tiled, (None, tile_i32))
-                        y_div = fx.logical_divide(y_tile, fx.make_layout(VEC_WIDTH, 1))
-                        y_thread = fx.slice(y_div, (None, tid_i32))
+                        y_div = fx.logical_divide(y_tiled[None, tile_i32], fx.make_layout(VEC_WIDTH, 1))
+                        y_thread = y_div[None, tid_i32]
 
-                        if n_sub > 1:
-                            y_inner = fx.logical_divide(y_thread, fx.make_layout(copy_vec_width, 1))
-
-                        for si in range_constexpr(n_sub):
-                            out_vec = acc_vecs[si]
-                            if elem_bits < 32:
-                                out_vec = arith.trunc_f(vec_type_e, out_vec)
-
-                            dst = fx.slice(y_inner, (None, fx.Int32(si))) if n_sub > 1 else y_thread
-                            r_out = fx.memref_alloca(copy_reg_ty, copy_reg_lay)
-                            fx.memref_store_vec(out_vec, r_out)
-                            fx.copy_atom_call(copy_atom, r_out, dst)
+                        store_frag = fx.make_fragment_like(y_thread)
+                        fx.memref_store_vec(out_vec, store_frag)
+                        fx.copy(copy_atom, store_frag, y_thread)
 
                     with _if_else(_if_full):
                         # Tail path: scalar load/store per lane.
