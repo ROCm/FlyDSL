@@ -51,11 +51,20 @@ if [ -z "${MLIR_PATH:-}" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# CMake generator: prefer Ninja, fall back to Unix Makefiles
+# CMake generator: prefer Ninja, fall back to Unix Makefiles.
+# If a CMakeCache.txt already exists, reuse its generator to avoid mismatch.
 # ---------------------------------------------------------------------------
-GENERATOR="Unix Makefiles"
-if command -v ninja &> /dev/null; then
-  GENERATOR="Ninja"
+_CMAKE_CACHE="${BUILD_DIR}/CMakeCache.txt"
+if [ -f "${_CMAKE_CACHE}" ]; then
+  CACHED_GENERATOR=$(grep -oP '(?<=^CMAKE_GENERATOR:INTERNAL=).+' "${_CMAKE_CACHE}" || true)
+  if [ -n "${CACHED_GENERATOR}" ]; then
+    GENERATOR="${CACHED_GENERATOR}"
+  fi
+else
+  GENERATOR="Unix Makefiles"
+  if command -v ninja &> /dev/null; then
+    GENERATOR="Ninja"
+  fi
 fi
 
 echo "=============================================="
