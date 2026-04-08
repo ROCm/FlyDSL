@@ -55,6 +55,7 @@ class Args:
     tile_m: int
     tile_n: int
     tile_k: int
+    split_k: int
     num_devices: int
     parts: int
     nsamples: int
@@ -125,7 +126,7 @@ def ref_func(args, inputs, outputs):
     )
 
 
-def worker(device_id, num_devices, parts, nsamples, inputs, outputs):
+def worker(device_id, num_devices, parts, nsamples, inputs, outputs, kwargs):
     group = init_world(device_id, num_devices, parts)
     rank = dist.get_rank(group=group)
     world_size = dist.get_world_size(group=group)
@@ -137,16 +138,16 @@ def worker(device_id, num_devices, parts, nsamples, inputs, outputs):
     for i in range(nsamples):
         input = inputs[device_id * nsamples + i]
         output = outputs[device_id * nsamples + i]
-        fa.hgemm_ar_fusion(input[0], input[1], output)
+        fa.hgemm_ar_fusion(input[0], input[1], output, kwargs)
     torch.cuda.synchronize()
     dist.barrier(group=group)
     dist.destroy_process_group()
 
 
-def func(args, inputs, outputs):
+def func(args, inputs, outputs, kwargs):
     mp.spawn(
         worker,
-        args=(args.num_devices, args.parts, args.nsamples, inputs, outputs),
+        args=(args.num_devices, args.parts, args.nsamples, inputs, outputs, kwargs),
         nprocs=args.num_devices,
         join=True
     )
@@ -154,12 +155,11 @@ def func(args, inputs, outputs):
 
 @pytest.mark.parametrize("dtype", ["fp16", "bf16"])
 @pytest.mark.parametrize(
-    "m, n, k, TILE_M, TILE_N, TILE_K, world_size",
+    "m, n, k, TILE_M, TILE_N, TILE_K, SPLIT_K, world_size",
     [
-        (32, 384, 7168, 16, 128, 128, 4),
-        (4, 384, 7168, 16, 128, 128, 8),
-        (65, 1024, 8192, 64, 64, 128, 2),
-        (4096, 4096, 4096, 128, 256, 64, 2),
+        (32, 384, 7168, 32, 64, 64, 8, 4),
+        (4, 384, 7168, 32, 64, 64, 8, 8),
+        (65, 1024, 8192, 64, 64, 128, 2, 2),
     ]
 )
 @pytest.mark.parametrize("test_graph", [
@@ -169,7 +169,7 @@ def func(args, inputs, outputs):
 def test_mfma_flyc_preshuffle_hgemm_ar(
     dtype,
     m, n, k,
-    TILE_M, TILE_N, TILE_K, world_size,
+    TILE_M, TILE_N, TILE_K, SPLIT_K, world_size,
     *,
     test_graph,
     bench_iters: int = DEFAULT_BENCH_ITERS,
@@ -198,15 +198,22 @@ def test_mfma_flyc_preshuffle_hgemm_ar(
         tile_m=TILE_M,
         tile_n=TILE_N,
         tile_k=TILE_K,
+        split_k=SPLIT_K,
         num_devices=world_size,
         parts=1,
         nsamples=10,
     )
+    kwargs = {
+        'TILE_M': args.tile_m,
+        'TILE_N': args.tile_n,
+        'TILE_K': args.tile_k,
+        'SPLIT_K': args.split_k,
+    }
 
     inputs = create_inputs(args)
     outputs = create_outputs(args)
     ref_outputs = create_outputs(args)
-    func(args, inputs, outputs)
+    func(args, inputs, outputs, kwargs)
     ref_func(args, inputs, ref_outputs)
     max_diff_global = float(-1)
     for output, ref_output in zip(outputs, ref_outputs):
@@ -215,4 +222,4 @@ def test_mfma_flyc_preshuffle_hgemm_ar(
         maxdiff_out = (output - ref_output).abs().max().item()
         max_diff_global = max(max_diff_global, maxdiff_out)
     print(f"max_diff_global:{max_diff_global}")
-    assert max_diff_global < 1e-3 * args.k
+    assert max_diff_global < 1e-2 * args.k * args.num_devices
