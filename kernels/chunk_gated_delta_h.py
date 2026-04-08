@@ -26,13 +26,29 @@ import flydsl.expr as fx
 from flydsl.expr.typing import T
 from flydsl.expr import range_constexpr, arith, vector, gpu, rocdl, buffer_ops
 from flydsl._mlir import ir
-from flydsl._mlir.dialects import scf, math as math_dialect
+from flydsl._mlir.dialects import scf, math as math_dialect, llvm as _llvm
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.compiler.protocol import fly_values
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 
 from kernels.tensor_shim import GTensor, STensor, _to_raw
+
+_LOG2E = math.log2(math.e)  # 1.4426950408889634
+
+
+def _llvm_exp2_f32(x):
+    """Emit llvm.exp2.f32 intrinsic directly (maps to single v_exp_f32 on AMD)."""
+    x_raw = _to_raw(x)
+    return _llvm.call_intrinsic(
+        ir.F32Type.get(), "llvm.exp2.f32", [x_raw], [], []
+    )
+
+
+def _fast_exp(x):
+    """exp(x) via exp2(x * log2(e)) using the LLVM intrinsic."""
+    log2e = arith.constant(_LOG2E, type=T.f32)
+    return _llvm_exp2_f32(arith.mulf(x, log2e))
 
 
 def _mfma_bf16_16x16x32(a_bf16x8, b_bf16x8, acc_f32x4):
@@ -110,7 +126,6 @@ def compile_chunk_gated_delta_h(
     LDS_VN_BYTES = LDS_VN_ELEMS * 4  # f32 = 4 bytes
 
     # LDS for h snapshot bf16: [K, BV] bf16 row-major, for w@h B operand
-    # Each k-block is [64, BV], total K rows x BV cols
     LDS_H_ELEMS = K * BV
     LDS_H_BYTES = LDS_H_ELEMS * 2  # bf16 = 2 bytes
 
@@ -253,9 +268,9 @@ def compile_chunk_gated_delta_h(
                         h0_row = fx.Int32(kb * 64) + wid * fx.Int32(16) + lane_m_base * fx.Int32(4) + fx.Int32(elem_i)
                         h0_off = h0_base + h0_row * fx.Int32(V) + h0_col
                         h0_elems.append(h0_[fx.Index(h0_off)])
-                    loaded = vector.from_elements(T.f32x4, h0_elems)
+                    loaded_vec = vector.from_elements(T.f32x4, h0_elems)
                     acc_idx = kb * N_REPEAT + nr
-                    h_accs[acc_idx] = arith.addf(h_accs[acc_idx], loaded)
+                    h_accs[acc_idx] = arith.addf(h_accs[acc_idx], loaded_vec)
 
         # ── Main chunk loop ──
         init_state = [_to_raw(v) for v in h_accs]
@@ -359,7 +374,7 @@ def compile_chunk_gated_delta_h(
 
                 g_last_off = (bos + last_idx_raw) * fx.Int32(H) + i_h
                 g_last = g_[fx.Index(g_last_off)]
-                exp_g_last = math_dialect.ExpOp(g_last).result
+                exp_g_last = _fast_exp(g_last)
 
                 # Gate v_new: each f32x4 element corresponds to a different BT row
                 for nr in range_constexpr(N_REPEAT):
@@ -371,7 +386,7 @@ def compile_chunk_gated_delta_h(
                         safe_row = arith.select(in_bounds, abs_row, fx.Int32(0))
                         g_row_off = (bos + safe_row) * fx.Int32(H) + i_h
                         g_row = g_[fx.Index(g_row_off)]
-                        gate = math_dialect.ExpOp(arith.subf(g_last, g_row)).result
+                        gate = _fast_exp(arith.subf(g_last, g_row))
                         gate_masked = arith.select(in_bounds, gate, arith.constant(0.0, type=T.f32))
                         gate_vec = vector.insert(gate_masked, gate_vec, static_position=[elem_i], dynamic_position=[])
                     vn_frags[nr] = arith.mulf(vn_val, gate_vec)
@@ -403,13 +418,15 @@ def compile_chunk_gated_delta_h(
 
             for kb in range_constexpr(NUM_K_BLOCKS):
                 for bt_s in range_constexpr(BT_STEPS):
+                    # Load k from global: k[bt_row, kb*64 + wid*16 + lane_n]
+                    # Vectorized load: 8 bf16 from consecutive BT rows
+                    k_col = fx.Int32(kb * 64) + wid * fx.Int32(16) + lane_n
                     k_a_elems = []
                     for ki in range_constexpr(8):
                         k_t_row_raw = i_t_i32 * fx.Int32(BT) + fx.Int32(bt_s * WMMA_K) + lane_m_base * fx.Int32(8) + fx.Int32(ki)
                         k_row_valid = arith.cmpi(arith.CmpIPredicate.slt, k_t_row_raw, T_local)
                         k_t_row = arith.select(k_row_valid, k_t_row_raw, fx.Int32(0))
-                        k_t_col = fx.Int32(kb * 64) + wid * fx.Int32(16) + lane_n
-                        k_off = k_base + k_t_row * stride_k + k_t_col
+                        k_off = k_base + k_t_row * stride_k + k_col
                         k_val = k_[fx.Index(k_off)]
                         k_a_elems.append(arith.select(k_row_valid, k_val, arith.constant(0.0, type=T.bf16)))
                     k_a_frag = vector.from_elements(T.vec(8, T.bf16), k_a_elems)
