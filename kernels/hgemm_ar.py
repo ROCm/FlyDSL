@@ -117,7 +117,7 @@ def compile_hgemm_ar_kernel(
     BLOCK_N_WARPS: int = 4,
     B_PRE_SHUFFLE: bool = False,
     B_TO_LDS: bool = False,
-    USE_ATOMIC_ADD: bool = False,
+    USE_CROSS_DEVICE_ATOMIC: bool = False,
 ):
     IS_SPLIT_K = SPLIT_K > 1
     BLOCK_K = TILE_K
@@ -210,8 +210,11 @@ def compile_hgemm_ar_kernel(
         KERNEL_NAME += "_BP"
     if IS_SPLIT_K:
         KERNEL_NAME += f"_SPK{SPLIT_K}"
+        USE_CROSS_DEVICE_ATOMIC = True
     if B_TO_LDS:
         KERNEL_NAME += f"_BS"
+    if USE_CROSS_DEVICE_ATOMIC:
+        KERNEL_NAME += f"_CATOM"
     
     @flyc.kernel
     def hgemm_ar_kernel(
@@ -307,7 +310,7 @@ def compile_hgemm_ar_kernel(
                     with ir.InsertionPoint(cond_boundary_if.then_block):
                         linear_byte_offset = C_.linear_offset((row_idx, n_offset + n_local_idx)) * DTYPE_BYTES
                         byte_offset_i64 = arith.index_cast(T.i64, linear_byte_offset)
-                        if USE_ATOMIC_ADD:
+                        if USE_CROSS_DEVICE_ATOMIC:
                             store_v4i32_nt(self_out_ptr + byte_offset_i64, vec_i32x4)
                         else:
                             store_v4i32_nt(self_tmp_ptr + byte_offset_i64, vec_i32x4)
@@ -730,7 +733,7 @@ def compile_hgemm_ar_kernel(
         else:
             gpu.barrier()
 
-        if USE_ATOMIC_ADD:
+        if USE_CROSS_DEVICE_ATOMIC:
 
             # NOTE: Low performance for atomic impl
             
@@ -779,12 +782,13 @@ def compile_hgemm_ar_kernel(
                 m_local_idx = fx.Index(global_tid // LDG_C_X_THREADS)
                 n_local_idx = fx.Index(global_tid % LDG_C_X_THREADS * LDG_VEC_SIZE)
                 m_global_idx = m_offset + m_local_idx
+                n_global_idx = n_offset + n_local_idx
                 cond_boundary = arith.cmpi(arith.CmpIPredicate.ult, m_global_idx, fx.Index(m))
                 cond_boundary_if = scf.IfOp(cond_boundary, results_=[], has_else=False)
                 with ir.InsertionPoint(cond_boundary_if.then_block):
                     vec = cs_.vec_load((m_local_idx, n_local_idx), LDG_VEC_SIZE)
                     vec_i32x4 = vector.bitcast(T.i32x4, vec)
-                    linear_bytes_offset = C_.linear_offset((m_global_idx, n_offset + n_local_idx)) * DTYPE_BYTES
+                    linear_bytes_offset = C_.linear_offset((m_global_idx, n_global_idx)) * DTYPE_BYTES
                     store_v4i32_nt(self_tmp_ptr + arith.index_cast(T.i64, linear_bytes_offset), vec_i32x4)
                     scf.YieldOp([])
             
@@ -807,7 +811,7 @@ def compile_hgemm_ar_kernel(
                     final_vec_i32x4 = vector.bitcast(T.i32x4, final_vec.truncf(T.vec(LDG_VEC_SIZE, dtype_)))
                     store_v4i32(self_out_ptr + arith.index_cast(T.i64, linear_bytes_offset), final_vec_i32x4)
                     scf.YieldOp([])
-            
+
         # _signal_end_sync(lane_i32=lane_i32, rank_i32=rank_i32, bid_i32=bid_i32, self_sg_i64=self_sg_i64, sgs_i64=sgs, ngpus=world_size)
         
         return
@@ -866,6 +870,7 @@ def get_default_kwargs(m, n, k):
         'BLOCK_N_WARPS': 2,
         'B_PRE_SHUFFLE': False,
         'B_TO_LDS': True,
+        'USE_CROSS_DEVICE_ATOMIC': False,
     }
     if m == 2048 and n == 2048 and k == 2048:
         kwargs['TILE_M'] = 128
