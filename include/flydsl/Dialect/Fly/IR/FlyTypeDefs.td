@@ -317,6 +317,12 @@ def Fly_CopyOpUniversalAtomic : Fly_Type<"CopyOpUniversalAtomic", "universal_ato
     "Type":$valType
   );
   let assemblyFormat = "`<` $atomicOp `,` $valType `>`";
+
+  let builders = [
+    TypeBuilderWithInferredContext<(ins "AtomicOpAttr":$atomicOp, "Type":$valType), [{
+      return $_get(atomicOp.getContext(), atomicOp, valType);
+    }]>
+  ];
 }
 
 def Fly_MmaOpUniversalFMA : Fly_Type<"MmaOpUniversalFMA", "universal_fma", [
