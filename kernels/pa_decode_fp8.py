@@ -1035,151 +1035,193 @@ def compile_pa_decode_ps(
                 c_zero_i32,
             )
 
-            # Unified loop bounds (shared across mtp_g passes — blocks don't change per mtp_g)
-            num_blocks_in_work = kv_end - kv_start
-            last_block_idx_val = num_blocks_in_work - c_one
-            _loop_start_g = arith.index(0)
-            _loop_stop_g = arith.index_cast(T.index, arith.unwrap(num_blocks_in_work))
-            _loop_step_g = arith.index(1)
+            # ── Early skip: if this block split has no valid tokens, write zeros and skip ──
+            _tile_start_tok = kv_start_abs_tok + tile_token_offset
+            _split_has_valid_tokens = _tile_start_tok < context_len
 
-            # ── MTP groups: Python compile-time loop — one MLIR KV-loop per group ──
-            # Use range_constexpr so AST rewriter keeps this as a plain Python loop
-            _mtp_groups = math.ceil(query_length * query_group_size / 16)
-            _total_pairs = query_length * query_group_size
-            for _mtp_g in range_constexpr(_mtp_groups):
-                _g_off = _mtp_g * 16  # compile-time offset into (qi, qhi) pair space
+            if _split_has_valid_tokens:
+                # Unified loop bounds (shared across mtp_g passes — blocks don't change per mtp_g)
+                num_blocks_in_work = kv_end - kv_start
+                last_block_idx_val = num_blocks_in_work - c_one
+                _loop_start_g = arith.index(0)
+                _loop_stop_g = arith.index_cast(T.index, arith.unwrap(num_blocks_in_work))
+                _loop_step_g = arith.index(1)
 
-                # ── Lane pair for MFMA output (qi_val and qhi_pos) ──
-                _lane_pair_raw = lane16id + arith.constant(_g_off, type=T.i32)
-                _c_total_pairs = arith.constant(_total_pairs, type=T.i32)
-                _c_pair_max = arith.constant(_total_pairs - 1, type=T.i32)
-                _c_ql_m1 = arith.constant(query_length - 1, type=T.i32)
-                _lane_pair = arith.select(_lane_pair_raw < _c_total_pairs, _lane_pair_raw, _c_pair_max)
-                _qi_raw = _lane_pair // arith.constant(query_group_size, type=T.i32)
-                qi_val = arith.select(_qi_raw < _c_ql_m1, _qi_raw, _c_ql_m1)
-                qhi_pos = _lane_pair % arith.constant(query_group_size, type=T.i32)
-                # MTP causal bound for this lane's qi_val token
-                causal_bound = context_len + arith.constant(1 - query_length, type=T.i32) + qi_val
+                # ── MTP groups: Python compile-time loop — one MLIR KV-loop per group ──
+                # Use range_constexpr so AST rewriter keeps this as a plain Python loop
+                _mtp_groups = math.ceil(query_length * query_group_size / 16)
+                _total_pairs = query_length * query_group_size
+                for _mtp_g in range_constexpr(_mtp_groups):
+                    _g_off = _mtp_g * 16  # compile-time offset into (qi, qhi) pair space
 
-                # ── local_qhead_idx pair for Q loading ──
-                _lqh_pair_raw = local_qhead_idx + arith.constant(_g_off, type=T.i32)
-                _lqh_pair = arith.select(_lqh_pair_raw < _c_total_pairs, _lqh_pair_raw, _c_pair_max)
-                _lqi_raw = _lqh_pair // arith.constant(query_group_size, type=T.i32)
-                qi_for_q = arith.select(_lqi_raw < _c_ql_m1, _lqi_raw, _c_ql_m1)
-                local_qhead_idx_for_q = _lqh_pair % arith.constant(query_group_size, type=T.i32)
+                    # ── Lane pair for MFMA output (qi_val and qhi_pos) ──
+                    _lane_pair_raw = lane16id + arith.constant(_g_off, type=T.i32)
+                    _c_total_pairs = arith.constant(_total_pairs, type=T.i32)
+                    _c_pair_max = arith.constant(_total_pairs - 1, type=T.i32)
+                    _c_ql_m1 = arith.constant(query_length - 1, type=T.i32)
+                    _lane_pair = arith.select(_lane_pair_raw < _c_total_pairs, _lane_pair_raw, _c_pair_max)
+                    _qi_raw = _lane_pair // arith.constant(query_group_size, type=T.i32)
+                    qi_val = arith.select(_qi_raw < _c_ql_m1, _qi_raw, _c_ql_m1)
+                    qhi_pos = _lane_pair % arith.constant(query_group_size, type=T.i32)
+                    # MTP causal bound for this lane's qi_val token
+                    causal_bound = context_len + arith.constant(1 - query_length, type=T.i32) + qi_val
 
-                # ── Q load into LDS for this mtp_g pass ──
-                # Between passes: barrier ensures prev pass's LDS prob-reads are done
-                if _mtp_g > 0:
+                    # ── local_qhead_idx pair for Q loading ──
+                    _lqh_pair_raw = local_qhead_idx + arith.constant(_g_off, type=T.i32)
+                    _lqh_pair = arith.select(_lqh_pair_raw < _c_total_pairs, _lqh_pair_raw, _c_pair_max)
+                    _lqi_raw = _lqh_pair // arith.constant(query_group_size, type=T.i32)
+                    qi_for_q = arith.select(_lqi_raw < _c_ql_m1, _lqi_raw, _c_ql_m1)
+                    local_qhead_idx_for_q = _lqh_pair % arith.constant(query_group_size, type=T.i32)
+
+                    # ── Q load into LDS for this mtp_g pass ──
+                    # Between passes: barrier ensures prev pass's LDS prob-reads are done
+                    if _mtp_g > 0:
+                        gpu.barrier()
+                        SmemPtr._view_cache = None
+                    q_row = batch_idx * arith.constant(query_length, type=T.i32) + qi_for_q
+                    q_base = q_row * stride_q_seq + (kv_h * arith.constant(query_group_size, type=T.i32) + local_qhead_idx_for_q) * stride_q_head
+                    offset1 = lane16id // arith.constant(4, type=T.i32)
+                    lds_q_base = (offset1 * arith.constant(2048, type=T.i32)
+                                  + lane4id * arith.constant(512, type=T.i32)
+                                  + local_qhead_idx * arith.constant(32, type=T.i32))
+                    q_w0, q_w1, q_w2, q_w3 = _load_q_words(q_base)
+                    v01 = vector.from_elements(T.vec(2, T.i32), [q_w0, q_w1])
+                    v23 = vector.from_elements(T.vec(2, T.i32), [q_w2, q_w3])
+                    lds_q_i32 = lds_q_base // arith.constant(4, type=T.i32)
+                    vector.store(v01, logits_lds_i32, [arith.index_cast(T.index, lds_q_i32)])
+                    vector.store(v23, logits_lds_i32,
+                        [arith.index_cast(T.index, lds_q_i32 + arith.constant(2, type=T.i32))])
+
+                    q_frags = []
                     gpu.barrier()
+                    for qkhe in range_constexpr(QKHELOOP):
+                        for qkr in range_constexpr(2):
+                            lds_rd_byte = (arith.constant(qkhe * 2048, type=T.i32)
+                                           + rowid * arith.constant(512, type=T.i32)
+                                           + lane16id * arith.constant(32, type=T.i32)
+                                           + arith.constant(qkr * 8, type=T.i32))
+                            lds_rd_base = lds_rd_byte // arith.constant(8, type=T.i32)
+                            q_v1 = vector.load_op(T.vec(1, T.i64), logits_lds_i64,
+                                [arith.index_cast(T.index, lds_rd_base)])
+                            q_frags.append(vector.extract(q_v1, static_position=[0]))
                     SmemPtr._view_cache = None
-                q_row = batch_idx * arith.constant(query_length, type=T.i32) + qi_for_q
-                q_base = q_row * stride_q_seq + (kv_h * arith.constant(query_group_size, type=T.i32) + local_qhead_idx_for_q) * stride_q_head
-                offset1 = lane16id // arith.constant(4, type=T.i32)
-                lds_q_base = (offset1 * arith.constant(2048, type=T.i32)
-                              + lane4id * arith.constant(512, type=T.i32)
-                              + local_qhead_idx * arith.constant(32, type=T.i32))
-                q_w0, q_w1, q_w2, q_w3 = _load_q_words(q_base)
-                v01 = vector.from_elements(T.vec(2, T.i32), [q_w0, q_w1])
-                v23 = vector.from_elements(T.vec(2, T.i32), [q_w2, q_w3])
-                lds_q_i32 = lds_q_base // arith.constant(4, type=T.i32)
-                vector.store(v01, logits_lds_i32, [arith.index_cast(T.index, lds_q_i32)])
-                vector.store(v23, logits_lds_i32,
-                    [arith.index_cast(T.index, lds_q_i32 + arith.constant(2, type=T.i32))])
 
-                q_frags = []
-                gpu.barrier()
-                for qkhe in range_constexpr(QKHELOOP):
-                    for qkr in range_constexpr(2):
-                        lds_rd_byte = (arith.constant(qkhe * 2048, type=T.i32)
-                                       + rowid * arith.constant(512, type=T.i32)
-                                       + lane16id * arith.constant(32, type=T.i32)
-                                       + arith.constant(qkr * 8, type=T.i32))
-                        lds_rd_base = lds_rd_byte // arith.constant(8, type=T.i32)
-                        q_v1 = vector.load_op(T.vec(1, T.i64), logits_lds_i64,
-                            [arith.index_cast(T.index, lds_rd_base)])
-                        q_frags.append(vector.extract(q_v1, static_position=[0]))
-                SmemPtr._view_cache = None
+                    # ── K init: load this CTA's 256-token block split for the first block ──
+                    first_k_base = (first_phys_block * c_kb + _k_head_off) // c_four
+                    k_flat = _load_k_flat_ps(first_k_base, tile_token_offset)
 
-                # ── K init: load this CTA's 256-token block split for the first block ──
-                first_k_base = (first_phys_block * c_kb + _k_head_off) // c_four
-                k_flat = _load_k_flat_ps(first_k_base, tile_token_offset)
-
-                init_state = _pack_state(
-                    NEG_INF, ZERO_F,
-                    arith.constant_vector(0.0, T.f32x4),
-                    arith.constant_vector(0.0, T.f32x4),
-                    k_flat,
-                )
-
-                for ib, state in range(_loop_start_g, _loop_stop_g, _loop_step_g,
-                                       init=init_state):
-                    running_max, running_sum, out0, out1, k_flat = _unpack_state(state)
-                    block_idx = arith.index_cast(T.i32, ib)
-
-                    phys_block = buffer_ops.buffer_load(kpi_rsrc,
-                        kv_start + block_idx, vec_width=1, dtype=T.i32)
-                    next_idx_raw = block_idx + c_one
-                    next_idx_clamped = arith.select(
-                        next_idx_raw < num_blocks_in_work, next_idx_raw, last_block_idx_val)
-                    next_phys_block = buffer_ops.buffer_load(kpi_rsrc,
-                        kv_start + next_idx_clamped, vec_width=1, dtype=T.i32)
-                    next_k_base = (next_phys_block * c_kb + _k_head_off) // c_four
-
-                    k_ops = _unflatten_k(k_flat)
-
-                    running_max, running_sum, out0, out1, k_next_flat = _process_block_split(
-                        phys_block,
-                        block_idx,
-                        running_max,
-                        running_sum,
-                        out0,
-                        out1,
-                        tile_token_offset,
-                        k_ops,
-                        next_k_base=next_k_base,
+                    init_state = _pack_state(
+                        NEG_INF, ZERO_F,
+                        arith.constant_vector(0.0, T.f32x4),
+                        arith.constant_vector(0.0, T.f32x4),
+                        k_flat,
                     )
 
-                    results = yield _pack_state(running_max, running_sum, out0, out1, k_next_flat)
+                    for ib, state in range(_loop_start_g, _loop_stop_g, _loop_step_g,
+                                           init=init_state):
+                        running_max, running_sum, out0, out1, k_flat = _unpack_state(state)
+                        block_idx = arith.index_cast(T.i32, ib)
 
-                running_max, running_sum, out0, out1, _ = _unpack_state(results)
-                SmemPtr._view_cache = None
+                        phys_block = buffer_ops.buffer_load(kpi_rsrc,
+                            kv_start + block_idx, vec_width=1, dtype=T.i32)
+                        next_idx_raw = block_idx + c_one
+                        next_idx_clamped = arith.select(
+                            next_idx_raw < num_blocks_in_work, next_idx_raw, last_block_idx_val)
+                        next_phys_block = buffer_ops.buffer_load(kpi_rsrc,
+                            kv_start + next_idx_clamped, vec_width=1, dtype=T.i32)
+                        next_k_base = (next_phys_block * c_kb + _k_head_off) // c_four
 
-                # ── Normalize output ──
-                safe_sum = arith.select(running_sum > ZERO_F, running_sum,
-                                        arith.constant(1.0, type=T.f32))
-                inv_sum = arith.constant(1.0, type=T.f32) / safe_sum
-                out0_norm = out0 * vector.broadcast(T.f32x4, inv_sum)
-                out1_norm = out1 * vector.broadcast(T.f32x4, inv_sum)
-                outelems_norm = [out0_norm, out1_norm]
+                        k_ops = _unflatten_k(k_flat)
 
-                for vhe in range_constexpr(VHELOOP):
-                    hs_base = (arith.constant(vhe * NUM_WARPS * MFMA_N, type=T.i32)
-                               + warp_id * arith.constant(MFMA_N, type=T.i32)
-                               + rowid * arith.constant(4, type=T.i32))
-                    # qhi_pos: mtp_g-based head position within kv_head group
-                    qhead = kv_h * arith.constant(query_group_size, type=T.i32) + qhi_pos
-                    _po_row = _po_row_base + qi_val
-                    po_off = (_po_row * stride_po_ql
-                              + qhead * arith.constant(HEAD_SIZE, type=T.i32)
-                              + hs_base)
+                        running_max, running_sum, out0, out1, k_next_flat = _process_block_split(
+                            phys_block,
+                            block_idx,
+                            running_max,
+                            running_sum,
+                            out0,
+                            out1,
+                            tile_token_offset,
+                            k_ops,
+                            next_k_base=next_k_base,
+                        )
 
-                    # pa_reduce_v1 expects normalized partial output from every block split.
-                    buffer_ops.buffer_store(outelems_norm[vhe], po_rsrc,
-                        po_off * arith.constant(4, type=T.i32), offset_is_bytes=True)
+                        results = yield _pack_state(running_max, running_sum, out0, out1, k_next_flat)
 
-                # ── LSE ──
-                safe_sum_lse = arith.select(running_sum > ZERO_F, running_sum,
+                    running_max, running_sum, out0, out1, _ = _unpack_state(results)
+                    SmemPtr._view_cache = None
+
+                    # ── Normalize output ──
+                    safe_sum = arith.select(running_sum > ZERO_F, running_sum,
                                             arith.constant(1.0, type=T.f32))
-                from flydsl._mlir.dialects import math as _mlir_math
-                log_sum = _mlir_math.log(safe_sum_lse, fastmath=arith.FastMathFlags.fast)
-                lse_val = running_max + log_sum
-                qhead_lse = kv_h * arith.constant(query_group_size, type=T.i32) + qhi_pos
-                _po_row_lse = _po_row_base + qi_val
-                pl_off = _po_row_lse * stride_pl_ql + qhead_lse
-                lse_as_i32 = arith.bitcast(T.i32, lse_val)
-                buffer_ops.buffer_store(lse_as_i32, pl_rsrc,
-                    pl_off * arith.constant(4, type=T.i32), offset_is_bytes=True)
+                    inv_sum = arith.constant(1.0, type=T.f32) / safe_sum
+                    out0_norm = out0 * vector.broadcast(T.f32x4, inv_sum)
+                    out1_norm = out1 * vector.broadcast(T.f32x4, inv_sum)
+                    outelems_norm = [out0_norm, out1_norm]
+
+                    for vhe in range_constexpr(VHELOOP):
+                        hs_base = (arith.constant(vhe * NUM_WARPS * MFMA_N, type=T.i32)
+                                   + warp_id * arith.constant(MFMA_N, type=T.i32)
+                                   + rowid * arith.constant(4, type=T.i32))
+                        # qhi_pos: mtp_g-based head position within kv_head group
+                        qhead = kv_h * arith.constant(query_group_size, type=T.i32) + qhi_pos
+                        _po_row = _po_row_base + qi_val
+                        po_off = (_po_row * stride_po_ql
+                                  + qhead * arith.constant(HEAD_SIZE, type=T.i32)
+                                  + hs_base)
+
+                        # pa_reduce_v1 expects normalized partial output from every block split.
+                        buffer_ops.buffer_store(outelems_norm[vhe], po_rsrc,
+                            po_off * arith.constant(4, type=T.i32), offset_is_bytes=True)
+
+                    # ── LSE ──
+                    safe_sum_lse = arith.select(running_sum > ZERO_F, running_sum,
+                                                arith.constant(1.0, type=T.f32))
+                    from flydsl._mlir.dialects import math as _mlir_math
+                    log_sum = _mlir_math.log(safe_sum_lse, fastmath=arith.FastMathFlags.fast)
+                    lse_val = running_max + log_sum
+                    qhead_lse = kv_h * arith.constant(query_group_size, type=T.i32) + qhi_pos
+                    _po_row_lse = _po_row_base + qi_val
+                    pl_off = _po_row_lse * stride_pl_ql + qhead_lse
+                    lse_as_i32 = arith.bitcast(T.i32, lse_val)
+                    buffer_ops.buffer_store(lse_as_i32, pl_rsrc,
+                        pl_off * arith.constant(4, type=T.i32), offset_is_bytes=True)
+            else:
+                # ── Early skip path: write zero partial_out and -inf LSE ──
+                _neg_inf_i32 = arith.bitcast(T.i32, NEG_INF)
+                _zero_vec = arith.constant_vector(0.0, T.f32x4)
+                _mtp_groups = math.ceil(query_length * query_group_size / 16)
+                _total_pairs = query_length * query_group_size
+                for _mtp_g in range_constexpr(_mtp_groups):
+                    _g_off = _mtp_g * 16
+                    # Recompute qi_val, qhi_pos (same logic as the if-branch)
+                    _lane_pair_raw = lane16id + arith.constant(_g_off, type=T.i32)
+                    _c_total_pairs = arith.constant(_total_pairs, type=T.i32)
+                    _c_pair_max = arith.constant(_total_pairs - 1, type=T.i32)
+                    _c_ql_m1 = arith.constant(query_length - 1, type=T.i32)
+                    _lane_pair = arith.select(_lane_pair_raw < _c_total_pairs, _lane_pair_raw, _c_pair_max)
+                    _qi_raw = _lane_pair // arith.constant(query_group_size, type=T.i32)
+                    qi_val = arith.select(_qi_raw < _c_ql_m1, _qi_raw, _c_ql_m1)
+                    qhi_pos = _lane_pair % arith.constant(query_group_size, type=T.i32)
+
+                    # Write zero partial_out for each vhe
+                    for vhe in range_constexpr(VHELOOP):
+                        hs_base = (arith.constant(vhe * NUM_WARPS * MFMA_N, type=T.i32)
+                                   + warp_id * arith.constant(MFMA_N, type=T.i32)
+                                   + rowid * arith.constant(4, type=T.i32))
+                        qhead = kv_h * arith.constant(query_group_size, type=T.i32) + qhi_pos
+                        _po_row = _po_row_base + qi_val
+                        po_off = (_po_row * stride_po_ql
+                                  + qhead * arith.constant(HEAD_SIZE, type=T.i32)
+                                  + hs_base)
+                        buffer_ops.buffer_store(_zero_vec, po_rsrc,
+                            po_off * arith.constant(4, type=T.i32), offset_is_bytes=True)
+
+                    # Write -inf LSE
+                    qhead_lse = kv_h * arith.constant(query_group_size, type=T.i32) + qhi_pos
+                    _po_row_lse = _po_row_base + qi_val
+                    pl_off = _po_row_lse * stride_pl_ql + qhead_lse
+                    buffer_ops.buffer_store(_neg_inf_i32, pl_rsrc,
+                        pl_off * arith.constant(4, type=T.i32), offset_is_bytes=True)
 
     # ── @flyc.jit launch wrapper ─────────────────────────────────────
     @flyc.jit

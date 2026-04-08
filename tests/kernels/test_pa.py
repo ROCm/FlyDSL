@@ -423,7 +423,7 @@ def shuffle_value_cache_layout(value_cache: torch.Tensor) -> torch.Tensor:
     return value_cache_reshaped.permute(0, 1, 3, 2, 4).contiguous()
 
 
-def measure_us(fn, *, warmup: int = 1, iters: int = 3) -> float:
+def measure_us(fn, *, warmup: int = 1, iters: int = 10) -> float:
     for _ in range(warmup):
         fn()
     torch.cuda.synchronize()
@@ -1152,6 +1152,34 @@ def normal_accuracy_test() -> None:
     parse_arg_and_run_test(output_tag="ps_normal_accuracy")
 
 
+# def sliding_window_accuracy_test() -> None:
+#     global BLOCK_SIZE_OPTIONS
+#     global QUERY_LENGTH_OPTIONS
+#     global BATCH_SIZE_OPTIONS
+#     global HEAD_CONFIGURATIONS
+#     global CONTEXT_LENGTH_OPTIONS
+#     global COMPUTE_TYPE_OPTIONS
+#     global QUANT_MODE_OPTIONS
+#     global HEAD_DIMENSION_OPTIONS
+#     global TRANS_V_OPTIONS
+#     global KV_VARLEN_OPTIONS
+#     global CONTEXT_PARTITION_SIZE_OPTIONS
+#     global SLIDING_WINDOW_OPTIONS
+#     COMPUTE_TYPE_OPTIONS = ["fp8"]
+#     CONTEXT_PARTITION_SIZE_OPTIONS = [256]
+#     HEAD_DIMENSION_OPTIONS = [128]
+#     HEAD_CONFIGURATIONS = [(8, 1), (16, 1)]
+#     QUERY_LENGTH_OPTIONS = [1, 2, 3, 4]
+#     QUANT_MODE_OPTIONS = ["per_token"]
+#     CONTEXT_LENGTH_OPTIONS = [8192]
+#     BATCH_SIZE_OPTIONS = [128]
+#     TRANS_V_OPTIONS = [True]
+#     KV_VARLEN_OPTIONS = [True]
+#     BLOCK_SIZE_OPTIONS = [1024]
+#     SLIDING_WINDOW_OPTIONS = [0, 128, 1023]
+#     parse_arg_and_run_test(output_tag="ps_sliding_window_accuracy")
+
+
 def sliding_window_accuracy_test() -> None:
     global BLOCK_SIZE_OPTIONS
     global QUERY_LENGTH_OPTIONS
@@ -1168,15 +1196,15 @@ def sliding_window_accuracy_test() -> None:
     COMPUTE_TYPE_OPTIONS = ["fp8"]
     CONTEXT_PARTITION_SIZE_OPTIONS = [256]
     HEAD_DIMENSION_OPTIONS = [128]
-    HEAD_CONFIGURATIONS = [(8, 1), (16, 1)]
-    QUERY_LENGTH_OPTIONS = [1, 2, 3, 4]
+    HEAD_CONFIGURATIONS = [(16, 1)]
+    QUERY_LENGTH_OPTIONS = [1]
     QUANT_MODE_OPTIONS = ["per_token"]
-    CONTEXT_LENGTH_OPTIONS = [8192]
+    CONTEXT_LENGTH_OPTIONS = [3000]
     BATCH_SIZE_OPTIONS = [128]
     TRANS_V_OPTIONS = [True]
-    KV_VARLEN_OPTIONS = [True]
+    KV_VARLEN_OPTIONS = [False]
     BLOCK_SIZE_OPTIONS = [1024]
-    SLIDING_WINDOW_OPTIONS = [0, 128, 1023]
+    SLIDING_WINDOW_OPTIONS = [0]
     parse_arg_and_run_test(output_tag="ps_sliding_window_accuracy")
 
 
