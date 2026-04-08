@@ -139,6 +139,7 @@ __all__ = [
     "tile_to_shape",
     "make_mma_atom",
     "make_copy_atom",
+    "atom_set_value",
     "copy_atom_call",
     "mma_atom_call",
     "make_tiled_copy",
@@ -665,6 +666,12 @@ def make_copy_atom(copy_op_type, elem_type, loc=None, ip=None):
         raise TypeError(f"make_copy_atom: elem_type must be NumericType, ir.Type, or int, got {type(elem_type)}")
     copy_atom_ty = CopyAtomType.get(copy_op=copy_op_type, val_bits=val_bits)
     return fly.make_copy_atom(copy_atom_ty, val_bits=val_bits, loc=loc, ip=ip)
+
+
+@traced_op
+def atom_set_value(atom, field, value, loc=None, ip=None):
+    """Update a field in a stateful atom (SSA-style, returns new atom)."""
+    return fly.atom_set_value(atom.type, atom, field, value, loc=loc, ip=ip)
 
 
 @traced_op

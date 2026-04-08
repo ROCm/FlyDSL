@@ -401,6 +401,8 @@ public:
     if (!copyAtomTy)
       return rewriter.notifyMatchFailure(op, "not a CopyAtomType");
     Type convertedTy = getTypeConverter()->convertType(copyAtomTy);
+    if (!isa<LLVM::LLVMStructType>(convertedTy))
+      return rewriter.notifyMatchFailure(op, "converted type is not an LLVM struct");
     rewriter.replaceOpWithNewOp<LLVM::UndefOp>(op, convertedTy);
     return success();
   }
@@ -416,6 +418,8 @@ public:
     if (!mmaAtomTy)
       return rewriter.notifyMatchFailure(op, "not a MmaAtomType");
     Type convertedTy = getTypeConverter()->convertType(mmaAtomTy);
+    if (!isa<LLVM::LLVMStructType>(convertedTy))
+      return rewriter.notifyMatchFailure(op, "converted type is not an LLVM struct");
     rewriter.replaceOpWithNewOp<LLVM::UndefOp>(op, convertedTy);
     return success();
   }

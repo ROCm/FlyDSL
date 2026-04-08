@@ -432,6 +432,7 @@ Type CopyAtomType::getConvertedType(MLIRContext *ctx) const {
 
 Value CopyAtomType::setAtomState(OpBuilder &builder, Location loc, Value atomStruct,
                                  Attribute fieldAttr, Value fieldValue) const {
+  assert(this->isStateful() && "CopyAtom is not stateful");
   return cast<StatefulOpTypeInterface>(getCopyOp())
       .setAtomState(builder, loc, atomStruct, fieldAttr, fieldValue);
 }
@@ -486,6 +487,7 @@ Type MmaAtomType::getConvertedType(MLIRContext *ctx) const {
 
 Value MmaAtomType::setAtomState(OpBuilder &builder, Location loc, Value atomStruct,
                                 Attribute fieldAttr, Value fieldValue) const {
+  assert(this->isStateful() && "MmaAtom is not stateful");
   return cast<StatefulOpTypeInterface>(getMmaOp())
       .setAtomState(builder, loc, atomStruct, fieldAttr, fieldValue);
 }

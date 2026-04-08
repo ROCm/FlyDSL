@@ -31,7 +31,7 @@ def Fly_StatefulOpTypeInterface : TypeInterface<"StatefulOpTypeInterface"> {
       "Return the LLVM struct type that holds the mutable state of this op.",
       "::mlir::Type", "getConvertedType", (ins "::mlir::MLIRContext *":$ctx)>,
     InterfaceMethod<
-      "Insert the given value to a field of this stateful op."
+      "Insert the given value to a field of this stateful op. "
       "Returns the updated struct value after setting the field.",
       "::mlir::Value",
       "setAtomState",
