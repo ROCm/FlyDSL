@@ -165,13 +165,13 @@ static std::optional<LLVM::AtomicBinOp> convertAtomicOp(AtomicOp binOp, bool isF
   case AtomicOp::Min:
     return isFloat ? LLVM::AtomicBinOp::fmin : LLVM::AtomicBinOp::min;
   case AtomicOp::And:
-    return LLVM::AtomicBinOp::_and;
+    return isFloat ? std::nullopt : std::optional(LLVM::AtomicBinOp::_and);
   case AtomicOp::Or:
-    return LLVM::AtomicBinOp::_or;
+    return isFloat ? std::nullopt : std::optional(LLVM::AtomicBinOp::_or);
   case AtomicOp::Inc:
-    return LLVM::AtomicBinOp::uinc_wrap;
+    return isFloat ? std::nullopt : std::optional(LLVM::AtomicBinOp::uinc_wrap);
   case AtomicOp::Dec:
-    return LLVM::AtomicBinOp::udec_wrap;
+    return isFloat ? std::nullopt : std::optional(LLVM::AtomicBinOp::udec_wrap);
   default:
     return std::nullopt;
   }
