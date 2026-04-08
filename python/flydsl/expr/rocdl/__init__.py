@@ -421,3 +421,50 @@ def pk_mul_f32(src_a_f32, src_b_f32, scale_f32):
     lo = ExtractOp(out, [], static_position=[0]).result
     hi = ExtractOp(out, [], static_position=[1]).result
     return lo, hi
+
+
+def pk_fma_f32(partial_a_f32, partial_b_f32, acc_a_f32, acc_b_f32, scale_f32):
+    """gfx9xx: v_pk_fma_f32 — fused multiply-add on two f32 pairs.
+
+    dst_lo = scale * partial_a + acc_a
+    dst_hi = scale * partial_b + acc_b
+    Returns (result_lo, result_hi) as two separate f32 values.
+    op_sel_hi:[0,1,1] broadcasts lo dword of src0 (scale) to both lanes.
+    """
+    from ..._mlir.dialects import llvm as _llvm
+    from ..._mlir import ir
+    from ..._mlir.dialects._vector_ops_gen import FromElementsOp, ExtractOp
+    f32 = ir.F32Type.get()
+    vec2_f32 = ir.VectorType.get([2], f32)
+    scale_vec = FromElementsOp(vec2_f32, [_to_ir(scale_f32), _to_ir(scale_f32)]).result
+    partial_vec = FromElementsOp(vec2_f32, [_to_ir(partial_a_f32), _to_ir(partial_b_f32)]).result
+    acc_vec = FromElementsOp(vec2_f32, [_to_ir(acc_a_f32), _to_ir(acc_b_f32)]).result
+    out = _llvm.inline_asm(
+        vec2_f32,
+        [scale_vec, partial_vec, acc_vec],
+        "v_pk_fma_f32 $0, $1, $2, $3 op_sel_hi:[0,1,1]",
+        "=&v,v,v,v",
+        has_side_effects=False,
+    )
+    lo = ExtractOp(out, [], static_position=[0]).result
+    hi = ExtractOp(out, [], static_position=[1]).result
+    return lo, hi
+
+
+def fma_f32(scale_f32, partial_f32, acc_f32):
+    """gfx9xx: v_fma_f32 — scalar fused multiply-add.
+
+    dst = scale * partial + acc
+    Returns a single f32 value.
+    """
+    from ..._mlir.dialects import llvm as _llvm
+    from ..._mlir import ir
+    f32 = ir.F32Type.get()
+    out = _llvm.inline_asm(
+        f32,
+        [_to_ir(scale_f32), _to_ir(partial_f32), _to_ir(acc_f32)],
+        "v_fma_f32 $0, $1, $2, $3",
+        "=v,v,v,0",
+        has_side_effects=False,
+    )
+    return out

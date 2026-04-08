@@ -329,7 +329,7 @@ def compile_moe_gemm1(
                 else arith.constant_vector(0.0, T.f32x4)
             )
             zero_i32_acc = arith.constant_vector(0, T.i32x4) if is_int4_groupwise else None
-            zero_f32_acc = arith.constant_vector(0.0, T.f32x4) if is_int4_fp8_groupwise else None
+            zero_f32_acc = arith.constant_vector(0.0, T.f32x4) if (is_int4_fp8_groupwise or is_int4_bf16_groupwise) else None
 
             # Layouts (use i32 values; fly.make_shape requires i32/i64, not index)
             layout_x = fx.make_layout((tokens_i32_v, k_i32_v), stride=(k_i32_v, 1))
@@ -964,14 +964,11 @@ def compile_moe_gemm1(
                         return vector.from_elements(T.f32x4, new_vals)
 
                     def _acc_scaled_f32(f32_acc_vec, f32_partial_vec, scale_val):
-                        """FP8 MFMA f32 partial -> scale -> add to f32 accumulator."""
-                        new_vals = []
-                        for ii in range_constexpr(4):
-                            vi = vector.extract(f32_partial_vec, static_position=[ii], dynamic_position=[])
-                            vf = vi * scale_val
-                            old = vector.extract(f32_acc_vec, static_position=[ii], dynamic_position=[])
-                            new_vals.append(old + vf)
-                        return vector.from_elements(T.f32x4, new_vals)
+                        """MFMA f32 partial -> scale -> add to f32 accumulator via math.fma on vector."""
+                        from flydsl._mlir.dialects._math_ops_gen import fma as _math_fma
+                        _uw = arith._to_raw
+                        scale_vec = _uw(vector.broadcast(T.f32x4, scale_val))
+                        return arith.ArithValue(_math_fma(scale_vec, _uw(f32_partial_vec), _uw(f32_acc_vec)))
 
                     if is_int4_fp8_groupwise:
                         # W4A_FP8 groupwise: per-K32 FP8 MFMA with fresh f32 acc -> scale -> f32 running acc.
@@ -1049,10 +1046,19 @@ def compile_moe_gemm1(
                                     else:
                                         packed_g, sc_g = b_gate_raw[ni], None
                                         packed_u, sc_u = b_up_raw[ni], None
-                                    bg0, bg1 = unpack_b_w4a16(packed_g, arith, vector, scale_val=sc_g, use_gfx950_cvt=use_gfx950_cvt, defer_scale16=use_gfx950_cvt)
-                                    gate_list[acc_idx] = mfma_k64(gate_list[acc_idx], a0, a1, bg0, bg1)
-                                    bu0, bu1 = unpack_b_w4a16(packed_u, arith, vector, scale_val=sc_u, use_gfx950_cvt=use_gfx950_cvt, defer_scale16=use_gfx950_cvt)
-                                    up_list[acc_idx] = mfma_k64(up_list[acc_idx], a0, a1, bu0, bu1)
+                                    if is_int4_bf16_groupwise and use_gfx950_cvt:
+                                        # Defer group scale to post-MFMA FMA: unpack without scale, MFMA into zero acc, then FMA.
+                                        bg0, bg1 = unpack_b_w4a16(packed_g, arith, vector, scale_val=None, use_gfx950_cvt=True, defer_scale16=True)
+                                        tmp = mfma_k64(zero_f32_acc, a0, a1, bg0, bg1)
+                                        gate_list[acc_idx] = _acc_scaled_f32(gate_list[acc_idx], tmp, sc_g)
+                                        bu0, bu1 = unpack_b_w4a16(packed_u, arith, vector, scale_val=None, use_gfx950_cvt=True, defer_scale16=True)
+                                        tmp = mfma_k64(zero_f32_acc, a0, a1, bu0, bu1)
+                                        up_list[acc_idx] = _acc_scaled_f32(up_list[acc_idx], tmp, sc_u)
+                                    else:
+                                        bg0, bg1 = unpack_b_w4a16(packed_g, arith, vector, scale_val=sc_g, use_gfx950_cvt=use_gfx950_cvt, defer_scale16=use_gfx950_cvt)
+                                        gate_list[acc_idx] = mfma_k64(gate_list[acc_idx], a0, a1, bg0, bg1)
+                                        bu0, bu1 = unpack_b_w4a16(packed_u, arith, vector, scale_val=sc_u, use_gfx950_cvt=use_gfx950_cvt, defer_scale16=use_gfx950_cvt)
+                                        up_list[acc_idx] = mfma_k64(up_list[acc_idx], a0, a1, bu0, bu1)
                     else:
                         for ku in range_constexpr(k_unroll):
                             b_gate_packs0, b_gate_packs1 = b_gate_tile_in[ku]
@@ -1096,6 +1102,8 @@ def compile_moe_gemm1(
                 rocdl.sched_barrier(0)
     
                 def hot_loop_scheduler():
+                    rocdl.sched_barrier(0)
+                    return
                     mfma_group = num_acc_n * 2
                     # K64 micro-step: 2x K32 MFMA per gemm.
                     mfma_total = (k_unroll * 2) * m_repeat * mfma_group
@@ -1815,7 +1823,7 @@ def compile_moe_gemm2(
                 else arith.constant_vector(0.0, T.f32x4)
             )
             zero_i32_acc = arith.constant_vector(0, T.i32x4) if is_int4_groupwise else None
-            zero_f32_acc = arith.constant_vector(0.0, T.f32x4) if is_int4_fp8_groupwise else None
+            zero_f32_acc = arith.constant_vector(0.0, T.f32x4) if (is_int4_fp8_groupwise or is_int4_bf16_groupwise) else None
 
             # A2 layout (flatten token-slot -> M; use i32 for fly.make_shape).
             topk_idx = fx.Index(topk)
@@ -2440,14 +2448,11 @@ def compile_moe_gemm2(
                         return vector.from_elements(T.f32x4, new_vals)
 
                     def _acc_scaled_f32(f32_acc_vec, f32_partial_vec, scale_val):
-                        """FP8 MFMA f32 partial -> scale -> add to f32 accumulator."""
-                        new_vals = []
-                        for ii in range_constexpr(4):
-                            vi = vector.extract(f32_partial_vec, static_position=[ii], dynamic_position=[])
-                            vf = vi * scale_val
-                            old = vector.extract(f32_acc_vec, static_position=[ii], dynamic_position=[])
-                            new_vals.append(old + vf)
-                        return vector.from_elements(T.f32x4, new_vals)
+                        """MFMA f32 partial -> scale -> add to f32 accumulator via math.fma on vector."""
+                        from flydsl._mlir.dialects._math_ops_gen import fma as _math_fma
+                        _uw = arith._to_raw
+                        scale_vec = _uw(vector.broadcast(T.f32x4, scale_val))
+                        return arith.ArithValue(_math_fma(scale_vec, _uw(f32_partial_vec), _uw(f32_acc_vec)))
 
                     if is_int4_fp8_groupwise:
                         # W4A_FP8 groupwise: per-K32 FP8 MFMA with fresh f32 acc -> scale -> f32 running acc.
@@ -2512,8 +2517,13 @@ def compile_moe_gemm2(
                                         packed, sc = b_raw[ni]
                                     else:
                                         packed, sc = b_raw[ni], None
-                                    b0, b1 = unpack_b_w4a16(packed, arith, vector, scale_val=sc, use_gfx950_cvt=use_gfx950_cvt, defer_scale16=use_gfx950_cvt)
-                                    acc_list[acc_idx] = mfma_k64(acc_list[acc_idx], a0, a1, b0, b1)
+                                    if is_int4_bf16_groupwise and use_gfx950_cvt:
+                                        b0, b1 = unpack_b_w4a16(packed, arith, vector, scale_val=None, use_gfx950_cvt=True, defer_scale16=True)
+                                        tmp = mfma_k64(zero_f32_acc, a0, a1, b0, b1)
+                                        acc_list[acc_idx] = _acc_scaled_f32(acc_list[acc_idx], tmp, sc)
+                                    else:
+                                        b0, b1 = unpack_b_w4a16(packed, arith, vector, scale_val=sc, use_gfx950_cvt=use_gfx950_cvt, defer_scale16=use_gfx950_cvt)
+                                        acc_list[acc_idx] = mfma_k64(acc_list[acc_idx], a0, a1, b0, b1)
                     else:
                         for ku in range_constexpr(k_unroll):
                             b_packs0, b_packs1 = b_tile_in[ku]
