@@ -50,12 +50,21 @@ if [ -z "${MLIR_PATH:-}" ]; then
   exit 1
 fi
 
+# ---------------------------------------------------------------------------
+# CMake generator: prefer Ninja, fall back to Unix Makefiles
+# ---------------------------------------------------------------------------
+GENERATOR="Unix Makefiles"
+if command -v ninja &> /dev/null; then
+  GENERATOR="Ninja"
+fi
+
 echo "=============================================="
 echo "FlyDSL Build"
 echo "  REPO_ROOT:  ${REPO_ROOT}"
 echo "  BUILD_DIR:  ${BUILD_DIR}"
 echo "  MLIR_PATH:  ${MLIR_PATH}"
 echo "  PARALLEL:   -j${PARALLEL_JOBS}"
+echo "  GENERATOR:  ${GENERATOR}"
 echo "=============================================="
 
 # ---------------------------------------------------------------------------
@@ -85,6 +94,7 @@ mkdir -p "${BUILD_DIR}"
 cd "${BUILD_DIR}"
 
 cmake_args=(
+  -G "${GENERATOR}"
   "${REPO_ROOT}"
   -DMLIR_DIR="${MLIR_PATH}/lib/cmake/mlir"
   -DPython3_EXECUTABLE="$(which python3)"
