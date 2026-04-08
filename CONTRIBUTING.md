@@ -119,6 +119,8 @@ bash scripts/run_benchmark.sh
 pytest tests/ -k "test_name" -v
 ```
 
+Tiered pytest markers, env vars, and examples: **[`tests/README.md`](tests/README.md)**.
+
 ### Adding Tests
 
 When adding new features or fixing bugs, include tests that cover the changes:

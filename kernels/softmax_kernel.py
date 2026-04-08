@@ -18,33 +18,23 @@ import flydsl.expr as fx
 from flydsl.compiler.kernel_function import CompilationContext
 
 from flydsl.expr import arith, vector, gpu, range_constexpr
+from flydsl.expr.arith import ArithValue
 from flydsl.expr.typing import T, Int32
 
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 
 from flydsl._mlir import ir
-from flydsl.expr import buffer_ops
 
 
 KERNEL_NAME = "softmax_kernel"
 
 import math
-from kernels.kernels_common import get_warp_size
+from kernels.kernels_common import dtype_to_elem_type, get_warp_size
 
 BLOCK_THREADS = 256
 WARP_SIZE = get_warp_size()
 VEC_WIDTH = 8
-
-
-def dtype_to_elem_type(dtype_str: str):
-    if dtype_str == "f32":
-        return T.f32
-    if dtype_str == "f16":
-        return T.f16
-    if dtype_str == "bf16":
-        return T.bf16
-    raise ValueError(f"unsupported dtype: {dtype_str}")
 
 
 def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
@@ -107,14 +97,14 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
             w = wave_reduce(val, mode)
 
             if lane == fx.Int32(0):
-                wave_idx = arith.index_cast(T.index, wave)
+                wave_idx = ArithValue(wave).index_cast(T.index)
                 SmemPtr.store(s_red_buffer, w, [wave_idx])
             gpu.barrier()
 
             if wave == fx.Int32(0):
                 in_range = lane < RED_SLOTS
                 lane_safe = in_range.select(lane, fx.Int32(0))
-                lane_safe_idx = arith.index_cast(T.index, lane_safe)
+                lane_safe_idx = ArithValue(lane_safe).index_cast(T.index)
                 v = SmemPtr.load(s_red_buffer, [lane_safe_idx])
                 z = neutral
                 ww = in_range.select(v, z)
@@ -135,36 +125,43 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
             from flydsl.expr.arith import ArithValue
 
             num_tiles = N // tile_cols
-            elem_bytes = 4 if dtype_str == "f32" else 2
-            vec_dwords = (VEC_WIDTH * elem_bytes) // 4
 
             vec_type_c = T.vec(VEC_WIDTH, compute_type)
             vec_type_e = T.vec(VEC_WIDTH, elem_type)
 
-            a_rsrc = buffer_ops.create_buffer_resource(A, max_size=True)
-            c_rsrc = buffer_ops.create_buffer_resource(C, max_size=True)
+            # ── Layout API: buffer-backed tensors + tiled access ─────
+            A_buf = fx.rocdl.make_buffer_tensor(A)
+            C_buf = fx.rocdl.make_buffer_tensor(C)
 
-            row_soffset = ArithValue(bid) * (N * elem_bytes)
-            thr_col_bytes = ArithValue(tid) * (VEC_WIDTH * elem_bytes)
+            row_a = fx.slice(A_buf, (bid, None))
+            row_c = fx.slice(C_buf, (bid, None))
 
-            def _load_vec(rsrc, col_byte_off, soff=None):
-                dw = col_byte_off >> fx.Int32(2)
-                raw = buffer_ops.buffer_load(rsrc, dw, vec_width=vec_dwords, dtype=T.i32, soffset_bytes=soff)
-                if vec_dwords == VEC_WIDTH:
-                    return raw.bitcast(vec_type_e)
-                return vector.bitcast(vec_type_e, raw)
+            a_div = fx.logical_divide(row_a, fx.make_layout(VEC_WIDTH, 1))
+            c_div = fx.logical_divide(row_c, fx.make_layout(VEC_WIDTH, 1))
 
-            def _store_vec(data, rsrc, col_byte_off, soff=None):
-                dw = col_byte_off >> fx.Int32(2)
-                buffer_ops.buffer_store(data, rsrc, dw, soffset_bytes=soff)
+            copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), elem_bits)
+            vec_reg_ty = fx.MemRefType.get(
+                elem_type, fx.LayoutType.get(VEC_WIDTH, 1), fx.AddressSpace.Register
+            )
+            vec_reg_lay = fx.make_layout(VEC_WIDTH, 1)
+
+            def _load_vec(div_tensor, idx):
+                r = fx.memref_alloca(vec_reg_ty, vec_reg_lay)
+                fx.copy_atom_call(copy_atom, fx.slice(div_tensor, (None, idx)), r)
+                return ArithValue(fx.memref_load_vec(r))
+
+            def _store_vec(val, div_tensor, idx):
+                r = fx.memref_alloca(vec_reg_ty, vec_reg_lay)
+                fx.memref_store_vec(val, r)
+                fx.copy_atom_call(copy_atom, r, fx.slice(div_tensor, (None, idx)))
 
             # 1. Load + compute local max
             row_buffer = []
             thread_max = c_neg_inf
 
             for tile_i in range_constexpr(num_tiles):
-                col_bytes = thr_col_bytes + (tile_i * tile_cols * elem_bytes)
-                vec_e = _load_vec(a_rsrc, col_bytes, soff=row_soffset)
+                idx = tid + tile_i * BLOCK_THREADS
+                vec_e = _load_vec(a_div, idx)
                 x = vec_e if dtype_str == "f32" else vec_e.extf(vec_type_c)
                 row_buffer.append(x)
                 red_max = vector.reduction(compute_type, vector.CombiningKind.MAXNUMF, x)
@@ -203,10 +200,8 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
                 else:
                     out_e = norm_vec.truncf(vec_type_e)
 
-                out_col = thr_col_bytes + (tile_i * tile_cols * elem_bytes)
-                i32_vec_ty = T.vec(vec_dwords, T.i32)
-                out_i32 = vector.bitcast(i32_vec_ty, out_e) if vec_dwords != VEC_WIDTH else out_e.bitcast(i32_vec_ty)
-                _store_vec(out_i32, c_rsrc, out_col, soff=row_soffset)
+                out_idx = tid + tile_i * BLOCK_THREADS
+                _store_vec(out_e, c_div, out_idx)
 
         else:
             # ==============================================================
@@ -214,10 +209,16 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
             # ==============================================================
             from flydsl.expr.arith import ArithValue
 
-            row_a = fx.slice(A, (bid, None))
-            row_c = fx.slice(C, (bid, None))
+            A_buf = fx.rocdl.make_buffer_tensor(A)
+            C_buf = fx.rocdl.make_buffer_tensor(C)
 
-            copy_atom_s = fx.make_copy_atom(fx.UniversalCopy(elem_bits), elem_bits)
+            row_a = fx.slice(A_buf, (bid, None))
+            row_c = fx.slice(C_buf, (bid, None))
+
+            copy_atom_s = fx.make_copy_atom(
+                fx.rocdl.BufferCopy16b() if elem_bits <= 16 else fx.rocdl.BufferCopy32b(),
+                elem_bits,
+            )
             scalar_reg_ty = fx.MemRefType.get(elem_type, fx.LayoutType.get(1, 1), fx.AddressSpace.Register)
             scalar_reg_lay = fx.make_layout(1, 1)
 
@@ -298,7 +299,7 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
         with ir.InsertionPoint(ctx.gpu_module_body):
             allocator.finalize()
 
-        idx_m = arith.index_cast(T.index, m_in)
+        idx_m = ArithValue(m_in).index_cast(T.index)
         launcher = softmax_kernel(A, C, C, C)
         launcher.launch(
             grid=(idx_m, 1, 1),

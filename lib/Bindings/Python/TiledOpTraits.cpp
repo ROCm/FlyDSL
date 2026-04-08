@@ -65,7 +65,7 @@ LayoutAttr tiledCopyGetTiledThrValLayoutDst(CopyAtomType copyAtom, LayoutAttr ti
                                            cast<LayoutAttr>(copyAtom.getThrValLayoutDst()));
 }
 
-LayoutAttr tiledMmaGetTiledThrValLayout(MmaAtomTypeInterface mmaAtom, LayoutAttr atomLayoutMNK,
+LayoutAttr tiledMmaGetTiledThrValLayout(MmaAtomType mmaAtom, LayoutAttr atomLayoutMNK,
                                         TileAttr permutationMNK, MmaOperand operandId) {
   auto *ctx = atomLayoutMNK.getContext();
   LayoutBuilder<LayoutAttr> attrBuilder(ctx);
@@ -165,7 +165,7 @@ LayoutAttr tiledMmaGetTiledThrValLayout(MmaAtomTypeInterface mmaAtom, LayoutAttr
   return LayoutAttr::get(finalShape, finalStride);
 }
 
-IntTupleAttr tiledMmaGetTileSizeMNK(MmaAtomTypeInterface mmaAtom, LayoutAttr atomLayoutMNK,
+IntTupleAttr tiledMmaGetTileSizeMNK(MmaAtomType mmaAtom, LayoutAttr atomLayoutMNK,
                                     TileAttr permutationMNK) {
   auto *ctx = atomLayoutMNK.getContext();
   LayoutBuilder<LayoutAttr> attrBuilder(ctx);
@@ -187,7 +187,7 @@ IntTupleAttr tiledMmaGetTileSizeMNK(MmaAtomTypeInterface mmaAtom, LayoutAttr ato
   return IntTupleAttr::get(ArrayAttr::get(ctx, tileSizeElems));
 }
 
-LayoutAttr tiledMmaGetThrLayoutVMNK(MmaAtomTypeInterface mmaAtom, LayoutAttr atomLayoutMNK) {
+LayoutAttr tiledMmaGetThrLayoutVMNK(MmaAtomType mmaAtom, LayoutAttr atomLayoutMNK) {
   auto *ctx = atomLayoutMNK.getContext();
   LayoutBuilder<LayoutAttr> attrBuilder(ctx);
 

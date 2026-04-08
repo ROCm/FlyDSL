@@ -1377,6 +1377,10 @@ def compile_moe_gemm2(
     _ck_lds128 = os.environ.get("FLYDSL_CK_LDS128", "1") in ("1", "true", "True", "YES", "yes")
     pad_k = 0 if _ck_lds128 else 8
     lds_stride = tile_k + pad_k
+    # gfx950+ has buffer_atomic_pk_add_bf16 → bf16 can use buffer atomics (same as f16).
+    # gfx942 only has global_atomic_pk_add_bf16 → must use global atomics with raw pointer.
+    _has_buffer_atomic_bf16 = str(gpu_arch).startswith(("gfx95", "gfx12"))
+    _needs_global_atomic_bf16 = out_is_bf16 and not _has_buffer_atomic_bf16
     if out_is_bf16:
         if not supports_bf16_global_atomics(gpu_arch):
             raise ValueError(
@@ -2291,12 +2295,11 @@ def compile_moe_gemm2(
                             "FLYDSL_MOE_STAGE2_CSHUFFLE=1 but lds_out is not allocated/aliased."
                         )
 
-                    # For bf16 global atomics, precompute the output base address once.
-                    # (We still need an inttoptr per atomic unless we can rely on GEPOp; keep the
-                    # stable path here.)
+                    # For bf16 global atomics (gfx942 only), precompute the output base address.
+                    # gfx950+ has buffer_atomic_pk_add_bf16, so bf16 uses buffer atomics there.
                     out_base_idx = None
-                    if out_is_bf16:
-                        out_base_idx = memref.extract_aligned_pointer_as_index(arg_out)
+                    if _needs_global_atomic_bf16:
+                        out_base_idx = buffer_ops.extract_base_index(arg_out)
 
                     def write_row_to_lds(
                         *,
@@ -2381,10 +2384,9 @@ def compile_moe_gemm2(
                         col_i32 = arith.index_cast(T.i32, col_g0)
                         idx_elem = idx0 + col_i32
                         idx_elem_even = idx_elem & mask_even_i32
-                        if out_is_bf16:
+                        if _needs_global_atomic_bf16:
+                            # gfx942: no buffer_atomic_pk_add_bf16, use global atomicrmw fadd
                             if bool(accumulate):
-                                # Use global atomicrmw fadd on <2 x bf16> (CK path).
-                                # Row-valid gating is handled at the row level by c_shuffle_epilog via `precompute_row`.
                                 byte_off = idx_elem_even * c2_i32
                                 byte_off_idx = arith.index_cast(T.index, byte_off)
                                 ptr_addr_idx = out_base_idx + byte_off_idx
@@ -2400,9 +2402,9 @@ def compile_moe_gemm2(
                                     alignment=4,
                                 )
                             else:
-                                # Scatter store (no atomic): store bf16x(e_vec) directly via buffer store.
                                 buffer_ops.buffer_store(frag, out_rsrc, idx_elem_even)
                         else:
+                            # f16, or bf16 on gfx950+ (has buffer_atomic_pk_add_bf16)
                             byte_off = idx_elem_even * c2_i32
                             if bool(accumulate):
                                 atomic_add_f16x2(frag, byte_off)
@@ -2544,19 +2546,19 @@ def compile_moe_reduction(
             valid_mask: fx.Tensor,
             i32_m_tokens: fx.Int32,
         ):
-            m_tokens = arith.index_cast(T.index, i32_m_tokens)
+            m_tokens = fx.Index(i32_m_tokens)
             c_topk = fx.Index(topk)
             c_model_dim = fx.Index(model_dim)
-            c_elem_bytes = arith.index(4 if dtype_str == "f32" else 2)
-            x_nbytes_idx = m_tokens * c_topk * c_model_dim * c_elem_bytes
-            y_nbytes_idx = m_tokens * c_model_dim * c_elem_bytes
             mask_nbytes_idx = m_tokens * c_topk
-            x_rsrc = buffer_ops.create_buffer_resource(
-                X, max_size=False, num_records_bytes=x_nbytes_idx
-            )
-            y_rsrc = buffer_ops.create_buffer_resource(
-                Y, max_size=False, num_records_bytes=y_nbytes_idx
-            )
+            elem_bits = 32 if dtype_str == "f32" else 16
+            copy_vec_width = 128 // elem_bits  # 8 for f16/bf16, 4 for f32
+            n_sub = VEC_WIDTH // copy_vec_width  # 1 for f16/bf16, 2 for f32
+            # Buffer-backed tensors via layout API (all dtypes)
+            X_buf = fx.rocdl.make_buffer_tensor(X)
+            Y_buf = fx.rocdl.make_buffer_tensor(Y)
+            # Scalar buffer resources for tail path and mask
+            x_rsrc = buffer_ops.create_buffer_resource(X, max_size=True)
+            y_rsrc = buffer_ops.create_buffer_resource(Y, max_size=True)
             mask_rsrc = buffer_ops.create_buffer_resource(
                 valid_mask, max_size=False, num_records_bytes=mask_nbytes_idx
             )
@@ -2565,10 +2567,8 @@ def compile_moe_reduction(
             tile_idx = gpu.block_id("y")
             tid = gpu.thread_id("x")
 
-            # Guard: token in range
-            token_i32 = arith.index_cast(i32_type(), token_idx)
-            m_tokens_i32 = arith.index_cast(i32_type(), m_tokens)
-            tok_ok = arith.cmpi(arith.CmpIPredicate.ult, token_i32, m_tokens_i32)
+            # Guard: token in range (Index is unsigned → auto ult)
+            tok_ok = token_idx < m_tokens
             _if_tok = scf.IfOp(tok_ok)
             with _if_then(_if_tok):
                 tile_cols = BLOCK_SIZE * VEC_WIDTH
@@ -2577,81 +2577,107 @@ def compile_moe_reduction(
 
                 col_base = tile_idx * c_tile_cols + tid * c_vecw
 
-                # Guard: any work in bounds
-                col_ok = arith.cmpi(arith.CmpIPredicate.ult,
-                    arith.index_cast(i32_type(), col_base),
-                    arith.index_cast(i32_type(), c_model_dim),
-                )
+                # Guard: any work in bounds (Index < → ult)
+                col_ok = col_base < c_model_dim
                 _if_col = scf.IfOp(col_ok)
                 with _if_then(_if_col):
-                    acc = [arith.constant(0.0, type=compute_type()) for _ in range(VEC_WIDTH)]
-
-                    # Fast path: full vector in-bounds -> vector load/store.
-                    end_ok = arith.cmpi(arith.CmpIPredicate.ule,
-                        arith.index_cast(i32_type(), col_base + c_vecw),
-                        arith.index_cast(i32_type(), c_model_dim),
-                    )
+                    # Fast path: full vector in-bounds (Index <= → ule)
+                    end_ok = col_base + c_vecw <= c_model_dim
                     _if_full = scf.IfOp(end_ok, has_else=True)
                     with _if_then(_if_full):
-                        c0_i8 = arith.constant(0, type=i8_type())
-                        token_base = token_idx * c_topk
-                        for lane in range_constexpr(VEC_WIDTH):
-                            col = col_base + fx.Index(lane)
-                            a = arith.constant(0.0, type=compute_type())
-                            for k in range_constexpr(topk):
-                                k_idx = fx.Index(k)
-                                x_idx = (token_base + k_idx) * c_model_dim + col
-                                x_idx_i32 = arith.index_cast(i32_type(), x_idx)
+                        # ── Vector path via layout API (all dtypes) ──
+                        # fx.copy auto-iterates when atom width < VEC_WIDTH
+                        # (e.g. f32: BufferCopy128b handles 4, fx.copy issues 2 calls for 8)
+                        copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), elem_bits)
+                        vec_type_c = T.vec(copy_vec_width, compute_type())
+                        vec_type_e = T.vec(copy_vec_width, elem_type())
+
+                        acc_vecs = [
+                            vector.broadcast(vec_type_c, fx.Float32(0.0).ir_value())
+                            for _ in range(n_sub)
+                        ]
+                        reg_ty = fx.MemRefType.get(
+                            elem_type(), fx.LayoutType.get(copy_vec_width, 1), fx.AddressSpace.Register
+                        )
+                        reg_lay = fx.make_layout(copy_vec_width, 1)
+
+                        tok_i32 = fx.Int32(token_idx)
+                        tile_i32 = fx.Int32(tile_idx)
+                        tid_i32 = fx.Int32(tid)
+
+                        for k in range_constexpr(topk):
+                            # X[token, k, :] → tile → thread's VEC_WIDTH slice
+                            x_row = X_buf[tok_i32, fx.Int32(k), None]
+                            x_tiled = fx.logical_divide(x_row, fx.make_layout(tile_cols, 1))
+                            x_div = fx.logical_divide(x_tiled[None, tile_i32], fx.make_layout(VEC_WIDTH, 1))
+                            x_thread = x_div[None, tid_i32]
+
+                            if use_mask:
+                                m_idx_i32 = fx.Int32(token_idx * c_topk + fx.Index(k))
+                                mv = buffer_ops.buffer_load(mask_rsrc, m_idx_i32, vec_width=1, dtype=i8_type())
+                                mv_ok = mv != fx.Int8(0)
+
+                            if n_sub > 1:
+                                x_inner = fx.logical_divide(x_thread, fx.make_layout(copy_vec_width, 1))
+                            for si in range_constexpr(n_sub):
+                                src = x_inner[None, fx.Int32(si)] if n_sub > 1 else x_thread
+                                r = fx.memref_alloca(reg_ty, reg_lay)
+                                fx.copy_atom_call(copy_atom, src, r)
+                                vec_e = fx.memref_load_vec(r)
+
                                 if use_mask:
-                                    m_idx = token_base + k_idx
-                                    m_idx_i32 = arith.index_cast(i32_type(), m_idx)
-                                    mv = buffer_ops.buffer_load(mask_rsrc, m_idx_i32, vec_width=1, dtype=i8_type())
-                                    mv_ok = arith.cmpi(arith.CmpIPredicate.ne, mv, c0_i8)
-                                    v = arith.select(
-                                        mv_ok,
-                                        buffer_ops.buffer_load(x_rsrc, x_idx_i32, vec_width=1, dtype=elem_type()),
-                                        arith.constant(0.0, type=elem_type()),
-                                    )
+                                    zero_e = vector.broadcast(vec_type_e, arith.constant(0.0, type=elem_type()))
+                                    vec_e = mv_ok.select(vec_e, zero_e)
+
+                                if elem_bits < 32:
+                                    vec_c = vec_e.extf(vec_type_c)
                                 else:
-                                    v = buffer_ops.buffer_load(x_rsrc, x_idx_i32, vec_width=1, dtype=elem_type())
-                                v_cast = v
-                                if dtype_str in ("f16", "bf16"):
-                                    v_cast = arith.extf(compute_type(), v)
-                                a = a + v_cast
-                            v = a
-                            out_v = v
-                            if dtype_str in ("f16", "bf16"):
-                                out_v = arith.trunc_f(elem_type(), v)
-                            y_idx = token_idx * c_model_dim + col
-                            y_idx_i32 = arith.index_cast(i32_type(), y_idx)
-                            buffer_ops.buffer_store(out_v, y_rsrc, y_idx_i32)
+                                    vec_c = vec_e
+                                acc_vecs[si] = acc_vecs[si] + vec_c
+
+                        # ── Store results ──
+                        if n_sub > 1:
+                            y_row = Y_buf[tok_i32, None]
+                            y_tiled = fx.logical_divide(y_row, fx.make_layout(tile_cols, 1))
+                            y_div = fx.logical_divide(y_tiled[None, tile_i32], fx.make_layout(VEC_WIDTH, 1))
+                            y_inner = fx.logical_divide(y_div[None, tid_i32], fx.make_layout(copy_vec_width, 1))
+
+                        for si in range_constexpr(n_sub):
+                            out_vec = acc_vecs[si]
+                            if elem_bits < 32:
+                                out_vec = out_vec.truncf(vec_type_e)
+
+                            if n_sub > 1:
+                                dst = y_inner[None, fx.Int32(si)]
+                            else:
+                                y_row = Y_buf[tok_i32, None]
+                                y_tiled = fx.logical_divide(y_row, fx.make_layout(tile_cols, 1))
+                                y_div = fx.logical_divide(y_tiled[None, tile_i32], fx.make_layout(VEC_WIDTH, 1))
+                                dst = y_div[None, tid_i32]
+
+                            r_out = fx.memref_alloca(reg_ty, reg_lay)
+                            fx.memref_store_vec(out_vec, r_out)
+                            fx.copy_atom_call(copy_atom, r_out, dst)
 
                     with _if_else(_if_full):
                         # Tail path: scalar load/store per lane.
                         for lane in range_constexpr(VEC_WIDTH):
                             col = col_base + fx.Index(lane)
-                            lane_ok = arith.cmpi(arith.CmpIPredicate.ult,
-                                arith.index_cast(i32_type(), col),
-                                arith.index_cast(i32_type(), c_model_dim),
-                            )
+                            lane_ok = col < c_model_dim
                             _if_lane = scf.IfOp(lane_ok)
                             with _if_then(_if_lane):
                                 a = arith.constant(0.0, type=compute_type())
                                 token_base = token_idx * c_topk
-                                c0_i8 = arith.constant(0, type=i8_type())
                                 for k in range_constexpr(topk):
                                     k_idx = fx.Index(k)
-                                    x_idx = (token_base + k_idx) * c_model_dim + col
-                                    x_idx_i32 = arith.index_cast(i32_type(), x_idx)
+                                    x_idx_i32 = fx.Int32((token_base + k_idx) * c_model_dim + col)
+                                    v = arith.constant(0.0, type=elem_type())
                                     if use_mask:
-                                        m_idx = token_base + k_idx
-                                        m_idx_i32 = arith.index_cast(i32_type(), m_idx)
+                                        m_idx_i32 = fx.Int32(token_base + k_idx)
                                         mv = buffer_ops.buffer_load(
                                             mask_rsrc, m_idx_i32, vec_width=1, dtype=i8_type()
                                         )
-                                        mv_ok = arith.cmpi(arith.CmpIPredicate.ne, mv, c0_i8)
-                                        v = arith.select(
-                                            mv_ok,
+                                        v = (mv != fx.Int8(0)).select(
                                             buffer_ops.buffer_load(x_rsrc, x_idx_i32, vec_width=1, dtype=elem_type()),
                                             arith.constant(0.0, type=elem_type()),
                                         )
@@ -2659,16 +2685,14 @@ def compile_moe_reduction(
                                         v = buffer_ops.buffer_load(
                                             x_rsrc, x_idx_i32, vec_width=1, dtype=elem_type()
                                         )
-                                    v_cast = v
                                     if dtype_str in ("f16", "bf16"):
-                                        v_cast = arith.extf(compute_type(), v)
-                                    a = a + v_cast
+                                        v = v.extf(compute_type())
+                                    a = a + v
 
                                 out = a
                                 if dtype_str in ("f16", "bf16"):
-                                    out = arith.trunc_f(elem_type(), out)
-                                y_idx = token_idx * c_model_dim + col
-                                y_idx_i32 = arith.index_cast(i32_type(), y_idx)
+                                    out = out.truncf(elem_type())
+                                y_idx_i32 = fx.Int32(token_idx * c_model_dim + col)
                                 buffer_ops.buffer_store(out, y_rsrc, y_idx_i32)
 
     # ── Host launcher (flyc.jit + .launch) ────────────────────────────────
@@ -2683,7 +2707,7 @@ def compile_moe_reduction(
         i32_m_tokens: fx.Int32,
         stream: fx.Stream,
     ):
-        gx = arith.index_cast(T.index, i32_m_tokens)
+        gx = fx.Index(i32_m_tokens)
         moe_reduction_kernel(X, Y, valid_mask, i32_m_tokens).launch(
             grid=(gx, gy_static, 1),
             block=(BLOCK_SIZE, 1, 1),

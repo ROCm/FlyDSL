@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2025 FlyDSL Project Contributors
 
-#ifndef FLYDSL_LIB_CONVERSION_FLYTOROCDL_BUFFERFATPTR_H
-#define FLYDSL_LIB_CONVERSION_FLYTOROCDL_BUFFERFATPTR_H
+#ifndef FLYDSL_DIALECT_FLYROCDL_UTILS_BUFFERFATPTR_H
+#define FLYDSL_DIALECT_FLYROCDL_UTILS_BUFFERFATPTR_H
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
@@ -95,4 +95,4 @@ public:
 
 } // namespace mlir::fly
 
-#endif // FLYDSL_LIB_CONVERSION_FLYTOROCDL_BUFFERFATPTR_H
+#endif // FLYDSL_DIALECT_FLYROCDL_UTILS_BUFFERFATPTR_H

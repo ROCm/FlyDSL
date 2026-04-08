@@ -113,12 +113,19 @@ class CompiledArtifact:
     def __call__(self, *args, **kwargs):
         func_exe = self._get_func_exe()
 
+        owned: list = []
         all_c_ptrs: List[ctypes.c_void_p] = []
         for arg in args:
-            all_c_ptrs.extend(fly_pointers(arg))
+            ptrs = fly_pointers(arg)
+            owned.append(ptrs)
+            owned.append(arg)
+            all_c_ptrs.extend(ptrs)
 
         packed_args = self._packer.pack(all_c_ptrs)
-        return func_exe(packed_args)
+
+        result = func_exe(packed_args)
+        del owned
+        return result
 
     def dump(self, compiled: bool = True):
         if compiled:

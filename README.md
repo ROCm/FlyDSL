@@ -108,6 +108,8 @@ bash scripts/run_tests.sh
 bash scripts/run_benchmark.sh
 ```
 
+**Test layout, pytest markers, and environment variables** used by the suite are documented in [**`tests/README.md`**](tests/README.md) .
+
 ### Quick reference
 
 ```bash
@@ -150,7 +152,7 @@ bash scripts/build.sh -j64
 
 - **Kernel cache issues** (stale results after code changes)
   - Clear: `rm -rf ~/.flydsl/cache`
-  - Or disable: `export FLYDSL_RUNTIME_ENABLE_CACHE=0`
+  - Or disable disk cache: `export FLYDSL_RUNTIME_ENABLE_CACHE=0` (in-memory cache remains active)
 
 ## 📐 Layout System
 
@@ -252,9 +254,9 @@ thr_layout = fx.make_layout((THR_M, THR_N), (1, THR_M))
 val_layout = fx.make_layout((VAL_M, VAL_N), (1, VAL_M))
 
 # Create tiled copy with vectorized atoms
-copy_atom = fx.make_copy_atom(fx.CopyAtomUniversalCopyType.get(32))
+copy_atom = fx.make_copy_atom(fx.UniversalCopy32b(), fx.Float32)
 layout_thr_val = fx.raked_product(thr_layout, val_layout)
-tile_mn = fx.make_tile([fx.make_layout(THR_M, 1), fx.make_layout(VAL_M, 1)])
+tile_mn = fx.make_tile(fx.make_layout(THR_M, 1), fx.make_layout(VAL_M, 1))
 tiled_copy = fx.make_tiled_copy(copy_atom, layout_thr_val, tile_mn)
 
 # Partition tensor across blocks and threads
@@ -294,10 +296,14 @@ def vectorAddKernel(
     tB = fx.slice(tB, (None, bid))
     tC = fx.slice(tC, (None, bid))
 
+    tA = fx.logical_divide(tA, fx.make_layout(1, 1))
+    tB = fx.logical_divide(tB, fx.make_layout(1, 1))
+    tC = fx.logical_divide(tC, fx.make_layout(1, 1))
+
     # Load to registers, compute, store via copy atoms
     RABTy = fx.MemRefType.get(fx.T.f32(), fx.LayoutType.get(1, 1),
                               fx.AddressSpace.Register)
-    copyAtom = fx.make_copy_atom(fx.CopyAtomUniversalCopyType.get(32))
+    copyAtom = fx.make_copy_atom(fx.UniversalCopy32b(), fx.Float32)
     rA = fx.memref_alloca(RABTy, fx.make_layout(1, 1))
     rB = fx.memref_alloca(RABTy, fx.make_layout(1, 1))
     rC = fx.memref_alloca(RABTy, fx.make_layout(1, 1))
@@ -312,8 +318,8 @@ def vectorAddKernel(
 @flyc.jit
 def vectorAdd(
     A: fx.Tensor, B: fx.Tensor, C,
-    n: fx.Int32,
-    const_n: fx.Constexpr[int],
+    n: fx.Int32,  # dynamic int32
+    const_n: fx.Constexpr[int],  # static int32, affects JIT cache-key
     stream: fx.Stream = fx.Stream(None),
 ):
     block_dim = 64

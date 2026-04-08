@@ -179,6 +179,7 @@ def make_tensor_descriptor_2d(
     workgroup_mask: Union[int, "ir.Value"] = 0,
     lds_byte_offset=None,
     for_store: bool = False,
+    atomic_barrier_enable: bool = False,
 ) -> TDMDescriptor2D:
     """Build a 2D TDM descriptor for tensor_load_to_lds_d2.
 
@@ -213,6 +214,17 @@ def make_tensor_descriptor_2d(
                        int: compile-time constant folded into descriptor.
                        ir.Value (i32 SGPR): runtime mask, ORed with upper config bits.
                        0 = no multicast (default).
+        lds_byte_offset: Optional extra LDS byte offset applied after the per-wave
+                       LDS address is computed. Use this when multiple descriptors
+                       share the same LDS backing allocation.
+        for_store:      Build a descriptor for the LDS->global store path. When
+                       enabled, any LDS padding is folded into the tile extent
+                       because stores do not perform an implicit de-padding step.
+        atomic_barrier_enable: Set the descriptor's hardware auto-barrier bit.
+                       Leave this disabled unless the kernel is intentionally
+                       relying on TDM atomic-barrier semantics; this helper keeps
+                       the encoded atomic-barrier address at zero, so all
+                       participating waves must agree on that protocol.
 
     Returns:
         TDMDescriptor2D with dgroup0 and dgroup1 ready for tensor_load_2d.
@@ -326,9 +338,10 @@ def make_tensor_descriptor_2d(
         pad_enable = 0
 
     # sgpr0: config bitfields
+    _abe = 1 if atomic_barrier_enable else 0
     g1_s0_upper = (
         (data_size_code << 16)      # data_size [17:16]
-        | (0 << 18)                   # atomic_barrier_enable
+        | (_abe << 18)                # atomic_barrier_enable
         | (0 << 19)                   # iterate_enable
         | (pad_enable << 20)          # pad_enable
         | (0 << 21)                   # early_timeout

@@ -17,7 +17,7 @@ def copy_kernel(
 
     block_m = 8
     block_n = 24
-    tile = fx.make_tile([fx.make_layout(block_m, 1), fx.make_layout(block_n, 1)])
+    tile = fx.make_tile(fx.make_layout(block_m, 1), fx.make_layout(block_n, 1))
 
     A = fx.rocdl.make_buffer_tensor(A)
     B = fx.rocdl.make_buffer_tensor(B)
@@ -30,7 +30,6 @@ def copy_kernel(
     thr_layout = fx.make_layout((4, 1), (1, 1))
     val_layout = fx.make_layout((1, 8), (1, 1))
     copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), fx.Float32)
-    layout_thr_val = fx.logical_product(thr_layout, val_layout)
     layout_thr_val = fx.raked_product(thr_layout, val_layout)
 
     tile_mn = fx.make_tile(4, 8)

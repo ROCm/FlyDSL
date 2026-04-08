@@ -12,6 +12,8 @@ import textwrap
 
 import pytest
 
+pytestmark = [pytest.mark.l1b_target_dialect, pytest.mark.rocm_lower]
+
 
 def _find_fly_opt():
     if "FLY_OPT" in os.environ:

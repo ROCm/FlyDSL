@@ -483,7 +483,7 @@ Cache is invalidated when:
 - `Constexpr` values change
 - FlyDSL or LLVM version changes
 
-### 9.3 Disabling Cache
+### 9.3 Disabling Disk Cache
 
 ```bash
 FLYDSL_RUNTIME_ENABLE_CACHE=0 python my_script.py

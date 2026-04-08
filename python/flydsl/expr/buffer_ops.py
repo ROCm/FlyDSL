@@ -75,6 +75,7 @@ __all__ = [
     'buffer_load',
     'buffer_store',
     'BufferResourceDescriptor',
+    'extract_base_index',
 ]
 
 
@@ -136,6 +137,21 @@ def create_llvm_ptr(value, address_space: int = 0) -> ir.Value:
         value = _unwrap_value(std_arith.IndexCastOp(i64_type, value).result)
     ptr_type = ir.Type.parse(f'!llvm.ptr<{address_space}>')
     return llvm.IntToPtrOp(ptr_type, value).result
+
+
+def extract_base_index(tensor, address_space: int = 1) -> ir.Value:
+    """Extract the base address of a fly.memref as an index value.
+
+    Inverse of :func:`create_llvm_ptr` (index -> ptr). Useful when ISA
+    requires a raw pointer instead of a buffer resource descriptor
+    (e.g. global_atomic_pk_add_bf16 on gfx942).
+    """
+    from .._mlir.dialects import fly as _fly
+    raw = _unwrap_value(tensor)
+    ptr_type = ir.Type.parse(f'!llvm.ptr<{address_space}>')
+    ptr = _fly.extract_aligned_pointer_as_index(ptr_type, raw)
+    i64_val = llvm.PtrToIntOp(ir.IntegerType.get_signless(64), ptr).result
+    return _unwrap_value(std_arith.IndexCastOp(ir.IndexType.get(), i64_val).result)
 
 
 def get_element_ptr(
