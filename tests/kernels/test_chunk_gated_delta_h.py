@@ -202,7 +202,7 @@ def _normalize_opt_v_new(vn_opt):
 class TestCorrectness:
     """Correctness against PyTorch reference."""
 
-    @pytest.mark.parametrize("full_prompt_len", [1000])
+    @pytest.mark.parametrize("full_prompt_len", FULL_PROMPT_LENS)
     def test_correctness_flydsl(self, full_prompt_len):
         context_lens = _build_context_lens(full_prompt_len)
         k, w_orig, u_orig, w_c, u_c, g, h0, cu, _ = _make_inputs(context_lens)
@@ -225,7 +225,7 @@ class TestCorrectness:
             fs_fly.float(), fs_ref.float(), atol=1e-1, rtol=1e-1)
 
     @pytest.mark.skipif(not TRITON_AVAILABLE, reason="Triton opt3 kernel not available")
-    @pytest.mark.parametrize("full_prompt_len", [1000])
+    @pytest.mark.parametrize("full_prompt_len", FULL_PROMPT_LENS)
     def test_correctness_triton_opt3(self, full_prompt_len):
         context_lens = _build_context_lens(full_prompt_len)
         k, w_orig, u_orig, w_c, u_c, g, h0, cu, _ = _make_inputs(context_lens)
@@ -248,7 +248,7 @@ class TestCorrectness:
             fs_tri.float(), fs_ref.float(), atol=1e-1, rtol=1e-1)
 
     @pytest.mark.skipif(not TRITON_AVAILABLE, reason="Triton opt3 kernel not available")
-    @pytest.mark.parametrize("full_prompt_len", [1000])
+    @pytest.mark.parametrize("full_prompt_len", FULL_PROMPT_LENS)
     def test_correctness_flydsl_vs_triton(self, full_prompt_len):
         """Direct comparison between FlyDSL and Triton opt3 kernels."""
         context_lens = _build_context_lens(full_prompt_len)
