@@ -24,6 +24,25 @@ def Fly_MayStaticInterface {
   ];
 }
 
+def Fly_StatefulOpTypeInterface : TypeInterface<"StatefulOpTypeInterface"> {
+  let cppNamespace = "::mlir::fly";
+  let methods = [
+    InterfaceMethod<
+      "Return the LLVM struct type that holds the mutable state of this op.",
+      "::mlir::Type", "getConvertedType", (ins "::mlir::MLIRContext *":$ctx)>,
+    InterfaceMethod<
+      "Insert the given value to a field of this stateful op."
+      "Returns the updated struct value after setting the field.",
+      "::mlir::Value",
+      "setAtomState",
+      (ins "::mlir::OpBuilder &":$builder,
+           "::mlir::Location":$loc,
+           "::mlir::Value":$atomStruct,
+           "::mlir::Attribute":$fieldAttr,
+           "::mlir::Value":$fieldValue)>
+  ];
+}
+
 def Fly_NestedAttrInterface : AttrInterface<"NestedAttrInterface"> {
   let cppNamespace = "::mlir::fly";
   let methods = Fly_NestedInterfaceMethods.methods;
@@ -48,7 +67,6 @@ def Fly_MayStaticTypeInterface : TypeInterface<"MayStaticTypeInterface"> {
       (ins "::mlir::OpBuilder &":$builder, "::mlir::Location":$loc, "::mlir::Value":$currentValue)>
   ]);
 }
-
 
 def Fly_CopyOpTypeInterface : TypeInterface<"CopyOpTypeInterface", [Fly_MayStaticTypeInterface]> {
   let cppNamespace = "::mlir::fly";

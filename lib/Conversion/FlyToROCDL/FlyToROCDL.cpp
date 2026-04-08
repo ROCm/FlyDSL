@@ -391,6 +391,92 @@ public:
   }
 };
 
+class MakeCopyAtomOpLowering : public OpConversionPattern<MakeCopyAtomOp> {
+public:
+  using OpConversionPattern<MakeCopyAtomOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(MakeCopyAtomOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    auto copyAtomTy = dyn_cast<CopyAtomType>(op.getResult().getType());
+    if (!copyAtomTy)
+      return rewriter.notifyMatchFailure(op, "not a CopyAtomType");
+    Type convertedTy = getTypeConverter()->convertType(copyAtomTy);
+    rewriter.replaceOpWithNewOp<LLVM::UndefOp>(op, convertedTy);
+    return success();
+  }
+};
+
+class MakeMmaAtomOpLowering : public OpConversionPattern<MakeMmaAtomOp> {
+public:
+  using OpConversionPattern<MakeMmaAtomOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(MakeMmaAtomOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    auto mmaAtomTy = dyn_cast<MmaAtomType>(op.getResult().getType());
+    if (!mmaAtomTy)
+      return rewriter.notifyMatchFailure(op, "not a MmaAtomType");
+    Type convertedTy = getTypeConverter()->convertType(mmaAtomTy);
+    rewriter.replaceOpWithNewOp<LLVM::UndefOp>(op, convertedTy);
+    return success();
+  }
+};
+
+class MakeTiledCopyOpLowering : public OpConversionPattern<MakeTiledCopyOp> {
+public:
+  using OpConversionPattern<MakeTiledCopyOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(MakeTiledCopyOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    rewriter.replaceOp(op, adaptor.getCopyAtom());
+    return success();
+  }
+};
+
+class MakeTiledMmaOpLowering : public OpConversionPattern<MakeTiledMmaOp> {
+public:
+  using OpConversionPattern<MakeTiledMmaOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(MakeTiledMmaOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    rewriter.replaceOp(op, adaptor.getMmaAtom());
+    return success();
+  }
+};
+
+class AtomSetValueOpLowering : public OpConversionPattern<AtomSetValueOp> {
+public:
+  using OpConversionPattern<AtomSetValueOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(AtomSetValueOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    Type origAtomTy = op.getAtom().getType();
+    Attribute fieldAttr = op.getField();
+    Location loc = op.getLoc();
+
+    Value structVal = adaptor.getAtom();
+    Value fieldVal = adaptor.getValue();
+    Value result;
+
+    if (auto copyAtomTy = dyn_cast<CopyAtomType>(origAtomTy)) {
+      if (!copyAtomTy.isStateful())
+        return rewriter.notifyMatchFailure(op, "CopyAtom is not stateful");
+      result = copyAtomTy.setAtomState(rewriter, loc, structVal, fieldAttr, fieldVal);
+    } else if (auto mmaAtomTy = dyn_cast<MmaAtomType>(origAtomTy)) {
+      if (!mmaAtomTy.isStateful())
+        return rewriter.notifyMatchFailure(op, "MmaAtom is not stateful");
+      result = mmaAtomTy.setAtomState(rewriter, loc, structVal, fieldAttr, fieldVal);
+    } else {
+      return rewriter.notifyMatchFailure(op, "atom is not CopyAtomType or MmaAtomType");
+    }
+
+    if (!result)
+      return rewriter.notifyMatchFailure(op, "setAtomState failed");
+
+    rewriter.replaceOp(op, result);
+    return success();
+  }
+};
+
 class CopyAtomCallLowering : public OpConversionPattern<CopyAtomCall> {
 public:
   using OpConversionPattern<CopyAtomCall>::OpConversionPattern;
@@ -544,6 +630,22 @@ public:
       unsigned as = mapToLLVMAddressSpace(flyPtrTy.getAddressSpace().getValue());
       return LLVM::LLVMPointerType::get(flyPtrTy.getContext(), as);
     });
+    addConversion([&](fly::CopyAtomType atomTy) -> Type {
+      if (atomTy.isStateful())
+        return atomTy.getConvertedType(atomTy.getContext());
+      return LLVM::LLVMStructType::getLiteral(atomTy.getContext(), {});
+    });
+    addConversion([&](fly::MmaAtomType atomTy) -> Type {
+      if (atomTy.isStateful())
+        return atomTy.getConvertedType(atomTy.getContext());
+      return LLVM::LLVMStructType::getLiteral(atomTy.getContext(), {});
+    });
+    addConversion([&](fly::TiledCopyType tiledTy) -> Type {
+      return convertType(tiledTy.getCopyAtom());
+    });
+    addConversion([&](fly::TiledMmaType tiledTy) -> Type {
+      return convertType(tiledTy.getMmaAtom());
+    });
   }
 };
 
@@ -585,7 +687,6 @@ public:
 
     // Constructors
     target.addLegalOp<StaticOp, MakeIntTupleOp, MakeLayoutOp, MakeComposedLayoutOp>();
-    target.addLegalOp<MakeMmaAtomOp, MakeCopyAtomOp, MakeTiledCopyOp, MakeTiledMmaOp>();
 
     FlyTypeConverter typeConverter;
 
@@ -632,6 +733,9 @@ public:
     patterns.add<AddOffsetOpLowering>(typeConverter, context);
     patterns.add<MakeViewOpLowering>(typeConverter, context);
     patterns.add<PtrLoadOpLowering, PtrStoreOpLowering>(typeConverter, context);
+    patterns.add<MakeCopyAtomOpLowering, MakeMmaAtomOpLowering>(typeConverter, context);
+    patterns.add<MakeTiledCopyOpLowering, MakeTiledMmaOpLowering>(typeConverter, context);
+    patterns.add<AtomSetValueOpLowering>(typeConverter, context);
     patterns.add<CopyAtomCallLowering, MmaAtomCallLowering>(typeConverter, context);
     patterns.add<GpuLaunchFuncOpLowering>(typeConverter, context);
 

@@ -259,6 +259,11 @@ def Fly_CopyAtom : Fly_Type<"CopyAtom", "copy_atom", [
     ::mlir::LogicalResult emitAtomCall(OpBuilder &builder, Location loc, Type copyAtomTy,
                                        Type srcMemTy, Type dstMemTy, Type predMemTy, Value atomVal, Value src, Value dst,
                                        Value pred) const;
+                                       
+    bool isStateful() const;
+    ::mlir::Type getConvertedType(::mlir::MLIRContext *ctx) const;
+    ::mlir::Value setAtomState(OpBuilder &builder, Location loc, Value atomStruct,
+                               Attribute fieldAttr, Value fieldValue) const;
   }];
 
   let builders = [
@@ -289,6 +294,11 @@ def Fly_MmaAtom : Fly_Type<"MmaAtom", "mma_atom", [
     ::mlir::LogicalResult emitAtomCall(OpBuilder &builder, Location loc, Type mmaAtomTy,
                                        Type dMemTy, Type aMemTy, Type bMemTy, Type cMemTy, Value atomVal, Value d,
                                        Value a, Value b, Value c) const;
+
+    bool isStateful() const;
+    ::mlir::Type getConvertedType(::mlir::MLIRContext *ctx) const;
+    ::mlir::Value setAtomState(OpBuilder &builder, Location loc, Value atomStruct,
+                               Attribute fieldAttr, Value fieldValue) const;
   }];
 
   let builders = [

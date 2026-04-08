@@ -408,16 +408,32 @@ Attribute CopyAtomType::getThrValLayoutRef() {
 }
 
 LogicalResult CopyAtomType::emitAtomCall(OpBuilder &builder, Location loc, Type copyAtomTy,
-                                         Type srcMemTy, Type dstMemTy, Value atomVal, Value src, Value dst) const {
-  return cast<CopyOpTypeInterface>(getCopyOp()).emitAtomCall(builder, loc, copyAtomTy, srcMemTy,
-                                                             dstMemTy, atomVal, src, dst);
+                                         Type srcMemTy, Type dstMemTy, Value atomVal, Value src,
+                                         Value dst) const {
+  return cast<CopyOpTypeInterface>(getCopyOp())
+      .emitAtomCall(builder, loc, copyAtomTy, srcMemTy, dstMemTy, atomVal, src, dst);
 }
 
 LogicalResult CopyAtomType::emitAtomCall(OpBuilder &builder, Location loc, Type copyAtomTy,
-                                         Type srcMemTy, Type dstMemTy, Type predMemTy, Value atomVal, Value src, Value dst,
-                                         Value pred) const {
-  return cast<CopyOpTypeInterface>(getCopyOp()).emitAtomCall(builder, loc, copyAtomTy, srcMemTy,
-                                                             dstMemTy, predMemTy, atomVal, src, dst, pred);
+                                         Type srcMemTy, Type dstMemTy, Type predMemTy,
+                                         Value atomVal, Value src, Value dst, Value pred) const {
+  return cast<CopyOpTypeInterface>(getCopyOp())
+      .emitAtomCall(builder, loc, copyAtomTy, srcMemTy, dstMemTy, predMemTy, atomVal, src, dst,
+                    pred);
+}
+
+bool CopyAtomType::isStateful() const { return isa<StatefulOpTypeInterface>(getCopyOp()); }
+
+Type CopyAtomType::getConvertedType(MLIRContext *ctx) const {
+  if (auto stateful = dyn_cast<StatefulOpTypeInterface>(getCopyOp()))
+    return stateful.getConvertedType(ctx);
+  return Type();
+}
+
+Value CopyAtomType::setAtomState(OpBuilder &builder, Location loc, Value atomStruct,
+                                 Attribute fieldAttr, Value fieldValue) const {
+  return cast<StatefulOpTypeInterface>(getCopyOp())
+      .setAtomState(builder, loc, atomStruct, fieldAttr, fieldValue);
 }
 
 bool MmaAtomType::isStatic() const {
@@ -454,10 +470,24 @@ Attribute MmaAtomType::getThrValLayoutC() const {
 }
 
 LogicalResult MmaAtomType::emitAtomCall(OpBuilder &builder, Location loc, Type mmaAtomTy,
-                                        Type dMemTy, Type aMemTy, Type bMemTy, Type cMemTy, Value atomVal, Value d,
-                                        Value a, Value b, Value c) const {
-  return cast<MmaOpTypeInterface>(getMmaOp()).emitAtomCall(
-      builder, loc, mmaAtomTy, dMemTy, aMemTy, bMemTy, cMemTy, atomVal, d, a, b, c);
+                                        Type dMemTy, Type aMemTy, Type bMemTy, Type cMemTy,
+                                        Value atomVal, Value d, Value a, Value b, Value c) const {
+  return cast<MmaOpTypeInterface>(getMmaOp())
+      .emitAtomCall(builder, loc, mmaAtomTy, dMemTy, aMemTy, bMemTy, cMemTy, atomVal, d, a, b, c);
+}
+
+bool MmaAtomType::isStateful() const { return isa<StatefulOpTypeInterface>(getMmaOp()); }
+
+Type MmaAtomType::getConvertedType(MLIRContext *ctx) const {
+  if (auto stateful = dyn_cast<StatefulOpTypeInterface>(getMmaOp()))
+    return stateful.getConvertedType(ctx);
+  return Type();
+}
+
+Value MmaAtomType::setAtomState(OpBuilder &builder, Location loc, Value atomStruct,
+                                Attribute fieldAttr, Value fieldValue) const {
+  return cast<StatefulOpTypeInterface>(getMmaOp())
+      .setAtomState(builder, loc, atomStruct, fieldAttr, fieldValue);
 }
 
 } // namespace mlir::fly

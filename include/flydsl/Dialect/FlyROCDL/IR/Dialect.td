@@ -37,6 +37,24 @@ class FlyxROCL_CopyOp<string typeName, string typeMnemonic, list<Trait> traits =
   let mnemonic = typeMnemonic;
 }
 
+class FlyxROCL_StatefulCopyOp<string typeName, string typeMnemonic, list<Trait> traits = []> 
+    : TypeDef<FlyROCDL_Dialect, typeName, !listconcat(traits, [
+        DeclareTypeInterfaceMethods<Fly_MayStaticTypeInterface>, 
+        DeclareTypeInterfaceMethods<Fly_CopyOpTypeInterface>,
+        DeclareTypeInterfaceMethods<Fly_StatefulOpTypeInterface>
+      ])> {
+  let mnemonic = typeMnemonic;
+}
+
+class FlyxROCL_StatefulMmaOp<string typeName, string typeMnemonic, list<Trait> traits = []> 
+    : TypeDef<FlyROCDL_Dialect, typeName, !listconcat(traits, [
+        DeclareTypeInterfaceMethods<Fly_MayStaticTypeInterface>, 
+        DeclareTypeInterfaceMethods<Fly_MmaOpTypeInterface>,
+        DeclareTypeInterfaceMethods<Fly_StatefulOpTypeInterface>
+      ])> {
+  let mnemonic = typeMnemonic;
+}
+
 def FlyROCDL_SchedGroup : I32BitEnumAttr<"SchedGroup", "", [
   I32BitEnumAttrCaseNone<"None">,
   I32BitEnumAttrCaseBit<"NonSideEffect", 0>,
