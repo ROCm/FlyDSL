@@ -344,7 +344,7 @@ def Fly_AtomSetValueOp : Fly_Op<"atom.set_value", [Pure]> {
   let summary = "Update a field in a stateful atom (SSA-style, returns new atom)";
   let arguments = (ins AnyType:$atom, AnyAttr:$field, AnyType:$value);
   let results = (outs AnyType:$result);
-  let assemblyFormat = "`(` $atom `,` $field `,` $value `)` attr-dict `:` type($result)";
+  let assemblyFormat = "`(` $atom `,` $field `,` $value `)` attr-dict `:` functional-type(operands, results)";
 }
 
 def Fly_CopyAtomCall : Fly_Op<"copy_atom_call"> {
