@@ -1,0 +1,117 @@
+name: Publish FlyDSL to PyPI
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate_tag:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      package_version: ${{ steps.version.outputs.package_version }}
+      tag_version: ${{ steps.version.outputs.tag_version }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Validate tag matches package version
+        id: version
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          PACKAGE_VERSION="$(awk -F'"' '/^_BASE_VERSION = / {print $2; exit}' python/flydsl/__init__.py)"
+
+          if [ -z "${PACKAGE_VERSION}" ]; then
+            echo "Failed to find _BASE_VERSION in python/flydsl/__init__.py" >&2
+            exit 1
+          fi
+
+          if [ "${TAG_VERSION}" != "${PACKAGE_VERSION}" ]; then
+            echo "Tag ${GITHUB_REF_NAME} does not match package version ${PACKAGE_VERSION}" >&2
+            exit 1
+          fi
+
+          echo "package_version=${PACKAGE_VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "tag_version=${TAG_VERSION}" >> "${GITHUB_OUTPUT}"
+
+  build:
+    needs: validate_tag
+    uses: ./.github/workflows/build-whl.yaml
+    with:
+      release_type: release
+      docker_image: rocm/pytorch:rocm7.2_ubuntu22.04_py3.10_pytorch_release_2.8.0
+      upload_s3_staging: false
+    permissions:
+      id-token: write
+      contents: read
+
+  test:
+    needs: [validate_tag, build]
+    uses: ./.github/workflows/test-whl.yaml
+    with:
+      docker_image: rocm/pytorch:rocm7.2_ubuntu22.04_py3.10_pytorch_release_2.8.0
+    permissions:
+      contents: read
+
+  publish:
+    needs: [validate_tag, build, test]
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Download wheel artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: flydsl-wheels
+          path: dist
+
+      - name: Prepare PyPI distributions
+        run: |
+          mkdir -p pypi-dist
+          cp dist/*.whl pypi-dist/
+          ls -lh pypi-dist/
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Validate distributions
+        run: |
+          python -m pip install -U twine
+          python -m twine check pypi-dist/*.whl
+
+      - name: Publish package distributions to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: pypi-dist/
+          skip-existing: true
+
+      - name: Publish summary
+        run: |
+          {
+            echo "## PyPI Publish Summary"
+            echo
+            echo "Published tag: \`${GITHUB_REF_NAME}\`"
+            echo "Package version: \`${{ needs.validate_tag.outputs.package_version }}\`"
+            echo
+            echo "Published package: \`flydsl\`"
+            echo
+            echo "### Distributions"
+            echo '```'
+            ls -1 pypi-dist/*.whl
+            echo '```'
+            echo
+            echo "### Install"
+            echo '```bash'
+            echo "pip install flydsl==${{ needs.validate_tag.outputs.package_version }}"
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"

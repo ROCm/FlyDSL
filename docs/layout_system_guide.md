@@ -378,15 +378,15 @@ dst_part = thr_copy.partition_D(dst)   # partition destination tensor
 retiled  = thr_copy.retile(tensor)     # retile tensor to match copy atom
 
 # Get a per-thread view of a tiled MMA
-thr_mma = tiled_mma.get_slice(tid)     # returns ThrMma
-part_a = thr_mma.partition_A(tensor_a)
-part_b = thr_mma.partition_B(tensor_b)
-part_c = thr_mma.partition_C(tensor_c)
+thr_mma = tiled_mma.thr_slice(tid)     # returns ThrMma (alias: get_slice)
 
-# Create register fragments
-frag_a = tiled_mma.make_fragment_A(part_a)
-frag_b = tiled_mma.make_fragment_B(part_b)
-frag_c = tiled_mma.make_fragment_C(part_c)
+# Register fragments: pass the block-level tensor views (see examples/03-tiledMma.py).
+frag_a = thr_mma.make_fragment_A(tensor_a)
+frag_b = thr_mma.make_fragment_B(tensor_b)
+frag_c = thr_mma.make_fragment_C(tensor_c)
+
+# Optional spatial partition of a tensor for this thread (different use case)
+part_a = thr_mma.partition_A(tensor_a)
 ```
 
 #### Execution

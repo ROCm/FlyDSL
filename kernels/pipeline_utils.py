@@ -40,4 +40,30 @@ def make_tail_plan(num_buffers, pre_loaded, extra):
     return plan
 
 
-__all__ = ["make_tail_plan"]
+def tdm_epilogue_fence_threshold_bytes(*, stage_base_off, tail_plan, loop_iters, extra):
+    """Return the earliest stage base that must remain untouched before epilogue.
+
+    The TDM-store epilogue reuses the dead LDS prefix starting at byte offset 0.
+    Reuse is only safe once all stages that may still be consumed after the last
+    full pipeline fence are out of the reuse window.
+
+    Args:
+        stage_base_off: Physical byte base for each logical stage.
+        tail_plan: Compile-time tail plan from ``make_tail_plan``.
+        loop_iters: Number of fully-pipelined main-loop iterations.
+        extra: Additional tail loads that happen after the main loop.
+    """
+    if not tail_plan:
+        return 0
+
+    if extra > 0:
+        stages_after_last_full_fence = [tail_plan[-1][1]]
+    elif loop_iters > 0:
+        stages_after_last_full_fence = [compute_stage for _, compute_stage, _ in tail_plan]
+    else:
+        stages_after_last_full_fence = [tail_plan[-1][1]]
+
+    return min(stage_base_off[stage] for stage in stages_after_last_full_fence)
+
+
+__all__ = ["make_tail_plan", "tdm_epilogue_fence_threshold_bytes"]

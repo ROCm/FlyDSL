@@ -222,7 +222,7 @@ def Fly_TiledCopy : Fly_Type<"TiledCopy", "tiled_copy", [
     Fly_Layout:$layoutThrVal,
     Fly_Tile:$tileMN
   );
-  let assemblyFormat = "`<` $copyAtom `,` $layoutThrVal `,` $tileMN `>`";
+  let assemblyFormat = "`<` $copyAtom `,` qualified($layoutThrVal) `,` qualified($tileMN) `>`";
 }
 
 def Fly_TiledMma : Fly_Type<"TiledMma", "tiled_mma", [
@@ -233,7 +233,7 @@ def Fly_TiledMma : Fly_Type<"TiledMma", "tiled_mma", [
     Fly_Layout:$atomLayout,
     DefaultValuedParameter<"TileType", "TiledMmaType::getDefaultPermutationMNK($_ctxt)">:$permutation
   );
-  let assemblyFormat = "`<` $mmaAtom `,` $atomLayout (`,` $permutation^)? `>`";
+  let assemblyFormat = "`<` $mmaAtom `,` qualified($atomLayout) (`,` qualified($permutation)^)? `>`";
 
   let extraClassDeclaration = [{
     static TileType getDefaultPermutationMNK(MLIRContext *ctx);
@@ -254,6 +254,11 @@ def Fly_CopyAtom : Fly_Type<"CopyAtom", "copy_atom", [
     ::mlir::Attribute getThrValLayoutSrc();
     ::mlir::Attribute getThrValLayoutDst();
     ::mlir::Attribute getThrValLayoutRef();
+    ::mlir::LogicalResult emitAtomCall(OpBuilder &builder, Location loc, Type copyAtomTy,
+                                       Type srcMemTy, Type dstMemTy, Value atomVal, Value src, Value dst) const;
+    ::mlir::LogicalResult emitAtomCall(OpBuilder &builder, Location loc, Type copyAtomTy,
+                                       Type srcMemTy, Type dstMemTy, Type predMemTy, Value atomVal, Value src, Value dst,
+                                       Value pred) const;
   }];
 
   let builders = [
@@ -281,6 +286,9 @@ def Fly_MmaAtom : Fly_Type<"MmaAtom", "mma_atom", [
     ::mlir::Attribute getThrValLayoutA() const;
     ::mlir::Attribute getThrValLayoutB() const;
     ::mlir::Attribute getThrValLayoutC() const;
+    ::mlir::LogicalResult emitAtomCall(OpBuilder &builder, Location loc, Type mmaAtomTy,
+                                       Type dMemTy, Type aMemTy, Type bMemTy, Type cMemTy, Value atomVal, Value d,
+                                       Value a, Value b, Value c) const;
   }];
 
   let builders = [

@@ -648,16 +648,13 @@ def run_moe_stage1(
     tflops = flops / (us / 1e6) / 1e12
 
     # Rough bytes-moved accounting (same spirit as GEMM tests: count each tensor once).
-    bytes_moved = 0
+    aE = min(tokens * topk, experts)
     x_elem_bytes = 2 if (is_int4_bf16 or in_dtype in ("bf16", "fp16")) else (0.5 if is_fp4 else 1)  # bf16/fp16 activations
-    bytes_moved += int((tokens * topk if is_int8smooth else tokens) * model_dim * x_elem_bytes)  # x (bf16 for W4A16, else fp8/int8)
-    bytes_moved += (experts * (2 * inter_dim) * model_dim) // (2 if (use_packed_int4 or is_fp4) else 1)  # w (packed for int4)
-    bytes_moved += tokens * topk * inter_dim * 2  # out fp16 (logical)
-    bytes_moved += (tokens * topk if is_int8smooth else tokens) * 4  # scale_x f32 (1D)
-    bytes_moved += experts * (2 * inter_dim) * 4  # scale_w f32 (1D)
-    bytes_moved += int(sorted_weights.numel()) * 4  # sorted_weights f32
-    bytes_moved += int(sorted_token_ids.numel()) * 4  # sorted_token_ids i32
-    bytes_moved += int(sorted_expert_ids.numel()) * 4  # sorted_expert_ids i32
+    bytes_moved = 0
+    bytes_moved += tokens * model_dim * x_elem_bytes
+    bytes_moved += aE * (inter_dim * 2) * model_dim * 0.5 if (use_packed_int4 or is_fp4) else 1
+    bytes_moved += aE * (inter_dim * 2) * math.ceil(model_dim / group_size if group_size > 0 else (32 if is_fp4 else model_dim))
+    bytes_moved += tokens * topk * inter_dim * 2
     tbps = bytes_moved / 1e12 / (us / 1e6)
 
     print(
@@ -1236,16 +1233,13 @@ def run_moe_stage2(
     flops = 2 * tokens * topk * model_dim * inter_dim
     tflops = flops / (us / 1e6) / 1e12
 
-    bytes_moved = 0
+    aE = min(tokens * topk, experts)
     a2_elem_bytes = 2 if in_dtype in ("int4_bf16", "bf16", "fp16") else (0.5 if is_fp4 else 1)  # bf16/fp16 activations
-    bytes_moved += int(tokens * topk * inter_dim * a2_elem_bytes)  # a2 (logical)
-    bytes_moved += (experts * model_dim * inter_dim) // (2 if (use_packed_int4 or is_fp4) else 1)  # w2 (packed for int4)
-    bytes_moved += tokens * model_dim * (2 if out_torch_dtype == torch.float16 else 4)  # out
-    bytes_moved += tokens * topk * 4  # a2_scale f32 (logical)
-    bytes_moved += experts * model_dim * 4  # w2_scale f32 (1D)
-    bytes_moved += int(sorted_weights.numel()) * 4
-    bytes_moved += int(sorted_token_ids.numel()) * 4
-    bytes_moved += int(sorted_expert_ids.numel()) * 4
+    bytes_moved = 0
+    bytes_moved += tokens * topk * inter_dim * a2_elem_bytes
+    bytes_moved += aE * model_dim * inter_dim * 0.5 if (use_packed_int4 or is_fp4) else 1
+    bytes_moved += aE * model_dim * math.ceil(inter_dim / group_size if group_size > 0 else (32 if is_fp4 else inter_dim))
+    bytes_moved += tokens * topk * model_dim * 2
     tbps = bytes_moved / 1e12 / (us / 1e6)
     print(
         f"FlyDSL MoE stage2 [{kernel_name}] {in_dtype} {'reduce' if use_reduce else 'atomic'} | "
@@ -1999,5 +1993,8 @@ if __name__ == "__main__":
     if "all" in in_dtypes:
         in_dtypes = ["fp8", "fp16", "bf16", "int8", "int4", "int4_bf16", "fp4"]
     for dt in in_dtypes:
+        if dt == "fp4" and "gfx95" not in ARCH:
+            print(f"Skipping FP4: requires gfx950+, got {ARCH}")
+            continue
         for use_reduce in reduce_flags:
             run_one(dt, use_reduce)

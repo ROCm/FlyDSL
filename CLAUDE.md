@@ -56,7 +56,7 @@ PYTHONPATH=./ pytest tests/
 # Specific kernel test
 PYTHONPATH=./ python tests/kernels/test_pa.py --num_iters 50
 
-# Disable JIT cache during development
+# Disable JIT disk cache during development (in-memory cache still active)
 FLYDSL_RUNTIME_ENABLE_CACHE=0 PYTHONPATH=./ python tests/kernels/test_pa.py
 ```
 
@@ -132,7 +132,7 @@ Important: clear `SmemPtr._view_cache = None` after exiting scf.for to avoid MLI
 
 ## Development Notes
 
-- Always set `FLYDSL_RUNTIME_ENABLE_CACHE=0` when iterating on kernel code to bypass JIT cache
+- Always set `FLYDSL_RUNTIME_ENABLE_CACHE=0` when iterating on kernel code to bypass JIT disk cache (in-memory cache remains active)
 - `PYTHONPATH=./` is required when running from the repo root
 - Kernel files in `kernels/` are importable as `from kernels.pa_decode_fp8 import ...`
 - The `_mlir` package is auto-generated during build — never edit it directly

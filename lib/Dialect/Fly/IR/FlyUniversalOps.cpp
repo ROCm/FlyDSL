@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2025 FlyDSL Project Contributors
 
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/DialectImplementation.h"
 
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
+#include "flydsl/Dialect/Fly/Utils/PointerUtils.h"
 #include "flydsl/Dialect/Fly/Utils/ThrValLayoutMacro.h.inc"
 
 namespace mlir::fly {
@@ -91,6 +93,57 @@ void MmaOpUniversalFMAType::print(AsmPrinter &printer) const {
   printer << "<";
   printMNKDimensionList(printer, 1, 1, 1);
   printer << ", (" << getElemTy() << ", " << getElemTy() << ") -> " << getElemTy() << ">";
+}
+
+LogicalResult CopyOpUniversalCopyType::emitAtomCall(OpBuilder &builder, Location loc,
+                                                    Type copyAtomTyArg, Type srcMemTyArg,
+                                                    Type dstMemTyArg, Value atomVal, Value src,
+                                                    Value dst) const {
+  auto srcMemTy = cast<fly::MemRefType>(srcMemTyArg);
+  auto dstMemTy = cast<fly::MemRefType>(dstMemTyArg);
+
+  if (!isa<LLVM::LLVMPointerType>(src.getType()) || !isa<LLVM::LLVMPointerType>(dst.getType()))
+    return failure();
+
+  int32_t copyBytes = getBitSize() / 8;
+  Value srcPtr = applySwizzleOnPtr(builder, loc, cast<TypedValue<LLVM::LLVMPointerType>>(src),
+                                   srcMemTy.getSwizzle());
+  Value dstPtr = applySwizzleOnPtr(builder, loc, cast<TypedValue<LLVM::LLVMPointerType>>(dst),
+                                   dstMemTy.getSwizzle());
+  Value len = arith::ConstantIntOp::create(builder, loc, copyBytes, /*width=*/32);
+  LLVM::MemcpyOp::create(builder, loc, dstPtr, srcPtr, len, /*isVolatile=*/false);
+
+  return success();
+}
+
+LogicalResult CopyOpUniversalCopyType::emitAtomCall(OpBuilder &builder, Location loc,
+                                                    Type copyAtomTyArg, Type srcMemTyArg,
+                                                    Type dstMemTyArg, Type predMemTyArg,
+                                                    Value atomVal, Value src, Value dst,
+                                                    Value pred) const {
+  auto predMemTy = cast<fly::MemRefType>(predMemTyArg);
+  Value predVal = LLVM::LoadOp::create(builder, loc, predMemTy.getElemTy(), pred);
+  auto ifOp = scf::IfOp::create(builder, loc, TypeRange{}, predVal, /*withElse=*/false);
+  builder.setInsertionPointToStart(&ifOp.getThenRegion().front());
+
+  return emitAtomCall(builder, loc, copyAtomTyArg, srcMemTyArg, dstMemTyArg, atomVal, src, dst);
+}
+
+LogicalResult MmaOpUniversalFMAType::emitAtomCall(OpBuilder &builder, Location loc, Type mmaAtomTy,
+                                                  Type dMemTy, Type aMemTy, Type bMemTy,
+                                                  Type cMemTy, Value atomVal, Value dPtr,
+                                                  Value aPtr, Value bPtr, Value cPtr) const {
+  Type elemTy = getElemTy();
+
+  Value a = LLVM::LoadOp::create(builder, loc, elemTy, aPtr);
+  Value b = LLVM::LoadOp::create(builder, loc, elemTy, bPtr);
+  Value c = LLVM::LoadOp::create(builder, loc, elemTy, cPtr);
+
+  Value mul = LLVM::FMulOp::create(builder, loc, elemTy, a, b);
+  Value res = LLVM::FAddOp::create(builder, loc, elemTy, mul, c);
+
+  LLVM::StoreOp::create(builder, loc, res, dPtr);
+  return success();
 }
 
 } // namespace mlir::fly

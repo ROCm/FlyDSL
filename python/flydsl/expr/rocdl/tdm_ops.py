@@ -47,7 +47,6 @@ __all__ = [
     "compute_padding_encoding",
     "compute_warp_distribution",
     "l2_prefetch_tile",
-    "advance_tdm_descriptor",
 ]
 
 
@@ -180,6 +179,7 @@ def make_tensor_descriptor_2d(
     workgroup_mask: Union[int, "ir.Value"] = 0,
     lds_byte_offset=None,
     for_store: bool = False,
+    atomic_barrier_enable: bool = False,
 ) -> TDMDescriptor2D:
     """Build a 2D TDM descriptor for tensor_load_to_lds_d2.
 
@@ -214,6 +214,17 @@ def make_tensor_descriptor_2d(
                        int: compile-time constant folded into descriptor.
                        ir.Value (i32 SGPR): runtime mask, ORed with upper config bits.
                        0 = no multicast (default).
+        lds_byte_offset: Optional extra LDS byte offset applied after the per-wave
+                       LDS address is computed. Use this when multiple descriptors
+                       share the same LDS backing allocation.
+        for_store:      Build a descriptor for the LDS->global store path. When
+                       enabled, any LDS padding is folded into the tile extent
+                       because stores do not perform an implicit de-padding step.
+        atomic_barrier_enable: Set the descriptor's hardware auto-barrier bit.
+                       Leave this disabled unless the kernel is intentionally
+                       relying on TDM atomic-barrier semantics; this helper keeps
+                       the encoded atomic-barrier address at zero, so all
+                       participating waves must agree on that protocol.
 
     Returns:
         TDMDescriptor2D with dgroup0 and dgroup1 ready for tensor_load_2d.
@@ -327,9 +338,10 @@ def make_tensor_descriptor_2d(
         pad_enable = 0
 
     # sgpr0: config bitfields
+    _abe = 1 if atomic_barrier_enable else 0
     g1_s0_upper = (
         (data_size_code << 16)      # data_size [17:16]
-        | (0 << 18)                   # atomic_barrier_enable
+        | (_abe << 18)                # atomic_barrier_enable
         | (0 << 19)                   # iterate_enable
         | (pad_enable << 20)          # pad_enable
         | (0 << 21)                   # early_timeout
@@ -526,40 +538,3 @@ def l2_prefetch_tile(
     # requires LLVM ISel support for gfx1250 global_prefetch_b8. If the LLVM
     # build lacks this pattern, the instruction will be silently dropped.
     rocdl.global_prefetch(ptr_val, scope)
-
-
-def advance_tdm_descriptor(desc: TDMDescriptor2D, byte_offset) -> TDMDescriptor2D:
-    """Advances the global address of a TDM descriptor by a byte offset."""
-    from .. import vector, arith
-    from ..typing import T
-    
-    dgroup0 = desc.dgroup0
-    
-    lo = vector.extract(dgroup0, static_position=[2], dynamic_position=[])
-    hi = vector.extract(dgroup0, static_position=[3], dynamic_position=[])
-    
-    lo_i64 = arith.extui(T.i64, lo)
-    hi_i64 = arith.extui(T.i64, hi)
-    
-    # Mask out the type field [31:30] from hi
-    hi_masked = arith.andi(hi_i64, arith.constant(0x3FFFFFFF, type=T.i64))
-    
-    # Combine to 64-bit address
-    addr_i64 = arith.ori(lo_i64, arith.shli(hi_masked, arith.constant(32, type=T.i64)))
-    
-    # Add offset
-    offset_i64 = arith.index_cast(T.i64, byte_offset) if getattr(byte_offset, 'type', None) != T.i64 else byte_offset
-    new_addr_i64 = arith.addi(addr_i64, offset_i64)
-    
-    # Split back
-    new_lo = arith.trunci(T.i32, new_addr_i64)
-    new_hi_raw = arith.trunci(T.i32, arith.shrui(new_addr_i64, arith.constant(32, type=T.i64)))
-    
-    # Restore type field (2 << 30)
-    new_hi = arith.ori(new_hi_raw, arith.constant(1 << 31, type=T.i32))
-    
-    # Insert back
-    new_dgroup0 = vector.insert(new_lo, dgroup0, static_position=[2], dynamic_position=[])
-    new_dgroup0 = vector.insert(new_hi, new_dgroup0, static_position=[3], dynamic_position=[])
-    
-    return TDMDescriptor2D(new_dgroup0, desc.dgroup1)
