@@ -113,19 +113,21 @@ def ref_worker(device_id, num_devices, parts, nsamples, inputs, outputs):
     end_event = torch.cuda.Event(enable_timing=True)
     torch.cuda.synchronize()
     dist.barrier(group=group)
-    start_event.record()
+    warmup_iter = 4
     for i in range(nsamples):
+        if i == warmup_iter:
+            start_event.record()
         input = inputs[device_id * nsamples + i]
         output = outputs[device_id * nsamples + i]
         F.linear(input[0], input[1], out=output)
         dist.all_reduce(output, group=group)
-    end_event.record()
     torch.cuda.synchronize()
+    end_event.record()
     dist.barrier(group=group)
     dist.destroy_process_group()
     total_ms = start_event.elapsed_time(end_event)
-    total_ms /= nsamples
-    print(f"device_id:{device_id}, total_ms:{total_ms}")
+    avg_ms = total_ms / (nsamples - warmup_iter)
+    print(f"device_id:{device_id}, avg_ms:{avg_ms}")
 
 
 def ref_func(args, inputs, outputs):
@@ -150,18 +152,20 @@ def worker(device_id, num_devices, parts, nsamples, inputs, outputs, kwargs):
     end_event = torch.cuda.Event(enable_timing=True)
     torch.cuda.synchronize()
     dist.barrier(group=group)
-    start_event.record()
+    warmup_iter = 4
     for i in range(nsamples):
+        if i == warmup_iter:
+            start_event.record()
         input = inputs[device_id * nsamples + i]
         output = outputs[device_id * nsamples + i]
         fa.hgemm_ar_fusion(input[0], input[1], output, kwargs)
-    end_event.record()
     torch.cuda.synchronize()
+    end_event.record()
     dist.barrier(group=group)
     dist.destroy_process_group()
     total_ms = start_event.elapsed_time(end_event)
-    total_ms /= nsamples
-    print(f"device_id:{device_id}, total_ms:{total_ms}")
+    avg_ms = total_ms / (nsamples - warmup_iter)
+    print(f"device_id:{device_id}, avg_ms:{avg_ms}")
 
 
 def func(args, inputs, outputs, kwargs):
@@ -226,7 +230,7 @@ def test_mfma_flyc_hgemm_ar(
         split_k=SPLIT_K,
         num_devices=world_size,
         parts=1,
-        nsamples=10,
+        nsamples=50,
     )
     kwargs = {
         'TILE_M': args.tile_m,
