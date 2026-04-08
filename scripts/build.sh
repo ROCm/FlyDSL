@@ -56,7 +56,7 @@ fi
 # ---------------------------------------------------------------------------
 _CMAKE_CACHE="${BUILD_DIR}/CMakeCache.txt"
 if [ -f "${_CMAKE_CACHE}" ]; then
-  CACHED_GENERATOR=$(grep -oP '(?<=^CMAKE_GENERATOR:INTERNAL=).+' "${_CMAKE_CACHE}" || true)
+  CACHED_GENERATOR=$(awk '/^CMAKE_GENERATOR:INTERNAL=/{sub(/^CMAKE_GENERATOR:INTERNAL=/, ""); print; exit}' "${_CMAKE_CACHE}" || true)
   if [ -n "${CACHED_GENERATOR}" ]; then
     GENERATOR="${CACHED_GENERATOR}"
   fi
