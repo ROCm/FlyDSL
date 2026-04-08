@@ -88,6 +88,7 @@ def compile_chunk_gated_delta_h(
     """
     assert K <= 256
     assert K % 64 == 0
+    assert BV % 16 == 0
     NUM_K_BLOCKS = K // 64
 
     WARP_SIZE = 64
@@ -230,25 +231,13 @@ def compile_chunk_gated_delta_h(
             ht_base = (i_nh * fx.Int32(K * V))
 
         # ── MFMA lane mapping for 16x16 tiles ──
-        # For mfma_f32_16x16x32_bf16 on CDNA (gfx942):
-        #   C[M, N] += A[M, K] * B[K, N]
-        #   Each lane holds f32x4 for 4 consecutive M rows at one N column.
-        #   M_base = (lane // 16) * 4, the 4 elements are M_base+0..3
-        #   N_col  = lane % 16
-        # For A (src0, bf16x8): row = lane % 16, 8 elements along K
-        # For B (src1, bf16x8): col = lane % 16, 8 elements along K
         lane_n = lane % fx.Int32(16)
         lane_m_base = lane // fx.Int32(16)
 
         # ── Initialize h accumulators ──
-        # h state: NUM_K_BLOCKS blocks of [64, BV], each decomposed into
-        # M_REPEAT x N_REPEAT MFMA tiles of 16x16
-        # Each warp handles M_REPEAT/NUM_WARPS rows of 16
-        # With 4 warps and M_REPEAT=4 (BT=64), each warp handles 1 row of 16
         acc_zero = arith.constant_vector(0.0, T.f32x4)
 
         # h_accs[kb][nr] = f32x4 accumulator for k-block kb, v-repeat nr
-        # Each warp owns one M-slice (wid-th 16-row block)
         h_accs = []
         for _kb in range_constexpr(NUM_K_BLOCKS):
             for _nr in range_constexpr(N_REPEAT):
@@ -258,8 +247,6 @@ def compile_chunk_gated_delta_h(
         if USE_INITIAL_STATE:
             for kb in range_constexpr(NUM_K_BLOCKS):
                 for nr in range_constexpr(N_REPEAT):
-                    # h0: [K, V] row-major. MFMA C layout: 4 consecutive M(=K) rows at one N(=V) col.
-                    # M_row = kb*64 + wid*16 + lane_m_base*4 + elem, N_col = i_v*BV + nr*16 + lane_n
                     h0_col = i_v * fx.Int32(BV) + fx.Int32(nr * 16) + lane_n
                     h0_elems = []
                     for elem_i in range_constexpr(4):
@@ -271,9 +258,6 @@ def compile_chunk_gated_delta_h(
                     h_accs[acc_idx] = arith.addf(h_accs[acc_idx], loaded)
 
         # ── Main chunk loop ──
-        # We use range_constexpr-style unrolling is not possible for dynamic NT.
-        # Use scf.for with loop-carried h_accs.
-
         init_state = [_to_raw(v) for v in h_accs]
         c_zero = arith.index(0)
         c_one = arith.index(1)
@@ -284,11 +268,6 @@ def compile_chunk_gated_delta_h(
             i_t_i32 = arith.index_cast(T.i32, i_t)
 
             # ── 1. Store h snapshot to global + LDS ──
-            # MFMA C layout: f32x4 holds 4 consecutive M(=K) rows at one N(=V) col.
-            #   M_row = kb*64 + wid*16 + lane_m_base*4 + elem
-            #   N_col = i_v*BV + nr*16 + lane_n
-            # h[K, V] and LDS_H[K, BV] are row-major, so 4 rows are NOT contiguous;
-            # we scatter-store each element individually.
             for kb in range_constexpr(NUM_K_BLOCKS):
                 for nr in range_constexpr(N_REPEAT):
                     acc_idx = kb * N_REPEAT + nr
@@ -311,13 +290,6 @@ def compile_chunk_gated_delta_h(
             gpu.barrier()
 
             # ── 2. Delta correction: b_v = w @ h, then v_new = u - b_v ──
-            # b_v[BT, BV] = w[BT, K] @ h[K, BV]
-            # MFMA: M=BT, N=BV, K_red=K
-            # C layout: M_row = lane_m_base*4+elem (BT within warp tile), N_col = lane_n (BV)
-            # A (src0): row = lane_n (M=BT), 8 elements along K = lane_m_base*8+{0..7}
-            # B (src1): col = lane_n (N=BV), 8 elements along K = lane_m_base*8+{0..7}
-            # Each warp handles 16 BT rows: wid*16 + lane_m_base*4 + elem
-
             K_STEPS = K // WMMA_K
 
             bv_accs = []
@@ -325,10 +297,6 @@ def compile_chunk_gated_delta_h(
                 bv_accs.append(arith.constant_vector(0.0, T.f32x4))
 
             for ks in range_constexpr(K_STEPS):
-                # A operand (w): bf16x8
-                # A[lane_n, lane_m_base*8+ki] = w[BT_row, K_col]
-                # BT_row = i_t*BT + wid*16 + lane_n (using lane_n for A row = M dim)
-                # K_col = ks*32 + lane_m_base*8 + ki
                 w_bt_row_raw = i_t_i32 * fx.Int32(BT) + wid * fx.Int32(16) + lane_n
                 w_row_in_bounds = arith.cmpi(arith.CmpIPredicate.slt, w_bt_row_raw, T_local)
                 safe_w_row = arith.select(w_row_in_bounds, w_bt_row_raw, fx.Int32(0))
@@ -337,10 +305,6 @@ def compile_chunk_gated_delta_h(
                 a_frag = w_.vec_load((fx.Index(w_off),), 8)
 
                 for nr in range_constexpr(N_REPEAT):
-                    # B operand (h) from LDS: bf16x8
-                    # B[lane_m_base*8+bi, lane_n] = h[K_row, BV_col]
-                    # K_row = ks*32 + lane_m_base*8 + bi
-                    # BV_col = nr*16 + lane_n
                     b_elems = []
                     for bi in range_constexpr(8):
                         lds_r = fx.Int32(ks * WMMA_K) + lane_m_base * fx.Int32(8) + fx.Int32(bi)
@@ -352,8 +316,6 @@ def compile_chunk_gated_delta_h(
                     bv_accs[nr] = _mfma_bf16_16x16x32(a_frag, b_frag, bv_accs[nr])
 
             # v_new = u - b_v  (per warp's M-tile only)
-            # bv_accs C layout: M_row = lane_m_base*4+elem (BT within warp), N_col = lane_n (BV)
-            # u must be loaded with matching layout: 4 elements along BT (M), 1 along BV (N)
             vn_frags = []
             for nr in range_constexpr(N_REPEAT):
                 bv_val = bv_accs[nr]
@@ -400,7 +362,6 @@ def compile_chunk_gated_delta_h(
                 exp_g_last = math_dialect.ExpOp(g_last).result
 
                 # Gate v_new: each f32x4 element corresponds to a different BT row
-                # BT_row[elem] = i_t*BT + wid*16 + lane_m_base*4 + elem
                 for nr in range_constexpr(N_REPEAT):
                     vn_val = vn_frags[nr]
                     gate_vec = arith.constant_vector(0.0, T.f32x4)
@@ -426,9 +387,6 @@ def compile_chunk_gated_delta_h(
                         h_accs_in[acc_idx] = arith.mulf(h_accs_in[acc_idx], exp_g_last_vec)
 
             # ── 3b. Store gated v_new to LDS (f32) for k^T @ v_new reload ──
-            # LDS layout: [BT, BV] f32 row-major.
-            # MFMA C layout: 4 elements along M(=BT), 1 along N(=BV).
-            # So we scatter-store each element to its BT row.
             for nr in range_constexpr(N_REPEAT):
                 vn_val = vn_frags[nr]
                 lds_col = fx.Int32(nr * 16) + lane_n
@@ -441,18 +399,10 @@ def compile_chunk_gated_delta_h(
             gpu.barrier()
 
             # ── 4. State update: h += k^T @ v_new_gated ──
-            # k^T[K, BT] @ v_new[BT, BV] -> [K, BV]
-            # MFMA: M=K, N=BV, K_red=BT
-            # C layout: M_row = lane_m_base*4+elem (K within warp), N_col = lane_n (BV)
-            # A (src0): row = lane_n (M=K), 8 elements along K_red(=BT) = lane_m_base*8+{0..7}
-            # B (src1): col = lane_n (N=BV), 8 elements along K_red(=BT) = lane_m_base*8+{0..7}
             BT_STEPS = BT // WMMA_K
 
             for kb in range_constexpr(NUM_K_BLOCKS):
                 for bt_s in range_constexpr(BT_STEPS):
-                    # A = k^T: A[lane_n, lane_m_base*8+ki] = k^T[K_idx, BT_idx]
-                    # K_idx = kb*64 + wid*16 + lane_n
-                    # BT_idx = i_t*BT + bt_s*32 + lane_m_base*8 + ki
                     k_a_elems = []
                     for ki in range_constexpr(8):
                         k_t_row_raw = i_t_i32 * fx.Int32(BT) + fx.Int32(bt_s * WMMA_K) + lane_m_base * fx.Int32(8) + fx.Int32(ki)
@@ -465,10 +415,6 @@ def compile_chunk_gated_delta_h(
                     k_a_frag = vector.from_elements(T.vec(8, T.bf16), k_a_elems)
 
                     for nr in range_constexpr(N_REPEAT):
-                        # B = v_new from LDS (f32 -> bf16):
-                        # B[lane_m_base*8+bi, lane_n] = v_new[BT_idx, BV_idx]
-                        # BT_idx = bt_s*32 + lane_m_base*8 + bi
-                        # BV_idx = nr*16 + lane_n
                         vn_b_elems = []
                         for bi in range_constexpr(8):
                             lds_r = fx.Int32(bt_s * WMMA_K) + lane_m_base * fx.Int32(8) + fx.Int32(bi)
@@ -492,7 +438,6 @@ def compile_chunk_gated_delta_h(
                     acc_idx = kb * N_REPEAT + nr
                     acc_val = h_accs_final[acc_idx]
 
-                    # MFMA C layout: 4 elements along M(=K) rows, 1 along N(=V) col
                     ht_col = i_v * fx.Int32(BV) + fx.Int32(nr * 16) + lane_n
                     for elem_i in range_constexpr(4):
                         f32_val = vector.extract(acc_val, static_position=[elem_i], dynamic_position=[])
@@ -557,7 +502,7 @@ def chunk_gated_delta_rule_fwd_h_flydsl(
     save_new_value: bool = True,
     cu_seqlens: torch.LongTensor | None = None,
     wu_contiguous: bool = True,
-    BV: int = 32,
+    BV: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     """FlyDSL K5 wrapper matching the Triton opt3 interface."""
     B, T, Hg, K = k.shape
@@ -571,6 +516,9 @@ def chunk_gated_delta_rule_fwd_h_flydsl(
         H = u.shape[-2]
         V = u.shape[-1]
         T_flat = w.shape[1]
+
+    if BV <= 0:
+        BV = min(V, 16)
 
     if cu_seqlens is None:
         N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
