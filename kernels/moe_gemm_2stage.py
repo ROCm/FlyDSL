@@ -1049,9 +1049,9 @@ def compile_moe_gemm1(
                                     else:
                                         packed_g, sc_g = b_gate_raw[ni], None
                                         packed_u, sc_u = b_up_raw[ni], None
-                                    bg0, bg1 = unpack_b_w4a16(packed_g, arith, vector, scale_val=sc_g, use_gfx950_cvt=use_gfx950_cvt)
+                                    bg0, bg1 = unpack_b_w4a16(packed_g, arith, vector, scale_val=sc_g, use_gfx950_cvt=use_gfx950_cvt, defer_scale16=use_gfx950_cvt)
                                     gate_list[acc_idx] = mfma_k64(gate_list[acc_idx], a0, a1, bg0, bg1)
-                                    bu0, bu1 = unpack_b_w4a16(packed_u, arith, vector, scale_val=sc_u, use_gfx950_cvt=use_gfx950_cvt)
+                                    bu0, bu1 = unpack_b_w4a16(packed_u, arith, vector, scale_val=sc_u, use_gfx950_cvt=use_gfx950_cvt, defer_scale16=use_gfx950_cvt)
                                     up_list[acc_idx] = mfma_k64(up_list[acc_idx], a0, a1, bu0, bu1)
                     else:
                         for ku in range_constexpr(k_unroll):
@@ -1289,6 +1289,13 @@ def compile_moe_gemm1(
                             if not needs_scale_w
                             else buffer_ops.buffer_load(sw_rsrc, row_up_idx, vec_width=1, dtype=T.f32)
                         )
+
+                # When defer_scale16 was used, the ×16 correction for v_cvt_off_f32_i4
+                # was omitted from the hot loop.  Fold it into the epilogue scale.
+                if use_gfx950_cvt:
+                    _c16 = fx.Float32(16.0)
+                    sw_gate_vals = [v * _c16 for v in sw_gate_vals]
+                    sw_up_vals = [v * _c16 for v in sw_up_vals]
 
                 # Epilogue hoists to keep IR + Python build time small:
                 col_i32_list = []
@@ -2505,7 +2512,7 @@ def compile_moe_gemm2(
                                         packed, sc = b_raw[ni]
                                     else:
                                         packed, sc = b_raw[ni], None
-                                    b0, b1 = unpack_b_w4a16(packed, arith, vector, scale_val=sc, use_gfx950_cvt=use_gfx950_cvt)
+                                    b0, b1 = unpack_b_w4a16(packed, arith, vector, scale_val=sc, use_gfx950_cvt=use_gfx950_cvt, defer_scale16=use_gfx950_cvt)
                                     acc_list[acc_idx] = mfma_k64(acc_list[acc_idx], a0, a1, b0, b1)
                     else:
                         for ku in range_constexpr(k_unroll):
@@ -2778,6 +2785,12 @@ def compile_moe_gemm2(
                             if not needs_scale_w
                             else buffer_ops.buffer_load(sw_rsrc, row_w_idx, vec_width=1, dtype=T.f32)
                         )
+
+                # When defer_scale16 was used, the ×16 correction for v_cvt_off_f32_i4
+                # was omitted from the hot loop.  Fold it into the epilogue scale.
+                if use_gfx950_cvt:
+                    _c16 = fx.Float32(16.0)
+                    sw_vals = [v * _c16 for v in sw_vals]
 
                 if out_is_f32:
                     # origin/dev_a16w4: f32 output uses scalar f32 atomics and skips CShuffle/LDS.

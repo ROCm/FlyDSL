@@ -399,23 +399,25 @@ def pk_mul_f32(src_a_f32, src_b_f32, scale_f32):
     """gfx9xx: v_pk_mul_f32 — multiply two f32 values by the same scale.
 
     dst_lo = src_a * scale, dst_hi = src_b * scale.
-    Uses op_sel_hi:[0,1] to broadcast scale from lo element.
     Returns (result_lo, result_hi) as two separate f32 values.
     """
     from ..._mlir.dialects import llvm as _llvm
     from ..._mlir import ir
-    i64 = ir.IntegerType.get_signless(64)
+    from ..._mlir.dialects._vector_ops_gen import FromElementsOp, ExtractOp
     f32 = ir.F32Type.get()
-    packed = _llvm.inline_asm(
-        i64,
-        [_to_ir(scale_f32), _to_ir(src_a_f32), _to_ir(src_b_f32)],
+    vec2_f32 = ir.VectorType.get([2], f32)
+    # Pack src_a/src_b into vector<2xf32> → allocated as v[N:N+1].
+    src_vec = FromElementsOp(vec2_f32, [_to_ir(src_a_f32), _to_ir(src_b_f32)]).result
+    # Scale broadcast: op_sel_hi:[0,1] reads lo dword of src1 for both lanes.
+    # Scale must be in a 64-bit pair; duplicate it into vector<2xf32>.
+    scale_vec = FromElementsOp(vec2_f32, [_to_ir(scale_f32), _to_ir(scale_f32)]).result
+    out = _llvm.inline_asm(
+        vec2_f32,
+        [scale_vec, src_vec],
         "v_pk_mul_f32 $0, $1, $2 op_sel_hi:[0,1]",
-        "=v,v,{v[0:1]}",
+        "=v,v,v",
         has_side_effects=False,
     )
-    from ..._mlir.dialects._arith_ops_gen import BitcastOp
-    vec2 = BitcastOp(ir.VectorType.get([2], f32), packed).result
-    from ..._mlir.dialects._vector_ops_gen import ExtractOp
-    lo = ExtractOp(vec2, [], static_position=[0]).result
-    hi = ExtractOp(vec2, [], static_position=[1]).result
+    lo = ExtractOp(out, [], static_position=[0]).result
+    hi = ExtractOp(out, [], static_position=[1]).result
     return lo, hi
