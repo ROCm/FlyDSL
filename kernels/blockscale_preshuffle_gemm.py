@@ -322,13 +322,13 @@ def compile_blockscale_preshuffle_gemm(
         tx_i32_base = tx * c_chunk_a
 
         def load_a(idx_i32, a_load_bytes_v):
-            if a_load_bytes_v == 16:
+            if const_expr(a_load_bytes_v == 16):
                 return buffer_copy_gmem16_dwordx4(
                     buffer_ops, vector,
                     elem_type=T.f8, idx_i32=idx_i32,
                     rsrc=a_rsrc, vec_elems=16, elem_bytes=elem_bytes,
                 )
-            if a_load_bytes_v == 8:
+            if const_expr(a_load_bytes_v == 8):
                 return buffer_ops.buffer_load(a_rsrc, idx_i32, vec_width=2, dtype=T.i32)
             return buffer_ops.buffer_load(a_rsrc, idx_i32, vec_width=1, dtype=T.i32)
 
@@ -347,7 +347,7 @@ def compile_blockscale_preshuffle_gemm(
                 row_a_global = bx_m + row_a_local
                 idx_i32 = row_a_global * _k_div4_factor + (base_k_div4 + col_a_local_i32)
                 a_vec = load_a(idx_i32, a_load_bytes_v)
-                if a_load_bytes_v == 16:
+                if const_expr(a_load_bytes_v == 16):
                     parts.append(vector.bitcast(T.i32x4, a_vec))
                 else:
                     parts.append(a_vec)
@@ -440,6 +440,11 @@ def compile_blockscale_preshuffle_gemm(
 
         # ── MFMA ──────────────────────────────────────────────────────────
         mfma_res_ty = T.f32x4
+        
+        def _mfma_fn_placeholder(*args, **kwargs):
+            raise RuntimeError("mfma_fn placeholder should be overwritten before use")
+
+        mfma_fn = _mfma_fn_placeholder
 
         if _is_gfx950:
             c0_i64 = arith.constant(0, type=T.i64)
@@ -450,12 +455,12 @@ def compile_blockscale_preshuffle_gemm(
         else:
             mfma_fn = rocdl.mfma_f32_16x16x32_fp8_fp8
 
-            def mfma_step(acc_in, a, b):
-                return mfma_fn(mfma_res_ty, [a, b, acc_in, 0, 0, 0])
+        def mfma_step(acc_in, a, b):
+            return mfma_fn(mfma_res_ty, [a, b, acc_in, 0, 0, 0])
 
-            def mfma_k64_bytes(acc_in, a0, a1, b0, b1):
-                acc_mid = mfma_step(acc_in, a0, b0)
-                return mfma_step(acc_mid, a1, b1)
+        def mfma_k64_bytes(acc_in, a0, a1, b0, b1):
+            acc_mid = mfma_step(acc_in, a0, b0)
+            return mfma_step(acc_mid, a1, b1)
 
         # ── Blockscale compute tile ───────────────────────────────────────
         from flydsl._mlir.dialects import math as math_dialect
@@ -672,6 +677,7 @@ def compile_blockscale_preshuffle_gemm(
 
         def hot_loop_scheduler():
             mfma_group = num_acc_n
+            mfma_total = -1
             if _is_gfx950:
                 mfma_total = sb_per_tile * m_repeat * mfma_group
             else:

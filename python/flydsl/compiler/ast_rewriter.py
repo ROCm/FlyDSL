@@ -659,7 +659,6 @@ class ReplaceIfWithDispatch(Transformer):
                             return False
                 return any(_visit(part) for part in compare_parts)
             if isinstance(node, ast.Call):
-                print(f"_visit Call node: {ast.unparse(node)}")
                 func = node.func
                 if not (isinstance(func, ast.Name) and func.id in ReplaceIfWithDispatch._REWRITE_HELPER_NAMES):
                     return True
