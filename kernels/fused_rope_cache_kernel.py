@@ -26,7 +26,7 @@ KV cache layouts:
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 
-from flydsl.expr import arith, vector, range_constexpr
+from flydsl.expr import vector, range_constexpr
 from flydsl.expr.arith import ArithValue
 from flydsl.expr.typing import T
 from flydsl.expr import buffer_ops
@@ -43,7 +43,7 @@ def _layout_to_dword_off(coord, layout, elem_bytes):
 
     crd2idx(coord, layout) → element offset (index) → byte offset (i32) → dword offset (i32).
     """
-    elem_off = arith.index_cast(T.i32, crd2idx(coord, layout))
+    elem_off = ArithValue(crd2idx(coord, layout)).index_cast(T.i32)
     return (ArithValue(elem_off) * elem_bytes) >> fx.Int32(2)
 
 
@@ -98,7 +98,7 @@ def _apply_neox_rope(qk_div, cos_div, sin_div, pair_div,
     # NeoX sign: first half uses -sin, second half uses +sin
     qk_cos   = ArithValue(qk_e) * ArithValue(cos_e)
     pair_sin = ArithValue(pair_e) * ArithValue(sin_e)
-    sin_term = arith.select(is_first_half, arith.negf(pair_sin), pair_sin)
+    sin_term = ArithValue(is_first_half).select(-pair_sin, pair_sin)
     rot_e    = ArithValue(qk_cos) + ArithValue(sin_term)
 
     return rot_e
@@ -216,7 +216,7 @@ def build_fused_rope_cache_module(
 
         copy_atom, vec_reg_ty, vec_reg_lay = _make_rope_copy_helpers(elem_type, elem_bits)
 
-        if arith.cmpi(arith.CmpIPredicate.ult, tid, fx.Int32(vecs_per_head)):
+        if tid < fx.Int32(vecs_per_head):
             pid_t = pid // num_q_heads
             pid_hq = pid % num_q_heads
 
@@ -238,8 +238,8 @@ def build_fused_rope_cache_module(
             sin_div = fx.logical_divide(sin_row, fx.make_layout(VEC_WIDTH, 1))
 
             # NeoX rotation: pair with opposite half
-            is_first_half = arith.cmpi(arith.CmpIPredicate.ult, tid, fx.Int32(vecs_per_half))
-            pair_tid = arith.select(is_first_half, tid + vecs_per_half, tid - vecs_per_half)
+            is_first_half = tid < fx.Int32(vecs_per_half)
+            pair_tid = ArithValue(is_first_half).select(tid + vecs_per_half, tid - vecs_per_half)
             # tid % vecs_per_half wraps into cos/sin range
             cos_vec_idx = tid % vecs_per_half
 
@@ -290,7 +290,7 @@ def build_fused_rope_cache_module(
         # Layouts for KV cache (used in non-layout-API scatter paths)
         kv_layout = fx.make_layout(_kv_shape, _kv_stride)
 
-        if arith.cmpi(arith.CmpIPredicate.ult, tid, fx.Int32(vecs_per_head)):
+        if tid < fx.Int32(vecs_per_head):
             pid_t = pid // num_kv_heads
             pid_hk = pid % num_kv_heads
 
@@ -312,8 +312,8 @@ def build_fused_rope_cache_module(
             sin_div = fx.logical_divide(sin_row, fx.make_layout(VEC_WIDTH, 1))
 
             # NeoX rotation
-            is_first_half = arith.cmpi(arith.CmpIPredicate.ult, tid, fx.Int32(vecs_per_half))
-            pair_tid = arith.select(is_first_half, tid + vecs_per_half, tid - vecs_per_half)
+            is_first_half = tid < fx.Int32(vecs_per_half)
+            pair_tid = ArithValue(is_first_half).select(tid + vecs_per_half, tid - vecs_per_half)
             cos_vec_idx = tid % vecs_per_half
 
             k_rot_e = _apply_neox_rope(
@@ -326,7 +326,7 @@ def build_fused_rope_cache_module(
             # --- KV Cache write ---
             slot_val = buffer_ops.buffer_load(slot_rsrc, pid_t, vec_width=1, dtype=T.i32)
 
-            if arith.cmpi(arith.CmpIPredicate.sge, slot_val, fx.Int32(0)):
+            if slot_val >= fx.Int32(0):
                 pid_t_slot = ArithValue(slot_val) // block_size
                 pid_b = ArithValue(slot_val) % block_size
 
@@ -387,7 +387,7 @@ def build_fused_rope_cache_module(
                         v_scalar = vector.extract(v_e, static_position=[vi])
                         d_idx = ArithValue(tid) * VEC_WIDTH + vi
                         vc_coord = (pid_t_slot, pid_hk, d_idx, pid_b)
-                        vc_elem_off = arith.index_cast(T.i32, crd2idx(vc_coord, vc_nf_layout))
+                        vc_elem_off = ArithValue(crd2idx(vc_coord, vc_nf_layout)).index_cast(T.i32)
                         buffer_ops.buffer_store(v_scalar, vc_rsrc, vc_elem_off)
 
     @flyc.jit

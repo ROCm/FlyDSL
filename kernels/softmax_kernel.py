@@ -18,6 +18,7 @@ import flydsl.expr as fx
 from flydsl.compiler.kernel_function import CompilationContext
 
 from flydsl.expr import arith, vector, gpu, range_constexpr
+from flydsl.expr.arith import ArithValue
 from flydsl.expr.typing import T, Int32
 
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
@@ -96,14 +97,14 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
             w = wave_reduce(val, mode)
 
             if lane == fx.Int32(0):
-                wave_idx = arith.index_cast(T.index, wave)
+                wave_idx = ArithValue(wave).index_cast(T.index)
                 s_red.store(w, [wave_idx])
             gpu.barrier()
 
             if wave == fx.Int32(0):
                 in_range = lane < RED_SLOTS
                 lane_safe = in_range.select(lane, fx.Int32(0))
-                lane_safe_idx = arith.index_cast(T.index, lane_safe)
+                lane_safe_idx = ArithValue(lane_safe).index_cast(T.index)
                 v = s_red.load([lane_safe_idx])
                 z = neutral
                 ww = in_range.select(v, z)
@@ -296,7 +297,7 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
         with ir.InsertionPoint(ctx.gpu_module_body):
             allocator.finalize()
 
-        idx_m = arith.index_cast(T.index, m_in)
+        idx_m = ArithValue(m_in).index_cast(T.index)
         launcher = softmax_kernel(A, C, C, C)
         launcher.launch(
             grid=(idx_m, 1, 1),

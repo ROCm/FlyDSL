@@ -15,6 +15,7 @@ import flydsl.expr as fx
 from flydsl.compiler.kernel_function import CompilationContext
 
 from flydsl.expr import arith, vector, gpu, range_constexpr
+from flydsl.expr.arith import ArithValue
 from flydsl.expr.typing import T, Int32
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
@@ -97,7 +98,7 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
             w1 = wave_reduce_add(val1)
 
             if lane == fx.Int32(0):
-                wave_idx = arith.index_cast(T.index, wave)
+                wave_idx = ArithValue(wave).index_cast(T.index)
                 s_red.store(w0, [wave_idx])
                 s_red2.store(w1, [wave_idx])
             gpu.barrier()
@@ -105,7 +106,7 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
             if wave == fx.Int32(0):
                 in_range = lane < RED_SLOTS
                 lane_safe = in_range.select(lane, fx.Int32(0))
-                lane_safe_idx = arith.index_cast(T.index, lane_safe)
+                lane_safe_idx = ArithValue(lane_safe).index_cast(T.index)
                 v0 = s_red.load([lane_safe_idx])
                 v1 = s_red2.load([lane_safe_idx])
                 z = fx.Float32(0.0)
@@ -329,7 +330,7 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
         with ir.InsertionPoint(ctx.gpu_module_body):
             allocator.finalize()
 
-        idx_m = arith.index_cast(T.index, m_in)
+        idx_m = ArithValue(m_in).index_cast(T.index)
         launcher = rmsnorm_kernel(Input, Gamma, Gamma, Output)
         launcher.launch(
             grid=(idx_m, 1, 1),
