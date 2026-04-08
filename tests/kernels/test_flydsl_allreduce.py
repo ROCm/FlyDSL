@@ -355,27 +355,33 @@ def _dist_worker(
             else:
                 max_err = 0.0
 
+            if num_iters <= 1:
+                raise ValueError("num_iters must be > 1 when dropping first measured iteration")
+
             torch.cuda.synchronize()
             dist.barrier(device_ids=[rank])
+            start_evt = torch.cuda.Event(enable_timing=True)
+            first_evt = torch.cuda.Event(enable_timing=True)
+            end_evt = torch.cuda.Event(enable_timing=True)
             with tpf.profile(
                 activities=[tpf.ProfilerActivity.CPU, tpf.ProfilerActivity.CUDA],
                 profile_memory=False,
                 with_stack=True,
                 with_modules=True,
             ) as prof:
-                for _ in range(num_iters):
+                start_evt.record()
+                _run_eager()
+                first_evt.record()
+                for _ in range(num_iters - 1):
                     _run_eager()
+                end_evt.record()
                 torch.cuda.synchronize()
             if save_trace:
                 prof.export_chrome_trace(f"profiler_trace_{rank}_{allreduce_impl}_eager.json")
             perf_df = get_trace_perf(prof, num_iters)
-            avg_name = "[avg us/iter]"
-            if avg_name in perf_df.index and "device_time_sum" in perf_df.columns:
-                avg_time_us = perf_df.at[avg_name, "device_time_sum"]
-            else:
-                device_time_col = perf_df.get("device_time_sum", pd.Series())
-                avg_time_us = device_time_col.sum() / num_iters if not device_time_col.empty else 0.0
-            device_time_sum = perf_df["device_time_sum"].sum() if "device_time_sum" in perf_df.columns else 0.0
+            total_ms_wo_first = first_evt.elapsed_time(end_evt)
+            avg_time_us = (total_ms_wo_first * 1000.0) / (num_iters - 1)
+            device_time_sum = total_ms_wo_first * 1000.0
             kernel_name = "unknown"
             if not perf_df.empty and "name" in perf_df.columns and "device_time_sum" in perf_df.columns:
                 top_kernel = perf_df.nlargest(1, "device_time_sum")
@@ -407,12 +413,6 @@ def _dist_worker(
                     "num_warmup": num_warmup, "error": "no capture()",
                 }
             else:
-                # Warmup OUTSIDE capture context (eager mode) to populate exe cache
-                for _ in range(num_warmup):
-                    _run_eager()
-                torch.cuda.synchronize()
-                dist.barrier(device_ids=[rank])
-
                 # Use a separate stream for graph capture (matches aiter's graph_capture pattern)
                 capture_stream = torch.cuda.Stream()
                 graph = torch.cuda.CUDAGraph()
@@ -444,12 +444,11 @@ def _dist_worker(
                     out.fill_(0)
                     torch.cuda.synchronize()
 
-                    dist.barrier(device_ids=[rank])
-                    graph.replay()
-                    torch.cuda.synchronize()
-                    dist.barrier(device_ids=[rank])
-
                     if not skip_check:
+                        dist.barrier(device_ids=[rank])
+                        graph.replay()
+                        torch.cuda.synchronize()
+                        dist.barrier(device_ids=[rank])
                         gathered = [torch.empty_like(x_flat) for _ in range(world_size)]
                         dist.all_gather(gathered, x_flat, group=group)
                         ref_f32 = torch.zeros_like(x_flat, dtype=torch.float32)
@@ -459,10 +458,21 @@ def _dist_worker(
                         assert max_err < atol, f"[rank={rank}] cudagraph max_err={max_err:.3e} >= atol={atol}"
                     else:
                         max_err = 0.0
-                    start_evt = torch.cuda.Event(enable_timing=True)
-                    end_evt = torch.cuda.Event(enable_timing=True)
+
+                    # Graph mode warmup should run in graph mode (replay).
+                    dist.barrier(device_ids=[rank])
+                    for _ in range(num_warmup):
+                        graph.replay()
                     torch.cuda.synchronize()
                     dist.barrier(device_ids=[rank])
+
+                    if num_iters <= 1:
+                        raise ValueError("num_iters must be > 1 when dropping first measured replay")
+
+                    start_evt = torch.cuda.Event(enable_timing=True)
+                    first_evt = torch.cuda.Event(enable_timing=True)
+                    end_evt = torch.cuda.Event(enable_timing=True)
+                    torch.cuda.synchronize()
 
                     with tpf.profile(
                         activities=[tpf.ProfilerActivity.CPU, tpf.ProfilerActivity.CUDA],
@@ -470,16 +480,22 @@ def _dist_worker(
                         with_stack=True,
                         with_modules=True,
                     ) as prof:
+                        # Align all ranks at profiling boundary.
+                        dist.barrier(device_ids=[rank])
                         start_evt.record()
-                        for _ in range(num_iters):
+                        graph.replay()
+                        first_evt.record()
+                        for _ in range(num_iters - 1):
                             graph.replay()
                         end_evt.record()
                         torch.cuda.synchronize()
-                    # prof.export_chrome_trace(f"profiler_trace_{rank}_{allreduce_impl}_cudagraph.json")
+                    if save_trace:
+                        prof.export_chrome_trace(f"profiler_trace_{rank}_{allreduce_impl}_cudagraph.json")
 
-                    total_ms = start_evt.elapsed_time(end_evt)
-                    avg_time_us = (total_ms * 1000.0) / num_iters if num_iters else 0.0
-                    device_time_sum = total_ms * 1000.0
+                    # Drop the first measured replay from performance statistics.
+                    total_ms_wo_first = first_evt.elapsed_time(end_evt)
+                    avg_time_us = (total_ms_wo_first * 1000.0) / (num_iters - 1)
+                    device_time_sum = total_ms_wo_first * 1000.0
                     result_dict[rank] = {
                         "rank": rank, "shape": shape, "dtype": dtype_str, "world_size": world_size,
                         "mode": "cudagraph", "max_error": max_err, "avg_time_us": avg_time_us,
