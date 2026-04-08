@@ -498,7 +498,8 @@ def _mxscale_extract_sub8(acc, vec_base: int, *, vector, range_constexpr, ACC_VE
     return vector.shuffle(acc, acc, [vec_base + i for i in range_constexpr(8)])
 
 
-def _finalize_alloc_and_launch_2d(*, ctx, alloc, launcher, gx, gy, block_threads: int, stream, waves_per_eu, ir):
+def _finalize_alloc_and_launch_2d(*, ctx, alloc, launcher, gx, gy, block_threads: int, stream, waves_per_eu, ir,
+                                  cluster=None):
     with ir.InsertionPoint(ctx.gpu_module_body):
         alloc.finalized = False
         alloc.finalize()
@@ -508,10 +509,14 @@ def _finalize_alloc_and_launch_2d(*, ctx, alloc, launcher, gx, gy, block_threads
                 op.attributes["rocdl.waves_per_eu"] = ir.IntegerAttr.get(
                     ir.IntegerType.get_signless(32), int(waves_per_eu)
                 )
+            if cluster is not None:
+                op.attributes["rocdl.cluster_dims"] = ir.StringAttr.get(
+                    f"{cluster[0]},{cluster[1]},{cluster[2]}")
     launcher.launch(
         grid=(gx, gy, 1),
         block=(block_threads, 1, 1),
         stream=stream,
+        cluster=cluster,
     )
 
 
@@ -1489,6 +1494,12 @@ def _compile_stage1_mxscale_kernel_impl(
     waves_per_eu: int | None,
     data_format: str = "fp8",
     expert_sched_mode: bool = True,
+    num_buffers: int = 1,
+    use_tdm_store: bool = False,
+    inst_prefetch: bool = False,
+    wave_specialized_tdm: bool = False,
+    cluster_m: int = 1,
+    cluster_n: int = 1,
 ):
     """Compile mxscale stage1 single kernel (route-pack + TDM + WMMA_SCALE + epilog)."""
     import flydsl.compiler as flyc
@@ -1524,6 +1535,22 @@ def _compile_stage1_mxscale_kernel_impl(
         raise ValueError(f"tile_k={tile_k} must be divisible by {WMMA_K}")
     if (int(tile_k) % SCALE_BLOCK) != 0:
         raise ValueError(f"tile_k={tile_k} must be divisible by {SCALE_BLOCK}")
+    if int(num_buffers) not in (1, 2, 3, 4):
+        raise ValueError(f"num_buffers must be 1, 2, 3, or 4, got {num_buffers}")
+    use_cluster = int(cluster_m) > 1 or int(cluster_n) > 1
+    if use_cluster:
+        if int(cluster_m) * int(cluster_n) > 16:
+            raise ValueError(
+                f"cluster_m * cluster_n must be <= 16, got {cluster_m}*{cluster_n}")
+    num_warps_s1 = int(m_warp) * int(n_warp)
+    if bool(wave_specialized_tdm):
+        if num_warps_s1 < 4:
+            raise ValueError(
+                f"wave_specialized_tdm requires at least 4 waves (B_gate + B_up + Bs_gate + Bs_up), got {num_warps_s1}")
+    tdm_desc_num_warps = 1 if bool(wave_specialized_tdm) else num_warps_s1
+    effective_waves_per_eu = waves_per_eu
+    if use_cluster and effective_waves_per_eu is None:
+        effective_waves_per_eu = 2
 
     K = int(model_dim)
     N = int(inter_dim)
@@ -1558,19 +1585,62 @@ def _compile_stage1_mxscale_kernel_impl(
         wmma_m_rep=wmma_m_rep, wmma_n_rep=wmma_n_rep, WMMA_M=WMMA_M, is_fp4=is_fp4
     )
 
+    # Pipeline calculations for multi-buffer
+    _use_pipeline = int(num_buffers) >= 2
+    if _use_pipeline:
+        from kernels.gemm_common_gfx1250 import (
+            pipeline_fence, pipeline_fence_signal, pipeline_fence_wait,
+        )
+        from kernels.pipeline_utils import make_tail_plan
+
+        pre_loaded = int(num_buffers) - 1
+        loop_iters = (num_k_tiles - pre_loaded) // int(num_buffers)
+        _tail_start = loop_iters * int(num_buffers)
+        extra = num_k_tiles - _tail_start - pre_loaded
+        TDM_PER_STEP = 1 if bool(wave_specialized_tdm) else 4
+        _fence_outstanding = TDM_PER_STEP * (int(num_buffers) - 2)
+        _base_tail_plan = make_tail_plan(int(num_buffers), pre_loaded, extra)
+        _tail_plan = [
+            (ls, cs, o * TDM_PER_STEP // 2 if o > 0 else o)
+            for ls, cs, o in _base_tail_plan
+        ]
+        if num_k_tiles < int(num_buffers):
+            raise ValueError(
+                f"{num_buffers}-stage buffering requires num_k_tiles >= {num_buffers}, "
+                f"got {num_k_tiles}")
+
+    if bool(wave_specialized_tdm):
+        from kernels.gemm_common_gfx1250 import issue_tdm_loads
+
     alloc = SmemAllocator(None, arch=str(get_hip_arch()), global_sym_name=f"moe_mxscale_{data_format}_s1_single")
-    off_ag = alloc._align(alloc.ptr, 16)
-    alloc.ptr = off_ag + lds_a_data_bytes
-    off_bg = alloc._align(alloc.ptr, 16)
-    alloc.ptr = off_bg + lds_b_data_bytes
-    off_as = alloc._align(alloc.ptr, 16)
-    alloc.ptr = off_as + lds_a_scale_bytes
-    off_bs = alloc._align(alloc.ptr, 16)
-    alloc.ptr = off_bs + lds_b_scale_bytes
-    off_bu = alloc._align(alloc.ptr, 16)
-    alloc.ptr = off_bu + lds_b_data_bytes
-    off_bsu = alloc._align(alloc.ptr, 16)
-    alloc.ptr = off_bsu + lds_b_scale_bytes
+    _nb = int(num_buffers)
+    off_ag_list, off_bg_list, off_as_list, off_bs_list = [], [], [], []
+    off_bu_list, off_bsu_list = [], []
+    for _buf_i in range(_nb):
+        _o = alloc._align(alloc.ptr, 16); alloc.ptr = _o + lds_a_data_bytes; off_ag_list.append(_o)
+        _o = alloc._align(alloc.ptr, 16); alloc.ptr = _o + lds_b_data_bytes; off_bg_list.append(_o)
+        _o = alloc._align(alloc.ptr, 16); alloc.ptr = _o + lds_a_scale_bytes; off_as_list.append(_o)
+        _o = alloc._align(alloc.ptr, 16); alloc.ptr = _o + lds_b_scale_bytes; off_bs_list.append(_o)
+        _o = alloc._align(alloc.ptr, 16); alloc.ptr = _o + lds_b_data_bytes; off_bu_list.append(_o)
+        _o = alloc._align(alloc.ptr, 16); alloc.ptr = _o + lds_b_scale_bytes; off_bsu_list.append(_o)
+
+    # TDM store epilogue: D output LDS layout (stage1)
+    LDS_PAD_D_BYTES_s1 = 16
+    elem_bytes_d_s1 = 2  # f16/bf16
+    if bool(use_tdm_store):
+        from kernels.gemm_common_gfx1250 import (
+            store_acc_vec8_to_lds,
+        )
+        lds_d_row_stride_s1 = warp_tile_n * elem_bytes_d_s1 + LDS_PAD_D_BYTES_s1
+        warp_d_bytes_s1 = warp_tile_m * lds_d_row_stride_s1
+        total_d_bytes_s1 = num_warps_s1 * warp_d_bytes_s1
+        d_output_off_s1 = 0
+        _lds_d_stride_elems_s1 = lds_d_row_stride_s1 // 2
+        _warp_d_elems_s1 = warp_d_bytes_s1 // 2
+        _n_col_d_elems_s1 = WMMA_N * elem_bytes_d_s1 // 2
+        d_need_epilogue_fence_s1 = _use_pipeline
+        if total_d_bytes_s1 > alloc.ptr:
+            alloc.ptr = total_d_bytes_s1
 
     @flyc.kernel
     def moe_mxscale_stage1_single(
@@ -1589,6 +1659,18 @@ def _compile_stage1_mxscale_kernel_impl(
         i32_size_expert_ids_in: fx.Int32,
     ):
         _ = (arg_max_token_ids, i32_k_in)
+        if inst_prefetch:
+            if arith.cmpi(arith.CmpIPredicate.eq, rocdl.wave_id(),
+                          arith.constant(0, type=T.i32)):
+                _prefetch_lines = ["s_setreg_imm32_b32 hwreg(HW_REG_WAVE_MODE, 8, 1), 1"]
+                for _pg in range_constexpr(10):
+                    _prefetch_lines.append(
+                        f"s_prefetch_inst_pc_rel {_pg * 4096}, s0, 31")
+                llvm_dialect.inline_asm(
+                    None, [],
+                    "\n".join(_prefetch_lines),
+                    "", has_side_effects=True,
+                )
         llvm_dialect.inline_asm(
             None, [],
             "s_setreg_imm32_b32 hwreg(26, 4, 1), 1",
@@ -1634,19 +1716,75 @@ def _compile_stage1_mxscale_kernel_impl(
         warp_n_base = wave_n_idx * arith.index(warp_tile_n)
         blk_n = bx * arith.index(int(tile_n))
 
+        if use_cluster:
+            _local_x, _local_y = gpu.compute_cluster_position()
+            _a_mcast_mask, b_mcast_mask = gpu.compute_mcast_masks(
+                _local_x, _local_y, int(cluster_m), int(cluster_n))
+        else:
+            b_mcast_mask = 0
+
         base_ptr = alloc.get_base()
-        smem_ag = SmemPtr(base_ptr, off_ag, T.i8, shape=(lds_a_data_bytes,))
-        smem_bg = SmemPtr(base_ptr, off_bg, T.i8, shape=(lds_b_data_bytes,))
-        smem_as = SmemPtr(base_ptr, off_as, T.i8, shape=(lds_a_scale_bytes,))
-        smem_bs = SmemPtr(base_ptr, off_bs, T.i8, shape=(lds_b_scale_bytes,))
-        smem_bu = SmemPtr(base_ptr, off_bu, T.i8, shape=(lds_b_data_bytes,))
-        smem_bsu = SmemPtr(base_ptr, off_bsu, T.i8, shape=(lds_b_scale_bytes,))
-        lds_ag = get_op_result_or_value(smem_ag.get())
-        lds_bg = get_op_result_or_value(smem_bg.get())
-        lds_as = get_op_result_or_value(smem_as.get())
-        lds_bs = get_op_result_or_value(smem_bs.get())
-        lds_bu = get_op_result_or_value(smem_bu.get())
-        lds_bsu = get_op_result_or_value(smem_bsu.get())
+        lds_ag_bufs, lds_bg_bufs, lds_as_bufs, lds_bs_bufs = [], [], [], []
+        lds_bu_bufs, lds_bsu_bufs = [], []
+        for _bi in range_constexpr(_nb):
+            lds_ag_bufs.append(get_op_result_or_value(
+                SmemPtr(base_ptr, off_ag_list[_bi], T.i8, shape=(lds_a_data_bytes,)).get()))
+            lds_bg_bufs.append(get_op_result_or_value(
+                SmemPtr(base_ptr, off_bg_list[_bi], T.i8, shape=(lds_b_data_bytes,)).get()))
+            lds_as_bufs.append(get_op_result_or_value(
+                SmemPtr(base_ptr, off_as_list[_bi], T.i8, shape=(lds_a_scale_bytes,)).get()))
+            lds_bs_bufs.append(get_op_result_or_value(
+                SmemPtr(base_ptr, off_bs_list[_bi], T.i8, shape=(lds_b_scale_bytes,)).get()))
+            lds_bu_bufs.append(get_op_result_or_value(
+                SmemPtr(base_ptr, off_bu_list[_bi], T.i8, shape=(lds_b_data_bytes,)).get()))
+            lds_bsu_bufs.append(get_op_result_or_value(
+                SmemPtr(base_ptr, off_bsu_list[_bi], T.i8, shape=(lds_b_scale_bytes,)).get()))
+
+        if bool(use_tdm_store):
+            from kernels.gemm_common_gfx1250 import get_lds_memref
+            d_lds_f16_count_s1 = total_d_bytes_s1 // 2
+            d_smem_s1 = SmemPtr(base_ptr, d_output_off_s1, T.f16,
+                                shape=(d_lds_f16_count_s1,))
+            d_lds_buffer_s1 = get_lds_memref(d_smem_s1)
+            warp_lds_off_s1 = (
+                (wave_m_idx * arith.index(int(n_warp)) + wave_n_idx)
+                * arith.index(_warp_d_elems_s1)
+            )
+            d_lane_base_s1 = (
+                warp_lds_off_s1
+                + lane16 * arith.index(_lds_d_stride_elems_s1)
+                + lane_kgrp * arith.index(4 * elem_bytes_d_s1)
+            )
+            wave_id_idx_s1 = arith.index_cast(T.index, rocdl.wave_id())
+            d_warp_off_sgpr_s1 = (
+                wave_id_idx_s1 * arith.index(warp_d_bytes_s1)
+                + arith.index(d_output_off_s1)
+            )
+            warp_m_off_sgpr_s1 = (
+                (wave_id_idx_s1 / arith.index(int(n_warp)))
+                * arith.index(warp_tile_m)
+            )
+            warp_n_off_sgpr_s1 = (
+                (wave_id_idx_s1 % arith.index(int(n_warp)))
+                * arith.index(warp_tile_n)
+            )
+            d_desc_s1 = tdm_ops.make_tensor_descriptor_2d(
+                global_ptr=arg_out,
+                lds_memref=base_ptr,
+                global_offset=(
+                    by * arith.index(int(tile_m)) + warp_m_off_sgpr_s1,
+                    blk_n + warp_n_off_sgpr_s1,
+                ),
+                tensor_shape=(warp_tile_m, warp_tile_n),
+                strides=(N, 1),
+                tile_shape=(warp_tile_m, warp_tile_n),
+                elem_bytes=elem_bytes_d_s1,
+                pad_interval=warp_tile_n,
+                pad_amount=LDS_PAD_D_BYTES_s1 // elem_bytes_d_s1,
+                num_warps=1,
+                lds_byte_offset=d_warp_off_sgpr_s1,
+                for_store=True,
+            )
 
         def silu(x):
             t = x * (-1.4426950408889634)
@@ -1658,7 +1796,7 @@ def _compile_stage1_mxscale_kernel_impl(
         def make_desc_a(k_base):
             return k_base / arith.index(PACK_FACTOR_A)
 
-        def issue_a_load(k_packed_base):
+        def issue_a_load(k_packed_base, target_lds):
             total = int(tile_m * packed_tile_k_a)
             rounds = (total + block_threads - 1) // block_threads
             for it in range(rounds):
@@ -1684,13 +1822,13 @@ def _compile_stage1_mxscale_kernel_impl(
                     x_val = arith.select(ok, buffer_ops.buffer_load(x_rsrc, x_idx_safe, vec_width=1, dtype=T.i8), arith.constant(0, type=T.i8))
                     lds_idx = row * arith.index(lds_a_stride_bytes) + col
                     v1 = vector.from_elements(T.vec(1, T.i8), [x_val])
-                    vector.store(v1, lds_ag, [lds_idx], alignment=1)
+                    vector.store(v1, target_lds, [lds_idx], alignment=1)
                     scf.YieldOp([])
 
         def make_desc_as(k_base):
             return k_base / arith.index(SCALE_BLOCK)
 
-        def issue_as_load(k_scale_base):
+        def issue_as_load(k_scale_base, target_lds):
             total = int(tile_m * scale_k_per_tile)
             rounds = (total + block_threads - 1) // block_threads
             for it in range(rounds):
@@ -1732,7 +1870,7 @@ def _compile_stage1_mxscale_kernel_impl(
                             + ksc_sub
                         )
                     v1 = vector.from_elements(T.vec(1, T.i8), [sx_val])
-                    vector.store(v1, lds_as, [lds_idx], alignment=1)
+                    vector.store(v1, target_lds, [lds_idx], alignment=1)
                     scf.YieldOp([])
 
         def make_desc_b(lds_b_mem, n_off, k_base):
@@ -1744,7 +1882,7 @@ def _compile_stage1_mxscale_kernel_impl(
                     strides=(K_packed_b, 1),
                     tile_shape=(int(tile_n), int(packed_tile_k_b)),
                     elem_bytes=1, pad_interval=int(packed_tile_k_b), pad_amount=LDS_PAD_B_BYTES,
-                    num_warps=int(m_warp) * int(n_warp), workgroup_mask=0)
+                    num_warps=tdm_desc_num_warps, workgroup_mask=b_mcast_mask)
             return tdm_ops.make_tensor_descriptor_2d(
                 global_ptr=arg_w, lds_memref=lds_b_mem,
                 global_offset=(n_off / arith.index(16), (k_base / arith.index(PACK_FACTOR_B)) * arith.index(16)),
@@ -1753,8 +1891,8 @@ def _compile_stage1_mxscale_kernel_impl(
                 tile_shape=(int(tile_n // 16), int(packed_tile_k_b * 16)),
                 elem_bytes=1,
                 pad_interval=0, pad_amount=0,
-                num_warps=int(m_warp) * int(n_warp),
-                workgroup_mask=0)
+                num_warps=tdm_desc_num_warps,
+                workgroup_mask=b_mcast_mask)
 
         def make_desc_bs(lds_bs_mem, n_off, k_base):
             return tdm_ops.make_tensor_descriptor_2d(
@@ -1764,52 +1902,13 @@ def _compile_stage1_mxscale_kernel_impl(
                 strides=(K_scale, 1),
                 tile_shape=(int(tile_n), int(scale_k_per_tile)),
                 elem_bytes=1, pad_interval=0, pad_amount=0,
-                num_warps=int(m_warp) * int(n_warp), workgroup_mask=0)
-
-        def issue_bs_load(k_base, lds_bs_mem, n_off):
-            if is_fp4:
-                tdm_ops.tensor_load_2d(make_desc_bs(lds_bs_mem, n_off, k_base))
-                return
-            total_bs = int(tile_n * scale_k_per_tile)
-            rounds_bs = (total_bs + block_threads - 1) // block_threads
-            for it in range(rounds_bs):
-                elem = tx + fx.Index(it * block_threads)
-                in_range = arith.cmpi(
-                    arith.CmpIPredicate.ult,
-                    arith.index_cast(T.i32, elem),
-                    arith.constant(total_bs, type=T.i32),
-                )
-                _if_bs = scf.IfOp(in_range)
-                with ir.InsertionPoint(_if_bs.then_block):
-                    n_local = elem // arith.index(int(scale_k_per_tile))
-                    ksc = elem % arith.index(int(scale_k_per_tile))
-                    k_scale_base = k_base / arith.index(SCALE_BLOCK)
-                    sw_idx = arith.index_cast(T.i32,
-                        (n_off + n_local) * arith.index(K_scale) + k_scale_base + ksc)
-                    sw_val = buffer_ops.buffer_load(
-                        sw_rsrc, sw_idx, vec_width=1, dtype=T.i8)
-                    wave_n = n_local / arith.index(warp_tile_n)
-                    sub_n = n_local % arith.index(warp_tile_n)
-                    wn_idx = sub_n / arith.index(WMMA_N)
-                    lane_row = sub_n % arith.index(WMMA_N)
-                    ksc_blk = ksc / arith.index(SCALES_PER_WMMA)
-                    ksc_sub = ksc % arith.index(SCALES_PER_WMMA)
-                    warp_lds_row = wave_n * arith.index(WMMA_N) + lane_row
-                    lds_idx = (
-                        warp_lds_row * arith.index(interleaved_scale_cols_b)
-                        + ksc_blk * arith.index(b_scale_load_rep * SCALES_PER_WMMA)
-                        + wn_idx * arith.index(SCALES_PER_WMMA)
-                        + ksc_sub
-                    )
-                    v1 = vector.from_elements(T.vec(1, T.i8), [sw_val])
-                    vector.store(v1, lds_bs_mem, [lds_idx], alignment=1)
-                    scf.YieldOp([])
+                num_warps=tdm_desc_num_warps, workgroup_mask=b_mcast_mask)
 
         def issue_b_load(k_base, lds_b_mem, lds_bs_mem, up_shift):
             eid_row = arith.index_cast(T.index, eid_i32) * arith.index(int(2 * N))
             n_off = eid_row + blk_n + arith.index(up_shift)
             tdm_ops.tensor_load_2d(make_desc_b(lds_b_mem, n_off, k_base))
-            issue_bs_load(k_base, lds_bs_mem, n_off)
+            tdm_ops.tensor_load_2d(make_desc_bs(lds_bs_mem, n_off, k_base))
 
         def _lds_load_b128(lds_buffer, byte_offset):
             from flydsl._mlir.dialects import llvm as _llvm, memref as _memref
@@ -1937,26 +2036,14 @@ def _compile_stage1_mxscale_kernel_impl(
             )
 
         def _precompute_b_scale_lane_bases():
-            if is_fp4:
-                return _mxscale_precompute_rowmajor_b_scale_lane_bases(
-                    warp_n_base=warp_n_base,
-                    lane16=lane16,
-                    scale_k_per_tile=scale_k_per_tile,
-                    wmma_n_rep=wmma_n_rep,
-                    WMMA_N=WMMA_N,
-                    arith=arith,
-                    range_constexpr=range_constexpr,
-                )
-            return _mxscale_precompute_b_scale_lane_bases(
+            return _mxscale_precompute_rowmajor_b_scale_lane_bases(
                 warp_n_base=warp_n_base,
                 lane16=lane16,
-                lane_kgrp=lane_kgrp,
-                b_scale_load_rep=b_scale_load_rep,
-                interleaved_scale_cols_b=interleaved_scale_cols_b,
-                is_fp4=is_fp4,
-                is_a8w4=is_a8w4,
+                scale_k_per_tile=scale_k_per_tile,
+                wmma_n_rep=wmma_n_rep,
+                WMMA_N=WMMA_N,
                 arith=arith,
-                SCALES_PER_WMMA=SCALES_PER_WMMA,
+                range_constexpr=range_constexpr,
             )
 
         def load_scale_b128(lds_buffer, scale_base, reps, ks=0):
@@ -1984,103 +2071,268 @@ def _compile_stage1_mxscale_kernel_impl(
             bs_bases = _precompute_b_scale_lane_bases()
             bsu_bases = _precompute_b_scale_lane_bases()
 
-            for kt in range_constexpr(num_k_tiles):
-                k_base = fx.Index(kt * int(tile_k))
-                a_desc = make_desc_a(k_base)
-                as_desc = make_desc_as(k_base)
-                issue_a_load(a_desc)
-                issue_as_load(as_desc)
-                issue_b_load(k_base, lds_bg, lds_bs, 0)
-                issue_b_load(k_base, lds_bu, lds_bsu, int(N))
-                tdm_ops.tensor_wait(0)
-                gpu.barrier()
-
+            # ── compute-tile helper (gate + up) ──────────────────────
+            def _compute_k_tile(acg, acu, buf_idx):
                 for ks in range_constexpr(k_wmma_steps):
-                    b_g = [load_b_frag(lds_bg, b_data_bases, wn, ks) for wn in range_constexpr(wmma_n_rep)]
-                    b_u = [load_b_frag(lds_bu, b_data_bases, wn, ks) for wn in range_constexpr(wmma_n_rep)]
+                    b_g = [load_b_frag(lds_bg_bufs[buf_idx], b_data_bases, wn, ks)
+                           for wn in range_constexpr(wmma_n_rep)]
+                    b_u = [load_b_frag(lds_bu_bufs[buf_idx], b_data_bases, wn, ks)
+                           for wn in range_constexpr(wmma_n_rep)]
                     if is_fp4:
-                        as_v = [load_scale_i32(lds_as, as_bases[wm], ks) for wm in range_constexpr(wmma_m_rep)]
-                        bs_g = [load_scale_i32(lds_bs, bs_bases[bi], ks) for bi in range_constexpr(b_scale_load_rep)]
-                        bs_u = [load_scale_i32(lds_bsu, bsu_bases[bi], ks) for bi in range_constexpr(b_scale_load_rep)]
+                        as_v = [load_scale_i32(lds_as_bufs[buf_idx], as_bases[wm], ks)
+                                for wm in range_constexpr(wmma_m_rep)]
+                        bs_gv = [load_scale_i32(lds_bs_bufs[buf_idx], bs_bases[bi], ks)
+                                 for bi in range_constexpr(b_scale_load_rep)]
+                        bs_uv = [load_scale_i32(lds_bsu_bufs[buf_idx], bsu_bases[bi], ks)
+                                 for bi in range_constexpr(b_scale_load_rep)]
                     else:
-                        as_v = load_scale_b128(lds_as, as_bases[0], wmma_m_rep, ks)
-                        bs_g = load_scale_b128(lds_bs, bs_bases[0], b_scale_load_rep, ks)
-                        bs_u = load_scale_b128(lds_bsu, bsu_bases[0], b_scale_load_rep, ks)
+                        as_v = load_scale_b128(lds_as_bufs[buf_idx], as_bases[0],
+                                               wmma_m_rep, ks)
+                        bs_gv = [load_scale_i32(lds_bs_bufs[buf_idx], bs_bases[wn], ks)
+                                 for wn in range_constexpr(wmma_n_rep)]
+                        bs_uv = [load_scale_i32(lds_bsu_bufs[buf_idx], bsu_bases[wn], ks)
+                                 for wn in range_constexpr(wmma_n_rep)]
                     for wm in range_constexpr(wmma_m_rep):
-                        a_frag = load_data_frag(lds_ag, a_data_bases[wm], ks)
+                        a_frag = load_data_frag(lds_ag_bufs[buf_idx],
+                                                a_data_bases[wm], ks)
                         for wn in range_constexpr(wmma_n_rep):
                             _mxscale_emit_wmma(
-                                accs=acc_g,
-                                wm=wm,
-                                wn=wn,
-                                a_frag=a_frag,
-                                b_frags=b_g,
-                                a_scales=as_v,
-                                b_scales=bs_g,
-                                is_fp4=is_fp4,
-                                is_a8w4=is_a8w4,
+                                accs=acg, wm=wm, wn=wn,
+                                a_frag=a_frag, b_frags=b_g,
+                                a_scales=as_v, b_scales=bs_gv,
+                                is_fp4=is_fp4, is_a8w4=is_a8w4,
                                 use_scale_opsel=False,
-                                rocdl=rocdl,
-                                T=T,
+                                rocdl=rocdl, T=T,
                             )
                             _mxscale_emit_wmma(
-                                accs=acc_u,
-                                wm=wm,
-                                wn=wn,
-                                a_frag=a_frag,
-                                b_frags=b_u,
-                                a_scales=as_v,
-                                b_scales=bs_u,
-                                is_fp4=is_fp4,
-                                is_a8w4=is_a8w4,
+                                accs=acu, wm=wm, wn=wn,
+                                a_frag=a_frag, b_frags=b_u,
+                                a_scales=as_v, b_scales=bs_uv,
+                                is_fp4=is_fp4, is_a8w4=is_a8w4,
                                 use_scale_opsel=False,
-                                rocdl=rocdl,
-                                T=T,
+                                rocdl=rocdl, T=T,
                             )
-                gpu.barrier()
+                return acg, acu
+
+            # ── pipeline load helpers ─────────────────────────────────
+            def _issue_b_tdm_only(k_base, buf_idx):
+                _eid_row = (arith.index_cast(T.index, eid_i32)
+                            * arith.index(int(2 * N)))
+                _n_gate = _eid_row + blk_n
+                _n_up = _eid_row + blk_n + arith.index(int(N))
+                if wave_specialized_tdm:
+                    _descs = [
+                        make_desc_b(lds_bg_bufs[buf_idx], _n_gate, k_base),
+                        make_desc_b(lds_bu_bufs[buf_idx], _n_up, k_base),
+                        make_desc_bs(lds_bs_bufs[buf_idx], _n_gate, k_base),
+                        make_desc_bs(lds_bsu_bufs[buf_idx], _n_up, k_base),
+                    ]
+                    issue_tdm_loads(*_descs, wave_specialized=True)
+                else:
+                    tdm_ops.tensor_load_2d(
+                        make_desc_b(lds_bg_bufs[buf_idx], _n_gate, k_base))
+                    tdm_ops.tensor_load_2d(
+                        make_desc_b(lds_bu_bufs[buf_idx], _n_up, k_base))
+                    tdm_ops.tensor_load_2d(
+                        make_desc_bs(lds_bs_bufs[buf_idx], _n_gate, k_base))
+                    tdm_ops.tensor_load_2d(
+                        make_desc_bs(lds_bsu_bufs[buf_idx], _n_up, k_base))
+
+            def _issue_scalar_loads(k_base, buf_idx):
+                issue_a_load(make_desc_a(k_base), lds_ag_bufs[buf_idx])
+                issue_as_load(make_desc_as(k_base), lds_as_bufs[buf_idx])
+
+            def _issue_all_loads(k_base, buf_idx):
+                _issue_b_tdm_only(k_base, buf_idx)
+                _issue_scalar_loads(k_base, buf_idx)
+
+            # ── main K-dimension reduction ────────────────────────────
+            if not _use_pipeline:
+                for kt in range_constexpr(num_k_tiles):
+                    k_base = fx.Index(kt * int(tile_k))
+                    _issue_all_loads(k_base, 0)
+                    tdm_ops.tensor_wait(0)
+                    if use_cluster:
+                        gpu.cluster_barrier()
+                    else:
+                        gpu.barrier()
+                    acc_g, acc_u = _compute_k_tile(acc_g, acc_u, 0)
+                    if use_cluster:
+                        gpu.cluster_barrier()
+                    else:
+                        gpu.barrier()
+            else:
+                # ── prologue ──
+                for _pi in range_constexpr(pre_loaded):
+                    _issue_all_loads(fx.Index(_pi * int(tile_k)), _pi)
+                pipeline_fence(outstanding=0, use_cluster=use_cluster)
+
+                # ── main pipelined loop ──
+                if loop_iters > 0:
+                    _init = list(acc_g) + list(acc_u)
+                    for _li, _st in fx.range(0, loop_iters, 1, init=_init):
+                        _ag = list(_st[:n_accs])
+                        _au = list(_st[n_accs:2 * n_accs])
+                        for _bi in range_constexpr(_nb):
+                            _lb = (_bi + _nb - 1) % _nb
+                            _kt = (_li * fx.Index(_nb)
+                                   + fx.Index(pre_loaded + _bi))
+                            _kb = _kt * fx.Index(int(tile_k))
+                            pipeline_fence_signal(
+                                outstanding=_fence_outstanding,
+                                use_cluster=use_cluster)
+                            pipeline_fence_wait(use_cluster=use_cluster)
+                            _issue_b_tdm_only(_kb, _lb)
+                            _ag, _au = _compute_k_tile(_ag, _au, _bi)
+                            _issue_scalar_loads(_kb, _lb)
+                        _res = yield list(_ag) + list(_au)
+                    acc_g = list(_res[:n_accs])
+                    acc_u = list(_res[n_accs:2 * n_accs])
+
+                # ── post-loop fence ──
+                if loop_iters > 0:
+                    pipeline_fence(outstanding=0, use_cluster=use_cluster)
+                elif use_cluster:
+                    gpu.cluster_barrier()
+
+                # ── tail ──
+                _tail_li = 0
+                _tail_had_load = False
+                for _ls, _cs, _out in _tail_plan:
+                    if _out == -1:
+                        if _tail_had_load:
+                            pipeline_fence(outstanding=0,
+                                           use_cluster=use_cluster)
+                        acc_g, acc_u = _compute_k_tile(
+                            acc_g, acc_u, _cs)
+                    else:
+                        pipeline_fence_signal(outstanding=_out,
+                                              use_cluster=use_cluster)
+                        pipeline_fence_wait(use_cluster=use_cluster)
+                        if _ls is not None:
+                            _tail_had_load = True
+                            _tkb = fx.Index(
+                                (_tail_start + pre_loaded + _tail_li)
+                                * int(tile_k))
+                            _issue_b_tdm_only(_tkb, _ls)
+                            _tail_li += 1
+                        acc_g, acc_u = _compute_k_tile(
+                            acc_g, acc_u, _cs)
+                        if _ls is not None:
+                            _issue_scalar_loads(_tkb, _ls)
 
             out_elem_ty = _moe_out_elem_ty(out_dtype, T)
 
-            def _load_gate_up_sub8(acc_idx, vec_base):
-                return (
-                    _mxscale_extract_sub8(
-                        acc_g[acc_idx], vec_base, vector=vector, range_constexpr=range_constexpr, ACC_VEC_SIZE=ACC_VEC_SIZE
-                    ),
-                    _mxscale_extract_sub8(
-                        acc_u[acc_idx], vec_base, vector=vector, range_constexpr=range_constexpr, ACC_VEC_SIZE=ACC_VEC_SIZE
-                    ),
-                )
+            if bool(use_tdm_store):
+                # ── TDM store epilogue: silu(gate)*up → LDS → global (contiguous sorted output) ──
+                _scale_per_wm_s1 = []
+                for _wm in range_constexpr(wmma_m_rep):
+                    _m_off_val = _wm * WMMA_M
+                    _row_local = warp_m_base + arith.index(_m_off_val) + lane16
+                    _sorted_row = by * arith.index(int(tile_m)) + _row_local
+                    _sorted_i32 = arith.index_cast(T.i32, _sorted_row)
+                    _row_in_route = arith.cmpi(
+                        arith.CmpIPredicate.ult,
+                        arith.index_cast(T.i32, _row_local),
+                        arith.constant(int(route_tile_m), type=T.i32))
+                    if bool(doweight_stage1):
+                        _sorted_safe = arith.select(
+                            _row_in_route, _sorted_i32,
+                            arith.index_cast(T.i32,
+                                by * arith.index(int(route_tile_m))))
+                        _tw = buffer_ops.buffer_load(
+                            tw_rsrc, _sorted_safe, vec_width=1, dtype=T.f32)
+                        _sc = arith.select(
+                            _row_in_route, _tw,
+                            arith.constant(0.0, type=T.f32))
+                    else:
+                        _sc = arith.select(
+                            _row_in_route,
+                            arith.constant(1.0, type=T.f32),
+                            arith.constant(0.0, type=T.f32))
+                    _scale_per_wm_s1.append(_sc)
 
-            _emit_stage1_gate_up_epilogue(
-                sub_tiles=_sub_tiles,
-                by=by,
-                tile_m=int(tile_m),
-                route_tile_m=int(route_tile_m),
-                warp_m_base=warp_m_base,
-                warp_n_base=warp_n_base,
-                blk_n=blk_n,
-                lane16=lane16,
-                lane_kgrp=lane_kgrp,
-                WMMA_N=WMMA_N,
-                i32_tokens_in=i32_tokens_in,
-                i32_inter_in=i32_inter_in,
-                topk=int(topk),
-                sorted_rsrc=sorted_rsrc,
-                tw_rsrc=tw_rsrc,
-                out_rsrc=out_rsrc,
-                doweight_stage1=bool(doweight_stage1),
-                out_elem_ty=out_elem_ty,
-                load_gate_up_sub8=_load_gate_up_sub8,
-                silu_fn=silu,
-                ir=ir,
-                fx=fx,
-                arith=arith,
-                buffer_ops=buffer_ops,
-                scf=scf,
-                vector=vector,
-                range_constexpr=range_constexpr,
-                T=T,
-            )
+                if d_need_epilogue_fence_s1:
+                    pipeline_fence(outstanding=0, use_cluster=use_cluster)
+                rocdl.sched_barrier(0)
+
+                for _acc_idx, _vec_base, _m_off, _wn in _sub_tiles:
+                    _wm_idx = _m_off // WMMA_M
+                    _sc = _scale_per_wm_s1[_wm_idx]
+                    _sub8g = _mxscale_extract_sub8(
+                        acc_g[_acc_idx], _vec_base,
+                        vector=vector,
+                        range_constexpr=range_constexpr,
+                        ACC_VEC_SIZE=ACC_VEC_SIZE)
+                    _sub8u = _mxscale_extract_sub8(
+                        acc_u[_acc_idx], _vec_base,
+                        vector=vector,
+                        range_constexpr=range_constexpr,
+                        ACC_VEC_SIZE=ACC_VEC_SIZE)
+                    _fused = []
+                    for _vi in range_constexpr(8):
+                        _vg = vector.extract(
+                            _sub8g,
+                            static_position=[_vi],
+                            dynamic_position=[])
+                        _vu = vector.extract(
+                            _sub8u,
+                            static_position=[_vi],
+                            dynamic_position=[])
+                        _y = silu(_vg) * _vu * _sc
+                        _fused.append(_y)
+                    _fused_sub8 = vector.from_elements(
+                        T.vec(8, T.f32), _fused)
+                    _imm = (_m_off * _lds_d_stride_elems_s1
+                            + _wn * _n_col_d_elems_s1)
+                    store_acc_vec8_to_lds(
+                        d_lds_buffer_s1, d_lane_base_s1, _imm,
+                        _fused_sub8, out_elem=out_elem_ty)
+
+                rocdl.s_wait_dscnt(0)
+                tdm_ops.tensor_store_2d(d_desc_s1)
+                tdm_ops.tensor_wait(0)
+            else:
+                def _load_gate_up_sub8(acc_idx, vec_base):
+                    return (
+                        _mxscale_extract_sub8(
+                            acc_g[acc_idx], vec_base, vector=vector, range_constexpr=range_constexpr, ACC_VEC_SIZE=ACC_VEC_SIZE
+                        ),
+                        _mxscale_extract_sub8(
+                            acc_u[acc_idx], vec_base, vector=vector, range_constexpr=range_constexpr, ACC_VEC_SIZE=ACC_VEC_SIZE
+                        ),
+                    )
+
+                _emit_stage1_gate_up_epilogue(
+                    sub_tiles=_sub_tiles,
+                    by=by,
+                    tile_m=int(tile_m),
+                    route_tile_m=int(route_tile_m),
+                    warp_m_base=warp_m_base,
+                    warp_n_base=warp_n_base,
+                    blk_n=blk_n,
+                    lane16=lane16,
+                    lane_kgrp=lane_kgrp,
+                    WMMA_N=WMMA_N,
+                    i32_tokens_in=i32_tokens_in,
+                    i32_inter_in=i32_inter_in,
+                    topk=int(topk),
+                    sorted_rsrc=sorted_rsrc,
+                    tw_rsrc=tw_rsrc,
+                    out_rsrc=out_rsrc,
+                    doweight_stage1=bool(doweight_stage1),
+                    out_elem_ty=out_elem_ty,
+                    load_gate_up_sub8=_load_gate_up_sub8,
+                    silu_fn=silu,
+                    ir=ir,
+                    fx=fx,
+                    arith=arith,
+                    buffer_ops=buffer_ops,
+                    scf=scf,
+                    vector=vector,
+                    range_constexpr=range_constexpr,
+                    T=T,
+                )
             scf.YieldOp([])
 
     @flyc.jit
@@ -2111,6 +2363,7 @@ def _compile_stage1_mxscale_kernel_impl(
             arg_sorted_token_ids, arg_expert_ids, arg_sorted_weights, arg_max_token_ids,
             i32_tokens_in, i32_inter_in, i32_k_in, i32_size_expert_ids_in,
         )
+        _cluster_arg = (int(cluster_m), int(cluster_n), 1) if use_cluster else None
         _finalize_alloc_and_launch_2d(
             ctx=ctx,
             alloc=alloc,
@@ -2119,8 +2372,9 @@ def _compile_stage1_mxscale_kernel_impl(
             gy=gy,
             block_threads=block_threads,
             stream=stream,
-            waves_per_eu=waves_per_eu,
+            waves_per_eu=effective_waves_per_eu,
             ir=ir,
+            cluster=_cluster_arg,
         )
 
     if expert_sched_mode:
@@ -2150,6 +2404,12 @@ def _compile_stage2_mxscale_kernel_impl(
     waves_per_eu: int | None,
     data_format: str = "fp8",
     expert_sched_mode: bool = True,
+    num_buffers: int = 1,
+    use_tdm_store: bool = False,
+    inst_prefetch: bool = False,
+    wave_specialized_tdm: bool = False,
+    cluster_m: int = 1,
+    cluster_n: int = 1,
 ):
     """Compile mxscale stage2 single kernel (route-pack + TDM + WMMA_SCALE + epilog)."""
     import flydsl.compiler as flyc
@@ -2185,6 +2445,24 @@ def _compile_stage2_mxscale_kernel_impl(
         raise ValueError(f"tile_k={tile_k} must be divisible by {WMMA_K}")
     if (int(tile_k) % SCALE_BLOCK) != 0:
         raise ValueError(f"tile_k={tile_k} must be divisible by {SCALE_BLOCK}")
+    if int(num_buffers) not in (1, 2, 3, 4):
+        raise ValueError(f"num_buffers must be 1, 2, 3, or 4, got {num_buffers}")
+    if bool(use_tdm_store) and bool(accumulate):
+        raise ValueError("use_tdm_store is not compatible with accumulate=True in moe mxscale stage2")
+    use_cluster = int(cluster_m) > 1 or int(cluster_n) > 1
+    if use_cluster:
+        if int(cluster_m) * int(cluster_n) > 16:
+            raise ValueError(
+                f"cluster_m * cluster_n must be <= 16, got {cluster_m}*{cluster_n}")
+    num_warps = int(m_warp) * int(n_warp)
+    if bool(wave_specialized_tdm):
+        if num_warps < 2:
+            raise ValueError(
+                f"wave_specialized_tdm requires at least 2 waves (B + B_scale), got {num_warps}")
+    tdm_desc_num_warps = 1 if bool(wave_specialized_tdm) else num_warps
+    effective_waves_per_eu = waves_per_eu
+    if use_cluster and effective_waves_per_eu is None:
+        effective_waves_per_eu = 2
 
     K = int(inter_dim)
     N_total = int(model_dim)
@@ -2216,15 +2494,67 @@ def _compile_stage2_mxscale_kernel_impl(
     lds_b_scale_bytes = int(tile_n) * scale_k_per_tile
     interleaved_scale_cols_a = wmma_m_rep * scale_k_per_tile
 
+    # Pipeline calculations for multi-buffer
+    _use_pipeline = int(num_buffers) >= 2
+    if _use_pipeline:
+        from kernels.gemm_common_gfx1250 import (
+            pipeline_fence, pipeline_fence_signal, pipeline_fence_wait,
+        )
+        from kernels.pipeline_utils import make_tail_plan
+
+        pre_loaded = int(num_buffers) - 1
+        loop_iters = (num_k_tiles - pre_loaded) // int(num_buffers)
+        _tail_start = loop_iters * int(num_buffers)
+        extra = num_k_tiles - _tail_start - pre_loaded
+        TDM_PER_STEP = 1 if bool(wave_specialized_tdm) else 2
+        _fence_outstanding = TDM_PER_STEP * (int(num_buffers) - 2)
+        _base_tail_plan = make_tail_plan(int(num_buffers), pre_loaded, extra)
+        _tail_plan = [
+            (ls, cs, o * TDM_PER_STEP // 2 if o > 0 else o)
+            for ls, cs, o in _base_tail_plan
+        ]
+        if num_k_tiles < int(num_buffers):
+            raise ValueError(
+                f"{num_buffers}-stage buffering requires num_k_tiles >= {num_buffers}, "
+                f"got {num_k_tiles}")
+
+    if bool(wave_specialized_tdm):
+        from kernels.gemm_common_gfx1250 import issue_tdm_loads
+
     alloc = SmemAllocator(None, arch=str(get_hip_arch()), global_sym_name=f"moe_mxscale_{data_format}_s2_single")
-    off_a = alloc._align(alloc.ptr, 16)
-    alloc.ptr = off_a + lds_a_data_bytes
-    off_b = alloc._align(alloc.ptr, 16)
-    alloc.ptr = off_b + lds_b_data_bytes
-    off_as = alloc._align(alloc.ptr, 16)
-    alloc.ptr = off_as + lds_a_scale_bytes
-    off_bs = alloc._align(alloc.ptr, 16)
-    alloc.ptr = off_bs + lds_b_scale_bytes
+    _nb = int(num_buffers)
+    off_a_list, off_b_list, off_as_list, off_bs_list = [], [], [], []
+    for _buf_i in range(_nb):
+        _oa = alloc._align(alloc.ptr, 16)
+        alloc.ptr = _oa + lds_a_data_bytes
+        off_a_list.append(_oa)
+        _ob = alloc._align(alloc.ptr, 16)
+        alloc.ptr = _ob + lds_b_data_bytes
+        off_b_list.append(_ob)
+        _oas = alloc._align(alloc.ptr, 16)
+        alloc.ptr = _oas + lds_a_scale_bytes
+        off_as_list.append(_oas)
+        _obs = alloc._align(alloc.ptr, 16)
+        alloc.ptr = _obs + lds_b_scale_bytes
+        off_bs_list.append(_obs)
+
+    # TDM store epilogue: D output LDS layout
+    LDS_PAD_D_BYTES = 16
+    elem_bytes_d = 2  # f16/bf16
+    if bool(use_tdm_store):
+        from kernels.gemm_common_gfx1250 import (
+            store_acc_vec8_to_lds,
+        )
+        lds_d_row_stride = warp_tile_n * elem_bytes_d + LDS_PAD_D_BYTES
+        warp_d_bytes = warp_tile_m * lds_d_row_stride
+        total_d_bytes = num_warps * warp_d_bytes
+        d_output_off = 0
+        _lds_d_stride_elems = lds_d_row_stride // 2
+        _warp_d_elems = warp_d_bytes // 2
+        _n_col_d_elems = WMMA_N * elem_bytes_d // 2
+        d_need_epilogue_fence = _use_pipeline
+        if total_d_bytes > alloc.ptr:
+            alloc.ptr = total_d_bytes
 
     _sub_tiles = _make_mxscale_sub_tiles(
         wmma_m_rep=wmma_m_rep, wmma_n_rep=wmma_n_rep, WMMA_M=WMMA_M, is_fp4=is_fp4
@@ -2247,6 +2577,18 @@ def _compile_stage2_mxscale_kernel_impl(
         i32_size_expert_ids_in: fx.Int32,
     ):
         _ = i32_k_in
+        if inst_prefetch:
+            if arith.cmpi(arith.CmpIPredicate.eq, rocdl.wave_id(),
+                          arith.constant(0, type=T.i32)):
+                _prefetch_lines = ["s_setreg_imm32_b32 hwreg(HW_REG_WAVE_MODE, 8, 1), 1"]
+                for _pg in range_constexpr(10):
+                    _prefetch_lines.append(
+                        f"s_prefetch_inst_pc_rel {_pg * 4096}, s0, 31")
+                llvm_dialect.inline_asm(
+                    None, [],
+                    "\n".join(_prefetch_lines),
+                    "", has_side_effects=True,
+                )
         llvm_dialect.inline_asm(
             None, [],
             "s_setreg_imm32_b32 hwreg(26, 4, 1), 1",
@@ -2307,20 +2649,78 @@ def _compile_stage2_mxscale_kernel_impl(
         warp_n_base = wave_n_idx * arith.index(warp_tile_n)
         blk_n = bx * arith.index(int(tile_n))
 
+        if use_cluster:
+            _local_x, _local_y = gpu.compute_cluster_position()
+            _a_mcast_mask, b_mcast_mask = gpu.compute_mcast_masks(
+                _local_x, _local_y, int(cluster_m), int(cluster_n))
+        else:
+            b_mcast_mask = 0
+
         base_ptr = alloc.get_base()
-        smem_a = SmemPtr(base_ptr, off_a, T.i8, shape=(lds_a_data_bytes,))
-        smem_b = SmemPtr(base_ptr, off_b, T.i8, shape=(lds_b_data_bytes,))
-        smem_as = SmemPtr(base_ptr, off_as, T.i8, shape=(lds_a_scale_bytes,))
-        smem_bs = SmemPtr(base_ptr, off_bs, T.i8, shape=(lds_b_scale_bytes,))
-        lds_a = get_op_result_or_value(smem_a.get())
-        lds_b = get_op_result_or_value(smem_b.get())
-        lds_as = get_op_result_or_value(smem_as.get())
-        lds_bs = get_op_result_or_value(smem_bs.get())
+        lds_a_bufs = []
+        lds_b_bufs = []
+        lds_as_bufs = []
+        lds_bs_bufs = []
+        for _bi in range_constexpr(_nb):
+            _sa = SmemPtr(base_ptr, off_a_list[_bi], T.i8, shape=(lds_a_data_bytes,))
+            _sb = SmemPtr(base_ptr, off_b_list[_bi], T.i8, shape=(lds_b_data_bytes,))
+            _sas = SmemPtr(base_ptr, off_as_list[_bi], T.i8, shape=(lds_a_scale_bytes,))
+            _sbs = SmemPtr(base_ptr, off_bs_list[_bi], T.i8, shape=(lds_b_scale_bytes,))
+            lds_a_bufs.append(get_op_result_or_value(_sa.get()))
+            lds_b_bufs.append(get_op_result_or_value(_sb.get()))
+            lds_as_bufs.append(get_op_result_or_value(_sas.get()))
+            lds_bs_bufs.append(get_op_result_or_value(_sbs.get()))
+
+        if bool(use_tdm_store):
+            from kernels.gemm_common_gfx1250 import get_lds_memref
+            d_lds_f16_count = total_d_bytes // 2
+            d_smem = SmemPtr(base_ptr, d_output_off, T.f16,
+                             shape=(d_lds_f16_count,))
+            d_lds_buffer = get_lds_memref(d_smem)
+            warp_lds_off = (
+                (wave_m_idx * arith.index(int(n_warp)) + wave_n_idx)
+                * arith.index(_warp_d_elems)
+            )
+            d_lane_base = (
+                warp_lds_off
+                + lane16 * arith.index(_lds_d_stride_elems)
+                + lane_kgrp * arith.index(4 * elem_bytes_d)
+            )
+            wave_id_idx = arith.index_cast(T.index, rocdl.wave_id())
+            d_warp_off_sgpr = (
+                wave_id_idx * arith.index(warp_d_bytes)
+                + arith.index(d_output_off)
+            )
+            warp_m_off_sgpr = (
+                (wave_id_idx / arith.index(int(n_warp)))
+                * arith.index(warp_tile_m)
+            )
+            warp_n_off_sgpr = (
+                (wave_id_idx % arith.index(int(n_warp)))
+                * arith.index(warp_tile_n)
+            )
+            d_desc = tdm_ops.make_tensor_descriptor_2d(
+                global_ptr=arg_out,
+                lds_memref=base_ptr,
+                global_offset=(
+                    by * arith.index(int(tile_m)) + warp_m_off_sgpr,
+                    blk_n + warp_n_off_sgpr,
+                ),
+                tensor_shape=(warp_tile_m, warp_tile_n),
+                strides=(N_total, 1),
+                tile_shape=(warp_tile_m, warp_tile_n),
+                elem_bytes=elem_bytes_d,
+                pad_interval=warp_tile_n,
+                pad_amount=LDS_PAD_D_BYTES // elem_bytes_d,
+                num_warps=1,
+                lds_byte_offset=d_warp_off_sgpr,
+                for_store=True,
+            )
 
         def make_desc_a(k_base):
             return k_base / arith.index(PACK_FACTOR_A)
 
-        def issue_a_load(k_packed_base):
+        def issue_a_load(k_packed_base, target_lds):
             total = int(tile_m * packed_tile_k_a)
             rounds = (total + block_threads - 1) // block_threads
             for it in range(rounds):
@@ -2351,13 +2751,13 @@ def _compile_stage2_mxscale_kernel_impl(
                     x_val = arith.select(load_ok, buffer_ops.buffer_load(x_rsrc, x_idx_safe, vec_width=1, dtype=T.i8), arith.constant(0, type=T.i8))
                     lds_idx = row * arith.index(lds_a_stride_bytes) + col
                     v1 = vector.from_elements(T.vec(1, T.i8), [x_val])
-                    vector.store(v1, lds_a, [lds_idx], alignment=1)
+                    vector.store(v1, target_lds, [lds_idx], alignment=1)
                     scf.YieldOp([])
 
         def make_desc_as(k_base):
             return k_base / arith.index(SCALE_BLOCK)
 
-        def issue_as_load(k_scale_base):
+        def issue_as_load(k_scale_base, target_lds):
             total = int(tile_m * scale_k_per_tile)
             rounds = (total + block_threads - 1) // block_threads
             for it in range(rounds):
@@ -2404,84 +2804,45 @@ def _compile_stage2_mxscale_kernel_impl(
                             + ksc_sub
                         )
                     v1 = vector.from_elements(T.vec(1, T.i8), [sx_val])
-                    vector.store(v1, lds_as, [lds_idx], alignment=1)
+                    vector.store(v1, target_lds, [lds_idx], alignment=1)
                     scf.YieldOp([])
 
-        def make_desc_b(n_off, k_base):
+        def make_desc_b(n_off, k_base, target_lds):
             if is_fp4:
                 return tdm_ops.make_tensor_descriptor_2d(
-                    global_ptr=arg_w, lds_memref=lds_b,
+                    global_ptr=arg_w, lds_memref=target_lds,
                     global_offset=(n_off, k_base / arith.index(PACK_FACTOR_B)),
                     tensor_shape=(int(tile_n), int(packed_tile_k_b)),
                     strides=(K_packed_b, 1),
                     tile_shape=(int(tile_n), int(packed_tile_k_b)),
                     elem_bytes=1, pad_interval=int(packed_tile_k_b), pad_amount=LDS_PAD_B_BYTES,
-                    num_warps=int(m_warp) * int(n_warp), workgroup_mask=0)
+                    num_warps=tdm_desc_num_warps, workgroup_mask=b_mcast_mask)
             return tdm_ops.make_tensor_descriptor_2d(
-                global_ptr=arg_w, lds_memref=lds_b,
+                global_ptr=arg_w, lds_memref=target_lds,
                 global_offset=(n_off / arith.index(16), (k_base / arith.index(PACK_FACTOR_B)) * arith.index(16)),
                 tensor_shape=(int(N_total // 16), int(K_packed_b * 16)),
                 strides=(int(K_packed_b * 16), 1),
                 tile_shape=(int(tile_n // 16), int(packed_tile_k_b * 16)),
                 elem_bytes=1,
                 pad_interval=0, pad_amount=0,
-                num_warps=int(m_warp) * int(n_warp),
-                workgroup_mask=0)
+                num_warps=tdm_desc_num_warps,
+                workgroup_mask=b_mcast_mask)
 
-        def make_desc_bs(n_off, k_base):
+        def make_desc_bs(n_off, k_base, target_lds):
             return tdm_ops.make_tensor_descriptor_2d(
-                global_ptr=arg_scale_w, lds_memref=lds_bs,
+                global_ptr=arg_scale_w, lds_memref=target_lds,
                 global_offset=(n_off, k_base / arith.index(SCALE_BLOCK)),
                 tensor_shape=(int(tile_n), int(scale_k_per_tile)),
                 strides=(K_scale, 1),
                 tile_shape=(int(tile_n), int(scale_k_per_tile)),
                 elem_bytes=1, pad_interval=0, pad_amount=0,
-                num_warps=int(m_warp) * int(n_warp), workgroup_mask=0)
+                num_warps=tdm_desc_num_warps, workgroup_mask=b_mcast_mask)
 
-        def issue_bs_load(k_base, n_off):
-            if is_fp4:
-                tdm_ops.tensor_load_2d(make_desc_bs(n_off, k_base))
-                return
-            total_bs = int(tile_n * scale_k_per_tile)
-            rounds_bs = (total_bs + block_threads - 1) // block_threads
-            for it in range(rounds_bs):
-                elem = tx + fx.Index(it * block_threads)
-                in_range = arith.cmpi(
-                    arith.CmpIPredicate.ult,
-                    arith.index_cast(T.i32, elem),
-                    arith.constant(total_bs, type=T.i32),
-                )
-                _if_bs = scf.IfOp(in_range)
-                with ir.InsertionPoint(_if_bs.then_block):
-                    n_local = elem // arith.index(int(scale_k_per_tile))
-                    ksc = elem % arith.index(int(scale_k_per_tile))
-                    k_scale_base = k_base / arith.index(SCALE_BLOCK)
-                    sw_idx = arith.index_cast(T.i32,
-                        (n_off + n_local) * arith.index(K_scale) + k_scale_base + ksc)
-                    sw_val = buffer_ops.buffer_load(
-                        sw_rsrc, sw_idx, vec_width=1, dtype=T.i8)
-                    wave_n = n_local / arith.index(warp_tile_n)
-                    sub_n = n_local % arith.index(warp_tile_n)
-                    wn_idx = sub_n / arith.index(WMMA_N)
-                    lane_row = sub_n % arith.index(WMMA_N)
-                    ksc_blk = ksc / arith.index(SCALES_PER_WMMA)
-                    ksc_sub = ksc % arith.index(SCALES_PER_WMMA)
-                    warp_lds_row = wave_n * arith.index(WMMA_N) + lane_row
-                    lds_idx = (
-                        warp_lds_row * arith.index(interleaved_scale_cols_b)
-                        + ksc_blk * arith.index(b_scale_load_rep * SCALES_PER_WMMA)
-                        + wn_idx * arith.index(SCALES_PER_WMMA)
-                        + ksc_sub
-                    )
-                    v1 = vector.from_elements(T.vec(1, T.i8), [sw_val])
-                    vector.store(v1, lds_bs, [lds_idx], alignment=1)
-                    scf.YieldOp([])
-
-        def issue_b_load(k_base):
+        def issue_b_load(k_base, target_lds_b, target_lds_bs):
             eid_idx = arith.index_cast(T.index, eid_i32)
             n_off = eid_idx * n_idx + blk_n
-            tdm_ops.tensor_load_2d(make_desc_b(n_off, k_base))
-            issue_bs_load(k_base, n_off)
+            tdm_ops.tensor_load_2d(make_desc_b(n_off, k_base, target_lds_b))
+            tdm_ops.tensor_load_2d(make_desc_bs(n_off, k_base, target_lds_bs))
 
         def _lds_load_b128(lds_buffer, byte_offset):
             from flydsl._mlir.dialects import llvm as _llvm, memref as _memref
@@ -2605,26 +2966,14 @@ def _compile_stage2_mxscale_kernel_impl(
             )
 
         def _precompute_b_scale_lane_bases():
-            if is_fp4:
-                return _mxscale_precompute_rowmajor_b_scale_lane_bases(
-                    warp_n_base=warp_n_base,
-                    lane16=lane16,
-                    scale_k_per_tile=scale_k_per_tile,
-                    wmma_n_rep=wmma_n_rep,
-                    WMMA_N=WMMA_N,
-                    arith=arith,
-                    range_constexpr=range_constexpr,
-                )
-            return _mxscale_precompute_b_scale_lane_bases(
+            return _mxscale_precompute_rowmajor_b_scale_lane_bases(
                 warp_n_base=warp_n_base,
                 lane16=lane16,
-                lane_kgrp=lane_kgrp,
-                b_scale_load_rep=b_scale_load_rep,
-                interleaved_scale_cols_b=interleaved_scale_cols_b,
-                is_fp4=is_fp4,
-                is_a8w4=is_a8w4,
+                scale_k_per_tile=scale_k_per_tile,
+                wmma_n_rep=wmma_n_rep,
+                WMMA_N=WMMA_N,
                 arith=arith,
-                SCALES_PER_WMMA=SCALES_PER_WMMA,
+                range_constexpr=range_constexpr,
             )
 
         def load_scale_b128(lds_buffer, scale_base, reps, ks=0):
@@ -2650,82 +2999,233 @@ def _compile_stage2_mxscale_kernel_impl(
             as_bases = _precompute_a_scale_lane_bases()
             bs_bases = _precompute_b_scale_lane_bases()
 
-            for kt in range_constexpr(num_k_tiles):
-                k_base = fx.Index(kt * int(tile_k))
-                a_desc = make_desc_a(k_base)
-                as_desc = make_desc_as(k_base)
-                issue_a_load(a_desc)
-                issue_as_load(as_desc)
-                issue_b_load(k_base)
-                tdm_ops.tensor_wait(0)
-                gpu.barrier()
+            # ── compute-tile helper ──────────────────────────────────
+            def _compute_k_tile(accs_in, buf_idx):
                 for ks in range_constexpr(k_wmma_steps):
-                    b_v = [load_b_frag(lds_b, b_data_bases, wn, ks) for wn in range_constexpr(wmma_n_rep)]
+                    b_v = [load_b_frag(lds_b_bufs[buf_idx], b_data_bases, wn, ks)
+                           for wn in range_constexpr(wmma_n_rep)]
                     if is_fp4:
-                        as_v = [load_scale_i32(lds_as, as_bases[wm], ks) for wm in range_constexpr(wmma_m_rep)]
-                        bs_v = [load_scale_i32(lds_bs, bs_bases[bi], ks) for bi in range_constexpr(b_scale_load_rep)]
+                        as_v = [load_scale_i32(lds_as_bufs[buf_idx], as_bases[wm], ks)
+                                for wm in range_constexpr(wmma_m_rep)]
+                        bs_v = [load_scale_i32(lds_bs_bufs[buf_idx], bs_bases[bi], ks)
+                                for bi in range_constexpr(b_scale_load_rep)]
                     else:
-                        as_v = load_scale_b128(lds_as, as_bases[0], wmma_m_rep, ks)
-                        bs_v = load_scale_b128(lds_bs, bs_bases[0], b_scale_load_rep, ks)
+                        as_v = load_scale_b128(lds_as_bufs[buf_idx], as_bases[0],
+                                               wmma_m_rep, ks)
+                        bs_v = [load_scale_i32(lds_bs_bufs[buf_idx], bs_bases[wn], ks)
+                                for wn in range_constexpr(wmma_n_rep)]
                     for wm in range_constexpr(wmma_m_rep):
-                        a_frag = load_data_frag(lds_a, a_data_bases[wm], ks)
+                        a_frag = load_data_frag(lds_a_bufs[buf_idx],
+                                                a_data_bases[wm], ks)
                         for wn in range_constexpr(wmma_n_rep):
                             _mxscale_emit_wmma(
-                                accs=acc,
-                                wm=wm,
-                                wn=wn,
-                                a_frag=a_frag,
-                                b_frags=b_v,
-                                a_scales=as_v,
-                                b_scales=bs_v,
-                                is_fp4=is_fp4,
-                                is_a8w4=is_a8w4,
+                                accs=accs_in, wm=wm, wn=wn,
+                                a_frag=a_frag, b_frags=b_v,
+                                a_scales=as_v, b_scales=bs_v,
+                                is_fp4=is_fp4, is_a8w4=is_a8w4,
                                 use_scale_opsel=False,
-                                rocdl=rocdl,
-                                T=T,
+                                rocdl=rocdl, T=T,
                             )
-                gpu.barrier()
+                return accs_in
+
+            # ── pipeline load helpers ─────────────────────────────────
+            def _issue_b_tdm_only(k_base, buf_idx):
+                _eid = arith.index_cast(T.index, eid_i32)
+                _n = _eid * n_idx + blk_n
+                if wave_specialized_tdm:
+                    _descs = [
+                        make_desc_b(_n, k_base, lds_b_bufs[buf_idx]),
+                        make_desc_bs(_n, k_base, lds_bs_bufs[buf_idx]),
+                    ]
+                    issue_tdm_loads(*_descs, wave_specialized=True)
+                else:
+                    tdm_ops.tensor_load_2d(
+                        make_desc_b(_n, k_base, lds_b_bufs[buf_idx]))
+                    tdm_ops.tensor_load_2d(
+                        make_desc_bs(_n, k_base, lds_bs_bufs[buf_idx]))
+
+            def _issue_scalar_loads(k_base, buf_idx):
+                issue_a_load(make_desc_a(k_base), lds_a_bufs[buf_idx])
+                issue_as_load(make_desc_as(k_base), lds_as_bufs[buf_idx])
+
+            def _issue_all_loads(k_base, buf_idx):
+                _issue_b_tdm_only(k_base, buf_idx)
+                _issue_scalar_loads(k_base, buf_idx)
+
+            # ── main K-dimension reduction ────────────────────────────
+            if not _use_pipeline:
+                # Single-buffer path (num_buffers=1)
+                for kt in range_constexpr(num_k_tiles):
+                    k_base = fx.Index(kt * int(tile_k))
+                    _issue_all_loads(k_base, 0)
+                    tdm_ops.tensor_wait(0)
+                    if use_cluster:
+                        gpu.cluster_barrier()
+                    else:
+                        gpu.barrier()
+                    acc = _compute_k_tile(acc, 0)
+                    if use_cluster:
+                        gpu.cluster_barrier()
+                    else:
+                        gpu.barrier()
+            else:
+                # Multi-buffer pipeline
+                # ── prologue: pre-load first `pre_loaded` stages ──
+                for _pi in range_constexpr(pre_loaded):
+                    _issue_all_loads(fx.Index(_pi * int(tile_k)), _pi)
+                pipeline_fence(outstanding=0, use_cluster=use_cluster)
+
+                # ── main pipelined loop ──
+                if loop_iters > 0:
+                    _init = list(acc)
+                    for _li, _st in fx.range(0, loop_iters, 1, init=_init):
+                        _acc = list(_st[:n_accs])
+                        for _bi in range_constexpr(_nb):
+                            _lb = (_bi + _nb - 1) % _nb
+                            _kt = (_li * fx.Index(_nb)
+                                   + fx.Index(pre_loaded + _bi))
+                            _kb = _kt * fx.Index(int(tile_k))
+                            pipeline_fence_signal(
+                                outstanding=_fence_outstanding,
+                                use_cluster=use_cluster)
+                            pipeline_fence_wait(use_cluster=use_cluster)
+                            _issue_b_tdm_only(_kb, _lb)
+                            _acc = _compute_k_tile(_acc, _bi)
+                            _issue_scalar_loads(_kb, _lb)
+                        _res = yield list(_acc)
+                    acc = list(_res[:n_accs])
+
+                # ── post-loop fence ──
+                if loop_iters > 0:
+                    pipeline_fence(outstanding=0, use_cluster=use_cluster)
+                elif use_cluster:
+                    gpu.cluster_barrier()
+
+                # ── tail ──
+                _tail_li = 0
+                _tail_had_load = False
+                for _ls, _cs, _out in _tail_plan:
+                    if _out == -1:
+                        if _tail_had_load:
+                            pipeline_fence(outstanding=0,
+                                           use_cluster=use_cluster)
+                        acc = _compute_k_tile(acc, _cs)
+                    else:
+                        pipeline_fence_signal(outstanding=_out,
+                                              use_cluster=use_cluster)
+                        pipeline_fence_wait(use_cluster=use_cluster)
+                        if _ls is not None:
+                            _tail_had_load = True
+                            _tkb = fx.Index(
+                                (_tail_start + pre_loaded + _tail_li)
+                                * int(tile_k))
+                            _issue_b_tdm_only(_tkb, _ls)
+                            _tail_li += 1
+                        acc = _compute_k_tile(acc, _cs)
+                        if _ls is not None:
+                            _issue_scalar_loads(_tkb, _ls)
 
             out_elem_ty = _moe_out_elem_ty(out_dtype, T)
 
-            def _load_sub8(acc_idx, vec_base):
-                return _mxscale_extract_sub8(
-                    acc[acc_idx], vec_base, vector=vector, range_constexpr=range_constexpr, ACC_VEC_SIZE=ACC_VEC_SIZE
-                )
+            if bool(use_tdm_store):
+                # ── TDM store epilogue: acc → LDS → global (contiguous sorted output) ──
+                # Pre-compute per-wm row scale (weight × validity mask)
+                _scale_per_wm = []
+                for _wm in range_constexpr(wmma_m_rep):
+                    _m_off_val = _wm * WMMA_M
+                    _row_local = warp_m_base + arith.index(_m_off_val) + lane16
+                    _sorted_row = by * arith.index(int(tile_m)) + _row_local
+                    _sorted_i32 = arith.index_cast(T.i32, _sorted_row)
+                    _row_in_route = arith.cmpi(
+                        arith.CmpIPredicate.ult,
+                        arith.index_cast(T.i32, _row_local),
+                        arith.constant(int(route_tile_m), type=T.i32))
+                    _row_in_valid = arith.cmpi(
+                        arith.CmpIPredicate.slt, _sorted_i32, num_valid_i32)
+                    _row_ok = arith.andi(_row_in_route, _row_in_valid)
+                    if bool(doweight_stage2):
+                        _sorted_safe = arith.select(
+                            _row_ok, _sorted_i32, block_row_start)
+                        _tw = buffer_ops.buffer_load(
+                            tw_rsrc, _sorted_safe, vec_width=1, dtype=T.f32)
+                        _sc = arith.select(
+                            _row_ok, _tw,
+                            arith.constant(0.0, type=T.f32))
+                    else:
+                        _sc = arith.select(
+                            _row_ok,
+                            arith.constant(1.0, type=T.f32),
+                            arith.constant(0.0, type=T.f32))
+                    _scale_per_wm.append(_sc)
 
-            _emit_stage2_store_epilogue(
-                sub_tiles=_sub_tiles,
-                by=by,
-                tile_m=int(tile_m),
-                route_tile_m=int(route_tile_m),
-                warp_m_base=warp_m_base,
-                warp_n_base=warp_n_base,
-                blk_n=blk_n,
-                lane16=lane16,
-                lane_kgrp=lane_kgrp,
-                WMMA_N=WMMA_N,
-                i32_tokens_in=i32_tokens_in,
-                i32_n_in=i32_n_in,
-                topk=int(topk),
-                num_valid_i32=num_valid_i32,
-                block_row_start=block_row_start,
-                sorted_rsrc=sorted_rsrc,
-                tw_rsrc=tw_rsrc,
-                out_rsrc=out_rsrc,
-                doweight_stage2=bool(doweight_stage2),
-                accumulate=bool(accumulate),
-                out_elem_ty=out_elem_ty,
-                load_sub8=_load_sub8,
-                ir=ir,
-                fx=fx,
-                arith=arith,
-                buffer_ops=buffer_ops,
-                scf=scf,
-                vector=vector,
-                range_constexpr=range_constexpr,
-                rocdl=rocdl,
-                T=T,
-            )
+                if d_need_epilogue_fence:
+                    pipeline_fence(outstanding=0, use_cluster=use_cluster)
+                rocdl.sched_barrier(0)
+
+                for _acc_idx, _vec_base, _m_off, _wn in _sub_tiles:
+                    _wm_idx = _m_off // WMMA_M
+                    _sc = _scale_per_wm[_wm_idx]
+                    _sub8 = _mxscale_extract_sub8(
+                        acc[_acc_idx], _vec_base,
+                        vector=vector,
+                        range_constexpr=range_constexpr,
+                        ACC_VEC_SIZE=ACC_VEC_SIZE)
+                    _scaled = []
+                    for _vi in range_constexpr(8):
+                        _v = vector.extract(
+                            _sub8,
+                            static_position=[_vi],
+                            dynamic_position=[])
+                        _scaled.append(_v * _sc)
+                    _scaled_sub8 = vector.from_elements(
+                        T.vec(8, T.f32), _scaled)
+                    _imm = _m_off * _lds_d_stride_elems + _wn * _n_col_d_elems
+                    store_acc_vec8_to_lds(
+                        d_lds_buffer, d_lane_base, _imm, _scaled_sub8,
+                        out_elem=out_elem_ty)
+
+                rocdl.s_wait_dscnt(0)
+                tdm_ops.tensor_store_2d(d_desc)
+                tdm_ops.tensor_wait(0)
+            else:
+                def _load_sub8(acc_idx, vec_base):
+                    return _mxscale_extract_sub8(
+                        acc[acc_idx], vec_base, vector=vector, range_constexpr=range_constexpr, ACC_VEC_SIZE=ACC_VEC_SIZE
+                    )
+
+                _emit_stage2_store_epilogue(
+                    sub_tiles=_sub_tiles,
+                    by=by,
+                    tile_m=int(tile_m),
+                    route_tile_m=int(route_tile_m),
+                    warp_m_base=warp_m_base,
+                    warp_n_base=warp_n_base,
+                    blk_n=blk_n,
+                    lane16=lane16,
+                    lane_kgrp=lane_kgrp,
+                    WMMA_N=WMMA_N,
+                    i32_tokens_in=i32_tokens_in,
+                    i32_n_in=i32_n_in,
+                    topk=int(topk),
+                    num_valid_i32=num_valid_i32,
+                    block_row_start=block_row_start,
+                    sorted_rsrc=sorted_rsrc,
+                    tw_rsrc=tw_rsrc,
+                    out_rsrc=out_rsrc,
+                    doweight_stage2=bool(doweight_stage2),
+                    accumulate=bool(accumulate),
+                    out_elem_ty=out_elem_ty,
+                    load_sub8=_load_sub8,
+                    ir=ir,
+                    fx=fx,
+                    arith=arith,
+                    buffer_ops=buffer_ops,
+                    scf=scf,
+                    vector=vector,
+                    range_constexpr=range_constexpr,
+                    rocdl=rocdl,
+                    T=T,
+                )
             scf.YieldOp([])
 
     @flyc.jit
@@ -2756,6 +3256,7 @@ def _compile_stage2_mxscale_kernel_impl(
             arg_sorted_token_ids, arg_expert_ids, arg_sorted_weights, arg_num_valid_ids,
             i32_tokens_in, i32_n_in, i32_k_in, i32_size_expert_ids_in,
         )
+        _cluster_arg = (int(cluster_m), int(cluster_n), 1) if use_cluster else None
         _finalize_alloc_and_launch_2d(
             ctx=ctx,
             alloc=alloc,
@@ -2764,8 +3265,9 @@ def _compile_stage2_mxscale_kernel_impl(
             gy=gy,
             block_threads=block_threads,
             stream=stream,
-            waves_per_eu=waves_per_eu,
+            waves_per_eu=effective_waves_per_eu,
             ir=ir,
+            cluster=_cluster_arg,
         )
 
     if expert_sched_mode:
@@ -2792,6 +3294,12 @@ def _compile_moe_stage1_kernel(
     out_dtype: str,
     waves_per_eu: int | None,
     expert_sched_mode: bool = True,
+    num_buffers: int = 1,
+    use_tdm_store: bool = False,
+    inst_prefetch: bool = False,
+    wave_specialized_tdm: bool = False,
+    cluster_m: int = 1,
+    cluster_n: int = 1,
 ):
     if data_format not in ("fp16", "bf16", "fp4", "fp8", "a8w4"):
         raise ValueError(f"Unsupported stage1 data_format: {data_format!r}")
@@ -2839,6 +3347,12 @@ def _compile_moe_stage1_kernel(
             waves_per_eu=waves_per_eu,
             data_format=data_format,
             expert_sched_mode=expert_sched_mode,
+            num_buffers=int(num_buffers),
+            use_tdm_store=bool(use_tdm_store),
+            inst_prefetch=bool(inst_prefetch),
+            wave_specialized_tdm=bool(wave_specialized_tdm),
+            cluster_m=int(cluster_m),
+            cluster_n=int(cluster_n),
         )
     raise ValueError(f"Unsupported stage1 data_format: {data_format!r}")
 
@@ -2859,6 +3373,12 @@ def _compile_moe_stage2_kernel(
     accumulate: bool,
     waves_per_eu: int | None,
     expert_sched_mode: bool = True,
+    num_buffers: int = 1,
+    use_tdm_store: bool = False,
+    inst_prefetch: bool = False,
+    wave_specialized_tdm: bool = False,
+    cluster_m: int = 1,
+    cluster_n: int = 1,
 ):
     if data_format not in ("fp16", "bf16", "fp4", "fp8", "a8w4"):
         raise ValueError(f"Unsupported stage2 data_format: {data_format!r}")
@@ -2908,6 +3428,12 @@ def _compile_moe_stage2_kernel(
             waves_per_eu=waves_per_eu,
             data_format=data_format,
             expert_sched_mode=expert_sched_mode,
+            num_buffers=int(num_buffers),
+            use_tdm_store=bool(use_tdm_store),
+            inst_prefetch=bool(inst_prefetch),
+            wave_specialized_tdm=bool(wave_specialized_tdm),
+            cluster_m=int(cluster_m),
+            cluster_n=int(cluster_n),
         )
     raise ValueError(f"Unsupported stage2 data_format: {data_format!r}")
 
@@ -2929,6 +3455,12 @@ def compile_moe_gemm1(
     use_cshuffle_epilog: bool | None = None,
     waves_per_eu: int | None = None,
     expert_sched_mode: bool = True,
+    num_buffers: int = 1,
+    use_tdm_store: bool = False,
+    inst_prefetch: bool = False,
+    wave_specialized_tdm: bool = False,
+    cluster_m: int = 1,
+    cluster_n: int = 1,
 ):
     _require_gfx1250()
     if waves_per_eu is not None and int(waves_per_eu) < 1:
@@ -2969,6 +3501,12 @@ def compile_moe_gemm1(
             out_dtype=out_dtype,
             waves_per_eu=waves_per_eu,
             expert_sched_mode=expert_sched_mode,
+            num_buffers=int(num_buffers),
+            use_tdm_store=bool(use_tdm_store),
+            inst_prefetch=bool(inst_prefetch),
+            wave_specialized_tdm=bool(wave_specialized_tdm),
+            cluster_m=int(cluster_m),
+            cluster_n=int(cluster_n),
         )
 
 
@@ -2990,6 +3528,12 @@ def compile_moe_gemm2(
     accumulate: bool = True,
     waves_per_eu: int | None = None,
     expert_sched_mode: bool = True,
+    num_buffers: int = 1,
+    use_tdm_store: bool = False,
+    inst_prefetch: bool = False,
+    wave_specialized_tdm: bool = False,
+    cluster_m: int = 1,
+    cluster_n: int = 1,
 ):
     _require_gfx1250()
     if waves_per_eu is not None and int(waves_per_eu) < 1:
@@ -3032,6 +3576,12 @@ def compile_moe_gemm2(
             accumulate=bool(accumulate),
             waves_per_eu=waves_per_eu,
             expert_sched_mode=expert_sched_mode,
+            num_buffers=int(num_buffers),
+            use_tdm_store=bool(use_tdm_store),
+            inst_prefetch=bool(inst_prefetch),
+            wave_specialized_tdm=bool(wave_specialized_tdm),
+            cluster_m=int(cluster_m),
+            cluster_n=int(cluster_n),
         )
 
 
@@ -3054,6 +3604,12 @@ def compile_moe_gemm2_ex(
     valid_mask=None,
     zero_intermediate: bool = True,
     expert_sched_mode: bool = True,
+    num_buffers: int = 1,
+    use_tdm_store: bool = False,
+    inst_prefetch: bool = False,
+    wave_specialized_tdm: bool = False,
+    cluster_m: int = 1,
+    cluster_n: int = 1,
 ):
     _require_gfx1250()
     if in_dtype in ("fp4", "fp8", "fp16", "bf16", "a8w4"):
@@ -3074,6 +3630,12 @@ def compile_moe_gemm2_ex(
                 accumulate=False,
                 waves_per_eu=waves_per_eu,
                 expert_sched_mode=expert_sched_mode,
+                num_buffers=int(num_buffers),
+                use_tdm_store=bool(use_tdm_store),
+                inst_prefetch=bool(inst_prefetch),
+                wave_specialized_tdm=bool(wave_specialized_tdm),
+                cluster_m=int(cluster_m),
+                cluster_n=int(cluster_n),
             )
             out_s = str(out_dtype).strip().lower()
             if out_s in ("f16", "fp16", "half"):
@@ -3115,6 +3677,12 @@ def compile_moe_gemm2_ex(
             accumulate=True,
             waves_per_eu=waves_per_eu,
             expert_sched_mode=expert_sched_mode,
+            num_buffers=int(num_buffers),
+            use_tdm_store=bool(use_tdm_store),
+            inst_prefetch=bool(inst_prefetch),
+            wave_specialized_tdm=bool(wave_specialized_tdm),
+            cluster_m=int(cluster_m),
+            cluster_n=int(cluster_n),
         )
 
     return _compile_with_optional_wpe(
