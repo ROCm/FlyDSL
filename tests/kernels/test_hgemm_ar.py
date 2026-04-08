@@ -63,7 +63,7 @@ class Args:
     nsamples: int
 
 
-def init_world(device_id, num_devices, parts, port=24317):
+def init_world(device_id, num_devices, parts, port=24327):
     torch.cuda.set_device(device_id)
     dist.init_process_group(
         backend="nccl",
@@ -108,26 +108,31 @@ def create_outputs(args):
 
 
 def ref_worker(device_id, num_devices, parts, nsamples, inputs, outputs):
-    group = init_world(device_id, num_devices, parts)
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
-    torch.cuda.synchronize()
-    dist.barrier(group=group)
     warmup_iter = 4
-    for i in range(nsamples):
-        if i == warmup_iter:
-            start_event.record()
+    group = init_world(device_id, num_devices, parts)
+    for i in range(warmup_iter):
         input = inputs[device_id * nsamples + i]
         output = outputs[device_id * nsamples + i]
         F.linear(input[0], input[1], out=output)
         dist.all_reduce(output, group=group)
     torch.cuda.synchronize()
-    end_event.record()
+    dist.barrier(group=group)
+    with profile(
+        activities=[ProfilerActivity.CUDA],
+        profile_memory=False,
+        with_stack=True,
+        with_modules=True
+    ) as prof:
+        for i in range(warmup_iter, nsamples):
+            input = inputs[device_id * nsamples + i]
+            output = outputs[device_id * nsamples + i]
+            F.linear(input[0], input[1], out=output)
+            dist.all_reduce(output, group=group)
+        torch.cuda.synchronize()
+    table = prof.key_averages().table(sort_by="self_cuda_time_total", row_limit=-1)
+    print(table)
     dist.barrier(group=group)
     dist.destroy_process_group()
-    total_ms = start_event.elapsed_time(end_event)
-    avg_ms = total_ms / (nsamples - warmup_iter)
-    print(f"device_id:{device_id}, avg_ms:{avg_ms}")
 
 
 def ref_func(args, inputs, outputs):
@@ -140,6 +145,7 @@ def ref_func(args, inputs, outputs):
 
 
 def worker(device_id, num_devices, parts, nsamples, inputs, outputs, kwargs):
+    warmup_iter = 4
     group = init_world(device_id, num_devices, parts)
     rank = dist.get_rank(group=group)
     world_size = dist.get_world_size(group=group)
@@ -148,24 +154,27 @@ def worker(device_id, num_devices, parts, nsamples, inputs, outputs, kwargs):
     handles = [torch.empty((1,), device="cpu", dtype=torch.uint8) for _ in range(world_size)]
     offsets = [0 for _ in range(world_size)]
     fa = init_custom_ar(meta, rank_data, handles, offsets, rank=rank, backend=GEMMARBackend)
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
-    torch.cuda.synchronize()
-    dist.barrier(group=group)
-    warmup_iter = 4
-    for i in range(nsamples):
-        if i == warmup_iter:
-            start_event.record()
+    for i in range(warmup_iter):
         input = inputs[device_id * nsamples + i]
         output = outputs[device_id * nsamples + i]
         fa.hgemm_ar_fusion(input[0], input[1], output, kwargs)
     torch.cuda.synchronize()
-    end_event.record()
+    dist.barrier(group=group)
+    with profile(
+        activities=[ProfilerActivity.CUDA],
+        profile_memory=False,
+        with_stack=True,
+        with_modules=True
+    ) as prof:
+        for i in range(warmup_iter, nsamples):
+            input = inputs[device_id * nsamples + i]
+            output = outputs[device_id * nsamples + i]
+            fa.hgemm_ar_fusion(input[0], input[1], output, kwargs)
+        torch.cuda.synchronize()
+    table = prof.key_averages().table(sort_by="self_cuda_time_total", row_limit=-1)
+    print(table)
     dist.barrier(group=group)
     dist.destroy_process_group()
-    total_ms = start_event.elapsed_time(end_event)
-    avg_ms = total_ms / (nsamples - warmup_iter)
-    print(f"device_id:{device_id}, avg_ms:{avg_ms}")
 
 
 def func(args, inputs, outputs, kwargs):
@@ -253,28 +262,8 @@ def test_mfma_flyc_hgemm_ar(
     print(f"max_diff_global:{max_diff_global}")
     assert max_diff_global < 1e-2 * args.k * args.num_devices
 
-    # get ref_func perf
     print("===================== [REF] =====================")
-    with profile(
-        activities=[ProfilerActivity.CUDA, ProfilerActivity.CPU],
-        profile_memory=False,
-        with_stack=True,
-        with_modules=True
-    ) as prof:
-        ref_func(args, inputs, ref_outputs)
-        torch.cuda.synchronize()
-    table = prof.key_averages().table(sort_by="self_cuda_time_total", row_limit=-1)
-    print(table)
+    ref_func(args, inputs, ref_outputs)
 
-    # get func perf
     print("===================== [FLYDSL] =====================")
-    with profile(
-        activities=[ProfilerActivity.CUDA, ProfilerActivity.CPU],
-        profile_memory=False,
-        with_stack=True,
-        with_modules=True
-    ) as prof:
-        func(args, inputs, outputs, kwargs)
-        torch.cuda.synchronize()
-    table = prof.key_averages().table(sort_by="self_cuda_time_total", row_limit=-1)
-    print(table)
+    func(args, inputs, outputs, kwargs)
