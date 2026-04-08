@@ -578,9 +578,13 @@ class ReplaceIfWithDispatch(Transformer):
             "scf_if_collect_results": cls._collect_result_dict,
         }
 
-    _REWRITE_HELPER_NAMES = {"dsl_not_", "dsl_and_", "dsl_or_",
-                              "scf_if_dispatch", "const_expr", "type",
-                              "bool", "isinstance", "hasattr"}
+    _REWRITE_HELPER_NAMES = {
+        "const_expr",
+        "type",
+        "bool",
+        "isinstance",
+        "hasattr",
+    }
 
     @staticmethod
     def _could_be_dynamic(test_node):
@@ -644,8 +648,6 @@ class ReplaceIfWithDispatch(Transformer):
                 return False
             if isinstance(node, ast.Compare):
                 compare_parts = [node.left, *node.comparators]
-                # Early static-false short-circuit for chain compare pairs like:
-                # left < c0 < c1 ... where any known static pair is False.
                 for i, op in enumerate(node.ops):
                     lhs_node = compare_parts[i]
                     rhs_node = compare_parts[i + 1]
@@ -657,11 +659,12 @@ class ReplaceIfWithDispatch(Transformer):
                             return False
                 return any(_visit(part) for part in compare_parts)
             if isinstance(node, ast.Call):
+                print(f"_visit Call node: {ast.unparse(node)}")
                 func = node.func
                 if not (isinstance(func, ast.Name) and func.id in ReplaceIfWithDispatch._REWRITE_HELPER_NAMES):
                     return True
-            # Plain names can be static symbols (constexpr params, local bools, etc.),
-            # and unknown nodes keep recursing into children.
+            if isinstance(node, ast.Name):
+                return True
 
             for child in ast.iter_child_nodes(node):
                 if _visit(child):
