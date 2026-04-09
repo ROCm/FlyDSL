@@ -277,7 +277,18 @@ class ReplaceIfWithDispatch(Transformer):
         Calls to RewriteBoolOps helpers (dsl_not_, dsl_and_, dsl_or_) and
         Python builtins are NOT considered dynamic — they just wrap Python-level
         boolean logic. Only calls to user/MLIR functions can produce Values.
+
+        A bare ``ast.Name`` (e.g. ``if flag:``) or ``ast.Compare``
+        (e.g. ``if tid < threshold:``) is treated as potentially dynamic
+        because the operands may be MLIR Values whose comparison produces
+        a dynamic i1.
         """
+        # A bare variable reference may hold a precomputed MLIR Value.
+        if isinstance(test_node, ast.Name):
+            return True
+        # A comparison between DSL values produces a dynamic Boolean.
+        if isinstance(test_node, ast.Compare):
+            return True
         for child in ast.walk(test_node):
             if isinstance(child, ast.Call):
                 func = child.func

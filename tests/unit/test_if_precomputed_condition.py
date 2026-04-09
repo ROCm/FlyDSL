@@ -1,22 +1,17 @@
 #!/usr/bin/env python3
 """Regression test: ``if precomputed_var:`` inside @flyc.kernel.
 
-Demonstrates that storing a dynamic comparison result in a variable and
-then branching on it (``if flag:``) does NOT produce a GPU-level
-``scf.IfOp``.  The AST rewriter's ``_could_be_dynamic`` only recognises
-``ast.Compare`` and ``ast.Call`` nodes — a bare ``ast.Name`` is treated
-as a Python-level ``if`` and always evaluates True (ArithValue objects
-are truthy).
+Verifies that storing a dynamic comparison result in a variable and
+then branching on it (``if flag:``) correctly produces a GPU-level
+``scf.IfOp``.
 
 The test has two kernels:
-  * **inline_if_kernel** — ``if tid < threshold:``  (Compare node, works)
+  * **inline_if_kernel** — ``if tid < threshold:``  (Compare node)
   * **precomputed_if_kernel** — ``flag = tid < threshold; if flag:``
-    (Name node, BROKEN — then-branch always taken)
+    (Name node)
 
 Both kernels conditionally write 1 to an output buffer.  The test checks
-that they produce the **same** result.  Until the FlyDSL bug is fixed,
-the precomputed variant writes 1 for ALL threads and the assertion
-fails, documenting the known limitation.
+that they produce the **same** result.
 """
 
 import argparse
@@ -57,9 +52,8 @@ def precomputed_if_kernel(
     rsrc = buffer_ops.create_buffer_resource(out)
     tid = arith.index_cast(T.i32, gpu.thread_id("x"))
 
-    # Store result in a variable first.
-    # Bug: ``flag`` is an ast.Name node; _could_be_dynamic returns False,
-    # so the ``if`` stays as Python-level and always evaluates True.
+    # Store result in a variable first — tests that ast.Name is recognised
+    # as potentially dynamic by _could_be_dynamic.
     flag = tid < threshold
     if flag:
         buffer_ops.buffer_store(arith.constant(1), rsrc, tid)
@@ -168,16 +162,6 @@ import pytest  # noqa: E402
 
 
 @pytest.mark.parametrize("threshold", [0, 1, 64, 128, 256])
-@pytest.mark.xfail(
-    reason=(
-        "FlyDSL ast_rewriter._could_be_dynamic does not recognise bare "
-        "ast.Name nodes as potentially dynamic. `if flag:` where flag is "
-        "a pre-computed MLIR Value always evaluates True at Python level. "
-        "Fix: add `if isinstance(test_node, ast.Name): return True` in "
-        "ReplaceIfWithDispatch._could_be_dynamic (ast_rewriter.py)."
-    ),
-    strict=False,  # threshold=0 may pass (0 ones == 0 expected)
-)
 def test_precomputed_if_matches_inline(threshold):
     r = run_one(threshold)
     assert r["ok"], f"precomputed if mismatch: {r['error']} ({r['detail']})"
