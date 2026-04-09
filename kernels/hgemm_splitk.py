@@ -190,9 +190,12 @@ def compile_hgemm_kernel(
     AS_BYTES = STAGES * BLOCK_M * BLOCK_K * DTYPE_BYTES
     AS_BYTES = max(AS_BYTES, BLOCK_M * BLOCK_N * DTYPE_BYTES)
     allocator.ptr = smem_a_offset + AS_BYTES
+    SMEM_USE = AS_BYTES
     if B_TO_LDS:
         smem_b_offset = allocator._align(allocator.ptr, 16)
         allocator.ptr = smem_b_offset + STAGES * BLOCK_N * BLOCK_K * DTYPE_BYTES
+        SMEM_USE += STAGES * BLOCK_N * BLOCK_K * DTYPE_BYTES
+    assert SMEM_USE <= 163840
     LDG_ASYNC_VEC_SIZE = DMA_BYTES // DTYPE_BYTES
     LDG_A_X_THREADS_AS = BLOCK_K // LDG_ASYNC_VEC_SIZE
     LDG_REG_A_COUNT_AS = BLOCK_MK_SIZE // LDG_ASYNC_VEC_SIZE // BLOCK_THREADS
@@ -519,6 +522,7 @@ def compile_hgemm_kernel(
         
         def block_mma_sync(a_frags, b_frags, c_frags):
             # wmma
+            c_frags_new = [cx for cx in c_frags]
             for kk in range_constexpr(WARP_K_STEPS):
                 for ii in range_constexpr(WARP_M_STEPS):
                     a_frag = a_frags[kk * WARP_M_STEPS + ii]
@@ -539,68 +543,79 @@ def compile_hgemm_kernel(
                             b_v1 = vector.bitcast(T.f16x4, vector.from_elements(T.vec(1, T.i64), [b1_i64]))
                             # wmma
                             c_idx = ii * WARP_N_STEPS + jj
-                            acc_in = c_frags[c_idx]
+                            acc_in = c_frags_new[c_idx]
                             acc_mid = WMMA_IMPL(a_v0, b_v0, acc_in)
-                            c_frags[c_idx] = WMMA_IMPL(a_v1, b_v1, acc_mid)
+                            c_frags_new[c_idx] = WMMA_IMPL(a_v1, b_v1, acc_mid)
                         elif MFMA_PER_WARP_K == 1:
                             c_idx = ii * WARP_N_STEPS + jj
-                            c_frags[c_idx] = WMMA_IMPL(a_frag, b_frag, c_frags[c_idx])
+                            c_frags_new[c_idx] = WMMA_IMPL(a_frag, b_frag, c_frags_new[c_idx])
                         else:
                             raise NotImplementedError(f"MFMA_PER_WARP_K={MFMA_PER_WARP_K} not supported")
+            return c_frags_new
         
         if IS_SPLIT_K:
             zero_c()
         
         if B_TO_LDS:
 
-            sts_a(ldg_a(ks_begin), 0)
-            sts_b(ldg_b(ks_begin), 0)
+            ldg_sts_a_async(ks_begin, 0)
+            ldg_sts_b_async(ks_begin, 0)
             gpu.barrier()
-            a_frags = lds_matrix_a(0)
-            b_frags = lds_matrix_b(0)
-            rocdl.sched_barrier(0)
             def hot_loop_scheduler():
                 MFMA_TOTAL = WARP_K_STEPS * WARP_M_STEPS * WARP_N_STEPS * MFMA_PER_WARP_K
                 LDG_REG_A_COUNT_ = LDG_REG_A_COUNT_AS if ASYNC_COPY else LDG_REG_A_COUNT
                 LDG_REG_B_COUNT_ = LDG_REG_B_COUNT_AS if ASYNC_COPY else LDG_REG_B_COUNT
-                LDG_TOTAL = LDG_REG_A_COUNT_ + LDG_REG_B_COUNT_ + WARP_K_STEPS * WARP_N_STEPS
+                LDG_TOTAL = LDG_REG_A_COUNT_ + LDG_REG_B_COUNT_
+                LDS_TOTAL = WARP_K_STEPS * (WARP_M_STEPS + WARP_N_STEPS)
+                LD_TOTAL = LDG_TOTAL + LDS_TOTAL
                 # ================ Ordered ================
-                # for i in range_constexpr(LDG_REG_A_COUNT_AS or LDG_REG_A_COUNT):
-                #     rocdl.sched_vmem(1) # ldg_sts_a_async next
-                # for i in range_constexpr(LDG_REG_B_COUNT_AS or LDG_REG_B_COUNT):
-                #     rocdl.sched_vmem(1) # ldg_sts_b_async next
-                # for i in range_constexpr(WARP_K_STEPS * WARP_M_STEPS * WARP_N_STEPS * MFMA_PER_WARP_K):
-                #     rocdl.sched_mfma(1)
+                for i in range_constexpr(WARP_K_STEPS * WARP_M_STEPS):
+                    rocdl.sched_dsrd(1) # lds_matrix_a current
+                for i in range_constexpr(WARP_K_STEPS * WARP_N_STEPS):
+                    rocdl.sched_dsrd(1) # lds_matrix_b current
+                for i in range_constexpr(LDG_REG_A_COUNT_):
+                    rocdl.sched_vmem(1) # ldg_sts_a_async next
+                    rocdl.sched_mfma(2)
+                for i in range_constexpr(LDG_REG_B_COUNT_):
+                    rocdl.sched_vmem(1) # ldg_sts_b_async next
+                    rocdl.sched_mfma(2)
+                REMAINING = max(MFMA_TOTAL - (LDG_REG_A_COUNT_ + LDG_REG_B_COUNT_) * 2, 0)
+                for i in range_constexpr(REMAINING):
+                    rocdl.sched_mfma(1)
                 # ================ Reordered ================
-                mfma_ = OnlineScheduler(MFMA_TOTAL, MFMA_TOTAL)
-                ldg_ = OnlineScheduler(LDG_TOTAL, LDG_TOTAL)
-                AVG_MFMA_COUNT = (MFMA_TOTAL + LDG_TOTAL - 1)  // LDG_TOTAL
-                for i in range_constexpr(LDG_TOTAL):
-                    rocdl.sched_vmem(ldg_.consume(1))
-                    rocdl.sched_mfma(mfma_.consume(AVG_MFMA_COUNT))
                 rocdl.sched_barrier(0)
-            init_state = [ks_begin, arith.constant(0, index=True)] + c_frags + a_frags + b_frags
-            for bki, state in range(1, BLOCK_K_LOOPS, init=init_state):
+            UNROLL = 8
+            init_state = [ks_begin, arith.constant(0, index=True)] + c_frags
+            for bki, state in range(0, BLOCK_K_LOOPS - 1, UNROLL, init=init_state):
                 k_offset = state[0]
                 current_stage = fx.Index(state[1])
-                next_stage = 1 - current_stage
                 c_frags = state[2 : 2 + C_FRAGS_LEN]
-                a_frags = state[2 + C_FRAGS_LEN : 2 + C_FRAGS_LEN + A_FRAGS_LEN]
-                b_frags = state[2 + C_FRAGS_LEN + A_FRAGS_LEN : 2 + C_FRAGS_LEN + A_FRAGS_LEN + B_FRAGS_LEN]
-                ldg_sts_a_async(k_offset + BLOCK_K, next_stage)
-                ldg_sts_b_async(k_offset + BLOCK_K, next_stage)
-                block_mma_sync(a_frags, b_frags, c_frags)
-                hot_loop_scheduler()
-                gpu.barrier()
-                a_frags = lds_matrix_a(next_stage)
-                b_frags = lds_matrix_b(next_stage)
-                k_offset = k_offset + fx.Int32(BLOCK_K)
-                rocdl.sched_barrier(0)
-                results = yield [k_offset, next_stage] + c_frags + a_frags + b_frags
+                for unroll_i in range_constexpr(UNROLL):
+                    cond = arith.cmpi(arith.CmpIPredicate.ult, fx.Index(bki + unroll_i), fx.Index(BLOCK_K_LOOPS - 1))
+                    cond_if = scf.IfOp(cond, results_=[T.vec(WMMA_C_FRAG_VALUES, T.f32)] * C_FRAGS_LEN + [T.index, T.i32], has_else=True)
+                    with ir.InsertionPoint(cond_if.then_block):
+                        next_stage = 1 - current_stage
+                        a_frags = lds_matrix_a(current_stage)
+                        b_frags = lds_matrix_b(current_stage)
+                        ldg_sts_a_async(k_offset + BLOCK_K, next_stage)
+                        ldg_sts_b_async(k_offset + BLOCK_K, next_stage)
+                        c_frags_new = block_mma_sync(a_frags, b_frags, c_frags)
+                        hot_loop_scheduler()
+                        gpu.barrier()
+                        k_offset_next = k_offset + fx.Int32(BLOCK_K)
+                        current_stage_next = 1 - current_stage
+                        scf.YieldOp(c_frags_new + [_to_raw(current_stage_next), k_offset_next])
+                    with ir.InsertionPoint(cond_if.else_block):
+                        scf.YieldOp(c_frags + [_to_raw(current_stage), k_offset])
+                    c_frags = [cond_if.results[i] for i in range(C_FRAGS_LEN)]
+                    current_stage = cond_if.results[C_FRAGS_LEN]
+                    k_offset = cond_if.results[C_FRAGS_LEN + 1]
+                results = yield [k_offset, current_stage] + c_frags
+            current_stage = results[1]
             c_frags = results[2 : 2 + C_FRAGS_LEN]
-            a_frags = results[2 + C_FRAGS_LEN : 2 + C_FRAGS_LEN + A_FRAGS_LEN]
-            b_frags = results[2 + C_FRAGS_LEN + A_FRAGS_LEN : 2 + C_FRAGS_LEN + A_FRAGS_LEN + B_FRAGS_LEN]
-            block_mma_sync(a_frags, b_frags, c_frags)
+            a_frags = lds_matrix_a(current_stage)
+            b_frags = lds_matrix_b(current_stage)
+            c_frags = block_mma_sync(a_frags, b_frags, c_frags)
 
         else:
 
@@ -651,7 +666,7 @@ def compile_hgemm_kernel(
                 else:
                     a_regs_next = ldg_a(k_offset + BLOCK_K)
                 b_frags_next = ldg_matrix_b(k_offset + BLOCK_K)
-                block_mma_sync(a_frags, b_frags, c_frags)
+                c_frags = block_mma_sync(a_frags, b_frags, c_frags)
                 if not ASYNC_COPY:
                     sts_a(a_regs_next, next_stage)
                 hot_loop_scheduler()
@@ -663,7 +678,7 @@ def compile_hgemm_kernel(
             c_frags = results[2 : 2 + C_FRAGS_LEN]
             a_frags = results[2 + C_FRAGS_LEN : 2 + C_FRAGS_LEN + A_FRAGS_LEN]
             b_frags = results[2 + C_FRAGS_LEN + A_FRAGS_LEN : 2 + C_FRAGS_LEN + A_FRAGS_LEN + B_FRAGS_LEN]
-            block_mma_sync(a_frags, b_frags, c_frags)
+            c_frags = block_mma_sync(a_frags, b_frags, c_frags)
 
         # write to lds
         stmatrix_c_m_vec_idx = w_tid // WMMA_N * WMMA_C_FRAG_VALUES
@@ -696,11 +711,6 @@ def compile_hgemm_kernel(
                 with ir.InsertionPoint(cond_boundary_if.then_block):
                     pk_val = cs_.vec_load((m_local_idx, n_local_idx), LDG_VEC_SIZE)
                     linear_bytes_offset = C_.linear_offset((m_global_idx, n_global_idx)) * DTYPE_BYTES
-                    byte_offset_i64 = arith.index_cast(T.i64, linear_bytes_offset)
-                    addr_i64 = llvm.AddOp(out_base_int, byte_offset_i64, llvm.IntegerOverflowFlags(0)).result
-                    out_ptr = llvm.IntToPtrOp(_ptr_type, addr_i64).result
-                    out_ptr_v = out_ptr._value if hasattr(out_ptr, "_value") else out_ptr
-                    pk_val_v = pk_val._value if hasattr(pk_val, "_value") else pk_val
                     # split to vec2s
                     vec2_ty = T.vec(2, dtype_)
                     for vec_idx in range_constexpr(LDG_VEC_SIZE // 2):
@@ -756,7 +766,27 @@ def compile_hgemm_kernel(
         hgemm_kernel._func.__name__ = KERNEL_NAME
         hgemm_kernel(C, A, B, m, COUNTER, signal_state).launch(grid=(bm, bn, SPLIT_K), block=(BLOCK_THREADS, 1, 1), stream=stream)
     
-    return launch_hgemm_kernel
+    _compile_hints = {
+        "llvm_options": {
+            "enable-post-misched": False,
+            "lsr-drop-solution": True,
+        },
+    }
+
+    def _launch(*args, **kwargs):
+        with CompilationContext.compile_hints(_compile_hints):
+            return launch_hgemm_kernel(*args, **kwargs)
+
+    _compile_cache = {}
+    def _compile(C, A, B, m, COUNTER, signal_state, stream):
+        with CompilationContext.compile_hints(_compile_hints):
+            if _compile_cache.get(m, None) is None:
+                _compile_cache[m] = flyc.compile(launch_hgemm_kernel, C, A, B, m, COUNTER, signal_state, stream)
+            return _compile_cache[m]
+
+    _launch.compile = _compile
+    
+    return _launch
 
 
 def hgemm_shuffle_b(x, layout=(16, 16), k_steps=2):
@@ -818,11 +848,13 @@ def hgemm_splitk_(
     global SPLIT_K_COUNTER_MAX_LEN
     global SPLIT_K_GLOBAL_SEMAPHORE
     global SPLIT_K_GLOBAL_SEMAPHORE_STATE
-    if SPLIT_K_GLOBAL_SEMAPHORE.get(stream, None) is None:
-        SPLIT_K_GLOBAL_SEMAPHORE[stream] = torch.zeros(
-            (3 * SPLIT_K_COUNTER_MAX_LEN,), dtype=torch.int32, device=stream.device)
-        SPLIT_K_GLOBAL_SEMAPHORE_STATE[stream] = int(0)
-    signal_state = SPLIT_K_GLOBAL_SEMAPHORE_STATE[stream]
+    device = a.device
+    lookup_key = (stream, device)
+    if SPLIT_K_GLOBAL_SEMAPHORE.get(lookup_key, None) is None:
+        SPLIT_K_GLOBAL_SEMAPHORE[lookup_key] = torch.zeros(
+            (3 * SPLIT_K_COUNTER_MAX_LEN,), dtype=torch.int32, device=device)
+        SPLIT_K_GLOBAL_SEMAPHORE_STATE[lookup_key] = int(0)
+    signal_state = SPLIT_K_GLOBAL_SEMAPHORE_STATE[lookup_key]
     k = a.shape[-1]
     a = a.view(-1, k)
     m = a.shape[0]
@@ -840,11 +872,12 @@ def hgemm_splitk_(
         raise NotImplementedError()
     if kwargs['B_PRE_SHUFFLE'] and shuffle_b:
         b = hgemm_shuffle_b(b)
-    semaphore = SPLIT_K_GLOBAL_SEMAPHORE[stream]
+    semaphore = SPLIT_K_GLOBAL_SEMAPHORE[lookup_key]
     if kwargs['SPLIT_K'] > 1:
         bm = (m + kwargs['TILE_M'] - 1) // kwargs['TILE_M']
         bn = n // kwargs['TILE_N']
         assert bm * bn <= SPLIT_K_COUNTER_MAX_LEN
+    exe_compiled = exe.compile(c, a, b, m, semaphore, signal_state, stream)
     exe(c, a, b, m, semaphore, signal_state, stream)
     if kwargs['SPLIT_K'] > 1:
-        SPLIT_K_GLOBAL_SEMAPHORE_STATE[stream] = (signal_state + 1) % 3
+        SPLIT_K_GLOBAL_SEMAPHORE_STATE[lookup_key] = (signal_state + 1) % 3
