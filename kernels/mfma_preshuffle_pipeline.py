@@ -187,6 +187,30 @@ def make_preshuffle_scale_layout(
     )
 
 
+def _unpack_int4_to_int8_pair(packed32):
+    """Split packed int4 dword into two int8 dwords (even/odd nibbles).
+
+    7-op bit manipulation shared by all int4 unpack paths (W4A8, W4A16, W4A_FP8).
+    """
+    c_08 = fx.Int32(0x08080808)
+    c_0f = fx.Int32(0x0F0F0F0F)
+    c_1e = fx.Int32(0x1E)
+    c_4 = fx.Int32(4)
+    s0 = (packed32 & c_08) * c_1e
+    even = (packed32 & c_0f) | s0
+    t = packed32 >> c_4
+    s1 = (t & c_08) * c_1e
+    odd = (t & c_0f) | s1
+    return even, odd
+
+
+def _pack_i32_pair_to_i64(lo, hi, vector):
+    """Pack two i32 values into one i64 via vector bitcast."""
+    v2 = vector.from_elements(T.vec(2, T.i32), [lo, hi])
+    v64 = vector.bitcast(T.vec(1, T.i64), v2)
+    return vector.extract(v64, static_position=[0], dynamic_position=[])
+
+
 def _i8x4_in_i32_to_bf16x4_i64(val_i32, arith, vector, scale_val=None):
     """Convert one i32 (4 signed int8 bytes) to 4 bf16 packed as i64.
 
@@ -254,6 +278,7 @@ def load_b_raw_w4a16(
     c4_idx = fx.Index(4)
 
     k0_base = base_k // c64
+
     k1_layout_offset = ku * 2
     lane_div_32 = lane_div_16 // c2_idx
     total_k1 = fx.Index(k1_layout_offset) + lane_div_32
@@ -278,24 +303,80 @@ def load_b_raw_w4a16(
     return packed32
 
 
-def unpack_b_w4a16(packed32, arith, vector, scale_val=None):
+def _int4_to_bf16x4_i64_gfx950(packed32, nibble_offsets, arith, vector, scale_val=None, defer_scale16=False):
+    """Convert 4 int4 nibbles to 4 bf16 packed as i64 using gfx950 instructions.
+
+    Uses v_cvt_off_f32_i4_sdwa with byte_sel to avoid per-nibble shifts.
+    Even nibbles (0,2,4,6) → SDWA BYTE_0/1/2/3 on original src.
+    Odd nibbles (1,3,5,7)  → SDWA BYTE_0/1/2/3 on (src >> 4).
+    Only 1 shift total instead of 7.
+
+    When defer_scale16=True, the ×16 correction factor for v_cvt_off_f32_i4 is
+    omitted and must be applied later (e.g. in the epilogue).  This saves VALU
+    in the hot loop and uses v_cvt_pk_bf16_f32 for proper f32→bf16 conversion.
+    """
+    from flydsl.expr import rocdl
+    from flydsl._mlir.dialects._arith_ops_gen import MulFOp as _MulFOp
+
+    _uw = _arith._to_raw
+    _av = _arith.ArithValue
+
+    src_even = packed32
+    src_odd = packed32 >> fx.Int32(4)
+
+    f32_vals = []
+    for nib in nibble_offsets:
+        byte_idx = nib // 2
+        src = src_odd if (nib % 2) else src_even
+        v = rocdl.cvt_off_f32_i4(src, byte_sel=byte_idx)
+        f32_vals.append(v)
+
+    if defer_scale16:
+        # Skip ×16; multiply by scale_val only if groupwise.
+        if scale_val is not None:
+            raw_scale = _uw(scale_val)
+            f32_vals = [_MulFOp(v, raw_scale).result for v in f32_vals]
+        # Use v_cvt_pk_bf16_f32 for proper f32→bf16 (no bit-shift trick needed).
+        i32_lo = rocdl.cvt_pk_bf16_f32(f32_vals[0], f32_vals[1])
+        i32_hi = rocdl.cvt_pk_bf16_f32(f32_vals[2], f32_vals[3])
+    else:
+        c16 = fx.Float32(16.0)
+        if scale_val is not None:
+            effective_scale = scale_val * c16
+        else:
+            effective_scale = c16
+        raw_scale = _uw(effective_scale)
+        f32_vals = [_MulFOp(v, raw_scale).result for v in f32_vals]
+        # Truncate f32→bf16 via bit-shift (exact for scaled int values).
+        c16_shift = fx.Int32(16)
+        c_ffff0000 = fx.Int32(0xFFFF0000)
+        bf16_vals = [arith.bitcast(T.i32, _av(v)) for v in f32_vals]
+        i32_lo = (bf16_vals[0] >> c16_shift) | (bf16_vals[1] & c_ffff0000)
+        i32_hi = (bf16_vals[2] >> c16_shift) | (bf16_vals[3] & c_ffff0000)
+
+    v2 = vector.from_elements(T.vec(2, T.i32), [i32_lo, i32_hi])
+    v64 = vector.bitcast(T.vec(1, T.i64), v2)
+    return vector.extract(v64, static_position=[0], dynamic_position=[])
+
+
+def unpack_b_w4a16(packed32, arith, vector, scale_val=None, use_gfx950_cvt=False, defer_scale16=False):
     """Phase 2 of W4A16 B load: unpack int4->int8 + convert int8->bf16.
 
     Takes raw packed32 from load_b_raw_w4a16 and produces (b0, b1) --
     two i64 values each containing 4 bf16 for one MFMA.
+
+    When use_gfx950_cvt=True, uses v_cvt_off_f32_i4 + v_cvt_pk_bf16_f32
+    for ~2x fewer VALU instructions.
+
+    When defer_scale16=True (requires use_gfx950_cvt=True), the ×16
+    correction for v_cvt_off_f32_i4 is omitted; caller must apply it
+    in the epilogue.
     """
-    c_08080808 = fx.Int32(0x08080808)
-    c_0f0f0f0f = fx.Int32(0x0F0F0F0F)
-    c_1e = fx.Int32(0x1E)
-    c_4_i32 = fx.Int32(4)
-
-    s0 = (packed32 & c_08080808) * c_1e
-    even = (packed32 & c_0f0f0f0f) | s0
-
-    t = packed32 >> c_4_i32
-    s1 = (t & c_08080808) * c_1e
-    odd = (t & c_0f0f0f0f) | s1
-
+    if use_gfx950_cvt:
+        b0 = _int4_to_bf16x4_i64_gfx950(packed32, [0, 2, 4, 6], arith, vector, scale_val, defer_scale16=defer_scale16)
+        b1 = _int4_to_bf16x4_i64_gfx950(packed32, [1, 3, 5, 7], arith, vector, scale_val, defer_scale16=defer_scale16)
+        return (b0, b1)
+    even, odd = _unpack_int4_to_int8_pair(packed32)
     b0 = _i8x4_in_i32_to_bf16x4_i64(even, arith, vector, scale_val=scale_val)
     b1 = _i8x4_in_i32_to_bf16x4_i64(odd, arith, vector, scale_val=scale_val)
     return (b0, b1)
@@ -352,22 +433,8 @@ def load_b_pack_k32(
             static_position=[0],
             dynamic_position=[],
         )
-
-        c_08080808 = fx.Int32(0x08080808)
-        c_0f0f0f0f = fx.Int32(0x0F0F0F0F)
-        c_1e = fx.Int32(0x1E)
-        c_4_i32 = fx.Int32(4)
-
-        s0 = (packed32 & c_08080808) * c_1e
-        even = (packed32 & c_0f0f0f0f) | s0
-
-        t = packed32 >> c_4_i32
-        s1 = (t & c_08080808) * c_1e
-        odd = (t & c_0f0f0f0f) | s1
-
-        v2 = vector.from_elements(T.vec(2, T.i32), [even, odd])
-        v64 = vector.bitcast(T.vec(1, T.i64), v2)
-        return vector.extract(v64, static_position=[0], dynamic_position=[])
+        even, odd = _unpack_int4_to_int8_pair(packed32)
+        return _pack_i32_pair_to_i64(even, odd, vector)
 
     vec_elems = kpack_bytes // int(elem_bytes)
     b16 = _buffer_load_vec(
@@ -548,15 +615,224 @@ def lds_load_pack_k32(
 
 __all__ = [
     "PreshuffleBLayout",
+    "PreshuffleScaleLayout",
     "buffer_copy_gmem16_dwordx4",
-    "lds_row_major_idx",
     "lds_load_pack_k32",
+    "lds_row_major_idx",
     "lds_store_4b_xor16",
     "lds_store_8b_xor16",
     "lds_store_16b_xor16",
     "make_preshuffle_b_layout",
+    "make_preshuffle_scale_layout",
     "load_b_pack_k32",
+    "load_b_raw_w4a16",
+    "unpack_b_w4a16",
+    "load_b_raw_w4a16_groupwise",
+    "unpack_b_w4a16_groupwise",
+    "load_b_raw_w4a8_k64",
+    "load_b_raw_w4a8_groupwise_k64",
+    "unpack_b_w4a8",
     "split_row_major_2d",
     "swizzle_xor16",
     "tile_chunk_coord_i32",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Groupwise scale load helper (shared by W4A16 and W4A8 groupwise paths)
+# ---------------------------------------------------------------------------
+
+def _load_groupwise_scale(
+    buffer_ops,
+    arith,
+    *,
+    scale_rsrc,
+    expert_offset,
+    n_blk,
+    n_intra,
+    k_pos,
+    num_groups: int,
+    group_size: int,
+    n_per_expert: int,
+):
+    """Load one per-group scale value from the scale buffer.
+
+    Computes the linear index into the scale tensor from expert offset,
+    N position, and group index derived from ``k_pos``.
+    """
+    c16 = fx.Index(16)
+    n_global = n_blk * c16 + n_intra
+    c_group_size = fx.Index(group_size)
+    c_gm1 = fx.Index(num_groups - 1)
+    c_npe = fx.Index(n_per_expert)
+    # n_global is the GLOBAL N index (includes expert offset), so use (G-1)
+    # to compensate: expert_offset*(G-1) + (expert_offset + n_within) = expert_offset*G + n_within
+    base_scale = expert_offset * c_gm1 + n_global
+    group_idx = k_pos // c_group_size
+    scale_idx_i32 = arith.index_cast(T.i32, base_scale + group_idx * c_npe)
+    return buffer_ops.buffer_load(scale_rsrc, scale_idx_i32, vec_width=1, dtype=T.f32)
+
+
+# ---------------------------------------------------------------------------
+# W4A16 groupwise load / unpack helpers
+# ---------------------------------------------------------------------------
+
+def load_b_raw_w4a16_groupwise(
+    buffer_ops,
+    arith,
+    vector,
+    *,
+    arg_b,
+    b_rsrc,
+    layout_b,
+    base_k,
+    ku: int,
+    n_blk,
+    n_intra,
+    lane_div_16,
+    elem_type,
+    scale_rsrc,
+    expert_offset,
+    num_groups: int,
+    group_size: int,
+    n_per_expert: int,
+    kpack_bytes: int = 8,
+):
+    """Phase 1 of W4A16 groupwise B load: buffer_loads for weight + scale.
+
+    Reuses :func:`load_b_raw_w4a16` for the weight load, then issues an
+    additional ``buffer_load_dword`` for the per-group scale.
+
+    Returns ``(packed32, scale_val)``.
+    """
+    packed32 = load_b_raw_w4a16(
+        buffer_ops, arith, vector,
+        arg_b=arg_b, b_rsrc=b_rsrc, layout_b=layout_b,
+        base_k=base_k, ku=ku,
+        n_blk=n_blk, n_intra=n_intra,
+        lane_div_16=lane_div_16, elem_type=elem_type,
+        kpack_bytes=kpack_bytes,
+    )
+    k_pos = base_k + fx.Index(ku * 32)
+    scale_val = _load_groupwise_scale(
+        buffer_ops, arith,
+        scale_rsrc=scale_rsrc, expert_offset=expert_offset,
+        n_blk=n_blk, n_intra=n_intra, k_pos=k_pos,
+        num_groups=num_groups, group_size=group_size, n_per_expert=n_per_expert,
+    )
+    return (packed32, scale_val)
+
+
+def unpack_b_w4a16_groupwise(packed32, scale_val, arith, vector, use_gfx950_cvt=False):
+    """Phase 2 of W4A16 groupwise: unpack + scale + convert to bf16."""
+    return unpack_b_w4a16(packed32, arith, vector, scale_val=scale_val, use_gfx950_cvt=use_gfx950_cvt)
+
+
+# ---------------------------------------------------------------------------
+# W4A8 load / unpack helpers (8B K64 loads)
+# ---------------------------------------------------------------------------
+
+def load_b_raw_w4a8_k64(
+    buffer_ops,
+    arith,
+    vector,
+    *,
+    arg_b,
+    b_rsrc,
+    layout_b,
+    base_k,
+    ku: int,
+    n_blk,
+    n_intra,
+    lane_div_16,
+    elem_type,
+    kpack_bytes: int = 8,
+):
+    """Phase 1 of W4A8 per-row B load: 8-byte buffer_load_dwordx2 for one K64 step.
+
+    Loads both K32 halves in a single VMEM instruction (``buffer_load_dwordx2``).
+    Returns ``(packed32_half0, packed32_half1)`` for :func:`unpack_b_w4a8`.
+    """
+    if kpack_bytes != 8:
+        raise ValueError(f"W4A8 requires kpack_bytes=8, got {kpack_bytes!r}")
+
+    c64 = fx.Index(64)
+    k0_base = base_k // c64
+    k0 = k0_base + fx.Index(ku)
+    k1 = lane_div_16
+
+    coord_pack = (n_blk, k0, k1, n_intra, fx.Index(0))
+    idx_pack = crd2idx(coord_pack, layout_b)
+
+    b8 = _buffer_load_vec(
+        buffer_ops, vector, b_rsrc, idx_pack,
+        elem_type=elem_type, vec_elems=8, elem_bytes=1, offset_in_bytes=True,
+    )
+    b_i32x2 = vector.bitcast(T.vec(2, T.i32), b8)
+    half0 = vector.extract(b_i32x2, static_position=[0], dynamic_position=[])
+    half1 = vector.extract(b_i32x2, static_position=[1], dynamic_position=[])
+    return (half0, half1)
+
+
+def load_b_raw_w4a8_groupwise_k64(
+    buffer_ops,
+    arith,
+    vector,
+    *,
+    arg_b,
+    b_rsrc,
+    layout_b,
+    base_k,
+    ku: int,
+    n_blk,
+    n_intra,
+    lane_div_16,
+    elem_type,
+    scale_rsrc,
+    expert_offset,
+    num_groups: int,
+    group_size: int,
+    n_per_expert: int,
+    kpack_bytes: int = 8,
+):
+    """Phase 1 of W4A8 groupwise B load: 8B weight + two scale loads per K64.
+
+    Reuses :func:`load_b_raw_w4a8_k64` for the weight load, then issues two
+    ``buffer_load_dword`` for per-group scales (each K32 half may belong to a
+    different group).
+
+    Returns ``(half0, half1, scale0, scale1)``.
+    """
+    half0, half1 = load_b_raw_w4a8_k64(
+        buffer_ops, arith, vector,
+        arg_b=arg_b, b_rsrc=b_rsrc, layout_b=layout_b,
+        base_k=base_k, ku=ku,
+        n_blk=n_blk, n_intra=n_intra,
+        lane_div_16=lane_div_16, elem_type=elem_type,
+        kpack_bytes=kpack_bytes,
+    )
+
+    scale_kw = dict(
+        scale_rsrc=scale_rsrc, expert_offset=expert_offset,
+        n_blk=n_blk, n_intra=n_intra,
+        num_groups=num_groups, group_size=group_size, n_per_expert=n_per_expert,
+    )
+    scale0 = _load_groupwise_scale(
+        buffer_ops, arith, k_pos=base_k + fx.Index(ku * 2 * 32), **scale_kw,
+    )
+    scale1 = _load_groupwise_scale(
+        buffer_ops, arith, k_pos=base_k + fx.Index((ku * 2 + 1) * 32), **scale_kw,
+    )
+    return (half0, half1, scale0, scale1)
+
+
+def unpack_b_w4a8(packed32, arith, vector):
+    """Phase 2 of W4A8 B load: 7-op unpack from packed int4 to int8 i64.
+
+    Takes a raw ``packed32`` (one dword of packed int4) and produces one i64
+    value containing 8 signed int8 bytes for one MFMA K32 step.
+    """
+    even, odd = _unpack_int4_to_int8_pair(packed32)
+    return _pack_i32_pair_to_i64(even, odd, vector)
+
+
