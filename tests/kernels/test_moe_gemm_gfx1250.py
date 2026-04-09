@@ -594,6 +594,7 @@ def run_moe_stage1(
     benchmark_mode: bool = False,
     flush_l2: bool = True,
     num_buffers: int = 1,
+    use_tdm_gather: bool = True,
     use_tdm_store: bool = False,
     inst_prefetch: bool = False,
     wave_specialized_tdm: bool = False,
@@ -856,6 +857,7 @@ def run_moe_stage1(
         use_cshuffle_epilog=False,
         waves_per_eu=waves_per_eu,
         num_buffers=int(num_buffers),
+        use_tdm_gather=bool(use_tdm_gather),
         use_tdm_store=bool(use_tdm_store),
         inst_prefetch=bool(inst_prefetch),
         wave_specialized_tdm=bool(wave_specialized_tdm),
@@ -1174,6 +1176,7 @@ def run_moe_stage2(
     benchmark_mode: bool = False,
     flush_l2: bool = True,
     num_buffers: int = 1,
+    use_tdm_gather: bool = True,
     use_tdm_store: bool = False,
     inst_prefetch: bool = False,
     wave_specialized_tdm: bool = False,
@@ -1519,6 +1522,7 @@ def run_moe_stage2(
         tile_k=tile_k,
         doweight_stage2=bool(doweight_stage2),
         num_buffers=int(num_buffers),
+        use_tdm_gather=bool(use_tdm_gather),
         use_tdm_store=bool(use_tdm_store),
         inst_prefetch=bool(inst_prefetch),
         wave_specialized_tdm=bool(wave_specialized_tdm),
@@ -1918,6 +1922,57 @@ def test_moe_2stage_waves_per_eu_smoke(waves_per_eu: int):
     assert torch.isfinite(stage2_out).all()
 
 
+def test_moe_stage2_use_tdm_gather_smoke():
+    """Stage2 should support toggling A TDM gather without changing numerics."""
+    tokens = 32
+    model_dim = 256
+    inter_dim = 128
+    experts = 4
+    topk = 2
+    tile_m = 16
+    tile_n = 64
+    tile_k = 128
+
+    torch.manual_seed(0)
+    a2_fp32 = torch.randn((tokens, topk, inter_dim), device="cuda", dtype=torch.float32)
+    a2_q, a2_scale = _per_1x32_fp8_quant(a2_fp32)
+
+    common_args = dict(
+        tokens=tokens,
+        model_dim=model_dim,
+        inter_dim=inter_dim,
+        experts=experts,
+        topk=topk,
+        tile_m=tile_m,
+        tile_n=tile_n,
+        tile_k=tile_k,
+        doweight_stage1=False,
+        in_dtype="fp8",
+        out_dtype="f16",
+        seed=123,
+        num_iters=1,
+        num_warmup=1,
+        compare_aiter_ck=False,
+        return_outputs=True,
+        skip_ref=True,
+        a2_fp8_in=a2_q,
+        a2_scale_in=a2_scale,
+    )
+
+    out_scalar, _ = run_moe_stage2(
+        **common_args,
+        use_tdm_gather=False,
+    )
+    out_gather, _ = run_moe_stage2(
+        **common_args,
+        use_tdm_gather=True,
+    )
+
+    assert torch.isfinite(out_scalar).all()
+    assert torch.isfinite(out_gather).all()
+    assert verify_output(out_gather.to(torch.float32), out_scalar.to(torch.float32), rtol=0.5, atol=0.5)
+
+
 @pytest.mark.parametrize("use_reduce", [False, True], ids=["atomic", "reduce"])
 def test_moe_2stage_fp4_smoke(use_reduce: bool):
     """Smoke test for gfx1250 fp4 stage1/stage2 path."""
@@ -2293,6 +2348,7 @@ def _make_reduce_mode_compile_fn(use_flydsl_reduce: bool = True, use_valid_mask:
         waves_per_eu: Optional[int] = None,
         expert_sched_mode: bool = True,
         num_buffers: int = 1,
+        use_tdm_gather: bool = True,
         use_tdm_store: bool = False,
         inst_prefetch: bool = False,
         wave_specialized_tdm: bool = False,
@@ -2318,6 +2374,7 @@ def _make_reduce_mode_compile_fn(use_flydsl_reduce: bool = True, use_valid_mask:
                 zero_intermediate=False, # test non-zeroed performance
                 expert_sched_mode=bool(expert_sched_mode),
                 num_buffers=int(num_buffers),
+                use_tdm_gather=bool(use_tdm_gather),
                 use_tdm_store=bool(use_tdm_store),
                 inst_prefetch=bool(inst_prefetch),
                 wave_specialized_tdm=bool(wave_specialized_tdm),
@@ -2341,6 +2398,7 @@ def _make_reduce_mode_compile_fn(use_flydsl_reduce: bool = True, use_valid_mask:
                 waves_per_eu=waves_per_eu,
                 expert_sched_mode=bool(expert_sched_mode),
                 num_buffers=int(num_buffers),
+                use_tdm_gather=bool(use_tdm_gather),
                 use_tdm_store=bool(use_tdm_store),
                 inst_prefetch=bool(inst_prefetch),
                 wave_specialized_tdm=bool(wave_specialized_tdm),

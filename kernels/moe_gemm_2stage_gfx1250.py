@@ -1495,6 +1495,7 @@ def _compile_stage1_mxscale_kernel_impl(
     data_format: str = "fp8",
     expert_sched_mode: bool = True,
     num_buffers: int = 1,
+    use_tdm_gather: bool = True,
     use_tdm_store: bool = False,
     inst_prefetch: bool = False,
     wave_specialized_tdm: bool = False,
@@ -1597,7 +1598,9 @@ def _compile_stage1_mxscale_kernel_impl(
         loop_iters = (num_k_tiles - pre_loaded) // int(num_buffers)
         _tail_start = loop_iters * int(num_buffers)
         extra = num_k_tiles - _tail_start - pre_loaded
-        TDM_PER_STEP = 1 if bool(wave_specialized_tdm) else 4
+        _B_TDM_PER_STEP = 1 if bool(wave_specialized_tdm) else 4
+        _A_GATHER_TDM_PER_STEP = (int(tile_m) + 8 - 1) // 8
+        TDM_PER_STEP = _B_TDM_PER_STEP + _A_GATHER_TDM_PER_STEP
         _fence_outstanding = TDM_PER_STEP * (int(num_buffers) - 2)
         _base_tail_plan = make_tail_plan(int(num_buffers), pre_loaded, extra)
         _tail_plan = [
@@ -1612,7 +1615,11 @@ def _compile_stage1_mxscale_kernel_impl(
     if bool(wave_specialized_tdm):
         from kernels.gemm_common_gfx1250 import issue_tdm_loads
 
-    alloc = SmemAllocator(None, arch=str(get_hip_arch()), global_sym_name=f"moe_mxscale_{data_format}_s1_single")
+    alloc = SmemAllocator(
+        None,
+        arch=str(get_hip_arch()),
+        global_sym_name=f"moe_mxscale_{data_format}_s1_single_g{int(bool(use_tdm_gather))}",
+    )
     _nb = int(num_buffers)
     off_ag_list, off_bg_list, off_as_list, off_bs_list = [], [], [], []
     off_bu_list, off_bsu_list = [], []
@@ -1785,7 +1792,7 @@ def _compile_stage1_mxscale_kernel_impl(
             return k_base / arith.index(PACK_FACTOR_A)
 
         # TDM gather for A data
-        _use_tdm_gather_a = True
+        _use_tdm_gather_a = bool(use_tdm_gather)
 
         def issue_a_load(k_packed_base, target_lds):
             total = int(tile_m * packed_tile_k_a)
@@ -2212,11 +2219,6 @@ def _compile_stage1_mxscale_kernel_impl(
 
             def _issue_scalar_loads(k_base, buf_idx):
                 if _use_tdm_gather_a:
-                    # Wait for any outstanding B TDM loads before issuing
-                    # A gather — AM simulator requires no concurrent TDM
-                    # 2D + gather in-flight.
-                    tdm_ops.tensor_wait(0)
-                    gpu.barrier()
                     issue_a_load_tdm_gather(k_base, lds_ag_bufs[buf_idx])
                 else:
                     issue_a_load(make_desc_a(k_base), lds_ag_bufs[buf_idx])
@@ -2552,6 +2554,7 @@ def _compile_stage2_mxscale_kernel_impl(
     data_format: str = "fp8",
     expert_sched_mode: bool = True,
     num_buffers: int = 1,
+    use_tdm_gather: bool = True,
     use_tdm_store: bool = False,
     inst_prefetch: bool = False,
     wave_specialized_tdm: bool = False,
@@ -2668,7 +2671,11 @@ def _compile_stage2_mxscale_kernel_impl(
     if bool(wave_specialized_tdm):
         from kernels.gemm_common_gfx1250 import issue_tdm_loads
 
-    alloc = SmemAllocator(None, arch=str(get_hip_arch()), global_sym_name=f"moe_mxscale_{data_format}_s2_single")
+    alloc = SmemAllocator(
+        None,
+        arch=str(get_hip_arch()),
+        global_sym_name=f"moe_mxscale_{data_format}_s2_single_g{int(bool(use_tdm_gather))}",
+    )
     _nb = int(num_buffers)
     off_a_list, off_b_list, off_as_list, off_bs_list = [], [], [], []
     for _buf_i in range(_nb):
@@ -2864,6 +2871,51 @@ def _compile_stage2_mxscale_kernel_impl(
                 for_store=True,
             )
 
+        _use_tdm_gather_a = bool(use_tdm_gather)
+        _a_row_ids = []
+        _TDM_GATHER_CHUNK = 8
+        _TDM_GATHER_GROUPS = (int(tile_m) + _TDM_GATHER_CHUNK - 1) // _TDM_GATHER_CHUNK
+        _tokens_topk_sgpr = None
+
+        def _get_tokens_topk_sgpr():
+            nonlocal _tokens_topk_sgpr
+            if _tokens_topk_sgpr is None:
+                _m_i32 = arith.index_cast(
+                    T.i32,
+                    tokens_idx * arith.index(int(topk)),
+                )
+                _tokens_topk_sgpr = rocdl.readfirstlane(T.i32, _m_i32)
+            return _tokens_topk_sgpr
+
+        def _precompute_a_row_indices():
+            _ts_oob = _get_tokens_topk_sgpr()
+            for _ri in range_constexpr(int(tile_m)):
+                _sorted_row = by * fx.Index(int(tile_m)) + fx.Index(_ri)
+                _sorted_i32 = arith.index_cast(T.i32, _sorted_row)
+                _row_in_route = arith.cmpi(
+                    arith.CmpIPredicate.ult,
+                    fx.Int32(_ri),
+                    fx.Int32(int(route_tile_m)),
+                )
+                _row_in_valid = arith.cmpi(
+                    arith.CmpIPredicate.slt,
+                    _sorted_i32,
+                    num_valid_i32,
+                )
+                _row_ok = arith.andi(_row_in_route, _row_in_valid)
+                _sorted_safe = arith.select(_row_ok, _sorted_i32, block_row_start)
+                _fused = buffer_ops.buffer_load(sorted_rsrc, _sorted_safe, vec_width=1, dtype=T.i32)
+                _tok = _fused & fx.Int32((1 << 24) - 1)
+                _slot = _fused >> fx.Int32(24)
+                _tok_ok = arith.cmpi(arith.CmpIPredicate.ult, _tok, i32_tokens_in)
+                _slot_ok0 = arith.cmpi(arith.CmpIPredicate.sge, _slot, fx.Int32(0))
+                _slot_ok1 = arith.cmpi(arith.CmpIPredicate.slt, _slot, c_topk_i32)
+                _ts = _tok * c_topk_i32 + _slot
+                _ts_ok = arith.andi(_tok_ok, arith.andi(_slot_ok0, _slot_ok1))
+                _row_fully_ok = arith.andi(_row_ok, _ts_ok)
+                _ts_safe = arith.select(_row_fully_ok, _ts, _ts_oob)
+                _a_row_ids.append(rocdl.readfirstlane(T.i32, _ts_safe))
+
         def make_desc_a(k_base):
             return k_base / arith.index(PACK_FACTOR_A)
 
@@ -2900,6 +2952,32 @@ def _compile_stage2_mxscale_kernel_impl(
                     v1 = vector.from_elements(T.vec(1, T.i8), [x_val])
                     vector.store(v1, target_lds, [lds_idx], alignment=1)
                     scf.YieldOp([])
+
+        def issue_a_load_tdm_gather(k_base, target_lds):
+            """Load stage2 A rows via TDM gather using token-slot row ids."""
+            k_packed_base = k_base if PACK_FACTOR_A == 1 else k_base // fx.Index(PACK_FACTOR_A)
+            _tokens_topk = _get_tokens_topk_sgpr()
+            for _gi in range_constexpr(_TDM_GATHER_GROUPS):
+                _start = _gi * _TDM_GATHER_CHUNK
+                _cnt = min(_TDM_GATHER_CHUNK, int(tile_m) - _start)
+                _row_indices = _a_row_ids[_start:_start + _cnt]
+                _lds_off = fx.Index(_start * lds_a_stride_bytes)
+                desc = tdm_ops.make_tensor_gather_descriptor(
+                    global_ptr=arg_x,
+                    lds_memref=target_lds,
+                    row_indices=_row_indices,
+                    row_width=int(packed_tile_k_a),
+                    tensor_dim0=K_packed_a,
+                    tensor_dim1=_tokens_topk,
+                    stride=K_packed_a,
+                    elem_bytes=1,
+                    pad_interval=int(packed_tile_k_a) if LDS_PAD_A_BYTES > 0 else 0,
+                    pad_amount=LDS_PAD_A_BYTES if LDS_PAD_A_BYTES > 0 else 0,
+                    index_size=32,
+                    lds_byte_offset=_lds_off,
+                    global_byte_offset=k_packed_base,
+                )
+                tdm_ops.tensor_load_gather(desc)
 
         def make_desc_as(k_base):
             return k_base / arith.index(SCALE_BLOCK)
@@ -3141,6 +3219,8 @@ def _compile_stage2_mxscale_kernel_impl(
 
         _if_blk = scf.IfOp(block_ok)
         with ir.InsertionPoint(_if_blk.then_block):
+            if _use_tdm_gather_a:
+                _precompute_a_row_indices()
             a_data_bases = _precompute_a_data_bases()
             b_data_bases = _precompute_b_data_bases()
             as_bases = _precompute_a_scale_lane_bases()
@@ -3192,7 +3272,14 @@ def _compile_stage2_mxscale_kernel_impl(
                         make_desc_bs(_n, k_base, lds_bs_bufs[buf_idx]))
 
             def _issue_scalar_loads(k_base, buf_idx):
-                issue_a_load(make_desc_a(k_base), lds_a_bufs[buf_idx])
+                if _use_tdm_gather_a:
+                    # Match stage1 ordering: AM simulator currently dislikes
+                    # concurrent in-flight 2D TDM + gather TDM.
+                    tdm_ops.tensor_wait(0)
+                    gpu.barrier()
+                    issue_a_load_tdm_gather(k_base, lds_a_bufs[buf_idx])
+                else:
+                    issue_a_load(make_desc_a(k_base), lds_a_bufs[buf_idx])
                 issue_as_load(make_desc_as(k_base), lds_as_bufs[buf_idx])
 
             def _issue_all_loads(k_base, buf_idx):
@@ -3442,6 +3529,7 @@ def _compile_moe_stage1_kernel(
     waves_per_eu: int | None,
     expert_sched_mode: bool = True,
     num_buffers: int = 1,
+    use_tdm_gather: bool = True,
     use_tdm_store: bool = False,
     inst_prefetch: bool = False,
     wave_specialized_tdm: bool = False,
@@ -3495,6 +3583,7 @@ def _compile_moe_stage1_kernel(
             data_format=data_format,
             expert_sched_mode=expert_sched_mode,
             num_buffers=int(num_buffers),
+            use_tdm_gather=bool(use_tdm_gather),
             use_tdm_store=bool(use_tdm_store),
             inst_prefetch=bool(inst_prefetch),
             wave_specialized_tdm=bool(wave_specialized_tdm),
@@ -3521,6 +3610,7 @@ def _compile_moe_stage2_kernel(
     waves_per_eu: int | None,
     expert_sched_mode: bool = True,
     num_buffers: int = 1,
+    use_tdm_gather: bool = True,
     use_tdm_store: bool = False,
     inst_prefetch: bool = False,
     wave_specialized_tdm: bool = False,
@@ -3576,6 +3666,7 @@ def _compile_moe_stage2_kernel(
             data_format=data_format,
             expert_sched_mode=expert_sched_mode,
             num_buffers=int(num_buffers),
+            use_tdm_gather=bool(use_tdm_gather),
             use_tdm_store=bool(use_tdm_store),
             inst_prefetch=bool(inst_prefetch),
             wave_specialized_tdm=bool(wave_specialized_tdm),
@@ -3603,6 +3694,7 @@ def compile_moe_gemm1(
     waves_per_eu: int | None = None,
     expert_sched_mode: bool = True,
     num_buffers: int = 1,
+    use_tdm_gather: bool = True,
     use_tdm_store: bool = False,
     inst_prefetch: bool = False,
     wave_specialized_tdm: bool = False,
@@ -3649,6 +3741,7 @@ def compile_moe_gemm1(
             waves_per_eu=waves_per_eu,
             expert_sched_mode=expert_sched_mode,
             num_buffers=int(num_buffers),
+            use_tdm_gather=bool(use_tdm_gather),
             use_tdm_store=bool(use_tdm_store),
             inst_prefetch=bool(inst_prefetch),
             wave_specialized_tdm=bool(wave_specialized_tdm),
@@ -3676,6 +3769,7 @@ def compile_moe_gemm2(
     waves_per_eu: int | None = None,
     expert_sched_mode: bool = True,
     num_buffers: int = 1,
+    use_tdm_gather: bool = True,
     use_tdm_store: bool = False,
     inst_prefetch: bool = False,
     wave_specialized_tdm: bool = False,
@@ -3724,6 +3818,7 @@ def compile_moe_gemm2(
             waves_per_eu=waves_per_eu,
             expert_sched_mode=expert_sched_mode,
             num_buffers=int(num_buffers),
+            use_tdm_gather=bool(use_tdm_gather),
             use_tdm_store=bool(use_tdm_store),
             inst_prefetch=bool(inst_prefetch),
             wave_specialized_tdm=bool(wave_specialized_tdm),
@@ -3752,6 +3847,7 @@ def compile_moe_gemm2_ex(
     zero_intermediate: bool = True,
     expert_sched_mode: bool = True,
     num_buffers: int = 1,
+    use_tdm_gather: bool = True,
     use_tdm_store: bool = False,
     inst_prefetch: bool = False,
     wave_specialized_tdm: bool = False,
@@ -3778,6 +3874,7 @@ def compile_moe_gemm2_ex(
                 waves_per_eu=waves_per_eu,
                 expert_sched_mode=expert_sched_mode,
                 num_buffers=int(num_buffers),
+                use_tdm_gather=bool(use_tdm_gather),
                 use_tdm_store=bool(use_tdm_store),
                 inst_prefetch=bool(inst_prefetch),
                 wave_specialized_tdm=bool(wave_specialized_tdm),
@@ -3825,6 +3922,7 @@ def compile_moe_gemm2_ex(
             waves_per_eu=waves_per_eu,
             expert_sched_mode=expert_sched_mode,
             num_buffers=int(num_buffers),
+            use_tdm_gather=bool(use_tdm_gather),
             use_tdm_store=bool(use_tdm_store),
             inst_prefetch=bool(inst_prefetch),
             wave_specialized_tdm=bool(wave_specialized_tdm),
