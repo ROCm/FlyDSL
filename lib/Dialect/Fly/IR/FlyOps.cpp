@@ -151,7 +151,6 @@ FLY_INFER_RETURN_TYPES(MakeLayoutOp) {
   return success();
 }
 
-
 FLY_INFER_RETURN_TYPES(MakeLayoutLikeOp) {
   auto layoutTy = dyn_cast<LayoutType>(operands[0].getType());
   if (!layoutTy)
@@ -1348,6 +1347,12 @@ FLY_INFER_RETURN_TYPES(TileToShapeOp) {
 // Atom and Tiled Mma/Copy ops
 //===----------------------------------------------------------------------===//
 
+FLY_INFER_RETURN_TYPES(AtomSetValueOp) {
+  auto atomTy = operands[0].getType();
+  inferredReturnTypes.assign({atomTy});
+  return success();
+}
+
 FLY_INFER_RETURN_TYPES(MakeTiledCopyOp) {
   auto copyAtomTy = operands[0].getType();
   auto layoutTy = dyn_cast<LayoutType>(operands[1].getType());
@@ -1540,9 +1545,8 @@ FLY_INFER_RETURN_TYPES(TiledMmaPartitionOp) {
 
   auto mmaAtom = dyn_cast<MmaAtomType>(tiledMmaTy.getMmaAtom());
   if (!mmaAtom)
-    return emitOptionalError(
-        location,
-        "TiledMmaPartitionOp: TiledMmaType's mma atom is not a MmaAtomType");
+    return emitOptionalError(location,
+                             "TiledMmaPartitionOp: TiledMmaType's mma atom is not a MmaAtomType");
 
   LayoutAttr atomLayout = tiledMmaTy.getAtomLayout().getAttr();
   TileAttr permutationMNK = tiledMmaTy.getPermutation().getAttr();
@@ -1627,9 +1631,8 @@ FLY_INFER_RETURN_TYPES(MmaMakeFragmentOp) {
 
   auto mmaAtom = dyn_cast<MmaAtomType>(tiledMmaTy.getMmaAtom());
   if (!mmaAtom)
-    return emitOptionalError(
-        location,
-        "MmaMakeFragmentOp: TiledMmaType's mma atom is not a MmaAtomType");
+    return emitOptionalError(location,
+                             "MmaMakeFragmentOp: TiledMmaType's mma atom is not a MmaAtomType");
 
   Type elemTy;
   switch (operandId) {

@@ -483,10 +483,12 @@ Cache is invalidated when:
 - `Constexpr` values change
 - FlyDSL or LLVM version changes
 
-### 9.3 Disabling Disk Cache
+### 9.3 Disk Cache Invalidation
+
+The JIT disk cache auto-invalidates when kernel source code or closure values change. Set `FLYDSL_RUNTIME_ENABLE_CACHE=0` only when modifying C++ passes or non-closure helper functions:
 
 ```bash
-FLYDSL_RUNTIME_ENABLE_CACHE=0 python my_script.py
+FLYDSL_RUNTIME_ENABLE_CACHE=0 python my_script.py  # or: rm -rf ~/.flydsl/cache
 ```
 
 ### 9.4 Compile-Only Mode

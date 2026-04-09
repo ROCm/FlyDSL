@@ -19,6 +19,7 @@ Example:
 
 from .._mlir._mlir_libs._mlirDialectsFlyROCDL import CopyOpCDNA3BufferCopyType, MmaOpCDNA3_MFMAType
 from .._mlir._mlir_libs._mlirDialectsFlyROCDL import MmaOpGFX1250_WMMAType
+from .._mlir.dialects._fly_rocdl_enum_gen import AtomStateField
 from .._mlir.dialects.rocdl import *  # noqa: F401,F403
 from .._mlir.extras import types as T
 
@@ -663,6 +664,8 @@ __all__ = [
     "cvt_f32_fp8",
     "cvt_pk_f32_bf8",
     "cvt_pk_f32_fp8",
+    # Atom state enums
+    "AtomStateField",
     # Copy atom types
     "CopyOpCDNA3BufferCopyType",
     "BufferCopy",
