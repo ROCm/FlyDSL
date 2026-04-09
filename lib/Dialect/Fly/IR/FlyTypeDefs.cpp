@@ -380,10 +380,10 @@ TileType TiledMmaType::getDefaultPermutationMNK(MLIRContext *ctx) {
 }
 
 bool CopyAtomType::isStatic() const {
-  auto copyOp = dyn_cast<CopyOpTypeInterface>(getCopyOp());
-  if (!copyOp)
+  auto mayStatic = dyn_cast<MayStaticTypeInterface>(getCopyOp());
+  if (!mayStatic)
     return false;
-  return copyOp.isStatic();
+  return mayStatic.isStatic();
 }
 
 Attribute CopyAtomType::getThrLayout() {
@@ -438,10 +438,10 @@ Value CopyAtomType::setAtomState(OpBuilder &builder, Location loc, Value atomStr
 }
 
 bool MmaAtomType::isStatic() const {
-  auto mmaOp = dyn_cast<MmaOpTypeInterface>(getMmaOp());
-  if (!mmaOp)
+  auto mayStatic = dyn_cast<MayStaticTypeInterface>(getMmaOp());
+  if (!mayStatic)
     return false;
-  return mmaOp.isStatic();
+  return mayStatic.isStatic();
 }
 
 Value MmaAtomType::rebuildStaticValue(OpBuilder &builder, Location loc, Value currentValue) const {

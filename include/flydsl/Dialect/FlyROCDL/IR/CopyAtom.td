@@ -6,11 +6,15 @@
 
 include "flydsl/Dialect/FlyROCDL/IR/Dialect.td"
 
-def FlyROCDL_CopyOpBufferCopy : FlyxROCL_CopyOp<"CopyOpCDNA3BufferCopy", "cdna3.buffer_copy",[]> {
+def FlyROCDL_CopyOpBufferCopy : FlyROCL_StatefulCopyOp<"CopyOpCDNA3BufferCopy", "cdna3.buffer_copy",[]> {
   let parameters = (ins
     "int32_t":$bitSize
   );
   let assemblyFormat = "`<` $bitSize `>`";
+
+  let extraClassDeclaration = [{
+    static std::optional<unsigned> getFieldIndex(AtomStateField field);
+  }];
 }
 
 #endif // FLYROCDL_COPYATOM
