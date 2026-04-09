@@ -878,6 +878,6 @@ def hgemm_splitk_(
         bn = n // kwargs['TILE_N']
         assert bm * bn <= SPLIT_K_COUNTER_MAX_LEN
     exe_compiled = exe.compile(c, a, b, m, semaphore, signal_state, stream)
-    exe(c, a, b, m, semaphore, signal_state, stream)
+    exe_compiled(c, a, b, m, semaphore, signal_state, stream)
     if kwargs['SPLIT_K'] > 1:
         SPLIT_K_GLOBAL_SEMAPHORE_STATE[lookup_key] = (signal_state + 1) % 3
