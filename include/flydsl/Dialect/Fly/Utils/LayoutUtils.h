@@ -1092,8 +1092,8 @@ auto layoutUpcastImpl(LayoutBuilder<Layout> &builder, SwizzleAttr swizzle, int32
   int32_t log_factor = std::log2(factor);
   int32_t base = swizzle.getBase();
   assert(base >= log_factor);
-  return builder.materializeSwizzle(SwizzleAttr::get(swizzle.getContext(), base - log_factor,
-                                                     swizzle.getMask(), swizzle.getShift()));
+  return builder.materializeSwizzle(SwizzleAttr::get(swizzle.getContext(), swizzle.getMask(),
+                                                     base - log_factor, swizzle.getShift()));
 }
 
 template <class Layout>
@@ -1135,7 +1135,7 @@ auto layoutDowncastImpl(LayoutBuilder<Layout> &builder, SwizzleAttr swizzle, int
   assert(utils::isPowerOf2(factor) && "layoutDowncast: factor must be a power of 2");
   int32_t log_factor = std::log2(factor);
   return builder.materializeSwizzle(SwizzleAttr::get(
-      swizzle.getContext(), swizzle.getBase() + log_factor, swizzle.getMask(), swizzle.getShift()));
+      swizzle.getContext(), swizzle.getMask(), swizzle.getBase() + log_factor, swizzle.getShift()));
 }
 
 } // namespace detail
