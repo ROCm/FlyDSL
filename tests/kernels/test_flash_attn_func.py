@@ -296,7 +296,7 @@ def run_aiter_bench(
     """Run true CK or true ASM kernel via aiter and return {tflops, max_err, us}."""
     try:
         import aiter
-    except ImportError:
+    except Exception:
         return {"err": "aiter not installed"}
 
     if backend == "asm" and dtype != torch.bfloat16:
