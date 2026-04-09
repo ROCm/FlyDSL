@@ -87,7 +87,7 @@ FlyDSL/
 │
 ├── tests/
 │   ├── mlir/                         # MLIR IR tests (no GPU required)
-│   ├── pyir/                         # Python IR tests (no GPU required)
+│   ├── python/                       # Python-based tests (examples, AOT)
 │   ├── kernels/                      # GPU kernel tests + benchmarks
 │   ├── python/                       # Python DSL tests
 │   │   ├── examples/                 # Example-based tests

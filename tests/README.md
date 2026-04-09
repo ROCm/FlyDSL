@@ -81,10 +81,10 @@ python3 -m pytest tests/kernels/ tests/unit/ tests/python/examples/ -m "not larg
 # python3 -m pytest tests/ -m "l2_device" -v
 ```
 
-Disable JIT disk cache while iterating (in-memory cache remains active):
+The JIT disk cache auto-invalidates when kernel source or closure values change. Only disable it when modifying C++ passes or non-closure helper functions:
 
 ```bash
-export FLYDSL_RUNTIME_ENABLE_CACHE=0
+export FLYDSL_RUNTIME_ENABLE_CACHE=0  # or: rm -rf ~/.flydsl/cache
 ```
 
 ## MLIR FileCheck tests

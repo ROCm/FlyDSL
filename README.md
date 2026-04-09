@@ -151,8 +151,8 @@ bash scripts/build.sh -j64
 | Testing & Benchmarks | Test infrastructure, benchmarking, performance comparison | [Testing Guide](docs/testing_benchmarking_guide.md) |
 
 - **Kernel cache issues** (stale results after code changes)
-  - Clear: `rm -rf ~/.flydsl/cache`
-  - Or disable disk cache: `export FLYDSL_RUNTIME_ENABLE_CACHE=0` (in-memory cache remains active)
+  - The JIT disk cache auto-invalidates on source/closure changes; only needed for C++ pass or non-closure helper changes
+  - Clear manually: `rm -rf ~/.flydsl/cache` or `export FLYDSL_RUNTIME_ENABLE_CACHE=0`
 
 ## 📐 Layout System
 
