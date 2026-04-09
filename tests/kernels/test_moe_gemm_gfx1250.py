@@ -1922,6 +1922,73 @@ def test_moe_2stage_waves_per_eu_smoke(waves_per_eu: int):
     assert torch.isfinite(stage2_out).all()
 
 
+def test_moe_stage1_use_tdm_gather_smoke():
+    """Stage1 should support toggling A TDM gather without changing numerics on padded routes."""
+    tokens = 5
+    model_dim = 256
+    inter_dim = 128
+    experts = 1
+    topk = 1
+    tile_m = 16
+    tile_n = 64
+    tile_k = 128
+
+    device = torch.device("cuda")
+    torch.manual_seed(0)
+    x_fp32 = torch.randn((tokens, model_dim), device=device, dtype=torch.float32)
+    w1_fp32 = torch.randn((experts, 2 * inter_dim, model_dim), device=device, dtype=torch.float32)
+    w2_fp32 = torch.randn((experts, model_dim, inter_dim), device=device, dtype=torch.float32)
+    topk_ids = torch.zeros((tokens, topk), device=device, dtype=torch.int64)
+    topk_weights = torch.ones((tokens, topk), device=device, dtype=torch.float32)
+    routing = build_routing_buffers(
+        topk_ids=topk_ids,
+        topk_weights=topk_weights,
+        experts=experts,
+        model_dim=model_dim,
+        tile_m=tile_m,
+        moe_sort_mode="torch",
+    )
+
+    common_args = dict(
+        tokens=tokens,
+        model_dim=model_dim,
+        inter_dim=inter_dim,
+        experts=experts,
+        topk=topk,
+        tile_m=tile_m,
+        tile_n=tile_n,
+        tile_k=tile_k,
+        doweight_stage1=False,
+        in_dtype="fp8",
+        seed=123,
+        num_iters=1,
+        num_warmup=1,
+        compare_aiter_ck=False,
+        moe_sort_mode="torch",
+        x_fp32_in=x_fp32,
+        w1_fp32_in=w1_fp32,
+        w2_fp32_in=w2_fp32,
+        topk_ids_in=topk_ids,
+        topk_weights_in=topk_weights,
+        routing_in=routing,
+        return_outputs=True,
+        skip_ref=True,
+    )
+
+    out_scalar, _ = run_moe_stage1(
+        **common_args,
+        use_tdm_gather=False,
+    )
+    out_gather, _ = run_moe_stage1(
+        **common_args,
+        use_tdm_gather=True,
+    )
+
+    assert torch.isfinite(out_scalar).all()
+    assert torch.isfinite(out_gather).all()
+    assert verify_output(out_gather.to(torch.float32), out_scalar.to(torch.float32), rtol=0.5, atol=0.5)
+
+
 def test_moe_stage2_use_tdm_gather_smoke():
     """Stage2 should support toggling A TDM gather without changing numerics."""
     tokens = 32
@@ -1957,6 +2024,78 @@ def test_moe_stage2_use_tdm_gather_smoke():
         skip_ref=True,
         a2_fp8_in=a2_q,
         a2_scale_in=a2_scale,
+    )
+
+    out_scalar, _ = run_moe_stage2(
+        **common_args,
+        use_tdm_gather=False,
+    )
+    out_gather, _ = run_moe_stage2(
+        **common_args,
+        use_tdm_gather=True,
+    )
+
+    assert torch.isfinite(out_scalar).all()
+    assert torch.isfinite(out_gather).all()
+    assert verify_output(out_gather.to(torch.float32), out_scalar.to(torch.float32), rtol=0.5, atol=0.5)
+
+
+def test_moe_stage2_use_tdm_gather_padding_smoke():
+    """Stage2 gather should match scalar load on deterministic padding-heavy routing."""
+    tokens = 5
+    model_dim = 256
+    inter_dim = 128
+    experts = 1
+    topk = 2
+    tile_m = 16
+    tile_n = 64
+    tile_k = 128
+
+    device = torch.device("cuda")
+    torch.manual_seed(1)
+    a2_fp32 = torch.randn((tokens, topk, inter_dim), device=device, dtype=torch.float32)
+    a2_q, a2_scale = _per_1x32_fp8_quant(a2_fp32)
+    x_fp32 = torch.randn((tokens, model_dim), device=device, dtype=torch.float32)
+    w1_fp32 = torch.randn((experts, 2 * inter_dim, model_dim), device=device, dtype=torch.float32)
+    w2_fp32 = torch.randn((experts, model_dim, inter_dim), device=device, dtype=torch.float32)
+    topk_ids = torch.zeros((tokens, topk), device=device, dtype=torch.int64)
+    topk_weights = torch.tensor([[0.75, 0.25]], device=device, dtype=torch.float32).expand(tokens, topk).contiguous()
+    routing = build_routing_buffers(
+        topk_ids=topk_ids,
+        topk_weights=topk_weights,
+        experts=experts,
+        model_dim=model_dim,
+        tile_m=tile_m,
+        moe_sort_mode="torch",
+    )
+
+    common_args = dict(
+        tokens=tokens,
+        model_dim=model_dim,
+        inter_dim=inter_dim,
+        experts=experts,
+        topk=topk,
+        tile_m=tile_m,
+        tile_n=tile_n,
+        tile_k=tile_k,
+        doweight_stage1=False,
+        in_dtype="fp8",
+        out_dtype="f16",
+        seed=321,
+        num_iters=1,
+        num_warmup=1,
+        compare_aiter_ck=False,
+        moe_sort_mode="torch",
+        x_fp32_in=x_fp32,
+        w1_fp32_in=w1_fp32,
+        w2_fp32_in=w2_fp32,
+        topk_ids_in=topk_ids,
+        topk_weights_in=topk_weights,
+        routing_in=routing,
+        a2_fp8_in=a2_q,
+        a2_scale_in=a2_scale,
+        return_outputs=True,
+        skip_ref=True,
     )
 
     out_scalar, _ = run_moe_stage2(

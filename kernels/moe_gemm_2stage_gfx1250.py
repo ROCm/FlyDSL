@@ -535,6 +535,8 @@ def _emit_stage1_gate_up_epilogue(
     i32_tokens_in,
     i32_inter_in,
     topk: int,
+    num_valid_i32=None,
+    block_row_start=None,
     sorted_rsrc,
     tw_rsrc,
     out_rsrc,
@@ -551,18 +553,28 @@ def _emit_stage1_gate_up_epilogue(
     range_constexpr,
     T,
 ):
+    c_topk_i32 = arith.constant(int(topk), type=T.i32)
+    default_block_row_start = arith.index_cast(T.i32, by * arith.index(int(route_tile_m)))
+    row_base_i32 = block_row_start if block_row_start is not None else default_block_row_start
     for acc_idx, vec_base, m_off, wn in sub_tiles:
         row_local = warp_m_base + fx.Index(m_off) + lane16
         sorted_row = by * arith.index(int(tile_m)) + row_local
+        row_i32 = arith.index_cast(T.i32, row_local)
+        sorted_i32 = arith.index_cast(T.i32, sorted_row)
         row_in_route = arith.cmpi(
             arith.CmpIPredicate.ult,
-            arith.index_cast(T.i32, row_local),
+            row_i32,
             arith.constant(int(route_tile_m), type=T.i32),
         )
+        if num_valid_i32 is None:
+            row_ok_meta = row_in_route
+        else:
+            row_in_valid = arith.cmpi(arith.CmpIPredicate.slt, sorted_i32, num_valid_i32)
+            row_ok_meta = arith.andi(row_in_route, row_in_valid)
         sorted_safe = arith.select(
-            row_in_route,
-            arith.index_cast(T.i32, sorted_row),
-            arith.index_cast(T.i32, by * arith.index(int(route_tile_m))),
+            row_ok_meta,
+            sorted_i32,
+            row_base_i32,
         )
         fused = buffer_ops.buffer_load(sorted_rsrc, sorted_safe, vec_width=1, dtype=T.i32)
         tok = fused & arith.constant((1 << 24) - 1, type=T.i32)
@@ -570,7 +582,7 @@ def _emit_stage1_gate_up_epilogue(
         tok_ok = arith.cmpi(arith.CmpIPredicate.ult, tok, i32_tokens_in)
         slot_ok0 = arith.cmpi(arith.CmpIPredicate.sge, slot, arith.constant(0, type=T.i32))
         slot_ok1 = arith.cmpi(arith.CmpIPredicate.slt, slot, arith.constant(int(topk), type=T.i32))
-        row_ok = arith.andi(row_in_route, arith.andi(tok_ok, arith.andi(slot_ok0, slot_ok1)))
+        row_ok = arith.andi(row_ok_meta, arith.andi(tok_ok, arith.andi(slot_ok0, slot_ok1)))
         sub8g, sub8u = load_gate_up_sub8(acc_idx, vec_base)
         tw = buffer_ops.buffer_load(tw_rsrc, sorted_safe, vec_width=1, dtype=T.f32) if bool(doweight_stage1) else arith.constant(1.0, type=T.f32)
         col_base = blk_n + warp_n_base + fx.Index(wn * WMMA_N) + lane_kgrp * fx.Index(8)
@@ -586,7 +598,7 @@ def _emit_stage1_gate_up_epilogue(
                 if bool(doweight_stage1):
                     y = y * tw
                 out_v = arith.trunc_f(out_elem_ty, y)
-                out_idx = ((tok * arith.constant(int(topk), type=T.i32) + slot) * i32_inter_in
+                out_idx = ((tok * c_topk_i32 + slot) * i32_inter_in
                            + arith.index_cast(T.i32, col))
                 buffer_ops.buffer_store(out_v, out_rsrc, out_idx)
                 scf.YieldOp([])
@@ -771,7 +783,7 @@ def _compile_stage1_dense_kernel_impl(
     off_a = alloc._align(alloc.ptr, 16)
     alloc.ptr = off_a + lds_a_elems * elem_bytes
 
-    @flyc.kernel
+    @flyc.kernel(known_block_size=[block_threads, 1, 1])
     def moe_fp16_stage1_single(
         arg_out: fx.Tensor,
         arg_x: fx.Tensor,
@@ -1159,7 +1171,7 @@ def _compile_stage2_dense_kernel_impl(
     off_a = alloc._align(alloc.ptr, 16)
     alloc.ptr = off_a + lds_a_elems * elem_bytes
 
-    @flyc.kernel
+    @flyc.kernel(known_block_size=[block_threads, 1, 1])
     def moe_fp16_stage2_single(
         arg_out: fx.Tensor,
         arg_x: fx.Tensor,
@@ -1649,7 +1661,7 @@ def _compile_stage1_mxscale_kernel_impl(
         if total_d_bytes_s1 > alloc.ptr:
             alloc.ptr = total_d_bytes_s1
 
-    @flyc.kernel
+    @flyc.kernel(known_block_size=[block_threads, 1, 1])
     def moe_mxscale_stage1_single(
         arg_out: fx.Tensor,
         arg_x: fx.Tensor,
@@ -1659,13 +1671,13 @@ def _compile_stage1_mxscale_kernel_impl(
         arg_sorted_token_ids: fx.Tensor,
         arg_expert_ids: fx.Tensor,
         arg_sorted_weights: fx.Tensor,
-        arg_max_token_ids: fx.Tensor,
+        arg_num_valid_ids: fx.Tensor,
         i32_tokens_in: fx.Int32,
         i32_inter_in: fx.Int32,
         i32_k_in: fx.Int32,
         i32_size_expert_ids_in: fx.Int32,
     ):
-        _ = (arg_max_token_ids, i32_k_in)
+        _ = i32_k_in
         if inst_prefetch:
             if arith.cmpi(arith.CmpIPredicate.eq, rocdl.wave_id(),
                           arith.constant(0, type=T.i32)):
@@ -1691,6 +1703,13 @@ def _compile_stage1_mxscale_kernel_impl(
 
         tokens_idx = arith.index_cast(T.index, i32_tokens_in)
         size_expert_ids = arith.index_cast(T.index, i32_size_expert_ids_in)
+        c_topk_i32 = arith.constant(int(topk), type=T.i32)
+        num_valid_i32 = buffer_ops.buffer_load(
+            buffer_ops.create_buffer_resource(arg_num_valid_ids, max_size=True),
+            arith.constant(0, type=T.i32),
+            vec_width=1,
+            dtype=T.i32,
+        )
         sorted_num = size_expert_ids * arith.index(int(route_tile_m))
         sorted_nbytes = sorted_num * arith.index(4)
         eid_nbytes = size_expert_ids * arith.index(4)
@@ -1712,7 +1731,9 @@ def _compile_stage1_mxscale_kernel_impl(
         eid_i32 = buffer_ops.buffer_load(eid_rsrc, arith.index_cast(T.i32, by), vec_width=1, dtype=T.i32)
         eid_ok0 = arith.cmpi(arith.CmpIPredicate.sge, eid_i32, arith.constant(0, type=T.i32))
         eid_ok1 = arith.cmpi(arith.CmpIPredicate.slt, eid_i32, arith.constant(int(experts), type=T.i32))
-        block_ok = arith.andi(eid_ok0, eid_ok1)
+        block_row_start = arith.index_cast(T.i32, by * arith.index(int(route_tile_m)))
+        block_in_valid = arith.cmpi(arith.CmpIPredicate.slt, block_row_start, num_valid_i32)
+        block_ok = arith.andi(block_in_valid, arith.andi(eid_ok0, eid_ok1))
 
         layout_thr = _make_moe_wave_layout(m_warp=m_warp, n_warp=n_warp, WAVE_SIZE=WAVE_SIZE, fx=fx)
         thr_coord = idx2crd(tx, layout_thr)
@@ -1805,19 +1826,19 @@ def _compile_stage1_mxscale_kernel_impl(
                     row = elem // arith.index(int(packed_tile_k_a))
                     col = elem % arith.index(int(packed_tile_k_a))
                     sorted_row = by * arith.index(int(tile_m)) + row
-                    row_in_route = arith.cmpi(arith.CmpIPredicate.ult, arith.index_cast(T.i32, row), arith.constant(int(route_tile_m), type=T.i32))
-                    sorted_safe = arith.select(
-                        row_in_route,
-                        arith.index_cast(T.i32, sorted_row),
-                        arith.index_cast(T.i32, by * arith.index(int(route_tile_m))),
-                    )
+                    row_i32 = arith.index_cast(T.i32, row)
+                    sorted_i32 = arith.index_cast(T.i32, sorted_row)
+                    row_in_route = arith.cmpi(arith.CmpIPredicate.ult, row_i32, arith.constant(int(route_tile_m), type=T.i32))
+                    row_in_valid = arith.cmpi(arith.CmpIPredicate.slt, sorted_i32, num_valid_i32)
+                    row_ok = arith.andi(row_in_route, row_in_valid)
+                    sorted_safe = arith.select(row_ok, sorted_i32, block_row_start)
                     fused = buffer_ops.buffer_load(sorted_rsrc, sorted_safe, vec_width=1, dtype=T.i32)
                     tok = fused & arith.constant((1 << 24) - 1, type=T.i32)
                     tok_ok = arith.cmpi(arith.CmpIPredicate.ult, tok, i32_tokens_in)
-                    ok = arith.andi(row_in_route, tok_ok)
+                    load_ok = arith.andi(row_ok, tok_ok)
                     x_idx = tok * arith.constant(K_packed_a, type=T.i32) + arith.index_cast(T.i32, k_packed_base + col)
-                    x_idx_safe = arith.select(ok, x_idx, arith.constant(0, type=T.i32))
-                    x_val = arith.select(ok, buffer_ops.buffer_load(x_rsrc, x_idx_safe, vec_width=1, dtype=T.i8), arith.constant(0, type=T.i8))
+                    x_idx_safe = arith.select(load_ok, x_idx, arith.constant(0, type=T.i32))
+                    x_val = arith.select(load_ok, buffer_ops.buffer_load(x_rsrc, x_idx_safe, vec_width=1, dtype=T.i8), arith.constant(0, type=T.i8))
                     lds_idx = row * arith.index(lds_a_stride_bytes) + col
                     v1 = vector.from_elements(T.vec(1, T.i8), [x_val])
                     vector.store(v1, target_lds, [lds_idx], alignment=1)
@@ -1831,6 +1852,8 @@ def _compile_stage1_mxscale_kernel_impl(
 
         def _precompute_a_row_indices():
             """Load sorted_ids for all tile_m rows and decode token_ids + output row indices."""
+            _tok_oob = _get_tokens_sgpr()
+            _out_oob = _get_tokens_topk_sgpr()
             for _ri in range_constexpr(int(tile_m)):
                 _sorted_row = by * fx.Index(int(tile_m)) + fx.Index(_ri)
                 _sorted_i32 = arith.index_cast(T.i32, _sorted_row)
@@ -1839,28 +1862,33 @@ def _compile_stage1_mxscale_kernel_impl(
                     fx.Int32(_ri),
                     fx.Int32(int(route_tile_m)),
                 )
+                _row_in_valid = arith.cmpi(
+                    arith.CmpIPredicate.slt,
+                    _sorted_i32,
+                    num_valid_i32,
+                )
+                _row_ok = arith.andi(_row_in_route, _row_in_valid)
                 _sorted_safe = arith.select(
-                    _row_in_route, _sorted_i32,
-                    arith.index_cast(T.i32, by * fx.Index(int(route_tile_m))),
+                    _row_ok, _sorted_i32,
+                    block_row_start,
                 )
                 _fused = buffer_ops.buffer_load(sorted_rsrc, _sorted_safe, vec_width=1, dtype=T.i32)
                 _tok = _fused & fx.Int32((1 << 24) - 1)
                 _slot = _fused >> fx.Int32(24)
-                # Clamp OOB token_ids to 0 for TDM gather safety
                 _tok_ok = arith.cmpi(arith.CmpIPredicate.ult, _tok, i32_tokens_in)
-                _tok_safe = arith.select(_tok_ok, _tok, fx.Int32(0))
+                _slot_ok0 = arith.cmpi(arith.CmpIPredicate.sge, _slot, fx.Int32(0))
+                _slot_ok1 = arith.cmpi(arith.CmpIPredicate.slt, _slot, c_topk_i32)
+                _slot_ok = arith.andi(_slot_ok0, _slot_ok1)
+                _row_tok_ok = arith.andi(_row_ok, _tok_ok)
+                _tok_safe = arith.select(_row_tok_ok, _tok, _tok_oob)
                 _tok_sgpr = rocdl.readfirstlane(T.i32, _tok_safe)
                 _a_tok_ids.append(_tok_sgpr)
-                # Output row index: tok * topk + slot (for TDM gather store).
-                # OOB rows must map to an out-of-range index so TDM's
-                # tensor_dim1 OOB check drops them instead of writing zeros
-                # on top of valid output rows.
-                _out_row = _tok_safe * fx.Int32(int(topk)) + _slot
-                _slot_ok = arith.cmpi(arith.CmpIPredicate.slt, _slot, fx.Int32(int(topk)))
-                _row_fully_ok = arith.andi(_tok_ok, _slot_ok)
+                _out_row = _tok * c_topk_i32 + _slot
+                _row_fully_ok = arith.andi(_row_tok_ok, _slot_ok)
                 _out_row_safe = arith.select(
                     _row_fully_ok, _out_row,
-                    fx.Int32(0x7FFFFFFE))  # sentinel: will OOB on tensor_dim1
+                    _out_oob,
+                )
                 _out_row_sgpr = rocdl.readfirstlane(T.i32, _out_row_safe)
                 _a_out_row_ids.append(_out_row_sgpr)
 
@@ -1868,6 +1896,7 @@ def _compile_stage1_mxscale_kernel_impl(
         _TDM_GATHER_GROUPS = (int(tile_m) + _TDM_GATHER_CHUNK - 1) // _TDM_GATHER_CHUNK
 
         _a_tokens_sgpr = None
+        _a_tokens_topk_sgpr = None
 
         def _get_tokens_sgpr():
             nonlocal _a_tokens_sgpr
@@ -1875,6 +1904,13 @@ def _compile_stage1_mxscale_kernel_impl(
                 _tok_i32 = arith.index_cast(T.i32, arith.index_cast(T.index, i32_tokens_in))
                 _a_tokens_sgpr = rocdl.readfirstlane(T.i32, _tok_i32)
             return _a_tokens_sgpr
+
+        def _get_tokens_topk_sgpr():
+            nonlocal _a_tokens_topk_sgpr
+            if _a_tokens_topk_sgpr is None:
+                _m_i32 = _get_tokens_sgpr() * c_topk_i32
+                _a_tokens_topk_sgpr = rocdl.readfirstlane(T.i32, _m_i32)
+            return _a_tokens_topk_sgpr
 
         def issue_a_load_tdm_gather(k_base, target_lds):
             """Load A data using TDM gather mode — one TDM instruction per 8 rows."""
@@ -1916,20 +1952,20 @@ def _compile_stage1_mxscale_kernel_impl(
                     row = elem // arith.index(int(scale_k_per_tile))
                     ksc = elem % arith.index(int(scale_k_per_tile))
                     sorted_row = by * arith.index(int(tile_m)) + row
-                    row_in_route = arith.cmpi(arith.CmpIPredicate.ult, arith.index_cast(T.i32, row), arith.constant(int(route_tile_m), type=T.i32))
-                    sorted_safe = arith.select(
-                        row_in_route,
-                        arith.index_cast(T.i32, sorted_row),
-                        arith.index_cast(T.i32, by * arith.index(int(route_tile_m))),
-                    )
+                    row_i32 = arith.index_cast(T.i32, row)
+                    sorted_i32 = arith.index_cast(T.i32, sorted_row)
+                    row_in_route = arith.cmpi(arith.CmpIPredicate.ult, row_i32, arith.constant(int(route_tile_m), type=T.i32))
+                    row_in_valid = arith.cmpi(arith.CmpIPredicate.slt, sorted_i32, num_valid_i32)
+                    row_ok = arith.andi(row_in_route, row_in_valid)
+                    sorted_safe = arith.select(row_ok, sorted_i32, block_row_start)
                     fused = buffer_ops.buffer_load(sorted_rsrc, sorted_safe, vec_width=1, dtype=T.i32)
                     tok = fused & arith.constant((1 << 24) - 1, type=T.i32)
                     tok_ok = arith.cmpi(arith.CmpIPredicate.ult, tok, i32_tokens_in)
-                    ok = arith.andi(row_in_route, tok_ok)
+                    load_ok = arith.andi(row_ok, tok_ok)
                     ksc_off = k_scale_base + ksc
                     sx_idx = tok * arith.constant(K_scale, type=T.i32) + arith.index_cast(T.i32, ksc_off)
-                    sx_idx_safe = arith.select(ok, sx_idx, arith.constant(0, type=T.i32))
-                    sx_val = arith.select(ok, buffer_ops.buffer_load(sx_rsrc, sx_idx_safe, vec_width=1, dtype=T.i8), arith.constant(127, type=T.i8))
+                    sx_idx_safe = arith.select(load_ok, sx_idx, arith.constant(0, type=T.i32))
+                    sx_val = arith.select(load_ok, buffer_ops.buffer_load(sx_rsrc, sx_idx_safe, vec_width=1, dtype=T.i8), arith.constant(127, type=T.i8))
                     if is_fp4:
                         lds_idx = row * arith.index(int(scale_k_per_tile)) + ksc
                     else:
@@ -2430,7 +2466,7 @@ def _compile_stage1_mxscale_kernel_impl(
                         row_indices=_ds_indices,
                         row_width=_store_tile_w,
                         tensor_dim0=warp_tile_n,
-                        tensor_dim1=_get_tokens_sgpr() * fx.Int32(int(topk)),
+                        tensor_dim1=_get_tokens_topk_sgpr(),
                         stride=N,
                         elem_bytes=elem_bytes_d_s1,
                         pad_interval=0,
@@ -2466,6 +2502,8 @@ def _compile_stage1_mxscale_kernel_impl(
                     i32_tokens_in=i32_tokens_in,
                     i32_inter_in=i32_inter_in,
                     topk=int(topk),
+                    num_valid_i32=num_valid_i32,
+                    block_row_start=block_row_start,
                     sorted_rsrc=sorted_rsrc,
                     tw_rsrc=tw_rsrc,
                     out_rsrc=out_rsrc,
@@ -2494,7 +2532,7 @@ def _compile_stage1_mxscale_kernel_impl(
         arg_sorted_token_ids: fx.Tensor,
         arg_expert_ids: fx.Tensor,
         arg_sorted_weights: fx.Tensor,
-        arg_max_token_ids: fx.Tensor,
+        arg_num_valid_ids: fx.Tensor,
         i32_tokens_in: fx.Int32,
         i32_inter_in: fx.Int32,
         i32_k_in: fx.Int32,
@@ -2509,7 +2547,7 @@ def _compile_stage1_mxscale_kernel_impl(
         gy = size_expert_ids_in
         launcher = moe_mxscale_stage1_single(
             arg_out, arg_x, arg_w, arg_scale_x, arg_scale_w,
-            arg_sorted_token_ids, arg_expert_ids, arg_sorted_weights, arg_max_token_ids,
+            arg_sorted_token_ids, arg_expert_ids, arg_sorted_weights, arg_num_valid_ids,
             i32_tokens_in, i32_inter_in, i32_k_in, i32_size_expert_ids_in,
         )
         _cluster_arg = (int(cluster_m), int(cluster_n), 1) if use_cluster else None
@@ -2714,7 +2752,7 @@ def _compile_stage2_mxscale_kernel_impl(
         wmma_m_rep=wmma_m_rep, wmma_n_rep=wmma_n_rep, WMMA_M=WMMA_M, is_fp4=is_fp4
     )
 
-    @flyc.kernel
+    @flyc.kernel(known_block_size=[block_threads, 1, 1])
     def moe_mxscale_stage2_single(
         arg_out: fx.Tensor,
         arg_x: fx.Tensor,
