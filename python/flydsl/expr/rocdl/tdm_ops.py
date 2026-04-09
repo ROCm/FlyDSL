@@ -415,7 +415,7 @@ def make_tensor_gather_descriptor(
     row_indices,
     row_width: int,
     tensor_dim0: int,
-    tensor_dim1: int,
+    tensor_dim1,
     stride: int,
     elem_bytes: int = 1,
     pad_interval: int = 0,
@@ -439,6 +439,10 @@ def make_tensor_gather_descriptor(
                        Must be a multiple of 4 bytes.
         tensor_dim0:   Full tensor dimension 0 (row width) for OOB check.
         tensor_dim1:   Full tensor dimension 1 (num rows) for OOB check.
+                       Accepts a Python int (compile-time) or an MLIR i32
+                       Value / SGPR (runtime).  Per ISA spec §4.10.3.2,
+                       row indices >= tensor_dim1 are treated as OOB, so
+                       this MUST be >= the actual number of rows (tokens).
         stride:        Stride of dim0 in elements (row stride of the global
                        matrix).
         elem_bytes:    Element size in bytes (1, 2, 4, or 8).
@@ -543,18 +547,34 @@ def make_tensor_gather_descriptor(
         )
 
     # tensor_dim0 (32 bits) packed into sgpr1[31:16] and sgpr2[15:0]
-    g1_s1 = arith.constant((tensor_dim0 & 0xFFFF) << 16, type=T.i32)
-    g1_s2 = arith.constant(
-        ((tensor_dim0 >> 16) & 0xFFFF) | ((tensor_dim1 & 0xFFFF) << 16),
-        type=T.i32,
-    )
+    # tensor_dim1 (32 bits) packed into sgpr2[31:16] and sgpr3[15:0]
+    #
+    # tensor_dim1 may be a runtime MLIR i32 value (e.g. num_tokens) —
+    # the TDM hardware uses it for OOB checking on gather row indices.
+    _td1_is_runtime = not isinstance(tensor_dim1, int)
 
-    # sgpr3: tensor_dim1_hi[15:0] | tile_dim0[31:16]
-    # tile_dim0 = row_width (in elements)
-    g1_s3 = arith.constant(
-        ((tensor_dim1 >> 16) & 0xFFFF) | (row_width << 16),
-        type=T.i32,
-    )
+    g1_s1 = arith.constant((tensor_dim0 & 0xFFFF) << 16, type=T.i32)
+
+    if _td1_is_runtime:
+        _td0_hi = arith.constant((tensor_dim0 >> 16) & 0xFFFF, type=T.i32)
+        _td1_lo = arith.andi(tensor_dim1, arith.constant(0xFFFF, type=T.i32))
+        _td1_lo_shifted = arith.shli(_td1_lo, arith.constant(16, type=T.i32))
+        g1_s2 = arith.ori(_td0_hi, _td1_lo_shifted)
+
+        _td1_hi = arith.andi(
+            arith.shrui(tensor_dim1, arith.constant(16, type=T.i32)),
+            arith.constant(0xFFFF, type=T.i32),
+        )
+        g1_s3 = arith.ori(_td1_hi, arith.constant(row_width << 16, type=T.i32))
+    else:
+        g1_s2 = arith.constant(
+            ((tensor_dim0 >> 16) & 0xFFFF) | ((tensor_dim1 & 0xFFFF) << 16),
+            type=T.i32,
+        )
+        g1_s3 = arith.constant(
+            ((tensor_dim1 >> 16) & 0xFFFF) | (row_width << 16),
+            type=T.i32,
+        )
 
     # sgpr4: tile_dim1[15:0] — in gather mode, this is the number of valid indices
     g1_s4 = arith.constant(num_indices & 0xFFFF, type=T.i32)

@@ -1863,26 +1863,31 @@ def _compile_stage1_mxscale_kernel_impl(
         _TDM_GATHER_CHUNK = 8
         _TDM_GATHER_GROUPS = (int(tile_m) + _TDM_GATHER_CHUNK - 1) // _TDM_GATHER_CHUNK
 
+        _a_tokens_sgpr = None
+
+        def _get_tokens_sgpr():
+            nonlocal _a_tokens_sgpr
+            if _a_tokens_sgpr is None:
+                _tok_i32 = arith.index_cast(T.i32, arith.index_cast(T.index, i32_tokens_in))
+                _a_tokens_sgpr = rocdl.readfirstlane(T.i32, _tok_i32)
+            return _a_tokens_sgpr
+
         def issue_a_load_tdm_gather(k_base, target_lds):
             """Load A data using TDM gather mode — one TDM instruction per 8 rows."""
             k_packed_base = k_base if PACK_FACTOR_A == 1 else k_base // fx.Index(PACK_FACTOR_A)
+            _tokens_dim1 = _get_tokens_sgpr()
             for _gi in range_constexpr(_TDM_GATHER_GROUPS):
                 _start = _gi * _TDM_GATHER_CHUNK
                 _cnt = min(_TDM_GATHER_CHUNK, int(tile_m) - _start)
                 _row_indices = _a_tok_ids[_start:_start + _cnt]
                 _lds_off = fx.Index(_start * lds_a_stride_bytes)
-                # tensor_dim0 = full row width for OOB, tensor_dim1 = num tokens
-                # stride = row stride in elements
-                # Note: tokens is runtime, use a large compile-time bound
-                _tokens_bound = arith.index_cast(T.i32, arith.index_cast(T.index, i32_tokens_in))
-                _tokens_bound_sgpr = rocdl.readfirstlane(T.i32, _tokens_bound)
                 desc = tdm_ops.make_tensor_gather_descriptor(
                     global_ptr=arg_x,
                     lds_memref=target_lds,
                     row_indices=_row_indices,
                     row_width=int(packed_tile_k_a),
                     tensor_dim0=K_packed_a,
-                    tensor_dim1=K_packed_a,  # just needs to be >= max row_index; large enough
+                    tensor_dim1=_tokens_dim1,
                     stride=K_packed_a,
                     elem_bytes=1,
                     pad_interval=int(packed_tile_k_a) if LDS_PAD_A_BYTES > 0 else 0,
@@ -1892,8 +1897,6 @@ def _compile_stage1_mxscale_kernel_impl(
                     global_byte_offset=k_packed_base,
                 )
                 tdm_ops.tensor_load_gather(desc)
-                # Serialize TDM gathers to avoid AM simulator tracker overflow
-                tdm_ops.tensor_wait(0)
 
         def make_desc_as(k_base):
             return k_base / arith.index(SCALE_BLOCK)
@@ -2212,6 +2215,11 @@ def _compile_stage1_mxscale_kernel_impl(
 
             def _issue_scalar_loads(k_base, buf_idx):
                 if _use_tdm_gather_a:
+                    # Wait for any outstanding B TDM loads before issuing
+                    # A gather — AM simulator requires no concurrent TDM
+                    # 2D + gather in-flight.
+                    tdm_ops.tensor_wait(0)
+                    gpu.barrier()
                     issue_a_load_tdm_gather(k_base, lds_ag_bufs[buf_idx])
                 else:
                     issue_a_load(make_desc_a(k_base), lds_ag_bufs[buf_idx])
