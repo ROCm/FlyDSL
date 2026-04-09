@@ -792,38 +792,22 @@ def compile_pa_decode_ps(
                 # (issued early to overlap with QK MFMA for memory latency hiding)
                 if per_token_kv:
                     # scale tensor layout: [num_blocks, num_kv_heads, kv_block_size, 1] in f32
-                    # stride_ks_block = key_scale.stride(0), stride_ks_head = key_scale.stride(1)
+                    # Token dim stride=1 (contiguous f32).  MFMA 16x16x32 row `rowid`
+                    # maps to tokens [rowid*4 .. rowid*4+3], which are contiguous, so each
+                    # thread can directly vector-load its 4 scale values (buffer_load_dwordx4)
+                    # instead of scalar-load + 4× ds_bpermute broadcast.
                     scale_block_base = phys_block * stride_ks_block + kv_h * stride_ks_head
-                    # Each lane loads one token scale from the 16-token strip for this td,
-                    # then row-local ds_bpermute reconstructs the 4-token vector needed by MFMA.
-                    _scale_tok_base_pt = tile_token_offset_i32 + _k_tok_thread_base
-                    _scale_src_lane_base = rowid * arith.constant(20, type=T.i32)
+                    _scale_tok_base_vec = (tile_token_offset_i32
+                                          + warp_id * arith.constant(TOKENS_PER_WARP, type=T.i32)
+                                          + rowid * c_four)
                     k_scale_vecs = []
                     v_scale_vecs = []
                     for td in range_constexpr(TLOOP):
-                        tok_off = _scale_tok_base_pt + arith.constant(td * MFMA_N, type=T.i32)
-                        k_scale_lane = buffer_ops.buffer_load(
-                            ks_rsrc, scale_block_base + tok_off, vec_width=1, dtype=T.f32
-                        )
-                        v_scale_lane = buffer_ops.buffer_load(
-                            vs_rsrc, scale_block_base + tok_off, vec_width=1, dtype=T.f32
-                        )
-                        k_scale_i32 = arith.bitcast(T.i32, k_scale_lane)
-                        v_scale_i32 = arith.bitcast(T.i32, v_scale_lane)
-                        k_scale_vals = []
-                        v_scale_vals = []
-                        for i in range_constexpr(4):
-                            bcast_addr = (_scale_src_lane_base + arith.constant(i, type=T.i32)) * c_four
-                            sk_i32 = rocdl.ds_bpermute(
-                                T.i32, arith.unwrap(bcast_addr), arith.unwrap(k_scale_i32)
-                            )
-                            sv_i32 = rocdl.ds_bpermute(
-                                T.i32, arith.unwrap(bcast_addr), arith.unwrap(v_scale_i32)
-                            )
-                            k_scale_vals.append(arith.bitcast(T.f32, sk_i32))
-                            v_scale_vals.append(arith.bitcast(T.f32, sv_i32))
-                        k_scale_vecs.append(vector.from_elements(T.f32x4, k_scale_vals))
-                        v_scale_vecs.append(vector.from_elements(T.f32x4, v_scale_vals))
+                        tok_off_vec = scale_block_base + _scale_tok_base_vec + arith.constant(td * MFMA_N, type=T.i32)
+                        k_scale_vecs.append(buffer_ops.buffer_load(
+                            ks_rsrc, tok_off_vec, vec_width=4, dtype=T.f32))
+                        v_scale_vecs.append(buffer_ops.buffer_load(
+                            vs_rsrc, tok_off_vec, vec_width=4, dtype=T.f32))
                 else:
                     v_scale_vecs = None
 
