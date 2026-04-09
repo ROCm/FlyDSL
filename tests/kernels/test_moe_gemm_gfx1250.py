@@ -2397,6 +2397,340 @@ def test_moe_stage2_standalone(
     )
 
 
+# ── Benchmark Mode ─────────────────────────────────────────────────────────
+# Integrated from bench_moe_gfx1250.py: sweeps model configs × dtypes × token counts.
+
+BENCH_WARMUP = 5
+BENCH_ITERS = 20
+
+BENCH_MODEL_CONFIGS = [
+    # name,      model_dim, inter_dim, experts, topk
+    ("DeepSeek-TP", 7168,    256,   257,  9),
+    ("DeepSeek-EP", 7168,   2048,    32,  8),
+    ("GPToss",      2880,   2880,   128,  4),
+]
+
+BENCH_DTYPE_TILE_MAP = {
+    # dtype: (tile_m, tile_n_s1, tile_k_s1, tile_n_s2, tile_k_s2)
+    "fp4":  (32, 64, 128, 64, 128),
+    "fp8":  (32, 64, 128, 64, 128),
+    "a8w4": (32, 64, 128, 64, 128),
+    "fp16": (32, 64,  64, 64,  64),
+    "bf16": (32, 64,  64, 64,  64),
+}
+
+BENCH_DEFAULT_TOKEN_SWEEP = [1, 4, 8, 32, 64, 128, 256]
+_BENCH_SCALE_GROUP = 32
+
+
+def _bench_dtype_bpe(in_dtype):
+    """Return (a_bpe, w_bpe, w_scale_bpg) for bandwidth accounting."""
+    if in_dtype == "fp4":
+        return 0.5, 0.5, 1
+    if in_dtype == "a8w4":
+        return 1, 0.5, 1
+    if in_dtype == "fp8":
+        return 1, 1, 1
+    if in_dtype in ("fp16", "bf16"):
+        return 2, 2, 0
+    return 1, 1, 1
+
+
+def _bench_bytes_moved_stage1(tokens, topk, model_dim, inter_dim, experts, in_dtype):
+    a_bpe, w_bpe, w_scale_bpg = _bench_dtype_bpe(in_dtype)
+    aE = min(tokens * topk, experts)
+    b = 0
+    b += tokens * model_dim * a_bpe
+    b += aE * (2 * inter_dim) * model_dim * w_bpe
+    b += aE * (2 * inter_dim) * math.ceil(model_dim / _BENCH_SCALE_GROUP) * w_scale_bpg
+    b += tokens * topk * inter_dim * 2
+    return int(b)
+
+
+def _bench_bytes_moved_stage2(tokens, topk, model_dim, inter_dim, experts, in_dtype):
+    a_bpe, w_bpe, w_scale_bpg = _bench_dtype_bpe(in_dtype)
+    aE = min(tokens * topk, experts)
+    b = 0
+    b += tokens * topk * inter_dim * a_bpe
+    b += aE * model_dim * inter_dim * w_bpe
+    b += aE * model_dim * math.ceil(inter_dim / _BENCH_SCALE_GROUP) * w_scale_bpg
+    b += tokens * topk * model_dim * 2
+    return int(b)
+
+
+def _bench_setup_data(tokens, model_dim, inter_dim, experts, topk, tile_m, seed=42):
+    device = torch.device("cuda")
+    torch.manual_seed(seed)
+    s = 0.2
+    x_fp32 = torch.randn((tokens, model_dim), device=device, dtype=torch.float32) * s
+    w1_fp32 = torch.randn((experts, 2 * inter_dim, model_dim), device=device, dtype=torch.float32) * s
+    w2_fp32 = torch.randn((experts, model_dim, inter_dim), device=device, dtype=torch.float32) * (s / math.sqrt(inter_dim))
+    score = torch.rand((tokens, experts), device=device, dtype=torch.float32)
+    topk_vals, topk_ids = torch.topk(score, k=topk, dim=1)
+    topk_weights = torch.softmax(topk_vals, dim=1).to(torch.float32)
+    routing = build_routing_buffers(
+        topk_ids=topk_ids, topk_weights=topk_weights,
+        experts=experts, model_dim=model_dim, tile_m=tile_m,
+    )
+    return x_fp32, w1_fp32, w2_fp32, topk_ids, topk_weights, routing
+
+
+def _bench_prepare_a2(out1_fp16, tokens, topk, inter_dim, in_dtype):
+    if in_dtype == "fp4":
+        f32 = out1_fp16.to(torch.float32)
+        a2_fp4, a2_scale_raw, _ = fp4_utils.per_1x32_f4_quant(f32.view(-1, inter_dim))
+        a2_q = a2_fp4.view(torch.uint8).view(tokens, topk, inter_dim // 2)
+        a2_scale = a2_scale_raw.view(torch.uint8).view(tokens, topk, inter_dim // 32)
+    elif in_dtype in ("fp8", "a8w4"):
+        a2_q, a2_scale = _per_1x32_fp8_quant(out1_fp16.to(torch.float32))
+    elif in_dtype in ("fp16", "bf16"):
+        a2_q = out1_fp16
+        a2_scale = None
+    else:
+        raise ValueError(f"Unsupported bench in_dtype={in_dtype}")
+    return a2_q, a2_scale
+
+
+def _bench_print_banner(text):
+    print(f"\n{'=' * 110}")
+    print(f"  {text}")
+    print(f"{'=' * 110}")
+
+
+def _bench_print_stage_header():
+    print(f"{'Tokens':>7} {'M_eff':>7} {'Latency(us)':>12} {'TFLOPS':>9} "
+          f"{'BW(TB/s)':>10} {'Util%':>7} {'Status':>8}")
+    print("-" * 110)
+
+
+def _bench_print_stage_row(tokens, m_eff, us, tflops, tbps, util_pct, status):
+    print(f"{tokens:>7} {m_eff:>7} {us:>10.1f}   {tflops:>8.2f} "
+          f"{tbps:>9.3f}  {util_pct:>6.1f}% {status:>8}")
+
+
+def bench_config(name, model_dim, inter_dim, experts, topk,
+                 in_dtype, token_list, check_ref, peak_tflops,
+                 warmup=BENCH_WARMUP, iters=BENCH_ITERS,
+                 use_tdm_store=False, inst_prefetch=False,
+                 wave_specialized_tdm=False):
+    """Benchmark a single (model, dtype) configuration across all token counts."""
+    tiles = BENCH_DTYPE_TILE_MAP[in_dtype]
+    tile_m, tile_n1, tile_k1, tile_n2, tile_k2 = tiles
+
+    _bench_print_banner(f"{name}  |  {in_dtype}  |  dim={model_dim}  inter={inter_dim}  E={experts}  K={topk}")
+    print(f"  Tiles: stage1=({tile_m},{tile_n1},{tile_k1})  stage2=({tile_m},{tile_n2},{tile_k2})")
+    print(f"  Warmup={warmup}  Iters={iters}  RefCheck={'ON' if check_ref else 'OFF'}")
+    print(
+        f"  Knobs: use_tdm_store={bool(use_tdm_store)}  "
+        f"inst_prefetch={bool(inst_prefetch)}  "
+        f"wave_specialized_tdm={bool(wave_specialized_tdm)}"
+    )
+    if peak_tflops > 0:
+        print(f"  Peak compute reference: {peak_tflops:.0f} TFLOPS")
+
+    # ── Stage 1 ──
+    print(f"\n  ── Stage 1 (gate+up: [{model_dim}] -> [{2*inter_dim}]) ──")
+    _bench_print_stage_header()
+
+    s1_results = []
+    for tok in token_list:
+        torch.cuda.empty_cache()
+        data_pack = _bench_setup_data(tok, model_dim, inter_dim, experts, topk, tile_m)
+        x, w1, w2, ids, wts, routing = data_pack
+        try:
+            out1, us1 = run_moe_stage1(
+                tokens=tok, model_dim=model_dim, inter_dim=inter_dim,
+                experts=experts, topk=topk, in_dtype=in_dtype, group_size=-1,
+                tile_m=tile_m, tile_n=tile_n1, tile_k=tile_k1,
+                doweight_stage1=False, seed=0,
+                num_iters=iters, num_warmup=warmup,
+                x_fp32_in=x, w1_fp32_in=w1, w2_fp32_in=w2,
+                topk_ids_in=ids, topk_weights_in=wts, routing_in=routing,
+                return_outputs=True, skip_ref=(not check_ref),
+                use_tdm_store=bool(use_tdm_store),
+                inst_prefetch=bool(inst_prefetch),
+                wave_specialized_tdm=bool(wave_specialized_tdm),
+            )
+            status = "PASS" if check_ref else "OK"
+        except Exception as e:
+            status = "FAIL"
+            us1 = 0.0
+            out1 = torch.zeros((tok, topk, inter_dim), device="cuda", dtype=torch.float16)
+            print(f"  [{type(e).__name__}] tokens={tok}: {e}")
+
+        m_eff = tok * topk
+        flops = 2 * tok * topk * (2 * inter_dim) * model_dim
+        tflops = flops / (us1 / 1e6) / 1e12 if us1 > 0 else 0
+        bm = _bench_bytes_moved_stage1(tok, topk, model_dim, inter_dim, experts, in_dtype)
+        tbps = bm / 1e12 / (us1 / 1e6) if us1 > 0 else 0
+        util = (tflops / peak_tflops * 100) if (peak_tflops > 0 and tflops > 0) else 0
+
+        _bench_print_stage_row(tok, m_eff, us1, tflops, tbps, util, status)
+        s1_results.append((tok, m_eff, us1, tflops, tbps, status, out1))
+
+    # ── Stage 2 atomic ──
+    print(f"\n  ── Stage 2 atomic (down: [{inter_dim}] -> [{model_dim}]) ──")
+    _bench_print_stage_header()
+
+    for tok, m_eff, _, _, _, s1_status, out1 in s1_results:
+        torch.cuda.empty_cache()
+        data_pack = _bench_setup_data(tok, model_dim, inter_dim, experts, topk, tile_m)
+        x, w1, w2, ids, wts, routing = data_pack
+        a2_q, a2_scale = _bench_prepare_a2(out1, tok, topk, inter_dim, in_dtype)
+        try:
+            _, us2 = run_moe_stage2(
+                tokens=tok, model_dim=model_dim, inter_dim=inter_dim,
+                experts=experts, topk=topk, in_dtype=in_dtype, out_dtype="f16",
+                group_size=-1, tile_m=tile_m, tile_n=tile_n2, tile_k=tile_k2,
+                doweight_stage1=False, seed=0,
+                num_iters=iters, num_warmup=warmup,
+                x_fp32_in=x, w1_fp32_in=w1, w2_fp32_in=w2,
+                topk_ids_in=ids, topk_weights_in=wts, routing_in=routing,
+                a2_fp8_in=a2_q, a2_scale_in=a2_scale,
+                return_outputs=True, skip_ref=(not check_ref),
+                use_reduce=False,
+                use_tdm_store=bool(use_tdm_store),
+                inst_prefetch=bool(inst_prefetch),
+                wave_specialized_tdm=bool(wave_specialized_tdm),
+            )
+            status = "PASS" if check_ref else "OK"
+        except Exception as e:
+            status = "FAIL"
+            us2 = 0.0
+            print(f"  [{type(e).__name__}] tokens={tok}: {e}")
+
+        flops = 2 * tok * topk * model_dim * inter_dim
+        tflops = flops / (us2 / 1e6) / 1e12 if us2 > 0 else 0
+        bm = _bench_bytes_moved_stage2(tok, topk, model_dim, inter_dim, experts, in_dtype)
+        tbps = bm / 1e12 / (us2 / 1e6) if us2 > 0 else 0
+        util = (tflops / peak_tflops * 100) if (peak_tflops > 0 and tflops > 0) else 0
+
+        _bench_print_stage_row(tok, m_eff, us2, tflops, tbps, util, status)
+
+    # ── Stage 2 reduce ──
+    print(f"\n  ── Stage 2 reduce (down: [{inter_dim}] -> [{model_dim}]) ──")
+    _bench_print_stage_header()
+
+    for tok, m_eff, _, _, _, s1_status, out1 in s1_results:
+        torch.cuda.empty_cache()
+        data_pack = _bench_setup_data(tok, model_dim, inter_dim, experts, topk, tile_m)
+        x, w1, w2, ids, wts, routing = data_pack
+        a2_q, a2_scale = _bench_prepare_a2(out1, tok, topk, inter_dim, in_dtype)
+        try:
+            _, us2r = run_moe_stage2(
+                tokens=tok, model_dim=model_dim, inter_dim=inter_dim,
+                experts=experts, topk=topk, in_dtype=in_dtype, out_dtype="f16",
+                group_size=-1, tile_m=tile_m, tile_n=tile_n2, tile_k=tile_k2,
+                doweight_stage1=False, seed=0,
+                num_iters=iters, num_warmup=warmup,
+                x_fp32_in=x, w1_fp32_in=w1, w2_fp32_in=w2,
+                topk_ids_in=ids, topk_weights_in=wts, routing_in=routing,
+                a2_fp8_in=a2_q, a2_scale_in=a2_scale,
+                return_outputs=True, skip_ref=(not check_ref),
+                use_reduce=True,
+                use_tdm_store=bool(use_tdm_store),
+                inst_prefetch=bool(inst_prefetch),
+                wave_specialized_tdm=bool(wave_specialized_tdm),
+            )
+            status = "PASS" if check_ref else "OK"
+        except Exception as e:
+            status = "FAIL"
+            us2r = 0.0
+            print(f"  [{type(e).__name__}] tokens={tok}: {e}")
+
+        flops = 2 * tok * topk * model_dim * inter_dim
+        tflops = flops / (us2r / 1e6) / 1e12 if us2r > 0 else 0
+        bm = _bench_bytes_moved_stage2(tok, topk, model_dim, inter_dim, experts, in_dtype)
+        tbps = bm / 1e12 / (us2r / 1e6) if us2r > 0 else 0
+        util = (tflops / peak_tflops * 100) if (peak_tflops > 0 and tflops > 0) else 0
+
+        _bench_print_stage_row(tok, m_eff, us2r, tflops, tbps, util, status)
+
+    del s1_results
+    torch.cuda.empty_cache()
+
+
+def bench_main(args):
+    """Entry point for --bench mode: sweep model configs x dtypes x token counts."""
+    os.environ["FLYDSL_RUNTIME_ENABLE_CACHE"] = "1"
+
+    warmup = args.bench_warmup
+    iters = args.bench_iters
+
+    timing_mode = args.bench_timing
+    if timing_mode == "events":
+        os.environ["MOE_TIMING"] = "events"
+        os.environ["MOE_FP8_SAFE_PERF"] = "1"
+        os.environ["MOE_FP4_SAFE_PERF"] = "1"
+        os.environ["MOE_FP16_SAFE_PERF"] = "1"
+    elif timing_mode == "serial":
+        os.environ.pop("MOE_TIMING", None)
+        os.environ["MOE_FP8_SAFE_PERF"] = "1"
+        os.environ["MOE_FP4_SAFE_PERF"] = "1"
+        os.environ["MOE_FP16_SAFE_PERF"] = "1"
+
+    dtypes = args.bench_dtype.split(",") if args.bench_dtype else list(BENCH_DTYPE_TILE_MAP.keys())
+    token_list = (
+        [int(t) for t in args.bench_tokens.split(",")]
+        if args.bench_tokens
+        else BENCH_DEFAULT_TOKEN_SWEEP
+    )
+    check_ref = not args.bench_no_ref
+
+    timing_label = {"events": "CUDA-Events", "serial": "Serial(sync)", "both": "Both"}[timing_mode]
+    print("=" * 110)
+    print("  AMD gfx1250 MOE GEMM Kernel Performance Benchmark")
+    print(f"  PyTorch {torch.__version__}")
+    print(f"  Device:  {torch.cuda.get_device_name(0)}")
+    props = torch.cuda.get_device_properties(0)
+    print(f"  CUs:     {props.multi_processor_count}")
+    print(f"  Memory:  {props.total_memory / 1024**3:.0f} GB")
+    print(f"  Warmup={warmup}  Iters={iters}  RefCheck={'ON' if check_ref else 'OFF'}  Timing={timing_label}")
+    print(f"  Dtypes:  {dtypes}")
+    print(f"  Tokens:  {token_list}")
+    print("=" * 110)
+
+    def _set_timing_env(mode):
+        if mode == "events":
+            os.environ["MOE_TIMING"] = "events"
+        else:
+            os.environ.pop("MOE_TIMING", None)
+        os.environ["MOE_FP8_SAFE_PERF"] = "1"
+        os.environ["MOE_FP4_SAFE_PERF"] = "1"
+        os.environ["MOE_FP16_SAFE_PERF"] = "1"
+
+    modes = ["events", "serial"] if timing_mode == "both" else [timing_mode]
+
+    t_start = time.time()
+    for mode in modes:
+        _set_timing_env(mode)
+        if timing_mode == "both":
+            mode_label = "CUDA-Events" if mode == "events" else "Serial(sync)"
+            _bench_print_banner(f"Timing mode: {mode_label}")
+        for cfg_name, mdim, idim, exp, topk in BENCH_MODEL_CONFIGS:
+            if args.bench_config and args.bench_config not in cfg_name:
+                continue
+            for dt in dtypes:
+                if dt not in BENCH_DTYPE_TILE_MAP:
+                    print(f"\n  [SKIP] Unknown dtype: {dt}")
+                    continue
+                try:
+                    bench_config(
+                        cfg_name, mdim, idim, exp, topk,
+                        dt, token_list, check_ref, args.bench_peak_tflops,
+                        warmup=warmup, iters=iters,
+                        use_tdm_store=bool(args.use_tdm_store),
+                        inst_prefetch=bool(args.inst_prefetch),
+                        wave_specialized_tdm=bool(args.wave_specialized_tdm),
+                    )
+                except Exception as e:
+                    print(f"\n  [ERROR] {cfg_name}/{dt}: {e}")
+                    import traceback; traceback.print_exc()
+
+    elapsed = time.time() - t_start
+    _bench_print_banner(f"Done in {elapsed:.1f}s")
+
+
 if __name__ == "__main__":
     torch.set_default_device("cuda")
     # CLI (mirrors key knobs from aiter/op_tests/test_moe_2stage.py, stage1 subset)
@@ -2534,7 +2868,35 @@ if __name__ == "__main__":
         help="Debug switch: force single expert by overriding experts=1 and topk=min(topk,1).",
     )
 
+    # ── Benchmark sweep mode (--bench) ──
+    bench_group = parser.add_argument_group("benchmark sweep", "Options for --bench mode (sweep model configs × dtypes × token counts)")
+    bench_group.add_argument("--bench", action="store_true", default=False,
+                             help="Run benchmark sweep mode instead of normal test mode.")
+    bench_group.add_argument("--bench-dtype", type=str, default=None,
+                             help="Comma-separated dtypes for bench (default: all of fp4,fp8,a8w4,fp16,bf16).")
+    bench_group.add_argument("--bench-tokens", type=str, default=None,
+                             help="Comma-separated token counts for bench (default: 1,4,8,32,64,128,256).")
+    bench_group.add_argument("--bench-config", type=str, default=None,
+                             help="Config name filter for bench (DeepSeek-TP, DeepSeek-EP, GPToss).")
+    bench_group.add_argument("--bench-no-ref", action="store_true", default=False,
+                             help="Skip correctness reference check in bench mode (pure perf).")
+    bench_group.add_argument("--bench-warmup", type=int, default=BENCH_WARMUP,
+                             help=f"Warmup iterations for bench (default: {BENCH_WARMUP}).")
+    bench_group.add_argument("--bench-iters", type=int, default=BENCH_ITERS,
+                             help=f"Measurement iterations for bench (default: {BENCH_ITERS}).")
+    bench_group.add_argument("--bench-peak-tflops", type=float, default=0,
+                             help="Peak TFLOPS for utilization calculation in bench mode.")
+    bench_group.add_argument("--bench-timing", type=str, default="events",
+                             choices=["events", "serial", "both"],
+                             help="Timing method for bench: 'events' (CUDA events, default), "
+                                  "'serial' (host time + sync), 'both'.")
+
     args = parser.parse_args()
+
+    # ── Bench sweep mode: run and exit ──
+    if args.bench:
+        bench_main(args)
+        sys.exit(0)
 
     model_dim, inter_dim = args.dim
 
