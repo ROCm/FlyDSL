@@ -1796,6 +1796,9 @@ def _compile_stage1_mxscale_kernel_impl(
         def make_desc_a(k_base):
             return k_base / arith.index(PACK_FACTOR_A)
 
+        # TDM gather for A data
+        _use_tdm_gather_a = True
+
         def issue_a_load(k_packed_base, target_lds):
             total = int(tile_m * packed_tile_k_a)
             rounds = (total + block_threads - 1) // block_threads
@@ -1824,6 +1827,73 @@ def _compile_stage1_mxscale_kernel_impl(
                     v1 = vector.from_elements(T.vec(1, T.i8), [x_val])
                     vector.store(v1, target_lds, [lds_idx], alignment=1)
                     scf.YieldOp([])
+
+        # Pre-compute token row indices for ALL tile_m rows (once, outside K-loop).
+        # These are loaded from sorted_ids and decoded.
+        # Each entry is the token_id (row index in X matrix).
+        _a_tok_ids = []  # will hold tile_m i32 SGPR values
+
+        def _precompute_a_row_indices():
+            """Load sorted_ids for all tile_m rows and decode token_ids.
+
+            OOB token_ids (>= tokens) are clamped to 0 to prevent TDM
+            gather from accessing out-of-bounds global memory.
+            """
+            for _ri in range_constexpr(int(tile_m)):
+                _sorted_row = by * fx.Index(int(tile_m)) + fx.Index(_ri)
+                _sorted_i32 = arith.index_cast(T.i32, _sorted_row)
+                _row_in_route = arith.cmpi(
+                    arith.CmpIPredicate.ult,
+                    fx.Int32(_ri),
+                    fx.Int32(int(route_tile_m)),
+                )
+                _sorted_safe = arith.select(
+                    _row_in_route, _sorted_i32,
+                    arith.index_cast(T.i32, by * fx.Index(int(route_tile_m))),
+                )
+                _fused = buffer_ops.buffer_load(sorted_rsrc, _sorted_safe, vec_width=1, dtype=T.i32)
+                _tok = _fused & fx.Int32((1 << 24) - 1)
+                # Clamp OOB token_ids to 0 (safe row) — TDM does not
+                # provide per-row OOB checking, only tensor-level.
+                _tok_ok = arith.cmpi(arith.CmpIPredicate.ult, _tok, i32_tokens_in)
+                _tok_safe = arith.select(_tok_ok, _tok, fx.Int32(0))
+                _tok_sgpr = rocdl.readfirstlane(T.i32, _tok_safe)
+                _a_tok_ids.append(_tok_sgpr)
+
+        _TDM_GATHER_CHUNK = 8
+        _TDM_GATHER_GROUPS = (int(tile_m) + _TDM_GATHER_CHUNK - 1) // _TDM_GATHER_CHUNK
+
+        def issue_a_load_tdm_gather(k_base, target_lds):
+            """Load A data using TDM gather mode — one TDM instruction per 8 rows."""
+            k_packed_base = k_base if PACK_FACTOR_A == 1 else k_base // fx.Index(PACK_FACTOR_A)
+            for _gi in range_constexpr(_TDM_GATHER_GROUPS):
+                _start = _gi * _TDM_GATHER_CHUNK
+                _cnt = min(_TDM_GATHER_CHUNK, int(tile_m) - _start)
+                _row_indices = _a_tok_ids[_start:_start + _cnt]
+                _lds_off = fx.Index(_start * lds_a_stride_bytes)
+                # tensor_dim0 = full row width for OOB, tensor_dim1 = num tokens
+                # stride = row stride in elements
+                # Note: tokens is runtime, use a large compile-time bound
+                _tokens_bound = arith.index_cast(T.i32, arith.index_cast(T.index, i32_tokens_in))
+                _tokens_bound_sgpr = rocdl.readfirstlane(T.i32, _tokens_bound)
+                desc = tdm_ops.make_tensor_gather_descriptor(
+                    global_ptr=arg_x,
+                    lds_memref=target_lds,
+                    row_indices=_row_indices,
+                    row_width=int(packed_tile_k_a),
+                    tensor_dim0=K_packed_a,
+                    tensor_dim1=K_packed_a,  # just needs to be >= max row_index; large enough
+                    stride=K_packed_a,
+                    elem_bytes=1,
+                    pad_interval=int(packed_tile_k_a) if LDS_PAD_A_BYTES > 0 else 0,
+                    pad_amount=LDS_PAD_A_BYTES if LDS_PAD_A_BYTES > 0 else 0,
+                    index_size=32,
+                    lds_byte_offset=_lds_off,
+                    global_byte_offset=k_packed_base,
+                )
+                tdm_ops.tensor_load_gather(desc)
+                # Serialize TDM gathers to avoid AM simulator tracker overflow
+                tdm_ops.tensor_wait(0)
 
         def make_desc_as(k_base):
             return k_base / arith.index(SCALE_BLOCK)
@@ -2065,6 +2135,8 @@ def _compile_stage1_mxscale_kernel_impl(
 
         _if_blk = scf.IfOp(block_ok)
         with ir.InsertionPoint(_if_blk.then_block):
+            if _use_tdm_gather_a:
+                _precompute_a_row_indices()
             a_data_bases = _precompute_a_data_bases()
             b_data_bases = _precompute_b_data_bases()
             as_bases = _precompute_a_scale_lane_bases()
@@ -2139,7 +2211,10 @@ def _compile_stage1_mxscale_kernel_impl(
                         make_desc_bs(lds_bsu_bufs[buf_idx], _n_up, k_base))
 
             def _issue_scalar_loads(k_base, buf_idx):
-                issue_a_load(make_desc_a(k_base), lds_ag_bufs[buf_idx])
+                if _use_tdm_gather_a:
+                    issue_a_load_tdm_gather(k_base, lds_ag_bufs[buf_idx])
+                else:
+                    issue_a_load(make_desc_a(k_base), lds_ag_bufs[buf_idx])
                 issue_as_load(make_desc_as(k_base), lds_as_bufs[buf_idx])
 
             def _issue_all_loads(k_base, buf_idx):

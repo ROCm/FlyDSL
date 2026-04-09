@@ -40,8 +40,11 @@ from ..utils.arith import ArithValue as _ArithValue
 
 __all__ = [
     "TDMDescriptor2D",
+    "TDMGatherDescriptor",
     "make_tensor_descriptor_2d",
+    "make_tensor_gather_descriptor",
     "tensor_load_2d",
+    "tensor_load_gather",
     "tensor_store_2d",
     "tensor_wait",
     "compute_padding_encoding",
@@ -130,6 +133,22 @@ class TDMDescriptor2D:
     """Holds constructed GROUP0 and GROUP1 vectors for tensor_load_to_lds_d2."""
     dgroup0: object  # vector<4xi32> MLIR Value
     dgroup1: object  # vector<8xi32> MLIR Value
+
+
+@dataclass
+class TDMGatherDescriptor:
+    """Holds GROUP0, GROUP1, GROUP2, GROUP3 for TDM gather mode.
+
+    In gather mode, groups 2 and 3 carry row indices instead of
+    higher-dimension tensor metadata.
+
+    - 32-bit index mode: up to 8 row indices (4 per group)
+    - 16-bit index mode: up to 16 row indices (8 per group)
+    """
+    dgroup0: object  # vector<4xi32> MLIR Value
+    dgroup1: object  # vector<8xi32> MLIR Value
+    dgroup2: object  # vector<4xi32> MLIR Value — row indices [0..3] or [0..7]
+    dgroup3: object  # vector<4xi32> MLIR Value — row indices [4..7] or [8..15]
 
 
 # ---------------------------------------------------------------------------
@@ -388,6 +407,232 @@ def make_tensor_descriptor_2d(
     )
 
     return TDMDescriptor2D(dgroup0=dgroup0, dgroup1=dgroup1)
+
+
+def make_tensor_gather_descriptor(
+    global_ptr,
+    lds_memref,
+    row_indices,
+    row_width: int,
+    tensor_dim0: int,
+    tensor_dim1: int,
+    stride: int,
+    elem_bytes: int = 1,
+    pad_interval: int = 0,
+    pad_amount: int = 0,
+    index_size: int = 32,
+    lds_byte_offset=None,
+    global_byte_offset=None,
+    workgroup_mask: Union[int, "ir.Value"] = 0,
+) -> TDMGatherDescriptor:
+    """Build a TDM gather descriptor for loading arbitrary rows from global to LDS.
+
+    In gather mode the TDM fetches rows specified by explicit indices in
+    descriptor groups 2 and 3, rather than iterating over contiguous dim1.
+
+    Args:
+        global_ptr:    The global tensor pointer (fx.Tensor).
+        lds_memref:    The LDS memref base (SmemAllocator base).
+        row_indices:   List of row index MLIR i32 Values.  Max 8 for 32-bit
+                       mode, max 16 for 16-bit mode.
+        row_width:     Width of each row in data_size elements (= tile_dim0).
+                       Must be a multiple of 4 bytes.
+        tensor_dim0:   Full tensor dimension 0 (row width) for OOB check.
+        tensor_dim1:   Full tensor dimension 1 (num rows) for OOB check.
+        stride:        Stride of dim0 in elements (row stride of the global
+                       matrix).
+        elem_bytes:    Element size in bytes (1, 2, 4, or 8).
+        pad_interval:  Padding interval in elements (0 to disable).
+        pad_amount:    Padding amount in elements (0 to disable).
+        index_size:    Row index width in bits (16 or 32).
+        lds_byte_offset: Additional LDS byte offset.
+        global_byte_offset: Additional global memory byte offset (MLIR index).
+                           Used for K-tile column offsets.
+        workgroup_mask: Multicast mask.
+
+    Returns:
+        TDMGatherDescriptor with groups 0-3 ready for tensor_load_gather.
+    """
+    from ..._mlir.dialects import fly as _fly_d
+
+    assert index_size in (16, 32), f"index_size must be 16 or 32, got {index_size}"
+    max_indices = 8 if index_size == 32 else 16
+    num_indices = len(row_indices)
+    assert 0 < num_indices <= max_indices, (
+        f"row_indices length {num_indices} exceeds max {max_indices} for {index_size}-bit mode"
+    )
+    assert row_width * elem_bytes % 4 == 0, (
+        f"row_width * elem_bytes must be multiple of 4, got {row_width * elem_bytes}"
+    )
+
+    # Global base address
+    glb_ptr_type = ir.Type.parse("!llvm.ptr<1>")
+    i64 = ir.IntegerType.get_signless(64)
+    a_raw = global_ptr.__fly_values__()[0]
+    glb_ptr = _fly_d.extract_aligned_pointer_as_index(glb_ptr_type, a_raw)
+    glb_base_i64 = _ArithValue(llvm_dialect.ptrtoint(i64, glb_ptr))
+    if global_byte_offset is not None:
+        glb_byte_off_i64 = arith.index_cast(T.i64, global_byte_offset)
+        glb_base_i64 = glb_base_i64 + glb_byte_off_i64
+
+    # LDS address
+    lds_base_idx = _ArithValue(memref_dialect.extract_aligned_pointer_as_index(lds_memref))
+    lds_total_off = lds_base_idx
+    if lds_byte_offset is not None:
+        lds_total_off = lds_total_off + lds_byte_offset
+    lds_addr_i32 = arith.index_cast(T.i32, lds_total_off)
+
+    # ================================================================
+    # GROUP 0: pred | gather_index_size | gather_mode | lds_addr | global_addr
+    # ================================================================
+    gather_index_bit = 1 if index_size == 32 else 0
+    g0_pred = (1               # count=1 (valid tensor)
+               | (gather_index_bit << 30)  # gather_index_size
+               | (1 << 31))                # gather_mode=1
+    g0_s0 = arith.constant(g0_pred, type=T.i32)
+    g0_s1 = lds_addr_i32
+
+    i32 = ir.IntegerType.get_signless(32)
+    g0_s2 = _ArithValue(std_arith.TruncIOp(i32, _raw(glb_base_i64)).result)
+    hi_raw = _ArithValue(_raw(glb_base_i64)).shrui(arith.constant(32, type=T.i64))
+    g0_s3 = (
+        _ArithValue(std_arith.TruncIOp(i32, _raw(hi_raw)).result)
+        | arith.constant(1 << 31, type=T.i32)  # type=2 in [31:30]
+    )
+    dgroup0 = vector.from_elements(
+        T.vec(4, T.i32), [g0_s0, g0_s1, g0_s2, g0_s3]
+    )
+
+    # ================================================================
+    # GROUP 1: config + tensor dims + tile + stride
+    # ================================================================
+    data_size_code = int(math.log2(elem_bytes))
+
+    if pad_interval > 0 and pad_amount > 0:
+        elem_bits = elem_bytes * 8
+        enc_interval, enc_amount = compute_padding_encoding(
+            pad_interval, pad_amount, elem_bits
+        )
+        pad_enable = 1
+    else:
+        enc_interval, enc_amount = 0, 0
+        pad_enable = 0
+
+    if isinstance(workgroup_mask, int):
+        g1_s0_val = (
+            (workgroup_mask & 0xFFFF)
+            | (data_size_code << 16)
+            | (0 << 18)               # atomic_barrier_enable
+            | (0 << 19)               # iterate_enable (ignored in gather)
+            | (pad_enable << 20)
+            | (0 << 21)               # early_timeout
+            | (enc_interval << 22)
+            | (enc_amount << 25)
+        )
+        g1_s0 = arith.constant(g1_s0_val, type=T.i32)
+    else:
+        upper = (
+            (data_size_code << 16)
+            | (pad_enable << 20)
+            | (enc_interval << 22)
+            | (enc_amount << 25)
+        )
+        g1_s0 = arith.ori(
+            arith.constant(upper, type=T.i32),
+            arith.andi(workgroup_mask, arith.constant(0xFFFF, type=T.i32)),
+        )
+
+    # tensor_dim0 (32 bits) packed into sgpr1[31:16] and sgpr2[15:0]
+    g1_s1 = arith.constant((tensor_dim0 & 0xFFFF) << 16, type=T.i32)
+    g1_s2 = arith.constant(
+        ((tensor_dim0 >> 16) & 0xFFFF) | ((tensor_dim1 & 0xFFFF) << 16),
+        type=T.i32,
+    )
+
+    # sgpr3: tensor_dim1_hi[15:0] | tile_dim0[31:16]
+    # tile_dim0 = row_width (in elements)
+    g1_s3 = arith.constant(
+        ((tensor_dim1 >> 16) & 0xFFFF) | (row_width << 16),
+        type=T.i32,
+    )
+
+    # sgpr4: tile_dim1[15:0] — in gather mode, this is the number of valid indices
+    g1_s4 = arith.constant(num_indices & 0xFFFF, type=T.i32)
+
+    # sgpr5: tensor_dim0_stride (dim0 stride = row stride in elements)
+    g1_s5 = arith.constant(stride & 0xFFFFFFFF, type=T.i32)
+
+    # sgpr6-7: tensor_dim1_stride (ignored in gather mode)
+    g1_s6 = arith.constant(0, type=T.i32)
+    g1_s7 = arith.constant(0, type=T.i32)
+
+    dgroup1 = vector.from_elements(
+        T.vec(8, T.i32),
+        [g1_s0, g1_s1, g1_s2, g1_s3, g1_s4, g1_s5, g1_s6, g1_s7],
+    )
+
+    # ================================================================
+    # GROUP 2 & 3: row indices
+    # ================================================================
+    zero = arith.constant(0, type=T.i32)
+
+    if index_size == 32:
+        # 32-bit mode: group2 has indices [0..3], group3 has [4..7]
+        g2_vals = [row_indices[i] if i < num_indices else zero for i in range(4)]
+        g3_vals = [row_indices[i + 4] if (i + 4) < num_indices else zero for i in range(4)]
+    else:
+        # 16-bit mode: pack 2 x 16-bit indices per 32-bit word
+        # Group 2: indices [0..7] packed into 4 x i32
+        g2_vals = []
+        for w in range(4):
+            lo_idx = w * 2
+            hi_idx = w * 2 + 1
+            lo = row_indices[lo_idx] if lo_idx < num_indices else zero
+            hi = row_indices[hi_idx] if hi_idx < num_indices else zero
+            lo_masked = arith.andi(lo, arith.constant(0xFFFF, type=T.i32))
+            hi_shifted = arith.shli(arith.andi(hi, arith.constant(0xFFFF, type=T.i32)),
+                                     arith.constant(16, type=T.i32))
+            g2_vals.append(arith.ori(lo_masked, hi_shifted))
+        # Group 3: indices [8..15] packed into 4 x i32
+        g3_vals = []
+        for w in range(4):
+            lo_idx = 8 + w * 2
+            hi_idx = 8 + w * 2 + 1
+            lo = row_indices[lo_idx] if lo_idx < num_indices else zero
+            hi = row_indices[hi_idx] if hi_idx < num_indices else zero
+            lo_masked = arith.andi(lo, arith.constant(0xFFFF, type=T.i32))
+            hi_shifted = arith.shli(arith.andi(hi, arith.constant(0xFFFF, type=T.i32)),
+                                     arith.constant(16, type=T.i32))
+            g3_vals.append(arith.ori(lo_masked, hi_shifted))
+
+    dgroup2 = vector.from_elements(T.vec(4, T.i32), g2_vals)
+    dgroup3 = vector.from_elements(T.vec(4, T.i32), g3_vals)
+
+    return TDMGatherDescriptor(
+        dgroup0=dgroup0, dgroup1=dgroup1,
+        dgroup2=dgroup2, dgroup3=dgroup3,
+    )
+
+
+def tensor_load_gather(
+    desc: TDMGatherDescriptor,
+    cache_policy: int = 0,
+) -> None:
+    """Issue a TDM gather load (Global -> LDS) using row indices.
+
+    Uses the 5-group tensor_load_to_lds intrinsic with groups 2 and 3
+    carrying the gather row indices.
+
+    Args:
+        desc:         TDMGatherDescriptor from make_tensor_gather_descriptor.
+        cache_policy: Cache policy (0 = default).
+    """
+    dg4 = _raw(_zero_dgroup_v8i32())
+    rocdl.tensor_load_to_lds(
+        _raw(desc.dgroup0), _raw(desc.dgroup1),
+        _raw(desc.dgroup2), _raw(desc.dgroup3),
+        dg4, cache_policy,
+    )
 
 
 def _zero_dgroup_v4i32():
