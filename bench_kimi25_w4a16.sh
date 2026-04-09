@@ -1,6 +1,7 @@
 #!/bin/bash
 # Kimi 2.5 TP8 W4A16 groupwise(g=32) MoE GEMM benchmark
 # model_dim=7168, inter_dim=256, E=384, topk=8, tokens=128
+export HIP_VISIBLE_DEVICES=2
 export FLYDSL_RUNTIME_ENABLE_CACHE=0
 export PYTHONPATH=./build/python_packages:./
 export HSA_TOOLS_LIB=""
