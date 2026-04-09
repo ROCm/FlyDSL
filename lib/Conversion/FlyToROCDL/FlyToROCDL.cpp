@@ -463,7 +463,7 @@ public:
   LogicalResult matchAndRewrite(AtomSetValueOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
     Type origAtomTy = op.getAtom().getType();
-    Attribute fieldAttr = op.getField();
+    StringAttr fieldAttr = op.getFieldAttr();
     Location loc = op.getLoc();
 
     Value structVal = adaptor.getAtom();
