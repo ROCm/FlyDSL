@@ -17,13 +17,38 @@ using namespace mlir::fly;
 
 namespace mlir::fly_rocdl {
 
-bool CopyOpCDNA3BufferCopyType::isStatic() const { return true; }
+std::optional<unsigned> CopyOpCDNA3BufferCopyType::getFieldIndex(AtomStateField field) {
+  switch (field) {
+  case AtomStateField::Soffset:
+    return 0;
+  }
+  return std::nullopt;
+}
 
-Value CopyOpCDNA3BufferCopyType::rebuildStaticValue(OpBuilder &builder, Location loc,
-                                                    Value currentValue) const {
-  if (currentValue && isa<MakeCopyAtomOp>(currentValue.getDefiningOp()))
+Type CopyOpCDNA3BufferCopyType::getConvertedType(MLIRContext *ctx) const {
+  return LLVM::LLVMStructType::getLiteral(ctx, {IntegerType::get(ctx, 32)});
+}
+
+Value CopyOpCDNA3BufferCopyType::getDefaultState(OpBuilder &builder, Location loc) const {
+  auto structTy = cast<LLVM::LLVMStructType>(getConvertedType(builder.getContext()));
+  Value state = LLVM::UndefOp::create(builder, loc, structTy);
+  Value zero = arith::ConstantIntOp::create(builder, loc, 0, 32);
+  return LLVM::InsertValueOp::create(builder, loc, state, zero,
+                                     ArrayRef<int64_t>{*getFieldIndex(AtomStateField::Soffset)});
+}
+
+Value CopyOpCDNA3BufferCopyType::setAtomState(OpBuilder &builder, Location loc, Value atomStruct,
+                                              Attribute fieldAttr, Value fieldValue) const {
+  auto fieldStr = dyn_cast<StringAttr>(fieldAttr);
+  if (!fieldStr)
     return nullptr;
-  return MakeCopyAtomOp::create(builder, loc, CopyAtomType::get(*this, getBitSize()), getBitSize());
+  auto field = symbolizeAtomStateField(fieldStr.getValue());
+  if (!field)
+    return nullptr;
+  auto idx = getFieldIndex(*field);
+  if (!idx)
+    return nullptr;
+  return LLVM::InsertValueOp::create(builder, loc, atomStruct, fieldValue, ArrayRef<int64_t>{*idx});
 }
 
 Attribute CopyOpCDNA3BufferCopyType::getThrLayout() const { return FxLayout(FxC(1), FxC(1)); }
@@ -53,8 +78,26 @@ LogicalResult CopyOpCDNA3BufferCopyType::emitAtomCall(OpBuilder &builder, Locati
   bool srcIsBuffer = (srcAS == AddressSpace::BufferDesc);
   bool dstIsBuffer = (dstAS == AddressSpace::BufferDesc);
 
-  if (!(srcIsBuffer || dstIsBuffer))
+  if (srcIsBuffer == dstIsBuffer)
     return failure();
+
+  Value soffsetRaw = LLVM::ExtractValueOp::create(
+      builder, loc, atomVal, ArrayRef<int64_t>{*getFieldIndex(AtomStateField::Soffset)});
+
+  fly::MemRefType bufferMemTy = srcIsBuffer ? srcMemTy : dstMemTy;
+  int64_t elemBits = bufferMemTy.getElemTy().getIntOrFloatBitWidth();
+  Value soffset;
+  if (elemBits == 8) {
+    soffset = soffsetRaw;
+  } else if (elemBits > 8 && elemBits % 8 == 0) {
+    Value scale = arith::ConstantIntOp::create(builder, loc, elemBits / 8, 32);
+    soffset = arith::MulIOp::create(builder, loc, soffsetRaw, scale);
+  } else {
+    Value scale = arith::ConstantIntOp::create(builder, loc, elemBits, 32);
+    Value bits = arith::MulIOp::create(builder, loc, soffsetRaw, scale);
+    Value eight = arith::ConstantIntOp::create(builder, loc, 8, 32);
+    soffset = arith::DivUIOp::create(builder, loc, bits, eight);
+  }
 
   Value zero = arith::ConstantIntOp::create(builder, loc, 0, 32);
   ArrayAttr noAttrs;
@@ -66,21 +109,16 @@ LogicalResult CopyOpCDNA3BufferCopyType::emitAtomCall(OpBuilder &builder, Locati
 
   if (srcIsBuffer && !dstIsBuffer) {
     auto [srcRsrc, srcOff] = unpackBuffer(src, srcMemTy);
-    Value loaded = ROCDL::RawPtrBufferLoadOp::create(builder, loc, copyTy, srcRsrc, srcOff, zero,
+    Value loaded = ROCDL::RawPtrBufferLoadOp::create(builder, loc, copyTy, srcRsrc, srcOff, soffset,
                                                      zero, noAttrs, noAttrs, noAttrs);
     LLVM::StoreOp::create(builder, loc, loaded, dst);
   } else if (!srcIsBuffer && dstIsBuffer) {
     auto [dstRsrc, dstOff] = unpackBuffer(dst, dstMemTy);
     Value loaded = LLVM::LoadOp::create(builder, loc, copyTy, src);
-    ROCDL::RawPtrBufferStoreOp::create(builder, loc, loaded, dstRsrc, dstOff, zero, zero, noAttrs,
-                                       noAttrs, noAttrs);
+    ROCDL::RawPtrBufferStoreOp::create(builder, loc, loaded, dstRsrc, dstOff, soffset, zero,
+                                       noAttrs, noAttrs, noAttrs);
   } else {
-    auto [srcRsrc, srcOff] = unpackBuffer(src, srcMemTy);
-    auto [dstRsrc, dstOff] = unpackBuffer(dst, dstMemTy);
-    Value loaded = ROCDL::RawPtrBufferLoadOp::create(builder, loc, copyTy, srcRsrc, srcOff, zero,
-                                                     zero, noAttrs, noAttrs, noAttrs);
-    ROCDL::RawPtrBufferStoreOp::create(builder, loc, loaded, dstRsrc, dstOff, zero, zero, noAttrs,
-                                       noAttrs, noAttrs);
+    return failure();
   }
   return success();
 }

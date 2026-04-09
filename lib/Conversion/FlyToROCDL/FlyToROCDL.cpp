@@ -401,9 +401,14 @@ public:
     if (!copyAtomTy)
       return rewriter.notifyMatchFailure(op, "not a CopyAtomType");
     Type convertedTy = getTypeConverter()->convertType(copyAtomTy);
-    if (!isa<LLVM::LLVMStructType>(convertedTy))
-      return rewriter.notifyMatchFailure(op, "converted type is not an LLVM struct");
-    rewriter.replaceOpWithNewOp<LLVM::UndefOp>(op, convertedTy);
+
+    auto statefulOp = dyn_cast<StatefulOpTypeInterface>(copyAtomTy.getCopyOp());
+    if (statefulOp) {
+      Value state = statefulOp.getDefaultState(rewriter, op.getLoc());
+      rewriter.replaceOp(op, state);
+    } else {
+      rewriter.replaceOpWithNewOp<LLVM::UndefOp>(op, convertedTy);
+    }
     return success();
   }
 };
@@ -418,9 +423,13 @@ public:
     if (!mmaAtomTy)
       return rewriter.notifyMatchFailure(op, "not a MmaAtomType");
     Type convertedTy = getTypeConverter()->convertType(mmaAtomTy);
-    if (!isa<LLVM::LLVMStructType>(convertedTy))
-      return rewriter.notifyMatchFailure(op, "converted type is not an LLVM struct");
-    rewriter.replaceOpWithNewOp<LLVM::UndefOp>(op, convertedTy);
+    auto statefulOp = dyn_cast<StatefulOpTypeInterface>(mmaAtomTy.getMmaOp());
+    if (statefulOp) {
+      Value state = statefulOp.getDefaultState(rewriter, op.getLoc());
+      rewriter.replaceOp(op, state);
+    } else {
+      rewriter.replaceOpWithNewOp<LLVM::UndefOp>(op, convertedTy);
+    }
     return success();
   }
 };
@@ -454,7 +463,7 @@ public:
   LogicalResult matchAndRewrite(AtomSetValueOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
     Type origAtomTy = op.getAtom().getType();
-    Attribute fieldAttr = op.getField();
+    StringAttr fieldAttr = op.getFieldAttr();
     Location loc = op.getLoc();
 
     Value structVal = adaptor.getAtom();
@@ -644,12 +653,10 @@ public:
         return atomTy.getConvertedType(atomTy.getContext());
       return LLVM::LLVMStructType::getLiteral(atomTy.getContext(), {});
     });
-    addConversion([&](fly::TiledCopyType tiledTy) -> Type {
-      return convertType(tiledTy.getCopyAtom());
-    });
-    addConversion([&](fly::TiledMmaType tiledTy) -> Type {
-      return convertType(tiledTy.getMmaAtom());
-    });
+    addConversion(
+        [&](fly::TiledCopyType tiledTy) -> Type { return convertType(tiledTy.getCopyAtom()); });
+    addConversion(
+        [&](fly::TiledMmaType tiledTy) -> Type { return convertType(tiledTy.getMmaAtom()); });
   }
 };
 
