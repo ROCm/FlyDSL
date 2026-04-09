@@ -61,6 +61,7 @@ def run_torch_bench(a, b):
         (4096, 4096, 4096, 128, 256, 64, 1),
     ]
 )
+@pytest.mark.parametrize("B_PRE_SHUFFLE", [True, False])
 @pytest.mark.parametrize("test_graph", [
     pytest.param(False, id="eager"),
     pytest.param(True, id="graph"),
@@ -68,7 +69,7 @@ def run_torch_bench(a, b):
 def test_mfma_flyc_preshuffle_splitk_hgemm(
     dtype,
     m, n, k,
-    TILE_M, TILE_N, TILE_K, SPLIT_K,
+    TILE_M, TILE_N, TILE_K, SPLIT_K, B_PRE_SHUFFLE,
     *,
     test_graph,
     bench_iters: int = DEFAULT_BENCH_ITERS,
@@ -114,10 +115,15 @@ def test_mfma_flyc_preshuffle_splitk_hgemm(
         'TILE_N': TILE_N,
         'TILE_K': TILE_K,
         'SPLIT_K': SPLIT_K,
+        'B_PRE_SHUFFLE': B_PRE_SHUFFLE,
+        'B_TO_LDS': not B_PRE_SHUFFLE,
+        'BLOCK_M_WARPS': 1 if B_PRE_SHUFFLE else 2,
+        'BLOCK_N_WARPS': 4 if B_PRE_SHUFFLE else 2,
     }
 
-    b_q = hgemm_shuffle_b(b_q)
-    print(f"✓ B shuffled")
+    if B_PRE_SHUFFLE:
+        b_q = hgemm_shuffle_b(b_q)
+        print(f"✓ B shuffled")
     hgemm_splitk_(c_out, a_q, b_q, False, kwargs, torch.cuda.current_stream())
     print(f"✓ Kernel prepared: {kwargs}")
 
@@ -158,6 +164,7 @@ if __name__ == "__main__":
     parser.add_argument("--TILE_N", type=int, default=256)
     parser.add_argument("--TILE_K", type=int, default=64)
     parser.add_argument("--SPLIT_K", type=int, default=1)
+    parser.add_argument("--BP", type=int, default=1)
     parser.add_argument("--num_warmup", type=int, default=DEFAULT_BENCH_WARMUP)
     parser.add_argument("--num_iters", type=int, default=DEFAULT_BENCH_ITERS)
     parser.add_argument("--test_graph", "-tg", action="store_true", default=False)
@@ -168,6 +175,7 @@ if __name__ == "__main__":
             args.dtype,
             m=args.m, n=args.n, k=args.k,
             TILE_M=args.TILE_M, TILE_N=args.TILE_N, TILE_K=args.TILE_K, SPLIT_K=args.SPLIT_K,
+            B_PRE_SHUFFLE=bool(args.BP),
             test_graph=bool(args.test_graph),
             bench_iters=args.num_iters,
             bench_warmup=args.num_warmup,
