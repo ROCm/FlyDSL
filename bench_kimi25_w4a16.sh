@@ -13,15 +13,18 @@ export FLYDSL_DEBUG_DUMP_ASM=1
 export FLYDSL_DUMP_DIR=$DUMP_DIR
 rm -rf "$DUMP_DIR"
 
+SCALE_DTYPE=${SCALE_DTYPE:-bf16}
+
 python -c "
 import torch; from tests.kernels.test_moe_gemm import run_moe_stage1, run_moe_stage2
-kw=dict(tokens=128,model_dim=7168,inter_dim=256,experts=384,topk=8,in_dtype='int4_bf16',group_size=32,doweight_stage1=False,num_iters=64,num_warmup=5,skip_ref=False)
+scale_dtype='${SCALE_DTYPE}'
+kw=dict(tokens=128,model_dim=7168,inter_dim=256,experts=384,topk=8,in_dtype='int4_bf16',group_size=32,doweight_stage1=False,num_iters=64,num_warmup=5,skip_ref=False,scale_dtype=scale_dtype)
 s1=dict(tile_m=16,tile_n=128,tile_k=128)
 s2=dict(tile_m=16,tile_n=128,tile_k=256)
-print('=== Stage1 params ==='); [print(f'  {k}={v}') for k,v in {**kw,**s1}.items()]
+print(f'=== Stage1 params (scale_dtype={scale_dtype}) ==='); [print(f'  {k}={v}') for k,v in {**kw,**s1}.items()]
 run_moe_stage1(**kw,**s1)
 a2=torch.randn(128,8,256,device='cuda',dtype=torch.bfloat16)*0.1
-print('=== Stage2 params ==='); [print(f'  {k}={v}') for k,v in {**kw,**s2}.items()]
+print(f'=== Stage2 params (scale_dtype={scale_dtype}) ==='); [print(f'  {k}={v}') for k,v in {**kw,**s2}.items()]
 run_moe_stage2(**kw,**s2,a2_fp8_in=a2,a2_scale_in=None)
 "
 

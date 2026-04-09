@@ -629,6 +629,7 @@ __all__ = [
     "unpack_b_w4a16",
     "load_b_raw_w4a16_groupwise",
     "unpack_b_w4a16_groupwise",
+    "extract_bf16_scale",
     "split_row_major_2d",
     "swizzle_xor16",
     "tile_chunk_coord_i32",
@@ -651,23 +652,61 @@ def _load_groupwise_scale(
     num_groups: int,
     group_size: int,
     n_per_expert: int,
+    scale_dtype=None,
 ):
     """Load one per-group scale value from the scale buffer.
 
     Computes the linear index into the scale tensor from expert offset,
     N position, and group index derived from ``k_pos``.
+
+    For bf16 scales the tensor uses ``(E, G//2, N, 2)`` layout — two
+    adjacent groups for the same N position are packed into one dword.
+    We load the raw i32 dword (no extraction) so it can be carried as
+    loop state without register copies.  Use :func:`extract_bf16_scale`
+    in the compute phase to obtain the f32 value.
     """
     c16 = fx.Index(16)
     n_global = n_blk * c16 + n_intra
     c_group_size = fx.Index(group_size)
-    c_gm1 = fx.Index(num_groups - 1)
     c_npe = fx.Index(n_per_expert)
-    # n_global is the GLOBAL N index (includes expert offset), so use (G-1)
-    # to compensate: expert_offset*(G-1) + (expert_offset + n_within) = expert_offset*G + n_within
-    base_scale = expert_offset * c_gm1 + n_global
     group_idx = k_pos // c_group_size
-    scale_idx_i32 = arith.index_cast(T.i32, base_scale + group_idx * c_npe)
-    return buffer_ops.buffer_load(scale_rsrc, scale_idx_i32, vec_width=1, dtype=T.f32)
+    if scale_dtype is None:
+        scale_dtype = T.f32
+
+    if scale_dtype == T.bf16:
+        # (E, G//2, N, 2) layout: dword at [e, pair, n] holds bf16 scales
+        # for groups 2*pair and 2*pair+1.
+        pair_idx = group_idx >> fx.Index(1)       # group_idx // 2
+        # Dword index: same flat formula but with G//2 groups
+        num_pairs = num_groups // 2
+        c_npm1 = fx.Index(num_pairs - 1)
+        dword_base = expert_offset * c_npm1 + n_global
+        dword_elem = dword_base + pair_idx * c_npe
+        dword_idx = arith.index_cast(T.i32, dword_elem)
+        # Return raw i32 dword — extraction deferred to compute phase.
+        scale_val = buffer_ops.buffer_load(scale_rsrc, dword_idx, vec_width=1, dtype=T.i32)
+    else:
+        # (E, G, N) layout with f32 dtype
+        c_gm1 = fx.Index(num_groups - 1)
+        base_scale = expert_offset * c_gm1 + n_global
+        elem_idx = base_scale + group_idx * c_npe
+        scale_idx_i32 = arith.index_cast(T.i32, elem_idx)
+        scale_val = buffer_ops.buffer_load(scale_rsrc, scale_idx_i32, vec_width=1, dtype=T.f32)
+    return scale_val
+
+
+def extract_bf16_scale(arith, scale_raw_i32, ku: int):
+    """Extract f32 scale from raw i32 dword loaded by bf16 groupwise path.
+
+    In the ``(E, G//2, N, 2)`` layout two adjacent groups share one dword.
+    ``ku`` determines which half: even ku → low bf16, odd ku → high bf16.
+    """
+    if ku % 2 == 0:
+        # Low bf16: shift left by 16 to place in upper 16 bits → f32
+        return arith.bitcast(T.f32, scale_raw_i32 << fx.Int32(16))
+    else:
+        # High bf16: mask upper 16 bits → f32
+        return arith.bitcast(T.f32, scale_raw_i32 & fx.Int32(0xFFFF0000))
 
 
 # ---------------------------------------------------------------------------
@@ -694,6 +733,7 @@ def load_b_raw_w4a16_groupwise(
     group_size: int,
     n_per_expert: int,
     kpack_bytes: int = 8,
+    scale_dtype=None,
 ):
     """Phase 1 of W4A16 groupwise B load: buffer_loads for weight + scale.
 
@@ -716,6 +756,7 @@ def load_b_raw_w4a16_groupwise(
         scale_rsrc=scale_rsrc, expert_offset=expert_offset,
         n_blk=n_blk, n_intra=n_intra, k_pos=k_pos,
         num_groups=num_groups, group_size=group_size, n_per_expert=n_per_expert,
+        scale_dtype=scale_dtype,
     )
     return (packed32, scale_val)
 

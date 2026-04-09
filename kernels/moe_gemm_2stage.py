@@ -57,6 +57,7 @@ from kernels.mfma_preshuffle_pipeline import (
     unpack_b_w4a16,
     load_b_raw_w4a16_groupwise,
     unpack_b_w4a16_groupwise,
+    extract_bf16_scale,
     tile_chunk_coord_i32,
     swizzle_xor16,
 )
@@ -107,6 +108,7 @@ def compile_moe_gemm1(
     group_size: int = -1,
     out_dtype: str = "f16",
     use_cshuffle_epilog: bool | None = None,
+    scale_is_bf16: bool = False,
 ):
     """Compile stage1 kernel (`moe_gemm1`) and return the compiled executable.
 
@@ -120,6 +122,7 @@ def compile_moe_gemm1(
         have a distinct input scaling before quantization).
       - "int4": W4A8 path: X is int8, W is packed int4 (2 values per byte) unpacked to int8 in-kernel
       - "int4_bf16": W4A16 path: X is bf16, W is packed int4 unpacked to bf16 in-kernel
+    scale_is_bf16: When True, groupwise scales are bf16 (halves scale bandwidth).
     """
 
     gpu_arch = get_hip_arch()
@@ -174,6 +177,7 @@ def compile_moe_gemm1(
         )
     is_int4_bf16_groupwise = is_int4_bf16 and use_groupwise_scale
     num_groups = model_dim // group_size if use_groupwise_scale else 1
+    _scale_is_bf16 = scale_is_bf16 and use_groupwise_scale
     scale_w_size_stage1 = experts * (2 * inter_dim) * num_groups
     # For groupwise scale, weight scale is applied per-group in the K loop,
     # so epilogue can skip weight scale multiplication (uses 1.0 for sw).
@@ -242,10 +246,11 @@ def compile_moe_gemm1(
     # IMPORTANT: module name participates in FlyDSL's compile cache key.
     # Keep an explicit ABI tag so signature changes can't accidentally reuse an old binary.
     _gs_tag = f"_g{group_size}" if use_groupwise_scale else ""
+    scale_tag = "_sbf16" if _scale_is_bf16 else ""
     module_name = (
         f"mfma_moe1_{in_dtype}_{out_dtype}_{epilog_tag}"
         f"_t{tile_m}x{tile_n}x{tile_k}"
-        f"{_gs_tag}"
+        f"{_gs_tag}{scale_tag}"
         f"_abi3" # also mask sentinel token ids on loads (X/scale_x) to avoid illegal address faults
     ).replace("-", "_")
 
@@ -292,6 +297,7 @@ def compile_moe_gemm1(
             x_elem = T.bf16 if is_bf16 else (T.f16 if is_f16 else (T.i8 if is_int8 else T.f8))
             # For int4/int4_bf16, weights are stored as packed bytes (i8) and unpacked in-kernel.
             w_elem = T.i8 if w_is_int4 else (T.bf16 if is_bf16 else (T.f16 if is_f16 else (T.i8 if is_int8 else T.f8)))
+            scale_dtype = T.bf16 if _scale_is_bf16 else T.f32
             vec16_elems = 16 if elem_bytes == 1 else 8
             vec8_elems = 8 if elem_bytes == 1 else 4
             vec4_elems = 4 if elem_bytes == 1 else 2
@@ -655,6 +661,7 @@ def compile_moe_gemm1(
                                     group_size=group_size,
                                     n_per_expert=2*inter_dim,
                                     kpack_bytes=kpack_bytes,
+                                    scale_dtype=scale_dtype,
                                 )
                                 raw_ku.append((packed32, scale_val))
                             raw_data.append(raw_ku)
@@ -883,6 +890,9 @@ def compile_moe_gemm1(
                                     if is_int4_bf16_groupwise:
                                         packed_g, sc_g = b_gate_raw[ni]
                                         packed_u, sc_u = b_up_raw[ni]
+                                        if _scale_is_bf16:
+                                            sc_g = extract_bf16_scale(arith, sc_g, ku)
+                                            sc_u = extract_bf16_scale(arith, sc_u, ku)
                                     else:
                                         packed_g, sc_g = b_gate_raw[ni], None
                                         packed_u, sc_u = b_up_raw[ni], None
@@ -1004,24 +1014,38 @@ def compile_moe_gemm1(
                 total_tiles = int(model_dim) // int(tile_k)
                 pair_iters = max((total_tiles - 2) // 2, 0)
 
-                _lists_per_ku = 2
-                _vals_per_bt = k_unroll * _lists_per_ku * num_acc_n
+                _fields_per_ku = 2 if is_int4_bf16_groupwise else 1
+                _vals_per_bt = k_unroll * _fields_per_ku * num_acc_n
 
                 def _flatten_bt(bt):
+                    """Flatten B tile for scf.for loop-carried state.
+
+                    Groupwise: bt[ku] = [(packed, scale), ...] per ni
+                      → [p0, p1, ..., s0, s1, ...] per ku (field-major).
+                    Non-groupwise: bt[ku] = [raw0, raw1, ...] per ni.
+                    """
                     flat = []
-                    for entry in bt:
-                        for lst in entry:
-                            flat.extend(lst if isinstance(lst, (list, tuple)) else [lst])
+                    for ku_entry in bt:
+                        if is_int4_bf16_groupwise:
+                            flat.extend(t[0] for t in ku_entry)
+                            flat.extend(t[1] for t in ku_entry)
+                        else:
+                            flat.extend(ku_entry if isinstance(ku_entry, (list, tuple)) else [ku_entry])
                     return flat
 
                 def _unflatten_bt(vals):
+                    """Inverse of _flatten_bt."""
                     bt, idx = [], 0
                     for _ in range_constexpr(k_unroll):
-                        entry = []
-                        for _ in range_constexpr(_lists_per_ku):
-                            entry.append(list(vals[idx:idx + num_acc_n]))
+                        if is_int4_bf16_groupwise:
+                            packed = list(vals[idx:idx + num_acc_n])
                             idx += num_acc_n
-                        bt.append(tuple(entry))
+                            scales = list(vals[idx:idx + num_acc_n])
+                            idx += num_acc_n
+                            bt.append([(packed[ni], scales[ni]) for ni in range_constexpr(num_acc_n)])
+                        else:
+                            bt.append(list(vals[idx:idx + num_acc_n]))
+                            idx += num_acc_n
                     return bt
 
                 init_state = (
@@ -1438,6 +1462,7 @@ def compile_moe_gemm2(
     out_dtype: str = "f16",
     use_cshuffle_epilog: bool | None = None,
     accumulate: bool = True,
+    scale_is_bf16: bool = False,
 ):
     """Compile stage2 kernel (`moe_gemm2`) and return the compiled executable.
 
@@ -1448,6 +1473,7 @@ def compile_moe_gemm2(
       - "int8": A2/W are int8
       - "int4": W4A8 path: A2 is int8, W is packed int4 unpacked to int8 in-kernel
       - "int4_bf16": W4A16 path: A2 is bf16, W is packed int4 unpacked to bf16 in-kernel
+    scale_is_bf16: When True, groupwise scales are bf16 (halves scale bandwidth).
 
     Stage2 output supports:
       - out_dtype="f16": fp16 half2 atomics (fast, can overflow to +/-inf for bf16 workloads)
@@ -1496,6 +1522,7 @@ def compile_moe_gemm2(
     is_int4_bf16_groupwise = is_int4_bf16 and use_groupwise_scale
     # Stage2 K dimension is inter_dim (weight shape: [E, model_dim, inter_dim])
     num_groups = inter_dim // group_size if use_groupwise_scale else 1
+    _scale_is_bf16 = scale_is_bf16 and use_groupwise_scale
     scale_w_size_stage2 = experts * model_dim * num_groups
 
     _is_gfx950 = "gfx95" in get_hip_arch()
@@ -1596,10 +1623,11 @@ def compile_moe_gemm2(
     # Dynamic-shape variant: safe to reuse across (tokens/sorted_size/size_expert_ids) at runtime.
     # Keep a distinct ABI tag so the compile cache never mixes with historical signatures.
     _gs_tag = f"_g{group_size}" if use_groupwise_scale else ""
+    scale_tag = "_sbf16" if _scale_is_bf16 else ""
     module_name = (
         f"mfma_moe2_{in_dtype}_{out_s}_{epilog_tag}"
         f"_t{tile_m}x{tile_n}x{tile_k}"
-        f"{_gs_tag}"
+        f"{_gs_tag}{scale_tag}"
         f"_abi2"  # mask sentinel token ids on loads/stores to avoid illegal address faults
     ).replace("-", "_")
 
@@ -1656,6 +1684,7 @@ def compile_moe_gemm2(
             x_elem = T.bf16 if is_bf16 else (T.f16 if is_f16 else (T.i8 if is_int8 else T.f8))
             # For int4/int4_bf16, weights are stored as packed bytes (i8) and unpacked in-kernel.
             w_elem = T.i8 if w_is_int4 else (T.bf16 if is_bf16 else (T.f16 if is_f16 else (T.i8 if is_int8 else T.f8)))
+            scale_dtype = T.bf16 if _scale_is_bf16 else T.f32
             vec16_elems = 16 if elem_bytes == 1 else 8
             vec8_elems = 8 if elem_bytes == 1 else 4
             vec4_elems = 4 if elem_bytes == 1 else 2
@@ -2001,6 +2030,7 @@ def compile_moe_gemm2(
                                     group_size=group_size,
                                     n_per_expert=model_dim,
                                     kpack_bytes=kpack_bytes,
+                                    scale_dtype=scale_dtype,
                                 )
                                 raw_ku.append((packed32, scale_val))
                             raw_data.append(raw_ku)
@@ -2222,6 +2252,8 @@ def compile_moe_gemm2(
                                     acc_idx = mi * num_acc_n + ni
                                     if is_int4_bf16_groupwise:
                                         packed, sc = b_raw[ni]
+                                        if _scale_is_bf16:
+                                            sc = extract_bf16_scale(arith, sc, ku)
                                     else:
                                         packed, sc = b_raw[ni], None
                                     if is_int4_bf16_groupwise and use_gfx950_cvt:
@@ -2382,27 +2414,34 @@ def compile_moe_gemm2(
                 c_tile_k_s2 = arith.index(tile_k)
                 pair_iters = k_main2_py // (int(tile_k) * 2)
 
-                _lists_per_ku = 2
-                _vals_per_bt = k_unroll * _lists_per_ku * num_acc_n
+                _fields_per_ku = 2 if is_int4_bf16_groupwise else 1
+                _vals_per_bt = k_unroll * _fields_per_ku * num_acc_n
                 _n_acc = m_repeat * num_acc_n
                 _p_b = _n_acc
                 _p_a0 = _p_b + _vals_per_bt
 
                 def _flatten_bt(bt):
                     flat = []
-                    for entry in bt:
-                        for lst in entry:
-                            flat.extend(lst if isinstance(lst, (list, tuple)) else [lst])
+                    for ku_entry in bt:
+                        if is_int4_bf16_groupwise:
+                            flat.extend(t[0] for t in ku_entry)
+                            flat.extend(t[1] for t in ku_entry)
+                        else:
+                            flat.extend(ku_entry if isinstance(ku_entry, (list, tuple)) else [ku_entry])
                     return flat
 
                 def _unflatten_bt(vals):
                     bt, idx = [], 0
                     for _ in range_constexpr(k_unroll):
-                        entry = []
-                        for _ in range_constexpr(_lists_per_ku):
-                            entry.append(list(vals[idx:idx + num_acc_n]))
+                        if is_int4_bf16_groupwise:
+                            packed = list(vals[idx:idx + num_acc_n])
                             idx += num_acc_n
-                        bt.append(tuple(entry))
+                            scales = list(vals[idx:idx + num_acc_n])
+                            idx += num_acc_n
+                            bt.append([(packed[ni], scales[ni]) for ni in range_constexpr(num_acc_n)])
+                        else:
+                            bt.append(list(vals[idx:idx + num_acc_n]))
+                            idx += num_acc_n
                     return bt
 
                 init_state = list(acc) + _flatten_bt(b_cur) + list(a0_prefetch_pong)
@@ -3134,6 +3173,7 @@ def compile_moe_gemm2_ex(
     mode: str = MoeGemm2Mode.ATOMIC,
     valid_mask = None,
     zero_intermediate: bool = True,
+    scale_is_bf16: bool = False,
 ):
     """Compile MoE GEMM2 kernel with optional reduction.
 
@@ -3170,6 +3210,7 @@ def compile_moe_gemm2_ex(
             out_dtype=out_dtype,
             use_cshuffle_epilog=use_cshuffle_epilog,
             accumulate=False,
+            scale_is_bf16=scale_is_bf16,
         )
         # Compile reduction kernel with masking support
         out_s = str(out_dtype).strip().lower()
