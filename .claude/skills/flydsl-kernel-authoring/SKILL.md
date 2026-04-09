@@ -1,3 +1,13 @@
+---
+name: flydsl-kernel-authoring
+description: >
+  Comprehensive reference for authoring FlyDSL GPU kernels on AMD GPUs.
+  Covers the layout algebra, tiled copy/MMA, buffer ops, scf.for loops,
+  SmemAllocator, autotuning, and common patterns. Use when writing,
+  reviewing, or understanding FlyDSL kernel code.
+allowed-tools: Read Edit Bash Grep Glob Agent
+---
+
 # FlyDSL Kernel Authoring Skill
 
 ## Overview

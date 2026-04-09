@@ -8,7 +8,7 @@ description: >
   isolation (all-1s test, single-partition test, host-side tensor inspection).
   Use when a FlyDSL kernel produces incorrect output or compilation errors.
   Usage: /debug-flydsl-kernel
-tools: Read,Edit,Bash,Grep,Glob,Agent
+allowed-tools: Read Edit Bash Grep Glob Agent
 ---
 
 # Debug FlyDSL Kernel
