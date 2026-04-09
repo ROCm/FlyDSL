@@ -601,15 +601,16 @@ Produces numbered `.mlir` files per pipeline stage plus `final_isa.s`.
 | Variable | Default | Description |
 |---|---|---|
 | `FLYDSL_DUMP_IR` | false | Dump IR at each stage |
-| `FLYDSL_DEBUG_ENABLE_DEBUG_INFO` | true | Emit DWARF debug info (source-to-asm mapping) |
+| `FLYDSL_DEBUG_ENABLE_DEBUG_INFO` | false | Emit DWARF debug info (source-to-asm mapping) |
 | `FLYDSL_RUNTIME_ENABLE_CACHE` | true | Enable kernel disk caching (in-memory cache is always active) |
 | `FLYDSL_RUNTIME_CACHE_DIR` | ~/.flydsl/cache | Cache directory |
 | `FLYDSL_COMPILE_OPT_LEVEL` | 2 | Optimization level (0-3) |
 | `ARCH` | auto-detect | Override GPU architecture |
 
-### Disable Disk Cache for Development
+### Disk Cache Invalidation
+The JIT disk cache auto-invalidates when kernel source or closure values change. Set `FLYDSL_RUNTIME_ENABLE_CACHE=0` only when modifying C++ passes or non-closure helper functions:
 ```bash
-FLYDSL_RUNTIME_ENABLE_CACHE=0 python my_kernel.py
+FLYDSL_RUNTIME_ENABLE_CACHE=0 python my_kernel.py  # or: rm -rf ~/.flydsl/cache
 ```
 
 ### Source-to-Assembly Debug Info
@@ -684,7 +685,7 @@ Pass raw `torch.Tensor` objects instead.
 
 2. **`buffer_ops.buffer_load` offset**: The `offset` parameter is in ELEMENTS, not bytes.
 
-3. **Cache stale after code changes**: Disable disk cache with `FLYDSL_RUNTIME_ENABLE_CACHE=0` or clear `~/.flydsl/cache/`.
+3. **Cache stale after code changes**: The disk cache auto-invalidates on source/closure changes. Only set `FLYDSL_RUNTIME_ENABLE_CACHE=0` or clear `~/.flydsl/cache/` if you changed C++ passes or non-closure helpers.
 
 4. **LDS overflow**: Check capacity (64KB on gfx942, 160KB on gfx950). Use `SmemAllocator` which tracks allocations.
 
