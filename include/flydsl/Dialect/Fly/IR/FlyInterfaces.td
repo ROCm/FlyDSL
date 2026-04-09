@@ -28,7 +28,7 @@ def Fly_StatefulOpTypeInterface : TypeInterface<"StatefulOpTypeInterface"> {
   let cppNamespace = "::mlir::fly";
   let methods = [
     InterfaceMethod<
-      "Return the Bottom type that holds the mutable state of this op.",
+      "Return the converted type that holds the mutable state of this op.",
       "::mlir::Type", "getConvertedType", (ins "::mlir::MLIRContext *":$ctx)>,
     InterfaceMethod<
       "Build the default state value for this op.",
