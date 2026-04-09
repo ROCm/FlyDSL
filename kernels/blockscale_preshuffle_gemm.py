@@ -358,7 +358,7 @@ def compile_blockscale_preshuffle_gemm(
         def store_a_tile_to_lds(vec_a_parts, lds_buffer, a_load_bytes_v, tx_i32_base_v, chunk_i32_a_v):
             for i in range_constexpr(num_a_loads):
                 row_a_local, col_a_local_i32 = a_tile_chunk_coord_i32(i, tx_i32_base_v, chunk_i32_a_v)
-                if a_load_bytes_v == 16:
+                if const_expr(a_load_bytes_v == 16):
                     lds_store_16b_xor16(
                         arith, vector,
                         lds_memref=lds_buffer, vec16_ty=T.f8x16,
@@ -368,7 +368,7 @@ def compile_blockscale_preshuffle_gemm(
                         lds_base=fx.Index(0),
                         vec_part_i32x4=vec_a_parts[i], elem_bytes=elem_bytes,
                     )
-                elif a_load_bytes_v == 8:
+                elif const_expr(a_load_bytes_v == 8):
                     lds_store_8b_xor16(
                         arith, vector,
                         lds_memref=lds_buffer, vec8_ty=T.f8x8,

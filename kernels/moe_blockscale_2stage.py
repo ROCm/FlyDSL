@@ -449,7 +449,7 @@ def compile_moe_blockscale_gemm1(
     
                     For 16B, keep the fast dwordx4 path. For 8B/4B, use byte offsets.
                     """
-                    if x_load_bytes_v == 16:
+                    if const_expr(x_load_bytes_v == 16):
                         idx_elem = idx_i32 if elem_bytes == 1 else (idx_i32 * fx.Index(2))
                         return buffer_copy_gmem16_dwordx4(
                             buffer_ops,
@@ -460,7 +460,7 @@ def compile_moe_blockscale_gemm1(
                             vec_elems=vec16_elems,
                             elem_bytes=elem_bytes,
                         )
-                    if x_load_bytes_v == 8:
+                    if const_expr(x_load_bytes_v == 8):
                         return buffer_ops.buffer_load(x_rsrc, idx_i32, vec_width=2, dtype=T.i32)
                     return buffer_ops.buffer_load(x_rsrc, idx_i32, vec_width=1, dtype=T.i32)
 
@@ -471,11 +471,11 @@ def compile_moe_blockscale_gemm1(
                     for i in range_constexpr(num_x_loads):
                         idx_i32 = x_row_base_div4[i] + base_k_div4 + x_col_local_i32[i]
                         x_vec = load_x(idx_i32, x_load_bytes_v)
-                        if x_load_bytes_v == 16:
+                        if const_expr(x_load_bytes_v == 16):
                             parts.append(vector.bitcast(T.i32x4, x_vec))
-                        elif x_load_bytes_v == 8:
+                        elif const_expr(x_load_bytes_v == 8):
                             parts.append(x_vec)
-                        else:
+                        if const_expr(x_load_bytes_v == 4):
                             parts.append(x_vec)
                     return parts
     
@@ -1617,7 +1617,7 @@ def compile_moe_blockscale_gemm2(
                 vec4_x = T.vec(4, x_elem)
 
                 def load_x(idx_i32, x_load_bytes_v):
-                    if x_load_bytes_v == 16:
+                    if const_expr(x_load_bytes_v == 16):
                         idx_elem = idx_i32 if elem_bytes == 1 else (idx_i32 * fx.Index(2))
                         return buffer_copy_gmem16_dwordx4(
                             buffer_ops,
@@ -1628,7 +1628,7 @@ def compile_moe_blockscale_gemm2(
                             vec_elems=vec16_elems,
                             elem_bytes=elem_bytes,
                         )
-                    if x_load_bytes_v == 8:
+                    if const_expr(x_load_bytes_v == 8):
                         return buffer_ops.buffer_load(x_rsrc, idx_i32, vec_width=2, dtype=T.i32)
                     return buffer_ops.buffer_load(x_rsrc, idx_i32, vec_width=1, dtype=T.i32)
     
@@ -1663,9 +1663,9 @@ def compile_moe_blockscale_gemm2(
                     for i in range_constexpr(num_x_loads):
                         idx_i32 = x_row_base_div4[i] + base_k_div4 + x_col_local_i32[i]
                         x_vec = load_x(idx_i32, x_load_bytes_v)
-                        if x_load_bytes_v == 16:
+                        if const_expr(x_load_bytes_v == 16):
                             parts.append(vector.bitcast(T.i32x4, x_vec))
-                        elif x_load_bytes_v == 8:
+                        elif const_expr(x_load_bytes_v == 8):
                             parts.append(x_vec)
                         else:
                             parts.append(x_vec)
