@@ -1979,6 +1979,46 @@ def test_moe_2stage_fp4_smoke(use_reduce: bool):
     assert torch.isfinite(stage2_out).all()
 
 
+def test_moe_2stage_fp4_wfp4_reduce_reference():
+    """wfp4 correctness path should still use stage1-derived fp4 A2 input."""
+    tokens = 64
+    model_dim = 256
+    inter_dim = 128
+    experts = 4
+    topk = 2
+    tile_m = 16
+    tile_n = 64
+    tile_k = 128
+    seed = 0
+    test_moe_gemm_2stage(
+        tokens=tokens,
+        model_dim=model_dim,
+        inter_dim=inter_dim,
+        experts=experts,
+        topk=topk,
+        tile_m=tile_m,
+        tile_n1=tile_n,
+        tile_k1=tile_k,
+        tile_n2=tile_n,
+        tile_k2=tile_k,
+        doweight_stage1=False,
+        in_dtype="fp4",
+        out_dtype="f16",
+        group_size=-1,
+        seed=seed,
+        num_iters=1,
+        num_warmup=1,
+        compare_aiter_ck=False,
+        moe_sort_mode="torch",
+        skip_ref=False,
+        use_reduce=True,
+        use_tdm_store=False,
+        w_fp4_kernel=True,
+        test_graph=False,
+        use_valid_mask=False,
+    )
+
+
 @pytest.mark.parametrize(
     "tokens, model_dim, inter_dim, experts, topk, tile_m, tile_n1, tile_k1, tile_n2, tile_k2, doweight_stage1",
     [
@@ -2028,6 +2068,12 @@ def test_moe_gemm_2stage(
     w_fp4_kernel: bool = False,
     benchmark_mode: bool = False,
     flush_l2: bool = True,
+    num_buffers: int = 1,
+    use_tdm_store: bool = False,
+    inst_prefetch: bool = False,
+    wave_specialized_tdm: bool = False,
+    cluster_m: int = 1,
+    cluster_n: int = 1,
 ):
     """Single 2-stage test: gemm1 -> quantize -> gemm2, with routing built once.
 
@@ -2121,14 +2167,32 @@ def test_moe_gemm_2stage(
         test_graph=test_graph,
         benchmark_mode=bool(benchmark_mode),
         flush_l2=bool(flush_l2),
+        num_buffers=int(num_buffers),
+        use_tdm_store=bool(use_tdm_store),
+        inst_prefetch=bool(inst_prefetch),
+        wave_specialized_tdm=bool(wave_specialized_tdm),
+        cluster_m=int(cluster_m),
+        cluster_n=int(cluster_n),
     )
 
     if w_fp4_kernel:
         if in_dtype == "fp4":
             # Stage2 FP4 kernel expects packed FP4 + E8M0 scale input.
-            # For benchmark-only mode (skip_ref), use synthetic A2 quant tensors.
-            a2_q = fp4_utils.random_fp4_packed(tokens * topk, inter_dim, device=device).view(tokens, topk, inter_dim // 2)
-            a2_scale = fp4_utils.random_e8m0(tokens * topk, inter_dim // 32, device=device).view(tokens, topk, inter_dim // 32)
+            # For correctness mode, quantize stage1 output so stage2 checks the
+            # real two-stage path. Keep synthetic A2 only for benchmark-only
+            # runs that explicitly skip the reference.
+            if bool(skip_ref):
+                a2_q = fp4_utils.random_fp4_packed(tokens * topk, inter_dim, device=device).view(
+                    tokens, topk, inter_dim // 2
+                )
+                a2_scale = fp4_utils.random_e8m0(tokens * topk, inter_dim // 32, device=device).view(
+                    tokens, topk, inter_dim // 32
+                )
+            else:
+                out1_fp32 = out1_fp16.to(torch.float32)
+                a2_fp4, a2_scale_raw, _ = fp4_utils.per_1x32_f4_quant(out1_fp32.view(-1, inter_dim))
+                a2_q = a2_fp4.view(torch.uint8).view(tokens, topk, inter_dim // 2)
+                a2_scale = a2_scale_raw.view(torch.uint8).view(tokens, topk, inter_dim // 32)
         else:
             a2_q = out1_fp16.to(torch.float32)
             # a2_q = torch.ones_like(out1_fp16, dtype=torch.float32) / 5
@@ -2196,6 +2260,12 @@ def test_moe_gemm_2stage(
         test_graph=test_graph,
         benchmark_mode=bool(benchmark_mode),
         flush_l2=bool(flush_l2),
+        num_buffers=int(num_buffers),
+        use_tdm_store=bool(use_tdm_store),
+        inst_prefetch=bool(inst_prefetch),
+        wave_specialized_tdm=bool(wave_specialized_tdm),
+        cluster_m=int(cluster_m),
+        cluster_n=int(cluster_n),
     )
 
 
@@ -2220,6 +2290,14 @@ def _make_reduce_mode_compile_fn(use_flydsl_reduce: bool = True, use_valid_mask:
         in_dtype: str = "fp8",
         group_size: int = -1,
         out_dtype: str = "f16",
+        waves_per_eu: Optional[int] = None,
+        expert_sched_mode: bool = True,
+        num_buffers: int = 1,
+        use_tdm_store: bool = False,
+        inst_prefetch: bool = False,
+        wave_specialized_tdm: bool = False,
+        cluster_m: int = 1,
+        cluster_n: int = 1,
     ):
         if use_flydsl_reduce:
             return compile_moe_gemm2_ex(
@@ -2234,9 +2312,17 @@ def _make_reduce_mode_compile_fn(use_flydsl_reduce: bool = True, use_valid_mask:
                 in_dtype=in_dtype,
                 group_size=group_size,
                 out_dtype=out_dtype,
+                waves_per_eu=waves_per_eu,
                 valid_mask=(True if bool(use_valid_mask) else None),
                 mode=MoeGemm2Mode.REDUCE,
                 zero_intermediate=False, # test non-zeroed performance
+                expert_sched_mode=bool(expert_sched_mode),
+                num_buffers=int(num_buffers),
+                use_tdm_store=bool(use_tdm_store),
+                inst_prefetch=bool(inst_prefetch),
+                wave_specialized_tdm=bool(wave_specialized_tdm),
+                cluster_m=int(cluster_m),
+                cluster_n=int(cluster_n),
             )
         else:
             gemm2_exe = compile_moe_gemm2(
@@ -2252,6 +2338,14 @@ def _make_reduce_mode_compile_fn(use_flydsl_reduce: bool = True, use_valid_mask:
                 group_size=group_size,
                 out_dtype=out_dtype,
                 accumulate=False,
+                waves_per_eu=waves_per_eu,
+                expert_sched_mode=bool(expert_sched_mode),
+                num_buffers=int(num_buffers),
+                use_tdm_store=bool(use_tdm_store),
+                inst_prefetch=bool(inst_prefetch),
+                wave_specialized_tdm=bool(wave_specialized_tdm),
+                cluster_m=int(cluster_m),
+                cluster_n=int(cluster_n),
             )
             return _TorchReduceWrapper(gemm2_exe, topk, model_dim)
     return _compile

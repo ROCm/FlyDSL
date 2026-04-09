@@ -45,6 +45,7 @@ __all__ = [
     "make_tensor_gather_descriptor",
     "tensor_load_2d",
     "tensor_load_gather",
+    "tensor_store_gather",
     "tensor_store_2d",
     "tensor_wait",
     "compute_padding_encoding",
@@ -649,6 +650,27 @@ def tensor_load_gather(
     """
     dg4 = _raw(_zero_dgroup_v8i32())
     rocdl.tensor_load_to_lds(
+        _raw(desc.dgroup0), _raw(desc.dgroup1),
+        _raw(desc.dgroup2), _raw(desc.dgroup3),
+        dg4, cache_policy,
+    )
+
+
+def tensor_store_gather(
+    desc: TDMGatherDescriptor,
+    cache_policy: int = 0,
+) -> None:
+    """Issue a TDM gather store (LDS -> Global) using row indices.
+
+    Uses the 5-group tensor_store_from_lds intrinsic with groups 2 and 3
+    carrying the gather row indices.
+
+    Args:
+        desc:         TDMGatherDescriptor from make_tensor_gather_descriptor.
+        cache_policy: Cache policy (0 = default).
+    """
+    dg4 = _raw(_zero_dgroup_v8i32())
+    rocdl.tensor_store_from_lds(
         _raw(desc.dgroup0), _raw(desc.dgroup1),
         _raw(desc.dgroup2), _raw(desc.dgroup3),
         dg4, cache_policy,

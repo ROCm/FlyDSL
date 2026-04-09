@@ -1768,23 +1768,11 @@ def _compile_stage1_mxscale_kernel_impl(
                 (wave_id_idx_s1 % arith.index(int(n_warp)))
                 * arith.index(warp_tile_n)
             )
-            d_desc_s1 = tdm_ops.make_tensor_descriptor_2d(
-                global_ptr=arg_out,
-                lds_memref=base_ptr,
-                global_offset=(
-                    by * arith.index(int(tile_m)) + warp_m_off_sgpr_s1,
-                    blk_n + warp_n_off_sgpr_s1,
-                ),
-                tensor_shape=(warp_tile_m, warp_tile_n),
-                strides=(N, 1),
-                tile_shape=(warp_tile_m, warp_tile_n),
-                elem_bytes=elem_bytes_d_s1,
-                pad_interval=warp_tile_n,
-                pad_amount=LDS_PAD_D_BYTES_s1 // elem_bytes_d_s1,
-                num_warps=1,
-                lds_byte_offset=d_warp_off_sgpr_s1,
-                for_store=True,
-            )
+            # TDM store for MoE stage1 uses gather-store mode because the
+            # output rows are not contiguous — each sorted row maps to
+            # out[tok * topk + slot, :] which is a scattered layout.
+            # d_desc_s1 is built lazily in the epilogue after sorted_ids
+            # are decoded (see _emit_tdm_gather_store_s1 below).
 
         def silu(x):
             t = x * (-1.4426950408889634)
@@ -1829,16 +1817,13 @@ def _compile_stage1_mxscale_kernel_impl(
                     scf.YieldOp([])
 
         # Pre-compute token row indices for ALL tile_m rows (once, outside K-loop).
-        # These are loaded from sorted_ids and decoded.
-        # Each entry is the token_id (row index in X matrix).
-        _a_tok_ids = []  # will hold tile_m i32 SGPR values
+        # _a_tok_ids[i] = token_id for TDM gather A load
+        # _a_out_row_ids[i] = tok * topk + slot for TDM gather store output
+        _a_tok_ids = []
+        _a_out_row_ids = []
 
         def _precompute_a_row_indices():
-            """Load sorted_ids for all tile_m rows and decode token_ids.
-
-            OOB token_ids (>= tokens) are clamped to 0 to prevent TDM
-            gather from accessing out-of-bounds global memory.
-            """
+            """Load sorted_ids for all tile_m rows and decode token_ids + output row indices."""
             for _ri in range_constexpr(int(tile_m)):
                 _sorted_row = by * fx.Index(int(tile_m)) + fx.Index(_ri)
                 _sorted_i32 = arith.index_cast(T.i32, _sorted_row)
@@ -1853,12 +1838,24 @@ def _compile_stage1_mxscale_kernel_impl(
                 )
                 _fused = buffer_ops.buffer_load(sorted_rsrc, _sorted_safe, vec_width=1, dtype=T.i32)
                 _tok = _fused & fx.Int32((1 << 24) - 1)
-                # Clamp OOB token_ids to 0 (safe row) — TDM does not
-                # provide per-row OOB checking, only tensor-level.
+                _slot = _fused >> fx.Int32(24)
+                # Clamp OOB token_ids to 0 for TDM gather safety
                 _tok_ok = arith.cmpi(arith.CmpIPredicate.ult, _tok, i32_tokens_in)
                 _tok_safe = arith.select(_tok_ok, _tok, fx.Int32(0))
                 _tok_sgpr = rocdl.readfirstlane(T.i32, _tok_safe)
                 _a_tok_ids.append(_tok_sgpr)
+                # Output row index: tok * topk + slot (for TDM gather store).
+                # OOB rows must map to an out-of-range index so TDM's
+                # tensor_dim1 OOB check drops them instead of writing zeros
+                # on top of valid output rows.
+                _out_row = _tok_safe * fx.Int32(int(topk)) + _slot
+                _slot_ok = arith.cmpi(arith.CmpIPredicate.slt, _slot, fx.Int32(int(topk)))
+                _row_fully_ok = arith.andi(_tok_ok, _slot_ok)
+                _out_row_safe = arith.select(
+                    _row_fully_ok, _out_row,
+                    fx.Int32(0x7FFFFFFE))  # sentinel: will OOB on tensor_dim1
+                _out_row_sgpr = rocdl.readfirstlane(T.i32, _out_row_safe)
+                _a_out_row_ids.append(_out_row_sgpr)
 
         _TDM_GATHER_CHUNK = 8
         _TDM_GATHER_GROUPS = (int(tile_m) + _TDM_GATHER_CHUNK - 1) // _TDM_GATHER_CHUNK
@@ -2138,7 +2135,7 @@ def _compile_stage1_mxscale_kernel_impl(
 
         _if_blk = scf.IfOp(block_ok)
         with ir.InsertionPoint(_if_blk.then_block):
-            if _use_tdm_gather_a:
+            if _use_tdm_gather_a or bool(use_tdm_store):
                 _precompute_a_row_indices()
             a_data_bases = _precompute_a_data_bases()
             b_data_bases = _precompute_b_data_bases()
@@ -2373,7 +2370,74 @@ def _compile_stage1_mxscale_kernel_impl(
                         _fused_sub8, out_elem=out_elem_ty)
 
                 rocdl.s_wait_dscnt(0)
-                tdm_ops.tensor_store_2d(d_desc_s1)
+                # TDM gather store: each warp stores its warp_tile_m rows
+                # to scattered output positions tok*topk+slot.
+                _warp_row_start = arith.index_cast(T.i32, warp_m_base)
+                _warp_row_start_py = rocdl.readfirstlane(T.i32, _warp_row_start)
+                _d_store_chunk = 8  # 32-bit gather mode
+                _d_store_groups = (warp_tile_m + _d_store_chunk - 1) // _d_store_chunk
+                for _dsi in range_constexpr(_d_store_groups):
+                    _ds_start = _dsi * _d_store_chunk
+                    _ds_cnt = min(_d_store_chunk, warp_tile_m - _ds_start)
+                    # Global output row indices for this group
+                    _ds_start_in_tile = _dsi * _d_store_chunk + rocdl.readfirstlane(
+                        T.i32, arith.index_cast(T.i32, warp_m_base))
+                    # Can't do runtime add on SGPR easily; use compile-time
+                    # warp offset from wave_id. But warp_m_base is runtime.
+                    # Instead, index _a_out_row_ids which is tile-global.
+                    # warp_m_base = wave_m_idx * warp_tile_m (runtime index)
+                    # We need _a_out_row_ids[warp_m_base + _ds_start + i]
+                    # Since warp_m_base depends on wave_id, we use scf.if
+                    # per warp to select the correct slice.
+                    # Simpler: for num_warps_m = m_warp, unroll per warp:
+                    _ds_indices = []
+                    for _wi in range_constexpr(int(m_warp)):
+                        _tile_row = _wi * warp_tile_m + _ds_start
+                        _warp_indices = _a_out_row_ids[_tile_row:_tile_row + _ds_cnt]
+                        if _wi == 0:
+                            _ds_indices = list(_warp_indices)
+                        else:
+                            _is_this_warp = arith.cmpi(
+                                arith.CmpIPredicate.eq,
+                                rocdl.wave_id() % fx.Int32(int(n_warp * m_warp) // int(n_warp)),
+                                fx.Int32(_wi))
+                            # Actually wave_m_idx is the M warp index
+                            _is_this_warp = arith.cmpi(
+                                arith.CmpIPredicate.eq,
+                                arith.index_cast(T.i32, wave_m_idx),
+                                fx.Int32(_wi))
+                            for _ii in range_constexpr(len(_ds_indices)):
+                                _ds_indices[_ii] = arith.select(
+                                    _is_this_warp,
+                                    _warp_indices[_ii],
+                                    _ds_indices[_ii])
+                    # LDS offset within D buffer for this group
+                    _ds_lds_off = arith.index(
+                        _ds_start * lds_d_row_stride_s1) + d_warp_off_sgpr_s1
+                    # Column offset in output
+                    _col_byte_off = (blk_n + warp_n_off_sgpr_s1) * arith.index(elem_bytes_d_s1)
+                    # For store direction: TDM ignores pad_enable, so we
+                    # expand tile_dim0 to include padding so LDS read
+                    # addresses align. tensor_dim0 stays at warp_tile_n so
+                    # the extra pad elements hit OOB and are dropped.
+                    _pad_elems = LDS_PAD_D_BYTES_s1 // elem_bytes_d_s1
+                    _store_tile_w = warp_tile_n + _pad_elems
+                    _d_store_desc = tdm_ops.make_tensor_gather_descriptor(
+                        global_ptr=arg_out,
+                        lds_memref=base_ptr,
+                        row_indices=_ds_indices,
+                        row_width=_store_tile_w,
+                        tensor_dim0=warp_tile_n,
+                        tensor_dim1=_get_tokens_sgpr() * fx.Int32(int(topk)),
+                        stride=N,
+                        elem_bytes=elem_bytes_d_s1,
+                        pad_interval=0,
+                        pad_amount=0,
+                        index_size=32,
+                        lds_byte_offset=_ds_lds_off,
+                        global_byte_offset=_col_byte_off,
+                    )
+                    tdm_ops.tensor_store_gather(_d_store_desc)
                 tdm_ops.tensor_wait(0)
             else:
                 def _load_gate_up_sub8(acc_idx, vec_base):
