@@ -337,10 +337,10 @@ def compile_moe_blockscale_gemm1(
 
                 # fp16 path ignores scales completely (implicit scale=1.0).
                 x_load_bytes = 16
-                if is_f16:
-                    sx_rsrc = None
-                    sw_rsrc = None
-                else:
+                
+                sx_rsrc = -1
+                sw_rsrc = -1
+                if not is_f16:
                     # scale_x: [nblk_k_w1, tokens] f32 transposed -> total = nblk_k_w1 * tokens
                     sx_nbytes_idx = arith.index(nblk_k_w1) * tokens_in * fx.Index(4)
                     sx_rsrc = buffer_ops.create_buffer_resource(
@@ -1515,10 +1515,9 @@ def compile_moe_blockscale_gemm2(
                 arg_out, max_size=False, num_records_bytes=arith.index_cast(T.i64, out_nbytes_idx)
             )
             # fp16 path ignores scales completely (implicit scale=1.0).
-            if is_f16:
-                sx_rsrc = None
-                sw_rsrc = None
-            else:
+            sx_rsrc = -1
+            sw_rsrc = -1
+            if not is_f16:
                 # scale_x (A2 scale): [nblk_k_w2, tokens*topk] f32 transposed -> total = nblk_k_w2 * tokens * topk
                 sx_nbytes_idx = arith.index(nblk_k_w2) * (tokens_in * c_topk) * fx.Index(4)
                 sx_rsrc = buffer_ops.create_buffer_resource(
@@ -1569,6 +1568,7 @@ def compile_moe_blockscale_gemm2(
                 # ---- X gmem->reg prefetch (match preshuffle GEMM mapping) ----
                 # Prefer 16B buffer-load (dwordx4). If the per-thread byte count isn't divisible by
                 # 16, fall back to 8B (dwordx2) or 4B (dword) loads. For fp16 we require 16B.
+                x_load_bytes = 0
                 if is_f16:
                     if bytes_per_thread_x % 16 != 0:
                         raise ValueError(
@@ -1877,6 +1877,7 @@ def compile_moe_blockscale_gemm2(
 
                         _sw_shared_n_s2 = (n_per_wave <= 128)
                         s_w_vals = []
+                        s_w = arith.constant(1.0, type=T.f32)
                         for ni in range_constexpr(num_acc_n):
                             if ni == 0 or not _sw_shared_n_s2:
                                 sw_idx = _pre_n_block_s2[ni] * c_nblk_k_w2 + kb
@@ -2306,6 +2307,7 @@ def compile_moe_blockscale_gemm2(
                         lds_out,
                     ):
                         # Blockscale: dequant already done in compute_tile_bs_s2.
+                        tw = arith.constant(1.0, type=T.f32)
                         if doweight_stage2:
                             tw = buffer_ops.buffer_load(
                                 sorted_w_rsrc, row, vec_width=1, dtype=T.f32
