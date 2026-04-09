@@ -2332,12 +2332,14 @@ def _compile_stage1_mxscale_kernel_impl(
                             _tkb = fx.Index(
                                 (_tail_start + pre_loaded + _tail_li)
                                 * int(tile_k))
-                            _issue_b_tdm_only(_tkb, _ls)
                             _tail_li += 1
-                        acc_g, acc_u = _compute_k_tile(
-                            acc_g, acc_u, _cs)
-                        if _ls is not None:
+                            _issue_b_tdm_only(_tkb, _ls)
+                            acc_g, acc_u = _compute_k_tile(
+                                acc_g, acc_u, _cs)
                             _issue_scalar_loads(_tkb, _ls)
+                        else:
+                            acc_g, acc_u = _compute_k_tile(
+                                acc_g, acc_u, _cs)
 
             out_elem_ty = _moe_out_elem_ty(out_dtype, T)
 
@@ -2617,6 +2619,7 @@ def _compile_stage2_mxscale_kernel_impl(
     PACK_FACTOR_B = int(fmt_cfg["PACK_FACTOR_B"])
     ACC_VEC_SIZE = int(fmt_cfg["ACC_VEC_SIZE"])
     WMMA_N_EFF = int(fmt_cfg["WMMA_N_EFF"])
+    DS_LOADS_PER_A_FRAG = int(fmt_cfg["DS_LOADS_PER_A_FRAG"])
 
     WMMA_M, WMMA_N, WMMA_K = 16, 16, 128
     SCALE_BLOCK = 32
@@ -3263,9 +3266,36 @@ def _compile_stage2_mxscale_kernel_impl(
             b_data_bases = _precompute_b_data_bases()
             as_bases = _precompute_a_scale_lane_bases()
             bs_bases = _precompute_b_scale_lane_bases()
+            _use_scheduled_compute = _use_pipeline and not is_fp4
+            _front_wm = (wmma_m_rep + 1) // 2
+            _back_wm = wmma_m_rep - _front_wm
+            _front_wmma = _front_wm * wmma_n_rep
+            _back_wmma = _back_wm * wmma_n_rep
+            _b_frag_ds_loads_per_wn = 2 if is_a8w4 else 4
+            _a_scale_ds_loads = wmma_m_rep if is_fp4 else (wmma_m_rep + 3) // 4
+            _b_scale_ds_loads = b_scale_load_rep if is_fp4 else wmma_n_rep
+            _bs_ds_loads = (
+                wmma_n_rep * _b_frag_ds_loads_per_wn
+                + _b_scale_ds_loads
+                + _a_scale_ds_loads
+            )
 
             # ── compute-tile helper ──────────────────────────────────
-            def _compute_k_tile(accs_in, buf_idx):
+            def _compute_k_tile(accs_in, buf_idx, mid_compute_callback=None):
+                _mid_emit_ks = 0
+                if k_wmma_steps > 1:
+                    _mid_emit_wm = wmma_m_rep - 1
+                    _mid_emit_wn = wmma_n_rep - 1
+                else:
+                    _front_wm = (wmma_m_rep + 1) // 2
+                    _front_wn = (wmma_n_rep + 1) // 2
+                    if wmma_m_rep > 1:
+                        _mid_emit_wm = _front_wm - 1
+                        _mid_emit_wn = wmma_n_rep - 1
+                    else:
+                        _mid_emit_wm = 0
+                        _mid_emit_wn = _front_wn - 1
+                _did_mid = False
                 for ks in range_constexpr(k_wmma_steps):
                     b_v = [load_b_frag(lds_b_bufs[buf_idx], b_data_bases, wn, ks)
                            for wn in range_constexpr(wmma_n_rep)]
@@ -3291,7 +3321,168 @@ def _compile_stage2_mxscale_kernel_impl(
                                 use_scale_opsel=False,
                                 rocdl=rocdl, T=T,
                             )
+                            if (
+                                not _did_mid
+                                and mid_compute_callback is not None
+                                and ks == _mid_emit_ks
+                                and wm == _mid_emit_wm
+                                and wn == _mid_emit_wn
+                            ):
+                                mid_compute_callback()
+                                _did_mid = True
                 return accs_in
+
+            def _load_b_and_scales(buf_idx, ks):
+                b_v = [load_b_frag(lds_b_bufs[buf_idx], b_data_bases, wn, ks)
+                       for wn in range_constexpr(wmma_n_rep)]
+                if is_fp4:
+                    as_v = [load_scale_i32(lds_as_bufs[buf_idx], as_bases[wm], ks)
+                            for wm in range_constexpr(wmma_m_rep)]
+                    bs_v = [load_scale_i32(lds_bs_bufs[buf_idx], bs_bases[bi], ks)
+                            for bi in range_constexpr(b_scale_load_rep)]
+                else:
+                    as_v = load_scale_b128(lds_as_bufs[buf_idx], as_bases[0],
+                                           wmma_m_rep, ks)
+                    bs_v = [load_scale_i32(lds_bs_bufs[buf_idx], bs_bases[wn], ks)
+                            for wn in range_constexpr(wmma_n_rep)]
+                return b_v, bs_v, as_v
+
+            def _emit_rows(accs_in, start_wm, a_frags, b_frags, a_scales, b_scales):
+                for frag_i in range_constexpr(len(a_frags)):
+                    wm = start_wm + frag_i
+                    for wn_raw in range_constexpr(wmma_n_rep):
+                        wn = (wmma_n_rep - 1 - wn_raw) if (wm % 2 == 1) else wn_raw
+                        _mxscale_emit_wmma(
+                            accs=accs_in,
+                            wm=wm,
+                            wn=wn,
+                            a_frag=a_frags[frag_i],
+                            b_frags=b_frags,
+                            a_scales=a_scales,
+                            b_scales=b_scales,
+                            is_fp4=is_fp4,
+                            is_a8w4=is_a8w4,
+                            use_scale_opsel=False,
+                            rocdl=rocdl,
+                            T=T,
+                        )
+
+            def _a_streaming_compute(
+                accs_in,
+                buf_idx,
+                b_frags,
+                b_scales,
+                a_scales,
+                ks,
+                next_bs_info=None,
+                mid_compute_callback=None,
+            ):
+                current_accs = accs_in
+                next_result = None
+                a_frags_front = [
+                    load_data_frag(lds_a_bufs[buf_idx], a_data_bases[wm], ks)
+                    for wm in range_constexpr(_front_wm)
+                ]
+                _use_partial_drain = (
+                    next_bs_info is not None
+                    and _front_wm * wmma_n_rep >= 4
+                )
+
+                if _use_partial_drain:
+                    _next_buf_idx, _next_ks = next_bs_info
+                    next_result = _load_b_and_scales(_next_buf_idx, _next_ks)
+                    rocdl.s_wait_dscnt(_bs_ds_loads)
+                else:
+                    rocdl.s_wait_dscnt(0)
+
+                _emit_rows(current_accs, 0, a_frags_front, b_frags, a_scales, b_scales)
+
+                if mid_compute_callback is not None:
+                    rocdl.sched_barrier(0)
+                    mid_compute_callback()
+
+                if _back_wm > 0:
+                    a_frags_back = [
+                        load_data_frag(
+                            lds_a_bufs[buf_idx],
+                            a_data_bases[_front_wm + h],
+                            ks,
+                        )
+                        for h in range_constexpr(_back_wm)
+                    ]
+                    _back_drain = _bs_ds_loads if _use_partial_drain else 0
+                    rocdl.s_wait_dscnt(_back_drain)
+                    _emit_rows(
+                        current_accs,
+                        _front_wm,
+                        a_frags_back,
+                        b_frags,
+                        a_scales,
+                        b_scales,
+                    )
+
+                if _use_partial_drain:
+                    return current_accs, next_result
+                if next_bs_info is not None:
+                    _next_buf_idx, _next_ks = next_bs_info
+                    next_result = _load_b_and_scales(_next_buf_idx, _next_ks)
+                    return current_accs, next_result
+                return current_accs
+
+            def _compute_k_tile_scheduled(accs_in, buf_idx, mid_compute_callback=None):
+                current_accs = list(accs_in)
+                if k_wmma_steps == 1:
+                    b_v, bs_v, as_v = _load_b_and_scales(buf_idx, 0)
+                    current_accs = _a_streaming_compute(
+                        current_accs,
+                        buf_idx,
+                        b_v,
+                        bs_v,
+                        as_v,
+                        0,
+                        mid_compute_callback=mid_compute_callback,
+                    )
+                else:
+                    prev_b, prev_bs, prev_as = _load_b_and_scales(buf_idx, 0)
+                    for ks in range_constexpr(k_wmma_steps - 1):
+                        _mid_cb = mid_compute_callback if ks == 0 else None
+                        current_accs, (prev_b, prev_bs, prev_as) = _a_streaming_compute(
+                            current_accs,
+                            buf_idx,
+                            prev_b,
+                            prev_bs,
+                            prev_as,
+                            ks,
+                            next_bs_info=(buf_idx, ks + 1),
+                            mid_compute_callback=_mid_cb,
+                        )
+                    current_accs = _a_streaming_compute(
+                        current_accs,
+                        buf_idx,
+                        prev_b,
+                        prev_bs,
+                        prev_as,
+                        k_wmma_steps - 1,
+                    )
+                return current_accs
+
+            def _hot_loop_scheduler_scheduled():
+                if not _use_scheduled_compute:
+                    return
+                _front_a_loads = _front_wm * DS_LOADS_PER_A_FRAG
+                _back_a_loads = _back_wm * DS_LOADS_PER_A_FRAG
+                for _ks in range_constexpr(k_wmma_steps):
+                    if _ks == 0:
+                        rocdl.sched_dsrd(_bs_ds_loads + _front_a_loads)
+                    else:
+                        rocdl.sched_dsrd(_front_a_loads)
+                    rocdl.sched_mfma(_front_wmma)
+                    if _back_wmma > 0:
+                        rocdl.sched_dsrd(_back_a_loads)
+                        rocdl.sched_mfma(_back_wmma)
+                    if _ks < k_wmma_steps - 1:
+                        rocdl.sched_dsrd(_bs_ds_loads)
+                rocdl.sched_barrier(0)
 
             # ── pipeline load helpers ─────────────────────────────────
             def _issue_b_tdm_only(k_base, buf_idx):
@@ -3320,9 +3511,35 @@ def _compile_stage2_mxscale_kernel_impl(
                     issue_a_load(make_desc_a(k_base), lds_a_bufs[buf_idx])
                 issue_as_load(make_desc_as(k_base), lds_as_bufs[buf_idx])
 
+            def _issue_scalar_loads_mid(k_base, buf_idx):
+                if _use_tdm_gather_a:
+                    # In the mid-compute path we only need to drain prior 2D TDM.
+                    # The matching cross-wave barrier stays at the next fence.
+                    tdm_ops.tensor_wait(0)
+                    issue_a_load_tdm_gather(k_base, lds_a_bufs[buf_idx])
+                else:
+                    issue_a_load(make_desc_a(k_base), lds_a_bufs[buf_idx])
+                issue_as_load(make_desc_as(k_base), lds_as_bufs[buf_idx])
+
             def _issue_all_loads(k_base, buf_idx):
                 _issue_b_tdm_only(k_base, buf_idx)
                 _issue_scalar_loads(k_base, buf_idx)
+
+            def _compute_with_mid_loads(accs_in, buf_idx, mid_load_callback=None):
+                if _use_scheduled_compute:
+                    return _compute_k_tile_scheduled(
+                        accs_in,
+                        buf_idx,
+                        mid_compute_callback=mid_load_callback,
+                    )
+                if mid_load_callback is None:
+                    return _compute_k_tile(accs_in, buf_idx)
+
+                return _compute_k_tile(
+                    accs_in,
+                    buf_idx,
+                    mid_compute_callback=mid_load_callback,
+                )
 
             # ── main K-dimension reduction ────────────────────────────
             if not _use_pipeline:
@@ -3361,9 +3578,21 @@ def _compile_stage2_mxscale_kernel_impl(
                                 outstanding=_fence_outstanding,
                                 use_cluster=use_cluster)
                             pipeline_fence_wait(use_cluster=use_cluster)
+
                             _issue_b_tdm_only(_kb, _lb)
-                            _acc = _compute_k_tile(_acc, _bi)
-                            _issue_scalar_loads(_kb, _lb)
+
+                            def _mid_issue_scalar(_mid_kb=_kb, _mid_lb=_lb):
+                                _issue_scalar_loads_mid(_mid_kb, _mid_lb)
+
+                            if _use_scheduled_compute:
+                                rocdl.sched_barrier(0)
+                            _acc = _compute_with_mid_loads(
+                                _acc,
+                                _bi,
+                                _mid_issue_scalar,
+                            )
+                            if _use_scheduled_compute:
+                                _hot_loop_scheduler_scheduled()
                         _res = yield list(_acc)
                     acc = list(_res[:n_accs])
 
@@ -3381,7 +3610,12 @@ def _compile_stage2_mxscale_kernel_impl(
                         if _tail_had_load:
                             pipeline_fence(outstanding=0,
                                            use_cluster=use_cluster)
-                        acc = _compute_k_tile(acc, _cs)
+                        if _use_scheduled_compute:
+                            rocdl.sched_barrier(0)
+                            acc = _compute_k_tile_scheduled(acc, _cs)
+                            _hot_loop_scheduler_scheduled()
+                        else:
+                            acc = _compute_k_tile(acc, _cs)
                     else:
                         pipeline_fence_signal(outstanding=_out,
                                               use_cluster=use_cluster)
@@ -3391,11 +3625,29 @@ def _compile_stage2_mxscale_kernel_impl(
                             _tkb = fx.Index(
                                 (_tail_start + pre_loaded + _tail_li)
                                 * int(tile_k))
-                            _issue_b_tdm_only(_tkb, _ls)
                             _tail_li += 1
-                        acc = _compute_k_tile(acc, _cs)
-                        if _ls is not None:
-                            _issue_scalar_loads(_tkb, _ls)
+
+                            _issue_b_tdm_only(_tkb, _ls)
+
+                            def _tail_mid_issue_scalar(_mid_kb=_tkb, _mid_ls=_ls):
+                                _issue_scalar_loads_mid(_mid_kb, _mid_ls)
+
+                            if _use_scheduled_compute:
+                                rocdl.sched_barrier(0)
+                            acc = _compute_with_mid_loads(
+                                acc,
+                                _cs,
+                                _tail_mid_issue_scalar,
+                            )
+                            if _use_scheduled_compute:
+                                _hot_loop_scheduler_scheduled()
+                        else:
+                            if _use_scheduled_compute:
+                                rocdl.sched_barrier(0)
+                                acc = _compute_k_tile_scheduled(acc, _cs)
+                                _hot_loop_scheduler_scheduled()
+                            else:
+                                acc = _compute_k_tile(acc, _cs)
 
             out_elem_ty = _moe_out_elem_ty(out_dtype, T)
 
