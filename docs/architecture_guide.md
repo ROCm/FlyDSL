@@ -73,26 +73,40 @@ FlyDSL/
 │
 ├── examples/                         # Runnable examples
 │   ├── 01-vectorAdd.py               # Vector addition with layout algebra
-│   └── 02-tiledCopy.py               # Tiled copy with partitioned tensors
+│   ├── 02-tiledCopy.py               # Tiled copy with partitioned tensors
+│   ├── 03-tiledMma.py                # Tiled MMA (GEMM) with MFMA atoms
+│   └── 04-preshuffle_gemm.py         # Preshuffle GEMM end-to-end example
 │
-├── kernels/                          # Pre-built GPU kernels
-│   ├── preshuffle_gemm.py       # GEMM with B-preshuffle (@flyc.kernel API)
-│   ├── layernorm_kernel.py           # LayerNorm
-│   ├── rmsnorm_kernel.py             # RMSNorm
-│   ├── softmax_kernel.py             # Softmax
-│   ├── reduce.py                     # Warp/block reduction primitives
-│   ├── mfma_epilogues.py             # MFMA result writeback patterns
+├── kernels/                          # Production GPU kernels
+│   ├── preshuffle_gemm.py            # GEMM (preshuffle layout)
+│   ├── blockscale_preshuffle_gemm.py # Blockscale GEMM
+│   ├── hgemm_splitk.py               # FP16 GEMM split-K
+│   ├── moe_gemm_2stage.py            # MoE GEMM (2-stage gate/up + reduce)
+│   ├── moe_blockscale_2stage.py      # MoE Blockscale GEMM
+│   ├── mixed_moe_gemm_2stage.py      # Mixed-precision MoE GEMM
+│   ├── pa_decode_fp8.py              # Paged attention decode (FP8)
+│   ├── flash_attn_func.py            # FlashAttention
+│   ├── layernorm_kernel.py           # LayerNorm (layout API)
+│   ├── rmsnorm_kernel.py             # RMSNorm (layout API)
+│   ├── softmax_kernel.py             # Softmax (layout API)
+│   ├── fused_rope_cache_kernel.py    # Fused RoPE + KV cache
+│   ├── custom_all_reduce.py          # Multi-GPU all-reduce
+│   ├── rdna_f16_gemm.py              # RDNA FP16 GEMM
+│   ├── rdna_fp8_preshuffle_gemm.py   # RDNA FP8 GEMM
+│   ├── gemm_common_gfx1250.py        # GFX1250 GEMM common
+│   ├── gemm_fp8fp4_gfx1250.py        # GFX1250 FP8/FP4 GEMM
+│   ├── wmma_gemm_gfx1250.py          # GFX1250 WMMA GEMM
+│   ├── mfma_epilogues.py             # MFMA epilogue helpers
 │   ├── mfma_preshuffle_pipeline.py   # Preshuffle helpers for MFMA kernels
-│   └── layout_utils.py              # Layout computation utilities
+│   ├── pipeline_utils.py             # Pipeline utility helpers
+│   ├── kernels_common.py             # Common kernel utilities
+│   └── tensor_shim.py                # GTensor/STensor abstraction
 │
 ├── tests/
-│   ├── mlir/                         # MLIR IR tests (no GPU required)
-│   ├── python/                       # Python-based tests (examples, AOT)
+│   ├── mlir/                         # MLIR-level tests (Conversion, LayoutAlgebra, Transforms)
 │   ├── kernels/                      # GPU kernel tests + benchmarks
-│   ├── python/                       # Python DSL tests
-│   │   ├── examples/                 # Example-based tests
-│   │   ├── gpu/                      # GPU tests
-│   │   └── ir/                       # IR generation tests
+│   ├── python/                       # Python-based tests (examples, AOT)
+│   ├── unit/                         # Unit tests (streams, async, etc.)
 │   ├── conftest.py                   # Pytest fixtures
 │   ├── test_common.py                # Shared test utilities
 │   └── utils.py                      # Compilation helpers

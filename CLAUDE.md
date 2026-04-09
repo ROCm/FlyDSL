@@ -1,6 +1,6 @@
 # FlyDSL Project Guide
 
-FlyDSL (Flexible Layout Python DSL) — a Python DSL and MLIR-based compiler stack for authoring high-performance GPU kernels with explicit layouts and tiling on AMD GPUs (MI300X/MI350).
+FlyDSL (Flexible Layout Python DSL) — a Python DSL and MLIR-based compiler stack for authoring high-performance GPU kernels with explicit layouts and tiling on AMD GPUs (MI300X/MI350/MI450).
 
 ## Repository Layout
 
@@ -28,11 +28,11 @@ FlyDSL/
 │   ├── flash_attn_func.py  # FlashAttention
 │   ├── fused_rope_cache_kernel.py  # Fused RoPE + KV cache
 │   ├── custom_all_reduce.py       # Multi-GPU all-reduce
-│   ├── rdna_f16_gemm.py           # RDNA FP16 GEMM
-│   ├── rdna_fp8_preshuffle_gemm.py # RDNA FP8 GEMM
-│   ├── gemm_common_gfx1250.py     # GFX1250 GEMM common
-│   ├── gemm_fp8fp4_gfx1250.py     # GFX1250 FP8/FP4 GEMM
-│   ├── wmma_gemm_gfx1250.py       # GFX1250 WMMA GEMM
+│   ├── rdna_f16_gemm.py           # RDNA4 (gfx120x) FP16 GEMM
+│   ├── rdna_fp8_preshuffle_gemm.py # RDNA4 (gfx120x) FP8 GEMM
+│   ├── gemm_common_gfx1250.py     # GFX1250 (MI450) GEMM common
+│   ├── gemm_fp8fp4_gfx1250.py     # GFX1250 (MI450) FP8/FP4 GEMM
+│   ├── wmma_gemm_gfx1250.py       # GFX1250 (MI450) WMMA GEMM
 │   ├── mfma_preshuffle_pipeline.py # Shared MFMA/preshuffle helpers
 │   ├── mfma_epilogues.py          # MFMA epilogue helpers
 │   ├── pipeline_utils.py          # Pipeline utility helpers
