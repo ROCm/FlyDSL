@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
+from enum import IntEnum
 from typing import overload
 
 from .._mlir import ir
@@ -691,8 +692,9 @@ def make_copy_atom(copy_op_type, elem_type, loc=None, ip=None):
 
 @traced_op
 def atom_set_value(atom, field, value, loc=None, ip=None):
-    """Update a field in a stateful atom (SSA-style, returns new atom)."""
-    return fly.atom_set_value(atom.type, atom, field, value, loc=loc, ip=ip)
+    if isinstance(field, IntEnum):
+        field = str(field)
+    return fly.atom_set_value(atom, field, value, loc=loc, ip=ip)
 
 
 @traced_op

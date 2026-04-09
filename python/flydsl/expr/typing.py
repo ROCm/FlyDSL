@@ -619,6 +619,10 @@ class CopyAtom(BuiltinDslType):
     def layout_ref_tv(self):
         return static(self.type.tv_layout_ref)
 
+    @traced_op
+    def set_value(self, field, value, loc=None, ip=None):
+        return atom_set_value(self, field, value, loc=loc, ip=ip)
+
 
 @ir.register_value_caster(MmaAtomType.static_typeid, replace=True)
 class MmaAtom(BuiltinDslType):
@@ -645,6 +649,10 @@ class MmaAtom(BuiltinDslType):
     @property
     def layout_C_tv(self):
         return static(self.type.tv_layout_c)
+
+    @traced_op
+    def set_value(self, field, value, loc=None, ip=None):
+        return atom_set_value(self, field, value, loc=loc, ip=ip)
 
 
 @ir.register_value_caster(TiledCopyType.static_typeid, replace=True)
