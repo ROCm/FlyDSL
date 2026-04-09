@@ -13,6 +13,7 @@ from __future__ import annotations
 import math
 import torch
 import functools
+from contextlib import contextmanager
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.expr import arith, vector, gpu, rocdl, buffer_ops, range_constexpr
@@ -26,6 +27,34 @@ try:
 except ImportError:
     pass
 from flydsl._mlir.dialects import arith as _mlir_arith
+from flydsl._mlir.dialects import scf
+
+
+@contextmanager
+def _if_then(if_op):
+    """Compat helper for SCF IfOp then-region across old/new Python APIs."""
+    with ir.InsertionPoint(if_op.then_block):
+        try:
+            yield if_op.then_block
+        finally:
+            blk = if_op.then_block
+            if (not blk.operations) or not isinstance(blk.operations[-1], scf.YieldOp):
+                scf.YieldOp([])
+
+
+@contextmanager
+def _if_else(if_op):
+    """Compat helper for SCF IfOp else-region across old/new Python APIs."""
+    if getattr(if_op, "else_block", None) is None:
+        raise RuntimeError("IfOp has no else block")
+    with ir.InsertionPoint(if_op.else_block):
+        try:
+            yield if_op.else_block
+        finally:
+            blk = if_op.else_block
+            if (not blk.operations) or not isinstance(blk.operations[-1], scf.YieldOp):
+                scf.YieldOp([])
+
 
 # ── Kernel geometry constants ────────────────────────────────────────
 QUERY_GROUP_SIZE = 16
@@ -1069,14 +1098,15 @@ def compile_pa_decode_ps(
                 tile_token_offset=tile_token_offset,
                 num_blocks_in_work=num_blocks_in_work,
             )
-            _has_valid_blocks = _valid_blocks_in_work > c_zero_i32
+            _has_valid_blocks = arith.cmpi(arith.CmpIPredicate.sgt, _valid_blocks_in_work, c_zero_i32)
             _loop_start_g = arith.index(0)
             _loop_stop_g = arith.index_cast(T.index, arith.unwrap(_valid_blocks_in_work))
             _loop_step_g = arith.index(1)
             _mtp_groups = math.ceil(query_length * query_group_size / 16)
             _total_pairs = query_length * query_group_size
 
-            if _has_valid_blocks:
+            _if_valid = scf.IfOp(_has_valid_blocks, has_else=True)
+            with _if_then(_if_valid):
                 first_phys_block = buffer_ops.buffer_load(
                     kpi_rsrc, kv_start, vec_width=1, dtype=T.i32
                 )
@@ -1216,7 +1246,7 @@ def compile_pa_decode_ps(
                     lse_as_i32 = arith.bitcast(T.i32, lse_val)
                     buffer_ops.buffer_store(lse_as_i32, pl_rsrc,
                         pl_off * arith.constant(4, type=T.i32), offset_is_bytes=True)
-            else:
+            with _if_else(_if_valid):
                 # ── Early skip path: write zero partial_out and -inf LSE ──
                 _neg_inf_i32 = arith.bitcast(T.i32, NEG_INF)
                 _zero_vec = arith.constant_vector(0.0, T.f32x4)

@@ -423,7 +423,7 @@ def shuffle_value_cache_layout(value_cache: torch.Tensor) -> torch.Tensor:
     return value_cache_reshaped.permute(0, 1, 3, 2, 4).contiguous()
 
 
-def measure_us(fn, *, warmup: int = 1, iters: int = 10) -> float:
+def measure_us(fn, *, warmup: int = 5, iters: int = 10) -> float:
     for _ in range(warmup):
         fn()
     torch.cuda.synchronize()
