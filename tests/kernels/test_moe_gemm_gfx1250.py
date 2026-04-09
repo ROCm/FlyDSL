@@ -783,12 +783,6 @@ def run_moe_stage1(
             w1_rows,
             w1_cols,
         ).view_as(w1_q)
-        scale_w1_kernel = preshuffle_e8m0_scale(
-            scale_w1.view(w1_rows, model_dim // 32),
-            _warp_tile_n,
-            scale_k_per_tile=tile_k // SCALE_BLOCK,
-            byte_swap=False,
-        ).view(w1_rows, model_dim // 32)
 
     # Flatten W1 for our FlyDSL kernel (treat expert dim as part of N).
     uses_block_scale = in_dtype in ("fp8", "a8w4", "fp4")
@@ -1382,12 +1376,6 @@ def run_moe_stage2(
             w2_rows,
             w2_cols,
         ).view_as(w2_q)
-        scale_w2_kernel = preshuffle_e8m0_scale(
-            scale_w2.view(w2_rows, inter_dim // 32),
-            _warp_tile_n,
-            scale_k_per_tile=tile_k // SCALE_BLOCK,
-            byte_swap=False,
-        ).view(w2_rows, inter_dim // 32)
 
     # Stage2 input (A2): either provided (gemm1->quantize chaining) or built from stage1 reference.
     # For int4_bf16, A2 is bf16 (same as fp16 for scale handling).
@@ -2277,9 +2265,7 @@ def test_moe_gemm_2stage(
         pytest.skip("valid_mask is only used in reduce mode (atomic mode ignores it).")
     if out_dtype in ("f32", "fp32", "float") and in_dtype in ("fp4", "fp8", "a8w4", "fp16", "bf16"):
         pytest.skip(f"gfx1250 {in_dtype} kernels only support out_dtype f16/bf16, not f32.")
-    if in_dtype in ("fp4", "a8w4"):
-        # Keep fp4 in the main parameterized matrix, but only run the small shape
-        # to avoid excessive compile/runtime during broad CI sweeps.
+    if in_dtype in ("fp4", "a8w4") and os.environ.get("FLYDSL_SKIP_SHAPE_GUARD", "0") != "1":
         is_small_shape = (
             tokens == 64
             and model_dim == 256
@@ -2701,14 +2687,46 @@ BENCH_MODEL_CONFIGS = [
     ("GPToss",      2880,   2880,   128,  4),
 ]
 
-BENCH_DTYPE_TILE_MAP = {
-    # dtype: (tile_m, tile_n_s1, tile_k_s1, tile_n_s2, tile_k_s2)
-    "fp4":  (32, 64, 128, 64, 128),
-    "fp8":  (32, 64, 128, 64, 128),
-    "a8w4": (32, 64, 128, 64, 128),
-    "fp16": (32, 64,  64, 64,  64),
-    "bf16": (32, 64,  64, 64,  64),
+BENCH_DTYPE_TARGET_TILES = {
+    # dtype: (tile_m, target_n, target_k, wmma_k)
+    "fp4":  (16, 256, 512, 128),
+    "fp8":  (16, 256, 512, 128),
+    "a8w4": (16, 256, 512, 128),
+    "fp16": (32,  64,  64,  32),
+    "bf16": (32,  64,  64,  32),
 }
+
+
+def _best_tile(target, dim, align):
+    """Largest value <= target that divides dim and is a multiple of align."""
+    for v in range(target, 0, -align):
+        if dim % v == 0:
+            return v
+    return None
+
+
+def _resolve_tiles(in_dtype, model_dim, inter_dim):
+    """Compute the largest valid (tile_m, tile_n1, tile_k1, tile_n2, tile_k2)
+    for a given dtype and model shape, falling back from the target when
+    dimensions don't divide evenly."""
+    tile_m, target_n, target_k, wmma_k = BENCH_DTYPE_TARGET_TILES[in_dtype]
+
+    tile_n1 = _best_tile(target_n, inter_dim, 16)
+    tile_k1 = _best_tile(target_k, model_dim, wmma_k)
+    tile_n2 = _best_tile(target_n, model_dim, 16)
+
+    tile_k2 = None
+    for k in range(target_k, 0, -wmma_k):
+        if inter_dim % k != 0:
+            continue
+        total = tile_m * k
+        if total % 256 == 0 and (total // 256) % 4 == 0:
+            tile_k2 = k
+            break
+
+    if any(v is None for v in (tile_n1, tile_k1, tile_n2, tile_k2)):
+        return None
+    return (tile_m, tile_n1, tile_k1, tile_n2, tile_k2)
 
 BENCH_DEFAULT_TOKEN_SWEEP = [1, 4, 8, 32, 64, 128, 256]
 _BENCH_SCALE_GROUP = 32
@@ -2805,7 +2823,11 @@ def bench_config(name, model_dim, inter_dim, experts, topk,
                  use_tdm_store=False, inst_prefetch=False,
                  wave_specialized_tdm=False):
     """Benchmark a single (model, dtype) configuration across all token counts."""
-    tiles = BENCH_DTYPE_TILE_MAP[in_dtype]
+    tiles = _resolve_tiles(in_dtype, model_dim, inter_dim)
+    if tiles is None:
+        _bench_print_banner(f"{name}  |  {in_dtype}  |  dim={model_dim}  inter={inter_dim}")
+        print(f"  SKIP: no valid tile for this shape (WMMA_K alignment)")
+        return
     tile_m, tile_n1, tile_k1, tile_n2, tile_k2 = tiles
 
     _bench_print_banner(f"{name}  |  {in_dtype}  |  dim={model_dim}  inter={inter_dim}  E={experts}  K={topk}")
@@ -2960,7 +2982,7 @@ def bench_main(args):
         os.environ["MOE_FP4_SAFE_PERF"] = "1"
         os.environ["MOE_FP16_SAFE_PERF"] = "1"
 
-    dtypes = args.bench_dtype.split(",") if args.bench_dtype else list(BENCH_DTYPE_TILE_MAP.keys())
+    dtypes = args.bench_dtype.split(",") if args.bench_dtype else list(BENCH_DTYPE_TARGET_TILES.keys())
     token_list = (
         [int(t) for t in args.bench_tokens.split(",")]
         if args.bench_tokens
@@ -3002,7 +3024,7 @@ def bench_main(args):
             if args.bench_config and args.bench_config not in cfg_name:
                 continue
             for dt in dtypes:
-                if dt not in BENCH_DTYPE_TILE_MAP:
+                if dt not in BENCH_DTYPE_TARGET_TILES:
                     print(f"\n  [SKIP] Unknown dtype: {dt}")
                     continue
                 try:
@@ -3068,9 +3090,9 @@ if __name__ == "__main__":
     parser.add_argument("-s", "--doweight_stage1", type=_str2bool, nargs="?", const=True, default=False, help="Whether to multiply routed weight in stage1 (t/f).")
 
     # Stage1-specific kernel tiling knobs
-    parser.add_argument("--tile_m", type=int, default=32, help="Tile M / block_m (routing block size).")
-    parser.add_argument("--tile_n", type=int, default=128, help="Tile N (inter dim tile).")
-    parser.add_argument("--tile_k", type=int, default=256, help="Tile K (model dim tile).")
+    parser.add_argument("--tile_m", type=int, default=16, help="Tile M / block_m (routing block size).")
+    parser.add_argument("--tile_n", type=int, default=256, help="Tile N (inter dim tile).")
+    parser.add_argument("--tile_k", type=int, default=512, help="Tile K (model dim tile).")
     parser.add_argument("--tile_n2", type=int, default=None, help="Stage2 tile N (model dim tile). Default: 2*tile_n.")
     parser.add_argument("--tile_k2", type=int, default=None, help="Stage2 tile K (inter dim tile). Default: tile_k.")
 
