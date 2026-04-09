@@ -203,6 +203,9 @@ def compile_moe_gemm1(
                 "(or `rocdl.mfma_f32_16x16x16_bf16_1k`)."
             )
 
+    # gfx950: use 16x16x32 MFMA for f16/bf16 (K=32 per MFMA, vs K=16 on gfx942).
+    _use_mfma_k32 = _is_gfx950 and (is_f16 or is_bf16)
+
     DYN = ir.ShapedType.get_dynamic_size()
     size_out = DYN
     size_x = DYN
@@ -770,15 +773,18 @@ def compile_moe_gemm1(
                     gate_list = list(acc_gate_in)
                     up_list = list(acc_up_in)
                     mfma_res_ty = T.i32x4 if is_int8 else T.f32x4
-                    mfma_fn = (
-                        mfma_i32_k32
-                        if is_int8
-                        else (
-                            mfma_f32_bf16_k16
-                            if is_bf16
-                            else (rocdl.mfma_f32_16x16x16f16 if is_f16 else rocdl.mfma_f32_16x16x32_fp8_fp8)
+                    if _use_mfma_k32:
+                        mfma_fn = rocdl.mfma_f32_16x16x32_f16 if is_f16 else rocdl.mfma_f32_16x16x32_bf16
+                    else:
+                        mfma_fn = (
+                            mfma_i32_k32
+                            if is_int8
+                            else (
+                                mfma_f32_bf16_k16
+                                if is_bf16
+                                else (rocdl.mfma_f32_16x16x16f16 if is_f16 else rocdl.mfma_f32_16x16x32_fp8_fp8)
+                            )
                         )
-                    )
 
                     # Optional: prefetch epilogue scales while we are about to run the last MFMA tile,
                     # matching the preshuffle GEMM pattern of overlapping scale loads with MFMA.
@@ -811,7 +817,24 @@ def compile_moe_gemm1(
                         v1 = vector.from_elements(T.vec(1, T.i64), [x_i64])
                         return vector.bitcast(T.i16x4, v1)
 
+                    def _i64x2_to_v8f16(lo, hi):
+                        v2 = vector.from_elements(T.i64x2, [lo, hi])
+                        return vector.bitcast(T.f16x8, v2)
+
+                    def _i64x2_to_v8bf16(lo, hi):
+                        v2 = vector.from_elements(T.i64x2, [lo, hi])
+                        return vector.bitcast(T.bf16x8, v2)
+
                     def mfma_k64(acc_in, a0, a1, b0, b1):
+                        if _use_mfma_k32:
+                            # gfx950: single 16x16x32 MFMA consuming all 128 bits (K=32 f16/bf16)
+                            if is_f16:
+                                av = _i64x2_to_v8f16(a0, a1)
+                                bv = _i64x2_to_v8f16(b0, b1)
+                            else:
+                                av = _i64x2_to_v8bf16(a0, a1)
+                                bv = _i64x2_to_v8bf16(b0, b1)
+                            return mfma_fn(mfma_res_ty, [av, bv, acc_in, 0, 0, 0])
                         if is_f16:
                             a0v = _i64_to_v4f16(a0)
                             a1v = _i64_to_v4f16(a1)
@@ -929,6 +952,8 @@ def compile_moe_gemm1(
                 rocdl.sched_barrier(0)
     
                 def hot_loop_scheduler():
+                    rocdl.sched_barrier(0)
+                    return
                     mfma_group = num_acc_n * 2
                     # K64 micro-step: 2x K32 MFMA per gemm.
                     mfma_total = (k_unroll * 2) * m_repeat * mfma_group
@@ -1474,6 +1499,9 @@ def compile_moe_gemm2(
                 "BF16 K16 MFMA op not found: expected `rocdl.mfma_f32_16x16x16bf16_1k` "
                 "(or `rocdl.mfma_f32_16x16x16_bf16_1k`)."
             )
+
+    # gfx950: use 16x16x32 MFMA for f16/bf16 (K=32 per MFMA, vs K=16 on gfx942).
+    _use_mfma_k32 = _is_gfx950 and (is_f16 or is_bf16)
 
     DYN = ir.ShapedType.get_dynamic_size()
     size_out = DYN
@@ -2055,15 +2083,18 @@ def compile_moe_gemm2(
                 def compute_tile(acc_in, b_tile_in, lds_base, *, prefetch_epilogue: bool = False, a0_prefetch=None):
                     acc_list = list(acc_in)
                     mfma_res_ty = T.i32x4 if is_int8 else T.f32x4
-                    mfma_fn = (
-                        mfma_i32_k32
-                        if is_int8
-                        else (
-                            mfma_f32_bf16_k16
-                            if is_bf16
-                            else (rocdl.mfma_f32_16x16x16f16 if is_f16 else rocdl.mfma_f32_16x16x32_fp8_fp8)
+                    if _use_mfma_k32:
+                        mfma_fn = rocdl.mfma_f32_16x16x32_f16 if is_f16 else rocdl.mfma_f32_16x16x32_bf16
+                    else:
+                        mfma_fn = (
+                            mfma_i32_k32
+                            if is_int8
+                            else (
+                                mfma_f32_bf16_k16
+                                if is_bf16
+                                else (rocdl.mfma_f32_16x16x16f16 if is_f16 else rocdl.mfma_f32_16x16x32_fp8_fp8)
+                            )
                         )
-                    )
 
                     epilogue_pf = None
                     if prefetch_epilogue and not use_groupwise_scale:
@@ -2104,7 +2135,24 @@ def compile_moe_gemm2(
                         v1 = vector.from_elements(T.vec(1, T.i64), [x_i64])
                         return vector.bitcast(T.i16x4, v1)
 
+                    def _i64x2_to_v8f16(lo, hi):
+                        v2 = vector.from_elements(T.i64x2, [lo, hi])
+                        return vector.bitcast(T.f16x8, v2)
+
+                    def _i64x2_to_v8bf16(lo, hi):
+                        v2 = vector.from_elements(T.i64x2, [lo, hi])
+                        return vector.bitcast(T.bf16x8, v2)
+
                     def mfma_k64(acc0, a0, a1, b0, b1):
+                        if _use_mfma_k32:
+                            # gfx950: single 16x16x32 MFMA consuming all 128 bits (K=32 f16/bf16)
+                            if is_f16:
+                                av = _i64x2_to_v8f16(a0, a1)
+                                bv = _i64x2_to_v8f16(b0, b1)
+                            else:
+                                av = _i64x2_to_v8bf16(a0, a1)
+                                bv = _i64x2_to_v8bf16(b0, b1)
+                            return mfma_fn(mfma_res_ty, [av, bv, acc0, 0, 0, 0])
                         if is_f16:
                             a0v = _i64_to_v4f16(a0)
                             a1v = _i64_to_v4f16(a1)
@@ -2237,6 +2285,8 @@ def compile_moe_gemm2(
                 #     rocdl.sched_barrier(0)
     
                 def hot_loop_scheduler():
+                    rocdl.sched_barrier(0)
+                    return
                     # - MFMA group size per "slot": num_acc_n
                     # - Total MFMA per tile: (2*K32 per K64) * k_unroll * m_repeat * num_acc_n
                     # - We emit (mfma_group + dsrd + mfma_group) per scheduler iteration.

@@ -88,8 +88,8 @@ analyze_occupancy() {
     printf "  %-24s %d%%  (%d/8 waves)\n" "Occupancy:" "$OCC_PCT" "$WAVES"
 }
 
-S1_ISA=$DUMP_DIR/moe_gemm1_0/16_final_isa.s
-S2_ISA=$DUMP_DIR/moe_gemm2_0/16_final_isa.s
+S1_ISA=$DUMP_DIR/moe_gemm1_0/17_final_isa.s
+S2_ISA=$DUMP_DIR/moe_gemm2_0/17_final_isa.s
 
 analyze_occupancy "$S1_ISA" "Stage1"
 analyze_occupancy "$S2_ISA" "Stage2"
