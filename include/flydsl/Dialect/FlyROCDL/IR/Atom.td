@@ -7,7 +7,8 @@
 include "flydsl/Dialect/FlyROCDL/IR/Dialect.td"
 
 def FlyROCDL_AtomStateField : I32EnumAttr<"AtomStateField", "", [
-  I32EnumAttrCase<"Soffset", 0, "soffset">
+  I32EnumAttrCase<"Soffset", 0, "soffset">,
+  I32EnumAttrCase<"ImmOffset", 1, "imm_offset">
 ]> {
   let genSpecializedAttr = 0;
   let cppNamespace = FlyROCDL_Dialect.cppNamespace;

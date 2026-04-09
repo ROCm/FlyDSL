@@ -16,14 +16,11 @@ This module provides access to ROCm-specific GPU operations including:
 
 from ..._mlir.dialects.rocdl import *  # noqa: F401,F403
 from ..meta import traced_op
+from . import cdna4
 
 # Keep references to ODS-generated builders so we can wrap them without losing access.
-_ods_wmma_scale_f32_16x16x128_f8f6f4 = (
-    globals().get("wmma_scale_f32_16x16x128_f8f6f4", None)
-)
-_ods_wmma_scale_f32_32x16x128_f4 = (
-    globals().get("wmma_scale_f32_32x16x128_f4", None)
-)
+_ods_wmma_scale_f32_16x16x128_f8f6f4 = globals().get("wmma_scale_f32_16x16x128_f8f6f4", None)
+_ods_wmma_scale_f32_32x16x128_f4 = globals().get("wmma_scale_f32_32x16x128_f4", None)
 _ods_wave_id = wave_id  # ODS: wave_id(res, ...) -> i32
 _ods_cluster_workgroup_id_x = cluster_workgroup_id_x
 _ods_cluster_workgroup_id_y = cluster_workgroup_id_y
@@ -37,21 +34,27 @@ _ods_mfma_f32_16x16x16f16 = mfma_f32_16x16x16f16
 _ods_mfma_f32_16x16x16bf16_1k = globals().get("mfma_f32_16x16x16bf16_1k", None)
 _ods_mfma_f32_16x16x32_fp8_fp8 = mfma_f32_16x16x32_fp8_fp8
 _ods_mfma_i32_16x16x32_i8 = mfma_i32_16x16x32_i8
-_ods_mfma_scale_f32_16x16x128_f8f6f4 = (
-    globals().get("mfma_scale_f32_16x16x128_f8f6f4", None)
-    or globals().get("mfma_scale_f32_16x16x128_f8f6f4_", None)
+_ods_mfma_scale_f32_16x16x128_f8f6f4 = globals().get("mfma_scale_f32_16x16x128_f8f6f4", None) or globals().get(
+    "mfma_scale_f32_16x16x128_f8f6f4_", None
 )
 mask_mfma = 0x008
 mask_vmem_rd = 0x020
 mask_dsrd = 0x100
 mask_dswr = 0x200
 
+
 def sched_mfma(cnt):
     sched_group_barrier(mask_mfma, cnt, 0)
+
+
 def sched_vmem(cnt):
     sched_group_barrier(mask_vmem_rd, cnt, 0)
+
+
 def sched_dsrd(cnt):
     sched_group_barrier(mask_dsrd, cnt, 0)
+
+
 def sched_dswr(cnt):
     sched_group_barrier(mask_dswr, cnt, 0)
 
@@ -62,6 +65,7 @@ def _unwrap_mfma_operand(v, *, loc=None):
     Accept Python ints and materialize them as i32 signless constants.
     """
     from flydsl._mlir.ir import IntegerType
+
     from .. import arith as _arith_ext
 
     if isinstance(v, int):
@@ -120,17 +124,41 @@ def mfma_scale_f32_16x16x128_f8f6f4(result_type, operands, *, loc=None, ip=None)
     opselB = int(operands[7]) if len(operands) > 7 else 0
     scaleB = _unwrap_mfma_operand(operands[8], loc=loc) if len(operands) > 8 else b
     return _ods_mfma_scale_f32_16x16x128_f8f6f4(
-        result_type, a, b, c, cbsz, blgp, opselA, scaleA, opselB, scaleB,
-        loc=loc, ip=ip,
+        result_type,
+        a,
+        b,
+        c,
+        cbsz,
+        blgp,
+        opselA,
+        scaleA,
+        opselB,
+        scaleB,
+        loc=loc,
+        ip=ip,
     ).result
 
 
-def wmma_scale_f32_16x16x128_f8f6f4(result_type, a, b, c, scaleA, scaleB,
-                                      *, fmtA=4, fmtB=4, modC=0,
-                                      scaleAType=0, fmtScaleA=0,
-                                      scaleBType=0, fmtScaleB=0,
-                                      reuseA=False, reuseB=False,
-                                      loc=None, ip=None):
+def wmma_scale_f32_16x16x128_f8f6f4(
+    result_type,
+    a,
+    b,
+    c,
+    scaleA,
+    scaleB,
+    *,
+    fmtA=4,
+    fmtB=4,
+    modC=0,
+    scaleAType=0,
+    fmtScaleA=0,
+    scaleBType=0,
+    fmtScaleB=0,
+    reuseA=False,
+    reuseB=False,
+    loc=None,
+    ip=None,
+):
     """V_WMMA_SCALE_F32_16X16X128_F8F6F4 for gfx1250 (wave32).
 
     Operand types (wave32):
@@ -152,21 +180,44 @@ def wmma_scale_f32_16x16x128_f8f6f4(result_type, a, b, c, scaleA, scaleB,
     sA = _unwrap_mfma_operand(scaleA, loc=loc)
     sB = _unwrap_mfma_operand(scaleB, loc=loc)
     return _ods_wmma_scale_f32_16x16x128_f8f6f4(
-        result_type, a_v, b_v, c_v, sA, sB,
-        fmtA=fmtA, fmtB=fmtB, modC=modC,
-        scaleAType=scaleAType, fmtScaleA=fmtScaleA,
-        scaleBType=scaleBType, fmtScaleB=fmtScaleB,
-        reuseA=reuseA, reuseB=reuseB,
-        loc=loc, ip=ip,
+        result_type,
+        a_v,
+        b_v,
+        c_v,
+        sA,
+        sB,
+        fmtA=fmtA,
+        fmtB=fmtB,
+        modC=modC,
+        scaleAType=scaleAType,
+        fmtScaleA=fmtScaleA,
+        scaleBType=scaleBType,
+        fmtScaleB=fmtScaleB,
+        reuseA=reuseA,
+        reuseB=reuseB,
+        loc=loc,
+        ip=ip,
     ).result
 
 
-def wmma_scale_f32_32x16x128_f4(result_type, a, b, c, scaleA, scaleB,
-                                  *, modC=0,
-                                  scaleAType=0, fmtScaleA=0,
-                                  scaleBType=0, fmtScaleB=0,
-                                  reuseA=False, reuseB=False,
-                                  loc=None, ip=None):
+def wmma_scale_f32_32x16x128_f4(
+    result_type,
+    a,
+    b,
+    c,
+    scaleA,
+    scaleB,
+    *,
+    modC=0,
+    scaleAType=0,
+    fmtScaleA=0,
+    scaleBType=0,
+    fmtScaleB=0,
+    reuseA=False,
+    reuseB=False,
+    loc=None,
+    ip=None,
+):
     """V_WMMA_SCALE_F32_32X16X128_F4 for gfx1250 (wave32).
 
     Operand types (wave32):
@@ -184,12 +235,21 @@ def wmma_scale_f32_32x16x128_f4(result_type, a, b, c, scaleA, scaleB,
     sA = _unwrap_mfma_operand(scaleA, loc=loc)
     sB = _unwrap_mfma_operand(scaleB, loc=loc)
     return _ods_wmma_scale_f32_32x16x128_f4(
-        result_type, a_v, b_v, c_v, sA, sB,
+        result_type,
+        a_v,
+        b_v,
+        c_v,
+        sA,
+        sB,
         modC=modC,
-        scaleAType=scaleAType, fmtScaleA=fmtScaleA,
-        scaleBType=scaleBType, fmtScaleB=fmtScaleB,
-        reuseA=reuseA, reuseB=reuseB,
-        loc=loc, ip=ip,
+        scaleAType=scaleAType,
+        fmtScaleA=fmtScaleA,
+        scaleBType=scaleBType,
+        fmtScaleB=fmtScaleB,
+        reuseA=reuseA,
+        reuseB=reuseB,
+        loc=loc,
+        ip=ip,
     ).result
 
 
@@ -200,27 +260,31 @@ def wave_id():
         i32 value (SGPR) with the wave ID within the workgroup.
     """
     from ..._mlir import ir
+
     i32 = ir.IntegerType.get_signless(32)
     return _ods_wave_id(i32)
 
 
 def cluster_workgroup_id_x():
-    """Get workgroup position within cluster along X (SGPR, gfx1250). """
+    """Get workgroup position within cluster along X (SGPR, gfx1250)."""
     from ..._mlir import ir
+
     i32 = ir.IntegerType.get_signless(32)
     return _ods_cluster_workgroup_id_x(i32)
 
 
 def cluster_workgroup_id_y():
-    """Get workgroup position within cluster along Y (SGPR, gfx1250). """
+    """Get workgroup position within cluster along Y (SGPR, gfx1250)."""
     from ..._mlir import ir
+
     i32 = ir.IntegerType.get_signless(32)
     return _ods_cluster_workgroup_id_y(i32)
 
 
 def cluster_workgroup_id_z():
-    """Get workgroup position within cluster along Z (SGPR, gfx1250). """
+    """Get workgroup position within cluster along Z (SGPR, gfx1250)."""
     from ..._mlir import ir
+
     i32 = ir.IntegerType.get_signless(32)
     return _ods_cluster_workgroup_id_z(i32)
 
@@ -244,12 +308,11 @@ def cluster_load_async_to_lds(global_ptr, lds_ptr, size_bytes, offset=0, cpol=0,
     }
     fn = _dispatch.get(size_bytes)
     if fn is None:
-        raise ValueError(
-            f"cluster_load_async_to_lds: size_bytes must be 1, 4, 8, or 16, "
-            f"got {size_bytes}")
+        raise ValueError(f"cluster_load_async_to_lds: size_bytes must be 1, 4, 8, or 16, got {size_bytes}")
     if mask is None:
         from ..._mlir import ir
         from .. import arith as _arith
+
         mask = _arith.unwrap(_arith.constant(0, type=ir.IntegerType.get_signless(32)))
     fn(global_ptr, lds_ptr, offset, cpol, mask)
 
@@ -289,7 +352,11 @@ def lds_transpose_load(result_type, lds_memref, elem_offset, elem_bytes):
     from ..._mlir import ir as _ir
     from ..._mlir.dialects import (
         llvm as _llvm,
+    )
+    from ..._mlir.dialects import (
         memref as _memref,
+    )
+    from ..._mlir.dialects import (
         rocdl as _rocdl,
     )
     from .. import arith as _arith
@@ -312,35 +379,40 @@ def lds_transpose_load(result_type, lds_memref, elem_offset, elem_bytes):
 # ── New high-level helpers from universal.py ──────────────────────────
 from .universal import *  # noqa: F401,F403
 
-
 # ── Wrappers: accept DSL Numeric args (fx.Int32, fx.Float32, etc.) ─────────
 # ODS-generated ops require raw ir.Value. These wrappers auto-convert.
+
 
 def _to_ir(v):
     """Coerce DSL Numeric to ir.Value if needed."""
     from ..._mlir import ir as _ir
-    if not isinstance(v, _ir.Value) and hasattr(v, 'ir_value'):
+
+    if not isinstance(v, _ir.Value) and hasattr(v, "ir_value"):
         return v.ir_value()
     return v
 
 
 def raw_ptr_buffer_atomic_fadd(vdata, rsrc, offset, soffset, aux, **kw):
     from ..._mlir.dialects.rocdl import raw_ptr_buffer_atomic_fadd as _op
+
     return _op(_to_ir(vdata), _to_ir(rsrc), _to_ir(offset), _to_ir(soffset), _to_ir(aux), **kw)
 
 
 def raw_ptr_buffer_atomic_fmax(vdata, rsrc, offset, soffset, aux, **kw):
     from ..._mlir.dialects.rocdl import raw_ptr_buffer_atomic_fmax as _op
+
     return _op(_to_ir(vdata), _to_ir(rsrc), _to_ir(offset), _to_ir(soffset), _to_ir(aux), **kw)
 
 
 def cvt_pk_fp8_f32(res, src_a, src_b, old, word_sel, **kw):
     from ..._mlir.dialects.rocdl import cvt_pk_fp8_f32 as _op
-    return _op(res=res, src_a=_to_ir(src_a), src_b=_to_ir(src_b),
-               old=_to_ir(old), word_sel=word_sel, **kw)
+
+    return _op(res=res, src_a=_to_ir(src_a), src_b=_to_ir(src_b), old=_to_ir(old), word_sel=word_sel, **kw)
 
 
 def raw_ptr_buffer_load_lds(rsrc, lds_ptr, size, voffset, soffset, offset, aux, **kw):
     from ..._mlir.dialects.rocdl import raw_ptr_buffer_load_lds as _op
-    return _op(_to_ir(rsrc), _to_ir(lds_ptr), _to_ir(size), _to_ir(voffset),
-               _to_ir(soffset), _to_ir(offset), _to_ir(aux), **kw)
+
+    return _op(
+        _to_ir(rsrc), _to_ir(lds_ptr), _to_ir(size), _to_ir(voffset), _to_ir(soffset), _to_ir(offset), _to_ir(aux), **kw
+    )
