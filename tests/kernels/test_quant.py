@@ -152,12 +152,14 @@ def build_quant_module(N):
         # i8 output: keep buffer_ops (BufferCopy64b unsupported by LLVM backend)
         out_rsrc = buffer_ops.create_buffer_resource(Output, max_size=True)
 
-        # Slice row for this block, tile by VEC_WIDTH
-        row_in = fx.slice(Input_buf, (bid, None))
+        # Slice at row 0; actual row offset via soffset (SGPR)
+        row_in = fx.slice(Input_buf, (0, None))
         in_div = fx.logical_divide(row_in, fx.make_layout(VEC_WIDTH, 1))
 
-        # Copy atom for f16 loads: 8 x f16 = 128b
-        copy_atom_in = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), 16)
+        # Copy atom for f16 loads: 8 x f16 = 128b, with soffset for row
+        copy_atom_in_base = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), 16)
+        bid_row_offset = ArithValue(bid) * fx.Int32(N)
+        copy_atom_in = copy_atom_in_base.set_value("soffset", bid_row_offset)
 
         vec_reg_ty_f16 = fx.MemRefType.get(
             T.f16, fx.LayoutType.get(VEC_WIDTH, 1), fx.AddressSpace.Register

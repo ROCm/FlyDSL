@@ -133,13 +133,16 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
             A_buf = fx.rocdl.make_buffer_tensor(A)
             C_buf = fx.rocdl.make_buffer_tensor(C)
 
-            row_a = fx.slice(A_buf, (bid, None))
-            row_c = fx.slice(C_buf, (bid, None))
+            # Slice at row 0; actual row offset via soffset (SGPR)
+            row_a = fx.slice(A_buf, (0, None))
+            row_c = fx.slice(C_buf, (0, None))
 
             a_div = fx.logical_divide(row_a, fx.make_layout(VEC_WIDTH, 1))
             c_div = fx.logical_divide(row_c, fx.make_layout(VEC_WIDTH, 1))
 
-            copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), elem_bits)
+            copy_atom_base = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), elem_bits)
+            bid_row_offset = ArithValue(bid) * fx.Int32(N)
+            copy_atom = copy_atom_base.set_value("soffset", bid_row_offset)
             vec_reg_ty = fx.MemRefType.get(
                 elem_type, fx.LayoutType.get(VEC_WIDTH, 1), fx.AddressSpace.Register
             )
@@ -211,13 +214,16 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
             A_buf = fx.rocdl.make_buffer_tensor(A)
             C_buf = fx.rocdl.make_buffer_tensor(C)
 
-            row_a = fx.slice(A_buf, (bid, None))
-            row_c = fx.slice(C_buf, (bid, None))
+            # Slice at row 0; actual row offset via soffset (SGPR)
+            row_a = fx.slice(A_buf, (0, None))
+            row_c = fx.slice(C_buf, (0, None))
 
-            copy_atom_s = fx.make_copy_atom(
+            copy_atom_s_base = fx.make_copy_atom(
                 fx.rocdl.BufferCopy16b() if elem_bits <= 16 else fx.rocdl.BufferCopy32b(),
                 elem_bits,
             )
+            bid_row_offset = ArithValue(bid) * fx.Int32(N)
+            copy_atom_s = copy_atom_s_base.set_value("soffset", bid_row_offset)
             scalar_reg_ty = fx.MemRefType.get(elem_type, fx.LayoutType.get(1, 1), fx.AddressSpace.Register)
             scalar_reg_lay = fx.make_layout(1, 1)
 
