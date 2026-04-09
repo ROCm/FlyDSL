@@ -1023,6 +1023,7 @@ def compile_moe_gemm1(
                     elif is_int4_bf16 or is_int4_bf16_groupwise:
                         # W4A16: deferred dequant — unpack int4→bf16 right before MFMA
                         # to minimize VGPR lifetime of dequantized bf16 values.
+                        _pending_gate_up = None
                         for ku in range_constexpr(k_unroll):
                             b_gate_raw = b_gate_tile_in[ku]
                             b_up_raw = b_up_tile_in[ku]
@@ -1047,18 +1048,28 @@ def compile_moe_gemm1(
                                         packed_g, sc_g = b_gate_raw[ni], None
                                         packed_u, sc_u = b_up_raw[ni], None
                                     if is_int4_bf16_groupwise and use_gfx950_cvt:
-                                        # Defer group scale to post-MFMA FMA: unpack without scale, MFMA into zero acc, then FMA.
+                                        # Defer group scale to post-MFMA FMA with pipeline:
+                                        # Issue current MFMA, then apply FMA for previous iteration's result.
                                         bg0, bg1 = unpack_b_w4a16(packed_g, arith, vector, scale_val=None, use_gfx950_cvt=True, defer_scale16=True)
-                                        tmp = mfma_k64(zero_f32_acc, a0, a1, bg0, bg1)
-                                        gate_list[acc_idx] = _acc_scaled_f32(gate_list[acc_idx], tmp, sc_g)
+                                        tmp_g = mfma_k64(zero_f32_acc, a0, a1, bg0, bg1)
                                         bu0, bu1 = unpack_b_w4a16(packed_u, arith, vector, scale_val=None, use_gfx950_cvt=True, defer_scale16=True)
-                                        tmp = mfma_k64(zero_f32_acc, a0, a1, bu0, bu1)
-                                        up_list[acc_idx] = _acc_scaled_f32(up_list[acc_idx], tmp, sc_u)
+                                        tmp_u = mfma_k64(zero_f32_acc, a0, a1, bu0, bu1)
+                                        # Apply FMA for previous pending result (MFMA already completed).
+                                        if _pending_gate_up is not None:
+                                            p_idx, p_g, p_u, p_sc_g, p_sc_u = _pending_gate_up
+                                            gate_list[p_idx] = _acc_scaled_f32(gate_list[p_idx], p_g, p_sc_g)
+                                            up_list[p_idx] = _acc_scaled_f32(up_list[p_idx], p_u, p_sc_u)
+                                        _pending_gate_up = (acc_idx, tmp_g, tmp_u, sc_g, sc_u)
                                     else:
                                         bg0, bg1 = unpack_b_w4a16(packed_g, arith, vector, scale_val=sc_g, use_gfx950_cvt=use_gfx950_cvt, defer_scale16=use_gfx950_cvt)
                                         gate_list[acc_idx] = mfma_k64(gate_list[acc_idx], a0, a1, bg0, bg1)
                                         bu0, bu1 = unpack_b_w4a16(packed_u, arith, vector, scale_val=sc_u, use_gfx950_cvt=use_gfx950_cvt, defer_scale16=use_gfx950_cvt)
                                         up_list[acc_idx] = mfma_k64(up_list[acc_idx], a0, a1, bu0, bu1)
+                        # Drain last pending FMA.
+                        if _pending_gate_up is not None:
+                            p_idx, p_g, p_u, p_sc_g, p_sc_u = _pending_gate_up
+                            gate_list[p_idx] = _acc_scaled_f32(gate_list[p_idx], p_g, p_sc_g)
+                            up_list[p_idx] = _acc_scaled_f32(up_list[p_idx], p_u, p_sc_u)
                     else:
                         for ku in range_constexpr(k_unroll):
                             b_gate_packs0, b_gate_packs1 = b_gate_tile_in[ku]
@@ -2497,6 +2508,7 @@ def compile_moe_gemm2(
                     elif is_int4_bf16 or is_int4_bf16_groupwise:
                         # W4A16: deferred dequant — unpack int4→bf16 right before MFMA
                         # to minimize VGPR lifetime of dequantized bf16 values.
+                        _pending_acc = None
                         for ku in range_constexpr(k_unroll):
                             b_raw = b_tile_in[ku]
                             ki64 = arith.index(ku * 64)
@@ -2520,10 +2532,17 @@ def compile_moe_gemm2(
                                     if is_int4_bf16_groupwise and use_gfx950_cvt:
                                         b0, b1 = unpack_b_w4a16(packed, arith, vector, scale_val=None, use_gfx950_cvt=True, defer_scale16=True)
                                         tmp = mfma_k64(zero_f32_acc, a0, a1, b0, b1)
-                                        acc_list[acc_idx] = _acc_scaled_f32(acc_list[acc_idx], tmp, sc)
+                                        if _pending_acc is not None:
+                                            p_idx, p_tmp, p_sc = _pending_acc
+                                            acc_list[p_idx] = _acc_scaled_f32(acc_list[p_idx], p_tmp, p_sc)
+                                        _pending_acc = (acc_idx, tmp, sc)
                                     else:
                                         b0, b1 = unpack_b_w4a16(packed, arith, vector, scale_val=sc, use_gfx950_cvt=use_gfx950_cvt, defer_scale16=use_gfx950_cvt)
                                         acc_list[acc_idx] = mfma_k64(acc_list[acc_idx], a0, a1, b0, b1)
+                        # Drain last pending FMA.
+                        if _pending_acc is not None:
+                            p_idx, p_tmp, p_sc = _pending_acc
+                            acc_list[p_idx] = _acc_scaled_f32(acc_list[p_idx], p_tmp, p_sc)
                     else:
                         for ku in range_constexpr(k_unroll):
                             b_packs0, b_packs1 = b_tile_in[ku]
