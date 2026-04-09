@@ -16,7 +16,19 @@ from ..primitive import (
 )
 from ..typing import Tensor
 
-BufferCopy = lambda bit_size: CopyOpCDNA3BufferCopyType.get(bit_size)
+
+def BufferCopy(bit_size):
+    """Create a CDNA3 buffer copy atom.
+
+    Current atom state:
+    - `soffset` (`i32`)
+
+    Update the state with `copy_atom.set_value("soffset", value)`.
+    """
+    return CopyOpCDNA3BufferCopyType.get(bit_size)
+
+
+# BufferCopy aliases for convenience
 BufferCopy8b = lambda: CopyOpCDNA3BufferCopyType.get(8)
 BufferCopy16b = lambda: CopyOpCDNA3BufferCopyType.get(16)
 BufferCopy32b = lambda: CopyOpCDNA3BufferCopyType.get(32)
