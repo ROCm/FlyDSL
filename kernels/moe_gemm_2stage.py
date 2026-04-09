@@ -2611,6 +2611,7 @@ def compile_moe_reduction(
                             x_div = fx.logical_divide(x_tiled[None, tile_i32], fx.make_layout(VEC_WIDTH, 1))
                             x_thread = x_div[None, tid_i32]
 
+                            mv_ok = True
                             if use_mask:
                                 m_idx_i32 = fx.Int32(token_idx * c_topk + fx.Index(k))
                                 mv = buffer_ops.buffer_load(mask_rsrc, m_idx_i32, vec_width=1, dtype=i8_type())
@@ -2628,10 +2629,7 @@ def compile_moe_reduction(
                                     zero_e = vector.broadcast(vec_type_e, arith.constant(0.0, type=elem_type()))
                                     vec_e = mv_ok.select(vec_e, zero_e)
 
-                                if elem_bits < 32:
-                                    vec_c = vec_e.extf(vec_type_c)
-                                else:
-                                    vec_c = vec_e
+                                vec_c = vec_e.extf(vec_type_c) if elem_bits < 32 else vec_e
                                 acc_vecs[si] = acc_vecs[si] + vec_c
 
                         # ── Store results ──
@@ -2646,6 +2644,8 @@ def compile_moe_reduction(
                             if elem_bits < 32:
                                 out_vec = out_vec.truncf(vec_type_e)
 
+                            # Placeholder init to avoid unbound name before branch assignment.
+                            dst = fx.make_layout(1, 1)
                             if n_sub > 1:
                                 dst = y_inner[None, fx.Int32(si)]
                             else:
