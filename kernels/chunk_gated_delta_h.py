@@ -343,7 +343,19 @@ def compile_chunk_gated_delta_h(
             h_accs_in = list(state)
             i_t_i32 = arith.index_cast(T.i32, i_t)
 
-            # ── 1. Store h snapshot to global + LDS ──
+            # ── 1. Prefetch w[0] from global (overlap with h snapshot store) ──
+            w_prefetch = []
+            w_prefetch_lds = []
+            for batch in range_constexpr(NUM_LOAD_BATCHES_64):
+                row = fx.Int32(batch * ROWS_PER_BATCH_64) + load_row_in_batch
+                abs_row = i_t_i32 * fx.Int32(BT) + row
+                in_bounds = arith.cmpi(arith.CmpIPredicate.slt, abs_row, T_local)
+                safe_row = arith.select(in_bounds, abs_row, fx.Int32(0))
+                g_off = w_base + safe_row * stride_w + fx.Int32(0 * 64) + load_col_base
+                w_prefetch.append(w_.vec_load((fx.Index(g_off),), LOAD_VEC_WIDTH))
+                w_prefetch_lds.append(row * fx.Int32(LDS_W_STRIDE) + load_col_base)
+
+            # ── Store h snapshot to global + LDS (w[0] loads in flight) ──
             for kb in range_constexpr(NUM_K_BLOCKS):
                 for nr in range_constexpr(N_REPEAT):
                     acc_idx = kb * N_REPEAT + nr
@@ -371,18 +383,6 @@ def compile_chunk_gated_delta_h(
                 bv_accs.append(arith.constant_vector(0.0, T.f32x4))
 
             K_STEPS_PER_BLOCK = 64 // WMMA_K
-
-            # ── Prefetch w[0] into registers ──
-            w_prefetch = []
-            w_prefetch_lds = []
-            for batch in range_constexpr(NUM_LOAD_BATCHES_64):
-                row = fx.Int32(batch * ROWS_PER_BATCH_64) + load_row_in_batch
-                abs_row = i_t_i32 * fx.Int32(BT) + row
-                in_bounds = arith.cmpi(arith.CmpIPredicate.slt, abs_row, T_local)
-                safe_row = arith.select(in_bounds, abs_row, fx.Int32(0))
-                g_off = w_base + safe_row * stride_w + fx.Int32(0 * 64) + load_col_base
-                w_prefetch.append(w_.vec_load((fx.Index(g_off),), LOAD_VEC_WIDTH))
-                w_prefetch_lds.append(row * fx.Int32(LDS_W_STRIDE) + load_col_base)
 
             for kb in range_constexpr(NUM_K_BLOCKS):
                 # ── Store prefetched w[kb] to LDS ──
@@ -498,7 +498,20 @@ def compile_chunk_gated_delta_h(
                         acc_idx = kb * N_REPEAT + nr
                         h_accs_in[acc_idx] = arith.mulf(h_accs_in[acc_idx], exp_g_last_vec)
 
-            # ── 3b. Store gated v_new to LDS (bf16) for k^T @ v_new reload ──
+            # ── 3b. Prefetch k[0] (overlap with v_new LDS store) ──
+            BT_STEPS = BT // WMMA_K
+            k_prefetch = []
+            k_prefetch_lds = []
+            for batch in range_constexpr(NUM_LOAD_BATCHES_64):
+                row = fx.Int32(batch * ROWS_PER_BATCH_64) + load_row_in_batch
+                abs_row = i_t_i32 * fx.Int32(BT) + row
+                in_bounds = arith.cmpi(arith.CmpIPredicate.slt, abs_row, T_local)
+                safe_row = arith.select(in_bounds, abs_row, fx.Int32(0))
+                g_off = k_base + safe_row * stride_k + fx.Int32(0 * 64) + load_col_base
+                k_prefetch.append(k_.vec_load((fx.Index(g_off),), LOAD_VEC_WIDTH))
+                k_prefetch_lds.append(row * fx.Int32(LDS_K_STRIDE) + load_col_base)
+
+            # Store gated v_new to LDS (bf16) — k[0] loads in flight
             for nr in range_constexpr(N_REPEAT):
                 vn_val = vn_frags[nr]
                 lds_col = fx.Int32(nr * 16) + lane_n
@@ -512,19 +525,6 @@ def compile_chunk_gated_delta_h(
             gpu.barrier()
 
             # ── 4. State update: h += k^T @ v_new_gated ──
-            BT_STEPS = BT // WMMA_K
-
-            # ── Prefetch k[0] into registers ──
-            k_prefetch = []
-            k_prefetch_lds = []
-            for batch in range_constexpr(NUM_LOAD_BATCHES_64):
-                row = fx.Int32(batch * ROWS_PER_BATCH_64) + load_row_in_batch
-                abs_row = i_t_i32 * fx.Int32(BT) + row
-                in_bounds = arith.cmpi(arith.CmpIPredicate.slt, abs_row, T_local)
-                safe_row = arith.select(in_bounds, abs_row, fx.Int32(0))
-                g_off = k_base + safe_row * stride_k + fx.Int32(0 * 64) + load_col_base
-                k_prefetch.append(k_.vec_load((fx.Index(g_off),), LOAD_VEC_WIDTH))
-                k_prefetch_lds.append(row * fx.Int32(LDS_K_STRIDE) + load_col_base)
 
             for kb in range_constexpr(NUM_K_BLOCKS):
                 # ── Store prefetched k[kb] to LDS ──
