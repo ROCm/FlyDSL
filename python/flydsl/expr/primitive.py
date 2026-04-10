@@ -696,7 +696,7 @@ def atom_set_value(atom, field, value, loc=None, ip=None):
         field = str(field)
     if isinstance(field, str):
         field = ir.StringAttr.get(field)
-    return fly.atom_set_value(atom.type, atom, field, value, loc=loc, ip=ip)
+    return fly.atom_set_value(atom, field, value, loc=loc, ip=ip)
 
 
 @traced_op
