@@ -810,7 +810,7 @@ class JitFunction:
 
             with ir.InsertionPoint(module.body), loc:
                 backend = get_backend()
-                gpu_module = create_gpu_module("kernels", targets=backend.gpu_module_targets())
+                gpu_module = create_gpu_module("kernels")
 
                 func_op = func.FuncOp(self.func.__name__, (ir_types, []))
                 func_op.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()

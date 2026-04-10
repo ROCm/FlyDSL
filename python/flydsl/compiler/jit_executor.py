@@ -147,13 +147,6 @@ class CompiledArtifact:
             self._func_exe = ctypes.CFUNCTYPE(None, ctypes.c_void_p)(func_ptr)
         return self._func_exe
 
-            # Cache the ctypes function object once (inside the lock to avoid
-            # races). Avoids two expensive operations per __call__:
-            # raw_lookup (~10 μs) and CFUNCTYPE(...)(func_ptr) (~20 μs),
-            # saving ~30 μs per dispatch.
-            func_ptr = self._engine.raw_lookup(self._entry)
-            self._func_exe = ctypes.CFUNCTYPE(None, ctypes.c_void_p)(func_ptr)
-
     def __call__(self, *args, **kwargs):
         func_exe = self._get_func_exe()
 
