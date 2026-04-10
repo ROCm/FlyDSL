@@ -20,7 +20,7 @@ from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, gpu, range_constexpr
 from flydsl.expr.arith import ArithValue
 from flydsl.expr.typing import T, Int32
-from flydsl.expr.tensor_ssa import TensorSSA, ReductionOp, full
+from flydsl.expr.vector import Vector, ReductionOp, full
 from flydsl.expr.numeric import Numeric, Float32
 
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
@@ -124,7 +124,7 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
         # Fast path: N is a multiple of tile_cols
         # ==================================================================
         if False and N >= tile_cols and N % tile_cols == 0:
-            from flydsl.expr import fmath
+            from flydsl.expr import math as fmath
 
             num_tiles = N // tile_cols
             elem_dtype = Numeric.from_ir_type(elem_type)
@@ -148,7 +148,7 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
             def _load_vec(div_tensor, idx):
                 r = fx.memref_alloca(vec_reg_ty, vec_reg_lay)
                 fx.copy_atom_call(copy_atom, fx.slice(div_tensor, (None, idx)), r)
-                return TensorSSA(fx.memref_load_vec(r), VEC_WIDTH, elem_dtype)
+                return Vector(fx.memref_load_vec(r), VEC_WIDTH, elem_dtype)
 
             def _store_vec(val, div_tensor, idx):
                 r = fx.memref_alloca(vec_reg_ty, vec_reg_lay)
@@ -219,7 +219,7 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
                 view = fx.slice(divided, (None, index))
                 r = fx.memref_alloca(scalar_reg_ty, scalar_reg_lay)
                 fx.copy_atom_call(copy_atom_s, view, r)
-                ts = TensorSSA(fx.memref_load_vec(r), 1, elem_dtype)
+                ts = Vector(fx.memref_load_vec(r), 1, elem_dtype)
                 return ts[0].ir_value()
 
             def _store_scalar(divided, index, val):

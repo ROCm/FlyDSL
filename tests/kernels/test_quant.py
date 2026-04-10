@@ -55,9 +55,8 @@ from flydsl.expr.typing import T, Int32
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from flydsl.runtime.device import get_rocm_arch
 from flydsl._mlir import ir
-from flydsl.expr import buffer_ops
 from flydsl.expr.arith import ArithValue
-from flydsl.expr.tensor_ssa import TensorSSA, full, ReductionOp
+from flydsl.expr.vector import Vector, full, ReductionOp
 from flydsl.expr.numeric import Float16, Float32, Int8
 from tests.test_common import run_perftest
 
@@ -150,17 +149,17 @@ def build_quant_module(N):
 
         # ── Layout API: buffer-backed tensors ────────────────────────────
         Input_buf = fx.rocdl.make_buffer_tensor(Input)
-        scales_rsrc = buffer_ops.create_buffer_resource(Scales, max_size=True)
-        # i8 output: keep buffer_ops (BufferCopy64b unsupported by LLVM backend)
-        out_rsrc = buffer_ops.create_buffer_resource(Output, max_size=True)
+        Out_buf = fx.rocdl.make_buffer_tensor(Output)
+        Scales_buf = fx.rocdl.make_buffer_tensor(Scales)
 
         # Slice at row 0; actual row offset via soffset (SGPR)
+        bid_row_offset = ArithValue(bid) * fx.Int32(N)
+
         row_in = fx.slice(Input_buf, (0, None))
         in_div = fx.logical_divide(row_in, fx.make_layout(VEC_WIDTH, 1))
 
         # Copy atom for f16 loads: 8 x f16 = 128b, with soffset for row
         copy_atom_in_base = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), 16)
-        bid_row_offset = ArithValue(bid) * fx.Int32(N)
         copy_atom_in = copy_atom_in_base.set_value("soffset", bid_row_offset)
 
         vec_reg_ty_f16 = fx.MemRefType.get(
@@ -168,15 +167,29 @@ def build_quant_module(N):
         )
         vec_reg_lay = fx.make_layout(VEC_WIDTH, 1)
 
-        elem_bytes_i8 = 1
-        vec_dwords_i8 = (VEC_WIDTH * elem_bytes_i8) // 4  # 2
-        row_soffset_out = ArithValue(bid) * (N * elem_bytes_i8)
-        thr_col_bytes_i8 = ArithValue(tid) * (VEC_WIDTH * elem_bytes_i8)
+        # Copy atom for i8 output: 8 x i8 = 64b, with soffset for row
+        copy_atom_out_base = fx.make_copy_atom(fx.rocdl.BufferCopy64b(), 8)
+        copy_atom_out = copy_atom_out_base.set_value("soffset", bid_row_offset)
+        out_row = fx.slice(Out_buf, (0, None))
+        out_div = fx.logical_divide(out_row, fx.make_layout(VEC_WIDTH, 1))
+        i8_vec_reg_ty = fx.MemRefType.get(
+            T.i8, fx.LayoutType.get(VEC_WIDTH, 1), fx.AddressSpace.Register
+        )
+
+        # Copy atom for f32 scales: scalar store with soffset for bid
+        copy_atom_f32_base = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), 32)
+        copy_atom_f32 = copy_atom_f32_base.set_value("soffset", bid)
+        scales_div = fx.logical_divide(Scales_buf, fx.make_layout(1, 1))
+        scales_base = fx.slice(scales_div, (None, fx.Int32(0)))
+        f32_reg_ty = fx.MemRefType.get(
+            T.f32, fx.LayoutType.get(1, 1), fx.AddressSpace.Register
+        )
+        f32_reg_lay = fx.make_layout(1, 1)
 
         def _load_vec_f16(div_tensor, idx):
             r = fx.memref_alloca(vec_reg_ty_f16, vec_reg_lay)
             fx.copy_atom_call(copy_atom_in, fx.slice(div_tensor, (None, idx)), r)
-            return TensorSSA(fx.memref_load_vec(r), VEC_WIDTH, Float16)
+            return Vector(fx.memref_load_vec(r), VEC_WIDTH, Float16)
 
         abs_mask = full(VEC_WIDTH, Int32(0x7FFFFFFF), Int32)
 
@@ -213,27 +226,33 @@ def build_quant_module(N):
 
         # thread 0 stores Scales[bid]
         if arith.cmpi(arith.CmpIPredicate.eq, tid, Int32(0)):
-            buffer_ops.buffer_store(final_scale, scales_rsrc, bid)
+            r_sc = fx.memref_alloca(f32_reg_ty, f32_reg_lay)
+            ts_sc = full(1, Float32(final_scale), Float32)
+            fx.memref_store_vec(ts_sc, r_sc)
+            fx.copy_atom_call(copy_atom_f32, r_sc, scales_base)
 
         # ── Pass 2: quantize f32 → i8, store ─────────────────────────────
         inv_scale = ArithValue(c_1) / ArithValue(final_scale)
 
         for tile_i in range_constexpr(num_tiles):
-            col_end = ArithValue(tid) * VEC_WIDTH + (tile_i * tile_cols + VEC_WIDTH)
-            is_valid = col_end <= N
-
             vec_f32 = cached_vecs[tile_i]
             vec_scaled = vec_f32 * inv_scale
-
             vec_i8 = vec_scaled.to(Int8)
-            out_packed = vec_i8.bitcast(Int32)
+            idx_out = tid + tile_i * BLOCK_THREADS
 
-            col_bytes_out = ArithValue(thr_col_bytes_i8) + (tile_i * tile_cols * elem_bytes_i8)
-            dw_out = col_bytes_out.shrui(arith.constant(2, type=T.i32))
-            buffer_ops.buffer_store(
-                out_packed, out_rsrc, dw_out,
-                soffset_bytes=row_soffset_out, mask=is_valid,
-            )
+            # Python-level check: only the last tile of non-aligned N needs a guard
+            last_partial = (N % tile_cols != 0) and (tile_i == num_tiles - 1)
+            if last_partial:
+                col_end = ArithValue(tid) * VEC_WIDTH + (tile_i * tile_cols + VEC_WIDTH)
+                is_valid = col_end <= N
+                if is_valid:
+                    r_out = fx.memref_alloca(i8_vec_reg_ty, vec_reg_lay)
+                    fx.memref_store_vec(vec_i8, r_out)
+                    fx.copy_atom_call(copy_atom_out, r_out, fx.slice(out_div, (None, idx_out)))
+            else:
+                r_out = fx.memref_alloca(i8_vec_reg_ty, vec_reg_lay)
+                fx.memref_store_vec(vec_i8, r_out)
+                fx.copy_atom_call(copy_atom_out, r_out, fx.slice(out_div, (None, idx_out)))
 
     @flyc.jit
     def launch_quant(
