@@ -684,6 +684,105 @@ def run_all_tests(
         return pd.DataFrame()
 
 
+# ============================================================================
+# Pytest test functions for 8-GPU allreduce CI testing
+# ============================================================================
+
+def _count_physical_gpus() -> int:
+    """Return number of physically available GPUs via a fresh subprocess.
+
+    Using a subprocess bypasses both HIP_VISIBLE_DEVICES restrictions and
+    PyTorch's internal device-count cache in the parent pytest process.
+    """
+    import subprocess as _sp
+    env = {k: v for k, v in os.environ.items() if k != "HIP_VISIBLE_DEVICES"}
+    try:
+        r = _sp.run(
+            [sys.executable, "-c", "import torch; print(torch.cuda.device_count())"],
+            capture_output=True, text=True, timeout=30, env=env,
+        )
+        return int(r.stdout.strip()) if r.returncode == 0 else 0
+    except Exception:
+        return 0
+
+
+# All 8-GPU test configurations (always run, no large_shape distinction).
+_8GPU_PARAMS = [
+    # (shape,          dtype_str,  mode)
+    # --- small shapes (edge-case coverage, aligned with aiter) ---
+    ((2,    7168), "bf16", "cudagraph"),    # 14 K elements · BF16 · cudagraph (aiter shape)
+    ((16,   4096), "fp16", "eager"),        # 64 K elements · FP16 · eager
+    # --- medium shapes ---
+    ((128,  8192), "bf16", "cudagraph"),    # 1 M elements  · BF16 · cudagraph
+    ((96,   4096), "fp16", "eager"),        # 384 K elements · FP16 · eager
+    # --- eager + cudagraph cross-dtype ---
+    ((512,  8192), "bf16", "eager"),        # 4 M elements  · BF16 · eager
+    ((1024, 8192), "fp16", "cudagraph"),    # 8 M elements  · FP16 · cudagraph
+    # --- fp32 coverage ---
+    ((64,   4096), "fp32", "eager"),        # 256 K elements · FP32 · eager
+]
+
+# 4-GPU test configurations (fp32 + smaller world_size coverage).
+_4GPU_PARAMS = [
+    # (shape,          dtype_str,  mode)
+    ((64,   4096), "fp32", "eager"),        # 256 K elements · FP32 · eager
+    ((128,  8192), "fp16", "eager"),        # 1 M elements   · FP16 · eager
+    ((64,   8192), "bf16", "cudagraph"),    # 512 K elements · BF16 · cudagraph
+]
+
+
+def _run_subprocess_test(*, world_size, shape, dtype_str, mode):
+    """Launch the allreduce harness in a subprocess and assert success."""
+    import subprocess as _sp
+
+    env = {k: v for k, v in os.environ.items() if k != "HIP_VISIBLE_DEVICES"}
+    shape_str = ",".join(str(d) for d in shape) + f",{dtype_str}"
+
+    cmd = [
+        sys.executable, __file__,
+        "--world_size",     str(world_size),
+        "--iters",          "10",
+        "--warmup",         "2",
+        "--shapes",         shape_str,
+        "--mode",           mode,
+        "--allreduce_impl", "flydsl",
+    ]
+    result = _sp.run(cmd, env=env, timeout=600, capture_output=True, text=True)
+    assert result.returncode == 0, (
+        f"{world_size}-GPU allreduce FAILED: shape={shape}, dtype={dtype_str}, "
+        f"mode={mode} (exit code {result.returncode})\n"
+        f"stdout (last 2000 chars):\n{result.stdout[-2000:]}\n"
+        f"stderr (last 2000 chars):\n{result.stderr[-2000:]}"
+    )
+
+
+@pytest.mark.multi_gpu
+@pytest.mark.parametrize("shape,dtype_str,mode", _8GPU_PARAMS)
+def test_allreduce_8gpu_accuracy(shape, dtype_str, mode):
+    """8-GPU allreduce accuracy test.
+
+    Runs the allreduce harness in a child subprocess so that
+    HIP_VISIBLE_DEVICES (auto-set by run_tests.sh to one GPU index)
+    does not limit device visibility inside the distributed workers.
+
+    Skipped automatically on machines with fewer than 8 physical GPUs.
+    """
+    phys_ng = _count_physical_gpus()
+    if phys_ng < 8:
+        pytest.skip(f"Requires >= 8 physical GPUs, found {phys_ng}.")
+    _run_subprocess_test(world_size=8, shape=shape, dtype_str=dtype_str, mode=mode)
+
+
+@pytest.mark.multi_gpu
+@pytest.mark.parametrize("shape,dtype_str,mode", _4GPU_PARAMS)
+def test_allreduce_4gpu_accuracy(shape, dtype_str, mode):
+    """4-GPU allreduce accuracy test (covers fp32 and world_size=4)."""
+    phys_ng = _count_physical_gpus()
+    if phys_ng < 4:
+        pytest.skip(f"Requires >= 4 physical GPUs, found {phys_ng}.")
+    _run_subprocess_test(world_size=4, shape=shape, dtype_str=dtype_str, mode=mode)
+
+
 if __name__ == "__main__":
     freeze_support()
     # Align with AIter harness: use spawn to avoid fork+CUDA issues.

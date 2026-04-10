@@ -116,6 +116,55 @@ done
 
 fi
 
+# ---------------------------------------------------------------------------
+# 4. Multi-GPU AllReduce tests (requires >= 8 GPUs; skipped otherwise)
+# ---------------------------------------------------------------------------
+echo ""
+echo "========================================================================"
+echo "Multi-GPU AllReduce Tests (world_size=8)"
+echo "========================================================================"
+
+# Detect physical GPU count in a subprocess without HIP_VISIBLE_DEVICES
+# so that the auto-selected single-GPU index set above does not hide GPUs.
+_phys_gpu_count=$(
+    env -u HIP_VISIBLE_DEVICES python3 -c \
+      "import torch; print(torch.cuda.device_count())" 2>/dev/null || echo "0"
+)
+
+if [[ "${_phys_gpu_count}" -ge 8 ]]; then
+    echo "[run_tests] Detected ${_phys_gpu_count} GPUs — running 8-GPU allreduce tests"
+
+    _run_allreduce() {
+        local dtype_str="$1" shape="$2" mode="${3:-eager}" iters="${4:-10}" warmup="${5:-2}"
+        echo "  RUN   allreduce shape=${shape} dtype=${dtype_str} mode=${mode}"
+        if env -u HIP_VISIBLE_DEVICES python3 \
+            "${REPO_ROOT}/tests/kernels/test_flydsl_allreduce.py" \
+            --world_size 8 --iters "${iters}" --warmup "${warmup}" \
+            --shapes "${shape},${dtype_str}" --mode "${mode}" \
+            --allreduce_impl flydsl; then
+            echo "  PASS  allreduce shape=${shape} dtype=${dtype_str} mode=${mode}"
+        else
+            echo "  FAIL  allreduce shape=${shape} dtype=${dtype_str} mode=${mode}"
+            exit 1
+        fi
+    }
+
+    # Basic accuracy tests (always run on 8-GPU machines)
+    _run_allreduce fp16 128,8192 eager 10 2
+    _run_allreduce bf16 256,8192 eager 10 2
+    _run_allreduce fp16 512,4096 eager 10 2
+    _run_allreduce fp32 64,4096  eager 10 2
+
+    # Extended tests (only in full CI)
+    if [ "${RUN_TESTS_FULL:-0}" = "1" ]; then
+        _run_allreduce fp16 1024,8192 eager     20 3
+        _run_allreduce fp16 128,8192  cudagraph 20 3
+        _run_allreduce bf16 256,8192  cudagraph 20 3
+    fi
+else
+    echo "  SKIP  8-GPU allreduce tests (need >= 8 GPUs, found ${_phys_gpu_count})"
+fi
+
 echo ""
 echo "========================================================================"
 echo "All tests passed."
