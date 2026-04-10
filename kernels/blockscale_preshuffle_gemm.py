@@ -531,6 +531,8 @@ def compile_blockscale_preshuffle_gemm(
 
                     for mi in range_constexpr(m_repeat):
                         curr_row_a_lds = row_a_lds + (mi * 16)
+                        a0 = ArithValue(arith.constant(-1, type=T.i64))
+                        a1 = ArithValue(arith.constant(-1, type=T.i64))
                         if a0_prefetch is not None and sb == 0 and mi == 0:
                             a0, a1 = a0_prefetch
                         else:

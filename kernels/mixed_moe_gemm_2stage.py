@@ -909,7 +909,7 @@ def compile_mixed_moe_gemm1(
                                             curr_row_a_lds, col_base0, lds_base
                                         )
 
-                                        if is_f8_a:
+                                        if const_expr(is_f8_a):
                                             col_base1 = col_base + 64
                                             a2, a3 = lds_load_packs_k64(
                                                 curr_row_a_lds, col_base1, lds_base
