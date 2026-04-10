@@ -596,7 +596,7 @@ def compile_moe_gemm1(
                         elem_type=w_elem,
                         kpack_bytes=kpack_bytes,
                         elem_bytes=w_elem_bytes,
-                        unpack_int4=is_int4,
+                        unpack_int4=(is_int4 or is_int4_bf16),
                     )
     
                 def load_b_tile(base_k, blk_list, intra_list):
@@ -605,7 +605,7 @@ def compile_moe_gemm1(
                     Returns a list of length `k_unroll`, where each entry is a tuple:
                       (packs_half0[ni], packs_half1[ni])  for the K64 micro-step.
                     """
-                    if is_int4_bf16:
+                    if const_expr(is_int4_bf16):
                         # W4A16: 2-phase load+unpack for VMEM latency hiding
                         # Phase 1: Issue ALL buffer_loads first.
                         raw_data = []
@@ -770,14 +770,14 @@ def compile_moe_gemm1(
                         return vector.bitcast(T.i16x4, v1)
 
                     def mfma_k64(acc_in, a0, a1, b0, b1):
-                        if is_f16:
+                        if const_expr(is_f16):
                             a0v = _i64_to_v4f16(a0)
                             a1v = _i64_to_v4f16(a1)
                             b0v = _i64_to_v4f16(b0)
                             b1v = _i64_to_v4f16(b1)
                             acc_mid = mfma_fn(mfma_res_ty, [a0v, b0v, acc_in, 0, 0, 0])
                             return mfma_fn(mfma_res_ty, [a1v, b1v, acc_mid, 0, 0, 0])
-                        if is_bf16:
+                        if const_expr(is_bf16):
                             a0v = _i64_to_v4i16(a0)
                             a1v = _i64_to_v4i16(a1)
                             b0v = _i64_to_v4i16(b0)
@@ -1791,7 +1791,7 @@ def compile_moe_gemm2(
                         elem_type=w_elem,
                         kpack_bytes=kpack_bytes,
                         elem_bytes=w_elem_bytes,
-                        unpack_int4=is_int4,
+                        unpack_int4=(is_int4 or is_int4_bf16),
                     )
     
                 def load_b_tile(base_k):
@@ -1800,7 +1800,7 @@ def compile_moe_gemm2(
                     Returns a list of length `k_unroll`, where each entry is a tuple:
                       (packs_half0[ni], packs_half1[ni])  for the K64 micro-step.
                     """
-                    if is_int4_bf16:
+                    if const_expr(is_int4_bf16):
                         # W4A16: 2-phase load+unpack for VMEM latency hiding
                         raw_data = []
                         for ku in range_constexpr(k_unroll):
@@ -1959,14 +1959,14 @@ def compile_moe_gemm2(
                         return vector.bitcast(T.i16x4, v1)
 
                     def mfma_k64(acc0, a0, a1, b0, b1):
-                        if is_f16:
+                        if const_expr(is_f16):
                             a0v = _i64_to_v4f16(a0)
                             a1v = _i64_to_v4f16(a1)
                             b0v = _i64_to_v4f16(b0)
                             b1v = _i64_to_v4f16(b1)
                             acc1 = mfma_fn(mfma_res_ty, [a0v, b0v, acc0, 0, 0, 0])
                             return mfma_fn(mfma_res_ty, [a1v, b1v, acc1, 0, 0, 0])
-                        if is_bf16:
+                        if const_expr(is_bf16):
                             a0v = _i64_to_v4i16(a0)
                             a1v = _i64_to_v4i16(a1)
                             b0v = _i64_to_v4i16(b0)

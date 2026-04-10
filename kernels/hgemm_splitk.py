@@ -234,11 +234,11 @@ def compile_hgemm_kernel(
             bs_ = STensor(smem_b_ptr, dtype_, shape=(STAGES, BLOCK_N, BLOCK_K))
         smem_c_ptr = SmemPtr(base_ptr, smem_a_offset, dtype_, shape=(BLOCK_M * BLOCK_N,))
         cs_ = STensor(smem_c_ptr, dtype_, shape=(BLOCK_M, BLOCK_N))
-        if B_PRE_SHUFFLE:
+        if const_expr(B_PRE_SHUFFLE):
             # origin: n // WARP_ATOM_N, WARP_ATOM_N, k // WARP_ATOM_K, WARP_ATOM_K // LDG_VEC_SIZE, LDG_VEC_SIZE
             SHUFFLED_B_ = GTensor(B, dtype=dtype_, shape=(
                 n // WARP_ATOM_N, k // WARP_ATOM_K, WARP_ATOM_K // LDG_VEC_SIZE, WARP_ATOM_N, LDG_VEC_SIZE))
-        if IS_SPLIT_K:
+        if const_expr(IS_SPLIT_K):
             COUNTER_ = GTensor(COUNTER, dtype=T.i32, shape=(-1,))
         
         tid = fx.Int32(fx.thread_idx.x)
@@ -504,7 +504,7 @@ def compile_hgemm_kernel(
                 b_k0 = b_k0_base + kk
                 for ii in range_constexpr(WARP_N_STEPS):
                     b_n0 = b_n0_base + ii
-                    if not B_PRE_SHUFFLE:
+                    if const_expr(not B_PRE_SHUFFLE):
                         warp_atom_n_idx = warp_n_idx + ii * WARP_ATOM_N
                         warp_atom_k_idx = kk * WARP_ATOM_K
                         n_idx = n_offset + warp_atom_n_idx + ldmatrix_b_n_idx
@@ -551,7 +551,7 @@ def compile_hgemm_kernel(
         if IS_SPLIT_K:
             zero_c()
         
-        if B_TO_LDS:
+        if const_expr(B_TO_LDS):
 
             sts_a(ldg_a(ks_begin), 0)
             sts_b(ldg_b(ks_begin), 0)
@@ -623,7 +623,7 @@ def compile_hgemm_kernel(
                 # for i in range_constexpr(WARP_K_STEPS * WARP_M_STEPS * WARP_N_STEPS * MFMA_PER_WARP_K):
                 #     rocdl.sched_mfma(1)
                 # ================ Reordered ================
-                if ASYNC_COPY:
+                if const_expr(ASYNC_COPY):
                     AVG_MFMA_COUNT = (MFMA_TOTAL + LDG_TOTAL - 1)  // LDG_TOTAL
                     for i in range_constexpr(LDG_TOTAL):
                         rocdl.sched_vmem(ldg_.consume(1))
@@ -646,13 +646,13 @@ def compile_hgemm_kernel(
                 c_frags = state[2 : 2 + C_FRAGS_LEN]
                 a_frags = state[2 + C_FRAGS_LEN : 2 + C_FRAGS_LEN + A_FRAGS_LEN]
                 b_frags = state[2 + C_FRAGS_LEN + A_FRAGS_LEN : 2 + C_FRAGS_LEN + A_FRAGS_LEN + B_FRAGS_LEN]
-                if ASYNC_COPY:
+                if const_expr(ASYNC_COPY):
                     ldg_sts_a_async(k_offset + BLOCK_K, next_stage)
                 else:
                     a_regs_next = ldg_a(k_offset + BLOCK_K)
                 b_frags_next = ldg_matrix_b(k_offset + BLOCK_K)
                 block_mma_sync(a_frags, b_frags, c_frags)
-                if not ASYNC_COPY:
+                if const_expr(not ASYNC_COPY):
                     sts_a(a_regs_next, next_stage)
                 hot_loop_scheduler()
                 gpu.barrier()
