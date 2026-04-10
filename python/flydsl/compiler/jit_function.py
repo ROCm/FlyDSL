@@ -9,6 +9,7 @@ import pickle
 import pkgutil
 import threading
 import types
+from contextlib import nullcontext
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set
@@ -17,9 +18,9 @@ from .._mlir import ir
 from .._mlir.dialects import func
 from .._mlir.passmanager import PassManager
 from ..expr.typing import Stream
-from ..runtime.device import get_rocm_arch, is_rdna_arch
 from ..utils import env, log
 from .ast_rewriter import ASTRewriter
+from .backends import compile_backend_name, get_backend
 from .jit_argument import convert_to_jit_arguments
 from .jit_executor import CompiledArtifact
 from .kernel_function import (
@@ -29,8 +30,7 @@ from .kernel_function import (
     create_gpu_module,
     get_gpu_module_body,
 )
-from .protocol import fly_types, fly_pointers, fly_construct
-
+from .protocol import fly_construct, fly_pointers, fly_types
 
 
 @lru_cache(maxsize=1)
@@ -39,8 +39,8 @@ def _flydsl_key() -> str:
 
     Covers:
       1. All Python source files under flydsl.compiler.*, flydsl.expr.*,
-         flydsl.runtime.*, flydsl.lang.*, flydsl.utils.*
-      2. Native shared libraries (_fly*.so, libFly*.so, libfly_jit_runtime.so,
+         flydsl.runtime.*, flydsl.utils.*
+      2. Native shared libraries (_mlirDialectsFly*.so, libFly*.so, libfly_jit_runtime.so,
          libmlir_rocm_runtime.so)
       3. flydsl.__version__
 
@@ -58,7 +58,6 @@ def _flydsl_key() -> str:
         (str(flydsl_root / "compiler"), "flydsl.compiler."),
         (str(flydsl_root / "expr"), "flydsl.expr."),
         (str(flydsl_root / "runtime"), "flydsl.runtime."),
-        (str(flydsl_root / "lang"), "flydsl.lang."),
         (str(flydsl_root / "utils"), "flydsl.utils."),
     ]
     for pkg_path, prefix in pkg_prefixes:
@@ -81,17 +80,10 @@ def _flydsl_key() -> str:
                 contents.append(hashlib.sha256(f.read()).hexdigest())
 
     # 2) Hash native shared libraries (C++ passes, runtime wrappers, bindings).
+    backend = get_backend()
     mlir_libs_dir = flydsl_root / "_mlir" / "_mlir_libs"
     if mlir_libs_dir.is_dir():
-        so_patterns = [
-            "_fly*.so",
-            "_fly_rocdl*.so",
-            "libFly*.so",
-            "libfly_jit_runtime.so",
-            "libmlir_rocm_runtime.so",
-            "_mlirRegisterEverything*.so",
-        ]
-        for pattern in so_patterns:
+        for pattern in backend.native_lib_patterns():
             for so_file in sorted(mlir_libs_dir.glob(pattern)):
                 h = hashlib.sha256()
                 with open(so_file, "rb") as f:
@@ -102,7 +94,7 @@ def _flydsl_key() -> str:
                         h.update(chunk)
                 contents.append(h.hexdigest())
 
-    key = f"flydsl:{flydsl.__version__}-" + "-".join(contents)
+    key = f"flydsl:{flydsl.__version__}:{backend.hash()}-" + "-".join(contents)
     log().debug(f"flydsl_key: {hashlib.sha256(key.encode()).hexdigest()[:16]}")
     return key
 
@@ -308,9 +300,11 @@ def _dump_isa(*, dump_dir: Path, ctx: ir.Context, asm: str, verify: bool, stage_
     """
     try:
         mod = ir.Module.parse(asm, context=ctx)
-        di_pass = "ensure-debug-info-scope-on-llvm-func{emission-kind=LineTablesOnly}," if env.debug.enable_debug_info else ""
+        di_pass = (
+            "ensure-debug-info-scope-on-llvm-func{emission-kind=LineTablesOnly}," if env.debug.enable_debug_info else ""
+        )
         pm = PassManager.parse(
-            f"builtin.module({di_pass}gpu-module-to-binary{{format=isa opts=\"{'-g' if env.debug.enable_debug_info else ''}\" section= toolkit=}})",
+            f'builtin.module({di_pass}gpu-module-to-binary{{format=isa opts="{"-g" if env.debug.enable_debug_info else ""}" section= toolkit=}})',
             context=ctx,
         )
         pm.enable_verifier(bool(verify))
@@ -351,50 +345,42 @@ def _sanitize_path_component(s: str) -> str:
     return _re.sub(r"[^A-Za-z0-9_.-]+", "_", s) if s else "unknown"
 
 
+def _extract_llvm_ir(module: ir.Module):
+    """Extract LLVM IR text from the gpu.module inside *module* (must already be in LLVM dialect)."""
+    try:
+        from .._mlir._mlir_libs._mlirDialectsLLVM import translate_module_to_llvmir
+
+        for op in module.body.operations:
+            if op.operation.name == "gpu.module":
+                return translate_module_to_llvmir(op.operation)
+        return None
+    except Exception as exc:
+        log().debug(f"[extract_llvm_ir] failed: {exc}")
+        return None
+
+
+def _pipeline_fragments(backend) -> tuple:
+    """Return the MLIR pass-pipeline fragments and llvm_options for *backend*."""
+    from .kernel_function import CompilationContext
+
+    hints = CompilationContext.get_compile_hints()
+    fragments = backend.pipeline_fragments(compile_hints=hints)
+    llvm_opts = hints.get("llvm_options")
+    return fragments, llvm_opts
+
+
 class MlirCompiler:
-    @staticmethod
-    def _pipeline_fragments(*, chip: str) -> list:
-        from .kernel_function import CompilationContext
-        hints = CompilationContext.get_compile_hints()
-        waves_per_eu = hints.get('waves_per_eu')
-        maxnreg = hints.get('maxnreg')
-
-        # Build compiler option flags for gpu-module-to-binary
-        debug_opt = "-g" if env.debug.enable_debug_info else ""
-        wpe_opt = f" --amdgpu-waves-per-eu={waves_per_eu}" if waves_per_eu else ""
-        maxnreg_opt = f" --amdgpu-num-vgpr={maxnreg}" if maxnreg else ""
-        all_opts = f"{debug_opt}{wpe_opt}{maxnreg_opt}".strip()
-
-        wave64 = "false" if is_rdna_arch(chip) else "true"
-        return [
-            "fly-rewrite-func-signature",
-            "fly-canonicalize",
-            "fly-layout-lowering",
-            "convert-fly-to-rocdl",
-            "canonicalize",
-            f"gpu.module(convert-scf-to-cf,cse,"
-            f"convert-gpu-to-rocdl{{chipset={chip} index-bitwidth=0 runtime=HIP use-bare-ptr-memref-call-conv=true}})",
-            f"rocdl-attach-target{{O=2 abi=600 chip={chip} correct-sqrt=true daz=false fast=false features= "
-            f"finite-only=false module= triple=amdgcn-amd-amdhsa unsafe-math=false wave64={wave64}}}",
-            "convert-scf-to-cf",
-            "convert-cf-to-llvm",
-            "gpu-to-llvm{use-bare-pointers-for-host=true use-bare-pointers-for-kernels=true}",
-            "convert-arith-to-llvm",
-            "convert-func-to-llvm",
-            "reconcile-unrealized-casts",
-            *((['ensure-debug-info-scope-on-llvm-func{emission-kind=LineTablesOnly}'] if env.debug.enable_debug_info else [])),
-            f'gpu-module-to-binary{{format=fatbin opts="{all_opts}"}}',
-        ]
-
     @classmethod
-    def compile(cls, module: ir.Module, *, chip: str = None, func_name: str = "") -> ir.Module:
+    def compile(cls, module: ir.Module, *, arch: str = "", func_name: str = "") -> ir.Module:
         module.operation.verify()
 
-        if chip is None:
-            chip = env.compile.arch or get_rocm_arch()
+        backend = get_backend(arch=arch)
 
         module = ir.Module.parse(module.operation.get_asm(enable_debug_info=env.debug.enable_debug_info))
-        fragments = cls._pipeline_fragments(chip=chip)
+        fragments, llvm_opts = _pipeline_fragments(backend)
+
+        from .llvm_options import llvm_options as _llvm_options
+        _llvm_ctx = _llvm_options(llvm_opts) if llvm_opts else nullcontext()
 
         if env.debug.print_origin_ir:
             log().info(f"Origin IR: \n{module}")
@@ -402,49 +388,61 @@ class MlirCompiler:
         dump_enabled = env.debug.dump_ir
         dump_dir = Path(env.debug.dump_dir).resolve()
 
-        if dump_enabled:
-            asm = module.operation.get_asm(enable_debug_info=True)
-            kernel_names = _infer_kernel_names_from_asm(asm)
-            subdir = kernel_names[0] if len(kernel_names) == 1 else (func_name or "module")
-            dump_dir = dump_dir / _sanitize_path_component(subdir)
-            print(f"[flydsl.compile] FLYDSL_DUMP_IR=1 dir={dump_dir}")
+        with _llvm_ctx:
+            if dump_enabled:
+                asm = module.operation.get_asm(enable_debug_info=True)
+                kernel_names = _infer_kernel_names_from_asm(asm)
+                subdir = kernel_names[0] if len(kernel_names) == 1 else (func_name or "module")
+                dump_dir = dump_dir / _sanitize_path_component(subdir)
+                print(f"[flydsl.compile] FLYDSL_DUMP_IR=1 dir={dump_dir}")
 
-            out = _dump_ir("00_origin", dump_dir=dump_dir, asm=asm)
-            print(f"[flydsl.compile] dump 00_origin -> {out}")
+                out = _dump_ir("00_origin", dump_dir=dump_dir, asm=asm)
+                print(f"[flydsl.compile] dump 00_origin -> {out}")
 
-            asm_for_isa = None
-            stage_num_base = 1
-            for idx, frag in enumerate(fragments):
-                stage_num = stage_num_base + idx
-                stage_name = f"{stage_num:02d}_{_stage_label_from_fragment(frag)}"
-                pm = PassManager.parse(f"builtin.module({frag})")
+                asm_for_isa = None
+                llir = None
+                stage_num_base = 1
+                for idx, frag in enumerate(fragments):
+                    if frag.strip().startswith("gpu-module-to-binary"):
+                        llir = _extract_llvm_ir(module)
+
+                    stage_num = stage_num_base + idx
+                    stage_name = f"{stage_num:02d}_{_stage_label_from_fragment(frag)}"
+                    pm = PassManager.parse(f"builtin.module({frag})")
+                    pm.enable_verifier(env.debug.enable_verifier)
+                    pm.run(module.operation)
+
+                    stage_asm = module.operation.get_asm(enable_debug_info=True)
+                    out = _dump_ir(stage_name, dump_dir=dump_dir, asm=stage_asm)
+                    print(f"[flydsl.compile] dump {stage_name} -> {out}")
+
+                    if frag.strip() == "reconcile-unrealized-casts":
+                        asm_for_isa = stage_asm
+
+                next_stage = stage_num_base + len(fragments)
+                if llir is not None:
+                    ll_name = f"{next_stage:02d}_llvm_ir"
+                    (dump_dir / f"{ll_name}.ll").write_text(llir, encoding="utf-8")
+                    print(f"[flydsl.compile] dump {ll_name} -> {dump_dir / f'{ll_name}.ll'}")
+                    next_stage += 1
+
+                if asm_for_isa is not None:
+                    isa_stage = f"{next_stage:02d}_final_isa"
+                    isa_out = _dump_isa(
+                        dump_dir=dump_dir,
+                        ctx=module.context,
+                        asm=asm_for_isa,
+                        verify=env.debug.enable_verifier,
+                        stage_name=isa_stage,
+                    )
+                    if isa_out is not None:
+                        print(f"[flydsl.compile] dump {isa_stage} -> {isa_out}")
+            else:
+                pipeline = f"builtin.module({','.join(fragments)})"
+                pm = PassManager.parse(pipeline)
                 pm.enable_verifier(env.debug.enable_verifier)
+                pm.enable_ir_printing(print_after_all=env.debug.print_after_all)
                 pm.run(module.operation)
-
-                stage_asm = module.operation.get_asm(enable_debug_info=True)
-                out = _dump_ir(stage_name, dump_dir=dump_dir, asm=stage_asm)
-                print(f"[flydsl.compile] dump {stage_name} -> {out}")
-
-                if frag.strip() == "reconcile-unrealized-casts":
-                    asm_for_isa = stage_asm
-
-            if asm_for_isa is not None:
-                isa_stage = f"{stage_num_base + len(fragments):02d}_final_isa"
-                isa_out = _dump_isa(
-                    dump_dir=dump_dir,
-                    ctx=module.context,
-                    asm=asm_for_isa,
-                    verify=env.debug.enable_verifier,
-                    stage_name=isa_stage,
-                )
-                if isa_out is not None:
-                    print(f"[flydsl.compile] dump {isa_stage} -> {isa_out}")
-        else:
-            pipeline = f"builtin.module({','.join(fragments)})"
-            pm = PassManager.parse(pipeline)
-            pm.enable_verifier(env.debug.enable_verifier)
-            pm.enable_ir_printing(print_after_all=env.debug.print_after_all)
-            pm.run(module.operation)
 
         return module
 
@@ -519,7 +517,7 @@ def _resolve_jit_arg_type(arg, annotation):
 
     if isinstance(arg, int) and annotation is Stream:
         return Stream
-    if hasattr(arg, '__fly_ptrs__'):
+    if hasattr(arg, "__fly_ptrs__"):
         return type(arg)
     constructor, _ = JitArgumentRegistry.get(type(arg))
     return constructor
@@ -548,13 +546,13 @@ def _build_call_state(sig, args_tuple, func_exe):
         if annotation is not inspect.Parameter.empty and _is_type_param_annotation(annotation):
             continue
 
-        if getattr(annotation, '_is_stream_param', False):
+        if getattr(annotation, "_is_stream_param", False):
             has_user_stream = True
 
         arg = args_tuple[i]
 
         jit_arg_type = _resolve_jit_arg_type(arg, annotation)
-        if jit_arg_type is None or not hasattr(jit_arg_type, '_reusable_slot_spec'):
+        if jit_arg_type is None or not hasattr(jit_arg_type, "_reusable_slot_spec"):
             return None
 
         spec = jit_arg_type._reusable_slot_spec(arg)
@@ -592,7 +590,7 @@ class CallState:
     thread-local storage for thread safety.
     """
 
-    __slots__ = ('_func_exe', '_spec', '_tls')
+    __slots__ = ("_func_exe", "_spec", "_tls")
 
     def __init__(self, slot_specs, func_exe):
         self._func_exe = func_exe
@@ -617,7 +615,7 @@ class CallState:
         self._tls._storages = storages
 
     def __call__(self, args_tuple):
-        if not hasattr(self._tls, 'packed'):
+        if not hasattr(self._tls, "packed"):
             self._init_buffers()
 
         for arg_idx, storage, extract in self._tls.updaters:
@@ -627,19 +625,23 @@ class CallState:
 
 
 class JitFunction:
-    def __init__(self, func: Callable):
+    def __init__(self, func: Callable, compile_hints: Optional[dict] = None):
         self.func = ASTRewriter.transform(func)
+        self.compile_hints = dict(compile_hints) if compile_hints is not None else {}
         self.manager_key = None
         self.cache_manager = None
         self._call_state_cache = {}  # cache_key -> CallState
         self._sig = None  # lazy: set on first call
+        self._target = None  # lazy: GPUTarget resolved once in _ensure_sig
         self._mem_cache = {}
+        self._last_compiled = None  # (cache_key, CompiledArtifact) for compile()
 
     def _ensure_sig(self):
         """Initialize signature + param metadata on first call (not at decoration time)."""
         if self._sig is not None:
             return
         self._sig = inspect.signature(self.func)
+        self._target = get_backend().target  # resolve once; frozen dataclass, hashable
 
     def _ensure_cache_manager(self):
         if self.manager_key is not None:
@@ -679,8 +681,9 @@ class JitFunction:
             return (type(arg), arg)
         else:
             from .jit_argument import JitArgumentRegistry
+
             constructor, _ = JitArgumentRegistry.get(type(arg))
-            if constructor is not None and hasattr(constructor, 'raw_cache_signature'):
+            if constructor is not None and hasattr(constructor, "raw_cache_signature"):
                 return constructor.raw_cache_signature(arg)
             return type(arg)
 
@@ -692,9 +695,13 @@ class JitFunction:
         key — only the Python type matters.  This prevents unnecessary
         recompilation when only runtime values change.
         """
-        from .jit_argument import _is_constexpr_annotation
+        from .jit_argument import _is_constexpr_annotation, _is_type_param_annotation
         sig = self._sig
-        key_parts = []
+        key_parts = [("_target_", self._target)]
+        if self.compile_hints:
+            key_parts.append(("_hints_", tuple(sorted(
+                (k, str(v)) for k, v in self.compile_hints.items()
+            ))))
         for name, arg in bound_args.items():
             param = sig.parameters.get(name)
             ann = param.annotation if param else inspect.Parameter.empty
@@ -703,11 +710,14 @@ class JitFunction:
                 key_parts.append((name, type(arg), arg))
                 continue
 
+            if ann is not inspect.Parameter.empty and _is_type_param_annotation(ann):
+                key_parts.append((name, "Type", arg))
+                continue
+
             is_runtime = (ann is not inspect.Parameter.empty
                           and hasattr(ann, '__fly_ptrs__'))
             if isinstance(arg, tuple):
-                key_parts.append((name, tuple(
-                    self._arg_cache_sig(a) for a in arg)))
+                key_parts.append((name, tuple(self._arg_cache_sig(a) for a in arg)))
             else:
                 key_parts.append((name, self._arg_cache_sig(arg, runtime=is_runtime)))
         return tuple(key_parts)
@@ -732,27 +742,32 @@ class JitFunction:
 
         args_tuple = tuple(bound.arguments.values())
 
+        # Compile/runtime pairing at JIT entry (not in CompiledArtifact / ExecutionEngine init).
+        from ..runtime.device_runtime import ensure_compile_runtime_pairing_from_env
+
+        ensure_compile_runtime_pairing_from_env(compile_backend_name())
+
         # Fast path: reuse pre-built CallState (no ctypes alloc, no DLPack)
         call_state = self._call_state_cache.get(cache_key)
         if call_state is not None:
             return call_state(args_tuple)
 
-        # Normal path: check caches
-        cached_func = None
-        use_cache = env.runtime.enable_cache
-        if use_cache:
-            cached_func = self._mem_cache.get(cache_key)
-            if cached_func is None and not env.debug.dump_ir:
-                str_key = self._cache_key_to_str(cache_key)
-                cached_func = self.cache_manager.get(str_key) if self.cache_manager else None
-                if cached_func is not None:
-                    self._mem_cache[cache_key] = cached_func
+        # Normal path: check in-process cache first, then optional disk cache.
+        use_disk_cache = env.runtime.enable_cache
+        cached_func = self._mem_cache.get(cache_key)
+        if cached_func is None and use_disk_cache and not env.debug.dump_ir:
+            str_key = self._cache_key_to_str(cache_key)
+            cached_func = self.cache_manager.get(str_key) if self.cache_manager else None
+            if cached_func is not None:
+                self._mem_cache[cache_key] = cached_func
 
         if cached_func is not None:
             # Build CallState via JitArgument registry (same dispatch as compile path)
             try:
                 state = _build_call_state(
-                    sig, args_tuple, cached_func._get_func_exe(),
+                    sig,
+                    args_tuple,
+                    cached_func._get_func_exe(),
                 )
             except Exception:
                 state = None
@@ -770,7 +785,9 @@ class JitFunction:
                 _ensure_stream_arg(jit_args)
                 return cached_func(*jit_args)
 
-        with ir.Context() as ctx:
+        _hints_ctx = CompilationContext.compile_hints(self.compile_hints) if self.compile_hints else nullcontext()
+
+        with ir.Context() as ctx, _hints_ctx:
             param_names, jit_args, dsl_types, constexpr_values = convert_to_jit_arguments(sig, bound)
             has_user_stream = _ensure_stream_arg(jit_args)
             ir_types = fly_types(jit_args)
@@ -785,8 +802,8 @@ class JitFunction:
             func_tracker = FuncLocationTracker(self.func)
 
             with ir.InsertionPoint(module.body), loc:
-                chip = env.compile.arch or get_rocm_arch()
-                gpu_module = create_gpu_module("kernels", targets=[f'#rocdl.target<chip = "{chip}">'])
+                backend = get_backend()
+                gpu_module = create_gpu_module("kernels", targets=backend.gpu_module_targets())
 
                 func_op = func.FuncOp(self.func.__name__, (ir_types, []))
                 func_op.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()
@@ -810,10 +827,10 @@ class JitFunction:
 
             original_ir = module.operation.get_asm(enable_debug_info=True)
 
-            compiled_module = MlirCompiler.compile(module, chip=chip, func_name=self.func.__name__)
+            compiled_module = MlirCompiler.compile(module, arch=backend.target.arch, func_name=self.func.__name__)
 
             if env.compile.compile_only:
-                print(f"[flydsl] COMPILE_ONLY=1, compilation succeeded (arch={chip})")
+                print(f"[flydsl] COMPILE_ONLY=1, compilation succeeded (arch={backend.target.arch})")
                 return None
 
             compiled_func = CompiledArtifact(
@@ -822,28 +839,33 @@ class JitFunction:
                 original_ir,
             )
 
-            if use_cache:
-                self._mem_cache[cache_key] = compiled_func
-                if self.cache_manager and not env.debug.dump_ir:
-                    str_key = self._cache_key_to_str(cache_key)
-                    self.cache_manager.set(str_key, compiled_func)
+            # Always keep a reference to the latest compilation result so
+            # flyc.compile() can retrieve it even when caching is disabled.
+            self._last_compiled = (cache_key, compiled_func)
+
+            # Keep compiled artifacts alive within the process even when disk
+            # cache is disabled. This preserves code object lifetime for
+            # profiler/roctracer teardown and enables fast same-process reuse.
+            self._mem_cache[cache_key] = compiled_func
+            if use_disk_cache and self.cache_manager and not env.debug.dump_ir:
+                str_key = self._cache_key_to_str(cache_key)
+                self.cache_manager.set(str_key, compiled_func)
 
             result = compiled_func(*jit_args)
 
-            # Build CallState so subsequent calls skip DLPack.
-            # Only when caching is enabled -- otherwise compiled_func will be
-            # GC'd and the function pointer inside CallState becomes dangling,
-            # causing a SIGSEGV on the next call with the same cache_key.
-            if use_cache:
-                try:
-                    state = _build_call_state(
-                        sig, args_tuple,
-                        compiled_func._get_func_exe(),
-                    )
-                    if state is not None:
-                        self._call_state_cache[cache_key] = state
-                except Exception:
-                    pass
+            # Build CallState so subsequent calls skip DLPack. The in-process
+            # CompiledArtifact cache above owns the ExecutionEngine/code object,
+            # so the function pointer remains valid even when disk cache is off.
+            try:
+                state = _build_call_state(
+                    sig,
+                    args_tuple,
+                    compiled_func._get_func_exe(),
+                )
+                if state is not None:
+                    self._call_state_cache[cache_key] = state
+            except Exception:
+                pass
 
             return result
 
@@ -863,3 +885,121 @@ def jit(func: Optional[Callable] = None) -> JitFunction:
     if func is None:
         return lambda f: JitFunction(f)
     return JitFunction(func)
+
+
+class CompiledFunction:
+    """Pre-compiled callable returned by ``flyc.compile()``.
+
+    All MLIR compilation, signature analysis, and argument metadata resolution
+    happen once at ``compile()`` time.  The ``__call__`` hot path does only:
+
+    1. Update pre-allocated ctypes storage (data_ptr / scalar extraction)
+    2. Invoke the JIT'd C function pointer
+
+    No ``inspect.Signature.bind``, no ``_make_cache_key``, no cache lookup.
+    Accepts **positional arguments only** (same count and order as the
+    original ``@flyc.jit`` function).
+    """
+
+    __slots__ = ("_call_state", "_keepalive")
+
+    def __init__(self, call_state, keepalive):
+        self._call_state = call_state
+        self._keepalive = keepalive  # prevent GC of CompiledArtifact / ExecutionEngine
+
+    def __call__(self, *args):
+        return self._call_state(args)
+
+
+def _compile_impl(func, *args) -> CompiledFunction:
+    """Pre-compile a ``@flyc.jit`` function, returning a fast callable.
+
+    Usage::
+
+        compiled_fn = flyc.compile(launch_gemm, c, a, b, sa, sb, M, N, stream)
+
+        # Hot loop — minimal dispatch overhead (~5 µs):
+        for ...:
+            compiled_fn(c, a, b, sa, sb, M, N, stream)
+
+    All arguments (including ``stream``) must be **positional**.
+    The returned :class:`CompiledFunction` also accepts only positional args.
+
+    Constexpr values are baked in at compile time and ignored on subsequent
+    calls; only runtime values (data pointers, scalars, stream) may change.
+    """
+    if not isinstance(func, JitFunction):
+        raise TypeError(
+            f"flyc.compile() expects a @flyc.jit function, got {type(func).__name__}"
+        )
+
+    jf = func
+
+    jf(*args)
+
+    # Retrieve the CallState (already built by __call__ above).
+    sig = jf._sig  # guaranteed initialized after __call__
+    bound = sig.bind(*args)
+    bound.apply_defaults()
+    cache_key = jf._make_cache_key(bound.arguments)
+    args_tuple = tuple(bound.arguments.values())
+
+    # Look up the CompiledArtifact.  We must hold a direct reference to it
+    # because it owns the ExecutionEngine and GPU code objects — if it gets
+    # GC'd, the function pointer inside CallState becomes dangling.
+    artifact = jf._mem_cache.get(cache_key)
+    if artifact is None:
+        # Cache disabled — retrieve from _last_compiled (set unconditionally
+        # by __call__).  This does not alter __call__'s caching semantics.
+        last = jf._last_compiled
+        if last is not None and last[0] == cache_key:
+            artifact = last[1]
+    if artifact is None:
+        raise RuntimeError(
+            "flyc.compile(): compilation succeeded but no cached artifact found."
+        )
+
+    call_state = jf._call_state_cache.get(cache_key)
+    if call_state is None:
+        call_state = _build_call_state(sig, args_tuple, artifact._get_func_exe())
+    if call_state is None:
+        raise RuntimeError(
+            "flyc.compile(): failed to build CallState.  "
+            "One or more argument types do not support the fast dispatch path "
+            "(missing _reusable_slot_spec)."
+        )
+
+    return CompiledFunction(call_state, artifact)
+
+
+class CompileCallable:
+    """Subscriptable compile callable.
+
+    Usage::
+
+        flyc.compile(launch, *args)                          # no hints
+        flyc.compile[{"fast_fp_math": True}](launch, *args)  # with hints
+        flyc.compile[hints](launch)                          # deferred
+    """
+
+    def __init__(self, compile_hints: Optional[dict] = None):
+        self._compile_hints = compile_hints
+
+    def __getitem__(self, hints: dict) -> "CompileCallable":
+        """``flyc.compile[{...}]`` → new CompileCallable with compile hints."""
+        if not isinstance(hints, dict):
+            raise TypeError(
+                f"flyc.compile[...] expects a dict of compile hints, got {type(hints).__name__}"
+            )
+        return CompileCallable(compile_hints=hints)
+
+    def __call__(self, func, *args):
+        if self._compile_hints and isinstance(func, JitFunction):
+            func.compile_hints = {**func.compile_hints, **self._compile_hints}
+        if not args:
+            # No args → just return the (hinted) function for deferred compilation
+            return func
+        return _compile_impl(func, *args)
+
+
+compile = CompileCallable()

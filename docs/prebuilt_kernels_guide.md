@@ -6,10 +6,10 @@
 
 | Kernel | Builder Function | API Style | Dtypes | Key Feature |
 |---|---|---|---|---|
-| **LayerNorm** | `build_layernorm_module(M, N, dtype)` | Legacy (pending migration) | f32, f16, bf16 | Two-pass vectorized normalization |
-| **RMSNorm** | `build_rmsnorm_module(M, N, dtype)` | Legacy (pending migration) | f32, f16, bf16 | LDS-cached 3-pass pipeline |
-| **Softmax** | `build_softmax_module(M, N, dtype)` | Legacy (pending migration) | f32, f16, bf16 | Online softmax, adaptive block size |
-| **GEMM** | `compile_preshuffle_gemm_a8(...)` | New (`@flyc.kernel`) | fp8, int8, int4, fp16, bf16, fp4 | Preshuffle B, ping-pong LDS, MFMA 16x16 |
+| **LayerNorm** | `build_layernorm_module(M, N, dtype)` | Layout API (`@flyc.kernel`) | f32, f16, bf16 | Two-pass vectorized normalization |
+| **RMSNorm** | `build_rmsnorm_module(M, N, dtype)` | Layout API (`@flyc.kernel`) | f32, f16, bf16 | LDS-cached 3-pass pipeline |
+| **Softmax** | `build_softmax_module(M, N, dtype)` | Layout API (`@flyc.kernel`) | f32, f16, bf16 | Online softmax, adaptive block size |
+| **GEMM** | `compile_preshuffle_gemm_a8(...)` | `@flyc.kernel` | fp8, int8, int4, fp16, bf16, fp4 | Preshuffle B, ping-pong LDS, MFMA 16x16 |
 
 > **Note on API styles**: All kernels use the `@flyc.kernel`/`@flyc.jit` API from `flydsl.compiler` and `flydsl.expr` (`python/flydsl/`).
 
@@ -182,7 +182,7 @@ Where:
 
 ## 4. Shared Utilities
 
-### 4.1 Reduction Helpers (`kernels/reduce.py`)
+### 4.1 Reduction Helpers (`kernels/kernels_common.py`)
 
 Reusable warp and block reduction functions (used by normalization and softmax kernels).
 
@@ -287,7 +287,7 @@ What operation do you need?
 │       └── → kernels/moe_gemm_2stage.py
 │
 └── Building blocks
-    ├── Warp/block reduction     → reduce.py
+    ├── Warp/block reduction     → kernels_common.py
     ├── MFMA epilogue selection  → mfma_epilogues.py
     └── Preshuffle data movement → mfma_preshuffle_pipeline.py
 ```
@@ -298,24 +298,50 @@ What operation do you need?
 
 | File | Description |
 |---|---|
-| `kernels/__init__.py` | Package marker |
-| `kernels/layernorm_kernel.py` | LayerNorm builder (`_LayerNorm` MlirModule, legacy API) |
-| `kernels/rmsnorm_kernel.py` | RMSNorm builder (`_RMSNorm` MlirModule, legacy API) |
-| `kernels/softmax_kernel.py` | Softmax builder (`_Softmax` MlirModule, legacy API) |
-| `kernels/preshuffle_gemm.py` | Preshuffle GEMM builder (new `@flyc.kernel` API) |
-| `kernels/reduce.py` | Shared warp/block reduction helpers |
-| `kernels/mfma_epilogues.py` | MFMA epilogue strategies (default, CShuffle) |
+| `kernels/preshuffle_gemm.py` | GEMM (preshuffle layout) |
+| `kernels/blockscale_preshuffle_gemm.py` | Blockscale GEMM |
+| `kernels/hgemm_splitk.py` | FP16 GEMM split-K |
+| `kernels/moe_gemm_2stage.py` | MoE GEMM 2-stage (gate/up + reduce) |
+| `kernels/moe_blockscale_2stage.py` | MoE Blockscale 2-stage |
+| `kernels/mixed_moe_gemm_2stage.py` | Mixed-precision MoE GEMM |
+| `kernels/pa_decode_fp8.py` | Paged attention decode (FP8) |
+| `kernels/flash_attn_func.py` | FlashAttention |
+| `kernels/layernorm_kernel.py` | LayerNorm (layout API) |
+| `kernels/rmsnorm_kernel.py` | RMSNorm (layout API) |
+| `kernels/softmax_kernel.py` | Softmax (layout API) |
+| `kernels/fused_rope_cache_kernel.py` | Fused RoPE + KV cache |
+| `kernels/custom_all_reduce.py` | Multi-GPU all-reduce |
+| `kernels/rdna_f16_gemm.py` | RDNA FP16 GEMM |
+| `kernels/rdna_fp8_preshuffle_gemm.py` | RDNA FP8 GEMM |
+| `kernels/gemm_common_gfx1250.py` | GFX1250 GEMM common |
+| `kernels/gemm_fp8fp4_gfx1250.py` | GFX1250 FP8/FP4 GEMM |
+| `kernels/wmma_gemm_gfx1250.py` | GFX1250 WMMA GEMM |
+| `kernels/mfma_epilogues.py` | MFMA epilogue helpers |
 | `kernels/mfma_preshuffle_pipeline.py` | Preshuffle data movement and layout utilities |
-| `kernels/blockscale_preshuffle_gemm.py` | Blockscale preshuffle GEMM (per-block FP8 scaling) |
-| `kernels/moe_gemm_2stage.py` | MoE GEMM 2-stage (gate/up + reduce, fp8/f16/bf16/int8/int4) |
-| `kernels/moe_blockscale_2stage.py` | MoE Blockscale 2-stage (per-block scaling) |
+| `kernels/pipeline_utils.py` | Pipeline utility helpers |
+| `kernels/kernels_common.py` | Common kernel utilities (reduction, etc.) |
+| `kernels/tensor_shim.py` | GTensor/STensor abstraction |
 
 ## 8. Test Files
 
 | File | Tests |
 |---|---|
-| `tests/kernels/test_layernorm.py` | LayerNorm correctness + perf |
-| `tests/kernels/test_rmsnorm.py` | RMSNorm correctness + perf |
-| `tests/kernels/test_softmax.py` | Softmax correctness + perf |
-| `tests/kernels/test_preshuffle_gemm.py` | GEMM fp8/int8/int4/bf16/fp4 correctness + perf |
+| `tests/kernels/test_preshuffle_gemm.py` | GEMM fp8/int8/int4/bf16/fp4 |
+| `tests/kernels/test_blockscale_preshuffle_gemm.py` | Blockscale GEMM |
+| `tests/kernels/test_hgemm_splitk.py` | FP16 GEMM split-K |
+| `tests/kernels/test_moe_gemm.py` | MoE GEMM |
+| `tests/kernels/test_moe_blockscale.py` | MoE Blockscale GEMM |
+| `tests/kernels/test_moe_reduce.py` | MoE reduce kernel |
+| `tests/kernels/test_pa.py` | Paged attention decode |
+| `tests/kernels/test_flash_attn_func.py` | FlashAttention |
+| `tests/kernels/test_layernorm.py` | LayerNorm |
+| `tests/kernels/test_rmsnorm.py` | RMSNorm |
+| `tests/kernels/test_softmax.py` | Softmax |
+| `tests/kernels/test_fused_rope_cache.py` | Fused RoPE + KV cache |
+| `tests/kernels/test_flydsl_allreduce.py` | Multi-GPU all-reduce |
+| `tests/kernels/test_rdna_gemm.py` | RDNA GEMM |
+| `tests/kernels/test_gemm_fp8fp4_gfx1250.py` | GFX1250 FP8/FP4 GEMM |
+| `tests/kernels/test_wmma_gemm_gfx1250.py` | GFX1250 WMMA GEMM |
+| `tests/kernels/test_vec_add.py` | Vector addition |
+| `tests/kernels/test_quant.py` | Quantization utilities |
 | `tests/kernels/benchmark_common.py` | Shared benchmark infrastructure |

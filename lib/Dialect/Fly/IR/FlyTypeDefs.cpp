@@ -4,6 +4,7 @@
 #include "mlir/IR/DialectImplementation.h"
 
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
+#include "flydsl/Dialect/Fly/Utils/IntTupleUtils.h"
 #include "flydsl/Dialect/Fly/Utils/LayoutUtils.h"
 #include "flydsl/Dialect/Fly/Utils/NormalForm.h"
 
@@ -262,7 +263,7 @@ Type CoordTensorType::parse(AsmParser &parser) {
 void CoordTensorType::print(AsmPrinter &printer) const {
   printer << "<";
   printer.printStrippedAttrOrType(getBase());
-  printer << ",";
+  printer << ", ";
   Attribute layoutAttr = getLayout();
   if (auto layout = dyn_cast<LayoutAttr>(layoutAttr))
     printer.printStrippedAttrOrType(layout);
@@ -306,11 +307,11 @@ static LogicalResult parseAlignAndSwizzle(AsmParser &parser, Type elemTy, AlignA
 static void printAlignAndSwizzle(AsmPrinter &printer, Type elemTy, AlignAttr alignment,
                                  SwizzleAttr swizzle, MLIRContext *ctx) {
   if (alignment != AlignAttr::getTrivialAlignment(elemTy)) {
-    printer << ",";
+    printer << ", ";
     printer.printStrippedAttrOrType(alignment);
   }
   if (swizzle != SwizzleAttr::getTrivialSwizzle(ctx)) {
-    printer << ",";
+    printer << ", ";
     printer.printStrippedAttrOrType(swizzle);
   }
 }
@@ -332,7 +333,7 @@ Type PointerType::parse(AsmParser &parser) {
 }
 
 void PointerType::print(AsmPrinter &printer) const {
-  printer << "<" << getElemTy() << ",";
+  printer << "<" << getElemTy() << ", ";
   printer.printStrippedAttrOrType(getAddressSpace());
   printAlignAndSwizzle(printer, getElemTy(), getAlignment(), getSwizzle(), getContext());
   printer << ">";
@@ -360,7 +361,7 @@ Type MemRefType::parse(AsmParser &parser) {
 }
 
 void MemRefType::print(AsmPrinter &printer) const {
-  printer << "<" << getElemTy() << ",";
+  printer << "<" << getElemTy() << ", ";
   printer.printStrippedAttrOrType(getAddressSpace());
   printer << ", ";
   Attribute layoutAttr = getLayout();
@@ -372,40 +373,17 @@ void MemRefType::print(AsmPrinter &printer) const {
   printer << ">";
 }
 
-#include "flydsl/Dialect/Fly/Utils/ThrValLayoutMacro.h.inc"
-
 TileType TiledMmaType::getDefaultPermutationMNK(MLIRContext *ctx) {
   Attribute noneVal = IntAttr::getNone(ctx);
   SmallVector<Attribute> elems(3, noneVal);
   return TileType::get(ctx, TileAttr::get(ArrayAttr::get(ctx, elems)));
 }
 
-bool CopyOpUniversalCopyType::isStatic() const { return true; }
-
-Value CopyOpUniversalCopyType::rebuildStaticValue(OpBuilder &builder, Location loc,
-                                                  Value currentValue) const {
-  if (currentValue && isa<MakeCopyAtomOp>(currentValue.getDefiningOp()))
-    return nullptr;
-  return MakeCopyAtomOp::create(builder, loc, CopyAtomType::get(*this, getBitSize()), getBitSize());
-}
-
-Attribute CopyOpUniversalCopyType::getThrLayout() const { return FxLayout(FxC(1), FxC(1)); }
-
-Attribute CopyOpUniversalCopyType::getThrBitLayoutSrc() const {
-  return FxLayout(FxShape(FxC(1), FxC(getBitSize())), FxStride(FxC(1), FxC(1)));
-}
-Attribute CopyOpUniversalCopyType::getThrBitLayoutDst() const {
-  return FxLayout(FxShape(FxC(1), FxC(getBitSize())), FxStride(FxC(1), FxC(1)));
-}
-Attribute CopyOpUniversalCopyType::getThrBitLayoutRef() const {
-  return FxLayout(FxShape(FxC(1), FxC(getBitSize())), FxStride(FxC(1), FxC(1)));
-}
-
 bool CopyAtomType::isStatic() const {
-  auto copyOp = dyn_cast<CopyOpTypeInterface>(getCopyOp());
-  if (!copyOp)
+  auto mayStatic = dyn_cast<MayStaticTypeInterface>(getCopyOp());
+  if (!mayStatic)
     return false;
-  return copyOp.isStatic();
+  return mayStatic.isStatic();
 }
 
 Attribute CopyAtomType::getThrLayout() {
@@ -429,66 +407,89 @@ Attribute CopyAtomType::getThrValLayoutRef() {
   return layoutRecast(builder, cast<LayoutAttr>(copyOp.getThrBitLayoutRef()), 1, getValBits());
 }
 
-bool MmaAtomUniversalFMAType::isStatic() const { return true; }
+LogicalResult CopyAtomType::emitAtomCall(OpBuilder &builder, Location loc, Type copyAtomTy,
+                                         Type srcMemTy, Type dstMemTy, Value atomVal, Value src,
+                                         Value dst) const {
+  return cast<CopyOpTypeInterface>(getCopyOp())
+      .emitAtomCall(builder, loc, copyAtomTy, srcMemTy, dstMemTy, atomVal, src, dst);
+}
 
-Value MmaAtomUniversalFMAType::rebuildStaticValue(OpBuilder &builder, Location loc,
-                                                  Value currentValue) const {
+LogicalResult CopyAtomType::emitAtomCall(OpBuilder &builder, Location loc, Type copyAtomTy,
+                                         Type srcMemTy, Type dstMemTy, Type predMemTy,
+                                         Value atomVal, Value src, Value dst, Value pred) const {
+  return cast<CopyOpTypeInterface>(getCopyOp())
+      .emitAtomCall(builder, loc, copyAtomTy, srcMemTy, dstMemTy, predMemTy, atomVal, src, dst,
+                    pred);
+}
+
+bool CopyAtomType::isStateful() const { return isa<StatefulOpTypeInterface>(getCopyOp()); }
+
+Type CopyAtomType::getConvertedType(MLIRContext *ctx) const {
+  if (auto stateful = dyn_cast<StatefulOpTypeInterface>(getCopyOp()))
+    return stateful.getConvertedType(ctx);
+  return Type();
+}
+
+Value CopyAtomType::setAtomState(OpBuilder &builder, Location loc, Value atomStruct,
+                                 Attribute fieldAttr, Value fieldValue) const {
+  assert(this->isStateful() && "CopyAtom is not stateful");
+  return cast<StatefulOpTypeInterface>(getCopyOp())
+      .setAtomState(builder, loc, atomStruct, fieldAttr, fieldValue);
+}
+
+bool MmaAtomType::isStatic() const {
+  auto mayStatic = dyn_cast<MayStaticTypeInterface>(getMmaOp());
+  if (!mayStatic)
+    return false;
+  return mayStatic.isStatic();
+}
+
+Value MmaAtomType::rebuildStaticValue(OpBuilder &builder, Location loc, Value currentValue) const {
   if (currentValue && isa<MakeMmaAtomOp>(currentValue.getDefiningOp()))
     return nullptr;
   return MakeMmaAtomOp::create(builder, loc, Type(*this));
 }
 
-Attribute MmaAtomUniversalFMAType::getShapeMNK() const {
-  return IntTupleAttr::get(ArrayAttr::get(getContext(), {FxC(1), FxC(1), FxC(1)}));
+Attribute MmaAtomType::getThrLayout() const {
+  return cast<MmaOpTypeInterface>(getMmaOp()).getThrLayout();
+}
+Attribute MmaAtomType::getShapeMNK() const {
+  return cast<MmaOpTypeInterface>(getMmaOp()).getShapeMNK();
+}
+Type MmaAtomType::getValTypeA() const { return cast<MmaOpTypeInterface>(getMmaOp()).getValTypeA(); }
+Type MmaAtomType::getValTypeB() const { return cast<MmaOpTypeInterface>(getMmaOp()).getValTypeB(); }
+Type MmaAtomType::getValTypeC() const { return cast<MmaOpTypeInterface>(getMmaOp()).getValTypeC(); }
+Type MmaAtomType::getValTypeD() const { return cast<MmaOpTypeInterface>(getMmaOp()).getValTypeD(); }
+Attribute MmaAtomType::getThrValLayoutA() const {
+  return cast<MmaOpTypeInterface>(getMmaOp()).getThrValLayoutA();
+}
+Attribute MmaAtomType::getThrValLayoutB() const {
+  return cast<MmaOpTypeInterface>(getMmaOp()).getThrValLayoutB();
+}
+Attribute MmaAtomType::getThrValLayoutC() const {
+  return cast<MmaOpTypeInterface>(getMmaOp()).getThrValLayoutC();
 }
 
-Attribute MmaAtomUniversalFMAType::getThrLayout() const { return FxLayout(FxC(1), FxC(1)); }
-
-Type MmaAtomUniversalFMAType::getValTypeA() const { return getElemTy(); }
-Type MmaAtomUniversalFMAType::getValTypeB() const { return getElemTy(); }
-Type MmaAtomUniversalFMAType::getValTypeC() const { return getElemTy(); }
-Type MmaAtomUniversalFMAType::getValTypeD() const { return getElemTy(); }
-
-Attribute MmaAtomUniversalFMAType::getThrValLayoutA() const {
-  return FxLayout(FxShape(FxC(1), FxC(1)), FxStride(FxC(1), FxC(1)));
-}
-Attribute MmaAtomUniversalFMAType::getThrValLayoutB() const {
-  return FxLayout(FxShape(FxC(1), FxC(1)), FxStride(FxC(1), FxC(1)));
-}
-Attribute MmaAtomUniversalFMAType::getThrValLayoutC() const {
-  return FxLayout(FxShape(FxC(1), FxC(1)), FxStride(FxC(1), FxC(1)));
+LogicalResult MmaAtomType::emitAtomCall(OpBuilder &builder, Location loc, Type mmaAtomTy,
+                                        Type dMemTy, Type aMemTy, Type bMemTy, Type cMemTy,
+                                        Value atomVal, Value d, Value a, Value b, Value c) const {
+  return cast<MmaOpTypeInterface>(getMmaOp())
+      .emitAtomCall(builder, loc, mmaAtomTy, dMemTy, aMemTy, bMemTy, cMemTy, atomVal, d, a, b, c);
 }
 
-Type MmaAtomUniversalFMAType::parse(AsmParser &parser) {
-  Type elemTyA, elemTyB, elemTyC;
-  if (parser.parseLess())
-    return {};
-  int32_t m, n, k;
-  if (parseMNKDimensionList(parser, m, n, k))
-    return {};
-  if (m != 1 || n != 1 || k != 1) {
-    parser.emitError(parser.getCurrentLocation())
-        << "expected 1x1x1 dimensions for universal FMA, got " << m << "x" << n << "x" << k;
-    return {};
-  }
-  // Parse ", (elemTy, elemTy) -> elemTy>"
-  if (parser.parseComma() || parser.parseLParen() || parser.parseType(elemTyA) ||
-      parser.parseComma() || parser.parseType(elemTyB) || parser.parseRParen() ||
-      parser.parseArrow() || parser.parseType(elemTyC) || parser.parseGreater())
-    return {};
-  // For universal FMA, all element types should be the same
-  if (elemTyA != elemTyB || elemTyB != elemTyC) {
-    parser.emitError(parser.getCurrentLocation())
-        << "expected all element types to be the same for universal FMA";
-    return {};
-  }
-  return get(parser.getContext(), elemTyA);
+bool MmaAtomType::isStateful() const { return isa<StatefulOpTypeInterface>(getMmaOp()); }
+
+Type MmaAtomType::getConvertedType(MLIRContext *ctx) const {
+  if (auto stateful = dyn_cast<StatefulOpTypeInterface>(getMmaOp()))
+    return stateful.getConvertedType(ctx);
+  return Type();
 }
 
-void MmaAtomUniversalFMAType::print(AsmPrinter &printer) const {
-  printer << "<";
-  printMNKDimensionList(printer, 1, 1, 1);
-  printer << ", (" << getElemTy() << ", " << getElemTy() << ") -> " << getElemTy() << ">";
+Value MmaAtomType::setAtomState(OpBuilder &builder, Location loc, Value atomStruct,
+                                Attribute fieldAttr, Value fieldValue) const {
+  assert(this->isStateful() && "MmaAtom is not stateful");
+  return cast<StatefulOpTypeInterface>(getMmaOp())
+      .setAtomState(builder, loc, atomStruct, fieldAttr, fieldValue);
 }
 
 } // namespace mlir::fly

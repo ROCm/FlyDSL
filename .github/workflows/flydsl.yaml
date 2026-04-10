@@ -22,7 +22,7 @@ jobs:
   test:
     strategy:
       matrix:
-        runners: [ 'linux-flydsl-mi325-1', 'linux-flydsl-mi355-1' ]
+        runners: [ 'linux-flydsl-mi325-1', 'linux-flydsl-mi355-1', 'linux-flydsl-navi-2' ]
       fail-fast: false
     runs-on: ${{ matrix.runners }}
     steps:
@@ -60,7 +60,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          docker exec flydsl_test bash -c "apt-get update && apt-get install -y cmake build-essential"
+          docker exec flydsl_test bash -c "apt-get update && apt-get install -y cmake build-essential patchelf"
           docker exec flydsl_test bash -c "python3 -m pip install -U pip setuptools wheel"
           docker exec flydsl_test bash -c "python3 -m pip install ninja>=1.11.1"
           docker exec flydsl_test bash -c "python3 -m pip install -U 'hypothesis>=6.82.0'"
@@ -74,7 +74,7 @@ jobs:
           path: mlir_install.tgz
           # Key includes LLVM commit and hashes of build scripts/workflow.
           # Repo is checked out under `flydsl-test/` (see actions/checkout path), so hash paths must include it.
-          key: mlir-install-${{ hashFiles('flydsl-test/thirdparty/llvm-hash.txt', 'flydsl-test/scripts/build_llvm.sh', 'flydsl-test/CMakeLists.txt', 'flydsl-test/.github/workflows/flydsl.yaml') }}
+          key: mlir-install-${{ matrix.runners }}-${{ hashFiles('flydsl-test/thirdparty/llvm-hash.txt', 'flydsl-test/scripts/build_llvm.sh', 'flydsl-test/CMakeLists.txt', 'flydsl-test/.github/workflows/flydsl.yaml') }}
 
       - name: Use cached MLIR install tarball (skip LLVM build)
         if: steps.mlir-cache.outputs.cache-hit == 'true'
@@ -126,13 +126,15 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
         
-      - name: Install aiter
+      - name: Prepare aiter
+        if: ${{ !contains(matrix.runners, 'navi') }}
         run: |
-          docker exec flydsl_test bash -c "git clone --depth 1 --recursive --shallow-submodules https://github.com/ROCm/aiter.git /tmp/aiter && cd /tmp/aiter && python3 setup.py develop"
+          docker exec flydsl_test bash -c "rm -rf /tmp/aiter && git clone --depth 1 --recursive --shallow-submodules https://github.com/ROCm/aiter.git /tmp/aiter"
+          docker exec flydsl_test bash -c "python3 -c \"from pathlib import Path; src = Path('/tmp/aiter/requirements.txt'); dst = Path('/tmp/aiter/requirements-flydsl-ci.txt'); lines = [line for line in src.read_text().splitlines() if line.strip() and not line.strip().startswith('flydsl==')]; dst.write_text('\\n'.join(lines) + '\\n')\" && python3 -m pip install -r /tmp/aiter/requirements-flydsl-ci.txt"
 
       - name: Run tests
         run: |
-          docker exec flydsl_test bash -c "cd /flydsl-test && RUN_TESTS_FULL=1 bash scripts/run_tests.sh"
+          docker exec flydsl_test bash -c "export PYTHONPATH=/tmp/aiter:\${PYTHONPATH:-} && export AITER_REPO=/tmp/aiter && cd /flydsl-test && RUN_TESTS_FULL=1 bash scripts/run_tests.sh"
 
       - name: Show tests logs
         if: failure()
@@ -148,7 +150,7 @@ jobs:
 
       - name: Run benchmarks
         run: |
-          docker exec flydsl_test bash -c "cd /flydsl-test && bash scripts/run_benchmark.sh"
+          docker exec flydsl_test bash -c "export PYTHONPATH=/tmp/aiter:\${PYTHONPATH:-} && export AITER_REPO=/tmp/aiter && cd /flydsl-test && bash scripts/run_benchmark.sh"
 
       - name: Show benchmarks logs
         if: failure()

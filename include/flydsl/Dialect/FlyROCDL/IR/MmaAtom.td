@@ -7,10 +7,10 @@
 include "flydsl/Dialect/FlyROCDL/IR/Dialect.td"
 
 //===----------------------------------------------------------------------===//
-// MmaAtom CDNA3
+// MmaOp CDNA3
 //===----------------------------------------------------------------------===//
 
-def FlyROCDL_MmaAtomCDNA3_MFMA : FlyxROCL_MmaAtom<"MmaAtomCDNA3_MFMA", "atom.cdna3.mfma", []> {
+def FlyROCDL_MmaOpCDNA3_MFMA : FlyROCL_MmaOp<"MmaOpCDNA3_MFMA", "cdna3.mfma", []> {
   let parameters = (ins
     "int32_t":$m,
     "int32_t":$n,
@@ -30,7 +30,32 @@ def FlyROCDL_MmaAtomCDNA3_MFMA : FlyxROCL_MmaAtom<"MmaAtomCDNA3_MFMA", "atom.cdn
 }
 
 //===----------------------------------------------------------------------===//
-// MmaAtom CDNA4
+// MmaOp CDNA4
 //===----------------------------------------------------------------------===//
+
+
+
+//===----------------------------------------------------------------------===//
+// MmaOp GFX1250 — WMMA wave32
+//===----------------------------------------------------------------------===//
+
+def FlyROCDL_MmaOpGFX1250_WMMA : FlyROCL_MmaOp<"MmaOpGFX1250_WMMA", "gfx1250.wmma", []> {
+  let parameters = (ins
+    "int32_t":$m,
+    "int32_t":$n,
+    "int32_t":$k,
+    "Type":$elemTyA,
+    "Type":$elemTyB,
+    "Type":$elemTyAcc
+  );
+  let assemblyFormat = "`<` custom<MNKDimensionList>($m, $n, $k) `,` `(` $elemTyA `,` $elemTyB `)` `->` $elemTyAcc `>`";
+
+  let builders = [
+    TypeBuilderWithInferredContext<(ins "int32_t":$m, "int32_t":$n, "int32_t":$k, "Type":$elemTyA, "Type":$elemTyB, "Type":$elemTyAcc), [{
+      return $_get(elemTyA.getContext(), m, n, k, elemTyA, elemTyB, elemTyAcc);
+    }]>
+  ];
+  let genVerifyDecl = 1;
+}
 
 #endif // FLYROCDL_MMAATOM

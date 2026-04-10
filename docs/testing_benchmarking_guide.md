@@ -7,7 +7,7 @@
 | Category | Location | Requires GPU | Description |
 |---|---|---|---|
 | **MLIR lit tests** | `tests/mlir/{LayoutAlgebra,Conversion,Transforms}/` | No | Verify Fly dialect lowering |
-| **Python IR tests** | `tests/pyir/test_*.py` | No | Python-based MLIR generation + lowering |
+| **Python tests** | `tests/python/examples/` | Varies | Python-based MLIR generation + AOT examples |
 | **GPU kernel tests** | `tests/kernels/test_*.py` | Yes | Full compilation → GPU execution |
 | **AOT examples** | `tests/python/examples/` | Varies | AOT pre-compilation examples |
 
@@ -46,20 +46,13 @@ cmake --build build-fly --target fly-opt -j$(nproc)
 build-fly/bin/fly-opt --fly-canonicalize tests/mlir/LayoutAlgebra/construction.mlir
 ```
 
-### 1.2 Python IR Tests (`tests/pyir/`)
+### 1.2 Python Tests (`tests/python/`)
 
-Python-based tests that generate MLIR IR using the FlyDSL Python API and verify the IR structure and lowering. No GPU execution required.
+Python-based tests including AOT pre-compilation examples.
 
-**Files:**
-| Test File | Description |
-|---|---|
-| `test_layout_algebra.py` | Layout algebra: coalesce, composition, divide, product, complement |
-| `test_rocir_print.py` | IR printing for Fly dialect ops |
-| `test_static_vs_dynamic.py` | Static vs dynamic value handling |
-
-**Running individually:**
+**Running:**
 ```bash
-python tests/pyir/test_layout_algebra.py
+python tests/python/examples/aot_example.py
 ```
 
 ### 1.3 GPU Kernel Tests (`tests/kernels/`)
@@ -282,7 +275,7 @@ shuffled = shuffle_weight(weight, layout=(16, 16))
 ### 6.1 PyIR Test Pattern (No GPU)
 
 ```python
-# tests/pyir/test_my_feature.py
+# tests/python/test_my_feature.py
 import flydsl.expr as fx
 from flydsl.expr.typing import T
 
@@ -417,6 +410,6 @@ bash scripts/dumpir.sh
 | `tests/utils.py` | `compile_to_hsaco()`, `pertoken_quant()`, `shuffle_weight()` |
 | `tests/kernels/benchmark_common.py` | `bench_gpu_us_torch()`, benchmark harness |
 | `tests/mlir/{LayoutAlgebra,Conversion,Transforms}/` | MLIR lit tests (18 files) |
-| `tests/pyir/test_*.py` | Python IR generation tests (3 files) |
+| `tests/python/examples/` | Python AOT examples |
 | `tests/kernels/test_*.py` | GPU kernel tests (12 files) |
 | `tests/python/examples/` | AOT pre-compilation examples |

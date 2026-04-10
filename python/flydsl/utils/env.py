@@ -224,6 +224,7 @@ class CompileEnvManager(EnvManager):
     opt_level = OptInt(2, min_value=0, max_value=3, description="Optimization level")
     compile_only = OptBool(False, env_var="COMPILE_ONLY", description="Only compile without execution, useful for verifying compilation without a GPU")
     arch = OptStr("", env_var="ARCH", description="Override target GPU architecture (e.g. gfx942, gfx950)")
+    backend = OptStr("rocm", description="GPU compile backend id (e.g. rocm)")
 
 
 class DebugEnvManager(EnvManager):
@@ -254,6 +255,10 @@ class RuntimeEnvManager(EnvManager):
 
     env_prefix = "RUNTIME"
 
+    kind = OptStr(
+        "rocm",
+        description="Device runtime kind (must match FLYDSL_COMPILE_BACKEND; e.g. rocm for HIP)",
+    )
     cache_dir = OptStr(str(Path.home() / ".flydsl" / "cache"), description="Directory for caching compiled kernels")
     enable_cache = OptBool(True, description="Enable kernel caching")
 

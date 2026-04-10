@@ -44,6 +44,39 @@ def Fly_MmaOperand : I32EnumAttr<"MmaOperand", "", [
 }
 def Fly_MmaOperandAttr : EnumAttr<Fly_Dialect, Fly_MmaOperand, "mma_operand"> {}
 
+def Fly_AtomicOp : I32EnumAttr<"AtomicOp", "", [
+  I32EnumAttrCase<"Add", 0, "add">,
+  I32EnumAttrCase<"Max", 1, "max">,
+  I32EnumAttrCase<"Min", 2, "min">,
+  I32EnumAttrCase<"And", 3, "and">,
+  I32EnumAttrCase<"Or", 4, "or">,
+  I32EnumAttrCase<"Inc", 5, "inc">,
+  I32EnumAttrCase<"Dec", 6, "dec">
+]> {
+  let genSpecializedAttr = 0;
+  let cppNamespace = Fly_Dialect.cppNamespace;
+}
+def Fly_AtomicOpAttr : EnumAttr<Fly_Dialect, Fly_AtomicOp, "atomic_op"> {}
+
+def Fly_GemmTraversalOrder : I32EnumAttr<"GemmTraversalOrder", "", [
+  I32EnumAttrCase<"KMN", 0, "kmn">,
+  I32EnumAttrCase<"KNM", 1, "knm">,
+  I32EnumAttrCase<"MKN", 2, "mkn">,
+  I32EnumAttrCase<"MNK", 3, "mnk">,
+  I32EnumAttrCase<"NKM", 4, "nkm">,
+  I32EnumAttrCase<"NMK", 5, "nmk">,
+  I32EnumAttrCase<"KMN_Serpentine", 6, "kmn_serpentine">,
+  I32EnumAttrCase<"KNM_Serpentine", 7, "knm_serpentine">,
+  I32EnumAttrCase<"MKN_Serpentine", 8, "mkn_serpentine">,
+  I32EnumAttrCase<"MNK_Serpentine", 9, "mnk_serpentine">,
+  I32EnumAttrCase<"NKM_Serpentine", 10, "nkm_serpentine">,
+  I32EnumAttrCase<"NMK_Serpentine", 11, "nmk_serpentine">
+]> {
+  let genSpecializedAttr = 0;
+  let cppNamespace = Fly_Dialect.cppNamespace;
+}
+def Fly_GemmTraversalOrderAttr : EnumAttr<Fly_Dialect, Fly_GemmTraversalOrder, "gemm_traversal_order"> {}
+
 //===----------------------------------------------------------------------===//
 // Type attributes
 //===----------------------------------------------------------------------===//

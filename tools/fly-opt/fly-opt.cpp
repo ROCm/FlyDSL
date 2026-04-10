@@ -20,6 +20,7 @@ int main(int argc, char **argv) {
   mlir::registerAllPasses();
   mlir::fly::registerFlyPasses();
   mlir::registerFlyToROCDLConversionPass();
+  mlir::registerFlyROCDLClusterAttrPass();
 
   mlir::DialectRegistry registry;
   mlir::registerAllDialects(registry);

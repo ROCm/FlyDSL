@@ -222,7 +222,7 @@ def Fly_TiledCopy : Fly_Type<"TiledCopy", "tiled_copy", [
     Fly_Layout:$layoutThrVal,
     Fly_Tile:$tileMN
   );
-  let assemblyFormat = "`<` $copyAtom `,` $layoutThrVal `,` $tileMN `>`";
+  let assemblyFormat = "`<` $copyAtom `,` qualified($layoutThrVal) `,` qualified($tileMN) `>`";
 }
 
 def Fly_TiledMma : Fly_Type<"TiledMma", "tiled_mma", [
@@ -233,7 +233,7 @@ def Fly_TiledMma : Fly_Type<"TiledMma", "tiled_mma", [
     Fly_Layout:$atomLayout,
     DefaultValuedParameter<"TileType", "TiledMmaType::getDefaultPermutationMNK($_ctxt)">:$permutation
   );
-  let assemblyFormat = "`<` $mmaAtom `,` $atomLayout (`,` $permutation^)? `>`";
+  let assemblyFormat = "`<` $mmaAtom `,` qualified($atomLayout) (`,` qualified($permutation)^)? `>`";
 
   let extraClassDeclaration = [{
     static TileType getDefaultPermutationMNK(MLIRContext *ctx);
@@ -254,11 +254,56 @@ def Fly_CopyAtom : Fly_Type<"CopyAtom", "copy_atom", [
     ::mlir::Attribute getThrValLayoutSrc();
     ::mlir::Attribute getThrValLayoutDst();
     ::mlir::Attribute getThrValLayoutRef();
+    ::mlir::LogicalResult emitAtomCall(OpBuilder &builder, Location loc, Type copyAtomTy,
+                                       Type srcMemTy, Type dstMemTy, Value atomVal, Value src, Value dst) const;
+    ::mlir::LogicalResult emitAtomCall(OpBuilder &builder, Location loc, Type copyAtomTy,
+                                       Type srcMemTy, Type dstMemTy, Type predMemTy, Value atomVal, Value src, Value dst,
+                                       Value pred) const;
+                                       
+    bool isStateful() const;
+    ::mlir::Type getConvertedType(::mlir::MLIRContext *ctx) const;
+    ::mlir::Value setAtomState(OpBuilder &builder, Location loc, Value atomStruct,
+                               Attribute fieldAttr, Value fieldValue) const;
   }];
 
   let builders = [
     TypeBuilderWithInferredContext<(ins "Type":$copyOp, "int32_t":$valBits), [{
       return $_get(copyOp.getContext(), copyOp, valBits);
+    }]>
+  ];
+}
+
+def Fly_MmaAtom : Fly_Type<"MmaAtom", "mma_atom", [
+  DeclareTypeInterfaceMethods<Fly_MayStaticTypeInterface>
+]> {
+  let parameters = (ins
+    "Type":$mmaOp
+  );
+  let assemblyFormat = "`<` $mmaOp `>`";
+
+  let extraClassDeclaration = [{
+    ::mlir::Attribute getThrLayout() const;
+    ::mlir::Attribute getShapeMNK() const;
+    ::mlir::Type getValTypeA() const;
+    ::mlir::Type getValTypeB() const;
+    ::mlir::Type getValTypeC() const;
+    ::mlir::Type getValTypeD() const;
+    ::mlir::Attribute getThrValLayoutA() const;
+    ::mlir::Attribute getThrValLayoutB() const;
+    ::mlir::Attribute getThrValLayoutC() const;
+    ::mlir::LogicalResult emitAtomCall(OpBuilder &builder, Location loc, Type mmaAtomTy,
+                                       Type dMemTy, Type aMemTy, Type bMemTy, Type cMemTy, Value atomVal, Value d,
+                                       Value a, Value b, Value c) const;
+
+    bool isStateful() const;
+    ::mlir::Type getConvertedType(::mlir::MLIRContext *ctx) const;
+    ::mlir::Value setAtomState(OpBuilder &builder, Location loc, Value atomStruct,
+                               Attribute fieldAttr, Value fieldValue) const;
+  }];
+
+  let builders = [
+    TypeBuilderWithInferredContext<(ins "Type":$mmaOp), [{
+      return $_get(mmaOp.getContext(), mmaOp);
     }]>
   ];
 }
@@ -273,9 +318,26 @@ def Fly_CopyOpUniversalCopy : Fly_Type<"CopyOpUniversalCopy", "universal_copy", 
   let assemblyFormat = "`<` $bitSize `>`";
 }
 
-def Fly_MmaAtomUniversalFMA : Fly_Type<"MmaAtomUniversalFMA", "universal_fma", [
+def Fly_CopyOpUniversalAtomic : Fly_Type<"CopyOpUniversalAtomic", "universal_atomic", [
   DeclareTypeInterfaceMethods<Fly_MayStaticTypeInterface>,
-  DeclareTypeInterfaceMethods<Fly_MmaAtomTypeInterface>
+  DeclareTypeInterfaceMethods<Fly_CopyOpTypeInterface>
+]> {
+  let parameters = (ins
+    "AtomicOpAttr":$atomicOp,
+    "Type":$valType
+  );
+  let assemblyFormat = "`<` $atomicOp `,` $valType `>`";
+
+  let builders = [
+    TypeBuilderWithInferredContext<(ins "AtomicOpAttr":$atomicOp, "Type":$valType), [{
+      return $_get(atomicOp.getContext(), atomicOp, valType);
+    }]>
+  ];
+}
+
+def Fly_MmaOpUniversalFMA : Fly_Type<"MmaOpUniversalFMA", "universal_fma", [
+  DeclareTypeInterfaceMethods<Fly_MayStaticTypeInterface>,
+  DeclareTypeInterfaceMethods<Fly_MmaOpTypeInterface>
 ]> {
   let parameters = (ins "Type":$elemTy);
 

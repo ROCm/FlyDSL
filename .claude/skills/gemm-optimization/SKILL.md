@@ -9,7 +9,7 @@ description: >
   instruction count analysis, and bottleneck identification from ATT traces.
   Based on the production preshuffle_gemm kernel.
   Usage: /gemm-optimization
-tools: Read,Edit,Bash,Grep,Glob,Agent
+allowed-tools: Read Edit Bash Grep Glob Agent
 ---
 
 # GEMM Optimization Guide
