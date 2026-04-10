@@ -126,33 +126,28 @@ def compile_chunk_gated_delta_h(
 
     NUM_H_ACCS = NUM_K_BLOCKS * N_REPEAT
 
-    # ── LDS layout ──
-    # w tile: [BT, 64] bf16 row-major, one K-block at a time
-    LDS_W_STRIDE = 64  # elements per row
+    # ── LDS layout: w and k store all K-blocks to reduce barriers ──
+    LDS_W_STRIDE = K
     LDS_W_ELEMS = BT * LDS_W_STRIDE
     LDS_W_BYTES = LDS_W_ELEMS * 2
 
-    # k tile: [BT, 64] bf16 row-major (stored as [BT,64], read transposed via ds_read_b64_tr_b16)
-    LDS_K_STRIDE = 64
+    LDS_K_STRIDE = K
     LDS_K_ELEMS = BT * LDS_K_STRIDE
     LDS_K_BYTES = LDS_K_ELEMS * 2
 
-    # gated v_new: [BT, BV] bf16 row-major
     LDS_VN_STRIDE = BV
     LDS_VN_ELEMS = BT * LDS_VN_STRIDE
-    LDS_VN_BYTES = LDS_VN_ELEMS * 2  # bf16
+    LDS_VN_BYTES = LDS_VN_ELEMS * 2
 
-    # h snapshot: [K, BV] bf16 row-major
     LDS_H_STRIDE = BV
     LDS_H_ELEMS = K * LDS_H_STRIDE
     LDS_H_BYTES = LDS_H_ELEMS * 2
 
-    # w and k are used in different phases, so they can share the same LDS region
-    LDS_WK_BYTES = max(LDS_W_BYTES, LDS_K_BYTES)
-
     allocator = SmemAllocator(None, arch="gfx942", global_sym_name="gdn_h_smem")
-    lds_wk_offset = allocator._align(allocator.ptr, 16)
-    allocator.ptr = lds_wk_offset + LDS_WK_BYTES
+    lds_w_offset = allocator._align(allocator.ptr, 16)
+    allocator.ptr = lds_w_offset + LDS_W_BYTES
+    lds_k_offset = allocator._align(allocator.ptr, 16)
+    allocator.ptr = lds_k_offset + LDS_K_BYTES
     lds_vn_offset = allocator._align(allocator.ptr, 16)
     allocator.ptr = lds_vn_offset + LDS_VN_BYTES
     lds_h_offset = allocator._align(allocator.ptr, 16)
@@ -208,9 +203,13 @@ def compile_chunk_gated_delta_h(
         # ── LDS views ──
         lds_base_ptr = allocator.get_base()
 
-        # w/k tile (shared region, bf16)
-        lds_wk_ptr = SmemPtr(lds_base_ptr, lds_wk_offset, T.bf16, shape=(max(LDS_W_ELEMS, LDS_K_ELEMS),))
-        lds_wk = STensor(lds_wk_ptr, dtype=T.bf16, shape=(max(LDS_W_ELEMS, LDS_K_ELEMS),))
+        # w tile (bf16) — separate from k
+        lds_w_ptr = SmemPtr(lds_base_ptr, lds_w_offset, T.bf16, shape=(LDS_W_ELEMS,))
+        lds_w = STensor(lds_w_ptr, dtype=T.bf16, shape=(LDS_W_ELEMS,))
+
+        # k tile (bf16) — separate from w
+        lds_k_ptr = SmemPtr(lds_base_ptr, lds_k_offset, T.bf16, shape=(LDS_K_ELEMS,))
+        lds_k = STensor(lds_k_ptr, dtype=T.bf16, shape=(LDS_K_ELEMS,))
 
         # gated v_new (bf16)
         lds_vn_ptr = SmemPtr(lds_base_ptr, lds_vn_offset, T.bf16, shape=(LDS_VN_ELEMS,))
@@ -231,12 +230,16 @@ def compile_chunk_gated_delta_h(
         def _xor_swizzle_idx(row, col):
             return col ^ ((row & arith.index(0x7)) << arith.index(3))
 
-        # ── LDS vector read helper (generates ds_read_b128 for 8xbf16) ──
+        # ── LDS vector read helpers (generates ds_read_b128 for 8xbf16) ──
         v8bf16_type = T.vec(8, T.bf16)
-        lds_wk_memref = lds_wk_ptr.get()
+        lds_w_memref = lds_w_ptr.get()
+        lds_k_memref = lds_k_ptr.get()
 
-        def _lds_vec_read_bf16x8(elem_idx):
-            return vector.load_op(v8bf16_type, lds_wk_memref, [elem_idx])
+        def _lds_vec_read_w_bf16x8(elem_idx):
+            return vector.load_op(v8bf16_type, lds_w_memref, [elem_idx])
+
+        def _lds_vec_read_k_bf16x8(elem_idx):
+            return vector.load_op(v8bf16_type, lds_k_memref, [elem_idx])
 
         # ── ds_read_b64_tr_b16 helper (gfx950) ──
         v4bf16_type = T.vec(4, T.bf16)
@@ -343,17 +346,18 @@ def compile_chunk_gated_delta_h(
             h_accs_in = list(state)
             i_t_i32 = arith.index_cast(T.i32, i_t)
 
-            # ── 1. Prefetch w[0] from global (overlap with h snapshot store) ──
-            w_prefetch = []
-            w_prefetch_lds = []
-            for batch in range_constexpr(NUM_LOAD_BATCHES_64):
-                row = fx.Int32(batch * ROWS_PER_BATCH_64) + load_row_in_batch
-                abs_row = i_t_i32 * fx.Int32(BT) + row
-                in_bounds = arith.cmpi(arith.CmpIPredicate.slt, abs_row, T_local)
-                safe_row = arith.select(in_bounds, abs_row, fx.Int32(0))
-                g_off = w_base + safe_row * stride_w + fx.Int32(0 * 64) + load_col_base
-                w_prefetch.append(w_.vec_load((fx.Index(g_off),), LOAD_VEC_WIDTH))
-                w_prefetch_lds.append(row * fx.Int32(LDS_W_STRIDE) + load_col_base)
+            # ── 1. Prefetch all w K-blocks from global (overlap with h snapshot store) ──
+            w_prefetch_all = []
+            w_prefetch_lds_all = []
+            for kb in range_constexpr(NUM_K_BLOCKS):
+                for batch in range_constexpr(NUM_LOAD_BATCHES_64):
+                    row = fx.Int32(batch * ROWS_PER_BATCH_64) + load_row_in_batch
+                    abs_row = i_t_i32 * fx.Int32(BT) + row
+                    in_bounds = arith.cmpi(arith.CmpIPredicate.slt, abs_row, T_local)
+                    safe_row = arith.select(in_bounds, abs_row, fx.Int32(0))
+                    g_off = w_base + safe_row * stride_w + fx.Int32(kb * 64) + load_col_base
+                    w_prefetch_all.append(w_.vec_load((fx.Index(g_off),), LOAD_VEC_WIDTH))
+                    w_prefetch_lds_all.append(row * fx.Int32(LDS_W_STRIDE) + fx.Int32(kb * 64) + load_col_base)
 
             # ── Store h snapshot to global + LDS (w[0] loads in flight) ──
             for kb in range_constexpr(NUM_K_BLOCKS):
@@ -375,9 +379,55 @@ def compile_chunk_gated_delta_h(
                         lds_h_idx = lds_h_row * fx.Int32(BV) + lds_h_col
                         lds_h[fx.Index(lds_h_idx)] = bf16_val
 
+            # ── Store all w K-blocks to LDS in one batch ──
+            for i_wp in range_constexpr(NUM_K_BLOCKS * NUM_LOAD_BATCHES_64):
+                lds_w.vec_store((fx.Index(w_prefetch_lds_all[i_wp]),), w_prefetch_all[i_wp], LOAD_VEC_WIDTH)
+
             gpu.barrier()
 
             # ── 2. Delta correction: b_v = w @ h, then v_new = u - b_v ──
+            # Prefetch k[0] and u values during MFMA (overlap global loads with compute)
+            k_prefetch = []
+            k_prefetch_lds = []
+            for batch in range_constexpr(NUM_LOAD_BATCHES_64):
+                row = fx.Int32(batch * ROWS_PER_BATCH_64) + load_row_in_batch
+                abs_row = i_t_i32 * fx.Int32(BT) + row
+                in_bounds = arith.cmpi(arith.CmpIPredicate.slt, abs_row, T_local)
+                safe_row = arith.select(in_bounds, abs_row, fx.Int32(0))
+                g_off = k_base + safe_row * stride_k + fx.Int32(0 * 64) + load_col_base
+                k_prefetch.append(k_.vec_load((fx.Index(g_off),), LOAD_VEC_WIDTH))
+                k_prefetch_lds.append(row * fx.Int32(LDS_K_STRIDE) + load_col_base)
+
+            # Prefetch g values (overlap with MFMA below)
+            if USE_G:
+                next_chunk_end = (i_t_i32 + fx.Int32(1)) * fx.Int32(BT)
+                last_idx_raw = arith.select(
+                    arith.cmpi(arith.CmpIPredicate.slt, next_chunk_end, T_local),
+                    next_chunk_end,
+                    T_local,
+                ) - fx.Int32(1)
+                g_last_off = (bos + last_idx_raw) * fx.Int32(H) + i_h
+                g_last_prefetch = g_[fx.Index(g_last_off)]
+
+                g_row_prefetch = []
+                for elem_i in range_constexpr(4):
+                    abs_row = i_t_i32 * fx.Int32(BT) + wid * fx.Int32(16) + lane_m_base * fx.Int32(4) + fx.Int32(elem_i)
+                    in_bounds = arith.cmpi(arith.CmpIPredicate.slt, abs_row, T_local)
+                    safe_row = arith.select(in_bounds, abs_row, fx.Int32(0))
+                    g_row_off = (bos + safe_row) * fx.Int32(H) + i_h
+                    g_row_prefetch.append((g_[fx.Index(g_row_off)], in_bounds))
+
+            # Prefetch u values (overlap with MFMA below)
+            u_prefetch = []
+            for nr in range_constexpr(N_REPEAT):
+                u_col = i_v * fx.Int32(BV) + fx.Int32(nr * 16) + lane_n
+                for elem_i in range_constexpr(4):
+                    u_bt_row_raw = i_t_i32 * fx.Int32(BT) + wid * fx.Int32(16) + lane_m_base * fx.Int32(4) + fx.Int32(elem_i)
+                    u_row_in_bounds = arith.cmpi(arith.CmpIPredicate.slt, u_bt_row_raw, T_local)
+                    safe_u_row = arith.select(u_row_in_bounds, u_bt_row_raw, fx.Int32(0))
+                    u_off = v_base + safe_u_row * stride_v + u_col
+                    u_prefetch.append(v_[fx.Index(u_off)])
+
             bv_accs = []
             for _nr in range_constexpr(N_REPEAT):
                 bv_accs.append(arith.constant_vector(0.0, T.f32x4))
@@ -385,31 +435,11 @@ def compile_chunk_gated_delta_h(
             K_STEPS_PER_BLOCK = 64 // WMMA_K
 
             for kb in range_constexpr(NUM_K_BLOCKS):
-                # ── Store prefetched w[kb] to LDS ──
-                for batch in range_constexpr(NUM_LOAD_BATCHES_64):
-                    lds_wk.vec_store((fx.Index(w_prefetch_lds[batch]),), w_prefetch[batch], LOAD_VEC_WIDTH)
-
-                gpu.barrier()
-
-                # ── MFMA: w (A from LDS_wk) × h (B from LDS_h) ──
-                # Overlap: issue next K-block's global loads during MFMA
-                if kb + 1 < NUM_K_BLOCKS:
-                    w_prefetch = []
-                    w_prefetch_lds = []
-                    for batch in range_constexpr(NUM_LOAD_BATCHES_64):
-                        row = fx.Int32(batch * ROWS_PER_BATCH_64) + load_row_in_batch
-                        abs_row = i_t_i32 * fx.Int32(BT) + row
-                        in_bounds = arith.cmpi(arith.CmpIPredicate.slt, abs_row, T_local)
-                        safe_row = arith.select(in_bounds, abs_row, fx.Int32(0))
-                        g_off = w_base + safe_row * stride_w + fx.Int32((kb + 1) * 64) + load_col_base
-                        w_prefetch.append(w_.vec_load((fx.Index(g_off),), LOAD_VEC_WIDTH))
-                        w_prefetch_lds.append(row * fx.Int32(LDS_W_STRIDE) + load_col_base)
-
                 for ks in range_constexpr(K_STEPS_PER_BLOCK):
                     w_lds_row_idx = wid_idx * arith.index(16) + lane_n_idx
-                    w_lds_col_idx = arith.index(ks * WMMA_K) + lane_m_base_idx * arith.index(8)
+                    w_lds_col_idx = arith.index(kb * 64 + ks * WMMA_K) + lane_m_base_idx * arith.index(8)
                     w_lds_idx = w_lds_row_idx * arith.index(LDS_W_STRIDE) + w_lds_col_idx
-                    a_frag = _lds_vec_read_bf16x8(w_lds_idx)
+                    a_frag = _lds_vec_read_w_bf16x8(w_lds_idx)
 
                     global_ks = kb * K_STEPS_PER_BLOCK + ks
 
@@ -425,20 +455,13 @@ def compile_chunk_gated_delta_h(
 
                         bv_accs[nr] = _mfma_bf16_16x16x32(a_frag, b_frag, bv_accs[nr])
 
-                gpu.barrier()
-
-            # v_new = u - b_v  (per warp's M-tile only)
+            # v_new = u - b_v (u values already prefetched)
             vn_frags = []
             for nr in range_constexpr(N_REPEAT):
                 bv_val = bv_accs[nr]
-                u_col = i_v * fx.Int32(BV) + fx.Int32(nr * 16) + lane_n
                 u_f32_elems = []
                 for elem_i in range_constexpr(4):
-                    u_bt_row_raw = i_t_i32 * fx.Int32(BT) + wid * fx.Int32(16) + lane_m_base * fx.Int32(4) + fx.Int32(elem_i)
-                    u_row_in_bounds = arith.cmpi(arith.CmpIPredicate.slt, u_bt_row_raw, T_local)
-                    safe_u_row = arith.select(u_row_in_bounds, u_bt_row_raw, fx.Int32(0))
-                    u_off = v_base + safe_u_row * stride_v + u_col
-                    u_bf16 = v_[fx.Index(u_off)]
+                    u_bf16 = u_prefetch[nr * 4 + elem_i]
                     u_f32_elems.append(arith.extf(T.f32, u_bf16))
                 u_f32 = vector.from_elements(T.f32x4, u_f32_elems)
 
@@ -460,35 +483,21 @@ def compile_chunk_gated_delta_h(
                             vn_[fx.Index(vn_off)] = bf16_v
                             scf.YieldOp([])
 
-            # ── 3. Gating ──
+            # ── 3. Gating — g values prefetched before MFMA ──
             if USE_G:
-                next_chunk_end = (i_t_i32 + fx.Int32(1)) * fx.Int32(BT)
-                last_idx_raw = arith.select(
-                    arith.cmpi(arith.CmpIPredicate.slt, next_chunk_end, T_local),
-                    next_chunk_end,
-                    T_local,
-                ) - fx.Int32(1)
-
-                g_last_off = (bos + last_idx_raw) * fx.Int32(H) + i_h
-                g_last = g_[fx.Index(g_last_off)]
+                g_last = g_last_prefetch
                 exp_g_last = _fast_exp(g_last)
 
-                # Gate v_new: each f32x4 element corresponds to a different BT row
-                for nr in range_constexpr(N_REPEAT):
-                    vn_val = vn_frags[nr]
-                    gate_vec = arith.constant_vector(0.0, T.f32x4)
-                    for elem_i in range_constexpr(4):
-                        abs_row = i_t_i32 * fx.Int32(BT) + wid * fx.Int32(16) + lane_m_base * fx.Int32(4) + fx.Int32(elem_i)
-                        in_bounds = arith.cmpi(arith.CmpIPredicate.slt, abs_row, T_local)
-                        safe_row = arith.select(in_bounds, abs_row, fx.Int32(0))
-                        g_row_off = (bos + safe_row) * fx.Int32(H) + i_h
-                        g_row = g_[fx.Index(g_row_off)]
-                        gate = _fast_exp(arith.subf(g_last, g_row))
-                        gate_masked = arith.select(in_bounds, gate, arith.constant(0.0, type=T.f32))
-                        gate_vec = vector.insert(gate_masked, gate_vec, static_position=[elem_i], dynamic_position=[])
-                    vn_frags[nr] = arith.mulf(vn_val, gate_vec)
+                gate_vec = arith.constant_vector(0.0, T.f32x4)
+                for elem_i in range_constexpr(4):
+                    g_row, in_bounds = g_row_prefetch[elem_i]
+                    gate = _fast_exp(arith.subf(g_last, g_row))
+                    gate_masked = arith.select(in_bounds, gate, arith.constant(0.0, type=T.f32))
+                    gate_vec = vector.insert(gate_masked, gate_vec, static_position=[elem_i], dynamic_position=[])
 
-                # Scale h: h *= exp(g_last)
+                for nr in range_constexpr(N_REPEAT):
+                    vn_frags[nr] = arith.mulf(vn_frags[nr], gate_vec)
+
                 exp_g_last_vec = arith.constant_vector(0.0, T.f32x4)
                 for ei in range_constexpr(4):
                     exp_g_last_vec = vector.insert(exp_g_last, exp_g_last_vec, static_position=[ei], dynamic_position=[])
@@ -498,20 +507,21 @@ def compile_chunk_gated_delta_h(
                         acc_idx = kb * N_REPEAT + nr
                         h_accs_in[acc_idx] = arith.mulf(h_accs_in[acc_idx], exp_g_last_vec)
 
-            # ── 3b. Prefetch k[0] (overlap with v_new LDS store) ──
+            # ── 4. State update: h += k^T @ v_new_gated ──
             BT_STEPS = BT // WMMA_K
-            k_prefetch = []
-            k_prefetch_lds = []
-            for batch in range_constexpr(NUM_LOAD_BATCHES_64):
-                row = fx.Int32(batch * ROWS_PER_BATCH_64) + load_row_in_batch
-                abs_row = i_t_i32 * fx.Int32(BT) + row
-                in_bounds = arith.cmpi(arith.CmpIPredicate.slt, abs_row, T_local)
-                safe_row = arith.select(in_bounds, abs_row, fx.Int32(0))
-                g_off = k_base + safe_row * stride_k + fx.Int32(0 * 64) + load_col_base
-                k_prefetch.append(k_.vec_load((fx.Index(g_off),), LOAD_VEC_WIDTH))
-                k_prefetch_lds.append(row * fx.Int32(LDS_K_STRIDE) + load_col_base)
 
-            # Store gated v_new to LDS (bf16) — k[0] loads in flight
+            # Prefetch remaining k K-blocks (k[0] already prefetched during delta correction)
+            for kb_extra in range_constexpr(1, NUM_K_BLOCKS):
+                for batch in range_constexpr(NUM_LOAD_BATCHES_64):
+                    row = fx.Int32(batch * ROWS_PER_BATCH_64) + load_row_in_batch
+                    abs_row = i_t_i32 * fx.Int32(BT) + row
+                    in_bounds = arith.cmpi(arith.CmpIPredicate.slt, abs_row, T_local)
+                    safe_row = arith.select(in_bounds, abs_row, fx.Int32(0))
+                    g_off = k_base + safe_row * stride_k + fx.Int32(kb_extra * 64) + load_col_base
+                    k_prefetch.append(k_.vec_load((fx.Index(g_off),), LOAD_VEC_WIDTH))
+                    k_prefetch_lds.append(row * fx.Int32(LDS_K_STRIDE) + fx.Int32(kb_extra * 64) + load_col_base)
+
+            # Store gated v_new + all k K-blocks to LDS in one batch, single barrier
             for nr in range_constexpr(N_REPEAT):
                 vn_val = vn_frags[nr]
                 lds_col = fx.Int32(nr * 16) + lane_n
@@ -522,43 +532,23 @@ def compile_chunk_gated_delta_h(
                     lds_idx = lds_row * fx.Int32(LDS_VN_STRIDE) + lds_col
                     lds_vn[fx.Index(lds_idx)] = bf16_v
 
+            for i_kp in range_constexpr(NUM_K_BLOCKS * NUM_LOAD_BATCHES_64):
+                lds_k.vec_store((fx.Index(k_prefetch_lds[i_kp]),), k_prefetch[i_kp], LOAD_VEC_WIDTH)
+
             gpu.barrier()
 
-            # ── 4. State update: h += k^T @ v_new_gated ──
-
             for kb in range_constexpr(NUM_K_BLOCKS):
-                # ── Store prefetched k[kb] to LDS ──
-                for batch in range_constexpr(NUM_LOAD_BATCHES_64):
-                    lds_wk.vec_store((fx.Index(k_prefetch_lds[batch]),), k_prefetch[batch], LOAD_VEC_WIDTH)
-
-                gpu.barrier()
-
-                # Issue next K-block's global loads during MFMA
-                if kb + 1 < NUM_K_BLOCKS:
-                    k_prefetch = []
-                    k_prefetch_lds = []
-                    for batch in range_constexpr(NUM_LOAD_BATCHES_64):
-                        row = fx.Int32(batch * ROWS_PER_BATCH_64) + load_row_in_batch
-                        abs_row = i_t_i32 * fx.Int32(BT) + row
-                        in_bounds = arith.cmpi(arith.CmpIPredicate.slt, abs_row, T_local)
-                        safe_row = arith.select(in_bounds, abs_row, fx.Int32(0))
-                        g_off = k_base + safe_row * stride_k + fx.Int32((kb + 1) * 64) + load_col_base
-                        k_prefetch.append(k_.vec_load((fx.Index(g_off),), LOAD_VEC_WIDTH))
-                        k_prefetch_lds.append(row * fx.Int32(LDS_K_STRIDE) + load_col_base)
-
-                # ── MFMA: k^T (A from LDS_wk via ds_read_b64_tr_b16) × v_new (B from LDS_vn) ──
                 for bt_s in range_constexpr(BT_STEPS):
                     k_col_tr = wid * fx.Int32(16) + tr_col_sub * fx.Int32(4)
                     bt_row_tr = fx.Int32(bt_s * WMMA_K) + lane_m_base * fx.Int32(8) + tr_k_group
-                    k_lds_elem = bt_row_tr * fx.Int32(LDS_K_STRIDE) + k_col_tr
-                    k_lds_byte = k_lds_elem * fx.Int32(2) + fx.Int32(lds_wk_offset)
+                    k_lds_elem = bt_row_tr * fx.Int32(LDS_K_STRIDE) + fx.Int32(kb * 64) + k_col_tr
+                    k_lds_byte = k_lds_elem * fx.Int32(2) + fx.Int32(lds_k_offset)
 
                     k_lo = _ds_read_tr_bf16x4(k_lds_byte)
                     k_hi = _ds_read_tr_bf16x4(k_lds_byte + fx.Int32(4 * LDS_K_STRIDE * 2))
                     k_a_frag = vector.shuffle(k_lo, k_hi, [0, 1, 2, 3, 4, 5, 6, 7])
 
                     for nr in range_constexpr(N_REPEAT):
-                        # Read v_new B-operand from LDS_vn via ds_read_b64_tr_b16
                         vn_bt_row = fx.Int32(bt_s * WMMA_K) + lane_m_base * fx.Int32(8) + tr_k_group
                         vn_v_col = fx.Int32(nr * 16) + tr_col_sub * fx.Int32(4)
                         vn_lds_elem = vn_bt_row * fx.Int32(LDS_VN_STRIDE) + vn_v_col
@@ -570,8 +560,6 @@ def compile_chunk_gated_delta_h(
 
                         acc_idx = kb * N_REPEAT + nr
                         h_accs_in[acc_idx] = _mfma_bf16_16x16x32(k_a_frag, vn_b_frag, h_accs_in[acc_idx])
-
-                gpu.barrier()
 
             results = yield [_to_raw(v) for v in h_accs_in]
 
