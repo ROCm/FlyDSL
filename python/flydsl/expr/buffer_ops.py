@@ -388,7 +388,8 @@ def buffer_load(rsrc: ir.Value,
                 dtype = None,
                 mask: Optional[ir.Value] = None,
                 cache_modifier: int = 0,
-                soffset_bytes: Optional[Union[int, ir.Value]] = None) -> ir.Value:
+                soffset_bytes: Optional[Union[int, ir.Value]] = None,
+                offset_is_bytes: bool = False) -> ir.Value:
     """AMD buffer load operation.
     
     Load data from global memory using buffer descriptor and offset.
@@ -396,7 +397,7 @@ def buffer_load(rsrc: ir.Value,
     
     Args:
         rsrc: Buffer resource descriptor (!llvm.ptr<8>)
-        offset: Offset in elements (i32 type)
+        offset: Offset in elements (i32 type), or in bytes if offset_is_bytes=True
         vec_width: Vector width (1, 2, or 4)
         dtype: Element data type (None for f32, or ir.F32Type, etc.)
         mask: Optional mask for predicated load (i1 type)
@@ -404,6 +405,7 @@ def buffer_load(rsrc: ir.Value,
         soffset_bytes: Optional scalar offset (in BYTES) added by the buffer instruction (soffset).
                       Use this to fold small constant deltas into the instruction instead of emitting
                       extra VGPR address arithmetic.
+        offset_is_bytes: If True, treat offset as already in bytes (skip element-to-byte scaling).
         
     Returns:
         Loaded data (scalar or vector depending on vec_width)
@@ -432,12 +434,13 @@ def buffer_load(rsrc: ir.Value,
         op = std_arith.IndexCastOp(T.i32(), offset)
         offset = _unwrap_value(op.result)
     
-    # IMPORTANT: Buffer load offset is in BYTES, not elements!
-    # For vec4xf32, each element is 4 bytes, so multiply offset by 4
-    element_bytes = dtype.width // 8
-    bytes_const = _create_i32_constant(element_bytes)
-    op = std_arith.MulIOp(offset, bytes_const)
-    offset = _unwrap_value(op.result)
+    # RawPtrBufferLoadOp offset is in BYTES.  By default we accept element
+    # offsets and scale to bytes; set offset_is_bytes=True to skip scaling.
+    if not offset_is_bytes:
+        element_bytes = dtype.width // 8
+        bytes_const = _create_i32_constant(element_bytes)
+        op = std_arith.MulIOp(offset, bytes_const)
+        offset = _unwrap_value(op.result)
     
     # Apply mask by setting invalid offsets to max
     if mask is not None:

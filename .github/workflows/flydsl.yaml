@@ -261,15 +261,9 @@ jobs:
         run: |
           docker exec flydsl_test bash -c "export MLIR_PATH=/llvm-project/mlir_install && cd /flydsl-test && python3 -m pip install -e . --use-pep517"
 
-      - name: Prepare aiter
-        run: |
-          docker exec flydsl_test bash -c "rm -rf /tmp/aiter && git clone --depth 1 --recursive --shallow-submodules https://github.com/ROCm/aiter.git /tmp/aiter"
-          docker exec flydsl_test bash -c "python3 -c \"from pathlib import Path; src = Path('/tmp/aiter/requirements.txt'); dst = Path('/tmp/aiter/requirements-flydsl-ci.txt'); lines = [line for line in src.read_text().splitlines() if line.strip() and not line.strip().startswith('flydsl==')]; dst.write_text('\\n'.join(lines) + '\\n')\" && python3 -m pip install -r /tmp/aiter/requirements-flydsl-ci.txt"
-
       - name: Run multi-GPU allreduce tests
         run: |
           docker exec flydsl_test bash -c "
-            export PYTHONPATH=/tmp/aiter:\${PYTHONPATH:-}
             cd /flydsl-test
             python3 -m pytest tests/kernels/test_flydsl_allreduce.py \
               -m multi_gpu -v --no-header --tb=short
