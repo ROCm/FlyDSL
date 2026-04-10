@@ -2004,6 +2004,24 @@ public:
     int32_t srcRank = srcLayoutAttr.rank();
     int32_t dstRank = dstLayoutAttr.rank();
 
+    if (srcRank > dstRank) {
+      IntTupleBuilder<IntTupleAttr> attrBuilder(ctx);
+      int32_t outerSize =
+          intTupleProduct(attrBuilder, srcLayoutAttr.getShape().at(srcRank - 1))
+              .getLeafAsInt()
+              .getValue();
+      for (int32_t i = 0; i < outerSize; ++i) {
+        SmallVector<Attribute> coordElems(srcRank, IntTupleAttr::getLeafNone(ctx));
+        coordElems[srcRank - 1] = IntTupleAttr::getLeafStatic(ctx, i);
+        Value coord = MakeIntTupleOp::create(
+            rewriter, loc,
+            IntTupleType::get(IntTupleAttr::get(ArrayAttr::get(ctx, coordElems))), {});
+        Value srcSlice = SliceOp::create(rewriter, loc, src, coord);
+        CopyOp::create(rewriter, loc, copyAtomVal, srcSlice, dst, pred);
+      }
+      rewriter.eraseOp(op);
+      return success();
+    }
     if (srcRank != dstRank)
       return rewriter.notifyMatchFailure(op, "src/dst ranks mismatch");
 
@@ -2110,12 +2128,43 @@ public:
     assert(loop_m == get_static_product(cLayoutAttr.getShape().at(1)) && "Mismatch in loop_m");
     assert(loop_n == get_static_product(cLayoutAttr.getShape().at(2)) && "Mismatch in loop_n");
 
+    // Build a slice coord that matches the operand's actual shape structure.
+    // For nested K dims (from k_perm), convert flat K index to hierarchical coord.
+    // Convert flat index to hierarchical coord matching a nested shape.
+    // E.g., flatIdx=3, shape=(4,2) → coord=(3, 0); flatIdx=5, shape=(4,2) → coord=(1, 1)
+    auto buildIdxForShape = [&](int32_t flatIdx, IntTupleAttr shapeAttr) -> IntTupleAttr {
+      if (shapeAttr.isLeaf()) {
+        return IntTupleAttr::getLeafStatic(ctx, flatIdx);
+      }
+      // col-major decomposition: innermost mode varies fastest
+      SmallVector<Attribute> coords;
+      int32_t remaining = flatIdx;
+      for (int i = 0; i < shapeAttr.rank(); ++i) {
+        int32_t modeSize = intTupleProduct(attrBuilder, shapeAttr.at(i)).getLeafAsInt().getValue();
+        coords.push_back(IntTupleAttr::getLeafStatic(ctx, remaining % modeSize));
+        remaining /= modeSize;
+      }
+      return IntTupleAttr::get(ArrayAttr::get(ctx, coords));
+    };
+
     auto getSliceCoord = [&](ArrayRef<int32_t> idx) {
       SmallVector<Attribute> coordElems;
       // Keep mode-0 unchanged for all operands.
       coordElems.push_back(IntTupleAttr::getLeafNone(ctx));
       for (int32_t i : idx)
         coordElems.push_back(IntTupleAttr::getLeafStatic(ctx, i));
+      return MakeIntTupleOp::create(
+          rewriter, loc, IntTupleType::get(IntTupleAttr::get(ArrayAttr::get(ctx, coordElems))), {});
+    };
+
+    // Shape-aware coord builder for gemm operands
+    auto getSliceCoordForOp = [&](Value operand, int32_t m_or_n, int32_t k) {
+      auto memRefTy = cast<fly::MemRefType>(operand.getType());
+      auto layoutAttr = cast<LayoutAttr>(memRefTy.getLayout());
+      SmallVector<Attribute> coordElems;
+      coordElems.push_back(IntTupleAttr::getLeafNone(ctx));  // mode-0 (Val)
+      coordElems.push_back(IntTupleAttr::getLeafStatic(ctx, m_or_n));  // mode-1 (M or N)
+      coordElems.push_back(buildIdxForShape(k, layoutAttr.getShape().at(2)));  // mode-2 (K)
       return MakeIntTupleOp::create(
           rewriter, loc, IntTupleType::get(IntTupleAttr::get(ArrayAttr::get(ctx, coordElems))), {});
     };
@@ -2224,8 +2273,9 @@ public:
         bool &visited = mnVisited[m * loop_n + n];
         Value cSrc = visited ? d : c;
         visited = true;
-        Value aSlice = SliceOp::create(rewriter, loc, a, getSliceCoord({m, k}));
-        Value bSlice = SliceOp::create(rewriter, loc, b, getSliceCoord({n, k}));
+        // Use shape-aware coord for A and B (handles nested K dim from k_perm)
+        Value aSlice = SliceOp::create(rewriter, loc, a, getSliceCoordForOp(a, m, k));
+        Value bSlice = SliceOp::create(rewriter, loc, b, getSliceCoordForOp(b, n, k));
         Value cSlice = SliceOp::create(rewriter, loc, cSrc, getSliceCoord({m, n}));
         Value dSlice = SliceOp::create(rewriter, loc, d, getSliceCoord({m, n}));
         MmaAtomCall::create(rewriter, loc, mmaAtomVal, dSlice, aSlice, bSlice, cSlice);

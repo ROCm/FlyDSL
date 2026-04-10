@@ -25,14 +25,14 @@ _ods_wmma_scale_f32_32x16x128_f4 = (
     globals().get("wmma_scale_f32_32x16x128_f4", None)
 )
 _ods_wave_id = wave_id  # ODS: wave_id(res, ...) -> i32
-_ods_cluster_workgroup_id_x = cluster_workgroup_id_x
-_ods_cluster_workgroup_id_y = cluster_workgroup_id_y
-_ods_cluster_workgroup_id_z = cluster_workgroup_id_z
-_ods_cluster_load_async_to_lds_b8 = cluster_load_async_to_lds_b8
-_ods_cluster_load_async_to_lds_b32 = cluster_load_async_to_lds_b32
-_ods_cluster_load_async_to_lds_b64 = cluster_load_async_to_lds_b64
-_ods_cluster_load_async_to_lds_b128 = cluster_load_async_to_lds_b128
-_ods_s_wait_asynccnt = s_wait_asynccnt
+_ods_cluster_workgroup_id_x = globals().get("cluster_workgroup_id_x", None)
+_ods_cluster_workgroup_id_y = globals().get("cluster_workgroup_id_y", None)
+_ods_cluster_workgroup_id_z = globals().get("cluster_workgroup_id_z", None)
+_ods_cluster_load_async_to_lds_b8 = globals().get("cluster_load_async_to_lds_b8", None)
+_ods_cluster_load_async_to_lds_b32 = globals().get("cluster_load_async_to_lds_b32", None)
+_ods_cluster_load_async_to_lds_b64 = globals().get("cluster_load_async_to_lds_b64", None)
+_ods_cluster_load_async_to_lds_b128 = globals().get("cluster_load_async_to_lds_b128", None)
+_ods_s_wait_asynccnt = globals().get("s_wait_asynccnt", None)
 _ods_mfma_f32_16x16x16f16 = mfma_f32_16x16x16f16
 _ods_mfma_f32_16x16x16bf16_1k = globals().get("mfma_f32_16x16x16bf16_1k", None)
 _ods_mfma_f32_16x16x32_fp8_fp8 = mfma_f32_16x16x32_fp8_fp8

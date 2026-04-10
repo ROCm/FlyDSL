@@ -85,8 +85,9 @@ LogicalResult MmaOpCDNA3_MFMAType::verify(function_ref<InFlightDiagnostic()> emi
     return emitError() << "elemTyAcc must be f32, got " << elemTyAcc;
 
   auto isValidElemType = [](Type ty) {
-    return ty.isF16() || ty.isBF16() || ty.isF32() || isa<Float8E4M3FNUZType>(ty) ||
-           isa<Float8E5M2FNUZType>(ty);
+    return ty.isF16() || ty.isBF16() || ty.isF32() || ty.isInteger(8) ||
+           isa<Float8E4M3FNUZType>(ty) || isa<Float8E5M2FNUZType>(ty) ||
+           isa<Float8E4M3FNType>(ty);
   };
   if (!isValidElemType(elemTyA)) {
     return emitError() << "elemTyA must be f16, bf16, f32, f8E4M3FNUZ, f8E5M2FNUZ, got " << elemTyA;
@@ -97,7 +98,9 @@ LogicalResult MmaOpCDNA3_MFMAType::verify(function_ref<InFlightDiagnostic()> emi
   return success();
 }
 
-static bool isFP8(Type ty) { return isa<Float8E4M3FNUZType>(ty); }
+static bool isFP8(Type ty) {
+  return isa<Float8E4M3FNUZType>(ty) || isa<Float8E4M3FNType>(ty) || ty.isInteger(8);
+}
 static bool isBF8(Type ty) { return isa<Float8E5M2FNUZType>(ty); }
 static bool isF8(Type ty) { return isFP8(ty) || isBF8(ty); }
 
@@ -108,7 +111,7 @@ static Type getMfmaABType(MLIRContext *ctx, Type elemTy, int32_t k = 0) {
     return VectorType::get({4}, Float16Type::get(ctx));
   if (elemTy.isBF16())
     return VectorType::get({(k >= 16) ? 4 : 2}, IntegerType::get(ctx, 16));
-  if (isF8(elemTy))
+  if (isF8(elemTy) || elemTy.isInteger(8))
     return IntegerType::get(ctx, 64);
   return nullptr;
 }
