@@ -191,6 +191,7 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
 
                 y = (x * rrms) * g
 
+                out_e = y.to(elem_dtype)
                 if dtype_str == "bf16":
                     if USE_HW_CVT_PK_BF16_F32:
                         out_e = y.to(elem_dtype)
