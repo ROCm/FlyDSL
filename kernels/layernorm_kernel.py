@@ -15,9 +15,11 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.compiler.kernel_function import CompilationContext
 
-from flydsl.expr import arith, vector, gpu, range_constexpr
+from flydsl.expr import arith, gpu, range_constexpr
 from flydsl.expr.arith import ArithValue
 from flydsl.expr.typing import T, Int32
+from flydsl.expr.vector import ReductionOp, full
+from flydsl.expr.numeric import Numeric, Float32, Uint32
 
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
@@ -128,8 +130,6 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
             return SmemPtr.load(s_sum, [c0_idx]), SmemPtr.load(s_sumsq, [c0_idx])
 
         def compute_mean_rstd(sum_val, sumsq_val):
-            from flydsl.expr.arith import ArithValue
-
             inv_n = arith.constant(1.0 / float(N), type=compute_type)
             s = ArithValue(sum_val)
             ss = ArithValue(sumsq_val)
@@ -150,18 +150,13 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
         # memory access (same approach as preshuffle_gemm).
         # ==================================================================
         if N == (BLOCK_THREADS * VEC_WIDTH * 4) and elem_bits <= 16:
-            from flydsl.expr.arith import ArithValue
-
             num_tiles_py = 4
+            elem_dtype = Numeric.from_ir_type(elem_type)
 
             c_zero_f = arith.constant(0.0, type=compute_type)
             thread_sum = c_zero_f
             thread_sumsq = c_zero_f
-            cache_as_elem = (dtype_str != "f32")
             in_local = []
-
-            vec_type_c = T.vec(VEC_WIDTH, compute_type)
-            vec_type_e = T.vec(VEC_WIDTH, elem_type)
 
             # ── Layout API: buffer-backed tensors + tiled access ─────
             Input_buf = fx.rocdl.make_buffer_tensor(Input)
@@ -186,7 +181,7 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
             def _load_vec(div_tensor, idx):
                 r = fx.memref_alloca(vec_reg_ty, vec_reg_lay)
                 fx.copy_atom_call(copy_atom, fx.slice(div_tensor, (None, idx)), r)
-                return ArithValue(fx.memref_load_vec(r))
+                return fx.memref_load_vec(r)
 
             def _store_vec(val, div_tensor, idx):
                 r = fx.memref_alloca(vec_reg_ty, vec_reg_lay)
@@ -196,48 +191,21 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
             # ── Pass 1: load input, accumulate sum / sumsq ───────────────
             for tile_i in range_constexpr(num_tiles_py):
                 idx = tid + tile_i * BLOCK_THREADS
-                vec_e = _load_vec(in_div, idx)
+                vec = _load_vec(in_div, idx)
+                in_local.append(vec)
+                x = vec.to(Float32)
 
-                if const_expr(cache_as_elem):
-                    in_local.append(vec_e)
-                    x = vec_e.extf(vec_type_c)
-                else:
-                    x = vec_e
-                    in_local.append(x)
-
-                x_av = ArithValue(x)
-                x2 = x_av * x_av
-                red = vector.reduction(
-                    compute_type, vector.CombiningKind.ADD,
-                    x, fastmath=fm_fast,
-                )
-                red2 = vector.reduction(
-                    compute_type, vector.CombiningKind.ADD,
-                    x2, fastmath=fm_fast,
-                )
+                x2 = x * x
+                red = x.reduce(ReductionOp.ADD, fastmath=fm_fast)
+                red2 = x2.reduce(ReductionOp.ADD, fastmath=fm_fast)
                 thread_sum = ArithValue(thread_sum) + red
                 thread_sumsq = ArithValue(thread_sumsq) + red2
 
             sum_val, sumsq_val = block_reduce_add2(thread_sum, thread_sumsq)
             mean, rstd = compute_mean_rstd(sum_val, sumsq_val)
 
-            mean_splat = vector.broadcast(vec_type_c, mean)
-            rstd_splat = vector.broadcast(vec_type_c, rstd)
-            mean_splat_av = ArithValue(mean_splat)
-            rstd_splat_av = ArithValue(rstd_splat)
-
-            g_e_cur = _load_vec(gamma_div, tid)
-            b_e_cur = _load_vec(beta_div, tid)
-            g_cur = (
-                g_e_cur
-                if dtype_str == "f32"
-                else g_e_cur.extf(vec_type_c)
-            )
-            b_cur = (
-                b_e_cur
-                if dtype_str == "f32"
-                else b_e_cur.extf(vec_type_c)
-            )
+            g_cur = _load_vec(gamma_div, tid).to(Float32)
+            b_cur = _load_vec(beta_div, tid).to(Float32)
 
             # ── Pass 2: normalize + affine + store ───────────────────────
             for tile_i in range_constexpr(num_tiles_py):
@@ -245,56 +213,35 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                 b_next = b_cur
                 if tile_i + 1 < num_tiles_py:
                     next_idx = tid + (tile_i + 1) * BLOCK_THREADS
-                    g_e_next = _load_vec(gamma_div, next_idx)
-                    b_e_next = _load_vec(beta_div, next_idx)
-                    g_next = (
-                        g_e_next
-                        if dtype_str == "f32"
-                        else g_e_next.extf(vec_type_c)
-                    )
-                    b_next = (
-                        b_e_next
-                        if dtype_str == "f32"
-                        else b_e_next.extf(vec_type_c)
-                    )
-                x = in_local[tile_i]
-                if cache_as_elem:
-                    x = x.extf(vec_type_c)
+                    g_next = _load_vec(gamma_div, next_idx).to(Float32)
+                    b_next = _load_vec(beta_div, next_idx).to(Float32)
+                else:
+                    g_next = g_cur
+                    b_next = b_cur
 
-                x_av = ArithValue(x)
-                g_av = ArithValue(g_cur)
-                b_av = ArithValue(b_cur)
-                y = (x_av - mean_splat_av) * rstd_splat_av
-                y = (y * g_av) + b_av
-                y_val = y
-                out_e = y_val
+                x = in_local[tile_i].to(Float32)
+                y = (x - mean) * rstd
+                y = y * g_cur + b_cur
 
                 if dtype_str == "bf16":
                     if USE_HW_CVT_PK_BF16_F32:
-                        out_e = y_val.truncf(vec_type_e)
+                        out_e = y.to(elem_dtype)
                     else:
-                        vec_i32_ty = T.vec(VEC_WIDTH, T.i32)
-                        vec4_i32_ty = T.vec(VEC_WIDTH // 2, T.i32)
-                        vec_bf16_ty = T.vec(VEC_WIDTH, elem_type)
-                        c16_i32 = arith.constant(16, type=T.i32)
-                        c16_v = vector.broadcast(vec_i32_ty, c16_i32)
-                        u = y_val.bitcast(vec_i32_ty)
-                        upper = u.shrui(c16_v)
-                        c1_v = vector.broadcast(vec_i32_ty, arith.constant(1, type=T.i32))
-                        lsb = upper & c1_v
-                        c7fff_v = vector.broadcast(vec_i32_ty, arith.constant(0x7FFF, type=T.i32))
-                        bias = ArithValue(c7fff_v) + lsb
-                        u_round = u + bias
-                        bf16_bits = u_round.shrui(c16_v)
-                        even = vector.shuffle(bf16_bits, bf16_bits, [0, 2, 4, 6])
-                        odd = vector.shuffle(bf16_bits, bf16_bits, [1, 3, 5, 7])
-                        odd_sh = odd << vector.broadcast(vec4_i32_ty, c16_i32)
+                        u = y.bitcast(Uint32)
+                        upper = u >> 16
+                        lsb = upper & 1
+                        bias = lsb + 0x7FFF
+                        u_round = y.bitcast(Uint32) + bias
+                        bf16_bits = u_round >> 16
+                        even = bf16_bits.shuffle(bf16_bits, [0, 2, 4, 6])
+                        odd = bf16_bits.shuffle(bf16_bits, [1, 3, 5, 7])
+                        odd_sh = odd << 16
                         packed = even | odd_sh
-                        out_e = vector.bitcast(vec_bf16_ty, packed)
+                        out_e = packed.bitcast(elem_dtype)
                 elif dtype_str == "f32":
-                    out_e = y_val
+                    out_e = y
                 else:
-                    out_e = y_val.truncf(vec_type_e)
+                    out_e = y.to(elem_dtype)
 
                 out_idx = tid + tile_i * BLOCK_THREADS
                 _store_vec(out_e, out_div, out_idx)
@@ -306,7 +253,7 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
             # ==============================================================
             # Generic path: 2-pass scalar implementation for arbitrary N
             # ==============================================================
-            from flydsl.expr.arith import ArithValue
+            elem_dtype = Numeric.from_ir_type(elem_type)
 
             Input_buf = fx.rocdl.make_buffer_tensor(Input)
             Output_buf = fx.rocdl.make_buffer_tensor(Output)
@@ -338,14 +285,12 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                 view = fx.slice(divided_tensor, (None, index))
                 r = fx.memref_alloca(scalar_reg_ty, scalar_reg_lay)
                 fx.copy_atom_call(copy_atom_s, view, r)
-                v = fx.memref_load_vec(r)
-                return vector.extract(v, static_position=[0])
+                return fx.memref_load_vec(r)[0].ir_value()
 
             def _store_scalar(divided_tensor, index, val):
                 r = fx.memref_alloca(scalar_reg_ty, scalar_reg_lay)
-                vec_ty = T.vec(1, elem_type)
-                v = vector.from_elements(vec_ty, [val])
-                fx.memref_store_vec(v, r)
+                ts = full(1, elem_dtype(val), elem_dtype)
+                fx.memref_store_vec(ts, r)
                 view = fx.slice(divided_tensor, (None, index))
                 fx.copy_atom_call(copy_atom_s, r, view)
 
@@ -396,9 +341,9 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                         else b_e.extf(compute_type)
                     )
                     diff = ArithValue(x) - mean
-                    norm = diff * ArithValue(rstd)
-                    scaled = norm * ArithValue(g)
-                    y = scaled + ArithValue(b)
+                    norm = diff * rstd
+                    scaled = norm * g
+                    y = scaled + b
                     y_e = y
                     if dtype_str == "bf16":
                         y_e = y.truncf(elem_type)

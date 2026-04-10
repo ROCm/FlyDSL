@@ -14,9 +14,11 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.compiler.kernel_function import CompilationContext
 
-from flydsl.expr import arith, vector, gpu, range_constexpr
+from flydsl.expr import arith, gpu, range_constexpr
 from flydsl.expr.arith import ArithValue
 from flydsl.expr.typing import T, Int32
+from flydsl.expr.vector import ReductionOp, full
+from flydsl.expr.numeric import Numeric, Float32, Uint32
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 
@@ -128,12 +130,8 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
         # Fast path: N is a multiple of tile_cols
         # ==================================================================
         if N >= tile_cols and N % tile_cols == 0 and elem_bits <= 16:
-            from flydsl.expr.arith import ArithValue
-
             num_tiles = N // tile_cols
-
-            vec_type_c = T.vec(VEC_WIDTH, compute_type)
-            vec_type_e = T.vec(VEC_WIDTH, elem_type)
+            elem_dtype = Numeric.from_ir_type(elem_type)
 
             # ── Layout API: buffer-backed tensors + tiled access ─────
             Input_buf = fx.rocdl.make_buffer_tensor(Input)
@@ -156,7 +154,7 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
             def _load_vec(div_tensor, idx):
                 r = fx.memref_alloca(vec_reg_ty, vec_reg_lay)
                 fx.copy_atom_call(copy_atom, fx.slice(div_tensor, (None, idx)), r)
-                return ArithValue(fx.memref_load_vec(r))
+                return fx.memref_load_vec(r)
 
             def _store_vec(val, div_tensor, idx):
                 r = fx.memref_alloca(vec_reg_ty, vec_reg_lay)
@@ -166,76 +164,52 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
             c_zero_f = arith.constant(0.0, type=compute_type)
             thread_sumsq = c_zero_f
             thread_dummy = c_zero_f
-            cache_as_elem = (dtype_str != "f32")
             in_local = []
 
             # Pass 1: load + cache + sumsq
             for tile_i in range_constexpr(num_tiles):
                 idx = tid + tile_i * BLOCK_THREADS
-                vec_e = _load_vec(in_div, idx)
+                vec = _load_vec(in_div, idx)
+                in_local.append(vec)
+                x = vec.to(Float32)
 
-                if const_expr(cache_as_elem):
-                    in_local.append(vec_e)
-                    x = vec_e.extf(vec_type_c)
-                else:
-                    x = vec_e
-                    in_local.append(x)
-
-                x_av = ArithValue(x)
-                x2 = x_av * x_av
-                red2 = vector.reduction(compute_type, vector.CombiningKind.ADD, x2, fastmath=fm_fast)
+                x2 = x * x
+                red2 = x2.reduce(ReductionOp.ADD, fastmath=fm_fast)
                 thread_sumsq = ArithValue(thread_sumsq) + red2
 
             _, sum_sq = block_reduce_add2(thread_dummy, thread_sumsq)
             mean_sq = ArithValue(sum_sq) / n_float
-            ms_eps = ArithValue(mean_sq) + eps_c
+            ms_eps = mean_sq + eps_c
             rrms = ms_eps.rsqrt(fastmath=fm_fast)
-            rrms_splat = vector.broadcast(vec_type_c, rrms)
-            rrms_splat_av = ArithValue(rrms_splat)
 
             # Pass 2: normalize + gamma + store (reuse cached input)
             for tile_i in range_constexpr(num_tiles):
                 idx = tid + tile_i * BLOCK_THREADS
 
-                g_e = _load_vec(gamma_div, idx)
-                g = g_e if dtype_str == "f32" else g_e.extf(vec_type_c)
+                g = _load_vec(gamma_div, idx).to(Float32)
+                x = in_local[tile_i].to(Float32)
 
-                x = in_local[tile_i]
-                if cache_as_elem:
-                    x = x.extf(vec_type_c)
-
-                x_av = ArithValue(x)
-                g_av = ArithValue(g)
-                y = (x_av * rrms_splat_av) * g_av
-                y_val = y
-                out_e = y_val
+                y = (x * rrms) * g
 
                 if dtype_str == "bf16":
                     if USE_HW_CVT_PK_BF16_F32:
-                        out_e = y_val.truncf(vec_type_e)
+                        out_e = y.to(elem_dtype)
                     else:
-                        vec_i32_ty = T.vec(VEC_WIDTH, T.i32)
-                        vec4_i32_ty = T.vec(VEC_WIDTH // 2, T.i32)
-                        vec_bf16_ty = T.vec(VEC_WIDTH, elem_type)
-                        c16_i32 = arith.constant(16, type=T.i32)
-                        c16_v = vector.broadcast(vec_i32_ty, c16_i32)
-                        u = y_val.bitcast(vec_i32_ty)
-                        upper = u.shrui(c16_v)
-                        c1_v = vector.broadcast(vec_i32_ty, arith.constant(1, type=T.i32))
-                        lsb = upper & c1_v
-                        c7fff_v = vector.broadcast(vec_i32_ty, arith.constant(0x7FFF, type=T.i32))
-                        bias = ArithValue(c7fff_v) + ArithValue(lsb)
-                        u_round = ArithValue(u) + bias
-                        bf16_bits = u_round.shrui(c16_v)
-                        even = vector.shuffle(bf16_bits, bf16_bits, [0, 2, 4, 6])
-                        odd = vector.shuffle(bf16_bits, bf16_bits, [1, 3, 5, 7])
-                        odd_sh = odd << vector.broadcast(vec4_i32_ty, c16_i32)
+                        u = y.bitcast(Uint32)
+                        upper = u >> 16
+                        lsb = upper & 1
+                        bias = lsb + 0x7FFF
+                        u_round = y.bitcast(Uint32) + bias
+                        bf16_bits = u_round >> 16
+                        even = bf16_bits.shuffle(bf16_bits, [0, 2, 4, 6])
+                        odd = bf16_bits.shuffle(bf16_bits, [1, 3, 5, 7])
+                        odd_sh = odd << 16
                         packed = even | odd_sh
-                        out_e = vector.bitcast(vec_bf16_ty, packed)
+                        out_e = packed.bitcast(elem_dtype)
                 elif dtype_str == "f32":
-                    out_e = y_val
+                    out_e = y
                 else:
-                    out_e = y_val.truncf(vec_type_e)
+                    out_e = y.to(elem_dtype)
 
                 out_idx = tid + tile_i * BLOCK_THREADS
                 _store_vec(out_e, out_div, out_idx)
@@ -244,7 +218,7 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
             # ==============================================================
             # Generic path: scalar 2-pass for arbitrary N
             # ==============================================================
-            from flydsl.expr.arith import ArithValue
+            elem_dtype = Numeric.from_ir_type(elem_type)
 
             Input_buf = fx.rocdl.make_buffer_tensor(Input)
             Output_buf = fx.rocdl.make_buffer_tensor(Output)
@@ -268,14 +242,12 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
                 view = fx.slice(divided_tensor, (None, index))
                 r = fx.memref_alloca(scalar_reg_ty, scalar_reg_lay)
                 fx.copy_atom_call(copy_atom_s, view, r)
-                v = fx.memref_load_vec(r)
-                return vector.extract(v, static_position=[0])
+                return fx.memref_load_vec(r)[0].ir_value()
 
             def _store_scalar(divided_tensor, index, val):
                 r = fx.memref_alloca(scalar_reg_ty, scalar_reg_lay)
-                vec_ty = T.vec(1, elem_type)
-                v = vector.from_elements(vec_ty, [val])
-                fx.memref_store_vec(v, r)
+                ts = full(1, elem_dtype(val), elem_dtype)
+                fx.memref_store_vec(ts, r)
                 view = fx.slice(divided_tensor, (None, index))
                 fx.copy_atom_call(copy_atom_s, r, view)
 
@@ -297,7 +269,7 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
 
             sum_sq = block_reduce_add(thread_sumsq)
             mean_sq = ArithValue(sum_sq) / n_float
-            ms_eps = ArithValue(mean_sq) + eps_c
+            ms_eps = mean_sq + eps_c
             rrms = ms_eps.rsqrt(fastmath=fm_fast)
 
             for base_idx_int in range_constexpr(0, N, BLOCK_THREADS):
@@ -308,9 +280,8 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
                     g_e = _load_scalar(gamma_div, idx)
                     x = x_e if dtype_str == "f32" else x_e.extf(compute_type)
                     g = g_e if dtype_str == "f32" else g_e.extf(compute_type)
-                    norm = ArithValue(x) * ArithValue(rrms)
-                    y = norm * ArithValue(g)
-                    y_e = y
+                    norm = ArithValue(x) * rrms
+                    y = norm * g
                     if dtype_str == "f32":
                         y_e = y
                     elif dtype_str == "bf16":

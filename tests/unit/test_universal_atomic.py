@@ -35,7 +35,7 @@ def reduce_add_kernel(
 
     RegTy = fx.MemRefType.get(fx.T.f32(), fx.LayoutType.get(1, 1), fx.AddressSpace.Register)
     loadAtom = fx.make_copy_atom(fx.UniversalCopy32b(), fx.Float32)
-    atomicAtom = fx.make_copy_atom(fx.UniversalAtomic(fx.AtomicOp.Add, fx.T.f32()), fx.Float32)
+    atomicAtom = fx.make_copy_atom(fx.UniversalAtomic(fx.AtomicOp.Add, fx.Float32), fx.Float32)
 
     rA = fx.memref_alloca(RegTy, fx.make_layout(1, 1))
     fx.copy_atom_call(loadAtom, fx.slice(tA, (None, tid)), rA)
@@ -57,7 +57,9 @@ def reduce_add(
 ):
     grid_x = (n + block_dim - 1) // block_dim
     reduce_add_kernel(A, Out, block_dim).launch(
-        grid=(grid_x, 1, 1), block=(block_dim, 1, 1), stream=stream,
+        grid=(grid_x, 1, 1),
+        block=(block_dim, 1, 1),
+        stream=stream,
     )
 
 
@@ -94,7 +96,7 @@ def reduce_max_kernel(
 
     RegTy = fx.MemRefType.get(fx.T.f32(), fx.LayoutType.get(1, 1), fx.AddressSpace.Register)
     loadAtom = fx.make_copy_atom(fx.UniversalCopy32b(), fx.Float32)
-    atomicAtom = fx.make_copy_atom(fx.UniversalAtomic(fx.AtomicOp.Max, fx.T.f32()), fx.Float32)
+    atomicAtom = fx.make_copy_atom(fx.UniversalAtomic(fx.AtomicOp.Max, fx.Float32), fx.Float32)
 
     rA = fx.memref_alloca(RegTy, fx.make_layout(1, 1))
     fx.copy_atom_call(loadAtom, fx.slice(tA, (None, tid)), rA)
@@ -116,7 +118,9 @@ def reduce_max(
 ):
     grid_x = (n + block_dim - 1) // block_dim
     reduce_max_kernel(A, Out, block_dim).launch(
-        grid=(grid_x, 1, 1), block=(block_dim, 1, 1), stream=stream,
+        grid=(grid_x, 1, 1),
+        block=(block_dim, 1, 1),
+        stream=stream,
     )
 
 

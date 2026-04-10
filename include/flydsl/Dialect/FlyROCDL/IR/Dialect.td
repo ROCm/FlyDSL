@@ -37,12 +37,15 @@ class FlyROCL_CopyOp<string typeName, string typeMnemonic, list<Trait> traits = 
   let mnemonic = typeMnemonic;
 }
 
-class FlyROCL_StatefulCopyOp<string typeName, string typeMnemonic, list<Trait> traits = []> 
+class FlyROCL_StatefulCopyOp<string typeName, string typeMnemonic, list<Trait> traits = []>
     : TypeDef<FlyROCDL_Dialect, typeName, !listconcat(traits, [
         DeclareTypeInterfaceMethods<Fly_CopyOpTypeInterface>,
         DeclareTypeInterfaceMethods<Fly_StatefulOpTypeInterface>
       ])> {
   let mnemonic = typeMnemonic;
+  let extraClassDeclaration = [{
+    static std::optional<unsigned> getFieldIndex(AtomStateField field);
+  }];
 }
 
 class FlyROCL_StatefulMmaOp<string typeName, string typeMnemonic, list<Trait> traits = []> 
@@ -51,6 +54,9 @@ class FlyROCL_StatefulMmaOp<string typeName, string typeMnemonic, list<Trait> tr
         DeclareTypeInterfaceMethods<Fly_StatefulOpTypeInterface>
       ])> {
   let mnemonic = typeMnemonic;
+  let extraClassDeclaration = [{
+    static std::optional<unsigned> getFieldIndex(AtomStateField field);
+  }];
 }
 
 #endif // FLYROCDL_DIALECT
