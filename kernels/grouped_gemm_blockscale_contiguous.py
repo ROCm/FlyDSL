@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""Grouped FP8 GEMM kernel (M-grouped contiguous layout).
+"""Contiguous Grouped FP8 GEMM kernel with block scaling.
 
 API matching DeepGEMM's m_grouped_fp8_gemm_nt_contiguous:
   - A: [M_total, K] FP8 - concatenated rows from all groups

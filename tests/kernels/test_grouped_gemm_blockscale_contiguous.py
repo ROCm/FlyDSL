@@ -3,9 +3,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""Tests for Grouped FP8 GEMM kernel.
+"""Tests for Contiguous Grouped FP8 GEMM kernel (blockscale).
 
-Tests the grouped FP8 GEMM with block scaling, matching DeepGEMM's
+Tests the contiguous grouped FP8 GEMM with block scaling, matching DeepGEMM's
 m_grouped_fp8_gemm_nt_contiguous API.
 """
 
@@ -25,7 +25,7 @@ for _p in reversed(_PYTHON_CANDIDATES):
     if os.path.isdir(_p) and _p not in sys.path:
         sys.path.insert(0, _p)
 
-from kernels.grouped_gemm import compile_grouped_fp8_gemm
+from kernels.grouped_gemm_blockscale_contiguous import compile_grouped_fp8_gemm
 from flydsl.runtime.device import get_rocm_arch
 from tests.test_common import run_perftest, verify_output
 from tests.utils import shuffle_weight
