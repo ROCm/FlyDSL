@@ -334,6 +334,8 @@ def run_moe_stage1(
     # Optional override for pre-built groupwise scale tensor [E, K//group_size, 2*inter_dim] (Opt 0 layout).
     scale_w1_groups_in: Optional[torch.Tensor] = None,
     scale_dtype: str = "f32",
+    even_dispatch: bool = False,
+    out_dtype: str = "f16",
 ):
     assert model_dim % 64 == 0
     assert model_dim % tile_k == 0
@@ -363,9 +365,17 @@ def run_moe_stage1(
 
     # Routing: aiter uses fused_topk; we use torch topk+softmax for portability/determinism.
     if topk_ids_in is None or topk_weights_in is None:
-        score = torch.randn((tokens, experts), device=device, dtype=torch.float32)
-        topk_vals, topk_ids = torch.topk(score, k=topk, dim=1)
-        topk_weights = torch.softmax(topk_vals, dim=1).to(torch.float32)
+        if even_dispatch:
+            # Evenly distribute tokens across experts: each token picks topk consecutive experts
+            # cycling through all E experts. Guarantees uniform load.
+            topk_ids = torch.stack(
+                [torch.arange(topk, device=device, dtype=torch.int32) + ((t * topk) % experts) for t in range(tokens)]
+            ) % experts
+            topk_weights = torch.full((tokens, topk), 1.0 / topk, device=device, dtype=torch.float32)
+        else:
+            score = torch.randn((tokens, experts), device=device, dtype=torch.float32)
+            topk_vals, topk_ids = torch.topk(score, k=topk, dim=1)
+            topk_weights = torch.softmax(topk_vals, dim=1).to(torch.float32)
     else:
         topk_ids = topk_ids_in
         topk_weights = topk_weights_in
@@ -390,6 +400,16 @@ def run_moe_stage1(
         sorted_size,
         blocks,
     ) = routing
+
+    # # Print token distribution across experts.
+    # tokens_per_expert = torch.bincount(topk_ids.reshape(-1).to(torch.int64), minlength=experts)
+    # active = int((tokens_per_expert > 0).sum())
+    # print(
+    #     f"  Token dispatch: {tokens} tokens x topk={topk} -> {active}/{experts} active experts, "
+    #     f"tokens/expert min={int(tokens_per_expert.min())} max={int(tokens_per_expert.max())} "
+    #     f"mean={tokens_per_expert.float().mean():.1f}"
+    #     f"{' (even)' if even_dispatch else ' (random)'}"
+    # )
 
     if in_dtype not in ("fp8", "fp16", "bf16", "int8", "int8smooth", "int4", "int4_bf16", "fp4"):
         raise ValueError(
@@ -542,8 +562,9 @@ def run_moe_stage1(
             scale_w1_1d = scale_w1_flat.view(-1).contiguous()
     sorted_weights_1d = sorted_weights.contiguous().view(-1)  # [sorted_size]
 
-    # Output: [tokens, topk, inter_dim] fp16
-    out = torch.empty((tokens, topk, inter_dim), device=device, dtype=torch.float16)
+    # Output: [tokens, topk, inter_dim]
+    _out_torch_dtype = torch.bfloat16 if out_dtype == "bf16" else torch.float16
+    out = torch.empty((tokens, topk, inter_dim), device=device, dtype=_out_torch_dtype)
 
     if is_fp4:
         exe = compile_mixed_moe_gemm1(
@@ -586,6 +607,7 @@ def run_moe_stage1(
             doweight_stage1=bool(doweight_stage1),
             use_cshuffle_epilog=False,
             scale_is_bf16=(scale_dtype == "bf16"),
+            out_dtype=out_dtype,
         )
 
         def _s1_args(o, x, w, sx, sw, st, eids, sw_sorted):
@@ -652,22 +674,23 @@ def run_moe_stage1(
     tflops = flops / (us / 1e6) / 1e12
 
     # Rough bytes-moved accounting (same spirit as GEMM tests: count each tensor once).
+    # Only activated experts load weights/scales: E_active = min(E, tokens * topk).
+    active_experts = min(experts, tokens * topk)
     bytes_moved = 0
     is_f16_or_bf16_s1 = is_int4_bf16 or in_dtype in ("bf16", "fp16")
     x_elem_bytes = 2 if is_f16_or_bf16_s1 else 1
     bytes_moved += (tokens * topk if is_int8smooth else tokens) * model_dim * x_elem_bytes  # x (bf16 for W4A16, else fp8/int8)
-    bytes_moved += (experts * (2 * inter_dim) * model_dim) // (2 if use_packed_int4 else 1)  # w (packed for int4)
+    bytes_moved += (active_experts * (2 * inter_dim) * model_dim) // (2 if use_packed_int4 else 1)  # w (packed for int4)
     bytes_moved += tokens * topk * inter_dim * 2  # out fp16 (logical)
     bytes_moved += ((tokens * topk if is_int8smooth else tokens) * 4) if not is_f16_or_bf16_s1 else 0  # scale_x f32
     if use_groupwise_scale:
         num_groups_s1 = model_dim // group_size
         _scale_bytes = 2 if scale_dtype == "bf16" else 4
-        bytes_moved += experts * num_groups_s1 * (2 * inter_dim) * _scale_bytes  # groupwise scale
+        bytes_moved += active_experts * num_groups_s1 * (2 * inter_dim) * _scale_bytes  # groupwise scale
     elif not is_f16_or_bf16_s1:
-        bytes_moved += experts * (2 * inter_dim) * 4  # per-row scale_w f32
-    bytes_moved += int(sorted_weights.numel()) * 4  # sorted_weights f32
-    bytes_moved += int(sorted_token_ids.numel()) * 4  # sorted_token_ids i32
-    bytes_moved += int(sorted_expert_ids.numel()) * 4  # sorted_expert_ids i32
+        bytes_moved += active_experts * (2 * inter_dim) * 4  # per-row scale_w f32
+    # Note: routing metadata (sorted_weights, sorted_token_ids, sorted_expert_ids) excluded
+    # from bytes_moved — they are negligible vs weight/activation/scale tensors.
     tbps = bytes_moved / 1e12 / (us / 1e6)
 
     print(
@@ -798,6 +821,7 @@ def run_moe_stage2(
     # Optional override for pre-built groupwise scale tensor [E, inter_dim//group_size, model_dim] (Opt 0 layout).
     scale_w2_groups_in: Optional[torch.Tensor] = None,
     scale_dtype: str = "f32",
+    even_dispatch: bool = False,
 ):
     """MoE stage2 (gemm2): out2[t] = sum_{slot} ( out1[t,slot] @ W2[expert]^T ) with optional routed weight."""
 
@@ -860,9 +884,15 @@ def run_moe_stage2(
 
     # Routing: deterministic torch topk + softmax.
     if topk_ids_in is None or topk_weights_in is None:
-        score = torch.rand((tokens, experts), device=device, dtype=torch.float32)
-        topk_vals, topk_ids = torch.topk(score, k=topk, dim=1)
-        topk_weights = torch.softmax(topk_vals, dim=1).to(torch.float32)
+        if even_dispatch:
+            topk_ids = torch.stack(
+                [torch.arange(topk, device=device, dtype=torch.int32) + ((t * topk) % experts) for t in range(tokens)]
+            ) % experts
+            topk_weights = torch.full((tokens, topk), 1.0 / topk, device=device, dtype=torch.float32)
+        else:
+            score = torch.rand((tokens, experts), device=device, dtype=torch.float32)
+            topk_vals, topk_ids = torch.topk(score, k=topk, dim=1)
+            topk_weights = torch.softmax(topk_vals, dim=1).to(torch.float32)
     else:
         topk_ids = topk_ids_in
         topk_weights = topk_weights_in
@@ -887,8 +917,16 @@ def run_moe_stage2(
         sorted_size,
         blocks,
     ) = routing
-    # NOTE: routing uses `moe_sorting` output directly (no host trim/pad). Extra launched blocks
-    # are gated by `num_valid_ids` inside the kernels.
+
+    # # Print token distribution across experts.
+    # tokens_per_expert = torch.bincount(topk_ids.reshape(-1).to(torch.int64), minlength=experts)
+    # active = int((tokens_per_expert > 0).sum())
+    # print(
+    #     f"  Token dispatch: {tokens} tokens x topk={topk} -> {active}/{experts} active experts, "
+    #     f"tokens/expert min={int(tokens_per_expert.min())} max={int(tokens_per_expert.max())} "
+    #     f"mean={tokens_per_expert.float().mean():.1f}"
+    #     f"{' (even)' if even_dispatch else ' (random)'}"
+    # )
 
     if in_dtype not in ("fp8", "fp16", "bf16", "int8", "int8smooth", "int4", "int4_bf16", "fp4"):
         raise ValueError(
@@ -1251,22 +1289,23 @@ def run_moe_stage2(
     flops = 2 * tokens * topk * model_dim * inter_dim
     tflops = flops / (us / 1e6) / 1e12
 
+    # Only activated experts load weights/scales: E_active = min(E, tokens * topk).
+    active_experts = min(experts, tokens * topk)
     bytes_moved = 0
     a2_elem_bytes = 2 if in_dtype in ("int4_bf16", "bf16", "fp16") else 1  # bf16/fp16 activations
     bytes_moved += tokens * topk * inter_dim * a2_elem_bytes  # a2 (logical)
-    bytes_moved += (experts * model_dim * inter_dim) // (2 if w_is_int4 else 1)  # w2 (packed for int4)
+    bytes_moved += (active_experts * model_dim * inter_dim) // (2 if w_is_int4 else 1)  # w2 (packed for int4)
     bytes_moved += tokens * model_dim * (2 if out_torch_dtype in (torch.float16, torch.bfloat16) else 4)  # out
     is_f16_or_bf16_s2 = is_int4_bf16 or in_dtype in ("bf16", "fp16")
     bytes_moved += (tokens * topk * 4) if not is_f16_or_bf16_s2 else 0  # a2_scale f32 (None for bf16)
     if use_groupwise_scale:
         num_groups_s2 = inter_dim // group_size
         _scale_bytes = 2 if scale_dtype == "bf16" else 4
-        bytes_moved += experts * num_groups_s2 * model_dim * _scale_bytes  # groupwise scale
+        bytes_moved += active_experts * num_groups_s2 * model_dim * _scale_bytes  # groupwise scale
     elif not is_f16_or_bf16_s2:
-        bytes_moved += experts * model_dim * 4  # per-row scale_w f32
-    bytes_moved += int(sorted_weights.numel()) * 4  # sorted_weights f32
-    bytes_moved += int(sorted_token_ids.numel()) * 4  # sorted_token_ids i32
-    bytes_moved += int(sorted_expert_ids.numel()) * 4  # sorted_expert_ids i32
+        bytes_moved += active_experts * model_dim * 4  # per-row scale_w f32
+    # Note: routing metadata (sorted_weights, sorted_token_ids, sorted_expert_ids) excluded
+    # from bytes_moved — they are negligible vs weight/activation/scale tensors.
     tbps = bytes_moved / 1e12 / (us / 1e6)
     print(
         f"FlyDSL MoE stage2 [{kernel_name}] {in_dtype} {'reduce' if use_reduce else 'atomic'} | "
