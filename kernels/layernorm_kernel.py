@@ -164,26 +164,23 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
             Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma)
             Beta_buf = fx.rocdl.make_buffer_tensor(Beta)
 
-            # Slice at row 0; actual row offset via soffset (SGPR)
-            row_in = fx.slice(Input_buf, (0, None))
-            row_out = fx.slice(Output_buf, (0, None))
+            row_in = fx.slice(Input_buf, (bid, None))
+            row_out = fx.slice(Output_buf, (bid, None))
 
             in_div = fx.logical_divide(row_in, fx.make_layout(VEC_WIDTH, 1))
             out_div = fx.logical_divide(row_out, fx.make_layout(VEC_WIDTH, 1))
             gamma_div = fx.logical_divide(Gamma_buf, fx.make_layout(VEC_WIDTH, 1))
             beta_div = fx.logical_divide(Beta_buf, fx.make_layout(VEC_WIDTH, 1))
 
-            copy_atom_base = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), elem_bits)
-            bid_row_offset = ArithValue(bid) * fx.Int32(N)
-            copy_atom = copy_atom_base.set_value("soffset", bid_row_offset)
+            copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), elem_bits)
             vec_reg_ty = fx.MemRefType.get(
                 elem_type, fx.LayoutType.get(VEC_WIDTH, 1), fx.AddressSpace.Register
             )
             vec_reg_lay = fx.make_layout(VEC_WIDTH, 1)
 
-            def _load_vec(div_tensor, idx, atom=None):
+            def _load_vec(div_tensor, idx):
                 r = fx.memref_alloca(vec_reg_ty, vec_reg_lay)
-                fx.copy_atom_call(atom if atom is not None else copy_atom, fx.slice(div_tensor, (None, idx)), r)
+                fx.copy_atom_call(copy_atom, fx.slice(div_tensor, (None, idx)), r)
                 return TensorSSA(fx.memref_load_vec(r), VEC_WIDTH, elem_dtype)
 
             def _store_vec(val, div_tensor, idx):
@@ -207,15 +204,15 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
             sum_val, sumsq_val = block_reduce_add2(thread_sum, thread_sumsq)
             mean, rstd = compute_mean_rstd(sum_val, sumsq_val)
 
-            g_cur = _load_vec(gamma_div, tid, atom=copy_atom_base).to(Float32)
-            b_cur = _load_vec(beta_div, tid, atom=copy_atom_base).to(Float32)
+            g_cur = _load_vec(gamma_div, tid).to(Float32)
+            b_cur = _load_vec(beta_div, tid).to(Float32)
 
             # ── Pass 2: normalize + affine + store ───────────────────────
             for tile_i in range_constexpr(num_tiles_py):
                 if tile_i + 1 < num_tiles_py:
                     next_idx = tid + (tile_i + 1) * BLOCK_THREADS
-                    g_next = _load_vec(gamma_div, next_idx, atom=copy_atom_base).to(Float32)
-                    b_next = _load_vec(beta_div, next_idx, atom=copy_atom_base).to(Float32)
+                    g_next = _load_vec(gamma_div, next_idx).to(Float32)
+                    b_next = _load_vec(beta_div, next_idx).to(Float32)
                 else:
                     g_next = g_cur
                     b_next = b_cur
@@ -261,20 +258,17 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
             Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma)
             Beta_buf = fx.rocdl.make_buffer_tensor(Beta)
 
-            # Slice at row 0; actual row offset via soffset (SGPR)
-            row_in = fx.slice(Input_buf, (0, None))
-            row_out = fx.slice(Output_buf, (0, None))
+            row_in = fx.slice(Input_buf, (bid, None))
+            row_out = fx.slice(Output_buf, (bid, None))
 
             c_zero_f = arith.constant(0.0, type=compute_type)
             thread_sum = c_zero_f
             thread_sumsq = c_zero_f
 
-            copy_atom_s_base = fx.make_copy_atom(
+            copy_atom_s = fx.make_copy_atom(
                 fx.rocdl.BufferCopy16b() if elem_bits <= 16 else fx.rocdl.BufferCopy32b(),
                 elem_bits,
             )
-            bid_row_offset = ArithValue(bid) * fx.Int32(N)
-            copy_atom_s = copy_atom_s_base.set_value("soffset", bid_row_offset)
             scalar_reg_ty = fx.MemRefType.get(
                 elem_type, fx.LayoutType.get(1, 1), fx.AddressSpace.Register
             )
@@ -285,10 +279,10 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
             beta_div = fx.logical_divide(Beta_buf, fx.make_layout(1, 1))
             out_div = fx.logical_divide(row_out, fx.make_layout(1, 1))
 
-            def _load_scalar(divided_tensor, index, atom=None):
+            def _load_scalar(divided_tensor, index):
                 view = fx.slice(divided_tensor, (None, index))
                 r = fx.memref_alloca(scalar_reg_ty, scalar_reg_lay)
-                fx.copy_atom_call(atom if atom is not None else copy_atom_s, view, r)
+                fx.copy_atom_call(copy_atom_s, view, r)
                 ts = TensorSSA(fx.memref_load_vec(r), 1, elem_dtype)
                 return ts[0].ir_value()
 
@@ -328,8 +322,8 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                 c_N_i32 = Int32(N)
                 if arith.cmpi(arith.CmpIPredicate.ult, idx, c_N_i32):
                     x_e = _load_scalar(row_div, idx)
-                    g_e = _load_scalar(gamma_div, idx, atom=copy_atom_s_base)
-                    b_e = _load_scalar(beta_div, idx, atom=copy_atom_s_base)
+                    g_e = _load_scalar(gamma_div, idx)
+                    b_e = _load_scalar(beta_div, idx)
                     x = (
                         x_e
                         if dtype_str == "f32"

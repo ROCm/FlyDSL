@@ -138,25 +138,22 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
             Output_buf = fx.rocdl.make_buffer_tensor(Output)
             Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma)
 
-            # Slice at row 0; actual row offset via soffset (SGPR)
-            row_in = fx.slice(Input_buf, (0, None))
-            row_out = fx.slice(Output_buf, (0, None))
+            row_in = fx.slice(Input_buf, (bid, None))
+            row_out = fx.slice(Output_buf, (bid, None))
 
             in_div = fx.logical_divide(row_in, fx.make_layout(VEC_WIDTH, 1))
             out_div = fx.logical_divide(row_out, fx.make_layout(VEC_WIDTH, 1))
             gamma_div = fx.logical_divide(Gamma_buf, fx.make_layout(VEC_WIDTH, 1))
 
-            copy_atom_base = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), elem_bits)
-            bid_row_offset = ArithValue(bid) * fx.Int32(N)
-            copy_atom = copy_atom_base.set_value("soffset", bid_row_offset)
+            copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), elem_bits)
             vec_reg_ty = fx.MemRefType.get(
                 elem_type, fx.LayoutType.get(VEC_WIDTH, 1), fx.AddressSpace.Register
             )
             vec_reg_lay = fx.make_layout(VEC_WIDTH, 1)
 
-            def _load_vec(div_tensor, idx, atom=None):
+            def _load_vec(div_tensor, idx):
                 r = fx.memref_alloca(vec_reg_ty, vec_reg_lay)
-                fx.copy_atom_call(atom if atom is not None else copy_atom, fx.slice(div_tensor, (None, idx)), r)
+                fx.copy_atom_call(copy_atom, fx.slice(div_tensor, (None, idx)), r)
                 return TensorSSA(fx.memref_load_vec(r), VEC_WIDTH, elem_dtype)
 
             def _store_vec(val, div_tensor, idx):
@@ -189,7 +186,7 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
             for tile_i in range_constexpr(num_tiles):
                 idx = tid + tile_i * BLOCK_THREADS
 
-                g = _load_vec(gamma_div, idx, atom=copy_atom_base).to(Float32)
+                g = _load_vec(gamma_div, idx).to(Float32)
                 x = in_local[tile_i].to(Float32)
 
                 y = (x * rrms) * g
@@ -227,16 +224,13 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
             Output_buf = fx.rocdl.make_buffer_tensor(Output)
             Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma)
 
-            # Slice at row 0; actual row offset via soffset (SGPR)
-            row_in = fx.slice(Input_buf, (0, None))
-            row_out = fx.slice(Output_buf, (0, None))
+            row_in = fx.slice(Input_buf, (bid, None))
+            row_out = fx.slice(Output_buf, (bid, None))
 
-            copy_atom_s_base = fx.make_copy_atom(
+            copy_atom_s = fx.make_copy_atom(
                 fx.rocdl.BufferCopy16b() if elem_bits <= 16 else fx.rocdl.BufferCopy32b(),
                 elem_bits,
             )
-            bid_row_offset = ArithValue(bid) * fx.Int32(N)
-            copy_atom_s = copy_atom_s_base.set_value("soffset", bid_row_offset)
             scalar_reg_ty = fx.MemRefType.get(elem_type, fx.LayoutType.get(1, 1), fx.AddressSpace.Register)
             scalar_reg_lay = fx.make_layout(1, 1)
 
@@ -244,10 +238,10 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
             gamma_div = fx.logical_divide(Gamma_buf, fx.make_layout(1, 1))
             out_div = fx.logical_divide(row_out, fx.make_layout(1, 1))
 
-            def _load_scalar(divided_tensor, index, atom=None):
+            def _load_scalar(divided_tensor, index):
                 view = fx.slice(divided_tensor, (None, index))
                 r = fx.memref_alloca(scalar_reg_ty, scalar_reg_lay)
-                fx.copy_atom_call(atom if atom is not None else copy_atom_s, view, r)
+                fx.copy_atom_call(copy_atom_s, view, r)
                 ts = TensorSSA(fx.memref_load_vec(r), 1, elem_dtype)
                 return ts[0].ir_value()
 
@@ -284,7 +278,7 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
                 c_N_i32 = Int32(N)
                 if arith.cmpi(arith.CmpIPredicate.ult, idx, c_N_i32):
                     x_e = _load_scalar(row_div, idx)
-                    g_e = _load_scalar(gamma_div, idx, atom=copy_atom_s_base)
+                    g_e = _load_scalar(gamma_div, idx)
                     x = x_e if dtype_str == "f32" else x_e.extf(compute_type)
                     g = g_e if dtype_str == "f32" else g_e.extf(compute_type)
                     norm = ArithValue(x) * ArithValue(rrms)
