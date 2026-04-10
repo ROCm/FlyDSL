@@ -97,6 +97,8 @@ def compile_preshuffle_gemm_v2(
     total_threads = 256
     a_load_bytes = 16
 
+    b_stages = 2
+
     # ── Kernel ────────────────────────────────────────────────────────
     @flyc.kernel
     def kernel_gemm(
@@ -130,14 +132,12 @@ def compile_preshuffle_gemm_v2(
             mma_uni = fx.make_copy_atom(fx.UniversalCopy128b(), layout_elem)
         buf_copy_g2s = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), layout_elem)
         uni_copy_g2s = fx.make_copy_atom(fx.UniversalCopy128b(), layout_elem)
-        buf_copy_out = fx.make_copy_atom(fx.rocdl.BufferCopy16b(), out_elem_cls)
 
         # Per-thread slices
         thr_mma = tiled_mma.thr_slice(tid)
         thr_g2s = tiled_copy_g2s.get_slice(tid)
         thr_s2r = fx.make_tiled_copy_A(mma_copy, tiled_mma).get_slice(tid)
         thr_g2r_B = fx.make_tiled_copy_B(mma_copy, tiled_mma).get_slice(tid)
-        thr_r2g_C = fx.make_tiled_copy_C(buf_copy_out, tiled_mma).get_slice(tid)
 
         # LDS with XOR16 swizzle (f16/bf16) or no swizzle (fp8)
         smem_ptr = fx.recast_iter(
@@ -155,7 +155,6 @@ def compile_preshuffle_gemm_v2(
         pA_s = thr_g2s.partition_D(sA)
         pA_s2r = thr_s2r.partition_S(sA)
         pB_g = thr_g2r_B.partition_S(tB)
-        pC_g = thr_r2g_C.partition_S(tC)
 
         # Fragments
         frag_copy_A = fx.make_fragment_like(pA_s[None, None, None, 0])
@@ -170,13 +169,14 @@ def compile_preshuffle_gemm_v2(
         frag_C = thr_mma.make_fragment_C(tC)
         frag_A_retile = thr_s2r.retile(frag_A)
         frag_B_retile = thr_g2r_B.retile(frag_B)
-        frag_C_out = fx.make_fragment_like(frag_C, out_elem_cls.ir_type)
-        frag_C_retile = thr_r2g_C.retile(frag_C_out)
+        if is_f16_or_bf16:
+            buf_copy_out = fx.make_copy_atom(fx.rocdl.BufferCopy16b(), out_elem_cls)
+            thr_r2g_C = fx.make_tiled_copy_C(buf_copy_out, tiled_mma).get_slice(tid)
+            pC_g = thr_r2g_C.partition_S(tC)
+            frag_C_out = fx.make_fragment_like(frag_C, out_elem_cls.ir_type)
+            frag_C_retile = thr_r2g_C.retile(frag_C_out)
 
-        # ── Pipeline stage ────────────────────────────────────────
-        # Order: prefetch A g2s → compute (A s2r + MFMA with current B)
-        #       → load next B g2r + write A to LDS → barrier
-        # This allows B loads to overlap with LDS writes and barrier.
+        # ── Pipeline stage (double-buffered B) ────────────────────
         def pipeline_stage(read_stage, next_k_val=None, read_next=True):
             write_stage = read_stage ^ 1
             # 1. Prefetch next A tile (global → register)
@@ -190,7 +190,7 @@ def compile_preshuffle_gemm_v2(
                         frag_A[None, None, (None, ki)],
                         frag_B[None, None, (None, ki), read_stage],
                         frag_C)
-            # 3. Load next B tile (global → register) — after compute
+            # 3. Load next B tile (after compute, overlaps with LDS write + barrier)
             if read_next and next_k_val is not None:
                 fx.copy(mma_copy, pB_g[None, None, None, next_k_val],
                         frag_B_retile[None, None, None, write_stage])
@@ -226,7 +226,7 @@ def compile_preshuffle_gemm_v2(
 
         # ── Epilogue ─────────────────────────────────────────────
         if is_fp8:
-            # FP8: apply per-token / per-column scales, then store
+            # FP8: per-token/per-column scales + mfma_epilog buffer_store
             c_n = arith.index_cast(T.index, i32_n)
             bx_m = gpu.block_id("x") * tile_m
             by_n = gpu.block_id("y") * tile_n
@@ -236,8 +236,15 @@ def compile_preshuffle_gemm_v2(
             lane_mod_16 = lane_id % 16
             n_tile_base = wave_id * n_per_wave
 
+            _c_nrec = arith.index_cast(T.i64, c_n * arith.index_cast(T.index, i32_m) * 2)
+            c_rsrc = buffer_ops.create_buffer_resource(arg_c, max_size=False, num_records_bytes=_c_nrec)
             scale_a_rsrc = buffer_ops.create_buffer_resource(arg_scale_a, max_size=False)
             scale_b_rsrc = buffer_ops.create_buffer_resource(arg_scale_b, max_size=True)
+
+            acc_vec = frag_C.load()
+            final_accs = [vector.from_elements(T.f32x4, [
+                vector.extract(acc_vec, static_position=[i*4+j], dynamic_position=[])
+                for j in range(4)]) for i in range_constexpr(n_accs)]
 
             s_b_vals = [buffer_ops.buffer_load(scale_b_rsrc,
                         by_n + n_tile_base + ni * 16 + lane_mod_16, vec_width=1, dtype=T.f32)
@@ -246,23 +253,24 @@ def compile_preshuffle_gemm_v2(
                         bx_m + mi * 16 + lane_div_16 * 4, vec_width=4, dtype=T.f32))
                         for mi in range_constexpr(m_repeat)]
 
-            acc = frag_C.load()
-            scaled = []
-            for acc_i in range_constexpr(n_accs):
-                mi_row = acc_i // num_acc_n
-                ni = acc_i % num_acc_n
-                for ii in range_constexpr(4):
-                    idx = acc_i * 4 + ii
-                    val = vector.extract(acc, static_position=[idx], dynamic_position=[])
-                    s_a = vector.extract(s_a_vecs[mi_row], static_position=[ii], dynamic_position=[])
-                    scaled.append(arith.trunc_f(out_elem_cls.ir_type, (val * s_a) * s_b_vals[ni]))
-            frag_C_out.store(vector.from_elements(T.vec(acc_size, out_elem_cls.ir_type), scaled))
-        else:
-            # f16/bf16: no scales, just truncate
-            frag_C_out.store(arith.trunc_f(T.vec(acc_size, out_elem_cls.ir_type), frag_C.load()))
+            def body_row(*, mi, ii, row_in_tile, row):
+                col_base = by_n + n_tile_base + lane_mod_16
+                idx_base = row * c_n + col_base
+                s_a = vector.extract(s_a_vecs[mi], static_position=[ii], dynamic_position=[])
+                for ni in range_constexpr(num_acc_n):
+                    val = vector.extract(final_accs[mi * num_acc_n + ni],
+                                         static_position=[ii], dynamic_position=[])
+                    val_out = arith.trunc_f(out_elem_cls.ir_type, (val * s_a) * s_b_vals[ni])
+                    buffer_ops.buffer_store(val_out, c_rsrc, idx_base + ni * 16)
 
-        # Store via fx.copy (all dtypes)
-        fx.copy(buf_copy_out, frag_C_retile, pC_g)
+            mfma_epilog(
+                use_cshuffle=False, arith=arith, range_constexpr=range_constexpr,
+                m_repeat=m_repeat, lane_div_16=lane_div_16, bx_m=bx_m, body_row=body_row,
+            )
+        else:
+            # f16/bf16: truncate + vectorized fx.copy (fast epilogue)
+            frag_C_out.store(arith.trunc_f(T.vec(acc_size, out_elem_cls.ir_type), frag_C.load()))
+            fx.copy(buf_copy_out, frag_C_retile, pC_g)
 
     # ── Host launcher ─────────────────────────────────────────────
     @flyc.jit
