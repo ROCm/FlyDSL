@@ -192,13 +192,7 @@ func.func @pyir_logical_divide_2d_bymode() -> !fly.layout<((2, 7), ((3, (2, 3)),
   %s = fly.static : !fly.int_tuple<(14, (6, 9))>
   %d = fly.static : !fly.int_tuple<(19, (69, 1))>
   %layout = fly.make_layout(%s, %d) : (!fly.int_tuple<(14, (6, 9))>, !fly.int_tuple<(19, (69, 1))>) -> !fly.layout<(14, (6, 9)) : (19, (69, 1))>
-  %m0s = fly.static : !fly.int_tuple<2>
-  %m0d = fly.static : !fly.int_tuple<7>
-  %m0 = fly.make_layout(%m0s, %m0d) : (!fly.int_tuple<2>, !fly.int_tuple<7>) -> !fly.layout<2 : 7>
-  %m1s = fly.static : !fly.int_tuple<(3, 6)>
-  %m1d = fly.static : !fly.int_tuple<(1, 3)>
-  %m1 = fly.make_layout(%m1s, %m1d) : (!fly.int_tuple<(3, 6)>, !fly.int_tuple<(1, 3)>) -> !fly.layout<(3, 6) : (1, 3)>
-  %tiler = fly.make_tile(%m0, %m1) : (!fly.layout<2 : 7>, !fly.layout<(3, 6) : (1, 3)>) -> !fly.tile<[2:7|(3, 6):(1, 3)]>
+  %tiler = fly.static : !fly.tile<[2:7|(3, 6):(1, 3)]>
   // CHECK: fly.logical_divide
   %result = fly.logical_divide(%layout, %tiler) : (!fly.layout<(14, (6, 9)) : (19, (69, 1))>, !fly.tile<[2:7|(3, 6):(1, 3)]>) -> !fly.layout<((2, 7), ((3, (2, 3)), 3)) : ((133, 19), ((69, (207, 1)), 3))>
   return %result : !fly.layout<((2, 7), ((3, (2, 3)), 3)) : ((133, 19), ((69, (207, 1)), 3))>
@@ -209,13 +203,7 @@ func.func @pyir_zipped_divide_2d_bymode() -> !fly.layout<((2, (3, (2, 3))), (7, 
   %s = fly.static : !fly.int_tuple<(14, (6, 9))>
   %d = fly.static : !fly.int_tuple<(19, (69, 1))>
   %layout = fly.make_layout(%s, %d) : (!fly.int_tuple<(14, (6, 9))>, !fly.int_tuple<(19, (69, 1))>) -> !fly.layout<(14, (6, 9)) : (19, (69, 1))>
-  %m0s = fly.static : !fly.int_tuple<2>
-  %m0d = fly.static : !fly.int_tuple<7>
-  %m0 = fly.make_layout(%m0s, %m0d) : (!fly.int_tuple<2>, !fly.int_tuple<7>) -> !fly.layout<2 : 7>
-  %m1s = fly.static : !fly.int_tuple<(3, 6)>
-  %m1d = fly.static : !fly.int_tuple<(1, 3)>
-  %m1 = fly.make_layout(%m1s, %m1d) : (!fly.int_tuple<(3, 6)>, !fly.int_tuple<(1, 3)>) -> !fly.layout<(3, 6) : (1, 3)>
-  %tiler = fly.make_tile(%m0, %m1) : (!fly.layout<2 : 7>, !fly.layout<(3, 6) : (1, 3)>) -> !fly.tile<[2:7|(3, 6):(1, 3)]>
+  %tiler = fly.static : !fly.tile<[2:7|(3, 6):(1, 3)]>
   // CHECK: fly.zipped_divide
   %result = fly.zipped_divide(%layout, %tiler) : (!fly.layout<(14, (6, 9)) : (19, (69, 1))>, !fly.tile<[2:7|(3, 6):(1, 3)]>) -> !fly.layout<((2, (3, (2, 3))), (7, 3)) : ((133, (69, (207, 1))), (19, 3))>
   return %result : !fly.layout<((2, (3, (2, 3))), (7, 3)) : ((133, (69, (207, 1))), (19, 3))>
@@ -226,13 +214,7 @@ func.func @pyir_tiled_divide_2d_bymode() -> !fly.layout<((2, (3, (2, 3))), 7, 3)
   %s = fly.static : !fly.int_tuple<(14, (6, 9))>
   %d = fly.static : !fly.int_tuple<(19, (69, 1))>
   %layout = fly.make_layout(%s, %d) : (!fly.int_tuple<(14, (6, 9))>, !fly.int_tuple<(19, (69, 1))>) -> !fly.layout<(14, (6, 9)) : (19, (69, 1))>
-  %m0s = fly.static : !fly.int_tuple<2>
-  %m0d = fly.static : !fly.int_tuple<7>
-  %m0 = fly.make_layout(%m0s, %m0d) : (!fly.int_tuple<2>, !fly.int_tuple<7>) -> !fly.layout<2 : 7>
-  %m1s = fly.static : !fly.int_tuple<(3, 6)>
-  %m1d = fly.static : !fly.int_tuple<(1, 3)>
-  %m1 = fly.make_layout(%m1s, %m1d) : (!fly.int_tuple<(3, 6)>, !fly.int_tuple<(1, 3)>) -> !fly.layout<(3, 6) : (1, 3)>
-  %tiler = fly.make_tile(%m0, %m1) : (!fly.layout<2 : 7>, !fly.layout<(3, 6) : (1, 3)>) -> !fly.tile<[2:7|(3, 6):(1, 3)]>
+  %tiler = fly.static : !fly.tile<[2:7|(3, 6):(1, 3)]>
   // CHECK: fly.tiled_divide
   %result = fly.tiled_divide(%layout, %tiler) : (!fly.layout<(14, (6, 9)) : (19, (69, 1))>, !fly.tile<[2:7|(3, 6):(1, 3)]>) -> !fly.layout<((2, (3, (2, 3))), 7, 3) : ((133, (69, (207, 1))), 19, 3)>
   return %result : !fly.layout<((2, (3, (2, 3))), 7, 3) : ((133, (69, (207, 1))), 19, 3)>
@@ -243,13 +225,7 @@ func.func @pyir_flat_divide_2d_bymode() -> !fly.layout<(2, (3, (2, 3)), 7, 3) : 
   %s = fly.static : !fly.int_tuple<(14, (6, 9))>
   %d = fly.static : !fly.int_tuple<(19, (69, 1))>
   %layout = fly.make_layout(%s, %d) : (!fly.int_tuple<(14, (6, 9))>, !fly.int_tuple<(19, (69, 1))>) -> !fly.layout<(14, (6, 9)) : (19, (69, 1))>
-  %m0s = fly.static : !fly.int_tuple<2>
-  %m0d = fly.static : !fly.int_tuple<7>
-  %m0 = fly.make_layout(%m0s, %m0d) : (!fly.int_tuple<2>, !fly.int_tuple<7>) -> !fly.layout<2 : 7>
-  %m1s = fly.static : !fly.int_tuple<(3, 6)>
-  %m1d = fly.static : !fly.int_tuple<(1, 3)>
-  %m1 = fly.make_layout(%m1s, %m1d) : (!fly.int_tuple<(3, 6)>, !fly.int_tuple<(1, 3)>) -> !fly.layout<(3, 6) : (1, 3)>
-  %tiler = fly.make_tile(%m0, %m1) : (!fly.layout<2 : 7>, !fly.layout<(3, 6) : (1, 3)>) -> !fly.tile<[2:7|(3, 6):(1, 3)]>
+  %tiler = fly.static : !fly.tile<[2:7|(3, 6):(1, 3)]>
   // CHECK: fly.flat_divide
   %result = fly.flat_divide(%layout, %tiler) : (!fly.layout<(14, (6, 9)) : (19, (69, 1))>, !fly.tile<[2:7|(3, 6):(1, 3)]>) -> !fly.layout<(2, (3, (2, 3)), 7, 3) : (133, (69, (207, 1)), 19, 3)>
   return %result : !fly.layout<(2, (3, (2, 3)), 7, 3) : (133, (69, (207, 1)), 19, 3)>

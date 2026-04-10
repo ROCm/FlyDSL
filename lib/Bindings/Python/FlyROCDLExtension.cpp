@@ -1,127 +1,127 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2025 FlyDSL Project Contributors
 
-#include "mlir-c/Bindings/Python/Interop.h"
-#include "mlir-c/Dialect/LLVM.h"
-#include "mlir-c/IR.h"
-#include "mlir-c/Support.h"
-#include "mlir/Bindings/Python/IRCore.h"
-#include "mlir/Bindings/Python/Nanobind.h"
-#include "mlir/Bindings/Python/NanobindAdaptors.h"
-#include "mlir/CAPI/IR.h"
-#include "mlir/CAPI/Wrap.h"
+#include "mlir/IR/BuiltinAttributes.h"
+#include "mlir/IR/MLIRContext.h"
+#include "mlir/IR/Value.h"
 
-#include <mlir/IR/BuiltinAttributes.h>
-#include <mlir/IR/MLIRContext.h>
-#include <mlir/IR/Value.h>
-
-#include "flydsl-c/FlyROCDLDialect.h"
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
 #include "flydsl/Dialect/FlyROCDL/IR/Dialect.h"
 
+#include "BindingUtils.h"
+
 namespace nb = nanobind;
 using namespace nb::literals;
+using namespace ::mlir::fly;
+using namespace ::mlir::fly_rocdl;
 
 namespace mlir {
 namespace python {
 namespace MLIR_BINDINGS_PYTHON_DOMAIN {
 namespace fly_rocdl {
 
-struct PyMmaAtomCDNA3_MFMAType : PyConcreteType<PyMmaAtomCDNA3_MFMAType> {
-  static constexpr IsAFunctionTy isaFunction = mlirTypeIsAFlyROCDLMmaAtomCDNA3_MFMAType;
-  static constexpr GetTypeIDFunctionTy getTypeIdFunction =
-      mlirFlyROCDLMmaAtomCDNA3_MFMATypeGetTypeID;
-  static constexpr const char *pyClassName = "MmaAtomCDNA3_MFMAType";
-  using Base::Base;
+struct PyMmaOpCDNA3_MFMAType : PyConcreteType<PyMmaOpCDNA3_MFMAType> {
+  FLYDSL_REGISTER_TYPE_BINDING(MmaOpCDNA3_MFMAType, "MmaOpCDNA3_MFMAType");
 
   static void bindDerived(ClassTy &c) {
     c.def_static(
         "get",
         [](int32_t m, int32_t n, int32_t k, PyType &elemTyA, PyType &elemTyB, PyType &elemTyAcc,
            DefaultingPyMlirContext context) {
-          return PyMmaAtomCDNA3_MFMAType(context->getRef(),
-                                         wrap(::mlir::fly_rocdl::MmaAtomCDNA3_MFMAType::get(
-                                             m, n, k, unwrap(static_cast<MlirType>(elemTyA)),
-                                             unwrap(static_cast<MlirType>(elemTyB)),
-                                             unwrap(static_cast<MlirType>(elemTyAcc)))));
+          return PyMmaOpCDNA3_MFMAType(context->getRef(), wrap(MmaOpCDNA3_MFMAType::get(
+                                                              m, n, k, unwrap(elemTyA),
+                                                              unwrap(elemTyB), unwrap(elemTyAcc))));
         },
         "m"_a, "n"_a, "k"_a, "elem_ty_a"_a, "elem_ty_b"_a, "elem_ty_acc"_a, nb::kw_only(),
         "context"_a = nb::none(),
-        "Create a MmaAtomCDNA3_MFMAType with m, n, k dimensions and element "
-        "types");
+        "Create a MmaOpCDNA3_MFMAType with m, n, k dimensions and element types");
+  }
+};
 
-    c.def_prop_ro("m", [](PyMmaAtomCDNA3_MFMAType &self) -> int32_t {
-      return mlirFlyROCDLMmaAtomCDNA3_MFMATypeGetM(self);
-    });
-    c.def_prop_ro("n", [](PyMmaAtomCDNA3_MFMAType &self) -> int32_t {
-      return mlirFlyROCDLMmaAtomCDNA3_MFMATypeGetN(self);
-    });
-    c.def_prop_ro("k", [](PyMmaAtomCDNA3_MFMAType &self) -> int32_t {
-      return mlirFlyROCDLMmaAtomCDNA3_MFMATypeGetK(self);
-    });
-    c.def_prop_ro("elem_ty_a", [](PyMmaAtomCDNA3_MFMAType &self) -> MlirType {
-      return mlirFlyROCDLMmaAtomCDNA3_MFMATypeGetElemTyA(self);
-    });
-    c.def_prop_ro("elem_ty_b", [](PyMmaAtomCDNA3_MFMAType &self) -> MlirType {
-      return mlirFlyROCDLMmaAtomCDNA3_MFMATypeGetElemTyB(self);
-    });
-    c.def_prop_ro("elem_ty_acc", [](PyMmaAtomCDNA3_MFMAType &self) -> MlirType {
-      return mlirFlyROCDLMmaAtomCDNA3_MFMATypeGetElemTyAcc(self);
-    });
+struct PyMmaOpGFX1250_WMMAType : PyConcreteType<PyMmaOpGFX1250_WMMAType> {
+  FLYDSL_REGISTER_TYPE_BINDING(MmaOpGFX1250_WMMAType, "MmaOpGFX1250_WMMAType");
 
-    c.def_prop_ro("thr_layout", [](PyMmaAtomCDNA3_MFMAType &self) -> MlirType {
-      auto ty =
-          ::mlir::cast<::mlir::fly::MmaAtomTypeInterface>(unwrap(static_cast<MlirType>(self)));
-      auto attr = ::mlir::cast<::mlir::fly::LayoutAttr>(ty.getThrLayout());
-      return wrap(::mlir::fly::LayoutType::get(attr));
-    });
-    c.def_prop_ro("shape_mnk", [](PyMmaAtomCDNA3_MFMAType &self) -> MlirType {
-      auto ty =
-          ::mlir::cast<::mlir::fly::MmaAtomTypeInterface>(unwrap(static_cast<MlirType>(self)));
-      auto attr = ::mlir::cast<::mlir::fly::IntTupleAttr>(ty.getShapeMNK());
-      return wrap(::mlir::fly::IntTupleType::get(attr));
-    });
-    c.def_prop_ro("tv_layout_a", [](PyMmaAtomCDNA3_MFMAType &self) -> MlirType {
-      auto ty =
-          ::mlir::cast<::mlir::fly::MmaAtomTypeInterface>(unwrap(static_cast<MlirType>(self)));
-      auto attr = ::mlir::cast<::mlir::fly::LayoutAttr>(ty.getThrValLayoutA());
-      return wrap(::mlir::fly::LayoutType::get(attr));
-    });
-    c.def_prop_ro("tv_layout_b", [](PyMmaAtomCDNA3_MFMAType &self) -> MlirType {
-      auto ty =
-          ::mlir::cast<::mlir::fly::MmaAtomTypeInterface>(unwrap(static_cast<MlirType>(self)));
-      auto attr = ::mlir::cast<::mlir::fly::LayoutAttr>(ty.getThrValLayoutB());
-      return wrap(::mlir::fly::LayoutType::get(attr));
-    });
-    c.def_prop_ro("tv_layout_c", [](PyMmaAtomCDNA3_MFMAType &self) -> MlirType {
-      auto ty =
-          ::mlir::cast<::mlir::fly::MmaAtomTypeInterface>(unwrap(static_cast<MlirType>(self)));
-      auto attr = ::mlir::cast<::mlir::fly::LayoutAttr>(ty.getThrValLayoutC());
-      return wrap(::mlir::fly::LayoutType::get(attr));
-    });
+  static void bindDerived(ClassTy &c) {
+    c.def_static(
+        "get",
+        [](int32_t m, int32_t n, int32_t k, PyType &elemTyA, PyType &elemTyB, PyType &elemTyAcc,
+           DefaultingPyMlirContext context) {
+          return PyMmaOpGFX1250_WMMAType(
+              context->getRef(),
+              wrap(MmaOpGFX1250_WMMAType::get(m, n, k, unwrap(elemTyA), unwrap(elemTyB),
+                                              unwrap(elemTyAcc))));
+        },
+        "m"_a, "n"_a, "k"_a, "elem_ty_a"_a, "elem_ty_b"_a, "elem_ty_acc"_a, nb::kw_only(),
+        "context"_a = nb::none(),
+        "Create a MmaOpGFX1250_WMMAType with m, n, k dimensions and element types");
   }
 };
 
 struct PyCopyOpCDNA3BufferCopyType : PyConcreteType<PyCopyOpCDNA3BufferCopyType> {
-  static constexpr IsAFunctionTy isaFunction = mlirTypeIsAFlyROCDLCopyOpCDNA3BufferCopyType;
-  static constexpr GetTypeIDFunctionTy getTypeIdFunction =
-      mlirFlyROCDLCopyOpCDNA3BufferCopyTypeGetTypeID;
-  static constexpr const char *pyClassName = "CopyOpCDNA3BufferCopyType";
-  using Base::Base;
+  FLYDSL_REGISTER_TYPE_BINDING(CopyOpCDNA3BufferCopyType, "CopyOpCDNA3BufferCopyType");
 
   static void bindDerived(ClassTy &c) {
     c.def_static(
         "get",
         [](int32_t bitSize, DefaultingPyMlirContext context) {
-          return PyCopyOpCDNA3BufferCopyType(
-              context->getRef(), mlirFlyROCDLCopyOpCDNA3BufferCopyTypeGet(context->get(), bitSize));
+          MLIRContext *ctx = unwrap(context.get()->get());
+          return PyCopyOpCDNA3BufferCopyType(context->getRef(),
+                                             wrap(CopyOpCDNA3BufferCopyType::get(ctx, bitSize)));
         },
         "bit_size"_a, nb::kw_only(), "context"_a = nb::none(),
-        "Create a CopyOpCDNA3BufferCopyType with the given bit size (32, 64, or 128)");
+        "Create a CopyOpCDNA3BufferCopyType with the given bit size");
+  }
+};
 
-    c.def_prop_ro("bit_size", [](PyCopyOpCDNA3BufferCopyType &self) -> int32_t {
-      return mlirFlyROCDLCopyOpCDNA3BufferCopyTypeGetBitSize(self);
-    });
+struct PyCopyOpCDNA3BufferCopyLDSType : PyConcreteType<PyCopyOpCDNA3BufferCopyLDSType> {
+  FLYDSL_REGISTER_TYPE_BINDING(CopyOpCDNA3BufferCopyLDSType, "CopyOpCDNA3BufferCopyLDSType");
+
+  static void bindDerived(ClassTy &c) {
+    c.def_static(
+        "get",
+        [](int32_t bitSize, DefaultingPyMlirContext context) {
+          MLIRContext *ctx = unwrap(context.get()->get());
+          return PyCopyOpCDNA3BufferCopyLDSType(
+              context->getRef(), wrap(CopyOpCDNA3BufferCopyLDSType::get(ctx, bitSize)));
+        },
+        "bit_size"_a, nb::kw_only(), "context"_a = nb::none(),
+        "Create a CopyOpCDNA3BufferCopyLDSType with the given bit size");
+  }
+};
+
+struct PyCopyOpCDNA3BufferAtomicType : PyConcreteType<PyCopyOpCDNA3BufferAtomicType> {
+  FLYDSL_REGISTER_TYPE_BINDING(CopyOpCDNA3BufferAtomicType, "CopyOpCDNA3BufferAtomicType");
+
+  static void bindDerived(ClassTy &c) {
+    c.def_static(
+        "get",
+        [](int32_t atomicOp, PyType &valTypeObj, DefaultingPyMlirContext context) {
+          MLIRContext *ctx = unwrap(context.get()->get());
+          auto atomicOpAttr = ::mlir::fly::AtomicOpAttr::get(
+              ctx, static_cast<::mlir::fly::AtomicOp>(atomicOp));
+          return PyCopyOpCDNA3BufferAtomicType(
+              context->getRef(),
+              wrap(CopyOpCDNA3BufferAtomicType::get(atomicOpAttr, unwrap(valTypeObj))));
+        },
+        "atomic_op"_a, "val_type"_a, nb::kw_only(), "context"_a = nb::none(),
+        "Create a CopyOpCDNA3BufferAtomicType with atomic op and value type");
+  }
+};
+
+struct PyCopyOpCDNA4LdsReadTransposeType : PyConcreteType<PyCopyOpCDNA4LdsReadTransposeType> {
+  FLYDSL_REGISTER_TYPE_BINDING(CopyOpCDNA4LdsReadTransposeType, "CopyOpCDNA4LdsReadTransposeType");
+
+  static void bindDerived(ClassTy &c) {
+    c.def_static(
+        "get",
+        [](int32_t transGranularity, int32_t bitSize, DefaultingPyMlirContext context) {
+          MLIRContext *ctx = unwrap(context.get()->get());
+          return PyCopyOpCDNA4LdsReadTransposeType(
+              context->getRef(),
+              wrap(CopyOpCDNA4LdsReadTransposeType::get(ctx, transGranularity, bitSize)));
+        },
+        "trans_granularity"_a, "bit_size"_a, nb::kw_only(), "context"_a = nb::none(),
+        "Create a CopyOpCDNA4LdsReadTransposeType with transpose granularity and bit size");
   }
 };
 
@@ -130,9 +130,13 @@ struct PyCopyOpCDNA3BufferCopyType : PyConcreteType<PyCopyOpCDNA3BufferCopyType>
 } // namespace python
 } // namespace mlir
 
-NB_MODULE(_fly_rocdl, m) {
+NB_MODULE(_mlirDialectsFlyROCDL, m) {
   m.doc() = "MLIR Python FlyROCDL Extension";
 
-  ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyMmaAtomCDNA3_MFMAType::bind(m);
+  ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyMmaOpCDNA3_MFMAType::bind(m);
+  ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyMmaOpGFX1250_WMMAType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyCopyOpCDNA3BufferCopyType::bind(m);
+  ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyCopyOpCDNA3BufferCopyLDSType::bind(m);
+  ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyCopyOpCDNA3BufferAtomicType::bind(m);
+  ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyCopyOpCDNA4LdsReadTransposeType::bind(m);
 }

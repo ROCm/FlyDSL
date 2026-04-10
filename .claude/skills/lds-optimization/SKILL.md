@@ -41,6 +41,62 @@ Run `/kernel-trace-analysis` first. Apply this skill when the trace shows:
 - LDS latency: **~20-40 cycles** (async, hidden if enough work between write and read)
 - **VGPR context**: LDS ops use **arch_vgpr** (not accum_vgpr). On CDNA3, arch_vgpr and accum_vgpr are separate 256-entry register files. LDS optimization does not interact with MFMA accumulator register pressure. See `/kernel-trace-analysis` Section 5.5 for VGPR architecture details.
 
+## LDS Architecture on CDNA4 (gfx950)
+
+### Hardware Facts
+
+- LDS size: **160 KB per CU** (2.5x larger than gfx942's 64 KB)
+- LDS is organized into **64 banks**, each **4 bytes wide** (640 DWords per bank)
+- Bank index = `(byte_address / 4) % 64`
+- **Bank conflict**: same rule as gfx942 — when 2+ threads in the same wavefront access **different addresses** in the **same bank** in the same cycle, accesses are serialized
+- **Broadcast**: same as gfx942 — when 2+ threads access the **same address** in the same bank, hardware broadcasts (no conflict)
+- LDS throughput: **256 bytes/cycle** (peak, no conflicts; 2x gfx942 due to 64 banks)
+- LDS latency: **~2-64 cycles** per operation depending on bank conflicts (2 cycles best case, 64 cycles worst case with all threads conflicting on one bank)
+- LDS allocation granularity: **1280 bytes** on **1280-byte alignment**; LDS allocations do not wrap around the LDS storage
+- **Wavefront dispatch**: reads across a 64-thread wavefront are dispatched over **4 cycles** in waterfall fashion
+- **32 concurrent LDS operations**: hardware can concurrently execute 32 read or write instructions (each 32-bit); extended instructions (read2/write2) can be 64-bit each
+- **32 integer atomic units** for unordered atomic operations
+- **VGPR context**: same as gfx942 — LDS ops use **arch_vgpr** (not accum_vgpr). On CDNA4, arch_vgpr and accum_vgpr are separate 256-entry register files.
+
+### Key Differences from gfx942
+
+| Aspect | gfx942 (CDNA3) | gfx950 (CDNA4) |
+|--------|----------------|-----------------|
+| LDS size per CU | 64 KB | 160 KB |
+| Number of banks | 32 | 64 |
+| Bank index formula | `(addr/4) % 32` | `(addr/4) % 64` |
+| Peak throughput | 128 bytes/cycle | 256 bytes/cycle |
+| LDS allocation granularity | 256 bytes | 1280 bytes |
+| Max LDS per workgroup | 64 KB | 160 KB |
+| MFMA Transpose Load | Not available | `DS_READ_B64_TR_B16/B8/B4`, `DS_READ_B96_TR_B6` |
+
+### Impact on Bank Conflict Analysis
+
+Because gfx950 has **64 banks** instead of 32, the bank conflict patterns change:
+
+- **Stride that causes conflicts**: multiples of 64 banks (256 bytes) instead of 32 banks (128 bytes)
+- A stride of 128 bytes that caused **full conflict on gfx942** (all threads hit same bank) will only cause **partial conflict on gfx950** (threads alternate between 2 banks)
+- To cause full 64-way conflict on gfx950, the stride must be a multiple of `64 * 4 = 256` bytes
+- **XOR swizzle masks may need adjustment** — masks designed for 32-bank gfx942 may be suboptimal on 64-bank gfx950
+
+### MFMA Transpose Load from LDS (gfx950 only)
+
+CDNA4 introduces dedicated instructions for transposing data while loading from LDS to VGPRs, eliminating the need for explicit transpose via `ds_write` + `ds_read` with permuted addresses:
+
+| Instruction | Element Size | VGPRs Written | Description |
+|-------------|-------------|---------------|-------------|
+| `DS_READ_B64_TR_B16` | 16-bit (fp16/bf16) | 2 VGPRs | Load column-major A or row-major B matrix; two instructions load a complete matrix. Each lane holds 4 consecutive M or N values. |
+| `DS_READ_B64_TR_B8` | 8-bit (fp8/bf8) | 2 VGPRs | Same as B16 but for 8-bit elements. First loads K=0..7,16..23,32..39,48..55; second loads remaining K values. |
+| `DS_READ_B64_TR_B4` | 4-bit (int4) | 2 VGPRs | Same pattern for 4-bit elements. First loads K=0..15,32..47; second loads remaining K values. |
+| `DS_READ_B96_TR_B6` | 6-bit | 3 VGPRs | 6-bit element transpose load into 3 VGPRs. Does NOT require even-VGPR alignment. |
+
+Requirements:
+- EXEC mask must be set to all 1's before executing
+- LDS address must be aligned to the data size
+- DS ops reading/writing 64-bit or larger data must use even-aligned VGPRs (except `DS_READ_B96_TR_B6`)
+
+These instructions are useful for MFMA operand preparation — loading A/B matrices from LDS in the transposed layout needed by MFMA instructions without explicit LDS-based transpose.
+
 ### LDS Instruction Model
 
 LDS operations (`ds_read_*`, `ds_write_*`, `ds_bpermute_*`, `ds_swizzle_*`) are **asynchronous**:
@@ -94,7 +150,9 @@ L 767  stall=  320  ds_read2_b64 v[36:39], v28 offset0:16 offset1:24  ; <-- bank
 Signs:
 - `ds_read_*` / `ds_write_*` instructions with stall > 100 cycles per hit
 - Multiple reads/writes with similar base address but different offsets that map to same banks
-- `ds_read2_b64` / `ds_write2_b32` with offsets that are multiples of 32 (= same bank)
+- `ds_read2_b64` / `ds_write2_b32` with offsets that are multiples of the bank count:
+  - **gfx942**: multiples of 32 (= same bank, 32-bank LDS)
+  - **gfx950**: multiples of 64 (= same bank, 64-bank LDS)
 
 **Type B: Write-Read Latency Exposed** (high stall on `s_waitcnt lgkmcnt(0)` after `ds_write`)
 
@@ -126,12 +184,25 @@ Signs:
 
 ### The Problem
 
-When multiple threads access LDS with a stride that is a multiple of 32 banks (128 bytes), every access hits the same bank:
+When multiple threads access LDS with a stride that is a multiple of the bank count, every access hits the same bank:
+
+- **gfx942 (32 banks)**: stride multiple of 128 bytes causes full conflict
+- **gfx950 (64 banks)**: stride multiple of 256 bytes causes full conflict; stride of 128 bytes causes 2-way conflict (threads alternate between 2 banks)
 
 ```
-Thread 0: addr = base + 0*128  -> bank 0
-Thread 1: addr = base + 1*128  -> bank 0  <- CONFLICT with thread 0
-Thread 2: addr = base + 2*128  -> bank 0  <- CONFLICT
+# gfx942 (32 banks): stride=128 -> full conflict
+Thread 0: addr = base + 0*128  -> bank (0*128/4)%32 = 0
+Thread 1: addr = base + 1*128  -> bank (1*128/4)%32 = 0  <- CONFLICT
+Thread 2: addr = base + 2*128  -> bank (2*128/4)%32 = 0  <- CONFLICT
+
+# gfx950 (64 banks): stride=128 -> only 2-way conflict (NOT full conflict)
+Thread 0: addr = base + 0*128  -> bank (0*128/4)%64 = 0
+Thread 1: addr = base + 1*128  -> bank (1*128/4)%64 = 32  <- different bank!
+Thread 2: addr = base + 2*128  -> bank (2*128/4)%64 = 0   <- conflict with thread 0
+
+# gfx950 (64 banks): stride=256 -> full conflict
+Thread 0: addr = base + 0*256  -> bank (0*256/4)%64 = 0
+Thread 1: addr = base + 1*256  -> bank (1*256/4)%64 = 0  <- CONFLICT
 ...
 ```
 
@@ -180,7 +251,9 @@ The goal is to make vectorized access span enough banks:
 | fp16/bf16 | 2 bytes     | 8                    | 4 banks (16 bytes)   |
 | fp8       | 1 byte      | 16                   | 4 banks (16 bytes)   |
 
-For XOR mask: use `32 / (vec * element_size / 4) - 1` to ensure full bank coverage.
+For XOR mask:
+- **gfx942 (32 banks)**: use `32 / (vec * element_size / 4) - 1` to ensure full bank coverage
+- **gfx950 (64 banks)**: use `64 / (vec * element_size / 4) - 1` — the doubled bank count means wider XOR masks may be needed to fully distribute accesses
 
 ### Example: Fix Bank Conflicts in KV Cache Load to LDS
 
@@ -216,9 +289,15 @@ Same as swizzle — stride-aligned accesses cause bank conflicts. Padding adds e
 Add 1 element of padding per row to break the alignment:
 
 ```python
+# gfx942 (32 banks):
 # Without padding: row stride = HEAD_SIZE (e.g., 128)
 # Bank stride = 128 * 2 / 4 = 64 -> 64 % 32 = 0 -> ALL rows hit same bank column
+# With padding: row stride = HEAD_SIZE + 1 (e.g., 129)
+# Bank stride = 129 * 2 / 4 = 64.5 -> fractional -> conflicts eliminated
 
+# gfx950 (64 banks):
+# Without padding: row stride = HEAD_SIZE (e.g., 128)
+# Bank stride = 128 * 2 / 4 = 64 -> 64 % 64 = 0 -> ALL rows hit same bank column (still conflicts!)
 # With padding: row stride = HEAD_SIZE + 1 (e.g., 129)
 # Bank stride = 129 * 2 / 4 = 64.5 -> fractional -> conflicts eliminated
 ```
@@ -250,24 +329,29 @@ def my_kernel(...):
 The minimum padding to eliminate all bank conflicts:
 
 ```
+# gfx942 (32 banks):
 padding_elements = 32 / (element_size_bytes)  # worst case
+
+# gfx950 (64 banks):
+padding_elements = 64 / (element_size_bytes)  # worst case
 ```
 
 But usually 1-4 elements suffice. The cost is extra LDS usage:
 - 1 element padding per row: `KV_BLOCK_SIZE * element_size` extra bytes
-- Must ensure total LDS usage stays within 64 KB per CU
+- Must ensure total LDS usage stays within **64 KB** per CU (gfx942) or **160 KB** per CU (gfx950)
 
 ### Swizzle vs Padding Trade-offs
 
 | Aspect | Swizzle | Padding |
 |--------|---------|---------|
 | LDS overhead | None (zero extra bytes) | Extra bytes per row |
-| Complexity | Need correct XOR mask params | Simple: just add 1 to stride |
+| Complexity | Need correct XOR mask params (arch-dependent) | Simple: just add 1 to stride |
 | Address computation | XOR adds ~1 SALU instruction | Simple offset, no extra compute |
-| Risk | Wrong params = silent bank conflicts | Exceeding 64KB LDS = kernel fail |
+| Risk | Wrong params = silent bank conflicts | Exceeding LDS limit = kernel fail |
+| LDS limit | N/A | gfx942: 64 KB, gfx950: 160 KB |
 | Preferred when | LDS near capacity, need zero overhead | Simple cases, LDS has headroom |
 
-**Recommendation**: Prefer swizzle (zero overhead). Use padding only when swizzle layout is hard to integrate with the kernel's access pattern.
+**Recommendation**: Prefer swizzle (zero overhead). Use padding only when swizzle layout is hard to integrate with the kernel's access pattern. On gfx950, the 160 KB LDS gives much more headroom for padding.
 
 ## Optimization Method 3: Increase Write-Read Distance
 
@@ -346,8 +430,9 @@ After applying LDS optimizations:
 3. **LDS usage**: Check total LDS consumption:
    ```python
    # Estimate: sum of all allocator.allocate_array() sizes * element_size
-   # Must be <= 65536 bytes (64 KB) per workgroup on gfx942
-   # Must be <= 163840 bytes (160 KB) per workgroup on gfx950
+   # gfx942: Must be <= 65536 bytes (64 KB) per workgroup
+   # gfx950: Must be <= 163840 bytes (160 KB) per workgroup
+   # Note: gfx950 allocates LDS in 1280-byte granularity (1280-byte aligned blocks)
    ```
 
 4. **Register pressure**: Swizzle adds ~1-2 SALU instructions for address XOR. Padding doesn't add register pressure but uses more LDS. Neither should significantly impact VGPR count.

@@ -9,12 +9,14 @@
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/IR/Attributes.h"
 #include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/Dominance.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/IR/SymbolTable.h"
 #include "mlir/IR/Value.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Support/LLVM.h"
+#include "mlir/Transforms/CSE.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "llvm/ADT/SmallPtrSet.h"
@@ -62,16 +64,38 @@ Value castPrintfArg(PatternRewriter &rewriter, Location loc, Value value, std::s
   }
   if (auto floatTy = dyn_cast<FloatType>(type)) {
     if (floatTy.getWidth() <= 32) {
-      format += "%f";
+      format += "%.2f";
       if (floatTy.getWidth() < 32) {
         return arith::ExtFOp::create(rewriter, loc, rewriter.getF32Type(), value);
       }
       return value;
     }
-    format += "%lf";
+    format += "%.2lf";
     if (floatTy.getWidth() != 64) {
       return arith::ExtFOp::create(rewriter, loc, rewriter.getF64Type(), value);
     }
+    return value;
+  }
+  return nullptr;
+}
+
+Value castVectorElementPrintfArg(PatternRewriter &rewriter, Location loc, Value value,
+                                 std::string &format) {
+  Type type = value.getType();
+  if (auto intTy = dyn_cast<IntegerType>(type)) {
+    format += "%d";
+    if (intTy.getWidth() < 32)
+      return arith::ExtSIOp::create(rewriter, loc, rewriter.getI32Type(), value);
+    if (intTy.getWidth() > 32)
+      return arith::TruncIOp::create(rewriter, loc, rewriter.getI32Type(), value);
+    return value;
+  }
+  if (auto floatTy = dyn_cast<FloatType>(type)) {
+    format += "%.2f";
+    if (floatTy.getWidth() < 32)
+      return arith::ExtFOp::create(rewriter, loc, rewriter.getF32Type(), value);
+    if (floatTy.getWidth() > 32)
+      return arith::TruncFOp::create(rewriter, loc, rewriter.getF32Type(), value);
     return value;
   }
   return nullptr;
@@ -84,6 +108,26 @@ bool appendScalarPrintfArg(PatternRewriter &rewriter, Location loc, Value value,
     return false;
   }
   args.push_back(casted);
+  return true;
+}
+
+bool appendVectorPrintf(PatternRewriter &rewriter, Location loc, Value value, std::string &format,
+                        SmallVectorImpl<Value> &args) {
+  auto vectorTy = dyn_cast<VectorType>(value.getType());
+  if (!vectorTy || vectorTy.getRank() != 1 || vectorTy.isScalable() || !vectorTy.hasStaticShape())
+    return false;
+
+  format += "[";
+  for (int64_t i = 0, e = vectorTy.getDimSize(0); i < e; ++i) {
+    if (i > 0)
+      format += ", ";
+    Value element = vector::ExtractOp::create(rewriter, loc, value, i);
+    Value casted = castVectorElementPrintfArg(rewriter, loc, element, format);
+    if (!casted)
+      return false;
+    args.push_back(casted);
+  }
+  format += "]";
   return true;
 }
 
@@ -130,6 +174,115 @@ bool appendIntTuplePrintfStatic(IntTupleAttr attr, std::string &format) {
   }
   format += ")";
   return true;
+}
+
+struct ContigSegment {
+  int32_t idx;
+  int64_t vecWidth;
+};
+
+enum class ContigResult { Vector, Scalar, Invalid };
+
+std::pair<ContigResult, ContigSegment> findContigSegment(IntTupleBuilder<IntTupleAttr> &attrBuilder,
+                                                         IntTupleAttr shapeAttr,
+                                                         IntTupleAttr strideAttr) {
+  SmallVector<IntTupleAttr> flatShapeLeaves;
+  SmallVector<IntTupleAttr> flatStrideLeaves;
+  intTupleFlattenToVector(attrBuilder, shapeAttr, flatShapeLeaves);
+  intTupleFlattenToVector(attrBuilder, strideAttr, flatStrideLeaves);
+  assert(flatShapeLeaves.size() == flatStrideLeaves.size());
+
+  int32_t flatRank = static_cast<int32_t>(flatShapeLeaves.size());
+
+  int count = 0;
+  ContigSegment result{0, 0};
+
+  for (int32_t i = 0; i < flatRank; ++i) {
+    bool isStride1 =
+        flatStrideLeaves[i].isStatic() && flatStrideLeaves[i].getLeafAsInt().getValue() == 1;
+    if (isStride1) {
+      ++count;
+      if (count > 1)
+        return {ContigResult::Invalid, {}};
+      result = {i, flatShapeLeaves[i].getLeafAsInt().getValue()};
+    }
+  }
+
+  if (count == 0)
+    return {ContigResult::Scalar, {}};
+  return {ContigResult::Vector, result};
+}
+
+Value permuteLoadedVec(PatternRewriter &rewriter, Location loc, Value vec, IntTupleAttr flatShape,
+                       int32_t flatRank, int32_t contigIdx, int64_t vecWidth, int64_t numChunks) {
+  if (contigIdx == 0)
+    return vec;
+
+  auto elemTy = cast<VectorType>(vec.getType()).getElementType();
+  int32_t numPre = contigIdx;
+  int32_t numPost = flatRank - contigIdx - 1;
+
+  SmallVector<int64_t> intermediateShape;
+  for (int32_t i = flatRank - 1; i > contigIdx; --i)
+    intermediateShape.push_back(flatShape.at(i).getLeafAsInt().getValue());
+  for (int32_t i = contigIdx - 1; i >= 0; --i)
+    intermediateShape.push_back(flatShape.at(i).getLeafAsInt().getValue());
+  intermediateShape.push_back(vecWidth);
+
+  auto intermediateTy = VectorType::get(intermediateShape, elemTy);
+  Value shaped = vector::ShapeCastOp::create(rewriter, loc, intermediateTy, vec);
+
+  SmallVector<int64_t> perm;
+  for (int32_t i = 0; i < numPost; ++i)
+    perm.push_back(i);
+  perm.push_back(numPost + numPre);
+  for (int32_t i = 0; i < numPre; ++i)
+    perm.push_back(numPost + i);
+
+  SmallVector<int64_t> transposedShape;
+  for (auto p : perm)
+    transposedShape.push_back(intermediateShape[p]);
+  auto transposedTy = VectorType::get(transposedShape, elemTy);
+  Value transposed = vector::TransposeOp::create(rewriter, loc, transposedTy, shaped, perm);
+
+  auto flatTy = VectorType::get({numChunks * vecWidth}, elemTy);
+  return vector::ShapeCastOp::create(rewriter, loc, flatTy, transposed);
+}
+
+Value permuteForStore(PatternRewriter &rewriter, Location loc, Value vec, IntTupleAttr flatShape,
+                      int32_t flatRank, int32_t contigIdx, int64_t vecWidth, int64_t numChunks) {
+  if (contigIdx == 0)
+    return vec;
+
+  auto elemTy = cast<VectorType>(vec.getType()).getElementType();
+  int32_t numPre = contigIdx;
+  int32_t numPost = flatRank - contigIdx - 1;
+
+  SmallVector<int64_t> targetShape;
+  for (int32_t i = flatRank - 1; i > contigIdx; --i)
+    targetShape.push_back(flatShape.at(i).getLeafAsInt().getValue());
+  targetShape.push_back(vecWidth);
+  for (int32_t i = contigIdx - 1; i >= 0; --i)
+    targetShape.push_back(flatShape.at(i).getLeafAsInt().getValue());
+
+  auto targetTy = VectorType::get(targetShape, elemTy);
+  Value shaped = vector::ShapeCastOp::create(rewriter, loc, targetTy, vec);
+
+  SmallVector<int64_t> perm;
+  for (int32_t i = 0; i < numPost; ++i)
+    perm.push_back(i);
+  for (int32_t i = 0; i < numPre; ++i)
+    perm.push_back(numPost + 1 + i);
+  perm.push_back(numPost);
+
+  SmallVector<int64_t> transposedShape;
+  for (auto p : perm)
+    transposedShape.push_back(targetShape[p]);
+  auto transposedTy = VectorType::get(transposedShape, elemTy);
+  Value transposed = vector::TransposeOp::create(rewriter, loc, transposedTy, shaped, perm);
+
+  auto flatTy = VectorType::get({numChunks * vecWidth}, elemTy);
+  return vector::ShapeCastOp::create(rewriter, loc, flatTy, transposed);
 }
 
 //===----------------------------------------------------------------------===//
@@ -836,6 +989,13 @@ public:
       if (!isNormalForm(cast<TypedValue<ComposedLayoutType>>(layout)))
         return failure();
       layoutAdaptor = LayoutValueAdaptor(layout, composedLayoutTy.getAttr());
+    } else if (auto swizzleTy = dyn_cast<SwizzleType>(layout.getType())) {
+      LayoutBuilder<LayoutValueAdaptor> layoutBuilder(rewriter, loc);
+      IntTupleValueAdaptor coordAdaptor =
+          IntTupleValueAdaptor::create(layoutBuilder, coord, coordTy.getAttr());
+      IntTupleValueAdaptor result = layoutBuilder.applySwizzle(coordAdaptor, swizzleTy.getAttr());
+      rewriter.replaceOp(op, layoutBuilder.finalize(result));
+      return success();
     } else {
       return failure();
     }
@@ -1314,6 +1474,8 @@ public:
           valFormat += ":";
           appendIntTuplePrintf(rewriter, loc, layoutBuilder.getStride(layout), valFormat, args);
         }
+      } else if (isa<VectorType>(val.getType())) {
+        appendVectorPrintf(rewriter, loc, val, valFormat, args);
       } else {
         appendScalarPrintfArg(rewriter, loc, val, valFormat, args);
       }
@@ -1603,7 +1765,7 @@ public:
     Value inputIter = makeViewOp.getIter();
     Value inputLayoutValue = makeViewOp.getLayout();
 
-    auto mmaAtom = dyn_cast<MmaAtomTypeInterface>(tiledMmaTy.getMmaAtom());
+    auto mmaAtom = dyn_cast<MmaAtomType>(tiledMmaTy.getMmaAtom());
     if (!mmaAtom)
       return failure();
 
@@ -1739,7 +1901,7 @@ public:
     if (!isNormalForm(cast<TypedValue<IntTupleType>>(shape)))
       return failure();
 
-    auto mmaAtom = dyn_cast<MmaAtomTypeInterface>(tiledMmaTy.getMmaAtom());
+    auto mmaAtom = dyn_cast<MmaAtomType>(tiledMmaTy.getMmaAtom());
     if (!mmaAtom)
       return failure();
 
@@ -1768,11 +1930,14 @@ public:
   using OpRewritePattern<MmaMakeFragmentOp>::OpRewritePattern;
 
   LogicalResult matchAndRewrite(MmaMakeFragmentOp op, PatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    auto *ctx = rewriter.getContext();
+
     auto tiledMmaTy = dyn_cast<TiledMmaType>(op.getTiledMma().getType());
     if (!tiledMmaTy)
       return failure();
 
-    auto mmaAtom = dyn_cast<MmaAtomTypeInterface>(tiledMmaTy.getMmaAtom());
+    auto mmaAtom = dyn_cast<MmaAtomType>(tiledMmaTy.getMmaAtom());
     if (!mmaAtom)
       return failure();
 
@@ -1792,7 +1957,13 @@ public:
       break;
     }
 
-    rewriter.replaceOpWithNewOp<MakeFragmentLikeOp>(op, op.getInput(), TypeAttr::get(elemTy));
+    IntTupleAttr zeroAttr = IntTupleAttr::getLeafStatic(ctx, 0);
+    Value coord = MakeIntTupleOp::create(rewriter, loc, IntTupleType::get(zeroAttr), ValueRange{});
+
+    Value partitioned = TiledMmaPartitionOp::create(rewriter, loc, op.getOperandId(),
+                                                    op.getTiledMma(), op.getInput(), coord);
+
+    rewriter.replaceOpWithNewOp<MakeFragmentLikeOp>(op, partitioned, TypeAttr::get(elemTy));
     return success();
   }
 };
@@ -1838,7 +2009,9 @@ public:
 
     if (srcRank == 1) {
       if (srcLayoutAttr.getShape().isLeaf()) {
-        CopyAtomCall::create(rewriter, loc, copyAtomVal, src, dst, pred);
+        Value srcDecomposition = DecompositionOp::create(rewriter, loc, src);
+        Value dstDecomposition = DecompositionOp::create(rewriter, loc, dst);
+        CopyAtomCall::create(rewriter, loc, copyAtomVal, srcDecomposition, dstDecomposition, pred);
         rewriter.eraseOp(op);
         return success();
       }
@@ -1896,13 +2069,9 @@ public:
     auto *ctx = rewriter.getContext();
 
     Value mmaAtomVal = op.getMmaAtom();
-    MmaAtomTypeInterface mmaAtomTy;
     if (auto tiledMmaOp = mmaAtomVal.getDefiningOp<MakeTiledMmaOp>()) {
       mmaAtomVal = tiledMmaOp.getMmaAtom();
     }
-    mmaAtomTy = dyn_cast<MmaAtomTypeInterface>(mmaAtomVal.getType());
-    if (!mmaAtomTy)
-      return failure();
 
     Value d = op.getD();
     Value a = op.getA();
@@ -1919,18 +2088,6 @@ public:
     int32_t bRank = bLayoutAttr.rank();
     int32_t cRank = cLayoutAttr.rank();
 
-    int32_t loop_m = dLayoutAttr.getShape().at(1).getLeafAsInt().getValue();
-    int32_t loop_n = dLayoutAttr.getShape().at(2).getLeafAsInt().getValue();
-
-    assert(loop_m == aLayoutAttr.getShape().at(1).getLeafAsInt().getValue() &&
-           "Mismatch in loop_m");
-    assert(loop_n == bLayoutAttr.getShape().at(1).getLeafAsInt().getValue() &&
-           "Mismatch in loop_n");
-    assert(loop_m == cLayoutAttr.getShape().at(1).getLeafAsInt().getValue() &&
-           "Mismatch in loop_m");
-    assert(loop_n == cLayoutAttr.getShape().at(2).getLeafAsInt().getValue() &&
-           "Mismatch in loop_n");
-
     if (dRank == 1 && aRank == 1 && bRank == 1 && cRank == 1) {
       MmaAtomCall::create(rewriter, loc, mmaAtomVal, d, a, b, c);
       rewriter.eraseOp(op);
@@ -1939,6 +2096,19 @@ public:
 
     if (dRank != 3 || cRank != 3 || aRank < 2 || bRank < 2)
       return failure();
+
+    IntTupleBuilder<IntTupleAttr> attrBuilder(ctx);
+    auto get_static_product = [&](IntTupleAttr shape) {
+      return intTupleProduct(attrBuilder, shape).getLeafAsInt().getValue();
+    };
+
+    int32_t loop_m = get_static_product(dLayoutAttr.getShape().at(1));
+    int32_t loop_n = get_static_product(dLayoutAttr.getShape().at(2));
+
+    assert(loop_m == get_static_product(aLayoutAttr.getShape().at(1)) && "Mismatch in loop_m");
+    assert(loop_n == get_static_product(bLayoutAttr.getShape().at(1)) && "Mismatch in loop_n");
+    assert(loop_m == get_static_product(cLayoutAttr.getShape().at(1)) && "Mismatch in loop_m");
+    assert(loop_n == get_static_product(cLayoutAttr.getShape().at(2)) && "Mismatch in loop_n");
 
     auto getSliceCoord = [&](ArrayRef<int32_t> idx) {
       SmallVector<Attribute> coordElems;
@@ -1951,39 +2121,453 @@ public:
     };
 
     if (aRank == 2 && bRank == 2) {
-      for (int32_t m = 0; m < loop_m; ++m) {
+      auto emitMmaCall2D = [&](int32_t m, int32_t n) {
         Value aSlice = SliceOp::create(rewriter, loc, a, getSliceCoord({m}));
-        for (int32_t n = 0; n < loop_n; ++n) {
-          Value bSlice = SliceOp::create(rewriter, loc, b, getSliceCoord({n}));
-          Value cSlice = SliceOp::create(rewriter, loc, c, getSliceCoord({m, n}));
-          Value dSlice = SliceOp::create(rewriter, loc, d, getSliceCoord({m, n}));
-          MmaAtomCall::create(rewriter, loc, mmaAtomVal, dSlice, aSlice, bSlice, cSlice);
-        }
-      }
-      rewriter.eraseOp(op);
-      return success();
-    } else if (aRank == 3 && bRank == 3) {
-      int32_t loop_k = aLayoutAttr.getShape().at(2).getLeafAsInt().getValue();
-      assert(loop_k == bLayoutAttr.getShape().at(2).getLeafAsInt().getValue() &&
-             "Mismatch in loop_k");
+        Value bSlice = SliceOp::create(rewriter, loc, b, getSliceCoord({n}));
+        Value cSlice = SliceOp::create(rewriter, loc, c, getSliceCoord({m, n}));
+        Value dSlice = SliceOp::create(rewriter, loc, d, getSliceCoord({m, n}));
+        MmaAtomCall::create(rewriter, loc, mmaAtomVal, dSlice, aSlice, bSlice, cSlice);
+      };
 
-      for (int32_t k = 0; k < loop_k; ++k) {
-        Value cSrc = (k == 0) ? c : d;
-        for (int32_t m = 0; m < loop_m; ++m) {
-          Value aSlice = SliceOp::create(rewriter, loc, a, getSliceCoord({m, k}));
-          for (int32_t n = 0; n < loop_n; ++n) {
-            Value bSlice = SliceOp::create(rewriter, loc, b, getSliceCoord({n, k}));
-            Value cSlice = SliceOp::create(rewriter, loc, cSrc, getSliceCoord({m, n}));
-            Value dSlice = SliceOp::create(rewriter, loc, d, getSliceCoord({m, n}));
-            MmaAtomCall::create(rewriter, loc, mmaAtomVal, dSlice, aSlice, bSlice, cSlice);
+      int32_t totalIters = loop_m * loop_n;
+
+      auto naturalShape =
+          IntTupleAttr::get(ArrayAttr::get(ctx, {IntTupleAttr::getLeafStatic(ctx, loop_m),
+                                                 IntTupleAttr::getLeafStatic(ctx, loop_n)}));
+      auto naturalStride = IntTupleAttr::get(ArrayAttr::get(
+          ctx, {IntTupleAttr::getLeafStatic(ctx, 1), IntTupleAttr::getLeafStatic(ctx, loop_m)}));
+
+      Value traversalLayoutVal = op.getTraversalLayout();
+      if (traversalLayoutVal) {
+        LayoutAttr tvLayout = cast<LayoutType>(traversalLayoutVal.getType()).getAttr();
+        assert(tvLayout.isStaticShape() && tvLayout.isStaticStride() &&
+               "traversalLayout must be fully static");
+
+        IntTupleAttr tvShape = tvLayout.getShape();
+        IntTupleAttr tvStride = tvLayout.getStride();
+
+        LayoutBuilder<LayoutAttr> layoutBuilder(ctx);
+        int32_t tvCosize = layoutCosize(layoutBuilder, tvLayout).getLeafAsInt().getValue();
+        assert(tvCosize == totalIters && "traversalLayout cosize must equal loop_m * loop_n");
+
+        for (int32_t i = 0; i < totalIters; ++i) {
+          IntTupleAttr iAttr = IntTupleAttr::getLeafStatic(ctx, i);
+          IntTupleAttr linearIdx = layoutCrd2Idx(attrBuilder, iAttr, tvShape, tvStride);
+          IntTupleAttr coord = layoutIdx2Crd(attrBuilder, linearIdx, naturalShape, naturalStride);
+          int32_t m = coord.at(0).getLeafAsInt().getValue();
+          int32_t n = coord.at(1).getLeafAsInt().getValue();
+          emitMmaCall2D(m, n);
+        }
+      } else {
+        // Column-major: first letter = fastest (innermost).
+        // 2D has no K, so only M/N ordering matters.
+        // Dim indices: M=0, N=1.
+        // order[0]=outermost, order[1]=innermost.
+        SmallVector<int32_t, 2> order = {0, 1}; // default: N innermost
+        bool serpentine = false;
+        if (auto traversalOrder = op.getTraversalOrder()) {
+          switch (*traversalOrder) {
+          case GemmTraversalOrder::KMN:
+            [[fallthrough]];
+          case GemmTraversalOrder::MKN:
+            [[fallthrough]];
+          case GemmTraversalOrder::MNK:
+            order = {1, 0};
+            break;
+          case GemmTraversalOrder::KNM:
+            [[fallthrough]];
+          case GemmTraversalOrder::NKM:
+            [[fallthrough]];
+          case GemmTraversalOrder::NMK:
+            order = {0, 1};
+            break;
+          case GemmTraversalOrder::KMN_Serpentine:
+            [[fallthrough]];
+          case GemmTraversalOrder::MKN_Serpentine:
+            [[fallthrough]];
+          case GemmTraversalOrder::MNK_Serpentine:
+            order = {1, 0};
+            serpentine = true;
+            break;
+          case GemmTraversalOrder::KNM_Serpentine:
+            [[fallthrough]];
+          case GemmTraversalOrder::NKM_Serpentine:
+            [[fallthrough]];
+          case GemmTraversalOrder::NMK_Serpentine:
+            order = {0, 1};
+            serpentine = true;
+            break;
+          }
+        }
+
+        int32_t loopBounds[2] = {loop_m, loop_n};
+        int32_t idx[2] = {0, 0};
+        for (int32_t i0 = 0; i0 < loopBounds[order[0]]; ++i0) {
+          idx[order[0]] = i0;
+          for (int32_t i1 = 0; i1 < loopBounds[order[1]]; ++i1) {
+            idx[order[1]] = serpentine && (i0 & 1) ? loopBounds[order[1]] - 1 - i1 : i1;
+            emitMmaCall2D(idx[0], idx[1]);
           }
         }
       }
+
+      rewriter.eraseOp(op);
+      return success();
+    } else if (aRank == 3 && bRank == 3) {
+      int32_t loop_k = get_static_product(aLayoutAttr.getShape().at(2));
+      assert(loop_k == get_static_product(bLayoutAttr.getShape().at(2)) && "Mismatch in loop_k");
+
+      // the accumulator source: c on first visit, d on subsequent visits.
+      SmallVector<bool> mnVisited(loop_m * loop_n, false);
+
+      auto emitMmaCall = [&](int32_t m, int32_t n, int32_t k) {
+        bool &visited = mnVisited[m * loop_n + n];
+        Value cSrc = visited ? d : c;
+        visited = true;
+        Value aSlice = SliceOp::create(rewriter, loc, a, getSliceCoord({m, k}));
+        Value bSlice = SliceOp::create(rewriter, loc, b, getSliceCoord({n, k}));
+        Value cSlice = SliceOp::create(rewriter, loc, cSrc, getSliceCoord({m, n}));
+        Value dSlice = SliceOp::create(rewriter, loc, d, getSliceCoord({m, n}));
+        MmaAtomCall::create(rewriter, loc, mmaAtomVal, dSlice, aSlice, bSlice, cSlice);
+      };
+
+      Value traversalLayoutVal = op.getTraversalLayout();
+      if (traversalLayoutVal) {
+        LayoutAttr tvLayout = cast<LayoutType>(traversalLayoutVal.getType()).getAttr();
+        assert(tvLayout.isStaticShape() && tvLayout.isStaticStride() &&
+               "traversalLayout must be fully static");
+
+        int32_t totalIters = loop_m * loop_n * loop_k;
+
+        auto naturalShape =
+            IntTupleAttr::get(ArrayAttr::get(ctx, {IntTupleAttr::getLeafStatic(ctx, loop_m),
+                                                   IntTupleAttr::getLeafStatic(ctx, loop_n),
+                                                   IntTupleAttr::getLeafStatic(ctx, loop_k)}));
+        auto naturalStride = IntTupleAttr::get(ArrayAttr::get(
+            ctx, {IntTupleAttr::getLeafStatic(ctx, 1), IntTupleAttr::getLeafStatic(ctx, loop_m),
+                  IntTupleAttr::getLeafStatic(ctx, loop_m * loop_n)}));
+
+        IntTupleAttr tvShape = tvLayout.getShape();
+        IntTupleAttr tvStride = tvLayout.getStride();
+
+        LayoutBuilder<LayoutAttr> layoutBuilder(ctx);
+        int32_t tvCosize = layoutCosize(layoutBuilder, tvLayout).getLeafAsInt().getValue();
+        assert(tvCosize == totalIters &&
+               "traversalLayout cosize must equal loop_m * loop_n * loop_k");
+
+        for (int32_t i = 0; i < totalIters; ++i) {
+          IntTupleAttr iAttr = IntTupleAttr::getLeafStatic(ctx, i);
+          IntTupleAttr linearIdx = layoutCrd2Idx(attrBuilder, iAttr, tvShape, tvStride);
+          IntTupleAttr coord = layoutIdx2Crd(attrBuilder, linearIdx, naturalShape, naturalStride);
+          int32_t m = coord.at(0).getLeafAsInt().getValue();
+          int32_t n = coord.at(1).getLeafAsInt().getValue();
+          int32_t k = coord.at(2).getLeafAsInt().getValue();
+          emitMmaCall(m, n, k);
+        }
+      } else {
+        // ── traversalOrder enum path (or default NMK) ──
+        SmallVector<int32_t, 3> order = {2, 0, 1}; // NMK
+        bool serpentine = false;
+        if (auto traversalOrder = op.getTraversalOrder()) {
+          switch (*traversalOrder) {
+          case GemmTraversalOrder::KMN:
+            order = {1, 0, 2};
+            break;
+          case GemmTraversalOrder::KNM:
+            order = {0, 1, 2};
+            break;
+          case GemmTraversalOrder::MKN:
+            order = {1, 2, 0};
+            break;
+          case GemmTraversalOrder::MNK:
+            order = {2, 1, 0};
+            break;
+          case GemmTraversalOrder::NKM:
+            order = {0, 2, 1};
+            break;
+          case GemmTraversalOrder::NMK:
+            order = {2, 0, 1};
+            break;
+          case GemmTraversalOrder::KMN_Serpentine:
+            order = {1, 0, 2};
+            serpentine = true;
+            break;
+          case GemmTraversalOrder::KNM_Serpentine:
+            order = {0, 1, 2};
+            serpentine = true;
+            break;
+          case GemmTraversalOrder::MKN_Serpentine:
+            order = {1, 2, 0};
+            serpentine = true;
+            break;
+          case GemmTraversalOrder::MNK_Serpentine:
+            order = {2, 1, 0};
+            serpentine = true;
+            break;
+          case GemmTraversalOrder::NKM_Serpentine:
+            order = {0, 2, 1};
+            serpentine = true;
+            break;
+          case GemmTraversalOrder::NMK_Serpentine:
+            order = {2, 0, 1};
+            serpentine = true;
+            break;
+          }
+        }
+
+        int32_t loopBounds[3] = {loop_m, loop_n, loop_k};
+        int32_t idx[3] = {0, 0, 0};
+        for (int32_t i0 = 0; i0 < loopBounds[order[0]]; ++i0) {
+          idx[order[0]] = i0;
+          for (int32_t i1 = 0; i1 < loopBounds[order[1]]; ++i1) {
+            idx[order[1]] = serpentine && (i0 & 1) ? loopBounds[order[1]] - 1 - i1 : i1;
+            for (int32_t i2 = 0; i2 < loopBounds[order[2]]; ++i2) {
+              idx[order[2]] = serpentine && ((i0 * loopBounds[order[1]] + i1) & 1)
+                                  ? loopBounds[order[2]] - 1 - i2
+                                  : i2;
+              emitMmaCall(idx[0], idx[1], idx[2]);
+            }
+          }
+        }
+      }
+
       rewriter.eraseOp(op);
       return success();
     } else {
       return failure();
     }
+  }
+};
+
+class MemRefLoadVecOpLowering : public OpRewritePattern<MemRefLoadVecOp> {
+public:
+  using OpRewritePattern<MemRefLoadVecOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(MemRefLoadVecOp op, PatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    auto *ctx = rewriter.getContext();
+    auto memrefTy = dyn_cast<fly::MemRefType>(op.getMemref().getType());
+    if (!memrefTy)
+      return failure();
+
+    auto layoutAttr = dyn_cast<LayoutAttr>(memrefTy.getLayout());
+    if (!layoutAttr)
+      return failure();
+    if (!layoutAttr.isStaticShape())
+      return failure();
+
+    IntTupleBuilder<IntTupleAttr> attrBuilder(ctx);
+    IntTupleAttr shapeAttr = layoutAttr.getShape();
+    IntTupleAttr strideAttr = layoutAttr.getStride();
+
+    auto resVecTy = dyn_cast<VectorType>(op.getResult().getType());
+    if (!resVecTy)
+      return failure();
+
+    Value memref = op.getMemref();
+    Value iter = GetIterOp::create(rewriter, loc, memref);
+    Value layout = GetLayoutOp::create(rewriter, loc, memref);
+
+    IntTupleAttr flatShape = intTupleFlatten(attrBuilder, shapeAttr);
+    int32_t flatRank = flatShape.rank();
+
+    auto [contigResult, contigSeg] = findContigSegment(attrBuilder, shapeAttr, strideAttr);
+    if (contigResult == ContigResult::Invalid)
+      return failure();
+
+    Value result = arith::ConstantOp::create(rewriter, loc, rewriter.getZeroAttr(resVecTy));
+
+    if (contigResult == ContigResult::Scalar) {
+      int64_t totalElems = intTupleProduct(attrBuilder, shapeAttr).getLeafAsInt().getValue();
+
+      Type scalarTy = resVecTy.getElementType();
+      for (int64_t i = 0; i < totalElems; ++i) {
+        IntTupleAttr coordAttr =
+            layoutIdx2CrdColMajor(attrBuilder, attrBuilder.materializeConstantLeaf(i), shapeAttr);
+
+        Value coord =
+            MakeIntTupleOp::create(rewriter, loc, IntTupleType::get(coordAttr), ValueRange{});
+        Value offset = Crd2IdxOp::create(rewriter, loc, coord, layout);
+        Value ptr = AddOffsetOp::create(rewriter, loc, iter, offset);
+        Value scalar = PtrLoadOp::create(rewriter, loc, scalarTy, ptr);
+        result = vector::InsertOp::create(rewriter, loc, scalar, result, i);
+      }
+      rewriter.replaceOp(op, result);
+      return success();
+    }
+
+    int64_t vecWidth = contigSeg.vecWidth;
+    int32_t contigIdx = contigSeg.idx;
+
+    if (flatRank == 1) {
+      Value loaded = PtrLoadOp::create(rewriter, loc, resVecTy, iter);
+      rewriter.replaceOp(op, loaded);
+      return success();
+    }
+
+    SmallVector<Attribute> restFlatElems;
+    for (int32_t i = 0; i < flatRank; ++i) {
+      if (i == contigIdx)
+        continue;
+      restFlatElems.push_back(flatShape.isLeaf() ? flatShape : flatShape.at(i));
+    }
+    IntTupleAttr restFlatShape = restFlatElems.size() == 1
+                                     ? cast<IntTupleAttr>(restFlatElems[0])
+                                     : IntTupleAttr::get(ArrayAttr::get(ctx, restFlatElems));
+
+    int64_t numChunks = intTupleProduct(attrBuilder, restFlatShape).getLeafAsInt().getValue();
+    VectorType chunkVecTy = VectorType::get({vecWidth}, resVecTy.getElementType());
+
+    for (int64_t i = 0; i < numChunks; ++i) {
+      // Compute column-major coordinate over the rest flat dims.
+      IntTupleAttr restCoord =
+          layoutIdx2CrdColMajor(attrBuilder, attrBuilder.materializeConstantLeaf(i), restFlatShape);
+
+      SmallVector<Attribute> flatCoordElems;
+      int32_t restIdx = 0;
+      for (int32_t j = 0; j < flatRank; ++j) {
+        if (j == contigIdx) {
+          flatCoordElems.push_back(attrBuilder.materializeConstantLeaf(0));
+        } else {
+          if (restFlatElems.size() == 1) {
+            flatCoordElems.push_back(restCoord);
+          } else {
+            flatCoordElems.push_back(restCoord.isLeaf() ? restCoord : restCoord.at(restIdx));
+          }
+          ++restIdx;
+        }
+      }
+      IntTupleAttr flatCoord = flatCoordElems.size() == 1
+                                   ? cast<IntTupleAttr>(flatCoordElems[0])
+                                   : IntTupleAttr::get(ArrayAttr::get(ctx, flatCoordElems));
+      IntTupleAttr coordAttr = intTupleUnflatten(attrBuilder, flatCoord, shapeAttr);
+
+      Value coord =
+          MakeIntTupleOp::create(rewriter, loc, IntTupleType::get(coordAttr), ValueRange{});
+      Value offset = Crd2IdxOp::create(rewriter, loc, coord, layout);
+      Value ptr = AddOffsetOp::create(rewriter, loc, iter, offset);
+      Value chunkVec = PtrLoadOp::create(rewriter, loc, chunkVecTy, ptr);
+      result = vector::InsertStridedSliceOp::create(rewriter, loc, chunkVec, result,
+                                                    ArrayRef<int64_t>{i * vecWidth},
+                                                    ArrayRef<int64_t>{1})
+                   .getResult();
+    }
+
+    result = permuteLoadedVec(rewriter, loc, result, flatShape, flatRank, contigIdx, vecWidth,
+                              numChunks);
+    rewriter.replaceOp(op, result);
+    return success();
+  }
+};
+
+class MemRefStoreVecOpLowering : public OpRewritePattern<MemRefStoreVecOp> {
+public:
+  using OpRewritePattern<MemRefStoreVecOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(MemRefStoreVecOp op, PatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    auto *ctx = rewriter.getContext();
+    auto memrefTy = dyn_cast<fly::MemRefType>(op.getMemref().getType());
+    if (!memrefTy)
+      return failure();
+
+    auto layoutAttr = dyn_cast<LayoutAttr>(memrefTy.getLayout());
+    if (!layoutAttr)
+      return failure();
+    if (!layoutAttr.isStaticShape())
+      return failure();
+
+    IntTupleBuilder<IntTupleAttr> attrBuilder(ctx);
+    IntTupleAttr shapeAttr = layoutAttr.getShape();
+    IntTupleAttr strideAttr = layoutAttr.getStride();
+
+    Value vec = op.getVector();
+    Value memref = op.getMemref();
+    Value iter = GetIterOp::create(rewriter, loc, memref);
+    Value layout = GetLayoutOp::create(rewriter, loc, memref);
+
+    IntTupleAttr flatShape = intTupleFlatten(attrBuilder, shapeAttr);
+    int32_t flatRank = flatShape.isLeaf() ? 1 : flatShape.rank();
+
+    auto [contigResult, contigSeg] = findContigSegment(attrBuilder, shapeAttr, strideAttr);
+    if (contigResult == ContigResult::Invalid)
+      return failure();
+
+    if (contigResult == ContigResult::Scalar) {
+      int64_t totalElems = intTupleProduct(attrBuilder, shapeAttr).getLeafAsInt().getValue();
+      for (int64_t i = 0; i < totalElems; ++i) {
+        IntTupleAttr coordAttr =
+            layoutIdx2CrdColMajor(attrBuilder, attrBuilder.materializeConstantLeaf(i), shapeAttr);
+        Value coord =
+            MakeIntTupleOp::create(rewriter, loc, IntTupleType::get(coordAttr), ValueRange{});
+        Value offset = Crd2IdxOp::create(rewriter, loc, coord, layout);
+        Value ptr = AddOffsetOp::create(rewriter, loc, iter, offset);
+        Value scalar = vector::ExtractOp::create(rewriter, loc, vec, i);
+        PtrStoreOp::create(rewriter, loc, scalar, ptr);
+      }
+      rewriter.eraseOp(op);
+      return success();
+    }
+
+    int64_t vecWidth = contigSeg.vecWidth;
+    int32_t contigIdx = contigSeg.idx;
+
+    if (flatRank == 1) {
+      PtrStoreOp::create(rewriter, loc, vec, iter);
+      rewriter.eraseOp(op);
+      return success();
+    }
+
+    SmallVector<Attribute> restFlatElems;
+    for (int32_t i = 0; i < flatRank; ++i) {
+      if (i == contigIdx)
+        continue;
+      restFlatElems.push_back(flatShape.isLeaf() ? flatShape : flatShape.at(i));
+    }
+    IntTupleAttr restFlatShape = restFlatElems.size() == 1
+                                     ? cast<IntTupleAttr>(restFlatElems[0])
+                                     : IntTupleAttr::get(ArrayAttr::get(ctx, restFlatElems));
+    int64_t numChunks = intTupleProduct(attrBuilder, restFlatShape).getLeafAsInt().getValue();
+
+    vec = permuteForStore(rewriter, loc, vec, flatShape, flatRank, contigIdx, vecWidth, numChunks);
+
+    for (int64_t i = 0; i < numChunks; ++i) {
+      // Compute column-major coordinate over the rest flat dims.
+      IntTupleAttr restCoord =
+          layoutIdx2CrdColMajor(attrBuilder, attrBuilder.materializeConstantLeaf(i), restFlatShape);
+
+      SmallVector<Attribute> flatCoordElems;
+      int32_t restIdx = 0;
+      for (int32_t j = 0; j < flatRank; ++j) {
+        if (j == contigIdx) {
+          flatCoordElems.push_back(attrBuilder.materializeConstantLeaf(0));
+        } else {
+          if (restFlatElems.size() == 1) {
+            flatCoordElems.push_back(restCoord);
+          } else {
+            flatCoordElems.push_back(restCoord.isLeaf() ? restCoord : restCoord.at(restIdx));
+          }
+          ++restIdx;
+        }
+      }
+      IntTupleAttr flatCoord = flatCoordElems.size() == 1
+                                   ? cast<IntTupleAttr>(flatCoordElems[0])
+                                   : IntTupleAttr::get(ArrayAttr::get(ctx, flatCoordElems));
+      IntTupleAttr coordAttr = intTupleUnflatten(attrBuilder, flatCoord, shapeAttr);
+
+      Value coord =
+          MakeIntTupleOp::create(rewriter, loc, IntTupleType::get(coordAttr), ValueRange{});
+      Value offset = Crd2IdxOp::create(rewriter, loc, coord, layout);
+      Value ptr = AddOffsetOp::create(rewriter, loc, iter, offset);
+      Value chunkVec =
+          vector::ExtractStridedSliceOp::create(rewriter, loc, vec, ArrayRef<int64_t>{i * vecWidth},
+                                                ArrayRef<int64_t>{vecWidth}, ArrayRef<int64_t>{1})
+              .getResult();
+      PtrStoreOp::create(rewriter, loc, chunkVec, ptr);
+    }
+
+    rewriter.eraseOp(op);
+    return success();
   }
 };
 
@@ -2087,6 +2671,7 @@ public:
     patterns.add<ExpandCopyOpLowering, ExpandGemmOpLowering>(context);
 
     // MemRef/Ptr operations
+    patterns.add<MemRefLoadVecOpLowering, MemRefStoreVecOpLowering>(context);
     patterns.add<MemRefAllocaOpLowering>(context);
 
     // Utility ops
@@ -2098,6 +2683,10 @@ public:
 
     if (failed(applyPatternsGreedily(getOperation(), std::move(patterns))))
       signalPassFailure();
+
+    IRRewriter rewriter(context);
+    DominanceInfo domInfo(getOperation());
+    eliminateCommonSubExpressions(rewriter, domInfo, getOperation());
   }
 };
 

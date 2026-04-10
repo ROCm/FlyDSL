@@ -50,12 +50,30 @@ if [ -z "${MLIR_PATH:-}" ]; then
   exit 1
 fi
 
+# ---------------------------------------------------------------------------
+# CMake generator: prefer Ninja, fall back to Unix Makefiles.
+# If a CMakeCache.txt already exists, reuse its generator to avoid mismatch.
+# ---------------------------------------------------------------------------
+_CMAKE_CACHE="${BUILD_DIR}/CMakeCache.txt"
+if [ -f "${_CMAKE_CACHE}" ]; then
+  CACHED_GENERATOR=$(awk '/^CMAKE_GENERATOR:INTERNAL=/{sub(/^CMAKE_GENERATOR:INTERNAL=/, ""); print; exit}' "${_CMAKE_CACHE}" || true)
+  if [ -n "${CACHED_GENERATOR}" ]; then
+    GENERATOR="${CACHED_GENERATOR}"
+  fi
+else
+  GENERATOR="Unix Makefiles"
+  if command -v ninja &> /dev/null; then
+    GENERATOR="Ninja"
+  fi
+fi
+
 echo "=============================================="
 echo "FlyDSL Build"
 echo "  REPO_ROOT:  ${REPO_ROOT}"
 echo "  BUILD_DIR:  ${BUILD_DIR}"
 echo "  MLIR_PATH:  ${MLIR_PATH}"
 echo "  PARALLEL:   -j${PARALLEL_JOBS}"
+echo "  GENERATOR:  ${GENERATOR}"
 echo "=============================================="
 
 # ---------------------------------------------------------------------------
@@ -85,6 +103,7 @@ mkdir -p "${BUILD_DIR}"
 cd "${BUILD_DIR}"
 
 cmake_args=(
+  -G "${GENERATOR}"
   "${REPO_ROOT}"
   -DMLIR_DIR="${MLIR_PATH}/lib/cmake/mlir"
   -DPython3_EXECUTABLE="$(which python3)"
