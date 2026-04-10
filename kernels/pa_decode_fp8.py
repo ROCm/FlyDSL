@@ -902,8 +902,8 @@ def compile_pa_decode_ps(
                 Returns (rmax, rsum, o0, o1, v_correction) where v_correction is the factor to
                 multiply the PV MFMA output by: v_scale_max/FP8_MAX for per-token, v_scale_val for per-tensor.
                 """
+                # ── Step 1: Read only max from LDS, compute partition_max + rescale factors ──
                 partition_max = NEG_INF
-                partition_sum = ZERO_F
                 warp_rescale_factors = []
                 for w in range_constexpr(NUM_WARPS):
                     w_max = vector.extract(vector.load_op(T.vec(1, T.f32), softmax_lds_f32, [_sm_rd_max_offs[w]]), static_position=[0])
@@ -913,15 +913,14 @@ def compile_pa_decode_ps(
                     diff_w = warp_rescale_factors[w] - partition_max
                     if needs_mask:
                         diff_w = arith.select(partition_max > NEG_INF, diff_w, ZERO_F)
-                    wf = (diff_w * arith.constant(LOG2E, type=T.f32)).exp2(fastmath=arith.FastMathFlags.fast)
-                    w_sum = vector.extract(vector.load_op(T.vec(1, T.f32), softmax_lds_f32, [_sm_rd_sum_offs[w]]), static_position=[0])
-                    partition_sum = partition_sum + w_sum * wf
-                    warp_rescale_factors[w] = wf
+                    warp_rescale_factors[w] = (diff_w * arith.constant(LOG2E, type=T.f32)).exp2(fastmath=arith.FastMathFlags.fast)
                 my_warp_rescale = warp_rescale_factors[0]
                 for w in range_constexpr(1, NUM_WARPS):
                     my_warp_rescale = arith.select(
                         warp_id == arith.constant(w, type=T.i32),
                         warp_rescale_factors[w], my_warp_rescale)
+
+                # ── Step 2: Online softmax rescale (no sum/vmax LDS reads needed yet) ──
                 new_rmax = rmax.maximumf(partition_max)
                 if needs_mask:
                     accum_scale = arith.select(rmax > NEG_INF,
@@ -931,20 +930,25 @@ def compile_pa_decode_ps(
                         ((partition_max - new_rmax) * arith.constant(LOG2E, type=T.f32)).exp2(fastmath=arith.FastMathFlags.fast),
                         ZERO_F)
                 else:
-                    # Safe without guards: exp2(-inf * LOG2E) = 0.0 in IEEE754
                     accum_scale = ((rmax - new_rmax) * arith.constant(LOG2E, type=T.f32)).exp2(fastmath=arith.FastMathFlags.fast)
                     part_to_new = ((partition_max - new_rmax) * arith.constant(LOG2E, type=T.f32)).exp2(fastmath=arith.FastMathFlags.fast)
-                rsum = accum_scale * rsum + partition_sum * part_to_new
-                rmax = new_rmax
                 o0 = o0 * vector.broadcast(T.f32x4, accum_scale)
                 o1 = o1 * vector.broadcast(T.f32x4, accum_scale)
+
+                # ── Step 3: Barrier prevents LLVM from hoisting sum/vmax reads into Step 2,
+                #    reducing peak VGPR by separating the rescale computation from LDS reads ──
+                rocdl.sched_barrier(0)
+
+                # ── Step 4: Read sum from LDS, compute partition_sum + rsum ──
+                partition_sum = ZERO_F
+                for w in range_constexpr(NUM_WARPS):
+                    w_sum = vector.extract(vector.load_op(T.vec(1, T.f32), softmax_lds_f32, [_sm_rd_sum_offs[w]]), static_position=[0])
+                    partition_sum = partition_sum + w_sum * warp_rescale_factors[w]
+                rsum = accum_scale * rsum + partition_sum * part_to_new
+                rmax = new_rmax
+
+                # ── Step 5: Read vmax from LDS (per-token), prob scale + FP8 pack ──
                 if per_token_kv and v_scale_vecs is not None:
-                    # Cross-warp v_scale_max: read all warps' per-warp v_max from LDS.
-                    # Each warp wrote its per-warp v_max in _qk_and_intra_softmax (before
-                    # the barrier), so this read is safe after the barrier.
-                    # Using a tile-wide (256-token) v_max ensures all 4 warps' probs in LDS
-                    # share the same normalization factor, which is required because _pv_mfma
-                    # reads ALL warps' probabilities and applies a single v_correction.
                     v_max_global = ZERO_F
                     for w in range_constexpr(NUM_WARPS):
                         w_vmax = vector.extract(
@@ -953,14 +957,10 @@ def compile_pa_decode_ps(
                         v_max_global = v_max_global.maximumf(w_vmax)
                     v_max_safe = v_max_global + arith.constant(1e-8, type=T.f32)
                     c_fp8_max = arith.constant(FP8_MAX, type=T.f32)
-                    norm_factor = c_fp8_max / v_max_safe
-                    # Normalize probs by per-tile partition_max (not running new_rmax).
-                    # This keeps packed FP8 probs in [0, FP8_MAX] range for every tile,
-                    # matching Gluon's per-partition normalization for best FP8 precision.
-                    # part_to_new = exp(partition_max - new_rmax) is absorbed into v_correction
-                    # so that the accumulated output still represents sum(exp(qk_i - new_rmax) * V).
+                    # Use rocdl.rcp to avoid div_scale/div_fixup chain (~6 VGPR temporaries).
+                    norm_factor = c_fp8_max * rocdl.rcp(T.f32, v_max_safe)
                     prob_scale = my_warp_rescale  # = exp(qk_max_warp - partition_max)
-                    v_correction = v_max_global / c_fp8_max * part_to_new
+                    v_correction = v_max_global * rocdl.rcp(T.f32, c_fp8_max) * part_to_new
                     for td in range_constexpr(TLOOP):
                         # Apply per-tile softmax renormalization and normalize v_scale to FP8 range
                         d_out[td] = d_out[td] * (
@@ -1200,7 +1200,10 @@ def compile_pa_decode_ps(
                     # ── Normalize output ──
                     safe_sum = arith.select(running_sum > ZERO_F, running_sum,
                                             arith.constant(1.0, type=T.f32))
-                    inv_sum = arith.constant(1.0, type=T.f32) / safe_sum
+                    # Use rocdl.rcp instead of arith.divf to avoid the LLVM
+                    # div_scale/div_fmas/div_fixup chain (~6 VGPRs of temporaries).
+                    # v_rcp_f32 has <1 ULP error, sufficient for softmax normalization.
+                    inv_sum = rocdl.rcp(T.f32, safe_sum)
                     out0_norm = out0 * vector.broadcast(T.f32x4, inv_sum)
                     out1_norm = out1 * vector.broadcast(T.f32x4, inv_sum)
                     outelems_norm = [out0_norm, out1_norm]
