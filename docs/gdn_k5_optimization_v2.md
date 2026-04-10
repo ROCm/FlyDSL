@@ -585,19 +585,58 @@ for kb in range_constexpr(NUM_K_BLOCKS):
 | 基线（bug 修复后） | 312us | — | — | 62.0% |
 | +批量 LDS 写入（减少 barrier 10→3） | 269us | -43us | -43us | 72.2% |
 | +合并 v_new/k barrier（3→2） | 242us | -27us | -70us | 80.0% |
-| +u/g/k 预取重叠 MFMA | 227us | -15us | -85us | **85.6%** |
+| +u/g/k 预取重叠 MFMA | 227us | -15us | -85us | 85.6% |
+| +v_new 无分支存储 + amdgcn.exp2 | 201us | -26us | -111us | **96.1%** |
 | **Triton opt3 基准** | **194us** | — | — | 100% |
 
-### 剩余差距分析（~33us）
+### 优化 E：v_new 无分支存储（-12us，227us → ~215us 贡献）
+
+**问题**: 4 个 `scf.IfOp` 生成 4 组 `s_and_saveexec` + `s_cbranch_execz` + `s_or_b64` exec mask 分支，每组 3 条标量指令。
+
+**方案**: 用 `arith.select` 做 safe addressing（out-of-bounds 时 clamp 到 row 0），然后无条件存储。写入 row 0 的冗余数据不影响正确性（后续迭代会覆盖）。
+
+```python
+# 修改前: 4 个 scf.IfOp 分支
+_if_vn = scf.IfOp(vn_in_bounds)
+with ir.InsertionPoint(_if_vn.then_block):
+    vn_[fx.Index(vn_off)] = bf16_v
+    scf.YieldOp([])
+
+# 修改后: branchless safe addressing
+safe_vn_row = arith.select(vn_in_bounds, vn_bt_row, fx.Int32(0))
+vn_off = vn_base + safe_vn_row * fx.Int32(V) + vn_col
+vn_[fx.Index(vn_off)] = bf16_v
+```
+
+消除了 4 组 exec mask 分支（12 条标量指令 + 4 次 `s_cbranch_execz`）。
+
+### 优化 F：amdgcn.exp2 消除下溢保护（-14us，~215us → 201us 贡献）
+
+**问题**: `_fast_exp` 使用 `llvm.exp2.f32` intrinsic，LLVM 后端为保证 IEEE 兼容性会展开为 `v_mul → v_cmp → v_cndmask → v_add → v_exp_f32 → v_cndmask → v_ldexp` 共 ~8 条指令/次。5 次 exp 产生 ~40 条额外指令。
+
+**方案**: 使用 `llvm.amdgcn.exp2.f32` target-specific intrinsic，直接映射到 `v_exp_f32` 指令，跳过下溢保护。gate 值 `exp(g_last - g_row)` 的参数范围 `[0, +∞)` 不会下溢，`exp(g_last)` 的参数虽可能为负但精度损失可接受。
+
+```python
+# 修改前: llvm.exp2.f32 → 8 条指令/次（含下溢保护）
+def _fast_exp(x):
+    return _llvm.call_intrinsic(ir.F32Type.get(), "llvm.exp2.f32", ...)
+
+# 修改后: llvm.amdgcn.exp2.f32 → 2 条指令/次（bare v_exp_f32）
+def _fast_exp(x):
+    return _llvm.call_intrinsic(ir.F32Type.get(), "llvm.amdgcn.exp2.f32", ...)
+```
+
+ISA 指令从 `5× v_exp_f32 + 5× v_ldexp_f32 + 10× v_cndmask + 5× v_cmp` (25 条) 减少到 `5× v_exp_f32 + 5× v_mul_f32` (10 条)，净减 ~30 条指令。
+
+### 剩余差距分析（~8us）
 
 | 因素 | 估计影响 | 说明 |
 |------|---------|------|
-| h snapshot 逐元素存储 | ~10us | FlyDSL: 8× `buffer_store_short` + 8× `ds_write_b16`; Triton: 2× `global_store_dwordx2` + cooperative load |
-| v_new 逐元素条件存储 | ~8us | FlyDSL: 4× `s_and_saveexec` 分支; Triton: 1× `global_store_dwordx2` |
-| u 逐元素标量加载 | ~5us | FlyDSL: 4× `buffer_load_ushort`; Triton: `ds_bpermute` warp shuffle |
-| AGPR 累加器 | ~3us | Triton 使用 AGPR 释放 VGPR 压力 |
-| kernarg preload | ~3us | Triton 预加载 14 SGPRs |
-| 指令调度差异 | ~4us | Triton 编译器全局优化（`v_pk_mul_f32` 等） |
-| **总计** | **~33us** | |
+| h snapshot 逐元素存储 | ~3us | 8× `buffer_store_short` + 8× `ds_write_b16`（Triton 用向量化 + cooperative load） |
+| u 逐元素标量加载 | ~2us | 4× `buffer_load_ushort`（Triton 用 `ds_bpermute` warp shuffle） |
+| AGPR 累加器 | ~1us | Triton 使用 AGPR 释放 VGPR 压力 |
+| kernarg preload | ~1us | Triton 预加载 14 SGPRs |
+| 指令调度差异 | ~1us | Triton 编译器全局优化 |
+| **总计** | **~8us** | |
 
-这些剩余差距主要需要 FlyDSL 编译器层面的支持（向量化 bf16 pack 存储、AGPR 分配、kernarg preload 等），属于基础设施优化而非 kernel 逻辑优化。
+剩余 8us 差距主要来自 FlyDSL 编译器基础设施限制（bf16 向量化存储、AGPR 分配、kernarg preload），需要编译器层面支持。
