@@ -1911,6 +1911,7 @@ def compile_mixed_moe_gemm2(
                 # ---- X gmem->reg prefetch (match preshuffle GEMM mapping) ----
                 # Prefer 16B buffer-load (dwordx4). If the per-thread byte count isn't divisible by
                 # 16, fall back to 8B (dwordx2) or 4B (dword) loads. For fp16 we require 16B.
+                x_load_bytes = 16
                 if const_expr(is_f16_a):
                     if bytes_per_thread_x % 16 != 0:
                         raise ValueError(

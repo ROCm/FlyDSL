@@ -1065,7 +1065,7 @@ def compile_preshuffle_gemm_a8(
                     prev = cur
                 return out
 
-            if _is_gfx942:
+            if const_expr(_is_gfx942):
                 mfma_group = num_acc_n
                 mfma_total = (k_unroll * 2) * m_repeat * mfma_group
                 mfma_per_iter = 2 * mfma_group
@@ -1120,6 +1120,7 @@ def compile_preshuffle_gemm_a8(
                 dvmem_preload_eff = min(int(dvmem_preload), num_gmem_loads)
                 vmem_remaining = num_gmem_loads - dvmem_preload_eff
                 dsrd_remaining = num_ds_load - dsrd_preload_eff
+                vmem_schedule = []
                 if vmem_remaining > 0 and vmem_remaining < mfma_total:
                     vmem_schedule = (_build_scheduler(vmem_remaining, vmem_remaining)
                                      + [0] * (mfma_total - vmem_remaining))
