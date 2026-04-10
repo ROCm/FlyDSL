@@ -863,6 +863,8 @@ def compile_preshuffle_gemm_a8(
                                     for imxdl in range_constexpr(_fp4_pack_M):
                                         mi_idx = mi_p * _fp4_pack_M + imxdl
                                         curr_row_a_lds = row_a_lds + (mi_idx * 16)
+                                        a0 = arith.constant(0, type=T.i64)
+                                        a1 = arith.constant(0, type=T.i64)
                                         if (a0_prefetch is not None) and (k_idx == 0) and (mi_idx == 0):
                                             a0, a1 = a0_prefetch
                                         else:
@@ -894,6 +896,8 @@ def compile_preshuffle_gemm_a8(
 
                         for mi in range_constexpr(m_repeat):
                             curr_row_a_lds = row_a_lds + (mi * 16)
+                            a0 = arith.constant(0, type=T.i64)
+                            a1 = arith.constant(0, type=T.i64)
                             if (a0_prefetch is not None) and (ku0 == 0) and (mi == 0):
                                 a0, a1 = a0_prefetch
                             else:
@@ -942,6 +946,8 @@ def compile_preshuffle_gemm_a8(
                 col_base = col_offset_base_bytes + ki64
                 for mi in range_constexpr(m_repeat):
                     curr_row_a_lds = row_a_lds + (mi * 16)
+                    a0 = arith.constant(0, type=T.i64)
+                    a1 = arith.constant(0, type=T.i64)
                     if const_expr((a0_prefetch is not None) and (ku == 0) and (mi == 0)):
                         a0, a1 = a0_prefetch
                     else:
