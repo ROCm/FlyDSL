@@ -26,10 +26,12 @@ KV cache layouts:
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 
-from flydsl.expr import vector, range_constexpr
+from flydsl.expr import range_constexpr
 from flydsl.expr.arith import ArithValue
 from flydsl.expr.typing import T
 from flydsl.expr import buffer_ops
+from flydsl.expr.tensor_ssa import TensorSSA
+from flydsl.expr.numeric import Numeric, Uint32
 from kernels.kernels_common import dtype_to_elem_type
 from kernels.mfma_preshuffle_pipeline import crd2idx
 
@@ -57,11 +59,15 @@ def _make_rope_copy_helpers(elem_type, elem_bits):
     return copy_atom, vec_reg_ty, vec_reg_lay
 
 
-def _load_vec_buf(copy_atom, vec_reg_ty, vec_reg_lay, div_tensor, idx):
-    """Vector load via layout API: div_tensor[:, idx] → register vec."""
+def _load_vec_buf(copy_atom, vec_reg_ty, vec_reg_lay, div_tensor, idx, *, elem_dtype=None):
+    """Vector load via layout API: div_tensor[:, idx] → register vec or TensorSSA."""
     r = fx.memref_alloca(vec_reg_ty, vec_reg_lay)
     fx.copy_atom_call(copy_atom, fx.slice(div_tensor, (None, idx)), r)
-    return ArithValue(fx.memref_load_vec(r))
+    val = fx.memref_load_vec(r)
+    if elem_dtype is not None:
+        from flydsl.expr.tensor_ssa import TensorSSA
+        return TensorSSA(val, val.type.shape[0], elem_dtype)
+    return ArithValue(val)
 
 
 def _store_vec_buf(copy_atom, vec_reg_ty, vec_reg_lay, val, div_tensor, idx):
@@ -276,6 +282,7 @@ def build_fused_rope_cache_module(
         tid = fx.thread_idx.x   # 0..63
 
         elem_type = dtype_to_elem_type(dtype_str)
+        elem_dtype = Numeric.from_ir_type(elem_type)
         vec_type_e = T.vec(VEC_WIDTH, elem_type)
         i32_vec_ty = T.vec(vec_dwords, T.i32)
         elem_bits = 16  # bf16/f16 only
@@ -348,8 +355,9 @@ def build_fused_rope_cache_module(
                 v_e = _load_vec_buf(copy_atom_kv, vec_reg_ty, vec_reg_lay, v_div, tid)
 
                 # Bitcast for KV cache stores (buffer_ops needs i32 vecs)
-                k_rot_i32 = vector.bitcast(i32_vec_ty, k_rot_e)
-                v_raw = vector.bitcast(i32_vec_ty, v_e)
+                k_rot_i32 = TensorSSA(k_rot_e, VEC_WIDTH, elem_dtype).bitcast(Uint32)
+                v_ts = TensorSSA(v_e, VEC_WIDTH, elem_dtype)
+                v_raw = v_ts.bitcast(Uint32)
 
                 # KV cache dword offset for stores (scattered, keep buffer_ops)
                 kv_coord = (pid_t, fx.Int32(pid_hk), tid)
@@ -396,7 +404,7 @@ def build_fused_rope_cache_module(
                          1),
                     )
                     for vi in range_constexpr(VEC_WIDTH):
-                        v_scalar = vector.extract(v_e, static_position=[vi])
+                        v_scalar = v_ts[vi]
                         d_idx = ArithValue(tid) * VEC_WIDTH + vi
                         vc_coord = (pid_t_slot, pid_hk, d_idx, pid_b)
                         vc_elem_off = ArithValue(crd2idx(vc_coord, vc_nf_layout)).index_cast(T.i32)
