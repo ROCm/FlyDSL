@@ -59,15 +59,11 @@ def _make_rope_copy_helpers(elem_type, elem_bits):
     return copy_atom, vec_reg_ty, vec_reg_lay
 
 
-def _load_vec_buf(copy_atom, vec_reg_ty, vec_reg_lay, div_tensor, idx, *, elem_dtype=None):
-    """Vector load via layout API: div_tensor[:, idx] → register vec or TensorSSA."""
+def _load_vec_buf(copy_atom, vec_reg_ty, vec_reg_lay, div_tensor, idx):
+    """Vector load via layout API: div_tensor[:, idx] → register vec."""
     r = fx.memref_alloca(vec_reg_ty, vec_reg_lay)
     fx.copy_atom_call(copy_atom, fx.slice(div_tensor, (None, idx)), r)
-    val = fx.memref_load_vec(r)
-    if elem_dtype is not None:
-        from flydsl.expr.tensor_ssa import TensorSSA
-        return TensorSSA(val, val.type.shape[0], elem_dtype)
-    return ArithValue(val)
+    return ArithValue(fx.memref_load_vec(r))
 
 
 def _store_vec_buf(copy_atom, vec_reg_ty, vec_reg_lay, val, div_tensor, idx):
@@ -276,8 +272,6 @@ def build_fused_rope_cache_module(
 
         elem_type = dtype_to_elem_type(dtype_str)
         elem_dtype = Numeric.from_ir_type(elem_type)
-        vec_type_e = T.vec(VEC_WIDTH, elem_type)
-        i32_vec_ty = T.vec(vec_dwords, T.i32)
         elem_bits = 16  # bf16/f16 only
 
         # Buffer-backed tensors via layout API

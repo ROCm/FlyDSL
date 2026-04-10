@@ -18,7 +18,7 @@ from flydsl.expr import arith, gpu, range_constexpr
 from flydsl.expr.arith import ArithValue
 from flydsl.expr.typing import T, Int32
 from flydsl.expr.tensor_ssa import TensorSSA, ReductionOp, full
-from flydsl.expr.numeric import Numeric, Float32, BFloat16, Uint32
+from flydsl.expr.numeric import Numeric, Float32, Uint32
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 
