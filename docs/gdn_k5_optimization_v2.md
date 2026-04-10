@@ -640,3 +640,100 @@ ISA 指令从 `5× v_exp_f32 + 5× v_ldexp_f32 + 10× v_cndmask + 5× v_cmp` (25
 | **总计** | **~8us** | |
 
 剩余 8us 差距主要来自 FlyDSL 编译器基础设施限制（bf16 向量化存储、AGPR 分配、kernarg preload），需要编译器层面支持。
+
+## 九、ISA 级深入分析：201us vs 193us 的最终差距
+
+### 主循环指令分类对比
+
+基于 `/workspace/ir_dump/opt_flydsl_201us_final/` 和 `/workspace/ir_dump/triton_193us_ir_dump_opt3/` 的 ISA 对比：
+
+| 指令类别 | FlyDSL 201us | Triton 193us | 差值 | 说明 |
+|---------|:-----------:|:-----------:|:----:|------|
+| MFMA | 8 | 8 | 0 | 已对齐 |
+| Barrier | 2 | 7 | -5 | FlyDSL 更少（批量 LDS 优化） |
+| Global Load | 17 | 11 | **+6** | u 4× `buffer_load_ushort` + g 5× `buffer_load_dword` |
+| Global Store | 12 | 3 | **+9** | h 8× + vn 4× `buffer_store_short` vs 3× `global_store_dwordx2` |
+| LDS Write | 20 | 20 | 0 | 已对齐 |
+| LDS Read | 24 | 18 | **+6** | h B-operand 8× `ds_read_b64_tr_b16` vs `ds_read_b128` |
+| LDS Shuffle | 0 | 2 | -2 | Triton 用 `ds_bpermute` 获取 u |
+| Exp | 5 | 4 | +1 | 基本持平（已消除 ldexp） |
+| BF16 Pack | 16 | 8 | **+8** | FlyDSL 逐元素 pack |
+| Packed Mul | 6 | 8 | -2 | Triton 更多 `v_pk_mul_f32` |
+| Exec Branch | 0 | 39 | -39 | Triton 大量 exec mask（含 cooperative load 边界检查） |
+| AGPR | 0 | 35 | -35 | Triton 独有 `v_accvgpr_read/write` |
+| Wait | 27 | 18 | **+9** | LLVM 后端插入偏保守 |
+| Other VALU/SALU | 77 | 116 | -39 | Triton 更多地址计算 |
+| **总计** | **214** | **297** | **-83** | FlyDSL 指令更少但更慢 |
+
+### 关键发现：FlyDSL 指令更少但更慢
+
+FlyDSL 主循环只有 214 条指令，比 Triton 的 297 条少 28%，但执行时间反而多 4%。根因是 **FlyDSL 的标量存储/加载指令吞吐量低**：
+
+1. **Global Store 吞吐量差 3×**：FlyDSL 用 12 次 `buffer_store_short`（每次 2B），Triton 用 3 次 `global_store_dwordx2`（每次 8B）。总写入量相同（24B），但 FlyDSL 需要 4× 的存储指令发射。
+
+2. **BF16 Pack 冗余 2×**：FlyDSL 用 16 次 `v_cvt_pk_bf16_f32`（每次 pack 1 个 f32 → bf16），Triton 用 8 次（每次 pack 2 个 f32 → bf16x2）。FlyDSL 的 pack 指令只利用了一半的 dword 带宽。
+
+3. **s_waitcnt 偏保守**：FlyDSL 有 27 次 `s_waitcnt`，Triton 只有 18 次。LLVM 后端对 `buffer_load/store` 指令的 wait 插入比 `global_load/store` 更保守。
+
+### 主循环关键路径分析
+
+FlyDSL 主循环分为 3 段（2 个 barrier 分隔）：
+
+```
+段 1 (92 指令): gating + v_new→LDS + k→LDS
+  ├─ 5× v_exp_f32 + 5× v_mul_f32           # gate 计算
+  ├─ 6× v_pk_mul_f32                        # gate 缩放 h 和 v_new
+  ├─ 4× v_cvt_pk_bf16_f32 + 4× ds_write_b16 # gated v_new → LDS
+  └─ 4× ds_write_b128                       # k → LDS
+  === BARRIER ===
+
+段 2 (100 指令): w 预取 + h snapshot + delta correction + v_new 存储 ← 关键路径
+  ├─ 4× buffer_load_dwordx4                 # w 全部 K-block 预取
+  ├─ 8× v_cvt_pk_bf16_f32                   # h f32→bf16
+  ├─ 8× ds_write_b16 + 8× buffer_store_short # h → LDS + global (双写)
+  ├─ 4× ds_write_b128                       # w → LDS
+  ├─ 4× buffer_load_ushort + 5× buffer_load_dword # u + g 预取
+  ├─ 2× buffer_load_dwordx4                 # k[0] 预取
+  ├─ 4× ds_read_b128 + 8× ds_read_b64_tr_b16 # w A + h B operand
+  ├─ 4× v_mfma (delta correction)
+  ├─ 4× v_sub_f32 + 4× v_cvt_pk_bf16_f32   # v_new = u - bv
+  └─ 4× buffer_store_short                  # v_new → global
+  === BARRIER ===
+
+段 3 (22 指令): state update MFMA
+  ├─ 8× ds_read_b64_tr_b16                  # k A + v_new B operand
+  └─ 4× v_mfma (state update)
+  → 回到段 1
+```
+
+段 2 是关键路径（100 指令），其中 **h snapshot 双写（16 条指令）** 和 **v_new 存储（4 条指令）** 占据了 20% 的指令数。
+
+### Triton 的关键优化差异
+
+Triton 在以下方面有结构性优势：
+
+1. **h snapshot 向量化存储**：Triton 用 `v_cvt_pk_bf16_f32` 把 2 个 f32 打包成 1 个 dword（2 bf16），再用 `global_store_dwordx2` 一次存 4 个 bf16。FlyDSL 的 h 布局 `[K, V]` 中 4 个连续行的同一列间隔 V=128 bf16 = 256 bytes，无法向量存储。
+
+2. **u 值 warp shuffle**：Triton 用 `ds_bpermute_b32`（LDS 延迟 ~20 cycles）替代 `buffer_load_ushort`（global 延迟 ~200 cycles），并通过 `v_pk_add_f32 neg_lo neg_hi` 实现 `v_new = u - bv` 的打包计算。
+
+3. **AGPR 累加器**：Triton 将 MFMA 累加结果存在 AGPR（a[0:7]），释放 8 个 VGPR 给数据预取 buffer。FlyDSL 的 MFMA 累加结果占用 VGPR（v[2:9]），限制了可用于预取的 VGPR 数量。
+
+### 尝试过但无效的优化
+
+| 优化 | 结果 | 原因 |
+|------|------|------|
+| BV=16 → BV=32 | 247us（变慢） | N_REPEAT=2 导致 LDS 和 VGPR 压力翻倍，抵消了 grid 减半的收益 |
+| h LDS scatter-write + gather-read | 未实施 | 需要精确的 MFMA B-operand lane 映射和 `ds_write_b16_d16_hi` 支持，实现复杂度极高 |
+| u ds_bpermute | 未实施 | BV=16 时 cooperative load 效率不高，需要理解 MFMA lane-to-row 映射 |
+
+### 结论
+
+FlyDSL 在 kernel 代码层面的优化已达到极限（**201us，Triton 的 96%**）。剩余 ~8us 差距来自编译器基础设施限制：
+
+| 编译器特性 | 当前状态 | 预期收益 |
+|-----------|---------|---------|
+| `buffer_store_dwordx2` 支持打包 bf16 | 不支持 | ~3us |
+| `ds_bpermute` u 值 warp shuffle | 需要 lane 映射支持 | ~2us |
+| AGPR 累加器分配 | 不支持 | ~1us |
+| kernarg preload | 不支持 | ~1us |
+| 更激进的 `s_waitcnt` 优化 | LLVM 后端保守 | ~1us |
