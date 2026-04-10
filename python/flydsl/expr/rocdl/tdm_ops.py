@@ -42,6 +42,7 @@ __all__ = [
     "TDMDescriptor2D",
     "TDMGatherDescriptor",
     "make_tensor_descriptor_2d",
+    "make_tensor_gather_dgroup0",
     "make_tensor_gather_descriptor",
     "tensor_load_2d",
     "tensor_load_gather",
@@ -422,6 +423,7 @@ def make_tensor_gather_descriptor(
     pad_interval: int = 0,
     pad_amount: int = 0,
     index_size: int = 32,
+    gather_tile_dim1=None,
     lds_byte_offset=None,
     global_byte_offset=None,
     workgroup_mask: Union[int, "ir.Value"] = 0,
@@ -450,6 +452,11 @@ def make_tensor_gather_descriptor(
         pad_interval:  Padding interval in elements (0 to disable).
         pad_amount:    Padding amount in elements (0 to disable).
         index_size:    Row index width in bits (16 or 32).
+        gather_tile_dim1:
+                      Optional override for gather-mode tile_dim1 (the number
+                      of valid indices to consume from groups 2/3). Accepts a
+                      Python int or runtime MLIR i32 Value / SGPR. Defaults to
+                      len(row_indices), preserving the historical behavior.
         lds_byte_offset: Additional LDS byte offset.
         global_byte_offset: Additional global memory byte offset (MLIR index).
                            Used for K-tile column offsets.
@@ -458,8 +465,6 @@ def make_tensor_gather_descriptor(
     Returns:
         TDMGatherDescriptor with groups 0-3 ready for tensor_load_gather.
     """
-    from ..._mlir.dialects import fly as _fly_d
-
     assert index_size in (16, 32), f"index_size must be 16 or 32, got {index_size}"
     max_indices = 8 if index_size == 32 else 16
     num_indices = len(row_indices)
@@ -470,42 +475,12 @@ def make_tensor_gather_descriptor(
         f"row_width * elem_bytes must be multiple of 4, got {row_width * elem_bytes}"
     )
 
-    # Global base address
-    glb_ptr_type = ir.Type.parse("!llvm.ptr<1>")
-    i64 = ir.IntegerType.get_signless(64)
-    a_raw = global_ptr.__fly_values__()[0]
-    glb_ptr = _fly_d.extract_aligned_pointer_as_index(glb_ptr_type, a_raw)
-    glb_base_i64 = _ArithValue(llvm_dialect.ptrtoint(i64, glb_ptr))
-    if global_byte_offset is not None:
-        glb_byte_off_i64 = arith.index_cast(T.i64, global_byte_offset)
-        glb_base_i64 = glb_base_i64 + glb_byte_off_i64
-
-    # LDS address
-    lds_base_idx = _ArithValue(memref_dialect.extract_aligned_pointer_as_index(lds_memref))
-    lds_total_off = lds_base_idx
-    if lds_byte_offset is not None:
-        lds_total_off = lds_total_off + lds_byte_offset
-    lds_addr_i32 = arith.index_cast(T.i32, lds_total_off)
-
-    # ================================================================
-    # GROUP 0: pred | gather_index_size | gather_mode | lds_addr | global_addr
-    # ================================================================
-    gather_index_bit = 1 if index_size == 32 else 0
-    g0_pred = (1               # count=1 (valid tensor)
-               | (gather_index_bit << 30)  # gather_index_size
-               | (1 << 31))                # gather_mode=1
-    g0_s0 = arith.constant(g0_pred, type=T.i32)
-    g0_s1 = lds_addr_i32
-
-    i32 = ir.IntegerType.get_signless(32)
-    g0_s2 = _ArithValue(std_arith.TruncIOp(i32, _raw(glb_base_i64)).result)
-    hi_raw = _ArithValue(_raw(glb_base_i64)).shrui(arith.constant(32, type=T.i64))
-    g0_s3 = (
-        _ArithValue(std_arith.TruncIOp(i32, _raw(hi_raw)).result)
-        | arith.constant(1 << 31, type=T.i32)  # type=2 in [31:30]
-    )
-    dgroup0 = vector.from_elements(
-        T.vec(4, T.i32), [g0_s0, g0_s1, g0_s2, g0_s3]
+    dgroup0 = make_tensor_gather_dgroup0(
+        global_ptr=global_ptr,
+        lds_memref=lds_memref,
+        index_size=index_size,
+        lds_byte_offset=lds_byte_offset,
+        global_byte_offset=global_byte_offset,
     )
 
     # ================================================================
@@ -577,8 +552,16 @@ def make_tensor_gather_descriptor(
             type=T.i32,
         )
 
-    # sgpr4: tile_dim1[15:0] — in gather mode, this is the number of valid indices
-    g1_s4 = arith.constant(num_indices & 0xFFFF, type=T.i32)
+    # sgpr4: tile_dim1[15:0] — in gather mode, this is the number of valid
+    # indices consumed from descriptor groups 2/3. Allow kernels to override it
+    # at runtime so they can keep a fixed index vector while shrinking the valid
+    # prefix for padded MoE tiles.
+    if gather_tile_dim1 is None:
+        g1_s4 = arith.constant(num_indices & 0xFFFF, type=T.i32)
+    elif isinstance(gather_tile_dim1, int):
+        g1_s4 = arith.constant(gather_tile_dim1 & 0xFFFF, type=T.i32)
+    else:
+        g1_s4 = arith.andi(gather_tile_dim1, arith.constant(0xFFFF, type=T.i32))
 
     # sgpr5: tensor_dim0_stride (dim0 stride = row stride in elements)
     g1_s5 = arith.constant(stride & 0xFFFFFFFF, type=T.i32)
@@ -634,6 +617,60 @@ def make_tensor_gather_descriptor(
         dgroup2=dgroup2, dgroup3=dgroup3,
     )
 
+
+
+def make_tensor_gather_dgroup0(
+    global_ptr,
+    lds_memref,
+    *,
+    index_size: int = 32,
+    lds_byte_offset=None,
+    global_byte_offset=None,
+):
+    """Build gather descriptor GROUP0 only.
+
+    This is the dynamic address-bearing portion of a TDM gather descriptor.
+    Separating it lets kernels hoist static GROUP1/GROUP2/GROUP3 state and
+    only rebuild the per-issue address group close to the TDM instruction.
+    """
+    from ..._mlir.dialects import fly as _fly_d
+
+    assert index_size in (16, 32), f"index_size must be 16 or 32, got {index_size}"
+
+    glb_ptr_type = ir.Type.parse("!llvm.ptr<1>")
+    i64 = ir.IntegerType.get_signless(64)
+    a_raw = global_ptr.__fly_values__()[0]
+    glb_ptr = _fly_d.extract_aligned_pointer_as_index(glb_ptr_type, a_raw)
+    glb_base_i64 = _ArithValue(llvm_dialect.ptrtoint(i64, glb_ptr))
+    if global_byte_offset is not None:
+        glb_byte_off_i64 = arith.index_cast(T.i64, global_byte_offset)
+        glb_base_i64 = glb_base_i64 + glb_byte_off_i64
+
+    lds_base_idx = _ArithValue(memref_dialect.extract_aligned_pointer_as_index(lds_memref))
+    lds_total_off = lds_base_idx
+    if lds_byte_offset is not None:
+        lds_total_off = lds_total_off + lds_byte_offset
+    lds_addr_i32 = arith.index_cast(T.i32, lds_total_off)
+
+    gather_index_bit = 1 if index_size == 32 else 0
+    g0_pred = (
+        1
+        | (gather_index_bit << 30)
+        | (1 << 31)
+    )
+    g0_s0 = arith.constant(g0_pred, type=T.i32)
+    g0_s1 = lds_addr_i32
+
+    i32 = ir.IntegerType.get_signless(32)
+    g0_s2 = _ArithValue(std_arith.TruncIOp(i32, _raw(glb_base_i64)).result)
+    hi_raw = _ArithValue(_raw(glb_base_i64)).shrui(arith.constant(32, type=T.i64))
+    g0_s3 = (
+        _ArithValue(std_arith.TruncIOp(i32, _raw(hi_raw)).result)
+        | arith.constant(1 << 31, type=T.i32)
+    )
+    return vector.from_elements(
+        T.vec(4, T.i32), [g0_s0, g0_s1, g0_s2, g0_s3]
+    )
 
 def tensor_load_gather(
     desc: TDMGatherDescriptor,

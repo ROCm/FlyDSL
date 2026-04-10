@@ -1969,11 +1969,20 @@ def _compile_stage1_mxscale_kernel_impl(
         # _a_out_row_ids[i] = tok * topk + slot for TDM gather store output
         _a_tok_ids = []
         _a_out_row_ids = []
+        _a_load_valids = []
+        _a_store_valids = []
+
+        def _sum_i32_values(_vals):
+            _acc = arith.constant(0, type=T.i32)
+            for _vi in range_constexpr(len(_vals)):
+                _acc = _acc + _vals[_vi]
+            return _acc
 
         def _precompute_a_row_indices():
             """Load sorted_ids for all tile_m rows and decode token_ids + output row indices."""
-            _tok_oob = _get_tokens_sgpr()
-            _out_oob = _get_tokens_topk_sgpr()
+            _safe_row = arith.constant(0, type=T.i32)
+            _one_i32 = arith.constant(1, type=T.i32)
+            _zero_i32 = arith.constant(0, type=T.i32)
             for _ri in range_constexpr(int(tile_m)):
                 _sorted_row = by * fx.Index(int(tile_m)) + fx.Index(_ri)
                 _sorted_i32 = arith.index_cast(T.i32, _sorted_row)
@@ -2000,14 +2009,18 @@ def _compile_stage1_mxscale_kernel_impl(
                 _slot_ok1 = arith.cmpi(arith.CmpIPredicate.slt, _slot, c_topk_i32)
                 _slot_ok = arith.andi(_slot_ok0, _slot_ok1)
                 _row_tok_ok = arith.andi(_row_ok, _tok_ok)
-                _tok_safe = arith.select(_row_tok_ok, _tok, _tok_oob)
+                _load_valid_i32 = arith.select(_row_tok_ok, _one_i32, _zero_i32)
+                _a_load_valids.append(rocdl.readfirstlane(T.i32, _load_valid_i32))
+                _tok_safe = arith.select(_row_tok_ok, _tok, _safe_row)
                 _tok_sgpr = rocdl.readfirstlane(T.i32, _tok_safe)
                 _a_tok_ids.append(_tok_sgpr)
                 _out_row = _tok * c_topk_i32 + _slot
                 _row_fully_ok = arith.andi(_row_tok_ok, _slot_ok)
+                _store_valid_i32 = arith.select(_row_fully_ok, _one_i32, _zero_i32)
+                _a_store_valids.append(rocdl.readfirstlane(T.i32, _store_valid_i32))
                 _out_row_safe = arith.select(
                     _row_fully_ok, _out_row,
-                    _out_oob,
+                    _safe_row,
                 )
                 _out_row_sgpr = rocdl.readfirstlane(T.i32, _out_row_safe)
                 _a_out_row_ids.append(_out_row_sgpr)
@@ -2036,27 +2049,34 @@ def _compile_stage1_mxscale_kernel_impl(
             """Load A data using TDM gather mode — one TDM instruction per 8 rows."""
             k_packed_base = k_base if PACK_FACTOR_A == 1 else k_base // fx.Index(PACK_FACTOR_A)
             _tokens_dim1 = _get_tokens_sgpr()
+            _zero_i32 = arith.constant(0, type=T.i32)
             for _gi in range_constexpr(_TDM_GATHER_GROUPS):
                 _start = _gi * _TDM_GATHER_CHUNK
                 _cnt = min(_TDM_GATHER_CHUNK, int(tile_m) - _start)
                 _row_indices = _a_tok_ids[_start:_start + _cnt]
+                _valid_count = _sum_i32_values(_a_load_valids[_start:_start + _cnt])
                 _lds_off = fx.Index(_start * lds_a_stride_bytes)
-                desc = tdm_ops.make_tensor_gather_descriptor(
-                    global_ptr=arg_x,
-                    lds_memref=target_lds,
-                    row_indices=_row_indices,
-                    row_width=int(packed_tile_k_a),
-                    tensor_dim0=K_packed_a,
-                    tensor_dim1=_tokens_dim1,
-                    stride=K_packed_a,
-                    elem_bytes=1,
-                    pad_interval=int(packed_tile_k_a) if LDS_PAD_A_BYTES > 0 else 0,
-                    pad_amount=LDS_PAD_A_BYTES if LDS_PAD_A_BYTES > 0 else 0,
-                    index_size=32,
-                    lds_byte_offset=_lds_off,
-                    global_byte_offset=k_packed_base,
-                )
-                tdm_ops.tensor_load_gather(desc)
+                _has_valid = arith.cmpi(arith.CmpIPredicate.sgt, _valid_count, _zero_i32)
+                _if_valid = scf.IfOp(_has_valid)
+                with ir.InsertionPoint(_if_valid.then_block):
+                    desc = tdm_ops.make_tensor_gather_descriptor(
+                        global_ptr=arg_x,
+                        lds_memref=target_lds,
+                        row_indices=_row_indices,
+                        row_width=int(packed_tile_k_a),
+                        tensor_dim0=K_packed_a,
+                        tensor_dim1=_tokens_dim1,
+                        stride=K_packed_a,
+                        elem_bytes=1,
+                        pad_interval=int(packed_tile_k_a) if LDS_PAD_A_BYTES > 0 else 0,
+                        pad_amount=LDS_PAD_A_BYTES if LDS_PAD_A_BYTES > 0 else 0,
+                        index_size=32,
+                        gather_tile_dim1=_valid_count,
+                        lds_byte_offset=_lds_off,
+                        global_byte_offset=k_packed_base,
+                    )
+                    tdm_ops.tensor_load_gather(desc)
+                    scf.YieldOp([])
 
         def make_desc_as(k_base):
             return k_base / arith.index(SCALE_BLOCK)
@@ -2812,6 +2832,7 @@ def _compile_stage1_mxscale_kernel_impl(
                 _warp_row_start_py = rocdl.readfirstlane(T.i32, _warp_row_start)
                 _d_store_chunk = 8  # 32-bit gather mode
                 _d_store_groups = (warp_tile_m + _d_store_chunk - 1) // _d_store_chunk
+                _tokens_topk_dim1 = _get_tokens_topk_sgpr()
                 for _dsi in range_constexpr(_d_store_groups):
                     _ds_start = _dsi * _d_store_chunk
                     _ds_cnt = min(_d_store_chunk, warp_tile_m - _ds_start)
@@ -2827,11 +2848,14 @@ def _compile_stage1_mxscale_kernel_impl(
                     # per warp to select the correct slice.
                     # Simpler: for num_warps_m = m_warp, unroll per warp:
                     _ds_indices = []
+                    _ds_valids = []
                     for _wi in range_constexpr(int(m_warp)):
                         _tile_row = _wi * warp_tile_m + _ds_start
                         _warp_indices = _a_out_row_ids[_tile_row:_tile_row + _ds_cnt]
+                        _warp_valids = _a_store_valids[_tile_row:_tile_row + _ds_cnt]
                         if _wi == 0:
                             _ds_indices = list(_warp_indices)
+                            _ds_valids = list(_warp_valids)
                         else:
                             _is_this_warp = arith.cmpi(
                                 arith.CmpIPredicate.eq,
@@ -2847,6 +2871,10 @@ def _compile_stage1_mxscale_kernel_impl(
                                     _is_this_warp,
                                     _warp_indices[_ii],
                                     _ds_indices[_ii])
+                                _ds_valids[_ii] = arith.select(
+                                    _is_this_warp,
+                                    _warp_valids[_ii],
+                                    _ds_valids[_ii])
                     # LDS offset within D buffer for this group
                     _ds_lds_off = arith.index(
                         _ds_start * lds_d_row_stride_s1) + d_warp_off_sgpr_s1
@@ -2858,22 +2886,29 @@ def _compile_stage1_mxscale_kernel_impl(
                     # the extra pad elements hit OOB and are dropped.
                     _pad_elems = LDS_PAD_D_BYTES_s1 // elem_bytes_d_s1
                     _store_tile_w = warp_tile_n + _pad_elems
-                    _d_store_desc = tdm_ops.make_tensor_gather_descriptor(
-                        global_ptr=arg_out,
-                        lds_memref=base_ptr,
-                        row_indices=_ds_indices,
-                        row_width=_store_tile_w,
-                        tensor_dim0=warp_tile_n,
-                        tensor_dim1=_get_tokens_topk_sgpr(),
-                        stride=N,
-                        elem_bytes=elem_bytes_d_s1,
-                        pad_interval=0,
-                        pad_amount=0,
-                        index_size=32,
-                        lds_byte_offset=_ds_lds_off,
-                        global_byte_offset=_col_byte_off,
-                    )
-                    tdm_ops.tensor_store_gather(_d_store_desc)
+                    _ds_valid_count = _sum_i32_values(_ds_valids)
+                    _zero_i32 = arith.constant(0, type=T.i32)
+                    _has_store = arith.cmpi(arith.CmpIPredicate.sgt, _ds_valid_count, _zero_i32)
+                    _if_store = scf.IfOp(_has_store)
+                    with ir.InsertionPoint(_if_store.then_block):
+                        _d_store_desc = tdm_ops.make_tensor_gather_descriptor(
+                            global_ptr=arg_out,
+                            lds_memref=base_ptr,
+                            row_indices=_ds_indices,
+                            row_width=_store_tile_w,
+                            tensor_dim0=warp_tile_n,
+                            tensor_dim1=_tokens_topk_dim1,
+                            stride=N,
+                            elem_bytes=elem_bytes_d_s1,
+                            pad_interval=0,
+                            pad_amount=0,
+                            index_size=32,
+                            gather_tile_dim1=_ds_valid_count,
+                            lds_byte_offset=_ds_lds_off,
+                            global_byte_offset=_col_byte_off,
+                        )
+                        tdm_ops.tensor_store_gather(_d_store_desc)
+                        scf.YieldOp([])
                 tdm_ops.tensor_wait(0)
             else:
                 def _load_gate_up_sub8(acc_idx, vec_base):
@@ -3310,9 +3345,16 @@ def _compile_stage2_mxscale_kernel_impl(
 
         _use_tdm_gather_a = bool(use_tdm_gather)
         _a_row_ids = []
+        _a_row_valids = []
         _TDM_GATHER_CHUNK = 8
         _TDM_GATHER_GROUPS = (int(tile_m) + _TDM_GATHER_CHUNK - 1) // _TDM_GATHER_CHUNK
         _tokens_topk_sgpr = None
+
+        def _sum_i32_values(_vals):
+            _acc = arith.constant(0, type=T.i32)
+            for _vi in range_constexpr(len(_vals)):
+                _acc = _acc + _vals[_vi]
+            return _acc
 
         def _get_tokens_topk_sgpr():
             nonlocal _tokens_topk_sgpr
@@ -3325,7 +3367,9 @@ def _compile_stage2_mxscale_kernel_impl(
             return _tokens_topk_sgpr
 
         def _precompute_a_row_indices():
-            _ts_oob = _get_tokens_topk_sgpr()
+            _safe_row = arith.constant(0, type=T.i32)
+            _one_i32 = arith.constant(1, type=T.i32)
+            _zero_i32 = arith.constant(0, type=T.i32)
             for _ri in range_constexpr(int(tile_m)):
                 _sorted_row = by * fx.Index(int(tile_m)) + fx.Index(_ri)
                 _sorted_i32 = arith.index_cast(T.i32, _sorted_row)
@@ -3350,7 +3394,9 @@ def _compile_stage2_mxscale_kernel_impl(
                 _ts = _tok * c_topk_i32 + _slot
                 _ts_ok = arith.andi(_tok_ok, arith.andi(_slot_ok0, _slot_ok1))
                 _row_fully_ok = arith.andi(_row_ok, _ts_ok)
-                _ts_safe = arith.select(_row_fully_ok, _ts, _ts_oob)
+                _row_valid_i32 = arith.select(_row_fully_ok, _one_i32, _zero_i32)
+                _a_row_valids.append(rocdl.readfirstlane(T.i32, _row_valid_i32))
+                _ts_safe = arith.select(_row_fully_ok, _ts, _safe_row)
                 _a_row_ids.append(rocdl.readfirstlane(T.i32, _ts_safe))
 
         def make_desc_a(k_base):
@@ -3394,27 +3440,34 @@ def _compile_stage2_mxscale_kernel_impl(
             """Load stage2 A rows via TDM gather using token-slot row ids."""
             k_packed_base = k_base if PACK_FACTOR_A == 1 else k_base // fx.Index(PACK_FACTOR_A)
             _tokens_topk = _get_tokens_topk_sgpr()
+            _zero_i32 = arith.constant(0, type=T.i32)
             for _gi in range_constexpr(_TDM_GATHER_GROUPS):
                 _start = _gi * _TDM_GATHER_CHUNK
                 _cnt = min(_TDM_GATHER_CHUNK, int(tile_m) - _start)
                 _row_indices = _a_row_ids[_start:_start + _cnt]
+                _valid_count = _sum_i32_values(_a_row_valids[_start:_start + _cnt])
                 _lds_off = fx.Index(_start * lds_a_stride_bytes)
-                desc = tdm_ops.make_tensor_gather_descriptor(
-                    global_ptr=arg_x,
-                    lds_memref=target_lds,
-                    row_indices=_row_indices,
-                    row_width=int(packed_tile_k_a),
-                    tensor_dim0=K_packed_a,
-                    tensor_dim1=_tokens_topk,
-                    stride=K_packed_a,
-                    elem_bytes=1,
-                    pad_interval=int(packed_tile_k_a) if LDS_PAD_A_BYTES > 0 else 0,
-                    pad_amount=LDS_PAD_A_BYTES if LDS_PAD_A_BYTES > 0 else 0,
-                    index_size=32,
-                    lds_byte_offset=_lds_off,
-                    global_byte_offset=k_packed_base,
-                )
-                tdm_ops.tensor_load_gather(desc)
+                _has_valid = arith.cmpi(arith.CmpIPredicate.sgt, _valid_count, _zero_i32)
+                _if_valid = scf.IfOp(_has_valid)
+                with ir.InsertionPoint(_if_valid.then_block):
+                    desc = tdm_ops.make_tensor_gather_descriptor(
+                        global_ptr=arg_x,
+                        lds_memref=target_lds,
+                        row_indices=_row_indices,
+                        row_width=int(packed_tile_k_a),
+                        tensor_dim0=K_packed_a,
+                        tensor_dim1=_tokens_topk,
+                        stride=K_packed_a,
+                        elem_bytes=1,
+                        pad_interval=int(packed_tile_k_a) if LDS_PAD_A_BYTES > 0 else 0,
+                        pad_amount=LDS_PAD_A_BYTES if LDS_PAD_A_BYTES > 0 else 0,
+                        index_size=32,
+                        gather_tile_dim1=_valid_count,
+                        lds_byte_offset=_lds_off,
+                        global_byte_offset=k_packed_base,
+                    )
+                    tdm_ops.tensor_load_gather(desc)
+                    scf.YieldOp([])
 
         def make_desc_as(k_base):
             return k_base / arith.index(SCALE_BLOCK)
