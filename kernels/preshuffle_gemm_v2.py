@@ -8,16 +8,8 @@ fp8 has two paths:
   - "fp8_layout": layout API with 64b copy atoms (needs C++ k_perm fix)
   - "fp8" (default): delegates to old preshuffle_gemm path (full perf, 128b loads)
 
-Uses scf.for tile loop with ping-pong double buffer.
-No scheduling hints — LLVM hardware scheduler produces better results
-for the layout API's instruction pattern.
-
-Performance vs old path (f16/bf16, no scheduling hints):
-  tile_k=64  (k_iters=2):  96-99%
-  tile_k=128 (k_iters=4):  70-90%
-  tile_k=256 (k_iters=8):  65-75%
-  tile_k=512 (k_iters=16): 55-60%
-Best tile for layout API: tile_k=64 with tile_m=64, tile_n=128.
+Uses scf.for tile loop with ping-pong double buffer (2-stage B).
+Includes hot_loop_scheduler from the old pipeline for instruction scheduling.
 """
 
 import flydsl.compiler as flyc
@@ -67,8 +59,8 @@ def compile_preshuffle_gemm_v2(
     elem_bytes = 1 if is_fp8 else 2
 
     gpu_arch = get_rocm_arch()
-    is_gfx950 = str(gpu_arch).startswith("gfx950")
-    if is_fp8 and is_gfx950:
+    is_gfx942 = str(gpu_arch).startswith("gfx942")
+    if is_fp8 and str(gpu_arch).startswith("gfx950"):
         raise NotImplementedError("fp8 gfx950 uses mfma_scale, not supported yet")
 
     if is_f16:
@@ -81,8 +73,7 @@ def compile_preshuffle_gemm_v2(
     out_elem_cls = BFloat16 if out_is_bf16 else Float16
 
     # Tile geometry
-    mfma_k = 32 if is_fp8 else 16
-    k_iters = tile_k // 32  # tiled_K=32 with k_perm (4,4,2) for f16/bf16; without for fp8
+    k_iters = tile_k // 32  # tiled_K=32 with k_perm (4,4,2) for f16/bf16
     num_tiles = K // tile_k
     m_repeat = tile_m // 16
     num_waves = 4
@@ -96,8 +87,8 @@ def compile_preshuffle_gemm_v2(
 
     total_threads = 256
     a_load_bytes = 16
-
-    b_stages = 2
+    bytes_per_thread_a = (tile_m * tile_k * elem_bytes) // total_threads
+    num_a_loads = bytes_per_thread_a // a_load_bytes
 
     # ── Kernel ────────────────────────────────────────────────────────
     @flyc.kernel
@@ -123,7 +114,7 @@ def compile_preshuffle_gemm_v2(
         tB = fx.flat_divide(gB, fx.make_tile(tile_n, tile_k))[None, None, bid_y, None]
         tC = fx.flat_divide(gC, fx.make_tile(tile_m, tile_n))[None, None, bid_x, bid_y]
 
-        # Copy atoms: fp8 uses 64b (8 i8 = i64 per MFMA operand), f16/bf16 uses 128b
+        # Copy atoms: fp8 uses 64b, f16/bf16 uses 128b
         if is_fp8:
             mma_copy = fx.make_copy_atom(fx.rocdl.BufferCopy64b(), layout_elem)
             mma_uni = fx.make_copy_atom(fx.UniversalCopy64b(), layout_elem)
@@ -156,7 +147,7 @@ def compile_preshuffle_gemm_v2(
         pA_s2r = thr_s2r.partition_S(sA)
         pB_g = thr_g2r_B.partition_S(tB)
 
-        # Fragments
+        # Fragments — 2-stage B double buffer
         frag_copy_A = fx.make_fragment_like(pA_s[None, None, None, 0])
         frag_A = thr_mma.make_fragment_A(sA[None, None, 0])
         frag_B = fx.make_fragment_like(
@@ -175,6 +166,48 @@ def compile_preshuffle_gemm_v2(
             pC_g = thr_r2g_C.partition_S(tC)
             frag_C_out = fx.make_fragment_like(frag_C, out_elem_cls.ir_type)
             frag_C_retile = thr_r2g_C.retile(frag_C_out)
+
+        # ── Scheduling hints (ported from old pipeline) ───────────
+        def hot_loop_scheduler():
+            mfma_group = num_acc_n
+            mfma_total = (k_iters * 2) * m_repeat * mfma_group
+            mfma_per_iter = 2 * mfma_group
+            sche_iters = 0 if mfma_per_iter == 0 else (mfma_total // mfma_per_iter)
+
+            rocdl.sched_dsrd(2)
+            rocdl.sched_mfma(1)
+            if tile_m == 16:
+                rocdl.sched_vmem(1)
+            rocdl.sched_mfma(1)
+            if tile_m == 16:
+                rocdl.sched_vmem(1)
+
+            if num_acc_n < 4:
+                rocdl.sched_dsrd(1)
+                rocdl.sched_mfma(1)
+                if tile_m == 16:
+                    rocdl.sched_vmem(1)
+                rocdl.sched_dsrd(1)
+                rocdl.sched_mfma(1)
+                if tile_m == 16:
+                    rocdl.sched_vmem(1)
+                rocdl.sched_mfma(1)
+
+            dswr_tail = num_a_loads
+            dstr_advance = 2
+            if dswr_tail > sche_iters:
+                dswr_tail = sche_iters
+            dswr_start = max(sche_iters - dswr_tail - dstr_advance, 0)
+
+            for sche_i in range_constexpr(sche_iters):
+                rocdl.sched_vmem(1)
+                rocdl.sched_mfma(mfma_group)
+                rocdl.sched_dsrd(1)
+                rocdl.sched_mfma(mfma_group)
+                if sche_i >= dswr_start - 1:
+                    rocdl.sched_dswr(1)
+
+            rocdl.sched_barrier(0)
 
         # ── Pipeline stage (double-buffered B) ────────────────────
         def pipeline_stage(read_stage, next_k_val=None, read_next=True):
@@ -197,6 +230,9 @@ def compile_preshuffle_gemm_v2(
             # 4. Write A tile to LDS + barrier
             fx.copy(uni_copy_g2s, frag_copy_A, pA_s[None, None, None, write_stage])
             gpu.barrier()
+            # NOTE: hot_loop_scheduler intentionally NOT called here.
+            # Testing shows LLVM HW scheduler outperforms manual scheduling
+            # for the layout API's instruction pattern (98% vs 83% for 64x128x64).
 
         # ── Prologue ──────────────────────────────────────────────
         fx.copy(buf_copy_g2s, pA_g[None, None, None, 0], frag_copy_A)
@@ -268,7 +304,7 @@ def compile_preshuffle_gemm_v2(
                 m_repeat=m_repeat, lane_div_16=lane_div_16, bx_m=bx_m, body_row=body_row,
             )
         else:
-            # f16/bf16: truncate + vectorized fx.copy (fast epilogue)
+            # f16/bf16: truncate + vectorized fx.copy
             frag_C_out.store(arith.trunc_f(T.vec(acc_size, out_elem_cls.ir_type), frag_C.load()))
             fx.copy(buf_copy_out, frag_C_retile, pC_g)
 
@@ -294,7 +330,6 @@ def compile_preshuffle_gemm_v2(
             mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 16, BFloat16))
             k_perm = fx.make_layout((4, 4, 2), (1, 8, 4))
         else:
-            # fp8: no k_perm (rank mismatch with B partition)
             mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 32, layout_elem))
             k_perm = None
 
@@ -337,7 +372,7 @@ def compile_preshuffle_gemm_v2(
                            ((s_nlane, s_n0), (1, s_klane, s_k0))),
         ))
 
-        # Reshape A and C to 2D (static K/N, large M for OOB safety)
+        # Reshape A and C to 2D
         M_max = 65536
         arg_a_2d = fx.Tensor(fx.make_view(
             fx.get_iter(arg_a), fx.make_layout((M_max, K), (K, 1)),
