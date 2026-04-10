@@ -73,18 +73,18 @@ def gemm_kernel(
     mma_frag_C_f16 = fx.make_fragment_like(mma_frag_C, fx.Float16.ir_type)
     mma_frag_C_retile = thr_copy_r2g_C.retile(mma_frag_C_f16)
 
-    def run_pipeline_stage(read_stage, next_k, read_next=True):
+    def run_pipeline_stage(read_stage, next_k, read_next=True, buffer_copy_128b_v=None):
         write_stage = read_stage ^ 1
 
         if read_next:
             next_k = fx.Int32(next_k)
             fx.copy(
-                buffer_copy_128b.set_value("soffset", next_k * BLOCK_K),
+                buffer_copy_128b_v.set_value("soffset", next_k * BLOCK_K),
                 thr_gA_k[None, None, None, 0], # global offset is added on the soffset of buffer_copy_atom
                 copy_frag_A,
             )
             fx.copy(
-                buffer_copy_128b,
+                buffer_copy_128b_v,
                 thr_gB_k[None, None, None, next_k],
                 mma_frag_B_retile[None, None, None, write_stage],
             )
@@ -142,11 +142,11 @@ def gemm_kernel(
     fx.gpu.barrier()
 
     for k_iter in range(0, K // BLOCK_K - 2, 2):
-        run_pipeline_stage(read_stage=0, next_k=k_iter + 1)
-        run_pipeline_stage(read_stage=1, next_k=k_iter + 2)
+        run_pipeline_stage(read_stage=0, next_k=k_iter + 1, buffer_copy_128b_v=buffer_copy_128b)
+        run_pipeline_stage(read_stage=1, next_k=k_iter + 2, buffer_copy_128b_v=buffer_copy_128b)
 
-    run_pipeline_stage(read_stage=0, next_k=K // BLOCK_K - 1)
-    run_pipeline_stage(read_stage=1, next_k=None, read_next=False)
+    run_pipeline_stage(read_stage=0, next_k=K // BLOCK_K - 1, buffer_copy_128b_v=buffer_copy_128b)
+    run_pipeline_stage(read_stage=1, next_k=None, read_next=False, buffer_copy_128b_v=buffer_copy_128b)
 
     mma_frag_C_f16.store(fx.arith.trunc_f(fx.T.VectorType.get([64], fx.T.f16()), mma_frag_C.load()))
     fx.copy(buffer_copy_16b, mma_frag_C_retile, thr_gC)
