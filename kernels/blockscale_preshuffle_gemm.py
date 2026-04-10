@@ -467,9 +467,9 @@ def compile_blockscale_preshuffle_gemm(
         c_M = fx.Index(M)
         row_off_base = lane_div_16 * 4
 
-        def load_scales_for_tile(k_base):
-            """Load and combine scales for all scale blocks in a K-tile. Returns list of combined_scales."""
-            all_combined = []
+        def issue_scale_loads(k_base):
+            """Issue buffer_loads for scale data only (no v_pk_mul). Returns raw vectors."""
+            all_raw = []
             for sb in range_constexpr(sb_per_tile):
                 kb = k_base // c_scale_block_k + fx.Index(sb)
                 sa_base_offset = kb * c_M
@@ -493,6 +493,15 @@ def compile_blockscale_preshuffle_gemm(
                     )
                     s_a_vecs.append(vector.bitcast(T.f32x4, s_a_vec))
 
+                all_raw.append((s_a_vecs, s_b_vals))
+            return all_raw
+
+        def combine_scales(all_raw):
+            """Combine scale_a * scale_b via v_pk_mul. Call after MFMA for latency hiding."""
+            all_combined = []
+            for sb_raw in all_raw:
+                s_a_vecs, s_b_vals = sb_raw
+
                 s_b_vecs = []
                 for ni in range_constexpr(num_acc_n):
                     s_b_vecs.append(vector.broadcast(T.f32x4, s_b_vals[ni]))
@@ -506,6 +515,10 @@ def compile_blockscale_preshuffle_gemm(
                     combined_scales.append(mi_combined)
                 all_combined.append(combined_scales)
             return all_combined
+
+        def load_scales_for_tile(k_base):
+            """Load and combine scales in one step (for epilogue)."""
+            return combine_scales(issue_scale_loads(k_base))
 
         def compute_tile_blockscale(
             global_accs, b_tile_in, lds_buffer, pre_scales, *, a0_prefetch=None
@@ -735,10 +748,11 @@ def compile_blockscale_preshuffle_gemm(
 
         # ── Main pipeline: prologue ───────────────────────────────────────
         k0 = fx.Index(0)
+        raw_scales_pong = issue_scale_loads(k0)
         b_tile_pong = prefetch_b_tile(k0)
-        scales_pong = load_scales_for_tile(k0)
         _load_a_to_lds(k0, lds_a_pong)
         gpu.barrier()
+        scales_pong = combine_scales(raw_scales_pong)
         global_accs = [acc_init] * (num_acc_n * m_repeat)
 
         a0_prefetch_pong = prefetch_a0_pack(lds_a_pong)
@@ -749,9 +763,9 @@ def compile_blockscale_preshuffle_gemm(
             for k_iv in range_constexpr(0, K - tile_k, tile_k * 2):
                 _k = fx.Index(k_iv)
                 next_k1 = _k + tile_k
+                raw_scales_ping = issue_scale_loads(next_k1)
                 _load_a_to_lds(next_k1, lds_a_ping)
                 b_tile_ping = prefetch_b_tile(next_k1)
-                scales_ping = load_scales_for_tile(next_k1)
 
                 global_accs = compute_tile_blockscale(
                     global_accs, b_tile_pong, lds_a_pong, scales_pong,
@@ -760,15 +774,16 @@ def compile_blockscale_preshuffle_gemm(
                 a0_prefetch_pong = None
 
                 hot_loop_scheduler()
+                scales_ping = combine_scales(raw_scales_ping)
                 if use_async_copy:
                     rocdl.s_waitcnt(num_b_loads)
                 gpu.barrier()
                 a0_prefetch_ping = prefetch_a0_pack(lds_a_ping)
 
                 next_k2 = _k + tile_k * 2
+                raw_scales_pong = issue_scale_loads(next_k2)
                 _load_a_to_lds(next_k2, lds_a_pong)
                 b_tile_pong = prefetch_b_tile(next_k2)
-                scales_pong = load_scales_for_tile(next_k2)
 
                 global_accs = compute_tile_blockscale(
                     global_accs, b_tile_ping, lds_a_ping, scales_ping,
@@ -777,6 +792,7 @@ def compile_blockscale_preshuffle_gemm(
                 a0_prefetch_ping = None
 
                 hot_loop_scheduler()
+                scales_pong = combine_scales(raw_scales_pong)
                 if use_async_copy:
                     rocdl.s_waitcnt(num_b_loads)
                 gpu.barrier()
@@ -791,9 +807,9 @@ def compile_blockscale_preshuffle_gemm(
             for k_iv in range_constexpr(0, K - tile_k * 3, tile_k * 2):
                 _k = fx.Index(k_iv)
                 next_k1 = _k + tile_k
+                raw_scales_ping = issue_scale_loads(next_k1)
                 _load_a_to_lds(next_k1, lds_a_ping)
                 b_tile_ping = prefetch_b_tile(next_k1)
-                scales_ping = load_scales_for_tile(next_k1)
 
                 global_accs = compute_tile_blockscale(
                     global_accs, b_tile_pong, lds_a_pong, scales_pong,
@@ -801,6 +817,7 @@ def compile_blockscale_preshuffle_gemm(
                 )
                 a0_prefetch_pong = None
                 hot_loop_scheduler()
+                scales_ping = combine_scales(raw_scales_ping)
                 if use_async_copy:
                     rocdl.s_waitcnt(num_b_loads)
                 gpu.barrier()
@@ -808,9 +825,9 @@ def compile_blockscale_preshuffle_gemm(
                 a0_prefetch_ping = prefetch_a0_pack(lds_a_ping)
 
                 next_k2 = _k + tile_k * 2
+                raw_scales_pong = issue_scale_loads(next_k2)
                 _load_a_to_lds(next_k2, lds_a_pong)
                 b_tile_pong = prefetch_b_tile(next_k2)
-                scales_pong = load_scales_for_tile(next_k2)
 
                 global_accs = compute_tile_blockscale(
                     global_accs, b_tile_ping, lds_a_ping, scales_ping,
@@ -819,6 +836,7 @@ def compile_blockscale_preshuffle_gemm(
                 a0_prefetch_ping = None
 
                 hot_loop_scheduler()
+                scales_pong = combine_scales(raw_scales_pong)
                 if use_async_copy:
                     rocdl.s_waitcnt(num_b_loads)
                 gpu.barrier()
@@ -827,9 +845,9 @@ def compile_blockscale_preshuffle_gemm(
             last_k = arith.index(K - tile_k)
             second_last_k = arith.index(K - tile_k * 2)
 
+            raw_scales_ping = issue_scale_loads(last_k)
             _load_a_to_lds(last_k, lds_a_ping)
             b_tile_ping = prefetch_b_tile(last_k)
-            scales_ping = load_scales_for_tile(last_k)
 
             global_accs = compute_tile_blockscale(
                 global_accs, b_tile_pong, lds_a_pong, scales_pong,
@@ -838,6 +856,7 @@ def compile_blockscale_preshuffle_gemm(
             a0_prefetch_pong = None
 
             hot_loop_scheduler()
+            scales_ping = combine_scales(raw_scales_ping)
             if use_async_copy:
                 rocdl.s_waitcnt(num_b_loads)
             gpu.barrier()
