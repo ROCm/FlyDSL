@@ -14,9 +14,11 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.compiler.kernel_function import CompilationContext
 
-from flydsl.expr import arith, vector, gpu, range_constexpr
+from flydsl.expr import arith, gpu, range_constexpr
 from flydsl.expr.arith import ArithValue
 from flydsl.expr.typing import T, Int32
+from flydsl.expr.tensor_ssa import TensorSSA, ReductionOp, full
+from flydsl.expr.numeric import Numeric, Float32, Uint32
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 
@@ -128,38 +130,31 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
         # Fast path: N is a multiple of tile_cols
         # ==================================================================
         if N >= tile_cols and N % tile_cols == 0 and elem_bits <= 16:
-            from flydsl.expr.arith import ArithValue
-
             num_tiles = N // tile_cols
-
-            vec_type_c = T.vec(VEC_WIDTH, compute_type)
-            vec_type_e = T.vec(VEC_WIDTH, elem_type)
+            elem_dtype = Numeric.from_ir_type(elem_type)
 
             # ── Layout API: buffer-backed tensors + tiled access ─────
             Input_buf = fx.rocdl.make_buffer_tensor(Input)
             Output_buf = fx.rocdl.make_buffer_tensor(Output)
             Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma)
 
-            # Slice at row 0; actual row offset via soffset (SGPR)
-            row_in = fx.slice(Input_buf, (0, None))
-            row_out = fx.slice(Output_buf, (0, None))
+            row_in = fx.slice(Input_buf, (bid, None))
+            row_out = fx.slice(Output_buf, (bid, None))
 
             in_div = fx.logical_divide(row_in, fx.make_layout(VEC_WIDTH, 1))
             out_div = fx.logical_divide(row_out, fx.make_layout(VEC_WIDTH, 1))
             gamma_div = fx.logical_divide(Gamma_buf, fx.make_layout(VEC_WIDTH, 1))
 
-            copy_atom_base = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), elem_bits)
-            bid_row_offset = ArithValue(bid) * fx.Int32(N)
-            copy_atom = copy_atom_base.set_value("soffset", bid_row_offset)
+            copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), elem_bits)
             vec_reg_ty = fx.MemRefType.get(
                 elem_type, fx.LayoutType.get(VEC_WIDTH, 1), fx.AddressSpace.Register
             )
             vec_reg_lay = fx.make_layout(VEC_WIDTH, 1)
 
-            def _load_vec(div_tensor, idx, atom=None):
+            def _load_vec(div_tensor, idx):
                 r = fx.memref_alloca(vec_reg_ty, vec_reg_lay)
-                fx.copy_atom_call(atom if atom is not None else copy_atom, fx.slice(div_tensor, (None, idx)), r)
-                return ArithValue(fx.memref_load_vec(r))
+                fx.copy_atom_call(copy_atom, fx.slice(div_tensor, (None, idx)), r)
+                return TensorSSA(fx.memref_load_vec(r), VEC_WIDTH, elem_dtype)
 
             def _store_vec(val, div_tensor, idx):
                 r = fx.memref_alloca(vec_reg_ty, vec_reg_lay)
@@ -169,75 +164,52 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
             c_zero_f = arith.constant(0.0, type=compute_type)
             thread_sumsq = c_zero_f
             thread_dummy = c_zero_f
-            cache_as_elem = (dtype_str != "f32")
             in_local = []
 
             # Pass 1: load + cache + sumsq
             for tile_i in range_constexpr(num_tiles):
                 idx = tid + tile_i * BLOCK_THREADS
-                vec_e = _load_vec(in_div, idx)
+                vec = _load_vec(in_div, idx)
+                in_local.append(vec)
+                x = vec.to(Float32)
 
-                if cache_as_elem:
-                    in_local.append(vec_e)
-                    x = vec_e.extf(vec_type_c)
-                else:
-                    x = vec_e
-                    in_local.append(x)
-
-                x_av = ArithValue(x)
-                x2 = x_av * x_av
-                red2 = vector.reduction(compute_type, vector.CombiningKind.ADD, x2, fastmath=fm_fast)
+                x2 = x * x
+                red2 = x2.reduce(ReductionOp.ADD, fastmath=fm_fast)
                 thread_sumsq = ArithValue(thread_sumsq) + red2
 
             _, sum_sq = block_reduce_add2(thread_dummy, thread_sumsq)
             mean_sq = ArithValue(sum_sq) / n_float
             ms_eps = ArithValue(mean_sq) + eps_c
             rrms = ms_eps.rsqrt(fastmath=fm_fast)
-            rrms_splat = vector.broadcast(vec_type_c, rrms)
-            rrms_splat_av = ArithValue(rrms_splat)
 
             # Pass 2: normalize + gamma + store (reuse cached input)
             for tile_i in range_constexpr(num_tiles):
                 idx = tid + tile_i * BLOCK_THREADS
 
-                g_e = _load_vec(gamma_div, idx, atom=copy_atom_base)
-                g = g_e if dtype_str == "f32" else g_e.extf(vec_type_c)
+                g = _load_vec(gamma_div, idx).to(Float32)
+                x = in_local[tile_i].to(Float32)
 
-                x = in_local[tile_i]
-                if cache_as_elem:
-                    x = x.extf(vec_type_c)
-
-                x_av = ArithValue(x)
-                g_av = ArithValue(g)
-                y = (x_av * rrms_splat_av) * g_av
-                y_val = y
+                y = (x * rrms) * g
 
                 if dtype_str == "bf16":
                     if USE_HW_CVT_PK_BF16_F32:
-                        out_e = y_val.truncf(vec_type_e)
+                        out_e = y.to(elem_dtype)
                     else:
-                        vec_i32_ty = T.vec(VEC_WIDTH, T.i32)
-                        vec4_i32_ty = T.vec(VEC_WIDTH // 2, T.i32)
-                        vec_bf16_ty = T.vec(VEC_WIDTH, elem_type)
-                        c16_i32 = arith.constant(16, type=T.i32)
-                        c16_v = vector.broadcast(vec_i32_ty, c16_i32)
-                        u = y_val.bitcast(vec_i32_ty)
-                        upper = u.shrui(c16_v)
-                        c1_v = vector.broadcast(vec_i32_ty, arith.constant(1, type=T.i32))
-                        lsb = upper & c1_v
-                        c7fff_v = vector.broadcast(vec_i32_ty, arith.constant(0x7FFF, type=T.i32))
-                        bias = ArithValue(c7fff_v) + ArithValue(lsb)
-                        u_round = ArithValue(u) + bias
-                        bf16_bits = u_round.shrui(c16_v)
-                        even = vector.shuffle(bf16_bits, bf16_bits, [0, 2, 4, 6])
-                        odd = vector.shuffle(bf16_bits, bf16_bits, [1, 3, 5, 7])
-                        odd_sh = odd << vector.broadcast(vec4_i32_ty, c16_i32)
+                        u = y.bitcast(Uint32)
+                        upper = u >> 16
+                        lsb = upper & 1
+                        bias = lsb + 0x7FFF
+                        u_round = y.bitcast(Uint32) + bias
+                        bf16_bits = u_round >> 16
+                        even = bf16_bits.shuffle(bf16_bits, [0, 2, 4, 6])
+                        odd = bf16_bits.shuffle(bf16_bits, [1, 3, 5, 7])
+                        odd_sh = odd << 16
                         packed = even | odd_sh
-                        out_e = vector.bitcast(vec_bf16_ty, packed)
+                        out_e = packed.bitcast(elem_dtype)
                 elif dtype_str == "f32":
-                    out_e = y_val
+                    out_e = y
                 else:
-                    out_e = y_val.truncf(vec_type_e)
+                    out_e = y.to(elem_dtype)
 
                 out_idx = tid + tile_i * BLOCK_THREADS
                 _store_vec(out_e, out_div, out_idx)
@@ -246,22 +218,19 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
             # ==============================================================
             # Generic path: scalar 2-pass for arbitrary N
             # ==============================================================
-            from flydsl.expr.arith import ArithValue
+            elem_dtype = Numeric.from_ir_type(elem_type)
 
             Input_buf = fx.rocdl.make_buffer_tensor(Input)
             Output_buf = fx.rocdl.make_buffer_tensor(Output)
             Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma)
 
-            # Slice at row 0; actual row offset via soffset (SGPR)
-            row_in = fx.slice(Input_buf, (0, None))
-            row_out = fx.slice(Output_buf, (0, None))
+            row_in = fx.slice(Input_buf, (bid, None))
+            row_out = fx.slice(Output_buf, (bid, None))
 
-            copy_atom_s_base = fx.make_copy_atom(
+            copy_atom_s = fx.make_copy_atom(
                 fx.rocdl.BufferCopy16b() if elem_bits <= 16 else fx.rocdl.BufferCopy32b(),
                 elem_bits,
             )
-            bid_row_offset = ArithValue(bid) * fx.Int32(N)
-            copy_atom_s = copy_atom_s_base.set_value("soffset", bid_row_offset)
             scalar_reg_ty = fx.MemRefType.get(elem_type, fx.LayoutType.get(1, 1), fx.AddressSpace.Register)
             scalar_reg_lay = fx.make_layout(1, 1)
 
@@ -269,18 +238,17 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
             gamma_div = fx.logical_divide(Gamma_buf, fx.make_layout(1, 1))
             out_div = fx.logical_divide(row_out, fx.make_layout(1, 1))
 
-            def _load_scalar(divided_tensor, index, atom=None):
+            def _load_scalar(divided_tensor, index):
                 view = fx.slice(divided_tensor, (None, index))
                 r = fx.memref_alloca(scalar_reg_ty, scalar_reg_lay)
-                fx.copy_atom_call(atom if atom is not None else copy_atom_s, view, r)
-                v = fx.memref_load_vec(r)
-                return vector.extract(v, static_position=[0])
+                fx.copy_atom_call(copy_atom_s, view, r)
+                ts = TensorSSA(fx.memref_load_vec(r), 1, elem_dtype)
+                return ts[0].ir_value()
 
             def _store_scalar(divided_tensor, index, val):
                 r = fx.memref_alloca(scalar_reg_ty, scalar_reg_lay)
-                vec_ty = T.vec(1, elem_type)
-                v = vector.from_elements(vec_ty, [val])
-                fx.memref_store_vec(v, r)
+                ts = full(1, elem_dtype(val), elem_dtype)
+                fx.memref_store_vec(ts, r)
                 view = fx.slice(divided_tensor, (None, index))
                 fx.copy_atom_call(copy_atom_s, r, view)
 
@@ -310,7 +278,7 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
                 c_N_i32 = Int32(N)
                 if arith.cmpi(arith.CmpIPredicate.ult, idx, c_N_i32):
                     x_e = _load_scalar(row_div, idx)
-                    g_e = _load_scalar(gamma_div, idx, atom=copy_atom_s_base)
+                    g_e = _load_scalar(gamma_div, idx)
                     x = x_e if dtype_str == "f32" else x_e.extf(compute_type)
                     g = g_e if dtype_str == "f32" else g_e.extf(compute_type)
                     norm = ArithValue(x) * ArithValue(rrms)

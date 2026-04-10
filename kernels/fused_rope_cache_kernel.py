@@ -26,10 +26,12 @@ KV cache layouts:
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 
-from flydsl.expr import vector, range_constexpr
+from flydsl.expr import range_constexpr
 from flydsl.expr.arith import ArithValue
 from flydsl.expr.typing import T
 from flydsl.expr import buffer_ops
+from flydsl.expr.tensor_ssa import TensorSSA
+from flydsl.expr.numeric import Numeric, Uint32
 from kernels.kernels_common import dtype_to_elem_type
 from kernels.mfma_preshuffle_pipeline import crd2idx
 
@@ -73,7 +75,7 @@ def _store_vec_buf(copy_atom, vec_reg_ty, vec_reg_lay, val, div_tensor, idx):
 
 def _apply_neox_rope(qk_div, cos_div, sin_div, pair_div,
                      qk_tid, cos_tid, pair_tid, is_first_half,
-                     copy_atom, vec_reg_ty, vec_reg_lay, cos_atom=None):
+                     copy_atom, vec_reg_ty, vec_reg_lay):
     """Load, rotate (NeoX), and return the rotated vector.
 
     Performs:
@@ -86,15 +88,13 @@ def _apply_neox_rope(qk_div, cos_div, sin_div, pair_div,
         qk_tid:   index into qk_div for current thread's vector
         cos_tid:  index into cos_div/sin_div (tid % vecs_per_half)
         pair_tid: index into pair_div for partner vector
-        cos_atom: optional separate copy atom for cos/sin loads (e.g. with different soffset)
 
     Returns:
         rot_e: rotated vector in element type
     """
-    cs_atom = cos_atom if cos_atom is not None else copy_atom
     qk_e   = _load_vec_buf(copy_atom, vec_reg_ty, vec_reg_lay, qk_div, qk_tid)
-    cos_e  = _load_vec_buf(cs_atom, vec_reg_ty, vec_reg_lay, cos_div, cos_tid)
-    sin_e  = _load_vec_buf(cs_atom, vec_reg_ty, vec_reg_lay, sin_div, cos_tid)
+    cos_e  = _load_vec_buf(copy_atom, vec_reg_ty, vec_reg_lay, cos_div, cos_tid)
+    sin_e  = _load_vec_buf(copy_atom, vec_reg_ty, vec_reg_lay, sin_div, cos_tid)
     pair_e = _load_vec_buf(copy_atom, vec_reg_ty, vec_reg_lay, pair_div, pair_tid)
 
     # NeoX sign: first half uses -sin, second half uses +sin
@@ -225,24 +225,19 @@ def build_fused_rope_cache_module(
             # Load position
             pos_val = buffer_ops.buffer_load(pos_rsrc, pid_t, vec_width=1, dtype=T.i32)
 
-            # Slice at (0,0,:); actual row offset via soffset (SGPR)
-            q_row = fx.slice(Q_buf, (0, 0, None))
+            # Q[pid_t, pid_hq, :] tiled by VEC_WIDTH
+            q_row = fx.slice(Q_buf, (pid_t, fx.Int32(pid_hq), None))
             q_div = fx.logical_divide(q_row, fx.make_layout(VEC_WIDTH, 1))
-            qo_row = fx.slice(Qo_buf, (0, 0, None))
+
+            # Q_out[pid_t, pid_hq, :] tiled by VEC_WIDTH
+            qo_row = fx.slice(Qo_buf, (pid_t, fx.Int32(pid_hq), None))
             qo_div = fx.logical_divide(qo_row, fx.make_layout(VEC_WIDTH, 1))
 
-            # soffset for Q/Q_out: token*heads*dim + head*dim (in elements)
-            q_soffset = ArithValue(pid_t) * fx.Int32(num_q_heads * head_dim) + ArithValue(pid_hq) * fx.Int32(head_dim)
-            copy_atom_qk = copy_atom.set_value("soffset", q_soffset)
-
-            # cos/sin: slice at row 0, soffset = pos_val * half_dim
-            cos_row = fx.slice(Cos_buf, (0, None))
+            # cos/sin[pos_val, :] tiled by VEC_WIDTH
+            cos_row = fx.slice(Cos_buf, (pos_val, None))
             cos_div = fx.logical_divide(cos_row, fx.make_layout(VEC_WIDTH, 1))
-            sin_row = fx.slice(Sin_buf, (0, None))
+            sin_row = fx.slice(Sin_buf, (pos_val, None))
             sin_div = fx.logical_divide(sin_row, fx.make_layout(VEC_WIDTH, 1))
-
-            cs_soffset = ArithValue(pos_val) * fx.Int32(half_dim)
-            copy_atom_cs = copy_atom.set_value("soffset", cs_soffset)
 
             # NeoX rotation: pair with opposite half
             is_first_half = tid < fx.Int32(vecs_per_half)
@@ -253,9 +248,9 @@ def build_fused_rope_cache_module(
             rot_e = _apply_neox_rope(
                 q_div, cos_div, sin_div, q_div,
                 tid, cos_vec_idx, pair_tid, is_first_half,
-                copy_atom_qk, vec_reg_ty, vec_reg_lay, cos_atom=copy_atom_cs,
+                copy_atom, vec_reg_ty, vec_reg_lay,
             )
-            _store_vec_buf(copy_atom_qk, vec_reg_ty, vec_reg_lay, rot_e, qo_div, tid)
+            _store_vec_buf(copy_atom, vec_reg_ty, vec_reg_lay, rot_e, qo_div, tid)
 
     # ----- Kernel 2: K RoPE + KV cache write -----
     # Grid: (T * KH, 1, 1), one program per (token, kv_head)
@@ -276,8 +271,7 @@ def build_fused_rope_cache_module(
         tid = fx.thread_idx.x   # 0..63
 
         elem_type = dtype_to_elem_type(dtype_str)
-        vec_type_e = T.vec(VEC_WIDTH, elem_type)
-        i32_vec_ty = T.vec(vec_dwords, T.i32)
+        elem_dtype = Numeric.from_ir_type(elem_type)
         elem_bits = 16  # bf16/f16 only
 
         # Buffer-backed tensors via layout API
@@ -304,24 +298,19 @@ def build_fused_rope_cache_module(
             # Load position
             pos_val = buffer_ops.buffer_load(pos_rsrc, pid_t, vec_width=1, dtype=T.i32)
 
-            # Slice at (0,0,:); actual row offset via soffset (SGPR)
-            k_row = fx.slice(K_buf, (0, 0, None))
+            # K[pid_t, pid_hk, :] tiled by VEC_WIDTH
+            k_row = fx.slice(K_buf, (pid_t, fx.Int32(pid_hk), None))
             k_div = fx.logical_divide(k_row, fx.make_layout(VEC_WIDTH, 1))
-            ko_row = fx.slice(Ko_buf, (0, 0, None))
+
+            # K_out[pid_t, pid_hk, :] tiled by VEC_WIDTH
+            ko_row = fx.slice(Ko_buf, (pid_t, fx.Int32(pid_hk), None))
             ko_div = fx.logical_divide(ko_row, fx.make_layout(VEC_WIDTH, 1))
 
-            # soffset for K/K_out: token*heads*dim + head*dim (in elements)
-            kv_soffset = ArithValue(pid_t) * fx.Int32(num_kv_heads * head_dim) + ArithValue(pid_hk) * fx.Int32(head_dim)
-            copy_atom_kv = copy_atom.set_value("soffset", kv_soffset)
-
-            # cos/sin: slice at row 0, soffset = pos_val * half_dim
-            cos_row = fx.slice(Cos_buf, (0, None))
+            # cos/sin[pos_val, :] tiled by VEC_WIDTH
+            cos_row = fx.slice(Cos_buf, (pos_val, None))
             cos_div = fx.logical_divide(cos_row, fx.make_layout(VEC_WIDTH, 1))
-            sin_row = fx.slice(Sin_buf, (0, None))
+            sin_row = fx.slice(Sin_buf, (pos_val, None))
             sin_div = fx.logical_divide(sin_row, fx.make_layout(VEC_WIDTH, 1))
-
-            cs_soffset = ArithValue(pos_val) * fx.Int32(half_dim)
-            copy_atom_cs = copy_atom.set_value("soffset", cs_soffset)
 
             # NeoX rotation
             is_first_half = tid < fx.Int32(vecs_per_half)
@@ -331,9 +320,9 @@ def build_fused_rope_cache_module(
             k_rot_e = _apply_neox_rope(
                 k_div, cos_div, sin_div, k_div,
                 tid, cos_vec_idx, pair_tid, is_first_half,
-                copy_atom_kv, vec_reg_ty, vec_reg_lay, cos_atom=copy_atom_cs,
+                copy_atom, vec_reg_ty, vec_reg_lay,
             )
-            _store_vec_buf(copy_atom_kv, vec_reg_ty, vec_reg_lay, k_rot_e, ko_div, tid)
+            _store_vec_buf(copy_atom, vec_reg_ty, vec_reg_lay, k_rot_e, ko_div, tid)
 
             # --- KV Cache write ---
             slot_val = buffer_ops.buffer_load(slot_rsrc, pid_t, vec_width=1, dtype=T.i32)
@@ -342,14 +331,15 @@ def build_fused_rope_cache_module(
                 pid_t_slot = ArithValue(slot_val) // block_size
                 pid_b = ArithValue(slot_val) % block_size
 
-                # Load V via layout API (same soffset as K)
-                v_row = fx.slice(V_buf, (0, 0, None))
+                # Load V via layout API
+                v_row = fx.slice(V_buf, (pid_t, fx.Int32(pid_hk), None))
                 v_div = fx.logical_divide(v_row, fx.make_layout(VEC_WIDTH, 1))
-                v_e = _load_vec_buf(copy_atom_kv, vec_reg_ty, vec_reg_lay, v_div, tid)
+                v_e = _load_vec_buf(copy_atom, vec_reg_ty, vec_reg_lay, v_div, tid)
 
                 # Bitcast for KV cache stores (buffer_ops needs i32 vecs)
-                k_rot_i32 = vector.bitcast(i32_vec_ty, k_rot_e)
-                v_raw = vector.bitcast(i32_vec_ty, v_e)
+                k_rot_i32 = TensorSSA(k_rot_e, VEC_WIDTH, elem_dtype).bitcast(Uint32)
+                v_ts = TensorSSA(v_e, VEC_WIDTH, elem_dtype)
+                v_raw = v_ts.bitcast(Uint32)
 
                 # KV cache dword offset for stores (scattered, keep buffer_ops)
                 kv_coord = (pid_t, fx.Int32(pid_hk), tid)
@@ -396,7 +386,7 @@ def build_fused_rope_cache_module(
                          1),
                     )
                     for vi in range_constexpr(VEC_WIDTH):
-                        v_scalar = vector.extract(v_e, static_position=[vi])
+                        v_scalar = v_ts[vi]
                         d_idx = ArithValue(tid) * VEC_WIDTH + vi
                         vc_coord = (pid_t_slot, pid_hk, d_idx, pid_b)
                         vc_elem_off = ArithValue(crd2idx(vc_coord, vc_nf_layout)).index_cast(T.i32)

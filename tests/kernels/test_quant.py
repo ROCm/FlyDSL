@@ -50,13 +50,15 @@ except Exception:
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.compiler.kernel_function import CompilationContext
-from flydsl.expr import arith, vector, gpu, range_constexpr
+from flydsl.expr import arith, gpu, range_constexpr
 from flydsl.expr.typing import T, Int32
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from flydsl.runtime.device import get_rocm_arch
 from flydsl._mlir import ir
 from flydsl.expr import buffer_ops
 from flydsl.expr.arith import ArithValue
+from flydsl.expr.tensor_ssa import TensorSSA, full, ReductionOp
+from flydsl.expr.numeric import Float16, Float32, Int8
 from tests.test_common import run_perftest
 
 BLOCK_THREADS = 256
@@ -174,13 +176,9 @@ def build_quant_module(N):
         def _load_vec_f16(div_tensor, idx):
             r = fx.memref_alloca(vec_reg_ty_f16, vec_reg_lay)
             fx.copy_atom_call(copy_atom_in, fx.slice(div_tensor, (None, idx)), r)
-            return ArithValue(fx.memref_load_vec(r))
+            return TensorSSA(fx.memref_load_vec(r), VEC_WIDTH, Float16)
 
-        vec_type_f32 = T.vec(VEC_WIDTH, T.f32)
-
-        # abs via sign-bit clearing (|x| = bitcast(bitcast(x, i32) & 0x7FFFFFFF, f32))
-        i32_vec_ty = T.vec(VEC_WIDTH, T.i32)
-        abs_mask = arith.constant_vector(0x7FFFFFFF, i32_vec_ty)
+        abs_mask = full(VEC_WIDTH, Int32(0x7FFFFFFF), Int32)
 
         c_zero_f = arith.constant(0.0, type=T.f32)
         local_max = c_zero_f
@@ -193,15 +191,15 @@ def build_quant_module(N):
             is_valid = col_end <= N
 
             vec_f16 = _load_vec_f16(in_div, idx)
-            vec_f32 = vec_f16.extf(vec_type_f32)
+            vec_f32 = vec_f16.to(Float32)
             cached_vecs.append(vec_f32)
 
-            vec_i32 = vec_f32.bitcast(i32_vec_ty)
-            vec_abs_i32 = arith.andi(vec_i32, abs_mask)
-            vec_abs = vector.bitcast(vec_type_f32, vec_abs_i32)
+            vec_i32 = vec_f32.bitcast(Int32)
+            vec_abs_i32 = vec_i32 & abs_mask
+            vec_abs = vec_abs_i32.bitcast(Float32)
 
-            chunk_max = vector.reduction(T.f32, "maxnumf", vec_abs)
-            chunk_max_safe = arith.select(is_valid, chunk_max, c_zero_f)
+            chunk_max = vec_abs.reduce(ReductionOp.MAX)
+            chunk_max_safe = arith.select(is_valid, chunk_max.ir_value(), c_zero_f)
             local_max = local_max.maximumf(chunk_max_safe)
 
         reduced_max = block_reduce_max(local_max)
@@ -219,20 +217,16 @@ def build_quant_module(N):
 
         # ── Pass 2: quantize f32 → i8, store ─────────────────────────────
         inv_scale = ArithValue(c_1) / ArithValue(final_scale)
-        inv_scale_splat = vector.broadcast(vec_type_f32, inv_scale)
-
-        vec_type_i8 = T.vec(VEC_WIDTH, T.i8)
-        i32_vec_ty_out = T.vec(vec_dwords_i8, T.i32)
 
         for tile_i in range_constexpr(num_tiles):
             col_end = ArithValue(tid) * VEC_WIDTH + (tile_i * tile_cols + VEC_WIDTH)
             is_valid = col_end <= N
 
             vec_f32 = cached_vecs[tile_i]
-            vec_scaled = ArithValue(vec_f32) * ArithValue(inv_scale_splat)
+            vec_scaled = vec_f32 * inv_scale
 
-            vec_i8 = arith.FPToSIOp(vec_type_i8, arith.unwrap(vec_scaled)).result
-            out_packed = vector.bitcast(i32_vec_ty_out, vec_i8)
+            vec_i8 = vec_scaled.to(Int8)
+            out_packed = vec_i8.bitcast(Int32)
 
             col_bytes_out = ArithValue(thr_col_bytes_i8) + (tile_i * tile_cols * elem_bytes_i8)
             dw_out = col_bytes_out.shrui(arith.constant(2, type=T.i32))
