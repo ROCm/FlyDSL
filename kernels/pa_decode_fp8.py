@@ -772,8 +772,9 @@ def compile_pa_decode_ps(
 
             def _qk_and_intra_softmax(k_ops, partition_start, v_block_base_dw, tile_token_offset_i32, phys_block=None):
                 """Phase 1: QK MFMA + intra-warp softmax + LDS write max/sum.
-                Returns (d_out, v_ops, v_scale_vecs) where v_scale_vecs is a list of f32x4
-                for each td (per-token mode) or None (per-tensor mode).
+                Returns (d_out, va_dws, v_scale_vecs) where va_dws is the V address
+                array (V data loading is deferred to _pv_mfma), and v_scale_vecs is
+                a list of f32x4 for each td (per-token mode) or None (per-tensor mode).
                 """
                 va_dws = []
                 for vt in range_constexpr(VTLOOP):
@@ -811,20 +812,14 @@ def compile_pa_decode_ps(
                 else:
                     v_scale_vecs = None
 
-                v_results = []
+                # V data loading is deferred to _pv_mfma to reduce peak VGPR pressure.
+                # Only V addresses (va_dws) are kept live across the softmax phases.
                 d_out = []
                 for td in range_constexpr(TLOOP):
-                    vhe_data = []
                     acc = arith.constant_vector(0.0, T.f32x4)
                     for k_step in range_constexpr(QKHELOOP * 2):
-                        if k_step % 2 == 0:
-                            v_4xi32 = buffer_ops.buffer_load(
-                                v_rsrc, va_dws[td][k_step // 2],
-                                vec_width=4, dtype=T.i32)
-                            vhe_data.append(v_4xi32)
                         acc = rocdl.mfma_f32_16x16x32_fp8_fp8(
                             T.f32x4, [k_ops[td][k_step], q_frags[k_step], acc, 0, 0, 0])
-                    v_results.append(vhe_data)
                     if per_token_kv:
                         # per-token: scale by (softmax_scale * q_scale) * k_scale_per_token
                         d_out.append(
@@ -885,7 +880,7 @@ def compile_pa_decode_ps(
                     vector.store(vector.from_elements(T.vec(1, T.f32), [v_max_warp]),
                                  softmax_lds_f32, [_sm_vmax_wr_off])
 
-                return d_out, v_results, v_scale_vecs
+                return d_out, va_dws, v_scale_vecs
 
             def _cross_warp_softmax_and_prob_pack(d_out, rmax, rsum, o0, o1, v_scale_vecs=None):
                 """Phase 2: Cross-warp reduction + online softmax + prob pack to LDS.
@@ -986,14 +981,26 @@ def compile_pa_decode_ps(
                     vector.store(pk_vec, logits_lds_i32, [arith.index_cast(T.index, i32_off)])
                 return rmax, rsum, o0, o1, v_correction
 
-            def _pv_mfma(v_ops, o0, o1, v_correction):
-                """Phase 3: LDS read probs + PV MFMA.
+            def _pv_mfma(va_dws, o0, o1, v_correction):
+                """Phase 3: V data load + LDS read probs + PV MFMA.
                 ASSUMES barrier already called to make prob LDS visible.
-                Reads prob data from LDS and executes PV MFMAs.
+                Loads V data from global memory (deferred from Phase 1a to reduce
+                peak VGPR), reads prob data from LDS, and executes PV MFMAs.
                 v_correction: scalar to multiply PV output by.
                   Per-tensor: v_scale_val (constant).
                   Per-token: v_scale_max/FP8_MAX (per-warp, computed in _cross_warp_softmax_and_prob_pack).
                 """
+                # Load V data here (deferred from _qk_and_intra_softmax to avoid
+                # 32 VGPRs being live across the entire softmax + cross-warp phases).
+                v_ops = []
+                for vt in range_constexpr(VTLOOP):
+                    vhe_data = []
+                    for vhe in range_constexpr(VHELOOP):
+                        v_4xi32 = buffer_ops.buffer_load(
+                            v_rsrc, va_dws[vt][vhe],
+                            vec_width=4, dtype=T.i32)
+                        vhe_data.append(v_4xi32)
+                    v_ops.append(vhe_data)
                 pv_results = [arith.constant_vector(0.0, T.f32x4) for _ in range_constexpr(VHELOOP)]
                 v_i64s = []
                 p_i64s = []
@@ -1045,7 +1052,7 @@ def compile_pa_decode_ps(
                 """Process one 256-token block split inside a 1024-token KV page."""
                 partition_start = kv_start_abs_tok + block_idx_in_work * c_bs + tile_token_offset_i32
                 v_base = (phys_block * c_vb + _v_head_off) // c_four
-                d_out, v_ops, v_scales = _qk_and_intra_softmax(
+                d_out, va_dws, v_scales = _qk_and_intra_softmax(
                     k_ops, partition_start, v_base, tile_token_offset_i32, phys_block
                 )
                 if next_k_base is not None:
@@ -1057,7 +1064,7 @@ def compile_pa_decode_ps(
                     d_out, rmax, rsum, o0, o1, v_scales
                 )
                 gpu.barrier()
-                o0, o1 = _pv_mfma(v_ops, o0, o1, v_correction)
+                o0, o1 = _pv_mfma(va_dws, o0, o1, v_correction)
                 return rmax, rsum, o0, o1, k_next_flat
 
 
