@@ -51,6 +51,9 @@ int32_t BasisAttr::depth() { return static_cast<int32_t>(getModes().size()); }
 
 bool SwizzleAttr::isTrivialSwizzle() const { return getMask() == 0; }
 SwizzleAttr SwizzleAttr::getTrivialSwizzle(MLIRContext *context) { return get(context, 0, 0, 0); }
+int32_t SwizzleAttr::getPeriod() const {
+  return int32_t{1} << (getBase() + getShift() + getMask());
+}
 
 //===----------------------------------------------------------------------===//
 // IntTupleAttr

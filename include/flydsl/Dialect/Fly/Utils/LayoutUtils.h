@@ -237,7 +237,14 @@ auto layoutCrd2Idx(LayoutBuilder<Layout> &builder, typename LayoutBuilder<Layout
 
     auto inner = builder.getInner(layout);
     if (builder.isSwizzle(inner)) {
-      return builder.applySwizzle(intermediate, builder.getSwizzleAttr(inner));
+      auto swizzle = builder.getSwizzleAttr(inner);
+      auto outerResultAttr = builder.getAttr(outerResult);
+      if (outerResultAttr.isLeafInt() &&
+          isDivisible(outerResultAttr.getLeafAsInt(), swizzle.getPeriod())) {
+        auto swizzledOffset = builder.applySwizzle(builder.getOffset(layout), swizzle);
+        return builder.add(swizzledOffset, outerResult);
+      }
+      return builder.applySwizzle(intermediate, swizzle);
     } else {
       return layoutCrd2Idx(builder, intermediate, inner);
     }
