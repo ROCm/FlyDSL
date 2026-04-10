@@ -589,3 +589,158 @@ FlyDSL 仓库中 `kernels/flash_attn_func.py` 已有完整的参考模式：
 | `ds_read_b64_tr_b16` | `ds_read_tr_v4f16()` (L294-307) | `ds_read_tr_bf16x4()` |
 | `vector.store` 写 LDS | L417, L424 | `lds_w.vec_store()` |
 | `_gep_load` 向量化全局加载 | `load_global_f16xN()` (L352) | `w_.vec_load(..., 8)` / `k_.vec_load(..., 8)` |
+
+---
+
+## 六、实施进展与 ISA 指令统计
+
+### 已完成的改动
+
+| # | 改动 | 状态 | 正确性 |
+|---|------|------|--------|
+| 1 | LDS 空间重分配：新增 `lds_wk`（w/k 共享），`lds_vn` 从 f32 改为 bf16 | ✅ 完成 | ✅ 通过 |
+| 2 | Cooperative load 基础设施：线程分解、XOR swizzle、`ds_read_tr` helper | ✅ 完成 | ✅ 通过 |
+| 3 | w 的 cooperative load：`buffer_load_dwordx4` → `ds_write_b128` → LDS | ✅ 完成 | ✅ 通过 |
+| 4 | v_new 写 LDS 改为 bf16：`ds_write_b16` 替代 `ds_write_b32` | ✅ 完成 | ✅ 通过 |
+| 5 | k 的 cooperative load：`buffer_load_dwordx4` → `ds_write_b128` → LDS | ✅ 完成 | ✅ 通过 |
+| 6 | k 的 LDS 读取：`ds_read_b64_tr_b16` 硬件转置 | ✅ 完成 | ✅ 通过 |
+
+### ISA 指令统计对比
+
+| 指令 | 优化前 (279us) | 当前 (611us) | Triton (194us) | 说明 |
+|------|---------------|-------------|---------------|------|
+| `buffer_load_ushort` | ~32 | **4** | 0 | 大幅减少，剩余为 u/g 加载 |
+| `buffer_load_dwordx4` | 0 | **8** | ~12 | w/k cooperative load ✅ |
+| `ds_write_b128` | 0 | **8** | ~16 | w/k 写入 LDS ✅ |
+| `ds_write_b16` | ~8 | **12** | ~4 | h snapshot + v_new bf16 写入 |
+| `ds_read_b128` | 0 | **4** | ~8 | LLVM 自动合并的 k 读取 |
+| `ds_read_b64_tr_b16` | 0 | **8** | **24** | k 的硬件转置读取 ✅ |
+| `ds_read_u16` | 0 | **64** | **0** | **主要瓶颈** |
+| `ds_read2_b32` | ~8 | 0 | 0 | 已消除 |
+| `v_mfma` | 4 | **8** | 8 | 翻倍（按 K-block 循环）✅ |
+| `s_barrier` | 2 | **10** | 20 | cooperative load 引入 |
+
+### 性能退化根因
+
+当前 611us 比优化前 279us 退化了 2.2x，原因是 **64 条 `ds_read_u16`** 的开销远超收益：
+
+| `ds_read_u16` 来源 | 数量 | 说明 |
+|-------------------|------|------|
+| w 的 A 操作数 | 32 | delta correction，swizzle 后 `vec_load` 被编译器拆成标量 |
+| h 的 B 操作数 | 16 | delta correction，8 元素跨行不连续 |
+| v_new 的 B 操作数 | 16 | state update，8 元素跨行不连续 |
+| **总计** | **64** | |
+
+### `ds_read_b64_tr_b16` 正确 lane 映射（已验证）
+
+通过 `tests/kernels/test_ds_read_tr_v2.py` 单元测试验证的正确公式：
+
+```python
+# 对于 mfma_f32_16x16x32_bf16 的 A 操作数，
+# 从 [ROWS, COLS] 行主序 LDS 中转置读取 [COLS, ROWS] 视角：
+#
+# lane 分解 (64-lane warp):
+#   tr_k_group = (lane % 16) // 4   # 0..3: 4-row group selector
+#   tr_col_sub = lane % 4           # 0..3: 4-column sub-group
+#   lane_m_base = lane // 16        # 0..3: which 8-row group
+#
+# 地址计算:
+#   col = wid * 16 + tr_col_sub * 4              # 列位置 (0..63)
+#   row = bt_step * WMMA_K + lane_m_base * 8 + tr_k_group  # 行位置 (0..BT-1)
+#   lds_elem = row * LDS_STRIDE + col
+#   lds_byte = lds_elem * 2 + lds_base_offset
+#
+# 两次调用 + shuffle 得到 8xbf16:
+#   lo = ds_read_tr(lds_byte)                     # 行 [row..row+3]
+#   hi = ds_read_tr(lds_byte + 4 * LDS_STRIDE * 2)  # 行 [row+4..row+7]
+#   frag = shuffle(lo, hi, [0,1,2,3,4,5,6,7])    # 8 consecutive rows
+```
+
+**关键发现**：
+- `tr_col_half`（`(lane % 32) // 16`）**不参与地址计算**，它由 16-lane 块结构隐式处理
+- hi 偏移是 **+4 行**（不是 +8 行），因为 lo 的 4×4 转置已经覆盖了 4 行
+- `lane_m_base`（`lane // 16`，0-3）决定 8 行组的起始位置，与 MFMA A 操作数布局匹配
+
+---
+
+## 七、下一步：消除剩余 64 条 `ds_read_u16`
+
+### 7.1 w 的 A 操作数（32 条 `ds_read_u16`）
+
+**问题**：w 在 LDS 中是 `[BT, 64]` 行主序 + XOR swizzle。`vec_load(8)` 请求连续 8 个 bf16，但 swizzle 后的地址是动态值，LLVM 无法证明 16B 对齐，拆成了 8 个标量读取。
+
+**方案 A — 去掉 w 的 swizzle**：不对 w 做 XOR swizzle，直接行主序写入 LDS。这样 `vec_load(8)` 的 8 个元素在 LDS 中连续，编译器可以生成 `ds_read_b128`。代价是可能有 LDS bank conflict。
+
+**方案 B — 用 `ds_read_b64_tr_b16` 读 w**：类似 k 的做法，但 w 的 MFMA A 操作数不需要转置（w 在 LDS 中的行方向就是 MFMA 的 K 维度）。需要重新设计 w 的 LDS 布局使其适配 `ds_read_b64_tr_b16`。
+
+**推荐方案 A**：最简单，去掉 w 的 swizzle 即可。
+
+### 7.2 h 的 B 操作数（16 条 `ds_read_u16`）
+
+**问题**：h 在 LDS 中是 `[K, BV]` 行主序，B 操作数的 8 个元素来自 8 个不同的 K 行（`lane_m_base * 8 + [0..7]`），在 LDS 中跨行不连续。
+
+**方案**：用 `ds_read_b64_tr_b16` 从 h 的 LDS 中转置读取。地址计算与 k 类似：
+```python
+h_k_row = ks * WMMA_K + lane_m_base * 8 + tr_k_group  # K 维度
+h_v_col = nr * 16 + tr_col_sub * 4                     # BV 维度
+lds_elem = h_k_row * BV + h_v_col
+```
+
+### 7.3 v_new 的 B 操作数（16 条 `ds_read_u16`）
+
+**问题**：v_new 在 LDS 中是 `[BT, BV]` 行主序，B 操作数的 8 个元素来自 8 个不同的 BT 行。
+
+**方案**：同上，用 `ds_read_b64_tr_b16`：
+```python
+vn_bt_row = bt_s * WMMA_K + lane_m_base * 8 + tr_k_group  # BT 维度
+vn_v_col = nr * 16 + tr_col_sub * 4                        # BV 维度
+lds_elem = vn_bt_row * BV + vn_v_col
+```
+
+### 预期效果
+
+消除全部 64 条 `ds_read_u16` 后：
+
+| 指令 | 当前 (611us) | 预期 | Triton (194us) |
+|------|-------------|------|---------------|
+| `ds_read_u16` | 64 | **0** | 0 |
+| `ds_read_b64_tr_b16` | 8 | **24** | 24 |
+| `ds_read_b128` | 4 | **4** | ~8 |
+
+### 7.1-7.3 实施结果
+
+全部三项改动已完成并通过正确性验证（FlyDSL vs Triton max abs_err = 0）。
+
+**ISA 指令统计（消除 `ds_read_u16` 后）**：
+
+| 指令 | 优化前 (279us) | 中间态 (611us) | **当前 (569us)** | Triton (194us) |
+|------|---------------|-------------|-----------------|---------------|
+| `ds_read_u16` | 0 | 64 | **0** ✅ | 0 |
+| `ds_read_b64_tr_b16` | 0 | 8 | **24** ✅ | **24** |
+| `ds_read_b128` | 0 | 4 | **4** | ~8 |
+| `buffer_load_dwordx4` | 0 | 8 | **8** | ~12 |
+| `ds_write_b128` | 0 | 8 | **8** | ~16 |
+| `v_mfma` | 4 | 8 | **8** | 8 |
+| `s_barrier` | 2 | 10 | **10** | 20 |
+| ISA 总行数 | 758 | ~800 | **664** | 1733 |
+
+**性能**：569us（vs 优化前 279us，Triton 194us）。
+
+### 剩余瓶颈分析
+
+`ds_read_u16` 已完全消除，`ds_read_b64_tr_b16` 数量与 Triton 一致（24 条），但性能仍为 Triton 的 ~3x。主要瓶颈：
+
+1. **Barrier 同步开销**：10 个 barrier，每个 K-block 的 cooperative load 前后各 1 个。Triton 通过 prefetch/double-buffer 将数据加载与计算重叠，隐藏了 barrier 延迟。
+
+2. **缺少 prefetch 流水线**：当前是串行的 load → barrier → compute → barrier → load，Triton 是 load(n+1) 与 compute(n) 重叠。
+
+3. **w 的 LDS 读取未完全向量化**：`ds_read_b128` 只有 4 条（应该有 8 条），说明 w 的 `_lds_vec_read_bf16x8` 部分被拆成了标量。
+
+4. **h snapshot 写入效率**：16 条 `v_cvt_pk_bf16_f32` + 12 条 `ds_write_b16` 逐元素写入，可以优化为向量化写入。
+
+### 下一步优化方向
+
+1. **Prefetch 流水线**：在 chunk 循环内，将下一个 K-block 的 cooperative load 与当前 K-block 的 MFMA 计算重叠
+2. **减少 barrier**：通过 double-buffer LDS 消除 load-compute 之间的 barrier
+3. **w 的 LDS 读取向量化**：调查为什么 `_lds_vec_read_bf16x8` 仍被拆成标量
+4. **h snapshot 向量化写入**：将逐元素 `ds_write_b16` 改为 `ds_write_b128`
