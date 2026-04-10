@@ -258,7 +258,10 @@ def compile_preshuffle_gemm_a8(
             return T.f16
         if is_bf16:
             return T.bf16
-        if is_fp4:
+        def load_fp4_scale_chunk(_base_k):
+            raise RuntimeError("load_fp4_scale_chunk called when is_fp4=False")
+
+        if const_expr(is_fp4):
             return T.i8
         return T.i8 if is_int8 else T.f8
 
@@ -288,6 +291,9 @@ def compile_preshuffle_gemm_a8(
     lds_tile_bytes = int(tile_m) * int(lds_stride_bytes) // a_elem_vec_pack
     lds_out_bytes = 2 * int(tile_m) * int(tile_n) if use_cshuffle_epilog else 0
 
+    lds_pong_offset = 0
+    lds_ping_offset = 0
+    lds_alloc_offset = 0
     if int(lds_stage) == 2:
         assert lds_out_bytes % 2 == 0, "lds_out_bytes should be multiple of 2"
         buffer_size_bytes = max(lds_tile_bytes, lds_out_bytes // lds_stage)
@@ -327,6 +333,7 @@ def compile_preshuffle_gemm_a8(
         )
 
         # ---- Layouts ----
+        
         _k_div4_factor = (K * elem_bytes) // 4 // a_elem_vec_pack
 
         kpack_bytes = 8 if is_int4 else 16
@@ -359,31 +366,39 @@ def compile_preshuffle_gemm_a8(
         base_ptr_pong = allocator_pong.get_base()
         base_ptr_ping = allocator_ping.get_base()
 
-        if lds_stage == 2:
-            lds_a_pong = SmemPtr(
+        lds_a_pong_ptr = SmemPtr(base_ptr_pong, lds_alloc_offset, _elem_type(), shape=(1,))
+        lds_a_ping_ptr = lds_a_pong_ptr
+        lds_out_ptr = SmemPtr(base_ptr_pong, lds_alloc_offset, _out_elem(), shape=(1,))
+
+        if const_expr(lds_stage == 2):
+            lds_a_pong_ptr = SmemPtr(
                 base_ptr_pong, lds_pong_offset, _elem_type(), shape=(tile_m * tile_k,)
-            ).get()
-            lds_a_ping = SmemPtr(
+            )
+            lds_a_ping_ptr = SmemPtr(
                 base_ptr_ping, lds_ping_offset, _elem_type(), shape=(tile_m * tile_k,)
-            ).get()
+            )
 
             if use_cshuffle_epilog:
-                lds_out = SmemPtr(
+                lds_out_ptr = SmemPtr(
                     base_ptr_pong, lds_pong_offset, _out_elem(), shape=(tile_m * tile_n,)
-                ).get()
+                )
             else:
-                lds_out = None
+                lds_out_ptr = SmemPtr(base_ptr_pong, lds_pong_offset, _out_elem(), shape=(1,))
         else:
-            lds_a_ptr = SmemPtr(
+            lds_a_pong_ptr = SmemPtr(
                 base_ptr_pong, lds_alloc_offset, _elem_type(), shape=(lds_total_elems,)
             )
-            lds_a_pong = lds_a_ptr.get()
-            lds_a_ping = lds_a_pong
-            lds_out = (
-                SmemPtr(base_ptr_pong, lds_alloc_offset, _out_elem(), shape=(tile_m * tile_n,)).get()
-                if use_cshuffle_epilog
-                else None
-            )
+            lds_a_ping_ptr = lds_a_pong_ptr
+            if use_cshuffle_epilog:
+                lds_out_ptr = SmemPtr(
+                    base_ptr_pong, lds_alloc_offset, _out_elem(), shape=(tile_m * tile_n,)
+                )
+            else:
+                lds_out_ptr = SmemPtr(base_ptr_pong, lds_alloc_offset, _out_elem(), shape=(1,))
+
+        lds_a_pong = lds_a_pong_ptr.get()
+        lds_a_ping = lds_a_ping_ptr.get()
+        lds_out = lds_out_ptr.get()
 
         # ---- Buffer resources (runtime byte sizes for OOB protection) ----
         _a_nrec = arith.index_cast(T.i64, c_m * (K * elem_bytes // a_elem_vec_pack))
@@ -476,11 +491,11 @@ def compile_preshuffle_gemm_a8(
             b_i64x2 = vector.bitcast(T.i64x2, b16)
             b0_i64 = vector.extract(b_i64x2, static_position=[0], dynamic_position=[])
             b1_i64 = vector.extract(b_i64x2, static_position=[1], dynamic_position=[])
-            if not is_f16_or_bf16:
+            if const_expr(not is_f16_or_bf16):
                 return b0_i64, b1_i64
             b0_v1 = vector.from_elements(T.vec(1, T.i64), [b0_i64])
             b1_v1 = vector.from_elements(T.vec(1, T.i64), [b1_i64])
-            if is_f16:
+            if const_expr(is_f16):
                 return vector.bitcast(T.f16x4, b0_v1), vector.bitcast(T.f16x4, b1_v1)
             return vector.bitcast(T.i16x4, b0_v1), vector.bitcast(T.i16x4, b1_v1)
 
@@ -494,7 +509,7 @@ def compile_preshuffle_gemm_a8(
             return _extract_b_packs(b16)
 
         def load_b_packs_k64(base_k, ku: int, ni: int):
-            if is_int4:
+            if const_expr(is_int4):
                 ki0 = (ku * 2) + 0
                 ki1 = (ku * 2) + 1
                 return load_b_pack(base_k, ki0, ni), load_b_pack(base_k, ki1, ni)
@@ -511,7 +526,7 @@ def compile_preshuffle_gemm_a8(
             return _extract_b_packs(b16)
 
         def load_b_tile(base_k):
-            if not is_int4 and not is_f16_or_bf16:
+            if const_expr((not is_int4) and (not is_f16_or_bf16)):
                 base_k_bytes = base_k * elem_bytes
                 k0_base = base_k_bytes // c64_b
                 k_dwords = []
@@ -558,12 +573,12 @@ def compile_preshuffle_gemm_a8(
             a0_i64 = vector.extract(a_i64x2, static_position=[0], dynamic_position=[])
             a1_i64 = vector.extract(a_i64x2, static_position=[1], dynamic_position=[])
 
-            if not is_f16_or_bf16:
+            if const_expr(not is_f16_or_bf16):
                 return a0_i64, a1_i64
 
             a0_v1 = vector.from_elements(T.vec(1, T.i64), [a0_i64])
             a1_v1 = vector.from_elements(T.vec(1, T.i64), [a1_i64])
-            if is_f16:
+            if const_expr(is_f16):
                 return vector.bitcast(T.f16x4, a0_v1), vector.bitcast(T.f16x4, a1_v1)
             return vector.bitcast(T.i16x4, a0_v1), vector.bitcast(T.i16x4, a1_v1)
 
@@ -623,41 +638,54 @@ def compile_preshuffle_gemm_a8(
                 chunk_i32=a_async_load_dword,
             )
 
-        def dma_a_tile_to_lds(base_k_div4, lds_buffer):
+        def dma_a_tile_to_lds(
+            base_k_div4,
+            lds_buffer,
+            *,
+            wave_id_v,
+            wave_size_v,
+            dma_bytes_v,
+            num_a_async_loads_v,
+            a_tile_chunk_coord_i32_async_fn,
+            c4_v,
+            k_blocks16_v,
+            bx_m_v,
+            k_bytes_factor_v,
+            total_threads_v,
+            a_rsrc_v,
+        ):
             from flydsl._mlir.dialects import memref as memref_dialect
 
-            dma_bytes = a_async_load_bytes
             wave_offset = rocdl.readfirstlane(
                 T.i64,
                 arith.index_cast(
-                    T.i64, wave_id * arith.constant(wave_size * dma_bytes, index=True)
+                    T.i64, wave_id_v * arith.constant(wave_size_v * dma_bytes_v, index=True)
                 ),
             )
+            lds_base = memref_dialect.extract_aligned_pointer_as_index(lds_buffer)
+            lds_ptr_base = buffer_ops.create_llvm_ptr(arith.index_cast(T.i64, lds_base), address_space=3)
+            lds_ptr = buffer_ops.get_element_ptr(lds_ptr_base, wave_offset)
 
-            for i in range_constexpr(num_a_async_loads):
-                row_a_local, col_a_local_i32 = a_tile_chunk_coord_i32_async(i)
-                col_a_local_sw = swizzle_xor16(row_a_local, col_a_local_i32 * c4, k_blocks16)
-                row_a_global = bx_m + row_a_local
-                global_byte_idx = row_a_global * k_bytes_factor + (base_k_div4 * c4 + col_a_local_sw)
+            for i in range_constexpr(num_a_async_loads_v):
+                row_a_local, col_a_local_i32 = a_tile_chunk_coord_i32_async_fn(i)
+                col_a_local_sw = swizzle_xor16(row_a_local, col_a_local_i32 * c4_v, k_blocks16_v)
+                row_a_global = bx_m_v + row_a_local
+                global_byte_idx = row_a_global * k_bytes_factor_v + (base_k_div4 * c4_v + col_a_local_sw)
                 global_offset = arith.index_cast(T.i32, global_byte_idx)
 
-                if i == 0:
-                    lds_base = memref_dialect.extract_aligned_pointer_as_index(lds_buffer)
-                    lds_ptr_base = buffer_ops.create_llvm_ptr(arith.index_cast(T.i64, lds_base), address_space=3)
-                    lds_ptr = buffer_ops.get_element_ptr(lds_ptr_base, wave_offset)
-                else:
+                if const_expr(i > 0):
                     lds_ptr = buffer_ops.get_element_ptr(
                         lds_ptr,
-                        static_byte_offset=total_threads * dma_bytes,
+                        static_byte_offset=total_threads_v * dma_bytes_v,
                     )
 
-                size_i32 = arith.constant(dma_bytes, type=T.i32)
+                size_i32 = arith.constant(dma_bytes_v, type=T.i32)
                 soffset = arith.constant(0, type=T.i32)
                 offset_imm = arith.constant(0, type=T.i32)
                 aux = arith.constant(1, type=T.i32)
 
                 rocdl.raw_ptr_buffer_load_lds(
-                    a_rsrc,
+                    a_rsrc_v,
                     lds_ptr,
                     size_i32,
                     global_offset,
@@ -666,9 +694,23 @@ def compile_preshuffle_gemm_a8(
                     aux,
                 )
 
-        def prefetch_a_to_lds(base_k, lds_buffer):
-            base_k_div4 = base_k // 4 // a_elem_vec_pack
-            dma_a_tile_to_lds(base_k_div4, lds_buffer)
+        def prefetch_a_to_lds(base_k, lds_buffer, *, a_elem_vec_pack_v, dma_a_tile_to_lds_fn):
+            base_k_div4 = base_k // 4 // a_elem_vec_pack_v
+            dma_a_tile_to_lds_fn(
+                base_k_div4,
+                lds_buffer,
+                wave_id_v=wave_id,
+                wave_size_v=wave_size,
+                dma_bytes_v=a_async_load_bytes,
+                num_a_async_loads_v=num_a_async_loads,
+                a_tile_chunk_coord_i32_async_fn=a_tile_chunk_coord_i32_async,
+                c4_v=c4,
+                k_blocks16_v=k_blocks16,
+                bx_m_v=bx_m,
+                k_bytes_factor_v=k_bytes_factor,
+                total_threads_v=total_threads,
+                a_rsrc_v=a_rsrc,
+            )
 
         def prefetch_a_tile(base_k):
             base_k_bytes = base_k * elem_bytes // a_elem_vec_pack
@@ -686,7 +728,11 @@ def compile_preshuffle_gemm_a8(
 
         # ── FP4 scale pre-fetch (outside compute_tile for latency hiding) ──
         _fp4_tilek128 = False
-        if is_fp4:
+
+        def load_fp4_scale_chunk(_base_k):
+            raise RuntimeError("load_fp4_scale_chunk called when is_fp4=False")
+
+        if const_expr(is_fp4):
             _fp4_pack_M_outer = 2
             _fp4_pack_N_outer = 2
             _fp4_pack_K_outer = 2
@@ -869,11 +915,16 @@ def compile_preshuffle_gemm_a8(
                 return current_accs_list, scales_pf
 
             mfma_res_ty = T.i32x4 if is_int8 else T.f32x4
-            if is_int8:
+
+            def _mfma_fn_placeholder(_res_ty, _ops):
+                raise RuntimeError("mfma_fn is not selected for current dtype path")
+
+            mfma_fn = _mfma_fn_placeholder
+            if const_expr(is_int8):
                 mfma_fn = mfma_i32_k32
-            elif is_f16:
+            elif const_expr(is_f16):
                 mfma_fn = rocdl.mfma_f32_16x16x16f16
-            elif is_bf16:
+            elif const_expr(is_bf16):
                 mfma_fn = rocdl.mfma_f32_16x16x16bf16_1k
             else:
                 mfma_fn = rocdl.mfma_f32_16x16x32_fp8_fp8
@@ -891,7 +942,7 @@ def compile_preshuffle_gemm_a8(
                 col_base = col_offset_base_bytes + ki64
                 for mi in range_constexpr(m_repeat):
                     curr_row_a_lds = row_a_lds + (mi * 16)
-                    if (a0_prefetch is not None) and (ku == 0) and (mi == 0):
+                    if const_expr((a0_prefetch is not None) and (ku == 0) and (mi == 0)):
                         a0, a1 = a0_prefetch
                     else:
                         a0, a1 = lds_load_packs_k64(curr_row_a_lds, col_base, lds_buffer)
@@ -907,10 +958,9 @@ def compile_preshuffle_gemm_a8(
         vec1_out = T.vec(1, _out_elem())
 
         def store_output(final_accs, scales):
-            if is_f16_or_bf16 or is_fp4:
-                s_b_vals = None
-                s_a_vecs = None
-            else:
+            s_b_vals = []
+            s_a_vecs = []
+            if const_expr(not (is_f16_or_bf16 or is_fp4)):
                 s_b_vals = scales["s_b_vals"]
                 s_a_vecs = scales["s_a_vecs"]
 
@@ -921,7 +971,8 @@ def compile_preshuffle_gemm_a8(
 
                 def write_row_to_lds(*, mi, ii, row_in_tile, row, row_base_lds,
                                      col_base_local, num_acc_n, lds_out):
-                    if _needs_per_token_scale:
+                    s_a = arith.constant(1.0, type=T.f32)
+                    if const_expr(_needs_per_token_scale):
                         s_a_vec4 = s_a_vecs[mi]
                         s_a = vector.extract(s_a_vec4, static_position=[ii], dynamic_position=[])
                     for ni in range_constexpr(num_acc_n):
@@ -929,11 +980,11 @@ def compile_preshuffle_gemm_a8(
                         acc_idx = mi * num_acc_n + ni
                         acc = final_accs[acc_idx]
                         val = vector.extract(acc, static_position=[ii], dynamic_position=[])
-                        if is_int8:
+                        if const_expr(is_int8):
                             val = arith.sitofp(T.f32, val)
-                        if is_f16_or_bf16 or is_fp4:
+                        if const_expr(is_f16_or_bf16 or is_fp4):
                             val_s = val
-                        elif _needs_per_token_scale:
+                        elif const_expr(_needs_per_token_scale):
                             val_s = (val * s_a) * s_b_vals[ni]
                         else:
                             val_s = val
@@ -968,7 +1019,8 @@ def compile_preshuffle_gemm_a8(
                 return
 
             def body_row(*, mi, ii, row_in_tile, row):
-                if _needs_per_token_scale:
+                s_a = arith.constant(1.0, type=T.f32)
+                if const_expr(_needs_per_token_scale):
                     s_a_vec4 = s_a_vecs[mi]
                     s_a = vector.extract(s_a_vec4, static_position=[ii], dynamic_position=[])
                 col_base = by_n + n_tile_base + lane_mod_16
@@ -977,11 +1029,11 @@ def compile_preshuffle_gemm_a8(
                     acc_idx = mi * num_acc_n + ni
                     acc = final_accs[acc_idx]
                     val = vector.extract(acc, static_position=[ii], dynamic_position=[])
-                    if is_int8:
+                    if const_expr(is_int8):
                         val = arith.sitofp(T.f32, val)
-                    if is_f16_or_bf16 or is_fp4:
+                    if const_expr(is_f16_or_bf16 or is_fp4):
                         val_s = val
-                    elif _needs_per_token_scale:
+                    elif const_expr(_needs_per_token_scale):
                         val_s = (val * s_a) * s_b_vals[ni]
                     else:
                         val_s = val
@@ -1137,38 +1189,85 @@ def compile_preshuffle_gemm_a8(
         n_accs = num_acc_n * m_repeat
         n_btile = k_unroll * 2 * num_acc_n
         n_a0pf = 2
+        n_fp4_asc = 0
+        n_fp4_bsc = 0
 
         if is_fp4:
             n_fp4_asc = _k_unroll_packed_outer * _m_repeat_packed_outer
             n_fp4_bsc = _k_unroll_packed_outer * _num_acc_n_packed_outer
 
-        def _pack_state(accs_l, bt_flat, a0pf, fp4_scales=None):
+        def _pack_state(accs_l, bt_flat, a0pf, fp4_scales=None, *, is_fp4_v):
             state = list(accs_l) + list(bt_flat) + [a0pf[0], a0pf[1]]
-            if is_fp4:
+            if is_fp4_v:
                 a_scales, b_scales = fp4_scales
                 state.extend(a_scales)
                 state.extend(b_scales)
             return state
 
-        def _unpack_state(vals):
-            accs_l = list(vals[:n_accs])
-            bt_flat = list(vals[n_accs:n_accs + n_btile])
-            a0pf = (vals[n_accs + n_btile], vals[n_accs + n_btile + 1])
-            if not is_fp4:
+        def _unpack_state(vals, *, n_accs_v, n_btile_v, n_a0pf_v, is_fp4_v, n_fp4_asc_v, n_fp4_bsc_v):
+            accs_l = list(vals[:n_accs_v])
+            bt_flat = list(vals[n_accs_v:n_accs_v + n_btile_v])
+            a0pf = (vals[n_accs_v + n_btile_v], vals[n_accs_v + n_btile_v + 1])
+            if not is_fp4_v:
                 return accs_l, bt_flat, a0pf, None
-            sc_base = n_accs + n_btile + n_a0pf
-            a_scales = list(vals[sc_base:sc_base + n_fp4_asc])
-            b_scales = list(vals[sc_base + n_fp4_asc:sc_base + n_fp4_asc + n_fp4_bsc])
+            sc_base = n_accs_v + n_btile_v + n_a0pf_v
+            a_scales = list(vals[sc_base:sc_base + n_fp4_asc_v])
+            b_scales = list(vals[sc_base + n_fp4_asc_v:sc_base + n_fp4_asc_v + n_fp4_bsc_v])
             return accs_l, bt_flat, a0pf, (a_scales, b_scales)
 
-        def _build_pingpong_body(k_iv, inner_state):
-            accs_in, bt_flat_in, a0pf_in, fp4_scales_pong_in = _unpack_state(inner_state)
+        def _build_pingpong_body(
+            k_iv,
+            inner_state,
+            *,
+            _unpack_state,
+            _unflatten_b_tile,
+            _fp4_tilek128,
+            tile_k,
+            use_async_copy,
+            prefetch_a_to_lds,
+            a_elem_vec_pack,
+            dma_a_tile_to_lds,
+            prefetch_a_tile,
+            prefetch_b_tile,
+            compute_tile,
+            lds_a_pong,
+            lds_a_ping,
+            store_a_tile_to_lds,
+            hot_loop_scheduler,
+            num_b_loads,
+            gpu,
+            prefetch_a0_pack,
+            load_fp4_scale_chunk,
+            is_fp4,
+            rocdl,
+            _pack_state,
+            _flatten_b_tile,
+            lds_load_packs_k64,
+            row_a_lds,
+            col_offset_base_bytes,
+            n_accs,
+            n_btile,
+            n_a0pf,
+            n_fp4_asc,
+            n_fp4_bsc,
+        ):
+            accs_in, bt_flat_in, a0pf_in, fp4_scales_pong_in = _unpack_state(
+                inner_state,
+                n_accs_v=n_accs,
+                n_btile_v=n_btile,
+                n_a0pf_v=n_a0pf,
+                is_fp4_v=is_fp4,
+                n_fp4_asc_v=n_fp4_asc,
+                n_fp4_bsc_v=n_fp4_bsc,
+            )
             b_tile_pong_in = _unflatten_b_tile(bt_flat_in)
 
             if _fp4_tilek128:
                 next_k1 = k_iv + tile_k
-                if use_async_copy:
-                    prefetch_a_to_lds(next_k1, lds_a_ping)
+                if const_expr(use_async_copy):
+                    prefetch_a_to_lds(
+                        next_k1, lds_a_ping, a_elem_vec_pack_v=a_elem_vec_pack, dma_a_tile_to_lds_fn=dma_a_tile_to_lds
+                    )
                 else:
                     a_tile_ping = prefetch_a_tile(next_k1)
                 b_tile_ping = prefetch_b_tile(next_k1)
@@ -1176,18 +1275,25 @@ def compile_preshuffle_gemm_a8(
                     accs_in, b_tile_pong_in, lds_a_pong,
                     a0_prefetch=a0pf_in, fp4_scales=fp4_scales_pong_in, fp4_scale_half=0,
                 )
-                if not use_async_copy:
+                if const_expr(not use_async_copy):
                     store_a_tile_to_lds(a_tile_ping, lds_a_ping)
                 hot_loop_scheduler()
                 rocdl.s_waitcnt(num_b_loads)
                 gpu.barrier()
-                a0_prefetch_ping = prefetch_a0_pack(lds_a_ping)
+                a0_prefetch_ping = prefetch_a0_pack(
+                    lds_a_ping,
+                    lds_load_packs_k64_fn=lds_load_packs_k64,
+                    row_a_lds_v=row_a_lds,
+                    col_offset_base_bytes_v=col_offset_base_bytes,
+                )
 
                 next_k2 = k_iv + (tile_k * 2)
                 _sc_ping = load_fp4_scale_chunk(next_k2) if is_fp4 else None
                 rocdl.sched_barrier(0)
-                if use_async_copy:
-                    prefetch_a_to_lds(next_k2, lds_a_pong)
+                if const_expr(use_async_copy):
+                    prefetch_a_to_lds(
+                        next_k2, lds_a_pong, a_elem_vec_pack_v=a_elem_vec_pack, dma_a_tile_to_lds_fn=dma_a_tile_to_lds
+                    )
                 else:
                     a_tile_pong = prefetch_a_tile(next_k2)
                 b_tile_pong_new = prefetch_b_tile(next_k2)
@@ -1195,76 +1301,161 @@ def compile_preshuffle_gemm_a8(
                     accs_in, b_tile_ping, lds_a_ping,
                     a0_prefetch=a0_prefetch_ping, fp4_scales=fp4_scales_pong_in, fp4_scale_half=1,
                 )
-                if not use_async_copy:
+                if const_expr(not use_async_copy):
                     store_a_tile_to_lds(a_tile_pong, lds_a_pong)
                 hot_loop_scheduler()
                 rocdl.s_waitcnt(num_b_loads)
                 gpu.barrier()
-                a0_prefetch_pong_new = prefetch_a0_pack(lds_a_pong)
+                a0_prefetch_pong_new = prefetch_a0_pack(
+                    lds_a_pong,
+                    lds_load_packs_k64_fn=lds_load_packs_k64,
+                    row_a_lds_v=row_a_lds,
+                    col_offset_base_bytes_v=col_offset_base_bytes,
+                )
 
-                return _pack_state(accs_in, _flatten_b_tile(b_tile_pong_new),
-                                   a0_prefetch_pong_new, _sc_ping)
+                return _pack_state(
+                    accs_in,
+                    _flatten_b_tile(b_tile_pong_new),
+                    a0_prefetch_pong_new,
+                    _sc_ping,
+                    is_fp4_v=is_fp4,
+                )
 
             next_k1 = k_iv + tile_k
-            if use_async_copy:
-                prefetch_a_to_lds(next_k1, lds_a_ping)
+            if const_expr(use_async_copy):
+                prefetch_a_to_lds(
+                    next_k1, lds_a_ping, a_elem_vec_pack_v=a_elem_vec_pack, dma_a_tile_to_lds_fn=dma_a_tile_to_lds
+                )
             else:
                 a_tile = prefetch_a_tile(next_k1)
             _sc_ping = load_fp4_scale_chunk(k_iv + fx.Index(tile_k)) if is_fp4 else None
             b_tile_ping = prefetch_b_tile(next_k1)
             accs_in, _ = compute_tile(accs_in, b_tile_pong_in, lds_a_pong,
                                       a0_prefetch=a0pf_in, fp4_scales=fp4_scales_pong_in)
-            if not use_async_copy:
+            if const_expr(not use_async_copy):
                 store_a_tile_to_lds(a_tile, lds_a_ping)
             hot_loop_scheduler()
             rocdl.s_waitcnt(num_b_loads)
             gpu.barrier()
-            a0_prefetch_ping = prefetch_a0_pack(lds_a_ping)
+            a0_prefetch_ping = prefetch_a0_pack(
+                lds_a_ping,
+                lds_load_packs_k64_fn=lds_load_packs_k64,
+                row_a_lds_v=row_a_lds,
+                col_offset_base_bytes_v=col_offset_base_bytes,
+            )
 
             next_k2 = k_iv + (tile_k * 2)
-            if use_async_copy:
-                prefetch_a_to_lds(next_k2, lds_a_pong)
+            if const_expr(use_async_copy):
+                prefetch_a_to_lds(
+                    next_k2, lds_a_pong, a_elem_vec_pack_v=a_elem_vec_pack, dma_a_tile_to_lds_fn=dma_a_tile_to_lds
+                )
             else:
                 a_tile = prefetch_a_tile(next_k2)
             _sc_pong = load_fp4_scale_chunk(k_iv + (tile_k * 2)) if is_fp4 else None
             b_tile_pong_new = prefetch_b_tile(next_k2)
             accs_in, _ = compute_tile(accs_in, b_tile_ping, lds_a_ping,
                                       a0_prefetch=a0_prefetch_ping, fp4_scales=_sc_ping)
-            if not use_async_copy:
+            if const_expr(not use_async_copy):
                 store_a_tile_to_lds(a_tile, lds_a_pong)
             hot_loop_scheduler()
             rocdl.s_waitcnt(num_b_loads)
             gpu.barrier()
-            a0_prefetch_pong_new = prefetch_a0_pack(lds_a_pong)
+            a0_prefetch_pong_new = prefetch_a0_pack(
+                lds_a_pong,
+                lds_load_packs_k64_fn=lds_load_packs_k64,
+                row_a_lds_v=row_a_lds,
+                col_offset_base_bytes_v=col_offset_base_bytes,
+            )
 
-            return _pack_state(accs_in, _flatten_b_tile(b_tile_pong_new),
-                               a0_prefetch_pong_new, _sc_pong)
+            return _pack_state(
+                accs_in,
+                _flatten_b_tile(b_tile_pong_new),
+                a0_prefetch_pong_new,
+                _sc_pong,
+                is_fp4_v=is_fp4,
+            )
 
-        if lds_stage == 2:
-            def prefetch_a0_pack(lds_buffer):
-                return lds_load_packs_k64(row_a_lds, col_offset_base_bytes, lds_buffer)
+        if const_expr(lds_stage == 2):
+            def prefetch_a0_pack(lds_buffer, *, lds_load_packs_k64_fn, row_a_lds_v, col_offset_base_bytes_v):
+                return lds_load_packs_k64_fn(row_a_lds_v, col_offset_base_bytes_v, lds_buffer)
 
             k0 = fx.Index(0)
             b_tile0 = prefetch_b_tile(k0)
-            if use_async_copy:
-                prefetch_a_to_lds(k0, lds_a_pong)
+            if const_expr(use_async_copy):
+                prefetch_a_to_lds(
+                    k0, lds_a_pong, a_elem_vec_pack_v=a_elem_vec_pack, dma_a_tile_to_lds_fn=dma_a_tile_to_lds
+                )
             else:
                 store_a_tile_to_lds(prefetch_a_tile(k0), lds_a_pong)
             gpu.barrier()
             accs = [acc_init] * n_accs
-            a0_prefetch_pong = prefetch_a0_pack(lds_a_pong)
+            a0_prefetch_pong = prefetch_a0_pack(
+                lds_a_pong,
+                lds_load_packs_k64_fn=lds_load_packs_k64,
+                row_a_lds_v=row_a_lds,
+                col_offset_base_bytes_v=col_offset_base_bytes,
+            )
             fp4_scales0 = load_fp4_scale_chunk(fx.Index(0)) if is_fp4 else None
 
+            final_accs = 1
+            scales = 1
             num_tiles = K // tile_k
-            if _fp4_tilek128:
-                if (num_tiles % 2) == 1:
+            if const_expr(_fp4_tilek128):
+                if const_expr((num_tiles % 2) == 1):
                     c_k_main = K - tile_k
-                    init_state = _pack_state(accs, _flatten_b_tile(b_tile0),
-                                             a0_prefetch_pong, fp4_scales0)
+                    init_state = _pack_state(
+                        accs,
+                        _flatten_b_tile(b_tile0),
+                        a0_prefetch_pong,
+                        fp4_scales0,
+                        is_fp4_v=is_fp4,
+                    )
                     results = init_state
                     for iv, inner in range(0, c_k_main, tile_k * 2, init=init_state):
-                        results = yield _build_pingpong_body(iv, inner)
-                    accs, bt_flat, a0pf, fp4_scales_final = _unpack_state(results)
+                        results = yield _build_pingpong_body(
+                            iv,
+                            inner,
+                            _unpack_state=_unpack_state,
+                            _unflatten_b_tile=_unflatten_b_tile,
+                            _fp4_tilek128=_fp4_tilek128,
+                            tile_k=tile_k,
+                            use_async_copy=use_async_copy,
+                            prefetch_a_to_lds=prefetch_a_to_lds,
+                            a_elem_vec_pack=a_elem_vec_pack,
+                            dma_a_tile_to_lds=dma_a_tile_to_lds,
+                            prefetch_a_tile=prefetch_a_tile,
+                            prefetch_b_tile=prefetch_b_tile,
+                            compute_tile=compute_tile,
+                            lds_a_pong=lds_a_pong,
+                            lds_a_ping=lds_a_ping,
+                            store_a_tile_to_lds=store_a_tile_to_lds,
+                            hot_loop_scheduler=hot_loop_scheduler,
+                            num_b_loads=num_b_loads,
+                            gpu=gpu,
+                            prefetch_a0_pack=prefetch_a0_pack,
+                            load_fp4_scale_chunk=load_fp4_scale_chunk,
+                            is_fp4=is_fp4,
+                            rocdl=rocdl,
+                            _pack_state=_pack_state,
+                            _flatten_b_tile=_flatten_b_tile,
+                            lds_load_packs_k64=lds_load_packs_k64,
+                            row_a_lds=row_a_lds,
+                            col_offset_base_bytes=col_offset_base_bytes,
+                            n_accs=n_accs,
+                            n_btile=n_btile,
+                            n_a0pf=n_a0pf,
+                            n_fp4_asc=n_fp4_asc,
+                            n_fp4_bsc=n_fp4_bsc,
+                        )
+                    accs, bt_flat, a0pf, fp4_scales_final = _unpack_state(
+                        results,
+                        n_accs_v=n_accs,
+                        n_btile_v=n_btile,
+                        n_a0pf_v=n_a0pf,
+                        is_fp4_v=is_fp4,
+                        n_fp4_asc_v=n_fp4_asc,
+                        n_fp4_bsc_v=n_fp4_bsc,
+                    )
                     b_tile_pong_final = _unflatten_b_tile(bt_flat)
                     final_accs, scales = compute_tile(
                         accs, b_tile_pong_final, lds_a_pong,
@@ -1273,42 +1464,143 @@ def compile_preshuffle_gemm_a8(
                     )
                 else:
                     c_k_stop = K - (tile_k * 3)
-                    init_state = _pack_state(accs, _flatten_b_tile(b_tile0),
-                                             a0_prefetch_pong, fp4_scales0)
+                    init_state = _pack_state(
+                        accs,
+                        _flatten_b_tile(b_tile0),
+                        a0_prefetch_pong,
+                        fp4_scales0,
+                        is_fp4_v=is_fp4,
+                    )
                     results = init_state
                     for iv, inner in range(0, c_k_stop, tile_k * 2, init=init_state):
-                        results = yield _build_pingpong_body(iv, inner)
-                    accs, bt_flat, a0pf, fp4_scales_ep = _unpack_state(results)
+                        results = yield _build_pingpong_body(
+                            iv,
+                            inner,
+                            _unpack_state=_unpack_state,
+                            _unflatten_b_tile=_unflatten_b_tile,
+                            _fp4_tilek128=_fp4_tilek128,
+                            tile_k=tile_k,
+                            use_async_copy=use_async_copy,
+                            prefetch_a_to_lds=prefetch_a_to_lds,
+                            a_elem_vec_pack=a_elem_vec_pack,
+                            dma_a_tile_to_lds=dma_a_tile_to_lds,
+                            prefetch_a_tile=prefetch_a_tile,
+                            prefetch_b_tile=prefetch_b_tile,
+                            compute_tile=compute_tile,
+                            lds_a_pong=lds_a_pong,
+                            lds_a_ping=lds_a_ping,
+                            store_a_tile_to_lds=store_a_tile_to_lds,
+                            hot_loop_scheduler=hot_loop_scheduler,
+                            num_b_loads=num_b_loads,
+                            gpu=gpu,
+                            prefetch_a0_pack=prefetch_a0_pack,
+                            load_fp4_scale_chunk=load_fp4_scale_chunk,
+                            is_fp4=is_fp4,
+                            rocdl=rocdl,
+                            _pack_state=_pack_state,
+                            _flatten_b_tile=_flatten_b_tile,
+                            lds_load_packs_k64=lds_load_packs_k64,
+                            row_a_lds=row_a_lds,
+                            col_offset_base_bytes=col_offset_base_bytes,
+                            n_accs=n_accs,
+                            n_btile=n_btile,
+                            n_a0pf=n_a0pf,
+                            n_fp4_asc=n_fp4_asc,
+                            n_fp4_bsc=n_fp4_bsc,
+                        )
+                    accs, bt_flat, a0pf, fp4_scales_ep = _unpack_state(
+                        results,
+                        n_accs_v=n_accs,
+                        n_btile_v=n_btile,
+                        n_a0pf_v=n_a0pf,
+                        is_fp4_v=is_fp4,
+                        n_fp4_asc_v=n_fp4_asc,
+                        n_fp4_bsc_v=n_fp4_bsc,
+                    )
                     b_tile_pong_ep = _unflatten_b_tile(bt_flat)
 
                     last_k = arith.index(K - tile_k)
                     b_tile_ping = prefetch_b_tile(last_k)
-                    if use_async_copy:
-                        prefetch_a_to_lds(last_k, lds_a_ping)
+                    if const_expr(use_async_copy):
+                        prefetch_a_to_lds(
+                            last_k, lds_a_ping, a_elem_vec_pack_v=a_elem_vec_pack, dma_a_tile_to_lds_fn=dma_a_tile_to_lds
+                        )
                     else:
                         a_regs_ping = prefetch_a_tile(last_k)
                     accs, _ = compute_tile(
                         accs, b_tile_pong_ep, lds_a_pong,
                         a0_prefetch=a0pf, fp4_scales=fp4_scales_ep, fp4_scale_half=0,
                     )
-                    if not use_async_copy:
+                    if const_expr(not use_async_copy):
                         store_a_tile_to_lds(a_regs_ping, lds_a_ping)
                     rocdl.s_waitcnt(num_b_loads)
                     gpu.barrier()
-                    a0_prefetch_ping = prefetch_a0_pack(lds_a_ping)
+                    a0_prefetch_ping = prefetch_a0_pack(
+                        lds_a_ping,
+                        lds_load_packs_k64_fn=lds_load_packs_k64,
+                        row_a_lds_v=row_a_lds,
+                        col_offset_base_bytes_v=col_offset_base_bytes,
+                    )
                     final_accs, scales = compute_tile(
                         accs, b_tile_ping, lds_a_ping,
                         is_last_tile=not is_fp4, a0_prefetch=a0_prefetch_ping,
                         fp4_scales=fp4_scales_ep, fp4_scale_half=1,
                     )
-            elif (num_tiles % 2) == 1:
+            elif const_expr((num_tiles % 2) == 1):
                 c_k_main = K - tile_k
-                init_state = _pack_state(accs, _flatten_b_tile(b_tile0),
-                                         a0_prefetch_pong, fp4_scales0)
+                init_state = _pack_state(
+                    accs,
+                    _flatten_b_tile(b_tile0),
+                    a0_prefetch_pong,
+                    fp4_scales0,
+                    is_fp4_v=is_fp4,
+                )
                 results = init_state
                 for iv, inner in range(0, c_k_main, tile_k * 2, init=init_state):
-                    results = yield _build_pingpong_body(iv, inner)
-                accs, bt_flat, a0pf, fp4_scales_final = _unpack_state(results)
+                    results = yield _build_pingpong_body(
+                        iv,
+                        inner,
+                        _unpack_state=_unpack_state,
+                        _unflatten_b_tile=_unflatten_b_tile,
+                        _fp4_tilek128=_fp4_tilek128,
+                        tile_k=tile_k,
+                        use_async_copy=use_async_copy,
+                        prefetch_a_to_lds=prefetch_a_to_lds,
+                        a_elem_vec_pack=a_elem_vec_pack,
+                        dma_a_tile_to_lds=dma_a_tile_to_lds,
+                        prefetch_a_tile=prefetch_a_tile,
+                        prefetch_b_tile=prefetch_b_tile,
+                        compute_tile=compute_tile,
+                        lds_a_pong=lds_a_pong,
+                        lds_a_ping=lds_a_ping,
+                        store_a_tile_to_lds=store_a_tile_to_lds,
+                        hot_loop_scheduler=hot_loop_scheduler,
+                        num_b_loads=num_b_loads,
+                        gpu=gpu,
+                        prefetch_a0_pack=prefetch_a0_pack,
+                        load_fp4_scale_chunk=load_fp4_scale_chunk,
+                        is_fp4=is_fp4,
+                        rocdl=rocdl,
+                        _pack_state=_pack_state,
+                        _flatten_b_tile=_flatten_b_tile,
+                        lds_load_packs_k64=lds_load_packs_k64,
+                        row_a_lds=row_a_lds,
+                        col_offset_base_bytes=col_offset_base_bytes,
+                        n_accs=n_accs,
+                        n_btile=n_btile,
+                        n_a0pf=n_a0pf,
+                        n_fp4_asc=n_fp4_asc,
+                        n_fp4_bsc=n_fp4_bsc,
+                    )
+                accs, bt_flat, a0pf, fp4_scales_final = _unpack_state(
+                    results,
+                    n_accs_v=n_accs,
+                    n_btile_v=n_btile,
+                    n_a0pf_v=n_a0pf,
+                    is_fp4_v=is_fp4,
+                    n_fp4_asc_v=n_fp4_asc,
+                    n_fp4_bsc_v=n_fp4_bsc,
+                )
                 b_tile_pong_final = _unflatten_b_tile(bt_flat)
                 final_accs, scales = compute_tile(
                     accs, b_tile_pong_final, lds_a_pong,
@@ -1316,29 +1608,83 @@ def compile_preshuffle_gemm_a8(
                 )
             else:
                 c_k_stop = K - (tile_k * 3)
-                init_state = _pack_state(accs, _flatten_b_tile(b_tile0),
-                                         a0_prefetch_pong, fp4_scales0)
+                init_state = _pack_state(
+                    accs,
+                    _flatten_b_tile(b_tile0),
+                    a0_prefetch_pong,
+                    fp4_scales0,
+                    is_fp4_v=is_fp4,
+                )
                 results = init_state
                 for iv, inner in range(0, c_k_stop, tile_k * 2, init=init_state):
-                    results = yield _build_pingpong_body(iv, inner)
-                accs, bt_flat, a0pf, fp4_scales_ep = _unpack_state(results)
+                    results = yield _build_pingpong_body(
+                        iv,
+                        inner,
+                        _unpack_state=_unpack_state,
+                        _unflatten_b_tile=_unflatten_b_tile,
+                        _fp4_tilek128=_fp4_tilek128,
+                        tile_k=tile_k,
+                        use_async_copy=use_async_copy,
+                        prefetch_a_to_lds=prefetch_a_to_lds,
+                        a_elem_vec_pack=a_elem_vec_pack,
+                        dma_a_tile_to_lds=dma_a_tile_to_lds,
+                        prefetch_a_tile=prefetch_a_tile,
+                        prefetch_b_tile=prefetch_b_tile,
+                        compute_tile=compute_tile,
+                        lds_a_pong=lds_a_pong,
+                        lds_a_ping=lds_a_ping,
+                        store_a_tile_to_lds=store_a_tile_to_lds,
+                        hot_loop_scheduler=hot_loop_scheduler,
+                        num_b_loads=num_b_loads,
+                        gpu=gpu,
+                        prefetch_a0_pack=prefetch_a0_pack,
+                        load_fp4_scale_chunk=load_fp4_scale_chunk,
+                        is_fp4=is_fp4,
+                        rocdl=rocdl,
+                        _pack_state=_pack_state,
+                        _flatten_b_tile=_flatten_b_tile,
+                        lds_load_packs_k64=lds_load_packs_k64,
+                        row_a_lds=row_a_lds,
+                        col_offset_base_bytes=col_offset_base_bytes,
+                        n_accs=n_accs,
+                        n_btile=n_btile,
+                        n_a0pf=n_a0pf,
+                        n_fp4_asc=n_fp4_asc,
+                        n_fp4_bsc=n_fp4_bsc,
+                    )
+                accs, bt_flat, a0pf, fp4_scales_ep = _unpack_state(
+                    results,
+                    n_accs_v=n_accs,
+                    n_btile_v=n_btile,
+                    n_a0pf_v=n_a0pf,
+                    is_fp4_v=is_fp4,
+                    n_fp4_asc_v=n_fp4_asc,
+                    n_fp4_bsc_v=n_fp4_bsc,
+                )
                 b_tile_pong_ep = _unflatten_b_tile(bt_flat)
 
                 last_k = arith.index(K - tile_k)
                 b_tile_ping = prefetch_b_tile(last_k)
-                if use_async_copy:
-                    prefetch_a_to_lds(last_k, lds_a_ping)
+                if const_expr(use_async_copy):
+                    prefetch_a_to_lds(
+                        last_k, lds_a_ping, a_elem_vec_pack_v=a_elem_vec_pack, dma_a_tile_to_lds_fn=dma_a_tile_to_lds
+                    )
                 else:
                     a_regs_ping = prefetch_a_tile(last_k)
                 _sc_last = load_fp4_scale_chunk(last_k) if is_fp4 else None
                 accs, _ = compute_tile(accs, b_tile_pong_ep, lds_a_pong,
                                        a0_prefetch=a0pf, fp4_scales=fp4_scales_ep)
-                if not use_async_copy:
+                if const_expr(not use_async_copy):
                     store_a_tile_to_lds(a_regs_ping, lds_a_ping)
                 hot_loop_scheduler()
                 rocdl.s_waitcnt(num_b_loads)
                 gpu.barrier()
-                a0_prefetch_ping = prefetch_a0_pack(lds_a_ping)
+                a0_prefetch_ping = prefetch_a0_pack(
+                    lds_a_ping,
+                    lds_load_packs_k64_fn=lds_load_packs_k64,
+                    row_a_lds_v=row_a_lds,
+                    col_offset_base_bytes_v=col_offset_base_bytes,
+                )
                 final_accs, scales = compute_tile(
                     accs, b_tile_ping, lds_a_ping,
                     is_last_tile=not is_fp4, a0_prefetch=a0_prefetch_ping, fp4_scales=_sc_last,
