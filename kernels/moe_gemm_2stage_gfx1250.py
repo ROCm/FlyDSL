@@ -1658,11 +1658,11 @@ def _compile_stage1_mxscale_kernel_impl(
     N = int(inter_dim)
     _merge_gate_up_tdm = bool((data_format in ("fp8", "a8w4")) and (N % int(tile_n) == 0))
     num_warps_s1 = int(m_warp) * int(n_warp)
+    _tdm_loader_waves = 2 if _merge_gate_up_tdm else 4
     if bool(wave_specialized_tdm):
-        _loader_waves = 2 if _merge_gate_up_tdm else 4
-        if num_warps_s1 < _loader_waves:
+        if num_warps_s1 < _tdm_loader_waves:
             raise ValueError(
-                f"wave_specialized_tdm requires at least {_loader_waves} waves, got {num_warps_s1}")
+                f"wave_specialized_tdm requires at least {_tdm_loader_waves} waves, got {num_warps_s1}")
     tdm_desc_num_warps = 1 if bool(wave_specialized_tdm) else num_warps_s1
     effective_waves_per_eu = waves_per_eu
     if use_cluster and effective_waves_per_eu is None:
@@ -1715,7 +1715,14 @@ def _compile_stage1_mxscale_kernel_impl(
             _B_TDM_PER_STEP = 1 if bool(wave_specialized_tdm) else 2
         else:
             _B_TDM_PER_STEP = 1 if bool(wave_specialized_tdm) else 4
-        _A_GATHER_TDM_PER_STEP = (int(tile_m) + 8 - 1) // 8
+        _A_GATHER_GROUPS = (int(tile_m) + 8 - 1) // 8 if bool(use_tdm_gather) else 0
+        if bool(use_tdm_gather) and bool(wave_specialized_tdm):
+            _A_GATHER_TDM_PER_STEP = (
+                (_A_GATHER_GROUPS + _tdm_loader_waves - 1)
+                // _tdm_loader_waves
+            )
+        else:
+            _A_GATHER_TDM_PER_STEP = _A_GATHER_GROUPS
         TDM_PER_STEP = _B_TDM_PER_STEP + _A_GATHER_TDM_PER_STEP
         _fence_outstanding = TDM_PER_STEP * (int(num_buffers) - 2)
         _base_tail_plan = make_tail_plan(int(num_buffers), pre_loaded, extra)
@@ -1727,9 +1734,7 @@ def _compile_stage1_mxscale_kernel_impl(
             raise ValueError(
                 f"{num_buffers}-stage buffering requires num_k_tiles >= {num_buffers}, "
                 f"got {num_k_tiles}")
-
-    if bool(wave_specialized_tdm):
-        from kernels.gemm_common_gfx1250 import issue_tdm_loads
+    from kernels.gemm_common_gfx1250 import workgroup_barrier
 
     alloc = SmemAllocator(
         None,
@@ -2057,8 +2062,17 @@ def _compile_stage1_mxscale_kernel_impl(
                 _valid_count = _sum_i32_values(_a_load_valids[_start:_start + _cnt])
                 _lds_off = fx.Index(_start * lds_a_stride_bytes)
                 _has_valid = arith.cmpi(arith.CmpIPredicate.sgt, _valid_count, _zero_i32)
-                _if_valid = scf.IfOp(_has_valid)
-                with ir.InsertionPoint(_if_valid.then_block):
+                _issue_pred = _has_valid
+                if wave_specialized_tdm:
+                    _gather_owner = _gi % _tdm_loader_waves
+                    _is_gather_loader = arith.cmpi(
+                        arith.CmpIPredicate.eq,
+                        _tdm_wave_id,
+                        arith.constant(_gather_owner, type=T.i32),
+                    )
+                    _issue_pred = arith.andi(_issue_pred, _is_gather_loader)
+                _if_issue = scf.IfOp(_issue_pred)
+                with ir.InsertionPoint(_if_issue.then_block):
                     desc = tdm_ops.make_tensor_gather_descriptor(
                         global_ptr=arg_x,
                         lds_memref=target_lds,
@@ -2585,43 +2599,263 @@ def _compile_stage1_mxscale_kernel_impl(
                         rocdl.sched_dsrd(_gate_up_ds_loads)
                 rocdl.sched_barrier(0)
 
+            if wave_specialized_tdm:
+                _tdm_wave_id = rocdl.wave_id()
+                _loader_waves = _tdm_loader_waves
+                _is_loader_wave = arith.cmpi(
+                    arith.CmpIPredicate.ult,
+                    _tdm_wave_id,
+                    arith.constant(_loader_waves, type=T.i32),
+                )
+                _tdm_pred = arith.constant(1, type=T.i32)
+
+                def _select_wave_tdm_value(*values):
+                    if len(values) != _loader_waves:
+                        raise ValueError(
+                            f"expected {_loader_waves} wave-specialized TDM values, got {len(values)}"
+                        )
+                    _selected = values[-1]
+                    for _sel_idx in range_constexpr(_loader_waves - 1):
+                        _value_idx = _loader_waves - 2 - _sel_idx
+                        _is_wave = arith.cmpi(
+                            arith.CmpIPredicate.eq,
+                            _tdm_wave_id,
+                            arith.constant(_value_idx, type=T.i32),
+                        )
+                        _selected = arith.select(_is_wave, values[_value_idx], _selected)
+                    return _selected
+
+                def _tdm_desc_lds_addr(desc):
+                    return vector.extract(
+                        desc.dgroup0,
+                        static_position=[1],
+                        dynamic_position=[],
+                    )
+
+                def _tdm_desc_addr_lo(desc):
+                    return vector.extract(
+                        desc.dgroup0,
+                        static_position=[2],
+                        dynamic_position=[],
+                    )
+
+                def _tdm_desc_addr_hi(desc):
+                    return vector.extract(
+                        desc.dgroup0,
+                        static_position=[3],
+                        dynamic_position=[],
+                    )
+
+                _zero_k_base = arith.index(0)
+                _scale_adv_i32 = arith.constant(scale_k_per_tile, type=T.i32)
+                if _merge_gate_up_tdm:
+                    _n_pair_init = _stage1_pair_row_base()
+                    _data_adv_i32 = arith.constant(packed_tile_k_b * 16, type=T.i32)
+
+                    _stages_b_lds_addr = [
+                        _tdm_desc_lds_addr(
+                            make_desc_b_pair(
+                                lds_bg_pair_bufs[i],
+                                _n_pair_init,
+                                _zero_k_base,
+                            )
+                        )
+                        for i in range_constexpr(_nb)
+                    ]
+                    _stages_bs_lds_addr = [
+                        _tdm_desc_lds_addr(
+                            make_desc_bs_pair(
+                                lds_bs_pair_bufs[i],
+                                _n_pair_init,
+                                _zero_k_base,
+                            )
+                        )
+                        for i in range_constexpr(_nb)
+                    ]
+
+                    _desc_b_init = make_desc_b_pair(
+                        lds_bg_pair_bufs[0],
+                        _n_pair_init,
+                        _zero_k_base,
+                    )
+                    _desc_bs_init = make_desc_bs_pair(
+                        lds_bs_pair_bufs[0],
+                        _n_pair_init,
+                        _zero_k_base,
+                    )
+
+                    _active_stage_lds_addr = [
+                        _select_wave_tdm_value(
+                            _stages_b_lds_addr[i],
+                            _stages_bs_lds_addr[i],
+                        )
+                        for i in range_constexpr(_nb)
+                    ]
+                    _active_addr_lo = _select_wave_tdm_value(
+                        _tdm_desc_addr_lo(_desc_b_init),
+                        _tdm_desc_addr_lo(_desc_bs_init),
+                    )
+                    _active_addr_hi = _select_wave_tdm_value(
+                        _tdm_desc_addr_hi(_desc_b_init),
+                        _tdm_desc_addr_hi(_desc_bs_init),
+                    )
+                    _active_dgroup1 = _select_wave_tdm_value(
+                        _desc_b_init.dgroup1,
+                        _desc_bs_init.dgroup1,
+                    )
+                    _active_adv_i32 = _select_wave_tdm_value(
+                        _data_adv_i32,
+                        _scale_adv_i32,
+                    )
+                else:
+                    _eid_row = (
+                        arith.index_cast(T.index, eid_i32)
+                        * arith.index(int(2 * N))
+                    )
+                    _n_gate_init = _eid_row + blk_n
+                    _n_up_init = _eid_row + blk_n + arith.index(int(N))
+                    _data_adv_i32 = arith.constant(
+                        packed_tile_k_b if is_fp4 else packed_tile_k_b * 16,
+                        type=T.i32,
+                    )
+
+                    _stages_bg_lds_addr = [
+                        _tdm_desc_lds_addr(
+                            make_desc_b(
+                                lds_bg_bufs[i],
+                                _n_gate_init,
+                                _zero_k_base,
+                            )
+                        )
+                        for i in range_constexpr(_nb)
+                    ]
+                    _stages_bu_lds_addr = [
+                        _tdm_desc_lds_addr(
+                            make_desc_b(
+                                lds_bu_bufs[i],
+                                _n_up_init,
+                                _zero_k_base,
+                            )
+                        )
+                        for i in range_constexpr(_nb)
+                    ]
+                    _stages_bs_lds_addr = [
+                        _tdm_desc_lds_addr(
+                            make_desc_bs(
+                                lds_bs_bufs[i],
+                                _n_gate_init,
+                                _zero_k_base,
+                            )
+                        )
+                        for i in range_constexpr(_nb)
+                    ]
+                    _stages_bsu_lds_addr = [
+                        _tdm_desc_lds_addr(
+                            make_desc_bs(
+                                lds_bsu_bufs[i],
+                                _n_up_init,
+                                _zero_k_base,
+                            )
+                        )
+                        for i in range_constexpr(_nb)
+                    ]
+
+                    _desc_bg_init = make_desc_b(
+                        lds_bg_bufs[0],
+                        _n_gate_init,
+                        _zero_k_base,
+                    )
+                    _desc_bu_init = make_desc_b(
+                        lds_bu_bufs[0],
+                        _n_up_init,
+                        _zero_k_base,
+                    )
+                    _desc_bs_init = make_desc_bs(
+                        lds_bs_bufs[0],
+                        _n_gate_init,
+                        _zero_k_base,
+                    )
+                    _desc_bsu_init = make_desc_bs(
+                        lds_bsu_bufs[0],
+                        _n_up_init,
+                        _zero_k_base,
+                    )
+
+                    _active_stage_lds_addr = [
+                        _select_wave_tdm_value(
+                            _stages_bg_lds_addr[i],
+                            _stages_bu_lds_addr[i],
+                            _stages_bs_lds_addr[i],
+                            _stages_bsu_lds_addr[i],
+                        )
+                        for i in range_constexpr(_nb)
+                    ]
+                    _active_addr_lo = _select_wave_tdm_value(
+                        _tdm_desc_addr_lo(_desc_bg_init),
+                        _tdm_desc_addr_lo(_desc_bu_init),
+                        _tdm_desc_addr_lo(_desc_bs_init),
+                        _tdm_desc_addr_lo(_desc_bsu_init),
+                    )
+                    _active_addr_hi = _select_wave_tdm_value(
+                        _tdm_desc_addr_hi(_desc_bg_init),
+                        _tdm_desc_addr_hi(_desc_bu_init),
+                        _tdm_desc_addr_hi(_desc_bs_init),
+                        _tdm_desc_addr_hi(_desc_bsu_init),
+                    )
+                    _active_dgroup1 = _select_wave_tdm_value(
+                        _desc_bg_init.dgroup1,
+                        _desc_bu_init.dgroup1,
+                        _desc_bs_init.dgroup1,
+                        _desc_bsu_init.dgroup1,
+                    )
+                    _active_adv_i32 = _select_wave_tdm_value(
+                        _data_adv_i32,
+                        _data_adv_i32,
+                        _scale_adv_i32,
+                        _scale_adv_i32,
+                    )
+
+                def _issue_active_b_tdm_only(stage_idx, curr_addr_lo):
+                    _if_loader = scf.IfOp(_is_loader_wave)
+                    with ir.InsertionPoint(_if_loader.then_block):
+                        _dg0 = vector.from_elements(T.vec(4, T.i32), [
+                            _tdm_pred,
+                            _active_stage_lds_addr[stage_idx],
+                            curr_addr_lo,
+                            _active_addr_hi,
+                        ])
+                        tdm_ops.tensor_load_2d(
+                            tdm_ops.TDMDescriptor2D(_dg0, _active_dgroup1)
+                        )
+                        scf.YieldOp([])
+                    _next_addr_lo = arith.addi(curr_addr_lo, _active_adv_i32)
+                    return arith.select(
+                        _is_loader_wave,
+                        _next_addr_lo,
+                        curr_addr_lo,
+                    )
+
             # ── pipeline load helpers ─────────────────────────────────
             def _issue_b_tdm_only(k_base, buf_idx):
                 if _merge_gate_up_tdm:
                     _n_pair = _stage1_pair_row_base()
-                    if wave_specialized_tdm:
-                        _descs = [
-                            make_desc_b_pair(lds_bg_pair_bufs[buf_idx], _n_pair, k_base),
-                            make_desc_bs_pair(lds_bs_pair_bufs[buf_idx], _n_pair, k_base),
-                        ]
-                        issue_tdm_loads(*_descs, wave_specialized=True)
-                    else:
-                        tdm_ops.tensor_load_2d(
-                            make_desc_b_pair(lds_bg_pair_bufs[buf_idx], _n_pair, k_base))
-                        tdm_ops.tensor_load_2d(
-                            make_desc_bs_pair(lds_bs_pair_bufs[buf_idx], _n_pair, k_base))
+                    tdm_ops.tensor_load_2d(
+                        make_desc_b_pair(lds_bg_pair_bufs[buf_idx], _n_pair, k_base))
+                    tdm_ops.tensor_load_2d(
+                        make_desc_bs_pair(lds_bs_pair_bufs[buf_idx], _n_pair, k_base))
                 else:
                     _eid_row = (arith.index_cast(T.index, eid_i32)
                                 * arith.index(int(2 * N)))
                     _n_gate = _eid_row + blk_n
                     _n_up = _eid_row + blk_n + arith.index(int(N))
-                    if wave_specialized_tdm:
-                        _descs = [
-                            make_desc_b(lds_bg_bufs[buf_idx], _n_gate, k_base),
-                            make_desc_b(lds_bu_bufs[buf_idx], _n_up, k_base),
-                            make_desc_bs(lds_bs_bufs[buf_idx], _n_gate, k_base),
-                            make_desc_bs(lds_bsu_bufs[buf_idx], _n_up, k_base),
-                        ]
-                        issue_tdm_loads(*_descs, wave_specialized=True)
-                    else:
-                        tdm_ops.tensor_load_2d(
-                            make_desc_b(lds_bg_bufs[buf_idx], _n_gate, k_base))
-                        tdm_ops.tensor_load_2d(
-                            make_desc_b(lds_bu_bufs[buf_idx], _n_up, k_base))
-                        tdm_ops.tensor_load_2d(
-                            make_desc_bs(lds_bs_bufs[buf_idx], _n_gate, k_base))
-                        tdm_ops.tensor_load_2d(
-                            make_desc_bs(lds_bsu_bufs[buf_idx], _n_up, k_base))
+                    tdm_ops.tensor_load_2d(
+                        make_desc_b(lds_bg_bufs[buf_idx], _n_gate, k_base))
+                    tdm_ops.tensor_load_2d(
+                        make_desc_b(lds_bu_bufs[buf_idx], _n_up, k_base))
+                    tdm_ops.tensor_load_2d(
+                        make_desc_bs(lds_bs_bufs[buf_idx], _n_gate, k_base))
+                    tdm_ops.tensor_load_2d(
+                        make_desc_bs(lds_bsu_bufs[buf_idx], _n_up, k_base))
 
             def _issue_scalar_loads(k_base, buf_idx):
                 if _use_tdm_gather_a:
@@ -2647,58 +2881,107 @@ def _compile_stage1_mxscale_kernel_impl(
 
             # ── main K-dimension reduction ────────────────────────────
             if not _use_pipeline:
-                for kt in range_constexpr(num_k_tiles):
-                    k_base = fx.Index(kt * int(tile_k))
-                    _issue_all_loads(k_base, 0)
-                    tdm_ops.tensor_wait(0)
-                    if use_cluster:
-                        gpu.cluster_barrier()
-                    else:
-                        gpu.barrier()
-                    acc_g, acc_u = _compute_k_tile(acc_g, acc_u, 0)
-                    if use_cluster:
-                        gpu.cluster_barrier()
-                    else:
-                        gpu.barrier()
+                if wave_specialized_tdm:
+                    active_b_addr_lo = _active_addr_lo
+                    for kt in range_constexpr(num_k_tiles):
+                        k_base = fx.Index(kt * int(tile_k))
+                        active_b_addr_lo = _issue_active_b_tdm_only(
+                            0, active_b_addr_lo)
+                        _issue_scalar_loads(k_base, 0)
+                        tdm_ops.tensor_wait(0)
+                        workgroup_barrier(use_cluster=use_cluster)
+                        acc_g, acc_u = _compute_k_tile(acc_g, acc_u, 0)
+                        workgroup_barrier(use_cluster=use_cluster)
+                else:
+                    for kt in range_constexpr(num_k_tiles):
+                        k_base = fx.Index(kt * int(tile_k))
+                        _issue_all_loads(k_base, 0)
+                        tdm_ops.tensor_wait(0)
+                        workgroup_barrier(use_cluster=use_cluster)
+                        acc_g, acc_u = _compute_k_tile(acc_g, acc_u, 0)
+                        workgroup_barrier(use_cluster=use_cluster)
             else:
                 # ── prologue ──
-                for _pi in range_constexpr(pre_loaded):
-                    _issue_all_loads(fx.Index(_pi * int(tile_k)), _pi)
+                if wave_specialized_tdm:
+                    active_b_addr_lo = _active_addr_lo
+                    for _pi in range_constexpr(pre_loaded):
+                        active_b_addr_lo = _issue_active_b_tdm_only(
+                            _pi, active_b_addr_lo)
+                        _issue_scalar_loads(fx.Index(_pi * int(tile_k)), _pi)
+                else:
+                    for _pi in range_constexpr(pre_loaded):
+                        _issue_all_loads(fx.Index(_pi * int(tile_k)), _pi)
                 pipeline_fence(outstanding=0, use_cluster=use_cluster)
 
                 # ── main pipelined loop ──
                 if loop_iters > 0:
-                    _init = list(acc_g) + list(acc_u)
-                    for _li, _st in fx.range(0, loop_iters, 1, init=_init):
-                        _ag = list(_st[:n_accs])
-                        _au = list(_st[n_accs:2 * n_accs])
-                        for _bi in range_constexpr(_nb):
-                            _lb = (_bi + _nb - 1) % _nb
-                            _kt = (_li * fx.Index(_nb)
-                                   + fx.Index(pre_loaded + _bi))
-                            _kb = _kt * fx.Index(int(tile_k))
-                            pipeline_fence_signal(
-                                outstanding=_fence_outstanding,
-                                use_cluster=use_cluster)
-                            pipeline_fence_wait(use_cluster=use_cluster)
-                            _issue_b_tdm_only(_kb, _lb)
+                    if wave_specialized_tdm:
+                        _init = list(acc_g) + list(acc_u) + [active_b_addr_lo]
+                        for _li, _st in fx.range(0, loop_iters, 1, init=_init):
+                            _ag = list(_st[:n_accs])
+                            _au = list(_st[n_accs:2 * n_accs])
+                            _cur_b_addr_lo = _st[2 * n_accs]
+                            for _bi in range_constexpr(_nb):
+                                _lb = (_bi + _nb - 1) % _nb
+                                _kt = (_li * fx.Index(_nb)
+                                       + fx.Index(pre_loaded + _bi))
+                                _kb = _kt * fx.Index(int(tile_k))
+                                pipeline_fence_signal(
+                                    outstanding=_fence_outstanding,
+                                    use_cluster=use_cluster)
+                                pipeline_fence_wait(use_cluster=use_cluster)
+                                _cur_b_addr_lo = _issue_active_b_tdm_only(
+                                    _lb, _cur_b_addr_lo)
 
-                            def _mid_issue_scalar(_mid_kb=_kb, _mid_lb=_lb):
-                                _issue_scalar_loads(_mid_kb, _mid_lb)
+                                def _mid_issue_scalar(_mid_kb=_kb, _mid_lb=_lb):
+                                    _issue_scalar_loads(_mid_kb, _mid_lb)
 
-                            if _use_scheduled_compute:
-                                rocdl.sched_barrier(0)
-                            _ag, _au = _compute_with_mid_loads(
-                                _ag,
-                                _au,
-                                _bi,
-                                _mid_issue_scalar,
-                            )
-                            if _use_scheduled_compute:
-                                _hot_loop_scheduler_scheduled()
-                        _res = yield list(_ag) + list(_au)
-                    acc_g = list(_res[:n_accs])
-                    acc_u = list(_res[n_accs:2 * n_accs])
+                                if _use_scheduled_compute:
+                                    rocdl.sched_barrier(0)
+                                _ag, _au = _compute_with_mid_loads(
+                                    _ag,
+                                    _au,
+                                    _bi,
+                                    _mid_issue_scalar,
+                                )
+                                if _use_scheduled_compute:
+                                    _hot_loop_scheduler_scheduled()
+                            _res = yield list(_ag) + list(_au) + [_cur_b_addr_lo]
+                        acc_g = list(_res[:n_accs])
+                        acc_u = list(_res[n_accs:2 * n_accs])
+                        active_b_addr_lo = _res[2 * n_accs]
+                    else:
+                        _init = list(acc_g) + list(acc_u)
+                        for _li, _st in fx.range(0, loop_iters, 1, init=_init):
+                            _ag = list(_st[:n_accs])
+                            _au = list(_st[n_accs:2 * n_accs])
+                            for _bi in range_constexpr(_nb):
+                                _lb = (_bi + _nb - 1) % _nb
+                                _kt = (_li * fx.Index(_nb)
+                                       + fx.Index(pre_loaded + _bi))
+                                _kb = _kt * fx.Index(int(tile_k))
+                                pipeline_fence_signal(
+                                    outstanding=_fence_outstanding,
+                                    use_cluster=use_cluster)
+                                pipeline_fence_wait(use_cluster=use_cluster)
+                                _issue_b_tdm_only(_kb, _lb)
+
+                                def _mid_issue_scalar(_mid_kb=_kb, _mid_lb=_lb):
+                                    _issue_scalar_loads(_mid_kb, _mid_lb)
+
+                                if _use_scheduled_compute:
+                                    rocdl.sched_barrier(0)
+                                _ag, _au = _compute_with_mid_loads(
+                                    _ag,
+                                    _au,
+                                    _bi,
+                                    _mid_issue_scalar,
+                                )
+                                if _use_scheduled_compute:
+                                    _hot_loop_scheduler_scheduled()
+                            _res = yield list(_ag) + list(_au)
+                        acc_g = list(_res[:n_accs])
+                        acc_u = list(_res[n_accs:2 * n_accs])
 
                 # ── post-loop fence ──
                 if loop_iters > 0:
@@ -2732,7 +3015,11 @@ def _compile_stage1_mxscale_kernel_impl(
                                 (_tail_start + pre_loaded + _tail_li)
                                 * int(tile_k))
                             _tail_li += 1
-                            _issue_b_tdm_only(_tkb, _ls)
+                            if wave_specialized_tdm:
+                                active_b_addr_lo = _issue_active_b_tdm_only(
+                                    _ls, active_b_addr_lo)
+                            else:
+                                _issue_b_tdm_only(_tkb, _ls)
 
                             def _tail_mid_issue_scalar(_mid_kb=_tkb, _mid_ls=_ls):
                                 _issue_scalar_loads(_mid_kb, _mid_ls)
@@ -3081,6 +3368,7 @@ def _compile_stage2_mxscale_kernel_impl(
         if num_warps < 2:
             raise ValueError(
                 f"wave_specialized_tdm requires at least 2 waves (B + B_scale), got {num_warps}")
+    _tdm_loader_waves = 2
     tdm_desc_num_warps = 1 if bool(wave_specialized_tdm) else num_warps
     effective_waves_per_eu = waves_per_eu
     if use_cluster and effective_waves_per_eu is None:
@@ -3128,7 +3416,16 @@ def _compile_stage2_mxscale_kernel_impl(
         loop_iters = (num_k_tiles - pre_loaded) // int(num_buffers)
         _tail_start = loop_iters * int(num_buffers)
         extra = num_k_tiles - _tail_start - pre_loaded
-        TDM_PER_STEP = 1 if bool(wave_specialized_tdm) else 2
+        _B_TDM_PER_STEP = 1 if bool(wave_specialized_tdm) else 2
+        _A_GATHER_GROUPS = (int(tile_m) + 8 - 1) // 8 if bool(use_tdm_gather) else 0
+        if bool(use_tdm_gather) and bool(wave_specialized_tdm):
+            _A_GATHER_TDM_PER_STEP = (
+                (_A_GATHER_GROUPS + _tdm_loader_waves - 1)
+                // _tdm_loader_waves
+            )
+        else:
+            _A_GATHER_TDM_PER_STEP = _A_GATHER_GROUPS
+        TDM_PER_STEP = _B_TDM_PER_STEP + _A_GATHER_TDM_PER_STEP
         _fence_outstanding = TDM_PER_STEP * (int(num_buffers) - 2)
         _base_tail_plan = make_tail_plan(int(num_buffers), pre_loaded, extra)
         _tail_plan = [
@@ -3139,9 +3436,7 @@ def _compile_stage2_mxscale_kernel_impl(
             raise ValueError(
                 f"{num_buffers}-stage buffering requires num_k_tiles >= {num_buffers}, "
                 f"got {num_k_tiles}")
-
-    if bool(wave_specialized_tdm):
-        from kernels.gemm_common_gfx1250 import issue_tdm_loads
+    from kernels.gemm_common_gfx1250 import workgroup_barrier
 
     alloc = SmemAllocator(
         None,
@@ -3448,8 +3743,17 @@ def _compile_stage2_mxscale_kernel_impl(
                 _valid_count = _sum_i32_values(_a_row_valids[_start:_start + _cnt])
                 _lds_off = fx.Index(_start * lds_a_stride_bytes)
                 _has_valid = arith.cmpi(arith.CmpIPredicate.sgt, _valid_count, _zero_i32)
-                _if_valid = scf.IfOp(_has_valid)
-                with ir.InsertionPoint(_if_valid.then_block):
+                _issue_pred = _has_valid
+                if wave_specialized_tdm:
+                    _gather_owner = _gi % _tdm_loader_waves
+                    _is_gather_loader = arith.cmpi(
+                        arith.CmpIPredicate.eq,
+                        _tdm_wave_id,
+                        arith.constant(_gather_owner, type=T.i32),
+                    )
+                    _issue_pred = arith.andi(_issue_pred, _is_gather_loader)
+                _if_issue = scf.IfOp(_issue_pred)
+                with ir.InsertionPoint(_if_issue.then_block):
                     desc = tdm_ops.make_tensor_gather_descriptor(
                         global_ptr=arg_x,
                         lds_memref=target_lds,
@@ -3933,21 +4237,136 @@ def _compile_stage2_mxscale_kernel_impl(
                         rocdl.sched_dsrd(_bs_ds_loads)
                 rocdl.sched_barrier(0)
 
+            if wave_specialized_tdm:
+                _tdm_wave_id = rocdl.wave_id()
+                _is_loader_wave = arith.cmpi(
+                    arith.CmpIPredicate.ult,
+                    _tdm_wave_id,
+                    arith.constant(_tdm_loader_waves, type=T.i32),
+                )
+                _tdm_pred = arith.constant(1, type=T.i32)
+
+                def _select_wave_tdm_value(b_value, bs_value):
+                    _wave_is_b = arith.cmpi(
+                        arith.CmpIPredicate.eq,
+                        _tdm_wave_id,
+                        arith.constant(0, type=T.i32),
+                    )
+                    return arith.select(_wave_is_b, b_value, bs_value)
+
+                def _tdm_desc_lds_addr(desc):
+                    return vector.extract(
+                        desc.dgroup0,
+                        static_position=[1],
+                        dynamic_position=[],
+                    )
+
+                def _tdm_desc_addr_lo(desc):
+                    return vector.extract(
+                        desc.dgroup0,
+                        static_position=[2],
+                        dynamic_position=[],
+                    )
+
+                def _tdm_desc_addr_hi(desc):
+                    return vector.extract(
+                        desc.dgroup0,
+                        static_position=[3],
+                        dynamic_position=[],
+                    )
+
+                _eid = arith.index_cast(T.index, eid_i32)
+                _n_init = _eid * n_idx + blk_n
+                _zero_k_base = arith.index(0)
+                _data_adv_i32 = arith.constant(
+                    packed_tile_k_b if is_fp4 else packed_tile_k_b * 16,
+                    type=T.i32,
+                )
+                _scale_adv_i32 = arith.constant(scale_k_per_tile, type=T.i32)
+
+                _stages_b_lds_addr = [
+                    _tdm_desc_lds_addr(
+                        make_desc_b(
+                            _n_init,
+                            _zero_k_base,
+                            lds_b_bufs[i],
+                        )
+                    )
+                    for i in range_constexpr(_nb)
+                ]
+                _stages_bs_lds_addr = [
+                    _tdm_desc_lds_addr(
+                        make_desc_bs(
+                            _n_init,
+                            _zero_k_base,
+                            lds_bs_bufs[i],
+                        )
+                    )
+                    for i in range_constexpr(_nb)
+                ]
+
+                _desc_b_init = make_desc_b(
+                    _n_init,
+                    _zero_k_base,
+                    lds_b_bufs[0],
+                )
+                _desc_bs_init = make_desc_bs(
+                    _n_init,
+                    _zero_k_base,
+                    lds_bs_bufs[0],
+                )
+
+                _active_stage_lds_addr = [
+                    _select_wave_tdm_value(
+                        _stages_b_lds_addr[i],
+                        _stages_bs_lds_addr[i],
+                    )
+                    for i in range_constexpr(_nb)
+                ]
+                _active_addr_lo = _select_wave_tdm_value(
+                    _tdm_desc_addr_lo(_desc_b_init),
+                    _tdm_desc_addr_lo(_desc_bs_init),
+                )
+                _active_addr_hi = _select_wave_tdm_value(
+                    _tdm_desc_addr_hi(_desc_b_init),
+                    _tdm_desc_addr_hi(_desc_bs_init),
+                )
+                _active_dgroup1 = _select_wave_tdm_value(
+                    _desc_b_init.dgroup1,
+                    _desc_bs_init.dgroup1,
+                )
+                _active_adv_i32 = _select_wave_tdm_value(
+                    _data_adv_i32,
+                    _scale_adv_i32,
+                )
+                def _issue_active_b_tdm_only(stage_idx, curr_addr_lo):
+                    _if_loader = scf.IfOp(_is_loader_wave)
+                    with ir.InsertionPoint(_if_loader.then_block):
+                        _dg0 = vector.from_elements(T.vec(4, T.i32), [
+                            _tdm_pred,
+                            _active_stage_lds_addr[stage_idx],
+                            curr_addr_lo,
+                            _active_addr_hi,
+                        ])
+                        tdm_ops.tensor_load_2d(
+                            tdm_ops.TDMDescriptor2D(_dg0, _active_dgroup1)
+                        )
+                        scf.YieldOp([])
+                    _next_addr_lo = arith.addi(curr_addr_lo, _active_adv_i32)
+                    return arith.select(
+                        _is_loader_wave,
+                        _next_addr_lo,
+                        curr_addr_lo,
+                    )
+
             # ── pipeline load helpers ─────────────────────────────────
             def _issue_b_tdm_only(k_base, buf_idx):
                 _eid = arith.index_cast(T.index, eid_i32)
                 _n = _eid * n_idx + blk_n
-                if wave_specialized_tdm:
-                    _descs = [
-                        make_desc_b(_n, k_base, lds_b_bufs[buf_idx]),
-                        make_desc_bs(_n, k_base, lds_bs_bufs[buf_idx]),
-                    ]
-                    issue_tdm_loads(*_descs, wave_specialized=True)
-                else:
-                    tdm_ops.tensor_load_2d(
-                        make_desc_b(_n, k_base, lds_b_bufs[buf_idx]))
-                    tdm_ops.tensor_load_2d(
-                        make_desc_bs(_n, k_base, lds_bs_bufs[buf_idx]))
+                tdm_ops.tensor_load_2d(
+                    make_desc_b(_n, k_base, lds_b_bufs[buf_idx]))
+                tdm_ops.tensor_load_2d(
+                    make_desc_bs(_n, k_base, lds_bs_bufs[buf_idx]))
 
             def _issue_scalar_loads(k_base, buf_idx):
                 if _use_tdm_gather_a:
@@ -3974,57 +4393,104 @@ def _compile_stage2_mxscale_kernel_impl(
             # ── main K-dimension reduction ────────────────────────────
             if not _use_pipeline:
                 # Single-buffer path (num_buffers=1)
-                for kt in range_constexpr(num_k_tiles):
-                    k_base = fx.Index(kt * int(tile_k))
-                    _issue_all_loads(k_base, 0)
-                    tdm_ops.tensor_wait(0)
-                    if use_cluster:
-                        gpu.cluster_barrier()
-                    else:
-                        gpu.barrier()
-                    acc = _compute_k_tile(acc, 0)
-                    if use_cluster:
-                        gpu.cluster_barrier()
-                    else:
-                        gpu.barrier()
+                if wave_specialized_tdm:
+                    active_b_addr_lo = _active_addr_lo
+                    for kt in range_constexpr(num_k_tiles):
+                        k_base = fx.Index(kt * int(tile_k))
+                        active_b_addr_lo = _issue_active_b_tdm_only(
+                            0, active_b_addr_lo)
+                        _issue_scalar_loads(k_base, 0)
+                        tdm_ops.tensor_wait(0)
+                        workgroup_barrier(use_cluster=use_cluster)
+                        acc = _compute_k_tile(acc, 0)
+                        workgroup_barrier(use_cluster=use_cluster)
+                else:
+                    for kt in range_constexpr(num_k_tiles):
+                        k_base = fx.Index(kt * int(tile_k))
+                        _issue_all_loads(k_base, 0)
+                        tdm_ops.tensor_wait(0)
+                        workgroup_barrier(use_cluster=use_cluster)
+                        acc = _compute_k_tile(acc, 0)
+                        workgroup_barrier(use_cluster=use_cluster)
             else:
                 # Multi-buffer pipeline
                 # ── prologue: pre-load first `pre_loaded` stages ──
-                for _pi in range_constexpr(pre_loaded):
-                    _issue_all_loads(fx.Index(_pi * int(tile_k)), _pi)
+                if wave_specialized_tdm:
+                    active_b_addr_lo = _active_addr_lo
+                    for _pi in range_constexpr(pre_loaded):
+                        active_b_addr_lo = _issue_active_b_tdm_only(
+                            _pi, active_b_addr_lo)
+                        _issue_scalar_loads(fx.Index(_pi * int(tile_k)), _pi)
+                else:
+                    for _pi in range_constexpr(pre_loaded):
+                        _issue_all_loads(fx.Index(_pi * int(tile_k)), _pi)
                 pipeline_fence(outstanding=0, use_cluster=use_cluster)
 
                 # ── main pipelined loop ──
                 if loop_iters > 0:
-                    _init = list(acc)
-                    for _li, _st in fx.range(0, loop_iters, 1, init=_init):
-                        _acc = list(_st[:n_accs])
-                        for _bi in range_constexpr(_nb):
-                            _lb = (_bi + _nb - 1) % _nb
-                            _kt = (_li * fx.Index(_nb)
-                                   + fx.Index(pre_loaded + _bi))
-                            _kb = _kt * fx.Index(int(tile_k))
-                            pipeline_fence_signal(
-                                outstanding=_fence_outstanding,
-                                use_cluster=use_cluster)
-                            pipeline_fence_wait(use_cluster=use_cluster)
+                    if wave_specialized_tdm:
+                        _init = list(acc) + [active_b_addr_lo]
+                        for _li, _st in fx.range(0, loop_iters, 1, init=_init):
+                            _acc = list(_st[:n_accs])
+                            _cur_b_addr_lo = _st[n_accs]
+                            for _bi in range_constexpr(_nb):
+                                _lb = (_bi + _nb - 1) % _nb
+                                _kt = (_li * fx.Index(_nb)
+                                       + fx.Index(pre_loaded + _bi))
+                                _kb = _kt * fx.Index(int(tile_k))
+                                pipeline_fence_signal(
+                                    outstanding=_fence_outstanding,
+                                    use_cluster=use_cluster)
+                                pipeline_fence_wait(use_cluster=use_cluster)
 
-                            _issue_b_tdm_only(_kb, _lb)
+                                _cur_b_addr_lo = _issue_active_b_tdm_only(
+                                    _lb, _cur_b_addr_lo)
 
-                            def _mid_issue_scalar(_mid_kb=_kb, _mid_lb=_lb):
-                                _issue_scalar_loads(_mid_kb, _mid_lb)
+                                def _mid_issue_scalar(_mid_kb=_kb, _mid_lb=_lb):
+                                    _issue_scalar_loads(_mid_kb, _mid_lb)
 
-                            if _use_scheduled_compute:
-                                rocdl.sched_barrier(0)
-                            _acc = _compute_with_mid_loads(
-                                _acc,
-                                _bi,
-                                _mid_issue_scalar,
-                            )
-                            if _use_scheduled_compute:
-                                _hot_loop_scheduler_scheduled()
-                        _res = yield list(_acc)
-                    acc = list(_res[:n_accs])
+                                if _use_scheduled_compute:
+                                    rocdl.sched_barrier(0)
+                                _acc = _compute_with_mid_loads(
+                                    _acc,
+                                    _bi,
+                                    _mid_issue_scalar,
+                                )
+                                if _use_scheduled_compute:
+                                    _hot_loop_scheduler_scheduled()
+                            _res = yield list(_acc) + [_cur_b_addr_lo]
+                        acc = list(_res[:n_accs])
+                        active_b_addr_lo = _res[n_accs]
+                    else:
+                        _init = list(acc)
+                        for _li, _st in fx.range(0, loop_iters, 1, init=_init):
+                            _acc = list(_st[:n_accs])
+                            for _bi in range_constexpr(_nb):
+                                _lb = (_bi + _nb - 1) % _nb
+                                _kt = (_li * fx.Index(_nb)
+                                       + fx.Index(pre_loaded + _bi))
+                                _kb = _kt * fx.Index(int(tile_k))
+                                pipeline_fence_signal(
+                                    outstanding=_fence_outstanding,
+                                    use_cluster=use_cluster)
+                                pipeline_fence_wait(use_cluster=use_cluster)
+
+                                _issue_b_tdm_only(_kb, _lb)
+
+                                def _mid_issue_scalar(_mid_kb=_kb, _mid_lb=_lb):
+                                    _issue_scalar_loads(_mid_kb, _mid_lb)
+
+                                if _use_scheduled_compute:
+                                    rocdl.sched_barrier(0)
+                                _acc = _compute_with_mid_loads(
+                                    _acc,
+                                    _bi,
+                                    _mid_issue_scalar,
+                                )
+                                if _use_scheduled_compute:
+                                    _hot_loop_scheduler_scheduled()
+                            _res = yield list(_acc)
+                        acc = list(_res[:n_accs])
 
                 # ── post-loop fence ──
                 if loop_iters > 0:
@@ -4057,7 +4523,11 @@ def _compile_stage2_mxscale_kernel_impl(
                                 * int(tile_k))
                             _tail_li += 1
 
-                            _issue_b_tdm_only(_tkb, _ls)
+                            if wave_specialized_tdm:
+                                active_b_addr_lo = _issue_active_b_tdm_only(
+                                    _ls, active_b_addr_lo)
+                            else:
+                                _issue_b_tdm_only(_tkb, _ls)
 
                             def _tail_mid_issue_scalar(_mid_kb=_tkb, _mid_ls=_ls):
                                 _issue_scalar_loads(_mid_kb, _mid_ls)
