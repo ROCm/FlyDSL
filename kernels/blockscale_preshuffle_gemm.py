@@ -288,15 +288,16 @@ def compile_blockscale_preshuffle_gemm(
             return b0_i64, b1_i64
 
         def load_b_tile(base_k):
+            packs0_per_ku = [[] for _ in range(k_unroll)]
+            packs1_per_ku = [[] for _ in range(k_unroll)]
+            for ni in range_constexpr(num_acc_n):
+                for ku in range_constexpr(k_unroll):
+                    b0, b1 = load_b_packs_k64(base_k, ku, ni)
+                    packs0_per_ku[ku].append(b0)
+                    packs1_per_ku[ku].append(b1)
             b_tile = []
             for ku in range_constexpr(k_unroll):
-                packs0 = []
-                packs1 = []
-                for ni in range_constexpr(num_acc_n):
-                    b0, b1 = load_b_packs_k64(base_k, ku, ni)
-                    packs0.append(b0)
-                    packs1.append(b1)
-                b_tile.append((packs0, packs1))
+                b_tile.append((packs0_per_ku[ku], packs1_per_ku[ku]))
             return b_tile
 
         # ── A LDS load helpers ────────────────────────────────────────────
@@ -472,16 +473,6 @@ def compile_blockscale_preshuffle_gemm(
             for sb in range_constexpr(sb_per_tile):
                 kb = k_base // c_scale_block_k + fx.Index(sb)
                 sa_base_offset = kb * c_M
-                s_a_vecs = []
-                for mi in range_constexpr(m_repeat):
-                    row_base_m = bx_m + arith.index(mi * 16)
-                    row_g_base = row_base_m + row_off_base
-                    sa_idx = sa_base_offset + row_g_base
-                    s_a_vec = buffer_ops.buffer_load(
-                        scale_a_rsrc, sa_idx, vec_width=4, dtype=T.f32
-                    )
-                    s_a_vecs.append(vector.bitcast(T.f32x4, s_a_vec))
-
                 s_b_vals = []
                 for ni in range_constexpr(num_acc_n):
                     col_base_ni = by_n + n_tile_base + arith.index(ni * 16)
@@ -491,6 +482,16 @@ def compile_blockscale_preshuffle_gemm(
                         scale_b_rsrc, sb_idx, vec_width=1, dtype=T.f32
                     )
                     s_b_vals.append(s_b_val)
+
+                s_a_vecs = []
+                for mi in range_constexpr(m_repeat):
+                    row_base_m = bx_m + arith.index(mi * 16)
+                    row_g_base = row_base_m + row_off_base
+                    sa_idx = sa_base_offset + row_g_base
+                    s_a_vec = buffer_ops.buffer_load(
+                        scale_a_rsrc, sa_idx, vec_width=4, dtype=T.f32
+                    )
+                    s_a_vecs.append(vector.bitcast(T.f32x4, s_a_vec))
 
                 s_b_vecs = []
                 for ni in range_constexpr(num_acc_n):
@@ -514,7 +515,6 @@ def compile_blockscale_preshuffle_gemm(
 
             for sb in range_constexpr(sb_per_tile):
                 combined_scales = pre_scales[sb]
-                block_accs = [acc_init] * (num_acc_n * m_repeat)
 
                 if _is_gfx950:
                     ku0 = sb * ku_per_sb
@@ -533,18 +533,30 @@ def compile_blockscale_preshuffle_gemm(
                         a2, a3 = lds_load_packs_k64(curr_row_a_lds, col_base1, lds_buffer)
                         a128 = pack_i64x4_to_i32x8(a0, a1, a2, a3)
 
+                        pending_acc = None
                         for ni in range_constexpr(num_acc_n):
                             b128 = pack_i64x4_to_i32x8(
                                 b0_packs0[ni], b0_packs1[ni],
                                 b1_packs0[ni], b1_packs1[ni],
                             )
                             acc_idx = mi * num_acc_n + ni
-                            block_accs[acc_idx] = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
+                            blk = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
                                 mfma_res_ty,
-                                [a128, b128, block_accs[acc_idx],
+                                [a128, b128, acc_init,
                                  0, 0, 0, 0x7F7F7F7F, 0, 0x7F7F7F7F],
                             )
+                            rocdl.sched_barrier(0)
+                            if pending_acc is not None:
+                                prev_acc_idx, prev_blk, prev_ni = pending_acc
+                                current_global[prev_acc_idx] = math_dialect.fma(
+                                    prev_blk, combined_scales[mi][prev_ni], current_global[prev_acc_idx])
+                            pending_acc = (acc_idx, blk, ni)
+                        if pending_acc is not None:
+                            prev_acc_idx, prev_blk, prev_ni = pending_acc
+                            current_global[prev_acc_idx] = math_dialect.fma(
+                                prev_blk, combined_scales[mi][prev_ni], current_global[prev_acc_idx])
                 else:
+                    block_accs = [acc_init] * (num_acc_n * m_repeat)
                     for ku_local in range_constexpr(ku_per_sb):
                         ku = sb * ku_per_sb + ku_local
                         b_packs0, b_packs1 = b_tile_in[ku]
@@ -574,15 +586,15 @@ def compile_blockscale_preshuffle_gemm(
                                     b_packs0[ni], b_packs1[ni],
                                 )
 
-                for mi in range_constexpr(m_repeat):
-                    for ni in range_constexpr(num_acc_n):
-                        acc_idx = mi * num_acc_n + ni
-                        fma_result = math_dialect.fma(
-                            block_accs[acc_idx],
-                            combined_scales[mi][ni],
-                            current_global[acc_idx],
-                        )
-                        current_global[acc_idx] = fma_result
+                    for mi in range_constexpr(m_repeat):
+                        for ni in range_constexpr(num_acc_n):
+                            acc_idx = mi * num_acc_n + ni
+                            fma_result = math_dialect.fma(
+                                block_accs[acc_idx],
+                                combined_scales[mi][ni],
+                                current_global[acc_idx],
+                            )
+                            current_global[acc_idx] = fma_result
 
             return current_global
 
