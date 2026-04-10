@@ -1014,56 +1014,81 @@ def compile_moe_gemm1(
                 total_tiles = int(model_dim) // int(tile_k)
                 pair_iters = max((total_tiles - 2) // 2, 0)
 
-                _fields_per_ku = 2 if is_int4_bf16_groupwise else 1
-                _vals_per_bt = k_unroll * _fields_per_ku * num_acc_n
+                # B-tile data layout per k_unroll entry (3 variants):
+                #
+                # 1) int4 + groupwise scale (is_int4_bf16_groupwise):
+                #    [(packed_w4, scale), (packed_w4, scale), ...]   per ni
+                #    Each ni has a (packed_weights, groupwise_scale) pair.
+                #    Flattened as: [packed_0..N, scale_0..N]  → 2 * num_acc_n values
+                #
+                # 2) int4_bf16 without groupwise scale (int4_bf16_single_field):
+                #    [raw_i64, raw_i64, ...]   per ni
+                #    Single packed i64 per ni, already contains both weight halves.
+                #    Flattened as: [raw_0..N]  → 1 * num_acc_n values
+                #
+                # 3) fp8/int8/bf16/fp16 (default — two register packs per ku):
+                #    (packs_even_list, packs_odd_list)
+                #    Two lists of num_acc_n regs for even/odd MFMA operands.
+                #    Flattened as: [even_0..N, odd_0..N]  → 2 * num_acc_n values
+                #
+                int4_bf16_single_field = is_int4_bf16 and not is_int4_bf16_groupwise
+                _fields_per_ku = 1 if int4_bf16_single_field else 2
+                _vals_per_b_tile = k_unroll * _fields_per_ku * num_acc_n
 
-                def _flatten_bt(bt):
-                    """Flatten B tile for scf.for loop-carried state.
-
-                    Groupwise: bt[ku] = [(packed, scale), ...] per ni
-                      → [p0, p1, ..., s0, s1, ...] per ku (field-major).
-                    Non-groupwise: bt[ku] = [raw0, raw1, ...] per ni.
-                    """
+                def _flatten_b_tile(b_tile):
+                    """Flatten B tile to a 1-D list for scf.for loop-carried state."""
                     flat = []
-                    for ku_entry in bt:
+                    for ku_entry in b_tile:
                         if is_int4_bf16_groupwise:
+                            # [(packed, scale), ...] → [packed_0..N, scale_0..N]
                             flat.extend(t[0] for t in ku_entry)
                             flat.extend(t[1] for t in ku_entry)
+                        elif int4_bf16_single_field:
+                            # [raw_i64, ...] → [raw_0..N]
+                            flat.extend(ku_entry)
                         else:
-                            flat.extend(ku_entry if isinstance(ku_entry, (list, tuple)) else [ku_entry])
+                            # (packs_even, packs_odd) → [even_0..N, odd_0..N]
+                            flat.extend(ku_entry[0])
+                            flat.extend(ku_entry[1])
                     return flat
 
-                def _unflatten_bt(vals):
-                    """Inverse of _flatten_bt."""
-                    bt, idx = [], 0
+                def _unflatten_b_tile(vals):
+                    """Reconstruct B tile from flattened scf.for loop-carried state."""
+                    b_tile, idx = [], 0
                     for _ in range_constexpr(k_unroll):
                         if is_int4_bf16_groupwise:
                             packed = list(vals[idx:idx + num_acc_n])
                             idx += num_acc_n
                             scales = list(vals[idx:idx + num_acc_n])
                             idx += num_acc_n
-                            bt.append([(packed[ni], scales[ni]) for ni in range_constexpr(num_acc_n)])
-                        else:
-                            bt.append(list(vals[idx:idx + num_acc_n]))
+                            b_tile.append([(packed[ni], scales[ni]) for ni in range_constexpr(num_acc_n)])
+                        elif int4_bf16_single_field:
+                            b_tile.append(list(vals[idx:idx + num_acc_n]))
                             idx += num_acc_n
-                    return bt
+                        else:
+                            packs_even = list(vals[idx:idx + num_acc_n])
+                            idx += num_acc_n
+                            packs_odd = list(vals[idx:idx + num_acc_n])
+                            idx += num_acc_n
+                            b_tile.append((packs_even, packs_odd))
+                    return b_tile
 
                 init_state = (
                     list(acc_gate) + list(acc_up)
-                    + _flatten_bt(b_gate_cur) + _flatten_bt(b_up_cur)
+                    + _flatten_b_tile(b_gate_cur) + _flatten_b_tile(b_up_cur)
                     + list(a0_prefetch_pong)
                 )
 
                 _n_acc = m_repeat * num_acc_n
                 _p_bg = 2 * _n_acc
-                _p_bu = _p_bg + _vals_per_bt
-                _p_a0 = _p_bu + _vals_per_bt
+                _p_bu = _p_bg + _vals_per_b_tile
+                _p_a0 = _p_bu + _vals_per_b_tile
 
                 for pair_iv, state in range(0, pair_iters, 1, init=init_state):
                     _ag = list(state[:_n_acc])
                     _au = list(state[_n_acc:_p_bg])
-                    _bg = _unflatten_bt(list(state[_p_bg:_p_bu]))
-                    _bu = _unflatten_bt(list(state[_p_bu:_p_a0]))
+                    _bg = _unflatten_b_tile(list(state[_p_bg:_p_bu]))
+                    _bu = _unflatten_b_tile(list(state[_p_bu:_p_a0]))
                     _a0pf = (state[_p_a0], state[_p_a0 + 1])
 
                     k_iv = pair_iv * (c_tile_k + c_tile_k)
@@ -1096,7 +1121,7 @@ def compile_moe_gemm1(
 
                     loop_results = yield (
                         list(_ag) + list(_au)
-                        + _flatten_bt(_bg_next) + _flatten_bt(_bu_next)
+                        + _flatten_b_tile(_bg_next) + _flatten_b_tile(_bu_next)
                         + list(_a0pf_new)
                     )
 
@@ -1105,8 +1130,8 @@ def compile_moe_gemm1(
                 if pair_iters > 0:
                     acc_gate = list(loop_results[:_n_acc])
                     acc_up = list(loop_results[_n_acc:_p_bg])
-                    b_gate_cur = _unflatten_bt(list(loop_results[_p_bg:_p_bu]))
-                    b_up_cur = _unflatten_bt(list(loop_results[_p_bu:_p_a0]))
+                    b_gate_cur = _unflatten_b_tile(list(loop_results[_p_bg:_p_bu]))
+                    b_up_cur = _unflatten_b_tile(list(loop_results[_p_bu:_p_a0]))
                     a0_prefetch_pong = (loop_results[_p_a0], loop_results[_p_a0 + 1])
                 k_tail1 = k_in - tile_k
                 x_regs_ping = load_x_tile(k_tail1)
@@ -2414,41 +2439,55 @@ def compile_moe_gemm2(
                 c_tile_k_s2 = arith.index(tile_k)
                 pair_iters = k_main2_py // (int(tile_k) * 2)
 
-                _fields_per_ku = 2 if is_int4_bf16_groupwise else 1
-                _vals_per_bt = k_unroll * _fields_per_ku * num_acc_n
+                # B-tile data layout per k_unroll entry (3 variants):
+                #   See gemm1 _flatten_b_tile for full layout documentation.
+                int4_bf16_single_field = is_int4_bf16 and not is_int4_bf16_groupwise
+                _fields_per_ku = 1 if int4_bf16_single_field else 2
+                _vals_per_b_tile = k_unroll * _fields_per_ku * num_acc_n
                 _n_acc = m_repeat * num_acc_n
                 _p_b = _n_acc
-                _p_a0 = _p_b + _vals_per_bt
+                _p_a0 = _p_b + _vals_per_b_tile
 
-                def _flatten_bt(bt):
+                def _flatten_b_tile(b_tile):
+                    """Flatten B tile to a 1-D list for scf.for loop-carried state."""
                     flat = []
-                    for ku_entry in bt:
+                    for ku_entry in b_tile:
                         if is_int4_bf16_groupwise:
                             flat.extend(t[0] for t in ku_entry)
                             flat.extend(t[1] for t in ku_entry)
+                        elif int4_bf16_single_field:
+                            flat.extend(ku_entry)
                         else:
-                            flat.extend(ku_entry if isinstance(ku_entry, (list, tuple)) else [ku_entry])
+                            flat.extend(ku_entry[0])
+                            flat.extend(ku_entry[1])
                     return flat
 
-                def _unflatten_bt(vals):
-                    bt, idx = [], 0
+                def _unflatten_b_tile(vals):
+                    """Reconstruct B tile from flattened scf.for loop-carried state."""
+                    b_tile, idx = [], 0
                     for _ in range_constexpr(k_unroll):
                         if is_int4_bf16_groupwise:
                             packed = list(vals[idx:idx + num_acc_n])
                             idx += num_acc_n
                             scales = list(vals[idx:idx + num_acc_n])
                             idx += num_acc_n
-                            bt.append([(packed[ni], scales[ni]) for ni in range_constexpr(num_acc_n)])
-                        else:
-                            bt.append(list(vals[idx:idx + num_acc_n]))
+                            b_tile.append([(packed[ni], scales[ni]) for ni in range_constexpr(num_acc_n)])
+                        elif int4_bf16_single_field:
+                            b_tile.append(list(vals[idx:idx + num_acc_n]))
                             idx += num_acc_n
-                    return bt
+                        else:
+                            packs_even = list(vals[idx:idx + num_acc_n])
+                            idx += num_acc_n
+                            packs_odd = list(vals[idx:idx + num_acc_n])
+                            idx += num_acc_n
+                            b_tile.append((packs_even, packs_odd))
+                    return b_tile
 
-                init_state = list(acc) + _flatten_bt(b_cur) + list(a0_prefetch_pong)
+                init_state = list(acc) + _flatten_b_tile(b_cur) + list(a0_prefetch_pong)
 
                 for pair_iv, state in range(0, pair_iters, 1, init=init_state):
                     _ac = list(state[:_n_acc])
-                    _bc = _unflatten_bt(list(state[_p_b:_p_a0]))
+                    _bc = _unflatten_b_tile(list(state[_p_b:_p_a0]))
                     _a0 = (state[_p_a0], state[_p_a0 + 1])
 
                     k_iv = pair_iv * (c_tile_k_s2 + c_tile_k_s2)
@@ -2475,12 +2514,12 @@ def compile_moe_gemm2(
 
                     _a0n = lds_load_packs_k64(row_a_lds, col_offset_base_bytes, lds_base_pong)
 
-                    loop_results = yield list(_ac) + _flatten_bt(_bn) + list(_a0n)
+                    loop_results = yield list(_ac) + _flatten_b_tile(_bn) + list(_a0n)
 
                 SmemPtr._view_cache = None
                 if pair_iters > 0:
                     acc = list(loop_results[:_n_acc])
-                    b_cur = _unflatten_bt(list(loop_results[_p_b:_p_a0]))
+                    b_cur = _unflatten_b_tile(list(loop_results[_p_b:_p_a0]))
                     a0_prefetch_pong = (loop_results[_p_a0], loop_results[_p_a0 + 1])
 
                 if odd_k_tiles:

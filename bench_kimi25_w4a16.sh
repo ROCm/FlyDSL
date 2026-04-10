@@ -13,7 +13,7 @@ export FLYDSL_DEBUG_DUMP_ASM=1
 export FLYDSL_DUMP_DIR=$DUMP_DIR
 rm -rf "$DUMP_DIR"
 
-SCALE_DTYPE=${SCALE_DTYPE:-bf16}
+SCALE_DTYPE=${SCALE_DTYPE:-f32}
 
 python -c "
 import torch; from tests.kernels.test_moe_gemm import run_moe_stage1, run_moe_stage2
