@@ -2296,8 +2296,8 @@ def compile_moe_gemm2(
 
                     # For bf16 global atomics (gfx942 only), precompute the output base address.
                     # gfx950+ has buffer_atomic_pk_add_bf16, so bf16 uses buffer atomics there.
-                    out_base_idx = None
-                    if _needs_global_atomic_bf16:
+                    out_base_idx = fx.Index(0)
+                    if const_expr(_needs_global_atomic_bf16):
                         out_base_idx = buffer_ops.extract_base_index(arg_out)
 
                     def write_row_to_lds(
