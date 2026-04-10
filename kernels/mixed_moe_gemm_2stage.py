@@ -17,7 +17,6 @@ from flydsl.expr import range_constexpr
 from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
-from test.FLYIR2.FlyDSL.python.flydsl.expr.primitive import const_expr
 
 try:
     from flydsl.runtime.device import supports_bf16_global_atomics
