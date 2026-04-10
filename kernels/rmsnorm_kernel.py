@@ -174,7 +174,7 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
                 idx = tid + tile_i * BLOCK_THREADS
                 vec_e = _load_vec(in_div, idx)
 
-                if cache_as_elem:
+                if const_expr(cache_as_elem):
                     in_local.append(vec_e)
                     x = vec_e.extf(vec_type_c)
                 else:
