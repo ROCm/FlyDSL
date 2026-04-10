@@ -17,7 +17,7 @@ from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, gpu, range_constexpr
 from flydsl.expr.arith import ArithValue
 from flydsl.expr.typing import T, Int32
-from flydsl.expr.vector import Vector, ReductionOp, full
+from flydsl.expr.vector import ReductionOp, full
 from flydsl.expr.numeric import Numeric, Float32, Uint32
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
@@ -154,7 +154,7 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
             def _load_vec(div_tensor, idx):
                 r = fx.memref_alloca(vec_reg_ty, vec_reg_lay)
                 fx.copy_atom_call(copy_atom, fx.slice(div_tensor, (None, idx)), r)
-                return Vector(fx.memref_load_vec(r), VEC_WIDTH, elem_dtype)
+                return fx.memref_load_vec(r)
 
             def _store_vec(val, div_tensor, idx):
                 r = fx.memref_alloca(vec_reg_ty, vec_reg_lay)
@@ -179,7 +179,7 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
 
             _, sum_sq = block_reduce_add2(thread_dummy, thread_sumsq)
             mean_sq = ArithValue(sum_sq) / n_float
-            ms_eps = ArithValue(mean_sq) + eps_c
+            ms_eps = mean_sq + eps_c
             rrms = ms_eps.rsqrt(fastmath=fm_fast)
 
             # Pass 2: normalize + gamma + store (reuse cached input)
@@ -242,8 +242,7 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
                 view = fx.slice(divided_tensor, (None, index))
                 r = fx.memref_alloca(scalar_reg_ty, scalar_reg_lay)
                 fx.copy_atom_call(copy_atom_s, view, r)
-                ts = Vector(fx.memref_load_vec(r), 1, elem_dtype)
-                return ts[0].ir_value()
+                return fx.memref_load_vec(r)[0].ir_value()
 
             def _store_scalar(divided_tensor, index, val):
                 r = fx.memref_alloca(scalar_reg_ty, scalar_reg_lay)
@@ -270,7 +269,7 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
 
             sum_sq = block_reduce_add(thread_sumsq)
             mean_sq = ArithValue(sum_sq) / n_float
-            ms_eps = ArithValue(mean_sq) + eps_c
+            ms_eps = mean_sq + eps_c
             rrms = ms_eps.rsqrt(fastmath=fm_fast)
 
             for base_idx_int in range_constexpr(0, N, BLOCK_THREADS):
@@ -281,8 +280,8 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
                     g_e = _load_scalar(gamma_div, idx)
                     x = x_e if dtype_str == "f32" else x_e.extf(compute_type)
                     g = g_e if dtype_str == "f32" else g_e.extf(compute_type)
-                    norm = ArithValue(x) * ArithValue(rrms)
-                    y = norm * ArithValue(g)
+                    norm = ArithValue(x) * rrms
+                    y = norm * g
                     if dtype_str == "f32":
                         y_e = y
                     elif dtype_str == "bf16":

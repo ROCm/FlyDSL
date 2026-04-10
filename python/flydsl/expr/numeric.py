@@ -369,6 +369,7 @@ class Numeric(metaclass=NumericMeta):
             T.f8E5M2(): Float8E5M2,
             T.f8E4M3(): Float8E4M3,
             T.f8E4M3FN(): Float8E4M3FN,
+            Float8E4M3FNUZ.ir_type: Float8E4M3FNUZ,  # not in upstream MLIR extras T
             T.f8E4M3B11FNUZ(): Float8E4M3B11FNUZ,
             T.f8E8M0FNU(): Float8E8M0FNU,
             T.f6E2M3FN(): Float6E2M3FN,
@@ -682,7 +683,7 @@ class Float8E5M2(Float, metaclass=NumericMeta, width=8, ir_type=T.f8E5M2): ...
 class Float8E4M3FN(Float, metaclass=NumericMeta, width=8, ir_type=T.f8E4M3FN): ...
 
 
-class Float8E4M3FNUZ(Float, metaclass=NumericMeta, width=8, ir_type=lambda: ir.Float8E4M3FNUZType.get()): ...
+class Float8E4M3FNUZ(Float, metaclass=NumericMeta, width=8, ir_type=lambda: ir.Float8E4M3FNUZType.get()): ...  # not in upstream MLIR extras T
 
 
 class Float8E4M3B11FNUZ(Float, metaclass=NumericMeta, width=8, ir_type=T.f8E4M3B11FNUZ): ...

@@ -20,7 +20,7 @@ from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, gpu, range_constexpr
 from flydsl.expr.arith import ArithValue
 from flydsl.expr.typing import T, Int32
-from flydsl.expr.vector import Vector, ReductionOp, full
+from flydsl.expr.vector import ReductionOp, full
 from flydsl.expr.numeric import Numeric, Float32
 
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
@@ -148,7 +148,7 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
             def _load_vec(div_tensor, idx):
                 r = fx.memref_alloca(vec_reg_ty, vec_reg_lay)
                 fx.copy_atom_call(copy_atom, fx.slice(div_tensor, (None, idx)), r)
-                return Vector(fx.memref_load_vec(r), VEC_WIDTH, elem_dtype)
+                return fx.memref_load_vec(r)
 
             def _store_vec(val, div_tensor, idx):
                 r = fx.memref_alloca(vec_reg_ty, vec_reg_lay)
@@ -219,8 +219,7 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
                 view = fx.slice(divided, (None, index))
                 r = fx.memref_alloca(scalar_reg_ty, scalar_reg_lay)
                 fx.copy_atom_call(copy_atom_s, view, r)
-                ts = Vector(fx.memref_load_vec(r), 1, elem_dtype)
-                return ts[0].ir_value()
+                return fx.memref_load_vec(r)[0].ir_value()
 
             def _store_scalar(divided, index, val):
                 r = fx.memref_alloca(scalar_reg_ty, scalar_reg_lay)

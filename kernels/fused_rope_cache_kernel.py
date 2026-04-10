@@ -27,10 +27,9 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 
 from flydsl.expr import range_constexpr
-from flydsl.expr.arith import ArithValue
 from flydsl.expr.typing import T
-from flydsl.expr.vector import Vector
 from flydsl.expr.numeric import Numeric
+from flydsl.expr.vector import full
 from kernels.kernels_common import dtype_to_elem_type
 
 
@@ -152,13 +151,12 @@ def build_fused_rope_cache_module(
             atom = copy_atom_i32.set_value("soffset", elem_offset)
             r = fx.memref_alloca(i32_reg_ty, i32_reg_lay)
             fx.copy_atom_call(atom, base_view, r)
-            from flydsl.expr.numeric import Int32 as _Int32
-            return Vector(fx.memref_load_vec(r), 1, _Int32)[0].ir_value()
+            return fx.memref_load_vec(r)[0]
 
         def load_vec(div_tensor, idx):
             r = fx.memref_alloca(vec_reg_ty, vec_reg_lay)
             fx.copy_atom_call(copy_atom, fx.slice(div_tensor, (None, idx)), r)
-            return ArithValue(fx.memref_load_vec(r))
+            return fx.memref_load_vec(r)
 
         def store_vec(val, div_tensor, idx):
             r = fx.memref_alloca(vec_reg_ty, vec_reg_lay)
@@ -187,7 +185,7 @@ def build_fused_rope_cache_module(
 
             # NeoX rotation: pair with opposite half
             is_first_half = tid < fx.Int32(vecs_per_half)
-            pair_tid = ArithValue(is_first_half).select(tid + vecs_per_half, tid - vecs_per_half)
+            pair_tid = is_first_half.select(tid + vecs_per_half, tid - vecs_per_half)
             cos_vec_idx = tid % vecs_per_half
 
             qk_e   = load_vec(q_div, tid)
@@ -195,10 +193,10 @@ def build_fused_rope_cache_module(
             sin_e  = load_vec(sin_div, cos_vec_idx)
             pair_e = load_vec(q_div, pair_tid)
 
-            qk_cos   = ArithValue(qk_e) * ArithValue(cos_e)
-            pair_sin = ArithValue(pair_e) * ArithValue(sin_e)
-            sin_term = ArithValue(is_first_half).select(-pair_sin, pair_sin)
-            rot_e    = ArithValue(qk_cos) + ArithValue(sin_term)
+            qk_cos   = qk_e * cos_e
+            pair_sin = pair_e * sin_e
+            sin_term = is_first_half.select(-pair_sin, pair_sin)
+            rot_e    = qk_cos + sin_term
 
             store_vec(rot_e, qo_div, tid)
 
@@ -259,13 +257,12 @@ def build_fused_rope_cache_module(
             atom = copy_atom_i32.set_value("soffset", elem_offset)
             r = fx.memref_alloca(i32_reg_ty, i32_reg_lay)
             fx.copy_atom_call(atom, base_view, r)
-            from flydsl.expr.numeric import Int32 as _Int32
-            return Vector(fx.memref_load_vec(r), 1, _Int32)[0].ir_value()
+            return fx.memref_load_vec(r)[0]
 
         def load_vec(div_tensor, idx):
             r = fx.memref_alloca(vec_reg_ty, vec_reg_lay)
             fx.copy_atom_call(copy_atom, fx.slice(div_tensor, (None, idx)), r)
-            return ArithValue(fx.memref_load_vec(r))
+            return fx.memref_load_vec(r)
 
         def store_vec(val, div_tensor, idx):
             r = fx.memref_alloca(vec_reg_ty, vec_reg_lay)
@@ -273,9 +270,8 @@ def build_fused_rope_cache_module(
             fx.copy_atom_call(copy_atom, r, fx.slice(div_tensor, (None, idx)))
 
         def store_scalar(val, div_tensor, idx):
-            from flydsl.expr.vector import full as _full
             r = fx.memref_alloca(elem_reg_ty, elem_reg_lay)
-            ts = _full(1, elem_dtype(val), elem_dtype)
+            ts = full(1, elem_dtype(val), elem_dtype)
             fx.memref_store_vec(ts, r)
             fx.copy_atom_call(copy_atom_elem, r, fx.slice(div_tensor, (None, idx)))
 
@@ -301,7 +297,7 @@ def build_fused_rope_cache_module(
 
             # NeoX rotation
             is_first_half = tid < fx.Int32(vecs_per_half)
-            pair_tid = ArithValue(is_first_half).select(tid + vecs_per_half, tid - vecs_per_half)
+            pair_tid = is_first_half.select(tid + vecs_per_half, tid - vecs_per_half)
             cos_vec_idx = tid % vecs_per_half
 
             qk_e   = load_vec(k_div, tid)
@@ -309,10 +305,10 @@ def build_fused_rope_cache_module(
             sin_e  = load_vec(sin_div, cos_vec_idx)
             pair_e = load_vec(k_div, pair_tid)
 
-            qk_cos   = ArithValue(qk_e) * ArithValue(cos_e)
-            pair_sin = ArithValue(pair_e) * ArithValue(sin_e)
-            sin_term = ArithValue(is_first_half).select(-pair_sin, pair_sin)
-            k_rot_e  = ArithValue(qk_cos) + ArithValue(sin_term)
+            qk_cos   = qk_e * cos_e
+            pair_sin = pair_e * sin_e
+            sin_term = is_first_half.select(-pair_sin, pair_sin)
+            k_rot_e  = qk_cos + sin_term
 
             store_vec(k_rot_e, ko_div, tid)
 
@@ -320,8 +316,8 @@ def build_fused_rope_cache_module(
             slot_val = load_scalar_i32(Slot_buf, pid_t)
 
             if slot_val >= fx.Int32(0):
-                pid_t_slot = ArithValue(slot_val) // block_size
-                pid_b = ArithValue(slot_val) % block_size
+                pid_t_slot = slot_val // block_size
+                pid_b = slot_val % block_size
 
                 # Load V
                 v_row = fx.slice(V_buf, (pid_t, fx.Int32(pid_hk), None))
@@ -339,18 +335,17 @@ def build_fused_rope_cache_module(
                     store_vec(v_e, vc_div, tid)
                 else:
                     # Non-flash key_cache: [num_blocks, KH, D//x, BS, x]
-                    dim_group = (ArithValue(tid) * VEC_WIDTH) // x_size
-                    sub_tile = ArithValue(tid) % (x_size // VEC_WIDTH)
+                    dim_group = (tid * VEC_WIDTH) // x_size
+                    sub_tile = tid % (x_size // VEC_WIDTH)
 
                     kc_nf_row = fx.slice(KC_buf, (pid_t_slot, fx.Int32(pid_hk), dim_group, pid_b, None))
                     kc_nf_div = fx.logical_divide(kc_nf_row, fx.make_layout(VEC_WIDTH, 1))
                     store_vec(k_rot_e, kc_nf_div, sub_tile)
 
                     # Non-flash value_cache: [num_blocks, KH, D, block_size]
-                    v_ts = Vector(v_e, VEC_WIDTH, elem_dtype)
                     for vi in range_constexpr(VEC_WIDTH):
-                        v_scalar = v_ts[vi]
-                        d_idx = ArithValue(tid) * VEC_WIDTH + vi
+                        v_scalar = v_e[vi]
+                        d_idx = tid * VEC_WIDTH + vi
                         vc_row = fx.slice(VC_buf, (pid_t_slot, fx.Int32(pid_hk), d_idx, None))
                         vc_div = fx.logical_divide(vc_row, fx.make_layout(1, 1))
                         store_scalar(v_scalar, vc_div, pid_b)
@@ -372,7 +367,7 @@ def build_fused_rope_cache_module(
         stream: fx.Stream = fx.Stream(None),
     ):
         # Kernel 1: Q RoPE
-        n_q = ArithValue(num_tokens) * num_q_heads
+        n_q = num_tokens * num_q_heads
         q_launcher = q_rope_kernel(Q, Positions, CosCache, SinCache, Q_out)
         q_launcher.launch(
             grid=(n_q, 1, 1),
@@ -381,7 +376,7 @@ def build_fused_rope_cache_module(
         )
 
         # Kernel 2: K RoPE + KV cache write
-        n_k = ArithValue(num_tokens) * num_kv_heads
+        n_k = num_tokens * num_kv_heads
         k_launcher = k_cache_kernel(
             K, V, Positions, CosCache, SinCache, SlotMapping,
             KeyCache, ValueCache, K_out,
