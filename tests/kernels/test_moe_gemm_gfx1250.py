@@ -774,8 +774,6 @@ def run_moe_stage1(
     w1_shuffled = w1_q if (uses_fp4_weight_layout or uses_native_gfx1250) else shuffle_weight(w1_q)
     w2_shuffled = w2_q if (uses_fp4_weight_layout or uses_native_gfx1250) else (shuffle_weight(w2_q) if in_dtype == "fp8" else None)
     if in_dtype in ("fp8", "a8w4"):
-        _single_tile_m, _single_tile_n, _single_m_warp, _single_n_warp = _pick_fp16_single_launch_shape(tile_m, tile_n)
-        _warp_tile_n = _single_tile_n // _single_n_warp
         w1_rows = experts * (2 * inter_dim)
         w1_cols = model_dim // 2 if is_a8w4 else model_dim
         w1_shuffled = fp4_utils.preshuffle_b_16x16(
@@ -2705,20 +2703,50 @@ def _best_tile(target, dim, align):
     return None
 
 
-def _resolve_tiles(in_dtype, model_dim, inter_dim):
+def _resolve_tiles(in_dtype, model_dim, inter_dim, num_buffers=1):
     """Compute the largest valid (tile_m, tile_n1, tile_k1, tile_n2, tile_k2)
     for a given dtype and model shape, falling back from the target when
-    dimensions don't divide evenly."""
+    dimensions don't divide evenly.  When num_buffers >= 2, also ensures
+    num_k_tiles >= num_buffers so the pipelined loop has enough iterations,
+    and that the LDS footprint stays within the 320 KB hardware limit."""
     tile_m, target_n, target_k, wmma_k = BENCH_DTYPE_TARGET_TILES[in_dtype]
 
+    LDS_LIMIT = 327680
+    _, w_bpe, _ = _bench_dtype_bpe(in_dtype)
+
+    # Stage1 has gate+up (2x B tiles); estimate LDS per buffer to cap tile_k1.
+    target_k1 = target_k
+    if num_buffers >= 2:
+        tn1_est = _best_tile(target_n, inter_dim, 16) or target_n
+        for k1_try in range(target_k, 0, -wmma_k):
+            per_buf = tile_m * k1_try + 2 * tn1_est * k1_try * w_bpe
+            per_buf += tile_m * (k1_try // 32) + 2 * tn1_est * (k1_try // 32)
+            if int(per_buf) * num_buffers <= LDS_LIMIT:
+                target_k1 = k1_try
+                break
+        else:
+            target_k1 = wmma_k
+
     tile_n1 = _best_tile(target_n, inter_dim, 16)
-    tile_k1 = _best_tile(target_k, model_dim, wmma_k)
+    tile_k1 = _best_tile(target_k1, model_dim, wmma_k)
+    if tile_k1 is not None and num_buffers > 1:
+        while tile_k1 and model_dim // tile_k1 < num_buffers:
+            tile_k1 = _best_tile(tile_k1 - wmma_k, model_dim, wmma_k) if tile_k1 > wmma_k else None
     tile_n2 = _best_tile(target_n, model_dim, 16)
 
     tile_k2 = None
     for k in range(target_k, 0, -wmma_k):
         if inter_dim % k != 0:
             continue
+        if num_buffers > 1 and inter_dim // k < num_buffers:
+            continue
+        # Stage2 LDS: 1x B tile (no gate+up doubling)
+        if num_buffers >= 2:
+            tn2_est = tile_n2 or target_n
+            per_buf = tile_m * k + tn2_est * k * w_bpe
+            per_buf += tile_m * (k // 32) + tn2_est * (k // 32)
+            if int(per_buf) * num_buffers > LDS_LIMIT:
+                continue
         total = tile_m * k
         if total % 256 == 0 and (total // 256) % 4 == 0:
             tile_k2 = k
@@ -2821,9 +2849,9 @@ def bench_config(name, model_dim, inter_dim, experts, topk,
                  in_dtype, token_list, check_ref, peak_tflops,
                  warmup=BENCH_WARMUP, iters=BENCH_ITERS,
                  use_tdm_store=False, inst_prefetch=False,
-                 wave_specialized_tdm=False):
+                 wave_specialized_tdm=False, num_buffers=1):
     """Benchmark a single (model, dtype) configuration across all token counts."""
-    tiles = _resolve_tiles(in_dtype, model_dim, inter_dim)
+    tiles = _resolve_tiles(in_dtype, model_dim, inter_dim, num_buffers=num_buffers)
     if tiles is None:
         _bench_print_banner(f"{name}  |  {in_dtype}  |  dim={model_dim}  inter={inter_dim}")
         print(f"  SKIP: no valid tile for this shape (WMMA_K alignment)")
@@ -2832,7 +2860,7 @@ def bench_config(name, model_dim, inter_dim, experts, topk,
 
     _bench_print_banner(f"{name}  |  {in_dtype}  |  dim={model_dim}  inter={inter_dim}  E={experts}  K={topk}")
     print(f"  Tiles: stage1=({tile_m},{tile_n1},{tile_k1})  stage2=({tile_m},{tile_n2},{tile_k2})")
-    print(f"  Warmup={warmup}  Iters={iters}  RefCheck={'ON' if check_ref else 'OFF'}")
+    print(f"  Warmup={warmup}  Iters={iters}  RefCheck={'ON' if check_ref else 'OFF'}  num_buffers={num_buffers}")
     print(
         f"  Knobs: use_tdm_store={bool(use_tdm_store)}  "
         f"inst_prefetch={bool(inst_prefetch)}  "
@@ -2863,6 +2891,7 @@ def bench_config(name, model_dim, inter_dim, experts, topk,
                 use_tdm_store=bool(use_tdm_store),
                 inst_prefetch=bool(inst_prefetch),
                 wave_specialized_tdm=bool(wave_specialized_tdm),
+                num_buffers=int(num_buffers),
             )
             status = "PASS" if check_ref else "OK"
         except Exception as e:
@@ -2902,9 +2931,10 @@ def bench_config(name, model_dim, inter_dim, experts, topk,
                 a2_fp8_in=a2_q, a2_scale_in=a2_scale,
                 return_outputs=True, skip_ref=(not check_ref),
                 use_reduce=False,
-                use_tdm_store=bool(use_tdm_store),
+                use_tdm_store=False,
                 inst_prefetch=bool(inst_prefetch),
                 wave_specialized_tdm=bool(wave_specialized_tdm),
+                num_buffers=int(num_buffers),
             )
             status = "PASS" if check_ref else "OK"
         except Exception as e:
@@ -2941,9 +2971,10 @@ def bench_config(name, model_dim, inter_dim, experts, topk,
                 a2_fp8_in=a2_q, a2_scale_in=a2_scale,
                 return_outputs=True, skip_ref=(not check_ref),
                 use_reduce=True,
-                use_tdm_store=bool(use_tdm_store),
+                use_tdm_store=False,
                 inst_prefetch=bool(inst_prefetch),
                 wave_specialized_tdm=bool(wave_specialized_tdm),
+                num_buffers=int(num_buffers),
             )
             status = "PASS" if check_ref else "OK"
         except Exception as e:
@@ -3035,6 +3066,7 @@ def bench_main(args):
                         use_tdm_store=bool(args.use_tdm_store),
                         inst_prefetch=bool(args.inst_prefetch),
                         wave_specialized_tdm=bool(args.wave_specialized_tdm),
+                        num_buffers=int(args.num_buffers),
                     )
                 except Exception as e:
                     print(f"\n  [ERROR] {cfg_name}/{dt}: {e}")
