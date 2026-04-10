@@ -78,7 +78,8 @@ def _dynamic_mxfp4_quant_kernel(
     bX = fx.slice(gX, ((None, None), (bidx,bidy)))
     gXfp4 = fx.zipped_divide(x_fp4, block_tile)
     bXfp4 = fx.slice(gXfp4, ((None, None), (bidx,bidy)))
-    
+
+    ''' 
     thr_layout = fx.make_layout((64, 1), (1, 1))
     val_layout = fx.make_layout((1, 32), (1, 1))
     copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), fx.BFloat16)
@@ -93,6 +94,7 @@ def _dynamic_mxfp4_quant_kernel(
     
     partition_src = thr_copy.partition_S(bX)
     partition_dst = thr_copy.partition_D(bXfp4)
+    '''
 
     frag = fx.make_fragment_like(partition_src)
 
