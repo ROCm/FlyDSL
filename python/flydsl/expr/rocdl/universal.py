@@ -46,6 +46,7 @@ def BufferCopyLDS(bit_size):
 
     Current atom state:
     - `soffset` (`i32`)
+    - `imm_offset` (`i32`)
     """
     return CopyOpCDNA3BufferCopyLDSType.get(bit_size)
 
@@ -65,9 +66,9 @@ def BufferAtomic(atomic_op, val_type):
     return CopyOpCDNA3BufferAtomicType.get(int(atomic_op), ty)
 
 
-BufferAtomicAdd = lambda val_type: BufferAtomic(AtomicOp.Add, val_type.ir_type)
-BufferAtomicMax = lambda val_type: BufferAtomic(AtomicOp.Max, val_type.ir_type)
-BufferAtomicMin = lambda val_type: BufferAtomic(AtomicOp.Min, val_type.ir_type)
+BufferAtomicAdd = lambda val_type: BufferAtomic(AtomicOp.Add, val_type)
+BufferAtomicMax = lambda val_type: BufferAtomic(AtomicOp.Max, val_type)
+BufferAtomicMin = lambda val_type: BufferAtomic(AtomicOp.Min, val_type)
 BufferAtomicPkAdd = lambda val_type: BufferAtomic(AtomicOp.Add, T.vector(2, val_type.ir_type))
 
 
