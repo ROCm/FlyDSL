@@ -446,7 +446,7 @@ def compile_blockscale_preshuffle_gemm(
 
         mfma_fn = _mfma_fn_placeholder
 
-        if _is_gfx950:
+        if const_expr(_is_gfx950):
             c0_i64 = arith.constant(0, type=T.i64)
 
             def pack_i64x4_to_i32x8(x0, x1, x2, x3):
@@ -521,7 +521,7 @@ def compile_blockscale_preshuffle_gemm(
                 combined_scales = pre_scales[sb]
                 block_accs = [acc_init] * (num_acc_n * m_repeat)
 
-                if _is_gfx950:
+                if const_expr(_is_gfx950):
                     ku0 = sb * ku_per_sb
                     ku1 = ku0 + 1
                     b0_packs0, b0_packs1 = b_tile_in[ku0]
