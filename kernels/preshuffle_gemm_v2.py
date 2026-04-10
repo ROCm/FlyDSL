@@ -174,14 +174,15 @@ def compile_preshuffle_gemm_v2(
         frag_C_retile = thr_r2g_C.retile(frag_C_out)
 
         # ── Pipeline stage ────────────────────────────────────────
+        # Order: prefetch A g2s → compute (A s2r + MFMA with current B)
+        #       → load next B g2r + write A to LDS → barrier
+        # This allows B loads to overlap with LDS writes and barrier.
         def pipeline_stage(read_stage, next_k_val=None, read_next=True):
             write_stage = read_stage ^ 1
-            # Issue next-tile loads (A g2s + B g2r)
+            # 1. Prefetch next A tile (global → register)
             if read_next and next_k_val is not None:
                 fx.copy(buf_copy_g2s, pA_g[None, None, None, next_k_val], frag_copy_A)
-                fx.copy(mma_copy, pB_g[None, None, None, next_k_val],
-                        frag_B_retile[None, None, None, write_stage])
-            # Interleaved copy + gemm per ki
+            # 2. Compute: A from LDS + MFMA with current B
             for ki in range_constexpr(k_iters):
                 fx.copy(mma_uni, pA_s2r[None, None, ki, read_stage],
                         frag_A_retile[None, None, ki])
@@ -189,7 +190,11 @@ def compile_preshuffle_gemm_v2(
                         frag_A[None, None, (None, ki)],
                         frag_B[None, None, (None, ki), read_stage],
                         frag_C)
-            # Write A tile to LDS
+            # 3. Load next B tile (global → register) — after compute
+            if read_next and next_k_val is not None:
+                fx.copy(mma_copy, pB_g[None, None, None, next_k_val],
+                        frag_B_retile[None, None, None, write_stage])
+            # 4. Write A tile to LDS + barrier
             fx.copy(uni_copy_g2s, frag_copy_A, pA_s[None, None, None, write_stage])
             gpu.barrier()
 
