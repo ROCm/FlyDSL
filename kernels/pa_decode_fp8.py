@@ -861,6 +861,7 @@ def compile_pa_decode_ps(
                             p = arith.select(kv_tok < causal_bound, p, ZERO_F)
                         exp_sum = exp_sum + p
                         d_out[td] = vector.insert(p, d_out[td], static_position=[i], dynamic_position=[])
+                    rocdl.sched_barrier(0)
                 for sh in [32, 16]:
                     exp_sum = exp_sum + exp_sum.shuffle_xor(arith.constant(sh, type=T.i32), c_w)
                 vector.store(vector.from_elements(T.vec(1, T.f32), [exp_sum]), softmax_lds_f32, [_sm_sum_off])
@@ -877,6 +878,7 @@ def compile_pa_decode_ps(
                                 vs_i = arith.select(kv_tok < causal_bound, vs_i, ZERO_F)
                                 vs = vector.insert(vs_i, vs, static_position=[i], dynamic_position=[])
                         v_max_warp = v_max_warp.maximumf(vector.reduction(T.f32, "maxnumf", vs))
+                        rocdl.sched_barrier(0)
                     for sh in [32, 16]:
                         v_max_warp = v_max_warp.maximumf(
                             v_max_warp.shuffle_xor(arith.constant(sh, type=T.i32), c_w))
