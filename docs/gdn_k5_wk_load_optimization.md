@@ -738,9 +738,42 @@ lds_elem = vn_bt_row * BV + vn_v_col
 
 4. **h snapshot 写入效率**：16 条 `v_cvt_pk_bf16_f32` + 12 条 `ds_write_b16` 逐元素写入，可以优化为向量化写入。
 
+### 后续优化（已实施）
+
+#### 7.4 去掉 w 的 XOR swizzle
+
+w 的 cooperative load 去掉了 XOR swizzle（直接行主序写入 LDS），使 `_lds_vec_read_bf16x8` 的 8 个元素在 LDS 中连续。但 LLVM 后端仍然将其拆成标量读取（`ds_read_u16`），因为动态 index 无法证明对齐。后续改为 `ds_read_b128` 需要进一步调查。
+
+#### 7.5 分离全局加载和 LDS 写入
+
+将 cooperative load 的 `buffer_load_dwordx4` 和 `ds_write_b128` 分离——先发射所有全局加载到寄存器，再统一写入 LDS。这让编译器有机会在两条 `buffer_load` 之间插入其他指令，减少 `s_waitcnt vmcnt(0)` 的阻塞。
+
+**效果**：569us → 467us（-18%）
+
+#### 7.6 K-block 间 prefetch
+
+在当前 K-block 的 MFMA 计算期间，提前发射下一个 K-block 的全局加载。具体做法：
+1. 在循环外预取 K-block 0 的数据到寄存器
+2. 在 K-block 0 的 MFMA 期间发射 K-block 1 的全局加载
+3. K-block 1 的 MFMA 开始前，K-block 1 的数据已经在寄存器中
+
+**效果**：467us → 363us（-22%）
+
+### 性能进展汇总
+
+| 版本 | 时间 (us) | vs 优化前 | vs Triton | 关键改动 |
+|------|----------|----------|----------|---------|
+| 优化前 | 279 | 1.00x | 0.69x | 逐元素 `buffer_load_ushort` |
+| 中间态 | 643 | 0.43x | 0.30x | coop load + 逐元素 LDS 读取 |
+| +ds_read_tr (k) | 611 | 0.46x | 0.32x | k 用 `ds_read_b64_tr_b16` |
+| +ds_read_tr (all) | 569 | 0.49x | 0.34x | h/v_new 也用 `ds_read_b64_tr_b16` |
+| +load/store 分离 | 467 | 0.60x | 0.42x | 减少 `s_waitcnt vmcnt(0)` 阻塞 |
+| **+K-block prefetch** | **363** | **0.77x** | **0.53x** | 全局加载与 MFMA 重叠 |
+| Triton | 194 | — | 1.00x | 完整流水线 + double-buffer |
+
 ### 下一步优化方向
 
-1. **Prefetch 流水线**：在 chunk 循环内，将下一个 K-block 的 cooperative load 与当前 K-block 的 MFMA 计算重叠
-2. **减少 barrier**：通过 double-buffer LDS 消除 load-compute 之间的 barrier
-3. **w 的 LDS 读取向量化**：调查为什么 `_lds_vec_read_bf16x8` 仍被拆成标量
-4. **h snapshot 向量化写入**：将逐元素 `ds_write_b16` 改为 `ds_write_b128`
+1. **跨阶段 prefetch**：在 delta correction 的 MFMA 期间预取 state update 的 k 数据
+2. **减少 barrier 数量**：当前 10 个 barrier，通过 double-buffer LDS 可以减少到 4-6 个
+3. **h snapshot 向量化写入**：将逐元素 `ds_write_b16` 改为 `ds_write_b128`
+4. **AGPR 使用**：让 MFMA 累加器使用 AGPR 而非 VGPR，减少寄存器压力

@@ -370,33 +370,50 @@ def compile_chunk_gated_delta_h(
             for _nr in range_constexpr(N_REPEAT):
                 bv_accs.append(arith.constant_vector(0.0, T.f32x4))
 
+            K_STEPS_PER_BLOCK = 64 // WMMA_K
+
+            # ── Prefetch w[0] into registers ──
+            w_prefetch = []
+            w_prefetch_lds = []
+            for batch in range_constexpr(NUM_LOAD_BATCHES_64):
+                row = fx.Int32(batch * ROWS_PER_BATCH_64) + load_row_in_batch
+                abs_row = i_t_i32 * fx.Int32(BT) + row
+                in_bounds = arith.cmpi(arith.CmpIPredicate.slt, abs_row, T_local)
+                safe_row = arith.select(in_bounds, abs_row, fx.Int32(0))
+                g_off = w_base + safe_row * stride_w + fx.Int32(0 * 64) + load_col_base
+                w_prefetch.append(w_.vec_load((fx.Index(g_off),), LOAD_VEC_WIDTH))
+                w_prefetch_lds.append(row * fx.Int32(LDS_W_STRIDE) + load_col_base)
+
             for kb in range_constexpr(NUM_K_BLOCKS):
-                # ── Cooperative load w[i_t*BT:(i_t+1)*BT, kb*64:(kb+1)*64] → LDS_wk (no swizzle) ──
+                # ── Store prefetched w[kb] to LDS ──
                 for batch in range_constexpr(NUM_LOAD_BATCHES_64):
-                    row = fx.Int32(batch * ROWS_PER_BATCH_64) + load_row_in_batch
-                    abs_row = i_t_i32 * fx.Int32(BT) + row
-                    in_bounds = arith.cmpi(arith.CmpIPredicate.slt, abs_row, T_local)
-                    safe_row = arith.select(in_bounds, abs_row, fx.Int32(0))
-                    g_off = w_base + safe_row * stride_w + fx.Int32(kb * 64) + load_col_base
-                    vec = w_.vec_load((fx.Index(g_off),), LOAD_VEC_WIDTH)
-                    lds_idx = row * fx.Int32(LDS_W_STRIDE) + load_col_base
-                    lds_wk.vec_store((fx.Index(lds_idx),), vec, LOAD_VEC_WIDTH)
+                    lds_wk.vec_store((fx.Index(w_prefetch_lds[batch]),), w_prefetch[batch], LOAD_VEC_WIDTH)
 
                 gpu.barrier()
 
-                # ── MFMA: w (A from LDS_wk via vec_load) × h (B from LDS_h) ──
-                K_STEPS_PER_BLOCK = 64 // WMMA_K
+                # ── MFMA: w (A from LDS_wk) × h (B from LDS_h) ──
+                # Overlap: issue next K-block's global loads during MFMA
+                if kb + 1 < NUM_K_BLOCKS:
+                    w_prefetch = []
+                    w_prefetch_lds = []
+                    for batch in range_constexpr(NUM_LOAD_BATCHES_64):
+                        row = fx.Int32(batch * ROWS_PER_BATCH_64) + load_row_in_batch
+                        abs_row = i_t_i32 * fx.Int32(BT) + row
+                        in_bounds = arith.cmpi(arith.CmpIPredicate.slt, abs_row, T_local)
+                        safe_row = arith.select(in_bounds, abs_row, fx.Int32(0))
+                        g_off = w_base + safe_row * stride_w + fx.Int32((kb + 1) * 64) + load_col_base
+                        w_prefetch.append(w_.vec_load((fx.Index(g_off),), LOAD_VEC_WIDTH))
+                        w_prefetch_lds.append(row * fx.Int32(LDS_W_STRIDE) + load_col_base)
+
                 for ks in range_constexpr(K_STEPS_PER_BLOCK):
                     w_lds_row_idx = wid_idx * arith.index(16) + lane_n_idx
                     w_lds_col_idx = arith.index(ks * WMMA_K) + lane_m_base_idx * arith.index(8)
                     w_lds_idx = w_lds_row_idx * arith.index(LDS_W_STRIDE) + w_lds_col_idx
                     a_frag = _lds_vec_read_bf16x8(w_lds_idx)
 
-                    # Global K-step index for h snapshot
                     global_ks = kb * K_STEPS_PER_BLOCK + ks
 
                     for nr in range_constexpr(N_REPEAT):
-                        # Read h B-operand from LDS_h via ds_read_b64_tr_b16
                         h_k_row = fx.Int32(global_ks * WMMA_K) + lane_m_base * fx.Int32(8) + tr_k_group
                         h_v_col = fx.Int32(nr * 16) + tr_col_sub * fx.Int32(4)
                         h_lds_elem = h_k_row * fx.Int32(BV) + h_v_col
@@ -497,19 +514,37 @@ def compile_chunk_gated_delta_h(
             # ── 4. State update: h += k^T @ v_new_gated ──
             BT_STEPS = BT // WMMA_K
 
+            # ── Prefetch k[0] into registers ──
+            k_prefetch = []
+            k_prefetch_lds = []
+            for batch in range_constexpr(NUM_LOAD_BATCHES_64):
+                row = fx.Int32(batch * ROWS_PER_BATCH_64) + load_row_in_batch
+                abs_row = i_t_i32 * fx.Int32(BT) + row
+                in_bounds = arith.cmpi(arith.CmpIPredicate.slt, abs_row, T_local)
+                safe_row = arith.select(in_bounds, abs_row, fx.Int32(0))
+                g_off = k_base + safe_row * stride_k + fx.Int32(0 * 64) + load_col_base
+                k_prefetch.append(k_.vec_load((fx.Index(g_off),), LOAD_VEC_WIDTH))
+                k_prefetch_lds.append(row * fx.Int32(LDS_K_STRIDE) + load_col_base)
+
             for kb in range_constexpr(NUM_K_BLOCKS):
-                # ── Cooperative load k[i_t*BT:(i_t+1)*BT, kb*64:(kb+1)*64] → LDS_wk (no swizzle) ──
+                # ── Store prefetched k[kb] to LDS ──
                 for batch in range_constexpr(NUM_LOAD_BATCHES_64):
-                    row = fx.Int32(batch * ROWS_PER_BATCH_64) + load_row_in_batch
-                    abs_row = i_t_i32 * fx.Int32(BT) + row
-                    in_bounds = arith.cmpi(arith.CmpIPredicate.slt, abs_row, T_local)
-                    safe_row = arith.select(in_bounds, abs_row, fx.Int32(0))
-                    g_off = k_base + safe_row * stride_k + fx.Int32(kb * 64) + load_col_base
-                    vec = k_.vec_load((fx.Index(g_off),), LOAD_VEC_WIDTH)
-                    lds_idx = row * fx.Int32(LDS_K_STRIDE) + load_col_base
-                    lds_wk.vec_store((fx.Index(lds_idx),), vec, LOAD_VEC_WIDTH)
+                    lds_wk.vec_store((fx.Index(k_prefetch_lds[batch]),), k_prefetch[batch], LOAD_VEC_WIDTH)
 
                 gpu.barrier()
+
+                # Issue next K-block's global loads during MFMA
+                if kb + 1 < NUM_K_BLOCKS:
+                    k_prefetch = []
+                    k_prefetch_lds = []
+                    for batch in range_constexpr(NUM_LOAD_BATCHES_64):
+                        row = fx.Int32(batch * ROWS_PER_BATCH_64) + load_row_in_batch
+                        abs_row = i_t_i32 * fx.Int32(BT) + row
+                        in_bounds = arith.cmpi(arith.CmpIPredicate.slt, abs_row, T_local)
+                        safe_row = arith.select(in_bounds, abs_row, fx.Int32(0))
+                        g_off = k_base + safe_row * stride_k + fx.Int32((kb + 1) * 64) + load_col_base
+                        k_prefetch.append(k_.vec_load((fx.Index(g_off),), LOAD_VEC_WIDTH))
+                        k_prefetch_lds.append(row * fx.Int32(LDS_K_STRIDE) + load_col_base)
 
                 # ── MFMA: k^T (A from LDS_wk via ds_read_b64_tr_b16) × v_new (B from LDS_vn) ──
                 for bt_s in range_constexpr(BT_STEPS):
