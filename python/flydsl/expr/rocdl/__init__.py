@@ -22,9 +22,9 @@ from . import cdna4
 _ods_wmma_scale_f32_16x16x128_f8f6f4 = globals().get("wmma_scale_f32_16x16x128_f8f6f4", None)
 _ods_wmma_scale_f32_32x16x128_f4 = globals().get("wmma_scale_f32_32x16x128_f4", None)
 _ods_wave_id = wave_id  # ODS: wave_id(res, ...) -> i32
-_ods_cluster_workgroup_id_x = cluster_workgroup_id_x
-_ods_cluster_workgroup_id_y = cluster_workgroup_id_y
-_ods_cluster_workgroup_id_z = cluster_workgroup_id_z
+_ods_cluster_workgroup_id_x = globals().get("cluster_workgroup_id_x", None)
+_ods_cluster_workgroup_id_y = globals().get("cluster_workgroup_id_y", None)
+_ods_cluster_workgroup_id_z = globals().get("cluster_workgroup_id_z", None)
 _ods_cluster_load_async_to_lds_b8 = cluster_load_async_to_lds_b8
 _ods_cluster_load_async_to_lds_b32 = cluster_load_async_to_lds_b32
 _ods_cluster_load_async_to_lds_b64 = cluster_load_async_to_lds_b64

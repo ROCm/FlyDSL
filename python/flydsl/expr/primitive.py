@@ -694,7 +694,9 @@ def make_copy_atom(copy_op_type, elem_type, loc=None, ip=None):
 def atom_set_value(atom, field, value, loc=None, ip=None):
     if isinstance(field, IntEnum):
         field = str(field)
-    return fly.atom_set_value(atom, field, value, loc=loc, ip=ip)
+    if isinstance(field, str):
+        field = ir.StringAttr.get(field)
+    return fly.atom_set_value(atom.type, atom, field, value, loc=loc, ip=ip)
 
 
 @traced_op
