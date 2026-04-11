@@ -819,7 +819,7 @@ def compile_preshuffle_gemm_a8(
                 str(gpu_arch).startswith("gfx95")
                 and (not is_int8) and (not is_int4) and (not is_f16_or_bf16)
             )
-            if use_mfma_scale_128:
+            if const_expr(use_mfma_scale_128):
                 if (int(tile_k) % 128) != 0:
                     raise ValueError(
                         f"tile_k must be divisible by 128 for mfma_scale_x128, got tile_k={tile_k}"
@@ -842,7 +842,7 @@ def compile_preshuffle_gemm_a8(
                     v4 = vector.from_elements(T.vec(4, T.i64), [x0, x1, x2, x3])
                     return vector.bitcast(T.vec(8, T.i32), v4)
 
-                if is_fp4:
+                if const_expr(is_fp4):
                     _fp4_a_sc, _fp4_b_sc = fp4_scales if fp4_scales else ([], [])
                     ku128_iters = 1 if _fp4_tilek128 else _k_unroll_packed
                     ikxdl_iters = 1 if _fp4_tilek128 else _fp4_pack_K
