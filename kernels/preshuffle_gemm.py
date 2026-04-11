@@ -1269,7 +1269,7 @@ def compile_preshuffle_gemm_a8(
             )
             b_tile_pong_in = _unflatten_b_tile(bt_flat_in)
 
-            if _fp4_tilek128:
+            if const_expr(_fp4_tilek128):
                 next_k1 = k_iv + tile_k
                 if const_expr(use_async_copy):
                     prefetch_a_to_lds(
