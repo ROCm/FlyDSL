@@ -829,10 +829,6 @@ class JitFunction:
 
             compiled_module = MlirCompiler.compile(module, arch=backend.target.arch, func_name=self.func.__name__)
 
-            if env.compile.compile_only:
-                print(f"[flydsl] COMPILE_ONLY=1, compilation succeeded (arch={backend.target.arch})")
-                return None
-
             compiled_func = CompiledArtifact(
                 compiled_module,
                 self.func.__name__,
@@ -850,6 +846,10 @@ class JitFunction:
             if use_disk_cache and self.cache_manager and not env.debug.dump_ir:
                 str_key = self._cache_key_to_str(cache_key)
                 self.cache_manager.set(str_key, compiled_func)
+
+            if env.compile.compile_only:
+                print(f"[flydsl] COMPILE_ONLY=1, compilation succeeded (arch={backend.target.arch})")
+                return None
 
             result = compiled_func(*jit_args)
 
