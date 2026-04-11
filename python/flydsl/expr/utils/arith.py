@@ -7,7 +7,7 @@ from functools import partialmethod
 from ..._mlir import ir
 from ..._mlir.dialects import arith, math
 from ..._mlir.extras import types as T
-from ..meta import traced_op
+from ..meta import traced_op, _caller_location
 
 
 def element_type(ty) -> ir.Type:
@@ -40,6 +40,8 @@ def recast_type(src_type, res_elem_type) -> ir.Type:
 def arith_const(value, ty=None, *, loc=None, ip=None):
     if isinstance(value, ir.Value):
         return value
+    if loc is None:
+        loc = _caller_location(depth=1)
 
     if ty is None:
         if isinstance(value, float):
@@ -68,6 +70,8 @@ def arith_const(value, ty=None, *, loc=None, ip=None):
 
 
 def fp_to_fp(src, res_elem_type, *, loc=None, ip=None):
+    if loc is None:
+        loc = _caller_location(depth=1)
     if not isinstance(src, ir.Value) and hasattr(src, "ir_value"):
         src = src.ir_value()
     src_elem_type = element_type(src.type)
@@ -80,6 +84,8 @@ def fp_to_fp(src, res_elem_type, *, loc=None, ip=None):
 
 
 def fp_to_int(src, signed, res_elem_type, *, loc=None, ip=None):
+    if loc is None:
+        loc = _caller_location(depth=1)
     if not isinstance(src, ir.Value) and hasattr(src, "ir_value"):
         src = src.ir_value()
     res_type = recast_type(src.type, res_elem_type)
@@ -89,6 +95,8 @@ def fp_to_int(src, signed, res_elem_type, *, loc=None, ip=None):
 
 
 def int_to_fp(src, signed, res_elem_type, *, loc=None, ip=None):
+    if loc is None:
+        loc = _caller_location(depth=1)
     if not isinstance(src, ir.Value) and hasattr(src, "ir_value"):
         src = src.ir_value()
     res_type = recast_type(src.type, res_elem_type)
@@ -98,6 +106,8 @@ def int_to_fp(src, signed, res_elem_type, *, loc=None, ip=None):
 
 
 def int_to_int(src, dst_type, *, signed=None, loc=None, ip=None):
+    if loc is None:
+        loc = _caller_location(depth=1)
     if not isinstance(src, ir.Value) and hasattr(src, "ir_value"):
         src = src.ir_value()
     src_width = element_type(src.type).width
@@ -133,6 +143,8 @@ _ARITH_OPS = {
 
 
 def _binary_op(self, other, op, *, loc=None, ip=None):
+    if loc is None:
+        loc = _caller_location(depth=2)
     other = _coerce_other(self, other, loc=loc, ip=ip)
     if other is NotImplemented:
         return NotImplemented
@@ -179,6 +191,8 @@ def _binary_op(self, other, op, *, loc=None, ip=None):
 
 
 def _rbinary_op(self, other, op, *, loc=None, ip=None):
+    if loc is None:
+        loc = _caller_location(depth=2)
     other = _coerce_other(self, other, loc=loc, ip=ip)
     if other is NotImplemented:
         return NotImplemented
@@ -212,6 +226,8 @@ _CMP_INT_UNSIGNED = {
 
 
 def _comparison_op(self, other, predicate, *, loc=None, ip=None):
+    if loc is None:
+        loc = _caller_location(depth=2)
     other = _coerce_other(self, other, loc=loc, ip=ip)
     if other is NotImplemented:
         return NotImplemented
@@ -231,6 +247,8 @@ _BITWISE_OPS = {
 
 
 def _bitwise_op(self, other, op, reverse=False, *, loc=None, ip=None):
+    if loc is None:
+        loc = _caller_location(depth=2)
     other = _coerce_other(self, other, loc=loc, ip=ip)
     if other is NotImplemented:
         return NotImplemented
@@ -241,6 +259,8 @@ def _bitwise_op(self, other, op, reverse=False, *, loc=None, ip=None):
 
 
 def _shift_op(self, other, op, reverse=False, *, loc=None, ip=None):
+    if loc is None:
+        loc = _caller_location(depth=2)
     other = _coerce_other(self, other, loc=loc, ip=ip)
     if other is NotImplemented:
         return NotImplemented
@@ -254,6 +274,8 @@ def _shift_op(self, other, op, reverse=False, *, loc=None, ip=None):
 
 
 def _pow_op(self, other, reverse=False, *, loc=None, ip=None):
+    if loc is None:
+        loc = _caller_location(depth=2)
     other = _coerce_other(self, other, loc=loc, ip=ip)
     if other is NotImplemented:
         return NotImplemented
@@ -271,6 +293,8 @@ def _pow_op(self, other, reverse=False, *, loc=None, ip=None):
 
 
 def _neg_op(self, *, loc=None, ip=None):
+    if loc is None:
+        loc = _caller_location(depth=1)
     if self.type == T.bool():
         raise TypeError("negation is not supported for boolean type")
     if self.is_float:
@@ -280,7 +304,9 @@ def _neg_op(self, *, loc=None, ip=None):
 
 
 def _invert_op(self, *, loc=None, ip=None):
-    return arith.xori(self, arith.constant(self.type, -1))
+    if loc is None:
+        loc = _caller_location(depth=1)
+    return arith.xori(self, arith.constant(self.type, -1, loc=loc), loc=loc)
 
 
 @ir.register_value_caster(ir.Float4E2M1FNType.static_typeid)
@@ -351,51 +377,73 @@ class ArithValue(ir.Value):
 
     def select(self, true_value, false_value, *, loc=None):
         """Ternary select: self (i1 condition) ? true_value : false_value."""
+        if loc is None:
+            loc = _caller_location(depth=1)
         return arith.SelectOp(_to_raw(self), _to_raw(true_value),
                               _to_raw(false_value), loc=loc).result
 
     def extf(self, target_type, *, loc=None):
         """Extend float precision (e.g. bf16 → f32)."""
+        if loc is None:
+            loc = _caller_location(depth=1)
         return arith.ExtFOp(target_type, self, loc=loc).result
 
     def truncf(self, target_type, *, loc=None):
         """Truncate float precision (e.g. f32 → bf16)."""
+        if loc is None:
+            loc = _caller_location(depth=1)
         return arith.TruncFOp(target_type, self, loc=loc).result
 
     def bitcast(self, target_type, *, loc=None):
         """Reinterpret bits as different type (same bit width)."""
+        if loc is None:
+            loc = _caller_location(depth=1)
         return arith.BitcastOp(target_type, self, loc=loc).result
 
     def shrui(self, amount, *, loc=None):
         """Unsigned right shift (zero-fills high bits)."""
+        if loc is None:
+            loc = _caller_location(depth=1)
         return arith.ShRUIOp(self, _to_raw(amount), loc=loc).result
 
     def addf(self, other, *, fastmath=None, loc=None):
         """Float add with optional fastmath flags."""
+        if loc is None:
+            loc = _caller_location(depth=1)
         return arith.addf(self, _to_raw(other), fastmath=fastmath, loc=loc)
 
     def maximumf(self, other, *, loc=None):
         """Float maximum (NaN-propagating)."""
+        if loc is None:
+            loc = _caller_location(depth=1)
         return arith.maximumf(self, _to_raw(other), loc=loc)
 
     def rsqrt(self, *, fastmath=None, loc=None):
         """Reciprocal square root: 1/sqrt(self)."""
+        if loc is None:
+            loc = _caller_location(depth=1)
         from ..._mlir.dialects import math as _math
         return _math.rsqrt(self, fastmath=fastmath, loc=loc)
 
     def exp2(self, *, fastmath=None, loc=None):
         """Base-2 exponential: 2^self."""
+        if loc is None:
+            loc = _caller_location(depth=1)
         from ..._mlir.dialects import math as _math
         return _math.exp2(self, fastmath=fastmath, loc=loc)
 
     def shuffle_xor(self, offset, width, *, loc=None):
         """GPU warp shuffle with XOR mode."""
+        if loc is None:
+            loc = _caller_location(depth=1)
         from ..._mlir.dialects.gpu import ShuffleOp
         return ShuffleOp(_to_raw(self), _to_raw(offset),
                          _to_raw(width), mode="xor", loc=loc).shuffleResult
 
     def index_cast(self, target_type, *, loc=None):
         """Cast between index and integer types."""
+        if loc is None:
+            loc = _caller_location(depth=1)
         return arith.IndexCastOp(target_type, self, loc=loc).result
 
     def __hash__(self):

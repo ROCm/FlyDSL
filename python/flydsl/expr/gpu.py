@@ -23,16 +23,43 @@ from .typing import Tuple3D
 from . import arith as _arith_ext
 from . import rocdl as _rocdl_ext
 from .typing import T
+from .meta import _caller_location
 
 thread_id = gpu.thread_id
 block_id = gpu.block_id
 
-thread_idx = Tuple3D(gpu.thread_id)
-block_idx = Tuple3D(gpu.block_id)
-block_dim = Tuple3D(gpu.block_dim)
-grid_dim = Tuple3D(gpu.grid_dim)
 
-barrier = gpu.barrier
+def _traced_thread_id(dim):
+    loc = _caller_location(depth=2)  # Tuple3D.__getattr__ -> factory -> user
+    return gpu.thread_id(dim, loc=loc)
+
+
+def _traced_block_id(dim):
+    loc = _caller_location(depth=2)
+    return gpu.block_id(dim, loc=loc)
+
+
+def _traced_block_dim(dim):
+    loc = _caller_location(depth=2)
+    return gpu.block_dim(dim, loc=loc)
+
+
+def _traced_grid_dim(dim):
+    loc = _caller_location(depth=2)
+    return gpu.grid_dim(dim, loc=loc)
+
+
+def _traced_barrier():
+    loc = _caller_location(depth=1)
+    gpu.barrier(loc=loc)
+
+
+thread_idx = Tuple3D(_traced_thread_id)
+block_idx = Tuple3D(_traced_block_id)
+block_dim = Tuple3D(_traced_block_dim)
+grid_dim = Tuple3D(_traced_grid_dim)
+
+barrier = _traced_barrier
 
 _int = int
 

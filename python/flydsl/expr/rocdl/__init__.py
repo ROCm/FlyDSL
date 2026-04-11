@@ -15,7 +15,7 @@ This module provides access to ROCm-specific GPU operations including:
 """
 
 from ..._mlir.dialects.rocdl import *  # noqa: F401,F403
-from ..meta import traced_op
+from ..meta import traced_op, _caller_location
 
 # Keep references to ODS-generated builders so we can wrap them without losing access.
 _ods_wmma_scale_f32_16x16x128_f8f6f4 = (
@@ -41,19 +41,30 @@ _ods_mfma_scale_f32_16x16x128_f8f6f4 = (
     globals().get("mfma_scale_f32_16x16x128_f8f6f4", None)
     or globals().get("mfma_scale_f32_16x16x128_f8f6f4_", None)
 )
+_ods_ds_bpermute = ds_bpermute
+_ods_ds_swizzle = ds_swizzle
+_ods_readlane = readlane
+_ods_readfirstlane = readfirstlane
+_ods_sched_group_barrier = sched_group_barrier
+_ods_cvt_pk_fp8_f32_orig = globals().get("cvt_pk_fp8_f32", None)
+
 mask_mfma = 0x008
 mask_vmem_rd = 0x020
 mask_dsrd = 0x100
 mask_dswr = 0x200
 
 def sched_mfma(cnt):
-    sched_group_barrier(mask_mfma, cnt, 0)
+    loc = _caller_location(depth=1)
+    _ods_sched_group_barrier(mask_mfma, cnt, 0, loc=loc)
 def sched_vmem(cnt):
-    sched_group_barrier(mask_vmem_rd, cnt, 0)
+    loc = _caller_location(depth=1)
+    _ods_sched_group_barrier(mask_vmem_rd, cnt, 0, loc=loc)
 def sched_dsrd(cnt):
-    sched_group_barrier(mask_dsrd, cnt, 0)
+    loc = _caller_location(depth=1)
+    _ods_sched_group_barrier(mask_dsrd, cnt, 0, loc=loc)
 def sched_dswr(cnt):
-    sched_group_barrier(mask_dswr, cnt, 0)
+    loc = _caller_location(depth=1)
+    _ods_sched_group_barrier(mask_dswr, cnt, 0, loc=loc)
 
 
 def _unwrap_mfma_operand(v, *, loc=None):
@@ -200,8 +211,9 @@ def wave_id():
         i32 value (SGPR) with the wave ID within the workgroup.
     """
     from ..._mlir import ir
+    loc = _caller_location(depth=1)
     i32 = ir.IntegerType.get_signless(32)
-    return _ods_wave_id(i32)
+    return _ods_wave_id(i32, loc=loc)
 
 
 def cluster_workgroup_id_x():
@@ -335,6 +347,8 @@ def raw_ptr_buffer_atomic_fmax(vdata, rsrc, offset, soffset, aux, **kw):
 
 
 def cvt_pk_fp8_f32(res, src_a, src_b, old, word_sel, **kw):
+    if 'loc' not in kw or kw['loc'] is None:
+        kw['loc'] = _caller_location(depth=1)
     from ..._mlir.dialects.rocdl import cvt_pk_fp8_f32 as _op
     return _op(res=res, src_a=_to_ir(src_a), src_b=_to_ir(src_b),
                old=_to_ir(old), word_sel=word_sel, **kw)
@@ -344,3 +358,25 @@ def raw_ptr_buffer_load_lds(rsrc, lds_ptr, size, voffset, soffset, offset, aux, 
     from ..._mlir.dialects.rocdl import raw_ptr_buffer_load_lds as _op
     return _op(_to_ir(rsrc), _to_ir(lds_ptr), _to_ir(size), _to_ir(voffset),
                _to_ir(soffset), _to_ir(offset), _to_ir(aux), **kw)
+
+
+# ── Traced wrappers for data-movement intrinsics ───────────────────────
+
+@traced_op
+def ds_bpermute(res, index, src, *, loc=None, ip=None):
+    return _ods_ds_bpermute(res, _to_ir(index), _to_ir(src), loc=loc, ip=ip)
+
+
+@traced_op
+def ds_swizzle(res, src, offset, *, loc=None, ip=None):
+    return _ods_ds_swizzle(res, _to_ir(src), offset, loc=loc, ip=ip)
+
+
+@traced_op
+def readlane(res, src, idx, *, loc=None, ip=None):
+    return _ods_readlane(res, _to_ir(src), _to_ir(idx), loc=loc, ip=ip)
+
+
+@traced_op
+def readfirstlane(res, src, *, loc=None, ip=None):
+    return _ods_readfirstlane(res, _to_ir(src), loc=loc, ip=ip)

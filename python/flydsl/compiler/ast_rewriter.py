@@ -11,6 +11,7 @@ from typing import List
 from .._mlir import ir
 from .._mlir.dialects import arith, scf
 from ..expr import const_expr
+from ..expr.meta import _caller_location
 from ..utils import env, log
 
 
@@ -341,38 +342,39 @@ class ReplaceIfWithDispatch(Transformer):
 @ASTRewriter.register
 class InsertEmptyYieldForSCFFor(Transformer):
     @staticmethod
-    def _to_index(val):
+    def _to_index(val, loc=None):
         if isinstance(val, ir.Value):
             if val.type == ir.IndexType.get():
                 return val
-            return arith.IndexCastOp(ir.IndexType.get(), val).result
+            return arith.IndexCastOp(ir.IndexType.get(), val, loc=loc).result
         if hasattr(val, "ir_value"):
             raw = val.ir_value()
             if isinstance(raw, ir.Value) and raw.type != ir.IndexType.get():
-                return arith.IndexCastOp(ir.IndexType.get(), raw).result
+                return arith.IndexCastOp(ir.IndexType.get(), raw, loc=loc).result
             return raw
         if isinstance(val, int) and not isinstance(val, bool):
-            return arith.ConstantOp(ir.IndexType.get(), val).result
+            return arith.ConstantOp(ir.IndexType.get(), val, loc=loc).result
         raise TypeError(
             f"_to_index expected ir.Value, object with ir_value(), or int; got {type(val).__name__}"
         )
 
     @staticmethod
     def scf_range(start, stop=None, step=None, *, init=None):
+        loc = _caller_location(depth=2)  # rewritten for-loop -> scf_range -> user code
         if stop is None:
             stop = start
             start = 0
         if step is None:
             step = 1
-        start_val = InsertEmptyYieldForSCFFor._to_index(start)
-        stop_val = InsertEmptyYieldForSCFFor._to_index(stop)
-        step_val = InsertEmptyYieldForSCFFor._to_index(step)
+        start_val = InsertEmptyYieldForSCFFor._to_index(start, loc=loc)
+        stop_val = InsertEmptyYieldForSCFFor._to_index(stop, loc=loc)
+        step_val = InsertEmptyYieldForSCFFor._to_index(step, loc=loc)
         if init is not None:
-            for_op = scf.ForOp(start_val, stop_val, step_val, list(init))
+            for_op = scf.ForOp(start_val, stop_val, step_val, list(init), loc=loc)
             with ir.InsertionPoint(for_op.body):
                 yield for_op.induction_variable, list(for_op.inner_iter_args)
         else:
-            for_op = scf.ForOp(start_val, stop_val, step_val)
+            for_op = scf.ForOp(start_val, stop_val, step_val, loc=loc)
             with ir.InsertionPoint(for_op.body):
                 yield for_op.induction_variable
 
