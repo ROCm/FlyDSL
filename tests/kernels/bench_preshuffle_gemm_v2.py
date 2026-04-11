@@ -89,8 +89,53 @@ def _make_args(c, a, b_shuf, sa, sb, M, N):
     )
 
 
+def compile_one(M, N, K, tile_m, tile_n, tile_k, in_dtype, out_dtype="bf16",
+                waves_per_eu=None, enable_scheduler=False, maxnreg=None,
+                opt_level=None):
+    """Compile v2 and old kernels, return compilation status."""
+    elem_bytes = 1 if in_dtype in ("fp8", "fp8_layout") else 2
+    smem = tile_m * tile_k * elem_bytes * 2
+    if smem > 65536:
+        return None
+
+    torch_out_dtype = torch.bfloat16 if out_dtype == "bf16" else torch.float16
+    a, b_raw, b_shuf, sa, sb, ref = _make_data(M, N, K, in_dtype)
+    c = torch.zeros(M, N, device=DEVICE, dtype=torch_out_dtype)
+    args = _make_args(c, a, b_shuf, sa, sb, M, N)
+
+    hints = {}
+    if maxnreg:
+        hints["maxnreg"] = maxnreg
+    if opt_level is not None:
+        hints["opt_level"] = opt_level
+
+    import time
+    t0 = time.time()
+    fn_v2 = compile_preshuffle_gemm_v2(
+        N=N, K=K, tile_m=tile_m, tile_n=tile_n, tile_k=tile_k,
+        in_dtype=in_dtype, out_dtype=out_dtype,
+        waves_per_eu=waves_per_eu, enable_scheduler=enable_scheduler,
+    )
+    compiled_v2 = flyc.compile[hints](fn_v2, *args) if hints else flyc.compile(fn_v2, *args)
+    t_v2 = time.time() - t0
+
+    t0 = time.time()
+    fn_old = compile_preshuffle_gemm_a8(
+        N=N, K=K, tile_m=tile_m, tile_n=tile_n, tile_k=tile_k,
+        in_dtype="fp8" if in_dtype == "fp8_layout" else in_dtype,
+        out_dtype=out_dtype,
+    )
+    compiled_old = flyc.compile(fn_old, *args)
+    t_old = time.time() - t0
+
+    tile_str = f"{tile_m}x{tile_n}x{tile_k}"
+    print(f"  {tile_str:>14s}  v2: {t_v2:.1f}s  old: {t_old:.1f}s  [OK]")
+    return {"tile": tile_str}
+
+
 def bench_one(M, N, K, tile_m, tile_n, tile_k, in_dtype, out_dtype="bf16",
-              warmup=5, iters=20, check_correctness=True):
+              warmup=5, iters=20, check_correctness=True, waves_per_eu=None,
+              enable_scheduler=False, maxnreg=None, opt_level=None):
     elem_bytes = 1 if in_dtype in ("fp8", "fp8_layout") else 2
     smem = tile_m * tile_k * elem_bytes * 2
     if smem > 65536:
@@ -100,13 +145,19 @@ def bench_one(M, N, K, tile_m, tile_n, tile_k, in_dtype, out_dtype="bf16",
     a, b_raw, b_shuf, sa, sb, ref = _make_data(M, N, K, in_dtype)
 
     # ── v2 (layout API) ──────────────────────────────────────────
+    hints = {}
+    if maxnreg:
+        hints["maxnreg"] = maxnreg
+    if opt_level is not None:
+        hints["opt_level"] = opt_level
     fn_v2 = compile_preshuffle_gemm_v2(
         N=N, K=K, tile_m=tile_m, tile_n=tile_n, tile_k=tile_k,
         in_dtype=in_dtype, out_dtype=out_dtype,
+        waves_per_eu=waves_per_eu, enable_scheduler=enable_scheduler,
     )
     c_v2 = torch.zeros(M, N, device=DEVICE, dtype=torch_out_dtype)
     args_v2 = _make_args(c_v2, a, b_shuf, sa, sb, M, N)
-    compiled_v2 = flyc.compile(fn_v2, *args_v2)
+    compiled_v2 = flyc.compile[hints](fn_v2, *args_v2) if hints else flyc.compile(fn_v2, *args_v2)
     us_v2 = _bench_kernel(compiled_v2, args_v2, warmup=warmup, iters=iters)
 
     # ── old path ──────────────────────────────────────────────────
@@ -219,21 +270,50 @@ def main():
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--no-check", action="store_true",
                         help="Skip correctness check")
+    parser.add_argument("--waves_per_eu", type=int, default=None,
+                        help="Set waves_per_eu hint for v2 kernel (e.g. 3)")
+    parser.add_argument("--compile_only", action="store_true",
+                        help="Compile only (no benchmark). Use with FLYDSL_DUMP_IR=1 for VGPR analysis")
+    parser.add_argument("--enable_scheduler", action="store_true",
+                        help="Enable hot_loop_scheduler in v2 kernel")
+    parser.add_argument("--maxnreg", type=int, default=None,
+                        help="Set max VGPR count for v2 kernel (e.g. 168)")
+    parser.add_argument("--opt_level", type=int, default=None,
+                        help="LLVM optimization level for v2 kernel (default: 2)")
     args = parser.parse_args()
 
     dtypes = [args.dtype] if args.dtype else ["fp16", "bf16", "fp8"]
 
     print(f"GPU: {ARCH}")
-    print(f"Pipeline comparison: v2 (layout API) vs old (manual)")
+    wpe_str = f", waves_per_eu={args.waves_per_eu}" if args.waves_per_eu else ""
+    print(f"Pipeline comparison: v2 (layout API{wpe_str}) vs old (manual)")
     print("=" * 78)
 
     for dt in dtypes:
+        # Compile-only mode
+        if args.compile_only:
+            if args.M and args.tile_m:
+                M, N, K = args.M, args.N or 5120, args.K or 8192
+                compile_one(M, N, K, args.tile_m, args.tile_n or 128, args.tile_k or 64,
+                            dt, waves_per_eu=args.waves_per_eu,
+                            enable_scheduler=args.enable_scheduler,
+                            maxnreg=args.maxnreg, opt_level=args.opt_level)
+            else:
+                configs = DEFAULT_CONFIGS.get(dt, [])
+                for M, N, K, tm, tn, tk in configs:
+                    compile_one(M, N, K, tm, tn, tk, dt, waves_per_eu=args.waves_per_eu,
+                                enable_scheduler=args.enable_scheduler,
+                            maxnreg=args.maxnreg, opt_level=args.opt_level)
+            continue
+
         # Custom single config
         if args.M and args.tile_m and not args.sweep:
             M, N, K = args.M, args.N or 5120, args.K or 8192
             r = bench_one(M, N, K, args.tile_m, args.tile_n or 128, args.tile_k or 64,
                           dt, warmup=args.warmup, iters=args.iters,
-                          check_correctness=not args.no_check)
+                          check_correctness=not args.no_check,
+                          waves_per_eu=args.waves_per_eu,
+                          enable_scheduler=args.enable_scheduler)
             if r:
                 print_results([r], dt)
             continue
@@ -249,7 +329,10 @@ def main():
                     continue
                 r = bench_one(M, N, K, tm, tn, tk, dt,
                               warmup=args.warmup, iters=args.iters,
-                              check_correctness=not args.no_check)
+                              check_correctness=not args.no_check,
+                              waves_per_eu=args.waves_per_eu,
+                              enable_scheduler=args.enable_scheduler,
+                            maxnreg=args.maxnreg, opt_level=args.opt_level)
                 if r:
                     results.append(r)
             if results:
@@ -271,7 +354,10 @@ def main():
             for tm, tn, tk in tiles:
                 r = bench_one(M, N, K, tm, tn, tk, dt,
                               warmup=args.warmup, iters=args.iters,
-                              check_correctness=not args.no_check)
+                              check_correctness=not args.no_check,
+                              waves_per_eu=args.waves_per_eu,
+                              enable_scheduler=args.enable_scheduler,
+                            maxnreg=args.maxnreg, opt_level=args.opt_level)
                 if r:
                     results.append(r)
             if results:

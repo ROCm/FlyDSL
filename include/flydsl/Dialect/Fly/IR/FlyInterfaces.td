@@ -131,7 +131,21 @@ def Fly_MmaOpTypeInterface : TypeInterface<"MmaOpTypeInterface", [Fly_MayStaticT
            "::mlir::Value":$d,
            "::mlir::Value":$a,
            "::mlir::Value":$b,
-           "::mlir::Value":$c)>
+           "::mlir::Value":$c)>,
+    InterfaceMethod<
+      "Emit MMA with SSA accumulator: loads A/B from ptrs, takes C as value, returns D as value.",
+      "::mlir::LogicalResult",
+      "emitAtomCallSsa",
+      (ins "::mlir::OpBuilder &":$builder,
+           "::mlir::Location":$loc,
+           "::mlir::Type":$mmaAtomTy,
+           "::mlir::Type":$aMemTy,
+           "::mlir::Type":$bMemTy,
+           "::mlir::Value":$atomVal,
+           "::mlir::Value":$a,
+           "::mlir::Value":$b,
+           "::mlir::Value":$c,
+           "::mlir::Value &":$result)>
   ];
 }
 

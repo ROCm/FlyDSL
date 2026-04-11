@@ -566,6 +566,41 @@ public:
   }
 };
 
+class MmaAtomCallValueLowering : public OpConversionPattern<MmaAtomCallValue> {
+public:
+  using OpConversionPattern<MmaAtomCallValue>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(MmaAtomCallValue op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    auto mmaAtomTy = dyn_cast<MmaAtomType>(op.getMmaAtom().getType());
+    if (!mmaAtomTy)
+      return rewriter.notifyMatchFailure(op, "expected MmaAtomType for mmaAtom operand");
+
+    Location loc = op.getLoc();
+
+    Value aPtr = adaptor.getA();
+    Value bPtr = adaptor.getB();
+    Value cVal = adaptor.getC();
+
+    if (!isa<LLVM::LLVMPointerType>(aPtr.getType()) ||
+        !isa<LLVM::LLVMPointerType>(bPtr.getType()))
+      return rewriter.notifyMatchFailure(op, "expected llvm.ptr for A/B after type conversion");
+
+    auto aMemTy = dyn_cast<fly::MemRefType>(op.getA().getType());
+    auto bMemTy = dyn_cast<fly::MemRefType>(op.getB().getType());
+    if (!aMemTy || !bMemTy)
+      return rewriter.notifyMatchFailure(op, "expected Fly memref types for A/B");
+
+    Value result;
+    if (failed(mmaAtomTy.emitAtomCallSsa(rewriter, loc, mmaAtomTy, aMemTy, bMemTy,
+                                         adaptor.getMmaAtom(), aPtr, bPtr, cVal, result)))
+      return failure();
+
+    rewriter.replaceOp(op, result);
+    return success();
+  }
+};
+
 /// Lower `gpu.launch_func` kernel operands so that any `!fly.memref` values are
 /// replaced by their type-converted builtin `memref` values. This prevents
 /// `unrealized_conversion_cast` materializations from remaining live after
@@ -740,7 +775,8 @@ public:
     patterns.add<MakeCopyAtomOpLowering, MakeMmaAtomOpLowering>(typeConverter, context);
     patterns.add<MakeTiledCopyOpLowering, MakeTiledMmaOpLowering>(typeConverter, context);
     patterns.add<AtomSetValueOpLowering>(typeConverter, context);
-    patterns.add<CopyAtomCallLowering, MmaAtomCallLowering>(typeConverter, context);
+    patterns.add<CopyAtomCallLowering, MmaAtomCallLowering, MmaAtomCallValueLowering>(typeConverter,
+                                                                                     context);
     patterns.add<GpuLaunchFuncOpLowering>(typeConverter, context);
 
     // TODO: deprecated in the future

@@ -176,6 +176,18 @@ static LogicalResult emitMfma(OpBuilder &builder, Location loc, Type abTyA, Type
   return success();
 }
 
+// SSA variant: takes C as value, returns D as value (no accumulator load/store).
+template <typename MfmaOp>
+static LogicalResult emitMfmaSsa(OpBuilder &builder, Location loc, Type abTyA, Type abTyB,
+                                 VectorType accTy, Value aPtr, Value bPtr, Value cVal,
+                                 Value &result) {
+  Value a = LLVM::LoadOp::create(builder, loc, abTyA, aPtr);
+  Value b = LLVM::LoadOp::create(builder, loc, abTyB, bPtr);
+  auto zeroAttr = builder.getI32IntegerAttr(0);
+  result = MfmaOp::create(builder, loc, accTy, a, b, cVal, zeroAttr, zeroAttr, zeroAttr);
+  return success();
+}
+
 LogicalResult MmaOpCDNA3_MFMAType::emitAtomCall(OpBuilder &builder, Location loc, Type mmaAtomTy,
                                                 Type dMemTy, Type aMemTy, Type bMemTy, Type cMemTy,
                                                 Value atomVal, Value dPtr, Value aPtr, Value bPtr,
@@ -232,6 +244,66 @@ LogicalResult MmaOpCDNA3_MFMAType::emitAtomCall(OpBuilder &builder, Location loc
   DISPATCH_MFMA(32, 16, isBF8(elemTyA) && isBF8(elemTyB), mfma_f32_32x32x16_bf8_bf8)
 
 #undef DISPATCH_MFMA
+
+  return failure();
+}
+
+LogicalResult MmaOpCDNA3_MFMAType::emitAtomCallSsa(OpBuilder &builder, Location loc,
+                                                   Type mmaAtomTy, Type aMemTy, Type bMemTy,
+                                                   Value atomVal, Value aPtr, Value bPtr,
+                                                   Value cVal, Value &result) const {
+  int32_t m = getM();
+  int32_t n = getN();
+  int32_t k = getK();
+  Type elemTyA = getElemTyA();
+  Type elemTyB = getElemTyB();
+  MLIRContext *ctx = builder.getContext();
+
+  Type abTyA = getMfmaABType(ctx, elemTyA, k);
+  Type abTyB = getMfmaABType(ctx, elemTyB, k);
+  if (!abTyA || !abTyB)
+    return failure();
+
+  int64_t accVecSize = getMfmaAccVecSize(m, k, elemTyA);
+  if (accVecSize == 0)
+    return failure();
+
+  Type accElemTy = getElemTyAcc();
+  VectorType accTy = VectorType::get({accVecSize}, accElemTy);
+
+#define DISPATCH_MFMA_SSA(M_, K_, PRED, OP)                                                        \
+  if (m == M_ && n == M_ && k == K_ && (PRED))                                                     \
+    return emitMfmaSsa<ROCDL::OP>(builder, loc, abTyA, abTyB, accTy, aPtr, bPtr, cVal, result);
+
+  DISPATCH_MFMA_SSA(32, 1, elemTyA.isF32(), mfma_f32_32x32x1f32)
+  DISPATCH_MFMA_SSA(16, 1, elemTyA.isF32(), mfma_f32_16x16x1f32)
+  DISPATCH_MFMA_SSA(4, 1, elemTyA.isF32(), mfma_f32_4x4x1f32)
+  DISPATCH_MFMA_SSA(32, 2, elemTyA.isF32(), mfma_f32_32x32x2f32)
+  DISPATCH_MFMA_SSA(16, 4, elemTyA.isF32(), mfma_f32_16x16x4f32)
+
+  DISPATCH_MFMA_SSA(32, 4, elemTyA.isF16(), mfma_f32_32x32x4f16)
+  DISPATCH_MFMA_SSA(16, 4, elemTyA.isF16(), mfma_f32_16x16x4f16)
+  DISPATCH_MFMA_SSA(4, 4, elemTyA.isF16(), mfma_f32_4x4x4f16)
+  DISPATCH_MFMA_SSA(32, 8, elemTyA.isF16(), mfma_f32_32x32x8f16)
+  DISPATCH_MFMA_SSA(16, 16, elemTyA.isF16(), mfma_f32_16x16x16f16)
+
+  DISPATCH_MFMA_SSA(32, 2, elemTyA.isBF16(), mfma_f32_32x32x2bf16)
+  DISPATCH_MFMA_SSA(16, 2, elemTyA.isBF16(), mfma_f32_16x16x2bf16)
+  DISPATCH_MFMA_SSA(4, 2, elemTyA.isBF16(), mfma_f32_4x4x2bf16)
+  DISPATCH_MFMA_SSA(32, 4, elemTyA.isBF16(), mfma_f32_32x32x4bf16)
+  DISPATCH_MFMA_SSA(16, 8, elemTyA.isBF16(), mfma_f32_16x16x8bf16)
+  DISPATCH_MFMA_SSA(16, 16, elemTyA.isBF16(), mfma_f32_16x16x16bf16_1k)
+
+  DISPATCH_MFMA_SSA(16, 32, isFP8(elemTyA) && isFP8(elemTyB), mfma_f32_16x16x32_fp8_fp8)
+  DISPATCH_MFMA_SSA(16, 32, isFP8(elemTyA) && isBF8(elemTyB), mfma_f32_16x16x32_fp8_bf8)
+  DISPATCH_MFMA_SSA(16, 32, isBF8(elemTyA) && isFP8(elemTyB), mfma_f32_16x16x32_bf8_fp8)
+  DISPATCH_MFMA_SSA(16, 32, isBF8(elemTyA) && isBF8(elemTyB), mfma_f32_16x16x32_bf8_bf8)
+  DISPATCH_MFMA_SSA(32, 16, isFP8(elemTyA) && isFP8(elemTyB), mfma_f32_32x32x16_fp8_fp8)
+  DISPATCH_MFMA_SSA(32, 16, isFP8(elemTyA) && isBF8(elemTyB), mfma_f32_32x32x16_fp8_bf8)
+  DISPATCH_MFMA_SSA(32, 16, isBF8(elemTyA) && isFP8(elemTyB), mfma_f32_32x32x16_bf8_fp8)
+  DISPATCH_MFMA_SSA(32, 16, isBF8(elemTyA) && isBF8(elemTyB), mfma_f32_32x32x16_bf8_bf8)
+
+#undef DISPATCH_MFMA_SSA
 
   return failure();
 }

@@ -303,4 +303,12 @@ LogicalResult MmaOpGFX1250_WMMAType::emitAtomCall(OpBuilder &builder, Location l
   return failure();
 }
 
+LogicalResult MmaOpGFX1250_WMMAType::emitAtomCallSsa(OpBuilder &builder, Location loc,
+                                                     Type mmaAtomTy, Type aMemTy, Type bMemTy,
+                                                     Value atomVal, Value aPtr, Value bPtr,
+                                                     Value cVal, Value &result) const {
+  // TODO: Implement SSA accumulator threading for GFX1250 WMMA.
+  return failure();
+}
+
 } // namespace mlir::fly_rocdl

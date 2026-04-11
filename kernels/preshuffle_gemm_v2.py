@@ -34,6 +34,7 @@ def compile_preshuffle_gemm_v2(
     in_dtype: str = "fp8",
     out_dtype: str = "bf16",
     waves_per_eu: Optional[int] = None,
+    enable_scheduler: bool = False,
 ):
     """Compile preshuffle GEMM using the layout API.
 
@@ -147,19 +148,18 @@ def compile_preshuffle_gemm_v2(
         pA_s2r = thr_s2r.partition_S(sA)
         pB_g = thr_g2r_B.partition_S(tB)
 
-        # Fragments — 2-stage B double buffer
+        # Fragments — 2 separate B fragments (split double buffer for VGPR lifetime)
         frag_copy_A = fx.make_fragment_like(pA_s[None, None, None, 0])
         frag_A = thr_mma.make_fragment_A(sA[None, None, 0])
-        frag_B = fx.make_fragment_like(
-            fx.flat_product(
-                thr_mma.partition_B(tB).layout(None, None, None, 0),
-                fx.make_layout(2, 1),
-            ),
-            layout_elem.ir_type,
-        )
+        frag_B_single_layout = thr_mma.partition_B(tB).layout(None, None, None, 0)
+        frag_B_0 = fx.make_fragment_like(frag_B_single_layout, layout_elem.ir_type)
+        frag_B_1 = fx.make_fragment_like(frag_B_single_layout, layout_elem.ir_type)
+        frag_B_stages = [frag_B_0, frag_B_1]
         frag_C = thr_mma.make_fragment_C(tC)
         frag_A_retile = thr_s2r.retile(frag_A)
-        frag_B_retile = thr_g2r_B.retile(frag_B)
+        frag_B_0_retile = thr_g2r_B.retile(frag_B_0)
+        frag_B_1_retile = thr_g2r_B.retile(frag_B_1)
+        frag_B_retile_stages = [frag_B_0_retile, frag_B_1_retile]
         if is_f16_or_bf16:
             buf_copy_out = fx.make_copy_atom(fx.rocdl.BufferCopy16b(), out_elem_cls)
             thr_r2g_C = fx.make_tiled_copy_C(buf_copy_out, tiled_mma).get_slice(tid)
@@ -209,9 +209,10 @@ def compile_preshuffle_gemm_v2(
 
             rocdl.sched_barrier(0)
 
-        # ── Pipeline stage (double-buffered B) ────────────────────
+        # ── Pipeline stage (double-buffered B via split fragments) ─
         def pipeline_stage(read_stage, next_k_val=None, read_next=True):
             write_stage = read_stage ^ 1
+            cur_frag_B = frag_B_stages[read_stage]
             # 1. Prefetch next A tile (global → register)
             if read_next and next_k_val is not None:
                 fx.copy(buf_copy_g2s, pA_g[None, None, None, next_k_val], frag_copy_A)
@@ -221,22 +222,21 @@ def compile_preshuffle_gemm_v2(
                         frag_A_retile[None, None, ki])
                 fx.gemm(tiled_mma, frag_C,
                         frag_A[None, None, (None, ki)],
-                        frag_B[None, None, (None, ki), read_stage],
+                        cur_frag_B[None, None, (None, ki)],
                         frag_C)
             # 3. Load next B tile (after compute, overlaps with LDS write + barrier)
             if read_next and next_k_val is not None:
                 fx.copy(mma_copy, pB_g[None, None, None, next_k_val],
-                        frag_B_retile[None, None, None, write_stage])
+                        frag_B_retile_stages[write_stage])
             # 4. Write A tile to LDS + barrier
             fx.copy(uni_copy_g2s, frag_copy_A, pA_s[None, None, None, write_stage])
+            if enable_scheduler:
+                hot_loop_scheduler()
             gpu.barrier()
-            # NOTE: hot_loop_scheduler intentionally NOT called here.
-            # Testing shows LLVM HW scheduler outperforms manual scheduling
-            # for the layout API's instruction pattern (98% vs 83% for 64x128x64).
 
         # ── Prologue ──────────────────────────────────────────────
         fx.copy(buf_copy_g2s, pA_g[None, None, None, 0], frag_copy_A)
-        fx.copy(mma_copy, pB_g[None, None, None, 0], frag_B_retile[None, None, None, 0])
+        fx.copy(mma_copy, pB_g[None, None, None, 0], frag_B_retile_stages[0])
         frag_C.store(arith.constant_vector(0.0, T.vec(acc_size, T.f32)))
         fx.copy(uni_copy_g2s, frag_copy_A, pA_s[None, None, None, 0])
         gpu.barrier()

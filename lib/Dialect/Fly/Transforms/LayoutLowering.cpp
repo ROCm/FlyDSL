@@ -2266,6 +2266,41 @@ public:
       int32_t loop_k = get_static_product(aLayoutAttr.getShape().at(2));
       assert(loop_k == get_static_product(bLayoutAttr.getShape().at(2)) && "Mismatch in loop_k");
 
+      // ── SSA accumulator threading ──
+      // When d == c (in-place accumulation), thread the accumulator through SSA
+      // values instead of load/store through alloca. This eliminates redundant
+      // accumulator loads/stores per MFMA and reduces VGPR pressure by ~90 VGPRs
+      // on tiles like 64x256x64 (252 → ~162 VGPRs, recovering 3 waves/SIMD).
+      //
+      // Uses MNK traversal (K innermost) so all K iterations for a given (m,n)
+      // are consecutive, enabling SSA threading of the accumulator chain.
+      bool useSsaAccum = (d == c) && !op.getTraversalLayout() && !op.getTraversalOrder();
+
+      if (useSsaAccum) {
+        for (int32_t m = 0; m < loop_m; ++m) {
+          for (int32_t n = 0; n < loop_n; ++n) {
+            // Load initial accumulator from C[m,n]
+            Value cSlice = SliceOp::create(rewriter, loc, c, getSliceCoord({m, n}));
+            Value accVec = MemRefLoadVecOp::create(rewriter, loc, cSlice);
+
+            // Thread accumulator through all K iterations as SSA values
+            for (int32_t k = 0; k < loop_k; ++k) {
+              Value aSlice = SliceOp::create(rewriter, loc, a, getSliceCoordForOp(a, m, k));
+              Value bSlice = SliceOp::create(rewriter, loc, b, getSliceCoordForOp(b, n, k));
+              accVec = MmaAtomCallValue::create(rewriter, loc, accVec.getType(),
+                                                mmaAtomVal, aSlice, bSlice, accVec);
+            }
+
+            // Store final accumulated result to D[m,n]
+            Value dSlice = SliceOp::create(rewriter, loc, d, getSliceCoord({m, n}));
+            MemRefStoreVecOp::create(rewriter, loc, accVec, dSlice);
+          }
+        }
+        rewriter.eraseOp(op);
+        return success();
+      }
+
+      // ── Legacy path: per-MFMA load/store through alloca ──
       // the accumulator source: c on first visit, d on subsequent visits.
       SmallVector<bool> mnVisited(loop_m * loop_n, false);
 

@@ -477,6 +477,13 @@ LogicalResult MmaAtomType::emitAtomCall(OpBuilder &builder, Location loc, Type m
       .emitAtomCall(builder, loc, mmaAtomTy, dMemTy, aMemTy, bMemTy, cMemTy, atomVal, d, a, b, c);
 }
 
+LogicalResult MmaAtomType::emitAtomCallSsa(OpBuilder &builder, Location loc, Type mmaAtomTy,
+                                           Type aMemTy, Type bMemTy, Value atomVal, Value a,
+                                           Value b, Value c, Value &result) const {
+  return cast<MmaOpTypeInterface>(getMmaOp())
+      .emitAtomCallSsa(builder, loc, mmaAtomTy, aMemTy, bMemTy, atomVal, a, b, c, result);
+}
+
 bool MmaAtomType::isStateful() const { return isa<StatefulOpTypeInterface>(getMmaOp()); }
 
 Type MmaAtomType::getConvertedType(MLIRContext *ctx) const {

@@ -294,6 +294,9 @@ def Fly_MmaAtom : Fly_Type<"MmaAtom", "mma_atom", [
     ::mlir::LogicalResult emitAtomCall(OpBuilder &builder, Location loc, Type mmaAtomTy,
                                        Type dMemTy, Type aMemTy, Type bMemTy, Type cMemTy, Value atomVal, Value d,
                                        Value a, Value b, Value c) const;
+    ::mlir::LogicalResult emitAtomCallSsa(OpBuilder &builder, Location loc, Type mmaAtomTy,
+                                          Type aMemTy, Type bMemTy, Value atomVal, Value a,
+                                          Value b, Value c, Value &result) const;
 
     bool isStateful() const;
     ::mlir::Type getConvertedType(::mlir::MLIRContext *ctx) const;

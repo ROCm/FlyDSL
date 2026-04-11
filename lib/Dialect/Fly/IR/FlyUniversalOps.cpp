@@ -132,13 +132,15 @@ LogicalResult CopyOpUniversalCopyType::emitAtomCall(OpBuilder &builder, Location
   if (!isa<LLVM::LLVMPointerType>(src.getType()) || !isa<LLVM::LLVMPointerType>(dst.getType()))
     return failure();
 
-  int32_t copyBytes = getBitSize() / 8;
   Value srcPtr = applySwizzleOnPtr(builder, loc, cast<TypedValue<LLVM::LLVMPointerType>>(src),
                                    srcMemTy.getSwizzle());
   Value dstPtr = applySwizzleOnPtr(builder, loc, cast<TypedValue<LLVM::LLVMPointerType>>(dst),
                                    dstMemTy.getSwizzle());
-  Value len = arith::ConstantIntOp::create(builder, loc, copyBytes, /*width=*/32);
-  LLVM::MemcpyOp::create(builder, loc, dstPtr, srcPtr, len, /*isVolatile=*/false);
+  // Use load+store instead of memcpy so SROA can promote private allocas
+  // (memcpy takes the alloca address, blocking SROA promotion).
+  Type intTy = IntegerType::get(builder.getContext(), getBitSize());
+  Value val = LLVM::LoadOp::create(builder, loc, intTy, srcPtr);
+  LLVM::StoreOp::create(builder, loc, val, dstPtr);
 
   return success();
 }
@@ -232,6 +234,20 @@ LogicalResult MmaOpUniversalFMAType::emitAtomCall(OpBuilder &builder, Location l
   Value res = LLVM::FAddOp::create(builder, loc, elemTy, mul, c);
 
   LLVM::StoreOp::create(builder, loc, res, dPtr);
+  return success();
+}
+
+LogicalResult MmaOpUniversalFMAType::emitAtomCallSsa(OpBuilder &builder, Location loc,
+                                                     Type mmaAtomTy, Type aMemTy, Type bMemTy,
+                                                     Value atomVal, Value aPtr, Value bPtr,
+                                                     Value cVal, Value &result) const {
+  Type elemTy = getElemTy();
+
+  Value a = LLVM::LoadOp::create(builder, loc, elemTy, aPtr);
+  Value b = LLVM::LoadOp::create(builder, loc, elemTy, bPtr);
+
+  Value mul = LLVM::FMulOp::create(builder, loc, elemTy, a, b);
+  result = LLVM::FAddOp::create(builder, loc, elemTy, mul, cVal);
   return success();
 }
 
