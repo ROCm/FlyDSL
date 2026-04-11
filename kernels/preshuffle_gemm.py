@@ -795,7 +795,7 @@ def compile_preshuffle_gemm_a8(
         # ── Compute tile (MFMA) ───────────────────────────────────────────
         def compute_tile(accs_in, b_tile_in, lds_buffer, *, is_last_tile=False, a0_prefetch=None, fp4_scales=None, fp4_scale_half=0):
             scales_pf = {}
-            if is_last_tile and (not is_f16_or_bf16):
+            if const_expr(is_last_tile and (not is_f16_or_bf16)):
                 s_b_vals = []
                 for ni in range_constexpr(num_acc_n):
                     col_g = by_n + n_tile_base + (ni * 16) + lane_mod_16
