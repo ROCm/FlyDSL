@@ -67,6 +67,7 @@ class RocmBackend(BaseBackend):
             "fly-layout-lowering",
             "convert-fly-to-rocdl",
             "canonicalize",
+            "fly-forward-llvm-allocas",
             f"gpu.module(convert-scf-to-cf,cse,"
             f"convert-gpu-to-rocdl{{chipset={chip} index-bitwidth=0 runtime=HIP use-bare-ptr-memref-call-conv=true}},"
             f"fly-rocdl-cluster-attr)",

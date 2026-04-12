@@ -19,7 +19,7 @@ from flydsl.expr.typing import T, Float16, BFloat16, Float8E4M3FNUZ, Float8E4M3F
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.runtime.device import get_rocm_arch
 from flydsl._mlir import ir
-from kernels.preshuffle_gemm import compile_preshuffle_gemm_a8
+from kernels.preshuffle_gemm import compile_preshuffle_gemm_a8, _get_preload
 from kernels.mfma_epilogues import mfma_epilog
 from typing import Optional
 
@@ -34,7 +34,7 @@ def compile_preshuffle_gemm_v2(
     in_dtype: str = "fp8",
     out_dtype: str = "bf16",
     waves_per_eu: Optional[int] = None,
-    enable_scheduler: bool = False,
+    enable_scheduler: bool = True,
 ):
     """Compile preshuffle GEMM using the layout API.
 
@@ -61,7 +61,8 @@ def compile_preshuffle_gemm_v2(
 
     gpu_arch = get_rocm_arch()
     is_gfx942 = str(gpu_arch).startswith("gfx942")
-    if is_fp8 and str(gpu_arch).startswith("gfx950"):
+    is_gfx950 = str(gpu_arch).startswith("gfx950")
+    if is_fp8 and is_gfx950:
         raise NotImplementedError("fp8 gfx950 uses mfma_scale, not supported yet")
 
     if is_f16:
@@ -90,6 +91,10 @@ def compile_preshuffle_gemm_v2(
     a_load_bytes = 16
     bytes_per_thread_a = (tile_m * tile_k * elem_bytes) // total_threads
     num_a_loads = bytes_per_thread_a // a_load_bytes
+    num_b_loads = (tile_n * tile_k * elem_bytes) // total_threads // 16
+    num_ds_load = (tile_m * tile_k * elem_bytes) // 64 // 16  # A LDS reads per wave
+    num_gmem_loads = num_a_loads + num_b_loads
+    dsrd_preload, dvmem_preload = _get_preload(tile_m, tile_n, tile_k)
 
     # ── Kernel ────────────────────────────────────────────────────────
     @flyc.kernel
@@ -168,44 +173,109 @@ def compile_preshuffle_gemm_v2(
             frag_C_retile = thr_r2g_C.retile(frag_C_out)
 
         # ── Scheduling hints (ported from old pipeline) ───────────
+        def _build_scheduler(numer: int, denom: int):
+            if denom <= 0:
+                return []
+            if numer <= 0:
+                return [0] * denom
+            out = []
+            prev = 0
+            for i in range_constexpr(denom):
+                cur = ((i + 1) * numer + (denom - 1)) // denom
+                out.append(cur - prev)
+                prev = cur
+            return out
+
         def hot_loop_scheduler():
             mfma_group = num_acc_n
             mfma_total = (k_iters * 2) * m_repeat * mfma_group
-            mfma_per_iter = 2 * mfma_group
-            sche_iters = 0 if mfma_per_iter == 0 else (mfma_total // mfma_per_iter)
 
-            rocdl.sched_dsrd(2)
-            rocdl.sched_mfma(1)
-            if tile_m == 16:
-                rocdl.sched_vmem(1)
-            rocdl.sched_mfma(1)
-            if tile_m == 16:
-                rocdl.sched_vmem(1)
+            if is_gfx942:
+                mfma_per_iter = 2 * mfma_group
+                sche_iters = 0 if mfma_per_iter == 0 else (mfma_total // mfma_per_iter)
 
-            if num_acc_n < 4:
-                rocdl.sched_dsrd(1)
-                rocdl.sched_mfma(1)
-                if tile_m == 16:
-                    rocdl.sched_vmem(1)
-                rocdl.sched_dsrd(1)
+                rocdl.sched_dsrd(2)
                 rocdl.sched_mfma(1)
                 if tile_m == 16:
                     rocdl.sched_vmem(1)
                 rocdl.sched_mfma(1)
+                if tile_m == 16:
+                    rocdl.sched_vmem(1)
 
-            dswr_tail = num_a_loads
-            dstr_advance = 2
-            if dswr_tail > sche_iters:
-                dswr_tail = sche_iters
-            dswr_start = max(sche_iters - dswr_tail - dstr_advance, 0)
+                if num_acc_n < 4:
+                    rocdl.sched_dsrd(1)
+                    rocdl.sched_mfma(1)
+                    if tile_m == 16:
+                        rocdl.sched_vmem(1)
+                    rocdl.sched_dsrd(1)
+                    rocdl.sched_mfma(1)
+                    if tile_m == 16:
+                        rocdl.sched_vmem(1)
+                    rocdl.sched_mfma(1)
 
-            for sche_i in range_constexpr(sche_iters):
-                rocdl.sched_vmem(1)
-                rocdl.sched_mfma(mfma_group)
-                rocdl.sched_dsrd(1)
-                rocdl.sched_mfma(mfma_group)
-                if sche_i >= dswr_start - 1:
-                    rocdl.sched_dswr(1)
+                dswr_tail = num_a_loads
+                dstr_advance = 2
+                if dswr_tail > sche_iters:
+                    dswr_tail = sche_iters
+                dswr_start = max(sche_iters - dswr_tail - dstr_advance, 0)
+
+                for sche_i in range_constexpr(sche_iters):
+                    rocdl.sched_vmem(1)
+                    rocdl.sched_mfma(mfma_group)
+                    rocdl.sched_dsrd(1)
+                    rocdl.sched_mfma(mfma_group)
+                    if sche_i >= dswr_start - 1:
+                        rocdl.sched_dswr(1)
+            else:
+                # gfx950 path: distribute vmem/dsrd across MFMA slots
+                dswr_tail = num_a_loads
+                dstr_advance = 2
+                if dswr_tail > mfma_total:
+                    dswr_tail = mfma_total
+                dsrd_preload_eff = min(int(dsrd_preload), num_ds_load)
+                dvmem_preload_eff = min(int(dvmem_preload), num_gmem_loads)
+                vmem_remaining = num_gmem_loads - dvmem_preload_eff
+                dsrd_remaining = num_ds_load - dsrd_preload_eff
+                if vmem_remaining > 0 and vmem_remaining < mfma_total:
+                    vmem_schedule = (_build_scheduler(vmem_remaining, vmem_remaining)
+                                     + [0] * (mfma_total - vmem_remaining))
+                else:
+                    vmem_schedule = _build_scheduler(vmem_remaining, mfma_total)
+                dsrd_schedule = _build_scheduler(dsrd_remaining, mfma_total)
+                dswr_start = max(mfma_total - dswr_tail - dstr_advance, 0)
+                last_dsrd_mfma_idx = -1
+                for sched_idx in range_constexpr(mfma_total):
+                    if dsrd_schedule[sched_idx]:
+                        last_dsrd_mfma_idx = sched_idx
+                dswr_start = max(dswr_start, last_dsrd_mfma_idx + 1)
+                idx_ds_read = dsrd_preload_eff
+                idx_gmem_load = dvmem_preload_eff
+                idx_ds_write = 0
+                if dvmem_preload_eff:
+                    rocdl.sched_vmem(dvmem_preload_eff)
+                if dsrd_preload_eff:
+                    rocdl.sched_dsrd(dsrd_preload_eff)
+                for mfma_idx in range_constexpr(mfma_total):
+                    rocdl.sched_mfma(1)
+                    n_dsrd = dsrd_schedule[mfma_idx]
+                    if n_dsrd and (idx_ds_read < num_ds_load):
+                        if idx_ds_read + n_dsrd > num_ds_load:
+                            n_dsrd = num_ds_load - idx_ds_read
+                        if n_dsrd:
+                            rocdl.sched_dsrd(n_dsrd)
+                            idx_ds_read += n_dsrd
+                    n_vmem = vmem_schedule[mfma_idx]
+                    if n_vmem and (idx_gmem_load < num_gmem_loads):
+                        if idx_gmem_load + n_vmem > num_gmem_loads:
+                            n_vmem = num_gmem_loads - idx_gmem_load
+                        if n_vmem:
+                            rocdl.sched_vmem(n_vmem)
+                            idx_gmem_load += n_vmem
+                    if (idx_ds_write < dswr_tail) and (mfma_idx >= dswr_start):
+                        rocdl.sched_dswr(1)
+                        idx_ds_write += 1
+                if idx_ds_write < num_a_loads:
+                    rocdl.sched_dswr(num_a_loads - idx_ds_write)
 
             rocdl.sched_barrier(0)
 
@@ -216,7 +286,12 @@ def compile_preshuffle_gemm_v2(
             # 1. Prefetch next A tile (global → register)
             if read_next and next_k_val is not None:
                 fx.copy(buf_copy_g2s, pA_g[None, None, None, next_k_val], frag_copy_A)
-            # 2. Compute: A from LDS + MFMA with current B
+            # 2. Load next B tile (before compute — matches v1 pipeline order,
+            #    all vmem available for scheduler interleaving with MFMAs)
+            if read_next and next_k_val is not None:
+                fx.copy(mma_copy, pB_g[None, None, None, next_k_val],
+                        frag_B_retile_stages[write_stage])
+            # 3. Compute: A from LDS + MFMA with current B
             for ki in range_constexpr(k_iters):
                 fx.copy(mma_uni, pA_s2r[None, None, ki, read_stage],
                         frag_A_retile[None, None, ki])
@@ -224,10 +299,6 @@ def compile_preshuffle_gemm_v2(
                         frag_A[None, None, (None, ki)],
                         cur_frag_B[None, None, (None, ki)],
                         frag_C)
-            # 3. Load next B tile (after compute, overlaps with LDS write + barrier)
-            if read_next and next_k_val is not None:
-                fx.copy(mma_copy, pB_g[None, None, None, next_k_val],
-                        frag_B_retile_stages[write_stage])
             # 4. Write A tile to LDS + barrier
             fx.copy(uni_copy_g2s, frag_copy_A, pA_s[None, None, None, write_stage])
             if enable_scheduler:
@@ -252,11 +323,19 @@ def compile_preshuffle_gemm_v2(
             loop_start = fx.Index(0)
             loop_end = fx.Index((num_tiles - 2) // 2)
             loop_step = fx.Index(1)
-            for iv, _ in range(loop_start, loop_end, loop_step, init=[]):
+            # Explicit loop-carried values: accumulator + B stage 0
+            acc_init = frag_C.load()
+            b0_init = frag_B_stages[0].load()
+            for iv, state in range(loop_start, loop_end, loop_step,
+                                   init=[acc_init, b0_init]):
+                frag_C.store(state[0])
+                frag_B_stages[0].store(state[1])
                 k_base = arith.index_cast(T.i32, iv * 2)
                 pipeline_stage(read_stage=0, next_k_val=k_base + fx.Int32(1))
                 pipeline_stage(read_stage=1, next_k_val=k_base + fx.Int32(2))
-                yield []
+                results = yield [frag_C.load(), frag_B_stages[0].load()]
+            frag_C.store(results[0])
+            frag_B_stages[0].store(results[1])
             pipeline_stage(read_stage=0, next_k_val=fx.Int32(num_tiles - 1))
             pipeline_stage(read_stage=1, read_next=False)
 

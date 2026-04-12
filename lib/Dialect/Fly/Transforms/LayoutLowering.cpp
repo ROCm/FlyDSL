@@ -2699,6 +2699,382 @@ namespace memref_rewrite {
 } // namespace memref_rewrite
 
 //===----------------------------------------------------------------------===//
+// Store-forwarding for register allocas
+//===----------------------------------------------------------------------===//
+// After layout lowering, register fragments (fly.make_ptr with allocaSize)
+// produce sequences of fly.ptr.store / fly.ptr.load at constant offsets.
+// Within a basic block, each load from offset X can be replaced by the value
+// most recently stored to offset X.  When all loads are forwarded the stores
+// and the alloca itself become dead and are removed by canonicalize/DCE.
+// This eliminates AS5 allocas that otherwise get promoted to full-lifetime
+// vector registers by AMDGPUPromoteAllocaToVector, saving ~80 VGPRs on
+// GEMM tiles like 64x256x64.
+
+/// Resolve the base MakePtrOp and static byte offset for a pointer value.
+/// Returns the base MakePtrOp (with allocaSize) and the offset in elements,
+/// or {nullptr, -1} if not resolvable.
+static std::pair<MakePtrOp, int64_t> resolveRegAllocaPtr(Value ptr) {
+  int64_t offset = 0;
+  Value cur = ptr;
+  while (auto addOff = cur.getDefiningOp<AddOffsetOp>()) {
+    auto offsetTy = dyn_cast<IntTupleType>(addOff.getOffset().getType());
+    if (!offsetTy)
+      return {nullptr, -1};
+    auto offsetAttr = offsetTy.getAttr();
+    if (!offsetAttr.isLeaf() || !offsetAttr.isStatic())
+      return {nullptr, -1};
+    offset += offsetAttr.getLeafAsInt().getValue();
+    cur = addOff.getPtr();
+  }
+  auto makePtrOp = cur.getDefiningOp<MakePtrOp>();
+  if (!makePtrOp)
+    return {nullptr, -1};
+  auto ptrTy = dyn_cast<PointerType>(makePtrOp.getResult().getType());
+  if (!ptrTy || ptrTy.getAddressSpace().getValue() != AddressSpace::Register)
+    return {nullptr, -1};
+  auto dictAttr = makePtrOp.getDictAttrs();
+  if (!dictAttr || !dictAttr->get("allocaSize"))
+    return {nullptr, -1};
+  return {makePtrOp, offset};
+}
+
+/// Forward stores to loads within each basic block for register allocas.
+/// Trace a memref value back to its base MakePtrOp (register alloca).
+/// Returns nullptr if not traceable to a register alloca.
+static MakePtrOp traceMemrefToRegAlloca(Value memref) {
+  Value cur = memref;
+  for (;;) {
+    if (auto viewOp = cur.getDefiningOp<MakeViewOp>()) {
+      cur = viewOp.getIter();
+      continue;
+    }
+    if (auto sliceOp = cur.getDefiningOp<SliceOp>()) {
+      cur = sliceOp.getSrc();
+      continue;
+    }
+    if (auto addOff = cur.getDefiningOp<AddOffsetOp>()) {
+      cur = addOff.getPtr();
+      continue;
+    }
+    break;
+  }
+  auto makePtrOp = cur.getDefiningOp<MakePtrOp>();
+  if (!makePtrOp)
+    return nullptr;
+  auto ptrTy = dyn_cast<PointerType>(makePtrOp.getResult().getType());
+  if (!ptrTy || ptrTy.getAddressSpace().getValue() != AddressSpace::Register)
+    return nullptr;
+  auto dictAttr = makePtrOp.getDictAttrs();
+  if (!dictAttr || !dictAttr->get("allocaSize"))
+    return nullptr;
+  return makePtrOp;
+}
+
+static void forwardRegAllocaStores(Operation *topOp) {
+  topOp->walk([&](Block *block) {
+    // Map: (MakePtrOp, element-offset) → most recent stored SSA value.
+    DenseMap<std::pair<Operation *, int64_t>, Value> storeMap;
+
+    for (auto &op : llvm::make_early_inc_range(*block)) {
+      if (auto storeOp = dyn_cast<PtrStoreOp>(&op)) {
+        auto [base, offset] = resolveRegAllocaPtr(storeOp.getPtr());
+        if (base) {
+          storeMap[{base.getOperation(), offset}] = storeOp.getValue();
+        }
+        continue;
+      }
+      if (auto loadOp = dyn_cast<PtrLoadOp>(&op)) {
+        auto [base, offset] = resolveRegAllocaPtr(loadOp.getPtr());
+        if (!base) continue;
+        auto it = storeMap.find({base.getOperation(), offset});
+        if (it == storeMap.end()) continue;
+        if (it->second.getType() != loadOp.getResult().getType()) continue;
+        loadOp.getResult().replaceAllUsesWith(it->second);
+        loadOp.erase();
+        continue;
+      }
+      // Ops with nested regions (scf.for, scf.if, etc.) may modify
+      // register allocas visible in the parent scope.  Walk the nested
+      // regions to find which allocas are touched and invalidate only
+      // those entries (rather than clearing everything).
+      if (op.getNumRegions() > 0) {
+        SmallPtrSet<Operation *, 4> clobbered;
+        op.walk([&](Operation *inner) {
+          // PtrStoreOp directly writes to a register alloca.
+          if (auto storeOp = dyn_cast<PtrStoreOp>(inner)) {
+            auto [base, offset] = resolveRegAllocaPtr(storeOp.getPtr());
+            if (base)
+              clobbered.insert(base.getOperation());
+            return;
+          }
+          // Any op with register memref operands may write through them.
+          for (Value operand : inner->getOperands()) {
+            if (auto memrefTy = dyn_cast<fly::MemRefType>(operand.getType())) {
+              if (memrefTy.getAddressSpace().getValue() == AddressSpace::Register) {
+                if (auto base = traceMemrefToRegAlloca(operand))
+                  clobbered.insert(base.getOperation());
+              }
+            }
+          }
+        });
+        if (!clobbered.empty()) {
+          SmallVector<std::pair<Operation *, int64_t>> toRemove;
+          for (auto &kv : storeMap) {
+            if (clobbered.contains(kv.first.first))
+              toRemove.push_back(kv.first);
+          }
+          for (auto &key : toRemove)
+            storeMap.erase(key);
+        }
+        continue;
+      }
+      // Check if this op writes to any register alloca through memref
+      // operands (e.g., copy_atom_call).  If so, invalidate all entries
+      // for that alloca since we don't know which offsets are modified.
+      if (!isa<PtrStoreOp, PtrLoadOp>(op)) {
+        SmallPtrSet<Operation *, 4> clobbered;
+        for (Value operand : op.getOperands()) {
+          if (auto memrefTy = dyn_cast<fly::MemRefType>(operand.getType())) {
+            if (memrefTy.getAddressSpace().getValue() == AddressSpace::Register) {
+              if (auto base = traceMemrefToRegAlloca(operand)) {
+                clobbered.insert(base.getOperation());
+              }
+            }
+          }
+        }
+        if (!clobbered.empty()) {
+          // Remove all entries for clobbered allocas.
+          SmallVector<std::pair<Operation *, int64_t>> toRemove;
+          for (auto &kv : storeMap) {
+            if (clobbered.contains(kv.first.first))
+              toRemove.push_back(kv.first);
+          }
+          for (auto &key : toRemove)
+            storeMap.erase(key);
+        }
+      }
+    }
+  });
+}
+
+/// Promote register-alloca load/store pairs across scf.for iterations to
+/// loop-carried values.  After forwardRegAllocaStores, loads at the top of
+/// an scf.for body that have no prior store (notFound) are backed by stores
+/// at the bottom of the previous iteration.  This converts them to init/yield
+/// loop-carried SSA values, letting LLVM eliminate the alloca entirely.
+static void promoteAllocaToLoopCarried(Operation *topOp) {
+  SmallVector<scf::ForOp> loops;
+  topOp->walk([&](scf::ForOp forOp) { loops.push_back(forOp); });
+
+  int promoted = 0;
+  for (auto forOp : loops) {
+    Block &body = forOp.getRegion().front();
+
+    // Collect "initial loads": PtrLoadOps from register allocas at the start
+    // of the body, before any PtrStoreOp to the same (base, offset).
+    // Also track which (base, offset) we've seen a store for.
+    using Key = std::pair<Operation *, int64_t>;
+    SmallVector<std::pair<Key, PtrLoadOp>> initialLoads;
+    DenseSet<Key> storedKeys;
+
+    for (auto &op : body) {
+      if (auto storeOp = dyn_cast<PtrStoreOp>(&op)) {
+        auto [base, offset] = resolveRegAllocaPtr(storeOp.getPtr());
+        if (base)
+          storedKeys.insert({base.getOperation(), offset});
+        continue;
+      }
+      if (auto loadOp = dyn_cast<PtrLoadOp>(&op)) {
+        auto [base, offset] = resolveRegAllocaPtr(loadOp.getPtr());
+        if (!base) continue;
+        Key key = {base.getOperation(), offset};
+        // Only consider loads where no store has been seen yet for this key.
+        if (!storedKeys.contains(key))
+          initialLoads.push_back({key, loadOp});
+        continue;
+      }
+    }
+
+    if (initialLoads.empty())
+      continue;
+
+    // For each initial load, find the LAST PtrStoreOp in the body for the
+    // same (base, offset).  This is the value that feeds into the next
+    // iteration (and should become a yield value).
+    DenseMap<Key, PtrStoreOp> lastStore;
+    for (auto it = body.rbegin(); it != body.rend(); ++it) {
+      if (auto storeOp = dyn_cast<PtrStoreOp>(&*it)) {
+        auto [base, offset] = resolveRegAllocaPtr(storeOp.getPtr());
+        if (!base) continue;
+        Key key = {base.getOperation(), offset};
+        if (!lastStore.contains(key))
+          lastStore[key] = storeOp;
+      }
+    }
+
+    // Filter: keep only initial loads that have a matching last store with
+    // compatible types.
+    SmallVector<std::pair<Key, PtrLoadOp>> validLoads;
+    for (auto &[key, loadOp] : initialLoads) {
+      auto it = lastStore.find(key);
+      if (it == lastStore.end()) continue;
+      if (it->second.getValue().getType() != loadOp.getResult().getType())
+        continue;
+      validLoads.push_back({key, loadOp});
+    }
+
+    if (validLoads.empty())
+      continue;
+
+    // De-duplicate by key (multiple loads from same (base,offset) — only
+    // carry one value and rewrite all loads).
+    DenseMap<Key, SmallVector<PtrLoadOp>> loadsByKey;
+    for (auto &[key, loadOp] : validLoads)
+      loadsByKey[key].push_back(loadOp);
+
+    SmallVector<Key> uniqueKeys;
+    for (auto &[key, _] : loadsByKey)
+      uniqueKeys.push_back(key);
+
+    // Build the new scf.for with loop-carried values.
+    OpBuilder builder(forOp);
+    Location loc = forOp.getLoc();
+
+    // Prologue loads: read initial values from the alloca before the loop.
+    SmallVector<Value> initValues;
+    for (auto &key : uniqueKeys) {
+      // Find the ptr for this (base, offset).  Use the ptr from the first
+      // load — it has the right AddOffset chain.
+      PtrLoadOp firstLoad = loadsByKey[key].front();
+      Value prologueVal = PtrLoadOp::create(builder, loc,
+          firstLoad.getResult().getType(), firstLoad.getPtr());
+      initValues.push_back(prologueVal);
+    }
+
+    // Instead of creating a new ForOp, mutate the existing one in-place:
+    // 1. Add block arguments for the loop-carried values
+    // 2. Add a yield terminator with the last store values
+    // 3. Update the ForOp to have init operands and result types
+
+    // Add region iter args to the existing body block.
+    SmallVector<Type> iterArgTypes;
+    SmallVector<Location> iterArgLocs;
+    for (auto &key : uniqueKeys) {
+      PtrLoadOp firstLoad = loadsByKey[key].front();
+      iterArgTypes.push_back(firstLoad.getResult().getType());
+      iterArgLocs.push_back(loc);
+    }
+
+    // We need to create a new ForOp because the existing one has no
+    // init operands and we can't easily add them in-place.
+    SmallVector<Type> resultTypes(iterArgTypes);
+    auto newForOp = builder.create<scf::ForOp>(loc,
+        forOp.getLowerBound(), forOp.getUpperBound(), forOp.getStep(),
+        initValues);
+
+    Block &newBody = newForOp.getRegion().front();
+
+    // Map old induction var to new.
+    body.getArgument(0).replaceAllUsesWith(newBody.getArgument(0));
+
+    // Replace initial loads with region iter args.
+    for (size_t i = 0; i < uniqueKeys.size(); ++i) {
+      Value iterArg = newBody.getArgument(i + 1);  // +1 for induction var
+      for (PtrLoadOp loadOp : loadsByKey[uniqueKeys[i]]) {
+        loadOp.getResult().replaceAllUsesWith(iterArg);
+        loadOp.erase();
+        promoted++;
+      }
+    }
+
+    // Erase the old body's empty scf.yield (from the original init=[] ForOp)
+    // before splicing, since we'll add a new yield with loop-carried values.
+    if (!body.empty() && body.mightHaveTerminator()) {
+      if (auto *term = body.getTerminator())
+        term->erase();
+    }
+
+    // Splice ops from old body to new body.
+    newBody.getOperations().splice(newBody.end(), body.getOperations());
+
+    // Build yield values from last stores.
+    builder.setInsertionPointToEnd(&newBody);
+    SmallVector<Value> yieldValues;
+    for (auto &key : uniqueKeys)
+      yieldValues.push_back(lastStore[key].getValue());
+    scf::YieldOp::create(builder, loc, yieldValues);
+
+    // Erase old ForOp (had no results).
+    forOp.erase();
+
+    // After the new loop, store the final loop-carried values back to the
+    // allocas so that epilogue code can read them.
+    builder.setInsertionPointAfter(newForOp);
+    for (size_t i = 0; i < uniqueKeys.size(); ++i) {
+      Value finalVal = newForOp.getResult(i);
+      PtrStoreOp::create(builder, loc, finalVal,
+                         lastStore[uniqueKeys[i]].getPtr());
+    }
+  }
+
+  if (promoted > 0)
+    llvm::errs() << "[alloca-to-loop-carried] promoted=" << promoted << "\n";
+}
+
+/// Eliminate dead stores to register allocas — stores where no subsequent
+/// PtrLoadOp reads from the same (base, offset).  Also remove allocas that
+/// have no remaining loads or stores.
+static void eliminateDeadRegAllocaStores(Operation *topOp) {
+  // Collect all register alloca MakePtrOps.
+  SmallPtrSet<Operation *, 8> allocaOps;
+  topOp->walk([&](MakePtrOp makePtrOp) {
+    auto ptrTy = dyn_cast<PointerType>(makePtrOp.getResult().getType());
+    if (!ptrTy || ptrTy.getAddressSpace().getValue() != AddressSpace::Register)
+      return;
+    auto dictAttr = makePtrOp.getDictAttrs();
+    if (dictAttr && dictAttr->get("allocaSize"))
+      allocaOps.insert(makePtrOp.getOperation());
+  });
+
+  if (allocaOps.empty()) return;
+
+  // Find all register alloca bases that still have PtrLoadOps.
+  SmallPtrSet<Operation *, 8> hasLoads;
+  topOp->walk([&](PtrLoadOp loadOp) {
+    auto [base, offset] = resolveRegAllocaPtr(loadOp.getPtr());
+    if (base)
+      hasLoads.insert(base.getOperation());
+  });
+
+  // Also consider memref operands as potential reads (copy_atom_call etc.)
+  topOp->walk([&](Operation *op) {
+    if (isa<PtrLoadOp, PtrStoreOp>(op)) return;
+    for (Value operand : op->getOperands()) {
+      if (auto memrefTy = dyn_cast<fly::MemRefType>(operand.getType())) {
+        if (memrefTy.getAddressSpace().getValue() == AddressSpace::Register) {
+          if (auto base = traceMemrefToRegAlloca(operand))
+            hasLoads.insert(base.getOperation());
+        }
+      }
+    }
+  });
+
+  // Erase all PtrStoreOps to allocas that have no loads.
+  int erasedStores = 0;
+  topOp->walk([&](PtrStoreOp storeOp) {
+    auto [base, offset] = resolveRegAllocaPtr(storeOp.getPtr());
+    if (!base) return;
+    if (!hasLoads.contains(base.getOperation())) {
+      storeOp.erase();
+      erasedStores++;
+    }
+  });
+
+  if (erasedStores > 0)
+    llvm::errs() << "[dead-store-elim] erased=" << erasedStores << "\n";
+}
+
+//===----------------------------------------------------------------------===//
 // Pass Definition
 //===----------------------------------------------------------------------===//
 
@@ -2768,6 +3144,17 @@ public:
 
     if (failed(applyPatternsGreedily(getOperation(), std::move(patterns))))
       signalPassFailure();
+
+    // Forward stores to loads on register allocas to eliminate alloca usage.
+    forwardRegAllocaStores(getOperation());
+
+    // Promote remaining alloca load/store pairs in scf.for to loop-carried
+    // values, then re-run store forwarding to handle newly exposed opportunities.
+    promoteAllocaToLoopCarried(getOperation());
+    forwardRegAllocaStores(getOperation());
+
+    // Eliminate dead stores to register allocas that have no remaining loads.
+    eliminateDeadRegAllocaStores(getOperation());
 
     IRRewriter rewriter(context);
     DominanceInfo domInfo(getOperation());

@@ -135,7 +135,8 @@ def compile_one(M, N, K, tile_m, tile_n, tile_k, in_dtype, out_dtype="bf16",
 
 def bench_one(M, N, K, tile_m, tile_n, tile_k, in_dtype, out_dtype="bf16",
               warmup=5, iters=20, check_correctness=True, waves_per_eu=None,
-              enable_scheduler=False, maxnreg=None, opt_level=None):
+              enable_scheduler=False, maxnreg=None, opt_level=None,
+              llvm_opts=None):
     elem_bytes = 1 if in_dtype in ("fp8", "fp8_layout") else 2
     smem = tile_m * tile_k * elem_bytes * 2
     if smem > 65536:
@@ -150,6 +151,8 @@ def bench_one(M, N, K, tile_m, tile_n, tile_k, in_dtype, out_dtype="bf16",
         hints["maxnreg"] = maxnreg
     if opt_level is not None:
         hints["opt_level"] = opt_level
+    if llvm_opts:
+        hints["llvm_options"] = llvm_opts
     fn_v2 = compile_preshuffle_gemm_v2(
         N=N, K=K, tile_m=tile_m, tile_n=tile_n, tile_k=tile_k,
         in_dtype=in_dtype, out_dtype=out_dtype,
@@ -280,7 +283,19 @@ def main():
                         help="Set max VGPR count for v2 kernel (e.g. 168)")
     parser.add_argument("--opt_level", type=int, default=None,
                         help="LLVM optimization level for v2 kernel (default: 2)")
+    parser.add_argument("--no_post_misched", action="store_true",
+                        help="Disable LLVM post-RA machine scheduling")
+    parser.add_argument("--lsr_drop", action="store_true",
+                        help="Set lsr-drop-solution=True")
     args = parser.parse_args()
+
+    llvm_opts = {}
+    if args.no_post_misched:
+        llvm_opts["enable-post-misched"] = False
+    if args.lsr_drop:
+        llvm_opts["lsr-drop-solution"] = True
+    if not llvm_opts:
+        llvm_opts = None
 
     dtypes = [args.dtype] if args.dtype else ["fp16", "bf16", "fp8"]
 
@@ -313,7 +328,9 @@ def main():
                           dt, warmup=args.warmup, iters=args.iters,
                           check_correctness=not args.no_check,
                           waves_per_eu=args.waves_per_eu,
-                          enable_scheduler=args.enable_scheduler)
+                          enable_scheduler=args.enable_scheduler,
+                          maxnreg=args.maxnreg, opt_level=args.opt_level,
+                          llvm_opts=llvm_opts)
             if r:
                 print_results([r], dt)
             continue
@@ -332,7 +349,8 @@ def main():
                               check_correctness=not args.no_check,
                               waves_per_eu=args.waves_per_eu,
                               enable_scheduler=args.enable_scheduler,
-                            maxnreg=args.maxnreg, opt_level=args.opt_level)
+                              maxnreg=args.maxnreg, opt_level=args.opt_level,
+                              llvm_opts=llvm_opts)
                 if r:
                     results.append(r)
             if results:
@@ -357,7 +375,8 @@ def main():
                               check_correctness=not args.no_check,
                               waves_per_eu=args.waves_per_eu,
                               enable_scheduler=args.enable_scheduler,
-                            maxnreg=args.maxnreg, opt_level=args.opt_level)
+                              maxnreg=args.maxnreg, opt_level=args.opt_level,
+                              llvm_opts=llvm_opts)
                 if r:
                     results.append(r)
             if results:

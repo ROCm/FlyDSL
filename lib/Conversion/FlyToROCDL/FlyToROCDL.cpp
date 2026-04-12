@@ -502,8 +502,8 @@ public:
 
     if (!srcMemTy || !dstMemTy)
       return rewriter.notifyMatchFailure(op, "expected MemRef types on original op");
-    if (srcMemTy.getElemTy() != dstMemTy.getElemTy())
-      return rewriter.notifyMatchFailure(op, "src/dst element types mismatch");
+    // Element type mismatch is allowed — copy atoms transfer raw bits.
+    // e.g. preshuffle GEMM copies i8 (buffer) → f16 (register).
 
     Location loc = op.getLoc();
 
