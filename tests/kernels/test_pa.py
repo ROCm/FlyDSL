@@ -668,12 +668,16 @@ def run_pa_decode_ps_test(
     if kv_varlen:
         kv_len_list = [random.randint(query_length, context_length) for _ in range(batch_size)]
     else:
+        # One outlier sequence at batch_size//2 is 3x longer than the rest
         kv_len_list = [context_length] * batch_size
+        if batch_size > 1:
+            kv_len_list[batch_size // 2] = context_length * 3
     context_lengths = torch.tensor(kv_len_list, dtype=torch.int32, device=device)
-    max_context_length = max(16384, context_length)
+    max_kv_len = max(kv_len_list)
+    max_context_length = max(16384, max_kv_len)
     max_blocks_per_sequence = triton.cdiv(max_context_length, block_size)
     total_blocks = max_blocks_per_sequence * batch_size
-    blocks_per_sequence = triton.cdiv(context_length, block_size)
+    blocks_per_sequence = triton.cdiv(max_kv_len, block_size)
     block_tables_list: List[List[int]] = []
     for _ in range(batch_size):
         block_tables_list.append(
@@ -1199,7 +1203,7 @@ def sliding_window_accuracy_test() -> None:
     HEAD_CONFIGURATIONS = [(16, 1)]
     QUERY_LENGTH_OPTIONS = [1]
     QUANT_MODE_OPTIONS = ["per_token"]
-    CONTEXT_LENGTH_OPTIONS = [3000]
+    CONTEXT_LENGTH_OPTIONS = [10000]
     BATCH_SIZE_OPTIONS = [128]
     TRANS_V_OPTIONS = [True]
     KV_VARLEN_OPTIONS = [False]

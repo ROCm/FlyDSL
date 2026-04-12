@@ -856,7 +856,7 @@ def compile_pa_decode_ps(
                             p = arith.select(kv_tok < causal_bound, p, ZERO_F)
                         exp_sum = exp_sum + p
                         d_out[td] = vector.insert(p, d_out[td], static_position=[i], dynamic_position=[])
-                    rocdl.sched_barrier(0)
+                    # rocdl.sched_barrier(0)
                 for sh in [32, 16]:
                     exp_sum = exp_sum + exp_sum.shuffle_xor(arith.constant(sh, type=T.i32), c_w)
                 vector.store(vector.from_elements(T.vec(1, T.f32), [exp_sum]), softmax_lds_f32, [_sm_sum_off])
@@ -873,7 +873,7 @@ def compile_pa_decode_ps(
                                 vs_i = arith.select(kv_tok < causal_bound, vs_i, ZERO_F)
                                 vs = vector.insert(vs_i, vs, static_position=[i], dynamic_position=[])
                         v_max_warp = v_max_warp.maximumf(vector.reduction(T.f32, "maxnumf", vs))
-                        rocdl.sched_barrier(0)
+                        # rocdl.sched_barrier(0)
                     for sh in [32, 16]:
                         v_max_warp = v_max_warp.maximumf(
                             v_max_warp.shuffle_xor(arith.constant(sh, type=T.i32), c_w))
@@ -932,7 +932,7 @@ def compile_pa_decode_ps(
 
                 # ── Step 3: Barrier prevents LLVM from hoisting sum/vmax reads into Step 2,
                 #    reducing peak VGPR by separating the rescale computation from LDS reads ──
-                rocdl.sched_barrier(0)
+                # rocdl.sched_barrier(0)
 
                 # ── Step 4: Read sum from LDS, compute partition_sum + rsum ──
                 partition_sum = ZERO_F
@@ -1136,6 +1136,22 @@ def compile_pa_decode_ps(
                     else:
                         d_out.append(acc * vector.broadcast(T.f32x4, _scale))
 
+                rocdl.sched_group_barrier(rocdl.mask_vmem_rd, 1, 0)
+                rocdl.sched_group_barrier(rocdl.mask_mfma, 2, 0)
+                rocdl.sched_group_barrier(rocdl.mask_vmem_rd, 1, 0)
+                rocdl.sched_group_barrier(rocdl.mask_mfma, 2, 0)
+                rocdl.sched_group_barrier(rocdl.mask_vmem_rd, 1, 0)
+                rocdl.sched_group_barrier(rocdl.mask_mfma, 2, 0)
+                rocdl.sched_group_barrier(rocdl.mask_vmem_rd, 2, 0)
+                rocdl.sched_group_barrier(rocdl.mask_mfma, 2, 0)
+                rocdl.sched_group_barrier(rocdl.mask_vmem_rd, 2, 0)
+                rocdl.sched_group_barrier(rocdl.mask_mfma, 2, 0)
+                rocdl.sched_group_barrier(rocdl.mask_vmem_rd, 2, 0)
+                rocdl.sched_group_barrier(rocdl.mask_mfma, 2, 0)
+                rocdl.sched_group_barrier(rocdl.mask_vmem_rd, 2, 0)
+                rocdl.sched_group_barrier(rocdl.mask_mfma, 2, 0)
+                # rocdl.sched_barrier(0)
+
                 # ════════════════════════════════════════════════════════════
                 # Phase 1d: Intra-warp softmax — max reduction
                 # ════════════════════════════════════════════════════════════
@@ -1166,7 +1182,7 @@ def compile_pa_decode_ps(
                             p = arith.select(kv_tok < causal_bound, p, ZERO_F)
                         exp_sum = exp_sum + p
                         d_out[td] = vector.insert(p, d_out[td], static_position=[i], dynamic_position=[])
-                    rocdl.sched_barrier(0)
+                    # rocdl.sched_barrier(0)
                 for sh in [32, 16]:
                     exp_sum = exp_sum + exp_sum.shuffle_xor(arith.constant(sh, type=T.i32), c_w)
                 vector.store(vector.from_elements(T.vec(1, T.f32), [exp_sum]), softmax_lds_f32, [_sm_sum_off])
@@ -1185,7 +1201,7 @@ def compile_pa_decode_ps(
                                 vs_i = arith.select(kv_tok < causal_bound, vs_i, ZERO_F)
                                 vs = vector.insert(vs_i, vs, static_position=[i], dynamic_position=[])
                         v_max_warp = v_max_warp.maximumf(vector.reduction(T.f32, "maxnumf", vs))
-                        rocdl.sched_barrier(0)
+                        # rocdl.sched_barrier(0)
                     for sh in [32, 16]:
                         v_max_warp = v_max_warp.maximumf(
                             v_max_warp.shuffle_xor(arith.constant(sh, type=T.i32), c_w))
@@ -1333,6 +1349,14 @@ def compile_pa_decode_ps(
                             tmp_out = rocdl.mfma_f32_16x16x32_fp8_fp8(
                                 T.f32x4, [v_i64s[vhe * VTLOOP * 2 + vt * 2 + j], p_i64s[vhe * VTLOOP * 2 + vt * 2 + j], tmp_out, 0, 0, 0])
                             pv_results[vhe] = tmp_out
+                rocdl.sched_group_barrier(rocdl.mask_vmem_rd, 2, 0)
+                rocdl.sched_group_barrier(rocdl.mask_mfma, 4, 0)
+                rocdl.sched_group_barrier(rocdl.mask_vmem_rd, 2, 0)
+                rocdl.sched_group_barrier(rocdl.mask_mfma, 4, 0)
+                rocdl.sched_group_barrier(rocdl.mask_vmem_rd, 2, 0)
+                rocdl.sched_group_barrier(rocdl.mask_mfma, 4, 0)
+                rocdl.sched_group_barrier(rocdl.mask_vmem_rd, 2, 0)
+                rocdl.sched_group_barrier(rocdl.mask_mfma, 4, 0)
                 o0 = o0 + pv_results[0] * vector.broadcast(T.f32x4, v_correction)
                 o1 = o1 + pv_results[1] * vector.broadcast(T.f32x4, v_correction)
 
