@@ -27,7 +27,6 @@ import argparse
 import os
 import sys
 import time
-
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
@@ -35,7 +34,33 @@ if _REPO_ROOT not in sys.path:
 from kernels.preshuffle_gemm import compile_preshuffle_gemm_a8
 
 
-def _run_kernel(
+def precompile_to_cache(launch_fn, M: int, N: int, K: int, in_dtype: str):
+    """Trigger JIT compilation with CPU dummy tensors and COMPILE_ONLY=1."""
+    import torch
+
+    is_low_prec = in_dtype not in ("fp16", "bf16")
+    a_dtype = torch.int8 if is_low_prec else (torch.float16 if in_dtype == "fp16" else torch.bfloat16)
+    b_elems = (N * K) // 2 if in_dtype == "int4" else N * K
+
+    prev = os.environ.get("COMPILE_ONLY")
+    os.environ["COMPILE_ONLY"] = "1"
+    try:
+        launch_fn(
+            torch.zeros(M * N, dtype=torch.float16),
+            torch.zeros(M * K, dtype=a_dtype),
+            torch.zeros(b_elems, dtype=torch.int8 if is_low_prec else a_dtype),
+            torch.zeros(M, dtype=torch.float32) if is_low_prec else torch.empty(0, dtype=torch.float32),
+            torch.zeros(N, dtype=torch.float32) if is_low_prec else torch.empty(0, dtype=torch.float32),
+            M, N, 0,
+        )
+    finally:
+        if prev is None:
+            os.environ.pop("COMPILE_ONLY", None)
+        else:
+            os.environ["COMPILE_ONLY"] = prev
+
+
+def run_and_verify(
     launch_fn,
     M: int,
     N: int,
@@ -211,12 +236,14 @@ def compile_one_config(
             in_dtype=in_dtype,
             lds_stage=lds_stage,
         )
+        if run_kernel:
+            run_and_verify(launch_fn, M, N, K, in_dtype)
+        else:
+            precompile_to_cache(launch_fn, M, N, K, in_dtype)
+
         elapsed = time.time() - t0
         result["compile_time"] = elapsed
         print(f"  [OK] compile  {elapsed:6.1f}s  {shape_str}")
-
-        if run_kernel and launch_fn is not None:
-            _run_kernel(launch_fn, M, N, K, in_dtype)
     except Exception as e:
         print(f"  [FAIL] compile  {shape_str}: {e}")
 
