@@ -7,10 +7,6 @@ on:
         description: 'Release type determines target S3 bucket (devreleases, nightlies, release)'
         type: string
         required: true
-      docker_image:
-        description: 'Docker base image for build'
-        type: string
-        required: true
       upload_s3_staging:
         description: 'Upload built wheels to the S3 staging bucket'
         type: boolean
@@ -35,6 +31,21 @@ jobs:
         with:
           path: flydsl
 
+      - name: Build manylinux Docker image
+        run: |
+          ROCM_VERSION=7.2
+          IMAGE="flydsl/manylinux_2_28:rocm${ROCM_VERSION}"
+          if docker image inspect "${IMAGE}" >/dev/null 2>&1; then
+            echo "Reusing existing image: ${IMAGE}"
+          else
+            docker build \
+              -f flydsl/docker/Dockerfile.manylinux_2_28 \
+              --build-arg ROCM_VERSION="${ROCM_VERSION}" \
+              -t "${IMAGE}" \
+              flydsl
+          fi
+          echo "MANYLINUX_IMAGE=${IMAGE}" >> $GITHUB_ENV
+
       - name: Start build container
         run: |
           docker run -dt --network=host --user root \
@@ -42,14 +53,23 @@ jobs:
             --ipc=host --shm-size 16g \
             -w /flydsl \
             --name flydsl_build \
-            ${{ inputs.docker_image }}
+            "${MANYLINUX_IMAGE}"
 
       - name: Install build dependencies
         run: |
-          docker exec flydsl_build bash -c "apt-get update && apt-get install -y cmake build-essential patchelf software-properties-common"
-          docker exec flydsl_build bash -c "add-apt-repository -y ppa:deadsnakes/ppa && apt-get update && apt-get install -y python3.12 python3.12-dev python3.12-venv"
-          docker exec flydsl_build bash -c "python3 -m pip install -U pip setuptools wheel"
-          docker exec flydsl_build bash -c "python3 -m pip install ninja>=1.11.1"
+          # Create pythonX.Y symlinks so build_wheels.sh can find them.
+          # Skip free-threaded builds (cpXYZt) — they would overwrite the normal symlink.
+          docker exec flydsl_build bash -c '
+            for d in /opt/python/cp*; do
+              case "${d}" in *t) continue ;; esac
+              py="${d}/bin/python"
+              [ -x "${py}" ] || continue
+              ver=$("${py}" -c "import sys; print(f\"{sys.version_info.major}.{sys.version_info.minor}\")")
+              ln -sf "${py}" "/usr/local/bin/python${ver}"
+              echo "  python${ver} -> ${py}"
+            done
+          '
+          docker exec flydsl_build bash -c "pip install -q numpy nanobind pybind11 auditwheel"
           docker exec flydsl_build bash -c "git config --global --add safe.directory '*'"
 
       - name: Restore cached MLIR install tarball
@@ -57,7 +77,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: mlir_install.tgz
-          key: mlir-install-${{ hashFiles('flydsl/thirdparty/llvm-hash.txt', 'flydsl/scripts/build_llvm.sh', 'flydsl/CMakeLists.txt', 'flydsl/.github/workflows/build-whl.yaml') }}
+          key: mlir-install-manylinux228-${{ hashFiles('flydsl/thirdparty/llvm-hash.txt', 'flydsl/scripts/build_llvm.sh', 'flydsl/CMakeLists.txt', 'flydsl/.github/workflows/build-whl.yaml') }}
 
       - name: Use cached MLIR install tarball
         if: steps.mlir-cache.outputs.cache-hit == 'true'
@@ -74,9 +94,10 @@ jobs:
 
       - name: Build wheels
         run: |
-          docker exec flydsl_build bash -c "export MLIR_PATH=/llvm-project/mlir_install && export EXPECTED_GLIBC=2.35 && export FLYDSL_RELEASE_TYPE=${{ inputs.release_type }} && cd /flydsl && bash scripts/build_wheels.sh"
+          docker exec flydsl_build bash -c "export MLIR_PATH=/llvm-project/mlir_install && export ALLOW_ANY_GLIBC=1 && export FLYDSL_RELEASE_TYPE=${{ inputs.release_type }} && cd /flydsl && bash scripts/build_wheels.sh"
           docker cp flydsl_build:/flydsl/dist ./dist
-          docker cp flydsl_build:/flydsl/build-fly/build_py312/bin/fly-opt ./dist/fly-opt
+          # Copy fly-opt from whichever build dir exists
+          docker exec flydsl_build bash -c "ls /flydsl/build-fly/build_py*/bin/fly-opt 2>/dev/null | head -1 | xargs -I{} cp {} /flydsl/dist/fly-opt" || true
 
       - name: Collect wheel names
         id: collect-wheels
@@ -97,7 +118,7 @@ jobs:
       - name: Build summary
         if: always()
         env:
-          SUMMARY_DOCKER_IMAGE: ${{ inputs.docker_image }}
+          SUMMARY_DOCKER_IMAGE: ${{ env.MANYLINUX_IMAGE }}
           SUMMARY_LLVM_COMMIT: $(cat flydsl/thirdparty/llvm-hash.txt | tr -d '[:space:]')
           SUMMARY_MLIR_CACHE: ${{ steps.mlir-cache.outputs.cache-hit == 'true' && 'Hit' || 'Miss (rebuilt)' }}
           SUMMARY_RELEASE_TYPE: ${{ inputs.release_type }}
