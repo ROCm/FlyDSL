@@ -475,7 +475,7 @@ def compile_moe_blockscale_gemm1(
                             parts.append(vector.bitcast(T.i32x4, x_vec))
                         elif const_expr(x_load_bytes_v == 8):
                             parts.append(x_vec)
-                        if const_expr(x_load_bytes_v == 4):
+                        else:
                             parts.append(x_vec)
                     return parts
     
@@ -587,7 +587,7 @@ def compile_moe_blockscale_gemm1(
                     for i in range_constexpr(num_x_loads):
                         row_local = x_row_local[i]
                         col_local_i32 = x_col_local_i32[i]
-                        if x_load_bytes_v == 16:
+                        if const_expr(x_load_bytes_v == 16):
                             lds_store_16b_xor16(
                                 arith,
                                 vector,
@@ -602,7 +602,7 @@ def compile_moe_blockscale_gemm1(
                                 vec_part_i32x4=vec_x_in_parts[i],
                                 elem_bytes=elem_bytes,
                             )
-                        elif x_load_bytes_v == 8:
+                        elif const_expr(x_load_bytes_v == 8):
                             lds_store_8b_xor16(
                                 arith,
                                 vector,
@@ -1764,7 +1764,7 @@ def compile_moe_blockscale_gemm2(
                     for i in range_constexpr(num_x_loads):
                         row_local = x_row_local[i]
                         col_local_i32 = x_col_local_i32[i]
-                        if x_load_bytes_v == 16:
+                        if const_expr(x_load_bytes_v == 16):
                             lds_store_16b_xor16(
                                 arith,
                                 vector,
@@ -1779,7 +1779,7 @@ def compile_moe_blockscale_gemm2(
                                 vec_part_i32x4=vec_x_in_parts[i],
                                 elem_bytes=elem_bytes,
                             )
-                        elif x_load_bytes_v == 8:
+                        elif const_expr(x_load_bytes_v == 8):
                             lds_store_8b_xor16(
                                 arith,
                                 vector,

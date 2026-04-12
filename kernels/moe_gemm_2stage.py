@@ -512,9 +512,9 @@ def compile_moe_gemm1(
                         x_vec = load_x(idx_i32, x_load_bytes_v)
                         if const_expr(x_load_bytes_v == 16):
                             parts.append(vector.bitcast(T.i32x4, x_vec))
-                        if const_expr(x_load_bytes_v == 8):
+                        elif const_expr(x_load_bytes_v == 8):
                             parts.append(x_vec)
-                        if const_expr(x_load_bytes_v == 4):
+                        else:
                             parts.append(x_vec)
                     return parts
 
@@ -1721,9 +1721,9 @@ def compile_moe_gemm2(
                         x_vec = load_x(idx_i32, x_load_bytes_v)
                         if const_expr(x_load_bytes_v == 16):
                             parts.append(vector.bitcast(T.i32x4, x_vec))
-                        if const_expr(x_load_bytes_v == 8):
+                        elif const_expr(x_load_bytes_v == 8):
                             parts.append(vector.bitcast(T.vec(2, T.i32), x_vec))
-                        if const_expr(x_load_bytes_v == 4):
+                        else:
                             parts.append(vector.bitcast(T.vec(1, T.i32), x_vec))
                     return parts
     
@@ -1860,7 +1860,7 @@ def compile_moe_gemm2(
                                 vec_part_i32x4=vec_x_in_parts[i],
                                 elem_bytes=elem_bytes,
                             )
-                        if const_expr(x_load_bytes_v == 8):
+                        elif const_expr(x_load_bytes_v == 8):
                             lds_store_8b_xor16(
                                 arith,
                                 vector,
@@ -1874,7 +1874,7 @@ def compile_moe_gemm2(
                                 lds_base=lds_base,
                                 vec_part_i32x2=vec_x_in_parts[i],
                             )
-                        if const_expr(x_load_bytes_v == 4):
+                        else:
                             lds_store_4b_xor16(
                                 arith,
                                 vector,
