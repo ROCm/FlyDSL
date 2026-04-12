@@ -1048,7 +1048,7 @@ def compile_pa_decode_ps(
                 return state[0], state[1], state[2], state[3], state[4], list(state[5:5 + _N_K])
 
             def _process_block_split(phys_block, block_idx_in_work, rmax, rsum, o0, o1,
-                                     tile_token_offset_i32, k_ops, next_k_base=None):
+                                     tile_token_offset_i32, k_ops, next_phys_block=None):
                 """Process one 256-token block split inside a 1024-token KV page.
 
                 Pipeline (inlined from _qk_and_intra_softmax / _cross_warp_softmax_and_prob_pack / _pv_mfma):
@@ -1062,21 +1062,37 @@ def compile_pa_decode_ps(
                 partition_start = kv_start_abs_tok + block_idx_in_work * c_bs + tile_token_offset_i32
 
                 # ════════════════════════════════════════════════════════════
-                # Phase 1b: Per-token K/V scale load (issued early for latency hiding)
+                # Phase 1b: Per-token K/V scale load (1 dwordx4 per scale + ds_bpermute)
+                # Each lane loads 4 consecutive scales at lane16id*4 offset,
+                # covering all 64 tokens (TLOOP*MFMA_N) in a single load per scale.
+                # ds_bpermute redistributes to each thread's rowid-specific values per td.
                 # ════════════════════════════════════════════════════════════
                 if per_token_kv:
                     scale_block_base = phys_block * stride_ks_block + kv_h * stride_ks_head
-                    _scale_tok_base_vec = (tile_token_offset_i32
+                    _scale_tok_base_lane = (tile_token_offset_i32
                                           + warp_id * arith.constant(TOKENS_PER_WARP, type=T.i32)
-                                          + rowid * c_four)
+                                          + lane16id * c_four)
+                    scale_off = scale_block_base + _scale_tok_base_lane
+                    k_scale_raw = buffer_ops.buffer_load(ks_rsrc, scale_off, vec_width=4, dtype=T.f32)
+                    v_scale_raw = buffer_ops.buffer_load(vs_rsrc, scale_off, vec_width=4, dtype=T.f32)
+                    # Extract elements as i32 for ds_bpermute source
+                    k_raw_i32 = [arith.bitcast(T.i32, vector.extract(k_scale_raw, static_position=[i], dynamic_position=[]))
+                                 for i in range_constexpr(4)]
+                    v_raw_i32 = [arith.bitcast(T.i32, vector.extract(v_scale_raw, static_position=[i], dynamic_position=[]))
+                                 for i in range_constexpr(4)]
+                    # Redistribute via ds_bpermute: thread (rowid=R) reads from lane (R + td*4)
                     k_scale_vecs = []
                     v_scale_vecs = []
                     for td in range_constexpr(TLOOP):
-                        tok_off_vec = scale_block_base + _scale_tok_base_vec + arith.constant(td * MFMA_N, type=T.i32)
-                        k_scale_vecs.append(buffer_ops.buffer_load(
-                            ks_rsrc, tok_off_vec, vec_width=4, dtype=T.f32))
-                        v_scale_vecs.append(buffer_ops.buffer_load(
-                            vs_rsrc, tok_off_vec, vec_width=4, dtype=T.f32))
+                        src_lane = rowid + arith.constant(td * 4, type=T.i32)
+                        bperm_addr = src_lane * c_four  # byte address for ds_bpermute
+                        k_elems = []
+                        v_elems = []
+                        for i in range_constexpr(4):
+                            k_elems.append(arith.bitcast(T.f32, rocdl.ds_bpermute(T.i32, bperm_addr, k_raw_i32[i])))
+                            v_elems.append(arith.bitcast(T.f32, rocdl.ds_bpermute(T.i32, bperm_addr, v_raw_i32[i])))
+                        k_scale_vecs.append(vector.from_elements(T.f32x4, k_elems))
+                        v_scale_vecs.append(vector.from_elements(T.f32x4, v_elems))
                 else:
                     v_scale_vecs = None
 
@@ -1299,9 +1315,10 @@ def compile_pa_decode_ps(
                             p_i64s.append(p_i64)
 
                 # ════════════════════════════════════════════════════════════
-                # K next prefetch (overlapped with Phase 1 softmax compute)
+                # K next prefetch (overlapped with prob LDS reads)
                 # ════════════════════════════════════════════════════════════
-                if next_k_base is not None:
+                if next_phys_block is not None:
+                    next_k_base = (next_phys_block * c_kb + _k_head_off) // c_four
                     k_next_flat = _load_k_flat_ps(next_k_base, tile_token_offset_i32)
                 else:
                     k_next_flat = None
@@ -1437,7 +1454,6 @@ def compile_pa_decode_ps(
                             next_idx_raw < num_blocks_in_work, next_idx_raw, last_block_idx_val)
                         next_phys_block = buffer_ops.buffer_load(kpi_rsrc,
                             kv_start + next_idx_clamped, vec_width=1, dtype=T.i32)
-                        next_k_base = (next_phys_block * c_kb + _k_head_off) // c_four
 
                         k_ops = _unflatten_k(k_flat)
 
@@ -1450,7 +1466,7 @@ def compile_pa_decode_ps(
                             out1,
                             tile_token_offset,
                             k_ops,
-                            next_k_base=next_k_base,
+                            next_phys_block=next_phys_block,
                         )
 
                         results = yield _pack_state(running_max, running_sum, out0, out1, next_phys_block, k_next_flat)
