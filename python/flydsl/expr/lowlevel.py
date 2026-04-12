@@ -804,26 +804,24 @@ def const_i64(v: int) -> ir.Value:
     return llvm.ConstantOp(_i64(), ir.IntegerAttr.get(_i64(), v)).result
 
 
-def select_i64(cond: Any, a: Any, b: Any) -> ir.Value:
-    """LLVM select: ``a if cond else b`` for i64."""
-    return llvm.SelectOp(_unwrap(cond), _unwrap(a), _unwrap(b)).result
+def bitcast_i32_to_v2bf16(val: Any) -> ir.Value:
+    """Bitcast i32 to vector<2xbf16> (bit-identical reinterpretation).
+
+    Used to reinterpret a packed i32 load result as two bf16 elements.
+    Note: arith.bitcast does not support scalar<->vector shape changes;
+    llvm.BitcastOp is required for this conversion.
+    """
+    from .._mlir.extras import types as T
+    v2bf16 = T.VectorType.get([2], T.bf16())
+    return llvm.BitcastOp(v2bf16, _unwrap(val)).res
 
 
-def select_i32(cond: Any, a: Any, b: Any) -> ir.Value:
-    """Scalar select: ``a if cond else b`` for i32 (via arith.select)."""
-    from .._mlir.dialects import arith as _arith
-    return _arith.SelectOp(_unwrap(cond), _unwrap(a), _unwrap(b)).result
+def bitcast_v2bf16_to_i32(val: Any) -> ir.Value:
+    """Bitcast vector<2xbf16> to i32 (bit-identical reinterpretation).
 
-
-def icmp_ult_i32(a: Any, b: Any) -> ir.Value:
-    """Unsigned less-than comparison for i32."""
-    return llvm.ICmpOp(llvm.ICmpPredicate.ult, _unwrap(a), _unwrap(b)).res
-
-
-def icmp_eq_i32(a: Any, b: Any) -> ir.Value:
-    """Equality comparison for i32."""
-    return llvm.ICmpOp(llvm.ICmpPredicate.eq, _unwrap(a), _unwrap(b)).res
-
+    Used to pack two bf16 accumulator results into an i32 for NT store.
+    """
+    return llvm.BitcastOp(IntegerType.get_signless(32), _unwrap(val)).res
 
 def idx_to_i32(v: Any) -> ir.Value:
     """Cast MLIR ``index``-typed induction variable to ``i32``.
@@ -872,15 +870,6 @@ def as_index(v: Any) -> ir.Value:
     if v_.type == IndexType.get():
         return v_
     return _arith.IndexCastOp(IndexType.get(), v_).result
-
-
-def sync_threads() -> None:
-    """``gpu.barrier()`` — block-level thread synchronization.
-
-    Equivalent to ``__syncthreads()`` / ``s.barrier``.
-    """
-    from .._mlir.dialects import gpu
-    gpu.barrier()
 
 
 def atomic_fetch_add_i32_global(addr_i64, val):
