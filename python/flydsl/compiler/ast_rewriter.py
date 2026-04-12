@@ -740,9 +740,6 @@ class ReplaceIfWithDispatch(Transformer):
         invoked_args = [name for name in invoked_args if name not in write_args]
         write_args = [name for name in write_args if in_active_symbols(name)]
         invoked_args = [name for name in invoked_args if in_active_symbols(name)]
-        # print(f"write_args: {write_args}")
-        # print(f"invoked_args: {invoked_args}")
-        # print(f"active_symbols: {active_symbols}")
         return write_args + invoked_args
 
     @staticmethod

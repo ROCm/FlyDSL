@@ -1121,7 +1121,6 @@ def compile_preshuffle_gemm_a8(
                     num_a_scale_loads = num_fp4_scale_k_groups * (m_repeat // 2)
                     num_b_scale_loads = num_fp4_scale_k_groups * (num_acc_n // 2)
                     num_gmem_loads += num_a_scale_loads + num_b_scale_loads
-                # print("mfma_total, dswr_tail, dstr_advance", mfma_total, dswr_tail, dstr_advance)
                 dsrd_preload_eff = min(int(dsrd_preload), num_ds_load)
                 dvmem_preload_eff = min(int(dvmem_preload), num_gmem_loads)
                 vmem_remaining = num_gmem_loads - dvmem_preload_eff
