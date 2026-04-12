@@ -416,6 +416,8 @@ with ir.InsertionPoint(comp_ctx.gpu_module_body):
 |---|---|
 | `gfx942` (MI300X) | 64 KB |
 | `gfx950` (MI350) | 160 KB |
+| `gfx1201` (MI355X) | 64 KB |
+| `gfx1250` (MI450) | 320 KB |
 
 ---
 

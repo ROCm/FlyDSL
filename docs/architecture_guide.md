@@ -359,6 +359,8 @@ Transforms Python control flow to MLIR ops at the AST level:
 |---|---|---|---|
 | `gfx942` | MI300A / MI300X | 64 KB | CDNA 3, primary development target |
 | `gfx950` | MI350 | 160 KB | CDNA 4, larger LDS |
+| `gfx1201` | MI355X | 64 KB | RDNA 4 |
+| `gfx1250` | MI450 | 320 KB | GFX12, wave32, WMMA, TDM ops |
 | `gfx90a` | MI250X | 64 KB | CDNA 2 (verified platform) |
 
 ---

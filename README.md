@@ -371,7 +371,7 @@ See `examples/` for more examples including tiled copy (`02-tiledCopy.py`), tile
 | **Quantization** | `test_quant.py` | Quantization utilities |
 
 **Verified Platforms**:
-*   AMD MI300X/MI308X (gfx942), AMD MI350 (gfx950), AMD MI450 (gfx1250)
+*   AMD MI300X/MI308X (gfx942), AMD MI350/MI355X (gfx950/gfx1201), AMD MI450 (gfx1250)
 *   Linux / ROCm 6.x, 7.x
 
 ## 🙏 Acknowledgements
