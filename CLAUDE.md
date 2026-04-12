@@ -60,8 +60,8 @@ FLYDSL_DUMP_IR=1 PYTHONPATH=./ python tests/kernels/test_pa.py # Dump MLIR IR at
 | Arch | Chips | Wave size | MMA | Key features |
 |---|---|---|---|---|
 | **CDNA3** | gfx942 (MI300X) | 64 | MFMA | BufferCopy, preshuffle GEMM |
-| **CDNA4** | gfx950 (MI350) | 64 | MFMA | MFMA_SCALE, FP4, 160KB LDS |
-| **RDNA4** | gfx1201 (MI355X) | 32 | WMMA | RDNA-specific GEMM |
+| **CDNA4** | gfx950 (MI350/MI355X) | 64 | MFMA | MFMA_SCALE, FP4, 160KB LDS |
+| **RDNA4** | gfx1201 | 32 | WMMA | RDNA-specific GEMM |
 | **gfx1250** | MI450 | 32 | WMMA | TDM ops, FP8/FP4 GEMM, multi-stage pipeline |
 
 ## Key Conventions & Pitfalls
