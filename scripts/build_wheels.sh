@@ -197,14 +197,16 @@ build_one() {
   # Use a per-version setuptools build base to avoid race conditions
   # when building multiple versions in parallel (shared build/ dir).
   local setup_build_base="${build_dir_rel}/setup_build"
+  mkdir -p "${setup_build_base}"
 
   # Build C++ and Python packages
+  # Use --egg-base to isolate egg-info per version (avoid race on shared python/flydsl.egg-info/).
   PATH="${venv}/bin:${PATH}" \
   MLIR_PATH="${MLIR_PATH}" \
   FLY_BUILD_DIR="${build_dir_rel}" \
   FLY_REBUILD="${FLY_REBUILD}" \
   FLYDSL_RELEASE_TYPE="${FLYDSL_RELEASE_TYPE:-}" \
-  "${venv}/bin/python" setup.py build -b "${setup_build_base}"
+  "${venv}/bin/python" setup.py egg_info --egg-base "${setup_build_base}" build -b "${setup_build_base}"
 
   # Strip shared libs in the build tree BEFORE bdist_wheel copies them.
   # Remove unversioned libFlyPythonCAPI.so (symlink that bdist_wheel
@@ -229,7 +231,7 @@ build_one() {
   FLY_BUILD_DIR="${build_dir_rel}" \
   FLY_REBUILD=0 \
   FLYDSL_RELEASE_TYPE="${FLYDSL_RELEASE_TYPE:-}" \
-  "${venv}/bin/python" setup.py build -b "${setup_build_base}" bdist_wheel
+  "${venv}/bin/python" setup.py egg_info --egg-base "${setup_build_base}" build -b "${setup_build_base}" bdist_wheel
 
   if ! ls -1 "dist/"*"-${py_tag}-${py_tag}-manylinux_"*.whl >/dev/null 2>&1; then
     echo "Error: expected a manylinux wheel for ${py_tag} under dist/ but didn't find one." >&2

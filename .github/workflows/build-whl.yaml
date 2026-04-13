@@ -42,7 +42,7 @@ jobs:
               -f flydsl/docker/Dockerfile.manylinux_2_28 \
               --build-arg ROCM_VERSION="${ROCM_VERSION}" \
               -t "${IMAGE}" \
-              flydsl
+              flydsl/docker
           fi
           echo "MANYLINUX_IMAGE=${IMAGE}" >> $GITHUB_ENV
 
@@ -119,11 +119,13 @@ jobs:
         if: always()
         env:
           SUMMARY_DOCKER_IMAGE: ${{ env.MANYLINUX_IMAGE }}
-          SUMMARY_LLVM_COMMIT: $(cat flydsl/thirdparty/llvm-hash.txt | tr -d '[:space:]')
           SUMMARY_MLIR_CACHE: ${{ steps.mlir-cache.outputs.cache-hit == 'true' && 'Hit' || 'Miss (rebuilt)' }}
           SUMMARY_RELEASE_TYPE: ${{ inputs.release_type }}
           SUMMARY_WHEEL_DIR: dist
-        run: python3 flydsl/scripts/generate_summary.py build
+        run: |
+          SUMMARY_LLVM_COMMIT="$(cat flydsl/thirdparty/llvm-hash.txt | tr -d '[:space:]')"
+          export SUMMARY_LLVM_COMMIT
+          python3 flydsl/scripts/generate_summary.py build
 
       - name: Configure AWS credentials
         if: ${{ github.repository_owner == 'ROCm' && inputs.upload_s3_staging }}
