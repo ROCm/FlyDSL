@@ -448,14 +448,14 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
                         T.index, ea.constant(wi, type=i32) * tnum_gpu_i32 + lane_id + sm_base)
                     raw_i = smem_ptr.load([sm_i_idx])
                     if is_f32:
-                        vf = raw_i.bitcast(v4f32)
+                        vf = ev.bitcast(v4f32, raw_i)
                         acc = vf if acc is None else acc + vf
                     else:
                         v16 = ev.bitcast(v8half, raw_i)
                         v32 = v16.extf(v8f32)
                         acc = v32 if acc is None else acc + v32
                 if is_f32:
-                    out_bits = acc.bitcast(v4i32)
+                    out_bits = ev.bitcast(v4i32, acc)
                 else:
                     out_bits = ev.bitcast(v4i32, acc.truncf(v8half))
                 dst_off_i32 = p * ea.constant(_BYTES_PER_PACK, type=i32)
@@ -562,14 +562,14 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
                         sm_r_idx = ea.index_cast(T.index, ea.constant(wi, type=i32) * tnum_gpu_i32 + lane_id + smem_base_expr)
                     raw_i = smem_ptr.load([sm_r_idx])
                     if is_f32:
-                        vf = raw_i.bitcast(v4f32)
+                        vf = ev.bitcast(v4f32, raw_i)
                         acc = vf if acc is None else acc + vf
                     else:
                         v16 = ev.bitcast(v8half, raw_i)
                         v32 = v16.extf(v8f32)
                         acc = v32 if acc is None else acc + v32
                 if is_f32:
-                    out_raw = acc.bitcast(v4i32)
+                    out_raw = ev.bitcast(v4i32, acc)
                 else:
                     out_raw = ev.bitcast(v4i32, acc.truncf(v8half))
                 rel_p = cur - start_p
@@ -839,14 +839,14 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
                         T.index, ea.constant(wi * tnum_gpu, type=i32) + lane_id)
                     raw_i = smem_ptr.load([sm_i_idx])
                     if is_f32:
-                        vf = raw_i.bitcast(v4f32)
+                        vf = ev.bitcast(v4f32, raw_i)
                         acc = vf if acc is None else acc + vf
                     else:
                         v16 = ev.bitcast(v8half, raw_i)
                         v32 = v16.extf(v8f32)
                         acc = v32 if acc is None else acc + v32
                 if is_f32:
-                    out_raw = acc.bitcast(v4i32)
+                    out_raw = ev.bitcast(v4i32, acc)
                 else:
                     out_raw = ev.bitcast(v4i32, acc.truncf(v8half))
                 res_idx = ea.index_cast(T.index, ea.constant(threads, type=i32) + lane_id)

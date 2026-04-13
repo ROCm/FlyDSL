@@ -437,7 +437,8 @@ def buffer_load(rsrc: ir.Value,
     # RawPtrBufferLoadOp offset is in BYTES.  By default we accept element
     # offsets and scale to bytes; set offset_is_bytes=True to skip scaling.
     if not offset_is_bytes:
-        element_bytes = dtype.width // 8
+        elem_ty = dtype.element_type if hasattr(dtype, 'element_type') else dtype
+        element_bytes = elem_ty.width // 8
         bytes_const = _create_i32_constant(element_bytes)
         op = std_arith.MulIOp(offset, bytes_const)
         offset = _unwrap_value(op.result)

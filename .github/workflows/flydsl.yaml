@@ -9,6 +9,11 @@ on:
       - main
   workflow_dispatch:
 
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -186,6 +191,7 @@ jobs:
   multi-gpu:
     needs: test
     name: Multi-GPU AllReduce Tests (${{ matrix.runners }})
+    timeout-minutes: 120
     strategy:
       matrix:
         runners: [
@@ -262,11 +268,65 @@ jobs:
           docker exec flydsl_test bash -c "export MLIR_PATH=/llvm-project/mlir_install && cd /flydsl-test && python3 -m pip install -e . --use-pep517"
 
       - name: Run multi-GPU allreduce tests
+        timeout-minutes: 30
         run: |
           docker exec flydsl_test bash -c "
             cd /flydsl-test
-            python3 -m pytest tests/kernels/test_flydsl_allreduce.py \
+            python3 -m pytest tests/kernels/test_allreduce.py \
               -m multi_gpu -v --no-header --tb=short
+          "
+
+      - name: Run allreduce benchmark (PR)
+        timeout-minutes: 30
+        run: |
+          docker exec flydsl_test bash -c "
+            cd /flydsl-test
+            python3 tests/kernels/test_allreduce.py \
+              --world_size 8 --iters 51 --warmup 5 \
+              --allreduce_impl flydsl --mode cudagraph \
+              --shapes '2,7168,fp16;32,8192,fp32;128,8192,fp16;1024,7168,bf16;4096,8192,bf16' \
+              --output_csv /tmp/bench_pr.csv
+          "
+
+      - name: Build main branch baseline
+        id: build-main
+        timeout-minutes: 20
+        continue-on-error: true
+        run: |
+          docker exec flydsl_test bash -c "
+            cd /flydsl-test
+            git fetch origin main --depth=1
+            git worktree add /tmp/flydsl-main origin/main
+            cd /tmp/flydsl-main
+            export MLIR_PATH=/llvm-project/mlir_install
+            python3 -m pip install -e . --use-pep517 2>&1 | tail -5
+          "
+
+      - name: Run allreduce benchmark (main)
+        id: bench-main
+        if: steps.build-main.outcome == 'success'
+        timeout-minutes: 30
+        continue-on-error: true
+        run: |
+          docker exec flydsl_test bash -c "
+            cp /flydsl-test/tests/kernels/test_allreduce.py \
+               /tmp/flydsl-main/tests/kernels/test_allreduce.py
+            cd /tmp/flydsl-main
+            python3 tests/kernels/test_allreduce.py \
+              --world_size 8 --iters 51 --warmup 5 \
+              --allreduce_impl flydsl --mode cudagraph \
+              --shapes '2,7168,fp16;32,8192,fp32;128,8192,fp16;1024,7168,bf16;4096,8192,bf16' \
+              --output_csv /tmp/bench_main.csv
+          "
+
+      - name: Check performance regression (PR vs main)
+        if: steps.bench-main.outcome != 'skipped'
+        timeout-minutes: 5
+        run: |
+          docker exec flydsl_test bash -c "
+            cd /flydsl-test
+            python3 tests/kernels/compare_allreduce_benchmark.py \
+              /tmp/bench_main.csv /tmp/bench_pr.csv
           "
 
       - name: Show test logs
