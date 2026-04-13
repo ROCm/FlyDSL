@@ -111,10 +111,9 @@ def Fly_GetScalarOp : Fly_Op<"get_scalar", [Pure, DeclareOpInterfaceMethods<Infe
   let results = (outs AnyType:$result);
 }
 
-// TODO: return a list of leaves
 def Fly_GetLeavesOp : Fly_Op<"get_leaves", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
-  let arguments = (ins Fly_IntTuple:$input);
-  let results = (outs Fly_IntTuple:$result);
+  let arguments = (ins Fly_IntTuple:$input, DefaultValuedAttr<BoolAttr, "false">:$dynamicOnly);
+  let results = (outs Variadic<AnyTypeOf<[I32, I64]>>:$results);
 }
 
 def Fly_GetShapeOp : Fly_Op<"get_shape", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {

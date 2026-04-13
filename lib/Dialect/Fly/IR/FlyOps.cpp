@@ -300,8 +300,19 @@ FLY_INFER_RETURN_TYPES(GetLeavesOp) {
   if (!intTupleType)
     return emitOptionalError(location, "GetLeavesOp: expected IntTupleType, got ",
                              operands[0].getType());
-  // transform_leaf on intTupleAttr,
-  return failure();
+  bool dynamicOnly = false;
+  if (properties)
+    dynamicOnly = properties.as<Properties *>()->dynamicOnly.getValue();
+  IntTupleBuilder<IntTupleAttr> builder(context);
+  SmallVector<IntTupleAttr> flatLeaves;
+  intTupleFlattenToVector(builder, intTupleType.getAttr(), flatLeaves);
+  for (auto leaf : flatLeaves) {
+    auto intAttr = leaf.extractIntFromLeaf();
+    if (dynamicOnly && intAttr.isStatic())
+      continue;
+    inferredReturnTypes.push_back(IntegerType::get(context, std::max(32, intAttr.getWidth())));
+  }
+  return success();
 }
 
 FLY_INFER_RETURN_TYPES(GetShapeOp) {
