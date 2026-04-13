@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2025 FlyDSL Project Contributors
 
-#include <cstdlib>
-
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/Pass/Pass.h"
+#include "llvm/ADT/MapVector.h"
+#include "llvm/Support/Debug.h"
+
+#define DEBUG_TYPE "fly-forward-llvm-allocas"
 
 #include "flydsl/Dialect/Fly/Transforms/Passes.h"
 
@@ -92,7 +94,7 @@ using AllocaKey = std::pair<Operation *, int64_t>;
 static void forwardLLVMAllocaStores(Operation *topOp) {
   int forwarded = 0;
   topOp->walk([&](Block *block) {
-    DenseMap<AllocaKey, Value> storeMap;
+    llvm::MapVector<AllocaKey, Value> storeMap;
 
     for (auto &op : llvm::make_early_inc_range(*block)) {
       if (auto storeOp = dyn_cast<LLVM::StoreOp>(&op)) {
@@ -180,8 +182,8 @@ static void forwardLLVMAllocaStores(Operation *topOp) {
       }
     }
   });
-  if (forwarded > 0)
-    llvm::errs() << "[forward-llvm-allocas] forwarded=" << forwarded << "\n";
+  LLVM_DEBUG(if (forwarded > 0) llvm::dbgs()
+             << "[forward-llvm-allocas] forwarded=" << forwarded << "\n");
 }
 
 // ── Cross-iteration promotion to loop-carried values ────────────────
@@ -189,6 +191,10 @@ static void forwardLLVMAllocaStores(Operation *topOp) {
 static void promoteLLVMAllocaToLoopCarried(Operation *topOp) {
   SmallVector<scf::ForOp> loops;
   topOp->walk([&](scf::ForOp forOp) { loops.push_back(forOp); });
+  // Process inner-most loops first: walk visits in pre-order (parents before
+  // children), so reversing gives us post-order.  This ensures that when we
+  // erase and replace a ForOp, no child loops remain in the worklist.
+  std::reverse(loops.begin(), loops.end());
 
   int promoted = 0;
   for (auto forOp : loops) {
@@ -369,9 +375,8 @@ static void promoteLLVMAllocaToLoopCarried(Operation *topOp) {
     }
   }
 
-  if (promoted > 0)
-    llvm::errs() << "[llvm-alloca-to-loop-carried] promoted=" << promoted
-                 << "\n";
+  LLVM_DEBUG(if (promoted > 0) llvm::dbgs()
+             << "[llvm-alloca-to-loop-carried] promoted=" << promoted << "\n");
 }
 
 // ── Dead AS5 alloca elimination ─────────────────────────────────────
@@ -431,9 +436,9 @@ static void eliminateDeadAS5Allocas(Operation *topOp) {
     }
   }
 
-  if (eliminated > 0)
-    llvm::errs() << "[eliminate-dead-as5-allocas] eliminated=" << eliminated
-                 << "\n";
+  LLVM_DEBUG(if (eliminated > 0) llvm::dbgs()
+             << "[eliminate-dead-as5-allocas] eliminated=" << eliminated
+             << "\n");
 }
 
 // ── Pass implementation ─────────────────────────────────────────────
@@ -442,13 +447,10 @@ class FlyForwardLLVMAllocasPass
     : public fly::impl::FlyForwardLLVMAllocasPassBase<
           FlyForwardLLVMAllocasPass> {
 public:
-  void runOnOperation() override {
-    // Controlled by FLYDSL_LLVM_ALLOCA_FORWARDING (default: enabled).
-    bool enabled = []() {
-      const char *env = std::getenv("FLYDSL_LLVM_ALLOCA_FORWARDING");
-      return !env || std::string(env) != "0";
-    }();
+  using fly::impl::FlyForwardLLVMAllocasPassBase<
+      FlyForwardLLVMAllocasPass>::FlyForwardLLVMAllocasPassBase;
 
+  void runOnOperation() override {
     if (!enabled)
       return;
 

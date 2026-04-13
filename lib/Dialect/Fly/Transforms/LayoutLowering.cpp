@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2025 FlyDSL Project Contributors
 
-#include <cstdlib>
-
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Arith/Utils/Utils.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -22,6 +20,7 @@
 #include "mlir/Transforms/DialectConversion.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/Support/Debug.h"
 
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
 #include "flydsl/Dialect/Fly/Transforms/Passes.h"
@@ -2700,6 +2699,8 @@ namespace memref_rewrite {
 #include "flydsl/Dialect/Fly/Transforms/MemrefLowering.cpp.inc"
 } // namespace memref_rewrite
 
+#define DEBUG_TYPE "fly-layout-lowering"
+
 //===----------------------------------------------------------------------===//
 // Store-forwarding for register allocas
 //===----------------------------------------------------------------------===//
@@ -2867,6 +2868,10 @@ static void forwardRegAllocaStores(Operation *topOp) {
 static void promoteAllocaToLoopCarried(Operation *topOp) {
   SmallVector<scf::ForOp> loops;
   topOp->walk([&](scf::ForOp forOp) { loops.push_back(forOp); });
+  // Process inner-most loops first: walk visits in pre-order (parents before
+  // children), so reversing gives us post-order.  This ensures that when we
+  // erase and replace a ForOp, no child loops remain in the worklist.
+  std::reverse(loops.begin(), loops.end());
 
   int promoted = 0;
   for (auto forOp : loops) {
@@ -2994,6 +2999,9 @@ static void promoteAllocaToLoopCarried(Operation *topOp) {
     newBody.getOperations().splice(newBody.end(), body.getOperations());
 
     // Now RAUW: old block args → new block args (ops are in newBody).
+    // The old ForOp must have no existing iter_args (only induction variable).
+    assert(body.getNumArguments() == 1 &&
+           "expected ForOp with no existing iter_args");
     body.getArgument(0).replaceAllUsesWith(newBody.getArgument(0));
 
     // Replace initial loads with region iter args.
@@ -3026,8 +3034,8 @@ static void promoteAllocaToLoopCarried(Operation *topOp) {
     }
   }
 
-  if (promoted > 0)
-    llvm::errs() << "[alloca-to-loop-carried] promoted=" << promoted << "\n";
+  LLVM_DEBUG(if (promoted > 0) llvm::dbgs()
+             << "[alloca-to-loop-carried] promoted=" << promoted << "\n");
 }
 
 /// Eliminate dead stores to register allocas — stores where no subsequent
@@ -3080,8 +3088,8 @@ static void eliminateDeadRegAllocaStores(Operation *topOp) {
   for (auto storeOp : deadStores)
     storeOp.erase();
 
-  if (erasedStores > 0)
-    llvm::errs() << "[dead-store-elim] erased=" << erasedStores << "\n";
+  LLVM_DEBUG(if (erasedStores > 0) llvm::dbgs()
+             << "[dead-store-elim] erased=" << erasedStores << "\n");
 }
 
 //===----------------------------------------------------------------------===//
@@ -3158,12 +3166,6 @@ public:
     // Register-alloca store forwarding: forward stores→loads, promote
     // cross-iteration patterns to loop-carried values, and eliminate dead
     // stores.  This eliminates AS5 allocas that would otherwise waste VGPRs.
-    // Controlled by FLYDSL_REG_ALLOCA_FORWARDING (default: enabled).
-    bool enableRegAllocaForwarding = []() {
-      const char *env = std::getenv("FLYDSL_REG_ALLOCA_FORWARDING");
-      return !env || std::string(env) != "0";
-    }();
-
     if (enableRegAllocaForwarding) {
       forwardRegAllocaStores(getOperation());
       promoteAllocaToLoopCarried(getOperation());

@@ -353,7 +353,7 @@ def Fly_CopyAtomCall : Fly_Op<"copy_atom_call"> {
 def Fly_MmaAtomCall : Fly_Op<"mma_atom_call"> {
   let arguments = (ins AnyType:$mmaAtom, Fly_MemRef:$d, Fly_MemRef:$a, Fly_MemRef:$b, Fly_MemRef:$c);
 }
-def Fly_MmaAtomCallValue : Fly_Op<"mma_atom_call_value"> {
+def Fly_MmaAtomCallValue : Fly_Op<"mma_atom_call_value", [Pure]> {
   let summary = "MMA atom call with SSA accumulator (value semantics for C/D)";
   let arguments = (ins AnyType:$mmaAtom, Fly_MemRef:$a, Fly_MemRef:$b, AnyType:$c);
   let results = (outs AnyType:$result);

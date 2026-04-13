@@ -18,8 +18,8 @@ LayoutAttr getThrValLayoutAB(MLIRContext *ctx, int32_t M, int32_t N, int32_t K, 
                              Type elemTyB, Type elemTyAcc) {
   auto getContext = [&]() { return ctx; };
 
+  assert(M == N && "M and N must be equal (checked by verify())");
   int MN = M;
-  assert(M == N && "M and N must be equal");
 
   int GroupK = 64 / MN;
   int KPerThread = K / GroupK;
@@ -77,9 +77,8 @@ Attribute MmaOpCDNA3_MFMAType::getThrValLayoutC() const {
 LogicalResult MmaOpCDNA3_MFMAType::verify(function_ref<InFlightDiagnostic()> emitError, int32_t m,
                                           int32_t n, int32_t k, Type elemTyA, Type elemTyB,
                                           Type elemTyAcc) {
-  assert(m == n && "M and N must be equal");
   if (m != n) {
-    return emitError() << "invalid MNK dimensions for CDNA3 MFMA: " << m << "x" << n << "x" << k;
+    return emitError() << "invalid MNK dimensions for CDNA3 MFMA: M != N: " << m << "x" << n << "x" << k;
   }
   if (!elemTyAcc.isF32())
     return emitError() << "elemTyAcc must be f32, got " << elemTyAcc;

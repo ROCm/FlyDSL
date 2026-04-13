@@ -47,6 +47,12 @@ def FlyLayoutLoweringPass : Pass<"fly-layout-lowering"> {
     "gpu::GPUDialect",
     "vector::VectorDialect"
   ];
+
+  let options = [
+    Option<"enableRegAllocaForwarding", "enable-reg-alloca-forwarding",
+           "bool", /*default=*/"true",
+           "Enable register-alloca store forwarding and loop-carried promotion">
+  ];
 }
 
 def FlyForwardLLVMAllocasPass : Pass<"fly-forward-llvm-allocas"> {
@@ -69,6 +75,12 @@ def FlyForwardLLVMAllocasPass : Pass<"fly-forward-llvm-allocas"> {
     "arith::ArithDialect",
     "LLVM::LLVMDialect",
     "scf::SCFDialect"
+  ];
+
+  let options = [
+    Option<"enabled", "enabled",
+           "bool", /*default=*/"true",
+           "Enable the pass (set to false to skip all transformations)">
   ];
 }
 

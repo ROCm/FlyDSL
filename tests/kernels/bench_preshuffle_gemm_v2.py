@@ -90,7 +90,7 @@ def _make_args(c, a, b_shuf, sa, sb, M, N):
 
 
 def compile_one(M, N, K, tile_m, tile_n, tile_k, in_dtype, out_dtype="bf16",
-                waves_per_eu=None, enable_scheduler=False, maxnreg=None,
+                waves_per_eu=None, enable_scheduler=True, maxnreg=None,
                 opt_level=None):
     """Compile v2 and old kernels, return compilation status."""
     elem_bytes = 1 if in_dtype in ("fp8",) else 2
@@ -135,7 +135,7 @@ def compile_one(M, N, K, tile_m, tile_n, tile_k, in_dtype, out_dtype="bf16",
 
 def bench_one(M, N, K, tile_m, tile_n, tile_k, in_dtype, out_dtype="bf16",
               warmup=5, iters=20, check_correctness=True, waves_per_eu=None,
-              enable_scheduler=False, maxnreg=None, opt_level=None,
+              enable_scheduler=True, maxnreg=None, opt_level=None,
               llvm_opts=None):
     elem_bytes = 1 if in_dtype in ("fp8",) else 2
     smem = tile_m * tile_k * elem_bytes * 2
@@ -164,29 +164,38 @@ def bench_one(M, N, K, tile_m, tile_n, tile_k, in_dtype, out_dtype="bf16",
     us_v2 = _bench_kernel(compiled_v2, args_v2, warmup=warmup, iters=iters)
 
     # ── old path ──────────────────────────────────────────────────
-    fn_old = compile_preshuffle_gemm_a8(
-        N=N, K=K, tile_m=tile_m, tile_n=tile_n, tile_k=tile_k,
-        in_dtype=in_dtype,
-        out_dtype=out_dtype,
-    )
-    c_old = torch.zeros(M, N, device=DEVICE, dtype=torch_out_dtype)
-    args_old = _make_args(c_old, a, b_shuf, sa, sb, M, N)
-    compiled_old = flyc.compile(fn_old, *args_old)
-    us_old = _bench_kernel(compiled_old, args_old, warmup=warmup, iters=iters)
+    us_old = 0.0
+    compiled_old = None
+    try:
+        fn_old = compile_preshuffle_gemm_a8(
+            N=N, K=K, tile_m=tile_m, tile_n=tile_n, tile_k=tile_k,
+            in_dtype=in_dtype,
+            out_dtype=out_dtype,
+        )
+        c_old = torch.zeros(M, N, device=DEVICE, dtype=torch_out_dtype)
+        args_old = _make_args(c_old, a, b_shuf, sa, sb, M, N)
+        compiled_old = flyc.compile(fn_old, *args_old)
+        us_old = _bench_kernel(compiled_old, args_old, warmup=warmup, iters=iters)
+    except (ValueError, RuntimeError) as e:
+        print(f"    (old kernel unsupported: {e})")
+        c_old = torch.zeros(M, N, device=DEVICE, dtype=torch_out_dtype)
+        args_old = _make_args(c_old, a, b_shuf, sa, sb, M, N)
 
     flops = 2 * M * N * K
     tflops_v2 = flops / (us_v2 / 1e6) / 1e12
-    tflops_old = flops / (us_old / 1e6) / 1e12
-    ratio = tflops_v2 / tflops_old * 100 if tflops_old > 0 else 0
+    tflops_old = flops / (us_old / 1e6) / 1e12 if us_old > 0 else 0.0
+    ratio = tflops_v2 / tflops_old * 100 if tflops_old > 0 else float("inf")
 
     # correctness
     err_v2 = err_old = None
     if check_correctness:
         compiled_v2(*args_v2)
-        compiled_old(*args_old)
+        if compiled_old:
+            compiled_old(*args_old)
         torch.cuda.synchronize()
         err_v2 = ((c_v2.float() - ref).abs() / (ref.abs() + 1e-6)).mean().item()
-        err_old = ((c_old.float() - ref).abs() / (ref.abs() + 1e-6)).mean().item()
+        if compiled_old:
+            err_old = ((c_old.float() - ref).abs() / (ref.abs() + 1e-6)).mean().item()
 
     return {
         "M": M, "N": N, "K": K,
@@ -247,12 +256,17 @@ def print_results(results, in_dtype):
     print(f"  {hdr}")
     print(f"  {'-' * len(hdr)}")
     for r in results:
+        old_us_str = f"{r['us_old']:>8.1f}" if r['us_old'] > 0 else f"{'n/a':>8s}"
+        old_tf_str = f"{r['tflops_old']:>7.1f}" if r['tflops_old'] > 0 else f"{'n/a':>7s}"
+        ratio_str = f"{r['ratio']:>5.1f}%" if r['ratio'] != float("inf") else f"{'v2only':>6s}"
         line = (f"  {r['tile']:>14s} {r['k_iters']:>2d} | "
                 f"{r['us_v2']:>8.1f} {r['tflops_v2']:>7.1f} | "
-                f"{r['us_old']:>8.1f} {r['tflops_old']:>7.1f} | "
-                f"{r['ratio']:>5.1f}%")
+                f"{old_us_str} {old_tf_str} | "
+                f"{ratio_str}")
         if r.get("err_v2") is not None:
-            line += f" | {r['err_v2']:>7.4f} {r['err_old']:>7.4f}"
+            ev2 = f"{r['err_v2']:>7.4f}" if r['err_v2'] is not None else f"{'n/a':>7s}"
+            eo = f"{r['err_old']:>7.4f}" if r['err_old'] is not None else f"{'n/a':>7s}"
+            line += f" | {ev2} {eo}"
         print(line)
 
 
@@ -277,8 +291,8 @@ def main():
                         help="Set waves_per_eu hint for v2 kernel (e.g. 3)")
     parser.add_argument("--compile_only", action="store_true",
                         help="Compile only (no benchmark). Use with FLYDSL_DUMP_IR=1 for VGPR analysis")
-    parser.add_argument("--enable_scheduler", action="store_true",
-                        help="Enable hot_loop_scheduler in v2 kernel")
+    parser.add_argument("--no_scheduler", action="store_true",
+                        help="Disable hot_loop_scheduler in v2 kernel")
     parser.add_argument("--maxnreg", type=int, default=None,
                         help="Set max VGPR count for v2 kernel (e.g. 168)")
     parser.add_argument("--opt_level", type=int, default=None,
@@ -311,13 +325,13 @@ def main():
                 M, N, K = args.M, args.N or 5120, args.K or 8192
                 compile_one(M, N, K, args.tile_m, args.tile_n or 128, args.tile_k or 64,
                             dt, waves_per_eu=args.waves_per_eu,
-                            enable_scheduler=args.enable_scheduler,
+                            enable_scheduler=not args.no_scheduler,
                             maxnreg=args.maxnreg, opt_level=args.opt_level)
             else:
                 configs = DEFAULT_CONFIGS.get(dt, [])
                 for M, N, K, tm, tn, tk in configs:
                     compile_one(M, N, K, tm, tn, tk, dt, waves_per_eu=args.waves_per_eu,
-                                enable_scheduler=args.enable_scheduler,
+                                enable_scheduler=not args.no_scheduler,
                             maxnreg=args.maxnreg, opt_level=args.opt_level)
             continue
 
@@ -328,7 +342,7 @@ def main():
                           dt, warmup=args.warmup, iters=args.iters,
                           check_correctness=not args.no_check,
                           waves_per_eu=args.waves_per_eu,
-                          enable_scheduler=args.enable_scheduler,
+                          enable_scheduler=not args.no_scheduler,
                           maxnreg=args.maxnreg, opt_level=args.opt_level,
                           llvm_opts=llvm_opts)
             if r:
@@ -348,7 +362,7 @@ def main():
                               warmup=args.warmup, iters=args.iters,
                               check_correctness=not args.no_check,
                               waves_per_eu=args.waves_per_eu,
-                              enable_scheduler=args.enable_scheduler,
+                              enable_scheduler=not args.no_scheduler,
                               maxnreg=args.maxnreg, opt_level=args.opt_level,
                               llvm_opts=llvm_opts)
                 if r:
@@ -374,7 +388,7 @@ def main():
                               warmup=args.warmup, iters=args.iters,
                               check_correctness=not args.no_check,
                               waves_per_eu=args.waves_per_eu,
-                              enable_scheduler=args.enable_scheduler,
+                              enable_scheduler=not args.no_scheduler,
                               maxnreg=args.maxnreg, opt_level=args.opt_level,
                               llvm_opts=llvm_opts)
                 if r:
