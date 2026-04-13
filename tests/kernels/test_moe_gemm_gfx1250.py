@@ -605,7 +605,8 @@ def run_moe_stage1(
     scale_w1_groups_in: Optional[torch.Tensor] = None,
 ):
     assert model_dim % 64 == 0
-    assert model_dim % tile_k == 0
+    if in_dtype not in ("fp4", "fp8", "a8w4"):
+        assert model_dim % tile_k == 0, f"model_dim={model_dim} must be divisible by tile_k={tile_k}"
     assert inter_dim % tile_n == 0
 
     device = torch.device("cuda")
@@ -766,6 +767,26 @@ def run_moe_stage1(
 
     scale_w1_kernel = scale_w1
 
+    # --- K-dimension padding for non-aligned model_dim (mxscale dtypes) ---
+    _orig_model_dim = model_dim
+    if in_dtype in ("fp4", "fp8", "a8w4") and model_dim % tile_k != 0:
+        _pad_k = ((model_dim + tile_k - 1) // tile_k) * tile_k - model_dim
+        if is_fp4:
+            x_q = F.pad(x_q, (0, _pad_k // 2))
+        else:
+            x_q = F.pad(x_q, (0, _pad_k))
+        if scale_x is not None:
+            scale_x = F.pad(scale_x, (0, _pad_k // 32))
+        if is_fp4 or is_a8w4:
+            w1_q = F.pad(w1_q, (0, _pad_k // 2))
+        else:
+            w1_q = F.pad(w1_q, (0, _pad_k))
+        if scale_w1 is not None:
+            scale_w1 = F.pad(scale_w1, (0, _pad_k // 32))
+        if scale_w1_kernel is not None:
+            scale_w1_kernel = F.pad(scale_w1_kernel, (0, _pad_k // 32))
+        model_dim = model_dim + _pad_k
+
     # Preshuffle weights on the *unpacked* tensor.
     uses_fp4_weight_layout = is_fp4 or is_a8w4
     # gfx1250 native kernels (fp4, fp8, a8w4, fp16) use TDM/transpose-load and
@@ -774,6 +795,8 @@ def run_moe_stage1(
     w1_shuffled = w1_q if (uses_fp4_weight_layout or uses_native_gfx1250) else shuffle_weight(w1_q)
     w2_shuffled = w2_q if (uses_fp4_weight_layout or uses_native_gfx1250) else (shuffle_weight(w2_q) if in_dtype == "fp8" else None)
     if in_dtype in ("fp8", "a8w4"):
+        _single_tile_m, _single_tile_n, _single_m_warp, _single_n_warp = _pick_fp16_single_launch_shape(tile_m, tile_n)
+        _warp_tile_n = _single_tile_n // _single_n_warp
         w1_rows = experts * (2 * inter_dim)
         w1_cols = model_dim // 2 if is_a8w4 else model_dim
         w1_shuffled = fp4_utils.preshuffle_b_16x16(
@@ -998,14 +1021,14 @@ def run_moe_stage1(
         assert verify_output(out.to(torch.float32), ref, rtol=rtol, atol=atol)
 
     # Note: kernel launches full expert-block range; effective work is gated by num_valid_ids.
-    flops = 2 * tokens * topk * (2 * inter_dim) * model_dim
+    flops = 2 * tokens * topk * (2 * inter_dim) * _orig_model_dim
     tflops = flops / (us / 1e6) / 1e12
 
     # Rough bytes-moved accounting (same spirit as GEMM tests: count each tensor once).
     bytes_moved = 0
     x_elem_bytes = 2 if (is_int4_bf16 or in_dtype in ("bf16", "fp16")) else 1  # bf16/fp16 activations
-    bytes_x = (tokens * topk if is_int8smooth else tokens) * model_dim * x_elem_bytes
-    bytes_w = (experts * (2 * inter_dim) * model_dim) // (2 if (use_packed_int4 or is_a8w4) else 1)
+    bytes_x = (tokens * topk if is_int8smooth else tokens) * _orig_model_dim * x_elem_bytes
+    bytes_w = (experts * (2 * inter_dim) * _orig_model_dim) // (2 if (use_packed_int4 or is_a8w4) else 1)
     bytes_out = tokens * topk * inter_dim * 2
     bytes_scale_x = (tokens * topk if is_int8smooth else tokens) * 4
     bytes_scale_w = experts * (2 * inter_dim) * 4
@@ -1185,9 +1208,7 @@ def run_moe_stage2(
         raise ValueError(
             f"Invalid stage2 tiling: model_dim ({model_dim}) must be divisible by tile_n2 ({tile_n})."
         )
-    if inter_dim % tile_k != 0:
-        # Stage2 tile_k is tile_k2 (K dimension = inter_dim).
-        # In kernels/moe_gemm_2stage.py, total_threads is fixed to 256 and there is no K-tail.
+    if in_dtype not in ("fp4", "fp8", "a8w4") and inter_dim % tile_k != 0:
         raise ValueError(
             "Invalid stage2 tiling: inter_dim ({inter_dim}) must be divisible by tile_k2 ({tile_k}). "
             "Try setting `--tile_k2` to a divisor of inter_dim. "
@@ -1359,6 +1380,20 @@ def run_moe_stage2(
 
     scale_w2_kernel = scale_w2
 
+    # --- K-dimension padding for non-aligned inter_dim (stage2 K=inter_dim) ---
+    _orig_inter_dim = inter_dim
+    if in_dtype in ("fp4", "fp8", "a8w4") and inter_dim % tile_k != 0:
+        _pad_k2 = ((inter_dim + tile_k - 1) // tile_k) * tile_k - inter_dim
+        if is_fp4 or is_a8w4:
+            w2_q = F.pad(w2_q, (0, _pad_k2 // 2))
+        else:
+            w2_q = F.pad(w2_q, (0, _pad_k2))
+        if scale_w2 is not None:
+            scale_w2 = F.pad(scale_w2, (0, _pad_k2 // 32))
+        if scale_w2_kernel is not None:
+            scale_w2_kernel = F.pad(scale_w2_kernel, (0, _pad_k2 // 32))
+        inter_dim = inter_dim + _pad_k2
+
     # Preshuffle weights on the *unpacked* tensor.
     uses_fp4_weight_layout = is_fp4 or is_a8w4
     uses_native_gfx1250 = in_dtype in ("fp4", "fp8", "a8w4", "fp16", "bf16")
@@ -1443,6 +1478,16 @@ def run_moe_stage2(
                 smooth_scale2 = (0.75 + 0.5 * torch.rand((experts, inter_dim), device=device, dtype=torch.float32))
                 out1_ref = out1_ref * smooth_scale2[topk_ids.to(torch.int64)]
             a2_q, a2_scale = pertoken_quant(out1_ref, quant_dtype=torch.int8)
+
+    # Pad A2 activation for non-aligned inter_dim (stage2 K-padding).
+    if _orig_inter_dim != inter_dim:
+        _pad_k2 = inter_dim - _orig_inter_dim
+        if is_fp4:
+            a2_q = F.pad(a2_q, (0, _pad_k2 // 2))
+        else:
+            a2_q = F.pad(a2_q, (0, _pad_k2))
+        if a2_scale is not None:
+            a2_scale = F.pad(a2_scale, (0, _pad_k2 // 32))
 
     # Flatten weights/scales for the kernel.
     uses_block_scale_s2 = in_dtype in ("fp8", "a8w4", "fp4")
@@ -1715,13 +1760,13 @@ def run_moe_stage2(
         assert verify_output(out.to(torch.float32), ref2, rtol=0.5, atol=0.5)
 
     # Launches full expert-block range; effective work is gated by num_valid_ids.
-    flops = 2 * tokens * topk * model_dim * inter_dim
+    flops = 2 * tokens * topk * model_dim * _orig_inter_dim
     tflops = flops / (us / 1e6) / 1e12
 
     bytes_moved = 0
     a2_elem_bytes = 2 if in_dtype in ("int4_bf16", "bf16", "fp16") else 1  # bf16/fp16 activations
-    bytes_a2 = tokens * topk * inter_dim * a2_elem_bytes
-    bytes_w2 = (experts * model_dim * inter_dim) // (2 if (is_int4 or is_a8w4) else 1)
+    bytes_a2 = tokens * topk * _orig_inter_dim * a2_elem_bytes
+    bytes_w2 = (experts * model_dim * _orig_inter_dim) // (2 if (is_int4 or is_a8w4) else 1)
     bytes_out = tokens * model_dim * (2 if out_torch_dtype == torch.float16 else 4)
     bytes_scale_a2 = tokens * topk * 4
     bytes_scale_w2 = experts * model_dim * 4
@@ -2703,50 +2748,20 @@ def _best_tile(target, dim, align):
     return None
 
 
-def _resolve_tiles(in_dtype, model_dim, inter_dim, num_buffers=1):
+def _resolve_tiles(in_dtype, model_dim, inter_dim):
     """Compute the largest valid (tile_m, tile_n1, tile_k1, tile_n2, tile_k2)
     for a given dtype and model shape, falling back from the target when
-    dimensions don't divide evenly.  When num_buffers >= 2, also ensures
-    num_k_tiles >= num_buffers so the pipelined loop has enough iterations,
-    and that the LDS footprint stays within the 320 KB hardware limit."""
+    dimensions don't divide evenly."""
     tile_m, target_n, target_k, wmma_k = BENCH_DTYPE_TARGET_TILES[in_dtype]
 
-    LDS_LIMIT = 327680
-    _, w_bpe, _ = _bench_dtype_bpe(in_dtype)
-
-    # Stage1 has gate+up (2x B tiles); estimate LDS per buffer to cap tile_k1.
-    target_k1 = target_k
-    if num_buffers >= 2:
-        tn1_est = _best_tile(target_n, inter_dim, 16) or target_n
-        for k1_try in range(target_k, 0, -wmma_k):
-            per_buf = tile_m * k1_try + 2 * tn1_est * k1_try * w_bpe
-            per_buf += tile_m * (k1_try // 32) + 2 * tn1_est * (k1_try // 32)
-            if int(per_buf) * num_buffers <= LDS_LIMIT:
-                target_k1 = k1_try
-                break
-        else:
-            target_k1 = wmma_k
-
     tile_n1 = _best_tile(target_n, inter_dim, 16)
-    tile_k1 = _best_tile(target_k1, model_dim, wmma_k)
-    if tile_k1 is not None and num_buffers > 1:
-        while tile_k1 and model_dim // tile_k1 < num_buffers:
-            tile_k1 = _best_tile(tile_k1 - wmma_k, model_dim, wmma_k) if tile_k1 > wmma_k else None
+    tile_k1 = _best_tile(target_k, model_dim, wmma_k)
     tile_n2 = _best_tile(target_n, model_dim, 16)
 
     tile_k2 = None
     for k in range(target_k, 0, -wmma_k):
         if inter_dim % k != 0:
             continue
-        if num_buffers > 1 and inter_dim // k < num_buffers:
-            continue
-        # Stage2 LDS: 1x B tile (no gate+up doubling)
-        if num_buffers >= 2:
-            tn2_est = tile_n2 or target_n
-            per_buf = tile_m * k + tn2_est * k * w_bpe
-            per_buf += tile_m * (k // 32) + tn2_est * (k // 32)
-            if int(per_buf) * num_buffers > LDS_LIMIT:
-                continue
         total = tile_m * k
         if total % 256 == 0 and (total // 256) % 4 == 0:
             tile_k2 = k
@@ -2849,9 +2864,9 @@ def bench_config(name, model_dim, inter_dim, experts, topk,
                  in_dtype, token_list, check_ref, peak_tflops,
                  warmup=BENCH_WARMUP, iters=BENCH_ITERS,
                  use_tdm_store=False, inst_prefetch=False,
-                 wave_specialized_tdm=False, num_buffers=1):
+                 wave_specialized_tdm=False):
     """Benchmark a single (model, dtype) configuration across all token counts."""
-    tiles = _resolve_tiles(in_dtype, model_dim, inter_dim, num_buffers=num_buffers)
+    tiles = _resolve_tiles(in_dtype, model_dim, inter_dim)
     if tiles is None:
         _bench_print_banner(f"{name}  |  {in_dtype}  |  dim={model_dim}  inter={inter_dim}")
         print(f"  SKIP: no valid tile for this shape (WMMA_K alignment)")
@@ -2860,7 +2875,7 @@ def bench_config(name, model_dim, inter_dim, experts, topk,
 
     _bench_print_banner(f"{name}  |  {in_dtype}  |  dim={model_dim}  inter={inter_dim}  E={experts}  K={topk}")
     print(f"  Tiles: stage1=({tile_m},{tile_n1},{tile_k1})  stage2=({tile_m},{tile_n2},{tile_k2})")
-    print(f"  Warmup={warmup}  Iters={iters}  RefCheck={'ON' if check_ref else 'OFF'}  num_buffers={num_buffers}")
+    print(f"  Warmup={warmup}  Iters={iters}  RefCheck={'ON' if check_ref else 'OFF'}")
     print(
         f"  Knobs: use_tdm_store={bool(use_tdm_store)}  "
         f"inst_prefetch={bool(inst_prefetch)}  "
@@ -2891,7 +2906,6 @@ def bench_config(name, model_dim, inter_dim, experts, topk,
                 use_tdm_store=bool(use_tdm_store),
                 inst_prefetch=bool(inst_prefetch),
                 wave_specialized_tdm=bool(wave_specialized_tdm),
-                num_buffers=int(num_buffers),
             )
             status = "PASS" if check_ref else "OK"
         except Exception as e:
@@ -2931,10 +2945,9 @@ def bench_config(name, model_dim, inter_dim, experts, topk,
                 a2_fp8_in=a2_q, a2_scale_in=a2_scale,
                 return_outputs=True, skip_ref=(not check_ref),
                 use_reduce=False,
-                use_tdm_store=False,
+                use_tdm_store=bool(use_tdm_store),
                 inst_prefetch=bool(inst_prefetch),
                 wave_specialized_tdm=bool(wave_specialized_tdm),
-                num_buffers=int(num_buffers),
             )
             status = "PASS" if check_ref else "OK"
         except Exception as e:
@@ -2971,10 +2984,9 @@ def bench_config(name, model_dim, inter_dim, experts, topk,
                 a2_fp8_in=a2_q, a2_scale_in=a2_scale,
                 return_outputs=True, skip_ref=(not check_ref),
                 use_reduce=True,
-                use_tdm_store=False,
+                use_tdm_store=bool(use_tdm_store),
                 inst_prefetch=bool(inst_prefetch),
                 wave_specialized_tdm=bool(wave_specialized_tdm),
-                num_buffers=int(num_buffers),
             )
             status = "PASS" if check_ref else "OK"
         except Exception as e:
@@ -3066,7 +3078,6 @@ def bench_main(args):
                         use_tdm_store=bool(args.use_tdm_store),
                         inst_prefetch=bool(args.inst_prefetch),
                         wave_specialized_tdm=bool(args.wave_specialized_tdm),
-                        num_buffers=int(args.num_buffers),
                     )
                 except Exception as e:
                     print(f"\n  [ERROR] {cfg_name}/{dt}: {e}")

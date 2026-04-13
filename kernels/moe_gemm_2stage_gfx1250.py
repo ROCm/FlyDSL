@@ -4464,7 +4464,7 @@ def _compile_stage2_mxscale_kernel_impl(
                     else:
                         _init = list(acc)
                         for _li, _st in fx.range(0, loop_iters, 1, init=_init):
-                            _acc = list(_st[:n_accs])
+                            _acc = list(_st[:n_accs]) if isinstance(_st, (list, tuple)) else [_st]
                             for _bi in range_constexpr(_nb):
                                 _lb = (_bi + _nb - 1) % _nb
                                 _kt = (_li * fx.Index(_nb)
@@ -4490,7 +4490,7 @@ def _compile_stage2_mxscale_kernel_impl(
                                 if _use_scheduled_compute:
                                     _hot_loop_scheduler_scheduled()
                             _res = yield list(_acc)
-                        acc = list(_res[:n_accs])
+                        acc = list(_res[:n_accs]) if isinstance(_res, (list, tuple)) else [_res]
 
                 # ── post-loop fence ──
                 if loop_iters > 0:
