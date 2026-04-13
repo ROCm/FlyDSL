@@ -210,7 +210,7 @@ def _assert_embedded_mlir_exists() -> None:
 
 _assert_embedded_mlir_exists()
 
-IS_WHEEL_BUILD = any(a in {"bdist_wheel", "sdist"} for a in os.sys.argv[1:])
+IS_WHEEL_BUILD = any(a in {"bdist_wheel", "sdist"} for a in os.sys.argv[1:]) or os.environ.get("FLY_WHEEL_BUILD") == "1"
 
 def _strip_embedded_shared_libs() -> None:
     """Strip debug symbols from embedded shared libraries to reduce wheel size."""

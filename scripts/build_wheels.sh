@@ -201,10 +201,13 @@ build_one() {
 
   # Build C++ and Python packages
   # Use --egg-base to isolate egg-info per version (avoid race on shared python/flydsl.egg-info/).
+  # FLY_WHEEL_BUILD=1 prevents setup.py and build.sh from mutating the shared source tree
+  # (python/flydsl/_mlir symlink), which would race across parallel builds.
   PATH="${venv}/bin:${PATH}" \
   MLIR_PATH="${MLIR_PATH}" \
   FLY_BUILD_DIR="${build_dir_rel}" \
   FLY_REBUILD="${FLY_REBUILD}" \
+  FLY_WHEEL_BUILD=1 \
   FLYDSL_RELEASE_TYPE="${FLYDSL_RELEASE_TYPE:-}" \
   "${venv}/bin/python" setup.py egg_info --egg-base "${setup_build_base}" build -b "${setup_build_base}"
 
@@ -230,6 +233,7 @@ build_one() {
   MLIR_PATH="${MLIR_PATH}" \
   FLY_BUILD_DIR="${build_dir_rel}" \
   FLY_REBUILD=0 \
+  FLY_WHEEL_BUILD=1 \
   FLYDSL_RELEASE_TYPE="${FLYDSL_RELEASE_TYPE:-}" \
   "${venv}/bin/python" setup.py egg_info --egg-base "${setup_build_base}" build -b "${setup_build_base}" bdist_wheel
 
