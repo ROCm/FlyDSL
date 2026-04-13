@@ -87,7 +87,7 @@ def _make_tdm_desc(base_addr_i64, shapes, strides, elem_bytes=2, tile_shape=None
     # Per-warp global address offset via wave_id
     if num_warps > 1:
         _wid_i32 = rocdl.wave_id()
-        _wid_idx = arith.index_cast(T.index, _wid_i32)
+        _wid_idx = _wid_i32.index_cast(T.index)
         _warp_coord_outer = _wid_idx % arith.index(warps_dim0)
         _warp_coord_inner = _wid_idx / arith.index(warps_dim0)
         _warp_off_outer = _warp_coord_outer * arith.index(bpw_outer)
@@ -101,7 +101,7 @@ def _make_tdm_desc(base_addr_i64, shapes, strides, elem_bytes=2, tile_shape=None
             _stride_idx = arith.index(int(outer_stride) if not hasattr(outer_stride, "type") else 1)
         _warp_elem_off = _warp_off_outer * _stride_idx + _warp_off_inner
         _warp_byte_off = _warp_elem_off * arith.index(elem_bytes)
-        _warp_byte_off_i64 = arith.index_cast(T.i64, _warp_byte_off)
+        _warp_byte_off_i64 = _warp_byte_off.index_cast(T.i64)
         glb_addr_i64 = _ArithValue(arith.AddIOp(glb_addr_i64, _warp_byte_off_i64).result)
 
     # LDS address placeholder (will be filled by tdm_copy)
@@ -183,7 +183,7 @@ def _tdm_copy_to_lds(desc, offsets, dst, elem_bytes=2, pred=None):
     # Add per-warp LDS offset
     _nw = getattr(desc, "_num_warps", 1)
     if _nw > 1:
-        _wid = arith.index_cast(T.index, rocdl.wave_id())
+        _wid = rocdl.wave_id().index_cast(T.index)
         _wco = _wid % arith.index(desc._warps_dim0)
         _wci = _wid / arith.index(desc._warps_dim0)
         _woo = _wco * arith.index(desc._bpw_outer)
@@ -376,7 +376,7 @@ def _lds_load_gf2(lds_ref, reg_offsets, lane_bases, warp_bases, n_elems, elem_dt
     else:
         lds_flat = lds_ref
 
-    tid = arith.index_cast(T.i32, gpu.thread_id("x"))
+    tid = gpu.thread_id("x").index_cast(T.i32)
     lane = tid & arith.constant(31, type=T.i32)
     warp = (tid >> arith.constant(5, type=T.i32)) & arith.constant(3, type=T.i32)
 
@@ -615,7 +615,7 @@ def _wmma_gemm_full(a_data, b_lds_ref, c_vec, ab_dtype,
 
     # Thread decomposition via CuTE idx2crd
     tid_raw = gpu.thread_id("x")
-    tid = arith.index_cast(T.i32, tid_raw)
+    tid = tid_raw.index_cast(T.i32)
     thr_crd = fx.idx2crd(tid, layout_thr)
     wave_m_idx = fx.get(thr_crd, 0)
     wave_n_idx = fx.get(thr_crd, 1)
@@ -1012,7 +1012,7 @@ def attn_fwd_pingpong_pipelined_kernel(q_ptr: fx.Tensor,
     stride_oh = stride_oh.ir_value()
     stride_om = stride_om.ir_value()
     
-    tid = arith.index_cast(T.i32, gpu.thread_id("x"))
+    tid = gpu.thread_id("x").index_cast(T.i32)
     
     # Get LDS base memref from SmemAllocator
     _lds_base = _lds_allocator.get_base()
@@ -1046,15 +1046,15 @@ def attn_fwd_pingpong_pipelined_kernel(q_ptr: fx.Tensor,
     BOUND_256_x16 = arith.constant_vector(256, T.vec(16, T.i32))
     BOUND_256_x32 = arith.constant_vector(256, T.vec(32, T.i32))
     BOUND_128_x32 = arith.constant_vector(128, T.vec(32, T.i32))
-    bid_x = arith.index_cast(T.i32, gpu.block_id("x"))
-    bid_y = arith.index_cast(T.i32, gpu.block_id("y"))
-    bid_z = arith.index_cast(T.i32, gpu.block_id("z"))
+    bid_x = gpu.block_id("x").index_cast(T.i32)
+    bid_y = gpu.block_id("y").index_cast(T.i32)
+    bid_z = gpu.block_id("z").index_cast(T.i32)
     _v3 = bid_z * c256_i32
     _v4 = stride_qz * bid_x
     _v5 = stride_qh * bid_y
     _v6 = _v4 + _v5
     _v8_layout = fx.make_layout((16, 2, 8), (1, 0, 16))
-    _v8_base = arith.index_cast(T.i32, _crd2idx(tid % 256, _v8_layout))
+    _v8_base = _crd2idx(tid % 256, _v8_layout).index_cast(T.i32)
     _v8 = vector.from_elements(T.vec(2, T.i32), [_v8_base, _v8_base + 128])
     _v9 = vector.broadcast(T.vec(2, T.i32), _v3)
     _v10 = _v9 + _v8
@@ -1064,13 +1064,13 @@ def attn_fwd_pingpong_pipelined_kernel(q_ptr: fx.Tensor,
     _v14 = vector.broadcast(T.vec(32, T.i32), _v6)
     _v15 = _v14 + _v13
     _v16_layout = fx.make_layout((16, 2, 8), (0, 8, 0))
-    _v16_base = arith.index_cast(T.i32, _crd2idx(tid % 256, _v16_layout))
+    _v16_base = _crd2idx(tid % 256, _v16_layout).index_cast(T.i32)
     _v16 = _make_reg_offset_vec(_v16_base, (8, 8), (1, 16))
     _v17 = _shuffle_select_repeat(_v15, [0, 16], n_repeat=64)
     _v18 = _shuffle_repeat_block(_v16, n_repeat=2)
     _v19 = _v17 + _v18
     _v20_layout = fx.make_layout((16, 2, 8), (0, 8, 0))
-    _v20_base = arith.index_cast(T.i32, _crd2idx(tid % 256, _v20_layout))
+    _v20_base = _crd2idx(tid % 256, _v20_layout).index_cast(T.i32)
     _v20 = _make_reg_offset_vec(_v20_base, (8, 4), (1, 16))
     _v21 = _v20 + BOUND_128_x32
     _v22 = _shuffle_select_repeat(_v15, [0, 16], n_repeat=32)
@@ -1087,7 +1087,7 @@ def attn_fwd_pingpong_pipelined_kernel(q_ptr: fx.Tensor,
     _v31 = _addptr(k_ptr, _v30, elem_bytes=2)  # addptr
     _v32 = stride_kh * bid_y
     _v33 = _addptr(_v31, _v32, elem_bytes=2)  # addptr
-    _v34 = arith.extsi(T.i64, stride_kn)
+    _v34 = stride_kn.extsi(T.i64)
     _v35 = _make_tdm_desc(_v33,
                           [c512_i32, c128_i32],
                           [_v34, c1_i64],
@@ -1111,7 +1111,7 @@ def attn_fwd_pingpong_pipelined_kernel(q_ptr: fx.Tensor,
     _v41 = _addptr(v_ptr, _v40, elem_bytes=2)  # addptr
     _v42 = stride_vh * bid_y
     _v43 = _addptr(_v41, _v42, elem_bytes=2)  # addptr
-    _v44 = arith.extsi(T.i64, stride_vn)
+    _v44 = stride_vn.extsi(T.i64)
     _v45 = _make_tdm_desc(_v43,
                           [c512_i32, c128_i32],
                           [_v44, c1_i64],
@@ -1180,7 +1180,7 @@ def attn_fwd_pingpong_pipelined_kernel(q_ptr: fx.Tensor,
     _v75 = _wmma_gemm_full(_v29, _v73, _v74, T.bf16, tile_m=256, tile_n=64, tile_k=64, warps_m=8, warps_n=1)
     _v76 = _v20 < BOUND_512_x32
     _v77 = _shuffle_repeat_block(_v76, n_repeat=2)
-    _v78 = arith.select(_v77, _v75, NEG_INF_64)
+    _v78 = _v77.select(_v75, NEG_INF_64)
     ZEROS_2 = arith.constant_vector(0.0, T.vec(2, T.f32))
     _v141 = _tree_reduce(_v78, arith.maxnumf, 0, 32)
     _v142 = vector.insert(_v141, ZEROS_2, static_position=[0], dynamic_position=[])
@@ -1192,15 +1192,15 @@ def attn_fwd_pingpong_pipelined_kernel(q_ptr: fx.Tensor,
     c16_i32 = arith.constant(16, type=T.i32)
     _v209 = _v208 ^ c16_i32
     _v210 = _v209 << c2_i32
-    _v211 = arith.bitcast(T.i32, _v207)
+    _v211 = _v207.bitcast(T.i32)
     _v212 = rocdl.ds_bpermute(T.i32, _v210, _v211)
-    _v213 = arith.bitcast(T.f32, _v212)
+    _v213 = _v212.bitcast(T.f32)
     _v214 = arith.maxnumf(_v207, _v213)
     _v215 = vector.insert(_v214, _v206, static_position=[0], dynamic_position=[])
     _v216 = vector.extract(_v215, static_position=[1])
-    _v217 = arith.bitcast(T.i32, _v216)
+    _v217 = _v216.bitcast(T.i32)
     _v218 = rocdl.ds_bpermute(T.i32, _v210, _v217)
-    _v219 = arith.bitcast(T.f32, _v218)
+    _v219 = _v218.bitcast(T.f32)
     _v220 = arith.maxnumf(_v216, _v219)
     _v221 = vector.insert(_v220, _v215, static_position=[1], dynamic_position=[])
     _v222 = arith.maxnumf(_v221, NEG_INF_2)
@@ -1251,7 +1251,7 @@ def attn_fwd_pingpong_pipelined_kernel(q_ptr: fx.Tensor,
     for _iv_index, (arg17, arg18, arg19, arg20, arg21, arg22, arg23, arg24) in range(
             c0_i32, c320_i32, c64_i32,
             init=[_v222, ONES_2, ZEROS_128, _v237, _v240, _v228, _v230, c0_i32]):
-        arg16 = arith.index_cast(T.i32, _iv_index)
+        arg16 = _iv_index.index_cast(T.i32)
         _v1050 = arg16 + c128_i32
         _v1051 = arg16 + c192_i32
         # GEMM: wmma_16x16x32 (16x16x32) — tiled WMMA, warps_m=8 warps_n=1
@@ -1271,22 +1271,22 @@ def attn_fwd_pingpong_pipelined_kernel(q_ptr: fx.Tensor,
         _v1176 = _tree_reduce(arg22, operator.add, 32, 32)
         _v1177 = vector.insert(_v1176, _v1113, static_position=[1], dynamic_position=[])
         _v1178 = vector.extract(_v1177, static_position=[0])
-        _v1179 = arith.bitcast(T.i32, _v1178)
+        _v1179 = _v1178.bitcast(T.i32)
         _v1180 = rocdl.ds_bpermute(T.i32, _v210, _v1179)
-        _v1181 = arith.bitcast(T.f32, _v1180)
+        _v1181 = _v1180.bitcast(T.f32)
         _v1182 = _v1178 + _v1181
         _v1183 = vector.insert(_v1182, _v1177, static_position=[0], dynamic_position=[])
         _v1184 = vector.extract(_v1183, static_position=[1])
-        _v1185 = arith.bitcast(T.i32, _v1184)
+        _v1185 = _v1184.bitcast(T.i32)
         _v1186 = rocdl.ds_bpermute(T.i32, _v210, _v1185)
-        _v1187 = arith.bitcast(T.f32, _v1186)
+        _v1187 = _v1186.bitcast(T.f32)
         _v1188 = _v1184 + _v1187
         _v1189 = vector.insert(_v1188, _v1183, static_position=[1], dynamic_position=[])
         _v1190 = vector.shuffle(arg23, arg23, [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1])
         _v1191 = _shuffle_select_repeat(_v1190, [0, 8], n_repeat=64)
         _v1192 = arg19 * _v1191
         _v1193 = _v1192
-        _v1194 = arith.truncf(T.vec(64, T.bf16), arg22)
+        _v1194 = arg22.truncf(T.vec(64, T.bf16))
         _v1195 = _v1194
         _v1196 = arg18 * arg23
         _v1197 = _v1196 + _v1189
@@ -1339,15 +1339,15 @@ def attn_fwd_pingpong_pipelined_kernel(q_ptr: fx.Tensor,
         _v1176 = _tree_reduce(_v1034_r2, arith.maxnumf, 32, 32)
         _v1177 = vector.insert(_v1176, _v1113, static_position=[1], dynamic_position=[])
         _v1178 = vector.extract(_v1177, static_position=[0])
-        _v1179 = arith.bitcast(T.i32, _v1178)
+        _v1179 = _v1178.bitcast(T.i32)
         _v1180 = rocdl.ds_bpermute(T.i32, _v210, _v1179)
-        _v1181 = arith.bitcast(T.f32, _v1180)
+        _v1181 = _v1180.bitcast(T.f32)
         _v1182 = arith.maxnumf(_v1178, _v1181)
         _v1183 = vector.insert(_v1182, _v1177, static_position=[0], dynamic_position=[])
         _v1184 = vector.extract(_v1183, static_position=[1])
-        _v1185 = arith.bitcast(T.i32, _v1184)
+        _v1185 = _v1184.bitcast(T.i32)
         _v1186 = rocdl.ds_bpermute(T.i32, _v210, _v1185)
-        _v1187 = arith.bitcast(T.f32, _v1186)
+        _v1187 = _v1186.bitcast(T.f32)
         _v1188 = arith.maxnumf(_v1184, _v1187)
         _v1189 = vector.insert(_v1188, _v1183, static_position=[1], dynamic_position=[])
         _v1190 = arith.maxnumf(arg17, _v1189)
@@ -1407,21 +1407,21 @@ def attn_fwd_pingpong_pipelined_kernel(q_ptr: fx.Tensor,
     _v372 = _tree_reduce(_v241_r5, operator.add, 32, 32)
     _v373 = vector.insert(_v372, _v309, static_position=[1], dynamic_position=[])
     _v374 = vector.extract(_v373, static_position=[0])
-    _v375 = arith.bitcast(T.i32, _v374)
+    _v375 = _v374.bitcast(T.i32)
     _v376 = rocdl.ds_bpermute(T.i32, _v210, _v375)
-    _v377 = arith.bitcast(T.f32, _v376)
+    _v377 = _v376.bitcast(T.f32)
     _v378 = _v374 + _v377
     _v379 = vector.insert(_v378, _v373, static_position=[0], dynamic_position=[])
     _v380 = vector.extract(_v379, static_position=[1])
-    _v381 = arith.bitcast(T.i32, _v380)
+    _v381 = _v380.bitcast(T.i32)
     _v382 = rocdl.ds_bpermute(T.i32, _v210, _v381)
-    _v383 = arith.bitcast(T.f32, _v382)
+    _v383 = _v382.bitcast(T.f32)
     _v384 = _v380 + _v383
     _v385 = vector.insert(_v384, _v379, static_position=[1], dynamic_position=[])
     _v386 = vector.shuffle(_v241_r6, _v241_r6, [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1])
     _v387 = _shuffle_select_repeat(_v386, [0, 8], n_repeat=64)
     _v388 = _v241_r2 * _v387
-    _v389 = arith.truncf(T.vec(64, T.bf16), _v241_r5)
+    _v389 = _v241_r5.truncf(T.vec(64, T.bf16))
     _v391 = _v241_r1 * _v241_r6
     _v392 = _v391 + _v385
     _v393 = _v241_r7 % c2_i32
@@ -1450,21 +1450,21 @@ def attn_fwd_pingpong_pipelined_kernel(q_ptr: fx.Tensor,
     _v403 = _v402 + _v20
     _v404 = _v403 < BOUND_512_x32
     _v405 = _shuffle_repeat_block(_v404, n_repeat=2)
-    _v406 = arith.select(_v405, _v401, NEG_INF_64)
+    _v406 = _v405.select(_v401, NEG_INF_64)
     _v469 = _tree_reduce(_v406, arith.maxnumf, 0, 32)
     _v470 = vector.insert(_v469, ZEROS_2, static_position=[0], dynamic_position=[])
     _v533 = _tree_reduce(_v406, arith.maxnumf, 32, 32)
     _v534 = vector.insert(_v533, _v470, static_position=[1], dynamic_position=[])
     _v535 = vector.extract(_v534, static_position=[0])
-    _v536 = arith.bitcast(T.i32, _v535)
+    _v536 = _v535.bitcast(T.i32)
     _v537 = rocdl.ds_bpermute(T.i32, _v210, _v536)
-    _v538 = arith.bitcast(T.f32, _v537)
+    _v538 = _v537.bitcast(T.f32)
     _v539 = arith.maxnumf(_v535, _v538)
     _v540 = vector.insert(_v539, _v534, static_position=[0], dynamic_position=[])
     _v541 = vector.extract(_v540, static_position=[1])
-    _v542 = arith.bitcast(T.i32, _v541)
+    _v542 = _v541.bitcast(T.i32)
     _v543 = rocdl.ds_bpermute(T.i32, _v210, _v542)
-    _v544 = arith.bitcast(T.f32, _v543)
+    _v544 = _v543.bitcast(T.f32)
     _v545 = arith.maxnumf(_v541, _v544)
     _v546 = vector.insert(_v545, _v540, static_position=[1], dynamic_position=[])
     _v547 = arith.maxnumf(_v241_r0, _v546)
@@ -1518,27 +1518,27 @@ def attn_fwd_pingpong_pipelined_kernel(q_ptr: fx.Tensor,
     _v569 = _v568 + _v20
     _v570 = _v569 < BOUND_512_x32
     _v571 = _shuffle_repeat_block(_v570, n_repeat=2)
-    _v572 = arith.select(_v571, _v567, NEG_INF_64)
+    _v572 = _v571.select(_v567, NEG_INF_64)
     _v635 = _tree_reduce(_v553, operator.add, 0, 32)
     _v636 = vector.insert(_v635, ZEROS_2, static_position=[0], dynamic_position=[])
     _v699 = _tree_reduce(_v553, operator.add, 32, 32)
     _v700 = vector.insert(_v699, _v636, static_position=[1], dynamic_position=[])
     _v701 = vector.extract(_v700, static_position=[0])
-    _v702 = arith.bitcast(T.i32, _v701)
+    _v702 = _v701.bitcast(T.i32)
     _v703 = rocdl.ds_bpermute(T.i32, _v210, _v702)
-    _v704 = arith.bitcast(T.f32, _v703)
+    _v704 = _v703.bitcast(T.f32)
     _v705 = _v701 + _v704
     _v706 = vector.insert(_v705, _v700, static_position=[0], dynamic_position=[])
     _v707 = vector.extract(_v706, static_position=[1])
-    _v708 = arith.bitcast(T.i32, _v707)
+    _v708 = _v707.bitcast(T.i32)
     _v709 = rocdl.ds_bpermute(T.i32, _v210, _v708)
-    _v710 = arith.bitcast(T.f32, _v709)
+    _v710 = _v709.bitcast(T.f32)
     _v711 = _v707 + _v710
     _v712 = vector.insert(_v711, _v706, static_position=[1], dynamic_position=[])
     _v713 = vector.shuffle(_v556, _v556, [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1])
     _v714 = _shuffle_select_repeat(_v713, [0, 8], n_repeat=64)
     _v715 = _v399 * _v714
-    _v716 = arith.truncf(T.vec(64, T.bf16), _v553)
+    _v716 = _v553.truncf(T.vec(64, T.bf16))
     _v718 = _v392 * _v556
     _v719 = _v718 + _v712
     _v720 = _v241_r7 + c1_i32
@@ -1565,15 +1565,15 @@ def attn_fwd_pingpong_pipelined_kernel(q_ptr: fx.Tensor,
     _v854 = _tree_reduce(_v572, arith.maxnumf, 32, 32)
     _v855 = vector.insert(_v854, _v791, static_position=[1], dynamic_position=[])
     _v856 = vector.extract(_v855, static_position=[0])
-    _v857 = arith.bitcast(T.i32, _v856)
+    _v857 = _v856.bitcast(T.i32)
     _v858 = rocdl.ds_bpermute(T.i32, _v210, _v857)
-    _v859 = arith.bitcast(T.f32, _v858)
+    _v859 = _v858.bitcast(T.f32)
     _v860 = arith.maxnumf(_v856, _v859)
     _v861 = vector.insert(_v860, _v855, static_position=[0], dynamic_position=[])
     _v862 = vector.extract(_v861, static_position=[1])
-    _v863 = arith.bitcast(T.i32, _v862)
+    _v863 = _v862.bitcast(T.i32)
     _v864 = rocdl.ds_bpermute(T.i32, _v210, _v863)
-    _v865 = arith.bitcast(T.f32, _v864)
+    _v865 = _v864.bitcast(T.f32)
     _v866 = arith.maxnumf(_v862, _v865)
     _v867 = vector.insert(_v866, _v861, static_position=[1], dynamic_position=[])
     _v868 = arith.maxnumf(_v547, _v867)
@@ -1590,21 +1590,21 @@ def attn_fwd_pingpong_pipelined_kernel(q_ptr: fx.Tensor,
     _v1003 = _tree_reduce(_v874, operator.add, 32, 32)
     _v1004 = vector.insert(_v1003, _v940, static_position=[1], dynamic_position=[])
     _v1005 = vector.extract(_v1004, static_position=[0])
-    _v1006 = arith.bitcast(T.i32, _v1005)
+    _v1006 = _v1005.bitcast(T.i32)
     _v1007 = rocdl.ds_bpermute(T.i32, _v210, _v1006)
-    _v1008 = arith.bitcast(T.f32, _v1007)
+    _v1008 = _v1007.bitcast(T.f32)
     _v1009 = _v1005 + _v1008
     _v1010 = vector.insert(_v1009, _v1004, static_position=[0], dynamic_position=[])
     _v1011 = vector.extract(_v1010, static_position=[1])
-    _v1012 = arith.bitcast(T.i32, _v1011)
+    _v1012 = _v1011.bitcast(T.i32)
     _v1013 = rocdl.ds_bpermute(T.i32, _v210, _v1012)
-    _v1014 = arith.bitcast(T.f32, _v1013)
+    _v1014 = _v1013.bitcast(T.f32)
     _v1015 = _v1011 + _v1014
     _v1016 = vector.insert(_v1015, _v1010, static_position=[1], dynamic_position=[])
     _v1017 = vector.shuffle(_v876, _v876, [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1])
     _v1018 = _shuffle_select_repeat(_v1017, [0, 8], n_repeat=64)
     _v1019 = _v727 * _v1018
-    _v1020 = arith.truncf(T.vec(64, T.bf16), _v874)
+    _v1020 = _v874.truncf(T.vec(64, T.bf16))
     _v1022 = _v719 * _v876
     _v1023 = _v1022 + _v1016
     tdm_ops.tensor_wait(0)
