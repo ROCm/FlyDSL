@@ -10,6 +10,11 @@ Validates:
   - compile_hints propagation through JitFunction → MlirCompiler → pipeline
 """
 import gc
+import os
+from pathlib import Path
+import subprocess
+import sys
+import textwrap
 import weakref
 
 import pytest
@@ -47,6 +52,37 @@ def _reset_jit_caches(jit_fn):
     jit_fn.cache_manager = None
 
 
+def _run_python_snippet(source: str) -> None:
+    """Run LLVM option smoke tests out-of-process.
+
+    Some LLVM cl::opt flags, notably opt-bisect-limit, retain occurrence state
+    after being set. Exercising them in a subprocess keeps the parent pytest
+    process free from persistent compiler debug logging.
+    """
+
+    repo_root = Path(__file__).resolve().parents[2]
+    build_pkg_dir = repo_root / "build-fly" / "python_packages"
+    pythonpath = [str(repo_root)]
+    if build_pkg_dir.exists():
+        pythonpath.insert(0, str(build_pkg_dir))
+    existing_pythonpath = os.environ.get("PYTHONPATH")
+    if existing_pythonpath:
+        pythonpath.append(existing_pythonpath)
+
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.pathsep.join(pythonpath)
+
+    completed = subprocess.run(
+        [sys.executable, "-c", textwrap.dedent(source)],
+        cwd=repo_root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr or completed.stdout
+
+
 # ──────────────────────────────────────────────────────────────
 # Tests: LLVM option Python bindings
 # ──────────────────────────────────────────────────────────────
@@ -68,11 +104,15 @@ class TestLLVMOptionBindings:
         assert restored is False
 
     def test_int_round_trip(self):
-        _fly = self._get_fly()
-        # Use a large limit so it doesn't affect compilation
-        old = _fly.set_llvm_option_int("opt-bisect-limit", 2147483647)
-        restored = _fly.set_llvm_option_int("opt-bisect-limit", old)
-        assert restored == 2147483647
+        _run_python_snippet(
+            """
+            from flydsl._mlir._mlir_libs import _mlirDialectsFly
+
+            old = _mlirDialectsFly.set_llvm_option_int("opt-bisect-limit", 2147483647)
+            restored = _mlirDialectsFly.set_llvm_option_int("opt-bisect-limit", old)
+            assert restored == 2147483647
+            """
+        )
 
     def test_str_round_trip(self):
         _fly = self._get_fly()
@@ -111,14 +151,18 @@ class TestLLVMOptionsContextManager:
         assert val == baseline
 
     def test_mixed_types(self):
-        from flydsl.compiler.llvm_options import llvm_options
+        _run_python_snippet(
+            """
+            from flydsl.compiler.llvm_options import llvm_options
 
-        with llvm_options({
-            "enable-post-misched": False,
-            "opt-bisect-limit": 100,
-            "module-summary-dot-file": "/tmp/test",
-        }):
-            pass  # just verify no exceptions
+            with llvm_options({
+                "enable-post-misched": False,
+                "opt-bisect-limit": 100,
+                "module-summary-dot-file": "/tmp/test",
+            }):
+                pass
+            """
+        )
 
     def test_invalid_type_raises(self):
         from flydsl.compiler.llvm_options import llvm_options
@@ -170,6 +214,8 @@ class TestCompileHintsPropagation:
         """Verify fast_fp_math/unsafe_fp_math appear in rocdl-attach-target."""
         from flydsl.compiler.backends import rocm
         captured = {}
+        monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", "0")
+        _reset_jit_caches(_noop_launch)
 
         orig = rocm.RocmBackend.pipeline_fragments
 
@@ -187,6 +233,7 @@ class TestCompileHintsPropagation:
 
     def test_llvm_options_in_compile_hints(self):
         """Verify llvm_options key is accepted and doesn't crash."""
+        _reset_jit_caches(_noop_launch)
         exe = flyc.compile[{
             "llvm_options": {"enable-post-misched": False},
         }](_noop_launch)
