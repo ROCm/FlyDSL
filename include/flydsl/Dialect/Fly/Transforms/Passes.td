@@ -38,14 +38,37 @@ def FlyCanonicalizePass : Pass<"fly-canonicalize"> {
 
 def FlyLayoutLoweringPass : Pass<"fly-layout-lowering"> {
   let summary = "Lower layout algebra operations";
-  let description = [{ 
+  let description = [{
     Lowers layout algebra operations to simpler forms.
   }];
-  
+
   let dependentDialects = [
     "arith::ArithDialect",
     "gpu::GPUDialect",
     "vector::VectorDialect"
+  ];
+}
+
+def FlyForwardLLVMAllocasPass : Pass<"fly-forward-llvm-allocas"> {
+  let summary = "Forward LLVM AS5 alloca stores to loads and promote to loop-carried";
+  let description = [{
+    After convert-fly-to-rocdl, CopyAtomCall and MmaAtomCallValue ops have been
+    expanded into explicit LLVM::StoreOp and LLVM::LoadOp sequences on AS5
+    (private scratch) allocas.  This pass:
+    1. Forwards LLVM::StoreOp values to subsequent LLVM::LoadOp from the same
+       alloca+offset within each basic block (intra-iteration forwarding).
+    2. Promotes cross-iteration alloca load/store patterns in scf.for loops
+       to loop-carried SSA values (phi nodes).
+    3. Eliminates dead AS5 allocas that have no remaining loads.
+
+    This must run AFTER convert-fly-to-rocdl and BEFORE convert-scf-to-cf,
+    since it relies on scf.for structure for loop-carried promotion.
+  }];
+
+  let dependentDialects = [
+    "arith::ArithDialect",
+    "LLVM::LLVMDialect",
+    "scf::SCFDialect"
   ];
 }
 

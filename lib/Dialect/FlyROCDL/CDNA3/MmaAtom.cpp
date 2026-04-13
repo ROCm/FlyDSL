@@ -85,8 +85,9 @@ LogicalResult MmaOpCDNA3_MFMAType::verify(function_ref<InFlightDiagnostic()> emi
     return emitError() << "elemTyAcc must be f32, got " << elemTyAcc;
 
   auto isValidElemType = [](Type ty) {
-    return ty.isF16() || ty.isBF16() || ty.isF32() || isa<Float8E4M3FNUZType>(ty) ||
-           isa<Float8E5M2FNUZType>(ty);
+    return ty.isF16() || ty.isBF16() || ty.isF32() || ty.isInteger(8) ||
+           isa<Float8E4M3FNUZType>(ty) || isa<Float8E5M2FNUZType>(ty) ||
+           isa<Float8E4M3FNType>(ty);
   };
   if (!isValidElemType(elemTyA)) {
     return emitError() << "elemTyA must be f16, bf16, f32, f8E4M3FNUZ, f8E5M2FNUZ, got " << elemTyA;
@@ -97,7 +98,9 @@ LogicalResult MmaOpCDNA3_MFMAType::verify(function_ref<InFlightDiagnostic()> emi
   return success();
 }
 
-static bool isFP8(Type ty) { return isa<Float8E4M3FNUZType>(ty); }
+static bool isFP8(Type ty) {
+  return isa<Float8E4M3FNUZType>(ty) || isa<Float8E4M3FNType>(ty) || ty.isInteger(8);
+}
 static bool isBF8(Type ty) { return isa<Float8E5M2FNUZType>(ty); }
 static bool isF8(Type ty) { return isFP8(ty) || isBF8(ty); }
 
@@ -108,7 +111,7 @@ static Type getMfmaABType(MLIRContext *ctx, Type elemTy, int32_t k = 0) {
     return VectorType::get({4}, Float16Type::get(ctx));
   if (elemTy.isBF16())
     return VectorType::get({(k >= 16) ? 4 : 2}, IntegerType::get(ctx, 16));
-  if (isF8(elemTy))
+  if (isF8(elemTy) || elemTy.isInteger(8))
     return IntegerType::get(ctx, 64);
   return nullptr;
 }
@@ -173,6 +176,18 @@ static LogicalResult emitMfma(OpBuilder &builder, Location loc, Type abTyA, Type
   return success();
 }
 
+// SSA variant: takes C as value, returns D as value (no accumulator load/store).
+template <typename MfmaOp>
+static LogicalResult emitMfmaSsa(OpBuilder &builder, Location loc, Type abTyA, Type abTyB,
+                                 VectorType accTy, Value aPtr, Value bPtr, Value cVal,
+                                 Value &result) {
+  Value a = LLVM::LoadOp::create(builder, loc, abTyA, aPtr);
+  Value b = LLVM::LoadOp::create(builder, loc, abTyB, bPtr);
+  auto zeroAttr = builder.getI32IntegerAttr(0);
+  result = MfmaOp::create(builder, loc, accTy, a, b, cVal, zeroAttr, zeroAttr, zeroAttr);
+  return success();
+}
+
 LogicalResult MmaOpCDNA3_MFMAType::emitAtomCall(OpBuilder &builder, Location loc, Type mmaAtomTy,
                                                 Type dMemTy, Type aMemTy, Type bMemTy, Type cMemTy,
                                                 Value atomVal, Value dPtr, Value aPtr, Value bPtr,
@@ -229,6 +244,66 @@ LogicalResult MmaOpCDNA3_MFMAType::emitAtomCall(OpBuilder &builder, Location loc
   DISPATCH_MFMA(32, 16, isBF8(elemTyA) && isBF8(elemTyB), mfma_f32_32x32x16_bf8_bf8)
 
 #undef DISPATCH_MFMA
+
+  return failure();
+}
+
+LogicalResult MmaOpCDNA3_MFMAType::emitAtomCallSsa(OpBuilder &builder, Location loc,
+                                                   Type mmaAtomTy, Type aMemTy, Type bMemTy,
+                                                   Value atomVal, Value aPtr, Value bPtr,
+                                                   Value cVal, Value &result) const {
+  int32_t m = getM();
+  int32_t n = getN();
+  int32_t k = getK();
+  Type elemTyA = getElemTyA();
+  Type elemTyB = getElemTyB();
+  MLIRContext *ctx = builder.getContext();
+
+  Type abTyA = getMfmaABType(ctx, elemTyA, k);
+  Type abTyB = getMfmaABType(ctx, elemTyB, k);
+  if (!abTyA || !abTyB)
+    return failure();
+
+  int64_t accVecSize = getMfmaAccVecSize(m, k, elemTyA);
+  if (accVecSize == 0)
+    return failure();
+
+  Type accElemTy = getElemTyAcc();
+  VectorType accTy = VectorType::get({accVecSize}, accElemTy);
+
+#define DISPATCH_MFMA_SSA(M_, K_, PRED, OP)                                                        \
+  if (m == M_ && n == M_ && k == K_ && (PRED))                                                     \
+    return emitMfmaSsa<ROCDL::OP>(builder, loc, abTyA, abTyB, accTy, aPtr, bPtr, cVal, result);
+
+  DISPATCH_MFMA_SSA(32, 1, elemTyA.isF32(), mfma_f32_32x32x1f32)
+  DISPATCH_MFMA_SSA(16, 1, elemTyA.isF32(), mfma_f32_16x16x1f32)
+  DISPATCH_MFMA_SSA(4, 1, elemTyA.isF32(), mfma_f32_4x4x1f32)
+  DISPATCH_MFMA_SSA(32, 2, elemTyA.isF32(), mfma_f32_32x32x2f32)
+  DISPATCH_MFMA_SSA(16, 4, elemTyA.isF32(), mfma_f32_16x16x4f32)
+
+  DISPATCH_MFMA_SSA(32, 4, elemTyA.isF16(), mfma_f32_32x32x4f16)
+  DISPATCH_MFMA_SSA(16, 4, elemTyA.isF16(), mfma_f32_16x16x4f16)
+  DISPATCH_MFMA_SSA(4, 4, elemTyA.isF16(), mfma_f32_4x4x4f16)
+  DISPATCH_MFMA_SSA(32, 8, elemTyA.isF16(), mfma_f32_32x32x8f16)
+  DISPATCH_MFMA_SSA(16, 16, elemTyA.isF16(), mfma_f32_16x16x16f16)
+
+  DISPATCH_MFMA_SSA(32, 2, elemTyA.isBF16(), mfma_f32_32x32x2bf16)
+  DISPATCH_MFMA_SSA(16, 2, elemTyA.isBF16(), mfma_f32_16x16x2bf16)
+  DISPATCH_MFMA_SSA(4, 2, elemTyA.isBF16(), mfma_f32_4x4x2bf16)
+  DISPATCH_MFMA_SSA(32, 4, elemTyA.isBF16(), mfma_f32_32x32x4bf16)
+  DISPATCH_MFMA_SSA(16, 8, elemTyA.isBF16(), mfma_f32_16x16x8bf16)
+  DISPATCH_MFMA_SSA(16, 16, elemTyA.isBF16(), mfma_f32_16x16x16bf16_1k)
+
+  DISPATCH_MFMA_SSA(16, 32, isFP8(elemTyA) && isFP8(elemTyB), mfma_f32_16x16x32_fp8_fp8)
+  DISPATCH_MFMA_SSA(16, 32, isFP8(elemTyA) && isBF8(elemTyB), mfma_f32_16x16x32_fp8_bf8)
+  DISPATCH_MFMA_SSA(16, 32, isBF8(elemTyA) && isFP8(elemTyB), mfma_f32_16x16x32_bf8_fp8)
+  DISPATCH_MFMA_SSA(16, 32, isBF8(elemTyA) && isBF8(elemTyB), mfma_f32_16x16x32_bf8_bf8)
+  DISPATCH_MFMA_SSA(32, 16, isFP8(elemTyA) && isFP8(elemTyB), mfma_f32_32x32x16_fp8_fp8)
+  DISPATCH_MFMA_SSA(32, 16, isFP8(elemTyA) && isBF8(elemTyB), mfma_f32_32x32x16_fp8_bf8)
+  DISPATCH_MFMA_SSA(32, 16, isBF8(elemTyA) && isFP8(elemTyB), mfma_f32_32x32x16_bf8_fp8)
+  DISPATCH_MFMA_SSA(32, 16, isBF8(elemTyA) && isBF8(elemTyB), mfma_f32_32x32x16_bf8_bf8)
+
+#undef DISPATCH_MFMA_SSA
 
   return failure();
 }

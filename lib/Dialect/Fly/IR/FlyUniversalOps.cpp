@@ -132,13 +132,58 @@ LogicalResult CopyOpUniversalCopyType::emitAtomCall(OpBuilder &builder, Location
   if (!isa<LLVM::LLVMPointerType>(src.getType()) || !isa<LLVM::LLVMPointerType>(dst.getType()))
     return failure();
 
-  int32_t copyBytes = getBitSize() / 8;
   Value srcPtr = applySwizzleOnPtr(builder, loc, cast<TypedValue<LLVM::LLVMPointerType>>(src),
                                    srcMemTy.getSwizzle());
   Value dstPtr = applySwizzleOnPtr(builder, loc, cast<TypedValue<LLVM::LLVMPointerType>>(dst),
                                    dstMemTy.getSwizzle());
-  Value len = arith::ConstantIntOp::create(builder, loc, copyBytes, /*width=*/32);
-  LLVM::MemcpyOp::create(builder, loc, dstPtr, srcPtr, len, /*isVolatile=*/false);
+
+  // Use element-type-aware vector chunks so that store types match MFMA
+  // load types.  SROA can then forward register-alloca stores to loads,
+  // eliminating allocas that AMDGPUPromoteAllocaToVector would otherwise
+  // give full-function lifetime.
+  //
+  // f16 MFMA reads <4 x half>  (64 b) → store <4 x half>
+  // f32 MFMA reads f32          (32 b) → store f32
+  // bf16 MFMA reads <4 x i16>  (64 b) → store <4 x i16>
+  // f8/i8 MFMA reads i64       (64 b) → store i64
+  unsigned totalBits = getBitSize();
+  Type chunkTy;
+  unsigned chunkBits;
+
+  Type elemTy = dstMemTy.getElemTy();
+  if (elemTy && elemTy.isF16()) {
+    chunkTy = VectorType::get({4}, elemTy);
+    chunkBits = 64;
+  } else if (elemTy && elemTy.isF32()) {
+    chunkTy = elemTy;
+    chunkBits = 32;
+  } else if (elemTy && elemTy.isBF16()) {
+    auto i16Ty = IntegerType::get(builder.getContext(), 16);
+    chunkTy = VectorType::get({4}, i16Ty);
+    chunkBits = 64;
+  } else {
+    // f8/i8/other: use i64 integer chunks (matches MFMA i64 operand)
+    chunkBits = std::min(totalBits, 64u);
+    chunkTy = IntegerType::get(builder.getContext(), chunkBits);
+  }
+
+  unsigned numChunks = totalBits / chunkBits;
+  unsigned chunkBytes = chunkBits / 8;
+  auto i8Ty = IntegerType::get(builder.getContext(), 8);
+
+  for (unsigned i = 0; i < numChunks; ++i) {
+    Value sPtr = srcPtr, dPtr = dstPtr;
+    if (i > 0) {
+      auto offset = LLVM::ConstantOp::create(builder, loc,
+          IntegerType::get(builder.getContext(), 32), i * chunkBytes);
+      sPtr = LLVM::GEPOp::create(builder, loc, srcPtr.getType(),
+                                  i8Ty, srcPtr, ValueRange{offset});
+      dPtr = LLVM::GEPOp::create(builder, loc, dstPtr.getType(),
+                                  i8Ty, dstPtr, ValueRange{offset});
+    }
+    Value val = LLVM::LoadOp::create(builder, loc, chunkTy, sPtr);
+    LLVM::StoreOp::create(builder, loc, val, dPtr);
+  }
 
   return success();
 }
@@ -232,6 +277,20 @@ LogicalResult MmaOpUniversalFMAType::emitAtomCall(OpBuilder &builder, Location l
   Value res = LLVM::FAddOp::create(builder, loc, elemTy, mul, c);
 
   LLVM::StoreOp::create(builder, loc, res, dPtr);
+  return success();
+}
+
+LogicalResult MmaOpUniversalFMAType::emitAtomCallSsa(OpBuilder &builder, Location loc,
+                                                     Type mmaAtomTy, Type aMemTy, Type bMemTy,
+                                                     Value atomVal, Value aPtr, Value bPtr,
+                                                     Value cVal, Value &result) const {
+  Type elemTy = getElemTy();
+
+  Value a = LLVM::LoadOp::create(builder, loc, elemTy, aPtr);
+  Value b = LLVM::LoadOp::create(builder, loc, elemTy, bPtr);
+
+  Value mul = LLVM::FMulOp::create(builder, loc, elemTy, a, b);
+  result = LLVM::FAddOp::create(builder, loc, elemTy, mul, cVal);
   return success();
 }
 

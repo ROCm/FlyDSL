@@ -371,6 +371,7 @@ class Numeric(metaclass=NumericMeta):
             T.f8E4M3(): Float8E4M3,
             T.f8E4M3FN(): Float8E4M3FN,
             T.f8E4M3B11FNUZ(): Float8E4M3B11FNUZ,
+            ir.Float8E4M3FNUZType.get(): Float8E4M3FNUZ,
             T.f8E8M0FNU(): Float8E8M0FNU,
             T.f6E2M3FN(): Float6E2M3FN,
             T.f6E3M2FN(): Float6E3M2FN,

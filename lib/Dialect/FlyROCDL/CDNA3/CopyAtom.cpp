@@ -64,14 +64,105 @@ LogicalResult CopyOpCDNA3BufferCopyType::emitAtomCall(OpBuilder &builder, Locati
     return {bp.bufferRsrc(builder, loc), bp.swizzleByteOffset(builder, loc)};
   };
 
+  // When writing to a register alloca, split wide stores into 64-bit
+  // element-typed vector chunks (<4 x half>, <4 x i16>, etc.) that match
+  // MFMA operand load types.  SROA can then forward store→load at each
+  // offset and eliminate the alloca entirely.
+  auto storeToRegSplit = [&](Value loaded, Value dstPtr) {
+    Type elemTy = dstMemTy.getElemTy();
+    unsigned totalBits = getBitSize();
+    if (dstAS == AddressSpace::Register && elemTy && elemTy.isIntOrFloat()) {
+      unsigned elemBits = elemTy.getIntOrFloatBitWidth();
+      unsigned chunkBits = 64;
+      if (elemBits < chunkBits && chunkBits % elemBits == 0 && totalBits > chunkBits) {
+        // Split wide integer into 64-bit vector chunks
+        unsigned numChunks = totalBits / chunkBits;
+        auto vecTy = VectorType::get({static_cast<int64_t>(chunkBits / elemBits)}, elemTy);
+        auto i64Ty = builder.getI64Type();
+        auto i8Ty = builder.getI8Type();
+        for (unsigned i = 0; i < numChunks; ++i) {
+          Value chunk;
+          if (i == 0) {
+            chunk = LLVM::TruncOp::create(builder, loc, i64Ty, loaded);
+          } else {
+            Value shiftAmt = LLVM::ConstantOp::create(builder, loc, copyTy,
+                builder.getIntegerAttr(copyTy, i * chunkBits));
+            Value shifted = LLVM::LShrOp::create(builder, loc, loaded, shiftAmt);
+            chunk = LLVM::TruncOp::create(builder, loc, i64Ty, shifted);
+          }
+          Value vec = LLVM::BitcastOp::create(builder, loc, vecTy, chunk);
+          Value dPtr = dstPtr;
+          if (i > 0) {
+            Value offset = LLVM::ConstantOp::create(builder, loc,
+                builder.getIntegerType(32), i * (chunkBits / 8));
+            dPtr = LLVM::GEPOp::create(builder, loc, dstPtr.getType(),
+                                        i8Ty, dstPtr, ValueRange{offset});
+          }
+          LLVM::StoreOp::create(builder, loc, vec, dPtr);
+        }
+        return;
+      }
+      // totalBits <= 64: single vector store
+      if (elemBits < totalBits && totalBits % elemBits == 0) {
+        auto vecTy = VectorType::get({static_cast<int64_t>(totalBits / elemBits)}, elemTy);
+        Value vec = LLVM::BitcastOp::create(builder, loc, vecTy, loaded);
+        LLVM::StoreOp::create(builder, loc, vec, dstPtr);
+        return;
+      }
+    }
+    LLVM::StoreOp::create(builder, loc, loaded, dstPtr);
+  };
+
+  auto loadFromRegSplit = [&](Value srcPtr) -> Value {
+    Type elemTy = srcMemTy.getElemTy();
+    unsigned totalBits = getBitSize();
+    if (srcAS == AddressSpace::Register && elemTy && elemTy.isIntOrFloat()) {
+      unsigned elemBits = elemTy.getIntOrFloatBitWidth();
+      unsigned chunkBits = 64;
+      if (elemBits < chunkBits && chunkBits % elemBits == 0 && totalBits > chunkBits) {
+        unsigned numChunks = totalBits / chunkBits;
+        auto vecTy = VectorType::get({static_cast<int64_t>(chunkBits / elemBits)}, elemTy);
+        auto i64Ty = builder.getI64Type();
+        auto i8Ty = builder.getI8Type();
+        Value result = LLVM::ConstantOp::create(builder, loc, copyTy,
+            builder.getIntegerAttr(copyTy, 0));
+        for (unsigned i = 0; i < numChunks; ++i) {
+          Value sPtr = srcPtr;
+          if (i > 0) {
+            Value offset = LLVM::ConstantOp::create(builder, loc,
+                builder.getIntegerType(32), i * (chunkBits / 8));
+            sPtr = LLVM::GEPOp::create(builder, loc, srcPtr.getType(),
+                                        i8Ty, srcPtr, ValueRange{offset});
+          }
+          Value vec = LLVM::LoadOp::create(builder, loc, vecTy, sPtr);
+          Value chunk = LLVM::BitcastOp::create(builder, loc, i64Ty, vec);
+          Value extended = LLVM::ZExtOp::create(builder, loc, copyTy, chunk);
+          if (i > 0) {
+            Value shiftAmt = LLVM::ConstantOp::create(builder, loc, copyTy,
+                builder.getIntegerAttr(copyTy, i * chunkBits));
+            extended = LLVM::ShlOp::create(builder, loc, extended, shiftAmt);
+          }
+          result = LLVM::OrOp::create(builder, loc, result, extended);
+        }
+        return result;
+      }
+      if (elemBits < totalBits && totalBits % elemBits == 0) {
+        auto vecTy = VectorType::get({static_cast<int64_t>(totalBits / elemBits)}, elemTy);
+        Value vec = LLVM::LoadOp::create(builder, loc, vecTy, srcPtr);
+        return LLVM::BitcastOp::create(builder, loc, copyTy, vec);
+      }
+    }
+    return LLVM::LoadOp::create(builder, loc, copyTy, srcPtr);
+  };
+
   if (srcIsBuffer && !dstIsBuffer) {
     auto [srcRsrc, srcOff] = unpackBuffer(src, srcMemTy);
     Value loaded = ROCDL::RawPtrBufferLoadOp::create(builder, loc, copyTy, srcRsrc, srcOff, zero,
                                                      zero, noAttrs, noAttrs, noAttrs);
-    LLVM::StoreOp::create(builder, loc, loaded, dst);
+    storeToRegSplit(loaded, dst);
   } else if (!srcIsBuffer && dstIsBuffer) {
     auto [dstRsrc, dstOff] = unpackBuffer(dst, dstMemTy);
-    Value loaded = LLVM::LoadOp::create(builder, loc, copyTy, src);
+    Value loaded = loadFromRegSplit(src);
     ROCDL::RawPtrBufferStoreOp::create(builder, loc, loaded, dstRsrc, dstOff, zero, zero, noAttrs,
                                        noAttrs, noAttrs);
   } else {
