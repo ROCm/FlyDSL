@@ -304,14 +304,22 @@ def compile_masked_grouped_fp8_gemm(
                 a_row_local.append(row_local)
                 a_col_local_i32.append(col_local_i32)
 
-            # ── Helper: load A tile to LDS with XOR swizzle ─────────────
-            def load_a_tile(k_tile_idx_py, lds_base):
-                """Load A tile from global to LDS with XOR16 swizzle."""
+            # ── Helper: prefetch A tile (gmem -> regs) ─────────────────
+            def prefetch_a_tile(k_tile_idx_py):
+                """Load A tile from global memory into VGPRs."""
                 base_k_div4 = fx.Index(k_tile_idx_py * tile_k_dwords)
+                parts = []
                 for i in range_constexpr(num_a_loads):
                     row_global = bx_m + a_row_local[i]
                     idx_i32 = group_a_off_div4 + row_global * _k_div4_factor + base_k_div4 + a_col_local_i32[i]
                     a_vec = buffer_ops.buffer_load(a_rsrc, idx_i32, vec_width=4, dtype=T.i32)
+                    parts.append(vector.bitcast(T.i32x4, a_vec))
+                return parts
+
+            # ── Helper: store A regs to LDS with XOR swizzle ───────────
+            def store_a_tile_to_lds(a_parts, lds_base):
+                """Write prefetched A tile from VGPRs into LDS with XOR16 swizzle."""
+                for i in range_constexpr(num_a_loads):
                     lds_store_16b_xor16(
                         arith, vector,
                         lds_memref=lds_a, vec16_ty=T.f8x16,
@@ -320,7 +328,7 @@ def compile_masked_grouped_fp8_gemm(
                         col_local_i32=a_col_local_i32[i],
                         tx_c4=c4_bytes, k_blocks16=k_blocks16,
                         lds_base=lds_base,
-                        vec_part_i32x4=a_vec, elem_bytes=elem_bytes,
+                        vec_part_i32x4=a_parts[i], elem_bytes=elem_bytes,
                     )
 
             # ── Helper: load A K64 pack from LDS with XOR swizzle ────────
@@ -444,8 +452,9 @@ def compile_masked_grouped_fp8_gemm(
                 return current_accs
 
             # ===== Ping-pong K-loop =====
-            # Prologue: load first A tile and B tile
-            load_a_tile(0, lds_base_pong)
+            # Prologue: prefetch first A tile into VGPRs, store to LDS, load B
+            a_regs0 = prefetch_a_tile(0)
+            store_a_tile_to_lds(a_regs0, lds_base_pong)
             b_tile_pong = load_b_tile(fx.Index(0))
             gpu.barrier()
 
@@ -453,27 +462,39 @@ def compile_masked_grouped_fp8_gemm(
             a0_prefetch_pong = lds_load_packs_k64(row_a_lds_base, col_offset_base_bytes, lds_base_pong)
 
             for k_pair in range_constexpr(0, num_k_tiles, 2):
-                # Load next A+B into ping while computing current from pong
+                # Prefetch next A+B to VGPRs (VMEM issued before compute)
                 if k_pair + 1 < num_k_tiles:
-                    load_a_tile(k_pair + 1, lds_base_ping)
+                    a_regs_ping = prefetch_a_tile(k_pair + 1)
                     b_tile_ping = load_b_tile(fx.Index((k_pair + 1) * tile_k))
+
+                # Compute current tile from pong LDS
                 accs = compute_tile(accs, k_pair, lds_base_pong, b_tile_pong,
                                     a0_prefetch=a0_prefetch_pong)
                 a0_prefetch_pong = None
+
+                # Store next A to LDS (ds_write after compute)
+                if k_pair + 1 < num_k_tiles:
+                    store_a_tile_to_lds(a_regs_ping, lds_base_ping)
                 gpu.barrier()
 
-                # Prefetch first A pack from ping
                 if k_pair + 1 < num_k_tiles:
+                    # Prefetch first A pack from ping
                     a0_prefetch_ping = lds_load_packs_k64(
                         row_a_lds_base, col_offset_base_bytes, lds_base_ping)
 
-                    # Load next A+B into pong while computing current from ping
+                    # Prefetch next A+B to VGPRs
                     if k_pair + 2 < num_k_tiles:
-                        load_a_tile(k_pair + 2, lds_base_pong)
+                        a_regs_pong = prefetch_a_tile(k_pair + 2)
                         b_tile_pong = load_b_tile(fx.Index((k_pair + 2) * tile_k))
+
+                    # Compute current tile from ping LDS
                     accs = compute_tile(accs, k_pair + 1, lds_base_ping, b_tile_ping,
                                         a0_prefetch=a0_prefetch_ping)
                     a0_prefetch_ping = None
+
+                    # Store next A to LDS
+                    if k_pair + 2 < num_k_tiles:
+                        store_a_tile_to_lds(a_regs_pong, lds_base_pong)
                     gpu.barrier()
 
                     # Prefetch first A pack from pong for next iteration
