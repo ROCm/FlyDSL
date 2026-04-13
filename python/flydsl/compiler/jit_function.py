@@ -632,6 +632,7 @@ class JitFunction:
         self.cache_manager = None
         self._call_state_cache = {}  # cache_key -> CallState
         self._sig = None  # lazy: set on first call
+        self._target = None  # lazy: GPUTarget resolved once in _ensure_sig
         self._mem_cache = {}
         self._last_compiled = None  # (cache_key, CompiledArtifact) for compile()
 
@@ -640,6 +641,7 @@ class JitFunction:
         if self._sig is not None:
             return
         self._sig = inspect.signature(self.func)
+        self._target = get_backend().target  # resolve once; frozen dataclass, hashable
 
     def _ensure_cache_manager(self):
         if self.manager_key is not None:
@@ -695,7 +697,11 @@ class JitFunction:
         """
         from .jit_argument import _is_constexpr_annotation, _is_type_param_annotation
         sig = self._sig
-        key_parts = []
+        key_parts = [("_target_", self._target)]
+        if self.compile_hints:
+            key_parts.append(("_hints_", tuple(sorted(
+                (k, str(v)) for k, v in self.compile_hints.items()
+            ))))
         for name, arg in bound_args.items():
             param = sig.parameters.get(name)
             ann = param.annotation if param else inspect.Parameter.empty
@@ -746,16 +752,14 @@ class JitFunction:
         if call_state is not None:
             return call_state(args_tuple)
 
-        # Normal path: check caches
-        cached_func = None
-        use_cache = env.runtime.enable_cache
-        if use_cache:
-            cached_func = self._mem_cache.get(cache_key)
-            if cached_func is None and not env.debug.dump_ir:
-                str_key = self._cache_key_to_str(cache_key)
-                cached_func = self.cache_manager.get(str_key) if self.cache_manager else None
-                if cached_func is not None:
-                    self._mem_cache[cache_key] = cached_func
+        # Normal path: check in-process cache first, then optional disk cache.
+        use_disk_cache = env.runtime.enable_cache
+        cached_func = self._mem_cache.get(cache_key)
+        if cached_func is None and use_disk_cache and not env.debug.dump_ir:
+            str_key = self._cache_key_to_str(cache_key)
+            cached_func = self.cache_manager.get(str_key) if self.cache_manager else None
+            if cached_func is not None:
+                self._mem_cache[cache_key] = cached_func
 
         if cached_func is not None:
             # Build CallState via JitArgument registry (same dispatch as compile path)
@@ -825,10 +829,6 @@ class JitFunction:
 
             compiled_module = MlirCompiler.compile(module, arch=backend.target.arch, func_name=self.func.__name__)
 
-            if env.compile.compile_only:
-                print(f"[flydsl] COMPILE_ONLY=1, compilation succeeded (arch={backend.target.arch})")
-                return None
-
             compiled_func = CompiledArtifact(
                 compiled_module,
                 self.func.__name__,
@@ -839,29 +839,33 @@ class JitFunction:
             # flyc.compile() can retrieve it even when caching is disabled.
             self._last_compiled = (cache_key, compiled_func)
 
-            if use_cache:
-                self._mem_cache[cache_key] = compiled_func
-                if self.cache_manager and not env.debug.dump_ir:
-                    str_key = self._cache_key_to_str(cache_key)
-                    self.cache_manager.set(str_key, compiled_func)
+            # Keep compiled artifacts alive within the process even when disk
+            # cache is disabled. This preserves code object lifetime for
+            # profiler/roctracer teardown and enables fast same-process reuse.
+            self._mem_cache[cache_key] = compiled_func
+            if use_disk_cache and self.cache_manager and not env.debug.dump_ir:
+                str_key = self._cache_key_to_str(cache_key)
+                self.cache_manager.set(str_key, compiled_func)
+
+            if env.compile.compile_only:
+                print(f"[flydsl] COMPILE_ONLY=1, compilation succeeded (arch={backend.target.arch})")
+                return None
 
             result = compiled_func(*jit_args)
 
-            # Build CallState so subsequent calls skip DLPack.
-            # Only when caching is enabled -- otherwise compiled_func will be
-            # GC'd and the function pointer inside CallState becomes dangling,
-            # causing a SIGSEGV on the next call with the same cache_key.
-            if use_cache:
-                try:
-                    state = _build_call_state(
-                        sig,
-                        args_tuple,
-                        compiled_func._get_func_exe(),
-                    )
-                    if state is not None:
-                        self._call_state_cache[cache_key] = state
-                except Exception:
-                    pass
+            # Build CallState so subsequent calls skip DLPack. The in-process
+            # CompiledArtifact cache above owns the ExecutionEngine/code object,
+            # so the function pointer remains valid even when disk cache is off.
+            try:
+                state = _build_call_state(
+                    sig,
+                    args_tuple,
+                    compiled_func._get_func_exe(),
+                )
+                if state is not None:
+                    self._call_state_cache[cache_key] = state
+            except Exception:
+                pass
 
             return result
 

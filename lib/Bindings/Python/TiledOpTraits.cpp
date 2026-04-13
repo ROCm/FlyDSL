@@ -96,9 +96,15 @@ LayoutAttr tiledMmaGetTiledThrValLayout(MmaAtomType mmaAtom, LayoutAttr atomLayo
       auto thrSizeI = intTupleProduct(attrBuilder, atomLayoutMNK.getShape().at(i)).getLeafAsInt();
       tileSizeElems.push_back(IntTupleAttr::get(atomShapeI * thrSizeI));
     } else {
-      auto permLayout = cast<LayoutAttr>(permutationMNK.at(i));
-      auto sizeI = intTupleProduct(attrBuilder, permLayout.getShape()).getLeafAsInt();
-      tileSizeElems.push_back(IntTupleAttr::get(sizeI));
+      auto permMode = permutationMNK.at(i);
+      if (auto permLayout = dyn_cast<LayoutAttr>(permMode)) {
+        tileSizeElems.push_back(
+            IntTupleAttr::get(intTupleProduct(attrBuilder, permLayout.getShape()).getLeafAsInt()));
+      } else if (auto permInt = dyn_cast<IntAttr>(permMode)) {
+        tileSizeElems.push_back(IntTupleAttr::get(permInt));
+      } else {
+        llvm_unreachable("unsupported tiled MMA permutation element");
+      }
     }
   }
   IntTupleAttr refShape = IntTupleAttr::get(ArrayAttr::get(ctx, tileSizeElems));
@@ -179,9 +185,15 @@ IntTupleAttr tiledMmaGetTileSizeMNK(MmaAtomType mmaAtom, LayoutAttr atomLayoutMN
       auto thrSizeI = intTupleProduct(attrBuilder, atomLayoutMNK.getShape().at(i)).getLeafAsInt();
       tileSizeElems.push_back(IntTupleAttr::get(atomShapeI * thrSizeI));
     } else {
-      auto permLayout = cast<LayoutAttr>(permutationMNK.at(i));
-      auto sizeI = intTupleProduct(attrBuilder, permLayout.getShape()).getLeafAsInt();
-      tileSizeElems.push_back(IntTupleAttr::get(sizeI));
+      auto permMode = permutationMNK.at(i);
+      if (auto permLayout = dyn_cast<LayoutAttr>(permMode)) {
+        tileSizeElems.push_back(
+            IntTupleAttr::get(intTupleProduct(attrBuilder, permLayout.getShape()).getLeafAsInt()));
+      } else if (auto permInt = dyn_cast<IntAttr>(permMode)) {
+        tileSizeElems.push_back(IntTupleAttr::get(permInt));
+      } else {
+        llvm_unreachable("unsupported tiled MMA permutation element");
+      }
     }
   }
   return IntTupleAttr::get(ArrayAttr::get(ctx, tileSizeElems));

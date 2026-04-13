@@ -696,6 +696,28 @@ struct PyCopyOpUniversalCopyType : PyConcreteType<PyCopyOpUniversalCopyType> {
 };
 
 // ---------------------------------------------------------------------------
+// CopyOpUniversalAtomicType
+// ---------------------------------------------------------------------------
+struct PyCopyOpUniversalAtomicType : PyConcreteType<PyCopyOpUniversalAtomicType> {
+  FLYDSL_REGISTER_TYPE_BINDING(::mlir::fly::CopyOpUniversalAtomicType, "CopyOpUniversalAtomicType");
+
+  static void bindDerived(ClassTy &c) {
+    c.def_static(
+        "get",
+        [](int32_t atomicOp, PyType &valTypeObj, DefaultingPyMlirContext context) {
+          MLIRContext *ctx = unwrap(context.get()->get());
+          auto atomicOpAttr = ::mlir::fly::AtomicOpAttr::get(
+              ctx, static_cast<::mlir::fly::AtomicOp>(atomicOp));
+          return PyCopyOpUniversalAtomicType(
+              context->getRef(),
+              wrap(CopyOpUniversalAtomicType::get(atomicOpAttr, unwrap(valTypeObj))));
+        },
+        "atomic_op"_a, "val_type"_a, nb::kw_only(), "context"_a = nb::none(),
+        "Create a CopyOpUniversalAtomicType with atomic op and value type");
+  }
+};
+
+// ---------------------------------------------------------------------------
 // MmaOpUniversalFMAType
 // ---------------------------------------------------------------------------
 struct PyMmaOpUniversalFMAType : PyConcreteType<PyMmaOpUniversalFMAType> {
@@ -796,6 +818,7 @@ NB_MODULE(_mlirDialectsFly, m) {
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly::PyTiledCopyType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly::PyTiledMmaType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly::PyCopyOpUniversalCopyType::bind(m);
+  ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly::PyCopyOpUniversalAtomicType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly::PyMmaOpUniversalFMAType::bind(m);
 
   m.def(

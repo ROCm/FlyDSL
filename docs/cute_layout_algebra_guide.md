@@ -417,7 +417,7 @@ launch(A_torch, B_torch, C_torch, ..., stream=torch.cuda.Stream())
 | `FLYDSL_DUMP_IR=1` | Dump intermediate MLIR IR |
 | `FLYDSL_DUMP_DIR=/path` | IR dump location |
 | `COMPILE_ONLY=1` | Skip execution, compile only |
-| `FLYDSL_RUNTIME_ENABLE_CACHE=0` | Disable compilation cache |
+| `FLYDSL_RUNTIME_ENABLE_CACHE=0` | Disable disk cache (auto-invalidates on source changes; only needed for C++ pass or non-closure helper changes) |
 | `FLYDSL_RUNTIME_CACHE_DIR=/path` | Cache directory (default: `~/.flydsl/cache/`) |
 
 ---

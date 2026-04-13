@@ -7,6 +7,7 @@ add_mlir_dialect_library(MLIRFlyDialect
   Utils/IntUtils.cpp
   Utils/IntTupleUtils.cpp
   Utils/NormalForm.cpp
+  Utils/PointerUtils.cpp
   Transforms/LayoutLowering.cpp
   Transforms/Canonicalize.cpp
   Transforms/RewriteFuncSignature.cpp
