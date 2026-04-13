@@ -2937,6 +2937,12 @@ static void promoteAllocaToLoopCarried(Operation *topOp) {
     SmallVector<Key> uniqueKeys;
     for (auto &[key, _] : loadsByKey)
       uniqueKeys.push_back(key);
+    // Sort for deterministic loop-carried argument order.
+    llvm::sort(uniqueKeys, [](const Key &a, const Key &b) {
+      if (a.first == b.first)
+        return a.second < b.second;
+      return a.first->isBeforeInBlock(b.first);
+    });
 
     // Build the new scf.for with loop-carried values.
     OpBuilder builder(forOp);
@@ -2976,7 +2982,18 @@ static void promoteAllocaToLoopCarried(Operation *topOp) {
 
     Block &newBody = newForOp.getRegion().front();
 
-    // Map old induction var to new.
+    // Erase the old body's empty scf.yield (from the original init=[] ForOp)
+    // before splicing, since we'll add a new yield with loop-carried values.
+    if (!body.empty() && body.mightHaveTerminator()) {
+      if (auto *term = body.getTerminator())
+        term->erase();
+    }
+
+    // Splice ops from old body to new body first, so RAUW stays within
+    // the same region (avoids cross-region dominance violations).
+    newBody.getOperations().splice(newBody.end(), body.getOperations());
+
+    // Now RAUW: old block args → new block args (ops are in newBody).
     body.getArgument(0).replaceAllUsesWith(newBody.getArgument(0));
 
     // Replace initial loads with region iter args.
@@ -2988,16 +3005,6 @@ static void promoteAllocaToLoopCarried(Operation *topOp) {
         promoted++;
       }
     }
-
-    // Erase the old body's empty scf.yield (from the original init=[] ForOp)
-    // before splicing, since we'll add a new yield with loop-carried values.
-    if (!body.empty() && body.mightHaveTerminator()) {
-      if (auto *term = body.getTerminator())
-        term->erase();
-    }
-
-    // Splice ops from old body to new body.
-    newBody.getOperations().splice(newBody.end(), body.getOperations());
 
     // Build yield values from last stores.
     builder.setInsertionPointToEnd(&newBody);
@@ -3061,16 +3068,17 @@ static void eliminateDeadRegAllocaStores(Operation *topOp) {
     }
   });
 
-  // Erase all PtrStoreOps to allocas that have no loads.
-  int erasedStores = 0;
+  // Collect dead stores first, then erase (walk-and-erase is UB).
+  SmallVector<PtrStoreOp> deadStores;
   topOp->walk([&](PtrStoreOp storeOp) {
     auto [base, offset] = resolveRegAllocaPtr(storeOp.getPtr());
     if (!base) return;
-    if (!hasLoads.contains(base.getOperation())) {
-      storeOp.erase();
-      erasedStores++;
-    }
+    if (!hasLoads.contains(base.getOperation()))
+      deadStores.push_back(storeOp);
   });
+  int erasedStores = static_cast<int>(deadStores.size());
+  for (auto storeOp : deadStores)
+    storeOp.erase();
 
   if (erasedStores > 0)
     llvm::errs() << "[dead-store-elim] erased=" << erasedStores << "\n";
@@ -3151,7 +3159,7 @@ public:
     // cross-iteration patterns to loop-carried values, and eliminate dead
     // stores.  This eliminates AS5 allocas that would otherwise waste VGPRs.
     // Controlled by FLYDSL_REG_ALLOCA_FORWARDING (default: enabled).
-    static bool enableRegAllocaForwarding = []() {
+    bool enableRegAllocaForwarding = []() {
       const char *env = std::getenv("FLYDSL_REG_ALLOCA_FORWARDING");
       return !env || std::string(env) != "0";
     }();

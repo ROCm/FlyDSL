@@ -167,6 +167,8 @@ LogicalResult CopyOpUniversalCopyType::emitAtomCall(OpBuilder &builder, Location
     chunkTy = IntegerType::get(builder.getContext(), chunkBits);
   }
 
+  assert(totalBits >= chunkBits && "copy total bits smaller than chunk size");
+  assert(totalBits % chunkBits == 0 && "copy total bits not divisible by chunk");
   unsigned numChunks = totalBits / chunkBits;
   unsigned chunkBytes = chunkBits / 8;
   auto i8Ty = IntegerType::get(builder.getContext(), 8);

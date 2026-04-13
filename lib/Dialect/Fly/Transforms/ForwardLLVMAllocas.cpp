@@ -256,6 +256,12 @@ static void promoteLLVMAllocaToLoopCarried(Operation *topOp) {
     SmallVector<AllocaKey> uniqueKeys;
     for (auto &[key, _] : loadsByKey)
       uniqueKeys.push_back(key);
+    // Sort for deterministic loop-carried argument order.
+    llvm::sort(uniqueKeys, [](const AllocaKey &a, const AllocaKey &b) {
+      if (a.first == b.first)
+        return a.second < b.second;
+      return a.first->isBeforeInBlock(b.first);
+    });
 
     OpBuilder builder(forOp);
     Location loc = forOp.getLoc();
@@ -300,7 +306,21 @@ static void promoteLLVMAllocaToLoopCarried(Operation *topOp) {
     if (newBody.mightHaveTerminator())
       newBody.getTerminator()->erase();
 
-    // Map old induction variable and existing iter args to new ones.
+    // Get existing yield values from old terminator before erasing.
+    SmallVector<Value> existingYieldValues;
+    if (body.mightHaveTerminator()) {
+      if (auto yieldOp = dyn_cast<scf::YieldOp>(body.getTerminator())) {
+        for (Value v : yieldOp.getResults())
+          existingYieldValues.push_back(v);
+      }
+      body.getTerminator()->erase();
+    }
+
+    // Splice ops from old body to new body first, so RAUW stays within
+    // the same region (avoids cross-region dominance violations).
+    newBody.getOperations().splice(newBody.end(), body.getOperations());
+
+    // Now RAUW: old block args → new block args (ops are in newBody).
     body.getArgument(0).replaceAllUsesWith(newBody.getArgument(0));
     for (size_t i = 0; i < existingIterArgs; ++i)
       body.getArgument(i + 1).replaceAllUsesWith(newBody.getArgument(i + 1));
@@ -314,19 +334,6 @@ static void promoteLLVMAllocaToLoopCarried(Operation *topOp) {
         promoted++;
       }
     }
-
-    // Get existing yield values from old terminator before erasing.
-    SmallVector<Value> existingYieldValues;
-    if (body.mightHaveTerminator()) {
-      if (auto yieldOp = dyn_cast<scf::YieldOp>(body.getTerminator())) {
-        for (Value v : yieldOp.getResults())
-          existingYieldValues.push_back(v);
-      }
-      body.getTerminator()->erase();
-    }
-
-    // Splice remaining ops from old body to new body.
-    newBody.getOperations().splice(newBody.end(), body.getOperations());
 
     // Build new yield: existing accumulator values + promoted alloca values.
     builder.setInsertionPointToEnd(&newBody);
@@ -437,7 +444,7 @@ class FlyForwardLLVMAllocasPass
 public:
   void runOnOperation() override {
     // Controlled by FLYDSL_LLVM_ALLOCA_FORWARDING (default: enabled).
-    static bool enabled = []() {
+    bool enabled = []() {
       const char *env = std::getenv("FLYDSL_LLVM_ALLOCA_FORWARDING");
       return !env || std::string(env) != "0";
     }();

@@ -90,19 +90,23 @@ LogicalResult MmaOpCDNA3_MFMAType::verify(function_ref<InFlightDiagnostic()> emi
            isa<Float8E4M3FNType>(ty);
   };
   if (!isValidElemType(elemTyA)) {
-    return emitError() << "elemTyA must be f16, bf16, f32, f8E4M3FNUZ, f8E5M2FNUZ, got " << elemTyA;
+    return emitError() << "elemTyA must be f16, bf16, f32, i8, f8E4M3FNUZ, "
+                          "f8E5M2FNUZ, f8E4M3FN, got " << elemTyA;
   }
   if (!isValidElemType(elemTyB)) {
-    return emitError() << "elemTyB must be f16, bf16, f32, f8E4M3FNUZ, f8E5M2FNUZ, got " << elemTyB;
+    return emitError() << "elemTyB must be f16, bf16, f32, i8, f8E4M3FNUZ, "
+                          "f8E5M2FNUZ, f8E4M3FN, got " << elemTyB;
   }
   return success();
 }
 
-static bool isFP8(Type ty) {
+/// Match FP8 types including i8 as a bitwise container (preshuffle uses i8
+/// for raw buffer copies that carry FP8 data).
+static bool isFP8OrI8(Type ty) {
   return isa<Float8E4M3FNUZType>(ty) || isa<Float8E4M3FNType>(ty) || ty.isInteger(8);
 }
 static bool isBF8(Type ty) { return isa<Float8E5M2FNUZType>(ty); }
-static bool isF8(Type ty) { return isFP8(ty) || isBF8(ty); }
+static bool isF8(Type ty) { return isFP8OrI8(ty) || isBF8(ty); }
 
 static Type getMfmaABType(MLIRContext *ctx, Type elemTy, int32_t k = 0) {
   if (elemTy.isF32())
@@ -234,13 +238,13 @@ LogicalResult MmaOpCDNA3_MFMAType::emitAtomCall(OpBuilder &builder, Location loc
   DISPATCH_MFMA(16, 8, elemTyA.isBF16(), mfma_f32_16x16x8bf16)
   DISPATCH_MFMA(16, 16, elemTyA.isBF16(), mfma_f32_16x16x16bf16_1k)
 
-  DISPATCH_MFMA(16, 32, isFP8(elemTyA) && isFP8(elemTyB), mfma_f32_16x16x32_fp8_fp8)
-  DISPATCH_MFMA(16, 32, isFP8(elemTyA) && isBF8(elemTyB), mfma_f32_16x16x32_fp8_bf8)
-  DISPATCH_MFMA(16, 32, isBF8(elemTyA) && isFP8(elemTyB), mfma_f32_16x16x32_bf8_fp8)
+  DISPATCH_MFMA(16, 32, isFP8OrI8(elemTyA) && isFP8OrI8(elemTyB), mfma_f32_16x16x32_fp8_fp8)
+  DISPATCH_MFMA(16, 32, isFP8OrI8(elemTyA) && isBF8(elemTyB), mfma_f32_16x16x32_fp8_bf8)
+  DISPATCH_MFMA(16, 32, isBF8(elemTyA) && isFP8OrI8(elemTyB), mfma_f32_16x16x32_bf8_fp8)
   DISPATCH_MFMA(16, 32, isBF8(elemTyA) && isBF8(elemTyB), mfma_f32_16x16x32_bf8_bf8)
-  DISPATCH_MFMA(32, 16, isFP8(elemTyA) && isFP8(elemTyB), mfma_f32_32x32x16_fp8_fp8)
-  DISPATCH_MFMA(32, 16, isFP8(elemTyA) && isBF8(elemTyB), mfma_f32_32x32x16_fp8_bf8)
-  DISPATCH_MFMA(32, 16, isBF8(elemTyA) && isFP8(elemTyB), mfma_f32_32x32x16_bf8_fp8)
+  DISPATCH_MFMA(32, 16, isFP8OrI8(elemTyA) && isFP8OrI8(elemTyB), mfma_f32_32x32x16_fp8_fp8)
+  DISPATCH_MFMA(32, 16, isFP8OrI8(elemTyA) && isBF8(elemTyB), mfma_f32_32x32x16_fp8_bf8)
+  DISPATCH_MFMA(32, 16, isBF8(elemTyA) && isFP8OrI8(elemTyB), mfma_f32_32x32x16_bf8_fp8)
   DISPATCH_MFMA(32, 16, isBF8(elemTyA) && isBF8(elemTyB), mfma_f32_32x32x16_bf8_bf8)
 
 #undef DISPATCH_MFMA
@@ -294,13 +298,13 @@ LogicalResult MmaOpCDNA3_MFMAType::emitAtomCallSsa(OpBuilder &builder, Location 
   DISPATCH_MFMA_SSA(16, 8, elemTyA.isBF16(), mfma_f32_16x16x8bf16)
   DISPATCH_MFMA_SSA(16, 16, elemTyA.isBF16(), mfma_f32_16x16x16bf16_1k)
 
-  DISPATCH_MFMA_SSA(16, 32, isFP8(elemTyA) && isFP8(elemTyB), mfma_f32_16x16x32_fp8_fp8)
-  DISPATCH_MFMA_SSA(16, 32, isFP8(elemTyA) && isBF8(elemTyB), mfma_f32_16x16x32_fp8_bf8)
-  DISPATCH_MFMA_SSA(16, 32, isBF8(elemTyA) && isFP8(elemTyB), mfma_f32_16x16x32_bf8_fp8)
+  DISPATCH_MFMA_SSA(16, 32, isFP8OrI8(elemTyA) && isFP8OrI8(elemTyB), mfma_f32_16x16x32_fp8_fp8)
+  DISPATCH_MFMA_SSA(16, 32, isFP8OrI8(elemTyA) && isBF8(elemTyB), mfma_f32_16x16x32_fp8_bf8)
+  DISPATCH_MFMA_SSA(16, 32, isBF8(elemTyA) && isFP8OrI8(elemTyB), mfma_f32_16x16x32_bf8_fp8)
   DISPATCH_MFMA_SSA(16, 32, isBF8(elemTyA) && isBF8(elemTyB), mfma_f32_16x16x32_bf8_bf8)
-  DISPATCH_MFMA_SSA(32, 16, isFP8(elemTyA) && isFP8(elemTyB), mfma_f32_32x32x16_fp8_fp8)
-  DISPATCH_MFMA_SSA(32, 16, isFP8(elemTyA) && isBF8(elemTyB), mfma_f32_32x32x16_fp8_bf8)
-  DISPATCH_MFMA_SSA(32, 16, isBF8(elemTyA) && isFP8(elemTyB), mfma_f32_32x32x16_bf8_fp8)
+  DISPATCH_MFMA_SSA(32, 16, isFP8OrI8(elemTyA) && isFP8OrI8(elemTyB), mfma_f32_32x32x16_fp8_fp8)
+  DISPATCH_MFMA_SSA(32, 16, isFP8OrI8(elemTyA) && isBF8(elemTyB), mfma_f32_32x32x16_fp8_bf8)
+  DISPATCH_MFMA_SSA(32, 16, isBF8(elemTyA) && isFP8OrI8(elemTyB), mfma_f32_32x32x16_bf8_fp8)
   DISPATCH_MFMA_SSA(32, 16, isBF8(elemTyA) && isBF8(elemTyB), mfma_f32_32x32x16_bf8_bf8)
 
 #undef DISPATCH_MFMA_SSA
