@@ -448,8 +448,8 @@ public:
     for (auto leaf : flatLeaves) {
       auto intAttr = leaf.extractIntFromLeaf();
       if (intAttr.isStatic()) {
-        results.push_back(arith::ConstantIntOp::create(
-            rewriter, loc, intAttr.getValue(), intAttr.getWidth()));
+        results.push_back(arith::ConstantIntOp::create(rewriter, loc, intAttr.getValue(),
+                                                       std::max(32, intAttr.getWidth())));
       } else {
         results.push_back(*dyncIter++);
       }

@@ -310,7 +310,7 @@ FLY_INFER_RETURN_TYPES(GetLeavesOp) {
     auto intAttr = leaf.extractIntFromLeaf();
     if (dynamicOnly && intAttr.isStatic())
       continue;
-    inferredReturnTypes.push_back(IntegerType::get(context, intAttr.getWidth()));
+    inferredReturnTypes.push_back(IntegerType::get(context, std::max(32, intAttr.getWidth())));
   }
   return success();
 }
