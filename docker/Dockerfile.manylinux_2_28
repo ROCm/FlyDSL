@@ -1,0 +1,57 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+#
+# Multi-stage Dockerfile for building manylinux_2_28 wheels with ROCm support.
+# Strategy (same as pytorch/manylinux2_28-builder:rocm*):
+#   Stage 1: Copy Python interpreters from quay.io/pypa/manylinux_2_28_x86_64
+#   Stage 2: Use rocm/dev-almalinux-8 (AlmaLinux 8 = glibc 2.28) with full ROCm SDK
+#   Merge:   Python toolchains + ROCm + build deps in one image
+#
+# Build:
+#   docker build -f docker/Dockerfile.manylinux_2_28 \
+#     --build-arg ROCM_VERSION=7.2 \
+#     -t flydsl/manylinux_2_28:rocm7.2 .
+#
+# Supported ROCm versions: 6.2, 6.3, 6.4, 7.0, 7.1, 7.2
+
+ARG ROCM_VERSION=7.2
+
+# ---------------------------------------------------------------------------
+# Stage 1: Grab pre-built CPython interpreters from the official manylinux image
+# ---------------------------------------------------------------------------
+FROM quay.io/pypa/manylinux_2_28_x86_64 AS python-source
+
+# ---------------------------------------------------------------------------
+# Stage 2: ROCm + AlmaLinux 8 (glibc 2.28)
+# ---------------------------------------------------------------------------
+FROM rocm/dev-almalinux-8:${ROCM_VERSION}-complete
+
+# /opt/python/cpXYZ-cpXYZ are symlinks to /opt/_internal/cpython-X.Y.Z
+# and pip shebangs point to /opt/_internal/... paths, so copy both.
+COPY --from=python-source /opt/_internal /opt/_internal
+COPY --from=python-source /opt/python /opt/python
+# Copy patchelf binary (statically linked, required by auditwheel)
+COPY --from=python-source /usr/local/bin/patchelf /usr/local/bin/patchelf
+
+# Install build dependencies
+RUN dnf install -y \
+      ninja-build \
+      gcc \
+      gcc-c++ \
+      make \
+      git \
+      zlib-devel \
+      openssl-devel \
+      libffi-devel \
+    && dnf clean all
+
+# Install cmake and ninja via pip (dnf versions are too old for LLVM)
+RUN /opt/python/cp312-cp312/bin/pip install cmake ninja
+
+# Put python3.12 and cmake on PATH
+ENV PATH="/opt/python/cp312-cp312/bin:${PATH}"
+
+WORKDIR /workspace
+
+LABEL maintainer="FlyDSL Contributors"
+LABEL description="manylinux_2_28 + ROCm wheel builder for FlyDSL"
