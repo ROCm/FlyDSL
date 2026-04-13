@@ -55,6 +55,7 @@ jobs:
     permissions:
       id-token: write
       contents: read
+      packages: write
 
   test:
     needs: [validate_tag, build]
