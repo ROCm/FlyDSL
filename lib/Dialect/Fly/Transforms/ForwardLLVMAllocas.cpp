@@ -6,6 +6,7 @@
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/Pass/Pass.h"
+#include "flydsl/Dialect/Fly/Utils/AllocaPromotion.h"
 #include "llvm/ADT/MapVector.h"
 #include "llvm/Support/Debug.h"
 
@@ -87,7 +88,7 @@ static std::pair<LLVM::AllocaOp, int64_t> resolveLLVMAllocaPtr(Value ptr) {
   return {allocaOp, byteOffset};
 }
 
-using AllocaKey = std::pair<Operation *, int64_t>;
+using fly::AllocaKey;
 
 // ── Intra-block store→load forwarding ───────────────────────────────
 
@@ -188,195 +189,51 @@ static void forwardLLVMAllocaStores(Operation *topOp) {
 
 // ── Cross-iteration promotion to loop-carried values ────────────────
 
+/// Build a GEP to (allocaOp + byteOffset) using i8 element type.
+static Value buildAllocaGEP(OpBuilder &builder, Location loc,
+                            LLVM::AllocaOp allocaOp, int64_t byteOffset) {
+  if (byteOffset == 0)
+    return allocaOp.getResult();
+  Value offset = arith::ConstantIntOp::create(builder, loc, byteOffset, 32);
+  return LLVM::GEPOp::create(builder, loc, allocaOp.getType(),
+                             builder.getI8Type(), allocaOp.getResult(),
+                             ValueRange{offset});
+}
+
 static void promoteLLVMAllocaToLoopCarried(Operation *topOp) {
-  SmallVector<scf::ForOp> loops;
-  topOp->walk([&](scf::ForOp forOp) { loops.push_back(forOp); });
-  // Process inner-most loops first: walk visits in pre-order (parents before
-  // children), so reversing gives us post-order.  This ensures that when we
-  // erase and replace a ForOp, no child loops remain in the worklist.
-  std::reverse(loops.begin(), loops.end());
-
-  int promoted = 0;
-  for (auto forOp : loops) {
-    Block &body = forOp.getRegion().front();
-
-    // Collect "initial loads": LLVM::LoadOps from AS5 allocas that appear
-    // before any LLVM::StoreOp to the same (alloca, byte_offset).
-    SmallVector<std::pair<AllocaKey, LLVM::LoadOp>> initialLoads;
-    DenseSet<AllocaKey> storedKeys;
-
-    for (auto &op : body) {
-      if (auto storeOp = dyn_cast<LLVM::StoreOp>(&op)) {
-        auto [alloca, offset] = resolveLLVMAllocaPtr(storeOp.getAddr());
-        if (alloca)
-          storedKeys.insert({alloca.getOperation(), offset});
-        continue;
-      }
-      if (auto loadOp = dyn_cast<LLVM::LoadOp>(&op)) {
-        auto [alloca, offset] = resolveLLVMAllocaPtr(loadOp.getAddr());
-        if (!alloca)
-          continue;
-        AllocaKey key = {alloca.getOperation(), offset};
-        if (!storedKeys.contains(key))
-          initialLoads.push_back({key, loadOp});
-        continue;
-      }
-    }
-
-    if (initialLoads.empty())
-      continue;
-
-    // Find the LAST LLVM::StoreOp in the body for each (alloca, offset).
-    DenseMap<AllocaKey, LLVM::StoreOp> lastStore;
-    for (auto it = body.rbegin(); it != body.rend(); ++it) {
-      if (auto storeOp = dyn_cast<LLVM::StoreOp>(&*it)) {
-        auto [alloca, offset] = resolveLLVMAllocaPtr(storeOp.getAddr());
-        if (!alloca)
-          continue;
-        AllocaKey key = {alloca.getOperation(), offset};
-        if (!lastStore.contains(key))
-          lastStore[key] = storeOp;
-      }
-    }
-
-    // Filter: keep only initial loads with a matching last store and
-    // compatible types.
-    SmallVector<std::pair<AllocaKey, LLVM::LoadOp>> validLoads;
-    for (auto &[key, loadOp] : initialLoads) {
-      auto it = lastStore.find(key);
-      if (it == lastStore.end())
-        continue;
-      if (it->second.getValue().getType() != loadOp.getResult().getType())
-        continue;
-      validLoads.push_back({key, loadOp});
-    }
-
-    if (validLoads.empty())
-      continue;
-
-    // De-duplicate by key.
-    DenseMap<AllocaKey, SmallVector<LLVM::LoadOp>> loadsByKey;
-    for (auto &[key, loadOp] : validLoads)
-      loadsByKey[key].push_back(loadOp);
-
-    SmallVector<AllocaKey> uniqueKeys;
-    for (auto &[key, _] : loadsByKey)
-      uniqueKeys.push_back(key);
-    // Sort for deterministic loop-carried argument order.
-    llvm::sort(uniqueKeys, [](const AllocaKey &a, const AllocaKey &b) {
-      if (a.first == b.first)
-        return a.second < b.second;
-      return a.first->isBeforeInBlock(b.first);
-    });
-
-    OpBuilder builder(forOp);
-    Location loc = forOp.getLoc();
-
-    // Collect existing init values.
-    SmallVector<Value> allInitValues;
-    for (Value init : forOp.getInitArgs())
-      allInitValues.push_back(init);
-    size_t existingIterArgs = forOp.getNumRegionIterArgs();
-
-    // Create prologue loads (before the loop) for each promoted key.
-    // Use i8-typed GEPs from the alloca base for simplicity.
-    auto i8Ty = builder.getI8Type();
-    for (auto &key : uniqueKeys) {
-      LLVM::LoadOp firstLoad = loadsByKey[key].front();
-      auto allocaOp = cast<LLVM::AllocaOp>(key.first);
-      int64_t byteOffset = key.second;
-
-      Value ptr;
-      if (byteOffset == 0) {
-        ptr = allocaOp.getResult();
-      } else {
-        Value offset =
-            arith::ConstantIntOp::create(builder, loc, byteOffset, 32);
-        ptr = LLVM::GEPOp::create(builder, loc, allocaOp.getType(), i8Ty,
-                                  allocaOp.getResult(), ValueRange{offset});
-      }
-      Value initVal = LLVM::LoadOp::create(builder, loc,
-                                           firstLoad.getResult().getType(),
-                                           ptr);
-      allInitValues.push_back(initVal);
-    }
-
-    // Create new ForOp with existing + promoted iter_args.
-    auto newForOp = scf::ForOp::create(builder, loc, forOp.getLowerBound(),
-                                       forOp.getUpperBound(), forOp.getStep(),
-                                       allInitValues);
-
-    Block &newBody = newForOp.getRegion().front();
-
-    // Erase auto-generated yield in the new body (if present).
-    if (newBody.mightHaveTerminator())
-      newBody.getTerminator()->erase();
-
-    // Get existing yield values from old terminator before erasing.
-    SmallVector<Value> existingYieldValues;
-    if (body.mightHaveTerminator()) {
-      if (auto yieldOp = dyn_cast<scf::YieldOp>(body.getTerminator())) {
-        for (Value v : yieldOp.getResults())
-          existingYieldValues.push_back(v);
-      }
-      body.getTerminator()->erase();
-    }
-
-    // Splice ops from old body to new body first, so RAUW stays within
-    // the same region (avoids cross-region dominance violations).
-    newBody.getOperations().splice(newBody.end(), body.getOperations());
-
-    // Now RAUW: old block args → new block args (ops are in newBody).
-    body.getArgument(0).replaceAllUsesWith(newBody.getArgument(0));
-    for (size_t i = 0; i < existingIterArgs; ++i)
-      body.getArgument(i + 1).replaceAllUsesWith(newBody.getArgument(i + 1));
-
-    // Replace initial loads with new iter args.
-    for (size_t i = 0; i < uniqueKeys.size(); ++i) {
-      Value iterArg = newBody.getArgument(existingIterArgs + 1 + i);
-      for (LLVM::LoadOp loadOp : loadsByKey[uniqueKeys[i]]) {
-        loadOp.getResult().replaceAllUsesWith(iterArg);
-        loadOp.erase();
-        promoted++;
-      }
-    }
-
-    // Build new yield: existing accumulator values + promoted alloca values.
-    builder.setInsertionPointToEnd(&newBody);
-    SmallVector<Value> yieldValues = existingYieldValues;
-    for (auto &key : uniqueKeys)
-      yieldValues.push_back(lastStore[key].getValue());
-    scf::YieldOp::create(builder, loc, yieldValues);
-
-    // Replace old ForOp results with new ones.
-    for (size_t i = 0; i < forOp.getNumResults(); ++i)
-      forOp.getResult(i).replaceAllUsesWith(newForOp.getResult(i));
-    forOp.erase();
-
-    // After the loop, store the final promoted values back to the allocas
-    // so that epilogue code can read them.
-    builder.setInsertionPointAfter(newForOp);
-    for (size_t i = 0; i < uniqueKeys.size(); ++i) {
-      auto &key = uniqueKeys[i];
-      auto allocaOp = cast<LLVM::AllocaOp>(key.first);
-      int64_t byteOffset = key.second;
-
-      Value ptr;
-      if (byteOffset == 0) {
-        ptr = allocaOp.getResult();
-      } else {
-        Value offset =
-            arith::ConstantIntOp::create(builder, loc, byteOffset, 32);
-        ptr = LLVM::GEPOp::create(builder, loc, allocaOp.getType(), i8Ty,
-                                  allocaOp.getResult(), ValueRange{offset});
-      }
-      LLVM::StoreOp::create(builder, loc,
-                            newForOp.getResult(existingIterArgs + i), ptr);
-    }
-  }
-
-  LLVM_DEBUG(if (promoted > 0) llvm::dbgs()
-             << "[llvm-alloca-to-loop-carried] promoted=" << promoted << "\n");
+  fly::AllocaPromotionHooks hooks;
+  hooks.resolvePtr = [](Value ptr) -> std::pair<Operation *, int64_t> {
+    auto [alloca, offset] = resolveLLVMAllocaPtr(ptr);
+    if (!alloca)
+      return {nullptr, -1};
+    return {alloca.getOperation(), offset};
+  };
+  hooks.tryGetStore = [](Operation &op)
+      -> std::optional<std::pair<Value, Value>> {
+    if (auto storeOp = dyn_cast<LLVM::StoreOp>(&op))
+      return std::pair{storeOp.getAddr(), storeOp.getValue()};
+    return std::nullopt;
+  };
+  hooks.tryGetLoad = [](Operation &op)
+      -> std::optional<std::pair<Value, Value>> {
+    if (auto loadOp = dyn_cast<LLVM::LoadOp>(&op))
+      return std::pair{loadOp.getAddr(), loadOp.getResult()};
+    return std::nullopt;
+  };
+  hooks.createPrologueLoad = [](OpBuilder &builder, Location loc,
+                                const fly::PromotedSlot &slot) -> Value {
+    auto allocaOp = cast<LLVM::AllocaOp>(slot.key.first);
+    Value ptr = buildAllocaGEP(builder, loc, allocaOp, slot.key.second);
+    return LLVM::LoadOp::create(builder, loc, slot.valueType, ptr);
+  };
+  hooks.createEpilogueStore = [](OpBuilder &builder, Location loc,
+                                 Value finalVal,
+                                 const fly::PromotedSlot &slot) {
+    auto allocaOp = cast<LLVM::AllocaOp>(slot.key.first);
+    Value ptr = buildAllocaGEP(builder, loc, allocaOp, slot.key.second);
+    LLVM::StoreOp::create(builder, loc, finalVal, ptr);
+  };
+  fly::promoteAllocasToLoopCarried(topOp, hooks);
 }
 
 // ── Dead AS5 alloca elimination ─────────────────────────────────────
