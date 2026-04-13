@@ -257,6 +257,9 @@ main() {
   mkdir -p dist
 
   if [[ "${SKIP_BUILD}" != "1" ]]; then
+    # Initialize submodules once before parallel builds to avoid git race conditions.
+    git -C "${REPO_ROOT}" submodule update --init --recursive
+
     rm -rf dist
     mkdir -p dist
 
