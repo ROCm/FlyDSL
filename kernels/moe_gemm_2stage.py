@@ -841,23 +841,23 @@ def compile_moe_gemm1(
                             else:
                                 av = _i64x2_to_v8bf16(a0, a1)
                                 bv = _i64x2_to_v8bf16(b0, b1)
-                            return mfma_fn(mfma_res_ty, [av, bv, acc_in, 0, 0, 0])
+                            return mfma_fn(mfma_res_ty, av, bv, acc_in, 0, 0, 0).result
                         if is_f16:
                             a0v = _i64_to_v4f16(a0)
                             a1v = _i64_to_v4f16(a1)
                             b0v = _i64_to_v4f16(b0)
                             b1v = _i64_to_v4f16(b1)
-                            acc_mid = mfma_fn(mfma_res_ty, [a0v, b0v, acc_in, 0, 0, 0])
-                            return mfma_fn(mfma_res_ty, [a1v, b1v, acc_mid, 0, 0, 0])
+                            acc_mid = mfma_fn(mfma_res_ty, a0v, b0v, acc_in, 0, 0, 0).result
+                            return mfma_fn(mfma_res_ty, a1v, b1v, acc_mid, 0, 0, 0).result
                         if is_bf16:
                             a0v = _i64_to_v4i16(a0)
                             a1v = _i64_to_v4i16(a1)
                             b0v = _i64_to_v4i16(b0)
                             b1v = _i64_to_v4i16(b1)
-                            acc_mid = mfma_fn(mfma_res_ty, [a0v, b0v, acc_in, 0, 0, 0])
-                            return mfma_fn(mfma_res_ty, [a1v, b1v, acc_mid, 0, 0, 0])
-                        acc_mid = mfma_fn(mfma_res_ty, [a0, b0, acc_in, 0, 0, 0])
-                        return mfma_fn(mfma_res_ty, [a1, b1, acc_mid, 0, 0, 0])
+                            acc_mid = mfma_fn(mfma_res_ty, a0v, b0v, acc_in, 0, 0, 0).result
+                            return mfma_fn(mfma_res_ty, a1v, b1v, acc_mid, 0, 0, 0).result
+                        acc_mid = mfma_fn(mfma_res_ty, a0, b0, acc_in, 0, 0, 0).result
+                        return mfma_fn(mfma_res_ty, a1, b1, acc_mid, 0, 0, 0).result
 
                     def _acc_scaled_f32(f32_acc_vec, f32_partial_vec, scale_val):
                         """MFMA f32 partial -> scale -> add to f32 accumulator via math.fma on vector."""
@@ -2230,23 +2230,23 @@ def compile_moe_gemm2(
                             else:
                                 av = _i64x2_to_v8bf16(a0, a1)
                                 bv = _i64x2_to_v8bf16(b0, b1)
-                            return mfma_fn(mfma_res_ty, [av, bv, acc0, 0, 0, 0])
+                            return mfma_fn(mfma_res_ty, av, bv, acc0, 0, 0, 0).result
                         if is_f16:
                             a0v = _i64_to_v4f16(a0)
                             a1v = _i64_to_v4f16(a1)
                             b0v = _i64_to_v4f16(b0)
                             b1v = _i64_to_v4f16(b1)
-                            acc1 = mfma_fn(mfma_res_ty, [a0v, b0v, acc0, 0, 0, 0])
-                            return mfma_fn(mfma_res_ty, [a1v, b1v, acc1, 0, 0, 0])
+                            acc1 = mfma_fn(mfma_res_ty, a0v, b0v, acc0, 0, 0, 0).result
+                            return mfma_fn(mfma_res_ty, a1v, b1v, acc1, 0, 0, 0).result
                         if is_bf16:
                             a0v = _i64_to_v4i16(a0)
                             a1v = _i64_to_v4i16(a1)
                             b0v = _i64_to_v4i16(b0)
                             b1v = _i64_to_v4i16(b1)
-                            acc1 = mfma_fn(mfma_res_ty, [a0v, b0v, acc0, 0, 0, 0])
-                            return mfma_fn(mfma_res_ty, [a1v, b1v, acc1, 0, 0, 0])
-                        acc1 = mfma_fn(mfma_res_ty, [a0, b0, acc0, 0, 0, 0])
-                        return mfma_fn(mfma_res_ty, [a1, b1, acc1, 0, 0, 0])
+                            acc1 = mfma_fn(mfma_res_ty, a0v, b0v, acc0, 0, 0, 0).result
+                            return mfma_fn(mfma_res_ty, a1v, b1v, acc1, 0, 0, 0).result
+                        acc1 = mfma_fn(mfma_res_ty, a0, b0, acc0, 0, 0, 0).result
+                        return mfma_fn(mfma_res_ty, a1, b1, acc1, 0, 0, 0).result
 
                     def _acc_scaled_f32(f32_acc_vec, f32_partial_vec, scale_val):
                         """MFMA f32 partial -> scale -> add to f32 accumulator via math.fma on vector."""

@@ -250,7 +250,6 @@ def _pack_i32_pair_to_i64(lo, hi, vector):
     return vector.extract(v64, static_position=[0], dynamic_position=[])
 
 
-
 def _i8x4_in_i32_to_bf16x4_i64(val_i32, arith, vector, scale_val=None):
     """Convert one i32 (4 signed int8 bytes) to 4 bf16 packed as i64.
 
@@ -687,14 +686,10 @@ __all__ = [
     "make_preshuffle_b_layout",
     "make_preshuffle_scale_layout",
     "load_b_pack_k32",
-    "load_b_raw_w4a16",
-    "unpack_b_w4a16",
-    "load_b_raw_w4a16_groupwise",
-    "unpack_b_w4a16_groupwise",
-    "extract_bf16_scale",
     "split_row_major_2d",
     "swizzle_xor16",
     "tile_chunk_coord_i32",
+    "unpack_b_w4a16",
 ]
 
 
