@@ -29,24 +29,13 @@ modules (`arith`, `vector`, `gpu`) and the `range_constexpr` iterator.
 
 from __future__ import annotations
 
-from contextlib import contextmanager
 from typing import Callable
 
 from flydsl._mlir import ir
 import flydsl.expr as fx
 from flydsl.expr.typing import T
 
-
-@contextmanager
-def _if_then(if_op, scf):
-    """Compat helper for SCF IfOp then-region across old/new Python APIs."""
-    with ir.InsertionPoint(if_op.then_block):
-        try:
-            yield if_op.then_block
-        finally:
-            blk = if_op.then_block
-            if (not blk.operations) or not isinstance(blk.operations[-1], scf.YieldOp):
-                scf.YieldOp([])
+from kernels.kernels_common import _if_then
 
 
 def default_epilog(
