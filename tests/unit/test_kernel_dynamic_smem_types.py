@@ -18,7 +18,7 @@ import flydsl.expr as fx
 @flyc.kernel
 def _smem_probe_kernel():
     # Keep the kernel minimal: this test focuses on launch-time smem typing.
-    pass
+    fx.printf("[smem_probe] tid={}", fx.thread_idx.x)
 
 
 @flyc.jit
