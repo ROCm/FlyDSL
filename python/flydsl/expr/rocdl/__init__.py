@@ -329,6 +329,7 @@ def lds_transpose_load(result_type, lds_memref, elem_offset, elem_bytes):
 
 # ── New high-level helpers from universal.py ──────────────────────────
 from .universal import *  # noqa: F401,F403
+from .inline_asm import *  # noqa: F401,F403
 
 
 # ── Wrappers: accept DSL Numeric args (fx.Int32, fx.Float32, etc.) ─────────
@@ -363,48 +364,5 @@ def raw_ptr_buffer_load_lds(rsrc, lds_ptr, size, voffset, soffset, offset, aux, 
     return _op(_to_ir(rsrc), _to_ir(lds_ptr), _to_ir(size), _to_ir(voffset),
                _to_ir(soffset), _to_ir(offset), _to_ir(aux), **kw)
 
-
-def cvt_off_f32_i4(src_i32, byte_sel=None):
-    """gfx9xx: v_cvt_off_f32_i4 — convert low nibble (bits[3:0]) to f32.
-
-    With byte_sel=0..3, uses SDWA to select the byte before conversion,
-    avoiding an explicit shift.  byte_sel=None uses the plain VOP1 form.
-    """
-    from ..._mlir.dialects import llvm as _llvm
-    from ..._mlir import ir
-
-    if byte_sel is not None:
-        sel = ["BYTE_0", "BYTE_1", "BYTE_2", "BYTE_3"][int(byte_sel)]
-        return _llvm.inline_asm(
-            ir.F32Type.get(),
-            [_to_ir(src_i32)],
-            f"v_cvt_off_f32_i4_sdwa $0, $1 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:{sel}",
-            "=v,v",
-            has_side_effects=False,
-        )
-    return _llvm.inline_asm(
-        ir.F32Type.get(),
-        [_to_ir(src_i32)],
-        "v_cvt_off_f32_i4 $0, $1",
-        "=v,v",
-        has_side_effects=False,
-    )
-
-
-def cvt_pk_bf16_f32(src_a_f32, src_b_f32):
-    """gfx950: v_cvt_pk_bf16_f32 vdst, vsrc0, vsrc1.
-
-    Pack two f32 values into 2xbf16 in i32.
-    dst[15:0] = bf16(src_a), dst[31:16] = bf16(src_b).
-    """
-    from ..._mlir.dialects import llvm as _llvm
-    from ..._mlir import ir
-    return _llvm.inline_asm(
-        ir.IntegerType.get_signless(32),
-        [_to_ir(src_a_f32), _to_ir(src_b_f32)],
-        "v_cvt_pk_bf16_f32 $0, $1, $2",
-        "=v,v,v",
-        has_side_effects=False,
-    )
 
 
