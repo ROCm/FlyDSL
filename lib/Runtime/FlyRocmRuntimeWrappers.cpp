@@ -19,6 +19,12 @@
 #include "mlir/ExecutionEngine/CRunnerUtils.h"
 #include "hip/hip_runtime.h"
 
+#ifdef _WIN32
+#define FLY_RUNTIME_EXPORT __declspec(dllexport)
+#else
+#define FLY_RUNTIME_EXPORT __attribute__((visibility("default")))
+#endif
+
 #define HIP_REPORT_IF_ERROR(expr)                                              \
   [](hipError_t result) {                                                      \
     if (!result)                                                               \
@@ -31,31 +37,31 @@
 
 thread_local static int32_t defaultDevice = 0;
 
-extern "C" hipModule_t mgpuModuleLoad(void *data, size_t /*gpuBlobSize*/) {
+extern "C" FLY_RUNTIME_EXPORT hipModule_t mgpuModuleLoad(void *data, size_t /*gpuBlobSize*/) {
   hipModule_t module = nullptr;
   HIP_REPORT_IF_ERROR(hipModuleLoadData(&module, data));
   return module;
 }
 
-extern "C" hipModule_t mgpuModuleLoadJIT(void *data, int optLevel) {
+extern "C" FLY_RUNTIME_EXPORT hipModule_t mgpuModuleLoadJIT(void *data, int optLevel) {
   (void)data;
   (void)optLevel;
   assert(false && "This function is not available in HIP.");
   return nullptr;
 }
 
-extern "C" void mgpuModuleUnload(hipModule_t module) {
+extern "C" FLY_RUNTIME_EXPORT void mgpuModuleUnload(hipModule_t module) {
   HIP_REPORT_IF_ERROR(hipModuleUnload(module));
 }
 
-extern "C" hipFunction_t mgpuModuleGetFunction(hipModule_t module,
+extern "C" FLY_RUNTIME_EXPORT hipFunction_t mgpuModuleGetFunction(hipModule_t module,
                                                const char *name) {
   hipFunction_t function = nullptr;
   HIP_REPORT_IF_ERROR(hipModuleGetFunction(&function, module, name));
   return function;
 }
 
-extern "C" void mgpuLaunchKernel(hipFunction_t function, intptr_t gridX,
+extern "C" FLY_RUNTIME_EXPORT void mgpuLaunchKernel(hipFunction_t function, intptr_t gridX,
                                  intptr_t gridY, intptr_t gridZ,
                                  intptr_t blockX, intptr_t blockY,
                                  intptr_t blockZ, int32_t smem,
@@ -66,7 +72,7 @@ extern "C" void mgpuLaunchKernel(hipFunction_t function, intptr_t gridX,
                                             stream, params, extra));
 }
 
-extern "C" void mgpuLaunchClusterKernel(hipFunction_t function,
+extern "C" FLY_RUNTIME_EXPORT void mgpuLaunchClusterKernel(hipFunction_t function,
                                         intptr_t clusterX, intptr_t clusterY,
                                         intptr_t clusterZ,
                                         intptr_t gridX, intptr_t gridY,
@@ -135,76 +141,76 @@ extern "C" void mgpuLaunchClusterKernel(hipFunction_t function,
 #endif
 }
 
-extern "C" hipStream_t mgpuStreamCreate() {
+extern "C" FLY_RUNTIME_EXPORT hipStream_t mgpuStreamCreate() {
   hipStream_t stream = nullptr;
   HIP_REPORT_IF_ERROR(hipStreamCreate(&stream));
   return stream;
 }
 
-extern "C" void mgpuStreamDestroy(hipStream_t stream) {
+extern "C" FLY_RUNTIME_EXPORT void mgpuStreamDestroy(hipStream_t stream) {
   HIP_REPORT_IF_ERROR(hipStreamDestroy(stream));
 }
 
-extern "C" void mgpuStreamSynchronize(hipStream_t stream) {
+extern "C" FLY_RUNTIME_EXPORT void mgpuStreamSynchronize(hipStream_t stream) {
   HIP_REPORT_IF_ERROR(hipStreamSynchronize(stream));
 }
 
-extern "C" void mgpuStreamWaitEvent(hipStream_t stream, hipEvent_t event) {
+extern "C" FLY_RUNTIME_EXPORT void mgpuStreamWaitEvent(hipStream_t stream, hipEvent_t event) {
   HIP_REPORT_IF_ERROR(hipStreamWaitEvent(stream, event, /*flags=*/0));
 }
 
-extern "C" hipEvent_t mgpuEventCreate() {
+extern "C" FLY_RUNTIME_EXPORT hipEvent_t mgpuEventCreate() {
   hipEvent_t event = nullptr;
   HIP_REPORT_IF_ERROR(hipEventCreateWithFlags(&event, hipEventDisableTiming));
   return event;
 }
 
-extern "C" void mgpuEventDestroy(hipEvent_t event) {
+extern "C" FLY_RUNTIME_EXPORT void mgpuEventDestroy(hipEvent_t event) {
   HIP_REPORT_IF_ERROR(hipEventDestroy(event));
 }
 
-extern "C" void mgpuEventSynchronize(hipEvent_t event) {
+extern "C" FLY_RUNTIME_EXPORT void mgpuEventSynchronize(hipEvent_t event) {
   HIP_REPORT_IF_ERROR(hipEventSynchronize(event));
 }
 
-extern "C" void mgpuEventRecord(hipEvent_t event, hipStream_t stream) {
+extern "C" FLY_RUNTIME_EXPORT void mgpuEventRecord(hipEvent_t event, hipStream_t stream) {
   HIP_REPORT_IF_ERROR(hipEventRecord(event, stream));
 }
 
-extern "C" void *mgpuMemAlloc(uint64_t sizeBytes, hipStream_t /*stream*/,
+extern "C" FLY_RUNTIME_EXPORT void *mgpuMemAlloc(uint64_t sizeBytes, hipStream_t /*stream*/,
                               bool /*isHostShared*/) {
   void *ptr = nullptr;
   HIP_REPORT_IF_ERROR(hipMalloc(&ptr, sizeBytes));
   return ptr;
 }
 
-extern "C" void mgpuMemFree(void *ptr, hipStream_t /*stream*/) {
+extern "C" FLY_RUNTIME_EXPORT void mgpuMemFree(void *ptr, hipStream_t /*stream*/) {
   HIP_REPORT_IF_ERROR(hipFree(ptr));
 }
 
-extern "C" void mgpuMemcpy(void *dst, void *src, size_t sizeBytes,
+extern "C" FLY_RUNTIME_EXPORT void mgpuMemcpy(void *dst, void *src, size_t sizeBytes,
                            hipStream_t stream) {
   HIP_REPORT_IF_ERROR(
       hipMemcpyAsync(dst, src, sizeBytes, hipMemcpyDefault, stream));
 }
 
-extern "C" void mgpuMemset32(void *dst, int value, size_t count,
+extern "C" FLY_RUNTIME_EXPORT void mgpuMemset32(void *dst, int value, size_t count,
                              hipStream_t stream) {
   HIP_REPORT_IF_ERROR(hipMemsetD32Async(reinterpret_cast<hipDeviceptr_t>(dst),
                                         value, count, stream));
 }
 
-extern "C" void mgpuMemset16(void *dst, int shortValue, size_t count,
+extern "C" FLY_RUNTIME_EXPORT void mgpuMemset16(void *dst, int shortValue, size_t count,
                              hipStream_t stream) {
   HIP_REPORT_IF_ERROR(hipMemsetD16Async(reinterpret_cast<hipDeviceptr_t>(dst),
                                         shortValue, count, stream));
 }
 
-extern "C" void mgpuMemHostRegister(void *ptr, uint64_t sizeBytes) {
+extern "C" FLY_RUNTIME_EXPORT void mgpuMemHostRegister(void *ptr, uint64_t sizeBytes) {
   HIP_REPORT_IF_ERROR(hipHostRegister(ptr, sizeBytes, /*flags=*/0));
 }
 
-extern "C" void
+extern "C" FLY_RUNTIME_EXPORT void
 mgpuMemHostRegisterMemRef(int64_t rank, StridedMemRefType<char, 1> *descriptor,
                           int64_t elementSizeBytes) {
   int64_t *sizes = descriptor->sizes;
@@ -232,11 +238,11 @@ mgpuMemHostRegisterMemRef(int64_t rank, StridedMemRefType<char, 1> *descriptor,
   mgpuMemHostRegister(ptr, sizeBytes);
 }
 
-extern "C" void mgpuMemHostUnregister(void *ptr) {
+extern "C" FLY_RUNTIME_EXPORT void mgpuMemHostUnregister(void *ptr) {
   HIP_REPORT_IF_ERROR(hipHostUnregister(ptr));
 }
 
-extern "C" void
+extern "C" FLY_RUNTIME_EXPORT void
 mgpuMemHostUnregisterMemRef(int64_t /*rank*/,
                             StridedMemRefType<char, 1> *descriptor,
                             int64_t elementSizeBytes) {
@@ -251,7 +257,7 @@ static void mgpuMemGetDevicePointer(T *hostPtr, T **devicePtr) {
       hipHostGetDevicePointer((void **)devicePtr, hostPtr, /*flags=*/0));
 }
 
-extern "C" StridedMemRefType<float, 1>
+extern "C" FLY_RUNTIME_EXPORT StridedMemRefType<float, 1>
 mgpuMemGetDeviceMemRef1dFloat(float * /*allocated*/, float *aligned,
                               int64_t offset, int64_t size, int64_t stride) {
   float *devicePtr = nullptr;
@@ -259,7 +265,7 @@ mgpuMemGetDeviceMemRef1dFloat(float * /*allocated*/, float *aligned,
   return {devicePtr, devicePtr, offset, {size}, {stride}};
 }
 
-extern "C" StridedMemRefType<int32_t, 1>
+extern "C" FLY_RUNTIME_EXPORT StridedMemRefType<int32_t, 1>
 mgpuMemGetDeviceMemRef1dInt32(int32_t * /*allocated*/, int32_t *aligned,
                               int64_t offset, int64_t size, int64_t stride) {
   int32_t *devicePtr = nullptr;
@@ -267,7 +273,7 @@ mgpuMemGetDeviceMemRef1dInt32(int32_t * /*allocated*/, int32_t *aligned,
   return {devicePtr, devicePtr, offset, {size}, {stride}};
 }
 
-extern "C" void mgpuSetDefaultDevice(int32_t device) {
+extern "C" FLY_RUNTIME_EXPORT void mgpuSetDefaultDevice(int32_t device) {
   defaultDevice = device;
   HIP_REPORT_IF_ERROR(hipSetDevice(device));
 }

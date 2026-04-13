@@ -3,18 +3,38 @@
 
 import functools
 import os
+import shutil
 import subprocess
+import sys
 from typing import Optional
 
 
 _ROCM_AGENT_TIMEOUT_S = int(os.environ.get("FLYDSL_ROCM_AGENT_TIMEOUT", "300"))
 
 
+def _find_rocm_tool(name: str) -> Optional[str]:
+    """Locate a ROCm CLI tool, checking ROCM_PATH/HIP_PATH on Windows."""
+    found = shutil.which(name)
+    if found:
+        return found
+    if sys.platform == "win32":
+        for env_var in ("ROCM_PATH", "HIP_PATH"):
+            prefix = os.environ.get(env_var)
+            if prefix:
+                candidate = os.path.join(prefix, "bin", name + ".exe")
+                if os.path.isfile(candidate):
+                    return candidate
+    return None
+
+
 def _arch_from_rocm_agent_enumerator() -> Optional[str]:
     """Query rocm_agent_enumerator (standard ROCm tool) for the first GPU arch."""
+    tool = _find_rocm_tool("rocm_agent_enumerator")
+    if tool is None:
+        return None
     try:
         out = subprocess.check_output(
-            ["rocm_agent_enumerator", "-name"],
+            [tool, "-name"],
             text=True,
             timeout=_ROCM_AGENT_TIMEOUT_S,
             stderr=subprocess.DEVNULL,
@@ -43,6 +63,17 @@ def get_rocm_arch() -> str:
     if arch:
         return arch.split(":", 1)[0]
 
+    # Fallback: query torch-rocm. TheRock SDK on Windows doesn't ship
+    # rocm_agent_enumerator, but torch.cuda reports gcnArchName on ROCm.
+    try:
+        import torch
+        if torch.cuda.is_available():
+            gcn = getattr(torch.cuda.get_device_properties(0), "gcnArchName", None)
+            if gcn:
+                return gcn.split(":", 1)[0]
+    except Exception:
+        pass
+
     return "gfx942"
 
 
@@ -53,9 +84,12 @@ def get_rocm_device_count() -> int:
     Uses the same invocation as :func:`_arch_from_rocm_agent_enumerator`. Returns 0
     when the tool is unavailable or no discrete GPU agents are reported.
     """
+    tool = _find_rocm_tool("rocm_agent_enumerator")
+    if tool is None:
+        return 0
     try:
         out = subprocess.check_output(
-            ["rocm_agent_enumerator", "-name"],
+            [tool, "-name"],
             text=True,
             timeout=5,
             stderr=subprocess.DEVNULL,

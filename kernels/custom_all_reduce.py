@@ -130,8 +130,10 @@ class FlyDSLAllreduce:
             pass
         if not arch:
             try:
+                import shutil
                 import subprocess
-                r = subprocess.run(["rocminfo"], capture_output=True, text=True, timeout=10)
+                rocminfo = shutil.which("rocminfo") or "rocminfo"
+                r = subprocess.run([rocminfo], capture_output=True, text=True, timeout=10)
                 for line in r.stdout.splitlines():
                     if "Name:" in line and "gfx" in line.lower():
                         arch = line.split(":")[-1].strip()
@@ -147,7 +149,13 @@ class FlyDSLAllreduce:
         if cls._hip is not None:
             return cls._hip
         import ctypes
-        for name in ("libamdhip64.so", "libamdhip64.so.6", "libamdhip64.so.5"):
+        import sys
+
+        if sys.platform == "win32":
+            hip_candidates = ("amdhip64.dll", "amdhip64_7.dll", "amdhip64_6.dll")
+        else:
+            hip_candidates = ("libamdhip64.so", "libamdhip64.so.6", "libamdhip64.so.5")
+        for name in hip_candidates:
             try:
                 cls._hip = ctypes.CDLL(name)
                 break
