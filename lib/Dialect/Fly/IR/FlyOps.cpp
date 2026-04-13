@@ -288,9 +288,13 @@ FLY_INFER_RETURN_TYPES(GetScalarOp) {
   if (!intTupleType)
     return emitOptionalError(location, "GetScalarOp: expected IntTupleType, got ",
                              operands[0].getType());
-  if (!intTupleType.getAttr().isLeaf())
-    return emitOptionalError(location, "GetScalarOp: expected a leaf IntTuple, got ", intTupleType);
-  auto intAttr = intTupleType.getAttr().extractIntFromLeaf();
+  IntTupleAttr scalarAttr = intTupleType.getAttr();
+  while (!scalarAttr.isLeaf() && scalarAttr.rank() == 1)
+    scalarAttr = scalarAttr.at(0);
+  if (!scalarAttr.isLeaf())
+    return emitOptionalError(location, "GetScalarOp: expected a scalar IntTuple, got ",
+                             intTupleType);
+  auto intAttr = scalarAttr.extractIntFromLeaf();
   inferredReturnTypes.assign({IntegerType::get(context, intAttr.getWidth())});
   return success();
 }

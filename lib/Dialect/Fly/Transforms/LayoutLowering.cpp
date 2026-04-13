@@ -398,12 +398,13 @@ public:
     if (!isNormalForm(cast<TypedValue<IntTupleType>>(intTuple)))
       return failure();
 
-    IntTupleAttr attr = intTupleTy.getAttr();
-    assert(attr.isLeaf() && "IntTuple must be a leaf");
+    IntTupleAttr scalarAttr = intTupleTy.getAttr();
 
-    Type resultTy = op.getResult().getType();
-    auto intAttr = attr.extractIntFromLeaf();
+    while (!scalarAttr.isLeaf() && scalarAttr.rank() == 1)
+      scalarAttr = scalarAttr.at(0);
+    auto intAttr = scalarAttr.extractIntFromLeaf();
     if (intAttr.isStatic()) {
+      Type resultTy = op.getResult().getType();
       rewriter.replaceOp(op,
                          arith::ConstantIntOp::create(rewriter, loc, resultTy, intAttr.getValue()));
       return success();
