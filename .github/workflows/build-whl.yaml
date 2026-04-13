@@ -57,7 +57,7 @@ jobs:
           TAG="rocm${ROCM_VERSION}-${DF_HASH}"
           FULL_IMAGE="${REGISTRY_IMAGE}:${TAG}"
 
-          if docker pull "${FULL_IMAGE}" 2>/dev/null; then
+          if docker pull "${FULL_IMAGE}"; then
             echo "Pulled cached image: ${FULL_IMAGE}"
           else
             echo "Cache miss — building image..."
@@ -101,7 +101,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: mlir_install.tgz
-          key: mlir-install-manylinux228-${{ hashFiles('flydsl/thirdparty/llvm-hash.txt', 'flydsl/scripts/build_llvm.sh', 'flydsl/CMakeLists.txt', 'flydsl/.github/workflows/build-whl.yaml') }}
+          key: mlir-install-manylinux228-${{ hashFiles('flydsl/thirdparty/llvm-hash.txt', 'flydsl/scripts/build_llvm.sh', 'flydsl/CMakeLists.txt') }}
 
       - name: Use cached MLIR install tarball
         if: steps.mlir-cache.outputs.cache-hit == 'true'
