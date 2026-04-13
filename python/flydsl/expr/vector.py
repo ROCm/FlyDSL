@@ -55,9 +55,24 @@ def store(value, memref, indices, *, loc=None, ip=None, **kwargs):
     )
 
 
+# -----------------------------------------------------------------------------
+# Thin wrappers for common op classes that otherwise require `.result` access.
+# -----------------------------------------------------------------------------
+
+
+_KDYNAMIC = -0x8000_0000_0000_0000  # ShapedType::kDynamic sentinel
+
+
 @traced_op
 def extract(vector, static_position=None, dynamic_position=None, *, loc=None, ip=None):
-    """Wrapper around `vector.ExtractOp(...).result`."""
+    """Wrapper around `vector.ExtractOp(...).result`.
+
+    When only ``dynamic_position`` is supplied (without explicit
+    ``static_position``), each dynamic index needs a corresponding
+    ``kDynamic`` sentinel in the static attribute so the ODS builder
+    pairs them correctly.  This wrapper fills in the sentinels
+    automatically.
+    """
     from . import arith as _arith_ext
 
     if static_position is None:
@@ -65,6 +80,12 @@ def extract(vector, static_position=None, dynamic_position=None, *, loc=None, ip
     if dynamic_position is None:
         dynamic_position = []
     dynamic_position = [_arith_ext.unwrap(i, index=True, loc=loc) for i in dynamic_position]
+
+    n_static = len(static_position)
+    n_dynamic = len(dynamic_position)
+    if n_dynamic > 0 and n_static < n_dynamic:
+        static_position = list(static_position) + [_KDYNAMIC] * (n_dynamic - n_static)
+
     return _vector.ExtractOp(
         _arith_ext.unwrap(vector, loc=loc),
         static_position=static_position,
