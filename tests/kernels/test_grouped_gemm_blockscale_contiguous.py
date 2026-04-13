@@ -174,48 +174,66 @@ def generate_grouped_gemm_inputs(
     k: int,
     scale_block_k: int = 128,
     scale_block_n: int = 128,
+    out_dtype: str = "bf16",
     device: str = "cuda",
 ):
     """Generate test inputs for grouped GEMM.
 
+    Generates variable actual group sizes (unaligned), pads each group to
+    128-row alignment, and marks padding rows with -1 in grouped_layout
+    (matching DeepGEMM's contiguous layout convention).
+
     Args:
         num_groups: Number of groups
-        m_per_group: Approximate M rows per group
+        m_per_group: Approximate actual M rows per group (before alignment)
         n: N dimension
         k: K dimension
         scale_block_k: K-dimension scale block size
         scale_block_n: N-dimension scale block size
+        out_dtype: Output data type ("bf16" or "f16")
         device: Device to create tensors on
 
     Returns:
-        Tuple of (a_fp8, scale_a, b_fp8, scale_b, grouped_layout, d, ref_d)
+        Tuple of (a_fp8, scale_a, b_shuffled, scale_b, grouped_layout, d, ref_d, M)
     """
-    # Generate variable group sizes (aligned to tile_m=128)
-    tile_m = 128
-    ms = []
-    for _ in range(num_groups):
-        m = int(m_per_group * (0.8 + 0.4 * torch.rand(1).item()))
-        m = align(m, tile_m)
-        ms.append(m)
-    M = sum(ms)
+    alignment = 128  # DeepGEMM's get_mk_alignment_for_contiguous_layout() = 128
+    torch_out_dtype = torch.bfloat16 if out_dtype == "bf16" else torch.float16
 
-    # Create grouped_layout
+    # Generate variable actual group sizes, then align
+    actual_ms = []
+    aligned_ms = []
+    for _ in range(num_groups):
+        m_actual = int(m_per_group * (0.8 + 0.4 * torch.rand(1).item()))
+        m_actual = max(1, m_actual)  # at least 1 row
+        m_aligned = align(m_actual, alignment)
+        actual_ms.append(m_actual)
+        aligned_ms.append(m_aligned)
+    M = sum(aligned_ms)
+
+    # Create grouped_layout with -1 padding
     grouped_layout = torch.empty(M, dtype=torch.int32, device=device)
     start = 0
-    for g, m in enumerate(ms):
-        grouped_layout[start : start + m] = g
-        start += m
+    for g, (m_actual, m_aligned) in enumerate(zip(actual_ms, aligned_ms)):
+        grouped_layout[start : start + m_actual] = g
+        grouped_layout[start + m_actual : start + m_aligned] = -1
+        start += m_aligned
 
     # Generate random data
     a_f32 = torch.randn(M, k, device=device, dtype=torch.float32)
     b_f32 = torch.randn(num_groups, n, k, device=device, dtype=torch.float32)
+
+    # Zero out padding rows in A (matching DeepGEMM convention)
+    start = 0
+    for m_actual, m_aligned in zip(actual_ms, aligned_ms):
+        a_f32[start + m_actual : start + m_aligned] = 0
+        start += m_aligned
 
     # Quantize to FP8
     a_fp8, scale_a = quantize_to_fp8(a_f32, scale_block_k)
     b_fp8, scale_b = quantize_b_to_fp8(b_f32, scale_block_n, scale_block_k)
 
     # Output buffer
-    d = torch.zeros(M, n, dtype=torch.bfloat16, device=device)
+    d = torch.zeros(M, n, dtype=torch_out_dtype, device=device)
 
     # Reference output (uses unshuffled B)
     ref_d = torch_grouped_gemm_ref(
@@ -236,22 +254,33 @@ def _as_i8(t: torch.Tensor) -> torch.Tensor:
 @pytest.mark.parametrize(
     "num_groups,m_per_group,n,k",
     [
-        pytest.param(1, 128, 128, 128, id="single-group-small"),
-        pytest.param(2, 128, 128, 128, id="two-groups-small"),
-        pytest.param(4, 128, 256, 256, id="four-groups-medium"),
-        pytest.param(8, 256, 512, 512, id="eight-groups-larger", marks=pytest.mark.large_shape),
+        # Basic shapes
+        pytest.param(1, 128, 128, 128, id="1g-128m-128n-128k"),
+        pytest.param(2, 128, 128, 128, id="2g-128m-128n-128k"),
+        pytest.param(4, 128, 256, 256, id="4g-128m-256n-256k"),
+        # Unaligned M (produces -1 padding rows in grouped_layout)
+        pytest.param(2, 100, 128, 128, id="2g-100m-unaligned"),
+        pytest.param(4, 200, 256, 256, id="4g-200m-unaligned"),
+        # Larger shapes
+        pytest.param(8, 256, 512, 512, id="8g-256m-512n-512k", marks=pytest.mark.large_shape),
+        # DeepSeek-V3 shapes
+        pytest.param(8, 256, 2112, 7168, id="DS-8g-2112x7168", marks=pytest.mark.large_shape),
+        pytest.param(8, 256, 7168, 2304, id="DS-8g-7168x2304", marks=pytest.mark.large_shape),
     ],
 )
-def test_grouped_fp8_gemm_correctness(num_groups, m_per_group, n, k,
-                                      tile_m=128, tile_n=128, tile_k=128,
-                                      out_dtype="bf16"):
+@pytest.mark.parametrize("out_dtype", [
+    pytest.param("bf16", id="bf16"),
+    pytest.param("f16", id="f16"),
+])
+def test_grouped_fp8_gemm_correctness(num_groups, m_per_group, n, k, out_dtype,
+                                      tile_m=128, tile_n=128, tile_k=128):
     """Test grouped FP8 GEMM correctness against PyTorch reference."""
     scale_block_k = 128
     scale_block_n = 128
 
     # Generate inputs
     a_fp8, scale_a, b_fp8, scale_b, grouped_layout, d, ref_d, M = generate_grouped_gemm_inputs(
-        num_groups, m_per_group, n, k, scale_block_k, scale_block_n
+        num_groups, m_per_group, n, k, scale_block_k, scale_block_n, out_dtype=out_dtype,
     )
 
     # Compile kernel
@@ -283,10 +312,14 @@ def test_grouped_fp8_gemm_correctness(num_groups, m_per_group, n, k,
     )
     torch.cuda.synchronize()
 
-    # Verify correctness
+    # Zero out padding rows (group_id == -1) before comparison
+    padding_mask = grouped_layout.cpu() == -1
     c_out_f32 = d.to(torch.float32)
     c_ref = ref_d.to(torch.float32)
-    msg = f"num_groups={num_groups}, M={M}, N={n}, K={k}"
+    c_out_f32[padding_mask] = 0.0
+    c_ref[padding_mask] = 0.0
+
+    msg = f"num_groups={num_groups}, M={M}, N={n}, K={k}, out={out_dtype}"
     passed = verify_output(c_out_f32, c_ref, rtol=1e-2, atol=1e-2, msg=msg)
     assert passed, f"Correctness check failed for {msg}"
 
@@ -307,7 +340,7 @@ def test_grouped_fp8_gemm_performance(num_groups, m_per_group, n, k,
 
     # Generate inputs
     a_fp8, scale_a, b_fp8, scale_b, grouped_layout, d, ref_d, M = generate_grouped_gemm_inputs(
-        num_groups, m_per_group, n, k, scale_block_k, scale_block_n
+        num_groups, m_per_group, n, k, scale_block_k, scale_block_n, out_dtype=out_dtype,
     )
 
     # Compile kernel
@@ -369,6 +402,7 @@ if __name__ == "__main__":
     parser.add_argument("--tile_n", type=int, default=128)
     parser.add_argument("--tile_k", type=int, default=128)
     parser.add_argument("--out_dtype", type=str, default="bf16", choices=["bf16", "f16"])
+    parser.add_argument("--waves_per_eu", type=int, default=None)
     parser.add_argument("--num_iters", type=int, default=100)
     parser.add_argument("--num_warmup", type=int, default=5)
     args = parser.parse_args()
@@ -379,8 +413,9 @@ if __name__ == "__main__":
 
     for m_per_group in m_list:
         test_grouped_fp8_gemm_correctness(args.num_groups, m_per_group, args.N, args.K,
+                                          out_dtype=args.out_dtype,
                                           tile_m=args.tile_m, tile_n=args.tile_n,
-                                          tile_k=args.tile_k, out_dtype=args.out_dtype)
+                                          tile_k=args.tile_k)
         test_grouped_fp8_gemm_performance(args.num_groups, m_per_group, args.N, args.K,
                                           tile_m=args.tile_m, tile_n=args.tile_n,
                                           tile_k=args.tile_k, out_dtype=args.out_dtype,

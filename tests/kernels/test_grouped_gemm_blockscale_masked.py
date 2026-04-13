@@ -170,6 +170,7 @@ def generate_masked_grouped_gemm_inputs(
     k: int,
     scale_block_k: int = 128,
     scale_block_n: int = 128,
+    out_dtype: str = "bf16",
     device: str = "cuda",
 ):
     """Generate test inputs for masked grouped GEMM.
@@ -180,10 +181,13 @@ def generate_masked_grouped_gemm_inputs(
         expected_m_per_group: Average actual M rows per group
         n: N dimension
         k: K dimension
+        out_dtype: Output data type ("bf16" or "f16")
 
     Returns:
         Tuple of (a_fp8, scale_a, b_shuffled, scale_b, masked_m, d, ref_d)
     """
+    torch_out_dtype = torch.bfloat16 if out_dtype == "bf16" else torch.float16
+
     # Generate valid length array
     masked_m = torch.empty(num_groups, dtype=torch.int32, device=device)
     for g in range(num_groups):
@@ -200,7 +204,7 @@ def generate_masked_grouped_gemm_inputs(
     b_fp8, scale_b = quantize_b_to_fp8(b_f32, scale_block_n, scale_block_k)
 
     # Output buffer
-    d = torch.zeros(num_groups, max_m, n, dtype=torch.bfloat16, device=device)
+    d = torch.zeros(num_groups, max_m, n, dtype=torch_out_dtype, device=device)
 
     # Reference output
     ref_d = torch_masked_grouped_gemm_ref(
@@ -221,22 +225,32 @@ def _as_i8(t: torch.Tensor) -> torch.Tensor:
 @pytest.mark.parametrize(
     "num_groups,max_m,expected_m,n,k",
     [
-        pytest.param(1, 256, 100, 128, 128, id="single-group-small"),
-        pytest.param(4, 256, 150, 128, 128, id="four-groups-small"),
-        pytest.param(8, 512, 300, 256, 256, id="eight-groups-medium"),
-        pytest.param(8, 1024, 800, 512, 512, id="eight-groups-larger", marks=pytest.mark.large_shape),
+        # Basic shapes
+        pytest.param(1, 256, 100, 128, 128, id="1g-256max-100m"),
+        pytest.param(4, 256, 150, 128, 128, id="4g-256max-150m"),
+        pytest.param(8, 512, 300, 256, 256, id="8g-512max-300m"),
+        # Small expected_m (many padding rows)
+        pytest.param(4, 512, 50, 128, 128, id="4g-512max-50m-sparse"),
+        # Larger shapes
+        pytest.param(8, 1024, 800, 512, 512, id="8g-1024max-800m", marks=pytest.mark.large_shape),
+        # DeepSeek-V3 shapes
+        pytest.param(8, 512, 300, 2112, 7168, id="DS-8g-2112x7168", marks=pytest.mark.large_shape),
+        pytest.param(8, 512, 300, 7168, 2304, id="DS-8g-7168x2304", marks=pytest.mark.large_shape),
     ],
 )
-def test_masked_grouped_fp8_gemm_correctness(num_groups, max_m, expected_m, n, k,
-                                             tile_m=128, tile_n=128, tile_k=128,
-                                             out_dtype="bf16"):
+@pytest.mark.parametrize("out_dtype", [
+    pytest.param("bf16", id="bf16"),
+    pytest.param("f16", id="f16"),
+])
+def test_masked_grouped_fp8_gemm_correctness(num_groups, max_m, expected_m, n, k, out_dtype,
+                                             tile_m=128, tile_n=128, tile_k=128):
     """Test masked grouped FP8 GEMM correctness against PyTorch reference."""
     scale_block_k = 128
     scale_block_n = 128
 
     # Generate inputs
     a_fp8, scale_a, b_fp8, scale_b, masked_m, d, ref_d = generate_masked_grouped_gemm_inputs(
-        num_groups, max_m, expected_m, n, k, scale_block_k, scale_block_n
+        num_groups, max_m, expected_m, n, k, scale_block_k, scale_block_n, out_dtype=out_dtype,
     )
 
     # Compile kernel
@@ -268,20 +282,16 @@ def test_masked_grouped_fp8_gemm_correctness(num_groups, max_m, expected_m, n, k
     )
     torch.cuda.synchronize()
 
-    # Verify correctness
+    # Verify correctness — zero out padding rows before comparison
+    # (kernel does not mask individual stores in the epilogue)
     c_out_f32 = d.to(torch.float32)
     c_ref = ref_d.to(torch.float32)
-
-    # Note: the kernel computes in block sizes of `tile_m` and does NOT mask out D 
-    # at the granularity of individual elements in the store epilogue.
-    # Therefore, padded rows (m_actual to max_m) in the computed tiles contain garbage.
-    # We must explicitly zero out the unused rows in the output before comparing.
     for g in range(num_groups):
         m_val = masked_m[g].item()
         c_out_f32[g, m_val:, :] = 0.0
         c_ref[g, m_val:, :] = 0.0
 
-    msg = f"num_groups={num_groups}, max_m={max_m}, N={n}, K={k}"
+    msg = f"num_groups={num_groups}, max_m={max_m}, N={n}, K={k}, out={out_dtype}"
     passed = verify_output(c_out_f32, c_ref, rtol=1e-2, atol=1e-2, msg=msg)
     assert passed, f"Correctness check failed for {msg}"
 
@@ -302,7 +312,7 @@ def test_masked_grouped_fp8_gemm_performance(num_groups, max_m, expected_m, n, k
 
     # Generate inputs
     a_fp8, scale_a, b_fp8, scale_b, masked_m, d, ref_d = generate_masked_grouped_gemm_inputs(
-        num_groups, max_m, expected_m, n, k, scale_block_k, scale_block_n
+        num_groups, max_m, expected_m, n, k, scale_block_k, scale_block_n, out_dtype=out_dtype,
     )
 
     # Compile kernel
@@ -368,6 +378,7 @@ if __name__ == "__main__":
     parser.add_argument("--tile_n", type=int, default=128)
     parser.add_argument("--tile_k", type=int, default=128)
     parser.add_argument("--out_dtype", type=str, default="bf16", choices=["bf16", "f16"])
+    parser.add_argument("--waves_per_eu", type=int, default=None)
     parser.add_argument("--num_iters", type=int, default=100)
     parser.add_argument("--num_warmup", type=int, default=5)
     args = parser.parse_args()
@@ -378,8 +389,9 @@ if __name__ == "__main__":
 
     for expected_m in m_list:
         test_masked_grouped_fp8_gemm_correctness(args.num_groups, args.max_m, expected_m, args.N, args.K,
+                                                 out_dtype=args.out_dtype,
                                                  tile_m=args.tile_m, tile_n=args.tile_n,
-                                                 tile_k=args.tile_k, out_dtype=args.out_dtype)
+                                                 tile_k=args.tile_k)
         test_masked_grouped_fp8_gemm_performance(args.num_groups, args.max_m, expected_m, args.N, args.K,
                                                  tile_m=args.tile_m, tile_n=args.tile_n,
                                                  tile_k=args.tile_k, out_dtype=args.out_dtype,
