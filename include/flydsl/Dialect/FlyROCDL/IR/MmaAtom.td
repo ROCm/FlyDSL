@@ -10,7 +10,7 @@ include "flydsl/Dialect/FlyROCDL/IR/Dialect.td"
 // MmaOp CDNA3
 //===----------------------------------------------------------------------===//
 
-def FlyROCDL_MmaOpCDNA3_MFMA : FlyxROCL_MmaOp<"MmaOpCDNA3_MFMA", "cdna3.mfma", []> {
+def FlyROCDL_MmaOpCDNA3_MFMA : FlyROCL_MmaOp<"MmaOpCDNA3_MFMA", "cdna3.mfma", []> {
   let parameters = (ins
     "int32_t":$m,
     "int32_t":$n,
@@ -39,7 +39,7 @@ def FlyROCDL_MmaOpCDNA3_MFMA : FlyxROCL_MmaOp<"MmaOpCDNA3_MFMA", "cdna3.mfma", [
 // MmaOp GFX1250 — WMMA wave32
 //===----------------------------------------------------------------------===//
 
-def FlyROCDL_MmaOpGFX1250_WMMA : FlyxROCL_MmaOp<"MmaOpGFX1250_WMMA", "gfx1250.wmma", []> {
+def FlyROCDL_MmaOpGFX1250_WMMA : FlyROCL_MmaOp<"MmaOpGFX1250_WMMA", "gfx1250.wmma", []> {
   let parameters = (ins
     "int32_t":$m,
     "int32_t":$n,

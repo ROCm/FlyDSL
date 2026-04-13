@@ -518,7 +518,4 @@ Which layout operation do I need?
 | `include/flydsl/Dialect/Fly/IR/FlyOps.td` | Fly dialect op definitions |
 | `lib/Dialect/Fly/IR/FlyOps.cpp` | Type inference for composition, product, divide (Fly) |
 | `include/flydsl/Dialect/Fly/Utils/LayoutUtils.h` | Layout algebra algorithms (composition, product, divide) |
-| `tests/pyir/test_layout_algebra.py` | Layout algebra tests |
-| `tests/pyir/test_product_divide.py` | Product and divide operation tests |
-| `tests/pyir/test_nested_layouts.py` | Nested/hierarchical layout tests |
-| `tests/pyir/test_local_ops.py` | Local partition and tile tests |
+| `tests/mlir/LayoutAlgebra/*.mlir` | Layout algebra MLIR lit tests |

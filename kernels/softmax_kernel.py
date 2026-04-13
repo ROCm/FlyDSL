@@ -17,9 +17,11 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.compiler.kernel_function import CompilationContext
 
-from flydsl.expr import arith, vector, gpu, range_constexpr
+from flydsl.expr import arith, gpu, range_constexpr
 from flydsl.expr.arith import ArithValue
 from flydsl.expr.typing import T, Int32
+from flydsl.expr.vector import ReductionOp, full
+from flydsl.expr.numeric import Numeric, Float32
 
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
@@ -122,12 +124,10 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
         # Fast path: N is a multiple of tile_cols
         # ==================================================================
         if False and N >= tile_cols and N % tile_cols == 0:
-            from flydsl.expr.arith import ArithValue
+            from flydsl.expr import math as fmath
 
             num_tiles = N // tile_cols
-
-            vec_type_c = T.vec(VEC_WIDTH, compute_type)
-            vec_type_e = T.vec(VEC_WIDTH, elem_type)
+            elem_dtype = Numeric.from_ir_type(elem_type)
 
             # ── Layout API: buffer-backed tensors + tiled access ─────
             A_buf = fx.rocdl.make_buffer_tensor(A)
@@ -148,7 +148,7 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
             def _load_vec(div_tensor, idx):
                 r = fx.memref_alloca(vec_reg_ty, vec_reg_lay)
                 fx.copy_atom_call(copy_atom, fx.slice(div_tensor, (None, idx)), r)
-                return ArithValue(fx.memref_load_vec(r))
+                return fx.memref_load_vec(r)
 
             def _store_vec(val, div_tensor, idx):
                 r = fx.memref_alloca(vec_reg_ty, vec_reg_lay)
@@ -161,26 +161,23 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
 
             for tile_i in range_constexpr(num_tiles):
                 idx = tid + tile_i * BLOCK_THREADS
-                vec_e = _load_vec(a_div, idx)
-                x = vec_e if dtype_str == "f32" else vec_e.extf(vec_type_c)
+                vec = _load_vec(a_div, idx)
+                x = vec.to(Float32)
                 row_buffer.append(x)
-                red_max = vector.reduction(compute_type, vector.CombiningKind.MAXNUMF, x)
+                red_max = x.reduce(ReductionOp.MAX)
                 thread_max = thread_max.maximumf(red_max)
 
             global_max = block_reduce(thread_max, "max")
 
             # 2. Exp + local sum
-            g_max_splat = vector.broadcast(vec_type_c, global_max)
-            log2e_splat = vector.broadcast(vec_type_c, c_log2e)
             thread_sum = c_zero_f
 
             for i in range_constexpr(num_tiles):
                 x = row_buffer[i]
-                sub = ArithValue(x) - ArithValue(g_max_splat)
-                scaled = sub * ArithValue(log2e_splat)
-                exp_val = scaled.exp2(fastmath=fm_fast)
+                scaled = (x - global_max) * c_log2e
+                exp_val = fmath.exp2(scaled, fastmath=True)
                 row_buffer[i] = exp_val
-                red_sum = vector.reduction(compute_type, vector.CombiningKind.ADD, exp_val, fastmath=fm_fast)
+                red_sum = exp_val.reduce(ReductionOp.ADD, fastmath=fm_fast)
                 thread_sum = thread_sum + red_sum
 
             global_sum = block_reduce(thread_sum, "sum")
@@ -188,16 +185,10 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
             # 3. Normalize + store
             c_one = arith.constant(1.0, type=compute_type)
             inv_sum = c_one / ArithValue(global_sum)
-            inv_sum_splat = vector.broadcast(vec_type_c, inv_sum)
 
             for tile_i in range_constexpr(num_tiles):
-                exp_vec = row_buffer[tile_i]
-                norm_vec = ArithValue(exp_vec) * ArithValue(inv_sum_splat)
-
-                if dtype_str == "f32":
-                    out_e = norm_vec
-                else:
-                    out_e = norm_vec.truncf(vec_type_e)
+                norm_vec = row_buffer[tile_i] * inv_sum
+                out_e = norm_vec if dtype_str == "f32" else norm_vec.to(elem_dtype)
 
                 out_idx = tid + tile_i * BLOCK_THREADS
                 _store_vec(out_e, c_div, out_idx)
@@ -206,7 +197,7 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
             # ==============================================================
             # Generic path: scalar for arbitrary N
             # ==============================================================
-            from flydsl.expr.arith import ArithValue
+            elem_dtype = Numeric.from_ir_type(elem_type)
 
             A_buf = fx.rocdl.make_buffer_tensor(A)
             C_buf = fx.rocdl.make_buffer_tensor(C)
@@ -228,14 +219,12 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
                 view = fx.slice(divided, (None, index))
                 r = fx.memref_alloca(scalar_reg_ty, scalar_reg_lay)
                 fx.copy_atom_call(copy_atom_s, view, r)
-                v = fx.memref_load_vec(r)
-                return vector.extract(v, static_position=[0])
+                return fx.memref_load_vec(r)[0].ir_value()
 
             def _store_scalar(divided, index, val):
                 r = fx.memref_alloca(scalar_reg_ty, scalar_reg_lay)
-                vec_ty = T.vec(1, elem_type)
-                v = vector.from_elements(vec_ty, [val])
-                fx.memref_store_vec(v, r)
+                ts = full(1, elem_dtype(val), elem_dtype)
+                fx.memref_store_vec(ts, r)
                 view = fx.slice(divided, (None, index))
                 fx.copy_atom_call(copy_atom_s, r, view)
 

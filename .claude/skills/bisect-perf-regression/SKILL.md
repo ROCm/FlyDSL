@@ -7,7 +7,7 @@ description: >
   runs the benchmark, extracts the metric, and narrows down to the offending
   commit. Reports the regression commit with its diff and suggested root cause.
   Usage: /bisect-perf-regression <good_commit> [bad_commit] -- <bench_cmd>
-tools: Bash,Read,Grep,Glob,Agent
+allowed-tools: Bash Read Grep Glob Agent
 ---
 
 # Bisect Performance Regression
