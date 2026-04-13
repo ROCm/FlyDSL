@@ -1479,13 +1479,10 @@ def pa_decode_ps_launch(
         batch_size = context_lengths.shape[0]
         head_size = query.shape[-1]
         eqgs = query_length * query_group_size
-        physical_partition_size = KV_BLOCK_SIZE
         context_partition_size = KV_COMPUTE_BLOCK
-
-        if max_context_partition_num == 0:
-            max_context_partition_num = (
-                (sliding_window + physical_partition_size - 1) // physical_partition_size
-            ) + 1
+        max_context_partition_num = (
+            (sliding_window + KV_BLOCK_SIZE - 1) // KV_BLOCK_SIZE
+        ) + 1
         total_context_partition_num = max_context_partition_num * TILES_PER_BLOCK
 
         if exp_sums is None:
@@ -1518,11 +1515,6 @@ def pa_decode_ps_launch(
             block_tables.stride(0),
             stride_ks_block, stride_ks_head,
             batch_size, num_kv_heads, max_context_partition_num, s)
-
-        # Fix NaN from fastmath in fully-masked partitions
-        temporary_output.nan_to_num_(0.0)
-        exp_sums.nan_to_num_(0.0)
-        max_logits.nan_to_num_(nan=float('-inf'))
 
         # Reduce: use Gluon reduce kernel for merging partitions
         from aiter.ops.triton.gluon.pa_decode_gluon import (
