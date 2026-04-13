@@ -382,6 +382,19 @@ def compile_masked_grouped_fp8_gemm(
             row_a_lds_base = lane_mod_16  # mi=0
             col_offset_base_bytes = lane_div_16 * fx.Index(16)  # ku=0
 
+            # ── Scheduling hints (sched_group_barrier, MoE stage 2 pattern) ──
+            ku_per_sb = scale_block_k // 64
+            rocdl.sched_barrier(0)
+
+            def hot_loop_scheduler():
+                mfma_per_ku = m_repeat * num_acc_n * 2  # m * n_acc * 2(k32)
+                total_mfma = k_unroll * mfma_per_ku
+                rocdl.sched_group_barrier(rocdl.mask_dsrd, ku_per_sb * m_repeat, 0)
+                rocdl.sched_group_barrier(rocdl.mask_mfma, total_mfma, 1)
+                rocdl.sched_group_barrier(rocdl.mask_vmem_rd, num_a_loads, 2)
+                rocdl.sched_group_barrier(rocdl.mask_dswr, num_a_loads, 3)
+                rocdl.sched_barrier(0)
+
             # ── Helper: compute one K-tile from LDS + B tile ────────────
             c_scale_k = fx.Index(scale_k)
             sa_group_off = group_idx * c_scale_k * m_in  # 3D scale_a Offset
@@ -475,6 +488,7 @@ def compile_masked_grouped_fp8_gemm(
                 # Store next A to LDS (ds_write after compute)
                 if k_pair + 1 < num_k_tiles:
                     store_a_tile_to_lds(a_regs_ping, lds_base_ping)
+                    hot_loop_scheduler()
                 gpu.barrier()
 
                 if k_pair + 1 < num_k_tiles:
@@ -495,6 +509,7 @@ def compile_masked_grouped_fp8_gemm(
                     # Store next A to LDS
                     if k_pair + 2 < num_k_tiles:
                         store_a_tile_to_lds(a_regs_pong, lds_base_pong)
+                        hot_loop_scheduler()
                     gpu.barrier()
 
                     # Prefetch first A pack from pong for next iteration
