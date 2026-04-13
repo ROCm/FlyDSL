@@ -20,6 +20,7 @@ Optimizations applied:
   - XOR swizzle for LDS bank conflict avoidance
   - Preshuffle B layout with load_b_pack_k32
   - A0 LDS prefetch (cross-tile, hides LDS read latency behind VMEM)
+  - CShuffle epilogue with vectorized stores
 """
 
 import functools
@@ -39,6 +40,7 @@ from flydsl._mlir.dialects import math as math_dialect
 from flydsl.expr.typing import T
 from flydsl.expr.arith import ArithValue
 
+from kernels.mfma_epilogues import mfma_epilog
 from kernels.mfma_preshuffle_pipeline import (
     crd2idx,
     lds_store_16b_xor16,
@@ -108,9 +110,11 @@ def compile_grouped_fp8_gemm(
     k_unroll = tile_k // 64  # K64-byte micro-steps (for K32 MFMA pairs)
     kpack_bytes = 16  # 16-byte packs for FP8
 
-    # LDS allocation: 2x for ping-pong double buffer
+    # LDS allocation: max of ping-pong A tiles and CShuffle epilogue output
     lds_a_bytes = tile_m * tile_k * elem_bytes
-    lds_total_bytes = 2 * lds_a_bytes
+    lds_pingpong_bytes = 2 * lds_a_bytes
+    lds_out_bytes = tile_m * tile_n * 2  # bf16/f16 = 2 bytes per element
+    lds_total_bytes = max(lds_pingpong_bytes, lds_out_bytes)
     lds_alloc_offset = allocator._align(allocator.ptr, 16)
     allocator.ptr = lds_alloc_offset + lds_total_bytes
     lds_tile_elems = tile_m * tile_k  # element offset between ping and pong
@@ -179,6 +183,9 @@ def compile_grouped_fp8_gemm(
         layout_lds = fx.make_layout((tile_m, tile_k), stride=(lds_stride, 1))
         lds_base_pong = fx.Index(0)
         lds_base_ping = fx.Index(lds_tile_elems)
+
+        # CShuffle epilogue LDS (aliased from same base, bf16 element type)
+        lds_out = SmemPtr(base_ptr, lds_alloc_offset, out_mlir(), shape=(tile_m * tile_n,)).get()
 
         # Buffer resources
         a_nbytes = m_in * k_in
@@ -466,27 +473,55 @@ def compile_grouped_fp8_gemm(
                         a0_prefetch_pong = lds_load_packs_k64(
                             row_a_lds_base, col_offset_base_bytes, lds_base_pong)
 
-            # ===== Epilogue: store results =====
+            # ===== Epilogue: CShuffle vectorized stores =====
             c_n = n_in
-            lane_div_16_mul4 = lane_div_16 * fx.Index(4)
+            vec1_out = T.vec(1, out_mlir())
+            e_vec = 4 if (tile_n % (32 * 4)) == 0 else 2
 
-            for mi in range_constexpr(m_repeat):
-                for ii in range_constexpr(4):
-                    row_off = lane_div_16_mul4 + fx.Index(ii)
-                    row_in_tile = arith.index(mi * 16) + row_off
-                    row_global = bx_m + row_in_tile
+            def write_row_to_lds(
+                *, mi, ii, row_in_tile, row,
+                row_base_lds, col_base_local, num_acc_n, lds_out,
+            ):
+                for ni in range_constexpr(num_acc_n):
+                    col_local = col_base_local + (ni * 16)
+                    acc_idx = mi * num_acc_n + ni
+                    acc = accs[acc_idx]
+                    val = vector.extract(acc, static_position=[ii], dynamic_position=[])
+                    v_out = arith.trunc_f(out_mlir(), val)
+                    lds_idx = row_base_lds + col_local
+                    v1 = vector.from_elements(vec1_out, [v_out])
+                    vector.store(v1, lds_out, [lds_idx], alignment=2)
 
-                    for ni in range_constexpr(num_acc_n):
-                        acc_idx = mi * num_acc_n + ni
-                        col_base = by_n + n_tile_base + arith.index(ni * 16) + lane_mod_16
+            def store_pair(*, row_local, row, row_ctx, col_pair0, col_g0, frag):
+                idx_out = row * c_n + col_g0
+                byte_off = idx_out * 2
+                if e_vec == 4:
+                    frag_i32x2 = vector.bitcast(T.vec(2, T.i32), frag)
+                    buffer_ops.buffer_store(
+                        frag_i32x2, d_rsrc, byte_off, offset_is_bytes=True
+                    )
+                else:
+                    frag_i32x1 = vector.bitcast(T.vec(1, T.i32), frag)
+                    frag_i32 = vector.extract(
+                        frag_i32x1, static_position=[0], dynamic_position=[]
+                    )
+                    buffer_ops.buffer_store(
+                        frag_i32, d_rsrc, byte_off, offset_is_bytes=True
+                    )
 
-                        # Extract scalar from accumulator
-                        val_f32 = vector.extract(accs[acc_idx], static_position=[ii], dynamic_position=[])
-                        val_out = arith.trunc_f(out_mlir(), val_f32)
-
-                        # Store to D
-                        d_idx = row_global * c_n + col_base
-                        buffer_ops.buffer_store(val_out, d_rsrc, d_idx)
+            mfma_epilog(
+                use_cshuffle=True,
+                arith=arith, vector=vector, gpu=gpu,
+                range_constexpr=range_constexpr,
+                tile_m=tile_m, tile_n=tile_n, e_vec=e_vec,
+                m_repeat=m_repeat, num_acc_n=num_acc_n,
+                tx=tx, lane_div_16=lane_div_16, lane_mod_16=lane_mod_16,
+                bx_m=bx_m, by_n=by_n, n_tile_base=n_tile_base,
+                lds_out=lds_out,
+                frag_elem_type=out_mlir(),
+                write_row_to_lds=write_row_to_lds,
+                store_pair=store_pair,
+            )
 
             scf.YieldOp([])
 
