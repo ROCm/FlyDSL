@@ -13,6 +13,7 @@ from dataclasses import dataclass
 
 import torch
 import torch.distributed as dist
+import flydsl.compiler as flyc
 import flydsl.expr as fx
 import mori.shmem as ms
 from mori.shmem import mori_shmem_create_tensor
@@ -153,6 +154,10 @@ class FlyDSLDispatchCombineIntraNodeOpV2:
         self._fx_p2p_comb_inp = fx.Int64(self._p2p_comb_inp.data_ptr())
         self._fx_p2p_xdb_mem  = fx.Int64(self._p2p_xdb_mem.data_ptr())
 
+        # flyc.compile 预编译状态（lazy：首次 dispatch/combine 调用时触发）
+        self._disp_compiled = None
+        self._comb_compiled = None
+
     def _alloc_buffers(self):
         cfg  = self.cfg
         npes = cfg.world_size
@@ -221,8 +226,7 @@ class FlyDSLDispatchCombineIntraNodeOpV2:
         wts_c = weights.contiguous()
         idx_c = indices.to(torch.int32).contiguous()
 
-        # 通过 @flyc.jit 调用 kernel
-        self._disp_fn(
+        args = (
             fx.Int64(inp_c.data_ptr()),
             fx.Int64(idx_c.data_ptr()),
             fx.Int64(wts_c.data_ptr()),
@@ -242,8 +246,12 @@ class FlyDSLDispatchCombineIntraNodeOpV2:
             self._fx_p2p_out_idx,
             self._fx_p2p_out_tok,
             self._fx_p2p_recv_num,
-            cur_tok,  # 裸 Python int，不要用 fx.Int32（会传指针而非值）
+            cur_tok,
         )
+        if self._disp_compiled is None:
+            self._disp_compiled = flyc.compile(self._disp_fn, *args)
+        else:
+            self._disp_compiled(*args)
         torch.cuda.synchronize()
 
         n    = int(self.total_recv[0].item())
@@ -268,8 +276,7 @@ class FlyDSLDispatchCombineIntraNodeOpV2:
         self.comb_bar.fill_(0)
         inp_c = input.to(cfg.data_type).contiguous()
 
-        # cur_tok/total_recv_val 必须为裸 Python int，不要用 fx.Int32 包装
-        self._comb_fn(
+        args = (
             fx.Int64(inp_c.data_ptr()),
             self._fx_comb_inp,
             self._fx_comb_out,
@@ -284,6 +291,10 @@ class FlyDSLDispatchCombineIntraNodeOpV2:
             cur_tok,
             total_recv_val,
         )
+        if self._comb_compiled is None:
+            self._comb_compiled = flyc.compile(self._comb_fn, *args)
+        else:
+            self._comb_compiled(*args)
         torch.cuda.synchronize()
 
         mt   = cfg.max_num_inp_token_per_rank
