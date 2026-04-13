@@ -95,7 +95,7 @@ This runs:
 
 - **MLIR lit tests**: ``tests/mlir/{LayoutAlgebra,Conversion,Transforms}/*.mlir``
   through ``fly-opt``
-- **Python IR tests**: ``tests/pyir/test_*.py`` (no GPU required)
+- **Python tests**: ``tests/python/examples/`` (AOT examples)
 - **Kernel/GPU execution tests** (only if ROCm is detected): ``tests/kernels/test_*.py``
 
 Troubleshooting

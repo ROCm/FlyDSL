@@ -6,7 +6,7 @@ description: >
   with explicit layouts and tiling on AMD GPUs. Requires building LLVM/MLIR from source (~30min)
   then FlyDSL C++ and Python bindings (~5min).
   Usage: /build-flydsl [container@host]
-tools: Bash
+allowed-tools: Bash
 ---
 
 # Build and Install FlyDSL

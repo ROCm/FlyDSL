@@ -7,7 +7,6 @@ description: >
   "code formatting", "/format-code", or wants to tidy up changed files before a git commit.
   Also trigger when the user mentions autoflake, black formatting, or clang-format in the context
   of cleaning up their working tree.
-user_invocable: true
 ---
 
 # Format Code

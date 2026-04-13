@@ -20,7 +20,7 @@
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
 
 #include "flydsl/Dialect/FlyROCDL/IR/Dialect.h.inc"
-#include "flydsl/Dialect/FlyROCDL/IR/Enums.h.inc"
+#include "flydsl/Dialect/FlyROCDL/IR/AtomStateEnums.h.inc"
 
 #define GET_TYPEDEF_CLASSES
 #include "flydsl/Dialect/FlyROCDL/IR/Atom.h.inc"

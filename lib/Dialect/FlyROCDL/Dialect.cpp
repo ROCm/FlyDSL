@@ -13,7 +13,7 @@ using namespace mlir::fly;
 using namespace mlir::fly_rocdl;
 
 #include "flydsl/Dialect/FlyROCDL/IR/Dialect.cpp.inc"
-#include "flydsl/Dialect/FlyROCDL/IR/Enums.cpp.inc"
+#include "flydsl/Dialect/FlyROCDL/IR/AtomStateEnums.cpp.inc"
 
 #define GET_TYPEDEF_CLASSES
 #include "flydsl/Dialect/FlyROCDL/IR/Atom.cpp.inc"

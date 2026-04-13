@@ -28,8 +28,12 @@ def Fly_StatefulOpTypeInterface : TypeInterface<"StatefulOpTypeInterface"> {
   let cppNamespace = "::mlir::fly";
   let methods = [
     InterfaceMethod<
-      "Return the LLVM struct type that holds the mutable state of this op.",
+      "Return the converted type that holds the mutable state of this op.",
       "::mlir::Type", "getConvertedType", (ins "::mlir::MLIRContext *":$ctx)>,
+    InterfaceMethod<
+      "Build the default state value for this op.",
+      "::mlir::Value", "getDefaultState",
+      (ins "::mlir::OpBuilder &":$builder, "::mlir::Location":$loc)>,
     InterfaceMethod<
       "Insert the given value to a field of this stateful op. "
       "Returns the updated struct value after setting the field.",
@@ -68,7 +72,7 @@ def Fly_MayStaticTypeInterface : TypeInterface<"MayStaticTypeInterface"> {
   ]);
 }
 
-def Fly_CopyOpTypeInterface : TypeInterface<"CopyOpTypeInterface", [Fly_MayStaticTypeInterface]> {
+def Fly_CopyOpTypeInterface : TypeInterface<"CopyOpTypeInterface"> {
   let cppNamespace = "::mlir::fly";
   let methods = [
     InterfaceMethod<"", "::mlir::Attribute", "getThrLayout", (ins)>,
@@ -104,7 +108,7 @@ def Fly_CopyOpTypeInterface : TypeInterface<"CopyOpTypeInterface", [Fly_MayStati
   ];
 }
 
-def Fly_MmaOpTypeInterface : TypeInterface<"MmaOpTypeInterface", [Fly_MayStaticTypeInterface]> {
+def Fly_MmaOpTypeInterface : TypeInterface<"MmaOpTypeInterface"> {
   let cppNamespace = "::mlir::fly";
   let methods = [
     InterfaceMethod<"", "::mlir::Attribute", "getThrLayout", (ins)>,

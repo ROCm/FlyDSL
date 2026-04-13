@@ -2,13 +2,25 @@
 # Copyright (c) 2025 FlyDSL Project Contributors
 
 import ctypes
-from typing import Generic, TypeVar
+import enum
+from inspect import isclass
+from typing import Generic, Type, TypeVar
 
 from flydsl.runtime.device import get_rocm_arch
 
 from .._mlir import ir
 from .._mlir.dialects import gpu
+from .._mlir.dialects import vector as _vector
 from .meta import traced_op
+from .utils.arith import (
+    ArithValue,
+    element_type,
+    fp_to_fp,
+    fp_to_int,
+    int_to_fp,
+    int_to_int,
+    _to_raw,
+)
 from .numeric import (
     BFloat16,
     Boolean,
@@ -31,6 +43,7 @@ from .numeric import (
     Int16,
     Int32,
     Int64,
+    Integer,
     Numeric,
     Uint8,
     Uint16,
@@ -258,6 +271,12 @@ __all__ = [
     "TiledMma",
     "Stream",
     "Tuple3D",
+    # Vector types
+    "Vector",
+    "ReductionOp",
+    "full",
+    "full_like",
+    "zeros_like",
 ]
 
 
@@ -619,6 +638,10 @@ class CopyAtom(BuiltinDslType):
     def layout_ref_tv(self):
         return static(self.type.tv_layout_ref)
 
+    @traced_op
+    def set_value(self, field, value, loc=None, ip=None):
+        return atom_set_value(self, field, value, loc=loc, ip=ip)
+
 
 @ir.register_value_caster(MmaAtomType.static_typeid, replace=True)
 class MmaAtom(BuiltinDslType):
@@ -645,6 +668,10 @@ class MmaAtom(BuiltinDslType):
     @property
     def layout_C_tv(self):
         return static(self.type.tv_layout_c)
+
+    @traced_op
+    def set_value(self, field, value, loc=None, ip=None):
+        return atom_set_value(self, field, value, loc=loc, ip=ip)
 
 
 @ir.register_value_caster(TiledCopyType.static_typeid, replace=True)
@@ -788,3 +815,194 @@ class Tuple3D:
 
     def __iter__(self):
         return iter((self.x, self.y, self.z))
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Vector — register vector with value semantics
+# ═══════════════════════════════════════════════════════════════════════
+
+class ReductionOp(enum.Enum):
+    ADD = "add"
+    MUL = "mul"
+    MAX = "max"
+    MIN = "min"
+
+
+_REDUCE_KINDS = {
+    "add": (_vector.CombiningKind.ADD,  _vector.CombiningKind.ADD,  _vector.CombiningKind.ADD),
+    "mul": (_vector.CombiningKind.MUL,  _vector.CombiningKind.MUL,  _vector.CombiningKind.MUL),
+    "max": (_vector.CombiningKind.MAXNUMF, _vector.CombiningKind.MAXSI, _vector.CombiningKind.MAXUI),
+    "min": (_vector.CombiningKind.MINIMUMF, _vector.CombiningKind.MINSI, _vector.CombiningKind.MINUI),
+}
+
+
+def _resolve_combining_kind(op, is_float, signed):
+    if isinstance(op, _vector.CombiningKind):
+        return op
+    if isinstance(op, ReductionOp):
+        key = op.value
+    elif isinstance(op, str):
+        key = op.lower()
+    else:
+        raise TypeError(f"reduce op must be str, ReductionOp, or CombiningKind, got {type(op)}")
+    triple = _REDUCE_KINDS.get(key)
+    if triple is None:
+        raise ValueError(f"unknown reduction kind {op!r}; expected one of {list(_REDUCE_KINDS)}")
+    return triple[0] if is_float else (triple[1] if signed else triple[2])
+
+
+@ir.register_value_caster(ir.VectorType.static_typeid, replace=True)
+class Vector(ArithValue):
+    """Thread-local register vector with value semantics.
+
+    Wraps a flat ``vector<NxTy>`` ir.Value with shape and dtype metadata.
+    Arithmetic operators are inherited from ArithValue; scalar operands
+    are auto-broadcast via ``_coerce_other``.
+    """
+
+    def __init__(self, value, shape=None, dtype=None):
+        if not isinstance(value, ir.Value) and hasattr(value, "ir_value"):
+            value = value.ir_value()
+        if shape is None:
+            vty = ir.VectorType(value.type)
+            shape = tuple(vty.shape)
+            dtype = Numeric.from_ir_type(vty.element_type)
+        signed = dtype.signed if isclass(dtype) and issubclass(dtype, Integer) else False
+        super().__init__(value, signed)
+        self._shape = (shape,) if isinstance(shape, int) else tuple(shape)
+        self._dtype = dtype
+
+    @property
+    def dtype(self) -> Type[Numeric]:
+        return self._dtype
+
+    @property
+    def element_type(self) -> Type[Numeric]:
+        return self._dtype
+
+    @property
+    def shape(self):
+        return self._shape
+
+    @property
+    def numel(self) -> int:
+        r = 1
+        for s in self._shape:
+            r *= s
+        return r
+
+    def __str__(self):
+        return f"Vector({self.type} o {self._shape}, {self._dtype.__name__})"
+
+    def __repr__(self):
+        return self.__str__()
+
+    def __fly_values__(self):
+        return [self]
+
+    @classmethod
+    def __fly_construct__(cls, values):
+        return values[0]
+
+    def to(self, dtype: Type[Numeric], *, loc=None, ip=None) -> "Vector":
+        if dtype is ir.Value:
+            return self
+        if not isclass(dtype) or not issubclass(dtype, Numeric):
+            raise TypeError(f"dtype must be a Numeric type, got {type(dtype)}")
+        src_dtype = self._dtype
+        if src_dtype is dtype:
+            return self
+        src_float = getattr(src_dtype, 'is_float', False)
+        dst_float = getattr(dtype, 'is_float', False)
+        if src_float and dst_float:
+            res = fp_to_fp(self, dtype.ir_type, loc=loc, ip=ip)
+        elif src_float:
+            res = fp_to_int(self, dtype.signed, dtype.ir_type, loc=loc, ip=ip)
+        elif dst_float:
+            res = int_to_fp(self, src_dtype.signed, dtype.ir_type, loc=loc, ip=ip)
+        else:
+            res = int_to_int(self, dtype, loc=loc, ip=ip)
+        return Vector(res, self._shape, dtype)
+
+    def ir_value(self, *, loc=None, ip=None):
+        return self
+
+    def reduce(self, op, init_val=None, reduction_profile=None,
+               *, fastmath=None, loc=None, ip=None):
+        is_fp = self._dtype.is_float
+        signed = getattr(self._dtype, 'signed', True)
+        kind = _resolve_combining_kind(op, is_fp, signed)
+        et = element_type(self.type)
+        kwargs = {}
+        if fastmath is not None:
+            kwargs["fastmath"] = fastmath
+        if init_val is not None:
+            if isinstance(init_val, Numeric):
+                init_val = init_val.ir_value(loc=loc, ip=ip)
+            kwargs["acc"] = _to_raw(init_val)
+        res = _vector.reduction(et, kind, self, loc=loc, ip=ip, **kwargs)
+        return self._dtype(res)
+
+    def __getitem__(self, idx):
+        if isinstance(idx, int):
+            res = _vector.ExtractOp(
+                self, static_position=[idx], dynamic_position=[]
+            ).result
+            return self._dtype(res)
+        raise TypeError(f"unsupported index type: {type(idx)}")
+
+    def bitcast(self, dtype: Type[Numeric], *, loc=None, ip=None) -> "Vector":
+        src_bits = self.numel * self._dtype.width
+        dst_count = src_bits // dtype.width
+        dst_vec_ty = ir.VectorType.get([dst_count], dtype.ir_type)
+        res = _vector.BitCastOp(dst_vec_ty, self, loc=loc, ip=ip).result
+        return Vector(res, (dst_count,), dtype)
+
+    def shuffle(self, other, mask, *, loc=None, ip=None) -> "Vector":
+        other_val = other if not isinstance(other, Vector) else ir.Value(other)
+        res = _vector.shuffle(self, other_val, mask, loc=loc, ip=ip)
+        return Vector(res, (len(mask),), self._dtype)
+
+    @classmethod
+    def filled(cls, shape, fill_value, dtype: Type[Numeric],
+               *, loc=None, ip=None) -> "Vector":
+        shape = (shape,) if isinstance(shape, int) else tuple(shape)
+        n = 1
+        for s in shape:
+            n *= s
+        if isinstance(fill_value, (int, float, bool)):
+            fill_value = dtype(fill_value)
+        elif isinstance(fill_value, Numeric):
+            fill_value = fill_value.to(dtype, loc=loc, ip=ip)
+        else:
+            raise ValueError(f"expected numeric fill_value, got {type(fill_value)}")
+        vec_ty = ir.VectorType.get([n], dtype.ir_type)
+        val = _vector.broadcast(vec_ty, fill_value.ir_value(loc=loc, ip=ip),
+                                loc=loc, ip=ip)
+        return cls(val, shape, dtype)
+
+    @classmethod
+    def filled_like(cls, template: "Vector", fill_value, dtype=None,
+                    *, loc=None, ip=None) -> "Vector":
+        if dtype is None:
+            dtype = template.dtype
+        return cls.filled(template.shape, fill_value, dtype, loc=loc, ip=ip)
+
+    @classmethod
+    def zeros_like(cls, template: "Vector", dtype=None,
+                   *, loc=None, ip=None) -> "Vector":
+        if dtype is None:
+            dtype = template.dtype
+        return cls.filled(template.shape, 0.0 if dtype.is_float else 0, dtype, loc=loc, ip=ip)
+
+
+def full(shape, fill_value, dtype: Type[Numeric], *, loc=None, ip=None) -> Vector:
+    return Vector.filled(shape, fill_value, dtype, loc=loc, ip=ip)
+
+
+def full_like(a: Vector, fill_value, dtype=None, *, loc=None, ip=None) -> Vector:
+    return Vector.filled_like(a, fill_value, dtype, loc=loc, ip=ip)
+
+
+def zeros_like(a: Vector, dtype=None, *, loc=None, ip=None) -> Vector:
+    return Vector.zeros_like(a, dtype, loc=loc, ip=ip)

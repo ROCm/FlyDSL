@@ -1,7 +1,7 @@
 ---
 name: build-rocm-image
 description: Connect to a remote host via SSH and build a Docker image with rocprofv3, vllm, aiter, FlyDSL, and custom triton (rocm-maxnreg-support-v35 branch). Use when user wants to build/rebuild the ROCm development image on a remote host. Usage: /build-rocm-image <hostname>
-tools: Bash
+allowed-tools: Bash
 ---
 
 # Build ROCm Development Image

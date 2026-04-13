@@ -73,6 +73,58 @@ struct PyCopyOpCDNA3BufferCopyType : PyConcreteType<PyCopyOpCDNA3BufferCopyType>
   }
 };
 
+struct PyCopyOpCDNA3BufferCopyLDSType : PyConcreteType<PyCopyOpCDNA3BufferCopyLDSType> {
+  FLYDSL_REGISTER_TYPE_BINDING(CopyOpCDNA3BufferCopyLDSType, "CopyOpCDNA3BufferCopyLDSType");
+
+  static void bindDerived(ClassTy &c) {
+    c.def_static(
+        "get",
+        [](int32_t bitSize, DefaultingPyMlirContext context) {
+          MLIRContext *ctx = unwrap(context.get()->get());
+          return PyCopyOpCDNA3BufferCopyLDSType(
+              context->getRef(), wrap(CopyOpCDNA3BufferCopyLDSType::get(ctx, bitSize)));
+        },
+        "bit_size"_a, nb::kw_only(), "context"_a = nb::none(),
+        "Create a CopyOpCDNA3BufferCopyLDSType with the given bit size");
+  }
+};
+
+struct PyCopyOpCDNA3BufferAtomicType : PyConcreteType<PyCopyOpCDNA3BufferAtomicType> {
+  FLYDSL_REGISTER_TYPE_BINDING(CopyOpCDNA3BufferAtomicType, "CopyOpCDNA3BufferAtomicType");
+
+  static void bindDerived(ClassTy &c) {
+    c.def_static(
+        "get",
+        [](int32_t atomicOp, PyType &valTypeObj, DefaultingPyMlirContext context) {
+          MLIRContext *ctx = unwrap(context.get()->get());
+          auto atomicOpAttr = ::mlir::fly::AtomicOpAttr::get(
+              ctx, static_cast<::mlir::fly::AtomicOp>(atomicOp));
+          return PyCopyOpCDNA3BufferAtomicType(
+              context->getRef(),
+              wrap(CopyOpCDNA3BufferAtomicType::get(atomicOpAttr, unwrap(valTypeObj))));
+        },
+        "atomic_op"_a, "val_type"_a, nb::kw_only(), "context"_a = nb::none(),
+        "Create a CopyOpCDNA3BufferAtomicType with atomic op and value type");
+  }
+};
+
+struct PyCopyOpCDNA4LdsReadTransposeType : PyConcreteType<PyCopyOpCDNA4LdsReadTransposeType> {
+  FLYDSL_REGISTER_TYPE_BINDING(CopyOpCDNA4LdsReadTransposeType, "CopyOpCDNA4LdsReadTransposeType");
+
+  static void bindDerived(ClassTy &c) {
+    c.def_static(
+        "get",
+        [](int32_t transGranularity, int32_t bitSize, DefaultingPyMlirContext context) {
+          MLIRContext *ctx = unwrap(context.get()->get());
+          return PyCopyOpCDNA4LdsReadTransposeType(
+              context->getRef(),
+              wrap(CopyOpCDNA4LdsReadTransposeType::get(ctx, transGranularity, bitSize)));
+        },
+        "trans_granularity"_a, "bit_size"_a, nb::kw_only(), "context"_a = nb::none(),
+        "Create a CopyOpCDNA4LdsReadTransposeType with transpose granularity and bit size");
+  }
+};
+
 } // namespace fly_rocdl
 } // namespace MLIR_BINDINGS_PYTHON_DOMAIN
 } // namespace python
@@ -84,4 +136,7 @@ NB_MODULE(_mlirDialectsFlyROCDL, m) {
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyMmaOpCDNA3_MFMAType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyMmaOpGFX1250_WMMAType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyCopyOpCDNA3BufferCopyType::bind(m);
+  ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyCopyOpCDNA3BufferCopyLDSType::bind(m);
+  ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyCopyOpCDNA3BufferAtomicType::bind(m);
+  ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyCopyOpCDNA4LdsReadTransposeType::bind(m);
 }
