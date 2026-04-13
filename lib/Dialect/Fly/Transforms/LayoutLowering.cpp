@@ -417,6 +417,49 @@ public:
   }
 };
 
+class GetLeavesLowering : public OpRewritePattern<GetLeavesOp> {
+public:
+  using OpRewritePattern<GetLeavesOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(GetLeavesOp op, PatternRewriter &rewriter) const override {
+    auto loc = op.getLoc();
+    Value intTuple = op.getInput();
+
+    auto intTupleTy = dyn_cast<IntTupleType>(intTuple.getType());
+    if (!intTupleTy)
+      return failure();
+    if (!isNormalForm(cast<TypedValue<IntTupleType>>(intTuple)))
+      return failure();
+
+    auto defOp = intTuple.getDefiningOp<MakeIntTupleOp>();
+    bool dynamicOnly = op.getDynamicOnly();
+
+    if (dynamicOnly) {
+      rewriter.replaceOp(op, defOp.getDyncElems());
+      return success();
+    }
+
+    IntTupleBuilder<IntTupleAttr> builder(rewriter.getContext());
+    SmallVector<IntTupleAttr> flatLeaves;
+    intTupleFlattenToVector(builder, intTupleTy.getAttr(), flatLeaves);
+
+    SmallVector<Value> results;
+    auto dyncIter = defOp.getDyncElems().begin();
+    for (auto leaf : flatLeaves) {
+      auto intAttr = leaf.extractIntFromLeaf();
+      if (intAttr.isStatic()) {
+        results.push_back(arith::ConstantIntOp::create(rewriter, loc, intAttr.getValue(),
+                                                       std::max(32, intAttr.getWidth())));
+      } else {
+        results.push_back(*dyncIter++);
+      }
+    }
+
+    rewriter.replaceOp(op, results);
+    return success();
+  }
+};
+
 class GetShapeLowering : public OpRewritePattern<GetShapeOp> {
 public:
   using OpRewritePattern<GetShapeOp>::OpRewritePattern;
@@ -2633,9 +2676,9 @@ public:
                  MakeLayoutLikeOpLowering, MakeFragmentLikeOpLowering>(context);
 
     // Extractors
-    patterns.add<GetScalarLowering, GetShapeLowering, GetStrideLowering, GetLayoutLowering,
-                 GetIterLowering, ComposedGetInnerLowering, ComposedGetOffsetLowering,
-                 ComposedGetOuterLowering>(context);
+    patterns.add<GetScalarLowering, GetLeavesLowering, GetShapeLowering, GetStrideLowering,
+                 GetLayoutLowering, GetIterLowering, ComposedGetInnerLowering,
+                 ComposedGetOffsetLowering, ComposedGetOuterLowering>(context);
 
     // IntTuple operations
     patterns.add<IntTupleAddOpLowering, IntTupleSubOpLowering, IntTupleMulOpLowering,
