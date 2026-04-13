@@ -87,11 +87,15 @@ fi
 # ---------------------------------------------------------------------------
 # Remove editable-install symlink that would cause CopyFlyPythonSources to
 # overwrite the freshly built _mlir_libs with files from a different build.
+# Skip in parallel wheel builds (FLY_WHEEL_BUILD=1) to avoid racing with
+# other builds that may be copying from the same source tree concurrently.
 # ---------------------------------------------------------------------------
-_EDITABLE_MLIR_LINK="${REPO_ROOT}/python/flydsl/_mlir"
-if [ -L "${_EDITABLE_MLIR_LINK}" ]; then
-  echo "Removing editable-install symlink: ${_EDITABLE_MLIR_LINK}"
-  rm -f "${_EDITABLE_MLIR_LINK}"
+if [ "${FLY_WHEEL_BUILD:-0}" != "1" ]; then
+  _EDITABLE_MLIR_LINK="${REPO_ROOT}/python/flydsl/_mlir"
+  if [ -L "${_EDITABLE_MLIR_LINK}" ]; then
+    echo "Removing editable-install symlink: ${_EDITABLE_MLIR_LINK}"
+    rm -f "${_EDITABLE_MLIR_LINK}"
+  fi
 fi
 
 # ---------------------------------------------------------------------------
