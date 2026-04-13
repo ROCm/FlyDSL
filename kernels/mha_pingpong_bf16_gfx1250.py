@@ -5,19 +5,23 @@ Warps: 8, Threads/Warp: 32
 
 import math as _math
 import operator
-import flydsl.expr as fx
+
 import flydsl.compiler as flyc
-from flydsl.expr import arith, vector, gpu, rocdl, buffer_ops, math
-from flydsl.expr.rocdl import tdm_ops
-from flydsl.expr.typing import T
+import flydsl.expr as fx
+
 from flydsl._mlir import ir
-from flydsl._mlir.dialects import llvm as llvm_dialect
-from flydsl._mlir.dialects import memref as memref_dialect
 from flydsl._mlir.dialects import fly as _fly_d
-from flydsl.expr.utils.arith import ArithValue as _ArithValue
-from flydsl._mlir.dialects import scf as _scf_dialect
-from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
+from flydsl._mlir.dialects import llvm as _llvm_d
+from flydsl._mlir.dialects import memref as _mr_d
+from flydsl._mlir.dialects import rocdl as _rocdl_d
+from flydsl._mlir.dialects import scf as _scf_d
+from flydsl._mlir.dialects import vector as _vec_d
 from flydsl.compiler.jit_function import CompilationContext
+from flydsl.expr import arith, buffer_ops, gpu, math, rocdl, tdm_ops, vector
+from flydsl.expr.rocdl.tdm_ops import compute_warp_distribution
+from flydsl.expr.typing import T
+from flydsl.expr.utils.arith import ArithValue as _ArithValue
+from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 
 NUM_WARPS = 8
 THREADS_PER_WARP = 32
@@ -36,7 +40,7 @@ def _addptr(base, offset, elem_bytes=2):
     if hasattr(base, "type") and "memref" in str(base.type):
         glb_ptr_type = ir.Type.parse("!llvm.ptr<1>")
         base_ptr = _fly_d.extract_aligned_pointer_as_index(glb_ptr_type, base)
-        base_val = _ArithValue(llvm_dialect.ptrtoint(i64, base_ptr))
+        base_val = _ArithValue(_llvm_d.ptrtoint(i64, base_ptr))
     elif hasattr(base, "type") and str(base.type) == "i64":
         base_val = _ArithValue(base)
     else:
@@ -63,8 +67,6 @@ def _make_tdm_desc(base_addr_i64, shapes, strides, elem_bytes=2, tile_shape=None
     i32 = ir.IntegerType.get_signless(32)
     i64 = ir.IntegerType.get_signless(64)
 
-    from flydsl.expr import rocdl as _rocdl_ext
-    from flydsl.expr.rocdl.tdm_ops import compute_warp_distribution
     outer_stride = strides[0]
 
     # Tile shape
@@ -84,7 +86,7 @@ def _make_tdm_desc(base_addr_i64, shapes, strides, elem_bytes=2, tile_shape=None
 
     # Per-warp global address offset via wave_id
     if num_warps > 1:
-        _wid_i32 = _rocdl_ext.wave_id()
+        _wid_i32 = rocdl.wave_id()
         _wid_idx = arith.index_cast(T.index, _wid_i32)
         _warp_coord_outer = _wid_idx % arith.index(warps_dim0)
         _warp_coord_inner = _wid_idx / arith.index(warps_dim0)
@@ -163,7 +165,6 @@ def _tdm_copy_to_lds(desc, offsets, dst, elem_bytes=2, pred=None):
     2. Global source address offset by (outer_off * stride + inner_off)
     Then issues the async copy.
     """
-    from flydsl._mlir.dialects import vector as _vec_d
     i32 = ir.IntegerType.get_signless(32)
     i64 = ir.IntegerType.get_signless(64)
 
@@ -172,7 +173,7 @@ def _tdm_copy_to_lds(desc, offsets, dst, elem_bytes=2, pred=None):
     if isinstance(dst, _LdsSubview):
         _sub_elem_off = dst.elem_offset  # i32 element offset
         dst = dst.base_mr
-    lds_base_idx = memref_dialect.extract_aligned_pointer_as_index(dst)
+    lds_base_idx = _mr_d.extract_aligned_pointer_as_index(dst)
     # Add sub-buffer element offset (from _memdesc_index_subview) as bytes
     if _sub_elem_off is not None:
         _off_idx = arith.index_cast(T.index, _sub_elem_off)
@@ -182,8 +183,7 @@ def _tdm_copy_to_lds(desc, offsets, dst, elem_bytes=2, pred=None):
     # Add per-warp LDS offset
     _nw = getattr(desc, "_num_warps", 1)
     if _nw > 1:
-        from flydsl.expr import rocdl as _rocdl_ext
-        _wid = arith.index_cast(T.index, _rocdl_ext.wave_id())
+        _wid = arith.index_cast(T.index, rocdl.wave_id())
         _wco = _wid % arith.index(desc._warps_dim0)
         _wci = _wid / arith.index(desc._warps_dim0)
         _woo = _wco * arith.index(desc._bpw_outer)
@@ -260,70 +260,6 @@ def _tdm_copy_to_lds(desc, offsets, dst, elem_bytes=2, pred=None):
     return dst
 
 
-def _to_index(val):
-    """Convert a value to MLIR index type."""
-    if isinstance(val, ir.Value):
-        if val.type == ir.IndexType.get():
-            return val
-        return arith.IndexCastOp(ir.IndexType.get(), val).result
-    if hasattr(val, "ir_value"):
-        raw = val.ir_value()
-        if isinstance(raw, ir.Value) and raw.type != ir.IndexType.get():
-            return arith.IndexCastOp(ir.IndexType.get(), raw).result
-        return raw
-    if isinstance(val, int):
-        return arith.ConstantOp(ir.IndexType.get(), val).result
-    raise TypeError(f"_to_index: unexpected type {type(val)}")
-
-
-class _SCFForCtx:
-    """Context manager for scf.for loop."""
-    def __init__(self, lb, ub, step, init_vals=None):
-        start = _to_index(lb)
-        stop = _to_index(ub)
-        step_v = _to_index(step)
-        raw_inits = []
-        if init_vals:
-            for v in init_vals:
-                if isinstance(v, ir.Value):
-                    raw_inits.append(v)
-                elif hasattr(v, "ir_value"):
-                    raw_inits.append(v.ir_value())
-                else:
-                    raw_inits.append(v)
-        if raw_inits:
-            self.for_op = _scf_dialect.ForOp(start, stop, step_v, raw_inits)
-        else:
-            self.for_op = _scf_dialect.ForOp(start, stop, step_v)
-        self.ip = ir.InsertionPoint(self.for_op.body)
-
-    def __enter__(self):
-        self.ip.__enter__()
-        iv = self.for_op.induction_variable
-        iargs = list(self.for_op.inner_iter_args) if self.for_op.inner_iter_args else []
-        return iv, iargs
-
-    def __exit__(self, *args):
-        self.ip.__exit__(*args)
-
-    @property
-    def results(self):
-        return list(self.for_op.results)
-
-
-def _scf_yield_(vals):
-    """Emit scf.yield with the given values."""
-    raw = []
-    for v in vals:
-        if isinstance(v, ir.Value):
-            raw.append(v)
-        elif hasattr(v, "ir_value"):
-            raw.append(v.ir_value())
-        else:
-            raw.append(v)
-    _scf_dialect.YieldOp(raw)
-
-
 def _tree_reduce(vec, reduce_fn, start, count):
     """Tree-reduce `count` elements from `vec` starting at index `start`.
 
@@ -334,8 +270,7 @@ def _tree_reduce(vec, reduce_fn, start, count):
     reduce_fn: callable(a, b) -> reduced value. Can be arith.maxnumf,
     operator.add (for addf), etc.
     """
-    from flydsl._mlir.dialects import vector as _vec_dialect
-    vals = [_vec_dialect.extract(vec, [], [start + i]) for i in range(count)]
+    vals = [_vec_d.extract(vec, [], [start + i]) for i in range(count)]
     while len(vals) > 1:
         nxt = []
         for j in range(0, len(vals) - 1, 2):
@@ -426,10 +361,6 @@ def _lds_load_gf2(lds_ref, reg_offsets, lane_bases, warp_bases, n_elems, elem_dt
     pad_interval: padded_shared interval in elements (0 = no padding).
     pad_amount: padded_shared pad amount in elements (0 = no padding).
     """
-    from flydsl._mlir.dialects import memref as _mr_d
-    from flydsl._mlir.dialects import vector as _vec_dialect
-    from flydsl._mlir.dialects import llvm as _llvm_d
-
     # Unwrap LDS memref from possible (memref, transposed) tuple or _LdsSubview
     _sub_elem_off = None  # i32 element offset for sub-buffer
     if isinstance(lds_ref, tuple):
@@ -495,7 +426,6 @@ def _lds_load_gf2(lds_ref, reg_offsets, lane_bases, warp_bases, n_elems, elem_dt
 
     # Transpose load path: use rocdl.ds_load_tr16_b128 for transposed V operand
     if transpose_load and tr_lane_bases is not None:
-        from flydsl._mlir.dialects import rocdl as _rocdl_d
         tr_tile = 8  # ds_load_tr16_b128 loads 8 bf16 per call
         tr_vec_ty = ir.VectorType.get([tr_tile], raw_dtype)
 
@@ -652,10 +582,6 @@ def _wmma_gemm_full(a_data, b_lds_ref, c_vec, ab_dtype,
     a_pad_* / b_pad_* describe padded_shared row padding when fly.lds_load
     forwards an LDS memref rather than a pre-loaded register vector.
     """
-    from flydsl._mlir.dialects import vector as _vec_dialect
-    from flydsl._mlir.dialects import memref as _mr_d
-    from flydsl.expr import rocdl
-
     raw_ab = ab_dtype
     if hasattr(raw_ab, "ir_type"):
         raw_ab = raw_ab.ir_type()
@@ -690,7 +616,7 @@ def _wmma_gemm_full(a_data, b_lds_ref, c_vec, ab_dtype,
     # Thread decomposition via CuTE idx2crd
     tid_raw = gpu.thread_id("x")
     tid = arith.index_cast(T.i32, tid_raw)
-    thr_crd = _idx2crd(tid, layout_thr)
+    thr_crd = fx.idx2crd(tid, layout_thr)
     wave_m_idx = fx.get(thr_crd, 0)
     wave_n_idx = fx.get(thr_crd, 1)
     lane_kgrp  = fx.get(thr_crd, 2)
@@ -850,19 +776,6 @@ def _crd2idx(crd, layout):
     return scalar
 
 
-def _idx2crd(idx, layout):
-    """CuTE idx2crd: (linear_index, layout) → coordinate tuple.
-
-    Returns the raw fly.int_tuple; use fx.get(result, i) to extract mode i.
-    """
-    if isinstance(idx, ir.Value) and not str(idx.type).startswith("!fly.int_tuple"):
-        idx_i32 = idx
-        if str(idx.type) != "i32":
-            idx_i32 = arith.IndexCastOp(ir.IntegerType.get_signless(32), idx).result
-        IntTupleTy, dyncElems = _fly_d.infer_int_tuple_type(idx_i32)
-        idx = _fly_d.make_int_tuple(IntTupleTy, dyncElems)
-    return fx.idx2crd(idx, layout)
-
 
 def _make_reg_offset_vec(base, reg_shape, reg_stride):
     """Build vector<n x i32> of register offsets from CuTE layout pattern.
@@ -912,22 +825,20 @@ def _expand_layout(shape, stride):
 
 def _shuffle_repeat_each(src, n_repeat):
     """Repeat each element n_repeat times: [a,b,...] → [a,a,..., b,b,..., ...]"""
-    from flydsl._mlir.dialects import vector as _vec_dialect
     sv = src.ir_value() if hasattr(src, "ir_value") else src
     n = sv.type.shape[0]
     mask = []
     for i in range(n):
         mask.extend([i] * n_repeat)
-    return _vec_dialect.shuffle(src, src, mask)
+    return _vec_d.shuffle(src, src, mask)
 
 
 def _shuffle_repeat_block(src, n_repeat):
     """Repeat entire vector n_repeat times: [a,b,c] → [a,b,c, a,b,c, ...]"""
-    from flydsl._mlir.dialects import vector as _vec_dialect
     sv = src.ir_value() if hasattr(src, "ir_value") else src
     n = sv.type.shape[0]
     mask = list(range(n)) * n_repeat
-    return _vec_dialect.shuffle(src, src, mask)
+    return _vec_d.shuffle(src, src, mask)
 
 
 def _shuffle_select_repeat(src, indices, n_repeat):
@@ -936,11 +847,10 @@ def _shuffle_select_repeat(src, indices, n_repeat):
     Example: _shuffle_select_repeat(v, [0, 16], n_repeat=64)
     → [v[0],v[0],...(64×), v[16],v[16],...(64×)]
     """
-    from flydsl._mlir.dialects import vector as _vec_dialect
     mask = []
     for idx in indices:
         mask.extend([idx] * n_repeat)
-    return _vec_dialect.shuffle(src, src, mask)
+    return _vec_d.shuffle(src, src, mask)
 
 
 def _buffer_load_dot_op_a(memref_ptr, offsets, masks, n_elems, elem_dtype,
@@ -962,7 +872,6 @@ def _buffer_load_dot_op_a(memref_ptr, offsets, masks, n_elems, elem_dtype,
     When k_width > 1, issues vectorized buffer_load instructions (e.g. buffer_load_b128
     for k_width=8 bf16) instead of per-element scalar loads.
     """
-    from flydsl._mlir.dialects import vector as _vec_dialect
     rsrc = buffer_ops.create_buffer_resource(memref_ptr)
     elem_ir = elem_dtype() if callable(elem_dtype) else elem_dtype
 
@@ -982,26 +891,26 @@ def _buffer_load_dot_op_a(memref_ptr, offsets, masks, n_elems, elem_dtype,
         zero_attr = ir.IntegerAttr.get(elem_ir, 0)
     zero_elem = arith.ConstantOp(elem_ir, zero_attr).result
     result_type = ir.VectorType.get([n_elems], elem_ir)
-    result_vec = _vec_dialect.broadcast(result_type, zero_elem)
+    result_vec = _vec_d.broadcast(result_type, zero_elem)
 
     for wm in range(wmma_m_rep):
         for ks in range(k_wmma_steps):
             for j in range(0, 16, vec_width):
                 flat_idx = wm * (k_wmma_steps * 16) + ks * 16 + j
                 # Use offset of first element in contiguous group
-                off = _vec_dialect.extract(offsets, [], [flat_idx])
+                off = _vec_d.extract(offsets, [], [flat_idx])
                 # Mask from first element (all vec_width share same M position)
                 mask_i = None
                 if masks is not None:
-                    mask_i = _vec_dialect.extract(masks, [], [flat_idx])
+                    mask_i = _vec_d.extract(masks, [], [flat_idx])
                 if vec_width > 1:
                     loaded = buffer_ops.buffer_load(rsrc, off, vec_width=vec_width, dtype=elem_ir, mask=mask_i)
                     for vi in range(vec_width):
-                        val = _vec_dialect.extract(loaded, [], [vi])
-                        result_vec = _vec_dialect.insert(val, result_vec, [], [flat_idx + vi])
+                        val = _vec_d.extract(loaded, [], [vi])
+                        result_vec = _vec_d.insert(val, result_vec, [], [flat_idx + vi])
                 else:
                     val_i = buffer_ops.buffer_load(rsrc, off, vec_width=1, dtype=elem_ir, mask=mask_i)
-                    result_vec = _vec_dialect.insert(val_i, result_vec, [], [flat_idx])
+                    result_vec = _vec_d.insert(val_i, result_vec, [], [flat_idx])
 
     return result_vec
 
@@ -1020,8 +929,6 @@ def _buffer_store_vec(data_vec, memref_ptr, offsets, masks, n_elems, elem_dtype,
         contiguous_size: number of contiguous elements per chunk for vectorized stores.
             When > 1, issues one wide buffer_store per chunk instead of per-element.
     """
-    from flydsl._mlir.dialects import vector as _vec_dialect
-    from flydsl._mlir.dialects import scf as _scf_d
     rsrc = buffer_ops.create_buffer_resource(memref_ptr)
     elem_ir = elem_dtype() if callable(elem_dtype) else elem_dtype
     if contiguous_size is not None and contiguous_size > 1:
@@ -1034,14 +941,14 @@ def _buffer_store_vec(data_vec, memref_ptr, offsets, masks, n_elems, elem_dtype,
             zero_elem = arith.ConstantOp(elem_ir,
                 ir.FloatAttr.get(elem_ir, 0.0) if isinstance(elem_ir, ir.FloatType)
                 else ir.IntegerAttr.get(elem_ir, 0)).result
-            chunk = _vec_dialect.broadcast(chunk_ty, zero_elem)
+            chunk = _vec_d.broadcast(chunk_ty, zero_elem)
             for j in range(contiguous_size):
-                val_j = _vec_dialect.extract(data_vec, [], [base_idx + j])
-                chunk = _vec_dialect.insert(val_j, chunk, [], [j])
-            off_0 = _vec_dialect.extract(offsets, [], [base_idx])
+                val_j = _vec_d.extract(data_vec, [], [base_idx + j])
+                chunk = _vec_d.insert(val_j, chunk, [], [j])
+            off_0 = _vec_d.extract(offsets, [], [base_idx])
             # Mask: all contiguous elements share the same M position
             if masks is not None:
-                mask_i = _vec_dialect.extract(masks, [], [base_idx])
+                mask_i = _vec_d.extract(masks, [], [base_idx])
                 if_op = _scf_d.IfOp(mask_i, [], has_else=False)
                 with ir.InsertionPoint(if_op.then_block):
                     buffer_ops.buffer_store(chunk, rsrc, off_0)
@@ -1051,10 +958,10 @@ def _buffer_store_vec(data_vec, memref_ptr, offsets, masks, n_elems, elem_dtype,
     else:
         # Per-element scalar path
         for i in range(n_elems):
-            val_i = _vec_dialect.extract(data_vec, [], [i])
-            off_i = _vec_dialect.extract(offsets, [], [i])
+            val_i = _vec_d.extract(data_vec, [], [i])
+            off_i = _vec_d.extract(offsets, [], [i])
             if masks is not None:
-                mask_i = _vec_dialect.extract(masks, [], [i])
+                mask_i = _vec_d.extract(masks, [], [i])
                 if_op = _scf_d.IfOp(mask_i, [], has_else=False)
                 with ir.InsertionPoint(if_op.then_block):
                     buffer_ops.buffer_store(val_i, rsrc, off_i)
@@ -1110,28 +1017,35 @@ def attn_fwd_pingpong_pipelined_kernel(q_ptr: fx.Tensor,
     # Get LDS base memref from SmemAllocator
     _lds_base = _lds_allocator.get_base()
     
-    ONES_16 = arith.constant_vector(1.0, T.vec(16, T.f32))
-    c2_i32 = arith.constant(2, type=T.i32)
-    c192_i32 = arith.constant(192, type=T.i32)
-    cst_0 = arith.constant_vector(0.10411755, T.vec(64, T.f32))
-    cst_1 = arith.constant_vector(0.10411755, T.vec(2, T.f32))
-    NEG_INF_64 = arith.constant_vector(float('-inf'), T.vec(64, T.f32))
-    cst_3 = arith.constant_vector(512, T.vec(32, T.i32))
-    ZEROS_64 = arith.constant_vector(0.0, T.vec(64, T.f32))
-    c1_i32 = arith.constant(1, type=T.i32)
+    # Scalar constants
     c0_i32 = arith.constant(0, type=T.i32)
+    c1_i32 = arith.constant(1, type=T.i32)
+    c2_i32 = arith.constant(2, type=T.i32)
+    c64_i32 = arith.constant(64, type=T.i32)
+    c128_i32 = arith.constant(128, type=T.i32)
+    c192_i32 = arith.constant(192, type=T.i32)
+    c256_i32 = arith.constant(256, type=T.i32)
     c320_i32 = arith.constant(320, type=T.i32)
+    c512_i32 = arith.constant(512, type=T.i32)
+    c1_i64 = arith.constant(1, type=T.i64)
+
+    # Vector constants — softmax scaling factor: log2(e) / sqrt(head_dim)
+    SOFTMAX_SCALE_64 = arith.constant_vector(0.10411755, T.vec(64, T.f32))
+    SOFTMAX_SCALE_2 = arith.constant_vector(0.10411755, T.vec(2, T.f32))
+
+    # Vector constants — zeros, ones, neg-inf for accumulator init / online softmax
+    ZEROS_64 = arith.constant_vector(0.0, T.vec(64, T.f32))
     ZEROS_128 = arith.constant_vector(0.0, T.vec(128, T.f32))
     ONES_2 = arith.constant_vector(1.0, T.vec(2, T.f32))
+    ONES_16 = arith.constant_vector(1.0, T.vec(16, T.f32))
     NEG_INF_2 = arith.constant_vector(float('-inf'), T.vec(2, T.f32))
-    cst_8 = arith.constant_vector(256, T.vec(16, T.i32))
-    c64_i32 = arith.constant(64, type=T.i32)
-    c1_i64 = arith.constant(1, type=T.i64)
-    c128_i32 = arith.constant(128, type=T.i32)
-    c512_i32 = arith.constant(512, type=T.i32)
-    cst_9 = arith.constant_vector(256, T.vec(32, T.i32))
-    cst_10 = arith.constant_vector(128, T.vec(32, T.i32))
-    c256_i32 = arith.constant(256, type=T.i32)
+    NEG_INF_64 = arith.constant_vector(float('-inf'), T.vec(64, T.f32))
+
+    # Vector constants — boundary masks
+    BOUND_512_x32 = arith.constant_vector(512, T.vec(32, T.i32))
+    BOUND_256_x16 = arith.constant_vector(256, T.vec(16, T.i32))
+    BOUND_256_x32 = arith.constant_vector(256, T.vec(32, T.i32))
+    BOUND_128_x32 = arith.constant_vector(128, T.vec(32, T.i32))
     bid_x = arith.index_cast(T.i32, gpu.block_id("x"))
     bid_y = arith.index_cast(T.i32, gpu.block_id("y"))
     bid_z = arith.index_cast(T.i32, gpu.block_id("z"))
@@ -1158,11 +1072,11 @@ def attn_fwd_pingpong_pipelined_kernel(q_ptr: fx.Tensor,
     _v20_layout = fx.make_layout((16, 2, 8), (0, 8, 0))
     _v20_base = arith.index_cast(T.i32, _crd2idx(tid % 256, _v20_layout))
     _v20 = _make_reg_offset_vec(_v20_base, (8, 4), (1, 16))
-    _v21 = _v20 + cst_10
+    _v21 = _v20 + BOUND_128_x32
     _v22 = _shuffle_select_repeat(_v15, [0, 16], n_repeat=32)
     _v23 = _shuffle_repeat_block(_v21, n_repeat=2)
     _v24 = _v22 + _v23
-    _v25 = _v11 < cst_9
+    _v25 = _v11 < BOUND_256_x32
     _v26 = _shuffle_select_repeat(_v25, [0, 16], n_repeat=64)
     _v27 = _buffer_load_dot_op_a(q_ptr, _v19, _v26, 128, T.bf16,
                                       tile_m=256, tile_k=128, warps_m=8, warps_n=1, stride_m=stride_qm, k_width=8)
@@ -1217,7 +1131,7 @@ def attn_fwd_pingpong_pipelined_kernel(q_ptr: fx.Tensor,
     _v54 = _v53 + _v52
     _v55 = _shuffle_select_repeat(_v54, [0, 8], n_repeat=64)
     _v56 = _v55 + _v18
-    _v57 = _v50 < cst_8
+    _v57 = _v50 < BOUND_256_x16
     _v58 = _memdesc_index_subview(_v36, c0_i32, 8192, pad_interval=128, pad_amount=8)
     _tdm_copy_to_lds(_v35, (c0_i32, c0_i32), _v58, elem_bytes=2)
     _v60 = _memdesc_index_subview(_v39, c0_i32, 4096, pad_interval=64, pad_amount=8)
@@ -1264,7 +1178,7 @@ def attn_fwd_pingpong_pipelined_kernel(q_ptr: fx.Tensor,
     _v74 = _wmma_gemm_full(_v27, _v70, ZEROS_64, T.bf16, tile_m=256, tile_n=64, tile_k=128, warps_m=8, warps_n=1)
     # GEMM: wmma_16x16x32 (16x16x32) — tiled WMMA, warps_m=8 warps_n=1
     _v75 = _wmma_gemm_full(_v29, _v73, _v74, T.bf16, tile_m=256, tile_n=64, tile_k=64, warps_m=8, warps_n=1)
-    _v76 = _v20 < cst_3
+    _v76 = _v20 < BOUND_512_x32
     _v77 = _shuffle_repeat_block(_v76, n_repeat=2)
     _v78 = arith.select(_v77, _v75, NEG_INF_64)
     ZEROS_2 = arith.constant_vector(0.0, T.vec(2, T.f32))
@@ -1290,8 +1204,8 @@ def attn_fwd_pingpong_pipelined_kernel(q_ptr: fx.Tensor,
     _v220 = arith.maxnumf(_v216, _v219)
     _v221 = vector.insert(_v220, _v215, static_position=[1], dynamic_position=[])
     _v222 = arith.maxnumf(_v221, NEG_INF_2)
-    _v223 = _v222 * cst_1
-    _v224 = _v78 * cst_0
+    _v223 = _v222 * SOFTMAX_SCALE_2
+    _v224 = _v78 * SOFTMAX_SCALE_64
     _v225 = vector.shuffle(_v223, _v223, [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1])
     _v226 = _shuffle_select_repeat(_v225, [0, 8], n_repeat=32)
     _v227 = _v224 - _v226
@@ -1334,11 +1248,9 @@ def attn_fwd_pingpong_pipelined_kernel(q_ptr: fx.Tensor,
                           n_additive=128,
                           pad_interval=64,
                           pad_amount=8)
-    _for_ctx__v241_8 = _SCFForCtx(c0_i32,
-                                  c320_i32,
-                                  c64_i32,
-                                  [_v222, ONES_2, ZEROS_128, _v237, _v240, _v228, _v230, c0_i32])
-    with _for_ctx__v241_8 as (_iv_index, [arg17, arg18, arg19, arg20, arg21, arg22, arg23, arg24]):
+    for _iv_index, (arg17, arg18, arg19, arg20, arg21, arg22, arg23, arg24) in range(
+            c0_i32, c320_i32, c64_i32,
+            init=[_v222, ONES_2, ZEROS_128, _v237, _v240, _v228, _v230, c0_i32]):
         arg16 = arith.index_cast(T.i32, _iv_index)
         _v1050 = arg16 + c128_i32
         _v1051 = arg16 + c192_i32
@@ -1353,133 +1265,10 @@ def attn_fwd_pingpong_pipelined_kernel(q_ptr: fx.Tensor,
         tdm_ops.tensor_wait(0)
         gpu.barrier()  # TDM is async; barrier ensures LDS visible to all waves
 
-        _v1050 = vector.extract(arg22, static_position=[0])
-        _v1051 = vector.extract(arg22, static_position=[1])
-        _v1052 = vector.extract(arg22, static_position=[2])
-        _v1053 = vector.extract(arg22, static_position=[3])
-        _v1054 = vector.extract(arg22, static_position=[4])
-        _v1055 = vector.extract(arg22, static_position=[5])
-        _v1056 = vector.extract(arg22, static_position=[6])
-        _v1057 = vector.extract(arg22, static_position=[7])
-        _v1058 = vector.extract(arg22, static_position=[8])
-        _v1059 = vector.extract(arg22, static_position=[9])
-        _v1060 = vector.extract(arg22, static_position=[10])
-        _v1061 = vector.extract(arg22, static_position=[11])
-        _v1062 = vector.extract(arg22, static_position=[12])
-        _v1063 = vector.extract(arg22, static_position=[13])
-        _v1064 = vector.extract(arg22, static_position=[14])
-        _v1065 = vector.extract(arg22, static_position=[15])
-        _v1066 = vector.extract(arg22, static_position=[16])
-        _v1067 = vector.extract(arg22, static_position=[17])
-        _v1068 = vector.extract(arg22, static_position=[18])
-        _v1069 = vector.extract(arg22, static_position=[19])
-        _v1070 = vector.extract(arg22, static_position=[20])
-        _v1071 = vector.extract(arg22, static_position=[21])
-        _v1072 = vector.extract(arg22, static_position=[22])
-        _v1073 = vector.extract(arg22, static_position=[23])
-        _v1074 = vector.extract(arg22, static_position=[24])
-        _v1075 = vector.extract(arg22, static_position=[25])
-        _v1076 = vector.extract(arg22, static_position=[26])
-        _v1077 = vector.extract(arg22, static_position=[27])
-        _v1078 = vector.extract(arg22, static_position=[28])
-        _v1079 = vector.extract(arg22, static_position=[29])
-        _v1080 = vector.extract(arg22, static_position=[30])
-        _v1081 = vector.extract(arg22, static_position=[31])
-        _v1082 = _v1050 + _v1051
-        _v1083 = _v1052 + _v1053
-        _v1084 = _v1054 + _v1055
-        _v1085 = _v1056 + _v1057
-        _v1086 = _v1058 + _v1059
-        _v1087 = _v1060 + _v1061
-        _v1088 = _v1062 + _v1063
-        _v1089 = _v1064 + _v1065
-        _v1090 = _v1066 + _v1067
-        _v1091 = _v1068 + _v1069
-        _v1092 = _v1070 + _v1071
-        _v1093 = _v1072 + _v1073
-        _v1094 = _v1074 + _v1075
-        _v1095 = _v1076 + _v1077
-        _v1096 = _v1078 + _v1079
-        _v1097 = _v1080 + _v1081
-        _v1098 = _v1082 + _v1083
-        _v1099 = _v1084 + _v1085
-        _v1100 = _v1086 + _v1087
-        _v1101 = _v1088 + _v1089
-        _v1102 = _v1090 + _v1091
-        _v1103 = _v1092 + _v1093
-        _v1104 = _v1094 + _v1095
-        _v1105 = _v1096 + _v1097
-        _v1106 = _v1098 + _v1099
-        _v1107 = _v1100 + _v1101
-        _v1108 = _v1102 + _v1103
-        _v1109 = _v1104 + _v1105
-        _v1110 = _v1106 + _v1107
-        _v1111 = _v1108 + _v1109
-        _v1112 = _v1110 + _v1111
+        # Tree-reduce arg22[0:32] and arg22[32:64] by addition
+        _v1112 = _tree_reduce(arg22, operator.add, 0, 32)
         _v1113 = vector.insert(_v1112, ZEROS_2, static_position=[0], dynamic_position=[])
-        _v1114 = vector.extract(arg22, static_position=[32])
-        _v1115 = vector.extract(arg22, static_position=[33])
-        _v1116 = vector.extract(arg22, static_position=[34])
-        _v1117 = vector.extract(arg22, static_position=[35])
-        _v1118 = vector.extract(arg22, static_position=[36])
-        _v1119 = vector.extract(arg22, static_position=[37])
-        _v1120 = vector.extract(arg22, static_position=[38])
-        _v1121 = vector.extract(arg22, static_position=[39])
-        _v1122 = vector.extract(arg22, static_position=[40])
-        _v1123 = vector.extract(arg22, static_position=[41])
-        _v1124 = vector.extract(arg22, static_position=[42])
-        _v1125 = vector.extract(arg22, static_position=[43])
-        _v1126 = vector.extract(arg22, static_position=[44])
-        _v1127 = vector.extract(arg22, static_position=[45])
-        _v1128 = vector.extract(arg22, static_position=[46])
-        _v1129 = vector.extract(arg22, static_position=[47])
-        _v1130 = vector.extract(arg22, static_position=[48])
-        _v1131 = vector.extract(arg22, static_position=[49])
-        _v1132 = vector.extract(arg22, static_position=[50])
-        _v1133 = vector.extract(arg22, static_position=[51])
-        _v1134 = vector.extract(arg22, static_position=[52])
-        _v1135 = vector.extract(arg22, static_position=[53])
-        _v1136 = vector.extract(arg22, static_position=[54])
-        _v1137 = vector.extract(arg22, static_position=[55])
-        _v1138 = vector.extract(arg22, static_position=[56])
-        _v1139 = vector.extract(arg22, static_position=[57])
-        _v1140 = vector.extract(arg22, static_position=[58])
-        _v1141 = vector.extract(arg22, static_position=[59])
-        _v1142 = vector.extract(arg22, static_position=[60])
-        _v1143 = vector.extract(arg22, static_position=[61])
-        _v1144 = vector.extract(arg22, static_position=[62])
-        _v1145 = vector.extract(arg22, static_position=[63])
-        _v1146 = _v1114 + _v1115
-        _v1147 = _v1116 + _v1117
-        _v1148 = _v1118 + _v1119
-        _v1149 = _v1120 + _v1121
-        _v1150 = _v1122 + _v1123
-        _v1151 = _v1124 + _v1125
-        _v1152 = _v1126 + _v1127
-        _v1153 = _v1128 + _v1129
-        _v1154 = _v1130 + _v1131
-        _v1155 = _v1132 + _v1133
-        _v1156 = _v1134 + _v1135
-        _v1157 = _v1136 + _v1137
-        _v1158 = _v1138 + _v1139
-        _v1159 = _v1140 + _v1141
-        _v1160 = _v1142 + _v1143
-        _v1161 = _v1144 + _v1145
-        _v1162 = _v1146 + _v1147
-        _v1163 = _v1148 + _v1149
-        _v1164 = _v1150 + _v1151
-        _v1165 = _v1152 + _v1153
-        _v1166 = _v1154 + _v1155
-        _v1167 = _v1156 + _v1157
-        _v1168 = _v1158 + _v1159
-        _v1169 = _v1160 + _v1161
-        _v1170 = _v1162 + _v1163
-        _v1171 = _v1164 + _v1165
-        _v1172 = _v1166 + _v1167
-        _v1173 = _v1168 + _v1169
-        _v1174 = _v1170 + _v1171
-        _v1175 = _v1172 + _v1173
-        _v1176 = _v1174 + _v1175
+        _v1176 = _tree_reduce(arg22, operator.add, 32, 32)
         _v1177 = vector.insert(_v1176, _v1113, static_position=[1], dynamic_position=[])
         _v1178 = vector.extract(_v1177, static_position=[0])
         _v1179 = arith.bitcast(T.i32, _v1178)
@@ -1563,14 +1352,14 @@ def attn_fwd_pingpong_pipelined_kernel(q_ptr: fx.Tensor,
         _v1189 = vector.insert(_v1188, _v1183, static_position=[1], dynamic_position=[])
         _v1190 = arith.maxnumf(arg17, _v1189)
         _v1191 = _v1190
-        _v1192 = _v1190 * cst_1
-        _v1193 = _v1034_r2 * cst_0
+        _v1192 = _v1190 * SOFTMAX_SCALE_2
+        _v1193 = _v1034_r2 * SOFTMAX_SCALE_64
         _v1194 = vector.shuffle(_v1192, _v1192, [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1])
         _v1195 = _shuffle_select_repeat(_v1194, [0, 8], n_repeat=32)
         _v1196 = _v1193 - _v1195
         _v1197 = math.exp2(_v1196)
         _v1198 = _v1197
-        _v1199 = arg17 * cst_1
+        _v1199 = arg17 * SOFTMAX_SCALE_2
         _v1200 = _v1199 - _v1192
         _v1201 = math.exp2(_v1200)
         _v1202 = _v1201
@@ -1606,15 +1395,9 @@ def attn_fwd_pingpong_pipelined_kernel(q_ptr: fx.Tensor,
         _v1044_r1 = _v1198
         _v1044_r2 = _v1202
         _v1044_r3 = _v1206
-        _scf_yield_([_v1044_r0, _v1037_r2, _v1041, _v1044_r3, _v1209, _v1044_r1, _v1044_r2, _v1037_r6])
-    _v241_r0 = _for_ctx__v241_8.results[0]
-    _v241_r1 = _for_ctx__v241_8.results[1]
-    _v241_r2 = _for_ctx__v241_8.results[2]
-    _v241_r3 = _for_ctx__v241_8.results[3]
-    _v241_r4 = _for_ctx__v241_8.results[4]
-    _v241_r5 = _for_ctx__v241_8.results[5]
-    _v241_r6 = _for_ctx__v241_8.results[6]
-    _v241_r7 = _for_ctx__v241_8.results[7]
+        _loop_results = yield _v1044_r0, _v1037_r2, _v1041, _v1044_r3, _v1209, _v1044_r1, _v1044_r2, _v1037_r6
+    (_v241_r0, _v241_r1, _v241_r2, _v241_r3,
+     _v241_r4, _v241_r5, _v241_r6, _v241_r7) = _loop_results
     _v242 = _v241_r7 - c1_i32
     _v243 = _v242 * c64_i32
     _v244 = _v243 + c128_i32
@@ -1665,7 +1448,7 @@ def attn_fwd_pingpong_pipelined_kernel(q_ptr: fx.Tensor,
     _v401 = _wmma_gemm_full(_v29, _v241_r4, _v400, T.bf16, tile_m=256, tile_n=64, tile_k=64, warps_m=8, warps_n=1)
     _v402 = vector.broadcast(T.vec(32, T.i32), _v244)
     _v403 = _v402 + _v20
-    _v404 = _v403 < cst_3
+    _v404 = _v403 < BOUND_512_x32
     _v405 = _shuffle_repeat_block(_v404, n_repeat=2)
     _v406 = arith.select(_v405, _v401, NEG_INF_64)
     _v469 = _tree_reduce(_v406, arith.maxnumf, 0, 32)
@@ -1685,13 +1468,13 @@ def attn_fwd_pingpong_pipelined_kernel(q_ptr: fx.Tensor,
     _v545 = arith.maxnumf(_v541, _v544)
     _v546 = vector.insert(_v545, _v540, static_position=[1], dynamic_position=[])
     _v547 = arith.maxnumf(_v241_r0, _v546)
-    _v548 = _v547 * cst_1
-    _v549 = _v406 * cst_0
+    _v548 = _v547 * SOFTMAX_SCALE_2
+    _v549 = _v406 * SOFTMAX_SCALE_64
     _v550 = vector.shuffle(_v548, _v548, [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1])
     _v551 = _shuffle_select_repeat(_v550, [0, 8], n_repeat=32)
     _v552 = _v549 - _v551
     _v553 = math.exp2(_v552)
-    _v554 = _v241_r0 * cst_1
+    _v554 = _v241_r0 * SOFTMAX_SCALE_2
     _v555 = _v554 - _v548
     _v556 = math.exp2(_v555)
     tdm_ops.tensor_wait(0)
@@ -1733,7 +1516,7 @@ def attn_fwd_pingpong_pipelined_kernel(q_ptr: fx.Tensor,
     _v567 = _wmma_gemm_full(_v29, _v564, _v566, T.bf16, tile_m=256, tile_n=64, tile_k=64, warps_m=8, warps_n=1)
     _v568 = vector.broadcast(T.vec(32, T.i32), _v245)
     _v569 = _v568 + _v20
-    _v570 = _v569 < cst_3
+    _v570 = _v569 < BOUND_512_x32
     _v571 = _shuffle_repeat_block(_v570, n_repeat=2)
     _v572 = arith.select(_v571, _v567, NEG_INF_64)
     _v635 = _tree_reduce(_v553, operator.add, 0, 32)
@@ -1794,8 +1577,8 @@ def attn_fwd_pingpong_pipelined_kernel(q_ptr: fx.Tensor,
     _v866 = arith.maxnumf(_v862, _v865)
     _v867 = vector.insert(_v866, _v861, static_position=[1], dynamic_position=[])
     _v868 = arith.maxnumf(_v547, _v867)
-    _v869 = _v868 * cst_1
-    _v870 = _v572 * cst_0
+    _v869 = _v868 * SOFTMAX_SCALE_2
+    _v870 = _v572 * SOFTMAX_SCALE_64
     _v871 = vector.shuffle(_v869, _v869, [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1])
     _v872 = _shuffle_select_repeat(_v871, [0, 8], n_repeat=32)
     _v873 = _v870 - _v872
