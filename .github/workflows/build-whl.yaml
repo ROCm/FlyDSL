@@ -114,9 +114,17 @@ jobs:
       - name: Build wheels
         run: |
           docker exec flydsl_build bash -c "export MLIR_PATH=/llvm-project/mlir_install && export ALLOW_ANY_GLIBC=1 && export FLYDSL_RELEASE_TYPE=${{ inputs.release_type }} && cd /flydsl && bash scripts/build_wheels.sh"
+          # Copy fly-opt into dist/ INSIDE the container, before docker cp pulls everything to host
+          docker exec flydsl_build bash -c '
+            FLY_OPT=$(find /flydsl/build-fly/build_py*/bin -name fly-opt -type f 2>/dev/null | head -1)
+            if [ -n "${FLY_OPT}" ]; then
+              cp "${FLY_OPT}" /flydsl/dist/fly-opt
+              echo "Copied fly-opt from ${FLY_OPT}"
+            else
+              echo "Warning: fly-opt not found in any build dir"
+            fi
+          '
           docker cp flydsl_build:/flydsl/dist ./dist
-          # Copy fly-opt from whichever build dir exists
-          docker exec flydsl_build bash -c "ls /flydsl/build-fly/build_py*/bin/fly-opt 2>/dev/null | head -1 | xargs -I{} cp {} /flydsl/dist/fly-opt" || true
 
       - name: Collect wheel names
         id: collect-wheels
