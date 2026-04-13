@@ -63,6 +63,7 @@ def compile_grouped_fp8_gemm(
     scale_block_k: int = 128,
     scale_block_n: int = 128,
     out_dtype: str = "bf16",
+    waves_per_eu: int | None = None,
 ):
     """Compile grouped FP8 GEMM kernel and return the JIT launcher.
 
@@ -599,6 +600,12 @@ def compile_grouped_fp8_gemm(
             i32_k,
             i32_num_groups,
         )
+        if waves_per_eu is not None:
+            _wpe = int(waves_per_eu)
+            if _wpe >= 1:
+                for op in ctx.gpu_module_body.operations:
+                    if hasattr(op, 'attributes') and op.OPERATION_NAME == "gpu.func":
+                        op.attributes["rocdl.waves_per_eu"] = ir.IntegerAttr.get(T.i32, _wpe)
         launcher.launch(grid=(gx, gy, 1), block=(total_threads, 1, 1), stream=stream)
 
     return launch_grouped_fp8_gemm
