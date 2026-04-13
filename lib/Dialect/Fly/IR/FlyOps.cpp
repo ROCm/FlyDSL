@@ -549,35 +549,7 @@ FLY_INFER_RETURN_TYPES(CeilDivOp) {
   return success();
 }
 
-FLY_INFER_RETURN_TYPES(ElemLessOp) {
-  auto lhsTy = dyn_cast<IntTupleType>(operands[0].getType());
-  auto rhsTy = dyn_cast<IntTupleType>(operands[1].getType());
-  if (!lhsTy)
-    return emitOptionalError(location, "ElemLessOp: expected IntTupleType for lhs, got ",
-                             operands[0].getType());
-  if (!rhsTy)
-    return emitOptionalError(location, "ElemLessOp: expected IntTupleType for rhs, got ",
-                             operands[1].getType());
-  IntTupleBuilder<IntTupleAttr> builder(context);
-  inferredReturnTypes.assign(
-      {IntTupleType::get(intTupleElemLess(builder, lhsTy.getAttr(), rhsTy.getAttr()))});
-  return success();
-}
 
-FLY_INFER_RETURN_TYPES(EqualOp) {
-  auto lhsTy = dyn_cast<IntTupleType>(operands[0].getType());
-  auto rhsTy = dyn_cast<IntTupleType>(operands[1].getType());
-  if (!lhsTy)
-    return emitOptionalError(location, "EqualOp: expected IntTupleType for lhs, got ",
-                             operands[0].getType());
-  if (!rhsTy)
-    return emitOptionalError(location, "EqualOp: expected IntTupleType for rhs, got ",
-                             operands[1].getType());
-  IntTupleBuilder<IntTupleAttr> builder(context);
-  inferredReturnTypes.assign(
-      {IntTupleType::get(intTupleEqual(builder, lhsTy.getAttr(), rhsTy.getAttr()))});
-  return success();
-}
 
 //===----------------------------------------------------------------------===//
 // IntTupleLike operations

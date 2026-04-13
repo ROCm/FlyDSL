@@ -682,7 +682,7 @@ IntTupleValueAdaptor intTupleBasis2Tuple(const IntTupleBuilder<IntTupleValueAdap
   assert(basis.isLeafBasis());
   IntTupleAttr attr = builder.getAttr(basis);
   IntTupleAttr newAttr = intTupleBasis2Tuple(builder.getAttrBuilder(), attr);
-  return IntTupleValueAdaptor::create(builder, basis.getValue(), newAttr);
+  return IntTupleValueAdaptor{basis.getValue(), newAttr};
 }
 
 static IntTupleAttr intTupleMakeBasisTupleLikeImpl(MLIRContext *ctx, IntTupleAttr profile,

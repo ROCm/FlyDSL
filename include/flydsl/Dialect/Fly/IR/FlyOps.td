@@ -181,8 +181,15 @@ def Fly_IntTupleProductLikeOp : Fly_IntTupleBinaryOp<"int_tuple_product_like">;
 
 def Fly_ShapeDivOp : Fly_IntTupleBinaryOp<"shape_div">;
 def Fly_CeilDivOp  : Fly_IntTupleBinaryOp<"ceil_div">;
-def Fly_ElemLessOp : Fly_IntTupleBinaryOp<"elem_less">;
-def Fly_EqualOp    : Fly_IntTupleBinaryOp<"equal">;
+
+def Fly_ElemLessOp : Fly_Op<"elem_less", [Pure]> {
+  let arguments = (ins Fly_IntTuple:$lhs, Fly_IntTuple:$rhs);
+  let results = (outs I1:$result);
+}
+def Fly_EqualOp : Fly_Op<"equal", [Pure]> {
+  let arguments = (ins Fly_IntTuple:$lhs, Fly_IntTuple:$rhs);
+  let results = (outs I1:$result);
+}
 
 //===----------------------------------------------------------------------===//
 // IntTupleLike operations

@@ -650,18 +650,6 @@ struct IntTupleCeilDivFn {
     return intTupleCeilDiv(builder, lhs, rhs);
   }
 };
-struct IntTupleElemLessFn {
-  IntTupleValueAdaptor operator()(IntTupleBuilder<IntTupleValueAdaptor> &builder,
-                                  IntTupleValueAdaptor lhs, IntTupleValueAdaptor rhs) const {
-    return intTupleElemLess(builder, lhs, rhs);
-  }
-};
-struct IntTupleEqualFn {
-  IntTupleValueAdaptor operator()(IntTupleBuilder<IntTupleValueAdaptor> &builder,
-                                  IntTupleValueAdaptor lhs, IntTupleValueAdaptor rhs) const {
-    return intTupleEqual(builder, lhs, rhs);
-  }
-};
 
 using IntTupleAddOpLowering = IntTupleBinaryOpLowering<IntTupleAddOp, IntTupleAddFn>;
 using IntTupleSubOpLowering = IntTupleBinaryOpLowering<IntTupleSubOp, IntTupleSubFn>;
@@ -677,8 +665,78 @@ using IntTupleProductLikeOpLowering =
 
 using ShapeDivOpLowering = IntTupleBinaryOpLowering<ShapeDivOp, IntTupleShapeDivFn>;
 using CeilDivOpLowering = IntTupleBinaryOpLowering<CeilDivOp, IntTupleCeilDivFn>;
-using ElemLessOpLowering = IntTupleBinaryOpLowering<ElemLessOp, IntTupleElemLessFn>;
-using EqualOpLowering = IntTupleBinaryOpLowering<EqualOp, IntTupleEqualFn>;
+
+class ElemLessOpLowering : public OpRewritePattern<ElemLessOp> {
+public:
+  using OpRewritePattern<ElemLessOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(ElemLessOp op, PatternRewriter &rewriter) const override {
+    auto loc = op.getLoc();
+    auto lhs = op.getLhs();
+    auto rhs = op.getRhs();
+
+    auto lhsTy = dyn_cast<IntTupleType>(lhs.getType());
+    auto rhsTy = dyn_cast<IntTupleType>(rhs.getType());
+    if (!lhsTy || !rhsTy)
+      return failure();
+
+    if (!isNormalForm(cast<TypedValue<IntTupleType>>(lhs)) ||
+        !isNormalForm(cast<TypedValue<IntTupleType>>(rhs)))
+      return failure();
+
+    IntTupleBuilder<IntTupleValueAdaptor> builder(rewriter, loc);
+    IntTupleValueAdaptor lhsAdaptor = IntTupleValueAdaptor::create(builder, lhs, lhsTy.getAttr());
+    IntTupleValueAdaptor rhsAdaptor = IntTupleValueAdaptor::create(builder, rhs, rhsTy.getAttr());
+
+    auto result = intTupleElemLess(builder, lhsAdaptor, rhsAdaptor);
+    auto i1Ty = rewriter.getI1Type();
+    Value i1Val;
+    if (result.isStatic()) {
+      int32_t staticVal = result.getAttr().extractIntFromLeaf().getValue();
+      i1Val = arith::ConstantIntOp::create(rewriter, loc, i1Ty, staticVal != 0).getResult();
+    } else {
+      i1Val = arith::TruncIOp::create(rewriter, loc, i1Ty, result.getValue()).getResult();
+    }
+    rewriter.replaceOp(op, i1Val);
+    return success();
+  }
+};
+
+class EqualOpLowering : public OpRewritePattern<EqualOp> {
+public:
+  using OpRewritePattern<EqualOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(EqualOp op, PatternRewriter &rewriter) const override {
+    auto loc = op.getLoc();
+    auto lhs = op.getLhs();
+    auto rhs = op.getRhs();
+
+    auto lhsTy = dyn_cast<IntTupleType>(lhs.getType());
+    auto rhsTy = dyn_cast<IntTupleType>(rhs.getType());
+    if (!lhsTy || !rhsTy)
+      return failure();
+
+    if (!isNormalForm(cast<TypedValue<IntTupleType>>(lhs)) ||
+        !isNormalForm(cast<TypedValue<IntTupleType>>(rhs)))
+      return failure();
+
+    IntTupleBuilder<IntTupleValueAdaptor> builder(rewriter, loc);
+    IntTupleValueAdaptor lhsAdaptor = IntTupleValueAdaptor::create(builder, lhs, lhsTy.getAttr());
+    IntTupleValueAdaptor rhsAdaptor = IntTupleValueAdaptor::create(builder, rhs, rhsTy.getAttr());
+
+    auto result = intTupleEqual(builder, lhsAdaptor, rhsAdaptor);
+    auto i1Ty = rewriter.getI1Type();
+    Value i1Val;
+    if (result.isStatic()) {
+      int32_t staticVal = result.getAttr().extractIntFromLeaf().getValue();
+      i1Val = arith::ConstantIntOp::create(rewriter, loc, i1Ty, staticVal != 0).getResult();
+    } else {
+      i1Val = arith::TruncIOp::create(rewriter, loc, i1Ty, result.getValue()).getResult();
+    }
+    rewriter.replaceOp(op, i1Val);
+    return success();
+  }
+};
 
 //===----------------------------------------------------------------------===//
 // IntTupleLike operations
