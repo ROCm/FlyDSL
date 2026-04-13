@@ -8,7 +8,7 @@ description: >
   be migrated to the higher-level layout algebra for consistency and
   readability.
   Usage: /port-to-layout-api <kernel_file>
-tools: Read,Edit,Bash,Grep,Glob,Agent
+allowed-tools: Read Edit Bash Grep Glob Agent
 ---
 
 # Port Kernel from Raw buffer_ops to Layout API

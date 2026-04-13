@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""Vector dialect helpers.
+"""Vector dialect helpers and re-exports.
 
-This module exists so tests can import vector ops through `flydsl._mlir_helpers`
-instead of directly importing from `_mlir.dialects.*`.
+The ``Vector`` class itself lives in ``typing.py`` alongside other builtin
+DSL types.  This module re-exports it for convenience and provides thin
+wrappers around upstream ``_mlir.dialects.vector`` ops.
 """
 
 from __future__ import annotations
@@ -12,18 +13,21 @@ from __future__ import annotations
 from .._mlir.dialects import vector as _vector
 from .meta import traced_op
 
-
-# Re-export everything from the upstream dialect module for convenience.
+# Re-export upstream dialect for ``from flydsl.expr import vector; vector.broadcast(...)``
 from .._mlir.dialects.vector import *  # noqa: F401,F403,E402
 
+# Re-export Vector and friends so ``from flydsl.expr.vector import Vector`` works
+from .typing import Vector, ReductionOp, full, full_like, zeros_like  # noqa: F401
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Dialect helper wrappers (legacy, will be deprecated)
+# Prefer using Vector methods or _mlir.dialects.vector directly.
+# ═══════════════════════════════════════════════════════════════════════
 
 @traced_op
 def from_elements(*args, loc=None, ip=None, **kwargs):
-    """Construct a vector from scalar elements, auto-unwrapping ArithValue wrappers.
-
-    Accepts the same arguments as ``vector.from_elements`` but transparently
-    handles ``ArithValue`` scalars so callers don't need explicit unwrapping.
-    """
+    """Construct a vector from scalar elements, auto-unwrapping ArithValue wrappers."""
     from . import arith as _arith_ext
 
     if len(args) >= 2:
@@ -49,11 +53,6 @@ def store(value, memref, indices, *, loc=None, ip=None, **kwargs):
         ip=ip,
         **kwargs,
     )
-
-
-# -----------------------------------------------------------------------------
-# Thin wrappers for common op classes that otherwise require `.result` access.
-# -----------------------------------------------------------------------------
 
 
 @traced_op
@@ -100,4 +99,3 @@ def bitcast(result_type, source, *, loc=None, ip=None):
         loc=loc,
         ip=ip,
     ).result
-

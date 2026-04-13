@@ -5,8 +5,13 @@ from ..._mlir import ir
 from ..._mlir._mlir_libs._mlirDialectsFlyROCDL import MmaOpGFX1250_WMMAType
 from ..._mlir.dialects import arith, fly
 from ..._mlir.dialects._fly_enum_gen import AddressSpace
-from ..._mlir.dialects.fly import PointerType
-from ..._mlir.dialects.fly_rocdl import CopyOpCDNA3BufferCopyType, MmaOpCDNA3_MFMAType
+from ..._mlir.dialects.fly import AtomicOp, PointerType
+from ..._mlir.dialects.fly_rocdl import (
+    CopyOpCDNA3BufferAtomicType,
+    CopyOpCDNA3BufferCopyLDSType,
+    CopyOpCDNA3BufferCopyType,
+    MmaOpCDNA3_MFMAType,
+)
 from ..._mlir.extras import types as T
 from ..primitive import (
     get_iter,
@@ -22,8 +27,6 @@ def BufferCopy(bit_size):
 
     Current atom state:
     - `soffset` (`i32`)
-
-    Update the state with `copy_atom.set_value("soffset", value)`.
     """
     return CopyOpCDNA3BufferCopyType.get(bit_size)
 
@@ -34,6 +37,39 @@ BufferCopy16b = lambda: CopyOpCDNA3BufferCopyType.get(16)
 BufferCopy32b = lambda: CopyOpCDNA3BufferCopyType.get(32)
 BufferCopy64b = lambda: CopyOpCDNA3BufferCopyType.get(64)
 BufferCopy128b = lambda: CopyOpCDNA3BufferCopyType.get(128)
+
+
+def BufferCopyLDS(bit_size):
+    """Create a CDNA3 buffer-to-LDS copy atom.
+
+    Only supports BufferDesc -> Shared address space direction.
+
+    Current atom state:
+    - `soffset` (`i32`)
+    - `imm_offset` (`i32`)
+    """
+    return CopyOpCDNA3BufferCopyLDSType.get(bit_size)
+
+
+BufferCopyLDS32b = lambda: CopyOpCDNA3BufferCopyLDSType.get(32)
+BufferCopyLDS64b = lambda: CopyOpCDNA3BufferCopyLDSType.get(64)
+BufferCopyLDS128b = lambda: CopyOpCDNA3BufferCopyLDSType.get(128)
+
+
+def BufferAtomic(atomic_op, val_type):
+    """Create a CDNA3 buffer atomic copy atom.
+
+    Current atom state:
+    - `soffset` (`i32`)
+    """
+    ty = val_type.ir_type if hasattr(val_type, "ir_type") else val_type
+    return CopyOpCDNA3BufferAtomicType.get(int(atomic_op), ty)
+
+
+BufferAtomicAdd = lambda val_type: BufferAtomic(AtomicOp.Add, val_type)
+BufferAtomicMax = lambda val_type: BufferAtomic(AtomicOp.Max, val_type)
+BufferAtomicMin = lambda val_type: BufferAtomic(AtomicOp.Min, val_type)
+BufferAtomicPkAdd = lambda val_type: BufferAtomic(AtomicOp.Add, T.vector(2, val_type.ir_type))
 
 
 def MFMA(m, n, k, elem_ty_ab, elem_ty_acc=None):

@@ -23,7 +23,7 @@ def visualize():
     tiled_mma = fx.make_tiled_mma(
         mma_atom,
         fx.make_layout((1, 2, 1), (0, 1, 0)),
-        fx.make_tile(16, 32, fx.make_layout((4, 4, 2), (1, 8, 4))),
+        fx.make_tile(None, None, fx.make_layout((4, 4, 2), (1, 8, 4))),
     )
 
     swizzle_layout = fx.make_composed_layout(
