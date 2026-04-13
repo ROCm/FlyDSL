@@ -30,6 +30,7 @@ jobs:
     permissions:
       id-token: write
       contents: read
+      packages: write
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -37,20 +38,37 @@ jobs:
           path: flydsl
           fetch-depth: 0
 
-      - name: Build manylinux Docker image
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build or pull manylinux Docker image
         run: |
           ROCM_VERSION=7.2
-          IMAGE="flydsl/manylinux_2_28:rocm${ROCM_VERSION}"
-          if docker image inspect "${IMAGE}" >/dev/null 2>&1; then
-            echo "Reusing existing image: ${IMAGE}"
+          # Use Dockerfile content hash as tag — rebuild only when Dockerfile changes.
+          DOCKERFILE="flydsl/docker/Dockerfile.manylinux_2_28"
+          DF_HASH=$(sha256sum "${DOCKERFILE}" | cut -c1-12)
+          REGISTRY_IMAGE="ghcr.io/${{ github.repository_owner }}/flydsl-manylinux_2_28"
+          # Lowercase the image name (GHCR requires lowercase)
+          REGISTRY_IMAGE=$(echo "${REGISTRY_IMAGE}" | tr '[:upper:]' '[:lower:]')
+          TAG="rocm${ROCM_VERSION}-${DF_HASH}"
+          FULL_IMAGE="${REGISTRY_IMAGE}:${TAG}"
+
+          if docker pull "${FULL_IMAGE}" 2>/dev/null; then
+            echo "Pulled cached image: ${FULL_IMAGE}"
           else
+            echo "Cache miss — building image..."
             docker build \
-              -f flydsl/docker/Dockerfile.manylinux_2_28 \
+              -f "${DOCKERFILE}" \
               --build-arg ROCM_VERSION="${ROCM_VERSION}" \
-              -t "${IMAGE}" \
+              -t "${FULL_IMAGE}" \
               flydsl/docker
+            docker push "${FULL_IMAGE}" && echo "Pushed to GHCR: ${FULL_IMAGE}" || echo "Warning: push failed (non-fatal)"
           fi
-          echo "MANYLINUX_IMAGE=${IMAGE}" >> $GITHUB_ENV
+          echo "MANYLINUX_IMAGE=${FULL_IMAGE}" >> $GITHUB_ENV
 
       - name: Start build container
         run: |
