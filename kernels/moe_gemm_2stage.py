@@ -781,9 +781,11 @@ def compile_moe_gemm1(
                     up_list = list(acc_up_in)
                     mfma_res_ty = T.i32x4 if is_int8 else T.f32x4
                     if _use_mfma_k32:
-                        mfma_fn = rocdl.mfma_f32_16x16x32_f16 if is_f16 else rocdl.mfma_f32_16x16x32_bf16
+                        _raw_mfma = rocdl.mfma_f32_16x16x32_f16 if is_f16 else rocdl.mfma_f32_16x16x32_bf16
+                        def mfma_fn(res_ty, args):
+                            return _raw_mfma(res_ty, *args).result
                     else:
-                        mfma_fn = (
+                        _raw_mfma = (
                             mfma_i32_k32
                             if is_int8
                             else (
@@ -792,6 +794,8 @@ def compile_moe_gemm1(
                                 else (rocdl.mfma_f32_16x16x16f16 if is_f16 else rocdl.mfma_f32_16x16x32_fp8_fp8)
                             )
                         )
+                        def mfma_fn(res_ty, args):
+                            return _raw_mfma(res_ty, args)
 
                     # Optional: prefetch epilogue scales while we are about to run the last MFMA tile,
                     # matching the preshuffle GEMM pattern of overlapping scale loads with MFMA.
@@ -841,23 +845,23 @@ def compile_moe_gemm1(
                             else:
                                 av = _i64x2_to_v8bf16(a0, a1)
                                 bv = _i64x2_to_v8bf16(b0, b1)
-                            return mfma_fn(mfma_res_ty, av, bv, acc_in, 0, 0, 0).result
+                            return mfma_fn(mfma_res_ty, [av, bv, acc_in, 0, 0, 0])
                         if is_f16:
                             a0v = _i64_to_v4f16(a0)
                             a1v = _i64_to_v4f16(a1)
                             b0v = _i64_to_v4f16(b0)
                             b1v = _i64_to_v4f16(b1)
-                            acc_mid = mfma_fn(mfma_res_ty, a0v, b0v, acc_in, 0, 0, 0).result
-                            return mfma_fn(mfma_res_ty, a1v, b1v, acc_mid, 0, 0, 0).result
+                            acc_mid = mfma_fn(mfma_res_ty, [a0v, b0v, acc_in, 0, 0, 0])
+                            return mfma_fn(mfma_res_ty, [a1v, b1v, acc_mid, 0, 0, 0])
                         if is_bf16:
                             a0v = _i64_to_v4i16(a0)
                             a1v = _i64_to_v4i16(a1)
                             b0v = _i64_to_v4i16(b0)
                             b1v = _i64_to_v4i16(b1)
-                            acc_mid = mfma_fn(mfma_res_ty, a0v, b0v, acc_in, 0, 0, 0).result
-                            return mfma_fn(mfma_res_ty, a1v, b1v, acc_mid, 0, 0, 0).result
-                        acc_mid = mfma_fn(mfma_res_ty, a0, b0, acc_in, 0, 0, 0).result
-                        return mfma_fn(mfma_res_ty, a1, b1, acc_mid, 0, 0, 0).result
+                            acc_mid = mfma_fn(mfma_res_ty, [a0v, b0v, acc_in, 0, 0, 0])
+                            return mfma_fn(mfma_res_ty, [a1v, b1v, acc_mid, 0, 0, 0])
+                        acc_mid = mfma_fn(mfma_res_ty, [a0, b0, acc_in, 0, 0, 0])
+                        return mfma_fn(mfma_res_ty, [a1, b1, acc_mid, 0, 0, 0])
 
                     def _acc_scaled_f32(f32_acc_vec, f32_partial_vec, scale_val):
                         """MFMA f32 partial -> scale -> add to f32 accumulator via math.fma on vector."""
@@ -2162,9 +2166,11 @@ def compile_moe_gemm2(
                     acc_list = list(acc_in)
                     mfma_res_ty = T.i32x4 if is_int8 else T.f32x4
                     if _use_mfma_k32:
-                        mfma_fn = rocdl.mfma_f32_16x16x32_f16 if is_f16 else rocdl.mfma_f32_16x16x32_bf16
+                        _raw_mfma = rocdl.mfma_f32_16x16x32_f16 if is_f16 else rocdl.mfma_f32_16x16x32_bf16
+                        def mfma_fn(res_ty, args):
+                            return _raw_mfma(res_ty, *args).result
                     else:
-                        mfma_fn = (
+                        _raw_mfma = (
                             mfma_i32_k32
                             if is_int8
                             else (
@@ -2173,6 +2179,8 @@ def compile_moe_gemm2(
                                 else (rocdl.mfma_f32_16x16x16f16 if is_f16 else rocdl.mfma_f32_16x16x32_fp8_fp8)
                             )
                         )
+                        def mfma_fn(res_ty, args):
+                            return _raw_mfma(res_ty, args)
 
                     epilogue_pf = None
                     if prefetch_epilogue and not use_groupwise_scale:
@@ -2230,23 +2238,23 @@ def compile_moe_gemm2(
                             else:
                                 av = _i64x2_to_v8bf16(a0, a1)
                                 bv = _i64x2_to_v8bf16(b0, b1)
-                            return mfma_fn(mfma_res_ty, av, bv, acc0, 0, 0, 0).result
+                            return mfma_fn(mfma_res_ty, [av, bv, acc0, 0, 0, 0])
                         if is_f16:
                             a0v = _i64_to_v4f16(a0)
                             a1v = _i64_to_v4f16(a1)
                             b0v = _i64_to_v4f16(b0)
                             b1v = _i64_to_v4f16(b1)
-                            acc1 = mfma_fn(mfma_res_ty, a0v, b0v, acc0, 0, 0, 0).result
-                            return mfma_fn(mfma_res_ty, a1v, b1v, acc1, 0, 0, 0).result
+                            acc1 = mfma_fn(mfma_res_ty, [a0v, b0v, acc0, 0, 0, 0])
+                            return mfma_fn(mfma_res_ty, [a1v, b1v, acc1, 0, 0, 0])
                         if is_bf16:
                             a0v = _i64_to_v4i16(a0)
                             a1v = _i64_to_v4i16(a1)
                             b0v = _i64_to_v4i16(b0)
                             b1v = _i64_to_v4i16(b1)
-                            acc1 = mfma_fn(mfma_res_ty, a0v, b0v, acc0, 0, 0, 0).result
-                            return mfma_fn(mfma_res_ty, a1v, b1v, acc1, 0, 0, 0).result
-                        acc1 = mfma_fn(mfma_res_ty, a0, b0, acc0, 0, 0, 0).result
-                        return mfma_fn(mfma_res_ty, a1, b1, acc1, 0, 0, 0).result
+                            acc1 = mfma_fn(mfma_res_ty, [a0v, b0v, acc0, 0, 0, 0])
+                            return mfma_fn(mfma_res_ty, [a1v, b1v, acc1, 0, 0, 0])
+                        acc1 = mfma_fn(mfma_res_ty, [a0, b0, acc0, 0, 0, 0])
+                        return mfma_fn(mfma_res_ty, [a1, b1, acc1, 0, 0, 0])
 
                     def _acc_scaled_f32(f32_acc_vec, f32_partial_vec, scale_val):
                         """MFMA f32 partial -> scale -> add to f32 accumulator via math.fma on vector."""
