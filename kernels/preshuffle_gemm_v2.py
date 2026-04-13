@@ -3,11 +3,7 @@
 
 """Preshuffle GEMM kernel — Layout API version.
 
-Supports f16, bf16 via layout API (fx.copy + fx.gemm).
-fp8 has two paths:
-  - "fp8_layout": layout API with 64b copy atoms (needs C++ k_perm fix)
-  - "fp8" (default): delegates to old preshuffle_gemm path (full perf, 128b loads)
-
+Supports f16, bf16, fp8 via layout API (fx.copy + fx.gemm).
 Uses scf.for tile loop with ping-pong double buffer (2-stage B).
 Includes hot_loop_scheduler from the old pipeline for instruction scheduling.
 """
@@ -15,12 +11,11 @@ Includes hot_loop_scheduler from the old pipeline for instruction scheduling.
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.expr import arith, vector, gpu, buffer_ops, rocdl, range_constexpr
-from flydsl.expr.typing import T, Float16, BFloat16, Float8E4M3FNUZ, Float8E4M3FN, Int8
+from flydsl.expr.typing import T, Float16, Float32, BFloat16, Float8E4M3FNUZ, Float8E4M3FN, Int8
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.runtime.device import get_rocm_arch
 from flydsl._mlir import ir
-from kernels.preshuffle_gemm import compile_preshuffle_gemm_a8, _get_preload
-from kernels.mfma_epilogues import mfma_epilog
+from kernels.preshuffle_gemm import _get_preload
 from typing import Optional
 
 
@@ -38,21 +33,13 @@ def compile_preshuffle_gemm_v2(
 ):
     """Compile preshuffle GEMM using the layout API.
 
-    Supports in_dtype: fp8, fp8_layout, fp16, bf16.
+    Supports in_dtype: fp8, fp16, bf16.
     Returns a JitFunction: fn(C, A, B, scale_a, scale_b, M, N, stream).
     """
-    if in_dtype not in ("fp8", "fp8_layout", "fp16", "bf16"):
-        raise ValueError(f"in_dtype must be fp8/fp8_layout/fp16/bf16, got {in_dtype!r}")
+    if in_dtype not in ("fp8", "fp16", "bf16"):
+        raise ValueError(f"in_dtype must be fp8/fp16/bf16, got {in_dtype!r}")
 
-    # fp8 (default): delegate to old path for full perf + 128b loads
-    if in_dtype == "fp8":
-        return compile_preshuffle_gemm_a8(
-            N=N, K=K, tile_m=tile_m, tile_n=tile_n, tile_k=tile_k,
-            in_dtype="fp8", out_dtype=out_dtype, waves_per_eu=waves_per_eu,
-        )
-
-    # fp8_layout: use layout API with 64b copy atoms
-    is_fp8 = in_dtype == "fp8_layout"
+    is_fp8 = in_dtype == "fp8"
     is_f16 = in_dtype == "fp16"
     is_bf16 = in_dtype == "bf16"
     is_f16_or_bf16 = is_f16 or is_bf16
@@ -75,7 +62,9 @@ def compile_preshuffle_gemm_v2(
     out_elem_cls = BFloat16 if out_is_bf16 else Float16
 
     # Tile geometry
-    k_iters = tile_k // 32  # tiled_K=32 with k_perm (4,4,2) for f16/bf16
+    # k_perm groups 2 MMA atoms: product=32 for f16/bf16 (2×K=16), 64 for fp8 (2×K=32)
+    tile_K_perm = 64 if is_fp8 else 32
+    k_iters = tile_k // tile_K_perm
     num_tiles = K // tile_k
     m_repeat = tile_m // 16
     num_waves = 4
@@ -120,13 +109,9 @@ def compile_preshuffle_gemm_v2(
         tB = fx.flat_divide(gB, fx.make_tile(tile_n, tile_k))[None, None, bid_y, None]
         tC = fx.flat_divide(gC, fx.make_tile(tile_m, tile_n))[None, None, bid_x, bid_y]
 
-        # Copy atoms: fp8 uses 64b, f16/bf16 uses 128b
-        if is_fp8:
-            mma_copy = fx.make_copy_atom(fx.rocdl.BufferCopy64b(), layout_elem)
-            mma_uni = fx.make_copy_atom(fx.UniversalCopy64b(), layout_elem)
-        else:
-            mma_copy = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), layout_elem)
-            mma_uni = fx.make_copy_atom(fx.UniversalCopy128b(), layout_elem)
+        # Copy atoms: 128b for all dtypes (matches old path's buffer_load_dwordx4 / ds_read_b128)
+        mma_copy = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), layout_elem)
+        mma_uni = fx.make_copy_atom(fx.UniversalCopy128b(), layout_elem)
         buf_copy_g2s = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), layout_elem)
         uni_copy_g2s = fx.make_copy_atom(fx.UniversalCopy128b(), layout_elem)
 
@@ -141,7 +126,7 @@ def compile_preshuffle_gemm_v2(
             fx.PointerType.get(layout_elem.ir_type, fx.AddressSpace.Shared, 512),
             fx.get_dyn_shared(),
         )
-        swz = fx.SwizzleType.get(3, 3, 3) if is_f16_or_bf16 else fx.SwizzleType.get(0, 0, 0)
+        swz = fx.SwizzleType.get(3, 3, 3)
         sA = fx.make_view(smem_ptr, fx.make_composed_layout(
             fx.static(swz),
             fx.make_ordered_layout((tile_m, tile_k, 2), (1, 0, 2)),
@@ -165,12 +150,11 @@ def compile_preshuffle_gemm_v2(
         frag_B_0_retile = thr_g2r_B.retile(frag_B_0)
         frag_B_1_retile = thr_g2r_B.retile(frag_B_1)
         frag_B_retile_stages = [frag_B_0_retile, frag_B_1_retile]
-        if is_f16_or_bf16:
-            buf_copy_out = fx.make_copy_atom(fx.rocdl.BufferCopy16b(), out_elem_cls)
-            thr_r2g_C = fx.make_tiled_copy_C(buf_copy_out, tiled_mma).get_slice(tid)
-            pC_g = thr_r2g_C.partition_S(tC)
-            frag_C_out = fx.make_fragment_like(frag_C, out_elem_cls.ir_type)
-            frag_C_retile = thr_r2g_C.retile(frag_C_out)
+        buf_copy_out = fx.make_copy_atom(fx.rocdl.BufferCopy16b(), out_elem_cls)
+        thr_r2g_C = fx.make_tiled_copy_C(buf_copy_out, tiled_mma).get_slice(tid)
+        pC_g = thr_r2g_C.partition_S(tC)
+        frag_C_out = fx.make_fragment_like(frag_C, out_elem_cls.ir_type)
+        frag_C_retile = thr_r2g_C.retile(frag_C_out)
 
         # ── Scheduling hints (ported from old pipeline) ───────────
         def _build_scheduler(numer: int, denom: int):
@@ -323,26 +307,40 @@ def compile_preshuffle_gemm_v2(
             loop_start = fx.Index(0)
             loop_end = fx.Index((num_tiles - 2) // 2)
             loop_step = fx.Index(1)
-            # Explicit loop-carried values: accumulator + B stage 0
+            # Loop-carried values:
+            #   bf16/f16: acc + B stage 0 (B alloca types don't match for SROA)
+            #   fp8: acc only (B alloca has uniform i64 types → SROA promotes it)
             acc_init = frag_C.load()
-            b0_init = frag_B_stages[0].load()
-            for iv, state in range(loop_start, loop_end, loop_step,
-                                   init=[acc_init, b0_init]):
-                frag_C.store(state[0])
-                frag_B_stages[0].store(state[1])
-                k_base = arith.index_cast(T.i32, iv * 2)
-                pipeline_stage(read_stage=0, next_k_val=k_base + fx.Int32(1))
-                pipeline_stage(read_stage=1, next_k_val=k_base + fx.Int32(2))
-                results = yield [frag_C.load(), frag_B_stages[0].load()]
-            frag_C.store(results[0])
-            frag_B_stages[0].store(results[1])
+            if is_fp8:
+                for iv, state in range(loop_start, loop_end, loop_step,
+                                       init=[acc_init]):
+                    frag_C.store(state[0])
+                    k_base = arith.index_cast(T.i32, iv * 2)
+                    pipeline_stage(read_stage=0, next_k_val=k_base + fx.Int32(1))
+                    pipeline_stage(read_stage=1, next_k_val=k_base + fx.Int32(2))
+                    results = yield [frag_C.load()]
+                frag_C.store(results)
+            else:
+                b0_init = frag_B_stages[0].load()
+                for iv, state in range(loop_start, loop_end, loop_step,
+                                       init=[acc_init, b0_init]):
+                    frag_C.store(state[0])
+                    frag_B_stages[0].store(state[1])
+                    k_base = arith.index_cast(T.i32, iv * 2)
+                    pipeline_stage(read_stage=0, next_k_val=k_base + fx.Int32(1))
+                    pipeline_stage(read_stage=1, next_k_val=k_base + fx.Int32(2))
+                    results = yield [frag_C.load(), frag_B_stages[0].load()]
+                frag_C.store(results[0])
+                frag_B_stages[0].store(results[1])
             pipeline_stage(read_stage=0, next_k_val=fx.Int32(num_tiles - 1))
             pipeline_stage(read_stage=1, read_next=False)
 
         # ── Epilogue ─────────────────────────────────────────────
         if is_fp8:
-            # FP8: per-token/per-column scales + mfma_epilog buffer_store
-            c_n = arith.index_cast(T.index, i32_n)
+            # FP8: inline scale multiply (no fragment allocas → avoids scratch spills)
+            # MFMA 16x16 accumulator layout: element [mi*num_acc_n*4 + ni*4 + ii]
+            #   row = mi*16 + lane_div_16*4 + ii, col = wave_n_base + ni*16 + lane_mod_16
+            #   scale_a depends on row (mi, ii), scale_b depends on col (ni)
             bx_m = gpu.block_id("x") * tile_m
             by_n = gpu.block_id("y") * tile_n
             wave_id = gpu.thread_id("x") // 64
@@ -351,37 +349,38 @@ def compile_preshuffle_gemm_v2(
             lane_mod_16 = lane_id % 16
             n_tile_base = wave_id * n_per_wave
 
-            _c_nrec = arith.index_cast(T.i64, c_n * arith.index_cast(T.index, i32_m) * 2)
-            c_rsrc = buffer_ops.create_buffer_resource(arg_c, max_size=False, num_records_bytes=_c_nrec)
-            scale_a_rsrc = buffer_ops.create_buffer_resource(arg_scale_a, max_size=False)
+            scale_a_rsrc = buffer_ops.create_buffer_resource(arg_scale_a, max_size=True)
             scale_b_rsrc = buffer_ops.create_buffer_resource(arg_scale_b, max_size=True)
 
-            acc_vec = frag_C.load()
-            final_accs = [vector.from_elements(T.f32x4, [
-                vector.extract(acc_vec, static_position=[i*4+j], dynamic_position=[])
-                for j in range(4)]) for i in range_constexpr(n_accs)]
-
+            # Load per-column scales: 1 scalar per N-block
             s_b_vals = [buffer_ops.buffer_load(scale_b_rsrc,
-                        by_n + n_tile_base + ni * 16 + lane_mod_16, vec_width=1, dtype=T.f32)
+                        by_n + n_tile_base + ni * 16 + lane_mod_16,
+                        vec_width=1, dtype=T.f32)
                         for ni in range_constexpr(num_acc_n)]
+            # Load per-row scales: 1 f32x4 per M-block (4 rows per thread)
             s_a_vecs = [vector.bitcast(T.f32x4, buffer_ops.buffer_load(scale_a_rsrc,
-                        bx_m + mi * 16 + lane_div_16 * 4, vec_width=4, dtype=T.f32))
+                        bx_m + mi * 16 + lane_div_16 * 4,
+                        vec_width=4, dtype=T.f32))
                         for mi in range_constexpr(m_repeat)]
 
-            def body_row(*, mi, ii, row_in_tile, row):
-                col_base = by_n + n_tile_base + lane_mod_16
-                idx_base = row * c_n + col_base
-                s_a = vector.extract(s_a_vecs[mi], static_position=[ii], dynamic_position=[])
+            # Build scaled accumulator inline
+            acc_vec = frag_C.load()
+            scaled_elems = []
+            for mi in range_constexpr(m_repeat):
                 for ni in range_constexpr(num_acc_n):
-                    val = vector.extract(final_accs[mi * num_acc_n + ni],
-                                         static_position=[ii], dynamic_position=[])
-                    val_out = arith.trunc_f(out_elem_cls.ir_type, (val * s_a) * s_b_vals[ni])
-                    buffer_ops.buffer_store(val_out, c_rsrc, idx_base + ni * 16)
+                    for ii in range_constexpr(4):
+                        idx = mi * num_acc_n * 4 + ni * 4 + ii
+                        val = vector.extract(acc_vec, static_position=[idx],
+                                             dynamic_position=[])
+                        s_a = vector.extract(s_a_vecs[mi], static_position=[ii],
+                                             dynamic_position=[])
+                        scaled_val = (val * s_a) * s_b_vals[ni]
+                        scaled_elems.append(arith.trunc_f(out_elem_cls.ir_type, scaled_val))
 
-            mfma_epilog(
-                use_cshuffle=False, arith=arith, range_constexpr=range_constexpr,
-                m_repeat=m_repeat, lane_div_16=lane_div_16, bx_m=bx_m, body_row=body_row,
-            )
+            out_vec = vector.from_elements(
+                T.vec(acc_size, out_elem_cls.ir_type), scaled_elems)
+            frag_C_out.store(out_vec)
+            fx.copy(buf_copy_out, frag_C_retile, pC_g)
         else:
             # f16/bf16: truncate + vectorized fx.copy
             frag_C_out.store(arith.trunc_f(T.vec(acc_size, out_elem_cls.ir_type), frag_C.load()))
@@ -410,17 +409,13 @@ def compile_preshuffle_gemm_v2(
             k_perm = fx.make_layout((4, 4, 2), (1, 8, 4))
         else:
             mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 32, layout_elem))
-            k_perm = None
+            # FP8: KPerThread=8, GroupK=4, 2 atoms → groups 64 K elements
+            k_perm = fx.make_layout((8, 4, 2), (1, 16, 8))
 
-        if k_perm is not None:
-            tiled_mma = fx.make_tiled_mma(
-                mma_atom, fx.make_layout((1, 4, 1), (0, 1, 0)),
-                fx.make_tile(None, None, k_perm),
-            )
-        else:
-            tiled_mma = fx.make_tiled_mma(
-                mma_atom, fx.make_layout((1, 4, 1), (0, 1, 0)),
-            )
+        tiled_mma = fx.make_tiled_mma(
+            mma_atom, fx.make_layout((1, 4, 1), (0, 1, 0)),
+            fx.make_tile(None, None, k_perm),
+        )
 
         # G2S tiled copy
         val_per_thr = a_load_bytes // elem_bytes

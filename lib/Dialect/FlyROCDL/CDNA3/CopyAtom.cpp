@@ -75,9 +75,15 @@ LogicalResult CopyOpCDNA3BufferCopyType::emitAtomCall(OpBuilder &builder, Locati
       unsigned elemBits = elemTy.getIntOrFloatBitWidth();
       unsigned chunkBits = 64;
       if (elemBits < chunkBits && chunkBits % elemBits == 0 && totalBits > chunkBits) {
-        // Split wide integer into 64-bit vector chunks
+        // Split wide integer into 64-bit chunks.
+        // For i8/fp8 elements, store as i64 (not <8 x i8>) to match MFMA
+        // operand load types — type mismatch blocks LLVM SROA promotion.
         unsigned numChunks = totalBits / chunkBits;
-        auto vecTy = VectorType::get({static_cast<int64_t>(chunkBits / elemBits)}, elemTy);
+        Type chunkStoreTy;
+        if (elemBits <= 8)
+          chunkStoreTy = builder.getI64Type();
+        else
+          chunkStoreTy = VectorType::get({static_cast<int64_t>(chunkBits / elemBits)}, elemTy);
         auto i64Ty = builder.getI64Type();
         auto i8Ty = builder.getI8Type();
         for (unsigned i = 0; i < numChunks; ++i) {
@@ -90,7 +96,11 @@ LogicalResult CopyOpCDNA3BufferCopyType::emitAtomCall(OpBuilder &builder, Locati
             Value shifted = LLVM::LShrOp::create(builder, loc, loaded, shiftAmt);
             chunk = LLVM::TruncOp::create(builder, loc, i64Ty, shifted);
           }
-          Value vec = LLVM::BitcastOp::create(builder, loc, vecTy, chunk);
+          Value storeVal;
+          if (isa<IntegerType>(chunkStoreTy))
+            storeVal = chunk;  // already i64, no bitcast needed
+          else
+            storeVal = LLVM::BitcastOp::create(builder, loc, chunkStoreTy, chunk);
           Value dPtr = dstPtr;
           if (i > 0) {
             Value offset = LLVM::ConstantOp::create(builder, loc,
@@ -98,15 +108,20 @@ LogicalResult CopyOpCDNA3BufferCopyType::emitAtomCall(OpBuilder &builder, Locati
             dPtr = LLVM::GEPOp::create(builder, loc, dstPtr.getType(),
                                         i8Ty, dstPtr, ValueRange{offset});
           }
-          LLVM::StoreOp::create(builder, loc, vec, dPtr);
+          LLVM::StoreOp::create(builder, loc, storeVal, dPtr);
         }
         return;
       }
-      // totalBits <= 64: single vector store
+      // totalBits <= 64: single store (i64 for i8/fp8, vector for others)
       if (elemBits < totalBits && totalBits % elemBits == 0) {
-        auto vecTy = VectorType::get({static_cast<int64_t>(totalBits / elemBits)}, elemTy);
-        Value vec = LLVM::BitcastOp::create(builder, loc, vecTy, loaded);
-        LLVM::StoreOp::create(builder, loc, vec, dstPtr);
+        if (elemBits <= 8) {
+          // Store as integer to match MFMA operand load type
+          LLVM::StoreOp::create(builder, loc, loaded, dstPtr);
+        } else {
+          auto vecTy = VectorType::get({static_cast<int64_t>(totalBits / elemBits)}, elemTy);
+          Value vec = LLVM::BitcastOp::create(builder, loc, vecTy, loaded);
+          LLVM::StoreOp::create(builder, loc, vec, dstPtr);
+        }
         return;
       }
     }

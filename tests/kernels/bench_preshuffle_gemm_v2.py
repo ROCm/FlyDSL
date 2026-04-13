@@ -93,7 +93,7 @@ def compile_one(M, N, K, tile_m, tile_n, tile_k, in_dtype, out_dtype="bf16",
                 waves_per_eu=None, enable_scheduler=False, maxnreg=None,
                 opt_level=None):
     """Compile v2 and old kernels, return compilation status."""
-    elem_bytes = 1 if in_dtype in ("fp8", "fp8_layout") else 2
+    elem_bytes = 1 if in_dtype in ("fp8",) else 2
     smem = tile_m * tile_k * elem_bytes * 2
     if smem > 65536:
         return None
@@ -122,7 +122,7 @@ def compile_one(M, N, K, tile_m, tile_n, tile_k, in_dtype, out_dtype="bf16",
     t0 = time.time()
     fn_old = compile_preshuffle_gemm_a8(
         N=N, K=K, tile_m=tile_m, tile_n=tile_n, tile_k=tile_k,
-        in_dtype="fp8" if in_dtype == "fp8_layout" else in_dtype,
+        in_dtype=in_dtype,
         out_dtype=out_dtype,
     )
     compiled_old = flyc.compile(fn_old, *args)
@@ -137,7 +137,7 @@ def bench_one(M, N, K, tile_m, tile_n, tile_k, in_dtype, out_dtype="bf16",
               warmup=5, iters=20, check_correctness=True, waves_per_eu=None,
               enable_scheduler=False, maxnreg=None, opt_level=None,
               llvm_opts=None):
-    elem_bytes = 1 if in_dtype in ("fp8", "fp8_layout") else 2
+    elem_bytes = 1 if in_dtype in ("fp8",) else 2
     smem = tile_m * tile_k * elem_bytes * 2
     if smem > 65536:
         return None  # LDS overflow
@@ -166,7 +166,7 @@ def bench_one(M, N, K, tile_m, tile_n, tile_k, in_dtype, out_dtype="bf16",
     # ── old path ──────────────────────────────────────────────────
     fn_old = compile_preshuffle_gemm_a8(
         N=N, K=K, tile_m=tile_m, tile_n=tile_n, tile_k=tile_k,
-        in_dtype="fp8" if in_dtype == "fp8_layout" else in_dtype,
+        in_dtype=in_dtype,
         out_dtype=out_dtype,
     )
     c_old = torch.zeros(M, N, device=DEVICE, dtype=torch_out_dtype)
