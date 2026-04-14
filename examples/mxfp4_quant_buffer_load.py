@@ -48,20 +48,22 @@ def _dynamic_mxfp4_quant_kernel(
     vec_type_i8 = T.vec(VEC_WIDTH, T.i8)
     vec_type_ui8 = T.vec(VEC_WIDTH, fx.typing.Uint8.ir_type)
     vec_type_i32_pack_8xi8 = T.vec(vec_dwords_i8, T.i32)
-    vec_type_i32_pack_8xi4 = T.vec(vec_dwords_i4, T.i32)
+    vec_type_i32_pack_32xi4 = T.vec(4*vec_dwords_i4, T.i32)
     vec_type_bool = T.vec(VEC_WIDTH, fx.typing.Boolean.ir_type)
 
-    row_soffset_x = ArithValue(bid) * (BLOCK_M*32*2) 
-    row_soffset_x_fp4 = ArithValue(bid) * (BLOCK_M*16*elem_bytes_i8) 
-    row_soffset_blockscale = ArithValue(bid) * (BLOCK_M*32*elem_bytes_i8) 
-    thr_bytes_x = ArithValue(tid) * (32*elem_bytes_f16)
-    thr_bytes_x_fp4 = ArithValue(tid) * (16*elem_bytes_i8)
-    thr_bytes_blockscale = ArithValue(tid) * (32*elem_bytes_i8)
+    row_soffset_x = ArithValue(bid) * (BLOCK_M*MXFP4_QUANT_BLOCK_SIZE*2) 
+    row_soffset_x_fp4 = ArithValue(bid) * (BLOCK_M*(MXFP4_QUANT_BLOCK_SIZE//2)*elem_bytes_i8) 
+    row_soffset_blockscale = ArithValue(bid) * (BLOCK_M*MXFP4_QUANT_BLOCK_SIZE*elem_bytes_i8) 
+    thr_bytes_x = ArithValue(tid) * (MXFP4_QUANT_BLOCK_SIZE*elem_bytes_f16)
+    thr_bytes_x_fp4 = ArithValue(tid) * ((MXFP4_QUANT_BLOCK_SIZE//2)*elem_bytes_i8)
+    thr_bytes_blockscale = ArithValue(tid) * ((MXFP4_QUANT_BLOCK_SIZE)*elem_bytes_i8)
 
     abs_mask = arith.constant_vector(0x7FFF, vec_type_i16)
+    c_mask_ones = arith.constant_vector(0xFFFFFFFF, vec_type_i32)
     c_zero_f = arith.constant(0.0, type=T.f32)
     local_max = c_zero_f
     cached_vecs = []
+
     #loop 4 times
     for i in range_constexpr(4):
         #load 8xbf16 values
@@ -75,17 +77,12 @@ def _dynamic_mxfp4_quant_kernel(
             )
         
         #calculate scale
-
         #abs
         vec_f16 = vector.bitcast(vec_type_bf16, x_raw_data)
-        #vec_f32 = vec_f16.extf(vec_type_f32)
-        #vec_i32 = vec_f32.bitcast(vec_type_i32) 
         vec_i16 = vec_f16.bitcast(vec_type_i16) 
         vec_abs_i16 = arith.andi(vec_i16, abs_mask)
-        #vec_abs = vector.bitcast(vec_type_bf16, vec_abs_i16)
         vec_abs = vec_abs_i16
 
-        #cached_vecs.append(vec_abs)
         cached_vecs.append(vec_f16)
         local_max = fx.vector.reduction(T.i16, "maxsi", vec_abs)
     
@@ -130,15 +127,11 @@ def _dynamic_mxfp4_quant_kernel(
     max_normal = fx.arith.constant(6.0)
     min_normal = fx.arith.constant(1.0)
 
+    e2m1_value_packed = []
     for i in range_constexpr(4):
         col_end =  arith.constant(32)
         is_valid = col_end <=32 
 
-        '''
-        vec_i32 = cached_vecs[i]
-        vec_i8 = arith.FPToSIOp(vec_type_i8, arith.unwrap(vec_i32)).result
-        #vec_i8 = arith.trunci(vec_type_i8, arith.unwrap(vec_i32))
-        '''
         x_vec_f16 = cached_vecs[i]
         x_f32 = x_vec_f16.extf(vec_type_f32)
         qx_fp32 = x_f32 * quant_scale_splat
@@ -154,10 +147,9 @@ def _dynamic_mxfp4_quant_kernel(
         saturate_mask_i32 = fx.arith.extui(vec_type_i32, saturate_mask)
         tmp = qx_fp32 < fx.vector.broadcast(vec_type_f32,min_normal)
         tmp = fx.arith.extui(vec_type_i32, tmp)
-        #denormal_mask = (~saturate_mask_i32) & tmp #(Not/~) on vector fails compilation
-        denormal_mask = (saturate_mask_i32) & tmp 
-        #normal_mask =  ~(saturate_mask | denormal_mask) #(Not/~) on vector fails compilation
+        denormal_mask = fx.arith.xori(saturate_mask_i32, c_mask_ones) & tmp
         normal_mask =  (saturate_mask_i32 | denormal_mask)
+        normal_mask = fx.arith.xori(normal_mask, c_mask_ones)
         denormal_mask = fx.arith.trunci(vec_type_bool, denormal_mask) #Convert to boolean for use in arith.select
         normal_mask = fx.arith.trunci(vec_type_bool, normal_mask)#Convert to boolean for use in arith.select
 
@@ -189,25 +181,19 @@ def _dynamic_mxfp4_quant_kernel(
         e2m1_value_ui8 = e2m1_value | sign_lp 
         e2m1_value_scalars = fx.vector.to_elements(e2m1_value_ui8)
 
-        e2m1_value_packed = []
-        
-        #e2m1_value_packed.append(fx.arith.addi(e2m1_value_scalars[0], fx.arith.constant(1, type=fx.typing.Uint8.ir_type)))
         e2m1_value_packed.append((e2m1_value_scalars[0] << 4) | e2m1_value_scalars[1])
         e2m1_value_packed.append((e2m1_value_scalars[2] << 4) | e2m1_value_scalars[3])
         e2m1_value_packed.append((e2m1_value_scalars[4] << 4) | e2m1_value_scalars[5])
         e2m1_value_packed.append((e2m1_value_scalars[6] << 4) | e2m1_value_scalars[7])
-        e2m1_value_packed = fx.vector.from_elements(T.vec(4, fx.typing.Uint8.ir_type), e2m1_value_packed)
         #fx.printf(len(e2m1_value_packed))
 
-        #out_packed = vector.bitcast(vec_type_i32_pack_8xi8, e2m1_value)
-        #col_bytes = ArithValue(thr_bytes_x_fp4) + (i * VEC_WIDTH* elem_bytes_i8)
-        out_packed = vector.bitcast(vec_type_i32_pack_8xi4, e2m1_value_packed)
-        col_bytes = ArithValue(thr_bytes_x_fp4) + (i * 4)
-        dw_out = col_bytes.shrui(arith.constant(2, type=T.i32))
-        buffer_ops.buffer_store(
-            out_packed, x_fp4_rsrc, dw_out,
-            soffset_bytes=row_soffset_x_fp4, offset_is_bytes=True
-        )
+    e2m1_value_packed = fx.vector.from_elements(T.vec(16, fx.typing.Uint8.ir_type), e2m1_value_packed)
+    out_packed = vector.bitcast(vec_type_i32_pack_32xi4, e2m1_value_packed)
+    col_bytes = ArithValue(thr_bytes_x_fp4) 
+    buffer_ops.buffer_store(
+        out_packed, x_fp4_rsrc, col_bytes,
+        soffset_bytes=row_soffset_x_fp4, offset_is_bytes=True
+    )
 
 @flyc.jit
 def _dynamic_mxfp4_quant_host(
@@ -235,9 +221,7 @@ def dynamic_mxfp4_quant(
     assert (N // 2) % 2 == 0
 
     MXFP4_QUANT_BLOCK_SIZE = 32 #Fixed for MXFP4 format
-    x_fp4 = torch.empty((M, N ), dtype=torch.uint8, device=x.device)
-    #x_fp4 = torch.empty((M, N ), dtype=torch.uint8, device=x.device)
-    #x_fp4 = torch.full((M, N), 0,dtype=torch.uint8, device=x.device)
+    x_fp4 = torch.empty((M, N // 2 ), dtype=torch.uint8, device=x.device)
     blockscale_e8m0 = torch.empty(
         ((N + MXFP4_QUANT_BLOCK_SIZE - 1) // MXFP4_QUANT_BLOCK_SIZE, M),
         dtype=torch.uint8,
@@ -253,9 +237,9 @@ def dynamic_mxfp4_quant(
 M = 64 
 N = 32
 torch.set_printoptions(threshold=4096)
-x = torch.full((M, N), -0.5, dtype=torch.bfloat16).cuda()
+x = torch.full((M, N), 2, dtype=torch.bfloat16).cuda()
 #x = torch.reshape(x, (M,N))
 x_fp4, blockscale_e8m0 = dynamic_mxfp4_quant(x)
-#print(x)
-#print(x_fp4)
+print(x)
+print(x_fp4)
 #print(blockscale_e8m0)
