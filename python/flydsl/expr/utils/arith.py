@@ -120,8 +120,13 @@ def _coerce_other(self, other, *, loc=None, ip=None):
     if not isinstance(other, ArithValue):
         # Accept DSL Numeric types (Int32, Float32, etc.) by unwrapping via ir_value()
         if hasattr(other, "ir_value"):
-            return ArithValue(other.ir_value())
-        return NotImplemented
+            other = ArithValue(other.ir_value())
+        else:
+            return NotImplemented
+    # Broadcast scalar to vector when self is a vector and other is scalar
+    if isinstance(self.type, ir.VectorType) and not isinstance(other.type, ir.VectorType):
+        from ..._mlir.dialects import vector as _vector
+        return _vector.broadcast(self.type, _to_raw(other), loc=loc, ip=ip)
     return other
 
 
@@ -275,12 +280,12 @@ def _neg_op(self, *, loc=None, ip=None):
         raise TypeError("negation is not supported for boolean type")
     if self.is_float:
         return arith.negf(self, loc=loc, ip=ip)
-    c0 = arith.constant(self.type, 0, loc=loc, ip=ip)
+    c0 = arith_const(0, self.type, loc=loc, ip=ip)
     return arith.subi(c0, self, loc=loc, ip=ip)
 
 
 def _invert_op(self, *, loc=None, ip=None):
-    return arith.xori(self, arith.constant(self.type, -1))
+    return arith.xori(self, arith_const(-1, self.type, loc=loc, ip=ip))
 
 
 @ir.register_value_caster(ir.Float4E2M1FNType.static_typeid)
@@ -361,6 +366,18 @@ class ArithValue(ir.Value):
     def truncf(self, target_type, *, loc=None):
         """Truncate float precision (e.g. f32 → bf16)."""
         return arith.TruncFOp(target_type, self, loc=loc).result
+
+    def extui(self, target_type, *, loc=None):
+        """Zero-extend integer to wider type (e.g. i32 → i64)."""
+        return arith.ExtUIOp(target_type, self, loc=loc).result
+
+    def extsi(self, target_type, *, loc=None):
+        """Sign-extend integer to wider type (e.g. i32 → i64)."""
+        return arith.ExtSIOp(target_type, self, loc=loc).result
+
+    def trunci(self, target_type, *, loc=None):
+        """Truncate integer to narrower type (e.g. i64 → i32)."""
+        return arith.TruncIOp(target_type, self, loc=loc).result
 
     def bitcast(self, target_type, *, loc=None):
         """Reinterpret bits as different type (same bit width)."""

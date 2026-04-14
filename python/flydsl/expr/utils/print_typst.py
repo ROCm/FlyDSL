@@ -43,6 +43,103 @@ def _typst_header() -> str:
     return '#set page(width: auto, height: auto, margin: 8pt)\n#set text(font: ("Ubuntu Mono", "New Computer Modern"), size: 9pt)\n'
 
 
+def _typst_content_lines(content: str) -> list[str]:
+    lines = [segment.strip() for segment in content.replace("#linebreak()", "\n").splitlines()]
+    return [line for line in lines if line] or [""]
+
+
+def _typst_visible_metrics(content: str) -> tuple[int, int]:
+    lines = _typst_content_lines(content)
+    return max(len(line) for line in lines), len(lines)
+
+
+def _typst_format_pt(value: float) -> str:
+    return f"{value:g}pt"
+
+
+def _typst_grid_cell_size_pt(
+    M: int,
+    N: int,
+    cells: dict[tuple[int, int], tuple[str, str]],
+    *,
+    row_labels: bool,
+    col_labels: bool,
+) -> tuple[float, float]:
+    contents = [content for _, content in cells.values()]
+    if row_labels:
+        contents.extend(str(m) for m in range(M))
+    if col_labels:
+        contents.extend(str(n) for n in range(N))
+
+    max_chars = 1
+    max_lines = 1
+    for content in contents:
+        chars, lines = _typst_visible_metrics(content)
+        max_chars = max(max_chars, chars)
+        max_lines = max(max_lines, lines)
+
+    width_pt = max(18.0, 5.0 * max_chars + 4.0)
+    height_pt = max(18.0, 9.5 * max_lines + 3.0)
+    side_pt = max(width_pt, height_pt)
+    return side_pt, side_pt + 1.5
+
+
+def _typst_grid_cell_size(
+    M: int,
+    N: int,
+    cells: dict[tuple[int, int], tuple[str, str]],
+    *,
+    row_labels: bool,
+    col_labels: bool,
+) -> tuple[str, str]:
+    width_pt, height_pt = _typst_grid_cell_size_pt(M, N, cells, row_labels=row_labels, col_labels=col_labels)
+    return _typst_format_pt(width_pt), _typst_format_pt(height_pt)
+
+
+def _typst_copy_grid_cell_sizes(
+    M: int,
+    N: int,
+    cells_src: dict[tuple[int, int], tuple[str, str]],
+    cells_dst: dict[tuple[int, int], tuple[str, str]],
+) -> tuple[tuple[str, str], tuple[str, str]]:
+    src_width, src_height = _typst_grid_cell_size_pt(M, N, cells_src, row_labels=True, col_labels=True)
+    dst_width, dst_height = _typst_grid_cell_size_pt(M, N, cells_dst, row_labels=True, col_labels=True)
+    shared_height = max(src_height, dst_height)
+    return (
+        (_typst_format_pt(src_width), _typst_format_pt(shared_height)),
+        (_typst_format_pt(dst_width), _typst_format_pt(shared_height)),
+    )
+
+
+def _typst_mma_grid_cell_sizes(
+    M: int,
+    N: int,
+    K: int,
+    cells_A: dict[tuple[int, int], tuple[str, str]],
+    cells_B: dict[tuple[int, int], tuple[str, str]],
+    cells_C: dict[tuple[int, int], tuple[str, str]],
+) -> dict[str, tuple[str, str]]:
+    width_A, height_A = _typst_grid_cell_size_pt(M, K, cells_A, row_labels=True, col_labels=True)
+    width_B, height_B = _typst_grid_cell_size_pt(K, N, cells_B, row_labels=True, col_labels=True)
+    width_C, height_C = _typst_grid_cell_size_pt(M, N, cells_C, row_labels=True, col_labels=True)
+    shared_height_AC = max(height_A, height_C)
+    shared_width_BC = max(width_B, width_C)
+    return {
+        "A": (_typst_format_pt(width_A), _typst_format_pt(shared_height_AC)),
+        "B": (_typst_format_pt(shared_width_BC), _typst_format_pt(height_B)),
+        "C": (_typst_format_pt(shared_width_BC), _typst_format_pt(shared_height_AC)),
+    }
+
+
+def _typst_boxed_cell(content: str, width: str, height: str, *, bold: bool = False) -> str:
+    weight = ', weight: "bold"' if bold else ""
+    return (
+        f"#box(width: {width}, height: {height}, inset: 1pt)["
+        f'#align(center + horizon)[#text(font: "New Computer Modern"{weight})[{content}]]'
+        "]"
+    )
+
+
 def _typst_grid_block(
     M: int,
     N: int,
@@ -51,6 +148,8 @@ def _typst_grid_block(
     row_labels: bool = True,
     col_labels: bool = True,
     title: str = "",
+    cell_width: str | None = None,
+    cell_height: str | None = None,
 ) -> str:
     lines: list[str] = []
     if title:
@@ -59,30 +158,29 @@ def _typst_grid_block(
 
     col_count = N + (1 if row_labels else 0)
     col_spec = ", ".join(["auto"] * col_count)
+    default_width, default_height = _typst_grid_cell_size(M, N, cells, row_labels=row_labels, col_labels=col_labels)
+    cell_width = cell_width or default_width
+    cell_height = cell_height or default_height
 
     lines.append("#grid(")
     lines.append(f"  columns: ({col_spec}),")
     lines.append("  gutter: 0pt,")
     lines.append("  stroke: 0.5pt + black,")
     lines.append("  align: center + horizon,")
-    lines.append("  inset: 4pt,")
+    lines.append("  inset: 0pt,")
 
     if col_labels:
         if row_labels:
-            lines.append("  grid.cell(stroke: none)[], ")
+            lines.append(f"  grid.cell(stroke: none)[{_typst_boxed_cell('', cell_width, cell_height)}],")
         for n in range(N):
-            lines.append(
-                f'  grid.cell(stroke: none, inset: 2pt)[#text(font: "New Computer Modern", weight: "bold")[{n}]],'
-            )
+            lines.append(f"  grid.cell(stroke: none)[{_typst_boxed_cell(str(n), cell_width, cell_height, bold=True)}],")
 
     for m in range(M):
         if row_labels:
-            lines.append(
-                f'  grid.cell(stroke: none, inset: 2pt)[#text(font: "New Computer Modern", weight: "bold")[{m}]],'
-            )
+            lines.append(f"  grid.cell(stroke: none)[{_typst_boxed_cell(str(m), cell_width, cell_height, bold=True)}],")
         for n in range(N):
             fill, content = cells.get((m, n), ("white", ""))
-            lines.append(f'  grid.cell(fill: rgb("{fill}"))[#text(font: "New Computer Modern")[{content}]],')
+            lines.append(f'  grid.cell(fill: rgb("{fill}"))[{_typst_boxed_cell(content, cell_width, cell_height)}],')
 
     lines.append(")")
     return "\n".join(lines)
@@ -249,16 +347,23 @@ def _typst_mma_atom(
     cells_C = _tv_cells(layout_C, M, N, color)
     cells_A = _tv_cells(layout_A, M, K, color)
     cells_B = _tv_cells_B_top(layout_B, N, K, color)
+    cell_sizes = _typst_mma_grid_cell_sizes(M, N, K, cells_A, cells_B, cells_C)
 
     doc = _typst_text_panel(_mma_atom_text_lines(mma_atom))
 
     doc += "\n\n#grid(\n  columns: (auto, auto, auto),\n  rows: (auto, auto),\n  gutter: 12pt,\n  align: center + horizon,\n"
     doc += "  [],\n  [\n"
-    doc += _typst_grid_block(K, N, cells_B, title="B (K x N)")
+    doc += _typst_grid_block(
+        K, N, cells_B, title="B (K x N)", cell_width=cell_sizes["B"][0], cell_height=cell_sizes["B"][1]
+    )
     doc += "\n  ],\n  [],\n  [\n"
-    doc += _typst_grid_block(M, K, cells_A, title="A (M x K)")
+    doc += _typst_grid_block(
+        M, K, cells_A, title="A (M x K)", cell_width=cell_sizes["A"][0], cell_height=cell_sizes["A"][1]
+    )
     doc += "\n  ],\n  [\n"
-    doc += _typst_grid_block(M, N, cells_C, title="C (M x N)")
+    doc += _typst_grid_block(
+        M, N, cells_C, title="C (M x N)", cell_width=cell_sizes["C"][0], cell_height=cell_sizes["C"][1]
+    )
     doc += "\n  ],\n  [],\n)\n"
     return doc
 
@@ -277,15 +382,22 @@ def _typst_mma(
     cells_C = _tv_cells(layout_C, M, N, color)
     cells_A = _tv_cells(layout_A, M, K, color)
     cells_B = _tv_cells_B_top(layout_B, N, K, color)
+    cell_sizes = _typst_mma_grid_cell_sizes(M, N, K, cells_A, cells_B, cells_C)
 
     doc = _typst_text_panel(_tiled_mma_text_lines(mma))
     doc += "\n\n#grid(\n  columns: (auto, auto, auto),\n  rows: (auto, auto),\n  gutter: 12pt,\n  align: center + horizon,\n"
     doc += "  [],\n  [\n"
-    doc += _typst_grid_block(K, N, cells_B, title="B (K x N)")
+    doc += _typst_grid_block(
+        K, N, cells_B, title="B (K x N)", cell_width=cell_sizes["B"][0], cell_height=cell_sizes["B"][1]
+    )
     doc += "\n  ],\n  [],\n  [\n"
-    doc += _typst_grid_block(M, K, cells_A, title="A (M x K)")
+    doc += _typst_grid_block(
+        M, K, cells_A, title="A (M x K)", cell_width=cell_sizes["A"][0], cell_height=cell_sizes["A"][1]
+    )
     doc += "\n  ],\n  [\n"
-    doc += _typst_grid_block(M, N, cells_C, title="C (M x N)")
+    doc += _typst_grid_block(
+        M, N, cells_C, title="C (M x N)", cell_width=cell_sizes["C"][0], cell_height=cell_sizes["C"][1]
+    )
     doc += "\n  ],\n  [],\n)\n"
     return doc
 
@@ -306,13 +418,14 @@ def _typst_copy(
 
     cells_S = _tv_cells(layout_src, M, N, color)
     cells_D = _tv_cells(layout_dst, M, N, color)
+    cell_size_S, cell_size_D = _typst_copy_grid_cell_sizes(M, N, cells_S, cells_D)
 
     doc = _typst_text_panel(_tiled_copy_text_lines(copy))
     doc += "\n\n#grid(\n  columns: (auto, 20pt, auto),\n  gutter: 0pt,\n"
     doc += "  [\n"
-    doc += _typst_grid_block(M, N, cells_S, title="Src (M x N)")
+    doc += _typst_grid_block(M, N, cells_S, title="Src (M x N)", cell_width=cell_size_S[0], cell_height=cell_size_S[1])
     doc += "\n  ],\n  [],\n  [\n"
-    doc += _typst_grid_block(M, N, cells_D, title="Dst (M x N)")
+    doc += _typst_grid_block(M, N, cells_D, title="Dst (M x N)", cell_width=cell_size_D[0], cell_height=cell_size_D[1])
     doc += "\n  ],\n)\n"
     return doc
 

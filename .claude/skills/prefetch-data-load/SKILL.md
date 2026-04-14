@@ -8,7 +8,7 @@ description: >
   instructions. Use when a kernel has a loop where buffer_load feeds into
   MFMA/compute and load latency is exposed.
   Usage: /prefetch-data-load
-tools: Read,Edit,Bash,Grep,Glob,Agent
+allowed-tools: Read Edit Bash Grep Glob Agent
 ---
 
 # Prefetch Data Load Optimization

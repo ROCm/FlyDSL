@@ -44,6 +44,20 @@ def Fly_MmaOperand : I32EnumAttr<"MmaOperand", "", [
 }
 def Fly_MmaOperandAttr : EnumAttr<Fly_Dialect, Fly_MmaOperand, "mma_operand"> {}
 
+def Fly_AtomicOp : I32EnumAttr<"AtomicOp", "", [
+  I32EnumAttrCase<"Add", 0, "add">,
+  I32EnumAttrCase<"Max", 1, "max">,
+  I32EnumAttrCase<"Min", 2, "min">,
+  I32EnumAttrCase<"And", 3, "and">,
+  I32EnumAttrCase<"Or", 4, "or">,
+  I32EnumAttrCase<"Inc", 5, "inc">,
+  I32EnumAttrCase<"Dec", 6, "dec">
+]> {
+  let genSpecializedAttr = 0;
+  let cppNamespace = Fly_Dialect.cppNamespace;
+}
+def Fly_AtomicOpAttr : EnumAttr<Fly_Dialect, Fly_AtomicOp, "atomic_op"> {}
+
 def Fly_GemmTraversalOrder : I32EnumAttr<"GemmTraversalOrder", "", [
   I32EnumAttrCase<"KMN", 0, "kmn">,
   I32EnumAttrCase<"KNM", 1, "knm">,

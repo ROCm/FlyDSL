@@ -171,6 +171,53 @@ def issue_tdm_loads(*descs, wave_specialized=False, wave_id=None):
         tdm_ops.tensor_load_2d(desc)
 
 
+WGP_BARRIER_ID = -1
+
+
+def pipeline_fence_signal(outstanding=0, use_cluster=False):
+    """Signal half of a split barrier fence.
+
+    Issues ``s_wait_tensorcnt`` then ``s_barrier_signal -1``.
+    The matching ``pipeline_fence_wait`` must be called later
+    (typically mid-compute) before reading the LDS data.
+
+    When *use_cluster* is True the intra-WG barrier is still required
+    so that all waves' TDM loads are visible before any wave reads LDS.
+    The cluster barrier is layered on top for inter-WG synchronisation.
+    """
+    tdm_ops.tensor_wait(outstanding)
+    rocdl.s_barrier_signal(WGP_BARRIER_ID)
+    if use_cluster:
+        gpu.cluster_signal_once_per_wg()
+
+
+def pipeline_fence_wait(use_cluster=False):
+    """Wait half of a split barrier fence.
+
+    Issues ``s_barrier_wait -1``.  Must be preceded by a matching
+    ``pipeline_fence_signal`` from all waves in the workgroup.
+    """
+    rocdl.s_barrier_wait(WGP_BARRIER_ID)
+    if use_cluster:
+        gpu.cluster_wait()
+
+
+def issue_tdm_loads(*descs, wave_specialized=False, wave_id=None):
+    """Emit one or more TDM loads, optionally one descriptor per loader wave."""
+    if wave_specialized:
+        if wave_id is None:
+            wave_id = rocdl.wave_id()
+        for idx, desc in enumerate(descs):
+            if arith.cmpi(
+                arith.CmpIPredicate.eq, wave_id, arith.constant(idx, type=T.i32)
+            ):
+                tdm_ops.tensor_load_2d(desc)
+        return
+
+    for desc in descs:
+        tdm_ops.tensor_load_2d(desc)
+
+
 def store_acc_vec8_to_lds(memref, base_elem_off, imm_elem_off, acc_vec8,
                           out_elem=None):
     """Write one 8-element f32 accumulator sub-vector to LDS.

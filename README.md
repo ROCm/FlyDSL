@@ -26,19 +26,25 @@ FlyDSL/
 ├── scripts/                   # build & test scripts
 │   ├── build_llvm.sh          # build LLVM/MLIR from source
 │   ├── build.sh               # build FlyDSL (C++ + Python bindings)
-│   ├── run_tests.sh           # run pytest GEMM tests
+│   ├── run_tests.sh           # run tests
 │   └── run_benchmark.sh       # run performance benchmarks
-├── include/flydsl/            # C++ dialect headers (Fly dialect)
-├── lib/                       # C++ dialect implementation
-├── python/flydsl/             # Python DSL sources
-│   ├── expr/                  # DSL expression API (primitive, arith, etc.)
-│   ├── compiler/              # JIT compilation pipeline
-│   └── _mlir/                 # (symlink to embedded MLIR bindings)
+├── include/flydsl/            # C++ Fly/FlyROCDL dialect headers
+├── lib/                       # C++ dialect implementation + Python bindings
+├── python/
+│   ├── flydsl/                # Python DSL sources
+│   │   ├── expr/              # DSL expression API (primitive, arith, vector, gpu, rocdl, buffer_ops, math, mem_ops)
+│   │   ├── compiler/          # JIT compilation pipeline (ast_rewriter, kernel_function, jit_function, backends/)
+│   │   ├── runtime/           # Device runtime (device.py, device_runtime/)
+│   │   ├── utils/             # Utilities (smem_allocator, env, logger)
+│   │   └── autotune.py        # Triton-style autotune module
+│   └── mlir_flydsl/           # MLIR Python bindings (built, not edited)
 ├── examples/                  # Runnable examples
 │   ├── 01-vectorAdd.py        # Vector addition with layout algebra
-│   └── 02-tiledCopy.py        # Tiled copy with partitioned tensors
-├── kernels/                   # Python GPU kernels (importable as `kernels.*`)
-├── tests/                     # pytest-based tests
+│   ├── 02-tiledCopy.py        # Tiled copy with partitioned tensors
+│   ├── 03-tiledMma.py         # Tiled MMA (GEMM) with MFMA atoms
+│   └── 04-preshuffle_gemm.py  # Preshuffle GEMM end-to-end example
+├── kernels/                   # Production GPU kernels (importable as `kernels.*`)
+├── tests/                     # All tests (kernels/, mlir/, unit/)
 ├── CMakeLists.txt             # top-level CMake
 └── setup.py                   # Python packaging
 ```
@@ -151,8 +157,8 @@ bash scripts/build.sh -j64
 | Testing & Benchmarks | Test infrastructure, benchmarking, performance comparison | [Testing Guide](docs/testing_benchmarking_guide.md) |
 
 - **Kernel cache issues** (stale results after code changes)
-  - Clear: `rm -rf ~/.flydsl/cache`
-  - Or disable: `export FLYDSL_RUNTIME_ENABLE_CACHE=0`
+  - The JIT disk cache auto-invalidates on source/closure changes; only needed for C++ pass or non-closure helper changes
+  - Clear manually: `rm -rf ~/.flydsl/cache` or `export FLYDSL_RUNTIME_ENABLE_CACHE=0`
 
 ## 📐 Layout System
 
@@ -339,19 +345,33 @@ torch.cuda.synchronize()
 print("Result correct:", torch.allclose(C, A + B))
 ```
 
-See `examples/` for more examples including tiled copy (`02-tiledCopy.py`).
+See `examples/` for more examples including tiled copy (`02-tiledCopy.py`), tiled MMA (`03-tiledMma.py`), and preshuffle GEMM (`04-preshuffle_gemm.py`).
 
 ## ✅ Testing Status
 
-| Category | Status | Description |
-|----------|--------|-------------|
-| **Preshuffle GEMM** | ✅ Passing | FP8, INT8, INT4, BF16 (16 tests) |
-| **FP4 GEMM** | ⏭ Skipped | Requires gfx950 |
-| **GPU Backend**| ✅ Passing | GPU kernel compilation, shared memory, vectorization |
-| **CUDA Graph** | ✅ Passing | Graph capture and replay |
+| Category | Test File | Description |
+|----------|-----------|-------------|
+| **Preshuffle GEMM** | `test_preshuffle_gemm.py` | FP8, INT8, INT4, BF16, FP4 |
+| **Blockscale GEMM** | `test_blockscale_preshuffle_gemm.py` | Blockscale preshuffle GEMM |
+| **HGEMM Split-K** | `test_hgemm_splitk.py` | FP16 GEMM split-K |
+| **MoE GEMM** | `test_moe_gemm.py` | MoE 2-stage (gate/up + reduce) |
+| **MoE Blockscale** | `test_moe_blockscale.py` | MoE blockscale 2-stage |
+| **MoE Reduce** | `test_moe_reduce.py` | MoE reduce kernel |
+| **PagedAttention** | `test_pa.py` | Paged attention decode (FP8) — *WIP perf tuning* |
+| **FlashAttention** | `test_flash_attn_func.py` | Flash attention — *WIP perf tuning* |
+| **LayerNorm** | `test_layernorm.py` | LayerNorm (layout API) |
+| **RMSNorm** | `test_rmsnorm.py` | RMSNorm (layout API) |
+| **Softmax** | `test_softmax.py` | Softmax (layout API) |
+| **Fused RoPE** | `test_fused_rope_cache.py` | Fused RoPE + KV cache |
+| **AllReduce** | `test_flydsl_allreduce.py` | Multi-GPU all-reduce |
+| **RDNA GEMM** | `test_rdna_gemm.py` | RDNA FP16/FP8 GEMM |
+| **GFX1250 GEMM** | `test_gemm_fp8fp4_gfx1250.py` | GFX1250 FP8/FP4 GEMM |
+| **WMMA GEMM** | `test_wmma_gemm_gfx1250.py` | GFX1250 WMMA GEMM |
+| **VecAdd** | `test_vec_add.py` | Basic vector addition |
+| **Quantization** | `test_quant.py` | Quantization utilities |
 
 **Verified Platforms**:
-*   AMD MI300X/MI308X (gfx942), AMD MI350 (gfx950)
+*   AMD MI300X/MI308X (gfx942), AMD MI350/MI355X (gfx950), AMD MI450 (gfx1250), Radeon AI PRO R9700 (gfx1201)
 *   Linux / ROCm 6.x, 7.x
 
 ## 🙏 Acknowledgements

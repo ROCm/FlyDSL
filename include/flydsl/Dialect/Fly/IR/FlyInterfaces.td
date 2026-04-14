@@ -24,6 +24,29 @@ def Fly_MayStaticInterface {
   ];
 }
 
+def Fly_StatefulOpTypeInterface : TypeInterface<"StatefulOpTypeInterface"> {
+  let cppNamespace = "::mlir::fly";
+  let methods = [
+    InterfaceMethod<
+      "Return the converted type that holds the mutable state of this op.",
+      "::mlir::Type", "getConvertedType", (ins "::mlir::MLIRContext *":$ctx)>,
+    InterfaceMethod<
+      "Build the default state value for this op.",
+      "::mlir::Value", "getDefaultState",
+      (ins "::mlir::OpBuilder &":$builder, "::mlir::Location":$loc)>,
+    InterfaceMethod<
+      "Insert the given value to a field of this stateful op. "
+      "Returns the updated struct value after setting the field.",
+      "::mlir::Value",
+      "setAtomState",
+      (ins "::mlir::OpBuilder &":$builder,
+           "::mlir::Location":$loc,
+           "::mlir::Value":$atomStruct,
+           "::mlir::Attribute":$fieldAttr,
+           "::mlir::Value":$fieldValue)>
+  ];
+}
+
 def Fly_NestedAttrInterface : AttrInterface<"NestedAttrInterface"> {
   let cppNamespace = "::mlir::fly";
   let methods = Fly_NestedInterfaceMethods.methods;
@@ -49,18 +72,43 @@ def Fly_MayStaticTypeInterface : TypeInterface<"MayStaticTypeInterface"> {
   ]);
 }
 
-
-def Fly_CopyOpTypeInterface : TypeInterface<"CopyOpTypeInterface", [Fly_MayStaticTypeInterface]> {
+def Fly_CopyOpTypeInterface : TypeInterface<"CopyOpTypeInterface"> {
   let cppNamespace = "::mlir::fly";
   let methods = [
     InterfaceMethod<"", "::mlir::Attribute", "getThrLayout", (ins)>,
     InterfaceMethod<"", "::mlir::Attribute", "getThrBitLayoutSrc", (ins)>,
     InterfaceMethod<"", "::mlir::Attribute", "getThrBitLayoutDst", (ins)>,
-    InterfaceMethod<"", "::mlir::Attribute", "getThrBitLayoutRef", (ins)>
+    InterfaceMethod<"", "::mlir::Attribute", "getThrBitLayoutRef", (ins)>,
+    InterfaceMethod<
+      "Emit the lowering IR for a copy_atom_call with this CopyOp type.",
+      "::mlir::LogicalResult",
+      "emitAtomCall",
+      (ins "::mlir::OpBuilder &":$builder,
+           "::mlir::Location":$loc,
+           "::mlir::Type":$copyAtomTy,
+           "::mlir::Type":$srcMemTy,
+           "::mlir::Type":$dstMemTy,
+           "::mlir::Value":$atomVal,
+           "::mlir::Value":$src,
+           "::mlir::Value":$dst)>,
+    InterfaceMethod<
+      "Emit the lowering IR for a predicated copy_atom_call with this CopyOp type.",
+      "::mlir::LogicalResult",
+      "emitAtomCall",
+      (ins "::mlir::OpBuilder &":$builder,
+           "::mlir::Location":$loc,
+           "::mlir::Type":$copyAtomTy,
+           "::mlir::Type":$srcMemTy,
+           "::mlir::Type":$dstMemTy,
+           "::mlir::Type":$predMemTy,
+           "::mlir::Value":$atomVal,
+           "::mlir::Value":$src,
+           "::mlir::Value":$dst,
+           "::mlir::Value":$pred)>
   ];
 }
 
-def Fly_MmaOpTypeInterface : TypeInterface<"MmaOpTypeInterface", [Fly_MayStaticTypeInterface]> {
+def Fly_MmaOpTypeInterface : TypeInterface<"MmaOpTypeInterface"> {
   let cppNamespace = "::mlir::fly";
   let methods = [
     InterfaceMethod<"", "::mlir::Attribute", "getThrLayout", (ins)>,
@@ -71,7 +119,23 @@ def Fly_MmaOpTypeInterface : TypeInterface<"MmaOpTypeInterface", [Fly_MayStaticT
     InterfaceMethod<"", "::mlir::Type", "getValTypeD", (ins)>,
     InterfaceMethod<"", "::mlir::Attribute", "getThrValLayoutA", (ins)>,
     InterfaceMethod<"", "::mlir::Attribute", "getThrValLayoutB", (ins)>,
-    InterfaceMethod<"", "::mlir::Attribute", "getThrValLayoutC", (ins)>
+    InterfaceMethod<"", "::mlir::Attribute", "getThrValLayoutC", (ins)>,
+    InterfaceMethod<
+      "Emit the lowering IR for an mma_atom_call with this MmaOp type.",
+      "::mlir::LogicalResult",
+      "emitAtomCall",
+      (ins "::mlir::OpBuilder &":$builder,
+           "::mlir::Location":$loc,
+           "::mlir::Type":$mmaAtomTy,
+           "::mlir::Type":$dMemTy,
+           "::mlir::Type":$aMemTy,
+           "::mlir::Type":$bMemTy,
+           "::mlir::Type":$cMemTy,
+           "::mlir::Value":$atomVal,
+           "::mlir::Value":$d,
+           "::mlir::Value":$a,
+           "::mlir::Value":$b,
+           "::mlir::Value":$c)>
   ];
 }
 

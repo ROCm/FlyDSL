@@ -380,10 +380,10 @@ TileType TiledMmaType::getDefaultPermutationMNK(MLIRContext *ctx) {
 }
 
 bool CopyAtomType::isStatic() const {
-  auto copyOp = dyn_cast<CopyOpTypeInterface>(getCopyOp());
-  if (!copyOp)
+  auto mayStatic = dyn_cast<MayStaticTypeInterface>(getCopyOp());
+  if (!mayStatic)
     return false;
-  return copyOp.isStatic();
+  return mayStatic.isStatic();
 }
 
 Attribute CopyAtomType::getThrLayout() {
@@ -407,11 +407,41 @@ Attribute CopyAtomType::getThrValLayoutRef() {
   return layoutRecast(builder, cast<LayoutAttr>(copyOp.getThrBitLayoutRef()), 1, getValBits());
 }
 
+LogicalResult CopyAtomType::emitAtomCall(OpBuilder &builder, Location loc, Type copyAtomTy,
+                                         Type srcMemTy, Type dstMemTy, Value atomVal, Value src,
+                                         Value dst) const {
+  return cast<CopyOpTypeInterface>(getCopyOp())
+      .emitAtomCall(builder, loc, copyAtomTy, srcMemTy, dstMemTy, atomVal, src, dst);
+}
+
+LogicalResult CopyAtomType::emitAtomCall(OpBuilder &builder, Location loc, Type copyAtomTy,
+                                         Type srcMemTy, Type dstMemTy, Type predMemTy,
+                                         Value atomVal, Value src, Value dst, Value pred) const {
+  return cast<CopyOpTypeInterface>(getCopyOp())
+      .emitAtomCall(builder, loc, copyAtomTy, srcMemTy, dstMemTy, predMemTy, atomVal, src, dst,
+                    pred);
+}
+
+bool CopyAtomType::isStateful() const { return isa<StatefulOpTypeInterface>(getCopyOp()); }
+
+Type CopyAtomType::getConvertedType(MLIRContext *ctx) const {
+  if (auto stateful = dyn_cast<StatefulOpTypeInterface>(getCopyOp()))
+    return stateful.getConvertedType(ctx);
+  return Type();
+}
+
+Value CopyAtomType::setAtomState(OpBuilder &builder, Location loc, Value atomStruct,
+                                 Attribute fieldAttr, Value fieldValue) const {
+  assert(this->isStateful() && "CopyAtom is not stateful");
+  return cast<StatefulOpTypeInterface>(getCopyOp())
+      .setAtomState(builder, loc, atomStruct, fieldAttr, fieldValue);
+}
+
 bool MmaAtomType::isStatic() const {
-  auto mmaOp = dyn_cast<MmaOpTypeInterface>(getMmaOp());
-  if (!mmaOp)
+  auto mayStatic = dyn_cast<MayStaticTypeInterface>(getMmaOp());
+  if (!mayStatic)
     return false;
-  return mmaOp.isStatic();
+  return mayStatic.isStatic();
 }
 
 Value MmaAtomType::rebuildStaticValue(OpBuilder &builder, Location loc, Value currentValue) const {
@@ -438,6 +468,28 @@ Attribute MmaAtomType::getThrValLayoutB() const {
 }
 Attribute MmaAtomType::getThrValLayoutC() const {
   return cast<MmaOpTypeInterface>(getMmaOp()).getThrValLayoutC();
+}
+
+LogicalResult MmaAtomType::emitAtomCall(OpBuilder &builder, Location loc, Type mmaAtomTy,
+                                        Type dMemTy, Type aMemTy, Type bMemTy, Type cMemTy,
+                                        Value atomVal, Value d, Value a, Value b, Value c) const {
+  return cast<MmaOpTypeInterface>(getMmaOp())
+      .emitAtomCall(builder, loc, mmaAtomTy, dMemTy, aMemTy, bMemTy, cMemTy, atomVal, d, a, b, c);
+}
+
+bool MmaAtomType::isStateful() const { return isa<StatefulOpTypeInterface>(getMmaOp()); }
+
+Type MmaAtomType::getConvertedType(MLIRContext *ctx) const {
+  if (auto stateful = dyn_cast<StatefulOpTypeInterface>(getMmaOp()))
+    return stateful.getConvertedType(ctx);
+  return Type();
+}
+
+Value MmaAtomType::setAtomState(OpBuilder &builder, Location loc, Value atomStruct,
+                                Attribute fieldAttr, Value fieldValue) const {
+  assert(this->isStateful() && "MmaAtom is not stateful");
+  return cast<StatefulOpTypeInterface>(getMmaOp())
+      .setAtomState(builder, loc, atomStruct, fieldAttr, fieldValue);
 }
 
 } // namespace mlir::fly

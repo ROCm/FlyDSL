@@ -6,7 +6,7 @@ description: >
   with explicit layouts and tiling on AMD GPUs. Requires building LLVM/MLIR from source (~30min)
   then FlyDSL C++ and Python bindings (~5min).
   Usage: /build-flydsl [container@host]
-tools: Bash
+allowed-tools: Bash
 ---
 
 # Build and Install FlyDSL
@@ -121,7 +121,7 @@ bash scripts/build.sh -j128
 
 # Clear kernel cache if stale results:
 rm -rf ~/.flydsl/cache
-# Or disable cache:
+# Or disable disk cache (in-memory cache remains active):
 export FLYDSL_RUNTIME_ENABLE_CACHE=0
 ```
 

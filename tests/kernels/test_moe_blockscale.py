@@ -53,7 +53,7 @@ try:
     from aiter.ops.quant import per_group_quant_hip
 
     HAS_AITER = True
-except ImportError:
+except Exception:
     HAS_AITER = False
 
 # Use aiter or torch for routing
