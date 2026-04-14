@@ -38,16 +38,188 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from kernels.chunk_gated_delta_h import chunk_gated_delta_rule_fwd_h_flydsl
 
-# Also import Triton reference for performance comparison
-TRITON_AVAILABLE = False
-try:
-    sys.path.insert(0, "/workspace/linear_attn_example")
-    from kernel.triton.chunk_delta_h import (
-        chunk_gated_delta_rule_fwd_h_opt3 as fwd_h_triton_opt3,
+# ── Triton opt3 kernel (inlined, no external dependency) ────────────────
+
+import functools
+import triton.language as tl
+
+def _check_platform():
+    try:
+        backend = triton.runtime.driver.active.get_current_target().backend
+    except (RuntimeError, AttributeError):
+        backend = "cpu"
+    return {"cuda": "nvidia", "hip": "amd", "xpu": "intel"}.get(backend, backend)
+
+_use_cuda_graph = _check_platform() == "nvidia" and os.environ.get("FLA_USE_CUDA_GRAPH", "0") == "1"
+
+def _tensor_cache(fn):
+    cache_entries = []
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        nonlocal cache_entries
+        for i, (la, lk, lr) in enumerate(cache_entries):
+            if len(args) == len(la) and all(a is b for a, b in zip(args, la)) \
+               and len(kwargs) == len(lk) and all(k in lk and v is lk[k] for k, v in kwargs.items()):
+                cache_entries = cache_entries[:i] + cache_entries[i+1:] + [(la, lk, lr)]
+                return lr
+        result = fn(*args, **kwargs)
+        if len(cache_entries) >= 8:
+            cache_entries.pop(0)
+        cache_entries.append((args, kwargs, result))
+        return result
+    return wrapper
+
+@_tensor_cache
+def _prepare_lens(cu_seqlens):
+    return cu_seqlens[1:] - cu_seqlens[:-1]
+
+@_tensor_cache
+def _prepare_chunk_indices(cu_seqlens, chunk_size):
+    indices = torch.cat([torch.arange(n) for n in triton.cdiv(_prepare_lens(cu_seqlens), chunk_size).tolist()])
+    return torch.stack([indices.eq(0).cumsum(0) - 1, indices], 1).to(cu_seqlens)
+
+@_tensor_cache
+def _prepare_chunk_offsets(cu_seqlens, chunk_size):
+    return torch.cat([cu_seqlens.new_tensor([0]), triton.cdiv(_prepare_lens(cu_seqlens), chunk_size)]).cumsum(-1)
+
+@triton.heuristics({
+    "USE_G": lambda args: args["g"] is not None,
+    "USE_GK": lambda args: args["gk"] is not None,
+    "USE_INITIAL_STATE": lambda args: args["h0"] is not None,
+    "STORE_FINAL_STATE": lambda args: args["ht"] is not None,
+    "SAVE_NEW_VALUE": lambda args: args["v_new"] is not None,
+    "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
+})
+@triton.autotune(
+    configs=[triton.Config({"BV": BV}, num_warps=nw, num_stages=ns)
+             for nw in [2, 4] for ns in [1, 2, 3, 4] for BV in [16, 32, 64]],
+    key=["H", "K", "V", "BT", "IS_VARLEN"],
+    use_cuda_graph=_use_cuda_graph,
+)
+@triton.jit(do_not_specialize=["T"])
+def _triton_fwd_kernel_h_opt3(
+    k, v, w, v_new, g, gk, h, h0, ht,
+    cu_seqlens, chunk_offsets, T, T_flat,
+    H: tl.constexpr, Hg: tl.constexpr, K: tl.constexpr, V: tl.constexpr,
+    BT: tl.constexpr, BV: tl.constexpr,
+    USE_G: tl.constexpr, USE_GK: tl.constexpr,
+    USE_INITIAL_STATE: tl.constexpr, STORE_FINAL_STATE: tl.constexpr,
+    SAVE_NEW_VALUE: tl.constexpr, IS_VARLEN: tl.constexpr,
+    WU_CONTIGUOUS: tl.constexpr,
+):
+    i_v, i_nh = tl.program_id(0), tl.program_id(1)
+    i_n, i_h = i_nh // H, i_nh % H
+    if IS_VARLEN:
+        bos = tl.load(cu_seqlens + i_n).to(tl.int32)
+        eos = tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        T = eos - bos
+        NT = tl.cdiv(T, BT)
+        boh = tl.load(chunk_offsets + i_n).to(tl.int32)
+    else:
+        bos, eos = i_n * T, i_n * T + T
+        NT = tl.cdiv(T, BT)
+        boh = i_n * NT
+    b_h1 = tl.zeros([64, BV], dtype=tl.float32)
+    if K > 64:  b_h2 = tl.zeros([64, BV], dtype=tl.float32)
+    if K > 128: b_h3 = tl.zeros([64, BV], dtype=tl.float32)
+    if K > 192: b_h4 = tl.zeros([64, BV], dtype=tl.float32)
+    h += ((boh * H + i_h) * K * V).to(tl.int64)
+    k += ((bos * Hg + i_h // (H // Hg)) * K).to(tl.int64)
+    if WU_CONTIGUOUS:
+        if IS_VARLEN:
+            v += ((i_h * T_flat + bos) * V).to(tl.int64)
+            w += ((i_h * T_flat + bos) * K).to(tl.int64)
+        else:
+            v += (((i_n * H + i_h) * T_flat) * V).to(tl.int64)
+            w += (((i_n * H + i_h) * T_flat) * K).to(tl.int64)
+        stride_v, stride_w = V, K
+    else:
+        v += ((bos * H + i_h) * V).to(tl.int64)
+        w += ((bos * H + i_h) * K).to(tl.int64)
+        stride_v, stride_w = H * V, H * K
+    if SAVE_NEW_VALUE:
+        if IS_VARLEN: v_new += ((i_h * T_flat + bos) * V).to(tl.int64)
+        else:         v_new += (((i_n * H + i_h) * T_flat) * V).to(tl.int64)
+    stride_h, stride_k = H * K * V, Hg * K
+    if USE_INITIAL_STATE: h0 = h0 + i_nh * K * V
+    if STORE_FINAL_STATE: ht = ht + i_nh * K * V
+    if USE_INITIAL_STATE:
+        b_h1 += tl.load(tl.make_block_ptr(h0, (K,V),(V,1),(0,i_v*BV),(64,BV),(1,0)), boundary_check=(0,1)).to(tl.float32)
+        if K > 64:  b_h2 += tl.load(tl.make_block_ptr(h0,(K,V),(V,1),(64,i_v*BV),(64,BV),(1,0)), boundary_check=(0,1)).to(tl.float32)
+        if K > 128: b_h3 += tl.load(tl.make_block_ptr(h0,(K,V),(V,1),(128,i_v*BV),(64,BV),(1,0)), boundary_check=(0,1)).to(tl.float32)
+        if K > 192: b_h4 += tl.load(tl.make_block_ptr(h0,(K,V),(V,1),(192,i_v*BV),(64,BV),(1,0)), boundary_check=(0,1)).to(tl.float32)
+    for i_t in range(NT):
+        tl.store(tl.make_block_ptr(h+i_t*stride_h,(K,V),(V,1),(0,i_v*BV),(64,BV),(1,0)), b_h1.to(tl.bfloat16), boundary_check=(0,1))
+        if K > 64:  tl.store(tl.make_block_ptr(h+i_t*stride_h,(K,V),(V,1),(64,i_v*BV),(64,BV),(1,0)), b_h2.to(tl.bfloat16), boundary_check=(0,1))
+        if K > 128: tl.store(tl.make_block_ptr(h+i_t*stride_h,(K,V),(V,1),(128,i_v*BV),(64,BV),(1,0)), b_h3.to(tl.bfloat16), boundary_check=(0,1))
+        if K > 192: tl.store(tl.make_block_ptr(h+i_t*stride_h,(K,V),(V,1),(192,i_v*BV),(64,BV),(1,0)), b_h4.to(tl.bfloat16), boundary_check=(0,1))
+        p_w = tl.make_block_ptr(w,(T,K),(stride_w,1),(i_t*BT,0),(BT,64),(1,0))
+        b_v = tl.dot(tl.load(p_w, boundary_check=(0,1)), b_h1.to(tl.bfloat16))
+        if K > 64:  b_v += tl.dot(tl.load(tl.make_block_ptr(w,(T,K),(stride_w,1),(i_t*BT,64),(BT,64),(1,0)), boundary_check=(0,1)), b_h2.to(tl.bfloat16))
+        if K > 128: b_v += tl.dot(tl.load(tl.make_block_ptr(w,(T,K),(stride_w,1),(i_t*BT,128),(BT,64),(1,0)), boundary_check=(0,1)), b_h3.to(tl.bfloat16))
+        if K > 192: b_v += tl.dot(tl.load(tl.make_block_ptr(w,(T,K),(stride_w,1),(i_t*BT,192),(BT,64),(1,0)), boundary_check=(0,1)), b_h4.to(tl.bfloat16))
+        b_v = tl.load(tl.make_block_ptr(v,(T,V),(stride_v,1),(i_t*BT,i_v*BV),(BT,BV),(1,0)), boundary_check=(0,1)) - b_v
+        if SAVE_NEW_VALUE:
+            tl.store(tl.make_block_ptr(v_new,(T,V),(V,1),(i_t*BT,i_v*BV),(BT,BV),(1,0)), b_v.to(tl.bfloat16), boundary_check=(0,1))
+        last_idx = min((i_t+1)*BT, T) - 1
+        if USE_G:
+            m_t = (i_t*BT + tl.arange(0, BT)) < T
+            b_g_last = tl.load(g + bos*H + last_idx*H + i_h)
+            b_g = tl.load(tl.make_block_ptr(g+bos*H+i_h,(T,),(H,),(i_t*BT,),(BT,),(0,)), boundary_check=(0,))
+            b_v = b_v * tl.where(m_t, tl.exp(b_g_last - b_g), 0)[:, None]
+            b_g_last = tl.exp(b_g_last)
+            b_h1 *= b_g_last
+            if K > 64:  b_h2 *= b_g_last
+            if K > 128: b_h3 *= b_g_last
+            if K > 192: b_h4 *= b_g_last
+        if USE_GK:
+            o_k1 = tl.arange(0, 64)
+            b_h1 *= tl.exp(tl.load(gk+(bos+last_idx)*H*K+i_h*K+o_k1, mask=(o_k1<K), other=0.0))[:, None]
+            if K > 64:  b_h2 *= tl.exp(tl.load(gk+(bos+last_idx)*H*K+i_h*K+64+o_k1, mask=(64+o_k1<K), other=0.0))[:, None]
+            if K > 128: b_h3 *= tl.exp(tl.load(gk+(bos+last_idx)*H*K+i_h*K+128+o_k1, mask=(128+o_k1<K), other=0.0))[:, None]
+            if K > 192: b_h4 *= tl.exp(tl.load(gk+(bos+last_idx)*H*K+i_h*K+192+o_k1, mask=(192+o_k1<K), other=0.0))[:, None]
+        b_v = b_v.to(k.dtype.element_ty)
+        b_k = tl.load(tl.make_block_ptr(k,(K,T),(1,stride_k),(0,i_t*BT),(64,BT),(0,1)), boundary_check=(0,1))
+        b_h1 += tl.dot(b_k, b_v)
+        if K > 64:  b_h2 += tl.dot(tl.load(tl.make_block_ptr(k,(K,T),(1,stride_k),(64,i_t*BT),(64,BT),(0,1)), boundary_check=(0,1)), b_v)
+        if K > 128: b_h3 += tl.dot(tl.load(tl.make_block_ptr(k,(K,T),(1,stride_k),(128,i_t*BT),(64,BT),(0,1)), boundary_check=(0,1)), b_v)
+        if K > 192: b_h4 += tl.dot(tl.load(tl.make_block_ptr(k,(K,T),(1,stride_k),(192,i_t*BT),(64,BT),(0,1)), boundary_check=(0,1)), b_v)
+    if STORE_FINAL_STATE:
+        tl.store(tl.make_block_ptr(ht,(K,V),(V,1),(0,i_v*BV),(64,BV),(1,0)), b_h1.to(tl.float32), boundary_check=(0,1))
+        if K > 64:  tl.store(tl.make_block_ptr(ht,(K,V),(V,1),(64,i_v*BV),(64,BV),(1,0)), b_h2.to(tl.float32), boundary_check=(0,1))
+        if K > 128: tl.store(tl.make_block_ptr(ht,(K,V),(V,1),(128,i_v*BV),(64,BV),(1,0)), b_h3.to(tl.float32), boundary_check=(0,1))
+        if K > 192: tl.store(tl.make_block_ptr(ht,(K,V),(V,1),(192,i_v*BV),(64,BV),(1,0)), b_h4.to(tl.float32), boundary_check=(0,1))
+
+def fwd_h_triton_opt3(
+    k, w, u, g=None, gk=None, initial_state=None,
+    output_final_state=False, chunk_size=64, save_new_value=True,
+    cu_seqlens=None, wu_contiguous=False,
+):
+    B, T, Hg, K = k.shape
+    BT = chunk_size
+    if wu_contiguous:
+        H, V, T_flat = w.shape[1], u.shape[-1], w.shape[2]
+    else:
+        H, V, T_flat = u.shape[-2], u.shape[-1], w.shape[1]
+    chunk_indices = _prepare_chunk_indices(cu_seqlens, chunk_size) if cu_seqlens is not None else None
+    if cu_seqlens is None:
+        N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
+    else:
+        N = len(cu_seqlens) - 1
+        NT = len(chunk_indices)
+        chunk_offsets = _prepare_chunk_offsets(cu_seqlens, BT)
+    h = k.new_empty(B, NT, H, K, V)
+    final_state = k.new_empty(N, H, K, V, dtype=torch.float32) if output_final_state else None
+    v_new = k.new_empty(B, H, T_flat, V, dtype=u.dtype) if save_new_value else None
+    _triton_fwd_kernel_h_opt3[(lambda meta: (triton.cdiv(V, meta["BV"]), N * H))](
+        k=k, v=u, w=w, v_new=v_new, g=g, gk=gk,
+        h=h, h0=initial_state, ht=final_state,
+        cu_seqlens=cu_seqlens, chunk_offsets=chunk_offsets,
+        T=T, T_flat=T_flat, H=H, Hg=Hg, K=K, V=V, BT=BT,
+        WU_CONTIGUOUS=wu_contiguous,
     )
-    TRITON_AVAILABLE = True
-except ImportError:
-    pass
+    return h, v_new, final_state
+
 
 
 # ── Global test configuration ──────────────────────────────────────────
@@ -224,7 +396,6 @@ class TestCorrectness:
         torch.testing.assert_close(
             fs_fly.float(), fs_ref.float(), atol=1e-1, rtol=1e-1)
 
-    @pytest.mark.skipif(not TRITON_AVAILABLE, reason="Triton opt3 kernel not available")
     @pytest.mark.parametrize("full_prompt_len", FULL_PROMPT_LENS)
     def test_correctness_triton_opt3(self, full_prompt_len):
         context_lens = _build_context_lens(full_prompt_len)
@@ -247,7 +418,6 @@ class TestCorrectness:
         torch.testing.assert_close(
             fs_tri.float(), fs_ref.float(), atol=1e-1, rtol=1e-1)
 
-    @pytest.mark.skipif(not TRITON_AVAILABLE, reason="Triton opt3 kernel not available")
     @pytest.mark.parametrize("full_prompt_len", FULL_PROMPT_LENS)
     def test_correctness_flydsl_vs_triton(self, full_prompt_len):
         """Direct comparison between FlyDSL and Triton opt3 kernels."""
@@ -338,21 +508,20 @@ class TestPerformance:
         print(f"\n[K5 FlyDSL T={total_tokens}]  {us_fly:.2f} us")
 
         # Triton opt3 kernel for comparison
-        if TRITON_AVAILABLE:
-            us_triton = _bench_fn(
-                fwd_h_triton_opt3,
-                k, w_c, u_c, g=g, initial_state=h0,
-                output_final_state=True, cu_seqlens=cu, wu_contiguous=True,
-            )
-            speedup = us_triton / us_fly if us_fly > 0 else float('inf')
-            print(f"[K5 Triton opt3 T={total_tokens}]  {us_triton:.2f} us")
-            print(f"[Speedup FlyDSL/Triton]  {speedup:.3f}x")
+        us_triton = _bench_fn(
+            fwd_h_triton_opt3,
+            k, w_c, u_c, g=g, initial_state=h0,
+            output_final_state=True, cu_seqlens=cu, wu_contiguous=True,
+        )
+        speedup = us_triton / us_fly if us_fly > 0 else float('inf')
+        print(f"[K5 Triton opt3 T={total_tokens}]  {us_triton:.2f} us")
+        print(f"[Speedup FlyDSL/Triton]  {speedup:.3f}x")
 
 
 # ── rocprofv3 profiling infrastructure ──────────────────────────────────
 
 TARGET_KERNEL_FLYDSL = "chunk_gdn_fwd_h_opt3"
-TARGET_KERNEL_TRITON = "chunk_gated_delta_rule_fwd_kernel_h_opt3"
+TARGET_KERNEL_TRITON = "_triton_fwd_kernel_h_opt3"
 
 
 def _load_roctx_library():
@@ -420,25 +589,24 @@ def _rocprof_worker(full_prompt_len):
     print(f"[rocprof-worker] FlyDSL: {NUM_ITERS} iterations done", flush=True)
 
     # Triton opt3
-    if TRITON_AVAILABLE:
-        run_tri = lambda: fwd_h_triton_opt3(
-            k, w_c, u_c, g=g, initial_state=h0,
-            output_final_state=True, cu_seqlens=cu, wu_contiguous=True,
-        )
+    run_tri = lambda: fwd_h_triton_opt3(
+        k, w_c, u_c, g=g, initial_state=h0,
+        output_final_state=True, cu_seqlens=cu, wu_contiguous=True,
+    )
 
-        print(f"[rocprof-worker] Warmup Triton opt3 ...", flush=True)
-        for _ in range(NUM_WARMUP):
-            run_tri()
-        torch.cuda.synchronize()
+    print(f"[rocprof-worker] Warmup Triton opt3 ...", flush=True)
+    for _ in range(NUM_WARMUP):
+        run_tri()
+    torch.cuda.synchronize()
 
-        roctx.roctxProfilerResume(tid)
-        roctx.roctxRangePushA(b"triton_k5_bench")
-        for _ in range(NUM_ITERS):
-            run_tri()
-        torch.cuda.synchronize()
-        roctx.roctxRangePop()
-        roctx.roctxProfilerPause(tid)
-        print(f"[rocprof-worker] Triton: {NUM_ITERS} iterations done", flush=True)
+    roctx.roctxProfilerResume(tid)
+    roctx.roctxRangePushA(b"triton_k5_bench")
+    for _ in range(NUM_ITERS):
+        run_tri()
+    torch.cuda.synchronize()
+    roctx.roctxRangePop()
+    roctx.roctxProfilerPause(tid)
+    print(f"[rocprof-worker] Triton: {NUM_ITERS} iterations done", flush=True)
 
 
 def _parse_kernel_stats(stats_path: Path) -> dict[str, dict]:
