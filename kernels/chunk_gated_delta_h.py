@@ -42,18 +42,18 @@ def _llvm_lds_ptr_ty():
     return ir.Type.parse("!llvm.ptr<3>")
 
 
-def _amdgcn_exp2_f32(x):
-    """Emit llvm.amdgcn.exp2.f32 — maps directly to v_exp_f32 without underflow guard."""
+def _llvm_exp2_f32(x):
+    """Emit llvm.exp2.f32 intrinsic directly (maps to single v_exp_f32 on AMD)."""
     x_raw = _to_raw(x)
     return _llvm.call_intrinsic(
-        ir.F32Type.get(), "llvm.amdgcn.exp2.f32", [x_raw], [], []
+        ir.F32Type.get(), "llvm.exp2.f32", [x_raw], [], []
     )
 
 
 def _fast_exp(x):
-    """exp(x) via bare v_exp_f32 (no underflow guard)."""
+    """exp(x) via exp2(x * log2(e)) using the LLVM intrinsic."""
     log2e = arith.constant(_LOG2E, type=T.f32)
-    return _amdgcn_exp2_f32(arith.mulf(x, log2e))
+    return _llvm_exp2_f32(arith.mulf(x, log2e))
 
 
 def _mfma_bf16_16x16x32(a_bf16x8, b_bf16x8, acc_f32x4):
@@ -467,7 +467,7 @@ def compile_chunk_gated_delta_h(
 
                 vn_frags.append(arith.subf(u_f32, bv_val))
 
-            # ── 2b. Store v_new (pre-gating) — branchless with safe addressing ──
+            # ── 2b. Store v_new (pre-gating) for output ──
             if SAVE_NEW_VALUE:
                 for nr in range_constexpr(N_REPEAT):
                     vn_val = vn_frags[nr]
@@ -475,11 +475,13 @@ def compile_chunk_gated_delta_h(
                     for elem_i in range_constexpr(4):
                         vn_bt_row = i_t_i32 * fx.Int32(BT) + wid * fx.Int32(16) + lane_m_base * fx.Int32(4) + fx.Int32(elem_i)
                         vn_in_bounds = arith.cmpi(arith.CmpIPredicate.slt, vn_bt_row, T_local)
-                        safe_vn_row = arith.select(vn_in_bounds, vn_bt_row, fx.Int32(0))
-                        f32_v = vector.extract(vn_val, static_position=[elem_i], dynamic_position=[])
-                        bf16_v = arith.trunc_f(T.bf16, f32_v)
-                        vn_off = vn_base + safe_vn_row * fx.Int32(V) + vn_col
-                        vn_[fx.Index(vn_off)] = bf16_v
+                        _if_vn = scf.IfOp(vn_in_bounds)
+                        with ir.InsertionPoint(_if_vn.then_block):
+                            f32_v = vector.extract(vn_val, static_position=[elem_i], dynamic_position=[])
+                            bf16_v = arith.trunc_f(T.bf16, f32_v)
+                            vn_off = vn_base + vn_bt_row * fx.Int32(V) + vn_col
+                            vn_[fx.Index(vn_off)] = bf16_v
+                            scf.YieldOp([])
 
             # ── 3. Gating — g values prefetched before MFMA ──
             if USE_G:
