@@ -26,7 +26,7 @@ pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
 
 from flydsl.runtime.device import get_rocm_arch
 from kernels.hgemm_splitk_gfx1250 import compile_hgemm_splitk_gfx1250, hgemm_splitk_gfx1250_
-from tests.test_common import verify_output
+from tests.test_common import run_perftest, verify_output
 
 
 if not torch.cuda.is_available():
@@ -190,8 +190,133 @@ def test_hgemm_splitk_gfx1250_buffer_store(in_dtype):
     )
 
 
+DEFAULT_BENCH_ITERS = 50
+DEFAULT_BENCH_WARMUP = 3
+
+
+def bench_hgemm_splitk_gfx1250(
+    in_dtype, M, N, K, tile_m, tile_n, tile_k, SPLIT_K, num_buffers,
+    m_warp=2, n_warp=4, l2_prefetch_distance=2,
+    out_dtype=None, use_tdm_store=True, inst_prefetch=False,
+    bench_iters=DEFAULT_BENCH_ITERS, bench_warmup=DEFAULT_BENCH_WARMUP,
+):
+    """Split-K HGEMM benchmark for gfx1250 — reports TFLOPS and BW."""
+    arch = str(get_rocm_arch())
+    if arch != "gfx1250":
+        print(f"Skipped: WMMA requires gfx1250, got {arch}")
+        return
+
+    assert K % SPLIT_K == 0, f"K={K} must be divisible by SPLIT_K={SPLIT_K}"
+    ks = K // SPLIT_K
+
+    num_k_tiles = ks // tile_k
+    if num_k_tiles < num_buffers:
+        print(f"Skipped: {num_buffers}-buffer requires num_k_tiles >= {num_buffers}, got {num_k_tiles}")
+        return
+
+    lds_pad = 8
+    elem_bytes = 2
+    a_buf = tile_m * (tile_k + lds_pad) * elem_bytes
+    b_buf = tile_k * (tile_n + lds_pad) * elem_bytes
+    total_lds = (a_buf + b_buf) * num_buffers
+    if total_lds > 327680:
+        print(f"Skipped: LDS budget exceeded: {total_lds} > 327680")
+        return
+
+    if SPLIT_K > 1:
+        use_tdm_store = False
+
+    _eff_out = out_dtype or ("f16" if in_dtype == "fp16" else "bf16")
+    _out_torch = {"f16": torch.float16, "bf16": torch.bfloat16, "f32": torch.float32}[_eff_out]
+    torch_dtype = torch.float16 if in_dtype == "fp16" else torch.bfloat16
+    torch.manual_seed(0)
+
+    mpad = (M + tile_m - 1) // tile_m * tile_m
+    npad = (N + tile_n - 1) // tile_n * tile_n
+
+    print(
+        f"Benchmarking Split-K HGEMM: M={M}, N={N}, K={K}, "
+        f"dtype={in_dtype}, out={_eff_out}, SPLIT_K={SPLIT_K}, bufs={num_buffers}, "
+        f"tdm_store={use_tdm_store}, iters={bench_iters}, warmup={bench_warmup}"
+    )
+
+    a = torch.randn((M, K), dtype=torch_dtype, device='cpu').cuda()
+    b = torch.randn((K, N), dtype=torch_dtype, device='cpu').cuda()
+
+    a_pad = torch.zeros((mpad, K), dtype=torch_dtype, device='cpu').cuda()
+    b_pad = torch.zeros((K, npad), dtype=torch_dtype, device='cpu').cuda()
+    a_pad[:M, :] = a
+    b_pad[:, :N] = b
+
+    c_pad = torch.zeros((mpad, npad), dtype=_out_torch, device='cpu').cuda()
+
+    semaphore = torch.zeros(
+        (3 * SPLIT_K_COUNTER_MAX_LEN,), dtype=torch.int32, device='cuda')
+    signal_state = 0
+
+    if SPLIT_K > 1:
+        bm = (mpad + tile_m - 1) // tile_m
+        bn = npad // tile_n
+        if bm * bn > SPLIT_K_COUNTER_MAX_LEN:
+            print(f"Skipped: Grid {bm}x{bn} exceeds SPLIT_K_COUNTER_MAX_LEN={SPLIT_K_COUNTER_MAX_LEN}")
+            return
+
+    launch_fn = compile_hgemm_splitk_gfx1250(
+        N=npad, K=K,
+        tile_m=tile_m, tile_n=tile_n, tile_k=tile_k,
+        SPLIT_K=SPLIT_K,
+        m_warp=m_warp, n_warp=n_warp, in_dtype=in_dtype,
+        out_dtype=out_dtype,
+        num_buffers=num_buffers,
+        l2_prefetch_distance=l2_prefetch_distance,
+        use_tdm_store=use_tdm_store,
+        inst_prefetch=inst_prefetch,
+    )
+
+    c_flat = c_pad.contiguous().view(-1)
+    a_flat = a_pad.contiguous().view(-1)
+    b_flat = b_pad.contiguous().view(-1)
+    stream = torch.cuda.current_stream()
+
+    def run_kernel():
+        launch_fn(c_flat, a_flat, b_flat, mpad, npad, semaphore, signal_state, stream)
+
+    # Warmup
+    for _ in range(bench_warmup):
+        run_kernel()
+    torch.cuda.synchronize()
+
+    # Timed iterations
+    start_event = torch.cuda.Event(enable_timing=True)
+    end_event = torch.cuda.Event(enable_timing=True)
+    start_event.record()
+    for _ in range(bench_iters):
+        run_kernel()
+    end_event.record()
+    end_event.synchronize()
+    us = start_event.elapsed_time(end_event) * 1000 / bench_iters  # ms -> us
+    torch.cuda.synchronize()
+
+    # Correctness check
+    ref = torch.mm(a.cpu().to(torch.float32), b.cpu().to(torch.float32))
+    rtol = 0.1
+    atol = 0.1
+    correct = verify_output(c_pad[:M, :N].cpu().to(torch.float32), ref, rtol=rtol, atol=atol)
+
+    # TFLOPS and BW
+    flops = 2 * M * N * K
+    bytes_moved = (M * K + K * N) * elem_bytes + M * N * 2  # A + B reads + C write
+    tflops = flops / (us / 1e6) / 1e12
+    tbps = bytes_moved / 1e12 / (us / 1e6)
+
+    status = "PASSED" if correct else "FAILED"
+    print(
+        f"[flyc] {status} | {us:.1f} us, {tflops:.2f} TFLOPS, BW: {tbps:.3f} TB/s"
+    )
+
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="gfx1250 Split-K HGEMM test")
+    parser = argparse.ArgumentParser(description="gfx1250 Split-K HGEMM test/benchmark")
     parser.add_argument("--dtype", type=str, default="fp16", choices=["fp16", "bf16"])
     parser.add_argument("-M", type=int, default=256)
     parser.add_argument("-N", type=int, default=256)
@@ -201,19 +326,26 @@ if __name__ == "__main__":
     parser.add_argument("--tile-k", type=int, default=128)
     parser.add_argument("--split-k", type=int, default=1)
     parser.add_argument("--num-buffers", type=int, default=2)
+    parser.add_argument("--m-warp", type=int, default=2)
+    parser.add_argument("--n-warp", type=int, default=4)
     parser.add_argument("--no-tdm-store", action="store_true", default=False)
     parser.add_argument("--inst-prefetch", action="store_true", default=False)
+    parser.add_argument("--num-iters", type=int, default=DEFAULT_BENCH_ITERS)
+    parser.add_argument("--num-warmup", type=int, default=DEFAULT_BENCH_WARMUP)
     args = parser.parse_args()
     torch.set_default_device("cuda")
     try:
-        test_hgemm_splitk_gfx1250(
+        bench_hgemm_splitk_gfx1250(
             args.dtype,
             M=args.M, N=args.N, K=args.K,
             tile_m=args.tile_m, tile_n=args.tile_n, tile_k=args.tile_k,
             SPLIT_K=args.split_k,
             num_buffers=args.num_buffers,
+            m_warp=args.m_warp, n_warp=args.n_warp,
             use_tdm_store=not args.no_tdm_store,
             inst_prefetch=args.inst_prefetch,
+            bench_iters=args.num_iters,
+            bench_warmup=args.num_warmup,
         )
     except pytest.skip.Exception as e:
         print(f"Skipped: {e}")
