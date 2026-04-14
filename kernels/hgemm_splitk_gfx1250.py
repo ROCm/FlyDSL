@@ -584,10 +584,13 @@ def compile_hgemm_splitk_gfx1250(
                 next_b_info=next_b_info)
 
         def compute_tile(accs_in, lds_a_idx, lds_b_idx,
-                         emit_filler=None, mid_compute_callback=None):
+                         emit_filler=None, mid_compute_callback=None,
+                         fence_wait_fn=None):
             current_accs = list(accs_in)
             a_buf, a_bases = _precompute_a_lane_bases(lds_a_idx)
             b_buf, b_bases = _precompute_b_lane_bases(lds_b_idx)
+            if fence_wait_fn is not None:
+                fence_wait_fn()
 
             if k_wmma_steps == 1:
                 b_frags = _load_b_frags(b_buf, b_bases, 0)
@@ -809,7 +812,6 @@ def compile_hgemm_splitk_gfx1250(
                     pipeline_fence_signal(
                         outstanding=_fence_outstanding,
                         use_cluster=False)
-                    pipeline_fence_wait(use_cluster=False)
 
                     addr_boxes = [[cur_lo_a], [cur_lo_b]]
 
@@ -833,12 +835,16 @@ def compile_hgemm_splitk_gfx1250(
                         _ab[1][0] = arith.addi(_ab[1][0], adv_b_i32)
                         _l2_prefetch(_k_off)
 
+                    def _fence_wait():
+                        pipeline_fence_wait(use_cluster=False)
+
                     rocdl.sched_barrier(0)
                     accs_in = compute_tile(
                         accs_in,
                         stages_a_idx[buf_idx],
                         stages_b_idx[buf_idx],
-                        mid_compute_callback=_mid_tdm)
+                        mid_compute_callback=_mid_tdm,
+                        fence_wait_fn=_fence_wait)
                     cur_lo_a = addr_boxes[0][0]
                     cur_lo_b = addr_boxes[1][0]
                     hot_loop_scheduler()
