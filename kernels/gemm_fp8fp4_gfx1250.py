@@ -193,8 +193,22 @@ def compile_mxscale_gemm(
     _scale_guard_bytes = 16
     lds_a_scale_bytes = tile_m * scale_k_per_tile + _scale_guard_bytes
     lds_b_scale_bytes = tile_n * scale_k_per_tile + _scale_guard_bytes
-    interleaved_scale_cols_a = wmma_m_rep * scale_k_per_tile
-    interleaved_scale_cols_b = b_scale_load_rep * scale_k_per_tile
+
+    _MIN_TDM_DIM0_BYTES = 256
+
+    def _scale_tdm_group(total_reps, warp_reps):
+        g = min(total_reps, max(warp_reps, _MIN_TDM_DIM0_BYTES // scale_k_per_tile))
+        if g % warp_reps != 0:
+            g = warp_reps
+        return g
+
+    _as_total_m_reps = tile_m // WMMA_M
+    as_tdm_group_m = _scale_tdm_group(_as_total_m_reps, wmma_m_rep)
+    interleaved_scale_cols_a = as_tdm_group_m * scale_k_per_tile
+
+    _bs_total_n_reps = tile_n // WMMA_M
+    bs_tdm_group_n = _scale_tdm_group(_bs_total_n_reps, b_scale_load_rep)
+    interleaved_scale_cols_b = bs_tdm_group_n * scale_k_per_tile
 
     def _align_up(value: int, align: int) -> int:
         if value % align == 0:
@@ -441,14 +455,15 @@ def compile_mxscale_gemm(
 
         def make_desc_as(memref, k_base):
             k_scale_off = k_base / arith.index(SCALE_BLOCK)
-            outer_off = blk_m / arith.index(wmma_m_rep)
-            inner_off = k_scale_off * arith.index(wmma_m_rep)
+            outer_off = blk_m / arith.index(as_tdm_group_m)
+            inner_off = k_scale_off * arith.index(as_tdm_group_m)
+            _as_tdm_outer = WMMA_M * _as_total_m_reps // as_tdm_group_m
             return tdm_ops.make_tensor_descriptor_2d(
                 global_ptr=arg_a_scale, lds_memref=memref,
                 global_offset=(outer_off, inner_off),
-                tensor_shape=(WMMA_M * m_warp, interleaved_scale_cols_a),
-                strides=(wmma_m_rep * K_scale, 1),
-                tile_shape=(WMMA_M * m_warp, interleaved_scale_cols_a),
+                tensor_shape=(_as_tdm_outer, interleaved_scale_cols_a),
+                strides=(as_tdm_group_m * K_scale, 1),
+                tile_shape=(_as_tdm_outer, interleaved_scale_cols_a),
                 elem_bytes=1,
                 pad_interval=0, pad_amount=0,
                 num_warps=tdm_desc_num_warps,
@@ -457,14 +472,15 @@ def compile_mxscale_gemm(
 
         def make_desc_bs(memref, k_base):
             k_scale_off = k_base / arith.index(SCALE_BLOCK)
-            outer_off = blk_n / arith.index(b_scale_load_rep)
-            inner_off = k_scale_off * arith.index(b_scale_load_rep)
+            outer_off = blk_n / arith.index(bs_tdm_group_n)
+            inner_off = k_scale_off * arith.index(bs_tdm_group_n)
+            _bs_tdm_outer = WMMA_M * _bs_total_n_reps // bs_tdm_group_n
             return tdm_ops.make_tensor_descriptor_2d(
                 global_ptr=arg_b_scale, lds_memref=memref,
                 global_offset=(outer_off, inner_off),
-                tensor_shape=(WMMA_M * n_warp, interleaved_scale_cols_b),
-                strides=(b_scale_load_rep * K_scale, 1),
-                tile_shape=(WMMA_M * n_warp, interleaved_scale_cols_b),
+                tensor_shape=(_bs_tdm_outer, interleaved_scale_cols_b),
+                strides=(bs_tdm_group_n * K_scale, 1),
+                tile_shape=(_bs_tdm_outer, interleaved_scale_cols_b),
                 elem_bytes=1,
                 pad_interval=0, pad_amount=0,
                 num_warps=tdm_desc_num_warps,
@@ -607,22 +623,38 @@ def compile_mxscale_gemm(
                 return vector.shuffle(v01, v23, list(range(16)))
 
         def _precompute_scale_lane_bases(lds_ptr, warp_base, reps,
-                                         interleaved_cols):
-            """Precompute scale lane bases (byte offsets)."""
-            warp_lds_row = warp_base / arith.index(reps) + lane16
-            base = warp_lds_row * arith.index(interleaved_cols)
+                                         interleaved_cols, tdm_group=0):
+            """Precompute scale lane bases (byte offsets).
+
+            When *tdm_group* > *reps*, the preshuffle packs
+            tdm_group WMMA reps per output row to widen TDM dim0
+            for Direct Copy.  Each wave reads only its own
+            *reps*-wide slice within the wider row.
+            """
+            if tdm_group > reps:
+                _elems_per_scale = WMMA_M // SCALES_PER_WMMA
+                warp_rep_off = warp_base / arith.index(_elems_per_scale)
+                base = lane16 * arith.index(interleaved_cols) + warp_rep_off
+            else:
+                warp_lds_row = warp_base / arith.index(reps) + lane16
+                base = warp_lds_row * arith.index(interleaved_cols)
             if is_fp4 or is_a8w4:
-                # FP4/A8W4: always add lane_kgrp offset (no opsel on BScale)
                 base = base + lane_kgrp * arith.index(SCALES_PER_WMMA)
             else:
-                # FP8: conditional on opsel
                 if use_scale_opsel:
                     base = base + lane_kgrp * arith.index(SCALES_PER_WMMA)
             return lds_ptr, [base]
 
-        def load_scale_b128(lds_buffer, scale_base, reps, ks=0):
-            """Load all wmma_rep scales via ds_load_b128(s) for K-subtile *ks*."""
-            ks_byte_off = ks * reps * SCALES_PER_WMMA
+        def load_scale_b128(lds_buffer, scale_base, reps, ks=0,
+                            ks_group=0):
+            """Load all wmma_rep scales via ds_load_b128(s) for K-subtile *ks*.
+
+            When *ks_group* > 0 the LDS row packs ks_group reps
+            per K-subtile, so the ks stride is ks_group * SCALES_PER_WMMA
+            instead of reps * SCALES_PER_WMMA.
+            """
+            _ks_reps = ks_group if ks_group > 0 else reps
+            ks_byte_off = ks * _ks_reps * SCALES_PER_WMMA
             eff_base = scale_base if ks_byte_off == 0 \
                 else scale_base + arith.index(ks_byte_off)
             num_loads = (reps + 3) // 4
@@ -638,9 +670,11 @@ def compile_mxscale_gemm(
             return results
 
         def load_scale_slice_b128(lds_buffer, scale_base, full_reps,
-                                  rep_start, rep_count, ks=0):
+                                  rep_start, rep_count, ks=0,
+                                  ks_group=0):
             """Load a contiguous slice of packed scale VGPRs for one K-subtile."""
-            ks_byte_off = (ks * full_reps + rep_start) * SCALES_PER_WMMA
+            _ks_reps = ks_group if ks_group > 0 else full_reps
+            ks_byte_off = (ks * _ks_reps + rep_start) * SCALES_PER_WMMA
             eff_base = scale_base if ks_byte_off == 0 \
                 else scale_base + arith.index(ks_byte_off)
             num_loads = (rep_count + 3) // 4
@@ -661,8 +695,11 @@ def compile_mxscale_gemm(
             b_frags = [load_b_frag(b_buf, b_bases, wn, ks)
                        for wn in range_constexpr(wmma_n_rep)]
             b_scales_all = load_scale_b128(bs_buf, bs_bases[0],
-                                           b_scale_load_rep, ks)
-            a_scales_all = load_scale_b128(as_buf, as_bases[0], wmma_m_rep, ks)
+                                           b_scale_load_rep, ks,
+                                           ks_group=bs_tdm_group_n)
+            a_scales_all = load_scale_b128(as_buf, as_bases[0],
+                                           wmma_m_rep, ks,
+                                           ks_group=as_tdm_group_m)
             if is_fp4:
                 # FP4 32x16: scaleAType=0 fixed (no op_sel on BScale)
                 b_scales = b_scales_all
@@ -790,9 +827,11 @@ def compile_mxscale_gemm(
             a_buf, a_bases = _precompute_a_lane_bases(lds_a)
             b_buf, b_bases = _precompute_b_lane_bases(lds_b)
             as_buf, as_bases = _precompute_scale_lane_bases(
-                lds_as, warp_m_base, wmma_m_rep, interleaved_scale_cols_a)
+                lds_as, warp_m_base, wmma_m_rep, interleaved_scale_cols_a,
+                tdm_group=as_tdm_group_m)
             bs_buf, bs_bases = _precompute_scale_lane_bases(
-                lds_bs, warp_n_base, b_scale_load_rep, interleaved_scale_cols_b)
+                lds_bs, warp_n_base, b_scale_load_rep, interleaved_scale_cols_b,
+                tdm_group=bs_tdm_group_n)
 
             if k_wmma_steps == 1:
                 b_frags, b_scales, a_scales = _load_b_and_scales(
@@ -826,9 +865,11 @@ def compile_mxscale_gemm(
             a_buf, a_bases = _precompute_a_lane_bases(lds_a)
             b_buf, b_bases = _precompute_b_lane_bases(lds_b)
             as_buf, as_bases = _precompute_scale_lane_bases(
-                lds_as, warp_m_base, wmma_m_rep, interleaved_scale_cols_a)
+                lds_as, warp_m_base, wmma_m_rep, interleaved_scale_cols_a,
+                tdm_group=as_tdm_group_m)
             bs_buf, bs_bases = _precompute_scale_lane_bases(
-                lds_bs, warp_n_base, b_scale_load_rep, interleaved_scale_cols_b)
+                lds_bs, warp_n_base, b_scale_load_rep, interleaved_scale_cols_b,
+                tdm_group=bs_tdm_group_n)
             _b_half_scale_loads = (_bank_half_b_scale_rep + 3) // 4
 
             def _fp4_get_a_scale_and_opsel(a_scales_all, wm_idx):
@@ -853,7 +894,8 @@ def compile_mxscale_gemm(
                 b_scales = load_scale_slice_b128(
                     bs_buf, bs_bases[0],
                     b_scale_load_rep, rep_start,
-                    _bank_half_b_scale_rep, ks)
+                    _bank_half_b_scale_rep, ks,
+                    ks_group=bs_tdm_group_n)
                 return b_frags, b_scales
 
             def _emit_group_rows(group_base, wm_base, a_frags, b_frags, a_scales,
@@ -894,7 +936,8 @@ def compile_mxscale_gemm(
             for ks in range_constexpr(k_wmma_steps):
                 is_last_ks = ks == k_wmma_steps - 1
                 a_scales_all = load_scale_b128(as_buf, as_bases[0],
-                                               wmma_m_rep, ks)
+                                               wmma_m_rep, ks,
+                                               ks_group=as_tdm_group_m)
 
                 a_top_frags = _load_a_group(0, _bank_half_wm, ks)
                 a_bottom_frags = _load_a_group(_bank_half_wm, _bank_half_wm, ks)
@@ -1250,8 +1293,8 @@ def compile_mxscale_gemm(
 
         adv_a_i32 = arith.constant(tile_k // PACK_FACTOR_A, type=T.i32)
         adv_b_i32 = arith.constant(packed_tile_k_b * 16, type=T.i32)
-        adv_as_i32 = arith.constant(tile_k // SCALE_BLOCK * wmma_m_rep, type=T.i32)
-        adv_bs_i32 = arith.constant(tile_k // SCALE_BLOCK * b_scale_load_rep, type=T.i32)
+        adv_as_i32 = arith.constant(tile_k // SCALE_BLOCK * as_tdm_group_m, type=T.i32)
+        adv_bs_i32 = arith.constant(tile_k // SCALE_BLOCK * bs_tdm_group_n, type=T.i32)
 
         pred_const = arith.constant(1, type=T.i32)
 

@@ -33,6 +33,19 @@ if not torch.cuda.is_available():
 
 
 SCALE_BLOCK = 32
+WMMA_DIM = 16
+_MIN_TDM_DIM0_BYTES = 256
+
+
+def _compute_scale_preshuffle_tile(tile_dim, tile_k, n_warps):
+    """Compute scale preshuffle warp_tile for TDM Direct Copy (A or B)."""
+    skt = tile_k // SCALE_BLOCK
+    warp_reps = tile_dim // n_warps // WMMA_DIM
+    total_reps = tile_dim // WMMA_DIM
+    tdm_group = min(total_reps, max(warp_reps, _MIN_TDM_DIM0_BYTES // skt))
+    if tdm_group % warp_reps != 0:
+        tdm_group = warp_reps
+    return tdm_group * WMMA_DIM
 
 
 def preshuffle_e8m0_scale(scale: torch.Tensor, warp_tile: int,
@@ -276,10 +289,10 @@ def _run_mxscale_gemm_test(
 
     # Preshuffle scales
     skt = tile_k // SCALE_BLOCK
-    warp_tile_m = tile_m // m_warp
-    warp_tile_n = tile_n // n_warp
-    a_scale = preshuffle_e8m0_scale(a_scale, warp_tile_m, scale_k_per_tile=skt)
-    b_scale = preshuffle_e8m0_scale(b_scale, warp_tile_n, scale_k_per_tile=skt)
+    as_ps_tile = _compute_scale_preshuffle_tile(tile_m, tile_k, m_warp)
+    bs_ps_tile = _compute_scale_preshuffle_tile(tile_n, tile_k, n_warp)
+    a_scale = preshuffle_e8m0_scale(a_scale, as_ps_tile, scale_k_per_tile=skt)
+    b_scale = preshuffle_e8m0_scale(b_scale, bs_ps_tile, scale_k_per_tile=skt)
 
     # Preshuffle B data
     K_packed = padded_k // padded_shape["pack_b"]
@@ -644,8 +657,10 @@ def _run_benchmark(args):
     skt = tile_k // SCALE_BLOCK
     warp_tile_m = tile_m // args.m_warp
     warp_tile_n = tile_n // args.n_warp
-    a_scale = preshuffle_e8m0_scale(a_scale, warp_tile_m, scale_k_per_tile=skt)
-    b_scale = preshuffle_e8m0_scale(b_scale, warp_tile_n, scale_k_per_tile=skt)
+    as_ps_tile = _compute_scale_preshuffle_tile(tile_m, tile_k, args.m_warp)
+    bs_ps_tile = _compute_scale_preshuffle_tile(tile_n, tile_k, args.n_warp)
+    a_scale = preshuffle_e8m0_scale(a_scale, as_ps_tile, scale_k_per_tile=skt)
+    b_scale = preshuffle_e8m0_scale(b_scale, bs_ps_tile, scale_k_per_tile=skt)
 
     K_packed = padded_k // PACK_B
     b = fp4_utils.preshuffle_b_16x16(b, padded_n, K_packed)
