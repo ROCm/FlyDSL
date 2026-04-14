@@ -645,13 +645,14 @@ def compile_mxscale_gemm(
                     base = base + lane_kgrp * arith.index(SCALES_PER_WMMA)
             return lds_ptr, [base]
 
-        def load_scale_b128(lds_buffer, scale_base, reps, ks=0,
-                            ks_group=0):
-            """Load all wmma_rep scales via ds_load_b128(s) for K-subtile *ks*.
+        def issue_scale_loads_raw(lds_buffer, scale_base, reps, ks=0,
+                                  ks_group=0):
+            """Issue ds_load_b128 for scale data WITHOUT extracting.
 
-            When *ks_group* > 0 the LDS row packs ks_group reps
-            per K-subtile, so the ks stride is ks_group * SCALES_PER_WMMA
-            instead of reps * SCALES_PER_WMMA.
+            Returns raw vec4 values that must later be passed to
+            extract_scales_from_raw().  Splitting load from extract
+            lets the caller insert independent work (A-frag loads)
+            in between to hide LDS latency.
             """
             _ks_reps = ks_group if ks_group > 0 else reps
             ks_byte_off = ks * _ks_reps * SCALES_PER_WMMA
@@ -662,12 +663,28 @@ def compile_mxscale_gemm(
             for ld in range_constexpr(num_loads):
                 off = eff_base if ld == 0 else eff_base + arith.index(ld * 16)
                 vecs.append(lds_load_b128_raw(lds_buffer, off))
+            return vecs
+
+        def extract_scales_from_raw(raw_vecs, reps):
+            """Extract individual scale values from raw ds_load_b128 vec4s."""
             results = []
             for i in range_constexpr(reps):
-                vi = vector.extract(vecs[i // 4],
+                vi = vector.extract(raw_vecs[i // 4],
                                     static_position=[i % 4], dynamic_position=[])
                 results.append(vi)
             return results
+
+        def load_scale_b128(lds_buffer, scale_base, reps, ks=0,
+                            ks_group=0):
+            """Load all wmma_rep scales via ds_load_b128(s) for K-subtile *ks*.
+
+            When *ks_group* > 0 the LDS row packs ks_group reps
+            per K-subtile, so the ks stride is ks_group * SCALES_PER_WMMA
+            instead of reps * SCALES_PER_WMMA.
+            """
+            raw = issue_scale_loads_raw(lds_buffer, scale_base, reps,
+                                        ks, ks_group)
+            return extract_scales_from_raw(raw, reps)
 
         def load_scale_slice_b128(lds_buffer, scale_base, full_reps,
                                   rep_start, rep_count, ks=0,
@@ -689,33 +706,42 @@ def compile_mxscale_gemm(
                 results.append(vi)
             return results
 
-        def _load_b_and_scales(b_buf, b_bases, bs_buf, bs_bases,
-                               as_buf, as_bases, ks):
-            """Load B frags + all scales for one K-subtile."""
+        def _issue_b_and_scale_loads(b_buf, b_bases, bs_buf, bs_bases,
+                                     as_buf, as_bases, ks):
+            """Load B frags + issue scale ds_loads (raw, no extract).
+
+            Returns (b_frags, bs_raw_vecs, as_raw_vecs).  The caller
+            must pass the raw vecs through _extract_and_filter_scales()
+            before consuming them in WMMA.
+            """
             b_frags = [load_b_frag(b_buf, b_bases, wn, ks)
                        for wn in range_constexpr(wmma_n_rep)]
-            b_scales_all = load_scale_b128(bs_buf, bs_bases[0],
+            bs_raw = issue_scale_loads_raw(bs_buf, bs_bases[0],
                                            b_scale_load_rep, ks,
                                            ks_group=bs_tdm_group_n)
-            a_scales_all = load_scale_b128(as_buf, as_bases[0],
+            as_raw = issue_scale_loads_raw(as_buf, as_bases[0],
                                            wmma_m_rep, ks,
                                            ks_group=as_tdm_group_m)
+            return b_frags, bs_raw, as_raw
+
+        def _extract_and_filter_scales(bs_raw, as_raw):
+            """Extract + filter scales from raw LDS vec4 values."""
+            b_scales_all = extract_scales_from_raw(bs_raw, b_scale_load_rep)
+            a_scales_all = extract_scales_from_raw(as_raw, wmma_m_rep)
             if is_fp4:
-                # FP4 32x16: scaleAType=0 fixed (no op_sel on BScale)
                 b_scales = b_scales_all
                 if use_scale_opsel:
                     a_scales = a_scales_all[::2]
                 else:
                     a_scales = a_scales_all
             else:
-                # FP8/A8W4 16x16: both scales support op_sel
                 if use_scale_opsel:
                     b_scales = b_scales_all[::2]
                     a_scales = a_scales_all[::2]
                 else:
                     b_scales = b_scales_all
                     a_scales = a_scales_all
-            return b_frags, b_scales, a_scales
+            return b_scales, a_scales
 
         def _emit_wmma(accs, wm, wn, a_frag, b_frags, a_scales, b_scales):
             """Emit one WMMA instruction (format-specific)."""
@@ -752,19 +778,25 @@ def compile_mxscale_gemm(
                     scaleAType=b_opsel, scaleBType=a_opsel,
                 )
 
-        def _a_streaming_compute(accs, a_buf, a_bases, b_frags, b_scales,
-                                 a_scales, ks, emit_filler=None,
+        def _a_streaming_compute(accs, a_buf, a_bases, b_frags, bs_raw,
+                                 as_raw, ks, emit_filler=None,
                                  next_bs_info=None,
                                  mid_compute_callback=None):
-            """Half-based A-streaming with zigzag wn ordering.
+            """Half-based A-streaming with deferred scale extraction.
 
-            When *next_bs_info* is provided, the next K-subtile's B+scale
-            loads are issued BEFORE the s_wait_dscnt so they overlap with
-            the current WMMA execution (partial drain pattern).
+            Scale ds_loads are issued in _issue_b_and_scale_loads but
+            the vector.extract is deferred until AFTER A-frag loads,
+            giving the LDS pipeline time to retire scale data before
+            the extract forces a wait.
             """
             next_result = None
             _front_wm = (wmma_m_rep + 1) // 2
             _back_wm = wmma_m_rep - _front_wm
+
+            a_frags_front = [load_a_frag(a_buf, a_bases[wm], ks)
+                             for wm in range_constexpr(_front_wm)]
+
+            b_scales, a_scales = _extract_and_filter_scales(bs_raw, as_raw)
 
             def _emit_rows(start_wm, a_frags):
                 for frag_i in range_constexpr(len(a_frags)):
@@ -778,9 +810,6 @@ def compile_mxscale_gemm(
                         _emit_wmma(accs, wm, wn, a_frags[frag_i], b_frags,
                                    a_scales, b_scales)
 
-            a_frags_front = [load_a_frag(a_buf, a_bases[wm], ks)
-                             for wm in range_constexpr(_front_wm)]
-
             _use_partial_drain = (
                 next_bs_info is not None
                 and _front_wm * wmma_n_rep >= 4
@@ -789,7 +818,7 @@ def compile_mxscale_gemm(
             if _use_partial_drain:
                 nb_buf, nb_bases, nbs_buf, nbs_bases, \
                     nas_buf, nas_bases, n_ks = next_bs_info
-                next_result = _load_b_and_scales(
+                next_result = _issue_b_and_scale_loads(
                     nb_buf, nb_bases, nbs_buf, nbs_bases,
                     nas_buf, nas_bases, n_ks)
                 rocdl.s_wait_dscnt(_bs_ds_loads)
@@ -814,7 +843,7 @@ def compile_mxscale_gemm(
             if next_bs_info is not None:
                 nb_buf, nb_bases, nbs_buf, nbs_bases, \
                     nas_buf, nas_bases, n_ks = next_bs_info
-                next_result = _load_b_and_scales(
+                next_result = _issue_b_and_scale_loads(
                     nb_buf, nb_bases, nbs_buf, nbs_bases,
                     nas_buf, nas_bases, n_ks)
                 return accs, next_result
@@ -834,26 +863,29 @@ def compile_mxscale_gemm(
                 tdm_group=bs_tdm_group_n)
 
             if k_wmma_steps == 1:
-                b_frags, b_scales, a_scales = _load_b_and_scales(
+                b_frags, bs_raw, as_raw = _issue_b_and_scale_loads(
                     b_buf, b_bases, bs_buf, bs_bases, as_buf, as_bases, 0)
                 current_accs = _a_streaming_compute(
-                    current_accs, a_buf, a_bases, b_frags, b_scales,
-                    a_scales, 0, emit_filler=emit_filler,
+                    current_accs, a_buf, a_bases, b_frags, bs_raw,
+                    as_raw, 0, emit_filler=emit_filler,
                     mid_compute_callback=mid_compute_callback)
             else:
-                prev_b, prev_bs, prev_as = _load_b_and_scales(
-                    b_buf, b_bases, bs_buf, bs_bases, as_buf, as_bases, 0)
+                prev_b, prev_bs_raw, prev_as_raw = \
+                    _issue_b_and_scale_loads(
+                        b_buf, b_bases, bs_buf, bs_bases,
+                        as_buf, as_bases, 0)
                 for ks in range_constexpr(k_wmma_steps - 1):
                     _mid_cb = mid_compute_callback if ks == 0 else None
-                    current_accs, (prev_b, prev_bs, prev_as) = \
+                    current_accs, (prev_b, prev_bs_raw, prev_as_raw) = \
                         _a_streaming_compute(
-                            current_accs, a_buf, a_bases, prev_b, prev_bs,
-                            prev_as, ks,
+                            current_accs, a_buf, a_bases,
+                            prev_b, prev_bs_raw, prev_as_raw, ks,
                             next_bs_info=(b_buf, b_bases, bs_buf, bs_bases,
                                           as_buf, as_bases, ks + 1),
                             mid_compute_callback=_mid_cb)
                 current_accs = _a_streaming_compute(
-                    current_accs, a_buf, a_bases, prev_b, prev_bs, prev_as,
+                    current_accs, a_buf, a_bases,
+                    prev_b, prev_bs_raw, prev_as_raw,
                     k_wmma_steps - 1, emit_filler=emit_filler)
             return current_accs
 
