@@ -1030,7 +1030,7 @@ def compile_moe_gemm1(
     
                 # Prologue: prefetch tile0, store to LDS(cur), sync.
                 k0 = k_base_idx
-                x_regs0 = load_x_tile(k0)
+                x_regs0 = load_x_tile(k0, x_load_bytes)
                 b_gate_cur = load_b_tile(k0, n_blk_gate, n_intra_gate)
                 b_up_cur = load_b_tile(k0, n_blk_up, n_intra_up)
                 store_x_tile_to_lds(x_regs0, lds_base_cur, x_load_bytes)
@@ -1132,12 +1132,12 @@ def compile_moe_gemm1(
 
                     # ---- stage 0: prefetch+store ping, compute pong ----
                     next_k1 = k_iv + c_tile_k
-                    x_regs_ping = load_x_tile(next_k1)
+                    x_regs_ping = load_x_tile(next_k1, x_load_bytes)
                     _bg_ping = load_b_tile(next_k1, n_blk_gate, n_intra_gate)
                     _bu_ping = load_b_tile(next_k1, n_blk_up, n_intra_up)
 
                     _ag, _au, _ = compute_tile(_ag, _au, _bg, _bu, lds_base_pong, a0_prefetch=_a0pf)
-                    store_x_tile_to_lds(x_regs_ping, lds_base_ping)
+                    store_x_tile_to_lds(x_regs_ping, lds_base_ping, x_load_bytes)
                     hot_loop_scheduler()
                     gpu.barrier()
 
@@ -1145,12 +1145,12 @@ def compile_moe_gemm1(
 
                     # ---- stage 1: prefetch+store pong, compute ping ----
                     next_k2 = k_iv + c_tile_k + c_tile_k
-                    x_regs_pong = load_x_tile(next_k2)
+                    x_regs_pong = load_x_tile(next_k2, x_load_bytes)
                     _bg_next = load_b_tile(next_k2, n_blk_gate, n_intra_gate)
                     _bu_next = load_b_tile(next_k2, n_blk_up, n_intra_up)
 
                     _ag, _au, _ = compute_tile(_ag, _au, _bg_ping, _bu_ping, lds_base_ping, a0_prefetch=_a0pf_ping)
-                    store_x_tile_to_lds(x_regs_pong, lds_base_pong)
+                    store_x_tile_to_lds(x_regs_pong, lds_base_pong, x_load_bytes)
                     hot_loop_scheduler()
                     gpu.barrier()
 
@@ -1171,7 +1171,7 @@ def compile_moe_gemm1(
                     b_up_cur = _unflatten_b_tile(list(loop_results[_p_bu:_p_a0]))
                     a0_prefetch_pong = (loop_results[_p_a0], loop_results[_p_a0 + 1])
                 k_tail1 = k_base_idx + arith.index(_k_per_batch - tile_k)
-                x_regs_ping = load_x_tile(k_tail1)
+                x_regs_ping = load_x_tile(k_tail1, x_load_bytes)
                 b_gate_ping = load_b_tile(k_tail1, n_blk_gate, n_intra_gate)
                 b_up_ping = load_b_tile(k_tail1, n_blk_up, n_intra_up)
     
@@ -2696,22 +2696,22 @@ def compile_moe_gemm2(
                     k_iv = pair_iv * (c_tile_k_s2 + c_tile_k_s2)
 
                     next_k1 = k_iv + c_tile_k_s2
-                    x_regs_ping = load_x_tile(next_k1)
+                    x_regs_ping = load_x_tile(next_k1, x_load_bytes)
                     _bp = load_b_tile(next_k1)
 
                     _ac, _ = compute_tile(_ac, _bc, lds_base_pong, a0_prefetch=_a0)
-                    store_x_tile_to_lds(x_regs_ping, lds_base_ping)
+                    store_x_tile_to_lds(x_regs_ping, lds_base_ping, x_load_bytes)
                     hot_loop_scheduler()
                     gpu.barrier()
 
                     _a0p = lds_load_packs_k64(row_a_lds, col_offset_base_bytes, lds_base_ping)
 
                     next_k2 = k_iv + c_tile_k_s2 + c_tile_k_s2
-                    x_regs_pong = load_x_tile(next_k2)
+                    x_regs_pong = load_x_tile(next_k2, x_load_bytes)
                     _bn = load_b_tile(next_k2)
 
                     _ac, _ = compute_tile(_ac, _bp, lds_base_ping, a0_prefetch=_a0p)
-                    store_x_tile_to_lds(x_regs_pong, lds_base_pong)
+                    store_x_tile_to_lds(x_regs_pong, lds_base_pong, x_load_bytes)
                     hot_loop_scheduler()
                     gpu.barrier()
 
@@ -2739,7 +2739,7 @@ def compile_moe_gemm2(
                     b_ping = load_b_tile(k_tail1)
 
                     acc, _ = compute_tile(acc, b_cur, lds_base_pong, a0_prefetch=a0_prefetch_pong)
-                    store_x_tile_to_lds(x_regs_ping, lds_base_ping)
+                    store_x_tile_to_lds(x_regs_ping, lds_base_ping, x_load_bytes)
                     hot_loop_scheduler()
                     gpu.barrier()
 
