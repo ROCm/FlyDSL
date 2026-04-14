@@ -963,21 +963,19 @@ def compile_mxscale_gemm(
             return current_accs
 
         def hot_loop_scheduler():
-            _front_wm = (wmma_m_rep + 1) // 2
-            _back_wm = wmma_m_rep - _front_wm
-            _front_wmma = _front_wm * wmma_n_rep
-            _back_wmma = _back_wm * wmma_n_rep
+            _half_wm = wmma_m_rep // 2
+            _half_wmma = _half_wm * wmma_n_rep
             _b_loads_per_frag = 2 if is_a8w4 else 4
 
             for _ks in range_constexpr(k_wmma_steps):
                 if _ks == 0:
                     rocdl.sched_dsrd(wmma_n_rep * _b_loads_per_frag + 2
-                                     + _front_wm * DS_LOADS_PER_A_FRAG)
+                                     + _half_wm * DS_LOADS_PER_A_FRAG)
                 else:
-                    rocdl.sched_dsrd(_front_wm * DS_LOADS_PER_A_FRAG)
-                rocdl.sched_mfma(_front_wmma)
-                rocdl.sched_dsrd(_back_wm * DS_LOADS_PER_A_FRAG)
-                rocdl.sched_mfma(_back_wmma)
+                    rocdl.sched_dsrd(_half_wm * DS_LOADS_PER_A_FRAG)
+                rocdl.sched_mfma(_half_wmma)
+                rocdl.sched_dsrd(_half_wm * DS_LOADS_PER_A_FRAG)
+                rocdl.sched_mfma(_half_wmma)
                 if _ks < k_wmma_steps - 1:
                     rocdl.sched_dsrd(wmma_n_rep * _b_loads_per_frag + 2)
             rocdl.sched_barrier(0)

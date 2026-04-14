@@ -192,7 +192,6 @@ def _format_kernel_pad(M: int, N: int, K: int, padded_shape: dict[str, int]) -> 
     return f", kernel_pad={padded_dims}"
 
 
-
 def _run_mxscale_gemm_test(
     data_format, M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp,
     num_buffers, use_tdm_store, out_dtype,
@@ -641,7 +640,6 @@ def _run_benchmark(args):
 
     a, b, a_scale, b_scale = _pad_mxscale_inputs(
         a, b, a_scale, b_scale, padded_shape)
-
 
     skt = tile_k // SCALE_BLOCK
     warp_tile_m = tile_m // args.m_warp
