@@ -12,15 +12,6 @@ from .._mlir import ir
 from .._mlir.dialects import gpu
 from .._mlir.dialects import vector as _vector
 from .meta import traced_op
-from .utils.arith import (
-    ArithValue,
-    element_type,
-    fp_to_fp,
-    fp_to_int,
-    int_to_fp,
-    int_to_int,
-    _to_raw,
-)
 from .numeric import (
     BFloat16,
     Boolean,
@@ -51,6 +42,15 @@ from .numeric import (
     Uint64,
 )
 from .primitive import *
+from .utils.arith import (
+    ArithValue,
+    _to_raw,
+    element_type,
+    fp_to_fp,
+    fp_to_int,
+    int_to_fp,
+    int_to_int,
+)
 
 
 def _vec(n: int, elem: ir.Type) -> ir.Type:
@@ -330,12 +330,25 @@ class IntTuple(BuiltinDslType):
             raise ValueError("IntTuple is not a static leaf")
         return self.type.get_static_leaf_int
 
-    def to_py_value(self):
-        if not self.is_static:
-            raise ValueError("IntTuple is not static")
+    @traced_op
+    def to_py_value(self, loc=None, ip=None):
+        if self.is_static:
+            if self.is_leaf:
+                return self.get_static_leaf_int
+            return tuple(get_(self, i).to_py_value() for i in range(self.rank))
+        leaves = get_leaves(self, dynamic_only=True, loc=loc, ip=ip)
+        leaf_iter = iter(leaves)
+        return self._rebuild_py_value(leaf_iter)
+
+    def _rebuild_py_value(self, leaf_iter):
         if self.is_leaf:
-            return self.get_static_leaf_int
-        return tuple(get_(self, i).to_py_value() for i in range(self.rank))
+            if self.is_static:
+                return self.get_static_leaf_int
+            val = next(leaf_iter)
+            width = ir.IntegerType(val.type).width
+            wrapper = Int64 if width == 64 else Int32
+            return wrapper(val)
+        return tuple(IntTuple(get_(self, i))._rebuild_py_value(leaf_iter) for i in range(self.rank))
 
     @traced_op
     def __getitem__(self, mode, loc=None, ip=None):
@@ -841,6 +854,7 @@ class Tuple3D:
 # Vector — register vector with value semantics
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class ReductionOp(enum.Enum):
     ADD = "add"
     MUL = "mul"
@@ -849,8 +863,8 @@ class ReductionOp(enum.Enum):
 
 
 _REDUCE_KINDS = {
-    "add": (_vector.CombiningKind.ADD,  _vector.CombiningKind.ADD,  _vector.CombiningKind.ADD),
-    "mul": (_vector.CombiningKind.MUL,  _vector.CombiningKind.MUL,  _vector.CombiningKind.MUL),
+    "add": (_vector.CombiningKind.ADD, _vector.CombiningKind.ADD, _vector.CombiningKind.ADD),
+    "mul": (_vector.CombiningKind.MUL, _vector.CombiningKind.MUL, _vector.CombiningKind.MUL),
     "max": (_vector.CombiningKind.MAXNUMF, _vector.CombiningKind.MAXSI, _vector.CombiningKind.MAXUI),
     "min": (_vector.CombiningKind.MINIMUMF, _vector.CombiningKind.MINSI, _vector.CombiningKind.MINUI),
 }
@@ -932,8 +946,8 @@ class Vector(ArithValue):
         src_dtype = self._dtype
         if src_dtype is dtype:
             return self
-        src_float = getattr(src_dtype, 'is_float', False)
-        dst_float = getattr(dtype, 'is_float', False)
+        src_float = getattr(src_dtype, "is_float", False)
+        dst_float = getattr(dtype, "is_float", False)
         if src_float and dst_float:
             res = fp_to_fp(self, dtype.ir_type, loc=loc, ip=ip)
         elif src_float:
@@ -947,10 +961,9 @@ class Vector(ArithValue):
     def ir_value(self, *, loc=None, ip=None):
         return self
 
-    def reduce(self, op, init_val=None, reduction_profile=None,
-               *, fastmath=None, loc=None, ip=None):
+    def reduce(self, op, init_val=None, reduction_profile=None, *, fastmath=None, loc=None, ip=None):
         is_fp = self._dtype.is_float
-        signed = getattr(self._dtype, 'signed', True)
+        signed = getattr(self._dtype, "signed", True)
         kind = _resolve_combining_kind(op, is_fp, signed)
         et = element_type(self.type)
         kwargs = {}
@@ -965,9 +978,7 @@ class Vector(ArithValue):
 
     def __getitem__(self, idx):
         if isinstance(idx, int):
-            res = _vector.ExtractOp(
-                self, static_position=[idx], dynamic_position=[]
-            ).result
+            res = _vector.ExtractOp(self, static_position=[idx], dynamic_position=[]).result
             return self._dtype(res)
         raise TypeError(f"unsupported index type: {type(idx)}")
 
@@ -984,8 +995,7 @@ class Vector(ArithValue):
         return Vector(res, (len(mask),), self._dtype)
 
     @classmethod
-    def filled(cls, shape, fill_value, dtype: Type[Numeric],
-               *, loc=None, ip=None) -> "Vector":
+    def filled(cls, shape, fill_value, dtype: Type[Numeric], *, loc=None, ip=None) -> "Vector":
         shape = (shape,) if isinstance(shape, int) else tuple(shape)
         n = 1
         for s in shape:
@@ -997,20 +1007,17 @@ class Vector(ArithValue):
         else:
             raise ValueError(f"expected numeric fill_value, got {type(fill_value)}")
         vec_ty = ir.VectorType.get([n], dtype.ir_type)
-        val = _vector.broadcast(vec_ty, fill_value.ir_value(loc=loc, ip=ip),
-                                loc=loc, ip=ip)
+        val = _vector.broadcast(vec_ty, fill_value.ir_value(loc=loc, ip=ip), loc=loc, ip=ip)
         return cls(val, shape, dtype)
 
     @classmethod
-    def filled_like(cls, template: "Vector", fill_value, dtype=None,
-                    *, loc=None, ip=None) -> "Vector":
+    def filled_like(cls, template: "Vector", fill_value, dtype=None, *, loc=None, ip=None) -> "Vector":
         if dtype is None:
             dtype = template.dtype
         return cls.filled(template.shape, fill_value, dtype, loc=loc, ip=ip)
 
     @classmethod
-    def zeros_like(cls, template: "Vector", dtype=None,
-                   *, loc=None, ip=None) -> "Vector":
+    def zeros_like(cls, template: "Vector", dtype=None, *, loc=None, ip=None) -> "Vector":
         if dtype is None:
             dtype = template.dtype
         return cls.filled(template.shape, 0.0 if dtype.is_float else 0, dtype, loc=loc, ip=ip)

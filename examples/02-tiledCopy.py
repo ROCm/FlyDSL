@@ -30,11 +30,9 @@ def copy_kernel(
     thr_layout = fx.make_layout((4, 1), (1, 1))
     val_layout = fx.make_layout((1, 8), (1, 1))
     copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), fx.Float32)
-    layout_thr_val = fx.raked_product(thr_layout, val_layout)
+    tile_mn, tv_layout = fx.make_layout_tv(thr_layout, val_layout)
 
-    tile_mn = fx.make_tile(4, 8)
-
-    tiled_copy = fx.make_tiled_copy(copy_atom, layout_thr_val, tile_mn)
+    tiled_copy = fx.make_tiled_copy(copy_atom, tv_layout, tile_mn)
     thr_copy = tiled_copy.get_slice(tid)
 
     partition_src = thr_copy.partition_S(bA)

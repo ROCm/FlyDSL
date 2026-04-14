@@ -253,3 +253,35 @@ func.func @test_right_inverse() -> !fly.layout<(4,2):(2,1)> {
   %result = fly.right_inverse(%layout) : (!fly.layout<(2,4):(4,1)>) -> !fly.layout<(4,2):(2,1)>
   return %result : !fly.layout<(4,2):(2,1)>
 }
+
+// -----
+
+// === GetLeavesOp Lowering ===
+
+// dynamicOnly=false: all leaves returned, static as arith.constant, dynamic forwarded.
+// Mixed i32/i64 dynamic leaves.
+// CHECK-LABEL: @test_get_leaves_all
+// CHECK-SAME: (%[[X:.*]]: i32, %[[Y:.*]]: i64)
+func.func @test_get_leaves_all(%x: i32, %y: i64) -> (i32, i32, i64) {
+  %t = fly.make_int_tuple(%x, %y) : (i32, i64) -> !fly.int_tuple<(4, ?, ?{i64})>
+  // CHECK-NOT: fly.get_leaves
+  // CHECK-DAG: %[[C4:.*]] = arith.constant 4 : i32
+  // CHECK: return %[[C4]], %[[X]], %[[Y]]
+  %0:3 = fly.get_leaves(%t) : (!fly.int_tuple<(4, ?, ?{i64})>) -> (i32, i32, i64)
+  return %0#0, %0#1, %0#2 : i32, i32, i64
+}
+
+// -----
+
+// dynamicOnly=true: only dynamic leaves returned, static skipped.
+// Mixed i32/i64 dynamic leaves.
+// CHECK-LABEL: @test_get_leaves_dynamic_only
+// CHECK-SAME: (%[[X:.*]]: i32, %[[Y:.*]]: i64)
+func.func @test_get_leaves_dynamic_only(%x: i32, %y: i64) -> (i32, i64) {
+  %t = fly.make_int_tuple(%x, %y) : (i32, i64) -> !fly.int_tuple<(4, ?, ?{i64})>
+  // CHECK-NOT: fly.get_leaves
+  // CHECK-NOT: arith.constant
+  // CHECK: return %[[X]], %[[Y]]
+  %0:2 = fly.get_leaves(%t) {dynamicOnly = true} : (!fly.int_tuple<(4, ?, ?{i64})>) -> (i32, i64)
+  return %0#0, %0#1 : i32, i64
+}

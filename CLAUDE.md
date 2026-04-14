@@ -1,6 +1,6 @@
 # FlyDSL Project Guide
 
-FlyDSL (Flexible Layout Python DSL) — a Python DSL and MLIR-based compiler stack for authoring high-performance GPU kernels with explicit layouts and tiling on AMD GPUs (MI300X/MI350/MI450).
+FlyDSL (Flexible Layout Python DSL) — a Python DSL and MLIR-based compiler stack for authoring high-performance GPU kernels with explicit layouts and tiling on AMD GPUs (MI300X/MI350/MI355X/MI450).
 
 ## Repository Layout
 
@@ -59,9 +59,10 @@ FLYDSL_DUMP_IR=1 PYTHONPATH=./ python tests/kernels/test_pa.py # Dump MLIR IR at
 
 | Arch | Chips | Wave size | MMA | Key features |
 |---|---|---|---|---|
-| **CDNA3** | gfx942/gfx950 (MI300X) | 64 | MFMA | BufferCopy, preshuffle GEMM |
-| **RDNA** | gfx10xx/gfx11xx/gfx12xx | 32 | WMMA | RDNA-specific GEMM |
-| **gfx1250** | MI400 | 32 | WMMA | TDM ops, FP8/FP4 GEMM, multi-stage pipeline |
+| **CDNA3** | gfx942 (MI300X) | 64 | MFMA | BufferCopy, preshuffle GEMM |
+| **CDNA4** | gfx950 (MI350/MI355X) | 64 | MFMA | MFMA_SCALE, FP4, 160KB LDS |
+| **RDNA4** | gfx1201 (Radeon AI PRO R9700) | 32 | WMMA | RDNA-specific GEMM |
+| **gfx1250** | MI450 | 32 | WMMA | TDM ops, FP8/FP4 GEMM, multi-stage pipeline |
 
 ## Key Conventions & Pitfalls
 

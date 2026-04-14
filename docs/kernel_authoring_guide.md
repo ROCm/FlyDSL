@@ -415,7 +415,9 @@ with ir.InsertionPoint(comp_ctx.gpu_module_body):
 | Architecture | LDS per CU |
 |---|---|
 | `gfx942` (MI300X) | 64 KB |
-| `gfx950` (MI350) | 160 KB |
+| `gfx950` (MI350/MI355X) | 160 KB |
+| `gfx1201` (Radeon AI PRO R9700) | 64 KB |
+| `gfx1250` (MI450) | 320 KB |
 
 ---
 

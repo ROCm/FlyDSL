@@ -300,8 +300,19 @@ FLY_INFER_RETURN_TYPES(GetLeavesOp) {
   if (!intTupleType)
     return emitOptionalError(location, "GetLeavesOp: expected IntTupleType, got ",
                              operands[0].getType());
-  // transform_leaf on intTupleAttr,
-  return failure();
+  bool dynamicOnly = false;
+  if (properties)
+    dynamicOnly = properties.as<Properties *>()->dynamicOnly.getValue();
+  IntTupleBuilder<IntTupleAttr> builder(context);
+  SmallVector<IntTupleAttr> flatLeaves;
+  intTupleFlattenToVector(builder, intTupleType.getAttr(), flatLeaves);
+  for (auto leaf : flatLeaves) {
+    auto intAttr = leaf.extractIntFromLeaf();
+    if (dynamicOnly && intAttr.isStatic())
+      continue;
+    inferredReturnTypes.push_back(IntegerType::get(context, std::max(32, intAttr.getWidth())));
+  }
+  return success();
 }
 
 FLY_INFER_RETURN_TYPES(GetShapeOp) {
@@ -549,35 +560,7 @@ FLY_INFER_RETURN_TYPES(CeilDivOp) {
   return success();
 }
 
-FLY_INFER_RETURN_TYPES(ElemLessOp) {
-  auto lhsTy = dyn_cast<IntTupleType>(operands[0].getType());
-  auto rhsTy = dyn_cast<IntTupleType>(operands[1].getType());
-  if (!lhsTy)
-    return emitOptionalError(location, "ElemLessOp: expected IntTupleType for lhs, got ",
-                             operands[0].getType());
-  if (!rhsTy)
-    return emitOptionalError(location, "ElemLessOp: expected IntTupleType for rhs, got ",
-                             operands[1].getType());
-  IntTupleBuilder<IntTupleAttr> builder(context);
-  inferredReturnTypes.assign(
-      {IntTupleType::get(intTupleElemLess(builder, lhsTy.getAttr(), rhsTy.getAttr()))});
-  return success();
-}
 
-FLY_INFER_RETURN_TYPES(EqualOp) {
-  auto lhsTy = dyn_cast<IntTupleType>(operands[0].getType());
-  auto rhsTy = dyn_cast<IntTupleType>(operands[1].getType());
-  if (!lhsTy)
-    return emitOptionalError(location, "EqualOp: expected IntTupleType for lhs, got ",
-                             operands[0].getType());
-  if (!rhsTy)
-    return emitOptionalError(location, "EqualOp: expected IntTupleType for rhs, got ",
-                             operands[1].getType());
-  IntTupleBuilder<IntTupleAttr> builder(context);
-  inferredReturnTypes.assign(
-      {IntTupleType::get(intTupleEqual(builder, lhsTy.getAttr(), rhsTy.getAttr()))});
-  return success();
-}
 
 //===----------------------------------------------------------------------===//
 // IntTupleLike operations

@@ -323,8 +323,9 @@ def get_scalar(int_tuple, loc=None, ip=None):
 
 
 @traced_op
-def get_leaves(input, loc=None, ip=None):
-    return fly.get_leaves(input, loc=loc, ip=ip)
+def get_leaves(input, dynamic_only=False, loc=None, ip=None):
+    res_lists = fly.GetLeavesOp(input, dynamicOnly=dynamic_only, loc=loc, ip=ip)
+    return tuple(res_lists.results)
 
 
 @traced_op
@@ -709,11 +710,15 @@ def mma_atom_call(mma_atom, d, a, b, c, loc=None, ip=None):
 
 @traced_op
 def make_tiled_copy(copy_atom, layout_thr_val, tile_mn, loc=None, ip=None):
+    if not isinstance(tile_mn, ir.Value):
+        tile_mn = make_tile(*tile_mn, loc=loc, ip=ip)
     return fly.make_tiled_copy(copy_atom, layout_thr_val, tile_mn, loc=loc, ip=ip)
 
 
 @traced_op
 def make_tiled_mma(mma_atom, atom_layout, permutation=None, loc=None, ip=None):
+    if permutation is not None and not isinstance(permutation, ir.Value):
+        permutation = make_tile(*permutation, loc=loc, ip=ip)
     return fly.make_tiled_mma(mma_atom, atom_layout, permutation=permutation, loc=loc, ip=ip)
 
 
