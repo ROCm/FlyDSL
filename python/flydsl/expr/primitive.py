@@ -94,6 +94,7 @@ __all__ = [
     "make_composed_layout",
     "make_identity_layout",
     "make_view",
+    "make_fragment_layout_like",
     "make_fragment_like",
     "get_scalar",
     "get_leaves",
@@ -308,7 +309,14 @@ def make_view(iter, layout, loc=None, ip=None):
 
 
 @traced_op
+def make_fragment_layout_like(tensor, loc=None, ip=None):
+    return fly.make_fragment_layout_like(tensor, loc=loc, ip=ip)
+
+
+@traced_op
 def make_fragment_like(tensor, dtype=None, loc=None, ip=None):
+    if hasattr(dtype, "ir_type"):
+        dtype = dtype.ir_type
     return fly.make_fragment_like(tensor, dtype=dtype, loc=loc, ip=ip)
 
 
@@ -592,21 +600,29 @@ def left_inverse(layout, loc=None, ip=None):
 
 @traced_op
 def logical_divide(layout, divisor, loc=None, ip=None):
+    if not isinstance(divisor, ir.Value):
+        divisor = make_tile(*divisor, loc=loc, ip=ip)
     return fly.logical_divide(layout, divisor, loc=loc, ip=ip)
 
 
 @traced_op
 def zipped_divide(layout, divisor, loc=None, ip=None):
+    if not isinstance(divisor, ir.Value):
+        divisor = make_tile(*divisor, loc=loc, ip=ip)
     return fly.zipped_divide(layout, divisor, loc=loc, ip=ip)
 
 
 @traced_op
 def tiled_divide(layout, divisor, loc=None, ip=None):
+    if not isinstance(divisor, ir.Value):
+        divisor = make_tile(*divisor, loc=loc, ip=ip)
     return fly.tiled_divide(layout, divisor, loc=loc, ip=ip)
 
 
 @traced_op
 def flat_divide(layout, divisor, loc=None, ip=None):
+    if not isinstance(divisor, ir.Value):
+        divisor = make_tile(*divisor, loc=loc, ip=ip)
     return fly.flat_divide(layout, divisor, loc=loc, ip=ip)
 
 

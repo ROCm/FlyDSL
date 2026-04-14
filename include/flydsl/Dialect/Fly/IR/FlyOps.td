@@ -102,6 +102,11 @@ def Fly_MakeFragmentLikeOp : Fly_Op<"make_fragment_like", [Pure, DeclareOpInterf
   let assemblyFormat = "`(` $src (`,` $dtype^)? `)` attr-dict `:` functional-type(operands, results)";
 }
 
+def Fly_MakeFragmentLayoutLikeOp : Fly_Op<"make_fragment_layout_like", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
+  let arguments = (ins AnyTypeOf<[Fly_Layout, Fly_MemRef]>:$src);
+  let results = (outs Fly_Layout:$result);
+}
+
 //===----------------------------------------------------------------------===//
 // Extractors
 //===----------------------------------------------------------------------===//

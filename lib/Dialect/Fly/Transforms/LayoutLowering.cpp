@@ -364,6 +364,22 @@ public:
   }
 };
 
+class MakeFragmentLayoutLikeOpLowering : public OpRewritePattern<MakeFragmentLayoutLikeOp> {
+public:
+  using OpRewritePattern<MakeFragmentLayoutLikeOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(MakeFragmentLayoutLikeOp op,
+                                PatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    auto resultTy = cast<fly::LayoutType>(op.getType());
+
+    LayoutBuilder<LayoutValueAdaptor> layoutBuilder(rewriter, loc);
+    Value fragmentLayout = layoutBuilder.materializeConstantLayout(resultTy.getAttr()).getValue();
+    rewriter.replaceOp(op, fragmentLayout);
+    return success();
+  }
+};
+
 class MakeFragmentLikeOpLowering : public OpRewritePattern<MakeFragmentLikeOp> {
 public:
   using OpRewritePattern<MakeFragmentLikeOp>::OpRewritePattern;
@@ -2734,7 +2750,8 @@ public:
 
     // Constructors
     patterns.add<MakeOrderedLayoutOpLowering, MakeIdentityLayoutOpLowering,
-                 MakeLayoutLikeOpLowering, MakeFragmentLikeOpLowering>(context);
+                 MakeLayoutLikeOpLowering, MakeFragmentLayoutLikeOpLowering,
+                 MakeFragmentLikeOpLowering>(context);
 
     // Extractors
     patterns.add<GetScalarLowering, GetLeavesLowering, GetShapeLowering, GetStrideLowering,

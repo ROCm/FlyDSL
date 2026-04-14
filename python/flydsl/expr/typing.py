@@ -622,7 +622,8 @@ class Tensor(BuiltinDslType):
 
     @traced_op
     def fill(self, value, loc=None, ip=None):
-        pass
+        filled_vec = full(self.shape.to_py_value(), value, self.dtype, loc=loc, ip=ip)
+        return self.store(filled_vec, loc=loc, ip=ip)
 
 
 @ir.register_value_caster(CopyAtomType.static_typeid, replace=True)
@@ -976,10 +977,17 @@ class Vector(ArithValue):
 
     @classmethod
     def filled(cls, shape, fill_value, dtype: Type[Numeric], *, loc=None, ip=None) -> "Vector":
+        def _shape_numel(dims):
+            n = 1
+            for dim in dims:
+                if isinstance(dim, (tuple, list)):
+                    n *= _shape_numel(dim)
+                else:
+                    n *= dim
+            return n
+
         shape = (shape,) if isinstance(shape, int) else tuple(shape)
-        n = 1
-        for s in shape:
-            n *= s
+        n = _shape_numel(shape)
         if isinstance(fill_value, (int, float, bool)):
             fill_value = dtype(fill_value)
         elif isinstance(fill_value, Numeric):

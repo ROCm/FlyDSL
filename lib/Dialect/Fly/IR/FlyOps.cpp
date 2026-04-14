@@ -248,6 +248,23 @@ FLY_INFER_RETURN_TYPES(MakeViewOp) {
   }
 }
 
+FLY_INFER_RETURN_TYPES(MakeFragmentLayoutLikeOp) {
+  auto srcLayout = GetLayoutAttrFromLayoutLikeType(operands[0].getType());
+  if (!srcLayout)
+    return emitOptionalError(location,
+                             "MakeFragmentLayoutLikeOp: expected LayoutType or MemRefType, got ",
+                             operands[0].getType());
+
+  if (!srcLayout.getShape().isStatic())
+    return emitOptionalError(
+        location, "MakeFragmentLayoutLikeOp: expected static shape layout, got ", srcLayout);
+
+  LayoutBuilder<LayoutAttr> layoutBuilder(context);
+  LayoutAttr fragmentLayout = layoutMakeFragmentLayout(layoutBuilder, srcLayout);
+  inferredReturnTypes.assign({LayoutType::get(context, fragmentLayout)});
+  return success();
+}
+
 FLY_INFER_RETURN_TYPES(MakeFragmentLikeOp) {
   TypeAttr dtypeAttr;
   if (properties)
