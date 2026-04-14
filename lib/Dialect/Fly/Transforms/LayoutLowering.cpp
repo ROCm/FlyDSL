@@ -402,6 +402,8 @@ public:
 
     while (!scalarAttr.isLeaf() && scalarAttr.rank() == 1)
       scalarAttr = scalarAttr.at(0);
+    if (!scalarAttr.isLeaf())
+      return rewriter.notifyMatchFailure(op, "expected leaf IntTupleAttr after unwrapping rank-1 chain");
     auto intAttr = scalarAttr.extractIntFromLeaf();
     if (intAttr.isStatic()) {
       Type resultTy = op.getResult().getType();
