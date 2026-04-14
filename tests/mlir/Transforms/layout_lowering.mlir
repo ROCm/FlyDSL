@@ -99,6 +99,29 @@ func.func @test_get_scalar_dynamic(%x: i32) -> i32 {
   return %s : i32
 }
 
+// Static get_scalar unwraps nested singleton tuples.
+// CHECK-LABEL: @test_get_scalar_nested_static
+func.func @test_get_scalar_nested_static() -> i32 {
+  %t = fly.make_int_tuple() : () -> !fly.int_tuple<((((42))))>
+  // CHECK-NOT: fly.get_scalar
+  // CHECK-NOT: fly.make_int_tuple
+  // CHECK: %[[C:.*]] = arith.constant 42 : i32
+  // CHECK: return %[[C]]
+  %s = fly.get_scalar(%t) : (!fly.int_tuple<((((42))))>) -> i32
+  return %s : i32
+}
+
+// Dynamic get_scalar unwraps nested singleton tuples to the leaf SSA value.
+// CHECK-LABEL: @test_get_scalar_nested_dynamic
+// CHECK-SAME: (%[[ARG:.*]]: i32)
+func.func @test_get_scalar_nested_dynamic(%x: i32) -> i32 {
+  %t = fly.make_int_tuple(%x) : (i32) -> !fly.int_tuple<((((?))))>
+  // CHECK-NOT: fly.get_scalar
+  // CHECK: return %[[ARG]]
+  %s = fly.get_scalar(%t) : (!fly.int_tuple<((((?))))>) -> i32
+  return %s : i32
+}
+
 // -----
 
 // === SizeOp Lowering ===

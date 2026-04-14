@@ -364,6 +364,22 @@ public:
   }
 };
 
+class MakeFragmentLayoutLikeOpLowering : public OpRewritePattern<MakeFragmentLayoutLikeOp> {
+public:
+  using OpRewritePattern<MakeFragmentLayoutLikeOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(MakeFragmentLayoutLikeOp op,
+                                PatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    auto resultTy = cast<fly::LayoutType>(op.getType());
+
+    LayoutBuilder<LayoutValueAdaptor> layoutBuilder(rewriter, loc);
+    Value fragmentLayout = layoutBuilder.materializeConstantLayout(resultTy.getAttr()).getValue();
+    rewriter.replaceOp(op, fragmentLayout);
+    return success();
+  }
+};
+
 class MakeFragmentLikeOpLowering : public OpRewritePattern<MakeFragmentLikeOp> {
 public:
   using OpRewritePattern<MakeFragmentLikeOp>::OpRewritePattern;
@@ -398,12 +414,15 @@ public:
     if (!isNormalForm(cast<TypedValue<IntTupleType>>(intTuple)))
       return failure();
 
-    IntTupleAttr attr = intTupleTy.getAttr();
-    assert(attr.isLeaf() && "IntTuple must be a leaf");
+    IntTupleAttr scalarAttr = intTupleTy.getAttr();
 
-    Type resultTy = op.getResult().getType();
-    auto intAttr = attr.extractIntFromLeaf();
+    while (!scalarAttr.isLeaf() && scalarAttr.rank() == 1)
+      scalarAttr = scalarAttr.at(0);
+    if (!scalarAttr.isLeaf())
+      return rewriter.notifyMatchFailure(op, "expected leaf IntTupleAttr after unwrapping rank-1 chain");
+    auto intAttr = scalarAttr.extractIntFromLeaf();
     if (intAttr.isStatic()) {
+      Type resultTy = op.getResult().getType();
       rewriter.replaceOp(op,
                          arith::ConstantIntOp::create(rewriter, loc, resultTy, intAttr.getValue()));
       return success();
@@ -2731,7 +2750,8 @@ public:
 
     // Constructors
     patterns.add<MakeOrderedLayoutOpLowering, MakeIdentityLayoutOpLowering,
-                 MakeLayoutLikeOpLowering, MakeFragmentLikeOpLowering>(context);
+                 MakeLayoutLikeOpLowering, MakeFragmentLayoutLikeOpLowering,
+                 MakeFragmentLikeOpLowering>(context);
 
     // Extractors
     patterns.add<GetScalarLowering, GetLeavesLowering, GetShapeLowering, GetStrideLowering,

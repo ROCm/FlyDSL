@@ -336,6 +336,7 @@ def run_moe_stage1(
     scale_dtype: str = "f32",
     even_dispatch: bool = False,
     out_dtype: str = "f16",
+    k_batch: int = 1,
 ):
     assert model_dim % 64 == 0
     assert model_dim % tile_k == 0
@@ -562,9 +563,13 @@ def run_moe_stage1(
             scale_w1_1d = scale_w1_flat.view(-1).contiguous()
     sorted_weights_1d = sorted_weights.contiguous().view(-1)  # [sorted_size]
 
-    # Output: [tokens, topk, inter_dim]
+    # Output: normal=[tokens, topk, inter_dim] f16/bf16, split-K=[tokens*topk, 2*inter_dim] f32
     _out_torch_dtype = torch.bfloat16 if out_dtype == "bf16" else torch.float16
-    out = torch.empty((tokens, topk, inter_dim), device=device, dtype=_out_torch_dtype)
+    _is_splitk = k_batch > 1
+    if _is_splitk:
+        out = torch.zeros((tokens * topk, 2 * inter_dim), device=device, dtype=torch.float32)
+    else:
+        out = torch.empty((tokens, topk, inter_dim), device=device, dtype=_out_torch_dtype)
 
     if is_fp4:
         exe = compile_mixed_moe_gemm1(
@@ -605,9 +610,10 @@ def run_moe_stage1(
             tile_n=tile_n,
             tile_k=tile_k,
             doweight_stage1=bool(doweight_stage1),
-            use_cshuffle_epilog=False,
+            use_cshuffle_epilog=None if _is_splitk else False,
             scale_is_bf16=(scale_dtype == "bf16"),
             out_dtype=out_dtype,
+            k_batch=k_batch,
         )
 
         def _s1_args(o, x, w, sx, sw, st, eids, sw_sorted):
@@ -618,6 +624,8 @@ def run_moe_stage1(
         compiled_exe = flyc.compile(exe, *_s1_args(out, x_q, w_kernel, scale_x_1d, scale_w1_1d,
                                                     sorted_token_ids, sorted_expert_ids, sorted_weights_1d))
         def launch(o, x, w, sx, sw, st, eids, sw_sorted):
+            if _is_splitk:
+                o.zero_()
             compiled_exe(*_s1_args(o, x, w, sx, sw, st, eids, sw_sorted))
 
     _, us = run_perftest(
@@ -635,6 +643,14 @@ def run_moe_stage1(
         testGraph=test_graph,
     )
     torch.cuda.synchronize()
+
+    # Split-K post-processing: apply silu(gate)*up on host, reshape to [tokens, topk, inter_dim]
+    # Note: the gfx950 v_cvt_off_f32_i4 x16 correction is already applied per-CTA in the kernel
+    # epilogue (linear factor commutes with summation: sum(x_i*16) = 16*sum(x_i)).
+    if _is_splitk:
+        gate = out[:, :inter_dim]   # [tokens*topk, inter_dim] f32
+        up = out[:, inter_dim:]     # [tokens*topk, inter_dim] f32
+        out = (torch.nn.functional.silu(gate) * up).to(_out_torch_dtype).view(tokens, topk, inter_dim)
 
     if not bool(skip_ref):
         if is_int8smooth:
