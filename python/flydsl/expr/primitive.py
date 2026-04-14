@@ -768,17 +768,56 @@ def mma_make_fragment(operand_id, tiled_mma, input, loc=None, ip=None):
     return fly.mma_make_fragment(operand_id, tiled_mma, input, loc=loc, ip=ip)
 
 
+def _apply_atom_fields(atom, fields, loc=None, ip=None):
+    """Apply attribute fields to atom-like inputs.
+
+    Accepts both wrapper atoms exposing ``set_value`` and raw MLIR atom types
+    accepted by ``atom_set_value``.
+    """
+    if not fields:
+        return atom
+    if hasattr(atom, "set_value"):
+        return atom.set_value(fields, loc=loc, ip=ip)
+    result = atom
+    for k, v in fields.items():
+        result = atom_set_value(result, k, v, loc=loc, ip=ip)
+    return result
+
+
+def _normalize_copy_atom(copy_atom, loc=None, ip=None):
+    atom = copy_atom
+    if not hasattr(atom, "set_value") and hasattr(atom, "copy_atom"):
+        atom = atom.copy_atom
+    if isinstance(atom, CopyAtomType):
+        val_bits = int(atom.val_bits)
+        atom = fly.make_copy_atom(atom, val_bits=val_bits, loc=loc, ip=ip)
+    return atom
+
+
+def _normalize_mma_atom(mma_atom, loc=None, ip=None):
+    atom = mma_atom
+    if not hasattr(atom, "set_value") and hasattr(atom, "mma_atom"):
+        atom = atom.mma_atom
+    if isinstance(atom, MmaAtomType):
+        atom = fly.make_mma_atom(atom, loc=loc, ip=ip)
+    return atom
+
+
 @traced_op
 def copy(copy_atom, src, dst, *, pred=None, loc=None, ip=None, **kwargs):
-    return fly.copy(copy_atom.set_value(kwargs), src, dst, pred=pred, loc=loc, ip=ip)
+    copy_atom = _normalize_copy_atom(copy_atom, loc=loc, ip=ip)
+    copy_atom = _apply_atom_fields(copy_atom, kwargs, loc=loc, ip=ip)
+    return fly.copy(copy_atom, src, dst, pred=pred, loc=loc, ip=ip)
 
 
 @traced_op
 def gemm(mma_atom, d, a, b, c, *, traversal_order=None, traversal_layout=None, loc=None, ip=None, **kwargs):
     if traversal_order is not None and traversal_layout is not None:
         raise ValueError("Only one of 'traversal_order' or 'traversal_layout' can be specified, not both")
+    mma_atom = _normalize_mma_atom(mma_atom, loc=loc, ip=ip)
+    mma_atom = _apply_atom_fields(mma_atom, kwargs, loc=loc, ip=ip)
     return fly.gemm(
-        mma_atom.set_value(kwargs),
+        mma_atom,
         d,
         a,
         b,

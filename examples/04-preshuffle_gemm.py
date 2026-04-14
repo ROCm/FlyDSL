@@ -103,7 +103,7 @@ def gemm_kernel(
                 mma_frag_A_retile[None, None, block_k_iter],
             )
             fx.gemm(
-                tiled_mma,
+                tiled_mma.mma_atom,
                 mma_frag_C,
                 mma_frag_A[None, None, (None, block_k_iter)],
                 mma_frag_B[None, None, (None, block_k_iter), read_stage],
