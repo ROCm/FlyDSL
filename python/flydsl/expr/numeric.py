@@ -223,6 +223,7 @@ def _unwrap_value(value):
         try:
             return as_numeric(value).ir_value()
         except Exception:
+            log().error(f"failed to construct {as_numeric(value)} from {value}")
             return value
     if hasattr(value, "__fly_values__"):
         values = value.__fly_values__()
@@ -246,11 +247,13 @@ def _wrap_like(value, exemplar=None):
             try:
                 return ctor([value])
             except Exception:
-                pass
+                log().error(f"failed to construct {type(exemplar)} from {value}")
+                return value
 
     try:
         return Numeric.from_ir_type(value.type)(value)
     except Exception:
+        log().error(f"failed to construct {Numeric.from_ir_type(value.type)} from {value}")
         return value
 
 

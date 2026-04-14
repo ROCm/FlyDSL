@@ -614,34 +614,41 @@ class ReplaceIfWithDispatch(Transformer):
                 return True, node.value
             try:
                 return True, ast.literal_eval(node)
-            except Exception:
+            except Exception as e:
+                log().error(
+                    "[FlyDSL ast_rewriter] literal_eval failed: "
+                    f"node={ast.dump(node, include_attributes=False)}, err={e!r}"
+                )
                 return False, None
 
         def _eval_static_compare_pair(lhs, op, rhs):
+            op_text_map = {
+                ast.Eq: "==",
+                ast.NotEq: "!=",
+                ast.Lt: "<",
+                ast.LtE: "<=",
+                ast.Gt: ">",
+                ast.GtE: ">=",
+                ast.Is: "is",
+                ast.IsNot: "is not",
+                ast.In: "in",
+                ast.NotIn: "not in",
+            }
             try:
-                if isinstance(op, ast.Eq):
-                    return lhs == rhs
-                if isinstance(op, ast.NotEq):
-                    return lhs != rhs
-                if isinstance(op, ast.Lt):
-                    return lhs < rhs
-                if isinstance(op, ast.LtE):
-                    return lhs <= rhs
-                if isinstance(op, ast.Gt):
-                    return lhs > rhs
-                if isinstance(op, ast.GtE):
-                    return lhs >= rhs
-                if isinstance(op, ast.Is):
-                    return lhs is rhs
-                if isinstance(op, ast.IsNot):
-                    return lhs is not rhs
-                if isinstance(op, ast.In):
-                    return lhs in rhs
-                if isinstance(op, ast.NotIn):
-                    return lhs not in rhs
-            except Exception:
+                op_text = op_text_map.get(type(op))
+                if op_text is None:
+                    return None
+                return eval(
+                    f"lhs_val {op_text} rhs_val",
+                    {"__builtins__": {}},
+                    {"lhs_val": lhs, "rhs_val": rhs},
+                )
+            except Exception as e:
+                log().error(
+                    "[FlyDSL ast_rewriter] static compare eval failed: "
+                    f"op={type(op).__name__}, lhs={lhs!r}, rhs={rhs!r}, err={e!r}"
+                )
                 return None
-            return None
 
         def _visit(node):
             if _is_literal_expr(node):
