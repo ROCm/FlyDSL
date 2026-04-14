@@ -2260,7 +2260,7 @@ def compile_moe_gemm2(
                         scale_vec = _uw(vector.broadcast(T.f32x4, scale_val))
                         return arith.ArithValue(_math_fma(scale_vec, _uw(f32_partial_vec), _uw(f32_acc_vec)))
 
-                    if const_expr(is_int4_bf16 or is_int4_bf16_groupwise:
+                    if const_expr(is_int4_bf16 or is_int4_bf16_groupwise):
                         # W4A16: deferred dequant -- unpack int4->bf16 right before MFMA
                         # to minimize VGPR lifetime of dequantized bf16 values.
                         _pending_acc = None
