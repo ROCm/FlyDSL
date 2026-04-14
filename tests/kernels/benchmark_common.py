@@ -398,6 +398,165 @@ def run_wmma_sweep(
     return rows
 
 
+# ── MOE bench common helpers ──────────────────────────────────────────────
+
+BENCH_WARMUP = 5
+BENCH_ITERS = 20
+
+BENCH_MODEL_CONFIGS = [
+    # name,      model_dim, inter_dim, experts, topk
+    ("DeepSeek-TP", 7168,    256,   257,  9),
+    ("DeepSeek-EP", 7168,   2048,    32,  8),
+    ("GPToss",      2880,   2880,   128,  4),
+]
+
+BENCH_DTYPE_TARGET_TILES = {
+    # dtype: (tile_m, target_n, target_k, wmma_k)
+    "fp4":  (16, 256, 512, 128),
+    "fp8":  (16, 256, 512, 128),
+    "a8w4": (16, 256, 512, 128),
+    "fp16": (32,  64,  64,  32),
+    "bf16": (32,  64,  64,  32),
+}
+
+BENCH_DEFAULT_TOKEN_SWEEP = [1, 4, 8, 32, 64, 128, 256]
+_BENCH_SCALE_GROUP = 32
+
+
+def bench_kernel_us(run_fn, warmup=10, iters=50, flush_l2=True, prep_fn=None):
+    """Per-iteration CUDA events timer with optional L2 flush and median latency."""
+    import torch
+
+    flush_buf = None
+    if flush_l2:
+        l2_bytes = getattr(
+            torch.cuda.get_device_properties(torch.cuda.current_device()),
+            "L2_cache_size", 4 * 1024 * 1024)
+        alloc_bytes = max(l2_bytes * 2, 8 * 1024 * 1024)
+        flush_buf = torch.empty(alloc_bytes, dtype=torch.uint8, device="cuda")
+
+    for _ in range(warmup):
+        if flush_buf is not None:
+            flush_buf.zero_()
+        if prep_fn is not None:
+            prep_fn()
+        run_fn()
+    torch.cuda.synchronize()
+
+    start_ev = [torch.cuda.Event(enable_timing=True) for _ in range(iters)]
+    end_ev = [torch.cuda.Event(enable_timing=True) for _ in range(iters)]
+
+    for i in range(iters):
+        if flush_buf is not None:
+            flush_buf.zero_()
+        if prep_fn is not None:
+            prep_fn()
+        start_ev[i].record()
+        run_fn()
+        end_ev[i].record()
+
+    torch.cuda.synchronize()
+    latencies = sorted(start_ev[i].elapsed_time(end_ev[i]) * 1e3 for i in range(iters))
+
+    n = len(latencies)
+    if n >= 8:
+        q1, q3 = latencies[n // 4], latencies[3 * n // 4]
+        iqr = q3 - q1
+        lo, hi = q1 - 1.5 * iqr, q3 + 1.5 * iqr
+        filtered = [x for x in latencies if lo <= x <= hi]
+        if filtered:
+            latencies = filtered
+
+    del flush_buf
+    return latencies[len(latencies) // 2]
+
+
+def bench_best_tile(target, dim, align):
+    """Largest value <= target that divides dim and is a multiple of align."""
+    for v in range(target, 0, -align):
+        if dim % v == 0:
+            return v
+    return None
+
+
+def bench_resolve_tiles(in_dtype, model_dim, inter_dim):
+    """Compute the largest valid (tile_m, tile_n1, tile_k1, tile_n2, tile_k2)
+    for a given dtype and model shape, falling back from the target when
+    dimensions don't divide evenly."""
+    tile_m, target_n, target_k, wmma_k = BENCH_DTYPE_TARGET_TILES[in_dtype]
+
+    tile_n1 = bench_best_tile(target_n, inter_dim, 16)
+    tile_k1 = bench_best_tile(target_k, model_dim, wmma_k)
+    tile_n2 = bench_best_tile(target_n, model_dim, 16)
+
+    tile_k2 = None
+    for k in range(target_k, 0, -wmma_k):
+        if inter_dim % k != 0:
+            continue
+        total = tile_m * k
+        if total % 256 == 0 and (total // 256) % 4 == 0:
+            tile_k2 = k
+            break
+
+    if any(v is None for v in (tile_n1, tile_k1, tile_n2, tile_k2)):
+        return None
+    return (tile_m, tile_n1, tile_k1, tile_n2, tile_k2)
+
+
+def bench_dtype_bpe(in_dtype):
+    """Return (a_bpe, w_bpe, w_scale_bpg) for bandwidth accounting."""
+    if in_dtype == "fp4":
+        return 0.5, 0.5, 1
+    if in_dtype == "a8w4":
+        return 1, 0.5, 1
+    if in_dtype == "fp8":
+        return 1, 1, 1
+    if in_dtype in ("fp16", "bf16"):
+        return 2, 2, 0
+    return 1, 1, 1
+
+
+def bench_bytes_moved_stage1(tokens, topk, model_dim, inter_dim, experts, in_dtype):
+    import math
+    a_bpe, w_bpe, w_scale_bpg = bench_dtype_bpe(in_dtype)
+    aE = min(tokens * topk, experts)
+    b = 0
+    b += tokens * model_dim * a_bpe
+    b += aE * (2 * inter_dim) * model_dim * w_bpe
+    b += aE * (2 * inter_dim) * math.ceil(model_dim / _BENCH_SCALE_GROUP) * w_scale_bpg
+    b += tokens * topk * inter_dim * 2
+    return int(b)
+
+
+def bench_bytes_moved_stage2(tokens, topk, model_dim, inter_dim, experts, in_dtype):
+    import math
+    a_bpe, w_bpe, w_scale_bpg = bench_dtype_bpe(in_dtype)
+    aE = min(tokens * topk, experts)
+    b = 0
+    b += tokens * topk * inter_dim * a_bpe
+    b += aE * model_dim * inter_dim * w_bpe
+    b += aE * model_dim * math.ceil(inter_dim / _BENCH_SCALE_GROUP) * w_scale_bpg
+    b += tokens * topk * model_dim * 2
+    return int(b)
+
+
+def bench_print_banner(text):
+    print(f"\n{'=' * 110}")
+    print(f"  {text}")
+    print(f"{'=' * 110}")
+
+
+def bench_print_stage_header():
+    print(f"{'Tokens':>7} {'M_eff':>7} {'Latency(us)':>12} {'TFLOPS':>9} "
+          f"{'BW(TB/s)':>10} {'Util%':>7} {'Status':>8}")
+    print("-" * 110)
+
+
+def bench_print_stage_row(tokens, m_eff, us, tflops, tbps, util_pct, status):
+    print(f"{tokens:>7} {m_eff:>7} {us:>10.1f}   {tflops:>8.2f} "
+          f"{tbps:>9.3f}  {util_pct:>6.1f}% {status:>8}")
+
+
 def main() -> None:
     # CLI entrypoint:
     #   BENCH_CONFIGS="M,N,dtype;..." AITER_IMPL=triton BENCH_WARMUP=10 BENCH_ITERS=50 python -m tests.kernels.benchmark_common
