@@ -622,6 +622,37 @@ def compile_chunk_gated_delta_h(
 # ── Python wrapper (matches Triton interface) ────────────────────────────
 
 _compiled_kernels = {}
+_autotune_cache = {}  # (shape_key) -> best BV
+_BV_CANDIDATES = [16, 32, 64]
+_AUTOTUNE_WARMUP = 5
+_AUTOTUNE_ITERS = 25
+
+
+def _get_or_compile(K, V, BT, BV, H, Hg, use_g, use_h0, store_fs, save_vn, is_varlen, wu_contig):
+    cache_key = (K, V, BT, BV, H, Hg, use_g, use_h0, store_fs, save_vn, is_varlen, wu_contig)
+    if cache_key not in _compiled_kernels:
+        _compiled_kernels[cache_key] = compile_chunk_gated_delta_h(
+            K=K, V=V, BT=BT, BV=BV, H=H, Hg=Hg,
+            USE_G=use_g, USE_INITIAL_STATE=use_h0,
+            STORE_FINAL_STATE=store_fs, SAVE_NEW_VALUE=save_vn,
+            IS_VARLEN=is_varlen, WU_CONTIGUOUS=wu_contig,
+        )
+    return _compiled_kernels[cache_key]
+
+
+def _launch_kernel(launch_fn, BV, V, N, H,
+                   k, u, w, vn_arg, g_arg, h, h0_arg, ht_arg,
+                   cu_arg, co_arg, T, T_flat, stream):
+    grid_v = triton.cdiv(V, BV)
+    grid_nh = N * H
+    launch_fn(
+        k, u, w, vn_arg, g_arg,
+        h, h0_arg, ht_arg,
+        cu_arg, co_arg,
+        T, T_flat, N,
+        grid_v, grid_nh,
+        stream,
+    )
 
 
 def chunk_gated_delta_rule_fwd_h_flydsl(
@@ -638,7 +669,7 @@ def chunk_gated_delta_rule_fwd_h_flydsl(
     wu_contiguous: bool = True,
     BV: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
-    """FlyDSL K5 wrapper matching the Triton opt3 interface."""
+    """FlyDSL K5 wrapper with wrapper-level autotune over BV."""
     B, T, Hg, K = k.shape
     BT = chunk_size
 
@@ -650,9 +681,6 @@ def chunk_gated_delta_rule_fwd_h_flydsl(
         H = u.shape[-2]
         V = u.shape[-1]
         T_flat = w.shape[1]
-
-    if BV <= 0:
-        BV = min(V, 16)
 
     if cu_seqlens is None:
         N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
@@ -672,29 +700,6 @@ def chunk_gated_delta_rule_fwd_h_flydsl(
     v_new_buf = k.new_empty(B, H, T_flat, V, dtype=u.dtype)
     v_new = v_new_buf if save_new_value else None
 
-    # Compile kernel with these specific parameters
-    cache_key = (K, V, BT, BV, H, Hg,
-                 g is not None, initial_state is not None,
-                 output_final_state, save_new_value,
-                 cu_seqlens is not None, wu_contiguous)
-
-    if cache_key not in _compiled_kernels:
-        _compiled_kernels[cache_key] = compile_chunk_gated_delta_h(
-            K=K, V=V, BT=BT, BV=BV, H=H, Hg=Hg,
-            USE_G=(g is not None),
-            USE_INITIAL_STATE=(initial_state is not None),
-            STORE_FINAL_STATE=output_final_state,
-            SAVE_NEW_VALUE=save_new_value,
-            IS_VARLEN=(cu_seqlens is not None),
-            WU_CONTIGUOUS=wu_contiguous,
-        )
-
-    launch_fn = _compiled_kernels[cache_key]
-
-    grid_v = triton.cdiv(V, BV)
-    grid_nh = N * H
-
-    # Prepare dummy tensors for optional params
     dummy = torch.empty(1, device=k.device, dtype=torch.float32)
     g_arg = g if g is not None else dummy
     h0_arg = initial_state if initial_state is not None else dummy
@@ -702,17 +707,62 @@ def chunk_gated_delta_rule_fwd_h_flydsl(
     vn_arg = v_new_buf
     cu_arg = cu_seqlens.to(torch.int32) if cu_seqlens is not None else dummy.to(torch.int32)
     co_arg = chunk_offsets if chunk_offsets is not None else dummy.to(torch.int32)
-
     stream = torch.cuda.current_stream()
 
-    launch_fn(
-        k, u, w, vn_arg, g_arg,
-        h, h0_arg, ht_arg,
-        cu_arg, co_arg,
-        T, T_flat, N,
-        grid_v, grid_nh,
-        stream,
-    )
+    use_g = g is not None
+    use_h0 = initial_state is not None
+    is_varlen = cu_seqlens is not None
+
+    # Resolve BV: explicit > autotune cache > benchmark
+    if BV <= 0:
+        shape_key = (K, V, BT, H, Hg, T_flat, N,
+                     use_g, use_h0, output_final_state,
+                     save_new_value, is_varlen, wu_contiguous)
+
+        if shape_key in _autotune_cache:
+            BV = _autotune_cache[shape_key]
+        else:
+            candidates = [bv for bv in _BV_CANDIDATES if bv <= V and V % bv == 0]
+            if len(candidates) <= 1:
+                BV = candidates[0] if candidates else 16
+            else:
+                print(f"[K5 autotune] benchmarking BV in {candidates} ...")
+                best_bv, best_us = candidates[0], float('inf')
+                for bv in candidates:
+                    fn = _get_or_compile(K, V, BT, bv, H, Hg,
+                                         use_g, use_h0, output_final_state,
+                                         save_new_value, is_varlen, wu_contiguous)
+                    # warmup
+                    for _ in range(_AUTOTUNE_WARMUP):
+                        _launch_kernel(fn, bv, V, N, H,
+                                       k, u, w, vn_arg, g_arg, h, h0_arg, ht_arg,
+                                       cu_arg, co_arg, T, T_flat, stream)
+                    torch.cuda.synchronize()
+                    # benchmark
+                    s = torch.cuda.Event(enable_timing=True)
+                    e = torch.cuda.Event(enable_timing=True)
+                    s.record()
+                    for _ in range(_AUTOTUNE_ITERS):
+                        _launch_kernel(fn, bv, V, N, H,
+                                       k, u, w, vn_arg, g_arg, h, h0_arg, ht_arg,
+                                       cu_arg, co_arg, T, T_flat, stream)
+                    e.record()
+                    torch.cuda.synchronize()
+                    us = s.elapsed_time(e) / _AUTOTUNE_ITERS * 1000
+                    print(f"  BV={bv:3d}: {us:.2f} us")
+                    if us < best_us:
+                        best_us = us
+                        best_bv = bv
+                BV = best_bv
+                print(f"[K5 autotune] best BV={BV} ({best_us:.2f} us)")
+            _autotune_cache[shape_key] = BV
+
+    launch_fn = _get_or_compile(K, V, BT, BV, H, Hg,
+                                use_g, use_h0, output_final_state,
+                                save_new_value, is_varlen, wu_contiguous)
+    _launch_kernel(launch_fn, BV, V, N, H,
+                   k, u, w, vn_arg, g_arg, h, h0_arg, ht_arg,
+                   cu_arg, co_arg, T, T_flat, stream)
 
     return h, v_new, final_state
 
