@@ -10,6 +10,7 @@ import numpy as np
 from .._mlir import ir
 from .._mlir.dialects import arith
 from .._mlir.extras import types as T
+from ..utils import log
 from .utils.arith import (
     ArithValue,
     arith_const,
