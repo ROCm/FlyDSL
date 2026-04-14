@@ -4,7 +4,7 @@
 import ctypes
 import enum
 from inspect import isclass
-from typing import Generic, Type, TypeVar
+from typing import Generic, Type, TypeVar, overload
 
 from flydsl.runtime.device import get_rocm_arch
 
