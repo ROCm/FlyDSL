@@ -16,17 +16,19 @@ Usage:
 import sys
 import os
 import argparse
-import math
 import logging
 
 import torch
+import pytest
 
 sys.path.insert(0, "build-fly/python_packages")
 sys.path.insert(1, ".")
 os.environ["FLYDSL_RUNTIME_ENABLE_CACHE"] = "1"
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
-import aiter
+pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
+
+aiter = pytest.importorskip("aiter", reason="aiter is not installed, skipping MLA tests")
 from aiter import dtypes
 
 from tests.test_common import run_perftest, checkAllclose
@@ -256,7 +258,18 @@ def run_single(batch_size, ctx_len, decode_qlen=1, max_split_per_batch=32):
     return err, us
 
 
-# ── CLI ─────────────────────────────────────────────────────────
+# ── pytest ──────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("batch_size,ctx_len", [
+    (1, 128),
+    (4, 2048),
+    (32, 8192),
+])
+def test_mla_decode(batch_size, ctx_len):
+    run_single(batch_size, ctx_len)
+
+
+# ── CLI (local benchmarking) ────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(description="FlyDSL MLA decode test")
