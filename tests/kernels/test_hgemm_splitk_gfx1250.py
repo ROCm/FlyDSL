@@ -33,7 +33,7 @@ if not torch.cuda.is_available():
     pytest.skip("CUDA/ROCm not available. Skipping GPU tests.", allow_module_level=True)
 
 
-SPLIT_K_COUNTER_MAX_LEN = 128
+SPLIT_K_COUNTER_MAX_LEN = 512
 
 
 def _validate_pipeline_depth(*, ks, tile_k, num_buffers):

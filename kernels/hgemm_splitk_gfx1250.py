@@ -49,7 +49,7 @@ LDS_PAD_A = 8
 LDS_PAD_B = 8
 LDS_PAD_D_BYTES = 16
 
-SPLIT_K_COUNTER_MAX_LEN = 128
+SPLIT_K_COUNTER_MAX_LEN = 512
 
 _make_tail_plan = make_tail_plan
 
@@ -373,35 +373,32 @@ def compile_hgemm_splitk_gfx1250(
             rocdl.sched_barrier(0)
             gpu.barrier()
 
-            # Clean old signal
+            # Clean old signal — vec4 store: 128 threads × 4 dwords = 512 entries
+            # Per CU: 128 × 16B = 2048B; per device: bm×bn × 2048B
             cond_ks0_if3 = scf.IfOp(cond_ks0, results_=[], has_else=False)
             with ir.InsertionPoint(cond_ks0_if3.then_block):
-                clean_cond = arith.cmpi(
-                    arith.CmpIPredicate.ult, tx, arith.index(SPLIT_K_COUNTER_MAX_LEN))
-                clean_cond_if = scf.IfOp(clean_cond, results_=[], has_else=False)
-                with ir.InsertionPoint(clean_cond_if.then_block):
-                    sig_val = arith.ArithValue(signal_state.ir_value())
-                    clean_state = (sig_val + arith.constant(2, type=T.i32)) % arith.constant(3, type=T.i32)
-                    clean_base = clean_state * arith.constant(SPLIT_K_COUNTER_MAX_LEN, type=T.i32)
-                    clean_idx = clean_base + arith.index_cast(T.i32, tx)
-                    # Store 0 to counter
-                    counter_base_ptr2 = fly.extract_aligned_pointer_as_index(
-                        _ptr_type, fly_values(COUNTER)[0])
-                    counter_base_int2 = llvm.PtrToIntOp(_i64_type, counter_base_ptr2).result
-                    clean_byte_off = arith.index_cast(
-                        T.i64,
-                        arith.index_cast(T.index, clean_idx) * arith.index(4))
-                    clean_ptr = llvm.IntToPtrOp(
-                        _ptr_type,
-                        llvm.AddOp(counter_base_int2, clean_byte_off,
-                                   llvm.IntegerOverflowFlags(0)).result).result
-                    clean_ptr_v = clean_ptr._value if hasattr(clean_ptr, "_value") else clean_ptr
-                    llvm.InlineAsmOp(
-                        None, [clean_ptr_v, arith.constant(0, type=T.i32)],
-                        "global_store_b32 $0, $1, off scope:SCOPE_DEV", "v,v",
-                        has_side_effects=True)
-                    rocdl.s_wait_storecnt(0)
-                    scf.YieldOp([])
+                sig_val = arith.ArithValue(signal_state.ir_value())
+                clean_state = (sig_val + arith.constant(2, type=T.i32)) % arith.constant(3, type=T.i32)
+                clean_base = clean_state * arith.constant(SPLIT_K_COUNTER_MAX_LEN, type=T.i32)
+                clean_idx = clean_base + arith.index_cast(T.i32, tx) * arith.constant(4, type=T.i32)
+                counter_base_ptr2 = fly.extract_aligned_pointer_as_index(
+                    _ptr_type, fly_values(COUNTER)[0])
+                counter_base_int2 = llvm.PtrToIntOp(_i64_type, counter_base_ptr2).result
+                clean_byte_off = arith.index_cast(
+                    T.i64,
+                    arith.index_cast(T.index, clean_idx) * arith.index(4))
+                clean_ptr = llvm.IntToPtrOp(
+                    _ptr_type,
+                    llvm.AddOp(counter_base_int2, clean_byte_off,
+                               llvm.IntegerOverflowFlags(0)).result).result
+                clean_ptr_v = clean_ptr._value if hasattr(clean_ptr, "_value") else clean_ptr
+                zero_vec4 = vector.broadcast(T.vec(4, T.i32), arith.constant(0, type=T.i32))
+                zero_vec4_v = zero_vec4._value if hasattr(zero_vec4, "_value") else zero_vec4
+                llvm.InlineAsmOp(
+                    None, [clean_ptr_v, zero_vec4_v],
+                    "global_store_b128 $0, $1, off scope:SCOPE_DEV", "v,v",
+                    has_side_effects=True)
+                rocdl.s_wait_storecnt(0)
                 scf.YieldOp([])
             rocdl.sched_barrier(0)
             gpu.barrier()
