@@ -37,7 +37,8 @@ SPLIT_K_COUNTER_MAX_LEN = 512
 
 
 def _validate_pipeline_depth(*, ks, tile_k, num_buffers):
-    num_k_tiles = ks // tile_k
+    load_tile_k = 2 * tile_k  # kernel loads 2*tile_k per stage
+    num_k_tiles = ks // load_tile_k
     if num_k_tiles < num_buffers:
         pytest.skip(
             f"{num_buffers}-buffer requires num_k_tiles >= {num_buffers}, got {num_k_tiles}"
@@ -76,11 +77,12 @@ def test_hgemm_splitk_gfx1250(
 
     _validate_pipeline_depth(ks=ks, tile_k=tile_k, num_buffers=num_buffers)
 
-    # Check LDS budget
+    # Check LDS budget (kernel loads 2*tile_k per stage)
+    load_tile_k = 2 * tile_k
     lds_pad = 8
     elem_bytes = 2
-    a_buf = tile_m * (tile_k + lds_pad) * elem_bytes
-    b_buf = tile_k * (tile_n + lds_pad) * elem_bytes
+    a_buf = tile_m * (load_tile_k + lds_pad) * elem_bytes
+    b_buf = load_tile_k * (tile_n + lds_pad) * elem_bytes
     total_lds = (a_buf + b_buf) * num_buffers
     if total_lds > 327680:
         pytest.skip(f"LDS budget exceeded: {total_lds} > 327680")
@@ -209,15 +211,16 @@ def bench_hgemm_splitk_gfx1250(
     assert K % SPLIT_K == 0, f"K={K} must be divisible by SPLIT_K={SPLIT_K}"
     ks = K // SPLIT_K
 
-    num_k_tiles = ks // tile_k
+    load_tile_k = 2 * tile_k  # kernel loads 2*tile_k per stage
+    num_k_tiles = ks // load_tile_k
     if num_k_tiles < num_buffers:
         print(f"Skipped: {num_buffers}-buffer requires num_k_tiles >= {num_buffers}, got {num_k_tiles}")
         return
 
     lds_pad = 8
     elem_bytes = 2
-    a_buf = tile_m * (tile_k + lds_pad) * elem_bytes
-    b_buf = tile_k * (tile_n + lds_pad) * elem_bytes
+    a_buf = tile_m * (load_tile_k + lds_pad) * elem_bytes
+    b_buf = load_tile_k * (tile_n + lds_pad) * elem_bytes
     total_lds = (a_buf + b_buf) * num_buffers
     if total_lds > 327680:
         print(f"Skipped: LDS budget exceeded: {total_lds} > 327680")

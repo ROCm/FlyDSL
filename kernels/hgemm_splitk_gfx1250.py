@@ -121,8 +121,8 @@ def compile_hgemm_splitk_gfx1250(
 
     TDM_LOADS_PER_STEP = 2  # always load both A and B
 
-    if ks % tile_k != 0:
-        raise ValueError(f"K/SPLIT_K must be divisible by tile_k={tile_k}, got ks={ks}")
+    if ks % (2 * tile_k) != 0:
+        raise ValueError(f"K/SPLIT_K must be divisible by 2*tile_k={2*tile_k}, got ks={ks}")
     if tile_k % WMMA_K != 0:
         raise ValueError(f"tile_k must be a multiple of {WMMA_K}, got {tile_k}")
     if tile_m % WMMA_M != 0:
@@ -139,17 +139,19 @@ def compile_hgemm_splitk_gfx1250(
     if warp_tile_n % WMMA_N != 0:
         raise ValueError(f"warp_tile_n={warp_tile_n} must be a multiple of {WMMA_N}")
 
-    num_k_tiles = ks // tile_k
+    load_tile_k = 2 * tile_k  # TDM load granularity: load 2x compute tile_k
+    num_k_tiles = ks // load_tile_k  # counts load tiles
     if num_k_tiles < num_buffers:
         raise ValueError(
             f"{num_buffers}-stage buffering requires num_k_tiles >= {num_buffers}, "
-            f"got {num_k_tiles} (ks={ks}, tile_k={tile_k})")
+            f"got {num_k_tiles} (ks={ks}, load_tile_k={load_tile_k})")
 
     gpu_arch = str(get_rocm_arch())
     assert gpu_arch.startswith("gfx1250"), f"Expected gfx1250, got {gpu_arch}"
 
     wmma_op = rocdl.wmma_f32_16x16x32_f16 if is_f16 else rocdl.wmma_f32_16x16x32_bf16
-    k_wmma_steps = tile_k // WMMA_K
+    k_wmma_steps = tile_k // WMMA_K  # WMMA steps per compute tile_k
+    compute_k_steps = tile_k // WMMA_K  # k_offset_steps for second half
 
     def _elem_type():
         return T.f16 if is_f16 else T.bf16
@@ -158,10 +160,10 @@ def compile_hgemm_splitk_gfx1250(
     wmma_n_rep = warp_tile_n // WMMA_N
     n_accs = wmma_m_rep * wmma_n_rep
 
-    lds_a_stride = tile_k + LDS_PAD_A
+    lds_a_stride = load_tile_k + LDS_PAD_A
     lds_b_stride = tile_n + LDS_PAD_B
     lds_a_elems = tile_m * lds_a_stride + LDS_PAD_A
-    lds_b_elems = tile_k * lds_b_stride + LDS_PAD_B
+    lds_b_elems = load_tile_k * lds_b_stride + LDS_PAD_B
 
     # --- LDS allocation ---
     def _align_up(value: int, align: int) -> int:
@@ -408,9 +410,9 @@ def compile_hgemm_splitk_gfx1250(
             return tdm_ops.make_tensor_descriptor_2d(
                 global_ptr=arg_a, lds_memref=lds_a_mem_ref,
                 global_offset=(blk_m, ks_begin + k_base),
-                tensor_shape=(tile_m, tile_k), strides=(K, 1),
-                tile_shape=(tile_m, tile_k), elem_bytes=elem_bytes,
-                pad_interval=tile_k, pad_amount=LDS_PAD_A,
+                tensor_shape=(tile_m, load_tile_k), strides=(K, 1),
+                tile_shape=(tile_m, load_tile_k), elem_bytes=elem_bytes,
+                pad_interval=load_tile_k, pad_amount=LDS_PAD_A,
                 num_warps=num_warps,
                 workgroup_mask=a_mcast_mask)
 
@@ -418,8 +420,8 @@ def compile_hgemm_splitk_gfx1250(
             return tdm_ops.make_tensor_descriptor_2d(
                 global_ptr=arg_b, lds_memref=lds_b_mem_ref,
                 global_offset=(ks_begin + k_base, blk_n),
-                tensor_shape=(tile_k, tile_n), strides=(N, 1),
-                tile_shape=(tile_k, tile_n), elem_bytes=elem_bytes,
+                tensor_shape=(load_tile_k, tile_n), strides=(N, 1),
+                tile_shape=(load_tile_k, tile_n), elem_bytes=elem_bytes,
                 pad_interval=tile_n, pad_amount=LDS_PAD_B,
                 num_warps=num_warps,
                 workgroup_mask=b_mcast_mask)
@@ -581,6 +583,7 @@ def compile_hgemm_splitk_gfx1250(
                 next_b_info=next_b_info)
 
         def compute_tile(accs_in, lds_a_idx, lds_b_idx,
+                         k_offset_steps=0,
                          emit_filler=None, mid_compute_callback=None,
                          fence_wait_fn=None):
             current_accs = list(accs_in)
@@ -590,22 +593,22 @@ def compile_hgemm_splitk_gfx1250(
                 fence_wait_fn()
 
             if k_wmma_steps == 1:
-                b_frags = _load_b_frags(b_buf, b_bases, 0)
+                b_frags = _load_b_frags(b_buf, b_bases, 0 + k_offset_steps)
                 current_accs = _a_streaming_compute(
-                    current_accs, a_buf, a_bases, b_frags, 0,
+                    current_accs, a_buf, a_bases, b_frags, 0 + k_offset_steps,
                     emit_filler=emit_filler,
                     mid_compute_callback=mid_compute_callback)
             else:
-                prev_b = _load_b_frags(b_buf, b_bases, 0)
+                prev_b = _load_b_frags(b_buf, b_bases, 0 + k_offset_steps)
                 for ks_step in range_constexpr(k_wmma_steps - 1):
                     _mid_cb = mid_compute_callback if ks_step == 0 else None
                     current_accs, prev_b = _a_streaming_compute(
-                        current_accs, a_buf, a_bases, prev_b, ks_step,
+                        current_accs, a_buf, a_bases, prev_b, ks_step + k_offset_steps,
                         mid_compute_callback=_mid_cb,
-                        next_b_info=(b_buf, b_bases, ks_step + 1))
+                        next_b_info=(b_buf, b_bases, ks_step + 1 + k_offset_steps))
                 current_accs = _a_streaming_compute(
                     current_accs, a_buf, a_bases, prev_b,
-                    k_wmma_steps - 1,
+                    k_wmma_steps - 1 + k_offset_steps,
                     emit_filler=emit_filler)
 
             return current_accs
@@ -683,12 +686,12 @@ def compile_hgemm_splitk_gfx1250(
         def _l2_prefetch(k_base):
             if _effective_l2_pf <= 0:
                 return
-            pf_k = k_base + arith.index(_effective_l2_pf * tile_k)
+            pf_k = k_base + arith.index(_effective_l2_pf * load_tile_k)
             tdm_ops.l2_prefetch_tile(
-                arg_a, (blk_m, ks_begin + pf_k), (tile_m, tile_k), (K, 1),
+                arg_a, (blk_m, ks_begin + pf_k), (tile_m, load_tile_k), (K, 1),
                 elem_bytes=elem_bytes, thread_id=tx, block_threads=block_threads)
             tdm_ops.l2_prefetch_tile(
-                arg_b, (ks_begin + pf_k, blk_n), (tile_k, tile_n), (N, 1),
+                arg_b, (ks_begin + pf_k, blk_n), (load_tile_k, tile_n), (N, 1),
                 elem_bytes=elem_bytes, thread_id=tx, block_threads=block_threads)
 
         acc_zero = arith.constant_vector(0.0, T.vec(8, T.f32))
@@ -764,8 +767,8 @@ def compile_hgemm_splitk_gfx1250(
         desc_a_init = make_desc_a(stages_a_mem[0], arith.index(0))
         desc_b_init = make_desc_b(stages_b_mem[0], arith.index(0))
 
-        adv_a_i32 = arith.constant(tile_k * elem_bytes, type=T.i32)
-        adv_b_i32 = arith.constant(tile_k * N * elem_bytes, type=T.i32)
+        adv_a_i32 = arith.constant(load_tile_k * elem_bytes, type=T.i32)
+        adv_b_i32 = arith.constant(load_tile_k * N * elem_bytes, type=T.i32)
         pred_const = arith.constant(1, type=T.i32)
 
         addr_lo_a = vector.extract(desc_a_init.dgroup0, static_position=[2], dynamic_position=[])
@@ -838,7 +841,13 @@ def compile_hgemm_splitk_gfx1250(
                 accs_in = compute_tile(
                     accs_in,
                     stages_a_idx[0],
-                    stages_b_idx[0])
+                    stages_b_idx[0],
+                    k_offset_steps=0)
+                accs_in = compute_tile(
+                    accs_in,
+                    stages_a_idx[0],
+                    stages_b_idx[0],
+                    k_offset_steps=compute_k_steps)
                 hot_loop_scheduler()
 
                 # Step 1: fence(0), issue load → buf 0, compute buf 1
@@ -861,7 +870,13 @@ def compile_hgemm_splitk_gfx1250(
                 accs_in = compute_tile(
                     accs_in,
                     stages_a_idx[1],
-                    stages_b_idx[1])
+                    stages_b_idx[1],
+                    k_offset_steps=0)
+                accs_in = compute_tile(
+                    accs_in,
+                    stages_a_idx[1],
+                    stages_b_idx[1],
+                    k_offset_steps=compute_k_steps)
                 hot_loop_scheduler()
 
                 results = yield list(accs_in) + [cur_lo_a, cur_lo_b]
@@ -891,7 +906,13 @@ def compile_hgemm_splitk_gfx1250(
             accs = compute_tile(
                 accs,
                 stages_a_idx[0],
-                stages_b_idx[0])
+                stages_b_idx[0],
+                k_offset_steps=0)
+            accs = compute_tile(
+                accs,
+                stages_a_idx[0],
+                stages_b_idx[0],
+                k_offset_steps=compute_k_steps)
             hot_loop_scheduler()
 
         # --- Epilogue: fence(0), compute last buf, no new load ---
@@ -903,8 +924,20 @@ def compile_hgemm_splitk_gfx1250(
             accs = compute_tile(
                 accs,
                 stages_a_idx[_last_buf],
-                stages_b_idx[_last_buf])
+                stages_b_idx[_last_buf],
+                k_offset_steps=0)
+            accs = compute_tile(
+                accs,
+                stages_a_idx[_last_buf],
+                stages_b_idx[_last_buf],
+                k_offset_steps=compute_k_steps)
         else:
+            accs = compute_tile(
+                accs,
+                stages_a_idx[_last_buf],
+                stages_b_idx[_last_buf],
+                k_offset_steps=0)
+
             def _emit_epi_addrs():
                 epi_addrs_box[0] = epilogue_prepare_addrs()
 
@@ -912,6 +945,7 @@ def compile_hgemm_splitk_gfx1250(
                 accs,
                 stages_a_idx[_last_buf],
                 stages_b_idx[_last_buf],
+                k_offset_steps=compute_k_steps,
                 emit_filler=_emit_epi_addrs)
 
         # --- Epilogue ---
