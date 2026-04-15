@@ -20,6 +20,7 @@ from kernels.moe_gemm_2stage import (
     compile_moe_reduction,
 )
 from kernels.moe_gemm_2stage_common_gfx1250 import (
+    _bf16_to_f16_wrapper,
     _emit_stage1_gate_up_epilogue,
     _emit_stage2_store_epilogue,
     _finalize_alloc_and_launch_2d,
@@ -29,23 +30,6 @@ from kernels.moe_gemm_2stage_common_gfx1250 import (
     _pick_fp16_single_launch_shape,
     _require_gfx1250,
 )
-
-
-def _bf16_to_f16_wrapper(fp16_exe, x_arg: int, w_arg: int):
-    """Wrap a compiled fp16 kernel to accept bf16 inputs."""
-    import torch
-
-    def wrapper(*args, **kwargs):
-        args = list(args)
-        for idx in (x_arg, w_arg):
-            if idx < len(args) and hasattr(args[idx], 'dtype') and args[idx].dtype == torch.bfloat16:
-                args[idx] = args[idx].to(torch.float16)
-        return fp16_exe(*args, **kwargs)
-
-    for attr in ('mode',):
-        if hasattr(fp16_exe, attr):
-            setattr(wrapper, attr, getattr(fp16_exe, attr))
-    return wrapper
 
 @functools.lru_cache(maxsize=64)
 def _compile_stage1_wmma_kernel_impl(
@@ -829,90 +813,10 @@ def _compile_stage2_wmma_kernel_impl(
 # Public API entry points for fp16/bf16
 # ---------------------------------------------------------------------------
 
-@functools.lru_cache(maxsize=256)
-def _compile_moe_stage1_wmma_kernel(
-    *,
-    model_dim: int,
-    inter_dim: int,
-    experts: int,
-    topk: int,
-    route_tile_m: int,
-    tile_n: int,
-    tile_k: int,
-    doweight_stage1: bool,
-    data_format: str,
-    out_dtype: str,
-    waves_per_eu: int | None,
-    expert_sched_mode: bool = True,
-):
-    single_tile_m, single_tile_n, single_m_warp, single_n_warp = _pick_fp16_single_launch_shape(
-        int(route_tile_m), int(tile_n), max_total_warps=8,
-    )
-    exe = _compile_stage1_wmma_kernel_impl(
-        model_dim=int(model_dim),
-        inter_dim=int(inter_dim),
-        experts=int(experts),
-        topk=int(topk),
-        route_tile_m=int(route_tile_m),
-        tile_m=int(single_tile_m),
-        tile_n=int(single_tile_n),
-        tile_k=int(tile_k),
-        m_warp=int(single_m_warp),
-        n_warp=int(single_n_warp),
-        doweight_stage1=bool(doweight_stage1),
-        out_dtype=out_dtype,
-        waves_per_eu=waves_per_eu,
-        expert_sched_mode=expert_sched_mode,
-    )
-    if data_format == "bf16":
-        return _bf16_to_f16_wrapper(exe, x_arg=1, w_arg=2)
-    return exe
-
-
-@functools.lru_cache(maxsize=256)
-def _compile_moe_stage2_wmma_kernel(
-    *,
-    model_dim: int,
-    inter_dim: int,
-    experts: int,
-    topk: int,
-    route_tile_m: int,
-    tile_n: int,
-    tile_k: int,
-    doweight_stage2: bool,
-    data_format: str,
-    out_dtype: str,
-    accumulate: bool,
-    waves_per_eu: int | None,
-    expert_sched_mode: bool = True,
-):
-    single_tile_m, single_tile_n, single_m_warp, single_n_warp = _pick_fp16_single_launch_shape(
-        int(route_tile_m), int(tile_n), max_total_warps=8,
-    )
-    exe = _compile_stage2_wmma_kernel_impl(
-        inter_dim=int(inter_dim),
-        experts=int(experts),
-        topk=int(topk),
-        route_tile_m=int(route_tile_m),
-        tile_m=int(single_tile_m),
-        tile_n=int(single_tile_n),
-        tile_k=int(tile_k),
-        m_warp=int(single_m_warp),
-        n_warp=int(single_n_warp),
-        doweight_stage2=bool(doweight_stage2),
-        out_dtype=out_dtype,
-        accumulate=bool(accumulate),
-        waves_per_eu=waves_per_eu,
-        expert_sched_mode=expert_sched_mode,
-    )
-    if data_format == "bf16":
-        return _bf16_to_f16_wrapper(exe, x_arg=1, w_arg=2)
-    return exe
-
-
 @functools.lru_cache(maxsize=1024)
-def compile_moe_gemm1(
+def _compile_moe_wmma_gemm(
     *,
+    stage: int,
     model_dim: int,
     inter_dim: int,
     experts: int,
@@ -920,144 +824,73 @@ def compile_moe_gemm1(
     tile_m: int,
     tile_n: int,
     tile_k: int,
-    doweight_stage1: bool,
+    doweight: bool,
     in_dtype: str = "fp16",
-    group_size: int = -1,
     out_dtype: str = "f16",
-    use_cshuffle_epilog: bool | None = None,
-    waves_per_eu: int | None = None,
-    expert_sched_mode: bool = True,
-    num_buffers: int = 1,
-    use_tdm_gather: bool = True,
-    use_tdm_store: bool = False,
-    inst_prefetch: bool = False,
-    wave_specialized_tdm: bool = False,
-    cluster_m: int = 1,
-    cluster_n: int = 1,
-):
-    _require_gfx1250()
-    if waves_per_eu is not None and int(waves_per_eu) < 1:
-        raise ValueError(f"waves_per_eu must be >= 1, got {waves_per_eu!r}")
-
-    if in_dtype not in ("fp16", "bf16"):
-        raise ValueError(f"Unsupported in_dtype for WMMA stage1: {in_dtype!r}, expected 'fp16' or 'bf16'")
-
-    return _compile_moe_stage1_wmma_kernel(
-        model_dim=int(model_dim),
-        inter_dim=int(inter_dim),
-        experts=int(experts),
-        topk=int(topk),
-        route_tile_m=int(tile_m),
-        tile_n=int(tile_n),
-        tile_k=int(tile_k),
-        doweight_stage1=bool(doweight_stage1),
-        data_format=in_dtype,
-        out_dtype=out_dtype,
-        waves_per_eu=waves_per_eu,
-        expert_sched_mode=expert_sched_mode,
-    )
-
-
-@functools.lru_cache(maxsize=1024)
-def compile_moe_gemm2(
-    *,
-    model_dim: int,
-    inter_dim: int,
-    experts: int,
-    topk: int,
-    tile_m: int,
-    tile_n: int,
-    tile_k: int,
-    doweight_stage2: bool,
-    in_dtype: str = "fp16",
-    group_size: int = -1,
-    out_dtype: str = "f16",
-    use_cshuffle_epilog: bool | None = None,
     accumulate: bool = True,
     waves_per_eu: int | None = None,
     expert_sched_mode: bool = True,
-    num_buffers: int = 1,
-    use_tdm_gather: bool = True,
-    use_tdm_store: bool = False,
-    inst_prefetch: bool = False,
-    wave_specialized_tdm: bool = False,
-    cluster_m: int = 1,
-    cluster_n: int = 1,
 ):
     _require_gfx1250()
     if waves_per_eu is not None and int(waves_per_eu) < 1:
         raise ValueError(f"waves_per_eu must be >= 1, got {waves_per_eu!r}")
-
     if in_dtype not in ("fp16", "bf16"):
-        raise ValueError(f"Unsupported in_dtype for WMMA stage2: {in_dtype!r}, expected 'fp16' or 'bf16'")
+        raise ValueError(
+            f"Unsupported in_dtype for WMMA stage{stage}: {in_dtype!r}, "
+            "expected 'fp16' or 'bf16'"
+        )
 
-    return _compile_moe_stage2_wmma_kernel(
-        model_dim=int(model_dim),
+    single_tile_m, single_tile_n, single_m_warp, single_n_warp = _pick_fp16_single_launch_shape(
+        int(tile_m), int(tile_n), max_total_warps=8,
+    )
+    common = dict(
         inter_dim=int(inter_dim),
         experts=int(experts),
         topk=int(topk),
         route_tile_m=int(tile_m),
-        tile_n=int(tile_n),
+        tile_m=int(single_tile_m),
+        tile_n=int(single_tile_n),
         tile_k=int(tile_k),
-        doweight_stage2=bool(doweight_stage2),
-        data_format=in_dtype,
+        m_warp=int(single_m_warp),
+        n_warp=int(single_n_warp),
         out_dtype=out_dtype,
-        accumulate=bool(accumulate),
         waves_per_eu=waves_per_eu,
         expert_sched_mode=expert_sched_mode,
     )
 
-
-def compile_moe_gemm2_ex(
-    *,
-    model_dim: int,
-    inter_dim: int,
-    experts: int,
-    topk: int,
-    tile_m: int,
-    tile_n: int,
-    tile_k: int,
-    doweight_stage2: bool,
-    in_dtype: str = "fp16",
-    group_size: int = -1,
-    out_dtype: str = "f16",
-    use_cshuffle_epilog: bool | None = None,
-    waves_per_eu: int | None = None,
-    mode: str = MoeGemm2Mode.ATOMIC,
-    valid_mask=None,
-    zero_intermediate: bool = True,
-    expert_sched_mode: bool = True,
-    num_buffers: int = 1,
-    use_tdm_gather: bool = True,
-    use_tdm_store: bool = False,
-    inst_prefetch: bool = False,
-    wave_specialized_tdm: bool = False,
-    cluster_m: int = 1,
-    cluster_n: int = 1,
-):
-    _require_gfx1250()
-    if in_dtype not in ("fp16", "bf16"):
-        raise ValueError(f"Unsupported in_dtype for WMMA gemm2_ex: {in_dtype!r}, expected 'fp16' or 'bf16'")
-
-    if mode == MoeGemm2Mode.REDUCE:
-        gemm2_exe = compile_moe_gemm2(
-            model_dim=model_dim,
-            inter_dim=inter_dim,
-            experts=experts,
-            topk=topk,
-            tile_m=tile_m,
-            tile_n=tile_n,
-            tile_k=tile_k,
-            doweight_stage2=doweight_stage2,
-            in_dtype=in_dtype,
-            group_size=group_size,
-            out_dtype=out_dtype,
-            use_cshuffle_epilog=use_cshuffle_epilog,
-            accumulate=False,
-            waves_per_eu=waves_per_eu,
-            expert_sched_mode=expert_sched_mode,
+    if stage == 1:
+        exe = _compile_stage1_wmma_kernel_impl(
+            model_dim=int(model_dim), doweight_stage1=bool(doweight), **common,
         )
-        out_s = str(out_dtype).strip().lower()
+    else:
+        exe = _compile_stage2_wmma_kernel_impl(
+            doweight_stage2=bool(doweight), accumulate=bool(accumulate), **common,
+        )
+
+    if in_dtype == "bf16":
+        return _bf16_to_f16_wrapper(exe, x_arg=1, w_arg=2)
+    return exe
+
+
+def compile_moe_gemm1(*, doweight_stage1, group_size=-1, use_cshuffle_epilog=None,
+                       num_buffers=1, use_tdm_gather=True, use_tdm_store=False,
+                       inst_prefetch=False, wave_specialized_tdm=False,
+                       cluster_m=1, cluster_n=1, **kw):
+    return _compile_moe_wmma_gemm(stage=1, doweight=doweight_stage1, **kw)
+
+
+def compile_moe_gemm2(*, doweight_stage2, accumulate=True, group_size=-1,
+                       use_cshuffle_epilog=None,
+                       num_buffers=1, use_tdm_gather=True, use_tdm_store=False,
+                       inst_prefetch=False, wave_specialized_tdm=False,
+                       cluster_m=1, cluster_n=1, **kw):
+    return _compile_moe_wmma_gemm(stage=2, doweight=doweight_stage2, accumulate=accumulate, **kw)
+
+
+def compile_moe_gemm2_ex(*, mode=MoeGemm2Mode.ATOMIC, valid_mask=None, zero_intermediate=True, **kw):
+    if mode == MoeGemm2Mode.REDUCE:
+        gemm2_exe = compile_moe_gemm2(accumulate=False, **kw)
+        out_s = str(kw.get("out_dtype", "f16")).strip().lower()
         if out_s in ("f16", "fp16", "half"):
             dtype_str = "f16"
         elif out_s in ("bf16", "bfloat16"):
@@ -1065,36 +898,15 @@ def compile_moe_gemm2_ex(
         else:
             dtype_str = "f32"
         reduce_exe = compile_moe_reduction(
-            topk=topk,
-            model_dim=model_dim,
-            dtype_str=dtype_str,
-            use_mask=(valid_mask is not None),
+            topk=kw["topk"], model_dim=kw["model_dim"],
+            dtype_str=dtype_str, use_mask=(valid_mask is not None),
         )
         from kernels.moe_gemm_2stage import _MoeGemm2ReduceWrapper
-
         return _MoeGemm2ReduceWrapper(
-            gemm2_exe=gemm2_exe,
-            reduce_exe=reduce_exe,
-            topk=topk,
-            model_dim=model_dim,
+            gemm2_exe=gemm2_exe, reduce_exe=reduce_exe,
+            topk=kw["topk"], model_dim=kw["model_dim"],
             out_dtype_str=dtype_str,
             use_mask=(valid_mask is not None),
             zero_intermediate=zero_intermediate,
         )
-    return compile_moe_gemm2(
-        model_dim=model_dim,
-        inter_dim=inter_dim,
-        experts=experts,
-        topk=topk,
-        tile_m=tile_m,
-        tile_n=tile_n,
-        tile_k=tile_k,
-        doweight_stage2=doweight_stage2,
-        in_dtype=in_dtype,
-        group_size=group_size,
-        out_dtype=out_dtype,
-        use_cshuffle_epilog=use_cshuffle_epilog,
-        accumulate=True,
-        waves_per_eu=waves_per_eu,
-        expert_sched_mode=expert_sched_mode,
-    )
+    return compile_moe_gemm2(accumulate=True, **kw)
