@@ -37,6 +37,7 @@ except ImportError:
 
 try:
     from kernels.pa_decode_fp8 import (
+        get_sw_ps_max_context_partition_num,
         get_pa_metadata as flydsl_get_pa_metadata,
         pa_decode_ps_launch as flydsl_ps_launch,
     )
@@ -59,7 +60,11 @@ STR_DTYPE_TO_TORCH_DTYPE = {
     "fp8": torch.uint8,
 }
 
-CASE_SET_NAME_OPTIONS = ["normal_accuracy", "sliding_window_accuracy"]
+CASE_SET_NAME_OPTIONS = [
+    "normal_accuracy",
+    "sliding_window_accuracy",
+    "global_window_accuracy",
+]
 
 COMPUTE_TYPE_OPTIONS = ["fp8"]
 KV_VARLEN_OPTIONS = [False, True]
@@ -73,6 +78,7 @@ QUERY_LENGTH_OPTIONS = [1, 2, 3, 4]
 CONTEXT_LENGTH_OPTIONS = [1027]
 BATCH_SIZE_OPTIONS = [3, 81]
 SLIDING_WINDOW_OPTIONS = [0]
+GLOBAL_WINDOW_OPTIONS = [0]
 
 
 def setup_seed(seed: int) -> None:
@@ -198,15 +204,18 @@ def create_kv_cache(
     return key_caches, value_caches
 
 
+
 def reference_masked_attention(
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
     softmax_scale: float,
     output_dtype: torch.dtype,
-    *,
-    sliding_window: int = 0,
+    is_causal: bool = True,
+    sliding_window=0,
+    global_window=0,
 ) -> torch.Tensor:
+    """Reference implementation of masked attention."""
     query = query.to(torch.float32)
     key = key.to(torch.float32)
     value = value.to(torch.float32)
@@ -216,25 +225,54 @@ def reference_masked_attention(
     s_k = key.shape[0]
     key = key.repeat_interleave(num_query_heads // num_kv_heads, dim=1)
     value = value.repeat_interleave(num_query_heads // num_kv_heads, dim=1)
+
     attention_weights = torch.einsum("qhd,khd->hqk", query, key) * softmax_scale
-    causal_mask = torch.ones(s_q, s_k, dtype=torch.bool, device=query.device).tril(
-        diagonal=s_k - s_q
-    )
-    attention_weights = attention_weights.masked_fill(
-        ~causal_mask.unsqueeze(0), float(-3.4e38)
-    )
-    if sliding_window > 0:
-        if s_q == s_k:
-            query_positions = torch.arange(s_q, device=query.device)
-            key_positions = torch.arange(s_k, device=query.device)
-        else:
-            query_positions = torch.arange(s_k, s_k + s_q, device=query.device)
-            key_positions = torch.arange(s_k, device=query.device)
-        pos_diff = query_positions.unsqueeze(1) - key_positions.unsqueeze(0)
-        sliding_window_mask = (pos_diff < 0) | (pos_diff >= sliding_window)
-        attention_weights = attention_weights.masked_fill(
-            sliding_window_mask.unsqueeze(0), float("-inf")
+
+    if is_causal:
+        query_len = query.shape[0]
+        key_len = key.shape[0]
+        attention_bias = torch.zeros(
+            query_len, key_len, dtype=torch.float32, device=query.device
         )
+        causal_mask = torch.ones(
+            query_len, key_len, dtype=torch.bool, device=query.device
+        ).tril(diagonal=key_len - query_len)
+        # attention_bias.masked_fill_(causal_mask.logical_not(), float(-3.4e38))
+        attention_bias.masked_fill_(causal_mask.logical_not(), float(-3.4e38))
+        attention_weights += attention_bias
+
+    # Handle position calculation for both context and generation phases
+    if s_q == s_k:
+        # Context phase: standard position calculation
+        query_positions = torch.arange(s_q, device=query.device)
+        key_positions = torch.arange(s_k, device=query.device)
+    else:
+        # Generation phase: query is at position s_k (after the cache)
+        query_positions = torch.arange(
+            s_k - s_q, s_k, device=query.device
+        )  # [s_k] for s_q=1
+        key_positions = torch.arange(s_k, device=query.device)  # [0,1,2,...,s_k-1]
+
+    # Create position difference matrix: query_pos - key_pos
+    pos_diff = query_positions.unsqueeze(1) - key_positions.unsqueeze(0)  # [s_q, s_k]
+
+    # Fallback: initialize the mask to all True, then progressively tighten with AND
+    window_mask = torch.ones_like(attention_weights, dtype=torch.bool)
+    if sliding_window > 0:
+        # Sliding window mask: allow attention only if 0 <= pos_diff < sliding_window_size
+        # sliding window size does not cover the diagonals
+        sliding_window_mask = pos_diff >= sliding_window + 1
+        window_mask &= sliding_window_mask
+
+    if global_window > 0:
+        # Global window mask: allow attention only if key_positions <= global_window
+        global_window_mask = key_positions.unsqueeze(0) >= global_window
+        window_mask &= global_window_mask
+
+    if sliding_window > 0 or global_window > 0:
+        attention_weights.masked_fill_(window_mask, float("-inf"))
+    # torch.save(attention_weights, "/data00/fengjunda.aml/debug/attention_weights.pt")
+
     attention_weights = torch.softmax(attention_weights, dim=-1)
     output = torch.einsum("hqk,khd->qhd", attention_weights, value)
     return output.to(output_dtype)
@@ -249,13 +287,16 @@ def torch_mha_extend(
     query_output_indptr: torch.Tensor,
     key_scale: Optional[torch.Tensor] = None,
     value_scale: Optional[torch.Tensor] = None,
-    *,
-    sliding_window: int = 0,
+    sliding_window=0,
+    global_window=0,
 ) -> torch.Tensor:
-    _, num_heads, head_size, block_size = value_cache.shape
+    """PyTorch reference implementation of paged attention."""
+    num_blocks, num_heads, head_size, block_size = value_cache.shape
     softmax_scale = 1.0 / (head_size**0.5)
+
     output_dtype = query.dtype
     kv_dtype = key_cache.dtype
+
     queries_split = torch.tensor_split(query, query_output_indptr.tolist()[1:])
     key_cache_flat = (
         key_cache.permute(0, 3, 1, 2, 4).contiguous().view(-1, num_heads, head_size)
@@ -263,38 +304,50 @@ def torch_mha_extend(
     value_cache_flat = (
         value_cache.permute(0, 3, 1, 2).contiguous().view(-1, num_heads, head_size)
     )
+
     batch_size = query_output_indptr.shape[0] - 1
     outputs = []
+
     for batch_idx in range(batch_size):
         current_query = queries_split[batch_idx]
         current_block_table = block_tables[batch_idx]
         current_context_length = context_lengths[batch_idx].item()
+
         token_indices = (
             current_block_table.repeat_interleave(block_size)[:current_context_length]
             * block_size
             + torch.arange(current_context_length, device=current_block_table.device)
             % block_size
         )
+
         gathered_keys = (
-            key_cache_flat.view(torch.int8)[token_indices].view(kv_dtype).to(torch.float32)
+            key_cache_flat.view(torch.int8)[token_indices]
+            .view(kv_dtype)
+            .to(torch.float)
         )
         if key_scale is not None:
             gathered_keys *= key_scale[:, token_indices].t().unsqueeze(-1)
+
         gathered_values = (
-            value_cache_flat.view(torch.int8)[token_indices].view(kv_dtype).to(torch.float32)
+            value_cache_flat.view(torch.int8)[token_indices]
+            .view(kv_dtype)
+            .to(torch.float)
         )
         if value_scale is not None:
             gathered_values *= value_scale[:, token_indices].t().unsqueeze(-1)
-        outputs.append(
-            reference_masked_attention(
-                current_query,
-                gathered_keys,
-                gathered_values,
-                softmax_scale,
-                output_dtype,
-                sliding_window=sliding_window,
-            )
+
+        attention_output = reference_masked_attention(
+            current_query,
+            gathered_keys,
+            gathered_values,
+            softmax_scale,
+            output_dtype,
+            is_causal=True,
+            sliding_window=sliding_window,
+            global_window=global_window,
         )
+        outputs.append(attention_output)
+
     return torch.cat(outputs)
 
 
@@ -442,9 +495,14 @@ def get_gluon_partition_count(
     block_size: int,
     context_partition_size: int,
     sliding_window: int,
+    global_window: int,
 ) -> int:
     if sliding_window > 0:
-        return triton.cdiv(sliding_window, context_partition_size) + 1
+        return get_sw_ps_max_context_partition_num(
+            sliding_window,
+            global_window,
+            context_partition_size,
+        )
     split_kv_blocks = triton.cdiv(block_size, context_partition_size)
     return get_recommended_splits(num_seqs, num_kv_heads, split_kv_blocks)
 
@@ -469,6 +527,7 @@ def run_gluon_ps(
     temporary_output: torch.Tensor,
     *,
     sliding_window: int,
+    global_window: int,
 ) -> None:
     torch.ops.aiter.pa_decode_gluon(
         output,
@@ -491,6 +550,7 @@ def run_gluon_ps(
         alibi_slopes=None,
         sinks=None,
         sliding_window=sliding_window,
+        global_window=global_window,
         ps=True,
     )
 
@@ -527,7 +587,9 @@ def run_flydsl_ps(
     metadata: Dict[str, torch.Tensor],
     *,
     sliding_window: int,
+    global_window: int,
     block_tables: torch.Tensor,
+    max_context_partition_num: int,
 ) -> None:
     flydsl_ps_launch(
         output,
@@ -542,8 +604,10 @@ def run_flydsl_ps(
         key_scale=key_scale,
         value_scale=value_scale,
         sliding_window=sliding_window,
+        global_window=global_window,
         metadata=metadata,
         block_tables=block_tables,
+        max_context_partition_num=max_context_partition_num,
     )
 
 
@@ -602,6 +666,7 @@ def run_pa_decode_ps_test(
     trans_v: bool,
     kv_varlen: bool,
     sliding_window: int,
+    global_window: int,
 ) -> Dict[str, Union[float, int, str, bool, Tuple[int, int]]]:
     if not HAS_FLYDSL_PS:
         raise RuntimeError("FlyDSL `pa_decode_ps_launch` is not available.")
@@ -624,6 +689,7 @@ def run_pa_decode_ps_test(
         "query_length": query_length,
         "head_size": head_size,
         "sliding_window": sliding_window,
+        "global_window": global_window,
         "quant_q": False,
         "quant_kv": True,
     }
@@ -722,6 +788,7 @@ def run_pa_decode_ps_test(
         key_scale_factors_flat,
         value_scale_factors_flat,
         sliding_window=sliding_window,
+        global_window=global_window,
     ).to(data_type)
     quantized_values = shuffle_value_cache_layout(quantized_values) if trans_v else quantized_values
     if HAS_GLUON:
@@ -731,6 +798,7 @@ def run_pa_decode_ps_test(
             block_size,
             context_partition_size,
             sliding_window,
+            global_window,
         )
         equivalent_query_group_size = query_length * (num_query_heads // num_kv_heads)
         intermediate_shape = (
@@ -769,6 +837,7 @@ def run_pa_decode_ps_test(
                 max_logits,
                 temporary_output,
                 sliding_window=sliding_window,
+                global_window=global_window,
             )
 
         gluon_time = measure_us(gluon_call)
@@ -807,6 +876,12 @@ def run_pa_decode_ps_test(
         ps_key_scale = key_scale_original
         ps_value_scale = value_scale_original
     flydsl_ps_output = torch.empty_like(reference_output)
+    
+    max_context_partition_num = get_sw_ps_max_context_partition_num(
+        sliding_window,
+        global_window,
+        context_partition_size,
+    )
 
     def flydsl_ps_call() -> None:
         run_flydsl_ps(
@@ -823,7 +898,9 @@ def run_pa_decode_ps_test(
             ps_value_scale,
             ps_metadata,
             sliding_window=sliding_window,
+            global_window=global_window,
             block_tables=block_tables,
+            max_context_partition_num=max_context_partition_num,
         )
 
     flydsl_ps_time = measure_us(flydsl_ps_call)
@@ -908,6 +985,12 @@ def create_argument_parser() -> argparse.ArgumentParser:
         help="Sliding window size; 0 disables sliding window",
     )
     parser.add_argument(
+        "--global_window",
+        type=int,
+        default=None,
+        help="Global prefix size; tokens with index < global_window stay visible",
+    )
+    parser.add_argument(
         "--sample_rate",
         type=float,
         default=1.0,
@@ -929,6 +1012,7 @@ def process_arguments(args: argparse.Namespace) -> tuple:
     kv_varlen = KV_VARLEN_OPTIONS
     context_partition_sizes = CONTEXT_PARTITION_SIZE_OPTIONS
     sliding_window_options = SLIDING_WINDOW_OPTIONS
+    global_window_options = GLOBAL_WINDOW_OPTIONS
     if args.compute_type is not None:
         compute_types = [dtypes.d_dtypes[args.compute_type]]
     if args.num_heads is not None:
@@ -953,6 +1037,8 @@ def process_arguments(args: argparse.Namespace) -> tuple:
         context_partition_sizes = [args.context_partition_size]
     if args.sliding_window is not None:
         sliding_window_options = [args.sliding_window]
+    if args.global_window is not None:
+        global_window_options = [args.global_window]
     return (
         block_sizes,
         head_configs,
@@ -967,6 +1053,7 @@ def process_arguments(args: argparse.Namespace) -> tuple:
         context_partition_sizes,
         args.sample_rate,
         sliding_window_options,
+        global_window_options,
     )
 
 
@@ -985,7 +1072,8 @@ def _run_single_test(args: Tuple[Dict[str, object], int, int]) -> Dict[str, obje
         f"batch_size={test_config['batch_size']}, "
         f"query_length={test_config['query_length']}, "
         f"head_size={test_config['head_size']}, "
-        f"sliding_window={test_config['sliding_window']}"
+        f"sliding_window={test_config['sliding_window']}, "
+        f"global_window={test_config['global_window']}"
     )
     return run_pa_decode_ps_test(**test_config)
 
@@ -1005,6 +1093,7 @@ def run_multi_pa_decode_ps_test(
     *,
     sample_rate: float = 1.0,
     sliding_window_options: List[int],
+    global_window_options: List[int],
 ) -> pd.DataFrame:
     test_configs: List[Dict[str, object]] = []
     for compute_type in compute_types:
@@ -1019,22 +1108,26 @@ def run_multi_pa_decode_ps_test(
                                         for context_length in context_lengths:
                                             for head_config in head_configs:
                                                 for sliding_window in sliding_window_options:
-                                                    test_configs.append(
-                                                        {
-                                                            "compute_type": compute_type,
-                                                            "quant_mode": quant_mode,
-                                                            "trans_v": trans_v_mode,
-                                                            "kv_varlen": kv_varlen_mode,
-                                                            "context_partition_size": context_partition_size,
-                                                            "block_size": block_size,
-                                                            "num_heads": head_config,
-                                                            "context_length": context_length,
-                                                            "batch_size": batch_size,
-                                                            "query_length": query_length,
-                                                            "head_size": head_size,
-                                                            "sliding_window": sliding_window,
-                                                        }
-                                                    )
+                                                    for global_window in global_window_options:
+                                                        if global_window > 0 and sliding_window <= 0:
+                                                            continue
+                                                        test_configs.append(
+                                                            {
+                                                                "compute_type": compute_type,
+                                                                "quant_mode": quant_mode,
+                                                                "trans_v": trans_v_mode,
+                                                                "kv_varlen": kv_varlen_mode,
+                                                                "context_partition_size": context_partition_size,
+                                                                "block_size": block_size,
+                                                                "num_heads": head_config,
+                                                                "context_length": context_length,
+                                                                "batch_size": batch_size,
+                                                                "query_length": query_length,
+                                                                "head_size": head_size,
+                                                                "sliding_window": sliding_window,
+                                                                "global_window": global_window,
+                                                            }
+                                                        )
     total = len(test_configs)
     print(f"\nTotal test cases: {total}")
     if sample_rate < 1.0:
@@ -1073,6 +1166,7 @@ def parse_arg_and_run_test(sample_rate0: float = None, *, output_tag: str = TEST
         context_partition_sizes,
         sample_rate1,
         sliding_window_options,
+        global_window_options,
     ) = process_arguments(args)
     sample_rate = sample_rate1 if sample_rate0 is None else sample_rate0
     results_df = run_multi_pa_decode_ps_test(
@@ -1089,6 +1183,7 @@ def parse_arg_and_run_test(sample_rate0: float = None, *, output_tag: str = TEST
         context_partition_sizes,
         sample_rate=sample_rate,
         sliding_window_options=sliding_window_options,
+        global_window_options=global_window_options,
     )
     output_file = (
         f"run_pa_decode_ps_test.{output_tag}.block_size_{block_sizes[0]}.triton.{TRITON_VERSION}.csv"
@@ -1119,6 +1214,7 @@ def normal_accuracy_test() -> None:
     global KV_VARLEN_OPTIONS
     global CONTEXT_PARTITION_SIZE_OPTIONS
     global SLIDING_WINDOW_OPTIONS
+    global GLOBAL_WINDOW_OPTIONS
     COMPUTE_TYPE_OPTIONS = ["fp8"]
     CONTEXT_PARTITION_SIZE_OPTIONS = [256]
     HEAD_DIMENSION_OPTIONS = [128]
@@ -1131,6 +1227,7 @@ def normal_accuracy_test() -> None:
     KV_VARLEN_OPTIONS = [False, True]
     BLOCK_SIZE_OPTIONS = [1024]
     SLIDING_WINDOW_OPTIONS = [0]
+    GLOBAL_WINDOW_OPTIONS = [0]
     parse_arg_and_run_test(output_tag="ps_normal_accuracy")
 
 
@@ -1147,6 +1244,7 @@ def sliding_window_accuracy_test() -> None:
     global KV_VARLEN_OPTIONS
     global CONTEXT_PARTITION_SIZE_OPTIONS
     global SLIDING_WINDOW_OPTIONS
+    global GLOBAL_WINDOW_OPTIONS
     COMPUTE_TYPE_OPTIONS = ["fp8"]
     CONTEXT_PARTITION_SIZE_OPTIONS = [256]
     HEAD_DIMENSION_OPTIONS = [128]
@@ -1159,7 +1257,39 @@ def sliding_window_accuracy_test() -> None:
     KV_VARLEN_OPTIONS = [True]
     BLOCK_SIZE_OPTIONS = [1024]
     SLIDING_WINDOW_OPTIONS = [0, 128, 1023]
+    GLOBAL_WINDOW_OPTIONS = [0]
     parse_arg_and_run_test(output_tag="ps_sliding_window_accuracy")
+
+
+def global_window_accuracy_test() -> None:
+    global BLOCK_SIZE_OPTIONS
+    global QUERY_LENGTH_OPTIONS
+    global BATCH_SIZE_OPTIONS
+    global HEAD_CONFIGURATIONS
+    global CONTEXT_LENGTH_OPTIONS
+    global COMPUTE_TYPE_OPTIONS
+    global QUANT_MODE_OPTIONS
+    global HEAD_DIMENSION_OPTIONS
+    global TRANS_V_OPTIONS
+    global KV_VARLEN_OPTIONS
+    global CONTEXT_PARTITION_SIZE_OPTIONS
+    global SLIDING_WINDOW_OPTIONS
+    global GLOBAL_WINDOW_OPTIONS
+    COMPUTE_TYPE_OPTIONS = ["fp8"]
+    CONTEXT_PARTITION_SIZE_OPTIONS = [256]
+    HEAD_DIMENSION_OPTIONS = [128]
+    HEAD_CONFIGURATIONS = [(4, 1), (8, 2)]
+    QUERY_LENGTH_OPTIONS = [1, 2, 3, 4]
+    QUANT_MODE_OPTIONS = ["per_token"]
+    CONTEXT_LENGTH_OPTIONS = [512, 1024, 8192]
+    BATCH_SIZE_OPTIONS = [1,4,32]
+    TRANS_V_OPTIONS = [True]
+    KV_VARLEN_OPTIONS = [True]
+    BLOCK_SIZE_OPTIONS = [1024]
+    SLIDING_WINDOW_OPTIONS = [1023]
+    GLOBAL_WINDOW_OPTIONS = [3]
+
+    parse_arg_and_run_test(output_tag="ps_global_window_accuracy")
 
 
 @pytest.mark.parametrize("case_set_name", CASE_SET_NAME_OPTIONS)
@@ -1168,9 +1298,12 @@ def test_multi_case_set(case_set_name: str) -> None:
         normal_accuracy_test()
     elif case_set_name == "sliding_window_accuracy":
         sliding_window_accuracy_test()
+    elif case_set_name == "global_window_accuracy":
+        global_window_accuracy_test()
     else:
         raise ValueError(f"Unsupported case set: {case_set_name}")
 
 
 if __name__ == "__main__":
-    sliding_window_accuracy_test()
+    # sliding_window_accuracy_test()
+    global_window_accuracy_test()

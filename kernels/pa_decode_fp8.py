@@ -13,6 +13,8 @@ from __future__ import annotations
 import math
 import torch
 import functools
+import triton
+import triton.language as tl
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.expr import arith, vector, gpu, rocdl, buffer_ops, range_constexpr
@@ -391,6 +393,7 @@ def _make_pa_phase_helpers(
     c_w,
     neg_inf,
     zero_f,
+    global_window_limit=None,
 ):
     apply_causal_mask = needs_mask or query_length > 1
 
@@ -491,9 +494,19 @@ def _make_pa_phase_helpers(
                 d_out.append(acc * vector.broadcast(T.f32x4, scale))
 
         apply_window_mask = seq_start is not None
+        apply_global_window = global_window_limit is not None
+        apply_range_mask = apply_window_mask or apply_global_window
+
+        def _is_visible_token(kv_tok):
+            if apply_window_mask and apply_global_window:
+                return (kv_tok >= seq_start) | (kv_tok < global_window_limit)
+            if apply_window_mask:
+                return kv_tok >= seq_start
+            return kv_tok < global_window_limit
+
         kv_tok_base = (
             partition_start + kv_tok_thread_base
-            if apply_causal_mask or apply_window_mask
+            if apply_causal_mask or apply_range_mask
             else None
         )
         qk_max = neg_inf
@@ -504,8 +517,8 @@ def _make_pa_phase_helpers(
                     kv_tok = kv_tok_base + arith.constant(td * MFMA_N + i, type=T.i32)
                     if apply_causal_mask:
                         s = arith.select(kv_tok < causal_bound, s, neg_inf)
-                    if apply_window_mask:
-                        s = arith.select(kv_tok > seq_start, s, neg_inf)
+                    if apply_range_mask:
+                        s = arith.select(_is_visible_token(kv_tok), s, neg_inf)
                 qk_max = qk_max.maximumf(s)
         for sh in [32, 16]:
             qk_max = qk_max.maximumf(
@@ -529,8 +542,8 @@ def _make_pa_phase_helpers(
                     kv_tok = kv_tok_base + arith.constant(td * MFMA_N + i, type=T.i32)
                     if apply_causal_mask:
                         p = arith.select(kv_tok < causal_bound, p, zero_f)
-                    if apply_window_mask:
-                        p = arith.select(kv_tok > seq_start, p, zero_f)
+                    if apply_range_mask:
+                        p = arith.select(_is_visible_token(kv_tok), p, zero_f)
                 exp_sum = exp_sum + p
                 d_out[td] = vector.insert(
                     p, d_out[td], static_position=[i], dynamic_position=[]
@@ -557,8 +570,8 @@ def _make_pa_phase_helpers(
                         )
                         if apply_causal_mask:
                             vs_i = arith.select(kv_tok < causal_bound, vs_i, zero_f)
-                        if apply_window_mask:
-                            vs_i = arith.select(kv_tok > seq_start, vs_i, zero_f)
+                        if apply_range_mask:
+                            vs_i = arith.select(_is_visible_token(kv_tok), vs_i, zero_f)
                         vs = vector.insert(
                             vs_i, vs, static_position=[i], dynamic_position=[]
                         )
@@ -925,8 +938,16 @@ def compile_pa_decode_ps(
         ks_rsrc = buffer_ops.create_buffer_resource(key_scale_ptr, max_size=True)
         vs_rsrc = buffer_ops.create_buffer_resource(value_scale_ptr, max_size=True)
         q_scale_val = buffer_ops.buffer_load(qs_rsrc, arith.constant(0, type=T.i32), vec_width=1)
-        k_scale_val = buffer_ops.buffer_load(ks_rsrc, arith.constant(0, type=T.i32), vec_width=1)
-        v_scale_val = buffer_ops.buffer_load(vs_rsrc, arith.constant(0, type=T.i32), vec_width=1)
+        if per_token_kv:
+            k_scale_val = arith.constant(1.0, type=T.f32)
+            v_scale_val = arith.constant(1.0, type=T.f32)
+        else:
+            k_scale_val = buffer_ops.buffer_load(
+                ks_rsrc, arith.constant(0, type=T.i32), vec_width=1
+            )
+            v_scale_val = buffer_ops.buffer_load(
+                vs_rsrc, arith.constant(0, type=T.i32), vec_width=1
+            )
 
         # ── LDS views ──
         smem_base = allocator.get_base()
@@ -1398,6 +1419,229 @@ def _get_query_input_dtype(query: torch.Tensor) -> str:
     )
 
 
+def get_sw_ps_max_context_partition_num(
+    sliding_window: int,
+    global_window: int = 0,
+    context_partition_size: int = KV_COMPUTE_BLOCK,
+) -> int:
+    if sliding_window <= 0:
+        return 0
+    return (
+        triton.cdiv(sliding_window, context_partition_size)
+        + 1
+        + triton.cdiv(global_window, context_partition_size)
+    )
+
+
+@triton.jit
+def paged_attention_decode_v2_reduce_explicit_kernel(
+    output_ptr,  # [batch, query_length, kv_heads, query_group_size, head_size]
+    exp_sums_ptr,  # [batch, kv_heads, max_parts, eqgs]
+    max_logits_ptr,  # [batch, kv_heads, max_parts, eqgs]
+    logits_ptr,  # [batch, kv_heads, max_parts, eqgs, head_size]
+    stride_output_bs,
+    stride_output_len,
+    stride_output_kv_head,
+    stride_output_group_size,
+    stride_exp_sums_seq,
+    stride_exp_sums_head,
+    stride_exp_sums_part,
+    stride_logits_seq,
+    stride_logits_head,
+    stride_logits_part,
+    stride_logits_group,
+    head_size,
+    context_partition_num,
+    query_seq_len,
+    query_group_size,
+    QUERY_SEQ_LEN_POW2: tl.constexpr,
+    ONE_QUERY_GROUP_SIZE_POW2: tl.constexpr,
+    HEAD_SIZE_POW2: tl.constexpr,
+    MAX_CONTEXT_PARTITION_NUM: tl.constexpr,
+):
+    sequence_idx = tl.program_id(0)
+    kv_head_idx = tl.program_id(1)
+
+    output_len_offsets = tl.arange(0, QUERY_SEQ_LEN_POW2)
+    output_group_offsets = tl.arange(0, ONE_QUERY_GROUP_SIZE_POW2)
+    query_group_offsets_mtp = tl.arange(0, QUERY_SEQ_LEN_POW2 * ONE_QUERY_GROUP_SIZE_POW2)
+    query_len_idx = query_group_offsets_mtp // ONE_QUERY_GROUP_SIZE_POW2
+    group_idx_in_len = query_group_offsets_mtp % ONE_QUERY_GROUP_SIZE_POW2
+    query_group_offsets = query_len_idx * query_group_size + group_idx_in_len
+    head_size_offsets = tl.arange(0, HEAD_SIZE_POW2)
+
+    query_group_mask = (output_len_offsets[:, None] < query_seq_len) & (
+        output_group_offsets[None, :] < query_group_size
+    )
+    query_group_mask = tl.reshape(query_group_mask, [QUERY_SEQ_LEN_POW2 * ONE_QUERY_GROUP_SIZE_POW2])
+
+    global_max = tl.where(
+        query_group_mask,
+        tl.full((QUERY_SEQ_LEN_POW2 * ONE_QUERY_GROUP_SIZE_POW2,), float("-inf"), dtype=tl.float32),
+        tl.zeros((QUERY_SEQ_LEN_POW2 * ONE_QUERY_GROUP_SIZE_POW2,), dtype=tl.float32),
+    )
+    global_max_prev = global_max
+    global_exp_sum = tl.zeros((QUERY_SEQ_LEN_POW2 * ONE_QUERY_GROUP_SIZE_POW2,), dtype=tl.float32)
+    final_output = tl.zeros(
+        (QUERY_SEQ_LEN_POW2 * ONE_QUERY_GROUP_SIZE_POW2, HEAD_SIZE_POW2), dtype=tl.float32
+    )
+
+    num_iterations = tl.cdiv(context_partition_num, MAX_CONTEXT_PARTITION_NUM)
+
+    for iter_idx in range(num_iterations):
+        partition_base = iter_idx * MAX_CONTEXT_PARTITION_NUM
+        partition_offsets = tl.arange(0, MAX_CONTEXT_PARTITION_NUM) + partition_base
+
+        exp_sums_offsets = (
+            sequence_idx * stride_exp_sums_seq
+            + kv_head_idx * stride_exp_sums_head
+            + partition_offsets[:, None] * stride_exp_sums_part
+            + query_group_offsets[None, :]
+        )
+        exp_sums_mask = (
+            partition_offsets[:, None] < context_partition_num
+        ) & query_group_mask[None, :]
+
+        max_logits = tl.load(
+            max_logits_ptr + exp_sums_offsets, mask=exp_sums_mask, other=float("-inf")
+        )
+        exp_sums = tl.load(
+            exp_sums_ptr + exp_sums_offsets, mask=exp_sums_mask, other=0.0
+        )
+
+        chunk_max_logits = tl.max(max_logits, axis=0)
+        global_max = tl.maximum(global_max, chunk_max_logits)
+        update_scale = tl.where(
+            global_max_prev > float("-inf"),
+            tl.exp(global_max_prev - global_max),
+            0.0,
+        )
+        rescale = tl.where(exp_sums_mask, tl.exp(max_logits - global_max[None, :]), 0.0)
+        exp_sums *= rescale
+        global_exp_sum = update_scale * global_exp_sum + tl.sum(exp_sums, axis=0)
+        global_max_prev = global_max
+
+    safe_global_exp_sum = tl.where(global_exp_sum > 0, global_exp_sum, 1.0)
+
+    for iter_idx in range(num_iterations):
+        partition_base = iter_idx * MAX_CONTEXT_PARTITION_NUM
+        partition_offsets = tl.arange(0, MAX_CONTEXT_PARTITION_NUM) + partition_base
+
+        exp_sums_offsets = (
+            sequence_idx * stride_exp_sums_seq
+            + kv_head_idx * stride_exp_sums_head
+            + partition_offsets[:, None] * stride_exp_sums_part
+            + query_group_offsets[None, :]
+        )
+        exp_sums_mask = (
+            partition_offsets[:, None] < context_partition_num
+        ) & query_group_mask[None, :]
+
+        max_logits = tl.load(
+            max_logits_ptr + exp_sums_offsets, mask=exp_sums_mask, other=float("-inf")
+        )
+        exp_sums = tl.load(
+            exp_sums_ptr + exp_sums_offsets, mask=exp_sums_mask, other=0.0
+        )
+        rescale = tl.where(exp_sums_mask, tl.exp(max_logits - global_max[None, :]), 0.0)
+        exp_sums *= rescale
+        attention_probs = tl.where(
+            exp_sums_mask,
+            exp_sums / safe_global_exp_sum[None, :],
+            0.0,
+        )
+        attention_probs = tl.reshape(
+            attention_probs, (MAX_CONTEXT_PARTITION_NUM, QUERY_SEQ_LEN_POW2 * ONE_QUERY_GROUP_SIZE_POW2, 1)
+        )
+
+        logits_offsets = (
+            sequence_idx * stride_logits_seq
+            + kv_head_idx * stride_logits_head
+            + partition_offsets[None, :, None] * stride_logits_part
+            + query_group_offsets[:, None, None] * stride_logits_group
+            + head_size_offsets[None, None, :]
+        )
+        logits_mask = (
+            partition_offsets[None, :] < context_partition_num
+        ) & query_group_mask[:, None]
+        partial_logits = tl.load(
+            logits_ptr + logits_offsets, mask=logits_mask[:, :, None], other=0.0
+        )
+        partial_logits = tl.permute(partial_logits, (1, 0, 2)).to(tl.float32)
+        final_output += tl.sum(partial_logits * attention_probs, axis=0)
+
+    final_output = tl.reshape(
+        final_output, [QUERY_SEQ_LEN_POW2, ONE_QUERY_GROUP_SIZE_POW2, HEAD_SIZE_POW2]
+    )
+    output_offsets = (
+        sequence_idx * stride_output_bs
+        + output_len_offsets[:, None, None] * stride_output_len
+        + kv_head_idx * stride_output_kv_head
+        + output_group_offsets[None, :, None] * stride_output_group_size
+        + head_size_offsets[None, None, :]
+    )
+    output_mask = (
+        (output_len_offsets[:, None, None] < query_seq_len)
+        & (output_group_offsets[None, :, None] < query_group_size)
+        & (head_size_offsets[None, None, :] < head_size)
+    )
+    tl.store(
+        output_ptr + output_offsets,
+        final_output.to(output_ptr.dtype.element_ty),
+        mask=output_mask,
+    )
+
+
+def _paged_attention_decode_v2_reduce_explicit_kernel_wrapper(
+    grid,
+    output_ptr,
+    exp_sums_ptr,
+    max_logits_ptr,
+    logits_ptr,
+    stride_output_bs,
+    stride_output_len,
+    stride_output_kv_head,
+    stride_output_group_size,
+    stride_exp_sums_seq,
+    stride_exp_sums_head,
+    stride_exp_sums_part,
+    stride_logits_seq,
+    stride_logits_head,
+    stride_logits_part,
+    stride_logits_group,
+    *,
+    query_seq_len,
+    query_group_size,
+    head_size,
+    context_partition_num,
+):
+    paged_attention_decode_v2_reduce_explicit_kernel[grid](
+        output_ptr,
+        exp_sums_ptr,
+        max_logits_ptr,
+        logits_ptr,
+        stride_output_bs,
+        stride_output_len,
+        stride_output_kv_head,
+        stride_output_group_size,
+        stride_exp_sums_seq,
+        stride_exp_sums_head,
+        stride_exp_sums_part,
+        stride_logits_seq,
+        stride_logits_head,
+        stride_logits_part,
+        stride_logits_group,
+        head_size=head_size,
+        context_partition_num=context_partition_num,
+        query_seq_len=query_seq_len,
+        query_group_size=query_group_size,
+        QUERY_SEQ_LEN_POW2=triton.next_power_of_2(query_seq_len),
+        ONE_QUERY_GROUP_SIZE_POW2=triton.next_power_of_2(query_group_size),
+        HEAD_SIZE_POW2=triton.next_power_of_2(head_size),
+        MAX_CONTEXT_PARTITION_NUM=8,
+    )
+
+
 def pa_decode_ps_launch(
     output: torch.Tensor,
     query: torch.Tensor,
@@ -1412,6 +1656,7 @@ def pa_decode_ps_launch(
     value_scale: torch.Tensor = None,
     *,
     sliding_window: int = 0,
+    global_window: int = 0,
     metadata: dict = None,
     block_tables: torch.Tensor = None,  # [num_seqs, max_blocks_per_seq] i32
     max_context_partition_num: int = 0,
@@ -1474,29 +1719,30 @@ def pa_decode_ps_launch(
     s = stream or torch.cuda.current_stream()
 
     if sliding_window > 0:
-        # Launch one CTA per 256-token tile inside each 1024-token physical block:
-        # grid = (batch, kv_heads, max_context_partition_num * 4).
+        # Launch one CTA per 256-token context partition in the sliding window:
+        # grid = (batch, kv_heads, max_context_partition_num).
         batch_size = context_lengths.shape[0]
         head_size = query.shape[-1]
         eqgs = query_length * query_group_size
         context_partition_size = KV_COMPUTE_BLOCK
-        max_context_partition_num = (
-            (sliding_window + KV_BLOCK_SIZE - 1) // KV_BLOCK_SIZE
-        ) + 1
-        total_context_partition_num = max_context_partition_num * TILES_PER_BLOCK
-
+        max_context_partition_num = get_sw_ps_max_context_partition_num(
+            sliding_window,
+            global_window,
+            context_partition_size,
+        )
         if exp_sums is None:
-            exp_sums = torch.empty(batch_size, num_kv_heads, total_context_partition_num, eqgs,
+            exp_sums = torch.empty(batch_size, num_kv_heads, max_context_partition_num, eqgs,
                                     device=dev, dtype=torch.float32)
         if max_logits is None:
-            max_logits = torch.full((batch_size, num_kv_heads, total_context_partition_num, eqgs),
+            max_logits = torch.full((batch_size, num_kv_heads, max_context_partition_num, eqgs),
                                      float('-inf'), device=dev, dtype=torch.float32)
         if temporary_output is None:
-            temporary_output = torch.zeros(batch_size, num_kv_heads, total_context_partition_num,
+            temporary_output = torch.zeros(batch_size, num_kv_heads, max_context_partition_num,
                                             eqgs, head_size, device=dev, dtype=torch.bfloat16)
 
         compiled_sw = compile_pa_decode_ps_sw(
             sliding_window=sliding_window,
+            global_window=global_window,
             softmax_scale=softmax_scale, trans_v=trans_v, query_group_size=query_group_size,
             per_token_kv=per_token_kv, query_length=query_length,
             query_input_dtype=query_input_dtype)
@@ -1516,22 +1762,16 @@ def pa_decode_ps_launch(
             stride_ks_block, stride_ks_head,
             batch_size, num_kv_heads, max_context_partition_num, s)
 
-        # Reduce: use Gluon reduce kernel for merging partitions
-        from aiter.ops.triton.gluon.pa_decode_gluon import (
-            _paged_attention_decode_v2_reduce_kernel_wrapper,
-        )
         head_size = query.shape[-1]
         output_5d = output.reshape(
             batch_size, query_length, num_kv_heads, query_group_size, head_size)
         reduce_grid = (batch_size, num_kv_heads, 1)
-        _paged_attention_decode_v2_reduce_kernel_wrapper(
+        _paged_attention_decode_v2_reduce_explicit_kernel_wrapper(
             reduce_grid,
             output_5d,
             exp_sums,
             max_logits,
             temporary_output,
-            context_lengths,
-            None,  # sinks
             output_5d.stride(0),
             output_5d.stride(1),
             output_5d.stride(2),
@@ -1546,9 +1786,7 @@ def pa_decode_ps_launch(
             query_seq_len=query_length,
             query_group_size=query_group_size,
             head_size=head_size,
-            CONTEXT_PARTITION_SIZE=context_partition_size,
-            PS=True,
-            context_partition_num=total_context_partition_num,
+            context_partition_num=max_context_partition_num,
         )
         return "ps_sw_partitioned"
     
@@ -1591,16 +1829,17 @@ def pa_decode_ps_launch(
 
 # =====================================================================
 # =====================================================================
-# compile_pa_decode_ps_sw — Sliding Window kernel with split grid-z
-# Grid = (batch_size, num_kv_heads, max_context_partition_num * 4)
-# Each block handles one (batch, kv_head, physical_block, 256-token sub-tile).
-# Each physical KV block contributes 4 partial slots to the reduce stage.
+# compile_pa_decode_ps_sw — Sliding Window kernel with one CTA per 256-token tile
+# Grid = (batch_size, num_kv_heads, max_context_partition_num)
+# Each block handles one 256-token context partition. `partition_idx` is decoded
+# into (physical_block, 256-token sub-tile) after applying the sliding-window offset.
 # Uses block_tables for physical block lookup instead of kv_page_indices.
 # Output: exp_sums, max_logits, temporary_output -> reduced by a separate kernel.
 # =====================================================================
 @functools.lru_cache(maxsize=256)
 def compile_pa_decode_ps_sw(
     sliding_window: int,   # required > 0 -- baked as compile-time constant
+    global_window: int = 0,
     softmax_scale=None,
     trans_v=False,
     query_group_size=QUERY_GROUP_SIZE,
@@ -1610,9 +1849,10 @@ def compile_pa_decode_ps_sw(
 ):
     """Compile a Gluon-style partitioned PA decode kernel for sliding window.
 
-    Grid = (batch_size, num_kv_heads, max_context_partition_num * 4).
-    Each GPU block processes one 256-token sub-partition inside a 1024-token KV block.
-    sliding_window is a compile-time constant.
+    Grid = (batch_size, num_kv_heads, max_context_partition_num).
+    Each GPU block processes one 256-token partition selected from the visible KV
+    region: the sliding tail window plus an optional global prefix.
+    sliding_window and global_window are compile-time constants.
     """
     assert sliding_window > 0, "Use compile_pa_decode_ps for sliding_window=0"
     arch = get_hip_arch()
@@ -1684,8 +1924,16 @@ def compile_pa_decode_ps_sw(
         ks_rsrc = buffer_ops.create_buffer_resource(key_scale_ptr, max_size=True)
         vs_rsrc = buffer_ops.create_buffer_resource(value_scale_ptr, max_size=True)
         q_scale_val = buffer_ops.buffer_load(qs_rsrc, arith.constant(0, type=T.i32), vec_width=1)
-        k_scale_val = buffer_ops.buffer_load(ks_rsrc, arith.constant(0, type=T.i32), vec_width=1)
-        v_scale_val = buffer_ops.buffer_load(vs_rsrc, arith.constant(0, type=T.i32), vec_width=1)
+        if per_token_kv:
+            k_scale_val = arith.constant(1.0, type=T.f32)
+            v_scale_val = arith.constant(1.0, type=T.f32)
+        else:
+            k_scale_val = buffer_ops.buffer_load(
+                ks_rsrc, arith.constant(0, type=T.i32), vec_width=1
+            )
+            v_scale_val = buffer_ops.buffer_load(
+                vs_rsrc, arith.constant(0, type=T.i32), vec_width=1
+            )
 
         smem_base = allocator.get_base()
         logits_lds_i32 = SmemPtr(smem_base, logits_off, T.i32, shape=(LDS_LOGITS_BYTES // 4,)).get()
@@ -1698,7 +1946,7 @@ def compile_pa_decode_ps_sw(
         c_vh = stride_v_head
 
         _softmax_q_scale = arith.constant(_softmax_scale, type=T.f32) * q_scale_val
-        _scale = _softmax_q_scale * k_scale_val
+        _scale = _softmax_q_scale * k_scale_val  # per-tensor only; per-token uses per-token k_scale
         c_w = arith.constant(WARP_SIZE, type=T.i32)
         NEG_INF = arith.constant(float("-inf"), type=T.f32)
         ZERO_F = arith.constant(0.0, type=T.f32)
@@ -1707,6 +1955,15 @@ def compile_pa_decode_ps_sw(
         c_bs = arith.constant(_bs, type=T.i32)
         c_four = arith.constant(4, type=T.i32)
         c_tpb = arith.constant(TILES_PER_BLOCK, type=T.i32)
+        c_zero = arith.constant(0, type=T.i32)
+        global_window_limit = (
+            arith.constant(global_window, type=T.i32) if global_window > 0 else None
+        )
+        global_prefix_tile_count = (
+            arith.constant(triton.cdiv(global_window, KV_COMPUTE_BLOCK), type=T.i32)
+            if global_window > 0
+            else None
+        )
 
         local_qhead_idx = warp_id * arith.constant(4, type=T.i32) + rowid
         (
@@ -1734,22 +1991,49 @@ def compile_pa_decode_ps_sw(
         )
 
         # ── Context length and partition mapping ──
+        # Visible tiles are the union of:
+        # 1) the optional global prefix [0, global_window)
+        # 2) the sliding tail [context_len - sliding_window, context_len)
         context_len = buffer_ops.buffer_load(cl_rsrc, batch_idx, vec_width=1, dtype=T.i32)
-        sequence_partition_idx = partition_idx // c_tpb
-        block_split_idx = partition_idx % c_tpb
-        tile_token_offset = block_split_idx * c_cps
         _c_sw = arith.constant(sliding_window, type=T.i32)
+        num_tiles_for_seq = (context_len + c_cps - c_one) // c_cps
         seq_start_global = context_len - _c_sw
-        partition_offset = seq_start_global // c_bs
-        partition_offset = arith.select(partition_offset > arith.constant(0, type=T.i32),
-                                         partition_offset, arith.constant(0, type=T.i32))
-        seq_partition_idx_raw = partition_offset + sequence_partition_idx
-        # Check if this partition is valid (within context range)
-        num_blocks_for_seq = (context_len + c_bs - c_one) // c_bs
-        _is_valid = seq_partition_idx_raw < num_blocks_for_seq
+        seq_start_global = arith.select(seq_start_global > c_zero, seq_start_global, c_zero)
+        tail_start_tile = seq_start_global // c_cps
+
+        if global_window > 0:
+            prefix_tile_count = arith.select(
+                global_prefix_tile_count < num_tiles_for_seq,
+                global_prefix_tile_count,
+                num_tiles_for_seq,
+            )
+            merged_ranges = tail_start_tile <= prefix_tile_count
+            merged_visible_tile_count = num_tiles_for_seq
+            split_visible_tile_count = prefix_tile_count + (
+                num_tiles_for_seq - tail_start_tile
+            )
+            visible_tile_count = arith.select(
+                merged_ranges, merged_visible_tile_count, split_visible_tile_count
+            )
+            in_prefix_region = partition_idx < prefix_tile_count
+            split_tail_tile_idx = tail_start_tile + (partition_idx - prefix_tile_count)
+            split_tile_partition_idx = arith.select(
+                in_prefix_region, partition_idx, split_tail_tile_idx
+            )
+            tile_partition_idx_raw = arith.select(
+                merged_ranges, partition_idx, split_tile_partition_idx
+            )
+        else:
+            visible_tile_count = num_tiles_for_seq - tail_start_tile
+            tile_partition_idx_raw = tail_start_tile + partition_idx
+
+        _is_valid = partition_idx < visible_tile_count
         # Clamp for safe memory access (invalid partitions will be skipped below)
-        seq_partition_idx = arith.select(_is_valid, seq_partition_idx_raw,
-                                          arith.constant(0, type=T.i32))
+        tile_partition_idx = arith.select(_is_valid, tile_partition_idx_raw,
+                                          c_zero)
+        seq_partition_idx = tile_partition_idx // c_tpb
+        block_split_idx = tile_partition_idx % c_tpb
+        tile_token_offset = block_split_idx * c_cps
         kv_seq_start = seq_partition_idx * c_bs + tile_token_offset
         # For invalid partitions, set context_len to 0 so all tokens get masked
         context_len = arith.select(_is_valid, context_len, arith.constant(0, type=T.i32))
@@ -1796,6 +2080,7 @@ def compile_pa_decode_ps_sw(
                 c_w=c_w,
                 neg_inf=NEG_INF,
                 zero_f=ZERO_F,
+                global_window_limit=global_window_limit,
             )
         )
 
@@ -1924,7 +2209,7 @@ def compile_pa_decode_ps_sw(
             s_bt_seq,
             s_ks_block, s_ks_head,
         ).launch(
-            grid=(gx, gy, gz * TILES_PER_BLOCK),
+            grid=(gx, gy, gz),
             block=(BLOCK_THREADS, 1, 1), stream=stream)
 
     return {
