@@ -10,20 +10,21 @@ Requires: aiter's get_pa_metadata_v1 (module_pa_metadata.so)
 """
 
 from __future__ import annotations
+from contextlib import contextmanager
 import math
 import torch
 import functools
 import triton
-import triton.language as tl
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.expr import arith, vector, gpu, rocdl, buffer_ops, range_constexpr
 from flydsl.expr.typing import T, Int32
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
+from flydsl.utils.env import runtime as flydsl_runtime_env
 from flydsl._mlir import ir
 from flydsl.compiler.kernel_function import CompilationContext
-from flydsl._mlir.dialects import arith as _mlir_arith
+from flydsl._mlir.dialects import arith as _mlir_arith, scf
 
 # ── Kernel geometry constants ────────────────────────────────────────
 QUERY_GROUP_SIZE = 16
@@ -71,6 +72,17 @@ _PACKED_FP8_QUERY_DTYPES = tuple(
     )
     if dtype is not None
 )
+
+
+@contextmanager
+def _if_then(if_op):
+    with ir.InsertionPoint(if_op.then_block):
+        try:
+            yield if_op.then_block
+        finally:
+            blk = if_op.then_block
+            if (not blk.operations) or not isinstance(blk.operations[-1], scf.YieldOp):
+                scf.YieldOp([])
 
 
 def _pack_i32_pair_to_i64(a_i32, b_i32):
@@ -295,6 +307,7 @@ def _load_q_fragments(
     q_rsrc,
     logits_lds_i32,
     logits_lds_i64,
+    softmax_lds_f32,
     q_base,
     lane16id,
     lane4id,
@@ -303,6 +316,7 @@ def _load_q_fragments(
     *,
     query_packed_fp8,
     query_load_is_bf16,
+    compute_query_scale_in_kernel=False,
 ):
     offset1 = lane16id // arith.constant(4, type=T.i32)
     lds_q_base = (
@@ -310,13 +324,83 @@ def _load_q_fragments(
         + lane4id * arith.constant(512, type=T.i32)
         + local_qhead_idx * arith.constant(32, type=T.i32)
     )
-    q_w0, q_w1, q_w2, q_w3 = _load_q_words(
-        q_rsrc,
-        q_base,
-        lane16id,
-        query_packed_fp8=query_packed_fp8,
-        query_load_is_bf16=query_load_is_bf16,
-    )
+    query_scale_lane = None
+    if query_packed_fp8 or not compute_query_scale_in_kernel:
+        q_w0, q_w1, q_w2, q_w3 = _load_q_words(
+            q_rsrc,
+            q_base,
+            lane16id,
+            query_packed_fp8=query_packed_fp8,
+            query_load_is_bf16=query_load_is_bf16,
+        )
+    else:
+        q_elem = q_base + lane16id * arith.constant(FP8_ELEMS_16B, type=T.i32)
+        i32_vec_ty = T.i32x4
+        abs_mask = arith.constant_vector(0x7FFFFFFF, i32_vec_ty)
+        c_zero_f = arith.constant(0.0, type=T.f32)
+        c_one_f = arith.constant(1.0, type=T.f32)
+        c_fp8_max = arith.constant(FP8_MAX, type=T.f32)
+        c_wave16 = arith.constant(16, type=T.i32)
+        q_f32_chunks = []
+        local_max = c_zero_f
+        for qwi in range_constexpr(4):
+            q_src = buffer_ops.buffer_load(
+                q_rsrc,
+                q_elem + arith.constant(qwi * 4, type=T.i32),
+                vec_width=4,
+                dtype=T.bf16 if query_load_is_bf16 else T.f16,
+            )
+            q_f32 = _mlir_arith.ExtFOp(T.f32x4, q_src).result
+            q_f32_chunks.append(q_f32)
+            q_i32 = vector.bitcast(i32_vec_ty, q_f32)
+            q_abs_i32 = arith.andi(q_i32, abs_mask)
+            q_abs = vector.bitcast(T.f32x4, q_abs_i32)
+            chunk_max = vector.reduction(T.f32, "maxnumf", q_abs)
+            local_max = local_max.maximumf(chunk_max)
+
+        for sh in [8, 4, 2, 1]:
+            local_max = local_max.maximumf(
+                local_max.shuffle_xor(arith.constant(sh, type=T.i32), c_wave16)
+            )
+        query_scale_lane = arith.select(
+            local_max > c_zero_f,
+            local_max / c_fp8_max,
+            c_one_f,
+        )
+        inv_query_scale = c_one_f / query_scale_lane
+        q_words = []
+        for q_f32 in q_f32_chunks:
+            p0 = (
+                vector.extract(q_f32, static_position=[0], dynamic_position=[])
+                * inv_query_scale
+            )
+            p1 = (
+                vector.extract(q_f32, static_position=[1], dynamic_position=[])
+                * inv_query_scale
+            )
+            p2 = (
+                vector.extract(q_f32, static_position=[2], dynamic_position=[])
+                * inv_query_scale
+            )
+            p3 = (
+                vector.extract(q_f32, static_position=[3], dynamic_position=[])
+                * inv_query_scale
+            )
+            lo = rocdl.cvt_pk_fp8_f32(
+                T.i32, p0, p1, arith.constant(0, type=T.i32), False
+            )
+            q_words.append(rocdl.cvt_pk_fp8_f32(T.i32, p2, p3, lo, True))
+        q_w0, q_w1, q_w2, q_w3 = q_words
+
+        scale_store_if = scf.IfOp(
+            arith.unwrap(lane16id == arith.constant(0, type=T.i32)), has_else=False
+        )
+        with _if_then(scale_store_if):
+            vector.store(
+                vector.from_elements(T.vec(1, T.f32), [query_scale_lane]),
+                softmax_lds_f32,
+                [arith.index_cast(T.index, local_qhead_idx)],
+            )
     v01 = vector.from_elements(T.vec(2, T.i32), [q_w0, q_w1])
     v23 = vector.from_elements(T.vec(2, T.i32), [q_w2, q_w3])
     lds_q_i32 = lds_q_base // arith.constant(4, type=T.i32)
@@ -329,6 +413,15 @@ def _load_q_fragments(
 
     q_frags = []
     gpu.barrier()
+    if compute_query_scale_in_kernel:
+        query_scale_lane = vector.extract(
+            vector.load_op(
+                T.vec(1, T.f32),
+                softmax_lds_f32,
+                [arith.index_cast(T.index, lane16id)],
+            ),
+            static_position=[0],
+        )
     for qkhe in range_constexpr(QKHELOOP):
         for qkr in range_constexpr(2):
             lds_rd_byte = (
@@ -344,7 +437,7 @@ def _load_q_fragments(
                 [arith.index_cast(T.index, lds_rd_base)],
             )
             q_frags.append(vector.extract(q_v1, static_position=[0]))
-    return q_frags
+    return q_frags, query_scale_lane
 
 
 def _normalize_pa_output(running_sum, out0, out1, zero_f):
@@ -884,6 +977,7 @@ def compile_pa_decode_ps(
     arch = get_hip_arch()
     query_packed_fp8 = query_input_dtype == "packed_fp8"
     query_load_is_bf16 = query_input_dtype == "bf16"
+    query_scale_in_kernel = not query_packed_fp8
     if softmax_scale is None:
         softmax_scale = 1.0 / (HEAD_SIZE ** 0.5)
     _softmax_scale = float(softmax_scale)
@@ -956,7 +1050,12 @@ def compile_pa_decode_ps(
         qs_rsrc = buffer_ops.create_buffer_resource(query_scale_ptr, max_size=True)
         ks_rsrc = buffer_ops.create_buffer_resource(key_scale_ptr, max_size=True)
         vs_rsrc = buffer_ops.create_buffer_resource(value_scale_ptr, max_size=True)
-        q_scale_val = buffer_ops.buffer_load(qs_rsrc, arith.constant(0, type=T.i32), vec_width=1)
+        if query_scale_in_kernel:
+            q_scale_val = arith.constant(1.0, type=T.f32)
+        else:
+            q_scale_val = buffer_ops.buffer_load(
+                qs_rsrc, arith.constant(0, type=T.i32), vec_width=1
+            )
         if per_token_kv:
             k_scale_val = arith.constant(1.0, type=T.f32)
             v_scale_val = arith.constant(1.0, type=T.f32)
@@ -1063,7 +1162,7 @@ def compile_pa_decode_ps(
             _qk_and_intra_softmax, _cross_warp_softmax_and_prob_pack, _pv_mfma = (
                 _make_pa_phase_helpers(
                     trans_v=trans_v,
-                    per_token_q=False,
+                    per_token_q=query_scale_in_kernel,
                     per_token_kv=per_token_kv,
                     needs_mask=needs_mask,
                     query_length=query_length,
@@ -1126,6 +1225,7 @@ def compile_pa_decode_ps(
                     tile_token_offset_i32,
                     q_frags,
                     causal_bound,
+                    query_scale_lane=query_scale_lane,
                     phys_block=phys_block,
                 )
 
@@ -1190,10 +1290,11 @@ def compile_pa_decode_ps(
                     gpu.barrier()
                 q_row = batch_idx * arith.constant(query_length, type=T.i32) + qi_for_q
                 q_base = q_row * stride_q_seq + (kv_h * arith.constant(query_group_size, type=T.i32) + local_qhead_idx_for_q) * stride_q_head
-                q_frags = _load_q_fragments(
+                q_frags, query_scale_lane = _load_q_fragments(
                     q_rsrc,
                     logits_lds_i32,
                     logits_lds_i64,
+                    softmax_lds_f32,
                     q_base,
                     lane16id,
                     lane4id,
@@ -1201,6 +1302,7 @@ def compile_pa_decode_ps(
                     local_qhead_idx,
                     query_packed_fp8=query_packed_fp8,
                     query_load_is_bf16=query_load_is_bf16,
+                    compute_query_scale_in_kernel=query_scale_in_kernel,
                 )
 
                 # ── K init: load this CTA's 256-token block split for the first block ──
@@ -1433,6 +1535,46 @@ def _is_per_token_query_scale(query_scale) -> bool:
     return isinstance(query_scale, torch.Tensor) and query_scale.numel() > 1
 
 
+def _is_current_stream_capturing() -> bool:
+    if not torch.cuda.is_available():
+        return False
+    try:
+        return torch.cuda.is_current_stream_capturing()
+    except RuntimeError:
+        return False
+
+
+def _prepare_scale_tensor(
+    name: str,
+    scale,
+    *,
+    device: torch.device,
+    is_graph_capturing: bool,
+) -> torch.Tensor:
+    if isinstance(scale, torch.Tensor):
+        if is_graph_capturing:
+            if scale.device != device:
+                raise ValueError(
+                    f"CUDA graph capture requires `{name}` to already be on {device}, "
+                    f"got {scale.device}."
+                )
+            if scale.dtype != torch.float32:
+                raise ValueError(
+                    f"CUDA graph capture requires `{name}` to already be float32, "
+                    f"got {scale.dtype}."
+                )
+            return scale
+        return scale.to(device=device, dtype=torch.float32)
+
+    if is_graph_capturing:
+        raise ValueError(
+            f"CUDA graph capture requires `{name}` to be passed as a pre-created "
+            "float32 tensor on the target device."
+        )
+
+    return torch.tensor([float(scale or 1.0)], device=device, dtype=torch.float32)
+
+
 def _validate_per_token_query_scale(
     query_scale: torch.Tensor,
     total_queries: int,
@@ -1458,6 +1600,19 @@ def _get_query_input_dtype(query: torch.Tensor) -> str:
     )
 
 
+def _get_output_dtype_str(output: torch.Tensor) -> str:
+    if output.dtype == torch.bfloat16:
+        return "bf16"
+    if output.dtype == torch.float16:
+        return "f16"
+    if output.dtype == torch.float32:
+        return "f32"
+    raise ValueError(
+        f"Unsupported output dtype for pa_decode_ps_launch reduce: {output.dtype}. "
+        "Expected bf16, f16, or f32."
+    )
+
+
 def get_sw_ps_max_context_partition_num(
     sliding_window: int,
     global_window: int = 0,
@@ -1471,194 +1626,145 @@ def get_sw_ps_max_context_partition_num(
         + triton.cdiv(global_window, context_partition_size)
     )
 
-
-@triton.jit
-def paged_attention_decode_v2_reduce_explicit_kernel(
-    output_ptr,  # [batch, query_length, kv_heads, query_group_size, head_size]
-    exp_sums_ptr,  # [batch, kv_heads, max_parts, eqgs]
-    max_logits_ptr,  # [batch, kv_heads, max_parts, eqgs]
-    logits_ptr,  # [batch, kv_heads, max_parts, eqgs, head_size]
-    stride_output_bs,
-    stride_output_len,
-    stride_output_kv_head,
-    stride_output_group_size,
-    stride_exp_sums_seq,
-    stride_exp_sums_head,
-    stride_exp_sums_part,
-    stride_logits_seq,
-    stride_logits_head,
-    stride_logits_part,
-    stride_logits_group,
-    head_size,
-    context_partition_num,
-    query_seq_len,
-    query_group_size,
-    QUERY_SEQ_LEN_POW2: tl.constexpr,
-    ONE_QUERY_GROUP_SIZE_POW2: tl.constexpr,
-    HEAD_SIZE_POW2: tl.constexpr,
-    MAX_CONTEXT_PARTITION_NUM: tl.constexpr,
-):
-    sequence_idx = tl.program_id(0)
-    kv_head_idx = tl.program_id(1)
-
-    output_len_offsets = tl.arange(0, QUERY_SEQ_LEN_POW2)
-    output_group_offsets = tl.arange(0, ONE_QUERY_GROUP_SIZE_POW2)
-    query_group_offsets_mtp = tl.arange(0, QUERY_SEQ_LEN_POW2 * ONE_QUERY_GROUP_SIZE_POW2)
-    query_len_idx = query_group_offsets_mtp // ONE_QUERY_GROUP_SIZE_POW2
-    group_idx_in_len = query_group_offsets_mtp % ONE_QUERY_GROUP_SIZE_POW2
-    query_group_offsets = query_len_idx * query_group_size + group_idx_in_len
-    head_size_offsets = tl.arange(0, HEAD_SIZE_POW2)
-
-    query_group_mask = (output_len_offsets[:, None] < query_seq_len) & (
-        output_group_offsets[None, :] < query_group_size
-    )
-    query_group_mask = tl.reshape(query_group_mask, [QUERY_SEQ_LEN_POW2 * ONE_QUERY_GROUP_SIZE_POW2])
-
-    global_max = tl.where(
-        query_group_mask,
-        tl.full((QUERY_SEQ_LEN_POW2 * ONE_QUERY_GROUP_SIZE_POW2,), float("-inf"), dtype=tl.float32),
-        tl.zeros((QUERY_SEQ_LEN_POW2 * ONE_QUERY_GROUP_SIZE_POW2,), dtype=tl.float32),
-    )
-    global_max_prev = global_max
-    global_exp_sum = tl.zeros((QUERY_SEQ_LEN_POW2 * ONE_QUERY_GROUP_SIZE_POW2,), dtype=tl.float32)
-    final_output = tl.zeros(
-        (QUERY_SEQ_LEN_POW2 * ONE_QUERY_GROUP_SIZE_POW2, HEAD_SIZE_POW2), dtype=tl.float32
-    )
-
-    num_iterations = tl.cdiv(context_partition_num, MAX_CONTEXT_PARTITION_NUM)
-
-    for iter_idx in range(num_iterations):
-        partition_base = iter_idx * MAX_CONTEXT_PARTITION_NUM
-        partition_offsets = tl.arange(0, MAX_CONTEXT_PARTITION_NUM) + partition_base
-
-        exp_sums_offsets = (
-            sequence_idx * stride_exp_sums_seq
-            + kv_head_idx * stride_exp_sums_head
-            + partition_offsets[:, None] * stride_exp_sums_part
-            + query_group_offsets[None, :]
-        )
-        exp_sums_mask = (
-            partition_offsets[:, None] < context_partition_num
-        ) & query_group_mask[None, :]
-
-        max_logits = tl.load(
-            max_logits_ptr + exp_sums_offsets, mask=exp_sums_mask, other=float("-inf")
-        )
-        exp_sums = tl.load(
-            exp_sums_ptr + exp_sums_offsets, mask=exp_sums_mask, other=0.0
-        )
-
-        chunk_max_logits = tl.max(max_logits, axis=0)
-        global_max = tl.maximum(global_max, chunk_max_logits)
-        update_scale = tl.where(
-            global_max_prev > float("-inf"),
-            tl.exp(global_max_prev - global_max),
-            0.0,
-        )
-        rescale = tl.where(exp_sums_mask, tl.exp(max_logits - global_max[None, :]), 0.0)
-        exp_sums *= rescale
-        global_exp_sum = update_scale * global_exp_sum + tl.sum(exp_sums, axis=0)
-        global_max_prev = global_max
-
-    safe_global_exp_sum = tl.where(global_exp_sum > 0, global_exp_sum, 1.0)
-
-    for iter_idx in range(num_iterations):
-        partition_base = iter_idx * MAX_CONTEXT_PARTITION_NUM
-        partition_offsets = tl.arange(0, MAX_CONTEXT_PARTITION_NUM) + partition_base
-
-        exp_sums_offsets = (
-            sequence_idx * stride_exp_sums_seq
-            + kv_head_idx * stride_exp_sums_head
-            + partition_offsets[:, None] * stride_exp_sums_part
-            + query_group_offsets[None, :]
-        )
-        exp_sums_mask = (
-            partition_offsets[:, None] < context_partition_num
-        ) & query_group_mask[None, :]
-
-        max_logits = tl.load(
-            max_logits_ptr + exp_sums_offsets, mask=exp_sums_mask, other=float("-inf")
-        )
-        exp_sums = tl.load(
-            exp_sums_ptr + exp_sums_offsets, mask=exp_sums_mask, other=0.0
-        )
-        rescale = tl.where(exp_sums_mask, tl.exp(max_logits - global_max[None, :]), 0.0)
-        exp_sums *= rescale
-        attention_probs = tl.where(
-            exp_sums_mask,
-            exp_sums / safe_global_exp_sum[None, :],
-            0.0,
-        )
-        attention_probs = tl.reshape(
-            attention_probs, (MAX_CONTEXT_PARTITION_NUM, QUERY_SEQ_LEN_POW2 * ONE_QUERY_GROUP_SIZE_POW2, 1)
-        )
-
-        logits_offsets = (
-            sequence_idx * stride_logits_seq
-            + kv_head_idx * stride_logits_head
-            + partition_offsets[None, :, None] * stride_logits_part
-            + query_group_offsets[:, None, None] * stride_logits_group
-            + head_size_offsets[None, None, :]
-        )
-        logits_mask = (
-            partition_offsets[None, :] < context_partition_num
-        ) & query_group_mask[:, None]
-        partial_logits = tl.load(
-            logits_ptr + logits_offsets, mask=logits_mask[:, :, None], other=0.0
-        )
-        partial_logits = tl.permute(partial_logits, (1, 0, 2)).to(tl.float32)
-        final_output += tl.sum(partial_logits * attention_probs, axis=0)
-
-    final_output = tl.reshape(
-        final_output, [QUERY_SEQ_LEN_POW2, ONE_QUERY_GROUP_SIZE_POW2, HEAD_SIZE_POW2]
-    )
-    output_offsets = (
-        sequence_idx * stride_output_bs
-        + output_len_offsets[:, None, None] * stride_output_len
-        + kv_head_idx * stride_output_kv_head
-        + output_group_offsets[None, :, None] * stride_output_group_size
-        + head_size_offsets[None, None, :]
-    )
-    output_mask = (
-        (output_len_offsets[:, None, None] < query_seq_len)
-        & (output_group_offsets[None, :, None] < query_group_size)
-        & (head_size_offsets[None, None, :] < head_size)
-    )
-    tl.store(
-        output_ptr + output_offsets,
-        final_output.to(output_ptr.dtype.element_ty),
-        mask=output_mask,
-    )
-
-
-def _paged_attention_decode_v2_reduce_explicit_kernel_wrapper(
-    grid,
-    output_ptr,
-    exp_sums_ptr,
-    max_logits_ptr,
-    logits_ptr,
-    stride_output_bs,
-    stride_output_len,
-    stride_output_kv_head,
-    stride_output_group_size,
-    stride_exp_sums_seq,
-    stride_exp_sums_head,
-    stride_exp_sums_part,
-    stride_logits_seq,
-    stride_logits_head,
-    stride_logits_part,
-    stride_logits_group,
+@functools.lru_cache(maxsize=256)
+def compile_pa_decode_sw_reduce(
     *,
-    query_seq_len,
-    query_group_size,
-    head_size,
-    context_partition_num,
+    max_context_partition_num: int,
+    query_seq_len: int,
+    query_group_size: int,
+    head_size: int,
+    output_dtype_str: str,
 ):
-    paged_attention_decode_v2_reduce_explicit_kernel[grid](
-        output_ptr,
-        exp_sums_ptr,
-        max_logits_ptr,
-        logits_ptr,
+    block_threads = head_size
+    assert block_threads > 0, "head_size must be positive"
+    assert block_threads <= 1024, "head_size must fit in one workgroup"
+
+    @flyc.kernel(known_block_size=(block_threads, 1, 1))
+    def pa_decode_sw_reduce_kernel(
+        output_ptr: fx.Tensor,
+        exp_sums_ptr: fx.Tensor,
+        max_logits_ptr: fx.Tensor,
+        logits_ptr: fx.Tensor,
+        stride_output_bs: Int32,
+        stride_output_len: Int32,
+        stride_output_kv_head: Int32,
+        stride_output_group_size: Int32,
+        stride_exp_sums_seq: Int32,
+        stride_exp_sums_head: Int32,
+        stride_exp_sums_part: Int32,
+        stride_logits_seq: Int32,
+        stride_logits_head: Int32,
+        stride_logits_part: Int32,
+        stride_logits_group: Int32,
+        context_partition_num: Int32,
+    ):
+        tid = gpu.thread_idx.x
+        batch_idx = gpu.block_idx.x
+        kv_head_idx = gpu.block_idx.y
+        eqgs_idx = gpu.block_idx.z
+
+        out_rsrc = buffer_ops.create_buffer_resource(output_ptr, max_size=True)
+        es_rsrc = buffer_ops.create_buffer_resource(exp_sums_ptr, max_size=True)
+        ml_rsrc = buffer_ops.create_buffer_resource(max_logits_ptr, max_size=True)
+        logits_rsrc = buffer_ops.create_buffer_resource(logits_ptr, max_size=True)
+
+        c_zero_f = arith.constant(0.0, type=T.f32)
+        c_one_f = arith.constant(1.0, type=T.f32)
+        c_neg_inf = arith.constant(float("-inf"), type=T.f32)
+        c_log2e = arith.constant(LOG2E, type=T.f32)
+        fm_fast = arith.FastMathFlags.fast
+        c_qgs = arith.constant(query_group_size, type=T.i32)
+
+        query_idx = eqgs_idx // c_qgs
+        group_idx = eqgs_idx % c_qgs
+
+        global_max = c_neg_inf
+        global_exp_sum = c_zero_f
+        for part_idx in range_constexpr(max_context_partition_num):
+            part_i32 = arith.constant(part_idx, type=T.i32)
+            es_off = (
+                batch_idx * stride_exp_sums_seq
+                + kv_head_idx * stride_exp_sums_head
+                + part_i32 * stride_exp_sums_part
+                + eqgs_idx
+            )
+            part_sum_raw = buffer_ops.buffer_load(es_rsrc, es_off, vec_width=1, dtype=T.f32)
+            part_max_raw = buffer_ops.buffer_load(ml_rsrc, es_off, vec_width=1, dtype=T.f32)
+            part_valid = arith.cmpi(arith.CmpIPredicate.slt, part_i32, context_partition_num)
+            part_max = arith.select(part_valid, part_max_raw, c_neg_inf)
+            part_sum = arith.select(part_valid, part_sum_raw, c_zero_f)
+            new_global_max = global_max.maximumf(part_max)
+            update_scale = arith.select(
+                global_max > c_neg_inf,
+                ((global_max - new_global_max) * c_log2e).exp2(fastmath=fm_fast),
+                c_zero_f,
+            )
+            part_scale = arith.select(
+                part_valid,
+                ((part_max - new_global_max) * c_log2e).exp2(fastmath=fm_fast),
+                c_zero_f,
+            )
+            global_exp_sum = update_scale * global_exp_sum + part_sum * part_scale
+            global_max = new_global_max
+
+        safe_global_exp_sum = arith.select(
+            global_exp_sum > c_zero_f,
+            global_exp_sum,
+            c_one_f,
+        )
+
+        acc = c_zero_f
+        for part_idx in range_constexpr(max_context_partition_num):
+            part_i32 = arith.constant(part_idx, type=T.i32)
+            es_off = (
+                batch_idx * stride_exp_sums_seq
+                + kv_head_idx * stride_exp_sums_head
+                + part_i32 * stride_exp_sums_part
+                + eqgs_idx
+            )
+            part_sum_raw = buffer_ops.buffer_load(es_rsrc, es_off, vec_width=1, dtype=T.f32)
+            part_max_raw = buffer_ops.buffer_load(ml_rsrc, es_off, vec_width=1, dtype=T.f32)
+            part_valid = arith.cmpi(arith.CmpIPredicate.slt, part_i32, context_partition_num)
+            part_scale = arith.select(
+                part_valid,
+                ((part_max_raw - global_max) * c_log2e).exp2(fastmath=fm_fast),
+                c_zero_f,
+            )
+            weight = (part_sum_raw * part_scale) / safe_global_exp_sum
+            logits_off = (
+                batch_idx * stride_logits_seq
+                + kv_head_idx * stride_logits_head
+                + part_i32 * stride_logits_part
+                + eqgs_idx * stride_logits_group
+                + tid
+            )
+            part_logits_bf16 = buffer_ops.buffer_load(
+                logits_rsrc, logits_off, vec_width=1, dtype=T.bf16
+            )
+            part_logits = _mlir_arith.ExtFOp(T.f32, part_logits_bf16).result
+            acc = acc + arith.select(part_valid, part_logits * weight, c_zero_f)
+
+        out_off = (
+            batch_idx * stride_output_bs
+            + query_idx * stride_output_len
+            + kv_head_idx * stride_output_kv_head
+            + group_idx * stride_output_group_size
+            + tid
+        )
+        if output_dtype_str == "f32":
+            out_val = acc
+        elif output_dtype_str == "f16":
+            out_val = arith.trunc_f(T.f16, acc)
+        else:
+            out_val = arith.trunc_f(T.bf16, acc)
+        buffer_ops.buffer_store(out_val, out_rsrc, out_off)
+
+    @flyc.jit
+    def launch_pa_decode_sw_reduce(
+        output,
+        exp_sums,
+        max_logits,
+        logits,
         stride_output_bs,
         stride_output_len,
         stride_output_kv_head,
@@ -1670,15 +1776,38 @@ def _paged_attention_decode_v2_reduce_explicit_kernel_wrapper(
         stride_logits_head,
         stride_logits_part,
         stride_logits_group,
-        head_size=head_size,
-        context_partition_num=context_partition_num,
-        query_seq_len=query_seq_len,
-        query_group_size=query_group_size,
-        QUERY_SEQ_LEN_POW2=triton.next_power_of_2(query_seq_len),
-        ONE_QUERY_GROUP_SIZE_POW2=triton.next_power_of_2(query_group_size),
-        HEAD_SIZE_POW2=triton.next_power_of_2(head_size),
-        MAX_CONTEXT_PARTITION_NUM=8,
-    )
+        context_partition_num,
+        batch_size,
+        num_kv_heads,
+        stream: fx.Stream = fx.Stream(None),
+    ):
+        pa_decode_sw_reduce_kernel(
+            output,
+            exp_sums,
+            max_logits,
+            logits,
+            stride_output_bs,
+            stride_output_len,
+            stride_output_kv_head,
+            stride_output_group_size,
+            stride_exp_sums_seq,
+            stride_exp_sums_head,
+            stride_exp_sums_part,
+            stride_logits_seq,
+            stride_logits_head,
+            stride_logits_part,
+            stride_logits_group,
+            context_partition_num,
+        ).launch(
+            grid=(batch_size, num_kv_heads, query_seq_len * query_group_size),
+            block=(block_threads, 1, 1),
+            stream=stream,
+        )
+
+    return {
+        "launch": launch_pa_decode_sw_reduce,
+        "kernel": pa_decode_sw_reduce_kernel,
+    }
 
 
 def pa_decode_ps_launch(
@@ -1717,19 +1846,43 @@ def pa_decode_ps_launch(
     total_queries = query.shape[0]
 
     dev = query.device
-    if query_input_dtype != "packed_fp8" and not _is_unit_query_scale(query_scale):
+    is_graph_capturing = _is_current_stream_capturing()
+    if is_graph_capturing and not flydsl_runtime_env.enable_cache:
+        raise ValueError(
+            "CUDA graph capture for `pa_decode_ps_launch` requires "
+            "`FLYDSL_RUNTIME_ENABLE_CACHE=1` so compiled launch artifacts stay alive."
+        )
+    query_scale = _prepare_scale_tensor(
+        "query_scale",
+        query_scale,
+        device=dev,
+        is_graph_capturing=is_graph_capturing,
+    )
+    key_scale = _prepare_scale_tensor(
+        "key_scale",
+        key_scale,
+        device=dev,
+        is_graph_capturing=is_graph_capturing,
+    )
+    value_scale = _prepare_scale_tensor(
+        "value_scale",
+        value_scale,
+        device=dev,
+        is_graph_capturing=is_graph_capturing,
+    )
+    if (
+        query_input_dtype != "packed_fp8"
+        and not (
+            is_graph_capturing
+            and query_scale.device.type != "cpu"
+            and query_scale.numel() == 1
+        )
+        and not _is_unit_query_scale(query_scale)
+    ):
         raise ValueError(
             "bf16/f16 query inputs do not accept host query_scale. "
             "For non-packed queries, query scale is computed inside the kernel."
         )
-    if not isinstance(query_scale, torch.Tensor):
-        query_scale = torch.tensor([float(query_scale or 1.0)], device=dev, dtype=torch.float32)
-    else:
-        query_scale = query_scale.to(device=dev, dtype=torch.float32)
-    if not isinstance(key_scale, torch.Tensor):
-        key_scale = torch.tensor([float(key_scale or 1.0)], device=dev, dtype=torch.float32)
-    if not isinstance(value_scale, torch.Tensor):
-        value_scale = torch.tensor([float(value_scale or 1.0)], device=dev, dtype=torch.float32)
 
     host_per_token_query = _is_per_token_query_scale(query_scale)
     if host_per_token_query:
@@ -1743,6 +1896,11 @@ def pa_decode_ps_launch(
     per_token_kv = key_scale.ndim > 1  # per-tensor: shape [1]; per-token: shape [blocks, heads, block_size, 1]
 
     if metadata is None:
+        if is_graph_capturing:
+            raise ValueError(
+                "CUDA graph capture requires precomputed `metadata`; "
+                "call `get_pa_metadata()` before capture and pass it via `metadata=`."
+            )
         metadata = get_pa_metadata(
             query, key_cache, context_lengths, kv_indptr,
             num_query_heads, num_kv_heads)
@@ -1786,9 +1944,16 @@ def pa_decode_ps_launch(
             global_window,
             context_partition_size,
         )
+        if is_graph_capturing and (
+            exp_sums is None or max_logits is None or temporary_output is None
+        ):
+            raise ValueError(
+                "CUDA graph capture requires preallocated `exp_sums`, `max_logits`, "
+                "and `temporary_output` for the sliding-window path."
+            )
         if exp_sums is None:
-            exp_sums = torch.empty(batch_size, num_kv_heads, max_context_partition_num, eqgs,
-                                    device=dev, dtype=torch.float32)
+            exp_sums = torch.zeros(batch_size, num_kv_heads, max_context_partition_num, eqgs,
+                                   device=dev, dtype=torch.float32)
         if max_logits is None:
             max_logits = torch.full((batch_size, num_kv_heads, max_context_partition_num, eqgs),
                                      float('-inf'), device=dev, dtype=torch.float32)
@@ -1822,9 +1987,14 @@ def pa_decode_ps_launch(
         head_size = query.shape[-1]
         output_5d = output.reshape(
             batch_size, query_length, num_kv_heads, query_group_size, head_size)
-        reduce_grid = (batch_size, num_kv_heads, 1)
-        _paged_attention_decode_v2_reduce_explicit_kernel_wrapper(
-            reduce_grid,
+        compiled_sw_reduce = compile_pa_decode_sw_reduce(
+            max_context_partition_num=max_context_partition_num,
+            query_seq_len=query_length,
+            query_group_size=query_group_size,
+            head_size=head_size,
+            output_dtype_str=_get_output_dtype_str(output),
+        )
+        compiled_sw_reduce["launch"](
             output_5d,
             exp_sums,
             max_logits,
@@ -1840,10 +2010,10 @@ def pa_decode_ps_launch(
             temporary_output.stride(1),
             temporary_output.stride(2),
             temporary_output.stride(3),
-            query_seq_len=query_length,
-            query_group_size=query_group_size,
-            head_size=head_size,
-            context_partition_num=max_context_partition_num,
+            max_context_partition_num,
+            batch_size,
+            num_kv_heads,
+            s,
         )
         return "ps_sw_partitioned"
     
@@ -1916,6 +2086,8 @@ def compile_pa_decode_sw(
     arch = get_hip_arch()
     query_packed_fp8 = query_input_dtype == "packed_fp8"
     query_load_is_bf16 = query_input_dtype == "bf16"
+    query_scale_in_kernel = not query_packed_fp8
+    uses_lane_query_scale = per_token_q or query_scale_in_kernel
     if softmax_scale is None:
         softmax_scale = 1.0 / (HEAD_SIZE ** 0.5)
     _softmax_scale = float(softmax_scale)
@@ -1983,7 +2155,7 @@ def compile_pa_decode_sw(
         qs_rsrc = buffer_ops.create_buffer_resource(query_scale_ptr, max_size=True)
         ks_rsrc = buffer_ops.create_buffer_resource(key_scale_ptr, max_size=True)
         vs_rsrc = buffer_ops.create_buffer_resource(value_scale_ptr, max_size=True)
-        if per_token_q:
+        if uses_lane_query_scale:
             q_scale_val = arith.constant(1.0, type=T.f32)
         else:
             q_scale_val = buffer_ops.buffer_load(
@@ -2094,7 +2266,7 @@ def compile_pa_decode_sw(
             tile_partition_idx_raw = tail_start_tile + partition_idx
 
         _is_valid = partition_idx < visible_tile_count
-        # Clamp for safe memory access (invalid partitions will be skipped below)
+        # Clamp for safe memory access; invalid CTAs take a zero-fill fast path below.
         tile_partition_idx = arith.select(_is_valid, tile_partition_idx_raw,
                                           c_zero)
         seq_partition_idx = tile_partition_idx // c_tpb
@@ -2114,7 +2286,7 @@ def compile_pa_decode_sw(
         _qk_and_intra_softmax, _cross_warp_softmax_and_prob_pack, _pv_mfma = (
             _make_pa_phase_helpers(
                 trans_v=trans_v,
-                per_token_q=per_token_q,
+                per_token_q=uses_lane_query_scale,
                 per_token_kv=per_token_kv,
                 needs_mask=True,
                 query_length=query_length,
@@ -2153,7 +2325,18 @@ def compile_pa_decode_sw(
             )
         )
 
-        def _process_block_split(rmax, rsum, o0, o1, tile_token_offset_i32, k_ops):
+        def _process_block_split(
+            rmax,
+            rsum,
+            o0,
+            o1,
+            tile_token_offset_i32,
+            k_ops,
+            q_frags,
+            causal_bound,
+            query_scale_lane,
+            seq_start,
+        ):
             """Process one 256-token tile inside the selected physical block."""
             v_base = (phys_block * c_vb + _v_head_off) // c_four
             d_out_0, v0_ops, vs0 = _qk_and_intra_softmax(
@@ -2173,73 +2356,8 @@ def compile_pa_decode_sw(
             o0, o1 = _pv_mfma(v0_ops, o0, o1, vc0)
             return rmax, rsum, o0, o1
 
-        # ── MTP groups ──
         _mtp_groups = math.ceil(query_length * query_group_size / 16)
-        for _mtp_g in range_constexpr(_mtp_groups):
-            qi_val, qhi_pos, qi_for_q, local_qhead_idx_for_q = _compute_mtp_group_state(
-                lane16id,
-                local_qhead_idx,
-                mtp_group_idx=_mtp_g,
-                query_length=query_length,
-                query_group_size=query_group_size,
-            )
-            causal_bound = context_len + arith.constant(1 - query_length, type=T.i32) + qi_val
-            seq_start = context_len - arith.constant(sliding_window, type=T.i32) + qi_val
-
-            if _mtp_g > 0:
-                gpu.barrier()
-            q_row = batch_idx * arith.constant(query_length, type=T.i32) + qi_for_q
-            q_base = q_row * stride_q_seq + (kv_h * arith.constant(query_group_size, type=T.i32) + local_qhead_idx_for_q) * stride_q_head
-            if per_token_q:
-                q_scale_row = batch_idx * arith.constant(query_length, type=T.i32) + qi_val
-                q_scale_head = (
-                    kv_h * arith.constant(query_group_size, type=T.i32) + qhi_pos
-                )
-                q_scale_off = q_scale_row * stride_qs_seq + q_scale_head * stride_qs_head
-                query_scale_lane = buffer_ops.buffer_load(
-                    qs_rsrc, q_scale_off, vec_width=1, dtype=T.f32
-                )
-            else:
-                query_scale_lane = None
-            q_frags = _load_q_fragments(
-                q_rsrc,
-                logits_lds_i32,
-                logits_lds_i64,
-                q_base,
-                lane16id,
-                lane4id,
-                rowid,
-                local_qhead_idx,
-                query_packed_fp8=query_packed_fp8,
-                query_load_is_bf16=query_load_is_bf16,
-            )
-
-            # ── Load K for the single block ──
-            k_base = (phys_block * c_kb + _k_head_off) // c_four
-            k0_flat = _load_k_flat(
-                k_rsrc,
-                k_base,
-                tile_token_offset,
-                _k_tok_thread_base,
-                _c_tok_stride_dw,
-                _k_he_off_dw,
-            )
-            k0_ops = _unflatten_k(k0_flat)
-
-            # ── Process this CTA's 256-token tile ──
-            running_max, running_sum, out0, out1 = _process_block_split(
-                NEG_INF, ZERO_F,
-                arith.constant_vector(0.0, T.f32x4),
-                arith.constant_vector(0.0, T.f32x4),
-                tile_token_offset,
-                k0_ops,
-            )
-
-            # ── Normalize and write output ──
-            outelems_norm = _normalize_pa_output(running_sum, out0, out1, ZERO_F)
-
-            eqgs_lane = qi_val * arith.constant(query_group_size, type=T.i32) + qhi_pos
-
+        def _store_partition_results(eqgs_lane, running_sum, running_max, outelems_norm):
             for vhe in range_constexpr(VHELOOP):
                 hs_base = (arith.constant(vhe * NUM_WARPS * MFMA_N, type=T.i32)
                            + warp_id * arith.constant(MFMA_N, type=T.i32)
@@ -2264,6 +2382,107 @@ def compile_pa_decode_sw(
                 es_off * arith.constant(4, type=T.i32), offset_is_bytes=True)
             buffer_ops.buffer_store(ml_i32, ml_rsrc,
                 es_off * arith.constant(4, type=T.i32), offset_is_bytes=True)
+
+        def _write_empty_partition():
+            zero_output = [
+                arith.constant_vector(0.0, T.f32x4),
+                arith.constant_vector(0.0, T.f32x4),
+            ]
+            for _mtp_g in range_constexpr(_mtp_groups):
+                qi_val, qhi_pos, _, _ = _compute_mtp_group_state(
+                    lane16id,
+                    local_qhead_idx,
+                    mtp_group_idx=_mtp_g,
+                    query_length=query_length,
+                    query_group_size=query_group_size,
+                )
+                eqgs_lane = qi_val * arith.constant(query_group_size, type=T.i32) + qhi_pos
+                _store_partition_results(eqgs_lane, ZERO_F, NEG_INF, zero_output)
+
+        def _run_valid_partition():
+            for _mtp_g in range_constexpr(_mtp_groups):
+                qi_val, qhi_pos, qi_for_q, local_qhead_idx_for_q = _compute_mtp_group_state(
+                    lane16id,
+                    local_qhead_idx,
+                    mtp_group_idx=_mtp_g,
+                    query_length=query_length,
+                    query_group_size=query_group_size,
+                )
+                causal_bound = context_len + arith.constant(1 - query_length, type=T.i32) + qi_val
+                seq_start = context_len - arith.constant(sliding_window, type=T.i32) + qi_val
+
+                if _mtp_g > 0:
+                    gpu.barrier()
+                q_row = batch_idx * arith.constant(query_length, type=T.i32) + qi_for_q
+                q_base = q_row * stride_q_seq + (kv_h * arith.constant(query_group_size, type=T.i32) + local_qhead_idx_for_q) * stride_q_head
+                if per_token_q:
+                    q_scale_row = batch_idx * arith.constant(query_length, type=T.i32) + qi_val
+                    q_scale_head = (
+                        kv_h * arith.constant(query_group_size, type=T.i32) + qhi_pos
+                    )
+                    q_scale_off = q_scale_row * stride_qs_seq + q_scale_head * stride_qs_head
+                    query_scale_lane = buffer_ops.buffer_load(
+                        qs_rsrc, q_scale_off, vec_width=1, dtype=T.f32
+                    )
+                else:
+                    query_scale_lane = None
+                q_frags, kernel_query_scale_lane = _load_q_fragments(
+                    q_rsrc,
+                    logits_lds_i32,
+                    logits_lds_i64,
+                    softmax_lds_f32,
+                    q_base,
+                    lane16id,
+                    lane4id,
+                    rowid,
+                    local_qhead_idx,
+                    query_packed_fp8=query_packed_fp8,
+                    query_load_is_bf16=query_load_is_bf16,
+                    compute_query_scale_in_kernel=query_scale_in_kernel,
+                )
+                if query_scale_in_kernel:
+                    query_scale_lane = kernel_query_scale_lane
+
+                # ── Load K for the single block ──
+                k_base = (phys_block * c_kb + _k_head_off) // c_four
+                k0_flat = _load_k_flat(
+                    k_rsrc,
+                    k_base,
+                    tile_token_offset,
+                    _k_tok_thread_base,
+                    _c_tok_stride_dw,
+                    _k_he_off_dw,
+                )
+                k0_ops = _unflatten_k(k0_flat)
+
+                # ── Process this CTA's 256-token tile ──
+                running_max, running_sum, out0, out1 = _process_block_split(
+                    NEG_INF, ZERO_F,
+                    arith.constant_vector(0.0, T.f32x4),
+                    arith.constant_vector(0.0, T.f32x4),
+                    tile_token_offset,
+                    k0_ops,
+                    q_frags,
+                    causal_bound,
+                    query_scale_lane,
+                    seq_start,
+                )
+
+                # ── Normalize and write output ──
+                outelems_norm = _normalize_pa_output(running_sum, out0, out1, ZERO_F)
+
+                eqgs_lane = qi_val * arith.constant(query_group_size, type=T.i32) + qhi_pos
+                _store_partition_results(eqgs_lane, running_sum, running_max, outelems_norm)
+
+        invalid_cta_if = scf.IfOp(
+            arith.unwrap(partition_idx >= visible_tile_count), has_else=False
+        )
+        with _if_then(invalid_cta_if):
+            _write_empty_partition()
+
+        valid_cta_if = scf.IfOp(arith.unwrap(_is_valid), has_else=False)
+        with _if_then(valid_cta_if):
+            _run_valid_partition()
 
     @flyc.jit
     def launch_pa_decode_sw(es, ml, to, q, kc, vc, bt, cl,

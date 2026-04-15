@@ -52,6 +52,7 @@ torch.set_printoptions(sci_mode=False)
 TRITON_VERSION = triton.__version__
 TEST_NAME = "ps_accuracy"
 UNIFORM_RANGE = (-1, 1)
+USE_CUDA_GRAPH_TEST = False
 
 STR_DTYPE_TO_TORCH_DTYPE = {
     "half": torch.half,
@@ -475,15 +476,48 @@ def shuffle_value_cache_layout(value_cache: torch.Tensor) -> torch.Tensor:
     return value_cache_reshaped.permute(0, 1, 3, 2, 4).contiguous()
 
 
-def measure_us(fn, *, warmup: int = 1, iters: int = 3) -> float:
+def measure_us(
+    fn,
+    *,
+    warmup: int = 1,
+    iters: int = 3,
+    use_cuda_graph: Optional[bool] = None,
+) -> float:
+    if use_cuda_graph is None:
+        use_cuda_graph = USE_CUDA_GRAPH_TEST
     for _ in range(warmup):
         fn()
     torch.cuda.synchronize()
+    graph = None
+    if use_cuda_graph:
+        capture_stream = torch.cuda.Stream()
+        capture_stream.wait_stream(torch.cuda.current_stream())
+        try:
+            with torch.cuda.stream(capture_stream):
+                fn()
+            torch.cuda.current_stream().wait_stream(capture_stream)
+            torch.cuda.synchronize()
+
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.stream(capture_stream):
+                with torch.cuda.graph(graph, stream=capture_stream):
+                    fn()
+            torch.cuda.current_stream().wait_stream(capture_stream)
+            torch.cuda.synchronize()
+        except RuntimeError as exc:
+            graph = None
+            print(
+                f"Warning: measure_us cuda graph capture failed, falling back to eager execution: {exc}"
+            )
+            torch.cuda.synchronize()
     start = torch.cuda.Event(enable_timing=True)
     end = torch.cuda.Event(enable_timing=True)
     start.record()
     for _ in range(iters):
-        fn()
+        if graph is not None:
+            graph.replay()
+        else:
+            fn()
     end.record()
     torch.cuda.synchronize()
     return start.elapsed_time(end) * 1000.0 / iters
@@ -590,6 +624,9 @@ def run_flydsl_ps(
     global_window: int,
     block_tables: torch.Tensor,
     max_context_partition_num: int,
+    exp_sums: Optional[torch.Tensor] = None,
+    max_logits: Optional[torch.Tensor] = None,
+    temporary_output: Optional[torch.Tensor] = None,
 ) -> None:
     flydsl_ps_launch(
         output,
@@ -608,6 +645,9 @@ def run_flydsl_ps(
         metadata=metadata,
         block_tables=block_tables,
         max_context_partition_num=max_context_partition_num,
+        exp_sums=exp_sums,
+        max_logits=max_logits,
+        temporary_output=temporary_output,
     )
 
 
@@ -860,7 +900,7 @@ def run_pa_decode_ps_test(
     # Match Gluon's query path: launch with bf16 query and let the PS launcher
     # cast to fp8 internally with a unit query scale.
     flydsl_ps_query = query
-    flydsl_ps_q_scale = 1.0
+    flydsl_ps_q_scale = torch.tensor([1.0], dtype=torch.float32, device=device)
     ps_metadata = flydsl_get_pa_metadata(
         flydsl_ps_query,
         quantized_keys,
@@ -869,12 +909,8 @@ def run_pa_decode_ps_test(
         num_query_heads,
         num_kv_heads,
     )
-    if key_scale_original.numel() == 1:
-        ps_key_scale: Union[float, torch.Tensor] = float(key_scale_original.item())
-        ps_value_scale: Union[float, torch.Tensor] = float(value_scale_original.item())
-    else:
-        ps_key_scale = key_scale_original
-        ps_value_scale = value_scale_original
+    ps_key_scale: torch.Tensor = key_scale_original
+    ps_value_scale: torch.Tensor = value_scale_original
     flydsl_ps_output = torch.empty_like(reference_output)
     
     max_context_partition_num = get_sw_ps_max_context_partition_num(
@@ -882,6 +918,28 @@ def run_pa_decode_ps_test(
         global_window,
         context_partition_size,
     )
+    flydsl_exp_sums = None
+    flydsl_max_logits = None
+    flydsl_temporary_output = None
+    if sliding_window > 0:
+        intermediate_shape = (
+            batch_size,
+            num_kv_heads,
+            max_context_partition_num,
+            query_length * (num_query_heads // num_kv_heads),
+        )
+        flydsl_exp_sums = torch.empty(
+            intermediate_shape, dtype=torch.float32, device=device
+        )
+        flydsl_max_logits = torch.empty(
+            intermediate_shape, dtype=torch.float32, device=device
+        )
+        flydsl_temporary_output = torch.empty(
+            *intermediate_shape,
+            head_size,
+            dtype=reference_output.dtype,
+            device=device,
+        )
 
     def flydsl_ps_call() -> None:
         run_flydsl_ps(
@@ -901,6 +959,9 @@ def run_pa_decode_ps_test(
             global_window=global_window,
             block_tables=block_tables,
             max_context_partition_num=max_context_partition_num,
+            exp_sums=flydsl_exp_sums,
+            max_logits=flydsl_max_logits,
+            temporary_output=flydsl_temporary_output,
         )
 
     flydsl_ps_time = measure_us(flydsl_ps_call)
@@ -995,6 +1056,11 @@ def create_argument_parser() -> argparse.ArgumentParser:
         type=float,
         default=1.0,
         help="Randomly sample test cases from the selected case set",
+    )
+    parser.add_argument(
+        "--use_cuda_graph",
+        action="store_true",
+        help="Enable CUDA graph timing mode for the selected test run",
     )
     return parser
 
@@ -1152,6 +1218,8 @@ def parse_arg_and_run_test(sample_rate0: float = None, *, output_tag: str = TEST
     parser = create_argument_parser()
     running_via_pytest = "pytest" in sys.argv[0] or sys.argv[0].endswith("py.test")
     args = parser.parse_args([] if running_via_pytest else None)
+    global USE_CUDA_GRAPH_TEST
+    USE_CUDA_GRAPH_TEST = args.use_cuda_graph
     (
         block_sizes,
         head_configs,
