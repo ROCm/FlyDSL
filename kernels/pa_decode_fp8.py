@@ -14,7 +14,6 @@ from contextlib import contextmanager
 import math
 import torch
 import functools
-import triton
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.expr import arith, vector, gpu, rocdl, buffer_ops, range_constexpr
@@ -72,6 +71,10 @@ _PACKED_FP8_QUERY_DTYPES = tuple(
     )
     if dtype is not None
 )
+
+
+def _cdiv(numer: int, denom: int) -> int:
+    return (numer + denom - 1) // denom
 
 
 @contextmanager
@@ -1621,9 +1624,9 @@ def get_sw_ps_max_context_partition_num(
     if sliding_window <= 0:
         return 0
     return (
-        triton.cdiv(sliding_window, context_partition_size)
+        _cdiv(sliding_window, context_partition_size)
         + 1
-        + triton.cdiv(global_window, context_partition_size)
+        + _cdiv(global_window, context_partition_size)
     )
 
 @functools.lru_cache(maxsize=256)
@@ -2198,7 +2201,7 @@ def compile_pa_decode_sw(
             arith.constant(global_window, type=T.i32) if global_window > 0 else None
         )
         global_prefix_tile_count = (
-            arith.constant(triton.cdiv(global_window, KV_COMPUTE_BLOCK), type=T.i32)
+            arith.constant(_cdiv(global_window, KV_COMPUTE_BLOCK), type=T.i32)
             if global_window > 0
             else None
         )
