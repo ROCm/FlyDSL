@@ -799,7 +799,7 @@ if __name__ == "__main__":
     parser.add_argument("--tile-k", type=int, default=256)
     parser.add_argument("--m-warp", type=int, default=2)
     parser.add_argument("--n-warp", type=int, default=2)
-    parser.add_argument("--num-buffers", type=int, default=4, choices=[2, 3, 4])
+    parser.add_argument("--num-buffers", type=int, default=3, choices=[2, 3, 4])
     parser.add_argument("--split-k", type=int, default=1)
     parser.add_argument("--l2-prefetch-distance", type=int, default=2)
     parser.add_argument("--cluster-m", type=int, default=1)
