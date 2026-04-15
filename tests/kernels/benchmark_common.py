@@ -557,6 +557,290 @@ def bench_print_stage_row(tokens, m_eff, us, tflops, tbps, util_pct, status):
           f"{tbps:>9.3f}  {util_pct:>6.1f}% {status:>8}")
 
 
+# ── MOE bench sweep system ─────────────────────────────────────────────────
+# Generic benchmark sweep for MoE 2-stage kernels: sweeps model configs ×
+# dtypes × token counts.  Callers provide the stage1/stage2 runner functions
+# and data-setup helpers so this module stays kernel-agnostic.
+
+
+def add_moe_bench_args(parser) -> None:
+    """Register the ``--bench`` argument group on *parser*.
+
+    Call this from the test script's ``if __name__ == '__main__':`` block so
+    the user can ``python test_xxx.py --bench ...``.
+    """
+    import argparse  # noqa: F811 – local import to avoid top-level dep
+
+    bench_group = parser.add_argument_group(
+        "benchmark sweep",
+        "Options for --bench mode (sweep model configs × dtypes × token counts)",
+    )
+    bench_group.add_argument("--bench", action="store_true", default=False,
+                             help="Run benchmark sweep mode instead of normal test mode.")
+    bench_group.add_argument("--bench-dtype", type=str, default=None,
+                             help="Comma-separated dtypes for bench (default: all keys in BENCH_DTYPE_TARGET_TILES).")
+    bench_group.add_argument("--bench-tokens", type=str, default=None,
+                             help="Comma-separated token counts for bench (default: 1,4,8,32,64,128,256).")
+    bench_group.add_argument("--bench-config", type=str, default=None,
+                             help="Config name filter for bench (DeepSeek-TP, DeepSeek-EP, GPToss).")
+    bench_group.add_argument("--bench-no-ref", action="store_true", default=False,
+                             help="Skip correctness reference check in bench mode (pure perf).")
+    bench_group.add_argument("--bench-warmup", type=int, default=BENCH_WARMUP,
+                             help=f"Warmup iterations for bench (default: {BENCH_WARMUP}).")
+    bench_group.add_argument("--bench-iters", type=int, default=BENCH_ITERS,
+                             help=f"Measurement iterations for bench (default: {BENCH_ITERS}).")
+    bench_group.add_argument("--bench-peak-tflops", type=float, default=0,
+                             help="Peak TFLOPS for utilization calculation in bench mode.")
+
+
+def moe_bench_config(
+    name: str,
+    model_dim: int,
+    inter_dim: int,
+    experts: int,
+    topk: int,
+    in_dtype: str,
+    token_list: List[int],
+    check_ref: bool,
+    peak_tflops: float,
+    *,
+    stage1_fn: Callable,
+    stage2_fn: Callable,
+    setup_data_fn: Callable,
+    prepare_a2_fn: Callable,
+    warmup: int = BENCH_WARMUP,
+    iters: int = BENCH_ITERS,
+    use_tdm_store: bool = False,
+    inst_prefetch: bool = False,
+    wave_specialized_tdm: bool = False,
+) -> None:
+    """Benchmark a single (model, dtype) configuration across all token counts.
+
+    Parameters
+    ----------
+    stage1_fn : callable
+        ``run_moe_stage1(...)`` from the test harness.
+    stage2_fn : callable
+        ``run_moe_stage2(...)`` from the test harness.
+    setup_data_fn : callable
+        ``(tokens, model_dim, inter_dim, experts, topk, tile_m) -> (x, w1, w2, ids, wts, routing)``
+    prepare_a2_fn : callable
+        ``(out1_fp16, tokens, topk, inter_dim, in_dtype) -> (a2_q, a2_scale)``
+    """
+    import torch
+
+    tiles = bench_resolve_tiles(in_dtype, model_dim, inter_dim)
+    if tiles is None:
+        bench_print_banner(f"{name}  |  {in_dtype}  |  dim={model_dim}  inter={inter_dim}")
+        print(f"  SKIP: no valid tile for this shape (WMMA_K alignment)")
+        return
+    tile_m, tile_n1, tile_k1, tile_n2, tile_k2 = tiles
+
+    bench_print_banner(f"{name}  |  {in_dtype}  |  dim={model_dim}  inter={inter_dim}  E={experts}  K={topk}")
+    print(f"  Tiles: stage1=({tile_m},{tile_n1},{tile_k1})  stage2=({tile_m},{tile_n2},{tile_k2})")
+    print(f"  Warmup={warmup}  Iters={iters}  RefCheck={'ON' if check_ref else 'OFF'}")
+    print(
+        f"  Knobs: use_tdm_store={bool(use_tdm_store)}  "
+        f"inst_prefetch={bool(inst_prefetch)}  "
+        f"wave_specialized_tdm={bool(wave_specialized_tdm)}"
+    )
+    if peak_tflops > 0:
+        print(f"  Peak compute reference: {peak_tflops:.0f} TFLOPS")
+
+    # ── Stage 1 ──
+    print(f"\n  ── Stage 1 (gate+up: [{model_dim}] -> [{2*inter_dim}]) ──")
+    bench_print_stage_header()
+
+    s1_results = []
+    for tok in token_list:
+        torch.cuda.empty_cache()
+        x, w1, w2, ids, wts, routing = setup_data_fn(tok, model_dim, inter_dim, experts, topk, tile_m)
+        try:
+            out1, us1 = stage1_fn(
+                tokens=tok, model_dim=model_dim, inter_dim=inter_dim,
+                experts=experts, topk=topk, in_dtype=in_dtype,
+                tile_m=tile_m, tile_n=tile_n1, tile_k=tile_k1,
+                doweight_stage1=False, seed=0,
+                num_iters=iters, num_warmup=warmup,
+                x_fp32_in=x, w1_fp32_in=w1, w2_fp32_in=w2,
+                topk_ids_in=ids, topk_weights_in=wts, routing_in=routing,
+                return_outputs=True, skip_ref=(not check_ref),
+                use_tdm_store=bool(use_tdm_store),
+                inst_prefetch=bool(inst_prefetch),
+                wave_specialized_tdm=bool(wave_specialized_tdm),
+            )
+            status = "PASS" if check_ref else "OK"
+        except Exception as e:
+            status = "FAIL"
+            us1 = 0.0
+            out1 = torch.zeros((tok, topk, inter_dim), device="cuda", dtype=torch.float16)
+            print(f"  [{type(e).__name__}] tokens={tok}: {e}")
+
+        m_eff = tok * topk
+        flops = 2 * tok * topk * (2 * inter_dim) * model_dim
+        tflops = flops / (us1 / 1e6) / 1e12 if us1 > 0 else 0
+        bm = bench_bytes_moved_stage1(tok, topk, model_dim, inter_dim, experts, in_dtype)
+        tbps = bm / 1e12 / (us1 / 1e6) if us1 > 0 else 0
+        util = (tflops / peak_tflops * 100) if (peak_tflops > 0 and tflops > 0) else 0
+
+        bench_print_stage_row(tok, m_eff, us1, tflops, tbps, util, status)
+        s1_results.append((tok, m_eff, us1, tflops, tbps, status, out1))
+
+    # ── Stage 2 atomic ──
+    print(f"\n  ── Stage 2 atomic (down: [{inter_dim}] -> [{model_dim}]) ──")
+    bench_print_stage_header()
+
+    for tok, m_eff, _, _, _, s1_status, out1 in s1_results:
+        torch.cuda.empty_cache()
+        x, w1, w2, ids, wts, routing = setup_data_fn(tok, model_dim, inter_dim, experts, topk, tile_m)
+        a2_q, a2_scale = prepare_a2_fn(out1, tok, topk, inter_dim, in_dtype)
+        try:
+            _, us2 = stage2_fn(
+                tokens=tok, model_dim=model_dim, inter_dim=inter_dim,
+                experts=experts, topk=topk, in_dtype=in_dtype, out_dtype="f16",
+                tile_m=tile_m, tile_n=tile_n2, tile_k=tile_k2,
+                doweight_stage1=False, seed=0,
+                num_iters=iters, num_warmup=warmup,
+                x_fp32_in=x, w1_fp32_in=w1, w2_fp32_in=w2,
+                topk_ids_in=ids, topk_weights_in=wts, routing_in=routing,
+                a2_fp8_in=a2_q, a2_scale_in=a2_scale,
+                return_outputs=True, skip_ref=(not check_ref),
+                use_reduce=False,
+                use_tdm_store=bool(use_tdm_store),
+                inst_prefetch=bool(inst_prefetch),
+                wave_specialized_tdm=bool(wave_specialized_tdm),
+            )
+            status = "PASS" if check_ref else "OK"
+        except Exception as e:
+            status = "FAIL"
+            us2 = 0.0
+            print(f"  [{type(e).__name__}] tokens={tok}: {e}")
+
+        flops = 2 * tok * topk * model_dim * inter_dim
+        tflops = flops / (us2 / 1e6) / 1e12 if us2 > 0 else 0
+        bm = bench_bytes_moved_stage2(tok, topk, model_dim, inter_dim, experts, in_dtype)
+        tbps = bm / 1e12 / (us2 / 1e6) if us2 > 0 else 0
+        util = (tflops / peak_tflops * 100) if (peak_tflops > 0 and tflops > 0) else 0
+
+        bench_print_stage_row(tok, m_eff, us2, tflops, tbps, util, status)
+
+    # ── Stage 2 reduce ──
+    print(f"\n  ── Stage 2 reduce (down: [{inter_dim}] -> [{model_dim}]) ──")
+    bench_print_stage_header()
+
+    for tok, m_eff, _, _, _, s1_status, out1 in s1_results:
+        torch.cuda.empty_cache()
+        x, w1, w2, ids, wts, routing = setup_data_fn(tok, model_dim, inter_dim, experts, topk, tile_m)
+        a2_q, a2_scale = prepare_a2_fn(out1, tok, topk, inter_dim, in_dtype)
+        try:
+            _, us2r = stage2_fn(
+                tokens=tok, model_dim=model_dim, inter_dim=inter_dim,
+                experts=experts, topk=topk, in_dtype=in_dtype, out_dtype="f16",
+                tile_m=tile_m, tile_n=tile_n2, tile_k=tile_k2,
+                doweight_stage1=False, seed=0,
+                num_iters=iters, num_warmup=warmup,
+                x_fp32_in=x, w1_fp32_in=w1, w2_fp32_in=w2,
+                topk_ids_in=ids, topk_weights_in=wts, routing_in=routing,
+                a2_fp8_in=a2_q, a2_scale_in=a2_scale,
+                return_outputs=True, skip_ref=(not check_ref),
+                use_reduce=True,
+                use_tdm_store=bool(use_tdm_store),
+                inst_prefetch=bool(inst_prefetch),
+                wave_specialized_tdm=bool(wave_specialized_tdm),
+            )
+            status = "PASS" if check_ref else "OK"
+        except Exception as e:
+            status = "FAIL"
+            us2r = 0.0
+            print(f"  [{type(e).__name__}] tokens={tok}: {e}")
+
+        flops = 2 * tok * topk * model_dim * inter_dim
+        tflops = flops / (us2r / 1e6) / 1e12 if us2r > 0 else 0
+        bm = bench_bytes_moved_stage2(tok, topk, model_dim, inter_dim, experts, in_dtype)
+        tbps = bm / 1e12 / (us2r / 1e6) if us2r > 0 else 0
+        util = (tflops / peak_tflops * 100) if (peak_tflops > 0 and tflops > 0) else 0
+
+        bench_print_stage_row(tok, m_eff, us2r, tflops, tbps, util, status)
+
+    del s1_results
+    torch.cuda.empty_cache()
+
+
+def moe_bench_main(
+    args,
+    *,
+    stage1_fn: Callable,
+    stage2_fn: Callable,
+    setup_data_fn: Callable,
+    prepare_a2_fn: Callable,
+) -> None:
+    """Entry point for ``--bench`` mode: sweep model configs × dtypes × token counts.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        Parsed CLI args (must include the ``--bench-*`` group from ``add_moe_bench_args``
+        and ``use_tdm_store``, ``inst_prefetch``, ``wave_specialized_tdm``).
+    stage1_fn, stage2_fn, setup_data_fn, prepare_a2_fn :
+        Kernel-specific callables (see ``moe_bench_config`` for signatures).
+    """
+    import time
+    import torch
+
+    os.environ["FLYDSL_RUNTIME_ENABLE_CACHE"] = "1"
+
+    warmup = args.bench_warmup
+    iters = args.bench_iters
+
+    dtypes = args.bench_dtype.split(",") if args.bench_dtype else list(BENCH_DTYPE_TARGET_TILES.keys())
+    token_list = (
+        [int(t) for t in args.bench_tokens.split(",")]
+        if args.bench_tokens
+        else BENCH_DEFAULT_TOKEN_SWEEP
+    )
+    check_ref = not args.bench_no_ref
+
+    print("=" * 110)
+    print("  AMD gfx1250 MOE GEMM Kernel Performance Benchmark")
+    print(f"  PyTorch {torch.__version__}")
+    print(f"  Device:  {torch.cuda.get_device_name(0)}")
+    props = torch.cuda.get_device_properties(0)
+    print(f"  CUs:     {props.multi_processor_count}")
+    print(f"  Memory:  {props.total_memory / 1024**3:.0f} GB")
+    print(f"  Warmup={warmup}  Iters={iters}  RefCheck={'ON' if check_ref else 'OFF'}")
+    print(f"  Dtypes:  {dtypes}")
+    print(f"  Tokens:  {token_list}")
+    print("=" * 110)
+
+    t_start = time.time()
+    for cfg_name, mdim, idim, exp, topk in BENCH_MODEL_CONFIGS:
+        if args.bench_config and args.bench_config not in cfg_name:
+            continue
+        for dt in dtypes:
+            if dt not in BENCH_DTYPE_TARGET_TILES:
+                print(f"\n  [SKIP] Unknown dtype: {dt}")
+                continue
+            try:
+                moe_bench_config(
+                    cfg_name, mdim, idim, exp, topk,
+                    dt, token_list, check_ref, args.bench_peak_tflops,
+                    stage1_fn=stage1_fn,
+                    stage2_fn=stage2_fn,
+                    setup_data_fn=setup_data_fn,
+                    prepare_a2_fn=prepare_a2_fn,
+                    warmup=warmup, iters=iters,
+                    use_tdm_store=bool(args.use_tdm_store),
+                    inst_prefetch=bool(args.inst_prefetch),
+                    wave_specialized_tdm=bool(args.wave_specialized_tdm),
+                )
+            except Exception as e:
+                print(f"\n  [ERROR] {cfg_name}/{dt}: {e}")
+                import traceback; traceback.print_exc()
+
+    elapsed = time.time() - t_start
+    bench_print_banner(f"Done in {elapsed:.1f}s")
+
+
 def main() -> None:
     # CLI entrypoint:
     #   BENCH_CONFIGS="M,N,dtype;..." AITER_IMPL=triton BENCH_WARMUP=10 BENCH_ITERS=50 python -m tests.kernels.benchmark_common
