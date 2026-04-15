@@ -189,6 +189,7 @@ def compile_preshuffle_gemm_a8(
     b_elem_vec_pack = 2 if is_fp4 else 1
 
     tile_k_bytes = int(tile_k) * int(elem_bytes)
+    _use_wg_swizzle = False
 
     if (tile_k_bytes % 64) != 0:
         raise ValueError(
@@ -354,8 +355,18 @@ def compile_preshuffle_gemm_a8(
         k_blocks16 = arith.index(tile_k_bytes // a_elem_vec_pack // 16)
 
         tx = gpu.thread_id("x")
-        bx = gpu.block_id("x")
-        by = gpu.block_id("y")
+
+        # ---- CK/HK-style L2 workgroup swizzle (bitwise, zero-cost) ----
+        if _use_wg_swizzle:
+            _linear_wgid = gpu.block_id("x")
+            _group_id = arith.shrui(_linear_wgid, arith.index(_log2_group))
+            _local_id = arith.andi(_linear_wgid, arith.index((1 << _log2_group) - 1))
+            _pid_m_in_grp = arith.andi(_local_id, arith.index(_WGM - 1))
+            by = arith.shrui(_local_id, arith.index(_log2_wgm))
+            bx = arith.shli(_group_id, arith.index(_log2_wgm)) + _pid_m_in_grp
+        else:
+            bx = gpu.block_id("x")
+            by = gpu.block_id("y")
 
         # ---- LDS (separate ping/pong buffers for no-alias guarantee) ----
         base_ptr_pong = allocator_pong.get_base()
@@ -1428,11 +1439,18 @@ def compile_preshuffle_gemm_a8(
                     if hasattr(op, 'attributes') and op.OPERATION_NAME == "gpu.func":
                         op.attributes["rocdl.waves_per_eu"] = ir.IntegerAttr.get(
                             T.i32, _wpe)
-        launcher.launch(
-            grid=(gx, gy, 1),
-            block=(256, 1, 1),
-            stream=stream,
-        )
+        if _use_wg_swizzle:
+            launcher.launch(
+                grid=(gx * gy, 1, 1),
+                block=(256, 1, 1),
+                stream=stream,
+            )
+        else:
+            launcher.launch(
+                grid=(gx, gy, 1),
+                block=(256, 1, 1),
+                stream=stream,
+            )
 
     return launch_gemm
 

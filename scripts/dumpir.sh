@@ -10,7 +10,7 @@ set -e
 cd "$(dirname "$0")/.."
 
 export FLYDSL_DUMP_IR=1
-export FLYDSL_DUMP_DIR="${FLYDSL_DUMP_DIR:-/tmp/flydsl_dump_ir}"
+export FLYDSL_DUMP_DIR="${FLYDSL_DUMP_DIR:-flydsl_dump_ir}"
 
 echo "[dumpir] IR dumps -> ${FLYDSL_DUMP_DIR} (cache disabled)"
 "$@"
