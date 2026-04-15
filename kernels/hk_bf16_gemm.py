@@ -95,33 +95,45 @@ def compile_hk_bf16_gemm(
     def _out_elem():
         return T.bf16 if _out_is_bf16 else T.f16
 
-    # --- 2 SmemAllocators: pong/ping, each holds 2 K-tiles (a_k0 + b_k0 + a_k1 + b_k1) ---
-    # Total per stage = 4 * 16KB = 64KB. Two stages = 128KB < 160KB.
-    # All sub-regions in one allocator share the same LDS base → 1 base VGPR per stage.
+    # --- 2 SmemAllocators: pong/ping ---
+    # Each stage: A_interleaved(32KB) + B_interleaved(32KB) = 64KB.
+    # A_interleaved layout: [mi0_k0(1024B), mi0_k1(1024B), mi1_k0(1024B), ...]
+    # This gives ds_read offsets 0, 1024, 2048, ..., 7168 from ONE base (HK pattern).
+    # Total: 2 stages × 64KB = 128KB < 160KB.
+    _mi_block_bytes = 16 * tile_k * elem_bytes  # 1024
+    _a_interleaved_bytes = m_repeat * 2 * _mi_block_bytes  # 16 mi × 2 k × 1024 = 32KB
+    _b_interleaved_bytes = num_acc_n * 2 * _mi_block_bytes  # 4 ni × 2 k × 1024 = 8KB... wait
+    # Actually: A has m_repeat mi-tiles, B has num_acc_n ni-tiles (warp-level)
+    # But LDS stores the FULL tile (all warps), not per-warp.
+    # tile_m / 16 = 16 mi-tiles for A, tile_n / 16 = 16 ni-tiles for B
+    _num_mi_tiles = tile_m // 16  # 16
+    _num_ni_tiles = tile_n // 16  # 16
+    _a_interleaved_bytes = _num_mi_tiles * 2 * _mi_block_bytes  # 16 × 2 × 1024 = 32KB
+    _b_interleaved_bytes = _num_ni_tiles * 2 * _mi_block_bytes  # 16 × 2 × 1024 = 32KB
+
     allocator_pong = SmemAllocator(None, arch=gpu_arch, global_sym_name="smem0")
     allocator_ping = SmemAllocator(None, arch=gpu_arch, global_sym_name="smem1")
 
     def _alloc_stage(alloc):
-        """Allocate 4 sub-regions: a_k0, b_k0, a_k1, b_k1. Returns offsets."""
-        a0 = alloc._align(alloc.ptr, 16); alloc.ptr = a0 + lds_a_bytes
-        b0 = alloc._align(alloc.ptr, 16); alloc.ptr = b0 + lds_b_bytes
-        a1 = alloc._align(alloc.ptr, 16); alloc.ptr = a1 + lds_a_bytes
-        b1 = alloc._align(alloc.ptr, 16); alloc.ptr = b1 + lds_b_bytes
-        return a0, b0, a1, b1
+        """Allocate 2 interleaved regions: A (32KB) + B (32KB)."""
+        a_off = alloc._align(alloc.ptr, 16); alloc.ptr = a_off + _a_interleaved_bytes
+        b_off = alloc._align(alloc.ptr, 16); alloc.ptr = b_off + _b_interleaved_bytes
+        return a_off, b_off
 
-    pong_a0_off, pong_b0_off, pong_a1_off, pong_b1_off = _alloc_stage(allocator_pong)
-    ping_a0_off, ping_b0_off, ping_a1_off, ping_b1_off = _alloc_stage(allocator_ping)
+    pong_a_off, pong_b_off = _alloc_stage(allocator_pong)
+    ping_a_off, ping_b_off = _alloc_stage(allocator_ping)
 
     _tile_k_div4 = tile_k * elem_bytes // 4
     num_k_tiles = K // tile_k
     num_k_pairs = num_k_tiles // 2
 
-    # Sub-region element offsets within each stage (for ds_read offset computation)
-    # These become constant ds_read byte offsets when multiplied by elem_bytes.
-    _off_a0 = pong_a0_off // elem_bytes  # 0
-    _off_b0 = pong_b0_off // elem_bytes  # lds_a_elems
-    _off_a1 = pong_a1_off // elem_bytes  # lds_a_elems + lds_b_elems
-    _off_b1 = pong_b1_off // elem_bytes  # lds_a_elems + lds_b_elems + lds_a_elems
+    # Interleaved element offsets: k0 at even blocks, k1 at odd blocks
+    # mi-tile stride = 2 * _mi_block_bytes / elem_bytes = 2 * 512 = 1024 elements = 2048 bytes
+    # k-chunk offset = _mi_block_bytes / elem_bytes = 512 elements = 1024 bytes
+    _interleaved_mi_stride = 2 * _mi_block_bytes // elem_bytes  # 1024 elems = 2048 bytes
+    _interleaved_k_offset = _mi_block_bytes // elem_bytes  # 512 elems = 1024 bytes
+    # B region starts after A
+    _b_region_elem_off = _a_interleaved_bytes // elem_bytes  # 16384 elems
 
     @flyc.kernel(known_block_size=[total_threads, 1, 1])
     def hk_bf16_gemm_v2(arg_c, arg_a, arg_b, i32_m, i32_n):
@@ -156,21 +168,21 @@ def compile_hk_bf16_gemm(
         bx = _first_pid_m + arith.remsi(_local_id, _group_size_m)
         by = arith.divsi(_local_id, _group_size_m)
 
-        # ---- LDS memrefs ----
-        # ONE get_base() per allocator — all memrefs share the same base pointer
-        # This ensures LLVM knows DMA writes and ds_reads alias correctly (no spurious vmcnt)
+        # ---- LDS memrefs (interleaved layout: 2 regions per stage) ----
+        # ONE base per allocator. A and B each get one memref for ds_reads → 2 base VGPRs.
         base_pong = allocator_pong.get_base()
         base_ping = allocator_ping.get_base()
 
-        # Sub-region memrefs for DMA (separate shapes for m0 computation)
-        lds_pong_a0 = SmemPtr(base_pong, pong_a0_off, T.bf16, shape=(lds_a_elems,)).get()
-        lds_pong_b0 = SmemPtr(base_pong, pong_b0_off, T.bf16, shape=(lds_b_elems,)).get()
-        lds_pong_a1 = SmemPtr(base_pong, pong_a1_off, T.bf16, shape=(lds_a_elems,)).get()
-        lds_pong_b1 = SmemPtr(base_pong, pong_b1_off, T.bf16, shape=(lds_b_elems,)).get()
-        lds_ping_a0 = SmemPtr(base_ping, ping_a0_off, T.bf16, shape=(lds_a_elems,)).get()
-        lds_ping_b0 = SmemPtr(base_ping, ping_b0_off, T.bf16, shape=(lds_b_elems,)).get()
-        lds_ping_a1 = SmemPtr(base_ping, ping_a1_off, T.bf16, shape=(lds_a_elems,)).get()
-        lds_ping_b1 = SmemPtr(base_ping, ping_b1_off, T.bf16, shape=(lds_b_elems,)).get()
+        _a_interleaved_elems = _a_interleaved_bytes // elem_bytes  # 16384
+        _b_interleaved_elems = _b_interleaved_bytes // elem_bytes  # 16384
+
+        # For ds_reads: 2 memrefs per stage (A, B) — gives 2 base VGPRs like HK
+        lds_pong_a = SmemPtr(base_pong, pong_a_off, T.bf16, shape=(_a_interleaved_elems,)).get()
+        lds_pong_b = SmemPtr(base_pong, pong_b_off, T.bf16, shape=(_b_interleaved_elems,)).get()
+        lds_ping_a = SmemPtr(base_ping, ping_a_off, T.bf16, shape=(_a_interleaved_elems,)).get()
+        lds_ping_b = SmemPtr(base_ping, ping_b_off, T.bf16, shape=(_b_interleaved_elems,)).get()
+
+        # For DMA: same memrefs (shared base → no alias issues)
 
         # ---- Buffer resources ----
         _a_nrec = arith.index_cast(T.i64, c_m * (K * elem_bytes))
@@ -201,36 +213,62 @@ def compile_hk_bf16_gemm(
         row_a_base = wave_m_id * warp_tile_m + lane_mod_16
         row_b_base = wave_n_id * warp_tile_n + lane_mod_16
 
-        # ---- DMA helpers ----
+        # ---- DMA: interleaved k0/k1 layout ----
+        # Thread mapping for interleaved DMA:
+        # Sequential LDS position T*16 maps to interleaved block:
+        #   block = T*16 / 1024 = T // 64
+        #   mi = block // 2
+        #   k_idx = block % 2
+        #   local_pos = (T*16 % 1024) / 16 = T % 64
+        #   row_in_mi = local_pos // 4
+        #   k_group = local_pos % 4
+        # Global read: row = base_row + mi*16 + row_in_mi
+        #              K_pos = k_start + k_idx * tile_k + k_group * 8
         from flydsl._mlir.dialects import memref as memref_dialect
         c4 = fx.Index(4)
         dma_bytes = 16 if _is_gfx950 else 4
         dma_dwords = dma_bytes // 4
-        tx_dma_base = tx * dma_dwords
-        layout_a_dma = fx.make_layout((tile_m, tile_k_dwords), (tile_k_dwords, 1))
-        layout_b_dma = fx.make_layout((tile_n, tile_k_dwords), (tile_k_dwords, 1))
         _K_bytes = K * elem_bytes
         _lds_k_dim_c = fx.Index(lds_k_dim)
         _k_blocks16_c = arith.index(k_blocks16)
 
-        def _dma_tile(rsrc, base_row, base_k_div4, lds_buffer, layout_dma, num_dma,
-                     lds_byte_offset=0):
-            """lds_byte_offset: additional byte offset within the full stage memref."""
-            lds_base_idx = memref_dialect.extract_aligned_pointer_as_index(lds_buffer)
-            if lds_byte_offset > 0:
-                lds_base_idx = lds_base_idx + arith.index(lds_byte_offset)
+        # Interleaved DMA: loads both k0 and k1 for one matrix in interleaved order.
+        # 512 threads × 4 loads × 16 bytes = 32KB per matrix (covers both K-tiles).
+        _num_interleaved_dma = 4  # 32KB / (512 * 16) = 4 loads per thread
+
+        def _dma_matrix_interleaved(rsrc, base_row, k_pair_div4, lds_buf, dim_tiles):
+            """DMA both k0+k1 for one matrix into interleaved LDS layout.
+            dim_tiles: number of mi/ni tiles (tile_m/16 or tile_n/16).
+            LDS layout: [mi0_k0(1024B), mi0_k1(1024B), mi1_k0(1024B), ...]
+            """
+            lds_base_idx = memref_dialect.extract_aligned_pointer_as_index(lds_buf)
             wave_off = rocdl.readfirstlane(
                 T.i64, arith.index_cast(T.i64, wave_id * arith.index(wave_size * dma_bytes)))
-            for i in _range_constexpr(num_dma):
-                coord = tile_chunk_coord_i32(
-                    arith, tx_i32_base=tx_dma_base, i=i,
-                    total_threads=total_threads, layout_tile_div4=layout_dma,
-                    chunk_i32=dma_dwords)
-                row_local, col_dw = coord
-                col_bytes = col_dw * c4
-                row_global = base_row + row_local
-                global_byte_idx = row_global * _K_bytes + (base_k_div4 * c4 + col_bytes)
+
+            k0_div4 = k_pair_div4
+            k1_div4 = k_pair_div4 + _tile_k_div4
+            _K_bytes_idx = fx.Index(_K_bytes)
+
+            for i in _range_constexpr(_num_interleaved_dma):
+                # Sequential position in LDS
+                seq_pos = tx * dma_dwords + i * total_threads * dma_dwords
+                # Decompose: block → (mi, k_idx), within block → (row_in_mi, k_group)
+                block_dwords = _mi_block_bytes // 4  # 256 dwords per block
+                block_id = seq_pos // block_dwords
+                local_dw = seq_pos % block_dwords
+                mi = block_id // 2
+                k_idx = block_id % 2
+                row_in_mi = local_dw // tile_k_dwords  # local_dw // 16
+                k_group_dw = local_dw % tile_k_dwords  # local_dw % 16
+
+                # Global address
+                row_global = base_row + mi * 16 + row_in_mi
+                col_bytes = k_group_dw * c4
+                # k0 or k1 offset
+                k_base = k0_div4 + k_idx * _tile_k_div4
+                global_byte_idx = row_global * _K_bytes_idx + (k_base * c4 + col_bytes)
                 global_offset = arith.index_cast(T.i32, global_byte_idx)
+
                 if i == 0:
                     lds_ptr_base = buffer_ops.create_llvm_ptr(
                         arith.index_cast(T.i64, lds_base_idx), address_space=3)
@@ -247,42 +285,24 @@ def compile_hk_bf16_gemm(
                     arith.constant(0, type=T.i32),
                 )
 
-        def _dma_k_pair(k_pair_div4, lds_full):
-            """DMA 2 K-tiles into one full-stage memref's 4 sub-regions."""
-            k0 = k_pair_div4
-            k1 = k_pair_div4 + _tile_k_div4
-            _dma_tile(a_rsrc, bx_m, k0, lds_full, layout_a_dma, num_a_dma,
-                      lds_byte_offset=pong_a0_off)
-            _dma_tile(b_rsrc, by_n, k0, lds_full, layout_b_dma, num_b_dma,
-                      lds_byte_offset=pong_b0_off)
-            _dma_tile(a_rsrc, bx_m, k1, lds_full, layout_a_dma, num_a_dma,
-                      lds_byte_offset=pong_a1_off)
-            _dma_tile(b_rsrc, by_n, k1, lds_full, layout_b_dma, num_b_dma,
-                      lds_byte_offset=pong_b1_off)
-
         def dma_pong(k_pair_div4):
-            _dma_k_pair(k_pair_div4, lds_pong_full)
+            _dma_matrix_interleaved(a_rsrc, bx_m, k_pair_div4, lds_pong_a, _num_mi_tiles)
+            _dma_matrix_interleaved(b_rsrc, by_n, k_pair_div4, lds_pong_b, _num_ni_tiles)
 
         def dma_ping(k_pair_div4):
-            _dma_k_pair(k_pair_div4, lds_ping_full)
+            _dma_matrix_interleaved(a_rsrc, bx_m, k_pair_div4, lds_ping_a, _num_mi_tiles)
+            _dma_matrix_interleaved(b_rsrc, by_n, k_pair_div4, lds_ping_b, _num_ni_tiles)
 
-        def _make_dma_interleaved(k_pair_div4, lds_full):
-            """Return dma_fn(phase_idx) issuing 2 DMA per phase through the SAME memref."""
-            k0 = k_pair_div4
-            k1 = k_pair_div4 + _tile_k_div4
+        def _make_dma_interleaved(k_pair_div4, lds_a_buf, lds_b_buf):
+            """Return dma_fn(phase_idx) issuing DMA loads spread across phases."""
+            # With interleaved layout, we issue the full DMA before compute.
+            # Interleaving DMA across phases is complex; DMA before compute is simpler
+            # and doesn't hurt because DMA overlaps with previous phase's MFMAs.
             def _dma_phase(phase_idx):
                 if phase_idx == 0:
-                    _dma_tile(a_rsrc, bx_m, k0, lds_full, layout_a_dma, num_a_dma,
-                              lds_byte_offset=pong_a0_off)
+                    _dma_matrix_interleaved(a_rsrc, bx_m, k_pair_div4, lds_a_buf, _num_mi_tiles)
                 elif phase_idx == 1:
-                    _dma_tile(b_rsrc, by_n, k0, lds_full, layout_b_dma, num_b_dma,
-                              lds_byte_offset=pong_b0_off)
-                elif phase_idx == 2:
-                    _dma_tile(a_rsrc, bx_m, k1, lds_full, layout_a_dma, num_a_dma,
-                              lds_byte_offset=pong_a1_off)
-                elif phase_idx == 3:
-                    _dma_tile(b_rsrc, by_n, k1, lds_full, layout_b_dma, num_b_dma,
-                              lds_byte_offset=pong_b1_off)
+                    _dma_matrix_interleaved(b_rsrc, by_n, k_pair_div4, lds_b_buf, _num_ni_tiles)
             return _dma_phase
 
         # ---- LDS read: use ONE stage memref for ALL sub-regions ----
@@ -291,19 +311,11 @@ def compile_hk_bf16_gemm(
         # constant element offsets added to the row-based index.
 
         # Stage-wide memref (all 4 sub-regions in one memref)
-        _stage_elems = allocator_pong.ptr // elem_bytes  # total elements per stage
 
         # Full-stage memrefs for ds_reads — SAME base_pong/base_ping (no duplicate get_base!)
-        lds_pong_full = SmemPtr(base_pong, 0, T.bf16, shape=(_stage_elems,)).get()
-        lds_ping_full = SmemPtr(base_ping, 0, T.bf16, shape=(_stage_elems,)).get()
 
         # Element offsets for each sub-region within the stage
-        _off_a0 = pong_a0_off // elem_bytes  # 0
-        _off_b0 = pong_b0_off // elem_bytes  # lds_a_elems = 8192
-        _off_a1 = pong_a1_off // elem_bytes  # 16384
-        _off_b1 = pong_b1_off // elem_bytes  # 24576
 
-        # _lds_load_pack removed — replaced by _lds_load_at_row above
 
         # ---- MFMA ----
         def _make_mfma():
@@ -359,10 +371,6 @@ def compile_hk_bf16_gemm(
         # Sub-region offsets expressed as virtual row offsets (divisible by lds_k_dim).
         # Adding these to row_base before row*lds_k_dim+col_swz lets LLVM fold them
         # into ds_read offset field (same pattern as preshuffle_gemm).
-        _row_off_a0 = _off_a0 // lds_k_dim  # 0
-        _row_off_b0 = _off_b0 // lds_k_dim  # 256
-        _row_off_a1 = _off_a1 // lds_k_dim  # 512
-        _row_off_b1 = _off_b1 // lds_k_dim  # 768
 
         def _lds_load_pack(row, lds_buf):
             """Load bf16x8 from lds_buf at row * lds_k_dim + col_base.
@@ -378,22 +386,37 @@ def compile_hk_bf16_gemm(
             a1 = vector.extract(v_i64x2, static_position=[1], dynamic_position=[])
             return a0, a1
 
-        def _load_b_half(ni_off, lds_b0_buf, lds_b1_buf):
-            """Load n_half B packs from both K-tiles. B loaded FIRST (HK pattern)."""
+        # Interleaved offsets: k0 at even mi-tile positions, k1 at odd
+        # For mi-tile i: k0 at i * 2 * _mi_tile_stride, k1 at i * 2 * _mi_tile_stride + _mi_tile_stride
+        # This gives offsets 0, 512, 1024, 1536, 2048, ... (in elements)
+        # = 0, 1024, 2048, 3072, 4096, ... (in bytes) — matches HK!
+
+        # In interleaved layout, virtual row for (mi_tile, k_idx):
+        #   virtual_row = mi * 32 + k_idx * 16 + lane_mod_16
+        # where 32 = 2 blocks × 16 rows/block (k0+k1 per mi-tile)
+        # This gives ds_read offsets: mi*32*32 + k_idx*16*32 = mi*1024 + k_idx*512
+        # In bytes: mi*2048 + k_idx*1024 — matches HK pattern!
+
+        def _load_b_half(ni_off, lds_b_buf):
+            """Load n_half B packs from interleaved LDS. B loaded FIRST."""
             b0 = []; b1 = []
             for ni_local in _range_constexpr(n_half):
-                row = row_b_base + (ni_off + ni_local) * 16
-                b0.append(_lds_load_pack(row, lds_b0_buf))
-                b1.append(_lds_load_pack(row, lds_b1_buf))
+                ni = ni_off + ni_local
+                # k0: virtual row = ni * 32 + 0*16 + lane_mod_16
+                b0.append(_lds_load_pack(row_b_base + ni * 32, lds_b_buf))
+                # k1: virtual row = ni * 32 + 1*16 + lane_mod_16
+                b1.append(_lds_load_pack(row_b_base + ni * 32 + 16, lds_b_buf))
             return b0, b1
 
-        def _load_a_half(mi_off, lds_a0_buf, lds_a1_buf):
-            """Load m_half A packs from both K-tiles. A loaded SECOND."""
+        def _load_a_half(mi_off, lds_a_buf):
+            """Load m_half A packs from interleaved LDS. A loaded SECOND."""
             a0 = []; a1 = []
             for mi_local in _range_constexpr(m_half):
-                row = row_a_base + (mi_off + mi_local) * 16
-                a0.append(_lds_load_pack(row, lds_a0_buf))
-                a1.append(_lds_load_pack(row, lds_a1_buf))
+                mi = mi_off + mi_local
+                # k0: virtual row = mi * 32 + 0*16
+                a0.append(_lds_load_pack(row_a_base + mi * 32, lds_a_buf))
+                # k1: virtual row = mi * 32 + 1*16
+                a1.append(_lds_load_pack(row_a_base + mi * 32 + 16, lds_a_buf))
             return a0, a1
 
         # HK lgkmcnt(8): wait for ds_reads, leave 8 DMA events pending
@@ -407,15 +430,15 @@ def compile_hk_bf16_gemm(
             rocdl.s_barrier()
             rocdl.s_waitcnt(0xC07F)  # lgkmcnt(0) — drain all
 
-        def compute_tile_2k(accs, la0, lb0, la1, lb1, dma_fn=None):
+        def compute_tile_2k(accs, la, lb, dma_fn=None):
             """4 phases × 16 MFMAs = 64 MFMAs, with data reuse + LDS prefetch.
             HK pattern: next-phase ds_reads issued BEFORE inter-phase barrier,
             so reads overlap with barrier sync and complete before MFMAs.
             All ds_reads from ONE stage memref → shared base VGPR.
             """
             # Phase 0: 12 reads (B first, then A — HK pattern) + 2 DMA + MFMAs
-            b_h0_k0, b_h0_k1 = _load_b_half(0, lb0, lb1)
-            a_h0_k0, a_h0_k1 = _load_a_half(0, la0, la1)
+            b_h0_k0, b_h0_k1 = _load_b_half(0, lb)
+            a_h0_k0, a_h0_k1 = _load_a_half(0, la)
             rocdl.sched_barrier(0)
             if dma_fn is not None:
                 dma_fn(0)
@@ -425,7 +448,7 @@ def compile_hk_bf16_gemm(
                                0, 0, m_half, n_half)
 
             # Prefetch Phase 1 B_half1 reads (4) BEFORE inter-phase barrier
-            b_h1_k0, b_h1_k1 = _load_b_half(n_half, lb0, lb1)
+            b_h1_k0, b_h1_k1 = _load_b_half(n_half, lb)
             rocdl.sched_barrier(0)
             if dma_fn is not None:
                 dma_fn(1)
@@ -437,7 +460,7 @@ def compile_hk_bf16_gemm(
                                0, n_half, m_half, n_half)
 
             # Prefetch Phase 2 A_half1 reads (8) BEFORE inter-phase barrier
-            a_h1_k0, a_h1_k1 = _load_a_half(m_half, la0, la1)
+            a_h1_k0, a_h1_k1 = _load_a_half(m_half, la)
             rocdl.sched_barrier(0)
             if dma_fn is not None:
                 dma_fn(2)
@@ -488,13 +511,13 @@ def compile_hk_bf16_gemm(
         _2k = 2 * _tile_k_div4  # stride per K-pair in div4 units
 
         if num_k_pairs <= 1:
-            accs = compute_tile_2k(init_accs, lds_pong_a0, lds_pong_b0, lds_pong_a1, lds_pong_b1)
+            accs = compute_tile_2k(init_accs, lds_pong_a, lds_pong_b)
         elif num_k_pairs == 2:
             dma_ping(arith.index(1 * _2k))
-            accs = compute_tile_2k(init_accs, lds_pong_a0, lds_pong_b0, lds_pong_a1, lds_pong_b1)
+            accs = compute_tile_2k(init_accs, lds_pong_a, lds_pong_b)
             rocdl.s_waitcnt(0xC07F)
             rocdl.s_barrier()
-            accs = compute_tile_2k(accs, lds_ping_a0, lds_ping_b0, lds_ping_a1, lds_ping_b1)
+            accs = compute_tile_2k(accs, lds_ping_a, lds_ping_b)
         else:
             # General case: 2x unroll (128 MFMAs per scf.for iteration = matches HK)
             num_loop_iters = (num_k_pairs - 1) // 2
@@ -508,14 +531,14 @@ def compile_hk_bf16_gemm(
                 k_pong = (2 * pair_iv + 2) * _2k
 
                 # Compute from pong, interleave DMA→ping (same memref for read+write)
-                dma_to_ping = _make_dma_interleaved(k_ping, lds_ping_full)
-                accs_out = compute_tile_2k(accs_in, lds_pong_a0, lds_pong_b0, lds_pong_a1, lds_pong_b1, dma_fn=dma_to_ping)
+                dma_to_ping = _make_dma_interleaved(k_ping, lds_ping_a, lds_ping_b)
+                accs_out = compute_tile_2k(accs_in, lds_pong_a, lds_pong_b, dma_fn=dma_to_ping)
                 rocdl.s_waitcnt(0xC07F)
                 rocdl.s_barrier()
 
                 # Compute from ping, interleave DMA→pong
-                dma_to_pong = _make_dma_interleaved(k_pong, lds_pong_full)
-                accs_out = compute_tile_2k(accs_out, lds_ping_a0, lds_ping_b0, lds_ping_a1, lds_ping_b1, dma_fn=dma_to_pong)
+                dma_to_pong = _make_dma_interleaved(k_pong, lds_pong_a, lds_pong_b)
+                accs_out = compute_tile_2k(accs_out, lds_ping_a, lds_ping_b, dma_fn=dma_to_pong)
                 rocdl.s_waitcnt(0xC07F)
                 rocdl.s_barrier()
 
@@ -526,12 +549,12 @@ def compile_hk_bf16_gemm(
             if has_tail:
                 tail_k = arith.index((num_k_pairs - 1) * _2k)
                 dma_ping(tail_k)
-                accs = compute_tile_2k(accs, lds_pong_a0, lds_pong_b0, lds_pong_a1, lds_pong_b1)
+                accs = compute_tile_2k(accs, lds_pong_a, lds_pong_b)
                 rocdl.s_waitcnt(0xC07F)
                 rocdl.s_barrier()
-                accs = compute_tile_2k(accs, lds_ping_a0, lds_ping_b0, lds_ping_a1, lds_ping_b1)
+                accs = compute_tile_2k(accs, lds_ping_a, lds_ping_b)
             else:
-                accs = compute_tile_2k(accs, lds_pong_a0, lds_pong_b0, lds_pong_a1, lds_pong_b1)
+                accs = compute_tile_2k(accs, lds_pong_a, lds_pong_b)
 
         store_output(accs)
 
