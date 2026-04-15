@@ -25,17 +25,6 @@ LayoutAttr getThrValLayoutAB(MLIRContext *ctx, int32_t M, int32_t N, int32_t K, 
   int GroupK = 64 / MN;
   int KPerThread = K / GroupK;
 
-  // For K=128 (gfx950 fp8 mfma_scale): use blocked value layout matching the
-  // preshuffle B 64-byte k-block structure. Each K-group reads 16 bytes from
-  // each of K/64 blocks: K-group g → K={g*16..g*16+15, 64+g*16..64+g*16+15, ...}.
-  if (KPerThread > 8) {
-    int innerK = 16;  // elements per k_lane in preshuffle format
-    int numBlocks = KPerThread / innerK;
-    int blockStride = MN * innerK * GroupK; // stride between k64 blocks
-    return FxLayout(FxShape(FxThr(MN, GroupK), FxVal(innerK, numBlocks)),
-                    FxStride(FxThr(1, MN * innerK), FxVal(MN, blockStride)));
-  }
-
   return FxLayout(FxShape(FxThr(MN, GroupK), FxVal(KPerThread)),
                   FxStride(FxThr(1, MN * KPerThread), FxVal(MN)));
 }

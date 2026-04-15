@@ -126,16 +126,20 @@ def compile_preshuffle_gemm_v2(
         thr_s2r = fx.make_tiled_copy_A(mma_copy, tiled_mma).get_slice(tid)
         thr_g2r_B = fx.make_tiled_copy_B(mma_copy, tiled_mma).get_slice(tid)
 
-        # LDS with XOR16 swizzle (f16/bf16) or no swizzle (fp8)
+        # LDS: XOR swizzle for f16/bf16 to avoid bank conflicts, identity for fp8
         smem_ptr = fx.recast_iter(
             fx.PointerType.get(layout_elem.ir_type, fx.AddressSpace.Shared, 512),
             fx.get_dyn_shared(),
         )
-        swz = fx.SwizzleType.get(3, 3, 3)
-        sA = fx.make_view(smem_ptr, fx.make_composed_layout(
-            fx.static(swz),
-            fx.make_ordered_layout((tile_m, tile_k, 2), (1, 0, 2)),
-        ))
+        if is_fp8:
+            sA = fx.make_view(smem_ptr,
+                fx.make_ordered_layout((tile_m, tile_k, 2), (1, 0, 2)))
+        else:
+            swz = fx.SwizzleType.get(3, 3, 3)
+            sA = fx.make_view(smem_ptr, fx.make_composed_layout(
+                fx.static(swz),
+                fx.make_ordered_layout((tile_m, tile_k, 2), (1, 0, 2)),
+            ))
 
         # Partitions
         pA_g = thr_g2s.partition_S(tA)
@@ -288,8 +292,8 @@ def compile_preshuffle_gemm_v2(
             for ki in range_constexpr(k_iters):
                 fx.copy(mma_uni, pA_s2r[None, None, ki, read_stage],
                         frag_A_retile[None, None, ki])
-                # K=128 (1 atom): frag shape (K_val, m, k_iters) → k_iters is flat
-                # K=32/16 (2 atoms): frag shape (K_val, m, (atoms, k_iters)) → nested
+                # K=128 (1 atom): frag K dim is flat k_iters → coord = ki
+                # K=32/16 (2 atoms): frag K dim is (atoms, k_iters) → coord = (None, ki)
                 k_coord = ki if use_mfma_scale_128 else (None, ki)
                 fx.gemm(tiled_mma, frag_C,
                         frag_A[None, None, k_coord],
@@ -420,10 +424,10 @@ def compile_preshuffle_gemm_v2(
             mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 16, BFloat16))
             k_perm = fx.make_layout((4, 4, 2), (1, 8, 4))
         elif use_mfma_scale_128:
-            # gfx950 fp8: K=128 atom with blocked TV layout (16 inner, 2 blocks)
-            # k_perm: (innerK=16, GroupK=4, blocks=2), tile_K_perm=128
+            # gfx950 fp8: K=128 atom with flat value layout (KPerThread=32)
+            # k_perm: (KPerThread=32, GroupK=4), tile_K_perm=128, 1 atom
             mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 128, layout_elem))
-            k_perm = fx.make_layout((16, 4, 2), (1, 16, 64))
+            k_perm = fx.make_layout((32, 4), (1, 32))
         else:
             mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 32, layout_elem))
             # FP8: KPerThread=8, GroupK=4, 2 atoms → groups 64 K elements
