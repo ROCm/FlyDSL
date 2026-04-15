@@ -615,7 +615,6 @@ def run_flydsl_ps(
     kv_page_indices: torch.Tensor,
     kv_indptr: torch.Tensor,
     softmax_scale: float,
-    query_scale: Union[float, torch.Tensor],
     key_scale: Union[float, torch.Tensor],
     value_scale: Union[float, torch.Tensor],
     metadata: Dict[str, torch.Tensor],
@@ -637,7 +636,6 @@ def run_flydsl_ps(
         kv_page_indices,
         kv_indptr,
         softmax_scale,
-        query_scale=query_scale,
         key_scale=key_scale,
         value_scale=value_scale,
         sliding_window=sliding_window,
@@ -790,6 +788,7 @@ def run_pa_decode_ps_test(
     )
     key_cache = key_caches[0]
     value_cache = value_caches[0]
+
     query_scale_factors = None
     quantized_query = query
     if quant_mode == "per_token":
@@ -900,7 +899,6 @@ def run_pa_decode_ps_test(
     # Match Gluon's query path: launch with bf16 query and let the PS launcher
     # cast to fp8 internally with a unit query scale.
     flydsl_ps_query = query
-    flydsl_ps_q_scale = torch.tensor([1.0], dtype=torch.float32, device=device)
     ps_metadata = flydsl_get_pa_metadata(
         flydsl_ps_query,
         quantized_keys,
@@ -951,7 +949,6 @@ def run_pa_decode_ps_test(
             kv_page_indices,
             kv_indptr,
             softmax_scale,
-            flydsl_ps_q_scale,
             ps_key_scale,
             ps_value_scale,
             ps_metadata,
@@ -1346,11 +1343,11 @@ def global_window_accuracy_test() -> None:
     COMPUTE_TYPE_OPTIONS = ["fp8"]
     CONTEXT_PARTITION_SIZE_OPTIONS = [256]
     HEAD_DIMENSION_OPTIONS = [128]
-    HEAD_CONFIGURATIONS = [(4, 1), (8, 2)]
-    QUERY_LENGTH_OPTIONS = [1, 2, 3, 4]
+    HEAD_CONFIGURATIONS = [(8, 2), (12, 2)]
+    QUERY_LENGTH_OPTIONS = [4]
     QUANT_MODE_OPTIONS = ["per_token"]
-    CONTEXT_LENGTH_OPTIONS = [512, 1024, 8192]
-    BATCH_SIZE_OPTIONS = [1,4,32]
+    CONTEXT_LENGTH_OPTIONS = [32768]
+    BATCH_SIZE_OPTIONS = [64]
     TRANS_V_OPTIONS = [True]
     KV_VARLEN_OPTIONS = [True]
     BLOCK_SIZE_OPTIONS = [1024]

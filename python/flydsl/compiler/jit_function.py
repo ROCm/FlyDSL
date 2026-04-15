@@ -33,8 +33,8 @@ from .kernel_function import (
 from .protocol import fly_construct, fly_pointers, fly_types
 
 
-@lru_cache(maxsize=1)
-def _flydsl_key() -> str:
+@lru_cache(maxsize=2)
+def _flydsl_key(debug_info_enabled: bool) -> str:
     """Compute a hash fingerprint of the entire FlyDSL compiler toolchain.
 
     Covers:
@@ -43,6 +43,7 @@ def _flydsl_key() -> str:
       2. Native shared libraries (_mlirDialectsFly*.so, libFly*.so, libfly_jit_runtime.so,
          libmlir_rocm_runtime.so)
       3. flydsl.__version__
+      4. Debug-info emission mode that changes the generated binary metadata
 
     Any change to compiler code, pass pipeline, runtime wrappers, or C++
     bindings will produce a different key, invalidating stale disk caches.
@@ -94,7 +95,11 @@ def _flydsl_key() -> str:
                         h.update(chunk)
                 contents.append(h.hexdigest())
 
-    key = f"flydsl:{flydsl.__version__}:{backend.hash()}-" + "-".join(contents)
+    key = (
+        f"flydsl:{flydsl.__version__}:{backend.hash()}:"
+        f"debug_info={int(debug_info_enabled)}-"
+        + "-".join(contents)
+    )
     log().debug(f"flydsl_key: {hashlib.sha256(key.encode()).hexdigest()[:16]}")
     return key
 
@@ -198,7 +203,7 @@ def _collect_dependency_sources(func, rootFile, visited: Optional[Set[int]] = No
 
 def _jit_function_cache_key(func: Callable) -> str:
     parts = []
-    parts.append(_flydsl_key())
+    parts.append(_flydsl_key(env.debug.enable_debug_info))
     try:
         source = inspect.getsource(func)
     except OSError:
