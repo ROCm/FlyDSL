@@ -894,7 +894,15 @@ void intTupleSliceImpl(const IntTupleBuilder<IntTuple> &builder, IntTuple tuple,
       result.push_back(tuple);
     }
   } else {
-    assert(coord.rank() == tuple.rank() && "Mismatched ranks in slice");
+    if (coord.rank() != tuple.rank()) {
+      // Rank mismatch: handle by iterating over the smaller rank and
+      // treating excess elements as kept (None) or indexed.
+      int minRank = std::min(coord.rank(), (int)tuple.rank());
+      for (int i = 0; i < minRank; ++i) {
+        intTupleSliceImpl(builder, builder.at(tuple, i), coord.at(i), result);
+      }
+      return;
+    }
     for (int i = 0; i < coord.rank(); ++i) {
       intTupleSliceImpl(builder, builder.at(tuple, i), coord.at(i), result);
     }

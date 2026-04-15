@@ -49,8 +49,10 @@ def compile_preshuffle_gemm_v2(
     gpu_arch = get_rocm_arch()
     is_gfx942 = str(gpu_arch).startswith("gfx942")
     is_gfx950 = str(gpu_arch).startswith("gfx950")
-    if is_fp8 and is_gfx950:
-        raise NotImplementedError("fp8 gfx950 uses mfma_scale, not supported yet")
+    use_mfma_scale_128 = is_fp8 and is_gfx950
+    if use_mfma_scale_128:
+        if tile_k % 128 != 0:
+            raise ValueError(f"tile_k must be divisible by 128 for gfx950 fp8, got {tile_k}")
 
     if is_f16:
         layout_elem = Float16
@@ -62,8 +64,8 @@ def compile_preshuffle_gemm_v2(
     out_elem_cls = BFloat16 if out_is_bf16 else Float16
 
     # Tile geometry
-    # k_perm groups 2 MMA atoms: product=32 for f16/bf16 (2×K=16), 64 for fp8 (2×K=32)
-    tile_K_perm = 64 if is_fp8 else 32
+    # k_perm groups atoms: 32 for f16/bf16 (2×K=16), 128 for gfx950 fp8 (1×K=128), 64 for gfx942 fp8 (2×K=32)
+    tile_K_perm = 128 if use_mfma_scale_128 else (64 if is_fp8 else 32)
     k_iters = tile_k // tile_K_perm
     num_tiles = K // tile_k
     m_repeat = tile_m // 16
@@ -83,7 +85,10 @@ def compile_preshuffle_gemm_v2(
     num_b_loads = (tile_n * tile_k * elem_bytes) // total_threads // 16
     num_ds_load = (tile_m * tile_k * elem_bytes) // 64 // 16  # A LDS reads per wave
     num_gmem_loads = num_a_loads + num_b_loads
-    dsrd_preload, dvmem_preload = _get_preload(tile_m, tile_n, tile_k)
+    if is_fp8 and is_gfx950:
+        dsrd_preload, dvmem_preload = _get_preload(tile_m, tile_n, tile_k)
+    else:
+        dsrd_preload, dvmem_preload = (0, 0)
 
     # ── Kernel ────────────────────────────────────────────────────────
     @flyc.kernel
@@ -172,9 +177,9 @@ def compile_preshuffle_gemm_v2(
 
         def hot_loop_scheduler():
             mfma_group = num_acc_n
-            mfma_total = (k_iters * 2) * m_repeat * mfma_group
 
             if is_gfx942:
+                mfma_total = (k_iters * 2) * m_repeat * mfma_group
                 mfma_per_iter = 2 * mfma_group
                 sche_iters = 0 if mfma_per_iter == 0 else (mfma_total // mfma_per_iter)
 
@@ -212,6 +217,10 @@ def compile_preshuffle_gemm_v2(
                         rocdl.sched_dswr(1)
             else:
                 # gfx950 path: distribute vmem/dsrd across MFMA slots
+                # Match v1: element_k_per_mfma=128 for scheduler MFMA count
+                element_k_per_mfma = 128
+                num_mfma_per_tile_k = tile_k // element_k_per_mfma
+                mfma_total = num_mfma_per_tile_k * m_repeat * mfma_group
                 dswr_tail = num_a_loads
                 dstr_advance = 2
                 if dswr_tail > mfma_total:
@@ -279,9 +288,12 @@ def compile_preshuffle_gemm_v2(
             for ki in range_constexpr(k_iters):
                 fx.copy(mma_uni, pA_s2r[None, None, ki, read_stage],
                         frag_A_retile[None, None, ki])
+                # K=128 (1 atom): frag shape (K_val, m, k_iters) → k_iters is flat
+                # K=32/16 (2 atoms): frag shape (K_val, m, (atoms, k_iters)) → nested
+                k_coord = ki if use_mfma_scale_128 else (None, ki)
                 fx.gemm(tiled_mma, frag_C,
-                        frag_A[None, None, (None, ki)],
-                        cur_frag_B[None, None, (None, ki)],
+                        frag_A[None, None, k_coord],
+                        cur_frag_B[None, None, k_coord],
                         frag_C)
             # 4. Write A tile to LDS + barrier
             fx.copy(uni_copy_g2s, frag_copy_A, pA_s[None, None, None, write_stage])
@@ -407,6 +419,11 @@ def compile_preshuffle_gemm_v2(
         elif is_bf16:
             mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 16, BFloat16))
             k_perm = fx.make_layout((4, 4, 2), (1, 8, 4))
+        elif use_mfma_scale_128:
+            # gfx950 fp8: K=128 atom with blocked TV layout (16 inner, 2 blocks)
+            # k_perm: (innerK=16, GroupK=4, blocks=2), tile_K_perm=128
+            mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 128, layout_elem))
+            k_perm = fx.make_layout((16, 4, 2), (1, 16, 64))
         else:
             mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 32, layout_elem))
             # FP8: KPerThread=8, GroupK=4, 2 atoms → groups 64 K elements

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2025 FlyDSL Project Contributors
 
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
 
@@ -23,6 +24,17 @@ LayoutAttr getThrValLayoutAB(MLIRContext *ctx, int32_t M, int32_t N, int32_t K, 
 
   int GroupK = 64 / MN;
   int KPerThread = K / GroupK;
+
+  // For K=128 (gfx950 fp8 mfma_scale): use blocked value layout matching the
+  // preshuffle B 64-byte k-block structure. Each K-group reads 16 bytes from
+  // each of K/64 blocks: K-group g → K={g*16..g*16+15, 64+g*16..64+g*16+15, ...}.
+  if (KPerThread > 8) {
+    int innerK = 16;  // elements per k_lane in preshuffle format
+    int numBlocks = KPerThread / innerK;
+    int blockStride = MN * innerK * GroupK; // stride between k64 blocks
+    return FxLayout(FxShape(FxThr(MN, GroupK), FxVal(innerK, numBlocks)),
+                    FxStride(FxThr(1, MN * innerK), FxVal(MN, blockStride)));
+  }
 
   return FxLayout(FxShape(FxThr(MN, GroupK), FxVal(KPerThread)),
                   FxStride(FxThr(1, MN * KPerThread), FxVal(MN)));
@@ -114,8 +126,11 @@ static Type getMfmaABType(MLIRContext *ctx, Type elemTy, int32_t k = 0) {
     return VectorType::get({4}, Float16Type::get(ctx));
   if (elemTy.isBF16())
     return VectorType::get({(k >= 16) ? 4 : 2}, IntegerType::get(ctx, 16));
-  if (isF8(elemTy) || elemTy.isInteger(8))
+  if (isF8(elemTy) || elemTy.isInteger(8)) {
+    if (k == 128)
+      return VectorType::get({8}, IntegerType::get(ctx, 32));
     return IntegerType::get(ctx, 64);
+  }
   return nullptr;
 }
 
@@ -159,6 +174,8 @@ static int64_t getMfmaAccVecSize(int32_t m, int32_t k, Type elemTyA) {
       return 4;
   }
   if (isF8(elemTyA)) {
+    if (m == 16 && k == 128)
+      return 4;
     if (m == 16 && k == 32)
       return 4;
     if (m == 32 && k == 16)
@@ -188,6 +205,37 @@ static LogicalResult emitMfmaSsa(OpBuilder &builder, Location loc, Type abTyA, T
   Value b = LLVM::LoadOp::create(builder, loc, abTyB, bPtr);
   auto zeroAttr = builder.getI32IntegerAttr(0);
   result = MfmaOp::create(builder, loc, accTy, a, b, cVal, zeroAttr, zeroAttr, zeroAttr);
+  return success();
+}
+
+// Emit mfma_scale_f32_16x16x128_f8f6f4 with identity scales (0x7F7F7F7F = 1.0 in e8m0).
+static LogicalResult emitMfmaScale16x16x128(OpBuilder &builder, Location loc, Type abTyA,
+                                             Type abTyB, VectorType accTy, Value aPtr, Value bPtr,
+                                             Value cPtr, Value dPtr) {
+  Value a = LLVM::LoadOp::create(builder, loc, abTyA, aPtr);
+  Value b = LLVM::LoadOp::create(builder, loc, abTyB, bPtr);
+  Value c = LLVM::LoadOp::create(builder, loc, accTy, cPtr);
+  auto zeroAttr = builder.getI32IntegerAttr(0);
+  Value identityScale = arith::ConstantIntOp::create(builder, loc, 0x7F7F7F7F, 32);
+  Value res = ROCDL::mfma_scale_f32_16x16x128_f8f6f4::create(builder, loc, accTy, a, b, c,
+                                                               zeroAttr, zeroAttr, zeroAttr,
+                                                               identityScale, zeroAttr,
+                                                               identityScale);
+  LLVM::StoreOp::create(builder, loc, res, dPtr);
+  return success();
+}
+
+static LogicalResult emitMfmaScale16x16x128Ssa(OpBuilder &builder, Location loc, Type abTyA,
+                                                Type abTyB, VectorType accTy, Value aPtr,
+                                                Value bPtr, Value cVal, Value &result) {
+  Value a = LLVM::LoadOp::create(builder, loc, abTyA, aPtr);
+  Value b = LLVM::LoadOp::create(builder, loc, abTyB, bPtr);
+  auto zeroAttr = builder.getI32IntegerAttr(0);
+  Value identityScale = arith::ConstantIntOp::create(builder, loc, 0x7F7F7F7F, 32);
+  result = ROCDL::mfma_scale_f32_16x16x128_f8f6f4::create(builder, loc, accTy, a, b, cVal,
+                                                            zeroAttr, zeroAttr, zeroAttr,
+                                                            identityScale, zeroAttr,
+                                                            identityScale);
   return success();
 }
 
@@ -245,6 +293,10 @@ LogicalResult MmaOpCDNA3_MFMAType::emitAtomCall(OpBuilder &builder, Location loc
   DISPATCH_MFMA(32, 16, isFP8OrI8(elemTyA) && isBF8(elemTyB), mfma_f32_32x32x16_fp8_bf8)
   DISPATCH_MFMA(32, 16, isBF8(elemTyA) && isFP8OrI8(elemTyB), mfma_f32_32x32x16_bf8_fp8)
   DISPATCH_MFMA(32, 16, isBF8(elemTyA) && isBF8(elemTyB), mfma_f32_32x32x16_bf8_bf8)
+
+  // gfx950 K=128 fp8 mfma_scale with identity scales
+  if (m == 16 && n == 16 && k == 128 && isF8(elemTyA) && isF8(elemTyB))
+    return emitMfmaScale16x16x128(builder, loc, abTyA, abTyB, accTy, aPtr, bPtr, cPtr, dPtr);
 
 #undef DISPATCH_MFMA
 
@@ -305,6 +357,10 @@ LogicalResult MmaOpCDNA3_MFMAType::emitAtomCallSsa(OpBuilder &builder, Location 
   DISPATCH_MFMA_SSA(32, 16, isFP8OrI8(elemTyA) && isBF8(elemTyB), mfma_f32_32x32x16_fp8_bf8)
   DISPATCH_MFMA_SSA(32, 16, isBF8(elemTyA) && isFP8OrI8(elemTyB), mfma_f32_32x32x16_bf8_fp8)
   DISPATCH_MFMA_SSA(32, 16, isBF8(elemTyA) && isBF8(elemTyB), mfma_f32_32x32x16_bf8_bf8)
+
+  // gfx950 K=128 fp8 mfma_scale with identity scales
+  if (m == 16 && n == 16 && k == 128 && isF8(elemTyA) && isF8(elemTyB))
+    return emitMfmaScale16x16x128Ssa(builder, loc, abTyA, abTyB, accTy, aPtr, bPtr, cVal, result);
 
 #undef DISPATCH_MFMA_SSA
 

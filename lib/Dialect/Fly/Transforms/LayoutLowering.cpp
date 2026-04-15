@@ -28,7 +28,6 @@
 #include "flydsl/Dialect/Fly/Utils/LayoutUtils.h"
 #include "flydsl/Dialect/Fly/Utils/NormalForm.h"
 #include "flydsl/Dialect/Fly/Utils/TiledOpUtils.h"
-#include "flydsl/Dialect/Fly/Utils/AllocaPromotion.h"
 
 #include <string>
 
@@ -2862,38 +2861,181 @@ static void forwardRegAllocaStores(Operation *topOp) {
 }
 
 /// Promote register-alloca load/store pairs across scf.for iterations to
-/// loop-carried values.  Uses the shared promoteAllocasToLoopCarried utility
-/// with Fly IR-specific hooks (PtrLoadOp/PtrStoreOp).
+/// loop-carried values.  After forwardRegAllocaStores, loads at the top of
+/// an scf.for body that have no prior store (notFound) are backed by stores
+/// at the bottom of the previous iteration.  This converts them to init/yield
+/// loop-carried SSA values, letting LLVM eliminate the alloca entirely.
 static void promoteAllocaToLoopCarried(Operation *topOp) {
-  fly::AllocaPromotionHooks hooks;
-  hooks.resolvePtr = [](Value ptr) -> std::pair<Operation *, int64_t> {
-    auto [base, offset] = resolveRegAllocaPtr(ptr);
-    if (!base)
-      return {nullptr, -1};
-    return {base.getOperation(), offset};
-  };
-  hooks.tryGetStore = [](Operation &op)
-      -> std::optional<std::pair<Value, Value>> {
-    if (auto storeOp = dyn_cast<PtrStoreOp>(&op))
-      return std::pair{storeOp.getPtr(), storeOp.getValue()};
-    return std::nullopt;
-  };
-  hooks.tryGetLoad = [](Operation &op)
-      -> std::optional<std::pair<Value, Value>> {
-    if (auto loadOp = dyn_cast<PtrLoadOp>(&op))
-      return std::pair{loadOp.getPtr(), loadOp.getResult()};
-    return std::nullopt;
-  };
-  hooks.createPrologueLoad = [](OpBuilder &builder, Location loc,
-                                const fly::PromotedSlot &slot) -> Value {
-    return PtrLoadOp::create(builder, loc, slot.valueType, slot.loadPtr);
-  };
-  hooks.createEpilogueStore = [](OpBuilder &builder, Location loc,
-                                 Value finalVal,
-                                 const fly::PromotedSlot &slot) {
-    PtrStoreOp::create(builder, loc, finalVal, slot.storePtr);
-  };
-  fly::promoteAllocasToLoopCarried(topOp, hooks);
+  SmallVector<scf::ForOp> loops;
+  topOp->walk([&](scf::ForOp forOp) { loops.push_back(forOp); });
+  // Process inner-most loops first: walk visits in pre-order (parents before
+  // children), so reversing gives us post-order.  This ensures that when we
+  // erase and replace a ForOp, no child loops remain in the worklist.
+  std::reverse(loops.begin(), loops.end());
+
+  int promoted = 0;
+  for (auto forOp : loops) {
+    Block &body = forOp.getRegion().front();
+
+    // Collect "initial loads": PtrLoadOps from register allocas at the start
+    // of the body, before any PtrStoreOp to the same (base, offset).
+    // Also track which (base, offset) we've seen a store for.
+    using Key = std::pair<Operation *, int64_t>;
+    SmallVector<std::pair<Key, PtrLoadOp>> initialLoads;
+    DenseSet<Key> storedKeys;
+
+    for (auto &op : body) {
+      if (auto storeOp = dyn_cast<PtrStoreOp>(&op)) {
+        auto [base, offset] = resolveRegAllocaPtr(storeOp.getPtr());
+        if (base)
+          storedKeys.insert({base.getOperation(), offset});
+        continue;
+      }
+      if (auto loadOp = dyn_cast<PtrLoadOp>(&op)) {
+        auto [base, offset] = resolveRegAllocaPtr(loadOp.getPtr());
+        if (!base) continue;
+        Key key = {base.getOperation(), offset};
+        // Only consider loads where no store has been seen yet for this key.
+        if (!storedKeys.contains(key))
+          initialLoads.push_back({key, loadOp});
+        continue;
+      }
+    }
+
+    if (initialLoads.empty())
+      continue;
+
+    // For each initial load, find the LAST PtrStoreOp in the body for the
+    // same (base, offset).  This is the value that feeds into the next
+    // iteration (and should become a yield value).
+    DenseMap<Key, PtrStoreOp> lastStore;
+    for (auto it = body.rbegin(); it != body.rend(); ++it) {
+      if (auto storeOp = dyn_cast<PtrStoreOp>(&*it)) {
+        auto [base, offset] = resolveRegAllocaPtr(storeOp.getPtr());
+        if (!base) continue;
+        Key key = {base.getOperation(), offset};
+        if (!lastStore.contains(key))
+          lastStore[key] = storeOp;
+      }
+    }
+
+    // Filter: keep only initial loads that have a matching last store with
+    // compatible types.
+    SmallVector<std::pair<Key, PtrLoadOp>> validLoads;
+    for (auto &[key, loadOp] : initialLoads) {
+      auto it = lastStore.find(key);
+      if (it == lastStore.end()) continue;
+      if (it->second.getValue().getType() != loadOp.getResult().getType())
+        continue;
+      validLoads.push_back({key, loadOp});
+    }
+
+    if (validLoads.empty())
+      continue;
+
+    // De-duplicate by key (multiple loads from same (base,offset) — only
+    // carry one value and rewrite all loads).
+    DenseMap<Key, SmallVector<PtrLoadOp>> loadsByKey;
+    for (auto &[key, loadOp] : validLoads)
+      loadsByKey[key].push_back(loadOp);
+
+    SmallVector<Key> uniqueKeys;
+    for (auto &[key, _] : loadsByKey)
+      uniqueKeys.push_back(key);
+    // Sort for deterministic loop-carried argument order.
+    llvm::sort(uniqueKeys, [](const Key &a, const Key &b) {
+      if (a.first == b.first)
+        return a.second < b.second;
+      return a.first->isBeforeInBlock(b.first);
+    });
+
+    // Build the new scf.for with loop-carried values.
+    OpBuilder builder(forOp);
+    Location loc = forOp.getLoc();
+
+    // Prologue loads: read initial values from the alloca before the loop.
+    SmallVector<Value> initValues;
+    for (auto &key : uniqueKeys) {
+      // Find the ptr for this (base, offset).  Use the ptr from the first
+      // load — it has the right AddOffset chain.
+      PtrLoadOp firstLoad = loadsByKey[key].front();
+      Value prologueVal = PtrLoadOp::create(builder, loc,
+          firstLoad.getResult().getType(), firstLoad.getPtr());
+      initValues.push_back(prologueVal);
+    }
+
+    // Instead of creating a new ForOp, mutate the existing one in-place:
+    // 1. Add block arguments for the loop-carried values
+    // 2. Add a yield terminator with the last store values
+    // 3. Update the ForOp to have init operands and result types
+
+    // Add region iter args to the existing body block.
+    SmallVector<Type> iterArgTypes;
+    SmallVector<Location> iterArgLocs;
+    for (auto &key : uniqueKeys) {
+      PtrLoadOp firstLoad = loadsByKey[key].front();
+      iterArgTypes.push_back(firstLoad.getResult().getType());
+      iterArgLocs.push_back(loc);
+    }
+
+    // We need to create a new ForOp because the existing one has no
+    // init operands and we can't easily add them in-place.
+    SmallVector<Type> resultTypes(iterArgTypes);
+    auto newForOp = builder.create<scf::ForOp>(loc,
+        forOp.getLowerBound(), forOp.getUpperBound(), forOp.getStep(),
+        initValues);
+
+    Block &newBody = newForOp.getRegion().front();
+
+    // Erase the old body's empty scf.yield (from the original init=[] ForOp)
+    // before splicing, since we'll add a new yield with loop-carried values.
+    if (!body.empty() && body.mightHaveTerminator()) {
+      if (auto *term = body.getTerminator())
+        term->erase();
+    }
+
+    // Splice ops from old body to new body first, so RAUW stays within
+    // the same region (avoids cross-region dominance violations).
+    newBody.getOperations().splice(newBody.end(), body.getOperations());
+
+    // Now RAUW: old block args → new block args (ops are in newBody).
+    // The old ForOp must have no existing iter_args (only induction variable).
+    assert(body.getNumArguments() == 1 &&
+           "expected ForOp with no existing iter_args");
+    body.getArgument(0).replaceAllUsesWith(newBody.getArgument(0));
+
+    // Replace initial loads with region iter args.
+    for (size_t i = 0; i < uniqueKeys.size(); ++i) {
+      Value iterArg = newBody.getArgument(i + 1);  // +1 for induction var
+      for (PtrLoadOp loadOp : loadsByKey[uniqueKeys[i]]) {
+        loadOp.getResult().replaceAllUsesWith(iterArg);
+        loadOp.erase();
+        promoted++;
+      }
+    }
+
+    // Build yield values from last stores.
+    builder.setInsertionPointToEnd(&newBody);
+    SmallVector<Value> yieldValues;
+    for (auto &key : uniqueKeys)
+      yieldValues.push_back(lastStore[key].getValue());
+    scf::YieldOp::create(builder, loc, yieldValues);
+
+    // Erase old ForOp (had no results).
+    forOp.erase();
+
+    // After the new loop, store the final loop-carried values back to the
+    // allocas so that epilogue code can read them.
+    builder.setInsertionPointAfter(newForOp);
+    for (size_t i = 0; i < uniqueKeys.size(); ++i) {
+      Value finalVal = newForOp.getResult(i);
+      PtrStoreOp::create(builder, loc, finalVal,
+                         lastStore[uniqueKeys[i]].getPtr());
+    }
+  }
+
+  LLVM_DEBUG(if (promoted > 0) llvm::dbgs()
+             << "[alloca-to-loop-carried] promoted=" << promoted << "\n");
 }
 
 /// Eliminate dead stores to register allocas — stores where no subsequent
