@@ -16,6 +16,7 @@ from flydsl._mlir import ir
 from flydsl.expr import arith, vector
 from flydsl.expr import gpu
 from flydsl.expr import buffer_ops, rocdl
+from flydsl.expr import math
 
 
 from flydsl.expr.typing import T
@@ -142,7 +143,8 @@ def compile_preshuffle_gemm_a8(
     waves_per_eu: Optional[int] = None,
     use_async_copy: bool = False,
     dsrd_preload: int = -1,
-    dvmem_preload: int = -1
+    dvmem_preload: int = -1,
+    epilogue: str = "none",  # "none", "bias", "bias_relu", "bias_silu", "bias_gelu"
 ):
     """Compile the preshuffle GEMM kernel using the @flyc.kernel API.
 
@@ -306,6 +308,12 @@ def compile_preshuffle_gemm_a8(
         allocator_pong.ptr = lds_alloc_offset + lds_total_elems * elem_bytes
 
     # ── Kernel function ────────────────────────────────────────────────────
+    _has_epilogue = epilogue != "none"
+    _has_bias = epilogue in ("bias", "bias_relu", "bias_silu", "bias_gelu")
+    _has_relu = epilogue == "bias_relu"
+    _has_silu = epilogue == "bias_silu"
+    _has_gelu = epilogue == "bias_gelu"
+
     @flyc.kernel
     def kernel_gemm(
         arg_c: fx.Tensor,
@@ -313,6 +321,7 @@ def compile_preshuffle_gemm_a8(
         arg_b: fx.Tensor,
         arg_scale_a: fx.Tensor,
         arg_scale_b: fx.Tensor,
+        arg_bias: fx.Tensor,
         i32_m: fx.Int32,
         i32_n: fx.Int32,
     ):
@@ -395,6 +404,13 @@ def compile_preshuffle_gemm_a8(
         _needs_per_token_scale = not is_f16_or_bf16 and not is_fp4
         scale_a_rsrc = None if (is_f16_or_bf16) else buffer_ops.create_buffer_resource(
             arg_scale_a, max_size=False)
+
+        # ---- Bias buffer resource (for fused epilogue) ----
+        bias_rsrc = None
+        if _has_bias:
+            _bias_nrec = arith.index_cast(T.i64, c_n * 2)  # N elements * 2 bytes (bf16/fp16)
+            bias_rsrc = buffer_ops.create_buffer_resource(arg_bias, max_size=False,
+                                                          num_records_bytes=_bias_nrec)
         b_rsrc = buffer_ops.create_buffer_resource(arg_b, max_size=True)
         scale_b_rsrc = None if (is_f16_or_bf16) else buffer_ops.create_buffer_resource(
             arg_scale_b, max_size=True)
@@ -985,6 +1001,39 @@ def compile_preshuffle_gemm_a8(
                         val_s = (val * s_a) * s_b_vals[ni]
                     else:
                         val_s = val
+
+                    # ── Fused epilogue: bias + activation ──
+                    if _has_bias and bias_rsrc is not None:
+                        col_idx = col_base + (ni * 16)
+                        bias_val_f16 = buffer_ops.buffer_load(
+                            bias_rsrc, col_idx, vec_width=1,
+                            dtype=_out_elem())
+                        bias_val_f32 = arith.extf(T.f32, bias_val_f16)
+                        val_s = val_s + bias_val_f32
+
+                    if _has_relu:
+                        zero_f32 = arith.constant(0.0, type=T.f32)
+                        cmp = arith.cmpf("ogt", val_s, zero_f32)
+                        val_s = arith.select(cmp, val_s, zero_f32)
+                    elif _has_silu:
+                        # SiLU(x) = x * sigmoid(x) = x / (1 + exp(-x))
+                        neg_one = arith.constant(-1.0, type=T.f32)
+                        neg_val = val_s * neg_one
+                        exp_neg = math.exp(neg_val)
+                        one_f32 = arith.constant(1.0, type=T.f32)
+                        denom = one_f32 + exp_neg
+                        val_s = val_s / denom
+                    elif _has_gelu:
+                        # GeLU approx: 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+                        half_f32 = arith.constant(0.5, type=T.f32)
+                        coeff_f32 = arith.constant(0.044715, type=T.f32)
+                        sqrt2pi_f32 = arith.constant(0.7978845608, type=T.f32)
+                        x3 = val_s * val_s * val_s
+                        inner = sqrt2pi_f32 * (val_s + coeff_f32 * x3)
+                        tanh_inner = math.tanh(inner)
+                        one_f32 = arith.constant(1.0, type=T.f32)
+                        val_s = half_f32 * val_s * (one_f32 + tanh_inner)
+
                     val_f16 = arith.trunc_f(_out_elem(), val_s)
                     idx_out = idx_base + (ni * 16)
                     buffer_ops.buffer_store(val_f16, c_rsrc, idx_out)
@@ -1384,6 +1433,7 @@ def compile_preshuffle_gemm_a8(
         arg_b: fx.Tensor,
         arg_scale_a: fx.Tensor,
         arg_scale_b: fx.Tensor,
+        arg_bias: fx.Tensor,
         i32_m: fx.Int32,
         i32_n: fx.Int32,
         stream: fx.Stream,
@@ -1398,7 +1448,7 @@ def compile_preshuffle_gemm_a8(
         gx = (i32_m + (tile_m - 1)) // tile_m
         gy = i32_n // tile_n
 
-        launcher = kernel_gemm(arg_c, arg_a, arg_b, arg_scale_a, arg_scale_b, i32_m, i32_n)
+        launcher = kernel_gemm(arg_c, arg_a, arg_b, arg_scale_a, arg_scale_b, arg_bias, i32_m, i32_n)
         if waves_per_eu is not None:
             _wpe = int(waves_per_eu)
             if _wpe >= 1:
