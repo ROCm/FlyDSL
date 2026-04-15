@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2025 FlyDSL Project Contributors
 
-
 #include "llvm/ADT/TypeSwitch.h"
 
 #include "mlir/IR/BuiltinAttributes.h"
@@ -269,8 +268,7 @@ int32_t TileAttr::rank() const {
   if (auto arrayAttr = dyn_cast<ArrayAttr>(this->getValue())) {
     return arrayAttr.size();
   }
-  assert(false && "invalid TileAttr");
-  return 0;
+  return 1;
 }
 
 bool TileAttr::isLeaf() const { return !isa<ArrayAttr>(this->getValue()); }
@@ -451,7 +449,19 @@ void IntTupleAttr::print(::mlir::AsmPrinter &odsPrinter) const {
 
 ::mlir::Attribute TileAttr::parse(::mlir::AsmParser &odsParser, ::mlir::Type odsType) {
   auto *ctx = odsParser.getBuilder().getContext();
-  auto parseElement = [&]() -> Attribute {
+  auto parseElement = [&](auto &&self) -> Attribute {
+    if (odsParser.parseOptionalLSquare().succeeded()) {
+      SmallVector<Attribute> nested;
+      do {
+        Attribute elem = self(self);
+        if (!elem)
+          return {};
+        nested.push_back(elem);
+      } while (odsParser.parseOptionalVerticalBar().succeeded());
+      if (odsParser.parseRSquare())
+        return {};
+      return TileAttr::get(ArrayAttr::get(ctx, nested));
+    }
     auto shapeAttr = IntTupleAttr::parse(odsParser, odsType);
     if (!shapeAttr)
       return {};
@@ -474,7 +484,7 @@ void IntTupleAttr::print(::mlir::AsmPrinter &odsPrinter) const {
   if (odsParser.parseOptionalLSquare().succeeded()) {
     SmallVector<Attribute> elements;
     do {
-      Attribute elem = parseElement();
+      Attribute elem = parseElement(parseElement);
       if (!elem)
         return {};
       elements.push_back(elem);
@@ -483,7 +493,7 @@ void IntTupleAttr::print(::mlir::AsmPrinter &odsPrinter) const {
       return {};
     return TileAttr::get(ArrayAttr::get(ctx, elements));
   } else {
-    Attribute elem = parseElement();
+    Attribute elem = parseElement(parseElement);
     if (!elem)
       return {};
     return TileAttr::get(elem);
@@ -491,27 +501,39 @@ void IntTupleAttr::print(::mlir::AsmPrinter &odsPrinter) const {
 }
 
 void TileAttr::print(::mlir::AsmPrinter &odsPrinter) const {
-  auto elemPrint = [&](Attribute attr) {
-    ::llvm::TypeSwitch<Attribute>(attr)
-        .Case<IntAttr>([&](IntAttr attr) {
-          if (attr.isNone()) {
-            odsPrinter << "*";
-          } else {
-            prettyPrintIntAttr(odsPrinter, attr);
-          }
-        })
-        .Case<LayoutAttr>([&](LayoutAttr attr) { attr.print(odsPrinter); })
-        .DefaultUnreachable("invalid LayoutAttr");
+  auto elemPrint = [&](auto &&self, Attribute attr) -> void {
+    if (auto intAttr = dyn_cast<IntAttr>(attr)) {
+      if (intAttr.isNone())
+        odsPrinter << "*";
+      else
+        prettyPrintIntAttr(odsPrinter, intAttr);
+    } else if (auto layoutAttr = dyn_cast<LayoutAttr>(attr)) {
+      layoutAttr.print(odsPrinter);
+    } else if (auto tile = dyn_cast<TileAttr>(attr)) {
+      if (tile.isLeaf()) {
+        self(self, tile.getValue());
+        return;
+      }
+      odsPrinter << "[";
+      self(self, tile.at(0));
+      for (int i = 1; i < tile.rank(); ++i) {
+        odsPrinter << "|";
+        self(self, tile.at(i));
+      }
+      odsPrinter << "]";
+    } else {
+      llvm_unreachable("invalid TileAttr element");
+    }
   };
   if (isLeaf()) {
-    elemPrint(this->getValue());
+    elemPrint(elemPrint, this->getValue());
     return;
   }
   odsPrinter << "[";
-  elemPrint(this->at(0));
+  elemPrint(elemPrint, this->at(0));
   for (int i = 1; i < this->rank(); ++i) {
     odsPrinter << "|";
-    elemPrint(this->at(i));
+    elemPrint(elemPrint, this->at(i));
   }
   odsPrinter << "]";
 }

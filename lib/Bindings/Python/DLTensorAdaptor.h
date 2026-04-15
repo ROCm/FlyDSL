@@ -242,9 +242,6 @@ public:
 
     LayoutAttr layoutAttr = LayoutAttr::get(ctx, shapeAttr, strideAttr);
 
-    if (getAddressSpace() != 1) {
-      throw std::runtime_error("Only device address space is supported");
-    }
     AddressSpaceAttr addrSpaceAttr = AddressSpaceAttr::get(ctx, AddressSpace::Global);
 
     assert(alignment_ > 0 && "alignment must be positive");

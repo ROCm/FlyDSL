@@ -64,7 +64,9 @@ class NumericMeta(type):
                 c_value = getattr(ctypes, f"c_int{width}")(self.value)
             else:
                 c_value = getattr(ctypes, f"c_uint{width}")(self.value)
-            return [ctypes.cast(ctypes.pointer(c_value), ctypes.c_void_p)]
+            ptr = ctypes.cast(ctypes.pointer(c_value), ctypes.c_void_p)
+            ptr._prevent_gc = c_value
+            return [ptr]
 
         inferred_np = np_dtype if np_dtype is not None else _infer_np_dtype(width, signed, name)
 
@@ -143,7 +145,7 @@ def _widen_narrow_int(x, widen_bool=False):
 
 def _resolve_float_type(ta, tb):
     """Pick the wider float type, or the one with higher rank at equal width."""
-    _FLOAT_RANK = {Float64: 3, Float32: 2, Float16: 1, BFloat16: 1}
+    # Use module-level _FLOAT_RANK (defined after all classes)
     if ta.is_float and not tb.is_float:
         return ta
     if tb.is_float and not ta.is_float:
@@ -254,7 +256,6 @@ class Numeric(metaclass=NumericMeta):
 
     def select(self, true_value, false_value, *, loc=None):
         """Ternary select (for Boolean conditions from Int32 comparisons)."""
-        from .utils.arith import ArithValue
         return ArithValue(self).select(true_value, false_value, loc=loc)
 
     @property
@@ -368,6 +369,7 @@ class Numeric(metaclass=NumericMeta):
             T.f8E5M2(): Float8E5M2,
             T.f8E4M3(): Float8E4M3,
             T.f8E4M3FN(): Float8E4M3FN,
+            Float8E4M3FNUZ.ir_type: Float8E4M3FNUZ,  # not in upstream MLIR extras T
             T.f8E4M3B11FNUZ(): Float8E4M3B11FNUZ,
             T.f8E8M0FNU(): Float8E8M0FNU,
             T.f6E2M3FN(): Float6E2M3FN,
@@ -681,7 +683,7 @@ class Float8E5M2(Float, metaclass=NumericMeta, width=8, ir_type=T.f8E5M2): ...
 class Float8E4M3FN(Float, metaclass=NumericMeta, width=8, ir_type=T.f8E4M3FN): ...
 
 
-class Float8E4M3FNUZ(Float, metaclass=NumericMeta, width=8, ir_type=lambda: ir.Float8E4M3FNUZType.get()): ...
+class Float8E4M3FNUZ(Float, metaclass=NumericMeta, width=8, ir_type=lambda: ir.Float8E4M3FNUZType.get()): ...  # not in upstream MLIR extras T
 
 
 class Float8E4M3B11FNUZ(Float, metaclass=NumericMeta, width=8, ir_type=T.f8E4M3B11FNUZ): ...
@@ -701,6 +703,65 @@ class Float8E8M0FNU(Float, metaclass=NumericMeta, width=8, ir_type=T.f8E8M0FNU):
 
 class Float4E2M1FN(Float, metaclass=NumericMeta, width=4, ir_type=T.f4E2M1FN): ...
 
+
+
+# Float type rank for promotion (must be after class definitions)
+_FLOAT_RANK = {Float64: 3, Float32: 2, Float16: 1, BFloat16: 1}
+
+# ── Type promotion (added to Numeric after all subclasses exist) ──────
+
+_FLOAT_BY_MIN_WIDTH = {16: Float16, 32: Float32, 64: Float64}
+
+
+def _widen_float(float_type, min_width):
+    """Return the narrowest standard float type with width >= *min_width*."""
+    if float_type.width >= min_width:
+        return float_type
+    for w in (32, 64):
+        if w >= min_width:
+            return _FLOAT_BY_MIN_WIDTH[w]
+    return Float64
+
+
+@classmethod
+def _promote(cls, a_type, b_type):
+    """Resolve the promoted result type for two Numeric types.
+
+    :param a_type: Left Numeric class (e.g. Float16)
+    :param b_type: Right Numeric class (e.g. Float32)
+    :return: The common Numeric class both can be safely promoted to
+    """
+    if a_type is b_type:
+        return a_type
+
+    a_float = a_type.is_float
+    b_float = b_type.is_float
+
+    if a_float and not b_float:
+        return _widen_float(a_type, b_type.width)
+    if b_float and not a_float:
+        return _widen_float(b_type, a_type.width)
+
+    if a_float and b_float:
+        aw, bw = a_type.width, b_type.width
+        if aw > bw and aw >= 16:
+            return a_type
+        if bw > aw and bw >= 16:
+            return b_type
+        if aw == bw:
+            ra = _FLOAT_RANK.get(a_type, 0)
+            rb = _FLOAT_RANK.get(b_type, 0)
+            return a_type if ra >= rb else b_type
+        raise ValueError(f"cannot promote {a_type} and {b_type}; cast explicitly")
+
+    # Both integers
+    if a_type.signed == b_type.signed:
+        return a_type if a_type.width >= b_type.width else b_type
+    u, s = (a_type, b_type) if not a_type.signed else (b_type, a_type)
+    return u if u.width >= s.width else s
+
+
+Numeric.promote = _promote
 
 
 class Index(Integer, metaclass=NumericMeta, width=64, signed=False,

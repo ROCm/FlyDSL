@@ -34,6 +34,12 @@ with ``@flyc.kernel``, use layout algebra to partition data, then launch with
        tB = fx.slice(tB, (None, bid))
        tC = fx.slice(tC, (None, bid))
 
+       # Second divide gives a 2-level layout so per-thread slice (None, tid) matches
+       # shape/stride rank (see examples/01-vectorAdd.py and tests/kernels/test_vec_add.py).
+       tA = fx.logical_divide(tA, fx.make_layout(1, 1))
+       tB = fx.logical_divide(tB, fx.make_layout(1, 1))
+       tC = fx.logical_divide(tC, fx.make_layout(1, 1))
+
        # Allocate register fragments, load, compute, store
        RABTy = fx.MemRefType.get(fx.T.f32(), fx.LayoutType.get(1, 1),
                                  fx.AddressSpace.Register)
@@ -52,8 +58,8 @@ with ``@flyc.kernel``, use layout algebra to partition data, then launch with
    @flyc.jit
    def vectorAdd(
        A: fx.Tensor, B: fx.Tensor, C,
-       n: fx.Int32,
-       const_n: fx.Constexpr[int],
+       n: fx.Int32,  # dynamic int32
+       const_n: fx.Constexpr[int],  # static int32, affects JIT cache-key
        stream: fx.Stream = fx.Stream(None),
    ):
        block_dim = 64

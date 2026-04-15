@@ -333,6 +333,10 @@ def run_moe_stage1(
     test_graph: bool = False,
     # Optional override for pre-built groupwise scale tensor [E, K//group_size, 2*inter_dim] (Opt 0 layout).
     scale_w1_groups_in: Optional[torch.Tensor] = None,
+    scale_dtype: str = "f32",
+    even_dispatch: bool = False,
+    out_dtype: str = "f16",
+    k_batch: int = 1,
 ):
     assert model_dim % 64 == 0
     assert model_dim % tile_k == 0
@@ -362,9 +366,17 @@ def run_moe_stage1(
 
     # Routing: aiter uses fused_topk; we use torch topk+softmax for portability/determinism.
     if topk_ids_in is None or topk_weights_in is None:
-        score = torch.randn((tokens, experts), device=device, dtype=torch.float32)
-        topk_vals, topk_ids = torch.topk(score, k=topk, dim=1)
-        topk_weights = torch.softmax(topk_vals, dim=1).to(torch.float32)
+        if even_dispatch:
+            # Evenly distribute tokens across experts: each token picks topk consecutive experts
+            # cycling through all E experts. Guarantees uniform load.
+            topk_ids = torch.stack(
+                [torch.arange(topk, device=device, dtype=torch.int32) + ((t * topk) % experts) for t in range(tokens)]
+            ) % experts
+            topk_weights = torch.full((tokens, topk), 1.0 / topk, device=device, dtype=torch.float32)
+        else:
+            score = torch.randn((tokens, experts), device=device, dtype=torch.float32)
+            topk_vals, topk_ids = torch.topk(score, k=topk, dim=1)
+            topk_weights = torch.softmax(topk_vals, dim=1).to(torch.float32)
     else:
         topk_ids = topk_ids_in
         topk_weights = topk_weights_in
@@ -390,12 +402,23 @@ def run_moe_stage1(
         blocks,
     ) = routing
 
+    # # Print token distribution across experts.
+    # tokens_per_expert = torch.bincount(topk_ids.reshape(-1).to(torch.int64), minlength=experts)
+    # active = int((tokens_per_expert > 0).sum())
+    # print(
+    #     f"  Token dispatch: {tokens} tokens x topk={topk} -> {active}/{experts} active experts, "
+    #     f"tokens/expert min={int(tokens_per_expert.min())} max={int(tokens_per_expert.max())} "
+    #     f"mean={tokens_per_expert.float().mean():.1f}"
+    #     f"{' (even)' if even_dispatch else ' (random)'}"
+    # )
+
     if in_dtype not in ("fp8", "fp16", "bf16", "int8", "int8smooth", "int4", "int4_bf16", "fp4"):
         raise ValueError(
             f"in_dtype must be one of ('fp8','fp16','bf16','int8','int8smooth','int4','int4_bf16','fp4'), got {in_dtype!r}"
         )
     is_int4 = in_dtype == "int4"
     is_int4_bf16 = in_dtype == "int4_bf16"  # W4A16: bf16 activations, packed int4 weights
+    w_is_int4 = is_int4 or is_int4_bf16
     is_int8 = in_dtype in ("int8", "int8smooth", "int4")
     is_int8smooth = in_dtype == "int8smooth"
     is_fp4 = in_dtype == "fp4"
@@ -467,7 +490,7 @@ def run_moe_stage1(
         w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.int8, dtypeMax=7)
         w2_q, _scale_w2_unused = pertoken_quant(w2_fp32, quant_dtype=torch.int8, dtypeMax=7)
 
-    # --- Groupwise scale for W4A16 ---
+    # --- Groupwise scale for int4 variants ---
     use_groupwise_scale = is_int4_bf16 and group_size > 0
     scale_w1_groups = None  # [E, K//group_size, 2*inter_dim] for kernel (Opt 0 layout)
     if use_groupwise_scale:
@@ -477,11 +500,12 @@ def run_moe_stage1(
             scale_w1_groups = scale_w1_groups_in
         else:
             # Generate random groupwise scale [E, num_groups, N] (Opt 0: cache-friendly).
+            _scale_torch_dtype = torch.bfloat16 if scale_dtype == "bf16" else torch.float32
             scale_w1_groups = (
                 torch.rand(experts, num_groups_s1, N_total, device=device, dtype=torch.float32)
                 * 0.05 + 0.005
-            )
-        # Prepare scale for kernel (no-op shuffle, returns contiguous).
+            ).to(_scale_torch_dtype)
+        # Prepare scale for kernel (handles both f32 and bf16 layouts).
         scale_w1_prepared = shuffle_scale_for_int4(scale_w1_groups, group_size=group_size)
         # Override per-row scale (kernel uses groupwise scale instead).
         scale_w1 = None
@@ -539,8 +563,13 @@ def run_moe_stage1(
             scale_w1_1d = scale_w1_flat.view(-1).contiguous()
     sorted_weights_1d = sorted_weights.contiguous().view(-1)  # [sorted_size]
 
-    # Output: [tokens, topk, inter_dim] fp16
-    out = torch.empty((tokens, topk, inter_dim), device=device, dtype=torch.float16)
+    # Output: normal=[tokens, topk, inter_dim] f16/bf16, split-K=[tokens*topk, 2*inter_dim] f32
+    _out_torch_dtype = torch.bfloat16 if out_dtype == "bf16" else torch.float16
+    _is_splitk = k_batch > 1
+    if _is_splitk:
+        out = torch.zeros((tokens * topk, 2 * inter_dim), device=device, dtype=torch.float32)
+    else:
+        out = torch.empty((tokens, topk, inter_dim), device=device, dtype=_out_torch_dtype)
 
     if is_fp4:
         exe = compile_mixed_moe_gemm1(
@@ -581,7 +610,10 @@ def run_moe_stage1(
             tile_n=tile_n,
             tile_k=tile_k,
             doweight_stage1=bool(doweight_stage1),
-            use_cshuffle_epilog=False,
+            use_cshuffle_epilog=None if _is_splitk else False,
+            scale_is_bf16=(scale_dtype == "bf16"),
+            out_dtype=out_dtype,
+            k_batch=k_batch,
         )
 
         def _s1_args(o, x, w, sx, sw, st, eids, sw_sorted):
@@ -592,6 +624,8 @@ def run_moe_stage1(
         compiled_exe = flyc.compile(exe, *_s1_args(out, x_q, w_kernel, scale_x_1d, scale_w1_1d,
                                                     sorted_token_ids, sorted_expert_ids, sorted_weights_1d))
         def launch(o, x, w, sx, sw, st, eids, sw_sorted):
+            if _is_splitk:
+                o.zero_()
             compiled_exe(*_s1_args(o, x, w, sx, sw, st, eids, sw_sorted))
 
     _, us = run_perftest(
@@ -609,6 +643,14 @@ def run_moe_stage1(
         testGraph=test_graph,
     )
     torch.cuda.synchronize()
+
+    # Split-K post-processing: apply silu(gate)*up on host, reshape to [tokens, topk, inter_dim]
+    # Note: the gfx950 v_cvt_off_f32_i4 x16 correction is already applied per-CTA in the kernel
+    # epilogue (linear factor commutes with summation: sum(x_i*16) = 16*sum(x_i)).
+    if _is_splitk:
+        gate = out[:, :inter_dim]   # [tokens*topk, inter_dim] f32
+        up = out[:, inter_dim:]     # [tokens*topk, inter_dim] f32
+        out = (torch.nn.functional.silu(gate) * up).to(_out_torch_dtype).view(tokens, topk, inter_dim)
 
     if not bool(skip_ref):
         if is_int8smooth:
@@ -648,16 +690,23 @@ def run_moe_stage1(
     tflops = flops / (us / 1e6) / 1e12
 
     # Rough bytes-moved accounting (same spirit as GEMM tests: count each tensor once).
+    # Only activated experts load weights/scales: E_active = min(E, tokens * topk).
+    active_experts = min(experts, tokens * topk)
     bytes_moved = 0
-    x_elem_bytes = 2 if (is_int4_bf16 or in_dtype in ("bf16", "fp16")) else (0.5 if is_fp4 else 1)  # bf16/fp16 activations
-    bytes_moved += int((tokens * topk if is_int8smooth else tokens) * model_dim * x_elem_bytes)  # x (bf16 for W4A16, else fp8/int8)
-    bytes_moved += (experts * (2 * inter_dim) * model_dim) // (2 if (use_packed_int4 or is_fp4) else 1)  # w (packed for int4)
+    is_f16_or_bf16_s1 = is_int4_bf16 or in_dtype in ("bf16", "fp16")
+    x_elem_bytes = 2 if is_f16_or_bf16_s1 else 1
+    bytes_moved += (tokens * topk if is_int8smooth else tokens) * model_dim * x_elem_bytes  # x (bf16 for W4A16, else fp8/int8)
+    bytes_moved += (active_experts * (2 * inter_dim) * model_dim) // (2 if use_packed_int4 else 1)  # w (packed for int4)
     bytes_moved += tokens * topk * inter_dim * 2  # out fp16 (logical)
-    bytes_moved += (tokens * topk if is_int8smooth else tokens) * 4  # scale_x f32 (1D)
-    bytes_moved += experts * (2 * inter_dim) * 4  # scale_w f32 (1D)
-    bytes_moved += int(sorted_weights.numel()) * 4  # sorted_weights f32
-    bytes_moved += int(sorted_token_ids.numel()) * 4  # sorted_token_ids i32
-    bytes_moved += int(sorted_expert_ids.numel()) * 4  # sorted_expert_ids i32
+    bytes_moved += ((tokens * topk if is_int8smooth else tokens) * 4) if not is_f16_or_bf16_s1 else 0  # scale_x f32
+    if use_groupwise_scale:
+        num_groups_s1 = model_dim // group_size
+        _scale_bytes = 2 if scale_dtype == "bf16" else 4
+        bytes_moved += active_experts * num_groups_s1 * (2 * inter_dim) * _scale_bytes  # groupwise scale
+    elif not is_f16_or_bf16_s1:
+        bytes_moved += active_experts * (2 * inter_dim) * 4  # per-row scale_w f32
+    # Note: routing metadata (sorted_weights, sorted_token_ids, sorted_expert_ids) excluded
+    # from bytes_moved — they are negligible vs weight/activation/scale tensors.
     tbps = bytes_moved / 1e12 / (us / 1e6)
 
     print(
@@ -787,6 +836,8 @@ def run_moe_stage2(
     test_graph: bool = False,
     # Optional override for pre-built groupwise scale tensor [E, inter_dim//group_size, model_dim] (Opt 0 layout).
     scale_w2_groups_in: Optional[torch.Tensor] = None,
+    scale_dtype: str = "f32",
+    even_dispatch: bool = False,
 ):
     """MoE stage2 (gemm2): out2[t] = sum_{slot} ( out1[t,slot] @ W2[expert]^T ) with optional routed weight."""
 
@@ -821,7 +872,7 @@ def run_moe_stage2(
     # Default compile function.
     if compile_fn is None:
         if use_reduce:
-            compile_fn = _make_reduce_mode_compile_fn(use_flydsl_reduce=True, use_valid_mask=bool(use_valid_mask))
+            compile_fn = _make_reduce_mode_compile_fn(use_flydsl_reduce=True, use_valid_mask=bool(use_valid_mask), scale_dtype=scale_dtype)
         else:
             compile_fn = compile_moe_gemm2
 
@@ -849,9 +900,15 @@ def run_moe_stage2(
 
     # Routing: deterministic torch topk + softmax.
     if topk_ids_in is None or topk_weights_in is None:
-        score = torch.rand((tokens, experts), device=device, dtype=torch.float32)
-        topk_vals, topk_ids = torch.topk(score, k=topk, dim=1)
-        topk_weights = torch.softmax(topk_vals, dim=1).to(torch.float32)
+        if even_dispatch:
+            topk_ids = torch.stack(
+                [torch.arange(topk, device=device, dtype=torch.int32) + ((t * topk) % experts) for t in range(tokens)]
+            ) % experts
+            topk_weights = torch.full((tokens, topk), 1.0 / topk, device=device, dtype=torch.float32)
+        else:
+            score = torch.rand((tokens, experts), device=device, dtype=torch.float32)
+            topk_vals, topk_ids = torch.topk(score, k=topk, dim=1)
+            topk_weights = torch.softmax(topk_vals, dim=1).to(torch.float32)
     else:
         topk_ids = topk_ids_in
         topk_weights = topk_weights_in
@@ -876,8 +933,16 @@ def run_moe_stage2(
         sorted_size,
         blocks,
     ) = routing
-    # NOTE: routing uses `moe_sorting` output directly (no host trim/pad). Extra launched blocks
-    # are gated by `num_valid_ids` inside the kernels.
+
+    # # Print token distribution across experts.
+    # tokens_per_expert = torch.bincount(topk_ids.reshape(-1).to(torch.int64), minlength=experts)
+    # active = int((tokens_per_expert > 0).sum())
+    # print(
+    #     f"  Token dispatch: {tokens} tokens x topk={topk} -> {active}/{experts} active experts, "
+    #     f"tokens/expert min={int(tokens_per_expert.min())} max={int(tokens_per_expert.max())} "
+    #     f"mean={tokens_per_expert.float().mean():.1f}"
+    #     f"{' (even)' if even_dispatch else ' (random)'}"
+    # )
 
     if in_dtype not in ("fp8", "fp16", "bf16", "int8", "int8smooth", "int4", "int4_bf16", "fp4"):
         raise ValueError(
@@ -885,6 +950,7 @@ def run_moe_stage2(
         )
     is_int4 = in_dtype == "int4"
     is_int4_bf16 = in_dtype == "int4_bf16"  # W4A16: bf16 activations, packed int4 weights
+    w_is_int4 = is_int4 or is_int4_bf16
     is_int8 = in_dtype in ("int8", "int8smooth", "int4")
     is_int8smooth = in_dtype == "int8smooth"
     is_fp4 = in_dtype == "fp4"
@@ -947,7 +1013,7 @@ def run_moe_stage2(
         w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.int8, dtypeMax=7)
         w2_q, scale_w2 = pertoken_quant(w2_fp32, quant_dtype=torch.int8, dtypeMax=7)
 
-    # --- Groupwise scale for W4A16 (stage 2) ---
+    # --- Groupwise scale for int4 variants (stage 2) ---
     use_groupwise_scale = is_int4_bf16 and group_size > 0
     scale_w2_groups = None  # [E, inter_dim//group_size, model_dim] Opt 0 layout
     if use_groupwise_scale:
@@ -956,10 +1022,12 @@ def run_moe_stage2(
             scale_w2_groups = scale_w2_groups_in
         else:
             # Generate random groupwise scale [E, num_groups, N] (Opt 0: cache-friendly).
+            _scale_torch_dtype = torch.bfloat16 if scale_dtype == "bf16" else torch.float32
             scale_w2_groups = (
                 torch.rand(experts, num_groups_s2, model_dim, device=device, dtype=torch.float32)
                 * 0.05 + 0.005
-            )
+            ).to(_scale_torch_dtype)
+        # Prepare scale for kernel (handles both f32 and bf16 layouts).
         scale_w2_prepared = shuffle_scale_for_int4(scale_w2_groups, group_size=group_size)
         # Override per-row scale (kernel uses groupwise scale instead).
         scale_w2 = None
@@ -1147,6 +1215,7 @@ def run_moe_stage2(
             tile_n=tile_n,
             tile_k=tile_k,
             doweight_stage2=bool(doweight_stage2),
+            scale_is_bf16=(scale_dtype == "bf16"),
         )
     is_reduce_exe = (getattr(exe, "mode", None) == MoeGemm2Mode.REDUCE) or bool(use_reduce)
 
@@ -1236,16 +1305,23 @@ def run_moe_stage2(
     flops = 2 * tokens * topk * model_dim * inter_dim
     tflops = flops / (us / 1e6) / 1e12
 
+    # Only activated experts load weights/scales: E_active = min(E, tokens * topk).
+    active_experts = min(experts, tokens * topk)
     bytes_moved = 0
-    a2_elem_bytes = 2 if in_dtype in ("int4_bf16", "bf16", "fp16") else (0.5 if is_fp4 else 1)  # bf16/fp16 activations
-    bytes_moved += int(tokens * topk * inter_dim * a2_elem_bytes)  # a2 (logical)
-    bytes_moved += (experts * model_dim * inter_dim) // (2 if (use_packed_int4 or is_fp4) else 1)  # w2 (packed for int4)
-    bytes_moved += tokens * model_dim * (2 if out_torch_dtype == torch.float16 else 4)  # out
-    bytes_moved += tokens * topk * 4  # a2_scale f32 (logical)
-    bytes_moved += experts * model_dim * 4  # w2_scale f32 (1D)
-    bytes_moved += int(sorted_weights.numel()) * 4
-    bytes_moved += int(sorted_token_ids.numel()) * 4
-    bytes_moved += int(sorted_expert_ids.numel()) * 4
+    a2_elem_bytes = 2 if in_dtype in ("int4_bf16", "bf16", "fp16") else 1  # bf16/fp16 activations
+    bytes_moved += tokens * topk * inter_dim * a2_elem_bytes  # a2 (logical)
+    bytes_moved += (active_experts * model_dim * inter_dim) // (2 if w_is_int4 else 1)  # w2 (packed for int4)
+    bytes_moved += tokens * model_dim * (2 if out_torch_dtype in (torch.float16, torch.bfloat16) else 4)  # out
+    is_f16_or_bf16_s2 = is_int4_bf16 or in_dtype in ("bf16", "fp16")
+    bytes_moved += (tokens * topk * 4) if not is_f16_or_bf16_s2 else 0  # a2_scale f32 (None for bf16)
+    if use_groupwise_scale:
+        num_groups_s2 = inter_dim // group_size
+        _scale_bytes = 2 if scale_dtype == "bf16" else 4
+        bytes_moved += active_experts * num_groups_s2 * model_dim * _scale_bytes  # groupwise scale
+    elif not is_f16_or_bf16_s2:
+        bytes_moved += active_experts * model_dim * 4  # per-row scale_w f32
+    # Note: routing metadata (sorted_weights, sorted_token_ids, sorted_expert_ids) excluded
+    # from bytes_moved — they are negligible vs weight/activation/scale tensors.
     tbps = bytes_moved / 1e12 / (us / 1e6)
     print(
         f"FlyDSL MoE stage2 [{kernel_name}] {in_dtype} {'reduce' if use_reduce else 'atomic'} | "
@@ -1364,7 +1440,7 @@ def run_moe_stage2(
     "fp8", "fp16", "bf16", "int8", "int8smooth", "int4", "int4_bf16",
     pytest.param("fp4", marks=pytest.mark.skipif("gfx95" not in ARCH, reason="FP4 requires gfx950+")),
 ])
-@pytest.mark.parametrize("out_dtype", ["f16", "f32"], ids=["out_f16", "out_f32"])
+@pytest.mark.parametrize("out_dtype", ["f16", "bf16", "f32"], ids=["out_f16", "out_bf16", "out_f32"])
 @pytest.mark.parametrize("use_reduce", [False, True], ids=["atomic", "reduce"])
 @pytest.mark.parametrize("use_valid_mask", [False, True], ids=["nomask", "mask"])
 @pytest.mark.parametrize("test_graph", [
@@ -1410,7 +1486,7 @@ def test_moe_gemm_2stage(
     if bool(use_reduce) and out_s in ("f32", "fp32", "float"):
         pytest.skip("reduce mode does not support out_dtype='f32' (compile_moe_gemm2(accumulate=False) forbids it).")
     if group_size > 0 and in_dtype != "int4_bf16":
-        pytest.skip("groupwise scale only applies to int4_bf16")
+        pytest.skip("groupwise scale only applies to int4_bf16 (W4A16)")
     if in_dtype == "fp4":
         if bool(use_valid_mask):
             pytest.skip("FP4 does not support valid_mask")
@@ -1590,7 +1666,7 @@ def _per_1x32_fp4_quant(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
 
 
 # Test Helpers for MoE GEMM2 Mode Comparison
-def _make_reduce_mode_compile_fn(use_flydsl_reduce: bool = True, use_valid_mask: bool = False):
+def _make_reduce_mode_compile_fn(use_flydsl_reduce: bool = True, use_valid_mask: bool = False, scale_dtype: str = "f32"):
     """Create a compile function that forces reduce mode.
     
     Args:
@@ -1610,6 +1686,7 @@ def _make_reduce_mode_compile_fn(use_flydsl_reduce: bool = True, use_valid_mask:
         in_dtype: str = "fp8",
         group_size: int = -1,
         out_dtype: str = "f16",
+        scale_is_bf16: bool = False,
     ):
         if use_flydsl_reduce:
             return compile_moe_gemm2_ex(
@@ -1627,6 +1704,7 @@ def _make_reduce_mode_compile_fn(use_flydsl_reduce: bool = True, use_valid_mask:
                 valid_mask=(True if bool(use_valid_mask) else None),
                 mode=MoeGemm2Mode.REDUCE,
                 zero_intermediate=False, # test non-zeroed performance
+                scale_is_bf16=(scale_dtype == "bf16"),
             )
         else:
             gemm2_exe = compile_moe_gemm2(
@@ -1642,6 +1720,7 @@ def _make_reduce_mode_compile_fn(use_flydsl_reduce: bool = True, use_valid_mask:
                 group_size=group_size,
                 out_dtype=out_dtype,
                 accumulate=False,
+                scale_is_bf16=(scale_dtype == "bf16"),
             )
             return _TorchReduceWrapper(gemm2_exe, topk, model_dim)
     return _compile
@@ -1713,6 +1792,45 @@ def test_moe_gemm_2stage_bf16_out(use_reduce):
         doweight_stage1=False, in_dtype="fp8", out_dtype="bf16",
         use_reduce=use_reduce, use_valid_mask=False, test_graph=False,
         group_size=-1, num_iters=2, num_warmup=1,
+    )
+
+
+@pytest.mark.parametrize("scale_dtype", ["f32", "bf16"], ids=["scale_f32", "scale_bf16"])
+def test_moe_gemm_w4a16_groupwise_scale(scale_dtype):
+    """Test W4A16 groupwise scale with f32 and bf16 (packed) scale dtypes."""
+    tokens, model_dim, inter_dim, experts, topk = 64, 256, 128, 4, 2
+    tile_m, tile_n, tile_k = 16, 64, 128
+    device = torch.device("cuda")
+    s = 0.2
+    x_fp32 = torch.randn((tokens, model_dim), device=device, dtype=torch.float32) * s
+    w1_fp32 = torch.randn((experts, 2 * inter_dim, model_dim), device=device, dtype=torch.float32) * s
+    w2_fp32 = torch.randn((experts, model_dim, inter_dim), device=device, dtype=torch.float32) * s
+    score = torch.rand((tokens, experts), device=device, dtype=torch.float32)
+    topk_vals, topk_ids = torch.topk(score, k=topk, dim=1)
+    topk_weights = torch.softmax(topk_vals, dim=1).to(torch.float32)
+    routing = build_routing_buffers(
+        topk_ids=topk_ids, topk_weights=topk_weights,
+        experts=experts, model_dim=model_dim, tile_m=tile_m,
+    )
+    out1, _ = run_moe_stage1(
+        tokens=tokens, model_dim=model_dim, inter_dim=inter_dim,
+        experts=experts, topk=topk, in_dtype="int4_bf16", group_size=32,
+        tile_m=tile_m, tile_n=tile_n, tile_k=tile_k,
+        doweight_stage1=False, num_iters=2, num_warmup=1,
+        x_fp32_in=x_fp32, w1_fp32_in=w1_fp32, w2_fp32_in=w2_fp32,
+        topk_ids_in=topk_ids, topk_weights_in=topk_weights, routing_in=routing,
+        return_outputs=True, skip_ref=False, scale_dtype=scale_dtype,
+    )
+    a2 = out1.to(torch.bfloat16)
+    run_moe_stage2(
+        tokens=tokens, model_dim=model_dim, inter_dim=inter_dim,
+        experts=experts, topk=topk, in_dtype="int4_bf16", group_size=32,
+        tile_m=tile_m, tile_n=tile_n, tile_k=tile_k,
+        doweight_stage1=False, num_iters=2, num_warmup=1,
+        x_fp32_in=x_fp32, w1_fp32_in=w1_fp32, w2_fp32_in=w2_fp32,
+        topk_ids_in=topk_ids, topk_weights_in=topk_weights, routing_in=routing,
+        a2_fp8_in=a2, a2_scale_in=None,
+        return_outputs=True, skip_ref=False, scale_dtype=scale_dtype,
     )
 
 
@@ -1999,5 +2117,8 @@ if __name__ == "__main__":
     if "all" in in_dtypes:
         in_dtypes = ["fp8", "fp16", "bf16", "int8", "int4", "int4_bf16", "fp4"]
     for dt in in_dtypes:
+        if dt == "fp4" and "gfx95" not in ARCH:
+            print(f"Skipping FP4: requires gfx950+, got {ARCH}")
+            continue
         for use_reduce in reduce_flags:
             run_one(dt, use_reduce)

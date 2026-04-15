@@ -415,7 +415,9 @@ with ir.InsertionPoint(comp_ctx.gpu_module_body):
 | Architecture | LDS per CU |
 |---|---|
 | `gfx942` (MI300X) | 64 KB |
-| `gfx950` (MI350) | 160 KB |
+| `gfx950` (MI350/MI355X) | 160 KB |
+| `gfx1201` (Radeon AI PRO R9700) | 64 KB |
+| `gfx1250` (MI450) | 320 KB |
 
 ---
 
@@ -483,10 +485,12 @@ Cache is invalidated when:
 - `Constexpr` values change
 - FlyDSL or LLVM version changes
 
-### 9.3 Disabling Cache
+### 9.3 Disk Cache Invalidation
+
+The JIT disk cache auto-invalidates when kernel source code or closure values change. Set `FLYDSL_RUNTIME_ENABLE_CACHE=0` only when modifying C++ passes or non-closure helper functions:
 
 ```bash
-FLYDSL_RUNTIME_ENABLE_CACHE=0 python my_script.py
+FLYDSL_RUNTIME_ENABLE_CACHE=0 python my_script.py  # or: rm -rf ~/.flydsl/cache
 ```
 
 ### 9.4 Compile-Only Mode

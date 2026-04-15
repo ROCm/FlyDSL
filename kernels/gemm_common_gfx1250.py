@@ -2,7 +2,7 @@
 
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm as llvm_dialect
-from flydsl.expr import arith, buffer_ops, gpu, tdm_ops, vector
+from flydsl.expr import arith, buffer_ops, gpu, rocdl, tdm_ops, vector
 from flydsl.expr.arith import _to_raw as _raw
 from flydsl.expr.typing import T
 from flydsl.utils.smem_allocator import (
@@ -58,21 +58,6 @@ def lds_store_b128(memref, elem_off, data):
     vector.store(typed_vec, memref, [elem_off])
 
 
-def lds_load_b32(memref, elem_off):
-    """Load 4 bytes from LDS as an ``i32`` scalar.
-
-    Produces ``ds_load_b32``.
-
-    Args:
-        memref: LDS memref (any 16-bit element type).
-        elem_off: Element offset in memref element units.
-    """
-    vec_ty = _lds_vec_type(memref, 32)
-    loaded = vector.load_op(vec_ty, memref, [elem_off])
-    i32_vec = vector.bitcast(ir.VectorType.get([1], ir.IntegerType.get_signless(32)), loaded)
-    return vector.extract(i32_vec, static_position=[0], dynamic_position=[])
-
-
 def extract_lds_base_idx(smem_ptr):
     """Extract the absolute LDS byte-base address as an index value."""
     from flydsl._mlir.dialects import memref as _memref
@@ -82,6 +67,17 @@ def extract_lds_base_idx(smem_ptr):
     return _memref.extract_aligned_pointer_as_index(raw_memref)
 
 
+def _raw_lds_ptr(lds_base_idx, byte_offset):
+    """Materialize an LLVM LDS pointer from a pre-extracted byte base."""
+    from flydsl._mlir.dialects import llvm as _llvm
+    from flydsl.expr.arith import ArithValue as _AV
+
+    lds_ptr_ty = ir.Type.parse("!llvm.ptr<3>")
+    total_byte = _AV(lds_base_idx) + byte_offset
+    addr_i32 = _raw(arith.index_cast(T.i32, total_byte))
+    return _llvm.inttoptr(lds_ptr_ty, addr_i32)
+
+
 def lds_load_b128_raw(lds_base_idx, byte_offset):
     """Load 16 bytes from LDS using a pre-extracted base index (raw LLVM).
 
@@ -89,32 +85,16 @@ def lds_load_b128_raw(lds_base_idx, byte_offset):
         lds_base_idx: Index value from ``extract_lds_base_idx``.
         byte_offset: Byte offset (index-type) relative to the base.
     """
-    from flydsl._mlir.dialects import llvm as _llvm
-    from flydsl.expr.arith import ArithValue as _AV
-
-    lds_ptr_ty = ir.Type.parse("!llvm.ptr<3>")
-    total_byte = _AV(lds_base_idx) + byte_offset
-    addr_i32 = _raw(arith.index_cast(T.i32, total_byte))
-    ptr_val = _llvm.inttoptr(lds_ptr_ty, addr_i32)
+    ptr_val = _raw_lds_ptr(lds_base_idx, byte_offset)
     return llvm_dialect.load(ir.VectorType.get([4], ir.IntegerType.get_signless(32)), ptr_val)
 
 
-def lds_store_b128_raw(lds_base_idx, byte_offset, data):
-    """Store 16 bytes to LDS using a pre-extracted base index (raw LLVM).
+def lds_transpose_load_raw(result_type, lds_base_idx, byte_offset):
+    """Transpose-load 16 bytes from LDS using a pre-extracted base index."""
+    from flydsl._mlir.dialects import rocdl as _rocdl
 
-    Args:
-        lds_base_idx: Index value from ``extract_lds_base_idx``.
-        byte_offset: Byte offset (index-type) relative to the base.
-        data: Raw 128-bit LLVM value to store.
-    """
-    from flydsl._mlir.dialects import llvm as _llvm
-    from flydsl.expr.arith import ArithValue as _AV
-
-    lds_ptr_ty = ir.Type.parse("!llvm.ptr<3>")
-    total_byte = _AV(lds_base_idx) + byte_offset
-    addr_i32 = _raw(arith.index_cast(T.i32, total_byte))
-    ptr_val = _llvm.inttoptr(lds_ptr_ty, addr_i32)
-    llvm_dialect.store(data, ptr_val)
+    ptr_val = _raw_lds_ptr(lds_base_idx, byte_offset)
+    return _rocdl.ds_load_tr16_b128(result_type, ptr_val)
 
 
 def pipeline_fence(outstanding=0, use_cluster=False):
@@ -127,6 +107,53 @@ def pipeline_fence(outstanding=0, use_cluster=False):
         gpu.cluster_barrier()
     else:
         gpu.barrier()
+
+
+WGP_BARRIER_ID = -1
+
+
+def pipeline_fence_signal(outstanding=0, use_cluster=False):
+    """Signal half of a split barrier fence.
+
+    Issues ``s_wait_tensorcnt`` then ``s_barrier_signal -1``.
+    The matching ``pipeline_fence_wait`` must be called later
+    (typically mid-compute) before reading the LDS data.
+
+    When *use_cluster* is True the intra-WG barrier is still required
+    so that all waves' TDM loads are visible before any wave reads LDS.
+    The cluster barrier is layered on top for inter-WG synchronisation.
+    """
+    tdm_ops.tensor_wait(outstanding)
+    rocdl.s_barrier_signal(WGP_BARRIER_ID)
+    if use_cluster:
+        gpu.cluster_signal_once_per_wg()
+
+
+def pipeline_fence_wait(use_cluster=False):
+    """Wait half of a split barrier fence.
+
+    Issues ``s_barrier_wait -1``.  Must be preceded by a matching
+    ``pipeline_fence_signal`` from all waves in the workgroup.
+    """
+    rocdl.s_barrier_wait(WGP_BARRIER_ID)
+    if use_cluster:
+        gpu.cluster_wait()
+
+
+def issue_tdm_loads(*descs, wave_specialized=False, wave_id=None):
+    """Emit one or more TDM loads, optionally one descriptor per loader wave."""
+    if wave_specialized:
+        if wave_id is None:
+            wave_id = rocdl.wave_id()
+        for idx, desc in enumerate(descs):
+            if arith.cmpi(
+                arith.CmpIPredicate.eq, wave_id, arith.constant(idx, type=T.i32)
+            ):
+                tdm_ops.tensor_load_2d(desc)
+        return
+
+    for desc in descs:
+        tdm_ops.tensor_load_2d(desc)
 
 
 def store_acc_vec8_to_lds(memref, base_elem_off, imm_elem_off, acc_vec8,
@@ -202,15 +229,15 @@ def store_acc_vec8_to_buffer(acc_vec8, c_rsrc, addr,
 __all__ = [
     # LDS helpers
     "get_lds_memref",
-    "lds_load_b128",
-    "lds_store_b128",
-    "lds_load_b32",
     # Raw LLVM path
     "extract_lds_base_idx",
     "lds_load_b128_raw",
-    "lds_store_b128_raw",
+    "lds_transpose_load_raw",
     # Pipeline
     "pipeline_fence",
+    "pipeline_fence_signal",
+    "pipeline_fence_wait",
+    "issue_tdm_loads",
     # Epilogue
     "store_acc_vec8_to_lds",
     "store_acc_vec8_to_buffer",

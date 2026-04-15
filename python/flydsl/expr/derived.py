@@ -20,7 +20,6 @@ Typical usage::
     tAr = thr_mma.partition_A(sA)
 """
 
-from .._mlir import ir
 from .._mlir.dialects._fly_enum_gen import MmaOperand
 from .meta import traced_op
 from .primitive import *
@@ -28,7 +27,6 @@ from .typing import Tensor, TiledCopy, TiledMma
 
 __all__ = [
     # Tiled Operation
-    "MmaAtom",
     "ThrCopy",
     "ThrMma",
     "make_layout_tv",
@@ -37,61 +35,6 @@ __all__ = [
     "make_tiled_copy_B",
     "make_tiled_copy_C",
 ]
-
-
-class Atom:
-    """Base class for hardware instruction atoms (copy/MMA).
-
-    An atom wraps a single MLIR ``ir.Value`` that represents a hardware
-    instruction descriptor in the Fly dialect type system.
-    """
-
-    def __init__(self, value: ir.Value):
-        self.value = value
-        self.atom_ty = self.value.type
-
-    @classmethod
-    def __fly_construct__(cls, values):
-        return cls(values[0])
-
-    def __fly_values__(self):
-        return [self.value]
-
-
-class MmaAtom(Atom):
-    """Atom describing a single MMA (matrix multiply-accumulate) instruction.
-
-    Wraps MFMA instruction descriptors with thread-value layouts for
-    operands A, B, and C, plus the MNK shape of the instruction.
-
-    Properties:
-        thr_layout: Thread layout of the MMA atom.
-        shape_mnk: The (M, N, K) shape of the MMA instruction.
-        tv_layout_A/B/C: Thread-value layouts for operands A, B, C.
-    """
-
-    def __str__(self):
-        return f"MmaAtom({self.atom_ty})"
-
-    @property
-    def thr_layout(self):
-        return static(self.atom_ty.thr_layout)
-
-    @property
-    def shape_mnk(self):
-        return static(self.atom_ty.shape_mnk)
-
-    @property
-    def tv_layout_A(self):
-        return static(self.atom_ty.tv_layout_a)
-
-    @property
-    def tv_layout_B(self):
-        return static(self.atom_ty.tv_layout_b)
-
-    @property
-    def tv_layout_C(self):
-        return static(self.atom_ty.tv_layout_c)
 
 
 class ThrCopy(TiledCopy):
@@ -163,14 +106,19 @@ def make_layout_tv(thr_layout, val_layout, loc=None, ip=None):
     Returns:
         Tuple of (tiler_mn, layout_tv).
     """
+    if not thr_layout.is_static:
+        raise ValueError("thr_layout is not static")
+    if not val_layout.is_static:
+        raise ValueError("val_layout is not static")
+
     layout_mn = raked_product(thr_layout, val_layout)
-    thr_size = size(thr_layout)
-    val_size = size(val_layout)
+    thr_size = size(thr_layout).to_py_value()
+    val_size = size(val_layout).to_py_value()
     tmp = make_layout((thr_size, val_size), (1, thr_size))
 
     layout_tv = composition(right_inverse(layout_mn), tmp)
 
-    tiler_mn = int_tuple_product_each(get_shape(layout_mn))
+    tiler_mn = int_tuple_product_each(get_shape(layout_mn)).to_py_value()
     return (tiler_mn, layout_tv)
 
 
@@ -179,10 +127,8 @@ def make_tiled_copy_A(copy_atom, tiled_mma):
     layout_tv = tiled_mma.tv_layout_A_tiled
     tile_size = tiled_mma.tile_size_mnk
     tile_mn = make_tile(
-        [
-            make_layout(select(tile_size, [0]), 1),
-            make_layout(select(tile_size, [2]), 1),
-        ]
+        make_layout(select(tile_size, [0]), 1),
+        make_layout(select(tile_size, [2]), 1),
     )
     return make_tiled_copy(copy_atom, layout_tv, tile_mn)
 
@@ -192,10 +138,8 @@ def make_tiled_copy_B(copy_atom, tiled_mma):
     layout_tv = tiled_mma.tv_layout_B_tiled
     tile_size = tiled_mma.tile_size_mnk
     tile_mn = make_tile(
-        [
-            make_layout(select(tile_size, [1]), 1),
-            make_layout(select(tile_size, [2]), 1),
-        ]
+        make_layout(select(tile_size, [1]), 1),
+        make_layout(select(tile_size, [2]), 1),
     )
     return make_tiled_copy(copy_atom, layout_tv, tile_mn)
 
@@ -205,9 +149,7 @@ def make_tiled_copy_C(copy_atom, tiled_mma):
     layout_tv = tiled_mma.tv_layout_C_tiled
     tile_size = tiled_mma.tile_size_mnk
     tile_mn = make_tile(
-        [
-            make_layout(select(tile_size, [0]), 1),
-            make_layout(select(tile_size, [1]), 1),
-        ]
+        make_layout(select(tile_size, [0]), 1),
+        make_layout(select(tile_size, [1]), 1),
     )
     return make_tiled_copy(copy_atom, layout_tv, tile_mn)

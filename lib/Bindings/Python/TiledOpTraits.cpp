@@ -65,7 +65,7 @@ LayoutAttr tiledCopyGetTiledThrValLayoutDst(CopyAtomType copyAtom, LayoutAttr ti
                                            cast<LayoutAttr>(copyAtom.getThrValLayoutDst()));
 }
 
-LayoutAttr tiledMmaGetTiledThrValLayout(MmaAtomTypeInterface mmaAtom, LayoutAttr atomLayoutMNK,
+LayoutAttr tiledMmaGetTiledThrValLayout(MmaAtomType mmaAtom, LayoutAttr atomLayoutMNK,
                                         TileAttr permutationMNK, MmaOperand operandId) {
   auto *ctx = atomLayoutMNK.getContext();
   LayoutBuilder<LayoutAttr> attrBuilder(ctx);
@@ -96,9 +96,15 @@ LayoutAttr tiledMmaGetTiledThrValLayout(MmaAtomTypeInterface mmaAtom, LayoutAttr
       auto thrSizeI = intTupleProduct(attrBuilder, atomLayoutMNK.getShape().at(i)).getLeafAsInt();
       tileSizeElems.push_back(IntTupleAttr::get(atomShapeI * thrSizeI));
     } else {
-      auto permLayout = cast<LayoutAttr>(permutationMNK.at(i));
-      auto sizeI = intTupleProduct(attrBuilder, permLayout.getShape()).getLeafAsInt();
-      tileSizeElems.push_back(IntTupleAttr::get(sizeI));
+      auto permMode = permutationMNK.at(i);
+      if (auto permLayout = dyn_cast<LayoutAttr>(permMode)) {
+        tileSizeElems.push_back(
+            IntTupleAttr::get(intTupleProduct(attrBuilder, permLayout.getShape()).getLeafAsInt()));
+      } else if (auto permInt = dyn_cast<IntAttr>(permMode)) {
+        tileSizeElems.push_back(IntTupleAttr::get(permInt));
+      } else {
+        llvm_unreachable("unsupported tiled MMA permutation element");
+      }
     }
   }
   IntTupleAttr refShape = IntTupleAttr::get(ArrayAttr::get(ctx, tileSizeElems));
@@ -165,7 +171,7 @@ LayoutAttr tiledMmaGetTiledThrValLayout(MmaAtomTypeInterface mmaAtom, LayoutAttr
   return LayoutAttr::get(finalShape, finalStride);
 }
 
-IntTupleAttr tiledMmaGetTileSizeMNK(MmaAtomTypeInterface mmaAtom, LayoutAttr atomLayoutMNK,
+IntTupleAttr tiledMmaGetTileSizeMNK(MmaAtomType mmaAtom, LayoutAttr atomLayoutMNK,
                                     TileAttr permutationMNK) {
   auto *ctx = atomLayoutMNK.getContext();
   LayoutBuilder<LayoutAttr> attrBuilder(ctx);
@@ -179,15 +185,21 @@ IntTupleAttr tiledMmaGetTileSizeMNK(MmaAtomTypeInterface mmaAtom, LayoutAttr ato
       auto thrSizeI = intTupleProduct(attrBuilder, atomLayoutMNK.getShape().at(i)).getLeafAsInt();
       tileSizeElems.push_back(IntTupleAttr::get(atomShapeI * thrSizeI));
     } else {
-      auto permLayout = cast<LayoutAttr>(permutationMNK.at(i));
-      auto sizeI = intTupleProduct(attrBuilder, permLayout.getShape()).getLeafAsInt();
-      tileSizeElems.push_back(IntTupleAttr::get(sizeI));
+      auto permMode = permutationMNK.at(i);
+      if (auto permLayout = dyn_cast<LayoutAttr>(permMode)) {
+        tileSizeElems.push_back(
+            IntTupleAttr::get(intTupleProduct(attrBuilder, permLayout.getShape()).getLeafAsInt()));
+      } else if (auto permInt = dyn_cast<IntAttr>(permMode)) {
+        tileSizeElems.push_back(IntTupleAttr::get(permInt));
+      } else {
+        llvm_unreachable("unsupported tiled MMA permutation element");
+      }
     }
   }
   return IntTupleAttr::get(ArrayAttr::get(ctx, tileSizeElems));
 }
 
-LayoutAttr tiledMmaGetThrLayoutVMNK(MmaAtomTypeInterface mmaAtom, LayoutAttr atomLayoutMNK) {
+LayoutAttr tiledMmaGetThrLayoutVMNK(MmaAtomType mmaAtom, LayoutAttr atomLayoutMNK) {
   auto *ctx = atomLayoutMNK.getContext();
   LayoutBuilder<LayoutAttr> attrBuilder(ctx);
 

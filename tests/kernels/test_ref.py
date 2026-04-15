@@ -100,11 +100,11 @@ def torch_moe_gemm1(
         s_idx = idx[:, 1]
         x_in = x[t_idx, :] if x.dim() == 2 else x[t_idx, s_idx, :]
         y2 = F.linear(x_in, w1[e, :, :])  # [num, 2*inter_dim]
-        if doweight_stage1:
-            y2 = y2 * topk_weights[t_idx, s_idx].unsqueeze(-1)
         gate = y2[:, :inter_dim]
         up = y2[:, inter_dim:]
         y = F.silu(gate) * up
+        if doweight_stage1:
+            y = y * topk_weights[t_idx, s_idx].unsqueeze(-1)
         out[t_idx, s_idx, :] = y
     return out
 

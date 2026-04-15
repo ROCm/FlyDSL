@@ -2,11 +2,16 @@
 # Copyright (c) 2025 FlyDSL Project Contributors
 
 from ..._mlir import ir
-from ..._mlir._mlir_libs._mlirDialectsFlyROCDL import MmaAtomGFX1250_WMMAType
+from ..._mlir._mlir_libs._mlirDialectsFlyROCDL import MmaOpGFX1250_WMMAType
 from ..._mlir.dialects import arith, fly
 from ..._mlir.dialects._fly_enum_gen import AddressSpace
-from ..._mlir.dialects.fly import PointerType
-from ..._mlir.dialects.fly_rocdl import CopyOpCDNA3BufferCopyType, MmaAtomCDNA3_MFMAType
+from ..._mlir.dialects.fly import AtomicOp, PointerType
+from ..._mlir.dialects.fly_rocdl import (
+    CopyOpCDNA3BufferAtomicType,
+    CopyOpCDNA3BufferCopyLDSType,
+    CopyOpCDNA3BufferCopyType,
+    MmaOpCDNA3_MFMAType,
+)
 from ..._mlir.extras import types as T
 from ..primitive import (
     get_iter,
@@ -16,12 +21,55 @@ from ..primitive import (
 )
 from ..typing import Tensor
 
-BufferCopy = lambda bit_size: CopyOpCDNA3BufferCopyType.get(bit_size)
+
+def BufferCopy(bit_size):
+    """Create a CDNA3 buffer copy atom.
+
+    Current atom state:
+    - `soffset` (`i32`)
+    """
+    return CopyOpCDNA3BufferCopyType.get(bit_size)
+
+
+# BufferCopy aliases for convenience
 BufferCopy8b = lambda: CopyOpCDNA3BufferCopyType.get(8)
 BufferCopy16b = lambda: CopyOpCDNA3BufferCopyType.get(16)
 BufferCopy32b = lambda: CopyOpCDNA3BufferCopyType.get(32)
 BufferCopy64b = lambda: CopyOpCDNA3BufferCopyType.get(64)
 BufferCopy128b = lambda: CopyOpCDNA3BufferCopyType.get(128)
+
+
+def BufferCopyLDS(bit_size):
+    """Create a CDNA3 buffer-to-LDS copy atom.
+
+    Only supports BufferDesc -> Shared address space direction.
+
+    Current atom state:
+    - `soffset` (`i32`)
+    - `imm_offset` (`i32`)
+    """
+    return CopyOpCDNA3BufferCopyLDSType.get(bit_size)
+
+
+BufferCopyLDS32b = lambda: CopyOpCDNA3BufferCopyLDSType.get(32)
+BufferCopyLDS64b = lambda: CopyOpCDNA3BufferCopyLDSType.get(64)
+BufferCopyLDS128b = lambda: CopyOpCDNA3BufferCopyLDSType.get(128)
+
+
+def BufferAtomic(atomic_op, val_type):
+    """Create a CDNA3 buffer atomic copy atom.
+
+    Current atom state:
+    - `soffset` (`i32`)
+    """
+    ty = val_type.ir_type if hasattr(val_type, "ir_type") else val_type
+    return CopyOpCDNA3BufferAtomicType.get(int(atomic_op), ty)
+
+
+BufferAtomicAdd = lambda val_type: BufferAtomic(AtomicOp.Add, val_type)
+BufferAtomicMax = lambda val_type: BufferAtomic(AtomicOp.Max, val_type)
+BufferAtomicMin = lambda val_type: BufferAtomic(AtomicOp.Min, val_type)
+BufferAtomicPkAdd = lambda val_type: BufferAtomic(AtomicOp.Add, T.vector(2, val_type.ir_type))
 
 
 def MFMA(m, n, k, elem_ty_ab, elem_ty_acc=None):
@@ -31,7 +79,7 @@ def MFMA(m, n, k, elem_ty_ab, elem_ty_acc=None):
         ty_acc = T.f32()
     else:
         ty_acc = elem_ty_acc.ir_type if hasattr(elem_ty_acc, "ir_type") else elem_ty_acc
-    return MmaAtomCDNA3_MFMAType.get(m, n, k, ty_ab, ty_ab, ty_acc)
+    return MmaOpCDNA3_MFMAType.get(m, n, k, ty_ab, ty_ab, ty_acc)
 
 
 def WMMA(m, n, k, elem_ty_ab, elem_ty_acc=None):
@@ -40,10 +88,10 @@ def WMMA(m, n, k, elem_ty_ab, elem_ty_acc=None):
         ty_acc = ir.F32Type.get()
     else:
         ty_acc = elem_ty_acc.ir_type if hasattr(elem_ty_acc, "ir_type") else elem_ty_acc
-    return MmaAtomGFX1250_WMMAType.get(m, n, k, ty_ab, ty_ab, ty_acc)
+    return MmaOpGFX1250_WMMAType.get(m, n, k, ty_ab, ty_ab, ty_acc)
 
 
-def make_buffer_tensor(tensor: Tensor) -> Tensor:
+def make_buffer_tensor(tensor: Tensor, max_size: bool = True) -> Tensor:
     def _elem_bit_width(elem_ty):
         if hasattr(elem_ty, "width"):
             return int(elem_ty.width)
@@ -59,7 +107,14 @@ def make_buffer_tensor(tensor: Tensor) -> Tensor:
     elem_bits = _elem_bit_width(elem_ty)
     elem_bytes = elem_bits // 8 if elem_bits > 0 else 1
 
-    if layout.is_static:
+    if max_size:
+        # Always use max buffer size to handle dynamic tensor shapes safely.
+        # The JIT cache may reuse a compiled kernel for tensors of different
+        # leading dimensions; a static num_records from the traced shape would
+        # silently truncate larger tensors.  This matches the behavior of
+        # buffer_ops.create_buffer_resource(max_size=True).
+        num_records_bytes = MAX_BUFFER_SIZE
+    elif layout.is_static:
         cosize = fly.cosize(layout)
         num_records_bytes = cosize.get_static_leaf_int * elem_bytes
         if num_records_bytes > MAX_BUFFER_SIZE:
