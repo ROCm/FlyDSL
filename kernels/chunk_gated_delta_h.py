@@ -270,7 +270,8 @@ def compile_chunk_gated_delta_h(
             boh = i_n * NT
 
         # ── Base pointer offsets (element counts) ──
-        # h: [B, NT, H, K, V] — base = (boh*H + i_h) * K * V
+        # h: [B, NT, H, V, K] — K-contiguous (transposed [K,V] slice)
+        # h[row, col] at offset col * K + row  (row=K-dim, col=V-dim)
         h_base = (boh * fx.Int32(H) + i_h) * fx.Int32(K * V)
         stride_h = fx.Int32(H * K * V)
 
@@ -323,16 +324,15 @@ def compile_chunk_gated_delta_h(
                 h_accs.append(acc_zero)
 
         # ── Load initial state if provided ──
+        # h0 layout: [V, K] K-contiguous → offset = v_col * K + k_row
+        # MFMA elem 0..3 are consecutive K-rows → now contiguous in memory
         if USE_INITIAL_STATE:
             for kb in range_constexpr(NUM_K_BLOCKS):
                 for nr in range_constexpr(N_REPEAT):
                     h0_col = i_v * fx.Int32(BV) + fx.Int32(nr * 16) + lane_n
-                    h0_elems = []
-                    for elem_i in range_constexpr(4):
-                        h0_row = fx.Int32(kb * 64) + wid * fx.Int32(16) + lane_m_base * fx.Int32(4) + fx.Int32(elem_i)
-                        h0_off = h0_base + h0_row * fx.Int32(V) + h0_col
-                        h0_elems.append(h0_[fx.Index(h0_off)])
-                    loaded_vec = vector.from_elements(T.f32x4, h0_elems)
+                    h0_row_base = fx.Int32(kb * 64) + wid * fx.Int32(16) + lane_m_base * fx.Int32(4)
+                    h0_off = h0_base + h0_col * fx.Int32(K) + h0_row_base
+                    loaded_vec = h0_.vec_load((fx.Index(h0_off),), 4)
                     acc_idx = kb * N_REPEAT + nr
                     h_accs[acc_idx] = arith.addf(h_accs[acc_idx], loaded_vec)
 
@@ -360,6 +360,9 @@ def compile_chunk_gated_delta_h(
                     w_prefetch_lds_all.append(row * fx.Int32(LDS_W_STRIDE) + fx.Int32(kb * 64) + load_col_base)
 
             # ── Store h snapshot to global + LDS (w[0] loads in flight) ──
+            # Global h layout: [V, K] K-contiguous → offset = v_col * K + k_row
+            # MFMA f32x4 = 4 consecutive K-rows → contiguous in memory
+            # → vector truncf f32x4→bf16x4 then single buffer_store (dwordx2, 8B)
             for kb in range_constexpr(NUM_K_BLOCKS):
                 for nr in range_constexpr(N_REPEAT):
                     acc_idx = kb * N_REPEAT + nr
@@ -367,14 +370,16 @@ def compile_chunk_gated_delta_h(
                     h_col = i_v * fx.Int32(BV) + fx.Int32(nr * 16) + lane_n
                     lds_h_col = fx.Int32(nr * 16) + lane_n
 
+                    h_row_base = fx.Int32(kb * 64) + wid * fx.Int32(16) + lane_m_base * fx.Int32(4)
+                    h_off_base = h_base + i_t_i32 * stride_h + h_col * fx.Int32(K) + h_row_base
+
+                    # Vectorized global store: truncf f32x4 → bf16x4 → dwordx2
+                    bf16x4_val = arith.trunc_f(T.vec(4, T.bf16), acc_val)
+                    buffer_ops.buffer_store(bf16x4_val, h_.rsrc, h_off_base)
+
+                    # LDS store: scalar (LDS layout [K, BV] is independent of global)
                     for elem_i in range_constexpr(4):
-                        f32_val = vector.extract(acc_val, static_position=[elem_i], dynamic_position=[])
-                        bf16_val = arith.trunc_f(T.bf16, f32_val)
-
-                        h_row = fx.Int32(kb * 64) + wid * fx.Int32(16) + lane_m_base * fx.Int32(4) + fx.Int32(elem_i)
-                        h_off = h_base + i_t_i32 * stride_h + h_row * fx.Int32(V) + h_col
-                        h_[fx.Index(h_off)] = bf16_val
-
+                        bf16_val = vector.extract(bf16x4_val, static_position=[elem_i], dynamic_position=[])
                         lds_h_row = fx.Int32(kb * 64) + wid * fx.Int32(16) + lane_m_base * fx.Int32(4) + fx.Int32(elem_i)
                         lds_h_idx = lds_h_row * fx.Int32(BV) + lds_h_col
                         lds_h[fx.Index(lds_h_idx)] = bf16_val
@@ -566,6 +571,7 @@ def compile_chunk_gated_delta_h(
         h_accs_final = list(results)
 
         # ── Epilogue: store final state ──
+        # ht layout: [V, K] K-contiguous → offset = v_col * K + k_row
         if STORE_FINAL_STATE:
             for kb in range_constexpr(NUM_K_BLOCKS):
                 for nr in range_constexpr(N_REPEAT):
@@ -573,11 +579,9 @@ def compile_chunk_gated_delta_h(
                     acc_val = h_accs_final[acc_idx]
 
                     ht_col = i_v * fx.Int32(BV) + fx.Int32(nr * 16) + lane_n
-                    for elem_i in range_constexpr(4):
-                        f32_val = vector.extract(acc_val, static_position=[elem_i], dynamic_position=[])
-                        ht_row = fx.Int32(kb * 64) + wid * fx.Int32(16) + lane_m_base * fx.Int32(4) + fx.Int32(elem_i)
-                        ht_off = ht_base + ht_row * fx.Int32(V) + ht_col
-                        ht_[fx.Index(ht_off)] = f32_val
+                    ht_row_base = fx.Int32(kb * 64) + wid * fx.Int32(16) + lane_m_base * fx.Int32(4)
+                    ht_off = ht_base + ht_col * fx.Int32(K) + ht_row_base
+                    buffer_ops.buffer_store(acc_val, ht_.rsrc, ht_off)
 
     # ── Host launcher ──────────────────────────────────────────────────────
     @flyc.jit
@@ -695,8 +699,9 @@ def chunk_gated_delta_rule_fwd_h_flydsl(
 
     assert K <= 256
 
-    h = k.new_empty(B, NT, H, K, V)
-    final_state = k.new_empty(N, H, K, V, dtype=torch.float32) if output_final_state else None
+    # h/h0/ht: [V, K] K-contiguous layout → [B, NT, H, V, K]
+    h = k.new_empty(B, NT, H, V, K)
+    final_state = k.new_empty(N, H, V, K, dtype=torch.float32) if output_final_state else None
     v_new_buf = k.new_empty(B, H, T_flat, V, dtype=u.dtype)
     v_new = v_new_buf if save_new_value else None
 

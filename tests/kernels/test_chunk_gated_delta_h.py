@@ -144,15 +144,15 @@ def _triton_fwd_kernel_h_opt3(
     if USE_INITIAL_STATE: h0 = h0 + i_nh * K * V
     if STORE_FINAL_STATE: ht = ht + i_nh * K * V
     if USE_INITIAL_STATE:
-        b_h1 += tl.load(tl.make_block_ptr(h0, (K,V),(V,1),(0,i_v*BV),(64,BV),(1,0)), boundary_check=(0,1)).to(tl.float32)
-        if K > 64:  b_h2 += tl.load(tl.make_block_ptr(h0,(K,V),(V,1),(64,i_v*BV),(64,BV),(1,0)), boundary_check=(0,1)).to(tl.float32)
-        if K > 128: b_h3 += tl.load(tl.make_block_ptr(h0,(K,V),(V,1),(128,i_v*BV),(64,BV),(1,0)), boundary_check=(0,1)).to(tl.float32)
-        if K > 192: b_h4 += tl.load(tl.make_block_ptr(h0,(K,V),(V,1),(192,i_v*BV),(64,BV),(1,0)), boundary_check=(0,1)).to(tl.float32)
+        b_h1 += tl.load(tl.make_block_ptr(h0, (K,V),(1,K),(0,i_v*BV),(64,BV),(0,1)), boundary_check=(0,1)).to(tl.float32)
+        if K > 64:  b_h2 += tl.load(tl.make_block_ptr(h0,(K,V),(1,K),(64,i_v*BV),(64,BV),(0,1)), boundary_check=(0,1)).to(tl.float32)
+        if K > 128: b_h3 += tl.load(tl.make_block_ptr(h0,(K,V),(1,K),(128,i_v*BV),(64,BV),(0,1)), boundary_check=(0,1)).to(tl.float32)
+        if K > 192: b_h4 += tl.load(tl.make_block_ptr(h0,(K,V),(1,K),(192,i_v*BV),(64,BV),(0,1)), boundary_check=(0,1)).to(tl.float32)
     for i_t in range(NT):
-        tl.store(tl.make_block_ptr(h+i_t*stride_h,(K,V),(V,1),(0,i_v*BV),(64,BV),(1,0)), b_h1.to(tl.bfloat16), boundary_check=(0,1))
-        if K > 64:  tl.store(tl.make_block_ptr(h+i_t*stride_h,(K,V),(V,1),(64,i_v*BV),(64,BV),(1,0)), b_h2.to(tl.bfloat16), boundary_check=(0,1))
-        if K > 128: tl.store(tl.make_block_ptr(h+i_t*stride_h,(K,V),(V,1),(128,i_v*BV),(64,BV),(1,0)), b_h3.to(tl.bfloat16), boundary_check=(0,1))
-        if K > 192: tl.store(tl.make_block_ptr(h+i_t*stride_h,(K,V),(V,1),(192,i_v*BV),(64,BV),(1,0)), b_h4.to(tl.bfloat16), boundary_check=(0,1))
+        tl.store(tl.make_block_ptr(h+i_t*stride_h,(K,V),(1,K),(0,i_v*BV),(64,BV),(0,1)), b_h1.to(tl.bfloat16), boundary_check=(0,1))
+        if K > 64:  tl.store(tl.make_block_ptr(h+i_t*stride_h,(K,V),(1,K),(64,i_v*BV),(64,BV),(0,1)), b_h2.to(tl.bfloat16), boundary_check=(0,1))
+        if K > 128: tl.store(tl.make_block_ptr(h+i_t*stride_h,(K,V),(1,K),(128,i_v*BV),(64,BV),(0,1)), b_h3.to(tl.bfloat16), boundary_check=(0,1))
+        if K > 192: tl.store(tl.make_block_ptr(h+i_t*stride_h,(K,V),(1,K),(192,i_v*BV),(64,BV),(0,1)), b_h4.to(tl.bfloat16), boundary_check=(0,1))
         p_w = tl.make_block_ptr(w,(T,K),(stride_w,1),(i_t*BT,0),(BT,64),(1,0))
         b_v = tl.dot(tl.load(p_w, boundary_check=(0,1)), b_h1.to(tl.bfloat16))
         if K > 64:  b_v += tl.dot(tl.load(tl.make_block_ptr(w,(T,K),(stride_w,1),(i_t*BT,64),(BT,64),(1,0)), boundary_check=(0,1)), b_h2.to(tl.bfloat16))
@@ -185,10 +185,10 @@ def _triton_fwd_kernel_h_opt3(
         if K > 128: b_h3 += tl.dot(tl.load(tl.make_block_ptr(k,(K,T),(1,stride_k),(128,i_t*BT),(64,BT),(0,1)), boundary_check=(0,1)), b_v)
         if K > 192: b_h4 += tl.dot(tl.load(tl.make_block_ptr(k,(K,T),(1,stride_k),(192,i_t*BT),(64,BT),(0,1)), boundary_check=(0,1)), b_v)
     if STORE_FINAL_STATE:
-        tl.store(tl.make_block_ptr(ht,(K,V),(V,1),(0,i_v*BV),(64,BV),(1,0)), b_h1.to(tl.float32), boundary_check=(0,1))
-        if K > 64:  tl.store(tl.make_block_ptr(ht,(K,V),(V,1),(64,i_v*BV),(64,BV),(1,0)), b_h2.to(tl.float32), boundary_check=(0,1))
-        if K > 128: tl.store(tl.make_block_ptr(ht,(K,V),(V,1),(128,i_v*BV),(64,BV),(1,0)), b_h3.to(tl.float32), boundary_check=(0,1))
-        if K > 192: tl.store(tl.make_block_ptr(ht,(K,V),(V,1),(192,i_v*BV),(64,BV),(1,0)), b_h4.to(tl.float32), boundary_check=(0,1))
+        tl.store(tl.make_block_ptr(ht,(K,V),(1,K),(0,i_v*BV),(64,BV),(0,1)), b_h1.to(tl.float32), boundary_check=(0,1))
+        if K > 64:  tl.store(tl.make_block_ptr(ht,(K,V),(1,K),(64,i_v*BV),(64,BV),(0,1)), b_h2.to(tl.float32), boundary_check=(0,1))
+        if K > 128: tl.store(tl.make_block_ptr(ht,(K,V),(1,K),(128,i_v*BV),(64,BV),(0,1)), b_h3.to(tl.float32), boundary_check=(0,1))
+        if K > 192: tl.store(tl.make_block_ptr(ht,(K,V),(1,K),(192,i_v*BV),(64,BV),(0,1)), b_h4.to(tl.float32), boundary_check=(0,1))
 
 def fwd_h_triton_opt3(
     k, w, u, g=None, gk=None, initial_state=None,
@@ -208,19 +208,383 @@ def fwd_h_triton_opt3(
         N = len(cu_seqlens) - 1
         NT = len(chunk_indices)
         chunk_offsets = _prepare_chunk_offsets(cu_seqlens, BT)
-    h = k.new_empty(B, NT, H, K, V)
-    final_state = k.new_empty(N, H, K, V, dtype=torch.float32) if output_final_state else None
+    # h/h0/ht: [V,K] K-contiguous layout → allocate as [..., V, K]
+    h_internal = k.new_empty(B, NT, H, V, K)
+    final_state_internal = k.new_empty(N, H, V, K, dtype=torch.float32) if output_final_state else None
     v_new = k.new_empty(B, H, T_flat, V, dtype=u.dtype) if save_new_value else None
+    h0_arg = initial_state.permute(0, 1, 3, 2).contiguous() if initial_state is not None else None
     _triton_fwd_kernel_h_opt3[(lambda meta: (triton.cdiv(V, meta["BV"]), N * H))](
         k=k, v=u, w=w, v_new=v_new, g=g, gk=gk,
-        h=h, h0=initial_state, ht=final_state,
+        h=h_internal, h0=h0_arg, ht=final_state_internal,
         cu_seqlens=cu_seqlens, chunk_offsets=chunk_offsets,
         T=T, T_flat=T_flat, H=H, Hg=Hg, K=K, V=V, BT=BT,
         WU_CONTIGUOUS=wu_contiguous,
     )
+    h = h_internal.permute(0, 1, 2, 4, 3).contiguous()
+    final_state = final_state_internal.permute(0, 1, 3, 2).contiguous() if final_state_internal is not None else None
     return h, v_new, final_state
 
+# =====================================================================
+# opt_vk variant: h layout [V, K] (transposed from opt's [K, V])
+# All other layouts (k, w, u, v_new) are identical to opt.
+# =====================================================================
 
+_IS_AMD = _check_platform() == "amd"
+NUM_STAGES_FWD = [2, 3] if _IS_AMD else [2, 3, 4]
+USE_CUDA_GRAPH = _use_cuda_graph
+import inspect as _inspect
+_SUPPORTS_AUTOTUNE_CACHE = "cache_results" in _inspect.signature(triton.autotune).parameters
+autotune_cache_kwargs = {"cache_results": os.getenv("FLA_CACHE_RESULTS", "1") == "1"} if _SUPPORTS_AUTOTUNE_CACHE else {}
+
+if os.environ.get("FLA_USE_FAST_OPS", "0") == "1":
+    import triton.language.extra.libdevice as _tldevice
+    exp = _tldevice.fast_expf
+else:
+    exp = tl.exp
+
+@functools.lru_cache(maxsize=8)
+def prepare_chunk_indices(cu_seqlens, chunk_size):
+    return _prepare_chunk_indices(cu_seqlens, chunk_size)
+
+@functools.lru_cache(maxsize=8)
+def prepare_chunk_offsets(cu_seqlens, chunk_size):
+    return _prepare_chunk_offsets(cu_seqlens, chunk_size)
+
+
+@triton.heuristics(
+    {
+        "USE_G": lambda args: args["g"] is not None,
+        "USE_GK": lambda args: args["gk"] is not None,
+        "USE_INITIAL_STATE": lambda args: args["h0"] is not None,
+        "STORE_FINAL_STATE": lambda args: args["ht"] is not None,
+        "SAVE_NEW_VALUE": lambda args: args["v_new"] is not None,
+        "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
+    }
+)
+@triton.autotune(
+    configs=[
+        triton.Config({"BV": BV}, num_warps=num_warps, num_stages=num_stages)
+        for num_warps in [2, 4]
+        for num_stages in NUM_STAGES_FWD
+        for BV in [16, 32, 64]
+    ],
+    key=["H", "K", "V", "BT"],
+    use_cuda_graph=USE_CUDA_GRAPH,
+    **autotune_cache_kwargs,
+)
+@triton.jit(do_not_specialize=["T", "T_flat"])
+def chunk_gated_delta_rule_fwd_kernel_h_opt_vk(
+    k,
+    v,
+    w,
+    v_new,
+    g,
+    gk,
+    h,
+    h0,
+    ht,
+    cu_seqlens,
+    chunk_offsets,
+    T,
+    T_flat,
+    H: tl.constexpr,
+    Hg: tl.constexpr,
+    K: tl.constexpr,
+    V: tl.constexpr,
+    BT: tl.constexpr,
+    BV: tl.constexpr,
+    USE_G: tl.constexpr,
+    USE_GK: tl.constexpr,
+    USE_INITIAL_STATE: tl.constexpr,
+    STORE_FINAL_STATE: tl.constexpr,
+    SAVE_NEW_VALUE: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
+):
+    i_v, i_nh = tl.program_id(0), tl.program_id(1)
+    i_n, i_h = i_nh // H, i_nh % H
+    if IS_VARLEN:
+        bos, eos = (
+            tl.load(cu_seqlens + i_n).to(tl.int32),
+            tl.load(cu_seqlens + i_n + 1).to(tl.int32),
+        )
+        T = eos - bos
+        NT = tl.cdiv(T, BT)
+        boh = tl.load(chunk_offsets + i_n).to(tl.int32)
+    else:
+        bos, eos = i_n * T, i_n * T + T
+        NT = tl.cdiv(T, BT)
+        boh = i_n * NT
+
+    # [BV, 64] — h in [V, K] layout (transposed from opt's [64, BV])
+    b_h1 = tl.zeros([BV, 64], dtype=tl.float32)
+    if K > 64:
+        b_h2 = tl.zeros([BV, 64], dtype=tl.float32)
+    if K > 128:
+        b_h3 = tl.zeros([BV, 64], dtype=tl.float32)
+    if K > 192:
+        b_h4 = tl.zeros([BV, 64], dtype=tl.float32)
+
+    h += ((boh * H + i_h) * V * K).to(tl.int64)
+    k += ((bos * Hg + i_h // (H // Hg)) * K).to(tl.int64)
+    if IS_VARLEN:
+        v += ((i_h * T_flat + bos) * V).to(tl.int64)
+        w += ((i_h * T_flat + bos) * K).to(tl.int64)
+    else:
+        v += (((i_n * H + i_h) * T_flat) * V).to(tl.int64)
+        w += (((i_n * H + i_h) * T_flat) * K).to(tl.int64)
+    stride_v = V
+    stride_w = K
+    if SAVE_NEW_VALUE:
+        if IS_VARLEN:
+            v_new += ((i_h * T_flat + bos) * V).to(tl.int64)
+        else:
+            v_new += (((i_n * H + i_h) * T_flat) * V).to(tl.int64)
+    stride_h = H * V * K
+    stride_k = Hg * K
+    if USE_INITIAL_STATE:
+        h0 = h0 + i_nh * V * K
+    if STORE_FINAL_STATE:
+        ht = ht + i_nh * V * K
+
+    if USE_INITIAL_STATE:
+        p_h0_1 = tl.make_block_ptr(h0, (V, K), (K, 1), (i_v * BV, 0), (BV, 64), (1, 0))
+        b_h1 += tl.load(p_h0_1, boundary_check=(0, 1)).to(tl.float32)
+        if K > 64:
+            p_h0_2 = tl.make_block_ptr(
+                h0, (V, K), (K, 1), (i_v * BV, 64), (BV, 64), (1, 0)
+            )
+            b_h2 += tl.load(p_h0_2, boundary_check=(0, 1)).to(tl.float32)
+        if K > 128:
+            p_h0_3 = tl.make_block_ptr(
+                h0, (V, K), (K, 1), (i_v * BV, 128), (BV, 64), (1, 0)
+            )
+            b_h3 += tl.load(p_h0_3, boundary_check=(0, 1)).to(tl.float32)
+        if K > 192:
+            p_h0_4 = tl.make_block_ptr(
+                h0, (V, K), (K, 1), (i_v * BV, 192), (BV, 64), (1, 0)
+            )
+            b_h4 += tl.load(p_h0_4, boundary_check=(0, 1)).to(tl.float32)
+
+    for i_t in range(NT):
+        # Store h snapshot [V, K]
+        p_h1 = tl.make_block_ptr(
+            h + i_t * stride_h, (V, K), (K, 1), (i_v * BV, 0), (BV, 64), (1, 0)
+        )
+        tl.store(p_h1, b_h1.to(p_h1.dtype.element_ty), boundary_check=(0, 1))
+        if K > 64:
+            p_h2 = tl.make_block_ptr(
+                h + i_t * stride_h, (V, K), (K, 1), (i_v * BV, 64), (BV, 64), (1, 0)
+            )
+            tl.store(p_h2, b_h2.to(p_h2.dtype.element_ty), boundary_check=(0, 1))
+        if K > 128:
+            p_h3 = tl.make_block_ptr(
+                h + i_t * stride_h, (V, K), (K, 1), (i_v * BV, 128), (BV, 64), (1, 0)
+            )
+            tl.store(p_h3, b_h3.to(p_h3.dtype.element_ty), boundary_check=(0, 1))
+        if K > 192:
+            p_h4 = tl.make_block_ptr(
+                h + i_t * stride_h, (V, K), (K, 1), (i_v * BV, 192), (BV, 64), (1, 0)
+            )
+            tl.store(p_h4, b_h4.to(p_h4.dtype.element_ty), boundary_check=(0, 1))
+
+        # b_v = u - w @ h^T  (h is [BV,64], need [64,BV] for dot with w[BT,64])
+        p_w = tl.make_block_ptr(
+            w, (T, K), (stride_w, 1), (i_t * BT, 0), (BT, 64), (1, 0)
+        )
+        b_w = tl.load(p_w, boundary_check=(0, 1))
+        b_v = tl.dot(b_w, tl.trans(b_h1).to(b_w.dtype))
+        if K > 64:
+            p_w = tl.make_block_ptr(
+                w, (T, K), (stride_w, 1), (i_t * BT, 64), (BT, 64), (1, 0)
+            )
+            b_w = tl.load(p_w, boundary_check=(0, 1))
+            b_v += tl.dot(b_w, tl.trans(b_h2).to(b_w.dtype))
+        if K > 128:
+            p_w = tl.make_block_ptr(
+                w, (T, K), (stride_w, 1), (i_t * BT, 128), (BT, 64), (1, 0)
+            )
+            b_w = tl.load(p_w, boundary_check=(0, 1))
+            b_v += tl.dot(b_w, tl.trans(b_h3).to(b_w.dtype))
+        if K > 192:
+            p_w = tl.make_block_ptr(
+                w, (T, K), (stride_w, 1), (i_t * BT, 192), (BT, 64), (1, 0)
+            )
+            b_w = tl.load(p_w, boundary_check=(0, 1))
+            b_v += tl.dot(b_w, tl.trans(b_h4).to(b_w.dtype))
+        p_v = tl.make_block_ptr(
+            v, (T, V), (stride_v, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0)
+        )
+        b_v = tl.load(p_v, boundary_check=(0, 1)) - b_v
+
+        if SAVE_NEW_VALUE:
+            p_vn = tl.make_block_ptr(
+                v_new, (T, V), (V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0)
+            )
+            tl.store(p_vn, b_v.to(p_vn.dtype.element_ty), boundary_check=(0, 1))
+
+        last_idx = min((i_t + 1) * BT, T) - 1
+        if USE_G:
+            m_t = (i_t * BT + tl.arange(0, BT)) < T
+            b_g_last = tl.load(g + bos * H + last_idx * H + i_h)
+            p_g = tl.make_block_ptr(
+                g + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,)
+            )
+            b_g = tl.load(p_g, boundary_check=(0,))
+            b_v = b_v * tl.where(m_t, exp(b_g_last - b_g), 0)[:, None]
+            b_g_last = exp(b_g_last)
+            b_h1 *= b_g_last
+            if K > 64:
+                b_h2 *= b_g_last
+            if K > 128:
+                b_h3 *= b_g_last
+            if K > 192:
+                b_h4 *= b_g_last
+
+        if USE_GK:
+            o_k1 = tl.arange(0, 64)
+            b_gk_last1 = tl.load(
+                gk + (bos + last_idx) * H * K + i_h * K + o_k1,
+                mask=(o_k1 < K),
+                other=0.0,
+            )
+            b_h1 *= exp(b_gk_last1)[None, :]
+            if K > 64:
+                o_k2 = 64 + o_k1
+                b_gk_last2 = tl.load(
+                    gk + (bos + last_idx) * H * K + i_h * K + o_k2,
+                    mask=(o_k2 < K),
+                    other=0.0,
+                )
+                b_h2 *= exp(b_gk_last2)[None, :]
+            if K > 128:
+                o_k3 = 128 + o_k1
+                b_gk_last3 = tl.load(
+                    gk + (bos + last_idx) * H * K + i_h * K + o_k3,
+                    mask=(o_k3 < K),
+                    other=0.0,
+                )
+                b_h3 *= exp(b_gk_last3)[None, :]
+            if K > 192:
+                o_k4 = 192 + o_k1
+                b_gk_last4 = tl.load(
+                    gk + (bos + last_idx) * H * K + i_h * K + o_k4,
+                    mask=(o_k4 < K),
+                    other=0.0,
+                )
+                b_h4 *= exp(b_gk_last4)[None, :]
+        b_v = b_v.to(k.dtype.element_ty)
+
+        # h[V,K] += v_new^T @ k  →  [BV,64] += trans(dot(k[64,BT], v[BT,BV]))
+        p_k = tl.make_block_ptr(
+            k, (K, T), (1, stride_k), (0, i_t * BT), (64, BT), (0, 1)
+        )
+        b_k = tl.load(p_k, boundary_check=(0, 1))
+        b_h1 += tl.trans(tl.dot(b_k, b_v))
+        if K > 64:
+            p_k = tl.make_block_ptr(
+                k, (K, T), (1, stride_k), (64, i_t * BT), (64, BT), (0, 1)
+            )
+            b_k = tl.load(p_k, boundary_check=(0, 1))
+            b_h2 += tl.trans(tl.dot(b_k, b_v))
+        if K > 128:
+            p_k = tl.make_block_ptr(
+                k, (K, T), (1, stride_k), (128, i_t * BT), (64, BT), (0, 1)
+            )
+            b_k = tl.load(p_k, boundary_check=(0, 1))
+            b_h3 += tl.trans(tl.dot(b_k, b_v))
+        if K > 192:
+            p_k = tl.make_block_ptr(
+                k, (K, T), (1, stride_k), (192, i_t * BT), (64, BT), (0, 1)
+            )
+            b_k = tl.load(p_k, boundary_check=(0, 1))
+            b_h4 += tl.trans(tl.dot(b_k, b_v))
+
+    if STORE_FINAL_STATE:
+        p_ht = tl.make_block_ptr(ht, (V, K), (K, 1), (i_v * BV, 0), (BV, 64), (1, 0))
+        tl.store(p_ht, b_h1.to(p_ht.dtype.element_ty), boundary_check=(0, 1))
+        if K > 64:
+            p_ht = tl.make_block_ptr(
+                ht, (V, K), (K, 1), (i_v * BV, 64), (BV, 64), (1, 0)
+            )
+            tl.store(p_ht, b_h2.to(p_ht.dtype.element_ty), boundary_check=(0, 1))
+        if K > 128:
+            p_ht = tl.make_block_ptr(
+                ht, (V, K), (K, 1), (i_v * BV, 128), (BV, 64), (1, 0)
+            )
+            tl.store(p_ht, b_h3.to(p_ht.dtype.element_ty), boundary_check=(0, 1))
+        if K > 192:
+            p_ht = tl.make_block_ptr(
+                ht, (V, K), (K, 1), (i_v * BV, 192), (BV, 64), (1, 0)
+            )
+            tl.store(p_ht, b_h4.to(p_ht.dtype.element_ty), boundary_check=(0, 1))
+
+def chunk_gated_delta_rule_fwd_h_opt_vk(
+    k: torch.Tensor,
+    w: torch.Tensor,
+    u: torch.Tensor,
+    g: torch.Tensor | None = None,
+    gk: torch.Tensor | None = None,
+    initial_state: torch.Tensor | None = None,
+    output_final_state: bool = False,
+    chunk_size: int = 64,
+    save_new_value: bool = True,
+    cu_seqlens: torch.LongTensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    """
+    Optimized hidden state forward with h layout [V, K].
+
+    w and u are expected in head-major contiguous layout [B, H, T, K] / [B, H, T, V].
+    initial_state/final_state: [N, H, V, K].
+    h snapshots: [B, NT, H, V, K].
+    v_new output is [B, H, T_flat, V].
+    """
+    B, T, Hg, K = k.shape
+    BT = chunk_size
+
+    H = w.shape[1]
+    V = u.shape[-1]
+    T_flat = w.shape[2]
+
+    if cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size)
+        N = len(cu_seqlens) - 1
+        NT = len(chunk_indices)
+        chunk_offsets = prepare_chunk_offsets(cu_seqlens, BT)
+    else:
+        N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
+
+    assert K <= 256, "current kernel does not support head dimension larger than 256."
+
+    h = k.new_empty(B, NT, H, V, K)
+    final_state = (
+        k.new_empty(N, H, V, K, dtype=torch.float32) if output_final_state else None
+    )
+    v_new = k.new_empty(B, H, T_flat, V, dtype=u.dtype) if save_new_value else None
+
+    def grid(meta):
+        return (triton.cdiv(V, meta["BV"]), N * H)
+
+    chunk_gated_delta_rule_fwd_kernel_h_opt_vk[grid](
+        k=k,
+        v=u,
+        w=w,
+        v_new=v_new,
+        g=g,
+        gk=gk,
+        h=h,
+        h0=initial_state,
+        ht=final_state,
+        cu_seqlens=cu_seqlens,
+        chunk_offsets=chunk_offsets,
+        T=T,
+        T_flat=T_flat,
+        H=H,
+        Hg=Hg,
+        K=K,
+        V=V,
+        BT=BT,
+    )
+    return h, v_new, final_state
 
 # ── Global test configuration ──────────────────────────────────────────
 
@@ -275,7 +639,7 @@ def _make_inputs(context_lens, dtype=torch.bfloat16, device="cuda",
 
     initial_state = None
     if with_initial_state:
-        initial_state = torch.randn(N, H, K, V, dtype=torch.float32, device=device) * 0.01
+        initial_state = torch.randn(N, H, V, K, dtype=torch.float32, device=device) * 0.01
 
     return k, w_orig, u_orig, w_c, u_c, g, initial_state, cu_seqlens, scheduled_q_lens
 
@@ -382,31 +746,62 @@ class TestCorrectness:
         h_fly, vn_fly, fs_fly = chunk_gated_delta_rule_fwd_h_flydsl(
             k, w_c, u_c, g=g, initial_state=h0,
             output_final_state=True, cu_seqlens=cu, wu_contiguous=True,
+            BV=16,
         )
+        h0_kv = h0.permute(0, 1, 3, 2).contiguous() if h0 is not None else None
         h_ref, vn_ref, fs_ref = ref_chunk_gated_delta_rule_fwd_h(
-            k, w_orig, u_orig, g=g, initial_state=h0,
+            k, w_orig, u_orig, g=g, initial_state=h0_kv,
             output_final_state=True, cu_seqlens=cu,
         )
 
+        h_fly_kv = h_fly.permute(0, 1, 2, 4, 3).contiguous()
+        fs_fly_kv = fs_fly.permute(0, 1, 3, 2).contiguous() if fs_fly is not None else None
         torch.testing.assert_close(
-            h_fly.float(), h_ref.float(), atol=1e-1, rtol=1e-1)
+            h_fly_kv.float(), h_ref.float(), atol=1e-1, rtol=1e-1)
         torch.testing.assert_close(
             _normalize_opt_v_new(vn_fly).float(), vn_ref.float(),
             atol=1e-1, rtol=1e-1)
         torch.testing.assert_close(
-            fs_fly.float(), fs_ref.float(), atol=1e-1, rtol=1e-1)
+            fs_fly_kv.float(), fs_ref.float(), atol=1e-1, rtol=1e-1)
+
+    @pytest.mark.parametrize("full_prompt_len", FULL_PROMPT_LENS)
+    def test_correctness_triton_opt_vk(self, full_prompt_len):
+        context_lens = _build_context_lens(full_prompt_len)
+        k, w_orig, u_orig, w_c, u_c, g, h0, cu, _ = _make_inputs(context_lens)
+
+        h_vk, vn_vk, fs_vk = chunk_gated_delta_rule_fwd_h_opt_vk(
+            k, w_c, u_c, g=g, initial_state=h0,
+            output_final_state=True, cu_seqlens=cu,
+        )
+        h_tri = h_vk.permute(0, 1, 2, 4, 3).contiguous()
+        fs_tri = fs_vk.permute(0, 1, 3, 2).contiguous() if fs_vk is not None else None
+
+        h0_kv = h0.permute(0, 1, 3, 2).contiguous() if h0 is not None else None
+        h_ref, vn_ref, fs_ref = ref_chunk_gated_delta_rule_fwd_h(
+            k, w_orig, u_orig, g=g, initial_state=h0_kv,
+            output_final_state=True, cu_seqlens=cu,
+        )
+
+        torch.testing.assert_close(
+            h_tri.float(), h_ref.float(), atol=1e-1, rtol=1e-1)
+        torch.testing.assert_close(
+            _normalize_opt_v_new(vn_vk).float(), vn_ref.float(),
+            atol=1e-1, rtol=1e-1)
+        torch.testing.assert_close(
+            fs_tri.float(), fs_ref.float(), atol=1e-1, rtol=1e-1)
 
     @pytest.mark.parametrize("full_prompt_len", FULL_PROMPT_LENS)
     def test_correctness_triton_opt3(self, full_prompt_len):
         context_lens = _build_context_lens(full_prompt_len)
         k, w_orig, u_orig, w_c, u_c, g, h0, cu, _ = _make_inputs(context_lens)
 
+        h0_kv = h0.permute(0, 1, 3, 2).contiguous() if h0 is not None else None
         h_tri, vn_tri, fs_tri = fwd_h_triton_opt3(
-            k, w_c, u_c, g=g, initial_state=h0,
+            k, w_c, u_c, g=g, initial_state=h0_kv,
             output_final_state=True, cu_seqlens=cu, wu_contiguous=True,
         )
         h_ref, vn_ref, fs_ref = ref_chunk_gated_delta_rule_fwd_h(
-            k, w_orig, u_orig, g=g, initial_state=h0,
+            k, w_orig, u_orig, g=g, initial_state=h0_kv,
             output_final_state=True, cu_seqlens=cu,
         )
 
@@ -420,22 +815,25 @@ class TestCorrectness:
 
     @pytest.mark.parametrize("full_prompt_len", FULL_PROMPT_LENS)
     def test_correctness_flydsl_vs_triton(self, full_prompt_len):
-        """Direct comparison between FlyDSL and Triton opt3 kernels."""
+        """Direct comparison between FlyDSL and Triton opt_vk kernels."""
         context_lens = _build_context_lens(full_prompt_len)
         k, w_orig, u_orig, w_c, u_c, g, h0, cu, _ = _make_inputs(context_lens)
 
         h_fly, vn_fly, fs_fly = chunk_gated_delta_rule_fwd_h_flydsl(
             k, w_c, u_c, g=g, initial_state=h0,
             output_final_state=True, cu_seqlens=cu, wu_contiguous=True,
+            BV=16,
         )
-        h_tri, vn_tri, fs_tri = fwd_h_triton_opt3(
+        h_vk, vn_vk, fs_vk = chunk_gated_delta_rule_fwd_h_opt_vk(
             k, w_c, u_c, g=g, initial_state=h0,
-            output_final_state=True, cu_seqlens=cu, wu_contiguous=True,
+            output_final_state=True, cu_seqlens=cu,
         )
 
-        h_fly_f, h_tri_f = h_fly.float(), h_tri.float()
-        vn_fly_f, vn_tri_f = vn_fly.float(), vn_tri.float()
-        fs_fly_f, fs_tri_f = fs_fly.float(), fs_tri.float()
+        h_fly_f = h_fly.float()
+        h_tri_f = h_vk.float()
+        vn_fly_f, vn_tri_f = vn_fly.float(), vn_vk.float()
+        fs_fly_f = fs_fly.float()
+        fs_tri_f = fs_vk.float() if fs_vk is not None else None
 
         def _report(name, a, b):
             diff = (a - b).abs()
@@ -452,7 +850,7 @@ class TestCorrectness:
                   f"median={median_val:.6f}  "
                   f"p99={p99_val:.6f}")
 
-        print(f"\n[FlyDSL vs Triton opt3  full_prompt_len={full_prompt_len}]")
+        print(f"\n[FlyDSL vs Triton opt_vk  full_prompt_len={full_prompt_len}]")
         _report("h", h_fly_f, h_tri_f)
         _report("v_new", vn_fly_f, vn_tri_f)
         _report("final_state", fs_fly_f, fs_tri_f)
@@ -503,25 +901,39 @@ class TestPerformance:
             chunk_gated_delta_rule_fwd_h_flydsl,
             k, w_c, u_c, g=g, initial_state=h0,
             output_final_state=True, cu_seqlens=cu, wu_contiguous=True,
+            BV=16,
         )
 
         print(f"\n[K5 FlyDSL T={total_tokens}]  {us_fly:.2f} us")
 
-        # Triton opt3 kernel for comparison
-        us_triton = _bench_fn(
-            fwd_h_triton_opt3,
+        # Triton opt_vk kernel
+        us_opt_vk = _bench_fn(
+            chunk_gated_delta_rule_fwd_h_opt_vk,
             k, w_c, u_c, g=g, initial_state=h0,
+            output_final_state=True, cu_seqlens=cu,
+        )
+        print(f"[K5 Triton opt_vk T={total_tokens}]  {us_opt_vk:.2f} us")
+
+        # Triton opt3 kernel (KV layout baseline)
+        h0_kv = h0.permute(0, 1, 3, 2).contiguous() if h0 is not None else None
+        us_opt3 = _bench_fn(
+            fwd_h_triton_opt3,
+            k, w_c, u_c, g=g, initial_state=h0_kv,
             output_final_state=True, cu_seqlens=cu, wu_contiguous=True,
         )
-        speedup = us_triton / us_fly if us_fly > 0 else float('inf')
-        print(f"[K5 Triton opt3 T={total_tokens}]  {us_triton:.2f} us")
-        print(f"[Speedup FlyDSL/Triton]  {speedup:.3f}x")
+        print(f"[K5 Triton opt3 T={total_tokens}]  {us_opt3:.2f} us")
+
+        speedup_vk = us_opt_vk / us_fly if us_fly > 0 else float('inf')
+        speedup_opt3 = us_opt3 / us_fly if us_fly > 0 else float('inf')
+        print(f"[Speedup FlyDSL/opt_vk]  {speedup_vk:.3f}x")
+        print(f"[Speedup FlyDSL/opt3]    {speedup_opt3:.3f}x")
 
 
 # ── rocprofv3 profiling infrastructure ──────────────────────────────────
 
 TARGET_KERNEL_FLYDSL = "chunk_gdn_fwd_h_opt3"
-TARGET_KERNEL_TRITON = "_triton_fwd_kernel_h_opt3"
+TARGET_KERNEL_TRITON = "chunk_gated_delta_rule_fwd_kernel_h_opt_vk"
+TARGET_KERNEL_OPT3 = "_triton_fwd_kernel_h_opt3"
 
 
 def _load_roctx_library():
@@ -570,6 +982,7 @@ def _rocprof_worker(full_prompt_len):
     run_fly = lambda: chunk_gated_delta_rule_fwd_h_flydsl(
         k, w_c, u_c, g=g, initial_state=h0,
         output_final_state=True, cu_seqlens=cu, wu_contiguous=True,
+        BV=16,
     )
 
     # Warmup FlyDSL (paused)
@@ -588,13 +1001,13 @@ def _rocprof_worker(full_prompt_len):
     roctx.roctxProfilerPause(tid)
     print(f"[rocprof-worker] FlyDSL: {NUM_ITERS} iterations done", flush=True)
 
-    # Triton opt3
-    run_tri = lambda: fwd_h_triton_opt3(
+    # Triton opt_vk
+    run_tri = lambda: chunk_gated_delta_rule_fwd_h_opt_vk(
         k, w_c, u_c, g=g, initial_state=h0,
-        output_final_state=True, cu_seqlens=cu, wu_contiguous=True,
+        output_final_state=True, cu_seqlens=cu,
     )
 
-    print(f"[rocprof-worker] Warmup Triton opt3 ...", flush=True)
+    print(f"[rocprof-worker] Warmup Triton opt_vk ...", flush=True)
     for _ in range(NUM_WARMUP):
         run_tri()
     torch.cuda.synchronize()
@@ -606,7 +1019,28 @@ def _rocprof_worker(full_prompt_len):
     torch.cuda.synchronize()
     roctx.roctxRangePop()
     roctx.roctxProfilerPause(tid)
-    print(f"[rocprof-worker] Triton: {NUM_ITERS} iterations done", flush=True)
+    print(f"[rocprof-worker] Triton opt_vk: {NUM_ITERS} iterations done", flush=True)
+
+    # Triton opt3 (KV layout baseline)
+    h0_kv = h0.permute(0, 1, 3, 2).contiguous() if h0 is not None else None
+    run_opt3 = lambda: fwd_h_triton_opt3(
+        k, w_c, u_c, g=g, initial_state=h0_kv,
+        output_final_state=True, cu_seqlens=cu, wu_contiguous=True,
+    )
+
+    print(f"[rocprof-worker] Warmup Triton opt3 ...", flush=True)
+    for _ in range(NUM_WARMUP):
+        run_opt3()
+    torch.cuda.synchronize()
+
+    roctx.roctxProfilerResume(tid)
+    roctx.roctxRangePushA(b"triton_opt3_k5_bench")
+    for _ in range(NUM_ITERS):
+        run_opt3()
+    torch.cuda.synchronize()
+    roctx.roctxRangePop()
+    roctx.roctxProfilerPause(tid)
+    print(f"[rocprof-worker] Triton opt3: {NUM_ITERS} iterations done", flush=True)
 
 
 def _parse_kernel_stats(stats_path: Path) -> dict[str, dict]:
@@ -624,7 +1058,8 @@ def _print_rocprof_summary(stats_path: Path, total_tokens: int):
 
     targets = [
         ("FlyDSL", TARGET_KERNEL_FLYDSL),
-        ("Triton opt3", TARGET_KERNEL_TRITON),
+        ("Triton opt_vk", TARGET_KERNEL_TRITON),
+        ("Triton opt3", TARGET_KERNEL_OPT3),
     ]
 
     results = {}
@@ -653,9 +1088,12 @@ def _print_rocprof_summary(stats_path: Path, total_tokens: int):
         print(f"    Max:     {max_ns / 1000:.2f} us")
         print(f"    Total:   {total_ns / 1e6:.2f} ms")
 
+    if "FlyDSL" in results and "Triton opt_vk" in results:
+        speedup = results["Triton opt_vk"] / results["FlyDSL"]
+        print(f"\n  Speedup (FlyDSL vs opt_vk): {speedup:.3f}x")
     if "FlyDSL" in results and "Triton opt3" in results:
         speedup = results["Triton opt3"] / results["FlyDSL"]
-        print(f"\n  Speedup (FlyDSL vs Triton): {speedup:.3f}x")
+        print(f"  Speedup (FlyDSL vs opt3):   {speedup:.3f}x")
 
     if not stats:
         print("  WARNING: no kernels found in stats file")
