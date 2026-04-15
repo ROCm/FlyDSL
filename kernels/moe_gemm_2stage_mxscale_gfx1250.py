@@ -21,329 +21,22 @@ from kernels.moe_gemm_2stage import (
 )
 from kernels.moe_gemm_2stage_common_gfx1250 import (
     _Stage1GateUpPackedWrapper,
+    _compute_mxscale_tiling,
+    _compute_pipeline_plan,
+    _compute_tdm_store_layout,
     _emit_stage1_gate_up_epilogue,
     _emit_stage2_store_epilogue,
     _extract_sub8,
     _finalize_alloc_and_launch_2d,
     _make_moe_wave_layout,
+    _make_mxscale_data_loaders,
     _make_wmma_sub_tiles,
     _moe_out_elem_ty,
-    _pick_fp16_single_launch_shape,
+    _mxscale_emit_wmma,
     _pick_mxscale_launch_shape,
     _require_gfx1250,
 )
 
-
-def _mxscale_format_config(data_format: str) -> dict[str, int | bool]:
-    if data_format not in ("fp4", "fp8", "a8w4"):
-        raise ValueError(f"data_format must be 'fp4', 'fp8', or 'a8w4', got {data_format!r}")
-    is_fp4 = data_format == "fp4"
-    is_a8w4 = data_format == "a8w4"
-    pack_factor_a = 1 if not is_fp4 else 2
-    pack_factor_b = 2 if (is_fp4 or is_a8w4) else 1
-    wmma_n_eff = 32 if is_fp4 else 16
-    acc_vec_size = 16 if is_fp4 else 8
-    ds_loads_per_a_frag = 2 if is_fp4 else 4
-    return {
-        "is_fp4": is_fp4,
-        "is_a8w4": is_a8w4,
-        "PACK_FACTOR_A": pack_factor_a,
-        "PACK_FACTOR_B": pack_factor_b,
-        "WMMA_N_EFF": wmma_n_eff,
-        "ACC_VEC_SIZE": acc_vec_size,
-        "DS_LOADS_PER_A_FRAG": ds_loads_per_a_frag,
-    }
-
-
-def _mxscale_precompute_preshuffled_b_data_bases(
-    *,
-    packed_tile_k_b: int,
-    warp_tile_n,
-    wave_n_idx,
-    lane16,
-    lane_kgrp,
-    wmma_n_rep: int,
-    arith,
-    range_constexpr,
-):
-    ngroup_stride = packed_tile_k_b * 16
-    n_group_base = arith.index(warp_tile_n // 16) * wave_n_idx
-    row_off = lane16 * arith.index(16)
-    k_tile_off = lane_kgrp * arith.index(256)
-    bases = []
-    for wn in range_constexpr(wmma_n_rep):
-        ngroup_off = n_group_base * arith.index(ngroup_stride) + arith.index(wn * ngroup_stride)
-        bases.append(ngroup_off + row_off + k_tile_off)
-    return bases
-
-
-def _mxscale_precompute_a_scale_lane_bases(
-    *,
-    warp_m_base,
-    lane16,
-    wmma_m_rep: int,
-    interleaved_scale_cols_a: int,
-    arith,
-):
-    warp_lds_row = warp_m_base / arith.index(wmma_m_rep) + lane16
-    base = warp_lds_row * arith.index(interleaved_scale_cols_a)
-    return [base]
-
-
-def _mxscale_load_scale_b128(
-    *,
-    lds_buffer,
-    scale_base,
-    reps: int,
-    ks,
-    SCALES_PER_WMMA: int,
-    _lds_load_b128,
-    arith,
-    vector,
-    range_constexpr,
-):
-    ks_byte_off = ks * reps * SCALES_PER_WMMA
-    eff_base = scale_base if ks_byte_off == 0 else scale_base + arith.index(ks_byte_off)
-    num_loads = (reps + 3) // 4
-    vecs = []
-    for ld in range_constexpr(num_loads):
-        off = eff_base if ld == 0 else eff_base + arith.index(ld * 16)
-        vecs.append(_lds_load_b128(lds_buffer, off))
-    results = []
-    for i in range_constexpr(reps):
-        vi = vector.extract(vecs[i // 4], static_position=[i % 4], dynamic_position=[])
-        results.append(vi)
-    return results
-
-
-def _mxscale_load_preshuffled_b_frag(
-    *,
-    lds_buffer,
-    b_lane_bases,
-    wn: int,
-    ks,
-    is_fp4: bool,
-    is_a8w4: bool,
-    PACK_FACTOR_B: int,
-    WMMA_K: int,
-    _lds_load_b128,
-    arith,
-    vector,
-):
-    num_tiles = WMMA_K // PACK_FACTOR_B // 16
-    k_subtile_off = arith.index(ks * num_tiles * 256)
-    if is_fp4:
-        base0 = b_lane_bases[wn * 2] + k_subtile_off
-        base1 = b_lane_bases[wn * 2 + 1] + k_subtile_off
-        v0 = _lds_load_b128(lds_buffer, base0)
-        v1 = _lds_load_b128(lds_buffer, base0 + arith.index(512))
-        v2 = _lds_load_b128(lds_buffer, base1)
-        v3 = _lds_load_b128(lds_buffer, base1 + arith.index(512))
-        v01 = vector.shuffle(v0, v1, list(range(8)))
-        v23 = vector.shuffle(v2, v3, list(range(8)))
-        return vector.shuffle(v01, v23, list(range(16)))
-    base0 = b_lane_bases[wn] + k_subtile_off
-    v0 = _lds_load_b128(lds_buffer, base0)
-    v1 = _lds_load_b128(lds_buffer, base0 + arith.index(512))
-    if is_a8w4:
-        return vector.shuffle(v0, v1, list(range(8)))
-    v2 = _lds_load_b128(lds_buffer, base0 + arith.index(1024))
-    v3 = _lds_load_b128(lds_buffer, base0 + arith.index(1536))
-    v01 = vector.shuffle(v0, v1, list(range(8)))
-    v23 = vector.shuffle(v2, v3, list(range(8)))
-    return vector.shuffle(v01, v23, list(range(16)))
-
-
-def _mxscale_load_scale_i32(
-    *,
-    lds_buffer,
-    scale_base,
-    ks,
-    SCALES_PER_WMMA: int,
-    llvm_dialect,
-    ir,
-    arith,
-    T,
-):
-    byte_off = scale_base + arith.index(ks * SCALES_PER_WMMA)
-    ptr_val = _mxscale_lds_ptr(lds_buffer, byte_off, ir=ir, arith=arith, T=T)
-    return llvm_dialect.load(ir.IntegerType.get_signless(32), ptr_val)
-
-
-def _mxscale_precompute_a_data_bases(
-    *,
-    warp_m_base,
-    lane16,
-    lane_kgrp,
-    lds_a_stride_bytes: int,
-    wmma_m_rep: int,
-    WMMA_M: int,
-    is_fp4: bool,
-    arith,
-    range_constexpr,
-):
-    row_base = (warp_m_base + lane16) * arith.index(lds_a_stride_bytes)
-    k_half_off = lane_kgrp * arith.index(32 if is_fp4 else 16)
-    return [
-        row_base + arith.index(wm * WMMA_M * lds_a_stride_bytes) + k_half_off
-        for wm in range_constexpr(wmma_m_rep)
-    ]
-
-
-def _mxscale_precompute_rowmajor_b_data_bases(
-    *,
-    warp_n_base,
-    lane16,
-    lane_kgrp,
-    lds_b_stride_bytes: int,
-    wmma_n_rep: int,
-    WMMA_N: int,
-    arith,
-    range_constexpr,
-):
-    return [
-        (warp_n_base + lane16) * arith.index(lds_b_stride_bytes)
-        + lane_kgrp * arith.index(32)
-        + arith.index(wnh * WMMA_N * lds_b_stride_bytes)
-        for wnh in range_constexpr(wmma_n_rep * 2)
-    ]
-
-
-def _mxscale_precompute_rowmajor_scale_lane_bases(
-    *,
-    warp_base,
-    lane16,
-    scale_k_per_tile: int,
-    reps: int,
-    WMMA_DIM: int,
-    arith,
-    range_constexpr,
-):
-    return [
-        (warp_base + lane16) * arith.index(int(scale_k_per_tile))
-        + arith.index(r * WMMA_DIM * int(scale_k_per_tile))
-        for r in range_constexpr(reps)
-    ]
-
-
-def _mxscale_lds_ptr(lds_buffer, byte_offset, *, ir, arith, T):
-    """Compute an ``!llvm.ptr<3>`` into LDS at *byte_offset*."""
-    from flydsl._mlir.dialects import llvm as _llvm, memref as _memref
-    from flydsl.expr.arith import _to_raw as _raw
-    from flydsl.expr.arith import ArithValue as _AV
-    lds_ptr_ty = ir.Type.parse("!llvm.ptr<3>")
-    raw_memref = arith.unwrap(lds_buffer)
-    lds_base = _memref.extract_aligned_pointer_as_index(raw_memref)
-    total_byte = _AV(lds_base) + byte_offset
-    addr_i32 = _raw(arith.index_cast(T.i32, total_byte))
-    return _llvm.inttoptr(lds_ptr_ty, addr_i32)
-
-
-def _mxscale_lds_load_b128(lds_buffer, byte_offset, *, ir, arith, T, llvm_dialect):
-    """Load a vec4<i32> (16 bytes) from LDS at the given byte offset."""
-    ptr_val = _mxscale_lds_ptr(lds_buffer, byte_offset, ir=ir, arith=arith, T=T)
-    return llvm_dialect.load(
-        ir.VectorType.get([4], ir.IntegerType.get_signless(32)), ptr_val,
-    )
-
-
-def _mxscale_load_data_frag(
-    *,
-    lds_buffer,
-    lane_base,
-    ks,
-    PACK_FACTOR_A: int,
-    WMMA_K: int,
-    is_fp4: bool,
-    _lds_load_b128,
-    arith,
-    vector,
-):
-    byte_off = lane_base + arith.index(ks * WMMA_K // PACK_FACTOR_A)
-    v0 = _lds_load_b128(lds_buffer, byte_off)
-    if is_fp4:
-        v1 = _lds_load_b128(lds_buffer, byte_off + arith.index(16))
-        return vector.shuffle(v0, v1, list(range(8)))
-    v1 = _lds_load_b128(lds_buffer, byte_off + arith.index(32))
-    v2 = _lds_load_b128(lds_buffer, byte_off + arith.index(64))
-    v3 = _lds_load_b128(lds_buffer, byte_off + arith.index(96))
-    v01 = vector.shuffle(v0, v1, list(range(8)))
-    v23 = vector.shuffle(v2, v3, list(range(8)))
-    return vector.shuffle(v01, v23, list(range(16)))
-
-
-def _mxscale_load_rowmajor_b_frag(
-    *,
-    lds_buffer,
-    b_lane_bases,
-    wn: int,
-    ks,
-    PACK_FACTOR_B: int,
-    WMMA_K: int,
-    _lds_load_b128,
-    arith,
-    vector,
-):
-    k_byte_off = arith.index(ks * WMMA_K // PACK_FACTOR_B)
-    base0 = b_lane_bases[wn * 2] + k_byte_off
-    base1 = b_lane_bases[wn * 2 + 1] + k_byte_off
-    v0 = _lds_load_b128(lds_buffer, base0)
-    v1 = _lds_load_b128(lds_buffer, base0 + arith.index(16))
-    v2 = _lds_load_b128(lds_buffer, base1)
-    v3 = _lds_load_b128(lds_buffer, base1 + arith.index(16))
-    v01 = vector.shuffle(v0, v1, list(range(8)))
-    v23 = vector.shuffle(v2, v3, list(range(8)))
-    return vector.shuffle(v01, v23, list(range(16)))
-
-
-def _mxscale_emit_wmma(
-    *,
-    accs,
-    wm: int,
-    wn: int,
-    a_frag,
-    b_frags,
-    a_scales,
-    b_scales,
-    is_fp4: bool,
-    is_a8w4: bool,
-    use_scale_opsel: bool,
-    rocdl,
-    T,
-):
-    idx = wm * len(b_frags) + wn
-    if use_scale_opsel:
-        a_scale_idx = wm // 2
-        a_opsel = wm % 2
-    else:
-        a_scale_idx = wm
-        a_opsel = 0
-
-    if is_fp4:
-        accs[idx] = rocdl.wmma_scale_f32_32x16x128_f4(
-            T.vec(16, T.f32),
-            b_frags[wn], a_frag, accs[idx],
-            b_scales[wn * 2], a_scales[a_scale_idx],
-            scaleAType=0,
-            scaleBType=a_opsel,
-        )
-        return
-
-    if use_scale_opsel:
-        b_scale_idx = wn // 2
-        b_opsel = wn % 2
-    else:
-        b_scale_idx = wn
-        b_opsel = 0
-    accs[idx] = rocdl.wmma_scale_f32_16x16x128_f8f6f4(
-        T.vec(8, T.f32),
-        b_frags[wn], a_frag, accs[idx],
-        b_scales[b_scale_idx], a_scales[a_scale_idx],
-        fmtA=4 if is_a8w4 else 0,
-        fmtB=0,
-        scaleAType=b_opsel,
-        scaleBType=a_opsel,
-    )
 
 @functools.lru_cache(maxsize=64)
 def _compile_stage1_mxscale_kernel_impl(
@@ -382,38 +75,39 @@ def _compile_stage1_mxscale_kernel_impl(
     from flydsl.expr.typing import T
     from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr, get_op_result_or_value
 
-    fmt_cfg = _mxscale_format_config(data_format)
-    is_fp4 = bool(fmt_cfg["is_fp4"])
-    is_a8w4 = bool(fmt_cfg["is_a8w4"])
-    PACK_FACTOR_A = int(fmt_cfg["PACK_FACTOR_A"])
-    PACK_FACTOR_B = int(fmt_cfg["PACK_FACTOR_B"])
-    ACC_VEC_SIZE = int(fmt_cfg["ACC_VEC_SIZE"])
-    WMMA_N_EFF = int(fmt_cfg["WMMA_N_EFF"])
-    DS_LOADS_PER_A_FRAG = int(fmt_cfg["DS_LOADS_PER_A_FRAG"])
+    tp = _compute_mxscale_tiling(
+        data_format=data_format, K=int(model_dim),
+        tile_m=int(tile_m), tile_n=int(tile_n), tile_k=int(tile_k),
+        m_warp=int(m_warp), n_warp=int(n_warp), out_dtype=out_dtype,
+        num_buffers=int(num_buffers), cluster_m=int(cluster_m),
+        cluster_n=int(cluster_n), stage_name="stage1",
+    )
+    is_fp4, is_a8w4 = tp["is_fp4"], tp["is_a8w4"]
+    PACK_FACTOR_A, PACK_FACTOR_B = tp["PACK_FACTOR_A"], tp["PACK_FACTOR_B"]
+    ACC_VEC_SIZE = tp["ACC_VEC_SIZE"]
+    DS_LOADS_PER_A_FRAG = tp["DS_LOADS_PER_A_FRAG"]
+    WMMA_M, WMMA_N, WMMA_K = tp["WMMA_M"], tp["WMMA_N"], tp["WMMA_K"]
+    SCALE_BLOCK, SCALES_PER_WMMA = tp["SCALE_BLOCK"], tp["SCALES_PER_WMMA"]
+    WAVE_SIZE = tp["WAVE_SIZE"]
+    LDS_PAD_A_BYTES, LDS_PAD_B_BYTES = tp["LDS_PAD_A_BYTES"], tp["LDS_PAD_B_BYTES"]
+    use_cluster = tp["use_cluster"]
+    K = tp["K"]
+    K_packed_a, K_packed_b = tp["K_packed_a"], tp["K_packed_b"]
+    packed_tile_k_a, packed_tile_k_b = tp["packed_tile_k_a"], tp["packed_tile_k_b"]
+    K_scale, scale_k_per_tile = tp["K_scale"], tp["scale_k_per_tile"]
+    block_threads = tp["block_threads"]
+    warp_tile_m, warp_tile_n = tp["warp_tile_m"], tp["warp_tile_n"]
+    wmma_m_rep, wmma_n_rep = tp["wmma_m_rep"], tp["wmma_n_rep"]
+    k_wmma_steps, n_accs = tp["k_wmma_steps"], tp["n_accs"]
+    num_k_tiles = tp["num_k_tiles"]
+    b_scale_load_rep = tp["b_scale_load_rep"]
+    interleaved_scale_cols_b = tp["interleaved_scale_cols_b"]
+    lds_a_stride_bytes = tp["lds_a_stride_bytes"]
+    lds_b_stride_bytes = tp["lds_b_stride_bytes"]
+    lds_a_data_bytes, lds_b_data_bytes = tp["lds_a_data_bytes"], tp["lds_b_data_bytes"]
+    lds_a_scale_bytes, lds_b_scale_bytes = tp["lds_a_scale_bytes"], tp["lds_b_scale_bytes"]
+    interleaved_scale_cols_a = tp["interleaved_scale_cols_a"]
 
-    WMMA_M, WMMA_N, WMMA_K = 16, 16, 128
-    SCALE_BLOCK = 32
-    SCALES_PER_WMMA = WMMA_K // SCALE_BLOCK
-    WAVE_SIZE = 32
-    LDS_PAD_A_BYTES = 16
-    LDS_PAD_B_BYTES = 16 if is_fp4 else 0
-
-    if out_dtype not in ("f16", "bf16"):
-        raise ValueError(f"mxscale stage1 single kernel supports out_dtype in ('f16','bf16'), got {out_dtype!r}")
-    if (int(model_dim) % int(tile_k)) != 0:
-        raise ValueError(f"model_dim={model_dim} must be divisible by tile_k={tile_k}")
-    if (int(tile_k) % WMMA_K) != 0:
-        raise ValueError(f"tile_k={tile_k} must be divisible by {WMMA_K}")
-    if (int(tile_k) % SCALE_BLOCK) != 0:
-        raise ValueError(f"tile_k={tile_k} must be divisible by {SCALE_BLOCK}")
-    if int(num_buffers) not in (1, 2, 3, 4):
-        raise ValueError(f"num_buffers must be 1, 2, 3, or 4, got {num_buffers}")
-    use_cluster = int(cluster_m) > 1 or int(cluster_n) > 1
-    if use_cluster:
-        if int(cluster_m) * int(cluster_n) > 16:
-            raise ValueError(
-                f"cluster_m * cluster_n must be <= 16, got {cluster_m}*{cluster_n}")
-    K = int(model_dim)
     N = int(inter_dim)
     _merge_gate_up_tdm = bool((data_format in ("fp8", "a8w4")) and (N % int(tile_n) == 0))
     num_warps_s1 = int(m_warp) * int(n_warp)
@@ -427,33 +121,6 @@ def _compile_stage1_mxscale_kernel_impl(
     if use_cluster and effective_waves_per_eu is None:
         effective_waves_per_eu = 2
 
-    K_packed_a = K // PACK_FACTOR_A
-    K_packed_b = K // PACK_FACTOR_B
-    packed_tile_k_a = int(tile_k) // PACK_FACTOR_A
-    packed_tile_k_b = int(tile_k) // PACK_FACTOR_B
-    K_scale = K // SCALE_BLOCK
-    scale_k_per_tile = int(tile_k) // SCALE_BLOCK
-    block_threads = int(m_warp) * int(n_warp) * WAVE_SIZE
-    warp_tile_m = int(tile_m) // int(m_warp)
-    warp_tile_n = int(tile_n) // int(n_warp)
-    wmma_m_rep = warp_tile_m // WMMA_M
-    wmma_n_rep = warp_tile_n // WMMA_N_EFF
-    k_wmma_steps = int(tile_k) // WMMA_K
-    n_accs = wmma_m_rep * wmma_n_rep
-    num_k_tiles = K // int(tile_k)
-    b_scale_load_rep = (wmma_n_rep * 2) if is_fp4 else wmma_n_rep
-    interleaved_scale_cols_b = b_scale_load_rep * scale_k_per_tile
-
-    if wmma_m_rep <= 0 or wmma_n_rep <= 0:
-        raise ValueError(f"Invalid warp tiling for mxscale stage1 single kernel: wmma_m_rep={wmma_m_rep}, wmma_n_rep={wmma_n_rep}")
-
-    lds_a_stride_bytes = int(packed_tile_k_a) + LDS_PAD_A_BYTES
-    lds_b_stride_bytes = int(packed_tile_k_b) + LDS_PAD_B_BYTES
-    lds_a_data_bytes = int(tile_m) * lds_a_stride_bytes
-    lds_b_data_bytes = int(tile_n) * lds_b_stride_bytes
-    lds_a_scale_bytes = int(tile_m) * scale_k_per_tile
-    lds_b_scale_bytes = int(tile_n) * scale_k_per_tile
-    interleaved_scale_cols_a = wmma_m_rep * scale_k_per_tile
     _sub_tiles = _make_wmma_sub_tiles(
         wmma_m_rep=wmma_m_rep, wmma_n_rep=wmma_n_rep, WMMA_M=WMMA_M, is_fp4=is_fp4
     )
@@ -464,35 +131,25 @@ def _compile_stage1_mxscale_kernel_impl(
         from kernels.gemm_common_gfx1250 import (
             pipeline_fence, pipeline_fence_signal, pipeline_fence_wait,
         )
-        from kernels.pipeline_utils import make_tail_plan
-
-        pre_loaded = int(num_buffers) - 1
-        loop_iters = (num_k_tiles - pre_loaded) // int(num_buffers)
-        _tail_start = loop_iters * int(num_buffers)
-        extra = num_k_tiles - _tail_start - pre_loaded
         if _merge_gate_up_tdm:
             _B_TDM_PER_STEP = 1 if bool(wave_specialized_tdm) else 2
         else:
             _B_TDM_PER_STEP = 1 if bool(wave_specialized_tdm) else 4
-        _A_GATHER_GROUPS = (int(tile_m) + 8 - 1) // 8 if bool(use_tdm_gather) else 0
-        if bool(use_tdm_gather) and bool(wave_specialized_tdm):
-            _A_GATHER_TDM_PER_STEP = (
-                (_A_GATHER_GROUPS + _tdm_loader_waves - 1)
-                // _tdm_loader_waves
-            )
-        else:
-            _A_GATHER_TDM_PER_STEP = _A_GATHER_GROUPS
-        TDM_PER_STEP = _B_TDM_PER_STEP + _A_GATHER_TDM_PER_STEP
-        _fence_outstanding = TDM_PER_STEP * (int(num_buffers) - 2)
-        _base_tail_plan = make_tail_plan(int(num_buffers), pre_loaded, extra)
-        _tail_plan = [
-            (ls, cs, o * TDM_PER_STEP // 2 if o > 0 else o)
-            for ls, cs, o in _base_tail_plan
-        ]
-        if num_k_tiles < int(num_buffers):
-            raise ValueError(
-                f"{num_buffers}-stage buffering requires num_k_tiles >= {num_buffers}, "
-                f"got {num_k_tiles}")
+        _pp = _compute_pipeline_plan(
+            num_k_tiles=num_k_tiles, num_buffers=int(num_buffers),
+            B_TDM_PER_STEP=_B_TDM_PER_STEP, tile_m=int(tile_m),
+            use_tdm_gather=use_tdm_gather,
+            wave_specialized_tdm=wave_specialized_tdm,
+            tdm_loader_waves=_tdm_loader_waves,
+        )
+        pre_loaded = _pp["pre_loaded"]
+        loop_iters = _pp["loop_iters"]
+        _tail_start = _pp["tail_start"]
+        extra = _pp["extra"]
+        _A_GATHER_GROUPS = _pp["A_GATHER_GROUPS"]
+        TDM_PER_STEP = _pp["TDM_PER_STEP"]
+        _fence_outstanding = _pp["fence_outstanding"]
+        _tail_plan = _pp["tail_plan"]
     from kernels.gemm_common_gfx1250 import workgroup_barrier
 
     alloc = SmemAllocator(
@@ -519,23 +176,20 @@ def _compile_stage1_mxscale_kernel_impl(
             _o = alloc._align(alloc.ptr, 16); alloc.ptr = _o + lds_b_data_bytes; off_bu_list.append(_o)
             _o = alloc._align(alloc.ptr, 16); alloc.ptr = _o + lds_b_scale_bytes; off_bsu_list.append(_o)
 
-    # TDM store epilogue: D output LDS layout (stage1)
-    LDS_PAD_D_BYTES_s1 = 16
-    elem_bytes_d_s1 = 2  # f16/bf16
     if bool(use_tdm_store):
-        from kernels.gemm_common_gfx1250 import (
-            store_acc_vec8_to_lds,
+        from kernels.gemm_common_gfx1250 import store_acc_vec8_to_lds
+        _ds1 = _compute_tdm_store_layout(
+            warp_tile_m=warp_tile_m, warp_tile_n=warp_tile_n,
+            num_warps=num_warps_s1, WMMA_N=WMMA_N, use_pipeline=_use_pipeline,
         )
-        lds_d_row_stride_s1 = warp_tile_n * elem_bytes_d_s1 + LDS_PAD_D_BYTES_s1
-        warp_d_bytes_s1 = warp_tile_m * lds_d_row_stride_s1
-        total_d_bytes_s1 = num_warps_s1 * warp_d_bytes_s1
-        d_output_off_s1 = 0
-        _lds_d_stride_elems_s1 = lds_d_row_stride_s1 // 2
-        _warp_d_elems_s1 = warp_d_bytes_s1 // 2
-        _n_col_d_elems_s1 = WMMA_N * elem_bytes_d_s1 // 2
-        d_need_epilogue_fence_s1 = _use_pipeline
-        if total_d_bytes_s1 > alloc.ptr:
-            alloc.ptr = total_d_bytes_s1
+        lds_d_row_stride_s1 = _ds1["lds_d_row_stride"]
+        d_output_off_s1 = _ds1["d_output_off"]
+        _lds_d_stride_elems_s1 = _ds1["lds_d_stride_elems"]
+        _warp_d_elems_s1 = _ds1["warp_d_elems"]
+        _n_col_d_elems_s1 = _ds1["n_col_d_elems"]
+        d_need_epilogue_fence_s1 = _ds1["d_need_epilogue_fence"]
+        if _ds1["total_d_bytes"] > alloc.ptr:
+            alloc.ptr = _ds1["total_d_bytes"]
 
     @flyc.kernel(known_block_size=[block_threads, 1, 1])
     def moe_mxscale_stage1_single(
@@ -957,142 +611,21 @@ def _compile_stage1_mxscale_kernel_impl(
             _tile_idx = blk_n / arith.index(int(tile_n))
             return _eid_row + _tile_idx * arith.index(int(2 * tile_n))
 
-        def _lds_load_b128(lds_buffer, byte_offset):
-            return _mxscale_lds_load_b128(
-                lds_buffer, byte_offset,
-                ir=ir, arith=arith, T=T, llvm_dialect=llvm_dialect,
-            )
-
-        def load_data_frag(lds_buffer, lane_base, ks):
-            return _mxscale_load_data_frag(
-                lds_buffer=lds_buffer,
-                lane_base=lane_base,
-                ks=ks,
-                PACK_FACTOR_A=PACK_FACTOR_A,
-                WMMA_K=WMMA_K,
-                is_fp4=is_fp4,
-                _lds_load_b128=_lds_load_b128,
-                arith=arith,
-                vector=vector,
-            )
-
-        def load_b_frag(lds_buffer, b_lane_bases, wn, ks):
-            if is_fp4:
-                return _mxscale_load_rowmajor_b_frag(
-                    lds_buffer=lds_buffer,
-                    b_lane_bases=b_lane_bases,
-                    wn=wn,
-                    ks=ks,
-                    PACK_FACTOR_B=PACK_FACTOR_B,
-                    WMMA_K=WMMA_K,
-                    _lds_load_b128=_lds_load_b128,
-                    arith=arith,
-                    vector=vector,
-                )
-            return _mxscale_load_preshuffled_b_frag(
-                lds_buffer=lds_buffer,
-                b_lane_bases=b_lane_bases,
-                wn=wn,
-                ks=ks,
-                is_fp4=False,
-                is_a8w4=is_a8w4,
-                PACK_FACTOR_B=PACK_FACTOR_B,
-                WMMA_K=WMMA_K,
-                _lds_load_b128=_lds_load_b128,
-                arith=arith,
-                vector=vector,
-            )
-
-        def load_scale_i32(lds_buffer, scale_base, ks):
-            return _mxscale_load_scale_i32(
-                lds_buffer=lds_buffer,
-                scale_base=scale_base,
-                ks=ks,
-                SCALES_PER_WMMA=SCALES_PER_WMMA,
-                llvm_dialect=llvm_dialect,
-                ir=ir,
-                arith=arith,
-                T=T,
-            )
-
-        def _precompute_a_data_bases():
-            return _mxscale_precompute_a_data_bases(
-                warp_m_base=warp_m_base,
-                lane16=lane16,
-                lane_kgrp=lane_kgrp,
-                lds_a_stride_bytes=lds_a_stride_bytes,
-                wmma_m_rep=wmma_m_rep,
-                WMMA_M=WMMA_M,
-                is_fp4=is_fp4,
-                arith=arith,
-                range_constexpr=range_constexpr,
-            )
-
-        def _precompute_b_data_bases():
-            if is_fp4:
-                return _mxscale_precompute_rowmajor_b_data_bases(
-                    warp_n_base=warp_n_base,
-                    lane16=lane16,
-                    lane_kgrp=lane_kgrp,
-                    lds_b_stride_bytes=lds_b_stride_bytes,
-                    wmma_n_rep=wmma_n_rep,
-                    WMMA_N=WMMA_N,
-                    arith=arith,
-                    range_constexpr=range_constexpr,
-                )
-            return _mxscale_precompute_preshuffled_b_data_bases(
-                packed_tile_k_b=packed_tile_k_b,
-                warp_tile_n=warp_tile_n,
-                wave_n_idx=wave_n_idx,
-                lane16=lane16,
-                lane_kgrp=lane_kgrp,
-                wmma_n_rep=wmma_n_rep,
-                arith=arith,
-                range_constexpr=range_constexpr,
-            )
-
-        def _precompute_a_scale_lane_bases():
-            if is_fp4:
-                return _mxscale_precompute_rowmajor_scale_lane_bases(
-                    warp_base=warp_m_base,
-                    lane16=lane16,
-                    scale_k_per_tile=scale_k_per_tile,
-                    reps=wmma_m_rep,
-                    WMMA_DIM=WMMA_M,
-                    arith=arith,
-                    range_constexpr=range_constexpr,
-                )
-            return _mxscale_precompute_a_scale_lane_bases(
-                warp_m_base=warp_m_base,
-                lane16=lane16,
-                wmma_m_rep=wmma_m_rep,
-                interleaved_scale_cols_a=interleaved_scale_cols_a,
-                arith=arith,
-            )
-
-        def _precompute_b_scale_lane_bases():
-            return _mxscale_precompute_rowmajor_scale_lane_bases(
-                warp_base=warp_n_base,
-                lane16=lane16,
-                scale_k_per_tile=scale_k_per_tile,
-                reps=wmma_n_rep * 2,
-                WMMA_DIM=WMMA_N,
-                arith=arith,
-                range_constexpr=range_constexpr,
-            )
-
-        def load_scale_b128(lds_buffer, scale_base, reps, ks=0):
-            return _mxscale_load_scale_b128(
-                lds_buffer=lds_buffer,
-                scale_base=scale_base,
-                reps=reps,
-                ks=ks,
-                SCALES_PER_WMMA=SCALES_PER_WMMA,
-                _lds_load_b128=_lds_load_b128,
-                arith=arith,
-                vector=vector,
-                range_constexpr=range_constexpr,
-            )
+        _ldrs = _make_mxscale_data_loaders(
+            tiling=tp, warp_m_base=warp_m_base, warp_n_base=warp_n_base,
+            wave_n_idx=wave_n_idx, lane16=lane16, lane_kgrp=lane_kgrp,
+            ir=ir, arith=arith, vector=vector, llvm_dialect=llvm_dialect,
+            T=T, range_constexpr=range_constexpr,
+        )
+        _lds_load_b128 = _ldrs["_lds_load_b128"]
+        load_data_frag = _ldrs["load_data_frag"]
+        load_b_frag = _ldrs["load_b_frag"]
+        load_scale_i32 = _ldrs["load_scale_i32"]
+        _precompute_a_data_bases = _ldrs["_precompute_a_data_bases"]
+        _precompute_b_data_bases = _ldrs["_precompute_b_data_bases"]
+        _precompute_a_scale_lane_bases = _ldrs["_precompute_a_scale_lane_bases"]
+        _precompute_b_scale_lane_bases = _ldrs["_precompute_b_scale_lane_bases"]
+        load_scale_b128 = _ldrs["load_scale_b128"]
 
         acc_zero = arith.constant_vector(0.0, T.vec(ACC_VEC_SIZE, T.f32))
         acc_g = [acc_zero] * n_accs
@@ -2059,39 +1592,43 @@ def _compile_stage2_mxscale_kernel_impl(
     from flydsl.expr.typing import T
     from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr, get_op_result_or_value
 
-    fmt_cfg = _mxscale_format_config(data_format)
-    is_fp4 = bool(fmt_cfg["is_fp4"])
-    is_a8w4 = bool(fmt_cfg["is_a8w4"])
-    PACK_FACTOR_A = int(fmt_cfg["PACK_FACTOR_A"])
-    PACK_FACTOR_B = int(fmt_cfg["PACK_FACTOR_B"])
-    ACC_VEC_SIZE = int(fmt_cfg["ACC_VEC_SIZE"])
-    WMMA_N_EFF = int(fmt_cfg["WMMA_N_EFF"])
-    DS_LOADS_PER_A_FRAG = int(fmt_cfg["DS_LOADS_PER_A_FRAG"])
-
-    WMMA_M, WMMA_N, WMMA_K = 16, 16, 128
-    SCALE_BLOCK = 32
-    SCALES_PER_WMMA = WMMA_K // SCALE_BLOCK
-    WAVE_SIZE = 32
-    LDS_PAD_A_BYTES = 16
-    LDS_PAD_B_BYTES = 16 if is_fp4 else 0
-
-    if out_dtype not in ("f16", "bf16"):
-        raise ValueError(f"mxscale stage2 single kernel supports out_dtype in ('f16','bf16'), got {out_dtype!r}")
-    if (int(inter_dim) % int(tile_k)) != 0:
-        raise ValueError(f"inter_dim={inter_dim} must be divisible by tile_k={tile_k}")
-    if (int(tile_k) % WMMA_K) != 0:
-        raise ValueError(f"tile_k={tile_k} must be divisible by {WMMA_K}")
-    if (int(tile_k) % SCALE_BLOCK) != 0:
-        raise ValueError(f"tile_k={tile_k} must be divisible by {SCALE_BLOCK}")
-    if int(num_buffers) not in (1, 2, 3, 4):
-        raise ValueError(f"num_buffers must be 1, 2, 3, or 4, got {num_buffers}")
     if bool(use_tdm_store) and bool(accumulate):
         raise ValueError("use_tdm_store is not compatible with accumulate=True in moe mxscale stage2")
-    use_cluster = int(cluster_m) > 1 or int(cluster_n) > 1
-    if use_cluster:
-        if int(cluster_m) * int(cluster_n) > 16:
-            raise ValueError(
-                f"cluster_m * cluster_n must be <= 16, got {cluster_m}*{cluster_n}")
+
+    tp = _compute_mxscale_tiling(
+        data_format=data_format, K=int(inter_dim),
+        tile_m=int(tile_m), tile_n=int(tile_n), tile_k=int(tile_k),
+        m_warp=int(m_warp), n_warp=int(n_warp), out_dtype=out_dtype,
+        num_buffers=int(num_buffers), cluster_m=int(cluster_m),
+        cluster_n=int(cluster_n), stage_name="stage2",
+    )
+    is_fp4, is_a8w4 = tp["is_fp4"], tp["is_a8w4"]
+    PACK_FACTOR_A, PACK_FACTOR_B = tp["PACK_FACTOR_A"], tp["PACK_FACTOR_B"]
+    ACC_VEC_SIZE = tp["ACC_VEC_SIZE"]
+    DS_LOADS_PER_A_FRAG = tp["DS_LOADS_PER_A_FRAG"]
+    WMMA_M, WMMA_N, WMMA_K = tp["WMMA_M"], tp["WMMA_N"], tp["WMMA_K"]
+    SCALE_BLOCK, SCALES_PER_WMMA = tp["SCALE_BLOCK"], tp["SCALES_PER_WMMA"]
+    WAVE_SIZE = tp["WAVE_SIZE"]
+    LDS_PAD_A_BYTES, LDS_PAD_B_BYTES = tp["LDS_PAD_A_BYTES"], tp["LDS_PAD_B_BYTES"]
+    use_cluster = tp["use_cluster"]
+    K = tp["K"]
+    K_packed_a, K_packed_b = tp["K_packed_a"], tp["K_packed_b"]
+    packed_tile_k_a, packed_tile_k_b = tp["packed_tile_k_a"], tp["packed_tile_k_b"]
+    K_scale, scale_k_per_tile = tp["K_scale"], tp["scale_k_per_tile"]
+    block_threads = tp["block_threads"]
+    warp_tile_m, warp_tile_n = tp["warp_tile_m"], tp["warp_tile_n"]
+    wmma_m_rep, wmma_n_rep = tp["wmma_m_rep"], tp["wmma_n_rep"]
+    k_wmma_steps, n_accs = tp["k_wmma_steps"], tp["n_accs"]
+    num_k_tiles = tp["num_k_tiles"]
+    b_scale_load_rep = tp["b_scale_load_rep"]
+    interleaved_scale_cols_b = tp["interleaved_scale_cols_b"]
+    lds_a_stride_bytes = tp["lds_a_stride_bytes"]
+    lds_b_stride_bytes = tp["lds_b_stride_bytes"]
+    lds_a_data_bytes, lds_b_data_bytes = tp["lds_a_data_bytes"], tp["lds_b_data_bytes"]
+    lds_a_scale_bytes, lds_b_scale_bytes = tp["lds_a_scale_bytes"], tp["lds_b_scale_bytes"]
+    interleaved_scale_cols_a = tp["interleaved_scale_cols_a"]
+
+    N_total = int(model_dim)
     num_warps = int(m_warp) * int(n_warp)
     if bool(wave_specialized_tdm):
         if num_warps < 2:
@@ -2103,68 +1640,27 @@ def _compile_stage2_mxscale_kernel_impl(
     if use_cluster and effective_waves_per_eu is None:
         effective_waves_per_eu = 2
 
-    K = int(inter_dim)
-    N_total = int(model_dim)
-    K_packed_a = K // PACK_FACTOR_A
-    K_packed_b = K // PACK_FACTOR_B
-    packed_tile_k_a = int(tile_k) // PACK_FACTOR_A
-    packed_tile_k_b = int(tile_k) // PACK_FACTOR_B
-    K_scale = K // SCALE_BLOCK
-    scale_k_per_tile = int(tile_k) // SCALE_BLOCK
-    block_threads = int(m_warp) * int(n_warp) * WAVE_SIZE
-    warp_tile_m = int(tile_m) // int(m_warp)
-    warp_tile_n = int(tile_n) // int(n_warp)
-    wmma_m_rep = warp_tile_m // WMMA_M
-    wmma_n_rep = warp_tile_n // WMMA_N_EFF
-    k_wmma_steps = int(tile_k) // WMMA_K
-    n_accs = wmma_m_rep * wmma_n_rep
-    num_k_tiles = K // int(tile_k)
-    b_scale_load_rep = (wmma_n_rep * 2) if is_fp4 else wmma_n_rep
-    interleaved_scale_cols_b = b_scale_load_rep * scale_k_per_tile
-
-    if wmma_m_rep <= 0 or wmma_n_rep <= 0:
-        raise ValueError(f"Invalid warp tiling for mxscale stage2 single kernel: wmma_m_rep={wmma_m_rep}, wmma_n_rep={wmma_n_rep}")
-
-    lds_a_stride_bytes = int(packed_tile_k_a) + LDS_PAD_A_BYTES
-    lds_b_stride_bytes = int(packed_tile_k_b) + LDS_PAD_B_BYTES
-    lds_a_data_bytes = int(tile_m) * lds_a_stride_bytes
-    lds_b_data_bytes = int(tile_n) * lds_b_stride_bytes
-    lds_a_scale_bytes = int(tile_m) * scale_k_per_tile
-    lds_b_scale_bytes = int(tile_n) * scale_k_per_tile
-    interleaved_scale_cols_a = wmma_m_rep * scale_k_per_tile
-
-    # Pipeline calculations for multi-buffer
     _use_pipeline = int(num_buffers) >= 2
     if _use_pipeline:
         from kernels.gemm_common_gfx1250 import (
             pipeline_fence, pipeline_fence_signal, pipeline_fence_wait,
         )
-        from kernels.pipeline_utils import make_tail_plan
-
-        pre_loaded = int(num_buffers) - 1
-        loop_iters = (num_k_tiles - pre_loaded) // int(num_buffers)
-        _tail_start = loop_iters * int(num_buffers)
-        extra = num_k_tiles - _tail_start - pre_loaded
         _B_TDM_PER_STEP = 1 if bool(wave_specialized_tdm) else 2
-        _A_GATHER_GROUPS = (int(tile_m) + 8 - 1) // 8 if bool(use_tdm_gather) else 0
-        if bool(use_tdm_gather) and bool(wave_specialized_tdm):
-            _A_GATHER_TDM_PER_STEP = (
-                (_A_GATHER_GROUPS + _tdm_loader_waves - 1)
-                // _tdm_loader_waves
-            )
-        else:
-            _A_GATHER_TDM_PER_STEP = _A_GATHER_GROUPS
-        TDM_PER_STEP = _B_TDM_PER_STEP + _A_GATHER_TDM_PER_STEP
-        _fence_outstanding = TDM_PER_STEP * (int(num_buffers) - 2)
-        _base_tail_plan = make_tail_plan(int(num_buffers), pre_loaded, extra)
-        _tail_plan = [
-            (ls, cs, o * TDM_PER_STEP // 2 if o > 0 else o)
-            for ls, cs, o in _base_tail_plan
-        ]
-        if num_k_tiles < int(num_buffers):
-            raise ValueError(
-                f"{num_buffers}-stage buffering requires num_k_tiles >= {num_buffers}, "
-                f"got {num_k_tiles}")
+        _pp = _compute_pipeline_plan(
+            num_k_tiles=num_k_tiles, num_buffers=int(num_buffers),
+            B_TDM_PER_STEP=_B_TDM_PER_STEP, tile_m=int(tile_m),
+            use_tdm_gather=use_tdm_gather,
+            wave_specialized_tdm=wave_specialized_tdm,
+            tdm_loader_waves=_tdm_loader_waves,
+        )
+        pre_loaded = _pp["pre_loaded"]
+        loop_iters = _pp["loop_iters"]
+        _tail_start = _pp["tail_start"]
+        extra = _pp["extra"]
+        _A_GATHER_GROUPS = _pp["A_GATHER_GROUPS"]
+        TDM_PER_STEP = _pp["TDM_PER_STEP"]
+        _fence_outstanding = _pp["fence_outstanding"]
+        _tail_plan = _pp["tail_plan"]
     from kernels.gemm_common_gfx1250 import workgroup_barrier
 
     alloc = SmemAllocator(
@@ -2188,23 +1684,20 @@ def _compile_stage2_mxscale_kernel_impl(
         alloc.ptr = _obs + lds_b_scale_bytes
         off_bs_list.append(_obs)
 
-    # TDM store epilogue: D output LDS layout
-    LDS_PAD_D_BYTES = 16
-    elem_bytes_d = 2  # f16/bf16
     if bool(use_tdm_store):
-        from kernels.gemm_common_gfx1250 import (
-            store_acc_vec8_to_lds,
+        from kernels.gemm_common_gfx1250 import store_acc_vec8_to_lds
+        _ds2 = _compute_tdm_store_layout(
+            warp_tile_m=warp_tile_m, warp_tile_n=warp_tile_n,
+            num_warps=num_warps, WMMA_N=WMMA_N, use_pipeline=_use_pipeline,
         )
-        lds_d_row_stride = warp_tile_n * elem_bytes_d + LDS_PAD_D_BYTES
-        warp_d_bytes = warp_tile_m * lds_d_row_stride
-        total_d_bytes = num_warps * warp_d_bytes
-        d_output_off = 0
-        _lds_d_stride_elems = lds_d_row_stride // 2
-        _warp_d_elems = warp_d_bytes // 2
-        _n_col_d_elems = WMMA_N * elem_bytes_d // 2
-        d_need_epilogue_fence = _use_pipeline
-        if total_d_bytes > alloc.ptr:
-            alloc.ptr = total_d_bytes
+        lds_d_row_stride = _ds2["lds_d_row_stride"]
+        d_output_off = _ds2["d_output_off"]
+        _lds_d_stride_elems = _ds2["lds_d_stride_elems"]
+        _warp_d_elems = _ds2["warp_d_elems"]
+        _n_col_d_elems = _ds2["n_col_d_elems"]
+        d_need_epilogue_fence = _ds2["d_need_epilogue_fence"]
+        if _ds2["total_d_bytes"] > alloc.ptr:
+            alloc.ptr = _ds2["total_d_bytes"]
 
     _sub_tiles = _make_wmma_sub_tiles(
         wmma_m_rep=wmma_m_rep, wmma_n_rep=wmma_n_rep, WMMA_M=WMMA_M, is_fp4=is_fp4
@@ -2592,142 +2085,21 @@ def _compile_stage2_mxscale_kernel_impl(
             tdm_ops.tensor_load_2d(make_desc_b(n_off, k_base, target_lds_b))
             tdm_ops.tensor_load_2d(make_desc_bs(n_off, k_base, target_lds_bs))
 
-        def _lds_load_b128(lds_buffer, byte_offset):
-            return _mxscale_lds_load_b128(
-                lds_buffer, byte_offset,
-                ir=ir, arith=arith, T=T, llvm_dialect=llvm_dialect,
-            )
-
-        def load_data_frag(lds_buffer, lane_base, ks):
-            return _mxscale_load_data_frag(
-                lds_buffer=lds_buffer,
-                lane_base=lane_base,
-                ks=ks,
-                PACK_FACTOR_A=PACK_FACTOR_A,
-                WMMA_K=WMMA_K,
-                is_fp4=is_fp4,
-                _lds_load_b128=_lds_load_b128,
-                arith=arith,
-                vector=vector,
-            )
-
-        def load_b_frag(lds_buffer, b_lane_bases, wn, ks):
-            if is_fp4:
-                return _mxscale_load_rowmajor_b_frag(
-                    lds_buffer=lds_buffer,
-                    b_lane_bases=b_lane_bases,
-                    wn=wn,
-                    ks=ks,
-                    PACK_FACTOR_B=PACK_FACTOR_B,
-                    WMMA_K=WMMA_K,
-                    _lds_load_b128=_lds_load_b128,
-                    arith=arith,
-                    vector=vector,
-                )
-            return _mxscale_load_preshuffled_b_frag(
-                lds_buffer=lds_buffer,
-                b_lane_bases=b_lane_bases,
-                wn=wn,
-                ks=ks,
-                is_fp4=is_fp4,
-                is_a8w4=is_a8w4,
-                PACK_FACTOR_B=PACK_FACTOR_B,
-                WMMA_K=WMMA_K,
-                _lds_load_b128=_lds_load_b128,
-                arith=arith,
-                vector=vector,
-            )
-
-        def load_scale_i32(lds_buffer, scale_base, ks):
-            return _mxscale_load_scale_i32(
-                lds_buffer=lds_buffer,
-                scale_base=scale_base,
-                ks=ks,
-                SCALES_PER_WMMA=SCALES_PER_WMMA,
-                llvm_dialect=llvm_dialect,
-                ir=ir,
-                arith=arith,
-                T=T,
-            )
-
-        def _precompute_a_data_bases():
-            return _mxscale_precompute_a_data_bases(
-                warp_m_base=warp_m_base,
-                lane16=lane16,
-                lane_kgrp=lane_kgrp,
-                lds_a_stride_bytes=lds_a_stride_bytes,
-                wmma_m_rep=wmma_m_rep,
-                WMMA_M=WMMA_M,
-                is_fp4=is_fp4,
-                arith=arith,
-                range_constexpr=range_constexpr,
-            )
-
-        def _precompute_b_data_bases():
-            if is_fp4:
-                return _mxscale_precompute_rowmajor_b_data_bases(
-                    warp_n_base=warp_n_base,
-                    lane16=lane16,
-                    lane_kgrp=lane_kgrp,
-                    lds_b_stride_bytes=lds_b_stride_bytes,
-                    wmma_n_rep=wmma_n_rep,
-                    WMMA_N=WMMA_N,
-                    arith=arith,
-                    range_constexpr=range_constexpr,
-                )
-            return _mxscale_precompute_preshuffled_b_data_bases(
-                packed_tile_k_b=packed_tile_k_b,
-                warp_tile_n=warp_tile_n,
-                wave_n_idx=wave_n_idx,
-                lane16=lane16,
-                lane_kgrp=lane_kgrp,
-                wmma_n_rep=wmma_n_rep,
-                arith=arith,
-                range_constexpr=range_constexpr,
-            )
-
-        def _precompute_a_scale_lane_bases():
-            if is_fp4:
-                return _mxscale_precompute_rowmajor_scale_lane_bases(
-                    warp_base=warp_m_base,
-                    lane16=lane16,
-                    scale_k_per_tile=scale_k_per_tile,
-                    reps=wmma_m_rep,
-                    WMMA_DIM=WMMA_M,
-                    arith=arith,
-                    range_constexpr=range_constexpr,
-                )
-            return _mxscale_precompute_a_scale_lane_bases(
-                warp_m_base=warp_m_base,
-                lane16=lane16,
-                wmma_m_rep=wmma_m_rep,
-                interleaved_scale_cols_a=interleaved_scale_cols_a,
-                arith=arith,
-            )
-
-        def _precompute_b_scale_lane_bases():
-            return _mxscale_precompute_rowmajor_scale_lane_bases(
-                warp_base=warp_n_base,
-                lane16=lane16,
-                scale_k_per_tile=scale_k_per_tile,
-                reps=wmma_n_rep * 2,
-                WMMA_DIM=WMMA_N,
-                arith=arith,
-                range_constexpr=range_constexpr,
-            )
-
-        def load_scale_b128(lds_buffer, scale_base, reps, ks=0):
-            return _mxscale_load_scale_b128(
-                lds_buffer=lds_buffer,
-                scale_base=scale_base,
-                reps=reps,
-                ks=ks,
-                SCALES_PER_WMMA=SCALES_PER_WMMA,
-                _lds_load_b128=_lds_load_b128,
-                arith=arith,
-                vector=vector,
-                range_constexpr=range_constexpr,
-            )
+        _ldrs = _make_mxscale_data_loaders(
+            tiling=tp, warp_m_base=warp_m_base, warp_n_base=warp_n_base,
+            wave_n_idx=wave_n_idx, lane16=lane16, lane_kgrp=lane_kgrp,
+            ir=ir, arith=arith, vector=vector, llvm_dialect=llvm_dialect,
+            T=T, range_constexpr=range_constexpr,
+        )
+        _lds_load_b128 = _ldrs["_lds_load_b128"]
+        load_data_frag = _ldrs["load_data_frag"]
+        load_b_frag = _ldrs["load_b_frag"]
+        load_scale_i32 = _ldrs["load_scale_i32"]
+        _precompute_a_data_bases = _ldrs["_precompute_a_data_bases"]
+        _precompute_b_data_bases = _ldrs["_precompute_b_data_bases"]
+        _precompute_a_scale_lane_bases = _ldrs["_precompute_a_scale_lane_bases"]
+        _precompute_b_scale_lane_bases = _ldrs["_precompute_b_scale_lane_bases"]
+        load_scale_b128 = _ldrs["load_scale_b128"]
 
         acc_zero = arith.constant_vector(0.0, T.vec(ACC_VEC_SIZE, T.f32))
         acc = [acc_zero] * n_accs
@@ -3417,125 +2789,10 @@ def _compile_stage2_mxscale_kernel_impl(
 # Public API entry points for fp4/fp8/a8w4
 # ---------------------------------------------------------------------------
 
-@functools.lru_cache(maxsize=256)
-def _compile_moe_stage1_mxscale_kernel(
-    *,
-    model_dim: int,
-    inter_dim: int,
-    experts: int,
-    topk: int,
-    route_tile_m: int,
-    tile_n: int,
-    tile_k: int,
-    doweight_stage1: bool,
-    data_format: str,
-    out_dtype: str,
-    waves_per_eu: int | None,
-    expert_sched_mode: bool = True,
-    num_buffers: int = 1,
-    use_tdm_gather: bool = True,
-    use_tdm_store: bool = False,
-    inst_prefetch: bool = False,
-    wave_specialized_tdm: bool = False,
-    cluster_m: int = 1,
-    cluster_n: int = 1,
-):
-    single_tile_m, single_tile_n, single_m_warp, single_n_warp = _pick_mxscale_launch_shape(
-        data_format, int(route_tile_m), int(tile_n),
-    )
-    exe = _compile_stage1_mxscale_kernel_impl(
-        model_dim=int(model_dim),
-        inter_dim=int(inter_dim),
-        experts=int(experts),
-        topk=int(topk),
-        route_tile_m=int(route_tile_m),
-        tile_m=int(single_tile_m),
-        tile_n=int(single_tile_n),
-        tile_k=int(tile_k),
-        m_warp=int(single_m_warp),
-        n_warp=int(single_n_warp),
-        doweight_stage1=bool(doweight_stage1),
-        out_dtype=out_dtype,
-        waves_per_eu=waves_per_eu,
-        data_format=data_format,
-        expert_sched_mode=expert_sched_mode,
-        num_buffers=int(num_buffers),
-        use_tdm_gather=bool(use_tdm_gather),
-        use_tdm_store=bool(use_tdm_store),
-        inst_prefetch=bool(inst_prefetch),
-        wave_specialized_tdm=bool(wave_specialized_tdm),
-        cluster_m=int(cluster_m),
-        cluster_n=int(cluster_n),
-    )
-    if data_format in ("fp8", "a8w4") and (int(inter_dim) % int(single_tile_n) == 0):
-        return _Stage1GateUpPackedWrapper(
-            exe,
-            experts=int(experts),
-            inter_dim=int(inter_dim),
-            tile_n=int(single_tile_n),
-            packed_cols_w=(int(model_dim) // 2) if data_format == "a8w4" else int(model_dim),
-            packed_cols_scale=int(model_dim) // 32,
-        )
-    return exe
-
-
-@functools.lru_cache(maxsize=256)
-def _compile_moe_stage2_mxscale_kernel(
-    *,
-    model_dim: int,
-    inter_dim: int,
-    experts: int,
-    topk: int,
-    route_tile_m: int,
-    tile_n: int,
-    tile_k: int,
-    doweight_stage2: bool,
-    data_format: str,
-    out_dtype: str,
-    accumulate: bool,
-    waves_per_eu: int | None,
-    expert_sched_mode: bool = True,
-    num_buffers: int = 1,
-    use_tdm_gather: bool = True,
-    use_tdm_store: bool = False,
-    inst_prefetch: bool = False,
-    wave_specialized_tdm: bool = False,
-    cluster_m: int = 1,
-    cluster_n: int = 1,
-):
-    single_tile_m, single_tile_n, single_m_warp, single_n_warp = _pick_mxscale_launch_shape(
-        data_format, int(route_tile_m), int(tile_n),
-    )
-    return _compile_stage2_mxscale_kernel_impl(
-        model_dim=int(model_dim),
-        inter_dim=int(inter_dim),
-        experts=int(experts),
-        topk=int(topk),
-        route_tile_m=int(route_tile_m),
-        tile_m=int(single_tile_m),
-        tile_n=int(single_tile_n),
-        tile_k=int(tile_k),
-        m_warp=int(single_m_warp),
-        n_warp=int(single_n_warp),
-        doweight_stage2=bool(doweight_stage2),
-        out_dtype=out_dtype,
-        accumulate=bool(accumulate),
-        waves_per_eu=waves_per_eu,
-        data_format=data_format,
-        expert_sched_mode=expert_sched_mode,
-        num_buffers=int(num_buffers),
-        use_tdm_gather=bool(use_tdm_gather),
-        use_tdm_store=bool(use_tdm_store),
-        inst_prefetch=bool(inst_prefetch),
-        wave_specialized_tdm=bool(wave_specialized_tdm),
-        cluster_m=int(cluster_m),
-        cluster_n=int(cluster_n),
-    )
-
-
 @functools.lru_cache(maxsize=1024)
-def compile_moe_gemm1(
+def _compile_moe_mxscale_gemm(
     *,
+    stage: int,
     model_dim: int,
     inter_dim: int,
     experts: int,
@@ -3543,66 +2800,9 @@ def compile_moe_gemm1(
     tile_m: int,
     tile_n: int,
     tile_k: int,
-    doweight_stage1: bool,
+    doweight: bool,
     in_dtype: str = "fp4",
-    group_size: int = -1,
     out_dtype: str = "f16",
-    use_cshuffle_epilog: bool | None = None,
-    waves_per_eu: int | None = None,
-    expert_sched_mode: bool = True,
-    num_buffers: int = 1,
-    use_tdm_gather: bool = True,
-    use_tdm_store: bool = False,
-    inst_prefetch: bool = False,
-    wave_specialized_tdm: bool = False,
-    cluster_m: int = 1,
-    cluster_n: int = 1,
-):
-    _require_gfx1250()
-    if waves_per_eu is not None and int(waves_per_eu) < 1:
-        raise ValueError(f"waves_per_eu must be >= 1, got {waves_per_eu!r}")
-
-    if in_dtype not in ("fp4", "fp8", "a8w4"):
-        raise ValueError(f"Unsupported in_dtype for MXScale stage1: {in_dtype!r}, expected 'fp4', 'fp8', or 'a8w4'")
-
-    return _compile_moe_stage1_mxscale_kernel(
-        model_dim=int(model_dim),
-        inter_dim=int(inter_dim),
-        experts=int(experts),
-        topk=int(topk),
-        route_tile_m=int(tile_m),
-        tile_n=int(tile_n),
-        tile_k=int(tile_k),
-        doweight_stage1=bool(doweight_stage1),
-        data_format=in_dtype,
-        out_dtype=out_dtype,
-        waves_per_eu=waves_per_eu,
-        expert_sched_mode=expert_sched_mode,
-        num_buffers=int(num_buffers),
-        use_tdm_gather=bool(use_tdm_gather),
-        use_tdm_store=bool(use_tdm_store),
-        inst_prefetch=bool(inst_prefetch),
-        wave_specialized_tdm=bool(wave_specialized_tdm),
-        cluster_m=int(cluster_m),
-        cluster_n=int(cluster_n),
-    )
-
-
-@functools.lru_cache(maxsize=1024)
-def compile_moe_gemm2(
-    *,
-    model_dim: int,
-    inter_dim: int,
-    experts: int,
-    topk: int,
-    tile_m: int,
-    tile_n: int,
-    tile_k: int,
-    doweight_stage2: bool,
-    in_dtype: str = "fp4",
-    group_size: int = -1,
-    out_dtype: str = "f16",
-    use_cshuffle_epilog: bool | None = None,
     accumulate: bool = True,
     waves_per_eu: int | None = None,
     expert_sched_mode: bool = True,
@@ -3617,91 +2817,57 @@ def compile_moe_gemm2(
     _require_gfx1250()
     if waves_per_eu is not None and int(waves_per_eu) < 1:
         raise ValueError(f"waves_per_eu must be >= 1, got {waves_per_eu!r}")
-
     if in_dtype not in ("fp4", "fp8", "a8w4"):
-        raise ValueError(f"Unsupported in_dtype for MXScale stage2: {in_dtype!r}, expected 'fp4', 'fp8', or 'a8w4'")
+        raise ValueError(
+            f"Unsupported in_dtype for MXScale stage{stage}: {in_dtype!r}, "
+            "expected 'fp4', 'fp8', or 'a8w4'"
+        )
 
-    return _compile_moe_stage2_mxscale_kernel(
-        model_dim=int(model_dim),
-        inter_dim=int(inter_dim),
-        experts=int(experts),
-        topk=int(topk),
+    single_tile_m, single_tile_n, single_m_warp, single_n_warp = _pick_mxscale_launch_shape(
+        in_dtype, int(tile_m), int(tile_n),
+    )
+    common = dict(
+        model_dim=int(model_dim), inter_dim=int(inter_dim),
+        experts=int(experts), topk=int(topk),
         route_tile_m=int(tile_m),
-        tile_n=int(tile_n),
-        tile_k=int(tile_k),
-        doweight_stage2=bool(doweight_stage2),
-        data_format=in_dtype,
-        out_dtype=out_dtype,
-        accumulate=bool(accumulate),
-        waves_per_eu=waves_per_eu,
-        expert_sched_mode=expert_sched_mode,
-        num_buffers=int(num_buffers),
-        use_tdm_gather=bool(use_tdm_gather),
-        use_tdm_store=bool(use_tdm_store),
-        inst_prefetch=bool(inst_prefetch),
-        wave_specialized_tdm=bool(wave_specialized_tdm),
-        cluster_m=int(cluster_m),
-        cluster_n=int(cluster_n),
+        tile_m=int(single_tile_m), tile_n=int(single_tile_n), tile_k=int(tile_k),
+        m_warp=int(single_m_warp), n_warp=int(single_n_warp),
+        out_dtype=out_dtype, waves_per_eu=waves_per_eu, data_format=in_dtype,
+        expert_sched_mode=expert_sched_mode, num_buffers=int(num_buffers),
+        use_tdm_gather=bool(use_tdm_gather), use_tdm_store=bool(use_tdm_store),
+        inst_prefetch=bool(inst_prefetch), wave_specialized_tdm=bool(wave_specialized_tdm),
+        cluster_m=int(cluster_m), cluster_n=int(cluster_n),
+    )
+
+    if stage == 1:
+        exe = _compile_stage1_mxscale_kernel_impl(doweight_stage1=bool(doweight), **common)
+        if in_dtype in ("fp8", "a8w4") and (int(inter_dim) % int(single_tile_n) == 0):
+            return _Stage1GateUpPackedWrapper(
+                exe,
+                experts=int(experts), inter_dim=int(inter_dim),
+                tile_n=int(single_tile_n),
+                packed_cols_w=(int(model_dim) // 2) if in_dtype == "a8w4" else int(model_dim),
+                packed_cols_scale=int(model_dim) // 32,
+            )
+        return exe
+
+    return _compile_stage2_mxscale_kernel_impl(
+        doweight_stage2=bool(doweight), accumulate=bool(accumulate), **common,
     )
 
 
-def compile_moe_gemm2_ex(
-    *,
-    model_dim: int,
-    inter_dim: int,
-    experts: int,
-    topk: int,
-    tile_m: int,
-    tile_n: int,
-    tile_k: int,
-    doweight_stage2: bool,
-    in_dtype: str = "fp4",
-    group_size: int = -1,
-    out_dtype: str = "f16",
-    use_cshuffle_epilog: bool | None = None,
-    waves_per_eu: int | None = None,
-    mode: str = MoeGemm2Mode.ATOMIC,
-    valid_mask=None,
-    zero_intermediate: bool = True,
-    expert_sched_mode: bool = True,
-    num_buffers: int = 1,
-    use_tdm_gather: bool = True,
-    use_tdm_store: bool = False,
-    inst_prefetch: bool = False,
-    wave_specialized_tdm: bool = False,
-    cluster_m: int = 1,
-    cluster_n: int = 1,
-):
-    _require_gfx1250()
-    if in_dtype not in ("fp4", "fp8", "a8w4"):
-        raise ValueError(f"Unsupported in_dtype for MXScale gemm2_ex: {in_dtype!r}, expected 'fp4', 'fp8', or 'a8w4'")
+def compile_moe_gemm1(*, doweight_stage1, group_size=-1, use_cshuffle_epilog=None, **kw):
+    return _compile_moe_mxscale_gemm(stage=1, doweight=doweight_stage1, **kw)
 
+
+def compile_moe_gemm2(*, doweight_stage2, accumulate=True, group_size=-1, use_cshuffle_epilog=None, **kw):
+    return _compile_moe_mxscale_gemm(stage=2, doweight=doweight_stage2, accumulate=accumulate, **kw)
+
+
+def compile_moe_gemm2_ex(*, mode=MoeGemm2Mode.ATOMIC, valid_mask=None, zero_intermediate=True, **kw):
     if mode == MoeGemm2Mode.REDUCE:
-        gemm2_exe = compile_moe_gemm2(
-            model_dim=model_dim,
-            inter_dim=inter_dim,
-            experts=experts,
-            topk=topk,
-            tile_m=tile_m,
-            tile_n=tile_n,
-            tile_k=tile_k,
-            doweight_stage2=doweight_stage2,
-            in_dtype=in_dtype,
-            group_size=group_size,
-            out_dtype=out_dtype,
-            use_cshuffle_epilog=use_cshuffle_epilog,
-            accumulate=False,
-            waves_per_eu=waves_per_eu,
-            expert_sched_mode=expert_sched_mode,
-            num_buffers=int(num_buffers),
-            use_tdm_gather=bool(use_tdm_gather),
-            use_tdm_store=bool(use_tdm_store),
-            inst_prefetch=bool(inst_prefetch),
-            wave_specialized_tdm=bool(wave_specialized_tdm),
-            cluster_m=int(cluster_m),
-            cluster_n=int(cluster_n),
-        )
-        out_s = str(out_dtype).strip().lower()
+        gemm2_exe = compile_moe_gemm2(accumulate=False, **kw)
+        out_s = str(kw.get("out_dtype", "f16")).strip().lower()
         if out_s in ("f16", "fp16", "half"):
             dtype_str = "f16"
         elif out_s in ("bf16", "bfloat16"):
@@ -3709,43 +2875,15 @@ def compile_moe_gemm2_ex(
         else:
             dtype_str = "f32"
         reduce_exe = compile_moe_reduction(
-            topk=topk,
-            model_dim=model_dim,
-            dtype_str=dtype_str,
-            use_mask=(valid_mask is not None),
+            topk=kw["topk"], model_dim=kw["model_dim"],
+            dtype_str=dtype_str, use_mask=(valid_mask is not None),
         )
         from kernels.moe_gemm_2stage import _MoeGemm2ReduceWrapper
-
         return _MoeGemm2ReduceWrapper(
-            gemm2_exe=gemm2_exe,
-            reduce_exe=reduce_exe,
-            topk=topk,
-            model_dim=model_dim,
+            gemm2_exe=gemm2_exe, reduce_exe=reduce_exe,
+            topk=kw["topk"], model_dim=kw["model_dim"],
             out_dtype_str=dtype_str,
             use_mask=(valid_mask is not None),
             zero_intermediate=zero_intermediate,
         )
-    return compile_moe_gemm2(
-        model_dim=model_dim,
-        inter_dim=inter_dim,
-        experts=experts,
-        topk=topk,
-        tile_m=tile_m,
-        tile_n=tile_n,
-        tile_k=tile_k,
-        doweight_stage2=doweight_stage2,
-        in_dtype=in_dtype,
-        group_size=group_size,
-        out_dtype=out_dtype,
-        use_cshuffle_epilog=use_cshuffle_epilog,
-        accumulate=True,
-        waves_per_eu=waves_per_eu,
-        expert_sched_mode=expert_sched_mode,
-        num_buffers=int(num_buffers),
-        use_tdm_gather=bool(use_tdm_gather),
-        use_tdm_store=bool(use_tdm_store),
-        inst_prefetch=bool(inst_prefetch),
-        wave_specialized_tdm=bool(wave_specialized_tdm),
-        cluster_m=int(cluster_m),
-        cluster_n=int(cluster_n),
-    )
+    return compile_moe_gemm2(accumulate=True, **kw)
