@@ -281,21 +281,27 @@ def bench_hgemm_splitk_gfx1250(
     def run_kernel():
         launch_fn(c_flat, a_flat, b_flat, mpad, npad, semaphore, signal_state, stream)
 
-    # Warmup
-    for _ in range(bench_warmup):
-        run_kernel()
-    torch.cuda.synchronize()
+    emu_mode = os.environ.get("EMU_MODE", "0") == "1"
 
-    # Timed iterations
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
-    start_event.record()
-    for _ in range(bench_iters):
+    if emu_mode:
+        # EMU_MODE: single iteration for correctness only
         run_kernel()
-    end_event.record()
-    end_event.synchronize()
-    us = start_event.elapsed_time(end_event) * 1000 / bench_iters  # ms -> us
-    torch.cuda.synchronize()
+        torch.cuda.synchronize()
+    else:
+        # Warmup
+        for _ in range(bench_warmup):
+            run_kernel()
+        torch.cuda.synchronize()
+        # Timed iterations
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+        start_event.record()
+        for _ in range(bench_iters):
+            run_kernel()
+        end_event.record()
+        end_event.synchronize()
+        us = start_event.elapsed_time(end_event) * 1000 / bench_iters  # ms -> us
+        torch.cuda.synchronize()
 
     # Correctness check
     ref = torch.mm(a.cpu().to(torch.float32), b.cpu().to(torch.float32))
@@ -303,16 +309,17 @@ def bench_hgemm_splitk_gfx1250(
     atol = 0.1
     correct = verify_output(c_pad[:M, :N].cpu().to(torch.float32), ref, rtol=rtol, atol=atol)
 
-    # TFLOPS and BW
-    flops = 2 * M * N * K
-    bytes_moved = (M * K + K * N) * elem_bytes + M * N * 2  # A + B reads + C write
-    tflops = flops / (us / 1e6) / 1e12
-    tbps = bytes_moved / 1e12 / (us / 1e6)
-
     status = "PASSED" if correct else "FAILED"
-    print(
-        f"[flyc] {status} | {us:.1f} us, {tflops:.2f} TFLOPS, BW: {tbps:.3f} TB/s"
-    )
+    if emu_mode:
+        print(f"[flyc] {status} (EMU_MODE — timing disabled)")
+    else:
+        flops = 2 * M * N * K
+        bytes_moved = (M * K + K * N) * elem_bytes + M * N * 2  # A + B reads + C write
+        tflops = flops / (us / 1e6) / 1e12
+        tbps = bytes_moved / 1e12 / (us / 1e6)
+        print(
+            f"[flyc] {status} | {us:.1f} us, {tflops:.2f} TFLOPS, BW: {tbps:.3f} TB/s"
+        )
 
 
 if __name__ == "__main__":
