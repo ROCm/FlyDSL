@@ -361,6 +361,7 @@ def _normalize_pa_output(running_sum, out0, out1, zero_f):
 def _make_pa_phase_helpers(
     *,
     trans_v,
+    per_token_q,
     per_token_kv,
     needs_mask,
     query_length,
@@ -372,7 +373,9 @@ def _make_pa_phase_helpers(
     softmax_lds_f32,
     stride_ks_block,
     stride_ks_head,
+    softmax_scale_base,
     softmax_q_scale,
+    k_scale_val,
     scale,
     v_scale_val,
     warp_id,
@@ -404,6 +407,7 @@ def _make_pa_phase_helpers(
         tile_token_offset_i32,
         q_frags,
         causal_bound,
+        query_scale_lane=None,
         *,
         phys_block,
         seq_start=None,
@@ -469,6 +473,11 @@ def _make_pa_phase_helpers(
 
         v_results = []
         d_out = []
+        query_scale_vec = None
+        if per_token_q:
+            query_scale_vec = vector.broadcast(
+                T.f32x4, query_scale_lane * softmax_scale_base
+            )
         for td in range_constexpr(TLOOP):
             vhe_data = []
             acc = arith.constant_vector(0.0, T.f32x4)
@@ -483,15 +492,25 @@ def _make_pa_phase_helpers(
                 )
             v_results.append(vhe_data)
             if per_token_kv:
+                scale_vec = (
+                    k_scale_vecs[td] * query_scale_vec
+                    if per_token_q
+                    else k_scale_vecs[td] * vector.broadcast(T.f32x4, softmax_q_scale)
+                )
                 d_out.append(
-                    acc
-                    * (
-                        k_scale_vecs[td]
-                        * vector.broadcast(T.f32x4, softmax_q_scale)
-                    )
+                    acc * scale_vec
                 )
             else:
-                d_out.append(acc * vector.broadcast(T.f32x4, scale))
+                if per_token_q:
+                    d_out.append(
+                        acc
+                        * (
+                            query_scale_vec
+                            * vector.broadcast(T.f32x4, k_scale_val)
+                        )
+                    )
+                else:
+                    d_out.append(acc * vector.broadcast(T.f32x4, scale))
 
         apply_window_mask = seq_start is not None
         apply_global_window = global_window_limit is not None
@@ -961,7 +980,8 @@ def compile_pa_decode_ps(
         c_vb = stride_v_block
         c_vh = stride_v_head
 
-        _softmax_q_scale = arith.constant(_softmax_scale, type=T.f32) * q_scale_val
+        _softmax_scale_const = arith.constant(_softmax_scale, type=T.f32)
+        _softmax_q_scale = _softmax_scale_const * q_scale_val
         _scale = _softmax_q_scale * k_scale_val  # per-tensor only; per-token uses per-token k_scale
         c_w = arith.constant(WARP_SIZE, type=T.i32)
         NEG_INF = arith.constant(float("-inf"), type=T.f32)
@@ -1043,6 +1063,7 @@ def compile_pa_decode_ps(
             _qk_and_intra_softmax, _cross_warp_softmax_and_prob_pack, _pv_mfma = (
                 _make_pa_phase_helpers(
                     trans_v=trans_v,
+                    per_token_q=False,
                     per_token_kv=per_token_kv,
                     needs_mask=needs_mask,
                     query_length=query_length,
@@ -1054,7 +1075,9 @@ def compile_pa_decode_ps(
                     softmax_lds_f32=softmax_lds_f32,
                     stride_ks_block=stride_ks_block,
                     stride_ks_head=stride_ks_head,
+                    softmax_scale_base=_softmax_scale_const,
                     softmax_q_scale=_softmax_q_scale,
+                    k_scale_val=k_scale_val,
                     scale=_scale,
                     v_scale_val=v_scale_val,
                     warp_id=warp_id,
@@ -1406,6 +1429,22 @@ def _is_unit_query_scale(query_scale) -> bool:
     return math.isclose(float(query_scale), 1.0)
 
 
+def _is_per_token_query_scale(query_scale) -> bool:
+    return isinstance(query_scale, torch.Tensor) and query_scale.numel() > 1
+
+
+def _validate_per_token_query_scale(
+    query_scale: torch.Tensor,
+    total_queries: int,
+    num_query_heads: int,
+) -> None:
+    expected_shape = (total_queries, num_query_heads, 1)
+    if tuple(query_scale.shape) != expected_shape:
+        raise ValueError(
+            f"Per-token query_scale must have shape {expected_shape}, got {tuple(query_scale.shape)}"
+        )
+
+
 def _get_query_input_dtype(query: torch.Tensor) -> str:
     if query.dtype in _PACKED_FP8_QUERY_DTYPES:
         return "packed_fp8"
@@ -1675,19 +1714,30 @@ def pa_decode_ps_launch(
     num_kv_heads = key_cache.shape[1]
     trans_v = len(value_cache.shape) == 5
     query_input_dtype = _get_query_input_dtype(query)
+    total_queries = query.shape[0]
 
     dev = query.device
     if query_input_dtype != "packed_fp8" and not _is_unit_query_scale(query_scale):
         raise ValueError(
-            "Non-packed query inputs require query_scale == 1.0. "
-            "For scaled query quantization, pass a pre-quantized packed FP8 query."
+            "bf16/f16 query inputs do not accept host query_scale. "
+            "For non-packed queries, query scale is computed inside the kernel."
         )
     if not isinstance(query_scale, torch.Tensor):
         query_scale = torch.tensor([float(query_scale or 1.0)], device=dev, dtype=torch.float32)
+    else:
+        query_scale = query_scale.to(device=dev, dtype=torch.float32)
     if not isinstance(key_scale, torch.Tensor):
         key_scale = torch.tensor([float(key_scale or 1.0)], device=dev, dtype=torch.float32)
     if not isinstance(value_scale, torch.Tensor):
         value_scale = torch.tensor([float(value_scale or 1.0)], device=dev, dtype=torch.float32)
+
+    host_per_token_query = _is_per_token_query_scale(query_scale)
+    if host_per_token_query:
+        _validate_per_token_query_scale(query_scale, total_queries, num_query_heads)
+        if sliding_window <= 0:
+            raise ValueError(
+                "Per-token query_scale is only supported for the sliding-window pa_decode_sw_kernel path."
+            )
 
     # Detect per-token vs per-tensor quantization from scale tensor dimensionality
     per_token_kv = key_scale.ndim > 1  # per-tensor: shape [1]; per-token: shape [blocks, heads, block_size, 1]
@@ -1709,6 +1759,12 @@ def pa_decode_ps_launch(
     query_group_size = num_query_heads // num_kv_heads
 
     # Strides for key_scale/value_scale
+    if host_per_token_query:
+        stride_qs_seq = query_scale.stride(0)
+        stride_qs_head = query_scale.stride(1)
+    else:
+        stride_qs_seq = 0
+        stride_qs_head = 0
     if per_token_kv:
         stride_ks_block = key_scale.stride(0)
         stride_ks_head = key_scale.stride(1)
@@ -1740,11 +1796,11 @@ def pa_decode_ps_launch(
             temporary_output = torch.zeros(batch_size, num_kv_heads, max_context_partition_num,
                                             eqgs, head_size, device=dev, dtype=torch.bfloat16)
 
-        compiled_sw = compile_pa_decode_ps_sw(
+        compiled_sw = compile_pa_decode_sw(
             sliding_window=sliding_window,
             global_window=global_window,
             softmax_scale=softmax_scale, trans_v=trans_v, query_group_size=query_group_size,
-            per_token_kv=per_token_kv, query_length=query_length,
+            per_token_q=host_per_token_query, per_token_kv=per_token_kv, query_length=query_length,
             query_input_dtype=query_input_dtype)
 
         compiled_sw['launch'](
@@ -1759,6 +1815,7 @@ def pa_decode_ps_launch(
             temporary_output.stride(0), temporary_output.stride(1),
             temporary_output.stride(2), temporary_output.stride(3),
             block_tables.stride(0),
+            stride_qs_seq, stride_qs_head,
             stride_ks_block, stride_ks_head,
             batch_size, num_kv_heads, max_context_partition_num, s)
 
@@ -1829,7 +1886,7 @@ def pa_decode_ps_launch(
 
 # =====================================================================
 # =====================================================================
-# compile_pa_decode_ps_sw — Sliding Window kernel with one CTA per 256-token tile
+# compile_pa_decode_sw — Sliding Window kernel with one CTA per 256-token tile
 # Grid = (batch_size, num_kv_heads, max_context_partition_num)
 # Each block handles one 256-token context partition. `partition_idx` is decoded
 # into (physical_block, 256-token sub-tile) after applying the sliding-window offset.
@@ -1837,12 +1894,13 @@ def pa_decode_ps_launch(
 # Output: exp_sums, max_logits, temporary_output -> reduced by a separate kernel.
 # =====================================================================
 @functools.lru_cache(maxsize=256)
-def compile_pa_decode_ps_sw(
+def compile_pa_decode_sw(
     sliding_window: int,   # required > 0 -- baked as compile-time constant
     global_window: int = 0,
     softmax_scale=None,
     trans_v=False,
     query_group_size=QUERY_GROUP_SIZE,
+    per_token_q=False,
     per_token_kv=False,
     query_length: int = 1,
     query_input_dtype: str = "packed_fp8",
@@ -1898,6 +1956,8 @@ def compile_pa_decode_ps_sw(
         stride_to_part: Int32,
         stride_to_group: Int32,
         stride_bt_seq: Int32,
+        stride_qs_seq: Int32,
+        stride_qs_head: Int32,
         stride_ks_block: Int32,
         stride_ks_head: Int32,
     ):
@@ -1923,7 +1983,12 @@ def compile_pa_decode_ps_sw(
         qs_rsrc = buffer_ops.create_buffer_resource(query_scale_ptr, max_size=True)
         ks_rsrc = buffer_ops.create_buffer_resource(key_scale_ptr, max_size=True)
         vs_rsrc = buffer_ops.create_buffer_resource(value_scale_ptr, max_size=True)
-        q_scale_val = buffer_ops.buffer_load(qs_rsrc, arith.constant(0, type=T.i32), vec_width=1)
+        if per_token_q:
+            q_scale_val = arith.constant(1.0, type=T.f32)
+        else:
+            q_scale_val = buffer_ops.buffer_load(
+                qs_rsrc, arith.constant(0, type=T.i32), vec_width=1
+            )
         if per_token_kv:
             k_scale_val = arith.constant(1.0, type=T.f32)
             v_scale_val = arith.constant(1.0, type=T.f32)
@@ -1945,7 +2010,8 @@ def compile_pa_decode_ps_sw(
         c_vb = stride_v_block
         c_vh = stride_v_head
 
-        _softmax_q_scale = arith.constant(_softmax_scale, type=T.f32) * q_scale_val
+        _softmax_scale_const = arith.constant(_softmax_scale, type=T.f32)
+        _softmax_q_scale = _softmax_scale_const * q_scale_val
         _scale = _softmax_q_scale * k_scale_val  # per-tensor only; per-token uses per-token k_scale
         c_w = arith.constant(WARP_SIZE, type=T.i32)
         NEG_INF = arith.constant(float("-inf"), type=T.f32)
@@ -2048,6 +2114,7 @@ def compile_pa_decode_ps_sw(
         _qk_and_intra_softmax, _cross_warp_softmax_and_prob_pack, _pv_mfma = (
             _make_pa_phase_helpers(
                 trans_v=trans_v,
+                per_token_q=per_token_q,
                 per_token_kv=per_token_kv,
                 needs_mask=True,
                 query_length=query_length,
@@ -2059,7 +2126,9 @@ def compile_pa_decode_ps_sw(
                 softmax_lds_f32=softmax_lds_f32,
                 stride_ks_block=stride_ks_block,
                 stride_ks_head=stride_ks_head,
+                softmax_scale_base=_softmax_scale_const,
                 softmax_q_scale=_softmax_q_scale,
+                k_scale_val=k_scale_val,
                 scale=_scale,
                 v_scale_val=v_scale_val,
                 warp_id=warp_id,
@@ -2094,6 +2163,7 @@ def compile_pa_decode_ps_sw(
                 tile_token_offset_i32,
                 q_frags,
                 causal_bound,
+                query_scale_lane=query_scale_lane,
                 phys_block=phys_block,
                 seq_start=seq_start,
             )
@@ -2120,6 +2190,17 @@ def compile_pa_decode_ps_sw(
                 gpu.barrier()
             q_row = batch_idx * arith.constant(query_length, type=T.i32) + qi_for_q
             q_base = q_row * stride_q_seq + (kv_h * arith.constant(query_group_size, type=T.i32) + local_qhead_idx_for_q) * stride_q_head
+            if per_token_q:
+                q_scale_row = batch_idx * arith.constant(query_length, type=T.i32) + qi_val
+                q_scale_head = (
+                    kv_h * arith.constant(query_group_size, type=T.i32) + qhi_pos
+                )
+                q_scale_off = q_scale_row * stride_qs_seq + q_scale_head * stride_qs_head
+                query_scale_lane = buffer_ops.buffer_load(
+                    qs_rsrc, q_scale_off, vec_width=1, dtype=T.f32
+                )
+            else:
+                query_scale_lane = None
             q_frags = _load_q_fragments(
                 q_rsrc,
                 logits_lds_i32,
@@ -2193,6 +2274,7 @@ def compile_pa_decode_ps_sw(
                                s_es_seq, s_es_head, s_es_part,
                                s_to_seq, s_to_head, s_to_part, s_to_group,
                                s_bt_seq,
+                               s_qs_seq, s_qs_head,
                                s_ks_block, s_ks_head,
                                gx, gy, gz,
                                stream: fx.Stream = fx.Stream(None)):
@@ -2207,6 +2289,7 @@ def compile_pa_decode_ps_sw(
             s_es_seq, s_es_head, s_es_part,
             s_to_seq, s_to_head, s_to_part, s_to_group,
             s_bt_seq,
+            s_qs_seq, s_qs_head,
             s_ks_block, s_ks_head,
         ).launch(
             grid=(gx, gy, gz),
