@@ -61,9 +61,6 @@ def store(value, memref, indices, *, loc=None, ip=None, **kwargs):
 # -----------------------------------------------------------------------------
 
 
-_KDYNAMIC = ir.ShapedType.get_dynamic_size()
-
-
 @traced_op
 def extract(vector, static_position=None, dynamic_position=None, *, loc=None, ip=None):
     """Wrapper around `vector.ExtractOp(...).result`.
@@ -85,7 +82,8 @@ def extract(vector, static_position=None, dynamic_position=None, *, loc=None, ip
     n_static = len(static_position)
     n_dynamic = len(dynamic_position)
     if n_dynamic > 0 and n_static < n_dynamic:
-        static_position = list(static_position) + [_KDYNAMIC] * (n_dynamic - n_static)
+        kDynamic = ir.ShapedType.get_dynamic_size()
+        static_position = list(static_position) + [kDynamic] * (n_dynamic - n_static)
 
     return _vector.ExtractOp(
         _arith_ext.unwrap(vector, loc=loc),
