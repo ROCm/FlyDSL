@@ -28,6 +28,7 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.expr import range_constexpr   # Python-level loop (no scf.for transform)
 from flydsl.expr import arith
+from flydsl.expr.typing import Stream
 import torch  # 用于 element_size
 
 import mori.ir.flydsl as mori_shmem
@@ -338,8 +339,6 @@ def make_combine_kernel(
         addr_tis:      fx.Int64,   # tok_id_to_src  基地址（i32[max_recv]，symmetric）
         addr_p2p_comb_inp: fx.Int64,  # 预计算 P2P 地址数组 i64[npes]
         addr_p2p_xdb_mem:  fx.Int64,  # 预计算 P2P 地址数组 i64[npes]
-        cur_tok:       fx.Int32,   # 本 rank token 数
-        total_recv_val:fx.Int32,   # dispatch 阶段接收到的总 token 数
     ):
         tid    = fx.thread_idx.x
         bid    = fx.block_idx.x
@@ -349,6 +348,7 @@ def make_combine_kernel(
         gw_num = block_num * warp_num_per_block
         gwtid  = bid * (warp_num_per_block * 64) + tid
 
+        total_recv_val = load_i32_global_at(addr_trecv, const_i32(0))
         cur_flag = load_i64_at(addr_xdb_flag, const_i32(0))
 
         # ── LDS P2P 基地址表（用于 Stage 1 P2P write）──
@@ -434,11 +434,11 @@ def make_combine_kernel(
 
         # VecBytes=4 + exec mask + tok_map 提前加载
         n_elems = n_i32   # hidden_dim / 2
-        _safe_cur_tok2 = arith.select(
-            arith.cmpi(arith.CmpIPredicate.eq, cur_tok, const_i32(0)), const_i32(1), cur_tok)
-        wpt_v2    = (gw_num + _safe_cur_tok2 - 1) // _safe_cur_tok2
+        _safe_recv = arith.select(
+            arith.cmpi(arith.CmpIPredicate.eq, total_recv_val, const_i32(0)), const_i32(1), total_recv_val)
+        wpt_v2    = (gw_num + _safe_recv - 1) // _safe_recv
         hpw_v2    = (n_elems + wpt_v2 - 1) // wpt_v2
-        s3_lim2   = cur_tok * wpt_v2
+        s3_lim2   = total_recv_val * wpt_v2
 
         for si in range(as_index(gw_id), as_index(s3_lim2), as_index(gw_num)):
             si      = idx_to_i32(si)
@@ -706,6 +706,7 @@ def make_dispatch_jit(*, rank, npes, experts_per_rank, experts_per_token,
         addr_p2p_out_wts: fx.Int64, addr_p2p_out_idx: fx.Int64,
         addr_p2p_out_tok: fx.Int64, addr_p2p_recv_num: fx.Int64,
         cur_tok: fx.Int32,
+        stream: Stream = Stream(None),
     ):
         _ = (_rank_id, _npes_id, _block_num, _wpb, _max_tok)  # referenced to include in cache key
         kernel(addr_inp_tok, addr_idx, addr_wts,
@@ -719,6 +720,7 @@ def make_dispatch_jit(*, rank, npes, experts_per_rank, experts_per_token,
                cur_tok).launch(
             grid=(block_num, 1, 1),
             block=(warp_num_per_block * 64, 1, 1),
+            stream=stream,
         )
 
     return dispatch_launch
@@ -756,7 +758,7 @@ def make_combine_jit(*, rank, npes, experts_per_token, hidden_dim,
         addr_comb_bar: fx.Int64, addr_trecv: fx.Int64,
         addr_tis: fx.Int64,
         addr_p2p_comb_inp: fx.Int64, addr_p2p_xdb_mem: fx.Int64,
-        cur_tok: fx.Int32, total_recv_val: fx.Int32,
+        stream: Stream = Stream(None),
     ):
         _ = (_rank_id, _npes_id, _block_num, _wpb, _max_tok)  # referenced to include in cache key
 
@@ -771,10 +773,10 @@ def make_combine_jit(*, rank, npes, experts_per_token, hidden_dim,
         kernel(addr_inp_tok, addr_comb_inp, addr_comb_out,
                addr_xdb_mem, addr_xdb_flag, addr_tok_map,
                addr_comb_bar, addr_trecv, addr_tis,
-               addr_p2p_comb_inp, addr_p2p_xdb_mem,
-               cur_tok, total_recv_val).launch(
+               addr_p2p_comb_inp, addr_p2p_xdb_mem).launch(
             grid=(block_num, 1, 1),
             block=(warp_num_per_block * 64, 1, 1),
+            stream=stream,
         )
 
     return combine_launch

@@ -141,6 +141,7 @@ class FlyDSLDispatchCombineIntraNodeOpV2:
         self._fx_comb_inp  = fx.Int64(self.shmem_comb_inp_tok.data_ptr())
         self._fx_comb_out  = fx.Int64(self.shmem_comb_out_tok.data_ptr())
         self._fx_xdb_mem   = fx.Int64(self.shmem_xdev_bar_mem.data_ptr())
+        self._fx_xdev_flag = fx.Int64(self._xdev_flag.data_ptr())
         self._fx_comb_bar  = fx.Int64(self.comb_bar.data_ptr())
         self._fx_trecv     = fx.Int64(self.total_recv.data_ptr())  # alias of _fx_total_rv
         # dispatch P2P 地址数组（预计算，消除内核中 ptr_p2p extern 调用）
@@ -154,7 +155,6 @@ class FlyDSLDispatchCombineIntraNodeOpV2:
         self._fx_p2p_comb_inp = fx.Int64(self._p2p_comb_inp.data_ptr())
         self._fx_p2p_xdb_mem  = fx.Int64(self._p2p_xdb_mem.data_ptr())
 
-        # flyc.compile 预编译状态（lazy：首次 dispatch/combine 调用时触发）
         self._disp_compiled = None
         self._comb_compiled = None
 
@@ -188,120 +188,140 @@ class FlyDSLDispatchCombineIntraNodeOpV2:
         self.dest_tok_map = torch.full(
             (mt * k,), sentinel, dtype=torch.int32, device=self._dev)
 
-    def reset(self):
-        """清零所有计数器和信号 buffer（供下一轮使用）。
-
-        shmem_barrier_all 确保 NIC 操作（prev round Phase 2/3 的远端写）
-        在下一轮 Phase 1 开始前完全完成。
-        调用方需确保 BOTH ranks 在同一时间点调用 reset()，
-        否则 barrier 可能与其他操作配对，导致竞争。
-        """
-        self.shmem_tok_off.fill_(0)
-        self.shmem_recv_tok_num.fill_(0)
-        self.shmem_xdev_bar_mem.fill_(0)
-        self.shmem_tok_id_to_src.fill_(0)
-        self.dest_pe_ctr.fill_(0)
-        self.disp_bar.fill_(0)
-        self.comb_bar.fill_(0)
-        self.total_recv.fill_(0)
-        max_recv = self.cfg.world_size * self.cfg.max_num_inp_token_per_rank
-        sentinel = self.cfg.world_size * max_recv
-        self.dest_tok_map.fill_(sentinel)
-        torch.cuda.synchronize()
-        # dist.barrier ensures both ranks reach this point before shmem_barrier_all
-        # This prevents wrong pairing of shmem barriers when ranks have different timing
-        if dist.is_initialized():
-            dist.barrier()
+    def barrier(self):
+        """跨 rank 同步。kernel 内部已实现自清理，无需清零缓冲区。"""
         ms.shmem_barrier_all()
+
+    def reset(self):
+        """等同于 barrier()。kernel 自清理，无需显式清零。"""
+        self.barrier()
 
     def dispatch(self, input, weights, scales, indices,
                  block_num=-1, rdma_block_num=-1, warp_per_block=-1):
         """Dispatch tokens → remote experts via shmem P2P。
 
-        调用前须先调用 reset() 清零计数器。shmem 地址使用预缓存的 fx.Int64 对象。
+        返回 max_recv 全尺寸 tensor（不做 .item() 和动态切片），
+        eager / CUDA Graph capture 均可直接调用，无特判。
         """
         cfg     = self.cfg
         cur_tok = input.shape[0]
-        inp_c = input.contiguous()
-        wts_c = weights.contiguous()
-        idx_c = indices.to(torch.int32).contiguous()
+        stream  = torch.cuda.current_stream()
+        inp_c = input if input.is_contiguous() else input.contiguous()
+        wts_c = weights if weights.is_contiguous() else weights.contiguous()
+        idx_c = indices if (indices.dtype == torch.int32 and indices.is_contiguous()) \
+            else indices.to(torch.int32).contiguous()
 
-        args = (
-            fx.Int64(inp_c.data_ptr()),
-            fx.Int64(idx_c.data_ptr()),
-            fx.Int64(wts_c.data_ptr()),
-            self._fx_out_tok,
-            self._fx_out_wts,
-            self._fx_out_idx,
-            self._fx_tok_off,
-            self._fx_recv_num,
-            self._fx_dest_ctr,
-            self._fx_disp_bar,
-            self._fx_tok_map,
-            self._fx_tis,
-            self._fx_total_rv,
-            self._fx_p2p_tok_off,
-            self._fx_p2p_tis,
-            self._fx_p2p_out_wts,
-            self._fx_p2p_out_idx,
-            self._fx_p2p_out_tok,
-            self._fx_p2p_recv_num,
-            cur_tok,
-        )
         if self._disp_compiled is None:
+            args = (
+                fx.Int64(inp_c.data_ptr()),
+                fx.Int64(idx_c.data_ptr()),
+                fx.Int64(wts_c.data_ptr()),
+                self._fx_out_tok,
+                self._fx_out_wts,
+                self._fx_out_idx,
+                self._fx_tok_off,
+                self._fx_recv_num,
+                self._fx_dest_ctr,
+                self._fx_disp_bar,
+                self._fx_tok_map,
+                self._fx_tis,
+                self._fx_total_rv,
+                self._fx_p2p_tok_off,
+                self._fx_p2p_tis,
+                self._fx_p2p_out_wts,
+                self._fx_p2p_out_idx,
+                self._fx_p2p_out_tok,
+                self._fx_p2p_recv_num,
+                cur_tok,
+                stream,
+            )
             self._disp_compiled = flyc.compile(self._disp_fn, *args)
         else:
-            self._disp_compiled(*args)
-        torch.cuda.synchronize()
+            self._disp_compiled(
+                inp_c.data_ptr(),
+                idx_c.data_ptr(),
+                wts_c.data_ptr(),
+                self._fx_out_tok,
+                self._fx_out_wts,
+                self._fx_out_idx,
+                self._fx_tok_off,
+                self._fx_recv_num,
+                self._fx_dest_ctr,
+                self._fx_disp_bar,
+                self._fx_tok_map,
+                self._fx_tis,
+                self._fx_total_rv,
+                self._fx_p2p_tok_off,
+                self._fx_p2p_tis,
+                self._fx_p2p_out_wts,
+                self._fx_p2p_out_idx,
+                self._fx_p2p_out_tok,
+                self._fx_p2p_recv_num,
+                cur_tok,
+                stream,
+            )
 
-        n    = int(self.total_recv[0].item())
         mr   = cfg.max_recv
         hdim = cfg.hidden_dim
         k    = cfg.top_k
 
         out_tok = (self.shmem_disp_out_tok.view(torch.bfloat16)
-                   .view(mr, hdim)[:n].to(cfg.data_type))
-        out_wts = self.shmem_disp_out_wts.view(mr, k)[:n]
-        out_idx = self.shmem_disp_out_idx.view(mr, k)[:n]
-        return out_tok, out_wts, None, out_idx, self.total_recv.clone()
+                   .view(mr, hdim).to(cfg.data_type))
+        out_wts = self.shmem_disp_out_wts.view(mr, k)
+        out_idx = self.shmem_disp_out_idx.view(mr, k)
+        return out_tok, out_wts, None, out_idx, self.total_recv
 
     def combine(self, input, weights, indices,
                 block_num=-1, rdma_block_num=-1, warp_per_block=-1,
                 use_external_inp_buf=-1, call_reset=False):
-        """Combine expert outputs via P2P read + weighted accumulate。"""
-        cfg            = self.cfg
-        cur_tok        = indices.shape[0]
-        total_recv_val = int(self.total_recv[0].item())
+        """Combine expert outputs via P2P read + weighted accumulate。
 
-        self.comb_bar.fill_(0)
-        inp_c = input.to(cfg.data_type).contiguous()
+        返回 max_tok 全尺寸 tensor（kernel 从 HBM 读取 total_recv），
+        eager / CUDA Graph capture 均可直接调用，无特判。
+        """
+        cfg    = self.cfg
+        stream = torch.cuda.current_stream()
 
-        args = (
-            fx.Int64(inp_c.data_ptr()),
-            self._fx_comb_inp,
-            self._fx_comb_out,
-            self._fx_xdb_mem,
-            fx.Int64(self._xdev_flag.data_ptr()),
-            self._fx_tok_map,
-            self._fx_comb_bar,
-            self._fx_trecv,
-            self._fx_tis,
-            self._fx_p2p_comb_inp,
-            self._fx_p2p_xdb_mem,
-            cur_tok,
-            total_recv_val,
-        )
+        inp_c = input if (input.dtype == cfg.data_type and input.is_contiguous()) \
+            else input.to(cfg.data_type).contiguous()
+
         if self._comb_compiled is None:
+            args = (
+                fx.Int64(inp_c.data_ptr()),
+                self._fx_comb_inp,
+                self._fx_comb_out,
+                self._fx_xdb_mem,
+                self._fx_xdev_flag,
+                self._fx_tok_map,
+                self._fx_comb_bar,
+                self._fx_trecv,
+                self._fx_tis,
+                self._fx_p2p_comb_inp,
+                self._fx_p2p_xdb_mem,
+                stream,
+            )
             self._comb_compiled = flyc.compile(self._comb_fn, *args)
         else:
-            self._comb_compiled(*args)
-        torch.cuda.synchronize()
+            self._comb_compiled(
+                inp_c.data_ptr(),
+                self._fx_comb_inp,
+                self._fx_comb_out,
+                self._fx_xdb_mem,
+                self._fx_xdev_flag,
+                self._fx_tok_map,
+                self._fx_comb_bar,
+                self._fx_trecv,
+                self._fx_tis,
+                self._fx_p2p_comb_inp,
+                self._fx_p2p_xdb_mem,
+                stream,
+            )
 
         mt   = cfg.max_num_inp_token_per_rank
         hdim = cfg.hidden_dim
 
         out_tok = (self.shmem_comb_out_tok.view(torch.bfloat16)
-                   .view(mt, hdim)[:cur_tok].to(cfg.data_type))
+                   .view(mt, hdim).to(cfg.data_type))
         out_wts = None
 
         if call_reset:
