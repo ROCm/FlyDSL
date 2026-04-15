@@ -2128,6 +2128,15 @@ def compile_pa_decode_ps_sw(
         # For invalid partitions, set context_len to 0 so all tokens get masked
         context_len = arith.select(_is_valid, context_len, arith.constant(0, type=T.i32))
 
+        # ── Early exit for fully-masked tiles ──
+        # A tile is fully masked when all its tokens fall outside the sliding window
+        # for every qi.  qi=0 has the smallest seq_start (most permissive left
+        # boundary).  If even qi=0 cannot see any token in this tile, no qi can.
+        # seq_start_global was computed from the *original* context_len above.
+        _tile_last_token = kv_seq_start + arith.constant(KV_COMPUTE_BLOCK - 1, type=T.i32)
+        _tile_in_window = _tile_last_token > seq_start_global  # at least 1 token visible
+        _should_run = _is_valid & _tile_in_window
+
         # Look up physical block (clamped index is always safe)
         bt_off = batch_idx * stride_bt_seq + seq_partition_idx
         phys_block = buffer_ops.buffer_load(bt_rsrc, bt_off, vec_width=1, dtype=T.i32)
@@ -2465,103 +2474,147 @@ def compile_pa_decode_ps_sw(
         # ── MTP groups ──
         _mtp_groups = math.ceil(query_length * query_group_size / 16)
         _total_pairs = query_length * query_group_size
-        for _mtp_g in range_constexpr(_mtp_groups):
-            _g_off = _mtp_g * 16
-            _lane_pair_raw = lane16id + arith.constant(_g_off, type=T.i32)
-            _c_total_pairs = arith.constant(_total_pairs, type=T.i32)
-            _c_pair_max = arith.constant(_total_pairs - 1, type=T.i32)
-            _c_ql_m1 = arith.constant(query_length - 1, type=T.i32)
-            _lane_pair = arith.select(_lane_pair_raw < _c_total_pairs, _lane_pair_raw, _c_pair_max)
-            _qi_raw = _lane_pair // arith.constant(query_group_size, type=T.i32)
-            qi_val = arith.select(_qi_raw < _c_ql_m1, _qi_raw, _c_ql_m1)
-            qhi_pos = _lane_pair % arith.constant(query_group_size, type=T.i32)
-            causal_bound = context_len + arith.constant(1 - query_length, type=T.i32) + qi_val
-            seq_start = context_len - arith.constant(sliding_window, type=T.i32) + qi_val
 
-            _lqh_pair_raw = local_qhead_idx + arith.constant(_g_off, type=T.i32)
-            _lqh_pair = arith.select(_lqh_pair_raw < _c_total_pairs, _lqh_pair_raw, _c_pair_max)
-            _lqi_raw = _lqh_pair // arith.constant(query_group_size, type=T.i32)
-            qi_for_q = arith.select(_lqi_raw < _c_ql_m1, _lqi_raw, _c_ql_m1)
-            local_qhead_idx_for_q = _lqh_pair % arith.constant(query_group_size, type=T.i32)
+        _if_run = scf.IfOp(arith.unwrap(_should_run), has_else=True)
+        with _if_then(_if_run):
+            # ── Then branch: tile has at least one visible token — full compute ──
+            for _mtp_g in range_constexpr(_mtp_groups):
+                _g_off = _mtp_g * 16
+                _lane_pair_raw = lane16id + arith.constant(_g_off, type=T.i32)
+                _c_total_pairs = arith.constant(_total_pairs, type=T.i32)
+                _c_pair_max = arith.constant(_total_pairs - 1, type=T.i32)
+                _c_ql_m1 = arith.constant(query_length - 1, type=T.i32)
+                _lane_pair = arith.select(_lane_pair_raw < _c_total_pairs, _lane_pair_raw, _c_pair_max)
+                _qi_raw = _lane_pair // arith.constant(query_group_size, type=T.i32)
+                qi_val = arith.select(_qi_raw < _c_ql_m1, _qi_raw, _c_ql_m1)
+                qhi_pos = _lane_pair % arith.constant(query_group_size, type=T.i32)
+                causal_bound = context_len + arith.constant(1 - query_length, type=T.i32) + qi_val
+                seq_start = context_len - arith.constant(sliding_window, type=T.i32) + qi_val
 
-            if _mtp_g > 0:
+                _lqh_pair_raw = local_qhead_idx + arith.constant(_g_off, type=T.i32)
+                _lqh_pair = arith.select(_lqh_pair_raw < _c_total_pairs, _lqh_pair_raw, _c_pair_max)
+                _lqi_raw = _lqh_pair // arith.constant(query_group_size, type=T.i32)
+                qi_for_q = arith.select(_lqi_raw < _c_ql_m1, _lqi_raw, _c_ql_m1)
+                local_qhead_idx_for_q = _lqh_pair % arith.constant(query_group_size, type=T.i32)
+
+                if _mtp_g > 0:
+                    gpu.barrier()
+                    SmemPtr._view_cache = None
+                q_row = batch_idx * arith.constant(query_length, type=T.i32) + qi_for_q
+                q_base = q_row * stride_q_seq + (kv_h * arith.constant(query_group_size, type=T.i32) + local_qhead_idx_for_q) * stride_q_head
+                offset1 = lane16id // arith.constant(4, type=T.i32)
+                lds_q_base = (offset1 * arith.constant(2048, type=T.i32)
+                              + lane4id * arith.constant(512, type=T.i32)
+                              + local_qhead_idx * arith.constant(32, type=T.i32))
+                q_w0, q_w1, q_w2, q_w3 = _load_q_words(q_base)
+                v01 = vector.from_elements(T.vec(2, T.i32), [q_w0, q_w1])
+                v23 = vector.from_elements(T.vec(2, T.i32), [q_w2, q_w3])
+                lds_q_i32 = lds_q_base // arith.constant(4, type=T.i32)
+                vector.store(v01, logits_lds_i32, [arith.index_cast(T.index, lds_q_i32)])
+                vector.store(v23, logits_lds_i32,
+                    [arith.index_cast(T.index, lds_q_i32 + arith.constant(2, type=T.i32))])
+                q_frags = []
                 gpu.barrier()
+                for qkhe in range_constexpr(QKHELOOP):
+                    for qkr in range_constexpr(2):
+                        lds_rd_byte = (arith.constant(qkhe * 2048, type=T.i32)
+                                       + rowid * arith.constant(512, type=T.i32)
+                                       + lane16id * arith.constant(32, type=T.i32)
+                                       + arith.constant(qkr * 8, type=T.i32))
+                        lds_rd_base = lds_rd_byte // arith.constant(8, type=T.i32)
+                        q_v1 = vector.load_op(T.vec(1, T.i64), logits_lds_i64,
+                            [arith.index_cast(T.index, lds_rd_base)])
+                        q_frags.append(vector.extract(q_v1, static_position=[0]))
                 SmemPtr._view_cache = None
-            q_row = batch_idx * arith.constant(query_length, type=T.i32) + qi_for_q
-            q_base = q_row * stride_q_seq + (kv_h * arith.constant(query_group_size, type=T.i32) + local_qhead_idx_for_q) * stride_q_head
-            offset1 = lane16id // arith.constant(4, type=T.i32)
-            lds_q_base = (offset1 * arith.constant(2048, type=T.i32)
-                          + lane4id * arith.constant(512, type=T.i32)
-                          + local_qhead_idx * arith.constant(32, type=T.i32))
-            q_w0, q_w1, q_w2, q_w3 = _load_q_words(q_base)
-            v01 = vector.from_elements(T.vec(2, T.i32), [q_w0, q_w1])
-            v23 = vector.from_elements(T.vec(2, T.i32), [q_w2, q_w3])
-            lds_q_i32 = lds_q_base // arith.constant(4, type=T.i32)
-            vector.store(v01, logits_lds_i32, [arith.index_cast(T.index, lds_q_i32)])
-            vector.store(v23, logits_lds_i32,
-                [arith.index_cast(T.index, lds_q_i32 + arith.constant(2, type=T.i32))])
-            q_frags = []
-            gpu.barrier()
-            for qkhe in range_constexpr(QKHELOOP):
-                for qkr in range_constexpr(2):
-                    lds_rd_byte = (arith.constant(qkhe * 2048, type=T.i32)
-                                   + rowid * arith.constant(512, type=T.i32)
-                                   + lane16id * arith.constant(32, type=T.i32)
-                                   + arith.constant(qkr * 8, type=T.i32))
-                    lds_rd_base = lds_rd_byte // arith.constant(8, type=T.i32)
-                    q_v1 = vector.load_op(T.vec(1, T.i64), logits_lds_i64,
-                        [arith.index_cast(T.index, lds_rd_base)])
-                    q_frags.append(vector.extract(q_v1, static_position=[0]))
-            SmemPtr._view_cache = None
 
-            # ── Load K for the single block ──
-            k_base = (phys_block * c_kb + _k_head_off) // c_four
-            k0_flat = _load_k_flat_ps(k_base, tile_token_offset)
-            k0_ops = _unflatten_k(k0_flat)
+                # ── Load K for the single block ──
+                k_base = (phys_block * c_kb + _k_head_off) // c_four
+                k0_flat = _load_k_flat_ps(k_base, tile_token_offset)
+                k0_ops = _unflatten_k(k0_flat)
 
-            # ── Process this CTA's 256-token tile ──
-            running_max, running_sum, out0, out1 = _process_block_split(
-                NEG_INF, ZERO_F,
-                arith.constant_vector(0.0, T.f32x4),
-                arith.constant_vector(0.0, T.f32x4),
-                tile_token_offset,
-                k0_ops,
-            )
-            SmemPtr._view_cache = None
+                # ── Process this CTA's 256-token tile ──
+                running_max, running_sum, out0, out1 = _process_block_split(
+                    NEG_INF, ZERO_F,
+                    arith.constant_vector(0.0, T.f32x4),
+                    arith.constant_vector(0.0, T.f32x4),
+                    tile_token_offset,
+                    k0_ops,
+                )
+                SmemPtr._view_cache = None
 
-            # ── Normalize and write output ──
-            safe_sum = arith.select(running_sum > ZERO_F, running_sum, arith.constant(1.0, type=T.f32))
-            inv_sum = arith.constant(1.0, type=T.f32) / safe_sum
-            out0_norm = out0 * vector.broadcast(T.f32x4, inv_sum)
-            out1_norm = out1 * vector.broadcast(T.f32x4, inv_sum)
-            outelems_norm = [out0_norm, out1_norm]
+                # ── Normalize and write output ──
+                safe_sum = arith.select(running_sum > ZERO_F, running_sum, arith.constant(1.0, type=T.f32))
+                inv_sum = arith.constant(1.0, type=T.f32) / safe_sum
+                out0_norm = out0 * vector.broadcast(T.f32x4, inv_sum)
+                out1_norm = out1 * vector.broadcast(T.f32x4, inv_sum)
+                outelems_norm = [out0_norm, out1_norm]
 
-            eqgs_lane = qi_val * arith.constant(query_group_size, type=T.i32) + qhi_pos
+                eqgs_lane = qi_val * arith.constant(query_group_size, type=T.i32) + qhi_pos
 
-            for vhe in range_constexpr(VHELOOP):
-                hs_base = (arith.constant(vhe * NUM_WARPS * MFMA_N, type=T.i32)
-                           + warp_id * arith.constant(MFMA_N, type=T.i32)
-                           + rowid * arith.constant(4, type=T.i32))
-                to_off = (batch_idx * stride_to_seq
-                          + kv_h * stride_to_head
-                          + partition_idx * stride_to_part
-                          + eqgs_lane * stride_to_group
-                          + hs_base)
-                out_bf16 = arith.trunc_f(T.vec(4, T.bf16), outelems_norm[vhe])
-                out_i32 = vector.bitcast(T.vec(2, T.i32), out_bf16)
-                buffer_ops.buffer_store(out_i32, to_rsrc,
-                    to_off * arith.constant(2, type=T.i32), offset_is_bytes=True)
+                for vhe in range_constexpr(VHELOOP):
+                    hs_base = (arith.constant(vhe * NUM_WARPS * MFMA_N, type=T.i32)
+                               + warp_id * arith.constant(MFMA_N, type=T.i32)
+                               + rowid * arith.constant(4, type=T.i32))
+                    to_off = (batch_idx * stride_to_seq
+                              + kv_h * stride_to_head
+                              + partition_idx * stride_to_part
+                              + eqgs_lane * stride_to_group
+                              + hs_base)
+                    out_bf16 = arith.trunc_f(T.vec(4, T.bf16), outelems_norm[vhe])
+                    out_i32 = vector.bitcast(T.vec(2, T.i32), out_bf16)
+                    buffer_ops.buffer_store(out_i32, to_rsrc,
+                        to_off * arith.constant(2, type=T.i32), offset_is_bytes=True)
 
-            es_off = (batch_idx * stride_es_seq
-                      + kv_h * stride_es_head
-                      + partition_idx * stride_es_part
-                      + eqgs_lane)
-            es_i32 = arith.bitcast(T.i32, running_sum)
-            ml_i32 = arith.bitcast(T.i32, running_max)
-            buffer_ops.buffer_store(es_i32, es_rsrc,
-                es_off * arith.constant(4, type=T.i32), offset_is_bytes=True)
-            buffer_ops.buffer_store(ml_i32, ml_rsrc,
-                es_off * arith.constant(4, type=T.i32), offset_is_bytes=True)
+                es_off = (batch_idx * stride_es_seq
+                          + kv_h * stride_es_head
+                          + partition_idx * stride_es_part
+                          + eqgs_lane)
+                es_i32 = arith.bitcast(T.i32, running_sum)
+                ml_i32 = arith.bitcast(T.i32, running_max)
+                buffer_ops.buffer_store(es_i32, es_rsrc,
+                    es_off * arith.constant(4, type=T.i32), offset_is_bytes=True)
+                buffer_ops.buffer_store(ml_i32, ml_rsrc,
+                    es_off * arith.constant(4, type=T.i32), offset_is_bytes=True)
+
+        with _if_else(_if_run):
+            # ── Else branch: tile is fully masked — write sentinel values ──
+            _zero_i32 = arith.constant(0, type=T.i32)
+            _neg_inf_i32 = arith.bitcast(T.i32, NEG_INF)
+            _zero_i32_vec = vector.from_elements(T.vec(2, T.i32), [_zero_i32, _zero_i32])
+            for _mtp_g in range_constexpr(_mtp_groups):
+                _g_off = _mtp_g * 16
+                _lane_pair_raw = lane16id + arith.constant(_g_off, type=T.i32)
+                _c_total_pairs = arith.constant(_total_pairs, type=T.i32)
+                _c_pair_max = arith.constant(_total_pairs - 1, type=T.i32)
+                _c_ql_m1 = arith.constant(query_length - 1, type=T.i32)
+                _lane_pair = arith.select(_lane_pair_raw < _c_total_pairs, _lane_pair_raw, _c_pair_max)
+                _qi_raw = _lane_pair // arith.constant(query_group_size, type=T.i32)
+                qi_val = arith.select(_qi_raw < _c_ql_m1, _qi_raw, _c_ql_m1)
+                qhi_pos = _lane_pair % arith.constant(query_group_size, type=T.i32)
+                eqgs_lane = qi_val * arith.constant(query_group_size, type=T.i32) + qhi_pos
+
+                # Write tmp_out = 0 (bf16 zeros = i32 zeros)
+                for vhe in range_constexpr(VHELOOP):
+                    hs_base = (arith.constant(vhe * NUM_WARPS * MFMA_N, type=T.i32)
+                               + warp_id * arith.constant(MFMA_N, type=T.i32)
+                               + rowid * arith.constant(4, type=T.i32))
+                    to_off = (batch_idx * stride_to_seq
+                              + kv_h * stride_to_head
+                              + partition_idx * stride_to_part
+                              + eqgs_lane * stride_to_group
+                              + hs_base)
+                    buffer_ops.buffer_store(_zero_i32_vec, to_rsrc,
+                        to_off * arith.constant(2, type=T.i32), offset_is_bytes=True)
+
+                # Write exp_sum = 0.0, max_logit = -inf
+                es_off = (batch_idx * stride_es_seq
+                          + kv_h * stride_es_head
+                          + partition_idx * stride_es_part
+                          + eqgs_lane)
+                buffer_ops.buffer_store(_zero_i32, es_rsrc,
+                    es_off * arith.constant(4, type=T.i32), offset_is_bytes=True)
+                buffer_ops.buffer_store(_neg_inf_i32, ml_rsrc,
+                    es_off * arith.constant(4, type=T.i32), offset_is_bytes=True)
 
     @flyc.jit
     def launch_pa_decode_ps_sw(es, ml, to, q, kc, vc, bt, cl,

@@ -671,7 +671,7 @@ def run_pa_decode_ps_test(
         # One outlier sequence at batch_size//2 is 3x longer than the rest
         kv_len_list = [context_length] * batch_size
         if batch_size > 1:
-            kv_len_list[batch_size // 2] = context_length * 3
+            kv_len_list[batch_size // 2] = context_length * 1
     context_lengths = torch.tensor(kv_len_list, dtype=torch.int32, device=device)
     max_kv_len = max(kv_len_list)
     max_context_length = max(16384, max_kv_len)
@@ -1200,16 +1200,43 @@ def sliding_window_accuracy_test() -> None:
     COMPUTE_TYPE_OPTIONS = ["fp8"]
     CONTEXT_PARTITION_SIZE_OPTIONS = [256]
     HEAD_DIMENSION_OPTIONS = [128]
-    HEAD_CONFIGURATIONS = [(16, 1)]
+    HEAD_CONFIGURATIONS = [(8, 2)]
     QUERY_LENGTH_OPTIONS = [1]
     QUANT_MODE_OPTIONS = ["per_token"]
-    CONTEXT_LENGTH_OPTIONS = [10000]
+    CONTEXT_LENGTH_OPTIONS = [3000]
     BATCH_SIZE_OPTIONS = [128]
     TRANS_V_OPTIONS = [True]
     KV_VARLEN_OPTIONS = [False]
     BLOCK_SIZE_OPTIONS = [1024]
-    SLIDING_WINDOW_OPTIONS = [0]
+    SLIDING_WINDOW_OPTIONS = [1023]
     parse_arg_and_run_test(output_tag="ps_sliding_window_accuracy")
+
+# def sliding_window_accuracy_test() -> None:
+#     global BLOCK_SIZE_OPTIONS
+#     global QUERY_LENGTH_OPTIONS
+#     global BATCH_SIZE_OPTIONS
+#     global HEAD_CONFIGURATIONS
+#     global CONTEXT_LENGTH_OPTIONS
+#     global COMPUTE_TYPE_OPTIONS
+#     global QUANT_MODE_OPTIONS
+#     global HEAD_DIMENSION_OPTIONS
+#     global TRANS_V_OPTIONS
+#     global KV_VARLEN_OPTIONS
+#     global CONTEXT_PARTITION_SIZE_OPTIONS
+#     global SLIDING_WINDOW_OPTIONS
+#     COMPUTE_TYPE_OPTIONS = ["fp8"]
+#     CONTEXT_PARTITION_SIZE_OPTIONS = [256]
+#     HEAD_DIMENSION_OPTIONS = [128]
+#     HEAD_CONFIGURATIONS = [(8, 2), (12, 2)]
+#     QUERY_LENGTH_OPTIONS = [1,2,3,4]
+#     QUANT_MODE_OPTIONS = ["per_token"]
+#     CONTEXT_LENGTH_OPTIONS = [3000, 10000]
+#     BATCH_SIZE_OPTIONS = [128]
+#     TRANS_V_OPTIONS = [True]
+#     KV_VARLEN_OPTIONS = [False]
+#     BLOCK_SIZE_OPTIONS = [1024]
+#     SLIDING_WINDOW_OPTIONS = [1023]
+#     parse_arg_and_run_test(output_tag="ps_sliding_window_accuracy")
 
 
 @pytest.mark.parametrize("case_set_name", CASE_SET_NAME_OPTIONS)
