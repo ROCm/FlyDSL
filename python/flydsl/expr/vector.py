@@ -10,6 +10,7 @@ wrappers around upstream ``_mlir.dialects.vector`` ops.
 
 from __future__ import annotations
 
+from .._mlir import ir
 from .._mlir.dialects import vector as _vector
 from .meta import traced_op
 
@@ -60,7 +61,7 @@ def store(value, memref, indices, *, loc=None, ip=None, **kwargs):
 # -----------------------------------------------------------------------------
 
 
-_KDYNAMIC = -0x8000_0000_0000_0000  # ShapedType::kDynamic sentinel
+_KDYNAMIC = ir.ShapedType.get_dynamic_size()
 
 
 @traced_op

@@ -44,27 +44,24 @@ def _make_rsrc(addr_i64):
 
 
 # ---- bulk data: 16-byte (128-bit) load / store ----------------------------
-# These accept a pre-built rsrc descriptor and a per-lane byte offset (i32).
+# These accept a pre-built rsrc descriptor and a per-lane element offset (i32).
 
-def _load_v4i32(rsrc, byte_off_i32):
+def _load_v4i32(rsrc, elem_off_i32):
     """Buffer-load vector<4xi32> (16 bytes) with pre-built descriptor."""
-    return buffer_ops.buffer_load(rsrc, byte_off_i32,
-                                  vec_width=4, dtype=T.i32,
-                                  offset_is_bytes=True)
+    return buffer_ops.buffer_load(rsrc, elem_off_i32,
+                                  vec_width=4, dtype=T.i32)
 
 
-def _store_v4i32(rsrc, byte_off_i32, data):
+def _store_v4i32(rsrc, elem_off_i32, data):
     """Buffer-store vector<4xi32> (16 bytes), cached."""
-    buffer_ops.buffer_store(data, rsrc, byte_off_i32,
-                            cache_modifier=_CM_CACHED,
-                            offset_is_bytes=True)
+    buffer_ops.buffer_store(data, rsrc, elem_off_i32,
+                            cache_modifier=_CM_CACHED)
 
 
-def _store_v4i32_nt(rsrc, byte_off_i32, v4i32_val):
+def _store_v4i32_nt(rsrc, elem_off_i32, v4i32_val):
     """Buffer-store vector<4xi32> nontemporal — bypasses L2 prefetcher."""
-    buffer_ops.buffer_store(v4i32_val, rsrc, byte_off_i32,
-                            cache_modifier=_CM_NT,
-                            offset_is_bytes=True)
+    buffer_ops.buffer_store(v4i32_val, rsrc, elem_off_i32,
+                            cache_modifier=_CM_NT)
     rocdl.s_waitcnt(0)
 
 
@@ -154,6 +151,7 @@ _SG_FLAG_OFF_B = _MAX_BLOCKS * 8 * 4 * 2       # 5120 when _MAX_BLOCKS=80
 # ---------------------------------------------------------------------------
 
 _BYTES_PER_PACK = 16  # sizeof(vector<4xi32>), the atomic load/store unit
+_ELEMS_PER_PACK = _BYTES_PER_PACK // 4  # i32 elements per pack
 
 
 def _elem_bytes(dtype_str: str) -> int:
@@ -431,7 +429,7 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
             p = afor.arguments[0]
             parity = afor.arguments[1]
 
-            off_i32 = p * ea.constant(_BYTES_PER_PACK, type=i32)
+            off_i32 = p * ea.constant(_ELEMS_PER_PACK, type=i32)
             raw = _load_v4i32(in_rsrc, off_i32)
             sm_base = parity * ea.constant(threads, type=i32)
             sm_idx = ea.index_cast(T.index, sm_base + lane_i32)
@@ -458,7 +456,7 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
                     out_bits = ev.bitcast(v4i32, acc)
                 else:
                     out_bits = ev.bitcast(v4i32, acc.truncf(v8half))
-                dst_off_i32 = p * ea.constant(_BYTES_PER_PACK, type=i32)
+                dst_off_i32 = p * ea.constant(_ELEMS_PER_PACK, type=i32)
                 _store_v4i32(out_rsrc, dst_off_i32, out_bits)
                 scf.YieldOp([])
 
@@ -542,7 +540,7 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
 
         def _build_reduce_body(cur, smem_base_expr=None):
             """Emit reduce body: load → smem → barrier1 → warp0 reduce → [barrier2]."""
-            off_i32 = cur * ea.constant(_BYTES_PER_PACK, type=i32)
+            off_i32 = cur * ea.constant(_ELEMS_PER_PACK, type=i32)
             raw = _load_v4i32(in_rsrc, off_i32)
             if smem_base_expr is None:
                 sm_idx = ea.index_cast(T.index, lane_i32)
@@ -573,7 +571,7 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
                 else:
                     out_raw = ev.bitcast(v4i32, acc.truncf(v8half))
                 rel_p = cur - start_p
-                rel_off_i32 = rel_p * ea.constant(_BYTES_PER_PACK, type=i32)
+                rel_off_i32 = rel_p * ea.constant(_ELEMS_PER_PACK, type=i32)
                 _store_v4i32(tmp_out_rsrc, rel_off_i32, out_raw)
                 scf.YieldOp([])
 
@@ -638,10 +636,10 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
                     dst_rank = sum_rw & ea.constant(world_size - 1, type=i32)
                 else:
                     dst_rank = _u(sum_rw) % ea.constant(world_size, type=i32)
-                src_off_i32 = cur * ea.constant(_BYTES_PER_PACK, type=i32)
+                src_off_i32 = cur * ea.constant(_ELEMS_PER_PACK, type=i32)
                 raw = _load_v4i32(tmp_rsrc, src_off_i32)
                 dst_pack = dst_rank * ea.constant(part_p, type=i32) + cur
-                dst_off_i32 = dst_pack * ea.constant(_BYTES_PER_PACK, type=i32)
+                dst_off_i32 = dst_pack * ea.constant(_ELEMS_PER_PACK, type=i32)
                 _store_v4i32(out_rsrc, dst_off_i32, raw)
                 scf.YieldOp([cur + stride_pack2])
         else:
@@ -665,10 +663,10 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
                         ok = _u(cur) < ea.constant(part_p, type=i32)
                     ifp = scf.IfOp(ok, results_=[], has_else=False)
                     with ir.InsertionPoint(ifp.then_block):
-                        src_off_i32 = cur * ea.constant(_BYTES_PER_PACK, type=i32)
+                        src_off_i32 = cur * ea.constant(_ELEMS_PER_PACK, type=i32)
                         raw = _load_v4i32(tmp_rsrcs[p], src_off_i32)
                         dst_pack_idx = ea.constant(p * part_p, type=i32) + cur
-                        dst_off_i32 = dst_pack_idx * ea.constant(_BYTES_PER_PACK, type=i32)
+                        dst_off_i32 = dst_pack_idx * ea.constant(_ELEMS_PER_PACK, type=i32)
                         _store_v4i32(out_rsrc, dst_off_i32, raw)
                         scf.YieldOp([])
                 scf.YieldOp([cur + stride_i32])
@@ -760,7 +758,7 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
         with ir.InsertionPoint(as1):
             cur = as1.arguments[0]
             stride_s1 = as1.arguments[1]
-            cur_off_i32 = cur * ea.constant(_BYTES_PER_PACK, type=i32)
+            cur_off_i32 = cur * ea.constant(_ELEMS_PER_PACK, type=i32)
             raw = _load_v4i32(inp_rsrc, cur_off_i32)
             rel_idx = cur - start_w
             dst_off = rank_i32 * ea.constant(part_p, type=i32) + rel_idx
@@ -768,7 +766,7 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
             with ir.InsertionPoint(if_tmp_ok.then_block):
                 scf.YieldOp([])
             with ir.InsertionPoint(if_tmp_ok.else_block):
-                dst_off_i32 = dst_off * ea.constant(_BYTES_PER_PACK, type=i32)
+                dst_off_i32 = dst_off * ea.constant(_ELEMS_PER_PACK, type=i32)
                 _store_v4i32(dst_tmp_rsrc, dst_off_i32, raw)
                 scf.YieldOp([])
             scf.YieldOp([cur + stride_s1, stride_s1])
@@ -813,7 +811,7 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
 
             # All warps load their chunk from tmp into smem
             src_off = warp_id * ea.constant(part_p, type=i32) + cur
-            src_off_i32 = src_off * ea.constant(_BYTES_PER_PACK, type=i32)
+            src_off_i32 = src_off * ea.constant(_ELEMS_PER_PACK, type=i32)
             raw_if = scf.IfOp(bad_load_addr, results_=[v4i32], has_else=True)
             with ir.InsertionPoint(raw_if.then_block):
                 scf.YieldOp([ea.constant_vector(0, v4i32)])
@@ -861,7 +859,7 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
             reduced_val = smem_ptr.load([res_read_idx])
 
             dst_out_off = rank_i32 * ea.constant(part_p, type=i32) + cur
-            dst_off_i32 = dst_out_off * ea.constant(_BYTES_PER_PACK, type=i32)
+            dst_off_i32 = dst_out_off * ea.constant(_ELEMS_PER_PACK, type=i32)
 
             if_out_ok = scf.IfOp(bad_out_addr, results_=[], has_else=True)
             with ir.InsertionPoint(if_out_ok.then_block):
