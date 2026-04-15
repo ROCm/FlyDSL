@@ -691,7 +691,6 @@ def compile_hgemm_splitk_gfx1250(
                 arg_b, (ks_begin + pf_k, blk_n), (tile_k, tile_n), (N, 1),
                 elem_bytes=elem_bytes, thread_id=tx, block_threads=block_threads)
 
-        # ====== Multi-stage pipeline ======
         acc_zero = arith.constant_vector(0.0, T.vec(8, T.f32))
         accs = [acc_zero] * n_accs
 
@@ -776,75 +775,94 @@ def compile_hgemm_splitk_gfx1250(
         dgroup1_a = desc_a_init.dgroup1
         dgroup1_b = desc_b_init.dgroup1
 
-        # --- Prologue ---
-        for i in range_constexpr(pre_loaded):
-            dg0_a = vector.from_elements(T.vec(4, T.i32), [
-                pred_const, stages_a_lds_addr[i], addr_lo_a, addr_hi_a])
-            dg0_b = vector.from_elements(T.vec(4, T.i32), [
-                pred_const, stages_b_lds_addr[i], addr_lo_b, addr_hi_b])
-            issue_tdm_loads(
-                tdm_ops.TDMDescriptor2D(dg0_a, dgroup1_a),
-                tdm_ops.TDMDescriptor2D(dg0_b, dgroup1_b),
-                wave_specialized=False)
-            addr_lo_a = arith.addi(addr_lo_a, adv_a_i32)
-            addr_lo_b = arith.addi(addr_lo_b, adv_b_i32)
+        # ====== Two-stage (double-buffer) pipeline ======
+        #
+        # fence(0) → issue_load → compute
+        #
+        # At each step:
+        #   1. pipeline_fence(0): wait ALL outstanding loads + barrier
+        #      - tensorcnt(0) ensures the current buffer's data is ready
+        #      - barrier ensures all waves finished previous compute
+        #        (so the OTHER buffer is free to be overwritten)
+        #   2. issue_load into the OTHER buffer (async, overlaps with compute)
+        #   3. compute from the CURRENT buffer
+        #
+        # Prologue:  issue load tile 0 → buf 0
+        # Main loop (unrolled by 2):
+        #   step 0: fence(0), issue load → buf 1, compute buf 0
+        #   step 1: fence(0), issue load → buf 0, compute buf 1
+        # Remainder: if odd tiles, one extra fence+issue+compute
+        # Epilogue:  fence(0), compute last buf (no new load)
 
-        pipeline_fence(outstanding=TDM_LOADS_PER_STEP * (num_buffers - 2),
-                       use_cluster=False)
+        # --- Prologue: issue load tile 0 into buffer 0 ---
+        dg0_a = vector.from_elements(T.vec(4, T.i32), [
+            pred_const, stages_a_lds_addr[0], addr_lo_a, addr_hi_a])
+        dg0_b = vector.from_elements(T.vec(4, T.i32), [
+            pred_const, stages_b_lds_addr[0], addr_lo_b, addr_hi_b])
+        issue_tdm_loads(
+            tdm_ops.TDMDescriptor2D(dg0_a, dgroup1_a),
+            tdm_ops.TDMDescriptor2D(dg0_b, dgroup1_b),
+            wave_specialized=False)
+        addr_lo_a = arith.addi(addr_lo_a, adv_a_i32)
+        addr_lo_b = arith.addi(addr_lo_b, adv_b_i32)
 
         # --- Main loop ---
-        _fence_outstanding = TDM_LOADS_PER_STEP * (num_buffers - 2)
+        _remaining = num_k_tiles - 1  # tiles left after prologue
+        _paired_iters = _remaining // 2
 
-        if loop_iters > 0:
+        if _paired_iters > 0:
             init_args = list(accs) + [addr_lo_a, addr_lo_b]
 
-            for loop_iter, state in range(0, loop_iters, 1, init=init_args):
+            for loop_iter, state in range(0, _paired_iters, 1, init=init_args):
                 accs_in = list(state[:n_accs])
                 cur_lo_a = state[n_accs]
                 cur_lo_b = state[n_accs + 1]
 
-                for buf_idx in range_constexpr(num_buffers):
-                    load_stage = (buf_idx + num_buffers - 1) % num_buffers
+                # Step 0: fence(0), issue load → buf 1, compute buf 0
+                pipeline_fence(outstanding=0, use_cluster=False)
 
-                    pipeline_fence_signal(
-                        outstanding=_fence_outstanding,
-                        use_cluster=False)
+                dg0_a = vector.from_elements(T.vec(4, T.i32), [
+                    pred_const, stages_a_lds_addr[1],
+                    cur_lo_a, addr_hi_a])
+                dg0_b = vector.from_elements(T.vec(4, T.i32), [
+                    pred_const, stages_b_lds_addr[1],
+                    cur_lo_b, addr_hi_b])
+                issue_tdm_loads(
+                    tdm_ops.TDMDescriptor2D(dg0_a, dgroup1_a),
+                    tdm_ops.TDMDescriptor2D(dg0_b, dgroup1_b),
+                    wave_specialized=False)
+                cur_lo_a = arith.addi(cur_lo_a, adv_a_i32)
+                cur_lo_b = arith.addi(cur_lo_b, adv_b_i32)
 
-                    addr_boxes = [[cur_lo_a], [cur_lo_b]]
+                rocdl.sched_barrier(0)
+                accs_in = compute_tile(
+                    accs_in,
+                    stages_a_idx[0],
+                    stages_b_idx[0])
+                hot_loop_scheduler()
 
-                    def _mid_tdm(
-                        _ls=load_stage,
-                        _ab=addr_boxes,
-                        _k_off=(loop_iter * arith.index(num_buffers * tile_k)
-                                + arith.index(buf_idx * tile_k)),
-                    ):
-                        dg0_a = vector.from_elements(T.vec(4, T.i32), [
-                            pred_const, stages_a_lds_addr[_ls],
-                            _ab[0][0], addr_hi_a])
-                        dg0_b = vector.from_elements(T.vec(4, T.i32), [
-                            pred_const, stages_b_lds_addr[_ls],
-                            _ab[1][0], addr_hi_b])
-                        issue_tdm_loads(
-                            tdm_ops.TDMDescriptor2D(dg0_a, dgroup1_a),
-                            tdm_ops.TDMDescriptor2D(dg0_b, dgroup1_b),
-                            wave_specialized=False)
-                        _ab[0][0] = arith.addi(_ab[0][0], adv_a_i32)
-                        _ab[1][0] = arith.addi(_ab[1][0], adv_b_i32)
-                        _l2_prefetch(_k_off)
+                # Step 1: fence(0), issue load → buf 0, compute buf 1
+                pipeline_fence(outstanding=0, use_cluster=False)
 
-                    def _fence_wait():
-                        pipeline_fence_wait(use_cluster=False)
+                dg0_a = vector.from_elements(T.vec(4, T.i32), [
+                    pred_const, stages_a_lds_addr[0],
+                    cur_lo_a, addr_hi_a])
+                dg0_b = vector.from_elements(T.vec(4, T.i32), [
+                    pred_const, stages_b_lds_addr[0],
+                    cur_lo_b, addr_hi_b])
+                issue_tdm_loads(
+                    tdm_ops.TDMDescriptor2D(dg0_a, dgroup1_a),
+                    tdm_ops.TDMDescriptor2D(dg0_b, dgroup1_b),
+                    wave_specialized=False)
+                cur_lo_a = arith.addi(cur_lo_a, adv_a_i32)
+                cur_lo_b = arith.addi(cur_lo_b, adv_b_i32)
 
-                    rocdl.sched_barrier(0)
-                    accs_in = compute_tile(
-                        accs_in,
-                        stages_a_idx[buf_idx],
-                        stages_b_idx[buf_idx],
-                        mid_compute_callback=_mid_tdm,
-                        fence_wait_fn=_fence_wait)
-                    cur_lo_a = addr_boxes[0][0]
-                    cur_lo_b = addr_boxes[1][0]
-                    hot_loop_scheduler()
+                rocdl.sched_barrier(0)
+                accs_in = compute_tile(
+                    accs_in,
+                    stages_a_idx[1],
+                    stages_b_idx[1])
+                hot_loop_scheduler()
 
                 results = yield list(accs_in) + [cur_lo_a, cur_lo_b]
 
@@ -852,73 +870,49 @@ def compile_hgemm_splitk_gfx1250(
             addr_lo_a = results[n_accs]
             addr_lo_b = results[n_accs + 1]
 
-        # --- Tail ---
-        _already_fenced = False
-        if loop_iters > 0:
+        # --- Remainder: one extra step if odd ---
+        _remainder = _remaining % 2
+        if _remainder == 1:
+            # fence(0), issue load → buf 1, compute buf 0
             pipeline_fence(outstanding=0, use_cluster=False)
-            _already_fenced = True
+
+            dg0_a = vector.from_elements(T.vec(4, T.i32), [
+                pred_const, stages_a_lds_addr[1],
+                addr_lo_a, addr_hi_a])
+            dg0_b = vector.from_elements(T.vec(4, T.i32), [
+                pred_const, stages_b_lds_addr[1],
+                addr_lo_b, addr_hi_b])
+            issue_tdm_loads(
+                tdm_ops.TDMDescriptor2D(dg0_a, dgroup1_a),
+                tdm_ops.TDMDescriptor2D(dg0_b, dgroup1_b),
+                wave_specialized=False)
+
+            rocdl.sched_barrier(0)
+            accs = compute_tile(
+                accs,
+                stages_a_idx[0],
+                stages_b_idx[0])
+            hot_loop_scheduler()
+
+        # --- Epilogue: fence(0), compute last buf, no new load ---
+        _last_buf = (num_k_tiles - 1) % 2
+        pipeline_fence(outstanding=0, use_cluster=False)
+
         epi_addrs_box = [None]
-        _tail_had_load = False
-        for _load_stage, _compute_stage, _outstanding in tail_plan:
-            if _outstanding == -1:
-                if _tail_had_load:
-                    pipeline_fence(outstanding=0, use_cluster=False)
-                elif not _already_fenced:
-                    pipeline_fence(outstanding=0, use_cluster=False)
-                if (use_tdm_store and not IS_SPLIT_K):
-                    accs = compute_tile(
-                        accs,
-                        stages_a_idx[_compute_stage],
-                        stages_b_idx[_compute_stage])
-                else:
-                    def _emit_epi_addrs():
-                        epi_addrs_box[0] = epilogue_prepare_addrs()
+        if use_tdm_store and not IS_SPLIT_K:
+            accs = compute_tile(
+                accs,
+                stages_a_idx[_last_buf],
+                stages_b_idx[_last_buf])
+        else:
+            def _emit_epi_addrs():
+                epi_addrs_box[0] = epilogue_prepare_addrs()
 
-                    accs = compute_tile(
-                        accs,
-                        stages_a_idx[_compute_stage],
-                        stages_b_idx[_compute_stage],
-                        emit_filler=_emit_epi_addrs)
-            else:
-                if _already_fenced:
-                    _already_fenced = False
-                else:
-                    pipeline_fence_signal(outstanding=_outstanding,
-                                          use_cluster=False)
-                    pipeline_fence_wait(use_cluster=False)
-
-                _tail_mid_cb = None
-                if _load_stage is not None:
-                    _tail_had_load = True
-                    _tail_ab = [[addr_lo_a], [addr_lo_b]]
-
-                    def _tail_mid(_ls=_load_stage, _ab=_tail_ab):
-                        dg0_a = vector.from_elements(T.vec(4, T.i32), [
-                            pred_const, stages_a_lds_addr[_ls],
-                            _ab[0][0], addr_hi_a])
-                        dg0_b = vector.from_elements(T.vec(4, T.i32), [
-                            pred_const, stages_b_lds_addr[_ls],
-                            _ab[1][0], addr_hi_b])
-                        issue_tdm_loads(
-                            tdm_ops.TDMDescriptor2D(dg0_a, dgroup1_a),
-                            tdm_ops.TDMDescriptor2D(dg0_b, dgroup1_b),
-                            wave_specialized=False)
-                        _ab[0][0] = arith.addi(_ab[0][0], adv_a_i32)
-                        _ab[1][0] = arith.addi(_ab[1][0], adv_b_i32)
-
-                    _tail_mid_cb = _tail_mid
-
-                rocdl.sched_barrier(0)
-                accs = compute_tile(
-                    accs,
-                    stages_a_idx[_compute_stage],
-                    stages_b_idx[_compute_stage],
-                    mid_compute_callback=_tail_mid_cb)
-                hot_loop_scheduler()
-
-                if _load_stage is not None:
-                    addr_lo_a = _tail_ab[0][0]
-                    addr_lo_b = _tail_ab[1][0]
+            accs = compute_tile(
+                accs,
+                stages_a_idx[_last_buf],
+                stages_b_idx[_last_buf],
+                emit_filler=_emit_epi_addrs)
 
         # --- Epilogue ---
         if IS_SPLIT_K:
