@@ -119,3 +119,35 @@ def bitcast(result_type, source, *, loc=None, ip=None):
         loc=loc,
         ip=ip,
     ).result
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Scalar ↔ vector bitcast (requires llvm.BitcastOp)
+# arith.bitcast and vector.BitCastOp do not support shape changes
+# (e.g. i32 ↔ vector<2xbf16>); llvm.BitcastOp is required.
+# ═══════════════════════════════════════════════════════════════════════
+
+def bitcast_i32_to_v2bf16(val, *, loc=None):
+    """Bitcast i32 scalar to vector<2xbf16> (bit-identical reinterpretation).
+
+    Used to reinterpret a packed i32 load result as two bf16 elements.
+    """
+    from . import arith as _arith_ext
+    from .._mlir.dialects import llvm as _llvm
+    from .._mlir.extras import types as _T
+
+    v2bf16 = _T.VectorType.get([2], _T.bf16())
+    return _llvm.BitcastOp(v2bf16, _arith_ext.unwrap(val, loc=loc), loc=loc).res
+
+
+def bitcast_v2bf16_to_i32(val, *, loc=None):
+    """Bitcast vector<2xbf16> to i32 (bit-identical reinterpretation).
+
+    Used to pack two bf16 accumulator results into an i32 for store.
+    """
+    from . import arith as _arith_ext
+    from .._mlir.dialects import llvm as _llvm
+    from .._mlir.ir import IntegerType
+
+    i32 = IntegerType.get_signless(32)
+    return _llvm.BitcastOp(i32, _arith_ext.unwrap(val, loc=loc), loc=loc).res
