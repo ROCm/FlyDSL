@@ -299,14 +299,12 @@ def compile_hk_bf16_gemm(
                                     lds_byte_offset=ping_b_off)
 
         def _make_dma_interleaved(k_pair_div4, lds_buf):
-            """Return dma_fn(phase_idx) issuing 2 DMA per phase (HK pattern).
-            Phase 0: A loads 0-1, Phase 1: A loads 2-3,
-            Phase 2: B loads 0-1, Phase 3: B loads 2-3.
+            """Return dma_fn(phase_idx) issuing 1 DMA per phase (8 phases = 8 DMA).
+            Matches HK: 1 DMA per mma_ABt phase.
+            Phases 0-7: A0, A1, A2, A3, B0, B1, B2, B3.
             """
             b_off = pong_b_off if lds_buf is lds_pong else ping_b_off
 
-            # Pre-compute all 8 DMA operations (4 for A + 4 for B)
-            # Then spread 2 per phase
             lds_base_a = memref_dialect.extract_aligned_pointer_as_index(lds_buf)
             lds_base_b = lds_base_a + arith.index(b_off)
             wave_off = rocdl.readfirstlane(
@@ -316,52 +314,44 @@ def compile_hk_bf16_gemm(
             k1_div4 = k_pair_div4 + _tile_k_div4
             _K_bytes_idx = fx.Index(_K_bytes)
 
-            def _issue_dma_pair(rsrc, base_row, lds_base_idx, load_start):
-                """Issue 2 DMA loads (load_start and load_start+1)."""
-                for i_off in _range_constexpr(2):
-                    i = load_start + i_off
-                    seq_pos = tx * dma_dwords + i * total_threads * dma_dwords
-                    block_dwords = _mi_block_bytes // 4
-                    block_id = seq_pos // block_dwords
-                    local_dw = seq_pos % block_dwords
-                    mi = block_id // 2
-                    k_idx = block_id % 2
-                    row_in_mi = local_dw // tile_k_dwords
-                    k_group_dw = local_dw % tile_k_dwords
+            def _issue_single_dma(rsrc, base_row, lds_base_idx, load_idx):
+                """Issue 1 DMA load (load_idx'th load of this matrix)."""
+                i = load_idx
+                seq_pos = tx * dma_dwords + i * total_threads * dma_dwords
+                block_dwords = _mi_block_bytes // 4
+                block_id = seq_pos // block_dwords
+                local_dw = seq_pos % block_dwords
+                mi = block_id // 2
+                k_idx = block_id % 2
+                row_in_mi = local_dw // tile_k_dwords
+                k_group_dw = local_dw % tile_k_dwords
 
-                    row_global = base_row + mi * 16 + row_in_mi
-                    col_bytes = k_group_dw * c4
-                    k_base = k0_div4 + k_idx * _tile_k_div4
-                    global_byte_idx = row_global * _K_bytes_idx + (k_base * c4 + col_bytes)
-                    global_offset = arith.index_cast(T.i32, global_byte_idx)
+                row_global = base_row + mi * 16 + row_in_mi
+                col_bytes = k_group_dw * c4
+                k_base = k0_div4 + k_idx * _tile_k_div4
+                global_byte_idx = row_global * _K_bytes_idx + (k_base * c4 + col_bytes)
+                global_offset = arith.index_cast(T.i32, global_byte_idx)
 
-                    if i_off == 0:
-                        lds_ptr_base = buffer_ops.create_llvm_ptr(
-                            arith.index_cast(T.i64, lds_base_idx), address_space=3)
-                        lds_ptr_0 = buffer_ops.get_element_ptr(lds_ptr_base, wave_off)
-                        lds_ptr = buffer_ops.get_element_ptr(
-                            lds_ptr_0, static_byte_offset=load_start * total_threads * dma_bytes)
-                    else:
-                        lds_ptr = buffer_ops.get_element_ptr(
-                            lds_ptr, static_byte_offset=total_threads * dma_bytes)
-                    rocdl.raw_ptr_buffer_load_lds(
-                        rsrc, lds_ptr,
-                        arith.constant(dma_bytes, type=T.i32),
-                        global_offset,
-                        arith.constant(0, type=T.i32),
-                        arith.constant(0, type=T.i32),
-                        arith.constant(0, type=T.i32),
-                    )
+                lds_ptr_base = buffer_ops.create_llvm_ptr(
+                    arith.index_cast(T.i64, lds_base_idx), address_space=3)
+                lds_ptr_0 = buffer_ops.get_element_ptr(lds_ptr_base, wave_off)
+                lds_ptr = buffer_ops.get_element_ptr(
+                    lds_ptr_0, static_byte_offset=load_idx * total_threads * dma_bytes)
+                rocdl.raw_ptr_buffer_load_lds(
+                    rsrc, lds_ptr,
+                    arith.constant(dma_bytes, type=T.i32),
+                    global_offset,
+                    arith.constant(0, type=T.i32),
+                    arith.constant(0, type=T.i32),
+                    arith.constant(0, type=T.i32),
+                )
 
             def _dma_phase(phase_idx):
-                if phase_idx == 0:
-                    _issue_dma_pair(a_rsrc, bx_m, lds_base_a, 0)  # A loads 0-1
-                elif phase_idx == 1:
-                    _issue_dma_pair(a_rsrc, bx_m, lds_base_a, 2)  # A loads 2-3
-                elif phase_idx == 2:
-                    _issue_dma_pair(b_rsrc, by_n, lds_base_b, 0)  # B loads 0-1
-                elif phase_idx == 3:
-                    _issue_dma_pair(b_rsrc, by_n, lds_base_b, 2)  # B loads 2-3
+                # 8 phases: A has 4 loads, B has 4 loads
+                if phase_idx < 4:
+                    _issue_single_dma(a_rsrc, bx_m, lds_base_a, phase_idx)
+                else:
+                    _issue_single_dma(b_rsrc, by_n, lds_base_b, phase_idx - 4)
             return _dma_phase
 
         # ---- LDS read: use ONE stage memref for ALL sub-regions ----
@@ -396,30 +386,17 @@ def compile_hk_bf16_gemm(
 
         mfma_k32 = _make_mfma()
 
-        # ---- HK compute: 4 phases with data reuse across phases ----
-        # Phase 0: load A_half0 (4×2k=8) + B_half0 (2×2k=4) = 12 reads, 16 MFMAs
-        # Phase 1: reuse A_half0, load B_half1 (2×2k=4) = 4 reads, 16 MFMAs
-        # Phase 2: load A_half1 (4×2k=8), reuse B_half0 = 8 reads, 16 MFMAs
-        # Phase 3: reuse A_half1, reuse B_half1 = 0 reads, 16 MFMAs
-        # Total: 24 reads per K-pair (matches HK), not 48.
+        # ---- HK compute: 8 phases (1 K-tile per phase), data reuse ----
+        # Matches HK's mma_ABt: 8 MFMAs per phase (m_half × n_half = 4×2)
 
-        def _mfma_phase(accs, a_packs_k0, a_packs_k1, b_packs_k0, b_packs_k1,
-                        mi_off, ni_off, mi_cnt, ni_cnt):
-            """16 MFMAs: 8 from k0 + 8 from k1, using pre-loaded A/B packs."""
+        def _mfma_phase_1k(accs, a_packs, b_packs, mi_off, ni_off, mi_cnt, ni_cnt):
+            """8 MFMAs from one K-tile, using pre-loaded A/B packs."""
             current_accs = list(accs)
             rocdl.s_setprio(1)
             for mi_local in _range_constexpr(mi_cnt):
-                a0, a1 = a_packs_k0[mi_local]
+                a0, a1 = a_packs[mi_local]
                 for ni_local in _range_constexpr(ni_cnt):
-                    b0, b1 = b_packs_k0[ni_local]
-                    mi = mi_off + mi_local
-                    ni = ni_off + ni_local
-                    current_accs[mi * num_acc_n + ni] = mfma_k32(
-                        current_accs[mi * num_acc_n + ni], a0, a1, b0, b1)
-            for mi_local in _range_constexpr(mi_cnt):
-                a0, a1 = a_packs_k1[mi_local]
-                for ni_local in _range_constexpr(ni_cnt):
-                    b0, b1 = b_packs_k1[ni_local]
+                    b0, b1 = b_packs[ni_local]
                     mi = mi_off + mi_local
                     ni = ni_off + ni_local
                     current_accs[mi * num_acc_n + ni] = mfma_k32(
@@ -456,27 +433,25 @@ def compile_hk_bf16_gemm(
         # This gives ds_read offsets: mi*32*32 + k_idx*16*32 = mi*1024 + k_idx*512
         # In bytes: mi*2048 + k_idx*1024 — matches HK pattern!
 
-        def _load_b_half(ni_off, lds_stage):
-            """Load n_half B packs from interleaved LDS. B loaded FIRST."""
-            b0 = []; b1 = []
+        _b_row_off = _b_elem_off // lds_k_dim  # virtual row offset for B region
+
+        def _load_b(ni_off, k_idx, lds_stage):
+            """Load n_half B packs for ONE K-tile from interleaved LDS."""
+            packs = []
             for ni_local in _range_constexpr(n_half):
                 ni = ni_off + ni_local
-                # B data starts at _b_elem_off within the stage
-                b_row = row_b_base + ni * 32 + _b_elem_off // lds_k_dim
-                b0.append(_lds_load_pack(b_row, lds_stage))
-                b1.append(_lds_load_pack(b_row + 16, lds_stage))
-            return b0, b1
+                b_row = row_b_base + ni * 32 + k_idx * 16 + _b_row_off
+                packs.append(_lds_load_pack(b_row, lds_stage))
+            return packs
 
-        def _load_a_half(mi_off, lds_stage):
-            """Load m_half A packs from interleaved LDS. A loaded SECOND."""
-            a0 = []; a1 = []
+        def _load_a(mi_off, k_idx, lds_stage):
+            """Load m_half A packs for ONE K-tile from interleaved LDS."""
+            packs = []
             for mi_local in _range_constexpr(m_half):
                 mi = mi_off + mi_local
-                # A data starts at offset 0 within the stage
-                a_row = row_a_base + mi * 32
-                a0.append(_lds_load_pack(a_row, lds_stage))
-                a1.append(_lds_load_pack(a_row + 16, lds_stage))
-            return a0, a1
+                a_row = row_a_base + mi * 32 + k_idx * 16
+                packs.append(_lds_load_pack(a_row, lds_stage))
+            return packs
 
         # HK lgkmcnt(8): wait for ds_reads, leave 8 DMA events pending
         # Encoding: vmcnt=63(max), expcnt=7(max), lgkmcnt=8
@@ -490,55 +465,58 @@ def compile_hk_bf16_gemm(
             rocdl.s_waitcnt(0xC07F)  # lgkmcnt(0) — drain all
 
         def compute_tile_2k(accs, lds_stage, dma_fn=None):
-            """4 phases × 16 MFMAs = 64 MFMAs, with data reuse + LDS prefetch.
-            HK pattern: next-phase ds_reads issued BEFORE inter-phase barrier,
-            so reads overlap with barrier sync and complete before MFMAs.
-            All ds_reads from ONE stage memref → shared base VGPR.
+            """8 phases × 8 MFMAs = 64 MFMAs. Matches HK's exact structure:
+            K-tile 0 phases 1-4, then K-tile 1 phases 5-8.
+            Each phase: ds_reads → 1 DMA → barrier → lgkmcnt(0) → 8 MFMAs → barrier.
+            sched_barrier(0) after phases 1,3,5,7 (C[0][0] and C[1][0]).
+            vmcnt(6) before phases 4,8 (C[1][1]).
             """
-            # Phase 0: 12 reads (B first, then A — HK pattern) + 2 DMA + MFMAs
-            b_h0_k0, b_h0_k1 = _load_b_half(0, lds_stage)
-            a_h0_k0, a_h0_k1 = _load_a_half(0, lds_stage)
+            # Phase 0: load B_h0 + A_h0 (both k0 and k1) + 1 DMA
+            b_h0_k0 = _load_b(0, 0, lds_stage)
+            b_h0_k1 = _load_b(0, 1, lds_stage)
+            a_h0_k0 = _load_a(0, 0, lds_stage)
+            a_h0_k1 = _load_a(0, 1, lds_stage)
             rocdl.sched_barrier(0)
             if dma_fn is not None:
                 dma_fn(0)
             rocdl.sched_barrier(0)
             _wait_reads_then_barrier(dma_fn is not None)
-            accs = _mfma_phase(accs, a_h0_k0, a_h0_k1, b_h0_k0, b_h0_k1,
-                               0, 0, m_half, n_half)
+            accs = _mfma_phase_1k(accs, a_h0_k0, b_h0_k0, 0, 0, m_half, n_half)
+            accs = _mfma_phase_1k(accs, a_h0_k1, b_h0_k1, 0, 0, m_half, n_half)
+            rocdl.sched_barrier(0)
 
-            # Prefetch Phase 1 B_half1 reads BEFORE inter-phase barrier
-            b_h1_k0, b_h1_k1 = _load_b_half(n_half, lds_stage)
+            # Phase 1: load B_h1 + 1 DMA, reuse A_h0
+            b_h1_k0 = _load_b(n_half, 0, lds_stage)
+            b_h1_k1 = _load_b(n_half, 1, lds_stage)
             rocdl.sched_barrier(0)
             if dma_fn is not None:
                 dma_fn(1)
             rocdl.sched_barrier(0)
-
-            # Phase 1: barrier + MFMAs
             _wait_reads_then_barrier(dma_fn is not None)
-            accs = _mfma_phase(accs, a_h0_k0, a_h0_k1, b_h1_k0, b_h1_k1,
-                               0, n_half, m_half, n_half)
+            accs = _mfma_phase_1k(accs, a_h0_k0, b_h1_k0, 0, n_half, m_half, n_half)
+            accs = _mfma_phase_1k(accs, a_h0_k1, b_h1_k1, 0, n_half, m_half, n_half)
 
-            # Prefetch Phase 2 A_half1 reads
-            a_h1_k0, a_h1_k1 = _load_a_half(m_half, lds_stage)
+            # Phase 2: load A_h1 + 1 DMA, reuse B_h0
+            a_h1_k0 = _load_a(m_half, 0, lds_stage)
+            a_h1_k1 = _load_a(m_half, 1, lds_stage)
             rocdl.sched_barrier(0)
             if dma_fn is not None:
                 dma_fn(2)
             rocdl.sched_barrier(0)
-
-            # Phase 2: barrier + MFMAs, reuse B_half0
             _wait_reads_then_barrier(dma_fn is not None)
-            accs = _mfma_phase(accs, a_h1_k0, a_h1_k1, b_h0_k0, b_h0_k1,
-                               m_half, 0, m_half, n_half)
+            accs = _mfma_phase_1k(accs, a_h1_k0, b_h0_k0, m_half, 0, m_half, n_half)
+            accs = _mfma_phase_1k(accs, a_h1_k1, b_h0_k1, m_half, 0, m_half, n_half)
+            rocdl.sched_barrier(0)
 
-            # Phase 3: 1 DMA, reuse all data
+            # Phase 3: 1 DMA, reuse all
             if dma_fn is not None:
                 dma_fn(3)
                 rocdl.sched_barrier(0)
                 _wait_reads_then_barrier(True)
             else:
                 rocdl.s_barrier()
-            accs = _mfma_phase(accs, a_h1_k0, a_h1_k1, b_h1_k0, b_h1_k1,
-                               m_half, n_half, m_half, n_half)
+            accs = _mfma_phase_1k(accs, a_h1_k0, b_h1_k0, m_half, n_half, m_half, n_half)
+            accs = _mfma_phase_1k(accs, a_h1_k1, b_h1_k1, m_half, n_half, m_half, n_half)
             return accs
 
         # ---- Epilogue ----
