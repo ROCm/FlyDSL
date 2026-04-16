@@ -1612,6 +1612,10 @@ def compile_pa_decode_sw_reduce(
     block_threads = head_size
     assert block_threads > 0, "head_size must be positive"
     assert block_threads <= 1024, "head_size must fit in one workgroup"
+    arch = get_hip_arch()
+    allocator = SmemAllocator(None, arch=arch, global_sym_name="pa_ps_sw_reduce_smem")
+    part_weights_off = allocator._align(allocator.ptr, 16)
+    allocator.ptr = part_weights_off + max_context_partition_num * 4
 
     @flyc.kernel(known_block_size=(block_threads, 1, 1))
     def pa_decode_sw_reduce_kernel(
@@ -1630,12 +1634,17 @@ def compile_pa_decode_sw_reduce(
         stride_logits_head: Int32,
         stride_logits_part: Int32,
         stride_logits_group: Int32,
-        context_partition_num: fx.Constexpr[Int32],
     ):
         tid = gpu.thread_idx.x
         batch_idx = gpu.block_idx.x
         kv_head_idx = gpu.block_idx.y
         eqgs_idx = gpu.block_idx.z
+
+        smem_base = allocator.get_base()
+        part_weights_lds = SmemPtr(
+            smem_base, part_weights_off, T.f32, shape=(max_context_partition_num,)
+        )
+        part_weights_lds.get()
 
         out_rsrc = buffer_ops.create_buffer_resource(output_ptr, max_size=True)
         es_rsrc = buffer_ops.create_buffer_resource(exp_sums_ptr, max_size=True)
@@ -1647,64 +1656,124 @@ def compile_pa_decode_sw_reduce(
         c_neg_inf = arith.constant(float("-inf"), type=T.f32)
         c_log2e = arith.constant(LOG2E, type=T.f32)
         fm_fast = arith.FastMathFlags.fast
-        c_qgs = arith.constant(query_group_size, type=T.i32)
+        c_zero_i = arith.constant(0, type=T.i32)
+        if max_context_partition_num <= WARP_SIZE:
+            c_w = arith.constant(WARP_SIZE, type=T.i32)
+            c_wave_mask = arith.constant(WARP_SIZE - 1, type=T.i32)
+            c_wave_shift = arith.constant(6, type=T.i32)
+            c_part_num = arith.constant(max_context_partition_num, type=T.i32)
+            lane = tid & c_wave_mask
+            warp_id = tid >> c_wave_shift
 
-        query_idx = eqgs_idx // c_qgs
-        group_idx = eqgs_idx % c_qgs
+            def _wave_reduce_max(val):
+                red = val
+                for sh in [32, 16, 8, 4, 2, 1]:
+                    red = red.maximumf(
+                        red.shuffle_xor(arith.constant(sh, type=T.i32), c_w)
+                    )
+                return red
 
-        global_max = c_neg_inf
-        global_exp_sum = c_zero_f
-        part_sum_cache = []
-        part_max_cache = []
-        for part_idx in range_constexpr(max_context_partition_num):
-            part_i32 = arith.constant(part_idx, type=T.i32)
-            es_off = (
-                batch_idx * stride_exp_sums_seq
-                + kv_head_idx * stride_exp_sums_head
-                + part_i32 * stride_exp_sums_part
-                + eqgs_idx
-            )
-            part_sum_raw = buffer_ops.buffer_load(es_rsrc, es_off, vec_width=1, dtype=T.f32)
-            part_max_raw = buffer_ops.buffer_load(ml_rsrc, es_off, vec_width=1, dtype=T.f32)
+            def _wave_reduce_sum(val):
+                red = val
+                for sh in [32, 16, 8, 4, 2, 1]:
+                    red = red.addf(
+                        red.shuffle_xor(arith.constant(sh, type=T.i32), c_w),
+                        fastmath=fm_fast,
+                    )
+                return red
 
-            part_valid = arith.cmpi(arith.CmpIPredicate.slt, part_i32, context_partition_num)
-            part_max = arith.select(part_valid, part_max_raw, c_neg_inf)
-            part_sum = arith.select(part_valid, part_sum_raw, c_zero_f)
-            part_sum_cache.append(part_sum_raw)
-            part_max_cache.append(part_max_raw)
+            # Fast path: warp 0 generates one weight per partition lane.
+            if arith.cmpi(arith.CmpIPredicate.eq, warp_id, c_zero_i):
+                lane_in_range = arith.cmpi(arith.CmpIPredicate.slt, lane, c_part_num)
+                part_i32 = arith.select(lane_in_range, lane, c_zero_i)
+                es_off = (
+                    batch_idx * stride_exp_sums_seq
+                    + kv_head_idx * stride_exp_sums_head
+                    + part_i32 * stride_exp_sums_part
+                    + eqgs_idx
+                )
+                part_sum_raw = buffer_ops.buffer_load(
+                    es_rsrc, es_off, vec_width=1, dtype=T.f32
+                )
+                part_max_raw = buffer_ops.buffer_load(
+                    ml_rsrc, es_off, vec_width=1, dtype=T.f32
+                )
+                part_sum = arith.select(lane_in_range, part_sum_raw, c_zero_f)
+                part_max = arith.select(lane_in_range, part_max_raw, c_neg_inf)
 
-            new_global_max = global_max.maximumf(part_max)
-            update_scale = arith.select(
-                global_max > c_neg_inf,
-                ((global_max - new_global_max) * c_log2e).exp2(fastmath=fm_fast),
-                c_zero_f,
-            )
-            part_scale = arith.select(
-                part_valid,
-                ((part_max - new_global_max) * c_log2e).exp2(fastmath=fm_fast),
-                c_zero_f,
-            )
-            global_exp_sum = update_scale * global_exp_sum + part_sum * part_scale
-            global_max = new_global_max
+                global_max = _wave_reduce_max(part_max)
+                part_scale = arith.select(
+                    lane_in_range,
+                    ((part_max - global_max) * c_log2e).exp2(fastmath=fm_fast),
+                    c_zero_f,
+                )
+                scaled_sum = part_sum * part_scale
+                global_exp_sum = _wave_reduce_sum(scaled_sum)
+                safe_global_exp_sum = arith.select(
+                    global_exp_sum > c_zero_f,
+                    global_exp_sum,
+                    c_one_f,
+                )
 
-        safe_global_exp_sum = arith.select(
-            global_exp_sum > c_zero_f,
-            global_exp_sum,
-            c_one_f,
-        )
+                if lane_in_range:
+                    weight = scaled_sum / safe_global_exp_sum
+                    part_idx_idx = arith.index_cast(T.index, lane)
+                    part_weights_lds.store(weight, [part_idx_idx])
+        else:
+            # Fallback for unusually large sliding-window partition counts.
+            if arith.cmpi(arith.CmpIPredicate.eq, tid, c_zero_i):
+                global_max = c_neg_inf
+                global_exp_sum = c_zero_f
+
+                for part_idx in range_constexpr(max_context_partition_num):
+                    part_i32 = arith.constant(part_idx, type=T.i32)
+                    es_off = (
+                        batch_idx * stride_exp_sums_seq
+                        + kv_head_idx * stride_exp_sums_head
+                        + part_i32 * stride_exp_sums_part
+                        + eqgs_idx
+                    )
+                    part_sum = buffer_ops.buffer_load(es_rsrc, es_off, vec_width=1, dtype=T.f32)
+                    part_max = buffer_ops.buffer_load(ml_rsrc, es_off, vec_width=1, dtype=T.f32)
+
+                    new_global_max = global_max.maximumf(part_max)
+                    update_scale = arith.select(
+                        global_max > c_neg_inf,
+                        ((global_max - new_global_max) * c_log2e).exp2(fastmath=fm_fast),
+                        c_zero_f,
+                    )
+                    part_scale = ((part_max - new_global_max) * c_log2e).exp2(fastmath=fm_fast)
+                    global_exp_sum = update_scale * global_exp_sum + part_sum * part_scale
+                    global_max = new_global_max
+
+                safe_global_exp_sum = arith.select(
+                    global_exp_sum > c_zero_f,
+                    global_exp_sum,
+                    c_one_f,
+                )
+
+                for part_idx in range_constexpr(max_context_partition_num):
+                    part_i32 = arith.constant(part_idx, type=T.i32)
+                    part_idx_idx = arith.constant(part_idx, index=True)
+                    es_off = (
+                        batch_idx * stride_exp_sums_seq
+                        + kv_head_idx * stride_exp_sums_head
+                        + part_i32 * stride_exp_sums_part
+                        + eqgs_idx
+                    )
+                    part_sum = buffer_ops.buffer_load(es_rsrc, es_off, vec_width=1, dtype=T.f32)
+                    part_max = buffer_ops.buffer_load(ml_rsrc, es_off, vec_width=1, dtype=T.f32)
+                    part_scale = ((part_max - global_max) * c_log2e).exp2(fastmath=fm_fast)
+                    weight = (part_sum * part_scale) / safe_global_exp_sum
+                    part_weights_lds.store(weight, [part_idx_idx])
+
+        gpu.barrier()
 
         acc = c_zero_f
         for part_idx in range_constexpr(max_context_partition_num):
             part_i32 = arith.constant(part_idx, type=T.i32)
-            part_sum_raw = part_sum_cache[part_idx]
-            part_max_raw = part_max_cache[part_idx]
-            part_valid = arith.cmpi(arith.CmpIPredicate.slt, part_i32, context_partition_num)
-            part_scale = arith.select(
-                part_valid,
-                ((part_max_raw - global_max) * c_log2e).exp2(fastmath=fm_fast),
-                c_zero_f,
-            )
-            weight = (part_sum_raw * part_scale) / safe_global_exp_sum
+            part_idx_idx = arith.constant(part_idx, index=True)
+            weight = part_weights_lds.load([part_idx_idx])
             logits_off = (
                 batch_idx * stride_logits_seq
                 + kv_head_idx * stride_logits_head
@@ -1716,8 +1785,11 @@ def compile_pa_decode_sw_reduce(
                 logits_rsrc, logits_off, vec_width=1, dtype=T.bf16
             )
             part_logits = _mlir_arith.ExtFOp(T.f32, part_logits_bf16).result
-            acc = acc + arith.select(part_valid, part_logits * weight, c_zero_f)
+            acc = acc + part_logits * weight
 
+        c_qgs = arith.constant(query_group_size, type=T.i32)
+        query_idx = eqgs_idx // c_qgs
+        group_idx = eqgs_idx % c_qgs
         out_off = (
             batch_idx * stride_output_bs
             + query_idx * stride_output_len
@@ -1750,11 +1822,14 @@ def compile_pa_decode_sw_reduce(
         stride_logits_head,
         stride_logits_part,
         stride_logits_group,
-        context_partition_num,
         batch_size,
         num_kv_heads,
         stream: fx.Stream = fx.Stream(None),
     ):
+        allocator.finalized = False
+        ctx = CompilationContext.get_current()
+        with ir.InsertionPoint(ctx.gpu_module_body):
+            allocator.finalize()
         pa_decode_sw_reduce_kernel(
             output,
             exp_sums,
@@ -1771,7 +1846,6 @@ def compile_pa_decode_sw_reduce(
             stride_logits_head,
             stride_logits_part,
             stride_logits_group,
-            context_partition_num,
         ).launch(
             grid=(batch_size, num_kv_heads, query_seq_len * query_group_size),
             block=(block_threads, 1, 1),
@@ -1781,6 +1855,7 @@ def compile_pa_decode_sw_reduce(
     return {
         "launch": launch_pa_decode_sw_reduce,
         "kernel": pa_decode_sw_reduce_kernel,
+        "allocator": allocator,
     }
 
 
@@ -1952,7 +2027,6 @@ def pa_decode_ps_launch(
             temporary_output.stride(1),
             temporary_output.stride(2),
             temporary_output.stride(3),
-            max_context_partition_num,
             batch_size,
             num_kv_heads,
             s,
@@ -2410,16 +2484,16 @@ def compile_pa_decode_sw(
             _run_valid_partition()
 
     @flyc.jit
-    def launch_pa_decode_sw(es, ml, to, q, kc, vc, bt, cl,
-                               ks, vs,
-                               s_q_seq, s_q_head,
-                               s_k_block, s_k_head,
-                               s_v_block, s_v_head,
-                               s_es_seq, s_es_head, s_es_part,
-                               s_to_seq, s_to_head, s_to_part, s_to_group,
-                               s_bt_seq,
-                               s_ks_block, s_ks_head,
-                               gx, gy, gz,
+    def launch_pa_decode_sw(es: fx.Tensor, ml: fx.Tensor, to: fx.Tensor, q: fx.Tensor, kc: fx.Tensor, vc: fx.Tensor, bt: fx.Tensor, cl: fx.Tensor,
+                               ks: fx.Tensor, vs: fx.Tensor,
+                               s_q_seq: Int32, s_q_head: Int32,
+                               s_k_block: Int32, s_k_head: Int32,
+                               s_v_block: Int32, s_v_head: Int32,
+                               s_es_seq: Int32, s_es_head: Int32, s_es_part: Int32,
+                               s_to_seq: Int32, s_to_head: Int32, s_to_part: Int32, s_to_group: Int32,
+                               s_bt_seq: Int32,
+                               s_ks_block: Int32, s_ks_head: Int32,
+                               gx: Int32, gy: Int32, gz: Int32,
                                stream: fx.Stream = fx.Stream(None)):
         allocator.finalized = False
         ctx = CompilationContext.get_current()

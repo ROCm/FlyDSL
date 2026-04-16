@@ -479,8 +479,8 @@ def shuffle_value_cache_layout(value_cache: torch.Tensor) -> torch.Tensor:
 def measure_us(
     fn,
     *,
-    warmup: int = 1,
-    iters: int = 3,
+    warmup: int = 3,
+    iters: int = 10,
     use_cuda_graph: Optional[bool] = None,
 ) -> float:
     if use_cuda_graph is None:
@@ -503,7 +503,11 @@ def measure_us(
                 with torch.cuda.graph(graph, stream=capture_stream):
                     fn()
             torch.cuda.current_stream().wait_stream(capture_stream)
+            if warmup > 0:
+                for _ in range(warmup):
+                    graph.replay()
             torch.cuda.synchronize()
+
         except RuntimeError as exc:
             graph = None
             print(
