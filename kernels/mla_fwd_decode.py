@@ -3,7 +3,37 @@
 
 """FlyDSL MLA decode launcher.  Uses aiter for device queries."""
 
+import functools
+import re
+import shutil
+import subprocess
+
 import torch
+
+
+@functools.lru_cache(maxsize=1)
+def _get_lds_size_per_cu() -> int:
+    """Return the LDS (shared memory) size per CU in bytes.
+
+    Parses the GROUP segment pool size from ``rocminfo`` output.
+    """
+    rocminfo = shutil.which("rocminfo")
+    if rocminfo is None:
+        raise RuntimeError("rocminfo not found on PATH")
+    result = subprocess.run(
+        [rocminfo], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
+    devices = re.split(r"Agent\s*\d+", result.stdout)
+    for device in devices:
+        if "Device Type" not in device or device.find("GPU") == -1:
+            continue
+        lines = device.split("\n")
+        for i, line in enumerate(lines):
+            if re.search(r"Segment\s*:\s*GROUP", line) and i + 1 < len(lines):
+                m = re.search(r"Size\s*:\s*(\d+)", lines[i + 1])
+                if m:
+                    return int(m.group(1)) * 1024  # KB -> bytes
+    raise RuntimeError("No GPU GROUP segment found in rocminfo output")
 
 
 def _is_fp8(dtype: torch.dtype) -> bool:
@@ -87,10 +117,10 @@ def flydsl_mla_fwd_decode(
         work_info_flat = work_info_set.contiguous().view(-1)
         kv_idx_flat = kv_page_indices.contiguous()
 
-        from aiter.jit.utils.chip_info import get_cu_num, get_lds_size_per_cu
+        from aiter.jit.utils.chip_info import get_cu_num
 
         num_cus = get_cu_num()
-        lds_size = get_lds_size_per_cu() // OCCUPANCY
+        lds_size = _get_lds_size_per_cu() // OCCUPANCY
 
         launch_mla_fwd_decode_m16x8_fp8_fp8(
             query_flat,
