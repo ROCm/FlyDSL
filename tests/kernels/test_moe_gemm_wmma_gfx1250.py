@@ -31,7 +31,7 @@ for _p in reversed(_PYTHON_CANDIDATES):
         sys.path.insert(0, _p)
 
 from tests.kernels.test_ref import torch_moe_gemm1, torch_moe_gemm2
-from tests.test_common import verify_output, run_perftest
+from tests.test_common import verify_output
 from flydsl.runtime.device import get_rocm_arch
 from tests.kernels.benchmark_common import (
     bench_kernel_us as _bench_kernel_us,
@@ -297,9 +297,7 @@ def run_moe_stage1(
     routing_in: Optional[RoutingBuffers] = None,
     return_outputs: bool = False,
     skip_ref: bool = False,
-    test_graph: bool = False,
     waves_per_eu: Optional[int] = None,
-    benchmark_mode: bool = False,
     flush_l2: bool = True,
     num_buffers: int = 1,
     use_tdm_gather: bool = True,
@@ -420,36 +418,19 @@ def run_moe_stage1(
             stream,
         )
 
-    if bool(benchmark_mode) and not bool(test_graph):
-        def _prep_stage1():
-            out.zero_()
+    def _prep_stage1():
+        out.zero_()
 
-        def _run_stage1():
-            launch(out, x_q, w_kernel, scale_x_1d, scale_w1_1d, sorted_token_ids, sorted_expert_ids, sorted_weights_1d)
+    def _run_stage1():
+        launch(out, x_q, w_kernel, scale_x_1d, scale_w1_1d, sorted_token_ids, sorted_expert_ids, sorted_weights_1d)
 
-        us = _bench_kernel_us(
-            _run_stage1,
-            warmup=int(num_warmup),
-            iters=int(max(1, num_iters)),
-            flush_l2=bool(flush_l2),
-            prep_fn=_prep_stage1,
-        )
-        torch.cuda.synchronize()
-    else:
-        _, us = run_perftest(
-            launch,
-            out,
-            x_q,
-            w_kernel,
-            scale_x_1d,
-            scale_w1_1d,
-            sorted_token_ids,
-            sorted_expert_ids,
-            sorted_weights_1d,
-            num_iters=int(num_iters),
-            num_warmup=int(num_warmup),
-            testGraph=test_graph,
-        )
+    us = _bench_kernel_us(
+        _run_stage1,
+        warmup=int(num_warmup),
+        iters=int(max(1, num_iters)),
+        flush_l2=bool(flush_l2),
+        prep_fn=_prep_stage1,
+    )
     torch.cuda.synchronize()
 
     if not bool(skip_ref):
@@ -488,29 +469,21 @@ def run_moe_stage1(
     read_bw_gbs = read_bytes / 1e9 / (us / 1e6)
     write_bw_gbs = write_bytes / 1e9 / (us / 1e6)
 
-    if bool(benchmark_mode):
-        print(
-            f"FlyDSL MoE stage1[{in_dtype}] benchmark | "
-            f"shape=({tokens},{model_dim},{inter_dim}), E={experts}, K={topk}, "
-            f"tile=({tile_m},{tile_n},{tile_k})"
-        )
-        print(
-            f"  kernel: {us:.1f} us ({us / 1e3:.4f} ms) | "
-            f"{tflops:.2f} TFLOPS(logical, M={tokens*topk}) | {tbps:.3f} TB/s"
-        )
-        print(
-            f"  bandwidth: read {read_bw_gbs:.1f} GB/s + write {write_bw_gbs:.1f} GB/s | "
-            f"bytes: x={bytes_x/1e6:.1f}MB w={bytes_w/1e6:.1f}MB "
-            f"sx={bytes_scale_x/1e6:.1f}MB sw={bytes_scale_w/1e6:.1f}MB "
-            f"route={bytes_route/1e6:.1f}MB out={bytes_out/1e6:.1f}MB"
-        )
-    else:
-        print(
-            f"FlyDSL MoE stage1[{in_dtype}]: "
-            f"{us:.1f} us, "
-            f"{tflops:.2f} TFLOPS(logical, M={tokens*topk}), "
-            f"{tbps:.3f} TB/s (doweight_stage1={doweight_stage1})"
-        )
+    print(
+        f"FlyDSL MoE stage1[{in_dtype}] benchmark | "
+        f"shape=({tokens},{model_dim},{inter_dim}), E={experts}, K={topk}, "
+        f"tile=({tile_m},{tile_n},{tile_k})"
+    )
+    print(
+        f"  kernel: {us:.1f} us ({us / 1e3:.4f} ms) | "
+        f"{tflops:.2f} TFLOPS(logical, M={tokens*topk}) | {tbps:.3f} TB/s"
+    )
+    print(
+        f"  bandwidth: read {read_bw_gbs:.1f} GB/s + write {write_bw_gbs:.1f} GB/s | "
+        f"bytes: x={bytes_x/1e6:.1f}MB w={bytes_w/1e6:.1f}MB "
+        f"sx={bytes_scale_x/1e6:.1f}MB sw={bytes_scale_w/1e6:.1f}MB "
+        f"route={bytes_route/1e6:.1f}MB out={bytes_out/1e6:.1f}MB"
+    )
     if return_outputs:
         return out, us
     return None
@@ -548,9 +521,7 @@ def run_moe_stage2(
     kernel_name: str = "moe_gemm2",
     use_reduce: bool = False,
     use_valid_mask: bool = False,
-    test_graph: bool = False,
     waves_per_eu: Optional[int] = None,
-    benchmark_mode: bool = False,
     flush_l2: bool = True,
     num_buffers: int = 1,
     use_tdm_gather: bool = True,
@@ -778,36 +749,11 @@ def run_moe_stage2(
                 stream,
             )
  
-    # NOTE: stage2 uses atomic-add into `out`, so we cannot reuse the same output buffer
-    # across perf iterations for correctness. Time into a dedicated buffer, then run
-    # a single clean launch for correctness verification below.
-    if bool(benchmark_mode) and not bool(test_graph):
-        def _prep_stage2():
-            out_perf.zero_()
+    def _prep_stage2():
+        out_perf.zero_()
 
-        def _run_stage2():
-            launch(
-                out_perf,
-                a2_q.view(-1),
-                w2_kernel.view(-1),
-                a2_scale_1d,
-                w2_scale_1d,
-                sorted_token_ids,
-                sorted_expert_ids,
-                sorted_weights_1d,
-            )
-
-        us = _bench_kernel_us(
-            _run_stage2,
-            warmup=int(num_warmup),
-            iters=int(max(1, num_iters)),
-            flush_l2=bool(flush_l2),
-            prep_fn=_prep_stage2,
-        )
-        torch.cuda.synchronize()
-    else:
-        _, us = run_perftest(
-            launch,
+    def _run_stage2():
+        launch(
             out_perf,
             a2_q.view(-1),
             w2_kernel.view(-1),
@@ -816,10 +762,15 @@ def run_moe_stage2(
             sorted_token_ids,
             sorted_expert_ids,
             sorted_weights_1d,
-            num_iters=int(num_iters),
-            num_warmup=int(num_warmup),
-            testGraph=test_graph,
         )
+
+    us = _bench_kernel_us(
+        _run_stage2,
+        warmup=int(num_warmup),
+        iters=int(max(1, num_iters)),
+        flush_l2=bool(flush_l2),
+        prep_fn=_prep_stage2,
+    )
     torch.cuda.synchronize()
 
     # Correctness run (single launch into a clean zeroed output).
@@ -870,28 +821,21 @@ def run_moe_stage2(
     write_bytes = bytes_out
     read_bw_gbs = read_bytes / 1e9 / (us / 1e6)
     write_bw_gbs = write_bytes / 1e9 / (us / 1e6)
-    if bool(benchmark_mode):
-        print(
-            f"FlyDSL MoE stage2[{kernel_name}] {in_dtype} {'reduce' if use_reduce else 'atomic'} benchmark | "
-            f"shape=({tokens},{model_dim},{inter_dim}), E={experts}, K={topk}, "
-            f"tile=({tile_m},{tile_n},{tile_k})"
-        )
-        print(
-            f"  kernel: {us:.1f} us ({us / 1e3:.4f} ms) | "
-            f"{tflops:.2f} TFLOPS(logical, M={tokens*topk}) | {tbps:.3f} TB/s"
-        )
-        print(
-            f"  bandwidth: read {read_bw_gbs:.1f} GB/s + write {write_bw_gbs:.1f} GB/s | "
-            f"bytes: a2={bytes_a2/1e6:.1f}MB w2={bytes_w2/1e6:.1f}MB "
-            f"sa2={bytes_scale_a2/1e6:.1f}MB sw2={bytes_scale_w2/1e6:.1f}MB "
-            f"route={bytes_route/1e6:.1f}MB out={bytes_out/1e6:.1f}MB"
-        )
-    else:
-        print(
-            f"FlyDSL MoE stage2 [{kernel_name}] {in_dtype} {'reduce' if use_reduce else 'atomic'} | "
-            f"{model_dim}x{inter_dim}, E={experts}, K={topk}, M_eff={tokens*topk} | "
-            f"{us:.1f} us, {tflops:.2f} TFLOPS, {tbps:.3f} TB/s"
-        )
+    print(
+        f"FlyDSL MoE stage2[{kernel_name}] {in_dtype} {'reduce' if use_reduce else 'atomic'} benchmark | "
+        f"shape=({tokens},{model_dim},{inter_dim}), E={experts}, K={topk}, "
+        f"tile=({tile_m},{tile_n},{tile_k})"
+    )
+    print(
+        f"  kernel: {us:.1f} us ({us / 1e3:.4f} ms) | "
+        f"{tflops:.2f} TFLOPS(logical, M={tokens*topk}) | {tbps:.3f} TB/s"
+    )
+    print(
+        f"  bandwidth: read {read_bw_gbs:.1f} GB/s + write {write_bw_gbs:.1f} GB/s | "
+        f"bytes: a2={bytes_a2/1e6:.1f}MB w2={bytes_w2/1e6:.1f}MB "
+        f"sa2={bytes_scale_a2/1e6:.1f}MB sw2={bytes_scale_w2/1e6:.1f}MB "
+        f"route={bytes_route/1e6:.1f}MB out={bytes_out/1e6:.1f}MB"
+    )
 
     # Print profile breakdown if the executor supports it
     if hasattr(exe, 'print_profile_stats'):
@@ -918,7 +862,6 @@ def run_moe_gemm_2stage(
     out_dtype: str,
     use_reduce: bool,
     use_valid_mask: bool,
-    test_graph: bool,
     *,
     seed: int = 0,
     num_iters: int = 5,
@@ -926,7 +869,6 @@ def run_moe_gemm_2stage(
     moe_sort_mode: Optional[str] = None,
     init_scale: float = 0.2,
     skip_ref: bool = False,
-    benchmark_mode: bool = False,
     flush_l2: bool = True,
     num_buffers: int = 1,
     use_tdm_store: bool = False,
@@ -967,8 +909,7 @@ def run_moe_gemm_2stage(
         x_fp32_in=x_fp32, w1_fp32_in=w1_fp32,
         topk_ids_in=topk_ids, topk_weights_in=topk_weights,
         routing_in=routing, return_outputs=True,
-        skip_ref=bool(skip_ref), test_graph=test_graph,
-        benchmark_mode=bool(benchmark_mode), flush_l2=bool(flush_l2),
+        skip_ref=bool(skip_ref), flush_l2=bool(flush_l2),
         num_buffers=int(num_buffers), use_tdm_store=bool(use_tdm_store),
         inst_prefetch=bool(inst_prefetch), wave_specialized_tdm=bool(wave_specialized_tdm),
         cluster_m=int(cluster_m), cluster_n=int(cluster_n),
@@ -1235,8 +1176,6 @@ if __name__ == "__main__":
     parser.add_argument("--use_valid_mask", type=_str2bool, nargs="?", const=True, default=False, help="Use valid mask for optimization when reduce or not.")
 
     # Benchmark knobs
-    parser.add_argument("--benchmark", action="store_true", default=False,
-                        help="Use GEMM-style per-iteration event timing with optional L2 flush.")
     parser.add_argument("--no_flush_l2", action="store_true", default=False,
                         help="Disable L2 flush in benchmark mode.")
     parser.add_argument("--num_buffers", type=int, default=1, choices=[1, 2, 3, 4],
@@ -1254,15 +1193,6 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=0, help="torch.manual_seed(seed)")
     parser.add_argument("--num_iters", type=int, default=2, help="Benchmark iters")
     parser.add_argument("--num_warmup", type=int, default=1, help="Benchmark warmup iters")
-
-    # graph mode test
-    parser.add_argument(
-        "--test_graph",
-        "-tg",
-        action="store_true",
-        default=False,
-        help="test with graph mode.",
-    )
 
     # ── Benchmark sweep mode (--bench) ──
     add_moe_bench_args(parser)
@@ -1302,8 +1232,6 @@ if __name__ == "__main__":
         seed=int(args.seed), num_iters=int(args.num_iters), num_warmup=int(args.num_warmup),
         moe_sort_mode=args.moe_sort_mode,
         skip_ref=bool(args.skip_ref),
-        test_graph=bool(args.test_graph),
-        benchmark_mode=bool(args.benchmark),
         flush_l2=not bool(args.no_flush_l2),
         num_buffers=int(args.num_buffers),
         use_tdm_store=bool(args.use_tdm_store),
@@ -1377,10 +1305,6 @@ def test_moe_2stage_waves_per_eu_smoke(waves_per_eu: int):
 @pytest.mark.parametrize("out_dtype", ["f16", "f32"], ids=["out_f16", "out_f32"])
 @pytest.mark.parametrize("use_reduce", [False, True], ids=["atomic", "reduce"])
 @pytest.mark.parametrize("use_valid_mask", [False, True], ids=["nomask", "mask"])
-@pytest.mark.parametrize("test_graph", [
-    pytest.param(False, id="eager"),
-    pytest.param(True, id="graph"),
-])
 def test_moe_gemm_2stage(
     tokens: int,
     model_dim: int,
@@ -1397,7 +1321,6 @@ def test_moe_gemm_2stage(
     out_dtype: str,
     use_reduce: bool,
     use_valid_mask: bool,
-    test_graph: bool,
 ):
     run_moe_gemm_2stage(
         tokens=tokens,
@@ -1415,5 +1338,4 @@ def test_moe_gemm_2stage(
         out_dtype=out_dtype,
         use_reduce=use_reduce,
         use_valid_mask=use_valid_mask,
-        test_graph=test_graph,
     )
