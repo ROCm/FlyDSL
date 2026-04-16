@@ -208,7 +208,7 @@ def _format_kernel_pad(M: int, N: int, K: int, padded_shape: dict[str, int]) -> 
 def _run_mxscale_gemm_test(
     data_format, M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp,
     num_buffers, use_tdm_store, out_dtype,
-    wave_specialized_tdm=False, use_scale_opsel=False,
+    wave_specialized_tdm=False,
     l2_prefetch_distance=0, cluster_m=1, cluster_n=1,
     inst_prefetch=False, waves_per_eu=None,
     expert_sched_mode=True, split_k=1,
@@ -221,9 +221,6 @@ def _run_mxscale_gemm_test(
     arch = str(get_rocm_arch())
     if arch != "gfx1250":
         pytest.skip(f"WMMA_SCALE requires gfx1250, got {arch}")
-
-    if use_scale_opsel and is_fp4:
-        pytest.skip("FP4 32x16 WMMA scaleBType op_sel ignored by AM simulator")
 
     if K % SCALE_BLOCK != 0:
         pytest.skip(f"K={K} must be divisible by SCALE_BLOCK={SCALE_BLOCK}")
@@ -319,7 +316,6 @@ def _run_mxscale_gemm_test(
         inst_prefetch=inst_prefetch,
         wave_specialized_tdm=wave_specialized_tdm,
         split_k=split_k,
-        use_scale_opsel=use_scale_opsel,
         expert_sched_mode=expert_sched_mode,
     )
     launch_fn(
@@ -413,16 +409,14 @@ def _extract_i64_metadata(compiled_ir: str, key: str) -> int:
 @pytest.mark.parametrize("num_buffers", [2, 3, 4])
 @pytest.mark.parametrize("use_tdm_store", [True, False])
 @pytest.mark.parametrize("wave_specialized_tdm", [True, False])
-@pytest.mark.parametrize("use_scale_opsel", [True, False])
 @pytest.mark.parametrize("out_dtype", ["f32", "bf16"])
 def test_mxfp4_gemm(M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp,
                      num_buffers, use_tdm_store, out_dtype,
-                     wave_specialized_tdm, use_scale_opsel):
+                     wave_specialized_tdm):
     _run_mxscale_gemm_test(
         "fp4", M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp,
         num_buffers, use_tdm_store, out_dtype,
-        wave_specialized_tdm=wave_specialized_tdm,
-        use_scale_opsel=use_scale_opsel)
+        wave_specialized_tdm=wave_specialized_tdm)
 
 
 @pytest.mark.parametrize("out_dtype", ["bf16", "f16"])
@@ -458,15 +452,13 @@ def test_mxfp4_metadata_and_spill_regression(out_dtype):
 )
 @pytest.mark.parametrize("num_buffers", [2, 3])
 @pytest.mark.parametrize("use_tdm_store", [True, False])
-@pytest.mark.parametrize("use_scale_opsel", [True, False])
 @pytest.mark.parametrize("out_dtype", ["f32", "bf16"])
 def test_mxfp8_gemm(M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp,
-                     num_buffers, use_tdm_store, out_dtype, use_scale_opsel):
+                     num_buffers, use_tdm_store, out_dtype):
     _run_mxscale_gemm_test(
         "fp8", M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp,
         num_buffers, use_tdm_store, out_dtype,
-        l2_prefetch_distance=2,
-        use_scale_opsel=use_scale_opsel)
+        l2_prefetch_distance=2)
 
 
 @pytest.mark.parametrize(
@@ -479,15 +471,13 @@ def test_mxfp8_gemm(M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp,
 )
 @pytest.mark.parametrize("num_buffers", [2, 3])
 @pytest.mark.parametrize("use_tdm_store", [True, False])
-@pytest.mark.parametrize("use_scale_opsel", [True, False])
 @pytest.mark.parametrize("out_dtype", ["f32", "bf16"])
 def test_a8w4_gemm(M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp,
-                    num_buffers, use_tdm_store, out_dtype, use_scale_opsel):
+                    num_buffers, use_tdm_store, out_dtype):
     _run_mxscale_gemm_test(
         "a8w4", M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp,
         num_buffers, use_tdm_store, out_dtype,
-        l2_prefetch_distance=2,
-        use_scale_opsel=use_scale_opsel)
+        l2_prefetch_distance=2)
 
 
 @pytest.mark.parametrize(
@@ -498,7 +488,6 @@ def test_a8w4_gemm(M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp,
     ],
 )
 def test_a8w4_gemm_irregular_m_tile16(M, N, K, use_tdm_store):
-    # Small-M path: pad M to 16 and dedicate one wave to the M dimension.
     _run_mxscale_gemm_test(
         "a8w4",
         M, N, K,
@@ -508,7 +497,6 @@ def test_a8w4_gemm_irregular_m_tile16(M, N, K, use_tdm_store):
         use_tdm_store=use_tdm_store,
         out_dtype="bf16",
         l2_prefetch_distance=2,
-        use_scale_opsel=False,
     )
 
 
@@ -628,7 +616,7 @@ def _run_benchmark(args):
         print(f"  Kernel pad: M={padded_m}, N={padded_n}, K={padded_k}")
     print(f"  Tile: ({tile_m}, {tile_n}, {tile_k}), warps=({args.m_warp}x{args.n_warp})")
     print(f"  Buffers={args.num_buffers}, out={args.out_dtype}, "
-          f"opsel={args.use_scale_opsel}, inst_prefetch={args.inst_prefetch}")
+          f"inst_prefetch={args.inst_prefetch}")
     if args.split_k > 1:
         print(f"  Split-K={args.split_k} (atomic accumulate, buffer-store epilogue)")
     print(f"  Warmup={args.warmup}, Iters={args.iters}, "
@@ -691,7 +679,6 @@ def _run_benchmark(args):
         inst_prefetch=args.inst_prefetch,
         wave_specialized_tdm=args.wave_spec_tdm,
         split_k=args.split_k,
-        use_scale_opsel=args.use_scale_opsel,
         expert_sched_mode=args.expert_sched_mode,
         atomic_barrier_enable=args.atomic_barrier_enable,
     )
@@ -799,7 +786,7 @@ if __name__ == "__main__":
     parser.add_argument("--tile-k", type=int, default=256)
     parser.add_argument("--m-warp", type=int, default=2)
     parser.add_argument("--n-warp", type=int, default=2)
-    parser.add_argument("--num-buffers", type=int, default=4, choices=[2, 3, 4])
+    parser.add_argument("--num-buffers", type=int, default=3, choices=[2, 3, 4])
     parser.add_argument("--split-k", type=int, default=1)
     parser.add_argument("--l2-prefetch-distance", type=int, default=2)
     parser.add_argument("--cluster-m", type=int, default=1)
@@ -810,7 +797,6 @@ if __name__ == "__main__":
     parser.add_argument("--inst-prefetch", action="store_true", default=False)
     parser.add_argument("--wave-spec-tdm", action="store_true", default=False)
     parser.add_argument("--waves-per-eu", type=int, default=None)
-    parser.add_argument("--use-scale-opsel", action="store_true", default=False)
     parser.add_argument("--disable-expert-sched-mode", dest="expert_sched_mode",
                         action="store_false", default=True)
     parser.add_argument("--atomic-barrier-enable", action="store_true", default=False,
@@ -837,7 +823,6 @@ if __name__ == "__main__":
             out_dtype=args.out_dtype,
             wave_specialized_tdm=args.wave_spec_tdm,
             split_k=args.split_k,
-            use_scale_opsel=args.use_scale_opsel,
             l2_prefetch_distance=args.l2_prefetch_distance,
             cluster_m=args.cluster_m,
             cluster_n=args.cluster_n,

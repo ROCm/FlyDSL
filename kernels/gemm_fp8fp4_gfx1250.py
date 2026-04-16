@@ -55,7 +55,6 @@ def compile_mxscale_gemm(
     inst_prefetch: bool = False,
     wave_specialized_tdm: bool = False,
     split_k: int = 1,
-    use_scale_opsel: bool = False,
     expert_sched_mode: bool = True,
     atomic_barrier_enable: bool = False,
 ):
@@ -638,11 +637,7 @@ def compile_mxscale_gemm(
             else:
                 warp_lds_row = warp_base / arith.index(reps) + lane16
                 base = warp_lds_row * arith.index(interleaved_cols)
-            if is_fp4 or is_a8w4:
-                base = base + lane_kgrp * arith.index(SCALES_PER_WMMA)
-            else:
-                if use_scale_opsel:
-                    base = base + lane_kgrp * arith.index(SCALES_PER_WMMA)
+            base = base + lane_kgrp * arith.index(SCALES_PER_WMMA)
             return lds_ptr, [base]
 
         def issue_scale_loads_raw(lds_buffer, scale_base, reps, ks=0,
@@ -725,36 +720,38 @@ def compile_mxscale_gemm(
             return b_frags, bs_raw, as_raw
 
         def _extract_and_filter_scales(bs_raw, as_raw):
-            """Extract + filter scales from raw LDS vec4 values."""
+            """Extract + filter scales from raw LDS vec4 values.
+
+            Op_sel packing: each scale VGPR holds two adjacent WMMA reps
+            (lo/hi 16-bit halves), so we stride-2 to get one VGPR per
+            pair and use scaleType op_sel to select the half.
+            FP4 32x16 WMMA: only A-scales use op_sel (via scaleBType);
+            B-scales are indexed directly (scaleAType always 0).
+            FP8/A8W4 16x16 WMMA: both A and B scales use op_sel.
+            """
             b_scales_all = extract_scales_from_raw(bs_raw, b_scale_load_rep)
             a_scales_all = extract_scales_from_raw(as_raw, wmma_m_rep)
+            a_scales = a_scales_all[::2]
             if is_fp4:
                 b_scales = b_scales_all
-                if use_scale_opsel:
-                    a_scales = a_scales_all[::2]
-                else:
-                    a_scales = a_scales_all
             else:
-                if use_scale_opsel:
-                    b_scales = b_scales_all[::2]
-                    a_scales = a_scales_all[::2]
-                else:
-                    b_scales = b_scales_all
-                    a_scales = a_scales_all
+                b_scales = b_scales_all[::2]
             return b_scales, a_scales
 
         def _emit_wmma(accs, wm, wn, a_frag, b_frags, a_scales, b_scales):
-            """Emit one WMMA instruction (format-specific)."""
+            """Emit one WMMA instruction (format-specific).
+
+            Scale op_sel packing: adjacent WMMA reps share one scale VGPR,
+            selecting lo (op_sel=0) or hi (op_sel=1) 16-bit half.
+            A-scale op_sel (via scaleBType) is used by all formats.
+            B-scale op_sel (via scaleAType) is used by FP8/A8W4 only;
+            FP4 32x16 WMMA indexes B-scales directly.
+            """
             idx = wm * wmma_n_rep + wn
-            if use_scale_opsel:
-                a_scale_idx = wm // 2
-                a_opsel = wm % 2
-            else:
-                a_scale_idx = wm
-                a_opsel = 0
+            a_scale_idx = wm // 2
+            a_opsel = wm % 2
 
             if is_fp4:
-                # 32x16 WMMA with A/B swap: SRC0=B, SRC1=A
                 accs[idx] = rocdl.wmma_scale_f32_32x16x128_f4(
                     T.vec(16, T.f32),
                     b_frags[wn], a_frag, accs[idx],
@@ -763,13 +760,8 @@ def compile_mxscale_gemm(
                     scaleBType=a_opsel,
                 )
             else:
-                # 16x16x128 WMMA: A8W4 (fmtA=FP4) or FP8 (fmtA=FP8)
-                if use_scale_opsel:
-                    b_scale_idx = wn // 2
-                    b_opsel = wn % 2
-                else:
-                    b_scale_idx = wn
-                    b_opsel = 0
+                b_scale_idx = wn // 2
+                b_opsel = wn % 2
                 accs[idx] = rocdl.wmma_scale_f32_16x16x128_f8f6f4(
                     T.vec(8, T.f32),
                     b_frags[wn], a_frag, accs[idx],
@@ -905,9 +897,7 @@ def compile_mxscale_gemm(
             _b_half_scale_loads = (_bank_half_b_scale_rep + 3) // 4
 
             def _fp4_get_a_scale_and_opsel(a_scales_all, wm_idx):
-                if use_scale_opsel:
-                    return a_scales_all[(wm_idx // 2) * 2], wm_idx % 2
-                return a_scales_all[wm_idx], 0
+                return a_scales_all[(wm_idx // 2) * 2], wm_idx % 2
 
             def _load_a_group(wm_base, wm_count, ks):
                 return [
@@ -1654,8 +1644,7 @@ def compile_mxscale_gemm(
                  effective_waves_per_eu, l2_prefetch_distance,
                  cluster_m, cluster_n, use_tdm_store,
                  out_dtype, inst_prefetch, wave_specialized_tdm, split_k,
-                 use_scale_opsel, expert_sched_mode,
-                 atomic_barrier_enable)
+                 expert_sched_mode, atomic_barrier_enable)
 
     @flyc.jit
     def launch_mxscale_gemm(
