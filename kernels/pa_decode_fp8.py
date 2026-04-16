@@ -1561,6 +1561,8 @@ def _prepare_scale_tensor(
         )
 
     return torch.tensor([float(scale or 1.0)], device=device, dtype=torch.float32)
+
+    
 def _get_query_input_dtype(query: torch.Tensor) -> str:
     if query.dtype in _PACKED_FP8_QUERY_DTYPES:
         return "packed_fp8"
@@ -1614,8 +1616,11 @@ def compile_pa_decode_sw_reduce(
     assert block_threads <= 1024, "head_size must fit in one workgroup"
     reduce_width = 1 if max_context_partition_num <= 1 else 1 << ((max_context_partition_num - 1).bit_length())
     reduce_shuffle_offsets = [off for off in [32, 16, 8, 4, 2, 1] if off < reduce_width]
+    red_slots = max(1, (block_threads + WARP_SIZE - 1) // WARP_SIZE)
     arch = get_hip_arch()
     allocator = SmemAllocator(None, arch=arch, global_sym_name="pa_ps_sw_reduce_smem")
+    red_off = allocator._align(allocator.ptr, 16)
+    allocator.ptr = red_off + red_slots * 4
     part_weights_off = allocator._align(allocator.ptr, 16)
     allocator.ptr = part_weights_off + max_context_partition_num * 4
 
@@ -1643,6 +1648,8 @@ def compile_pa_decode_sw_reduce(
         eqgs_idx = gpu.block_idx.z
 
         smem_base = allocator.get_base()
+        red_scratch = SmemPtr(smem_base, red_off, T.f32, shape=(red_slots,))
+        red_scratch.get()
         if max_context_partition_num > WARP_SIZE:
             part_weights_lds = SmemPtr(
                 smem_base, part_weights_off, T.f32, shape=(max_context_partition_num,)
@@ -1660,13 +1667,59 @@ def compile_pa_decode_sw_reduce(
         c_log2e = arith.constant(LOG2E, type=T.f32)
         fm_fast = arith.FastMathFlags.fast
         c_zero_i = arith.constant(0, type=T.i32)
+        c_w = arith.constant(WARP_SIZE, type=T.i32)
+        c_wave_mask = arith.constant(WARP_SIZE - 1, type=T.i32)
+        c_wave_shift = arith.constant(6, type=T.i32)
+        c_red_slots = arith.constant(red_slots, type=T.i32)
+        lane = tid & c_wave_mask
+        wave = tid >> c_wave_shift
+
+        def _wave_reduce_max_full(val):
+            red = val
+            for sh in [32, 16, 8, 4, 2, 1]:
+                red = red.maximumf(
+                    red.shuffle_xor(arith.constant(sh, type=T.i32), c_w)
+                )
+            return red
+
+        def _wave_reduce_sum_full(val):
+            red = val
+            for sh in [32, 16, 8, 4, 2, 1]:
+                red = red.addf(
+                    red.shuffle_xor(arith.constant(sh, type=T.i32), c_w),
+                    fastmath=fm_fast,
+                )
+            return red
+
+        def _block_reduce(val, mode):
+            if red_slots == 1:
+                return _wave_reduce_max_full(val) if mode == "max" else _wave_reduce_sum_full(val)
+
+            neutral = c_neg_inf if mode == "max" else c_zero_f
+            w = _wave_reduce_max_full(val) if mode == "max" else _wave_reduce_sum_full(val)
+
+            if arith.cmpi(arith.CmpIPredicate.eq, lane, c_zero_i):
+                wave_idx = arith.index_cast(T.index, wave)
+                red_scratch.store(w, [wave_idx])
+            gpu.barrier()
+
+            if arith.cmpi(arith.CmpIPredicate.eq, wave, c_zero_i):
+                in_range = arith.cmpi(arith.CmpIPredicate.slt, lane, c_red_slots)
+                lane_safe = arith.select(in_range, lane, c_zero_i)
+                lane_safe_idx = arith.index_cast(T.index, lane_safe)
+                red_val = red_scratch.load([lane_safe_idx])
+                red_val = arith.select(in_range, red_val, neutral)
+                red_val = _wave_reduce_max_full(red_val) if mode == "max" else _wave_reduce_sum_full(red_val)
+                if arith.cmpi(arith.CmpIPredicate.eq, lane, c_zero_i):
+                    red_scratch.store(red_val, [arith.constant(0, index=True)])
+            gpu.barrier()
+
+            return red_scratch.load([arith.constant(0, index=True)])
+
         if max_context_partition_num <= WARP_SIZE:
-            c_w = arith.constant(WARP_SIZE, type=T.i32)
-            c_wave_mask = arith.constant(WARP_SIZE - 1, type=T.i32)
             c_part_num = arith.constant(max_context_partition_num, type=T.i32)
             c_reduce_width = arith.constant(reduce_width, type=T.i32)
             c_four = arith.constant(4, type=T.i32)
-            lane = tid & c_wave_mask
 
             def _wave_reduce_max(val):
                 red = val
@@ -1744,50 +1797,85 @@ def compile_pa_decode_sw_reduce(
                 acc = acc + part_logits * weight
         else:
             # Fallback for unusually large sliding-window partition counts.
-            if arith.cmpi(arith.CmpIPredicate.eq, tid, c_zero_i):
-                global_max = c_neg_inf
-                global_exp_sum = c_zero_f
-
-                for part_idx in range_constexpr(max_context_partition_num):
-                    part_i32 = arith.constant(part_idx, type=T.i32)
-                    es_off = (
-                        batch_idx * stride_exp_sums_seq
-                        + kv_head_idx * stride_exp_sums_head
-                        + part_i32 * stride_exp_sums_part
-                        + eqgs_idx
-                    )
-                    part_sum = buffer_ops.buffer_load(es_rsrc, es_off, vec_width=1, dtype=T.f32)
-                    part_max = buffer_ops.buffer_load(ml_rsrc, es_off, vec_width=1, dtype=T.f32)
-
-                    new_global_max = global_max.maximumf(part_max)
-                    update_scale = arith.select(
-                        global_max > c_neg_inf,
-                        ((global_max - new_global_max) * c_log2e).exp2(fastmath=fm_fast),
-                        c_zero_f,
-                    )
-                    part_scale = ((part_max - new_global_max) * c_log2e).exp2(fastmath=fm_fast)
-                    global_exp_sum = update_scale * global_exp_sum + part_sum * part_scale
-                    global_max = new_global_max
-
-                safe_global_exp_sum = arith.select(
-                    global_exp_sum > c_zero_f,
-                    global_exp_sum,
-                    c_one_f,
+            global_max = c_neg_inf
+            for chunk_base in range(0, max_context_partition_num, block_threads):
+                chunk_size = min(block_threads, max_context_partition_num - chunk_base)
+                c_chunk_size = arith.constant(chunk_size, type=T.i32)
+                c_chunk_base = arith.constant(chunk_base, type=T.i32)
+                in_chunk = arith.cmpi(arith.CmpIPredicate.slt, tid, c_chunk_size)
+                part_i32 = arith.select(in_chunk, tid + c_chunk_base, c_zero_i)
+                es_off = (
+                    batch_idx * stride_exp_sums_seq
+                    + kv_head_idx * stride_exp_sums_head
+                    + part_i32 * stride_exp_sums_part
+                    + eqgs_idx
                 )
+                part_max_raw = buffer_ops.buffer_load(
+                    ml_rsrc, es_off, vec_width=1, dtype=T.f32
+                )
+                part_max = arith.select(in_chunk, part_max_raw, c_neg_inf)
+                chunk_max = _block_reduce(part_max, "max")
+                global_max = global_max.maximumf(chunk_max)
 
-                for part_idx in range_constexpr(max_context_partition_num):
-                    part_i32 = arith.constant(part_idx, type=T.i32)
-                    part_idx_idx = arith.constant(part_idx, index=True)
-                    es_off = (
-                        batch_idx * stride_exp_sums_seq
-                        + kv_head_idx * stride_exp_sums_head
-                        + part_i32 * stride_exp_sums_part
-                        + eqgs_idx
-                    )
-                    part_sum = buffer_ops.buffer_load(es_rsrc, es_off, vec_width=1, dtype=T.f32)
-                    part_max = buffer_ops.buffer_load(ml_rsrc, es_off, vec_width=1, dtype=T.f32)
+            global_exp_sum = c_zero_f
+            for chunk_base in range(0, max_context_partition_num, block_threads):
+                chunk_size = min(block_threads, max_context_partition_num - chunk_base)
+                c_chunk_size = arith.constant(chunk_size, type=T.i32)
+                c_chunk_base = arith.constant(chunk_base, type=T.i32)
+                in_chunk = arith.cmpi(arith.CmpIPredicate.slt, tid, c_chunk_size)
+                part_i32 = arith.select(in_chunk, tid + c_chunk_base, c_zero_i)
+                es_off = (
+                    batch_idx * stride_exp_sums_seq
+                    + kv_head_idx * stride_exp_sums_head
+                    + part_i32 * stride_exp_sums_part
+                    + eqgs_idx
+                )
+                part_sum_raw = buffer_ops.buffer_load(
+                    es_rsrc, es_off, vec_width=1, dtype=T.f32
+                )
+                part_max_raw = buffer_ops.buffer_load(
+                    ml_rsrc, es_off, vec_width=1, dtype=T.f32
+                )
+                part_sum = arith.select(in_chunk, part_sum_raw, c_zero_f)
+                part_max = arith.select(in_chunk, part_max_raw, c_neg_inf)
+                part_scale = arith.select(
+                    in_chunk,
+                    ((part_max - global_max) * c_log2e).exp2(fastmath=fm_fast),
+                    c_zero_f,
+                )
+                chunk_sum = _block_reduce(part_sum * part_scale, "sum")
+                global_exp_sum = global_exp_sum + chunk_sum
+
+            safe_global_exp_sum = arith.select(
+                global_exp_sum > c_zero_f,
+                global_exp_sum,
+                c_one_f,
+            )
+
+            for chunk_base in range(0, max_context_partition_num, block_threads):
+                chunk_size = min(block_threads, max_context_partition_num - chunk_base)
+                c_chunk_size = arith.constant(chunk_size, type=T.i32)
+                c_chunk_base = arith.constant(chunk_base, type=T.i32)
+                in_chunk = arith.cmpi(arith.CmpIPredicate.slt, tid, c_chunk_size)
+                part_i32 = arith.select(in_chunk, tid + c_chunk_base, c_zero_i)
+                es_off = (
+                    batch_idx * stride_exp_sums_seq
+                    + kv_head_idx * stride_exp_sums_head
+                    + part_i32 * stride_exp_sums_part
+                    + eqgs_idx
+                )
+                part_sum_raw = buffer_ops.buffer_load(
+                    es_rsrc, es_off, vec_width=1, dtype=T.f32
+                )
+                part_max_raw = buffer_ops.buffer_load(
+                    ml_rsrc, es_off, vec_width=1, dtype=T.f32
+                )
+                if in_chunk:
+                    part_sum = part_sum_raw
+                    part_max = part_max_raw
                     part_scale = ((part_max - global_max) * c_log2e).exp2(fastmath=fm_fast)
                     weight = (part_sum * part_scale) / safe_global_exp_sum
+                    part_idx_idx = arith.index_cast(T.index, part_i32)
                     part_weights_lds.store(weight, [part_idx_idx])
 
             gpu.barrier()
@@ -2540,4 +2628,3 @@ def compile_pa_decode_sw(
         'kernel': pa_decode_sw_kernel,
         'allocator': allocator,
     }
-
