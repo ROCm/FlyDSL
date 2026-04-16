@@ -7,8 +7,10 @@ gpu.module @convert_atom_call_to_ssa_form {
   // Test 1: copy_atom_call with register dst (rank=1, stride=1) should be promoted
   // CHECK-LABEL: gpu.func @copy_dst_register
   // CHECK-NOT: fly.copy_atom_call(
-  // CHECK: %[[SSA:.*]] = fly.copy_atom_call_ssa
-  // CHECK: fly.ptr.store(%[[SSA]], %{{.*}}) : (vector<4xf16>, !fly.ptr<f16, register>) -> ()
+  // CHECK: %[[REG_PTR:.*]] = fly.make_ptr() {dictAttrs = {allocaSize = 4 : i64}} : () -> !fly.ptr<f16, register>
+  // CHECK: %[[SSA:.*]] = fly.copy_atom_call_ssa(%{{.*}}, %{{.*}}) {operandSegmentSizes = array<i32: 1, 1, 0, 0>}
+  // CHECK-SAME: : (!fly.copy_atom<!fly.universal_copy<64>, 16>, !fly.memref<f16, global, 4:1>) -> vector<4xf16>
+  // CHECK: fly.ptr.store(%[[SSA]], %[[REG_PTR]]) : (vector<4xf16>, !fly.ptr<f16, register>) -> ()
   gpu.func @copy_dst_register(%src: !fly.ptr<f16, global>) kernel {
     %shape4 = fly.make_int_tuple() : () -> !fly.int_tuple<4>
     %stride1 = fly.make_int_tuple() : () -> !fly.int_tuple<1>
@@ -28,8 +30,10 @@ gpu.module @convert_atom_call_to_ssa_form {
   // src is pre-loaded via ptr.load, then passed to copy_atom_call_ssa as vector operand
   // CHECK-LABEL: gpu.func @copy_src_register
   // CHECK-NOT: fly.copy_atom_call(
-  // CHECK: %[[VEC:.*]] = fly.ptr.load(%{{.*}}) : (!fly.ptr<f16, register>) -> vector<4xf16>
-  // CHECK: fly.copy_atom_call_ssa(%{{.*}}, %[[VEC]], %{{.*}})
+  // CHECK: %[[SRC_PTR:.*]] = fly.make_ptr() {dictAttrs = {allocaSize = 4 : i64}} : () -> !fly.ptr<f16, register>
+  // CHECK: %[[VEC:.*]] = fly.ptr.load(%[[SRC_PTR]]) : (!fly.ptr<f16, register>) -> vector<4xf16>
+  // CHECK: fly.copy_atom_call_ssa(%{{.*}}, %[[VEC]], %{{.*}}) {operandSegmentSizes = array<i32: 1, 1, 1, 0>}
+  // CHECK-SAME: : (!fly.copy_atom<!fly.universal_copy<64>, 16>, vector<4xf16>, !fly.memref<f16, global, 4:1>) -> ()
   gpu.func @copy_src_register(%dst: !fly.ptr<f16, global>) kernel {
     %shape4 = fly.make_int_tuple() : () -> !fly.int_tuple<4>
     %stride1 = fly.make_int_tuple() : () -> !fly.int_tuple<1>
@@ -49,9 +53,12 @@ gpu.module @convert_atom_call_to_ssa_form {
   // src is pre-loaded via ptr.load, result stored back to dst register
   // CHECK-LABEL: gpu.func @copy_both_register
   // CHECK-NOT: fly.copy_atom_call(
-  // CHECK: %[[VEC:.*]] = fly.ptr.load(%{{.*}}) : (!fly.ptr<f16, register>) -> vector<4xf16>
-  // CHECK: %[[SSA:.*]] = fly.copy_atom_call_ssa(%{{.*}}, %[[VEC]])
-  // CHECK: fly.ptr.store(%[[SSA]], %{{.*}}) : (vector<4xf16>, !fly.ptr<f16, register>) -> ()
+  // CHECK: %[[SRC_PTR:.*]] = fly.make_ptr() {dictAttrs = {allocaSize = 4 : i64}} : () -> !fly.ptr<f16, register>
+  // CHECK: %[[DST_PTR:.*]] = fly.make_ptr() {dictAttrs = {allocaSize = 4 : i64}} : () -> !fly.ptr<f16, register>
+  // CHECK: %[[VEC:.*]] = fly.ptr.load(%[[SRC_PTR]]) : (!fly.ptr<f16, register>) -> vector<4xf16>
+  // CHECK: %[[SSA:.*]] = fly.copy_atom_call_ssa(%{{.*}}, %[[VEC]]) {operandSegmentSizes = array<i32: 1, 1, 0, 0>}
+  // CHECK-SAME: : (!fly.copy_atom<!fly.universal_copy<64>, 16>, vector<4xf16>) -> vector<4xf16>
+  // CHECK: fly.ptr.store(%[[SSA]], %[[DST_PTR]]) : (vector<4xf16>, !fly.ptr<f16, register>) -> ()
   gpu.func @copy_both_register() kernel {
     %shape4 = fly.make_int_tuple() : () -> !fly.int_tuple<4>
     %stride1 = fly.make_int_tuple() : () -> !fly.int_tuple<1>
@@ -89,8 +96,10 @@ gpu.module @convert_atom_call_to_ssa_form {
   // (4,1):(1,0) coalesces to 4:1, so should be promoted
   // CHECK-LABEL: gpu.func @copy_dst_register_coalescable
   // CHECK-NOT: fly.copy_atom_call(
-  // CHECK: %[[SSA:.*]] = fly.copy_atom_call_ssa
-  // CHECK: fly.ptr.store(%[[SSA]], %{{.*}}) : (vector<4xf16>, !fly.ptr<f16, register>) -> ()
+  // CHECK: %[[REG_PTR:.*]] = fly.make_ptr() {dictAttrs = {allocaSize = 4 : i64}} : () -> !fly.ptr<f16, register>
+  // CHECK: %[[SSA:.*]] = fly.copy_atom_call_ssa(%{{.*}}, %{{.*}}) {operandSegmentSizes = array<i32: 1, 1, 0, 0>}
+  // CHECK-SAME: : (!fly.copy_atom<!fly.universal_copy<64>, 16>, !fly.memref<f16, global, 4:1>) -> vector<4xf16>
+  // CHECK: fly.ptr.store(%[[SSA]], %[[REG_PTR]]) : (vector<4xf16>, !fly.ptr<f16, register>) -> ()
   gpu.func @copy_dst_register_coalescable(%src: !fly.ptr<f16, global>) kernel {
     %shape4 = fly.make_int_tuple() : () -> !fly.int_tuple<4>
     %stride1 = fly.make_int_tuple() : () -> !fly.int_tuple<1>
@@ -140,11 +149,16 @@ gpu.module @convert_atom_call_to_ssa_form {
   // a, b, c are also register eligible, so they get pre-loaded as vectors
   // CHECK-LABEL: gpu.func @mma_d_register
   // CHECK-NOT: fly.mma_atom_call(
-  // CHECK: fly.ptr.load
-  // CHECK: fly.ptr.load
-  // CHECK: fly.ptr.load
-  // CHECK: %[[SSA:.*]] = fly.mma_atom_call_ssa
-  // CHECK: fly.ptr.store(%[[SSA]], %{{.*}}) : (vector<4xf32>, !fly.ptr<f32, register>) -> ()
+  // CHECK-DAG: %[[A_PTR:.*]] = fly.make_ptr() {dictAttrs = {allocaSize = 4 : i64}} : () -> !fly.ptr<f16, register>
+  // CHECK-DAG: %[[B_PTR:.*]] = fly.make_ptr() {dictAttrs = {allocaSize = 4 : i64}} : () -> !fly.ptr<f16, register>
+  // CHECK-DAG: %[[D_PTR:.*]] = fly.make_ptr() {dictAttrs = {allocaSize = 4 : i64}} : () -> !fly.ptr<f32, register>
+  // CHECK-DAG: %[[C_PTR:.*]] = fly.make_ptr() {dictAttrs = {allocaSize = 4 : i64}} : () -> !fly.ptr<f32, register>
+  // CHECK: %[[A:.*]] = fly.ptr.load(%[[A_PTR]]) : (!fly.ptr<f16, register>) -> vector<4xf16>
+  // CHECK: %[[B:.*]] = fly.ptr.load(%[[B_PTR]]) : (!fly.ptr<f16, register>) -> vector<4xf16>
+  // CHECK: %[[C:.*]] = fly.ptr.load(%[[C_PTR]]) : (!fly.ptr<f32, register>) -> vector<4xf32>
+  // CHECK: %[[SSA:.*]] = fly.mma_atom_call_ssa(%{{.*}}, %[[A]], %[[B]], %[[C]])
+  // CHECK-SAME: -> vector<4xf32>
+  // CHECK: fly.ptr.store(%[[SSA]], %[[D_PTR]]) : (vector<4xf32>, !fly.ptr<f32, register>) -> ()
   gpu.func @mma_d_register(%out: !fly.ptr<f32, global>) kernel {
     %shape4 = fly.make_int_tuple() : () -> !fly.int_tuple<4>
     %stride1 = fly.make_int_tuple() : () -> !fly.int_tuple<1>
@@ -171,11 +185,16 @@ gpu.module @convert_atom_call_to_ssa_form {
   // (4,1):(1,0) coalesces to 4:1, so should be promoted. a, b, c also pre-loaded
   // CHECK-LABEL: gpu.func @mma_d_register_coalescable
   // CHECK-NOT: fly.mma_atom_call(
-  // CHECK: fly.ptr.load
-  // CHECK: fly.ptr.load
-  // CHECK: fly.ptr.load
-  // CHECK: %[[SSA:.*]] = fly.mma_atom_call_ssa
-  // CHECK: fly.ptr.store(%[[SSA]], %{{.*}}) : (vector<4xf32>, !fly.ptr<f32, register>) -> ()
+  // CHECK-DAG: %[[A_PTR:.*]] = fly.make_ptr() {dictAttrs = {allocaSize = 4 : i64}} : () -> !fly.ptr<f16, register>
+  // CHECK-DAG: %[[B_PTR:.*]] = fly.make_ptr() {dictAttrs = {allocaSize = 4 : i64}} : () -> !fly.ptr<f16, register>
+  // CHECK-DAG: %[[D_PTR:.*]] = fly.make_ptr() {dictAttrs = {allocaSize = 8 : i64}} : () -> !fly.ptr<f32, register>
+  // CHECK-DAG: %[[C_PTR:.*]] = fly.make_ptr() {dictAttrs = {allocaSize = 8 : i64}} : () -> !fly.ptr<f32, register>
+  // CHECK: %[[A:.*]] = fly.ptr.load(%[[A_PTR]]) : (!fly.ptr<f16, register>) -> vector<4xf16>
+  // CHECK: %[[B:.*]] = fly.ptr.load(%[[B_PTR]]) : (!fly.ptr<f16, register>) -> vector<4xf16>
+  // CHECK: %[[C:.*]] = fly.ptr.load(%[[C_PTR]]) : (!fly.ptr<f32, register>) -> vector<4xf32>
+  // CHECK: %[[SSA:.*]] = fly.mma_atom_call_ssa(%{{.*}}, %[[A]], %[[B]], %[[C]])
+  // CHECK-SAME: -> vector<4xf32>
+  // CHECK: fly.ptr.store(%[[SSA]], %[[D_PTR]]) : (vector<4xf32>, !fly.ptr<f32, register>) -> ()
   gpu.func @mma_d_register_coalescable(%out: !fly.ptr<f32, global>) kernel {
     %shape4 = fly.make_int_tuple() : () -> !fly.int_tuple<4>
     %stride1 = fly.make_int_tuple() : () -> !fly.int_tuple<1>
@@ -204,10 +223,16 @@ gpu.module @convert_atom_call_to_ssa_form {
   // Test 5b: mma_atom_call with register d non-coalescable, but a/b are register eligible
   // d and c have (4,2):(1,8) which cannot coalesce, but a/b have 4:1 which is eligible
   // a and b should be pre-loaded as vectors, mma_atom_call_ssa is used
+  // d and c remain as memref (not promoted to SSA)
   // CHECK-LABEL: gpu.func @mma_d_register_non_coalescable
-  // CHECK: fly.ptr.load
-  // CHECK: fly.ptr.load
-  // CHECK: fly.mma_atom_call_ssa
+  // CHECK-DAG: %[[A_PTR:.*]] = fly.make_ptr() {dictAttrs = {allocaSize = 4 : i64}} : () -> !fly.ptr<f16, register>
+  // CHECK-DAG: %[[B_PTR:.*]] = fly.make_ptr() {dictAttrs = {allocaSize = 4 : i64}} : () -> !fly.ptr<f16, register>
+  // CHECK: %[[A:.*]] = fly.ptr.load(%[[A_PTR]]) : (!fly.ptr<f16, register>) -> vector<4xf16>
+  // CHECK: %[[B:.*]] = fly.ptr.load(%[[B_PTR]]) : (!fly.ptr<f16, register>) -> vector<4xf16>
+  // CHECK: fly.mma_atom_call_ssa(%{{.*}}, %{{.*}}, %[[A]], %[[B]], %{{.*}}) :
+  // CHECK-SAME: (!fly.mma_atom<!fly_rocdl.cdna3.mfma<16x16x16, (f16, f16) -> f32>>,
+  // CHECK-SAME: !fly.memref<f32, register, (4,2):(1,8)>, vector<4xf16>, vector<4xf16>,
+  // CHECK-SAME: !fly.memref<f32, register, (4,2):(1,8)>) -> ()
   // CHECK-NOT: fly.ptr.store
   gpu.func @mma_d_register_non_coalescable(%out: !fly.ptr<f32, global>) kernel {
     %shape4 = fly.make_int_tuple() : () -> !fly.int_tuple<4>
