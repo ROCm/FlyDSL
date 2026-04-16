@@ -1612,6 +1612,8 @@ def compile_pa_decode_sw_reduce(
     block_threads = head_size
     assert block_threads > 0, "head_size must be positive"
     assert block_threads <= 1024, "head_size must fit in one workgroup"
+    reduce_width = 1 if max_context_partition_num <= 1 else 1 << ((max_context_partition_num - 1).bit_length())
+    reduce_shuffle_offsets = [off for off in [32, 16, 8, 4, 2, 1] if off < reduce_width]
     arch = get_hip_arch()
     allocator = SmemAllocator(None, arch=arch, global_sym_name="pa_ps_sw_reduce_smem")
     part_weights_off = allocator._align(allocator.ptr, 16)
@@ -1641,10 +1643,11 @@ def compile_pa_decode_sw_reduce(
         eqgs_idx = gpu.block_idx.z
 
         smem_base = allocator.get_base()
-        part_weights_lds = SmemPtr(
-            smem_base, part_weights_off, T.f32, shape=(max_context_partition_num,)
-        )
-        part_weights_lds.get()
+        if max_context_partition_num > WARP_SIZE:
+            part_weights_lds = SmemPtr(
+                smem_base, part_weights_off, T.f32, shape=(max_context_partition_num,)
+            )
+            part_weights_lds.get()
 
         out_rsrc = buffer_ops.create_buffer_resource(output_ptr, max_size=True)
         es_rsrc = buffer_ops.create_buffer_resource(exp_sums_ptr, max_size=True)
@@ -1660,14 +1663,14 @@ def compile_pa_decode_sw_reduce(
         if max_context_partition_num <= WARP_SIZE:
             c_w = arith.constant(WARP_SIZE, type=T.i32)
             c_wave_mask = arith.constant(WARP_SIZE - 1, type=T.i32)
-            c_wave_shift = arith.constant(6, type=T.i32)
             c_part_num = arith.constant(max_context_partition_num, type=T.i32)
+            c_reduce_width = arith.constant(reduce_width, type=T.i32)
+            c_four = arith.constant(4, type=T.i32)
             lane = tid & c_wave_mask
-            warp_id = tid >> c_wave_shift
 
             def _wave_reduce_max(val):
                 red = val
-                for sh in [32, 16, 8, 4, 2, 1]:
+                for sh in reduce_shuffle_offsets:
                     red = red.maximumf(
                         red.shuffle_xor(arith.constant(sh, type=T.i32), c_w)
                     )
@@ -1675,16 +1678,18 @@ def compile_pa_decode_sw_reduce(
 
             def _wave_reduce_sum(val):
                 red = val
-                for sh in [32, 16, 8, 4, 2, 1]:
+                for sh in reduce_shuffle_offsets:
                     red = red.addf(
                         red.shuffle_xor(arith.constant(sh, type=T.i32), c_w),
                         fastmath=fm_fast,
                     )
                 return red
 
-            # Fast path: warp 0 generates one weight per partition lane.
-            if arith.cmpi(arith.CmpIPredicate.eq, warp_id, c_zero_i):
-                lane_in_range = arith.cmpi(arith.CmpIPredicate.slt, lane, c_part_num)
+            lane_in_range = arith.cmpi(arith.CmpIPredicate.slt, lane, c_part_num)
+            lane_in_reduce = arith.cmpi(arith.CmpIPredicate.slt, lane, c_reduce_width)
+            part_sum = c_zero_f
+            part_max = c_neg_inf
+            if lane_in_reduce:
                 part_i32 = arith.select(lane_in_range, lane, c_zero_i)
                 es_off = (
                     batch_idx * stride_exp_sums_seq
@@ -1701,24 +1706,42 @@ def compile_pa_decode_sw_reduce(
                 part_sum = arith.select(lane_in_range, part_sum_raw, c_zero_f)
                 part_max = arith.select(lane_in_range, part_max_raw, c_neg_inf)
 
-                global_max = _wave_reduce_max(part_max)
-                part_scale = arith.select(
-                    lane_in_range,
-                    ((part_max - global_max) * c_log2e).exp2(fastmath=fm_fast),
-                    c_zero_f,
-                )
-                scaled_sum = part_sum * part_scale
-                global_exp_sum = _wave_reduce_sum(scaled_sum)
-                safe_global_exp_sum = arith.select(
-                    global_exp_sum > c_zero_f,
-                    global_exp_sum,
-                    c_one_f,
-                )
+            global_max = _wave_reduce_max(part_max)
+            part_scale = arith.select(
+                lane_in_range,
+                ((part_max - global_max) * c_log2e).exp2(fastmath=fm_fast),
+                c_zero_f,
+            )
+            scaled_sum = part_sum * part_scale
+            global_exp_sum = _wave_reduce_sum(scaled_sum)
+            safe_global_exp_sum = arith.select(
+                global_exp_sum > c_zero_f,
+                global_exp_sum,
+                c_one_f,
+            )
+            weight_local = scaled_sum / safe_global_exp_sum
+            weight_local_i32 = arith.bitcast(T.i32, weight_local)
 
-                if lane_in_range:
-                    weight = scaled_sum / safe_global_exp_sum
-                    part_idx_idx = arith.index_cast(T.index, lane)
-                    part_weights_lds.store(weight, [part_idx_idx])
+            acc = c_zero_f
+            for part_idx in range_constexpr(max_context_partition_num):
+                part_i32 = arith.constant(part_idx, type=T.i32)
+                bcast_addr = part_i32 * c_four
+                weight_i32 = rocdl.ds_bpermute(
+                    T.i32, arith.unwrap(bcast_addr), arith.unwrap(weight_local_i32)
+                )
+                weight = arith.bitcast(T.f32, weight_i32)
+                logits_off = (
+                    batch_idx * stride_logits_seq
+                    + kv_head_idx * stride_logits_head
+                    + part_i32 * stride_logits_part
+                    + eqgs_idx * stride_logits_group
+                    + tid
+                )
+                part_logits_bf16 = buffer_ops.buffer_load(
+                    logits_rsrc, logits_off, vec_width=1, dtype=T.bf16
+                )
+                part_logits = _mlir_arith.ExtFOp(T.f32, part_logits_bf16).result
+                acc = acc + part_logits * weight
         else:
             # Fallback for unusually large sliding-window partition counts.
             if arith.cmpi(arith.CmpIPredicate.eq, tid, c_zero_i):
@@ -1767,25 +1790,25 @@ def compile_pa_decode_sw_reduce(
                     weight = (part_sum * part_scale) / safe_global_exp_sum
                     part_weights_lds.store(weight, [part_idx_idx])
 
-        gpu.barrier()
+            gpu.barrier()
 
-        acc = c_zero_f
-        for part_idx in range_constexpr(max_context_partition_num):
-            part_i32 = arith.constant(part_idx, type=T.i32)
-            part_idx_idx = arith.constant(part_idx, index=True)
-            weight = part_weights_lds.load([part_idx_idx])
-            logits_off = (
-                batch_idx * stride_logits_seq
-                + kv_head_idx * stride_logits_head
-                + part_i32 * stride_logits_part
-                + eqgs_idx * stride_logits_group
-                + tid
-            )
-            part_logits_bf16 = buffer_ops.buffer_load(
-                logits_rsrc, logits_off, vec_width=1, dtype=T.bf16
-            )
-            part_logits = _mlir_arith.ExtFOp(T.f32, part_logits_bf16).result
-            acc = acc + part_logits * weight
+            acc = c_zero_f
+            for part_idx in range_constexpr(max_context_partition_num):
+                part_i32 = arith.constant(part_idx, type=T.i32)
+                part_idx_idx = arith.constant(part_idx, index=True)
+                weight = part_weights_lds.load([part_idx_idx])
+                logits_off = (
+                    batch_idx * stride_logits_seq
+                    + kv_head_idx * stride_logits_head
+                    + part_i32 * stride_logits_part
+                    + eqgs_idx * stride_logits_group
+                    + tid
+                )
+                part_logits_bf16 = buffer_ops.buffer_load(
+                    logits_rsrc, logits_off, vec_width=1, dtype=T.bf16
+                )
+                part_logits = _mlir_arith.ExtFOp(T.f32, part_logits_bf16).result
+                acc = acc + part_logits * weight
 
         c_qgs = arith.constant(query_group_size, type=T.i32)
         query_idx = eqgs_idx // c_qgs
@@ -1930,14 +1953,6 @@ def pa_decode_ps_launch(
             query, key_cache, context_lengths, kv_indptr,
             num_query_heads, num_kv_heads)
 
-    work_indptr = metadata['work_indptr']
-    work_info_flat = metadata['work_info_flat']
-    partial_output = metadata['partial_output']
-    partial_lse = metadata['partial_lse']
-    stride_po_partial = metadata['stride_po_partial']
-    stride_pl_partial = metadata['stride_pl_partial']
-    num_sm = metadata['num_sm']
-
     query_length = query.shape[0] // context_lengths.shape[0]
     query_group_size = num_query_heads // num_kv_heads
 
@@ -1958,11 +1973,12 @@ def pa_decode_ps_launch(
         head_size = query.shape[-1]
         eqgs = query_length * query_group_size
         context_partition_size = KV_COMPUTE_BLOCK
-        max_context_partition_num = get_sw_ps_max_context_partition_num(
-            sliding_window,
-            global_window,
-            context_partition_size,
-        )
+        if max_context_partition_num == 0:
+            max_context_partition_num = get_sw_ps_max_context_partition_num(
+                sliding_window,
+                global_window,
+                context_partition_size,
+            )
         if is_graph_capturing and (
             exp_sums is None or max_logits is None or temporary_output is None
         ):
@@ -2033,6 +2049,14 @@ def pa_decode_ps_launch(
         )
         return "ps_sw_partitioned"
     
+    work_indptr = metadata['work_indptr']
+    work_info_flat = metadata['work_info_flat']
+    partial_output = metadata['partial_output']
+    partial_lse = metadata['partial_lse']
+    stride_po_partial = metadata['stride_po_partial']
+    stride_pl_partial = metadata['stride_pl_partial']
+    num_sm = metadata['num_sm']
+
     compiled = compile_pa_decode_ps(
         softmax_scale=softmax_scale, trans_v=trans_v, query_group_size=query_group_size,
         per_token_kv=per_token_kv, query_length=query_length,
