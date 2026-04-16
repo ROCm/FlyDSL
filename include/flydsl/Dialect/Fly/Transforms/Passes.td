@@ -62,4 +62,18 @@ def FlyConvertAtomCallToSSAFormPass : Pass<"fly-convert-atom-call-to-ssa-form"> 
   ];
 }
 
+def FlyPromoteRegMemToVectorSSAPass : Pass<"fly-promote-regmem-to-vectorssa"> {
+  let summary = "Promote register memory to vector SSA values";
+  let description = [{
+    Promotes fly.make_ptr(register) memory semantics to vector SSA values.
+    Requires fly-convert-atom-call-to-ssa-form to have run first. 
+  }];
+
+  let dependentDialects = [
+    "arith::ArithDialect",
+    "gpu::GPUDialect",
+    "vector::VectorDialect"
+  ];
+}
+
 #endif // FLY_PASSES
