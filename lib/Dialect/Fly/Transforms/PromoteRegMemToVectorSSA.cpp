@@ -373,6 +373,8 @@ private:
       RegMem2VectorSSAMap thenState = state;
       Block *oldThen = &oldIf.getThenRegion().front();
       Block *newThen = &newIf.getThenRegion().front();
+      if (!newThen->empty())
+        newThen->back().erase();
       if (failed(rewriteBlock(oldThen, newThen, thenMapping, thenState)))
         return failure();
 
@@ -391,6 +393,8 @@ private:
       RegMem2VectorSSAMap elseState = state;
       Block *oldElse = &oldIf.getElseRegion().front();
       Block *newElse = &newIf.getElseRegion().front();
+      if (!newElse->empty())
+        newElse->back().erase();
       if (failed(rewriteBlock(oldElse, newElse, elseMapping, elseState)))
         return failure();
 
@@ -404,6 +408,8 @@ private:
       scf::YieldOp::create(elseYieldBuilder, oldYield.getLoc(), newYieldOperands);
     } else if (withElse) {
       Block *newElse = &newIf.getElseRegion().front();
+      if (!newElse->empty())
+        newElse->back().erase();
       SmallVector<Value> elseYieldOperands;
       appendVectorSSAValues(state, touchedRoots, elseYieldOperands);
       OpBuilder elseYieldBuilder = OpBuilder::atBlockEnd(newElse);

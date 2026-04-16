@@ -359,4 +359,22 @@ gpu.module @promote_rmem_to_vector_ssa {
     %use_if_res = arith.addi %if_res, %c0_i32 : i32
     gpu.return
   }
+
+  // CHECK-LABEL: gpu.func @promote_void_if_with_region_local_register
+  // CHECK-NOT: register
+  // CHECK: scf.if %arg1
+  // CHECK:   %[[LOCAL_INIT:.*]] = ub.poison : vector<1xi32>
+  // CHECK:   %[[AFTER_STORE:.*]] = vector.insert %{{.*}}, %[[LOCAL_INIT]]
+  // CHECK:   %[[LOADED:.*]] = vector.extract %[[AFTER_STORE]]
+  // CHECK:   fly.ptr.store(%[[LOADED]], %arg0)
+  gpu.func @promote_void_if_with_region_local_register(%out: !fly.ptr<i32, global>, %pred: i1) kernel {
+    %c42_i32 = arith.constant 42 : i32
+    scf.if %pred {
+      %local = fly.make_ptr() {dictAttrs = {allocaSize = 1 : i64}} : () -> !fly.ptr<i32, register>
+      fly.ptr.store(%c42_i32, %local) : (i32, !fly.ptr<i32, register>) -> ()
+      %val = fly.ptr.load(%local) : (!fly.ptr<i32, register>) -> i32
+      fly.ptr.store(%val, %out) : (i32, !fly.ptr<i32, global>) -> ()
+    }
+    gpu.return
+  }
 }
