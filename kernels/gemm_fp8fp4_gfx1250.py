@@ -31,7 +31,6 @@ SCALE_BLOCK = 32
 SCALES_PER_WMMA = WMMA_K // SCALE_BLOCK  # 4
 
 LDS_PAD_A_BYTES = 16
-LDS_PAD_B_BYTES = 16
 LDS_PAD_D_BYTES = 16
 
 
@@ -189,15 +188,8 @@ def compile_mxscale_gemm(
 
     lds_a_stride_bytes = packed_tile_k_a + LDS_PAD_A_BYTES
 
-    _B_TILE_BYTES = 256
-    _b_padded_tile_stride = _B_TILE_BYTES + LDS_PAD_B_BYTES
-    _b_interleaved_stride = _b_padded_tile_stride * 2
-    _b_row_data_bytes = packed_tile_k_b * 16
-    _b_pads_per_row = _b_row_data_bytes // _B_TILE_BYTES
-    _b_padded_row_bytes = _b_row_data_bytes + _b_pads_per_row * LDS_PAD_B_BYTES
-
     lds_a_data_bytes = tile_m * lds_a_stride_bytes
-    lds_b_data_bytes = (tile_n // 16) * _b_padded_row_bytes
+    lds_b_data_bytes = tile_n * packed_tile_k_b
     _scale_guard_bytes = 16
     lds_a_scale_bytes = tile_m * scale_k_per_tile + _scale_guard_bytes
     lds_b_scale_bytes = tile_n * scale_k_per_tile + _scale_guard_bytes
@@ -456,7 +448,7 @@ def compile_mxscale_gemm(
                 strides=(K_packed_b * 16, 1),
                 tile_shape=(tile_n // 16, packed_tile_k_b * 16),
                 elem_bytes=1,
-                pad_interval=_B_TILE_BYTES, pad_amount=LDS_PAD_B_BYTES,
+                pad_interval=0, pad_amount=0,
                 num_warps=tdm_desc_num_warps,
                 workgroup_mask=b_mcast_mask,
                 atomic_barrier_enable=atomic_barrier_enable)
@@ -561,12 +553,13 @@ def compile_mxscale_gemm(
 
             K-dimension interleaving for FP8/A8W4:
               kgrp0 and kgrp1 read alternating 16x16 tiles (stride = 2 tiles).
-              kgrp offset = 1 padded tile = _b_padded_tile_stride bytes.
+              kgrp offset = 1 tile = 256 bytes.
             """
-            _ngroup_stride = _b_padded_row_bytes
+            _ngroup_stride = packed_tile_k_b * 16
             _n_group_base = arith.index(warp_tile_n // 16) * wave_n_idx
             row_off = lane16 * arith.index(16)
-            k_tile_off = lane_kgrp * arith.index(_b_padded_tile_stride)
+            # All formats: interleaved — kgrp offset = 1 tile = 256 bytes
+            k_tile_off = lane_kgrp * arith.index(256)
             bases = []
             if is_fp4:
                 for wn_half in range_constexpr(wmma_n_rep * 2):
@@ -589,36 +582,42 @@ def compile_mxscale_gemm(
             A8W4: 16x128 FP4 → vec<8xi32> from 1 N-group (bases[wn]).
 
             K-dimension interleaving (FP8/A8W4):
-              Stride = _b_interleaved_stride bytes between same-kgrp tiles.
+              Stride = 2 tiles = 512 bytes between loads.
               kgrp0 reads tiles 0,2,4,6; kgrp1 reads tiles 1,3,5,7.
             """
             if is_fp4:
-                _num_tiles = WMMA_K // PACK_FACTOR_B // 16
-                k_subtile_off = arith.index(ks * _num_tiles * _b_padded_tile_stride)
+                # FP4: 2 N-groups per wn, 4 tiles per N-group
+                # Interleaved stride=512 (2 tiles): kgrp0→tiles 0,2; kgrp1→tiles 1,3
+                _num_tiles = WMMA_K // PACK_FACTOR_B // 16  # 4 tiles total per N-group
+                k_subtile_off = arith.index(ks * _num_tiles * 256)
                 base0 = b_lane_bases[wn * 2] + k_subtile_off
                 v0 = lds_load_b128_raw(lds_buffer, base0)
-                v1 = lds_load_b128_raw(lds_buffer, base0 + arith.index(_b_interleaved_stride))
+                v1 = lds_load_b128_raw(lds_buffer, base0 + arith.index(512))
                 base1 = b_lane_bases[wn * 2 + 1] + k_subtile_off
                 v2 = lds_load_b128_raw(lds_buffer, base1)
-                v3 = lds_load_b128_raw(lds_buffer, base1 + arith.index(_b_interleaved_stride))
+                v3 = lds_load_b128_raw(lds_buffer, base1 + arith.index(512))
                 v01 = vector.shuffle(v0, v1, list(range(8)))
                 v23 = vector.shuffle(v2, v3, list(range(8)))
                 return vector.shuffle(v01, v23, list(range(16)))
             elif is_a8w4:
-                _num_tiles = WMMA_K // PACK_FACTOR_B // 16
-                k_subtile_off = arith.index(ks * _num_tiles * _b_padded_tile_stride)
+                # A8W4: FP4 weight, 4 tiles per N-group
+                # Interleaved stride=512: kgrp0→tiles 0,2; kgrp1→tiles 1,3
+                _num_tiles = WMMA_K // PACK_FACTOR_B // 16  # 4 tiles total
+                k_subtile_off = arith.index(ks * _num_tiles * 256)
                 base0 = b_lane_bases[wn] + k_subtile_off
                 v0 = lds_load_b128_raw(lds_buffer, base0)
-                v1 = lds_load_b128_raw(lds_buffer, base0 + arith.index(_b_interleaved_stride))
+                v1 = lds_load_b128_raw(lds_buffer, base0 + arith.index(512))
                 return vector.shuffle(v0, v1, list(range(8)))
             else:
-                _num_tiles = WMMA_K // PACK_FACTOR_B // 16
-                k_subtile_off = arith.index(ks * _num_tiles * _b_padded_tile_stride)
+                # FP8: 8 tiles per N-group
+                # Interleaved stride=512: kgrp0→tiles 0,2,4,6; kgrp1→tiles 1,3,5,7
+                _num_tiles = WMMA_K // PACK_FACTOR_B // 16  # 8 tiles total
+                k_subtile_off = arith.index(ks * _num_tiles * 256)
                 base0 = b_lane_bases[wn] + k_subtile_off
                 v0 = lds_load_b128_raw(lds_buffer, base0)
-                v1 = lds_load_b128_raw(lds_buffer, base0 + arith.index(_b_interleaved_stride))
-                v2 = lds_load_b128_raw(lds_buffer, base0 + arith.index(_b_interleaved_stride * 2))
-                v3 = lds_load_b128_raw(lds_buffer, base0 + arith.index(_b_interleaved_stride * 3))
+                v1 = lds_load_b128_raw(lds_buffer, base0 + arith.index(512))
+                v2 = lds_load_b128_raw(lds_buffer, base0 + arith.index(1024))
+                v3 = lds_load_b128_raw(lds_buffer, base0 + arith.index(1536))
                 v01 = vector.shuffle(v0, v1, list(range(8)))
                 v23 = vector.shuffle(v2, v3, list(range(8)))
                 return vector.shuffle(v01, v23, list(range(16)))
