@@ -5,9 +5,10 @@ Correctness: compare FlyDSL kernel against a pure-PyTorch reference.
 Performance: compare FlyDSL kernel against Triton opt3 kernel.
 Rocprof:     profile with rocprofv3 for accurate GPU kernel timing.
 
-Runtime parameters derived from Qwen3.5-397B-A17B TP=8 serving config:
-  K=128, V=128, Hk=16->Hg=2, Hv=64->H=8, BT=64
-  max_num_batched_tokens=8192, full_prompt_len=8000
+Runtime parameters derived from Qwen3.5-397B-A17B serving config:
+  K=128, V=128, Hk=16, Hv=32, BT=64
+  TP_LIST=[1,4] -> Hg=Hk/TP, H=Hv/TP (parametrized per test)
+  max_num_batched_tokens=32768
 
 Usage:
   cd /workspace/FlyDSL
@@ -36,7 +37,7 @@ import triton
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from kernels.chunk_gated_delta_h import chunk_gated_delta_rule_fwd_h_flydsl
+from kernels.chunk_gated_delta_h import chunk_gated_delta_rule_fwd_h_flydsl, _autotune_cache as _flydsl_autotune_cache
 
 # ── Triton opt3 kernel (inlined, no external dependency) ────────────────
 
@@ -223,15 +224,24 @@ def fwd_h_triton_opt3(
 
 
 # ── Global test configuration ──────────────────────────────────────────
+# # Qwen3 params
+# K = 128
+# V = 128
+# Hk = 16
+# Hv = 32
+# TP_LIST = [1, 4]
+# BT = 64
 
+# Qwen3.5 params
 K = 128
 V = 128
-Hg = 2
-H = 8
+Hk = 16
+Hv = 64
+TP_LIST = [4, 8]
 BT = 64
 
-MAX_NUM_BATCHED_TOKENS = 8192
-FULL_PROMPT_LENS = [8000]
+MAX_NUM_BATCHED_TOKENS = 32768
+FULL_PROMPT_LENS = [1024, 2048, 4096, 8192]
 
 NUM_WARMUP = 10
 NUM_ITERS = 200
@@ -257,8 +267,10 @@ def _build_cu_seqlens(context_lens, device="cuda"):
     return scheduled_q_lens, cu_seqlens
 
 
-def _make_inputs(context_lens, dtype=torch.bfloat16, device="cuda",
+def _make_inputs(context_lens, tp=1, dtype=torch.bfloat16, device="cuda",
                  with_initial_state=True):
+    Hg = Hk // tp
+    H = Hv // tp
     scheduled_q_lens, cu_seqlens = _build_cu_seqlens(context_lens, device=device)
     T_total = int(cu_seqlens[-1].item())
     N = len(scheduled_q_lens)
@@ -369,15 +381,22 @@ def _normalize_opt_v_new(vn_opt):
     return vn_opt.permute(0, 2, 1, 3).contiguous()
 
 
+PERF_SHAPES = [
+    pytest.param(tp, fpl, id=f"TP{tp}_full{fpl}")
+    for tp in TP_LIST
+    for fpl in FULL_PROMPT_LENS
+]
+
+
 # ── Correctness tests ───────────────────────────────────────────────────
 
 class TestCorrectness:
     """Correctness against PyTorch reference."""
 
-    @pytest.mark.parametrize("full_prompt_len", FULL_PROMPT_LENS)
-    def test_correctness_flydsl(self, full_prompt_len):
+    @pytest.mark.parametrize("tp, full_prompt_len", PERF_SHAPES)
+    def test_correctness_flydsl(self, tp, full_prompt_len):
         context_lens = _build_context_lens(full_prompt_len)
-        k, w_orig, u_orig, w_c, u_c, g, h0, cu, _ = _make_inputs(context_lens)
+        k, w_orig, u_orig, w_c, u_c, g, h0, cu, _ = _make_inputs(context_lens, tp=tp)
 
         h_fly, vn_fly, fs_fly = chunk_gated_delta_rule_fwd_h_flydsl(
             k, w_c, u_c, g=g, initial_state=h0,
@@ -396,10 +415,10 @@ class TestCorrectness:
         torch.testing.assert_close(
             fs_fly.float(), fs_ref.float(), atol=1e-1, rtol=1e-1)
 
-    @pytest.mark.parametrize("full_prompt_len", FULL_PROMPT_LENS)
-    def test_correctness_triton_opt3(self, full_prompt_len):
+    @pytest.mark.parametrize("tp, full_prompt_len", PERF_SHAPES)
+    def test_correctness_triton_opt3(self, tp, full_prompt_len):
         context_lens = _build_context_lens(full_prompt_len)
-        k, w_orig, u_orig, w_c, u_c, g, h0, cu, _ = _make_inputs(context_lens)
+        k, w_orig, u_orig, w_c, u_c, g, h0, cu, _ = _make_inputs(context_lens, tp=tp)
 
         h_tri, vn_tri, fs_tri = fwd_h_triton_opt3(
             k, w_c, u_c, g=g, initial_state=h0,
@@ -418,11 +437,11 @@ class TestCorrectness:
         torch.testing.assert_close(
             fs_tri.float(), fs_ref.float(), atol=1e-1, rtol=1e-1)
 
-    @pytest.mark.parametrize("full_prompt_len", FULL_PROMPT_LENS)
-    def test_correctness_flydsl_vs_triton(self, full_prompt_len):
+    @pytest.mark.parametrize("tp, full_prompt_len", PERF_SHAPES)
+    def test_correctness_flydsl_vs_triton(self, tp, full_prompt_len):
         """Direct comparison between FlyDSL and Triton opt3 kernels."""
         context_lens = _build_context_lens(full_prompt_len)
-        k, w_orig, u_orig, w_c, u_c, g, h0, cu, _ = _make_inputs(context_lens)
+        k, w_orig, u_orig, w_c, u_c, g, h0, cu, _ = _make_inputs(context_lens, tp=tp)
 
         h_fly, vn_fly, fs_fly = chunk_gated_delta_rule_fwd_h_flydsl(
             k, w_c, u_c, g=g, initial_state=h0,
@@ -452,7 +471,7 @@ class TestCorrectness:
                   f"median={median_val:.6f}  "
                   f"p99={p99_val:.6f}")
 
-        print(f"\n[FlyDSL vs Triton opt3  full_prompt_len={full_prompt_len}]")
+        print(f"\n[FlyDSL vs Triton opt3  TP={tp} full_prompt_len={full_prompt_len}]")
         _report("h", h_fly_f, h_tri_f)
         _report("v_new", vn_fly_f, vn_tri_f)
         _report("final_state", fs_fly_f, fs_tri_f)
@@ -460,6 +479,31 @@ class TestCorrectness:
         torch.testing.assert_close(h_fly_f, h_tri_f, atol=1e-1, rtol=1e-1)
         torch.testing.assert_close(vn_fly_f, vn_tri_f, atol=1e-1, rtol=1e-1)
         torch.testing.assert_close(fs_fly_f, fs_tri_f, atol=1e-1, rtol=1e-1)
+
+
+# ── Best-config helpers ────────────────────────────────────────────────
+
+def _get_flydsl_best_config() -> str:
+    """Return the last cached FlyDSL autotune result as a short string."""
+    if not _flydsl_autotune_cache:
+        return "N/A"
+    bv = list(_flydsl_autotune_cache.values())[-1]
+    return f"BV={bv}"
+
+
+def _get_triton_best_config() -> str:
+    """Return the Triton autotune best config as a short string."""
+    try:
+        kernel = _triton_fwd_kernel_h_opt3
+        autotuner = kernel.fn if hasattr(kernel, "fn") else kernel
+        cfg = autotuner.best_config
+        kw = cfg.kwargs
+        bv = kw.get("BV", "?")
+        nw = cfg.num_warps
+        ns = cfg.num_stages
+        return f"BV={bv},nw={nw},ns={ns}"
+    except (AttributeError, TypeError):
+        return "N/A"
 
 
 # ── Performance tests ───────────────────────────────────────────────────
@@ -482,40 +526,56 @@ def _bench_fn(fn, *args, **kwargs):
     return s.elapsed_time(e) / NUM_ITERS * 1000
 
 
-PERF_SHAPES = [
-    pytest.param(fpl, id=f"full{fpl}")
-    for fpl in FULL_PROMPT_LENS
-]
-
-
 class TestPerformance:
     """Performance comparison: FlyDSL vs Triton opt3."""
 
-    @pytest.mark.parametrize("full_prompt_len", PERF_SHAPES)
-    def test_perf_comparison(self, full_prompt_len):
+    _results: list[dict] = []
+
+    @pytest.mark.parametrize("tp, full_prompt_len", PERF_SHAPES)
+    def test_perf_comparison(self, tp, full_prompt_len):
         context_lens = _build_context_lens(full_prompt_len)
         k, w_orig, u_orig, w_c, u_c, g, h0, cu, scheduled_q_lens = _make_inputs(
-            context_lens)
+            context_lens, tp=tp)
         total_tokens = int(cu[-1].item())
+        num_seqs = len(context_lens)
+        Hg = Hk // tp
+        H = Hv // tp
 
-        # FlyDSL kernel
         us_fly = _bench_fn(
             chunk_gated_delta_rule_fwd_h_flydsl,
             k, w_c, u_c, g=g, initial_state=h0,
             output_final_state=True, cu_seqlens=cu, wu_contiguous=True,
         )
 
-        print(f"\n[K5 FlyDSL T={total_tokens}]  {us_fly:.2f} us")
+        print(f"\n[K5 FlyDSL TP={tp} Hg={Hg} H={H} T={total_tokens}]  {us_fly:.2f} us")
 
-        # Triton opt3 kernel for comparison
         us_triton = _bench_fn(
             fwd_h_triton_opt3,
             k, w_c, u_c, g=g, initial_state=h0,
             output_final_state=True, cu_seqlens=cu, wu_contiguous=True,
         )
         speedup = us_triton / us_fly if us_fly > 0 else float('inf')
-        print(f"[K5 Triton opt3 T={total_tokens}]  {us_triton:.2f} us")
+        print(f"[K5 Triton opt3 TP={tp} T={total_tokens}]  {us_triton:.2f} us")
         print(f"[Speedup FlyDSL/Triton]  {speedup:.3f}x")
+
+        TestPerformance._results.append({
+            "tp": tp,
+            "Hg": Hg,
+            "H": H,
+            "full_prompt_len": full_prompt_len,
+            "num_seqs": num_seqs,
+            "flydsl_us": us_fly,
+            "flydsl_cfg": _get_flydsl_best_config(),
+            "triton_us": us_triton,
+            "triton_cfg": _get_triton_best_config(),
+            "speedup": speedup,
+        })
+
+    @pytest.fixture(autouse=True, scope="class")
+    def _print_table(self):
+        TestPerformance._results = []
+        yield
+        _print_summary_table(TestPerformance._results, title="CUDA Event Performance Summary")
 
 
 # ── rocprofv3 profiling infrastructure ──────────────────────────────────
@@ -551,7 +611,7 @@ def _roctx_thread_id(lib):
     return int(tid.value)
 
 
-def _rocprof_worker(full_prompt_len):
+def _rocprof_worker(full_prompt_len, tp=1):
     """Inner worker: runs under rocprofv3 --selected-regions.
 
     Profiling starts paused. We warmup both kernels, then
@@ -564,7 +624,7 @@ def _rocprof_worker(full_prompt_len):
     tid = _roctx_thread_id(roctx)
 
     context_lens = _build_context_lens(full_prompt_len)
-    k, w_orig, u_orig, w_c, u_c, g, h0, cu, _ = _make_inputs(context_lens)
+    k, w_orig, u_orig, w_c, u_c, g, h0, cu, _ = _make_inputs(context_lens, tp=tp)
     total_tokens = int(cu[-1].item())
 
     run_fly = lambda: chunk_gated_delta_rule_fwd_h_flydsl(
@@ -618,8 +678,27 @@ def _parse_kernel_stats(stats_path: Path) -> dict[str, dict]:
     return result
 
 
-def _print_rocprof_summary(stats_path: Path, total_tokens: int):
-    """Print a formatted summary from rocprofv3 kernel_stats CSV."""
+def _extract_kernel_us(stats: dict, kname: str) -> dict | None:
+    """Find a kernel entry in parsed stats and return timing dict, or None."""
+    entry = stats.get(kname)
+    if entry is None:
+        for name in stats:
+            if kname in name:
+                entry = stats[name]
+                break
+    if entry is None:
+        return None
+    return {
+        "avg_us": float(entry["AverageNs"]) / 1000,
+        "min_us": float(entry["MinNs"]) / 1000,
+        "max_us": float(entry["MaxNs"]) / 1000,
+        "calls": int(entry["Calls"]),
+        "total_ms": float(entry["TotalDurationNs"]) / 1e6,
+    }
+
+
+def _print_rocprof_summary(stats_path: Path, total_tokens: int) -> dict | None:
+    """Print a formatted summary and return {flydsl_us, triton_us, speedup} or None."""
     stats = _parse_kernel_stats(stats_path)
 
     targets = [
@@ -629,33 +708,27 @@ def _print_rocprof_summary(stats_path: Path, total_tokens: int):
 
     results = {}
     for label, kname in targets:
-        entry = stats.get(kname)
-        if entry is None:
-            for name in stats:
-                if kname in name:
-                    entry = stats[name]
-                    break
-        if entry is None:
+        t = _extract_kernel_us(stats, kname)
+        if t is None:
             print(f"  {label}: kernel '{kname}' not found in stats")
             continue
-
-        avg_ns = float(entry["AverageNs"])
-        min_ns = float(entry["MinNs"])
-        max_ns = float(entry["MaxNs"])
-        calls = int(entry["Calls"])
-        total_ns = float(entry["TotalDurationNs"])
-        results[label] = avg_ns
-
+        results[label] = t
         print(f"  {label} ({kname}):")
-        print(f"    Calls:   {calls}")
-        print(f"    Average: {avg_ns / 1000:.2f} us  ({avg_ns:.0f} ns)")
-        print(f"    Min:     {min_ns / 1000:.2f} us")
-        print(f"    Max:     {max_ns / 1000:.2f} us")
-        print(f"    Total:   {total_ns / 1e6:.2f} ms")
+        print(f"    Calls:   {t['calls']}")
+        print(f"    Average: {t['avg_us']:.2f} us")
+        print(f"    Min:     {t['min_us']:.2f} us")
+        print(f"    Max:     {t['max_us']:.2f} us")
+        print(f"    Total:   {t['total_ms']:.2f} ms")
 
+    row = None
     if "FlyDSL" in results and "Triton opt3" in results:
-        speedup = results["Triton opt3"] / results["FlyDSL"]
+        speedup = results["Triton opt3"]["avg_us"] / results["FlyDSL"]["avg_us"]
         print(f"\n  Speedup (FlyDSL vs Triton): {speedup:.3f}x")
+        row = {
+            "flydsl_us": results["FlyDSL"]["avg_us"],
+            "triton_us": results["Triton opt3"]["avg_us"],
+            "speedup": speedup,
+        }
 
     if not stats:
         print("  WARNING: no kernels found in stats file")
@@ -664,13 +737,21 @@ def _print_rocprof_summary(stats_path: Path, total_tokens: int):
         for name in sorted(stats.keys()):
             print(f"    {name}")
 
+    return row
 
-def _do_rocprof(full_prompt_len):
-    """Outer driver: launches rocprofv3 wrapping this script in --_rocprof-worker mode."""
+
+def _do_rocprof(full_prompt_len, tp=1) -> tuple[int, dict | None]:
+    """Outer driver: launches rocprofv3 wrapping this script in --_rocprof-worker mode.
+
+    Returns (returncode, row_dict_or_None).
+    row_dict keys: tp, Hg, H, full_prompt_len, num_seqs, flydsl_us, triton_us, speedup.
+    """
+    Hg = Hk // tp
+    H = Hv // tp
     repo_root = Path(__file__).resolve().parent.parent.parent
     output_dir = repo_root / "rocprof_output"
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_stem = f"gdn_k5_fpl{full_prompt_len}"
+    output_stem = f"gdn_k5_tp{tp}_fpl{full_prompt_len}"
 
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
@@ -679,6 +760,7 @@ def _do_rocprof(full_prompt_len):
         "python3", "-u", str(Path(__file__).resolve()),
         "--_rocprof-worker",
         "--full-prompt-len", str(full_prompt_len),
+        "--tp", str(tp),
     ]
     rocprof_cmd = [
         "rocprofv3",
@@ -694,15 +776,26 @@ def _do_rocprof(full_prompt_len):
 
     context_lens = _build_context_lens(full_prompt_len)
     total_tokens = sum(context_lens)
+    num_seqs = len(context_lens)
 
-    print(f"\n[rocprof] full_prompt_len={full_prompt_len}, T={total_tokens}")
+    print(f"\n[rocprof] TP={tp} Hg={Hg} H={H} full_prompt_len={full_prompt_len}, T={total_tokens}")
     print(f"[rocprof] cmd: {' '.join(rocprof_cmd)}", flush=True)
     result = subprocess.run(rocprof_cmd, cwd=repo_root, env=env)
 
+    row = None
     stats_path = output_dir / f"{output_stem}_kernel_stats.csv"
     if stats_path.exists():
-        print(f"\n[rocprof] Results (full_prompt_len={full_prompt_len}, T={total_tokens}):")
-        _print_rocprof_summary(stats_path, total_tokens)
+        print(f"\n[rocprof] Results (TP={tp} full_prompt_len={full_prompt_len}, T={total_tokens}):")
+        perf = _print_rocprof_summary(stats_path, total_tokens)
+        if perf is not None:
+            row = {
+                "tp": tp,
+                "Hg": Hg,
+                "H": H,
+                "full_prompt_len": full_prompt_len,
+                "num_seqs": num_seqs,
+                **perf,
+            }
     else:
         print(f"[rocprof] kernel stats not found: {stats_path}", flush=True)
         trace_path = output_dir / f"{output_stem}_kernel_trace.csv"
@@ -712,7 +805,48 @@ def _do_rocprof(full_prompt_len):
     if result.returncode != 0:
         print(f"[rocprof] rocprofv3 exited with code {result.returncode}", flush=True)
 
-    return result.returncode
+    return result.returncode, row
+
+
+def _print_summary_table(rows: list[dict], title: str = "Performance Summary"):
+    """Print a formatted summary table from collected benchmark rows.
+
+    Rows are grouped by TP value, each group gets its own sub-table.
+    Each row dict keys: tp, Hg, H, full_prompt_len, num_seqs,
+      flydsl_us, flydsl_cfg, triton_us, triton_cfg, speedup.
+    """
+    if not rows:
+        return
+
+    from itertools import groupby
+
+    w = 138
+    sep = "-" * w
+    print(f"\n{'=' * w}")
+    print(f"  {title}")
+    print(f"  Fixed: K={K}, V={V}, Hk={Hk}, Hv={Hv}, BT={BT}, max_tokens={MAX_NUM_BATCHED_TOKENS}")
+    print(f"{'=' * w}")
+
+    sorted_rows = sorted(rows, key=lambda r: (r.get("tp", 1), r["full_prompt_len"]))
+    for tp_val, group in groupby(sorted_rows, key=lambda r: r.get("tp", 1)):
+        group_rows = list(group)
+        Hg_val = group_rows[0].get("Hg", "?")
+        H_val = group_rows[0].get("H", "?")
+        print(f"\n  TP={tp_val}  (Hg={Hg_val}, H={H_val})")
+        print(f"  {'FullPromptLen':>13}  {'NumSeqs':>8}  "
+              f"{'FlyDSL(us)':>11}  {'FlyDSL BestCfg':>15}  "
+              f"{'Triton(us)':>11}  {'Triton BestCfg':>22}  "
+              f"{'Speedup':>8}")
+        print(f"  {sep}")
+        for r in group_rows:
+            fly_cfg = r.get("flydsl_cfg", "N/A")
+            tri_cfg = r.get("triton_cfg", "N/A")
+            print(f"  {r['full_prompt_len']:>13}  {r['num_seqs']:>8}  "
+                  f"{r['flydsl_us']:>11.2f}  {fly_cfg:>15}  "
+                  f"{r['triton_us']:>11.2f}  {tri_cfg:>22}  "
+                  f"{r['speedup']:>7.3f}x")
+
+    print(f"{'=' * w}\n")
 
 
 # ── rocprofv3 pytest tests ─────────────────────────────────────────────
@@ -720,10 +854,34 @@ def _do_rocprof(full_prompt_len):
 class TestRocprof:
     """Profile FlyDSL and Triton kernels with rocprofv3."""
 
-    @pytest.mark.parametrize("full_prompt_len", PERF_SHAPES)
-    def test_rocprof(self, full_prompt_len):
-        rc = _do_rocprof(full_prompt_len)
+    _results: list[dict] = []
+
+    @pytest.mark.parametrize("tp, full_prompt_len", PERF_SHAPES)
+    def test_rocprof(self, tp, full_prompt_len):
+        context_lens = _build_context_lens(full_prompt_len)
+        k, w_orig, u_orig, w_c, u_c, g, h0, cu, _ = _make_inputs(context_lens, tp=tp)
+        chunk_gated_delta_rule_fwd_h_flydsl(
+            k, w_c, u_c, g=g, initial_state=h0,
+            output_final_state=True, cu_seqlens=cu, wu_contiguous=True,
+        )
+        fwd_h_triton_opt3(
+            k, w_c, u_c, g=g, initial_state=h0,
+            output_final_state=True, cu_seqlens=cu, wu_contiguous=True,
+        )
+        torch.cuda.synchronize()
+
+        rc, row = _do_rocprof(full_prompt_len, tp=tp)
+        if row is not None:
+            row["flydsl_cfg"] = _get_flydsl_best_config()
+            row["triton_cfg"] = _get_triton_best_config()
+            TestRocprof._results.append(row)
         assert rc == 0, f"rocprofv3 exited with code {rc}"
+
+    @pytest.fixture(autouse=True, scope="class")
+    def _print_table(self):
+        TestRocprof._results = []
+        yield
+        _print_summary_table(TestRocprof._results, title="Rocprof Performance Summary")
 
 
 # ── Main ────────────────────────────────────────────────────────────────
@@ -733,13 +891,14 @@ if __name__ == "__main__":
     parser.add_argument("--mode", choices=["test", "rocprof"], default="test",
                         help="test=pytest (default), rocprof=rocprofv3 profiling")
     parser.add_argument("--full-prompt-len", type=int, default=8000)
+    parser.add_argument("--tp", type=int, default=1)
     parser.add_argument("--_rocprof-worker", action="store_true",
                         help=argparse.SUPPRESS)
     args = parser.parse_args()
 
     if args._rocprof_worker:
-        _rocprof_worker(args.full_prompt_len)
+        _rocprof_worker(args.full_prompt_len, tp=args.tp)
     elif args.mode == "rocprof":
-        _do_rocprof(args.full_prompt_len)
+        _do_rocprof(args.full_prompt_len, tp=args.tp)
     else:
         pytest.main([__file__, "-v", "-s"])
