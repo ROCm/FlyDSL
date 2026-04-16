@@ -11,6 +11,7 @@ add_mlir_dialect_library(MLIRFlyDialect
   Transforms/LayoutLowering.cpp
   Transforms/Canonicalize.cpp
   Transforms/RewriteFuncSignature.cpp
+  Transforms/ConvertAtomCallToSSAForm.cpp
   
   DEPENDS
   MLIRFlyIncGen

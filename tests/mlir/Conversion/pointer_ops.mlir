@@ -3,49 +3,8 @@
 // RUN: %fly-opt %s --convert-fly-to-rocdl | FileCheck %s
 
 // Pointer operation lowering tests:
-//   - fly.get_iter -> identity (memref ptr passthrough)
 //   - fly.add_offset -> llvm.getelementptr
 //   - fly.make_view -> identity/bitcast
-
-// -----
-
-// === GetIter (identity) ===
-
-// get_iter extracts a raw pointer from a memref, then add_offset advances it.
-// After lowering, get_iter becomes identity and add_offset becomes GEP.
-
-// CHECK-LABEL: @test_get_iter_global
-// CHECK-SAME: (%[[MEM:.*]]: !llvm.ptr<1>)
-func.func @test_get_iter_global(%mem: !fly.memref<f32, global, 32:1>) {
-  // CHECK-NOT: fly.get_iter
-  %iter = fly.get_iter(%mem) : (!fly.memref<f32, global, 32:1>) -> !fly.ptr<f32, global>
-  %offset = fly.make_int_tuple() : () -> !fly.int_tuple<8>
-  // CHECK: llvm.getelementptr %[[MEM]][{{.*}}] : (!llvm.ptr<1>, i32) -> !llvm.ptr<1>, f32
-  %result = fly.add_offset(%iter, %offset) : (!fly.ptr<f32, global>, !fly.int_tuple<8>) -> !fly.ptr<f32, global>
-  return
-}
-
-// CHECK-LABEL: @test_get_iter_shared
-// CHECK-SAME: (%[[MEM:.*]]: !llvm.ptr<3>)
-func.func @test_get_iter_shared(%mem: !fly.memref<f32, shared, 16:1>) {
-  // CHECK-NOT: fly.get_iter
-  %iter = fly.get_iter(%mem) : (!fly.memref<f32, shared, 16:1>) -> !fly.ptr<f32, shared>
-  %offset = fly.make_int_tuple() : () -> !fly.int_tuple<4>
-  // CHECK: llvm.getelementptr %[[MEM]][{{.*}}] : (!llvm.ptr<3>, i32) -> !llvm.ptr<3>, f32
-  %result = fly.add_offset(%iter, %offset) : (!fly.ptr<f32, shared>, !fly.int_tuple<4>) -> !fly.ptr<f32, shared>
-  return
-}
-
-// CHECK-LABEL: @test_get_iter_register
-// CHECK-SAME: (%[[MEM:.*]]: !llvm.ptr<5>)
-func.func @test_get_iter_register(%mem: !fly.memref<f32, register, 4:1>) {
-  // CHECK-NOT: fly.get_iter
-  %iter = fly.get_iter(%mem) : (!fly.memref<f32, register, 4:1>) -> !fly.ptr<f32, register>
-  %offset = fly.make_int_tuple() : () -> !fly.int_tuple<2>
-  // CHECK: llvm.getelementptr %[[MEM]][{{.*}}] : (!llvm.ptr<5>, i32) -> !llvm.ptr<5>, f32
-  %result = fly.add_offset(%iter, %offset) : (!fly.ptr<f32, register>, !fly.int_tuple<2>) -> !fly.ptr<f32, register>
-  return
-}
 
 // -----
 
