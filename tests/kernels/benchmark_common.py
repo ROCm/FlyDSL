@@ -487,11 +487,19 @@ def bench_resolve_tiles(in_dtype, model_dim, inter_dim):
 
     tile_n1 = bench_best_tile(target_n, inter_dim, 16)
     tile_k1 = bench_best_tile(target_k, model_dim, wmma_k)
+    if tile_k1 is None:
+        tile_k1 = wmma_k
     tile_n2 = bench_best_tile(target_n, model_dim, 16)
 
     tile_k2 = None
     for k in range(target_k, 0, -wmma_k):
         if inter_dim % k != 0:
+            # K-padding: run_moe_stage2 auto-pads inter_dim, so accept
+            # any tile_k that satisfies the load-mapping constraints.
+            total = tile_m * k
+            if total % 256 == 0 and (total // 256) % 4 == 0:
+                if tile_k2 is None:
+                    tile_k2 = k
             continue
         total = tile_m * k
         if total % 256 == 0 and (total // 256) % 4 == 0:
