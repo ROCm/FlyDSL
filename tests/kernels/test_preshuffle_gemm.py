@@ -472,3 +472,107 @@ if __name__ == "__main__":
             )
     except pytest.skip.Exception as e:
         print(f"Skipped: {e}")
+
+
+# ── CUDAGraph Capture Test ────────────────────────────────────────────────
+
+@pytest.mark.parametrize("in_dtype", ["bf16", "fp8"])
+def test_cudagraph_capture_preshuffle(in_dtype):
+    """Verify FlyDSL preshuffle GEMM kernels are captured by CUDAGraph.
+
+    This test ensures that passing torch.cuda.current_stream() correctly
+    routes the kernel launch to the capture stream during graph recording.
+    Without proper stream handling, CUDAGraph replay produces all-zeros.
+    """
+    device = "cuda:0"
+    M, N, K = 1, 8192, 8192
+    tile_m, tile_n, tile_k = 16, 64, 256
+
+    arch = str(get_rocm_arch())
+    if not arch.startswith("gfx94") and not arch.startswith("gfx95"):
+        pytest.skip(f"Unsupported arch: {arch}")
+
+    # Prepare data
+    a_raw = torch.randn(M, K, dtype=torch.bfloat16, device=device)
+    b_raw = torch.randn(N, K, dtype=torch.bfloat16, device=device)
+
+    if in_dtype == "fp8":
+        a_q, scale_a = pertoken_quant(a_raw, dtype=torch.float8_e4m3fnuz)
+        b_q, scale_b = pertoken_quant(b_raw, dtype=torch.float8_e4m3fnuz)
+        a_q = a_q.view(torch.int8)
+        b_input = shuffle_weight(b_q.view(torch.int8), layout=(16, 16)).contiguous().view(-1)
+        sa_flat = scale_a.contiguous().view(-1)
+        sb_flat = scale_b.contiguous().view(-1)
+    else:
+        a_q = a_raw
+        b_input = shuffle_weight(b_raw.contiguous(), layout=(16, 16)).contiguous().view(-1)
+        sa_flat = torch.empty(0, dtype=torch.float32, device=device)
+        sb_flat = torch.empty(0, dtype=torch.float32, device=device)
+
+    c_out = torch.empty(M, N, dtype=torch.bfloat16, device=device)
+    _dummy_bias = torch.empty(0, dtype=torch.bfloat16, device=device)
+
+    # Compile kernel
+    launch_fn = compile_preshuffle_gemm_a8(
+        M=M, N=N, K=K,
+        tile_m=tile_m, tile_n=tile_n, tile_k=tile_k,
+        in_dtype=in_dtype,
+        epilogue="none",
+    )
+
+    def _args(c, a, b, sa, sb):
+        return (c.contiguous().view(-1),
+                a.contiguous().view(-1) if "int" not in str(a.dtype) else a.contiguous().view(-1),
+                b,
+                sa.contiguous().view(-1) if sa.numel() > 0 else sa,
+                sb.contiguous().view(-1) if sb.numel() > 0 else sb,
+                _dummy_bias,
+                M, N, torch.cuda.current_stream())
+
+    compiled_fn = flyc.compile(launch_fn, *_args(c_out, a_q, b_input, sa_flat, sb_flat))
+
+    # Warmup
+    compiled_fn(*_args(c_out, a_q, b_input, sa_flat, sb_flat))
+    torch.cuda.synchronize()
+
+    # ── Regular execution (reference) ──
+    c_out.zero_()
+    compiled_fn(*_args(c_out, a_q, b_input, sa_flat, sb_flat))
+    torch.cuda.synchronize()
+    ref = c_out.clone()
+    assert ref.abs().max().item() > 0, "Regular execution produced all zeros"
+
+    # ── CUDAGraph capture ──
+    g = torch.cuda.CUDAGraph()
+    s = torch.cuda.Stream()
+    s.wait_stream(torch.cuda.current_stream())
+
+    # Warmup on capture stream
+    with torch.cuda.stream(s):
+        compiled_fn(*_args(c_out, a_q, b_input, sa_flat, sb_flat))
+    torch.cuda.current_stream().wait_stream(s)
+    torch.cuda.synchronize()
+
+    # Record
+    c_out.zero_()
+    with torch.cuda.graph(g, stream=s):
+        compiled_fn(*_args(c_out, a_q, b_input, sa_flat, sb_flat))
+    torch.cuda.synchronize()
+
+    # ── Replay ──
+    c_out.zero_()
+    g.replay()
+    torch.cuda.synchronize()
+    graph_result = c_out.clone()
+
+    # ── Verify ──
+    max_diff = (ref - graph_result).abs().max().item()
+    assert graph_result.abs().max().item() > 0, (
+        f"CUDAGraph replay produced all zeros — kernel was NOT captured! "
+        f"ref max={ref.abs().max().item():.4f}"
+    )
+    assert torch.allclose(ref, graph_result, atol=1e-2), (
+        f"CUDAGraph result mismatch: max_diff={max_diff:.6f}, "
+        f"ref max={ref.abs().max().item():.4f}, graph max={graph_result.abs().max().item():.4f}"
+    )
+    print(f"✓ CUDAGraph capture verified ({in_dtype}): max_diff={max_diff:.6f}")
