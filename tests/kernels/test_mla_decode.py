@@ -30,6 +30,11 @@ pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
 
 aiter = pytest.importorskip("aiter", reason="aiter is not installed, skipping MLA tests")
 from aiter import dtypes
+from aiter.ops.attention import (
+    get_mla_metadata_info_v1,
+    get_mla_metadata_v1,
+    mla_reduce_v1,
+)
 
 from tests.test_common import run_perftest, checkAllclose
 from kernels.mla_fwd_decode import flydsl_mla_fwd_decode
@@ -169,7 +174,7 @@ def run_single(batch_size, ctx_len, decode_qlen=1, max_split_per_batch=32):
         (reduce_indptr_size, reduce_indptr_type),
         (reduce_final_map_size, reduce_final_map_type),
         (reduce_partial_map_size, reduce_partial_map_type),
-    ) = aiter.get_mla_metadata_info_v1(
+    ) = get_mla_metadata_info_v1(
         batch_size, max_seqlen_qo, nhead, fp8, fp8,
         is_sparse=False, fast_mode=True,
         num_kv_splits=max_split_per_batch,
@@ -183,7 +188,7 @@ def run_single(batch_size, ctx_len, decode_qlen=1, max_split_per_batch=32):
     reduce_final_map = torch.empty(reduce_final_map_size, dtype=reduce_final_map_type, device="cuda")
     reduce_partial_map = torch.empty(reduce_partial_map_size, dtype=reduce_partial_map_type, device="cuda")
 
-    aiter.get_mla_metadata_v1(
+    get_mla_metadata_v1(
         qo_indptr, kv_indptr, kv_last_page_lens,
         nhead // nhead_kv, nhead_kv, False,
         work_meta_data, work_info_set, work_indptr,
@@ -223,7 +228,7 @@ def run_single(batch_size, ctx_len, decode_qlen=1, max_split_per_batch=32):
             attn_lse,
             sm_scale,
         )
-        aiter.mla_reduce_v1(
+        mla_reduce_v1(
             logits, attn_lse,
             reduce_indptr, reduce_final_map, reduce_partial_map,
             max_seqlen_qo, out_asm, None,
