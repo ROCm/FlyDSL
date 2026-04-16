@@ -226,7 +226,7 @@ def compile_wmma_gemm_tdm(
             arena_alloc.ptr = total_d_bytes
     check_smem_capacity(arena_total_bytes, gpu_arch)
 
-    @flyc.kernel
+    @flyc.kernel(known_block_size=[block_threads, 1, 1])
     def kernel_wmma_gemm_tdm(
         arg_c: fx.Tensor,
         arg_a: fx.Tensor,

@@ -867,5 +867,121 @@ def main() -> None:
         print("=" * 100 + "\n")
 
 
+###############################################################################
+# GEMM benchmark helpers (TFLOPS, bandwidth, WMMA stats, results printer)
+###############################################################################
+
+
+def compute_gemm_tflops(
+    M: int, N: int, K: int,
+    padded_m: int, padded_n: int, padded_k: int,
+    us: float,
+) -> Tuple[float, float, float]:
+    """Return (logical_tflops, kernel_tflops, time_s) for a GEMM kernel."""
+    logical_flops = 2.0 * M * N * K
+    kernel_flops = 2.0 * padded_m * padded_n * padded_k
+    time_s = us / 1e6
+    logical_tflops = logical_flops / time_s / 1e12 if time_s > 0 else 0.0
+    kernel_tflops = kernel_flops / time_s / 1e12 if time_s > 0 else 0.0
+    return logical_tflops, kernel_tflops, time_s
+
+
+def compute_gemm_bandwidth(
+    read_bytes: int,
+    write_bytes: int,
+    time_s: float,
+) -> Tuple[float, float, float]:
+    """Return (total_bw_gbs, read_bw_gbs, write_bw_gbs)."""
+    bw_gbs = (read_bytes + write_bytes) / 1e9 / time_s if time_s > 0 else 0.0
+    read_bw_gbs = read_bytes / 1e9 / time_s if time_s > 0 else 0.0
+    write_bw_gbs = write_bytes / 1e9 / time_s if time_s > 0 else 0.0
+    return bw_gbs, read_bw_gbs, write_bw_gbs
+
+
+def compute_wmma_stats(
+    tile_m: int, tile_n: int, tile_k: int,
+    m_warp: int, n_warp: int,
+    padded_m: int, padded_n: int, padded_k: int,
+    us: float,
+    *,
+    wmma_k: int = 32,
+    wmma_n_eff: int = 16,
+    split_k: int = 1,
+) -> dict:
+    """Compute WMMA instruction counts and per-WG sequential stats."""
+    warp_tile_m = tile_m // m_warp
+    warp_tile_n = tile_n // n_warp
+    wmma_m_rep = warp_tile_m // 16
+    wmma_n_rep = warp_tile_n // wmma_n_eff
+    k_wmma_steps = tile_k // wmma_k
+    wmma_per_tile = wmma_m_rep * wmma_n_rep * k_wmma_steps
+    m_tiles = padded_m // tile_m
+    n_tiles = padded_n // tile_n
+    k_tiles = padded_k // tile_k
+    k_tiles_local = (padded_k // split_k) // tile_k
+    seq_wmma = k_tiles_local * wmma_per_tile
+    us_per_wmma = us / seq_wmma if seq_wmma > 0 else 0.0
+    return {
+        "wmma_per_tile": wmma_per_tile,
+        "wmma_m_rep": wmma_m_rep,
+        "wmma_n_rep": wmma_n_rep,
+        "k_wmma_steps": k_wmma_steps,
+        "m_tiles": m_tiles,
+        "n_tiles": n_tiles,
+        "k_tiles": k_tiles,
+        "k_tiles_local": k_tiles_local,
+        "seq_wmma": seq_wmma,
+        "us_per_wmma": us_per_wmma,
+    }
+
+
+def print_gemm_results(
+    us: float,
+    needs_pad: bool,
+    logical_tflops: float,
+    kernel_tflops: float,
+    bw_gbs: float,
+    read_bw_gbs: float,
+    write_bw_gbs: float,
+    byte_breakdown: dict,
+    wmma_stats: dict,
+    *,
+    split_k: int = 1,
+    trap_handler_warn: bool = False,
+    us_per_wmma_fmt: str = ".2f",
+) -> Tuple[float, float, float]:
+    """Print [3/3] Results block and return (us, reported_tflops, bw_gbs)."""
+    s = wmma_stats
+    bytes_moved = sum(byte_breakdown.values())
+
+    print(f"\n[3/3] Results:")
+    print(f"      Kernel time:  {us:.1f} us ({us / 1e3:.4f} ms)")
+    if not needs_pad:
+        print(f"      TFLOPS:       {kernel_tflops:.4f}")
+    else:
+        print(f"      TFLOPS:       {logical_tflops:.4f} (logical), {kernel_tflops:.4f} (kernel)")
+    print(f"      Bandwidth:    {bw_gbs:.1f} GB/s  "
+          f"(read: {read_bw_gbs:.1f} + write: {write_bw_gbs:.1f})")
+    parts = " ".join(f"{k}={v / 1e6:.1f}" for k, v in byte_breakdown.items())
+    print(f"      Bytes moved:  {bytes_moved / 1e6:.1f} MB  ({parts})")
+    print(f"      ---")
+    print(f"      WMMA/tile:    {s['wmma_per_tile']} "
+          f"({s['wmma_m_rep']}m \u00d7 {s['wmma_n_rep']}n \u00d7 {s['k_wmma_steps']}k)")
+    if split_k > 1:
+        print(f"      Total tiles:  {s['m_tiles']}\u00d7{s['n_tiles']} spatial \u00d7 "
+              f"{split_k} split-K \u00d7 {s['k_tiles_local']} local K-iters")
+    else:
+        print(f"      Total tiles:  {s['m_tiles']}\u00d7{s['n_tiles']} spatial \u00d7 {s['k_tiles']} K-iters")
+    print(f"      Seq WMMA/WG:  {s['seq_wmma']}")
+    print(f"      us/WMMA:      {s['us_per_wmma']:{us_per_wmma_fmt}}")
+    if trap_handler_warn and s["us_per_wmma"] > 1000:
+        print(f"      WARNING: {s['us_per_wmma']/1000:.1f} ms/WMMA indicates "
+              f"WMMA_SCALE trap-handler emulation")
+    print("=" * 72)
+
+    reported_tflops = kernel_tflops if not needs_pad else logical_tflops
+    return us, reported_tflops, bw_gbs
+
+
 if __name__ == "__main__":
     main()
