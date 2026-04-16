@@ -781,11 +781,9 @@ def compile_moe_gemm1(
                     up_list = list(acc_up_in)
                     mfma_res_ty = T.i32x4 if is_int8 else T.f32x4
                     if _use_mfma_k32:
-                        _raw_mfma = rocdl.mfma_f32_16x16x32_f16 if is_f16 else rocdl.mfma_f32_16x16x32_bf16
-                        def mfma_fn(res_ty, args):
-                            return _raw_mfma(res_ty, *args).result
+                        mfma_fn = rocdl.mfma_f32_16x16x32_f16 if is_f16 else rocdl.mfma_f32_16x16x32_bf16
                     else:
-                        _raw_mfma = (
+                        mfma_fn = (
                             mfma_i32_k32
                             if is_int8
                             else (
@@ -794,8 +792,6 @@ def compile_moe_gemm1(
                                 else (rocdl.mfma_f32_16x16x16f16 if is_f16 else rocdl.mfma_f32_16x16x32_fp8_fp8)
                             )
                         )
-                        def mfma_fn(res_ty, args):
-                            return _raw_mfma(res_ty, args)
 
                     # Optional: prefetch epilogue scales while we are about to run the last MFMA tile,
                     # matching the preshuffle GEMM pattern of overlapping scale loads with MFMA.
@@ -2166,11 +2162,9 @@ def compile_moe_gemm2(
                     acc_list = list(acc_in)
                     mfma_res_ty = T.i32x4 if is_int8 else T.f32x4
                     if _use_mfma_k32:
-                        _raw_mfma = rocdl.mfma_f32_16x16x32_f16 if is_f16 else rocdl.mfma_f32_16x16x32_bf16
-                        def mfma_fn(res_ty, args):
-                            return _raw_mfma(res_ty, *args).result
+                        mfma_fn = rocdl.mfma_f32_16x16x32_f16 if is_f16 else rocdl.mfma_f32_16x16x32_bf16
                     else:
-                        _raw_mfma = (
+                        mfma_fn = (
                             mfma_i32_k32
                             if is_int8
                             else (
@@ -2179,8 +2173,6 @@ def compile_moe_gemm2(
                                 else (rocdl.mfma_f32_16x16x16f16 if is_f16 else rocdl.mfma_f32_16x16x32_fp8_fp8)
                             )
                         )
-                        def mfma_fn(res_ty, args):
-                            return _raw_mfma(res_ty, args)
 
                     epilogue_pf = None
                     if prefetch_epilogue and not use_groupwise_scale:
