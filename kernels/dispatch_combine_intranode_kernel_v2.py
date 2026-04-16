@@ -9,7 +9,7 @@ FlyDSL 编码规则（来自实际调试经验）
 1. 编译期常量 → 闭包变量，不在 kernel 参数列表中
 2. 动态 if 条件必须是函数调用形式（icmp_eq_i32 等）
 3. for 循环不能嵌套在 scf.if 闭包内（SSA 作用域限制）
-4. scf.ForOp 归纳变量是 index 类型 → 用 idx_to_i32() 转回 i32
+4. scf.ForOp 归纳变量是 index 类型 → 用 _to_i32() 转回 i32
 5. 所有 tensor 地址以 fx.Int64 传入，内部用 load_global_at / store_global_at 等访问
 """
 
@@ -38,26 +38,89 @@ from flydsl.expr import T
 
 from flydsl.expr.rocdl import ballot_i64, readlane
 from flydsl.expr.vector import bitcast_i32_to_v2bf16, bitcast_v2bf16_to_i32
-from flydsl.expr.lowlevel import (
-    load_at,
-    load_global,
-    load_global_at,
-    store_global,
-    store_global_at,
-    store_i32_system,
-    store_i64_system,
-    store_i64_global_system,
-    as_index,
-    idx_to_i32,
-    atomic_add_global_at,
+from flydsl.expr.buffer_ops import (
+    create_buffer_resource_from_addr,
+    buffer_load,
+    buffer_store,
 )
-from flydsl.expr.lowlevel import _unwrap as _lv_unwrap
+from flydsl._mlir import ir as _ir
+from flydsl._mlir.dialects import llvm as _llvm_d
+from flydsl._mlir.ir import IntegerAttr as _IntAttr, IntegerType as _IntTy
+
+
+# ── 底层 LLVM helpers（从 lowlevel.py 内联）─────────────────────────────────
+
+def _lv_unwrap(v):
+    """Extract raw ir.Value from DSL object, ir.Value, or Python int."""
+    if isinstance(v, _ir.Value):
+        return v
+    if hasattr(v, "__fly_values__"):
+        vals = v.__fly_values__()
+        if len(vals) == 1:
+            return vals[0]
+        raise ValueError(f"Expected 1 ir.Value, got {len(vals)}")
+    if isinstance(v, int):
+        _i32 = _IntTy.get_signless(32)
+        return _llvm_d.ConstantOp(_i32, _IntAttr.get(_i32, v)).result
+    raise TypeError(f"Cannot convert {type(v).__name__} to ir.Value")
+
+
+def _to_ptr_global(v):
+    """i64 → !llvm.ptr<1> (global address space)."""
+    return _llvm_d.IntToPtrOp(
+        _llvm_d.PointerType.get(address_space=1), _lv_unwrap(v)).result
+
+
+def store_i32_system(addr_i64, offset, val):
+    """System-scope monotonic i32 store (global addrspace 1).
+    For P2P signaling via XGMI — visible to remote GPUs immediately.
+    """
+    base = _lv_unwrap(addr_i64)
+    off  = _lv_unwrap(offset)
+    val_ = _lv_unwrap(val)
+    _i64 = _IntTy.get_signless(64)
+    _i32 = _IntTy.get_signless(32)
+    _nuw = _ir.Attribute.parse("#llvm.overflow<none>")
+    off64 = _llvm_d.ZExtOp(_i64, off).res if off.type == _i32 else off
+    byte_off = _llvm_d.MulOp(
+        off64, _llvm_d.ConstantOp(_i64, _IntAttr.get(_i64, 4)).result, _nuw).result
+    addr = _llvm_d.AddOp(base, byte_off, _nuw).result
+    gptr = _llvm_d.IntToPtrOp(
+        _llvm_d.PointerType.get(address_space=1), addr).result
+    _llvm_d.StoreOp(val_, gptr, alignment=4,
+                    ordering=_llvm_d.AtomicOrdering.monotonic,
+                    syncscope="one-as")
+
+
+def store_i64_global_system(addr_i64, val):
+    """System-scope monotonic i64 store (global addrspace 1).
+    For cross-device barrier signaling via XGMI.
+    """
+    gptr = _to_ptr_global(addr_i64)
+    _llvm_d.StoreOp(_lv_unwrap(val), gptr, alignment=8,
+                    ordering=_llvm_d.AtomicOrdering.monotonic,
+                    syncscope="one-as")
+
+
+def atomic_add_global_at(addr_i64, val):
+    """Global atomic fetch-and-add (monotonic). Returns old value."""
+    ptr = _to_ptr_global(addr_i64)
+    return _llvm_d.AtomicRMWOp(
+        _llvm_d.AtomicBinOp.add, ptr, _lv_unwrap(val),
+        _llvm_d.AtomicOrdering.monotonic).res
 
 
 # ── 辅助函数 ──────────────────────────────────────────────────────────────────
 
-def _v4i32():
-    return T.VectorType.get([4], T.i32())
+def _to_idx(v):
+    """ArithValue / Python int → index type (for range())."""
+    if isinstance(v, int):
+        return arith.index(v)
+    return arith.index_cast(T.index(), v)
+
+def _to_i32(v):
+    """index induction variable → i32 (for address arithmetic)."""
+    return arith.index_cast(T.i32(), v)
 
 def _sel_pe(rem_list, dest_pe):
     """用 arith.select 链实现运行时动态索引（不能用 Python list[ArithValue]）。"""
@@ -122,18 +185,30 @@ def make_dispatch_kernel(
         gw_num = block_num * warp_num_per_block     # global warp 总数（grid-stride 步长）
         limit  = cur_tok * experts_per_token        # 外层循环总迭代数
 
+        # buffer resources（一次性创建，供 buffer_load/store 使用）
+        _r_idx     = create_buffer_resource_from_addr(_lv_unwrap(addr_idx))
+        _r_wts     = create_buffer_resource_from_addr(_lv_unwrap(addr_wts))
+        _r_tok_map = create_buffer_resource_from_addr(_lv_unwrap(addr_tok_map))
+        _r_tok_off = create_buffer_resource_from_addr(_lv_unwrap(addr_tok_off))
+        _r_dest_ctr = create_buffer_resource_from_addr(_lv_unwrap(addr_dest_ctr))
+        _r_disp_bar = create_buffer_resource_from_addr(_lv_unwrap(addr_disp_bar))
+        _r_total_rv = create_buffer_resource_from_addr(_lv_unwrap(addr_total_rv))
+        _r_p2p_tok_off  = create_buffer_resource_from_addr(_lv_unwrap(addr_p2p_tok_off))
+        _r_p2p_tis      = create_buffer_resource_from_addr(_lv_unwrap(addr_p2p_tis))
+        _r_p2p_out_wts  = create_buffer_resource_from_addr(_lv_unwrap(addr_p2p_out_wts))
+        _r_p2p_out_idx  = create_buffer_resource_from_addr(_lv_unwrap(addr_p2p_out_idx))
+        _r_p2p_out_tok  = create_buffer_resource_from_addr(_lv_unwrap(addr_p2p_out_tok))
+        _r_p2p_recv_num = create_buffer_resource_from_addr(_lv_unwrap(addr_p2p_recv_num))
+
         # ── Phase 1: 发送 token ───────────────────────────────────────────────
-        # 使用预计算 P2P 地址数组（消除 ptr_p2p extern 调用开销）：
-        # load_global_at(addr_p2p_xxx, dest_pe, dtype=i64) 替代 mori_shmem.ptr_p2p(addr_xxx, rank, dest_pe)
-        # 等价于 mori 的 GetAs<T*>(destPe)（从设备内存数组读单个指针）。
-        for i in range(as_index(gw_id), as_index(limit), as_index(gw_num)):
-            i = idx_to_i32(i)
+        for i in range(_to_idx(gw_id), _to_idx(limit), _to_idx(gw_num)):
+            i = _to_i32(i)
             src_tok  = arith.divui(i, experts_per_token)
             j        = arith.remui(i, experts_per_token)
             # 两个 idx load 并行发射（消除不必要的 s_waitcnt vmcnt(0)）
-            dest_exp = load_global_at(addr_idx, i)
+            dest_exp = buffer_load(_r_idx, i, vec_width=1, dtype=T.i32())
             safe_lane    = arith.select(arith.cmpi(arith.CmpIPredicate.ult, lane, j), lane, arith.constant(0))
-            lane_exp     = load_global_at(addr_idx, src_tok * experts_per_token + safe_lane)
+            lane_exp     = buffer_load(_r_idx, src_tok * experts_per_token + safe_lane, vec_width=1, dtype=T.i32())
             # divui 延后到两个 load 都发射之后
             dest_pe      = arith.divui(dest_exp, experts_per_rank)
             lane_pe      = arith.divui(lane_exp, experts_per_rank)
@@ -159,7 +234,7 @@ def make_dispatch_kernel(
                     [_i32_ty], has_else=True)
                 with _IP(_if_nodup.then_block):
                     _old_tok = atomic_add_global_at(
-                        load_global_at(addr_p2p_tok_off, dest_pe, dtype=T.i64()),
+                        buffer_load(_r_p2p_tok_off, dest_pe, vec_width=1, dtype=T.i64()),
                         arith.constant(1))
                     _scf_d.YieldOp([_lv_unwrap(_old_tok)])
                 with _IP(_if_nodup.else_block):
@@ -175,16 +250,16 @@ def make_dispatch_kernel(
             dtm_val = arith.select(is_dup, arith.constant(sentinel_val),
                                   dest_pe * max_recv + dest_tok_all)
             if arith.cmpi(arith.CmpIPredicate.eq, lane, arith.constant(0)):
-                store_global_at(addr_tok_map, i, dtm_val)
+                buffer_store(_lv_unwrap(dtm_val), _r_tok_map, i)
 
             # 仅非重复时写入 tok_id_to_src 和更新 dest_pe_ctr（lane0）
             # P2P global store（与 mori GetAs<T*>(destPe)[offset] = val 一致）
             if arith.cmpi(arith.CmpIPredicate.eq, lane, arith.constant(0)):
                 if arith.cmpi(arith.CmpIPredicate.eq, dup_ballot, arith.constant(0, type=T.i64())):
                     src_enc  = rank * max_tok_per_rank + src_tok
-                    store_global_at(
-                        load_global_at(addr_p2p_tis, dest_pe, dtype=T.i64()),
-                        dest_tok_all, src_enc)
+                    _r_tis_remote = create_buffer_resource_from_addr(
+                        buffer_load(_r_p2p_tis, dest_pe, vec_width=1, dtype=T.i64()))
+                    buffer_store(_lv_unwrap(src_enc), _r_tis_remote, dest_tok_all)
                     ctr_addr = addr_dest_ctr + arith.zext_i64(dest_pe) * 4
                     atomic_add_global_at(ctr_addr, arith.constant(1))
 
@@ -193,33 +268,33 @@ def make_dispatch_kernel(
             if arith.cmpi(arith.CmpIPredicate.ult, lane, arith.constant(experts_per_token)):
                 if arith.cmpi(arith.CmpIPredicate.eq, dup_ballot, arith.constant(0, type=T.i64())):
                     wt_src   = src_tok * experts_per_token + lane
-                    wt_val   = load_global_at(addr_wts, wt_src, dtype=T.f32())
-                    ix_val   = load_global_at(addr_idx, wt_src)
+                    wt_val   = buffer_load(_r_wts, wt_src, vec_width=1, dtype=T.f32())
+                    ix_val   = buffer_load(_r_idx, wt_src, vec_width=1, dtype=T.i32())
                     dst_slot = dest_tok_all * experts_per_token + lane
-                    store_global_at(
-                        load_global_at(addr_p2p_out_wts, dest_pe, dtype=T.i64()),
-                        dst_slot, wt_val.bitcast(T.i32()))
-                    store_global_at(
-                        load_global_at(addr_p2p_out_idx, dest_pe, dtype=T.i64()),
-                        dst_slot, ix_val)
+                    _r_wts_remote = create_buffer_resource_from_addr(
+                        buffer_load(_r_p2p_out_wts, dest_pe, vec_width=1, dtype=T.i64()))
+                    buffer_store(_lv_unwrap(arith.bitcast(T.i32(), wt_val)), _r_wts_remote, dst_slot)
+                    _r_idx_remote = create_buffer_resource_from_addr(
+                        buffer_load(_r_p2p_out_idx, dest_pe, vec_width=1, dtype=T.i64()))
+                    buffer_store(ix_val, _r_idx_remote, dst_slot)
 
             # 写入 token embedding（inp_tok 不在 shmem heap，用 XGMI 直接写）
             # 优化 1: is_dup 时 copy_end == lane4，循环零迭代（等价于 mori 的 continue）
             # 优化 2: stride=512，每次先发 2 个 global_load_dwordx4 再 2 个 store，隐藏内存延迟
-            tok_remote = load_global_at(addr_p2p_out_tok, dest_pe, dtype=T.i64()) + \
+            tok_remote = buffer_load(_r_p2p_out_tok, dest_pe, vec_width=1, dtype=T.i64()) + \
                 arith.zext_i64(dest_tok_all * hidden_dim * hidden_elem_size)
             inp_src_b  = addr_inp_tok + arith.zext_i64(
                 src_tok * hidden_dim * hidden_elem_size)
+            rsrc_src = create_buffer_resource_from_addr(_lv_unwrap(inp_src_b))
+            rsrc_dst = create_buffer_resource_from_addr(_lv_unwrap(tok_remote))
             lane4    = lane * 4
             copy_end = arith.select(is_dup, lane4, arith.constant(n_i32))
-            for ec4 in range(as_index(lane4), as_index(copy_end), 512):
-                ec4      = idx_to_i32(ec4)
-                ec4_byt0 = arith.zext_i64(ec4) * 4
-                ec4_byt1 = arith.zext_i64(ec4 + 256) * 4
-                vec4_0   = load_global(inp_src_b + ec4_byt0, dtype=_v4i32())
-                vec4_1   = load_global(inp_src_b + ec4_byt1, dtype=_v4i32())
-                store_global(vec4_0, tok_remote + ec4_byt0)
-                store_global(vec4_1, tok_remote + ec4_byt1)
+            for ec4 in range(_to_idx(lane4), _to_idx(copy_end), 512):
+                ec4      = _to_i32(ec4)
+                vec4_0   = buffer_load(rsrc_src, ec4, vec_width=4, dtype=T.i32())
+                vec4_1   = buffer_load(rsrc_src, ec4 + 256, vec_width=4, dtype=T.i32())
+                buffer_store(vec4_0, rsrc_dst, ec4)
+                buffer_store(vec4_1, rsrc_dst, ec4 + 256)
 
         # ── Phase 2: 栅栏 + 发送 token 数量信号 ──────────────────────────────
         # Phase 1 全部使用 XGMI P2P store（非 NIC put），无需 quiet。
@@ -229,32 +304,32 @@ def make_dispatch_kernel(
             atomic_add_global_at(addr_disp_bar, arith.constant(1))
 
         rtn_local_off = arith.zext_i64(arith.constant(rank)) * 4
-        for dest_pe in range(as_index(lane), as_index(npes), 64):
-            dest_pe = idx_to_i32(dest_pe)
+        for dest_pe in range(_to_idx(lane), _to_idx(npes), 64):
+            dest_pe = _to_i32(dest_pe)
             if arith.cmpi(arith.CmpIPredicate.eq, gw_id, arith.constant(0)):
                 mori_shmem.int32_wait_until_equals(addr_disp_bar, block_num)
-                store_global_at(addr_disp_bar, arith.constant(0), arith.constant(0))
-                nsig       = load_global_at(addr_dest_ctr, dest_pe) + 1
-                rtn_remote = load_global_at(addr_p2p_recv_num, dest_pe, dtype=T.i64()) + rtn_local_off
+                buffer_store(_lv_unwrap(arith.constant(0)), _r_disp_bar, arith.constant(0))
+                nsig       = buffer_load(_r_dest_ctr, dest_pe, vec_width=1, dtype=T.i32()) + 1
+                rtn_remote = buffer_load(_r_p2p_recv_num, dest_pe, vec_width=1, dtype=T.i64()) + rtn_local_off
                 mori_shmem.int32_wait_until_equals(rtn_remote, 0)
                 # fence 已移除：barrier wait 已保证 Phase 1 P2P store 可见性
                 # mori 同样只用 AtomicStoreRelaxedSystem，无额外 fence
                 store_i32_system(rtn_remote, arith.constant(0), nsig)
 
         # ── Phase 3: 接收信号，累计 total_recv ───────────────────────────────
-        for src_pe in range(as_index(lane), as_index(npes), 64):
-            src_pe = idx_to_i32(src_pe)
+        for src_pe in range(_to_idx(lane), _to_idx(npes), 64):
+            src_pe = _to_i32(src_pe)
             if arith.cmpi(arith.CmpIPredicate.eq, gw_id, arith.constant(0)):
                 rtn_src  = addr_recv_num + arith.zext_i64(src_pe) * 4
                 sig_val  = mori_shmem.int32_wait_until_greater_than(rtn_src, 0)
                 recv_cnt = sig_val - 1
                 store_i32_system(rtn_src, arith.constant(0), arith.constant(0))
                 atomic_add_global_at(addr_total_rv, recv_cnt)
-                store_global_at(addr_dest_ctr, src_pe, arith.constant(0))
+                buffer_store(_lv_unwrap(arith.constant(0)), _r_dest_ctr, src_pe)
 
         if arith.cmpi(arith.CmpIPredicate.eq, gw_id, arith.constant(0)):
             if arith.cmpi(arith.CmpIPredicate.eq, lane, arith.constant(0)):
-                store_global_at(addr_tok_off, arith.constant(0), arith.constant(0))
+                buffer_store(_lv_unwrap(arith.constant(0)), _r_tok_off, arith.constant(0))
 
     return ep_dispatch_intranode
 
@@ -324,8 +399,16 @@ def make_combine_kernel(
         gw_num = block_num * warp_num_per_block
         gwtid  = bid * (warp_num_per_block * 64) + tid
 
-        total_recv_val = load_global_at(addr_trecv, arith.constant(0))
-        cur_flag = load_at(addr_xdb_flag, arith.constant(0), dtype=T.i64())
+        _r_trecv     = create_buffer_resource_from_addr(_lv_unwrap(addr_trecv))
+        _r_xdb_flag  = create_buffer_resource_from_addr(_lv_unwrap(addr_xdb_flag))
+        _r_tis       = create_buffer_resource_from_addr(_lv_unwrap(addr_tis))
+        _r_comb_bar  = create_buffer_resource_from_addr(_lv_unwrap(addr_comb_bar))
+        _r_p2p_comb  = create_buffer_resource_from_addr(_lv_unwrap(addr_p2p_comb_inp))
+        _r_p2p_xdb   = create_buffer_resource_from_addr(_lv_unwrap(addr_p2p_xdb_mem))
+        _rsrc_tok_map = create_buffer_resource_from_addr(_lv_unwrap(addr_tok_map))
+
+        total_recv_val = buffer_load(_r_trecv, arith.constant(0), vec_width=1, dtype=T.i32())
+        cur_flag = buffer_load(_r_xdb_flag, arith.constant(0), vec_width=1, dtype=T.i64())
 
         # ── LDS P2P 基地址表（用于 Stage 1 P2P write）──
         base_ptr = allocator.get_base()
@@ -335,8 +418,8 @@ def make_combine_kernel(
 
         # 从预计算 P2P 地址数组加载到 LDS（消除 ptr_p2p extern 调用）
         if arith.cmpi(arith.CmpIPredicate.ult, lane, arith.constant(npes)):
-            _p2p_base = load_global_at(addr_p2p_comb_inp, lane, dtype=T.i64())
-            _lds_p2p_bases.store(_p2p_base, [as_index(lane)])
+            _p2p_base = buffer_load(_r_p2p_comb, lane, vec_width=1, dtype=T.i64())
+            _lds_p2p_bases.store(_p2p_base, [_to_idx(lane)])
         fx.barrier()
 
         # ── Stage 1: P2P scatter（nop2p 模式）──────────────────────────────────
@@ -347,10 +430,10 @@ def make_combine_kernel(
         #   P2P write → shmem_comb_inp[destPe] @ (myPe * MaxRecvPerRank + destLocalTokId)
         # Stage 3 再从本地 shmem_comb_inp 读取（全部本地内存访问）。
         n_chunks = nbytes // 16
-        for tok_i in range(as_index(gw_id), as_index(total_recv_val), as_index(gw_num)):
-            tok_i    = idx_to_i32(tok_i)
+        for tok_i in range(_to_idx(gw_id), _to_idx(total_recv_val), _to_idx(gw_num)):
+            tok_i    = _to_i32(tok_i)
             # 解码目标 PE 和本地 token ID
-            dest_enc = load_global_at(addr_tis, tok_i)
+            dest_enc = buffer_load(_r_tis, tok_i, vec_width=1, dtype=T.i32())
             if _log2_max_tok is not None:
                 dest_pe  = dest_enc >> arith.constant(_log2_max_tok)
                 dest_lid = dest_enc & arith.constant(_mask_max_tok)
@@ -358,20 +441,21 @@ def make_combine_kernel(
                 dest_pe  = arith.divui(dest_enc, max_tok_per_rank)
                 dest_lid = arith.remui(dest_enc, max_tok_per_rank)
             # 远端 shmem_comb_inp 上的目标偏移：(myPe * max_tok + destLocalTokId) * nbytes
-            _pe_base   = _lds_p2p_bases.load([as_index(dest_pe)])
+            _pe_base   = _lds_p2p_bases.load([_to_idx(dest_pe)])
             _dest_off  = arith.zext_i64(arith.constant(rank) * max_tok_per_rank + dest_lid) * nbytes
             _dest_base = _lv_unwrap(_pe_base) + _dest_off
             # 本地 inp_tok 偏移
             _src_base  = addr_inp_tok + arith.zext_i64(tok_i) * nbytes
-            for cj in range(as_index(lane), as_index(n_chunks), as_index(128)):
-                cj      = idx_to_i32(cj)
-                cj_off  = arith.zext_i64(cj) * 16
-                vec4_a  = load_global(_src_base + cj_off, dtype=_v4i32())
-                cj2     = cj + arith.constant(64)
-                cj2_off = arith.zext_i64(cj2) * 16
-                vec4_b  = load_global(_src_base + cj2_off, dtype=_v4i32())
-                store_global(vec4_a, _dest_base + cj_off)
-                store_global(vec4_b, _dest_base + cj2_off)
+            _rsrc_src  = create_buffer_resource_from_addr(_lv_unwrap(_src_base))
+            _rsrc_dst  = create_buffer_resource_from_addr(_dest_base)
+            for cj in range(_to_idx(lane), _to_idx(n_chunks), _to_idx(128)):
+                cj       = _to_i32(cj)
+                cj_elem  = cj * 4
+                cj2_elem = (cj + 64) * 4
+                vec4_a   = buffer_load(_rsrc_src, cj_elem, vec_width=4, dtype=T.i32())
+                vec4_b   = buffer_load(_rsrc_src, cj2_elem, vec_width=4, dtype=T.i32())
+                buffer_store(vec4_a, _rsrc_dst, cj_elem)
+                buffer_store(vec4_b, _rsrc_dst, cj2_elem)
 
         # ── Stage 2: CrossDeviceBarrier ───────────────────────────────────────
         # 与 mori CrossDeviceBarrierIntraNodeKernel 完全一致的结构
@@ -381,8 +465,8 @@ def make_combine_kernel(
 
         if arith.cmpi(arith.CmpIPredicate.ult, gwtid, arith.constant(npes)):
             mori_shmem.int32_wait_until_equals(addr_comb_bar, block_num)
-            store_global_at(addr_comb_bar, arith.constant(0), arith.constant(0))
-            xdb_remote = load_global_at(addr_p2p_xdb_mem, gwtid, dtype=T.i64()) + \
+            buffer_store(_lv_unwrap(arith.constant(0)), _r_comb_bar, arith.constant(0))
+            xdb_remote = buffer_load(_r_p2p_xdb, gwtid, vec_width=1, dtype=T.i64()) + \
                 arith.zext_i64(arith.constant(rank)) * 8
             store_i64_global_system(xdb_remote, cur_flag)
 
@@ -395,7 +479,7 @@ def make_combine_kernel(
 
         fx.barrier()
         if arith.cmpi(arith.CmpIPredicate.eq, tid, arith.constant(0)):
-            store_global_at(addr_trecv, arith.constant(0), arith.constant(0))
+            buffer_store(_lv_unwrap(arith.constant(0)), _r_trecv, arith.constant(0))
 
         # ── Stage 3: 本地读 + WarpAccum ──────────────────────────────────────
         # 从本地 shmem_comb_inp 读取数据（Stage 1 已通过 P2P 写入）。
@@ -405,8 +489,8 @@ def make_combine_kernel(
         from flydsl._mlir.ir import InsertionPoint as _IP
         _v2bf16   = T.VectorType.get([2], T.bf16())
         _v2f32    = T.VectorType.get([2], T.f32())
-        _i32t     = T.i32()
-        _ptr_g    = _llvm_d.PointerType.get(address_space=1)
+        _SLC      = 2   # SLC bit = nontemporal for buffer ops
+        _rsrc_out = create_buffer_resource_from_addr(_lv_unwrap(addr_comb_out))
 
         # VecBytes=4 + exec mask + tok_map 提前加载
         n_elems = n_i32   # hidden_dim / 2
@@ -416,20 +500,19 @@ def make_combine_kernel(
         hpw_v2    = (n_elems + wpt_v2 - 1) // wpt_v2
         s3_lim2   = total_recv_val * wpt_v2
 
-        for si in range(as_index(gw_id), as_index(s3_lim2), as_index(gw_num)):
-            si      = idx_to_i32(si)
+        for si in range(_to_idx(gw_id), _to_idx(s3_lim2), _to_idx(gw_num)):
+            si      = _to_i32(si)
             tok_id  = arith.divui(si, wpt_v2)
             part_id = arith.remui(si, wpt_v2)
             h_off   = part_id * hpw_v2
 
             # 提前加载 tok_map（向量化 2×dwordx4 = 8 个 i32，匹配 mori 的模式）
             # tok_map 编码 = dest_pe * max_recv + dest_tok_id
-            _tm_base_off = arith.zext_i64(tok_id * experts_per_token) * 4
-            _tm_addr0    = addr_tok_map + _tm_base_off
-            _tm_vec0     = load_global(_tm_addr0, dtype=_v4i32())               # entries [0..3]
-            _tm_vec1     = load_global(_tm_addr0 + arith.constant(16, type=T.i64()), dtype=_v4i32())  # entries [4..7]
+            _tm_off_elem = tok_id * experts_per_token
+            _tm_vec0     = buffer_load(_rsrc_tok_map, _tm_off_elem, vec_width=4, dtype=T.i32())        # entries [0..3]
+            _tm_vec1     = buffer_load(_rsrc_tok_map, _tm_off_elem + 4, vec_width=4, dtype=T.i32())    # entries [4..7]
 
-            _expert_base = []
+            _expert_rsrc = []
             _expert_vld  = []
             for j_py in range_constexpr(experts_per_token):
                 # 从向量化结果中提取单个 i32
@@ -448,12 +531,9 @@ def make_combine_kernel(
                 # 本地读：shmem_comb_inp + (srcPe * max_tok + tok_id) * nbytes
                 _tok_off  = arith.zext_i64(safe_pe * max_tok_per_rank + tok_id) * nbytes
                 _ebase    = _lv_unwrap(addr_comb_inp + _tok_off)
-                _expert_base.append(_ebase)
+                _expert_rsrc.append(create_buffer_resource_from_addr(_ebase))
                 _expert_vld.append(vld_j)
 
-            # WarpAccum — Fix A+B+D + Fix F(消除glob_ec<n_elems guard) +
-            #             Fix G(预计算slot B基地址) + Fix H(分离双槽主循环和单槽尾部)
-            _nt_attr  = arith.BoolAttr.get(True)
             _all_vld  = (npes >= experts_per_token)   # Fix B: 编译期判断，EP=8 k=8 恒True
 
             _use_wide = arith.cmpi(arith.CmpIPredicate.ult, arith.constant(895), hpw_v2)   # Fix D: hpw_v2 > 895
@@ -465,15 +545,6 @@ def make_combine_kernel(
                 _n_rem_128   = arith.constant(n_elems) - h_off
                 _adj_end_128 = arith.select(
                     arith.cmpi(arith.CmpIPredicate.ult, _n_rem_128, hpw_v2), _n_rem_128, hpw_v2)
-                # Fix G+I: 预计算 slot B/C/D 基地址（+256/+512/+768 bytes）
-                _const_256 = arith.constant(256, type=T.i64())
-                _const_512 = arith.constant(512, type=T.i64())
-                _const_768 = arith.constant(768, type=T.i64())
-                _expert_base_b, _expert_base_c, _expert_base_d = [], [], []
-                for _j_py in range_constexpr(experts_per_token):
-                    _expert_base_b.append(arith.addi(_expert_base[_j_py], _const_256))
-                    _expert_base_c.append(arith.addi(_expert_base[_j_py], _const_512))
-                    _expert_base_d.append(arith.addi(_expert_base[_j_py], _const_768))
 
                 if n_i32 % 256 == 0 and warp_num_per_block < 16:
                     # Fix I+K: 4-slot step=256，仅在 wpb<16 时使用
@@ -489,30 +560,16 @@ def make_combine_kernel(
                     _if_256aln   = _scf_d.IfOp(_lv_unwrap(_is_256aln), [], has_else=True)
                     with _IP(_if_256aln.then_block):
                       _quad_end_128 = _adj_end_128 - arith.constant(192)
-                      for ec in range(as_index(lane), as_index(_quad_end_128), as_index(256)):
-                        ec       = idx_to_i32(ec)
+                      for ec in range(_to_idx(lane), _to_idx(_quad_end_128), _to_idx(256)):
+                        ec       = _to_i32(ec)
                         glob_ec  = h_off + ec
-                        elem_byte_off = arith.zext_i64(glob_ec) * 4
-                        # 先发射全部 32 个 NT load（最大化 XGMI 并发）
                         _va, _vb, _vc, _vd = [], [], [], []
                         for _j_py in range_constexpr(experts_per_token):
-                            _bj  = _expert_base[_j_py]
-                            _aa  = arith.addi(_bj, _lv_unwrap(elem_byte_off))
-                            _va.append(_llvm_d.LoadOp(
-                                _i32t, _llvm_d.IntToPtrOp(_ptr_g, _aa).result,
-                                alignment=4, nontemporal=_nt_attr).result)
-                            _ab  = arith.addi(_expert_base_b[_j_py], _lv_unwrap(elem_byte_off))
-                            _vb.append(_llvm_d.LoadOp(
-                                _i32t, _llvm_d.IntToPtrOp(_ptr_g, _ab).result,
-                                alignment=4, nontemporal=_nt_attr).result)
-                            _ac  = arith.addi(_expert_base_c[_j_py], _lv_unwrap(elem_byte_off))
-                            _vc.append(_llvm_d.LoadOp(
-                                _i32t, _llvm_d.IntToPtrOp(_ptr_g, _ac).result,
-                                alignment=4, nontemporal=_nt_attr).result)
-                            _ad  = arith.addi(_expert_base_d[_j_py], _lv_unwrap(elem_byte_off))
-                            _vd.append(_llvm_d.LoadOp(
-                                _i32t, _llvm_d.IntToPtrOp(_ptr_g, _ad).result,
-                                alignment=4, nontemporal=_nt_attr).result)
+                            _rj = _expert_rsrc[_j_py]
+                            _va.append(buffer_load(_rj, glob_ec, vec_width=1, dtype=T.i32(), cache_modifier=_SLC))
+                            _vb.append(buffer_load(_rj, glob_ec, vec_width=1, dtype=T.i32(), cache_modifier=_SLC, soffset_bytes=256))
+                            _vc.append(buffer_load(_rj, glob_ec, vec_width=1, dtype=T.i32(), cache_modifier=_SLC, soffset_bytes=512))
+                            _vd.append(buffer_load(_rj, glob_ec, vec_width=1, dtype=T.i32(), cache_modifier=_SLC, soffset_bytes=768))
                         # 累加 4 个 slot（Fix J: 消除 ZeroOp，用首个 expert 值初始化）
                         if _all_vld:
                             # EP=8 k=8: 全部有效，直接用 va[0]/vb[0]/vc[0]/vd[0] 初始化
@@ -545,40 +602,23 @@ def make_combine_kernel(
                         _i32b = bitcast_v2bf16_to_i32(_accb.truncf(_v2bf16))
                         _i32c = bitcast_v2bf16_to_i32(_accc.truncf(_v2bf16))
                         _i32d = bitcast_v2bf16_to_i32(_accd.truncf(_v2bf16))
-                        # Fix J: 预计算输出基地址，4 次 store 共用 base + 常量偏移
-                        _out_off = arith.zext_i64(tok_id * n_i32 + glob_ec) * 4
-                        _out_base_i64 = _lv_unwrap(addr_comb_out + _out_off)
-                        _llvm_d.StoreOp(_i32a, _llvm_d.IntToPtrOp(
-                            _ptr_g, _out_base_i64).result,
-                            alignment=4, nontemporal=_nt_attr)
-                        _llvm_d.StoreOp(_i32b, _llvm_d.IntToPtrOp(
-                            _ptr_g, arith.addi(_out_base_i64, _const_256)).result,
-                            alignment=4, nontemporal=_nt_attr)
-                        _llvm_d.StoreOp(_i32c, _llvm_d.IntToPtrOp(
-                            _ptr_g, arith.addi(_out_base_i64, _const_512)).result,
-                            alignment=4, nontemporal=_nt_attr)
-                        _llvm_d.StoreOp(_i32d, _llvm_d.IntToPtrOp(
-                            _ptr_g, arith.addi(_out_base_i64, _const_768)).result,
-                            alignment=4, nontemporal=_nt_attr)
+                        _out_elem = tok_id * n_i32 + glob_ec
+                        buffer_store(_lv_unwrap(_i32a), _rsrc_out, _out_elem, cache_modifier=_SLC)
+                        buffer_store(_lv_unwrap(_i32b), _rsrc_out, _out_elem, cache_modifier=_SLC, soffset_bytes=256)
+                        buffer_store(_lv_unwrap(_i32c), _rsrc_out, _out_elem, cache_modifier=_SLC, soffset_bytes=512)
+                        buffer_store(_lv_unwrap(_i32d), _rsrc_out, _out_elem, cache_modifier=_SLC, soffset_bytes=768)
                       _scf_d.YieldOp([])
                     with _IP(_if_256aln.else_block):
                       # 2-slot fallback: hpw_v2 不整除 256（如 wpt_v2=3 时 hpw_v2=1195）
                       _dual_end_256fb = _adj_end_128 - arith.constant(64)
-                      for ec in range(as_index(lane), as_index(_dual_end_256fb), as_index(128)):
-                        ec       = idx_to_i32(ec)
+                      for ec in range(_to_idx(lane), _to_idx(_dual_end_256fb), _to_idx(128)):
+                        ec       = _to_i32(ec)
                         glob_ec  = h_off + ec
-                        elem_byte_off = arith.zext_i64(glob_ec) * 4
                         _va, _vb = [], []
                         for _j_py in range_constexpr(experts_per_token):
-                            _bj  = _expert_base[_j_py]
-                            _aa  = arith.addi(_bj, _lv_unwrap(elem_byte_off))
-                            _va.append(_llvm_d.LoadOp(
-                                _i32t, _llvm_d.IntToPtrOp(_ptr_g, _aa).result,
-                                alignment=4, nontemporal=_nt_attr).result)
-                            _ab  = arith.addi(_expert_base_b[_j_py], _lv_unwrap(elem_byte_off))
-                            _vb.append(_llvm_d.LoadOp(
-                                _i32t, _llvm_d.IntToPtrOp(_ptr_g, _ab).result,
-                                alignment=4, nontemporal=_nt_attr).result)
+                            _rj = _expert_rsrc[_j_py]
+                            _va.append(buffer_load(_rj, glob_ec, vec_width=1, dtype=T.i32(), cache_modifier=_SLC))
+                            _vb.append(buffer_load(_rj, glob_ec, vec_width=1, dtype=T.i32(), cache_modifier=_SLC, soffset_bytes=256))
                         if _all_vld:
                             _acca = bitcast_i32_to_v2bf16(_va[0]).extf(_v2f32)
                             _accb = bitcast_i32_to_v2bf16(_vb[0]).extf(_v2f32)
@@ -597,14 +637,9 @@ def make_combine_kernel(
                                 _accb = _accb + arith.select(_vld, _fb, _z)
                         _i32a = bitcast_v2bf16_to_i32(_acca.truncf(_v2bf16))
                         _i32b = bitcast_v2bf16_to_i32(_accb.truncf(_v2bf16))
-                        _out_off = arith.zext_i64(tok_id * n_i32 + glob_ec) * 4
-                        _out_base_i64 = _lv_unwrap(addr_comb_out + _out_off)
-                        _llvm_d.StoreOp(_i32a, _llvm_d.IntToPtrOp(
-                            _ptr_g, _out_base_i64).result,
-                            alignment=4, nontemporal=_nt_attr)
-                        _llvm_d.StoreOp(_i32b, _llvm_d.IntToPtrOp(
-                            _ptr_g, arith.addi(_out_base_i64, _const_256)).result,
-                            alignment=4, nontemporal=_nt_attr)
+                        _out_elem = tok_id * n_i32 + glob_ec
+                        buffer_store(_lv_unwrap(_i32a), _rsrc_out, _out_elem, cache_modifier=_SLC)
+                        buffer_store(_lv_unwrap(_i32b), _rsrc_out, _out_elem, cache_modifier=_SLC, soffset_bytes=256)
                       _scf_d.YieldOp([])
                 _scf_d.YieldOp([])
 
@@ -614,16 +649,12 @@ def make_combine_kernel(
                 _n_rem_64   = arith.constant(n_elems) - h_off
                 _adj_end_64 = arith.select(
                     arith.cmpi(arith.CmpIPredicate.ult, _n_rem_64, hpw_v2), _n_rem_64, hpw_v2)
-                for ec in range(as_index(lane), as_index(_adj_end_64), as_index(64)):
-                    ec      = idx_to_i32(ec)
+                for ec in range(_to_idx(lane), _to_idx(_adj_end_64), _to_idx(64)):
+                    ec      = _to_i32(ec)
                     glob_ec = h_off + ec
-                    elem_byte_off = arith.zext_i64(glob_ec) * 4
                     _vals = []
                     for _j_py in range_constexpr(experts_per_token):
-                        _aa = arith.addi(_expert_base[_j_py], _lv_unwrap(elem_byte_off))
-                        _vals.append(_llvm_d.LoadOp(  # Fix A: NT load
-                            _i32t, _llvm_d.IntToPtrOp(_ptr_g, _aa).result,
-                            alignment=4, nontemporal=_nt_attr).result)
+                        _vals.append(buffer_load(_expert_rsrc[_j_py], glob_ec, vec_width=1, dtype=T.i32(), cache_modifier=_SLC))
                     acc = arith.constant_vector(0.0, _v2f32)
                     for _j_py in range_constexpr(experts_per_token):
                         _fa  = bitcast_i32_to_v2bf16(_vals[_j_py]).extf(_v2f32)
@@ -634,10 +665,8 @@ def make_combine_kernel(
                             acc  = acc + arith.select(
                                     _lv_unwrap(_expert_vld[_j_py]), _fa, _z)
                     _i32v = bitcast_v2bf16_to_i32(acc.truncf(_v2bf16))
-                    _ob   = arith.zext_i64(tok_id * n_i32 + glob_ec) * 4
-                    _op   = _llvm_d.IntToPtrOp(
-                        _ptr_g, _lv_unwrap(addr_comb_out + _ob)).result
-                    _llvm_d.StoreOp(_i32v, _op, alignment=4, nontemporal=_nt_attr)
+                    _out_elem = tok_id * n_i32 + glob_ec
+                    buffer_store(_lv_unwrap(_i32v), _rsrc_out, _out_elem, cache_modifier=_SLC)
                 _scf_d.YieldOp([])
 
     ep_combine_intranode._allocator = allocator

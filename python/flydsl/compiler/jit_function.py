@@ -395,6 +395,8 @@ class MlirCompiler:
         dump_enabled = env.debug.dump_ir
         dump_dir = Path(env.debug.dump_dir).resolve()
 
+        import time as _time
+
         with _llvm_ctx:
             if dump_enabled:
                 asm = module.operation.get_asm(enable_debug_info=True)
@@ -417,7 +419,10 @@ class MlirCompiler:
                     stage_name = f"{stage_num:02d}_{_stage_label_from_fragment(frag)}"
                     pm = PassManager.parse(f"builtin.module({frag})")
                     pm.enable_verifier(env.debug.enable_verifier)
+                    _t0 = _time.perf_counter()
                     pm.run(module.operation)
+                    _dt = _time.perf_counter() - _t0
+                    print(f"[flydsl.compile] pass {stage_name}  {_dt:.3f}s")
 
                     stage_asm = module.operation.get_asm(enable_debug_info=True)
                     out = _dump_ir(stage_name, dump_dir=dump_dir, asm=stage_asm)
@@ -449,7 +454,11 @@ class MlirCompiler:
                 pm = PassManager.parse(pipeline)
                 pm.enable_verifier(env.debug.enable_verifier)
                 pm.enable_ir_printing(print_after_all=env.debug.print_after_all)
+                _t0 = _time.perf_counter()
                 pm.run(module.operation)
+                _dt = _time.perf_counter() - _t0
+                if _dt > 1.0:
+                    print(f"[flydsl.compile] total pipeline  {_dt:.3f}s")
 
         return module
 
