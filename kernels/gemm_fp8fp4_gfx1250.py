@@ -323,27 +323,32 @@ def compile_mxscale_gemm(
 
     COMPUTE_SCHEDULE_ROW_MAJOR_STREAMING = "row_major_streaming"
     COMPUTE_SCHEDULE_FP4_COL_BAND = "fp4_col_band"
+    COMPUTE_SCHEDULE_COL_BAND = "col_band"
 
     def _pick_compute_schedule_kind():
-        # The FP4 col-band (quadrant) schedule reduces VGPR bank conflicts by
-        # splitting B loads into left/right halves and processing four quadrants
-        # (top-left, bottom-left, top-right, bottom-right).  This distributes
-        # accumulator writes across different VGPR bank groups and overlaps
-        # B-right loading with quadrant-1 WMMA compute.
-        if not is_fp4:
-            return COMPUTE_SCHEDULE_ROW_MAJOR_STREAMING
+        # The col-band (quadrant) schedule splits B loads into left/right
+        # halves and processes four quadrants (top-left, bottom-left,
+        # top-right, bottom-right).  This overlaps B-right loading with
+        # quadrant-1 WMMA compute, dramatically reducing the initial load
+        # burst and improving xDL utilization.
         if wmma_m_rep % 2 != 0 or wmma_n_rep % 2 != 0:
             return COMPUTE_SCHEDULE_ROW_MAJOR_STREAMING
         if n_accs < 8:
             return COMPUTE_SCHEDULE_ROW_MAJOR_STREAMING
-        return COMPUTE_SCHEDULE_FP4_COL_BAND
+        if is_fp4:
+            return COMPUTE_SCHEDULE_FP4_COL_BAND
+        return COMPUTE_SCHEDULE_COL_BAND
 
     compute_schedule_kind = _pick_compute_schedule_kind()
     use_fp4_bank_friendly_schedule = (
         compute_schedule_kind == COMPUTE_SCHEDULE_FP4_COL_BAND
     )
+    use_col_band_schedule = (
+        compute_schedule_kind in (COMPUTE_SCHEDULE_FP4_COL_BAND,
+                                  COMPUTE_SCHEDULE_COL_BAND)
+    )
 
-    if use_fp4_bank_friendly_schedule:
+    if use_col_band_schedule:
         _bank_half_wm = wmma_m_rep // 2
         _bank_half_wn = wmma_n_rep // 2
         _bank_group_size = _bank_half_wm * _bank_half_wn
@@ -1027,22 +1032,204 @@ def compile_mxscale_gemm(
 
             return current_accs
 
+        def compute_tile_col_band(accs_in, lds_a, lds_b, lds_as, lds_bs,
+                                  emit_filler=None,
+                                  mid_compute_callback=None):
+            """Column-band (quadrant) compute for FP8/A8W4.
+
+            Splits B loads into left (wn<half_wn) and right (wn>=half_wn)
+            halves, processing four quadrants:
+              Q1: top-A × B-left
+              Q2: bottom-A × B-left  (B-right loading overlaps)
+              Q3: top-A × B-right
+              Q4: bottom-A × B-right (next-ks B-left prefetch overlaps)
+
+            This cuts the initial ds_load burst from ~76 to ~26 before
+            first WMMA, dramatically improving xDL utilization.
+            """
+            current_accs = list(accs_in)
+            a_buf, a_bases = _precompute_a_lane_bases(lds_a)
+            b_buf, b_bases = _precompute_b_lane_bases(lds_b)
+            as_buf, as_bases = _precompute_scale_lane_bases(
+                lds_as, warp_m_base, wmma_m_rep, interleaved_scale_cols_a,
+                tdm_group=as_tdm_group_m)
+            bs_buf, bs_bases = _precompute_scale_lane_bases(
+                lds_bs, warp_n_base, b_scale_load_rep, interleaved_scale_cols_b,
+                tdm_group=bs_tdm_group_n)
+
+            _half_wn = wmma_n_rep // 2
+            _half_wm = wmma_m_rep // 2
+            _half_b_scale_rep = b_scale_load_rep // 2
+            _half_b_scale_loads = (_half_b_scale_rep + 3) // 4
+
+            def _load_b_half(wn_start, ks):
+                return [load_b_frag(b_buf, b_bases, wn_start + wn_local, ks)
+                        for wn_local in range_constexpr(_half_wn)]
+
+            def _load_b_half_with_scales(wn_start, scale_rep_start, ks):
+                frags = _load_b_half(wn_start, ks)
+                scales_all = load_scale_slice_b128(
+                    bs_buf, bs_bases[0],
+                    b_scale_load_rep, scale_rep_start,
+                    _half_b_scale_rep, ks,
+                    ks_group=bs_tdm_group_n)
+                # Op_sel packing: adjacent reps share one VGPR;
+                # stride-2 gives one per pair (same as _extract_and_filter_scales).
+                scales = scales_all[::2]
+                return frags, scales
+
+            def _load_a_group(wm_start, count, ks):
+                return [load_a_frag(a_buf, a_bases[wm_start + i], ks)
+                        for i in range_constexpr(count)]
+
+            def _emit_q(a_frags, b_frags, a_scales, b_scales,
+                        wm_base, wn_base, group_base):
+                for wm_local in range_constexpr(_half_wm):
+                    wm = wm_base + wm_local
+                    a_scale_idx = wm // 2
+                    a_opsel = wm % 2
+                    for wn_local in range_constexpr(_half_wn):
+                        wn = wn_base + wn_local
+                        idx = group_base + wm_local * _half_wn + wn_local
+                        if is_a8w4:
+                            b_scale_idx = wn_local // 2
+                            b_opsel = wn_local % 2
+                            current_accs[idx] = rocdl.wmma_scale_f32_16x16x128_f8f6f4(
+                                T.vec(8, T.f32),
+                                b_frags[wn_local], a_frags[wm_local],
+                                current_accs[idx],
+                                b_scales[b_scale_idx], a_scales[a_scale_idx],
+                                fmtA=4, fmtB=0,
+                                scaleAType=b_opsel, scaleBType=a_opsel,
+                            )
+                        else:
+                            b_scale_idx = wn_local // 2
+                            b_opsel = wn_local % 2
+                            current_accs[idx] = rocdl.wmma_scale_f32_16x16x128_f8f6f4(
+                                T.vec(8, T.f32),
+                                b_frags[wn_local], a_frags[wm_local],
+                                current_accs[idx],
+                                b_scales[b_scale_idx], a_scales[a_scale_idx],
+                                fmtA=0, fmtB=0,
+                                scaleAType=b_opsel, scaleBType=a_opsel,
+                            )
+
+            _q_size = _half_wm * _half_wn  # group size for quadrant indexing
+
+            # Load left B half + all A-scales (A-scales are small, 1 load)
+            b_left_frags, b_left_scales = _load_b_half_with_scales(0, 0, 0)
+
+            for ks in range_constexpr(k_wmma_steps):
+                is_last_ks = ks == k_wmma_steps - 1
+
+                # Load A-scales (shared by all quadrants)
+                a_scales_all = load_scale_b128(
+                    as_buf, as_bases[0], wmma_m_rep, ks,
+                    ks_group=as_tdm_group_m)
+                a_scales = a_scales_all[::2]
+
+                # Load A top and bottom halves
+                a_top = _load_a_group(0, _half_wm, ks)
+                a_bottom = _load_a_group(_half_wm, _half_wm, ks)
+
+                # Wait: keep A-bottom loads in flight (partial drain)
+                rocdl.s_wait_dscnt(_half_wm * DS_LOADS_PER_A_FRAG)
+
+                # Q1: top-A × B-left
+                _emit_q(a_top, b_left_frags, a_scales, b_left_scales,
+                        0, 0, 0)
+
+                if ks == 0 and mid_compute_callback is not None:
+                    rocdl.sched_barrier(0)
+                    mid_compute_callback()
+
+                # Load right B half (overlaps with Q1 WMMA)
+                b_right_frags, b_right_scales = _load_b_half_with_scales(
+                    _half_wn, _half_b_scale_rep, ks)
+
+                # Wait for B-right, A-bottom already ready
+                rocdl.s_wait_dscnt(
+                    _half_wn * _b_frag_loads_per_wn + _half_b_scale_loads)
+
+                # Q2: bottom-A × B-left
+                _emit_q(a_bottom, b_left_frags, a_scales, b_left_scales,
+                        _half_wm, 0, _q_size)
+
+                # Prefetch next-ks B-left (overlaps with Q3/Q4 WMMA)
+                if not is_last_ks:
+                    next_left_frags, next_left_scales = \
+                        _load_b_half_with_scales(0, 0, ks + 1)
+                    rocdl.s_wait_dscnt(
+                        _half_wn * _b_frag_loads_per_wn + _half_b_scale_loads)
+                else:
+                    rocdl.s_wait_dscnt(0)
+
+                # Q3: top-A × B-right
+                _emit_q(a_top, b_right_frags, a_scales, b_right_scales,
+                        0, _half_wn, _q_size * 2)
+
+                if is_last_ks and emit_filler is not None:
+                    rocdl.sched_barrier(0)
+                    emit_filler()
+
+                # Q4: bottom-A × B-right
+                _emit_q(a_bottom, b_right_frags, a_scales, b_right_scales,
+                        _half_wm, _half_wn, _q_size * 3)
+
+                if not is_last_ks:
+                    b_left_frags = next_left_frags
+                    b_left_scales = next_left_scales
+
+            return current_accs
+
         def hot_loop_scheduler():
             _half_wm = wmma_m_rep // 2
-            _half_wmma = _half_wm * wmma_n_rep
             _b_loads_per_frag = 2 if is_a8w4 else 4
+            _a_front = _half_wm * DS_LOADS_PER_A_FRAG   # 8
+            _b_total = wmma_n_rep * _b_loads_per_frag    # 32
+            _next_b_scale = _b_total + 2                 # 34
 
             for _ks in range_constexpr(k_wmma_steps):
                 if _ks == 0:
-                    rocdl.sched_dsrd(wmma_n_rep * _b_loads_per_frag + 2
-                                     + _half_wm * DS_LOADS_PER_A_FRAG)
+                    # k-step 0: 42 loads (B=32 + scale=2 + A_front=8) + 32 WMMA
+                    # Issue B loads in groups of 8, starting WMMA as soon as
+                    # first B data is likely ready (~3 WMMA ≈ 24cy > LDS latency)
+                    rocdl.sched_dsrd(8)      # B chunk 1
+                    rocdl.sched_dsrd(8)      # B chunk 2
+                    rocdl.sched_dsrd(8)      # B chunk 3
+                    rocdl.sched_mfma(4)      # 4 WMMA — B chunk 1 data ready
+                    rocdl.sched_dsrd(8)      # B chunk 4
+                    rocdl.sched_mfma(4)      # 4 WMMA
+                    rocdl.sched_dsrd(2)      # scale loads
+                    rocdl.sched_dsrd(_a_front)  # A front (8)
+                    rocdl.sched_mfma(4)      # 4 WMMA
+                    rocdl.sched_mfma(4)      # 4 WMMA (front half done: 16)
                 else:
-                    rocdl.sched_dsrd(_half_wm * DS_LOADS_PER_A_FRAG)
-                rocdl.sched_mfma(_half_wmma)
-                rocdl.sched_dsrd(_half_wm * DS_LOADS_PER_A_FRAG)
-                rocdl.sched_mfma(_half_wmma)
+                    # k-step 1+: A_front(8) + next-B prefetch overlapped with 16 WMMA
+                    # The next-B loads from k_step 0 are already in flight;
+                    # just need A_front for this k-step
+                    rocdl.sched_dsrd(_a_front)  # A front (8)
+                    rocdl.sched_mfma(4)
+                    rocdl.sched_mfma(4)
+                    rocdl.sched_mfma(4)
+                    rocdl.sched_mfma(4)      # front half done: 16
+
+                # A_back(8) interleaved with back-half WMMA(16)
+                rocdl.sched_dsrd(4)      # A back first half
+                rocdl.sched_mfma(4)
+                rocdl.sched_dsrd(4)      # A back second half
+                rocdl.sched_mfma(4)
+                rocdl.sched_mfma(4)
+                rocdl.sched_mfma(4)      # back half done: 16
+
                 if _ks < k_wmma_steps - 1:
-                    rocdl.sched_dsrd(wmma_n_rep * _b_loads_per_frag + 2)
+                    # Prefetch next k-step B+scale(34) interleaved in tail
+                    # These overlap with subsequent k-step's WMMA
+                    rocdl.sched_dsrd(8)
+                    rocdl.sched_dsrd(8)
+                    rocdl.sched_dsrd(8)
+                    rocdl.sched_dsrd(10)
+
             rocdl.sched_barrier(0)
 
         def hot_loop_scheduler_fp4_bank_friendly():
@@ -1069,11 +1256,26 @@ def compile_mxscale_gemm(
                 rocdl.sched_mfma(_group_wmma)
             rocdl.sched_barrier(0)
 
+        def hot_loop_scheduler_col_band():
+            """Sched hints matching compute_tile_col_band quadrant order.
+
+            Uses sched_barrier(0) only — the col-band code restructuring
+            provides sufficient data-dependency structure for LLVM to schedule
+            well on its own. Empirically, adding fine-grained sched_group_barrier
+            hints is at best neutral and at worst slightly harmful.
+            """
+            rocdl.sched_barrier(0)
+
         def compute_tile_scheduled(accs_in, lds_a, lds_b, lds_as, lds_bs,
                                    emit_filler=None,
                                    mid_compute_callback=None):
             if compute_schedule_kind == COMPUTE_SCHEDULE_FP4_COL_BAND:
                 return compute_tile_fp4_bank_friendly(
+                    accs_in, lds_a, lds_b, lds_as, lds_bs,
+                    emit_filler=emit_filler,
+                    mid_compute_callback=mid_compute_callback)
+            if compute_schedule_kind == COMPUTE_SCHEDULE_COL_BAND:
+                return compute_tile_col_band(
                     accs_in, lds_a, lds_b, lds_as, lds_bs,
                     emit_filler=emit_filler,
                     mid_compute_callback=mid_compute_callback)
@@ -1085,6 +1287,8 @@ def compile_mxscale_gemm(
         def hot_loop_scheduler_scheduled():
             if compute_schedule_kind == COMPUTE_SCHEDULE_FP4_COL_BAND:
                 hot_loop_scheduler_fp4_bank_friendly()
+            elif compute_schedule_kind == COMPUTE_SCHEDULE_COL_BAND:
+                hot_loop_scheduler_col_band()
             else:
                 hot_loop_scheduler()
 
@@ -1184,7 +1388,7 @@ def compile_mxscale_gemm(
             return row_major
 
         def finalize_acc_layout(accs_in):
-            if compute_schedule_kind == COMPUTE_SCHEDULE_FP4_COL_BAND:
+            if use_col_band_schedule:
                 return grouped_accs_to_row_major(accs_in)
             return accs_in
 
