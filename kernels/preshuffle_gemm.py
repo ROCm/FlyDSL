@@ -120,11 +120,44 @@ _TILE_PRELOAD_TABLE = {
 
 _TILE_PRELOAD_DEFAULT = (0, 0)
 
+# gfx950 (MI355X) preload tuning table.
+# gfx950 has different LDS/VMEM latencies and benefits from higher preload
+# counts for large tiles. Tuned on MI355X with DeepSeek-R1 MoE shapes.
+_TILE_PRELOAD_TABLE_GFX950 = {
+    # (tile_m, tile_n, tile_k): (dsrd_preload, dvmem_preload)
+    (16, 64, 256):  (2, 2),
+    (16, 64, 512):  (4, 4),
+    (16, 128, 256): (2, 2),
+    (16, 128, 512): (2, 2),
+    (16, 256, 256): (2, 2),
+    (16, 256, 512): (2, 2),
+    (32, 64, 128):  (4, 4),
+    (32, 64, 256):  (4, 4),
+    (32, 128, 128): (4, 4),
+    (32, 128, 256): (4, 4),
+    (32, 256, 128): (4, 4),
+    (32, 256, 256): (4, 4),
+    (64, 64, 128):  (4, 4),
+    (64, 128, 128): (4, 4),
+    (64, 128, 256): (4, 4),
+    (64, 256, 128): (4, 4),
+    (64, 256, 256): (4, 4),
+    (128, 128, 128): (4, 4),
+    (128, 128, 256): (4, 4),
+    (128, 256, 128): (4, 4),
+    (256, 256, 128): (4, 4),
+}
 
-def _get_preload(tile_m, tile_n, tile_k):
-    """Look up (dsrd_preload, dvmem_preload) from the tile table."""
-    return _TILE_PRELOAD_TABLE.get(
-        (int(tile_m), int(tile_n), int(tile_k)), _TILE_PRELOAD_DEFAULT)
+
+def _get_preload(tile_m, tile_n, tile_k, gpu_arch=None):
+    """Look up (dsrd_preload, dvmem_preload) from the tile table.
+    
+    Uses gfx950-specific table when running on MI355X.
+    """
+    key = (int(tile_m), int(tile_n), int(tile_k))
+    if gpu_arch is not None and str(gpu_arch).startswith("gfx950"):
+        return _TILE_PRELOAD_TABLE_GFX950.get(key, _TILE_PRELOAD_DEFAULT)
+    return _TILE_PRELOAD_TABLE.get(key, _TILE_PRELOAD_DEFAULT)
 
 
 def compile_preshuffle_gemm_a8(
@@ -160,8 +193,12 @@ def compile_preshuffle_gemm_a8(
         dvmem_preload: Initial global-load preload count (-1 = auto from _TILE_PRELOAD_TABLE).
     """
     if dsrd_preload < 0 or dvmem_preload < 0:
-        if in_dtype in ("fp8", "int8") and str(get_hip_arch()) == "gfx950":
-            computed_dsrd, computed_dvmem = _get_preload(tile_m, tile_n, tile_k)
+        _arch = get_hip_arch()
+        if in_dtype in ("fp8", "int8") and str(_arch) == "gfx950":
+            computed_dsrd, computed_dvmem = _get_preload(tile_m, tile_n, tile_k, gpu_arch=_arch)
+        elif str(_arch).startswith("gfx950"):
+            # gfx950 BF16 path: use gfx950-specific preload table
+            computed_dsrd, computed_dvmem = _get_preload(tile_m, tile_n, tile_k, gpu_arch=_arch)
         else:
             computed_dsrd, computed_dvmem = _TILE_PRELOAD_DEFAULT
         if dsrd_preload < 0:
