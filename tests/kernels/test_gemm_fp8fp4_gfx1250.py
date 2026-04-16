@@ -26,6 +26,11 @@ pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
 from flydsl.runtime.device import get_rocm_arch
 from kernels.gemm_fp8fp4_gfx1250 import compile_mxscale_gemm
 from tests.kernels.utils import fp4_utils
+from tests.kernels.benchmark_common import (
+    bench_kernel_us,
+    compute_gemm_tflops, compute_gemm_bandwidth,
+    compute_wmma_stats, print_gemm_results,
+)
 
 
 if not torch.cuda.is_available():
@@ -526,60 +531,6 @@ def test_mxfp4_gemm_mcast(M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp,
         cluster_m=cluster_m, cluster_n=cluster_n)
 
 
-def _bench_kernel_us(run_fn, warmup=10, iters=50, flush_l2=True, prep_fn=None):
-    """Per-iteration CUDA events timer with L2 flush, IQR outlier removal, median.
-
-    Follows the golden practices from benchmarks/gemm_gfx1250_benchmark.py:
-    - L2 flush between iterations via zero-fill of 2× L2 buffer
-    - Per-iteration event pairs (no inter-iteration sync on kernel)
-    - IQR outlier removal (if n >= 8), median latency
-    """
-    flush_buf = None
-    if flush_l2:
-        l2_bytes = getattr(
-            torch.cuda.get_device_properties(torch.cuda.current_device()),
-            "L2_cache_size", 4 * 1024 * 1024)
-        alloc_bytes = max(l2_bytes * 2, 8 * 1024 * 1024)
-        flush_buf = torch.empty(alloc_bytes, dtype=torch.uint8, device="cuda")
-
-    for _ in range(warmup):
-        if flush_buf is not None:
-            flush_buf.zero_()
-        if prep_fn is not None:
-            prep_fn()
-        run_fn()
-    torch.cuda.synchronize()
-
-    start_ev = [torch.cuda.Event(enable_timing=True) for _ in range(iters)]
-    end_ev = [torch.cuda.Event(enable_timing=True) for _ in range(iters)]
-
-    for i in range(iters):
-        if flush_buf is not None:
-            flush_buf.zero_()
-        if prep_fn is not None:
-            prep_fn()
-        start_ev[i].record()
-        run_fn()
-        end_ev[i].record()
-
-    torch.cuda.synchronize()
-
-    latencies = sorted(
-        start_ev[i].elapsed_time(end_ev[i]) * 1e3 for i in range(iters))
-
-    n = len(latencies)
-    if n >= 8:
-        q1, q3 = latencies[n // 4], latencies[3 * n // 4]
-        iqr = q3 - q1
-        lo, hi = q1 - 1.5 * iqr, q3 + 1.5 * iqr
-        filtered = [x for x in latencies if lo <= x <= hi]
-        if filtered:
-            latencies = filtered
-
-    del flush_buf
-    return latencies[len(latencies) // 2]
-
-
 def _run_benchmark(args):
     """Benchmark mode: compile once, time kernel execution with proper methodology."""
     import time
@@ -643,8 +594,6 @@ def _run_benchmark(args):
         a, b, a_scale, b_scale, padded_shape)
 
     skt = tile_k // SCALE_BLOCK
-    warp_tile_m = tile_m // args.m_warp
-    warp_tile_n = tile_n // args.n_warp
     as_ps_tile = _compute_scale_preshuffle_tile(tile_m, tile_k, args.m_warp)
     bs_ps_tile = _compute_scale_preshuffle_tile(tile_n, tile_k, args.n_warp)
     a_scale = preshuffle_e8m0_scale(a_scale, as_ps_tile, scale_k_per_tile=skt)
@@ -707,69 +656,32 @@ def _run_benchmark(args):
     print(f"      Compile + first launch: {compile_ms:.0f} ms")
 
     print(f"[2/3] Warming up ({args.warmup} iters) + benchmarking ({args.iters} iters)...")
-    us = _bench_kernel_us(run_kernel, warmup=args.warmup, iters=args.iters,
+    us = bench_kernel_us(run_kernel, warmup=args.warmup, iters=args.iters,
                           flush_l2=not args.no_flush_l2, prep_fn=prep_kernel)
 
-    logical_flops = 2.0 * M * N * K
-    kernel_flops = 2.0 * padded_m * padded_n * padded_k
-    time_s = us / 1e6
-    logical_tflops = logical_flops / time_s / 1e12 if time_s > 0 else 0.0
-    kernel_tflops = kernel_flops / time_s / 1e12 if time_s > 0 else 0.0
+    logical_tflops, kernel_tflops, time_s = compute_gemm_tflops(
+        M, N, K, padded_m, padded_n, padded_k, us)
 
     bytes_a = padded_m * padded_k // PACK_A
     bytes_b = padded_n * padded_k // PACK_B
     bytes_scale = (padded_m + padded_n) * padded_shape["K_scale"]
     bytes_d = padded_m * padded_n * elem_bytes_d
     read_bytes = bytes_a + bytes_b + bytes_scale
-    write_bytes = bytes_d
-    bytes_moved = read_bytes + write_bytes
-    bw_gbs = bytes_moved / 1e9 / time_s if time_s > 0 else 0.0
-    read_bw_gbs = read_bytes / 1e9 / time_s if time_s > 0 else 0.0
-    write_bw_gbs = write_bytes / 1e9 / time_s if time_s > 0 else 0.0
+    bw_gbs, read_bw_gbs, write_bw_gbs = compute_gemm_bandwidth(
+        read_bytes, bytes_d, time_s)
 
     WMMA_K = 128
     WMMA_N_EFF = 32 if is_fp4 else 16
-    wmma_m_rep = warp_tile_m // 16
-    wmma_n_rep = warp_tile_n // WMMA_N_EFF
-    k_wmma_steps = tile_k // WMMA_K
-    wmma_per_tile = wmma_m_rep * wmma_n_rep * k_wmma_steps
-    m_tiles = padded_m // tile_m
-    n_tiles = padded_n // tile_n
-    k_tiles = padded_k // tile_k
-    k_tiles_local = (padded_k // args.split_k) // tile_k
-    total_wmma = m_tiles * n_tiles * k_tiles * wmma_per_tile
-    # Sequential WMMAs per workgroup (all k_tiles execute sequentially)
-    seq_wmma = k_tiles_local * wmma_per_tile
-    us_per_wmma = us / seq_wmma if seq_wmma > 0 else 0
+    ws = compute_wmma_stats(
+        tile_m, tile_n, tile_k, args.m_warp, args.n_warp,
+        padded_m, padded_n, padded_k, us,
+        wmma_k=WMMA_K, wmma_n_eff=WMMA_N_EFF, split_k=args.split_k)
 
-    print(f"\n[3/3] Results:")
-    print(f"      Kernel time:  {us:.1f} us ({us / 1e3:.4f} ms)")
-    if not needs_pad:
-        print(f"      TFLOPS:       {kernel_tflops:.4f}")
-    else:
-        print(f"      TFLOPS:       {logical_tflops:.4f} (logical), {kernel_tflops:.4f} (kernel)")
-    print(f"      Bandwidth:    {bw_gbs:.1f} GB/s  "
-          f"(read: {read_bw_gbs:.1f} + write: {write_bw_gbs:.1f})")
-    print(f"      Bytes moved:  {bytes_moved / 1e6:.1f} MB  "
-          f"(A={bytes_a / 1e6:.1f} B={bytes_b / 1e6:.1f} "
-          f"scale={bytes_scale / 1e6:.1f} D={bytes_d / 1e6:.1f})")
-    print(f"      ---")
-    print(f"      WMMA/tile:    {wmma_per_tile} "
-          f"({wmma_m_rep}m × {wmma_n_rep}n × {k_wmma_steps}k)")
-    if args.split_k > 1:
-        print(f"      Total tiles:  {m_tiles}×{n_tiles} spatial × "
-              f"{args.split_k} split-K × {k_tiles_local} local K-iters")
-    else:
-        print(f"      Total tiles:  {m_tiles}×{n_tiles} spatial × {k_tiles} K-iters")
-    print(f"      Seq WMMA/WG:  {seq_wmma}")
-    print(f"      us/WMMA:      {us_per_wmma:.1f}")
-    if us_per_wmma > 1000:
-        print(f"      WARNING: {us_per_wmma/1000:.1f} ms/WMMA indicates "
-              f"WMMA_SCALE trap-handler emulation")
-    print("=" * 72)
-
-    reported_tflops = kernel_tflops if not needs_pad else logical_tflops
-    return us, reported_tflops, bw_gbs
+    return print_gemm_results(
+        us, needs_pad, logical_tflops, kernel_tflops,
+        bw_gbs, read_bw_gbs, write_bw_gbs,
+        {"A": bytes_a, "B": bytes_b, "scale": bytes_scale, "D": bytes_d}, ws,
+        split_k=args.split_k, trap_handler_warn=True, us_per_wmma_fmt=".1f")
 
 
 if __name__ == "__main__":
