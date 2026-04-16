@@ -799,7 +799,7 @@ def get_dyn_shared(loc=None, ip=None):
 
 @traced_op
 def inttoptr(result_type, src, loc=None, ip=None):
-    if src.address_space == AddressSpace.Register:
+    if result_type.address_space == AddressSpace.Register:
         raise ValueError("inttoptr is not supported for register address space")
     return fly.inttoptr(result_type, src, loc=loc, ip=ip)
 

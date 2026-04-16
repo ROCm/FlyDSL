@@ -72,7 +72,9 @@ def FlyPromoteRegMemToVectorSSAPass : Pass<"fly-promote-regmem-to-vectorssa"> {
   let dependentDialects = [
     "arith::ArithDialect",
     "gpu::GPUDialect",
-    "vector::VectorDialect"
+    "scf::SCFDialect",
+    "vector::VectorDialect",
+    "ub::UBDialect"
   ];
 }
 
