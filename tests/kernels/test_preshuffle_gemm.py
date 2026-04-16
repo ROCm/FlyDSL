@@ -202,12 +202,16 @@ def test_mfma_a8_flyc_preshuffle(
     def _as_i8(t):
         return t.view(torch.int8) if "float8" in str(t.dtype) else t
 
+    # Create a dummy bias tensor (unused when epilogue="none")
+    _dummy_bias = torch.empty(0, dtype=out_dtype, device=a_q.device)
+
     def _gemm_args(c, a, b, sa, sb):
         return (c.contiguous().view(-1),
                 _as_i8(a.contiguous().view(-1)),
                 _as_i8(b.contiguous().view(-1)),
                 sa.contiguous().view(-1) if sa.numel() > 0 else sa,
                 sb.contiguous().view(-1) if sb.numel() > 0 else sb,
+                _dummy_bias,
                 M, N, torch.cuda.current_stream())
 
     compiled_fn = flyc.compile(launch_fn, *_gemm_args(c_out_raw, a_q, b_input, sa_flat, sb_flat))
@@ -362,12 +366,16 @@ def test_mfma_w4_flyc_preshuffle(
             return t
         return t.view(torch.uint8)
 
+    # Create a dummy bias tensor (unused when epilogue="none")
+    _dummy_bias_w4 = torch.empty(0, dtype=torch.bfloat16, device=a_q.device)
+
     def _w4_args(c, a, b, sa, sb):
         return (c.contiguous().view(-1),
                 _to_bytes(a).contiguous().view(-1),
                 _to_bytes(b).contiguous().view(-1),
                 _to_bytes(sa).contiguous().view(-1),
                 _to_bytes(sb).contiguous().view(-1),
+                _dummy_bias_w4,
                 M, N, torch.cuda.current_stream())
 
     compiled_fn = flyc.compile(launch_fn, *_w4_args(c_out, a_q, b_shuffled, scale_a, scale_b_shuffled))
