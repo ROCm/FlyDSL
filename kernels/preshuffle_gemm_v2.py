@@ -50,6 +50,7 @@ def compile_preshuffle_gemm_v2(
     is_gfx942 = str(gpu_arch).startswith("gfx942")
     is_gfx950 = str(gpu_arch).startswith("gfx950")
     use_mfma_scale_128 = is_fp8 and is_gfx950
+    use_mfma_k32 = is_f16_or_bf16 and is_gfx950
     if use_mfma_scale_128:
         if tile_k % 128 != 0:
             raise ValueError(f"tile_k must be divisible by 128 for gfx950 fp8, got {tile_k}")
@@ -64,7 +65,8 @@ def compile_preshuffle_gemm_v2(
     out_elem_cls = BFloat16 if out_is_bf16 else Float16
 
     # Tile geometry
-    # k_perm groups atoms: 32 for f16/bf16 (2×K=16), 128 for gfx950 fp8 (1×K=128), 64 for gfx942 fp8 (2×K=32)
+    # k_perm groups atoms: 32 for f16/bf16 K=16 (2 atoms), 32 for K=32 (1 atom),
+    # 128 for gfx950 fp8 (1×K=128), 64 for gfx942 fp8 (2×K=32)
     tile_K_perm = 128 if use_mfma_scale_128 else (64 if is_fp8 else 32)
     k_iters = tile_k // tile_K_perm
     num_tiles = K // tile_k
@@ -292,9 +294,9 @@ def compile_preshuffle_gemm_v2(
             for ki in range_constexpr(k_iters):
                 fx.copy(mma_uni, pA_s2r[None, None, ki, read_stage],
                         frag_A_retile[None, None, ki])
-                # K=128 (1 atom): frag K dim is flat k_iters → coord = ki
-                # K=32/16 (2 atoms): frag K dim is (atoms, k_iters) → coord = (None, ki)
-                k_coord = ki if use_mfma_scale_128 else (None, ki)
+                # K=128 or K=32 (1 atom): frag K dim is flat k_iters → coord = ki
+                # K=16 gfx942 (2 atoms): frag K dim is (atoms, k_iters) → coord = (None, ki)
+                k_coord = ki if (use_mfma_scale_128 or use_mfma_k32) else (None, ki)
                 fx.gemm(tiled_mma, frag_C,
                         frag_A[None, None, k_coord],
                         cur_frag_B[None, None, k_coord],
@@ -417,7 +419,13 @@ def compile_preshuffle_gemm_v2(
         ctx = CompilationContext.get_current()
 
         # MMA atom
-        if is_f16:
+        if is_f16 and use_mfma_k32:
+            mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 32, Float16))
+            k_perm = fx.make_layout((8, 4), (1, 8))
+        elif is_bf16 and use_mfma_k32:
+            mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 32, BFloat16))
+            k_perm = fx.make_layout((8, 4), (1, 8))
+        elif is_f16:
             mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 16, Float16))
             k_perm = fx.make_layout((4, 4, 2), (1, 8, 4))
         elif is_bf16:
