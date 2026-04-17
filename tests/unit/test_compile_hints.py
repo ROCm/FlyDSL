@@ -76,11 +76,14 @@ class TestLLVMOptionBindings:
         assert restored == 2147483647
 
     def test_str_round_trip(self):
+        import os
+        import tempfile
         _fly = self._get_fly()
-        old = _fly.set_llvm_option_str("module-summary-dot-file", "/tmp/test.dot")
+        test_path = os.path.join(tempfile.gettempdir(), "test.dot")
+        old = _fly.set_llvm_option_str("module-summary-dot-file", test_path)
         assert old == ""
         restored = _fly.set_llvm_option_str("module-summary-dot-file", old)
-        assert restored == "/tmp/test.dot"
+        assert restored == test_path
 
     def test_unknown_option_raises(self):
         _fly = self._get_fly()

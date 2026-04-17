@@ -4,9 +4,11 @@
 #ifndef FLYDSL_BINDINGS_PYTHON_BINDINGUTILS_H
 #define FLYDSL_BINDINGS_PYTHON_BINDINGUTILS_H
 
+// Nanobind.h must come before Interop.h: nanobind includes Python.h which
+// defines PyObject — Interop.h uses PyObject but doesn't include Python.h.
+#include "mlir/Bindings/Python/Nanobind.h"
 #include "mlir-c/Bindings/Python/Interop.h"
 #include "mlir/Bindings/Python/IRCore.h"
-#include "mlir/Bindings/Python/Nanobind.h"
 #include "mlir/Bindings/Python/NanobindAdaptors.h"
 #include "mlir/CAPI/IR.h"
 #include "mlir/CAPI/Support.h"

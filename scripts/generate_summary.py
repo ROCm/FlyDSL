@@ -79,8 +79,10 @@ def test_summary(summary: Path) -> None:
     install_outcome = os.environ.get("SUMMARY_INSTALL_OUTCOME", "unknown")
     tests_outcome = os.environ.get("SUMMARY_TESTS_OUTCOME", "unknown")
     bench_outcome = os.environ.get("SUMMARY_BENCHMARKS_OUTCOME", "unknown")
-    test_log = os.environ.get("SUMMARY_TEST_LOG", "/tmp/test_output.log")
-    bench_log = os.environ.get("SUMMARY_BENCH_LOG", "/tmp/bench_output.log")
+    import tempfile
+    _tmp = tempfile.gettempdir()
+    test_log = os.environ.get("SUMMARY_TEST_LOG", os.path.join(_tmp, "test_output.log"))
+    bench_log = os.environ.get("SUMMARY_BENCH_LOG", os.path.join(_tmp, "bench_output.log"))
 
     _out(summary, f"## Test Summary (`{runner}`)")
     _out(summary)

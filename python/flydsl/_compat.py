@@ -9,6 +9,24 @@ easy to find / disable.
 
 import ctypes
 import os
+import sys
+
+
+def _default_comgr_path() -> str:
+    """Return the default path to the system ``libamd_comgr`` library."""
+    if sys.platform == "win32":
+        rocm = os.environ.get("ROCM_PATH") or os.environ.get("HIP_PATH", "")
+        if rocm:
+            return os.path.join(rocm, "bin", "amd_comgr.dll")
+        return "amd_comgr.dll"
+    return "/opt/rocm/lib/libamd_comgr.so.3"
+
+
+def _comgr_sim_name() -> str:
+    """Return the simulator-side comgr library name."""
+    if sys.platform == "win32":
+        return "amd_comgr.dll"
+    return "libamd_comgr.so.3"
 
 
 def _maybe_preload_system_comgr() -> None:
@@ -32,10 +50,8 @@ def _maybe_preload_system_comgr() -> None:
     if not in_ffm_session:
         return
 
-    system_comgr = os.environ.get(
-        "FLYDSL_COMGR_PRELOAD_PATH", "/opt/rocm/lib/libamd_comgr.so.3"
-    )
-    sim_comgr = os.path.join(model_path, "rocm", "libamd_comgr.so.3")
+    system_comgr = os.environ.get("FLYDSL_COMGR_PRELOAD_PATH", _default_comgr_path())
+    sim_comgr = os.path.join(model_path, "rocm", _comgr_sim_name())
     if not (os.path.exists(system_comgr) and os.path.exists(sim_comgr)):
         return
 

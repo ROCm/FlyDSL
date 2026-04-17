@@ -5,6 +5,7 @@ from typing import List
 
 from ...runtime.device import get_rocm_arch, is_rdna_arch
 from ...utils import env
+from ...utils.platform import rocm_toolkit_path, shared_lib_glob, shared_lib_name
 from .base import BaseBackend, GPUTarget
 
 
@@ -85,7 +86,7 @@ class RocmBackend(BaseBackend):
                 if env.debug.enable_debug_info
                 else []
             ),
-            f'gpu-module-to-binary{{format=fatbin opts="{" ".join(bin_cli_opts)}"}}',
+            f'gpu-module-to-binary{{format=fatbin opts="{" ".join(bin_cli_opts)}" toolkit={rocm_toolkit_path()}}}',
         ]
 
     def gpu_module_targets(self) -> List[str]:
@@ -96,15 +97,16 @@ class RocmBackend(BaseBackend):
 
     def native_lib_patterns(self) -> List[str]:
         return [
-            "_mlirDialectsFly*.so",
-            "libFly*.so",
-            "libfly_jit_runtime.so",
-            "libmlir_rocm_runtime.so",
-            "_mlirRegisterEverything*.so",
+            shared_lib_glob("_mlirDialectsFly*.so"),
+            shared_lib_glob("libFly*.so"),
+            shared_lib_name("libfly_jit_runtime.so"),
+            shared_lib_name("libmlir_rocm_runtime.so"),
+            shared_lib_glob("_mlirRegisterEverything*.so"),
         ]
 
     def jit_runtime_lib_basenames(self) -> List[str]:
         return [
-            "libfly_jit_runtime.so",
-            "libmlir_c_runner_utils.so",
+            shared_lib_name("libfly_jit_runtime.so"),
+            shared_lib_name("libmlir_c_runner_utils.so"),
+            shared_lib_name("libmlir_rocm_runtime.so"),
         ]

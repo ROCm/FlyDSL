@@ -191,18 +191,35 @@ def _assert_embedded_mlir_exists() -> None:
         try:
             env = dict(os.environ)
             env.setdefault("FLY_BUILD_DIR", str(BUILD_DIR_REL))
-            subprocess.run(["bash", "scripts/build.sh"], cwd=str(REPO_ROOT), check=True, env=env)
+            if sys.platform == "win32":
+                build_script = REPO_ROOT / "scripts" / "build.ps1"
+                if build_script.exists():
+                    subprocess.run(
+                        ["powershell", "-ExecutionPolicy", "Bypass", "-File", str(build_script)],
+                        cwd=str(REPO_ROOT), check=True, env=env,
+                    )
+                else:
+                    raise FileNotFoundError(
+                        "Windows build script not found. "
+                        "Run: python scripts/build.py  or use CMake directly."
+                    )
+            else:
+                subprocess.run(["bash", "scripts/build.sh"], cwd=str(REPO_ROOT), check=True, env=env)
         except Exception as e:
             raise RuntimeError(
-                "Failed to build via `scripts/build.sh`.\n"
+                "Failed to build.\n"
                 f"Original error: {e}\n"
             ) from e
 
     if not EMBEDDED__MLIR.exists():
+        build_hint = (
+            "Build first:  .\\scripts\\build.ps1" if sys.platform == "win32"
+            else "Build first:  bash scripts/build.sh"
+        )
         raise RuntimeError(
             "Embedded MLIR python runtime not found at "
             f"{EMBEDDED__MLIR}.\n\n"
-            "Build first:  bash scripts/build.sh\n\n"
+            f"{build_hint}\n\n"
             "Controls:\n"
             "  - FLY_REBUILD=auto (default): build iff missing\n"
             "  - FLY_REBUILD=1:              always rebuild\n"
@@ -216,6 +233,10 @@ IS_WHEEL_BUILD = any(a in {"bdist_wheel", "sdist"} for a in os.sys.argv[1:])
 
 def _strip_embedded_shared_libs() -> None:
     """Strip debug symbols from embedded shared libraries to reduce wheel size."""
+    if sys.platform == "win32":
+        # Windows: no strip equivalent needed; MSVC Release builds are already optimized.
+        return
+
     strip_bin = shutil.which("strip")
     if not strip_bin:
         print("Warning: strip not found; skipping binary stripping.")
@@ -366,15 +387,37 @@ def _ensure_python_embedded_mlir_package() -> None:
         # Path exists but is neither a working directory nor a symlink we can manage.
         raise RuntimeError(f"{dst} exists but is not a usable symlink/directory; please remove it and retry.")
     # Prefer a relative symlink so the repo remains relocatable.
+    # On Windows, symlinks require Developer Mode or admin privileges.
+    # Fall back to a directory junction (no special privileges) or copy.
     try:
         dst.symlink_to(target, target_is_directory=True)
-    except Exception as e:
-        raise RuntimeError(
-            f"Failed to create symlink {dst} -> {target}.\n"
-            "Either create it manually, or install with PYTHONPATH pointing at "
-            "`build/python_packages/flydsl`.\n"
-            f"Original error: {e}"
-        ) from e
+    except OSError:
+        if sys.platform == "win32":
+            # Try a directory junction (works without special privileges on Windows)
+            abs_target = (dst.parent / target).resolve()
+            try:
+                subprocess.run(
+                    ["cmd", "/c", "mklink", "/J", str(dst), str(abs_target)],
+                    check=True, capture_output=True,
+                )
+            except Exception:
+                # Last resort: copy the directory
+                try:
+                    shutil.copytree(str(abs_target), str(dst))
+                except Exception as e2:
+                    raise RuntimeError(
+                        f"Failed to link or copy {dst} -> {abs_target}.\n"
+                        "Enable Developer Mode in Windows Settings for symlink support,\n"
+                        "or install with PYTHONPATH pointing at "
+                        "`build/python_packages/flydsl`.\n"
+                        f"Original error: {e2}"
+                    ) from e2
+        else:
+            raise RuntimeError(
+                f"Failed to create symlink {dst} -> {target}.\n"
+                "Either create it manually, or install with PYTHONPATH pointing at "
+                "`build/python_packages/flydsl`.\n"
+            )
 
 
 if not IS_WHEEL_BUILD:
@@ -417,12 +460,18 @@ setup(
     # otherwise the wheel will miss required runtime deps and be unusable.
     package_data={
         "flydsl._mlir": [
+            # Linux shared libraries
             "_mlir_libs/_*.so",
             "_mlir_libs/libFlyPythonCAPI.so.*",
             "_mlir_libs/libnanobind-*.so",
             "_mlir_libs/libMLIRPythonSupport-*.so",
             "_mlir_libs/lib*.so",
             "_mlir_libs/lib*.so.*",
+            # Windows shared libraries
+            "_mlir_libs/*.dll",
+            "_mlir_libs/*.pyd",
+            "_mlir_libs/*.lib",
+            # Type stubs
             "*.pyi",
         ],
     },
