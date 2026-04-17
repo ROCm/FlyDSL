@@ -23,6 +23,7 @@ Usage:
 import os
 import sys
 import argparse
+import time
 
 os.environ.setdefault("FLYDSL_RUNTIME_ENABLE_CACHE", "0")
 
@@ -109,7 +110,6 @@ def compile_one(M, N, K, tile_m, tile_n, tile_k, in_dtype, out_dtype="bf16",
     if opt_level is not None:
         hints["opt_level"] = opt_level
 
-    import time
     t0 = time.time()
     fn_v2 = compile_preshuffle_gemm_v2(
         N=N, K=K, tile_m=tile_m, tile_n=tile_n, tile_k=tile_k,

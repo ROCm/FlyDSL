@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2025 FlyDSL Project Contributors
 //
-// MmaOpCDNA3_MFMAType — wave64 MFMA atoms for gfx942 (CDNA3).
-// For gfx950 (CDNA4) atoms, see CDNA4/MmaAtom.cpp.
+// MmaOpCDNA4_MFMAType — wave64 MFMA atoms for gfx950 (CDNA4).
+// Superset of CDNA3: includes K=32 f16/bf16, K=128 fp8 mfma_scale,
+// plus all CDNA3 (gfx942) MFMA instructions.
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
@@ -18,57 +19,41 @@
 using namespace mlir;
 using namespace mlir::fly;
 
-namespace cdna3 {
-
-LayoutAttr getThrValLayoutAB(MLIRContext *ctx, int32_t M, int32_t N, int32_t K, Type elemTyA,
-                             Type elemTyB, Type elemTyAcc) {
-  auto getContext = [&]() { return ctx; };
-
-  int MN = M;
-  assert(M == N && "M and N must be equal");
-
-  int GroupK = 64 / MN;
-  int KPerThread = K / GroupK;
-
-  return FxLayout(FxShape(FxThr(MN, GroupK), FxVal(KPerThread)),
-                  FxStride(FxThr(1, MN * KPerThread), FxVal(MN)));
-}
-
-} // namespace cdna3
-
 namespace mlir::fly_rocdl {
 
-bool MmaOpCDNA3_MFMAType::isStatic() const { return true; }
+bool MmaOpCDNA4_MFMAType::isStatic() const { return true; }
 
-Value MmaOpCDNA3_MFMAType::rebuildStaticValue(OpBuilder &builder, Location loc,
+Value MmaOpCDNA4_MFMAType::rebuildStaticValue(OpBuilder &builder, Location loc,
                                               Value currentValue) const {
   if (currentValue && isa<MakeMmaAtomOp>(currentValue.getDefiningOp()))
     return nullptr;
   return MakeMmaAtomOp::create(builder, loc, MmaAtomType::get(*this));
 }
 
-Attribute MmaOpCDNA3_MFMAType::getThrLayout() const { return FxLayout(FxC(64), FxC(1)); }
+Attribute MmaOpCDNA4_MFMAType::getThrLayout() const { return FxLayout(FxC(64), FxC(1)); }
 
-Attribute MmaOpCDNA3_MFMAType::getShapeMNK() const {
+Attribute MmaOpCDNA4_MFMAType::getShapeMNK() const {
   return IntTupleAttr::get(ArrayAttr::get(getContext(), {FxC(getM()), FxC(getN()), FxC(getK())}));
 }
 
-Type MmaOpCDNA3_MFMAType::getValTypeA() const { return getElemTyA(); }
-Type MmaOpCDNA3_MFMAType::getValTypeB() const { return getElemTyB(); }
-Type MmaOpCDNA3_MFMAType::getValTypeC() const { return getElemTyAcc(); }
-Type MmaOpCDNA3_MFMAType::getValTypeD() const { return getElemTyAcc(); }
+Type MmaOpCDNA4_MFMAType::getValTypeA() const { return getElemTyA(); }
+Type MmaOpCDNA4_MFMAType::getValTypeB() const { return getElemTyB(); }
+Type MmaOpCDNA4_MFMAType::getValTypeC() const { return getElemTyAcc(); }
+Type MmaOpCDNA4_MFMAType::getValTypeD() const { return getElemTyAcc(); }
 
-Attribute MmaOpCDNA3_MFMAType::getThrValLayoutA() const {
+// Thread-value layouts are identical to CDNA3 (both wave64 MFMA).
+Attribute MmaOpCDNA4_MFMAType::getThrValLayoutA() const {
   return cdna3::getThrValLayoutAB(getContext(), getM(), getN(), getK(), getElemTyA(), getElemTyB(),
                                   getElemTyAcc());
 }
-Attribute MmaOpCDNA3_MFMAType::getThrValLayoutB() const {
+Attribute MmaOpCDNA4_MFMAType::getThrValLayoutB() const {
   return cdna3::getThrValLayoutAB(getContext(), getM(), getN(), getK(), getElemTyA(), getElemTyB(),
                                   getElemTyAcc());
 }
-Attribute MmaOpCDNA3_MFMAType::getThrValLayoutC() const {
+Attribute MmaOpCDNA4_MFMAType::getThrValLayoutC() const {
   int M = getM();
   int N = getN();
+  auto getContext = [&]() { return this->getContext(); };
 
   int GroupM = 64 / N;
   int ValM0 = 4;
@@ -78,21 +63,19 @@ Attribute MmaOpCDNA3_MFMAType::getThrValLayoutC() const {
                   FxStride(FxThr(M, ValM0), FxVal(1, ValM0 * GroupM)));
 }
 
-LogicalResult MmaOpCDNA3_MFMAType::verify(function_ref<InFlightDiagnostic()> emitError, int32_t m,
+LogicalResult MmaOpCDNA4_MFMAType::verify(function_ref<InFlightDiagnostic()> emitError, int32_t m,
                                           int32_t n, int32_t k, Type elemTyA, Type elemTyB,
                                           Type elemTyAcc) {
-  assert(m == n && "M and N must be equal");
   if (m != n)
-    return emitError() << "invalid MNK dimensions for CDNA3 MFMA: " << m << "x" << n << "x" << k;
+    return emitError() << "invalid MNK dimensions for CDNA4 MFMA: " << m << "x" << n << "x" << k;
   if (!elemTyAcc.isF32())
     return emitError() << "elemTyAcc must be f32, got " << elemTyAcc;
 
   auto isValidElemType = [](Type ty) {
     if (ty.isF16() || ty.isBF16() || ty.isF32())
       return true;
-    if (isa<Float8E4M3FNUZType>(ty) || isa<Float8E5M2FNUZType>(ty))
+    if (isa<Float8E4M3FNUZType>(ty) || isa<Float8E5M2FNUZType>(ty) || isa<Float8E4M3FNType>(ty))
       return true;
-    // i8 is accepted as a stand-in for FP8 (layout API uses i8 to avoid f8 vector types)
     if (auto intTy = dyn_cast<IntegerType>(ty))
       return intTy.getWidth() == 8;
     return false;
@@ -106,23 +89,37 @@ LogicalResult MmaOpCDNA3_MFMAType::verify(function_ref<InFlightDiagnostic()> emi
   return success();
 }
 
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
 static bool isI8(Type ty) {
   if (auto intTy = dyn_cast<IntegerType>(ty))
     return intTy.getWidth() == 8;
   return false;
 }
-static bool isFP8(Type ty) { return isa<Float8E4M3FNUZType>(ty) || isI8(ty); }
+static bool isFP8(Type ty) {
+  return isa<Float8E4M3FNUZType>(ty) || isa<Float8E4M3FNType>(ty) || isI8(ty);
+}
 static bool isBF8(Type ty) { return isa<Float8E5M2FNUZType>(ty); }
+static bool isF8(Type ty) { return isFP8(ty) || isBF8(ty); }
 
-static Type getMfmaABType(MLIRContext *ctx, Type elemTy, int32_t k = 0) {
+static Type getMfmaABType(MLIRContext *ctx, Type elemTy, int32_t k) {
   if (elemTy.isF32())
     return Float32Type::get(ctx);
-  if (elemTy.isF16())
+  if (elemTy.isF16()) {
+    if (k >= 32)
+      return VectorType::get({8}, Float16Type::get(ctx));
     return VectorType::get({4}, Float16Type::get(ctx));
-  if (elemTy.isBF16())
+  }
+  if (elemTy.isBF16()) {
+    if (k >= 32)
+      return VectorType::get({8}, BFloat16Type::get(ctx));
     return VectorType::get({(k >= 16) ? 4 : 2}, IntegerType::get(ctx, 16));
-  if (elemTy.getIntOrFloatBitWidth() == 8)
+  }
+  if (elemTy.getIntOrFloatBitWidth() == 8) {
+    if (k >= 128)
+      return VectorType::get({8}, IntegerType::get(ctx, 32));
     return IntegerType::get(ctx, 64);
+  }
   return nullptr;
 }
 
@@ -139,6 +136,7 @@ static int64_t getMfmaAccVecSize(int32_t m, int32_t k, Type elemTyA) {
     if (m == 32 && k == 8) return 16;
     if (m == 16 && k == 4) return 16;
     if (m == 16 && k == 16) return 4;
+    if (m == 16 && k == 32) return 4;
     if (m == 4 && k == 4) return 4;
   }
   if (elemTyA.isBF16()) {
@@ -147,16 +145,20 @@ static int64_t getMfmaAccVecSize(int32_t m, int32_t k, Type elemTyA) {
     if (m == 16 && k == 2) return 16;
     if (m == 16 && k == 8) return 4;
     if (m == 16 && k == 16) return 4;
+    if (m == 16 && k == 32) return 4;
     if (m == 4 && k == 2) return 4;
   }
-  if (isFP8(elemTyA) || isBF8(elemTyA)) {
+  if (isF8(elemTyA)) {
+    if (m == 16 && k == 128) return 4;
     if (m == 16 && k == 32) return 4;
     if (m == 32 && k == 16) return 16;
   }
   return 0;
 }
 
-FailureOr<Value> MmaOpCDNA3_MFMAType::emitAtomCallSSA(OpBuilder &builder, Location loc,
+// ── Atom emission ────────────────────────────────────────────────────────────
+
+FailureOr<Value> MmaOpCDNA4_MFMAType::emitAtomCallSSA(OpBuilder &builder, Location loc,
                                                       Type resultTy, Type mmaAtomTyArg, Type dTyArg,
                                                       Type aTyArg, Type bTyArg, Type cTyArg,
                                                       Value atomVal, Value d, Value a, Value b,
@@ -173,7 +175,7 @@ FailureOr<Value> MmaOpCDNA3_MFMAType::emitAtomCallSSA(OpBuilder &builder, Locati
   if (!abTyA || !abTyB)
     return failure();
 
-  // Bitcast SSA operands when type doesn't match MFMA ABI (e.g. bf16 -> i16, i8 -> i64)
+  // Bitcast SSA operands when type doesn't match MFMA ABI
   auto bitcastToABI = [&](Value v, Type targetTy) -> Value {
     if (v.getType() == targetTy)
       return v;
@@ -197,6 +199,26 @@ FailureOr<Value> MmaOpCDNA3_MFMAType::emitAtomCallSSA(OpBuilder &builder, Locati
     return ROCDL::OP::create(builder, loc, accTy, a, b, c, zeroAttr, zeroAttr, zeroAttr)           \
         .getResult();                                                                              \
   }
+
+  // ── CDNA4-only instructions ────────────────────────────────────────────────
+
+  // K=32 f16/bf16 (gfx950)
+  DISPATCH_MFMA_SSA(16, 32, elemTyA.isF16(), mfma_f32_16x16x32_f16)
+  DISPATCH_MFMA_SSA(16, 32, elemTyA.isBF16(), mfma_f32_16x16x32_bf16)
+
+  // K=128 fp8 mfma_scale (gfx950)
+  if (m == 16 && n == 16 && k == 128 && isFP8(elemTyA) && isFP8(elemTyB)) {
+    auto zeroAttr = builder.getI32IntegerAttr(0);
+    Value zeroVal = arith::ConstantOp::create(builder, loc, builder.getI32IntegerAttr(0));
+    return ROCDL::mfma_scale_f32_16x16x128_f8f6f4::create(
+               builder, loc, accTy, a, b, c,
+               /*cbsz=*/zeroAttr, /*blgp=*/zeroAttr,
+               /*opselA=*/zeroAttr, /*scaleA=*/zeroVal,
+               /*opselB=*/zeroAttr, /*scaleB=*/zeroVal)
+        .getResult();
+  }
+
+  // ── CDNA3 instructions (also available on CDNA4) ───────────────────────────
 
   DISPATCH_MFMA_SSA(32, 1, elemTyA.isF32(), mfma_f32_32x32x1f32)
   DISPATCH_MFMA_SSA(16, 1, elemTyA.isF32(), mfma_f32_16x16x1f32)
@@ -231,7 +253,7 @@ FailureOr<Value> MmaOpCDNA3_MFMAType::emitAtomCallSSA(OpBuilder &builder, Locati
   return failure();
 }
 
-LogicalResult MmaOpCDNA3_MFMAType::emitAtomCall(OpBuilder &builder, Location loc, Type mmaAtomTy,
+LogicalResult MmaOpCDNA4_MFMAType::emitAtomCall(OpBuilder &builder, Location loc, Type mmaAtomTy,
                                                 Type dMemTy, Type aMemTy, Type bMemTy, Type cMemTy,
                                                 Value atomVal, Value dPtr, Value aPtr, Value bPtr,
                                                 Value cPtr) const {

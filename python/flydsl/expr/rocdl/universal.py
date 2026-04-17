@@ -2,7 +2,7 @@
 # Copyright (c) 2025 FlyDSL Project Contributors
 
 from ..._mlir import ir
-from ..._mlir._mlir_libs._mlirDialectsFlyROCDL import MmaOpGFX1250_WMMAType
+from ..._mlir._mlir_libs._mlirDialectsFlyROCDL import MmaOpGFX1250_WMMAType, MmaOpCDNA4_MFMAType
 from ..._mlir.dialects import arith, fly
 from ..._mlir.dialects._fly_enum_gen import AddressSpace
 from ..._mlir.dialects.fly import AtomicOp, PointerType
@@ -72,13 +72,19 @@ BufferAtomicMin = lambda val_type: BufferAtomic(AtomicOp.Min, val_type)
 BufferAtomicPkAdd = lambda val_type: BufferAtomic(AtomicOp.Add, T.vector(2, val_type.ir_type))
 
 
-def MFMA(m, n, k, elem_ty_ab, elem_ty_acc=None):
+def MFMA(m, n, k, elem_ty_ab, elem_ty_acc=None, *, cdna4=False):
+    """Create a wave64 MFMA atom.
+
+    Args:
+        cdna4: Use CDNA4 (gfx950) type. Required for K=32 f16/bf16 and K=128 fp8.
+    """
     ty_ab = elem_ty_ab.ir_type if hasattr(elem_ty_ab, "ir_type") else elem_ty_ab
     if elem_ty_acc is None:
-        # default to f32
         ty_acc = T.f32()
     else:
         ty_acc = elem_ty_acc.ir_type if hasattr(elem_ty_acc, "ir_type") else elem_ty_acc
+    if cdna4:
+        return MmaOpCDNA4_MFMAType.get(m, n, k, ty_ab, ty_ab, ty_acc)
     return MmaOpCDNA3_MFMAType.get(m, n, k, ty_ab, ty_ab, ty_acc)
 
 

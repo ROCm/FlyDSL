@@ -83,7 +83,7 @@ def run(dt, M, N, K, tm, tn, tk):
     # old
     fn_old = compile_preshuffle_gemm_a8(
         N=N, K=K, tile_m=tm, tile_n=tn, tile_k=tk,
-        in_dtype="fp8" if dt == "fp8_layout" else dt, out_dtype="bf16")
+        in_dtype=dt, out_dtype="bf16")
     c_old = torch.zeros(M, N, device=DEVICE, dtype=torch_out)
     co = flyc.compile(fn_old, *make_args(c_old))
     us_old = bench(co, make_args(c_old))

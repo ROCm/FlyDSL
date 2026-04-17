@@ -294,8 +294,9 @@ def compile_preshuffle_gemm_v2(
             for ki in range_constexpr(k_iters):
                 fx.copy(mma_uni, pA_s2r[None, None, ki, read_stage],
                         frag_A_retile[None, None, ki])
-                # K=128 or K=32 (1 atom): frag K dim is flat k_iters → coord = ki
-                # K=16 gfx942 (2 atoms): frag K dim is (atoms, k_iters) → coord = (None, ki)
+                # Fragment K-dim indexing depends on atoms per tile_K_perm:
+                #   1 atom (K=128 fp8, K=32 f16/bf16): flat → ki
+                #   2 atoms (K=16 gfx942 f16/bf16, K=32 fp8): hierarchical → (None, ki)
                 k_coord = ki if (use_mfma_scale_128 or use_mfma_k32) else (None, ki)
                 fx.gemm(tiled_mma, frag_C,
                         frag_A[None, None, k_coord],
@@ -394,12 +395,13 @@ def compile_preshuffle_gemm_v2(
     ):
         ctx = CompilationContext.get_current()
 
-        # MMA atom
+        # MMA atom — use CDNA4 type on gfx950, CDNA3 on gfx942
+        _cdna4 = is_gfx950
         if is_f16 and use_mfma_k32:
-            mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 32, Float16))
+            mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 32, Float16, cdna4=_cdna4))
             k_perm = fx.make_layout((8, 4), (1, 8))
         elif is_bf16 and use_mfma_k32:
-            mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 32, BFloat16))
+            mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 32, BFloat16, cdna4=_cdna4))
             k_perm = fx.make_layout((8, 4), (1, 8))
         elif is_f16:
             mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 16, Float16))
@@ -408,13 +410,10 @@ def compile_preshuffle_gemm_v2(
             mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 16, BFloat16))
             k_perm = fx.make_layout((4, 4, 2), (1, 8, 4))
         elif use_mfma_scale_128:
-            # gfx950 fp8: K=128 atom with flat value layout (KPerThread=32)
-            # k_perm: (KPerThread=32, GroupK=4), tile_K_perm=128, 1 atom
-            mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 128, layout_elem))
+            mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 128, layout_elem, cdna4=_cdna4))
             k_perm = fx.make_layout((32, 4), (1, 32))
         else:
             mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 32, layout_elem))
-            # FP8: KPerThread=8, GroupK=4, 2 atoms → groups 64 K elements
             k_perm = fx.make_layout((8, 4, 2), (1, 16, 8))
 
         tiled_mma = fx.make_tiled_mma(
