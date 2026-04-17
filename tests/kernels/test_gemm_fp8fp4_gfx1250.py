@@ -688,14 +688,14 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data-format", type=str, default="fp4",
+    parser.add_argument("--data-format", type=str, default="fp8",
                         choices=["fp4", "fp8", "a8w4"])
-    parser.add_argument("-M", type=int, default=8192)
+    parser.add_argument("-M", type=int, default=1024)
     parser.add_argument("-N", type=int, default=8192)
     parser.add_argument("-K", type=int, default=8192)
-    parser.add_argument("--tile-m", type=int, default=128)
+    parser.add_argument("--tile-m", type=int, default=256)
     parser.add_argument("--tile-n", type=int, default=256)
-    parser.add_argument("--tile-k", type=int, default=256)
+    parser.add_argument("--tile-k", type=int, default=128)
     parser.add_argument("--m-warp", type=int, default=2)
     parser.add_argument("--n-warp", type=int, default=2)
     parser.add_argument("--num-buffers", type=int, default=3, choices=[2, 3, 4])
