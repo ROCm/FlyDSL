@@ -1055,9 +1055,14 @@ def compile_moe_gemm1(
                 lds_base_nxt = lds_tile_elems
     
                 # Optional scheduler hints (copied from tuned GEMM); can be disabled via env.
-                rocdl.sched_barrier(0)
+                # STAGE1_SCHED_ENV v1: FLYDSL_MOE_STAGE1_SCHED=0 turns off hints.
+                _stage1_sched_on = os.environ.get('FLYDSL_MOE_STAGE1_SCHED', '1') in ('1','true','True','YES','yes')
+                if _stage1_sched_on:
+                    rocdl.sched_barrier(0)
     
                 def hot_loop_scheduler():
+                    if not _stage1_sched_on:
+                        return
                     mfma_group = num_acc_n * 2
                     # K64 micro-step: 2x K32 MFMA per gemm.
                     mfma_total = (k_unroll * 2) * m_repeat * mfma_group
@@ -2443,7 +2448,10 @@ def compile_moe_gemm2(
                 lds_base_cur = fx.Index(0)
                 lds_base_nxt = lds_tile_elems
     
-                rocdl.sched_barrier(0)
+                # STAGE2_SCHED_ENV v1: FLYDSL_MOE_STAGE2_SCHED=0 turns off hints.
+                _stage2_sched_on = os.environ.get('FLYDSL_MOE_STAGE2_SCHED', '1') in ('1','true','True','YES','yes')
+                if _stage2_sched_on:
+                    rocdl.sched_barrier(0)
     
                 # def hot_loop_scheduler():
                 #     mfma_group = num_acc_n
@@ -2482,6 +2490,8 @@ def compile_moe_gemm2(
                 #     rocdl.sched_barrier(0)
     
                 def hot_loop_scheduler():
+                    if not _stage2_sched_on:
+                        return
                     # - MFMA group size per "slot": num_acc_n
                     # - Total MFMA per tile: (2*K32 per K64) * k_unroll * m_repeat * num_acc_n
                     # - We emit (mfma_group + dsrd + mfma_group) per scheduler iteration.
