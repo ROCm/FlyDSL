@@ -279,10 +279,10 @@ def compile_moe_gemm1(
     # - ping-pong X tiles (2 * tile_m * lds_stride bytes)
     # - optional epilogue CShuffle tile (tile_m * tile_n f16 -> 2 * tile_m * tile_n bytes)
     _use_cshuffle_epilog = bool(use_cshuffle_epilog)
-    # Split-K requires CShuffle epilogue (f32 atomic adds via store_pair callback)
+    # Split-K requires CShuffle epilogue (packed bf16/f16 atomic adds via store_pair callback)
     if _is_splitk:
         _use_cshuffle_epilog = True
-    _cshuffle_elem_bytes = 4 if _is_splitk else 2  # f32 for split-K, f16 otherwise
+    _cshuffle_elem_bytes = 2  # bf16/f16 for both split-K and normal paths
     lds_x_bytes = 2 * int(tile_m) * int(lds_stride) * int(elem_bytes)
     lds_out_bytes = _cshuffle_elem_bytes * int(tile_m) * int(tile_n) if _use_cshuffle_epilog else 0
     lds_total_bytes = max(lds_x_bytes, lds_out_bytes)
@@ -411,9 +411,8 @@ def compile_moe_gemm1(
                     shape=(lds_total_elems,),
                 )
                 lds_x = lds_x_ptr.get()
-                # Alias LDS bytes for optional CShuffle epilogue.
-                # Split-K uses f32 (4B) per element for atomic accumulation; normal uses f16 (2B).
-                _lds_out_elem_type = T.f32 if _is_splitk else T.f16
+                # Alias LDS bytes for optional CShuffle epilogue (bf16 or f16).
+                _lds_out_elem_type = out_mlir()
                 lds_out = (
                     SmemPtr(base_ptr, lds_x_ptr.byte_offset, _lds_out_elem_type, shape=(tile_m * tile_n,)).get()
                     if _use_cshuffle_epilog
@@ -433,8 +432,8 @@ def compile_moe_gemm1(
 
                 w_rsrc = buffer_ops.create_buffer_resource(arg_w, max_size=False)
 
-                # OUT: normal=[tokens, topk, inter] f16/bf16, split-K=[tokens*topk, 2*inter] f32
-                out_elem_bytes = 4 if _is_splitk else 2
+                # OUT: normal=[tokens, topk, inter] f16/bf16, split-K=[tokens*topk, 2*inter] f16/bf16
+                out_elem_bytes = 2
                 if _is_splitk:
                     out_nbytes_idx = tokens_in * c_topk * inter_in * fx.Index(2 * out_elem_bytes)
                 else:
@@ -1249,14 +1248,14 @@ def compile_moe_gemm1(
                 # Uses EVec=4 (buffer store "x4" of fp16 elements).
                 use_cshuffle_epilog_flag = _use_cshuffle_epilog
 
-                # ─── Split-K epilogue: two-pass gate/up with f32 atomic fadd ───
+                # ─── Split-K epilogue: two-pass gate/up with bf16/f16 atomic fadd ───
                 if _is_splitk:
                     if lds_out is None:
                         raise RuntimeError("Split-K epilogue requires lds_out (CShuffle)")
 
                     out_base_idx = buffer_ops.extract_base_index(arg_out)
                     _split_k_out_row_stride = inter_dim * 2 * out_elem_bytes  # bytes per row
-                    _split_k_e_vec = 2  # f32 vec2 for atomic fadd
+                    _split_k_e_vec = 2  # vec2 for packed atomic fadd (bf16x2 or f16x2)
 
                     # Mutable slot: 0 for gate pass, inter_dim for up pass
                     _split_k_n_offset = [0]
@@ -1276,7 +1275,7 @@ def compile_moe_gemm1(
                         num_acc_n: int,
                         lds_out,
                     ):
-                        """Write scaled f32 partial sums to LDS (no silu, no doweight)."""
+                        """Write scaled partial sums to LDS as bf16/f16 (no silu, no doweight)."""
                         _acc = _split_k_acc[0]
                         _sw = _split_k_sw_vals[0]
                         # Load per-row scale_x (sx) — same logic as normal epilogue.
@@ -1314,9 +1313,11 @@ def compile_moe_gemm1(
                             if is_int8:
                                 v = arith.sitofp(T.f32, v)
                             v = v * sx * _sw[ni]
+                            v_out = arith.trunc_f(out_mlir(), v)
                             lds_idx = row_base_lds + col_local
-                            v1 = vector.from_elements(T.vec(1, T.f32), [v])
-                            vector.store(v1, lds_out, [lds_idx], alignment=4)
+                            vec1_out = T.vec(1, out_mlir())
+                            v1 = vector.from_elements(vec1_out, [v_out])
+                            vector.store(v1, lds_out, [lds_idx], alignment=2)
 
                     def precompute_row_splitk(*, row_local, row):
                         fused2 = buffer_ops.buffer_load(sorted_rsrc, row, vec_width=1, dtype=T.i32)
@@ -1347,7 +1348,7 @@ def compile_moe_gemm1(
                         )
 
                     _cshuffle_nlane_splitk = min(32, tile_n // _split_k_e_vec)
-                    _splitk_frag_elem = ir.F32Type.get()
+                    _splitk_frag_elem = ir.BF16Type.get() if out_dtype == "bf16" else ir.F16Type.get()
 
                     # Pass 1: gate (offset=0)
                     _split_k_acc[0] = acc_gate

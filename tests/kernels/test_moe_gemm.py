@@ -563,11 +563,11 @@ def run_moe_stage1(
             scale_w1_1d = scale_w1_flat.view(-1).contiguous()
     sorted_weights_1d = sorted_weights.contiguous().view(-1)  # [sorted_size]
 
-    # Output: normal=[tokens, topk, inter_dim] f16/bf16, split-K=[tokens*topk, 2*inter_dim] f32
+    # Output: normal=[tokens, topk, inter_dim] f16/bf16, split-K=[tokens*topk, 2*inter_dim] f16/bf16
     _out_torch_dtype = torch.bfloat16 if out_dtype == "bf16" else torch.float16
     _is_splitk = k_batch > 1
     if _is_splitk:
-        out = torch.zeros((tokens * topk, 2 * inter_dim), device=device, dtype=torch.float32)
+        out = torch.zeros((tokens * topk, 2 * inter_dim), device=device, dtype=_out_torch_dtype)
     else:
         out = torch.empty((tokens, topk, inter_dim), device=device, dtype=_out_torch_dtype)
 
@@ -648,8 +648,8 @@ def run_moe_stage1(
     # Note: the gfx950 v_cvt_off_f32_i4 x16 correction is already applied per-CTA in the kernel
     # epilogue (linear factor commutes with summation: sum(x_i*16) = 16*sum(x_i)).
     if _is_splitk:
-        gate = out[:, :inter_dim]   # [tokens*topk, inter_dim] f32
-        up = out[:, inter_dim:]     # [tokens*topk, inter_dim] f32
+        gate = out[:, :inter_dim].float()   # [tokens*topk, inter_dim] -> f32 for silu precision
+        up = out[:, inter_dim:].float()     # [tokens*topk, inter_dim] -> f32 for silu precision
         out = (torch.nn.functional.silu(gate) * up).to(_out_torch_dtype).view(tokens, topk, inter_dim)
 
     if not bool(skip_ref):
