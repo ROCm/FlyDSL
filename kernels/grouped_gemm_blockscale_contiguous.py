@@ -378,13 +378,23 @@ def compile_grouped_fp8_gemm(
             row_a_lds_base = lane_mod_16  # mi=0
             col_offset_base_bytes = lane_div_16 * fx.Index(16)  # ku=0
 
+            # ── Pack helper for gfx950 K=128 MFMA ──────────────────────
+            mfma_res_ty = T.f32x4
+
+            def pack_i64x4_to_i32x8(x0, x1, x2, x3):
+                v4 = vector.from_elements(T.vec(4, T.i64), [x0, x1, x2, x3])
+                return vector.bitcast(T.vec(8, T.i32), v4)
+
             # ── Scheduling hints (sched_group_barrier, MoE stage 2 pattern) ──
             ku_per_sb = scale_block_k // 64
             rocdl.sched_barrier(0)
 
             def hot_loop_scheduler():
-                mfma_per_ku = m_repeat * num_acc_n * 2  # m * n_acc * 2(k32)
-                total_mfma = k_unroll * mfma_per_ku
+                mfma_group = num_acc_n
+                if _is_gfx950:
+                    total_mfma = sb_per_tile * m_repeat * mfma_group
+                else:
+                    total_mfma = k_unroll * m_repeat * mfma_group * 2
                 rocdl.sched_group_barrier(rocdl.mask_dsrd, ku_per_sb * m_repeat, 0)
                 rocdl.sched_group_barrier(rocdl.mask_mfma, total_mfma, 1)
                 rocdl.sched_group_barrier(rocdl.mask_vmem_rd, num_a_loads, 2)
@@ -425,35 +435,68 @@ def compile_grouped_fp8_gemm(
                         s_b_vals.append(s_b_val)
 
                     # MFMA computation for this scale block
-                    ku_per_sb = scale_block_k // 64
-
-                    for ku_local in range_constexpr(ku_per_sb):
-                        ku = sb * ku_per_sb + ku_local
-                        k_offset_bytes = ku * 64
-                        b_packs0, b_packs1 = b_tile_in[ku]
+                    if _is_gfx950:
+                        # gfx950: single K=128 MFMA per (sb, mi, ni)
+                        ku0 = sb * ku_per_sb
+                        ku1 = ku0 + 1
+                        b0_packs0, b0_packs1 = b_tile_in[ku0]
+                        b1_packs0, b1_packs1 = b_tile_in[ku1]
+                        col_base0 = col_offset_base_bytes + fx.Index(ku0 * 64)
+                        col_base1 = col_offset_base_bytes + fx.Index(ku1 * 64)
 
                         for mi in range_constexpr(m_repeat):
-                            # Use prefetched A0 for the very first iteration
-                            if a0_prefetch is not None and sb == 0 and ku_local == 0 and mi == 0:
+                            curr_row_a_lds = lane_mod_16 + arith.index(mi * 16)
+                            if a0_prefetch is not None and sb == 0 and mi == 0:
                                 a0, a1 = a0_prefetch
                             else:
-                                row_a_lds = lane_mod_16 + arith.index(mi * 16)
-                                col_a_base_bytes = lane_div_16 * fx.Index(16) + fx.Index(k_offset_bytes)
-                                a0, a1 = lds_load_packs_k64(row_a_lds, col_a_base_bytes, lds_base)
+                                a0, a1 = lds_load_packs_k64(curr_row_a_lds, col_base0, lds_base)
+                            a2, a3 = lds_load_packs_k64(curr_row_a_lds, col_base1, lds_base)
+                            a128 = pack_i64x4_to_i32x8(a0, a1, a2, a3)
 
                             for ni in range_constexpr(num_acc_n):
+                                b128 = pack_i64x4_to_i32x8(
+                                    b0_packs0[ni], b0_packs1[ni],
+                                    b1_packs0[ni], b1_packs1[ni],
+                                )
                                 acc_idx = mi * num_acc_n + ni
-
-                                # Two K32 MFMAs using preshuffle B packs
-                                mfma_fn = rocdl.mfma_f32_16x16x32_fp8_fp8
-                                mfma_mid = mfma_fn(T.f32x4, [a0, b_packs0[ni], acc_init, 0, 0, 0])
-                                mfma_result = mfma_fn(T.f32x4, [a1, b_packs1[ni], mfma_mid, 0, 0, 0])
+                                mfma_result = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
+                                    mfma_res_ty,
+                                    [a128, b128, acc_init,
+                                     0, 0, 0, 0x7F7F7F7F, 0, 0x7F7F7F7F],
+                                )
 
                                 # Apply scales: accum += mfma_result * scale_a * scale_b
                                 s_a_v4 = s_a_vecs[mi]
                                 s_b_bc = vector.broadcast(T.f32x4, s_b_vals[ni])
                                 scaled = ArithValue(mfma_result) * ArithValue(s_a_v4)
                                 current_accs[acc_idx] = math_dialect.fma(scaled, s_b_bc, current_accs[acc_idx])
+                    else:
+                        # gfx942: two K=32 MFMAs per K64 micro-step
+                        for ku_local in range_constexpr(ku_per_sb):
+                            ku = sb * ku_per_sb + ku_local
+                            k_offset_bytes = ku * 64
+                            b_packs0, b_packs1 = b_tile_in[ku]
+
+                            for mi in range_constexpr(m_repeat):
+                                if a0_prefetch is not None and sb == 0 and ku_local == 0 and mi == 0:
+                                    a0, a1 = a0_prefetch
+                                else:
+                                    row_a_lds = lane_mod_16 + arith.index(mi * 16)
+                                    col_a_base_bytes = lane_div_16 * fx.Index(16) + fx.Index(k_offset_bytes)
+                                    a0, a1 = lds_load_packs_k64(row_a_lds, col_a_base_bytes, lds_base)
+
+                                for ni in range_constexpr(num_acc_n):
+                                    acc_idx = mi * num_acc_n + ni
+
+                                    mfma_fn = rocdl.mfma_f32_16x16x32_fp8_fp8
+                                    mfma_mid = mfma_fn(T.f32x4, [a0, b_packs0[ni], acc_init, 0, 0, 0])
+                                    mfma_result = mfma_fn(T.f32x4, [a1, b_packs1[ni], mfma_mid, 0, 0, 0])
+
+                                    # Apply scales: accum += mfma_result * scale_a * scale_b
+                                    s_a_v4 = s_a_vecs[mi]
+                                    s_b_bc = vector.broadcast(T.f32x4, s_b_vals[ni])
+                                    scaled = ArithValue(mfma_result) * ArithValue(s_a_v4)
+                                    current_accs[acc_idx] = math_dialect.fma(scaled, s_b_bc, current_accs[acc_idx])
 
                 return current_accs
 
