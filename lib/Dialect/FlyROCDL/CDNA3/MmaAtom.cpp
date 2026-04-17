@@ -180,6 +180,12 @@ FailureOr<Value> MmaOpCDNA3_MFMAType::emitAtomCallSSA(OpBuilder &builder, Locati
   if (!abTyA || !abTyB)
     return failure();
 
+  // Bitcast SSA operands when type doesn't match MFMA ABI (e.g. bf16 -> i16)
+  if (a.getType() != abTyA)
+    a = vector::BitCastOp::create(builder, loc, abTyA, a);
+  if (b.getType() != abTyB)
+    b = vector::BitCastOp::create(builder, loc, abTyB, b);
+
   int64_t accVecSize = getMfmaAccVecSize(m, k, elemTyA);
   if (accVecSize == 0)
     return failure();
