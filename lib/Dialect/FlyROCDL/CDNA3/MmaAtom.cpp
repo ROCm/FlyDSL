@@ -211,10 +211,18 @@ FailureOr<Value> MmaOpCDNA3_MFMAType::emitAtomCallSSA(OpBuilder &builder, Locati
     return failure();
 
   // Bitcast SSA operands when type doesn't match MFMA ABI (e.g. bf16 -> i16)
-  if (a.getType() != abTyA)
-    a = vector::BitCastOp::create(builder, loc, abTyA, a);
-  if (b.getType() != abTyB)
-    b = vector::BitCastOp::create(builder, loc, abTyB, b);
+  // For scalar targets (e.g. i64 for fp8 K<128): use LLVM bitcast (vector->scalar)
+  auto bitcastToABI = [&](Value v, Type targetTy) -> Value {
+    if (v.getType() == targetTy)
+      return v;
+    if (!isa<VectorType>(targetTy)) {
+      // vector<8xi8> -> i64: LLVM bitcast handles vector-to-scalar
+      return LLVM::BitcastOp::create(builder, loc, targetTy, v);
+    }
+    return vector::BitCastOp::create(builder, loc, targetTy, v);
+  };
+  a = bitcastToABI(a, abTyA);
+  b = bitcastToABI(b, abTyB);
 
   int64_t accVecSize = getMfmaAccVecSize(m, k, elemTyA);
   if (accVecSize == 0)

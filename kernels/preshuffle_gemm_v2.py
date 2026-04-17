@@ -322,34 +322,10 @@ def compile_preshuffle_gemm_v2(
             pipeline_stage(read_stage=0, next_k_val=fx.Int32(1))
             pipeline_stage(read_stage=1, read_next=False)
         else:
-            loop_start = fx.Index(0)
-            loop_end = fx.Index((num_tiles - 2) // 2)
-            loop_step = fx.Index(1)
-            # Loop-carried values:
-            #   bf16/f16: acc + B stage 0 (B alloca types don't match for SROA)
-            #   fp8: acc only (B alloca has uniform i64 types → SROA promotes it)
-            acc_init = frag_C.load()
-            if is_fp8:
-                for iv, state in range(loop_start, loop_end, loop_step,
-                                       init=[acc_init]):
-                    frag_C.store(state[0])
-                    k_base = arith.index_cast(T.i32, iv * 2)
-                    pipeline_stage(read_stage=0, next_k_val=k_base + fx.Int32(1))
-                    pipeline_stage(read_stage=1, next_k_val=k_base + fx.Int32(2))
-                    results = yield [frag_C.load()]
-                frag_C.store(results)
-            else:
-                b0_init = frag_B_stages[0].load()
-                for iv, state in range(loop_start, loop_end, loop_step,
-                                       init=[acc_init, b0_init]):
-                    frag_C.store(state[0])
-                    frag_B_stages[0].store(state[1])
-                    k_base = arith.index_cast(T.i32, iv * 2)
-                    pipeline_stage(read_stage=0, next_k_val=k_base + fx.Int32(1))
-                    pipeline_stage(read_stage=1, next_k_val=k_base + fx.Int32(2))
-                    results = yield [frag_C.load(), frag_B_stages[0].load()]
-                frag_C.store(results[0])
-                frag_B_stages[0].store(results[1])
+            for iv in range(fx.Index(0), fx.Index((num_tiles - 2) // 2), fx.Index(1)):
+                k_base = arith.index_cast(T.i32, iv * 2)
+                pipeline_stage(read_stage=0, next_k_val=k_base + fx.Int32(1))
+                pipeline_stage(read_stage=1, next_k_val=k_base + fx.Int32(2))
             pipeline_stage(read_stage=0, next_k_val=fx.Int32(num_tiles - 1))
             pipeline_stage(read_stage=1, read_next=False)
 
