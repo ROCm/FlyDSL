@@ -203,7 +203,7 @@ def test_mfma_a8_flyc_preshuffle(
         return t.view(torch.int8) if "float8" in str(t.dtype) else t
 
     # Create a dummy bias tensor (unused when epilogue="none")
-    _dummy_bias = torch.empty(0, dtype=out_dtype, device=a_q.device)
+    _dummy_bias = torch.empty(0, dtype=torch_out_dtype, device=a_q.device)
 
     def _gemm_args(c, a, b, sa, sb):
         return (c.contiguous().view(-1),
@@ -497,8 +497,8 @@ def test_cudagraph_capture_preshuffle(in_dtype):
     b_raw = torch.randn(N, K, dtype=torch.bfloat16, device=device)
 
     if in_dtype == "fp8":
-        a_q, scale_a = pertoken_quant(a_raw, dtype=torch.float8_e4m3fnuz)
-        b_q, scale_b = pertoken_quant(b_raw, dtype=torch.float8_e4m3fnuz)
+        a_q, scale_a = pertoken_quant(a_raw, quant_dtype=torch.float8_e4m3fnuz)
+        b_q, scale_b = pertoken_quant(b_raw, quant_dtype=torch.float8_e4m3fnuz)
         a_q = a_q.view(torch.int8)
         b_input = shuffle_weight(b_q.view(torch.int8), layout=(16, 16)).contiguous().view(-1)
         sa_flat = scale_a.contiguous().view(-1)
