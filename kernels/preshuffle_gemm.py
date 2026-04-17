@@ -191,6 +191,7 @@ def compile_preshuffle_gemm_a8(
     b_elem_vec_pack = 2 if is_fp4 else 1
 
     tile_k_bytes = int(tile_k) * int(elem_bytes)
+    _use_wg_swizzle = False
 
     if (tile_k_bytes % 64) != 0:
         raise ValueError(
@@ -252,6 +253,8 @@ def compile_preshuffle_gemm_a8(
 
     _is_gfx950 = str(gpu_arch).startswith("gfx950")
     _is_gfx942 = str(gpu_arch).startswith("gfx942")
+    # gfx950: use 16x16x32 MFMA for f16/bf16 (K=32 per MFMA, vs K=16 on gfx942).
+    _use_mfma_k32 = _is_gfx950 and is_f16_or_bf16
 
     lds_stride_bytes = tile_k_bytes
 
@@ -372,8 +375,18 @@ def compile_preshuffle_gemm_a8(
         k_blocks16 = arith.index(tile_k_bytes // a_elem_vec_pack // 16)
 
         tx = gpu.thread_id("x")
-        bx = gpu.block_id("x")
-        by = gpu.block_id("y")
+
+        # ---- CK/HK-style L2 workgroup swizzle (bitwise, zero-cost) ----
+        if _use_wg_swizzle:
+            _linear_wgid = gpu.block_id("x")
+            _group_id = arith.shrui(_linear_wgid, arith.index(_log2_group))
+            _local_id = arith.andi(_linear_wgid, arith.index((1 << _log2_group) - 1))
+            _pid_m_in_grp = arith.andi(_local_id, arith.index(_WGM - 1))
+            by = arith.shrui(_local_id, arith.index(_log2_wgm))
+            bx = arith.shli(_group_id, arith.index(_log2_wgm)) + _pid_m_in_grp
+        else:
+            bx = gpu.block_id("x")
+            by = gpu.block_id("y")
 
         # ---- LDS (separate ping/pong buffers for no-alias guarantee) ----
         base_ptr_pong = allocator_pong.get_base()
@@ -504,7 +517,7 @@ def compile_preshuffle_gemm_a8(
             b_i64x2 = vector.bitcast(T.i64x2, b16)
             b0_i64 = vector.extract(b_i64x2, static_position=[0], dynamic_position=[])
             b1_i64 = vector.extract(b_i64x2, static_position=[1], dynamic_position=[])
-            if not is_f16_or_bf16:
+            if not is_f16_or_bf16 or _use_mfma_k32:
                 return b0_i64, b1_i64
             b0_v1 = vector.from_elements(T.vec(1, T.i64), [b0_i64])
             b1_v1 = vector.from_elements(T.vec(1, T.i64), [b1_i64])
@@ -586,7 +599,7 @@ def compile_preshuffle_gemm_a8(
             a0_i64 = vector.extract(a_i64x2, static_position=[0], dynamic_position=[])
             a1_i64 = vector.extract(a_i64x2, static_position=[1], dynamic_position=[])
 
-            if not is_f16_or_bf16:
+            if not is_f16_or_bf16 or _use_mfma_k32:
                 return a0_i64, a1_i64
 
             a0_v1 = vector.from_elements(T.vec(1, T.i64), [a0_i64])
@@ -695,7 +708,7 @@ def compile_preshuffle_gemm_a8(
                 )
 
         def prefetch_a_to_lds(base_k, lds_buffer):
-            base_k_div4 = base_k // 4 // a_elem_vec_pack
+            base_k_div4 = base_k * elem_bytes // a_elem_vec_pack // 4
             dma_a_tile_to_lds(base_k_div4, lds_buffer)
 
         def prefetch_a_tile(base_k):
@@ -897,21 +910,34 @@ def compile_preshuffle_gemm_a8(
                 return current_accs_list, scales_pf
 
             mfma_res_ty = T.i32x4 if is_int8 else T.f32x4
-            if is_int8:
-                mfma_fn = mfma_i32_k32
-            elif is_f16:
-                mfma_fn = rocdl.mfma_f32_16x16x16f16
-            elif is_bf16:
-                mfma_fn = rocdl.mfma_f32_16x16x16bf16_1k
+            if _use_mfma_k32:
+                # gfx950: single 16x16x32 MFMA consuming 128 bits (K=32 f16/bf16)
+                mfma_fn_k32 = rocdl.mfma_f32_16x16x32_f16 if is_f16 else rocdl.mfma_f32_16x16x32_bf16
+
+                def _i64x2_to_v8(lo, hi):
+                    v2 = vector.from_elements(T.i64x2, [lo, hi])
+                    return vector.bitcast(T.f16x8 if is_f16 else T.bf16x8, v2)
+
+                def mfma_k64_bytes(acc_in, a0, a1, b0, b1):
+                    av = _i64x2_to_v8(a0, a1)
+                    bv = _i64x2_to_v8(b0, b1)
+                    return mfma_fn_k32(mfma_res_ty, [av, bv, acc_in, 0, 0, 0])
             else:
-                mfma_fn = rocdl.mfma_f32_16x16x32_fp8_fp8
+                if is_int8:
+                    mfma_fn = mfma_i32_k32
+                elif is_f16:
+                    mfma_fn = rocdl.mfma_f32_16x16x16f16
+                elif is_bf16:
+                    mfma_fn = rocdl.mfma_f32_16x16x16bf16_1k
+                else:
+                    mfma_fn = rocdl.mfma_f32_16x16x32_fp8_fp8
 
-            def mfma_step(acc_in, a, b):
-                return mfma_fn(mfma_res_ty, [a, b, acc_in, 0, 0, 0])
+                def mfma_step(acc_in, a, b):
+                    return mfma_fn(mfma_res_ty, [a, b, acc_in, 0, 0, 0])
 
-            def mfma_k64_bytes(acc_in, a0, a1, b0, b1):
-                acc_mid = mfma_step(acc_in, a0, b0)
-                return mfma_step(acc_mid, a1, b1)
+                def mfma_k64_bytes(acc_in, a0, a1, b0, b1):
+                    acc_mid = mfma_step(acc_in, a0, b0)
+                    return mfma_step(acc_mid, a1, b1)
 
             for ku in range_constexpr(k_unroll):
                 b_packs0, b_packs1 = b_tile_in[ku]
@@ -1154,7 +1180,14 @@ def compile_preshuffle_gemm_a8(
                         rocdl.sched_dswr(1)
             else:
                 mfma_group = num_acc_n
-                element_k_per_mfma = 128 if _is_gfx950 else 32
+                if is_f16_or_bf16:
+                    element_k_per_mfma = 32 if _use_mfma_k32 else 16
+                elif is_int8:
+                    element_k_per_mfma = 32
+                elif _is_gfx950:
+                    element_k_per_mfma = 128  # FP8/FP4: mfma_scale_f32_16x16x128
+                else:
+                    element_k_per_mfma = 32
                 num_mfma_per_tile_k = tile_k // element_k_per_mfma
                 mfma_total = num_mfma_per_tile_k * m_repeat * mfma_group
                 num_ds_load = num_a_lds_load
@@ -1512,11 +1545,18 @@ def compile_preshuffle_gemm_a8(
                     if hasattr(op, 'attributes') and op.OPERATION_NAME == "gpu.func":
                         op.attributes["rocdl.waves_per_eu"] = ir.IntegerAttr.get(
                             T.i32, _wpe)
-        launcher.launch(
-            grid=(gx, gy, 1),
-            block=(256, 1, 1),
-            stream=stream,
-        )
+        if _use_wg_swizzle:
+            launcher.launch(
+                grid=(gx * gy, 1, 1),
+                block=(256, 1, 1),
+                stream=stream,
+            )
+        else:
+            launcher.launch(
+                grid=(gx, gy, 1),
+                block=(256, 1, 1),
+                stream=stream,
+            )
 
     return launch_gemm
 
