@@ -40,12 +40,24 @@ DTYPE_BF16 = torch.bfloat16
 EPS: float = 1e-5
 from kernels.rmsnorm_kernel import (
     build_rmsnorm_module,
+    build_rmsnorm_dynamicquant_module,
+    build_rmsnorm_smoothquant_module,
     KERNEL_NAME as RMSNORM_KERNEL_NAME,
     BLOCK_THREADS,
 )
 
 WARMUP_ITERS = 10
 BENCH_ITERS = 100
+
+
+def _torch_dtype(dtype: str):
+    if dtype == "f32":
+        return DTYPE_FP32
+    if dtype == "f16":
+        return DTYPE_FP16
+    if dtype == "bf16":
+        return DTYPE_BF16
+    raise ValueError(f"unsupported dtype: {dtype}")
 
 def run_test(M: int, N: int, dtype: str = "f32"):
     print(f"\nTesting RMSNorm (M={M}, N={N}, dtype={dtype})")
@@ -133,6 +145,94 @@ def run_test(M: int, N: int, dtype: str = "f32"):
         print(output_ref[0, :5])
         ok = False
     return ok, flydsl_gpu_us
+
+
+def _reference_rmsnorm_quant(input_dev, gamma_dev, *, xscale_dev=None):
+    x = input_dev.to(DTYPE_FP32)
+    gamma = gamma_dev.to(DTYPE_FP32)
+    expected = (x / torch.sqrt((x * x).mean(dim=1, keepdim=True) + EPS)) * gamma
+    if xscale_dev is not None:
+        expected = expected * xscale_dev.to(DTYPE_FP32)
+
+    yscale = expected.abs().amax(dim=1) / 127.0
+    yscale = torch.where(yscale == 0, torch.ones_like(yscale), yscale)
+    q = torch.clamp(torch.trunc(expected / yscale.unsqueeze(1)), -127, 127).to(torch.int8)
+    return expected, q, yscale
+
+
+@pytest.mark.parametrize("dtype", ["f16"])
+def test_rmsnorm_dynamicquant_generic(dtype: str):
+    M, N = 16, 192
+    torch_dtype = _torch_dtype(dtype)
+    launch_fn = build_rmsnorm_dynamicquant_module(M, N, dtype)
+
+    torch.manual_seed(7)
+    input_dev = torch.randn((M, N), device="cuda", dtype=torch_dtype).contiguous()
+    gamma_dev = torch.rand((N,), device="cuda", dtype=torch_dtype).contiguous()
+    output_dev = torch.empty((M, N), device="cuda", dtype=torch.int8)
+    yscale_dev = torch.empty((M,), device="cuda", dtype=torch.float32)
+
+    launch_fn(input_dev, gamma_dev, output_dev, yscale_dev, M, stream=torch.cuda.current_stream())
+    torch.cuda.synchronize()
+
+    expected, q_ref, yscale_ref = _reference_rmsnorm_quant(input_dev, gamma_dev)
+    q_out = output_dev.cpu().to(torch.int16)
+    q_expected = q_ref.cpu().to(torch.int16)
+    yscale_out = yscale_dev.cpu()
+    yscale_expected = yscale_ref.cpu()
+
+    q_diff = (q_out - q_expected).abs().max().item()
+    scale_diff = (yscale_out - yscale_expected).abs().max().item()
+    recon = output_dev.to(DTYPE_FP32) * yscale_dev.unsqueeze(1)
+    recon_err = (recon - expected).abs().max().item()
+
+    assert q_diff <= 1
+    assert scale_diff < 5e-3
+    assert recon_err < 0.2
+
+
+@pytest.mark.parametrize("dtype", ["bf16"])
+def test_rmsnorm_smoothquant_fastpath(dtype: str):
+    M, N = 8, BLOCK_THREADS * 8
+    torch_dtype = _torch_dtype(dtype)
+    launch_fn = build_rmsnorm_smoothquant_module(M, N, dtype)
+
+    torch.manual_seed(11)
+    input_dev = torch.randn((M, N), device="cuda", dtype=torch_dtype).contiguous()
+    gamma_dev = torch.rand((N,), device="cuda", dtype=torch_dtype).contiguous()
+    xscale_dev = torch.rand((N,), device="cuda", dtype=torch_dtype).contiguous() + 0.5
+    output_dev = torch.empty((M, N), device="cuda", dtype=torch.int8)
+    yscale_dev = torch.empty((M,), device="cuda", dtype=torch.float32)
+
+    launch_fn(
+        input_dev,
+        gamma_dev,
+        xscale_dev,
+        output_dev,
+        yscale_dev,
+        M,
+        stream=torch.cuda.current_stream(),
+    )
+    torch.cuda.synchronize()
+
+    expected, q_ref, yscale_ref = _reference_rmsnorm_quant(
+        input_dev,
+        gamma_dev,
+        xscale_dev=xscale_dev,
+    )
+    q_out = output_dev.cpu().to(torch.int16)
+    q_expected = q_ref.cpu().to(torch.int16)
+    yscale_out = yscale_dev.cpu()
+    yscale_expected = yscale_ref.cpu()
+
+    q_diff = (q_out - q_expected).abs().max().item()
+    scale_diff = (yscale_out - yscale_expected).abs().max().item()
+    recon = output_dev.to(DTYPE_FP32) * yscale_dev.unsqueeze(1)
+    recon_err = (recon - expected).abs().max().item()
+
+    assert q_diff <= 1
+    assert scale_diff < 1e-2
+    assert recon_err < 0.25
 
 def test_all():
     print("="*80)
