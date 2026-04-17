@@ -38,14 +38,43 @@ def FlyCanonicalizePass : Pass<"fly-canonicalize"> {
 
 def FlyLayoutLoweringPass : Pass<"fly-layout-lowering"> {
   let summary = "Lower layout algebra operations";
-  let description = [{ 
+  let description = [{
     Lowers layout algebra operations to simpler forms.
   }];
-  
+
   let dependentDialects = [
     "arith::ArithDialect",
     "gpu::GPUDialect",
     "vector::VectorDialect"
+  ];
+}
+
+def FlyConvertAtomCallToSSAFormPass : Pass<"fly-convert-atom-call-to-ssa-form"> {
+  let summary = "Convert copy_atom_call/mma_atom_call to SSA form";
+  let description = [{
+    Try to convert copy_atom_call and mma_atom_call to their SSA counterparts 
+    (copy_atom_call_ssa / mma_atom_call_ssa) if possible.
+    Promote register tensor to vector ssa value. Keep others memref unchanged.
+  }];
+
+  let dependentDialects = [
+    "vector::VectorDialect"
+  ];
+}
+
+def FlyPromoteRegMemToVectorSSAPass : Pass<"fly-promote-regmem-to-vectorssa"> {
+  let summary = "Promote register memory to vector SSA values";
+  let description = [{
+    Promotes fly.make_ptr(register) memory semantics to vector SSA values.
+    Requires fly-convert-atom-call-to-ssa-form to have run first. 
+  }];
+
+  let dependentDialects = [
+    "arith::ArithDialect",
+    "gpu::GPUDialect",
+    "scf::SCFDialect",
+    "vector::VectorDialect",
+    "ub::UBDialect"
   ];
 }
 

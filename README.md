@@ -363,7 +363,7 @@ See `examples/` for more examples including tiled copy (`02-tiledCopy.py`), tile
 | **RMSNorm** | `test_rmsnorm.py` | RMSNorm (layout API) |
 | **Softmax** | `test_softmax.py` | Softmax (layout API) |
 | **Fused RoPE** | `test_fused_rope_cache.py` | Fused RoPE + KV cache |
-| **AllReduce** | `test_flydsl_allreduce.py` | Multi-GPU all-reduce |
+| **AllReduce** | `test_allreduce.py` | Multi-GPU all-reduce |
 | **RDNA GEMM** | `test_rdna_gemm.py` | RDNA FP16/FP8 GEMM |
 | **GFX1250 GEMM** | `test_gemm_fp8fp4_gfx1250.py` | GFX1250 FP8/FP4 GEMM |
 | **WMMA GEMM** | `test_wmma_gemm_gfx1250.py` | GFX1250 WMMA GEMM |

@@ -72,6 +72,7 @@ __all__ = [
     'create_llvm_ptr',
     'get_element_ptr',
     'create_buffer_resource',
+    'create_buffer_resource_from_addr',
     'buffer_load',
     'buffer_store',
     'BufferResourceDescriptor',
@@ -323,6 +324,34 @@ class BufferResourceDescriptor:
         return BufferResourceDescriptor(rsrc)
 
 
+def create_buffer_resource_from_addr(addr_i64: ir.Value) -> ir.Value:
+    """Create AMD buffer resource descriptor from a raw i64 device address.
+
+    Useful when working with runtime pointer arrays (e.g. IPC-mapped addresses
+    or device-side pointer tables) where no fly.memref is available.
+    The full address is encoded as the buffer base; callers should pass
+    byte offset 0 to buffer_load / buffer_store.
+
+    Args:
+        addr_i64: Raw 64-bit device address (i64 MLIR value).
+
+    Returns:
+        ROCDL buffer resource descriptor (!llvm.ptr<8>).
+
+    Example:
+        >>> rsrc = create_buffer_resource_from_addr(raw_addr_i64)
+        >>> data = buffer_load(rsrc, i32_zero, vec_width=4, dtype=T.i32)
+    """
+    addr_i64 = _unwrap_value(addr_i64)
+    ptr_type = ir.Type.parse('!llvm.ptr')
+    base_ptr = llvm.IntToPtrOp(ptr_type, addr_i64).result
+    flags = _create_i32_constant(_get_buffer_flags())
+    stride = _create_i16_constant(0)
+    num_records = _create_i64_constant(0xFFFFFFFF)
+    rsrc_type = ir.Type.parse('!llvm.ptr<8>')
+    return rocdl.MakeBufferRsrcOp(rsrc_type, base_ptr, stride, num_records, flags).result
+
+
 @traced_op
 def create_buffer_resource(memref_val: ir.Value, 
                            stride: int = 0,
@@ -361,10 +390,10 @@ def buffer_load(rsrc: ir.Value,
                 cache_modifier: int = 0,
                 soffset_bytes: Optional[Union[int, ir.Value]] = None) -> ir.Value:
     """AMD buffer load operation.
-    
+
     Load data from global memory using buffer descriptor and offset.
     Uses hardware-level bounds checking and vectorization.
-    
+
     Args:
         rsrc: Buffer resource descriptor (!llvm.ptr<8>)
         offset: Offset in elements (i32 type)

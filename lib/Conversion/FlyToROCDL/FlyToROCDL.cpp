@@ -200,18 +200,6 @@ public:
   }
 };
 
-class GetIterOpLowering : public OpConversionPattern<GetIterOp> {
-public:
-  GetIterOpLowering(const TypeConverter &typeConverter, MLIRContext *context)
-      : OpConversionPattern<GetIterOp>(typeConverter, context) {}
-
-  LogicalResult matchAndRewrite(GetIterOp op, OpAdaptor adaptor,
-                                ConversionPatternRewriter &rewriter) const override {
-    rewriter.replaceOp(op, adaptor.getMemref());
-    return success();
-  }
-};
-
 class ApplySwizzleOpLowering : public OpConversionPattern<ApplySwizzleOp> {
 public:
   using OpConversionPattern::OpConversionPattern;
@@ -537,6 +525,45 @@ public:
   }
 };
 
+class CopyAtomCallSSALowering : public OpConversionPattern<CopyAtomCallSSA> {
+public:
+  using OpConversionPattern<CopyAtomCallSSA>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(CopyAtomCallSSA op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    Type copyAtomType = op.getCopyAtom().getType();
+    auto copyAtom = dyn_cast<CopyAtomType>(copyAtomType);
+    if (!copyAtom)
+      return rewriter.notifyMatchFailure(op, "copyAtom is not CopyAtomType");
+
+    Location loc = op.getLoc();
+    bool hasResult = op.getResults().size() > 0;
+    Type srcTy = op.getSrc().getType();
+    Value pred = adaptor.getPred();
+
+    Type resultTy = hasResult ? op.getResult(0).getType() : Type{};
+    Type dstTy = op.getDst() ? op.getDst().getType() : Type{};
+
+    FailureOr<Value> result;
+    if (pred) {
+      result = copyAtom.emitAtomCallSSA(rewriter, loc, resultTy, copyAtomType, srcTy, dstTy,
+                                        op.getPred().getType(), adaptor.getCopyAtom(),
+                                        adaptor.getSrc(), adaptor.getDst(), pred);
+    } else {
+      result = copyAtom.emitAtomCallSSA(rewriter, loc, resultTy, copyAtomType, srcTy, dstTy,
+                                        adaptor.getCopyAtom(), adaptor.getSrc(), adaptor.getDst());
+    }
+    if (failed(result))
+      return failure();
+
+    if (hasResult)
+      rewriter.replaceOp(op, *result);
+    else
+      rewriter.eraseOp(op);
+    return success();
+  }
+};
+
 class MmaAtomCallLowering : public OpConversionPattern<MmaAtomCall> {
 public:
   using OpConversionPattern<MmaAtomCall>::OpConversionPattern;
@@ -571,6 +598,38 @@ public:
       return failure();
 
     rewriter.eraseOp(op);
+    return success();
+  }
+};
+
+class MmaAtomCallSSALowering : public OpConversionPattern<MmaAtomCallSSA> {
+public:
+  using OpConversionPattern<MmaAtomCallSSA>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(MmaAtomCallSSA op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    auto mmaAtomTy = dyn_cast<MmaAtomType>(op.getMmaAtom().getType());
+    if (!mmaAtomTy)
+      return rewriter.notifyMatchFailure(op, "expected MmaAtomType for mmaAtom operand");
+
+    Location loc = op.getLoc();
+    bool hasResult = op.getResults().size() > 0;
+
+    Type resultTy = hasResult ? op.getResult(0).getType() : Type{};
+    Type dTy = op.getD() ? op.getD().getType() : Type{};
+    Value dPtr = hasResult ? Value{} : adaptor.getD();
+
+    auto result =
+        mmaAtomTy.emitAtomCallSSA(rewriter, loc, resultTy, mmaAtomTy, dTy, op.getA().getType(),
+                                  op.getB().getType(), op.getC().getType(), adaptor.getMmaAtom(),
+                                  dPtr, adaptor.getA(), adaptor.getB(), adaptor.getC());
+    if (failed(result))
+      return failure();
+
+    if (hasResult)
+      rewriter.replaceOp(op, *result);
+    else
+      rewriter.eraseOp(op);
     return success();
   }
 };
@@ -739,8 +798,7 @@ public:
 
     patterns.add<MakePtrOpLowering, GetDynSharedOpLowering>(typeConverter, context);
     patterns.add<IntToPtrOpLowering, PtrToIntOpLowering>(typeConverter, context);
-    patterns.add<GetIterOpLowering, ApplySwizzleOpLowering, RecastIterOpLowering>(typeConverter,
-                                                                                  context);
+    patterns.add<ApplySwizzleOpLowering, RecastIterOpLowering>(typeConverter, context);
     patterns.add<AddOffsetOpLowering>(typeConverter, context);
     patterns.add<MakeViewOpLowering>(typeConverter, context);
     patterns.add<PtrLoadOpLowering, PtrStoreOpLowering>(typeConverter, context);
@@ -748,6 +806,7 @@ public:
     patterns.add<MakeTiledCopyOpLowering, MakeTiledMmaOpLowering>(typeConverter, context);
     patterns.add<AtomSetValueOpLowering>(typeConverter, context);
     patterns.add<CopyAtomCallLowering, MmaAtomCallLowering>(typeConverter, context);
+    patterns.add<CopyAtomCallSSALowering, MmaAtomCallSSALowering>(typeConverter, context);
     patterns.add<GpuLaunchFuncOpLowering>(typeConverter, context);
 
     // TODO: deprecated in the future
@@ -802,15 +861,3 @@ public:
 };
 
 } // namespace
-
-namespace impl {
-
-std::unique_ptr<::mlir::Pass> createFlyToROCDLConversionPass() {
-  return std::make_unique<FlyToROCDLConversionPass>();
-}
-
-std::unique_ptr<::mlir::Pass> createFlyROCDLClusterAttrPass() {
-  return std::make_unique<FlyROCDLClusterAttrPass>();
-}
-
-} // namespace impl

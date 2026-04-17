@@ -188,3 +188,15 @@ class TestKernelParameter:
         _vecadd(a, b, c, SIZE, BLOCK_DIM, VEC_WIDTH)
         torch.cuda.synchronize()
         assert torch.allclose(c, a.data + b.data, atol=1e-5)
+
+    def test_parameter_requires_grad_forward_only(self):
+        """requires_grad=True Parameter should be accepted for forward-only use."""
+        w = torch.nn.Parameter(
+            torch.randn(SIZE, device="cuda", dtype=torch.float32),
+            requires_grad=True,
+        )
+        b = torch.randn(SIZE, device="cuda", dtype=torch.float32)
+        c = torch.empty_like(b)
+        _vecadd(w, b, c, SIZE, BLOCK_DIM, VEC_WIDTH)
+        torch.cuda.synchronize()
+        assert torch.allclose(c, w.detach() + b, atol=1e-5)

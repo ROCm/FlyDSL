@@ -74,3 +74,6 @@ FLYDSL_DUMP_IR=1 PYTHONPATH=./ python tests/kernels/test_pa.py # Dump MLIR IR at
 - **Layout API vs buffer_ops**: New kernels should use `fx.rocdl.make_buffer_tensor()` + `copy_atom_call` (layout API). Raw `buffer_ops.create_buffer_resource()` is legacy
 - **Arch detection**: Use `from flydsl.runtime.device import get_rocm_arch`
 - **`range` vs `range_constexpr`**: Use `range_constexpr` for compile-time unrolled loops; `range(start, stop, step, init=[...])` for `scf.for` with loop-carried values
+- **Branch-local defs**: Do not define a value inside `if/else` and then use it after the branch. Hoist the variable or rewrite the logic so later uses see a single explicit definition path.
+- **Nested helper captures**: Inside `@flyc.kernel` / `@flyc.jit`, nested helper functions must not mutate captured outer variables. Read-only capture is acceptable, but writes should go through explicit parameters / returns.
+- **Single-exit control flow**: Avoid early `return`. Do not place `return` or `yield` inside `if/else` branches; keep a single explicit exit path so MLIR result types stay well-defined.

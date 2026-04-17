@@ -68,6 +68,7 @@ public:
   static IntTupleValueAdaptor create(Builder &builder, Value value, IntTupleAttr attr) {
     // Rebuild the adaptor from a normal-form IntTuple value while re-establishing
     // the leaf/non-leaf invariant above.
+    assert(isa<TypedValue<IntTupleType>>(value) && "Value must be a IntTuple");
     assert(isNormalForm(cast<TypedValue<IntTupleType>>(value)) && "Value must be in normal form");
     if (attr.isLeaf()) {
       if (attr.isStatic()) {
@@ -96,6 +97,9 @@ public:
   IntTupleAttr getAttr() const { return attr; }
 
   friend class IntTupleBuilder<IntTupleValueAdaptor>;
+  friend IntTupleValueAdaptor
+  intTupleBasis2Tuple(const IntTupleBuilder<IntTupleValueAdaptor> &builder,
+                      IntTupleValueAdaptor basis);
 };
 
 template <class IntTuple>
