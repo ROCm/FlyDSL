@@ -210,8 +210,8 @@ def compile_hk_bf16_gemm(
         lane_mod_16 = fx.get(coord_lane16, 1)
 
         col_offset_base_bytes = lane_div_16 * 8 * elem_bytes
-        row_a_base = wave_m_id * warp_tile_m + lane_mod_16
-        row_b_base = wave_n_id * warp_tile_n + lane_mod_16
+        row_a_base = wave_m_id * (warp_tile_m * 2) + lane_mod_16
+        row_b_base = wave_n_id * (warp_tile_n * 2) + lane_mod_16
 
         # ---- DMA: interleaved k0/k1 layout ----
         # Thread mapping for interleaved DMA:
@@ -347,11 +347,11 @@ def compile_hk_bf16_gemm(
                 )
 
             def _dma_phase(phase_idx):
-                # 8 phases: A has 4 loads, B has 4 loads
-                if phase_idx < 4:
-                    _issue_single_dma(a_rsrc, bx_m, lds_base_a, phase_idx)
+                load_idx = phase_idx // 2
+                if phase_idx % 2 == 0:
+                    _issue_single_dma(a_rsrc, bx_m, lds_base_a, load_idx)
                 else:
-                    _issue_single_dma(b_rsrc, by_n, lds_base_b, phase_idx - 4)
+                    _issue_single_dma(b_rsrc, by_n, lds_base_b, load_idx)
             return _dma_phase
 
         # ---- LDS read: use ONE stage memref for ALL sub-regions ----
@@ -392,7 +392,6 @@ def compile_hk_bf16_gemm(
         def _mfma_phase_1k(accs, a_packs, b_packs, mi_off, ni_off, mi_cnt, ni_cnt):
             """8 MFMAs from one K-tile, using pre-loaded A/B packs."""
             current_accs = list(accs)
-            rocdl.s_setprio(1)
             for mi_local in _range_constexpr(mi_cnt):
                 a0, a1 = a_packs[mi_local]
                 for ni_local in _range_constexpr(ni_cnt):
@@ -401,7 +400,6 @@ def compile_hk_bf16_gemm(
                     ni = ni_off + ni_local
                     current_accs[mi * num_acc_n + ni] = mfma_k32(
                         current_accs[mi * num_acc_n + ni], a0, a1, b0, b1)
-            rocdl.s_setprio(0)
             return current_accs
 
         # Sub-region offsets expressed as virtual row offsets (divisible by lds_k_dim).
@@ -453,70 +451,101 @@ def compile_hk_bf16_gemm(
                 packs.append(_lds_load_pack(a_row, lds_stage))
             return packs
 
-        # HK lgkmcnt(8): wait for ds_reads, leave 8 DMA events pending
-        # Encoding: vmcnt=63(max), expcnt=7(max), lgkmcnt=8
-        _LGKMCNT_8 = (0x3 << 14) | (8 << 8) | (0x7 << 4) | 0xF  # 0xC87F
-
-        def _wait_reads_then_barrier(has_dma):
-            """HK waitcnt pattern: lgkmcnt(N) → barrier → lgkmcnt(0)."""
-            if has_dma:
-                rocdl.s_waitcnt(_LGKMCNT_8)  # wait for ds_reads, DMA still pending
-            rocdl.s_barrier()
-            rocdl.s_waitcnt(0xC07F)  # lgkmcnt(0) — drain all
+        _LGKMCNT_0 = 0xC07F
+        _VMCNT_6 = 0x0F76
 
         def compute_tile_2k(accs, lds_stage, dma_fn=None):
-            """8 phases × 8 MFMAs = 64 MFMAs. Matches HK's exact structure:
-            K-tile 0 phases 1-4, then K-tile 1 phases 5-8.
-            Each phase: ds_reads → 1 DMA → barrier → lgkmcnt(0) → 8 MFMAs → barrier.
-            sched_barrier(0) after phases 1,3,5,7 (C[0][0] and C[1][0]).
-            vmcnt(6) before phases 4,8 (C[1][1]).
-            """
-            # Phase 0: load B_h0 + A_h0 (both k0 and k1) + 1 DMA
+            """k0-first/k1-second, 8 phases × 8 MFMAs."""
+            # k0 block
             b_h0_k0 = _load_b(0, 0, lds_stage)
-            b_h0_k1 = _load_b(0, 1, lds_stage)
             a_h0_k0 = _load_a(0, 0, lds_stage)
-            a_h0_k1 = _load_a(0, 1, lds_stage)
             rocdl.sched_barrier(0)
-            if dma_fn is not None:
-                dma_fn(0)
+            if dma_fn is not None: dma_fn(0)
             rocdl.sched_barrier(0)
-            _wait_reads_then_barrier(dma_fn is not None)
+            rocdl.s_barrier()
+            rocdl.s_waitcnt(_LGKMCNT_0)
+            rocdl.s_setprio(1)
             accs = _mfma_phase_1k(accs, a_h0_k0, b_h0_k0, 0, 0, m_half, n_half)
-            accs = _mfma_phase_1k(accs, a_h0_k1, b_h0_k1, 0, 0, m_half, n_half)
+            rocdl.s_setprio(0)
             rocdl.sched_barrier(0)
 
-            # Phase 1: load B_h1 + 1 DMA, reuse A_h0
             b_h1_k0 = _load_b(n_half, 0, lds_stage)
-            b_h1_k1 = _load_b(n_half, 1, lds_stage)
             rocdl.sched_barrier(0)
-            if dma_fn is not None:
-                dma_fn(1)
+            if dma_fn is not None: dma_fn(1)
             rocdl.sched_barrier(0)
-            _wait_reads_then_barrier(dma_fn is not None)
+            rocdl.s_barrier()
+            rocdl.s_waitcnt(_LGKMCNT_0)
+            rocdl.s_setprio(1)
             accs = _mfma_phase_1k(accs, a_h0_k0, b_h1_k0, 0, n_half, m_half, n_half)
-            accs = _mfma_phase_1k(accs, a_h0_k1, b_h1_k1, 0, n_half, m_half, n_half)
+            rocdl.s_setprio(0)
 
-            # Phase 2: load A_h1 + 1 DMA, reuse B_h0
             a_h1_k0 = _load_a(m_half, 0, lds_stage)
-            a_h1_k1 = _load_a(m_half, 1, lds_stage)
             rocdl.sched_barrier(0)
-            if dma_fn is not None:
-                dma_fn(2)
+            if dma_fn is not None: dma_fn(2)
             rocdl.sched_barrier(0)
-            _wait_reads_then_barrier(dma_fn is not None)
+            rocdl.s_barrier()
+            rocdl.s_waitcnt(_LGKMCNT_0)
+            rocdl.s_setprio(1)
             accs = _mfma_phase_1k(accs, a_h1_k0, b_h0_k0, m_half, 0, m_half, n_half)
-            accs = _mfma_phase_1k(accs, a_h1_k1, b_h0_k1, m_half, 0, m_half, n_half)
+            rocdl.s_setprio(0)
             rocdl.sched_barrier(0)
 
-            # Phase 3: 1 DMA, reuse all
             if dma_fn is not None:
                 dma_fn(3)
                 rocdl.sched_barrier(0)
-                _wait_reads_then_barrier(True)
+                rocdl.s_waitcnt(_VMCNT_6)
+                rocdl.s_barrier()
             else:
                 rocdl.s_barrier()
+            rocdl.s_setprio(1)
             accs = _mfma_phase_1k(accs, a_h1_k0, b_h1_k0, m_half, n_half, m_half, n_half)
+            rocdl.s_setprio(0)
+
+            # k1 block
+            b_h0_k1 = _load_b(0, 1, lds_stage)
+            a_h0_k1 = _load_a(0, 1, lds_stage)
+            rocdl.sched_barrier(0)
+            if dma_fn is not None: dma_fn(4)
+            rocdl.sched_barrier(0)
+            rocdl.s_barrier()
+            rocdl.s_waitcnt(_LGKMCNT_0)
+            rocdl.s_setprio(1)
+            accs = _mfma_phase_1k(accs, a_h0_k1, b_h0_k1, 0, 0, m_half, n_half)
+            rocdl.s_setprio(0)
+            rocdl.sched_barrier(0)
+
+            b_h1_k1 = _load_b(n_half, 1, lds_stage)
+            rocdl.sched_barrier(0)
+            if dma_fn is not None: dma_fn(5)
+            rocdl.sched_barrier(0)
+            rocdl.s_barrier()
+            rocdl.s_waitcnt(_LGKMCNT_0)
+            rocdl.s_setprio(1)
+            accs = _mfma_phase_1k(accs, a_h0_k1, b_h1_k1, 0, n_half, m_half, n_half)
+            rocdl.s_setprio(0)
+
+            a_h1_k1 = _load_a(m_half, 1, lds_stage)
+            rocdl.sched_barrier(0)
+            if dma_fn is not None: dma_fn(6)
+            rocdl.sched_barrier(0)
+            rocdl.s_barrier()
+            rocdl.s_waitcnt(_LGKMCNT_0)
+            rocdl.s_setprio(1)
+            accs = _mfma_phase_1k(accs, a_h1_k1, b_h0_k1, m_half, 0, m_half, n_half)
+            rocdl.s_setprio(0)
+            rocdl.sched_barrier(0)
+
+            if dma_fn is not None:
+                dma_fn(7)
+                rocdl.sched_barrier(0)
+                rocdl.s_waitcnt(_VMCNT_6)
+                rocdl.s_barrier()
+            else:
+                rocdl.s_barrier()
+            rocdl.s_setprio(1)
             accs = _mfma_phase_1k(accs, a_h1_k1, b_h1_k1, m_half, n_half, m_half, n_half)
+            rocdl.s_setprio(0)
+
             return accs
 
         # ---- Epilogue ----
