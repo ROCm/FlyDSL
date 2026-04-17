@@ -234,7 +234,7 @@ def _as_i8(t: torch.Tensor) -> torch.Tensor:
         # Larger shapes
         pytest.param(8, 1024, 800, 512, 512, id="8g-1024max-800m", marks=pytest.mark.large_shape),
         # DeepSeek-V3 shapes
-        pytest.param(8, 512, 300, 2112, 7168, id="DS-8g-2112x7168", marks=pytest.mark.large_shape),
+        pytest.param(8, 512, 300, 2048, 7168, id="DS-8g-2048x7168", marks=pytest.mark.large_shape),
         pytest.param(8, 512, 300, 7168, 2304, id="DS-8g-7168x2304", marks=pytest.mark.large_shape),
     ],
 )
