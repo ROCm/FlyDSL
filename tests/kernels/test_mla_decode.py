@@ -36,12 +36,16 @@ from aiter.ops.attention import (
     mla_reduce_v1,
 )
 
+from flydsl.runtime.device import get_rocm_arch
+
 from tests.test_common import run_perftest, checkAllclose
 from kernels.mla_fwd_decode import flydsl_mla_fwd_decode
 
 torch.set_default_device("cuda")
 
 logger = logging.getLogger("mla_decode_test")
+
+_GPU_ARCH = str(get_rocm_arch())
 
 # ── Model constants (DeepSeek-V3 / R1) ──────────────────────────
 KV_LORA_RANK = 512
@@ -265,6 +269,17 @@ def run_single(batch_size, ctx_len, decode_qlen=1, max_split_per_batch=32):
 
 # ── pytest ──────────────────────────────────────────────────────
 
+# On gfx950, AITER folds nh=128 + fp8/fp8 to a nh=16 work-info layout
+# instead of generating the native nh=128 layout. This FlyDSL kernel only
+# decodes the native nh=128 layout, so it cannot run against AITER's
+# gfx950 metadata.
+@pytest.mark.skipif(
+    _GPU_ARCH == "gfx950",
+    reason=(
+        "AITER metadata for nh=128 + fp8/fp8 on gfx950 uses the folded "
+        "nh=16 layout, which this FlyDSL MLA kernel does not support."
+    ),
+)
 @pytest.mark.parametrize("batch_size,ctx_len", [
     (1, 128),
     (4, 2048),
