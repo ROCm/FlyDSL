@@ -3,6 +3,7 @@
 
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
+#include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/IR/BuiltinTypes.h"
 
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
@@ -142,6 +143,12 @@ FailureOr<Value> MmaOpCDNA3_MFMAType::emitAtomCallSSA(OpBuilder &builder, Locati
   Type abTyB = getMfmaABType(ctx, elemTyB, n, k);
   if (!abTyA || !abTyB)
     return failure();
+
+  // Bitcast SSA operands when type doesn't match MFMA ABI (e.g. bf16 -> i16)
+  if (a.getType() != abTyA)
+    a = vector::BitCastOp::create(builder, loc, abTyA, a);
+  if (b.getType() != abTyB)
+    b = vector::BitCastOp::create(builder, loc, abTyB, b);
 
   int64_t accVecSize = getMfmaAccVecSize(m, n, elemTyA);
   if (accVecSize == 0)
