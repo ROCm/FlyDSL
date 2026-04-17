@@ -28,9 +28,15 @@ def crd2idx(crd, layout):
 def swizzle_xor16(row, col, k_blocks16):
     """XOR-with-row swizzle on the K dimension at 16B granularity.
 
-    Computes: col XOR ((row % k_blocks16) * 16)
+    Computes: col XOR ((row & (k_blocks16 - 1)) * 16)
+
+    k_blocks16 is always a power of 2 (tile_k_bytes / 16), so use
+    bitwise AND instead of remui to save ~10 VALU cycles on CDNA.
     """
-    rem = row % k_blocks16
+    from flydsl.expr import arith as _swz_arith
+
+    mask = k_blocks16 - _swz_arith.index(1)
+    rem = _swz_arith.andi(row, mask)
     return col ^ (rem * 16)
 
 
@@ -45,78 +51,44 @@ def split_row_major_2d(index, minor_extent):
     return index // minor_extent, index % minor_extent
 
 
-def _buffer_load_vec(buffer_ops, vector, rsrc, idx, *, elem_type, vec_elems, elem_bytes, offset_in_bytes):
+def _buffer_load_vec(
+    buffer_ops,
+    vector,
+    rsrc,
+    idx,
+    *,
+    elem_type,
+    vec_elems,
+    elem_bytes,
+    offset_in_bytes,
+    cache_modifier=0,
+):
     """Load vec_elems elements via buffer_load dwordx[1,2,4] + bitcast."""
+    from flydsl.expr import arith as _ld_arith
+
     elem_size = int(elem_bytes)
     load_bytes = int(vec_elems) * elem_size
     vec_width = load_bytes // 4
 
     if offset_in_bytes:
-        idx_i32 = idx // 4
+        idx_i32 = _ld_arith.shrui(idx, _ld_arith.index(2))
     elif elem_bytes == 2:
-        idx_i32 = (idx * 2) // 4
+        idx_i32 = _ld_arith.shrui(idx, _ld_arith.index(1))
     else:
         idx_i32 = idx
 
-    i32_val = buffer_ops.buffer_load(rsrc, idx_i32, vec_width=vec_width, dtype=T.i32)
+    i32_val = buffer_ops.buffer_load(
+        rsrc,
+        idx_i32,
+        vec_width=vec_width,
+        dtype=T.i32,
+        cache_modifier=cache_modifier,
+    )
     if vec_width == 1:
         i32_vec = vector.from_elements(T.vec(1, T.i32), [i32_val])
     else:
         i32_vec = i32_val
     return vector.bitcast(T.vec(int(vec_elems), elem_type), i32_vec)
-
-
-@dataclass(frozen=True)
-class PreshuffleBLayout:
-    """Container returned by `make_preshuffle_b_layout`."""
-
-    layout_b: object
-    kpack_bytes: int
-
-
-def make_preshuffle_b_layout(
-    arith,
-    *,
-    c_n: ir.Value,
-    c_k: ir.Value,
-    kpack_bytes: int = 16,
-    elem_bytes: int = 1,
-) -> PreshuffleBLayout:
-    """Build B layout matching aiter/CK preshuffle for A8 MFMA kernels."""
-    if kpack_bytes not in (8, 16):
-        raise ValueError(f"kpack_bytes must be 8 or 16, got {kpack_bytes!r}")
-
-    c16 = fx.Index(16)
-    c64 = fx.Index(64)
-    c4 = fx.Index(4)
-    c_kpack = fx.Index(kpack_bytes)
-
-    if elem_bytes not in (1, 2):
-        raise ValueError(f"elem_bytes must be 1 or 2, got {elem_bytes!r}")
-    c_k_bytes = c_k * arith.constant(int(elem_bytes), index=True)
-    c_k0 = c_k_bytes // c64
-    n0 = c_n // c16
-
-    c_kpack_elems = c_kpack if elem_bytes == 1 else (c_kpack // arith.constant(int(elem_bytes), index=True))
-
-    stride_nlane = c_kpack_elems
-    stride_klane = c16 * stride_nlane
-    stride_k0 = c4 * stride_klane
-    stride_n0 = c_k0 * stride_k0
-
-    # fly.make_shape requires i32/i64 for dynamic operands (not index).
-    # Convert dynamic index values to i32; use Python ints for static constants.
-    kpack_elems_static = kpack_bytes if elem_bytes == 1 else kpack_bytes // elem_bytes
-    n0_i32 = arith.index_cast(T.i32, n0)
-    c_k0_i32 = arith.index_cast(T.i32, c_k0)
-    stride_n0_i32 = arith.index_cast(T.i32, stride_n0)
-    stride_k0_i32 = arith.index_cast(T.i32, stride_k0)
-    stride_klane_i32 = arith.index_cast(T.i32, stride_klane)
-    stride_nlane_i32 = arith.index_cast(T.i32, stride_nlane)
-
-    stride_b = (stride_n0_i32, stride_k0_i32, stride_klane_i32, stride_nlane_i32, 1)
-    layout_b = fx.make_layout((n0_i32, c_k0_i32, 4, 16, kpack_elems_static), stride_b)
-    return PreshuffleBLayout(layout_b=layout_b, kpack_bytes=kpack_bytes)
 
 
 @dataclass(frozen=True)
@@ -129,10 +101,10 @@ class PreshuffleScaleLayout:
         idx = mni * stride_n0 + ku * stride_k0 + k_lane * stride_klane + n_lane
     """
 
-    layout_scale: object  # fly layout value (same as PreshuffleBLayout.layout_b)
-    stride_n0: object  # index-typed MLIR value (dynamic)
-    stride_k0: object  # index-typed MLIR value (= 64)
-    stride_klane: object  # index-typed MLIR value (= 16)
+    layout_scale: object
+    stride_n0: object
+    stride_k0: object
+    stride_klane: object
 
 
 def make_preshuffle_scale_layout(
@@ -150,14 +122,12 @@ def make_preshuffle_scale_layout(
     Layout shape: ``(c_mn1, c_k1, 4, 16)`` where
     ``c_mn1 = c_mn / 16 / mn_pack`` and ``c_k1 = (c_k / scale_block_size) / 4 / k_pack``.
     """
-    c16 = arith.constant(16, index=True)
-    c4 = arith.constant(4, index=True)
-    c_mn_pack = arith.constant(mn_pack, index=True)
-    c_k_pack = arith.constant(k_pack, index=True)
-    c_k_scale = c_k / scale_block_size
+    c16 = fx.Index(16)
+    c4 = fx.Index(4)
+    c_k_scale = c_k // fx.Index(scale_block_size)
 
-    c_mn1 = c_mn / c16 / c_mn_pack
-    c_k1 = c_k_scale / c4 / c_k_pack
+    c_mn1 = (c_mn // c16) // fx.Index(mn_pack)
+    c_k1 = (c_k_scale // c4) // fx.Index(k_pack)
     if elem_bytes != mn_pack * k_pack:
         raise ValueError(
             f"elem_bytes of scale must be {mn_pack} * {k_pack}, got {elem_bytes!r}"
@@ -167,7 +137,6 @@ def make_preshuffle_scale_layout(
     stride_k0 = c4 * stride_klane
     stride_n0 = c_k1 * stride_k0
 
-    # Build fly layout (i32 strides for fx.make_layout).
     c_mn1_i32 = arith.index_cast(T.i32, c_mn1)
     c_k1_i32 = arith.index_cast(T.i32, c_k1)
     stride_n0_i32 = arith.index_cast(T.i32, stride_n0)
@@ -185,6 +154,76 @@ def make_preshuffle_scale_layout(
         stride_k0=stride_k0,
         stride_klane=stride_klane,
     )
+
+
+@dataclass(frozen=True)
+class PreshuffleBLayout:
+    """Container returned by `make_preshuffle_b_layout`."""
+
+    layout_b: object
+    kpack_bytes: int
+
+
+def make_preshuffle_b_layout(
+    arith,
+    *,
+    c_n: ir.Value,
+    c_k: ir.Value,
+    kpack_bytes: int = 16,
+    elem_bytes: int = 1,
+    k_major: bool = False,
+) -> PreshuffleBLayout:
+    """Build B layout matching aiter/CK preshuffle for A8 MFMA kernels.
+
+    When *k_major* is True the block-level order is K-major (``k_blk`` outermost),
+    matching the ``(0,3,1,4,2,5)`` shuffle permutation.  The default N-major
+    order (``k_major=False``) matches the legacy ``(0,1,3,4,2,5)`` permutation.
+    """
+    if kpack_bytes not in (8, 16):
+        raise ValueError(f"kpack_bytes must be 8 or 16, got {kpack_bytes!r}")
+
+    c16 = fx.Index(16)
+    c_kpack = fx.Index(kpack_bytes)
+
+    if elem_bytes not in (1, 2):
+        raise ValueError(f"elem_bytes must be 1 or 2, got {elem_bytes!r}")
+    c_k_bytes = c_k * arith.constant(int(elem_bytes), index=True)
+    n0 = c_n // c16
+
+    c_kpack_elems = c_kpack if elem_bytes == 1 else (c_kpack // arith.constant(int(elem_bytes), index=True))
+
+    stride_nlane = c_kpack_elems
+
+    if k_major:
+        c32 = fx.Index(32)
+        c2 = fx.Index(2)
+        c_k0 = c_k_bytes // c32
+        klane_dim = 2
+        stride_klane = c16 * stride_nlane
+        stride_n0 = c2 * stride_klane
+        stride_k0 = n0 * stride_n0
+    else:
+        c64 = fx.Index(64)
+        c4 = fx.Index(4)
+        c_k0 = c_k_bytes // c64
+        klane_dim = 4
+        stride_klane = c16 * stride_nlane
+        stride_k0 = c4 * stride_klane
+        stride_n0 = c_k0 * stride_k0
+
+    kpack_elems_static = kpack_bytes if elem_bytes == 1 else kpack_bytes // elem_bytes
+    n0_i32 = arith.index_cast(T.i32, n0)
+    c_k0_i32 = arith.index_cast(T.i32, c_k0)
+    stride_n0_i32 = arith.index_cast(T.i32, stride_n0)
+    stride_k0_i32 = arith.index_cast(T.i32, stride_k0)
+    stride_klane_i32 = arith.index_cast(T.i32, stride_klane)
+    stride_nlane_i32 = arith.index_cast(T.i32, stride_nlane)
+
+    stride_b = (stride_n0_i32, stride_k0_i32, stride_klane_i32, stride_nlane_i32, 1)
+    layout_b = fx.make_layout(
+        (n0_i32, c_k0_i32, klane_dim, 16, kpack_elems_static), stride_b
+    )
+    return PreshuffleBLayout(layout_b=layout_b, kpack_bytes=kpack_bytes)
 
 
 def _unpack_int4_to_int8_pair(packed32):
@@ -292,8 +331,14 @@ def load_b_raw_w4a16(
     idx_bytes = idx_pack + k2_base
 
     b4 = _buffer_load_vec(
-        buffer_ops, vector, b_rsrc, idx_bytes,
-        elem_type=elem_type, vec_elems=4, elem_bytes=1, offset_in_bytes=True,
+        buffer_ops,
+        vector,
+        b_rsrc,
+        idx_bytes,
+        elem_type=elem_type,
+        vec_elems=4,
+        elem_bytes=1,
+        offset_in_bytes=True,
     )
     packed32 = vector.extract(
         vector.bitcast(T.vec(1, T.i32), b4),
@@ -425,8 +470,14 @@ def load_b_pack_k32(
     if unpack_int4:
         idx_bytes = idx_pack + k2_base
         b4 = _buffer_load_vec(
-            buffer_ops, vector, b_rsrc, idx_bytes,
-            elem_type=elem_type, vec_elems=4, elem_bytes=1, offset_in_bytes=True,
+            buffer_ops,
+            vector,
+            b_rsrc,
+            idx_bytes,
+            elem_type=elem_type,
+            vec_elems=4,
+            elem_bytes=1,
+            offset_in_bytes=True,
         )
         packed32 = vector.extract(
             vector.bitcast(T.vec(1, T.i32), b4),
@@ -438,8 +489,13 @@ def load_b_pack_k32(
 
     vec_elems = kpack_bytes // int(elem_bytes)
     b16 = _buffer_load_vec(
-        buffer_ops, vector, b_rsrc, idx_pack,
-        elem_type=elem_type, vec_elems=vec_elems, elem_bytes=elem_bytes,
+        buffer_ops,
+        vector,
+        b_rsrc,
+        idx_pack,
+        elem_type=elem_type,
+        vec_elems=vec_elems,
+        elem_bytes=elem_bytes,
         offset_in_bytes=(elem_bytes == 1),
     )
 
@@ -492,8 +548,13 @@ def buffer_copy_gmem16_dwordx4(
     if int(vec_elems) <= 0:
         raise ValueError(f"vec_elems must be > 0, got {vec_elems!r}")
     return _buffer_load_vec(
-        buffer_ops, vector, rsrc, idx_i32,
-        elem_type=elem_type, vec_elems=vec_elems, elem_bytes=elem_bytes,
+        buffer_ops,
+        vector,
+        rsrc,
+        idx_i32,
+        elem_type=elem_type,
+        vec_elems=vec_elems,
+        elem_bytes=elem_bytes,
         offset_in_bytes=False,
     )
 
@@ -625,14 +686,10 @@ __all__ = [
     "make_preshuffle_b_layout",
     "make_preshuffle_scale_layout",
     "load_b_pack_k32",
-    "load_b_raw_w4a16",
-    "unpack_b_w4a16",
-    "load_b_raw_w4a16_groupwise",
-    "unpack_b_w4a16_groupwise",
-    "extract_bf16_scale",
     "split_row_major_2d",
     "swizzle_xor16",
     "tile_chunk_coord_i32",
+    "unpack_b_w4a16",
 ]
 
 
