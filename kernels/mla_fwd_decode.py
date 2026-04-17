@@ -11,11 +11,22 @@ import subprocess
 import torch
 
 
-@functools.lru_cache(maxsize=1)
-def _get_lds_size_per_cu() -> int:
-    """Return the LDS (shared memory) size per CU in bytes.
+def _gcn_arch_base(arch_name: str) -> str:
+    """Strip target features (':sramecc+:xnack-') from a gcnArchName."""
+    return arch_name.split(":", 1)[0]
 
-    Parses the GROUP segment pool size from ``rocminfo`` output.
+
+@functools.lru_cache(maxsize=None)
+def _get_lds_size_per_cu(arch: str) -> int:
+    """Return the LDS (shared memory) size per CU in bytes for ``arch``.
+
+    Cached per arch so a mixed-GPU process (or one that switches devices)
+    gets the right LDS budget for the active device — not whichever GPU
+    rocminfo happens to list first. Caller must pass the current device's
+    base gcnArchName (e.g. ``"gfx942"``).
+
+    Parses the GROUP segment pool size from ``rocminfo`` output, picking
+    the first GPU agent whose name matches ``arch``.
     """
     rocminfo = shutil.which("rocminfo")
     if rocminfo is None:
@@ -23,17 +34,23 @@ def _get_lds_size_per_cu() -> int:
     result = subprocess.run(
         [rocminfo], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
     )
-    devices = re.split(r"Agent\s*\d+", result.stdout)
-    for device in devices:
-        if "Device Type" not in device or device.find("GPU") == -1:
+    agents = re.split(r"Agent\s*\d+", result.stdout)
+    for agent in agents:
+        if "Device Type" not in agent or agent.find("GPU") == -1:
             continue
-        lines = device.split("\n")
+        # Match this agent's Name (e.g. "gfx942") against the requested arch.
+        name_m = re.search(r"^\s*Name:\s*(\S+)", agent, re.MULTILINE)
+        if not name_m or name_m.group(1) != arch:
+            continue
+        lines = agent.split("\n")
         for i, line in enumerate(lines):
             if re.search(r"Segment\s*:\s*GROUP", line) and i + 1 < len(lines):
                 m = re.search(r"Size\s*:\s*(\d+)", lines[i + 1])
                 if m:
                     return int(m.group(1)) * 1024  # KB -> bytes
-    raise RuntimeError("No GPU GROUP segment found in rocminfo output")
+    raise RuntimeError(
+        f"No GPU GROUP segment found in rocminfo output for arch {arch!r}"
+    )
 
 
 def _is_fp8(dtype: torch.dtype) -> bool:
@@ -105,13 +122,27 @@ def flydsl_mla_fwd_decode(
                         ("split_lse", split_lse)]:
             assert t.device == dev, f"{name}: expected device {dev}, got {t.device}"
 
+        # Output tensors must be contiguous: reshape() on a non-contiguous
+        # output would silently materialize a copy, the kernel would write
+        # into the copy, and the caller's original tensor would never be
+        # updated. Use view() after asserting contiguity so any layout
+        # mismatch fails loudly here instead.
+        for name, t in [("final_output", final_output),
+                        ("split_output", split_output),
+                        ("split_lse", split_lse)]:
+            assert t.is_contiguous(), (
+                f"{name}: must be contiguous (stride={list(t.stride())}, "
+                f"shape={list(t.shape)}); reshape() would silently copy and "
+                f"the kernel's writes would not be visible to the caller"
+            )
+
         num_pages = kv_buffer.size(0)
 
         query_flat = query.reshape(num_seqs * num_heads, QK_HEAD_DIM)
         kv_flat = kv_buffer.reshape(num_pages, QK_HEAD_DIM)
-        final_flat = final_output.reshape(num_seqs * num_heads, V_HEAD_DIM)
-        split_o_flat = split_output.reshape(num_partial * num_heads, V_HEAD_DIM)
-        split_lse_flat = split_lse.reshape(num_partial * num_heads)
+        final_flat = final_output.view(num_seqs * num_heads, V_HEAD_DIM)
+        split_o_flat = split_output.view(num_partial * num_heads, V_HEAD_DIM)
+        split_lse_flat = split_lse.view(num_partial * num_heads)
 
         work_indptr_flat = work_indptr.contiguous()
         work_info_flat = work_info_set.contiguous().view(-1)
@@ -120,7 +151,8 @@ def flydsl_mla_fwd_decode(
         from aiter.jit.utils.chip_info import get_cu_num
 
         num_cus = get_cu_num()
-        lds_size = _get_lds_size_per_cu() // OCCUPANCY
+        arch = _gcn_arch_base(torch.cuda.get_device_properties(dev).gcnArchName)
+        lds_size = _get_lds_size_per_cu(arch) // OCCUPANCY
 
         launch_mla_fwd_decode_m16x8_fp8_fp8(
             query_flat,

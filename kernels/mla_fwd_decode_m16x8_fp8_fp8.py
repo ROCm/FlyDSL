@@ -287,43 +287,6 @@ def _to_mlir(val, index=False):
     return _raw(val)
 
 
-def _set_mfma_vgpr_form():
-    """Force MFMA to use ACC_CD=0 (D/C in ArchVGPR) via LLVM cl::opt."""
-    import ctypes
-    import os
-
-    lib_dir = os.path.dirname(
-        __import__("flydsl._mlir._mlir_libs", fromlist=["_mlir_libs"]).__file__
-    )
-    lib_name = "libFlyPythonCAPI.so"
-    lib_path = os.path.join(lib_dir, lib_name)
-    if not os.path.exists(lib_path):
-        lib_name = "libFlirPythonCAPI.so"
-        lib_path = os.path.join(lib_dir, lib_name)
-    lib = ctypes.CDLL(lib_path)
-    try:
-        parse_fn = lib.LLVMParseCommandLineOptions
-    except AttributeError:
-        return  # Symbol not available in this build
-    parse_fn.restype = None
-    parse_fn.argtypes = [
-        ctypes.c_int,
-        ctypes.POINTER(ctypes.c_char_p),
-        ctypes.c_char_p,
-    ]
-    argv = [
-        b"mlir",
-        b"-amdgpu-mfma-vgpr-form",
-        b"--amdgpu-schedule-metric-bias=0",
-        b"--enable-deferred-spilling",
-    ]
-    argv_arr = (ctypes.c_char_p * len(argv))(*argv)
-    parse_fn(len(argv), argv_arr, None)
-
-
-_set_mfma_vgpr_form()
-
-
 # ---------------------------------------------------------------------------
 # Kernel
 # ---------------------------------------------------------------------------
