@@ -1122,32 +1122,34 @@ def compile_mxscale_gemm(
             for ks in range_constexpr(k_wmma_steps):
                 is_last_ks = ks == k_wmma_steps - 1
 
+                # Issue TDM loads ASAP (ks=0 only) to maximize overlap window
+                if ks == 0 and mid_compute_callback is not None:
+                    rocdl.sched_barrier(0)
+                    mid_compute_callback()
+
                 # Load A-scales (shared by all quadrants)
                 a_scales_all = load_scale_b128(
                     as_buf, as_bases[0], wmma_m_rep, ks,
                     ks_group=as_tdm_group_m)
                 a_scales = a_scales_all[::2]
 
-                # Load A top and bottom halves
+                # Load A top first (Q1 needs only a_top + b_left + a_scales).
                 a_top = _load_a_group(0, _half_wm, ks)
-                a_bottom = _load_a_group(_half_wm, _half_wm, ks)
 
-                # Wait: keep A-bottom loads in flight (partial drain)
-                rocdl.s_wait_dscnt(_half_wm * DS_LOADS_PER_A_FRAG)
+                # Wait for a_top + a_scales to be ready (small drain).
+                rocdl.s_wait_dscnt(0)
 
                 # Q1: top-A × B-left
                 _emit_q(a_top, b_left_frags, a_scales, b_left_scales,
                         0, 0, 0)
 
-                if ks == 0 and mid_compute_callback is not None:
-                    rocdl.sched_barrier(0)
-                    mid_compute_callback()
-
-                # Load right B half (overlaps with Q1 WMMA)
+                # Issue a_bottom + b_right loads DURING Q1's WMMA execution,
+                # overlapping LDS round-trip latency with matrix engine work.
+                a_bottom = _load_a_group(_half_wm, _half_wm, ks)
                 b_right_frags, b_right_scales = _load_b_half_with_scales(
                     _half_wn, _half_b_scale_rep, ks)
 
-                # Wait for B-right, A-bottom already ready
+                # Wait for B-right + a_bottom (b_right is the longer chain)
                 rocdl.s_wait_dscnt(
                     _half_wn * _b_frag_loads_per_wn + _half_b_scale_loads)
 
