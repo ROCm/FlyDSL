@@ -1783,6 +1783,119 @@ class _TorchReduceWrapper:
         return self._mode
 
 
+@pytest.mark.skipif("gfx95" not in ARCH, reason="BF16xFP4 requires gfx950+ (mfma_scale_f32_16x16x128_f8f6f4)")
+@pytest.mark.parametrize("act", ["silu", "swiglu"], ids=["silu", "swiglu"])
+@pytest.mark.parametrize(
+    "tokens, model_dim, inter_dim, experts, topk, tile_m, tile_n, tile_k",
+    [
+        pytest.param(64, 512, 256, 4, 2, 16, 128, 256, id="S-tm16"),
+        pytest.param(64, 512, 256, 4, 2, 32, 128, 256, id="S-tm32"),
+        pytest.param(128, 1024, 256, 8, 2, 64, 128, 256, id="M-tm64"),
+    ],
+)
+def test_moe_gemm1_bf16xfp4(
+    tokens: int,
+    model_dim: int,
+    inter_dim: int,
+    experts: int,
+    topk: int,
+    tile_m: int,
+    tile_n: int,
+    tile_k: int,
+    act: str,
+):
+    """Stage-1 correctness: BF16 activations x MXFP4 E2M1 weights.
+
+    Reference: dequantize weights to FP32, run torch.matmul in BF16, apply activation.
+    Tolerance matches the FP4 quantization error budget (atol/rtol=0.15).
+    """
+    from tests.kernels.utils import fp4_utils
+
+    device = torch.device("cuda")
+    torch.manual_seed(42)
+    s = 0.1
+    x_fp32 = torch.randn((tokens, model_dim), device=device, dtype=torch.float32) * s
+    w1_fp32 = torch.randn((experts, 2 * inter_dim, model_dim), device=device, dtype=torch.float32) * s
+
+    # Quantize weights to MXFP4 (per-1x32 E8M0 block scale).
+    w1_flat_fp32 = w1_fp32.view(experts * (2 * inter_dim), model_dim)
+    w1_fp4, scale_w1_raw = _per_1x32_fp4_quant(w1_flat_fp32)
+    w1_shuffled = shuffle_weight(w1_fp4.view(torch.float4_e2m1fn_x2))
+    w_kernel = w1_shuffled.view(torch.uint8).contiguous()
+    scale_w1_1d = fp4_utils.e8m0_shuffle(scale_w1_raw.view(experts * (2 * inter_dim), -1)).view(torch.uint8).contiguous()
+
+    # BF16 activations — no per-token scale (scale_x=1.0 implicitly).
+    x_bf16 = x_fp32.to(torch.bfloat16).contiguous()
+    scale_x_dummy = torch.empty((0,), device=device, dtype=torch.float32)
+    bias_dummy = torch.empty((0,), device=device, dtype=torch.float32)
+
+    # MoE routing.
+    score = torch.rand((tokens, experts), device=device, dtype=torch.float32)
+    topk_vals, topk_ids = torch.topk(score, k=topk, dim=1)
+    topk_weights = torch.softmax(topk_vals, dim=1).to(torch.float32)
+    sorted_token_ids, sorted_weights_1d, sorted_expert_ids, num_tokens_post_pad = (
+        moe_sorting_torch_native(topk_ids, topk_weights, num_experts=experts, block_size=tile_m)
+    )
+    num_valid_ids = num_tokens_post_pad[0]
+    blocks = sorted_expert_ids.shape[0]
+
+    out = torch.empty((tokens, topk, inter_dim), device=device, dtype=torch.float16)
+
+    exe = compile_mixed_moe_gemm1(
+        model_dim=model_dim,
+        inter_dim=inter_dim,
+        experts=experts,
+        topk=topk,
+        tile_m=tile_m,
+        tile_n=tile_n,
+        tile_k=tile_k,
+        doweight_stage1=False,
+        a_dtype="bf16",
+        b_dtype="fp4",
+        out_dtype="f16",
+        act=act,
+    )
+
+    def _args(o):
+        return (o, x_bf16, w_kernel, scale_x_dummy, scale_w1_1d,
+                sorted_token_ids, sorted_expert_ids, sorted_weights_1d,
+                num_valid_ids, bias_dummy,
+                tokens, inter_dim * 2, model_dim, int(blocks),
+                torch.cuda.current_stream())
+
+    compiled_exe = flyc.compile(exe, *_args(out))
+    compiled_exe(*_args(out))
+    torch.cuda.synchronize()
+
+    # Reference: dequantize FP4 weights to FP32, matmul, apply activation.
+    # w1_fp4 shape: [E*2N, K//2] (2 elements packed per byte).
+    # mxfp4_to_f32 unpacks to [E*2N, K].
+    scale_w1_f32 = fp4_utils.e8m0_to_f32(scale_w1_raw.view(experts * (2 * inter_dim), -1).view(torch.uint8))
+    w1_dq = fp4_utils.mxfp4_to_f32(w1_fp4.view(torch.uint8))  # [E*2N, K]
+    # Apply per-1x32 block scale: each block of 32 elements shares one scale.
+    block_size = 32
+    w1_dq = w1_dq.view(experts * (2 * inter_dim), -1, block_size)
+    w1_dq = (w1_dq * scale_w1_f32.unsqueeze(-1)).view(experts * (2 * inter_dim), model_dim)
+    gate_w = w1_dq.view(experts, 2 * inter_dim, model_dim)[:, :inter_dim, :]   # [E, N, K]
+    up_w = w1_dq.view(experts, 2 * inter_dim, model_dim)[:, inter_dim:, :]     # [E, N, K]
+
+    ref = torch.zeros((tokens, topk, inter_dim), device=device, dtype=torch.float32)
+    for t in range(tokens):
+        for s_idx in range(topk):
+            e = int(topk_ids[t, s_idx].item())
+            x_t = x_fp32[t].float()
+            gate_val = (gate_w[e] @ x_t)   # [N]
+            up_val = (up_w[e] @ x_t)       # [N]
+            if act == "swiglu":
+                ref[t, s_idx] = torch.sigmoid(gate_val) * gate_val * up_val
+            else:
+                ref[t, s_idx] = torch.sigmoid(gate_val) * gate_val
+
+    assert verify_output(out.float(), ref, rtol=0.15, atol=0.15), (
+        "BF16xFP4 stage-1 output exceeds tolerance"
+    )
+
+
 @pytest.mark.parametrize("use_reduce", [False, True], ids=["atomic", "reduce"])
 def test_moe_gemm_2stage_bf16_out(use_reduce):
     """Smoke test for bf16 output atomics (gfx942: global atomic, gfx950+: buffer atomic)."""

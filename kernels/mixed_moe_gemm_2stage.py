@@ -104,9 +104,9 @@ def compile_mixed_moe_gemm1(
     gpu_arch = get_hip_arch()
     allocator = SmemAllocator(None, arch=gpu_arch)
 
-    if a_dtype not in ("fp8", "fp16", "int8", "fp4"):
+    if a_dtype not in ("fp8", "fp16", "bf16", "int8", "fp4"):
         raise ValueError(
-            f"a_dtype must be one of ('fp8','fp16','int8','fp4'), got {a_dtype!r}"
+            f"a_dtype must be one of ('fp8','fp16','bf16','int8','fp4'), got {a_dtype!r}"
         )
     if b_dtype not in ("fp8", "fp16", "int8", "int4", "fp4"):
         raise ValueError(
@@ -114,6 +114,7 @@ def compile_mixed_moe_gemm1(
         )
 
     is_f16_a = a_dtype == "fp16"
+    is_bf16_a = a_dtype == "bf16"
     is_f16_b = b_dtype == "fp16"
     is_f16 = is_f16_a or is_f16_b
 
@@ -127,11 +128,12 @@ def compile_mixed_moe_gemm1(
 
     elem_bytes = 1
 
-    a_elem_bytes = 2 if is_f16_a else 1
+    a_elem_bytes = 2 if (is_f16_a or is_bf16_a) else 1
     b_elem_bytes = 1
     tile_k_bytes = int(tile_k) * int(a_elem_bytes)
 
     a_elem_vec_pack = 2 if is_f4_a else 1
+    # cbsz encodes A operand type for mfma_scale: 0=fp8, 4=fp16/bf16 (both 16-bit).
     cbsz = 0 if is_f8_a else 4
     blgp = 4
 
@@ -145,6 +147,8 @@ def compile_mixed_moe_gemm1(
 
 
     def _x_lds_elem_type():
+        if is_bf16_a:
+            return T.bf16
         return T.f16 if is_f16_a else T.f8
 
     def _out_elem_type():
@@ -217,7 +221,7 @@ def compile_mixed_moe_gemm1(
         size_expert_ids_in = arith.index_cast(T.index, i32_size_expert_ids_in)
         tokens_i32_v = i32_tokens_in
         k_i32_v = i32_k_in
-        x_elem = T.f16 if is_f16_a else T.f8
+        x_elem = T.bf16 if is_bf16_a else (T.f16 if is_f16_a else T.f8)
         vec4_f32 = T.vec(4, T.f32)
         vec4_i32 = T.vec(4, T.i32)
         vec1_f32 = T.vec(1, T.f32)
@@ -369,7 +373,7 @@ def compile_mixed_moe_gemm1(
                 arg_out, max_size=False, num_records_bytes=out_nbytes_i32
             )
 
-            if is_f16_a:
+            if is_f16_a or is_bf16_a:
                 sx_rsrc = None
             else:
                 # A1 microscale: [sorted_rows, K/32] e8m0 bytes, packed as i32.
@@ -1538,9 +1542,9 @@ def compile_mixed_moe_gemm2(
     gpu_arch = get_hip_arch()
     allocator = SmemAllocator(None, arch=gpu_arch)
 
-    if a_dtype not in ("fp8", "fp16", "int8", "fp4"):
+    if a_dtype not in ("fp8", "fp16", "bf16", "int8", "fp4"):
         raise ValueError(
-            f"a_dtype must be one of ('fp8','fp16','int8','fp4'), got {a_dtype!r}"
+            f"a_dtype must be one of ('fp8','fp16','bf16','int8','fp4'), got {a_dtype!r}"
         )
     if b_dtype not in ("fp8", "fp16", "int8", "int4", "fp4"):
         raise ValueError(
@@ -1548,6 +1552,7 @@ def compile_mixed_moe_gemm2(
         )
 
     is_f16_a = a_dtype == "fp16"
+    is_bf16_a = a_dtype == "bf16"
     is_f16_b = b_dtype == "fp16"
 
     is_f8_a = a_dtype == "fp8"
@@ -1560,11 +1565,12 @@ def compile_mixed_moe_gemm2(
 
     elem_bytes = 1
 
-    a_elem_bytes = 2 if is_f16_a else 1
+    a_elem_bytes = 2 if (is_f16_a or is_bf16_a) else 1
     b_elem_bytes = 1
     tile_k_bytes = int(tile_k) * int(a_elem_bytes)
 
     a_elem_vec_pack = 2 if is_f4_a else 1
+    # cbsz encodes A operand type for mfma_scale: 0=fp8, 4=fp16/bf16 (both 16-bit).
     cbsz = 0 if is_f8_a else 4
     blgp = 4
 
@@ -1659,6 +1665,8 @@ def compile_mixed_moe_gemm2(
     lds_total_elems = lds_total_bytes if a_elem_bytes == 1 else (lds_total_bytes // 2)
 
     def x_lds_elem():
+        if is_bf16_a:
+            return T.bf16
         return T.f16 if is_f16_a else T.f8
 
     lds_alloc_bytes = int(lds_total_elems) * int(a_elem_bytes)
@@ -1688,7 +1696,7 @@ def compile_mixed_moe_gemm2(
             n_in = arith.index_cast(T.index, i32_n_in)
             k_in = arith.index_cast(T.index, i32_k_in)
             size_expert_ids_in = arith.index_cast(T.index, i32_size_expert_ids_in)
-            x_elem = T.f16 if is_f16_a else T.f8
+            x_elem = T.bf16 if is_bf16_a else (T.f16 if is_f16_a else T.f8)
             vec4_f32 = T.vec(4, T.f32)
             vec4_i32 = T.vec(4, T.i32)
             vec16_elems = 16 if a_elem_bytes == 1 else 8
@@ -1815,8 +1823,8 @@ def compile_mixed_moe_gemm2(
             )
             num_valid_idx = arith.index_cast(T.index, num_valid_i32)
 
-            # fp16 path ignores scales completely (implicit scale=1.0).
-            if is_f16_a:
+            # fp16/bf16 path ignores scales completely (implicit scale=1.0).
+            if is_f16_a or is_bf16_a:
                 sx_rsrc = None
             else:
                 if is_f4_a:
@@ -1910,11 +1918,11 @@ def compile_mixed_moe_gemm2(
 
                 # ---- X gmem->reg prefetch (match preshuffle GEMM mapping) ----
                 # Prefer 16B buffer-load (dwordx4). If the per-thread byte count isn't divisible by
-                # 16, fall back to 8B (dwordx2) or 4B (dword) loads. For fp16 we require 16B.
-                if is_f16_a:
+                # 16, fall back to 8B (dwordx2) or 4B (dword) loads. For fp16/bf16 we require 16B.
+                if is_f16_a or is_bf16_a:
                     if bytes_per_thread_x % 16 != 0:
                         raise ValueError(
-                            f"[fp16] bytes_per_thread_x ({bytes_per_thread_x}) must be divisible by 16"
+                            f"[fp16/bf16] bytes_per_thread_x ({bytes_per_thread_x}) must be divisible by 16"
                         )
                     x_load_bytes = 16
                 else:
