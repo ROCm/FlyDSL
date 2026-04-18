@@ -124,12 +124,11 @@ def _read_version() -> str:
       release     -> {base}                             (e.g. 0.1.0)
       <unset>     -> {base}.dev{commit_count}           (legacy local dev builds)
     """
+    import re
+
     init_py = (PY_SRC / "flydsl" / "__init__.py").read_text(encoding="utf-8")
-    base_version = "0.0.0"
-    for line in init_py.splitlines():
-        if line.startswith("_BASE_VERSION"):
-            base_version = line.split("=", 1)[1].strip().strip('"').strip("'")
-            break
+    m = re.search(r'^__version__\s*=\s*["\']([^"\']+)["\']', init_py, re.MULTILINE)
+    base_version = m.group(1) if m else "0.0.0"
 
     if "+" in base_version:
         return base_version
