@@ -156,14 +156,6 @@ def _read_version() -> str:
     return f"{base_version}.dev{commit_count}"
 
 
-def _write_version_file(version: str) -> None:
-    """Generate _version.py so that runtime __version__ matches the build version."""
-    version_file = PY_SRC / "flydsl" / "_version.py"
-    version_file.write_text(
-        f'__version__ = "{version}"\n',
-        encoding="utf-8",
-    )
-
 
 def _load_requirements() -> list[str]:
     req = REPO_ROOT / "requirements.txt"
@@ -399,7 +391,6 @@ else:
     }
 
 _version = _read_version()
-_write_version_file(_version)
 
 setup(
     name="flydsl",
