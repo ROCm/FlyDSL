@@ -120,7 +120,7 @@ def _read_version() -> str:
 
     Release types (set via env var FLYDSL_RELEASE_TYPE):
       nightlies   -> {base}+{YYYYMMDD}.{git_hash}     (e.g. 0.1.0+20260309.a1b2c3d)
-      devreleases -> {base}.dev{YYYYMMDD}+{git_hash}   (e.g. 0.1.0.dev20260309+a1b2c3d)
+      devreleases -> {base}.dev{commit_count}            (e.g. 0.1.0.dev472)
       release     -> {base}                             (e.g. 0.1.0)
       <unset>     -> {base}.dev{commit_count}           (legacy local dev builds)
     """
@@ -141,10 +141,8 @@ def _read_version() -> str:
         local = ".".join(filter(None, [date_tag, git_hash]))
         return f"{base_version}+{local}"
     elif release_type == "devreleases":
-        version = f"{base_version}.dev{date_tag}"
-        if git_hash:
-            version += f"+{git_hash}"
-        return version
+        commit_count = _git_rev_count() or "0"
+        return f"{base_version}.dev{commit_count}"
     elif release_type == "release":
         return base_version
 
@@ -203,7 +201,7 @@ def _assert_embedded_mlir_exists() -> None:
 
 _assert_embedded_mlir_exists()
 
-IS_WHEEL_BUILD = any(a in {"bdist_wheel", "sdist"} for a in os.sys.argv[1:])
+IS_WHEEL_BUILD = any(a in {"bdist_wheel", "sdist"} for a in os.sys.argv[1:]) or os.environ.get("FLY_WHEEL_BUILD") == "1"
 
 def _strip_embedded_shared_libs() -> None:
     """Strip debug symbols from embedded shared libraries to reduce wheel size."""
@@ -249,6 +247,28 @@ def _latest_wheel_in(dist_dir: Path) -> Path | None:
     return max(wheels, key=lambda p: p.stat().st_mtime)
 
 
+def _detect_soname(lib_base: str) -> str:
+    """Detect the SONAME of a shared library by searching common paths.
+
+    For example, _detect_soname("libamdhip64.so") -> "libamdhip64.so.6" on ROCm 6.x.
+    Returns the SONAME string, or "" if not found.
+    """
+    import subprocess
+
+    search_dirs = ["/opt/rocm/lib", "/usr/lib/x86_64-linux-gnu", "/usr/lib64"]
+    for d in search_dirs:
+        lib_path = os.path.join(d, lib_base)
+        if os.path.exists(lib_path):
+            try:
+                out = subprocess.check_output(["objdump", "-p", lib_path], stderr=subprocess.DEVNULL, text=True)
+                for line in out.splitlines():
+                    if "SONAME" in line:
+                        return line.split()[-1]
+            except (subprocess.CalledProcessError, FileNotFoundError):
+                pass
+    return ""
+
+
 def _auditwheel_repair_in_place(wheel_path: Path, dist_dir: Path) -> None:
     """Run `auditwheel repair` to produce a manylinux-tagged wheel when possible.
 
@@ -271,8 +291,8 @@ def _auditwheel_repair_in_place(wheel_path: Path, dist_dir: Path) -> None:
         print("Warning: patchelf not found; skipping manylinux repair. (Install with `apt-get install patchelf`.)")
         return
 
-    wheelhouse = dist_dir / "wheelhouse"
-    wheelhouse.mkdir(parents=True, exist_ok=True)
+    import tempfile
+    wheelhouse = Path(tempfile.mkdtemp(prefix="wheelhouse_", dir=str(dist_dir)))
 
     cmd = [
         auditwheel,
@@ -280,14 +300,23 @@ def _auditwheel_repair_in_place(wheel_path: Path, dist_dir: Path) -> None:
         str(wheel_path),
         "-w",
         str(wheelhouse),
-        # IMPORTANT: do not bundle ROCm user-space runtime libraries into the wheel.
-        "--exclude",
-        "libamdhip64.so.*",
-        "--exclude",
-        "libhsa-runtime64.so.*",
-        "--exclude",
-        "libdrm_amdgpu.so.*",
     ]
+
+    # Do not bundle ROCm / system runtime libraries into the wheel.
+    # auditwheel --exclude matches SONAMEs (e.g. libamdhip64.so.6).
+    # Detect actual SONAMEs from the system so we don't hardcode ROCm versions.
+    _ROCM_EXCLUDE_LIBS = [
+        "libamdhip64.so",
+        "libhsa-runtime64.so",
+        "libamd_comgr.so",
+        "libdrm_amdgpu.so",
+        "libdrm.so",
+        "librocprofiler-register.so",
+    ]
+    for lib_base in _ROCM_EXCLUDE_LIBS:
+        soname = _detect_soname(lib_base)
+        if soname:
+            cmd += ["--exclude", soname]
 
     # auditwheel needs to locate MLIR runtime libraries that are already
     # bundled in the wheel.  Add the embedded _mlir_libs directory (and the
@@ -398,7 +427,7 @@ setup(
     long_description=(REPO_ROOT / "README.md").read_text(encoding="utf-8") if (REPO_ROOT / "README.md").exists() else "",
     long_description_content_type="text/markdown",
     license="Apache-2.0",
-    python_requires=">=3.8",
+    python_requires=">=3.10",
     packages=all_packages,
     package_dir=package_dir,
     include_package_data=True,

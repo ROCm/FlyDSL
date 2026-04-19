@@ -6,12 +6,24 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${REPO_ROOT}"
 
+# ---------------------------------------------------------------------------
+# Python versions to build wheels for.
+# Override via env: PYTHON_VERSIONS="3.10 3.12" bash scripts/build_wheels.sh
+# ---------------------------------------------------------------------------
+DEFAULT_PYTHON_VERSIONS="3.10 3.11 3.12 3.13 3.14"
+IFS=' ' read -r -a PYTHON_VERSIONS <<< "${PYTHON_VERSIONS:-${DEFAULT_PYTHON_VERSIONS}}"
+
 usage() {
-  cat <<'EOF'
-Build FlyDSL wheels for Python 3.10 and 3.12.
+  cat <<EOF
+Build FlyDSL wheels for multiple Python versions.
+
+Default versions: ${DEFAULT_PYTHON_VERSIONS}
 
 Usage:
   bash scripts/build_wheels.sh [--skip-build] [--install-deps]
+
+Override versions:
+  PYTHON_VERSIONS="3.10 3.12" bash scripts/build_wheels.sh
 
 Required env:
   MLIR_PATH    path to llvm-project build (defaults to ./llvm-project/mlir_install)
@@ -38,15 +50,7 @@ FLY_REBUILD="${FLY_REBUILD:-1}"
 EXPECTED_GLIBC="${EXPECTED_GLIBC:-2.35}"
 ALLOW_ANY_GLIBC="${ALLOW_ANY_GLIBC:-0}"
 
-PY310_BIN="${PY310_BIN:-python3.10}"
-PY312_BIN="${PY312_BIN:-python3.12}"
-
 VENV_ROOT="${VENV_ROOT:-${REPO_ROOT}/.venvs/release}"
-VENV_310="${VENV_ROOT}/cp310"
-VENV_312="${VENV_ROOT}/cp312"
-
-FLY_BUILD_DIR_310="${FLY_BUILD_DIR_310:-build-fly/build_py310}"
-FLY_BUILD_DIR_312="${FLY_BUILD_DIR_312:-build-fly/build_py312}"
 
 if [[ -z "${MLIR_PATH:-}" ]]; then
   MLIR_PATH="${REPO_ROOT}/llvm-project/mlir_install"
@@ -114,25 +118,48 @@ ensure_glibc() {
   fi
 }
 
+# Get the python binary name for a version like "3.12"
+py_bin_for_version() {
+  local ver="$1"
+  local env_var_name="PY${ver//./}_BIN"
+  local val="${!env_var_name:-python${ver}}"
+  echo "${val}"
+}
+
+# Get the cpython tag for a version like "3.12" -> "cp312"
+py_tag_for_version() {
+  local ver="$1"
+  echo "cp${ver//./}"
+}
+
 ensure_python_bins() {
   local missing=0
-  for py in "${PY310_BIN}" "${PY312_BIN}"; do
-    if ! command -v "${py}" >/dev/null 2>&1; then
-      echo "Missing: ${py}" >&2
+  for ver in "${PYTHON_VERSIONS[@]}"; do
+    local py_bin
+    py_bin="$(py_bin_for_version "${ver}")"
+    if ! command -v "${py_bin}" >/dev/null 2>&1; then
+      echo "Missing: ${py_bin}" >&2
       missing=1
     fi
   done
 
   if [[ "${missing}" == "1" ]]; then
     local pkgs=()
-    command -v "${PY310_BIN}" >/dev/null 2>&1 || pkgs+=( python3.10 python3.10-dev python3.10-venv )
-    command -v "${PY312_BIN}" >/dev/null 2>&1 || pkgs+=( python3.12 python3.12-dev python3.12-venv )
+    for ver in "${PYTHON_VERSIONS[@]}"; do
+      local py_bin
+      py_bin="$(py_bin_for_version "${ver}")"
+      if ! command -v "${py_bin}" >/dev/null 2>&1; then
+        pkgs+=( "python${ver}" "python${ver}-dev" "python${ver}-venv" )
+      fi
+    done
     [[ "${#pkgs[@]}" -eq 0 ]] || apt_install_if_possible "${pkgs[@]}" || true
   fi
 
-  for py in "${PY310_BIN}" "${PY312_BIN}"; do
-    if ! command -v "${py}" >/dev/null 2>&1; then
-      echo "Error: Python not found: ${py}" >&2
+  for ver in "${PYTHON_VERSIONS[@]}"; do
+    local py_bin
+    py_bin="$(py_bin_for_version "${ver}")"
+    if ! command -v "${py_bin}" >/dev/null 2>&1; then
+      echo "Error: Python not found: ${py_bin}" >&2
       exit 1
     fi
   done
@@ -162,26 +189,71 @@ build_one() {
   local venv="$2"
   local build_dir_rel="$3"
   local py_tag="$4"
+  local log_file="${5:-/dev/stderr}"
 
   echo "[build] ${py_tag} using ${pybin}"
   create_venv_and_deps "${pybin}" "${venv}"
 
+  # Use a per-version setuptools build base to avoid race conditions
+  # when building multiple versions in parallel (shared build/ dir).
+  local setup_build_base="${build_dir_rel}/setup_build"
+  mkdir -p "${setup_build_base}"
+
+  # Build C++ and Python packages
+  # Use --egg-base to isolate egg-info per version (avoid race on shared python/flydsl.egg-info/).
+  # FLY_WHEEL_BUILD=1 prevents setup.py and build.sh from mutating the shared source tree
+  # (python/flydsl/_mlir symlink), which would race across parallel builds.
   PATH="${venv}/bin:${PATH}" \
   MLIR_PATH="${MLIR_PATH}" \
   FLY_BUILD_DIR="${build_dir_rel}" \
   FLY_REBUILD="${FLY_REBUILD}" \
+  FLY_WHEEL_BUILD=1 \
   FLYDSL_RELEASE_TYPE="${FLYDSL_RELEASE_TYPE:-}" \
-  "${venv}/bin/python" setup.py bdist_wheel
+  "${venv}/bin/python" setup.py egg_info --egg-base "${setup_build_base}" build -b "${setup_build_base}"
+
+  # Strip shared libs in the build tree BEFORE bdist_wheel copies them.
+  # Remove unversioned libFlyPythonCAPI.so (symlink that bdist_wheel
+  # would copy as a second full-size file, doubling the wheel size).
+  local _mlir_libs="${build_dir_rel}/python_packages/flydsl/_mlir/_mlir_libs"
+  if [[ -d "${_mlir_libs}" ]]; then
+    rm -f "${_mlir_libs}/libFlyPythonCAPI.so"
+    find "${_mlir_libs}" \( -name '*.so' -o -name '*.so.*' \) ! -name '*nanobind*' \
+      -exec strip --strip-unneeded {} + 2>/dev/null || true
+    # Also strip the setuptools copy if it already exists
+    for d in "${setup_build_base}"/lib.*/flydsl/_mlir/_mlir_libs; do
+      [[ -d "${d}" ]] || continue
+      rm -f "${d}/libFlyPythonCAPI.so"
+      find "${d}" \( -name '*.so' -o -name '*.so.*' \) ! -name '*nanobind*' \
+        -exec strip --strip-unneeded {} + 2>/dev/null || true
+    done
+  fi
+
+  # Package wheel (C++ already built, skip rebuild)
+  PATH="${venv}/bin:${PATH}" \
+  MLIR_PATH="${MLIR_PATH}" \
+  FLY_BUILD_DIR="${build_dir_rel}" \
+  FLY_REBUILD=0 \
+  FLY_WHEEL_BUILD=1 \
+  FLYDSL_RELEASE_TYPE="${FLYDSL_RELEASE_TYPE:-}" \
+  "${venv}/bin/python" setup.py egg_info --egg-base "${setup_build_base}" build -b "${setup_build_base}" bdist_wheel
 
   if ! ls -1 "dist/"*"-${py_tag}-${py_tag}-manylinux_"*.whl >/dev/null 2>&1; then
     echo "Error: expected a manylinux wheel for ${py_tag} under dist/ but didn't find one." >&2
     ls -1 dist || true
-    exit 1
+    return 1
   fi
 }
 
+# ---------------------------------------------------------------------------
+# Parallel build: max concurrency = PARALLEL_WHEELS (default: 3)
+# Each version gets its own build dir, venv, and log file — no conflicts.
+# ---------------------------------------------------------------------------
+PARALLEL_WHEELS="${PARALLEL_WHEELS:-3}"
 
 main() {
+  echo "Building wheels for Python versions: ${PYTHON_VERSIONS[*]}"
+  echo "Parallel jobs: ${PARALLEL_WHEELS}"
+
   ensure_host_deps
   ensure_glibc
   ensure_python_bins
@@ -189,11 +261,60 @@ main() {
   mkdir -p dist
 
   if [[ "${SKIP_BUILD}" != "1" ]]; then
+    # Initialize submodules once before parallel builds to avoid git race conditions.
+    git -C "${REPO_ROOT}" submodule update --init --recursive
+
     rm -rf dist
     mkdir -p dist
 
-    build_one "${PY310_BIN}" "${VENV_310}" "${FLY_BUILD_DIR_310}" "cp310"
-    build_one "${PY312_BIN}" "${VENV_312}" "${FLY_BUILD_DIR_312}" "cp312"
+    local log_dir
+    log_dir="$(mktemp -d "${REPO_ROOT}/.wheel_build_logs.XXXXXX")"
+    local pids=()
+    local tags=()
+    local logs=()
+    local running=0
+
+    for ver in "${PYTHON_VERSIONS[@]}"; do
+      local py_bin py_tag venv build_dir log_file
+      py_bin="$(py_bin_for_version "${ver}")"
+      py_tag="$(py_tag_for_version "${ver}")"
+      venv="${VENV_ROOT}/${py_tag}"
+      build_dir="build-fly/build_py${ver//./}"
+      log_file="${log_dir}/${py_tag}.log"
+
+      echo "[parallel] Starting ${py_tag} (log: ${log_file})"
+      build_one "${py_bin}" "${venv}" "${build_dir}" "${py_tag}" "${log_file}" \
+        > "${log_file}" 2>&1 &
+      pids+=($!)
+      tags+=("${py_tag}")
+      logs+=("${log_file}")
+      running=$((running + 1))
+
+      # Throttle: wait for a slot if we hit the concurrency limit
+      if [[ "${running}" -ge "${PARALLEL_WHEELS}" ]]; then
+        wait -n 2>/dev/null || true
+        running=$((running - 1))
+      fi
+    done
+
+    # Wait for all remaining builds to finish
+    local failed=0
+    for i in "${!pids[@]}"; do
+      if ! wait "${pids[$i]}"; then
+        echo "FAILED: ${tags[$i]} (see ${logs[$i]})" >&2
+        tail -20 "${logs[$i]}" >&2
+        failed=1
+      else
+        echo "OK: ${tags[$i]}"
+      fi
+    done
+
+    # Show logs for any failures, then clean up
+    if [[ "${failed}" == "1" ]]; then
+      echo "Some wheel builds failed. Logs preserved at: ${log_dir}" >&2
+      exit 1
+    fi
+    rm -rf "${log_dir}"
   fi
 
   echo ""
