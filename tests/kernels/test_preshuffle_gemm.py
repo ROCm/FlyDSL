@@ -576,3 +576,104 @@ def test_cudagraph_capture_preshuffle(in_dtype):
         f"ref max={ref.abs().max().item():.4f}, graph max={graph_result.abs().max().item():.4f}"
     )
     print(f"✓ CUDAGraph capture verified ({in_dtype}): max_diff={max_diff:.6f}")
+
+
+# ── Fused epilogue correctness test ─────────────────────────────────────────
+
+@pytest.mark.parametrize("epilogue", ["bias", "bias_relu", "bias_silu", "bias_gelu"])
+def test_fused_epilogue_correctness(epilogue):
+    """Verify fused epilogue (bias + activation) matches a torch reference.
+
+    The previous test suite only exercised epilogue='none' with a dummy bias
+    tensor, so a regression in body_row's fused bias/activation path would
+    not have been caught. This test runs each of the four epilogue modes
+    end-to-end and compares against a torch reference.
+    """
+    import torch.nn.functional as F
+
+    arch = str(get_rocm_arch())
+    if not arch.startswith("gfx94") and not arch.startswith("gfx95"):
+        pytest.skip(f"Unsupported arch: {arch}")
+
+    device = "cuda:0"
+    M, N, K = 16, 5120, 8192
+    tile_m, tile_n, tile_k = 16, 64, 512
+    in_dtype = "bf16"
+    out_dtype = "bf16"
+    torch_out_dtype = torch.bfloat16
+
+    torch.manual_seed(0)
+    a_raw = torch.randn(M, K, dtype=torch_out_dtype, device=device)
+    b_raw = torch.randn(N, K, dtype=torch_out_dtype, device=device)
+    bias  = torch.randn(N,    dtype=torch_out_dtype, device=device)
+
+    # Torch reference: GEMM + bias + activation
+    a_f32 = a_raw.to(torch.float32)
+    b_f32 = b_raw.to(torch.float32)
+    ref_f32 = a_f32 @ b_f32.T + bias.to(torch.float32)
+    if epilogue == "bias_relu":
+        ref_f32 = F.relu(ref_f32)
+    elif epilogue == "bias_silu":
+        ref_f32 = F.silu(ref_f32)
+    elif epilogue == "bias_gelu":
+        ref_f32 = F.gelu(ref_f32, approximate="tanh")
+    ref = ref_f32.to(torch_out_dtype)
+
+    # FlyDSL kernel
+    b_input = shuffle_weight(b_raw.contiguous(), layout=(16, 16)).contiguous().view(-1)
+    sa_flat = torch.empty(0, dtype=torch.float32, device=device)
+    sb_flat = torch.empty(0, dtype=torch.float32, device=device)
+    c_out = torch.zeros(M, N, dtype=torch_out_dtype, device=device)
+
+    launch_fn = compile_preshuffle_gemm_a8(
+        M=M, N=N, K=K,
+        tile_m=tile_m, tile_n=tile_n, tile_k=tile_k,
+        in_dtype=in_dtype,
+        out_dtype=out_dtype,
+        epilogue=epilogue,
+    )
+
+    def _args(c, a, b, sa, sb, bs):
+        return (
+            c.contiguous().view(-1),
+            a.contiguous().view(-1),
+            b,
+            sa.contiguous().view(-1) if sa.numel() > 0 else sa,
+            sb.contiguous().view(-1) if sb.numel() > 0 else sb,
+            bs,
+            M, N, torch.cuda.current_stream(),
+        )
+
+    compiled_fn = flyc.compile(launch_fn, *_args(c_out, a_raw, b_input, sa_flat, sb_flat, bias))
+    compiled_fn(*_args(c_out, a_raw, b_input, sa_flat, sb_flat, bias))
+    torch.cuda.synchronize()
+
+    # bf16 GEMM accumulates in fp32 then rounds; allow generous tolerance.
+    atol = 0.5
+    rtol = 0.05
+    diff = (c_out.to(torch.float32) - ref.to(torch.float32)).abs()
+    max_diff = diff.max().item()
+    rel = (diff / (ref.to(torch.float32).abs() + 1e-3)).max().item()
+    assert torch.allclose(c_out, ref, atol=atol, rtol=rtol), (
+        f"Epilogue {epilogue} mismatch: max_abs_diff={max_diff:.4f} max_rel={rel:.4f}, "
+        f"ref max={ref.abs().max().item():.4f}, out max={c_out.abs().max().item():.4f}"
+    )
+    print(f"✓ Fused epilogue {epilogue} correctness verified: max_diff={max_diff:.4f}")
+
+
+def test_fused_epilogue_rejects_cshuffle():
+    """Compile-time guard: epilogue != 'none' with use_cshuffle_epilog=True
+    must raise rather than silently produce wrong output."""
+    arch = str(get_rocm_arch())
+    if not arch.startswith("gfx94") and not arch.startswith("gfx95"):
+        pytest.skip(f"Unsupported arch: {arch}")
+
+    with pytest.raises(ValueError, match="cshuffle"):
+        compile_preshuffle_gemm_a8(
+            M=16, N=64, K=512,
+            tile_m=16, tile_n=64, tile_k=512,
+            in_dtype="bf16",
+            out_dtype="bf16",
+            epilogue="bias_silu",
+            use_cshuffle_epilog=True,
+        )

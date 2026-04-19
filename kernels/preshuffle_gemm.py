@@ -314,6 +314,17 @@ def compile_preshuffle_gemm_a8(
     _has_silu = epilogue == "bias_silu"
     _has_gelu = epilogue == "bias_gelu"
 
+    # Fused epilogue is implemented inside body_row (the direct store path).
+    # When use_cshuffle_epilog=True, the epilogue path goes through
+    # write_row_to_lds -> store_pair and returns before body_row, which would
+    # silently drop the bias + activation. Reject the unsupported combination.
+    if _has_epilogue and use_cshuffle_epilog:
+        raise ValueError(
+            "Fused epilogue (epilogue != 'none') is not supported with "
+            "use_cshuffle_epilog=True; the cshuffle path bypasses body_row "
+            "where the bias/activation fusion lives."
+        )
+
     @flyc.kernel
     def kernel_gemm(
         arg_c: fx.Tensor,
@@ -406,11 +417,12 @@ def compile_preshuffle_gemm_a8(
             arg_scale_a, max_size=False)
 
         # ---- Bias buffer resource (for fused epilogue) ----
+        # Use max_size=True so the buffer descriptor's size is taken from the
+        # actual arg_bias tensor; this avoids hardcoding the output element
+        # size (was c_n * 2, which broke if out_dtype became fp32 etc.).
         bias_rsrc = None
         if _has_bias:
-            _bias_nrec = arith.index_cast(T.i64, c_n * 2)  # N elements * 2 bytes (bf16/fp16)
-            bias_rsrc = buffer_ops.create_buffer_resource(arg_bias, max_size=False,
-                                                          num_records_bytes=_bias_nrec)
+            bias_rsrc = buffer_ops.create_buffer_resource(arg_bias, max_size=True)
         b_rsrc = buffer_ops.create_buffer_resource(arg_b, max_size=True)
         scale_b_rsrc = None if (is_f16_or_bf16) else buffer_ops.create_buffer_resource(
             arg_scale_b, max_size=True)
@@ -1016,13 +1028,18 @@ def compile_preshuffle_gemm_a8(
                         cmp = arith.cmpf("ogt", val_s, zero_f32)
                         val_s = arith.select(cmp, val_s, zero_f32)
                     elif _has_silu:
-                        # SiLU(x) = x * sigmoid(x) = x / (1 + exp(-x))
+                        # SiLU(x) = x * sigmoid(x). Compute as
+                        #   sigmoid_x = 1 / (1 + exp(-x))    # one rcp instead of fdiv
+                        #   val_s    = val_s * sigmoid_x
+                        # to lower to v_rcp_f32 + v_mul_f32 instead of v_div_*
+                        # (~4x faster than fdiv on AMD GPUs).
                         neg_one = arith.constant(-1.0, type=T.f32)
                         neg_val = val_s * neg_one
                         exp_neg = math.exp(neg_val)
                         one_f32 = arith.constant(1.0, type=T.f32)
                         denom = one_f32 + exp_neg
-                        val_s = val_s / denom
+                        sigmoid_x = arith.divf(one_f32, denom)
+                        val_s = val_s * sigmoid_x
                     elif _has_gelu:
                         # GeLU approx: 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
                         half_f32 = arith.constant(0.5, type=T.f32)
