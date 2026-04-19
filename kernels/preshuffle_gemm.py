@@ -1024,9 +1024,14 @@ def compile_preshuffle_gemm_a8(
                         val_s = val_s + bias_val_f32
 
                     if _has_relu:
+                        # ReLU(x) = max(x, 0). Use maximumf rather than
+                        # cmpf+select: the lower-level cmpf wrapper requires
+                        # an integer CmpFPredicate enum value, not the string
+                        # "ogt", so the previous form failed at compile time
+                        # the moment the bias_relu epilogue was actually
+                        # exercised (test coverage gap).
                         zero_f32 = arith.constant(0.0, type=T.f32)
-                        cmp = arith.cmpf("ogt", val_s, zero_f32)
-                        val_s = arith.select(cmp, val_s, zero_f32)
+                        val_s = arith.maximumf(val_s, zero_f32)
                     elif _has_silu:
                         # SiLU(x) = x * sigmoid(x). Compute as
                         #   sigmoid_x = 1 / (1 + exp(-x))    # one rcp instead of fdiv
@@ -1042,14 +1047,53 @@ def compile_preshuffle_gemm_a8(
                         val_s = val_s * sigmoid_x
                     elif _has_gelu:
                         # GeLU approx: 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
-                        half_f32 = arith.constant(0.5, type=T.f32)
-                        coeff_f32 = arith.constant(0.044715, type=T.f32)
+                        # math.tanh has no AMD libcall, so expand it via exp.
+                        # Numerically stable form using only non-positive
+                        # exponent (avoids fp32 overflow for large |x|):
+                        #   a = -2 * |y|              (a <= 0, exp(a) in [0,1])
+                        #   tanh(y) = sign(y) * (1 - exp(a)) / (1 + exp(a))
+                        #   1 + tanh(y) = 1 + sign(y) * (1 - exp(a))/(1+exp(a))
+                        # We compute (1 + tanh(y)) directly from y because we
+                        # need the GeLU output, which is half * x * (1 + tanh).
+                        half_f32    = arith.constant(0.5, type=T.f32)
+                        coeff_f32   = arith.constant(0.044715, type=T.f32)
                         sqrt2pi_f32 = arith.constant(0.7978845608, type=T.f32)
+                        neg_two_f32 = arith.constant(-2.0, type=T.f32)
+                        one_f32     = arith.constant(1.0, type=T.f32)
+                        zero_f32    = arith.constant(0.0, type=T.f32)
                         x3 = val_s * val_s * val_s
-                        inner = sqrt2pi_f32 * (val_s + coeff_f32 * x3)
-                        tanh_inner = math.tanh(inner)
-                        one_f32 = arith.constant(1.0, type=T.f32)
-                        val_s = half_f32 * val_s * (one_f32 + tanh_inner)
+                        y  = sqrt2pi_f32 * (val_s + coeff_f32 * x3)
+                        # |y| via max(y, -y) — avoids math.absf dependency
+                        neg_y  = zero_f32 - y
+                        abs_y  = arith.maximumf(y, neg_y)
+                        # exp(-2|y|) is in [0, 1], no overflow.
+                        e_neg2abs = math.exp(neg_two_f32 * abs_y)
+                        denom = one_f32 + e_neg2abs
+                        # tanh(|y|) = (1 - e_neg2abs) / denom
+                        # tanh(y)   = sign(y) * tanh(|y|)
+                        # 1 + tanh(y):
+                        #   y >= 0: 1 + tanh(|y|) = (denom + (1 - e)) / denom
+                        #                         = (2)             / denom
+                        #                          (because denom = 1 + e and
+                        #                           denom + 1 - e = 2)
+                        #   y <  0: 1 - tanh(|y|) = (denom - (1 - e)) / denom
+                        #                         = (2 * e)          / denom
+                        two_f32 = arith.constant(2.0, type=T.f32)
+                        is_pos  = arith.maximumf(y, zero_f32)  # y if y>=0 else 0
+                        is_neg  = arith.maximumf(neg_y, zero_f32)  # -y if y<0 else 0
+                        # numerator = 2          when y >= 0
+                        #           = 2 * e_neg2abs  when y <  0
+                        # use a sign-free trick: numerator = 2 * (y>=0 ? 1 : e)
+                        #   = 2 * (e + (1 - e) * step(y))
+                        # step(y) via division-free trick:
+                        # easier: branchless using fp select via cmpf+select
+                        sign_pred = arith.cmpf(2, y, zero_f32)  # 2 = OGT
+                        num_pos = two_f32
+                        num_neg = two_f32 * e_neg2abs
+                        numerator = arith.select(sign_pred, num_pos, num_neg)
+                        recip = arith.divf(one_f32, denom)
+                        one_plus_tanh = numerator * recip
+                        val_s = half_f32 * val_s * one_plus_tanh
 
                     val_f16 = arith.trunc_f(_out_elem(), val_s)
                     idx_out = idx_base + (ni * 16)
