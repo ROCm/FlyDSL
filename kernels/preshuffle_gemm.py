@@ -1079,15 +1079,10 @@ def compile_preshuffle_gemm_a8(
                         #   y <  0: 1 - tanh(|y|) = (denom - (1 - e)) / denom
                         #                         = (2 * e)          / denom
                         two_f32 = arith.constant(2.0, type=T.f32)
-                        is_pos  = arith.maximumf(y, zero_f32)  # y if y>=0 else 0
-                        is_neg  = arith.maximumf(neg_y, zero_f32)  # -y if y<0 else 0
                         # numerator = 2          when y >= 0
                         #           = 2 * e_neg2abs  when y <  0
-                        # use a sign-free trick: numerator = 2 * (y>=0 ? 1 : e)
-                        #   = 2 * (e + (1 - e) * step(y))
-                        # step(y) via division-free trick:
-                        # easier: branchless using fp select via cmpf+select
-                        sign_pred = arith.cmpf(2, y, zero_f32)  # 2 = OGT
+                        # OGT predicate id = 2 (CmpFPredicate.OGT)
+                        sign_pred = arith.cmpf(2, y, zero_f32)
                         num_pos = two_f32
                         num_neg = two_f32 * e_neg2abs
                         numerator = arith.select(sign_pred, num_pos, num_neg)

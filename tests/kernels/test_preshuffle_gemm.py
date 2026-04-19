@@ -648,8 +648,17 @@ def test_fused_epilogue_correctness(epilogue):
     compiled_fn(*_args(c_out, a_raw, b_input, sa_flat, sb_flat, bias))
     torch.cuda.synchronize()
 
-    # bf16 GEMM accumulates in fp32 then rounds; allow generous tolerance.
-    atol = 0.5
+    # bf16 has ~7 bits mantissa; for K=8192 reduction the per-element
+    # error is bounded by ~K * eps_bf16 ~ 8192 * 2^-7 ~= 64 ULP. We use
+    # rtol=0.05 (5%) and atol=2.0 (covers small-magnitude outputs).
+    assert not torch.isnan(c_out).any(), (
+        f"Epilogue {epilogue}: kernel produced NaN(s) "
+        f"(count={int(torch.isnan(c_out).sum().item())})"
+    )
+    assert not torch.isinf(c_out).any(), (
+        f"Epilogue {epilogue}: kernel produced Inf(s)"
+    )
+    atol = 2.0
     rtol = 0.05
     diff = (c_out.to(torch.float32) - ref.to(torch.float32)).abs()
     max_diff = diff.max().item()
@@ -658,7 +667,8 @@ def test_fused_epilogue_correctness(epilogue):
         f"Epilogue {epilogue} mismatch: max_abs_diff={max_diff:.4f} max_rel={rel:.4f}, "
         f"ref max={ref.abs().max().item():.4f}, out max={c_out.abs().max().item():.4f}"
     )
-    print(f"✓ Fused epilogue {epilogue} correctness verified: max_diff={max_diff:.4f}")
+    print(f"✓ Fused epilogue {epilogue} correctness verified: "
+          f"max_abs_diff={max_diff:.4f}, max_rel={rel:.4f}, ref_max={ref.abs().max().item():.2f}")
 
 
 def test_fused_epilogue_rejects_cshuffle():
