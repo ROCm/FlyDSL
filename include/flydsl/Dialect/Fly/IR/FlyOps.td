@@ -102,6 +102,11 @@ def Fly_MakeFragmentLikeOp : Fly_Op<"make_fragment_like", [Pure, DeclareOpInterf
   let assemblyFormat = "`(` $src (`,` $dtype^)? `)` attr-dict `:` functional-type(operands, results)";
 }
 
+def Fly_MakeFragmentLayoutLikeOp : Fly_Op<"make_fragment_layout_like", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
+  let arguments = (ins AnyTypeOf<[Fly_Layout, Fly_MemRef]>:$src);
+  let results = (outs Fly_Layout:$result);
+}
+
 //===----------------------------------------------------------------------===//
 // Extractors
 //===----------------------------------------------------------------------===//
@@ -180,8 +185,15 @@ def Fly_IntTupleProductLikeOp : Fly_IntTupleBinaryOp<"int_tuple_product_like">;
 
 def Fly_ShapeDivOp : Fly_IntTupleBinaryOp<"shape_div">;
 def Fly_CeilDivOp  : Fly_IntTupleBinaryOp<"ceil_div">;
-def Fly_ElemLessOp : Fly_IntTupleBinaryOp<"elem_less">;
-def Fly_EqualOp    : Fly_IntTupleBinaryOp<"equal">;
+
+def Fly_ElemLessOp : Fly_Op<"elem_less", [Pure]> {
+  let arguments = (ins Fly_IntTuple:$lhs, Fly_IntTuple:$rhs);
+  let results = (outs I1:$result);
+}
+def Fly_EqualOp : Fly_Op<"equal", [Pure]> {
+  let arguments = (ins Fly_IntTuple:$lhs, Fly_IntTuple:$rhs);
+  let results = (outs I1:$result);
+}
 
 //===----------------------------------------------------------------------===//
 // IntTupleLike operations
@@ -329,8 +341,8 @@ def Fly_TileToShapeOp : Fly_Op<"tile_to_shape", [Pure, DeclareOpInterfaceMethods
 
 def Fly_MakeMmaAtomOp : Fly_Op<"make_mma_atom", [Pure]> {
   let arguments = (ins);
-  let results = (outs AnyType:$result);
-  let assemblyFormat = "attr-dict `:` type($result)";
+  let results = (outs Fly_MmaAtom:$result);
+  let assemblyFormat = "attr-dict `:` qualified(type($result))";
 }
 
 def Fly_MakeCopyAtomOp : Fly_Op<"make_copy_atom", [Pure]> {
@@ -349,7 +361,18 @@ def Fly_CopyAtomCall : Fly_Op<"copy_atom_call"> {
   let arguments = (ins Fly_CopyAtom:$copyAtom, Fly_MemRef:$src, Fly_MemRef:$dst, Optional<Fly_MemRef>:$pred);
 }
 def Fly_MmaAtomCall : Fly_Op<"mma_atom_call"> {
-  let arguments = (ins AnyType:$mmaAtom, Fly_MemRef:$d, Fly_MemRef:$a, Fly_MemRef:$b, Fly_MemRef:$c);
+  let arguments = (ins Fly_MmaAtom:$mmaAtom, Fly_MemRef:$d, Fly_MemRef:$a, Fly_MemRef:$b, Fly_MemRef:$c);
+}
+
+def Fly_CopyAtomCallSSA : Fly_Op<"copy_atom_call_ssa", [AttrSizedOperandSegments]> {
+  let arguments = (ins Fly_CopyAtom:$copyAtom, AnyType:$src,
+                       Optional<AnyType>:$dst, Optional<AnyType>:$pred);
+  let results = (outs Variadic<AnyType>:$results);
+}
+def Fly_MmaAtomCallSSA : Fly_Op<"mma_atom_call_ssa"> {
+  let arguments = (ins Fly_MmaAtom:$mmaAtom, Optional<AnyType>:$d,
+                       AnyType:$a, AnyType:$b, AnyType:$c);
+  let results = (outs Variadic<AnyType>:$results);
 }
 
 def Fly_MakeTiledCopyOp : Fly_Op<"make_tiled_copy", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {

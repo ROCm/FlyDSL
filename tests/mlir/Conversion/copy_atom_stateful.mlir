@@ -74,10 +74,11 @@ func.func @test_copy_atom_call_store_with_soffset(
     %atom: !fly.copy_atom<!fly_rocdl.cdna3.buffer_copy<32>, 32>,
     %src: !fly.memref<f32, register, 1:1>,
     %dst: !fly.memref<f32, buffer_desc, 1:1>) {
-  // CHECK: %[[SOFF_RAW:.*]] = llvm.extractvalue %[[ATOM]][0]
-  // CHECK: %[[SOFF:.*]] = arith.muli %[[SOFF_RAW]], %{{.*}}
-  // CHECK: llvm.load %[[SRC]]
-  // CHECK: rocdl.raw.ptr.buffer.store %{{.*}}, %{{.*}}, %{{.*}}, %[[SOFF]]
+  // CHECK-DAG: %[[SOFF_RAW:.*]] = llvm.extractvalue %[[ATOM]][0]
+  // CHECK-DAG: %[[SOFF:.*]] = arith.muli %[[SOFF_RAW]], %{{.*}}
+  // CHECK-DAG: %[[VAL:.*]] = llvm.load %[[SRC]]
+  // CHECK-DAG: %[[CAST:.*]] = llvm.bitcast %[[VAL]]
+  // CHECK: rocdl.raw.ptr.buffer.store %[[CAST]], %{{.*}}, %{{.*}}, %[[SOFF]]
   fly.copy_atom_call(%atom, %src, %dst) : (!fly.copy_atom<!fly_rocdl.cdna3.buffer_copy<32>, 32>, !fly.memref<f32, register, 1:1>, !fly.memref<f32, buffer_desc, 1:1>) -> ()
   return
 }

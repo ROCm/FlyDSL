@@ -17,13 +17,12 @@ def copy_kernel(
 
     block_m = 8
     block_n = 24
-    tile = fx.make_tile(fx.make_layout(block_m, 1), fx.make_layout(block_n, 1))
 
     A = fx.rocdl.make_buffer_tensor(A)
     B = fx.rocdl.make_buffer_tensor(B)
 
-    bA = fx.zipped_divide(A, tile)
-    bB = fx.zipped_divide(B, tile)
+    bA = fx.zipped_divide(A, (block_m, block_n))
+    bB = fx.zipped_divide(B, (block_m, block_n))
     bA = fx.slice(bA, (None, bid))
     bB = fx.slice(bB, (None, bid))
 

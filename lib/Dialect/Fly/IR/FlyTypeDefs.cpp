@@ -422,6 +422,22 @@ LogicalResult CopyAtomType::emitAtomCall(OpBuilder &builder, Location loc, Type 
                     pred);
 }
 
+FailureOr<Value> CopyAtomType::emitAtomCallSSA(OpBuilder &builder, Location loc, Type resultTy,
+                                               Type copyAtomTy, Type srcTy, Type dstTy,
+                                               Value atomVal, Value src, Value dst) const {
+  return cast<CopyOpTypeInterface>(getCopyOp())
+      .emitAtomCallSSA(builder, loc, resultTy, copyAtomTy, srcTy, dstTy, atomVal, src, dst);
+}
+
+FailureOr<Value> CopyAtomType::emitAtomCallSSA(OpBuilder &builder, Location loc, Type resultTy,
+                                               Type copyAtomTy, Type srcTy, Type dstTy, Type predTy,
+                                               Value atomVal, Value src, Value dst,
+                                               Value pred) const {
+  return cast<CopyOpTypeInterface>(getCopyOp())
+      .emitAtomCallSSA(builder, loc, resultTy, copyAtomTy, srcTy, dstTy, predTy, atomVal, src, dst,
+                       pred);
+}
+
 bool CopyAtomType::isStateful() const { return isa<StatefulOpTypeInterface>(getCopyOp()); }
 
 Type CopyAtomType::getConvertedType(MLIRContext *ctx) const {
@@ -475,6 +491,13 @@ LogicalResult MmaAtomType::emitAtomCall(OpBuilder &builder, Location loc, Type m
                                         Value atomVal, Value d, Value a, Value b, Value c) const {
   return cast<MmaOpTypeInterface>(getMmaOp())
       .emitAtomCall(builder, loc, mmaAtomTy, dMemTy, aMemTy, bMemTy, cMemTy, atomVal, d, a, b, c);
+}
+FailureOr<Value> MmaAtomType::emitAtomCallSSA(OpBuilder &builder, Location loc, Type resultTy,
+                                              Type mmaAtomTy, Type dTy, Type aTy, Type bTy,
+                                              Type cTy, Value atomVal, Value d, Value a, Value b,
+                                              Value c) const {
+  return cast<MmaOpTypeInterface>(getMmaOp())
+      .emitAtomCallSSA(builder, loc, resultTy, mmaAtomTy, dTy, aTy, bTy, cTy, atomVal, d, a, b, c);
 }
 
 bool MmaAtomType::isStateful() const { return isa<StatefulOpTypeInterface>(getMmaOp()); }

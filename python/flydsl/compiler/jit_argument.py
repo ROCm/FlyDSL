@@ -147,11 +147,12 @@ class TensorAdaptor:
         assumed_align: Optional[int] = None,
         use_32bit_stride: bool = False,
     ):
-        self._tensor_keepalive = tensor
-        dlpack_tensor = tensor
-        if _FLOAT8_DTYPES and tensor.dtype in _FLOAT8_DTYPES:
-            dlpack_tensor = tensor.view(torch.uint8)
-            self._tensor_keepalive = dlpack_tensor
+        # Forward-only interop: DLPack export from torch rejects tensors that
+        # still participate in autograd, so detach before crossing into FlyDSL.
+        dlpack_tensor = tensor.detach() if tensor.requires_grad else tensor
+        if _FLOAT8_DTYPES and dlpack_tensor.dtype in _FLOAT8_DTYPES:
+            dlpack_tensor = dlpack_tensor.view(torch.uint8)
+        self._tensor_keepalive = dlpack_tensor
 
         self.tensor_adaptor = DLTensorAdaptor(dlpack_tensor.__dlpack__(stream=-1), assumed_align, use_32bit_stride)
         self.assumed_align = assumed_align

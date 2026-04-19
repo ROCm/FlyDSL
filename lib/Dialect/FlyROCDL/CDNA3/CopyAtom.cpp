@@ -8,6 +8,7 @@
 #include "mlir/IR/BuiltinTypes.h"
 
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
+#include "flydsl/Dialect/Fly/Utils/PointerUtils.h"
 #include "flydsl/Dialect/Fly/Utils/ThrValLayoutMacro.h.inc"
 #include "flydsl/Dialect/FlyROCDL/IR/Dialect.h"
 #include "flydsl/Dialect/FlyROCDL/Utils/BufferFatPtr.h"
@@ -64,6 +65,95 @@ Attribute CopyOpCDNA3BufferCopyType::getThrBitLayoutRef() const {
   return FxLayout(FxShape(FxC(1), FxC(getBitSize())), FxStride(FxC(1), FxC(1)));
 }
 
+FailureOr<Value> CopyOpCDNA3BufferCopyType::emitAtomCallSSA(OpBuilder &builder, Location loc,
+                                                            Type resultTy, Type copyAtomTyArg,
+                                                            Type srcTyArg, Type dstTyArg,
+                                                            Value atomVal, Value src,
+                                                            Value dst) const {
+  IntegerType copyTy = builder.getIntegerType(getBitSize());
+
+  Value soffsetRaw = LLVM::ExtractValueOp::create(
+      builder, loc, atomVal, ArrayRef<int64_t>{*getFieldIndex(AtomStateField::Soffset)});
+
+  auto computeSoffset = [&](int64_t elemBits) -> Value {
+    if (elemBits == 8)
+      return soffsetRaw;
+    if (elemBits > 8 && elemBits % 8 == 0) {
+      Value scale = arith::ConstantIntOp::create(builder, loc, elemBits / 8, 32);
+      return arith::MulIOp::create(builder, loc, soffsetRaw, scale);
+    }
+    Value scale = arith::ConstantIntOp::create(builder, loc, elemBits, 32);
+    Value bits = arith::MulIOp::create(builder, loc, soffsetRaw, scale);
+    Value eight = arith::ConstantIntOp::create(builder, loc, 8, 32);
+    return arith::DivUIOp::create(builder, loc, bits, eight);
+  };
+
+  Value zero = arith::ConstantIntOp::create(builder, loc, 0, 32);
+  ArrayAttr noAttrs;
+
+  auto srcMemTy = srcTyArg ? dyn_cast<fly::MemRefType>(srcTyArg) : fly::MemRefType();
+  auto dstMemTy = dstTyArg ? dyn_cast<fly::MemRefType>(dstTyArg) : fly::MemRefType();
+
+  if (srcMemTy && srcMemTy.getAddressSpace().getValue() == AddressSpace::BufferDesc) {
+    // buffer -> reg
+    Value soffset = computeSoffset(srcMemTy.getElemTy().getIntOrFloatBitWidth());
+    BufferFatPtr bp(srcMemTy.getPointerType(), src);
+    Value srcRsrc = bp.bufferRsrc(builder, loc);
+    Value srcOff = bp.swizzleByteOffset(builder, loc);
+
+    Value loaded = ROCDL::RawPtrBufferLoadOp::create(builder, loc, copyTy, srcRsrc, srcOff, soffset,
+                                                     zero, noAttrs, noAttrs, noAttrs);
+    if (resultTy && loaded.getType() != resultTy)
+      loaded = LLVM::BitcastOp::create(builder, loc, resultTy, loaded);
+    return loaded;
+  }
+
+  if (dstMemTy && dstMemTy.getAddressSpace().getValue() == AddressSpace::BufferDesc) {
+    // reg -> buffer
+    Value soffset = computeSoffset(dstMemTy.getElemTy().getIntOrFloatBitWidth());
+    BufferFatPtr bp(dstMemTy.getPointerType(), dst);
+    Value dstRsrc = bp.bufferRsrc(builder, loc);
+    Value dstOff = bp.swizzleByteOffset(builder, loc);
+
+    Value stored = src;
+    if (stored.getType() != copyTy)
+      stored = LLVM::BitcastOp::create(builder, loc, copyTy, stored);
+    ROCDL::RawPtrBufferStoreOp::create(builder, loc, stored, dstRsrc, dstOff, soffset, zero,
+                                       noAttrs, noAttrs, noAttrs);
+    return stored;
+  }
+
+  return failure();
+}
+
+FailureOr<Value> CopyOpCDNA3BufferCopyType::emitAtomCallSSA(
+    OpBuilder &builder, Location loc, Type resultTy, Type copyAtomTyArg, Type srcTyArg,
+    Type dstTyArg, Type predTyArg, Value atomVal, Value src, Value dst, Value pred) const {
+  OpBuilder::InsertionGuard guard(builder);
+  if (resultTy) {
+    // buffer -> reg
+    auto ifOp = scf::IfOp::create(builder, loc, resultTy, pred, /*withElseRegion=*/true);
+    builder.setInsertionPointToStart(&ifOp.getThenRegion().front());
+    auto result = emitAtomCallSSA(builder, loc, resultTy, copyAtomTyArg, srcTyArg, dstTyArg,
+                                  atomVal, src, dst);
+    if (failed(result))
+      return failure();
+    scf::YieldOp::create(builder, loc, *result);
+    builder.setInsertionPointToStart(&ifOp.getElseRegion().front());
+    scf::YieldOp::create(builder, loc, dst);
+    return ifOp.getResult(0);
+  } else {
+    // reg -> buffer
+    auto ifOp = scf::IfOp::create(builder, loc, TypeRange{}, pred, /*withElse=*/false);
+    builder.setInsertionPointToStart(&ifOp.getThenRegion().front());
+    auto result = emitAtomCallSSA(builder, loc, resultTy, copyAtomTyArg, srcTyArg, dstTyArg,
+                                  atomVal, src, dst);
+    if (failed(result))
+      return failure();
+    return Value();
+  }
+}
+
 LogicalResult CopyOpCDNA3BufferCopyType::emitAtomCall(OpBuilder &builder, Location loc,
                                                       Type copyAtomTyArg, Type srcMemTyArg,
                                                       Type dstMemTyArg, Value atomVal, Value src,
@@ -71,55 +161,26 @@ LogicalResult CopyOpCDNA3BufferCopyType::emitAtomCall(OpBuilder &builder, Locati
   auto srcMemTy = cast<fly::MemRefType>(srcMemTyArg);
   auto dstMemTy = cast<fly::MemRefType>(dstMemTyArg);
 
-  IntegerType copyTy = builder.getIntegerType(getBitSize());
-
-  AddressSpace srcAS = srcMemTy.getAddressSpace().getValue();
-  AddressSpace dstAS = dstMemTy.getAddressSpace().getValue();
-
-  bool srcIsBuffer = (srcAS == AddressSpace::BufferDesc);
-  bool dstIsBuffer = (dstAS == AddressSpace::BufferDesc);
+  bool srcIsBuffer = (srcMemTy.getAddressSpace().getValue() == AddressSpace::BufferDesc);
+  bool dstIsBuffer = (dstMemTy.getAddressSpace().getValue() == AddressSpace::BufferDesc);
 
   if (srcIsBuffer == dstIsBuffer)
     return failure();
 
-  Value soffsetRaw = LLVM::ExtractValueOp::create(
-      builder, loc, atomVal, ArrayRef<int64_t>{*getFieldIndex(AtomStateField::Soffset)});
-
-  fly::MemRefType bufferMemTy = srcIsBuffer ? srcMemTy : dstMemTy;
-  int64_t elemBits = bufferMemTy.getElemTy().getIntOrFloatBitWidth();
-  Value soffset;
-  if (elemBits == 8) {
-    soffset = soffsetRaw;
-  } else if (elemBits > 8 && elemBits % 8 == 0) {
-    Value scale = arith::ConstantIntOp::create(builder, loc, elemBits / 8, 32);
-    soffset = arith::MulIOp::create(builder, loc, soffsetRaw, scale);
+  if (srcIsBuffer) {
+    auto dstSSATy = fly::RegMem2SSAType(dstMemTy);
+    auto res = emitAtomCallSSA(builder, loc, dstSSATy, copyAtomTyArg, srcMemTyArg, Type{}, atomVal,
+                               src, Value{});
+    if (failed(res))
+      return failure();
+    LLVM::StoreOp::create(builder, loc, *res, dst);
   } else {
-    Value scale = arith::ConstantIntOp::create(builder, loc, elemBits, 32);
-    Value bits = arith::MulIOp::create(builder, loc, soffsetRaw, scale);
-    Value eight = arith::ConstantIntOp::create(builder, loc, 8, 32);
-    soffset = arith::DivUIOp::create(builder, loc, bits, eight);
-  }
-
-  Value zero = arith::ConstantIntOp::create(builder, loc, 0, 32);
-  ArrayAttr noAttrs;
-
-  auto unpackBuffer = [&](Value val, fly::MemRefType flyTy) -> std::pair<Value, Value> {
-    BufferFatPtr bp(flyTy.getPointerType(), val);
-    return {bp.bufferRsrc(builder, loc), bp.swizzleByteOffset(builder, loc)};
-  };
-
-  if (srcIsBuffer && !dstIsBuffer) {
-    auto [srcRsrc, srcOff] = unpackBuffer(src, srcMemTy);
-    Value loaded = ROCDL::RawPtrBufferLoadOp::create(builder, loc, copyTy, srcRsrc, srcOff, soffset,
-                                                     zero, noAttrs, noAttrs, noAttrs);
-    LLVM::StoreOp::create(builder, loc, loaded, dst);
-  } else if (!srcIsBuffer && dstIsBuffer) {
-    auto [dstRsrc, dstOff] = unpackBuffer(dst, dstMemTy);
-    Value loaded = LLVM::LoadOp::create(builder, loc, copyTy, src);
-    ROCDL::RawPtrBufferStoreOp::create(builder, loc, loaded, dstRsrc, dstOff, soffset, zero,
-                                       noAttrs, noAttrs, noAttrs);
-  } else {
-    return failure();
+    auto srcSSATy = fly::RegMem2SSAType(srcMemTy);
+    Value srcVal = LLVM::LoadOp::create(builder, loc, srcSSATy, src);
+    auto res = emitAtomCallSSA(builder, loc, Type{}, copyAtomTyArg, srcSSATy, dstMemTyArg, atomVal,
+                               srcVal, dst);
+    if (failed(res))
+      return failure();
   }
   return success();
 }
@@ -129,6 +190,7 @@ LogicalResult CopyOpCDNA3BufferCopyType::emitAtomCall(OpBuilder &builder, Locati
                                                       Type dstMemTyArg, Type predMemTyArg,
                                                       Value atomVal, Value src, Value dst,
                                                       Value pred) const {
+  OpBuilder::InsertionGuard guard(builder);
   auto predMemTy = cast<fly::MemRefType>(predMemTyArg);
   Value predVal = LLVM::LoadOp::create(builder, loc, predMemTy.getElemTy(), pred);
   auto ifOp = scf::IfOp::create(builder, loc, TypeRange{}, predVal, /*withElse=*/false);
@@ -198,6 +260,25 @@ Attribute CopyOpCDNA3BufferCopyLDSType::getThrBitLayoutRef() const {
   return FxLayout(FxShape(FxC(1), FxC(getBitSize())), FxStride(FxC(1), FxC(1)));
 }
 
+FailureOr<Value> CopyOpCDNA3BufferCopyLDSType::emitAtomCallSSA(OpBuilder &builder, Location loc,
+                                                               Type resultTy, Type copyAtomTyArg,
+                                                               Type srcTyArg, Type dstTyArg,
+                                                               Value atomVal, Value src,
+                                                               Value dst) const {
+  if (failed(emitAtomCall(builder, loc, copyAtomTyArg, srcTyArg, dstTyArg, atomVal, src, dst)))
+    return failure();
+  return Value{};
+}
+
+FailureOr<Value> CopyOpCDNA3BufferCopyLDSType::emitAtomCallSSA(
+    OpBuilder &builder, Location loc, Type resultTy, Type copyAtomTyArg, Type srcTyArg,
+    Type dstTyArg, Type predTyArg, Value atomVal, Value src, Value dst, Value pred) const {
+  if (failed(emitAtomCall(builder, loc, copyAtomTyArg, srcTyArg, dstTyArg, predTyArg, atomVal, src,
+                          dst, pred)))
+    return failure();
+  return Value{};
+}
+
 LogicalResult CopyOpCDNA3BufferCopyLDSType::emitAtomCall(OpBuilder &builder, Location loc,
                                                          Type copyAtomTyArg, Type srcMemTyArg,
                                                          Type dstMemTyArg, Value atomVal, Value src,
@@ -250,6 +331,7 @@ LogicalResult CopyOpCDNA3BufferCopyLDSType::emitAtomCall(OpBuilder &builder, Loc
                                                          Type dstMemTyArg, Type predMemTyArg,
                                                          Value atomVal, Value src, Value dst,
                                                          Value pred) const {
+  OpBuilder::InsertionGuard guard(builder);
   auto predMemTy = cast<fly::MemRefType>(predMemTyArg);
   Value predVal = LLVM::LoadOp::create(builder, loc, predMemTy.getElemTy(), pred);
   auto ifOp = scf::IfOp::create(builder, loc, TypeRange{}, predVal, /*withElse=*/false);
@@ -310,17 +392,13 @@ Attribute CopyOpCDNA3BufferAtomicType::getThrBitLayoutRef() const {
   return FxLayout(FxShape(FxC(1), FxC(bits)), FxStride(FxC(1), FxC(1)));
 }
 
-LogicalResult CopyOpCDNA3BufferAtomicType::emitAtomCall(OpBuilder &builder, Location loc,
-                                                        Type copyAtomTyArg, Type srcMemTyArg,
-                                                        Type dstMemTyArg, Value atomVal, Value src,
-                                                        Value dst) const {
-  auto srcMemTy = cast<fly::MemRefType>(srcMemTyArg);
-  auto dstMemTy = cast<fly::MemRefType>(dstMemTyArg);
-
-  AddressSpace srcAS = srcMemTy.getAddressSpace().getValue();
-  AddressSpace dstAS = dstMemTy.getAddressSpace().getValue();
-
-  if (srcAS != AddressSpace::Register || dstAS != AddressSpace::BufferDesc)
+FailureOr<Value> CopyOpCDNA3BufferAtomicType::emitAtomCallSSA(OpBuilder &builder, Location loc,
+                                                              Type resultTy, Type copyAtomTyArg,
+                                                              Type srcTyArg, Type dstTyArg,
+                                                              Value atomVal, Value src,
+                                                              Value dst) const {
+  auto dstMemTy = cast<fly::MemRefType>(dstTyArg);
+  if (dstMemTy.getAddressSpace().getValue() != AddressSpace::BufferDesc)
     return failure();
 
   Type valTy = getValType();
@@ -328,8 +406,6 @@ LogicalResult CopyOpCDNA3BufferAtomicType::emitAtomCall(OpBuilder &builder, Loca
   if (auto vecTy = dyn_cast<VectorType>(valTy))
     scalarTy = vecTy.getElementType();
   bool isFloat = isa<FloatType>(scalarTy);
-
-  Value loaded = LLVM::LoadOp::create(builder, loc, valTy, src);
 
   BufferFatPtr bp(dstMemTy.getPointerType(), dst);
   Value dstRsrc = bp.bufferRsrc(builder, loc);
@@ -361,27 +437,67 @@ LogicalResult CopyOpCDNA3BufferAtomicType::emitAtomCall(OpBuilder &builder, Loca
   case AtomicOp::Add:
     if (!isFloat)
       return failure();
-    ROCDL::RawPtrBufferAtomicFaddOp::create(builder, loc, loaded, dstRsrc, dstOff, soffset, zero,
+    ROCDL::RawPtrBufferAtomicFaddOp::create(builder, loc, src, dstRsrc, dstOff, soffset, zero,
                                             noAttrs, noAttrs, noAttrs);
     break;
   case AtomicOp::Max:
     if (isFloat)
-      ROCDL::RawPtrBufferAtomicFmaxOp::create(builder, loc, loaded, dstRsrc, dstOff, soffset, zero,
+      ROCDL::RawPtrBufferAtomicFmaxOp::create(builder, loc, src, dstRsrc, dstOff, soffset, zero,
                                               noAttrs, noAttrs, noAttrs);
     else
-      ROCDL::RawPtrBufferAtomicSmaxOp::create(builder, loc, loaded, dstRsrc, dstOff, soffset, zero,
+      ROCDL::RawPtrBufferAtomicSmaxOp::create(builder, loc, src, dstRsrc, dstOff, soffset, zero,
                                               noAttrs, noAttrs, noAttrs);
     break;
   case AtomicOp::Min:
     if (isFloat)
       return failure();
-    ROCDL::RawPtrBufferAtomicUminOp::create(builder, loc, loaded, dstRsrc, dstOff, soffset, zero,
+    ROCDL::RawPtrBufferAtomicUminOp::create(builder, loc, src, dstRsrc, dstOff, soffset, zero,
                                             noAttrs, noAttrs, noAttrs);
     break;
   default:
     return failure();
   }
 
+  return src;
+}
+
+FailureOr<Value> CopyOpCDNA3BufferAtomicType::emitAtomCallSSA(
+    OpBuilder &builder, Location loc, Type resultTy, Type copyAtomTyArg, Type srcTyArg,
+    Type dstTyArg, Type predTyArg, Value atomVal, Value src, Value dst, Value pred) const {
+  OpBuilder::InsertionGuard guard(builder);
+  if (resultTy) {
+    auto ifOp = scf::IfOp::create(builder, loc, resultTy, pred, /*withElseRegion=*/true);
+    builder.setInsertionPointToStart(&ifOp.getThenRegion().front());
+    auto result = emitAtomCallSSA(builder, loc, resultTy, copyAtomTyArg, srcTyArg, dstTyArg,
+                                  atomVal, src, dst);
+    if (failed(result))
+      return failure();
+    scf::YieldOp::create(builder, loc, *result);
+    builder.setInsertionPointToStart(&ifOp.getElseRegion().front());
+    scf::YieldOp::create(builder, loc, dst);
+    return ifOp.getResult(0);
+  }
+
+  auto ifOp = scf::IfOp::create(builder, loc, TypeRange{}, pred, /*withElse=*/false);
+  builder.setInsertionPointToStart(&ifOp.getThenRegion().front());
+  auto result =
+      emitAtomCallSSA(builder, loc, resultTy, copyAtomTyArg, srcTyArg, dstTyArg, atomVal, src, dst);
+  if (failed(result))
+    return failure();
+  return Value();
+}
+
+LogicalResult CopyOpCDNA3BufferAtomicType::emitAtomCall(OpBuilder &builder, Location loc,
+                                                        Type copyAtomTyArg, Type srcMemTyArg,
+                                                        Type dstMemTyArg, Value atomVal, Value src,
+                                                        Value dst) const {
+  auto srcMemTy = cast<fly::MemRefType>(srcMemTyArg);
+  auto srcSSATy = fly::RegMem2SSAType(srcMemTy);
+  Value srcVal = LLVM::LoadOp::create(builder, loc, srcSSATy, src);
+  auto res = emitAtomCallSSA(builder, loc, Type{}, copyAtomTyArg, srcSSATy, dstMemTyArg, atomVal,
+                             srcVal, dst);
+  if (failed(res))
+    return failure();
   return success();
 }
 

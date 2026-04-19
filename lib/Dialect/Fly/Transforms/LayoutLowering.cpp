@@ -364,6 +364,22 @@ public:
   }
 };
 
+class MakeFragmentLayoutLikeOpLowering : public OpRewritePattern<MakeFragmentLayoutLikeOp> {
+public:
+  using OpRewritePattern<MakeFragmentLayoutLikeOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(MakeFragmentLayoutLikeOp op,
+                                PatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    auto resultTy = cast<fly::LayoutType>(op.getType());
+
+    LayoutBuilder<LayoutValueAdaptor> layoutBuilder(rewriter, loc);
+    Value fragmentLayout = layoutBuilder.materializeConstantLayout(resultTy.getAttr()).getValue();
+    rewriter.replaceOp(op, fragmentLayout);
+    return success();
+  }
+};
+
 class MakeFragmentLikeOpLowering : public OpRewritePattern<MakeFragmentLikeOp> {
 public:
   using OpRewritePattern<MakeFragmentLikeOp>::OpRewritePattern;
@@ -398,12 +414,16 @@ public:
     if (!isNormalForm(cast<TypedValue<IntTupleType>>(intTuple)))
       return failure();
 
-    IntTupleAttr attr = intTupleTy.getAttr();
-    assert(attr.isLeaf() && "IntTuple must be a leaf");
+    IntTupleAttr scalarAttr = intTupleTy.getAttr();
 
-    Type resultTy = op.getResult().getType();
-    auto intAttr = attr.extractIntFromLeaf();
+    while (!scalarAttr.isLeaf() && scalarAttr.rank() == 1)
+      scalarAttr = scalarAttr.at(0);
+    if (!scalarAttr.isLeaf())
+      return rewriter.notifyMatchFailure(
+          op, "expected leaf IntTupleAttr after unwrapping rank-1 chain");
+    auto intAttr = scalarAttr.extractIntFromLeaf();
     if (intAttr.isStatic()) {
+      Type resultTy = op.getResult().getType();
       rewriter.replaceOp(op,
                          arith::ConstantIntOp::create(rewriter, loc, resultTy, intAttr.getValue()));
       return success();
@@ -693,18 +713,6 @@ struct IntTupleCeilDivFn {
     return intTupleCeilDiv(builder, lhs, rhs);
   }
 };
-struct IntTupleElemLessFn {
-  IntTupleValueAdaptor operator()(IntTupleBuilder<IntTupleValueAdaptor> &builder,
-                                  IntTupleValueAdaptor lhs, IntTupleValueAdaptor rhs) const {
-    return intTupleElemLess(builder, lhs, rhs);
-  }
-};
-struct IntTupleEqualFn {
-  IntTupleValueAdaptor operator()(IntTupleBuilder<IntTupleValueAdaptor> &builder,
-                                  IntTupleValueAdaptor lhs, IntTupleValueAdaptor rhs) const {
-    return intTupleEqual(builder, lhs, rhs);
-  }
-};
 
 using IntTupleAddOpLowering = IntTupleBinaryOpLowering<IntTupleAddOp, IntTupleAddFn>;
 using IntTupleSubOpLowering = IntTupleBinaryOpLowering<IntTupleSubOp, IntTupleSubFn>;
@@ -720,8 +728,78 @@ using IntTupleProductLikeOpLowering =
 
 using ShapeDivOpLowering = IntTupleBinaryOpLowering<ShapeDivOp, IntTupleShapeDivFn>;
 using CeilDivOpLowering = IntTupleBinaryOpLowering<CeilDivOp, IntTupleCeilDivFn>;
-using ElemLessOpLowering = IntTupleBinaryOpLowering<ElemLessOp, IntTupleElemLessFn>;
-using EqualOpLowering = IntTupleBinaryOpLowering<EqualOp, IntTupleEqualFn>;
+
+class ElemLessOpLowering : public OpRewritePattern<ElemLessOp> {
+public:
+  using OpRewritePattern<ElemLessOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(ElemLessOp op, PatternRewriter &rewriter) const override {
+    auto loc = op.getLoc();
+    auto lhs = op.getLhs();
+    auto rhs = op.getRhs();
+
+    auto lhsTy = dyn_cast<IntTupleType>(lhs.getType());
+    auto rhsTy = dyn_cast<IntTupleType>(rhs.getType());
+    if (!lhsTy || !rhsTy)
+      return failure();
+
+    if (!isNormalForm(cast<TypedValue<IntTupleType>>(lhs)) ||
+        !isNormalForm(cast<TypedValue<IntTupleType>>(rhs)))
+      return failure();
+
+    IntTupleBuilder<IntTupleValueAdaptor> builder(rewriter, loc);
+    IntTupleValueAdaptor lhsAdaptor = IntTupleValueAdaptor::create(builder, lhs, lhsTy.getAttr());
+    IntTupleValueAdaptor rhsAdaptor = IntTupleValueAdaptor::create(builder, rhs, rhsTy.getAttr());
+
+    auto result = intTupleElemLess(builder, lhsAdaptor, rhsAdaptor);
+    auto i1Ty = rewriter.getI1Type();
+    Value i1Val;
+    if (result.isStatic()) {
+      int32_t staticVal = result.getAttr().extractIntFromLeaf().getValue();
+      i1Val = arith::ConstantIntOp::create(rewriter, loc, i1Ty, staticVal != 0).getResult();
+    } else {
+      i1Val = arith::TruncIOp::create(rewriter, loc, i1Ty, result.getValue()).getResult();
+    }
+    rewriter.replaceOp(op, i1Val);
+    return success();
+  }
+};
+
+class EqualOpLowering : public OpRewritePattern<EqualOp> {
+public:
+  using OpRewritePattern<EqualOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(EqualOp op, PatternRewriter &rewriter) const override {
+    auto loc = op.getLoc();
+    auto lhs = op.getLhs();
+    auto rhs = op.getRhs();
+
+    auto lhsTy = dyn_cast<IntTupleType>(lhs.getType());
+    auto rhsTy = dyn_cast<IntTupleType>(rhs.getType());
+    if (!lhsTy || !rhsTy)
+      return failure();
+
+    if (!isNormalForm(cast<TypedValue<IntTupleType>>(lhs)) ||
+        !isNormalForm(cast<TypedValue<IntTupleType>>(rhs)))
+      return failure();
+
+    IntTupleBuilder<IntTupleValueAdaptor> builder(rewriter, loc);
+    IntTupleValueAdaptor lhsAdaptor = IntTupleValueAdaptor::create(builder, lhs, lhsTy.getAttr());
+    IntTupleValueAdaptor rhsAdaptor = IntTupleValueAdaptor::create(builder, rhs, rhsTy.getAttr());
+
+    auto result = intTupleEqual(builder, lhsAdaptor, rhsAdaptor);
+    auto i1Ty = rewriter.getI1Type();
+    Value i1Val;
+    if (result.isStatic()) {
+      int32_t staticVal = result.getAttr().extractIntFromLeaf().getValue();
+      i1Val = arith::ConstantIntOp::create(rewriter, loc, i1Ty, staticVal != 0).getResult();
+    } else {
+      i1Val = arith::TruncIOp::create(rewriter, loc, i1Ty, result.getValue()).getResult();
+    }
+    rewriter.replaceOp(op, i1Val);
+    return success();
+  }
+};
 
 //===----------------------------------------------------------------------===//
 // IntTupleLike operations
@@ -2672,8 +2750,9 @@ public:
     RewritePatternSet patterns(context);
 
     // Constructors
-    patterns.add<MakeOrderedLayoutOpLowering, MakeIdentityLayoutOpLowering,
-                 MakeLayoutLikeOpLowering, MakeFragmentLikeOpLowering>(context);
+    patterns
+        .add<MakeOrderedLayoutOpLowering, MakeIdentityLayoutOpLowering, MakeLayoutLikeOpLowering,
+             MakeFragmentLayoutLikeOpLowering, MakeFragmentLikeOpLowering>(context);
 
     // Extractors
     patterns.add<GetScalarLowering, GetLeavesLowering, GetShapeLowering, GetStrideLowering,
@@ -2734,11 +2813,3 @@ public:
 };
 
 } // namespace
-
-namespace impl {
-
-std::unique_ptr<::mlir::Pass> createFlyLayoutLoweringPass() {
-  return std::make_unique<FlyLayoutLoweringPass>();
-}
-
-} // namespace impl

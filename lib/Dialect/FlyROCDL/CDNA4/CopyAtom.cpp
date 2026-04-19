@@ -8,6 +8,7 @@
 #include "mlir/IR/BuiltinTypes.h"
 
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
+#include "flydsl/Dialect/Fly/Utils/PointerUtils.h"
 #include "flydsl/Dialect/Fly/Utils/ThrValLayoutMacro.h.inc"
 #include "flydsl/Dialect/FlyROCDL/IR/Dialect.h"
 
@@ -65,37 +66,65 @@ Attribute CopyOpCDNA4LdsReadTransposeType::getThrBitLayoutRef() const {
   return getThrBitLayoutDst();
 }
 
-LogicalResult CopyOpCDNA4LdsReadTransposeType::emitAtomCall(OpBuilder &builder, Location loc,
-                                                            Type copyAtomTyArg, Type srcMemTyArg,
-                                                            Type dstMemTyArg, Value atomVal,
-                                                            Value src, Value dst) const {
-  auto srcMemTy = cast<fly::MemRefType>(srcMemTyArg);
-  auto dstMemTy = cast<fly::MemRefType>(dstMemTyArg);
-
-  AddressSpace srcAS = srcMemTy.getAddressSpace().getValue();
-  AddressSpace dstAS = dstMemTy.getAddressSpace().getValue();
-
-  if (srcAS != AddressSpace::Shared || dstAS != AddressSpace::Register)
-    return failure();
-
+FailureOr<Value> CopyOpCDNA4LdsReadTransposeType::emitAtomCallSSA(OpBuilder &builder, Location loc,
+                                                                  Type resultTy, Type copyAtomTyArg,
+                                                                  Type srcTyArg, Type dstTyArg,
+                                                                  Value atomVal, Value src,
+                                                                  Value dst) const {
   int32_t bitSize = getBitSize();
   int32_t transGranularity = getTransGranularity();
-  IntegerType copyTy = builder.getIntegerType(getBitSize());
 
   Value loaded;
   if (bitSize == 64 && transGranularity == 4) {
-    loaded = ROCDL::ds_read_tr4_b64::create(builder, loc, copyTy, src).getResult();
+    auto intrTy = VectorType::get({2}, builder.getI32Type());
+    loaded = ROCDL::ds_read_tr4_b64::create(builder, loc, intrTy, src);
   } else if (bitSize == 64 && transGranularity == 8) {
-    loaded = ROCDL::ds_read_tr8_b64::create(builder, loc, copyTy, src).getResult();
+    auto intrTy = VectorType::get({2}, builder.getI32Type());
+    loaded = ROCDL::ds_read_tr8_b64::create(builder, loc, intrTy, src);
   } else if (bitSize == 96 && transGranularity == 6) {
-    loaded = ROCDL::ds_read_tr6_b96::create(builder, loc, copyTy, src).getResult();
+    auto intrTy = VectorType::get({3}, builder.getI32Type());
+    loaded = ROCDL::ds_read_tr6_b96::create(builder, loc, intrTy, src);
   } else if (bitSize == 64 && transGranularity == 16) {
-    loaded = ROCDL::ds_read_tr16_b64::create(builder, loc, copyTy, src).getResult();
+    auto intrTy = VectorType::get({4}, builder.getI16Type());
+    loaded = ROCDL::ds_read_tr16_b64::create(builder, loc, intrTy, src);
   } else {
     return failure();
   }
 
-  LLVM::StoreOp::create(builder, loc, loaded, dst);
+  if (resultTy && loaded.getType() != resultTy)
+    loaded = LLVM::BitcastOp::create(builder, loc, resultTy, loaded);
+
+  return loaded;
+}
+
+FailureOr<Value> CopyOpCDNA4LdsReadTransposeType::emitAtomCallSSA(
+    OpBuilder &builder, Location loc, Type resultTy, Type copyAtomTyArg, Type srcTyArg,
+    Type dstTyArg, Type predTyArg, Value atomVal, Value src, Value dst, Value pred) const {
+  assert(resultTy && "resultTy must be SSA Type");
+  OpBuilder::InsertionGuard guard(builder);
+  auto ifOp = scf::IfOp::create(builder, loc, resultTy, pred, /*withElseRegion=*/true);
+  builder.setInsertionPointToStart(&ifOp.getThenRegion().front());
+  auto result =
+      emitAtomCallSSA(builder, loc, resultTy, copyAtomTyArg, srcTyArg, dstTyArg, atomVal, src, dst);
+  if (failed(result))
+    return failure();
+  scf::YieldOp::create(builder, loc, *result);
+
+  builder.setInsertionPointToStart(&ifOp.getElseRegion().front());
+  scf::YieldOp::create(builder, loc, dst);
+  return ifOp.getResult(0);
+}
+
+LogicalResult CopyOpCDNA4LdsReadTransposeType::emitAtomCall(OpBuilder &builder, Location loc,
+                                                            Type copyAtomTyArg, Type srcMemTyArg,
+                                                            Type dstMemTyArg, Value atomVal,
+                                                            Value src, Value dst) const {
+  auto dstSSATy = fly::RegMem2SSAType(cast<fly::MemRefType>(dstMemTyArg));
+  auto res = emitAtomCallSSA(builder, loc, dstSSATy, copyAtomTyArg, srcMemTyArg, Type{}, atomVal,
+                             src, Value{});
+  if (failed(res))
+    return failure();
+  LLVM::StoreOp::create(builder, loc, *res, dst);
   return success();
 }
 
@@ -104,6 +133,7 @@ LogicalResult CopyOpCDNA4LdsReadTransposeType::emitAtomCall(OpBuilder &builder, 
                                                             Type dstMemTyArg, Type predMemTyArg,
                                                             Value atomVal, Value src, Value dst,
                                                             Value pred) const {
+  OpBuilder::InsertionGuard guard(builder);
   auto predMemTy = cast<fly::MemRefType>(predMemTyArg);
   Value predVal = LLVM::LoadOp::create(builder, loc, predMemTy.getElemTy(), pred);
   auto ifOp = scf::IfOp::create(builder, loc, TypeRange{}, predVal, /*withElse=*/false);
