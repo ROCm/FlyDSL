@@ -534,26 +534,36 @@ def _make_pa_phase_helpers(
 
         if per_token_kv:
             scale_block_base = phys_block * stride_ks_block + kv_h * stride_ks_head
-            scale_tok_base_pt = tile_token_offset_i32 + k_tok_thread_base
-            scale_src_lane_base = rowid * arith.constant(20, type=T.i32)
+            # Vectorized scale load: each lane loads 4 consecutive token scales
+            # via a single buffer_load_dwordx4 instead of 4 separate buffer_load_dword.
+            # lane16id = k_tok_thread_base & 15; new base = warp_base + lane16id * 4
+            _lane16 = k_tok_thread_base & arith.constant(15, type=T.i32)
+            scale_tok_base_vec = (
+                tile_token_offset_i32
+                + k_tok_thread_base
+                + _lane16 * arith.constant(3, type=T.i32)
+            )
+            k_scale_x4 = buffer_ops.buffer_load(
+                ks_rsrc, scale_block_base + scale_tok_base_vec, vec_width=4, dtype=T.i32
+            )
+            v_scale_x4 = buffer_ops.buffer_load(
+                vs_rsrc, scale_block_base + scale_tok_base_vec, vec_width=4, dtype=T.i32
+            )
             k_scale_vecs = []
             v_scale_vecs = []
             for td in range_constexpr(TLOOP):
-                tok_off = scale_tok_base_pt + arith.constant(td * MFMA_N, type=T.i32)
-                k_scale_lane = buffer_ops.buffer_load(
-                    ks_rsrc, scale_block_base + tok_off, vec_width=1, dtype=T.f32
-                )
-                v_scale_lane = buffer_ops.buffer_load(
-                    vs_rsrc, scale_block_base + tok_off, vec_width=1, dtype=T.f32
-                )
-                k_scale_i32 = arith.bitcast(T.i32, k_scale_lane)
-                v_scale_i32 = arith.bitcast(T.i32, v_scale_lane)
+                # Source lane = td*4 + rowid (bpermute from row-0 thread holding this tile's scales)
+                bcast_addr = (arith.constant(td * 4, type=T.i32) + rowid) * c_four
                 k_scale_vals = []
                 v_scale_vals = []
                 for i in range_constexpr(4):
-                    bcast_addr = (
-                        scale_src_lane_base + arith.constant(i, type=T.i32)
-                    ) * c_four
+                    # dword_idx = i (compile-time constant, proven by rowid*20 % 4 == 0 and td*16 % 4 == 0)
+                    k_scale_i32 = vector.extract(
+                        k_scale_x4, static_position=[i], dynamic_position=[]
+                    )
+                    v_scale_i32 = vector.extract(
+                        v_scale_x4, static_position=[i], dynamic_position=[]
+                    )
                     sk_i32 = rocdl.ds_bpermute(
                         T.i32, arith.unwrap(bcast_addr), arith.unwrap(k_scale_i32)
                     )
@@ -2409,6 +2419,18 @@ def compile_pa_decode_sw(
                 _store_partition_results(eqgs_lane, ZERO_F, NEG_INF, zero_output)
 
         def _run_valid_partition():
+            # ── Load K once (shared across mtp_g iterations) ──
+            k_base = (phys_block * c_kb + _k_head_off) // c_four
+            k0_flat = _load_k_flat(
+                k_rsrc,
+                k_base,
+                tile_token_offset,
+                _k_tok_thread_base,
+                _c_tok_stride_dw,
+                _k_he_off_dw,
+            )
+            k0_ops = _unflatten_k(k0_flat)
+
             for _mtp_g in range_constexpr(_mtp_groups):
                 qi_val, qhi_pos, qi_for_q, local_qhead_idx_for_q = _compute_mtp_group_state(
                     lane16id,
@@ -2441,18 +2463,6 @@ def compile_pa_decode_sw(
                 )
                 if query_scale_in_kernel:
                     query_scale_lane = kernel_query_scale_lane
-
-                # ── Load K for the single block ──
-                k_base = (phys_block * c_kb + _k_head_off) // c_four
-                k0_flat = _load_k_flat(
-                    k_rsrc,
-                    k_base,
-                    tile_token_offset,
-                    _k_tok_thread_base,
-                    _c_tok_stride_dw,
-                    _k_he_off_dw,
-                )
-                k0_ops = _unflatten_k(k0_flat)
 
                 # ── Process this CTA's 256-token tile ──
                 running_max, running_sum, out0, out1 = _process_block_split(
