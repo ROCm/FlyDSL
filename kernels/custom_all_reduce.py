@@ -268,6 +268,14 @@ class FlyDSLAllreduce:
         if self.world_size not in {2, 4, 8}:
             raise ValueError(f"world_size must be one of {{2, 4, 8}}, got {self.world_size}")
 
+        # Pre-initialize resource attributes so close() is safe on partial init failure.
+        self._meta_ptr = None
+        self._meta_bases = [None] * self.world_size
+        self._input_buffer_bases = [None] * self.world_size
+        self._output_buffer_bases = [None] * self.world_size
+        self._graph_ipc_reg_list = []
+        self._out_ptrs_cache = None
+
         alloc_size = self._SIGNAL_SIZE + int(self.max_size)
         self._meta_ptr = self._alloc_uncached(alloc_size)
 
@@ -373,7 +381,9 @@ class FlyDSLAllreduce:
 
     def close(self):
         """Release IPC memory handles for peer GPU buffers."""
-        for bases in [self._meta_bases, self._input_buffer_bases, self._output_buffer_bases]:
+        for bases in [getattr(self, '_meta_bases', []),
+                      getattr(self, '_input_buffer_bases', []),
+                      getattr(self, '_output_buffer_bases', [])]:
             for b in bases:
                 if b is not None:
                     self._close_mem_handle(int(b))

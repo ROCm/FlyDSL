@@ -807,11 +807,15 @@ def get_dyn_shared(loc=None, ip=None):
 
 @traced_op
 def inttoptr(result_type, src, loc=None, ip=None):
+    if result_type.address_space == AddressSpace.Register:
+        raise ValueError("inttoptr is not supported for register address space")
     return fly.inttoptr(result_type, src, loc=loc, ip=ip)
 
 
 @traced_op
 def ptrtoint(ptr, loc=None, ip=None):
+    if ptr.address_space == AddressSpace.Register:
+        raise ValueError("ptrtoint is not supported for register address space")
     return fly.ptrtoint(ptr, loc=loc, ip=ip)
 
 

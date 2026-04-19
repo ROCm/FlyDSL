@@ -72,12 +72,10 @@ def _flydsl_key() -> str:
             except Exception:
                 pass
 
-    # Also hash flydsl/__init__.py and _version.py.
-    for name in ("__init__.py", "_version.py"):
-        p = flydsl_root / name
-        if p.is_file():
-            with open(p, "rb") as f:
-                contents.append(hashlib.sha256(f.read()).hexdigest())
+    p = flydsl_root / "__init__.py"
+    if p.is_file():
+        with open(p, "rb") as f:
+            contents.append(hashlib.sha256(f.read()).hexdigest())
 
     # 2) Hash native shared libraries (C++ passes, runtime wrappers, bindings).
     backend = get_backend()

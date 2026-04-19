@@ -419,7 +419,8 @@ public:
     while (!scalarAttr.isLeaf() && scalarAttr.rank() == 1)
       scalarAttr = scalarAttr.at(0);
     if (!scalarAttr.isLeaf())
-      return rewriter.notifyMatchFailure(op, "expected leaf IntTupleAttr after unwrapping rank-1 chain");
+      return rewriter.notifyMatchFailure(
+          op, "expected leaf IntTupleAttr after unwrapping rank-1 chain");
     auto intAttr = scalarAttr.extractIntFromLeaf();
     if (intAttr.isStatic()) {
       Type resultTy = op.getResult().getType();
@@ -2749,9 +2750,9 @@ public:
     RewritePatternSet patterns(context);
 
     // Constructors
-    patterns.add<MakeOrderedLayoutOpLowering, MakeIdentityLayoutOpLowering,
-                 MakeLayoutLikeOpLowering, MakeFragmentLayoutLikeOpLowering,
-                 MakeFragmentLikeOpLowering>(context);
+    patterns
+        .add<MakeOrderedLayoutOpLowering, MakeIdentityLayoutOpLowering, MakeLayoutLikeOpLowering,
+             MakeFragmentLayoutLikeOpLowering, MakeFragmentLikeOpLowering>(context);
 
     // Extractors
     patterns.add<GetScalarLowering, GetLeavesLowering, GetShapeLowering, GetStrideLowering,
@@ -2812,11 +2813,3 @@ public:
 };
 
 } // namespace
-
-namespace impl {
-
-std::unique_ptr<::mlir::Pass> createFlyLayoutLoweringPass() {
-  return std::make_unique<FlyLayoutLoweringPass>();
-}
-
-} // namespace impl
