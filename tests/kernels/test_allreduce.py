@@ -257,6 +257,13 @@ def _dist_worker(
         mode: "eager" or "cudagraph" - which path to run (separate flows)
         result_dict: Shared dictionary to collect results from all ranks
     """
+    import warnings
+    warnings.filterwarnings("ignore")
+    _devnull_fd = os.open(os.devnull, os.O_WRONLY)
+    os.dup2(_devnull_fd, 1)
+    os.dup2(_devnull_fd, 2)
+    os.close(_devnull_fd)
+
     torch.cuda.set_device(rank)
     device = torch.device(f"cuda:{rank}")
 
@@ -304,15 +311,6 @@ def _dist_worker(
     rank_data = x_flat
     out = torch.empty_like(x_flat)
     fa = init_custom_ar(meta, rank_data, handles, offsets, rank=rank, full_nvlink=True, out=out)
-
-    if rank == 0:
-        fa_mod = getattr(getattr(fa, "__class__", None), "__module__", None)
-        fa_name = getattr(getattr(fa, "__class__", None), "__name__", None)
-        print(
-            f"[custom_all_reduce] backend=aiter "
-            f"allreduce_impl={allreduce_impl!r} fa={fa_mod}.{fa_name}",
-            flush=True,
-        )
 
     # Warmup: align all ranks
     dist.all_reduce(torch.zeros(1, device=device), group=group)
@@ -405,7 +403,7 @@ def _dist_worker(
         elif mode == "cudagraph":
             if not hasattr(fa, "capture"):
                 if rank == 0:
-                    print("[test_flydsl_allreduce] WARN: fa has no capture(); skipping cudagraph.", flush=True)
+                    print("[test_allreduce] WARN: fa has no capture(); skipping cudagraph.", flush=True)
                 result_dict[rank] = {
                     "rank": rank, "shape": shape, "dtype": dtype_str, "world_size": world_size,
                     "mode": "cudagraph", "max_error": float("nan"), "avg_time_us": 0.0,
@@ -638,6 +636,7 @@ def run_all_tests(
                 print(f"    Avg time: mean={mean_avg_time:.3f} us/iter, min={min_avg_time:.3f}, max={max_avg_time:.3f}")
                 
                 # Add aggregate row
+                rank0 = rank_results[0] if rank_results else {}
                 aggregate_result = {
                     "rank": "aggregate",
                     "shape": str(shape),
@@ -649,9 +648,10 @@ def run_all_tests(
                     "min_avg_time_us": min_avg_time,
                     "max_avg_time_us": max_avg_time,
                     "device_time_sum_us": sum(r["device_time_sum_us"] for r in rank_results),
-                    "kernel_name": rank_results[0]["kernel_name"] if rank_results else "unknown",
+                    "kernel_name": rank0.get("kernel_name", "unknown"),
                     "num_iters": num_iters,
                     "num_warmup": num_warmup,
+                    "error": rank0.get("error"),
                 }
                 all_results.append(aggregate_result)
                 
@@ -678,10 +678,187 @@ def run_all_tests(
         if not aggregate_df.empty:
             print(aggregate_df.to_string(index=False))
         print("=" * 80)
+
+        failed = [
+            r for r in all_results
+            if r.get("rank") == "aggregate"
+            and (r.get("kernel_name") in ("skip", "error") or r.get("error"))
+        ]
+        if failed:
+            print("\n✗ FAILED cases:")
+            for r in failed:
+                reason = r.get("error") or r.get("kernel_name", "unknown")
+                print(f"  {r['shape']}  {r['dtype']}  {r['mode']}  → {reason}")
+            sys.exit(1)
+
         return df
     else:
         print("\nNo results to save.")
         return pd.DataFrame()
+
+
+# ============================================================================
+# Pytest test functions for 8-GPU allreduce CI testing
+# ============================================================================
+
+def _count_physical_gpus() -> int:
+    """Return number of physically available GPUs via a fresh subprocess.
+
+    Using a subprocess bypasses both HIP_VISIBLE_DEVICES restrictions and
+    PyTorch's internal device-count cache in the parent pytest process.
+    """
+    import subprocess as _sp
+    env = {k: v for k, v in os.environ.items() if k != "HIP_VISIBLE_DEVICES"}
+    try:
+        r = _sp.run(
+            [sys.executable, "-c", "import torch; print(torch.cuda.device_count())"],
+            capture_output=True, text=True, timeout=30, env=env,
+        )
+        return int(r.stdout.strip()) if r.returncode == 0 else 0
+    except Exception:
+        return 0
+
+
+# All 8-GPU test configurations (always run, no large_shape distinction).
+_8GPU_PARAMS = [
+    # (shape,          dtype_str,  mode)
+    # --- small shapes (edge-case coverage, aligned with aiter) ---
+    ((2,    7168), "bf16", "cudagraph"),    # 14 K elements · BF16 · cudagraph (aiter shape)
+    ((16,   4096), "fp16", "eager"),        # 64 K elements · FP16 · eager
+    # --- medium shapes ---
+    ((128,  8192), "bf16", "cudagraph"),    # 1 M elements  · BF16 · cudagraph
+    ((96,   4096), "fp16", "eager"),        # 384 K elements · FP16 · eager
+    # --- eager + cudagraph cross-dtype ---
+    ((512,  8192), "bf16", "eager"),        # 4 M elements  · BF16 · eager
+    ((1024, 8192), "fp16", "cudagraph"),    # 8 M elements  · FP16 · cudagraph
+    # --- fp32 coverage ---
+    ((64,   4096), "fp32", "eager"),        # 256 K elements · FP32 · eager
+]
+
+# 4-GPU test configurations (fp32 + smaller world_size coverage).
+_4GPU_PARAMS = [
+    # (shape,          dtype_str,  mode)
+    ((64,   4096), "fp32", "eager"),        # 256 K elements · FP32 · eager
+    ((128,  8192), "fp16", "eager"),        # 1 M elements   · FP16 · eager
+    ((64,   8192), "bf16", "cudagraph"),    # 512 K elements · BF16 · cudagraph
+]
+
+
+# 8-GPU benchmark configurations: cover all 3 kernel paths × 3 dtypes, cudagraph mode.
+#   small  (2×7168)    → 1-stage kernel
+#   medium (128×8192)  → 2-stage kernel
+#   large  (1024×8192) → write-mode kernel
+_BENCHMARK_PARAMS = [
+    # (shape,           dtype_str, mode)
+    ((2,    7168),  "fp16", "cudagraph"),
+    ((32,   8192),  "fp32", "cudagraph"),
+    ((128,  8192),  "fp16", "cudagraph"),
+    ((1024, 7168),  "bf16", "cudagraph"),
+    ((4096, 8192),  "bf16", "cudagraph")
+]
+
+
+def _run_subprocess(*, world_size, shape, dtype_str, mode, iters=10, warmup=2,
+                    output_csv=None, timeout=600):
+    """Launch the allreduce harness in a subprocess and assert success."""
+    import subprocess as _sp
+
+    env = {k: v for k, v in os.environ.items() if k != "HIP_VISIBLE_DEVICES"}
+    shape_str = ",".join(str(d) for d in shape) + f",{dtype_str}"
+
+    cmd = [
+        sys.executable, __file__,
+        "--world_size",     str(world_size),
+        "--iters",          str(iters),
+        "--warmup",         str(warmup),
+        "--shapes",         shape_str,
+        "--mode",           mode,
+        "--allreduce_impl", "flydsl",
+    ]
+    if output_csv:
+        cmd += ["--output_csv", output_csv]
+    result = _sp.run(cmd, env=env, timeout=timeout, capture_output=True, text=True)
+    assert result.returncode == 0, (
+        f"{world_size}-GPU allreduce FAILED: shape={shape}, dtype={dtype_str}, "
+        f"mode={mode} (exit code {result.returncode})\n"
+        f"stdout (last 2000 chars):\n{result.stdout[-2000:]}\n"
+        f"stderr (last 2000 chars):\n{result.stderr[-2000:]}"
+    )
+    return result
+
+
+def _run_subprocess_test(*, world_size, shape, dtype_str, mode):
+    """Launch the allreduce accuracy test in a subprocess."""
+    _run_subprocess(world_size=world_size, shape=shape, dtype_str=dtype_str, mode=mode)
+
+
+def _run_subprocess_benchmark(*, world_size, shape, dtype_str, mode):
+    """Launch the allreduce benchmark in a subprocess with more iterations.
+
+    Returns the CSV output path for downstream baseline comparison.
+    """
+    shape_tag = "x".join(str(d) for d in shape)
+    csv_path = f"/tmp/allreduce_bench_{shape_tag}_{dtype_str}_{mode}.csv"
+    result = _run_subprocess(
+        world_size=world_size, shape=shape, dtype_str=dtype_str, mode=mode,
+        iters=51, warmup=5, output_csv=csv_path, timeout=900,
+    )
+    if result.stdout:
+        for line in result.stdout.splitlines():
+            if "avg_time" in line.lower() or "max_error" in line.lower() or "aggregate" in line.lower():
+                print(line)
+    return csv_path
+
+
+def _param_id(shape, dtype_str, mode):
+    s = "x".join(str(d) for d in shape)
+    return f"{s}-{dtype_str}-{mode}"
+
+
+@pytest.mark.multi_gpu
+@pytest.mark.parametrize("shape,dtype_str,mode", _8GPU_PARAMS,
+                         ids=[_param_id(*p) for p in _8GPU_PARAMS])
+def test_allreduce_8gpu_accuracy(shape, dtype_str, mode):
+    """8-GPU allreduce accuracy test.
+
+    Runs the allreduce harness in a child subprocess so that
+    HIP_VISIBLE_DEVICES (auto-set by run_tests.sh to one GPU index)
+    does not limit device visibility inside the distributed workers.
+
+    Skipped automatically on machines with fewer than 8 physical GPUs.
+    """
+    phys_ng = _count_physical_gpus()
+    if phys_ng < 8:
+        pytest.skip(f"Requires >= 8 physical GPUs, found {phys_ng}.")
+    _run_subprocess_test(world_size=8, shape=shape, dtype_str=dtype_str, mode=mode)
+
+
+@pytest.mark.multi_gpu
+@pytest.mark.benchmark
+@pytest.mark.parametrize("shape,dtype_str,mode", _BENCHMARK_PARAMS,
+                         ids=[_param_id(*p) for p in _BENCHMARK_PARAMS])
+def test_allreduce_8gpu_benchmark(shape, dtype_str, mode):
+    """8-GPU allreduce benchmark test.
+
+    Uses 51 iters / 5 warmup to get stable timing data.
+    Performance regression is checked at the CI workflow level by comparing
+    this PR's results against the main branch (run separately).
+    """
+    phys_ng = _count_physical_gpus()
+    if phys_ng < 8:
+        pytest.skip(f"Requires >= 8 physical GPUs, found {phys_ng}.")
+    _run_subprocess_benchmark(world_size=8, shape=shape, dtype_str=dtype_str, mode=mode)
+
+
+@pytest.mark.multi_gpu
+@pytest.mark.parametrize("shape,dtype_str,mode", _4GPU_PARAMS,
+                         ids=[_param_id(*p) for p in _4GPU_PARAMS])
+def test_allreduce_4gpu_accuracy(shape, dtype_str, mode):
+    """4-GPU allreduce accuracy test (covers fp32 and world_size=4)."""
+    phys_ng = _count_physical_gpus()
+    if phys_ng < 4:
+        pytest.skip(f"Requires >= 4 physical GPUs, found {phys_ng}.")
+    _run_subprocess_test(world_size=4, shape=shape, dtype_str=dtype_str, mode=mode)
 
 
 if __name__ == "__main__":

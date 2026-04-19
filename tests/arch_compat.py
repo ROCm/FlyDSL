@@ -16,6 +16,7 @@ CDNA_ONLY_TESTS = frozenset({
     "test_moe_reduce.py",
     "test_pa.py",
     "test_quant.py",
+    "test_allreduce.py",   # custom_all_reduce requires CDNA (gfx9xx)
 })
 
 # Example scripts verified to work on RDNA (non-CDNA) GPUs.

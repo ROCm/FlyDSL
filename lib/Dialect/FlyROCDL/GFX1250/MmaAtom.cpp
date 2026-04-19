@@ -212,11 +212,8 @@ static int64_t getWmmaAccVecSize(int32_t m, int32_t k, Type elemTyA, Type elemTy
 enum class WmmaVariant { ModsAllReuse, ModsC, ModsABClamp };
 
 template <typename WmmaOp, WmmaVariant Variant>
-static LogicalResult emitWmma(OpBuilder &builder, Location loc, Type abTyA, Type abTyB,
-                              VectorType accTy, Value aPtr, Value bPtr, Value cPtr, Value dPtr) {
-  Value a = LLVM::LoadOp::create(builder, loc, abTyA, aPtr);
-  Value b = LLVM::LoadOp::create(builder, loc, abTyB, bPtr);
-  Value c = LLVM::LoadOp::create(builder, loc, accTy, cPtr);
+static FailureOr<Value> emitWmmaSSA(OpBuilder &builder, Location loc, VectorType accTy, Value a,
+                                    Value b, Value c) {
   Value res;
   if constexpr (Variant == WmmaVariant::ModsAllReuse) {
     res = WmmaOp::create(builder, loc, accTy,
@@ -235,14 +232,14 @@ static LogicalResult emitWmma(OpBuilder &builder, Location loc, Type abTyA, Type
                          /*reuseA=*/false, /*reuseB=*/false, /*clamp=*/false)
               .getResult();
   }
-  LLVM::StoreOp::create(builder, loc, res, dPtr);
-  return success();
+  return res;
 }
 
-LogicalResult MmaOpGFX1250_WMMAType::emitAtomCall(OpBuilder &builder, Location loc, Type mmaAtomTy,
-                                                  Type dMemTy, Type aMemTy, Type bMemTy,
-                                                  Type cMemTy, Value atomVal, Value dPtr,
-                                                  Value aPtr, Value bPtr, Value cPtr) const {
+FailureOr<Value> MmaOpGFX1250_WMMAType::emitAtomCallSSA(OpBuilder &builder, Location loc,
+                                                        Type resultTy, Type mmaAtomTyArg,
+                                                        Type dTyArg, Type aTyArg, Type bTyArg,
+                                                        Type cTyArg, Value atomVal, Value d,
+                                                        Value a, Value b, Value c) const {
   int32_t m = getM();
   int32_t n = getN();
   int32_t k = getK();
@@ -262,45 +259,79 @@ LogicalResult MmaOpGFX1250_WMMAType::emitAtomCall(OpBuilder &builder, Location l
 
   VectorType accTy = VectorType::get({accVecSize}, elemTyAcc);
 
-#define DISPATCH_WMMA(M_, K_, PRED, OP, VARIANT)                                                   \
-  if (m == M_ && n == M_ && k == K_ && (PRED))                                                     \
-    return emitWmma<ROCDL::OP, WmmaVariant::VARIANT>(builder, loc, abTyA, abTyB, accTy, aPtr,      \
-                                                     bPtr, cPtr, dPtr);
+#define DISPATCH_WMMA_SSA(M_, K_, PRED, OP, VARIANT)                                               \
+  if (m == M_ && n == M_ && k == K_ && (PRED)) {                                                   \
+    return emitWmmaSSA<ROCDL::OP, WmmaVariant::VARIANT>(builder, loc, accTy, a, b, c);             \
+  }
 
-#define DISPATCH_WMMA_FP8(K_, ACC_PRED, ACC_PREFIX)                                                \
-  DISPATCH_WMMA(16, K_, isFP8(elemTyA) && isFP8(elemTyB) && ACC_PRED,                              \
-                wmma_##ACC_PREFIX##_16x16x##K_##_fp8_fp8, ModsC)                                   \
-  DISPATCH_WMMA(16, K_, isFP8(elemTyA) && isBF8(elemTyB) && ACC_PRED,                              \
-                wmma_##ACC_PREFIX##_16x16x##K_##_fp8_bf8, ModsC)                                   \
-  DISPATCH_WMMA(16, K_, isBF8(elemTyA) && isFP8(elemTyB) && ACC_PRED,                              \
-                wmma_##ACC_PREFIX##_16x16x##K_##_bf8_fp8, ModsC)                                   \
-  DISPATCH_WMMA(16, K_, isBF8(elemTyA) && isBF8(elemTyB) && ACC_PRED,                              \
-                wmma_##ACC_PREFIX##_16x16x##K_##_bf8_bf8, ModsC)
+#define DISPATCH_WMMA_SSA_FP8(K_, ACC_PRED, ACC_PREFIX)                                            \
+  DISPATCH_WMMA_SSA(16, K_, isFP8(elemTyA) && isFP8(elemTyB) && ACC_PRED,                          \
+                    wmma_##ACC_PREFIX##_16x16x##K_##_fp8_fp8, ModsC)                               \
+  DISPATCH_WMMA_SSA(16, K_, isFP8(elemTyA) && isBF8(elemTyB) && ACC_PRED,                          \
+                    wmma_##ACC_PREFIX##_16x16x##K_##_fp8_bf8, ModsC)                               \
+  DISPATCH_WMMA_SSA(16, K_, isBF8(elemTyA) && isFP8(elemTyB) && ACC_PRED,                          \
+                    wmma_##ACC_PREFIX##_16x16x##K_##_bf8_fp8, ModsC)                               \
+  DISPATCH_WMMA_SSA(16, K_, isBF8(elemTyA) && isBF8(elemTyB) && ACC_PRED,                          \
+                    wmma_##ACC_PREFIX##_16x16x##K_##_bf8_bf8, ModsC)
 
-  DISPATCH_WMMA(16, 4, elemTyA.isF32() && elemTyB.isF32() && elemTyAcc.isF32(),
-                wmma_f32_16x16x4_f32, ModsAllReuse)
+  DISPATCH_WMMA_SSA(16, 4, elemTyA.isF32() && elemTyB.isF32() && elemTyAcc.isF32(),
+                    wmma_f32_16x16x4_f32, ModsAllReuse)
 
-  DISPATCH_WMMA(16, 32, elemTyA.isF16() && elemTyB.isF16() && elemTyAcc.isF32(),
-                wmma_f32_16x16x32_f16, ModsAllReuse)
-  DISPATCH_WMMA(16, 32, elemTyA.isBF16() && elemTyB.isBF16() && elemTyAcc.isF32(),
-                wmma_f32_16x16x32_bf16, ModsAllReuse)
-  DISPATCH_WMMA(16, 32, elemTyA.isF16() && elemTyB.isF16() && elemTyAcc.isF16(),
-                wmma_f16_16x16x32_f16, ModsAllReuse)
-  DISPATCH_WMMA(16, 32, elemTyA.isBF16() && elemTyB.isBF16() && elemTyAcc.isBF16(),
-                wmma_bf16_16x16x32_bf16, ModsAllReuse)
+  DISPATCH_WMMA_SSA(16, 32, elemTyA.isF16() && elemTyB.isF16() && elemTyAcc.isF32(),
+                    wmma_f32_16x16x32_f16, ModsAllReuse)
+  DISPATCH_WMMA_SSA(16, 32, elemTyA.isBF16() && elemTyB.isBF16() && elemTyAcc.isF32(),
+                    wmma_f32_16x16x32_bf16, ModsAllReuse)
+  DISPATCH_WMMA_SSA(16, 32, elemTyA.isF16() && elemTyB.isF16() && elemTyAcc.isF16(),
+                    wmma_f16_16x16x32_f16, ModsAllReuse)
+  DISPATCH_WMMA_SSA(16, 32, elemTyA.isBF16() && elemTyB.isBF16() && elemTyAcc.isBF16(),
+                    wmma_bf16_16x16x32_bf16, ModsAllReuse)
 
-  DISPATCH_WMMA_FP8(64, elemTyAcc.isF32(), f32)
-  DISPATCH_WMMA_FP8(64, elemTyAcc.isF16(), f16)
-  DISPATCH_WMMA_FP8(128, elemTyAcc.isF32(), f32)
-  DISPATCH_WMMA_FP8(128, elemTyAcc.isF16(), f16)
+  DISPATCH_WMMA_SSA_FP8(64, elemTyAcc.isF32(), f32)
+  DISPATCH_WMMA_SSA_FP8(64, elemTyAcc.isF16(), f16)
+  DISPATCH_WMMA_SSA_FP8(128, elemTyAcc.isF32(), f32)
+  DISPATCH_WMMA_SSA_FP8(128, elemTyAcc.isF16(), f16)
 
-  DISPATCH_WMMA(16, 64, elemTyA.isInteger(8) && elemTyB.isInteger(8) && elemTyAcc.isInteger(32),
-                wmma_i32_16x16x64_iu8, ModsABClamp)
+  DISPATCH_WMMA_SSA(16, 64, elemTyA.isInteger(8) && elemTyB.isInteger(8) && elemTyAcc.isInteger(32),
+                    wmma_i32_16x16x64_iu8, ModsABClamp)
 
-#undef DISPATCH_WMMA_FP8
-#undef DISPATCH_WMMA
+#undef DISPATCH_WMMA_SSA_FP8
+#undef DISPATCH_WMMA_SSA
 
   return failure();
+}
+
+LogicalResult MmaOpGFX1250_WMMAType::emitAtomCall(OpBuilder &builder, Location loc, Type mmaAtomTy,
+                                                  Type dMemTy, Type aMemTy, Type bMemTy,
+                                                  Type cMemTy, Value atomVal, Value dPtr,
+                                                  Value aPtr, Value bPtr, Value cPtr) const {
+  int32_t m = getM();
+  int32_t n = getN();
+  int32_t k = getK();
+  Type elemTyA = getElemTyA();
+  Type elemTyB = getElemTyB();
+  Type elemTyAcc = getElemTyAcc();
+  MLIRContext *ctx = builder.getContext();
+
+  Type abTyA = getWmmaABType(ctx, m, k, elemTyA);
+  Type abTyB = getWmmaABType(ctx, n, k, elemTyB);
+  if (!abTyA || !abTyB)
+    return failure();
+
+  int64_t accVecSize = getWmmaAccVecSize(m, k, elemTyA, elemTyB, elemTyAcc);
+  if (accVecSize == 0)
+    return failure();
+
+  VectorType accTy = VectorType::get({accVecSize}, elemTyAcc);
+
+  Value a = LLVM::LoadOp::create(builder, loc, abTyA, aPtr);
+  Value b = LLVM::LoadOp::create(builder, loc, abTyB, bPtr);
+  Value c = LLVM::LoadOp::create(builder, loc, accTy, cPtr);
+  auto res = emitAtomCallSSA(builder, loc, Type{}, mmaAtomTy, accTy, abTyA, abTyB, accTy, atomVal,
+                             Value{}, a, b, c);
+  if (failed(res))
+    return failure();
+  LLVM::StoreOp::create(builder, loc, *res, dPtr);
+  return success();
 }
 
 } // namespace mlir::fly_rocdl
