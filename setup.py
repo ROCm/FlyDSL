@@ -155,7 +155,6 @@ def _read_version() -> str:
     return f"{base_version}.dev{commit_count}"
 
 
-
 def _load_requirements() -> list[str]:
     req = REPO_ROOT / "requirements.txt"
     if not req.exists():

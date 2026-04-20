@@ -142,6 +142,46 @@ class CompiledArtifact:
                 print("=" * 60)
                 print(self._source_ir)
 
+    def dump_to_object(self, function_prefix: str, arch: str = "") -> bytes:
+        """Export this artifact as a relocatable ELF .o file.
+
+        The .o contains x86 host wrapper code + embedded GPU binary (HSACO),
+        linkable into a shared library for C/C++ deployment without Python.
+
+        Args:
+            function_prefix: Prefix for exported symbols, e.g. "gemm_fp16_256x128".
+            arch: Target GPU architecture. Auto-detected if empty.
+
+        Returns:
+            bytes: Contents of the ELF .o file.
+        """
+        from .export.object_export import dump_to_object
+
+        return dump_to_object(self, function_prefix, arch=arch)
+
+    def export_to_c(
+        self,
+        file_path: str,
+        file_name: str,
+        function_prefix: str,
+        arch: str = "",
+    ) -> None:
+        """Export this artifact as C header + object file for HIP deployment.
+
+        Produces {file_name}.h and {file_name}.o in the specified directory.
+        Use ``load_module("{file_name}.o")`` to load in Python (links .o → .so
+        automatically), or ``gcc -shared`` to link for C/C++ use.
+
+        Args:
+            file_path: Directory to write output files.
+            file_name: Base name for output files (without extension).
+            function_prefix: Symbol prefix, e.g. "gemm_fp16_256x128".
+            arch: Target GPU architecture. Auto-detected if empty.
+        """
+        from .export.hip_header import export_to_c
+
+        export_to_c(self, file_path, file_name, function_prefix, arch=arch)
+
     @property
     def ir(self) -> str:
         return self._ir_text

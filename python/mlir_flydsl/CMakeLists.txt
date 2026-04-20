@@ -249,3 +249,36 @@ set_target_properties(FlyJitRuntime PROPERTIES
 add_dependencies(FlyPythonCAPI FlyJitRuntime)
 
 
+################################################################################
+# FlyBinaryLoader — LLVM LLJIT-based .o file loader.
+# Loads relocatable .o files in-process via JITLink without requiring gcc.
+################################################################################
+
+add_library(FlyBinaryLoader SHARED
+  ${PROJECT_SOURCE_DIR}/lib/Runtime/FlyBinaryLoader.cpp
+)
+target_include_directories(FlyBinaryLoader PRIVATE
+  ${LLVM_INCLUDE_DIRS}
+  ${MLIR_INCLUDE_DIRS}
+)
+target_compile_features(FlyBinaryLoader PRIVATE cxx_std_17)
+# Hide all symbols except flyBinaryModule* C API.
+# Prevents LLVM symbol conflicts with other LLVM-based libraries in the process.
+target_compile_options(FlyBinaryLoader PRIVATE -fvisibility=hidden)
+target_link_options(FlyBinaryLoader PRIVATE
+  -Wl,--version-script=${PROJECT_SOURCE_DIR}/lib/Runtime/fly_binary_loader.version
+)
+if(NOT LLVM_ENABLE_RTTI)
+  target_compile_options(FlyBinaryLoader PRIVATE -fno-rtti)
+endif()
+# Link LLVM ORC JIT + dependencies via cmake component resolver.
+llvm_map_components_to_libnames(_FLY_BINARY_LOADER_LLVM_LIBS
+  orcjit jitlink executionengine runtimedyld native support
+)
+target_link_libraries(FlyBinaryLoader PRIVATE ${_FLY_BINARY_LOADER_LLVM_LIBS})
+set_target_properties(FlyBinaryLoader PROPERTIES
+  OUTPUT_NAME "fly_binary_loader"
+  LIBRARY_OUTPUT_DIRECTORY "${_MLIR_LIBS_DIR}"
+)
+
+
