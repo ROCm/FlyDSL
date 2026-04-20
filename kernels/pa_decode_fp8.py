@@ -543,6 +543,21 @@ def _make_pa_phase_helpers(
                 vhe_data.append(va_dw)
             va_dws.append(vhe_data)
 
+        def _build_scale_vec(scale_x4, td):
+            # Broadcast the row-0 lane's dwordx4 scale payload to the td-local token group.
+            bcast_addr = (arith.constant(td * 4, type=T.i32) + rowid) * c_four
+            scale_vals = []
+            for i in range_constexpr(4):
+                scale_i32 = vector.extract(
+                    scale_x4, static_position=[i], dynamic_position=[]
+                )
+                out_i32 = rocdl.ds_bpermute(
+                    T.i32, arith.unwrap(bcast_addr), arith.unwrap(scale_i32)
+                )
+                scale_vals.append(arith.bitcast(T.f32, out_i32))
+            return vector.from_elements(T.f32x4, scale_vals)
+
+        v_scale_vecs = None
         if per_token_kv:
             scale_block_base = phys_block * stride_ks_block + kv_h * stride_ks_head
             # Vectorized scale load: each lane loads 4 consecutive token scales
@@ -557,36 +572,6 @@ def _make_pa_phase_helpers(
             k_scale_x4 = buffer_ops.buffer_load(
                 ks_rsrc, scale_block_base + scale_tok_base_vec, vec_width=4, dtype=T.i32
             )
-            v_scale_x4 = buffer_ops.buffer_load(
-                vs_rsrc, scale_block_base + scale_tok_base_vec, vec_width=4, dtype=T.i32
-            )
-            k_scale_vecs = []
-            v_scale_vecs = []
-            for td in range_constexpr(TLOOP):
-                # Source lane = td*4 + rowid (bpermute from row-0 thread holding this tile's scales)
-                bcast_addr = (arith.constant(td * 4, type=T.i32) + rowid) * c_four
-                k_scale_vals = []
-                v_scale_vals = []
-                for i in range_constexpr(4):
-                    # dword_idx = i (compile-time constant, proven by rowid*20 % 4 == 0 and td*16 % 4 == 0)
-                    k_scale_i32 = vector.extract(
-                        k_scale_x4, static_position=[i], dynamic_position=[]
-                    )
-                    v_scale_i32 = vector.extract(
-                        v_scale_x4, static_position=[i], dynamic_position=[]
-                    )
-                    sk_i32 = rocdl.ds_bpermute(
-                        T.i32, arith.unwrap(bcast_addr), arith.unwrap(k_scale_i32)
-                    )
-                    sv_i32 = rocdl.ds_bpermute(
-                        T.i32, arith.unwrap(bcast_addr), arith.unwrap(v_scale_i32)
-                    )
-                    k_scale_vals.append(arith.bitcast(T.f32, sk_i32))
-                    v_scale_vals.append(arith.bitcast(T.f32, sv_i32))
-                k_scale_vecs.append(vector.from_elements(T.f32x4, k_scale_vals))
-                v_scale_vecs.append(vector.from_elements(T.f32x4, v_scale_vals))
-        else:
-            v_scale_vecs = None
 
         v_results = []
         d_out = []
@@ -609,14 +594,13 @@ def _make_pa_phase_helpers(
                 )
             v_results.append(vhe_data)
             if per_token_kv:
+                k_scale_vec = _build_scale_vec(k_scale_x4, td)
                 scale_vec = (
-                    k_scale_vecs[td] * query_scale_vec
+                    k_scale_vec * query_scale_vec
                     if per_token_q
-                    else k_scale_vecs[td] * vector.broadcast(T.f32x4, softmax_q_scale)
+                    else k_scale_vec * vector.broadcast(T.f32x4, softmax_q_scale)
                 )
-                d_out.append(
-                    acc * scale_vec
-                )
+                d_out.append(acc * scale_vec)
             else:
                 if per_token_q:
                     d_out.append(
@@ -695,9 +679,14 @@ def _make_pa_phase_helpers(
         )
 
         if per_token_kv:
+            v_scale_x4 = buffer_ops.buffer_load(
+                vs_rsrc, scale_block_base + scale_tok_base_vec, vec_width=4, dtype=T.i32
+            )
+            v_scale_vecs = []
             v_max_warp = zero_f
             for td in range_constexpr(TLOOP):
-                vs = v_scale_vecs[td]
+                vs = _build_scale_vec(v_scale_x4, td)
+                v_scale_vecs.append(vs)
                 for i in range_constexpr(4):
                     if kv_tok_base is not None:
                         kv_tok = kv_tok_base + arith.constant(td * MFMA_N + i, type=T.i32)
@@ -2430,18 +2419,6 @@ def compile_pa_decode_sw(
                 _store_partition_results(eqgs_lane, ZERO_F, NEG_INF, zero_output)
 
         def _run_valid_partition():
-            # ── Load K once (shared across mtp_g iterations) ──
-            k_base = (phys_block * c_kb + _k_head_off) // c_four
-            k0_flat = _load_k_flat(
-                k_rsrc,
-                k_base,
-                tile_token_offset,
-                _k_tok_thread_base,
-                _c_tok_stride_dw,
-                _k_he_off_dw,
-            )
-            k0_ops = _unflatten_k(k0_flat)
-
             for _mtp_g in range_constexpr(_mtp_groups):
                 qi_val, qhi_pos, qi_for_q, local_qhead_idx_for_q = _compute_mtp_group_state(
                     lane16id,
@@ -2490,6 +2467,12 @@ def compile_pa_decode_sw(
 
                 # ══ VISIBLE WARP: full QK + softmax + PV pipeline ══
                 with _if_then(warp_visible_if):
+                    k_base = (phys_block * c_kb + _k_head_off) // c_four
+                    k0_flat = _load_k_flat(
+                        k_rsrc, k_base, tile_token_offset,
+                        _k_tok_thread_base, _c_tok_stride_dw, _k_he_off_dw,
+                    )
+                    k0_ops = _unflatten_k(k0_flat)
                     v_base = (phys_block * c_vb + _v_head_off) // c_four
                     d_out_0, v0_ops, vs0 = _qk_and_intra_softmax(
                         k0_ops, kv_seq_start, v_base, tile_token_offset,
