@@ -38,6 +38,27 @@ struct PyMmaOpCDNA3_MFMAType : PyConcreteType<PyMmaOpCDNA3_MFMAType> {
   }
 };
 
+struct PyMmaOpCDNA4_MFMAScaleType : PyConcreteType<PyMmaOpCDNA4_MFMAScaleType> {
+  FLYDSL_REGISTER_TYPE_BINDING(MmaOpCDNA4_MFMAScaleType, "MmaOpCDNA4_MFMAScaleType");
+
+  static void bindDerived(ClassTy &c) {
+    c.def_static(
+        "get",
+        [](int32_t m, int32_t n, int32_t k, PyType &elemTyA, PyType &elemTyB, PyType &elemTyAcc,
+           int32_t opselA, int32_t opselB, DefaultingPyMlirContext context) {
+          return PyMmaOpCDNA4_MFMAScaleType(
+              context->getRef(),
+              wrap(MmaOpCDNA4_MFMAScaleType::get(m, n, k, unwrap(elemTyA), unwrap(elemTyB),
+                                                 unwrap(elemTyAcc), opselA, opselB)));
+        },
+        "m"_a, "n"_a, "k"_a, "elem_ty_a"_a, "elem_ty_b"_a, "elem_ty_acc"_a, "opsel_a"_a = 0,
+        "opsel_b"_a = 0, nb::kw_only(), "context"_a = nb::none(),
+        "Create a MmaOpCDNA4_MFMAScaleType with m, n, k dimensions, element types, "
+        "and optional opsel_a / opsel_b (compile-time lane index into the scale "
+        "vector, default 0)");
+  }
+};
+
 struct PyMmaOpGFX1250_WMMAType : PyConcreteType<PyMmaOpGFX1250_WMMAType> {
   FLYDSL_REGISTER_TYPE_BINDING(MmaOpGFX1250_WMMAType, "MmaOpGFX1250_WMMAType");
 
@@ -97,8 +118,8 @@ struct PyCopyOpCDNA3BufferAtomicType : PyConcreteType<PyCopyOpCDNA3BufferAtomicT
         "get",
         [](int32_t atomicOp, PyType &valTypeObj, DefaultingPyMlirContext context) {
           MLIRContext *ctx = unwrap(context.get()->get());
-          auto atomicOpAttr = ::mlir::fly::AtomicOpAttr::get(
-              ctx, static_cast<::mlir::fly::AtomicOp>(atomicOp));
+          auto atomicOpAttr =
+              ::mlir::fly::AtomicOpAttr::get(ctx, static_cast<::mlir::fly::AtomicOp>(atomicOp));
           return PyCopyOpCDNA3BufferAtomicType(
               context->getRef(),
               wrap(CopyOpCDNA3BufferAtomicType::get(atomicOpAttr, unwrap(valTypeObj))));
@@ -133,10 +154,13 @@ struct PyCopyOpCDNA4LdsReadTransposeType : PyConcreteType<PyCopyOpCDNA4LdsReadTr
 NB_MODULE(_mlirDialectsFlyROCDL, m) {
   m.doc() = "MLIR Python FlyROCDL Extension";
 
+  // clang-format off
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyMmaOpCDNA3_MFMAType::bind(m);
+  ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyMmaOpCDNA4_MFMAScaleType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyMmaOpGFX1250_WMMAType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyCopyOpCDNA3BufferCopyType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyCopyOpCDNA3BufferCopyLDSType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyCopyOpCDNA3BufferAtomicType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyCopyOpCDNA4LdsReadTransposeType::bind(m);
+  // clang-format on
 }
