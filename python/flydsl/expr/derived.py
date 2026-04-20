@@ -106,14 +106,19 @@ def make_layout_tv(thr_layout, val_layout, loc=None, ip=None):
     Returns:
         Tuple of (tiler_mn, layout_tv).
     """
+    if not thr_layout.is_static:
+        raise ValueError("thr_layout is not static")
+    if not val_layout.is_static:
+        raise ValueError("val_layout is not static")
+
     layout_mn = raked_product(thr_layout, val_layout)
-    thr_size = size(thr_layout)
-    val_size = size(val_layout)
+    thr_size = size(thr_layout).to_py_value()
+    val_size = size(val_layout).to_py_value()
     tmp = make_layout((thr_size, val_size), (1, thr_size))
 
     layout_tv = composition(right_inverse(layout_mn), tmp)
 
-    tiler_mn = int_tuple_product_each(get_shape(layout_mn))
+    tiler_mn = int_tuple_product_each(get_shape(layout_mn)).to_py_value()
     return (tiler_mn, layout_tv)
 
 

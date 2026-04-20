@@ -77,11 +77,3 @@ public:
 };
 
 } // namespace
-
-namespace impl {
-
-std::unique_ptr<::mlir::Pass> createFlyCanonicalizePass() {
-  return std::make_unique<FlyCanonicalizePass>();
-}
-
-} // namespace impl

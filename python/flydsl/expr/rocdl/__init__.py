@@ -34,8 +34,11 @@ _ods_mfma_f32_16x16x16f16 = mfma_f32_16x16x16f16
 _ods_mfma_f32_16x16x16bf16_1k = globals().get("mfma_f32_16x16x16bf16_1k", None)
 _ods_mfma_f32_16x16x32_fp8_fp8 = mfma_f32_16x16x32_fp8_fp8
 _ods_mfma_i32_16x16x32_i8 = mfma_i32_16x16x32_i8
-_ods_mfma_scale_f32_16x16x128_f8f6f4 = globals().get("mfma_scale_f32_16x16x128_f8f6f4", None) or globals().get(
-    "mfma_scale_f32_16x16x128_f8f6f4_", None
+_ods_mfma_f32_16x16x32_f16 = globals().get("mfma_f32_16x16x32_f16", None)
+_ods_mfma_f32_16x16x32_bf16 = globals().get("mfma_f32_16x16x32_bf16", None)
+_ods_mfma_scale_f32_16x16x128_f8f6f4 = (
+    globals().get("mfma_scale_f32_16x16x128_f8f6f4", None)
+    or globals().get("mfma_scale_f32_16x16x128_f8f6f4_", None)
 )
 mask_mfma = 0x008
 mask_vmem_rd = 0x020
@@ -108,6 +111,22 @@ def mfma_f32_16x16x32_fp8_fp8(result_type, operands, *, loc=None, ip=None):
 def mfma_i32_16x16x32_i8(result_type, operands, *, loc=None, ip=None):
     a, b, c, cbsz, abid, blgp = _split_mfma_operands(operands, loc=loc)
     return _ods_mfma_i32_16x16x32_i8(result_type, a, b, c, cbsz, abid, blgp, loc=loc, ip=ip).result
+
+
+@traced_op
+def mfma_f32_16x16x32_f16(result_type, operands, *, loc=None, ip=None):
+    if _ods_mfma_f32_16x16x32_f16 is None:
+        raise AttributeError("ROCDL op not found: mfma_f32_16x16x32_f16 (gfx950+)")
+    a, b, c, cbsz, abid, blgp = _split_mfma_operands(operands, loc=loc)
+    return _ods_mfma_f32_16x16x32_f16(result_type, a, b, c, cbsz, abid, blgp, loc=loc, ip=ip).result
+
+
+@traced_op
+def mfma_f32_16x16x32_bf16(result_type, operands, *, loc=None, ip=None):
+    if _ods_mfma_f32_16x16x32_bf16 is None:
+        raise AttributeError("ROCDL op not found: mfma_f32_16x16x32_bf16 (gfx950+)")
+    a, b, c, cbsz, abid, blgp = _split_mfma_operands(operands, loc=loc)
+    return _ods_mfma_f32_16x16x32_bf16(result_type, a, b, c, cbsz, abid, blgp, loc=loc, ip=ip).result
 
 
 @traced_op
@@ -378,6 +397,7 @@ def lds_transpose_load(result_type, lds_memref, elem_offset, elem_bytes):
 
 # ── New high-level helpers from universal.py ──────────────────────────
 from .universal import *  # noqa: F401,F403
+from .inline_asm import *  # noqa: F401,F403
 
 # ── Wrappers: accept DSL Numeric args (fx.Int32, fx.Float32, etc.) ─────────
 # ODS-generated ops require raw ir.Value. These wrappers auto-convert.

@@ -67,6 +67,7 @@ class TestLLVMOptionBindings:
         restored = _fly.set_llvm_option_bool("enable-post-misched", True)
         assert restored is False
 
+    @pytest.mark.skip(reason="Temporarily disabled: opt-bisect-limit leaks LLVM BISECT logs across pytest.")
     def test_int_round_trip(self):
         _fly = self._get_fly()
         # Use a large limit so it doesn't affect compilation
@@ -110,6 +111,7 @@ class TestLLVMOptionsContextManager:
         val = _fly.set_llvm_option_bool("enable-post-misched", baseline)
         assert val == baseline
 
+    @pytest.mark.skip(reason="Temporarily disabled: opt-bisect-limit leaks LLVM BISECT logs across pytest.")
     def test_mixed_types(self):
         from flydsl.compiler.llvm_options import llvm_options
 
@@ -170,6 +172,8 @@ class TestCompileHintsPropagation:
         """Verify fast_fp_math/unsafe_fp_math appear in rocdl-attach-target."""
         from flydsl.compiler.backends import rocm
         captured = {}
+        monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", "0")
+        _reset_jit_caches(_noop_launch)
 
         orig = rocm.RocmBackend.pipeline_fragments
 
@@ -187,6 +191,7 @@ class TestCompileHintsPropagation:
 
     def test_llvm_options_in_compile_hints(self):
         """Verify llvm_options key is accepted and doesn't crash."""
+        _reset_jit_caches(_noop_launch)
         exe = flyc.compile[{
             "llvm_options": {"enable-post-misched": False},
         }](_noop_launch)

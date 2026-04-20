@@ -9,6 +9,11 @@ on:
       - main
   workflow_dispatch:
 
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -19,10 +24,18 @@ env:
   GITHUB_COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.event.head_commit.id }}
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # Single-GPU tests: kernels, unit, examples, MLIR FileCheck, benchmarks.
+  # Runs on 1-GPU and Navi runners only.
+  # ---------------------------------------------------------------------------
   test:
     strategy:
       matrix:
-        runners: [ 'linux-flydsl-mi325-1', 'linux-flydsl-mi355-1', 'linux-flydsl-navi-2' ]
+        runners: [
+          'linux-flydsl-mi325-1',
+          'linux-flydsl-mi355-1',
+          'linux-flydsl-navi-2',
+        ]
       fail-fast: false
     runs-on: ${{ matrix.runners }}
     steps:
@@ -164,6 +177,170 @@ jobs:
             echo "logs.tgz not found; skipping log extraction"
           fi
       
+      - name: Clean up
+        if: always()
+        run: |
+          docker stop flydsl_test
+          docker rm flydsl_test
+
+  # ---------------------------------------------------------------------------
+  # Multi-GPU allreduce tests: ONLY for 8-GPU runners.
+  # Runs on BOTH linux-flydsl-mi325-8 AND linux-flydsl-mi355-8 independently.
+  # fail-fast: false ensures both runners always complete even if one fails.
+  # ---------------------------------------------------------------------------
+  multi-gpu:
+    needs: test
+    name: Multi-GPU AllReduce Tests (${{ matrix.runners }})
+    timeout-minutes: 120
+    strategy:
+      matrix:
+        runners: [
+          'linux-flydsl-mi325-8',
+          'linux-flydsl-mi355-8',
+        ]
+      fail-fast: false
+    runs-on: ${{ matrix.runners }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.GITHUB_REPO_NAME }}
+          ref: ${{ env.GITHUB_COMMIT_SHA }}
+          path: flydsl-test
+
+      - name: Start CI container
+        run: |
+          echo "Clean up containers..."
+          docker ps -aq -f name=flydsl_test | xargs -r docker stop | xargs -r docker rm || true
+
+          echo "Start CI container..."
+          if [ -f "/etc/podinfo/gha-render-devices" ]; then
+            DEVICE_FLAG=$(cat /etc/podinfo/gha-render-devices)
+          else
+            DEVICE_FLAG="--device /dev/dri"
+          fi
+
+          docker run -dt --network=host --user root --device=/dev/kfd $DEVICE_FLAG \
+          -v "${GITHUB_WORKSPACE:-$PWD}/flydsl-test:/flydsl-test" \
+          --ipc=host --group-add video \
+          --shm-size 16g \
+          --cap-add=SYS_PTRACE \
+          --security-opt seccomp=unconfined \
+          -w /flydsl-test \
+          --name flydsl_test \
+          ${{ env.DOCKER_IMAGE }}
+        env:
+          GITHUB_WORKSPACE: ${{ github.workspace }}
+
+      - name: Install dependencies
+        run: |
+          docker exec flydsl_test bash -c "apt-get update && apt-get install -y cmake build-essential patchelf"
+          docker exec flydsl_test bash -c "python3 -m pip install -U pip setuptools wheel"
+          docker exec flydsl_test bash -c "python3 -m pip install ninja>=1.11.1"
+          docker exec flydsl_test bash -c "python3 -m pip install -U 'hypothesis>=6.82.0'"
+          docker exec flydsl_test bash -c "git config --global --add safe.directory /flydsl-test && cd /flydsl-test && git log"
+
+      - name: Restore cached MLIR install tarball (if available)
+        id: mlir-cache
+        uses: actions/cache@v4
+        with:
+          path: mlir_install.tgz
+          key: mlir-install-${{ matrix.runners }}-${{ hashFiles('flydsl-test/thirdparty/llvm-hash.txt', 'flydsl-test/scripts/build_llvm.sh', 'flydsl-test/CMakeLists.txt', 'flydsl-test/.github/workflows/flydsl.yaml') }}
+
+      - name: Use cached MLIR install tarball (skip LLVM build)
+        if: steps.mlir-cache.outputs.cache-hit == 'true'
+        run: |
+          ls -lh mlir_install.tgz
+          docker cp mlir_install.tgz flydsl_test:/tmp/mlir_install.tgz
+          docker exec flydsl_test bash -c "rm -rf /llvm-project/mlir_install && mkdir -p /llvm-project && tar -xzf /tmp/mlir_install.tgz -C /llvm-project"
+          docker exec flydsl_test bash -c "ls -la /llvm-project/mlir_install/lib/cmake/mlir"
+
+      - name: Build LLVM
+        if: steps.mlir-cache.outputs.cache-hit != 'true'
+        run: |
+          set -ex
+          docker exec flydsl_test bash -c "cd /flydsl-test && bash scripts/build_llvm.sh"
+          docker exec flydsl_test bash -c "ls -la /llvm-project/mlir_install/lib/cmake/mlir"
+          docker cp flydsl_test:/llvm-project/mlir_install.tgz ./mlir_install.tgz || true
+
+      - name: Build FlyDSL (uses MLIR install prefix)
+        run: |
+          docker exec flydsl_test bash -c "export MLIR_PATH=/llvm-project/mlir_install && cd /flydsl-test && python3 -m pip install -e . --use-pep517"
+
+      - name: Run multi-GPU allreduce tests
+        timeout-minutes: 30
+        run: |
+          docker exec flydsl_test bash -c "
+            cd /flydsl-test
+            python3 -m pytest tests/kernels/test_allreduce.py \
+              -m multi_gpu -v --no-header --tb=short
+          "
+
+      - name: Run allreduce benchmark (PR)
+        timeout-minutes: 30
+        run: |
+          docker exec flydsl_test bash -c "
+            cd /flydsl-test
+            python3 tests/kernels/test_allreduce.py \
+              --world_size 8 --iters 51 --warmup 5 \
+              --allreduce_impl flydsl --mode cudagraph \
+              --shapes '2,7168,fp16;32,8192,fp32;128,8192,fp16;1024,7168,bf16;4096,8192,bf16' \
+              --output_csv /tmp/bench_pr.csv
+          "
+
+      - name: Build main branch baseline
+        id: build-main
+        timeout-minutes: 20
+        continue-on-error: true
+        run: |
+          docker exec flydsl_test bash -c "
+            cd /flydsl-test
+            git fetch origin main --depth=1
+            git worktree add /tmp/flydsl-main origin/main
+            cd /tmp/flydsl-main
+            export MLIR_PATH=/llvm-project/mlir_install
+            python3 -m pip install -e . --use-pep517 2>&1 | tail -5
+          "
+
+      - name: Run allreduce benchmark (main)
+        id: bench-main
+        if: steps.build-main.outcome == 'success'
+        timeout-minutes: 30
+        continue-on-error: true
+        run: |
+          docker exec flydsl_test bash -c "
+            cp /flydsl-test/tests/kernels/test_allreduce.py \
+               /tmp/flydsl-main/tests/kernels/test_allreduce.py
+            cd /tmp/flydsl-main
+            python3 tests/kernels/test_allreduce.py \
+              --world_size 8 --iters 51 --warmup 5 \
+              --allreduce_impl flydsl --mode cudagraph \
+              --shapes '2,7168,fp16;32,8192,fp32;128,8192,fp16;1024,7168,bf16;4096,8192,bf16' \
+              --output_csv /tmp/bench_main.csv
+          "
+
+      - name: Check performance regression (PR vs main)
+        if: steps.bench-main.outcome != 'skipped'
+        timeout-minutes: 5
+        run: |
+          docker exec flydsl_test bash -c "
+            cd /flydsl-test
+            python3 tests/kernels/compare_allreduce_benchmark.py \
+              /tmp/bench_main.csv /tmp/bench_pr.csv
+          "
+
+      - name: Show test logs
+        if: failure()
+        run: |
+          docker exec flydsl_test bash -c 'cd /tmp && tar czf /tmp/logs.tgz *.log 2>/dev/null || echo "no logs"'
+          docker cp flydsl_test:/tmp/logs.tgz . || true
+          if [ -f logs.tgz ]; then
+            tar -xzf logs.tgz || true
+            cat *.log || true
+          else
+            echo "logs.tgz not found; skipping log extraction"
+          fi
+
       - name: Clean up
         if: always()
         run: |

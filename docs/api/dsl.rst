@@ -80,6 +80,7 @@ Memory Operations
 - **fx.memref_store(value, memref, indices)** -- scalar store to memref
 - **fx.memref_load_vec(memref)** -- load entire register as a vector
 - **fx.memref_store_vec(vec, memref)** -- store vector to register memref
+- **fx.make_fragment_layout_like(layout_like)** -- compute the corresponding fragment layout
 - **fx.make_fragment_like(tensor)** -- allocate register fragment with same layout
 
 Copy & GEMM
