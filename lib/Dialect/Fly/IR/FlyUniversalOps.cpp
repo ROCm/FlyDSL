@@ -285,7 +285,7 @@ LogicalResult CopyOpUniversalAtomicType::emitAtomCall(OpBuilder &builder, Locati
                                                       Type dstMemTyArg, Value atomVal, Value src,
                                                       Value dst) const {
   auto srcMemTy = cast<fly::MemRefType>(srcMemTyArg);
-  auto srcSSATy = fly::RegMem2SSAType(srcMemTy);
+  auto srcSSATy = fly::RegMem2SSAType(srcMemTy, /*llvmCompatibleType=*/true);
   Value srcVal = LLVM::LoadOp::create(builder, loc, srcSSATy, src);
   auto res = emitAtomCallSSA(builder, loc, Type{}, copyAtomTyArg, srcSSATy, dstMemTyArg, atomVal,
                              srcVal, dst);

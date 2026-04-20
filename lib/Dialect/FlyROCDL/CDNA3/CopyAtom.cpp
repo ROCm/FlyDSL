@@ -168,14 +168,14 @@ LogicalResult CopyOpCDNA3BufferCopyType::emitAtomCall(OpBuilder &builder, Locati
     return failure();
 
   if (srcIsBuffer) {
-    auto dstSSATy = fly::RegMem2SSAType(dstMemTy);
+    auto dstSSATy = fly::RegMem2SSAType(dstMemTy, true);
     auto res = emitAtomCallSSA(builder, loc, dstSSATy, copyAtomTyArg, srcMemTyArg, Type{}, atomVal,
                                src, Value{});
     if (failed(res))
       return failure();
     LLVM::StoreOp::create(builder, loc, *res, dst);
   } else {
-    auto srcSSATy = fly::RegMem2SSAType(srcMemTy);
+    auto srcSSATy = fly::RegMem2SSAType(srcMemTy, true);
     Value srcVal = LLVM::LoadOp::create(builder, loc, srcSSATy, src);
     auto res = emitAtomCallSSA(builder, loc, Type{}, copyAtomTyArg, srcSSATy, dstMemTyArg, atomVal,
                                srcVal, dst);
@@ -214,8 +214,9 @@ std::optional<unsigned> CopyOpCDNA3BufferCopyLDSType::getFieldIndex(AtomStateFie
     return 0;
   case AtomStateField::ImmOffset:
     return 1;
+  default:
+    return std::nullopt;
   }
-  return std::nullopt;
 }
 
 Type CopyOpCDNA3BufferCopyLDSType::getConvertedType(MLIRContext *ctx) const {
@@ -492,7 +493,7 @@ LogicalResult CopyOpCDNA3BufferAtomicType::emitAtomCall(OpBuilder &builder, Loca
                                                         Type dstMemTyArg, Value atomVal, Value src,
                                                         Value dst) const {
   auto srcMemTy = cast<fly::MemRefType>(srcMemTyArg);
-  auto srcSSATy = fly::RegMem2SSAType(srcMemTy);
+  auto srcSSATy = fly::RegMem2SSAType(srcMemTy, /*llvmCompatibleType=*/true);
   Value srcVal = LLVM::LoadOp::create(builder, loc, srcSSATy, src);
   auto res = emitAtomCallSSA(builder, loc, Type{}, copyAtomTyArg, srcSSATy, dstMemTyArg, atomVal,
                              srcVal, dst);
