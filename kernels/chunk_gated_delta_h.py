@@ -359,7 +359,9 @@ def compile_chunk_gated_delta_h(
                     w_prefetch_all.append(w_.vec_load((fx.Index(g_off),), LOAD_VEC_WIDTH))
                     w_prefetch_lds_all.append(row * fx.Int32(LDS_W_STRIDE) + fx.Int32(kb * 64) + load_col_base)
 
-            # ── Store h snapshot to global + LDS (w[0] loads in flight) ──
+            # ── Store h snapshot to LDS only (K-major rows × V tile; feeds MFMA ds_read). ──
+            # Global VK layout is v*K+k; naive per-lane stores stride by K and lose coalescing.
+            # After a full-tile barrier, write global h in linear VK order (k consecutive).
             for kb in range_constexpr(NUM_K_BLOCKS):
                 for nr in range_constexpr(N_REPEAT):
                     acc_idx = kb * N_REPEAT + nr
@@ -371,13 +373,21 @@ def compile_chunk_gated_delta_h(
                         f32_val = vector.extract(acc_val, static_position=[elem_i], dynamic_position=[])
                         bf16_val = arith.trunc_f(T.bf16, f32_val)
 
-                        h_row = fx.Int32(kb * 64) + wid * fx.Int32(16) + lane_m_base * fx.Int32(4) + fx.Int32(elem_i)
-                        h_off = h_base + i_t_i32 * stride_h + h_col * fx.Int32(K) + h_row
-                        h_[fx.Index(h_off)] = bf16_val
-
                         lds_h_row = fx.Int32(kb * 64) + wid * fx.Int32(16) + lane_m_base * fx.Int32(4) + fx.Int32(elem_i)
                         lds_h_idx = lds_h_row * fx.Int32(BV) + lds_h_col
                         lds_h[fx.Index(lds_h_idx)] = bf16_val
+
+            gpu.barrier()
+
+            for vk_base in range_constexpr(0, LDS_H_ELEMS, BLOCK_THREADS):
+                linear = fx.Int32(vk_base) + tid
+                k_idx = linear % fx.Int32(K)
+                v_loc = linear // fx.Int32(K)
+                lds_read_idx = k_idx * fx.Int32(BV) + v_loc
+                bf16_tile = lds_h[fx.Index(lds_read_idx)]
+                v_global = i_v * fx.Int32(BV) + v_loc
+                h_off = h_base + i_t_i32 * stride_h + v_global * fx.Int32(K) + k_idx
+                h_[fx.Index(h_off)] = bf16_tile
 
             # ── Store all w K-blocks to LDS in one batch ──
             for i_wp in range_constexpr(NUM_K_BLOCKS * NUM_LOAD_BATCHES_64):
@@ -623,7 +633,7 @@ def compile_chunk_gated_delta_h(
 
 _compiled_kernels = {}
 _autotune_cache = {}  # (shape_key) -> best BV
-_BV_CANDIDATES = [16, 32, 64]
+_BV_CANDIDATES = [16]
 _AUTOTUNE_WARMUP = 5
 _AUTOTUNE_ITERS = 25
 

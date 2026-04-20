@@ -17,6 +17,9 @@ Usage:
   python3 -m pytest tests/kernels/test_chunk_gated_delta_h.py -v -s -k "Perf"
   python3 -m pytest tests/kernels/test_chunk_gated_delta_h.py -v -s -k "Rocprof"
 
+  # Autotune best config + IR/asm (Triton opt_vk + FlyDSL) into tests/kernels/k5_autotune_artifacts/:
+  FLYDSL_K5_AUTOTUNE_ARTIFACTS=1 python3 -m pytest tests/kernels/test_chunk_gated_delta_h.py -v -s -k "dump_autotune"
+
   # Direct rocprofv3 profiling (without pytest):
   python3 tests/kernels/test_chunk_gated_delta_h.py --mode rocprof
   python3 tests/kernels/test_chunk_gated_delta_h.py --mode rocprof --full-prompt-len 1000
@@ -261,9 +264,9 @@ _FLA_CHUNK_SIZE_OPT_VK = 64
 @triton.autotune(
     configs=[
         triton.Config({"BV": BV}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [2, 4]
-        for num_stages in [1, 2, 3, 4]
-        for BV in [16, 32, 64]
+        for num_warps in [4]
+        for num_stages in [3]
+        for BV in [16]
     ],
     key=["H", "K", "V", "BT"],
     use_cuda_graph=_use_cuda_graph,
@@ -904,6 +907,169 @@ def _get_triton_opt_vk_best_config() -> str:
         return "N/A"
 
 
+def _k5_autotune_artifacts_enabled() -> bool:
+    return os.environ.get("FLYDSL_K5_AUTOTUNE_ARTIFACTS", "").lower() in ("1", "true", "yes", "on")
+
+
+def _k5_autotune_artifact_root() -> Path:
+    return Path(__file__).resolve().parent / "k5_autotune_artifacts"
+
+
+def _triton_opt_vk_jit_launch_bundle(
+    k: torch.Tensor,
+    w: torch.Tensor,
+    u: torch.Tensor,
+    g: torch.Tensor | None,
+    gk: torch.Tensor | None,
+    initial_state: torch.Tensor | None,
+    output_final_state: bool,
+    save_new_value: bool,
+    cu_seqlens: torch.Tensor | None,
+):
+    """Mirror ``chunk_gated_delta_rule_fwd_h_opt_vk`` setup for ``JITFunction.run(..., warmup=True)``."""
+    B, T, Hg, K = k.shape
+    H = w.shape[1]
+    V = u.shape[-1]
+    T_flat = w.shape[2]
+    BT = _FLA_CHUNK_SIZE_OPT_VK
+
+    if cu_seqlens is None:
+        N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
+    else:
+        N, NT = len(cu_seqlens) - 1, len(_prepare_chunk_indices(cu_seqlens, BT))
+        chunk_offsets = _prepare_chunk_offsets(cu_seqlens, BT)
+
+    h = k.new_empty(B, NT, H, V, K)
+    final_state = k.new_empty(N, H, V, K, dtype=torch.float32) if output_final_state else None
+    v_new = k.new_empty(B, H, T_flat, V, dtype=u.dtype) if save_new_value else None
+
+    def grid(meta):
+        return (triton.cdiv(V, meta["BV"]), N * H)
+
+    launch_kw = dict(
+        k=k,
+        v=u,
+        w=w,
+        v_new=v_new,
+        g=g,
+        gk=gk,
+        h=h,
+        h0=initial_state,
+        ht=final_state,
+        cu_seqlens=cu_seqlens,
+        chunk_offsets=chunk_offsets,
+        T=T,
+        T_flat=T_flat,
+        H=H,
+        Hg=Hg,
+        K=K,
+        V=V,
+        BT=BT,
+    )
+    return grid, launch_kw
+
+
+def _dump_triton_opt_vk_ir_asm(
+    out_dir: Path,
+    k: torch.Tensor,
+    w_c: torch.Tensor,
+    u_c: torch.Tensor,
+    g: torch.Tensor | None,
+    gk: torch.Tensor | None,
+    h0: torch.Tensor | None,
+    cu: torch.Tensor | None,
+) -> None:
+    """Write Triton compiler IR stages + HSACO for ``chunk_gated_delta_rule_fwd_kernel_h_opt_vk`` best config."""
+    heur = chunk_gated_delta_rule_fwd_kernel_h_opt_vk
+    auto = heur.fn
+    jit = auto.fn
+    cfg = auto.best_config
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "best_config.txt").write_text(
+        f"Triton chunk_gated_delta_rule_fwd_kernel_h_opt_vk best_config:\n{cfg}\n", encoding="utf-8"
+    )
+    grid, launch_kw = _triton_opt_vk_jit_launch_bundle(
+        k=k,
+        w=w_c,
+        u=u_c,
+        g=g,
+        gk=gk,
+        initial_state=h0,
+        output_final_state=True,
+        save_new_value=True,
+        cu_seqlens=cu,
+    )
+    ctx = dict(launch_kw)
+    for v, heur_fn in heur.values.items():
+        ctx[v] = heur_fn({**dict(zip(heur.arg_names, [])), **ctx})
+    merged = {**ctx, **cfg.all_kwargs()}
+    ck = jit.run(grid=grid, warmup=True, **merged)
+    if ck is None:
+        (out_dir / "README.txt").write_text("jit.run(warmup=True) returned None.\n", encoding="utf-8")
+        return
+    for name, payload in ck.asm.items():
+        if isinstance(payload, (bytes, bytearray, memoryview)):
+            (out_dir / f"{name}.bin").write_bytes(bytes(payload))
+        else:
+            (out_dir / f"{name}.txt").write_text(str(payload), encoding="utf-8")
+
+
+def _dump_flydsl_ir_asm_for_best_bv(out_dir: Path, cg_mod, k, w_c, u_c, g, h0, cu) -> None:
+    """Recompile FlyDSL K5 with ``BV`` fixed to autotuned value and ``FLYDSL_DUMP_IR=1`` (MLIR stages + ``*_final_isa.s``)."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    shape_key = None
+    best_bv = None
+    for key, bv in cg_mod._autotune_cache.items():
+        if key[0] == K and key[1] == V:  # match global K,V
+            shape_key, best_bv = key, bv
+            break
+    if shape_key is None and cg_mod._autotune_cache:
+        shape_key, best_bv = next(iter(cg_mod._autotune_cache.items()))
+    if best_bv is None:
+        (out_dir / "README.txt").write_text("FlyDSL _autotune_cache is empty.\n", encoding="utf-8")
+        return
+
+    (out_dir / "best_config.txt").write_text(
+        f"FlyDSL chunk_gated_delta_rule_fwd_h_flydsl autotune (BV only):\n"
+        f"  shape_key={shape_key!r}\n  BV={best_bv}\n"
+        f"(MLIR gpu.func name is typically chunk_gdn_fwd_h_opt3 — see 00_origin.mlir)\n",
+        encoding="utf-8",
+    )
+    cg_mod._compiled_kernels.clear()
+    prev_dump = os.environ.get("FLYDSL_DUMP_IR")
+    prev_dir = os.environ.get("FLYDSL_DUMP_DIR")
+    prev_rt_cache = os.environ.get("FLYDSL_RUNTIME_ENABLE_CACHE")
+    try:
+        os.environ["FLYDSL_DUMP_IR"] = "1"
+        os.environ["FLYDSL_DUMP_DIR"] = str(out_dir.resolve())
+        os.environ["FLYDSL_RUNTIME_ENABLE_CACHE"] = "0"
+        chunk_gated_delta_rule_fwd_h_flydsl(
+            k,
+            w_c,
+            u_c,
+            g=g,
+            initial_state=h0,
+            output_final_state=True,
+            cu_seqlens=cu,
+            wu_contiguous=True,
+            BV=int(best_bv),
+        )
+        torch.cuda.synchronize()
+    finally:
+        if prev_dump is None:
+            os.environ.pop("FLYDSL_DUMP_IR", None)
+        else:
+            os.environ["FLYDSL_DUMP_IR"] = prev_dump
+        if prev_dir is None:
+            os.environ.pop("FLYDSL_DUMP_DIR", None)
+        else:
+            os.environ["FLYDSL_DUMP_DIR"] = prev_dir
+        if prev_rt_cache is None:
+            os.environ.pop("FLYDSL_RUNTIME_ENABLE_CACHE", None)
+        else:
+            os.environ["FLYDSL_RUNTIME_ENABLE_CACHE"] = prev_rt_cache
+
+
 # ── Performance tests ───────────────────────────────────────────────────
 
 def _bench_fn(fn, *args, **kwargs):
@@ -1355,6 +1521,53 @@ class TestRocprof:
         TestRocprof._results = []
         yield
         _print_summary_table(TestRocprof._results, title="Rocprof Performance Summary")
+
+
+class TestK5AutotuneArtifacts:
+    """Dump autotune winners and compiler artifacts (opt-in via ``FLYDSL_K5_AUTOTUNE_ARTIFACTS=1``)."""
+
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA/HIP required")
+    def test_dump_autotune_best_configs_and_ir_asm(self):
+        if not _k5_autotune_artifacts_enabled():
+            pytest.skip("set FLYDSL_K5_AUTOTUNE_ARTIFACTS=1 to dump configs / IR / asm")
+
+        import kernels.chunk_gated_delta_h as cg_k5
+
+        fpl = FULL_PROMPT_LENS[0] if FULL_PROMPT_LENS else 8192
+        tp = TP_LIST[0] if TP_LIST else 1
+        context_lens = _build_context_lens(fpl)
+        k, _, _, w_c, u_c, g, h0, cu, _ = _make_inputs(context_lens, tp=tp)
+
+        root = _k5_autotune_artifact_root()
+        root.mkdir(parents=True, exist_ok=True)
+        tri_dir = root / "triton_chunk_gated_delta_rule_fwd_kernel_h_opt_vk"
+        fly_dir = root / "flydsl_chunk_gated_delta_rule_fwd_h_flydsl"
+
+        # --- Triton opt_vk: autotune (no artifact dump yet) ---
+        fwd_h_triton_opt_vk(
+            k, w_c, u_c, g=g, initial_state=h0,
+            output_final_state=True, cu_seqlens=cu,
+        )
+        torch.cuda.synchronize()
+        tri_cfg = _get_triton_opt_vk_best_config()
+        print(f"\n[K5 artifacts] Triton opt_vk autotune best: {tri_cfg}")
+        _dump_triton_opt_vk_ir_asm(tri_dir, k=k, w_c=w_c, u_c=u_c, g=g, gk=None, h0=h0, cu=cu)
+        print(f"[K5 artifacts] Triton IR/asm -> {tri_dir}")
+
+        # --- FlyDSL: autotune BV, then single recompile with FLYDSL_DUMP_IR ---
+        cg_k5._compiled_kernels.clear()
+        cg_k5._autotune_cache.clear()
+        chunk_gated_delta_rule_fwd_h_flydsl(
+            k, w_c, u_c, g=g, initial_state=h0,
+            output_final_state=True, cu_seqlens=cu, wu_contiguous=True,
+        )
+        torch.cuda.synchronize()
+        fly_cfg = _get_flydsl_best_config()
+        print(f"[K5 artifacts] FlyDSL BV autotune best: {fly_cfg}")
+        _dump_flydsl_ir_asm_for_best_bv(fly_dir, cg_k5, k, w_c, u_c, g, h0, cu)
+        subdirs = [p.name for p in fly_dir.iterdir() if p.is_dir()]
+        extra = f" subdirs={subdirs!r}" if subdirs else ""
+        print(f"[K5 artifacts] FlyDSL MLIR stages + final_isa.s -> {fly_dir}/" f"{extra}\n")
 
 
 # ── Main ────────────────────────────────────────────────────────────────
