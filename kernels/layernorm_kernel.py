@@ -104,16 +104,16 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
 
             if lane == fx.Int32(0):
                 wave_idx = ArithValue(wave).index_cast(T.index)
-                s_sum.store(w0, [wave_idx])
-                s_sumsq.store(w1, [wave_idx])
+                SmemPtr.store(s_sum, w0, [wave_idx])
+                SmemPtr.store(s_sumsq, w1, [wave_idx])
             gpu.barrier()
 
             if wave == fx.Int32(0):
                 in_range = lane < RED_SLOTS
                 lane_safe = in_range.select(lane, fx.Int32(0))
                 lane_safe_idx = ArithValue(lane_safe).index_cast(T.index)
-                v0 = s_sum.load([lane_safe_idx])
-                v1 = s_sumsq.load([lane_safe_idx])
+                v0 = SmemPtr.load(s_sum, [lane_safe_idx])
+                v1 = SmemPtr.load(s_sumsq, [lane_safe_idx])
                 z = fx.Float32(0.0)
                 ww0 = in_range.select(v0, z)
                 ww1 = in_range.select(v1, z)
@@ -122,12 +122,12 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
 
                 if lane == fx.Int32(0):
                     c0_idx = fx.Index(0)
-                    s_sum.store(ww0, [c0_idx])
-                    s_sumsq.store(ww1, [c0_idx])
+                    SmemPtr.store(s_sum, ww0, [c0_idx])
+                    SmemPtr.store(s_sumsq, ww1, [c0_idx])
             gpu.barrier()
 
             c0_idx = fx.Index(0)
-            return s_sum.load([c0_idx]), s_sumsq.load([c0_idx])
+            return SmemPtr.load(s_sum, [c0_idx]), SmemPtr.load(s_sumsq, [c0_idx])
 
         def compute_mean_rstd(sum_val, sumsq_val):
             inv_n = arith.constant(1.0 / float(N), type=compute_type)
@@ -209,6 +209,8 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
 
             # ── Pass 2: normalize + affine + store ───────────────────────
             for tile_i in range_constexpr(num_tiles_py):
+                g_next = g_cur
+                b_next = b_cur
                 if tile_i + 1 < num_tiles_py:
                     next_idx = tid + (tile_i + 1) * BLOCK_THREADS
                     g_next = _load_vec(gamma_div, next_idx).to(Float32)
@@ -221,6 +223,7 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                 y = (x - mean) * rstd
                 y = y * g_cur + b_cur
 
+                out_e = y.to(elem_dtype)
                 if dtype_str == "bf16":
                     if USE_HW_CVT_PK_BF16_F32:
                         out_e = y.to(elem_dtype)
@@ -342,6 +345,7 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                     norm = diff * rstd
                     scaled = norm * g
                     y = scaled + b
+                    y_e = y
                     if dtype_str == "bf16":
                         y_e = y.truncf(elem_type)
                     elif dtype_str == "f32":

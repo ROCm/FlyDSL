@@ -101,16 +101,16 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
 
             if lane == fx.Int32(0):
                 wave_idx = ArithValue(wave).index_cast(T.index)
-                s_red.store(w0, [wave_idx])
-                s_red2.store(w1, [wave_idx])
+                SmemPtr.store(s_red, w0, [wave_idx])
+                SmemPtr.store(s_red2, w1, [wave_idx])
             gpu.barrier()
 
             if wave == fx.Int32(0):
                 in_range = lane < RED_SLOTS
                 lane_safe = in_range.select(lane, fx.Int32(0))
                 lane_safe_idx = ArithValue(lane_safe).index_cast(T.index)
-                v0 = s_red.load([lane_safe_idx])
-                v1 = s_red2.load([lane_safe_idx])
+                v0 = SmemPtr.load(s_red, [lane_safe_idx])
+                v1 = SmemPtr.load(s_red2, [lane_safe_idx])
                 z = fx.Float32(0.0)
                 ww0 = in_range.select(v0, z)
                 ww1 = in_range.select(v1, z)
@@ -119,12 +119,12 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
 
                 if lane == fx.Int32(0):
                     c0_idx = fx.Index(0)
-                    s_red.store(ww0, [c0_idx])
-                    s_red2.store(ww1, [c0_idx])
+                    SmemPtr.store(s_red, ww0, [c0_idx])
+                    SmemPtr.store(s_red2, ww1, [c0_idx])
             gpu.barrier()
 
             c0_idx = fx.Index(0)
-            return s_red.load([c0_idx]), s_red2.load([c0_idx])
+            return SmemPtr.load(s_red, [c0_idx]), SmemPtr.load(s_red2, [c0_idx])
 
         # ==================================================================
         # Fast path: N is a multiple of tile_cols
@@ -191,6 +191,7 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
 
                 y = (x * rrms) * g
 
+                out_e = y.to(elem_dtype)
                 if dtype_str == "bf16":
                     if USE_HW_CVT_PK_BF16_F32:
                         out_e = y.to(elem_dtype)

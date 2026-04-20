@@ -243,7 +243,7 @@ def build_fused_rope_cache_module(
         i32_reg_ty = fx.MemRefType.get(T.i32, fx.LayoutType.get(1, 1), fx.AddressSpace.Register)
         i32_reg_lay = fx.make_layout(1, 1)
 
-        if not flash_layout:
+        if const_expr(not flash_layout):
             copy_atom_elem = fx.make_copy_atom(fx.rocdl.BufferCopy16b(), elem_bits)
             elem_reg_ty = fx.MemRefType.get(
                 elem_type, fx.LayoutType.get(1, 1), fx.AddressSpace.Register

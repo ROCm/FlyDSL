@@ -10,6 +10,7 @@ import numpy as np
 from .._mlir import ir
 from .._mlir.dialects import arith
 from .._mlir.extras import types as T
+from ..utils import log
 from .utils.arith import (
     ArithValue,
     arith_const,
@@ -213,6 +214,48 @@ def _extract_arith(val, signed):
     """Unwrap Numeric.value, attaching signedness if it's an ArithValue."""
     v = val.value
     return v.with_signedness(signed) if isinstance(v, ArithValue) else v
+
+
+def _unwrap_value(value):
+    """Convert FlyDSL wrappers to raw MLIR values when possible."""
+    if isinstance(value, ir.Value):
+        return value
+    if isinstance(value, (bool, int, float)):
+        try:
+            return as_numeric(value).ir_value()
+        except Exception:
+            log().error(f"failed to construct {as_numeric(value)} from {value}")
+            return value
+    if hasattr(value, "__fly_values__"):
+        values = value.__fly_values__()
+        if len(values) == 1:
+            return values[0]
+    if hasattr(value, "ir_value"):
+        return value.ir_value()
+    return value
+
+
+def _wrap_like(value, exemplar=None):
+    """Wrap an MLIR value back to a FlyDSL wrapper when possible."""
+    if not isinstance(value, ir.Value):
+        return value
+
+    if exemplar is not None:
+        if isinstance(exemplar, Numeric):
+            return type(exemplar)(value)
+        ctor = getattr(type(exemplar), "__fly_construct__", None)
+        if ctor is not None:
+            try:
+                return ctor([value])
+            except Exception:
+                log().error(f"failed to construct {type(exemplar)} from {value}")
+                return value
+
+    try:
+        return Numeric.from_ir_type(value.type)(value)
+    except Exception:
+        log().error(f"failed to construct {Numeric.from_ir_type(value.type)} from {value}")
+        return value
 
 
 def _make_binop(op, promote=True, widen_bool=False, swap=False):
