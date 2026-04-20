@@ -97,65 +97,32 @@ LogicalResult MmaOpCDNA3_MFMAType::verify(function_ref<InFlightDiagnostic()> emi
 
 static bool isFP8(Type ty) { return isa<Float8E4M3FNUZType>(ty); }
 static bool isBF8(Type ty) { return isa<Float8E5M2FNUZType>(ty); }
-static bool isF8(Type ty) { return isFP8(ty) || isBF8(ty); }
 
-static Type getMfmaABType(MLIRContext *ctx, Type elemTy, int32_t k = 0) {
+static Type getMfmaABType(MLIRContext *ctx, Type elemTy, int32_t mn, int32_t k = 0) {
   if (elemTy.isF32())
     return Float32Type::get(ctx);
   if (elemTy.isF16())
-    return VectorType::get({4}, Float16Type::get(ctx));
-  if (elemTy.isBF16())
-    return VectorType::get({(k >= 16) ? 4 : 2}, IntegerType::get(ctx, 16));
+    return VectorType::get({mn * k / 64}, Float16Type::get(ctx));
+  if (elemTy.isBF16()) {
+    int vecSize = mn * k / 64;
+    Type elemTy;
+    if (vecSize == 8) {
+      elemTy = BFloat16Type::get(ctx); // CDNA4 version
+    } else {
+      elemTy = IntegerType::get(ctx, 16);
+    }
+    return VectorType::get({vecSize}, elemTy);
+  }
   if (elemTy.getIntOrFloatBitWidth() == 8)
     return IntegerType::get(ctx, 64);
   return nullptr;
 }
 
-static int64_t getMfmaAccVecSize(int32_t m, int32_t k, Type elemTyA) {
-  if (elemTyA.isF32()) {
-    if (m == 32 && k == 1)
-      return 32;
-    if (m == 32 && k == 2)
-      return 16;
-    if (m == 16 && k == 1)
-      return 16;
-    if (m == 16 && k == 4)
-      return 4;
-    if (m == 4 && k == 1)
-      return 4;
-  }
-  if (elemTyA.isF16()) {
-    if (m == 32 && k == 4)
-      return 32;
-    if (m == 32 && k == 8)
-      return 16;
-    if (m == 16 && k == 4)
-      return 16;
-    if (m == 16 && k == 16)
-      return 4;
-    if (m == 4 && k == 4)
-      return 4;
-  }
-  if (elemTyA.isBF16()) {
-    if (m == 32 && k == 2)
-      return 32;
-    if (m == 32 && k == 4)
-      return 16;
-    if (m == 16 && k == 2)
-      return 16;
-    if (m == 16 && k == 8)
-      return 4;
-    if (m == 16 && k == 16)
-      return 4;
-    if (m == 4 && k == 2)
-      return 4;
-  }
-  if (isF8(elemTyA)) {
-    if (m == 16 && k == 32)
-      return 4;
-    if (m == 32 && k == 16)
-      return 16;
-  }
+static int64_t getMfmaAccVecSize(int32_t m, int32_t n, Type elemTyA) {
+  if (m == 16 && n == 16)
+    return 4;
+  if (m == 32 && n == 32)
+    return 16;
   return 0;
 }
 
@@ -176,7 +143,7 @@ FailureOr<Value> MmaOpCDNA3_MFMAType::emitAtomCallSSA(OpBuilder &builder, Locati
   if (!abTyA || !abTyB)
     return failure();
 
-  int64_t accVecSize = getMfmaAccVecSize(m, k, elemTyA);
+  int64_t accVecSize = getMfmaAccVecSize(m, n, elemTyA);
   if (accVecSize == 0)
     return failure();
 
