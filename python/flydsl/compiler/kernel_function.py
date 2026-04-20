@@ -250,6 +250,8 @@ class CompilationContext:
         self.func_tracker = func_tracker
         self.kernel_trackers: Dict[str, FuncLocationTracker] = {}
         self.stream_arg = None
+        self.extern_symbols: set = set()
+        self.link_libs: set = set()
 
     @classmethod
     def get_current(cls) -> Optional["CompilationContext"]:
@@ -308,8 +310,6 @@ class KernelLauncher:
     def _check_block_vs_known(self, block_dims: Tuple) -> None:
         """Raise when statically-known *block* dims are invalid for AMDGPU."""
         if self._known_block_size is None:
-            # Without known_block_size the AMDGPU backend assumes
-            # max_flat_workgroup_size = 256.  Error if the launch exceeds that.
             if all(isinstance(v, int) for v in block_dims):
                 total = block_dims[0] * block_dims[1] * block_dims[2]
                 if total > 256:
