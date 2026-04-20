@@ -88,6 +88,17 @@ def _if_then(if_op):
                 scf.YieldOp([])
 
 
+@contextmanager
+def _if_else(if_op):
+    with ir.InsertionPoint(if_op.else_block):
+        try:
+            yield if_op.else_block
+        finally:
+            blk = if_op.else_block
+            if (not blk.operations) or not isinstance(blk.operations[-1], scf.YieldOp):
+                scf.YieldOp([])
+
+
 def _pack_i32_pair_to_i64(a_i32, b_i32):
     v = vector.from_elements(T.vec(2, T.i32), [a_i32, b_i32])
     v1 = vector.bitcast(T.vec(1, T.i64), v)
@@ -2464,24 +2475,91 @@ def compile_pa_decode_sw(
                 if query_scale_in_kernel:
                     query_scale_lane = kernel_query_scale_lane
 
-                # ── Process this CTA's 256-token tile ──
-                running_max, running_sum, out0, out1 = _process_block_split(
-                    NEG_INF, ZERO_F,
-                    arith.constant_vector(0.0, T.f32x4),
-                    arith.constant_vector(0.0, T.f32x4),
-                    tile_token_offset,
-                    k0_ops,
-                    q_frags,
-                    causal_bound,
-                    query_scale_lane,
-                    seq_start,
-                )
-
-                # ── Normalize and write output ──
-                outelems_norm = _normalize_pa_output(running_sum, out0, out1, ZERO_F)
+                # ── Per-warp visibility check (wavefront-uniform) ──
+                _warp_tok_start = kv_seq_start + warp_id * arith.constant(TOKENS_PER_WARP, type=T.i32)
+                _warp_tok_end = _warp_tok_start + arith.constant(TOKENS_PER_WARP, type=T.i32)
+                if global_window_limit is not None:
+                    _warp_visible = (_warp_tok_start < global_window_limit) | (_warp_tok_end > seq_start)
+                else:
+                    _warp_visible = _warp_tok_end > seq_start
+                _warp_visible = _warp_visible | (_warp_tok_start < causal_bound)
 
                 eqgs_lane = qi_val * arith.constant(query_group_size, type=T.i32) + qhi_pos
-                _store_partition_results(eqgs_lane, running_sum, running_max, outelems_norm)
+
+                warp_visible_if = scf.IfOp(arith.unwrap(_warp_visible), has_else=True)
+
+                # ══ VISIBLE WARP: full QK + softmax + PV pipeline ══
+                with _if_then(warp_visible_if):
+                    v_base = (phys_block * c_vb + _v_head_off) // c_four
+                    d_out_0, v0_ops, vs0 = _qk_and_intra_softmax(
+                        k0_ops, kv_seq_start, v_base, tile_token_offset,
+                        q_frags, causal_bound,
+                        query_scale_lane=query_scale_lane,
+                        phys_block=phys_block,
+                        seq_start=seq_start,
+                    )
+                    gpu.barrier()
+                    running_max, running_sum, out0, out1, vc0 = (
+                        _cross_warp_softmax_and_prob_pack(
+                            d_out_0, NEG_INF, ZERO_F,
+                            arith.constant_vector(0.0, T.f32x4),
+                            arith.constant_vector(0.0, T.f32x4),
+                            vs0,
+                        )
+                    )
+                    gpu.barrier()
+                    out0, out1 = _pv_mfma(v0_ops, out0, out1, vc0)
+                    outelems_norm = _normalize_pa_output(running_sum, out0, out1, ZERO_F)
+                    _store_partition_results(eqgs_lane, running_sum, running_max, outelems_norm)
+
+                # ══ INVISIBLE WARP: skip QK/V/PV, write defaults ══
+                with _if_else(warp_visible_if):
+                    # Write defaults to softmax LDS
+                    vector.store(
+                        vector.from_elements(T.vec(1, T.f32), [NEG_INF]),
+                        softmax_lds_f32, [_sm_max_off],
+                    )
+                    vector.store(
+                        vector.from_elements(T.vec(1, T.f32), [ZERO_F]),
+                        softmax_lds_f32, [_sm_sum_off],
+                    )
+                    if per_token_kv:
+                        vector.store(
+                            vector.from_elements(T.vec(1, T.f32), [ZERO_F]),
+                            softmax_lds_f32, [_sm_vmax_wr_off],
+                        )
+                    # Zero prob in logits LDS
+                    _zero_i32 = arith.constant(0, type=T.i32)
+                    _zero_i32_vec = vector.from_elements(T.vec(1, T.i32), [_zero_i32])
+                    for _td in range_constexpr(TLOOP):
+                        _prob_off = _prob_wr_thread_base + arith.constant(
+                            _td * MFMA_N * PROB_ROW_STRIDE_BYTES, type=T.i32
+                        )
+                        vector.store(
+                            _zero_i32_vec, logits_lds_i32,
+                            [arith.index_cast(T.index, _prob_off // c_four)],
+                        )
+
+                    gpu.barrier()  # aligned with visible branch barrier 1
+
+                    # Participate in cross-warp softmax with dummy inputs
+                    _dummy_d_out = [arith.constant_vector(0.0, T.f32x4) for _ in range(TLOOP)]
+                    _dummy_vs = [arith.constant_vector(0.0, T.f32x4) for _ in range(TLOOP)] if per_token_kv else None
+                    _cross_warp_softmax_and_prob_pack(
+                        _dummy_d_out, NEG_INF, ZERO_F,
+                        arith.constant_vector(0.0, T.f32x4),
+                        arith.constant_vector(0.0, T.f32x4),
+                        _dummy_vs,
+                    )
+
+                    gpu.barrier()  # aligned with visible branch barrier 2
+
+                    # Skip PV MFMA — write zero output directly
+                    _zero_output = [
+                        arith.constant_vector(0.0, T.f32x4),
+                        arith.constant_vector(0.0, T.f32x4),
+                    ]
+                    _store_partition_results(eqgs_lane, ZERO_F, NEG_INF, _zero_output)
 
         invalid_cta_if = scf.IfOp(
             arith.unwrap(partition_idx >= visible_tile_count), has_else=False
