@@ -1,10 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2025 FlyDSL Project Contributors
 
-#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
-#include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/IR/BuiltinTypes.h"
 
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
@@ -31,8 +29,6 @@ LayoutAttr getThrValLayoutAB(MLIRContext *ctx, int32_t M, int32_t N, int32_t K, 
 }
 
 } // namespace cdna3
-
-namespace cdna4 {}
 
 namespace mlir::fly_rocdl {
 
@@ -186,6 +182,13 @@ FailureOr<Value> MmaOpCDNA3_MFMAType::emitAtomCallSSA(OpBuilder &builder, Locati
 
   Type accElemTy = getElemTyAcc();
   VectorType accTy = VectorType::get({accVecSize}, accElemTy);
+
+  if (a.getType() != abTyA)
+    a = LLVM::BitcastOp::create(builder, loc, abTyA, a);
+  if (b.getType() != abTyB)
+    b = LLVM::BitcastOp::create(builder, loc, abTyB, b);
+  if (c.getType() != accTy)
+    c = LLVM::BitcastOp::create(builder, loc, accTy, c);
 
 #define DISPATCH_MFMA_SSA(M_, K_, PRED, OP)                                                        \
   if (m == M_ && n == M_ && k == K_ && (PRED)) {                                                   \

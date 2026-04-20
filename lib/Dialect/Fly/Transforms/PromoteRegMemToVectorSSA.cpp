@@ -11,15 +11,13 @@
 #include "mlir/IR/Dominance.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/IR/PatternMatch.h"
-#include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/CSE.h"
 #include "llvm/ADT/DenseMap.h"
-#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
 
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
 #include "flydsl/Dialect/Fly/Transforms/Passes.h"
-#include "flydsl/Dialect/Fly/Utils/LayoutUtils.h"
+#include "flydsl/Dialect/Fly/Utils/PointerUtils.h"
 
 #include <optional>
 #include <utility>
@@ -141,10 +139,12 @@ private:
         return;
 
       PointerType ptrTy = cast<PointerType>(makePtrOp.getType());
+      Type originElemTy = ptrTy.getElemTy();
+      Type ssaElemTy = projectToLLVMCompatibleElemTy(ptrTy.getElemTy());
       regAllocaInfos.try_emplace(
           makePtrOp,
-          RegAllocaInfo{makePtrOp, static_cast<int32_t>(allocaSizeAttr.getInt()), ptrTy.getElemTy(),
-                        VectorType::get({allocaSizeAttr.getInt()}, ptrTy.getElemTy())});
+          RegAllocaInfo{makePtrOp, static_cast<int32_t>(allocaSizeAttr.getInt()), originElemTy,
+                        VectorType::get({allocaSizeAttr.getInt()}, ssaElemTy)});
       allocaOrder.push_back(makePtrOp);
     });
 
@@ -293,6 +293,40 @@ private:
     }
   }
 
+  Value bitcastScalarViaVector(OpBuilder &builder, Location loc, Value value, Type targetTy) {
+    auto srcVecTy = VectorType::get({1}, value.getType());
+    auto dstVecTy = VectorType::get({1}, targetTy);
+    Value srcVec = vector::FromElementsOp::create(builder, loc, srcVecTy, value);
+    Value dstVec = vector::BitCastOp::create(builder, loc, dstVecTy, srcVec);
+    return vector::ExtractOp::create(builder, loc, dstVec, ArrayRef<int64_t>{0});
+  }
+
+  Value bitcastToSSAElem(OpBuilder &builder, Location loc, Value value, Type ssaElemTy) {
+    Type valueTy = value.getType();
+    if (auto vecTy = dyn_cast<VectorType>(valueTy)) {
+      if (vecTy.getElementType() == ssaElemTy)
+        return value;
+      auto targetTy = VectorType::get(vecTy.getShape(), ssaElemTy);
+      return vector::BitCastOp::create(builder, loc, targetTy, value);
+    }
+    if (valueTy == ssaElemTy)
+      return value;
+    return bitcastScalarViaVector(builder, loc, value, ssaElemTy);
+  }
+
+  Value bitcastFromSSAElem(OpBuilder &builder, Location loc, Value value, Type originalTy) {
+    Type valueTy = value.getType();
+    if (auto vecTy = dyn_cast<VectorType>(valueTy)) {
+      auto originalVecTy = cast<VectorType>(originalTy);
+      if (vecTy.getElementType() == originalVecTy.getElementType())
+        return value;
+      return vector::BitCastOp::create(builder, loc, originalVecTy, value);
+    }
+    if (valueTy == originalTy)
+      return value;
+    return bitcastScalarViaVector(builder, loc, value, originalTy);
+  }
+
   LogicalResult rewritePtrStore(PtrStoreOp storeOp, OpBuilder &builder, IRMapping &mapping,
                                 RegMem2VectorSSAMap &state) {
     auto access = getRegAccessInfo(storeOp.getPtr(), storeOp.getValue().getType());
@@ -306,6 +340,10 @@ private:
 
     auto loc = storeOp.getLoc();
     Value storedValue = mapping.lookupOrDefault(storeOp.getValue());
+
+    const RegAllocaInfo *info = getAllocaInfo(access->makePtrOp);
+    assert(info && "missing alloca info for register ptr.store");
+    storedValue = bitcastToSSAElem(builder, loc, storedValue, info->vectorSSATy.getElementType());
 
     if (isa<IntegerType, FloatType>(storedValue.getType())) {
       assert(access->width == 1 && "expected scalar type with width 1");
@@ -349,6 +387,7 @@ private:
           builder, loc, currentVec, ArrayRef<int64_t>{access->offset},
           ArrayRef<int64_t>{access->width}, ArrayRef<int64_t>{1});
     }
+    extracted = bitcastFromSSAElem(builder, loc, extracted, resultType);
     mapping.map(loadOp, extracted);
     return success();
   }
