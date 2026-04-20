@@ -572,20 +572,12 @@ def fwd_h_flydsl(
     k, w, u, g=None, initial_state=None,
     output_final_state=False, cu_seqlens=None, wu_contiguous=True,
 ):
-    """Wrapper for FlyDSL kernel.
-
-    External interface uses VK layout [V, K] for hidden states.
-    FlyDSL kernel internally uses KV layout [K, V], so we transpose at boundaries.
-    """
-    h0_kv = initial_state.transpose(-2, -1).contiguous() if initial_state is not None else None
-    h_kv, v_new, fs_kv = chunk_gated_delta_rule_fwd_h_flydsl(
-        k, w, u, g=g, initial_state=h0_kv,
+    """FlyDSL K5: h / h0 / final_state are VK [V, K] (same convention as Triton opt_vk)."""
+    return chunk_gated_delta_rule_fwd_h_flydsl(
+        k, w, u, g=g, initial_state=initial_state,
         output_final_state=output_final_state,
         cu_seqlens=cu_seqlens, wu_contiguous=wu_contiguous,
     )
-    h_vk = h_kv.transpose(-2, -1).contiguous()
-    fs_vk = fs_kv.transpose(-2, -1).contiguous() if fs_kv is not None else None
-    return h_vk, v_new, fs_vk
 
 
 # ── Global test configuration ──────────────────────────────────────────
@@ -947,12 +939,12 @@ class TestPerformance:
         Hg = Hk // tp
         H = Hv // tp
 
-        # Pre-transpose h0 for KV-layout kernels (outside benchmark loop)
+        # Triton opt3 uses KV hidden-state layout; FlyDSL / opt_vk use VK natively.
         h0_kv = h0.transpose(-2, -1).contiguous() if h0 is not None else None
 
         us_fly = _bench_fn(
             chunk_gated_delta_rule_fwd_h_flydsl,
-            k, w_c, u_c, g=g, initial_state=h0_kv,
+            k, w_c, u_c, g=g, initial_state=h0,
             output_final_state=True, cu_seqlens=cu, wu_contiguous=True,
         )
 
@@ -1049,11 +1041,11 @@ def _rocprof_worker(full_prompt_len, tp=1, config_path: str | None = None):
     k, w_orig, u_orig, w_c, u_c, g, h0, cu, _ = _make_inputs(context_lens, tp=tp)
     total_tokens = int(cu[-1].item())
 
-    # Pre-transpose h0 for KV-layout kernels (outside profiling region)
+    # Triton opt3 (KV) needs transposed h0; FlyDSL uses VK like opt_vk.
     h0_kv = h0.transpose(-2, -1).contiguous() if h0 is not None else None
 
     run_fly = lambda: chunk_gated_delta_rule_fwd_h_flydsl(
-        k, w_c, u_c, g=g, initial_state=h0_kv,
+        k, w_c, u_c, g=g, initial_state=h0,
         output_final_state=True, cu_seqlens=cu, wu_contiguous=True,
     )
 

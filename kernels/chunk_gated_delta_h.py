@@ -270,9 +270,9 @@ def compile_chunk_gated_delta_h(
             boh = i_n * NT
 
         # ── Base pointer offsets (element counts) ──
-        # h: [B, NT, H, K, V] — base = (boh*H + i_h) * K * V
-        h_base = (boh * fx.Int32(H) + i_h) * fx.Int32(K * V)
-        stride_h = fx.Int32(H * K * V)
+        # h: [B, NT, H, V, K] (VK) — base = (boh*H + i_h) * V * K
+        h_base = (boh * fx.Int32(H) + i_h) * fx.Int32(V * K)
+        stride_h = fx.Int32(H * V * K)
 
         # k: [B, T, Hg, K] — base = (bos*Hg + i_h//(H//Hg)) * K
         gqa_ratio = H // Hg
@@ -300,9 +300,9 @@ def compile_chunk_gated_delta_h(
             vn_base = ((i_n * fx.Int32(H) + i_h) * T_flat) * fx.Int32(V)
 
         if USE_INITIAL_STATE:
-            h0_base = (i_nh * fx.Int32(K * V))
+            h0_base = (i_nh * fx.Int32(V * K))
         if STORE_FINAL_STATE:
-            ht_base = (i_nh * fx.Int32(K * V))
+            ht_base = (i_nh * fx.Int32(V * K))
 
         # ── MFMA lane mapping for 16x16 tiles ──
         lane_n = lane % fx.Int32(16)
@@ -330,7 +330,7 @@ def compile_chunk_gated_delta_h(
                     h0_elems = []
                     for elem_i in range_constexpr(4):
                         h0_row = fx.Int32(kb * 64) + wid * fx.Int32(16) + lane_m_base * fx.Int32(4) + fx.Int32(elem_i)
-                        h0_off = h0_base + h0_row * fx.Int32(V) + h0_col
+                        h0_off = h0_base + h0_col * fx.Int32(K) + h0_row
                         h0_elems.append(h0_[fx.Index(h0_off)])
                     loaded_vec = vector.from_elements(T.f32x4, h0_elems)
                     acc_idx = kb * N_REPEAT + nr
@@ -372,7 +372,7 @@ def compile_chunk_gated_delta_h(
                         bf16_val = arith.trunc_f(T.bf16, f32_val)
 
                         h_row = fx.Int32(kb * 64) + wid * fx.Int32(16) + lane_m_base * fx.Int32(4) + fx.Int32(elem_i)
-                        h_off = h_base + i_t_i32 * stride_h + h_row * fx.Int32(V) + h_col
+                        h_off = h_base + i_t_i32 * stride_h + h_col * fx.Int32(K) + h_row
                         h_[fx.Index(h_off)] = bf16_val
 
                         lds_h_row = fx.Int32(kb * 64) + wid * fx.Int32(16) + lane_m_base * fx.Int32(4) + fx.Int32(elem_i)
@@ -576,7 +576,7 @@ def compile_chunk_gated_delta_h(
                     for elem_i in range_constexpr(4):
                         f32_val = vector.extract(acc_val, static_position=[elem_i], dynamic_position=[])
                         ht_row = fx.Int32(kb * 64) + wid * fx.Int32(16) + lane_m_base * fx.Int32(4) + fx.Int32(elem_i)
-                        ht_off = ht_base + ht_row * fx.Int32(V) + ht_col
+                        ht_off = ht_base + ht_col * fx.Int32(K) + ht_row
                         ht_[fx.Index(ht_off)] = f32_val
 
     # ── Host launcher ──────────────────────────────────────────────────────
@@ -669,7 +669,10 @@ def chunk_gated_delta_rule_fwd_h_flydsl(
     wu_contiguous: bool = True,
     BV: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
-    """FlyDSL K5 wrapper with wrapper-level autotune over BV."""
+    """FlyDSL K5 wrapper with wrapper-level autotune over BV.
+
+    ``h`` / ``initial_state`` / ``final_state`` are VK-ordered on the last two dims: ``[..., V, K]``.
+    """
     B, T, Hg, K = k.shape
     BT = chunk_size
 
@@ -695,8 +698,8 @@ def chunk_gated_delta_rule_fwd_h_flydsl(
 
     assert K <= 256
 
-    h = k.new_empty(B, NT, H, K, V)
-    final_state = k.new_empty(N, H, K, V, dtype=torch.float32) if output_final_state else None
+    h = k.new_empty(B, NT, H, V, K)
+    final_state = k.new_empty(N, H, V, K, dtype=torch.float32) if output_final_state else None
     v_new_buf = k.new_empty(B, H, T_flat, V, dtype=u.dtype)
     v_new = v_new_buf if save_new_value else None
 
