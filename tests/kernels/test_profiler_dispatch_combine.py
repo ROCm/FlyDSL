@@ -1,5 +1,8 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+
 """
-FlyDSL v2 和 mori ref 的 dispatch/combine kernel 性能测试。
+FlyDSL 和 mori ref 的 dispatch/combine kernel 性能测试。
 
 两个正交维度可自由组合：
   --mode       测量方式：profile（torch.profiler 采集）| bench（CUDA Event 计时）
@@ -38,7 +41,23 @@ import torch
 import torch.distributed as dist
 from torch.profiler import ProfilerActivity, profile, record_function
 
-os.environ.setdefault("MORI_SHMEM_HEAP_SIZE", "6G")
+os.environ.setdefault("MORI_SHMEM_HEAP_SIZE", "16G")
+
+# ── dtype 映射 ──
+DTYPE_MAP = {
+    "bf16": torch.bfloat16,
+    "f32": torch.float32,
+    "fp8_ocp": torch.float8_e4m3fn,
+    "fp8_fnuz": torch.float8_e4m3fnuz,
+    "fp4": torch.float4_e2m1fn_x2,
+}
+
+MORI_KERNEL_SUFFIX = {
+    "bf16": "bf16",
+    "f32": "f32",
+    "fp8_ocp": "fp8_ocp",
+    "fp8_fnuz": "fp8_fnuz",
+}
 
 _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 for _p in [_ROOT, "/home/yashao/FlyDSL/python", "/home/yashao/mori/python"]:
@@ -46,9 +65,9 @@ for _p in [_ROOT, "/home/yashao/FlyDSL/python", "/home/yashao/mori/python"]:
         sys.path.insert(0, _p)
 
 import mori.shmem as ms
-from kernels.dispatch_combine_intranode_op_v2 import (
-    FlyDSLDispatchCombineConfigV2,
-    FlyDSLDispatchCombineIntraNodeOpV2,
+from kernels.dispatch_combine_intranode_op import (
+    FlyDSLDispatchCombineConfig,
+    FlyDSLDispatchCombineIntraNodeOp,
 )
 
 
@@ -87,22 +106,29 @@ def cleanup():
         dist.destroy_process_group()
 
 
+_MORI_SUPPORTED_DTYPES = {torch.bfloat16, torch.float32, torch.float8_e4m3fn}
+
+
 def build_mori_ref(rank, world_size, cfg,
                    block_num: int = None, warp_per_block: int = None):
+    if cfg.data_type not in _MORI_SUPPORTED_DTYPES:
+        raise RuntimeError(f"mori does not support dtype {cfg.data_type} on this platform")
     from mori.ops.dispatch_combine import EpDispatchCombineConfig, EpDispatchCombineOp
     elem = torch.tensor([], dtype=cfg.data_type).element_size()
     mcfg = EpDispatchCombineConfig(
         data_type=cfg.data_type,
         rank=rank, world_size=world_size,
         hidden_dim=cfg.hidden_dim,
-        scale_dim=cfg.top_k, scale_type_size=4,
+        scale_dim=cfg.num_experts_per_token, scale_type_size=4,
         max_token_type_size=elem,
         max_num_inp_token_per_rank=cfg.max_num_inp_token_per_rank,
         num_experts_per_rank=cfg.num_experts_per_rank,
-        num_experts_per_token=cfg.top_k,
+        num_experts_per_token=cfg.num_experts_per_token,
         warp_num_per_block=warp_per_block if warp_per_block is not None else cfg.warp_num_per_block,
         block_num=block_num if block_num is not None else cfg.block_num,
         gpu_per_node=world_size,
+        use_external_inp_buf=cfg.use_external_inp_buf,
+        quant_type=cfg.quant_type,
     )
     return EpDispatchCombineOp(mcfg)
 
@@ -142,7 +168,8 @@ def _save_profile_json(prof, out_path: str, rank: int, op_tag: str, meta: dict):
 
 
 def _allreduce_stats(prof, op_tag: str, rank: int, world_size: int,
-                     dev: torch.device) -> dict:
+                     dev: torch.device, dtype_key: str = "bf16",
+                     quant_type: str = "none") -> dict:
     """从本卡 profiler 提取关键指标，跨卡 all_reduce 后返回 avg/min/max 字典。
 
     采集 6 项指标（顺序固定，打包成 float64 tensor 做 all_reduce）：
@@ -153,13 +180,14 @@ def _allreduce_stats(prof, op_tag: str, rank: int, world_size: int,
       4: dispatch record_function CPU  time (μs/call)
       5: combine  record_function CPU  time (μs/call)
     """
-    # kernel 名称映射
+    msuf = MORI_KERNEL_SUFFIX.get(dtype_key, "bf16")
+    _cast_suf = "_fp8cast" if quant_type == "fp8_direct_cast" else ""
     if op_tag == "flydsl":
         d_kernel = "ep_dispatch_intranode_0"
         c_kernel = "ep_combine_intranode_0"
     else:
-        d_kernel = "EpDispatchIntraNodeKernel_bf16"
-        c_kernel = "EpCombineIntraNodeKernel_bf16_nop2p"
+        d_kernel = f"EpDispatchIntraNodeKernel_{msuf}"
+        c_kernel = f"EpCombineIntraNodeKernel_{msuf}_nop2p{_cast_suf}"
     d_label = f"{op_tag}::dispatch"
     c_label  = f"{op_tag}::combine"
 
@@ -219,7 +247,8 @@ def _print_aggregated(stats: dict, op_tag: str, world_size: int, meta: dict):
 
 def _allreduce_cudagraph_stats_from_key_averages(
         prof, op_tag: str, rank: int, world_size: int,
-        dev: torch.device) -> dict:
+        dev: torch.device, dtype_key: str = "bf16",
+        quant_type: str = "none") -> dict:
     """从 key_averages() 提取指标（仅含 active 阶段数据），跨卡 all_reduce。
 
     采集 4 项：
@@ -228,12 +257,14 @@ def _allreduce_cudagraph_stats_from_key_averages(
       2: cudagraph_replay CUDA E2E time
       3: cudagraph_replay CPU  E2E time
     """
+    msuf = MORI_KERNEL_SUFFIX.get(dtype_key, "bf16")
+    _cast_suf = "_fp8cast" if quant_type == "fp8_direct_cast" else ""
     if op_tag == "flydsl":
         d_kernel = "ep_dispatch_intranode_0"
         c_kernel = "ep_combine_intranode_0"
     else:
-        d_kernel = "EpDispatchIntraNodeKernel_bf16"
-        c_kernel = "EpCombineIntraNodeKernel_bf16_nop2p"
+        d_kernel = f"EpDispatchIntraNodeKernel_{msuf}"
+        c_kernel = f"EpCombineIntraNodeKernel_{msuf}_nop2p{_cast_suf}"
     cg_label = f"{op_tag}::cudagraph_replay"
 
     ev = {e.key: e for e in prof.key_averages()}
@@ -264,7 +295,9 @@ def _allreduce_cudagraph_stats_from_key_averages(
 def _cudagraph_stats_from_trace(trace_path: str, op_tag: str,
                                 rank: int, world_size: int,
                                 dev: torch.device,
-                                active_iters: int, skip_first: int = 5) -> dict:
+                                active_iters: int, skip_first: int = 5,
+                                dtype_key: str = "bf16",
+                                quant_type: str = "none") -> dict:
     """从 chrome trace JSON 手动统计 kernel 性能，跳过前 skip_first 次 active 调用。
 
     流程：解析 trace → 按时间排序取最后 active_iters 个事件 → 丢弃前 skip_first 个 → 跨卡聚合。
@@ -272,11 +305,13 @@ def _cudagraph_stats_from_trace(trace_path: str, op_tag: str,
     with open(trace_path) as f:
         tr = json.load(f)
 
+    msuf = MORI_KERNEL_SUFFIX.get(dtype_key, "bf16")
+    _cast_suf = "_fp8cast" if quant_type == "fp8_direct_cast" else ""
     if op_tag == "flydsl":
         d_name, c_name = "ep_dispatch_intranode_0", "ep_combine_intranode_0"
     else:
-        d_name = "EpDispatchIntraNodeKernel_bf16"
-        c_name = "EpCombineIntraNodeKernel_bf16_nop2p"
+        d_name = f"EpDispatchIntraNodeKernel_{msuf}"
+        c_name = f"EpCombineIntraNodeKernel_{msuf}_nop2p{_cast_suf}"
     cg_name = f"{op_tag}::cudagraph_replay"
 
     kernel_events = [e for e in tr["traceEvents"] if e.get("cat") == "kernel"]
@@ -365,15 +400,18 @@ def _make_profiler(active_iters: int = None, prof_warmup: int = 10):
 # ─── bench 模式：不用 profiler，用 CUDA Event 计时 ────────────────────────────
 def bench_op(op, op_tag: str, inp, wts, idx, wc_buf, k,
              rank: int, world_size: int, dev: torch.device,
-             warmup: int, iters: int, meta: dict):
+             warmup: int, iters: int, meta: dict,
+             scales=None, packed_recv_x=None):
     """无 profiler 的纯计时模式，输出 dispatch / combine 的 GPU 耗时（avg/min/max）。"""
+    _dkw = dict(packed_recv_x=packed_recv_x) if packed_recv_x is not None else {}
+    _ckw = dict(packed_recv_x=packed_recv_x) if packed_recv_x is not None else {}
     ms.shmem_barrier_all()
     if rank == 0:
         print(f"\n[bench] {op_tag} 预热 {warmup} 轮...")
     for _ in range(warmup):
         op.reset()
-        ret = op.dispatch(inp, wts, None, idx)
-        op.combine(ret[0], None, ret[3])
+        ret = op.dispatch(inp, wts, scales, idx, **_dkw)
+        op.combine(ret[0], None, ret[3], **_ckw)
     torch.cuda.synchronize()
     dist.barrier()
 
@@ -390,13 +428,13 @@ def bench_op(op, op_tag: str, inp, wts, idx, wc_buf, k,
         dist.barrier()
 
         d_events[i][0].record()
-        ret = op.dispatch(inp, wts, None, idx)
+        ret = op.dispatch(inp, wts, scales, idx, **_dkw)
         d_events[i][1].record()
 
         dist.barrier()
 
         c_events[i][0].record()
-        op.combine(ret[0], None, ret[3])
+        op.combine(ret[0], None, ret[3], **_ckw)
         c_events[i][1].record()
 
     torch.cuda.synchronize()
@@ -427,7 +465,8 @@ def bench_op(op, op_tag: str, inp, wts, idx, wc_buf, k,
 
 
 # ─── cudagraph 模式：CUDA Graph capture + replay 计时 ─────────────────────────
-def _cudagraph_capture_flydsl(op, inp, wts, idx, wc_buf, capture_stream):
+def _cudagraph_capture_flydsl(op, inp, wts, idx, wc_buf, capture_stream,
+                              scales=None, packed_recv_x=None):
     """FlyDSL：录制 dispatch+combine 到 CUDA Graph。
 
     dispatch/combine 均返回全尺寸 tensor（无 .item()、无动态切片）。
@@ -435,19 +474,22 @@ def _cudagraph_capture_flydsl(op, inp, wts, idx, wc_buf, capture_stream):
     default stream，不能在 capture 期间执行），之后 capture 中仅录制
     已编译的 kernel launch。
     """
+    _dkw = dict(packed_recv_x=packed_recv_x) if packed_recv_x is not None else {}
+    _ckw = dict(packed_recv_x=packed_recv_x) if packed_recv_x is not None else {}
     op.reset()
-    ret = op.dispatch(inp, wts, None, idx)
-    op.combine(ret[0], None, ret[3])
+    ret = op.dispatch(inp, wts, scales, idx, **_dkw)
+    op.combine(ret[0], None, ret[3], **_ckw)
 
     op.barrier()
     g = torch.cuda.CUDAGraph()
     with torch.cuda.graph(g, stream=capture_stream):
-        ret = op.dispatch(inp, wts, None, idx)
-        op.combine(ret[0], None, ret[3])
+        ret = op.dispatch(inp, wts, scales, idx, **_dkw)
+        op.combine(ret[0], None, ret[3], **_ckw)
     return g, capture_stream
 
 
-def _cudagraph_capture_mori(op, inp, wts, idx, wc_buf, capture_stream):
+def _cudagraph_capture_mori(op, inp, wts, idx, wc_buf, capture_stream,
+                            scales=None, packed_recv_x=None):
     """Mori 专用：直接在 graph capture 中录制 dispatch+combine。
 
     Mori 的 dispatch 在 capture 模式下返回真实 tensor，combine kernel
@@ -464,15 +506,18 @@ def _cudagraph_capture_mori(op, inp, wts, idx, wc_buf, capture_stream):
 
 def cudagraph_op(op, op_tag: str, inp, wts, idx, wc_buf, k,
                  rank: int, world_size: int, dev: torch.device,
-                 warmup: int, iters: int, meta: dict):
+                 warmup: int, iters: int, meta: dict,
+                 scales=None, packed_recv_x=None):
     """CUDA Graph 模式：capture dispatch+combine kernel，replay 计时。"""
     capture_stream = torch.cuda.Stream()
     if op_tag == "flydsl":
         g, cs = _cudagraph_capture_flydsl(
-            op, inp, wts, idx, wc_buf, capture_stream)
+            op, inp, wts, idx, wc_buf, capture_stream,
+            scales=scales, packed_recv_x=packed_recv_x)
     else:
         g, cs = _cudagraph_capture_mori(
-            op, inp, wts, idx, wc_buf, capture_stream)
+            op, inp, wts, idx, wc_buf, capture_stream,
+            scales=scales, packed_recv_x=packed_recv_x)
 
     if rank == 0:
         print(f"\n[cudagraph] {op_tag} capture done")
@@ -537,7 +582,10 @@ def cudagraph_op(op, op_tag: str, inp, wts, idx, wc_buf, k,
 # ─── 单算子 profiler 采集 ──────────────────────────────────────────────────────
 def profile_op(op, op_tag: str, inp, wts, idx, wc_buf, k,
                rank: int, world_size: int, dev: torch.device,
-               iters: int, out_dir: str, meta: dict):
+               iters: int, out_dir: str, meta: dict,
+               scales=None, packed_recv_x=None,
+               dtype_key: str = "bf16",
+               quant_type: str = "none"):
     """对单个算子（FlyDSL 或 mori）独立 profiling，保存 JSON 并打印全卡聚合统计。
 
     使用 schedule(wait=1, warmup=10, active=iters) 让 ROCTracer 在前 11 步
@@ -549,6 +597,8 @@ def profile_op(op, op_tag: str, inp, wts, idx, wc_buf, k,
     if rank == 0:
         print(f"\n[profiler] {op_tag} 开始采集（{iters} 轮 active + {1 + prof_warmup} 轮 ramp-up）...")
 
+    _dkw = dict(packed_recv_x=packed_recv_x) if packed_recv_x is not None else {}
+    _ckw = dict(packed_recv_x=packed_recv_x) if packed_recv_x is not None else {}
     with _make_profiler(active_iters=iters, prof_warmup=prof_warmup) as prof:
         for step in range(total_steps):
             # with record_function(f"{op_tag}::reset"):
@@ -556,12 +606,12 @@ def profile_op(op, op_tag: str, inp, wts, idx, wc_buf, k,
             dist.barrier()
 
             with record_function(f"{op_tag}::dispatch"):
-                ret = op.dispatch(inp, wts, None, idx)
+                ret = op.dispatch(inp, wts, scales, idx, **_dkw)
 
             dist.barrier()
 
             with record_function(f"{op_tag}::combine"):
-                op.combine(ret[0], None, ret[3])
+                op.combine(ret[0], None, ret[3], **_ckw)
             
             # dist.barrier()
 
@@ -574,7 +624,8 @@ def profile_op(op, op_tag: str, inp, wts, idx, wc_buf, k,
         print(f"[profiler] {op_tag} trace → {out_path}")
 
     # 跨卡聚合统计（all_reduce），rank 0 打印
-    agg_stats = _allreduce_stats(prof, op_tag, rank, world_size, dev)
+    agg_stats = _allreduce_stats(prof, op_tag, rank, world_size, dev,
+                                 dtype_key=dtype_key, quant_type=quant_type)
     if rank == 0:
         _print_aggregated(agg_stats, op_tag, world_size, meta)
     return prof
@@ -583,7 +634,10 @@ def profile_op(op, op_tag: str, inp, wts, idx, wc_buf, k,
 # ─── profile + cudagraph 模式 ─────────────────────────────────────────────────
 def profile_cudagraph_op(op, op_tag: str, inp, wts, idx, wc_buf, k,
                          rank: int, world_size: int, dev: torch.device,
-                         warmup: int, iters: int, out_dir: str, meta: dict):
+                         warmup: int, iters: int, out_dir: str, meta: dict,
+                         scales=None, packed_recv_x=None,
+                         dtype_key: str = "bf16",
+                         quant_type: str = "none"):
     """torch.profiler 采集 CUDAGraph replay，保存 JSON 并打印全卡聚合统计。
 
     流程：eager warmup → graph capture → replay warmup → profiler 包裹的 replay。
@@ -593,10 +647,12 @@ def profile_cudagraph_op(op, op_tag: str, inp, wts, idx, wc_buf, k,
     capture_stream = torch.cuda.Stream()
     if op_tag == "flydsl":
         g, cs = _cudagraph_capture_flydsl(
-            op, inp, wts, idx, wc_buf, capture_stream)
+            op, inp, wts, idx, wc_buf, capture_stream,
+            scales=scales, packed_recv_x=packed_recv_x)
     else:
         g, cs = _cudagraph_capture_mori(
-            op, inp, wts, idx, wc_buf, capture_stream)
+            op, inp, wts, idx, wc_buf, capture_stream,
+            scales=scales, packed_recv_x=packed_recv_x)
 
     if rank == 0:
         print(f"\n[profile+cudagraph] {op_tag} capture done")
@@ -631,11 +687,223 @@ def profile_cudagraph_op(op, op_tag: str, inp, wts, idx, wc_buf, k,
 
     agg_stats = _cudagraph_stats_from_trace(
         trace_path, op_tag, rank, world_size, dev,
-        active_iters=active_iters, skip_first=skip_first)
+        active_iters=active_iters, skip_first=skip_first,
+        dtype_key=dtype_key, quant_type=quant_type)
     if rank == 0:
         _print_cudagraph_aggregated(agg_stats, op_tag, world_size, meta,
                                     active_iters=valid_iters)
     return prof
+
+
+# ─── verify 模式：正确性验证 ─────────────────────────────────────────────────
+VERIFY_TOL = {
+    "f32":      {"atol": 1e-5,  "rtol": 1e-4},
+    "bf16":     {"atol": 1e-2,  "rtol": 1e-2},
+    "fp8_ocp":  {"atol": 1e-1,  "rtol": 5e-2},
+    "fp8_fnuz": {"atol": 1e-1,  "rtol": 5e-2},
+    "fp4":      {"atol": 5e-1,  "rtol": 1e-1},
+}
+
+
+def _check_close(name, a, b, atol, rtol, rank, cast_to=None):
+    """Compare two tensors and print PASS/FAIL."""
+    if cast_to is not None:
+        a, b = a.to(cast_to), b.to(cast_to)
+    ok = torch.allclose(a, b, atol=atol, rtol=rtol)
+    max_diff = (a.float() - b.float()).abs().max().item()
+    status = "PASS" if ok else "FAIL"
+    if rank == 0:
+        print(f"  [{status}] {name:40s}  max_diff={max_diff:.6g}  atol={atol} rtol={rtol}")
+    return ok
+
+
+def _check_exact(name, a, b, rank):
+    """Compare two tensors for exact equality."""
+    ok = torch.equal(a, b)
+    if not ok:
+        diff_count = (a != b).sum().item()
+        status = "FAIL"
+    else:
+        diff_count = 0
+        status = "PASS"
+    if rank == 0:
+        print(f"  [{status}] {name:40s}  diff_elements={diff_count}")
+    return ok
+
+
+def verify_self(op_fly, inp, wts, idx, k,
+                rank, world_size, dev, dtype_key, cfg):
+    """FlyDSL self-check when mori is unavailable.
+
+    dispatch → combine → verify output ≈ weighted sum of input.
+    With uniform weights (1/k) and k distinct PEs, combine output should ≈ input.
+    """
+    tol = VERIFY_TOL.get(dtype_key, VERIFY_TOL["bf16"])
+    if cfg.quant_type == "fp8_direct_cast":
+        tol = {"atol": 2.0 * k, "rtol": 0.5}
+    all_pass = True
+
+    if rank == 0:
+        print(f"\n{'='*65}")
+        print(f"  VERIFY (self-check, mori unavailable)  dtype={dtype_key}  "
+              f"EP={world_size}  bs={inp.shape[0]}  h={cfg.hidden_dim}  k={k}")
+        print(f"{'='*65}")
+
+    op_fly.reset()
+    ms.shmem_barrier_all()
+
+    packed_recv_x = None
+    if cfg.enable_std_moe:
+        epr = cfg.num_experts_per_rank
+        mr = cfg.max_recv
+        _prx_nbytes = epr * mr * cfg.token_bytes
+        packed_recv_x = torch.zeros(
+            _prx_nbytes, dtype=torch.uint8, device=dev
+        ).view(cfg.data_type).view(epr * mr, cfg.token_view_dim)
+
+    scales = None
+    if cfg.scale_dim > 0 and cfg.scale_type_size > 0:
+        _sc_bytes = cfg.scale_dim * cfg.scale_type_size
+        scales = torch.randn(inp.shape[0], _sc_bytes // 4,
+                             dtype=torch.float32, device=dev).contiguous()
+        scales = scales.view(torch.uint8).view(inp.shape[0], _sc_bytes)
+
+    ret_f = op_fly.dispatch(inp, wts, scales, idx,
+                            packed_recv_x=packed_recv_x)
+    torch.cuda.synchronize()
+    dist.barrier()
+
+    if rank == 0:
+        tr = ret_f[4].item()
+        print(f"\n  total_recv = {tr}")
+
+    cout_f = op_fly.combine(ret_f[0], None, ret_f[3],
+                            packed_recv_x=packed_recv_x)
+    torch.cuda.synchronize()
+    dist.barrier()
+
+    mt = cfg.max_num_inp_token_per_rank
+    f_tok = cout_f[0][:mt]
+
+
+    if cfg.enable_std_moe:
+        scale_factor = 1
+        check_label = "out_tok vs inp (StdMoE weighted)"
+    else:
+        scale_factor = k
+        check_label = "out_tok vs k*inp"
+
+    if rank == 0:
+        print(f"\n  ── Self-check: combine output vs {'inp' if scale_factor == 1 else 'k*input'} ──")
+        if cfg.data_type == torch.float4_e2m1fn_x2:
+            if k == 1 and not cfg.enable_std_moe:
+                ok = torch.equal(f_tok.view(torch.uint8), inp.view(torch.uint8))
+                status = "PASS" if ok else "FAIL"
+                print(f"  [{status}] out_tok vs inp (byte-level, k=1)")
+                all_pass &= ok
+            else:
+                print(f"  [SKIP] fp4 numeric check not supported "
+                      f"(k={k}, std_moe={cfg.enable_std_moe})")
+        else:
+            cast_to = torch.float32 if cfg.data_type in (
+                torch.float8_e4m3fn, torch.float8_e4m3fnuz) else None
+            try:
+                expected = (inp.float() * scale_factor).to(cfg.data_type)
+                all_pass &= _check_close(
+                    check_label, f_tok, expected,
+                    tol["atol"], tol["rtol"], rank, cast_to=cast_to)
+            except Exception as e:
+                has_nan = torch.isnan(f_tok.float()).any().item()
+                has_inf = torch.isinf(f_tok.float()).any().item()
+                print(f"  [INFO] Self-check exception (NaN={has_nan}, Inf={has_inf}): {e}")
+                all_pass &= (not has_nan and not has_inf)
+
+    if rank == 0:
+        result = "ALL PASS" if all_pass else "SOME FAILED"
+        print(f"\n  >>> {result} <<<\n")
+    return all_pass
+
+
+def verify_op(op_fly, op_mori, inp, wts, idx, k,
+              rank, world_size, dev, dtype_key, cfg, args):
+    """Run FlyDSL and mori dispatch+combine, compare outputs.
+
+    Dispatch output ordering is non-deterministic (atomic fetch-and-add), so
+    we only compare total_recv. Combine output is the final accumulated result
+    and should be semantically identical.
+    """
+    tol = VERIFY_TOL.get(dtype_key, VERIFY_TOL["bf16"])
+    all_pass = True
+
+    if rank == 0:
+        print(f"\n{'='*65}")
+        print(f"  VERIFY  dtype={dtype_key}  EP={world_size}  bs={inp.shape[0]}  "
+              f"h={cfg.hidden_dim}  k={k}")
+        print(f"{'='*65}")
+
+    # ── Dispatch ──
+    op_fly.reset(); op_mori.reset()
+    ms.shmem_barrier_all()
+
+    ret_f = op_fly.dispatch(inp, wts, None, idx)
+    ret_m = op_mori.dispatch(inp, wts, None, idx)
+    torch.cuda.synchronize()
+
+    tr_f = ret_f[4].clone(); tr_m = ret_m[4].clone()
+    dist.barrier()
+    if rank == 0:
+        print("\n  ── Dispatch 对比（仅 total_recv，token 排列因原子序不同） ──")
+
+    all_pass &= _check_exact("total_recv", tr_f, tr_m, rank)
+
+    # ── Combine ──
+    ms.shmem_barrier_all()
+    cout_f = op_fly.combine(ret_f[0], None, ret_f[3])
+    cout_m = op_mori.combine(ret_m[0], None, ret_m[3])
+    torch.cuda.synchronize()
+    dist.barrier()
+
+    if rank == 0:
+        print("\n  ── Combine 输出对比 ──")
+
+    mt = cfg.max_num_inp_token_per_rank
+    cast_to = torch.float32 if cfg.data_type in (
+        torch.float8_e4m3fn, torch.float8_e4m3fnuz, torch.float4_e2m1fn_x2) else None
+
+    f_tok = cout_f[0][:mt] if cout_f[0] is not None else None
+    m_tok = cout_m[0][:mt] if cout_m[0] is not None else None
+
+    # Diagnostic: compare both outputs with expected k*input (skip for packed types)
+    if rank == 0 and f_tok is not None and m_tok is not None:
+        try:
+            expected = (inp.float() * k).to(cfg.data_type)
+            f_vs_exp = (f_tok.float() - expected.float()).abs().max().item()
+            m_vs_exp = (m_tok.float() - expected.float()).abs().max().item()
+            f_vs_m = (f_tok.float() - m_tok.float()).abs().max().item()
+            print(f"  [DIAG] fly vs k*inp: {f_vs_exp:.4f}  mori vs k*inp: {m_vs_exp:.4f}  fly vs mori: {f_vs_m:.4f}")
+        except Exception:
+            pass
+
+    if f_tok is not None and m_tok is not None:
+        all_pass &= _check_close(
+            "out_tok[:mt]", f_tok, m_tok,
+            tol["atol"], tol["rtol"], rank, cast_to=cast_to)
+    elif rank == 0:
+        print(f"  [SKIP] out_tok: fly={f_tok is not None}, mori={m_tok is not None}")
+
+    f_wts = cout_f[1] if (len(cout_f) > 1 and cout_f[1] is not None) else None
+    m_wts = cout_m[1] if (len(cout_m) > 1 and cout_m[1] is not None) else None
+    if f_wts is not None and m_wts is not None:
+        all_pass &= _check_close(
+            "out_wts[:mt]", f_wts[:mt], m_wts[:mt],
+            1e-4, 1e-3, rank)
+    elif rank == 0:
+        print(f"  [SKIP] out_wts: fly={f_wts is not None}, mori={m_wts is not None}")
+
+    if rank == 0:
+        result = "ALL PASS" if all_pass else "SOME FAILED"
+        print(f"\n  >>> {result} <<<\n")
+    return all_pass
 
 
 # ─── 主逻辑 ───────────────────────────────────────────────────────────────────
@@ -645,18 +913,22 @@ def run_profiler(rank, world_size, args):
     cur_tok = args.max_tokens
     n_exp   = world_size * args.num_experts_per_rank
 
-    _combine_wpb = args.combine_warp_per_block if args.combine_warp_per_block > 0 else None
-    cfg = FlyDSLDispatchCombineConfigV2(
+    _dtype = DTYPE_MAP.get(args.dtype, torch.bfloat16)
+    cfg = FlyDSLDispatchCombineConfig(
         rank=rank, world_size=world_size,
         hidden_dim=args.hidden_dim,
         max_num_inp_token_per_rank=cur_tok,
         num_experts_per_rank=args.num_experts_per_rank,
-        top_k=k,
-        data_type=torch.bfloat16,
+        num_experts_per_token=k,
+        data_type=_dtype,
         warp_num_per_block=args.warp_per_block,
         block_num=args.block_num,
         chip=args.chip,
-        combine_warp_num_per_block=_combine_wpb,
+        use_external_inp_buf=args.use_external_inp_buf,
+        enable_std_moe=args.enable_std_moe,
+        scale_dim=args.scale_dim,
+        scale_type_size=args.scale_type_size,
+        quant_type=args.quant_type,
     )
 
     mori_bn  = args.mori_block_num      if args.mori_block_num      > 0 else cfg.block_num
@@ -670,6 +942,11 @@ def run_profiler(rank, world_size, args):
         flydsl_warp_per_block=cfg.warp_num_per_block,
         mori_block_num=mori_bn,
         mori_warp_per_block=mori_wpb,
+        use_external_inp_buf=cfg.use_external_inp_buf,
+        enable_std_moe=cfg.enable_std_moe,
+        scale_dim=cfg.scale_dim,
+        scale_type_size=cfg.scale_type_size,
+        quant_type=cfg.quant_type,
     )
 
     # 输出目录：/tmp/ep{ws}_bs{cur_tok}/
@@ -681,11 +958,11 @@ def run_profiler(rank, world_size, args):
         print(f"\n{'='*65}")
         print(f"[profiler] EP={world_size}, bs={cur_tok}, h={cfg.hidden_dim}, k={k}")
         print(f"{'='*65}")
-        print("[profiler] 构建 FlyDSL v2...")
-    op_v2 = FlyDSLDispatchCombineIntraNodeOpV2(cfg)
+        print("[profiler] 构建 FlyDSL...")
+    op_fly = FlyDSLDispatchCombineIntraNodeOp(cfg)
 
     op_ref = None
-    if args.compare:
+    if args.compare and not cfg.enable_std_moe:
         mori_bn  = args.mori_block_num  if args.mori_block_num  > 0 else None
         mori_wpb = args.mori_warp_per_block if args.mori_warp_per_block > 0 else None
         bn_str  = mori_bn  if mori_bn  else cfg.block_num
@@ -698,20 +975,52 @@ def run_profiler(rank, world_size, args):
         except Exception as e:
             if rank == 0:
                 print(f"[warn] mori ref 不可用: {e}")
+    elif cfg.enable_std_moe and rank == 0:
+        print("[info] StdMoE 模式：跳过 mori ref，使用自洽验证")
     ms.shmem_barrier_all()
 
     # ── 准备输入（固定 seed，FlyDSL 和 mori 使用完全相同的输入）────────────────
     torch.manual_seed(42 + rank)
-    inp = torch.randn(cur_tok, cfg.hidden_dim, dtype=cfg.data_type, device=dev)
+    if cfg.data_type == torch.float4_e2m1fn_x2:
+        inp = torch.randint(0, 256, (cur_tok, cfg.hidden_dim // 2), dtype=torch.uint8, device=dev).view(torch.float4_e2m1fn_x2)
+    elif cfg.data_type in (torch.float8_e4m3fn, torch.float8_e4m3fnuz):
+        inp = torch.randn(cur_tok, cfg.hidden_dim, dtype=torch.bfloat16, device=dev).to(cfg.data_type)
+    else:
+        inp = torch.randn(cur_tok, cfg.hidden_dim, dtype=cfg.data_type, device=dev)
     wts = torch.rand(cur_tok, k, dtype=torch.float32, device=dev)
     wts = wts / wts.sum(-1, keepdim=True)
+    epr = args.num_experts_per_rank
     idx = torch.zeros(cur_tok, k, dtype=torch.int32, device=dev)
-    for t in range(cur_tok):
-        idx[t] = torch.randperm(n_exp, device=dev)[:k]
+    if args.mode == "verify" and k <= world_size:
+        # Ensure each token's k experts go to k DISTINCT PEs.
+        # FlyDSL dispatch deduplicates same-PE assignments, mori does not.
+        for t in range(cur_tok):
+            pes = torch.randperm(world_size, device=dev)[:k]
+            for j in range(k):
+                idx[t, j] = pes[j] * epr + torch.randint(0, epr, (1,), device=dev)
+    else:
+        for t in range(cur_tok):
+            idx[t] = torch.randperm(n_exp, device=dev)[:k]
 
     # 预分配 combine 权重 buffer（FlyDSL 和 mori 共用，避免计时窗口内额外 GPU 核）
     max_recv = world_size * cur_tok
     wc_buf = torch.full((max_recv, k), 1.0 / k, dtype=torch.float32, device=dev)
+
+    # ── 构造 scales / packed_recv_x（所有模式共用）─────────────────────────
+    packed_recv_x = None
+    if cfg.enable_std_moe:
+        _prx_nbytes = cfg.num_experts_per_rank * cfg.max_recv * cfg.token_bytes
+        packed_recv_x = torch.zeros(
+            _prx_nbytes, dtype=torch.uint8, device=dev
+        ).view(cfg.data_type).view(
+            cfg.num_experts_per_rank * cfg.max_recv, cfg.token_view_dim)
+
+    scales = None
+    if cfg.scale_dim > 0 and cfg.scale_type_size > 0:
+        _sc_bytes = cfg.scale_dim * cfg.scale_type_size
+        scales = torch.randn(cur_tok, _sc_bytes // 4,
+                             dtype=torch.float32, device=dev).contiguous()
+        scales = scales.view(torch.uint8).view(cur_tok, _sc_bytes)
 
     # profile+eager 模式需要外部预热；其他 3 种组合由各自函数内部处理
     do_warmup = (args.mode == "profile" and not args.cudagraph)
@@ -720,9 +1029,11 @@ def run_profiler(rank, world_size, args):
         if rank == 0:
             print(f"[setup] 预热 FlyDSL {args.warmup} 轮...")
         for _ in range(args.warmup):
-            op_v2.reset()
-            ret = op_v2.dispatch(inp, wts, None, idx)
-            op_v2.combine(ret[0], None, ret[3])
+            op_fly.reset()
+            ret = op_fly.dispatch(inp, wts, scales, idx,
+                                 packed_recv_x=packed_recv_x)
+            op_fly.combine(ret[0], None, ret[3],
+                          packed_recv_x=packed_recv_x)
             torch.cuda.synchronize()
 
         if op_ref is not None:
@@ -740,49 +1051,62 @@ def run_profiler(rank, world_size, args):
     test_flydsl = args.bench_op in ("flydsl", "both")
     test_mori   = args.bench_op in ("mori",   "both") and op_ref is not None
 
+    if args.mode == "verify":
+        if op_ref is not None:
+            verify_op(op_fly, op_ref, inp, wts, idx, k,
+                      rank, world_size, dev, args.dtype, cfg, args)
+        else:
+            verify_self(op_fly, inp, wts, idx, k,
+                        rank, world_size, dev, args.dtype, cfg)
+        return
+
     if args.mode == "bench" and not args.cudagraph:
-        # bench + eager：CUDA Event 计时
         if test_flydsl:
-            bench_op(op_v2, "flydsl", inp, wts, idx, wc_buf, k,
-                     rank, world_size, dev, args.warmup, args.iters, meta)
+            bench_op(op_fly, "flydsl", inp, wts, idx, wc_buf, k,
+                     rank, world_size, dev, args.warmup, args.iters, meta,
+                     scales=scales, packed_recv_x=packed_recv_x)
         if test_mori:
             ms.shmem_barrier_all()
             bench_op(op_ref, "mori", inp, wts, idx, wc_buf, k,
                      rank, world_size, dev, args.warmup, args.iters, meta)
 
     elif args.mode == "bench" and args.cudagraph:
-        # bench + cudagraph：CUDAGraph replay + CUDA Event 计时
         if test_flydsl:
-            cudagraph_op(op_v2, "flydsl", inp, wts, idx, wc_buf, k,
-                         rank, world_size, dev, args.warmup, args.iters, meta)
+            cudagraph_op(op_fly, "flydsl", inp, wts, idx, wc_buf, k,
+                         rank, world_size, dev, args.warmup, args.iters, meta,
+                         scales=scales, packed_recv_x=packed_recv_x)
         if test_mori:
             ms.shmem_barrier_all()
             cudagraph_op(op_ref, "mori", inp, wts, idx, wc_buf, k,
                          rank, world_size, dev, args.warmup, args.iters, meta)
 
     elif args.mode == "profile" and not args.cudagraph:
-        # profile + eager：torch.profiler 采集
         if test_flydsl:
-            profile_op(op_v2, "flydsl", inp, wts, idx, wc_buf, k,
-                       rank, world_size, dev, args.iters, out_dir, meta)
+            profile_op(op_fly, "flydsl", inp, wts, idx, wc_buf, k,
+                       rank, world_size, dev, args.iters, out_dir, meta,
+                       scales=scales, packed_recv_x=packed_recv_x,
+                       dtype_key=args.dtype, quant_type=args.quant_type)
         if test_mori:
             ms.shmem_barrier_all()
             profile_op(op_ref, "mori", inp, wts, idx, wc_buf, k,
-                       rank, world_size, dev, args.iters, out_dir, meta)
+                       rank, world_size, dev, args.iters, out_dir, meta,
+                       dtype_key=args.dtype, quant_type=args.quant_type)
         if rank == 0:
             print(f"\n[profiler] 全部结果已保存到: {out_dir}/")
 
     elif args.mode == "profile" and args.cudagraph:
-        # profile + cudagraph：torch.profiler 采集 CUDAGraph replay
         if test_flydsl:
-            profile_cudagraph_op(op_v2, "flydsl", inp, wts, idx, wc_buf, k,
+            profile_cudagraph_op(op_fly, "flydsl", inp, wts, idx, wc_buf, k,
                                  rank, world_size, dev, args.warmup, args.iters,
-                                 out_dir, meta)
+                                 out_dir, meta,
+                                 scales=scales, packed_recv_x=packed_recv_x,
+                                 dtype_key=args.dtype, quant_type=args.quant_type)
         if test_mori:
             ms.shmem_barrier_all()
             profile_cudagraph_op(op_ref, "mori", inp, wts, idx, wc_buf, k,
                                  rank, world_size, dev, args.warmup, args.iters,
-                                 out_dir, meta)
+                                 out_dir, meta,
+                                 dtype_key=args.dtype, quant_type=args.quant_type)
         if rank == 0:
             print(f"\n[profiler] 全部结果已保存到: {out_dir}/")
 
@@ -809,13 +1133,14 @@ def _parse_args():
     p.add_argument("--k",                    type=int, default=8)
     p.add_argument("--block-num",            type=int, default=80)
     p.add_argument("--warp-per-block",       type=int, default=4)
-    p.add_argument("--combine-warp-per-block", type=int, default=0,
-                   help="combine 内核专用 warp_per_block（0=与 --warp-per-block 相同）")
     p.add_argument("--mori-block-num",       type=int, default=0,
                    help="mori 专用 block_num（0=与FlyDSL相同，mori默认最优=80）")
     p.add_argument("--mori-warp-per-block",  type=int, default=0,
                    help="mori 专用 warp_per_block（0=与FlyDSL相同，mori默认最优=8）")
-    p.add_argument("--chip",                 type=str, default="gfx942")
+    p.add_argument("--chip",                 type=str, default="gfx950")
+    p.add_argument("--dtype",                type=str, default="bf16",
+                   choices=list(DTYPE_MAP.keys()),
+                   help="数据类型（默认 bf16）")
     p.add_argument("--warmup",               type=int, default=5,
                    help="预热轮次（不进 profiler，确保 JIT 编译完成）")
     p.add_argument("--iters",                type=int, default=5,
@@ -825,12 +1150,25 @@ def _parse_args():
     p.add_argument("--port",                 type=int, default=29800)
     p.add_argument("--no-compare",           dest="compare", action="store_false")
     # ── 模式选择 ──────────────────────────────────────────────────────────────
-    p.add_argument("--mode", choices=["profile", "bench"], default="profile",
-                   help="测量方式：profile=torch.profiler 采集（默认）; bench=CUDA Event 计时")
+    p.add_argument("--mode", choices=["profile", "bench", "verify"], default="profile",
+                   help="测量方式：profile=torch.profiler 采集（默认）; bench=CUDA Event 计时; verify=正确性验证")
     p.add_argument("--cudagraph", action="store_true",
                    help="使用 CUDAGraph capture+replay 执行（默认 eager）")
     p.add_argument("--bench-op", choices=["flydsl", "mori", "both"], default="both",
                    help="测哪个算子（默认 both）")
+    # ── 功能开关 ──────────────────────────────────────────────────────────────
+    p.add_argument("--no-external-inp-buf", dest="use_external_inp_buf",
+                   action="store_false", default=True,
+                   help="使用 P2P Read combine 变体（默认使用 external inp buf）")
+    p.add_argument("--enable-std-moe", action="store_true", default=False,
+                   help="启用 Standard MoE Adapt 模式")
+    p.add_argument("--scale-dim", type=int, default=0,
+                   help="Scale 张量维度（0=不使用 scale）")
+    p.add_argument("--scale-type-size", type=int, default=0,
+                   help="Scale 类型大小（字节，0=不使用 scale）")
+    p.add_argument("--quant-type", type=str, default="none",
+                   choices=["none", "fp8_direct_cast"],
+                   help="量化类型（none=默认，fp8_direct_cast=FP8直接转换combine）")
     p.set_defaults(compare=True)
     return p.parse_args()
 
