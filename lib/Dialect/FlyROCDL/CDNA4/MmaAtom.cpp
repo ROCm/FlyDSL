@@ -87,8 +87,22 @@ Value MmaOpCDNA4_MFMAScaleType::setAtomState(OpBuilder &builder, Location loc, V
   if (!idx)
     return nullptr;
   Value scaleVal = fieldValue;
+  Type srcTy = scaleVal.getType();
   Type i32Ty = IntegerType::get(builder.getContext(), 32);
-  if (scaleVal.getType() != i32Ty) {
+  if (srcTy != i32Ty) {
+    auto bitWidthOf = [](Type t) -> unsigned {
+      if (auto vec = dyn_cast<VectorType>(t)) {
+        Type elt = vec.getElementType();
+        if (!elt.isIntOrFloat())
+          return 0;
+        return elt.getIntOrFloatBitWidth() * vec.getNumElements();
+      }
+      if (auto intTy = dyn_cast<IntegerType>(t))
+        return intTy.getWidth();
+      return 0;
+    };
+    if (bitWidthOf(srcTy) != 32)
+      return nullptr;
     scaleVal = LLVM::BitcastOp::create(builder, loc, i32Ty, scaleVal);
   }
   return LLVM::InsertValueOp::create(builder, loc, atomStruct, scaleVal, ArrayRef<int64_t>{*idx});
