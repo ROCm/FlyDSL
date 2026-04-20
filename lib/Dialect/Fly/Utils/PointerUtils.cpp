@@ -28,13 +28,24 @@ TypedValue<LLVM::LLVMPointerType> applySwizzleOnPtr(OpBuilder &b, Location loc,
       LLVM::IntToPtrOp::create(b, loc, ptrTy, swizzled).getResult());
 }
 
-Type RegMem2SSAType(fly::MemRefType memRefTy) {
+Type projectToLLVMCompatibleElemTy(Type elemTy) {
+  if (auto floatTy = dyn_cast<FloatType>(elemTy)) {
+    unsigned width = floatTy.getWidth();
+    if (width < 16)
+      return IntegerType::get(elemTy.getContext(), width);
+  }
+  return elemTy;
+}
+
+Type RegMem2SSAType(fly::MemRefType memRefTy, bool llvmCompatibleType) {
   if (memRefTy.getAddressSpace().getValue() != AddressSpace::Register)
     return Type();
   LayoutBuilder<LayoutAttr> builder(memRefTy.getContext());
   auto layoutAttr = cast<LayoutAttr>(memRefTy.getLayout());
   int32_t cosize = layoutCosize(builder, layoutAttr).getLeafAsInt().getValue();
   Type elemTy = memRefTy.getElemTy();
+  if (llvmCompatibleType)
+    elemTy = projectToLLVMCompatibleElemTy(elemTy);
   if (cosize == 1)
     return elemTy;
   return VectorType::get({cosize}, elemTy);
