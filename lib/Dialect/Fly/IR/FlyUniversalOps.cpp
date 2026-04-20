@@ -122,6 +122,62 @@ void MmaOpUniversalFMAType::print(AsmPrinter &printer) const {
   printer << ", (" << getElemTy() << ", " << getElemTy() << ") -> " << getElemTy() << ">";
 }
 
+FailureOr<Value> CopyOpUniversalCopyType::emitAtomCallSSA(OpBuilder &builder, Location loc,
+                                                          Type resultTy, Type copyAtomTyArg,
+                                                          Type srcTyArg, Type dstTyArg,
+                                                          Value atomVal, Value src,
+                                                          Value dst) const {
+  Value result;
+  if (isa<fly::MemRefType>(srcTyArg)) {
+    // src is memory
+    auto srcMemTy = cast<fly::MemRefType>(srcTyArg);
+    Type loadTy = resultTy ? resultTy : builder.getIntegerType(getBitSize());
+    Value srcPtr = applySwizzleOnPtr(builder, loc, cast<TypedValue<LLVM::LLVMPointerType>>(src),
+                                     srcMemTy.getSwizzle());
+    result = LLVM::LoadOp::create(builder, loc, loadTy, srcPtr);
+  } else {
+    // src is register
+    result = src;
+  }
+
+  if (!resultTy) {
+    // dst is memory
+    auto dstMemTy = cast<fly::MemRefType>(dstTyArg);
+    Value dstPtr = applySwizzleOnPtr(builder, loc, cast<TypedValue<LLVM::LLVMPointerType>>(dst),
+                                     dstMemTy.getSwizzle());
+    LLVM::StoreOp::create(builder, loc, result, dstPtr);
+  }
+  return result;
+}
+
+FailureOr<Value> CopyOpUniversalCopyType::emitAtomCallSSA(OpBuilder &builder, Location loc,
+                                                          Type resultTy, Type copyAtomTyArg,
+                                                          Type srcTyArg, Type dstTyArg,
+                                                          Type predTyArg, Value atomVal, Value src,
+                                                          Value dst, Value pred) const {
+  OpBuilder::InsertionGuard guard(builder);
+  if (resultTy) {
+    auto ifOp = scf::IfOp::create(builder, loc, resultTy, pred, /*withElseRegion=*/true);
+    builder.setInsertionPointToStart(&ifOp.getThenRegion().front());
+    auto result = emitAtomCallSSA(builder, loc, resultTy, copyAtomTyArg, srcTyArg, dstTyArg,
+                                  atomVal, src, dst);
+    if (failed(result))
+      return failure();
+    scf::YieldOp::create(builder, loc, *result);
+    builder.setInsertionPointToStart(&ifOp.getElseRegion().front());
+    scf::YieldOp::create(builder, loc, dst);
+    return ifOp.getResult(0);
+  }
+
+  auto ifOp = scf::IfOp::create(builder, loc, TypeRange{}, pred, /*withElse=*/false);
+  builder.setInsertionPointToStart(&ifOp.getThenRegion().front());
+  auto result =
+      emitAtomCallSSA(builder, loc, resultTy, copyAtomTyArg, srcTyArg, dstTyArg, atomVal, src, dst);
+  if (failed(result))
+    return failure();
+  return Value();
+}
+
 LogicalResult CopyOpUniversalCopyType::emitAtomCall(OpBuilder &builder, Location loc,
                                                     Type copyAtomTyArg, Type srcMemTyArg,
                                                     Type dstMemTyArg, Value atomVal, Value src,
@@ -172,22 +228,17 @@ static std::optional<LLVM::AtomicBinOp> convertAtomicOp(AtomicOp binOp, bool isF
     return isFloat ? std::nullopt : std::optional(LLVM::AtomicBinOp::uinc_wrap);
   case AtomicOp::Dec:
     return isFloat ? std::nullopt : std::optional(LLVM::AtomicBinOp::udec_wrap);
-  default:
-    return std::nullopt;
   }
+  return std::nullopt;
 }
 
-LogicalResult CopyOpUniversalAtomicType::emitAtomCall(OpBuilder &builder, Location loc,
-                                                      Type copyAtomTyArg, Type srcMemTyArg,
-                                                      Type dstMemTyArg, Value atomVal, Value src,
-                                                      Value dst) const {
-  if (!isa<LLVM::LLVMPointerType>(src.getType()) || !isa<LLVM::LLVMPointerType>(dst.getType()))
-    return failure();
-
-  auto srcMemTy = cast<fly::MemRefType>(srcMemTyArg);
-  auto dstMemTy = cast<fly::MemRefType>(dstMemTyArg);
-
-  if (srcMemTy.getAddressSpace().getValue() != AddressSpace::Register)
+FailureOr<Value> CopyOpUniversalAtomicType::emitAtomCallSSA(OpBuilder &builder, Location loc,
+                                                            Type resultTy, Type copyAtomTyArg,
+                                                            Type srcTyArg, Type dstTyArg,
+                                                            Value atomVal, Value src,
+                                                            Value dst) const {
+  auto dstMemTy = dstTyArg ? dyn_cast<fly::MemRefType>(dstTyArg) : fly::MemRefType();
+  if (!dstMemTy)
     return failure();
 
   Type elemTy = getValType();
@@ -196,12 +247,50 @@ LogicalResult CopyOpUniversalAtomicType::emitAtomCall(OpBuilder &builder, Locati
   Value dstPtr = applySwizzleOnPtr(builder, loc, cast<TypedValue<LLVM::LLVMPointerType>>(dst),
                                    dstMemTy.getSwizzle());
 
-  Value loaded = LLVM::LoadOp::create(builder, loc, elemTy, src);
-
   auto binOp = convertAtomicOp(getAtomicOp().getValue(), isFloat);
   if (!binOp)
     return failure();
-  LLVM::AtomicRMWOp::create(builder, loc, *binOp, dstPtr, loaded, LLVM::AtomicOrdering::monotonic);
+  LLVM::AtomicRMWOp::create(builder, loc, *binOp, dstPtr, src, LLVM::AtomicOrdering::monotonic);
+  return src;
+}
+
+FailureOr<Value> CopyOpUniversalAtomicType::emitAtomCallSSA(
+    OpBuilder &builder, Location loc, Type resultTy, Type copyAtomTyArg, Type srcTyArg,
+    Type dstTyArg, Type predTyArg, Value atomVal, Value src, Value dst, Value pred) const {
+  OpBuilder::InsertionGuard guard(builder);
+  if (resultTy) {
+    auto ifOp = scf::IfOp::create(builder, loc, resultTy, pred, /*withElseRegion=*/true);
+    builder.setInsertionPointToStart(&ifOp.getThenRegion().front());
+    auto result = emitAtomCallSSA(builder, loc, resultTy, copyAtomTyArg, srcTyArg, dstTyArg,
+                                  atomVal, src, dst);
+    if (failed(result))
+      return failure();
+    scf::YieldOp::create(builder, loc, *result);
+    builder.setInsertionPointToStart(&ifOp.getElseRegion().front());
+    scf::YieldOp::create(builder, loc, dst);
+    return ifOp.getResult(0);
+  }
+
+  auto ifOp = scf::IfOp::create(builder, loc, TypeRange{}, pred, /*withElse=*/false);
+  builder.setInsertionPointToStart(&ifOp.getThenRegion().front());
+  auto result =
+      emitAtomCallSSA(builder, loc, resultTy, copyAtomTyArg, srcTyArg, dstTyArg, atomVal, src, dst);
+  if (failed(result))
+    return failure();
+  return Value();
+}
+
+LogicalResult CopyOpUniversalAtomicType::emitAtomCall(OpBuilder &builder, Location loc,
+                                                      Type copyAtomTyArg, Type srcMemTyArg,
+                                                      Type dstMemTyArg, Value atomVal, Value src,
+                                                      Value dst) const {
+  auto srcMemTy = cast<fly::MemRefType>(srcMemTyArg);
+  auto srcSSATy = fly::RegMem2SSAType(srcMemTy);
+  Value srcVal = LLVM::LoadOp::create(builder, loc, srcSSATy, src);
+  auto res = emitAtomCallSSA(builder, loc, Type{}, copyAtomTyArg, srcSSATy, dstMemTyArg, atomVal,
+                             srcVal, dst);
+  if (failed(res))
+    return failure();
   return success();
 }
 
@@ -216,6 +305,19 @@ LogicalResult CopyOpUniversalAtomicType::emitAtomCall(OpBuilder &builder, Locati
   builder.setInsertionPointToStart(&ifOp.getThenRegion().front());
 
   return emitAtomCall(builder, loc, copyAtomTyArg, srcMemTyArg, dstMemTyArg, atomVal, src, dst);
+}
+
+FailureOr<Value> MmaOpUniversalFMAType::emitAtomCallSSA(OpBuilder &builder, Location loc,
+                                                        Type resultTy, Type mmaAtomTyArg,
+                                                        Type dTyArg, Type aTyArg, Type bTyArg,
+                                                        Type cTyArg, Value atomVal, Value d,
+                                                        Value a, Value b, Value c) const {
+  Type elemTy = getElemTy();
+  Value mul = LLVM::FMulOp::create(builder, loc, elemTy, a, b);
+  Value res = LLVM::FAddOp::create(builder, loc, elemTy, mul, c);
+  if (d)
+    LLVM::StoreOp::create(builder, loc, res, d);
+  return res;
 }
 
 LogicalResult MmaOpUniversalFMAType::emitAtomCall(OpBuilder &builder, Location loc, Type mmaAtomTy,

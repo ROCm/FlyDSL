@@ -224,6 +224,39 @@ for i in range(runtime_value):
     ...
 ```
 
+### Frontend Semantic Restrictions
+When writing or reviewing `@flyc.kernel` / `@flyc.jit` code, proactively avoid these patterns because they can conflict with MLIR construction even if they look valid in plain Python.
+
+1. **Do not define values inside `if/else` and use them later outside the branch.** Keep a single explicit definition path.
+   ```python
+   if cond:
+       dst = a
+   else:
+       dst = b
+   use(dst)  # avoid this pattern
+   ```
+
+2. **Do not mutate captured outer variables inside nested helper functions.** Read-only closure capture is acceptable, but writes should go through explicit parameters and return values.
+   ```python
+   def kernel():
+       acc = fx.Float32(0.0)
+
+       def helper(acc):
+           acc = acc + fx.Float32(1.0)
+           return acc
+
+       acc = helper(acc)
+   ```
+
+3. **Avoid early `return`, and do not place `return` / `yield` inside `if/else` branches.** Prefer a single explicit exit so the frontend can determine result types.
+   ```python
+   if cond:
+       out = v0
+   else:
+       out = v1
+   return out
+   ```
+
 ### scf.for with Loop-Carried Values (Software Pipelining)
 
 Use `init=` on `range()` to create an `scf.for` with explicit SSA phi nodes for loop-carried state. This is required for software pipelining (prefetch patterns) where data must flow across iterations.

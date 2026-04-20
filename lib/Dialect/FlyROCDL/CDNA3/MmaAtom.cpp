@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2025 FlyDSL Project Contributors
 
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
+#include "mlir/Dialect/Vector/IR/VectorOps.h"
+#include "mlir/IR/BuiltinTypes.h"
 
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
 #include "flydsl/Dialect/Fly/Utils/ThrValLayoutMacro.h.inc"
 #include "flydsl/Dialect/FlyROCDL/IR/Dialect.h"
-#include "mlir/IR/BuiltinTypes.h"
 
 using namespace mlir;
 using namespace mlir::fly;
@@ -108,7 +110,7 @@ static Type getMfmaABType(MLIRContext *ctx, Type elemTy, int32_t k = 0) {
     return VectorType::get({4}, Float16Type::get(ctx));
   if (elemTy.isBF16())
     return VectorType::get({(k >= 16) ? 4 : 2}, IntegerType::get(ctx, 16));
-  if (isF8(elemTy))
+  if (elemTy.getIntOrFloatBitWidth() == 8)
     return IntegerType::get(ctx, 64);
   return nullptr;
 }
@@ -161,22 +163,11 @@ static int64_t getMfmaAccVecSize(int32_t m, int32_t k, Type elemTyA) {
   return 0;
 }
 
-template <typename MfmaOp>
-static LogicalResult emitMfma(OpBuilder &builder, Location loc, Type abTyA, Type abTyB,
-                              VectorType accTy, Value aPtr, Value bPtr, Value cPtr, Value dPtr) {
-  Value a = LLVM::LoadOp::create(builder, loc, abTyA, aPtr);
-  Value b = LLVM::LoadOp::create(builder, loc, abTyB, bPtr);
-  Value c = LLVM::LoadOp::create(builder, loc, accTy, cPtr);
-  auto zeroAttr = builder.getI32IntegerAttr(0);
-  Value res = MfmaOp::create(builder, loc, accTy, a, b, c, zeroAttr, zeroAttr, zeroAttr);
-  LLVM::StoreOp::create(builder, loc, res, dPtr);
-  return success();
-}
-
-LogicalResult MmaOpCDNA3_MFMAType::emitAtomCall(OpBuilder &builder, Location loc, Type mmaAtomTy,
-                                                Type dMemTy, Type aMemTy, Type bMemTy, Type cMemTy,
-                                                Value atomVal, Value dPtr, Value aPtr, Value bPtr,
-                                                Value cPtr) const {
+FailureOr<Value> MmaOpCDNA3_MFMAType::emitAtomCallSSA(OpBuilder &builder, Location loc,
+                                                      Type resultTy, Type mmaAtomTyArg, Type dTyArg,
+                                                      Type aTyArg, Type bTyArg, Type cTyArg,
+                                                      Value atomVal, Value d, Value a, Value b,
+                                                      Value c) const {
   int32_t m = getM();
   int32_t n = getN();
   int32_t k = getK();
@@ -196,41 +187,77 @@ LogicalResult MmaOpCDNA3_MFMAType::emitAtomCall(OpBuilder &builder, Location loc
   Type accElemTy = getElemTyAcc();
   VectorType accTy = VectorType::get({accVecSize}, accElemTy);
 
-#define DISPATCH_MFMA(M_, K_, PRED, OP)                                                            \
-  if (m == M_ && n == M_ && k == K_ && (PRED))                                                     \
-    return emitMfma<ROCDL::OP>(builder, loc, abTyA, abTyB, accTy, aPtr, bPtr, cPtr, dPtr);
+#define DISPATCH_MFMA_SSA(M_, K_, PRED, OP)                                                        \
+  if (m == M_ && n == M_ && k == K_ && (PRED)) {                                                   \
+    auto zeroAttr = builder.getI32IntegerAttr(0);                                                  \
+    return ROCDL::OP::create(builder, loc, accTy, a, b, c, zeroAttr, zeroAttr, zeroAttr)           \
+        .getResult();                                                                              \
+  }
 
-  DISPATCH_MFMA(32, 1, elemTyA.isF32(), mfma_f32_32x32x1f32)
-  DISPATCH_MFMA(16, 1, elemTyA.isF32(), mfma_f32_16x16x1f32)
-  DISPATCH_MFMA(4, 1, elemTyA.isF32(), mfma_f32_4x4x1f32)
-  DISPATCH_MFMA(32, 2, elemTyA.isF32(), mfma_f32_32x32x2f32)
-  DISPATCH_MFMA(16, 4, elemTyA.isF32(), mfma_f32_16x16x4f32)
+  DISPATCH_MFMA_SSA(32, 1, elemTyA.isF32(), mfma_f32_32x32x1f32)
+  DISPATCH_MFMA_SSA(16, 1, elemTyA.isF32(), mfma_f32_16x16x1f32)
+  DISPATCH_MFMA_SSA(4, 1, elemTyA.isF32(), mfma_f32_4x4x1f32)
+  DISPATCH_MFMA_SSA(32, 2, elemTyA.isF32(), mfma_f32_32x32x2f32)
+  DISPATCH_MFMA_SSA(16, 4, elemTyA.isF32(), mfma_f32_16x16x4f32)
 
-  DISPATCH_MFMA(32, 4, elemTyA.isF16(), mfma_f32_32x32x4f16)
-  DISPATCH_MFMA(16, 4, elemTyA.isF16(), mfma_f32_16x16x4f16)
-  DISPATCH_MFMA(4, 4, elemTyA.isF16(), mfma_f32_4x4x4f16)
-  DISPATCH_MFMA(32, 8, elemTyA.isF16(), mfma_f32_32x32x8f16)
-  DISPATCH_MFMA(16, 16, elemTyA.isF16(), mfma_f32_16x16x16f16)
+  DISPATCH_MFMA_SSA(32, 4, elemTyA.isF16(), mfma_f32_32x32x4f16)
+  DISPATCH_MFMA_SSA(16, 4, elemTyA.isF16(), mfma_f32_16x16x4f16)
+  DISPATCH_MFMA_SSA(4, 4, elemTyA.isF16(), mfma_f32_4x4x4f16)
+  DISPATCH_MFMA_SSA(32, 8, elemTyA.isF16(), mfma_f32_32x32x8f16)
+  DISPATCH_MFMA_SSA(16, 16, elemTyA.isF16(), mfma_f32_16x16x16f16)
 
-  DISPATCH_MFMA(32, 2, elemTyA.isBF16(), mfma_f32_32x32x2bf16)
-  DISPATCH_MFMA(16, 2, elemTyA.isBF16(), mfma_f32_16x16x2bf16)
-  DISPATCH_MFMA(4, 2, elemTyA.isBF16(), mfma_f32_4x4x2bf16)
-  DISPATCH_MFMA(32, 4, elemTyA.isBF16(), mfma_f32_32x32x4bf16)
-  DISPATCH_MFMA(16, 8, elemTyA.isBF16(), mfma_f32_16x16x8bf16)
-  DISPATCH_MFMA(16, 16, elemTyA.isBF16(), mfma_f32_16x16x16bf16_1k)
+  DISPATCH_MFMA_SSA(32, 2, elemTyA.isBF16(), mfma_f32_32x32x2bf16)
+  DISPATCH_MFMA_SSA(16, 2, elemTyA.isBF16(), mfma_f32_16x16x2bf16)
+  DISPATCH_MFMA_SSA(4, 2, elemTyA.isBF16(), mfma_f32_4x4x2bf16)
+  DISPATCH_MFMA_SSA(32, 4, elemTyA.isBF16(), mfma_f32_32x32x4bf16)
+  DISPATCH_MFMA_SSA(16, 8, elemTyA.isBF16(), mfma_f32_16x16x8bf16)
+  DISPATCH_MFMA_SSA(16, 16, elemTyA.isBF16(), mfma_f32_16x16x16bf16_1k)
 
-  DISPATCH_MFMA(16, 32, isFP8(elemTyA) && isFP8(elemTyB), mfma_f32_16x16x32_fp8_fp8)
-  DISPATCH_MFMA(16, 32, isFP8(elemTyA) && isBF8(elemTyB), mfma_f32_16x16x32_fp8_bf8)
-  DISPATCH_MFMA(16, 32, isBF8(elemTyA) && isFP8(elemTyB), mfma_f32_16x16x32_bf8_fp8)
-  DISPATCH_MFMA(16, 32, isBF8(elemTyA) && isBF8(elemTyB), mfma_f32_16x16x32_bf8_bf8)
-  DISPATCH_MFMA(32, 16, isFP8(elemTyA) && isFP8(elemTyB), mfma_f32_32x32x16_fp8_fp8)
-  DISPATCH_MFMA(32, 16, isFP8(elemTyA) && isBF8(elemTyB), mfma_f32_32x32x16_fp8_bf8)
-  DISPATCH_MFMA(32, 16, isBF8(elemTyA) && isFP8(elemTyB), mfma_f32_32x32x16_bf8_fp8)
-  DISPATCH_MFMA(32, 16, isBF8(elemTyA) && isBF8(elemTyB), mfma_f32_32x32x16_bf8_bf8)
+  DISPATCH_MFMA_SSA(16, 32, isFP8(elemTyA) && isFP8(elemTyB), mfma_f32_16x16x32_fp8_fp8)
+  DISPATCH_MFMA_SSA(16, 32, isFP8(elemTyA) && isBF8(elemTyB), mfma_f32_16x16x32_fp8_bf8)
+  DISPATCH_MFMA_SSA(16, 32, isBF8(elemTyA) && isFP8(elemTyB), mfma_f32_16x16x32_bf8_fp8)
+  DISPATCH_MFMA_SSA(16, 32, isBF8(elemTyA) && isBF8(elemTyB), mfma_f32_16x16x32_bf8_bf8)
+  DISPATCH_MFMA_SSA(32, 16, isFP8(elemTyA) && isFP8(elemTyB), mfma_f32_32x32x16_fp8_fp8)
+  DISPATCH_MFMA_SSA(32, 16, isFP8(elemTyA) && isBF8(elemTyB), mfma_f32_32x32x16_fp8_bf8)
+  DISPATCH_MFMA_SSA(32, 16, isBF8(elemTyA) && isFP8(elemTyB), mfma_f32_32x32x16_bf8_fp8)
+  DISPATCH_MFMA_SSA(32, 16, isBF8(elemTyA) && isBF8(elemTyB), mfma_f32_32x32x16_bf8_bf8)
 
-#undef DISPATCH_MFMA
+#undef DISPATCH_MFMA_SSA
 
   return failure();
+}
+
+LogicalResult MmaOpCDNA3_MFMAType::emitAtomCall(OpBuilder &builder, Location loc, Type mmaAtomTy,
+                                                Type dMemTy, Type aMemTy, Type bMemTy, Type cMemTy,
+                                                Value atomVal, Value dPtr, Value aPtr, Value bPtr,
+                                                Value cPtr) const {
+  int32_t m = getM();
+  int32_t k = getK();
+  Type elemTyA = getElemTyA();
+  Type elemTyB = getElemTyB();
+  MLIRContext *ctx = builder.getContext();
+
+  Type abTyA = getMfmaABType(ctx, elemTyA, k);
+  Type abTyB = getMfmaABType(ctx, elemTyB, k);
+  if (!abTyA || !abTyB)
+    return failure();
+
+  int64_t accVecSize = getMfmaAccVecSize(m, k, elemTyA);
+  if (accVecSize == 0)
+    return failure();
+
+  Type accElemTy = getElemTyAcc();
+  VectorType accTy = VectorType::get({accVecSize}, accElemTy);
+
+  Value a = LLVM::LoadOp::create(builder, loc, abTyA, aPtr);
+  Value b = LLVM::LoadOp::create(builder, loc, abTyB, bPtr);
+  Value c = LLVM::LoadOp::create(builder, loc, accTy, cPtr);
+  auto res = emitAtomCallSSA(builder, loc, accTy, mmaAtomTy, Type{}, abTyA, abTyB, accTy, atomVal,
+                             Value{}, a, b, c);
+  if (failed(res))
+    return failure();
+  LLVM::StoreOp::create(builder, loc, *res, dPtr);
+  return success();
 }
 
 } // namespace mlir::fly_rocdl
