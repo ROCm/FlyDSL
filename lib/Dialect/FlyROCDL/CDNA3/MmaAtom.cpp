@@ -138,8 +138,8 @@ FailureOr<Value> MmaOpCDNA3_MFMAType::emitAtomCallSSA(OpBuilder &builder, Locati
   Type elemTyB = getElemTyB();
   MLIRContext *ctx = builder.getContext();
 
-  Type abTyA = getMfmaABType(ctx, elemTyA, k);
-  Type abTyB = getMfmaABType(ctx, elemTyB, k);
+  Type abTyA = getMfmaABType(ctx, elemTyA, m, k);
+  Type abTyB = getMfmaABType(ctx, elemTyB, n, k);
   if (!abTyA || !abTyB)
     return failure();
 
@@ -202,17 +202,18 @@ LogicalResult MmaOpCDNA3_MFMAType::emitAtomCall(OpBuilder &builder, Location loc
                                                 Value atomVal, Value dPtr, Value aPtr, Value bPtr,
                                                 Value cPtr) const {
   int32_t m = getM();
+  int32_t n = getN();
   int32_t k = getK();
   Type elemTyA = getElemTyA();
   Type elemTyB = getElemTyB();
   MLIRContext *ctx = builder.getContext();
 
-  Type abTyA = getMfmaABType(ctx, elemTyA, k);
-  Type abTyB = getMfmaABType(ctx, elemTyB, k);
+  Type abTyA = getMfmaABType(ctx, elemTyA, m, k);
+  Type abTyB = getMfmaABType(ctx, elemTyB, n, k);
   if (!abTyA || !abTyB)
     return failure();
 
-  int64_t accVecSize = getMfmaAccVecSize(m, k, elemTyA);
+  int64_t accVecSize = getMfmaAccVecSize(m, n, elemTyA);
   if (accVecSize == 0)
     return failure();
 
