@@ -1,25 +1,25 @@
 """
-InterNode V1 LL dispatch/combine with FlyDSL copy-to-staging + FlyDSL combine tails.
+InterNode V1 LL dispatch/combine with pure FlyDSL kernels.
 
-- **Dispatch phase 1** (``EpDispatchCopyToStaging``): FlyDSL when prerequisites hold;
-  otherwise full HIP (same as :class:`mori.ops.dispatch_combine.EpDispatchCombineOp`),
-  including ``quant_type=fp8_direct_cast`` (HIP path casts / packs like mori).
-- **Dispatch phase 2** (``EpDispatchInterNodeV1KernelLowLatency`` or ``…_stdmoe``): HIP.
-- **Combine**: FlyDSL ``EpCombineSync`` + ``EpCombineAll`` only for bf16 + ``quant none``;
-  **fp8** uses full HIP combine (``EpCombineSync`` includes bf16→internal fp8 cast).
+- **Dispatch phase 1** (``EpDispatchCopyToStaging``): FlyDSL when enabled.
+- **Dispatch phase 2** (low-latency routing): FlyDSL.
+- Unsupported/legacy paths still fall back to HIP via ``super().dispatch``.
+- **Combine**: pure FlyDSL combine kernel for bf16 + ``quant none``.
 - **Standard MoE** (``ENABLE_STANDARD_MOE_ADAPT``): ``dispatch_standard_moe`` can use
-  Fly copy + ``EpDispatchInterNodeV1KernelLowLatency_*_stdmoe`` when the same Fly
-  prerequisites hold; ``combine_standard_moe`` stays **all HIP** because mori's
+  Fly dispatch path (including stdmoe mapping); ``combine_standard_moe`` stays **all HIP** because mori's
   ``EpCombineSync`` skips the hidden copy under std-moe, which FlyDSL sync does not
   mirror.
 
-Set ``use_flydsl_copy_staging=False`` for pure HIP (mori default).
+Set ``use_flydsl_copy_staging=False`` to disable FlyDSL phase-1 copy while keeping
+FlyDSL phase-2 dispatch.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 
 import torch
+import mori.shmem as ms
+from mori.shmem import mori_shmem_create_tensor
 
 from mori import cpp as mori_cpp
 from mori.ops.dispatch_combine import (
@@ -37,13 +37,10 @@ from mori.ops.dispatch_combine import (
     from_gpu_ptr,
 )
 
-from .dispatch_combine_internode_v1ll_copy_staging import (
-    make_ep_dispatch_copy_to_staging_jit,
+from .dispatch_combine_internode_v1ll_dispatch import (
+    FlyDSLInterNodeV1LLDispatchEngine,
 )
-from .dispatch_combine_internode_v1ll_combine import (
-    make_ep_combine_all_jit,
-    make_ep_combine_sync_jit,
-)
+from .dispatch_combine_intranode_kernel import make_combine_jit
 
 
 @dataclass
@@ -70,8 +67,6 @@ class FlyDSLDispatchCombineInterNodeV1LLConfig:
     quant_type: str = "none"
 
     def to_mori_config(self) -> EpDispatchCombineConfig:
-        from mori.ops.dispatch_combine import _normalize_quant_type
-
         return EpDispatchCombineConfig(
             data_type=self.data_type,
             rank=self.rank,
@@ -91,7 +86,7 @@ class FlyDSLDispatchCombineInterNodeV1LLConfig:
             gpu_per_node=self.gpu_per_node,
             rdma_block_num=self.rdma_block_num,
             num_qp_per_pe=self.num_qp_per_pe,
-            quant_type=_normalize_quant_type(self.quant_type),
+            quant_type=self.quant_type,
         )
 
 
@@ -102,66 +97,68 @@ class FlyDSLDispatchCombineInterNodeV1LLOp(EpDispatchCombineOp):
         mori_cfg = config.to_mori_config()
         super().__init__(mori_cfg)
         self._fly_use_copy = use_flydsl_copy_staging
-        self._fly_copy_jit = None
-        self._fly_combine_sync_jit = {}
-        self._fly_combine_all_jit = {}
-        self._vll_scale_bytes = mori_cfg.scale_dim * mori_cfg.scale_type_size
-        if use_flydsl_copy_staging:
-            mp = int(self._handle_info["multi_processor_count"])
-            wpb = mori_cfg.warp_num_per_block
-            self._fly_copy_jit = make_ep_dispatch_copy_to_staging_jit(
-                rank=mori_cfg.rank,
-                world_size=mori_cfg.world_size,
-                max_tok_per_rank=mori_cfg.max_num_inp_token_per_rank,
-                hidden_dim=mori_cfg.hidden_dim,
-                experts_per_token=mori_cfg.num_experts_per_token,
-                scale_dim=mori_cfg.scale_dim,
-                scale_type_size=mori_cfg.scale_type_size,
-                multiprocessor_count=mp,
-                warp_num_per_block=wpb,
-                data_type=config.data_type,
+        self._fly_dispatch = FlyDSLInterNodeV1LLDispatchEngine(
+            config=mori_cfg,
+            handle_info=self._handle_info,
+            data_type=config.data_type,
+            use_flydsl_copy_staging=use_flydsl_copy_staging,
+            handle=self._handle,
+            dispatch_out_ptrs=self._dispatch_out_ptrs,
+            get_dispatch_src_token_pos_fn=self._get_dispatch_src_token_pos_func,
+        )
+        self._fly_combine_jit = {}
+        self._dev = torch.device("cuda", mori_cfg.rank)
+        npes = mori_cfg.world_size
+        mt = mori_cfg.max_num_inp_token_per_rank
+        mr = npes * mt
+        k = mori_cfg.num_experts_per_token
+        token_bytes = mori_cfg.hidden_dim * torch.tensor([], dtype=config.data_type).element_size()
+        tok_i16_mr = (mr * token_bytes + 1) // 2
+        self._fly_comb_inp_tok = mori_shmem_create_tensor((tok_i16_mr,), torch.int16)
+        self._fly_comb_inp_wts = mori_shmem_create_tensor((mr * k,), torch.float32)
+        self._fly_xdev_bar_mem = mori_shmem_create_tensor((npes,), torch.int64)
+        ms.shmem_barrier_all()
+        self._fly_xdev_flag = torch.ones(1, dtype=torch.int64, device=self._dev)
+        self._fly_comb_bar = torch.zeros(1, dtype=torch.int32, device=self._dev)
+        self._fly_p2p_comb_inp = torch.zeros(npes, dtype=torch.int64, device=self._dev)
+        self._fly_p2p_comb_inp_wts = torch.zeros(npes, dtype=torch.int64, device=self._dev)
+        self._fly_p2p_xdb_mem = torch.zeros(npes, dtype=torch.int64, device=self._dev)
+        for pe in range(npes):
+            self._fly_p2p_comb_inp[pe] = ms.shmem_ptr_p2p(
+                self._fly_comb_inp_tok.data_ptr(), mori_cfg.rank, pe
             )
-            for _hw in (False, True):
-                self._fly_combine_sync_jit[_hw] = make_ep_combine_sync_jit(
-                    hidden_dim=mori_cfg.hidden_dim,
-                    experts_per_token=mori_cfg.num_experts_per_token,
-                    multiprocessor_count=mp,
-                    warp_num_per_block=wpb,
-                    has_weights=_hw,
-                    data_type=config.data_type,
-                )
-                self._fly_combine_all_jit[_hw] = make_ep_combine_all_jit(
-                    rank=mori_cfg.rank,
-                    world_size=mori_cfg.world_size,
-                    gpu_per_node=mori_cfg.gpu_per_node,
-                    max_tok_per_rank=mori_cfg.max_num_inp_token_per_rank,
-                    hidden_dim=mori_cfg.hidden_dim,
-                    experts_per_token=mori_cfg.num_experts_per_token,
-                    num_experts_per_rank=mori_cfg.num_experts_per_rank,
-                    multiprocessor_count=mp,
-                    warp_num_per_block=wpb,
-                    has_weights=_hw,
-                    data_type=config.data_type,
-                )
+            self._fly_p2p_comb_inp_wts[pe] = ms.shmem_ptr_p2p(
+                self._fly_comb_inp_wts.data_ptr(), mori_cfg.rank, pe
+            )
+            self._fly_p2p_xdb_mem[pe] = ms.shmem_ptr_p2p(
+                self._fly_xdev_bar_mem.data_ptr(), mori_cfg.rank, pe
+            )
+        for _hw in (False, True):
+            self._fly_combine_jit[_hw] = make_combine_jit(
+                rank=mori_cfg.rank,
+                npes=mori_cfg.world_size,
+                experts_per_rank=mori_cfg.num_experts_per_rank,
+                experts_per_token=mori_cfg.num_experts_per_token,
+                hidden_dim=mori_cfg.hidden_dim,
+                max_tok_per_rank=mori_cfg.max_num_inp_token_per_rank,
+                block_num=mori_cfg.block_num,
+                warp_num_per_block=mori_cfg.warp_num_per_block,
+                data_type=config.data_type,
+                enable_weights=_hw,
+                enable_std_moe=False,
+                use_p2p_read=False,
+            )
 
     def _fly_dispatch_copy_prerequisites(
         self, *, weight_ptr: int, scale_ptr: int, staging_ptr: int
     ) -> bool:
         """Same gating as mori ``EpDispatchCopyToStaging`` + Fly pack; fp8 → HIP only."""
-        if not self._fly_use_copy or self._fly_copy_jit is None:
-            return False
-        if (
-            _normalize_quant_type(self.config.quant_type)
-            == EpDispatchCombineQuantType.Fp8DirectCast
-        ):
-            return False
-        if staging_ptr == 0:
-            return False
-        if self._vll_scale_bytes > 0 and scale_ptr == 0:
-            return False
-        if weight_ptr == 0:
-            return False
-        return True
+        return self._fly_dispatch.can_use_fly_copy(
+            quant_type=self.config.quant_type,
+            weight_ptr=weight_ptr,
+            scale_ptr=scale_ptr,
+            staging_ptr=staging_ptr,
+        )
 
     def dispatch(
         self,
@@ -173,7 +170,7 @@ class FlyDSLDispatchCombineInterNodeV1LLOp(EpDispatchCombineOp):
         rdma_block_num: int = -1,
         warp_per_block: int = -1,
     ):
-        if not self._fly_use_copy or self._fly_copy_jit is None:
+        if not self._fly_dispatch.copy_enabled:
             return super().dispatch(
                 input,
                 weights,
@@ -183,8 +180,6 @@ class FlyDSLDispatchCombineInterNodeV1LLOp(EpDispatchCombineOp):
                 rdma_block_num=rdma_block_num,
                 warp_per_block=warp_per_block,
             )
-
-        import flydsl.expr as fx
 
         hidden_dim = input.size(1)
         weight_ptr = weights.data_ptr() if weights is not None else 0
@@ -197,25 +192,20 @@ class FlyDSLDispatchCombineInterNodeV1LLOp(EpDispatchCombineOp):
         self._dispatch_dtype = input.dtype
         sfx = _DTYPE_SUFFIX[input.dtype]
 
-        mori_cpp.prepare_inference_args(
-            self._handle,
-            inp_ptr=input.data_ptr(),
-            dtype=dtype_to_int(input.dtype),
-            num_tokens=input.size(0),
+        ctx = self._fly_dispatch.prepare_context(
+            handle=self._handle,
+            hidden_dim=hidden_dim,
+            input=input,
+            indices=indices,
             weight_ptr=weight_ptr,
             scale_ptr=scale_ptr,
-            indices_ptr=indices.data_ptr(),
-        )
-        args_ptr = mori_cpp.build_args(
-            self._handle,
             rdma_block_num=actual_rbn,
-            hidden_dim=hidden_dim,
+            dtype_to_int_fn=dtype_to_int,
         )
 
         shared_mem = self._dispatch_shared_mem(actual_wpb)
-        staging_ptr = mori_cpp.get_dispatch_combine_staging_ptr(self._handle)
         if not self._fly_dispatch_copy_prerequisites(
-            weight_ptr=weight_ptr, scale_ptr=scale_ptr, staging_ptr=staging_ptr
+            weight_ptr=weight_ptr, scale_ptr=scale_ptr, staging_ptr=ctx.staging_ptr
         ):
             return super().dispatch(
                 input,
@@ -228,22 +218,17 @@ class FlyDSLDispatchCombineInterNodeV1LLOp(EpDispatchCombineOp):
             )
 
         cur_tok = int(input.size(0))
-        self._fly_copy_jit(
-            fx.Int64(input.data_ptr()),
-            fx.Int64(indices.data_ptr()),
-            fx.Int64(weight_ptr),
-            fx.Int64(scale_ptr),
-            fx.Int64(staging_ptr),
-            fx.Int32(cur_tok),
-        )
-
-        self._launch(
-            f"EpDispatchInterNodeV1KernelLowLatency_{sfx}",
-            (actual_bn,),
-            (WARP_SIZE * actual_wpb,),
-            shared_mem,
-            stream,
-            args_ptr,
+        self._fly_dispatch.run_copy_and_launch(
+            launch_kernel_fn=self._launch,
+            kernel_name=f"EpDispatchInterNodeV1KernelLowLatency_{sfx}",
+            block_num=actual_bn,
+            warp_per_block=actual_wpb,
+            shared_mem=shared_mem,
+            stream=stream,
+            input_ptr=input.data_ptr(),
+            indices_ptr=indices.data_ptr(),
+            ctx=ctx,
+            cur_tok=cur_tok,
         )
 
         out_ptr, outW_ptr, outS_ptr, outI_ptr, total_ptr = self._dispatch_out_ptrs
@@ -277,10 +262,9 @@ class FlyDSLDispatchCombineInterNodeV1LLOp(EpDispatchCombineOp):
         weight_ptr = (
             weights.data_ptr() if weights is not None and weights.size(0) != 0 else 0
         )
-        actual_bn, actual_rbn, actual_wpb = self._resolve_launch_params(
+        _, actual_rbn, _ = self._resolve_launch_params(
             block_num, rdma_block_num, warp_per_block
         )
-        stream = _current_stream()
         self._combine_dtype = input.dtype
         sfx = _DTYPE_SUFFIX[input.dtype]
         quant_type = _normalize_quant_type(self.config.quant_type)
@@ -295,88 +279,63 @@ class FlyDSLDispatchCombineInterNodeV1LLOp(EpDispatchCombineOp):
             scale_ptr=0,
             indices_ptr=indices.data_ptr(),
         )
-        args_ptr = mori_cpp.build_args(
+        _ = mori_cpp.build_args(
             self._handle,
             rdma_block_num=actual_rbn,
             hidden_dim=hidden_dim,
             use_external_inp_buf=use_external_inp_buf,
         )
 
-        shared_mem = self._combine_shared_mem(actual_wpb)
-        bsz = WARP_SIZE * actual_wpb
-
         use_fly_combine = (
-            self._fly_use_copy
-            and kt == EpDispatchCombineKernelType.InterNodeV1LL.value
+            kt == EpDispatchCombineKernelType.InterNodeV1LL.value
             and sfx == "bf16"
             and quant_type == EpDispatchCombineQuantType.None_
-            and self._fly_combine_sync_jit
+            and self._fly_combine_jit
         )
-
-        if use_fly_combine:
-            staging_ptr = mori_cpp.get_dispatch_combine_staging_ptr(self._handle)
-            send_map_ptr = mori_cpp.get_dispatch_combine_disp_send_map_ptr(self._handle)
-            block_flag_ptr = mori_cpp.get_dispatch_combine_block_flag_counter_ptr(self._handle)
-            total_recv_ptr = mori_cpp.get_dispatch_combine_total_recv_num_ptr(self._handle)
-            wts_shmem_ptr = mori_cpp.get_dispatch_combine_inp_weights_shmem_ptr(self._handle)
-            combine_inp = self.get_registered_combine_input_buffer(input.dtype, hidden_dim)
-            out_ptr, outW_ptr = mori_cpp.get_combine_output_ptrs(
-                self._handle, bool(weight_ptr)
-            )
-            if (
-                staging_ptr == 0
-                or send_map_ptr == 0
-                or block_flag_ptr == 0
-                or total_recv_ptr == 0
-                or combine_inp.data_ptr() == 0
-                or out_ptr == 0
-                or (weight_ptr != 0 and (wts_shmem_ptr == 0 or outW_ptr == 0))
-            ):
-                use_fly_combine = False
-
         if not use_fly_combine:
-            return super().combine(
-                input,
-                weights,
-                indices,
-                block_num=block_num,
-                rdma_block_num=rdma_block_num,
-                warp_per_block=warp_per_block,
-                use_external_inp_buf=use_external_inp_buf,
-                call_reset=call_reset,
+            raise RuntimeError(
+                "InterNodeV1LL combine is configured for pure FlyDSL only; "
+                f"unsupported combine config: dtype={input.dtype}, quant={self.config.quant_type}, kernel_type={self.config.kernel_type}"
             )
 
         import flydsl.expr as fx
 
         hw = bool(weight_ptr)
         cur_tok = int(self._get_cur_rank_num_token(self._handle))
-        self._fly_combine_sync_jit[hw](
+        out_ptr, outW_ptr = mori_cpp.get_combine_output_ptrs(self._handle, hw)
+        total_recv_ptr = self._dispatch_out_ptrs[4]
+        if (
+            out_ptr == 0
+            or total_recv_ptr == 0
+            or self._fly_dispatch.tok_map_ptr == 0
+            or self._fly_dispatch.src_tok_pos_ptr == 0
+            or self._fly_comb_inp_tok.data_ptr() == 0
+            or self._fly_xdev_bar_mem.data_ptr() == 0
+            or (hw and outW_ptr == 0)
+        ):
+            raise RuntimeError("Pure FlyDSL combine setup failed due to invalid buffer pointers")
+
+        self._fly_combine_jit[hw](
             fx.Int64(input.data_ptr()),
-            fx.Int64(combine_inp.data_ptr()),
-            fx.Int64(weight_ptr if hw else 0),
-            fx.Int64(wts_shmem_ptr if hw else 0),
-            fx.Int64(total_recv_ptr),
-        )
-        self._launch_multi(
-            [
-                f"EpCombineSyncBarrier_{sfx}",
-                f"EpCombineInterNodeV1KernelLowLatency_{sfx}",
-            ],
-            [1, actual_bn],
-            [WARP_SIZE, bsz],
-            [0, shared_mem],
-            stream,
-            args_ptr,
-        )
-        self._fly_combine_all_jit[hw](
-            fx.Int64(total_recv_ptr),
-            fx.Int64(block_flag_ptr),
-            fx.Int64(send_map_ptr),
-            fx.Int64(staging_ptr),
+            fx.Int64(self._fly_comb_inp_tok.data_ptr()),
             fx.Int64(out_ptr),
+            fx.Int64(self._fly_xdev_bar_mem.data_ptr()),
+            fx.Int64(self._fly_xdev_flag.data_ptr()),
+            fx.Int64(self._fly_dispatch.tok_map_ptr),
+            fx.Int64(self._fly_comb_bar.data_ptr()),
+            fx.Int64(total_recv_ptr),
+            fx.Int64(self._fly_dispatch.src_tok_pos_ptr),
+            fx.Int64(self._fly_p2p_comb_inp.data_ptr()),
+            fx.Int64(self._fly_p2p_xdb_mem.data_ptr()),
+            fx.Int64(weight_ptr if hw else 0),
+            fx.Int64(self._fly_comb_inp_wts.data_ptr() if hw else 0),
             fx.Int64(outW_ptr if hw else 0),
-            fx.Int64(indices.data_ptr()),
+            fx.Int64(self._fly_p2p_comb_inp_wts.data_ptr() if hw else 0),
+            fx.Int64(0),
+            fx.Int64(0),
+            fx.Int64(0),
             fx.Int32(cur_tok),
+            torch.cuda.current_stream(),
         )
 
         out = from_gpu_ptr(
@@ -398,6 +357,20 @@ class FlyDSLDispatchCombineInterNodeV1LLOp(EpDispatchCombineOp):
         if call_reset:
             self._reset_func(self._handle, _current_stream())
         return (out, out_weights)
+
+    def get_dispatch_src_token_pos(self):
+        """Expose src-token map in mori FlatTokenIndex format for parity checks."""
+        src = from_gpu_ptr(
+            self._fly_dispatch.src_tok_pos_ptr,
+            (self.config.world_size * self.config.max_num_inp_token_per_rank,),
+            torch.int32,
+        ).clone()
+        max_tok = self.config.max_num_inp_token_per_rank
+        world_stride = self.config.world_size * max_tok
+        rank_id = torch.div(src, max_tok, rounding_mode="floor")
+        tok_id = torch.remainder(src, max_tok)
+        src.copy_(rank_id * world_stride + tok_id)
+        return src
 
     def dispatch_standard_moe(
         self,
@@ -477,28 +450,39 @@ class FlyDSLDispatchCombineInterNodeV1LLOp(EpDispatchCombineOp):
 
         if kt == EpDispatchCombineKernelType.InterNodeV1LL.value:
             mp = self._handle_info["multi_processor_count"]
-            staging_ptr = mori_cpp.get_dispatch_combine_staging_ptr(self._handle)
+            get_staging_ptr = getattr(mori_cpp, "get_dispatch_combine_staging_ptr", None)
+            staging_ptr = get_staging_ptr(self._handle) if get_staging_ptr else 0
             if self._fly_dispatch_copy_prerequisites(
                 weight_ptr=weight_ptr, scale_ptr=scale_ptr, staging_ptr=staging_ptr
             ):
-                import flydsl.expr as fx
-
-                cur_tok = int(input.size(0))
-                self._fly_copy_jit(
-                    fx.Int64(input.data_ptr()),
-                    fx.Int64(indices.data_ptr()),
-                    fx.Int64(weight_ptr),
-                    fx.Int64(scale_ptr),
-                    fx.Int64(staging_ptr),
-                    fx.Int32(cur_tok),
+                ctx = self._fly_dispatch.prepare_context(
+                    handle=self._handle,
+                    hidden_dim=hidden_dim,
+                    input=input,
+                    indices=indices,
+                    weight_ptr=weight_ptr,
+                    scale_ptr=scale_ptr,
+                    rdma_block_num=actual_rbn,
+                    dtype_to_int_fn=dtype_to_int,
                 )
-                self._launch(
-                    f"EpDispatchInterNodeV1KernelLowLatency_{sfx}_stdmoe",
-                    grid,
-                    block,
-                    shared_mem,
-                    stream,
-                    args_ptr,
+                self._fly_dispatch.run_copy_and_launch(
+                    launch_kernel_fn=self._launch,
+                    kernel_name=f"EpDispatchInterNodeV1KernelLowLatency_{sfx}_stdmoe",
+                    block_num=actual_bn,
+                    warp_per_block=actual_wpb,
+                    shared_mem=shared_mem,
+                    stream=stream,
+                    input_ptr=input.data_ptr(),
+                    indices_ptr=indices.data_ptr(),
+                    ctx=ctx,
+                    cur_tok=int(input.size(0)),
+                    packed_recv_x_ptr=packed_recv_x.data_ptr(),
+                    packed_recv_count_ptr=mori_cpp.get_standard_moe_packed_recv_count_ptr(
+                        self._handle
+                    ),
+                    packed_recv_src_info_ptr=packed_recv_src_info.data_ptr(),
+                    disp_tok_map_ptr=0,
+                    disp_grid_bar_ptr=0,
                 )
             else:
                 self._launch(

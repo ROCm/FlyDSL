@@ -28,7 +28,7 @@ from flydsl._mlir.ir import BF16Type, F32Type, FloatAttr, IntegerAttr as _IA, In
 
 import flydsl._mlir.ir as _ir
 
-from flydsl.expr.lowlevel import (
+from .dispatch_combine_internode_v1ll_llvm_helpers import (
     _unwrap as _lv_unwrap,
     as_index,
     const_i32,
