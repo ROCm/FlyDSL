@@ -333,27 +333,52 @@ result = arith.select(cond, true_val, false_val)
 is_less = arith.cmpf(a, b, predicate="olt")    # ordered less-than
 ```
 
-### Vector Arithmetic (IMPORTANT)
-All arith ops (`addf`, `mulf`, `negf`, `maximumf`, `cmpf`, `select`) work on **both scalars and vectors**.
-To broadcast a scalar to a vector, use `arith.constant_vector`:
+### Internal Types: Vector and Numeric (PREFERRED)
+
+Use FlyDSL's internal typed system instead of raw MLIR ops. The `Vector` class wraps `vector<NxTy>` with operator overloading and type-safe methods.
 
 ```python
-from flydsl._mlir.ir import VectorType
+from flydsl.expr.typing import Vector as Vec, Float32, Float16, BFloat16
 
-# Create a splat constant vector (e.g., all 2.0)
-vec_type = VectorType.get([vec_width], fx.T.f32())
-scale_vec = arith.constant_vector(2.0, vec_type)
+# Wrap raw vector values
+acc = Vec(frag_C.load())      # vector<Nxf32> → Vector with * / + operators
 
-# Now use it with vector ops
-vA = fx.memref_load_vec(rA)        # load vec from register
-vC = arith.mulf(vA, scale_vec)    # element-wise scale
+# Indexing (replaces vector.extract)
+val = acc[idx]                 # returns Float32 scalar
+
+# Bitcast (replaces vector.bitcast)
+v_f32 = Vec(raw_vec).bitcast(Float32)  # vector<Nxi32> → vector<Nxf32>
+
+# Type conversion (replaces arith.trunc_f / arith.ext_f)
+bf16_val = f32_val.to(BFloat16)        # f32 → bf16
+
+# Arithmetic — use Python operators, not arith.mulf/addf
+result = (val * scale_a) * scale_b     # auto-dispatches to mulf
+
+# Splat constant vector
+zeros = Vec.filled(N, 0.0, Float32)
+
+# Index cast — use fx.Int32 instead of arith.index_cast
+idx = fx.Int32(gpu.block_id("x") * tile_m)
 ```
+
+**Prefer internal types over raw ops:**
+| Raw MLIR op | Internal type equivalent |
+|-------------|------------------------|
+| `vector.extract(v, static_position=[i], ...)` | `Vec(v)[i]` |
+| `vector.bitcast(target_ty, v)` | `Vec(v).bitcast(Float32)` |
+| `arith.trunc_f(ty, v)` | `v.to(BFloat16)` |
+| `arith.mulf(a, b)` | `a * b` |
+| `arith.addf(a, b)` | `a + b` |
+| `arith.index_cast(T.i32, v)` | `fx.Int32(v)` |
+
+Still use `arith.constant_vector` for splat and `vector.from_elements` for building vectors from scalars (no Vector equivalent yet).
 
 ### Arith Ops Availability Table
 | Operation | Function | Works on Vectors | Notes |
 |-----------|----------|-----------------|-------|
-| Add | `arith.addf(a, b)` | Yes | |
-| Multiply | `arith.mulf(a, b)` | Yes | |
+| Add | `a + b` or `arith.addf(a, b)` | Yes | |
+| Multiply | `a * b` or `arith.mulf(a, b)` | Yes | |
 | Negate | `arith.negf(a)` | Yes | |
 | Max | `arith.maximumf(a, b)` | Yes | Good for ReLU |
 | Compare | `arith.cmpf(a, b, pred)` | Yes | Returns i1/vec<i1> |

@@ -10,8 +10,8 @@ Includes hot_loop_scheduler from the old pipeline for instruction scheduling.
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.expr import arith, vector, gpu, buffer_ops, rocdl, range_constexpr
-from flydsl.expr.typing import T, Float16, BFloat16, Float8E4M3FNUZ, Float8E4M3FN, Int8
+from flydsl.expr import vector, gpu, rocdl, range_constexpr
+from flydsl.expr.typing import T, Float16, Float32, BFloat16, Float8E4M3FNUZ, Float8E4M3FN, Int8, Vector as Vec
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.runtime.device import get_rocm_arch
 from flydsl._mlir import ir
@@ -317,7 +317,7 @@ def compile_preshuffle_gemm_v2(
         # ── Prologue ──────────────────────────────────────────────
         fx.copy(buf_copy_g2s, pA_g[None, None, None, 0], frag_copy_A)
         fx.copy(mma_copy, pB_g[None, None, None, 0], frag_B_retile_stages[0])
-        frag_C.store(arith.constant_vector(0.0, T.vec(acc_size, T.f32)))
+        frag_C.store(Vec.filled(acc_size, 0.0, Float32))
         fx.copy(uni_copy_g2s, frag_copy_A, pA_s[None, None, None, 0])
         gpu.barrier()
         rocdl.sched_barrier(0)
@@ -340,7 +340,7 @@ def compile_preshuffle_gemm_v2(
                 for iv, state in range(loop_start, loop_end, loop_step,
                                        init=[acc_init]):
                     frag_C.store(state[0])
-                    k_base = arith.index_cast(T.i32, iv * 2)
+                    k_base = fx.Int32(iv * 2)
                     pipeline_stage(read_stage=0, next_k_val=k_base + fx.Int32(1))
                     pipeline_stage(read_stage=1, next_k_val=k_base + fx.Int32(2))
                     results = yield [frag_C.load()]
@@ -351,7 +351,7 @@ def compile_preshuffle_gemm_v2(
                                        init=[acc_init, b0_init]):
                     frag_C.store(state[0])
                     frag_B_stages[0].store(state[1])
-                    k_base = arith.index_cast(T.i32, iv * 2)
+                    k_base = fx.Int32(iv * 2)
                     pipeline_stage(read_stage=0, next_k_val=k_base + fx.Int32(1))
                     pipeline_stage(read_stage=1, next_k_val=k_base + fx.Int32(2))
                     results = yield [frag_C.load(), frag_B_stages[0].load()]
@@ -362,9 +362,8 @@ def compile_preshuffle_gemm_v2(
 
         # ── Epilogue ─────────────────────────────────────────────
         if is_fp8:
-            # FP8: inline scale multiply (no fragment allocas → avoids scratch spills)
-            # MFMA 16x16 accumulator layout: element [mi*num_acc_n*4 + ni*4 + ii]
-            #   row = mi*16 + lane_div_16*4 + ii, col = wave_n_base + ni*16 + lane_mod_16
+            # FP8: inline scale multiply via layout API buffer loads
+            # Accumulator layout: [mi*num_acc_n*4 + ni*4 + ii]
             #   scale_a depends on row (mi, ii), scale_b depends on col (ni)
             bx_m = gpu.block_id("x") * tile_m
             by_n = gpu.block_id("y") * tile_n
@@ -374,33 +373,39 @@ def compile_preshuffle_gemm_v2(
             lane_mod_16 = lane_id % 16
             n_tile_base = wave_id * n_per_wave
 
-            scale_a_rsrc = buffer_ops.create_buffer_resource(arg_scale_a, max_size=True)
-            scale_b_rsrc = buffer_ops.create_buffer_resource(arg_scale_b, max_size=True)
+            # Scale buffer tensors + scalar copy atom
+            scale_a_buf = fx.rocdl.make_buffer_tensor(arg_scale_a, max_size=True)
+            scale_b_buf = fx.rocdl.make_buffer_tensor(arg_scale_b, max_size=True)
+            scale_copy = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), 32)
+            scale_reg_ty = fx.MemRefType.get(T.f32, fx.LayoutType.get(1, 1), fx.AddressSpace.Register)
+            scale_reg_lay = fx.make_layout(1, 1)
+            scale_a_div = fx.logical_divide(scale_a_buf, fx.make_layout(1, 1))
+            scale_b_div = fx.logical_divide(scale_b_buf, fx.make_layout(1, 1))
+
+            def load_scale(div_tensor, index):
+                r = fx.memref_alloca(scale_reg_ty, scale_reg_lay)
+                fx.copy_atom_call(scale_copy, fx.slice(div_tensor, (None, fx.Int32(index))), r)
+                return Vec(fx.memref_load_vec(r))[0]
 
             # Load per-column scales: 1 scalar per N-block
-            s_b_vals = [buffer_ops.buffer_load(scale_b_rsrc,
-                        by_n + n_tile_base + ni * 16 + lane_mod_16,
-                        vec_width=1, dtype=T.f32)
+            s_b_vals = [load_scale(scale_b_div, by_n + n_tile_base + ni * 16 + lane_mod_16)
                         for ni in range_constexpr(num_acc_n)]
-            # Load per-row scales: 1 f32x4 per M-block (4 rows per thread)
-            s_a_vecs = [vector.bitcast(T.f32x4, buffer_ops.buffer_load(scale_a_rsrc,
-                        bx_m + mi * 16 + lane_div_16 * 4,
-                        vec_width=4, dtype=T.f32))
+            # Load per-row scales: 1 scalar per row per thread
+            s_a_vals = [[load_scale(scale_a_div, bx_m + mi * 16 + lane_div_16 * 4 + ii)
+                         for ii in range_constexpr(4)]
                         for mi in range_constexpr(m_repeat)]
 
             # Build scaled accumulator inline
-            acc_vec = frag_C.load()
+            acc_vec = Vec(frag_C.load())
             scaled_elems = []
             for mi in range_constexpr(m_repeat):
                 for ni in range_constexpr(num_acc_n):
                     for ii in range_constexpr(4):
                         idx = mi * num_acc_n * 4 + ni * 4 + ii
-                        val = vector.extract(acc_vec, static_position=[idx],
-                                             dynamic_position=[])
-                        s_a = vector.extract(s_a_vecs[mi], static_position=[ii],
-                                             dynamic_position=[])
+                        val = acc_vec[idx]
+                        s_a = s_a_vals[mi][ii]
                         scaled_val = (val * s_a) * s_b_vals[ni]
-                        scaled_elems.append(arith.trunc_f(out_elem_cls.ir_type, scaled_val))
+                        scaled_elems.append(scaled_val.to(out_elem_cls))
 
             out_vec = vector.from_elements(
                 T.vec(acc_size, out_elem_cls.ir_type), scaled_elems)
@@ -408,7 +413,7 @@ def compile_preshuffle_gemm_v2(
             fx.copy(buf_copy_out, frag_C_retile, pC_g)
         else:
             # f16/bf16: truncate + vectorized fx.copy
-            frag_C_out.store(arith.trunc_f(T.vec(acc_size, out_elem_cls.ir_type), frag_C.load()))
+            frag_C_out.store(Vec(frag_C.load()).to(out_elem_cls))
             fx.copy(buf_copy_out, frag_C_retile, pC_g)
 
     # ── Host launcher ─────────────────────────────────────────────
