@@ -1,20 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""Load AOT-exported .o or .so files back into Python for execution.
-
-Supports both .o and .so files:
-- .o files loaded via FlyBinaryLoader (LLVM JITLink, no gcc needed)
-- .so files loaded via dlopen
-- ``__getattr__`` for ergonomic function lookup
-
-Usage::
-
-    from flydsl.compiler.export import load_module
-
-    mod = load_module("./build/my_kernel.o")  # or .so
-    mod.gemm_fp16(packed_args)
-"""
+"""Load AOT-exported .o or .so files back into Python for execution."""
 
 import ctypes
 import os
@@ -25,7 +12,7 @@ from typing import Optional
 
 @lru_cache(maxsize=1)
 def _get_binary_loader():
-    """Load libfly_binary_loader.so (LLVM LLJIT-based .o loader)."""
+    """Load libfly_binary_loader.so if available."""
     lib_dir = Path(__file__).resolve().parent.parent.parent / "_mlir" / "_mlir_libs"
     loader_path = lib_dir / "libfly_binary_loader.so"
     if not loader_path.exists():
@@ -51,12 +38,7 @@ def _get_binary_loader():
 
 
 class BinaryKernelModule:
-    """A loaded AOT module from an exported .o or .so file.
-
-    For .o files: uses FlyBinaryLoader (LLVM JITLink) to load in-process.
-    For .so files: loaded directly via dlopen.
-
-    """
+    """A loaded AOT module (.o via JITLink, .so via dlopen)."""
 
     def __init__(self, file_path: str):
         self._path = file_path
@@ -75,7 +57,7 @@ class BinaryKernelModule:
             raise ValueError(f"Unsupported file type: {self._path}. Use .o or .so")
 
     def _load_object_file(self, obj_path: str):
-        """Load .o via FlyBinaryLoader (LLVM JITLink), fallback to gcc."""
+        """Load .o via JITLink, fallback to gcc."""
         loader = _get_binary_loader()
         if loader is not None:
             self._load_via_jitlink(obj_path, loader)
@@ -83,7 +65,6 @@ class BinaryKernelModule:
             self._load_via_gcc(obj_path)
 
     def _load_via_jitlink(self, obj_path: str, loader):
-        """Load .o in-process using LLVM LLJIT."""
         from ..jit_executor import _resolve_runtime_libs
 
         with open(obj_path, "rb") as f:
@@ -103,7 +84,6 @@ class BinaryKernelModule:
         self._loader = loader
 
     def _load_via_gcc(self, obj_path: str):
-        """Fallback: link .o → .so using gcc, then dlopen."""
         import subprocess
 
         from ..jit_executor import _resolve_runtime_libs
@@ -124,7 +104,6 @@ class BinaryKernelModule:
         self._lib = ctypes.CDLL(so_path)
 
     def _lookup_symbol(self, name: str) -> Optional[int]:
-        """Look up a symbol, returns raw pointer or None."""
         if self._jit_handle is not None:
             ptr = self._loader.flyBinaryModuleLookup(
                 self._jit_handle, name.encode()
@@ -140,7 +119,6 @@ class BinaryKernelModule:
         return None
 
     def _read_string_global(self, name: str) -> Optional[str]:
-        """Read a null-terminated string global (llvm.array<N x i8>)."""
         if self._jit_handle is not None:
             ptr = self._lookup_symbol(name)
             if ptr:
@@ -155,10 +133,7 @@ class BinaryKernelModule:
         return None
 
     def get_function(self, prefix: str):
-        """Look up a function by its export prefix.
-
-        Returns a ctypes callable: ``fn(packed_args: ctypes.c_void_p) -> None``.
-        """
+        """Look up a callable by export prefix."""
         if prefix in self._func_cache:
             return self._func_cache[prefix]
 
@@ -189,7 +164,6 @@ class BinaryKernelModule:
         return func_ptr
 
     def __getattr__(self, prefix: str):
-        """Ergonomic function lookup: ``mod.gemm_fp16(packed_args)``."""
         if prefix.startswith("_"):
             raise AttributeError(prefix)
         try:
@@ -215,20 +189,7 @@ class BinaryKernelModule:
 
 
 def load_module(file_path: str) -> BinaryKernelModule:
-    """Load an AOT-exported .o or .so file.
-
-    For .o files: uses LLVM JITLink (in-process, no gcc needed).
-    For .so files: loaded directly via dlopen.
-
-    Falls back to gcc linking if FlyBinaryLoader is not available.
-
-
-    Args:
-        file_path: Path to the .o or .so file.
-
-    Returns:
-        BinaryKernelModule with ``.get_function(prefix)`` or ``__getattr__``.
-    """
+    """Load an AOT-exported .o or .so file."""
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"Module file not found: {file_path}")
     return BinaryKernelModule(file_path)

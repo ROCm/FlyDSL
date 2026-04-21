@@ -1,13 +1,5 @@
 #!/usr/bin/env python3
-"""Test AOT export: dump_to_object, export_to_c, and load_module.
-
-- dump_to_object: returns .o bytes (ELF relocatable object) in memory
-- export_to_c: writes .h + .o to disk (C header + object for HIP deployment)
-- load_module: loads .o or .so back into Python for execution
-
-Usage:
-    PYTHONPATH=./ python tests/python/examples/test_aot_export.py
-"""
+"""Test AOT export: dump_to_object and load_module."""
 
 import os
 import shutil
@@ -45,7 +37,6 @@ def _copy_launch(A: fx.Tensor, B, n: fx.Int32, stream: fx.Stream = fx.Stream(Non
 
 
 def _compile_copy_artifact():
-    """Compile a simple copy kernel and return its CompiledArtifact."""
     n = 64
     A = torch.rand(n, dtype=torch.float32).cuda()
     B = torch.zeros(n, dtype=torch.float32).cuda()
@@ -59,7 +50,6 @@ def _compile_copy_artifact():
 # ── Tests ──
 
 def test_dump_to_object():
-    """dump_to_object produces a valid ELF with prefixed symbols."""
     print("=== test_dump_to_object ===")
     artifact = _compile_copy_artifact()
 
@@ -84,32 +74,25 @@ def test_dump_to_object():
     print("  PASSED")
 
 
-def test_export_to_c():
-    """export_to_c produces .h + .o."""
-    print("\n=== test_export_to_c ===")
+def test_dump_to_object_with_output_path():
+    print("\n=== test_dump_to_object_with_output_path ===")
     artifact = _compile_copy_artifact()
     d = tempfile.mkdtemp(prefix="flydsl_export_")
     try:
-        artifact.export_to_c(d, "kernel", "copy_fp32")
+        o_path = os.path.join(d, "kernel.o")
+        obj_bytes = artifact.dump_to_object("copy_fp32", output_path=o_path)
 
-        h = os.path.join(d, "kernel.h")
-        o = os.path.join(d, "kernel.o")
-        assert os.path.exists(h), ".h missing"
-        assert os.path.exists(o), ".o missing"
-
-        with open(h) as f:
-            header = f.read()
-        assert "_mlir_copy_fp32_" in header
-        assert "copy_fp32_launch" in header
-        assert "hip/hip_runtime.h" in header
-        print(f"  .h: {len(header)} chars, .o: {os.path.getsize(o)} bytes")
+        assert os.path.exists(o_path), ".o missing"
+        assert obj_bytes[:4] == b"\x7fELF", f"Expected ELF, got {obj_bytes[:4]!r}"
+        with open(o_path, "rb") as f:
+            assert f.read() == obj_bytes, "file content != returned bytes"
+        print(f"  {len(obj_bytes)} bytes written to {o_path}")
         print("  PASSED")
     finally:
         shutil.rmtree(d)
 
 
 def test_load_module_from_o():
-    """load_module(".o") loads via LLVM JITLink."""
     print("\n=== test_load_module_from_o ===")
     artifact = _compile_copy_artifact()
     d = tempfile.mkdtemp(prefix="flydsl_load_")
@@ -139,13 +122,12 @@ def test_load_module_from_o():
 
 
 def test_load_module_from_so():
-    """load_module(".so") works with pre-linked .so."""
     print("\n=== test_load_module_from_so ===")
     artifact = _compile_copy_artifact()
     d = tempfile.mkdtemp(prefix="flydsl_so_")
     try:
-        artifact.export_to_c(d, "kernel", "so_test")
         o_path = os.path.join(d, "kernel.o")
+        artifact.dump_to_object("so_test", output_path=o_path)
 
         from flydsl.compiler.jit_executor import _resolve_runtime_libs
         from pathlib import Path
@@ -168,14 +150,7 @@ def test_load_module_from_so():
 
 
 def _run_gemm_aot_subprocess():
-    """Run GEMM AOT test in a subprocess.
-
-    dump_to_object creates an ExecutionEngine that loads/unloads GPU modules,
-    which corrupts in-process GPU state. A subprocess provides clean isolation.
-
-    Reuses compile_preshuffle_gemm_a8 and data-prep from tests/utils (same
-    patterns as test_preshuffle_gemm.py).
-    """
+    """Run GEMM AOT test in subprocess (isolates GPU state from dump_to_object)."""
     result = subprocess.run(
         [sys.executable, "-u", "-c", f"""
 import sys; sys.path.insert(0, {_REPO_ROOT!r})
@@ -233,7 +208,6 @@ import shutil; shutil.rmtree(d)
 
 
 def test_gemm_dump_to_object():
-    """AOT round-trip: compile preshuffle GEMM -> dump_to_object -> load_module."""
     print("\n=== test_gemm_dump_to_object ===")
     result = _run_gemm_aot_subprocess()
     print(f"  {result.stdout.strip()}")
@@ -246,7 +220,7 @@ def test_gemm_dump_to_object():
 if __name__ == "__main__":
     test_gemm_dump_to_object()
     test_dump_to_object()
-    test_export_to_c()
+    test_dump_to_object_with_output_path()
     test_load_module_from_o()
     test_load_module_from_so()
     print("\nALL PASSED")
