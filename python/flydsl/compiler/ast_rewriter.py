@@ -765,10 +765,14 @@ class ReplaceIfWithDispatch(Transformer):
         active_symbols_before_if = self.symbol_scopes.snapshot_symbol_scopes()
         if _is_constexpr(node.test):
             node.test = _unwrap_constexpr(node.test)
-            node = super().visit_If(node)
+            node.body = self._visit_stmt_block(node.body)
+            if node.orelse:
+                node.orelse = self._visit_stmt_block(node.orelse)
             return node
         if not self._could_be_dynamic(node.test):
-            node = super().visit_If(node)
+            node.body = self._visit_stmt_block(node.body)
+            if node.orelse:
+                node.orelse = self._visit_stmt_block(node.orelse)
             return node
         with self.symbol_scopes.control_flow_scope():
             node.test = self.visit(node.test)
