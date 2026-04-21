@@ -280,5 +280,4 @@ set_target_properties(FlyBinaryLoader PROPERTIES
   OUTPUT_NAME "fly_binary_loader"
   LIBRARY_OUTPUT_DIRECTORY "${_MLIR_LIBS_DIR}"
 )
-
-
+add_dependencies(FlyPythonCAPI FlyBinaryLoader)

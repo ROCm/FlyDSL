@@ -805,8 +805,10 @@ class Stream:
             return raw
         return raw.cuda_stream
 
+    _aot_type_tag = "stream"
+
     @classmethod
-    def _reusable_slot_spec(cls, arg):
+    def _reusable_slot_spec(cls, arg=None):
         return ctypes.c_void_p, cls._extract_stream_value
 
     @classmethod

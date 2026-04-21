@@ -150,7 +150,7 @@ def test_load_module_from_so():
 
 
 def _run_gemm_aot_subprocess():
-    """Run GEMM AOT test in subprocess (isolates GPU state from dump_to_object)."""
+    """Run GEMM AOT test in subprocess (avoids heavy imports in main process)."""
     result = subprocess.run(
         [sys.executable, "-u", "-c", f"""
 import sys; sys.path.insert(0, {_REPO_ROOT!r})

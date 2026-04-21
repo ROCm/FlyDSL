@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 _META_ENTRY = "entry_name"
 _META_VER = "fly_version"
 _META_ARCH = "gpu_arch"
+_META_ARGS = "args_spec"
 
 
 def _collect_defined_names(module: ir.Module):
@@ -108,13 +109,16 @@ def _clone_and_prefix(ir_source, prefix: str) -> ir.Module:
     return module
 
 
-def _add_metadata(module: ir.Module, prefix: str, entry_name: str, arch: str, version: str):
-    """Add metadata globals (entry_name, version, arch) as string constants."""
+def _add_metadata(module: ir.Module, prefix: str, entry_name: str, arch: str, version: str,
+                   args_spec: str = None):
+    """Add metadata globals as null-terminated string constants."""
     entries = {
         f"{prefix}_{_META_ENTRY}": entry_name + "\0",
         f"{prefix}_{_META_VER}": version + "\0",
         f"{prefix}_{_META_ARCH}": arch + "\0",
     }
+    if args_spec:
+        entries[f"{prefix}_{_META_ARGS}"] = args_spec + "\0"
     with module.context, ir.Location.unknown():
         with ir.InsertionPoint(module.body):
             for name, val in entries.items():
@@ -131,6 +135,7 @@ def dump_to_object(
     function_prefix: str,
     output_path: str = "",
     arch: str = "",
+    args_spec: str = None,
 ) -> bytes:
     """Export a CompiledArtifact as a relocatable ELF .o file (bytes).
 
@@ -155,6 +160,7 @@ def dump_to_object(
             module, function_prefix,
             f"{function_prefix}_{artifact._entry}",
             arch, flydsl.__version__,
+            args_spec=args_spec,
         )
 
         engine = ExecutionEngine(
@@ -169,13 +175,22 @@ def dump_to_object(
             os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
             engine.dump_to_object_file(output_path)
             with open(output_path, "rb") as f:
-                return f.read()
+                obj_bytes = f.read()
         else:
             fd, tmp_path = tempfile.mkstemp(suffix=".o")
             os.close(fd)
             try:
                 engine.dump_to_object_file(tmp_path)
                 with open(tmp_path, "rb") as f:
-                    return f.read()
+                    obj_bytes = f.read()
             finally:
                 os.unlink(tmp_path)
+
+        # Keep engine alive to suppress hipModuleUnload warnings at GC time.
+        # The engine's GPU modules are distinct from the caller's, but the
+        # MLIR runtime prints noisy errors when unloading them.
+        _keep_alive_engines.append(engine)
+        return obj_bytes
+
+
+_keep_alive_engines: list = []

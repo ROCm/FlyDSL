@@ -14,7 +14,10 @@ LayerNorm(x) = (x - mean) / sqrt(var + eps) * gamma + beta
 """
 
 import os
+import tempfile
+import shutil
 
+import flydsl.compiler as flyc
 from tests.test_common import run_perftest
 from tests.kernels.benchmark_common import (
     PerfRow,
@@ -140,6 +143,25 @@ def run_test(M: int, N: int, dtype: str = "f32"):
         print("First row Actual:")
         print(output_ref[0, :5])
         ok = False
+
+    # AOT round-trip: compile → dump → load_module → call → verify
+    if ok:
+        compiled_fn = flyc.compile(launch_fn, input_dev, gamma_dev, beta_dev, output_dev, M, stream)
+        _aot_dir = tempfile.mkdtemp(prefix="flydsl_aot_")
+        _aot_prefix = f"layernorm_{dtype}_{M}x{N}"
+        _aot_path = os.path.join(_aot_dir, "kernel.o")
+        try:
+            compiled_fn.dump_to_object(_aot_prefix, output_path=_aot_path)
+            mod = flyc.load_module(_aot_path)
+            aot_fn = mod.get_function(_aot_prefix)
+            output_dev.zero_()
+            aot_fn(input_dev, gamma_dev, beta_dev, output_dev, M, stream)
+            torch.cuda.synchronize()
+            aot_error = (output_dev.to(DTYPE_FP32) - expected).abs().max().item()
+            assert aot_error < atol, f"AOT round-trip failed: error={aot_error:.2e}"
+            print(f"  [AOT] {_aot_prefix}: PASS")
+        finally:
+            shutil.rmtree(_aot_dir)
 
     return ok, flydsl_gpu_us
 

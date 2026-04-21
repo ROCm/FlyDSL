@@ -161,18 +161,20 @@ class TensorAdaptor:
         self._orig_shape = tensor.shape
         self._orig_strides = tensor.stride()
 
+    _aot_type_tag = "tensor"
+
     @staticmethod
     def _extract_data_ptr(arg):
         return arg.data_ptr()
 
     @classmethod
-    def _reusable_slot_spec(cls, arg):
+    def _reusable_slot_spec(cls, arg=None):
         """Reusable slot for tensor arguments.
 
         For bare-pointer calling convention, only the data pointer changes
         between calls with the same shape/dtype/strides.
         """
-        if not hasattr(arg, 'data_ptr'):
+        if arg is not None and not hasattr(arg, 'data_ptr'):
             return None
         return ctypes.c_void_p, cls._extract_data_ptr
 
