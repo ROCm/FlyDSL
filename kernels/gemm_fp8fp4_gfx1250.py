@@ -1082,11 +1082,9 @@ def compile_mxscale_gemm(
                 return [load_a_frag(a_buf, a_bases[wm_start + i], ks)
                         for i in range_constexpr(count)]
 
-            def _emit_q_rows(a_frags, b_frags, a_scales, b_scales,
-                             wm_base, wn_base, group_base,
-                             row_start, row_count):
-                for wm_row in range_constexpr(row_count):
-                    wm_local = row_start + wm_row
+            def _emit_q(a_frags, b_frags, a_scales, b_scales,
+                        wm_base, wn_base, group_base):
+                for wm_local in range_constexpr(_half_wm):
                     wm = wm_base + wm_local
                     a_scale_idx = wm // 2
                     a_opsel = wm % 2
@@ -1098,7 +1096,7 @@ def compile_mxscale_gemm(
                             b_opsel = wn_local % 2
                             current_accs[idx] = rocdl.wmma_scale_f32_16x16x128_f8f6f4(
                                 T.vec(8, T.f32),
-                                b_frags[wn_local], a_frags[wm_row],
+                                b_frags[wn_local], a_frags[wm_local],
                                 current_accs[idx],
                                 b_scales[b_scale_idx], a_scales[a_scale_idx],
                                 fmtA=4, fmtB=0,
@@ -1109,20 +1107,12 @@ def compile_mxscale_gemm(
                             b_opsel = wn_local % 2
                             current_accs[idx] = rocdl.wmma_scale_f32_16x16x128_f8f6f4(
                                 T.vec(8, T.f32),
-                                b_frags[wn_local], a_frags[wm_row],
+                                b_frags[wn_local], a_frags[wm_local],
                                 current_accs[idx],
                                 b_scales[b_scale_idx], a_scales[a_scale_idx],
                                 fmtA=0, fmtB=0,
                                 scaleAType=b_opsel, scaleBType=a_opsel,
                             )
-
-            def _emit_q(a_frags, b_frags, a_scales, b_scales,
-                        wm_base, wn_base, group_base):
-                _emit_q_rows(
-                    a_frags, b_frags, a_scales, b_scales,
-                    wm_base, wn_base, group_base,
-                    0, _half_wm,
-                )
 
             _q_size = _half_wm * _half_wn  # group size for quadrant indexing
 
@@ -1143,38 +1133,16 @@ def compile_mxscale_gemm(
                     ks_group=as_tdm_group_m)
                 a_scales = a_scales_all[::2]
 
-                # For the common tile_k=128 path, split Q1's A-top load into
-                # two row groups so the first WMMA chunk starts after fewer
-                # LDS reads. This targets the dominant stage-head dscnt wait.
-                _q1_front_rows = _half_wm if (k_wmma_steps != 1 or _half_wm < 4) \
-                    else 1
+                # Load A top first (Q1 needs only a_top + b_left + a_scales).
+                a_top = _load_a_group(0, _half_wm, ks)
 
-                a_top_front = _load_a_group(0, _q1_front_rows, ks)
-
-                # Wait for the first Q1 row-group + scales to be ready.
+                # Wait for a_top + a_scales to be ready (small drain).
                 rocdl.s_wait_dscnt(0)
 
-                _emit_q_rows(
-                    a_top_front, b_left_frags, a_scales, b_left_scales,
-                    0, 0, 0,
-                    0, _q1_front_rows,
-                )
+                # Q1: top-A × B-left
+                _emit_q(a_top, b_left_frags, a_scales, b_left_scales,
+                        0, 0, 0)
 
-                if _q1_front_rows < _half_wm:
-                    a_top_back = _load_a_group(
-                        _q1_front_rows,
-                        _half_wm - _q1_front_rows,
-                        ks,
-                    )
-                    rocdl.s_wait_dscnt(0)
-                    _emit_q_rows(
-                        a_top_back, b_left_frags, a_scales, b_left_scales,
-                        0, 0, 0,
-                        _q1_front_rows, _half_wm - _q1_front_rows,
-                    )
-                    a_top = list(a_top_front) + list(a_top_back)
-                else:
-                    a_top = a_top_front
                 # Issue a_bottom + b_right loads DURING Q1's WMMA execution,
                 # overlapping LDS round-trip latency with matrix engine work.
                 a_bottom = _load_a_group(_half_wm, _half_wm, ks)
