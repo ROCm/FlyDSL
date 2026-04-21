@@ -11,7 +11,7 @@ Includes hot_loop_scheduler from the old pipeline for instruction scheduling.
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.expr import arith, vector, gpu, buffer_ops, rocdl, range_constexpr
-from flydsl.expr.typing import T, Float16, Float32, BFloat16, Float8E4M3FNUZ, Float8E4M3FN, Int8
+from flydsl.expr.typing import T, Float16, BFloat16, Int8
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.runtime.device import get_rocm_arch
 from flydsl._mlir import ir
@@ -224,8 +224,12 @@ def compile_preshuffle_gemm_v2(
                         rocdl.sched_dswr(1)
             else:
                 # gfx950 path: distribute vmem/dsrd across MFMA slots
-                # Match v1: element_k_per_mfma=128 for scheduler MFMA count
-                element_k_per_mfma = 128
+                if use_mfma_k32:
+                    element_k_per_mfma = 32
+                elif is_fp8:
+                    element_k_per_mfma = 128  # mfma_scale_f32_16x16x128
+                else:
+                    element_k_per_mfma = 16
                 num_mfma_per_tile_k = tile_k // element_k_per_mfma
                 mfma_total = num_mfma_per_tile_k * m_repeat * mfma_group
                 dswr_tail = num_a_loads
