@@ -252,7 +252,7 @@ def compile_preshuffle_gemm_a8(
 
     _is_gfx950 = str(gpu_arch).startswith("gfx950")
     _is_gfx942 = str(gpu_arch).startswith("gfx942")
-    _use_mfma_k32 = _is_gfx950 and is_f16_or_bf16
+    use_mfma_k32 = _is_gfx950 and is_f16_or_bf16
 
     lds_stride_bytes = tile_k_bytes
 
@@ -505,7 +505,7 @@ def compile_preshuffle_gemm_a8(
             b_i64x2 = vector.bitcast(T.i64x2, b16)
             b0_i64 = vector.extract(b_i64x2, static_position=[0], dynamic_position=[])
             b1_i64 = vector.extract(b_i64x2, static_position=[1], dynamic_position=[])
-            if not is_f16_or_bf16 or _use_mfma_k32:
+            if not is_f16_or_bf16 or use_mfma_k32:
                 return b0_i64, b1_i64
             b0_v1 = vector.from_elements(T.vec(1, T.i64), [b0_i64])
             b1_v1 = vector.from_elements(T.vec(1, T.i64), [b1_i64])
@@ -587,7 +587,7 @@ def compile_preshuffle_gemm_a8(
             a0_i64 = vector.extract(a_i64x2, static_position=[0], dynamic_position=[])
             a1_i64 = vector.extract(a_i64x2, static_position=[1], dynamic_position=[])
 
-            if not is_f16_or_bf16 or _use_mfma_k32:
+            if not is_f16_or_bf16 or use_mfma_k32:
                 return a0_i64, a1_i64
 
             a0_v1 = vector.from_elements(T.vec(1, T.i64), [a0_i64])
@@ -898,16 +898,16 @@ def compile_preshuffle_gemm_a8(
                 return current_accs_list, scales_pf
 
             mfma_res_ty = T.i32x4 if is_int8 else T.f32x4
-            if _use_mfma_k32:
+            if use_mfma_k32:
                 mfma_fn_k32 = rocdl.mfma_f32_16x16x32_f16 if is_f16 else rocdl.mfma_f32_16x16x32_bf16
 
-                def _i64x2_to_v8(lo, hi):
+                def i64x2_to_v8(lo, hi):
                     v2 = vector.from_elements(T.i64x2, [lo, hi])
                     return vector.bitcast(T.f16x8 if is_f16 else T.bf16x8, v2)
 
                 def mfma_k64_bytes(acc_in, a0, a1, b0, b1):
-                    av = _i64x2_to_v8(a0, a1)
-                    bv = _i64x2_to_v8(b0, b1)
+                    av = i64x2_to_v8(a0, a1)
+                    bv = i64x2_to_v8(b0, b1)
                     return mfma_fn_k32(mfma_res_ty, [av, bv, acc_in, 0, 0, 0])
             else:
                 if is_int8:
@@ -1167,7 +1167,7 @@ def compile_preshuffle_gemm_a8(
                         rocdl.sched_dswr(1)
             else:
                 mfma_group = num_acc_n
-                if _use_mfma_k32:
+                if use_mfma_k32:
                     element_k_per_mfma = 32
                 elif _is_gfx950:
                     element_k_per_mfma = 128

@@ -171,7 +171,7 @@ def compile_preshuffle_gemm_v2(
         frag_C_retile = thr_r2g_C.retile(frag_C_out)
 
         # ── Scheduling hints (ported from old pipeline) ───────────
-        def _build_scheduler(numer: int, denom: int):
+        def build_scheduler(numer: int, denom: int):
             if denom <= 0:
                 return []
             if numer <= 0:
@@ -243,11 +243,11 @@ def compile_preshuffle_gemm_v2(
                 vmem_remaining = num_gmem_loads - dvmem_preload_eff
                 dsrd_remaining = num_ds_load - dsrd_preload_eff
                 if vmem_remaining > 0 and vmem_remaining < mfma_total:
-                    vmem_schedule = (_build_scheduler(vmem_remaining, vmem_remaining)
+                    vmem_schedule = (build_scheduler(vmem_remaining, vmem_remaining)
                                      + [0] * (mfma_total - vmem_remaining))
                 else:
-                    vmem_schedule = _build_scheduler(vmem_remaining, mfma_total)
-                dsrd_schedule = _build_scheduler(dsrd_remaining, mfma_total)
+                    vmem_schedule = build_scheduler(vmem_remaining, mfma_total)
+                dsrd_schedule = build_scheduler(dsrd_remaining, mfma_total)
                 dswr_start = max(mfma_total - dswr_tail - dstr_advance, 0)
                 last_dsrd_mfma_idx = -1
                 for sched_idx in range_constexpr(mfma_total):
@@ -425,26 +425,18 @@ def compile_preshuffle_gemm_v2(
     ):
         ctx = CompilationContext.get_current()
 
-        # MMA atom
-        if is_f16 and use_mfma_k32:
-            mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 32, Float16))
+        # MMA atom — layout_elem carries the dtype (Float16/BFloat16/Float8E4M3FN/etc)
+        if use_mfma_k32:
+            mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 32, layout_elem))
             k_perm = fx.make_layout((8, 4), (1, 8))
-        elif is_bf16 and use_mfma_k32:
-            mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 32, BFloat16))
-            k_perm = fx.make_layout((8, 4), (1, 8))
-        elif is_f16:
-            mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 16, Float16))
-            k_perm = fx.make_layout((4, 4, 2), (1, 8, 4))
-        elif is_bf16:
-            mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 16, BFloat16))
+        elif is_f16_or_bf16:
+            mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 16, layout_elem))
             k_perm = fx.make_layout((4, 4, 2), (1, 8, 4))
         elif use_mfma_scale_128:
-            # gfx950 fp8: K=128 atom via CDNA4 MFMA_Scale path (TODO)
             mma_atom = fx.make_mma_atom(fx.rocdl.cdna4.MFMA_Scale(16, 16, 128, layout_elem))
             k_perm = fx.make_layout((32, 4), (1, 32))
         else:
             mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 32, layout_elem))
-            # FP8 gfx942: KPerThread=8, GroupK=4, 2 atoms → groups 64 K elements
             k_perm = fx.make_layout((8, 4, 2), (1, 16, 8))
 
         tiled_mma = fx.make_tiled_mma(
