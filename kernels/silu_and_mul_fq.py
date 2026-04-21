@@ -1,15 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""Fused silu_and_mul + MXFP4 quantization + sorted-scale write kernel (FlyDSL).
+"""Fused silu_and_mul + optional quantization + sorted-scale write kernel (FlyDSL).
 
 Designed for split-K MOE stage1 post-processing:
 
   input   : tmp_out  (token_num * topk, inter_dim * 2) bf16
   sorted  : sorted_token_ids (sorted_len,) i32 -- packed (token<<0 | slot<<24)
             num_valid_ids    (1,) i32
-  output  : out_fp4          raw byte buffer -- FP4x2 packed, row stride = inter_dim//2
-            out_scale_sorted raw byte buffer -- tiled E8M0 scale (same layout as moe_mxfp4_sort)
+  output  : out              raw byte buffer
+              * quant_mode="fp4"  -> FP4x2 packed, row stride = inter_dim//2
+              * quant_mode="fp8"  -> MXFP8 (e4m3fn) bytes, row stride = inter_dim
+              * quant_mode="none" -> bf16, row stride = inter_dim * 2
+            out_scale_sorted raw byte buffer -- tiled E8M0 scale
+              (only written when quant_mode in {"fp4","fp8"}; same tiled layout
+              as ``moe_mxfp4_sort``)
 
 Grid:  (num_sorted_rows, 1, 1)  -- one workgroup per sorted row (including blockM padding).
 Block: (BLOCK_THREADS, 1, 1)
@@ -17,12 +22,19 @@ Block: (BLOCK_THREADS, 1, 1)
 Each workgroup:
   1. Loads sorted_token_ids[bid] -> (token_id, slot_id) -> row = token_id * topk + slot_id
   2. If bid < num_valid_ids (valid row):
-     a. Reads gate = tmp_out[row, 0:inter_dim], up = tmp_out[row, inter_dim:2*inter_dim]
+     a. Reads gate/up depending on gui_layout:
+        gui_layout=False -> gate at col [0:inter_dim], up at col [inter_dim:2*inter_dim]
+        gui_layout=True  -> block-interleaved per-16 (gate[0:16], up[0:16], gate[16:32], ...)
      b. Computes silu(gate) * up in f32
-     c. Per-1x32 MXFP4 quant -> writes packed FP4 + E8M0 scale in tiled layout
+     c. Per-1x32 MXFP4/MXFP8 quant -> writes packed data + E8M0 scale in tiled layout,
+        or (quant_mode="none") writes bf16 directly
   3. If bid >= num_valid_ids (blockM padding row):
-     a. Writes zero FP4 bytes to out_fp4
-     b. Writes zero E8M0 scale to out_scale_sorted (keeps tiled layout consistent)
+     a. quant_mode in {fp4,fp8}: writes zero E8M0 scale (keeps tiled layout consistent)
+     b. quant_mode=="none": no-op
+
+All arithmetic uses FlyDSL high-level APIs:
+``fx_math.absf`` / ``rocdl.exp2`` / ``rocdl.rcp`` / ``ArithValue.shuffle_xor`` /
+``rocdl.cvt_pk_fp8_f32`` / ``vector.bitcast`` / ``vector.truncf``.
 """
 
 import flydsl.compiler as flyc
@@ -71,18 +83,41 @@ def _scale_byte_offset(layout_scale, row, col32):
     return ArithValue(scalar)
 
 
-def build_silu_and_mul_fq_module(inter_dim: int, topk: int):
-    """Return a JIT launcher for fused silu_and_mul + mxfp4 quant + scale sort.
+def build_silu_and_mul_fq_module(
+    inter_dim: int,
+    topk: int,
+    quant_mode: str = "fp4",
+    gui_layout: bool = False,
+):
+    """Return a JIT launcher for fused silu_and_mul + optional quant + scale sort.
 
     Parameters
     ----------
     inter_dim : int
-        Output columns of stage1 (after activation). Input has inter_dim*2 cols.
-        Must be divisible by 32 (MXFP4 block size).
+        Output columns of stage1 (after activation). Input has ``inter_dim*2`` cols.
+        Must be divisible by 32 (MXFP4/MXFP8 block size).
     topk : int
         Number of expert slots per token.
+    quant_mode : str
+        One of ``"fp4"`` (default, MXFP4 e2m1 + e8m0 scale),
+        ``"fp8"`` (MXFP8 e4m3fn + e8m0 scale),
+        or ``"none"`` (bf16 passthrough, no scale written).
+        The old 2-argument call ``build_silu_and_mul_fq_module(inter_dim, topk)``
+        keeps the original MXFP4 semantics.
+    gui_layout : bool
+        ``False`` (default): input is gate-up separated [gate_0:N | up_0:N].
+        ``True``: input is block-interleaved per-16
+        [gate_0:16, up_0:16, gate_16:32, ...]; requires ``VEC <= 16``.
     """
     assert inter_dim % 32 == 0, f"inter_dim={inter_dim} must be divisible by 32"
+    if quant_mode not in ("fp4", "fp8", "none"):
+        raise ValueError(
+            f"quant_mode must be one of ('fp4','fp8','none'), got {quant_mode!r}"
+        )
+    _need_fp4 = quant_mode == "fp4"
+    _need_fp8 = quant_mode == "fp8"
+    _need_quant = _need_fp4 or _need_fp8
+    _fp_headroom = 2 if _need_fp4 else 8  # only used when _need_quant
 
     scale_cols = inter_dim // 32
     ELEMS_PER_THREAD = (inter_dim + BLOCK_THREADS - 1) // BLOCK_THREADS
@@ -90,6 +125,8 @@ def build_silu_and_mul_fq_module(inter_dim: int, topk: int):
     if VEC % 2 != 0:
         VEC += 1
     assert 32 % VEC == 0, f"VEC={VEC} must divide 32 evenly"
+    if gui_layout:
+        assert VEC <= 16, f"VEC={VEC} must be <=16 for gui (block-interleave) layout"
     THREADS_PER_QUANT_BLK = 32 // VEC
     SHUFFLE_DISTS = []
     d = 1
@@ -98,12 +135,12 @@ def build_silu_and_mul_fq_module(inter_dim: int, topk: int):
         d *= 2
 
     fp4_row_bytes = inter_dim // 2
-    _pack_bytes = VEC // 2
+    _fp4_pack_bytes = VEC // 2
 
     @flyc.kernel
     def silu_and_mul_fq_kernel(
         x: fx.Tensor,
-        out_fp4: fx.Tensor,
+        out_buf: fx.Tensor,
         out_scale_sorted: fx.Tensor,
         sorted_ids: fx.Tensor,
         num_valid_ids: fx.Tensor,
@@ -130,7 +167,7 @@ def build_silu_and_mul_fq_module(inter_dim: int, topk: int):
             return fx.memref_load_vec(r)
 
         # ── Buffer resources for flat byte buffers and scalar loads ───
-        out_rsrc = buffer_ops.create_buffer_resource(out_fp4, max_size=True)
+        out_rsrc = buffer_ops.create_buffer_resource(out_buf, max_size=True)
         scale_rsrc = buffer_ops.create_buffer_resource(out_scale_sorted, max_size=True)
         tid_rsrc = buffer_ops.create_buffer_resource(sorted_ids, max_size=True)
         nv_rsrc = buffer_ops.create_buffer_resource(num_valid_ids, max_size=True)
@@ -187,8 +224,25 @@ def build_silu_and_mul_fq_module(inter_dim: int, topk: int):
                     row_div = fx.logical_divide(row_x, fx.make_layout(VEC, 1))
                     tile_idx = tid + iter_idx * BLOCK_THREADS
 
-                    gate_f32 = load_vec(row_div, tile_idx).extf(vec_f32_ty)
-                    up_f32 = load_vec(row_div, tile_idx + inter_dim // VEC).extf(vec_f32_ty)
+                    if gui_layout:
+                        # Block-interleaved per 16:
+                        # [gate_0:16, up_0:16, gate_16:32, up_16:32, ...]
+                        # VEC <= 16 guarantees one VEC-wide load is entirely
+                        # within a single gate-16 (or up-16) chunk.
+                        # gate_col = (col0 // 16) * 32 + (col0 % 16)
+                        # up_col   = gate_col + 16
+                        block16 = col0 >> 4
+                        off16 = col0 & 15
+                        gate_col = block16 * 32 + off16
+                        up_col = gate_col + 16
+                        gate_tile_idx = gate_col // VEC
+                        up_tile_idx = up_col // VEC
+                    else:
+                        gate_tile_idx = tile_idx
+                        up_tile_idx = tile_idx + inter_dim // VEC
+
+                    gate_f32 = load_vec(row_div, gate_tile_idx).extf(vec_f32_ty)
+                    up_f32 = load_vec(row_div, up_tile_idx).extf(vec_f32_ty)
 
                     # ── SiLU(gate) * up ──────────────────────────────
                     neg_log2e = arith.constant(-1.4426950408889634, type=T.f32)
@@ -201,52 +255,146 @@ def build_silu_and_mul_fq_module(inter_dim: int, topk: int):
                         sig = ArithValue(rocdl.rcp(T.f32, c1_f32 + emu))
                         act_vals.append(g * sig * u)
 
-                    # ── Per-32-block max for E8M0 scale ──────────────
-                    local_max = c0_f32
-                    for vi in range_constexpr(VEC):
-                        local_max = local_max.maximumf(fx_math.absf(act_vals[vi]))
+                    if _need_quant:
+                        # ── Per-32-block max for E8M0 scale ──────────
+                        local_max = c0_f32
+                        for vi in range_constexpr(VEC):
+                            local_max = local_max.maximumf(fx_math.absf(act_vals[vi]))
 
-                    for sh_dist in SHUFFLE_DISTS:
-                        local_max = local_max.maximumf(
-                            local_max.shuffle_xor(fx.Int32(sh_dist), fx.Int32(WARP_SIZE))
+                        for sh_dist in SHUFFLE_DISTS:
+                            local_max = local_max.maximumf(
+                                local_max.shuffle_xor(fx.Int32(sh_dist), fx.Int32(WARP_SIZE))
+                            )
+
+                        # ── Compute e8m0 bias + quant_scale (fp4: h=2, fp8: h=8) ──
+                        exp_field = ((local_max.bitcast(T.i32) + 0x200000) & 0xFF800000) >> 23
+                        e8m0_biased = arith.maxsi(
+                            exp_field - arith.constant(_fp_headroom, type=T.i32),
+                            arith.constant(0, type=T.i32),
                         )
+                        quant_scale = (
+                            (arith.constant(254, type=T.i32) - e8m0_biased) << 23
+                        ).bitcast(T.f32)
 
-                    # ── Quantize to FP4 ──────────────────────────────
-                    exp_field = ((local_max.bitcast(T.i32) + 0x200000) & 0xFF800000) >> 23
-                    e8m0_biased = arith.maxsi(
-                        exp_field - arith.constant(2, type=T.i32),
-                        arith.constant(0, type=T.i32),
-                    )
-                    quant_scale = (
-                        (arith.constant(254, type=T.i32) - e8m0_biased) << 23
-                    ).bitcast(T.f32)
+                        if _need_fp4:
+                            fp4_vals = []
+                            for vi in range_constexpr(VEC):
+                                fp4_vals.append(_f32_to_e2m1(act_vals[vi] * quant_scale))
 
-                    fp4_vals = []
-                    for vi in range_constexpr(VEC):
-                        fp4_vals.append(_f32_to_e2m1(act_vals[vi] * quant_scale))
+                            packed_i32 = fp4_vals[0] | (fp4_vals[1] << 4)
+                            for k in range_constexpr(1, VEC // 2):
+                                byte_k = fp4_vals[2 * k] | (fp4_vals[2 * k + 1] << 4)
+                                packed_i32 = packed_i32 | (byte_k << (k * 8))
 
-                    packed_i32 = fp4_vals[0] | (fp4_vals[1] << 4)
-                    for k in range_constexpr(1, VEC // 2):
-                        byte_k = fp4_vals[2 * k] | (fp4_vals[2 * k + 1] << 4)
-                        packed_i32 = packed_i32 | (byte_k << (k * 8))
+                            fp4_byte_off = in_row * fp4_row_bytes + (col0 >> 1)
+                            _pack_type = {1: T.i8, 2: T.i16}.get(_fp4_pack_bytes, T.i32)
+                            packed = (
+                                arith.trunci(_pack_type, packed_i32)
+                                if _fp4_pack_bytes < 4
+                                else packed_i32
+                            )
+                            buffer_ops.buffer_store(
+                                packed, out_rsrc, fp4_byte_off, offset_is_bytes=True,
+                            )
+                        else:
+                            # MXFP8 (e4m3fn) output, row stride = inter_dim bytes.
+                            # Use rocdl.cvt_pk_fp8_f32 to pack 2 f32 -> 2 fp8 bytes
+                            # per dword (word_sel selects low/high pair).
+                            scaled = [act_vals[vi] * quant_scale for vi in range_constexpr(VEC)]
+                            fp8_byte_off = in_row * inter_dim + col0
+                            if VEC <= 4:
+                                packed_i32 = arith.constant(0, type=T.i32)
+                                for w in range_constexpr(VEC // 2):
+                                    packed_i32 = rocdl.cvt_pk_fp8_f32(
+                                        T.i32,
+                                        scaled[2 * w],
+                                        scaled[2 * w + 1],
+                                        packed_i32,
+                                        w,
+                                    )
+                                if VEC == 2:
+                                    buffer_ops.buffer_store(
+                                        arith.trunci(T.i16, packed_i32),
+                                        out_rsrc,
+                                        fp8_byte_off,
+                                        offset_is_bytes=True,
+                                    )
+                                else:
+                                    buffer_ops.buffer_store(
+                                        packed_i32,
+                                        out_rsrc,
+                                        fp8_byte_off,
+                                        offset_is_bytes=True,
+                                    )
+                            else:
+                                # VEC > 4: pack 4 f32 -> 1 dword per group
+                                for wg in range_constexpr(VEC // 4):
+                                    base = wg * 4
+                                    packed_w = arith.constant(0, type=T.i32)
+                                    packed_w = rocdl.cvt_pk_fp8_f32(
+                                        T.i32,
+                                        scaled[base],
+                                        scaled[base + 1],
+                                        packed_w,
+                                        0,
+                                    )
+                                    packed_w = rocdl.cvt_pk_fp8_f32(
+                                        T.i32,
+                                        scaled[base + 2],
+                                        scaled[base + 3],
+                                        packed_w,
+                                        1,
+                                    )
+                                    word_off = fp8_byte_off + wg * 4
+                                    buffer_ops.buffer_store(
+                                        packed_w,
+                                        out_rsrc,
+                                        word_off,
+                                        offset_is_bytes=True,
+                                    )
 
-                    fp4_byte_off = in_row * fp4_row_bytes + (col0 >> 1)
-                    _pack_type = {1: T.i8, 2: T.i16}.get(_pack_bytes, T.i32)
-                    packed = arith.trunci(_pack_type, packed_i32) if _pack_bytes < 4 else packed_i32
-                    buffer_ops.buffer_store(
-                        packed, out_rsrc, fp4_byte_off, offset_is_bytes=True,
-                    )
-
-                    _store_scale(scale_rsrc, layout_scale, bid_i32, col0,
-                                 arith.trunci(T.i8, e8m0_biased))
+                        _store_scale(scale_rsrc, layout_scale, bid_i32, col0,
+                                     arith.trunci(T.i8, e8m0_biased))
+                    else:
+                        # quant_mode == "none": write bf16 out directly.
+                        # out row stride = inter_dim * 2 bytes.
+                        act_f32_vec = vector.from_elements(vec_f32_ty, act_vals)
+                        act_f32_av = ArithValue(act_f32_vec)
+                        act_bf16_vec = act_f32_av.truncf(T.vec(VEC, T.bf16))
+                        # Write as packed i32 (VEC/2 dwords).
+                        vec_dw = VEC // 2  # each dword = 2 bf16 elems
+                        if vec_dw >= 1:
+                            act_i32 = vector.bitcast(T.vec(vec_dw, T.i32), act_bf16_vec)
+                            bf16_byte_off = in_row * (inter_dim * 2) + col0 * 2
+                            if vec_dw == 1:
+                                store_val = vector.extract(
+                                    act_i32, static_position=[0], dynamic_position=[]
+                                )
+                                buffer_ops.buffer_store(
+                                    store_val,
+                                    out_rsrc,
+                                    bf16_byte_off,
+                                    offset_is_bytes=True,
+                                )
+                            else:
+                                buffer_ops.buffer_store(
+                                    act_i32,
+                                    out_rsrc,
+                                    bf16_byte_off,
+                                    offset_is_bytes=True,
+                                )
                 else:
-                    _store_scale(scale_rsrc, layout_scale, bid_i32, col0,
-                                 arith.constant(0, type=T.i8))
+                    # Invalid (padding) row.  Only zero-fill the e8m0 scale
+                    # when a scale tile exists (fp4/fp8); quant_mode="none"
+                    # has no scale buffer to maintain.
+                    if _need_quant:
+                        _store_scale(scale_rsrc, layout_scale, bid_i32, col0,
+                                     arith.constant(0, type=T.i8))
 
     @flyc.jit
     def launch_silu_and_mul_fq(
         x: fx.Tensor,
-        out_fp4: fx.Tensor,
+        out_buf: fx.Tensor,
         out_scale_sorted: fx.Tensor,
         sorted_ids: fx.Tensor,
         num_valid_ids: fx.Tensor,
@@ -260,7 +408,7 @@ def build_silu_and_mul_fq_module(inter_dim: int, topk: int):
 
         idx_rows = ArithValue(num_sorted_rows).index_cast(T.index)
         launcher = silu_and_mul_fq_kernel(
-            x, out_fp4, out_scale_sorted, sorted_ids, num_valid_ids, token_num
+            x, out_buf, out_scale_sorted, sorted_ids, num_valid_ids, token_num
         )
         launcher.launch(
             grid=(idx_rows, 1, 1),
