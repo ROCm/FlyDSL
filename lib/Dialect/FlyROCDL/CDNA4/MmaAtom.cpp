@@ -292,4 +292,156 @@ LogicalResult MmaOpCDNA4_MFMAScaleType::emitAtomCall(OpBuilder &builder, Locatio
   return success();
 }
 
+//===----------------------------------------------------------------------===//
+// MmaOpCDNA4_MFMAType (non-scale, stateless — k32 f16/bf16 on gfx950)
+//===----------------------------------------------------------------------===//
+
+bool MmaOpCDNA4_MFMAType::isStatic() const { return true; }
+
+Value MmaOpCDNA4_MFMAType::rebuildStaticValue(OpBuilder &builder, Location loc,
+                                              Value currentValue) const {
+  if (currentValue && isa<MakeMmaAtomOp>(currentValue.getDefiningOp()))
+    return nullptr;
+  return MakeMmaAtomOp::create(builder, loc, MmaAtomType::get(*this));
+}
+
+Attribute MmaOpCDNA4_MFMAType::getThrLayout() const { return FxLayout(FxC(64), FxC(1)); }
+
+Attribute MmaOpCDNA4_MFMAType::getShapeMNK() const {
+  return IntTupleAttr::get(ArrayAttr::get(getContext(), {FxC(getM()), FxC(getN()), FxC(getK())}));
+}
+
+Type MmaOpCDNA4_MFMAType::getValTypeA() const { return getElemTyA(); }
+Type MmaOpCDNA4_MFMAType::getValTypeB() const { return getElemTyB(); }
+Type MmaOpCDNA4_MFMAType::getValTypeC() const { return getElemTyAcc(); }
+Type MmaOpCDNA4_MFMAType::getValTypeD() const { return getElemTyAcc(); }
+
+Attribute MmaOpCDNA4_MFMAType::getThrValLayoutA() const {
+  return cdna4::getThrValLayoutAB(getContext(), getM(), getN(), getK(), getElemTyA());
+}
+
+Attribute MmaOpCDNA4_MFMAType::getThrValLayoutB() const {
+  return cdna4::getThrValLayoutAB(getContext(), getM(), getN(), getK(), getElemTyB());
+}
+
+Attribute MmaOpCDNA4_MFMAType::getThrValLayoutC() const {
+  return cdna4::getThrValLayoutC(getContext(), getM(), getN());
+}
+
+LogicalResult MmaOpCDNA4_MFMAType::verify(function_ref<InFlightDiagnostic()> emitError, int32_t m,
+                                          int32_t n, int32_t k, Type elemTyA, Type elemTyB,
+                                          Type elemTyAcc) {
+  if (m != n)
+    return emitError() << "invalid MNK for CDNA4 MFMA: " << m << "x" << n << "x" << k;
+  if (!((m == 16 && k == 32) || (m == 32 && k == 16)))
+    return emitError() << "unsupported MNK for CDNA4 MFMA: " << m << "x" << n << "x" << k
+                       << " (expected 16x16x32 or 32x32x16)";
+  if (!elemTyAcc.isF32())
+    return emitError() << "elemTyAcc must be f32, got " << elemTyAcc;
+  if (!elemTyA.isF16() && !elemTyA.isBF16())
+    return emitError() << "elemTyA must be f16 or bf16, got " << elemTyA;
+  if (!elemTyB.isF16() && !elemTyB.isBF16())
+    return emitError() << "elemTyB must be f16 or bf16, got " << elemTyB;
+  return success();
+}
+
+static Type getCDNA4MfmaABType(MLIRContext *ctx, Type elemTy, int32_t mn, int32_t k) {
+  int64_t vecSize = mn * k / 64;
+  if (elemTy.isF16())
+    return VectorType::get({vecSize}, Float16Type::get(ctx));
+  if (elemTy.isBF16())
+    return VectorType::get({vecSize}, BFloat16Type::get(ctx));
+  return nullptr;
+}
+
+static int64_t getCDNA4MfmaAccVecSize(int32_t m, int32_t n) {
+  if (m == 16 && n == 16)
+    return 4;
+  if (m == 32 && n == 32)
+    return 16;
+  return 0;
+}
+
+FailureOr<Value> MmaOpCDNA4_MFMAType::emitAtomCallSSA(OpBuilder &builder, Location loc,
+                                                      Type resultTy, Type mmaAtomTyArg, Type dTyArg,
+                                                      Type aTyArg, Type bTyArg, Type cTyArg,
+                                                      Value atomVal, Value d, Value a, Value b,
+                                                      Value c) const {
+  int32_t m = getM();
+  int32_t n = getN();
+  int32_t k = getK();
+  Type elemTyA = getElemTyA();
+  Type elemTyB = getElemTyB();
+  MLIRContext *ctx = builder.getContext();
+
+  Type abTyA = getCDNA4MfmaABType(ctx, elemTyA, m, k);
+  Type abTyB = getCDNA4MfmaABType(ctx, elemTyB, n, k);
+  if (!abTyA || !abTyB)
+    return failure();
+
+  int64_t accVecSize = getCDNA4MfmaAccVecSize(m, n);
+  if (accVecSize == 0)
+    return failure();
+
+  Type accElemTy = getElemTyAcc();
+  VectorType accTy = VectorType::get({accVecSize}, accElemTy);
+
+  if (a.getType() != abTyA)
+    a = vector::BitCastOp::create(builder, loc, abTyA, a);
+  if (b.getType() != abTyB)
+    b = vector::BitCastOp::create(builder, loc, abTyB, b);
+  if (c.getType() != accTy)
+    c = LLVM::BitcastOp::create(builder, loc, accTy, c);
+
+#define DISPATCH_MFMA_SSA(M_, K_, PRED, OP)                                                        \
+  if (m == M_ && n == M_ && k == K_ && (PRED)) {                                                   \
+    auto zeroAttr = builder.getI32IntegerAttr(0);                                                  \
+    return ROCDL::OP::create(builder, loc, accTy, a, b, c, zeroAttr, zeroAttr, zeroAttr)           \
+        .getResult();                                                                              \
+  }
+
+  DISPATCH_MFMA_SSA(16, 32, elemTyA.isF16(), mfma_f32_16x16x32_f16)
+  DISPATCH_MFMA_SSA(16, 32, elemTyA.isBF16(), mfma_f32_16x16x32_bf16)
+  DISPATCH_MFMA_SSA(32, 16, elemTyA.isF16(), mfma_f32_32x32x16_f16)
+  DISPATCH_MFMA_SSA(32, 16, elemTyA.isBF16(), mfma_f32_32x32x16_bf16)
+
+#undef DISPATCH_MFMA_SSA
+
+  return failure();
+}
+
+LogicalResult MmaOpCDNA4_MFMAType::emitAtomCall(OpBuilder &builder, Location loc, Type mmaAtomTy,
+                                                Type dMemTy, Type aMemTy, Type bMemTy, Type cMemTy,
+                                                Value atomVal, Value dPtr, Value aPtr, Value bPtr,
+                                                Value cPtr) const {
+  int32_t m = getM();
+  int32_t n = getN();
+  int32_t k = getK();
+  Type elemTyA = getElemTyA();
+  Type elemTyB = getElemTyB();
+  MLIRContext *ctx = builder.getContext();
+
+  Type abTyA = getCDNA4MfmaABType(ctx, elemTyA, m, k);
+  Type abTyB = getCDNA4MfmaABType(ctx, elemTyB, n, k);
+  if (!abTyA || !abTyB)
+    return failure();
+
+  int64_t accVecSize = getCDNA4MfmaAccVecSize(m, n);
+  if (accVecSize == 0)
+    return failure();
+
+  Type accElemTy = getElemTyAcc();
+  VectorType accTy = VectorType::get({accVecSize}, accElemTy);
+
+  Value a = LLVM::LoadOp::create(builder, loc, abTyA, aPtr);
+  Value b = LLVM::LoadOp::create(builder, loc, abTyB, bPtr);
+  Value c = LLVM::LoadOp::create(builder, loc, accTy, cPtr);
+  auto res = emitAtomCallSSA(builder, loc, accTy, mmaAtomTy, Type{}, abTyA, abTyB, accTy, atomVal,
+                             Value{}, a, b, c);
+  if (failed(res))
+    return failure();
+  LLVM::StoreOp::create(builder, loc, *res, dPtr);
+  return success();
+}
+
 } // namespace mlir::fly_rocdl
