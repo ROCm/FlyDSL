@@ -637,6 +637,10 @@ def run_all_tests(
                 
                 # Add aggregate row
                 rank0 = rank_results[0] if rank_results else {}
+                has_failure = any(
+                    r.get("error") or r.get("kernel_name") in ("skip", "error")
+                    for r in rank_results
+                )
                 aggregate_result = {
                     "rank": "aggregate",
                     "shape": str(shape),
@@ -651,7 +655,7 @@ def run_all_tests(
                     "kernel_name": rank0.get("kernel_name", "unknown"),
                     "num_iters": num_iters,
                     "num_warmup": num_warmup,
-                    "error": rank0.get("error"),
+                    "acc_res": "failed" if has_failure else "pass",
                 }
                 all_results.append(aggregate_result)
                 
@@ -681,14 +685,12 @@ def run_all_tests(
 
         failed = [
             r for r in all_results
-            if r.get("rank") == "aggregate"
-            and (r.get("kernel_name") in ("skip", "error") or r.get("error"))
+            if r.get("rank") == "aggregate" and r.get("acc_res") == "failed"
         ]
         if failed:
             print("\n✗ FAILED cases:")
             for r in failed:
-                reason = r.get("error") or r.get("kernel_name", "unknown")
-                print(f"  {r['shape']}  {r['dtype']}  {r['mode']}  → {reason}")
+                print(f"  {r['shape']}  {r['dtype']}  {r['mode']}  → {r.get('kernel_name', 'unknown')}")
             sys.exit(1)
 
         return df
