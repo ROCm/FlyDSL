@@ -12,6 +12,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include <atomic>
 #include <cassert>
 #include <cstdio>
 #include <vector>
@@ -66,6 +67,38 @@ extern "C" void mgpuLaunchKernel(hipFunction_t function, intptr_t gridX,
                                             stream, params, extra));
 }
 
+// Cached per-device cluster-launch capability for the current HIP device.
+// Cache slot encoding: 0 = unqueried, 1 = no cluster, 2 = cluster supported.
+// Populated lazily from hipDeviceProp_t::clusterLaunch (field stable since
+// ROCm 6.0). Per-device caching is required because mgpuSetDefaultDevice
+// allows multi-GPU usage. Concurrent first-time queries on the same device
+// race benignly: both threads compute the same value before storing.
+static int flyDeviceClusterLaunchCap() {
+  int dev = 0;
+  if (hipGetDevice(&dev) != hipSuccess)
+    return 0;
+
+  constexpr int kMaxCachedDevices = 16;
+  static std::atomic<int> sCache[kMaxCachedDevices];
+
+  auto query = [](int d) -> int {
+    hipDeviceProp_t prop{};
+    if (hipGetDeviceProperties(&prop, d) != hipSuccess)
+      return 0;
+    return prop.clusterLaunch ? 1 : 0;
+  };
+
+  if (dev < 0 || dev >= kMaxCachedDevices)
+    return query(dev);
+
+  int cached = sCache[dev].load(std::memory_order_relaxed);
+  if (cached != 0)
+    return cached - 1;
+  int v = query(dev);
+  sCache[dev].store(v + 1, std::memory_order_relaxed);
+  return v;
+}
+
 extern "C" void mgpuLaunchClusterKernel(hipFunction_t function,
                                         intptr_t clusterX, intptr_t clusterY,
                                         intptr_t clusterZ,
@@ -75,64 +108,75 @@ extern "C" void mgpuLaunchClusterKernel(hipFunction_t function,
                                         intptr_t blockZ, int32_t smem,
                                         hipStream_t stream, void **params,
                                         void **extra, size_t /*paramsCount*/) {
-#ifdef hipLaunchAttributeClusterDimension
-  hipLaunchAttribute attrs[1];
-  attrs[0].id = hipLaunchAttributeClusterDimension;
-  attrs[0].value.clusterDim.x = static_cast<unsigned>(clusterX);
-  attrs[0].value.clusterDim.y = static_cast<unsigned>(clusterY);
-  attrs[0].value.clusterDim.z = static_cast<unsigned>(clusterZ);
-
-  HIP_LAUNCH_CONFIG config{};
-  config.gridDimX = static_cast<unsigned>(gridX);
-  config.gridDimY = static_cast<unsigned>(gridY);
-  config.gridDimZ = static_cast<unsigned>(gridZ);
-  config.blockDimX = static_cast<unsigned>(blockX);
-  config.blockDimY = static_cast<unsigned>(blockY);
-  config.blockDimZ = static_cast<unsigned>(blockZ);
-  config.sharedMemBytes = static_cast<unsigned>(smem);
-  config.hStream = stream;
-  config.attrs = attrs;
-  config.numAttrs = 1;
-
-  hipError_t err = hipDrvLaunchKernelEx(&config, function, params, extra);
-  if (err == hipSuccess)
-    return;
-
   const bool requestedRealCluster =
       (clusterX > 1) || (clusterY > 1) || (clusterZ > 1);
-  if (requestedRealCluster) {
+
+#if FLY_HIP_HAS_CLUSTER_ATTR
+  const int deviceClusterCap = flyDeviceClusterLaunchCap();
+
+  if (requestedRealCluster && !deviceClusterCap) {
     fprintf(stderr,
-            "[mgpuLaunchClusterKernel] hipDrvLaunchKernelEx failed (err=%d) "
-            "for requested cluster=(%ld,%ld,%ld); not falling back to "
-            "hipModuleLaunchKernel.\n",
-            static_cast<int>(err), static_cast<long>(clusterX),
-            static_cast<long>(clusterY), static_cast<long>(clusterZ));
-    HIP_REPORT_IF_ERROR(err);
+            "[mgpuLaunchClusterKernel] cluster=(%ld,%ld,%ld) requested but "
+            "device reports clusterLaunch=0; aborting (no silent fallback).\n",
+            static_cast<long>(clusterX), static_cast<long>(clusterY),
+            static_cast<long>(clusterZ));
     return;
   }
 
-  fprintf(stderr,
-          "[mgpuLaunchClusterKernel] hipDrvLaunchKernelEx failed (err=%d) "
-          "for cluster=(1,1,1); falling back to hipModuleLaunchKernel.\n",
-          static_cast<int>(err));
-  HIP_REPORT_IF_ERROR(hipModuleLaunchKernel(function, gridX, gridY, gridZ,
-                                            blockX, blockY, blockZ, smem,
-                                            stream, params, extra));
+  if (deviceClusterCap) {
+    hipLaunchAttribute attrs[1];
+    attrs[0].id = hipLaunchAttributeClusterDimension;
+    attrs[0].value.clusterDim.x = static_cast<unsigned>(clusterX);
+    attrs[0].value.clusterDim.y = static_cast<unsigned>(clusterY);
+    attrs[0].value.clusterDim.z = static_cast<unsigned>(clusterZ);
+
+    HIP_LAUNCH_CONFIG config{};
+    config.gridDimX = static_cast<unsigned>(gridX);
+    config.gridDimY = static_cast<unsigned>(gridY);
+    config.gridDimZ = static_cast<unsigned>(gridZ);
+    config.blockDimX = static_cast<unsigned>(blockX);
+    config.blockDimY = static_cast<unsigned>(blockY);
+    config.blockDimZ = static_cast<unsigned>(blockZ);
+    config.sharedMemBytes = static_cast<unsigned>(smem);
+    config.hStream = stream;
+    config.attrs = attrs;
+    config.numAttrs = 1;
+
+    hipError_t err = hipDrvLaunchKernelEx(&config, function, params, extra);
+    if (err == hipSuccess)
+      return;
+
+    if (requestedRealCluster) {
+      fprintf(stderr,
+              "[mgpuLaunchClusterKernel] hipDrvLaunchKernelEx failed (err=%d) "
+              "for requested cluster=(%ld,%ld,%ld); not falling back.\n",
+              static_cast<int>(err), static_cast<long>(clusterX),
+              static_cast<long>(clusterY), static_cast<long>(clusterZ));
+      HIP_REPORT_IF_ERROR(err);
+      return;
+    }
+
+    fprintf(stderr,
+            "[mgpuLaunchClusterKernel] hipDrvLaunchKernelEx failed (err=%d) "
+            "for cluster=(1,1,1); falling back to hipModuleLaunchKernel.\n",
+            static_cast<int>(err));
+  }
 #else
-  // Cluster launch not supported by this HIP version; ignore cluster dims
-  // and fall back to regular kernel launch.
-  if ((clusterX > 1) || (clusterY > 1) || (clusterZ > 1)) {
+  if (requestedRealCluster) {
     fprintf(stderr,
             "[mgpuLaunchClusterKernel] cluster=(%ld,%ld,%ld) requested but "
-            "hipLaunchAttributeClusterDimension is not available in this HIP "
-            "version; falling back to hipModuleLaunchKernel.\n",
+            "FlyDSL was built against a HIP without "
+            "hipLaunchAttributeClusterDimension; aborting "
+            "(no silent fallback).\n",
             static_cast<long>(clusterX), static_cast<long>(clusterY),
             static_cast<long>(clusterZ));
+    return;
   }
+#endif
+
   HIP_REPORT_IF_ERROR(hipModuleLaunchKernel(function, gridX, gridY, gridZ,
                                             blockX, blockY, blockZ, smem,
                                             stream, params, extra));
-#endif
 }
 
 extern "C" hipStream_t mgpuStreamCreate() {
