@@ -11,7 +11,7 @@ Includes hot_loop_scheduler from the old pipeline for instruction scheduling.
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.expr import arith, vector, gpu, buffer_ops, rocdl, range_constexpr
-from flydsl.expr.typing import T, Float16, BFloat16, Int8
+from flydsl.expr.typing import T, Float16, BFloat16, Float8E4M3FNUZ, Float8E4M3FN, Int8
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.runtime.device import get_rocm_arch
 from flydsl._mlir import ir
@@ -60,8 +60,10 @@ def compile_preshuffle_gemm_v2(
         layout_elem = Float16
     elif is_bf16:
         layout_elem = BFloat16
+    elif is_gfx950:
+        layout_elem = Float8E4M3FN
     else:
-        layout_elem = Int8
+        layout_elem = Float8E4M3FNUZ
 
     out_elem_cls = BFloat16 if out_is_bf16 else Float16
 
@@ -437,13 +439,15 @@ def compile_preshuffle_gemm_v2(
             mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 16, BFloat16))
             k_perm = fx.make_layout((4, 4, 2), (1, 8, 4))
         elif use_mfma_scale_128:
-            # gfx950 fp8: K=128 atom via CDNA3 MFMA path
-            # k_perm: (KPerThread=32, GroupK=4), tile_K_perm=128, 1 atom
-            mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 128, layout_elem))
+            # gfx950 fp8: K=128 atom via CDNA4 MFMA_Scale path (TODO)
+            mma_atom = fx.make_mma_atom(fx.rocdl.cdna4.MFMA_Scale(16, 16, 128, layout_elem))
             k_perm = fx.make_layout((32, 4), (1, 32))
+        elif is_fp8 and is_gfx950:
+            mma_atom = fx.make_mma_atom(fx.rocdl.cdna4.MFMA(16, 16, 32, layout_elem))
+            k_perm = fx.make_layout((8, 4, 2), (1, 16, 8))
         else:
             mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 32, layout_elem))
-            # FP8: KPerThread=8, GroupK=4, 2 atoms → groups 64 K elements
+            # FP8 gfx942: KPerThread=8, GroupK=4, 2 atoms → groups 64 K elements
             k_perm = fx.make_layout((8, 4, 2), (1, 16, 8))
 
         tiled_mma = fx.make_tiled_mma(

@@ -328,6 +328,11 @@ Attribute MmaOpCDNA4_MFMAType::getThrValLayoutC() const {
   return cdna4::getThrValLayoutC(getContext(), getM(), getN());
 }
 
+static bool isCDNA4MfmaElemTy(Type ty) {
+  return ty.isF16() || ty.isBF16() || isa<Float8E4M3FNUZType>(ty) || isa<Float8E5M2FNUZType>(ty) ||
+         isa<Float8E4M3FNType>(ty);
+}
+
 LogicalResult MmaOpCDNA4_MFMAType::verify(function_ref<InFlightDiagnostic()> emitError, int32_t m,
                                           int32_t n, int32_t k, Type elemTyA, Type elemTyB,
                                           Type elemTyAcc) {
@@ -338,10 +343,10 @@ LogicalResult MmaOpCDNA4_MFMAType::verify(function_ref<InFlightDiagnostic()> emi
                        << " (expected 16x16x32 or 32x32x16)";
   if (!elemTyAcc.isF32())
     return emitError() << "elemTyAcc must be f32, got " << elemTyAcc;
-  if (!elemTyA.isF16() && !elemTyA.isBF16())
-    return emitError() << "elemTyA must be f16 or bf16, got " << elemTyA;
-  if (!elemTyB.isF16() && !elemTyB.isBF16())
-    return emitError() << "elemTyB must be f16 or bf16, got " << elemTyB;
+  if (!isCDNA4MfmaElemTy(elemTyA))
+    return emitError() << "elemTyA must be f16, bf16, or fp8, got " << elemTyA;
+  if (!isCDNA4MfmaElemTy(elemTyB))
+    return emitError() << "elemTyB must be f16, bf16, or fp8, got " << elemTyB;
   return success();
 }
 
@@ -351,6 +356,8 @@ static Type getCDNA4MfmaABType(MLIRContext *ctx, Type elemTy, int32_t mn, int32_
     return VectorType::get({vecSize}, Float16Type::get(ctx));
   if (elemTy.isBF16())
     return VectorType::get({vecSize}, BFloat16Type::get(ctx));
+  if (elemTy.getIntOrFloatBitWidth() == 8)
+    return IntegerType::get(ctx, 64);
   return nullptr;
 }
 
@@ -386,12 +393,16 @@ FailureOr<Value> MmaOpCDNA4_MFMAType::emitAtomCallSSA(OpBuilder &builder, Locati
   Type accElemTy = getElemTyAcc();
   VectorType accTy = VectorType::get({accVecSize}, accElemTy);
 
-  if (a.getType() != abTyA)
-    a = vector::BitCastOp::create(builder, loc, abTyA, a);
-  if (b.getType() != abTyB)
-    b = vector::BitCastOp::create(builder, loc, abTyB, b);
-  if (c.getType() != accTy)
-    c = LLVM::BitcastOp::create(builder, loc, accTy, c);
+  auto bitcastIfNeeded = [&](Value v, Type targetTy) -> Value {
+    if (v.getType() == targetTy)
+      return v;
+    if (isa<VectorType>(v.getType()) && isa<VectorType>(targetTy))
+      return vector::BitCastOp::create(builder, loc, targetTy, v);
+    return LLVM::BitcastOp::create(builder, loc, targetTy, v);
+  };
+  a = bitcastIfNeeded(a, abTyA);
+  b = bitcastIfNeeded(b, abTyB);
+  c = bitcastIfNeeded(c, accTy);
 
 #define DISPATCH_MFMA_SSA(M_, K_, PRED, OP)                                                        \
   if (m == M_ && n == M_ && k == K_ && (PRED)) {                                                   \
@@ -404,6 +415,12 @@ FailureOr<Value> MmaOpCDNA4_MFMAType::emitAtomCallSSA(OpBuilder &builder, Locati
   DISPATCH_MFMA_SSA(16, 32, elemTyA.isBF16(), mfma_f32_16x16x32_bf16)
   DISPATCH_MFMA_SSA(32, 16, elemTyA.isF16(), mfma_f32_32x32x16_f16)
   DISPATCH_MFMA_SSA(32, 16, elemTyA.isBF16(), mfma_f32_32x32x16_bf16)
+
+  // FP8 k32
+  DISPATCH_MFMA_SSA(16, 32, isa<Float8E4M3FNUZType>(elemTyA), mfma_f32_16x16x32_fp8_fp8)
+  DISPATCH_MFMA_SSA(16, 32, isa<Float8E4M3FNType>(elemTyA), mfma_f32_16x16x32_fp8_fp8)
+  DISPATCH_MFMA_SSA(32, 16, isa<Float8E4M3FNUZType>(elemTyA), mfma_f32_32x32x16_fp8_fp8)
+  DISPATCH_MFMA_SSA(32, 16, isa<Float8E4M3FNType>(elemTyA), mfma_f32_32x32x16_fp8_fp8)
 
 #undef DISPATCH_MFMA_SSA
 
