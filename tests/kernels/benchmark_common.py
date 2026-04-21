@@ -170,51 +170,55 @@ def _dtype_torch(dt: str):
 
 
 def _bench_flydsl_torch(*, op: str, M: int, N: int, dtype: str, warmup: int, iters: int) -> Optional[float]:
-    """Build + compile FlyDSL kernel, then benchmark via torch CUDA events.
+    """Benchmark FlyDSL kernels via torch CUDA events.
 
     This intentionally avoids hip-python / HIP driver calls, aligning with the
-    style used by other tests (flydsl.compile + torch timing).
+    style used by the kernel tests (builder/launcher + torch timing).
     """
     import torch
-    import flydsl
 
     if not torch.cuda.is_available():
         return None
 
     torch_dtype, dt_norm = _dtype_torch(dtype)
     dtype = dt_norm
+    stream = torch.cuda.current_stream()
+
+    def _time_launch(fn: Callable[[], None]) -> float:
+        # Trigger one launch first so lazy JIT/initialization work does not
+        # pollute the timed steady-state iterations.
+        fn()
+        torch.cuda.synchronize()
+        return bench_gpu_us_torch(fn, warmup=warmup, iters=iters)
 
     if op == "softmax":
         from kernels.softmax_kernel import build_softmax_module
 
-        # M is runtime; module construction uses a dummy M.
-        # `flydsl.compile()` already has its own cache.
-        m = build_softmax_module(1, N, dtype)
-        exe = flydsl.compile(m)
-        x = torch.randn((M, N), device="cuda", dtype=torch_dtype)
+        launch_fn = build_softmax_module(M, N, dtype)
+        x = torch.randn((M, N), device="cuda", dtype=torch_dtype).contiguous()
         y = torch.empty((M, N), device="cuda", dtype=torch_dtype)
-        return bench_gpu_us_torch(lambda: exe(x, y, M), warmup=warmup, iters=iters)
+        return _time_launch(lambda: launch_fn(x, y, M, stream=stream))
 
     if op == "layernorm":
         from kernels.layernorm_kernel import build_layernorm_module
 
-        m = build_layernorm_module(1, N, dtype)
-        exe = flydsl.compile(m)
-        x = torch.randn((M, N), device="cuda", dtype=torch_dtype)
-        gamma = torch.randn((N,), device="cuda", dtype=torch_dtype)
-        beta = torch.randn((N,), device="cuda", dtype=torch_dtype)
+        launch_fn = build_layernorm_module(M, N, dtype)
+        x = torch.randn((M, N), device="cuda", dtype=torch_dtype).contiguous()
+        gamma = torch.randn((N,), device="cuda", dtype=torch_dtype).contiguous()
+        beta = torch.randn((N,), device="cuda", dtype=torch_dtype).contiguous()
         y = torch.empty((M, N), device="cuda", dtype=torch_dtype)
-        return bench_gpu_us_torch(lambda: exe(x, gamma, beta, y, M), warmup=warmup, iters=iters)
+        return _time_launch(
+            lambda: launch_fn(x, gamma, beta, y, M, stream=stream)
+        )
 
     if op == "rmsnorm":
         from kernels.rmsnorm_kernel import build_rmsnorm_module
 
-        m = build_rmsnorm_module(1, N, dtype)
-        exe = flydsl.compile(m)
-        x = torch.randn((M, N), device="cuda", dtype=torch_dtype)
-        gamma = torch.randn((N,), device="cuda", dtype=torch_dtype)
+        launch_fn = build_rmsnorm_module(M, N, dtype)
+        x = torch.randn((M, N), device="cuda", dtype=torch_dtype).contiguous()
+        gamma = torch.randn((N,), device="cuda", dtype=torch_dtype).contiguous()
         y = torch.empty((M, N), device="cuda", dtype=torch_dtype)
-        return bench_gpu_us_torch(lambda: exe(x, gamma, y, M), warmup=warmup, iters=iters)
+        return _time_launch(lambda: launch_fn(x, gamma, y, M, stream=stream))
 
     if op == "wmma_gemm":
         from kernels.rdna_f16_gemm import create_wmma_gemm_module
