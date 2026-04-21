@@ -29,7 +29,7 @@ import torch
 from flydsl._mlir.dialects import arith as _arith_d
 from flydsl._mlir.dialects import llvm as _llvm_d
 from flydsl._mlir.ir import IntegerType as _IT_mlir
-from flydsl.expr.lowlevel import (
+from .dispatch_combine_internode_v1ll_llvm_helpers import (
     _unwrap as _lv_unwrap,
     as_index,
     const_i32,

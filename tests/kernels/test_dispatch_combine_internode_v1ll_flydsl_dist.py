@@ -1,11 +1,13 @@
 """
 8-GPU FlyDSL ``copy_to_staging`` smoke (one rank per GPU, no mori op).
 
-Run (single node 8 GPUs)::
+Run (single node 8 GPUs). Use ``torchrun -m pytest`` so pytest runs as a module (do not pass
+``pytest`` as a script path). ``--standalone`` sets local rendezvous for one node::
 
     cd FlyDSL
-    PYTHONPATH=python:.. torchrun --nproc_per_node=8 \\
-      pytest tests/kernels/test_dispatch_combine_internode_v1ll_flydsl_dist.py -v --tb=short
+    PYTHONPATH=python:.. torchrun --standalone --nproc_per_node=8 -m pytest \\
+      tests/kernels/test_dispatch_combine_internode_v1ll_flydsl_dist.py::test_copy_to_staging_8ranks \\
+      -v --tb=short
 
 Do **not** mix with full ``tests/kernels/`` under ``torchrun`` (each rank would run every test).
 """
