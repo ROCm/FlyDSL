@@ -33,7 +33,39 @@ def FlyROCDL_MmaOpCDNA3_MFMA : FlyROCL_MmaOp<"MmaOpCDNA3_MFMA", "cdna3.mfma", []
 // MmaOp CDNA4
 //===----------------------------------------------------------------------===//
 
+def FlyROCDL_MmaOpCDNA4_MFMAScale : FlyROCL_StatefulMmaOp<"MmaOpCDNA4_MFMAScale", "cdna4.mfma_scale", []> {
+  let parameters = (ins
+    "int32_t":$m,
+    "int32_t":$n,
+    "int32_t":$k,
+    "Type":$elemTyA,
+    "Type":$elemTyB,
+    "Type":$elemTyAcc,
+    "int32_t":$opselA,
+    "int32_t":$opselB
+  );
+  let assemblyFormat = [{
+    `<` custom<MNKDimensionList>($m, $n, $k) `,` `(` $elemTyA `,` $elemTyB `)` `->` $elemTyAcc
+    `,` `opselA` `=` $opselA `,` `opselB` `=` $opselB `>`
+  }];
 
+  let builders = [
+    TypeBuilderWithInferredContext<(ins
+      "int32_t":$m, "int32_t":$n, "int32_t":$k,
+      "Type":$elemTyA, "Type":$elemTyB, "Type":$elemTyAcc), [{
+      return $_get(elemTyA.getContext(), m, n, k, elemTyA, elemTyB, elemTyAcc,
+                   /*opselA=*/0, /*opselB=*/0);
+    }]>,
+    TypeBuilderWithInferredContext<(ins
+      "int32_t":$m, "int32_t":$n, "int32_t":$k,
+      "Type":$elemTyA, "Type":$elemTyB, "Type":$elemTyAcc,
+      "int32_t":$opselA, "int32_t":$opselB), [{
+      return $_get(elemTyA.getContext(), m, n, k, elemTyA, elemTyB, elemTyAcc,
+                   opselA, opselB);
+    }]>
+  ];
+  let genVerifyDecl = 1;
+}
 
 //===----------------------------------------------------------------------===//
 // MmaOp GFX1250 — WMMA wave32

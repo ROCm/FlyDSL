@@ -202,12 +202,16 @@ def test_mfma_a8_flyc_preshuffle(
     def _as_i8(t):
         return t.view(torch.int8) if "float8" in str(t.dtype) else t
 
+    # Create a dummy bias tensor (unused when epilogue="none")
+    _dummy_bias = torch.empty(0, dtype=torch_out_dtype, device=a_q.device)
+
     def _gemm_args(c, a, b, sa, sb):
         return (c.contiguous().view(-1),
                 _as_i8(a.contiguous().view(-1)),
                 _as_i8(b.contiguous().view(-1)),
                 sa.contiguous().view(-1) if sa.numel() > 0 else sa,
                 sb.contiguous().view(-1) if sb.numel() > 0 else sb,
+                _dummy_bias,
                 M, N, torch.cuda.current_stream())
 
     compiled_fn = flyc.compile(launch_fn, *_gemm_args(c_out_raw, a_q, b_input, sa_flat, sb_flat))
@@ -362,12 +366,16 @@ def test_mfma_w4_flyc_preshuffle(
             return t
         return t.view(torch.uint8)
 
+    # Create a dummy bias tensor (unused when epilogue="none")
+    _dummy_bias_w4 = torch.empty(0, dtype=torch.bfloat16, device=a_q.device)
+
     def _w4_args(c, a, b, sa, sb):
         return (c.contiguous().view(-1),
                 _to_bytes(a).contiguous().view(-1),
                 _to_bytes(b).contiguous().view(-1),
                 _to_bytes(sa).contiguous().view(-1),
                 _to_bytes(sb).contiguous().view(-1),
+                _dummy_bias_w4,
                 M, N, torch.cuda.current_stream())
 
     compiled_fn = flyc.compile(launch_fn, *_w4_args(c_out, a_q, b_shuffled, scale_a, scale_b_shuffled))
@@ -464,3 +472,218 @@ if __name__ == "__main__":
             )
     except pytest.skip.Exception as e:
         print(f"Skipped: {e}")
+
+
+# ── CUDAGraph Capture Test ────────────────────────────────────────────────
+
+@pytest.mark.parametrize("in_dtype", ["bf16", "fp8"])
+def test_cudagraph_capture_preshuffle(in_dtype):
+    """Verify FlyDSL preshuffle GEMM kernels are captured by CUDAGraph.
+
+    This test ensures that passing torch.cuda.current_stream() correctly
+    routes the kernel launch to the capture stream during graph recording.
+    Without proper stream handling, CUDAGraph replay produces all-zeros.
+    """
+    device = "cuda:0"
+    M, N, K = 1, 8192, 8192
+    tile_m, tile_n, tile_k = 16, 64, 256
+
+    arch = str(get_rocm_arch())
+    if not arch.startswith("gfx94") and not arch.startswith("gfx95"):
+        pytest.skip(f"Unsupported arch: {arch}")
+
+    # Prepare data
+    a_raw = torch.randn(M, K, dtype=torch.bfloat16, device=device)
+    b_raw = torch.randn(N, K, dtype=torch.bfloat16, device=device)
+
+    if in_dtype == "fp8":
+        a_q, scale_a = pertoken_quant(a_raw, quant_dtype=torch.float8_e4m3fnuz)
+        b_q, scale_b = pertoken_quant(b_raw, quant_dtype=torch.float8_e4m3fnuz)
+        a_q = a_q.view(torch.int8)
+        b_input = shuffle_weight(b_q.view(torch.int8), layout=(16, 16)).contiguous().view(-1)
+        sa_flat = scale_a.contiguous().view(-1)
+        sb_flat = scale_b.contiguous().view(-1)
+    else:
+        a_q = a_raw
+        b_input = shuffle_weight(b_raw.contiguous(), layout=(16, 16)).contiguous().view(-1)
+        sa_flat = torch.empty(0, dtype=torch.float32, device=device)
+        sb_flat = torch.empty(0, dtype=torch.float32, device=device)
+
+    c_out = torch.empty(M, N, dtype=torch.bfloat16, device=device)
+    _dummy_bias = torch.empty(0, dtype=torch.bfloat16, device=device)
+
+    # Compile kernel
+    launch_fn = compile_preshuffle_gemm_a8(
+        M=M, N=N, K=K,
+        tile_m=tile_m, tile_n=tile_n, tile_k=tile_k,
+        in_dtype=in_dtype,
+        epilogue="none",
+    )
+
+    def _args(c, a, b, sa, sb):
+        return (c.contiguous().view(-1),
+                a.contiguous().view(-1) if "int" not in str(a.dtype) else a.contiguous().view(-1),
+                b,
+                sa.contiguous().view(-1) if sa.numel() > 0 else sa,
+                sb.contiguous().view(-1) if sb.numel() > 0 else sb,
+                _dummy_bias,
+                M, N, torch.cuda.current_stream())
+
+    compiled_fn = flyc.compile(launch_fn, *_args(c_out, a_q, b_input, sa_flat, sb_flat))
+
+    # Warmup
+    compiled_fn(*_args(c_out, a_q, b_input, sa_flat, sb_flat))
+    torch.cuda.synchronize()
+
+    # ── Regular execution (reference) ──
+    c_out.zero_()
+    compiled_fn(*_args(c_out, a_q, b_input, sa_flat, sb_flat))
+    torch.cuda.synchronize()
+    ref = c_out.clone()
+    assert ref.abs().max().item() > 0, "Regular execution produced all zeros"
+
+    # ── CUDAGraph capture ──
+    g = torch.cuda.CUDAGraph()
+    s = torch.cuda.Stream()
+    s.wait_stream(torch.cuda.current_stream())
+
+    # Warmup on capture stream
+    with torch.cuda.stream(s):
+        compiled_fn(*_args(c_out, a_q, b_input, sa_flat, sb_flat))
+    torch.cuda.current_stream().wait_stream(s)
+    torch.cuda.synchronize()
+
+    # Record
+    c_out.zero_()
+    with torch.cuda.graph(g, stream=s):
+        compiled_fn(*_args(c_out, a_q, b_input, sa_flat, sb_flat))
+    torch.cuda.synchronize()
+
+    # ── Replay ──
+    c_out.zero_()
+    g.replay()
+    torch.cuda.synchronize()
+    graph_result = c_out.clone()
+
+    # ── Verify ──
+    max_diff = (ref - graph_result).abs().max().item()
+    assert graph_result.abs().max().item() > 0, (
+        f"CUDAGraph replay produced all zeros — kernel was NOT captured! "
+        f"ref max={ref.abs().max().item():.4f}"
+    )
+    assert torch.allclose(ref, graph_result, atol=1e-2), (
+        f"CUDAGraph result mismatch: max_diff={max_diff:.6f}, "
+        f"ref max={ref.abs().max().item():.4f}, graph max={graph_result.abs().max().item():.4f}"
+    )
+    print(f"✓ CUDAGraph capture verified ({in_dtype}): max_diff={max_diff:.6f}")
+
+
+# ── Fused epilogue correctness test ─────────────────────────────────────────
+
+@pytest.mark.parametrize("epilogue", ["bias", "bias_relu", "bias_silu", "bias_gelu"])
+def test_fused_epilogue_correctness(epilogue):
+    """Verify fused epilogue (bias + activation) matches a torch reference.
+
+    The previous test suite only exercised epilogue='none' with a dummy bias
+    tensor, so a regression in body_row's fused bias/activation path would
+    not have been caught. This test runs each of the four epilogue modes
+    end-to-end and compares against a torch reference.
+    """
+    import torch.nn.functional as F
+
+    arch = str(get_rocm_arch())
+    if not arch.startswith("gfx94") and not arch.startswith("gfx95"):
+        pytest.skip(f"Unsupported arch: {arch}")
+
+    device = "cuda:0"
+    M, N, K = 16, 5120, 8192
+    tile_m, tile_n, tile_k = 16, 64, 512
+    in_dtype = "bf16"
+    out_dtype = "bf16"
+    torch_out_dtype = torch.bfloat16
+
+    torch.manual_seed(0)
+    a_raw = torch.randn(M, K, dtype=torch_out_dtype, device=device)
+    b_raw = torch.randn(N, K, dtype=torch_out_dtype, device=device)
+    bias  = torch.randn(N,    dtype=torch_out_dtype, device=device)
+
+    # Torch reference: GEMM + bias + activation
+    a_f32 = a_raw.to(torch.float32)
+    b_f32 = b_raw.to(torch.float32)
+    ref_f32 = a_f32 @ b_f32.T + bias.to(torch.float32)
+    if epilogue == "bias_relu":
+        ref_f32 = F.relu(ref_f32)
+    elif epilogue == "bias_silu":
+        ref_f32 = F.silu(ref_f32)
+    elif epilogue == "bias_gelu":
+        ref_f32 = F.gelu(ref_f32, approximate="tanh")
+    ref = ref_f32.to(torch_out_dtype)
+
+    # FlyDSL kernel
+    b_input = shuffle_weight(b_raw.contiguous(), layout=(16, 16)).contiguous().view(-1)
+    sa_flat = torch.empty(0, dtype=torch.float32, device=device)
+    sb_flat = torch.empty(0, dtype=torch.float32, device=device)
+    c_out = torch.zeros(M, N, dtype=torch_out_dtype, device=device)
+
+    launch_fn = compile_preshuffle_gemm_a8(
+        M=M, N=N, K=K,
+        tile_m=tile_m, tile_n=tile_n, tile_k=tile_k,
+        in_dtype=in_dtype,
+        out_dtype=out_dtype,
+        epilogue=epilogue,
+    )
+
+    def _args(c, a, b, sa, sb, bs):
+        return (
+            c.contiguous().view(-1),
+            a.contiguous().view(-1),
+            b,
+            sa.contiguous().view(-1) if sa.numel() > 0 else sa,
+            sb.contiguous().view(-1) if sb.numel() > 0 else sb,
+            bs,
+            M, N, torch.cuda.current_stream(),
+        )
+
+    compiled_fn = flyc.compile(launch_fn, *_args(c_out, a_raw, b_input, sa_flat, sb_flat, bias))
+    compiled_fn(*_args(c_out, a_raw, b_input, sa_flat, sb_flat, bias))
+    torch.cuda.synchronize()
+
+    # bf16 has ~7 bits mantissa; for K=8192 reduction the per-element
+    # error is bounded by ~K * eps_bf16 ~ 8192 * 2^-7 ~= 64 ULP. We use
+    # rtol=0.05 (5%) and atol=2.0 (covers small-magnitude outputs).
+    assert not torch.isnan(c_out).any(), (
+        f"Epilogue {epilogue}: kernel produced NaN(s) "
+        f"(count={int(torch.isnan(c_out).sum().item())})"
+    )
+    assert not torch.isinf(c_out).any(), (
+        f"Epilogue {epilogue}: kernel produced Inf(s)"
+    )
+    atol = 2.0
+    rtol = 0.05
+    diff = (c_out.to(torch.float32) - ref.to(torch.float32)).abs()
+    max_diff = diff.max().item()
+    rel = (diff / (ref.to(torch.float32).abs() + 1e-3)).max().item()
+    assert torch.allclose(c_out, ref, atol=atol, rtol=rtol), (
+        f"Epilogue {epilogue} mismatch: max_abs_diff={max_diff:.4f} max_rel={rel:.4f}, "
+        f"ref max={ref.abs().max().item():.4f}, out max={c_out.abs().max().item():.4f}"
+    )
+    print(f"✓ Fused epilogue {epilogue} correctness verified: "
+          f"max_abs_diff={max_diff:.4f}, max_rel={rel:.4f}, ref_max={ref.abs().max().item():.2f}")
+
+
+def test_fused_epilogue_rejects_cshuffle():
+    """Compile-time guard: epilogue != 'none' with use_cshuffle_epilog=True
+    must raise rather than silently produce wrong output."""
+    arch = str(get_rocm_arch())
+    if not arch.startswith("gfx94") and not arch.startswith("gfx95"):
+        pytest.skip(f"Unsupported arch: {arch}")
+
+    with pytest.raises(ValueError, match="cshuffle"):
+        compile_preshuffle_gemm_a8(
+            M=16, N=64, K=512,
+            tile_m=16, tile_n=64, tile_k=512,
+            in_dtype="bf16",
+            out_dtype="bf16",
+            epilogue="bias_silu",
+            use_cshuffle_epilog=True,
+        )

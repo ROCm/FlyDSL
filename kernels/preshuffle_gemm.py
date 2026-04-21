@@ -16,6 +16,7 @@ from flydsl._mlir import ir
 from flydsl.expr import arith, vector
 from flydsl.expr import gpu
 from flydsl.expr import buffer_ops, rocdl
+from flydsl.expr import math
 
 
 from flydsl.expr.typing import T
@@ -142,7 +143,8 @@ def compile_preshuffle_gemm_a8(
     waves_per_eu: Optional[int] = None,
     use_async_copy: bool = False,
     dsrd_preload: int = -1,
-    dvmem_preload: int = -1
+    dvmem_preload: int = -1,
+    epilogue: str = "none",  # "none", "bias", "bias_relu", "bias_silu", "bias_gelu"
 ):
     """Compile the preshuffle GEMM kernel using the @flyc.kernel API.
 
@@ -306,6 +308,23 @@ def compile_preshuffle_gemm_a8(
         allocator_pong.ptr = lds_alloc_offset + lds_total_elems * elem_bytes
 
     # ── Kernel function ────────────────────────────────────────────────────
+    _has_epilogue = epilogue != "none"
+    _has_bias = epilogue in ("bias", "bias_relu", "bias_silu", "bias_gelu")
+    _has_relu = epilogue == "bias_relu"
+    _has_silu = epilogue == "bias_silu"
+    _has_gelu = epilogue == "bias_gelu"
+
+    # Fused epilogue is implemented inside body_row (the direct store path).
+    # When use_cshuffle_epilog=True, the epilogue path goes through
+    # write_row_to_lds -> store_pair and returns before body_row, which would
+    # silently drop the bias + activation. Reject the unsupported combination.
+    if _has_epilogue and use_cshuffle_epilog:
+        raise ValueError(
+            "Fused epilogue (epilogue != 'none') is not supported with "
+            "use_cshuffle_epilog=True; the cshuffle path bypasses body_row "
+            "where the bias/activation fusion lives."
+        )
+
     @flyc.kernel
     def kernel_gemm(
         arg_c: fx.Tensor,
@@ -313,6 +332,7 @@ def compile_preshuffle_gemm_a8(
         arg_b: fx.Tensor,
         arg_scale_a: fx.Tensor,
         arg_scale_b: fx.Tensor,
+        arg_bias: fx.Tensor,
         i32_m: fx.Int32,
         i32_n: fx.Int32,
     ):
@@ -395,6 +415,14 @@ def compile_preshuffle_gemm_a8(
         _needs_per_token_scale = not is_f16_or_bf16 and not is_fp4
         scale_a_rsrc = None if (is_f16_or_bf16) else buffer_ops.create_buffer_resource(
             arg_scale_a, max_size=False)
+
+        # ---- Bias buffer resource (for fused epilogue) ----
+        # Use max_size=True so the buffer descriptor's size is taken from the
+        # actual arg_bias tensor; this avoids hardcoding the output element
+        # size (was c_n * 2, which broke if out_dtype became fp32 etc.).
+        bias_rsrc = None
+        if _has_bias:
+            bias_rsrc = buffer_ops.create_buffer_resource(arg_bias, max_size=True)
         b_rsrc = buffer_ops.create_buffer_resource(arg_b, max_size=True)
         scale_b_rsrc = None if (is_f16_or_bf16) else buffer_ops.create_buffer_resource(
             arg_scale_b, max_size=True)
@@ -985,6 +1013,83 @@ def compile_preshuffle_gemm_a8(
                         val_s = (val * s_a) * s_b_vals[ni]
                     else:
                         val_s = val
+
+                    # ── Fused epilogue: bias + activation ──
+                    if _has_bias and bias_rsrc is not None:
+                        col_idx = col_base + (ni * 16)
+                        bias_val_f16 = buffer_ops.buffer_load(
+                            bias_rsrc, col_idx, vec_width=1,
+                            dtype=_out_elem())
+                        bias_val_f32 = arith.extf(T.f32, bias_val_f16)
+                        val_s = val_s + bias_val_f32
+
+                    if _has_relu:
+                        # ReLU(x) = max(x, 0). Use maximumf rather than
+                        # cmpf+select: the lower-level cmpf wrapper requires
+                        # an integer CmpFPredicate enum value, not the string
+                        # "ogt", so the previous form failed at compile time
+                        # the moment the bias_relu epilogue was actually
+                        # exercised (test coverage gap).
+                        zero_f32 = arith.constant(0.0, type=T.f32)
+                        val_s = arith.maximumf(val_s, zero_f32)
+                    elif _has_silu:
+                        # SiLU(x) = x * sigmoid(x). Compute as
+                        #   sigmoid_x = 1 / (1 + exp(-x))    # one rcp instead of fdiv
+                        #   val_s    = val_s * sigmoid_x
+                        # to lower to v_rcp_f32 + v_mul_f32 instead of v_div_*
+                        # (~4x faster than fdiv on AMD GPUs).
+                        neg_one = arith.constant(-1.0, type=T.f32)
+                        neg_val = val_s * neg_one
+                        exp_neg = math.exp(neg_val)
+                        one_f32 = arith.constant(1.0, type=T.f32)
+                        denom = one_f32 + exp_neg
+                        sigmoid_x = arith.divf(one_f32, denom)
+                        val_s = val_s * sigmoid_x
+                    elif _has_gelu:
+                        # GeLU approx: 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+                        # math.tanh has no AMD libcall, so expand it via exp.
+                        # Numerically stable form using only non-positive
+                        # exponent (avoids fp32 overflow for large |x|):
+                        #   a = -2 * |y|              (a <= 0, exp(a) in [0,1])
+                        #   tanh(y) = sign(y) * (1 - exp(a)) / (1 + exp(a))
+                        #   1 + tanh(y) = 1 + sign(y) * (1 - exp(a))/(1+exp(a))
+                        # We compute (1 + tanh(y)) directly from y because we
+                        # need the GeLU output, which is half * x * (1 + tanh).
+                        half_f32    = arith.constant(0.5, type=T.f32)
+                        coeff_f32   = arith.constant(0.044715, type=T.f32)
+                        sqrt2pi_f32 = arith.constant(0.7978845608, type=T.f32)
+                        neg_two_f32 = arith.constant(-2.0, type=T.f32)
+                        one_f32     = arith.constant(1.0, type=T.f32)
+                        zero_f32    = arith.constant(0.0, type=T.f32)
+                        x3 = val_s * val_s * val_s
+                        y  = sqrt2pi_f32 * (val_s + coeff_f32 * x3)
+                        # |y| via max(y, -y) — avoids math.absf dependency
+                        neg_y  = zero_f32 - y
+                        abs_y  = arith.maximumf(y, neg_y)
+                        # exp(-2|y|) is in [0, 1], no overflow.
+                        e_neg2abs = math.exp(neg_two_f32 * abs_y)
+                        denom = one_f32 + e_neg2abs
+                        # tanh(|y|) = (1 - e_neg2abs) / denom
+                        # tanh(y)   = sign(y) * tanh(|y|)
+                        # 1 + tanh(y):
+                        #   y >= 0: 1 + tanh(|y|) = (denom + (1 - e)) / denom
+                        #                         = (2)             / denom
+                        #                          (because denom = 1 + e and
+                        #                           denom + 1 - e = 2)
+                        #   y <  0: 1 - tanh(|y|) = (denom - (1 - e)) / denom
+                        #                         = (2 * e)          / denom
+                        two_f32 = arith.constant(2.0, type=T.f32)
+                        # numerator = 2          when y >= 0
+                        #           = 2 * e_neg2abs  when y <  0
+                        # OGT predicate id = 2 (CmpFPredicate.OGT)
+                        sign_pred = arith.cmpf(2, y, zero_f32)
+                        num_pos = two_f32
+                        num_neg = two_f32 * e_neg2abs
+                        numerator = arith.select(sign_pred, num_pos, num_neg)
+                        recip = arith.divf(one_f32, denom)
+                        one_plus_tanh = numerator * recip
+                        val_s = half_f32 * val_s * one_plus_tanh
+
                     val_f16 = arith.trunc_f(_out_elem(), val_s)
                     idx_out = idx_base + (ni * 16)
                     buffer_ops.buffer_store(val_f16, c_rsrc, idx_out)
@@ -1384,6 +1489,7 @@ def compile_preshuffle_gemm_a8(
         arg_b: fx.Tensor,
         arg_scale_a: fx.Tensor,
         arg_scale_b: fx.Tensor,
+        arg_bias: fx.Tensor,
         i32_m: fx.Int32,
         i32_n: fx.Int32,
         stream: fx.Stream,
@@ -1398,7 +1504,7 @@ def compile_preshuffle_gemm_a8(
         gx = (i32_m + (tile_m - 1)) // tile_m
         gy = i32_n // tile_n
 
-        launcher = kernel_gemm(arg_c, arg_a, arg_b, arg_scale_a, arg_scale_b, i32_m, i32_n)
+        launcher = kernel_gemm(arg_c, arg_a, arg_b, arg_scale_a, arg_scale_b, arg_bias, i32_m, i32_n)
         if waves_per_eu is not None:
             _wpe = int(waves_per_eu)
             if _wpe >= 1:

@@ -259,6 +259,13 @@ FailureOr<Value> MmaOpGFX1250_WMMAType::emitAtomCallSSA(OpBuilder &builder, Loca
 
   VectorType accTy = VectorType::get({accVecSize}, elemTyAcc);
 
+  if (a.getType() != abTyA)
+    a = LLVM::BitcastOp::create(builder, loc, abTyA, a);
+  if (b.getType() != abTyB)
+    b = LLVM::BitcastOp::create(builder, loc, abTyB, b);
+  if (c.getType() != accTy)
+    c = LLVM::BitcastOp::create(builder, loc, accTy, c);
+
 #define DISPATCH_WMMA_SSA(M_, K_, PRED, OP, VARIANT)                                               \
   if (m == M_ && n == M_ && k == K_ && (PRED)) {                                                   \
     return emitWmmaSSA<ROCDL::OP, WmmaVariant::VARIANT>(builder, loc, accTy, a, b, c);             \
