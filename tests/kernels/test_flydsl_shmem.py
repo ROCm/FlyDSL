@@ -6,7 +6,7 @@
 FlyDSL + mori shmem integration test — cross-PE basic operations.
 
 Validates the full pipeline:
-  ExternFunction → extern_symbols → bitcode linking → shmem module-load hook
+  ExternFunction → extern_symbols → bitcode linking → post-load module init
 
 Usage:
     torchrun --nproc_per_node=2 tests/kernels/test_flydsl_shmem.py
@@ -22,10 +22,9 @@ import pytest
 pytest.importorskip("mori", reason="mori package required for shmem tests")
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-for _p in [os.path.join(_HERE, "../../python"), "/home/yashao/FlyDSL/python",
-           "/home/yashao/mori/python"]:
-    if os.path.isdir(_p) and _p not in sys.path:
-        sys.path.insert(0, _p)
+_FLYDSL_PY = os.path.join(_HERE, "../../python")
+if os.path.isdir(_FLYDSL_PY) and _FLYDSL_PY not in sys.path:
+    sys.path.insert(0, _FLYDSL_PY)
 
 import torch
 import torch.distributed as dist

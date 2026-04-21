@@ -246,7 +246,11 @@ class ExternFunction:
         callee_ref = FlatSymbolRefAttr.get(self.symbol)
 
         if ret_type is None:
-            # void return — emit via Operation.create
+            # void return: Operation.create is required because the
+            # auto-generated llvm.CallOp Python binding always expects
+            # at least one result type.  The explicit attribute dict
+            # mirrors what CallOp would emit; if the MLIR version
+            # changes attribute names this will need updating.
             from .._mlir.ir import Operation
             Operation.create(
                 "llvm.call",

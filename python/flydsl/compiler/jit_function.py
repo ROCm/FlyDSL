@@ -33,8 +33,6 @@ from .kernel_function import (
 )
 from .protocol import fly_construct, fly_pointers, fly_types
 
-_FLYDSL_COV = 6
-
 
 @lru_cache(maxsize=1)
 def _flydsl_key() -> str:
@@ -381,13 +379,19 @@ class MlirCompiler:
         fragments, llvm_opts = _pipeline_fragments(backend)
 
         if link_libs:
-            link_opt = " " + " ".join(f"l={lib}" for lib in link_libs)
-            fragments = [
-                (f[:-1] + link_opt + "}") if "rocdl-attach-target" in f else f
-                for f in fragments
-            ]
-            assert any("rocdl-attach-target" in f for f in fragments), \
+            link_opt = " ".join(f"l={lib}" for lib in link_libs)
+            new_fragments = []
+            found_rocdl = False
+            for f in fragments:
+                if "rocdl-attach-target" in f:
+                    base = f.rstrip("}").rstrip()
+                    new_fragments.append(f"{base} {link_opt}" + "}")
+                    found_rocdl = True
+                else:
+                    new_fragments.append(f)
+            assert found_rocdl, \
                 "link_libs specified but no 'rocdl-attach-target' fragment found in pipeline"
+            fragments = new_fragments
 
         from .llvm_options import llvm_options as _llvm_options
         _llvm_ctx = _llvm_options(llvm_opts) if llvm_opts else nullcontext()
@@ -820,9 +824,11 @@ class JitFunction:
 
             with ir.InsertionPoint(module.body), loc:
                 backend = get_backend()
-                # Targets are set by the rocdl-attach-target pass in the
-                # compilation pipeline; omitting them here avoids duplication
-                # and allows link_libs injection to control targets centrally.
+                # Let rocdl-attach-target be the sole source of GPU target
+                # attributes.  Providing targets here would cause the pass
+                # to *append* a second copy, which breaks bitcode linking
+                # when link_libs is active (hipErrorNoBinaryForGpu).
+                # Safe for all kernels: rocdl-attach-target always runs.
                 gpu_module = create_gpu_module("kernels")
 
                 func_op = func.FuncOp(self.func.__name__, (ir_types, []))
@@ -847,23 +853,21 @@ class JitFunction:
 
             original_ir = module.operation.get_asm(enable_debug_info=True)
 
-            # Collect bitcode link_libs from two sources:
+            # Collect link_libs and post-load processors.
             # 1. Explicit: ExternFunction.bitcode_path → comp_ctx.link_libs
-            # 2. Fallback: mori_shmem_* prefix auto-detection (backward compat)
+            # 2. Auto: delegate to mori compile_helper (no hardcoded prefixes)
             link_libs = list(comp_ctx.link_libs) if comp_ctx.link_libs else None
-            has_shmem_symbols = any(s.startswith("mori_shmem_") for s in comp_ctx.extern_symbols)
-            needs_shmem = has_shmem_symbols
+            post_load_processors = []
 
-            if has_shmem_symbols and not link_libs:
+            if comp_ctx.extern_symbols and not link_libs:
                 try:
-                    from mori.ir.bitcode import find_bitcode
-                except ImportError as exc:
-                    shmem_syms = [s for s in comp_ctx.extern_symbols if s.startswith("mori_shmem_")]
-                    raise ImportError(
-                        f"Kernel uses mori shmem symbols {shmem_syms} but 'mori' is not installed.\n"
-                        f"  pip install: git clone https://github.com/ROCm/mori && cd mori && pip install -e ."
-                    ) from exc
-                link_libs = [find_bitcode(cov=_FLYDSL_COV)]
+                    from mori.ir.flydsl.compile_helper import prepare_compile
+                    shmem_info = prepare_compile(comp_ctx.extern_symbols, arch=backend.target.arch)
+                    if shmem_info is not None:
+                        link_libs = shmem_info.link_libs
+                        post_load_processors.append(shmem_info.module_init_fn)
+                except ImportError:
+                    pass
 
             compiled_module = MlirCompiler.compile(
                 module, arch=backend.target.arch, func_name=self.func.__name__, link_libs=link_libs,
@@ -873,7 +877,7 @@ class JitFunction:
                 compiled_module,
                 self.func.__name__,
                 original_ir,
-                needs_shmem=needs_shmem,
+                post_load_processors=post_load_processors,
             )
 
             # Always keep a reference to the latest compilation result so

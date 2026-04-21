@@ -31,21 +31,24 @@
 
 thread_local static int32_t defaultDevice = 0;
 
-// Module load hook — called after hipModuleLoadData, if registered.
-// Used by mori shmem to inject globalGpuStates into dynamically loaded GPU modules.
-typedef void (*MgpuModuleLoadHook)(hipModule_t module);
-static MgpuModuleLoadHook s_moduleLoadHook = nullptr;
+// Module tracker — records hipModule_t handles loaded between
+// mgpuResetModuleTracker() and the next query, so that Python-side
+// post-load processors can act on specific modules.
+static thread_local std::vector<hipModule_t> s_loadedModules;
 
-extern "C" void mgpuSetModuleLoadHook(MgpuModuleLoadHook hook) {
-  s_moduleLoadHook = hook;
+extern "C" void mgpuResetModuleTracker() { s_loadedModules.clear(); }
+extern "C" int mgpuGetLoadedModuleCount() {
+  return static_cast<int>(s_loadedModules.size());
+}
+extern "C" hipModule_t mgpuGetLoadedModule(int idx) {
+  return s_loadedModules[idx];
 }
 
 extern "C" hipModule_t mgpuModuleLoad(void *data, size_t /*gpuBlobSize*/) {
   hipModule_t module = nullptr;
   HIP_REPORT_IF_ERROR(hipModuleLoadData(&module, data));
-  if (module && s_moduleLoadHook) {
-    s_moduleLoadHook(module);
-  }
+  if (module)
+    s_loadedModules.push_back(module);
   return module;
 }
 

@@ -47,58 +47,18 @@ class _ArgPacker:
         return buf
 
 
-_shmem_hook_installed = False
-_shmem_hook_lock = threading.Lock()
-
-
-def _ensure_shmem_hook():
-    """Register mori shmem module-load hook in libfly_jit_runtime.so.
-
-    After registration, every hipModuleLoadData performed by the MLIR
-    ExecutionEngine will trigger ``mori.shmem.shmem_module_init`` so that
-    ``globalGpuStates`` is injected into the loaded GPU module.
-    """
-    global _shmem_hook_installed
-    if _shmem_hook_installed:
-        return
-
-    with _shmem_hook_lock:
-        if _shmem_hook_installed:
-            return
-
-        try:
-            import mori.shmem as ms
-        except ImportError as exc:
-            raise ImportError(
-                "This kernel requires 'mori' for shmem support, but it is not installed.\n"
-                "  pip install: git clone https://github.com/ROCm/mori && cd mori && pip install -e ."
-            ) from exc
-
-        runtime_lib = ctypes.CDLL(str(_resolve_runtime_libs()[0]))
-
-        HOOK_TYPE = ctypes.CFUNCTYPE(None, ctypes.c_void_p)
-
-        def _on_module_load(hip_module_ptr):
-            ms.shmem_module_init(hip_module_ptr)
-
-        # Must keep a reference to prevent GC of the callback.
-        _ensure_shmem_hook._callback = HOOK_TYPE(_on_module_load)
-        runtime_lib.mgpuSetModuleLoadHook(_ensure_shmem_hook._callback)
-        _shmem_hook_installed = True
-
-
 class CompiledArtifact:
     def __init__(
         self,
         compiled_module: ir.Module,
         func_name: str,
         source_ir: str = None,
-        needs_shmem: bool = False,
+        post_load_processors: List = None,
     ):
         self._ir_text = str(compiled_module)
         self._entry = func_name
         self._source_ir = source_ir
-        self._needs_shmem = needs_shmem
+        self._post_load_processors = post_load_processors or []
         self._module = None
         self._engine = None
         self._func_exe = None
@@ -110,14 +70,20 @@ class CompiledArtifact:
             "ir_text": self._ir_text,
             "entry": self._entry,
             "source_ir": self._source_ir,
-            "needs_shmem": self._needs_shmem,
+            "has_post_load": bool(self._post_load_processors),
         }
 
     def __setstate__(self, state):
         self._ir_text = state["ir_text"]
         self._entry = state["entry"]
         self._source_ir = state["source_ir"]
-        self._needs_shmem = state.get("needs_shmem", False)
+        self._post_load_processors = []
+        if state.get("has_post_load"):
+            try:
+                from mori.ir.flydsl.compile_helper import restore_processors
+                self._post_load_processors = restore_processors()
+            except ImportError:
+                pass
         self._module = None
         self._engine = None
         self._func_exe = None
@@ -129,8 +95,10 @@ class CompiledArtifact:
             if self._engine is not None:
                 return
 
-            if self._needs_shmem:
-                _ensure_shmem_hook()
+            runtime_lib = ctypes.CDLL(str(_resolve_runtime_libs()[0]))
+
+            if self._post_load_processors:
+                runtime_lib.mgpuResetModuleTracker()
 
             # Create context and immediately exit the with-block, but
             # keep a reference (self._ctx) so the context is not
@@ -147,8 +115,15 @@ class CompiledArtifact:
                     shared_libs=_resolve_runtime_libs(),
                 )
                 self._engine.initialize()
-            # Store ctx to prevent GC (but no longer the active context)
             self._ctx = ctx
+
+            if self._post_load_processors:
+                runtime_lib.mgpuGetLoadedModuleCount.restype = ctypes.c_int
+                runtime_lib.mgpuGetLoadedModule.restype = ctypes.c_void_p
+                count = runtime_lib.mgpuGetLoadedModuleCount()
+                for proc in self._post_load_processors:
+                    for i in range(count):
+                        proc(runtime_lib.mgpuGetLoadedModule(ctypes.c_int(i)))
 
     def _get_func_exe(self):
         if self._func_exe is None:
@@ -161,13 +136,19 @@ class CompiledArtifact:
     def __call__(self, *args, **kwargs):
         func_exe = self._get_func_exe()
 
+        owned: list = []
         all_c_ptrs: List[ctypes.c_void_p] = []
         for arg in args:
-            all_c_ptrs.extend(fly_pointers(arg))
+            ptrs = fly_pointers(arg)
+            owned.append(ptrs)
+            owned.append(arg)
+            all_c_ptrs.extend(ptrs)
 
         packed_args = self._packer.pack(all_c_ptrs)
 
-        return func_exe(packed_args)
+        result = func_exe(packed_args)
+        del owned
+        return result
 
     def dump(self, compiled: bool = True):
         if compiled:
