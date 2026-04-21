@@ -427,10 +427,10 @@ def compile_preshuffle_gemm_v2(
 
         # MMA atom
         if is_f16 and use_mfma_k32:
-            mma_atom = fx.make_mma_atom(fx.rocdl.cdna4.MFMA(16, 16, 32, Float16))
+            mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 32, Float16))
             k_perm = fx.make_layout((8, 4), (1, 8))
         elif is_bf16 and use_mfma_k32:
-            mma_atom = fx.make_mma_atom(fx.rocdl.cdna4.MFMA(16, 16, 32, BFloat16))
+            mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 32, BFloat16))
             k_perm = fx.make_layout((8, 4), (1, 8))
         elif is_f16:
             mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 16, Float16))
@@ -442,9 +442,6 @@ def compile_preshuffle_gemm_v2(
             # gfx950 fp8: K=128 atom via CDNA4 MFMA_Scale path (TODO)
             mma_atom = fx.make_mma_atom(fx.rocdl.cdna4.MFMA_Scale(16, 16, 128, layout_elem))
             k_perm = fx.make_layout((32, 4), (1, 32))
-        elif is_fp8 and is_gfx950:
-            mma_atom = fx.make_mma_atom(fx.rocdl.cdna4.MFMA(16, 16, 32, layout_elem))
-            k_perm = fx.make_layout((8, 4, 2), (1, 16, 8))
         else:
             mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 32, layout_elem))
             # FP8 gfx942: KPerThread=8, GroupK=4, 2 atoms → groups 64 K elements

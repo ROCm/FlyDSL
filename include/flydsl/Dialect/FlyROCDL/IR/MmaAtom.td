@@ -33,25 +33,6 @@ def FlyROCDL_MmaOpCDNA3_MFMA : FlyROCL_MmaOp<"MmaOpCDNA3_MFMA", "cdna3.mfma", []
 // MmaOp CDNA4
 //===----------------------------------------------------------------------===//
 
-def FlyROCDL_MmaOpCDNA4_MFMA : FlyROCL_MmaOp<"MmaOpCDNA4_MFMA", "cdna4.mfma", []> {
-  let parameters = (ins
-    "int32_t":$m,
-    "int32_t":$n,
-    "int32_t":$k,
-    "Type":$elemTyA,
-    "Type":$elemTyB,
-    "Type":$elemTyAcc
-  );
-  let assemblyFormat = "`<` custom<MNKDimensionList>($m, $n, $k) `,` `(` $elemTyA `,` $elemTyB `)` `->` $elemTyAcc `>`";
-
-  let builders = [
-    TypeBuilderWithInferredContext<(ins "int32_t":$m, "int32_t":$n, "int32_t":$k, "Type":$elemTyA, "Type":$elemTyB, "Type":$elemTyAcc), [{
-      return $_get(elemTyA.getContext(), m, n, k, elemTyA, elemTyB, elemTyAcc);
-    }]>
-  ];
-  let genVerifyDecl = 1;
-}
-
 def FlyROCDL_MmaOpCDNA4_MFMAScale : FlyROCL_StatefulMmaOp<"MmaOpCDNA4_MFMAScale", "cdna4.mfma_scale", []> {
   let parameters = (ins
     "int32_t":$m,

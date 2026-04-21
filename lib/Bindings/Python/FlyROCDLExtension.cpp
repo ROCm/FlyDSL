@@ -38,24 +38,6 @@ struct PyMmaOpCDNA3_MFMAType : PyConcreteType<PyMmaOpCDNA3_MFMAType> {
   }
 };
 
-struct PyMmaOpCDNA4_MFMAType : PyConcreteType<PyMmaOpCDNA4_MFMAType> {
-  FLYDSL_REGISTER_TYPE_BINDING(MmaOpCDNA4_MFMAType, "MmaOpCDNA4_MFMAType");
-
-  static void bindDerived(ClassTy &c) {
-    c.def_static(
-        "get",
-        [](int32_t m, int32_t n, int32_t k, PyType &elemTyA, PyType &elemTyB, PyType &elemTyAcc,
-           DefaultingPyMlirContext context) {
-          return PyMmaOpCDNA4_MFMAType(context->getRef(), wrap(MmaOpCDNA4_MFMAType::get(
-                                                              m, n, k, unwrap(elemTyA),
-                                                              unwrap(elemTyB), unwrap(elemTyAcc))));
-        },
-        "m"_a, "n"_a, "k"_a, "elem_ty_a"_a, "elem_ty_b"_a, "elem_ty_acc"_a, nb::kw_only(),
-        "context"_a = nb::none(),
-        "Create a MmaOpCDNA4_MFMAType with m, n, k dimensions and element types");
-  }
-};
-
 struct PyMmaOpCDNA4_MFMAScaleType : PyConcreteType<PyMmaOpCDNA4_MFMAScaleType> {
   FLYDSL_REGISTER_TYPE_BINDING(MmaOpCDNA4_MFMAScaleType, "MmaOpCDNA4_MFMAScaleType");
 
@@ -174,7 +156,6 @@ NB_MODULE(_mlirDialectsFlyROCDL, m) {
 
   // clang-format off
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyMmaOpCDNA3_MFMAType::bind(m);
-  ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyMmaOpCDNA4_MFMAType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyMmaOpCDNA4_MFMAScaleType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyMmaOpGFX1250_WMMAType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyCopyOpCDNA3BufferCopyType::bind(m);
