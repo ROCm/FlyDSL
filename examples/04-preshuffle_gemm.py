@@ -85,13 +85,13 @@ def gemm_kernel(
         if read_next:
             next_k = fx.Int32(next_k)
             fx.copy(
-                buffer_copy_128b.set_value("soffset", next_k * gA_k_stride),
+                buffer_copy_128b,
                 thr_gA_k[None, None, None, 0],  # global offset is added on the soffset of buffer_copy_atom
                 copy_frag_A,
                 soffset=next_k * gA_k_stride,
             )
             fx.copy(
-                buffer_copy_128b.set_value("soffset", next_k * gB_k_stride),
+                buffer_copy_128b,
                 thr_gB_k[None, None, None, 0],
                 mma_frag_B_retile[None, None, None, write_stage],
                 soffset=next_k * gB_k_stride,
