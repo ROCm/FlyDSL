@@ -11,41 +11,42 @@ LLVM_INSTALL_DIR="${LLVM_INSTALL_DIR:-$LLVM_BUILD_DIR/mlir_install}"
 LLVM_INSTALL_TGZ="${LLVM_INSTALL_TGZ:-$LLVM_BUILD_DIR/mlir_install.tgz}"
 LLVM_PACKAGE_INSTALL="${LLVM_PACKAGE_INSTALL:-1}"
 
-# Read LLVM commit hash from cmake/llvm-hash.txt
-LLVM_HASH_FILE="${REPO_ROOT}/cmake/llvm-hash.txt"
-if [[ -f "${LLVM_HASH_FILE}" ]]; then
-    LLVM_COMMIT_DEFAULT=$(cat "${LLVM_HASH_FILE}" | tr -d '[:space:]')
-else
-    echo "Warning: ${LLVM_HASH_FILE} not found, using hardcoded default."
-    LLVM_COMMIT_DEFAULT="ac5dc54d509169d387fcfd495d71853d81c46484"
-fi
-LLVM_COMMIT="${LLVM_COMMIT:-$LLVM_COMMIT_DEFAULT}"
+# ROCm llvm-project fork; override with LLVM_GIT_URL / LLVM_BRANCH if needed.
+LLVM_GIT_URL="${LLVM_GIT_URL:-https://github.com/ROCm/llvm-project.git}"
+LLVM_BRANCH="${LLVM_BRANCH:-zan/dsl_mla}"
 
 echo "Base directory: $BASE_DIR"
 echo "LLVM Source:    $LLVM_SRC_DIR"
 echo "LLVM Build:     $LLVM_BUILD_DIR"
 echo "LLVM Install:   $LLVM_INSTALL_DIR"
 echo "LLVM Tarball:   $LLVM_INSTALL_TGZ"
-echo "LLVM Commit:    $LLVM_COMMIT"
+echo "LLVM URL:       $LLVM_GIT_URL"
+echo "LLVM Branch:    $LLVM_BRANCH"
 
 # 1. Clone LLVM
 if [ ! -d "$LLVM_SRC_DIR" ]; then
     echo "Cloning llvm-project..."
-    git clone https://github.com/ROCm/llvm-project.git "$LLVM_SRC_DIR"
+    git clone "${LLVM_GIT_URL}" "$LLVM_SRC_DIR"
 fi
 
-echo "Checking out llvm-project commit ${LLVM_COMMIT} (amd-staging)..."
+echo "Checking out llvm-project branch ${LLVM_BRANCH}..."
 pushd "$LLVM_SRC_DIR"
 
-# Check if we need to switch remote to ROCm fork
 CURRENT_REMOTE=$(git remote get-url origin)
 if [[ "$CURRENT_REMOTE" == *"github.com/llvm/llvm-project"* ]]; then
-    echo "Detected upstream LLVM. Switching origin to ROCm fork for amd-staging..."
-    git remote set-url origin https://github.com/ROCm/llvm-project.git
+    echo "Switching origin from upstream llvm to ${LLVM_GIT_URL}..."
+    git remote set-url origin "${LLVM_GIT_URL}"
+elif [[ "$CURRENT_REMOTE" != *"ROCm/llvm-project"* ]]; then
+    echo "Setting origin to ${LLVM_GIT_URL}..."
+    git remote set-url origin "${LLVM_GIT_URL}"
 fi
 
-git fetch origin amd-staging
-git checkout "${LLVM_COMMIT}"
+git fetch origin "${LLVM_BRANCH}"
+if ! git rev-parse --verify "refs/remotes/origin/${LLVM_BRANCH}" >/dev/null 2>&1; then
+    echo "Error: remote branch origin/${LLVM_BRANCH} not found after fetch." >&2
+    exit 1
+fi
+git checkout -B "${LLVM_BRANCH}" "origin/${LLVM_BRANCH}"
 popd
 
 # 2. Create Build Directory
