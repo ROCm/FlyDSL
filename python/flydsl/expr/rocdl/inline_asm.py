@@ -9,7 +9,8 @@ LLVM's AMDGPU backend (VOP1Instructions.td / VOP3Instructions.td) but the
 MLIR ROCDLOps.td tablegen does not surface them.
 
 TODO: Remove these inline asm wrappers once upstream MLIR adds proper ROCDL
-dialect ops for v_cvt_off_f32_i4 and v_cvt_pk_bf16_f32.
+dialect ops for v_cvt_off_f32_i4, v_cvt_pk_bf16_f32, and
+v_cvt_scalef32_pk_bf16_fp4.
 """
 
 
