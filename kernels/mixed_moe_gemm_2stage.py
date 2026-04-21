@@ -1853,6 +1853,7 @@ def compile_mixed_moe_gemm2(
         )
 
     is_f16_a = a_dtype == "fp16"
+    is_bf16_a = a_dtype == "bf16"
     is_f16_b = b_dtype == "fp16"
 
     is_f8_a = a_dtype == "fp8"
@@ -1865,7 +1866,7 @@ def compile_mixed_moe_gemm2(
 
     elem_bytes = 1
 
-    a_elem_bytes = 2 if is_f16_a else 1
+    a_elem_bytes = 2 if (is_f16_a or is_bf16_a) else 1
     b_elem_bytes = 1
     tile_k_bytes = int(tile_k) * int(a_elem_bytes)
 
@@ -1873,7 +1874,7 @@ def compile_mixed_moe_gemm2(
     cbsz = 0 if is_f8_a else 4
     blgp = 4
 
-    # K64-byte micro-step: always 64 bytes per `ku`. For fp16, this is 32 elements (2xK16 MFMA).
+    # K64-byte micro-step: always 64 bytes per `ku`. For fp16/bf16, this is 32 elements (2xK16 MFMA).
     if (tile_k_bytes % 64) != 0:
         raise ValueError(
             f"tile_k_bytes must be divisible by 64, got tile_k_bytes={tile_k_bytes} "
