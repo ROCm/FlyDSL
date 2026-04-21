@@ -264,11 +264,11 @@ _FLA_CHUNK_SIZE_OPT_VK = 64
 @triton.autotune(
     configs=[
         triton.Config({"BV": BV}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [4]
-        for num_stages in [3]
-        for BV in [16]
+        for num_warps in [2, 4]
+        for num_stages in [1, 2, 3, 4]
+        for BV in [16, 32, 64]
     ],
-    key=["H", "K", "V", "BT"],
+    key=["H", "K", "V", "BT", "IS_VARLEN"],
     use_cuda_graph=_use_cuda_graph,
 )
 @triton.jit(do_not_specialize=["T"])

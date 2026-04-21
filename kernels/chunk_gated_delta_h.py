@@ -59,8 +59,8 @@ def _fast_exp(x):
 def _mfma_bf16_16x16x32(a_bf16x8, b_bf16x8, acc_f32x4):
     """Single mfma_f32_16x16x32_bf16 instruction."""
     return rocdl.mfma_f32_16x16x32_bf16(
-        T.f32x4, a_bf16x8, b_bf16x8, acc_f32x4, 0, 0, 0
-    ).res
+        T.f32x4, [a_bf16x8, b_bf16x8, acc_f32x4, 0, 0, 0]
+    )
 
 
 # ── Utility helpers ──────────────────────────────────────────────────────
@@ -653,7 +653,7 @@ def compile_chunk_gated_delta_h(
 
 _compiled_kernels = {}
 _autotune_cache = {}  # (shape_key) -> best BV
-_BV_CANDIDATES = [16]
+_BV_CANDIDATES = [16, 32, 64]
 _AUTOTUNE_WARMUP = 5
 _AUTOTUNE_ITERS = 25
 
