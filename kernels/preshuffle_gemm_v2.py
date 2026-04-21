@@ -49,8 +49,10 @@ def compile_preshuffle_gemm_v2(
     gpu_arch = get_rocm_arch()
     is_gfx942 = str(gpu_arch).startswith("gfx942")
     is_gfx950 = str(gpu_arch).startswith("gfx950")
-    use_mfma_scale_128 = is_fp8 and is_gfx950
-    use_mfma_k32 = is_f16_or_bf16 and is_gfx950
+    # TODO: enable when CDNA4 MFMA_Scale works through layout API (fly.mma_atom_call)
+    use_mfma_scale_128 = False  # is_fp8 and is_gfx950
+    # TODO: enable when k32 DISPATCH is added to CDNA3 MmaAtom
+    use_mfma_k32 = False  # is_f16_or_bf16 and is_gfx950
     if use_mfma_scale_128:
         if tile_k % 128 != 0:
             raise ValueError(f"tile_k must be divisible by 128 for gfx950 fp8, got {tile_k}")
@@ -432,7 +434,7 @@ def compile_preshuffle_gemm_v2(
             mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 16, BFloat16))
             k_perm = fx.make_layout((4, 4, 2), (1, 8, 4))
         elif use_mfma_scale_128:
-            # gfx950 fp8: K=128 atom with flat value layout (KPerThread=32)
+            # gfx950 fp8: K=128 atom via CDNA3 MFMA path
             # k_perm: (KPerThread=32, GroupK=4), tile_K_perm=128, 1 atom
             mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 128, layout_elem))
             k_perm = fx.make_layout((32, 4), (1, 32))

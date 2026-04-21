@@ -74,19 +74,22 @@ def run(dt, M, N, K, tm, tn, tk):
     def _i8(t):
         return t.view(torch.int8) if "float8" in str(t.dtype) else t
 
-    def make_args(c):
-        return (c.view(-1), _i8(a.view(-1)), _i8(b_shuf.view(-1)),
+    def make_args(c, include_bias=False):
+        args = [c.view(-1), _i8(a.view(-1)), _i8(b_shuf.view(-1)),
                 sa.view(-1) if sa.numel() > 0 else sa,
-                sb.view(-1) if sb.numel() > 0 else sb,
-                M, N, torch.cuda.current_stream())
+                sb.view(-1) if sb.numel() > 0 else sb]
+        if include_bias:
+            args.append(torch.empty(0, device=DEVICE, dtype=c.dtype))
+        args.extend([M, N, torch.cuda.current_stream()])
+        return tuple(args)
 
     # old
     fn_old = compile_preshuffle_gemm_a8(
         N=N, K=K, tile_m=tm, tile_n=tn, tile_k=tk,
         in_dtype="fp8" if dt == "fp8_layout" else dt, out_dtype="bf16")
     c_old = torch.zeros(M, N, device=DEVICE, dtype=torch_out)
-    co = flyc.compile(fn_old, *make_args(c_old))
-    us_old = bench(co, make_args(c_old))
+    co = flyc.compile(fn_old, *make_args(c_old, include_bias=True))
+    us_old = bench(co, make_args(c_old, include_bias=True))
 
     # v2
     fn_v2 = compile_preshuffle_gemm_v2(

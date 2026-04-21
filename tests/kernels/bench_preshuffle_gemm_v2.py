@@ -78,15 +78,18 @@ def _as_i8(t):
     return t.view(torch.int8) if "float8" in str(t.dtype) else t
 
 
-def _make_args(c, a, b_shuf, sa, sb, M, N):
-    return (
+def _make_args(c, a, b_shuf, sa, sb, M, N, *, include_bias=False):
+    args = [
         c.view(-1),
         _as_i8(a.view(-1)),
         _as_i8(b_shuf.view(-1)),
         sa.view(-1) if sa.numel() > 0 else sa,
         sb.view(-1) if sb.numel() > 0 else sb,
-        M, N, torch.cuda.current_stream(),
-    )
+    ]
+    if include_bias:
+        args.append(torch.empty(0, device=c.device, dtype=c.dtype))
+    args.extend([M, N, torch.cuda.current_stream()])
+    return tuple(args)
 
 
 def compile_one(M, N, K, tile_m, tile_n, tile_k, in_dtype, out_dtype="bf16",
@@ -125,7 +128,8 @@ def compile_one(M, N, K, tile_m, tile_n, tile_k, in_dtype, out_dtype="bf16",
         in_dtype=in_dtype,
         out_dtype=out_dtype,
     )
-    compiled_old = flyc.compile(fn_old, *args)
+    args_old = _make_args(c, a, b_shuf, sa, sb, M, N, include_bias=True)
+    compiled_old = flyc.compile(fn_old, *args_old)
     t_old = time.time() - t0
 
     tile_str = f"{tile_m}x{tile_n}x{tile_k}"
@@ -173,13 +177,13 @@ def bench_one(M, N, K, tile_m, tile_n, tile_k, in_dtype, out_dtype="bf16",
             out_dtype=out_dtype,
         )
         c_old = torch.zeros(M, N, device=DEVICE, dtype=torch_out_dtype)
-        args_old = _make_args(c_old, a, b_shuf, sa, sb, M, N)
+        args_old = _make_args(c_old, a, b_shuf, sa, sb, M, N, include_bias=True)
         compiled_old = flyc.compile(fn_old, *args_old)
         us_old = _bench_kernel(compiled_old, args_old, warmup=warmup, iters=iters)
     except (ValueError, RuntimeError) as e:
         print(f"    (old kernel unsupported: {e})")
         c_old = torch.zeros(M, N, device=DEVICE, dtype=torch_out_dtype)
-        args_old = _make_args(c_old, a, b_shuf, sa, sb, M, N)
+        args_old = _make_args(c_old, a, b_shuf, sa, sb, M, N, include_bias=True)
 
     flops = 2 * M * N * K
     tflops_v2 = flops / (us_v2 / 1e6) / 1e12
