@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Test AOT export: dump_to_object, export_to_c, and load_module.
 
-- export_to_c produces .h + .o
-- load_module accepts .o or .so
-- Multiple .o files can be linked into one .so
+- dump_to_object: returns .o bytes (ELF relocatable object) in memory
+- export_to_c: writes .h + .o to disk (C header + object for HIP deployment)
+- load_module: loads .o or .so back into Python for execution
 
 Usage:
     PYTHONPATH=./ python tests/python/examples/test_aot_export.py
@@ -44,7 +44,8 @@ def _copy_launch(A: fx.Tensor, B, n: fx.Int32, stream: fx.Stream = fx.Stream(Non
     _copy_kernel(A, B).launch(grid=(grid_x, 1, 1), block=[64, 1, 1], stream=stream)
 
 
-def _compile_and_get_artifact():
+def _compile_copy_artifact():
+    """Compile a simple copy kernel and return its CompiledArtifact."""
     n = 64
     A = torch.rand(n, dtype=torch.float32).cuda()
     B = torch.zeros(n, dtype=torch.float32).cuda()
@@ -60,7 +61,7 @@ def _compile_and_get_artifact():
 def test_dump_to_object():
     """dump_to_object produces a valid ELF with prefixed symbols."""
     print("=== test_dump_to_object ===")
-    artifact = _compile_and_get_artifact()
+    artifact = _compile_copy_artifact()
 
     t0 = time.perf_counter()
     obj_bytes = artifact.dump_to_object("test_copy")
@@ -86,7 +87,7 @@ def test_dump_to_object():
 def test_export_to_c():
     """export_to_c produces .h + .o."""
     print("\n=== test_export_to_c ===")
-    artifact = _compile_and_get_artifact()
+    artifact = _compile_copy_artifact()
     d = tempfile.mkdtemp(prefix="flydsl_export_")
     try:
         artifact.export_to_c(d, "kernel", "copy_fp32")
@@ -110,7 +111,7 @@ def test_export_to_c():
 def test_load_module_from_o():
     """load_module(".o") loads via LLVM JITLink."""
     print("\n=== test_load_module_from_o ===")
-    artifact = _compile_and_get_artifact()
+    artifact = _compile_copy_artifact()
     d = tempfile.mkdtemp(prefix="flydsl_load_")
     try:
         obj_bytes = artifact.dump_to_object("load_test")
@@ -140,10 +141,9 @@ def test_load_module_from_o():
 def test_load_module_from_so():
     """load_module(".so") works with pre-linked .so."""
     print("\n=== test_load_module_from_so ===")
-    artifact = _compile_and_get_artifact()
+    artifact = _compile_copy_artifact()
     d = tempfile.mkdtemp(prefix="flydsl_so_")
     try:
-        # Export .o, then user links to .so
         artifact.export_to_c(d, "kernel", "so_test")
         o_path = os.path.join(d, "kernel.o")
 
@@ -167,8 +167,15 @@ def test_load_module_from_so():
         shutil.rmtree(d)
 
 
-def test_gemm_aot_roundtrip():
-    """AOT round-trip for preshuffle GEMM in subprocess (avoids GPU state pollution)."""
+def _run_gemm_aot_subprocess():
+    """Run GEMM AOT test in a subprocess.
+
+    dump_to_object creates an ExecutionEngine that loads/unloads GPU modules,
+    which corrupts in-process GPU state. A subprocess provides clean isolation.
+
+    Reuses compile_preshuffle_gemm_a8 and data-prep from tests/utils (same
+    patterns as test_preshuffle_gemm.py).
+    """
     result = subprocess.run(
         [sys.executable, "-u", "-c", f"""
 import sys; sys.path.insert(0, {_REPO_ROOT!r})
@@ -181,16 +188,25 @@ from kernels.preshuffle_gemm import compile_preshuffle_gemm_a8
 arch = get_rocm_arch()
 FP8 = torch.float8_e4m3fn if "gfx95" in arch else torch.float8_e4m3fnuz
 M, N, K = 32, 1024, 2048
+
+# Data prep (same pattern as test_preshuffle_gemm.py)
 a_q, sa = pertoken_quant(torch.rand(M, K, device="cuda"), quant_dtype=FP8)
 b_q, sb = pertoken_quant(torch.rand(N, K, device="cuda"), quant_dtype=FP8)
 b_shuf = shuffle_weight(b_q, layout=(16, 16))
 c = torch.zeros((M, N), dtype=torch.float16, device="cuda")
+dummy_bias = torch.empty(0, dtype=torch.float16, device="cuda")
 stream = torch.cuda.current_stream()
 
-launch_fn = compile_preshuffle_gemm_a8(M=M, N=N, K=K, tile_m=32, tile_n=64, tile_k=512, in_dtype="fp8")
-flyc.compile(launch_fn, c.view(-1), a_q.view(torch.int8).view(-1),
-    b_shuf.view(torch.int8).view(-1), sa.view(-1), sb.view(-1), M, N, stream)
+def _as_i8(t):
+    return t.view(torch.int8) if "float8" in str(t.dtype) else t
 
+launch_fn = compile_preshuffle_gemm_a8(
+    M=M, N=N, K=K, tile_m=32, tile_n=64, tile_k=512, in_dtype="fp8")
+flyc.compile(launch_fn,
+    c.view(-1), _as_i8(a_q).view(-1), _as_i8(b_shuf).view(-1),
+    sa.view(-1), sb.view(-1), dummy_bias, M, N, stream)
+
+# dump_to_object round-trip
 import tempfile, os
 artifact = launch_fn._last_compiled[1]
 d = tempfile.mkdtemp()
@@ -205,21 +221,30 @@ fn = mod.get_function("gemm_fp8")
 assert fn is not None
 entry = mod._read_string_global("gemm_fp8_entry_name")
 ver = mod._read_string_global("gemm_fp8_fly_version")
-assert entry and ver
-print(f"GEMM AOT: {{len(obj)}} bytes, entry={{entry}}, ver={{ver}}")
+gpu_arch = mod._read_string_global("gemm_fp8_gpu_arch")
+assert entry and ver and gpu_arch
+print(f"GEMM AOT: {{len(obj)}} bytes, entry={{entry}}, ver={{ver}}, arch={{gpu_arch}}")
 import shutil; shutil.rmtree(d)
 """],
         capture_output=True, text=True, timeout=300,
         env={**os.environ, "FLYDSL_RUNTIME_ENABLE_CACHE": "0", "PYTHONPATH": _REPO_ROOT},
     )
+    return result
+
+
+def test_gemm_dump_to_object():
+    """AOT round-trip: compile preshuffle GEMM -> dump_to_object -> load_module."""
+    print("\n=== test_gemm_dump_to_object ===")
+    result = _run_gemm_aot_subprocess()
     print(f"  {result.stdout.strip()}")
     if result.returncode != 0:
         print(f"  stderr: {result.stderr[:500]}")
     assert result.returncode == 0, f"Subprocess failed (rc={result.returncode})"
+    print("  PASSED")
 
 
 if __name__ == "__main__":
-    test_gemm_aot_roundtrip()
+    test_gemm_dump_to_object()
     test_dump_to_object()
     test_export_to_c()
     test_load_module_from_o()
