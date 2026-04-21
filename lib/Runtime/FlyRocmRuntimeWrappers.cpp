@@ -66,6 +66,19 @@ extern "C" void mgpuLaunchKernel(hipFunction_t function, intptr_t gridX,
                                             stream, params, extra));
 }
 
+// Cached per-device cluster-launch capability. -1 = not yet queried.
+// Populated lazily on first launch from hipDeviceProp_t::clusterLaunch (a
+// field stable since ROCm 6.0). Keeps the launch path branch-only after warmup.
+static int flyQueryDeviceClusterLaunchCap() {
+  int dev = 0;
+  if (hipGetDevice(&dev) != hipSuccess)
+    return 0;
+  hipDeviceProp_t prop{};
+  if (hipGetDeviceProperties(&prop, dev) != hipSuccess)
+    return 0;
+  return prop.clusterLaunch ? 1 : 0;
+}
+
 extern "C" void mgpuLaunchClusterKernel(hipFunction_t function,
                                         intptr_t clusterX, intptr_t clusterY,
                                         intptr_t clusterZ,
@@ -75,64 +88,79 @@ extern "C" void mgpuLaunchClusterKernel(hipFunction_t function,
                                         intptr_t blockZ, int32_t smem,
                                         hipStream_t stream, void **params,
                                         void **extra, size_t /*paramsCount*/) {
-#ifdef hipLaunchAttributeClusterDimension
-  hipLaunchAttribute attrs[1];
-  attrs[0].id = hipLaunchAttributeClusterDimension;
-  attrs[0].value.clusterDim.x = static_cast<unsigned>(clusterX);
-  attrs[0].value.clusterDim.y = static_cast<unsigned>(clusterY);
-  attrs[0].value.clusterDim.z = static_cast<unsigned>(clusterZ);
-
-  HIP_LAUNCH_CONFIG config{};
-  config.gridDimX = static_cast<unsigned>(gridX);
-  config.gridDimY = static_cast<unsigned>(gridY);
-  config.gridDimZ = static_cast<unsigned>(gridZ);
-  config.blockDimX = static_cast<unsigned>(blockX);
-  config.blockDimY = static_cast<unsigned>(blockY);
-  config.blockDimZ = static_cast<unsigned>(blockZ);
-  config.sharedMemBytes = static_cast<unsigned>(smem);
-  config.hStream = stream;
-  config.attrs = attrs;
-  config.numAttrs = 1;
-
-  hipError_t err = hipDrvLaunchKernelEx(&config, function, params, extra);
-  if (err == hipSuccess)
-    return;
-
   const bool requestedRealCluster =
       (clusterX > 1) || (clusterY > 1) || (clusterZ > 1);
-  if (requestedRealCluster) {
+
+#if FLY_HIP_HAS_CLUSTER_ATTR
+  static int sDeviceClusterCap = -1;
+  if (sDeviceClusterCap < 0)
+    sDeviceClusterCap = flyQueryDeviceClusterLaunchCap();
+
+  if (requestedRealCluster && !sDeviceClusterCap) {
     fprintf(stderr,
-            "[mgpuLaunchClusterKernel] hipDrvLaunchKernelEx failed (err=%d) "
-            "for requested cluster=(%ld,%ld,%ld); not falling back to "
-            "hipModuleLaunchKernel.\n",
-            static_cast<int>(err), static_cast<long>(clusterX),
-            static_cast<long>(clusterY), static_cast<long>(clusterZ));
-    HIP_REPORT_IF_ERROR(err);
+            "[mgpuLaunchClusterKernel] cluster=(%ld,%ld,%ld) requested but "
+            "device reports clusterLaunch=0; aborting (no silent fallback).\n",
+            static_cast<long>(clusterX), static_cast<long>(clusterY),
+            static_cast<long>(clusterZ));
+    HIP_REPORT_IF_ERROR(hipErrorNotSupported);
     return;
   }
 
-  fprintf(stderr,
-          "[mgpuLaunchClusterKernel] hipDrvLaunchKernelEx failed (err=%d) "
-          "for cluster=(1,1,1); falling back to hipModuleLaunchKernel.\n",
-          static_cast<int>(err));
-  HIP_REPORT_IF_ERROR(hipModuleLaunchKernel(function, gridX, gridY, gridZ,
-                                            blockX, blockY, blockZ, smem,
-                                            stream, params, extra));
+  if (sDeviceClusterCap) {
+    hipLaunchAttribute attrs[1];
+    attrs[0].id = hipLaunchAttributeClusterDimension;
+    attrs[0].value.clusterDim.x = static_cast<unsigned>(clusterX);
+    attrs[0].value.clusterDim.y = static_cast<unsigned>(clusterY);
+    attrs[0].value.clusterDim.z = static_cast<unsigned>(clusterZ);
+
+    HIP_LAUNCH_CONFIG config{};
+    config.gridDimX = static_cast<unsigned>(gridX);
+    config.gridDimY = static_cast<unsigned>(gridY);
+    config.gridDimZ = static_cast<unsigned>(gridZ);
+    config.blockDimX = static_cast<unsigned>(blockX);
+    config.blockDimY = static_cast<unsigned>(blockY);
+    config.blockDimZ = static_cast<unsigned>(blockZ);
+    config.sharedMemBytes = static_cast<unsigned>(smem);
+    config.hStream = stream;
+    config.attrs = attrs;
+    config.numAttrs = 1;
+
+    hipError_t err = hipDrvLaunchKernelEx(&config, function, params, extra);
+    if (err == hipSuccess)
+      return;
+
+    if (requestedRealCluster) {
+      fprintf(stderr,
+              "[mgpuLaunchClusterKernel] hipDrvLaunchKernelEx failed (err=%d) "
+              "for requested cluster=(%ld,%ld,%ld); not falling back.\n",
+              static_cast<int>(err), static_cast<long>(clusterX),
+              static_cast<long>(clusterY), static_cast<long>(clusterZ));
+      HIP_REPORT_IF_ERROR(err);
+      return;
+    }
+
+    fprintf(stderr,
+            "[mgpuLaunchClusterKernel] hipDrvLaunchKernelEx failed (err=%d) "
+            "for cluster=(1,1,1); falling back to hipModuleLaunchKernel.\n",
+            static_cast<int>(err));
+  }
 #else
-  // Cluster launch not supported by this HIP version; ignore cluster dims
-  // and fall back to regular kernel launch.
-  if ((clusterX > 1) || (clusterY > 1) || (clusterZ > 1)) {
+  if (requestedRealCluster) {
     fprintf(stderr,
             "[mgpuLaunchClusterKernel] cluster=(%ld,%ld,%ld) requested but "
-            "hipLaunchAttributeClusterDimension is not available in this HIP "
-            "version; falling back to hipModuleLaunchKernel.\n",
+            "FlyDSL was built against a HIP without "
+            "hipLaunchAttributeClusterDimension; aborting "
+            "(no silent fallback).\n",
             static_cast<long>(clusterX), static_cast<long>(clusterY),
             static_cast<long>(clusterZ));
+    HIP_REPORT_IF_ERROR(hipErrorNotSupported);
+    return;
   }
+#endif
+
   HIP_REPORT_IF_ERROR(hipModuleLaunchKernel(function, gridX, gridY, gridZ,
                                             blockX, blockY, blockZ, smem,
                                             stream, params, extra));
-#endif
 }
 
 extern "C" hipStream_t mgpuStreamCreate() {
