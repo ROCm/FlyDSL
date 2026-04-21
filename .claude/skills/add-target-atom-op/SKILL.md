@@ -109,10 +109,10 @@ Two kernel-IR ops carry the atom invocation, and they correspond to the two inte
 
 | Kernel Op                | Operand form                                  | Lowered via           | Implementation status |
 |--------------------------|-----------------------------------------------|-----------------------|-----------------------|
-| `fly.copy_atom_call`     | `src/dst : !fly.memref<..., register, ...>` (pointer to register memory) | `emitAtomCall`        | **Required** |
-| `fly.mma_atom_call`      | `a/b/c/d : !fly.memref<..., register, ...>`   | `emitAtomCall`        | **Required** |
-| `fly.copy_atom_call_ssa` | `src/dst : SSA value` (scalar or `vector<Nxelem>`) | `emitAtomCallSSA` | **Optional** — only needed if `fly-convert-atom-call-to-ssa-form` appears in the pipeline |
-| `fly.mma_atom_call_ssa`  | `a/b/c : SSA`, optional `d`                   | `emitAtomCallSSA`     | **Optional** (same condition) |
+| `fly.copy_atom_call`     | `src/dst : !fly.memref<...>`                  | `emitAtomCall`        | **Required**          |
+| `fly.mma_atom_call`      | `a/b/c/d : !fly.memref<...>`                  | `emitAtomCall`        | **Required**          |
+| `fly.copy_atom_call_ssa` | `src/dst : SSA value or !fly.memref<..., addressSpace != Register>` | `emitAtomCallSSA` | **Optional** — only needed if `fly-convert-atom-call-to-ssa-form` appears in the pipeline |
+| `fly.mma_atom_call_ssa`  | `a/b/c : SSA value or !fly.memref<..., addressSpace != Register>`   | `emitAtomCallSSA`     | **Optional** (same condition) |
 
 **Default path (memref / `emitAtomCall`).** Every `fly.copy_atom_call` / `fly.mma_atom_call` in the
 IR lowers through `emitAtomCall`. The Op receives the operand *pointers* into register memory
@@ -243,8 +243,7 @@ The interface publishes `getThrBitLayout*` (bit granularity); the `CopyAtomType`
 `CopyAtomType::getThrValLayout{Src,Dst,Ref}` in `FlyTypeDefs.cpp`).
 
 Consequences:
-- Always write ThrBitLayout with **shape mode-1 == bitSize**, never divided by element bits. A 32b
-  buffer copy writes `FxShape(FxC(1), FxC(32))` for an f32 → the recast at `valBits=32` trivially
+- A 32b buffer copy writes `FxShape(FxC(1), FxC(32))` for an f32 → the recast at `valBits=32` trivially
   keeps it as `FxShape(FxC(1), FxC(1))` (1 f32 per thread). The same Op reused for a 16b copy of an
   f16 pair gives `FxShape(FxC(1), FxC(2))` (2 f16 per thread), all automatically.
 - If `bitSize` does not divide evenly by the downstream `valBits` (e.g. 96b / 32b f32 = 3 — fine;
@@ -380,7 +379,7 @@ wrapper like `MFMA_CDNA5(m, n, k, elem, ...)` in `python/flydsl/expr/rocdl.py`.
 ```
 
 **Step 9 — Build and verify.** `bash scripts/build.sh` rebuilds C++, bindings, and stubs. Run
-FileCheck, then a 1-wave end-to-end Python kernel (see §1.5.6) before trusting the layout.
+FileCheck, then a 1-wave end-to-end Python kernels before trusting the layout.
 
 ---
 
