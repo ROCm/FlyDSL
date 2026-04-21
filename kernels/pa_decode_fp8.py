@@ -631,7 +631,7 @@ def _make_pa_phase_helpers(
         phys_block,
         seq_start=None,
     ):
-        va_dws = []
+        v_results = []
         for vt in range_constexpr(VTLOOP):
             vhe_data = []
             for vhe in range_constexpr(VHELOOP):
@@ -652,8 +652,11 @@ def _make_pa_phase_helpers(
                         + vhead_elem_dw[vhe]
                         + v_token_in_block // c_four
                     )
-                vhe_data.append(va_dw)
-            va_dws.append(vhe_data)
+                v_4xi32 = buffer_ops.buffer_load(
+                    v_rsrc, va_dw, vec_width=4, dtype=T.i32
+                )
+                vhe_data.append(v_4xi32)
+            v_results.append(vhe_data)
 
         if per_token_kv:
             scale_block_base = phys_block * stride_ks_block + kv_h * stride_ks_head
@@ -690,7 +693,6 @@ def _make_pa_phase_helpers(
         else:
             v_scale_vecs = None
 
-        v_results = []
         d_out = []
         query_scale_vec = None
         if per_token_q:
@@ -698,18 +700,11 @@ def _make_pa_phase_helpers(
                 T.f32x4, query_scale_lane * softmax_scale_base
             )
         for td in range_constexpr(TLOOP):
-            vhe_data = []
             acc = arith.constant_vector(0.0, T.f32x4)
             for k_step in range_constexpr(QKHELOOP * 2):
-                if k_step % 2 == 0:
-                    v_4xi32 = buffer_ops.buffer_load(
-                        v_rsrc, va_dws[td][k_step // 2], vec_width=4, dtype=T.i32
-                    )
-                    vhe_data.append(v_4xi32)
                 acc = rocdl.mfma_f32_16x16x32_fp8_fp8(
                     T.f32x4, [k_ops[td][k_step], q_frags[k_step], acc, 0, 0, 0]
                 )
-            v_results.append(vhe_data)
             if per_token_kv:
                 scale_vec = (
                     k_scale_vecs[td] * query_scale_vec
