@@ -23,12 +23,33 @@ _ModuleLoadCb = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p)
 
 
 def _qualname(fn: Callable) -> Optional[str]:
-    """Serialise a callable as ``module:qualname``; return None if not possible."""
+    """Serialise a callable as ``module:qualname``; return None if not possible.
+
+    Rejects anything that can't round-trip through ``_resolve_qualname``:
+
+    - Missing ``__module__`` / ``__qualname__``.
+    - ``__qualname__`` containing ``<`` (lambdas → ``<lambda>``,
+      nested / closure functions → ``<locals>``, comprehensions, etc.).
+    - Bound methods: ``__qualname__`` looks fine (``Class.method``) but
+      resolving it yields the *unbound* function, silently dropping ``self``.
+
+    As a final safety net we verify the generated ref actually resolves
+    back to *fn* in the current process — if not, we refuse.
+    """
     mod = getattr(fn, "__module__", None)
     qn = getattr(fn, "__qualname__", None)
     if not mod or not qn:
         return None
-    return f"{mod}:{qn}"
+    if "<" in qn:
+        return None
+    if getattr(fn, "__self__", None) is not None:
+        return None
+    ref = f"{mod}:{qn}"
+    # Round-trip check: guarantees the symbol is actually reachable
+    # under the name we plan to write into the pickle stream.
+    if _resolve_qualname(ref) is not fn:
+        return None
+    return ref
 
 
 def _resolve_qualname(ref: str) -> Optional[Callable]:
