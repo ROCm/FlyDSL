@@ -319,11 +319,16 @@ def compile_preshuffle_gemm_v2(
         rocdl.sched_barrier(0)
 
         # ── Main tile loop (python-unrolled ping-pong, example-04 style) ──
-        for k_iter in range(0, num_tiles - 2, 2):
-            pipeline_stage(read_stage=0, next_k_val=fx.Int32(k_iter + 1))
-            pipeline_stage(read_stage=1, next_k_val=fx.Int32(k_iter + 2))
-        pipeline_stage(read_stage=0, next_k_val=fx.Int32(num_tiles - 1))
-        pipeline_stage(read_stage=1, read_next=False)
+        if num_tiles == 1:
+            # Only tile 0, already loaded by prologue — consume without further loads.
+            pipeline_stage(read_stage=0, read_next=False)
+        else:
+            # num_tiles >= 2: body consumes pairs, tail flushes last 2 tiles.
+            for k_iter in range(0, num_tiles - 2, 2):
+                pipeline_stage(read_stage=0, next_k_val=fx.Int32(k_iter + 1))
+                pipeline_stage(read_stage=1, next_k_val=fx.Int32(k_iter + 2))
+            pipeline_stage(read_stage=0, next_k_val=fx.Int32(num_tiles - 1))
+            pipeline_stage(read_stage=1, read_next=False)
 
         # ── Epilogue ─────────────────────────────────────────────
         if is_fp8:
