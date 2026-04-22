@@ -17,6 +17,8 @@ concurrency:
 
 env:
   ATOM_BASE_IMAGE: rocm/atom-dev:latest
+  ATOM_REPOSITORY: ROCm/ATOM
+  ATOM_REF: main
   GITHUB_REPO_NAME: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
   GITHUB_COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
 
@@ -53,6 +55,13 @@ jobs:
           repository: ${{ env.GITHUB_REPO_NAME }}
           ref: ${{ env.GITHUB_COMMIT_SHA }}
           path: flydsl-test
+
+      - name: Checkout upstream ATOM repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.ATOM_REPOSITORY }}
+          ref: ${{ env.ATOM_REF }}
+          path: atom-upstream
 
       - name: Restore cached MLIR install tarball
         id: mlir-cache
@@ -96,12 +105,15 @@ jobs:
             --ulimit stack=67108864 \
             -e ATOM_DISABLE_MMAP=true \
             -e HF_HUB_ENABLE_HF_TRANSFER=1 \
-            -e HF_TOKEN="${secrets.HF_TOKEN:-}" \
+            -e HF_TOKEN="${HF_TOKEN:-${AMD_HF_TOKEN:-${HF_TOKEN_TEST:-}}}" \
             --name "${CONTAINER_NAME}" \
             "${{ env.ATOM_BASE_IMAGE }}"
         env:
           GITHUB_WORKSPACE: ${{ github.workspace }}
           MODEL_ENV_VARS: ${{ matrix.env_vars }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          AMD_HF_TOKEN: ${{ secrets.AMD_HF_TOKEN }}
+          HF_TOKEN_TEST: ${{ secrets.HF_TOKEN_TEST }}
 
       - name: Install CI dependencies
         run: |
@@ -112,6 +124,7 @@ jobs:
             python3 -m pip install --timeout 60 --retries 10 -U pip setuptools wheel
             python3 -m pip install --timeout 60 --retries 10 'ninja>=1.11.1' 'pybind11>=3.0.1' 'lm-eval[api]' hf_transfer 'huggingface_hub[cli]'
             git config --global --add safe.directory /workspace/flydsl-test
+            chmod +x /workspace/atom-upstream/.github/scripts/atom_test.sh
             cd /workspace/flydsl-test
             git submodule sync
             git submodule update --init --recursive
@@ -148,16 +161,17 @@ jobs:
 
             echo '=== Reinstalling aiter from main ==='
             pip uninstall -y amd-aiter aiter || true
+            rm -rf /tmp/aiter-main
             git clone --depth 1 -b main https://github.com/ROCm/aiter.git /tmp/aiter-main
             cd /tmp/aiter-main
             git submodule sync
             git submodule update --init --recursive
-            pip install -e .
+            MAX_JOBS=64 PREBUILD_KERNELS=0 GPU_ARCHS=gfx950 python3 setup.py develop
 
             echo '=== Installing FlyDSL from the checked out PR commit ==='
             pip uninstall -y flydsl || true
             cd /workspace/flydsl-test
-            pip install -e .
+            MLIR_PATH=/workspace/llvm-project/build-flydsl/mlir_install python3 -m pip install -e . --use-pep517
 
             python3 - <<'PY'
             import pathlib
@@ -193,7 +207,7 @@ jobs:
           set -euo pipefail
           docker exec "${CONTAINER_NAME}" bash -lc "
             set -euo pipefail
-            cd /workspace/flydsl-test
+            cd /workspace/atom-upstream
 
             if [ -d '/models/${{ matrix.model_path }}' ]; then
               model_path='/models/${{ matrix.model_path }}'
@@ -201,8 +215,15 @@ jobs:
               model_path='${{ matrix.model_path }}'
             fi
 
-            bash scripts/run_atom_downstream.sh launch \"\$model_path\" ${{ matrix.extra_args }}
-            bash scripts/run_atom_downstream.sh accuracy \"\$model_path\"
+            ATOM_SERVER_LOG=/tmp/atom_server.log \
+            ATOM_CLIENT_LOG=/tmp/atom_client.log \
+            ATOM_DOCKER_IMAGE='${{ env.ATOM_BASE_IMAGE }}' \
+            bash .github/scripts/atom_test.sh launch \"\$model_path\" ${{ matrix.extra_args }}
+
+            ATOM_SERVER_LOG=/tmp/atom_server.log \
+            ATOM_CLIENT_LOG=/tmp/atom_client.log \
+            ATOM_DOCKER_IMAGE='${{ env.ATOM_BASE_IMAGE }}' \
+            bash .github/scripts/atom_test.sh accuracy \"\$model_path\"
           " 2>&1 | tee atom_accuracy_output.txt
 
       - name: Check accuracy threshold
@@ -213,12 +234,12 @@ jobs:
           set -euo pipefail
           RESULT_FILE=$(python3 - <<'PY'
           import glob
-          files = sorted(glob.glob('flydsl-test/accuracy_test_results/*.json'))
+          files = sorted(glob.glob('atom-upstream/accuracy_test_results/*.json'))
           print(files[-1] if files else '')
           PY
           )
           if [ -z "${RESULT_FILE:-}" ] || [ ! -f "${RESULT_FILE}" ]; then
-            echo "No accuracy result JSON found in flydsl-test/accuracy_test_results/"
+            echo "No accuracy result JSON found in atom-upstream/accuracy_test_results/"
             exit 1
           fi
 
@@ -248,10 +269,11 @@ jobs:
           echo "Accuracy Test Summary for ${{ matrix.model_name }}:" >> "${GITHUB_STEP_SUMMARY}"
           awk '/\|Tasks\|Version\|/,/^$/ { if (NF > 0) print }' atom_accuracy_output.txt >> "${GITHUB_STEP_SUMMARY}" || true
 
-      - name: Collect ATOM server log
+      - name: Collect ATOM logs
         if: always()
         run: |
           docker cp "${CONTAINER_NAME}:/tmp/atom_server.log" atom_server.log 2>/dev/null || true
+          docker cp "${CONTAINER_NAME}:/tmp/atom_client.log" atom_client.log 2>/dev/null || true
 
       - name: Upload logs and accuracy results
         if: always()
@@ -261,7 +283,8 @@ jobs:
           path: |
             atom_accuracy_output.txt
             atom_server.log
-            flydsl-test/accuracy_test_results/*.json
+            atom_client.log
+            atom-upstream/accuracy_test_results/*.json
           if-no-files-found: ignore
           retention-days: 14
 
@@ -270,8 +293,8 @@ jobs:
         run: |
           docker exec "${CONTAINER_NAME}" bash -lc "
             set -euo pipefail
-            cd /workspace/flydsl-test
-            bash scripts/run_atom_downstream.sh stop || true
+            cd /workspace/atom-upstream
+            bash .github/scripts/atom_test.sh stop || true
             rm -rf /workspace/llvm-project /workspace/flydsl-test/build-fly /workspace/flydsl-test/python/flydsl/_mlir
           " || true
           docker stop "${CONTAINER_NAME}" || true
