@@ -821,11 +821,10 @@ class JitFunction:
 
             with ir.InsertionPoint(module.body), loc:
                 backend = get_backend()
-                # Let rocdl-attach-target be the sole source of GPU target
-                # attributes.  Providing targets here would cause the pass
-                # to *append* a second copy, which breaks bitcode linking
-                # when link_libs is active (hipErrorNoBinaryForGpu).
-                # Safe for all kernels: rocdl-attach-target always runs.
+                # rocdl-attach-target is the sole source of GPU target
+                # attributes on the JIT path; passing targets here would
+                # double them up and break bitcode linking
+                # (hipErrorNoBinaryForGpu).
                 gpu_module = create_gpu_module("kernels")
 
                 func_op = func.FuncOp(self.func.__name__, (ir_types, []))

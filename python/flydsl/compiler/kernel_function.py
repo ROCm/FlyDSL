@@ -250,7 +250,6 @@ class CompilationContext:
         self.func_tracker = func_tracker
         self.kernel_trackers: Dict[str, FuncLocationTracker] = {}
         self.stream_arg = None
-        self.extern_symbols: set = set()
         self.link_libs: set = set()
         # Callables invoked on each GPU hipModule_t after ExecutionEngine
         # loads it.  Populated by ExternFunction when module_init_fn is set.

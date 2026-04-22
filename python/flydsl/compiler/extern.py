@@ -126,10 +126,6 @@ class ExternFunction:
         self.module_init_fn = module_init_fn
         # Cache resolved MLIR types per context (keyed by Context object id).
         self._types_cache: dict = {}
-        # Track which (context, gpu.module body) pairs we have declared into.
-        # We key by (id(Context.current), id(gpu_module_body)) to avoid false
-        # cache hits caused by Python GC reusing object IDs across compilations.
-        self._declared_in: set = set()
 
     # -- type resolution (lazy, per context) --------------------------------
     def _resolve_types(self) -> tuple:
@@ -142,38 +138,57 @@ class ExternFunction:
         return self._types_cache[key]
 
     # -- declaration in GPU module ------------------------------------------
+    def _already_declared(self, gpu_module_body) -> bool:
+        """Return True iff an llvm.func with our symbol already lives in *body*.
+
+        We scan the body's top-level ops instead of memoising on object
+        ``id()`` — ExternFunction wrappers are module-level singletons
+        whose lifetime spans every JIT compilation in the process, so an
+        id-keyed cache would (a) grow without bound and (b) risk false
+        hits once CPython recycles a gpu.module address across separate
+        compilations.  The scan cost is O(#top-level-ops-in-gpu.module),
+        typically <30 ops, i.e. microseconds per ensure_declared — lost
+        in the noise of MLIR→LLVM compile time.
+        """
+        for op in gpu_module_body.operations:
+            if op.operation.name != "llvm.func":
+                continue
+            attrs = op.operation.attributes
+            if "sym_name" not in attrs:
+                continue
+            name_attr = attrs["sym_name"]
+            name = getattr(name_attr, "value", None)
+            if name is None:
+                name = str(name_attr).strip('"')
+            if name == self.symbol:
+                return True
+        return False
+
     def _ensure_declared(self, gpu_module_body) -> None:
-        """Add ``llvm.func private`` declaration to the GPU module body if absent."""
-        # Use (context_id, body_id) as the cache key to prevent false hits
-        # when Python GC recycles object addresses across separate compilations.
-        body_id = (id(ir.Context.current), id(gpu_module_body))
-        if body_id in self._declared_in:
-            return
+        """Add ``llvm.func private`` declaration to *body* if absent, then
+        register the bitcode / post-load side-effects on the current
+        CompilationContext.  Idempotent across repeated calls within
+        the same kernel compile."""
+        if not self._already_declared(gpu_module_body):
+            arg_types, ret_type = self._resolve_types()
 
-        arg_types, ret_type = self._resolve_types()
+            arg_strs = ", ".join(str(t) for t in arg_types)
+            ret_str = "void" if ret_type is None else str(ret_type)
+            fn_type = ir.Type.parse(f"!llvm.func<{ret_str} ({arg_strs})>")
 
-        # Build LLVM function type string: !llvm.func<ret (args...)>
-        arg_strs = ", ".join(str(t) for t in arg_types)
-        if ret_type is None:
-            ret_str = "void"
-        else:
-            ret_str = str(ret_type)
-        fn_type_str = f"!llvm.func<{ret_str} ({arg_strs})>"
-        fn_type = ir.Type.parse(fn_type_str)
+            with InsertionPoint(gpu_module_body):
+                llvm.LLVMFuncOp(
+                    self.symbol,
+                    TypeAttr.get(fn_type),
+                    sym_visibility="private",
+                )
 
-        with InsertionPoint(gpu_module_body):
-            op = llvm.LLVMFuncOp(
-                self.symbol,
-                TypeAttr.get(fn_type),
-                sym_visibility="private",
-            )
-
-        self._declared_in.add(body_id)
-
+        # Registration on the compile context is idempotent: link_libs
+        # is a set, and post_load_processors uses explicit membership
+        # guarding, so repeated calls are cheap no-ops.
         from .kernel_function import CompilationContext
         ctx = CompilationContext.get_current()
         if ctx is not None:
-            ctx.extern_symbols.add(self.symbol)
             if self.bitcode_path is not None:
                 ctx.link_libs.add(self.bitcode_path)
             if self.module_init_fn is not None and \
