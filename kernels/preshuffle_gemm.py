@@ -1220,9 +1220,9 @@ def compile_preshuffle_gemm_a8(
                         rocdl.sched_dswr(1)
             else:
                 mfma_group = num_acc_n
-                if use_mfma_k32:
+                if const_expr(use_mfma_k32):
                     element_k_per_mfma = 32
-                elif _is_gfx950:
+                elif const_expr(_is_gfx950):
                     element_k_per_mfma = 128
                 else:
                     element_k_per_mfma = 32
