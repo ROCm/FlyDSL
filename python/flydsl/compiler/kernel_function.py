@@ -1,0 +1,566 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+
+import inspect
+import threading
+from contextlib import contextmanager
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union, get_origin
+
+from .._mlir import ir
+from .._mlir.dialects import arith, gpu
+from ..expr.typing import Constexpr
+from .ast_rewriter import ASTRewriter
+from .protocol import fly_construct, fly_types, fly_values
+
+# =============================================================================
+# GPU Operation Helpers
+# =============================================================================
+
+
+def create_gpu_module(
+    sym_name: str,
+    targets: Optional[List[str]] = None,
+    *,
+    loc=None,
+    ip=None,
+) -> gpu.GPUModuleOp:
+    target_attrs = []
+    if targets:
+        for t in targets:
+            if isinstance(t, str):
+                target_attrs.append(ir.Attribute.parse(t))
+            else:
+                target_attrs.append(t)
+    module_op = gpu.GPUModuleOp(
+        sym_name, targets=ir.ArrayAttr.get(target_attrs) if target_attrs else None, loc=loc, ip=ip
+    )
+    module_op.regions[0].blocks.append()
+    return module_op
+
+
+def get_gpu_module_body(module_op: gpu.GPUModuleOp):
+    return module_op.regions[0].blocks[0]
+
+
+def _validate_known_block_size(value):
+    """Validate and normalize *known_block_size* to a list of 3 positive ints.
+
+    Returns ``None`` when *value* is ``None`` (attribute should be omitted).
+
+    Raises:
+        TypeError: if *value* is not a sequence of integers.
+        ValueError: if the length is not 3 or any element is not positive.
+    """
+    if value is None:
+        return None
+
+    try:
+        elems = list(value)
+    except TypeError:
+        raise TypeError(
+            f"known_block_size must be a sequence of 3 positive integers, got {type(value).__name__}"
+        ) from None
+
+    if len(elems) != 3:
+        raise ValueError(
+            f"known_block_size must have exactly 3 elements (x, y, z), got {len(elems)}"
+        )
+
+    for i, v in enumerate(elems):
+        if not isinstance(v, int):
+            raise TypeError(
+                f"known_block_size[{i}] must be an int, got {type(v).__name__}"
+            )
+        if v <= 0:
+            raise ValueError(
+                f"known_block_size[{i}] must be positive, got {v}"
+            )
+
+    return elems
+
+
+def create_gpu_func(
+    sym_name: str,
+    function_type: ir.TypeAttr,
+    *,
+    known_block_size=None,
+    loc=None,
+    ip=None,
+) -> gpu.GPUFuncOp:
+    return gpu.GPUFuncOp(
+        function_type,
+        sym_name=sym_name,
+        kernel=True,
+        known_block_size=known_block_size,
+        loc=loc,
+        ip=ip,
+    )
+
+
+# =============================================================================
+# Location Tracking Utilities
+# =============================================================================
+
+
+def get_source_location(depth: int = 2) -> Tuple[str, int, int]:
+    """Get source file location from call stack.
+
+    Args:
+        depth: Stack depth to look up (2 = caller's caller)
+
+    Returns:
+        Tuple of (filename, line, column)
+    """
+    frame = inspect.currentframe()
+    try:
+        for _ in range(depth):
+            if frame is not None:
+                frame = frame.f_back
+        if frame is not None:
+            return (frame.f_code.co_filename, frame.f_lineno, 0)
+    finally:
+        del frame
+    return ("<unknown>", 0, 0)
+
+
+def create_file_location(filename: str, line: int, col: int = 0, context=None) -> ir.Location:
+    """Create an MLIR file location."""
+    ctx = context or ir.Context.current
+    return ir.Location.file(filename, line, col, context=ctx)
+
+
+def create_caller_location(depth: int = 2, context=None) -> ir.Location:
+    """Create an MLIR location from the caller's source position."""
+    filename, line, col = get_source_location(depth + 1)
+    return create_file_location(filename, line, col, context)
+
+
+class FuncLocationTracker:
+    """Track source locations for a Python function being traced."""
+
+    def __init__(self, func: Callable):
+        self._func = func
+        self._filename = inspect.getfile(func)
+        try:
+            self._source_lines, self._start_line = inspect.getsourcelines(func)
+        except (OSError, TypeError):
+            self._source_lines = []
+            self._start_line = 0
+
+    @property
+    def filename(self) -> str:
+        return self._filename
+
+    @property
+    def start_line(self) -> int:
+        return self._start_line
+
+    def get_func_location(self, context=None) -> ir.Location:
+        """Get location for the function definition."""
+        return create_file_location(self._filename, self._start_line, 0, context)
+
+    @contextmanager
+    def func_scope(self):
+        """Enter a location scope for this function."""
+        loc = self.get_func_location()
+        with loc:
+            yield loc
+
+
+# =============================================================================
+# Launch Configuration
+# =============================================================================
+
+DimValueType = Union[int, ir.Value]
+DimType = Union[int, ir.Value, Tuple[DimValueType, ...], List[DimValueType]]
+
+
+def _unwrap_to_raw(val):
+    if isinstance(val, ir.Value):
+        return val
+    if hasattr(val, "__fly_values__"):
+        values = val.__fly_values__()
+        if len(values) == 1:
+            return values[0]
+    return val
+
+
+def _to_index_value(val: DimValueType) -> ir.Value:
+    val = _unwrap_to_raw(val)
+    if isinstance(val, ir.Value):
+        if val.type == ir.IndexType.get():
+            return val
+        return arith.index_cast(ir.IndexType.get(), val)
+    return arith.constant(ir.IndexType.get(), val)
+
+
+def _normalize_dim(dim: DimType) -> Tuple[DimValueType, DimValueType, DimValueType]:
+    if isinstance(dim, (int, ir.Value)):
+        return (dim, 1, 1)
+    elif len(dim) == 1:
+        return (dim[0], 1, 1)
+    elif len(dim) == 2:
+        return (dim[0], dim[1], 1)
+    return (dim[0], dim[1], dim[2])
+
+
+# =============================================================================
+# Compilation Context (per-compilation state)
+# =============================================================================
+
+
+class CompilationContext:
+    """Context for tracking compilation state within a @jit function.
+
+    Manages:
+    - GPU module op for kernel definitions
+    - Kernel counter for unique naming
+    - Location trackers for debugging
+    """
+
+    _current: Optional["CompilationContext"] = None
+
+    # Thread-local storage for compile hints (waves_per_eu, maxnreg, etc.)
+    _compile_hints = threading.local()
+
+    @classmethod
+    @contextmanager
+    def compile_hints(cls, hints: dict):
+        """Context manager for setting compiler hints (thread-safe).
+
+        Usage:
+            with CompilationContext.compile_hints({"waves_per_eu": 2}):
+                fn(*args, **kwargs)
+        """
+        prev = getattr(cls._compile_hints, 'data', None)
+        cls._compile_hints.data = hints
+        try:
+            yield
+        finally:
+            cls._compile_hints.data = prev
+
+    @classmethod
+    def get_compile_hints(cls):
+        """Get compiler hints for the current thread, or empty dict."""
+        return getattr(cls._compile_hints, 'data', None) or {}
+
+    def __init__(self, func_tracker: Optional[FuncLocationTracker] = None):
+        self.gpu_module_op = None
+        self.kernel_counter = 0
+        self.func_tracker = func_tracker
+        self.kernel_trackers: Dict[str, FuncLocationTracker] = {}
+        self.stream_arg = None
+
+    @classmethod
+    def get_current(cls) -> Optional["CompilationContext"]:
+        return cls._current
+
+    @classmethod
+    @contextmanager
+    def create(cls, func_tracker: Optional[FuncLocationTracker] = None):
+        prev = cls._current
+        ctx = CompilationContext(func_tracker)
+        cls._current = ctx
+        try:
+            yield ctx
+        finally:
+            cls._current = prev
+
+    def next_kernel_id(self) -> int:
+        """Get next unique kernel ID."""
+        kid = self.kernel_counter
+        self.kernel_counter += 1
+        return kid
+
+    def register_kernel_tracker(self, name: str, tracker: FuncLocationTracker):
+        """Register a location tracker for a kernel function."""
+        self.kernel_trackers[name] = tracker
+
+    def get_kernel_tracker(self, name: str) -> Optional[FuncLocationTracker]:
+        """Get the location tracker for a kernel function."""
+        return self.kernel_trackers.get(name)
+
+
+# =============================================================================
+# Kernel Launcher
+# =============================================================================
+
+
+class KernelLauncher:
+    """Holds kernel reference and generates gpu.launch_func on launch().
+
+    Created by calling a @kernel decorated function. Call .launch()
+    to emit the actual launch operation.
+    """
+
+    def __init__(
+        self,
+        kernel_name: str,
+        kernel_args: Tuple,
+        call_location: Optional[ir.Location] = None,
+        known_block_size: Optional[List[int]] = None,
+    ):
+        self._kernel_name = kernel_name
+        self._kernel_args = kernel_args
+        self._call_location = call_location
+        self._known_block_size = known_block_size
+
+    def _check_block_vs_known(self, block_dims: Tuple) -> None:
+        """Raise when statically-known *block* dims are invalid for AMDGPU."""
+        if self._known_block_size is None:
+            # Without known_block_size the AMDGPU backend assumes
+            # max_flat_workgroup_size = 256.  Error if the launch exceeds that.
+            if all(isinstance(v, int) for v in block_dims):
+                total = block_dims[0] * block_dims[1] * block_dims[2]
+                if total > 256:
+                    raise ValueError(
+                        f"launch block size {block_dims[0]}x{block_dims[1]}x{block_dims[2]}"
+                        f" = {total} threads exceeds the AMDGPU default "
+                        f"max_flat_workgroup_size of 256. "
+                        f"Add known_block_size=[{block_dims[0]}, {block_dims[1]}, {block_dims[2]}] "
+                        f"to @kernel for kernel '{self._kernel_name}'."
+                    )
+            return
+
+        labels = ("x", "y", "z")
+        for i, (launch_val, declared) in enumerate(zip(block_dims, self._known_block_size)):
+            if isinstance(launch_val, int) and launch_val != declared:
+                raise ValueError(
+                    f"launch block {labels[i]}={launch_val} differs from "
+                    f"known_block_size {labels[i]}={declared} declared on "
+                    f"kernel '{self._kernel_name}'. "
+                    f"This produces an internally-inconsistent IR and is "
+                    f"undefined behavior on AMDGPU."
+                )
+
+    def launch(
+        self,
+        *,
+        grid: DimType = (1, 1, 1),
+        block: DimType = (1, 1, 1),
+        smem: Union[int, ir.Value] = 0,
+        stream: Optional[ir.Value] = None,
+        cluster: Optional[DimType] = None,
+    ) -> None:
+        """Emit gpu.launch_func operation with the given configuration.
+
+        Args:
+            grid: Grid dimensions (x, y, z). Can be int, ir.Value, tuple, or list.
+            block: Block dimensions (x, y, z). Can be int, ir.Value, tuple, or list.
+            smem: Dynamic shared memory size in bytes. Can be int or ir.Value.
+            stream: CUDA/HIP stream as ir.Value. None means default stream.
+            cluster: Cluster dimensions (x, y, z) for workgroup clustering.
+                     None means no clustering. Enables MCAST and cluster barriers.
+        """
+        launch_loc = create_caller_location(depth=2)
+
+        kernel_operands = []
+        for arg in self._kernel_args:
+            kernel_operands.extend(fly_values(arg))
+
+        grid_dims = _normalize_dim(grid)
+        block_dims = _normalize_dim(block)
+
+        self._check_block_vs_known(block_dims)
+
+        with launch_loc:
+            grid_x = _to_index_value(grid_dims[0])
+            grid_y = _to_index_value(grid_dims[1])
+            grid_z = _to_index_value(grid_dims[2])
+            block_x = _to_index_value(block_dims[0])
+            block_y = _to_index_value(block_dims[1])
+            block_z = _to_index_value(block_dims[2])
+
+            smem_val = None
+            smem_raw = _unwrap_to_raw(smem)
+            if isinstance(smem_raw, ir.Value):
+                smem_val = smem_raw
+            else:
+                smem_py = None
+                try:
+                    smem_py = int(smem_raw)
+                except (TypeError, ValueError):
+                    smem_py = None
+                if smem_py is not None and smem_py > 0:
+                    smem_val = arith.constant(ir.IntegerType.get_signless(32), smem_py)
+
+            if stream is not None:
+                stream_val = _unwrap_to_raw(stream)
+            else:
+                ctx = CompilationContext.get_current()
+                stream_val = ctx.stream_arg if ctx and ctx.stream_arg else None
+
+            async_deps = [stream_val] if stream_val is not None else None
+
+            cluster_size = None
+            if cluster is not None:
+                cx, cy, cz = _normalize_dim(cluster)
+                cluster_size = (
+                    _to_index_value(cx),
+                    _to_index_value(cy),
+                    _to_index_value(cz),
+                )
+
+            gpu.LaunchFuncOp(
+                ["kernels", self._kernel_name],
+                (grid_x, grid_y, grid_z),
+                (block_x, block_y, block_z),
+                kernel_operands,
+                async_dependencies=async_deps,
+                dynamic_shared_memory_size=smem_val,
+                cluster_size=cluster_size,
+                loc=launch_loc,
+                ip=None,
+            )
+
+
+# =============================================================================
+# Kernel Function
+# =============================================================================
+
+
+class KernelFunction:
+    """Wrapper for @kernel decorated functions.
+
+    When called, emits a gpu.func and returns a KernelLauncher for
+    configuring and launching the kernel.
+    """
+
+    def __init__(self, func: Callable, some_args=None, name: Optional[str] = None, known_block_size=None):
+        self._func = ASTRewriter.transform(func)
+        self._some_args = some_args
+        self._name = name
+        self._known_block_size = _validate_known_block_size(known_block_size)
+        self._kernel_name: Optional[str] = None
+        self._location_tracker = FuncLocationTracker(func)
+
+    @staticmethod
+    def _is_constexpr_annotation(annotation) -> bool:
+        if annotation is Constexpr:
+            return True
+        return get_origin(annotation) is Constexpr
+
+    def _emit_kernel(self, ctx: CompilationContext, args: Tuple, kwargs: Dict) -> Tuple[Any, ...]:
+        """Emit gpu.func for this kernel into the GPU module.
+
+        Returns:
+            Tuple of non-constexpr argument values for use in launch.
+        """
+        sig = inspect.signature(self._func)
+        bound = sig.bind(*args, **kwargs)
+        bound.apply_defaults()
+
+        param_names: List[str] = []
+        param_values: List[Any] = []
+        constexpr_values: Dict[str, Any] = {}
+
+        for param_name, value in bound.arguments.items():
+            param = sig.parameters[param_name]
+            annotation = param.annotation
+            if annotation is not inspect.Parameter.empty and self._is_constexpr_annotation(annotation):
+                constexpr_values[param_name] = value
+            else:
+                param_names.append(param_name)
+                param_values.append(value)
+
+        kernel_arg_types = []
+        for value in param_values:
+            kernel_arg_types.extend(fly_types(value))
+
+        kernel_id = ctx.next_kernel_id()
+        if self._name is not None:
+            self._kernel_name = self._name
+        else:
+            self._kernel_name = f"{self._func.__name__}_{kernel_id}"
+
+        ctx.register_kernel_tracker(self._kernel_name, self._location_tracker)
+
+        kernel_loc = self._location_tracker.get_func_location()
+
+        with ir.InsertionPoint(ctx.gpu_module_body):
+            func_type = ir.FunctionType.get(kernel_arg_types, [])
+            with kernel_loc:
+                gpu_func = create_gpu_func(
+                    self._kernel_name,
+                    ir.TypeAttr.get(func_type),
+                    known_block_size=self._known_block_size,
+                )
+            gpu_func.regions[0].blocks.append(*kernel_arg_types)
+            entry_block = gpu_func.regions[0].blocks[0]
+
+            with ir.InsertionPoint(entry_block), kernel_loc:
+                block_args = list(entry_block.arguments)
+                dsl_args: Dict[str, Any] = {}
+                idx = 0
+                for param_name, value in zip(param_names, param_values):
+                    n = len(fly_types(value))
+                    dsl_args[param_name] = fly_construct(type(value), value, list(block_args[idx : idx + n]))
+                    idx += n
+
+                dsl_args.update(constexpr_values)
+                self._func(**dsl_args)
+                gpu.ReturnOp([])
+
+        return tuple(param_values)
+
+    def __call__(self, *args, **kwargs) -> KernelLauncher:
+        ctx = CompilationContext.get_current()
+        if ctx is None:
+            raise RuntimeError("@kernel can only be called inside @jit function")
+
+        call_loc = create_caller_location(depth=2)
+
+        kernel_args = self._emit_kernel(ctx, args, kwargs)
+
+        return KernelLauncher(self._kernel_name, kernel_args, call_loc, self._known_block_size)
+
+
+# =============================================================================
+# Kernel Decorator
+# =============================================================================
+
+
+def kernel(
+    func: Optional[Callable] = None,
+    *,
+    some_args=None,
+    name: Optional[str] = None,
+    known_block_size=None,
+) -> KernelFunction:
+    """Decorator for GPU kernel functions.
+
+    Usage:
+        @kernel
+        def my_kernel(a: Tensor, b: Tensor):
+            # kernel body
+            ...
+
+        # With explicit kernel name (visible in profiler):
+        @kernel(name="gemm_m16n128k128_bf16")
+        def my_kernel(a: Tensor):
+            ...
+
+        # With known block size (required when block > 256 on AMDGPU):
+        @kernel(known_block_size=[512, 1, 1])
+        def my_kernel(a: Tensor):
+            ...
+
+    The decorated function can be called inside a @jit function to
+    define the kernel, then .launch(config) is called to emit the launch op.
+
+    Args:
+        func: Function to decorate
+        some_args: Optional kernel-specific arguments
+        name: Optional kernel name override; shown in profiler instead of the
+              Python function name. Tile/dtype info can be embedded here.
+        known_block_size: Optional list of [x, y, z] block dimensions. Sets
+              the ``known_block_size`` attribute on the GPU function, which the
+              AMDGPU backend uses to derive ``max_flat_workgroup_size``.
+              Required when block size exceeds 256 threads.
+
+    Returns:
+        KernelFunction wrapper
+    """
+    if func is None:
+        return lambda f: KernelFunction(f, some_args=some_args, name=name, known_block_size=known_block_size)
+    return KernelFunction(func, some_args=some_args, name=name, known_block_size=known_block_size)

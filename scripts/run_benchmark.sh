@@ -1,4 +1,6 @@
 #!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
 # POSIX sh compatible (also works in bash).
 set -eu
 # Enable pipefail when supported (bash/ksh/zsh); ignore if unavailable (dash/posix sh).
@@ -9,16 +11,43 @@ cd "$(dirname "$0")/.."
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 REPO_ROOT=$(cd "${SCRIPT_DIR}/.." && pwd)
-# Locate the build directory (default: .flir/build; fallback: build/).
-BUILD_DIR="${FLIR_BUILD_DIR:-${REPO_ROOT}/.flir/build}"
+# Locate the build directory (default: build-fly; fallback: build/).
+BUILD_DIR="${FLY_BUILD_DIR:-${REPO_ROOT}/build-fly}"
 if [ ! -d "${BUILD_DIR}" ] && [ -d "${REPO_ROOT}/build" ]; then
   BUILD_DIR="${REPO_ROOT}/build"
 fi
-PYTHON_PACKAGE_ROOT="${BUILD_DIR}/python_packages/flydsl"
-export PYTHONPATH="${REPO_ROOT}/flydsl/src:${PYTHON_PACKAGE_ROOT}:${REPO_ROOT}:${PYTHONPATH:-}"
+PYTHON_PACKAGE_ROOT="${BUILD_DIR}/python_packages"
+# Ensure build packages take priority over pip-installed flydsl
+export PYTHONPATH="${PYTHON_PACKAGE_ROOT}:${REPO_ROOT}:${PYTHONPATH:-}"
+MLIR_LIBS_DIR="${PYTHON_PACKAGE_ROOT}/flydsl/_mlir/_mlir_libs"
+if [ -d "${MLIR_LIBS_DIR}" ]; then
+  export LD_LIBRARY_PATH="${MLIR_LIBS_DIR}:${LD_LIBRARY_PATH:-}"
+fi
 
-BENCH_LOG_DIR="${BENCH_LOG_DIR:-/tmp/flir_bench}"
+BENCH_LOG_DIR="${BENCH_LOG_DIR:-/tmp/flydsl_bench}"
 mkdir -p "${BENCH_LOG_DIR}"
+
+# Auto-select GPU with the most free VRAM (skip if HIP_VISIBLE_DEVICES is already set).
+if [ -z "${HIP_VISIBLE_DEVICES:-}" ] && command -v python3 >/dev/null 2>&1; then
+    _best_gpu=$(python3 -c "
+import torch
+if torch.cuda.is_available() and torch.cuda.device_count() > 1:
+    best = max(range(torch.cuda.device_count()), key=lambda i: torch.cuda.mem_get_info(i)[0])
+    print(best)
+" 2>/dev/null || true)
+    if [ -n "${_best_gpu}" ]; then
+        export HIP_VISIBLE_DEVICES="${_best_gpu}"
+        echo "[run_benchmark] Auto-selected GPU ${_best_gpu} (most free VRAM)"
+    fi
+fi
+
+# Detect GPU architecture — CDNA-only benchmarks are guarded by IS_CDNA.
+GPU_ARCH=$(python3 -c "from flydsl.runtime.device import get_rocm_arch; print(get_rocm_arch())" 2>/dev/null || echo "unknown")
+IS_CDNA=false
+IS_RDNA4=false
+case "${GPU_ARCH}" in gfx9*) IS_CDNA=true ;; esac
+case "${GPU_ARCH}" in gfx120*) IS_RDNA4=true ;; esac
+echo "[run_benchmark] GPU arch: ${GPU_ARCH} (CDNA=${IS_CDNA}, RDNA4=${IS_RDNA4})"
 
 SUCCESS_COUNT=0
 FAIL_COUNT=0
@@ -27,11 +56,14 @@ FAIL_COUNT=0
 # Benchmark Configuration
 # ============================================================================
 
-# Softmax/LayerNorm shapes: "M,N,dtype"
+# Softmax/LayerNorm/RMSNorm shapes: "M,N,dtype"
 SOFTMAX_SHAPES='
 32768,8192,bf16
 '
 LAYERNORM_SHAPES='
+32768,8192,bf16
+'
+RMSNORM_SHAPES='
 32768,8192,bf16
 '
 
@@ -39,14 +71,41 @@ LAYERNORM_SHAPES='
 GEMM_SHAPES='
 fp8,16,40960,5120,16,128,256
 fp8,16,77824,5120,16,128,256
+fp8,256,2112,7168,64,64,256
+fp8,512,2112,7168,64,64,256
 fp8,5120,5120,8320,64,256,128
 fp8,9728,8192,8320,64,256,128
+fp8,8192,8192,8192,128,256,128
 int8,9728,8192,8320,64,256,128
+int4,9728,8192,8320,64,256,128
+bf16,5120,5120,8320,64,256,128
+'
+
+# Async preshuffle GEMM shapes:
+# "dtype,M,N,K,tile_m,tile_n,tile_k[,waves_per_eu]"
+GEMM_SHAPES_ASYNC='
+fp8,256,2112,7168,64,64,256
+fp8,512,2112,7168,64,64,256
+fp8,5120,5120,8320,128,256,128,2
+fp8,9728,8192,8320,128,256,128,2
+fp8,8192,8192,8192,128,256,128,2
+int8,9728,8192,8320,128,256,128,2
 '
 
 # FP4 GEMM shapes (requires --wfp4, gfx950 only): "M,N,K,tile_m,tile_n,tile_k"
 GEMM_FP4_SHAPES='
 8192,8192,8192,64,128,256
+8192,8192,8192,64,256,256
+8192,8192,8192,128,256,256
+8192,8192,8192,128,256,128
+'
+
+# Async FP4 GEMM shapes:
+# "M,N,K,tile_m,tile_n,tile_k[,waves_per_eu]"
+GEMM_FP4_SHAPES_ASYNC='
+
+8192,8192,8192,128,256,128,2
+8192,8192,8192,128,256,256,2
 '
 
 # MoE shapes: "tokens,model_dim,inter_dim,experts,topk,tile_m,tile_n,tile_k,tile_n2,tile_k2"
@@ -55,6 +114,27 @@ MOE_SHAPES='
 64,6144,1024,128,8,16,64,256,64,256
 '
 
+# MoE FP4 shapes (requires --in_dtype fp4, gfx950 only): same format as MOE_SHAPES
+MOE_FP4_SHAPES='
+16,7168,256,257,9,64,256,256,256,256
+128,7168,256,257,9,64,256,256,256,256
+2048,7168,256,257,9,64,256,256,256,256
+16384,7168,256,257,9,64,256,256,256,256
+32768,7168,256,257,9,64,256,256,256,256
+16,7168,2048,32,8,64,256,256,256,256
+128,7168,2048,32,8,64,256,256,256,256
+2048,7168,2048,32,8,64,256,256,256,256
+8192,7168,2048,32,8,64,256,256,256,256
+32768,7168,2048,32,8,64,256,256,256,256
+'
+
+# MoE W4A16 groupwise shapes (int4_bf16, group_size=32): same format as MOE_SHAPES
+# Kimi 2.5 TP8: model_dim=7168, inter_dim=256, E=384, topk=8
+MOE_W4A16_SHAPES='
+128,7168,256,384,8,16,128,128,128,256
+256,7168,256,384,8,16,128,128,128,256
+512,7168,256,384,8,16,128,128,128,256
+'
 
 # Memory bound threshold (M or tokens <= threshold => memory bound)
 MEMORY_BOUND_THRESHOLD=512
@@ -73,10 +153,7 @@ Usage:
   bash scripts/run_benchmark.sh --list
 
 Supported ops:
-  softmax | layernorm | gemm | moe
-
-Notes:
-  - `layernorm` is accepted as an alias of `layernorm` (script runs layernorm).
+  softmax | layernorm | rmsnorm | gemm | moe
 USAGE
 }
 
@@ -134,15 +211,18 @@ _normalize_op() {
   esac
 }
 
-# Default: run all benchmarks unless user selected a subset.
+# Default: run softmax, norms, and GEMM unless user selected a subset.
+# Use positional args or --only to enable others: softmax, layernorm, rmsnorm, gemm, moe
 RUN_SOFTMAX=1
 RUN_LAYERNORM=1
+RUN_RMSNORM=1
 RUN_PRESHUFFLE_GEMM=1
 RUN_MOE=1
 
 _enable_only_ops() {
   RUN_SOFTMAX=0
   RUN_LAYERNORM=0
+  RUN_RMSNORM=0
   RUN_PRESHUFFLE_GEMM=0
   RUN_MOE=0
   for op in "$@"; do
@@ -150,6 +230,7 @@ _enable_only_ops() {
     case "${op}" in
       softmax) RUN_SOFTMAX=1 ;;
       layernorm) RUN_LAYERNORM=1 ;;
+      rmsnorm) RUN_RMSNORM=1 ;;
       gemm) RUN_PRESHUFFLE_GEMM=1 ;;
       moe) RUN_MOE=1 ;;
       "" ) ;;
@@ -185,6 +266,7 @@ if [ "$#" -gt 0 ]; then
       --list)
         echo "softmax"
         echo "layernorm"
+        echo "rmsnorm"
         echo "gemm"
         echo "moe"
         exit 0
@@ -257,10 +339,10 @@ if m:
     tflops = float(m.group(1))
     tbps = float(m.group(2))
 
-# MoE-style: "FLIR MoE stageX[dt]: ... XX.XX TFLOPS ... Y.YYY TB/s"
+# MoE-style: "FlyDSL MoE stageX[dt]: ... XX.XX TFLOPS ... Y.YYY TB/s"
 if tbps is None or tflops is None:
     m = None
-    for m in re.finditer(r"FLIR MoE .*?\:\s*[0-9.]+\s*us,\s*([0-9.]+)\s*TFLOPS.*?([0-9.]+)\s*TB/s", txt):
+    for m in re.finditer(r"FlyDSL MoE .*?\:\s*[0-9.]+\s*us,\s*([0-9.]+)\s*TFLOPS.*?([0-9.]+)\s*TB/s", txt):
         pass
     if m:
         tflops = float(m.group(1))
@@ -340,8 +422,32 @@ if [ "${RUN_LAYERNORM}" -eq 1 ]; then
   done
 fi
 
-# Preshuffle GEMM
-if [ "${RUN_PRESHUFFLE_GEMM}" -eq 1 ]; then
+# RMSNorm
+if [ "${RUN_RMSNORM}" -eq 1 ]; then
+  for shape in $RMSNORM_SHAPES; do
+    oldIFS=$IFS
+    IFS=,
+    # shellcheck disable=SC2086 # intentional word-splitting on IFS=,
+    set -- $shape
+    IFS=$oldIFS
+    M=$1; N=$2; dtype=$3
+    export ROCDSL_RMSNORM_SHAPES="$shape"
+    log="${BENCH_LOG_DIR}/rmsnorm_${M}x${N}_${dtype}.log"
+    if python3 tests/kernels/test_rmsnorm.py >"${log}" 2>&1; then
+      SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+    else
+      FAIL_COUNT=$((FAIL_COUNT + 1))
+      echo "rmsnorm failed. Log: ${log}" >&2
+      _show_fail_log "${log}" "rmsnorm"
+    fi
+    row="$(_py_parse_and_emit rmsnorm "${M}x${N}" "${dtype}" "${log}")"
+    set -- $row
+    _emit_row "$1" "$2" "$3" "$4" "$5"
+  done
+fi
+
+# Preshuffle GEMM (CDNA only — uses MFMA)
+if [ "${RUN_PRESHUFFLE_GEMM}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
   for shape in $GEMM_SHAPES; do
     oldIFS=$IFS
     IFS=,
@@ -366,7 +472,53 @@ if [ "${RUN_PRESHUFFLE_GEMM}" -eq 1 ]; then
       echo "gemm failed. Log: ${log}" >&2
       _show_fail_log "${log}" "gemm"
     fi
-    row="$(_py_parse_and_emit gemm "${M}x${N}x${K}" "${dtype}" "${log}")"
+    gemm_shape_tag="${M}x${N}x${K}_tile${tile_m}x${tile_n}x${tile_k}"
+    row="$(_py_parse_and_emit gemm "${gemm_shape_tag}" "${dtype}" "${log}")"
+    set -- $row
+    _emit_row "$1" "$2" "$3" "$4" "$5"
+  done
+
+  GEMM_USE_ASYNC_COPY="${GEMM_USE_ASYNC_COPY:-1}"
+  GEMM_WAVES_PER_EU="${GEMM_WAVES_PER_EU:-2}"
+
+  for shape in $GEMM_SHAPES_ASYNC; do
+    oldIFS=$IFS
+    IFS=,
+    # shellcheck disable=SC2086 # intentional word-splitting on IFS=,
+    set -- $shape
+    IFS=$oldIFS
+    dtype=$1; M=$2; N=$3; K=$4; tile_m=$5; tile_n=$6; tile_k=$7
+    shape_waves_per_eu="${8:-}"
+
+    async_copy_flag=""
+    async_copy_tag="async_copy"
+    if [ "${GEMM_USE_ASYNC_COPY}" = "1" ] || [ "${GEMM_USE_ASYNC_COPY}" = "true" ]; then
+      async_copy_flag="--use_async_copy"
+    fi
+    waves_per_eu="${shape_waves_per_eu:-${GEMM_WAVES_PER_EU}}"
+    waves_per_eu_tag="${waves_per_eu}"
+
+    log="${BENCH_LOG_DIR}/preshuffle_gemm_${M}x${N}x${K}_${dtype}_t${tile_m}x${tile_n}x${tile_k}_${async_copy_tag}_${waves_per_eu_tag}.log"
+    if python3 tests/kernels/test_preshuffle_gemm.py \
+      --in_dtype "$dtype" \
+      --num_warmup 10 \
+      --num_iters 100 \
+      -M "$M" \
+      -N "$N" \
+      -K "$K" \
+      --tile_m "$tile_m" \
+      --tile_n "$tile_n" \
+      --tile_k "$tile_k" \
+      ${async_copy_flag} \
+      --waves_per_eu "${waves_per_eu}" >"${log}" 2>&1; then
+      SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+    else
+      FAIL_COUNT=$((FAIL_COUNT + 1))
+      echo "gemm failed. Log: ${log}" >&2
+      _show_fail_log "${log}" "gemm"
+    fi
+    shape_tag="${M}x${N}x${K}_tile${tile_m}x${tile_n}x${tile_k}_${waves_per_eu}tg"
+    row="$(_py_parse_and_emit gemm_async "${shape_tag}" "${dtype}" "${log}")"
     set -- $row
     _emit_row "$1" "$2" "$3" "$4" "$5"
   done
@@ -394,28 +546,95 @@ if [ "${RUN_PRESHUFFLE_GEMM}" -eq 1 ]; then
       --tile_n "$tile_n" \
       --tile_k "$tile_k" >"${log}" 2>&1; then
       # Check if test was skipped due to architecture
-      if grep -q "Skipping FP4 GEMM test" "${log}"; then
-        _emit_row "gemm" "${M}x${N}x${K}" "${dtype}" "skip" "skip"
+      if grep -q "Skipping FP4 GEMM test\|Skipped" "${log}"; then
+        gemm_shape_tag="${M}x${N}x${K}_tile${tile_m}x${tile_n}x${tile_k}"
+        _emit_row "gemm" "${gemm_shape_tag}" "${dtype}" "skip" "skip"
       else
         SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
-        row="$(_py_parse_and_emit gemm "${M}x${N}x${K}" "${dtype}" "${log}")"
+        gemm_shape_tag="${M}x${N}x${K}_tile${tile_m}x${tile_n}x${tile_k}"
+        row="$(_py_parse_and_emit gemm "${gemm_shape_tag}" "${dtype}" "${log}")"
         set -- $row
         _emit_row "$1" "$2" "$3" "$4" "$5"
       fi
     else
-      FAIL_COUNT=$((FAIL_COUNT + 1))
-      echo "gemm fp4 failed. Log: ${log}" >&2
-      _show_fail_log "${log}" "gemm_fp4"
+      # Skip gracefully on unsupported architectures or missing features
+      if grep -q "gfx950\|invalid choice\|Skipped\|not supported" "${log}" 2>/dev/null; then
+        gemm_shape_tag="${M}x${N}x${K}_tile${tile_m}x${tile_n}x${tile_k}"
+        _emit_row "gemm" "${gemm_shape_tag}" "${dtype}" "skip" "skip"
+      else
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+        echo "gemm fp4 failed. Log: ${log}" >&2
+        _show_fail_log "${log}" "gemm_fp4"
+      fi
+
+    fi
+  done
+
+  # FP4 GEMM async problem sizes (gfx950 only)
+  GEMM_FP4_USE_ASYNC_COPY="${GEMM_FP4_USE_ASYNC_COPY:-1}"
+  GEMM_FP4_WAVES_PER_EU="${GEMM_FP4_WAVES_PER_EU:-2}"
+
+  for shape in $GEMM_FP4_SHAPES_ASYNC; do
+    [ -z "$shape" ] && continue
+    oldIFS=$IFS
+    IFS=,
+    # shellcheck disable=SC2086 # intentional word-splitting on IFS=,
+    set -- $shape
+    IFS=$oldIFS
+    M=$1; N=$2; K=$3; tile_m=$4; tile_n=$5; tile_k=$6
+    shape_waves_per_eu="${7:-}"
+    dtype="fp4"
+
+    async_copy_flag=""
+    async_copy_tag="async_copy"
+    if [ "${GEMM_FP4_USE_ASYNC_COPY}" = "1" ] || [ "${GEMM_FP4_USE_ASYNC_COPY}" = "true" ]; then
+      async_copy_flag="--use_async_copy"
+    fi
+    waves_per_eu="${shape_waves_per_eu:-${GEMM_FP4_WAVES_PER_EU}}"
+    waves_per_eu_tag="${waves_per_eu}"
+
+    log="${BENCH_LOG_DIR}/preshuffle_gemm_${M}x${N}x${K}_${dtype}_t${tile_m}x${tile_n}x${tile_k}_${async_copy_tag}_${waves_per_eu_tag}.log"
+    if python3 tests/kernels/test_preshuffle_gemm.py \
+      --wfp4 \
+      --in_dtype fp4 \
+      --num_warmup 10 \
+      --num_iters 100 \
+      -M "$M" \
+      -N "$N" \
+      -K "$K" \
+      --tile_m "$tile_m" \
+      --tile_n "$tile_n" \
+      --tile_k "$tile_k" \
+      ${async_copy_flag} \
+      --waves_per_eu "${waves_per_eu}" >"${log}" 2>&1; then
+      if grep -q "Skipping FP4 GEMM test\|Skipped" "${log}"; then
+        gemm_shape_tag="${M}x${N}x${K}_tile${tile_m}x${tile_n}x${tile_k}_${waves_per_eu}tg"
+        _emit_row "gemm_fp4_async" "${gemm_shape_tag}" "${dtype}" "skip" "skip"
+      else
+        SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+        gemm_shape_tag="${M}x${N}x${K}_tile${tile_m}x${tile_n}x${tile_k}_${waves_per_eu}tg"
+        row="$(_py_parse_and_emit gemm_fp4_async "${gemm_shape_tag}" "${dtype}" "${log}")"
+        set -- $row
+        _emit_row "$1" "$2" "$3" "$4" "$5"
+      fi
+    else
+      if grep -q "gfx950\|invalid choice\|Skipped\|not supported" "${log}" 2>/dev/null; then
+        gemm_shape_tag="${M}x${N}x${K}_tile${tile_m}x${tile_n}x${tile_k}_${waves_per_eu}tg"
+        _emit_row "gemm_fp4_async" "${gemm_shape_tag}" "${dtype}" "skip" "skip"
+      else
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+        echo "gemm fp4 async failed. Log: ${log}" >&2
+        _show_fail_log "${log}" "gemm_fp4_async"
+      fi
     fi
   done
 fi
 
-# MoE
-if [ "${RUN_MOE}" -eq 1 ]; then
+# MoE (CDNA only — uses MFMA)
+if [ "${RUN_MOE}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
   for shape in $MOE_SHAPES; do
     oldIFS=$IFS
     IFS=,
-    # shellcheck disable=SC2086 # intentional word-splitting on IFS=,
     set -- $shape
     IFS=$oldIFS
     tokens=$1; model_dim=$2; inter_dim=$3; experts=$4; topk=$5; tile_m=$6; tile_n=$7; tile_k=$8; tile_n2=$9; tile_k2=${10}
@@ -445,20 +664,146 @@ if [ "${RUN_MOE}" -eq 1 ]; then
     # Keep shape string compact (no spaces/commas) so table alignment stays stable.
     shape_moe="t${tokens}-d${model_dim}x${inter_dim}-e${experts}k${topk}"
 
-    dt_s1="$(grep -Eo 'FLIR MoE stage1\[[^]]+\]:' "${log}" | tail -1 | cut -d'[' -f2 | cut -d']' -f1 || true)"
-    tf_s1="$(grep -Eo 'FLIR MoE stage1\[[^]]+\]:.* ([0-9.]+) TFLOPS' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
-    tb_s1="$(grep -Eo 'FLIR MoE stage1\[[^]]+\]:.* ([0-9.]+) TB/s' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
+    dt_s1="$(grep -Eo 'FlyDSL MoE stage1\[[^]]+\]:' "${log}" | tail -1 | cut -d'[' -f2 | cut -d']' -f1 || true)"
+    tf_s1="$(grep -Eo 'FlyDSL MoE stage1\[[^]]+\]:.* ([0-9.]+) TFLOPS' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
+    tb_s1="$(grep -Eo 'FlyDSL MoE stage1\[[^]]+\]:.* ([0-9.]+) TB/s' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
     if [ -n "${dt_s1}" ] && [ -n "${tf_s1}" ] && [ -n "${tb_s1}" ]; then
       _emit_row "moe_gemm1" "${shape_moe}" "${dt_s1}" "${tb_s1}" "${tf_s1}"
     fi
 
-    dt_s2="$(grep -Eo 'FLIR MoE stage2\[[^]]+\]:' "${log}" | tail -1 | cut -d'[' -f2 | cut -d']' -f1 || true)"
-    tf_s2="$(grep -Eo 'FLIR MoE stage2\[[^]]+\]:.* ([0-9.]+) TFLOPS' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
-    tb_s2="$(grep -Eo 'FLIR MoE stage2\[[^]]+\]:.* ([0-9.]+) TB/s' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
+    dt_s2="$(grep -Eo 'FlyDSL MoE stage2 \[[^]]+\] [^ ]+' "${log}" | tail -1 | awk '{print $NF}' || true)"
+    tf_s2="$(grep -Eo 'FlyDSL MoE stage2 .* ([0-9.]+) TFLOPS' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
+    tb_s2="$(grep -Eo 'FlyDSL MoE stage2 .* ([0-9.]+) TB/s' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
     if [ -n "${dt_s2}" ] && [ -n "${tf_s2}" ] && [ -n "${tb_s2}" ]; then
       _emit_row "moe_gemm2" "${shape_moe}" "${dt_s2}" "${tb_s2}" "${tf_s2}"
     fi
   done
+
+  # MoE FP4 (gfx950 only)
+  for shape in $MOE_FP4_SHAPES; do
+    [ -z "$shape" ] && continue
+    oldIFS=$IFS
+    IFS=,
+    # shellcheck disable=SC2086 # intentional word-splitting on IFS=,
+    set -- $shape
+    IFS=$oldIFS
+    tokens=$1; model_dim=$2; inter_dim=$3; experts=$4; topk=$5; tile_m=$6; tile_n=$7; tile_k=$8; tile_n2=$9; tile_k2=${10}
+    dtype="fp4"
+    log="${BENCH_LOG_DIR}/moe_fp4_t${tokens}_md${model_dim}_id${inter_dim}_e${experts}_k${topk}.log"
+    if python3 tests/kernels/test_moe_gemm.py \
+      --in_dtype fp4 \
+      -dim "$model_dim,$inter_dim" \
+      -t "$tokens" \
+      -e "$experts" \
+      -k "$topk" \
+      --num_warmup 10 \
+      --num_iters 100 \
+      --tile_m "$tile_m" \
+      --tile_n "$tile_n" \
+      --tile_k "$tile_k" \
+      --tile_n2 "$tile_n2" \
+      --tile_k2 "$tile_k2" \
+      --skip_ref false \
+      --compare_aiter_ck false >"${log}" 2>&1; then
+      # Check if test was skipped due to architecture
+      if grep -q "requires gfx950\|Skipping FP4" "${log}"; then
+        shape_moe="t${tokens}-d${model_dim}x${inter_dim}-e${experts}k${topk}"
+        _emit_row "moe_fp4" "${shape_moe}" "${dtype}" "skip" "skip"
+      else
+        SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+        shape_moe="t${tokens}-d${model_dim}x${inter_dim}-e${experts}k${topk}"
+
+        dt_s1="$(grep -Eo 'FlyDSL MoE stage1\[[^]]+\]:' "${log}" | tail -1 | cut -d'[' -f2 | cut -d']' -f1 || true)"
+        tf_s1="$(grep -Eo 'FlyDSL MoE stage1\[[^]]+\]:.* ([0-9.]+) TFLOPS' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
+        tb_s1="$(grep -Eo 'FlyDSL MoE stage1\[[^]]+\]:.* ([0-9.]+) TB/s' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
+        if [ -n "${dt_s1}" ] && [ -n "${tf_s1}" ] && [ -n "${tb_s1}" ]; then
+          _emit_row "moe_fp4_s1" "${shape_moe}" "${dt_s1}" "${tb_s1}" "${tf_s1}"
+        fi
+
+        dt_s2="$(grep -Eo 'FlyDSL MoE stage2 \[[^]]+\] [^ ]+' "${log}" | tail -1 | awk '{print $NF}' || true)"
+        tf_s2="$(grep -Eo 'FlyDSL MoE stage2 .* ([0-9.]+) TFLOPS' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
+        tb_s2="$(grep -Eo 'FlyDSL MoE stage2 .* ([0-9.]+) TB/s' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
+        if [ -n "${dt_s2}" ] && [ -n "${tf_s2}" ] && [ -n "${tb_s2}" ]; then
+          _emit_row "moe_fp4_s2" "${shape_moe}" "${dt_s2}" "${tb_s2}" "${tf_s2}"
+        fi
+      fi
+    else
+      # Skip gracefully on unsupported architectures
+      if grep -q "requires gfx950\|Skipping FP4\|not supported" "${log}" 2>/dev/null; then
+        shape_moe="t${tokens}-d${model_dim}x${inter_dim}-e${experts}k${topk}"
+        _emit_row "moe_fp4" "${shape_moe}" "${dtype}" "skip" "skip"
+      else
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+        echo "moe fp4 failed. Log: ${log}" >&2
+        _show_fail_log "${log}" "moe_fp4"
+      fi
+    fi
+  done
+
+  # MoE W4A16 groupwise (int4_bf16, group_size=32)
+  for shape in $MOE_W4A16_SHAPES; do
+    [ -z "$shape" ] && continue
+    oldIFS=$IFS
+    IFS=,
+    set -- $shape
+    IFS=$oldIFS
+    tokens=$1; model_dim=$2; inter_dim=$3; experts=$4; topk=$5; tile_m=$6; tile_n=$7; tile_k=$8; tile_n2=$9; tile_k2=${10}
+    log="${BENCH_LOG_DIR}/moe_w4a16_t${tokens}_md${model_dim}_id${inter_dim}_e${experts}_k${topk}.log"
+    if python3 tests/kernels/test_moe_gemm.py \
+      --in_dtype int4_bf16 \
+      --group_size 32 \
+      -dim "$model_dim,$inter_dim" \
+      -t "$tokens" \
+      -e "$experts" \
+      -k "$topk" \
+      --num_warmup 10 \
+      --num_iters 100 \
+      --tile_m "$tile_m" \
+      --tile_n "$tile_n" \
+      --tile_k "$tile_k" \
+      --tile_n2 "$tile_n2" \
+      --tile_k2 "$tile_k2" \
+      --skip_ref false \
+      --compare_aiter_ck false >"${log}" 2>&1; then
+      SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+    else
+      FAIL_COUNT=$((FAIL_COUNT + 1))
+      echo "moe w4a16 failed. Log: ${log}" >&2
+      _show_fail_log "${log}" "moe_w4a16"
+    fi
+    shape_moe="t${tokens}-d${model_dim}x${inter_dim}-e${experts}k${topk}"
+
+    dt_s1="$(grep -Eo 'FlyDSL MoE stage1\[[^]]+\]:' "${log}" | tail -1 | cut -d'[' -f2 | cut -d']' -f1 || true)"
+    tf_s1="$(grep -Eo 'FlyDSL MoE stage1\[[^]]+\]:.* ([0-9.]+) TFLOPS' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
+    tb_s1="$(grep -Eo 'FlyDSL MoE stage1\[[^]]+\]:.* ([0-9.]+) TB/s' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
+    if [ -n "${dt_s1}" ] && [ -n "${tf_s1}" ] && [ -n "${tb_s1}" ]; then
+      _emit_row "moe_w4a16_s1" "${shape_moe}" "${dt_s1}" "${tb_s1}" "${tf_s1}"
+    fi
+
+    dt_s2="$(grep -Eo 'FlyDSL MoE stage2 \[[^]]+\] [^ ]+' "${log}" | tail -1 | awk '{print $NF}' || true)"
+    tf_s2="$(grep -Eo 'FlyDSL MoE stage2 .* ([0-9.]+) TFLOPS' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
+    tb_s2="$(grep -Eo 'FlyDSL MoE stage2 .* ([0-9.]+) TB/s' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
+    if [ -n "${dt_s2}" ] && [ -n "${tf_s2}" ] && [ -n "${tb_s2}" ]; then
+      _emit_row "moe_w4a16_s2" "${shape_moe}" "${dt_s2}" "${tb_s2}" "${tf_s2}"
+    fi
+  done
+fi
+
+# RDNA4 WMMA GEMM benchmarks (via benchmark_common.py)
+if [ "${IS_RDNA4}" = "true" ]; then
+  echo ""
+  echo "========================================================================"
+  echo "RDNA4 WMMA Benchmarks"
+  echo "========================================================================"
+  log="${BENCH_LOG_DIR}/rdna_wmma_sweep.log"
+  if python3 -c "from tests.kernels.benchmark_common import run_wmma_sweep, print_perf_table; rows = run_wmma_sweep(); print_perf_table(rows)" >"${log}" 2>&1; then
+    cat "${log}"
+    SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+  else
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+    echo "RDNA4 WMMA benchmark failed. Log: ${log}" >&2
+    tail -20 "${log}" >&2
+  fi
 fi
 
 # Summary

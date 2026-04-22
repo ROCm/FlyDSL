@@ -72,6 +72,48 @@ def e8m0_to_f32(scale_e8m0_biased):
     return scale_f32
 
 
+def random_e8m0(rows: int, cols: int, *, low_exp=127, high_exp=132,
+                device="cpu") -> torch.Tensor:
+    """Generate random E8M0 scale bytes [rows, cols] uint8."""
+    return torch.randint(low_exp, high_exp + 1, (rows, cols),
+                         dtype=torch.uint8, device=device)
+
+
+def random_fp4_packed(rows: int, cols: int, *, device="cpu") -> torch.Tensor:
+    """Generate random packed FP4 data [rows, cols//2] uint8. """
+    assert cols % 2 == 0
+    unpacked = torch.randint(0, 16, (rows, cols), dtype=torch.uint8, device=device)
+    return pack_uint4(unpacked)
+
+
+def fp8_e4m3_to_f32(x):
+    """Convert FP8/E4M3 (OCP E4M3, no infinity) uint8 tensor to float32.
+
+    E4M3 layout: [sign:1][exp:4][mantissa:3], bias=7.
+    Special: exp=0b1111 + mantissa=0b111 → NaN.
+    """
+    x = x.view(torch.uint8).to(torch.int32)
+    sign = (x >> 7) & 1
+    exp = (x >> 3) & 0xF
+    mant = x & 0x7
+
+    # Normal: value = (-1)^sign * 2^(exp - 7) * (1 + mant/8)
+    # Denormal (exp==0): value = (-1)^sign * 2^(-6) * (mant/8)
+    # NaN: exp==15 and mant==7
+    is_nan = (exp == 15) & (mant == 7)
+    is_denorm = exp == 0
+
+    # Normal path
+    f_normal = (1.0 + mant.float() / 8.0) * torch.pow(2.0, (exp.float() - 7.0))
+    # Denormal path
+    f_denorm = (mant.float() / 8.0) * (2.0 ** -6)
+
+    result = torch.where(is_denorm, f_denorm, f_normal)
+    result = torch.where(is_nan, torch.tensor(float('nan')), result)
+    result = torch.where(sign == 1, -result, result)
+    return result
+
+
 def e8m0_shuffle(scale):
     if scale is None:
         return scale
@@ -685,3 +727,15 @@ def per_1x32_f4_quant(x, scale=None, quant_dtype=fp4x2, shuffle=False):
         scale = e8m0_shuffle(scale)
     return y_fp4, scale.view(fp8_e8m0), y
 
+
+def preshuffle_b_16x16(b: Tensor, rows: int, cols: int) -> Tensor:
+    """Preshuffle B data into 16x16 byte tiles for WMMA-friendly LDS loads.
+
+    Works for both FP4 (cols = K//2) and FP8 (cols = K).
+    """
+    assert rows % 16 == 0, f"rows must be a multiple of 16, got {rows}"
+    assert cols % 16 == 0, f"cols must be a multiple of 16, got {cols}"
+    b = b.view(rows, cols)
+    b = b.view(rows // 16, 16, cols // 16, 16)
+    b = b.permute(0, 2, 1, 3).contiguous()
+    return b.view(rows, cols)

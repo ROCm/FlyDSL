@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+
 """
 Softmax Operator Test with Manual Vectorization and Register Buffering
 Implementation based on high-performance C++ kernel logic:
@@ -8,23 +12,12 @@ Implementation based on high-performance C++ kernel logic:
 - Shared Memory Block Reductions
 """
 
-import sys
 import os
-from pathlib import Path
-
-# Prefer embedded MLIR/rocdsl to avoid mixing multiple runtimes.
-# Repo root is two levels above `tests/kernels/`.
-_repo = Path(__file__).resolve().parents[2]
-_embedded = _repo / "build" / "python_packages" / "rocdsl"
-if _embedded.exists():
-    os.environ.setdefault("ROCDSL_USE_EMBEDDED_MLIR", "1")
-    sys.path.insert(0, str(_embedded))
-_src_py = _repo / "python"
-if _src_py.exists():
-    sys.path.insert(0, str(_src_py))
-sys.path.insert(0, str(_repo))
 
 import pytest
+
+pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
+
 try:
     import torch
 except ImportError:
@@ -36,7 +29,6 @@ DTYPE_FP32 = torch.float32
 DTYPE_FP16 = torch.float16
 DTYPE_BF16 = torch.bfloat16
 
-import flydsl
 from tests.test_common import run_perftest
 from tests.kernels.benchmark_common import (
     PerfRow,
@@ -57,8 +49,7 @@ def run_test(M, N, dtype_str):
     print(f"\nTesting Softmax (Vectorized): M={M}, N={N}, dtype={dtype_str}")
 
     try:
-        m = build_softmax_module(M, N, dtype_str)
-        exe = flydsl.compile(m)
+        launch_fn = build_softmax_module(M, N, dtype_str)
     except Exception as e:
         print(f"Compilation Failed: {e}")
         import traceback
@@ -81,8 +72,10 @@ def run_test(M, N, dtype_str):
         a_dev = a_t.to(DTYPE_BF16).contiguous()
         c_dev = torch.empty((M, N), device="cuda", dtype=DTYPE_BF16)
     
+    stream = torch.cuda.current_stream()
+
     def kernel_launch():
-        exe(a_dev, c_dev, M)
+        launch_fn(a_dev, c_dev, M, stream=stream)
 
     # One run for correctness visibility, then benchmark via shared harness.
     kernel_launch()
@@ -90,17 +83,17 @@ def run_test(M, N, dtype_str):
 
     _, avg_us = run_perftest(lambda: (kernel_launch(), torch.cuda.synchronize()), num_iters=BENCH_ITERS, num_warmup=WARMUP_ITERS)
     torch.cuda.synchronize()
-    # Optional: more stable device timing via HIP events (for FLIR kernel).
-    flir_gpu_us = None
+    # Optional: more stable device timing via HIP events (for FlyDSL kernel).
+    flydsl_gpu_us = None
     if os.environ.get("ROCDSL_COMPARE_AITER", "0") == "1":
-        flir_gpu_us = bench_gpu_us_torch(kernel_launch, warmup=WARMUP_ITERS, iters=BENCH_ITERS)
+        flydsl_gpu_us = bench_gpu_us_torch(kernel_launch, warmup=WARMUP_ITERS, iters=BENCH_ITERS)
     avg_ms = avg_us / 1000.0
     total_bytes = 2 * M * N * (4 if dtype_str == "f32" else 2)  # read input + write output
     bandwidth_gbs = total_bytes / (avg_us / 1e6) / 1e9
     print(f"Kernel avg time: {avg_ms:.4f} ms via run_perftest (warmup={WARMUP_ITERS}, iters={BENCH_ITERS})")
     print(f"Bandwidth: {bandwidth_gbs:.2f} GB/s")
-    if flir_gpu_us is not None:
-        print(f"[Perf] FLIR softmax gpu: {flir_gpu_us:.1f} us")
+    if flydsl_gpu_us is not None:
+        print(f"[Perf] FlyDSL softmax gpu: {flydsl_gpu_us:.1f} us")
 
     # Verify in pure torch style (keep tensors, compute max error in torch), similar to test_mfma_gemm_fp8_rocir.py
     if dtype_str == "f32":
@@ -118,10 +111,10 @@ def run_test(M, N, dtype_str):
     
     if max_err < atol:
         print("  Passed")
-        return True, flir_gpu_us
+        return True, flydsl_gpu_us
     else:
         print("  Failed")
-        return False, flir_gpu_us
+        return False, flydsl_gpu_us
 
 def test_all():
     print("="*80)
@@ -154,7 +147,7 @@ def test_all():
     
     failures = 0
     for M, N, dtype in configs:
-        ok, flir_gpu_us = run_test(M, N, dtype)
+        ok, flydsl_gpu_us = run_test(M, N, dtype)
         if not ok:
             failures += 1
 
@@ -164,8 +157,8 @@ def test_all():
             if not torch.cuda.is_available():
                 continue
 
-            # FLIR side: reuse this test's hip kernel launch via compilation path in run_test is expensive to re-plumb.
-            # We provide AIter numbers here; FLIR gpu-us is printed from run_test via HIP events.
+            # FlyDSL side: reuse this test's hip kernel launch via compilation path in run_test is expensive to re-plumb.
+            # We provide AIter numbers here; FlyDSL gpu-us is printed from run_test via HIP events.
             aiter_us = None
             if maybe_enable_aiter():
                 try:
@@ -184,7 +177,7 @@ def test_all():
                 except Exception as e:
                     print(f"[Perf] AIter softmax skipped: {type(e).__name__}: {e!r}")
 
-            perf_rows.append(PerfRow(op="softmax", shape=f"{M}x{N}", dtype=dtype, flir_gpu_us=flir_gpu_us, aiter_gpu_us=aiter_us))
+            perf_rows.append(PerfRow(op="softmax", shape=f"{M}x{N}", dtype=dtype, flydsl_gpu_us=flydsl_gpu_us, aiter_gpu_us=aiter_us))
             
     print("\n" + "="*80)
     if failures == 0:

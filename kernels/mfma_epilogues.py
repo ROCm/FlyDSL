@@ -1,10 +1,13 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+
 """Reusable epilogue helpers for MFMA 16x16-based kernels.
 
 This module provides:
 
 - `mfma_epilog(...)`
   A single entrypoint that dispatches to either the default row-epilogue or the
-  CK-style LDS CShuffle epilogue based on input parameters.
+  LDS CShuffle epilogue based on input parameters.
 
 - `default_epilog(...)` (implementation helper)
   A lightweight row-iterator for the common MFMA accumulator-to-output mapping
@@ -13,7 +16,7 @@ This module provides:
   (e.g. loads scales once, loops over ni, stores).
 
 - `c_shuffle_epilog(...)` (implementation helper)
-  A CK-style LDS CShuffle epilogue skeleton:
+  A LDS CShuffle epilogue skeleton:
     1) call `write_row_to_lds(...)` for each MFMA output row to populate `lds_out`
        in row-major [tile_m, tile_n] order
     2) barrier
@@ -26,9 +29,24 @@ modules (`arith`, `vector`, `gpu`) and the `range_constexpr` iterator.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from typing import Callable
 
-from _mlir import ir
+from flydsl._mlir import ir
+import flydsl.expr as fx
+from flydsl.expr.typing import T
+
+
+@contextmanager
+def _if_then(if_op, scf):
+    """Compat helper for SCF IfOp then-region across old/new Python APIs."""
+    with ir.InsertionPoint(if_op.then_block):
+        try:
+            yield if_op.then_block
+        finally:
+            blk = if_op.then_block
+            if (not blk.operations) or not isinstance(blk.operations[-1], scf.YieldOp):
+                scf.YieldOp([])
 
 
 def default_epilog(
@@ -55,7 +73,7 @@ def default_epilog(
     """
     bx_m_v = bx_m
     lane_div_16_mul4 = lane_div_16 * 4
-    ii_idx_list = [arith.constant(ii, index=True) for ii in range(4)]
+    ii_idx_list = [fx.Index(ii) for ii in range(4)]
 
     for mi in range_constexpr(m_repeat):
         mi_base = arith.constant(mi * 16, index=True)
@@ -97,7 +115,7 @@ def c_shuffle_epilog(
     precompute_row: Callable | None = None,
     store_pair: Callable,
 ):
-    """CK-style LDS CShuffle epilogue skeleton.
+    """LDS CShuffle epilogue skeleton.
 
     Call pattern:
       - `write_row_to_lds(...)` is called once per MFMA row produced by this thread.
@@ -163,14 +181,14 @@ def c_shuffle_epilog(
     m_reps_shuffle = int(tile_m) // CShuffleMLane
     n_reps_shuffle = int(tile_n) // (CShuffleNLane * EVec)
 
-    c_nlane = arith.constant(CShuffleNLane, index=True)
-    m_lane = tx / c_nlane
+    c_nlane = fx.Index(CShuffleNLane)
+    m_lane = tx // c_nlane
     n_lane = tx % c_nlane
-    c_evec = arith.constant(EVec, index=True)
+    c_evec = fx.Index(EVec)
 
     if frag_elem_type is None:
-        frag_elem_type = ir.F16Type.get()
-    vec_frag = ir.VectorType.get([EVec], frag_elem_type)
+        frag_elem_type = T.f16
+    vec_frag = T.vec(EVec, frag_elem_type)
     bx_m_v = bx_m
     by_n_v = by_n
 
@@ -215,7 +233,7 @@ def c_shuffle_epilog(
 
         if row_pred is not None:
             _if_row = scf.IfOp(row_pred)
-            with _if_row.then():
+            with _if_then(_if_row, scf):
                 _do_store_row()
         else:
             _do_store_row()

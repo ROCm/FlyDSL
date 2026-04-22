@@ -10,7 +10,8 @@ import numpy as np
 import pandas as pd
 import logging
 
-logger = logging.getLogger("flir")
+logger = logging.getLogger("flydsl")
+
 pd.set_option("display.max_rows", 200)
 ## debug ##
 # pd.set_option("display.max_rows", None)
@@ -52,7 +53,7 @@ def perftest(
             run_iters(num_warmup, func, *args, **kwargs)
             torch.cuda.synchronize()
 
-            if int(os.environ.get("FLIR_LOG_MORE", 0)):
+            if int(os.environ.get("FLYDSL_LOG_MORE", 0)):
                 latencies = []
                 start_event = torch.cuda.Event(enable_timing=True)
                 end_event = torch.cuda.Event(enable_timing=True)
@@ -64,6 +65,17 @@ def perftest(
                     latencies.append(start_event.elapsed_time(end_event))
                 avg = np.mean(latencies) * 1000
                 logger.info(f"avg: {avg} us/iter from cuda.Event")
+            with tpf.profile(
+                activities=[tpf.ProfilerActivity.CPU, tpf.ProfilerActivity.CUDA],
+                profile_memory=False,
+                with_stack=False,
+                with_modules=True,
+            ) as prof:
+                data = run_iters_rotate(num_iters, func, rotate_args)
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+            avg = get_trace_perf(prof, num_iters)
+
             if testGraph:
                 graph = torch.cuda.CUDAGraph()
                 with torch.cuda.graph(graph):
@@ -77,23 +89,7 @@ def perftest(
                     run_iters(1, graph.replay)
                 avg = get_trace_perf(prof, num_iters)
                 logger.info(f"avg: {avg} us/iter with hipgraph")
-            with tpf.profile(
-                activities=[tpf.ProfilerActivity.CPU, tpf.ProfilerActivity.CUDA],
-                profile_memory=False,
-                with_stack=False,
-                with_modules=True,
-                # record_shapes=True,
-                on_trace_ready=(
-                    tpf.tensorboard_trace_handler(f"./flir_logs/gpu_id_{gpu_id}")
-                    if needTrace
-                    else None
-                ),
-            ) as prof:
-                data = run_iters_rotate(num_iters, func, rotate_args)
-                torch.cuda.synchronize()
-                torch.cuda.empty_cache()
 
-            avg = get_trace_perf(prof, num_iters)
             return data, avg
 
         return wrapper
@@ -286,7 +282,7 @@ def post_process_data(df, num_iters, warm_iter=1):
     indices_to_add = [idx for sublist in index_sublists for idx in sublist]
     indices.update(indices_to_add)
     indices.update(dropped_indexs)
-    if int(os.environ.get("FLIR_LOG_MORE", 0)):
+    if int(os.environ.get("FLYDSL_LOG_MORE", 0)):
         logger.info(f"abnormal data indices: {indices}")
         for i in indices:
             logger.info(f"abnormal data: {df.iloc[i]['self_device_time_total']}")
@@ -364,7 +360,7 @@ def get_trace_perf(prof, num_iters):
             df.at[avg_name, el] = df[el].sum() / num_iters
         else:
             df.at[avg_name, el] = df[el].sum() / actual_iters
-    if int(os.environ.get("FLIR_LOG_MORE", 0)):
+    if int(os.environ.get("FLYDSL_LOG_MORE", 0)):
         pd.set_option("display.expand_frame_repr", False)
         pd.set_option("display.max_colwidth", 90)
         pd.set_option("display.float_format", "{:,.1f}".format)
@@ -423,7 +419,7 @@ def checkAllclose(
 
 
 def verify_output(c_out, c_ref, atol=1e-2, rtol=1e-2, msg='', logits_diff_threshold=2e-3):
-    if checkAllclose(c_out, c_ref, rtol=atol, atol=atol) < 0.05:
+    if checkAllclose(c_out, c_ref, rtol=rtol, atol=atol) < 0.05:
         return True
     
     # Calculate various error metrics

@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+
 """
 RMSNorm Operator Test
 Implementation of a Block-wise RMSNorm:
@@ -9,21 +13,7 @@ Implementation of a Block-wise RMSNorm:
 RMSNorm(x) = x / sqrt(mean(x^2) + eps) * gamma
 """
 
-import sys
 import os
-from pathlib import Path
-
-# Prefer embedded MLIR/rocdsl to avoid mixing multiple runtimes.
-# Repo root is two levels above `tests/kernels/`.
-_repo = Path(__file__).resolve().parents[2]
-_embedded = _repo / "build" / "python_packages" / "rocdsl"
-if _embedded.exists():
-    os.environ.setdefault("ROCDSL_USE_EMBEDDED_MLIR", "1")
-    sys.path.insert(0, str(_embedded))
-_src_py = _repo / "python"
-if _src_py.exists():
-    sys.path.insert(0, str(_src_py))
-sys.path.insert(0, str(_repo))
 
 from tests.test_common import run_perftest
 from tests.kernels.benchmark_common import (
@@ -33,6 +23,9 @@ from tests.kernels.benchmark_common import (
     print_perf_table,
 )
 import pytest
+
+pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
+
 try:
     import torch
 except ImportError:
@@ -43,8 +36,6 @@ if torch is None or not torch.cuda.is_available():
 DTYPE_FP32 = torch.float32
 DTYPE_FP16 = torch.float16
 DTYPE_BF16 = torch.bfloat16
-
-import flydsl
 
 EPS: float = 1e-5
 from kernels.rmsnorm_kernel import (
@@ -60,11 +51,8 @@ def run_test(M: int, N: int, dtype: str = "f32"):
     print(f"\nTesting RMSNorm (M={M}, N={N}, dtype={dtype})")
 
     try:
-        m = build_rmsnorm_module(M, N, dtype)
-        exe = flydsl.compile(m)
+        launch_fn = build_rmsnorm_module(M, N, dtype)
     except Exception as e:
-        # Treat compile-time failures as test failures so wrapper scripts (run_tests.sh)
-        # can detect them via a non-zero exit code.
         print(f"[FAIL] Compile failed for (M={M}, N={N}, dtype={dtype}): {type(e).__name__}: {e}")
         return False, None
     torch.manual_seed(42)
@@ -105,16 +93,17 @@ def run_test(M: int, N: int, dtype: str = "f32"):
     expected = expected.to(DTYPE_FP32)
 
     print("Launching kernel...")
+    stream = torch.cuda.current_stream()
 
     def kernel_launch():
-        exe(input_dev, gamma_dev, output_dev, M)
+        launch_fn(input_dev, gamma_dev, output_dev, M, stream=stream)
 
     # run_perftest returns (data, avg_us)
     _, avg_us = run_perftest(lambda: (kernel_launch(), torch.cuda.synchronize()), num_iters=BENCH_ITERS, num_warmup=WARMUP_ITERS)
     torch.cuda.synchronize()
-    flir_gpu_us = None
+    flydsl_gpu_us = None
     if os.environ.get("ROCDSL_COMPARE_AITER", "0") == "1":
-        flir_gpu_us = bench_gpu_us_torch(kernel_launch, warmup=WARMUP_ITERS, iters=BENCH_ITERS)
+        flydsl_gpu_us = bench_gpu_us_torch(kernel_launch, warmup=WARMUP_ITERS, iters=BENCH_ITERS)
     avg_ms = avg_us / 1000.0
 
     # Bandwidth estimate: read input + read gamma + write output
@@ -124,8 +113,8 @@ def run_test(M: int, N: int, dtype: str = "f32"):
 
     print(f"Kernel avg time: {avg_ms:.4f} ms via run_perftest (warmup={WARMUP_ITERS}, iters={BENCH_ITERS})")
     print(f"Bandwidth: {bandwidth_gbs:.2f} GB/s")
-    if flir_gpu_us is not None:
-        print(f"[Perf] FLIR rmsnorm gpu: {flir_gpu_us:.1f} us")
+    if flydsl_gpu_us is not None:
+        print(f"[Perf] FlyDSL rmsnorm gpu: {flydsl_gpu_us:.1f} us")
 
     # Verification (pure torch style; compute max error in torch)
     output_ref = output_dev.to(DTYPE_FP32)
@@ -143,7 +132,7 @@ def run_test(M: int, N: int, dtype: str = "f32"):
         print("First row Actual:")
         print(output_ref[0, :5])
         ok = False
-    return ok, flir_gpu_us
+    return ok, flydsl_gpu_us
 
 def test_all():
     print("="*80)
@@ -176,7 +165,7 @@ def test_all():
 
     failures = 0
     for M, N, dtype in configs:
-        ok, flir_gpu_us = run_test(M, N, dtype)
+        ok, flydsl_gpu_us = run_test(M, N, dtype)
         if not ok:
             failures += 1
 
@@ -197,7 +186,7 @@ def test_all():
                 except Exception as e:
                     print(f"[Perf] AIter rmsnorm skipped: {type(e).__name__}: {e!r}")
 
-            perf_rows.append(PerfRow(op="rmsnorm", shape=f"{M}x{N}", dtype=dtype, flir_gpu_us=flir_gpu_us, aiter_gpu_us=aiter_us))
+            perf_rows.append(PerfRow(op="rmsnorm", shape=f"{M}x{N}", dtype=dtype, flydsl_gpu_us=flydsl_gpu_us, aiter_gpu_us=aiter_us))
 
     print("\n" + "="*80)
     if failures == 0:

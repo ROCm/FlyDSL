@@ -1,0 +1,276 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2025 FlyDSL Project Contributors
+
+#ifndef FLY_ATTRDEFS
+#define FLY_ATTRDEFS
+
+include "mlir/IR/AttrTypeBase.td"
+include "mlir/IR/BuiltinAttributeInterfaces.td"
+include "mlir/IR/Constraints.td"
+
+include "flydsl/Dialect/Fly/IR/FlyDialect.td"
+
+//===----------------------------------------------------------------------===//
+// Enum attributes
+//===----------------------------------------------------------------------===//
+def Fly_CachePolicy : I32EnumAttr<"CachePolicy", "", [
+  I32EnumAttrCase<"CacheGlobal", 0, "cache_global">,
+  I32EnumAttrCase<"CacheAlways", 1, "cache_always">
+]> {
+  let genSpecializedAttr = 0;
+  let cppNamespace = Fly_Dialect.cppNamespace;
+}
+def Fly_CachePolicyAttr : EnumAttr<Fly_Dialect, Fly_CachePolicy, "cache_policy"> {}
+
+def Fly_AddressSpace : I32EnumAttr<"AddressSpace", "", [
+  I32EnumAttrCase<"Global", 0, "global">,
+  I32EnumAttrCase<"Shared", 1, "shared">,
+  I32EnumAttrCase<"Register", 2, "register">,
+  I32EnumAttrCase<"BufferDesc", 8, "buffer_desc">
+]> {
+  let genSpecializedAttr = 0;
+  let cppNamespace = Fly_Dialect.cppNamespace;
+}
+def Fly_AddressSpaceAttr : EnumAttr<Fly_Dialect, Fly_AddressSpace, "address_space"> {}
+
+def Fly_MmaOperand : I32EnumAttr<"MmaOperand", "", [
+  I32EnumAttrCase<"A", 0, "a">,
+  I32EnumAttrCase<"B", 1, "b">,
+  I32EnumAttrCase<"C", 2, "c">,
+  I32EnumAttrCase<"D", 3, "d">
+]> {
+  let genSpecializedAttr = 0;
+  let cppNamespace = Fly_Dialect.cppNamespace;
+}
+def Fly_MmaOperandAttr : EnumAttr<Fly_Dialect, Fly_MmaOperand, "mma_operand"> {}
+
+def Fly_AtomicOp : I32EnumAttr<"AtomicOp", "", [
+  I32EnumAttrCase<"Add", 0, "add">,
+  I32EnumAttrCase<"Max", 1, "max">,
+  I32EnumAttrCase<"Min", 2, "min">,
+  I32EnumAttrCase<"And", 3, "and">,
+  I32EnumAttrCase<"Or", 4, "or">,
+  I32EnumAttrCase<"Inc", 5, "inc">,
+  I32EnumAttrCase<"Dec", 6, "dec">
+]> {
+  let genSpecializedAttr = 0;
+  let cppNamespace = Fly_Dialect.cppNamespace;
+}
+def Fly_AtomicOpAttr : EnumAttr<Fly_Dialect, Fly_AtomicOp, "atomic_op"> {}
+
+def Fly_GemmTraversalOrder : I32EnumAttr<"GemmTraversalOrder", "", [
+  I32EnumAttrCase<"KMN", 0, "kmn">,
+  I32EnumAttrCase<"KNM", 1, "knm">,
+  I32EnumAttrCase<"MKN", 2, "mkn">,
+  I32EnumAttrCase<"MNK", 3, "mnk">,
+  I32EnumAttrCase<"NKM", 4, "nkm">,
+  I32EnumAttrCase<"NMK", 5, "nmk">,
+  I32EnumAttrCase<"KMN_Serpentine", 6, "kmn_serpentine">,
+  I32EnumAttrCase<"KNM_Serpentine", 7, "knm_serpentine">,
+  I32EnumAttrCase<"MKN_Serpentine", 8, "mkn_serpentine">,
+  I32EnumAttrCase<"MNK_Serpentine", 9, "mnk_serpentine">,
+  I32EnumAttrCase<"NKM_Serpentine", 10, "nkm_serpentine">,
+  I32EnumAttrCase<"NMK_Serpentine", 11, "nmk_serpentine">
+]> {
+  let genSpecializedAttr = 0;
+  let cppNamespace = Fly_Dialect.cppNamespace;
+}
+def Fly_GemmTraversalOrderAttr : EnumAttr<Fly_Dialect, Fly_GemmTraversalOrder, "gemm_traversal_order"> {}
+
+//===----------------------------------------------------------------------===//
+// Type attributes
+//===----------------------------------------------------------------------===//
+
+def Fly_AlignAttr : Fly_Attr<"Align", "align", []> {
+  let parameters = (ins "int32_t":$alignment);
+  let assemblyFormat = "`align` `<` `` $alignment `` `>`";
+
+  let builders = [
+    AttrBuilderWithInferredContext<(ins "Type":$elemTy, "int32_t":$divisibility), [{
+      int32_t bitWidth = elemTy.getIntOrFloatBitWidth();
+      divisibility = divisibility > 0 ? divisibility : 1;
+      int32_t alignment = (bitWidth * divisibility + 7) / 8;
+      return $_get(elemTy.getContext(), alignment);
+    }]>
+  ];
+
+  let extraClassDeclaration = [{
+    static AlignAttr getTrivialAlignment(Type elemTy);
+  }];
+}
+
+/// Unified integer attribute that represents both static and dynamic integers.
+/// - None : value == 0 and width == 0. it could be used as a Static 0 in the arithmetic operations.
+/// - Static integer: staticFlag == true, value is the actual integer value
+/// - Dynamic integer: staticFlag == false, width and divisibility describe the dynamic value
+def Fly_IntAttr : Fly_Attr<"Int", "int", [
+    DeclareAttrInterfaceMethods<Fly_MayStaticAttrInterface>
+]> {
+  let parameters = (ins 
+    "int32_t":$value, // may need update to int64_t in the future
+    "int32_t":$width, 
+    "int32_t":$divisibility,
+    "bool":$staticFlag);
+  let hasCustomAssemblyFormat = 1;
+
+  let extraClassDeclaration = [{
+    bool isNone() const;
+    bool isStaticValue(int32_t value) const;
+    static IntAttr getNone(MLIRContext *ctx);
+    static IntAttr getStatic(MLIRContext *ctx, int32_t value);
+    static IntAttr getDynamic(MLIRContext *ctx, int32_t width = 32, int32_t divisibility = 1);
+  }];
+}
+
+
+def Fly_BasisAttr : Fly_Attr<"Basis", "basis", [
+    DeclareAttrInterfaceMethods<Fly_MayStaticAttrInterface>
+]> {
+  let parameters = (ins
+    Fly_IntAttr:$value,
+    ArrayRefParameter<"int32_t">:$modes
+  );
+  let hasCustomAssemblyFormat = 1;
+
+  let builders = [
+    AttrBuilderWithInferredContext<(ins "IntAttr":$value, "int32_t":$mode), [{
+      ::llvm::SmallVector<int32_t, 1> modes;
+      modes.push_back(mode);
+      return $_get(value.getContext(), value, modes);
+    }]>,
+    AttrBuilderWithInferredContext<(ins "IntAttr":$value, "ArrayRef<int32_t>":$modes), [{
+      return $_get(value.getContext(), value, modes);
+    }]>
+  ];
+  
+  let extraClassDeclaration = [{
+    int32_t depth();
+    static BasisAttr getStatic(MLIRContext *ctx, int32_t value, ArrayRef<int32_t> modes);
+  }];
+}
+
+def Fly_SwizzleAttr : Fly_Attr<"Swizzle", "swizzle", []> {
+  let parameters = (ins "int32_t":$mask, "int32_t":$base, "int32_t":$shift);
+  let assemblyFormat = "`` `S` `` `<` $mask `` `,` `` $base `` `,` `` $shift `` `>`";
+
+  let extraClassDeclaration = [{
+    bool isTrivialSwizzle() const;
+    static SwizzleAttr getTrivialSwizzle(MLIRContext *context);
+  }];
+}
+
+def Fly_IntTupleAttr : Fly_Attr<"IntTuple", "int_tuple", [
+    DeclareAttrInterfaceMethods<Fly_NestedAttrInterface>,
+    DeclareAttrInterfaceMethods<Fly_MayStaticAttrInterface>
+]> {
+  let parameters = (ins
+    "Attribute":$value
+  );
+  let hasCustomAssemblyFormat = 1;
+
+  let builders = [
+    AttrBuilderWithInferredContext<(ins "IntAttr":$value, "ArrayRef<int32_t>":$modes), [{
+      return $_get(value.getContext(), BasisAttr::get(value, modes));
+    }]>,
+    AttrBuilderWithInferredContext<(ins "Attribute":$value), [{
+      return $_get(value.getContext(), value);
+    }]>
+  ];
+
+  let extraClassDeclaration = [{
+    static IntTupleAttr getLeafNone(MLIRContext *ctx);
+    static IntTupleAttr getLeafStatic(MLIRContext *ctx, int32_t value);
+    static IntTupleAttr getLeafDynamic(MLIRContext *ctx, int32_t width = 32, int32_t divisibility = 1);
+
+    bool isLeafNone() const;
+    bool isLeafInt() const;
+    bool isLeafBasis() const;
+    bool isLeafStaticValue(int32_t value) const;
+    IntAttr getLeafAsInt() const;
+    IntAttr extractIntFromLeaf() const;
+    BasisAttr getLeafAsBasis() const;
+
+    IntTupleAttr at(int32_t idx) const;
+    IntTupleAttr at(const ArrayRef<int32_t> idxs) const;
+
+    int32_t dyncLeafCount() const;
+  }];
+}
+
+def Fly_LayoutAttr : Fly_Attr<"Layout", "layout", [
+    DeclareAttrInterfaceMethods<Fly_NestedAttrInterface>,
+    DeclareAttrInterfaceMethods<Fly_MayStaticAttrInterface>
+]> {
+  let parameters = (ins
+    Fly_IntTupleAttr:$shape,
+    Fly_IntTupleAttr:$stride
+  );
+  let assemblyFormat = "`` $shape `` `:` `` $stride";
+  
+  let builders = [
+    AttrBuilderWithInferredContext<(ins "IntTupleAttr":$shape, "IntTupleAttr":$stride), [{
+      return $_get(shape.getContext(), shape, stride);
+    }]>
+  ];
+
+  let extraClassDeclaration = [{
+    bool isStaticShape() const;
+    bool isStaticStride() const;
+
+    LayoutAttr at(int32_t idx) const;
+    LayoutAttr at(const ArrayRef<int32_t> idxs) const;
+  }];
+}
+
+def Fly_ComposedLayoutAttr : Fly_Attr<"ComposedLayout", "composed_layout", [
+    DeclareAttrInterfaceMethods<Fly_NestedAttrInterface>,
+    DeclareAttrInterfaceMethods<Fly_MayStaticAttrInterface>
+]> {
+  let parameters = (ins
+    "Attribute":$inner,
+    Fly_IntTupleAttr:$offset,
+    Fly_LayoutAttr:$outer
+  );
+  let hasCustomAssemblyFormat = 1;
+    
+  let builders = [
+    AttrBuilderWithInferredContext<(ins "Attribute":$inner, "IntTupleAttr":$offset, "LayoutAttr":$outer), [{
+      return $_get(inner.getContext(), inner, offset, outer);
+    }]>
+  ];
+
+  let extraClassDeclaration = [{
+    bool isStaticOuter() const;
+    bool isStaticInner() const;
+    bool isStaticOffset() const;
+
+    ComposedLayoutAttr at(int32_t idx) const;
+    ComposedLayoutAttr at(const ArrayRef<int32_t> idxs) const;
+  }];
+}
+
+def Fly_TileAttr : Fly_Attr<"Tile", "tile", []> {
+  let parameters = (ins
+    "Attribute":$value
+  );
+  let hasCustomAssemblyFormat = 1;
+  
+  let builders = [
+    AttrBuilderWithInferredContext<(ins "Attribute":$value), [{
+      return $_get(value.getContext(), value);
+    }]>
+  ];
+
+  let extraClassDeclaration = [{
+    int32_t rank() const;
+
+    bool isLeaf() const;
+    bool isNoneMode() const;
+    bool isNoneMode(int32_t idx) const;
+
+    Attribute at(int32_t idx) const;
+  }];
+}
+
+
+#endif // FLY_ATTRDEFS

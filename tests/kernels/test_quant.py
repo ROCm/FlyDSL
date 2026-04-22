@@ -1,43 +1,29 @@
 #!/usr/bin/env python3
+
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+
 """
-Benchmark: Per-Token Quantization Kernel
+Benchmark: Per-Token Quantization Kernel (flydsl API)
+
+Per-token quant: for each row, find max(|x|), scale = max_abs / 127,
+output[i] = fptosi(x[i] / scale).
 
 Usage Examples:
-    # Single test with default size (4096x8192)
-    python per_token_quant_benchmark_3.py
-    
-    # Single test with custom size
-    python per_token_quant_benchmark_3.py -m 2048 -n 4096
-    
-    # Multi-size testing (same N - only compiles ONCE! 🚀)
-    python per_token_quant_benchmark_3.py --multi-test "2048x8192,4096x8192,8192x8192"
-    # Output: ✓ All tests use N=8192 - will compile once and reuse!
-    
-    # Multi-size testing (different N - compiles per N value)
-    python per_token_quant_benchmark_3.py --multi-test "2048x4096,4096x8192"
-    # Output: ⚠ 2 different N values detected: [4096, 8192]
-    
-    # Complex scenario (5 tests, 2 N values = 2 compilations)
-    python per_token_quant_benchmark_3.py --multi-test "1024x4096,2048x4096,4096x4096,2048x8192,4096x8192"
-    # Compiles N=4096 once → runs 3 tests
-    # Compiles N=8192 once → runs 2 tests
+    python tests/kernels/test_quant.py
+    python tests/kernels/test_quant.py -m 2048 -n 4096
+    python tests/kernels/test_quant.py --multi-test "2048x8192,4096x8192,8192x8192"
 """
 
 import sys
 import os
 import argparse
 
-
-# NOTE:
-# This file is executed under pytest from the repo root with `tests/` as rootdir.
-# Avoid mutating `sys.path` based on relative layout (it breaks when directories move).
-
 import numpy as np
 import pytest
 
-# Temporary CI safeguard:
-# This benchmark currently shows correctness deltas (Max Output Diff ~= 1.0) and is not
-# stable enough for gating. Skip by default; opt-in via env var when debugging.
+pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
+
 _RUN_QUANT = os.environ.get("FLYDSL_RUN_QUANT", "").strip().lower() in ("1", "true", "yes", "on")
 if not _RUN_QUANT:
     _reason = "Per-token quant benchmark temporarily disabled (set FLYDSL_RUN_QUANT=1 to enable)."
@@ -46,7 +32,6 @@ if not _RUN_QUANT:
         raise SystemExit(0)
     pytest.skip(_reason, allow_module_level=True)
 
-# Keep dependency checks precise so skip reasons are actionable.
 try:
     import torch
 except Exception:
@@ -61,273 +46,287 @@ try:
     HAS_AITER = True
 except Exception:
     HAS_AITER = False
-    pytest.skip("AITer not available. Install `aiter` to run per-token quant GPU benchmarks.", allow_module_level=True)
 
-import flydsl
-from flydsl.dialects.ext import arith, flir, block_reduce_ops, scf as scf_ext
-from flydsl.dialects.ext.gpu import lds_space
+import flydsl.compiler as flyc
+import flydsl.expr as fx
+from flydsl.compiler.kernel_function import CompilationContext
+from flydsl.expr import arith, gpu, range_constexpr
+from flydsl.expr.typing import T, Int32
+from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from flydsl.runtime.device import get_rocm_arch
-from flydsl.utils import SmemAllocator
-from flydsl.dialects.ext import vector, memref
-import _mlir.extras.types as T
+from flydsl._mlir import ir
+from flydsl.expr.arith import ArithValue
+from flydsl.expr.vector import Vector, full, ReductionOp
+from flydsl.expr.numeric import Float16, Float32, Int8
 from tests.test_common import run_perftest
 
+BLOCK_THREADS = 256
+WARP_SIZE = 64
+VEC_WIDTH = 8
+
+
 class KernelCompilationCache:
-    
+
     def __init__(self):
         self.cache = {}
-    
+
     def get_or_compile(self, N, compile_fn):
         if N in self.cache:
             return self.cache[N] + (True,)
-        
         result = compile_fn()
         self.cache[N] = result
         return result + (False,)
-    
+
     def clear(self):
         self.cache.clear()
 
 
-def compile_kernel_for_n(N, gpu_arch=None):
-    if gpu_arch is None:
-        gpu_arch = get_rocm_arch()
-    
-    NUM_WARPS = 4
-    BLOCK_SIZE = 64 * NUM_WARPS
-    VEC_WIDTH = 32
-    ELEMS_PER_BLOCK_ITER = BLOCK_SIZE * VEC_WIDTH
-    
-    assert N % VEC_WIDTH == 0, f"N must be multiple of {VEC_WIDTH}"
-    ITERS = (N + ELEMS_PER_BLOCK_ITER - 1) // ELEMS_PER_BLOCK_ITER
-    
-    M_compile = 16384
-    
-    allocator = SmemAllocator(None, arch=gpu_arch)
-    _state = {}
+def build_quant_module(N):
+    """Build per-token quantization kernel for hidden dimension N.
 
-    def _quant_kernel_impl(input, output, scales):
-        tid_x = flir.thread_idx("x")
-        bid_x = flir.block_idx("x")
-        tid_linear = tid_x
+    Returns (launch_fn, config) where launch_fn(Input, Output, Scales, M)
+    runs the quantization kernel.
+    """
+    arch = get_rocm_arch()
 
-        thr_layout = flir.make_ordered_layout((1, BLOCK_SIZE), order=(1, 0))
-        val_layout = flir.make_ordered_layout((1, VEC_WIDTH), order=(1, 0))
+    tile_cols = BLOCK_THREADS * VEC_WIDTH
+    num_tiles = (N + tile_cols - 1) // tile_cols
+    RED_SLOTS = max(1, BLOCK_THREADS // WARP_SIZE)
 
-        copy_atom_load = flir.make_copy_atom(T.f16(), vector_size=VEC_WIDTH)
-        copy_atom_store = flir.make_copy_atom(T.i8(), vector_size=VEC_WIDTH)
+    allocator = SmemAllocator(None, arch=arch)
+    red_offset = allocator._align(allocator.ptr, 16)
+    allocator.ptr = red_offset + RED_SLOTS * 4  # f32 scratch
 
-        tiled_copy_input = flir.make_tiled_copy_tv(
-            copy_atom_load,
-            thr_layout,
-            val_layout,
-            thr_shape=(1, BLOCK_SIZE),
-            val_shape=(1, VEC_WIDTH),
-        )
-        tiled_copy_output = flir.make_tiled_copy_tv(
-            copy_atom_store,
-            thr_layout,
-            val_layout,
-            thr_shape=(1, BLOCK_SIZE),
-            val_shape=(1, VEC_WIDTH),
-        )
-
-        tensor_input = flir.make_tensor(input, shape=(M_compile, N), strides=(N, 1))
-        tensor_output = flir.make_tensor(output, shape=(M_compile, N), strides=(N, 1))
-        tensor_scales = flir.make_tensor(scales, shape=(M_compile,), strides=(1,))
-
-        tile_shape = (1, ELEMS_PER_BLOCK_ITER)
-
-        gInput = flir.zipped_divide(tensor_input, tile_shape)
-        gOutput = flir.zipped_divide(tensor_output, tile_shape)
-
-        thr_copy_input = tiled_copy_input.get_slice(tid_linear)
-        thr_copy_output = tiled_copy_output.get_slice(tid_linear)
+    @flyc.kernel
+    def quant_kernel(Input: fx.Tensor, Output: fx.Tensor, Scales: fx.Tensor):
+        bid = fx.block_idx.x
+        tid = fx.thread_idx.x
 
         base_ptr = allocator.get_base()
-        red_val = _state["red_buffer_decl"](base_ptr).get()
+        s_red = SmemPtr(base_ptr, red_offset, T.f32, shape=(RED_SLOTS,))
+        s_red.get()
 
-        f_0 = arith.f32(0.0)
-        f_1 = arith.f32(1.0)
-        f_127 = arith.f32(127.0)
-        c_0 = arith.index(0)
+        # ── Wave / block reduction (max) ─────────────────────────────────
+        def wave_reduce_max(x):
+            width_i32 = arith.constant(WARP_SIZE, type=T.i32)
+            w = x
+            for sh in [32, 16, 8, 4, 2, 1]:
+                off = arith.constant(sh, type=T.i32)
+                peer = w.shuffle_xor(off, width_i32)
+                w = w.maximumf(peer)
+            return w
 
-        local_max = f_0
-        cached_vecs = []
+        def block_reduce_max(val):
+            if RED_SLOTS == 1:
+                return wave_reduce_max(val)
 
-        vec_type_f16 = T.vector(VEC_WIDTH, T.f16())
-        vec_type_f32 = T.vector(VEC_WIDTH, T.f32())
+            lane = tid % WARP_SIZE
+            wave = tid // WARP_SIZE
+            c_zero_f = arith.constant(0.0, type=T.f32)
 
-        c_n = arith.index(N)
+            w = wave_reduce_max(val)
 
-        for i in range(ITERS):
-            c_chunk_offset = arith.index(i * ELEMS_PER_BLOCK_ITER)
-            thread_offset = tid_linear * arith.index(VEC_WIDTH)
-            col_base = c_chunk_offset + thread_offset
+            if arith.cmpi(arith.CmpIPredicate.eq, lane, Int32(0)):
+                wave_idx = arith.index_cast(T.index, wave)
+                s_red.store(w, [wave_idx])
+            gpu.barrier()
 
-            is_valid = col_base < c_n
+            if arith.cmpi(arith.CmpIPredicate.eq, wave, Int32(0)):
+                in_range = lane < RED_SLOTS
+                lane_safe = arith.select(in_range, lane, Int32(0))
+                lane_safe_idx = arith.index_cast(T.index, lane_safe)
+                v = s_red.load([lane_safe_idx])
+                ww = arith.select(in_range, v, c_zero_f)
+                ww = wave_reduce_max(ww)
 
-            blk_coord = (bid_x, arith.index(i))
-            blkInput = gInput[blk_coord]
-            thrInput = thr_copy_input.partition_S(blkInput)
+                if arith.cmpi(arith.CmpIPredicate.eq, lane, Int32(0)):
+                    c0_idx = arith.constant(0, index=True)
+                    s_red.store(ww, [c0_idx])
+            gpu.barrier()
 
-            frgInput = flir.make_fragment_like(thrInput, T.f16())
+            c0_idx = arith.constant(0, index=True)
+            return s_red.load([c0_idx])
 
-            zero_vec = arith.constant_vector(0.0, vec_type_f16)
-            frg_memref = frgInput.memref if hasattr(frgInput, "memref") else frgInput
-            vector.store(zero_vec, frg_memref, [c_0, c_0])
+        # ── Layout API: buffer-backed tensors ────────────────────────────
+        Input_buf = fx.rocdl.make_buffer_tensor(Input)
+        Out_buf = fx.rocdl.make_buffer_tensor(Output)
+        Scales_buf = fx.rocdl.make_buffer_tensor(Scales)
 
-            flir.copy(tiled_copy_input, thrInput, frgInput, pred=is_valid)
+        # Slice at row 0; actual row offset via soffset (SGPR)
+        bid_row_offset = ArithValue(bid) * fx.Int32(N)
 
-            vec_val_f16 = vector.load_op(vec_type_f16, frg_memref, [c_0, c_0])
-            vec_val_f32 = arith.extf(vec_type_f32, vec_val_f16)
+        row_in = fx.slice(Input_buf, (0, None))
+        in_div = fx.logical_divide(row_in, fx.make_layout(VEC_WIDTH, 1))
 
-            vec_abs_f32 = arith.absf(vec_val_f32)
-            chunk_max = arith.reduce(vec_abs_f32, "max")
-            local_max = arith.maximum(local_max, chunk_max)
+        # Copy atom for f16 loads: 8 x f16 = 128b, with soffset for row
+        copy_atom_in_base = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), 16)
+        copy_atom_in = copy_atom_in_base.set_value("soffset", bid_row_offset)
 
-            cached_vecs.append(vec_val_f32)
+        vec_reg_ty_f16 = fx.MemRefType.get(
+            T.f16, fx.LayoutType.get(VEC_WIDTH, 1), fx.AddressSpace.Register
+        )
+        vec_reg_lay = fx.make_layout(VEC_WIDTH, 1)
 
-        reduced_max = block_reduce_ops.block_reduce_max(
-            local_max, red_val, tid_linear, num_warps=NUM_WARPS, warp_size=64
+        # Copy atom for i8 output: 8 x i8 = 64b, with soffset for row
+        copy_atom_out_base = fx.make_copy_atom(fx.rocdl.BufferCopy64b(), 8)
+        copy_atom_out = copy_atom_out_base.set_value("soffset", bid_row_offset)
+        out_row = fx.slice(Out_buf, (0, None))
+        out_div = fx.logical_divide(out_row, fx.make_layout(VEC_WIDTH, 1))
+        i8_vec_reg_ty = fx.MemRefType.get(
+            T.i8, fx.LayoutType.get(VEC_WIDTH, 1), fx.AddressSpace.Register
         )
 
-        scale = reduced_max / f_127
-        is_zero = scale == 0
-        final_scale = arith.select(is_zero, f_1, scale)
+        # Copy atom for f32 scales: scalar store with soffset for bid
+        copy_atom_f32_base = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), 32)
+        copy_atom_f32 = copy_atom_f32_base.set_value("soffset", bid)
+        scales_div = fx.logical_divide(Scales_buf, fx.make_layout(1, 1))
+        scales_base = fx.slice(scales_div, (None, fx.Int32(0)))
+        f32_reg_ty = fx.MemRefType.get(
+            T.f32, fx.LayoutType.get(1, 1), fx.AddressSpace.Register
+        )
+        f32_reg_lay = fx.make_layout(1, 1)
 
-        c_0_idx = arith.index(0)
-        is_thread_0 = tid_linear == c_0_idx
+        def _load_vec_f16(div_tensor, idx):
+            r = fx.memref_alloca(vec_reg_ty_f16, vec_reg_lay)
+            fx.copy_atom_call(copy_atom_in, fx.slice(div_tensor, (None, idx)), r)
+            return Vector(fx.memref_load_vec(r), VEC_WIDTH, Float16)
 
-        if is_thread_0:
-            tensor_scales[bid_x] = final_scale
+        abs_mask = full(VEC_WIDTH, Int32(0x7FFFFFFF), Int32)
 
-        vec_scale = vector.broadcast(vec_type_f32, final_scale)
-        vec_f1 = vector.broadcast(vec_type_f32, f_1)
-        vec_f1_arith = arith.ArithValue(vec_f1)
-        vec_scale_arith = arith.ArithValue(vec_scale)
-        vec_inv_scale = (vec_f1_arith / vec_scale_arith)
+        c_zero_f = arith.constant(0.0, type=T.f32)
+        local_max = c_zero_f
+        cached_vecs = []
 
-        for i in range(ITERS):
-            c_chunk_offset = arith.index(i * ELEMS_PER_BLOCK_ITER)
-            c_vec_width = arith.index(VEC_WIDTH)
-            thread_offset = tid_linear * c_vec_width
-            col_base = c_chunk_offset + thread_offset
+        # ── Pass 1: load f16 → f32, compute row max|val|, cache ──────────
+        for tile_i in range_constexpr(num_tiles):
+            idx = tid + tile_i * BLOCK_THREADS
+            col_end = ArithValue(tid) * VEC_WIDTH + (tile_i * tile_cols + VEC_WIDTH)
+            is_valid = col_end <= N
 
-            is_valid = col_base < c_n
+            vec_f16 = _load_vec_f16(in_div, idx)
+            vec_f32 = vec_f16.to(Float32)
+            cached_vecs.append(vec_f32)
 
-            vec_val = cached_vecs[i]
-            vec_scaled = vec_val * vec_inv_scale
-            vec_i8_type = T.vector(VEC_WIDTH, T.i8())
-            vec_quant = arith.fptosi(vec_i8_type, vec_scaled)
+            vec_i32 = vec_f32.bitcast(Int32)
+            vec_abs_i32 = vec_i32 & abs_mask
+            vec_abs = vec_abs_i32.bitcast(Float32)
 
-            blk_coord = (bid_x, arith.index(i))
-            blkOutput = gOutput[blk_coord]
-            thrOutput = thr_copy_output.partition_D(blkOutput)
+            chunk_max = vec_abs.reduce(ReductionOp.MAX)
+            chunk_max_safe = arith.select(is_valid, chunk_max.ir_value(), c_zero_f)
+            local_max = local_max.maximumf(chunk_max_safe)
 
-            frgOutput = flir.make_fragment_like(thrOutput, T.i8())
-            frg_out_memref = (
-                frgOutput.memref if hasattr(frgOutput, "memref") else frgOutput
-            )
+        reduced_max = block_reduce_max(local_max)
 
-            vector.store(vec_quant, frg_out_memref, [c_0, c_0])
-            flir.copy(tiled_copy_output, frgOutput, thrOutput, pred=is_valid)
+        # ── Compute scale ────────────────────────────────────────────────
+        c_127 = arith.constant(127.0, type=T.f32)
+        c_1 = arith.constant(1.0, type=T.f32)
+        scale = ArithValue(reduced_max) / c_127
+        is_zero = scale == c_zero_f
+        final_scale = arith.select(is_zero, c_1, scale)
 
-    class _Quant(flir.MlirModule):
-        GPU_MODULE_NAME = "quant_mod"
-        GPU_MODULE_TARGETS = [f'#rocdl.target<chip = "{gpu_arch}">']
+        # thread 0 stores Scales[bid]
+        if arith.cmpi(arith.CmpIPredicate.eq, tid, Int32(0)):
+            r_sc = fx.memref_alloca(f32_reg_ty, f32_reg_lay)
+            ts_sc = full(1, Float32(final_scale), Float32)
+            fx.memref_store_vec(ts_sc, r_sc)
+            fx.copy_atom_call(copy_atom_f32, r_sc, scales_base)
 
-        def init_gpu_module(self):
-            _state["red_buffer_decl"] = allocator.allocate_array(T.f32(), 64)
+        # ── Pass 2: quantize f32 → i8, store ─────────────────────────────
+        inv_scale = ArithValue(c_1) / ArithValue(final_scale)
+
+        for tile_i in range_constexpr(num_tiles):
+            vec_f32 = cached_vecs[tile_i]
+            vec_scaled = vec_f32 * inv_scale
+            vec_i8 = vec_scaled.to(Int8)
+            idx_out = tid + tile_i * BLOCK_THREADS
+
+            # Python-level check: only the last tile of non-aligned N needs a guard
+            last_partial = (N % tile_cols != 0) and (tile_i == num_tiles - 1)
+            if last_partial:
+                col_end = ArithValue(tid) * VEC_WIDTH + (tile_i * tile_cols + VEC_WIDTH)
+                is_valid = col_end <= N
+                if is_valid:
+                    r_out = fx.memref_alloca(i8_vec_reg_ty, vec_reg_lay)
+                    fx.memref_store_vec(vec_i8, r_out)
+                    fx.copy_atom_call(copy_atom_out, r_out, fx.slice(out_div, (None, idx_out)))
+            else:
+                r_out = fx.memref_alloca(i8_vec_reg_ty, vec_reg_lay)
+                fx.memref_store_vec(vec_i8, r_out)
+                fx.copy_atom_call(copy_atom_out, r_out, fx.slice(out_div, (None, idx_out)))
+
+    @flyc.jit
+    def launch_quant(
+        Input: fx.Tensor,
+        Output: fx.Tensor,
+        Scales: fx.Tensor,
+        m_in: fx.Int32,
+        stream: fx.Stream = fx.Stream(None),
+    ):
+        allocator.finalized = False
+        ctx = CompilationContext.get_current()
+        with ir.InsertionPoint(ctx.gpu_module_body):
             allocator.finalize()
-            red_type = T.memref(NUM_WARPS, T.f32(), memory_space=lds_space())
-            memref.global_(sym_name="red_buffer", type_=red_type, alignment=16)
 
-        @flir.kernel
-        def quant_kernel(
-            self,
-            input: lambda: T.memref(M_compile * N, T.f16()),
-            output: lambda: T.memref(M_compile * N, T.i8()),
-            scales: lambda: T.memref(M_compile, T.f32()),
-        ):
-            _quant_kernel_impl(input, output, scales)
+        idx_m = arith.index_cast(T.index, m_in)
+        launcher = quant_kernel(Input, Output, Scales)
+        launcher.launch(
+            grid=(idx_m, 1, 1),
+            block=(BLOCK_THREADS, 1, 1),
+            stream=stream,
+        )
 
-        @flir.jit
-        def __call__(
-            self: flir.T.i64,
-            input: lambda: T.memref(M_compile * N, T.f16()),
-            output: lambda: T.memref(M_compile * N, T.i8()),
-            scales: lambda: T.memref(M_compile, T.f32()),
-            m_in: lambda: T.index(),
-        ):
-            c1 = arith.index(1)
-            bx = arith.index(BLOCK_SIZE)
-            flir.gpu_ext.LaunchFuncOp(
-                [self.GPU_MODULE_NAME, "quant_kernel"],
-                grid_size=(m_in, c1, c1),
-                block_size=(bx, c1, c1),
-                kernel_operands=[input, output, scales],
-            )
-
-    m = _Quant()
-    exe = flydsl.compile(m)
-    
     config = {
         'N': N,
-        'NUM_WARPS': NUM_WARPS,
-        'BLOCK_SIZE': BLOCK_SIZE,
+        'BLOCK_THREADS': BLOCK_THREADS,
         'VEC_WIDTH': VEC_WIDTH,
-        'ELEMS_PER_BLOCK_ITER': ELEMS_PER_BLOCK_ITER,
-        'ITERS': ITERS,
+        'ELEMS_PER_BLOCK_ITER': tile_cols,
+        'ITERS': num_tiles,
     }
-    
-    return exe, config
+
+    return launch_quant, config
 
 
-def benchmark_per_token_quant(M=4096, N=8192, exe=None, config=None):
+def compile_kernel_for_n(N, gpu_arch=None):
+    """Compile kernel for hidden dim N, returning (launch_fn, config)."""
+    print(f"Compiling kernel for N={N}...")
+    launch_fn, config = build_quant_module(N)
+    print("Compiled via flydsl")
+    return launch_fn, config
+
+
+def benchmark_per_token_quant(M=4096, N=8192, launch_fn=None, config=None):
     """Run Per-Token Quantization benchmark.
-    
+
     Args:
         M: Number of tokens
         N: Hidden dimension
-        exe: Pre-compiled executor (optional)
-        config: Config dict from compile_kernel_for_n (optional)
-    
+        launch_fn: Pre-compiled launcher (optional)
+        config: Config dict from compile (optional)
+
     Returns:
         bool: True if correctness check passed
     """
     print("\n" + "=" * 80)
-    print(f"Benchmark: Per-Token Quantization Performance (FLIR) [M={M}, N={N}]")
+    print(f"Benchmark: Per-Token Quantization Performance (FlyDSL) [M={M}, N={N}]")
     print("=" * 80)
 
-    # Compile if not provided
-    if exe is None or config is None:
+    if launch_fn is None or config is None:
         gpu_arch = get_rocm_arch()
         print(f"Detected ROCm Arch: {gpu_arch}")
-        print("Compiling MLIR module...")
-        exe, config = compile_kernel_for_n(N, gpu_arch)
-        print("Compiled via flir.compile")
+        launch_fn, config = compile_kernel_for_n(N, gpu_arch)
     else:
-        print("Using pre-compiled executor")
-    
-    # Extract config
-    NUM_WARPS = config['NUM_WARPS']
-    BLOCK_SIZE = config['BLOCK_SIZE']
-    VEC_WIDTH = config['VEC_WIDTH']
-    ELEMS_PER_BLOCK_ITER = config['ELEMS_PER_BLOCK_ITER']
-    ITERS = config['ITERS']
+        print("Using pre-compiled launcher")
 
     total_elements = M * N
-    total_bytes_rw = (M * N * 2) * 1 + (M * N * 1) + (M * 4)
+    total_bytes_rw = (M * N * 2) + (M * N * 1) + (M * 4)
 
     print(f"Configuration:")
     print(f"  - Shape: [{M}, {N}]")
-    print(f"  - Block Size: {BLOCK_SIZE}")
+    print(f"  - Block Size: {config['BLOCK_THREADS']}")
     print(f"  - Total Elements: {total_elements/1e6:.2f}M")
-    print(f"  - Loops per Block: {ITERS}")
+    print(f"  - Loops per Block: {config['ITERS']}")
     print(f"  - Est. Memory Traffic: {total_bytes_rw/1e9:.2f} GB per call")
 
-    # Prepare test data
     np.random.seed(42)
     input_data_fp16 = np.random.uniform(-5.0, 5.0, size=(M, N)).astype(np.float16)
     input_data = input_data_fp16.astype(np.float32)
@@ -338,24 +337,20 @@ def benchmark_per_token_quant(M=4096, N=8192, exe=None, config=None):
     scale_expanded = per_token_scale[:, np.newaxis]
     output_ref = (input_data / scale_expanded).astype(np.int8)
 
-    input_size_bytes = M * N * 2
-    output_size_bytes = M * N * 1
-    scales_size_bytes = M * 4
     input_torch = torch.from_numpy(input_data_fp16).to(device="cuda")
     output_torch = torch.empty((M, N), device="cuda", dtype=torch.int8)
     scales_torch = torch.empty((M,), device="cuda", dtype=torch.float32)
 
     def kernel_launch():
-        exe(input_torch, output_torch, scales_torch, M)
+        launch_fn(input_torch, output_torch, scales_torch, M)
         torch.cuda.synchronize()
 
     print("Running benchmark...")
     _, avg_us = run_perftest(kernel_launch, num_iters=20, num_warmup=2)
-    
-    # Calculate metrics
+
     bandwidth_gbs = total_bytes_rw / (avg_us / 1e6) / 1e9
     avg_ms = avg_us / 1000
-    
+
     results = {
         "avg_ms": avg_ms,
         "avg_us": avg_us,
@@ -372,19 +367,13 @@ def benchmark_per_token_quant(M=4096, N=8192, exe=None, config=None):
         np.abs(output_host.astype(np.float32) - output_ref.astype(np.float32))
     )
 
-    print(f"\nFLIR Kernel Results:")
+    print(f"\nFlyDSL Kernel Results:")
     print(f"  Max Scale Diff:  {scale_diff:.2e}")
     print(f"  Max Output Diff: {output_diff:.2e}")
-    # Standardized bandwidth line so run_tests.sh can pick it up (like matrixTranspose).
     print(f"\nBandwidth: {bandwidth_gbs:.2f} GB/s")
     print(f"  {results}")
 
     if HAS_AITER:
-        # `aiter` is an optional reference backend. In practice it may be built
-        # against a different PyTorch/ROCm ABI than the active environment,
-        # leading to runtime linker errors (ImportError/OSError/undefined symbol).
-        # Treat that as "reference unavailable" instead of failing the FLIR
-        # correctness benchmark.
         try:
             print("\n" + "=" * 80)
             print("Benchmarking Reference Implementation (aiter)")
@@ -407,11 +396,11 @@ def benchmark_per_token_quant(M=4096, N=8192, exe=None, config=None):
                 "total_bytes": total_bytes_rw,
             }
 
-            output_torch, scale_torch = per_token_quant_hip(input_torch)
+            output_torch_ref, scale_torch_ref = per_token_quant_hip(input_torch)
             torch.cuda.synchronize()
 
-            output_ref_torch = output_torch.cpu().numpy()
-            scale_ref_torch = scale_torch.squeeze().cpu().numpy()
+            output_ref_torch = output_torch_ref.cpu().numpy()
+            scale_ref_torch = scale_torch_ref.squeeze().cpu().numpy()
 
             scale_diff_ref = np.max(np.abs(scale_ref_torch - per_token_scale))
             output_diff_ref = np.max(
@@ -422,19 +411,18 @@ def benchmark_per_token_quant(M=4096, N=8192, exe=None, config=None):
             print(f"  Max Scale Diff:  {scale_diff_ref:.2e}")
             print(f"  Max Output Diff: {output_diff_ref:.2e}")
 
-            flir_time = results["avg_ms"]
+            flydsl_time = results["avg_ms"]
             aiter_time = aiter_results["avg_ms"]
-            speedup = aiter_time / flir_time
+            speedup = aiter_time / flydsl_time
 
             print(f"\n" + "=" * 80)
             print(f"Performance Comparison:")
             print(
-                f"  FLIR:     {flir_time:7.3f} ms  ({results['bandwidth_gbs']:8.2f} GB/s)"
+                f"  FlyDSL:   {flydsl_time:7.3f} ms  ({results['bandwidth_gbs']:8.2f} GB/s)"
             )
             print(
                 f"  Reference:  {aiter_time:7.3f} ms  ({aiter_results['bandwidth_gbs']:8.2f} GB/s)"
             )
-            # Avoid printing another "Bandwidth:" line here; run_tests.sh greps for "Bandwidth:".
             print(f"  Speedup:    {speedup:7.2f}x")
             print("=" * 80)
         except Exception as e:
@@ -478,7 +466,7 @@ if __name__ == "__main__":
             test_configs.append((int(m_str), int(n_str)))
 
         print(f"\n{'='*80}")
-        print(f"Per-Token Quantization Multi-Size Benchmark (v3 with caching)")
+        print(f"Per-Token Quantization Multi-Size Benchmark")
         print(f"Test Configurations: {len(test_configs)}")
         for i, (m, n) in enumerate(test_configs, 1):
             print(f"  {i}. M={m}, N={n}")
@@ -488,75 +476,69 @@ if __name__ == "__main__":
         tests_by_n = defaultdict(list)
         for m, n in test_configs:
             tests_by_n[n].append((m, n))
-        
+
         unique_ns = sorted(tests_by_n.keys())
         if len(unique_ns) == 1:
-            print(f"\n✓ All tests use N={unique_ns[0]} - will compile once and reuse!")
+            print(f"\nAll tests use N={unique_ns[0]} - will compile once and reuse!")
         else:
-            print(f"\n⚠ {len(unique_ns)} different N values detected: {unique_ns}")
+            print(f"\n{len(unique_ns)} different N values detected: {unique_ns}")
             print(f"  Will compile once per N value (total {len(unique_ns)} compilations)")
-        
-        gpu_arch = get_rocm_arch()
+
         results = []
         cache = KernelCompilationCache()
-        
+
         for n_val in unique_ns:
             n_tests = tests_by_n[n_val]
-            
+
             print(f"\n{'='*80}")
             print(f"Processing N={n_val} group ({len(n_tests)} test(s))")
             print(f"{'='*80}")
-            
-            # Compile kernel for this N (only once)
-            print(f"Compiling kernel for N={n_val}...")
-            exe, config, was_cached = cache.get_or_compile(
+
+            launch_fn, config, was_cached = cache.get_or_compile(
                 n_val,
-                lambda: compile_kernel_for_n(n_val, gpu_arch)
+                lambda: compile_kernel_for_n(n_val)
             )
-            
+
             if was_cached:
-                print("✓ Using cached executor")
+                print("Using cached launcher")
             else:
-                print("✓ Compiled")
-            
-            # Run all tests with this N using the compiled kernel
+                print("Compiled")
+
             for M, N in n_tests:
                 print(f"\n{'='*80}")
                 print(f"Test {len(results)+1}/{len(test_configs)}: M={M}, N={N}")
                 print(f"{'='*80}")
-                
-                success = benchmark_per_token_quant(M=M, N=N, exe=exe, config=config)
-                
+
+                success = benchmark_per_token_quant(M=M, N=N, launch_fn=launch_fn, config=config)
+
                 results.append({
                     'M': M,
                     'N': N,
                     'success': success,
                 })
-                
-                if not success:
-                    print(f"✗ Failed for M={M}, N={N}")
 
-        # Summary
+                if not success:
+                    print(f"Failed for M={M}, N={N}")
+
         print(f"\n{'='*80}")
         print(f"Summary of All Tests")
         print(f"{'='*80}")
         print(f"{'M':>6} {'N':>6} {'Status':>8}")
         print(f"{'-'*80}")
         for r in results:
-            status = "✓ Pass" if r['success'] else "✗ Fail"
+            status = "Pass" if r['success'] else "Fail"
             print(f"{r['M']:6} {r['N']:6} {status:>8}")
-        
+
         all_passed = all(r['success'] for r in results)
         print(f"\n{'='*80}")
         if all_passed:
-            print("✓ All tests passed!")
+            print("All tests passed!")
         else:
-            print("✗ Some tests failed")
+            print("Some tests failed")
         print(f"{'='*80}\n")
 
         sys.exit(0 if all_passed else 1)
     else:
-        # Single test mode
         success = benchmark_per_token_quant(M=args.tokens, N=args.hidden)
         if not success:
             sys.exit(1)
