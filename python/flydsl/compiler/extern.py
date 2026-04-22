@@ -100,8 +100,13 @@ class ExternFunction:
     bitcode_path:
         Optional path to the LLVM bitcode file (``.bc``) that provides this
         symbol.  When set, the compilation pipeline automatically links it
-        via ``rocdl-attach-target l=<path>``.  If ``None``, the pipeline
-        falls back to prefix-based auto-detection (e.g. ``mori_shmem_*``).
+        via ``rocdl-attach-target l=<path>``.
+    module_init_fn:
+        Optional callable ``fn(hipModule_t) -> None`` invoked once on every
+        GPU module that the JIT runtime loads for a kernel using this
+        ExternFunction.  Use it to initialise device-side globals that the
+        bitcode relies on (for example, writing runtime pointers into a
+        ``__global__`` struct).  Must be deterministic and idempotent.
     """
 
     def __init__(
@@ -111,12 +116,14 @@ class ExternFunction:
         ret_type: str,
         is_pure: bool = False,
         bitcode_path: Optional[str] = None,
+        module_init_fn: Optional[Any] = None,
     ):
         self.symbol    = symbol
         self._arg_type_names = list(arg_types)
         self._ret_type_name  = ret_type
         self.is_pure   = is_pure
         self.bitcode_path = bitcode_path
+        self.module_init_fn = module_init_fn
         # Cache resolved MLIR types per context (keyed by Context object id).
         self._types_cache: dict = {}
         # Track which (context, gpu.module body) pairs we have declared into.
@@ -169,6 +176,9 @@ class ExternFunction:
             ctx.extern_symbols.add(self.symbol)
             if self.bitcode_path is not None:
                 ctx.link_libs.add(self.bitcode_path)
+            if self.module_init_fn is not None and \
+                    self.module_init_fn not in ctx.post_load_processors:
+                ctx.post_load_processors.append(self.module_init_fn)
 
     # -- callable interface -------------------------------------------------
     def __call__(self, *args: Any) -> Any:

@@ -31,24 +31,30 @@
 
 thread_local static int32_t defaultDevice = 0;
 
-// Module tracker — records hipModule_t handles loaded between
-// mgpuResetModuleTracker() and the next query, so that Python-side
-// post-load processors can act on specific modules.
-static thread_local std::vector<hipModule_t> s_loadedModules;
+// Optional per-thread callback fired by mgpuModuleLoad after each
+// successful hipModuleLoadData.  The callback — and any storage it
+// writes into — lives on the Python side; the C++ runtime holds only
+// a single function pointer and stays free of per-module state.
+//
+// Contract: install the callback immediately before
+// ExecutionEngine.initialize() and clear it right after; hipModule_t
+// handles must be consumed before any mgpuModuleUnload on the same
+// thread.
+using FlyModuleLoadCallback = void (*)(hipModule_t, void *);
+static thread_local FlyModuleLoadCallback s_moduleLoadCb = nullptr;
+static thread_local void *s_moduleLoadCbUser = nullptr;
 
-extern "C" void mgpuResetModuleTracker() { s_loadedModules.clear(); }
-extern "C" int mgpuGetLoadedModuleCount() {
-  return static_cast<int>(s_loadedModules.size());
-}
-extern "C" hipModule_t mgpuGetLoadedModule(int idx) {
-  return s_loadedModules[idx];
+extern "C" void mgpuSetModuleLoadCallback(FlyModuleLoadCallback cb,
+                                          void *user) {
+  s_moduleLoadCb = cb;
+  s_moduleLoadCbUser = user;
 }
 
 extern "C" hipModule_t mgpuModuleLoad(void *data, size_t /*gpuBlobSize*/) {
   hipModule_t module = nullptr;
   HIP_REPORT_IF_ERROR(hipModuleLoadData(&module, data));
-  if (module)
-    s_loadedModules.push_back(module);
+  if (module && s_moduleLoadCb)
+    s_moduleLoadCb(module, s_moduleLoadCbUser);
   return module;
 }
 

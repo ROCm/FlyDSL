@@ -179,7 +179,7 @@ def cleanup():
 # 4. Tests
 # ===================================================================
 
-def test_basic(mype, npes):
+def run_basic(mype, npes):
     """Verify my_pe() and n_pes() return correct values."""
     print(f"\n[PE {mype}] === FlyDSL shmem_basic_kernel ===")
     out = torch.zeros(2, dtype=torch.int32, device="cuda")
@@ -195,7 +195,7 @@ def test_basic(mype, npes):
     print(f"[PE {mype}] [FlyDSL] basic  PASS")
 
 
-def test_put(mype, npes):
+def run_put(mype, npes):
     """Send an int32 to peer PE via shmem_put, verify receipt."""
     print(f"\n[PE {mype}] === FlyDSL shmem_put_kernel ===")
     buf = ms.mori_shmem_create_tensor((1,), torch.int32)
@@ -225,8 +225,8 @@ def test_put(mype, npes):
 def main():
     mype, npes = setup_distributed()
     try:
-        test_basic(mype, npes)
-        test_put(mype, npes)
+        run_basic(mype, npes)
+        run_put(mype, npes)
         if mype == 0:
             print(f"\n{'=' * 60}")
             print(f"  All tests PASSED on {npes} PEs (FlyDSL + mori shmem)")

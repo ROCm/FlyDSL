@@ -8,7 +8,6 @@ import os
 import pickle
 import pkgutil
 import threading
-import time
 import types
 from contextlib import nullcontext
 from functools import lru_cache
@@ -384,13 +383,18 @@ class MlirCompiler:
             found_rocdl = False
             for f in fragments:
                 if "rocdl-attach-target" in f:
-                    base = f.rstrip("}").rstrip()
+                    if f.endswith("}"):
+                        base = f[:-1].rstrip()
+                    else:
+                        base = f.rstrip()
                     new_fragments.append(f"{base} {link_opt}" + "}")
                     found_rocdl = True
                 else:
                     new_fragments.append(f)
-            assert found_rocdl, \
-                "link_libs specified but no 'rocdl-attach-target' fragment found in pipeline"
+            if not found_rocdl:
+                raise RuntimeError(
+                    "link_libs specified but no 'rocdl-attach-target' fragment found in pipeline"
+                )
             fragments = new_fragments
 
         from .llvm_options import llvm_options as _llvm_options
@@ -424,10 +428,7 @@ class MlirCompiler:
                     stage_name = f"{stage_num:02d}_{_stage_label_from_fragment(frag)}"
                     pm = PassManager.parse(f"builtin.module({frag})")
                     pm.enable_verifier(env.debug.enable_verifier)
-                    _t0 = time.perf_counter()
                     pm.run(module.operation)
-                    _dt = time.perf_counter() - _t0
-                    log().debug(f"[flydsl.compile] pass {stage_name}  {_dt:.3f}s")
 
                     stage_asm = module.operation.get_asm(enable_debug_info=True)
                     out = _dump_ir(stage_name, dump_dir=dump_dir, asm=stage_asm)
@@ -459,11 +460,7 @@ class MlirCompiler:
                 pm = PassManager.parse(pipeline)
                 pm.enable_verifier(env.debug.enable_verifier)
                 pm.enable_ir_printing(print_after_all=env.debug.print_after_all)
-                _t0 = time.perf_counter()
                 pm.run(module.operation)
-                _dt = time.perf_counter() - _t0
-                if _dt > 1.0:
-                    log().info(f"[flydsl.compile] total pipeline  {_dt:.3f}s")
 
         return module
 
@@ -853,21 +850,12 @@ class JitFunction:
 
             original_ir = module.operation.get_asm(enable_debug_info=True)
 
-            # Collect link_libs and post-load processors.
-            # 1. Explicit: ExternFunction.bitcode_path → comp_ctx.link_libs
-            # 2. Auto: delegate to mori compile_helper (no hardcoded prefixes)
+            # Extern-symbol integration is carried entirely via
+            # CompilationContext: each ExternFunction populates
+            # link_libs and post_load_processors at declaration time,
+            # so the JIT path depends on no framework-specific import.
             link_libs = list(comp_ctx.link_libs) if comp_ctx.link_libs else None
-            post_load_processors = []
-
-            if comp_ctx.extern_symbols and not link_libs:
-                try:
-                    from mori.ir.flydsl.compile_helper import prepare_compile
-                    shmem_info = prepare_compile(comp_ctx.extern_symbols, arch=backend.target.arch)
-                    if shmem_info is not None:
-                        link_libs = shmem_info.link_libs
-                        post_load_processors.append(shmem_info.module_init_fn)
-                except ImportError:
-                    pass
+            post_load_processors = list(comp_ctx.post_load_processors)
 
             compiled_module = MlirCompiler.compile(
                 module, arch=backend.target.arch, func_name=self.func.__name__, link_libs=link_libs,

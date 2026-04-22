@@ -2,14 +2,44 @@
 # Copyright (c) 2025 FlyDSL Project Contributors
 
 import ctypes
+import importlib
 import threading
+import warnings
 from functools import lru_cache
 from pathlib import Path
-from typing import List
+from typing import Callable, List, Optional
 
 from .._mlir import ir
 from .._mlir.execution_engine import ExecutionEngine
 from .protocol import fly_pointers
+
+
+# C prototype for the runtime callback installed by
+# mgpuSetModuleLoadCallback.  Keep at module scope so ctypes generates
+# the type once; per-compilation wrappers simply wrap a fresh Python
+# closure in this CFUNCTYPE.
+_ModuleLoadCb = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p)
+
+
+def _qualname(fn: Callable) -> Optional[str]:
+    """Serialise a callable as ``module:qualname``; return None if not possible."""
+    mod = getattr(fn, "__module__", None)
+    qn = getattr(fn, "__qualname__", None)
+    if not mod or not qn:
+        return None
+    return f"{mod}:{qn}"
+
+
+def _resolve_qualname(ref: str) -> Optional[Callable]:
+    """Inverse of _qualname; silently returns None on failure."""
+    try:
+        mod_name, qn = ref.split(":", 1)
+        obj = importlib.import_module(mod_name)
+        for part in qn.split("."):
+            obj = getattr(obj, part)
+        return obj
+    except Exception:
+        return None
 
 
 @lru_cache(maxsize=1)
@@ -52,8 +82,8 @@ class CompiledArtifact:
         self,
         compiled_module: ir.Module,
         func_name: str,
-        source_ir: str = None,
-        post_load_processors: List = None,
+        source_ir: Optional[str] = None,
+        post_load_processors: Optional[List[Callable]] = None,
     ):
         self._ir_text = str(compiled_module)
         self._entry = func_name
@@ -66,11 +96,24 @@ class CompiledArtifact:
         self._packer = _ArgPacker()
 
     def __getstate__(self):
+        # Serialise post-load processors by fully-qualified name so the
+        # pickle stream contains no concrete callables.  Callables that
+        # lack a module:qualname pair are dropped; the unpickler will
+        # warn once so missing hooks are visible.
+        refs: List[str] = []
+        dropped = 0
+        for p in self._post_load_processors:
+            ref = _qualname(p)
+            if ref is None:
+                dropped += 1
+            else:
+                refs.append(ref)
         return {
             "ir_text": self._ir_text,
             "entry": self._entry,
             "source_ir": self._source_ir,
-            "has_post_load": bool(self._post_load_processors),
+            "processor_refs": refs,
+            "processors_dropped": dropped,
         }
 
     def __setstate__(self, state):
@@ -78,12 +121,29 @@ class CompiledArtifact:
         self._entry = state["entry"]
         self._source_ir = state["source_ir"]
         self._post_load_processors = []
-        if state.get("has_post_load"):
-            try:
-                from mori.ir.flydsl.compile_helper import restore_processors
-                self._post_load_processors = restore_processors()
-            except ImportError:
-                pass
+        missing: List[str] = []
+        for ref in state.get("processor_refs", []):
+            fn = _resolve_qualname(ref)
+            if fn is None:
+                missing.append(ref)
+            else:
+                self._post_load_processors.append(fn)
+        if missing:
+            warnings.warn(
+                "CompiledArtifact was unpickled without some post-load "
+                f"processors (could not resolve: {missing}); kernels that "
+                "rely on them may fail at launch time.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        if state.get("processors_dropped"):
+            warnings.warn(
+                f"{state['processors_dropped']} post-load processor(s) could "
+                "not be pickled (no module:qualname); they will not be "
+                "re-attached on unpickle.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
         self._module = None
         self._engine = None
         self._func_exe = None
@@ -95,35 +155,60 @@ class CompiledArtifact:
             if self._engine is not None:
                 return
 
-            runtime_lib = ctypes.CDLL(str(_resolve_runtime_libs()[0]))
+            loaded_modules: List[int] = []
+            cb_ref: Optional[ctypes._CFuncPtr] = None
+            runtime_lib: Optional[ctypes.CDLL] = None
 
             if self._post_load_processors:
-                runtime_lib.mgpuResetModuleTracker()
+                runtime_lib = ctypes.CDLL(str(_resolve_runtime_libs()[0]))
+                # argtypes use c_void_p so we can pass both a ctypes
+                # CFUNCTYPE instance (via ctypes.cast) and None (NULL)
+                # through the same entry point.
+                runtime_lib.mgpuSetModuleLoadCallback.argtypes = [
+                    ctypes.c_void_p, ctypes.c_void_p,
+                ]
+                runtime_lib.mgpuSetModuleLoadCallback.restype = None
 
-            # Create context and immediately exit the with-block, but
-            # keep a reference (self._ctx) so the context is not
-            # garbage-collected.  Destroying the context while
-            # ExecutionEngine still holds HSA code objects causes GPU
-            # memory access faults.
-            ctx = ir.Context()
-            with ctx:
-                ctx.load_all_available_dialects()
-                self._module = ir.Module.parse(self._ir_text)
-                self._engine = ExecutionEngine(
-                    self._module,
-                    opt_level=3,
-                    shared_libs=_resolve_runtime_libs(),
+                @_ModuleLoadCb
+                def _on_module_load(module, _user):
+                    loaded_modules.append(module)
+
+                # Keep a strong reference to the ctypes trampoline for
+                # the entire engine-init window; letting it be GC'd
+                # while the C++ runtime still holds the pointer would
+                # SIGSEGV on the next hipModuleLoadData.
+                cb_ref = _on_module_load
+                runtime_lib.mgpuSetModuleLoadCallback(
+                    ctypes.cast(cb_ref, ctypes.c_void_p), None,
                 )
-                self._engine.initialize()
-            self._ctx = ctx
 
-            if self._post_load_processors:
-                runtime_lib.mgpuGetLoadedModuleCount.restype = ctypes.c_int
-                runtime_lib.mgpuGetLoadedModule.restype = ctypes.c_void_p
-                count = runtime_lib.mgpuGetLoadedModuleCount()
-                for proc in self._post_load_processors:
-                    for i in range(count):
-                        proc(runtime_lib.mgpuGetLoadedModule(ctypes.c_int(i)))
+            try:
+                # Create context and immediately exit the with-block, but
+                # keep a reference (self._ctx) so the context is not
+                # garbage-collected.  Destroying the context while
+                # ExecutionEngine still holds HSA code objects causes GPU
+                # memory access faults.
+                ctx = ir.Context()
+                with ctx:
+                    ctx.load_all_available_dialects()
+                    self._module = ir.Module.parse(self._ir_text)
+                    self._engine = ExecutionEngine(
+                        self._module,
+                        opt_level=3,
+                        shared_libs=_resolve_runtime_libs(),
+                    )
+                    self._engine.initialize()
+                self._ctx = ctx
+            finally:
+                if runtime_lib is not None:
+                    runtime_lib.mgpuSetModuleLoadCallback(None, None)
+                # Release the ctypes trampoline now that the C++ runtime
+                # no longer holds a pointer to it.
+                del cb_ref
+
+            for proc in self._post_load_processors:
+                for module in loaded_modules:
+                    proc(module)
 
     def _get_func_exe(self):
         if self._func_exe is None:

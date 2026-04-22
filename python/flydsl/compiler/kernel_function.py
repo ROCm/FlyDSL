@@ -252,6 +252,9 @@ class CompilationContext:
         self.stream_arg = None
         self.extern_symbols: set = set()
         self.link_libs: set = set()
+        # Callables invoked on each GPU hipModule_t after ExecutionEngine
+        # loads it.  Populated by ExternFunction when module_init_fn is set.
+        self.post_load_processors: list = []
 
     @classmethod
     def get_current(cls) -> Optional["CompilationContext"]:
