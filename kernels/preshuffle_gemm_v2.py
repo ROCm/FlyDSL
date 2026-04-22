@@ -4,14 +4,14 @@
 """Preshuffle GEMM kernel — Layout API version.
 
 Supports f16, bf16, fp8 via layout API (fx.copy + fx.gemm).
-Uses scf.for tile loop with ping-pong double buffer (2-stage B).
+Python-unrolled tile loop with ping-pong double buffer (2-stage B).
 Includes hot_loop_scheduler from the old pipeline for instruction scheduling.
 """
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.expr import vector, gpu, rocdl, range_constexpr
-from flydsl.expr.typing import T, Float16, Float32, BFloat16, Float8E4M3FNUZ, Float8E4M3FN, Int8, Vector as Vec
+from flydsl.expr.typing import T, Float16, Float32, BFloat16, Float8E4M3FNUZ, Float8E4M3FN, Vector as Vec
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.runtime.device import get_rocm_arch
 from flydsl._mlir import ir
@@ -152,18 +152,20 @@ def compile_preshuffle_gemm_v2(
         pA_s2r = thr_s2r.partition_S(sA)
         pB_g = thr_g2r_B.partition_S(tB)
 
-        # Fragments — 2 separate B fragments (split double buffer for VGPR lifetime)
+        # Fragments — single 2-stage B alloca (leaf axis = stage), example-04 style
         frag_copy_A = fx.make_fragment_like(pA_s[None, None, None, 0])
         frag_A = thr_mma.make_fragment_A(sA[None, None, 0])
-        frag_B_single_layout = thr_mma.partition_B(tB).layout(None, None, None, 0)
-        frag_B_0 = fx.make_fragment_like(frag_B_single_layout, layout_elem.ir_type)
-        frag_B_1 = fx.make_fragment_like(frag_B_single_layout, layout_elem.ir_type)
-        frag_B_stages = [frag_B_0, frag_B_1]
+        mma_frag_B = fx.make_fragment_like(
+            fx.flat_product(
+                fx.make_fragment_layout_like(
+                    thr_mma.partition_B(tB).layout(None, None, None, 0)),
+                fx.make_layout(2, 1),
+            ),
+            layout_elem.ir_type,
+        )
+        mma_frag_B_retile = thr_g2r_B.retile(mma_frag_B)
         frag_C = thr_mma.make_fragment_C(tC)
         frag_A_retile = thr_s2r.retile(frag_A)
-        frag_B_0_retile = thr_g2r_B.retile(frag_B_0)
-        frag_B_1_retile = thr_g2r_B.retile(frag_B_1)
-        frag_B_retile_stages = [frag_B_0_retile, frag_B_1_retile]
         buf_copy_out = fx.make_copy_atom(fx.rocdl.BufferCopy16b(), out_elem_cls)
         thr_r2g_C = fx.make_tiled_copy_C(buf_copy_out, tiled_mma).get_slice(tid)
         pC_g = thr_r2g_C.partition_S(tC)
@@ -285,19 +287,13 @@ def compile_preshuffle_gemm_v2(
 
             rocdl.sched_barrier(0)
 
-        # ── Pipeline stage (double-buffered B via split fragments) ─
+        # ── Pipeline stage (double-buffered B via single 2-stage fragment) ─
         def pipeline_stage(read_stage, next_k_val=None, read_next=True):
             write_stage = read_stage ^ 1
-            cur_frag_B = frag_B_stages[read_stage]
-            # 1. Prefetch next A tile (global → register)
             if read_next and next_k_val is not None:
                 fx.copy(buf_copy_g2s, pA_g[None, None, None, next_k_val], frag_copy_A)
-            # 2. Load next B tile (before compute — matches v1 pipeline order,
-            #    all vmem available for scheduler interleaving with MFMAs)
-            if read_next and next_k_val is not None:
                 fx.copy(mma_copy, pB_g[None, None, None, next_k_val],
-                        frag_B_retile_stages[write_stage])
-            # 3. Compute: A from LDS + MFMA with current B
+                        mma_frag_B_retile[None, None, None, write_stage])
             for ki in range_constexpr(k_iters):
                 fx.copy(mma_uni, pA_s2r[None, None, ki, read_stage],
                         frag_A_retile[None, None, ki])
@@ -306,9 +302,8 @@ def compile_preshuffle_gemm_v2(
                 k_coord = ki if (use_mfma_scale_128 or use_mfma_k32) else (None, ki)
                 fx.gemm(tiled_mma, frag_C,
                         frag_A[None, None, k_coord],
-                        cur_frag_B[None, None, k_coord],
+                        mma_frag_B[None, None, k_coord, read_stage],
                         frag_C)
-            # 4. Write A tile to LDS + barrier
             fx.copy(uni_copy_g2s, frag_copy_A, pA_s[None, None, None, write_stage])
             if enable_scheduler:
                 hot_loop_scheduler()
@@ -316,49 +311,19 @@ def compile_preshuffle_gemm_v2(
 
         # ── Prologue ──────────────────────────────────────────────
         fx.copy(buf_copy_g2s, pA_g[None, None, None, 0], frag_copy_A)
-        fx.copy(mma_copy, pB_g[None, None, None, 0], frag_B_retile_stages[0])
+        fx.copy(mma_copy, pB_g[None, None, None, 0],
+                mma_frag_B_retile[None, None, None, 0])
         frag_C.store(Vec.filled(acc_size, 0.0, Float32))
         fx.copy(uni_copy_g2s, frag_copy_A, pA_s[None, None, None, 0])
         gpu.barrier()
         rocdl.sched_barrier(0)
 
-        # ── Main tile loop (scf.for with ping-pong) ──────────────
-        if num_tiles == 1:
-            pipeline_stage(read_stage=0, read_next=False)
-        elif num_tiles == 2:
-            pipeline_stage(read_stage=0, next_k_val=fx.Int32(1))
-            pipeline_stage(read_stage=1, read_next=False)
-        else:
-            loop_start = fx.Index(0)
-            loop_end = fx.Index((num_tiles - 2) // 2)
-            loop_step = fx.Index(1)
-            # Loop-carried values:
-            #   bf16/f16: acc + B stage 0 (B alloca types don't match for SROA)
-            #   fp8: acc only (B alloca has uniform i64 types → SROA promotes it)
-            acc_init = frag_C.load()
-            if is_fp8:
-                for iv, state in range(loop_start, loop_end, loop_step,
-                                       init=[acc_init]):
-                    frag_C.store(state[0])
-                    k_base = fx.Int32(iv * 2)
-                    pipeline_stage(read_stage=0, next_k_val=k_base + fx.Int32(1))
-                    pipeline_stage(read_stage=1, next_k_val=k_base + fx.Int32(2))
-                    results = yield [frag_C.load()]
-                frag_C.store(results)
-            else:
-                b0_init = frag_B_stages[0].load()
-                for iv, state in range(loop_start, loop_end, loop_step,
-                                       init=[acc_init, b0_init]):
-                    frag_C.store(state[0])
-                    frag_B_stages[0].store(state[1])
-                    k_base = fx.Int32(iv * 2)
-                    pipeline_stage(read_stage=0, next_k_val=k_base + fx.Int32(1))
-                    pipeline_stage(read_stage=1, next_k_val=k_base + fx.Int32(2))
-                    results = yield [frag_C.load(), frag_B_stages[0].load()]
-                frag_C.store(results[0])
-                frag_B_stages[0].store(results[1])
-            pipeline_stage(read_stage=0, next_k_val=fx.Int32(num_tiles - 1))
-            pipeline_stage(read_stage=1, read_next=False)
+        # ── Main tile loop (python-unrolled ping-pong, example-04 style) ──
+        for k_iter in range(0, num_tiles - 2, 2):
+            pipeline_stage(read_stage=0, next_k_val=fx.Int32(k_iter + 1))
+            pipeline_stage(read_stage=1, next_k_val=fx.Int32(k_iter + 2))
+        pipeline_stage(read_stage=0, next_k_val=fx.Int32(num_tiles - 1))
+        pipeline_stage(read_stage=1, read_next=False)
 
         # ── Epilogue ─────────────────────────────────────────────
         if is_fp8:
