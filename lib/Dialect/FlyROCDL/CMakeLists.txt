@@ -4,6 +4,7 @@ add_mlir_dialect_library(MLIRFlyROCDLDialect
   Dialect.cpp
   CDNA3/MmaAtom.cpp
   CDNA3/CopyAtom.cpp
+  CDNA4/MmaAtom.cpp
   CDNA4/CopyAtom.cpp
   GFX1250/MmaAtom.cpp
 

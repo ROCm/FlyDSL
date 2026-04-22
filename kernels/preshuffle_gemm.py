@@ -252,6 +252,7 @@ def compile_preshuffle_gemm_a8(
 
     _is_gfx950 = str(gpu_arch).startswith("gfx950")
     _is_gfx942 = str(gpu_arch).startswith("gfx942")
+    use_mfma_k32 = _is_gfx950 and is_f16_or_bf16
 
     lds_stride_bytes = tile_k_bytes
 
@@ -519,7 +520,11 @@ def compile_preshuffle_gemm_a8(
             b_i64x2 = vector.bitcast(T.i64x2, b16)
             b0_i64 = vector.extract(b_i64x2, static_position=[0], dynamic_position=[])
             b1_i64 = vector.extract(b_i64x2, static_position=[1], dynamic_position=[])
+<<<<<<< yxd/if_dispatch_dynamic_tests_refactor
             if const_expr(not is_f16_or_bf16):
+=======
+            if not is_f16_or_bf16 or use_mfma_k32:
+>>>>>>> main
                 return b0_i64, b1_i64
             b0_v1 = vector.from_elements(T.vec(1, T.i64), [b0_i64])
             b1_v1 = vector.from_elements(T.vec(1, T.i64), [b1_i64])
@@ -601,7 +606,11 @@ def compile_preshuffle_gemm_a8(
             a0_i64 = vector.extract(a_i64x2, static_position=[0], dynamic_position=[])
             a1_i64 = vector.extract(a_i64x2, static_position=[1], dynamic_position=[])
 
+<<<<<<< yxd/if_dispatch_dynamic_tests_refactor
             if const_expr(not is_f16_or_bf16):
+=======
+            if not is_f16_or_bf16 or use_mfma_k32:
+>>>>>>> main
                 return a0_i64, a1_i64
 
             a0_v1 = vector.from_elements(T.vec(1, T.i64), [a0_i64])
@@ -947,6 +956,7 @@ def compile_preshuffle_gemm_a8(
                 return current_accs_list, scales_pf
 
             mfma_res_ty = T.i32x4 if is_int8 else T.f32x4
+<<<<<<< yxd/if_dispatch_dynamic_tests_refactor
 
             def _mfma_fn_placeholder(_res_ty, _ops):
                 raise RuntimeError("mfma_fn is not selected for current dtype path")
@@ -958,15 +968,35 @@ def compile_preshuffle_gemm_a8(
                 mfma_fn = rocdl.mfma_f32_16x16x16f16
             elif const_expr(is_bf16):
                 mfma_fn = rocdl.mfma_f32_16x16x16bf16_1k
+=======
+            if use_mfma_k32:
+                mfma_fn_k32 = rocdl.mfma_f32_16x16x32_f16 if is_f16 else rocdl.mfma_f32_16x16x32_bf16
+
+                def i64x2_to_v8(lo, hi):
+                    v2 = vector.from_elements(T.i64x2, [lo, hi])
+                    return vector.bitcast(T.f16x8 if is_f16 else T.bf16x8, v2)
+
+                def mfma_k64_bytes(acc_in, a0, a1, b0, b1):
+                    av = i64x2_to_v8(a0, a1)
+                    bv = i64x2_to_v8(b0, b1)
+                    return mfma_fn_k32(mfma_res_ty, [av, bv, acc_in, 0, 0, 0])
+>>>>>>> main
             else:
-                mfma_fn = rocdl.mfma_f32_16x16x32_fp8_fp8
+                if is_int8:
+                    mfma_fn = mfma_i32_k32
+                elif is_f16:
+                    mfma_fn = rocdl.mfma_f32_16x16x16f16
+                elif is_bf16:
+                    mfma_fn = rocdl.mfma_f32_16x16x16bf16_1k
+                else:
+                    mfma_fn = rocdl.mfma_f32_16x16x32_fp8_fp8
 
-            def mfma_step(acc_in, a, b):
-                return mfma_fn(mfma_res_ty, [a, b, acc_in, 0, 0, 0])
+                def mfma_step(acc_in, a, b):
+                    return mfma_fn(mfma_res_ty, [a, b, acc_in, 0, 0, 0])
 
-            def mfma_k64_bytes(acc_in, a0, a1, b0, b1):
-                acc_mid = mfma_step(acc_in, a0, b0)
-                return mfma_step(acc_mid, a1, b1)
+                def mfma_k64_bytes(acc_in, a0, a1, b0, b1):
+                    acc_mid = mfma_step(acc_in, a0, b0)
+                    return mfma_step(acc_mid, a1, b1)
 
             for ku in range_constexpr(k_unroll):
                 b_packs0, b_packs1 = b_tile_in[ku]
@@ -1212,7 +1242,12 @@ def compile_preshuffle_gemm_a8(
                         rocdl.sched_dswr(1)
             else:
                 mfma_group = num_acc_n
-                element_k_per_mfma = 128 if _is_gfx950 else 32
+                if use_mfma_k32:
+                    element_k_per_mfma = 32
+                elif _is_gfx950:
+                    element_k_per_mfma = 128
+                else:
+                    element_k_per_mfma = 32
                 num_mfma_per_tile_k = tile_k // element_k_per_mfma
                 mfma_total = num_mfma_per_tile_k * m_repeat * mfma_group
                 num_ds_load = num_a_lds_load
