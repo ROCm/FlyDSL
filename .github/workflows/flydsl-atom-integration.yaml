@@ -119,8 +119,10 @@ jobs:
         run: |
           docker exec "${CONTAINER_NAME}" bash -lc "
             set -euo pipefail
-            apt-get update
-            apt-get install -y cmake build-essential git curl
+            command -v git curl cmake python3
+            git --version
+            cmake --version
+            python3 --version
             python3 -m pip install --timeout 60 --retries 10 -U pip setuptools wheel
             python3 -m pip install --timeout 60 --retries 10 'ninja>=1.11.1' 'pybind11>=3.0.1' 'lm-eval[api]' hf_transfer 'huggingface_hub[cli]'
             git config --global --add safe.directory /workspace/flydsl-test
