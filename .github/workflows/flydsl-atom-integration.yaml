@@ -1,0 +1,278 @@
+name: FlyDSL ATOM integration
+
+on:
+  push:
+    branches:
+      - main
+      - pre_v0.1
+  pull_request:
+    branches:
+      - main
+      - pre_v0.1
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  ATOM_BASE_IMAGE: rocm/atom-dev:latest
+  GITHUB_REPO_NAME: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+  GITHUB_COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+
+jobs:
+  atom-accuracy:
+    name: ATOM accuracy / ${{ matrix.model_name }}
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - model_name: DeepSeek-R1-0528
+            model_path: deepseek-ai/DeepSeek-R1-0528
+            extra_args: --kv_cache_dtype fp8 -tp 8
+            accuracy_threshold: 0.94
+            runner: linux-flydsl-mi355-8
+            env_vars: ""
+          - model_name: gpt-oss-120b
+            model_path: openai/gpt-oss-120b
+            extra_args: --kv_cache_dtype fp8 --gpu-memory-utilization 0.3
+            accuracy_threshold: 0.38
+            runner: linux-flydsl-mi355-1
+            env_vars: ""
+
+    runs-on: ${{ matrix.runner }}
+
+    env:
+      CONTAINER_NAME: flydsl_atom_${{ strategy.job-index }}
+
+    steps:
+      - name: Checkout FlyDSL code
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.GITHUB_REPO_NAME }}
+          ref: ${{ env.GITHUB_COMMIT_SHA }}
+          path: flydsl-test
+
+      - name: Restore cached MLIR install tarball
+        id: mlir-cache
+        uses: actions/cache@v4
+        with:
+          path: mlir_install.tgz
+          key: flydsl-mlir-install-${{ hashFiles('flydsl-test/cmake/llvm-hash.txt', 'flydsl-test/scripts/build_llvm.sh', 'flydsl-test/.github/workflows/flydsl-atom-integration.yaml') }}
+
+      - name: Start CI container
+        run: |
+          set -euo pipefail
+
+          echo "Cleaning up any stale container..."
+          (docker ps -aq -f name="^${CONTAINER_NAME}$" | xargs -r docker stop) || true
+          (docker ps -aq -f name="^${CONTAINER_NAME}$" | xargs -r docker rm) || true
+
+          if [ -f "/etc/podinfo/gha-render-devices" ]; then
+            DEVICE_FLAG=$(cat /etc/podinfo/gha-render-devices)
+          else
+            DEVICE_FLAG="--device /dev/dri"
+          fi
+
+          MODEL_MOUNT=""
+          if [ -d "/models" ]; then
+            MODEL_MOUNT="-v /models:/models"
+          fi
+
+          printf '%s\n' "${MODEL_ENV_VARS:-}" | grep -v '^$' > /tmp/flydsl_atom_env.txt || true
+
+          docker run -dt --pull always --device=/dev/kfd $DEVICE_FLAG \
+            -v "${GITHUB_WORKSPACE:-$PWD}:/workspace" \
+            $MODEL_MOUNT \
+            -w /workspace \
+            --ipc=host --group-add video \
+            --shm-size=16G \
+            --privileged \
+            --cap-add=SYS_PTRACE \
+            --env-file /tmp/flydsl_atom_env.txt \
+            --security-opt seccomp=unconfined \
+            --ulimit memlock=-1 \
+            --ulimit stack=67108864 \
+            -e ATOM_DISABLE_MMAP=true \
+            -e HF_HUB_ENABLE_HF_TRANSFER=1 \
+            -e HF_TOKEN="${secrets.HF_TOKEN:-}" \
+            --name "${CONTAINER_NAME}" \
+            "${{ env.ATOM_BASE_IMAGE }}"
+        env:
+          GITHUB_WORKSPACE: ${{ github.workspace }}
+          MODEL_ENV_VARS: ${{ matrix.env_vars }}
+
+      - name: Install CI dependencies
+        run: |
+          docker exec "${CONTAINER_NAME}" bash -lc "
+            set -euo pipefail
+            apt-get update
+            apt-get install -y cmake build-essential git curl
+            python3 -m pip install --timeout 60 --retries 10 -U pip setuptools wheel
+            python3 -m pip install --timeout 60 --retries 10 'ninja>=1.11.1' 'pybind11>=3.0.1' 'lm-eval[api]' hf_transfer 'huggingface_hub[cli]'
+            git config --global --add safe.directory /workspace/flydsl-test
+            cd /workspace/flydsl-test
+            git submodule sync
+            git submodule update --init --recursive
+          "
+
+      - name: Restore cached MLIR install into container
+        if: steps.mlir-cache.outputs.cache-hit == 'true'
+        run: |
+          docker cp mlir_install.tgz "${CONTAINER_NAME}:/tmp/mlir_install.tgz"
+          docker exec "${CONTAINER_NAME}" bash -lc "
+            set -euo pipefail
+            rm -rf /workspace/llvm-project/build-flydsl/mlir_install
+            mkdir -p /workspace/llvm-project/build-flydsl
+            tar -xzf /tmp/mlir_install.tgz -C /workspace/llvm-project/build-flydsl
+            ls -la /workspace/llvm-project/build-flydsl/mlir_install/lib/cmake/mlir
+          "
+
+      - name: Build LLVM and cache MLIR install
+        if: steps.mlir-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          docker exec "${CONTAINER_NAME}" bash -lc "
+            set -euo pipefail
+            cd /workspace/flydsl-test
+            bash scripts/build_llvm.sh
+            ls -la /workspace/llvm-project/build-flydsl/mlir_install/lib/cmake/mlir
+          "
+          docker cp "${CONTAINER_NAME}:/workspace/llvm-project/build-flydsl/mlir_install.tgz" ./mlir_install.tgz
+
+      - name: Reinstall aiter main and FlyDSL PR commit
+        run: |
+          docker exec "${CONTAINER_NAME}" bash -lc "
+            set -euo pipefail
+
+            echo '=== Reinstalling aiter from main ==='
+            pip uninstall -y amd-aiter aiter || true
+            git clone --depth 1 -b main https://github.com/ROCm/aiter.git /tmp/aiter-main
+            cd /tmp/aiter-main
+            git submodule sync
+            git submodule update --init --recursive
+            pip install -e .
+
+            echo '=== Installing FlyDSL from the checked out PR commit ==='
+            pip uninstall -y flydsl || true
+            cd /workspace/flydsl-test
+            pip install -e .
+
+            python3 - <<'PY'
+            import pathlib
+            import atom
+            import flydsl
+
+            repo_root = pathlib.Path('/workspace/flydsl-test').resolve()
+            flydsl_path = pathlib.Path(flydsl.__file__).resolve()
+
+            print(f'atom package: {atom.__file__}')
+            print(f'flydsl package: {flydsl_path}')
+            print(f'flydsl version: {getattr(flydsl, "__version__", "unknown")}')
+
+            if repo_root not in flydsl_path.parents:
+                raise SystemExit(f'FlyDSL is not loaded from the checked out PR commit: {flydsl_path}')
+            PY
+          "
+
+      - name: Pre-download model when cache mount exists
+        run: |
+          set -euo pipefail
+          if [ -d "/models" ]; then
+            docker exec "${CONTAINER_NAME}" bash -lc "
+              set -euo pipefail
+              hf download '${{ matrix.model_path }}' --local-dir '/models/${{ matrix.model_path }}'
+            "
+          else
+            echo "/models is not available on this runner; using Hugging Face model path directly."
+          fi
+
+      - name: Run ATOM accuracy test
+        run: |
+          set -euo pipefail
+          docker exec "${CONTAINER_NAME}" bash -lc "
+            set -euo pipefail
+            cd /workspace/flydsl-test
+
+            if [ -d '/models/${{ matrix.model_path }}' ]; then
+              model_path='/models/${{ matrix.model_path }}'
+            else
+              model_path='${{ matrix.model_path }}'
+            fi
+
+            bash scripts/run_atom_downstream.sh launch \"\$model_path\" ${{ matrix.extra_args }}
+            bash scripts/run_atom_downstream.sh accuracy \"\$model_path\"
+          " 2>&1 | tee atom_accuracy_output.txt
+
+      - name: Check accuracy threshold
+        if: success()
+        env:
+          ACCURACY_THRESHOLD: ${{ matrix.accuracy_threshold }}
+        run: |
+          set -euo pipefail
+          RESULT_FILE=$(python3 - <<'PY'
+          import glob
+          files = sorted(glob.glob('flydsl-test/accuracy_test_results/*.json'))
+          print(files[-1] if files else '')
+          PY
+          )
+          if [ -z "${RESULT_FILE:-}" ] || [ ! -f "${RESULT_FILE}" ]; then
+            echo "No accuracy result JSON found in flydsl-test/accuracy_test_results/"
+            exit 1
+          fi
+
+          RESULT_FILE="${RESULT_FILE}" python3 - <<'PY'
+          import json
+          import os
+
+          result_file = os.environ["RESULT_FILE"]
+          threshold = float(os.environ["ACCURACY_THRESHOLD"])
+
+          with open(result_file, encoding="utf-8") as f:
+              result = json.load(f)
+
+          value = result["results"]["gsm8k"]["exact_match,flexible-extract"]
+          print(f"RESULT_FILE: {result_file}")
+          print(f"Flexible extract value: {value}")
+          print(f"Accuracy threshold: {threshold}")
+
+          if value < threshold:
+              raise SystemExit(f"Accuracy test failed: {value} < {threshold}")
+          print(f"Accuracy test passed: {value} >= {threshold}")
+          PY
+
+      - name: Collect test summary
+        if: success()
+        run: |
+          echo "Accuracy Test Summary for ${{ matrix.model_name }}:" >> "${GITHUB_STEP_SUMMARY}"
+          awk '/\|Tasks\|Version\|/,/^$/ { if (NF > 0) print }' atom_accuracy_output.txt >> "${GITHUB_STEP_SUMMARY}" || true
+
+      - name: Collect ATOM server log
+        if: always()
+        run: |
+          docker cp "${CONTAINER_NAME}:/tmp/atom_server.log" atom_server.log 2>/dev/null || true
+
+      - name: Upload logs and accuracy results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: flydsl-atom-${{ matrix.model_name }}
+          path: |
+            atom_accuracy_output.txt
+            atom_server.log
+            flydsl-test/accuracy_test_results/*.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Clean up
+        if: always()
+        run: |
+          docker exec "${CONTAINER_NAME}" bash -lc "
+            set -euo pipefail
+            cd /workspace/flydsl-test
+            bash scripts/run_atom_downstream.sh stop || true
+            rm -rf /workspace/llvm-project /workspace/flydsl-test/build-fly /workspace/flydsl-test/python/flydsl/_mlir
+          " || true
+          docker stop "${CONTAINER_NAME}" || true
+          docker rm "${CONTAINER_NAME}" || true
