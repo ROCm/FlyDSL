@@ -54,8 +54,10 @@ private:
 };
 
 int Divisibility::get(Value v) {
-  if (auto c = getConstantIntValue(v))
-    return *c == 0 ? INT32_MAX : (int)std::abs(*c);
+  if (auto c = getConstantIntValue(v)) {
+    int64_t abs_c = *c == INT64_MIN ? INT64_MAX : std::abs(*c);
+    return abs_c == 0 ? INT32_MAX : (int)std::min(abs_c, (int64_t)INT32_MAX);
+  }
   if (auto it = cache.find(v); it != cache.end())
     return it->second;
   if (!visiting.insert(v).second)
@@ -138,6 +140,8 @@ struct PeelResult {
 };
 
 PeelResult peelByPeriod(Value v, int period, Divisibility &div) {
+  if (period <= 0)
+    return {v, {}};
   auto period_multiple = [&](Value x) { return div.get(x) % period == 0; };
 
   if (auto add = v.getDefiningOp<arith::AddIOp>()) {
@@ -194,11 +198,11 @@ public:
       auto shiftC = getConstantIntValue(shrui.getRhs());
       if (!maskC || !shiftC)
         return;
-      unsigned mask = (unsigned)*maskC;
+      uint64_t mask = (uint64_t)*maskC;
       if (mask == 0)
         return;
-      int low = mask & -mask;
-      int plus = mask + low;
+      uint64_t low = mask & -mask;
+      uint64_t plus = mask + low;
       if ((mask & plus) != 0)
         return;
       int K = llvm::countr_zero(mask);
