@@ -520,11 +520,7 @@ def compile_preshuffle_gemm_a8(
             b_i64x2 = vector.bitcast(T.i64x2, b16)
             b0_i64 = vector.extract(b_i64x2, static_position=[0], dynamic_position=[])
             b1_i64 = vector.extract(b_i64x2, static_position=[1], dynamic_position=[])
-<<<<<<< yxd/if_dispatch_dynamic_tests_refactor
-            if const_expr(not is_f16_or_bf16):
-=======
-            if not is_f16_or_bf16 or use_mfma_k32:
->>>>>>> main
+            if const_expr(not is_f16_or_bf16 or use_mfma_k32):
                 return b0_i64, b1_i64
             b0_v1 = vector.from_elements(T.vec(1, T.i64), [b0_i64])
             b1_v1 = vector.from_elements(T.vec(1, T.i64), [b1_i64])
@@ -606,11 +602,7 @@ def compile_preshuffle_gemm_a8(
             a0_i64 = vector.extract(a_i64x2, static_position=[0], dynamic_position=[])
             a1_i64 = vector.extract(a_i64x2, static_position=[1], dynamic_position=[])
 
-<<<<<<< yxd/if_dispatch_dynamic_tests_refactor
-            if const_expr(not is_f16_or_bf16):
-=======
-            if not is_f16_or_bf16 or use_mfma_k32:
->>>>>>> main
+            if const_expr(not is_f16_or_bf16 or use_mfma_k32):
                 return a0_i64, a1_i64
 
             a0_v1 = vector.from_elements(T.vec(1, T.i64), [a0_i64])
@@ -956,20 +948,7 @@ def compile_preshuffle_gemm_a8(
                 return current_accs_list, scales_pf
 
             mfma_res_ty = T.i32x4 if is_int8 else T.f32x4
-<<<<<<< yxd/if_dispatch_dynamic_tests_refactor
-
-            def _mfma_fn_placeholder(_res_ty, _ops):
-                raise RuntimeError("mfma_fn is not selected for current dtype path")
-
-            mfma_fn = _mfma_fn_placeholder
-            if const_expr(is_int8):
-                mfma_fn = mfma_i32_k32
-            elif const_expr(is_f16):
-                mfma_fn = rocdl.mfma_f32_16x16x16f16
-            elif const_expr(is_bf16):
-                mfma_fn = rocdl.mfma_f32_16x16x16bf16_1k
-=======
-            if use_mfma_k32:
+            if const_expr(use_mfma_k32):
                 mfma_fn_k32 = rocdl.mfma_f32_16x16x32_f16 if is_f16 else rocdl.mfma_f32_16x16x32_bf16
 
                 def i64x2_to_v8(lo, hi):
@@ -980,13 +959,12 @@ def compile_preshuffle_gemm_a8(
                     av = i64x2_to_v8(a0, a1)
                     bv = i64x2_to_v8(b0, b1)
                     return mfma_fn_k32(mfma_res_ty, [av, bv, acc_in, 0, 0, 0])
->>>>>>> main
             else:
-                if is_int8:
+                if const_expr(is_int8):
                     mfma_fn = mfma_i32_k32
-                elif is_f16:
+                elif const_expr(is_f16):
                     mfma_fn = rocdl.mfma_f32_16x16x16f16
-                elif is_bf16:
+                elif const_expr(is_bf16):
                     mfma_fn = rocdl.mfma_f32_16x16x16bf16_1k
                 else:
                     mfma_fn = rocdl.mfma_f32_16x16x32_fp8_fp8
