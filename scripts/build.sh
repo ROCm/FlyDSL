@@ -74,6 +74,7 @@ echo "  BUILD_DIR:  ${BUILD_DIR}"
 echo "  MLIR_PATH:  ${MLIR_PATH}"
 echo "  PARALLEL:   -j${PARALLEL_JOBS}"
 echo "  GENERATOR:  ${GENERATOR}"
+echo "  HIP_PLATFORM: ${HIP_PLATFORM:-amd (default)}"
 echo "=============================================="
 
 # ---------------------------------------------------------------------------
@@ -102,11 +103,18 @@ NANOBIND_DIR=$(python3 -c "import nanobind; import os; print(os.path.dirname(nan
 mkdir -p "${BUILD_DIR}"
 cd "${BUILD_DIR}"
 
+# HIP_PLATFORM: required by /opt/rocm/lib/cmake/hip/hip-config.cmake.
+# The shipped hip-config.cmake has `if("OFF") ... set(hip_HIPCONFIG_EXECUTABLE) ...`
+# so it cannot auto-detect the platform and relies on HIP_PLATFORM being
+# provided as a CMake cache variable or environment variable.
+HIP_PLATFORM="${HIP_PLATFORM:-amd}"
+
 cmake_args=(
   -G "${GENERATOR}"
   "${REPO_ROOT}"
   -DMLIR_DIR="${MLIR_PATH}/lib/cmake/mlir"
   -DPython3_EXECUTABLE="$(which python3)"
+  -DHIP_PLATFORM="${HIP_PLATFORM}"
 )
 if [ -n "${NANOBIND_DIR}" ]; then
   cmake_args+=(-Dnanobind_DIR="${NANOBIND_DIR}")

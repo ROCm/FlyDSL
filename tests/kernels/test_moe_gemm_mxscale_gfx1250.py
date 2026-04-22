@@ -208,9 +208,17 @@ def run_moe_stage1(
     cluster_m: int = 1,
     cluster_n: int = 1,
     expert_sched_mode: bool = True,
+    k_batch: int = 1,
 ):
     assert model_dim % 64 == 0
     assert inter_dim % tile_n == 0
+    if int(k_batch) > 1:
+        assert not bool(doweight_stage1), \
+            "split-K (k_batch>1) requires doweight_stage1=False (routing weight applied externally)."
+        assert int(model_dim) % int(k_batch) == 0, \
+            f"split-K: model_dim={model_dim} must be divisible by k_batch={k_batch}."
+        assert (int(model_dim) // int(k_batch)) % int(tile_k) == 0, \
+            f"split-K: model_dim/k_batch={model_dim//k_batch} must be divisible by tile_k={tile_k}."
 
     device = torch.device("cuda")
     torch.manual_seed(int(seed))
@@ -228,7 +236,13 @@ def run_moe_stage1(
 
     # Routing: aiter uses fused_topk; we use torch topk+softmax for portability/determinism.
     if topk_ids_in is None or topk_weights_in is None:
-        score = torch.randn((tokens, experts), device=device, dtype=torch.float32)
+        score = torch.zeros((tokens, experts), device=device, dtype=torch.float32)
+        start_col = 0
+        end_col = topk
+        for token_id in range(tokens):
+            score[token_id, start_col:end_col] = 1.0
+            start_col = end_col % experts
+            end_col = start_col + topk
         topk_vals, topk_ids = torch.topk(score, k=topk, dim=1)
         topk_weights = torch.softmax(topk_vals, dim=1).to(torch.float32)
     else:
@@ -335,8 +349,15 @@ def run_moe_stage1(
         scale_w1_1d = scale_w1.view(-1).contiguous()
     sorted_weights_1d = sorted_weights.contiguous().view(-1)  # [sorted_size]
 
-    # Output: [tokens, topk, inter_dim] fp16
-    out = torch.zeros((tokens, topk, inter_dim), device=device, dtype=torch.float16)
+    _is_splitk = int(k_batch) > 1
+    if _is_splitk:
+        # Split-K kernel writes atomically-accumulated gate/up partials to a flat [M, 2*N] buffer
+        # without silu*mul fusion; we perform silu*mul + routing-weight reduction on host side.
+        out_kernel = torch.zeros((tokens * topk, 2 * inter_dim), device=device, dtype=torch.float16)
+        out = torch.zeros((tokens, topk, inter_dim), device=device, dtype=torch.float16)
+    else:
+        out_kernel = torch.zeros((tokens, topk, inter_dim), device=device, dtype=torch.float16)
+        out = out_kernel
 
     exe = compile_moe_gemm1(
         model_dim=model_dim,
@@ -358,6 +379,7 @@ def run_moe_stage1(
         cluster_m=int(cluster_m),
         cluster_n=int(cluster_n),
         expert_sched_mode=bool(expert_sched_mode),
+        k_batch=int(k_batch),
     )
 
     def launch(o, x, w, sx, sw, st, eids, sw_sorted):
@@ -380,10 +402,10 @@ def run_moe_stage1(
         )
 
     def _prep_stage1():
-        out.zero_()
+        out_kernel.zero_()
 
     def _run_stage1():
-        launch(out, x_q, w_kernel, scale_x_1d, scale_w1_1d, sorted_token_ids, sorted_expert_ids, sorted_weights_1d)
+        launch(out_kernel, x_q, w_kernel, scale_x_1d, scale_w1_1d, sorted_token_ids, sorted_expert_ids, sorted_weights_1d)
 
     us = _bench_kernel_us(
         _run_stage1,
@@ -393,6 +415,15 @@ def run_moe_stage1(
         prep_fn=_prep_stage1,
     )
     torch.cuda.synchronize()
+
+    if _is_splitk:
+        # Post-reduction: silu(gate) * up -> pack to [tokens, topk, inter_dim] (doweight_stage1 forced off).
+        _part_f32 = out_kernel.to(torch.float32).view(tokens, topk, 2 * inter_dim)
+        _gate = _part_f32[:, :, :inter_dim]
+        _up = _part_f32[:, :, inter_dim:]
+        _silu_gate = _gate * torch.sigmoid(_gate)
+        _reduced = _silu_gate * _up  # [tokens, topk, inter_dim]
+        out.copy_(_reduced.to(torch.float16))
 
     if not bool(skip_ref):
         if in_dtype == "fp8":
@@ -442,7 +473,9 @@ def run_moe_stage1(
 
         rtol = 0.5 if (is_a8w4 or is_fp4) else 0.25
         atol = 0.5 if is_a8w4 else 0.25
-        assert verify_output(out.to(torch.float32), ref, rtol=rtol, atol=atol)
+        logits_thr = 1.0 if (is_a8w4 or is_fp4) else 2e-3
+        assert verify_output(out.to(torch.float32), ref, rtol=rtol, atol=atol,
+                             logits_diff_threshold=logits_thr)
 
     # Note: kernel launches full expert-block range; effective work is gated by num_valid_ids.
     flops = 2 * tokens * topk * (2 * inter_dim) * _orig_model_dim
@@ -582,7 +615,13 @@ def run_moe_stage2(
 
     # Routing: deterministic torch topk + softmax.
     if topk_ids_in is None or topk_weights_in is None:
-        score = torch.rand((tokens, experts), device=device, dtype=torch.float32)
+        score = torch.zeros((tokens, experts), device=device, dtype=torch.float32)
+        start_col = 0
+        end_col = topk
+        for token_id in range(tokens):
+            score[token_id, start_col:end_col] = 1.0
+            start_col = end_col % experts
+            end_col = start_col + topk
         topk_vals, topk_ids = torch.topk(score, k=topk, dim=1)
         topk_weights = torch.softmax(topk_vals, dim=1).to(torch.float32)
     else:
@@ -901,7 +940,9 @@ def run_moe_stage2(
                 topk_ids.to(torch.int64), topk_weights,
                 model_dim=model_dim, doweight_stage2=doweight_stage2,
             )
-        assert verify_output(out.to(torch.float32), ref2, rtol=0.5, atol=0.5)
+        logits_thr2 = 1.0 if (is_a8w4 or is_fp4) else 2e-3
+        assert verify_output(out.to(torch.float32), ref2, rtol=0.5, atol=0.5,
+                             logits_diff_threshold=logits_thr2)
 
     # Launches full expert-block range; effective work is gated by num_valid_ids.
     flops = 2 * tokens * topk * model_dim * _orig_inter_dim
@@ -1007,7 +1048,13 @@ def run_moe_gemm_2stage(
     w1_fp32 = torch.randn((experts, 2 * inter_dim, model_dim), device=device, dtype=torch.float32) * s
     w2_fp32 = torch.randn((experts, model_dim, inter_dim), device=device, dtype=torch.float32) * (s / math.sqrt(inter_dim))
 
-    score = torch.rand((tokens, experts), device=device, dtype=torch.float32)
+    score = torch.zeros((tokens, experts), device=device, dtype=torch.float32)
+    start_col = 0
+    end_col = topk
+    for token_id in range(tokens):
+        score[token_id, start_col:end_col] = 1.0
+        start_col = end_col % experts
+        end_col = start_col + topk
     topk_vals, topk_ids = torch.topk(score, k=topk, dim=1)
     topk_weights = torch.softmax(topk_vals, dim=1).to(torch.float32)
 

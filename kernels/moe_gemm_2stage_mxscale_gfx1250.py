@@ -25,6 +25,7 @@ from kernels.moe_gemm_2stage_common_gfx1250 import (
     _compute_pipeline_plan,
     _compute_tdm_store_layout,
     _emit_stage1_gate_up_epilogue,
+    _emit_stage1_gate_up_splitk_epilogue,
     _emit_stage2_store_epilogue,
     _extract_sub8,
     _finalize_alloc_and_launch_2d,
@@ -63,6 +64,7 @@ def _compile_stage1_mxscale_kernel_impl(
     wave_specialized_tdm: bool = False,
     cluster_m: int = 1,
     cluster_n: int = 1,
+    k_batch: int = 1,
 ):
     """Compile mxscale stage1 single kernel (route-pack + TDM + WMMA_SCALE + epilog)."""
     import flydsl.compiler as flyc
@@ -109,6 +111,43 @@ def _compile_stage1_mxscale_kernel_impl(
     interleaved_scale_cols_a = tp["interleaved_scale_cols_a"]
 
     N = int(inter_dim)
+
+    # ── Split-K validation / setup ────────────────────────────────────
+    # When k_batch > 1 the K dimension (model_dim) is split across the
+    # grid z-dim. Each CTA computes a K-slice and atomically accumulates
+    # gate / up partial sums into a [tokens*topk, 2*inter_dim] output.
+    # silu/mul fusion, doweight_stage1 and TDM store must be disabled for
+    # split-K; a separate reduction kernel fuses silu*mul and folds in
+    # the per-slot routing weight.
+    _is_splitk = int(k_batch) > 1
+    if _is_splitk:
+        if int(model_dim) % int(k_batch) != 0:
+            raise ValueError(
+                f"split-K requires model_dim divisible by k_batch, "
+                f"got model_dim={model_dim}, k_batch={k_batch}")
+        _k_per_batch = int(model_dim) // int(k_batch)
+        if _k_per_batch % int(tile_k) != 0:
+            raise ValueError(
+                f"split-K requires (model_dim // k_batch) divisible by tile_k, "
+                f"got k_per_batch={_k_per_batch}, tile_k={tile_k}")
+        if bool(use_tdm_store):
+            raise ValueError("split-K stage1 does not support use_tdm_store")
+        if bool(wave_specialized_tdm):
+            raise ValueError("split-K stage1 does not support wave_specialized_tdm")
+        if bool(doweight_stage1):
+            raise ValueError(
+                "split-K stage1 does not support fused doweight_stage1; "
+                "apply routing weight in the external reduction kernel")
+        _s1_out = str(out_dtype).strip().lower()
+        if _s1_out not in ("f16", "fp16", "half", "bf16", "bfloat16"):
+            raise ValueError(
+                f"split-K stage1 only supports fp16/bf16 output (x2 atomic fadd), "
+                f"got out_dtype={out_dtype!r}")
+        num_k_tiles_per_bz = _k_per_batch // int(tile_k)
+    else:
+        _k_per_batch = int(model_dim)
+        num_k_tiles_per_bz = num_k_tiles
+
     _merge_gate_up_tdm = bool((data_format in ("fp8", "a8w4")) and (N % int(tile_n) == 0))
     num_warps_s1 = int(m_warp) * int(n_warp)
     _tdm_loader_waves = 2 if _merge_gate_up_tdm else 4
@@ -136,7 +175,7 @@ def _compile_stage1_mxscale_kernel_impl(
         else:
             _B_TDM_PER_STEP = 1 if bool(wave_specialized_tdm) else 4
         _pp = _compute_pipeline_plan(
-            num_k_tiles=num_k_tiles, num_buffers=int(num_buffers),
+            num_k_tiles=num_k_tiles_per_bz, num_buffers=int(num_buffers),
             B_TDM_PER_STEP=_B_TDM_PER_STEP, tile_m=int(tile_m),
             use_tdm_gather=use_tdm_gather,
             wave_specialized_tdm=wave_specialized_tdm,
@@ -230,6 +269,14 @@ def _compile_stage1_mxscale_kernel_impl(
         tx = gpu.thread_id("x")
         bx = gpu.block_id("x")
         by = gpu.block_id("y")
+
+        # Split-K: bz identifies the K-slice; k_base_idx is the starting
+        # K offset (in data elements, pre-pack) for this CTA.
+        if _is_splitk:
+            bz = gpu.block_id("z")  # already index type
+            k_base_idx = bz * arith.index(int(_k_per_batch))
+        else:
+            k_base_idx = arith.index(0)
 
         tokens_idx = arith.index_cast(T.index, i32_tokens_in)
         size_expert_ids = arith.index_cast(T.index, i32_size_expert_ids_in)
@@ -1141,12 +1188,20 @@ def _compile_stage1_mxscale_kernel_impl(
                     mid_compute_callback=mid_load_callback,
                 )
 
+            # Helper: apply split-K K-base offset. For non-splitk the
+            # compile-time constant expression is returned unchanged so
+            # the non-splitk code path is identical.
+            def _k_off(static_offset_val):
+                if _is_splitk:
+                    return k_base_idx + static_offset_val
+                return static_offset_val
+
             # ── main K-dimension reduction ────────────────────────────
             if not _use_pipeline:
                 if wave_specialized_tdm:
                     active_b_addr_lo = _active_addr_lo
-                    for kt in range_constexpr(num_k_tiles):
-                        k_base = fx.Index(kt * int(tile_k))
+                    for kt in range_constexpr(num_k_tiles_per_bz):
+                        k_base = _k_off(fx.Index(kt * int(tile_k)))
                         active_b_addr_lo = _issue_active_b_tdm_only(
                             0, active_b_addr_lo)
                         _issue_scalar_loads(k_base, 0)
@@ -1155,8 +1210,8 @@ def _compile_stage1_mxscale_kernel_impl(
                         acc_g, acc_u = _compute_k_tile(acc_g, acc_u, 0)
                         workgroup_barrier(use_cluster=use_cluster)
                 else:
-                    for kt in range_constexpr(num_k_tiles):
-                        k_base = fx.Index(kt * int(tile_k))
+                    for kt in range_constexpr(num_k_tiles_per_bz):
+                        k_base = _k_off(fx.Index(kt * int(tile_k)))
                         _issue_all_loads(k_base, 0)
                         tdm_ops.tensor_wait(0)
                         workgroup_barrier(use_cluster=use_cluster)
@@ -1169,10 +1224,12 @@ def _compile_stage1_mxscale_kernel_impl(
                     for _pi in range_constexpr(pre_loaded):
                         active_b_addr_lo = _issue_active_b_tdm_only(
                             _pi, active_b_addr_lo)
-                        _issue_scalar_loads(fx.Index(_pi * int(tile_k)), _pi)
+                        _issue_scalar_loads(
+                            _k_off(fx.Index(_pi * int(tile_k))), _pi)
                 else:
                     for _pi in range_constexpr(pre_loaded):
-                        _issue_all_loads(fx.Index(_pi * int(tile_k)), _pi)
+                        _issue_all_loads(
+                            _k_off(fx.Index(_pi * int(tile_k))), _pi)
                 pipeline_fence(outstanding=0, use_cluster=use_cluster)
 
                 # ── main pipelined loop ──
@@ -1187,7 +1244,7 @@ def _compile_stage1_mxscale_kernel_impl(
                                 _lb = (_bi + _nb - 1) % _nb
                                 _kt = (_li * fx.Index(_nb)
                                        + fx.Index(pre_loaded + _bi))
-                                _kb = _kt * fx.Index(int(tile_k))
+                                _kb = _k_off(_kt * fx.Index(int(tile_k)))
                                 pipeline_fence_signal(
                                     outstanding=_fence_outstanding,
                                     use_cluster=use_cluster)
@@ -1221,7 +1278,7 @@ def _compile_stage1_mxscale_kernel_impl(
                                 _lb = (_bi + _nb - 1) % _nb
                                 _kt = (_li * fx.Index(_nb)
                                        + fx.Index(pre_loaded + _bi))
-                                _kb = _kt * fx.Index(int(tile_k))
+                                _kb = _k_off(_kt * fx.Index(int(tile_k)))
                                 pipeline_fence_signal(
                                     outstanding=_fence_outstanding,
                                     use_cluster=use_cluster)
@@ -1273,9 +1330,9 @@ def _compile_stage1_mxscale_kernel_impl(
                         pipeline_fence_wait(use_cluster=use_cluster)
                         if _ls is not None:
                             _tail_had_load = True
-                            _tkb = fx.Index(
+                            _tkb = _k_off(fx.Index(
                                 (_tail_start + pre_loaded + _tail_li)
-                                * int(tile_k))
+                                * int(tile_k)))
                             _tail_li += 1
                             if wave_specialized_tdm:
                                 active_b_addr_lo = _issue_active_b_tdm_only(
@@ -1470,38 +1527,73 @@ def _compile_stage1_mxscale_kernel_impl(
                         ),
                     )
 
-                _emit_stage1_gate_up_epilogue(
-                    sub_tiles=_sub_tiles,
-                    by=by,
-                    tile_m=int(tile_m),
-                    route_tile_m=int(route_tile_m),
-                    warp_m_base=warp_m_base,
-                    warp_n_base=warp_n_base,
-                    blk_n=blk_n,
-                    lane16=lane16,
-                    lane_kgrp=lane_kgrp,
-                    WMMA_N=WMMA_N,
-                    i32_tokens_in=i32_tokens_in,
-                    i32_inter_in=i32_inter_in,
-                    topk=int(topk),
-                    num_valid_i32=num_valid_i32,
-                    block_row_start=block_row_start,
-                    sorted_rsrc=sorted_rsrc,
-                    tw_rsrc=tw_rsrc,
-                    out_rsrc=out_rsrc,
-                    doweight_stage1=bool(doweight_stage1),
-                    out_elem_ty=out_elem_ty,
-                    load_gate_up_sub8=_load_gate_up_sub8,
-                    silu_fn=silu,
-                    ir=ir,
-                    fx=fx,
-                    arith=arith,
-                    buffer_ops=buffer_ops,
-                    scf=scf,
-                    vector=vector,
-                    range_constexpr=range_constexpr,
-                    T=T,
-                )
+                if _is_splitk:
+                    # Split-K: atomic-fadd gate/up partials into a
+                    # [tokens*topk, 2*inter_dim] buffer. silu/mul and the
+                    # routing weight fold in via the external reduction.
+                    _emit_stage1_gate_up_splitk_epilogue(
+                        sub_tiles=_sub_tiles,
+                        by=by,
+                        tile_m=int(tile_m),
+                        route_tile_m=int(route_tile_m),
+                        warp_m_base=warp_m_base,
+                        warp_n_base=warp_n_base,
+                        blk_n=blk_n,
+                        lane16=lane16,
+                        lane_kgrp=lane_kgrp,
+                        WMMA_N=WMMA_N,
+                        i32_tokens_in=i32_tokens_in,
+                        i32_inter_in=i32_inter_in,
+                        topk=int(topk),
+                        num_valid_i32=num_valid_i32,
+                        block_row_start=block_row_start,
+                        sorted_rsrc=sorted_rsrc,
+                        out_rsrc=out_rsrc,
+                        out_elem_ty=out_elem_ty,
+                        load_gate_up_sub8=_load_gate_up_sub8,
+                        ir=ir,
+                        fx=fx,
+                        arith=arith,
+                        buffer_ops=buffer_ops,
+                        scf=scf,
+                        vector=vector,
+                        range_constexpr=range_constexpr,
+                        rocdl=rocdl,
+                        T=T,
+                    )
+                else:
+                    _emit_stage1_gate_up_epilogue(
+                        sub_tiles=_sub_tiles,
+                        by=by,
+                        tile_m=int(tile_m),
+                        route_tile_m=int(route_tile_m),
+                        warp_m_base=warp_m_base,
+                        warp_n_base=warp_n_base,
+                        blk_n=blk_n,
+                        lane16=lane16,
+                        lane_kgrp=lane_kgrp,
+                        WMMA_N=WMMA_N,
+                        i32_tokens_in=i32_tokens_in,
+                        i32_inter_in=i32_inter_in,
+                        topk=int(topk),
+                        num_valid_i32=num_valid_i32,
+                        block_row_start=block_row_start,
+                        sorted_rsrc=sorted_rsrc,
+                        tw_rsrc=tw_rsrc,
+                        out_rsrc=out_rsrc,
+                        doweight_stage1=bool(doweight_stage1),
+                        out_elem_ty=out_elem_ty,
+                        load_gate_up_sub8=_load_gate_up_sub8,
+                        silu_fn=silu,
+                        ir=ir,
+                        fx=fx,
+                        arith=arith,
+                        buffer_ops=buffer_ops,
+                        scf=scf,
+                        vector=vector,
+                        range_constexpr=range_constexpr,
+                        T=T,
+                    )
             scf.YieldOp([])
 
     @flyc.jit
@@ -1544,6 +1636,7 @@ def _compile_stage1_mxscale_kernel_impl(
             waves_per_eu=effective_waves_per_eu,
             ir=ir,
             cluster=_cluster_arg,
+            gz=int(k_batch),
         )
 
     if expert_sched_mode:
@@ -2813,6 +2906,7 @@ def _compile_moe_mxscale_gemm(
     wave_specialized_tdm: bool = False,
     cluster_m: int = 1,
     cluster_n: int = 1,
+    k_batch: int = 1,
 ):
     _require_gfx1250()
     if waves_per_eu is not None and int(waves_per_eu) < 1:
@@ -2840,8 +2934,13 @@ def _compile_moe_mxscale_gemm(
     )
 
     if stage == 1:
-        exe = _compile_stage1_mxscale_kernel_impl(doweight_stage1=bool(doweight), **common)
-        if in_dtype in ("fp8", "a8w4") and (int(inter_dim) % int(single_tile_n) == 0):
+        exe = _compile_stage1_mxscale_kernel_impl(
+            doweight_stage1=bool(doweight), k_batch=int(k_batch), **common)
+        if (
+            int(k_batch) == 1
+            and in_dtype in ("fp8", "a8w4")
+            and (int(inter_dim) % int(single_tile_n) == 0)
+        ):
             return _Stage1GateUpPackedWrapper(
                 exe,
                 experts=int(experts), inter_dim=int(inter_dim),
@@ -2851,13 +2950,17 @@ def _compile_moe_mxscale_gemm(
             )
         return exe
 
+    if int(k_batch) != 1:
+        raise ValueError(
+            "split-K (k_batch>1) is only supported on stage1 for MXScale MoE")
     return _compile_stage2_mxscale_kernel_impl(
         doweight_stage2=bool(doweight), accumulate=bool(accumulate), **common,
     )
 
 
-def compile_moe_gemm1(*, doweight_stage1, group_size=-1, use_cshuffle_epilog=None, **kw):
-    return _compile_moe_mxscale_gemm(stage=1, doweight=doweight_stage1, **kw)
+def compile_moe_gemm1(*, doweight_stage1, group_size=-1, use_cshuffle_epilog=None, k_batch=1, **kw):
+    return _compile_moe_mxscale_gemm(
+        stage=1, doweight=doweight_stage1, k_batch=int(k_batch), **kw)
 
 
 def compile_moe_gemm2(*, doweight_stage2, accumulate=True, group_size=-1, use_cshuffle_epilog=None, **kw):
