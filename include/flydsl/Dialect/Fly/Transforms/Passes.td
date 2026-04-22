@@ -62,6 +62,28 @@ def FlyConvertAtomCallToSSAFormPass : Pass<"fly-convert-atom-call-to-ssa-form"> 
   ];
 }
 
+def FlyIntSwizzleSimplifyPass : Pass<"fly-int-swizzle-simplify"> {
+  let summary = "Algebraically simplify swizzle-shaped arith sequences";
+  let description = [{
+      Recognize the canonical three-instruction swizzle sequence emitted by `applySwizzle`,
+
+        %m  = arith.constant ((1<<M)-1) << (base+shift) : iN     // ring of 1s
+        %s  = arith.constant shift                       : iN
+        %r  = arith.xori %x, arith.shrui(arith.andi %x, %m), %s
+
+      and apply the algebraic identity
+
+        swizzle(a + d) = swizzle(a) + d   when d % period == 0,
+
+      The peeled-off addends survive as plain `arith.addi/subi`, exposing them to CSE and constant
+      folding that the bit-level form would hide.
+    }];
+    
+  let dependentDialects = [
+    "arith::ArithDialect"
+  ];
+}
+
 def FlyPromoteRegMemToVectorSSAPass : Pass<"fly-promote-regmem-to-vectorssa"> {
   let summary = "Promote register memory to vector SSA values";
   let description = [{

@@ -65,6 +65,7 @@ class RocmBackend(BaseBackend):
             "fly-rewrite-func-signature",
             "fly-canonicalize",
             "fly-layout-lowering",
+            "fly-int-swizzle-simplify",
             "fly-convert-atom-call-to-ssa-form",
             "fly-promote-regmem-to-vectorssa",
             "convert-fly-to-rocdl",
