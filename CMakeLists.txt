@@ -24,7 +24,9 @@ include(TableGen)
 include(AddLLVM)
 include(AddMLIR)
 include(HandleLLVMOptions)
-string(REPLACE "-Wl,-z,defs" "" CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS}")
+if(NOT WIN32)
+  string(REPLACE "-Wl,-z,defs" "" CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS}")
+endif()
 include(MLIRDetectPythonEnv)
 mlir_configure_python_dev_packages()
 
@@ -44,6 +46,22 @@ add_definitions(${LLVM_DEFINITIONS})
 set(MLIR_PYTHON_PACKAGE_PREFIX "_mlir" CACHE STRING "" FORCE)
 set(MLIR_BINDINGS_PYTHON_INSTALL_PREFIX "python_packages/flydsl/${MLIR_PYTHON_PACKAGE_PREFIX}" CACHE STRING "" FORCE)
 
+
+# On Windows, MLIR's default SelfOwningTypeID scheme does not work across DLL
+# boundaries: the TypeID's `static SelfOwningTypeID id` member cannot be auto-imported
+# from a DLL without explicit __declspec(dllimport). So FlyDSL's Fly-defined types
+# (defined in obj.MLIRFlyDialect embedded in FlyPythonCAPI.dll) are unreachable from
+# .pyd extensions that reference them, causing link errors or runtime TypeID mismatches.
+#
+# Switch our compilation to string-based FallbackTypeIDs globally. Our own types all
+# route through the process-shared `registerImplicitTypeID` exported from
+# FlyPythonCAPI.dll, giving consistent TypeIDs across every DLL. Upstream MLIR's
+# prebuilt static libs (MLIRIR.lib, etc.) were compiled with SelfOwning TypeIDs,
+# but those are now linked into FlyPythonCAPI.dll as a single copy — internal usage
+# within that DLL still agrees with itself, so no mismatch there.
+if(WIN32)
+  add_compile_definitions(MLIR_USE_FALLBACK_TYPE_IDS=1)
+endif()
 
 add_subdirectory(include/flydsl)
 add_subdirectory(lib)

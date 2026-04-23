@@ -19,6 +19,7 @@ from .._mlir.dialects import func
 from .._mlir.passmanager import PassManager
 from ..expr.typing import Stream
 from ..utils import env, log
+from ..utils.platform import rocm_toolkit_path
 from .ast_rewriter import ASTRewriter
 from .backends import compile_backend_name, get_backend
 from .jit_argument import convert_to_jit_arguments
@@ -40,8 +41,8 @@ def _flydsl_key() -> str:
     Covers:
       1. All Python source files under flydsl.compiler.*, flydsl.expr.*,
          flydsl.runtime.*, flydsl.utils.*
-      2. Native shared libraries (_mlirDialectsFly*.so, libFly*.so, libfly_jit_runtime.so,
-         libmlir_rocm_runtime.so)
+      2. Native shared libraries (e.g. _mlirDialectsFly*, libFly*, fly_jit_runtime,
+         mlir_rocm_runtime — .so on Linux, .dll/.pyd on Windows)
       3. flydsl.__version__
 
     Any change to compiler code, pass pipeline, runtime wrappers, or C++
@@ -302,7 +303,7 @@ def _dump_isa(*, dump_dir: Path, ctx: ir.Context, asm: str, verify: bool, stage_
             "ensure-debug-info-scope-on-llvm-func{emission-kind=LineTablesOnly}," if env.debug.enable_debug_info else ""
         )
         pm = PassManager.parse(
-            f'builtin.module({di_pass}gpu-module-to-binary{{format=isa opts="{"-g" if env.debug.enable_debug_info else ""}" section= toolkit=}})',
+            f'builtin.module({di_pass}gpu-module-to-binary{{format=isa opts="{"-g" if env.debug.enable_debug_info else ""}" section= toolkit={rocm_toolkit_path()}}})',
             context=ctx,
         )
         pm.enable_verifier(bool(verify))

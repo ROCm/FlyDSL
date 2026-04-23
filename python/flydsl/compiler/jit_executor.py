@@ -14,6 +14,8 @@ from .protocol import fly_pointers
 
 @lru_cache(maxsize=1)
 def _resolve_runtime_libs() -> List[str]:
+    import sys
+
     from .backends import get_backend
 
     backend = get_backend()
@@ -25,6 +27,20 @@ def _resolve_runtime_libs() -> List[str]:
                 f"Required JIT runtime library not found: {lib}\n"
                 f"Please rebuild the project."
             )
+
+    # Windows: LLVM's LoadLibraryPermanently uses default search order which does
+    # not include the DLL's own directory. Pre-load each runtime lib (and any
+    # sibling .dll dependencies) via ctypes with LOAD_WITH_ALTERED_SEARCH_PATH so
+    # transitive deps resolve from _mlir_libs/ before ExecutionEngine touches them.
+    if sys.platform == "win32":
+        import os
+        os.add_dll_directory(str(mlir_libs_dir))
+        for dep in mlir_libs_dir.glob("*.dll"):
+            try:
+                ctypes.CDLL(str(dep), mode=0x00000008)  # LOAD_WITH_ALTERED_SEARCH_PATH
+            except OSError:
+                pass
+
     return [str(p) for p in libs]
 
 
