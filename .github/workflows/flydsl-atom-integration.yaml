@@ -14,8 +14,6 @@ env:
   ATOM_BASE_IMAGE: rocm/atom-dev:latest
   ATOM_REPOSITORY: ROCm/ATOM
   ATOM_REF: main
-  FLYDSL_WHEEL_BUCKET: framework-whls-nightlies
-  FLYDSL_WHEEL_PREFIX: whl/gfx942-gfx950
 
 jobs:
   atom-accuracy:
@@ -23,7 +21,6 @@ jobs:
     timeout-minutes: 180
     runs-on: ${{ matrix.runner }}
     permissions:
-      id-token: write
       contents: read
     strategy:
       fail-fast: false
@@ -46,28 +43,12 @@ jobs:
       CONTAINER_NAME: flydsl_atom_${{ strategy.job-index }}
 
     steps:
-      - name: Checkout FlyDSL utility scripts
-        uses: actions/checkout@v4
-        with:
-          sparse-checkout: |
-            scripts/install_awscli.sh
-          path: flydsl
-
       - name: Checkout upstream ATOM repo
         uses: actions/checkout@v4
         with:
           repository: ${{ env.ATOM_REPOSITORY }}
           ref: ${{ env.ATOM_REF }}
           path: atom-upstream
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-region: us-east-1
-          role-to-assume: arn:aws:iam::661452401056:role/framework-flydsl-nightlies
-
-      - name: Install AWS CLI
-        run: bash ./flydsl/scripts/install_awscli.sh
 
       - name: Start CI container
         run: |
@@ -118,76 +99,18 @@ jobs:
         run: |
           docker exec "${CONTAINER_NAME}" bash -lc "
             set -euo pipefail
-            command -v git curl python3
-            git --version
+            command -v curl python3
             python3 --version
             python3 -m pip install --timeout 60 --retries 10 -U pip setuptools wheel
             python3 -m pip install --timeout 60 --retries 10 'lm-eval[api]' hf_transfer 'huggingface_hub[cli]'
             chmod +x /workspace/atom-upstream/.github/scripts/atom_test.sh
           "
 
-      - name: Download latest FlyDSL nightly wheel
+      - name: Check bundled FlyDSL
         run: |
-          set -euo pipefail
-
-          PY_TAG=$(docker exec "${CONTAINER_NAME}" python3 - <<'PY'
-          import sys
-          print(f"cp{sys.version_info.major}{sys.version_info.minor}")
-          PY
-          )
-          echo "Detected Python tag inside atom-dev image: ${PY_TAG}"
-
-          aws s3api list-objects-v2 \
-            --bucket "${{ env.FLYDSL_WHEEL_BUCKET }}" \
-            --prefix "${{ env.FLYDSL_WHEEL_PREFIX }}/" \
-            --output json > /tmp/flydsl-nightly-wheels.json
-
-          LATEST_KEY=$(PY_TAG="${PY_TAG}" S3_PREFIX="${{ env.FLYDSL_WHEEL_PREFIX }}" python3 - <<'PY'
-          import datetime as dt
-          import json
-          import os
-          import posixpath
-
-          py_tag = os.environ["PY_TAG"]
-          s3_prefix = os.environ["S3_PREFIX"]
-          with open("/tmp/flydsl-nightly-wheels.json", encoding="utf-8") as f:
-              data = json.load(f)
-
-          candidates = []
-          for obj in data.get("Contents", []):
-              key = obj["Key"]
-              name = posixpath.basename(key)
-              if not (name.startswith("flydsl-") and name.endswith(".whl")):
-                  continue
-              if py_tag not in name:
-                  continue
-              timestamp = dt.datetime.fromisoformat(obj["LastModified"].replace("Z", "+00:00"))
-              candidates.append((timestamp, key))
-
-          if not candidates:
-              raise SystemExit(f"No FlyDSL wheel found for {py_tag} under s3://framework-whls-nightlies/{s3_prefix}/")
-
-          print(max(candidates, key=lambda item: item[0])[1])
-          PY
-          )
-
-          WHEEL_NAME=$(basename "${LATEST_KEY}")
-          WHEEL_S3_URI="s3://${{ env.FLYDSL_WHEEL_BUCKET }}/${LATEST_KEY}"
-          echo "Selected FlyDSL wheel: ${WHEEL_S3_URI}"
-          aws s3 cp "${WHEEL_S3_URI}" "./${WHEEL_NAME}"
-
-          printf 'Wheel S3 URI: %s\n' "${WHEEL_S3_URI}" | tee selected-flydsl-wheel.txt
-          echo "FLYDSL_WHEEL_NAME=${WHEEL_NAME}" >> "${GITHUB_ENV}"
-          echo "FLYDSL_WHEEL_S3_URI=${WHEEL_S3_URI}" >> "${GITHUB_ENV}"
-
-      - name: Install latest FlyDSL nightly wheel
-        run: |
-          set -euo pipefail
-          docker cp "${FLYDSL_WHEEL_NAME}" "${CONTAINER_NAME}:/tmp/${FLYDSL_WHEEL_NAME}"
           docker exec "${CONTAINER_NAME}" bash -lc "
             set -euo pipefail
-            pip uninstall -y flydsl || true
-            python3 -m pip install --force-reinstall /tmp/${FLYDSL_WHEEL_NAME}
+            python3 -m pip show flydsl || true
             python3 - <<'PY'
             import flydsl
             print(f'flydsl package: {flydsl.__file__}')
@@ -195,13 +118,13 @@ jobs:
             PY
           "
 
-      - name: Record nightly wheel
+      - name: Record bundled FlyDSL
         run: |
           {
-            echo "## Nightly Wheel"
+            echo "## Bundled FlyDSL"
             echo
-            echo "- S3 URI: \`${FLYDSL_WHEEL_S3_URI}\`"
-            echo "- Local file: \`${FLYDSL_WHEEL_NAME}\`"
+            echo "- Source: \`rocm/atom-dev:latest\`"
+            echo "- Validation mode: use FlyDSL preinstalled in the nightly image"
           } >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Pre-download model when cache mount exists
@@ -295,7 +218,6 @@ jobs:
         with:
           name: flydsl-atom-${{ matrix.model_name }}
           path: |
-            selected-flydsl-wheel.txt
             atom_accuracy_output.txt
             atom_server.log
             atom_client.log
