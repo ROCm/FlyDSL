@@ -248,6 +248,23 @@ FLY_INFER_RETURN_TYPES(MakeViewOp) {
   }
 }
 
+FLY_INFER_RETURN_TYPES(MakeFragmentLayoutLikeOp) {
+  auto srcLayout = GetLayoutAttrFromLayoutLikeType(operands[0].getType());
+  if (!srcLayout)
+    return emitOptionalError(location,
+                             "MakeFragmentLayoutLikeOp: expected LayoutType or MemRefType, got ",
+                             operands[0].getType());
+
+  if (!srcLayout.getShape().isStatic())
+    return emitOptionalError(
+        location, "MakeFragmentLayoutLikeOp: expected static shape layout, got ", srcLayout);
+
+  LayoutBuilder<LayoutAttr> layoutBuilder(context);
+  LayoutAttr fragmentLayout = layoutMakeFragmentLayout(layoutBuilder, srcLayout);
+  inferredReturnTypes.assign({LayoutType::get(context, fragmentLayout)});
+  return success();
+}
+
 FLY_INFER_RETURN_TYPES(MakeFragmentLikeOp) {
   TypeAttr dtypeAttr;
   if (properties)
@@ -288,9 +305,13 @@ FLY_INFER_RETURN_TYPES(GetScalarOp) {
   if (!intTupleType)
     return emitOptionalError(location, "GetScalarOp: expected IntTupleType, got ",
                              operands[0].getType());
-  if (!intTupleType.getAttr().isLeaf())
-    return emitOptionalError(location, "GetScalarOp: expected a leaf IntTuple, got ", intTupleType);
-  auto intAttr = intTupleType.getAttr().extractIntFromLeaf();
+  IntTupleAttr scalarAttr = intTupleType.getAttr();
+  while (!scalarAttr.isLeaf() && scalarAttr.rank() == 1)
+    scalarAttr = scalarAttr.at(0);
+  if (!scalarAttr.isLeaf())
+    return emitOptionalError(location, "GetScalarOp: expected a scalar IntTuple, got ",
+                             intTupleType);
+  auto intAttr = scalarAttr.extractIntFromLeaf();
   inferredReturnTypes.assign({IntegerType::get(context, intAttr.getWidth())});
   return success();
 }
@@ -300,8 +321,19 @@ FLY_INFER_RETURN_TYPES(GetLeavesOp) {
   if (!intTupleType)
     return emitOptionalError(location, "GetLeavesOp: expected IntTupleType, got ",
                              operands[0].getType());
-  // transform_leaf on intTupleAttr,
-  return failure();
+  bool dynamicOnly = false;
+  if (properties)
+    dynamicOnly = properties.as<Properties *>()->dynamicOnly.getValue();
+  IntTupleBuilder<IntTupleAttr> builder(context);
+  SmallVector<IntTupleAttr> flatLeaves;
+  intTupleFlattenToVector(builder, intTupleType.getAttr(), flatLeaves);
+  for (auto leaf : flatLeaves) {
+    auto intAttr = leaf.extractIntFromLeaf();
+    if (dynamicOnly && intAttr.isStatic())
+      continue;
+    inferredReturnTypes.push_back(IntegerType::get(context, std::max(32, intAttr.getWidth())));
+  }
+  return success();
 }
 
 FLY_INFER_RETURN_TYPES(GetShapeOp) {
@@ -549,35 +581,7 @@ FLY_INFER_RETURN_TYPES(CeilDivOp) {
   return success();
 }
 
-FLY_INFER_RETURN_TYPES(ElemLessOp) {
-  auto lhsTy = dyn_cast<IntTupleType>(operands[0].getType());
-  auto rhsTy = dyn_cast<IntTupleType>(operands[1].getType());
-  if (!lhsTy)
-    return emitOptionalError(location, "ElemLessOp: expected IntTupleType for lhs, got ",
-                             operands[0].getType());
-  if (!rhsTy)
-    return emitOptionalError(location, "ElemLessOp: expected IntTupleType for rhs, got ",
-                             operands[1].getType());
-  IntTupleBuilder<IntTupleAttr> builder(context);
-  inferredReturnTypes.assign(
-      {IntTupleType::get(intTupleElemLess(builder, lhsTy.getAttr(), rhsTy.getAttr()))});
-  return success();
-}
 
-FLY_INFER_RETURN_TYPES(EqualOp) {
-  auto lhsTy = dyn_cast<IntTupleType>(operands[0].getType());
-  auto rhsTy = dyn_cast<IntTupleType>(operands[1].getType());
-  if (!lhsTy)
-    return emitOptionalError(location, "EqualOp: expected IntTupleType for lhs, got ",
-                             operands[0].getType());
-  if (!rhsTy)
-    return emitOptionalError(location, "EqualOp: expected IntTupleType for rhs, got ",
-                             operands[1].getType());
-  IntTupleBuilder<IntTupleAttr> builder(context);
-  inferredReturnTypes.assign(
-      {IntTupleType::get(intTupleEqual(builder, lhsTy.getAttr(), rhsTy.getAttr()))});
-  return success();
-}
 
 //===----------------------------------------------------------------------===//
 // IntTupleLike operations

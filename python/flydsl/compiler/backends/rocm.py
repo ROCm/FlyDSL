@@ -65,6 +65,10 @@ class RocmBackend(BaseBackend):
             "fly-rewrite-func-signature",
             "fly-canonicalize",
             "fly-layout-lowering",
+            "fly-int-swizzle-simplify",
+            "canonicalize",
+            "fly-convert-atom-call-to-ssa-form",
+            "fly-promote-regmem-to-vectorssa",
             "convert-fly-to-rocdl",
             "canonicalize",
             f"gpu.module(convert-scf-to-cf,cse,"
@@ -74,8 +78,8 @@ class RocmBackend(BaseBackend):
             "convert-scf-to-cf",
             "convert-cf-to-llvm",
             "gpu-to-llvm{use-bare-pointers-for-host=true use-bare-pointers-for-kernels=true}",
-            "convert-arith-to-llvm",
             "convert-vector-to-llvm",
+            "convert-arith-to-llvm",
             "convert-func-to-llvm",
             "reconcile-unrealized-casts",
             *(

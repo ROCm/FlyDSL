@@ -9,5 +9,5 @@ from .derived import *
 
 from . import utils
 
-from . import arith, vector, gpu, buffer_ops, rocdl, math, mem_ops
+from . import arith, vector, gpu, buffer_ops, rocdl, math
 from .rocdl import tdm_ops

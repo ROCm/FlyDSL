@@ -20,17 +20,13 @@ def gemm_kernel(
     tid = fx.thread_idx.x
     bid = fx.block_idx.x
 
-    tileA = fx.make_tile(block_m, block_k)
-    tileB = fx.make_tile(block_n, block_k)
-    tileC = fx.make_tile(block_m, block_n)
-
     A = fx.rocdl.make_buffer_tensor(A)
     B = fx.rocdl.make_buffer_tensor(B)
     C = fx.rocdl.make_buffer_tensor(C)
 
-    bA = fx.zipped_divide(A, tileA)
-    bB = fx.zipped_divide(B, tileB)
-    bC = fx.zipped_divide(C, tileC)
+    bA = fx.zipped_divide(A, (block_m, block_k))
+    bB = fx.zipped_divide(B, (block_n, block_k))
+    bC = fx.zipped_divide(C, (block_m, block_n))
 
     bA = fx.slice(bA, (None, bid))
     bB = fx.slice(bB, (None, bid))
@@ -64,6 +60,7 @@ def gemm_kernel(
     fx.copy(copy_atom, copy_src_A, copy_frag_A, pred=None)
     fx.copy(copy_atom, copy_src_B, copy_frag_B, pred=None)
 
+    frag_C.fill(0)
     fx.gemm(mma_atom, frag_C, frag_A, frag_B, frag_C)
 
     fx.copy(copy_atom, copy_frag_C, copy_dst_C, pred=None)

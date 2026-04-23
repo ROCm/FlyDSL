@@ -28,9 +28,9 @@ def gemm_kernel(
     B = fx.rocdl.make_buffer_tensor(B)
     C = fx.rocdl.make_buffer_tensor(C)
 
-    gA_k = fx.flat_divide(A, fx.make_tile(BLOCK_M, BLOCK_K))[None, None, bid_x, None]  # (BM, BK, k)
-    gB_k = fx.flat_divide(B, fx.make_tile(BLOCK_N, BLOCK_K))[None, None, bid_y, None]  # (BN, BK, k)
-    gC = fx.flat_divide(C, fx.make_tile(BLOCK_M, BLOCK_N))[None, None, bid_x, bid_y]  # (BM, BN)
+    gA_k = fx.flat_divide(A, (BLOCK_M, BLOCK_K))[None, None, bid_x, None]  # (BM, BK, k)
+    gB_k = fx.flat_divide(B, (BLOCK_N, BLOCK_K))[None, None, bid_y, None]  # (BN, BK, k)
+    gC = fx.flat_divide(C, (BLOCK_M, BLOCK_N))[None, None, bid_x, bid_y]  # (BM, BN)
 
     thr_mma = tiled_mma.thr_slice(tid)
     thr_copy_g2s_A = tiled_copy_g2s_A.get_slice(tid)
@@ -63,15 +63,18 @@ def gemm_kernel(
 
     mma_frag_A = thr_mma.make_fragment_A(sA[None, None, 0])  # (VA, VM, VN)
     mma_frag_B = fx.make_fragment_like(
-        fx.flat_product(thr_mma.partition_B(gB_k).layout(None, None, None, 0), fx.make_layout(2, 1)),
-        fx.Float16.ir_type,
+        fx.flat_product(
+            fx.make_fragment_layout_like(thr_mma.partition_B(gB_k).layout(None, None, None, 0)), fx.make_layout(2, 1)
+        ),
+        fx.Float16,
     )  # (VB, VM, VK, 2)
     mma_frag_C = thr_mma.make_fragment_C(gC)  # (VC, VM, VN)
 
     mma_frag_A_retile = thr_copy_s2r_A.retile(mma_frag_A)
     mma_frag_B_retile = thr_copy_g2r_B.retile(mma_frag_B)
-    mma_frag_C_f16 = fx.make_fragment_like(mma_frag_C, fx.Float16.ir_type)
-    mma_frag_C_retile = thr_copy_r2g_C.retile(mma_frag_C_f16)
+
+    gA_k_stride = fx.get_scalar(gA_k.stride[2])
+    gB_k_stride = fx.get_scalar(gB_k.stride[2])
 
     def run_pipeline_stage(read_stage, next_k, read_next=True):
         write_stage = read_stage ^ 1
@@ -79,13 +82,13 @@ def gemm_kernel(
         if read_next:
             next_k = fx.Int32(next_k)
             fx.copy(
-                buffer_copy_128b.set_value("soffset", next_k * BLOCK_K),
-                thr_gA_k[None, None, None, 0], # global offset is added on the soffset of buffer_copy_atom
+                buffer_copy_128b.set_value("soffset", next_k * gA_k_stride),
+                thr_gA_k[None, None, None, 0],  # global offset is added on the soffset of buffer_copy_atom
                 copy_frag_A,
             )
             fx.copy(
-                buffer_copy_128b,
-                thr_gB_k[None, None, None, next_k],
+                buffer_copy_128b.set_value("soffset", next_k * gB_k_stride),
+                thr_gB_k[None, None, None, 0],
                 mma_frag_B_retile[None, None, None, write_stage],
             )
 
@@ -101,6 +104,7 @@ def gemm_kernel(
                 mma_frag_A[None, None, (None, block_k_iter)],
                 mma_frag_B[None, None, (None, block_k_iter), read_stage],
                 mma_frag_C,
+                traversal_order=fx.GemmTraversalOrder.KNM,
             )
 
         fx.copy(uni_copy_128b, copy_frag_A, thr_sA[None, None, None, write_stage])
@@ -136,7 +140,7 @@ def gemm_kernel(
     fx.copy(buffer_copy_128b, thr_gA_k[None, None, None, 0], copy_frag_A)
     fx.copy(buffer_copy_128b, thr_gB_k[None, None, None, 0], mma_frag_B_retile[None, None, None, 0])
 
-    mma_frag_C.store(fx.arith.constant_vector(0.0, fx.T.VectorType.get([64], fx.T.f32())))
+    mma_frag_C.fill(0)
 
     fx.copy(uni_copy_128b, copy_frag_A, thr_sA[None, None, None, 0])
     fx.gpu.barrier()
@@ -148,6 +152,8 @@ def gemm_kernel(
     run_pipeline_stage(read_stage=0, next_k=K // BLOCK_K - 1)
     run_pipeline_stage(read_stage=1, next_k=None, read_next=False)
 
+    mma_frag_C_f16 = fx.make_fragment_like(mma_frag_C, fx.Float16.ir_type)
+    mma_frag_C_retile = thr_copy_r2g_C.retile(mma_frag_C_f16)
     mma_frag_C_f16.store(fx.arith.trunc_f(fx.T.VectorType.get([64], fx.T.f16()), mma_frag_C.load()))
     fx.copy(buffer_copy_16b, mma_frag_C_retile, thr_gC)
 

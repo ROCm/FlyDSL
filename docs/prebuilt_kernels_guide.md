@@ -338,7 +338,7 @@ What operation do you need?
 | `tests/kernels/test_rmsnorm.py` | RMSNorm |
 | `tests/kernels/test_softmax.py` | Softmax |
 | `tests/kernels/test_fused_rope_cache.py` | Fused RoPE + KV cache |
-| `tests/kernels/test_flydsl_allreduce.py` | Multi-GPU all-reduce |
+| `tests/kernels/test_allreduce.py` | Multi-GPU all-reduce |
 | `tests/kernels/test_rdna_gemm.py` | RDNA GEMM |
 | `tests/kernels/test_gemm_fp8fp4_gfx1250.py` | GFX1250 FP8/FP4 GEMM |
 | `tests/kernels/test_wmma_gemm_gfx1250.py` | GFX1250 WMMA GEMM |

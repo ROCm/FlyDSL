@@ -26,7 +26,7 @@ def BufferCopy(bit_size):
     """Create a CDNA3 buffer copy atom.
 
     Current atom state:
-    - `soffset` (`i32`)
+    - `soffset` (`i32`), default zero
     """
     return CopyOpCDNA3BufferCopyType.get(bit_size)
 
@@ -45,8 +45,8 @@ def BufferCopyLDS(bit_size):
     Only supports BufferDesc -> Shared address space direction.
 
     Current atom state:
-    - `soffset` (`i32`)
-    - `imm_offset` (`i32`)
+    - `soffset` (`i32`), default zero
+    - `imm_offset` (`i32`), default zero
     """
     return CopyOpCDNA3BufferCopyLDSType.get(bit_size)
 
@@ -60,7 +60,7 @@ def BufferAtomic(atomic_op, val_type):
     """Create a CDNA3 buffer atomic copy atom.
 
     Current atom state:
-    - `soffset` (`i32`)
+    - `soffset` (`i32`), default zero
     """
     ty = val_type.ir_type if hasattr(val_type, "ir_type") else val_type
     return CopyOpCDNA3BufferAtomicType.get(int(atomic_op), ty)
