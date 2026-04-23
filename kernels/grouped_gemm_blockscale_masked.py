@@ -444,13 +444,31 @@ def compile_masked_grouped_fp8_gemm(
 
                     # MFMA computation for this scale block
                     if _is_gfx950:
-                        # gfx950: single K=128 MFMA per (sb, mi, ni)
+                        # gfx950: single K=128 MFMA with hardware E8M0 block scaling
                         ku0 = sb * ku_per_sb
                         ku1 = ku0 + 1
                         b0_packs0, b0_packs1 = b_tile_in[ku0]
                         b1_packs0, b1_packs1 = b_tile_in[ku1]
                         col_base0 = col_offset_base_bytes + fx.Index(ku0 * 64)
                         col_base1 = col_offset_base_bytes + fx.Index(ku1 * 64)
+
+                        # Load per-lane scaleA E8M0 (one per mi, varies by lane_mod_16)
+                        sa_e8m0_list = []
+                        for mi in range_constexpr(m_repeat):
+                            sa_row = bx_m + arith.index(mi * 16) + lane_mod_16
+                            sa_idx = sa_base + sa_row
+                            sa_f32 = buffer_ops.buffer_load(sa_rsrc, sa_idx, vec_width=1, dtype=T.f32)
+                            sa_i32 = arith.bitcast(T.i32, sa_f32)
+                            sa_e8m0 = arith.andi(arith.shrui(sa_i32, fx.Int32(23)), fx.Int32(0xFF))
+                            sa_e8m0_list.append(sa_e8m0)
+
+                        # Load uniform scaleB E8M0 (one per ni, same for all lanes)
+                        sb_e8m0_list = []
+                        for ni in range_constexpr(num_acc_n):
+                            sb_f32 = s_b_vals[ni]
+                            sb_i32 = arith.bitcast(T.i32, sb_f32)
+                            sb_e8m0 = arith.andi(arith.shrui(sb_i32, fx.Int32(23)), fx.Int32(0xFF))
+                            sb_e8m0_list.append(sb_e8m0)
 
                         for mi in range_constexpr(m_repeat):
                             curr_row_a_lds = lane_mod_16 + arith.index(mi * 16)
@@ -467,17 +485,12 @@ def compile_masked_grouped_fp8_gemm(
                                     b1_packs0[ni], b1_packs1[ni],
                                 )
                                 acc_idx = mi * num_acc_n + ni
-                                mfma_result = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
+                                # Hardware scaling + direct accumulation
+                                current_accs[acc_idx] = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
                                     mfma_res_ty,
-                                    [a128, b128, acc_init,
-                                     0, 0, 0, 0x7F7F7F7F, 0, 0x7F7F7F7F],
+                                    [a128, b128, current_accs[acc_idx],
+                                     0, 0, 0, sa_e8m0_list[mi], 0, sb_e8m0_list[ni]],
                                 )
-
-                                # Apply scales: accum += mfma_result * scale_a * scale_b
-                                s_a_v4 = s_a_vecs[mi]
-                                s_b_bc = vector.broadcast(T.f32x4, s_b_vals[ni])
-                                scaled = ArithValue(mfma_result) * ArithValue(s_a_v4)
-                                current_accs[acc_idx] = math_dialect.fma(scaled, s_b_bc, current_accs[acc_idx])
                     else:
                         # gfx942: two K=32 MFMAs per K64 micro-step
                         for ku_local in range_constexpr(ku_per_sb):
