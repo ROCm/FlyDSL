@@ -46,7 +46,7 @@ from kernels.mfma_preshuffle_pipeline import (
 
 
 @functools.lru_cache(maxsize=128)
-def compile_grouped_fp8_gemm(
+def compile_grouped_gemm_blockscale_contiguous(
     *,
     n: int,
     k: int,
@@ -116,7 +116,7 @@ def compile_grouped_fp8_gemm(
 
     # Module name for caching
     module_name = (
-        f"grouped_fp8_gemm_{out_dtype}"
+        f"grouped_gemm_blockscale_contiguous_{out_dtype}"
         f"_n{n}_k{k}_g{num_groups}"
         f"_t{tile_m}x{tile_n}x{tile_k}"
         f"_pingpong"
@@ -132,7 +132,7 @@ def compile_grouped_fp8_gemm(
     num_a_loads = bytes_per_thread_a // a_load_bytes
 
     @flyc.kernel(name=module_name)
-    def grouped_fp8_gemm_kernel(
+    def grouped_gemm_blockscale_contiguous_kernel(
         arg_d: fx.Tensor,
         arg_a: fx.Tensor,
         arg_b: fx.Tensor,
@@ -644,7 +644,7 @@ def compile_grouped_fp8_gemm(
 
     # ===== JIT Launcher =====
     @flyc.jit
-    def launch_grouped_fp8_gemm(
+    def launch_grouped_gemm_blockscale_contiguous(
         arg_d: fx.Tensor,
         arg_a: fx.Tensor,
         arg_b: fx.Tensor,
@@ -668,7 +668,7 @@ def compile_grouped_fp8_gemm(
         gx = n_in // fx.Index(tile_n)  # N-blocks
         gy = (m_in + fx.Index(tile_m - 1)) // fx.Index(tile_m)  # M-blocks (ceil)
 
-        launcher = grouped_fp8_gemm_kernel(
+        launcher = grouped_gemm_blockscale_contiguous_kernel(
             arg_d,
             arg_a,
             arg_b,
@@ -688,4 +688,4 @@ def compile_grouped_fp8_gemm(
                         op.attributes["rocdl.waves_per_eu"] = ir.IntegerAttr.get(T.i32, _wpe)
         launcher.launch(grid=(gx, gy, 1), block=(total_threads, 1, 1), stream=stream)
 
-    return launch_grouped_fp8_gemm
+    return launch_grouped_gemm_blockscale_contiguous

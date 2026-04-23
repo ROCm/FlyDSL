@@ -27,7 +27,7 @@ for _p in reversed(_PYTHON_CANDIDATES):
     if os.path.isdir(_p) and _p not in sys.path:
         sys.path.insert(0, _p)
 
-from kernels.grouped_gemm_blockscale_contiguous import compile_grouped_fp8_gemm
+from kernels.grouped_gemm_blockscale_contiguous import compile_grouped_gemm_blockscale_contiguous
 from flydsl.runtime.device import get_rocm_arch
 from tests.test_common import run_perftest, verify_output
 from tests.utils import shuffle_weight
@@ -281,7 +281,7 @@ def test_grouped_fp8_gemm(num_groups, m_per_group, n, k, out_dtype,
     )
 
     # Compile kernel
-    launch_fn = compile_grouped_fp8_gemm(
+    launch_fn = compile_grouped_gemm_blockscale_contiguous(
         n=n,
         k=k,
         num_groups=num_groups,
