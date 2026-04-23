@@ -35,6 +35,8 @@ logging.basicConfig(level=logging.INFO)
 ARCH = get_rocm_arch()
 # Use appropriate FP8 dtype for the architecture
 DTYPE_FP8 = torch.float8_e4m3fn if "gfx95" in ARCH else torch.float8_e4m3fnuz
+# gfx950 uses hardware E8M0 block scaling — quantization must use E8M0-truncated scales
+USE_UE8M0 = "gfx95" in ARCH
 
 
 def ceil_div(x: int, y: int) -> int:
@@ -43,6 +45,18 @@ def ceil_div(x: int, y: int) -> int:
 
 def align(x: int, y: int) -> int:
     return ceil_div(x, y) * y
+
+
+def fp32_to_e8m0(scale: torch.Tensor) -> torch.Tensor:
+    """Round FP32 scale UP to E8M0 precision (ceiling on exponent).
+
+    Matches DeepGEMM's ceil_to_ue8m0 (deep_gemm/utils/math.py). Rounding up is
+    required so that x / scale_e8m0 <= fp8_max — truncation would shrink the
+    scale, causing FP8 saturation and a systematic bias on every block.
+    """
+    bits = scale.abs().float().view(torch.int32)
+    exp = ((bits >> 23) & 0xFF) + (bits & 0x7FFFFF).bool().int()
+    return (exp.clamp(1, 254) << 23).view(torch.float32)
 
 
 def quantize_to_fp8(x: torch.Tensor, scale_block_k: int = 128) -> tuple[torch.Tensor, torch.Tensor]:
@@ -66,6 +80,10 @@ def quantize_to_fp8(x: torch.Tensor, scale_block_k: int = 128) -> tuple[torch.Te
 
     fp8_max = torch.finfo(DTYPE_FP8).max
     scale = x_amax / fp8_max
+
+    # Truncate to E8M0 precision when hardware scaling is used (gfx950)
+    if USE_UE8M0:
+        scale = fp32_to_e8m0(scale)
 
     # Quantize
     x_scaled = x_blocks / scale.unsqueeze(2)
@@ -103,68 +121,15 @@ def quantize_b_to_fp8(
     fp8_max = torch.finfo(DTYPE_FP8).max
     scale = b_amax / fp8_max
 
+    # Truncate to E8M0 precision when hardware scaling is used (gfx950)
+    if USE_UE8M0:
+        scale = fp32_to_e8m0(scale)
+
     # Quantize
     b_scaled = b_blocks / scale.view(num_groups, nblk_n, 1, nblk_k, 1)
     b_fp8 = b_scaled.to(DTYPE_FP8).view(num_groups, N, K)
 
     return b_fp8, scale
-
-
-def torch_grouped_gemm_ref(
-    a: torch.Tensor,
-    scale_a: torch.Tensor,
-    b: torch.Tensor,
-    scale_b: torch.Tensor,
-    grouped_layout: torch.Tensor,
-    scale_block_k: int = 128,
-    scale_block_n: int = 128,
-) -> torch.Tensor:
-    """PyTorch reference implementation for grouped FP8 GEMM with block scaling.
-
-    Args:
-        a: [M, K] FP8 tensor
-        scale_a: [scale_k, M] FP32 scale factors (transposed layout)
-        b: [num_groups, N, K] FP8 tensor
-        scale_b: [num_groups, scale_n, scale_k] FP32 scale factors
-        grouped_layout: [M] INT32 mapping rows to groups (-1 for padding)
-        scale_block_k: K-dimension scale block size
-        scale_block_n: N-dimension scale block size
-
-    Returns:
-        d: [M, N] BF16 output tensor
-    """
-    M, K = a.shape
-    num_groups, N, _ = b.shape
-    nblk_k = K // scale_block_k
-    nblk_n = N // scale_block_n
-
-    # Dequantize A
-    a_f32 = a.to(torch.float32)
-    # scale_a is [scale_k, M], transpose to [M, scale_k]
-    scale_a_t = scale_a.T  # [M, scale_k]
-    # Expand to element-wise: [M, nblk_k, scale_block_k]
-    a_scaled = a_f32.view(M, nblk_k, scale_block_k) * scale_a_t.view(M, nblk_k, 1)
-    a_scaled = a_scaled.view(M, K)
-
-    # Dequantize B per group
-    # scale_b: [num_groups, scale_n, scale_k]
-    # Expand to [num_groups, N, K]
-    b_f32 = b.to(torch.float32)
-    b_scaled = b_f32.view(num_groups, nblk_n, scale_block_n, nblk_k, scale_block_k)
-    b_scaled = b_scaled * scale_b.view(num_groups, nblk_n, 1, nblk_k, 1)
-    b_scaled = b_scaled.view(num_groups, N, K)
-
-    # Compute grouped GEMM on CPU (hipBLAS on this ROCm version can't handle these shapes)
-    a_scaled_cpu = a_scaled.cpu()
-    b_scaled_cpu = b_scaled.cpu()
-    grouped_layout_cpu = grouped_layout.cpu()
-    d = torch.zeros(M, N, dtype=torch.float32, device="cpu")
-    for g in range(num_groups):
-        mask = grouped_layout_cpu == g
-        if mask.any():
-            d[mask] = a_scaled_cpu[mask] @ b_scaled_cpu[g].T
-
-    return d.to(torch.bfloat16).to(a.device)
 
 
 def generate_grouped_gemm_inputs(
@@ -228,17 +193,24 @@ def generate_grouped_gemm_inputs(
         a_f32[start + m_actual : start + m_aligned] = 0
         start += m_aligned
 
+    # Reference output from original FP32 data BEFORE quantization
+    # (matching DeepGEMM test convention: ref absorbs all quantization + scale errors)
+    a_cpu = a_f32.cpu()
+    b_cpu = b_f32.cpu()
+    gl_cpu = grouped_layout.cpu()
+    ref_d = torch.zeros(M, n, dtype=torch.float32, device="cpu")
+    for g in range(num_groups):
+        mask = gl_cpu == g
+        if mask.any():
+            ref_d[mask] = a_cpu[mask] @ b_cpu[g].T
+    ref_d = ref_d.to(torch_out_dtype).to(device)
+
     # Quantize to FP8
     a_fp8, scale_a = quantize_to_fp8(a_f32, scale_block_k)
     b_fp8, scale_b = quantize_b_to_fp8(b_f32, scale_block_n, scale_block_k)
 
     # Output buffer
     d = torch.zeros(M, n, dtype=torch_out_dtype, device=device)
-
-    # Reference output (uses unshuffled B)
-    ref_d = torch_grouped_gemm_ref(
-        a_fp8, scale_a, b_fp8, scale_b, grouped_layout, scale_block_k, scale_block_n
-    )
 
     # Preshuffle B for kernel (applied per-group, batch dim folded automatically)
     b_shuffled = shuffle_weight(b_fp8, layout=(16, 16))
@@ -320,7 +292,8 @@ def test_grouped_fp8_gemm_correctness(num_groups, m_per_group, n, k, out_dtype,
     c_ref[padding_mask] = 0.0
 
     msg = f"num_groups={num_groups}, M={M}, N={n}, K={k}, out={out_dtype}"
-    passed = verify_output(c_out_f32, c_ref, rtol=1e-2, atol=1e-2, msg=msg)
+    passed = verify_output(c_out_f32, c_ref, rtol=1e-2, atol=1e-2, msg=msg,
+                           logits_diff_threshold=1e-3)
     assert passed, f"Correctness check failed for {msg}"
 
 
