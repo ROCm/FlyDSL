@@ -405,21 +405,56 @@ def compile_grouped_fp8_gemm(
                 rocdl.sched_barrier(0)
 
             # ── Helper: compute one K-tile from LDS + B tile ────────────
-            def compute_tile(accs_in, k_tile_idx_py, lds_base, b_tile_in, *, a0_prefetch=None):
-                """Compute MFMA tiles for one K-tile, return updated accumulators."""
+            # ── Helper: prefetch E8M0 scales for one K-tile (gfx950 HW path) ──
+            # Returns (sa_e8m0_pf, sb_e8m0_pf) — outer index = sb (sb_per_tile),
+            # inner = m_repeat / num_acc_n. Issued ahead of compute_tile so
+            # scale-load latency overlaps with prior tile's MFMA work + B-tile load.
+            def prefetch_scales(k_tile_idx_py):
+                if not _is_gfx950:
+                    return None
+                sa_pf = []
+                sb_pf = []
+                sb_group_offset = group_idx * fx.Index(scale_n * scale_k)
+                for sb in range_constexpr(sb_per_tile):
+                    kb = fx.Index(k_tile_idx_py * sb_per_tile + sb)
+                    sa_base_pf = kb * m_in
+
+                    sa_sb = []
+                    for mi in range_constexpr(m_repeat):
+                        sa_row = bx_m + arith.index(mi * 16) + lane_mod_16
+                        sa_idx = sa_base_pf + sa_row
+                        sa_i8 = buffer_ops.buffer_load(sa_rsrc, sa_idx, vec_width=1, dtype=T.i8)
+                        sa_e8m0 = ArithValue(sa_i8).extui(T.i32)
+                        sa_sb.append(sa_e8m0)
+                    sa_pf.append(sa_sb)
+
+                    sb_sb = []
+                    for ni in range_constexpr(num_acc_n):
+                        sb_idx = sb_group_offset + n_block_for_scale[ni] * c_scale_k + kb
+                        sb_i8 = buffer_ops.buffer_load(sb_rsrc, sb_idx, vec_width=1, dtype=T.i8)
+                        sb_i32 = ArithValue(sb_i8).extui(T.i32)
+                        sb_e8m0 = rocdl.readfirstlane(T.i32, sb_i32)
+                        sb_sb.append(sb_e8m0)
+                    sb_pf.append(sb_sb)
+                return (sa_pf, sb_pf)
+
+            def compute_tile(accs_in, k_tile_idx_py, lds_base, b_tile_in, scales_pf, *, a0_prefetch=None):
+                """Compute MFMA tiles for one K-tile, return updated accumulators.
+
+                scales_pf: result of prefetch_scales(k_tile_idx_py) for the gfx950
+                HW path; None for the gfx942 SW path (which loads scales locally).
+                """
                 current_accs = list(accs_in)
 
                 for sb in range_constexpr(sb_per_tile):
                     kb = fx.Index(k_tile_idx_py * sb_per_tile + sb)
 
-                    # Load scale_a for this K-block (per-token scale)
-                    # scale_a layout: [scale_k, M] transposed
-                    # gfx950 HW path loads scaleA per-lane below as int8; the
-                    # gfx942-layout f32 loads here are unused (and would be OOB
-                    # against the int8-sized buffer resource), so they are gated.
-                    sa_base = kb * m_in
+                    # gfx942 SW path needs s_a_vecs (4 loads/mi, lane_div_16 layout)
+                    # and s_b_vals as f32. gfx950 HW path uses prefetched E8M0 bytes.
                     s_a_vecs = []
+                    s_b_vals = []
                     if not _is_gfx950:
+                        sa_base = kb * m_in
                         row_off_base = lane_div_16 * fx.Index(4)
                         for mi in range_constexpr(m_repeat):
                             s_a_row = []
@@ -432,10 +467,6 @@ def compile_grouped_fp8_gemm(
                             s_a_vec4 = vector.from_elements(T.f32x4, s_a_row)
                             s_a_vecs.append(s_a_vec4)
 
-                    # Load scale_b for this K-block (only the SW gfx942 path needs
-                    # the f32 list; gfx950 path loads int8 bytes directly below).
-                    s_b_vals = []
-                    if not _is_gfx950:
                         sb_group_offset = group_idx * fx.Index(scale_n * scale_k)
                         for ni in range_constexpr(num_acc_n):
                             sb_idx = sb_group_offset + n_block_for_scale[ni] * c_scale_k + kb
@@ -445,34 +476,18 @@ def compile_grouped_fp8_gemm(
 
                     # MFMA computation for this scale block
                     if _is_gfx950:
-                        # gfx950: single K=128 MFMA with hardware E8M0 block scaling.
-                        # Scales are pre-packed as uint8 on host (1 byte each); load
-                        # and zero-extend to i32 for the MFMA scale operand.
+                        # gfx950: single K=128 MFMA with HW E8M0 scales prefetched
+                        # ahead of compute_tile (scales_pf passed by caller).
+                        sa_pf, sb_pf = scales_pf
+                        sa_e8m0_list = sa_pf[sb]
+                        sb_e8m0_list = sb_pf[sb]
+
                         ku0 = sb * ku_per_sb
                         ku1 = ku0 + 1
                         b0_packs0, b0_packs1 = b_tile_in[ku0]
                         b1_packs0, b1_packs1 = b_tile_in[ku1]
                         col_base0 = col_offset_base_bytes + fx.Index(ku0 * 64)
                         col_base1 = col_offset_base_bytes + fx.Index(ku1 * 64)
-
-                        # Per-lane scaleA E8M0 byte (one per mi, varies by lane_mod_16)
-                        sa_e8m0_list = []
-                        for mi in range_constexpr(m_repeat):
-                            sa_row = bx_m + arith.index(mi * 16) + lane_mod_16
-                            sa_idx = sa_base + sa_row
-                            sa_i8 = buffer_ops.buffer_load(sa_rsrc, sa_idx, vec_width=1, dtype=T.i8)
-                            sa_e8m0 = ArithValue(sa_i8).extui(T.i32)
-                            sa_e8m0_list.append(sa_e8m0)
-
-                        # Wave-uniform scaleB E8M0 byte (one per ni)
-                        sb_group_offset = group_idx * fx.Index(scale_n * scale_k)
-                        sb_e8m0_list = []
-                        for ni in range_constexpr(num_acc_n):
-                            sb_idx = sb_group_offset + n_block_for_scale[ni] * c_scale_k + kb
-                            sb_i8 = buffer_ops.buffer_load(sb_rsrc, sb_idx, vec_width=1, dtype=T.i8)
-                            sb_i32 = ArithValue(sb_i8).extui(T.i32)
-                            sb_e8m0 = rocdl.readfirstlane(T.i32, sb_i32)
-                            sb_e8m0_list.append(sb_e8m0)
 
                         for mi in range_constexpr(m_repeat):
                             curr_row_a_lds = lane_mod_16 + arith.index(mi * 16)
@@ -526,23 +541,26 @@ def compile_grouped_fp8_gemm(
                 return current_accs
 
             # ===== Ping-pong K-loop =====
-            # Prologue: prefetch first A tile into VGPRs, store to LDS, load B
+            # Prologue: prefetch first A tile into VGPRs, store to LDS, load B + scales
             a_regs0 = prefetch_a_tile(0)
             store_a_tile_to_lds(a_regs0, lds_base_pong)
             b_tile_pong = load_b_tile(fx.Index(0))
+            scales_pong_pf = prefetch_scales(0)
             gpu.barrier()
 
             # Prefetch first A pack from pong (hides LDS latency behind upcoming VMEM)
             a0_prefetch_pong = lds_load_packs_k64(row_a_lds_base, col_offset_base_bytes, lds_base_pong)
 
             for k_pair in range_constexpr(0, num_k_tiles, 2):
-                # Prefetch next A+B to VGPRs (VMEM issued before compute)
+                # Prefetch next scales BEFORE B-tile VMEM (per moe-2stage pattern:
+                # scale-load latency hides behind heavy B VMEM); then A+B regs.
                 if k_pair + 1 < num_k_tiles:
+                    scales_ping_pf = prefetch_scales(k_pair + 1)
                     a_regs_ping = prefetch_a_tile(k_pair + 1)
                     b_tile_ping = load_b_tile(fx.Index((k_pair + 1) * tile_k))
 
                 # Compute current tile from pong LDS
-                accs = compute_tile(accs, k_pair, lds_base_pong, b_tile_pong,
+                accs = compute_tile(accs, k_pair, lds_base_pong, b_tile_pong, scales_pong_pf,
                                     a0_prefetch=a0_prefetch_pong)
                 a0_prefetch_pong = None
 
@@ -557,13 +575,14 @@ def compile_grouped_fp8_gemm(
                     a0_prefetch_ping = lds_load_packs_k64(
                         row_a_lds_base, col_offset_base_bytes, lds_base_ping)
 
-                    # Prefetch next A+B to VGPRs
+                    # Prefetch next scales + A+B
                     if k_pair + 2 < num_k_tiles:
+                        scales_pong_pf = prefetch_scales(k_pair + 2)
                         a_regs_pong = prefetch_a_tile(k_pair + 2)
                         b_tile_pong = load_b_tile(fx.Index((k_pair + 2) * tile_k))
 
                     # Compute current tile from ping LDS
-                    accs = compute_tile(accs, k_pair + 1, lds_base_ping, b_tile_ping,
+                    accs = compute_tile(accs, k_pair + 1, lds_base_ping, b_tile_ping, scales_ping_pf,
                                         a0_prefetch=a0_prefetch_ping)
                     a0_prefetch_ping = None
 
