@@ -209,15 +209,18 @@ def compile_masked_grouped_fp8_gemm(
             arg_d, max_size=False, num_records_bytes=arith.index_cast(T.i64, d_nbytes)
         )
 
-        # Scale buffers
-        # scale_a: [G, scale_k, max_m] 
-        sa_nbytes = num_groups_in * fx.Index(scale_k) * m_in * fx.Index(4)
+        # Scale buffers — gfx950 HW E8M0 path consumes int8 (one byte/scale,
+        # pre-packed on host); gfx942 SW path consumes f32.
+        scale_byte_size = 1 if _is_gfx950 else 4
+
+        # scale_a: [G, scale_k, max_m]
+        sa_nbytes = num_groups_in * fx.Index(scale_k) * m_in * fx.Index(scale_byte_size)
         sa_rsrc = buffer_ops.create_buffer_resource(
             arg_scale_a, max_size=False, num_records_bytes=arith.index_cast(T.i64, sa_nbytes)
         )
 
         # scale_b: [G, scale_n, scale_k]
-        sb_nbytes = num_groups_in * fx.Index(scale_n * scale_k * 4)
+        sb_nbytes = num_groups_in * fx.Index(scale_n * scale_k * scale_byte_size)
         sb_rsrc = buffer_ops.create_buffer_resource(
             arg_scale_b, max_size=False, num_records_bytes=arith.index_cast(T.i64, sb_nbytes)
         )
@@ -433,21 +436,22 @@ def compile_masked_grouped_fp8_gemm(
                         s_a_vec4 = vector.from_elements(T.f32x4, s_a_row)
                         s_a_vecs.append(s_a_vec4)
 
-                    # Load scale_b for this K-block
-                    # scale_b layout: [G, scale_n, scale_k]
-                    # The address is wave-uniform (no lane dependence) — promote the
-                    # load to a single broadcast via readfirstlane to free VMEM slots.
-                    sb_group_offset = group_idx * fx.Index(scale_n * scale_k)
+                    # Load scale_b for this K-block (only the SW gfx942 path needs
+                    # the f32 list; gfx950 path loads int8 bytes directly below).
                     s_b_vals = []
-                    for ni in range_constexpr(num_acc_n):
-                        sb_idx = sb_group_offset + n_block_for_scale[ni] * c_scale_k + kb
-                        s_b_val = buffer_ops.buffer_load(sb_rsrc, sb_idx, vec_width=1, dtype=T.f32)
-                        s_b_val = rocdl.readfirstlane(T.f32, s_b_val)
-                        s_b_vals.append(s_b_val)
+                    if not _is_gfx950:
+                        sb_group_offset = group_idx * fx.Index(scale_n * scale_k)
+                        for ni in range_constexpr(num_acc_n):
+                            sb_idx = sb_group_offset + n_block_for_scale[ni] * c_scale_k + kb
+                            s_b_val = buffer_ops.buffer_load(sb_rsrc, sb_idx, vec_width=1, dtype=T.f32)
+                            s_b_val = rocdl.readfirstlane(T.f32, s_b_val)
+                            s_b_vals.append(s_b_val)
 
                     # MFMA computation for this scale block
                     if _is_gfx950:
-                        # gfx950: single K=128 MFMA with hardware E8M0 block scaling
+                        # gfx950: single K=128 MFMA with hardware E8M0 block scaling.
+                        # Scales are pre-packed as uint8 on host (1 byte each); load
+                        # and zero-extend to i32 for the MFMA scale operand.
                         ku0 = sb * ku_per_sb
                         ku1 = ku0 + 1
                         b0_packs0, b0_packs1 = b_tile_in[ku0]
@@ -455,22 +459,23 @@ def compile_masked_grouped_fp8_gemm(
                         col_base0 = col_offset_base_bytes + fx.Index(ku0 * 64)
                         col_base1 = col_offset_base_bytes + fx.Index(ku1 * 64)
 
-                        # Load per-lane scaleA E8M0 (one per mi, varies by lane_mod_16)
+                        # Per-lane scaleA E8M0 byte (one per mi, varies by lane_mod_16)
                         sa_e8m0_list = []
                         for mi in range_constexpr(m_repeat):
                             sa_row = bx_m + arith.index(mi * 16) + lane_mod_16
                             sa_idx = sa_base + sa_row
-                            sa_f32 = buffer_ops.buffer_load(sa_rsrc, sa_idx, vec_width=1, dtype=T.f32)
-                            sa_i32 = arith.bitcast(T.i32, sa_f32)
-                            sa_e8m0 = (ArithValue(sa_i32) >> fx.Int32(23)) & fx.Int32(0xFF)
+                            sa_i8 = buffer_ops.buffer_load(sa_rsrc, sa_idx, vec_width=1, dtype=T.i8)
+                            sa_e8m0 = ArithValue(sa_i8).extui(T.i32)
                             sa_e8m0_list.append(sa_e8m0)
 
-                        # Load uniform scaleB E8M0 (one per ni, same for all lanes)
+                        # Wave-uniform scaleB E8M0 byte (one per ni)
+                        sb_group_offset = group_idx * fx.Index(scale_n * scale_k)
                         sb_e8m0_list = []
                         for ni in range_constexpr(num_acc_n):
-                            sb_f32 = s_b_vals[ni]
-                            sb_i32 = arith.bitcast(T.i32, sb_f32)
-                            sb_e8m0 = (ArithValue(sb_i32) >> fx.Int32(23)) & fx.Int32(0xFF)
+                            sb_idx = sb_group_offset + n_block_for_scale[ni] * c_scale_k + kb
+                            sb_i8 = buffer_ops.buffer_load(sb_rsrc, sb_idx, vec_width=1, dtype=T.i8)
+                            sb_i32 = ArithValue(sb_i8).extui(T.i32)
+                            sb_e8m0 = rocdl.readfirstlane(T.i32, sb_i32)
                             sb_e8m0_list.append(sb_e8m0)
 
                         for mi in range_constexpr(m_repeat):

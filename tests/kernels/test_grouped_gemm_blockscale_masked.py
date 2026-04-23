@@ -60,6 +60,15 @@ def fp32_to_e8m0(scale: torch.Tensor) -> torch.Tensor:
     return (exp.clamp(1, 254) << 23).view(torch.float32)
 
 
+def fp32_e8m0_to_byte(scale_e8m0_f32: torch.Tensor) -> torch.Tensor:
+    """Extract the E8M0 byte from a float that was previously rounded by
+    fp32_to_e8m0. Returns uint8. Use this when handing scales to the kernel
+    so dequant uses bit-exact the same scale the kernel will apply (HW E8M0
+    path uses byte 0 of the i32 scale operand)."""
+    bits = scale_e8m0_f32.view(torch.int32)
+    return ((bits >> 23) & 0xFF).to(torch.uint8)
+
+
 def quantize_a_masked_to_fp8(x: torch.Tensor, scale_block_k: int = 128) -> tuple[torch.Tensor, torch.Tensor]:
     """Quantize padded 3D A tensor to FP8 with per-row, per-block scaling.
 
@@ -82,13 +91,19 @@ def quantize_a_masked_to_fp8(x: torch.Tensor, scale_block_k: int = 128) -> tuple
     fp8_max = torch.finfo(DTYPE_FP8).max
     scale = x_amax / fp8_max
 
-    # Round to E8M0 precision when hardware scaling is used (gfx950)
+    # Round to E8M0 when hardware scaling is used (gfx950); keep as FP32 for the
+    # quantization divide, then pre-pack to uint8 below for kernel consumption.
     if USE_UE8M0:
         scale = fp32_to_e8m0(scale)
 
     # Quantize
     x_scaled = x_blocks / scale.unsqueeze(-1)
     x_fp8 = x_scaled.to(DTYPE_FP8).view(G, max_m, K)
+
+    # Pre-pack scale as uint8 (one E8M0 byte per scale) so the kernel can load
+    # 1 byte/scale and skip the in-kernel bitwise extract.
+    if USE_UE8M0:
+        scale = fp32_e8m0_to_byte(scale)
 
     # Transpose scale to [G, scale_k, max_m] to match kernel layout
     scale = scale.transpose(1, 2).contiguous()
@@ -122,13 +137,17 @@ def quantize_b_to_fp8(
     fp8_max = torch.finfo(DTYPE_FP8).max
     scale = b_amax / fp8_max
 
-    # Round to E8M0 precision when hardware scaling is used (gfx950)
+    # Round to E8M0 when hardware scaling is used (gfx950); keep as FP32 for the
+    # quantization divide, then pre-pack to uint8 below for kernel consumption.
     if USE_UE8M0:
         scale = fp32_to_e8m0(scale)
 
     # Quantize
     b_scaled = b_blocks / scale.view(num_groups, nblk_n, 1, nblk_k, 1)
     b_fp8 = b_scaled.to(DTYPE_FP8).view(num_groups, N, K)
+
+    if USE_UE8M0:
+        scale = fp32_e8m0_to_byte(scale)
 
     return b_fp8, scale
 
