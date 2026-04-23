@@ -1,31 +1,30 @@
-name: FlyDSL ATOM integration
+name: FlyDSL ATOM nightly
 
 on:
-  push:
-    branches:
-      - main
-      - pre_v0.1
-  pull_request:
-    branches:
-      - main
-      - pre_v0.1
+  schedule:
+    # Run after the FlyDSL nightly wheel publish/promote flow.
+    - cron: '0 4 * * *'
   workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  cancel-in-progress: true
 
 env:
   ATOM_BASE_IMAGE: rocm/atom-dev:latest
   ATOM_REPOSITORY: ROCm/ATOM
   ATOM_REF: main
-  GITHUB_REPO_NAME: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
-  GITHUB_COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+  FLYDSL_WHEEL_BUCKET: framework-whls-nightlies
+  FLYDSL_WHEEL_PREFIX: whl/gfx942-gfx950
 
 jobs:
   atom-accuracy:
     name: ATOM accuracy / ${{ matrix.model_name }}
     timeout-minutes: 180
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      id-token: write
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -43,18 +42,16 @@ jobs:
             runner: linux-flydsl-mi355-1
             env_vars: ""
 
-    runs-on: ${{ matrix.runner }}
-
     env:
       CONTAINER_NAME: flydsl_atom_${{ strategy.job-index }}
 
     steps:
-      - name: Checkout FlyDSL code
+      - name: Checkout FlyDSL utility scripts
         uses: actions/checkout@v4
         with:
-          repository: ${{ env.GITHUB_REPO_NAME }}
-          ref: ${{ env.GITHUB_COMMIT_SHA }}
-          path: flydsl-test
+          sparse-checkout: |
+            scripts/install_awscli.sh
+          path: flydsl
 
       - name: Checkout upstream ATOM repo
         uses: actions/checkout@v4
@@ -63,12 +60,14 @@ jobs:
           ref: ${{ env.ATOM_REF }}
           path: atom-upstream
 
-      - name: Restore cached MLIR install tarball
-        id: mlir-cache
-        uses: actions/cache@v4
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          path: mlir_install.tgz
-          key: flydsl-mlir-install-${{ hashFiles('flydsl-test/cmake/llvm-hash.txt', 'flydsl-test/scripts/build_llvm.sh', 'flydsl-test/.github/workflows/flydsl-atom-integration.yaml') }}
+          aws-region: us-east-1
+          role-to-assume: arn:aws:iam::661452401056:role/framework-flydsl-nightlies
+
+      - name: Install AWS CLI
+        run: bash ./flydsl/scripts/install_awscli.sh
 
       - name: Start CI container
         run: |
@@ -119,78 +118,91 @@ jobs:
         run: |
           docker exec "${CONTAINER_NAME}" bash -lc "
             set -euo pipefail
-            command -v git curl cmake python3
+            command -v git curl python3
             git --version
-            cmake --version
             python3 --version
             python3 -m pip install --timeout 60 --retries 10 -U pip setuptools wheel
-            python3 -m pip install --timeout 60 --retries 10 'ninja>=1.11.1' 'pybind11>=3.0.1' 'lm-eval[api]' hf_transfer 'huggingface_hub[cli]'
-            git config --global --add safe.directory /workspace/flydsl-test
+            python3 -m pip install --timeout 60 --retries 10 'lm-eval[api]' hf_transfer 'huggingface_hub[cli]'
             chmod +x /workspace/atom-upstream/.github/scripts/atom_test.sh
-            cd /workspace/flydsl-test
-            git submodule sync
-            git submodule update --init --recursive
           "
 
-      - name: Restore cached MLIR install into container
-        if: steps.mlir-cache.outputs.cache-hit == 'true'
-        run: |
-          docker cp mlir_install.tgz "${CONTAINER_NAME}:/tmp/mlir_install.tgz"
-          docker exec "${CONTAINER_NAME}" bash -lc "
-            set -euo pipefail
-            rm -rf /workspace/llvm-project/build-flydsl/mlir_install
-            mkdir -p /workspace/llvm-project/build-flydsl
-            tar -xzf /tmp/mlir_install.tgz -C /workspace/llvm-project/build-flydsl
-            ls -la /workspace/llvm-project/build-flydsl/mlir_install/lib/cmake/mlir
-          "
-
-      - name: Build LLVM and cache MLIR install
-        if: steps.mlir-cache.outputs.cache-hit != 'true'
+      - name: Download latest FlyDSL nightly wheel
         run: |
           set -euo pipefail
-          docker exec "${CONTAINER_NAME}" bash -lc "
-            set -euo pipefail
-            cd /workspace/flydsl-test
-            bash scripts/build_llvm.sh
-            ls -la /workspace/llvm-project/build-flydsl/mlir_install/lib/cmake/mlir
-          "
-          docker cp "${CONTAINER_NAME}:/workspace/llvm-project/build-flydsl/mlir_install.tgz" ./mlir_install.tgz
 
-      - name: Reinstall aiter main and FlyDSL PR commit
+          PY_TAG=$(docker exec "${CONTAINER_NAME}" python3 - <<'PY'
+          import sys
+          print(f"cp{sys.version_info.major}{sys.version_info.minor}")
+          PY
+          )
+          echo "Detected Python tag inside atom-dev image: ${PY_TAG}"
+
+          aws s3api list-objects-v2 \
+            --bucket "${{ env.FLYDSL_WHEEL_BUCKET }}" \
+            --prefix "${{ env.FLYDSL_WHEEL_PREFIX }}/" \
+            --output json > /tmp/flydsl-nightly-wheels.json
+
+          LATEST_KEY=$(PY_TAG="${PY_TAG}" S3_PREFIX="${{ env.FLYDSL_WHEEL_PREFIX }}" python3 - <<'PY'
+          import datetime as dt
+          import json
+          import os
+          import posixpath
+
+          py_tag = os.environ["PY_TAG"]
+          s3_prefix = os.environ["S3_PREFIX"]
+          with open("/tmp/flydsl-nightly-wheels.json", encoding="utf-8") as f:
+              data = json.load(f)
+
+          candidates = []
+          for obj in data.get("Contents", []):
+              key = obj["Key"]
+              name = posixpath.basename(key)
+              if not (name.startswith("flydsl-") and name.endswith(".whl")):
+                  continue
+              if py_tag not in name:
+                  continue
+              timestamp = dt.datetime.fromisoformat(obj["LastModified"].replace("Z", "+00:00"))
+              candidates.append((timestamp, key))
+
+          if not candidates:
+              raise SystemExit(f"No FlyDSL wheel found for {py_tag} under s3://framework-whls-nightlies/{s3_prefix}/")
+
+          print(max(candidates, key=lambda item: item[0])[1])
+          PY
+          )
+
+          WHEEL_NAME=$(basename "${LATEST_KEY}")
+          WHEEL_S3_URI="s3://${{ env.FLYDSL_WHEEL_BUCKET }}/${LATEST_KEY}"
+          echo "Selected FlyDSL wheel: ${WHEEL_S3_URI}"
+          aws s3 cp "${WHEEL_S3_URI}" "./${WHEEL_NAME}"
+
+          printf 'Wheel S3 URI: %s\n' "${WHEEL_S3_URI}" | tee selected-flydsl-wheel.txt
+          echo "FLYDSL_WHEEL_NAME=${WHEEL_NAME}" >> "${GITHUB_ENV}"
+          echo "FLYDSL_WHEEL_S3_URI=${WHEEL_S3_URI}" >> "${GITHUB_ENV}"
+
+      - name: Install latest FlyDSL nightly wheel
         run: |
+          set -euo pipefail
+          docker cp "${FLYDSL_WHEEL_NAME}" "${CONTAINER_NAME}:/tmp/${FLYDSL_WHEEL_NAME}"
           docker exec "${CONTAINER_NAME}" bash -lc "
             set -euo pipefail
-
-            echo '=== Reinstalling aiter from main ==='
-            pip uninstall -y amd-aiter aiter || true
-            rm -rf /tmp/aiter-main
-            git clone --depth 1 -b main https://github.com/ROCm/aiter.git /tmp/aiter-main
-            cd /tmp/aiter-main
-            git submodule sync
-            git submodule update --init --recursive
-            MAX_JOBS=64 PREBUILD_KERNELS=0 GPU_ARCHS=gfx950 python3 setup.py develop
-
-            echo '=== Installing FlyDSL from the checked out PR commit ==='
             pip uninstall -y flydsl || true
-            cd /workspace/flydsl-test
-            MLIR_PATH=/workspace/llvm-project/build-flydsl/mlir_install python3 -m pip install -e . --use-pep517
-
+            python3 -m pip install --force-reinstall /tmp/${FLYDSL_WHEEL_NAME}
             python3 - <<'PY'
-            import pathlib
-            import atom
             import flydsl
-
-            repo_root = pathlib.Path('/workspace/flydsl-test').resolve()
-            flydsl_path = pathlib.Path(flydsl.__file__).resolve()
-
-            print(f'atom package: {atom.__file__}')
-            print(f'flydsl package: {flydsl_path}')
+            print(f'flydsl package: {flydsl.__file__}')
             print(f'flydsl version: {getattr(flydsl, "__version__", "unknown")}')
-
-            if repo_root not in flydsl_path.parents:
-                raise SystemExit(f'FlyDSL is not loaded from the checked out PR commit: {flydsl_path}')
             PY
           "
+
+      - name: Record nightly wheel
+        run: |
+          {
+            echo "## Nightly Wheel"
+            echo
+            echo "- S3 URI: \`${FLYDSL_WHEEL_S3_URI}\`"
+            echo "- Local file: \`${FLYDSL_WHEEL_NAME}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Pre-download model when cache mount exists
         run: |
@@ -283,6 +295,7 @@ jobs:
         with:
           name: flydsl-atom-${{ matrix.model_name }}
           path: |
+            selected-flydsl-wheel.txt
             atom_accuracy_output.txt
             atom_server.log
             atom_client.log
@@ -297,7 +310,6 @@ jobs:
             set -euo pipefail
             cd /workspace/atom-upstream
             bash .github/scripts/atom_test.sh stop || true
-            rm -rf /workspace/llvm-project /workspace/flydsl-test/build-fly /workspace/flydsl-test/python/flydsl/_mlir
           " || true
           docker stop "${CONTAINER_NAME}" || true
           docker rm "${CONTAINER_NAME}" || true
