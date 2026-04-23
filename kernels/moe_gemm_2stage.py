@@ -3392,6 +3392,103 @@ class _MoeGemm2ReduceWrapper:
         return MoeGemm2Mode.REDUCE
 
 
+# ---------------------------------------------------------------------------
+# Arch-agnostic MoE public API factory
+# ---------------------------------------------------------------------------
+#
+# Arch-specific MoE kernel modules (CDNA MFMA here, RDNA4 in
+# ``rdna_moe_gemm_2stage.py``, gfx1250 in ``moe_gemm_2stage_wmma_gfx1250.py``)
+# share the same public builder shape. ``make_moe_public_api`` generates
+# ``compile_moe_gemm1`` / ``compile_moe_gemm2`` / ``compile_moe_gemm2_ex``
+# bound to a given arch-specific ``compile_impl`` so each arch file does not
+# have to hand-roll the same wrappers.
+
+
+# Extra kwargs accepted at the public API layer so callers can stay uniform
+# across CDNA / gfx1250 / RDNA4 even if some options are arch-specific; we
+# strip the ones the target ``compile_impl`` does not actually use.
+_MOE_PUBLIC_EXTRA_KWARGS = (
+    "group_size",
+    "use_cshuffle_epilog",
+    "num_buffers",
+    "use_tdm_gather",
+    "use_tdm_store",
+    "inst_prefetch",
+    "wave_specialized_tdm",
+    "cluster_m",
+    "cluster_n",
+)
+
+
+def _moe_strip_extras(kw: dict, allowed_extras: tuple = ()) -> dict:
+    result = dict(kw)
+    for key in _MOE_PUBLIC_EXTRA_KWARGS:
+        if key in allowed_extras:
+            continue
+        result.pop(key, None)
+    return result
+
+
+def make_moe_public_api(compile_impl, *, pass_through_kwargs: tuple = ()):
+    """Create ``compile_moe_gemm1`` / ``compile_moe_gemm2`` / ``compile_moe_gemm2_ex``.
+
+    ``compile_impl`` must accept ``stage``, ``doweight``, ``accumulate`` and
+    the usual MoE kwargs (``model_dim``, ``inter_dim``, ``experts``, ``topk``,
+    ``tile_m``, ``tile_n``, ``tile_k``, ``in_dtype``, ``out_dtype``,
+    ``waves_per_eu``, ``expert_sched_mode``). ``pass_through_kwargs`` lets
+    arch-specific builders opt in to receiving extra public kwargs (e.g.
+    gfx1250 TDM / cluster knobs) that would otherwise be stripped.
+    """
+
+    def compile_moe_gemm1(*, doweight_stage1, **kw):
+        kw = _moe_strip_extras(kw, pass_through_kwargs)
+        return compile_impl(stage=1, doweight=doweight_stage1, **kw)
+
+    def compile_moe_gemm2(*, doweight_stage2, accumulate=True, **kw):
+        kw = _moe_strip_extras(kw, pass_through_kwargs)
+        return compile_impl(
+            stage=2,
+            doweight=doweight_stage2,
+            accumulate=accumulate,
+            **kw,
+        )
+
+    def compile_moe_gemm2_ex(
+        *,
+        mode=MoeGemm2Mode.ATOMIC,
+        valid_mask=None,
+        zero_intermediate=True,
+        **kw,
+    ):
+        if mode == MoeGemm2Mode.REDUCE:
+            gemm2_exe = compile_moe_gemm2(accumulate=False, **kw)
+            out_s = str(kw.get("out_dtype", "f16")).strip().lower()
+            if out_s in ("f16", "fp16", "half"):
+                dtype_str = "f16"
+            elif out_s in ("bf16", "bfloat16"):
+                dtype_str = "bf16"
+            else:
+                dtype_str = "f32"
+            reduce_exe = compile_moe_reduction(
+                topk=kw["topk"],
+                model_dim=kw["model_dim"],
+                dtype_str=dtype_str,
+                use_mask=(valid_mask is not None),
+            )
+            return _MoeGemm2ReduceWrapper(
+                gemm2_exe=gemm2_exe,
+                reduce_exe=reduce_exe,
+                topk=kw["topk"],
+                model_dim=kw["model_dim"],
+                out_dtype_str=dtype_str,
+                use_mask=(valid_mask is not None),
+                zero_intermediate=zero_intermediate,
+            )
+        return compile_moe_gemm2(accumulate=True, **kw)
+
+    return compile_moe_gemm1, compile_moe_gemm2, compile_moe_gemm2_ex
+
+
 def compile_moe_gemm2_ex(
     *,
     model_dim: int,

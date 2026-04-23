@@ -800,8 +800,13 @@ def moe_bench_main(
     )
     check_ref = not args.bench_no_ref
 
+    try:
+        from flydsl.runtime.device import get_rocm_arch as _get_rocm_arch
+        _arch_label = str(_get_rocm_arch())
+    except Exception:
+        _arch_label = "rocm"
     print("=" * 110)
-    print("  AMD gfx1250 MOE GEMM Kernel Performance Benchmark")
+    print(f"  AMD {_arch_label} MoE GEMM Kernel Performance Benchmark")
     print(f"  PyTorch {torch.__version__}")
     print(f"  Device:  {torch.cuda.get_device_name(0)}")
     props = torch.cuda.get_device_properties(0)

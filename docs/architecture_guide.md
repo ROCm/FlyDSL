@@ -82,6 +82,7 @@ FlyDSL/
 │   ├── blockscale_preshuffle_gemm.py # Blockscale GEMM
 │   ├── hgemm_splitk.py               # FP16 GEMM split-K
 │   ├── moe_gemm_2stage.py            # MoE GEMM (2-stage gate/up + reduce)
+│   ├── rdna_moe_gemm_2stage.py       # RDNA4 (gfx120x) MoE GEMM (fp16/bf16 WMMA)
 │   ├── moe_blockscale_2stage.py      # MoE Blockscale GEMM
 │   ├── mixed_moe_gemm_2stage.py      # Mixed-precision MoE GEMM
 │   ├── pa_decode_fp8.py              # Paged attention decode (FP8)

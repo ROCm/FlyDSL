@@ -202,6 +202,47 @@ _emit_row() {
   printf "%-14.14s %-34.34s %-10.10s %10s %10s\n" "${op}" "${shape}" "${dtype}" "${tbps}" "${tflops}"
 }
 
+_emit_rdna4_moe_rows_from_log() {
+  log="$1"
+  [ -f "${log}" ] || return 0
+  awk '
+    function trim(s) {
+      sub(/^[ \t]+/, "", s)
+      sub(/[ \t]+$/, "", s)
+      return s
+    }
+    /\|/ && $0 ~ /dim=/ && $0 ~ /inter=/ {
+      n = split($0, parts, /\|/)
+      if (n >= 2) {
+        cfg = trim(parts[1])
+        dtype = trim(parts[2])
+      }
+      next
+    }
+    /Stage 1/ { stage = "moe_rdna4_s1"; next }
+    /Stage 2 atomic/ { stage = "moe_rdna4_s2a"; next }
+    /Stage 2 reduce/ { stage = "moe_rdna4_s2r"; next }
+    /^[[:space:]]*[0-9]+[[:space:]]+/ {
+      if (stage == "" || cfg == "" || dtype == "") {
+        next
+      }
+      tokens = $1
+      m_eff = $2
+      tflops = $4
+      tbps = $5
+      status = $7
+      if (status == "" || status == "FAIL") {
+        next
+      }
+      shape = cfg "_t" tokens "_m" m_eff
+      printf "%s\t%s\t%s\t%s\t%s\n", stage, shape, dtype, tbps, tflops
+    }
+  ' "${log}" | while IFS="$(printf '\t')" read -r op shape dtype tbps tflops; do
+    [ -n "${op}" ] || continue
+    _emit_row "${op}" "${shape}" "${dtype}" "${tbps}" "${tflops}"
+  done
+}
+
 _normalize_op() {
   # Normalize aliases to canonical op names.
   op="${1:-}"
@@ -787,6 +828,30 @@ if [ "${RUN_MOE}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
       _emit_row "moe_w4a16_s2" "${shape_moe}" "${dt_s2}" "${tb_s2}" "${tf_s2}"
     fi
   done
+fi
+
+# RDNA4 MoE (gfx120x only — uses WMMA fp16/bf16)
+if [ "${RUN_MOE}" -eq 1 ] && [ "${IS_RDNA4}" = "true" ]; then
+  echo ""
+  echo "========================================================================"
+  echo "RDNA4 MoE Benchmarks"
+  echo "========================================================================"
+  log="${BENCH_LOG_DIR}/moe_rdna4.log"
+  if python3 tests/kernels/test_moe_gemm_rdna4.py \
+    --bench \
+    --bench-dtype fp16,bf16 \
+    --bench-warmup 5 \
+    --bench-iters 20 \
+    --bench-no-ref \
+    >"${log}" 2>&1; then
+    SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+    cat "${log}"
+    _emit_rdna4_moe_rows_from_log "${log}"
+  else
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+    echo "moe rdna4 failed. Log: ${log}" >&2
+    _show_fail_log "${log}" "moe_rdna4"
+  fi
 fi
 
 # RDNA4 WMMA GEMM benchmarks (via benchmark_common.py)
