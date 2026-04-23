@@ -451,7 +451,7 @@ def compile_grouped_fp8_gemm(
                             sa_idx = sa_base + sa_row
                             sa_f32 = buffer_ops.buffer_load(sa_rsrc, sa_idx, vec_width=1, dtype=T.f32)
                             sa_i32 = arith.bitcast(T.i32, sa_f32)
-                            sa_e8m0 = arith.andi(arith.shrui(sa_i32, fx.Int32(23)), fx.Int32(0xFF))
+                            sa_e8m0 = (ArithValue(sa_i32) >> fx.Int32(23)) & fx.Int32(0xFF)
                             sa_e8m0_list.append(sa_e8m0)
 
                         # Load uniform scaleB E8M0 (one per ni, same for all lanes)
@@ -459,7 +459,7 @@ def compile_grouped_fp8_gemm(
                         for ni in range_constexpr(num_acc_n):
                             sb_f32 = s_b_vals[ni]
                             sb_i32 = arith.bitcast(T.i32, sb_f32)
-                            sb_e8m0 = arith.andi(arith.shrui(sb_i32, fx.Int32(23)), fx.Int32(0xFF))
+                            sb_e8m0 = (ArithValue(sb_i32) >> fx.Int32(23)) & fx.Int32(0xFF)
                             sb_e8m0_list.append(sb_e8m0)
 
                         for mi in range_constexpr(m_repeat):
