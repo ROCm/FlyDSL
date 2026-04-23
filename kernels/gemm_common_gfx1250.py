@@ -150,6 +150,101 @@ def pipeline_fence_wait(use_cluster=False):
         gpu.cluster_wait()
 
 
+def pipeline_fence_signal_named(bar, outstanding=0, use_cluster=False):
+    """Named-barrier signal half of split fence (gfx1250+).
+
+    Per the canonical LLVM lowering ``s-barrier-lowering.ll``, ``signal_var``
+    only programs the member count; ``join`` is the per-wave arrival.
+    Emits ``s_wait_tensorcnt`` → ``s_barrier_signal_var`` (re-program mc)
+    → ``s_barrier_join`` (this wave arrives).
+    """
+    tdm_ops.tensor_wait(outstanding)
+    bar.signal_var()
+    bar.join()
+    if use_cluster:
+        gpu.cluster_signal_once_per_wg()
+
+
+def pipeline_fence_wait_named(bar, use_cluster=False):
+    """Named-barrier wait half of split fence (gfx1250+).
+
+    Emits ``s_barrier_wait id=imm_id`` on the supplied :class:`NamedBarrier`.
+    Must be preceded by matching ``pipeline_fence_signal_named`` calls from
+    every member wave (count must equal ``bar.member_count``).
+    """
+    bar.wait()
+    if use_cluster:
+        gpu.cluster_wait()
+
+
+def pipeline_fence_signal_named_multi(bars, outstanding=0, use_cluster=False):
+    """Signal multiple named barriers after a single ``tensor_wait``.
+
+    Steady-state form: assumes barriers were initialized once at kernel
+    entry via :func:`init_named_barriers`.  Each wave emits ``signal id``
+    (immediate-form arrival) per barrier — no ``signal_var`` writes to M0
+    in the hot loop, no ``join`` needed.  After the barrier releases it
+    auto-resets to ``member_count``.
+
+    Wraps the signal in an explicit ``llvm.fence syncscope("workgroup") release``.
+    The legacy ``s_barrier_signal -1`` (WGP) gets an automatic memory fence
+    from the AMDGPU backend, but named-barrier signals do not, so the
+    producer's LDS stores can be reordered past the barrier without it.
+    """
+    from flydsl._mlir.dialects import llvm as _llvm
+    from flydsl._mlir.dialects._llvm_enum_gen import AtomicOrdering
+
+    tdm_ops.tensor_wait(outstanding)
+    _llvm.fence(AtomicOrdering.release, syncscope="workgroup")
+    for bar in bars:
+        bar.signal()
+    if use_cluster:
+        gpu.cluster_signal_once_per_wg()
+
+
+def pipeline_fence_wait_named_multi(bars, use_cluster=False):
+    """Wait on every named barrier in *bars* (in declaration order).
+
+    Issues ``llvm.fence syncscope("workgroup") acquire`` after the last wait
+    so consumer LDS loads cannot be hoisted above the barrier.
+    """
+    from flydsl._mlir.dialects import llvm as _llvm
+    from flydsl._mlir.dialects._llvm_enum_gen import AtomicOrdering
+
+    for bar in bars:
+        bar.wait()
+    _llvm.fence(AtomicOrdering.acquire, syncscope="workgroup")
+    if use_cluster:
+        gpu.cluster_wait()
+
+
+def init_named_barriers(bars):
+    """Initialize a list of named barriers once at kernel entry.
+
+    Gated to wave 0 (``rocdl.wave_id() == 0``) — ``s_barrier_init`` resets
+    the wave-arrival counter, so racing inits from multiple waves can wipe
+    earlier signals.  Followed by ``gpu.barrier()`` so the init is visible
+    to all waves before they begin signalling.
+    """
+    from flydsl.expr import arith as _arith
+    from flydsl.expr import rocdl as _rocdl
+    from flydsl._mlir import ir as _ir
+    from flydsl._mlir.dialects import scf as _scf
+    from flydsl.expr.typing import T as _T
+
+    is_wave0 = _arith.cmpi(
+        _arith.CmpIPredicate.eq,
+        _rocdl.wave_id(),
+        _arith.constant(0, type=_T.i32),
+    )
+    if_op = _scf.IfOp(is_wave0)
+    with _ir.InsertionPoint(if_op.then_block):
+        for bar in bars:
+            bar.init()
+        _scf.YieldOp([])
+    workgroup_barrier()
+
+
 def issue_tdm_loads(*descs, wave_specialized=False, wave_id=None):
     """Emit one or more TDM loads, optionally one descriptor per loader wave."""
     if wave_specialized:
@@ -253,6 +348,11 @@ __all__ = [
     "pipeline_fence",
     "pipeline_fence_signal",
     "pipeline_fence_wait",
+    "pipeline_fence_signal_named",
+    "pipeline_fence_wait_named",
+    "pipeline_fence_signal_named_multi",
+    "pipeline_fence_wait_named_multi",
+    "init_named_barriers",
     "issue_tdm_loads",
     # Epilogue
     "store_acc_vec8_to_lds",
