@@ -2067,8 +2067,8 @@ def test_moe_stage2_standalone(
 # ---------------------------------------------------------------------------
 
 _A16W4_SHAPES = [
-    pytest.param(16, 7168, 256, 256, 8, 32, 256, 256, id="a16w4-s2-small"),
-    pytest.param(128, 7168, 256, 256, 8, 64, 256, 256, id="a16w4-s2-medium"),
+    pytest.param(16, 3072, 3072, 128, 4, 32, 256, 256, id="a16w4-s2-small"),
+    pytest.param(128, 3072, 3072, 128, 4, 64, 256, 256, id="a16w4-s2-medium"),
 ]
 
 _A16W4_SKIP = pytest.mark.skipif(
@@ -2128,9 +2128,9 @@ def test_moe_gemm2_a16w4(
     w2_qt_raw, w2_scale = torch_quant(w2_fp32.to(dtype), quant_dtype=aiter.dtypes.fp4x2)
     w2_qt_raw = w2_qt_raw.view(experts, model_dim, inter_dim // 2)
 
-    # Pre-shuffle weights and scales for the kernel
-    w2_qt_shuf = shuffle_weight_a16w4(w2_qt_raw, 16, False)
-    w2_scale_shuf = shuffle_scale_a16w4(w2_scale, experts, False)
+    # Pre-shuffle weights and scales for the kernel; view as uint8 for DLPack.
+    w2_qt_shuf = shuffle_weight_a16w4(w2_qt_raw, 16, False).view(torch.uint8).contiguous()
+    w2_scale_shuf = shuffle_scale_a16w4(w2_scale, experts, False).view(torch.uint8).contiguous()
 
     # MoE routing: uniform assignment so every token routes to expert 0..topk-1
     topk_ids = torch.zeros((tokens, topk), device=device, dtype=torch.int32)
@@ -2188,13 +2188,7 @@ def test_moe_gemm2_a16w4(
     )
     ref = ref.to(dtype)
 
-    verify_output(
-        out_kernel,
-        ref,
-        test_name="test_moe_gemm2_a16w4",
-        atol=atol,
-        rtol=rtol,
-    )
+    verify_output(out_kernel, ref, atol=atol, rtol=rtol)
 
 
 if __name__ == "__main__":
