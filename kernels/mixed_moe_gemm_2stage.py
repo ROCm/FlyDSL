@@ -4973,11 +4973,11 @@ def compile_a16w4_moe_gemm2(
                     return parts
 
                 coord_wl = fx.idx2crd(tx, layout_tx_wave_lane)
-                wave_id = coord_wl[0]
-                lane_id = coord_wl[1]
+                wave_id = fx.get(coord_wl, 0)
+                lane_id = fx.get(coord_wl, 1)
                 coord_l16 = fx.idx2crd(lane_id, layout_lane16)
-                lane_div_16 = coord_l16[0]
-                lane_mod_16 = coord_l16[1]
+                lane_div_16 = fx.get(coord_l16, 0)
+                lane_mod_16 = fx.get(coord_l16, 1)
 
                 _dma_bytes = 16
                 _wave_size = 64
@@ -5055,8 +5055,8 @@ def compile_a16w4_moe_gemm2(
 
                     row_w = expert_off_idx + col_g
                     coord_w = fx.idx2crd(row_w, layout_n_blk_intra)
-                    n_blk_list.append(coord_w[0])
-                    n_intra_list.append(coord_w[1])
+                    n_blk_list.append(fx.get(coord_w, 0))
+                    n_intra_list.append(fx.get(coord_w, 1))
 
                 m_repeat = tile_m // 16
                 k_unroll = tile_k_bytes // 64
