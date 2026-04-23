@@ -5,26 +5,20 @@
 
 API matching DeepGEMM's m_grouped_fp8_gemm_nt_contiguous:
   - A: [M_total, K] FP8 - concatenated rows from all groups
-  - scale_a: [scale_k, M_total] FP32 - per-token, per-128K scales (transposed)
+  - scale_a: [scale_k, M_total] - per-token, per-128K scales (transposed).
+    uint8 (E8M0) on gfx950 (HW scaling); FP32 on gfx942 (SW scaling).
   - B: [num_groups, N, K] FP8 - one weight matrix per group
-  - scale_b: [num_groups, scale_n, scale_k] FP32 - per-block scales
+  - scale_b: [num_groups, scale_n, scale_k] - per-block scales.
+    uint8 (E8M0) on gfx950; FP32 on gfx942.
   - D: [M_total, N] BF16 - output
   - grouped_layout: [M_total] INT32 - maps each row to group ID (-1 for padding)
 
 Block scaling granularity (matching DeepGEMM):
   - A: (1, 128) - per-token, per-128-K-elements
   - B: (128, 128) - per-128-N, per-128-K block
-
-Optimizations applied:
-  - LDS ping-pong double buffering for A tiles
-  - XOR swizzle for LDS bank conflict avoidance
-  - Preshuffle B layout with load_b_pack_k32
-  - A0 LDS prefetch (cross-tile, hides LDS read latency behind VMEM)
-  - CShuffle epilogue with vectorized stores
 """
 
 import functools
-import os
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
@@ -404,7 +398,6 @@ def compile_grouped_fp8_gemm(
                 rocdl.sched_group_barrier(rocdl.mask_dswr, num_a_loads, 3)
                 rocdl.sched_barrier(0)
 
-            # ── Helper: compute one K-tile from LDS + B tile ────────────
             # ── Helper: prefetch E8M0 scales for one K-tile (gfx950 HW path) ──
             # Returns (sa_e8m0_pf, sb_e8m0_pf) — outer index = sb (sb_per_tile),
             # inner = m_repeat / num_acc_n. Issued ahead of compute_tile so

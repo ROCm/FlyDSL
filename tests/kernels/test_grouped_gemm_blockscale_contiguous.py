@@ -219,7 +219,7 @@ def generate_grouped_gemm_inputs(
 
     # Reference output from original FP32 data BEFORE quantization
     # (matching DeepGEMM test convention: ref absorbs all quantization + scale errors)
-    # Per-group matmul on GPU via hipBLASLt (much faster than CPU for large K).
+    # Per-group matmul.
     ref_d = torch.zeros(M, n, dtype=torch.float32, device=device)
     for g in range(num_groups):
         mask = grouped_layout == g

@@ -175,7 +175,10 @@ def generate_masked_grouped_gemm_inputs(
         expected_m_per_group: Average actual M rows per group
         n: N dimension
         k: K dimension
+        scale_block_k: K-dimension scale block size
+        scale_block_n: N-dimension scale block size
         out_dtype: Output data type ("bf16" or "f16")
+        device: Device to create tensors on
 
     Returns:
         Tuple of (a_fp8, scale_a, b_shuffled, scale_b, masked_m, d, ref_d)
@@ -195,7 +198,7 @@ def generate_masked_grouped_gemm_inputs(
 
     # Reference output from original FP32 data BEFORE quantization
     # (matching DeepGEMM test convention: ref absorbs all quantization + scale errors)
-    # Per-group matmul on GPU via hipBLASLt (much faster than CPU for large K).
+    # Per-group matmul.
     ref_d = torch.zeros(num_groups, max_m, n, dtype=torch.float32, device=device)
     for g in range(num_groups):
         m_actual = masked_m[g].item()

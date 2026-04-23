@@ -5,9 +5,11 @@
 
 API matching DeepGEMM's m_grouped_fp8_gemm_nt_masked:
   - A: [G, expected_m, K] FP8 - padded activation tensor per group
-  - scale_a: [G, scale_k, expected_m] FP32 - per-token, per-128K scales (transposed)
+  - scale_a: [G, scale_k, expected_m] - per-token, per-128K scales (transposed).
+    uint8 (E8M0) on gfx950 (HW scaling); FP32 on gfx942 (SW scaling).
   - B: [G, N, K] FP8 - one weight matrix per group
-  - scale_b: [G, scale_n, scale_k] FP32 - per-block scales
+  - scale_b: [G, scale_n, scale_k] - per-block scales.
+    uint8 (E8M0) on gfx950; FP32 on gfx942.
   - D: [G, expected_m, N] BF16 - padded output tensor per group
   - masked_m: [G] INT32 - tracks the actual number of valid tokens per group
   - expected_m: INT32 - the padded capacity (max_m) for the M dimension
@@ -15,18 +17,9 @@ API matching DeepGEMM's m_grouped_fp8_gemm_nt_masked:
 Block scaling granularity (matching DeepGEMM's 1D2D configuration):
   - A: (1, 128) - per-token, per-128-K-elements
   - B: (128, 128) - per-128-N, per-128-K block
-
-Optimizations applied:
-  - LDS ping-pong double buffering for A tiles
-  - XOR swizzle for LDS bank conflict avoidance
-  - Preshuffle B layout with load_b_pack_k32
-  - A0 LDS prefetch (cross-tile, hides LDS read latency behind VMEM)
-  - CShuffle epilogue with vectorized stores
-  - Dynamic block-level early exit using masked_m to skip computing padded garbage
 """
 
 import functools
-import os
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
@@ -409,8 +402,6 @@ def compile_masked_grouped_fp8_gemm(
                 rocdl.sched_group_barrier(rocdl.mask_dswr, num_a_loads, 3)
                 rocdl.sched_barrier(0)
 
-            # ── Helper: compute one K-tile from LDS + B tile ────────────
-            c_scale_k = fx.Index(scale_k)
             sa_group_off = group_idx * c_scale_k * m_in  # 3D scale_a Offset
 
             # ── Helper: prefetch E8M0 scales for one K-tile (gfx950 HW path) ──
