@@ -414,19 +414,23 @@ def compile_grouped_fp8_gemm(
 
                     # Load scale_a for this K-block (per-token scale)
                     # scale_a layout: [scale_k, M] transposed
+                    # gfx950 HW path loads scaleA per-lane below as int8; the
+                    # gfx942-layout f32 loads here are unused (and would be OOB
+                    # against the int8-sized buffer resource), so they are gated.
                     sa_base = kb * m_in
                     s_a_vecs = []
-                    row_off_base = lane_div_16 * fx.Index(4)
-                    for mi in range_constexpr(m_repeat):
-                        s_a_row = []
-                        for ii in range_constexpr(4):
-                            row_in_tile = arith.index(mi * 16) + row_off_base + fx.Index(ii)
-                            row_global = bx_m + row_in_tile
-                            sa_idx = sa_base + row_global
-                            s_a_val = buffer_ops.buffer_load(sa_rsrc, sa_idx, vec_width=1, dtype=T.f32)
-                            s_a_row.append(s_a_val)
-                        s_a_vec4 = vector.from_elements(T.f32x4, s_a_row)
-                        s_a_vecs.append(s_a_vec4)
+                    if not _is_gfx950:
+                        row_off_base = lane_div_16 * fx.Index(4)
+                        for mi in range_constexpr(m_repeat):
+                            s_a_row = []
+                            for ii in range_constexpr(4):
+                                row_in_tile = arith.index(mi * 16) + row_off_base + fx.Index(ii)
+                                row_global = bx_m + row_in_tile
+                                sa_idx = sa_base + row_global
+                                s_a_val = buffer_ops.buffer_load(sa_rsrc, sa_idx, vec_width=1, dtype=T.f32)
+                                s_a_row.append(s_a_val)
+                            s_a_vec4 = vector.from_elements(T.f32x4, s_a_row)
+                            s_a_vecs.append(s_a_vec4)
 
                     # Load scale_b for this K-block (only the SW gfx942 path needs
                     # the f32 list; gfx950 path loads int8 bytes directly below).
