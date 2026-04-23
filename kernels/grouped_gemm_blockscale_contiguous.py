@@ -427,11 +427,14 @@ def compile_grouped_fp8_gemm(
 
                     # Load scale_b for this K-block
                     # scale_b layout: [num_groups, scale_n, scale_k]
+                    # The address is wave-uniform (no lane dependence) — promote the
+                    # load to a single broadcast via readfirstlane to free VMEM slots.
                     sb_group_offset = group_idx * fx.Index(scale_n * scale_k)
                     s_b_vals = []
                     for ni in range_constexpr(num_acc_n):
                         sb_idx = sb_group_offset + n_block_for_scale[ni] * c_scale_k + kb
                         s_b_val = buffer_ops.buffer_load(sb_rsrc, sb_idx, vec_width=1, dtype=T.f32)
+                        s_b_val = rocdl.readfirstlane(T.f32, s_b_val)
                         s_b_vals.append(s_b_val)
 
                     # MFMA computation for this scale block
