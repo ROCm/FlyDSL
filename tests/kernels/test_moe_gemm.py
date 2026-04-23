@@ -31,7 +31,7 @@ for _p in reversed(_PYTHON_CANDIDATES):
     if os.path.isdir(_p) and _p not in sys.path:
         sys.path.insert(0, _p)
 
-from tests.kernels.test_ref import torch_moe_gemm1, torch_moe_gemm2
+from tests.kernels.test_ref import torch_moe_gemm1, torch_moe_gemm2, _dequant_mxfp4_per_1x32
 from tests.utils import pertoken_quant, shuffle_weight, shuffle_scale_for_int4
 from tests.test_common import verify_output, run_perftest
 from flydsl.runtime.device import get_rocm_arch
@@ -1957,6 +1957,104 @@ def test_moe_stage2_standalone(
         use_valid_mask=True,
         kernel_name="moe_gemm2_reduce_flydsl_valid_mask",
     )
+
+
+@pytest.mark.skipif("gfx95" not in ARCH, reason="BF16×FP4 requires gfx950+ (v_cvt_scalef32_pk_bf16_fp4)")
+@pytest.mark.parametrize("tile_m", [16, 32, 64], ids=["tile_m16", "tile_m32", "tile_m64"])
+@pytest.mark.parametrize("act", ["silu", "swiglu"])
+def test_moe_gemm1_bf16xfp4(tile_m: int, act: str):
+    """BF16×FP4 (W4A16) stage1: BF16 activations, FP4 E2M1 weights, software dequant via
+    v_cvt_scalef32_pk_bf16_fp4, then mfma_f32_16x16x32_bf16."""
+    from tests.kernels.utils import fp4_utils
+    if fp4_utils is None:
+        pytest.skip("fp4_utils not available (triton not installed)")
+
+    tokens, model_dim, inter_dim, experts, topk = 64, 512, 256, 4, 2
+    tile_n, tile_k = 256, 256
+    device = torch.device("cuda")
+    torch.manual_seed(0)
+
+    x_fp32 = torch.randn((tokens, model_dim), device=device, dtype=torch.float32) * 0.2
+    w1_fp32 = torch.randn((experts, 2 * inter_dim, model_dim), device=device, dtype=torch.float32) * 0.2
+
+    score = torch.randn((tokens, experts), device=device, dtype=torch.float32)
+    topk_vals, topk_ids = torch.topk(score, k=topk, dim=1)
+    topk_weights = torch.softmax(topk_vals, dim=1).to(torch.float32)
+
+    routing = build_routing_buffers(
+        topk_ids=topk_ids,
+        topk_weights=topk_weights,
+        experts=experts,
+        model_dim=model_dim,
+        tile_m=tile_m,
+    )
+    sorted_token_ids, sorted_weights, sorted_expert_ids, num_valid_ids, _sorted_size, blocks = routing
+
+    # Activations: BF16, no quantization
+    x_bf16 = x_fp32.to(torch.bfloat16)
+
+    # Weights: quantize W1 to MX FP4 E2M1, preshuffle for the kernel
+    w1_flat_fp32 = w1_fp32.view(experts * (2 * inter_dim), model_dim)
+    w1_fp4, w1_scale_raw = _per_1x32_fp4_quant(w1_flat_fp32)
+    w1_shuffled = shuffle_weight(w1_fp4.view(torch.float4_e2m1fn_x2))
+    w_kernel = w1_shuffled.view(torch.uint8).contiguous()
+    scale_w1_1d = fp4_utils.e8m0_shuffle(w1_scale_raw).view(torch.uint8).contiguous()
+
+    # Scale X: empty (no activation scale for BF16 path)
+    scale_x_1d = torch.empty((0,), device=device, dtype=torch.float32)
+
+    out = torch.empty((tokens, topk, inter_dim), device=device, dtype=torch.float16)
+
+    exe = compile_mixed_moe_gemm1(
+        model_dim=model_dim,
+        inter_dim=inter_dim,
+        experts=experts,
+        topk=topk,
+        tile_m=tile_m,
+        tile_n=tile_n,
+        tile_k=tile_k,
+        doweight_stage1=False,
+        a_dtype="bf16",
+        b_dtype="fp4",
+        out_dtype="f16",
+        act=act,
+    )
+    bias_dummy = torch.empty((0,), device=device, dtype=torch.float32)
+
+    def _args(o):
+        return (
+            o, x_bf16, w_kernel, scale_x_1d, scale_w1_1d,
+            sorted_token_ids, sorted_expert_ids, sorted_weights,
+            num_valid_ids, bias_dummy,
+            tokens, inter_dim * 2, model_dim, int(blocks),
+            torch.cuda.current_stream(),
+        )
+
+    compiled_exe = flyc.compile(exe, *_args(out))
+    compiled_exe(*_args(out))
+    torch.cuda.synchronize()
+
+    # Reference: dequantize W1 FP4→f32, multiply by BF16 activations
+    w1_q_flat = w1_fp4.view(experts * (2 * inter_dim), model_dim // 2)
+    scale_w1_flat = w1_scale_raw.view(experts * (2 * inter_dim), model_dim // 32)
+    w1_dequant_f32 = _dequant_mxfp4_per_1x32(w1_q_flat, scale_w1_flat).view(experts, 2 * inter_dim, model_dim)
+    x_f32 = x_bf16.to(torch.float32)
+
+    ref = torch.zeros((tokens, topk, inter_dim), device=device, dtype=torch.float32)
+    for e in range(experts):
+        mask = topk_ids == e
+        idx = mask.nonzero(as_tuple=False)
+        if idx.numel() == 0:
+            continue
+        t_idx, s_idx = idx[:, 0], idx[:, 1]
+        y2 = torch.nn.functional.linear(x_f32[t_idx], w1_dequant_f32[e])
+        gate, up = y2[:, :inter_dim], y2[:, inter_dim:]
+        if act == "silu":
+            ref[t_idx, s_idx] = (torch.nn.functional.silu(gate) * up).float()
+        else:
+            ref[t_idx, s_idx] = (torch.nn.functional.silu(gate) * up).float()
+
+    assert verify_output(out.to(torch.float32), ref, rtol=0.15, atol=0.15)
 
 
 if __name__ == "__main__":
