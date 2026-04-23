@@ -970,7 +970,6 @@ def load_b_raw_mxfp4_dwordx4(
         vec_elems=16,
         elem_bytes=1,
         offset_in_bytes=True,
-        cache_modifier=cache_modifier,
     )
     return vector.bitcast(T.vec(4, T.i32), b16)
 
