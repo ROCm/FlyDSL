@@ -156,6 +156,8 @@ def Fly_SwizzleAttr : Fly_Attr<"Swizzle", "swizzle", []> {
   let extraClassDeclaration = [{
     bool isTrivialSwizzle() const;
     static SwizzleAttr getTrivialSwizzle(MLIRContext *context);
+
+    int32_t period() const { return 1 << (getMask() + getBase() + getShift()); }
   }];
 }
 
