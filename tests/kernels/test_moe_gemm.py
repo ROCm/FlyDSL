@@ -746,6 +746,29 @@ def run_moe_stage1(
         f"{tflops:.2f} TFLOPS(logical, M={tokens*topk}), "
         f"{tbps:.3f} TB/s (doweight_stage1={doweight_stage1})"
     )
+
+    # AOT round-trip
+    if not _is_splitk:
+        import tempfile, shutil
+        _aot_dir = tempfile.mkdtemp(prefix="flydsl_aot_")
+        _aot_prefix = f"moe_s1_{in_dtype}"
+        _aot_path = os.path.join(_aot_dir, "kernel.o")
+        try:
+            compiled_exe.dump_to_object(_aot_prefix, output_path=_aot_path)
+            mod = flyc.load_module(_aot_path)
+            aot_fn = mod.get_function(_aot_prefix)
+            out.zero_()
+            launch_args = (out, x_q, w_kernel, scale_x_1d, scale_w1_1d,
+                           sorted_token_ids, sorted_expert_ids, sorted_weights_1d)
+            if is_fp4:
+                aot_fn(*_s1_args_fp4(*launch_args))
+            else:
+                aot_fn(*_s1_args(*launch_args))
+            torch.cuda.synchronize()
+            print(f"  [AOT] {_aot_prefix}: PASS")
+        finally:
+            shutil.rmtree(_aot_dir)
+
     # Compare + benchmark vs aiter stage1 (optional; enabled by default when aiter is runnable).
     if compare_aiter_ck is None:
         compare_ck = os.environ.get("COMPARE_AITER_CK", "1" if HAS_AITER else "0") == "1"
@@ -1347,6 +1370,31 @@ def run_moe_stage2(
             scale_w2_groups=scale_w2_groups,
         )
         assert verify_output(out.to(torch.float32), ref2, rtol=0.5, atol=0.5)
+
+    # AOT round-trip (skip reduce mode — uses wrapper, not a single compiled function)
+    if not is_reduce_exe:
+        import tempfile, shutil
+        _aot_dir = tempfile.mkdtemp(prefix="flydsl_aot_")
+        _aot_prefix = f"moe_s2_{in_dtype}"
+        _aot_path = os.path.join(_aot_dir, "kernel.o")
+        try:
+            compiled_exe.dump_to_object(_aot_prefix, output_path=_aot_path)
+            mod = flyc.load_module(_aot_path)
+            aot_fn = mod.get_function(_aot_prefix)
+            out.zero_()
+            _s2_launch_args = (out, a2_q.view(-1), w2_kernel.view(-1),
+                               a2_scale_1d, w2_scale_1d, sorted_token_ids,
+                               sorted_expert_ids, sorted_weights_1d)
+            if is_fp4:
+                aot_fn(*_s2_args_fp4(*_s2_launch_args))
+            else:
+                aot_fn(*_s2_args_atomic(*_s2_launch_args))
+            torch.cuda.synchronize()
+            if not bool(skip_ref):
+                assert verify_output(out.to(torch.float32), ref2, rtol=0.5, atol=0.5), "AOT round-trip failed"
+            print(f"  [AOT] {_aot_prefix}: PASS")
+        finally:
+            shutil.rmtree(_aot_dir)
 
     # Launches full expert-block range; effective work is gated by num_valid_ids.
     flops = 2 * tokens * topk * model_dim * inter_dim

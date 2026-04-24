@@ -142,6 +142,12 @@ class CompiledArtifact:
                 print("=" * 60)
                 print(self._source_ir)
 
+    def dump_to_object(self, function_prefix: str, output_path: str = "", arch: str = "") -> bytes:
+        """Export as relocatable ELF .o (host wrapper + embedded GPU binary)."""
+        from .export.object_export import dump_to_object
+
+        return dump_to_object(self, function_prefix, output_path=output_path, arch=arch)
+
     @property
     def ir(self) -> str:
         return self._ir_text

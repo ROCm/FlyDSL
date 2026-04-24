@@ -524,15 +524,12 @@ def _resolve_jit_arg_type(arg, annotation):
 def _build_call_state(sig, args_tuple, func_exe):
     """Build a CallState for fast repeated dispatch.
 
-    Resolves each parameter's JitArgument type using the same registry as
-    convert_to_jit_arguments, then asks it for a reusable slot specification.
-    This ensures a single source of truth for argument packing.
-
     Returns a CallState, or None if any parameter can't be fast-pathed.
     """
     from .jit_argument import _is_constexpr_annotation, _is_type_param_annotation
 
     slot_specs = []
+    type_tags = []
     has_user_stream = False
 
     for i, (param_name, param) in enumerate(sig.parameters.items()):
@@ -559,40 +556,34 @@ def _build_call_state(sig, args_tuple, func_exe):
 
         ctype, extract = spec
 
+        tag = getattr(jit_arg_type, "_aot_type_tag", None)
+        if tag is None:
+            return None
+
         try:
             extract(arg)
         except (AttributeError, TypeError):
             return None
 
         slot_specs.append((i, ctype, extract))
+        type_tags.append((i, tag))
 
-    # Auto-stream: append a zero-valued slot for the default (NULL) stream.
-    # When no user-declared stream parameter exists, the compiled kernel
-    # still expects a stream pointer as the last argument.  A NULL pointer
-    # (value 0) selects the HIP default stream.
     if not has_user_stream:
         slot_specs.append((-1, ctypes.c_void_p, None))
+        type_tags.append((-1, "null_stream"))
 
-    return CallState(slot_specs, func_exe)
+    return CallState(slot_specs, func_exe, type_tags)
 
 
 class CallState:
-    """Pre-allocated state for fast kernel dispatch.
+    """Pre-allocated state for fast kernel dispatch."""
 
-    Built from JitArgument types' _reusable_slot_spec protocol — the same
-    types used by convert_to_jit_arguments for the full DLPack path.
+    __slots__ = ("_func_exe", "_spec", "_type_tags", "_tls")
 
-    Pre-allocates typed ctypes storage and a packed pointer array at init
-    time.  On each call, only updates .value on existing storage objects —
-    no ctypes object allocation, no pointer()/cast() calls.  Uses
-    thread-local storage for thread safety.
-    """
-
-    __slots__ = ("_func_exe", "_spec", "_tls")
-
-    def __init__(self, slot_specs, func_exe):
+    def __init__(self, slot_specs, func_exe, type_tags=None):
         self._func_exe = func_exe
         self._spec = slot_specs  # list of (arg_idx, ctype, extract_fn)
+        self._type_tags = type_tags  # list of (arg_idx, type_tag_str)
         self._tls = threading.local()
 
     def _init_buffers(self):
@@ -892,13 +883,6 @@ def jit(func: Optional[Callable] = None) -> JitFunction:
 class CompiledFunction:
     """Pre-compiled callable returned by ``flyc.compile()``.
 
-    All MLIR compilation, signature analysis, and argument metadata resolution
-    happen once at ``compile()`` time.  The ``__call__`` hot path does only:
-
-    1. Update pre-allocated ctypes storage (data_ptr / scalar extraction)
-    2. Invoke the JIT'd C function pointer
-
-    No ``inspect.Signature.bind``, no ``_make_cache_key``, no cache lookup.
     Accepts **positional arguments only** (same count and order as the
     original ``@flyc.jit`` function).
     """
@@ -911,6 +895,16 @@ class CompiledFunction:
 
     def __call__(self, *args):
         return self._call_state(args)
+
+    def dump_to_object(self, function_prefix: str, output_path: str = "", arch: str = "") -> bytes:
+        """Export as relocatable ELF .o (host wrapper + embedded GPU binary)."""
+        import json
+        args_spec = json.dumps(self._call_state._type_tags) if self._call_state._type_tags else None
+        from .export.object_export import dump_to_object
+        return dump_to_object(
+            self._keepalive, function_prefix,
+            output_path=output_path, arch=arch, args_spec=args_spec,
+        )
 
 
 def _compile_impl(func, *args) -> CompiledFunction:

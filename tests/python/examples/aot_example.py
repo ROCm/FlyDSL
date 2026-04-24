@@ -51,6 +51,7 @@ def precompile_to_cache(launch_fn, M: int, N: int, K: int, in_dtype: str):
             torch.zeros(b_elems, dtype=torch.int8 if is_low_prec else a_dtype),
             torch.zeros(M, dtype=torch.float32) if is_low_prec else torch.empty(0, dtype=torch.float32),
             torch.zeros(N, dtype=torch.float32) if is_low_prec else torch.empty(0, dtype=torch.float32),
+            torch.empty(0, dtype=torch.float16),  # dummy bias
             M, N, 0,
         )
     finally:
@@ -132,6 +133,7 @@ def run_and_verify(
         else scale_b.contiguous().view(-1)
     )
 
+    dummy_bias = torch.empty(0, dtype=torch.float16, device=device)
     stream = torch.cuda.current_stream()
     launch_fn(
         c_out.contiguous().view(-1),
@@ -139,6 +141,7 @@ def run_and_verify(
         _as_i8(b_input.contiguous().view(-1)),
         sa_flat,
         sb_flat,
+        dummy_bias,
         M,
         N,
         stream,

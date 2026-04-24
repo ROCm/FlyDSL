@@ -237,6 +237,23 @@ def test_mfma_a8_flyc_preshuffle(
 
     assert verify_output(c_out_scaled, c_ref, rtol=0.1, atol=0.1)
 
+    # AOT round-trip: dump → load_module → call → verify
+    import tempfile, shutil
+    _aot_dir = tempfile.mkdtemp(prefix="flydsl_aot_")
+    _aot_prefix = f"gemm_{in_dtype}_{M}x{N}x{K}"
+    _aot_path = os.path.join(_aot_dir, "kernel.o")
+    try:
+        compiled_fn.dump_to_object(_aot_prefix, output_path=_aot_path)
+        mod = flyc.load_module(_aot_path)
+        aot_fn = mod.get_function(_aot_prefix)
+        c_out_raw.zero_()
+        aot_fn(*_gemm_args(c_out_raw, a_q, b_input, sa_flat, sb_flat))
+        torch.cuda.synchronize()
+        assert verify_output(c_out_raw.to(torch.float32), c_ref, rtol=0.1, atol=0.1), "AOT round-trip failed"
+        print(f"  [AOT] {_aot_prefix}: PASS")
+    finally:
+        shutil.rmtree(_aot_dir)
+
     if HAS_AITER and bool(run_aiter_bench) and (not is_int4) and (in_dtype in ("fp8", "int8")):
         print("-" * 40)
         print("Running Aiter Benchmark...")
