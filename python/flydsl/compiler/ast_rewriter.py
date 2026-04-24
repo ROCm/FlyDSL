@@ -430,12 +430,6 @@ class ReplaceIfWithDispatch(Transformer):
         return tuple(values)
 
     @staticmethod
-    def _merge_partial_results(base_names, base_values, part_names, part_values):
-        merged = {name: value for name, value in zip(base_names, base_values)}
-        merged.update({name: value for name, value in zip(part_names, part_values)})
-        return [merged[name] for name in base_names]
-
-    @staticmethod
     def _call_branch(fn, result_names, state_values):
         sig = inspect.signature(fn)
         params = list(sig.parameters.values())
@@ -469,46 +463,49 @@ class ReplaceIfWithDispatch(Transformer):
         result_names, result_values = ReplaceIfWithDispatch._normalize_named_values(
             result_names, result_values, "result_names", "result_values"
         )
-        # Only variables with an incoming value can be scf.if results/yields.
-        effective_result_pairs = [
-            (name, value)
-            for name, value in zip(result_names, result_values)
-            if _unwrap_value(value) is not None
-        ]
-        effective_result_names = tuple(name for name, _ in effective_result_pairs)
-        effective_result_values = tuple(value for _, value in effective_result_pairs)
-        effective_result_map = {name: value for name, value in effective_result_pairs}
+        result_map = {name: value for name, value in zip(result_names, result_values)}
 
         if not ReplaceIfWithDispatch._is_dynamic(cond):
             taken = then_fn if cond else else_fn
             if taken is None:
                 return ReplaceIfWithDispatch._pack_named_values(result_names, result_values)
-            result = ReplaceIfWithDispatch._call_branch(taken, effective_result_names, result_values)
-            if not effective_result_names:
+            result = ReplaceIfWithDispatch._call_branch(taken, result_names, result_values)
+            if not result_names:
                 return ReplaceIfWithDispatch._pack_named_values(result_names, result_values)
             partial_values = ReplaceIfWithDispatch._normalize_branch_result(
-                result, effective_result_names, effective_result_map, "selected branch"
+                result, result_names, result_map, "selected branch"
             )
-            merged_values = ReplaceIfWithDispatch._merge_partial_results(
-                result_names, result_values, effective_result_names, partial_values
-            )
-            return ReplaceIfWithDispatch._pack_named_values(result_names, merged_values)
+            return ReplaceIfWithDispatch._pack_named_values(result_names, partial_values)
 
         cond_i1 = ReplaceIfWithDispatch._to_i1(cond)
         if not isinstance(cond_i1, ir.Value):
             raise TypeError(f"dynamic if condition must lower to ir.Value, got {type(cond_i1).__name__}")
 
-        if not effective_result_names:
+        none_vars = [
+            name for name, value in zip(result_names, result_values)
+            if _unwrap_value(value) is None
+        ]
+        if none_vars:
+            raise TypeError(
+                f"Variable(s) {none_vars} initialized as None before a dynamic "
+                f"if/else (scf.if). Branches assign to these variables, but "
+                f"None cannot be yielded as an scf.if result. Initialize them "
+                f"with a value whose type matches the branch assignment (e.g. "
+                f"fx.Int32(0), fx.Float32(0.0)), or wrap the condition with "
+                f"const_expr() if it is a compile-time constant."
+            )
+
+        if not result_names:
             has_else = else_fn is not None
             if_op = scf.IfOp(cond_i1, [], has_else=has_else, loc=ir.Location.unknown())
             with ir.InsertionPoint(if_op.regions[0].blocks[0]):
-                ReplaceIfWithDispatch._call_branch(then_fn, effective_result_names, result_values)
+                ReplaceIfWithDispatch._call_branch(then_fn, result_names, result_values)
                 scf.YieldOp([])
             if has_else:
                 if len(if_op.regions[1].blocks) == 0:
                     if_op.regions[1].blocks.append(*[])
                 with ir.InsertionPoint(if_op.regions[1].blocks[0]):
-                    ReplaceIfWithDispatch._call_branch(else_fn, effective_result_names, result_values)
+                    ReplaceIfWithDispatch._call_branch(else_fn, result_names, result_values)
                     scf.YieldOp([])
             return ReplaceIfWithDispatch._pack_named_values(result_names, result_values)
 
@@ -516,7 +513,7 @@ class ReplaceIfWithDispatch(Transformer):
             else_fn = lambda *args: {}
 
         state_raw = []
-        for name, value in zip(effective_result_names, effective_result_values):
+        for name, value in zip(result_names, result_values):
             raw = _unwrap_value(value)
             if not isinstance(raw, ir.Value):
                 raise TypeError(
@@ -529,12 +526,12 @@ class ReplaceIfWithDispatch(Transformer):
         if_op = scf.IfOp(cond_i1, result_types, has_else=True, loc=ir.Location.unknown())
 
         with ir.InsertionPoint(if_op.regions[0].blocks[0]):
-            then_result = ReplaceIfWithDispatch._call_branch(then_fn, effective_result_names, result_values)
+            then_result = ReplaceIfWithDispatch._call_branch(then_fn, result_names, result_values)
             then_values = ReplaceIfWithDispatch._normalize_branch_result(
-                then_result, effective_result_names, effective_result_map, "then-branch"
+                then_result, result_names, result_map, "then-branch"
             )
-            then_raw = ReplaceIfWithDispatch._unwrap_mlir_values(then_values, effective_result_names, "then-branch")
-            for name, expect_ty, got in zip(effective_result_names, result_types, then_raw):
+            then_raw = ReplaceIfWithDispatch._unwrap_mlir_values(then_values, result_names, "then-branch")
+            for name, expect_ty, got in zip(result_names, result_types, then_raw):
                 if got.type != expect_ty:
                     raise TypeError(
                         f"if/else variable '{name}' type mismatch in then-branch: "
@@ -545,12 +542,12 @@ class ReplaceIfWithDispatch(Transformer):
         if len(if_op.regions[1].blocks) == 0:
             if_op.regions[1].blocks.append(*[])
         with ir.InsertionPoint(if_op.regions[1].blocks[0]):
-            else_result = ReplaceIfWithDispatch._call_branch(else_fn, effective_result_names, result_values)
+            else_result = ReplaceIfWithDispatch._call_branch(else_fn, result_names, result_values)
             else_values = ReplaceIfWithDispatch._normalize_branch_result(
-                else_result, effective_result_names, effective_result_map, "else-branch"
+                else_result, result_names, result_map, "else-branch"
             )
-            else_raw = ReplaceIfWithDispatch._unwrap_mlir_values(else_values, effective_result_names, "else-branch")
-            for name, expect_ty, got in zip(effective_result_names, result_types, else_raw):
+            else_raw = ReplaceIfWithDispatch._unwrap_mlir_values(else_values, result_names, "else-branch")
+            for name, expect_ty, got in zip(result_names, result_types, else_raw):
                 if got.type != expect_ty:
                     raise TypeError(
                         f"if/else variable '{name}' type mismatch in else-branch: "
@@ -558,17 +555,14 @@ class ReplaceIfWithDispatch(Transformer):
                     )
             scf.YieldOp(else_raw)
 
-        partial_wrapped = ReplaceIfWithDispatch._pack_dispatch_results(
-            list(if_op.results), effective_result_values
+        wrapped = ReplaceIfWithDispatch._pack_dispatch_results(
+            list(if_op.results), result_values
         )
-        if len(effective_result_names) == 1:
-            partial_values = [partial_wrapped]
+        if len(result_names) == 1:
+            final_values = [wrapped]
         else:
-            partial_values = list(partial_wrapped)
-        merged_values = ReplaceIfWithDispatch._merge_partial_results(
-            result_names, result_values, effective_result_names, partial_values
-        )
-        return ReplaceIfWithDispatch._pack_named_values(result_names, merged_values)
+            final_values = list(wrapped)
+        return ReplaceIfWithDispatch._pack_named_values(result_names, final_values)
 
     @classmethod
     def rewrite_globals(cls):
