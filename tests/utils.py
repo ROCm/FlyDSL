@@ -73,7 +73,13 @@ def pertoken_quant(
     return y, y_scale
 
 
-def shuffle_weight(x: torch.Tensor, layout=(16, 16), use_int4=False) -> torch.Tensor:
+def shuffle_weight(
+    x: torch.Tensor,
+    layout=(16, 16),
+    use_int4: bool = False,
+    *,
+    interleave_k64: bool = False,
+) -> torch.Tensor:
     # Hardcode BLOCK_K and BLOCK_N
     x_type = x.dtype
     if hasattr(torch, "float4_e2m1fn_x2") and x_type == torch.float4_e2m1fn_x2:
@@ -91,6 +97,21 @@ def shuffle_weight(x: torch.Tensor, layout=(16, 16), use_int4=False) -> torch.Te
     x_ = x_.permute(0, 1, 3, 4, 2, 5)
     x_ = x_.contiguous()
     x_ = x_.view(*x.shape)
+    if interleave_k64:
+        if not use_int4:
+            raise ValueError(
+                "interleave_k64 currently only supported for int4/uint4 (use_int4=True)"
+            )
+        K_total = x_.shape[-1]
+        if K_total % 128 != 0:
+            raise ValueError(f"interleave_k64 requires K%128==0, got K={K_total}")
+        x128 = x_.view(*x_.shape[:-1], K_total // 128, 128)
+        low = x128[..., :64]
+        high = x128[..., 64:]
+        y128 = torch.empty_like(x128)
+        y128[..., 0::2] = low
+        y128[..., 1::2] = high
+        x_ = y128.view(*x_.shape)
     x_ = x_.view(x_type)
     x_.is_shuffled = True
     return x_

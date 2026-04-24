@@ -609,14 +609,15 @@ def run_moe_stage1(
     #     f"{' (even)' if even_dispatch else ' (random)'}"
     # )
 
-    if in_dtype not in ("fp8", "fp16", "bf16", "int8", "int8smooth", "int4", "int4_bf16", "fp4"):
+    if in_dtype not in ("fp8", "fp16", "bf16", "int8", "int8smooth", "int4", "int4_bf16", "fp4", "a8w4smooth"):
         raise ValueError(
-            f"in_dtype must be one of ('fp8','fp16','bf16','int8','int8smooth','int4','int4_bf16','fp4'), got {in_dtype!r}"
+            f"in_dtype must be one of ('fp8','fp16','bf16','int8','int8smooth','int4','int4_bf16','fp4','a8w4smooth'), got {in_dtype!r}"
         )
     is_int4 = in_dtype == "int4"
     is_int4_bf16 = in_dtype == "int4_bf16"  # W4A16: bf16 activations, packed int4 weights
-    w_is_int4 = is_int4 or is_int4_bf16
-    is_int8 = in_dtype in ("int8", "int8smooth", "int4")
+    is_a8w4smooth = in_dtype == "a8w4smooth"
+    w_is_int4 = is_int4 or is_int4_bf16 or is_a8w4smooth
+    is_int8 = in_dtype in ("int8", "int8smooth", "int4", "a8w4smooth")
     is_int8smooth = in_dtype == "int8smooth"
     is_fp4 = in_dtype == "fp4"
     use_packed_int4 = is_int4 or is_int4_bf16
@@ -681,6 +682,14 @@ def run_moe_stage1(
         w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.int8, dtypeMax=7)
         w2_q, _scale_w2_unused = pertoken_quant(w2_fp32, quant_dtype=torch.int8, dtypeMax=7)
         scale_x = None
+    elif in_dtype == "a8w4smooth":
+        # W4A8 smooth: X is int8 repeated to [topk, tokens, model_dim] (slot-major).
+        x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=torch.int8)
+        x_q = x_q.unsqueeze(0).expand(topk, tokens, model_dim).contiguous()
+        scale_x = scale_x.unsqueeze(0).expand(topk, tokens, 1).contiguous()
+        # Weights are generated directly via build_a8w4smooth_moe_weight (PDF packed4 layout).
+        w1_q, scale_w1 = None, None
+        w2_q = None
     else:
         # W4A8: X is int8, W is int4 packed (host packs from int8 values in [-8,7]).
         x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=torch.int8)
@@ -725,6 +734,35 @@ def run_moe_stage1(
             block_size=tile_m,
         ).view(torch.uint8).contiguous()
         x_q = x_q.view(torch.uint8).contiguous().view(tokens, -1)
+    elif is_a8w4smooth:
+        # ---- A8W4SMOOTH (PDF packed4 layout): build weights + qparams directly. ----
+        a8w4smooth_qparam_format = os.environ.get("FLIR_A8W4SMOOTH_QPARAM_FORMAT", "packed4").strip().lower()
+        a8w4smooth_interleave = os.environ.get("FLIR_A8W4SMOOTH_INTERLEAVE_K64", "1").strip().lower() not in ("0", "false", "no")
+        if a8w4smooth_qparam_format != "packed4":
+            raise ValueError(f"a8w4smooth only supports FLIR_A8W4SMOOTH_QPARAM_FORMAT=packed4, got {a8w4smooth_qparam_format!r}")
+        (
+            w_packed,
+            qscale_u8_w1,
+            qzero_u8_w1,
+            qscale_i32_w1,
+            qzero_i32_w1,
+            w1_int8_unshuffled_flat,
+        ) = build_a8w4smooth_moe_weight(
+            experts=experts,
+            rows_per_expert=(2 * inter_dim),
+            K=model_dim,
+            device=device,
+            seed=seed + 11,
+            interleave_k64=bool(a8w4smooth_interleave),
+        )
+        w_kernel = w_packed.contiguous()
+        qscale_w1_1d = qscale_i32_w1.contiguous().view(-1)
+        qzero_w1_1d = qzero_i32_w1.contiguous().view(-1)
+        scale_w1_1d = torch.full((experts * (2 * inter_dim),), 1e-3, device=device, dtype=torch.float32)
+        scale_w1_flat = scale_w1_1d.view(experts * (2 * inter_dim), 1)
+        w1_q_flat = w1_int8_unshuffled_flat
+        x_q = x_q.contiguous().view(tokens * topk, model_dim)
+        scale_x_1d = scale_x.view(-1).contiguous()
     else:
         w1_shuffled = shuffle_weight(w1_q)
         w2_shuffled = shuffle_weight(w2_q) if in_dtype == "fp8" else None
@@ -758,6 +796,9 @@ def run_moe_stage1(
             scale_w1_1d = torch.empty((0,), device=device, dtype=torch.float32)
         else:
             scale_w1_1d = scale_w1_flat.view(-1).contiguous()
+        # a8w4smooth qparam buffers (zero-pad placeholder for non-a8w4smooth dtypes; kernel ignores them).
+        qscale_w1_1d = torch.zeros((1,), device=device, dtype=torch.int32)
+        qzero_w1_1d = torch.zeros((1,), device=device, dtype=torch.int32)
     sorted_weights_1d = sorted_weights.contiguous().view(-1)  # [sorted_size]
 
     # Output: normal=[tokens, topk, inter_dim] f16/bf16, split-K=[tokens*topk, 2*inter_dim] f32
@@ -793,7 +834,7 @@ def run_moe_stage1(
 
         compiled_exe = flyc.compile(exe, *_s1_args_fp4(out, x_q, w_kernel, scale_x_1d, scale_w1_1d,
                                                         sorted_token_ids, sorted_expert_ids, sorted_weights_1d))
-        def launch(o, x, w, sx, sw, st, eids, sw_sorted):
+        def launch(o, x, w, sx, sw, qs, qz, st, eids, sw_sorted):
             compiled_exe(*_s1_args_fp4(o, x, w, sx, sw, st, eids, sw_sorted))
     else:
         exe = compile_moe_gemm1(
@@ -813,17 +854,18 @@ def run_moe_stage1(
             k_batch=k_batch,
         )
 
-        def _s1_args(o, x, w, sx, sw, st, eids, sw_sorted):
-            return (o, x, w, sx, sw, st, eids, sw_sorted,
+        def _s1_args(o, x, w, sx, sw, qs, qz, st, eids, sw_sorted):
+            return (o, x, w, sx, sw, qs, qz, st, eids, sw_sorted,
                     num_valid_ids, tokens, inter_dim, model_dim, int(blocks),
                     torch.cuda.current_stream())
 
         compiled_exe = flyc.compile(exe, *_s1_args(out, x_q, w_kernel, scale_x_1d, scale_w1_1d,
+                                                    qscale_w1_1d, qzero_w1_1d,
                                                     sorted_token_ids, sorted_expert_ids, sorted_weights_1d))
-        def launch(o, x, w, sx, sw, st, eids, sw_sorted):
+        def launch(o, x, w, sx, sw, qs, qz, st, eids, sw_sorted):
             if _is_splitk:
                 o.zero_()
-            compiled_exe(*_s1_args(o, x, w, sx, sw, st, eids, sw_sorted))
+            compiled_exe(*_s1_args(o, x, w, sx, sw, qs, qz, st, eids, sw_sorted))
 
     _, us = run_perftest(
         launch,
@@ -832,6 +874,8 @@ def run_moe_stage1(
         w_kernel,
         scale_x_1d,
         scale_w1_1d,
+        qscale_w1_1d,
+        qzero_w1_1d,
         sorted_token_ids,
         sorted_expert_ids,
         sorted_weights_1d,
@@ -850,7 +894,7 @@ def run_moe_stage1(
         out = (torch.nn.functional.silu(gate) * up).to(_out_torch_dtype).view(tokens, topk, inter_dim)
 
     if not bool(skip_ref):
-        if is_int8smooth:
+        if is_int8smooth or is_a8w4smooth:
             # x_q is slot-major [topk, tokens, K]; convert to [tokens, topk, K] for ref.
             x_ref = x_q.view(topk, tokens, model_dim).permute(1, 0, 2).contiguous()
             sx_ref = scale_x.view(topk, tokens, 1).permute(1, 0, 2).contiguous()
@@ -860,8 +904,8 @@ def run_moe_stage1(
                 inter_dim=inter_dim, doweight_stage1=doweight_stage1,
                 group_size=group_size, scale_w1_groups=scale_w1_groups,
             )
-            rtol = 0.5 if (is_int4 or is_int4_bf16) else 0.25
-            atol = 0.5 if (is_int4 or is_int4_bf16) else 0.25
+            rtol = 0.5 if (is_int4 or is_int4_bf16 or is_a8w4smooth) else 0.25
+            atol = 0.5 if (is_int4 or is_int4_bf16 or is_a8w4smooth) else 0.25
             assert verify_output(out.to(torch.float32), ref, rtol=rtol, atol=atol)
         else:
             x_ref = x_q
@@ -892,10 +936,10 @@ def run_moe_stage1(
     bytes_moved = 0
     is_f16_or_bf16_s1 = is_int4_bf16 or in_dtype in ("bf16", "fp16")
     x_elem_bytes = 2 if is_f16_or_bf16_s1 else 1
-    bytes_moved += (tokens * topk if is_int8smooth else tokens) * model_dim * x_elem_bytes  # x (bf16 for W4A16, else fp8/int8)
-    bytes_moved += (active_experts * (2 * inter_dim) * model_dim) // (2 if use_packed_int4 else 1)  # w (packed for int4)
+    bytes_moved += (tokens * topk if (is_int8smooth or is_a8w4smooth) else tokens) * model_dim * x_elem_bytes  # x (bf16 for W4A16, else fp8/int8)
+    bytes_moved += (active_experts * (2 * inter_dim) * model_dim) // (2 if (use_packed_int4 or is_a8w4smooth) else 1)  # w (packed for int4)
     bytes_moved += tokens * topk * inter_dim * 2  # out fp16 (logical)
-    bytes_moved += ((tokens * topk if is_int8smooth else tokens) * 4) if not is_f16_or_bf16_s1 else 0  # scale_x f32
+    bytes_moved += ((tokens * topk if (is_int8smooth or is_a8w4smooth) else tokens) * 4) if not is_f16_or_bf16_s1 else 0  # scale_x f32
     if use_groupwise_scale:
         num_groups_s1 = model_dim // group_size
         _scale_bytes = 2 if scale_dtype == "bf16" else 4
@@ -1141,14 +1185,15 @@ def run_moe_stage2(
     #     f"{' (even)' if even_dispatch else ' (random)'}"
     # )
 
-    if in_dtype not in ("fp8", "fp16", "bf16", "int8", "int8smooth", "int4", "int4_bf16", "fp4"):
+    if in_dtype not in ("fp8", "fp16", "bf16", "int8", "int8smooth", "int4", "int4_bf16", "fp4", "a8w4smooth"):
         raise ValueError(
-            f"in_dtype must be one of ('fp8','fp16','bf16','int8','int8smooth','int4','int4_bf16','fp4'), got {in_dtype!r}"
+            f"in_dtype must be one of ('fp8','fp16','bf16','int8','int8smooth','int4','int4_bf16','fp4','a8w4smooth'), got {in_dtype!r}"
         )
     is_int4 = in_dtype == "int4"
     is_int4_bf16 = in_dtype == "int4_bf16"  # W4A16: bf16 activations, packed int4 weights
-    w_is_int4 = is_int4 or is_int4_bf16
-    is_int8 = in_dtype in ("int8", "int8smooth", "int4")
+    is_a8w4smooth = in_dtype == "a8w4smooth"
+    w_is_int4 = is_int4 or is_int4_bf16 or is_a8w4smooth
+    is_int8 = in_dtype in ("int8", "int8smooth", "int4", "a8w4smooth")
     is_int8smooth = in_dtype == "int8smooth"
     is_fp4 = in_dtype == "fp4"
     use_packed_int4 = is_int4 or is_int4_bf16
@@ -1188,6 +1233,12 @@ def run_moe_stage2(
         w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.int8, dtypeMax=7)
         w2_q, scale_w2 = pertoken_quant(w2_fp32, quant_dtype=torch.int8, dtypeMax=7)
         scale_x = None
+    elif in_dtype == "a8w4smooth":
+        # W4A8 zero-point: A2 is int8, W2 is 4-bit packed with per-block qscale/qzero.
+        x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=torch.int8)
+        # Weights are generated directly via build_a8w4smooth_moe_weight (PDF packed4 layout).
+        w1_q, scale_w1 = None, None
+        w2_q, scale_w2 = None, None
     elif in_dtype == "fp4":
         from tests.kernels.utils import fp4_utils
         if fp4_utils is None:
@@ -1258,6 +1309,54 @@ def run_moe_stage2(
         w1_shuffled = None
         w2_shuffled_orig = None
         sorted_weights_1d = sorted_weights.contiguous().view(-1)
+        # a8w4smooth qparam placeholders (kernel ignores; needed only to satisfy launch signature).
+        qscale_w2_1d = torch.zeros((1,), device=device, dtype=torch.int32)
+        qzero_w2_1d = torch.zeros((1,), device=device, dtype=torch.int32)
+    elif is_a8w4smooth:
+        # ---- A8W4SMOOTH (PDF packed4 layout): build weights + qparams directly. ----
+        a8w4smooth_qparam_format = os.environ.get("FLIR_A8W4SMOOTH_QPARAM_FORMAT", "packed4").strip().lower()
+        a8w4smooth_interleave = os.environ.get("FLIR_A8W4SMOOTH_INTERLEAVE_K64", "1").strip().lower() not in ("0", "false", "no")
+        if a8w4smooth_qparam_format != "packed4":
+            raise ValueError(f"a8w4smooth only supports FLIR_A8W4SMOOTH_QPARAM_FORMAT=packed4, got {a8w4smooth_qparam_format!r}")
+        (
+            w2_packed,
+            qscale_u8_w2,
+            qzero_u8_w2,
+            qscale_i32_w2,
+            qzero_i32_w2,
+            w2_int8_unshuffled_flat,
+        ) = build_a8w4smooth_moe_weight(
+            experts=experts,
+            rows_per_expert=model_dim,
+            K=inter_dim,
+            device=device,
+            seed=seed + 22,
+            interleave_k64=bool(a8w4smooth_interleave),
+        )
+        w2_kernel = w2_packed.contiguous()
+        qscale_w2_1d = qscale_i32_w2.contiguous().view(-1)
+        qzero_w2_1d = qzero_i32_w2.contiguous().view(-1)
+        w2_scale_1d = torch.full((experts * model_dim,), 1e-3, device=device, dtype=torch.float32)
+        scale_w2 = w2_scale_1d.view(experts, model_dim, 1)
+        # a8w4smooth uses logical int8 unshuffled weights for the torch ref path.
+        w2_q_ref = w2_int8_unshuffled_flat.view(experts, model_dim, inter_dim)
+
+        # A2 must be supplied (a8w4smooth doesn't synthesize a2 from torch_moe_gemm1 here).
+        if a2_fp8_in is None or a2_scale_in is None:
+            raise RuntimeError(
+                "run_moe_stage2(in_dtype='a8w4smooth') requires a2_fp8_in and a2_scale_in "
+                "(stage2 does not synthesize int8 A2 internally for this dtype)."
+            )
+        a2_q = a2_fp8_in
+        a2_scale = a2_scale_in
+        if a2_scale is None:
+            a2_scale_1d = torch.empty((0,), device=device, dtype=torch.float32)
+        else:
+            a2_scale_1d = a2_scale.view(-1).contiguous()
+        sorted_weights_1d = sorted_weights.contiguous().view(-1)
+        w1_shuffled = None
+        w2_shuffled = None
+        scale_w2_flat = scale_w2.view(experts * model_dim, 1)
     else:
         # Preshuffle weights on the *unpacked* tensor.
         w1_shuffled = shuffle_weight(w1_q)
@@ -1333,6 +1432,9 @@ def run_moe_stage2(
         else:
             w2_scale_1d = scale_w2_flat.view(-1).contiguous()  # [experts*model_dim]
         sorted_weights_1d = sorted_weights.contiguous().view(-1)  # [sorted_size]
+        # a8w4smooth qparam buffers (zero-pad placeholder for non-a8w4smooth dtypes; kernel ignores them).
+        qscale_w2_1d = torch.zeros((1,), device=device, dtype=torch.int32)
+        qzero_w2_1d = torch.zeros((1,), device=device, dtype=torch.int32)
 
     out_s = str(out_dtype).strip().lower()
     if out_s in ("f16", "fp16", "half"):
@@ -1379,7 +1481,7 @@ def run_moe_stage2(
                 a2_scale_1d, w2_scale_1d, sorted_token_ids,
                 sorted_expert_ids, sorted_weights_1d))
 
-            def launch(o, x, w, sx, sw, st, eids, sw_sorted):
+            def launch(o, x, w, sx, sw, qs, qz, st, eids, sw_sorted):
                 intermediate = torch.empty(
                     tokens * topk, model_dim, device=device, dtype=torch.float16
                 )
@@ -1397,7 +1499,7 @@ def run_moe_stage2(
                 a2_scale_1d, w2_scale_1d, sorted_token_ids,
                 sorted_expert_ids, sorted_weights_1d))
 
-            def launch(o, x, w, sx, sw, st, eids, sw_sorted):
+            def launch(o, x, w, sx, sw, qs, qz, st, eids, sw_sorted):
                 compiled_exe(*_s2_args_fp4(o, x, w, sx, sw, st, eids, sw_sorted))
     else:
         exe = compile_fn(
@@ -1417,8 +1519,8 @@ def run_moe_stage2(
     is_reduce_exe = (getattr(exe, "mode", None) == MoeGemm2Mode.REDUCE) or bool(use_reduce)
 
     if not is_fp4:
-        def _s2_args_atomic(o, x, w, sx, sw, st, eids, sw_sorted):
-            return (o, x, w, sx, sw, st, eids, sw_sorted,
+        def _s2_args_atomic(o, x, w, sx, sw, qs, qz, st, eids, sw_sorted):
+            return (o, x, w, sx, sw, qs, qz, st, eids, sw_sorted,
                     num_valid_ids, tokens, model_dim, inter_dim, int(blocks),
                     torch.cuda.current_stream())
 
@@ -1428,27 +1530,27 @@ def run_moe_stage2(
         if not is_reduce_exe and hasattr(flyc, 'compile'):
             compiled_exe = flyc.compile(exe, *_s2_args_atomic(
                 out_perf, a2_q.view(-1), w2_kernel.view(-1),
-                a2_scale_1d, w2_scale_1d, sorted_token_ids,
-                sorted_expert_ids, sorted_weights_1d))
+                a2_scale_1d, w2_scale_1d, qscale_w2_1d, qzero_w2_1d,
+                sorted_token_ids, sorted_expert_ids, sorted_weights_1d))
         elif not is_reduce_exe:
             compiled_exe = exe
 
-        def launch(o, x, w, sx, sw, st, eids, sw_sorted):
+        def launch(o, x, w, sx, sw, qs, qz, st, eids, sw_sorted):
             if is_reduce_exe:
                 stream = torch.cuda.current_stream()
                 valid_mask = None
                 if bool(use_valid_mask):
                     valid_mask = get_topk_valid_mask(topk_ids, expert_mask=None).contiguous()
                 exe(
-                    o, x, w, sx, sw, st, eids, sw_sorted,
+                    o, x, w, sx, sw, qs, qz, st, eids, sw_sorted,
                     num_valid_ids, tokens, model_dim, inter_dim, int(blocks),
                     valid_mask, stream,
                 )
             else:
                 if hasattr(flyc, 'compile'):
-                    compiled_exe(*_s2_args_atomic(o, x, w, sx, sw, st, eids, sw_sorted))
+                    compiled_exe(*_s2_args_atomic(o, x, w, sx, sw, qs, qz, st, eids, sw_sorted))
                 else:
-                    exe(*_s2_args_atomic(o, x, w, sx, sw, st, eids, sw_sorted))
+                    exe(*_s2_args_atomic(o, x, w, sx, sw, qs, qz, st, eids, sw_sorted))
  
     # NOTE: stage2 uses atomic-add into `out`, so we cannot reuse the same output buffer
     # across perf iterations for correctness. Time into a dedicated buffer, then run
@@ -1460,6 +1562,8 @@ def run_moe_stage2(
         w2_kernel.view(-1),
         a2_scale_1d,
         w2_scale_1d,
+        qscale_w2_1d,
+        qzero_w2_1d,
         sorted_token_ids,
         sorted_expert_ids,
         sorted_weights_1d,
@@ -1477,6 +1581,8 @@ def run_moe_stage2(
         w2_kernel.view(-1),
         a2_scale_1d,
         w2_scale_1d,
+        qscale_w2_1d,
+        qzero_w2_1d,
         sorted_token_ids,
         sorted_expert_ids,
         sorted_weights_1d,
@@ -1486,7 +1592,7 @@ def run_moe_stage2(
     if not bool(skip_ref):
         ref2 = torch_moe_gemm2(
             a2_q,
-            w2_q,
+            (w2_q_ref if is_a8w4smooth else w2_q),
             a2_scale,
             scale_w2,
             topk_ids.to(torch.int64),
@@ -1507,7 +1613,7 @@ def run_moe_stage2(
     bytes_moved = 0
     a2_elem_bytes = 2 if in_dtype in ("int4_bf16", "bf16", "fp16") else 1  # bf16/fp16 activations
     bytes_moved += tokens * topk * inter_dim * a2_elem_bytes  # a2 (logical)
-    bytes_moved += (active_experts * model_dim * inter_dim) // (2 if w_is_int4 else 1)  # w2 (packed for int4)
+    bytes_moved += (active_experts * model_dim * inter_dim) // (2 if (w_is_int4 or is_a8w4smooth) else 1)  # w2 (packed for int4/a8w4smooth)
     bytes_moved += tokens * model_dim * (2 if out_torch_dtype in (torch.float16, torch.bfloat16) else 4)  # out
     is_f16_or_bf16_s2 = is_int4_bf16 or in_dtype in ("bf16", "fp16")
     bytes_moved += (tokens * topk * 4) if not is_f16_or_bf16_s2 else 0  # a2_scale f32 (None for bf16)
@@ -1636,6 +1742,7 @@ def run_moe_stage2(
 @pytest.mark.parametrize("in_dtype", [
     "fp8", "fp16", "bf16", "int8", "int8smooth", "int4", "int4_bf16",
     pytest.param("fp4", marks=pytest.mark.skipif("gfx95" not in ARCH, reason="FP4 requires gfx950+")),
+    "a8w4smooth",
 ])
 @pytest.mark.parametrize("out_dtype", ["f16", "bf16", "f32"], ids=["out_f16", "out_bf16", "out_f32"])
 @pytest.mark.parametrize("use_reduce", [False, True], ids=["atomic", "reduce"])
@@ -1698,6 +1805,14 @@ def test_moe_gemm_2stage(
             pytest.skip(f"FP4 stage2 requires inter_dim >= 256 and tile_k2 >= 256, got {inter_dim}, {tile_k2}")
         if tile_m < 32 or tile_m % 32 != 0:
             pytest.skip(f"FP4 requires tile_m % 32 == 0 and tile_m >= 32, got {tile_m}")
+    if in_dtype == "a8w4smooth":
+        if out_s not in ("f16", "fp16", "half"):
+            pytest.skip("a8w4smooth only supports f16 output")
+        if group_size > 0:
+            pytest.skip("a8w4smooth does not support groupwise scale")
+        # build_a8w4smooth_moe_weight requires K%256==0 (model_dim for stage1, inter_dim for stage2).
+        if model_dim % 256 != 0 or inter_dim % 256 != 0:
+            pytest.skip(f"a8w4smooth requires model_dim%256==0 and inter_dim%256==0, got {model_dim}, {inter_dim}")
     device = torch.device("cuda")
     # torch.manual_seed(int(seed))
 
@@ -1787,6 +1902,9 @@ def test_moe_gemm_2stage(
         # W4A16: A2 is bf16 (no quant)
         a2_q = out1_fp16.to(torch.bfloat16)
         a2_scale = None
+    elif in_dtype == "a8w4smooth":
+        out1_fp32 = out1_fp16.to(torch.float32)
+        a2_q, a2_scale = pertoken_quant(out1_fp32, quant_dtype=torch.int8)
     else:
         out1_fp32 = out1_fp16.to(torch.float32)
         if in_dtype == "int8smooth":
@@ -2316,7 +2434,7 @@ def run_moe_stage1_a8w4smooth(
 
 
 @pytest.mark.parametrize("in_dtype", ["a8w4smooth"])
-@pytest.mark.parametrize("tile_k", [256])
+@pytest.mark.parametrize("tile_k", [256, 128])
 def test_moe_gemm_a8w4smooth(in_dtype, tile_k):
     run_moe_stage1_a8w4smooth(
         tokens=256, model_dim=1024, inter_dim=256, experts=4, topk=2,
@@ -2473,7 +2591,7 @@ def run_moe_stage2_a8w4smooth(
 
 
 @pytest.mark.parametrize("in_dtype", ["a8w4smooth"])
-@pytest.mark.parametrize("tile_k", [256])
+@pytest.mark.parametrize("tile_k", [256, 128])
 def test_moe_gemm2_a8w4smooth(in_dtype, tile_k):
     run_moe_stage2_a8w4smooth(
         tokens=256, model_dim=1024, inter_dim=256, experts=4, topk=2,
