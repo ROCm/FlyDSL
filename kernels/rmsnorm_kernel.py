@@ -14,7 +14,7 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.compiler.kernel_function import CompilationContext
 
-from flydsl.expr import arith, vector, gpu, range_constexpr, buffer_ops
+from flydsl.expr import arith, vector, gpu, range_constexpr
 from flydsl.expr.arith import ArithValue
 from flydsl.expr.typing import T, Int32
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
@@ -366,10 +366,7 @@ def _build_rmsnorm_quant_module(
     tile_cols = BLOCK_THREADS * VEC_WIDTH
     RED_SLOTS = max(1, (BLOCK_THREADS + WARP_SIZE - 1) // WARP_SIZE)
     elem_bits = 32 if dtype_str == "f32" else 16
-    quant_elem_type = _quant_dtype_to_elem_type(quant_dtype_str)
     quant_dtype_max = _quant_dtype_max(quant_dtype_str)
-    quant_elem_bytes = 1
-
     allocator = SmemAllocator(None, arch=arch)
     f32_bytes = 4
     red_offset = allocator._align(allocator.ptr, 16)
@@ -389,6 +386,8 @@ def _build_rmsnorm_quant_module(
         tid = fx.thread_idx.x
 
         elem_type = dtype_to_elem_type(dtype_str)
+        # Resolve quant types only when an MLIR compile context is active.
+        quant_elem_type = _quant_dtype_to_elem_type(quant_dtype_str)
         compute_type = T.f32
 
         fm_fast = arith.FastMathFlags.fast
@@ -404,6 +403,19 @@ def _build_rmsnorm_quant_module(
         s_red2 = SmemPtr(base_ptr, red2_offset, T.f32, shape=(RED_SLOTS,))
         s_red.get()
         s_red2.get()
+
+        YScale_buf = fx.rocdl.make_buffer_tensor(YScale)
+        yscale_div = fx.logical_divide(YScale_buf, fx.make_layout(1, 1))
+        scale_copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), 32)
+        scale_reg_ty = fx.MemRefType.get(T.f32, fx.LayoutType.get(1, 1), fx.AddressSpace.Register)
+        scale_reg_lay = fx.make_layout(1, 1)
+
+        def _store_yscale(index, val):
+            r = fx.memref_alloca(scale_reg_ty, scale_reg_lay)
+            vec_ty = T.vec(1, T.f32)
+            v = vector.from_elements(vec_ty, [val])
+            fx.memref_store_vec(v, r)
+            fx.copy_atom_call(scale_copy_atom, r, fx.slice(yscale_div, (None, index)))
 
         def wave_reduce_add(x):
             width_i32 = fx.Int32(WARP_SIZE)
@@ -492,6 +504,9 @@ def _build_rmsnorm_quant_module(
             c0_idx = fx.Index(0)
             return s_red.load([c0_idx])
 
+        # ==================================================================
+        # Fast path: N is a multiple of tile_cols
+        # ==================================================================
         if N >= tile_cols and N % tile_cols == 0 and elem_bits <= 16:
             from flydsl.expr.arith import ArithValue
 
@@ -500,22 +515,22 @@ def _build_rmsnorm_quant_module(
             vec_type_c = T.vec(VEC_WIDTH, compute_type)
             vec_type_e = T.vec(VEC_WIDTH, elem_type)
             vec_type_q = T.vec(VEC_WIDTH, quant_elem_type)
-            vec_q_pack_type = T.vec((VEC_WIDTH * quant_elem_bytes) // 4, T.i32)
+            vec_type_q_half = T.vec(VEC_WIDTH // 2, quant_elem_type)
             vec_i32_ty = T.vec(VEC_WIDTH, T.i32)
             abs_mask = arith.constant_vector(0x7FFFFFFF, vec_i32_ty)
 
+            # ── Layout API: buffer-backed tensors + tiled access ─────
             Input_buf = fx.rocdl.make_buffer_tensor(Input)
             Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma)
+            Output_buf = fx.rocdl.make_buffer_tensor(Output)
             if is_smooth:
                 XScale_buf = fx.rocdl.make_buffer_tensor(XScale)
 
-            yscale_rsrc = buffer_ops.create_buffer_resource(YScale, max_size=True)
-            out_rsrc = buffer_ops.create_buffer_resource(Output, max_size=True)
-            row_soffset_out = ArithValue(bid) * (N * quant_elem_bytes)
-            thr_col_bytes_out = ArithValue(tid) * (VEC_WIDTH * quant_elem_bytes)
-
             row_in = fx.slice(Input_buf, (bid, None))
+            row_out = fx.slice(Output_buf, (bid, None))
+            
             in_div = fx.logical_divide(row_in, fx.make_layout(VEC_WIDTH, 1))
+            out_div_q = fx.logical_divide(row_out, fx.make_layout(VEC_WIDTH // 2, 1))
             gamma_div = fx.logical_divide(Gamma_buf, fx.make_layout(VEC_WIDTH, 1))
             if is_smooth:
                 xscale_div = fx.logical_divide(XScale_buf, fx.make_layout(VEC_WIDTH, 1))
@@ -525,17 +540,28 @@ def _build_rmsnorm_quant_module(
                 elem_type, fx.LayoutType.get(VEC_WIDTH, 1), fx.AddressSpace.Register
             )
             vec_reg_lay = fx.make_layout(VEC_WIDTH, 1)
+            copy_atom_q = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), 8)
+            vec_reg_ty_q = fx.MemRefType.get(
+                quant_elem_type, fx.LayoutType.get(VEC_WIDTH // 2, 1), fx.AddressSpace.Register
+            )
+            vec_reg_lay_q = fx.make_layout(VEC_WIDTH // 2, 1)
 
             def _load_vec(div_tensor, idx):
                 r = fx.memref_alloca(vec_reg_ty, vec_reg_lay)
                 fx.copy_atom_call(copy_atom, fx.slice(div_tensor, (None, idx)), r)
                 return ArithValue(fx.memref_load_vec(r))
 
+            def _store_q_vec(div_tensor, idx, val):
+                r = fx.memref_alloca(vec_reg_ty_q, vec_reg_lay_q)
+                fx.memref_store_vec(val, r)
+                fx.copy_atom_call(copy_atom_q, r, fx.slice(div_tensor, (None, idx)))
+
             thread_sumsq = c_zero_f
             thread_dummy = c_zero_f
             cache_as_elem = (dtype_str != "f32")
             in_local = []
 
+            # Pass 1: load + cache + sumsq
             for tile_i in range_constexpr(num_tiles):
                 idx = tid + tile_i * BLOCK_THREADS
                 vec_e = _load_vec(in_div, idx)
@@ -562,6 +588,7 @@ def _build_rmsnorm_quant_module(
             thread_row_max = c_zero_f
             y_local = []
 
+            # Pass 2: normalize + gamma + store (reuse cached input)
             for tile_i in range_constexpr(num_tiles):
                 idx = tid + tile_i * BLOCK_THREADS
 
@@ -590,7 +617,7 @@ def _build_rmsnorm_quant_module(
             final_scale = (scale == c_zero_f).select(c_one_f, scale)
 
             if tid == fx.Int32(0):
-                buffer_ops.buffer_store(final_scale, yscale_rsrc, bid)
+                _store_yscale(bid, final_scale)
 
             inv_scale = ArithValue(c_one_f) / ArithValue(final_scale)
             inv_scale_splat = vector.broadcast(vec_type_c, inv_scale)
@@ -598,33 +625,41 @@ def _build_rmsnorm_quant_module(
             for tile_i in range_constexpr(num_tiles):
                 q = ArithValue(y_local[tile_i]) * ArithValue(inv_scale_splat)
                 q_i8 = arith.FPToSIOp(vec_type_q, arith.unwrap(q)).result
-                q_packed = vector.bitcast(vec_q_pack_type, q_i8)
-                col_bytes_out = ArithValue(thr_col_bytes_out) + (tile_i * tile_cols * quant_elem_bytes)
-                dw_out = col_bytes_out.shrui(arith.constant(2, type=T.i32))
-                buffer_ops.buffer_store(q_packed, out_rsrc, dw_out, soffset_bytes=row_soffset_out)
+                q_lo = vector.shuffle(q_i8, q_i8, [0, 1, 2, 3])
+                q_hi = vector.shuffle(q_i8, q_i8, [4, 5, 6, 7])
+                out_idx = tid * 2 + tile_i * BLOCK_THREADS * 2
+                _store_q_vec(out_div_q, out_idx, q_lo)
+                _store_q_vec(out_div_q, out_idx + 1, q_hi)
 
         else:
+            # ==============================================================
+            # Generic path: scalar 2-pass for arbitrary N
+            # ==============================================================
             from flydsl.expr.arith import ArithValue
 
             Input_buf = fx.rocdl.make_buffer_tensor(Input)
             Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma)
+            Output_buf = fx.rocdl.make_buffer_tensor(Output)
             if is_smooth:
                 XScale_buf = fx.rocdl.make_buffer_tensor(XScale)
-
-            yscale_rsrc = buffer_ops.create_buffer_resource(YScale, max_size=True)
-            out_rsrc = buffer_ops.create_buffer_resource(Output, max_size=True)
-            row_soffset_out = ArithValue(bid) * (N * quant_elem_bytes)
 
             copy_atom_s = fx.make_copy_atom(
                 fx.rocdl.BufferCopy16b() if elem_bits <= 16 else fx.rocdl.BufferCopy32b(),
                 elem_bits,
             )
+            copy_atom_qs = fx.make_copy_atom(fx.rocdl.BufferCopy(8), 8)
             scalar_reg_ty = fx.MemRefType.get(elem_type, fx.LayoutType.get(1, 1), fx.AddressSpace.Register)
             scalar_reg_lay = fx.make_layout(1, 1)
+            scalar_reg_ty_q = fx.MemRefType.get(
+                quant_elem_type, fx.LayoutType.get(1, 1), fx.AddressSpace.Register
+            )
+            scalar_reg_lay_q = fx.make_layout(1, 1)
 
             row_in = fx.slice(Input_buf, (bid, None))
+            row_out = fx.slice(Output_buf, (bid, None))
             row_div = fx.logical_divide(row_in, fx.make_layout(1, 1))
             gamma_div = fx.logical_divide(Gamma_buf, fx.make_layout(1, 1))
+            out_div = fx.logical_divide(row_out, fx.make_layout(1, 1))
             if is_smooth:
                 xscale_div = fx.logical_divide(XScale_buf, fx.make_layout(1, 1))
 
@@ -634,6 +669,14 @@ def _build_rmsnorm_quant_module(
                 fx.copy_atom_call(copy_atom_s, view, r)
                 v = fx.memref_load_vec(r)
                 return vector.extract(v, static_position=[0])
+
+            def _store_quant_scalar(divided_tensor, index, val):
+                r = fx.memref_alloca(scalar_reg_ty_q, scalar_reg_lay_q)
+                vec_ty = T.vec(1, quant_elem_type)
+                v = vector.from_elements(vec_ty, [val])
+                fx.memref_store_vec(v, r)
+                view = fx.slice(divided_tensor, (None, index))
+                fx.copy_atom_call(copy_atom_qs, r, view)
 
             def _abs_scalar(val):
                 is_neg = val < c_zero_f
@@ -680,7 +723,7 @@ def _build_rmsnorm_quant_module(
             final_scale = (scale == c_zero_f).select(c_one_f, scale)
 
             if tid == fx.Int32(0):
-                buffer_ops.buffer_store(final_scale, yscale_rsrc, bid)
+                _store_yscale(bid, final_scale)
 
             inv_scale = ArithValue(c_one_f) / ArithValue(final_scale)
 
@@ -698,7 +741,7 @@ def _build_rmsnorm_quant_module(
                         y = ArithValue(y) * ArithValue(s)
                     q = ArithValue(y) * ArithValue(inv_scale)
                     q_i8 = arith.FPToSIOp(quant_elem_type, arith.unwrap(q)).result
-                    buffer_ops.buffer_store(q_i8, out_rsrc, idx, soffset_bytes=row_soffset_out)
+                    _store_quant_scalar(out_div, idx, q_i8)
 
     if is_smooth:
         @flyc.jit
