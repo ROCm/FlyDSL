@@ -28,7 +28,7 @@ from kernels.tensor_shim import get_dtype_in_kernel, GTensor, STensor, _to_raw, 
 fm_fast = arith.FastMathFlags.fast
 
 
-SPLIT_K_SEMAPHORE_MAX_LEN = 128
+SPLIT_K_SEMAPHORE_MAX_LEN = 256
 
 
 def swizzle_xor16(row, col_in_bytes, k_blocks16):
