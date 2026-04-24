@@ -81,8 +81,13 @@ def make_preshuffle_b_layout(
     c_k: ir.Value,
     kpack_bytes: int = 16,
     elem_bytes: int = 1,
+    packed_4bit: bool = False,
 ) -> PreshuffleBLayout:
-    """Build B layout matching aiter/CK preshuffle for A8 MFMA kernels."""
+    """Build B layout matching aiter/CK preshuffle for A8 MFMA kernels.
+
+    For packed UINT4 (a8w4smooth W4A8 + qparam): use packed_4bit=True + kpack_bytes=16. In this
+    mode, the logical K element domain is mapped to packed bytes by KBytes = K/2.
+    """
     if kpack_bytes not in (8, 16):
         raise ValueError(f"kpack_bytes must be 8 or 16, got {kpack_bytes!r}")
 
@@ -93,7 +98,16 @@ def make_preshuffle_b_layout(
 
     if elem_bytes not in (1, 2):
         raise ValueError(f"elem_bytes must be 1 or 2, got {elem_bytes!r}")
-    c_k_bytes = c_k * arith.constant(int(elem_bytes), index=True)
+    if packed_4bit:
+        if elem_bytes != 1:
+            raise ValueError(f"packed_4bit requires elem_bytes==1, got {elem_bytes!r}")
+        if kpack_bytes != 16:
+            raise ValueError(
+                f"packed_4bit requires kpack_bytes==16 (innermost 16B == 32x4bits), got {kpack_bytes!r}"
+            )
+        c_k_bytes = c_k // arith.constant(2, index=True)
+    else:
+        c_k_bytes = c_k * arith.constant(int(elem_bytes), index=True)
     c_k0 = c_k_bytes // c64
     n0 = c_n // c16
 
