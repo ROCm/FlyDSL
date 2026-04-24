@@ -19,7 +19,7 @@ if _REPO_ROOT not in sys.path:
 if _PYFLYDSL_SRC not in sys.path:
     sys.path.insert(0, _PYFLYDSL_SRC)
 
-from kernels.hgemm_splitk import hgemm_splitk_, hgemm_shuffle_b
+from kernels.hgemm_splitk import hgemm_splitk_
 from tests.test_common import run_perftest, verify_output
 from flydsl.runtime.device import get_rocm_arch
 
@@ -53,22 +53,24 @@ def run_torch_bench(a, b):
 
 @pytest.mark.parametrize("dtype", ["fp16", "bf16"])
 @pytest.mark.parametrize(
-    "m, n, k, TILE_M, TILE_N, TILE_K, SPLIT_K",
+    "m, n, k, TILE_M, TILE_N, TILE_K, SPLIT_K, BLOCK_M_WARPS, BLOCK_N_WARPS",
     [
-        (32, 384, 7168, 16, 128, 128, 8),
-        (4, 384, 7168, 16, 128, 128, 8),
-        (65, 1024, 8192, 64, 64, 128, 8),
-        (4096, 4096, 4096, 128, 256, 64, 1),
+        (32, 384, 7168, 16, 64, 128, 14, 1, 2),
+        (4, 384, 7168, 16, 64, 128, 14, 1, 2),
+        (65, 1024, 8192, 48, 64, 128, 8, 1, 2),
+        (8, 5120, 2880, 32, 128, 64, 9, 2, 2),
+        (4096, 4096, 4096, 256, 256, 64, 1, 2, 2),
+        (8192, 8192, 8192, 256, 256, 64, 1, 2, 2),
     ]
 )
 @pytest.mark.parametrize("test_graph", [
     pytest.param(False, id="eager"),
     pytest.param(True, id="graph"),
 ])
-def test_mfma_flyc_preshuffle_splitk_hgemm(
+def test_mfma_flyc_splitk_hgemm(
     dtype,
     m, n, k,
-    TILE_M, TILE_N, TILE_K, SPLIT_K,
+    TILE_M, TILE_N, TILE_K, SPLIT_K, BLOCK_M_WARPS, BLOCK_N_WARPS,
     *,
     test_graph,
     bench_iters: int = DEFAULT_BENCH_ITERS,
@@ -114,22 +116,21 @@ def test_mfma_flyc_preshuffle_splitk_hgemm(
         'TILE_N': TILE_N,
         'TILE_K': TILE_K,
         'SPLIT_K': SPLIT_K,
+        'BLOCK_M_WARPS': BLOCK_M_WARPS,
+        'BLOCK_N_WARPS': BLOCK_N_WARPS,
     }
 
-    b_q = hgemm_shuffle_b(b_q)
-    print(f"✓ B shuffled")
-    hgemm_splitk_(c_out, a_q, b_q, False, kwargs, torch.cuda.current_stream())
+    hgemm_splitk_(c_out, a_q, b_q, None, kwargs, torch.cuda.current_stream())
     print(f"✓ Kernel prepared: {kwargs}")
 
-    def launch_kernel(c, a, b, shuffle_b, kwargs):
-        hgemm_splitk_(c, a, b, shuffle_b, kwargs, torch.cuda.current_stream())
+    def launch_kernel(c, a, b, kwargs):
+        hgemm_splitk_(c, a, b, None, kwargs, torch.cuda.current_stream())
 
     _, us = run_perftest(
         launch_kernel,
         c_out,
         a_q,
         b_q,
-        False, # shuffle_b
         kwargs,
         num_iters=bench_iters,
         num_warmup=bench_warmup,
@@ -149,25 +150,28 @@ def test_mfma_flyc_preshuffle_splitk_hgemm(
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="Preshuffle SplitK HGEMM benchmark")
+    parser = argparse.ArgumentParser(description="SplitK HGEMM benchmark")
     parser.add_argument("--dtype", type=str, default="bf16", choices=["fp16", "bf16"])
     parser.add_argument("-m", type=int, default=4096)
     parser.add_argument("-n", type=int, default=4096)
     parser.add_argument("-k", type=int, default=4096)
-    parser.add_argument("--TILE_M", type=int, default=128)
+    parser.add_argument("--TILE_M", type=int, default=256)
     parser.add_argument("--TILE_N", type=int, default=256)
     parser.add_argument("--TILE_K", type=int, default=64)
     parser.add_argument("--SPLIT_K", type=int, default=1)
+    parser.add_argument("--BLOCK_M_WARPS", type=int, default=2)
+    parser.add_argument("--BLOCK_N_WARPS", type=int, default=2)
     parser.add_argument("--num_warmup", type=int, default=DEFAULT_BENCH_WARMUP)
     parser.add_argument("--num_iters", type=int, default=DEFAULT_BENCH_ITERS)
     parser.add_argument("--test_graph", "-tg", action="store_true", default=False)
     args = parser.parse_args()
     torch.set_default_device("cuda")
     try:
-        test_mfma_flyc_preshuffle_splitk_hgemm(
+        test_mfma_flyc_splitk_hgemm(
             args.dtype,
             m=args.m, n=args.n, k=args.k,
             TILE_M=args.TILE_M, TILE_N=args.TILE_N, TILE_K=args.TILE_K, SPLIT_K=args.SPLIT_K,
+            BLOCK_M_WARPS=args.BLOCK_M_WARPS, BLOCK_N_WARPS=args.BLOCK_N_WARPS,
             test_graph=bool(args.test_graph),
             bench_iters=args.num_iters,
             bench_warmup=args.num_warmup,
