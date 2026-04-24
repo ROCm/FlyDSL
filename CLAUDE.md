@@ -1,6 +1,6 @@
 # FlyDSL Project Guide
 
-FlyDSL (Flexible Layout Python DSL) — a Python DSL and MLIR-based compiler stack for authoring high-performance GPU kernels with explicit layouts and tiling on AMD GPUs (MI300X/MI350/MI450).
+FlyDSL (Flexible Layout Python DSL) — a Python DSL and MLIR-based compiler stack for authoring high-performance GPU kernels with explicit layouts and tiling on AMD GPUs (MI300X/MI350/MI355X/MI450).
 
 ## Repository Layout
 
@@ -59,9 +59,10 @@ FLYDSL_DUMP_IR=1 PYTHONPATH=./ python tests/kernels/test_pa.py # Dump MLIR IR at
 
 | Arch | Chips | Wave size | MMA | Key features |
 |---|---|---|---|---|
-| **CDNA3** | gfx942/gfx950 (MI300X) | 64 | MFMA | BufferCopy, preshuffle GEMM |
-| **RDNA** | gfx10xx/gfx11xx/gfx12xx | 32 | WMMA | RDNA-specific GEMM |
-| **gfx1250** | MI400 | 32 | WMMA | TDM ops, FP8/FP4 GEMM, multi-stage pipeline |
+| **CDNA3** | gfx942 (MI300X) | 64 | MFMA | BufferCopy, preshuffle GEMM |
+| **CDNA4** | gfx950 (MI350/MI355X) | 64 | MFMA | MFMA_SCALE, FP4, 160KB LDS |
+| **RDNA4** | gfx1201 (Radeon AI PRO R9700) | 32 | WMMA | RDNA-specific GEMM |
+| **gfx1250** | MI450 | 32 | WMMA | TDM ops, FP8/FP4 GEMM, multi-stage pipeline |
 
 ## Key Conventions & Pitfalls
 
@@ -73,3 +74,6 @@ FLYDSL_DUMP_IR=1 PYTHONPATH=./ python tests/kernels/test_pa.py # Dump MLIR IR at
 - **Layout API vs buffer_ops**: New kernels should use `fx.rocdl.make_buffer_tensor()` + `copy_atom_call` (layout API). Raw `buffer_ops.create_buffer_resource()` is legacy
 - **Arch detection**: Use `from flydsl.runtime.device import get_rocm_arch`
 - **`range` vs `range_constexpr`**: Use `range_constexpr` for compile-time unrolled loops; `range(start, stop, step, init=[...])` for `scf.for` with loop-carried values
+- **Branch-local defs**: Do not define a value inside `if/else` and then use it after the branch. Hoist the variable or rewrite the logic so later uses see a single explicit definition path.
+- **Nested helper captures**: Inside `@flyc.kernel` / `@flyc.jit`, nested helper functions must not mutate captured outer variables. Read-only capture is acceptable, but writes should go through explicit parameters / returns.
+- **Single-exit control flow**: Avoid early `return`. Do not place `return` or `yield` inside `if/else` branches; keep a single explicit exit path so MLIR result types stay well-defined.

@@ -357,13 +357,13 @@ See `examples/` for more examples including tiled copy (`02-tiledCopy.py`), tile
 | **MoE GEMM** | `test_moe_gemm.py` | MoE 2-stage (gate/up + reduce) |
 | **MoE Blockscale** | `test_moe_blockscale.py` | MoE blockscale 2-stage |
 | **MoE Reduce** | `test_moe_reduce.py` | MoE reduce kernel |
-| **PagedAttention** | `test_pa.py` | Paged attention decode (FP8) |
-| **FlashAttention** | `test_flash_attn_func.py` | Flash attention |
+| **PagedAttention** | `test_pa.py` | Paged attention decode (FP8) — *WIP perf tuning* |
+| **FlashAttention** | `test_flash_attn_func.py` | Flash attention — *WIP perf tuning* |
 | **LayerNorm** | `test_layernorm.py` | LayerNorm (layout API) |
 | **RMSNorm** | `test_rmsnorm.py` | RMSNorm (layout API) |
 | **Softmax** | `test_softmax.py` | Softmax (layout API) |
 | **Fused RoPE** | `test_fused_rope_cache.py` | Fused RoPE + KV cache |
-| **AllReduce** | `test_flydsl_allreduce.py` | Multi-GPU all-reduce |
+| **AllReduce** | `test_allreduce.py` | Multi-GPU all-reduce |
 | **RDNA GEMM** | `test_rdna_gemm.py` | RDNA FP16/FP8 GEMM |
 | **GFX1250 GEMM** | `test_gemm_fp8fp4_gfx1250.py` | GFX1250 FP8/FP4 GEMM |
 | **WMMA GEMM** | `test_wmma_gemm_gfx1250.py` | GFX1250 WMMA GEMM |
@@ -371,7 +371,7 @@ See `examples/` for more examples including tiled copy (`02-tiledCopy.py`), tile
 | **Quantization** | `test_quant.py` | Quantization utilities |
 
 **Verified Platforms**:
-*   AMD MI300X/MI308X (gfx942), AMD MI350 (gfx950), AMD MI450 (gfx1250)
+*   AMD MI300X/MI308X (gfx942), AMD MI350/MI355X (gfx950), AMD MI450 (gfx1250), Radeon AI PRO R9700 (gfx1201)
 *   Linux / ROCm 6.x, 7.x
 
 ## 🙏 Acknowledgements

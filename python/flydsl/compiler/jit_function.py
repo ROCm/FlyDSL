@@ -72,12 +72,10 @@ def _flydsl_key() -> str:
             except Exception:
                 pass
 
-    # Also hash flydsl/__init__.py and _version.py.
-    for name in ("__init__.py", "_version.py"):
-        p = flydsl_root / name
-        if p.is_file():
-            with open(p, "rb") as f:
-                contents.append(hashlib.sha256(f.read()).hexdigest())
+    p = flydsl_root / "__init__.py"
+    if p.is_file():
+        with open(p, "rb") as f:
+            contents.append(hashlib.sha256(f.read()).hexdigest())
 
     # 2) Hash native shared libraries (C++ passes, runtime wrappers, bindings).
     backend = get_backend()
@@ -750,6 +748,8 @@ class JitFunction:
         # Fast path: reuse pre-built CallState (no ctypes alloc, no DLPack)
         call_state = self._call_state_cache.get(cache_key)
         if call_state is not None:
+            if env.compile.compile_only:
+                return None
             return call_state(args_tuple)
 
         # Normal path: check in-process cache first, then optional disk cache.
@@ -762,6 +762,8 @@ class JitFunction:
                 self._mem_cache[cache_key] = cached_func
 
         if cached_func is not None:
+            if env.compile.compile_only:
+                return None
             # Build CallState via JitArgument registry (same dispatch as compile path)
             try:
                 state = _build_call_state(
@@ -829,10 +831,6 @@ class JitFunction:
 
             compiled_module = MlirCompiler.compile(module, arch=backend.target.arch, func_name=self.func.__name__)
 
-            if env.compile.compile_only:
-                print(f"[flydsl] COMPILE_ONLY=1, compilation succeeded (arch={backend.target.arch})")
-                return None
-
             compiled_func = CompiledArtifact(
                 compiled_module,
                 self.func.__name__,
@@ -850,6 +848,10 @@ class JitFunction:
             if use_disk_cache and self.cache_manager and not env.debug.dump_ir:
                 str_key = self._cache_key_to_str(cache_key)
                 self.cache_manager.set(str_key, compiled_func)
+
+            if env.compile.compile_only:
+                print(f"[flydsl] COMPILE_ONLY=1, compilation succeeded (arch={backend.target.arch})")
+                return None
 
             result = compiled_func(*jit_args)
 

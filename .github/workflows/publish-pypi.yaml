@@ -25,10 +25,10 @@ jobs:
         id: version
         run: |
           TAG_VERSION="${GITHUB_REF_NAME#v}"
-          PACKAGE_VERSION="$(awk -F'"' '/^_BASE_VERSION = / {print $2; exit}' python/flydsl/__init__.py)"
+          PACKAGE_VERSION="$(awk -F'"' '/^__version__ = / {print $2; exit}' python/flydsl/__init__.py)"
 
           if [ -z "${PACKAGE_VERSION}" ]; then
-            echo "Failed to find _BASE_VERSION in python/flydsl/__init__.py" >&2
+            echo "Failed to find __version__ in python/flydsl/__init__.py" >&2
             exit 1
           fi
 

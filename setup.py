@@ -124,12 +124,11 @@ def _read_version() -> str:
       release     -> {base}                             (e.g. 0.1.0)
       <unset>     -> {base}.dev{commit_count}           (legacy local dev builds)
     """
+    import re
+
     init_py = (PY_SRC / "flydsl" / "__init__.py").read_text(encoding="utf-8")
-    base_version = "0.0.0"
-    for line in init_py.splitlines():
-        if line.startswith("_BASE_VERSION"):
-            base_version = line.split("=", 1)[1].strip().strip('"').strip("'")
-            break
+    m = re.search(r'^__version__\s*=\s*["\']([^"\']+)["\']', init_py, re.MULTILINE)
+    base_version = m.group(1) if m else "0.0.0"
 
     if "+" in base_version:
         return base_version
@@ -155,14 +154,6 @@ def _read_version() -> str:
         return base_version
     return f"{base_version}.dev{commit_count}"
 
-
-def _write_version_file(version: str) -> None:
-    """Generate _version.py so that runtime __version__ matches the build version."""
-    version_file = PY_SRC / "flydsl" / "_version.py"
-    version_file.write_text(
-        f'__version__ = "{version}"\n',
-        encoding="utf-8",
-    )
 
 
 def _load_requirements() -> list[str]:
@@ -399,7 +390,6 @@ else:
     }
 
 _version = _read_version()
-_write_version_file(_version)
 
 setup(
     name="flydsl",

@@ -99,24 +99,31 @@ def shuffle_weight(x: torch.Tensor, layout=(16, 16), use_int4=False) -> torch.Te
 def shuffle_scale_for_int4(scale: torch.Tensor, group_size: int = 32, layout=(16, 16)) -> torch.Tensor:
     """Prepare scale tensor for W4A16 groupwise scale kernel.
 
-    NOTE: Despite the name, this function does NOT shuffle the scale tensor.
-    The kernel uses the [E, num_groups, N] layout (Opt 0: cache-friendly) where
-    adjacent threads read adjacent N elements (stride-1 access).
+    Input: scale tensor of shape ``[E, num_groups, N]``.
 
-    Scale indexing uses: scale_idx = expert_offset*(G-1) + n_global + group_idx*N_pe
+    For **f32** scales the kernel uses ``(E, G, N)`` layout directly, so this
+    is a contiguous no-op.
+
+    For **bf16** scales the kernel uses ``(E, G//2, N, 2)`` layout — two
+    adjacent groups for the same N position are packed into one dword.
 
     Args:
-        scale: Scale tensor of shape [E, num_groups, N] where num_groups = K_dim // group_size
-        group_size: Group size for quantization (must be 32 for FlyDSL)
-        layout: Tile layout (unused, kept for API compatibility)
+        scale: Scale tensor of shape [E, num_groups, N].
+        group_size: Group size for quantization (must be 32 for FlyDSL).
+        layout: Tile layout (unused, kept for API compatibility).
 
     Returns:
-        Scale tensor in [E, num_groups, N] layout, ready for kernel consumption.
+        Scale tensor ready for kernel consumption.
     """
     if group_size != 32:
         raise ValueError(
             f"shuffle_scale_for_int4 only supports group_size=32, got {group_size}. "
             f"This is due to int4 preshuffle layout constraints."
         )
+
+    if scale.dtype == torch.bfloat16:
+        # (E, G, N) bf16 → (E, G//2, N, 2) bf16 packed layout.
+        E, G, N = scale.shape
+        return scale.view(E, G // 2, 2, N).permute(0, 1, 3, 2).contiguous()
 
     return scale.contiguous()

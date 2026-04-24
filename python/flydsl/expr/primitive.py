@@ -94,6 +94,7 @@ __all__ = [
     "make_composed_layout",
     "make_identity_layout",
     "make_view",
+    "make_fragment_layout_like",
     "make_fragment_like",
     "get_scalar",
     "get_leaves",
@@ -192,14 +193,14 @@ UniversalCopy32b = lambda: CopyOpUniversalCopyType.get(32)
 UniversalCopy64b = lambda: CopyOpUniversalCopyType.get(64)
 UniversalCopy128b = lambda: CopyOpUniversalCopyType.get(128)
 
-UniversalAtomic = lambda atomic_op, val_type: CopyOpUniversalAtomicType.get(int(atomic_op), val_type)
-UniversalAtomicAdd = lambda val_type: CopyOpUniversalAtomicType.get(int(AtomicOp.Add), val_type)
-UniversalAtomicMax = lambda val_type: CopyOpUniversalAtomicType.get(int(AtomicOp.Max), val_type)
-UniversalAtomicMin = lambda val_type: CopyOpUniversalAtomicType.get(int(AtomicOp.Min), val_type)
-UniversalAtomicAnd = lambda val_type: CopyOpUniversalAtomicType.get(int(AtomicOp.And), val_type)
-UniversalAtomicOr = lambda val_type: CopyOpUniversalAtomicType.get(int(AtomicOp.Or), val_type)
-UniversalAtomicInc = lambda val_type: CopyOpUniversalAtomicType.get(int(AtomicOp.Inc), val_type)
-UniversalAtomicDec = lambda val_type: CopyOpUniversalAtomicType.get(int(AtomicOp.Dec), val_type)
+UniversalAtomic = lambda atomic_op, val_type: CopyOpUniversalAtomicType.get(int(atomic_op), val_type.ir_type)
+UniversalAtomicAdd = lambda val_type: CopyOpUniversalAtomicType.get(int(AtomicOp.Add), val_type.ir_type)
+UniversalAtomicMax = lambda val_type: CopyOpUniversalAtomicType.get(int(AtomicOp.Max), val_type.ir_type)
+UniversalAtomicMin = lambda val_type: CopyOpUniversalAtomicType.get(int(AtomicOp.Min), val_type.ir_type)
+UniversalAtomicAnd = lambda val_type: CopyOpUniversalAtomicType.get(int(AtomicOp.And), val_type.ir_type)
+UniversalAtomicOr = lambda val_type: CopyOpUniversalAtomicType.get(int(AtomicOp.Or), val_type.ir_type)
+UniversalAtomicInc = lambda val_type: CopyOpUniversalAtomicType.get(int(AtomicOp.Inc), val_type.ir_type)
+UniversalAtomicDec = lambda val_type: CopyOpUniversalAtomicType.get(int(AtomicOp.Dec), val_type.ir_type)
 
 UniversalFMA = lambda ty: MmaOpUniversalFMAType.get(ty.ir_type)
 
@@ -308,7 +309,14 @@ def make_view(iter, layout, loc=None, ip=None):
 
 
 @traced_op
+def make_fragment_layout_like(tensor, loc=None, ip=None):
+    return fly.make_fragment_layout_like(tensor, loc=loc, ip=ip)
+
+
+@traced_op
 def make_fragment_like(tensor, dtype=None, loc=None, ip=None):
+    if hasattr(dtype, "ir_type"):
+        dtype = dtype.ir_type
     return fly.make_fragment_like(tensor, dtype=dtype, loc=loc, ip=ip)
 
 
@@ -323,8 +331,9 @@ def get_scalar(int_tuple, loc=None, ip=None):
 
 
 @traced_op
-def get_leaves(input, loc=None, ip=None):
-    return fly.get_leaves(input, loc=loc, ip=ip)
+def get_leaves(input, dynamic_only=False, loc=None, ip=None):
+    res_lists = fly.GetLeavesOp(input, dynamicOnly=dynamic_only, loc=loc, ip=ip)
+    return tuple(res_lists.results)
 
 
 @traced_op
@@ -591,21 +600,29 @@ def left_inverse(layout, loc=None, ip=None):
 
 @traced_op
 def logical_divide(layout, divisor, loc=None, ip=None):
+    if not isinstance(divisor, ir.Value):
+        divisor = make_tile(*divisor, loc=loc, ip=ip)
     return fly.logical_divide(layout, divisor, loc=loc, ip=ip)
 
 
 @traced_op
 def zipped_divide(layout, divisor, loc=None, ip=None):
+    if not isinstance(divisor, ir.Value):
+        divisor = make_tile(*divisor, loc=loc, ip=ip)
     return fly.zipped_divide(layout, divisor, loc=loc, ip=ip)
 
 
 @traced_op
 def tiled_divide(layout, divisor, loc=None, ip=None):
+    if not isinstance(divisor, ir.Value):
+        divisor = make_tile(*divisor, loc=loc, ip=ip)
     return fly.tiled_divide(layout, divisor, loc=loc, ip=ip)
 
 
 @traced_op
 def flat_divide(layout, divisor, loc=None, ip=None):
+    if not isinstance(divisor, ir.Value):
+        divisor = make_tile(*divisor, loc=loc, ip=ip)
     return fly.flat_divide(layout, divisor, loc=loc, ip=ip)
 
 
@@ -709,11 +726,15 @@ def mma_atom_call(mma_atom, d, a, b, c, loc=None, ip=None):
 
 @traced_op
 def make_tiled_copy(copy_atom, layout_thr_val, tile_mn, loc=None, ip=None):
+    if not isinstance(tile_mn, ir.Value):
+        tile_mn = make_tile(*tile_mn, loc=loc, ip=ip)
     return fly.make_tiled_copy(copy_atom, layout_thr_val, tile_mn, loc=loc, ip=ip)
 
 
 @traced_op
 def make_tiled_mma(mma_atom, atom_layout, permutation=None, loc=None, ip=None):
+    if permutation is not None and not isinstance(permutation, ir.Value):
+        permutation = make_tile(*permutation, loc=loc, ip=ip)
     return fly.make_tiled_mma(mma_atom, atom_layout, permutation=permutation, loc=loc, ip=ip)
 
 
@@ -778,11 +799,15 @@ def get_dyn_shared(loc=None, ip=None):
 
 @traced_op
 def inttoptr(result_type, src, loc=None, ip=None):
+    if result_type.address_space == AddressSpace.Register:
+        raise ValueError("inttoptr is not supported for register address space")
     return fly.inttoptr(result_type, src, loc=loc, ip=ip)
 
 
 @traced_op
 def ptrtoint(ptr, loc=None, ip=None):
+    if ptr.address_space == AddressSpace.Register:
+        raise ValueError("ptrtoint is not supported for register address space")
     return fly.ptrtoint(ptr, loc=loc, ip=ip)
 
 

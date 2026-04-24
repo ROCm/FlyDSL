@@ -1,7 +1,7 @@
 """Shared utilities for gfx1250 GEMM kernels (fp16 / mxfp4 / mxfp8). """
 
 from flydsl._mlir import ir
-from flydsl._mlir.dialects import llvm as llvm_dialect
+from flydsl._mlir.dialects import llvm as llvm_dialect, scf
 from flydsl.expr import arith, buffer_ops, gpu, rocdl, tdm_ops, vector
 from flydsl.expr.arith import _to_raw as _raw
 from flydsl.expr.typing import T
@@ -97,16 +97,26 @@ def lds_transpose_load_raw(result_type, lds_base_idx, byte_offset):
     return _rocdl.ds_load_tr16_b128(result_type, ptr_val)
 
 
+def workgroup_barrier(use_cluster=False):
+    """Issue the appropriate barrier for LDS visibility.
+
+    Cluster mode layers an inter-workgroup barrier on top of the regular
+    workgroup barrier protocol, so call sites can treat it as a single
+    "LDS is now readable" fence.
+    """
+    if use_cluster:
+        gpu.cluster_barrier()
+    else:
+        gpu.barrier()
+
+
 def pipeline_fence(outstanding=0, use_cluster=False):
     """Fused READY+REUSE fence for gfx1250 multi-buffer pipeline.
 
     Issues ``s_wait_tensorcnt`` followed by the appropriate barrier.
     """
     tdm_ops.tensor_wait(outstanding)
-    if use_cluster:
-        gpu.cluster_barrier()
-    else:
-        gpu.barrier()
+    workgroup_barrier(use_cluster=use_cluster)
 
 
 WGP_BARRIER_ID = -1
@@ -146,10 +156,15 @@ def issue_tdm_loads(*descs, wave_specialized=False, wave_id=None):
         if wave_id is None:
             wave_id = rocdl.wave_id()
         for idx, desc in enumerate(descs):
-            if arith.cmpi(
-                arith.CmpIPredicate.eq, wave_id, arith.constant(idx, type=T.i32)
-            ):
+            is_loader_wave = arith.cmpi(
+                arith.CmpIPredicate.eq,
+                wave_id,
+                arith.constant(idx, type=T.i32),
+            )
+            if_op = scf.IfOp(is_loader_wave)
+            with ir.InsertionPoint(if_op.then_block):
                 tdm_ops.tensor_load_2d(desc)
+                scf.YieldOp([])
         return
 
     for desc in descs:
@@ -234,6 +249,7 @@ __all__ = [
     "lds_load_b128_raw",
     "lds_transpose_load_raw",
     # Pipeline
+    "workgroup_barrier",
     "pipeline_fence",
     "pipeline_fence_signal",
     "pipeline_fence_wait",

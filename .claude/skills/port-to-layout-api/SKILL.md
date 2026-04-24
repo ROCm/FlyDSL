@@ -31,7 +31,7 @@ Read the kernel and classify each buffer_load/buffer_store:
 | Pattern | Layout API Port | Example |
 |---------|----------------|---------|
 | Contiguous vec load along innermost dim | `make_buffer_tensor` + `BufferCopy128b` | Load 8xf16 from row |
-| Scalar load (vec_width=1) of metadata | Keep as `buffer_ops.buffer_load` | Position/slot/mask loads |
+| Scalar load (vec_width=1) | `make_buffer_tensor` + `BufferCopy32b`/`BufferCopy16b` | Scale/metadata loads |
 | Scattered store (non-contiguous layout) | Keep as `buffer_ops.buffer_store` | Non-flash value_cache |
 | Contiguous vec store along innermost dim | `make_buffer_tensor` + `BufferCopy` | Store 8xf16 to output |
 
@@ -138,12 +138,33 @@ if is_valid:
     _store_vec(val, out_div, idx)
 ```
 
-### Step 6: Keep Scalar Accesses as buffer_ops
+### Step 6: Scalar Loads via Layout API
 
-Not everything should use the layout API. Keep `buffer_ops` for:
-- Scalar metadata loads: `buffer_ops.buffer_load(rsrc, idx, vec_width=1, dtype=T.i32)`
-- Scattered stores where elements are non-contiguous in memory
-- Single-element stores (e.g., writing one scale value per block)
+Scalar loads (vec_width=1) also work through the layout API:
+
+```python
+buf = fx.rocdl.make_buffer_tensor(tensor, max_size=True)
+copy_atom_s = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), 32)  # f32 scalar
+scalar_reg_ty = fx.MemRefType.get(T.f32, fx.LayoutType.get(1, 1), fx.AddressSpace.Register)
+scalar_reg_lay = fx.make_layout(1, 1)
+div = fx.logical_divide(buf, fx.make_layout(1, 1))
+
+def load_scalar(index):
+    r = fx.memref_alloca(scalar_reg_ty, scalar_reg_lay)
+    fx.copy_atom_call(copy_atom_s, fx.slice(div, (None, fx.Int32(index))), r)
+    return Vec(fx.memref_load_vec(r))[0]  # extract scalar from vector<1xf32>
+```
+
+Scalar stores work the same way (reverse src/dst):
+```python
+def store_scalar(index, val):
+    r = fx.memref_alloca(scalar_reg_ty, scalar_reg_lay)
+    fx.memref_store_vec(Vec.filled(1, val, Float32), r)
+    fx.copy_atom_call(copy_atom_s, r, fx.slice(div, (None, fx.Int32(index))))
+```
+
+Keep `buffer_ops` only for:
+- Scattered stores where elements are truly non-contiguous in memory
 
 ### Step 7: Remove Dead Code
 
