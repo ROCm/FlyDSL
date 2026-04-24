@@ -55,9 +55,9 @@ def align(x: int, y: int) -> int:
 def fp32_to_e8m0(scale: torch.Tensor) -> torch.Tensor:
     """Round FP32 scale UP to E8M0 precision (ceiling on exponent).
 
-    Matches DeepGEMM's ceil_to_ue8m0 (deep_gemm/utils/math.py). Rounding up is
-    required so that x / scale_e8m0 <= fp8_max — truncation would shrink the
-    scale, causing FP8 saturation and a systematic bias on every block.
+    Rounding up is required so that x / scale_e8m0 <= fp8_max — truncation
+    would shrink the scale, causing FP8 saturation and a systematic bias on
+    every block.
     """
     bits = scale.abs().float().view(torch.int32)
     exp = ((bits >> 23) & 0xFF) + (bits & 0x7FFFFF).bool().int()
@@ -197,7 +197,7 @@ def generate_masked_grouped_gemm_inputs(
     b_f32 = torch.randn(num_groups, n, k, device=device, dtype=torch.float32)
 
     # Reference output from original FP32 data BEFORE quantization
-    # (matching DeepGEMM test convention: ref absorbs all quantization + scale errors)
+    # (ref absorbs all quantization + scale errors).
     # Per-group matmul.
     ref_d = torch.zeros(num_groups, max_m, n, dtype=torch.float32, device=device)
     for g in range(num_groups):
@@ -235,9 +235,8 @@ def _as_i8(t: torch.Tensor) -> torch.Tensor:
         pytest.param(4, 512, 50, 128, 128, id="4g-512max-50m-sparse"),
         # Larger shapes
         pytest.param(8, 1024, 800, 512, 512, id="8g-1024max-800m", marks=pytest.mark.large_shape),
-        # DeepSeek-V3 shapes
-        pytest.param(8, 512, 300, 2048, 7168, id="DS-8g-2048x7168", marks=pytest.mark.large_shape),
-        pytest.param(8, 512, 300, 7168, 2304, id="DS-8g-7168x2304", marks=pytest.mark.large_shape),
+        pytest.param(8, 512, 300, 2048, 7168, id="8g-2048x7168-large", marks=pytest.mark.large_shape),
+        pytest.param(8, 512, 300, 7168, 2304, id="8g-7168x2304-large", marks=pytest.mark.large_shape),
     ],
 )
 @pytest.mark.parametrize("out_dtype", [
