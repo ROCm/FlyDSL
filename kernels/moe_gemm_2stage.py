@@ -62,7 +62,7 @@ from kernels.mfma_preshuffle_pipeline import (
     swizzle_xor16,
 )
 from kernels.mfma_epilogues import c_shuffle_epilog, default_epilog, mfma_epilog
-from kernels.mfma_preshuffle_pipeline import crd2idx
+from kernels.mfma_preshuffle_pipeline import crd2idx, _buffer_load_vec
 
 
 @contextmanager
@@ -146,7 +146,7 @@ def compile_moe_gemm1(
     is_uint4 = in_dtype == "uint4"
     is_a8w4smooth = in_dtype in ("a8w4smooth", "uint4")
     needs_scale_x = (not is_f16_or_bf16) and (not is_a8w4smooth)
-    needs_scale_w = ((not is_f16_or_bf16) or is_int4_bf16) and (not is_a8w4smooth)
+    needs_scale_w = (not is_f16_or_bf16) or is_int4_bf16
     elem_bytes = 2 if is_f16_or_bf16 else 1
     if out_dtype not in ("f16", "bf16"):
         raise ValueError(f"out_dtype must be 'f16' or 'bf16', got {out_dtype!r}")
@@ -807,20 +807,17 @@ def compile_moe_gemm1(
                         k0 = k0_base + fx.Index(pack_group)
 
                         # Load 16B weight pack once per ni for this pack_group.
+                        # idx_pack from crd2idx is in bytes; use offset_in_bytes=True so the
+                        # primitive does the byte→dword conversion internally (avoids needing
+                        # IntTuple // Index, which is unsupported).
                         w_i32x4_list = []
                         for ni in range_constexpr(num_acc_n):
-                            coord_pack = fx.make_coord(
-                                blk_list[ni], k0, lane_div_16, intra_list[ni], fx.Index(0),
-                            )
-                            idx_pack = fx.crd2idx(coord_pack, layout_b)
-                            idx_pack_dword = idx_pack // c4
-                            b16 = buffer_copy_gmem16_dwordx4(
-                                buffer_ops, vector,
-                                elem_type=w_elem,
-                                idx_i32=idx_pack_dword,
-                                rsrc=w_rsrc,
-                                vec_elems=16,
-                                elem_bytes=1,
+                            coord_pack = (blk_list[ni], k0, lane_div_16, intra_list[ni], fx.Index(0))
+                            idx_pack = crd2idx(coord_pack, layout_b)
+                            b16 = _buffer_load_vec(
+                                buffer_ops, vector, w_rsrc, idx_pack,
+                                elem_type=w_elem, vec_elems=16, elem_bytes=1,
+                                offset_in_bytes=True,
                             )
                             w_i32x4_list.append(vector.bitcast(vec4_i32_ty, b16))
 
@@ -908,15 +905,12 @@ def compile_moe_gemm1(
                     k0 = k0_base + fx.Index(pack_group)
                     w_i32x4_list = []
                     for ni in range_constexpr(num_acc_n):
-                        coord_pack = fx.make_coord(
-                            blk_list[ni], k0, lane_div_16, intra_list[ni], fx.Index(0),
-                        )
-                        idx_pack = fx.crd2idx(coord_pack, layout_b)
-                        idx_pack_dword = idx_pack // c4
-                        b16 = buffer_copy_gmem16_dwordx4(
-                            buffer_ops, vector,
-                            elem_type=w_elem, idx_i32=idx_pack_dword,
-                            rsrc=w_rsrc, vec_elems=16, elem_bytes=1,
+                        coord_pack = (blk_list[ni], k0, lane_div_16, intra_list[ni], fx.Index(0))
+                        idx_pack = crd2idx(coord_pack, layout_b)
+                        b16 = _buffer_load_vec(
+                            buffer_ops, vector, w_rsrc, idx_pack,
+                            elem_type=w_elem, vec_elems=16, elem_bytes=1,
+                            offset_in_bytes=True,
                         )
                         w_i32x4_list.append(vector.bitcast(vec4_i32_ty, b16))
 
@@ -1113,8 +1107,12 @@ def compile_moe_gemm1(
                         return b_tile
 
                 # A8W4SMOOTH dispatch: substitute load_b_tile with packed-4bit dequant loader.
-                if is_a8w4smooth and int(tile_k) == 256:
-                    load_b_tile = load_b_tile_a8w4smooth
+                # NOTE: must NOT use a Python `if` here because @flyc.kernel's AST rewriter
+                # converts `if`/`else` on Python-level booleans into scf.if runtime conditionals,
+                # which would scope the rebind into a then_fn closure (CLAUDE.md "Branch-local defs").
+                # Pre-compute the choice as a Python value at construction time and apply unconditionally.
+                _use_a8w4smooth_loader = bool(is_a8w4smooth) and int(tile_k) == 256
+                load_b_tile = load_b_tile_a8w4smooth if _use_a8w4smooth_loader else load_b_tile
 
                 acc_gate = [acc_init] * (num_acc_n * m_repeat)
                 acc_up = [acc_init] * (num_acc_n * m_repeat)
@@ -2117,7 +2115,7 @@ def compile_moe_gemm2(
     is_uint4 = in_dtype == "uint4"
     is_a8w4smooth = in_dtype in ("a8w4smooth", "uint4")
     needs_scale_x = (not is_f16_or_bf16) and (not is_a8w4smooth)
-    needs_scale_w = ((not is_f16_or_bf16) or is_int4_bf16) and (not is_a8w4smooth)
+    needs_scale_w = (not is_f16_or_bf16) or is_int4_bf16
     elem_bytes = 2 if is_f16_or_bf16 else 1
     out_s = str(out_dtype).strip().lower()
     if out_s not in ("f16", "fp16", "half", "bf16", "bfloat16", "f32", "fp32", "float"):
@@ -2748,18 +2746,12 @@ def compile_moe_gemm2(
 
                         w_i32x4_list = []
                         for ni in range_constexpr(num_acc_n):
-                            coord_pack = fx.make_coord(
-                                n_blk_list[ni], k0, lane_div_16, n_intra_list[ni], fx.Index(0),
-                            )
-                            idx_pack = fx.crd2idx(coord_pack, layout_b)
-                            idx_pack_dword = idx_pack // c4
-                            b16 = buffer_copy_gmem16_dwordx4(
-                                buffer_ops, vector,
-                                elem_type=w_elem,
-                                idx_i32=idx_pack_dword,
-                                rsrc=w_rsrc,
-                                vec_elems=16,
-                                elem_bytes=1,
+                            coord_pack = (n_blk_list[ni], k0, lane_div_16, n_intra_list[ni], fx.Index(0))
+                            idx_pack = crd2idx(coord_pack, layout_b)
+                            b16 = _buffer_load_vec(
+                                buffer_ops, vector, w_rsrc, idx_pack,
+                                elem_type=w_elem, vec_elems=16, elem_bytes=1,
+                                offset_in_bytes=True,
                             )
                             w_i32x4_list.append(vector.bitcast(vec4_i32_ty, b16))
 
@@ -2898,8 +2890,10 @@ def compile_moe_gemm2(
                         return b_tile
 
                 # A8W4SMOOTH dispatch: substitute load_b_tile with packed-4bit dequant loader.
-                if is_a8w4smooth and int(tile_k) == 256:
-                    load_b_tile = load_b_tile_a8w4smooth
+                # NOTE: a Python `if` here would be rewritten to scf.if by @flyc.kernel's AST
+                # rewriter, scoping the rebind inside a then_fn closure. Use a ternary instead.
+                _use_a8w4smooth_loader = bool(is_a8w4smooth) and int(tile_k) == 256
+                load_b_tile = load_b_tile_a8w4smooth if _use_a8w4smooth_loader else load_b_tile
 
                 # ---- Pipeline helpers: store X tile to LDS with ping-pong base ----
                 def store_x_tile_to_lds(vec_x_in_parts, lds_base):

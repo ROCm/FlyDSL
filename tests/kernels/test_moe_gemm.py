@@ -2242,8 +2242,9 @@ def run_moe_stage1_a8w4smooth(
     qs_1d = qscale_i32.view(-1).contiguous()
     qz_1d = qzero_i32.view(-1).contiguous()
     sw_1d = sorted_weights.contiguous().view(-1)
-    # scale_w not used by a8w4smooth path; pass empty.
-    scale_w_1d = torch.empty((0,), device=device, dtype=torch.float32)
+    # scale_w IS read by the a8w4smooth path (per-row f32). Match FlyDSL: 1e-3 constant.
+    scale_w_1d = torch.full((experts * rows_per_expert,), 1e-3, device=device, dtype=torch.float32)
+    scale_w1_flat_ref = scale_w_1d.view(experts * rows_per_expert, 1)
 
     out = torch.empty((tokens, topk, inter_dim), device=device, dtype=torch.float16)
 
@@ -2281,37 +2282,27 @@ def run_moe_stage1_a8w4smooth(
     torch.cuda.synchronize()
 
     if not bool(skip_ref):
-        # Build reference: dequant w_packed via _a8w4smooth_packed_w_to_unshuffled_int8
-        # qscale_kn / qzero_kn need shape [K//64, N] int32 from physical [E, nb, g256, 16, 4].
-        N_total = experts * rows_per_expert
+        # Reference path: use w_i8_unshuffled_flat returned directly from build_a8w4smooth_moe_weight
+        # (matching FlyDSL line 704: w1_q_flat_ref = w1_int8_unshuffled_flat). The round-trip
+        # helper _a8w4smooth_packed_w_to_unshuffled_int8 does not invert the K64 interleave.
         K = model_dim
-        nb = rows_per_expert // 16
-        g256 = K // 256
-        # qscale_u8 shape [E, nb, g256, 16, 4]; map to [K//64, N] int32:
-        #   N idx = e*rows_per_expert + b*16 + l ; K_blk idx = g*4 + p
-        qs_nk = qscale_u8.to(torch.int32).permute(0, 1, 3, 2, 4).reshape(N_total, g256 * 4)
-        qz_nk = qzero_u8.to(torch.int32).permute(0, 1, 3, 2, 4).reshape(N_total, g256 * 4)
-        qs_kn = qs_nk.t().contiguous()  # [K//64, N]
-        qz_kn = qz_nk.t().contiguous()
-
-        w_i8_ref = _a8w4smooth_packed_w_to_unshuffled_int8(
-            w_kernel, qs_kn, qz_kn,
-            N=N_total, K=K, experts=experts, rows_per_expert=rows_per_expert,
-            scale_block_k=64,
-        ).to(torch.float32)
-
         # x_q is slot-major [topk, tokens, K]; ref expects [tokens, topk, K]
         x_ref = x_q.view(topk, tokens, model_dim).permute(1, 0, 2).contiguous()
         sx_ref = scale_x.view(topk, tokens, 1).permute(1, 0, 2).contiguous()
         ref = torch_moe_gemm1(
             x_ref,
-            w_i8_ref.view(experts, rows_per_expert, K),
+            w_i8_unshuffled_flat.view(experts * rows_per_expert, K).to(torch.float32),
             sx_ref,
-            None,
+            scale_w1_flat_ref,
             topk_ids.to(torch.int64),
             topk_weights,
             inter_dim=inter_dim, doweight_stage1=False,
         )
+        diff = (out.to(torch.float32) - ref)
+        print(f"[DEBUG a8w4smooth] out shape={out.shape}, ref shape={ref.shape}")
+        print(f"[DEBUG a8w4smooth] out[0,0,:16]={[f'{v:.4f}' for v in out[0,0,:16].tolist()]}")
+        print(f"[DEBUG a8w4smooth] ref[0,0,:16]={[f'{v:.4f}' for v in ref[0,0,:16].tolist()]}")
+        print(f"[DEBUG a8w4smooth] diff[0,0,:16]={[f'{v:.4f}' for v in diff[0,0,:16].tolist()]}")
         assert verify_output(out.to(torch.float32), ref, rtol=0.5, atol=0.5)
 
     flops = 2 * tokens * topk * (2 * inter_dim) * model_dim
