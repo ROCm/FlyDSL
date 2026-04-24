@@ -14,9 +14,18 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.compiler.kernel_function import CompilationContext
 
-from flydsl.expr import arith, vector, gpu, range_constexpr
+from flydsl.expr import arith, gpu, range_constexpr
 from flydsl.expr.arith import ArithValue
 from flydsl.expr.typing import T, Int32
+from flydsl.expr.vector import (
+    CombiningKind,
+    bitcast,
+    broadcast,
+    extract,
+    from_elements,
+    reduction,
+    shuffle,
+)
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 
@@ -195,14 +204,14 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
 
                 x_av = ArithValue(x)
                 x2 = x_av * x_av
-                red2 = vector.reduction(compute_type, vector.CombiningKind.ADD, x2, fastmath=fm_fast)
+                red2 = reduction(compute_type, CombiningKind.ADD, x2, fastmath=fm_fast)
                 thread_sumsq = ArithValue(thread_sumsq) + red2
 
             _, sum_sq = block_reduce_add2(thread_dummy, thread_sumsq)
             mean_sq = ArithValue(sum_sq) / n_float
             ms_eps = ArithValue(mean_sq) + eps_c
             rrms = ms_eps.rsqrt(fastmath=fm_fast)
-            rrms_splat = vector.broadcast(vec_type_c, rrms)
+            rrms_splat = broadcast(vec_type_c, rrms)
             rrms_splat_av = ArithValue(rrms_splat)
 
             # Pass 2: normalize + gamma + store (reuse cached input)
@@ -229,20 +238,20 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
                         vec4_i32_ty = T.vec(VEC_WIDTH // 2, T.i32)
                         vec_bf16_ty = T.vec(VEC_WIDTH, elem_type)
                         c16_i32 = arith.constant(16, type=T.i32)
-                        c16_v = vector.broadcast(vec_i32_ty, c16_i32)
+                        c16_v = broadcast(vec_i32_ty, c16_i32)
                         u = y_val.bitcast(vec_i32_ty)
                         upper = u.shrui(c16_v)
-                        c1_v = vector.broadcast(vec_i32_ty, arith.constant(1, type=T.i32))
+                        c1_v = broadcast(vec_i32_ty, arith.constant(1, type=T.i32))
                         lsb = upper & c1_v
-                        c7fff_v = vector.broadcast(vec_i32_ty, arith.constant(0x7FFF, type=T.i32))
+                        c7fff_v = broadcast(vec_i32_ty, arith.constant(0x7FFF, type=T.i32))
                         bias = ArithValue(c7fff_v) + ArithValue(lsb)
                         u_round = ArithValue(u) + bias
                         bf16_bits = u_round.shrui(c16_v)
-                        even = vector.shuffle(bf16_bits, bf16_bits, [0, 2, 4, 6])
-                        odd = vector.shuffle(bf16_bits, bf16_bits, [1, 3, 5, 7])
-                        odd_sh = odd << vector.broadcast(vec4_i32_ty, c16_i32)
+                        even = shuffle(bf16_bits, bf16_bits, [0, 2, 4, 6])
+                        odd = shuffle(bf16_bits, bf16_bits, [1, 3, 5, 7])
+                        odd_sh = odd << broadcast(vec4_i32_ty, c16_i32)
                         packed = even | odd_sh
-                        out_e = vector.bitcast(vec_bf16_ty, packed)
+                        out_e = bitcast(vec_bf16_ty, packed)
                 elif dtype_str == "f32":
                     out_e = y_val
                 else:
@@ -280,12 +289,12 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
                 r = fx.memref_alloca(scalar_reg_ty, scalar_reg_lay)
                 fx.copy_atom_call(copy_atom_s, view, r)
                 v = fx.memref_load_vec(r)
-                return vector.extract(v, static_position=[0])
+                return extract(v, static_position=[0])
 
             def _store_scalar(divided_tensor, index, val):
                 r = fx.memref_alloca(scalar_reg_ty, scalar_reg_lay)
                 vec_ty = T.vec(1, elem_type)
-                v = vector.from_elements(vec_ty, [val])
+                v = from_elements(vec_ty, [val])
                 fx.memref_store_vec(v, r)
                 view = fx.slice(divided_tensor, (None, index))
                 fx.copy_atom_call(copy_atom_s, r, view)
@@ -413,7 +422,7 @@ def _build_rmsnorm_quant_module(
         def _store_yscale(index, val):
             r = fx.memref_alloca(scale_reg_ty, scale_reg_lay)
             vec_ty = T.vec(1, T.f32)
-            v = vector.from_elements(vec_ty, [val])
+            v = from_elements(vec_ty, [val])
             fx.memref_store_vec(v, r)
             fx.copy_atom_call(scale_copy_atom, r, fx.slice(yscale_div, (None, index)))
 
@@ -575,14 +584,14 @@ def _build_rmsnorm_quant_module(
 
                 x_av = ArithValue(x)
                 x2 = x_av * x_av
-                red2 = vector.reduction(compute_type, vector.CombiningKind.ADD, x2, fastmath=fm_fast)
+                red2 = reduction(compute_type, CombiningKind.ADD, x2, fastmath=fm_fast)
                 thread_sumsq = ArithValue(thread_sumsq) + red2
 
             _, sum_sq = block_reduce_add2(thread_dummy, thread_sumsq)
             mean_sq = ArithValue(sum_sq) / n_float
             ms_eps = ArithValue(mean_sq) + eps_c
             rrms = ms_eps.rsqrt(fastmath=fm_fast)
-            rrms_splat = vector.broadcast(vec_type_c, rrms)
+            rrms_splat = broadcast(vec_type_c, rrms)
             rrms_splat_av = ArithValue(rrms_splat)
 
             thread_row_max = c_zero_f
@@ -608,8 +617,8 @@ def _build_rmsnorm_quant_module(
                 y_local.append(y)
                 y_bits = ArithValue(y).bitcast(vec_i32_ty)
                 y_abs_bits = y_bits & abs_mask
-                y_abs = vector.bitcast(vec_type_c, y_abs_bits)
-                tile_max = vector.reduction(compute_type, vector.CombiningKind.MAXNUMF, y_abs)
+                y_abs = bitcast(vec_type_c, y_abs_bits)
+                tile_max = reduction(compute_type, CombiningKind.MAXNUMF, y_abs)
                 thread_row_max = thread_row_max.maximumf(tile_max)
 
             row_max = block_reduce_max(thread_row_max)
@@ -620,13 +629,13 @@ def _build_rmsnorm_quant_module(
                 _store_yscale(bid, final_scale)
 
             inv_scale = ArithValue(c_one_f) / ArithValue(final_scale)
-            inv_scale_splat = vector.broadcast(vec_type_c, inv_scale)
+            inv_scale_splat = broadcast(vec_type_c, inv_scale)
 
             for tile_i in range_constexpr(num_tiles):
                 q = ArithValue(y_local[tile_i]) * ArithValue(inv_scale_splat)
                 q_i8 = arith.FPToSIOp(vec_type_q, arith.unwrap(q)).result
-                q_lo = vector.shuffle(q_i8, q_i8, [0, 1, 2, 3])
-                q_hi = vector.shuffle(q_i8, q_i8, [4, 5, 6, 7])
+                q_lo = shuffle(q_i8, q_i8, [0, 1, 2, 3])
+                q_hi = shuffle(q_i8, q_i8, [4, 5, 6, 7])
                 out_idx = tid * 2 + tile_i * BLOCK_THREADS * 2
                 _store_q_vec(out_div_q, out_idx, q_lo)
                 _store_q_vec(out_div_q, out_idx + 1, q_hi)
@@ -668,12 +677,12 @@ def _build_rmsnorm_quant_module(
                 r = fx.memref_alloca(scalar_reg_ty, scalar_reg_lay)
                 fx.copy_atom_call(copy_atom_s, view, r)
                 v = fx.memref_load_vec(r)
-                return vector.extract(v, static_position=[0])
+                return extract(v, static_position=[0])
 
             def _store_quant_scalar(divided_tensor, index, val):
                 r = fx.memref_alloca(scalar_reg_ty_q, scalar_reg_lay_q)
                 vec_ty = T.vec(1, quant_elem_type)
-                v = vector.from_elements(vec_ty, [val])
+                v = from_elements(vec_ty, [val])
                 fx.memref_store_vec(v, r)
                 view = fx.slice(divided_tensor, (None, index))
                 fx.copy_atom_call(copy_atom_qs, r, view)
