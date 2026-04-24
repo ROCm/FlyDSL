@@ -13,22 +13,29 @@ backend automatically counts these globals and writes
 So the program only needs to declare the globals — no kernel-descriptor
 or runtime tweaking required.
 
-Usage::
+Usage (canonical JOIN-SIGNAL-WAIT pattern)::
 
     nbar_alloc = NamedBarrierAllocator(sym_prefix="myk_nbar")
     nbar_a = nbar_alloc.alloc(member_count=4, name_hint="A")
-    nbar_b = nbar_alloc.alloc(member_count=4, name_hint="B")
     # ... inside gpu.module body:
     nbar_alloc.finalize()
     # ... inside kernel body:
-    nbar_a.signal_var()      # producer
-    nbar_a.wait()            # consumer
+    nbar_a.init()            # wave 0 only (gate this with an scf.if)
+    gpu.barrier()            # WG barrier so every wave sees the INIT
+    nbar_a.join()            # every wave: subscribe to the barrier
+    # ... hot loop:
+    nbar_a.signal()          # arrive
+    nbar_a.wait()            # wait for memberCnt arrivals
+
+A wave may be joined to at most one named barrier at a time.  Without a
+prior ``join()``, ``wait()`` is a silent NOP.
 """
 
 from typing import List, Optional
 
 from .._mlir import ir
 from .._mlir.dialects import llvm as llvm_dialect
+from ..expr import rocdl
 
 
 _NAMED_BARRIER_TYPE_STR = '!llvm.target<"amdgcn.named.barrier", 0>'
@@ -48,10 +55,9 @@ class NamedBarrier:
     Attributes:
         sym_name: Symbol name of the underlying ``llvm.mlir.global``.
         member_count: Compile-time member count used by ``signal_var``/``init``.
-        imm_id: Reserved immediate barrier id (1..16). Currently UNUSED — the
-            backend assigns the actual id based on the global. Use ``signal_var``
-            (ptr-form) for signal; for ``wait`` we still need an immediate id,
-            see :meth:`wait` for the lowering trick.
+        imm_id: Immediate barrier id (1..16) used by the id-form ``signal``/
+            ``wait`` ops. Assigned in allocation order; matches the AMDGPU
+            backend's per-kernel named-barrier allocation.
     """
 
     def __init__(self, sym_name: str, member_count: int, imm_id: int):
@@ -78,8 +84,6 @@ class NamedBarrier:
         *member_count* arrivals after each release, so steady-state per-iter
         code only needs ``signal(id)`` + ``wait(id)``.
         """
-        from flydsl.expr import rocdl
-
         rocdl.s_barrier_init(self.addrof(), self.member_count)
 
     def signal_var(self):
@@ -87,39 +91,54 @@ class NamedBarrier:
 
         ``member_count`` is encoded as an I32Attr (immediate), not an SSA value.
         """
-        from flydsl.expr import rocdl
-
         rocdl.s_barrier_signal_var(self.addrof(), self.member_count)
 
     def signal(self):
-        """Emit ``rocdl.s.barrier.signal id=imm_id`` (id form, immediate)."""
-        from flydsl.expr import rocdl
+        """Emit ``rocdl.s.barrier.signal id=imm_id`` (id form, immediate).
 
+        S_BARRIER_SIGNAL increments the barrier's signalCnt; when signalCnt
+        reaches memberCnt the barrier broadcasts "complete" to all waves 
+        that are joined to it.
+        """
         rocdl.s_barrier_signal(self.imm_id)
 
     def join(self):
-        """Emit ``rocdl.s.barrier.join`` (ptr) — the actual arrival.
+        """Emit ``rocdl.s.barrier.join`` — subscribe this wave to the barrier.
 
-        Per the canonical LLVM lowering test ``s-barrier-lowering.ll``,
-        ``s.barrier.signal.var`` only programs member count; ``join`` is
-        the per-wave arrival that increments the satisfaction counter.
-        Wave order is: ``signal_var`` (program mc) → ``join`` (arrive) →
-        ``wait id`` (block until count satisfied).
+        S_BARRIER_JOIN *does not* increment the barrier's signal/member count;
+        it only sets ``wave.namedBarID`` and clears the wave's ``namedBarComplete``
+        bit so the wave will be woken when the barrier next completes.
+
+        A wave must JOIN a named barrier **before** calling :meth:`wait` —
+        otherwise ``wave.namedBarID == 0`` and ``S_BARRIER_WAIT`` becomes a
+        silent NOP ("if (NamedBarID == 0 && Bar# >= 0) return").
+
+        A wave may be joined to at most one named barrier at a time; JOINing
+        a different barrier switches the subscription. Since JOIN is sticky
+        across loop iterations, the canonical pattern is JOIN-once-at-entry
+        then SIGNAL+WAIT in the hot loop.
+
+        Canonical sequence (see llvm/test/CodeGen/AMDGPU/s-barrier.ll): ::
+
+            bar.join()            # kernel entry, all waves
+            # per iteration:
+            bar.signal()          # arrive
+            bar.wait()            # block until all members have signalled
         """
-        from flydsl.expr import rocdl
-
         rocdl.s_barrier_join(self.addrof())
 
     def wait(self):
         """Emit ``rocdl.s.barrier.wait id=imm_id`` (id form, immediate).
 
-        Note: ``s.barrier.wait`` only accepts an immediate id (MI400 SPG L4391:
-        "BAR# may only be a constant, not come from M0"). This relies on the
-        backend allocating barriers in declaration order so that ``imm_id``
-        matches the id LLVM picks for the corresponding global.
-        """
-        from flydsl.expr import rocdl
+        ``S_BARRIER_WAIT`` always blocks on the *most recently joined* 
+        named barrier — the ``Bar#`` operand only selects between 
+        named/workgroup/trap/cluster barriers, it does **not**
+        pick an individual named barrier. The wave **must** have called
+        :meth:`join` prior to :meth:`wait`, otherwise WAIT is a NOP.
 
+        The immediate form is mandatory: "BAR# may only be a constant, not
+        come from M0".
+        """
         rocdl.s_barrier_wait(self.imm_id)
 
 
