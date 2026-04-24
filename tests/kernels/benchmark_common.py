@@ -156,6 +156,24 @@ def _default_fp8_configs() -> List[Tuple[int, int, str]]:
     ]
 
 
+def _default_rmsnorm_dynamicquant_configs() -> List[Tuple[int, int, str]]:
+    """Default RMSNorm dynamic-quant configs: (M, N, dtype)."""
+    return [
+        (16, 192, "f16"),
+        (1024, 8192, "f16"),
+    ]
+
+
+def _default_rmsnorm_smoothquant_configs() -> List[Tuple[int, int, str]]:
+    """Default RMSNorm smooth-quant configs: (M, N, dtype)."""
+    from kernels.rmsnorm_kernel import BLOCK_THREADS
+
+    return [
+        (8, BLOCK_THREADS * 8, "bf16"),
+        (1024, 8192, "bf16"),
+    ]
+
+
 def _dtype_torch(dt: str):
     dt = dt.lower()
     import torch
@@ -219,6 +237,29 @@ def _bench_flydsl_torch(*, op: str, M: int, N: int, dtype: str, warmup: int, ite
         gamma = torch.randn((N,), device="cuda", dtype=torch_dtype).contiguous()
         y = torch.empty((M, N), device="cuda", dtype=torch_dtype)
         return _time_launch(lambda: launch_fn(x, gamma, y, M, stream=stream))
+
+    if op == "rmsnorm_dq":
+        from kernels.rmsnorm_kernel import build_rmsnorm_dynamicquant_module
+
+        launch_fn = build_rmsnorm_dynamicquant_module(M, N, dtype)
+        x = torch.randn((M, N), device="cuda", dtype=torch_dtype).contiguous()
+        gamma = torch.rand((N,), device="cuda", dtype=torch_dtype).contiguous()
+        y = torch.empty((M, N), device="cuda", dtype=torch.int8)
+        yscale = torch.empty((M,), device="cuda", dtype=torch.float32)
+        return _time_launch(lambda: launch_fn(x, gamma, y, yscale, M, stream=stream))
+
+    if op == "rmsnorm_sq":
+        from kernels.rmsnorm_kernel import build_rmsnorm_smoothquant_module
+
+        launch_fn = build_rmsnorm_smoothquant_module(M, N, dtype)
+        x = torch.randn((M, N), device="cuda", dtype=torch_dtype).contiguous()
+        gamma = torch.rand((N,), device="cuda", dtype=torch_dtype).contiguous()
+        xscale = (torch.rand((N,), device="cuda", dtype=torch_dtype) + 0.5).contiguous()
+        y = torch.empty((M, N), device="cuda", dtype=torch.int8)
+        yscale = torch.empty((M,), device="cuda", dtype=torch.float32)
+        return _time_launch(
+            lambda: launch_fn(x, gamma, xscale, y, yscale, M, stream=stream)
+        )
 
     if op == "wmma_gemm":
         from kernels.rdna_f16_gemm import create_wmma_gemm_module
@@ -297,9 +338,61 @@ def _bench_aiter(*, op: str, impl: str, M: int, N: int, dtype: str, warmup: int,
             x = torch.randn((M, N), device="cuda", dtype=torch_dtype)
             w = torch.randn((N,), device="cuda", dtype=torch_dtype)
             return bench_gpu_us_torch(lambda: fn(x, w, 1e-5), warmup=warmup, iters=iters)
+        if op == "rmsnorm_dq":
+            from aiter.ops.triton.normalization.rmsnorm import (
+                rmsnorm2d_fwd_with_dynamicquant as fn,
+            )
+
+            x = torch.randn((M, N), device="cuda", dtype=torch_dtype).contiguous()
+            w = torch.rand((N,), device="cuda", dtype=torch_dtype).contiguous()
+            y = torch.empty((M, N), dtype=torch.int8, device="cuda")
+            yscale = torch.empty((M, 1), dtype=torch.float32, device="cuda")
+            return bench_gpu_us_torch(
+                lambda: fn(y, x, yscale, w, 1e-5),
+                warmup=warmup,
+                iters=iters,
+            )
+        if op == "rmsnorm_sq":
+            from aiter.ops.triton.normalization.rmsnorm import (
+                rmsnorm2d_fwd_with_smoothquant as fn,
+            )
+
+            x = torch.randn((M, N), device="cuda", dtype=torch_dtype).contiguous()
+            w = torch.rand((N,), device="cuda", dtype=torch_dtype).contiguous()
+            xscale = (torch.rand((N,), device="cuda", dtype=torch_dtype) + 0.5).contiguous()
+            y = torch.empty((M, N), dtype=torch.int8, device="cuda")
+            yscale = torch.empty((M, 1), dtype=torch.float32, device="cuda")
+            return bench_gpu_us_torch(
+                lambda: fn(y, x, xscale, yscale, w, 1e-5),
+                warmup=warmup,
+                iters=iters,
+            )
         return None
 
     raise ValueError(f"unsupported AITER_IMPL={impl!r} (expected triton)")
+
+
+def _bench_compare_row(
+    *,
+    op: str,
+    M: int,
+    N: int,
+    dtype: str,
+    aiter_impl: str,
+    warmup: int,
+    iters: int,
+) -> PerfRow:
+    flydsl_us = None
+    aiter_us = None
+    try:
+        flydsl_us = _bench_flydsl_torch(op=op, M=M, N=N, dtype=dtype, warmup=warmup, iters=iters)
+    except Exception:
+        flydsl_us = None
+    try:
+        aiter_us = _bench_aiter(op=op, impl=aiter_impl, M=M, N=N, dtype=dtype, warmup=warmup, iters=iters)
+    except Exception:
+        aiter_us = None
+    return PerfRow(op=op, shape=f"{M}x{N}", dtype=dtype, flydsl_gpu_us=flydsl_us, aiter_gpu_us=aiter_us)
 
 
 def run_compare_sweep(
@@ -311,19 +404,57 @@ def run_compare_sweep(
 ) -> List[PerfRow]:
     rows: List[PerfRow] = []
     for M, N, dt in configs:
-        shape = f"{M}x{N}"
         for op in ("softmax", "layernorm", "rmsnorm"):
-            flydsl_us = None
-            aiter_us = None
-            try:
-                flydsl_us = _bench_flydsl_torch(op=op, M=M, N=N, dtype=dt, warmup=warmup, iters=iters)
-            except Exception:
-                flydsl_us = None
-            try:
-                aiter_us = _bench_aiter(op=op, impl=aiter_impl, M=M, N=N, dtype=dt, warmup=warmup, iters=iters)
-            except Exception:
-                aiter_us = None
-            rows.append(PerfRow(op=op, shape=shape, dtype=dt, flydsl_gpu_us=flydsl_us, aiter_gpu_us=aiter_us))
+            rows.append(
+                _bench_compare_row(
+                    op=op,
+                    M=M,
+                    N=N,
+                    dtype=dt,
+                    aiter_impl=aiter_impl,
+                    warmup=warmup,
+                    iters=iters,
+                )
+            )
+    return rows
+
+
+def run_rmsnorm_quant_sweep(
+    *,
+    dynamic_configs: Optional[List[Tuple[int, int, str]]] = None,
+    smooth_configs: Optional[List[Tuple[int, int, str]]] = None,
+    aiter_impl: str = "triton",
+    warmup: int = 10,
+    iters: int = 50,
+) -> List[PerfRow]:
+    rows: List[PerfRow] = []
+
+    for M, N, dt in dynamic_configs or _default_rmsnorm_dynamicquant_configs():
+        rows.append(
+            _bench_compare_row(
+                op="rmsnorm_dq",
+                M=M,
+                N=N,
+                dtype=dt,
+                aiter_impl=aiter_impl,
+                warmup=warmup,
+                iters=iters,
+            )
+        )
+
+    for M, N, dt in smooth_configs or _default_rmsnorm_smoothquant_configs():
+        rows.append(
+            _bench_compare_row(
+                op="rmsnorm_sq",
+                M=M,
+                N=N,
+                dtype=dt,
+                aiter_impl=aiter_impl,
+                warmup=warmup,
+                iters=iters,
+            )
+        )
+
     return rows
 
 
@@ -404,28 +535,48 @@ def run_wmma_sweep(
 
 def main() -> None:
     # CLI entrypoint:
-    #   BENCH_CONFIGS="M,N,dtype;..." AITER_IMPL=triton BENCH_WARMUP=10 BENCH_ITERS=50 python -m tests.kernels.benchmark_common
-    configs = _parse_configs(os.environ.get("BENCH_CONFIGS", "")) or _default_configs()
+    #   BENCH_MODE=regular BENCH_CONFIGS="M,N,dtype;..." AITER_IMPL=triton BENCH_WARMUP=10 BENCH_ITERS=50 python -m tests.kernels.benchmark_common
+    #   BENCH_MODE=rmsnorm_quant BENCH_DQ_CONFIGS="M,N,dtype;..." BENCH_SQ_CONFIGS="M,N,dtype;..." python -m tests.kernels.benchmark_common
+    bench_mode = os.environ.get("BENCH_MODE", "regular").strip().lower()
     aiter_impl = os.environ.get("AITER_IMPL", "triton")
     warmup = int(os.environ.get("BENCH_WARMUP", "10"))
     iters = int(os.environ.get("BENCH_ITERS", "50"))
-    rows = run_compare_sweep(configs=configs, aiter_impl=aiter_impl, warmup=warmup, iters=iters)
-    print_perf_table(rows)
 
-    # WMMA GEMM benchmarks (RDNA4 only)
-    wmma_rows = run_wmma_sweep(warmup=warmup, iters=iters)
-    if wmma_rows:
-        print("\n" + "=" * 100)
-        print("Perf Compare (gpu us): FlyDSL WMMA vs torch (RDNA4)")
-        print("=" * 100)
-        print(f"{'op':10s} {'shape':18s} {'dtype':6s} {'FlyDSL(gpu us)':>14s} {'torch(gpu us)':>14s} {'speedup':>10s}")
-        for r in wmma_rows:
-            sp = r.speedup_aiter_vs_flydsl
-            sp_s = "-" if sp is None else f"{sp:,.2f}x"
-            print(
-                f"{r.op:10s} {r.shape:18s} {r.dtype:6s} {_fmt_us(r.flydsl_gpu_us):>14s} {_fmt_us(r.aiter_gpu_us):>14s} {sp_s:>10s}"
-            )
-        print("=" * 100 + "\n")
+    if bench_mode == "regular":
+        configs = _parse_configs(os.environ.get("BENCH_CONFIGS", "")) or _default_configs()
+        rows = run_compare_sweep(configs=configs, aiter_impl=aiter_impl, warmup=warmup, iters=iters)
+        print_perf_table(rows)
+
+        # WMMA GEMM benchmarks (RDNA4 only)
+        wmma_rows = run_wmma_sweep(warmup=warmup, iters=iters)
+        if wmma_rows:
+            print("\n" + "=" * 100)
+            print("Perf Compare (gpu us): FlyDSL WMMA vs torch (RDNA4)")
+            print("=" * 100)
+            print(f"{'op':10s} {'shape':18s} {'dtype':6s} {'FlyDSL(gpu us)':>14s} {'torch(gpu us)':>14s} {'speedup':>10s}")
+            for r in wmma_rows:
+                sp = r.speedup_aiter_vs_flydsl
+                sp_s = "-" if sp is None else f"{sp:,.2f}x"
+                print(
+                    f"{r.op:10s} {r.shape:18s} {r.dtype:6s} {_fmt_us(r.flydsl_gpu_us):>14s} {_fmt_us(r.aiter_gpu_us):>14s} {sp_s:>10s}"
+                )
+            print("=" * 100 + "\n")
+        return
+
+    if bench_mode == "rmsnorm_quant":
+        dq_configs = _parse_configs(os.environ.get("BENCH_DQ_CONFIGS", "")) or _default_rmsnorm_dynamicquant_configs()
+        sq_configs = _parse_configs(os.environ.get("BENCH_SQ_CONFIGS", "")) or _default_rmsnorm_smoothquant_configs()
+        rows = run_rmsnorm_quant_sweep(
+            dynamic_configs=dq_configs,
+            smooth_configs=sq_configs,
+            aiter_impl=aiter_impl,
+            warmup=warmup,
+            iters=iters,
+        )
+        print_perf_table(rows)
+        return
+
+    raise ValueError(f"unsupported BENCH_MODE={bench_mode!r} (expected 'regular' or 'rmsnorm_quant')")
 
 
 if __name__ == "__main__":
