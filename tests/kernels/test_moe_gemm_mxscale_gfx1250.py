@@ -54,6 +54,16 @@ if not str(ARCH).startswith("gfx1250"):
     pytest.skip(f"MoE 2stage gfx1250 tests require gfx1250, got {ARCH}", allow_module_level=True)
 
 
+def _safe_rate(numerator: float, us: float, denom_scale: float) -> Optional[float]:
+    if us <= 0:
+        return None
+    return numerator / (us / 1e6) / denom_scale
+
+
+def _fmt_perf_metric(value: Optional[float], fmt: str) -> str:
+    return "n/a" if value is None else format(value, fmt)
+
+
 
 def _per_1x32_fp8_quant(x: torch.Tensor):
     """Quantize fp32 tensor to raw FP8/E4M3 bytes with one E8M0 scale per 32-wide K block."""
@@ -446,7 +456,7 @@ def run_moe_stage1(
 
     # Note: kernel launches full expert-block range; effective work is gated by num_valid_ids.
     flops = 2 * tokens * topk * (2 * inter_dim) * _orig_model_dim
-    tflops = flops / (us / 1e6) / 1e12
+    tflops = _safe_rate(flops, us, 1e12)
 
     # Rough bytes-moved accounting (same spirit as GEMM tests: count each tensor once).
     bytes_moved = 0
@@ -461,11 +471,11 @@ def run_moe_stage1(
         + int(sorted_expert_ids.numel()) * 4
     )
     bytes_moved += bytes_x + bytes_w + bytes_out + bytes_scale_x + bytes_scale_w + bytes_route
-    tbps = bytes_moved / 1e12 / (us / 1e6)
+    tbps = _safe_rate(bytes_moved, us, 1e12)
     read_bytes = bytes_x + bytes_w + bytes_scale_x + bytes_scale_w + bytes_route
     write_bytes = bytes_out
-    read_bw_gbs = read_bytes / 1e9 / (us / 1e6)
-    write_bw_gbs = write_bytes / 1e9 / (us / 1e6)
+    read_bw_gbs = _safe_rate(read_bytes, us, 1e9)
+    write_bw_gbs = _safe_rate(write_bytes, us, 1e9)
 
     print(
         f"FlyDSL MoE stage1[{in_dtype}] benchmark | "
@@ -474,10 +484,12 @@ def run_moe_stage1(
     )
     print(
         f"  kernel: {us:.1f} us ({us / 1e3:.4f} ms) | "
-        f"{tflops:.2f} TFLOPS(logical, M={tokens*topk}) | {tbps:.3f} TB/s"
+        f"{_fmt_perf_metric(tflops, '.2f')} TFLOPS(logical, M={tokens*topk}) | "
+        f"{_fmt_perf_metric(tbps, '.3f')} TB/s"
     )
     print(
-        f"  bandwidth: read {read_bw_gbs:.1f} GB/s + write {write_bw_gbs:.1f} GB/s | "
+        f"  bandwidth: read {_fmt_perf_metric(read_bw_gbs, '.1f')} GB/s + "
+        f"write {_fmt_perf_metric(write_bw_gbs, '.1f')} GB/s | "
         f"bytes: x={bytes_x/1e6:.1f}MB w={bytes_w/1e6:.1f}MB "
         f"sx={bytes_scale_x/1e6:.1f}MB sw={bytes_scale_w/1e6:.1f}MB "
         f"route={bytes_route/1e6:.1f}MB out={bytes_out/1e6:.1f}MB"
@@ -905,7 +917,7 @@ def run_moe_stage2(
 
     # Launches full expert-block range; effective work is gated by num_valid_ids.
     flops = 2 * tokens * topk * model_dim * _orig_inter_dim
-    tflops = flops / (us / 1e6) / 1e12
+    tflops = _safe_rate(flops, us, 1e12)
 
     bytes_moved = 0
     bytes_a2 = tokens * topk * _orig_inter_dim  # 1B elements (fp4/fp8/a8w4)
@@ -919,11 +931,11 @@ def run_moe_stage2(
         + int(sorted_expert_ids.numel()) * 4
     )
     bytes_moved += bytes_a2 + bytes_w2 + bytes_out + bytes_scale_a2 + bytes_scale_w2 + bytes_route
-    tbps = bytes_moved / 1e12 / (us / 1e6)
+    tbps = _safe_rate(bytes_moved, us, 1e12)
     read_bytes = bytes_a2 + bytes_w2 + bytes_scale_a2 + bytes_scale_w2 + bytes_route
     write_bytes = bytes_out
-    read_bw_gbs = read_bytes / 1e9 / (us / 1e6)
-    write_bw_gbs = write_bytes / 1e9 / (us / 1e6)
+    read_bw_gbs = _safe_rate(read_bytes, us, 1e9)
+    write_bw_gbs = _safe_rate(write_bytes, us, 1e9)
     print(
         f"FlyDSL MoE stage2[{kernel_name}] {in_dtype} {'reduce' if use_reduce else 'atomic'} benchmark | "
         f"shape=({tokens},{model_dim},{inter_dim}), E={experts}, K={topk}, "
@@ -931,10 +943,12 @@ def run_moe_stage2(
     )
     print(
         f"  kernel: {us:.1f} us ({us / 1e3:.4f} ms) | "
-        f"{tflops:.2f} TFLOPS(logical, M={tokens*topk}) | {tbps:.3f} TB/s"
+        f"{_fmt_perf_metric(tflops, '.2f')} TFLOPS(logical, M={tokens*topk}) | "
+        f"{_fmt_perf_metric(tbps, '.3f')} TB/s"
     )
     print(
-        f"  bandwidth: read {read_bw_gbs:.1f} GB/s + write {write_bw_gbs:.1f} GB/s | "
+        f"  bandwidth: read {_fmt_perf_metric(read_bw_gbs, '.1f')} GB/s + "
+        f"write {_fmt_perf_metric(write_bw_gbs, '.1f')} GB/s | "
         f"bytes: a2={bytes_a2/1e6:.1f}MB w2={bytes_w2/1e6:.1f}MB "
         f"sa2={bytes_scale_a2/1e6:.1f}MB sw2={bytes_scale_w2/1e6:.1f}MB "
         f"route={bytes_route/1e6:.1f}MB out={bytes_out/1e6:.1f}MB"

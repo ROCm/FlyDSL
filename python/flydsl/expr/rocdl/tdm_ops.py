@@ -44,6 +44,8 @@ __all__ = [
     "make_tensor_descriptor_2d",
     "make_tensor_gather_dgroup0",
     "make_tensor_gather_descriptor",
+    "update_tensor_descriptor_2d_addr_lo",
+    "update_tensor_gather_descriptor_addr_lo",
     "tensor_load_2d",
     "tensor_load_gather",
     "tensor_store_gather",
@@ -137,6 +139,25 @@ class TDMDescriptor2D:
     dgroup1: object  # vector<8xi32> MLIR Value
 
 
+def update_tensor_descriptor_2d_addr_lo(
+    desc: TDMDescriptor2D,
+    addr_lo,
+) -> TDMDescriptor2D:
+    """Return a descriptor with only GROUP0 lane2 (global addr low) updated.
+
+    This keeps the descriptor structure explicit at the Python API boundary and
+    allows kernel builders to carry a mostly-static descriptor through loops,
+    mutating only the address field that advances each iteration.
+    """
+    dgroup0 = vector.insert(
+        addr_lo,
+        desc.dgroup0,
+        static_position=[2],
+        dynamic_position=[],
+    )
+    return TDMDescriptor2D(dgroup0=dgroup0, dgroup1=desc.dgroup1)
+
+
 @dataclass
 class TDMGatherDescriptor:
     """Holds GROUP0, GROUP1, GROUP2, GROUP3 for TDM gather mode.
@@ -151,6 +172,34 @@ class TDMGatherDescriptor:
     dgroup1: object  # vector<8xi32> MLIR Value
     dgroup2: object  # vector<4xi32> MLIR Value — row indices [0..3] or [0..7]
     dgroup3: object  # vector<4xi32> MLIR Value — row indices [4..7] or [8..15]
+
+
+def update_tensor_gather_descriptor_addr_lo(
+    desc: TDMGatherDescriptor,
+    addr_lo,
+) -> TDMGatherDescriptor:
+    """Return a gather descriptor with only GROUP0 lane2 (global addr low) updated.
+
+    Mirror of update_tensor_descriptor_2d_addr_lo for gather mode. Lets kernel
+    builders hoist a static gather descriptor (dgroup1/dgroup2/dgroup3 plus the
+    address-independent parts of dgroup0) out of the K loop, then cheaply
+    advance the global address each iteration via a single vector.insert.
+
+    Assumes the high 32 bits of the global address stay stable across the
+    advance (same assumption as update_tensor_descriptor_2d_addr_lo).
+    """
+    dgroup0 = vector.insert(
+        addr_lo,
+        desc.dgroup0,
+        static_position=[2],
+        dynamic_position=[],
+    )
+    return TDMGatherDescriptor(
+        dgroup0=dgroup0,
+        dgroup1=desc.dgroup1,
+        dgroup2=desc.dgroup2,
+        dgroup3=desc.dgroup3,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -406,6 +455,47 @@ def make_tensor_descriptor_2d(
     dgroup1 = vector.from_elements(
         T.vec(8, T.i32),
         [g1_s0, g1_s1, g1_s2, g1_s3, g1_s4, g1_s5, g1_s6, g1_s7],
+    )
+
+    # ------------------------------------------------------------------
+    # Pin dgroup1 to an SSA value so it is NOT folded into an inline
+    # <8 x i32> constant literal at every tensor_load_to_lds call site.
+    # ------------------------------------------------------------------
+    # When workgroup_mask is a Python int (the common non-multicast case)
+    # every lane of dgroup1 is a compile-time constant. MLIR's CSE and
+    # LLVM's constant-vector canonicalization then inline the whole vector
+    # as an immediate operand to llvm.amdgcn.tensor.load.to.lds. The AMDGPU
+    # backend treats that as "cheap to rebuild" and emits 5-7 s_mov_b32 /
+    # s_brev_b32 / s_movk_i32 per K-loop iteration (e.g. 0x40000, 0x200000,
+    # 32, 0x4000, 0x20000, s_brev 16) instead of keeping the 8-SGPR
+    # descriptor live across iterations — killing the benefit of hoisting
+    # make_tensor_descriptor_2d out of the K loop via
+    # update_tensor_descriptor_2d_addr_lo.
+    #
+    # Fix: OR a runtime-zero into dgroup1 lane 0 (whose low 16 bits are
+    # the workgroup_mask; OR 0 is a semantic no-op). The zero is produced
+    # by llvm.amdgcn.readfirstlane(i32 0). AMDGPU's InstCombine only folds
+    # nested readfirstlane / readlane chains; it does NOT fold
+    # readfirstlane of a plain constant, so the intrinsic call survives
+    # through IR passes and keeps dgroup1 as a proper SSA vector<8xi32>.
+    # It is loop-invariant and speculatable, so LICM hoists the whole
+    # anchor + insert chain into the preheader once; in codegen it lowers
+    # to a single `s_mov_b32 s?, 0`. Gather descriptors already avoid this
+    # problem because their dgroup1 carries runtime-valued fields (e.g.
+    # tensor_dim1, gather_tile_dim1), so they naturally stay SSA.
+    _zero_i32 = std_arith.ConstantOp(
+        T.i32, ir.IntegerAttr.get(T.i32, 0)
+    ).result
+    _anchor_zero = _ArithValue(
+        rocdl.readfirstlane(T.i32, _zero_i32)
+    )
+    _orig_lane0 = vector.extract(
+        dgroup1, static_position=[0], dynamic_position=[]
+    )
+    _new_lane0 = arith.ori(_orig_lane0, _anchor_zero)
+    dgroup1 = vector.insert(
+        _new_lane0, dgroup1,
+        static_position=[0], dynamic_position=[],
     )
 
     return TDMDescriptor2D(dgroup0=dgroup0, dgroup1=dgroup1)
@@ -736,13 +826,14 @@ def tensor_load_2d(
     (as built by make_tensor_descriptor_2d). All waves together
     cover the full tile.
 
-    Uses the unified 5-group intrinsic with dgroup2/dgroup3/dgroup4
-    zero-initialized for 2D tensors.
-
     Args:
         desc:         TDMDescriptor2D from make_tensor_descriptor_2d.
         cache_policy: Cache policy (0 = default).
     """
+    load_2d_op = getattr(rocdl, "tensor_load_to_lds_d2", None)
+    if load_2d_op is not None:
+        load_2d_op(_raw(desc.dgroup0), _raw(desc.dgroup1), cache_policy)
+        return
     dg2 = _raw(_zero_dgroup_v4i32())
     dg3 = _raw(_zero_dgroup_v4i32())
     dg4 = _raw(_zero_dgroup_v8i32())
@@ -757,13 +848,14 @@ def tensor_store_2d(
 ) -> None:
     """Issue a TDM 2D async store (LDS -> Global).
 
-    Uses the unified 5-group intrinsic with dgroup2/dgroup3/dgroup4
-    zero-initialized for 2D tensors.
-
     Args:
         desc:         TDMDescriptor2D (with LDS source and global destination).
         cache_policy: Cache policy (0 = default).
     """
+    store_2d_op = getattr(rocdl, "tensor_store_from_lds_d2", None)
+    if store_2d_op is not None:
+        store_2d_op(_raw(desc.dgroup0), _raw(desc.dgroup1), cache_policy)
+        return
     dg2 = _raw(_zero_dgroup_v4i32())
     dg3 = _raw(_zero_dgroup_v4i32())
     dg4 = _raw(_zero_dgroup_v8i32())
