@@ -193,33 +193,21 @@ KERNEL_NAME = "mla_decode_kernel"
 
 
 def _set_mfma_vgpr_form():
-    """Force MFMA to use ACC_CD=0 (D/C in ArchVGPR) via LLVM cl::opt."""
-    import ctypes
-    import os
-    lib_dir = os.path.dirname(
-        __import__('flydsl._mlir._mlir_libs', fromlist=['_mlir_libs']).__file__
-    )
-    lib_name = 'libFlyPythonCAPI.so'
-    lib_path = os.path.join(lib_dir, lib_name)
-    if not os.path.exists(lib_path):
-        lib_name = 'libFlirPythonCAPI.so'
-        lib_path = os.path.join(lib_dir, lib_name)
-    lib = ctypes.CDLL(lib_path)
-    parse_fn = lib.LLVMParseCommandLineOptions
-    parse_fn.restype = None
-    parse_fn.argtypes = [
-        ctypes.c_int,
-        ctypes.POINTER(ctypes.c_char_p),
-        ctypes.c_char_p,
-    ]
-    argv = [
-        b'mlir',
-        b'-amdgpu-mfma-vgpr-form',
-        b'--amdgpu-schedule-metric-bias=0',
-        b'--enable-deferred-spilling',
-    ]
-    argv_arr = (ctypes.c_char_p * len(argv))(*argv)
-    parse_fn(len(argv), argv_arr, None)
+    """Force MFMA to use ACC_CD=0 (D/C in ArchVGPR).
+
+    Use the FlyDSL Python bindings for LLVM cl::opt control. Some options are
+    branch-specific in ROCm LLVM, so keep optional knobs best-effort.
+    """
+    from flydsl._mlir._mlir_libs import _mlirDialectsFly as _fly
+
+    _fly.set_llvm_option_bool("amdgpu-mfma-vgpr-form", True)
+    _fly.set_llvm_option_int("amdgpu-schedule-metric-bias", 0)
+
+    try:
+        _fly.set_llvm_option_bool("enable-deferred-spilling", True)
+    except RuntimeError as exc:
+        if "Unknown LLVM option" not in str(exc):
+            raise
 
 
 _set_mfma_vgpr_form()
