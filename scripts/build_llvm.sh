@@ -17,6 +17,7 @@ LLVM_PACKAGE_INSTALL="${LLVM_PACKAGE_INSTALL:-1}"
 LLVM_HASH_FILE="${REPO_ROOT}/thirdparty/llvm-hash.txt"
 LLVM_COMMIT_DEFAULT=$(cat "${LLVM_HASH_FILE}" | tr -d '[:space:]')
 LLVM_COMMIT="${LLVM_COMMIT:-$LLVM_COMMIT_DEFAULT}"
+LLVM_BRANCH="${LLVM_BRANCH:-zan/dsl_mla}"
 
 if [[ ${#LLVM_COMMIT} -lt 40 ]]; then
     echo "Error: LLVM_COMMIT must be a full 40-char SHA (got '${LLVM_COMMIT}')"
@@ -29,23 +30,30 @@ echo "LLVM Source:    $LLVM_SRC_DIR"
 echo "LLVM Build:     $LLVM_BUILD_DIR"
 echo "LLVM Install:   $LLVM_INSTALL_DIR"
 echo "LLVM Tarball:   $LLVM_INSTALL_TGZ"
+echo "LLVM Branch:    $LLVM_BRANCH"
 echo "LLVM Commit:    $LLVM_COMMIT"
 
 # 1. Clone LLVM
-LLVM_REMOTE="${LLVM_REMOTE:-https://github.com/llvm/llvm-project.git}"
+LLVM_REMOTE="${LLVM_REMOTE:-https://github.com/ROCm/llvm-project.git}"
 
 if [ ! -d "$LLVM_SRC_DIR" ]; then
-    echo "Fetching llvm-project commit ${LLVM_COMMIT} (shallow, single commit)..."
+    echo "Fetching llvm-project from ${LLVM_REMOTE} (${LLVM_BRANCH})..."
     git init "$LLVM_SRC_DIR"
     pushd "$LLVM_SRC_DIR"
     git remote add origin "$LLVM_REMOTE"
 else
     pushd "$LLVM_SRC_DIR"
+    git remote set-url origin "$LLVM_REMOTE"
 fi
 
 if ! git cat-file -e "${LLVM_COMMIT}^{commit}" 2>/dev/null; then
-    echo "Fetching commit ${LLVM_COMMIT} ..."
-    git fetch --depth 1 origin "${LLVM_COMMIT}"
+    echo "Fetching branch ${LLVM_BRANCH} ..."
+    git fetch --depth 1 origin "${LLVM_BRANCH}"
+
+    if ! git cat-file -e "${LLVM_COMMIT}^{commit}" 2>/dev/null; then
+        echo "Fetching commit ${LLVM_COMMIT} from ${LLVM_BRANCH} ..."
+        git fetch --depth 1 origin "${LLVM_COMMIT}"
+    fi
 fi
 git checkout "${LLVM_COMMIT}"
 popd
