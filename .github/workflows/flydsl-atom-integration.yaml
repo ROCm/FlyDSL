@@ -108,15 +108,9 @@ jobs:
 
       - name: Check bundled FlyDSL
         run: |
-          docker exec "${CONTAINER_NAME}" bash -lc "
-            set -euo pipefail
-            python3 -m pip show flydsl || true
-            python3 - <<'PY'
-            import flydsl
-            print(f'flydsl package: {flydsl.__file__}')
-            print(f'flydsl version: {getattr(flydsl, "__version__", "unknown")}')
-            PY
-          "
+          set -euo pipefail
+          docker exec "${CONTAINER_NAME}" python3 -m pip show flydsl || true
+          docker exec "${CONTAINER_NAME}" python3 -c "import flydsl; print(f'flydsl package: {flydsl.__file__}'); print(f\"flydsl version: {getattr(flydsl, '__version__', 'unknown')}\")"
 
       - name: Record bundled FlyDSL
         run: |
