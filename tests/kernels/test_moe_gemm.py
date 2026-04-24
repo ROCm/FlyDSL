@@ -2325,6 +2325,163 @@ def test_moe_gemm_a8w4smooth(in_dtype, tile_k):
     )
 
 
+def run_moe_stage2_a8w4smooth(
+    *,
+    tokens: int,
+    model_dim: int,
+    inter_dim: int,
+    experts: int,
+    topk: int,
+    tile_m: int,
+    tile_n: int,
+    tile_k: int,
+    seed: int = 0,
+    num_iters: int = 5,
+    num_warmup: int = 2,
+    moe_sort_mode: Optional[str] = None,
+    skip_ref: bool = False,
+):
+    """Stage2 a8w4smooth runner: W4A8 + smoothquant + zero-point dequant on the down-projection."""
+    if inter_dim % 256 != 0:
+        raise ValueError(f"a8w4smooth stage2 requires inter_dim%256==0, got {inter_dim}")
+    if int(tile_k) not in (128, 256):
+        raise ValueError(f"a8w4smooth requires tile_k in (128,256), got {tile_k}")
+
+    os.environ.setdefault("FLIR_A8W4SMOOTH_QPARAM_FORMAT", "packed4")
+    os.environ.setdefault("FLIR_A8W4SMOOTH_INTERLEAVE_K64", "1")
+
+    device = torch.device("cuda")
+    torch.manual_seed(int(seed))
+
+    # Routing
+    gating = torch.randn(tokens, experts, device=device, dtype=torch.float32)
+    topk_weights, topk_ids = torch.topk(torch.softmax(gating, dim=-1), k=int(topk), dim=-1)
+    topk_weights = topk_weights.to(torch.float32).contiguous()
+    topk_ids = topk_ids.to(torch.int32).contiguous()
+
+    routing = build_routing_buffers(
+        topk_ids=topk_ids,
+        topk_weights=topk_weights,
+        experts=int(experts),
+        model_dim=int(model_dim),
+        tile_m=int(tile_m),
+        moe_sort_mode=moe_sort_mode,
+    )
+    sorted_token_ids, sorted_weights, sorted_expert_ids, num_valid_ids, sorted_size, blocks = routing
+
+    # A2 (stage2 input): per-(t,slot) int8 with scale_x. Build directly from random fp32.
+    a2_fp32 = torch.randn(tokens, topk, inter_dim, device=device, dtype=torch.float32)
+    a2_q, a2_scale = pertoken_quant(a2_fp32, quant_dtype=torch.int8)
+    a2_q_flat = a2_q.view(tokens * topk, inter_dim).contiguous()
+    a2_scale_1d = a2_scale.view(-1).contiguous()
+
+    # Stage2 weights (a8w4smooth packed4): rows_per_expert = model_dim, K = inter_dim.
+    rows_per_expert = model_dim
+    (
+        w_packed_i8,
+        qscale_u8,
+        qzero_u8,
+        qscale_i32,
+        qzero_i32,
+        w_i8_unshuffled_flat,
+    ) = build_a8w4smooth_moe_weight(
+        experts=int(experts),
+        rows_per_expert=int(rows_per_expert),
+        K=int(inter_dim),
+        device=device,
+        seed=int(seed) + 22,
+        interleave_k64=True,
+    )
+
+    w_kernel = w_packed_i8.view(-1).contiguous()
+    qs_1d = qscale_i32.view(-1).contiguous()
+    qz_1d = qzero_i32.view(-1).contiguous()
+    sw_1d = sorted_weights.contiguous().view(-1)
+    # scale_w (per-row f32) is applied by the kernel; use 1e-3 constant matching FlyDSL.
+    scale_w_1d = torch.full((experts * rows_per_expert,), 1e-3, device=device, dtype=torch.float32)
+    scale_w_ref = scale_w_1d.view(experts, model_dim, 1)
+
+    out = torch.zeros((tokens, model_dim), device=device, dtype=torch.float16)
+    out_perf = torch.zeros_like(out)
+
+    exe = compile_moe_gemm2(
+        model_dim=int(model_dim),
+        inter_dim=int(inter_dim),
+        experts=int(experts),
+        topk=int(topk),
+        in_dtype="a8w4smooth",
+        tile_m=int(tile_m),
+        tile_n=int(tile_n),
+        tile_k=int(tile_k),
+        doweight_stage2=True,
+        out_dtype="f16",
+    )
+
+    def _args(o, x, w, sx, sw, qs, qz, st, eids, sw_sorted):
+        return (o, x, w, sx, sw, qs, qz, st, eids, sw_sorted,
+                num_valid_ids, tokens, model_dim, inter_dim, int(blocks),
+                torch.cuda.current_stream())
+
+    compiled_exe = flyc.compile(exe, *_args(out_perf, a2_q_flat, w_kernel, a2_scale_1d, scale_w_1d,
+                                              qs_1d, qz_1d,
+                                              sorted_token_ids, sorted_expert_ids, sw_1d))
+
+    def launch(o, x, w, sx, sw, qs, qz, st, eids, sw_sorted):
+        compiled_exe(*_args(o, x, w, sx, sw, qs, qz, st, eids, sw_sorted))
+
+    _, us = run_perftest(
+        launch, out_perf, a2_q_flat, w_kernel, a2_scale_1d, scale_w_1d, qs_1d, qz_1d,
+        sorted_token_ids, sorted_expert_ids, sw_1d,
+        num_iters=int(num_iters), num_warmup=int(num_warmup),
+    )
+    torch.cuda.synchronize()
+
+    # Correctness run into a clean buffer (stage2 atomic-adds).
+    out.zero_()
+    launch(out, a2_q_flat, w_kernel, a2_scale_1d, scale_w_1d, qs_1d, qz_1d,
+           sorted_token_ids, sorted_expert_ids, sw_1d)
+    torch.cuda.synchronize()
+
+    if not bool(skip_ref):
+        # Reference: dequanted weight is w_i8_unshuffled_flat; scale_w applied by ref.
+        w_ref = w_i8_unshuffled_flat.view(experts, model_dim, inter_dim).to(torch.float32)
+        ref2 = torch_moe_gemm2(
+            a2_q,                       # [tokens, topk, inter_dim] int8
+            w_ref,
+            a2_scale,                   # [tokens, topk, 1]
+            scale_w_ref,                # [experts, model_dim, 1]
+            topk_ids.to(torch.int64),
+            topk_weights,
+            model_dim=model_dim,
+            doweight_stage2=True,
+        )
+        diff = (out.to(torch.float32) - ref2)
+        print(f"[DEBUG a8w4smooth stage2] out shape={out.shape}, ref shape={ref2.shape}")
+        print(f"[DEBUG a8w4smooth stage2] out[0,:16]={[f'{v:.4f}' for v in out[0,:16].tolist()]}")
+        print(f"[DEBUG a8w4smooth stage2] ref[0,:16]={[f'{v:.4f}' for v in ref2[0,:16].tolist()]}")
+        print(f"[DEBUG a8w4smooth stage2] diff[0,:16]={[f'{v:.4f}' for v in diff[0,:16].tolist()]}")
+        assert verify_output(out.to(torch.float32), ref2, rtol=0.5, atol=0.5)
+
+    flops = 2 * tokens * topk * model_dim * inter_dim
+    tflops = flops / (us / 1e6) / 1e12
+    print(
+        f"FLIR MoE stage2[a8w4smooth]: tokens={tokens} M={model_dim} N={inter_dim} "
+        f"E={experts} topk={topk} tile=({tile_m},{tile_n},{tile_k}) "
+        f"=> {us:.1f}us ({tflops:.1f} TFLOPS)"
+    )
+    return out
+
+
+@pytest.mark.parametrize("in_dtype", ["a8w4smooth"])
+@pytest.mark.parametrize("tile_k", [256])
+def test_moe_gemm2_a8w4smooth(in_dtype, tile_k):
+    run_moe_stage2_a8w4smooth(
+        tokens=256, model_dim=1024, inter_dim=256, experts=4, topk=2,
+        tile_m=32, tile_n=64, tile_k=int(tile_k),
+        num_iters=3, num_warmup=1, skip_ref=False,
+    )
+
+
 if __name__ == "__main__":
     torch.set_default_device("cuda")
     # CLI (mirrors key knobs from aiter/op_tests/test_moe_2stage.py, stage1 subset)
