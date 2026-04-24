@@ -23,7 +23,13 @@ from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.env import runtime as flydsl_runtime_env
 from flydsl._mlir import ir
 from flydsl.compiler.kernel_function import CompilationContext
-from flydsl._mlir.dialects import arith as _mlir_arith, scf
+from flydsl._mlir.dialects import (
+    arith as _mlir_arith,
+    fly as _mlir_fly,
+    llvm as _mlir_llvm,
+    rocdl as _mlir_rocdl,
+    scf,
+)
 
 # ── Kernel geometry constants ────────────────────────────────────────
 QUERY_GROUP_SIZE = 16
@@ -125,6 +131,72 @@ def _pack_i32_pair_to_i64(a_i32, b_i32):
     v = vector.from_elements(T.vec(2, T.i32), [a_i32, b_i32])
     v1 = vector.bitcast(T.vec(1, T.i64), v)
     return vector.extract(v1, static_position=[0])
+
+
+def _widen_nonnegative_i32_to_i64(value):
+    value = arith.unwrap(value)
+    if value.type == T.i64:
+        return value
+    return _mlir_arith.ExtUIOp(T.i64, value).result
+
+
+def _compute_block_base_dw(phys_block, block_stride, head_offset):
+    # Keep the final per-load offset in signed i32 range by chunking the buffer
+    # resource base, while still computing the block base in i64 first.
+    base_elem_i64 = (
+        _widen_nonnegative_i32_to_i64(phys_block)
+        * _widen_nonnegative_i32_to_i64(block_stride)
+        + _widen_nonnegative_i32_to_i64(head_offset)
+    )
+    base_dw_i64 = base_elem_i64 // arith.constant(4, type=T.i64)
+    return _mlir_arith.TruncIOp(T.i32, base_dw_i64).result
+
+
+def _make_shifted_buffer_resource(memref_val, byte_offset_i64, num_records_bytes_i64):
+    raw_memref = buffer_ops._unwrap_value(memref_val)
+    llvm_ptr_ty = ir.Type.parse("!llvm.ptr")
+    rsrc_ty = ir.Type.parse("!llvm.ptr<8>")
+    base_ptr = _mlir_fly.extract_aligned_pointer_as_index(llvm_ptr_ty, raw_memref)
+    base_i64 = _mlir_llvm.PtrToIntOp(T.i64, base_ptr).result
+    shifted_i64 = _mlir_llvm.AddOp(
+        base_i64,
+        arith.unwrap(byte_offset_i64),
+        _mlir_llvm.IntegerOverflowFlags(0),
+    ).result
+    shifted_ptr = _mlir_llvm.IntToPtrOp(llvm_ptr_ty, shifted_i64).result
+    stride_val = arith.constant(0, type=T.i16)
+    flags_val = arith.constant(buffer_ops._get_buffer_flags(), type=T.i32)
+    return _mlir_rocdl.MakeBufferRsrcOp(
+        rsrc_ty,
+        shifted_ptr,
+        stride_val,
+        arith.unwrap(num_records_bytes_i64),
+        flags_val,
+    ).result
+
+
+def _chunk_buffer_resource_for_block(memref_val, phys_block, block_stride):
+    # `buffer_load` multiplies the i32 logical offset by element bytes before
+    # issuing the raw buffer instruction, so each descriptor window must stay
+    # within signed-i32 byte reach.
+    max_chunk_bytes_i64 = arith.constant(0x7FFF0000, type=T.i64)
+    one_i64 = arith.constant(1, type=T.i64)
+    phys_block_i64 = _widen_nonnegative_i32_to_i64(phys_block)
+    block_stride_i64 = _widen_nonnegative_i32_to_i64(block_stride)
+    chunk_blocks_i64 = arith.select(
+        block_stride_i64 < max_chunk_bytes_i64,
+        max_chunk_bytes_i64 // block_stride_i64,
+        one_i64,
+    )
+    chunk_span_bytes_i64 = chunk_blocks_i64 * block_stride_i64
+    chunk_idx_i64 = phys_block_i64 // chunk_blocks_i64
+    local_phys_block_i64 = phys_block_i64 % chunk_blocks_i64
+    chunk_byte_offset_i64 = chunk_idx_i64 * chunk_span_bytes_i64
+    rsrc = _make_shifted_buffer_resource(
+        memref_val, chunk_byte_offset_i64, chunk_span_bytes_i64
+    )
+    local_phys_block_i32 = _mlir_arith.TruncIOp(T.i32, local_phys_block_i64).result
+    return rsrc, local_phys_block_i32
 
 
 def _load_q_words(q_rsrc, q_base_elem, lane16id, *, query_packed_fp8, query_load_is_bf16):
@@ -382,23 +454,55 @@ def _load_q_fragments(
     query_load_is_bf16,
     compute_query_scale_in_kernel=False,
 ):
-    offset1 = lane16id // arith.constant(4, type=T.i32)
+    # LDS Q layout (compact, per-qhead contiguous):
+    #   Q[head=h][hd=d]  at byte offset  h * HEAD_SIZE + d   (FP8 after conversion)
+    # Total Q footprint = 16 qheads * 128 B = 2048 B, aliased with the later P
+    # writes via `logits_lds_i32 / logits_lds_i64` (same base).
+    #
+    # Writer: thread (warp_id W, rowid R', lane16id L') owns qhead = W*4 + R' =
+    # `local_qhead_idx`, and within that qhead owns the 8 FP8 elements at
+    # head_dim [L'*8 .. L'*8+7].  We therefore write 2 i32 words (= 1 i64 = 8 B)
+    # at `local_qhead_idx * 128 + lane16id * 8`.
+    #
+    # Reader: MFMA lane layout for mfma_f32_16x16x32_fp8_fp8 (B = Q^T, N = qhead,
+    # K = head_dim) — reverse-engineered from `_load_k_flat`: thread (rowid R,
+    # lane16id L) consumes, for k_step = qkhe*2 + qkr,
+    #   Q[head = L][hd = (qkhe*4 + R) * 16 + qkr * 8 + 0..7]
+    # i.e. the read byte offset is `L * 128 + qkhe*64 + R*16 + qkr*8`.
+    #
+    # This replaces the previous swizzled layout
+    #   write: (lane16id//4)*2048 + (lane16id%4)*512 + local_qhead_idx*32
+    #   read : qkhe*2048 + rowid*512 + lane16id*32 + qkr*8
+    # which implicitly required every lane to load 16 elements of Q and therefore
+    # read `lane16id*16` elements past `q_base`.  For bf16/f16 (2 B/elem) lane16id
+    # ∈ {8..15} crossed the qhead boundary and faulted once the query tensor
+    # ended mid-block.
     lds_q_base = (
-        offset1 * arith.constant(2048, type=T.i32)
-        + lane4id * arith.constant(512, type=T.i32)
-        + local_qhead_idx * arith.constant(32, type=T.i32)
+        local_qhead_idx * arith.constant(HEAD_SIZE, type=T.i32)
+        + lane16id * arith.constant(8, type=T.i32)
     )
     query_scale_lane = None
     if query_packed_fp8 or not compute_query_scale_in_kernel:
-        q_w0, q_w1, q_w2, q_w3 = _load_q_words(
+        # NB: _load_q_words() is unreachable under compile_pswa_decode_sw today
+        # (that entry point rejects packed_fp8 and always forces
+        # compute_query_scale_in_kernel=True).  Keep the call site intact for
+        # any out-of-tree callers but only consume the first two i32 words so
+        # the per-lane footprint matches the new 8-B LDS slot.
+        q_words = _load_q_words(
             q_rsrc,
             q_base,
             lane16id,
             query_packed_fp8=query_packed_fp8,
             query_load_is_bf16=query_load_is_bf16,
         )
+        q_w0, q_w1 = q_words[0], q_words[1]
     else:
-        q_elem = q_base + lane16id * arith.constant(FP8_ELEMS_16B, type=T.i32)
+        # bf16/f16 + in-kernel query_scale path.  Each lane owns 8 Q elements,
+        # loaded as 2 × vec_width=4 buffer loads (4 bf16/f16 elems per load = 8 B,
+        # element offset += 4 per iter).  After FP8 packing each load produces
+        # one i32 word, so the per-lane store is `vec<2, i32>` = 8 B = 1 i64.
+        q_elem = q_base + lane16id * arith.constant(8, type=T.i32)
+        
         i32_vec_ty = T.i32x4
         abs_mask = arith.constant_vector(0x7FFFFFFF, i32_vec_ty)
         c_zero_f = arith.constant(0.0, type=T.f32)
@@ -407,7 +511,7 @@ def _load_q_fragments(
         c_wave16 = arith.constant(16, type=T.i32)
         q_f32_chunks = []
         local_max = c_zero_f
-        for qwi in range_constexpr(4):
+        for qwi in range_constexpr(2):
             q_src = buffer_ops.buffer_load(
                 q_rsrc,
                 q_elem + arith.constant(qwi * 4, type=T.i32),
@@ -454,7 +558,7 @@ def _load_q_fragments(
                 T.i32, p0, p1, arith.constant(0, type=T.i32), False
             )
             q_words.append(rocdl.cvt_pk_fp8_f32(T.i32, p2, p3, lo, True))
-        q_w0, q_w1, q_w2, q_w3 = q_words
+        q_w0, q_w1 = q_words
 
         scale_store_if = scf.IfOp(
             arith.unwrap(lane16id == arith.constant(0, type=T.i32)), has_else=False
@@ -466,14 +570,8 @@ def _load_q_fragments(
                 [arith.index_cast(T.index, local_qhead_idx)],
             )
     v01 = vector.from_elements(T.vec(2, T.i32), [q_w0, q_w1])
-    v23 = vector.from_elements(T.vec(2, T.i32), [q_w2, q_w3])
     lds_q_i32 = lds_q_base // arith.constant(4, type=T.i32)
     vector.store(v01, logits_lds_i32, [arith.index_cast(T.index, lds_q_i32)])
-    vector.store(
-        v23,
-        logits_lds_i32,
-        [arith.index_cast(T.index, lds_q_i32 + arith.constant(2, type=T.i32))],
-    )
 
     q_frags = []
     gpu.barrier()
@@ -486,12 +584,15 @@ def _load_q_fragments(
             ),
             static_position=[0],
         )
+    c_head_size = arith.constant(HEAD_SIZE, type=T.i32)
     for qkhe in range_constexpr(QKHELOOP):
         for qkr in range_constexpr(2):
+            # See layout comment above. Byte offset:
+            #   lane16id * HEAD_SIZE + qkhe*64 + rowid*16 + qkr*8
             lds_rd_byte = (
-                arith.constant(qkhe * 2048, type=T.i32)
-                + rowid * arith.constant(512, type=T.i32)
-                + lane16id * arith.constant(32, type=T.i32)
+                lane16id * c_head_size
+                + arith.constant(qkhe * 64, type=T.i32)
+                + rowid * arith.constant(16, type=T.i32)
                 + arith.constant(qkr * 8, type=T.i32)
             )
             lds_rd_base = lds_rd_byte // arith.constant(8, type=T.i32)
@@ -622,6 +723,7 @@ def _make_pa_phase_helpers(
     def _qk_and_intra_softmax(
         k_ops,
         partition_start,
+        v_rsrc_cur,
         v_block_base_dw,
         tile_token_offset_i32,
         q_frags,
@@ -653,7 +755,7 @@ def _make_pa_phase_helpers(
                         + v_token_in_block // c_four
                     )
                 v_4xi32 = buffer_ops.buffer_load(
-                    v_rsrc, va_dw, vec_width=4, dtype=T.i32
+                    v_rsrc_cur, va_dw, vec_width=4, dtype=T.i32
                 )
                 vhe_data.append(v_4xi32)
             v_results.append(vhe_data)
@@ -989,6 +1091,7 @@ def _make_pa_phase_helpers(
 
     def _prepare_block_split_pair(
         k_ops,
+        v_rsrc_cur,
         v_block_base_dw,
         tile_token_offset_i32,
         q_frags_0,
@@ -1077,7 +1180,7 @@ def _make_pa_phase_helpers(
             for k_step in range_constexpr(QKHELOOP * 2):
                 if k_step % 2 == 0:
                     v_4xi32 = buffer_ops.buffer_load(
-                        v_rsrc, va_dws[td][k_step // 2], vec_width=4, dtype=T.i32
+                        v_rsrc_cur, va_dws[td][k_step // 2], vec_width=4, dtype=T.i32
                     )
                     vhe_data.append(v_4xi32)
                 acc_0 = rocdl.mfma_f32_16x16x32_fp8_fp8(
@@ -1592,13 +1695,17 @@ def compile_pa_decode_ps(
                 return state[0], state[1], state[2], state[3], list(state[4:4 + _N_K])
 
             def _process_block_split(phys_block, block_idx_in_work, rmax, rsum, o0, o1,
-                                     tile_token_offset_i32, k_ops, next_k_base=None):
+                                     tile_token_offset_i32, k_ops, next_k_rsrc=None, next_k_base=None):
                 """Process one 256-token block split inside a 1024-token KV page."""
                 partition_start = kv_start_abs_tok + block_idx_in_work * c_bs + tile_token_offset_i32
-                v_base = (phys_block * c_vb + _v_head_off) // c_four
+                v_block_rsrc, v_local_phys_block = _chunk_buffer_resource_for_block(
+                    value_cache_ptr, phys_block, c_vb
+                )
+                v_base = _compute_block_base_dw(v_local_phys_block, c_vb, _v_head_off)
                 d_out, v_ops, v_scales = _qk_and_intra_softmax(
                     k_ops,
                     partition_start,
+                    v_block_rsrc,
                     v_base,
                     tile_token_offset_i32,
                     q_frags,
@@ -1611,9 +1718,9 @@ def compile_pa_decode_ps(
                 rmax, rsum, o0, o1, v_correction = _cross_warp_softmax_and_prob_pack(
                     d_out, rmax, rsum, o0, o1, v_scales
                 )
-                if next_k_base is not None:
+                if next_k_rsrc is not None and next_k_base is not None:
                     k_next_flat = _load_k_flat(
-                        k_rsrc,
+                        next_k_rsrc,
                         next_k_base,
                         tile_token_offset_i32,
                         _k_tok_thread_base,
@@ -1684,9 +1791,14 @@ def compile_pa_decode_ps(
                 )
 
                 # ── K init: load this CTA's 256-token block split for the first block ──
-                first_k_base = (first_phys_block * c_kb + _k_head_off) // c_four
+                first_k_rsrc, first_k_local_phys_block = _chunk_buffer_resource_for_block(
+                    key_cache_ptr, first_phys_block, c_kb
+                )
+                first_k_base = _compute_block_base_dw(
+                    first_k_local_phys_block, c_kb, _k_head_off
+                )
                 k_flat = _load_k_flat(
-                    k_rsrc,
+                    first_k_rsrc,
                     first_k_base,
                     tile_token_offset,
                     _k_tok_thread_base,
@@ -1713,7 +1825,12 @@ def compile_pa_decode_ps(
                         next_idx_raw < num_blocks_in_work, next_idx_raw, last_block_idx_val)
                     next_phys_block = buffer_ops.buffer_load(kpi_rsrc,
                         kv_start + next_idx_clamped, vec_width=1, dtype=T.i32)
-                    next_k_base = (next_phys_block * c_kb + _k_head_off) // c_four
+                    next_k_rsrc, next_k_local_phys_block = _chunk_buffer_resource_for_block(
+                        key_cache_ptr, next_phys_block, c_kb
+                    )
+                    next_k_base = _compute_block_base_dw(
+                        next_k_local_phys_block, c_kb, _k_head_off
+                    )
 
                     k_ops = _unflatten_k(k_flat)
 
@@ -1726,6 +1843,7 @@ def compile_pa_decode_ps(
                         out1,
                         tile_token_offset,
                         k_ops,
+                        next_k_rsrc=next_k_rsrc,
                         next_k_base=next_k_base,
                     )
 
@@ -2841,10 +2959,14 @@ def compile_pa_decode_sw(
             seq_start,
         ):
             """Process one 256-token tile inside the selected physical block."""
-            v_base = (phys_block * c_vb + _v_head_off) // c_four
+            v_block_rsrc, v_local_phys_block = _chunk_buffer_resource_for_block(
+                value_cache_ptr, phys_block, c_vb
+            )
+            v_base = _compute_block_base_dw(v_local_phys_block, c_vb, _v_head_off)
             d_out_0, v0_ops, vs0 = _qk_and_intra_softmax(
                 k_ops,
                 kv_seq_start,
+                v_block_rsrc,
                 v_base,
                 tile_token_offset_i32,
                 q_frags,
@@ -2879,9 +3001,13 @@ def compile_pa_decode_sw(
             seq_start_0,
             seq_start_1,
         ):
-            v_base = (phys_block * c_vb + _v_head_off) // c_four
+            v_block_rsrc, v_local_phys_block = _chunk_buffer_resource_for_block(
+                value_cache_ptr, phys_block, c_vb
+            )
+            v_base = _compute_block_base_dw(v_local_phys_block, c_vb, _v_head_off)
             d_out_0, d_out_1, v0_ops, vs0 = _prepare_block_split_pair(
                 k_ops,
+                v_block_rsrc,
                 v_base,
                 tile_token_offset_i32,
                 q_frags_0,
@@ -2999,9 +3125,12 @@ def compile_pa_decode_sw(
                 )
 
                 # ── Load K for the single block ──
-                k_base = (phys_block * c_kb + _k_head_off) // c_four
+                k_block_rsrc, k_local_phys_block = _chunk_buffer_resource_for_block(
+                    key_cache_ptr, phys_block, c_kb
+                )
+                k_base = _compute_block_base_dw(k_local_phys_block, c_kb, _k_head_off)
                 k0_flat = _load_k_flat(
-                    k_rsrc,
+                    k_block_rsrc,
                     k_base,
                     tile_token_offset,
                     _k_tok_thread_base,
