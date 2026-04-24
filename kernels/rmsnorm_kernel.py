@@ -32,6 +32,7 @@ import math
 from kernels.kernels_common import dtype_to_elem_type, get_warp_size
 
 WARP_SIZE = get_warp_size()
+BLOCK_THREADS = 256
 DEFAULT_VEC_WIDTH = 8
 F32_VEC_WIDTH = 4
 
