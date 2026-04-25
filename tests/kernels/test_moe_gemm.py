@@ -1538,13 +1538,22 @@ def run_moe_stage2(
         def launch(o, x, w, sx, sw, qs, qz, st, eids, sw_sorted):
             if is_reduce_exe:
                 stream = torch.cuda.current_stream()
-                valid_mask = None
+                topk_ids_arg = None
+                expert_mask_arg = None
                 if bool(use_valid_mask):
-                    valid_mask = get_topk_valid_mask(topk_ids, expert_mask=None).contiguous()
+                    # Pass raw topk_ids + a synthetic all-ones expert_mask so the
+                    # kernel-side `expert_mask[topk_ids[t,k]] != 0` lookup matches
+                    # the prior `get_topk_valid_mask(topk_ids, expert_mask=None)`
+                    # behavior (every expert id is valid).
+                    topk_ids_arg = topk_ids.contiguous().to(torch.int32)
+                    n_experts_local = int(topk_ids.max().item()) + 1 if topk_ids.numel() > 0 else 1
+                    expert_mask_arg = torch.ones(
+                        (n_experts_local,), device=o.device, dtype=torch.int32
+                    )
                 exe(
                     o, x, w, sx, sw, qs, qz, st, eids, sw_sorted,
                     num_valid_ids, tokens, model_dim, inter_dim, int(blocks),
-                    valid_mask, stream,
+                    topk_ids=topk_ids_arg, expert_mask=expert_mask_arg, stream_ptr=stream,
                 )
             else:
                 if hasattr(flyc, 'compile'):

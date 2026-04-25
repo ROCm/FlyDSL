@@ -3225,11 +3225,12 @@ def compile_moe_reduction(
     """Compile a reduction kernel that sums over the topk dimension.
 
     Input:  X [tokens, topk, model_dim]
-            valid_mask [tokens, topk] (optional, if use_mask=True)
+            topk_ids [tokens, topk] i32 (optional, if use_mask=True)
+            expert_mask [total_experts] i32 (optional, if use_mask=True)
     Output: Y [tokens, model_dim]
 
     This kernel performs: Y[t, d] = sum(X[t, :, d]) for all t, d.
-    When use_mask=True, only sums slots where valid_mask[t,k]=1.
+    When use_mask=True, only sums slots where expert_mask[topk_ids[t, k]] != 0.
     Used in conjunction with compile_moe_gemm2(accumulate=False) to avoid atomic contention.
     """
     gpu_arch = get_hip_arch()
@@ -3264,13 +3265,14 @@ def compile_moe_reduction(
         def moe_reduction_kernel(
             X: fx.Tensor,
             Y: fx.Tensor,
-            valid_mask: fx.Tensor,
+            topk_ids: fx.Tensor,
+            expert_mask: fx.Tensor,
             i32_m_tokens: fx.Int32,
         ):
             m_tokens = fx.Index(i32_m_tokens)
             c_topk = fx.Index(topk)
             c_model_dim = fx.Index(model_dim)
-            mask_nbytes_idx = m_tokens * c_topk
+            topk_ids_nbytes_idx = m_tokens * c_topk * fx.Index(4)
             elem_bits = 32 if dtype_str == "f32" else 16
             copy_vec_width = 128 // elem_bits  # 8 for f16/bf16, 4 for f32
             n_sub = VEC_WIDTH // copy_vec_width  # 1 for f16/bf16, 2 for f32
@@ -3280,8 +3282,11 @@ def compile_moe_reduction(
             # Scalar buffer resources for tail path and mask
             x_rsrc = buffer_ops.create_buffer_resource(X, max_size=True)
             y_rsrc = buffer_ops.create_buffer_resource(Y, max_size=True)
-            mask_rsrc = buffer_ops.create_buffer_resource(
-                valid_mask, max_size=False, num_records_bytes=mask_nbytes_idx
+            topk_ids_rsrc = buffer_ops.create_buffer_resource(
+                topk_ids, max_size=False, num_records_bytes=topk_ids_nbytes_idx
+            )
+            expert_mask_rsrc = buffer_ops.create_buffer_resource(
+                expert_mask, max_size=True
             )
 
             token_idx = gpu.block_id("x")
@@ -3335,8 +3340,13 @@ def compile_moe_reduction(
 
                             if use_mask:
                                 m_idx_i32 = fx.Int32(token_idx * c_topk + fx.Index(k))
-                                mv = buffer_ops.buffer_load(mask_rsrc, m_idx_i32, vec_width=1, dtype=i8_type())
-                                mv_ok = mv != fx.Int8(0)
+                                expert_i32 = buffer_ops.buffer_load(
+                                    topk_ids_rsrc, m_idx_i32, vec_width=1, dtype=i32_type()
+                                )
+                                mv = buffer_ops.buffer_load(
+                                    expert_mask_rsrc, expert_i32, vec_width=1, dtype=i32_type()
+                                )
+                                mv_ok = mv != fx.Int32(0)
 
                             if n_sub > 1:
                                 x_inner = fx.logical_divide(x_thread, fx.make_layout(copy_vec_width, 1))
@@ -3394,10 +3404,13 @@ def compile_moe_reduction(
                                     x_idx_i32 = fx.Int32((token_base + k_idx) * c_model_dim + col)
                                     if use_mask:
                                         m_idx_i32 = fx.Int32(token_base + k_idx)
-                                        mv = buffer_ops.buffer_load(
-                                            mask_rsrc, m_idx_i32, vec_width=1, dtype=i8_type()
+                                        expert_i32 = buffer_ops.buffer_load(
+                                            topk_ids_rsrc, m_idx_i32, vec_width=1, dtype=i32_type()
                                         )
-                                        v = (mv != fx.Int8(0)).select(
+                                        mv = buffer_ops.buffer_load(
+                                            expert_mask_rsrc, expert_i32, vec_width=1, dtype=i32_type()
+                                        )
+                                        v = (mv != fx.Int32(0)).select(
                                             buffer_ops.buffer_load(x_rsrc, x_idx_i32, vec_width=1, dtype=elem_type()),
                                             arith.constant(0.0, type=elem_type()),
                                         )
@@ -3423,12 +3436,13 @@ def compile_moe_reduction(
     def launch_moe_reduction(
         X: fx.Tensor,
         Y: fx.Tensor,
-        valid_mask: fx.Tensor,
+        topk_ids: fx.Tensor,
+        expert_mask: fx.Tensor,
         i32_m_tokens: fx.Int32,
         stream: fx.Stream,
     ):
         gx = fx.Index(i32_m_tokens)
-        moe_reduction_kernel(X, Y, valid_mask, i32_m_tokens).launch(
+        moe_reduction_kernel(X, Y, topk_ids, expert_mask, i32_m_tokens).launch(
             grid=(gx, gy_static, 1),
             block=(BLOCK_SIZE, 1, 1),
             stream=stream,
@@ -3499,40 +3513,60 @@ class _MoeGemm2ReduceWrapper:
         n_in,
         k_in,
         size_expert_ids_in,
+        intermediate = None,
         valid_mask = None,
-        stream = None,
+        topk_ids = None,
+        expert_mask = None,
+        stream_ptr = None,
     ):
         """Execute GEMM2 + reduce.
 
         Args match moe_gemm2 kernel signature (see compile_moe_gemm2).
+        For masked reduction, pass `topk_ids` ([tokens, topk] int32) and
+        `expert_mask` ([total_experts] int32); the kernel fuses the
+        `expert_mask[topk_ids]` lookup inline.
         """
         import torch
-        if stream is None:
-            stream = torch.cuda.current_stream()
-        intermediate = torch.empty(
-                tokens_in * self._topk, self._model_dim,
-                device=arg_out.device,
-                dtype=self._get_torch_dtype()
-            )
+        if stream_ptr is None:
+            stream_ptr = torch.cuda.current_stream()
+        if intermediate is None:
+            intermediate = torch.empty(
+                    tokens_in * self._topk, self._model_dim,
+                    device=arg_out.device,
+                    dtype=self._get_torch_dtype()
+                )
         if self._zero_intermediate and not self._use_mask:
             intermediate.zero_()
         # Phase 1: GEMM2 (no atomics) -> [tokens*topk, model_dim]
         self._gemm2_exe(
             intermediate.view(-1),
-            arg_x, arg_w, arg_scale_x, arg_scale_w, arg_qscale_w, arg_qzero_w,
+            arg_x, arg_w, arg_scale_x, arg_scale_w,
+            arg_qscale_w, arg_qzero_w,
             arg_sorted_token_ids, arg_expert_ids, arg_sorted_weights,
             arg_num_valid_ids, tokens_in, n_in, k_in, size_expert_ids_in,
-            stream,
+            stream_ptr,
         )
         # Phase 2: Reduce over topk -> [tokens, model_dim]
         X = intermediate.view(tokens_in, self._topk, self._model_dim)
         Y = arg_out.view(tokens_in, self._model_dim)
-        if not self._use_mask:
+        if self._use_mask:
+            if topk_ids is None or expert_mask is None:
+                if valid_mask is None:
+                    raise ValueError(
+                        "Masked reduction requires topk_ids and expert_mask"
+                    )
+                # Backward-compatible fallback for older callers that still provide
+                # a precomputed valid_mask instead of topk_ids/expert_mask.
+                Y.copy_(torch.sum(X * valid_mask.view(tokens_in, self._topk, 1).to(dtype=X.dtype), dim=1))
+                return
+            topk_ids = topk_ids.contiguous()
+            expert_mask = expert_mask.contiguous()
+        else:
             if valid_mask is not None:
                 logging.warning("valid_mask provided but use_mask=False; ignoring valid_mask")
-            valid_mask = torch.empty(
-                (0, self._topk), device=arg_out.device, dtype=torch.uint8)
-        self._reduce_exe(X, Y, valid_mask, tokens_in, stream)
+            topk_ids = torch.empty((0, self._topk), device=arg_out.device, dtype=torch.int32)
+            expert_mask = torch.empty((0,), device=arg_out.device, dtype=torch.int32)
+        self._reduce_exe(X, Y, topk_ids, expert_mask, tokens_in, stream_ptr)
 
     @property
     def mode(self) -> str:
