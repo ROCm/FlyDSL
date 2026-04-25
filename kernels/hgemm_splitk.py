@@ -120,9 +120,8 @@ def compile_hgemm_kernel(
 ):
     assert BLOCK_M_WARPS * BLOCK_N_WARPS <= 4
     assert TILE_M * TILE_N * TILE_K <= 256 * 256 * 64
-    if (TILE_M >= 256) or (TILE_N >= 256):
-        assert TILE_M == 256 and TILE_N == 256 and TILE_K == 64
-        assert SPLIT_K == 1
+    if (TILE_M == 256) and (TILE_N == 256):
+        assert (TILE_K == 64) and (SPLIT_K == 1)
     N_BLOCKS = n // TILE_N
     assert (N_BLOCKS >= 1) and (n % TILE_N == 0)
     IS_SPLIT_K = SPLIT_K > 1
