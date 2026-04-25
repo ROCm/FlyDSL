@@ -409,8 +409,9 @@ def Fly_TiledMmaPartitionShapeOp : Fly_Op<"tiled_mma.partition_shape", [Pure, De
   let results = (outs Fly_IntTuple:$result);
 }
 def Fly_MmaMakeFragmentOp : Fly_Op<"mma.make_fragment", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
-  let arguments = (ins Fly_MmaOperandAttr:$operand_id, Fly_TiledMma:$tiled_mma, Fly_MemRef:$input);
+  let arguments = (ins Fly_MmaOperandAttr:$operand_id, Fly_TiledMma:$tiled_mma, Fly_MemRef:$input, OptionalAttr<I32Attr>:$stages);
   let results = (outs Fly_MemRef:$result);
+  let assemblyFormat = "`(` $operand_id `,` $tiled_mma `,` $input (`,` `stages` `=` $stages^)? `)` attr-dict `:` functional-type(operands, results)";
 }
 
 def Fly_CopyOp : Fly_Op<"copy"> {

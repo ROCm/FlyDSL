@@ -62,12 +62,7 @@ def gemm_kernel(
     copy_frag_A = fx.make_fragment_like(thr_sA[None, None, None, 0])  # (VA, VM, VN)
 
     mma_frag_A = thr_mma.make_fragment_A(sA[None, None, 0])  # (VA, VM, VN)
-    mma_frag_B = fx.make_fragment_like(
-        fx.flat_product(
-            fx.make_fragment_layout_like(thr_mma.partition_B(gB_k).layout(None, None, None, 0)), fx.make_layout(2, 1)
-        ),
-        fx.Float16,
-    )  # (VB, VM, VK, 2)
+    mma_frag_B = thr_mma.make_fragment_B(gB_k, stages=2)  # (VB, VM, VK, 2)
     mma_frag_C = thr_mma.make_fragment_C(gC)  # (VC, VM, VN)
 
     mma_frag_A_retile = thr_copy_s2r_A.retile(mma_frag_A)
@@ -79,7 +74,7 @@ def gemm_kernel(
     def run_pipeline_stage(read_stage, next_k, read_next=True):
         write_stage = read_stage ^ 1
 
-        if read_next:
+        if fx.const_expr(read_next):
             next_k = fx.Int32(next_k)
             fx.copy(
                 buffer_copy_128b.set_value("soffset", next_k * gA_k_stride),
@@ -159,7 +154,7 @@ def gemm_kernel(
 
 
 @flyc.jit
-def tiledMma(
+def preshuffle_gemm(
     A: fx.Tensor,
     B: fx.Tensor,
     C: fx.Tensor,
@@ -194,10 +189,10 @@ C = torch.zeros(M, N, dtype=torch.float16).cuda()
 
 preshuffle_B = shuffle_weight(B, layout=(16, 16))
 
-tiledMma(A, preshuffle_B, C, stream=torch.cuda.Stream())
+preshuffle_gemm(A, preshuffle_B, C, stream=torch.cuda.current_stream())
 
 _, us = run_perftest(
-    lambda c, a, b: tiledMma(a, b, c, stream=torch.cuda.current_stream()),
+    lambda c, a, b: preshuffle_gemm(a, b, c, stream=torch.cuda.current_stream()),
     C,
     A,
     preshuffle_B,
@@ -208,9 +203,14 @@ print(f"[flyc] Throughput: {us:.1f} us, {tflops:.2f} TFLOPS")
 
 torch.cuda.synchronize()
 expected = (A @ B.T).to(torch.float32)
-is_correct = torch.allclose(C.to(torch.float32), expected, atol=1e-3, rtol=1e-3)
+actual = C.to(torch.float32)
+diff = (actual - expected).abs()
+tol = 1e-3 + 1e-3 * expected.abs()
+max_violation = (diff - tol).max().item()
+is_correct = max_violation <= 0
+
 print("Result correct:", is_correct)
 if not is_correct:
-    print("Max diff:", (C - expected).abs().max().item())
-    print("Expected", expected)
-    print("Got", C)
+    print("Max violation:", max_violation)
+    print("Expected:", expected)
+    print("Got:", C)

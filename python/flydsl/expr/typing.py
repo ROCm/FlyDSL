@@ -234,6 +234,7 @@ __all__ = [
     "T",
     "default_f8_type",
     # DSL value types
+    "Numeric",
     "Boolean",
     "Float",
     "BFloat16",
@@ -758,16 +759,16 @@ class TiledMma(BuiltinDslType):
         return self.get_slice(thr_idx)
 
     @traced_op
-    def make_fragment_A(self, a: Tensor, loc=None, ip=None):
-        return mma_make_fragment(MmaOperand.A, self, a, loc=loc, ip=ip)
+    def make_fragment_A(self, a: Tensor, *, stages=None, loc=None, ip=None):
+        return mma_make_fragment(MmaOperand.A, self, a, stages=stages, loc=loc, ip=ip)
 
     @traced_op
-    def make_fragment_B(self, b: Tensor, loc=None, ip=None):
-        return mma_make_fragment(MmaOperand.B, self, b, loc=loc, ip=ip)
+    def make_fragment_B(self, b: Tensor, *, stages=None, loc=None, ip=None):
+        return mma_make_fragment(MmaOperand.B, self, b, stages=stages, loc=loc, ip=ip)
 
     @traced_op
-    def make_fragment_C(self, c: Tensor, loc=None, ip=None):
-        return mma_make_fragment(MmaOperand.C, self, c, loc=loc, ip=ip)
+    def make_fragment_C(self, c: Tensor, *, stages=None, loc=None, ip=None):
+        return mma_make_fragment(MmaOperand.C, self, c, stages=stages, loc=loc, ip=ip)
 
 
 class Stream:
