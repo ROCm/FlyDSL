@@ -6,25 +6,22 @@ with TDM (Tensor Data Mover) hardware async copy for both A and B tiles.
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
+
 from flydsl._mlir import ir
 from flydsl.compiler.kernel_function import CompilationContext
-from flydsl.expr import arith, buffer_ops, const_expr, gpu, idx2crd, range_constexpr, rocdl, tdm_ops
+from flydsl.expr import arith, buffer_ops, gpu, range_constexpr, rocdl, tdm_ops, vector
 from flydsl.expr.arith import _to_raw as _raw
-from flydsl.expr.rocdl import cluster
 from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr, check_smem_capacity
+
+from flydsl.expr import idx2crd
 from kernels.gemm_common_gfx1250 import (
-    extract_lds_base_idx,
-    get_lds_memref,
+    extract_lds_base_idx, get_lds_memref,
     issue_tdm_loads,
-    lds_load_b128_raw,
-    lds_transpose_load_raw,
+    lds_load_b128_raw, lds_transpose_load_raw,
     pipeline_fence,
-    pipeline_fence_signal,
-    pipeline_fence_wait,
-    store_acc_vec8_to_buffer,
-    store_acc_vec8_to_lds,
+    store_acc_vec8_to_buffer, store_acc_vec8_to_lds,
 )
 from kernels.pipeline_utils import make_tail_plan, tdm_epilogue_fence_threshold_bytes
 
@@ -98,8 +95,7 @@ def compile_wmma_gemm_tdm(
     if use_cluster:
         if cluster_m * cluster_n > 16:
             raise ValueError(
-                f"cluster_m * cluster_n must be <= 16, got {cluster_m}*{cluster_n}={cluster_m * cluster_n}"
-            )
+                f"cluster_m * cluster_n must be <= 16, got {cluster_m}*{cluster_n}={cluster_m * cluster_n}")
         if cluster_m < 1 or cluster_n < 1:
             raise ValueError(f"cluster dims must be >= 1, got ({cluster_m}, {cluster_n})")
     effective_waves_per_eu = waves_per_eu
@@ -113,9 +109,11 @@ def compile_wmma_gemm_tdm(
     block_threads = num_warps * WAVE_SIZE
 
     if wave_specialized_tdm and num_warps < 2:
-        raise ValueError(f"wave_specialized_tdm requires at least 2 waves, got {num_warps}")
+        raise ValueError(
+            f"wave_specialized_tdm requires at least 2 waves, got {num_warps}")
 
     TDM_LOADS_PER_STEP = 1 if wave_specialized_tdm else 2
+    tdm_desc_num_warps = 1 if wave_specialized_tdm else num_warps
 
     if K % tile_k != 0:
         raise ValueError(f"K must be divisible by tile_k={tile_k}, got K={K}")
@@ -139,8 +137,7 @@ def compile_wmma_gemm_tdm(
     if num_k_tiles < num_buffers:
         raise ValueError(
             f"{num_buffers}-stage buffering requires num_k_tiles >= {num_buffers}, "
-            f"got {num_k_tiles} (K={K}, tile_k={tile_k})"
-        )
+            f"got {num_k_tiles} (K={K}, tile_k={tile_k})")
 
     gpu_arch = str(get_hip_arch())
     assert gpu_arch.startswith("gfx1250"), f"Expected gfx1250, got {gpu_arch}"
@@ -176,21 +173,24 @@ def compile_wmma_gemm_tdm(
     stage_bytes = _align_up(stage_layout.ptr, 128)
 
     # Compile-time pipeline parameters
-    pre_loaded = num_buffers - 1  # stages pre-loaded in prologue
+    pre_loaded = num_buffers - 1        # stages pre-loaded in prologue
     loop_iters = (num_k_tiles - pre_loaded) // num_buffers
     _tail_start = loop_iters * num_buffers  # index of first un-computed tile in tail
     extra = num_k_tiles - _tail_start - pre_loaded
     _base_tail_plan = _make_tail_plan(num_buffers, pre_loaded, extra)
     _last_compute_stage = _base_tail_plan[-1][1]
-    tail_plan = [(ls, cs, o * TDM_LOADS_PER_STEP // 2 if o > 0 else o) for ls, cs, o in _base_tail_plan]
+    tail_plan = [
+        (ls, cs, o * TDM_LOADS_PER_STEP // 2 if o > 0 else o)
+        for ls, cs, o in _base_tail_plan
+    ]
 
     stage_pitch_bytes = _align_up(stage_bytes, 1024)
     arena_alloc = SmemAllocator(
         None,
         arch=gpu_arch,
         global_sym_name=(
-            f"wmma_tdm_{in_dtype}_{out_dtype}_{tile_m}x{tile_n}x{tile_k}_" f"{m_warp}x{n_warp}_{num_buffers}buf_arena"
-        ),
+            f"wmma_tdm_{in_dtype}_{out_dtype}_{tile_m}x{tile_n}x{tile_k}_"
+            f"{m_warp}x{n_warp}_{num_buffers}buf_arena"),
     )
     stage_phys_order = [i for i in range(num_buffers) if i != _last_compute_stage]
     stage_phys_order.append(_last_compute_stage)
@@ -206,8 +206,12 @@ def compile_wmma_gemm_tdm(
         extra=extra,
     )
 
-    stage_b_offsets = [stage_base_off[i] + stage_b_rel_off for i in range(num_buffers)]
-    stage_a_offsets = [stage_base_off[i] + stage_a_rel_off for i in range(num_buffers)]
+    stage_b_offsets = [
+        stage_base_off[i] + stage_b_rel_off for i in range(num_buffers)
+    ]
+    stage_a_offsets = [
+        stage_base_off[i] + stage_a_rel_off for i in range(num_buffers)
+    ]
     if use_tdm_store:
         lds_d_row_stride = warp_tile_n * elem_bytes_d + LDS_PAD_D_BYTES
         warp_d_bytes = warp_tile_m * lds_d_row_stride
@@ -241,30 +245,26 @@ def compile_wmma_gemm_tdm(
         blk_n = by * arith.index(tile_n)
 
         # --- Cluster MCAST setup ---
-        if const_expr(use_cluster):
-            local_x, local_y = cluster.compute_cluster_position()
-            a_mcast_mask, b_mcast_mask = cluster.compute_mcast_masks(local_x, local_y, cluster_m, cluster_n)
+        if use_cluster:
+            local_x, local_y = gpu.compute_cluster_position()
+            a_mcast_mask, b_mcast_mask = gpu.compute_mcast_masks(
+                local_x, local_y, cluster_m, cluster_n)
         else:
             a_mcast_mask = 0
             b_mcast_mask = 0
 
         # --- Thread/wave decomposition ---
-        layout_thr = fx.make_layout((m_warp, n_warp, 2, 16), (n_warp * WAVE_SIZE, WAVE_SIZE, 16, 1))
+        layout_thr = fx.make_layout(
+            (m_warp, n_warp, 2, 16),
+            (n_warp * WAVE_SIZE, WAVE_SIZE, 16, 1))
         thr_coord = idx2crd(tx, layout_thr)
         wave_m_idx, wave_n_idx, lane_kgrp, lane16 = (
-            fx.get(thr_coord, 0),
-            fx.get(thr_coord, 1),
-            fx.get(thr_coord, 2),
-            fx.get(thr_coord, 3),
-        )
+            fx.get(thr_coord, 0), fx.get(thr_coord, 1), fx.get(thr_coord, 2), fx.get(thr_coord, 3))
 
         warp_m_base = wave_m_idx * arith.index(warp_tile_m)
         warp_n_base = wave_n_idx * arith.index(warp_tile_n)
 
         elem_ty = _elem_type()
-        from flydsl.expr.typing import Numeric as _Numeric
-
-        elem_dtype = _Numeric.from_ir_type(elem_ty)
 
         # --- Epilogue setup ---
         m_idx = arith.index_cast(T.index, i32_m.ir_value())
@@ -275,33 +275,23 @@ def compile_wmma_gemm_tdm(
         # --- TDM async copy helpers (MCAST-aware) ---
         def make_desc_a(lds_a_mem_ref, k_base):
             return tdm_ops.make_tensor_descriptor_2d(
-                global_ptr=arg_a,
-                lds_memref=lds_a_mem_ref,
+                global_ptr=arg_a, lds_memref=lds_a_mem_ref,
                 global_offset=(blk_m, k_base),
-                tensor_shape=(tile_m, tile_k),
-                strides=(K, 1),
-                tile_shape=(tile_m, tile_k),
-                elem_bytes=elem_bytes,
-                pad_interval=tile_k,
-                pad_amount=LDS_PAD_A,
-                num_warps=num_warps,
-                workgroup_mask=a_mcast_mask,
-            )
+                tensor_shape=(tile_m, tile_k), strides=(K, 1),
+                tile_shape=(tile_m, tile_k), elem_bytes=elem_bytes,
+                pad_interval=tile_k, pad_amount=LDS_PAD_A,
+                num_warps=tdm_desc_num_warps,
+                workgroup_mask=a_mcast_mask)
 
         def make_desc_b(lds_b_mem_ref, k_base):
             return tdm_ops.make_tensor_descriptor_2d(
-                global_ptr=arg_b,
-                lds_memref=lds_b_mem_ref,
+                global_ptr=arg_b, lds_memref=lds_b_mem_ref,
                 global_offset=(k_base, blk_n),
-                tensor_shape=(tile_k, tile_n),
-                strides=(N, 1),
-                tile_shape=(tile_k, tile_n),
-                elem_bytes=elem_bytes,
-                pad_interval=tile_n,
-                pad_amount=LDS_PAD_B,
-                num_warps=num_warps,
-                workgroup_mask=b_mcast_mask,
-            )
+                tensor_shape=(tile_k, tile_n), strides=(N, 1),
+                tile_shape=(tile_k, tile_n), elem_bytes=elem_bytes,
+                pad_interval=tile_n, pad_amount=LDS_PAD_B,
+                num_warps=tdm_desc_num_warps,
+                workgroup_mask=b_mcast_mask)
 
         # --- LDS load helpers ---
         def _precompute_a_lane_bases(lds_base_idx):
@@ -314,7 +304,11 @@ def compile_wmma_gemm_tdm(
             k_lane_off = lane_kgrp * arith.index(8 * elem_bytes)
             bases = []
             for wm in range_constexpr(wmma_m_rep):
-                a_base = row_stride_off + arith.index(wm * WMMA_M * lds_a_stride * elem_bytes) + k_lane_off
+                a_base = (
+                    row_stride_off
+                    + arith.index(wm * WMMA_M * lds_a_stride * elem_bytes)
+                    + k_lane_off
+                )
                 bases.append(a_base)
             return lds_base_idx, bases
 
@@ -324,14 +318,18 @@ def compile_wmma_gemm_tdm(
             a_lane_base is precomputed by _precompute_a_lane_bases.
             ks is the K-subtile index (compile-time constant).
             """
+            vec8_ty = ir.VectorType.get([8], elem_ty)
+
             k_byte_off = arith.index(ks * WMMA_K * elem_bytes)
             off0 = a_lane_base + k_byte_off
             off1 = a_lane_base + k_byte_off + arith.index(32)
 
-            v0 = fx.Vector(lds_load_b128_raw(a_lds_base_idx, off0)).bitcast(elem_dtype)
-            v1 = fx.Vector(lds_load_b128_raw(a_lds_base_idx, off1)).bitcast(elem_dtype)
+            raw0 = lds_load_b128_raw(a_lds_base_idx, off0)
+            raw1 = lds_load_b128_raw(a_lds_base_idx, off1)
+            v0 = vector.bitcast(vec8_ty, raw0)
+            v1 = vector.bitcast(vec8_ty, raw1)
 
-            return v0.shuffle(v1, list(range(16)))
+            return vector.shuffle(v0, v1, list(range(16)))
 
         def _precompute_b_lane_bases(lds_base_idx):
             """Precompute per-wn B fragment lane base addresses.
@@ -345,11 +343,18 @@ def compile_wmma_gemm_tdm(
             """
             lane8 = lane16 % arith.index(8)
             lane_ngrp = lane16 / arith.index(8)
-            k_lane_off = (lane_kgrp * arith.index(8) + lane8) * arith.index(lds_b_stride * elem_bytes)
+            k_lane_off = (
+                (lane_kgrp * arith.index(8) + lane8)
+                * arith.index(lds_b_stride * elem_bytes)
+            )
             n_lane_off = lane_ngrp * arith.index(8 * elem_bytes)
             bases = []
             for wn in range_constexpr(wmma_n_rep):
-                n_col = (warp_n_base + arith.index(wn * WMMA_N)) * arith.index(elem_bytes) + n_lane_off
+                n_col = (
+                    (warp_n_base + arith.index(wn * WMMA_N))
+                    * arith.index(elem_bytes)
+                    + n_lane_off
+                )
                 b_base = k_lane_off + n_col
                 bases.append(b_base)
             return lds_base_idx, bases
@@ -367,34 +372,60 @@ def compile_wmma_gemm_tdm(
                 k_row_off = (ks * WMMA_K + k_half * 16) * lds_b_stride * elem_bytes
                 elem_off = b_lane_base + arith.index(k_row_off)
                 v = lds_transpose_load_raw(vec8_ty, lds_base_idx, elem_off)
-                results.append(fx.Vector(v))
-            return results[0].shuffle(results[1], list(range(16)))
+                results.append(v)
+            return vector.shuffle(results[0], results[1], list(range(16)))
 
         # --- K-subtile compute (A-streaming pipeline) ---
         def _load_b_frags(b_lds_buffer, b_bases, ks):
             """Load all B fragments for one K-subtile (no wait)."""
-            return [load_wmma_frag_tr(b_lds_buffer, b_bases[wn], ks) for wn in range_constexpr(wmma_n_rep)]
+            return [load_wmma_frag_tr(b_lds_buffer, b_bases[wn], ks)
+                    for wn in range_constexpr(wmma_n_rep)]
 
-        use_half_streaming_schedule = (wmma_m_rep % 2) == 0 and wmma_m_rep > 1
+        use_half_streaming_schedule = (
+            (wmma_m_rep % 2) == 0 and wmma_m_rep > 1
+        )
+
+        COMPUTE_SCHEDULE_ROW_MAJOR_STREAMING = "row_major_streaming"
+        COMPUTE_SCHEDULE_COL_BAND = "col_band"
+
+        def _pick_compute_schedule_kind():
+            if in_dtype != "bf16":
+                return COMPUTE_SCHEDULE_ROW_MAJOR_STREAMING
+            if not wave_specialized_tdm:
+                return COMPUTE_SCHEDULE_ROW_MAJOR_STREAMING
+            if num_buffers != 3:
+                return COMPUTE_SCHEDULE_ROW_MAJOR_STREAMING
+            if tile_k != 64 or k_wmma_steps != 2:
+                return COMPUTE_SCHEDULE_ROW_MAJOR_STREAMING
+            if wmma_m_rep % 2 != 0 or wmma_n_rep % 2 != 0:
+                return COMPUTE_SCHEDULE_ROW_MAJOR_STREAMING
+            if wmma_m_rep < 2 or wmma_n_rep < 2:
+                return COMPUTE_SCHEDULE_ROW_MAJOR_STREAMING
+            return COMPUTE_SCHEDULE_COL_BAND
+
+        compute_schedule_kind = _pick_compute_schedule_kind()
+        use_col_band_schedule = (
+            compute_schedule_kind == COMPUTE_SCHEDULE_COL_BAND
+        )
+
+        if use_col_band_schedule:
+            _band_half_wm = wmma_m_rep // 2
+            _band_half_wn = wmma_n_rep // 2
 
         def _emit_wmma_row(accs, wm, a_frag, b_frags):
             for wn in range_constexpr(wmma_n_rep):
                 idx = wm * wmma_n_rep + wn
                 accs[idx] = wmma_op(
                     T.vec(8, T.f32),
-                    b_frags[wn],
-                    a_frag,
-                    accs[idx],
-                    signA=False,
-                    signB=False,
-                    modC=0,
-                    reuseA=False,
-                    reuseB=False,
+                    b_frags[wn], a_frag, accs[idx],
+                    signA=False, signB=False, modC=0,
+                    reuseA=False, reuseB=False,
                 ).result
 
-        def _a_streaming_compute_per_wm(
-            accs, a_buf, a_bases, b_frags, ks, emit_filler=None, mid_compute_callback=None, next_b_info=None
-        ):
+        def _a_streaming_compute_per_wm(accs, a_buf, a_bases, b_frags, ks,
+                                        emit_filler=None,
+                                        mid_compute_callback=None,
+                                        next_b_info=None):
             """Stream A fragments per-wm group, interleaved with WMMA.
 
             mid_compute_callback: called mid-compute (after first half of wm
@@ -403,128 +434,221 @@ def compile_wmma_gemm_tdm(
             next_b_frags = None
             a_frag = load_wmma_frag(a_buf, a_bases[0], ks)
             for wm in range_constexpr(wmma_m_rep):
-                is_last = wm == wmma_m_rep - 1
-                if const_expr(not is_last):
+                is_last = (wm == wmma_m_rep - 1)
+                if not is_last:
                     a_next = load_wmma_frag(a_buf, a_bases[wm + 1], ks)
-                if const_expr(is_last):
+                if is_last:
                     rocdl.s_wait_dscnt(0)
-                    if const_expr(emit_filler is not None):
+                    if emit_filler is not None:
                         rocdl.sched_barrier(0)
                         emit_filler()
-                    if const_expr(next_b_info is not None):
+                    if next_b_info is not None:
                         nb_buf, nb_bases, nb_ks = next_b_info
                         next_b_frags = _load_b_frags(nb_buf, nb_bases, nb_ks)
                 else:
                     rocdl.s_wait_dscnt(DS_LOADS_PER_A_FRAG)
                 _emit_wmma_row(accs, wm, a_frag, b_frags)
-                if const_expr(not is_last):
+                if not is_last:
                     a_frag = a_next
 
-            if const_expr(mid_compute_callback is not None):
+            if mid_compute_callback is not None:
                 rocdl.sched_barrier(0)
                 mid_compute_callback()
 
-            if const_expr(next_b_info is not None):
+            if next_b_info is not None:
                 return accs, next_b_frags
             return accs
 
-        def _a_streaming_compute_half(
-            accs, a_buf, a_bases, b_frags, ks, emit_filler=None, mid_compute_callback=None, next_b_info=None
-        ):
+        def _a_streaming_compute_half(accs, a_buf, a_bases, b_frags, ks,
+                                      emit_filler=None,
+                                      mid_compute_callback=None,
+                                      next_b_info=None):
             """Half-based A-streaming with mid-compute callback."""
             next_b_frags = None
             half_wm = wmma_m_rep // 2
             half_wait = (half_wm - 1) * DS_LOADS_PER_A_FRAG
 
-            a_frags_h0 = [load_wmma_frag(a_buf, a_bases[wm], ks) for wm in range_constexpr(half_wm)]
+            a_frags_h0 = [load_wmma_frag(a_buf, a_bases[wm], ks)
+                          for wm in range_constexpr(half_wm)]
             rocdl.s_wait_dscnt(half_wait)
 
-            if const_expr(mid_compute_callback is not None):
+            if mid_compute_callback is not None:
                 rocdl.sched_barrier(0)
                 mid_compute_callback()
 
             for wm in range_constexpr(half_wm):
                 _emit_wmma_row(accs, wm, a_frags_h0[wm], b_frags)
 
-            a_frags_h1 = [load_wmma_frag(a_buf, a_bases[half_wm + h], ks) for h in range_constexpr(half_wm)]
+            a_frags_h1 = [load_wmma_frag(a_buf, a_bases[half_wm + h], ks)
+                          for h in range_constexpr(half_wm)]
             rocdl.s_wait_dscnt(half_wait)
             for h in range_constexpr(half_wm):
                 wm = half_wm + h
-                if const_expr(wm == wmma_m_rep - 1 and emit_filler is not None):
+                if wm == wmma_m_rep - 1 and emit_filler is not None:
                     rocdl.sched_barrier(0)
                     emit_filler()
                 _emit_wmma_row(accs, wm, a_frags_h1[h], b_frags)
 
-            if const_expr(next_b_info is not None):
+            if next_b_info is not None:
                 nb_buf, nb_bases, nb_ks = next_b_info
                 next_b_frags = _load_b_frags(nb_buf, nb_bases, nb_ks)
                 return accs, next_b_frags
             return accs
 
-        def _a_streaming_compute(
-            accs, a_buf, a_bases, b_frags, ks, emit_filler=None, mid_compute_callback=None, next_b_info=None
-        ):
-            if const_expr(use_half_streaming_schedule):
+        def _a_streaming_compute(accs, a_buf, a_bases, b_frags, ks,
+                                 emit_filler=None,
+                                 mid_compute_callback=None,
+                                 next_b_info=None):
+            if use_half_streaming_schedule:
                 return _a_streaming_compute_half(
-                    accs,
-                    a_buf,
-                    a_bases,
-                    b_frags,
-                    ks,
+                    accs, a_buf, a_bases, b_frags, ks,
                     emit_filler=emit_filler,
                     mid_compute_callback=mid_compute_callback,
-                    next_b_info=next_b_info,
-                )
+                    next_b_info=next_b_info)
             return _a_streaming_compute_per_wm(
-                accs,
-                a_buf,
-                a_bases,
-                b_frags,
-                ks,
+                accs, a_buf, a_bases, b_frags, ks,
                 emit_filler=emit_filler,
                 mid_compute_callback=mid_compute_callback,
-                next_b_info=next_b_info,
-            )
+                next_b_info=next_b_info)
 
         # --- Compute on one LDS buffer (A-streaming K-subtile pipeline) ---
-        def compute_tile(accs_in, lds_a_idx, lds_b_idx, emit_filler=None, mid_compute_callback=None):
+        def compute_tile(accs_in, lds_a_idx, lds_b_idx,
+                         emit_filler=None, mid_compute_callback=None):
             current_accs = list(accs_in)
             a_buf, a_bases = _precompute_a_lane_bases(lds_a_idx)
             b_buf, b_bases = _precompute_b_lane_bases(lds_b_idx)
 
-            if const_expr(k_wmma_steps == 1):
+            if k_wmma_steps == 1:
                 b_frags = _load_b_frags(b_buf, b_bases, 0)
                 current_accs = _a_streaming_compute(
-                    current_accs,
-                    a_buf,
-                    a_bases,
-                    b_frags,
-                    0,
+                    current_accs, a_buf, a_bases, b_frags, 0,
                     emit_filler=emit_filler,
-                    mid_compute_callback=mid_compute_callback,
-                )
+                    mid_compute_callback=mid_compute_callback)
             else:
                 prev_b = _load_b_frags(b_buf, b_bases, 0)
                 for ks in range_constexpr(k_wmma_steps - 1):
                     _mid_cb = mid_compute_callback if ks == 0 else None
                     current_accs, prev_b = _a_streaming_compute(
-                        current_accs,
-                        a_buf,
-                        a_bases,
-                        prev_b,
-                        ks,
+                        current_accs, a_buf, a_bases, prev_b, ks,
                         mid_compute_callback=_mid_cb,
-                        next_b_info=(b_buf, b_bases, ks + 1),
-                    )
+                        next_b_info=(b_buf, b_bases, ks + 1))
                 current_accs = _a_streaming_compute(
-                    current_accs, a_buf, a_bases, prev_b, k_wmma_steps - 1, emit_filler=emit_filler
-                )
+                    current_accs, a_buf, a_bases, prev_b,
+                    k_wmma_steps - 1,
+                    emit_filler=emit_filler)
 
             return current_accs
 
+        def compute_tile_col_band(accs_in, lds_a_idx, lds_b_idx,
+                                  emit_filler=None,
+                                  mid_compute_callback=None):
+            """Quadrant schedule for bf16 tk64/nb3 wave-specialized path.
+
+            Split B into left/right halves and consume four quadrants:
+              Q1: top-A × B-left
+              Q2: bottom-A × B-left   (B-right stays in flight)
+              Q3: top-A × B-right
+              Q4: bottom-A × B-right  (next-ks B-left stays in flight)
+
+            This is the closest bf16 analogue to the fp8 bank-friendly path and
+            targets the dominant stage-head `s_wait_dscnt` waits. Keep only
+            Q1's top-half A + left-band B on the stage head, then issue the
+            bottom-half A under Q1's WMMA window the same way Triton/fp8 does.
+            """
+            current_accs = list(accs_in)
+            a_buf, a_bases = _precompute_a_lane_bases(lds_a_idx)
+            b_buf, b_bases = _precompute_b_lane_bases(lds_b_idx)
+
+            def _load_a_group(wm_base, wm_count, ks):
+                return [
+                    load_wmma_frag(a_buf, a_bases[wm_base + wm_local], ks)
+                    for wm_local in range_constexpr(wm_count)
+                ]
+
+            def _load_b_half(wn_base, ks):
+                return [
+                    load_wmma_frag_tr(b_buf, b_bases[wn_base + wn_local], ks)
+                    for wn_local in range_constexpr(_band_half_wn)
+                ]
+
+            def _emit_group(wm_base, wn_base, a_frags, b_frags,
+                            emit_filler_now=False):
+                if emit_filler_now and emit_filler is not None:
+                    rocdl.sched_barrier(0)
+                    emit_filler()
+                for wm_local in range_constexpr(len(a_frags)):
+                    a_frag = a_frags[wm_local]
+                    global_wm = wm_base + wm_local
+                    for wn_local in range_constexpr(len(b_frags)):
+                        global_wn = wn_base + wn_local
+                        idx = global_wm * wmma_n_rep + global_wn
+                        current_accs[idx] = wmma_op(
+                            T.vec(8, T.f32),
+                            b_frags[wn_local], a_frag, current_accs[idx],
+                            signA=False, signB=False, modC=0,
+                            reuseA=False, reuseB=False,
+                        ).result
+
+            b_left_frags = None
+            for ks in range_constexpr(k_wmma_steps):
+                is_last_ks = ks == k_wmma_steps - 1
+                if ks == 0:
+                    if mid_compute_callback is not None:
+                        rocdl.sched_barrier(0)
+                        mid_compute_callback()
+                        rocdl.sched_barrier(0)
+                        mid_compute_callback = None
+                    b_left_frags = _load_b_half(0, 0)
+
+                a_top_frags = _load_a_group(0, _band_half_wm, ks)
+                a_bottom_frags = _load_a_group(_band_half_wm, _band_half_wm, ks)
+
+                # Keep the bottom-A half in flight while Q1 starts.
+                rocdl.s_wait_dscnt(_band_half_wm * DS_LOADS_PER_A_FRAG)
+                _emit_group(0, 0, a_top_frags, b_left_frags)
+
+                b_right_frags = _load_b_half(_band_half_wn, ks)
+
+                # Let B-right remain in flight while Q2 consumes the left band.
+                rocdl.s_wait_dscnt(_band_half_wn * DS_LOADS_PER_B_FRAG)
+                _emit_group(_band_half_wm, 0, a_bottom_frags, b_left_frags)
+
+                if not is_last_ks:
+                    next_left_frags = _load_b_half(0, ks + 1)
+                    # Keep next-ks B-left outstanding while Q3/Q4 consume
+                    # the current right band.
+                    rocdl.s_wait_dscnt(_band_half_wn * DS_LOADS_PER_B_FRAG)
+                else:
+                    rocdl.s_wait_dscnt(0)
+
+                _emit_group(0, _band_half_wn, a_top_frags, b_right_frags)
+                _emit_group(
+                    _band_half_wm, _band_half_wn,
+                    a_bottom_frags, b_right_frags,
+                    emit_filler_now=is_last_ks,
+                )
+
+                if not is_last_ks:
+                    b_left_frags = next_left_frags
+
+            return current_accs
+
+        def compute_tile_scheduled(accs_in, lds_a_idx, lds_b_idx,
+                                   emit_filler=None,
+                                   mid_compute_callback=None):
+            if use_col_band_schedule:
+                return compute_tile_col_band(
+                    accs_in, lds_a_idx, lds_b_idx,
+                    emit_filler=emit_filler,
+                    mid_compute_callback=mid_compute_callback)
+            return compute_tile(
+                accs_in, lds_a_idx, lds_b_idx,
+                emit_filler=emit_filler,
+                mid_compute_callback=mid_compute_callback)
+
         # --- Scheduling ---
         def hot_loop_scheduler():
-            if const_expr(not use_half_streaming_schedule):
+            if not use_half_streaming_schedule:
                 rocdl.sched_barrier(0)
                 return
 
@@ -534,16 +658,22 @@ def compile_wmma_gemm_tdm(
             b_full_loads = wmma_n_rep * DS_LOADS_PER_B_FRAG
 
             for ks in range_constexpr(k_wmma_steps):
-                if const_expr(ks == 0):
+                if ks == 0:
                     rocdl.sched_dsrd(b_full_loads + a_half_loads)
                 else:
                     rocdl.sched_dsrd(a_half_loads)
                 rocdl.sched_mfma(half_wmma)
                 rocdl.sched_dsrd(a_half_loads)
                 rocdl.sched_mfma(half_wmma)
-                if const_expr(ks < k_wmma_steps - 1):
+                if ks < k_wmma_steps - 1:
                     rocdl.sched_dsrd(b_full_loads)
             rocdl.sched_barrier(0)
+
+        def hot_loop_scheduler_scheduled():
+            if use_col_band_schedule:
+                rocdl.sched_barrier(0)
+                return
+            hot_loop_scheduler()
 
         # --- Epilogue helpers ---
         _half_out = out_dtype in ("f16", "bf16")
@@ -555,8 +685,9 @@ def compile_wmma_gemm_tdm(
             for wm in range_constexpr(wmma_m_rep):
                 for wn in range_constexpr(wmma_n_rep):
                     row = blk_m + warp_m_base + arith.index(wm * WMMA_M) + lane16
-                    col_base = blk_n + warp_n_base + arith.index(wn * WMMA_N) + lane_kgrp * arith.index(8)
-                    if const_expr(_half_out):
+                    col_base = (blk_n + warp_n_base + arith.index(wn * WMMA_N)
+                                + lane_kgrp * arith.index(8))
+                    if _half_out:
                         c_off_bytes = (row * n_stride + col_base) * arith.index(elem_bytes_d)
                         addrs.append(c_off_bytes)
                     else:
@@ -572,12 +703,13 @@ def compile_wmma_gemm_tdm(
             for wm in range_constexpr(wmma_m_rep):
                 for wn in range_constexpr(wmma_n_rep):
                     idx = wm * wmma_n_rep + wn
-                    if const_expr(_half_out):
+                    if _half_out:
                         addr_idx += store_acc_vec8_to_buffer(
-                            final_accs[idx], c_rsrc, addrs[addr_idx], out_elem=_out_elem, offset_is_bytes=True
-                        )
+                            final_accs[idx], c_rsrc, addrs[addr_idx],
+                            out_elem=_out_elem, offset_is_bytes=True)
                     else:
-                        addr_idx += store_acc_vec8_to_buffer(final_accs[idx], c_rsrc, addrs[addr_idx : addr_idx + 2])
+                        addr_idx += store_acc_vec8_to_buffer(
+                            final_accs[idx], c_rsrc, addrs[addr_idx:addr_idx + 2])
 
         def epilogue_lds_stores(final_accs, d_buf, d_base):
             """Write accumulators to D output LDS via lds_store_b128."""
@@ -585,34 +717,23 @@ def compile_wmma_gemm_tdm(
                 for wn in range_constexpr(wmma_n_rep):
                     idx = wm * wmma_n_rep + wn
                     imm = wm * WMMA_M * _lds_d_stride_elems + wn * _n_col_d_elems
-                    store_acc_vec8_to_lds(d_buf, d_base, imm, final_accs[idx], out_elem=_out_elem)
+                    store_acc_vec8_to_lds(
+                        d_buf, d_base, imm, final_accs[idx], out_elem=_out_elem)
 
         _effective_l2_pf = l2_prefetch_distance
-        if const_expr(use_cluster and l2_prefetch_distance > 0):
+        if use_cluster and l2_prefetch_distance > 0:
             _effective_l2_pf = max(1, l2_prefetch_distance - 1)
 
         def _l2_prefetch(k_base):
-            if const_expr(_effective_l2_pf <= 0):
+            if _effective_l2_pf <= 0:
                 return
             pf_k = k_base + arith.index(_effective_l2_pf * tile_k)
             tdm_ops.l2_prefetch_tile(
-                arg_a,
-                (blk_m, pf_k),
-                (tile_m, tile_k),
-                (K, 1),
-                elem_bytes=elem_bytes,
-                thread_id=tx,
-                block_threads=block_threads,
-            )
+                arg_a, (blk_m, pf_k), (tile_m, tile_k), (K, 1),
+                elem_bytes=elem_bytes, thread_id=tx, block_threads=block_threads)
             tdm_ops.l2_prefetch_tile(
-                arg_b,
-                (pf_k, blk_n),
-                (tile_k, tile_n),
-                (N, 1),
-                elem_bytes=elem_bytes,
-                thread_id=tx,
-                block_threads=block_threads,
-            )
+                arg_b, (pf_k, blk_n), (tile_k, tile_n), (N, 1),
+                elem_bytes=elem_bytes, thread_id=tx, block_threads=block_threads)
 
         # ====== Multi-stage pipeline ======
         acc_zero = arith.constant_vector(0.0, T.vec(8, T.f32))
@@ -630,31 +751,39 @@ def compile_wmma_gemm_tdm(
         ]
         stages_a_mem = [stages_a[i].get() for i in range_constexpr(num_buffers)]
         stages_b_mem = [stages_b[i].get() for i in range_constexpr(num_buffers)]
-        stages_a_idx = [extract_lds_base_idx(stages_a[i]) for i in range_constexpr(num_buffers)]
-        stages_b_idx = [extract_lds_base_idx(stages_b[i]) for i in range_constexpr(num_buffers)]
+        stages_a_idx = [extract_lds_base_idx(stages_a[i])
+                        for i in range_constexpr(num_buffers)]
+        stages_b_idx = [extract_lds_base_idx(stages_b[i])
+                        for i in range_constexpr(num_buffers)]
 
         # D output LDS setup for TDM store epilogue
-        if const_expr(use_tdm_store):
+        if use_tdm_store:
             d_lds_base_ptr = arena_base_ptr
             d_lds_f16_count = total_d_bytes // elem_bytes
-            d_smem = SmemPtr(d_lds_base_ptr, d_output_off, elem_ty, shape=(d_lds_f16_count,))
+            d_smem = SmemPtr(d_lds_base_ptr, d_output_off, elem_ty,
+                             shape=(d_lds_f16_count,))
             d_lds_buffer = get_lds_memref(d_smem)
 
-            warp_lds_off = (wave_m_idx * arith.index(n_warp) + wave_n_idx) * arith.index(_warp_d_elems)
-            d_lane_base = (
-                warp_lds_off + lane16 * arith.index(_lds_d_stride_elems) + lane_kgrp * arith.index(4 * elem_bytes_d)
-            )
+            warp_lds_off = (wave_m_idx * arith.index(n_warp) + wave_n_idx) \
+                * arith.index(_warp_d_elems)
+            d_lane_base = (warp_lds_off
+                           + lane16 * arith.index(_lds_d_stride_elems)
+                           + lane_kgrp * arith.index(4 * elem_bytes_d))
 
             wave_id_idx = arith.index_cast(T.index, rocdl.wave_id())
-            d_warp_off_sgpr = wave_id_idx * arith.index(warp_d_bytes) + arith.index(d_output_off)
+            d_warp_off_sgpr = wave_id_idx * arith.index(warp_d_bytes) \
+                + arith.index(d_output_off)
 
-            warp_m_off_sgpr = (wave_id_idx / arith.index(n_warp)) * arith.index(warp_tile_m)
-            warp_n_off_sgpr = (wave_id_idx % arith.index(n_warp)) * arith.index(warp_tile_n)
+            warp_m_off_sgpr = (wave_id_idx / arith.index(n_warp)) \
+                * arith.index(warp_tile_m)
+            warp_n_off_sgpr = (wave_id_idx % arith.index(n_warp)) \
+                * arith.index(warp_tile_n)
 
             d_desc = tdm_ops.make_tensor_descriptor_2d(
                 global_ptr=arg_c,
                 lds_memref=d_lds_base_ptr,
-                global_offset=(blk_m + warp_m_off_sgpr, blk_n + warp_n_off_sgpr),
+                global_offset=(blk_m + warp_m_off_sgpr,
+                               blk_n + warp_n_off_sgpr),
                 tensor_shape=(warp_tile_m, warp_tile_n),
                 strides=(N, 1),
                 tile_shape=(warp_tile_m, warp_tile_n),
@@ -666,74 +795,95 @@ def compile_wmma_gemm_tdm(
                 for_store=True,
             )
 
-        # TDM descriptor lane layout: dgroup0 = [predicate, lds_addr, addr_lo, addr_hi].
-        def _dg0_lane(desc, lane):
-            return fx.Vector(desc.dgroup0)[lane]
-
-        def _pack_dg0(pred, lds_addr, addr_lo, addr_hi):
-            return fx.Vector.from_elements([pred, lds_addr, addr_lo, addr_hi], fx.Int32)
-
         # --- TDM descriptor addr_lo management (FP4-style) ---
         stages_a_lds_addr = []
         stages_b_lds_addr = []
         for i in range_constexpr(num_buffers):
-            stages_a_lds_addr.append(_dg0_lane(make_desc_a(stages_a_mem[i], arith.index(0)), 1))
-            stages_b_lds_addr.append(_dg0_lane(make_desc_b(stages_b_mem[i], arith.index(0)), 1))
+            stages_a_lds_addr.append(vector.extract(
+                make_desc_a(stages_a_mem[i], arith.index(0)).dgroup0,
+                static_position=[1], dynamic_position=[]))
+            stages_b_lds_addr.append(vector.extract(
+                make_desc_b(stages_b_mem[i], arith.index(0)).dgroup0,
+                static_position=[1], dynamic_position=[]))
 
         desc_a_init = make_desc_a(stages_a_mem[0], arith.index(0))
         desc_b_init = make_desc_b(stages_b_mem[0], arith.index(0))
 
-        adv_a_i32 = fx.Int32(tile_k * elem_bytes)
-        adv_b_i32 = fx.Int32(tile_k * N * elem_bytes)
-        pred_const = fx.Int32(1)
+        adv_a_i32 = arith.constant(tile_k * elem_bytes, type=T.i32)
+        adv_b_i32 = arith.constant(tile_k * N * elem_bytes, type=T.i32)
+        pred_const = arith.constant(1, type=T.i32)
 
-        if const_expr(wave_specialized_tdm):
+        if wave_specialized_tdm:
             tdm_wave_id = rocdl.wave_id()
-            tdm_wave_is_a = arith.cmpi(arith.CmpIPredicate.eq, tdm_wave_id, arith.constant(0, type=T.i32))
+            tdm_wave_is_a = arith.cmpi(
+                arith.CmpIPredicate.eq, tdm_wave_id,
+                arith.constant(0, type=T.i32))
+            tdm_wave_is_b = arith.cmpi(
+                arith.CmpIPredicate.eq, tdm_wave_id,
+                arith.constant(1, type=T.i32))
+            tdm_inactive_pred = arith.constant(0, type=T.i32)
 
             def _select_wave_tdm_value(a_value, b_value):
                 return arith.select(tdm_wave_is_a, a_value, b_value)
 
+            active_pred = arith.select(
+                tdm_wave_is_a,
+                pred_const,
+                arith.select(tdm_wave_is_b, pred_const, tdm_inactive_pred),
+            )
+
             active_stage_lds_addr = [
-                _select_wave_tdm_value(stages_a_lds_addr[i], stages_b_lds_addr[i]) for i in range_constexpr(num_buffers)
+                _select_wave_tdm_value(
+                    stages_a_lds_addr[i], stages_b_lds_addr[i])
+                for i in range_constexpr(num_buffers)
             ]
-            active_addr_lo = _select_wave_tdm_value(_dg0_lane(desc_a_init, 2), _dg0_lane(desc_b_init, 2))
-            active_addr_hi = _select_wave_tdm_value(_dg0_lane(desc_a_init, 3), _dg0_lane(desc_b_init, 3))
-            active_dgroup1 = _select_wave_tdm_value(desc_a_init.dgroup1, desc_b_init.dgroup1)
+            active_addr_lo = _select_wave_tdm_value(
+                vector.extract(desc_a_init.dgroup0, static_position=[2], dynamic_position=[]),
+                vector.extract(desc_b_init.dgroup0, static_position=[2], dynamic_position=[]))
+            active_addr_hi = _select_wave_tdm_value(
+                vector.extract(desc_a_init.dgroup0, static_position=[3], dynamic_position=[]),
+                vector.extract(desc_b_init.dgroup0, static_position=[3], dynamic_position=[]))
+            active_dgroup1 = _select_wave_tdm_value(
+                desc_a_init.dgroup1, desc_b_init.dgroup1)
             active_adv_i32 = _select_wave_tdm_value(adv_a_i32, adv_b_i32)
         else:
-            addr_lo_a = _dg0_lane(desc_a_init, 2)
-            addr_hi_a = _dg0_lane(desc_a_init, 3)
-            addr_lo_b = _dg0_lane(desc_b_init, 2)
-            addr_hi_b = _dg0_lane(desc_b_init, 3)
+            addr_lo_a = vector.extract(desc_a_init.dgroup0, static_position=[2], dynamic_position=[])
+            addr_hi_a = vector.extract(desc_a_init.dgroup0, static_position=[3], dynamic_position=[])
+            addr_lo_b = vector.extract(desc_b_init.dgroup0, static_position=[2], dynamic_position=[])
+            addr_hi_b = vector.extract(desc_b_init.dgroup0, static_position=[3], dynamic_position=[])
             dgroup1_a = desc_a_init.dgroup1
             dgroup1_b = desc_b_init.dgroup1
 
         # --- Prologue ---
-        if const_expr(wave_specialized_tdm):
+        if wave_specialized_tdm:
             for i in range_constexpr(pre_loaded):
-                dg0 = _pack_dg0(pred_const, active_stage_lds_addr[i], active_addr_lo, active_addr_hi)
-                tdm_ops.tensor_load_2d(tdm_ops.TDMDescriptor2D(dg0, active_dgroup1))
-                active_addr_lo = active_addr_lo + active_adv_i32
+                dg0 = vector.from_elements(T.vec(4, T.i32), [
+                    active_pred, active_stage_lds_addr[i],
+                    active_addr_lo, active_addr_hi])
+                tdm_ops.tensor_load_2d(
+                    tdm_ops.TDMDescriptor2D(dg0, active_dgroup1))
+                active_addr_lo = arith.addi(active_addr_lo, active_adv_i32)
         else:
             for i in range_constexpr(pre_loaded):
-                dg0_a = _pack_dg0(pred_const, stages_a_lds_addr[i], addr_lo_a, addr_hi_a)
-                dg0_b = _pack_dg0(pred_const, stages_b_lds_addr[i], addr_lo_b, addr_hi_b)
+                dg0_a = vector.from_elements(T.vec(4, T.i32), [
+                    pred_const, stages_a_lds_addr[i], addr_lo_a, addr_hi_a])
+                dg0_b = vector.from_elements(T.vec(4, T.i32), [
+                    pred_const, stages_b_lds_addr[i], addr_lo_b, addr_hi_b])
                 issue_tdm_loads(
                     tdm_ops.TDMDescriptor2D(dg0_a, dgroup1_a),
                     tdm_ops.TDMDescriptor2D(dg0_b, dgroup1_b),
-                    wave_specialized=wave_specialized_tdm,
-                )
-                addr_lo_a = addr_lo_a + adv_a_i32
-                addr_lo_b = addr_lo_b + adv_b_i32
+                    wave_specialized=wave_specialized_tdm)
+                addr_lo_a = arith.addi(addr_lo_a, adv_a_i32)
+                addr_lo_b = arith.addi(addr_lo_b, adv_b_i32)
 
-        pipeline_fence(outstanding=TDM_LOADS_PER_STEP * (num_buffers - 2), use_cluster=use_cluster)
+        pipeline_fence(outstanding=TDM_LOADS_PER_STEP * (num_buffers - 2),
+                       use_cluster=use_cluster)
 
         # --- Main loop (acc_mixed: fence at top, TDM mid-compute) ---
         _fence_outstanding = TDM_LOADS_PER_STEP * (num_buffers - 2)
 
-        if const_expr(loop_iters > 0):
-            if const_expr(wave_specialized_tdm):
+        if loop_iters > 0:
+            if wave_specialized_tdm:
                 init_args = list(accs) + [active_addr_lo]
 
                 for loop_iter, state in range(0, loop_iters, 1, init=init_args):
@@ -743,27 +893,34 @@ def compile_wmma_gemm_tdm(
                     for buf_idx in range_constexpr(num_buffers):
                         load_stage = (buf_idx + num_buffers - 1) % num_buffers
 
-                        pipeline_fence_signal(outstanding=_fence_outstanding, use_cluster=use_cluster)
-                        pipeline_fence_wait(use_cluster=use_cluster)
+                        pipeline_fence(
+                            outstanding=_fence_outstanding,
+                            use_cluster=use_cluster)
 
                         addr_box = [cur_addr_lo]
 
                         def _mid_tdm_ws(
                             _ls=load_stage,
                             _ab=addr_box,
-                            _k_off=(loop_iter * arith.index(num_buffers * tile_k) + arith.index(buf_idx * tile_k)),
+                            _k_off=(loop_iter * arith.index(num_buffers * tile_k)
+                                    + arith.index(buf_idx * tile_k)),
                         ):
-                            dg0 = _pack_dg0(pred_const, active_stage_lds_addr[_ls], _ab[0], active_addr_hi)
-                            tdm_ops.tensor_load_2d(tdm_ops.TDMDescriptor2D(dg0, active_dgroup1))
-                            _ab[0] = _ab[0] + active_adv_i32
+                            dg0 = vector.from_elements(T.vec(4, T.i32), [
+                                active_pred, active_stage_lds_addr[_ls],
+                                _ab[0], active_addr_hi])
+                            tdm_ops.tensor_load_2d(
+                                tdm_ops.TDMDescriptor2D(dg0, active_dgroup1))
+                            _ab[0] = arith.addi(_ab[0], active_adv_i32)
                             _l2_prefetch(_k_off)
 
                         rocdl.sched_barrier(0)
-                        accs_in = compute_tile(
-                            accs_in, stages_a_idx[buf_idx], stages_b_idx[buf_idx], mid_compute_callback=_mid_tdm_ws
-                        )
+                        accs_in = compute_tile_scheduled(
+                            accs_in,
+                            stages_a_idx[buf_idx],
+                            stages_b_idx[buf_idx],
+                            mid_compute_callback=_mid_tdm_ws)
                         cur_addr_lo = addr_box[0]
-                        hot_loop_scheduler()
+                        hot_loop_scheduler_scheduled()
 
                     results = yield list(accs_in) + [cur_addr_lo]
 
@@ -780,34 +937,41 @@ def compile_wmma_gemm_tdm(
                     for buf_idx in range_constexpr(num_buffers):
                         load_stage = (buf_idx + num_buffers - 1) % num_buffers
 
-                        pipeline_fence_signal(outstanding=_fence_outstanding, use_cluster=use_cluster)
-                        pipeline_fence_wait(use_cluster=use_cluster)
+                        pipeline_fence(
+                            outstanding=_fence_outstanding,
+                            use_cluster=use_cluster)
 
                         addr_boxes = [[cur_lo_a], [cur_lo_b]]
 
                         def _mid_tdm_nws(
                             _ls=load_stage,
                             _ab=addr_boxes,
-                            _k_off=(loop_iter * arith.index(num_buffers * tile_k) + arith.index(buf_idx * tile_k)),
+                            _k_off=(loop_iter * arith.index(num_buffers * tile_k)
+                                    + arith.index(buf_idx * tile_k)),
                         ):
-                            dg0_a = _pack_dg0(pred_const, stages_a_lds_addr[_ls], _ab[0][0], addr_hi_a)
-                            dg0_b = _pack_dg0(pred_const, stages_b_lds_addr[_ls], _ab[1][0], addr_hi_b)
+                            dg0_a = vector.from_elements(T.vec(4, T.i32), [
+                                pred_const, stages_a_lds_addr[_ls],
+                                _ab[0][0], addr_hi_a])
+                            dg0_b = vector.from_elements(T.vec(4, T.i32), [
+                                pred_const, stages_b_lds_addr[_ls],
+                                _ab[1][0], addr_hi_b])
                             issue_tdm_loads(
                                 tdm_ops.TDMDescriptor2D(dg0_a, dgroup1_a),
                                 tdm_ops.TDMDescriptor2D(dg0_b, dgroup1_b),
-                                wave_specialized=wave_specialized_tdm,
-                            )
-                            _ab[0][0] = _ab[0][0] + adv_a_i32
-                            _ab[1][0] = _ab[1][0] + adv_b_i32
+                                wave_specialized=wave_specialized_tdm)
+                            _ab[0][0] = arith.addi(_ab[0][0], adv_a_i32)
+                            _ab[1][0] = arith.addi(_ab[1][0], adv_b_i32)
                             _l2_prefetch(_k_off)
 
                         rocdl.sched_barrier(0)
-                        accs_in = compute_tile(
-                            accs_in, stages_a_idx[buf_idx], stages_b_idx[buf_idx], mid_compute_callback=_mid_tdm_nws
-                        )
+                        accs_in = compute_tile_scheduled(
+                            accs_in,
+                            stages_a_idx[buf_idx],
+                            stages_b_idx[buf_idx],
+                            mid_compute_callback=_mid_tdm_nws)
                         cur_lo_a = addr_boxes[0][0]
                         cur_lo_b = addr_boxes[1][0]
-                        hot_loop_scheduler()
+                        hot_loop_scheduler_scheduled()
 
                     results = yield list(accs_in) + [cur_lo_a, cur_lo_b]
 
@@ -818,74 +982,86 @@ def compile_wmma_gemm_tdm(
         # --- Tail ---
         # The main loop's last mid-compute TDM load needs to be fenced
         # before the tail starts reading newly loaded LDS data.
-        if const_expr(loop_iters > 0):
+        if loop_iters > 0:
             pipeline_fence(outstanding=0, use_cluster=use_cluster)
-        elif const_expr(use_cluster):
-            cluster.cluster_barrier()
+        elif use_cluster:
+            gpu.cluster_barrier()
         epi_addrs_box = [None]
         _tail_had_load = False
         for _load_stage, _compute_stage, _outstanding in tail_plan:
-            if const_expr(_outstanding == -1):
-                if const_expr(_tail_had_load):
+            if _outstanding == -1:
+                if _tail_had_load:
                     pipeline_fence(outstanding=0, use_cluster=use_cluster)
-                if const_expr(use_tdm_store):
-                    accs = compute_tile(accs, stages_a_idx[_compute_stage], stages_b_idx[_compute_stage])
+                if use_tdm_store:
+                    accs = compute_tile_scheduled(
+                        accs,
+                        stages_a_idx[_compute_stage],
+                        stages_b_idx[_compute_stage])
                 else:
-
                     def _emit_epi_addrs():
                         epi_addrs_box[0] = epilogue_prepare_addrs()
 
-                    accs = compute_tile(
-                        accs, stages_a_idx[_compute_stage], stages_b_idx[_compute_stage], emit_filler=_emit_epi_addrs
-                    )
+                    accs = compute_tile_scheduled(
+                        accs,
+                        stages_a_idx[_compute_stage],
+                        stages_b_idx[_compute_stage],
+                        emit_filler=_emit_epi_addrs)
             else:
-                pipeline_fence_signal(outstanding=_outstanding, use_cluster=use_cluster)
-                pipeline_fence_wait(use_cluster=use_cluster)
+                pipeline_fence(outstanding=_outstanding,
+                               use_cluster=use_cluster)
 
                 _tail_mid_cb = None
-                if const_expr(_load_stage is not None):
+                if _load_stage is not None:
                     _tail_had_load = True
-                    if const_expr(wave_specialized_tdm):
+                    if wave_specialized_tdm:
                         _tail_addr_box = [active_addr_lo]
 
                         def _tail_mid_ws(_ls=_load_stage, _ab=_tail_addr_box):
-                            dg0 = _pack_dg0(pred_const, active_stage_lds_addr[_ls], _ab[0], active_addr_hi)
-                            tdm_ops.tensor_load_2d(tdm_ops.TDMDescriptor2D(dg0, active_dgroup1))
-                            _ab[0] = _ab[0] + active_adv_i32
+                            dg0 = vector.from_elements(T.vec(4, T.i32), [
+                                active_pred, active_stage_lds_addr[_ls],
+                                _ab[0], active_addr_hi])
+                            tdm_ops.tensor_load_2d(
+                                tdm_ops.TDMDescriptor2D(dg0, active_dgroup1))
+                            _ab[0] = arith.addi(_ab[0], active_adv_i32)
 
                         _tail_mid_cb = _tail_mid_ws
                     else:
                         _tail_ab = [[addr_lo_a], [addr_lo_b]]
 
                         def _tail_mid_nws(_ls=_load_stage, _ab=_tail_ab):
-                            dg0_a = _pack_dg0(pred_const, stages_a_lds_addr[_ls], _ab[0][0], addr_hi_a)
-                            dg0_b = _pack_dg0(pred_const, stages_b_lds_addr[_ls], _ab[1][0], addr_hi_b)
+                            dg0_a = vector.from_elements(T.vec(4, T.i32), [
+                                pred_const, stages_a_lds_addr[_ls],
+                                _ab[0][0], addr_hi_a])
+                            dg0_b = vector.from_elements(T.vec(4, T.i32), [
+                                pred_const, stages_b_lds_addr[_ls],
+                                _ab[1][0], addr_hi_b])
                             issue_tdm_loads(
                                 tdm_ops.TDMDescriptor2D(dg0_a, dgroup1_a),
                                 tdm_ops.TDMDescriptor2D(dg0_b, dgroup1_b),
-                                wave_specialized=wave_specialized_tdm,
-                            )
-                            _ab[0][0] = _ab[0][0] + adv_a_i32
-                            _ab[1][0] = _ab[1][0] + adv_b_i32
+                                wave_specialized=wave_specialized_tdm)
+                            _ab[0][0] = arith.addi(_ab[0][0], adv_a_i32)
+                            _ab[1][0] = arith.addi(_ab[1][0], adv_b_i32)
 
                         _tail_mid_cb = _tail_mid_nws
 
                 rocdl.sched_barrier(0)
-                accs = compute_tile(
-                    accs, stages_a_idx[_compute_stage], stages_b_idx[_compute_stage], mid_compute_callback=_tail_mid_cb
-                )
-                hot_loop_scheduler()
+                accs = compute_tile_scheduled(
+                    accs,
+                    stages_a_idx[_compute_stage],
+                    stages_b_idx[_compute_stage],
+                    mid_compute_callback=_tail_mid_cb)
+                hot_loop_scheduler_scheduled()
 
-                if const_expr(_load_stage is not None):
-                    if const_expr(wave_specialized_tdm):
+                if _load_stage is not None:
+                    if wave_specialized_tdm:
                         active_addr_lo = _tail_addr_box[0]
                     else:
                         addr_lo_a = _tail_ab[0][0]
                         addr_lo_b = _tail_ab[1][0]
 
         # --- Epilogue ---
-        if const_expr(use_tdm_store):
-            if const_expr(d_need_epilogue_fence):
+        if use_tdm_store:
+            if d_need_epilogue_fence:
                 pipeline_fence(outstanding=0, use_cluster=use_cluster)
             rocdl.sched_barrier(0)
             epilogue_lds_stores(accs, d_lds_buffer, d_lane_base)
@@ -896,25 +1072,10 @@ def compile_wmma_gemm_tdm(
             rocdl.sched_barrier(0)
             epilogue_stores(accs, epi_addrs_box[0])
 
-    cache_tag = (
-        in_dtype,
-        out_dtype,
-        K,
-        tile_m,
-        tile_n,
-        tile_k,
-        m_warp,
-        n_warp,
-        num_buffers,
-        effective_waves_per_eu,
-        l2_prefetch_distance,
-        use_tdm_store,
-        cluster_m,
-        cluster_n,
-        wave_specialized_tdm,
-        inst_prefetch,
-        expert_sched_mode,
-    )
+    cache_tag = (in_dtype, out_dtype, K, tile_m, tile_n, tile_k, m_warp, n_warp,
+                 num_buffers, effective_waves_per_eu, l2_prefetch_distance,
+                 use_tdm_store, cluster_m, cluster_n,
+                 wave_specialized_tdm, inst_prefetch, expert_sched_mode)
 
     @flyc.jit
     def launch_wmma_gemm_tdm(
@@ -936,18 +1097,19 @@ def compile_wmma_gemm_tdm(
         gx = _raw((idx_m + arith.index(tile_m - 1)) / arith.index(tile_m))
         gy = _raw((idx_n + arith.index(tile_n - 1)) / arith.index(tile_n))
 
+        launcher = kernel_wmma_gemm_tdm(arg_c, arg_a, arg_b, i32_m, i32_n)
+        for op in ctx.gpu_module_body.operations:
+            if hasattr(op, 'attributes') and op.OPERATION_NAME == "gpu.func":
+                if effective_waves_per_eu is not None:
+                    _wpe = int(effective_waves_per_eu)
+                    if _wpe >= 1:
+                        op.attributes["rocdl.waves_per_eu"] = ir.IntegerAttr.get(
+                            ir.IntegerType.get_signless(32), _wpe)
+                if use_cluster:
+                    op.attributes["rocdl.cluster_dims"] = ir.StringAttr.get(
+                        f"{cluster_m},{cluster_n},1")
         cluster_arg = (cluster_m, cluster_n, 1) if use_cluster else None
-        kernel_wmma_gemm_tdm(
-            arg_c,
-            arg_a,
-            arg_b,
-            i32_m,
-            i32_n,
-            value_attrs={
-                "rocdl.waves_per_eu": effective_waves_per_eu,
-                "rocdl.cluster_dims": f"{cluster_m},{cluster_n},1" if use_cluster else None,
-            },
-        ).launch(
+        launcher.launch(
             grid=(gx, gy, 1),
             block=(block_threads, 1, 1),
             stream=stream,
@@ -955,11 +1117,11 @@ def compile_wmma_gemm_tdm(
         )
 
         llvm_opts = {}
-        if const_expr(expert_sched_mode):
+        if expert_sched_mode:
             llvm_opts["amdgpu-expert-scheduling-mode"] = True
-        if const_expr(inst_prefetch):
+        if inst_prefetch:
             llvm_opts["amdgpu-inst-prefetch-distance"] = 8
-        if const_expr(llvm_opts):
+        if llvm_opts:
             launch_wmma_gemm_tdm.compile_hints["llvm_options"] = llvm_opts
 
     return launch_wmma_gemm_tdm

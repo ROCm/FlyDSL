@@ -64,10 +64,14 @@ def compile_mxscale_gemm(
     expert_sched_mode: bool = True,
     atomic_barrier_enable: bool = False,
 ):
-    """Compile an MXFP4 or MXFP8 GEMM kernel with TDM async copy.
+    """Compile an MXFP4/MXFP8/A8W4 GEMM kernel with TDM async copy.
 
     Args:
-        data_format: "fp4" for FP4/E2M1, "fp8" for FP8/E4M3.
+        data_format: "fp4" for FP4/E2M1, "fp8" for FP8/E4M3,
+            or "a8w4" for FP8 activations with FP4 weights.
+        M, N, K: compile-time problem dimensions. M and N must be the
+            tile-aligned padded dimensions passed to the launch function; this
+            kernel does not predicate tail tiles.
 
     Data layout (both formats):
         A: [M, K_packed] uint8 (FP4: K_packed=K//2, FP8: K_packed=K)
@@ -92,6 +96,25 @@ def compile_mxscale_gemm(
         raise ValueError(f"num_buffers must be 2, 3, or 4, got {num_buffers}")
     if split_k < 1:
         raise ValueError(f"split_k must be >= 1, got {split_k}")
+    if M <= 0 or N <= 0 or K <= 0:
+        raise ValueError(f"M, N, and K must be positive, got M={M}, N={N}, K={K}")
+    if tile_m <= 0 or tile_n <= 0 or tile_k <= 0:
+        raise ValueError(
+            f"tile_m, tile_n, and tile_k must be positive, "
+            f"got {tile_m}, {tile_n}, {tile_k}")
+    if m_warp <= 0 or n_warp <= 0:
+        raise ValueError(f"m_warp and n_warp must be positive, got {m_warp}, {n_warp}")
+    if cluster_m <= 0 or cluster_n <= 0:
+        raise ValueError(
+            f"cluster_m and cluster_n must be positive, got {cluster_m}, {cluster_n}")
+    if waves_per_eu is not None and waves_per_eu < 1:
+        raise ValueError(f"waves_per_eu must be >= 1 when set, got {waves_per_eu}")
+    if M % tile_m != 0:
+        raise ValueError(
+            f"M must be divisible by tile_m={tile_m}; pad M before compile, got M={M}")
+    if N % tile_n != 0:
+        raise ValueError(
+            f"N must be divisible by tile_n={tile_n}; pad N before compile, got N={N}")
 
     use_cluster = cluster_m > 1 or cluster_n > 1
     if use_cluster:
@@ -1118,6 +1141,7 @@ def compile_mxscale_gemm(
 
             def _emit_q_rows(a_frags, b_frags, a_scales, b_scales,
                              wm_base, wn_base, group_base, row_start=0):
+                fmt_a = 4 if is_a8w4 else 0
                 for row_off in range_constexpr(len(a_frags)):
                     wm_local = row_start + row_off
                     wm = wm_base + wm_local
@@ -1126,28 +1150,16 @@ def compile_mxscale_gemm(
                     for wn_local in range_constexpr(_half_wn):
                         wn = wn_base + wn_local
                         idx = group_base + wm_local * _half_wn + wn_local
-                        if is_a8w4:
-                            b_scale_idx = wn_local // 2
-                            b_opsel = wn_local % 2
-                            current_accs[idx] = rocdl.wmma_scale_f32_16x16x128_f8f6f4(
-                                T.vec(8, T.f32),
-                                b_frags[wn_local], a_frags[wm_local],
-                                current_accs[idx],
-                                b_scales[b_scale_idx], a_scales[a_scale_idx],
-                                fmtA=4, fmtB=0,
-                                scaleAType=b_opsel, scaleBType=a_opsel,
-                            )
-                        else:
-                            b_scale_idx = wn_local // 2
-                            b_opsel = wn_local % 2
-                            current_accs[idx] = rocdl.wmma_scale_f32_16x16x128_f8f6f4(
-                                T.vec(8, T.f32),
-                                b_frags[wn_local], a_frags[wm_local],
-                                current_accs[idx],
-                                b_scales[b_scale_idx], a_scales[a_scale_idx],
-                                fmtA=0, fmtB=0,
-                                scaleAType=b_opsel, scaleBType=a_opsel,
-                            )
+                        b_scale_idx = wn_local // 2
+                        b_opsel = wn_local % 2
+                        current_accs[idx] = rocdl.wmma_scale_f32_16x16x128_f8f6f4(
+                            T.vec(8, T.f32),
+                            b_frags[wn_local], a_frags[wm_local],
+                            current_accs[idx],
+                            b_scales[b_scale_idx], a_scales[a_scale_idx],
+                            fmtA=fmt_a, fmtB=0,
+                            scaleAType=b_opsel, scaleBType=a_opsel,
+                        )
 
             def _emit_q(a_frags, b_frags, a_scales, b_scales,
                         wm_base, wn_base, group_base):
@@ -1283,17 +1295,22 @@ def compile_mxscale_gemm(
 
             return current_accs, _next_b_left_head
 
-        # Cross-buf b_left prefetch.
-        # cols=4 = _half_wn ceiling for the 256x256 FP8 config; prefetches the
-        # full b_left half of next stage during current stage's Q4 tail.
+        # Cross-buf b_left prefetch is only valid for the FP8/A8W4 col-band
+        # schedule, where compute_tile_scheduled returns the prefetched frags.
+        # Row-major and FP4 bank-friendly schedules return None in that slot.
+        # Prefetch up to four columns, capped by the current B-left half width.
         #
-        # num_buffers=2 race: emit_prefetch_next reads next_buf_idx =
+        # num_buffers<=3 race: emit_prefetch_next reads next_buf_idx =
         # (buf_idx+1)%N, mid_callback writes load_stage = (buf_idx+N-1)%N.
-        # For N=2 these collide on the same LDS slot before the end-of-buf_idx
-        # tensor_wait, so prefetch reads in-flight TDM target → stale data.
-        # Disable prefetch when num_buffers < 3.
-        _col_band_prefetch_enabled = num_buffers >= 3
-        _col_band_prefetch_cols = 4
+        # For N=2 these collide on the same LDS slot. For N=3, the prefetch can
+        # still reach a stage loaded in the previous step while the pipeline
+        # fence intentionally leaves one TDM step outstanding, so it may observe
+        # stale/in-flight LDS data. Keep this prefetch to 4-stage buffering.
+        _col_band_prefetch_enabled = (
+            num_buffers >= 4
+            and compute_schedule_kind == COMPUTE_SCHEDULE_COL_BAND
+        )
+        _col_band_prefetch_cols = min(4, wmma_n_rep // 2)
 
         def _prefetch_b_left_head_for_stage(lds_b_idx):
             b_buf, b_bases = _precompute_b_lane_bases(lds_b_idx)
@@ -1305,7 +1322,6 @@ def compile_mxscale_gemm(
             _b_loads_per_frag = 2 if is_a8w4 else 4
             _a_front = _half_wm * DS_LOADS_PER_A_FRAG   # 8
             _b_total = wmma_n_rep * _b_loads_per_frag    # 32
-            _next_b_scale = _b_total + 2                 # 34
 
             for _ks in range_constexpr(k_wmma_steps):
                 if _ks == 0:

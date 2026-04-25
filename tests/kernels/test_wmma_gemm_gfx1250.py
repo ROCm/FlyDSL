@@ -97,6 +97,7 @@ def _make_wmma_case(
     waves_per_eu=None,
     expert_sched_mode=True,
     need_reference=True,
+    const_init_inputs=None,
 ):
     """Prepare inputs, launch closure, and optional reference for a WMMA GEMM case."""
     arch = str(get_rocm_arch())
@@ -149,8 +150,12 @@ def _make_wmma_case(
         f"expert_sched_mode={expert_sched_mode}"
     )
 
-    a = torch.randn((M, K), dtype=torch_dtype, device='cpu')
-    b = torch.randn((K, N), dtype=torch_dtype, device='cpu')
+    if const_init_inputs is not None:
+        a = torch.full((M, K), const_init_inputs, dtype=torch_dtype, device='cpu')
+        b = torch.full((K, N), const_init_inputs, dtype=torch_dtype, device='cpu')
+    else:
+        a = torch.randn((M, K), dtype=torch_dtype, device='cpu')
+        b = torch.randn((K, N), dtype=torch_dtype, device='cpu')
     ref = torch.mm(a.to(torch.float32), b.to(torch.float32)) if need_reference else None
 
     a_pad = _pad_2d_tensor(a, mpad, kpad).cuda()
@@ -197,6 +202,7 @@ def _make_wmma_case(
         "wave_specialized_tdm": wave_specialized_tdm,
         "inst_prefetch": inst_prefetch,
         "expert_sched_mode": expert_sched_mode,
+        "const_init_inputs": const_init_inputs,
         "launch_fn": launch_fn,
         "a_pad": a_pad,
         "b_pad": b_pad,
@@ -248,6 +254,7 @@ def _run_benchmark(args):
         waves_per_eu=args.waves_per_eu,
         expert_sched_mode=args.expert_sched_mode,
         need_reference=False,
+        const_init_inputs=args.const_init_inputs,
     )
 
     print("=" * 72)
@@ -273,7 +280,10 @@ def _run_benchmark(args):
         f"  Warmup={args.warmup}, Iters={args.iters}, "
         f"L2 flush={'ON' if not args.no_flush_l2 else 'OFF'}"
     )
-    print("  Zero fill: ON (outside timing)")
+    print(
+        "  Zero fill: ON (outside timing), "
+        f"const_init_inputs={args.const_init_inputs}"
+    )
     print("=" * 72)
 
     def prep_kernel():
@@ -339,7 +349,8 @@ def test_wmma_gemm_tdm(in_dtype, M, N, K, tile_m, tile_n, tile_k,
                         out_dtype=None, use_tdm_store=True,
                         cluster_m=1, cluster_n=1,
                         wave_specialized_tdm=False, inst_prefetch=False,
-                        waves_per_eu=None, expert_sched_mode=True):
+                        waves_per_eu=None, expert_sched_mode=True,
+                        const_init_inputs=None):
     """Non-cluster GEMM correctness test."""
     case = _make_wmma_case(
         in_dtype,
@@ -361,6 +372,7 @@ def test_wmma_gemm_tdm(in_dtype, M, N, K, tile_m, tile_n, tile_k,
         inst_prefetch=inst_prefetch,
         waves_per_eu=waves_per_eu,
         expert_sched_mode=expert_sched_mode,
+        const_init_inputs=const_init_inputs,
     )
     _launch_wmma_case(case)
     torch.cuda.synchronize()
@@ -496,6 +508,8 @@ def _build_arg_parser():
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--iters", type=int, default=20)
     parser.add_argument("--no-flush-l2", action="store_true", default=False)
+    parser.add_argument("--const-init-inputs", type=float, default=None,
+                        help="Use a constant value to initialize A/B instead of random inputs.")
     return parser
 
 
@@ -520,6 +534,7 @@ def _run_cli_args(args, runner=None):
         inst_prefetch=args.inst_prefetch,
         waves_per_eu=args.waves_per_eu,
         expert_sched_mode=args.expert_sched_mode,
+        const_init_inputs=args.const_init_inputs,
     )
 
 

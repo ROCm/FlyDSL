@@ -339,7 +339,7 @@ def _run_mxscale_gemm_test(
           f"mean={c_out.float().mean():.2f}, std={c_out.float().std():.2f}")
 
     if c_out.float().abs().max() < 1e-10:
-        print("WARNING: kernel output is all zeros!")
+        pytest.fail("kernel output is all zeros")
 
     if out_dtype in ("bf16", "f16"):
         ref_cmp = ref.to(torch_out_dtype)
@@ -466,6 +466,33 @@ def test_mxfp8_gemm(M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp,
         l2_prefetch_distance=2)
 
 
+def test_mxfp8_gemm_tile16_wave_spec_4buf_regression():
+    _run_mxscale_gemm_test(
+        "fp8",
+        16, 256, 1024,
+        16, 256, 256,
+        1, 4,
+        num_buffers=4,
+        use_tdm_store=True,
+        out_dtype="bf16",
+        wave_specialized_tdm=True,
+        l2_prefetch_distance=2,
+    )
+
+
+def test_mxfp8_gemm_col_band_3buf_regression():
+    _run_mxscale_gemm_test(
+        "fp8",
+        1024, 1024, 1024,
+        128, 256, 128,
+        2, 4,
+        num_buffers=3,
+        use_tdm_store=True,
+        out_dtype="f32",
+        l2_prefetch_distance=2,
+    )
+
+
 @pytest.mark.parametrize(
     "M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp",
     [
@@ -572,23 +599,48 @@ def _run_benchmark(args):
         print(f"  Split-K={args.split_k} (atomic accumulate, buffer-store epilogue)")
     print(f"  Warmup={args.warmup}, Iters={args.iters}, "
           f"L2 flush={'ON' if not args.no_flush_l2 else 'OFF'}")
+    if args.const_init is not None:
+        print(f"  Const init: {args.const_init} (A/B/scale quantized, C=0)")
     print("  Zero fill: ON (outside timing)")
     print("=" * 72)
 
     torch.manual_seed(0)
 
-    if is_a8w4:
+    if args.const_init is not None:
+        val = args.const_init
+        fp8_byte = torch.tensor(val, dtype=torch.float32).to(
+            torch.float8_e4m3fn).view(torch.uint8).item()
+        e8m0_byte = fp4_utils.f32_to_e8m0(
+            torch.tensor([val], dtype=torch.float32)).view(torch.uint8).item()
+        if is_a8w4:
+            a = torch.full((M, K), fp8_byte, dtype=torch.uint8)
+            b = fp4_utils.f32_to_mxfp4(
+                torch.full((N, K), val, dtype=torch.float32)).view(torch.uint8)
+        elif is_fp4:
+            a = fp4_utils.f32_to_mxfp4(
+                torch.full((M, K), val, dtype=torch.float32)).view(torch.uint8)
+            b = fp4_utils.f32_to_mxfp4(
+                torch.full((N, K), val, dtype=torch.float32)).view(torch.uint8)
+        else:
+            a = torch.full((M, K), fp8_byte, dtype=torch.uint8)
+            b = torch.full((N, K), fp8_byte, dtype=torch.uint8)
+        a_scale = torch.full((M, K // SCALE_BLOCK), e8m0_byte, dtype=torch.uint8)
+        b_scale = torch.full((N, K // SCALE_BLOCK), e8m0_byte, dtype=torch.uint8)
+    elif is_a8w4:
         a = random_fp8_data(M, K)
         b = fp4_utils.random_fp4_packed(N, K)
+        a_scale = fp4_utils.random_e8m0(M, K // SCALE_BLOCK)
+        b_scale = fp4_utils.random_e8m0(N, K // SCALE_BLOCK)
     elif is_fp4:
         a = fp4_utils.random_fp4_packed(M, K)
         b = fp4_utils.random_fp4_packed(N, K)
+        a_scale = fp4_utils.random_e8m0(M, K // SCALE_BLOCK)
+        b_scale = fp4_utils.random_e8m0(N, K // SCALE_BLOCK)
     else:
         a = random_fp8_data(M, K)
         b = random_fp8_data(N, K)
-
-    a_scale = fp4_utils.random_e8m0(M, K // SCALE_BLOCK)
-    b_scale = fp4_utils.random_e8m0(N, K // SCALE_BLOCK)
+        a_scale = fp4_utils.random_e8m0(M, K // SCALE_BLOCK)
+        b_scale = fp4_utils.random_e8m0(N, K // SCALE_BLOCK)
 
     a, b, a_scale, b_scale = _pad_mxscale_inputs(
         a, b, a_scale, b_scale, padded_shape)
@@ -719,6 +771,10 @@ if __name__ == "__main__":
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--iters", type=int, default=20)
     parser.add_argument("--no-flush-l2", action="store_true", default=False)
+    parser.add_argument("--const-init", type=float, default=None,
+                        help="Initialize A/B/scale with a constant value, quantized "
+                             "to each format's native representation (fp8/fp4/e8m0). "
+                             "Default: None (random init). ")
     args = parser.parse_args()
 
     if args.benchmark:
