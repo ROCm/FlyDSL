@@ -2080,7 +2080,7 @@ public:
     auto resultTy = cast<fly::MemRefType>(op.getType());
     auto layoutAttr = dyn_cast<LayoutAttr>(resultTy.getLayout());
     if (!layoutAttr || !layoutAttr.isStatic())
-      return rewriter.notifyMatchFailure(op, "staged fragment layout must be static");
+      return rewriter.notifyMatchFailure(op, "fragment layout must be fully static to alloca");
 
     LayoutBuilder<LayoutValueAdaptor> layoutBuilder(rewriter, loc);
     Value fragmentLayout = layoutBuilder.materializeConstantLayout(layoutAttr).getValue();
