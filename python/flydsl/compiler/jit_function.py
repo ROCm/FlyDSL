@@ -748,6 +748,8 @@ class JitFunction:
         # Fast path: reuse pre-built CallState (no ctypes alloc, no DLPack)
         call_state = self._call_state_cache.get(cache_key)
         if call_state is not None:
+            if env.compile.compile_only:
+                return None
             return call_state(args_tuple)
 
         # Normal path: check in-process cache first, then optional disk cache.
@@ -760,6 +762,8 @@ class JitFunction:
                 self._mem_cache[cache_key] = cached_func
 
         if cached_func is not None:
+            if env.compile.compile_only:
+                return None
             # Build CallState via JitArgument registry (same dispatch as compile path)
             try:
                 state = _build_call_state(
