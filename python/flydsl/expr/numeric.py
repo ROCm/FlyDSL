@@ -12,13 +12,13 @@ from .._mlir.dialects import arith
 from .._mlir.extras import types as T
 from .utils.arith import (
     ArithValue,
+    _to_raw,
     arith_const,
     fp_to_fp,
     fp_to_int,
     int_to_fp,
     int_to_int,
     is_float_type,
-    _to_raw,
 )
 
 
@@ -500,7 +500,11 @@ class Integer(Numeric, metaclass=NumericMeta, width=32, signed=True, ir_type=T.i
                 x_val = fp_to_int(x, ty.signed, ty.ir_type, loc=loc, ip=ip)
         elif isinstance(x, Integer):
             if isinstance(x.value, ir.Value):
-                x_val = int_to_int(x.ir_value(), ty)
+                raw = x.ir_value(loc=loc, ip=ip)
+                if isinstance(raw.type, ir.IndexType):
+                    x_val = arith.index_cast(ty.ir_type, raw, loc=loc, ip=ip)
+                else:
+                    x_val = int_to_int(raw, ty)
             else:
                 src_dtype = type(x).numpy_dtype
                 dst_dtype = ty.numpy_dtype

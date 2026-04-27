@@ -330,12 +330,6 @@ def compile_preshuffle_gemm_a8(
         c_m = fx.Index(i32_m)
         c_n = fx.Index(i32_n)
 
-        def _i32(value):
-            return fx.Int32(value.ir_value() if hasattr(value, "ir_value") else value)
-
-        def _i64(value):
-            return fx.Int64(value.ir_value() if hasattr(value, "ir_value") else value)
-
         # ---- Types ----
         acc_init = (
             Vec.filled(4, 0, fx.Int32)
@@ -398,8 +392,8 @@ def compile_preshuffle_gemm_a8(
             )
 
         # ---- Buffer resources (runtime byte sizes for OOB protection) ----
-        _a_nrec = _i64(c_m * (K * elem_bytes // a_elem_vec_pack))
-        _c_nrec = _i64(c_m * c_n * 2)
+        _a_nrec = fx.Int64(c_m * (K * elem_bytes // a_elem_vec_pack))
+        _c_nrec = fx.Int64(c_m * c_n * 2)
         a_rsrc = buffer_ops.create_buffer_resource(arg_a, max_size=False,
                                                    num_records_bytes=_a_nrec)
         c_rsrc = buffer_ops.create_buffer_resource(arg_c, max_size=False,
@@ -506,7 +500,7 @@ def compile_preshuffle_gemm_a8(
         def _load_b_single(k_dword_offset, ni):
             """Load one 16B B vector using pre-computed k dword offset."""
             dword_idx = _b_n_full_dword_list[ni] + k_dword_offset
-            dword_idx_i32 = _i32(dword_idx)
+            dword_idx_i32 = fx.Int32(dword_idx)
             b_vec4 = buffer_ops.buffer_load(b_rsrc, dword_idx_i32, vec_width=4, dtype=fx.Int32)
             b16 = Vec(b_vec4).bitcast(_elem_dtype())
             return _extract_b_packs(b16)
@@ -646,7 +640,7 @@ def compile_preshuffle_gemm_a8(
             dma_bytes = a_async_load_bytes
             wave_offset = rocdl.readfirstlane(
                 fx.Int64.ir_type,
-                _i64(wave_id * fx.Index(wave_size * dma_bytes)),
+                fx.Int64(wave_id * fx.Index(wave_size * dma_bytes)),
             )
 
             for i in range_constexpr(num_a_async_loads):
@@ -654,11 +648,11 @@ def compile_preshuffle_gemm_a8(
                 col_a_local_sw = swizzle_xor16(row_a_local, col_a_local_i32 * c4, k_blocks16)
                 row_a_global = bx_m + row_a_local
                 global_byte_idx = row_a_global * k_bytes_factor + (base_k_div4 * c4 + col_a_local_sw)
-                global_offset = _i32(global_byte_idx)
+                global_offset = fx.Int32(global_byte_idx)
 
                 if i == 0:
                     lds_base = memref_dialect.extract_aligned_pointer_as_index(lds_buffer)
-                    lds_ptr_base = buffer_ops.create_llvm_ptr(_i64(lds_base), address_space=3)
+                    lds_ptr_base = buffer_ops.create_llvm_ptr(fx.Int64(lds_base), address_space=3)
                     lds_ptr = buffer_ops.get_element_ptr(lds_ptr_base, wave_offset)
                 else:
                     lds_ptr = buffer_ops.get_element_ptr(
@@ -666,10 +660,10 @@ def compile_preshuffle_gemm_a8(
                         static_byte_offset=total_threads * dma_bytes,
                     )
 
-                size_i32 = _i32(dma_bytes)
-                soffset = _i32(0)
-                offset_imm = _i32(0)
-                aux = _i32(1)
+                size_i32 = fx.Int32(dma_bytes)
+                soffset = fx.Int32(0)
+                offset_imm = fx.Int32(0)
+                aux = fx.Int32(1)
 
                 rocdl.raw_ptr_buffer_load_lds(
                     a_rsrc,
@@ -794,7 +788,7 @@ def compile_preshuffle_gemm_a8(
                         f"tile_k must be divisible by 128 for mfma_scale_x128, got tile_k={tile_k}"
                     )
                 mfma_res_ty = Vec.make_type(4, fx.Float32)
-                c0_i64 = _i64(0)
+                c0_i64 = fx.Int64(0)
 
                 _fp4_cbsz = 4 if is_fp4 else 0
                 _fp4_blgp = 4 if is_fp4 else 0
