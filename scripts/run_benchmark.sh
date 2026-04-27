@@ -136,6 +136,17 @@ MOE_W4A16_SHAPES='
 512,7168,256,384,8,16,128,128,128,256
 '
 
+# MoE A8W4 shapes (FP8 activation + MX-FP4 weight, gfx950 only): same format as MOE_SHAPES.
+# GPT-OSS inspired: model_dim=3072, inter_dim=3072, E=128, topk=4; sweep tokens from 512 to
+# bracket memory- and compute-bound regimes.  tile_m>=32 / tile_k>=256 are MX-FP4 layout requirements.
+MOE_A8W4_SHAPES='
+512,3072,3072,128,4,32,128,256,256,256
+1024,3072,3072,128,4,32,128,256,256,256
+2048,3072,3072,128,4,32,128,256,256,256
+4096,3072,3072,128,4,32,128,256,256,256
+8192,3072,3072,128,4,32,128,256,256,256
+'
+
 # Memory bound threshold (M or tokens <= threshold => memory bound)
 MEMORY_BOUND_THRESHOLD=512
 
@@ -192,14 +203,14 @@ print_bound_info() {
 # Print one-line perf row (like run_tests.sh style).
 _fmt_table_header() {
   # Use fixed widths and truncate long strings to keep columns aligned.
-  # (bash printf supports precision on %s: %-W.Ps)
-  printf "\n%-14.14s %-34.34s %-10.10s %10s %10s\n" "op" "shape" "dtype" "TB/s" "TFLOPS"
-  printf "%-14.14s %-34.34s %-10.10s %10s %10s\n" "--------------" "----------------------------------" "----------" "----------" "----------"
+  # op column is wide enough to host "moe_<family>_s2_atomic" / "_reduce" suffixes.
+  printf "\n%-22.22s %-34.34s %-10.10s %10s %10s\n" "op" "shape" "dtype" "TB/s" "TFLOPS"
+  printf "%-22.22s %-34.34s %-10.10s %10s %10s\n" "----------------------" "----------------------------------" "----------" "----------" "----------"
 }
 
 _emit_row() {
   op="$1"; shape="$2"; dtype="$3"; tbps="$4"; tflops="$5"
-  printf "%-14.14s %-34.34s %-10.10s %10s %10s\n" "${op}" "${shape}" "${dtype}" "${tbps}" "${tflops}"
+  printf "%-22.22s %-34.34s %-10.10s %10s %10s\n" "${op}" "${shape}" "${dtype}" "${tbps}" "${tflops}"
 }
 
 _normalize_op() {
@@ -361,6 +372,51 @@ def fmt(x):
     return "-" if x is None else f"{x:.3f}"
 
 print(f"{op}\t{shape}\t{dtype}\t{fmt(tbps)}\t{fmt(tflops)}")
+PY
+}
+
+_emit_moe_s2_rows() {
+  # Args: op_prefix shape log_path
+  # Extract separate atomic/reduce rows from MoE stage2 log lines. A line looks like:
+  #   FlyDSL MoE stage2 [moe_gemm2] fp4 atomic | 7168x2048, ... | 1163.2 us, 1654.24 TFLOPS, 0.377 TB/s
+  # Emit two table rows (op_prefix_atomic, op_prefix_reduce). Falls back to single row
+  # tagged "mixed" if the log only has one mode (e.g., --gemm2_mode was overridden).
+  op_prefix="$1"; shape="$2"; log_path="$3"
+  python3 - "$op_prefix" "$shape" "$log_path" <<'PY'
+import re, sys
+
+op_prefix, shape, path = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    with open(path, "r", errors="ignore") as f:
+        txt = f.read()
+except Exception:
+    txt = ""
+
+pat = re.compile(
+    r"FlyDSL MoE stage2 \[[^]]+\]\s+(\S+)\s+(atomic|reduce)\b.*?"
+    r"([0-9.]+)\s*TFLOPS.*?([0-9.]+)\s*TB/s"
+)
+# keep last occurrence per mode
+found = {}
+for m in pat.finditer(txt):
+    dtype, mode = m.group(1), m.group(2)
+    found[mode] = (dtype, float(m.group(3)), float(m.group(4)))
+
+def fmt(x):
+    return "-" if x is None else f"{x:.3f}"
+
+# Always emit atomic row first (if any), then reduce row.
+emitted = False
+for mode in ("atomic", "reduce"):
+    if mode not in found:
+        continue
+    dtype, tflops, tbps = found[mode]
+    print(f"{op_prefix}_{mode}\t{shape}\t{dtype}\t{fmt(tbps)}\t{fmt(tflops)}")
+    emitted = True
+
+if not emitted:
+    # Nothing parsed — emit empty row so caller knows.
+    print(f"{op_prefix}_atomic\t{shape}\t-\t-\t-")
 PY
 }
 
@@ -671,12 +727,9 @@ if [ "${RUN_MOE}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
       _emit_row "moe_gemm1" "${shape_moe}" "${dt_s1}" "${tb_s1}" "${tf_s1}"
     fi
 
-    dt_s2="$(grep -Eo 'FlyDSL MoE stage2 \[[^]]+\] [^ ]+' "${log}" | tail -1 | awk '{print $NF}' || true)"
-    tf_s2="$(grep -Eo 'FlyDSL MoE stage2 .* ([0-9.]+) TFLOPS' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
-    tb_s2="$(grep -Eo 'FlyDSL MoE stage2 .* ([0-9.]+) TB/s' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
-    if [ -n "${dt_s2}" ] && [ -n "${tf_s2}" ] && [ -n "${tb_s2}" ]; then
-      _emit_row "moe_gemm2" "${shape_moe}" "${dt_s2}" "${tb_s2}" "${tf_s2}"
-    fi
+    _emit_moe_s2_rows "moe_gemm2" "${shape_moe}" "${log}" | while IFS="$(printf '\t')" read -r _op _sh _dt _tb _tf; do
+      _emit_row "${_op}" "${_sh}" "${_dt}" "${_tb}" "${_tf}"
+    done
   done
 
   # MoE FP4 (gfx950 only)
@@ -720,12 +773,9 @@ if [ "${RUN_MOE}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
           _emit_row "moe_fp4_s1" "${shape_moe}" "${dt_s1}" "${tb_s1}" "${tf_s1}"
         fi
 
-        dt_s2="$(grep -Eo 'FlyDSL MoE stage2 \[[^]]+\] [^ ]+' "${log}" | tail -1 | awk '{print $NF}' || true)"
-        tf_s2="$(grep -Eo 'FlyDSL MoE stage2 .* ([0-9.]+) TFLOPS' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
-        tb_s2="$(grep -Eo 'FlyDSL MoE stage2 .* ([0-9.]+) TB/s' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
-        if [ -n "${dt_s2}" ] && [ -n "${tf_s2}" ] && [ -n "${tb_s2}" ]; then
-          _emit_row "moe_fp4_s2" "${shape_moe}" "${dt_s2}" "${tb_s2}" "${tf_s2}"
-        fi
+        _emit_moe_s2_rows "moe_fp4_s2" "${shape_moe}" "${log}" | while IFS="$(printf '\t')" read -r _op _sh _dt _tb _tf; do
+          _emit_row "${_op}" "${_sh}" "${_dt}" "${_tb}" "${_tf}"
+        done
       fi
     else
       # Skip gracefully on unsupported architectures
@@ -780,11 +830,64 @@ if [ "${RUN_MOE}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
       _emit_row "moe_w4a16_s1" "${shape_moe}" "${dt_s1}" "${tb_s1}" "${tf_s1}"
     fi
 
-    dt_s2="$(grep -Eo 'FlyDSL MoE stage2 \[[^]]+\] [^ ]+' "${log}" | tail -1 | awk '{print $NF}' || true)"
-    tf_s2="$(grep -Eo 'FlyDSL MoE stage2 .* ([0-9.]+) TFLOPS' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
-    tb_s2="$(grep -Eo 'FlyDSL MoE stage2 .* ([0-9.]+) TB/s' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
-    if [ -n "${dt_s2}" ] && [ -n "${tf_s2}" ] && [ -n "${tb_s2}" ]; then
-      _emit_row "moe_w4a16_s2" "${shape_moe}" "${dt_s2}" "${tb_s2}" "${tf_s2}"
+    _emit_moe_s2_rows "moe_w4a16_s2" "${shape_moe}" "${log}" | while IFS="$(printf '\t')" read -r _op _sh _dt _tb _tf; do
+      _emit_row "${_op}" "${_sh}" "${_dt}" "${_tb}" "${_tf}"
+    done
+  done
+
+  # MoE A8W4 — FP8 activation + MX-FP4 weight (gfx950 only). End-to-end 2-stage:
+  # stage1 a_dtype=fp8,b_dtype=fp4 -> silu(gate)*up fp16 -> MX-FP8 re-quant -> stage2.
+  for shape in $MOE_A8W4_SHAPES; do
+    [ -z "$shape" ] && continue
+    oldIFS=$IFS
+    IFS=,
+    # shellcheck disable=SC2086 # intentional word-splitting on IFS=,
+    set -- $shape
+    IFS=$oldIFS
+    tokens=$1; model_dim=$2; inter_dim=$3; experts=$4; topk=$5; tile_m=$6; tile_n=$7; tile_k=$8; tile_n2=$9; tile_k2=${10}
+    dtype="a8w4"
+    shape_moe="t${tokens}-d${model_dim}x${inter_dim}-e${experts}k${topk}"
+    log="${BENCH_LOG_DIR}/moe_a8w4_t${tokens}_md${model_dim}_id${inter_dim}_e${experts}_k${topk}.log"
+    if python3 tests/kernels/test_moe_gemm.py \
+      --in_dtype a8w4 \
+      -dim "$model_dim,$inter_dim" \
+      -t "$tokens" \
+      -e "$experts" \
+      -k "$topk" \
+      --num_warmup 10 \
+      --num_iters 100 \
+      --tile_m "$tile_m" \
+      --tile_n "$tile_n" \
+      --tile_k "$tile_k" \
+      --tile_n2 "$tile_n2" \
+      --tile_k2 "$tile_k2" \
+      --skip_ref false \
+      --compare_aiter_ck false >"${log}" 2>&1; then
+      # CLI prints "Skipping a8w4: requires gfx950+" on unsupported archs.
+      if grep -q "requires gfx950\|Skipping a8w4" "${log}"; then
+        _emit_row "moe_a8w4" "${shape_moe}" "${dtype}" "skip" "skip"
+      else
+        SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+
+        dt_s1="$(grep -Eo 'FlyDSL MoE stage1\[[^]]+\]:' "${log}" | tail -1 | cut -d'[' -f2 | cut -d']' -f1 || true)"
+        tf_s1="$(grep -Eo 'FlyDSL MoE stage1\[[^]]+\]:.* ([0-9.]+) TFLOPS' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
+        tb_s1="$(grep -Eo 'FlyDSL MoE stage1\[[^]]+\]:.* ([0-9.]+) TB/s' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
+        if [ -n "${dt_s1}" ] && [ -n "${tf_s1}" ] && [ -n "${tb_s1}" ]; then
+          _emit_row "moe_a8w4_s1" "${shape_moe}" "${dt_s1}" "${tb_s1}" "${tf_s1}"
+        fi
+
+        _emit_moe_s2_rows "moe_a8w4_s2" "${shape_moe}" "${log}" | while IFS="$(printf '\t')" read -r _op _sh _dt _tb _tf; do
+          _emit_row "${_op}" "${_sh}" "${_dt}" "${_tb}" "${_tf}"
+        done
+      fi
+    else
+      if grep -q "requires gfx950\|Skipping a8w4\|not supported" "${log}" 2>/dev/null; then
+        _emit_row "moe_a8w4" "${shape_moe}" "${dtype}" "skip" "skip"
+      else
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+        echo "moe a8w4 failed. Log: ${log}" >&2
+        _show_fail_log "${log}" "moe_a8w4"
+      fi
     fi
   done
 fi

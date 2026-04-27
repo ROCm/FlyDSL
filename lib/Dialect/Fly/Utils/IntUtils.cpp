@@ -250,6 +250,12 @@ IntAttr intApplySwizzle(IntAttr v, SwizzleAttr swizzle) {
                              utils::divisibilityApplySwizzle(v.getDivisibility(), swizzle));
 }
 
+bool isDivisibleBy(IntAttr attr, int32_t divisor) {
+  if (attr.isStatic())
+    return attr.getValue() % divisor == 0;
+  return attr.getDivisibility() % divisor == 0;
+}
+
 BasisAttr operator*(BasisAttr lhs, IntAttr rhs) {
   return BasisAttr::get(lhs.getValue() * rhs, lhs.getModes());
 }
