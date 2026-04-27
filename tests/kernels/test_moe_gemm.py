@@ -1965,8 +1965,9 @@ def test_moe_stage2_standalone(
 # ---------------------------------------------------------------------------
 
 _A16W4_SHAPES = [
-    pytest.param(16, 3072, 3072, 128, 4, 32, 256, 256, id="a16w4-s2-small"),
-    pytest.param(128, 3072, 3072, 128, 4, 64, 256, 256, id="a16w4-s2-medium"),
+    pytest.param(16, 3072, 3072, 128, 4, 32, 256, 256, 1, id="a16w4-s2-small"),
+    pytest.param(128, 3072, 3072, 128, 4, 64, 256, 256, 1, id="a16w4-s2-medium"),
+    pytest.param(4, 3072, 3072, 128, 4, 16, 128, 256, 2, id="a16w4-s2-kbatch2"),
 ]
 
 _A16W4_SKIP = pytest.mark.skipif(
@@ -1977,7 +1978,7 @@ _A16W4_SKIP = pytest.mark.skipif(
 
 @_A16W4_SKIP
 @pytest.mark.parametrize(
-    "tokens, model_dim, inter_dim, experts, topk, tile_m, tile_n, tile_k",
+    "tokens, model_dim, inter_dim, experts, topk, tile_m, tile_n, tile_k, k_batch",
     _A16W4_SHAPES,
 )
 def test_moe_gemm2_a16w4(
@@ -1989,6 +1990,7 @@ def test_moe_gemm2_a16w4(
     tile_m: int,
     tile_n: int,
     tile_k: int,
+    k_batch: int,
     *,
     seed: int = 0,
     atol: float = 1.0,
@@ -2052,6 +2054,7 @@ def test_moe_gemm2_a16w4(
         doweight_stage2=True,
         out_dtype="bf16",
         accumulate=True,
+        k_batch=k_batch,
     )
 
     out_kernel = torch.zeros((tokens, model_dim), device=device, dtype=dtype)
