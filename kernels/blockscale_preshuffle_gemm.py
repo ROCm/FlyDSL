@@ -11,7 +11,7 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.compiler.kernel_function import CompilationContext
 
-from flydsl.expr import range_constexpr
+from flydsl.expr import range_constexpr, const_expr
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 
@@ -206,7 +206,7 @@ def compile_blockscale_preshuffle_gemm(
             base_ptr_ping, lds_ping_offset, T.f8, shape=(tile_m * tile_k,)
         ).get()
 
-        if use_cshuffle_epilog:
+        if const_expr(use_cshuffle_epilog):
             lds_out = SmemPtr(
                 base_ptr_pong, lds_pong_offset, _out_elem_type(),
                 shape=(tile_m * tile_n,)
@@ -404,7 +404,7 @@ def compile_blockscale_preshuffle_gemm(
                 global_byte_idx = row_a_global * k_bytes_factor + (base_k_div4 * c4_bytes + col_a_local_sw)
                 global_offset = arith.index_cast(T.i32, global_byte_idx)
 
-                if i == 0:
+                if const_expr(i == 0):
                     lds_addr = memref_dialect.extract_aligned_pointer_as_index(lds_buffer) + wave_id * 64 * dma_bytes
                     lds_ptr_i64_lane0 = rocdl.readfirstlane(T.i64, arith.index_cast(T.i64, lds_addr))
                 else:
@@ -533,7 +533,7 @@ def compile_blockscale_preshuffle_gemm(
                         curr_row_a_lds = row_a_lds + (mi * 16)
                         a0 = ArithValue(arith.constant(-1, type=T.i64))
                         a1 = ArithValue(arith.constant(-1, type=T.i64))
-                        if a0_prefetch is not None and sb == 0 and mi == 0:
+                        if const_expr(a0_prefetch is not None and sb == 0 and mi == 0):
                             a0, a1 = a0_prefetch
                         else:
                             a0, a1 = lds_load_packs_k64(curr_row_a_lds, col_base0, lds_buffer)
@@ -564,7 +564,7 @@ def compile_blockscale_preshuffle_gemm(
                                 curr_row_a_lds, col_base, lds_buffer
                             )
 
-                            if (
+                            if const_expr(
                                 a0_prefetch is not None
                                 and sb == 0
                                 and ku_local == 0
@@ -596,8 +596,8 @@ def compile_blockscale_preshuffle_gemm(
         vec1_out = T.vec(1, T.bf16) if is_bf16_out else T.vec(1, T.f16)
 
         def store_output(final_accs):
-            if use_cshuffle_epilog:
-                if lds_out is None:
+            if const_expr(use_cshuffle_epilog):
+                if const_expr(lds_out is None):
                     raise RuntimeError(
                         "use_cshuffle_epilog=True but lds_out is not allocated."
                     )
@@ -623,7 +623,7 @@ def compile_blockscale_preshuffle_gemm(
                     idx_out = row * c_n + col_g0
                     byte_off = idx_out * 2
                     e_vec = 4 if (int(tile_n) % (32 * 4)) == 0 else 2
-                    if e_vec == 4:
+                    if const_expr(e_vec == 4):
                         frag_i32x2 = vector.bitcast(T.vec(2, T.i32), frag)
                         buffer_ops.buffer_store(
                             frag_i32x2, c_rsrc, byte_off, offset_is_bytes=True
@@ -680,7 +680,7 @@ def compile_blockscale_preshuffle_gemm(
         def hot_loop_scheduler():
             mfma_group = num_acc_n
             mfma_total = -1
-            if _is_gfx950:
+            if const_expr(_is_gfx950):
                 mfma_total = sb_per_tile * m_repeat * mfma_group
             else:
                 mfma_total = (k_unroll * 2) * m_repeat * mfma_group
@@ -689,24 +689,24 @@ def compile_blockscale_preshuffle_gemm(
 
             rocdl.sched_dsrd(2)
             rocdl.sched_mfma(1)
-            if tile_m == 16:
+            if const_expr(tile_m == 16):
                 rocdl.sched_vmem(1)
             rocdl.sched_mfma(1)
-            if tile_m == 16:
+            if const_expr(tile_m == 16):
                 rocdl.sched_vmem(1)
-            if num_acc_n < 4:
+            if const_expr(num_acc_n < 4):
                 rocdl.sched_dsrd(1)
                 rocdl.sched_mfma(1)
-                if tile_m == 16:
+                if const_expr(tile_m == 16):
                     rocdl.sched_vmem(1)
                 rocdl.sched_dsrd(1)
                 rocdl.sched_mfma(1)
-                if tile_m == 16:
+                if const_expr(tile_m == 16):
                     rocdl.sched_vmem(1)
                 rocdl.sched_mfma(1)
 
             dswr_tail = num_a_loads
-            if dswr_tail > sche_iters:
+            if const_expr(dswr_tail > sche_iters):
                 dswr_tail = sche_iters
             dswr_start = sche_iters - dswr_tail
 
@@ -715,7 +715,7 @@ def compile_blockscale_preshuffle_gemm(
                 rocdl.sched_mfma(mfma_group)
                 rocdl.sched_dsrd(1)
                 rocdl.sched_mfma(mfma_group)
-                if sche_i >= dswr_start - 1:
+                if const_expr(sche_i >= dswr_start - 1):
                     rocdl.sched_dswr(1)
             rocdl.sched_barrier(0)
 
@@ -723,7 +723,7 @@ def compile_blockscale_preshuffle_gemm(
             return lds_load_packs_k64(row_a_lds, col_offset_base_bytes, lds_buffer)
 
         def _load_a_to_lds(base_k, lds_buffer, a_load_bytes_v, tx_i32_base_v, chunk_i32_a_v):
-            if use_async_copy:
+            if const_expr(use_async_copy):
                 prefetch_a_to_lds(base_k, lds_buffer)
             else:
                 store_a_tile_to_lds(
@@ -747,7 +747,7 @@ def compile_blockscale_preshuffle_gemm(
         num_tiles = K // tile_k
         final_accs = global_accs
 
-        if (num_tiles % 2) == 1:
+        if const_expr((num_tiles % 2) == 1):
             for k_iv in range_constexpr(0, K - tile_k, tile_k * 2):
                 _k = fx.Index(k_iv)
                 next_k1 = _k + tile_k
@@ -762,7 +762,7 @@ def compile_blockscale_preshuffle_gemm(
                 a0_prefetch_pong = None
 
                 hot_loop_scheduler()
-                if use_async_copy:
+                if const_expr(use_async_copy):
                     rocdl.s_waitcnt(num_b_loads)
                 gpu.barrier()
                 a0_prefetch_ping = prefetch_a0_pack(lds_a_ping)
@@ -779,7 +779,7 @@ def compile_blockscale_preshuffle_gemm(
                 a0_prefetch_ping = None
 
                 hot_loop_scheduler()
-                if use_async_copy:
+                if const_expr(use_async_copy):
                     rocdl.s_waitcnt(num_b_loads)
                 gpu.barrier()
                 a0_prefetch_pong = prefetch_a0_pack(lds_a_pong)
@@ -803,7 +803,7 @@ def compile_blockscale_preshuffle_gemm(
                 )
                 a0_prefetch_pong = None
                 hot_loop_scheduler()
-                if use_async_copy:
+                if const_expr(use_async_copy):
                     rocdl.s_waitcnt(num_b_loads)
                 gpu.barrier()
 
@@ -821,7 +821,7 @@ def compile_blockscale_preshuffle_gemm(
                 a0_prefetch_ping = None
 
                 hot_loop_scheduler()
-                if use_async_copy:
+                if const_expr(use_async_copy):
                     rocdl.s_waitcnt(num_b_loads)
                 gpu.barrier()
                 a0_prefetch_pong = prefetch_a0_pack(lds_a_pong)
@@ -840,7 +840,7 @@ def compile_blockscale_preshuffle_gemm(
             a0_prefetch_pong = None
 
             hot_loop_scheduler()
-            if use_async_copy:
+            if const_expr(use_async_copy):
                 rocdl.s_waitcnt(num_b_loads)
             gpu.barrier()
             a0_prefetch_ping = prefetch_a0_pack(lds_a_ping)
@@ -876,11 +876,11 @@ def compile_blockscale_preshuffle_gemm(
 
         launcher = kernel_gemm(arg_c, arg_a, arg_b, arg_scale_a, arg_scale_b,
                                i32_m, i32_n)
-        if waves_per_eu is not None:
+        if const_expr(waves_per_eu is not None):
             _wpe = int(waves_per_eu)
-            if _wpe >= 1:
+            if const_expr(_wpe >= 1):
                 for op in ctx.gpu_module_body.operations:
-                    if hasattr(op, 'attributes') and op.OPERATION_NAME == "gpu.func":
+                    if const_expr(hasattr(op, 'attributes') and op.OPERATION_NAME == "gpu.func"):
                         op.attributes["rocdl.waves_per_eu"] = ir.IntegerAttr.get(
                             T.i32, _wpe)
         launcher.launch(

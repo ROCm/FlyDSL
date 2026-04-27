@@ -15,7 +15,7 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.compiler.kernel_function import CompilationContext
 
-from flydsl.expr import arith, gpu, range_constexpr
+from flydsl.expr import arith, const_expr, gpu, range_constexpr
 from flydsl.expr.arith import ArithValue
 from flydsl.expr.typing import T, Int32
 from flydsl.expr.vector import ReductionOp, full
@@ -93,7 +93,7 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
             return w
 
         def block_reduce_add2(val0, val1):
-            if RED_SLOTS == 1:
+            if const_expr(RED_SLOTS == 1):
                 return wave_reduce_add(val0), wave_reduce_add(val1)
 
             lane = tid % WARP_SIZE
@@ -149,7 +149,7 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
         # Uses buffer_load / buffer_store for high-bandwidth vectorised
         # memory access (same approach as preshuffle_gemm).
         # ==================================================================
-        if N == (BLOCK_THREADS * VEC_WIDTH * 4) and elem_bits <= 16:
+        if const_expr(N == (BLOCK_THREADS * VEC_WIDTH * 4) and elem_bits <= 16):
             num_tiles_py = 4
             elem_dtype = Numeric.from_ir_type(elem_type)
 
@@ -211,7 +211,7 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
             for tile_i in range_constexpr(num_tiles_py):
                 g_next = g_cur
                 b_next = b_cur
-                if tile_i + 1 < num_tiles_py:
+                if const_expr(tile_i + 1 < num_tiles_py):
                     next_idx = tid + (tile_i + 1) * BLOCK_THREADS
                     g_next = _load_vec(gamma_div, next_idx).to(Float32)
                     b_next = _load_vec(beta_div, next_idx).to(Float32)
@@ -224,8 +224,8 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                 y = y * g_cur + b_cur
 
                 out_e = y.to(elem_dtype)
-                if dtype_str == "bf16":
-                    if USE_HW_CVT_PK_BF16_F32:
+                if const_expr(dtype_str == "bf16"):
+                    if const_expr(USE_HW_CVT_PK_BF16_F32):
                         out_e = y.to(elem_dtype)
                     else:
                         u = y.bitcast(Uint32)
@@ -239,7 +239,7 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                         odd_sh = odd << 16
                         packed = even | odd_sh
                         out_e = packed.bitcast(elem_dtype)
-                elif dtype_str == "f32":
+                elif const_expr(dtype_str == "f32"):
                     out_e = y
                 else:
                     out_e = y.to(elem_dtype)
@@ -346,9 +346,9 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                     scaled = norm * g
                     y = scaled + b
                     y_e = y
-                    if dtype_str == "bf16":
+                    if const_expr(dtype_str == "bf16"):
                         y_e = y.truncf(elem_type)
-                    elif dtype_str == "f32":
+                    elif const_expr(dtype_str == "f32"):
                         y_e = y
                     else:
                         y_e = y.truncf(elem_type)

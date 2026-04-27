@@ -15,7 +15,7 @@ import flydsl
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.expr.typing import T
-from flydsl.expr import range_constexpr, arith, vector, gpu, rocdl
+from flydsl.expr import range_constexpr, const_expr, arith, vector, gpu, rocdl
 from flydsl._mlir import ir
 from flydsl.runtime.device import get_rocm_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
@@ -229,7 +229,7 @@ def compile_hgemm_kernel(
         base_ptr = allocator.get_base()
         smem_a_ptr = SmemPtr(base_ptr, smem_a_offset, dtype_, shape=(STAGES * BLOCK_M * BLOCK_K,))
         as_ = STensor(smem_a_ptr, dtype_, shape=(STAGES, BLOCK_M, BLOCK_K))
-        if B_TO_LDS:
+        if const_expr(B_TO_LDS):
             smem_b_ptr = SmemPtr(base_ptr, smem_b_offset, dtype_, shape=(STAGES * BLOCK_N * BLOCK_K,))
             bs_ = STensor(smem_b_ptr, dtype_, shape=(STAGES, BLOCK_N, BLOCK_K))
         smem_c_ptr = SmemPtr(base_ptr, smem_a_offset, dtype_, shape=(BLOCK_M * BLOCK_N,))
@@ -321,7 +321,7 @@ def compile_hgemm_kernel(
             gpu.barrier()
 
         def split_k_barrier():
-            if True:
+            if const_expr(True):
                 init_cur = arith.constant(0, type=T.i32)
                 w = scf.WhileOp([T.i32], [init_cur])
                 before = ir.Block.create_at_start(w.before, [T.i32])
@@ -524,7 +524,7 @@ def compile_hgemm_kernel(
                     a_frag = a_frags[kk * WARP_M_STEPS + ii]
                     for jj in range_constexpr(WARP_N_STEPS):
                         b_frag = b_frags[kk * WARP_N_STEPS + jj]
-                        if MFMA_PER_WARP_K == 2:
+                        if const_expr(MFMA_PER_WARP_K == 2):
                             # split a
                             a_i64x2 = vector.bitcast(T.i64x2, a_frag)
                             a0_i64 = vector.extract(a_i64x2, static_position=[0], dynamic_position=[])
@@ -542,15 +542,15 @@ def compile_hgemm_kernel(
                             acc_in = c_frags[c_idx]
                             acc_mid = WMMA_IMPL(a_v0, b_v0, acc_in)
                             c_frags[c_idx] = WMMA_IMPL(a_v1, b_v1, acc_mid)
-                        elif MFMA_PER_WARP_K == 1:
+                        elif const_expr(MFMA_PER_WARP_K == 1):
                             c_idx = ii * WARP_N_STEPS + jj
                             c_frags[c_idx] = WMMA_IMPL(a_frag, b_frag, c_frags[c_idx])
                         else:
                             raise NotImplementedError(f"MFMA_PER_WARP_K={MFMA_PER_WARP_K} not supported")
         
-        if IS_SPLIT_K:
+        if const_expr(IS_SPLIT_K):
             zero_c()
-        
+
         if const_expr(B_TO_LDS):
 
             sts_a(ldg_a(ks_begin), 0)
@@ -680,7 +680,7 @@ def compile_hgemm_kernel(
                     cs_[lds_m_idx, lds_n_idx] = val.truncf(dtype_)
         
         # write back to global
-        if IS_SPLIT_K:
+        if const_expr(IS_SPLIT_K):
             split_k_barrier()
             out_raw = fly_values(C)[0]
             out_base_ptr = fly.extract_aligned_pointer_as_index(_ptr_type, out_raw)

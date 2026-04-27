@@ -17,7 +17,7 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.compiler.kernel_function import CompilationContext
 
-from flydsl.expr import arith, gpu, range_constexpr
+from flydsl.expr import arith, const_expr, gpu, range_constexpr
 from flydsl.expr.arith import ArithValue
 from flydsl.expr.typing import T, Int32
 from flydsl.expr.vector import ReductionOp, full
@@ -82,14 +82,14 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
             for _sh_exp in range_constexpr(int(math.log2(WARP_SIZE))):
                 off = fx.Int32(WARP_SIZE // (2 << _sh_exp))
                 peer = w.shuffle_xor(off, width_i32)
-                if mode == "max":
+                if const_expr(mode == "max"):
                     w = w.maximumf(peer)
                 else:
                     w = w.addf(peer, fastmath=fm_fast)
             return w
 
         def block_reduce(val, mode, s_red_buffer):
-            if RED_SLOTS == 1:
+            if const_expr(RED_SLOTS == 1):
                 return wave_reduce(val, mode)
 
             lane = tid % WARP_SIZE
@@ -123,7 +123,7 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
         # ==================================================================
         # Fast path: N is a multiple of tile_cols
         # ==================================================================
-        if False and N >= tile_cols and N % tile_cols == 0:
+        if const_expr(False and N >= tile_cols and N % tile_cols == 0):
             from flydsl.expr import math as fmath
 
             num_tiles = N // tile_cols
@@ -269,7 +269,7 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
                 if arith.cmpi(arith.CmpIPredicate.ult, idx, Int32(N)):
                     norm_val = ArithValue(exp_val) * inv_sum
                     out_e = norm_val
-                    if dtype_str == "f32":
+                    if const_expr(dtype_str == "f32"):
                         out_e = norm_val
                     else:
                         out_e = norm_val.truncf(elem_type)

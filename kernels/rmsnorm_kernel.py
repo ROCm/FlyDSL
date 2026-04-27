@@ -14,7 +14,7 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.compiler.kernel_function import CompilationContext
 
-from flydsl.expr import arith, gpu, range_constexpr
+from flydsl.expr import arith, const_expr, gpu, range_constexpr
 from flydsl.expr.arith import ArithValue
 from flydsl.expr.typing import T, Int32
 from flydsl.expr.vector import ReductionOp, full
@@ -90,7 +90,7 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
             return r0
 
         def block_reduce_add2(val0, val1):
-            if RED_SLOTS == 1:
+            if const_expr(RED_SLOTS == 1):
                 return wave_reduce_add(val0), wave_reduce_add(val1)
 
             lane = tid % WARP_SIZE
@@ -129,7 +129,7 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
         # ==================================================================
         # Fast path: N is a multiple of tile_cols
         # ==================================================================
-        if N >= tile_cols and N % tile_cols == 0 and elem_bits <= 16:
+        if const_expr(N >= tile_cols and N % tile_cols == 0 and elem_bits <= 16):
             num_tiles = N // tile_cols
             elem_dtype = Numeric.from_ir_type(elem_type)
 
@@ -192,8 +192,8 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
                 y = (x * rrms) * g
 
                 out_e = y.to(elem_dtype)
-                if dtype_str == "bf16":
-                    if USE_HW_CVT_PK_BF16_F32:
+                if const_expr(dtype_str == "bf16"):
+                    if const_expr(USE_HW_CVT_PK_BF16_F32):
                         out_e = y.to(elem_dtype)
                     else:
                         u = y.bitcast(Uint32)
@@ -207,7 +207,7 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
                         odd_sh = odd << 16
                         packed = even | odd_sh
                         out_e = packed.bitcast(elem_dtype)
-                elif dtype_str == "f32":
+                elif const_expr(dtype_str == "f32"):
                     out_e = y
                 else:
                     out_e = y.to(elem_dtype)
@@ -283,9 +283,9 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
                     g = g_e if dtype_str == "f32" else g_e.extf(compute_type)
                     norm = ArithValue(x) * rrms
                     y = norm * g
-                    if dtype_str == "f32":
+                    if const_expr(dtype_str == "f32"):
                         y_e = y
-                    elif dtype_str == "bf16":
+                    elif const_expr(dtype_str == "bf16"):
                         y_e = y.truncf(elem_type)
                     else:
                         y_e = y.truncf(elem_type)
