@@ -369,13 +369,33 @@ def _pipeline_fragments(backend) -> tuple:
 
 class MlirCompiler:
     @classmethod
-    def compile(cls, module: ir.Module, *, arch: str = "", func_name: str = "") -> ir.Module:
+    def compile(cls, module: ir.Module, *, arch: str = "", func_name: str = "", link_libs: Optional[list] = None) -> ir.Module:
         module.operation.verify()
 
         backend = get_backend(arch=arch)
 
         module = ir.Module.parse(module.operation.get_asm(enable_debug_info=env.debug.enable_debug_info))
         fragments, llvm_opts = _pipeline_fragments(backend)
+
+        if link_libs:
+            link_opt = " ".join(f"l={lib}" for lib in link_libs)
+            new_fragments = []
+            found_rocdl = False
+            for f in fragments:
+                if "rocdl-attach-target" in f:
+                    if f.endswith("}"):
+                        base = f[:-1].rstrip()
+                    else:
+                        base = f.rstrip()
+                    new_fragments.append(f"{base} {link_opt}" + "}")
+                    found_rocdl = True
+                else:
+                    new_fragments.append(f)
+            if not found_rocdl:
+                raise RuntimeError(
+                    "link_libs specified but no 'rocdl-attach-target' fragment found in pipeline"
+                )
+            fragments = new_fragments
 
         from .llvm_options import llvm_options as _llvm_options
         _llvm_ctx = _llvm_options(llvm_opts) if llvm_opts else nullcontext()
@@ -805,7 +825,11 @@ class JitFunction:
 
             with ir.InsertionPoint(module.body), loc:
                 backend = get_backend()
-                gpu_module = create_gpu_module("kernels", targets=backend.gpu_module_targets())
+                # rocdl-attach-target is the sole source of GPU target
+                # attributes on the JIT path; passing targets here would
+                # double them up and break bitcode linking
+                # (hipErrorNoBinaryForGpu).
+                gpu_module = create_gpu_module("kernels")
 
                 func_op = func.FuncOp(self.func.__name__, (ir_types, []))
                 func_op.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()
@@ -829,12 +853,22 @@ class JitFunction:
 
             original_ir = module.operation.get_asm(enable_debug_info=True)
 
-            compiled_module = MlirCompiler.compile(module, arch=backend.target.arch, func_name=self.func.__name__)
+            # Extern-symbol integration is carried entirely via
+            # CompilationContext: each ExternFunction populates
+            # link_libs and post_load_processors at declaration time,
+            # so the JIT path depends on no framework-specific import.
+            link_libs = list(comp_ctx.link_libs) if comp_ctx.link_libs else None
+            post_load_processors = list(comp_ctx.post_load_processors)
+
+            compiled_module = MlirCompiler.compile(
+                module, arch=backend.target.arch, func_name=self.func.__name__, link_libs=link_libs,
+            )
 
             compiled_func = CompiledArtifact(
                 compiled_module,
                 self.func.__name__,
                 original_ir,
+                post_load_processors=post_load_processors,
             )
 
             # Always keep a reference to the latest compilation result so

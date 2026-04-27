@@ -2,14 +2,66 @@
 # Copyright (c) 2025 FlyDSL Project Contributors
 
 import ctypes
+import importlib
+import pickle
 import threading
+import warnings
 from functools import lru_cache
 from pathlib import Path
-from typing import List
+from typing import Any, Callable, List, Optional
 
 from .._mlir import ir
 from .._mlir.execution_engine import ExecutionEngine
 from .protocol import fly_pointers
+
+
+# C prototype for the runtime callback installed by
+# mgpuSetModuleLoadCallback.  Keep at module scope so ctypes generates
+# the type once; per-compilation wrappers simply wrap a fresh Python
+# closure in this CFUNCTYPE.
+_ModuleLoadCb = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p)
+
+
+def _qualname(fn: Callable) -> Optional[str]:
+    """Serialise a callable as ``module:qualname``; return None if not possible.
+
+    Rejects anything that can't round-trip through ``_resolve_qualname``:
+
+    - Missing ``__module__`` / ``__qualname__``.
+    - ``__qualname__`` containing ``<`` (lambdas → ``<lambda>``,
+      nested / closure functions → ``<locals>``, comprehensions, etc.).
+    - Bound methods: ``__qualname__`` looks fine (``Class.method``) but
+      resolving it yields the *unbound* function, silently dropping ``self``.
+
+    As a final safety net we verify the generated ref actually resolves
+    back to *fn* in the current process — if not, we refuse.
+    """
+    mod = getattr(fn, "__module__", None)
+    qn = getattr(fn, "__qualname__", None)
+    if not mod or not qn:
+        return None
+    if "<" in qn:
+        return None
+    if getattr(fn, "__self__", None) is not None:
+        return None
+    ref = f"{mod}:{qn}"
+    # Round-trip check: guarantees the symbol is actually reachable
+    # under the name we plan to write into the pickle stream.
+    if _resolve_qualname(ref) is not fn:
+        return None
+    return ref
+
+
+def _resolve_qualname(ref: str) -> Optional[Callable]:
+    """Inverse of _qualname; silently returns None on failure."""
+    try:
+        mod_name, qn = ref.split(":", 1)
+        obj = importlib.import_module(mod_name)
+        for part in qn.split("."):
+            obj = getattr(obj, part)
+        return obj
+    except Exception:
+        return None
 
 
 @lru_cache(maxsize=1)
@@ -52,11 +104,13 @@ class CompiledArtifact:
         self,
         compiled_module: ir.Module,
         func_name: str,
-        source_ir: str = None,
+        source_ir: Optional[str] = None,
+        post_load_processors: Optional[List[Callable]] = None,
     ):
         self._ir_text = str(compiled_module)
         self._entry = func_name
         self._source_ir = source_ir
+        self._post_load_processors = post_load_processors or []
         self._module = None
         self._engine = None
         self._func_exe = None
@@ -64,16 +118,73 @@ class CompiledArtifact:
         self._packer = _ArgPacker()
 
     def __getstate__(self):
+        # Serialise post-load processors by fully-qualified name so the
+        # pickle stream carries no concrete callables.
+        #
+        # If any processor cannot be represented as module:qualname
+        # (e.g. lambdas, functools.partial, bound methods) we *refuse*
+        # to pickle instead of silently dropping it.  Silently dropping
+        # would let the disk cache round-trip a kernel that later
+        # launches without running its required initialiser, and the
+        # first kernel launch on the next process would GPU-fault on
+        # uninitialised device-side globals — with a stack that gives
+        # no hint about the missing processor.  Raising here means:
+        # (a) the failure is visible during cache-write, before any
+        # user sees a mysterious fault, and (b) the caller (typically
+        # the on-disk cache layer) can fall back to "memory cache
+        # only" for this artifact without crashing the run.
+        refs: List[str] = []
+        unpicklable: List[str] = []
+        for p in self._post_load_processors:
+            ref = _qualname(p)
+            if ref is None:
+                unpicklable.append(repr(p))
+            else:
+                refs.append(ref)
+        if unpicklable:
+            raise pickle.PicklingError(
+                "CompiledArtifact has post-load processors that are not "
+                "representable as module:qualname: "
+                f"{unpicklable}.  Wrap them in a top-level function in a "
+                "regular Python module so the on-disk cache can re-import "
+                "them after pickle round-trip (lambdas, partial, and bound "
+                "methods are not supported).  If this artifact genuinely "
+                "must not be cached to disk, suppress the disk-cache write "
+                "path for it."
+            )
         return {
             "ir_text": self._ir_text,
             "entry": self._entry,
             "source_ir": self._source_ir,
+            "processor_refs": refs,
         }
 
     def __setstate__(self, state):
         self._ir_text = state["ir_text"]
         self._entry = state["entry"]
         self._source_ir = state["source_ir"]
+        self._post_load_processors = []
+        missing: List[str] = []
+        for ref in state.get("processor_refs", []):
+            fn = _resolve_qualname(ref)
+            if fn is None:
+                missing.append(ref)
+            else:
+                self._post_load_processors.append(fn)
+        if missing:
+            # The referenced module/qualname could not be imported in this
+            # process even though the artifact was pickled successfully.
+            # This is usually an environment mismatch (different installed
+            # packages) rather than an artifact bug, so warn loudly — the
+            # kernel may still work if its processors were for a different
+            # optional integration — but let the user decide.
+            warnings.warn(
+                "CompiledArtifact was unpickled without some post-load "
+                f"processors (could not resolve: {missing}); kernels that "
+                "rely on them may fail at launch time.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
         self._module = None
         self._engine = None
         self._func_exe = None
@@ -85,22 +196,77 @@ class CompiledArtifact:
             if self._engine is not None:
                 return
 
-            # Create context and immediately exit the with-block, but
-            # keep a reference so the context is not garbage-collected.
-            # Destroying the context while ExecutionEngine still holds
-            # HSA code objects causes GPU memory access faults.
-            ctx = ir.Context()
-            with ctx:
-                ctx.load_all_available_dialects()
-                self._module = ir.Module.parse(self._ir_text)
-                self._engine = ExecutionEngine(
-                    self._module,
-                    opt_level=3,
-                    shared_libs=_resolve_runtime_libs(),
+            loaded_modules: List[int] = []
+            cb_ref: Optional[Any] = None
+            runtime_lib: Optional[ctypes.CDLL] = None
+
+            if self._post_load_processors:
+                runtime_lib = ctypes.CDLL(str(_resolve_runtime_libs()[0]))
+                # argtypes use c_void_p so both a ctypes CFUNCTYPE
+                # instance (via ctypes.cast) and None (NULL) share the
+                # same entry point.
+                runtime_lib.mgpuSetModuleLoadCallback.argtypes = [
+                    ctypes.c_void_p, ctypes.c_void_p,
+                ]
+                runtime_lib.mgpuSetModuleLoadCallback.restype = None
+
+                @_ModuleLoadCb
+                def _on_module_load(module, _user):
+                    loaded_modules.append(module)
+
+                # Keep a strong reference to the ctypes trampoline for
+                # the entire engine-init window; letting it be GC'd
+                # while the C++ runtime still holds the pointer would
+                # SIGSEGV on the next hipModuleLoadData.
+                cb_ref = _on_module_load
+                runtime_lib.mgpuSetModuleLoadCallback(
+                    ctypes.cast(cb_ref, ctypes.c_void_p), None,
                 )
-                self._engine.initialize()
-            # Store ctx to prevent GC (but no longer the active context)
-            self._ctx = ctx
+
+            try:
+                # Keep the Context alive on self._ctx: destroying it
+                # while ExecutionEngine still holds HSA code objects
+                # causes GPU memory access faults.
+                ctx = ir.Context()
+                with ctx:
+                    ctx.load_all_available_dialects()
+                    self._module = ir.Module.parse(self._ir_text)
+                    self._engine = ExecutionEngine(
+                        self._module,
+                        opt_level=3,
+                        shared_libs=_resolve_runtime_libs(),
+                    )
+                    self._engine.initialize()
+                self._ctx = ctx
+            finally:
+                if runtime_lib is not None:
+                    runtime_lib.mgpuSetModuleLoadCallback(None, None)
+                del cb_ref
+
+            # Post-condition: if callers registered post-load
+            # processors, at least one module load MUST have been
+            # observed on this thread.  Zero observations means the
+            # C++ runtime's thread_local callback contract is violated
+            # — e.g. MLIR started loading modules on a worker thread.
+            # Fail loud here rather than let kernel launch segfault
+            # on uninitialised device globals.
+            if self._post_load_processors and not loaded_modules:
+                raise RuntimeError(
+                    "post_load_processors registered but no hipModuleLoad "
+                    "was observed in the engine-init thread.  This breaks "
+                    "the thread_local callback contract in "
+                    "FlyRocmRuntimeWrappers.cpp (mgpuSetModuleLoadCallback) "
+                    "— the most likely cause is that MLIR ExecutionEngine "
+                    "started loading GPU modules asynchronously on a "
+                    "worker thread.  Device-side globals (e.g. mori shmem's "
+                    "globalGpuStates) will be uninitialised at kernel "
+                    "launch.  See jit_executor.py and the contract "
+                    "comment atop FlyRocmRuntimeWrappers.cpp."
+                )
+
+            for proc in self._post_load_processors:
+                for module in loaded_modules:
+                    proc(module)
 
     def _get_func_exe(self):
         if self._func_exe is None:
