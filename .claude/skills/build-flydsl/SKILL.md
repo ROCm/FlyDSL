@@ -22,7 +22,7 @@ LLVM/MLIR build with Python bindings, followed by the FlyDSL C++ dialect and Pyt
 
 ## Prerequisites
 
-- **ROCm 6.x or 7.x** (for GPU execution)
+- **ROCm 7.x** (for GPU execution)
 - **cmake** >= 3.20, C++17 compiler, **ninja** (recommended)
 - **Python** 3.10+ with pip
 - **Git** (to clone LLVM)
