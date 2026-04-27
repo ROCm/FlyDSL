@@ -707,9 +707,9 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
         for pass_idx in range_constexpr(4):
             if const_expr(pass_idx == 0):
                 off = 0
-            elif pass_idx == 1:
+            elif const_expr(pass_idx == 1):
                 off = KV_BYTES_PER_ROW
-            elif pass_idx == 2:
+            elif const_expr(pass_idx == 2):
                 off = KV_SUB_BYTES
             else:
                 off = KV_SUB_BYTES + KV_BYTES_PER_ROW
