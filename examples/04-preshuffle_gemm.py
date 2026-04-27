@@ -71,20 +71,25 @@ def gemm_kernel(
     gA_k_stride = fx.get_scalar(gA_k.stride[2])
     gB_k_stride = fx.get_scalar(gB_k.stride[2])
 
+    gA_k_stride = fx.get_scalar(gA_k.stride[2])
+    gB_k_stride = fx.get_scalar(gB_k.stride[2])
+
     def run_pipeline_stage(read_stage, next_k, read_next=True):
         write_stage = read_stage ^ 1
 
         if fx.const_expr(read_next):
             next_k = fx.Int32(next_k)
             fx.copy(
-                buffer_copy_128b.set_value("soffset", next_k * gA_k_stride),
+                buffer_copy_128b,
                 thr_gA_k[None, None, None, 0],  # global offset is added on the soffset of buffer_copy_atom
                 copy_frag_A,
+                soffset=next_k * gA_k_stride,
             )
             fx.copy(
-                buffer_copy_128b.set_value("soffset", next_k * gB_k_stride),
+                buffer_copy_128b,
                 thr_gB_k[None, None, None, 0],
                 mma_frag_B_retile[None, None, None, write_stage],
+                soffset=next_k * gB_k_stride,
             )
 
         for block_k_iter in fx.range_constexpr(BLOCK_K // 32):

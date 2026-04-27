@@ -39,7 +39,7 @@ KV cache layouts:
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 
-from flydsl.expr import arith, vector, buffer_ops, range_constexpr
+from flydsl.expr import arith, vector, buffer_ops, range_constexpr, const_expr
 from flydsl.expr.arith import ArithValue
 from flydsl.expr.typing import T
 from kernels.kernels_common import get_warp_size
@@ -160,7 +160,7 @@ def build_fused_rope_cache_module(
         # Handles VEC_WIDTH=1 (vector<1xbf16/f16>, 16-bit) and VEC_WIDTH=2 (vector<2xbf16/f16>, 32-bit).
         def ds_bpermute_pair(vec_val, pair_byte_addr):
             """Return the copy of vec_val held by the rotary-pair thread, via ds_bpermute."""
-            if VEC_WIDTH == 1:
+            if const_expr(VEC_WIDTH == 1):
                 # vector<1xf16/bf16> → extract scalar → bitcast to i16 → zero-extend i32
                 elem_val = vector.extract(vec_val, static_position=[0], dynamic_position=[])
                 i16_val = ArithValue(elem_val).bitcast(T.i16)
@@ -186,7 +186,7 @@ def build_fused_rope_cache_module(
         if tid < fx.Int32(vecs_per_head):
             # --- Load position (scalar i32) ---
             pos_rsrc = buffer_ops.create_buffer_resource(Positions, max_size=True)
-            if pos_dtype == "i64":
+            if const_expr(pos_dtype == "i64"):
                 pos_elem_off = ArithValue(pid_t) * 2
             else:
                 pos_elem_off = pid_t
@@ -257,7 +257,7 @@ def build_fused_rope_cache_module(
 
                 # --- KV Cache write ---
                 slot_rsrc = buffer_ops.create_buffer_resource(SlotMapping, max_size=True)
-                if pos_dtype == "i64":
+                if const_expr(pos_dtype == "i64"):
                     slot_elem_off = ArithValue(pid_t) * 2
                 else:
                     slot_elem_off = pid_t
@@ -273,7 +273,7 @@ def build_fused_rope_cache_module(
                     v_div = fx.logical_divide(v_row, vec_div_lay)
                     v_e = load_vec(v_div, tid)
 
-                    if apply_scale:
+                    if const_expr(apply_scale):
                         # --- fp8 KV cache path (raw buffer_ops for fp8 intrinsics) ---
                         ks_buf = fx.rocdl.make_buffer_tensor(KScale)
                         vs_buf = fx.rocdl.make_buffer_tensor(VScale)
@@ -302,7 +302,7 @@ def build_fused_rope_cache_module(
                         kc_fp8_rsrc = buffer_ops.create_buffer_resource(KeyCache, max_size=True)
                         vc_fp8_rsrc = buffer_ops.create_buffer_resource(ValueCache, max_size=True)
 
-                        if VEC_WIDTH >= 4:
+                        if const_expr(VEC_WIDTH >= 4):
                             def pack_fp8(vals):
                                 i32s = []
                                 for i in range_constexpr(VEC_WIDTH // 4):
@@ -318,7 +318,7 @@ def build_fused_rope_cache_module(
                             k_fp8 = pack_fp8(k_scaled)
                             v_fp8 = pack_fp8(v_scaled)
 
-                            if flash_layout:
+                            if const_expr(flash_layout):
                                 kc_byte_off = (
                                     pid_t_slot * (block_size * num_kv_heads * head_dim)
                                     + pid_b * (num_kv_heads * head_dim)
@@ -370,7 +370,7 @@ def build_fused_rope_cache_module(
 
                                 d_idx = ArithValue(tid) * VEC_WIDTH + vi
 
-                                if flash_layout:
+                                if const_expr(flash_layout):
                                     byte_off = (
                                         pid_t_slot * (block_size * num_kv_heads * head_dim)
                                         + pid_b * (num_kv_heads * head_dim)
@@ -400,7 +400,7 @@ def build_fused_rope_cache_module(
                                     buffer_ops.buffer_store(v_byte, vc_fp8_rsrc, vc_byte_off)
                     else:
                         # --- bf16/f16 KV cache path ---
-                        if flash_layout:
+                        if const_expr(flash_layout):
                             # Flash layout: contiguous [num_blocks, block_size, KH, D]
                             KC_buf = fx.rocdl.make_buffer_tensor(KeyCache)
                             VC_buf = fx.rocdl.make_buffer_tensor(ValueCache)

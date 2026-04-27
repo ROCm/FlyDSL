@@ -4,7 +4,7 @@
 import ctypes
 import enum
 from inspect import isclass
-from typing import Generic, Type, TypeVar
+from typing import Generic, Type, TypeVar, overload
 
 from flydsl.runtime.device import get_rocm_arch
 
@@ -653,8 +653,18 @@ class CopyAtom(BuiltinDslType):
     def layout_ref_tv(self):
         return static(self.type.tv_layout_ref)
 
+    @overload
+    def set_value(self, field: str, value, loc=None, ip=None): ...
+    @overload
+    def set_value(self, field: dict, loc=None, ip=None): ...
+
     @traced_op
-    def set_value(self, field, value, loc=None, ip=None):
+    def set_value(self, field, value=None, loc=None, ip=None):
+        if isinstance(field, dict):
+            result = self
+            for k, v in field.items():
+                result = atom_set_value(result, k, v, loc=loc, ip=ip)
+            return result
         return atom_set_value(self, field, value, loc=loc, ip=ip)
 
 
@@ -684,8 +694,18 @@ class MmaAtom(BuiltinDslType):
     def layout_C_tv(self):
         return static(self.type.tv_layout_c)
 
+    @overload
+    def set_value(self, field: str, value, loc=None, ip=None): ...
+    @overload
+    def set_value(self, field: dict, loc=None, ip=None): ...
+
     @traced_op
-    def set_value(self, field, value, loc=None, ip=None):
+    def set_value(self, field, value=None, loc=None, ip=None):
+        if isinstance(field, dict):
+            result = self
+            for k, v in field.items():
+                result = atom_set_value(result, k, v, loc=loc, ip=ip)
+            return result
         return atom_set_value(self, field, value, loc=loc, ip=ip)
 
 
