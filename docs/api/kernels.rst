@@ -16,7 +16,11 @@ GEMM Kernels
 MoE (Mixture-of-Experts) Kernels
 ----------------------------------
 
-- ``kernels.moe_gemm_2stage`` -- MoE GEMM with 2-stage pipeline (stage1 + stage2)
+- ``kernels.moe_gemm_2stage`` -- CDNA / MFMA MoE GEMM with 2-stage pipeline
+- ``kernels.rdna_moe_gemm_2stage`` -- RDNA4 (``gfx120x`` / ``gfx1201``) MoE
+  GEMM 2-stage, fp16/bf16 WMMA
+- ``kernels.moe_gemm_2stage_wmma_gfx1250`` -- gfx1250 (MI450) MoE GEMM
+  2-stage, fp16/bf16 WMMA with TDM
 - ``kernels.mixed_moe_gemm_2stage`` -- Mixed-precision MoE GEMM
 - ``kernels.moe_blockscale_2stage`` -- MoE with block-scale quantization (MXFP4)
 - ``kernels.moe_reduce`` -- MoE reduction kernel: sums over the topk dimension
