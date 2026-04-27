@@ -7,12 +7,22 @@ from abc import ABC, abstractmethod
 
 import flydsl
 import flydsl.expr as fx
+import flydsl.compiler as flyc
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import fly, llvm
 from flydsl.compiler.protocol import fly_values
 from flydsl.expr.typing import T
 
 from flydsl.expr import buffer_ops, range_constexpr, vector, memref_load, memref_store
+
+
+def _run_compiled(exe, *args):
+    cf = getattr(exe, "_cf", None)
+    if cf is None:
+        cf = flyc.compile(exe, *args)
+        exe._cf = cf
+    else:
+        cf(*args)
 
 
 def _to_raw(v):
