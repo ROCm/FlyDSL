@@ -124,6 +124,53 @@ Type applyOffsetOnTensorLike(LayoutBuilder<LayoutAttr> &builder, Type tensorLike
   llvm_unreachable("Unsupported tensor like type");
 }
 
+FailureOr<std::pair<int64_t, int64_t>> getCoalescedLeafCountAndStride(fly::MemRefType memRefTy) {
+  auto layoutAttr = dyn_cast<LayoutAttr>(memRefTy.getLayout());
+  if (!layoutAttr)
+    return failure();
+  LayoutBuilder<LayoutAttr> builder(memRefTy.getContext());
+  auto coalesced = layoutCoalesce(builder, layoutAttr);
+  if (!coalesced.isLeaf())
+    return failure();
+  auto shape = coalesced.getShape().getLeafAsInt();
+  auto stride = coalesced.getStride().getLeafAsInt();
+  if (!shape.isStatic() || !stride.isStatic())
+    return failure();
+  return std::make_pair<int64_t, int64_t>(shape.getValue(), stride.getValue());
+}
+
+LogicalResult verifyUniversalCopyOperand(Operation *op, StringRef operandName, CopyAtomType copyAtomTy,
+                                         fly::MemRefType memRefTy) {
+  auto universalCopy = dyn_cast<CopyOpUniversalCopyType>(copyAtomTy.getCopyOp());
+  if (!universalCopy)
+    return success();
+
+  auto countAndStride = getCoalescedLeafCountAndStride(memRefTy);
+  if (failed(countAndStride)) {
+    return op->emitOpError() << operandName
+                             << " memref layout must coalesce to a single static leaf for "
+                             << copyAtomTy;
+  }
+
+  auto [count, stride] = *countAndStride;
+  int64_t elemBits = memRefTy.getElemTy().getIntOrFloatBitWidth();
+  int64_t copyBits = universalCopy.getBitSize();
+  int64_t totalBits = count * elemBits;
+  if (totalBits != copyBits) {
+    return op->emitOpError() << operandName << " memref covers " << totalBits
+                             << " bits after coalescing, but " << copyAtomTy << " expects "
+                             << copyBits << " bits";
+  }
+
+  int64_t contiguousBits = (count <= 1 || stride == 1) ? totalBits : elemBits;
+  if (contiguousBits < copyBits) {
+    return op->emitOpError() << operandName << " memref contiguous bit count " << contiguousBits
+                             << " is smaller than copy granularity " << copyBits;
+  }
+
+  return success();
+}
+
 } // namespace
 
 #define FLY_INFER_RETURN_TYPES(OP)                                                                 \
@@ -132,6 +179,40 @@ Type applyOffsetOnTensorLike(LayoutBuilder<LayoutAttr> &builder, Type tensorLike
       mlir::ValueRange operands, mlir::DictionaryAttr attributes,                                  \
       mlir::OpaqueProperties properties, mlir::RegionRange regions,                                \
       llvm::SmallVectorImpl<mlir::Type> &inferredReturnTypes)
+
+LogicalResult CopyAtomCall::verify() {
+  auto copyAtomTy = dyn_cast<CopyAtomType>(getCopyAtom().getType());
+  if (!copyAtomTy)
+    return emitOpError("copyAtom is not CopyAtomType");
+
+  auto srcTy = cast<fly::MemRefType>(getSrc().getType());
+  auto dstTy = cast<fly::MemRefType>(getDst().getType());
+  if (srcTy.getElemTy() != dstTy.getElemTy())
+    return emitOpError("src/dst element types mismatch");
+
+  if (failed(verifyUniversalCopyOperand(getOperation(), "src", copyAtomTy, srcTy)))
+    return failure();
+  if (failed(verifyUniversalCopyOperand(getOperation(), "dst", copyAtomTy, dstTy)))
+    return failure();
+  return success();
+}
+
+LogicalResult CopyAtomCallSSA::verify() {
+  auto copyAtomTy = dyn_cast<CopyAtomType>(getCopyAtom().getType());
+  if (!copyAtomTy)
+    return emitOpError("copyAtom is not CopyAtomType");
+
+  auto srcTy = dyn_cast<fly::MemRefType>(getSrc().getType());
+  auto dstTy = getDst() ? dyn_cast<fly::MemRefType>(getDst().getType()) : fly::MemRefType();
+  if (srcTy && dstTy && srcTy.getElemTy() != dstTy.getElemTy())
+    return emitOpError("src/dst element types mismatch");
+
+  if (srcTy && failed(verifyUniversalCopyOperand(getOperation(), "src", copyAtomTy, srcTy)))
+    return failure();
+  if (dstTy && failed(verifyUniversalCopyOperand(getOperation(), "dst", copyAtomTy, dstTy)))
+    return failure();
+  return success();
+}
 
 //===----------------------------------------------------------------------===//
 // Constructors

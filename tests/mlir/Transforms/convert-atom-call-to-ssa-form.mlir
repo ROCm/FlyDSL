@@ -120,31 +120,6 @@ gpu.module @convert_atom_call_to_ssa_form {
     gpu.return
   }
 
-  // Test 3b: copy_atom_call with register dst, non-coalescable layout should NOT be promoted
-  // (4,2):(1,8) cannot coalesce to rank=1 stride=1
-  // CHECK-LABEL: gpu.func @copy_dst_register_non_coalescable
-  // CHECK: fly.copy_atom_call(
-  // CHECK-NOT: fly.copy_atom_call_ssa
-  gpu.func @copy_dst_register_non_coalescable(%src: !fly.ptr<f16, global>) kernel {
-    %shape4 = fly.make_int_tuple() : () -> !fly.int_tuple<4>
-    %stride1 = fly.make_int_tuple() : () -> !fly.int_tuple<1>
-    %vec4 = fly.make_layout(%shape4, %stride1) : (!fly.int_tuple<4>, !fly.int_tuple<1>) -> !fly.layout<4:1>
-
-    %src_view = fly.make_view(%src, %vec4) : (!fly.ptr<f16, global>, !fly.layout<4:1>) -> !fly.memref<f16, global, 4:1>
-
-    %nc_shape = fly.make_int_tuple() : () -> !fly.int_tuple<(4,2)>
-    %nc_stride = fly.make_int_tuple() : () -> !fly.int_tuple<(1,8)>
-    %nc_layout = fly.make_layout(%nc_shape, %nc_stride) : (!fly.int_tuple<(4,2)>, !fly.int_tuple<(1,8)>) -> !fly.layout<(4,2):(1,8)>
-
-    %copy = fly.make_copy_atom {valBits = 16 : i32} : !fly.copy_atom<!fly.universal_copy<64>, 16>
-
-    %reg_ptr = fly.make_ptr() {dictAttrs = {allocaSize = 8 : i64}} : () -> !fly.ptr<f16, register>
-    %reg_view = fly.make_view(%reg_ptr, %nc_layout) : (!fly.ptr<f16, register>, !fly.layout<(4,2):(1,8)>) -> !fly.memref<f16, register, (4,2):(1,8)>
-
-    fly.copy_atom_call(%copy, %src_view, %reg_view) : (!fly.copy_atom<!fly.universal_copy<64>, 16>, !fly.memref<f16, global, 4:1>, !fly.memref<f16, register, (4,2):(1,8)>) -> ()
-    gpu.return
-  }
-
   // Test 4: mma_atom_call with register d (rank=1, stride=1) should be promoted
   // a, b, c are also register eligible, so they get pre-loaded as vectors
   // CHECK-LABEL: gpu.func @mma_d_register
