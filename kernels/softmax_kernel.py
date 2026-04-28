@@ -21,7 +21,6 @@ from flydsl._mlir.ir import InsertionPoint
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, const_expr, gpu, range_constexpr
 from flydsl.expr import math as fmath
-from flydsl.expr.numeric import Numeric
 from flydsl.expr.vector import ReductionOp, full
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
@@ -56,7 +55,8 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
         bid = fx.block_idx.x
         tid = fx.thread_idx.x
 
-        elem_type = dtype_to_elem_type(dtype_str)
+        elem_dtype = dtype_to_elem_type(dtype_str)
+        elem_type = elem_dtype.ir_type
         fm_fast = arith.FastMathFlags.fast
 
         base_ptr = allocator.get_base()
@@ -117,8 +117,6 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
         # ==================================================================
         if const_expr(False and N >= tile_cols and N % tile_cols == 0):
             num_tiles = N // tile_cols
-            elem_dtype = Numeric.from_ir_type(elem_type)
-
             # ── Layout API: buffer-backed tensors + tiled access ─────
             A_buf = fx.rocdl.make_buffer_tensor(A)
             C_buf = fx.rocdl.make_buffer_tensor(C)
@@ -187,8 +185,6 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
             # ==============================================================
             # Generic path: scalar for arbitrary N
             # ==============================================================
-            elem_dtype = Numeric.from_ir_type(elem_type)
-
             A_buf = fx.rocdl.make_buffer_tensor(A)
             C_buf = fx.rocdl.make_buffer_tensor(C)
 

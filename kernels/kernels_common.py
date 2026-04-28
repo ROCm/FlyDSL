@@ -9,10 +9,15 @@ but this module is intentionally small and MLIR-dialect facing.
 
 from contextlib import contextmanager
 
+import flydsl.expr as fx
 from flydsl._mlir import ir
-from flydsl.expr.typing import T
-from flydsl._mlir.dialects import arith as _std_arith, builtin, gpu as _gpu, llvm as _llvm, scf as _scf
+from flydsl._mlir.dialects import arith as _std_arith
+from flydsl._mlir.dialects import builtin
+from flydsl._mlir.dialects import gpu as _gpu
+from flydsl._mlir.dialects import llvm as _llvm
+from flydsl._mlir.dialects import scf as _scf
 from flydsl.expr import buffer_ops
+from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch, is_rdna_arch
 
 
@@ -50,16 +55,16 @@ def validate_moe_dtypes(a_dtype: str, b_dtype: str) -> None:
 
 
 def dtype_to_elem_type(dtype_str: str):
-    """Map a dtype string to its MLIR scalar type.
+    """Map a dtype string to its FlyDSL numeric type.
 
     Supported: 'f32', 'f16', 'bf16'.
     """
     if dtype_str == "f32":
-        return T.f32
+        return fx.Float32
     if dtype_str == "f16":
-        return T.f16
+        return fx.Float16
     if dtype_str == "bf16":
-        return T.bf16
+        return fx.BFloat16
     raise ValueError(f"unsupported dtype: {dtype_str!r} (expected 'f32', 'f16', or 'bf16')")
 
 

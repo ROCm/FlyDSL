@@ -19,7 +19,6 @@ from flydsl._mlir.ir import InsertionPoint
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, const_expr, gpu, range_constexpr
 from flydsl.expr import math as fmath
-from flydsl.expr.numeric import Numeric
 from flydsl.expr.vector import ReductionOp, full
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
@@ -63,7 +62,8 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
         bid = fx.block_idx.x
         tid = fx.thread_idx.x
 
-        elem_type = dtype_to_elem_type(dtype_str)
+        elem_dtype = dtype_to_elem_type(dtype_str)
+        elem_type = elem_dtype.ir_type
         fm_fast = arith.FastMathFlags.fast
         eps_c = fx.Float32(EPS)
 
@@ -142,8 +142,6 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
         # ==================================================================
         if const_expr(N == (BLOCK_THREADS * VEC_WIDTH * 4) and elem_bits <= 16):
             num_tiles_py = 4
-            elem_dtype = Numeric.from_ir_type(elem_type)
-
             c_zero_f = fx.Float32(0.0)
             thread_sum = c_zero_f
             thread_sumsq = c_zero_f
@@ -245,8 +243,6 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
             # ==============================================================
             # Generic path: 2-pass scalar implementation for arbitrary N
             # ==============================================================
-            elem_dtype = Numeric.from_ir_type(elem_type)
-
             Input_buf = fx.rocdl.make_buffer_tensor(Input)
             Output_buf = fx.rocdl.make_buffer_tensor(Output)
             Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma)
