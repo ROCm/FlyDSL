@@ -2,11 +2,11 @@
 # Copyright (c) 2025 FlyDSL Project Contributors
 
 
-"""gfx1250 MoE 2-stage fp16 WMMA kernels.
+"""gfx1250 (MI450 / GFX12) MoE 2-stage fp16/bf16 WMMA kernels.
 
-Implements stage1/stage2 single-kernel inline paths using the
-``wmma_f32_16x16x32_f16`` instruction for fp16 (and bf16 via host
-conversion) inputs.
+Implements the single-kernel stage1/stage2 paths for gfx1250 using the
+``wmma_f32_16x16x32_f16`` instruction together with TDM helpers. RDNA4
+(gfx120x) has a different WMMA ISA and lives in ``rdna_moe_gemm_2stage.py``.
 """
 
 from __future__ import annotations
@@ -15,10 +15,7 @@ import functools
 
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 
-from kernels.moe_gemm_2stage import (
-    MoeGemm2Mode,
-    compile_moe_reduction,
-)
+from kernels.moe_gemm_2stage import MoeGemm2Mode, make_moe_public_api
 from kernels.moe_gemm_2stage_common_gfx1250 import (
     _bf16_to_f16_wrapper,
     _emit_stage1_gate_up_epilogue,
@@ -813,6 +810,7 @@ def _compile_stage2_wmma_kernel_impl(
 # Public API entry points for fp16/bf16
 # ---------------------------------------------------------------------------
 
+
 @functools.lru_cache(maxsize=1024)
 def _compile_moe_wmma_gemm(
     *,
@@ -872,41 +870,6 @@ def _compile_moe_wmma_gemm(
     return exe
 
 
-def compile_moe_gemm1(*, doweight_stage1, group_size=-1, use_cshuffle_epilog=None,
-                       num_buffers=1, use_tdm_gather=True, use_tdm_store=False,
-                       inst_prefetch=False, wave_specialized_tdm=False,
-                       cluster_m=1, cluster_n=1, **kw):
-    return _compile_moe_wmma_gemm(stage=1, doweight=doweight_stage1, **kw)
-
-
-def compile_moe_gemm2(*, doweight_stage2, accumulate=True, group_size=-1,
-                       use_cshuffle_epilog=None,
-                       num_buffers=1, use_tdm_gather=True, use_tdm_store=False,
-                       inst_prefetch=False, wave_specialized_tdm=False,
-                       cluster_m=1, cluster_n=1, **kw):
-    return _compile_moe_wmma_gemm(stage=2, doweight=doweight_stage2, accumulate=accumulate, **kw)
-
-
-def compile_moe_gemm2_ex(*, mode=MoeGemm2Mode.ATOMIC, valid_mask=None, zero_intermediate=True, **kw):
-    if mode == MoeGemm2Mode.REDUCE:
-        gemm2_exe = compile_moe_gemm2(accumulate=False, **kw)
-        out_s = str(kw.get("out_dtype", "f16")).strip().lower()
-        if out_s in ("f16", "fp16", "half"):
-            dtype_str = "f16"
-        elif out_s in ("bf16", "bfloat16"):
-            dtype_str = "bf16"
-        else:
-            dtype_str = "f32"
-        reduce_exe = compile_moe_reduction(
-            topk=kw["topk"], model_dim=kw["model_dim"],
-            dtype_str=dtype_str, use_mask=(valid_mask is not None),
-        )
-        from kernels.moe_gemm_2stage import _MoeGemm2ReduceWrapper
-        return _MoeGemm2ReduceWrapper(
-            gemm2_exe=gemm2_exe, reduce_exe=reduce_exe,
-            topk=kw["topk"], model_dim=kw["model_dim"],
-            out_dtype_str=dtype_str,
-            use_mask=(valid_mask is not None),
-            zero_intermediate=zero_intermediate,
-        )
-    return compile_moe_gemm2(accumulate=True, **kw)
+compile_moe_gemm1, compile_moe_gemm2, compile_moe_gemm2_ex = make_moe_public_api(
+    _compile_moe_wmma_gemm
+)

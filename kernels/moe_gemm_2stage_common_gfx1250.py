@@ -2,16 +2,21 @@
 # Copyright (c) 2025 FlyDSL Project Contributors
 
 
-"""Shared utilities for gfx1250 MoE 2-stage kernels.
+"""Shared utilities for gfx1250 (MI450 / GFX12) MoE 2-stage kernels.
 
-Common helpers used by both the fp16 WMMA kernels and the mxscale
-(fp4/fp8/a8w4) kernels.
+Common helpers used by the gfx1250 fp16 WMMA kernels
+(``moe_gemm_2stage_wmma_gfx1250.py``) and the gfx1250 mxscale fp4/fp8/a8w4
+kernels (``moe_gemm_2stage_mxscale_gfx1250.py``).
+
+RDNA4 (gfx120x) MoE helpers live in ``rdna_moe_gemm_2stage_common.py``.
+The arch-agnostic MoE public API factory (``make_moe_public_api``) lives in
+``kernels/moe_gemm_2stage.py``.
 """
 
 from __future__ import annotations
 
 import inspect
-from typing import Any
+from typing import Any, Optional, Tuple
 
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 
@@ -24,6 +29,68 @@ def _require_gfx1250() -> None:
 
 def _align_up(v: int, a: int) -> int:
     return ((int(v) + int(a) - 1) // int(a)) * int(a)
+
+
+def _moe_out_elem_ty(out_dtype: str, T):
+    """gfx1250 MoE output element type mapping (f16 or bf16)."""
+    return T.f16 if out_dtype == "f16" else T.bf16
+
+
+def _make_moe_wave_layout(*, m_warp: int, n_warp: int, WAVE_SIZE: int, fx):
+    return fx.make_layout(
+        (int(m_warp), int(n_warp), 2, 16),
+        (int(n_warp) * WAVE_SIZE, WAVE_SIZE, 16, 1),
+    )
+
+
+def _make_wmma_sub_tiles(
+    *, wmma_m_rep: int, wmma_n_rep: int, WMMA_M: int, is_fp4: bool
+) -> list:
+    sub_tiles = []
+    for wm in range(wmma_m_rep):
+        for wn in range(wmma_n_rep):
+            if is_fp4:
+                for half in range(2):
+                    sub_tiles.append(
+                        (wm * wmma_n_rep + wn, half * 8, wm * WMMA_M, wn * 2 + half)
+                    )
+            else:
+                sub_tiles.append((wm * wmma_n_rep + wn, 0, wm * WMMA_M, wn))
+    return sub_tiles
+
+
+def _finalize_alloc_and_launch_2d(
+    *,
+    ctx,
+    alloc,
+    launcher,
+    gx,
+    gy,
+    block_threads: int,
+    stream,
+    waves_per_eu,
+    ir,
+    cluster: Optional[Tuple[int, int, int]] = None,
+):
+    with ir.InsertionPoint(ctx.gpu_module_body):
+        alloc.finalized = False
+        alloc.finalize()
+    for op in ctx.gpu_module_body.operations:
+        if hasattr(op, "attributes") and op.OPERATION_NAME == "gpu.func":
+            if waves_per_eu is not None and int(waves_per_eu) >= 1:
+                op.attributes["rocdl.waves_per_eu"] = ir.IntegerAttr.get(
+                    ir.IntegerType.get_signless(32), int(waves_per_eu)
+                )
+            if cluster is not None:
+                op.attributes["rocdl.cluster_dims"] = ir.StringAttr.get(
+                    f"{cluster[0]},{cluster[1]},{cluster[2]}"
+                )
+    launcher.launch(
+        grid=(gx, gy, 1),
+        block=(block_threads, 1, 1),
+        stream=stream,
+        cluster=cluster,
+    )
 
 
 def _pick_fp4_warp_shape(tile_m: int, tile_n: int) -> tuple[int, int]:
@@ -108,57 +175,10 @@ def _pick_mxscale_launch_shape(data_format: str, route_tile_m: int, tile_n: int)
     return _pick_fp16_single_launch_shape(int(route_tile_m), int(tile_n), max_total_warps=8)
 
 
-def _make_moe_wave_layout(*, m_warp: int, n_warp: int, WAVE_SIZE: int, fx):
-    return fx.make_layout(
-        (int(m_warp), int(n_warp), 2, 16),
-        (int(n_warp) * WAVE_SIZE, WAVE_SIZE, 16, 1),
-    )
-
-
-def _make_wmma_sub_tiles(
-    *, wmma_m_rep: int, wmma_n_rep: int, WMMA_M: int, is_fp4: bool
-) -> list[tuple[int, int, int, int]]:
-    sub_tiles = []
-    for wm in range(wmma_m_rep):
-        for wn in range(wmma_n_rep):
-            if is_fp4:
-                for half in range(2):
-                    sub_tiles.append((wm * wmma_n_rep + wn, half * 8, wm * WMMA_M, wn * 2 + half))
-            else:
-                sub_tiles.append((wm * wmma_n_rep + wn, 0, wm * WMMA_M, wn))
-    return sub_tiles
-
-
-def _moe_out_elem_ty(out_dtype: str, T):
-    return T.f16 if out_dtype == "f16" else T.bf16
-
-
 def _extract_sub8(acc, vec_base: int, *, vector, range_constexpr, ACC_VEC_SIZE: int):
     if ACC_VEC_SIZE == 8:
         return acc
     return vector.shuffle(acc, acc, [vec_base + i for i in range_constexpr(8)])
-
-
-def _finalize_alloc_and_launch_2d(*, ctx, alloc, launcher, gx, gy, block_threads: int, stream, waves_per_eu, ir,
-                                  cluster=None):
-    with ir.InsertionPoint(ctx.gpu_module_body):
-        alloc.finalized = False
-        alloc.finalize()
-    for op in ctx.gpu_module_body.operations:
-        if hasattr(op, "attributes") and op.OPERATION_NAME == "gpu.func":
-            if waves_per_eu is not None and int(waves_per_eu) >= 1:
-                op.attributes["rocdl.waves_per_eu"] = ir.IntegerAttr.get(
-                    ir.IntegerType.get_signless(32), int(waves_per_eu)
-                )
-            if cluster is not None:
-                op.attributes["rocdl.cluster_dims"] = ir.StringAttr.get(
-                    f"{cluster[0]},{cluster[1]},{cluster[2]}")
-    launcher.launch(
-        grid=(gx, gy, 1),
-        block=(block_threads, 1, 1),
-        stream=stream,
-        cluster=cluster,
-    )
 
 
 def _emit_stage1_gate_up_epilogue(

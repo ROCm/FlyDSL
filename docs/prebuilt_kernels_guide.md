@@ -283,8 +283,13 @@ What operation do you need?
 ├── MoE (Mixture of Experts)
 │   ├── Blockscale MoE (gate+up+reduce)
 │   │   └── → kernels/moe_blockscale_2stage.py
-│   └── Standard MoE (fp8/f16/bf16/int8/int4)
-│       └── → kernels/moe_gemm_2stage.py
+│   ├── Standard MoE (CDNA / MFMA, fp8/f16/bf16/int8/int4)
+│   │   └── → kernels/moe_gemm_2stage.py
+│   ├── RDNA4 MoE (gfx120x / gfx1201, fp16/bf16 WMMA)
+│   │   └── → kernels/rdna_moe_gemm_2stage.py
+│   └── GFX1250 MoE (MI450, WMMA fp16/bf16 + MXScale fp4/fp8/a8w4)
+│       ├── → kernels/moe_gemm_2stage_wmma_gfx1250.py
+│       └── → kernels/moe_gemm_2stage_mxscale_gfx1250.py
 │
 └── Building blocks
     ├── Warp/block reduction     → kernels_common.py
@@ -301,7 +306,10 @@ What operation do you need?
 | `kernels/preshuffle_gemm.py` | GEMM (preshuffle layout) |
 | `kernels/blockscale_preshuffle_gemm.py` | Blockscale GEMM |
 | `kernels/hgemm_splitk.py` | FP16 GEMM split-K |
-| `kernels/moe_gemm_2stage.py` | MoE GEMM 2-stage (gate/up + reduce) |
+| `kernels/moe_gemm_2stage.py` | MoE GEMM 2-stage (gate/up + reduce), CDNA / MFMA |
+| `kernels/rdna_moe_gemm_2stage.py` | RDNA4 (gfx120x) MoE GEMM 2-stage, fp16/bf16 WMMA |
+| `kernels/moe_gemm_2stage_wmma_gfx1250.py` | gfx1250 MoE GEMM 2-stage, fp16/bf16 WMMA |
+| `kernels/moe_gemm_2stage_mxscale_gfx1250.py` | gfx1250 MoE GEMM 2-stage, fp4/fp8/a8w4 MXScale |
 | `kernels/moe_blockscale_2stage.py` | MoE Blockscale 2-stage |
 | `kernels/mixed_moe_gemm_2stage.py` | Mixed-precision MoE GEMM |
 | `kernels/pa_decode_fp8.py` | Paged attention decode (FP8) |
@@ -330,6 +338,7 @@ What operation do you need?
 | `tests/kernels/test_blockscale_preshuffle_gemm.py` | Blockscale GEMM |
 | `tests/kernels/test_hgemm_splitk.py` | FP16 GEMM split-K |
 | `tests/kernels/test_moe_gemm.py` | MoE GEMM |
+| `tests/kernels/test_moe_gemm_rdna4.py` | RDNA4 MoE GEMM |
 | `tests/kernels/test_moe_blockscale.py` | MoE Blockscale GEMM |
 | `tests/kernels/test_moe_reduce.py` | MoE reduce kernel |
 | `tests/kernels/test_pa.py` | Paged attention decode |
@@ -345,3 +354,18 @@ What operation do you need?
 | `tests/kernels/test_vec_add.py` | Vector addition |
 | `tests/kernels/test_quant.py` | Quantization utilities |
 | `tests/kernels/benchmark_common.py` | Shared benchmark infrastructure |
+
+## 9. RDNA4 MoE Notes
+
+`kernels/rdna_moe_gemm_2stage.py` targets `gfx120x` only (Radeon RDNA4,
+including `gfx1201`). It uses ``wmma_f32_16x16x16_{f16,bf16}`` with a simple
+LDS pipeline and reuses the public `compile_moe_gemm1` / `compile_moe_gemm2`
+/ `compile_moe_gemm2_ex` contract via the `make_moe_public_api` factory in
+`kernels/moe_gemm_2stage.py`.
+
+Measured starting points on `gfx1201`:
+
+- Stage1: `tile_k=128`, `tile_n=64` for `tile_m` 16/32, and `tile_n=128` for `tile_m=64`
+- Stage2: `tile_k=128`, `tile_n=64`
+- `waves_per_eu=2` often helps stage1, while stage2 remains workload-dependent
+- Reduce mode can outperform atomic mode for medium and large routed workloads, so both modes should be benchmarked on target shapes
