@@ -25,9 +25,6 @@ from flydsl._mlir import ir
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl._mlir.dialects import (
     arith as _mlir_arith,
-    fly as _mlir_fly,
-    llvm as _mlir_llvm,
-    rocdl as _mlir_rocdl,
     scf,
 )
 
@@ -143,36 +140,21 @@ def _widen_nonnegative_i32_to_i64(value):
 def _compute_block_base_dw(phys_block, block_stride, head_offset):
     # Keep the final per-load offset in signed i32 range by chunking the buffer
     # resource base, while still computing the block base in i64 first.
-    base_elem_i64 = (
-        _widen_nonnegative_i32_to_i64(phys_block)
-        * _widen_nonnegative_i32_to_i64(block_stride)
-        + _widen_nonnegative_i32_to_i64(head_offset)
-    )
+    phys_block_i64 = _widen_nonnegative_i32_to_i64(phys_block)
+    block_stride_i64 = _widen_nonnegative_i32_to_i64(block_stride)
+    head_offset_i64 = _widen_nonnegative_i32_to_i64(head_offset)
+    base_elem_i64 = phys_block_i64 * block_stride_i64 + head_offset_i64
     base_dw_i64 = base_elem_i64 // arith.constant(4, type=T.i64)
-    return _mlir_arith.TruncIOp(T.i32, base_dw_i64).result
+    return arith.ArithValue(base_dw_i64).trunci(T.i32)
 
 
 def _make_shifted_buffer_resource(memref_val, byte_offset_i64, num_records_bytes_i64):
-    raw_memref = buffer_ops._unwrap_value(memref_val)
-    llvm_ptr_ty = ir.Type.parse("!llvm.ptr")
-    rsrc_ty = ir.Type.parse("!llvm.ptr<8>")
-    base_ptr = _mlir_fly.extract_aligned_pointer_as_index(llvm_ptr_ty, raw_memref)
-    base_i64 = _mlir_llvm.PtrToIntOp(T.i64, base_ptr).result
-    shifted_i64 = _mlir_llvm.AddOp(
-        base_i64,
-        arith.unwrap(byte_offset_i64),
-        _mlir_llvm.IntegerOverflowFlags(0),
-    ).result
-    shifted_ptr = _mlir_llvm.IntToPtrOp(llvm_ptr_ty, shifted_i64).result
-    stride_val = arith.constant(0, type=T.i16)
-    flags_val = arith.constant(buffer_ops._get_buffer_flags(), type=T.i32)
-    return _mlir_rocdl.MakeBufferRsrcOp(
-        rsrc_ty,
-        shifted_ptr,
-        stride_val,
-        arith.unwrap(num_records_bytes_i64),
-        flags_val,
-    ).result
+    return buffer_ops.create_buffer_resource(
+        memref_val,
+        max_size=True,
+        num_records_bytes=num_records_bytes_i64,
+        base_byte_offset=byte_offset_i64,
+    )
 
 
 def _chunk_buffer_resource_for_block(memref_val, phys_block, block_stride):
