@@ -47,7 +47,7 @@ jobs:
             docker build \
               --build-arg ROCM_VERSION="${ROCM_VERSION}" \
               -t "${IMAGE}" \
-              - < flydsl/Dockerfile.manylinux_2_28
+              - < flydsl/.github/workflows/Dockerfile.manylinux_2_28
           fi
           echo "MANYLINUX_IMAGE=${IMAGE}" >> $GITHUB_ENV
 
