@@ -12,13 +12,14 @@ from __future__ import annotations
 
 from .._mlir import ir
 from .._mlir.dialects import vector as _vector
+from .meta import traced_op
 
 # Re-export upstream dialect for ``from flydsl.expr import vector; vector.broadcast(...)``
 from .._mlir.dialects.vector import *  # noqa: F401,F403,E402
-from .meta import traced_op
 
 # Re-export Vector and friends so ``from flydsl.expr.vector import Vector`` works
-from .typing import ReductionOp, Vector, empty_like, full, full_like, ones_like, zeros_like  # noqa: F401
+from .typing import Vector, ReductionOp, full, full_like, zeros_like  # noqa: F401
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # Dialect helper wrappers (legacy, will be deprecated)

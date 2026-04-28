@@ -52,8 +52,6 @@ def fly_values(obj) -> List[ir.Value]:
 
 
 def fly_construct(dsl_type, args, values: List[ir.Value]) -> DslType:
-    if hasattr(args, "__fly_construct_from_values__"):
-        return args.__fly_construct_from_values__(values)
     if hasattr(dsl_type, "__fly_construct__"):
         return dsl_type.__fly_construct__(values)
     if isinstance(dsl_type, (tuple, list)):

@@ -3,7 +3,6 @@
 
 import ctypes
 import enum
-import operator
 from inspect import isclass
 from typing import Generic, Type, TypeVar
 
@@ -276,10 +275,8 @@ __all__ = [
     # Vector types
     "Vector",
     "ReductionOp",
-    "empty_like",
     "full",
     "full_like",
-    "ones_like",
     "zeros_like",
 ]
 
@@ -618,7 +615,7 @@ class Tensor(BuiltinDslType):
 
     @traced_op
     def load(self, loc=None, ip=None):
-        return Vector(memref_load_vec(self, loc=loc, ip=ip), self.shape.to_py_value(), self.dtype)
+        return memref_load_vec(self, loc=loc, ip=ip)
 
     @traced_op
     def store(self, vector, loc=None, ip=None):
@@ -854,6 +851,7 @@ _REDUCE_KINDS = {
     "min": (_vector.CombiningKind.MINIMUMF, _vector.CombiningKind.MINSI, _vector.CombiningKind.MINUI),
 }
 
+
 def _resolve_combining_kind(op, is_float, signed):
     if isinstance(op, _vector.CombiningKind):
         return op
@@ -881,22 +879,13 @@ class Vector(ArithValue):
     def __init__(self, value, shape=None, dtype=None):
         if not isinstance(value, ir.Value) and hasattr(value, "ir_value"):
             value = value.ir_value()
-        vty = ir.VectorType(value.type)
         if shape is None:
+            vty = ir.VectorType(value.type)
             shape = tuple(vty.shape)
             dtype = Numeric.from_ir_type(vty.element_type)
-        elif dtype is None:
-            dtype = Numeric.from_ir_type(vty.element_type)
-        shape = self._canonical_shape(shape)
-        if not all(isinstance(dim, int) for dim in self._flatten_static(shape)):
-            raise ValueError("dynamic vector shape is not supported")
-        if self._numel_from_shape(shape) != self._numel_from_shape(tuple(vty.shape)):
-            raise ValueError(f"shape {shape} has {self._numel_from_shape(shape)} elements, but value has type {value.type}")
-        if dtype.ir_type != vty.element_type:
-            raise ValueError(f"dtype {dtype} does not match vector element type {vty.element_type}")
         signed = dtype.signed if isclass(dtype) and issubclass(dtype, Integer) else False
         super().__init__(value, signed)
-        self._shape = shape
+        self._shape = (shape,) if isinstance(shape, int) else tuple(shape)
         self._dtype = dtype
 
     @property
@@ -913,89 +902,10 @@ class Vector(ArithValue):
 
     @property
     def numel(self) -> int:
-        return self._numel_from_shape(self._shape)
-
-    @staticmethod
-    def _canonical_shape(shape):
-        return (shape,) if isinstance(shape, int) else tuple(shape)
-
-    @staticmethod
-    def _flatten_static(value):
-        if isinstance(value, (tuple, list)):
-            out = []
-            for elem in value:
-                out.extend(Vector._flatten_static(elem))
-            return out
-        return [value]
-
-    @staticmethod
-    def _slice_shape(shape, coord):
-        out = []
-        for dim, index in zip(shape, coord, strict=True):
-            if isinstance(dim, (tuple, list)):
-                if index is None:
-                    out.append(tuple(dim))
-                    continue
-                sub_shape = Vector._slice_shape(tuple(dim), Vector._canonical_shape(index))
-                if sub_shape != ():
-                    out.append(sub_shape)
-            elif index is None:
-                out.append(int(dim))
-        return tuple(out)
-
-    @staticmethod
-    def _flat_static_index(shape, coord) -> int:
-        shape = Vector._flatten_static(shape)
-        coord = Vector._flatten_static(coord)
-        if len(shape) != len(coord):
-            raise ValueError(f"coordinate rank {len(coord)} does not match shape rank {len(shape)}")
-        idx = 0
-        for dim, value in zip(shape, coord, strict=True):
-            idx = idx * int(dim) + int(value)
-        return idx
-
-    @staticmethod
-    def _numel_from_shape(shape) -> int:
-        n = 1
-        for dim in shape:
-            if isinstance(dim, (tuple, list)):
-                n *= Vector._numel_from_shape(dim)
-            else:
-                n *= int(dim)
-        return n
-
-    @staticmethod
-    def make_type(shape, dtype: Type[Numeric]) -> ir.Type:
-        """Return the flat MLIR vector type for a FlyDSL vector shape/dtype."""
-        if not isclass(dtype) or not issubclass(dtype, Numeric):
-            raise TypeError(f"dtype must be a Numeric type, got {type(dtype)}")
-        shape = Vector._canonical_shape(shape)
-        return ir.VectorType.get([Vector._numel_from_shape(shape)], dtype.ir_type)
-
-    @staticmethod
-    def _infer_broadcast_shape(lhs_shape, rhs_shape):
-        if lhs_shape == rhs_shape:
-            return lhs_shape
-        lhs_flat = Vector._flatten_static(lhs_shape)
-        rhs_flat = Vector._flatten_static(rhs_shape)
-        if Vector._numel_from_shape(lhs_shape) == 1:
-            return rhs_shape
-        if Vector._numel_from_shape(rhs_shape) == 1:
-            return lhs_shape
-        rank = max(len(lhs_flat), len(rhs_flat))
-        lhs_dims = [1] * (rank - len(lhs_flat)) + lhs_flat
-        rhs_dims = [1] * (rank - len(rhs_flat)) + rhs_flat
-        result = []
-        for lhs_dim, rhs_dim in zip(lhs_dims, rhs_dims, strict=True):
-            if lhs_dim == rhs_dim:
-                result.append(lhs_dim)
-            elif lhs_dim == 1:
-                result.append(rhs_dim)
-            elif rhs_dim == 1:
-                result.append(lhs_dim)
-            else:
-                raise ValueError(f"cannot broadcast shapes {lhs_shape} and {rhs_shape}")
-        return tuple(result)
+        r = 1
+        for s in self._shape:
+            r *= s
+        return r
 
     def __str__(self):
         return f"Vector({self.type} o {self._shape}, {self._dtype.__name__})"
@@ -1003,17 +913,12 @@ class Vector(ArithValue):
     def __repr__(self):
         return self.__str__()
 
-    __hash__ = ArithValue.__hash__
-
     def __fly_values__(self):
         return [self]
 
     @classmethod
     def __fly_construct__(cls, values):
-        return cls(values[0])
-
-    def __fly_construct_from_values__(self, values):
-        return Vector(values[0], self.shape, self.dtype)
+        return values[0]
 
     def to(self, dtype: Type[Numeric], *, loc=None, ip=None) -> "Vector":
         if dtype is ir.Value:
@@ -1038,125 +943,6 @@ class Vector(ArithValue):
     def ir_value(self, *, loc=None, ip=None):
         return self
 
-    def with_signedness(self, signed):
-        return ArithValue(self, signed)
-
-    def _wrap_op_result(self, result, shape):
-        if isinstance(result, ir.Value) and isinstance(result.type, ir.VectorType):
-            return Vector(result, shape, Numeric.from_ir_type(result.type.element_type))
-        if isinstance(result, Numeric):
-            return result
-        if isinstance(result, ir.Value):
-            return Numeric.from_ir_type(result.type)(result)
-        return result
-
-    def _apply_op(self, method_name, op, other, flip=False, *, loc=None, ip=None):
-        lhs = self
-        rhs = other
-        shape = self.shape
-        if isinstance(other, Vector):
-            shape = self._infer_broadcast_shape(self.shape, other.shape)
-            lhs = self.broadcast_to(shape, loc=loc, ip=ip)
-            rhs = other.broadcast_to(shape, loc=loc, ip=ip)
-        method = getattr(ArithValue, method_name)
-        result = method(rhs, lhs, loc=loc, ip=ip) if flip else method(lhs, rhs, loc=loc, ip=ip)
-        return self._wrap_op_result(result, shape)
-
-    def apply_op(self, op, other, flip=False, *, loc=None, ip=None):
-        op_to_method = {
-            operator.add: "__add__",
-            operator.sub: "__sub__",
-            operator.mul: "__mul__",
-            operator.truediv: "__truediv__",
-            operator.floordiv: "__floordiv__",
-            operator.mod: "__mod__",
-            operator.and_: "__and__",
-            operator.or_: "__or__",
-            operator.xor: "__xor__",
-            operator.lt: "__lt__",
-            operator.le: "__le__",
-            operator.gt: "__gt__",
-            operator.ge: "__ge__",
-            operator.eq: "__eq__",
-            operator.ne: "__ne__",
-        }
-        method_name = op_to_method.get(op)
-        if method_name is None:
-            raise NotImplementedError(f"Vector.apply_op does not support {op}")
-        return self._apply_op(method_name, op, other, flip=flip, loc=loc, ip=ip)
-
-    def __add__(self, other, *, loc=None, ip=None):
-        return self.apply_op(operator.add, other, loc=loc, ip=ip)
-
-    def __radd__(self, other, *, loc=None, ip=None):
-        return self.apply_op(operator.add, other, flip=True, loc=loc, ip=ip)
-
-    def __sub__(self, other, *, loc=None, ip=None):
-        return self.apply_op(operator.sub, other, loc=loc, ip=ip)
-
-    def __rsub__(self, other, *, loc=None, ip=None):
-        return self.apply_op(operator.sub, other, flip=True, loc=loc, ip=ip)
-
-    def __mul__(self, other, *, loc=None, ip=None):
-        return self.apply_op(operator.mul, other, loc=loc, ip=ip)
-
-    def __rmul__(self, other, *, loc=None, ip=None):
-        return self.apply_op(operator.mul, other, flip=True, loc=loc, ip=ip)
-
-    def __truediv__(self, other, *, loc=None, ip=None):
-        return self.apply_op(operator.truediv, other, loc=loc, ip=ip)
-
-    def __rtruediv__(self, other, *, loc=None, ip=None):
-        return self.apply_op(operator.truediv, other, flip=True, loc=loc, ip=ip)
-
-    def __floordiv__(self, other, *, loc=None, ip=None):
-        return self.apply_op(operator.floordiv, other, loc=loc, ip=ip)
-
-    def __rfloordiv__(self, other, *, loc=None, ip=None):
-        return self.apply_op(operator.floordiv, other, flip=True, loc=loc, ip=ip)
-
-    def __mod__(self, other, *, loc=None, ip=None):
-        return self.apply_op(operator.mod, other, loc=loc, ip=ip)
-
-    def __rmod__(self, other, *, loc=None, ip=None):
-        return self.apply_op(operator.mod, other, flip=True, loc=loc, ip=ip)
-
-    def __and__(self, other, *, loc=None, ip=None):
-        return self.apply_op(operator.and_, other, loc=loc, ip=ip)
-
-    def __rand__(self, other, *, loc=None, ip=None):
-        return self.apply_op(operator.and_, other, flip=True, loc=loc, ip=ip)
-
-    def __or__(self, other, *, loc=None, ip=None):
-        return self.apply_op(operator.or_, other, loc=loc, ip=ip)
-
-    def __ror__(self, other, *, loc=None, ip=None):
-        return self.apply_op(operator.or_, other, flip=True, loc=loc, ip=ip)
-
-    def __xor__(self, other, *, loc=None, ip=None):
-        return self.apply_op(operator.xor, other, loc=loc, ip=ip)
-
-    def __rxor__(self, other, *, loc=None, ip=None):
-        return self.apply_op(operator.xor, other, flip=True, loc=loc, ip=ip)
-
-    def __lt__(self, other, *, loc=None, ip=None):
-        return self.apply_op(operator.lt, other, loc=loc, ip=ip)
-
-    def __le__(self, other, *, loc=None, ip=None):
-        return self.apply_op(operator.le, other, loc=loc, ip=ip)
-
-    def __gt__(self, other, *, loc=None, ip=None):
-        return self.apply_op(operator.gt, other, loc=loc, ip=ip)
-
-    def __ge__(self, other, *, loc=None, ip=None):
-        return self.apply_op(operator.ge, other, loc=loc, ip=ip)
-
-    def __eq__(self, other, *, loc=None, ip=None):
-        return self.apply_op(operator.eq, other, loc=loc, ip=ip)
-
-    def __ne__(self, other, *, loc=None, ip=None):
-        return self.apply_op(operator.ne, other, loc=loc, ip=ip)
-
     def reduce(self, op, init_val=None, reduction_profile=None, *, fastmath=None, loc=None, ip=None):
         is_fp = self._dtype.is_float
         signed = getattr(self._dtype, "signed", True)
@@ -1172,94 +958,11 @@ class Vector(ArithValue):
         res = _vector.reduction(et, kind, self, loc=loc, ip=ip, **kwargs)
         return self._dtype(res)
 
-    @staticmethod
-    def _coerce_element(element, dtype: Type[Numeric], *, loc=None, ip=None):
-        if isinstance(element, (int, float, bool)):
-            return dtype(element)
-        if isinstance(element, Numeric):
-            return element.to(dtype, loc=loc, ip=ip)
-        if isinstance(element, ir.Value):
-            return Numeric.from_ir_type(element.type)(element).to(dtype, loc=loc, ip=ip)
-        if hasattr(element, "ir_value"):
-            value = element.ir_value(loc=loc, ip=ip)
-            return Numeric.from_ir_type(value.type)(value).to(dtype, loc=loc, ip=ip)
-        raise ValueError(f"expected numeric vector element, got {type(element)}")
-
     def __getitem__(self, idx):
-        if idx is None:
-            return self
         if isinstance(idx, int):
             res = _vector.ExtractOp(self, static_position=[idx], dynamic_position=[]).result
             return self._dtype(res)
-        if isinstance(idx, (Numeric, ArithValue, ir.Value)):
-            dyn_idx = _to_raw(Index(idx))
-            res = _vector.ExtractOp(
-                self,
-                static_position=[ir.ShapedType.get_dynamic_size()],
-                dynamic_position=[dyn_idx],
-            ).result
-            return self._dtype(res)
-        if isinstance(idx, tuple):
-            coord = self._canonical_shape(idx)
-            if not any(part is None for part in self._flatten_static(coord)):
-                flat_idx = self._flat_static_index(self._shape, coord)
-                return self[flat_idx]
-
-            flat_shape = self._flatten_static(self._shape)
-            flat_coord = self._flatten_static(coord)
-            if len(flat_shape) != len(flat_coord):
-                raise ValueError(f"coordinate rank {len(flat_coord)} does not match shape rank {len(flat_shape)}")
-
-            offsets = [0 if c is None else int(c) for c in flat_coord]
-            sizes = [int(s) if c is None else 1 for s, c in zip(flat_shape, flat_coord, strict=True)]
-            tmp_ty = ir.VectorType.get(list(flat_shape), self._dtype.ir_type)
-            tmp = _vector.shape_cast(tmp_ty, self)
-            res_ty = ir.VectorType.get(sizes, self._dtype.ir_type)
-            res = _vector.extract_strided_slice(
-                res_ty,
-                tmp,
-                offsets=offsets,
-                sizes=sizes,
-                strides=[1] * len(flat_shape),
-            )
-            res_shape = self._slice_shape(self._shape, coord)
-            return self._build_result(res, res_shape, row_major=True)
         raise TypeError(f"unsupported index type: {type(idx)}")
-
-    def _build_result(self, value, shape, *, row_major=False, loc=None, ip=None) -> "Vector":
-        shape = self._canonical_shape(shape)
-        flat_ty = self.make_type(shape, self._dtype)
-        flat_value = _vector.shape_cast(flat_ty, value, loc=loc, ip=ip)
-        return Vector(flat_value, shape, self._dtype)
-
-    def reshape(self, shape, *, loc=None, ip=None) -> "Vector":
-        shape = self._canonical_shape(shape)
-        if self.numel != self._numel_from_shape(shape):
-            raise ValueError(f"expected reshaped size to match: {self._shape} -> {shape}")
-        return Vector(self, shape, self._dtype)
-
-    def broadcast_to(self, target_shape, *, loc=None, ip=None) -> "Vector":
-        target_shape = self._canonical_shape(target_shape)
-        if self._shape == target_shape:
-            return self
-        src_flat_shape = self._flatten_static(self._shape)
-        target_flat_shape = self._flatten_static(target_shape)
-        if self.numel == 1:
-            scalar = self[0].ir_value(loc=loc, ip=ip)
-            target_ty = self.make_type(target_shape, self._dtype)
-            res = _vector.broadcast(target_ty, scalar, loc=loc, ip=ip)
-            return Vector(res, target_shape, self._dtype)
-        if len(src_flat_shape) > len(target_flat_shape):
-            raise ValueError(f"cannot broadcast shape {self._shape} to {target_shape}")
-        padded_src = [1] * (len(target_flat_shape) - len(src_flat_shape)) + src_flat_shape
-        for src_dim, dst_dim in zip(padded_src, target_flat_shape, strict=True):
-            if src_dim != dst_dim and src_dim != 1:
-                raise ValueError(f"cannot broadcast shape {self._shape} to {target_shape}")
-        src_ty = ir.VectorType.get(padded_src, self._dtype.ir_type)
-        src = _vector.shape_cast(src_ty, self, loc=loc, ip=ip)
-        target_ty_nd = ir.VectorType.get(target_flat_shape, self._dtype.ir_type)
-        res = _vector.broadcast(target_ty_nd, src, loc=loc, ip=ip)
-        return self._build_result(res, target_shape, row_major=True, loc=loc, ip=ip)
 
     def bitcast(self, dtype: Type[Numeric], *, loc=None, ip=None) -> "Vector":
         src_bits = self.numel * self._dtype.width
@@ -1274,63 +977,25 @@ class Vector(ArithValue):
         return Vector(res, (len(mask),), self._dtype)
 
     @classmethod
-    def from_elements(cls, elements, dtype: Type[Numeric] | None = None, *, loc=None, ip=None) -> "Vector":
-        elements = list(elements)
-        if not elements:
-            raise ValueError("Vector.from_elements requires at least one element")
-        if dtype is None:
-            first = elements[0]
-            if isinstance(first, Numeric):
-                dtype = type(first)
-            elif isinstance(first, ir.Value):
-                dtype = Numeric.from_ir_type(first.type)
-            elif hasattr(first, "ir_value"):
-                dtype = Numeric.from_ir_type(first.ir_value(loc=loc, ip=ip).type)
-            else:
-                dtype = type(Numeric.from_python_value(first))
-        vec_ty = cls.make_type(len(elements), dtype)
-        raw_elements = [_to_raw(cls._coerce_element(element, dtype, loc=loc, ip=ip)) for element in elements]
-        res = _vector.from_elements(vec_ty, raw_elements, loc=loc, ip=ip)
-        return cls(res, (len(elements),), dtype)
-
-    @classmethod
-    def load(cls, result_type, memref, indices, *, loc=None, ip=None) -> "Vector":
-        vty = ir.VectorType(result_type)
-        dtype = Numeric.from_ir_type(vty.element_type)
-        raw_indices = []
-        for index in indices:
-            if isinstance(index, int):
-                index = Index(index, loc=loc, ip=ip)
-            elif not isinstance(index, ir.Value) and not hasattr(index, "ir_value"):
-                index = Index(index, loc=loc, ip=ip)
-            raw_indices.append(_to_raw(index))
-        res = _vector.LoadOp(result_type, _to_raw(memref), raw_indices, loc=loc, ip=ip).result
-        return cls(res, tuple(vty.shape), dtype)
-
-    def store(self, memref, indices, *, alignment=None, loc=None, ip=None):
-        raw_indices = []
-        for index in indices:
-            if isinstance(index, int):
-                index = Index(index, loc=loc, ip=ip)
-            elif not isinstance(index, ir.Value) and not hasattr(index, "ir_value"):
-                index = Index(index, loc=loc, ip=ip)
-            raw_indices.append(_to_raw(index))
-        kwargs = {}
-        if alignment is not None:
-            kwargs["alignment"] = alignment
-        return _vector.store(_to_raw(self), _to_raw(memref), raw_indices, loc=loc, ip=ip, **kwargs)
-
-    @classmethod
     def filled(cls, shape, fill_value, dtype: Type[Numeric], *, loc=None, ip=None) -> "Vector":
-        shape = cls._canonical_shape(shape)
-        n = cls._numel_from_shape(shape)
+        def _shape_numel(dims):
+            n = 1
+            for dim in dims:
+                if isinstance(dim, (tuple, list)):
+                    n *= _shape_numel(dim)
+                else:
+                    n *= dim
+            return n
+
+        shape = (shape,) if isinstance(shape, int) else tuple(shape)
+        n = _shape_numel(shape)
         if isinstance(fill_value, (int, float, bool)):
             fill_value = dtype(fill_value)
         elif isinstance(fill_value, Numeric):
             fill_value = fill_value.to(dtype, loc=loc, ip=ip)
         else:
             raise ValueError(f"expected numeric fill_value, got {type(fill_value)}")
-        vec_ty = cls.make_type(n, dtype)
+        vec_ty = ir.VectorType.get([n], dtype.ir_type)
         val = _vector.broadcast(vec_ty, fill_value.ir_value(loc=loc, ip=ip), loc=loc, ip=ip)
         return cls(val, shape, dtype)
 
@@ -1353,14 +1018,6 @@ def full(shape, fill_value, dtype: Type[Numeric], *, loc=None, ip=None) -> Vecto
 
 def full_like(a: Vector, fill_value, dtype=None, *, loc=None, ip=None) -> Vector:
     return Vector.filled_like(a, fill_value, dtype, loc=loc, ip=ip)
-
-
-def empty_like(a: Vector, dtype=None, *, loc=None, ip=None) -> Vector:
-    return Vector.filled_like(a, 0, dtype, loc=loc, ip=ip)
-
-
-def ones_like(a: Vector, dtype=None, *, loc=None, ip=None) -> Vector:
-    return Vector.filled_like(a, 1, dtype, loc=loc, ip=ip)
 
 
 def zeros_like(a: Vector, dtype=None, *, loc=None, ip=None) -> Vector:

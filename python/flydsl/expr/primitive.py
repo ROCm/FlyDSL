@@ -765,8 +765,6 @@ def tiled_mma_partition_shape(operand_id, tiled_mma, shape, loc=None, ip=None):
 
 @traced_op
 def mma_make_fragment(operand_id, tiled_mma, input, *, stages=None, loc=None, ip=None):
-    if stages is None:
-        return fly.mma_make_fragment(operand_id, tiled_mma, input, loc=loc, ip=ip)
     return fly.mma_make_fragment(operand_id, tiled_mma, input, stages=stages, loc=loc, ip=ip)
 
 
