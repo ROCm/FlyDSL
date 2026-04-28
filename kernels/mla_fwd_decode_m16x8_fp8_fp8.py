@@ -15,24 +15,19 @@ NOTE: Do NOT use ``from __future__ import annotations`` here -- it breaks
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-
 from flydsl._mlir import ir
+from flydsl._mlir.dialects import gpu as _mlir_gpu
 from flydsl._mlir.dialects import llvm, scf
 from flydsl._mlir.dialects import math as _math
 from flydsl._mlir.dialects import memref as _memref
-from flydsl._mlir.dialects import gpu as _mlir_gpu
 from flydsl._mlir.dialects._arith_enum_gen import CmpIPredicate
-
-from flydsl.expr import arith, vector, gpu, buffer_ops, rocdl
-from flydsl.expr import range_constexpr
-from flydsl.expr import const_expr
+from flydsl.compiler.kernel_function import CompilationContext
+from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, rocdl, vector
 from flydsl.expr.arith import _to_raw as _raw
 from flydsl.expr.typing import T
-
-from flydsl.compiler.kernel_function import CompilationContext
-from flydsl.utils.smem_allocator import SmemAllocator
+from flydsl.expr.typing import Vector as Vec
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
-
+from flydsl.utils.smem_allocator import SmemAllocator
 
 # ---------------------------------------------------------------------------
 # Compile-time constants (mirroring HkMlaDecodeFwdTraits)
@@ -345,30 +340,30 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
     lds_base_idx = _memref.ExtractAlignedPointerAsIndexOp(lds_buffer).result
 
     # ---- V^T transpose perm constants ----
-    c_perm0 = arith.constant(0x05010400, type=T.i32)
-    c_perm1 = arith.constant(0x07030602, type=T.i32)
-    c_perm2 = arith.constant(0x05040100, type=T.i32)
-    c_perm3 = arith.constant(0x07060302, type=T.i32)
+    c_perm0 = fx.Int32(0x05010400)
+    c_perm1 = fx.Int32(0x07030602)
+    c_perm2 = fx.Int32(0x05040100)
+    c_perm3 = fx.Int32(0x07060302)
 
     def _vt_perm(src_hi, src_lo, sel):
         return llvm.call_intrinsic(
             T.i32,
             "llvm.amdgcn.perm",
-            [src_hi, src_lo, sel],
+            [_raw(src_hi), _raw(src_lo), _raw(sel)],
             [],
             [],
         )
 
     # ---- Constants ----
-    c_neg_inf_f32 = arith.constant(float("-inf"), type=T.f32)
-    c_zero_f32 = arith.constant(0.0, type=T.f32)
-    c_one_f32 = arith.constant(1.0, type=T.f32)
-    c_zero_i32 = arith.constant(0, type=T.i32)
-    c_zero_v4f32 = arith.constant_vector(0.0, T.f32x4)
-    c_log2e = arith.constant(LOG2E, type=T.f32)
-    c_inv_log2e = arith.constant(1.0 / LOG2E, type=T.f32)
-    c_dword_sz = arith.constant(4, type=T.i32)
-    c_aux_zero = arith.constant(0, type=T.i32)
+    c_neg_inf_f32 = fx.Float32(float("-inf"))
+    c_zero_f32 = fx.Float32(0.0)
+    c_one_f32 = fx.Float32(1.0)
+    c_zero_i32 = fx.Int32(0)
+    c_zero_v4f32 = Vec.filled(4, 0.0, fx.Float32)
+    c_log2e = fx.Float32(LOG2E)
+    c_inv_log2e = fx.Float32(1.0 / LOG2E)
+    c_dword_sz = fx.Int32(4)
+    c_aux_zero = fx.Int32(0)
 
     # ---- Buffer resources ----
     query_rsrc = buffer_ops.create_buffer_resource(query)
@@ -391,10 +386,11 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
     # ---- Work range ----
     worker_idx_i32 = _index_cast_to_i32(worker_idx)
     work_range = buffer_ops.buffer_load(
-        work_indptr_rsrc, worker_idx_i32, vec_width=2, dtype=T.i32
+        work_indptr_rsrc, worker_idx_i32, vec_width=2, dtype=fx.Int32
     )
-    work_start_i32 = rocdl.readfirstlane(T.i32, _raw(vector.extract(work_range, [0])))
-    work_end_i32 = rocdl.readfirstlane(T.i32, _raw(vector.extract(work_range, [1])))
+    work_range_vec = Vec(work_range)
+    work_start_i32 = rocdl.readfirstlane(T.i32, work_range_vec[0])
+    work_end_i32 = rocdl.readfirstlane(T.i32, work_range_vec[1])
     work_start_idx = arith.index_cast(T.index, work_start_i32)
     work_end_idx = arith.index_cast(T.index, work_end_i32)
 
@@ -420,27 +416,15 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
         """
         row_idx_i32 = _raw(kv_ld_row_base_i32 + kv_tile_start_i32)
         if const_expr(check_boundary):
-            neg_one = _raw(arith.constant(-1, type=T.i32))
-            if_op = scf.IfOp(
-                arith.cmpi(
-                    CmpIPredicate.slt, row_idx_i32, _raw(kv_tile_end_i32)
-                ),
-                [T.i32],
-                has_else=True,
-            )
-            with ir.InsertionPoint(if_op.regions[0].blocks[0]):
-                # In-bounds: do the buffer_load
-                phys_row_ib = buffer_ops.buffer_load(
-                    kv_page_indices_rsrc, row_idx_i32, vec_width=1, dtype=T.i32
+            phys_row = fx.Int32(-1)
+            if arith.cmpi(CmpIPredicate.slt, row_idx_i32, _raw(kv_tile_end_i32)):
+                phys_row = buffer_ops.buffer_load(
+                    kv_page_indices_rsrc, row_idx_i32, vec_width=1, dtype=fx.Int32
                 )
-                scf.YieldOp([_raw(phys_row_ib)])
-            with ir.InsertionPoint(if_op.regions[1].blocks[0]):
-                # OOB: return -1
-                scf.YieldOp([neg_one])
-            return if_op.results[0]
+            return _raw(phys_row)
         else:
             phys_row = buffer_ops.buffer_load(
-                kv_page_indices_rsrc, row_idx_i32, vec_width=1, dtype=T.i32
+                kv_page_indices_rsrc, row_idx_i32, vec_width=1, dtype=fx.Int32
             )
             return _raw(phys_row)
 
@@ -463,9 +447,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
         if const_expr(check_boundary):
             neg_one = _raw(arith.constant(-1, type=T.i32))
             is_oob = arith.cmpi(CmpIPredicate.eq, _raw(row_i32), neg_one)
-            # For OOB: write zero to LDS
-            if_op = scf.IfOp(is_oob, [], has_else=True)
-            with ir.InsertionPoint(if_op.regions[0].blocks[0]):
+            if is_oob:
                 # Write zero via ds_write_b32 at lane's position
                 zero_u32 = _raw(arith.constant(0, type=T.i32))
                 lane_offset = _raw(lane_idx_i32 * arith.constant(4, type=T.i32))
@@ -479,8 +461,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
                 lds_addr_i64 = _raw(arith.ArithValue(lds_addr_zero).extui(T.i64))
                 lds_ptr = _inttoptr_lds(lds_addr_i64)
                 llvm.StoreOp(zero_u32, lds_ptr, alignment=4)
-                scf.YieldOp([])
-            with ir.InsertionPoint(if_op.regions[1].blocks[0]):
+            else:
                 # Normal load
                 voff = _raw(
                     arith.ArithValue(_raw(row_i32))
@@ -499,7 +480,6 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
                     _raw(col_off),
                     _raw(c_aux_zero),
                 )
-                scf.YieldOp([])
         else:
             voff = _raw(
                 arith.ArithValue(_raw(row_i32))
@@ -589,8 +569,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
             if const_expr(check_boundary is not True):
                 is_oob = _raw(arith.ArithValue(check_boundary) & arith.ArithValue(is_oob))
 
-            if_op = scf.IfOp(is_oob, [], has_else=True)
-            with ir.InsertionPoint(if_op.regions[0].blocks[0]):
+            if is_oob:
                 # OOB: write zero to LDS via inline asm ds_write_b32
                 lane_offset = _raw(lane_idx_i32 * arith.constant(4, type=T.i32))
                 lds_zero_addr = _raw(
@@ -606,10 +585,8 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
                     has_side_effects=True,
                     is_align_stack=False,
                 )
-                scf.YieldOp([])
-            with ir.InsertionPoint(if_op.regions[1].blocks[0]):
+            else:
                 _emit_normal_load()
-                scf.YieldOp([])
 
     # ---- K LDS lane base pointer (computed once, shared across all K loads) ----
     # Per-lane dynamic part of the K LDS address, stored as an LDS pointer.
@@ -718,12 +695,9 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
                 T.i32x2,
                 static_byte_offset=off,
             )
-            v_vals.append(
-                vector.extract(data, static_position=[0], dynamic_position=[])
-            )
-            v_vals.append(
-                vector.extract(data, static_position=[1], dynamic_position=[])
-            )
+            data_vec = Vec(data)
+            v_vals.append(_raw(data_vec[0]))
+            v_vals.append(_raw(data_vec[1]))
         return v_vals  # 8 i32 values
 
     # ---- Helper: transpose V in-register ----
@@ -780,11 +754,11 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
 
         # ds_write_b128 x 2 (4 dwords each = 32 fp8)
         lo_packed = vector.from_elements(T.i32x4, vt8[0:4])
-        lo_i8 = vector.bitcast(T.i8x16, lo_packed)
+        lo_i8 = Vec(lo_packed).bitcast(fx.Int8)
         vector.store(lo_i8, lds_buffer, [_raw(lds_vt_addr)])
 
         hi_packed = vector.from_elements(T.i32x4, vt8[4:8])
-        hi_i8 = vector.bitcast(T.i8x16, hi_packed)
+        hi_i8 = Vec(hi_packed).bitcast(fx.Int8)
         vector.store(hi_i8, lds_buffer, [_raw(lds_vt_addr + arith.index(16))])
 
     # ---- Helper: load transposed V from Vt LDS ----
@@ -1108,7 +1082,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
     def _rescale_oaccu(oaccu, rescale):
         """Multiply all oaccu accumulators by rescale factor.
         Descending s_setprio 3->0 across 4 groups of 8 muls."""
-        rescale_vec = vector.broadcast(T.f32x4, rescale)
+        rescale_vec = vector.broadcast(T.f32x4, _raw(rescale))
         result = [None] * len(oaccu)
         for group in range_constexpr(4):
             rocdl.s_setprio(3 - group)
@@ -1249,16 +1223,11 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
         # ---- Resolve row for tile+2 (2-ahead, matches HK line 407-426) ----
         # The buffer_load has softmax+V-transpose+GEMM2+barrier to complete.
         if const_expr(do_resolve_nn is not None):
-            neg_one_nn = _raw(arith.constant(-1, type=T.i32))
-            if_nn = scf.IfOp(do_resolve_nn, [T.i32], has_else=True)
-            with ir.InsertionPoint(if_nn.regions[0].blocks[0]):
-                row_nn_resolved = _get_kv_ld_row(nn_resolve_start, nn_resolve_end, True)
-                scf.YieldOp([row_nn_resolved])
-            with ir.InsertionPoint(if_nn.regions[1].blocks[0]):
-                scf.YieldOp([neg_one_nn])
-            row_kv_ld_nn = if_nn.results[0]
+            row_kv_ld_nn = fx.Int32(-1)
+            if do_resolve_nn:
+                row_kv_ld_nn = _get_kv_ld_row(nn_resolve_start, nn_resolve_end, True)
         else:
-            row_kv_ld_nn = _raw(arith.constant(-1, type=T.i32))
+            row_kv_ld_nn = fx.Int32(-1)
 
         # ---- Softmax ----
         p_exp_vals, row_max_new, row_sum_e_new, rescale = _softmax(
@@ -1601,7 +1570,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
         4. Multiply by reci_sum
         5. Store immediately (bf16 or f32 split)
         """
-        rescale_vec = vector.broadcast(T.f32x4, rescale)
+        rescale_vec = vector.broadcast(T.f32x4, _raw(rescale))
         reci_vec = vector.broadcast(T.f32x4, reci_sum)
         c32_i64_pv = _raw(arith.constant(32, type=T.i64))
 
@@ -1812,37 +1781,31 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
         )
 
         # --- First tile: resolve KV row (branched on boundary) ---
-        if_setup = scf.IfOp(first_tile_needs_boundary, [T.i32], has_else=True)
-        with ir.InsertionPoint(if_setup.regions[0].blocks[0]):
-            row_cb = _get_kv_ld_row(kv_start, kv_end, True)
-            scf.YieldOp([row_cb])
-        with ir.InsertionPoint(if_setup.regions[1].blocks[0]):
+        row_kv_ld_first = fx.Int32(-1)
+        if first_tile_needs_boundary:
+            row_kv_ld_first = _get_kv_ld_row(kv_start, kv_end, True)
+        else:
             kv_first_end = _raw(kv_start + c_block_n)
-            row_nc = _get_kv_ld_row(kv_start, kv_first_end, False)
-            scf.YieldOp([row_nc])
-        row_kv_ld_first = if_setup.results[0]
+            row_kv_ld_first = _get_kv_ld_row(kv_start, kv_first_end, False)
 
         # Load Q to GPR (independent of boundary check)
         q_nope_packs, q_rope_packs = _load_q_to_regs(qo_start)
 
         # Async load first tile KV to LDS (branched)
-        if_load = scf.IfOp(first_tile_needs_boundary, [], has_else=True)
-        with ir.InsertionPoint(if_load.regions[0].blocks[0]):
+        if first_tile_needs_boundary:
             _async_load_kv_all(
                 p_lds_kv_0_warp_i32,
                 row_kv_ld_first,
                 kv_ld_col_base_i32,
                 check_boundary=True,
             )
-            scf.YieldOp([])
-        with ir.InsertionPoint(if_load.regions[1].blocks[0]):
+        else:
             _async_load_kv_all(
                 p_lds_kv_0_warp_i32,
                 row_kv_ld_first,
                 kv_ld_col_base_i32,
                 check_boundary=False,
             )
-            scf.YieldOp([])
 
         # --- Tile-1 row resolution (only meaningful for multi-tile) ---
         # tile1_is_full: kv_start + 2*BN <= kv_end (equiv to num_tiles >= 3)
@@ -1852,16 +1815,13 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
         tile1_is_full = arith.cmpi(
             CmpIPredicate.sle, kv_start_plus_2bn, _raw(kv_end),
         )
-        if_tile1_row = scf.IfOp(tile1_is_full, [T.i32], has_else=True)
-        with ir.InsertionPoint(if_tile1_row.regions[0].blocks[0]):
+        row_kv_ld_tile1 = fx.Int32(-1)
+        if tile1_is_full:
             # Tile 1 is full -> no boundary check, tile_end = start+2*BN
-            row_t1_full = _get_kv_ld_row(kv_start_plus_bn, kv_start_plus_2bn, False)
-            scf.YieldOp([row_t1_full])
-        with ir.InsertionPoint(if_tile1_row.regions[1].blocks[0]):
+            row_kv_ld_tile1 = _get_kv_ld_row(kv_start_plus_bn, kv_start_plus_2bn, False)
+        else:
             # Tile 1 may be partial -> boundary check, tile_end = kv_end
-            row_t1_partial = _get_kv_ld_row(kv_start_plus_bn, _raw(kv_end), True)
-            scf.YieldOp([row_t1_partial])
-        row_kv_ld_tile1 = if_tile1_row.results[0]
+            row_kv_ld_tile1 = _get_kv_ld_row(kv_start_plus_bn, _raw(kv_end), True)
 
         # check_boundary_next for first tile: True only when
         # num_tiles==2 AND last_tile_partial (next tile is partial last)
@@ -1891,16 +1851,17 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
         )
 
         # Branch on has_multi_tiles: multi-tile gets prefetch, single doesn't
-        if_first = scf.IfOp(has_multi_tiles, first_result_types, has_else=True)
-        with ir.InsertionPoint(if_first.regions[0].blocks[0]):
+        p_pack_first = fx.Int64(0)
+        rescale_first = c_one_f32
+        row_kv_ld_nn_first = fx.Int32(-1)
+        if has_multi_tiles:
             # Multi-tile: first tile is always full, prefetch tile 1.
             # Sub-branch on first_tile_cbn for compile-time check_boundary_next.
-            if_first_cbn = scf.IfOp(first_tile_cbn, first_result_types, has_else=True)
-            with ir.InsertionPoint(if_first_cbn.regions[0].blocks[0]):
+            if first_tile_cbn:
                 # cbn=True: next tile needs boundary check (num_tiles==2, partial)
                 _barrier(vmcnt=0, lgkmcnt=0)
                 rocdl.sched_barrier(0)
-                rm1a, rse1a, pp1a, rs1a, nn1a = _process_tile_gemm1(
+                row_max, row_sum_e, p_pack_first, rescale_first, row_kv_ld_nn_first = _process_tile_gemm1(
                     p_lds_kv_0_base,
                     kv_start,
                     kv_end,
@@ -1918,16 +1879,11 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
                     nn_resolve_end=_raw(kv_end),
                     do_resolve_nn=do_resolve_nn_first,
                 )
-                y1a = [
-                    _raw(v) if not isinstance(v, ir.Value) else v
-                    for v in [rm1a, rse1a, pp1a, rs1a, nn1a]
-                ]
-                scf.YieldOp(y1a)
-            with ir.InsertionPoint(if_first_cbn.regions[1].blocks[0]):
+            else:
                 # cbn=False: next tile is full, no boundary check
                 _barrier(vmcnt=0, lgkmcnt=0)
                 rocdl.sched_barrier(0)
-                rm1b, rse1b, pp1b, rs1b, nn1b = _process_tile_gemm1(
+                row_max, row_sum_e, p_pack_first, rescale_first, row_kv_ld_nn_first = _process_tile_gemm1(
                     p_lds_kv_0_base,
                     kv_start,
                     kv_end,
@@ -1945,18 +1901,11 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
                     nn_resolve_end=_raw(kv_end),
                     do_resolve_nn=do_resolve_nn_first,
                 )
-                y1b = [
-                    _raw(v) if not isinstance(v, ir.Value) else v
-                    for v in [rm1b, rse1b, pp1b, rs1b, nn1b]
-                ]
-                scf.YieldOp(y1b)
-            y1 = list(if_first_cbn.results)
-            scf.YieldOp(y1)
-        with ir.InsertionPoint(if_first.regions[1].blocks[0]):
+        else:
             # Single tile: no prefetch, no 2-ahead resolve
             _barrier(vmcnt=0, lgkmcnt=0)
             rocdl.sched_barrier(0)
-            rm2, rse2, pp2, rs2, nn2 = _process_tile_gemm1(
+            row_max, row_sum_e, p_pack_first, rescale_first, row_kv_ld_nn_first = _process_tile_gemm1(
                 p_lds_kv_0_base,
                 kv_start,
                 kv_end,
@@ -1967,17 +1916,6 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
                 is_first_iter=True,
                 check_boundary=first_tile_needs_boundary,
             )
-            y2 = [
-                _raw(v) if not isinstance(v, ir.Value) else v
-                for v in [rm2, rse2, pp2, rs2, nn2]
-            ]
-            scf.YieldOp(y2)
-
-        row_max = if_first.results[0]
-        row_sum_e = if_first.results[1]
-        p_pack_first = if_first.results[2]
-        rescale_first = if_first.results[3]
-        row_kv_ld_nn_first = if_first.results[4]
 
         def _write_lse(pqo_loc_i32, rm, rse):
             """Write LSE for split output (first 16 lanes per warp)."""
@@ -2011,7 +1949,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
 
             Branches on partial_qo_loc to select bf16 vs f32 split output.
             """
-            reci = arith.DivFOp(_raw(c_one_f32), rse, fastmath=fm_fast).result
+            reci = arith.DivFOp(_raw(c_one_f32), _raw(rse), fastmath=fm_fast).result
             is_not_split = arith.cmpi(
                 CmpIPredicate.slt,
                 _raw(partial_qo_loc),
