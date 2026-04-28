@@ -215,10 +215,14 @@ def _is_int_tuple_value(value):
 
 
 def _expand_int_tuple_leaves(value, loc=None, ip=None):
+    from .numeric import Numeric
+
     if _is_int_tuple_value(value):
-        return value.to_py_value(loc=loc, ip=ip)
+        return _expand_int_tuple_leaves(value.to_py_value(loc=loc, ip=ip))
     if isinstance(value, (list, tuple)):
         return tuple(_expand_int_tuple_leaves(v, loc=loc, ip=ip) for v in value)
+    if isinstance(value, Numeric):
+        return value.value
     return value
 
 
@@ -287,15 +291,6 @@ def depth(int_or_tuple):
     if isinstance(int_or_tuple, tuple):
         return 1 + max((depth(c) for c in int_or_tuple), default=0)
     return fly.depth(int_or_tuple)
-
-
-is_profile_congruent = fly.is_profile_congruent
-is_profile_weakly_congruent = fly.is_profile_weakly_congruent
-
-
-def _check_profile(match_func, lhs, rhs):
-    if not match_func(lhs, rhs):
-        raise ValueError(f"profile mismatch: {match_func.__name__}({lhs.type}, {rhs.type}) is False")
 
 
 # ===----------------------------------------------------------------------=== #
