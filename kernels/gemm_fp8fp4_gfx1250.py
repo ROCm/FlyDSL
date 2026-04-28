@@ -1146,7 +1146,8 @@ def compile_mxscale_gemm(
                                   emit_filler=None,
                                   mid_compute_callback=None,
                                   prefetched_b_left_head=None,
-                                  emit_prefetch_next=None):
+                                  emit_prefetch_next=None,
+                                  late_fence_signal=None):
             """Column-band (quadrant) compute for FP8/A8W4.
 
             Splits B loads into left (wn<half_wn) and right (wn>=half_wn)
@@ -1178,17 +1179,23 @@ def compile_mxscale_gemm(
                 return [load_b_frag(b_buf, b_bases, wn_start + wn_local, ks)
                         for wn_local in range_constexpr(_half_wn)]
 
-            def _load_b_half_with_scales(wn_start, scale_rep_start, ks):
-                frags = _load_b_half(wn_start, ks)
-                scales_all = load_scale_slice_b128(
+            def _issue_b_scale_slice_raw(scale_rep_start, ks):
+                return issue_scale_slice_loads_raw(
                     bs_buf, bs_bases[0],
                     b_scale_load_rep, scale_rep_start,
                     _half_b_scale_rep, ks,
                     ks_group=bs_tdm_group_n)
+
+            def _extract_b_scale_slice(raw_vecs):
+                scales_all = extract_scales_from_raw(raw_vecs, _half_b_scale_rep)
                 # Op_sel packing: adjacent reps share one VGPR;
                 # stride-2 gives one per pair (same as _extract_and_filter_scales).
-                scales = scales_all[::2]
-                return frags, scales
+                return scales_all[::2]
+
+            def _load_b_half_with_scale_raw(wn_start, scale_rep_start, ks):
+                scale_raw = _issue_b_scale_slice_raw(scale_rep_start, ks)
+                frags = _load_b_half(wn_start, ks)
+                return frags, scale_raw
 
             def _load_a_group(wm_start, count, ks):
                 return [load_a_frag(a_buf, a_bases[wm_start + i], ks)
@@ -1230,24 +1237,21 @@ def compile_mxscale_gemm(
 
             # Load left B half + all A-scales (A-scales are small, 1 load)
             if prefetched_b_left_head is None:
-                b_left_frags, b_left_scales = _load_b_half_with_scales(0, 0, 0)
+                b_left_frags, b_left_scale_raw = _load_b_half_with_scale_raw(
+                    0, 0, 0)
             else:
                 # Use prefetched head frags (from prev buf's Q4);
                 # only load the remaining tail frags + scales here.
                 _pref_count = len(prefetched_b_left_head)
                 _remain_count = _half_wn - _pref_count
+                b_left_scale_raw = _issue_b_scale_slice_raw(0, 0)
                 b_left_back = [
                     load_b_frag(b_buf, b_bases, _pref_count + i, 0)
                     for i in range_constexpr(_remain_count)
                 ]
-                b_left_scales_all = load_scale_slice_b128(
-                    bs_buf, bs_bases[0],
-                    b_scale_load_rep, 0,
-                    _half_b_scale_rep, 0,
-                    ks_group=bs_tdm_group_n)
                 b_left_frags = list(prefetched_b_left_head) + b_left_back
-                b_left_scales = b_left_scales_all[::2]
 
+            _next_b_left_head = None
             for ks in range_constexpr(k_wmma_steps):
                 is_last_ks = ks == k_wmma_steps - 1
 
@@ -1260,17 +1264,21 @@ def compile_mxscale_gemm(
                 if _mid_early:
                     mid_compute_callback()
 
-                # Load A-scales (shared by all quadrants)
-                a_scales_all = load_scale_b128(
+                # Issue scale loads early and keep them raw until the first
+                # consumer. A/B LDS loads below cover the scale LDS latency.
+                a_scale_raw = issue_scale_loads_raw(
                     as_buf, as_bases[0], wmma_m_rep, ks,
                     ks_group=as_tdm_group_m)
-                a_scales = a_scales_all[::2]
 
                 # Load A top first (Q1 needs only a_top + b_left + a_scales).
                 a_top = _load_a_group(0, _half_wm, ks)
 
                 # Wait for a_top + a_scales to be ready (small drain).
                 rocdl.s_wait_dscnt(0)
+                a_scales_all = extract_scales_from_raw(a_scale_raw, wmma_m_rep)
+                a_scales = a_scales_all[::2]
+                if ks == 0:
+                    b_left_scales = _extract_b_scale_slice(b_left_scale_raw)
 
                 # Fuse Q1 WMMA + Q2 loads + Q2 WMMA into a single
                 # scheduling region so sched_group_barrier hints can organize
@@ -1289,9 +1297,11 @@ def compile_mxscale_gemm(
 
                 # Q2 loads join the fused region (no s_wait_dscnt: LLVM will
                 # auto-insert one driven by VGPR dependency to Q2 WMMAs).
+                b_right_scale_raw = _issue_b_scale_slice_raw(
+                    _half_b_scale_rep, ks)
                 a_bottom = _load_a_group(_half_wm, _half_wm, ks)
-                b_right_frags, b_right_scales = _load_b_half_with_scales(
-                    _half_wn, _half_b_scale_rep, ks)
+                b_right_frags = _load_b_half(_half_wn, ks)
+                b_right_scales = _extract_b_scale_slice(b_right_scale_raw)
 
                 _emit_q_rows(a_bottom, b_left_frags, a_scales, b_left_scales,
                              _half_wm, 0, _q_size, row_start=0)
@@ -1319,10 +1329,12 @@ def compile_mxscale_gemm(
 
                 # Prefetch next-ks B-left (overlaps with Q3/Q4 WMMA)
                 if not is_last_ks:
-                    next_left_frags, next_left_scales = \
-                        _load_b_half_with_scales(0, 0, ks + 1)
+                    next_left_frags, next_left_scale_raw = \
+                        _load_b_half_with_scale_raw(0, 0, ks + 1)
                     rocdl.s_wait_dscnt(
                         _half_wn * _b_frag_loads_per_wn + _half_b_scale_loads)
+                    next_left_scales = _extract_b_scale_slice(
+                        next_left_scale_raw)
                 else:
                     rocdl.s_wait_dscnt(0)
 
@@ -1330,9 +1342,19 @@ def compile_mxscale_gemm(
                 _emit_q(a_top, b_right_frags, a_scales, b_right_scales,
                         0, _half_wn, _q_size * 2)
 
+                if is_last_ks and late_fence_signal is not None:
+                    rocdl.sched_barrier(0)
+                    late_fence_signal()
+
                 if is_last_ks and emit_filler is not None:
                     rocdl.sched_barrier(0)
                     emit_filler()
+
+                # Move the cross-buffer B-left head prefetch before Q4 so Q4
+                # WMMAs can cover the LDS read burst without changing B layout.
+                if is_last_ks and emit_prefetch_next is not None:
+                    rocdl.sched_barrier(0)
+                    _next_b_left_head = emit_prefetch_next()
 
                 # Q4: bottom-A × B-right
                 _emit_q(a_bottom, b_right_frags, a_scales, b_right_scales,
@@ -1341,12 +1363,6 @@ def compile_mxscale_gemm(
                 if not is_last_ks:
                     b_left_frags = next_left_frags
                     b_left_scales = next_left_scales
-
-            # Prefetch next buf's b_left_head at Q4 end.
-            _next_b_left_head = None
-            if emit_prefetch_next is not None:
-                rocdl.sched_barrier(0)
-                _next_b_left_head = emit_prefetch_next()
 
             return current_accs, _next_b_left_head
 
@@ -1459,7 +1475,8 @@ def compile_mxscale_gemm(
                                    emit_filler=None,
                                    mid_compute_callback=None,
                                    prefetched_b_left_head=None,
-                                   emit_prefetch_next=None):
+                                   emit_prefetch_next=None,
+                                   late_fence_signal=None):
             # col_band returns (accs, prefetched_or_None);
             # all other schedules return (accs, None) so call sites unify.
             if compute_schedule_kind == COMPUTE_SCHEDULE_FP4_COL_BAND:
@@ -1473,7 +1490,8 @@ def compile_mxscale_gemm(
                     emit_filler=emit_filler,
                     mid_compute_callback=mid_compute_callback,
                     prefetched_b_left_head=prefetched_b_left_head,
-                    emit_prefetch_next=emit_prefetch_next)
+                    emit_prefetch_next=emit_prefetch_next,
+                    late_fence_signal=late_fence_signal)
             return compute_tile(
                 accs_in, lds_a, lds_b, lds_as, lds_bs,
                 emit_filler=emit_filler,
@@ -1937,12 +1955,16 @@ def compile_mxscale_gemm(
         if nbar_alloc is not None:
             init_named_barriers([nbar_sync])
 
+        def _wait_scale_async(async_outstanding):
+            if async_outstanding is not None:
+                rocdl.s_wait_asynccnt(async_outstanding)
+
         def _pipeline_fence(outstanding=0, async_outstanding=0):
             if split_data_tdm_scale_async:
                 tdm_ops.tensor_wait(outstanding)
                 rocdl.s_wait_loadcnt(0)
                 rocdl.s_wait_dscnt(0)
-                rocdl.s_wait_asynccnt(async_outstanding)
+                _wait_scale_async(async_outstanding)
                 gpu.barrier()
             else:
                 pipeline_fence(outstanding=outstanding, use_cluster=use_cluster)
@@ -1952,7 +1974,7 @@ def compile_mxscale_gemm(
                 tdm_ops.tensor_wait(outstanding)
                 rocdl.s_wait_loadcnt(0)
                 rocdl.s_wait_dscnt(0)
-                rocdl.s_wait_asynccnt(async_outstanding)
+                _wait_scale_async(async_outstanding)
                 rocdl.s_barrier_signal(-1)
             else:
                 pipeline_fence_signal(
@@ -2053,6 +2075,14 @@ def compile_mxscale_gemm(
                             _ab[0] = arith.addi(_ab[0], active_adv_i32)
                             _l2_prefetch(_k_off)
 
+                        late_fence_box = [False]
+
+                        def _late_fence_signal_ws():
+                            _pipeline_fence_signal(
+                                outstanding=_fence_outstanding,
+                                async_outstanding=scale_async_buffered_outstanding)
+                            late_fence_box[0] = True
+
                         rocdl.sched_barrier(0)
                         if split_data_tdm_scale_async:
                             issue_scale_async(load_stage, scale_load_k)
@@ -2068,7 +2098,10 @@ def compile_mxscale_gemm(
                                 stages_bs_idx[buf_idx],
                                 mid_compute_callback=_mid_tdm_ws,
                                 prefetched_b_left_head=prefetched,
-                                emit_prefetch_next=_prefetch_next)
+                                emit_prefetch_next=_prefetch_next,
+                                late_fence_signal=(
+                                    _late_fence_signal_ws
+                                    if split_data_tdm_scale_async else None))
                         else:
                             accs_in, _ = compute_tile_scheduled(
                                 accs_in,
@@ -2089,9 +2122,10 @@ def compile_mxscale_gemm(
                             pipeline_fence_wait_named_multi(
                                 _nbars, use_cluster=use_cluster)
                         else:
-                            _pipeline_fence_signal(
-                                outstanding=_fence_outstanding,
-                                async_outstanding=scale_async_buffered_outstanding)
+                            if not late_fence_box[0]:
+                                _pipeline_fence_signal(
+                                    outstanding=_fence_outstanding,
+                                    async_outstanding=scale_async_buffered_outstanding)
                             _pipeline_fence_wait()
 
                     if _col_band_prefetch_enabled:
@@ -2225,6 +2259,7 @@ def compile_mxscale_gemm(
             gpu.cluster_barrier()
         epi_addrs_box = [None]
         _tail_had_load = False
+        _tail_scale_async_pending = False
         _tail_prefetch_box = [tail_leftover_prefetched]
         _tail_scale_k_box = [
             split_k_base + arith.index((_tail_start + pre_loaded) * tile_k)
@@ -2238,7 +2273,11 @@ def compile_mxscale_gemm(
         for _load_stage, _compute_stage, _outstanding in tail_plan:
             if _outstanding == -1:
                 if _tail_had_load:
-                    _pipeline_fence(outstanding=0)
+                    _pipeline_fence(
+                        outstanding=0,
+                        async_outstanding=(
+                            0 if _tail_scale_async_pending else None))
+                    _tail_scale_async_pending = False
                 if use_tdm_store:
                     accs, _ = compute_tile_scheduled(
                         accs,
@@ -2256,8 +2295,12 @@ def compile_mxscale_gemm(
                         emit_filler=_emit_epi_addrs,
                         prefetched_b_left_head=_consume_tail_prefetched())
             else:
-                _pipeline_fence_signal(outstanding=_outstanding)
+                _pipeline_fence_signal(
+                    outstanding=_outstanding,
+                    async_outstanding=(
+                        0 if _tail_scale_async_pending else None))
                 _pipeline_fence_wait()
+                _tail_scale_async_pending = False
 
                 _tail_mid_cb = None
                 if _load_stage is not None:
@@ -2314,6 +2357,7 @@ def compile_mxscale_gemm(
                     and _load_stage is not None
                 ):
                     issue_scale_async(_load_stage, _tail_scale_k_box[0])
+                    _tail_scale_async_pending = True
                     _tail_scale_k_box[0] = (
                         _tail_scale_k_box[0] + arith.index(tile_k))
                 accs, _ = compute_tile_scheduled(
