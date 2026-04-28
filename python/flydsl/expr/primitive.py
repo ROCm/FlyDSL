@@ -205,6 +205,11 @@ UniversalAtomicDec = lambda val_type: CopyOpUniversalAtomicType.get(int(AtomicOp
 UniversalFMA = lambda ty: MmaOpUniversalFMAType.get(ty.ir_type)
 
 
+# ===----------------------------------------------------------------------=== #
+# Compile-time utility
+# ===----------------------------------------------------------------------=== #
+
+
 def const_expr(x):
     return x
 
@@ -214,11 +219,47 @@ def range_constexpr(*args):
 
 
 def rank(int_or_tuple):
+    """Number of top-level elements of a tuple / layout.
+
+    A leaf integer has rank 1; each child of a nested tuple counts as one mode.
+
+    Examples:
+        rank(8)              -> 1
+        rank((8, 16))        -> 2
+        rank((8, (4, 2)))    -> 2   (the nested (4, 2) still counts as one mode)
+    """
+    if isinstance(int_or_tuple, int):
+        return 1
+    if isinstance(int_or_tuple, tuple):
+        return len(int_or_tuple)
     return fly.rank(int_or_tuple)
 
 
 def depth(int_or_tuple):
+    """How deeply the tuple is nested.
+
+    A leaf integer has depth 0; a flat tuple has depth 1; each extra level of
+    nesting adds one.
+
+    Examples:
+        depth(8)             -> 0
+        depth((8, 16))       -> 1
+        depth((8, (4, 2)))   -> 2
+    """
+    if isinstance(int_or_tuple, int):
+        return 0
+    if isinstance(int_or_tuple, tuple):
+        return 1 + max((depth(c) for c in int_or_tuple), default=0)
     return fly.depth(int_or_tuple)
+
+
+is_profile_congruent = fly.is_profile_congruent
+is_profile_weakly_congruent = fly.is_profile_weakly_congruent
+
+
+def _check_profile(match_func, lhs, rhs):
+    if not match_func(lhs, rhs):
+        raise ValueError(f"profile mismatch: {match_func.__name__}({lhs.type}, {rhs.type}) is False")
 
 
 # ===----------------------------------------------------------------------=== #
@@ -263,6 +304,7 @@ def make_layout(shape, stride, loc=None, ip=None):
     if not isinstance(stride, ir.Value):
         strideTy, dyncElems = fly.infer_int_tuple_type(stride)
         stride = fly.make_stride(strideTy, dyncElems, loc=loc, ip=ip)
+    _check_profile(is_profile_congruent, shape, stride)
     return fly.make_layout(shape, stride=stride, loc=loc, ip=ip)
 
 
@@ -279,6 +321,7 @@ def make_ordered_layout(shape, order, loc=None, ip=None):
     if not isinstance(order, ir.Value):
         orderTy, dyncElems = fly.infer_int_tuple_type(order)
         order = fly.make_int_tuple(orderTy, dyncElems, loc=loc, ip=ip)
+    _check_profile(is_profile_weakly_congruent, order, shape)
     return fly.make_ordered_layout(shape, order, loc=loc, ip=ip)
 
 
@@ -489,6 +532,7 @@ def slice(src, coord, loc=None, ip=None):
     if not isinstance(coord, ir.Value):
         coordTy, dyncElems = fly.infer_int_tuple_type(coord)
         coord = fly.make_coord(coordTy, dyncElems, loc=loc, ip=ip)
+    _check_profile(is_profile_weakly_congruent, coord, src)
     return fly.slice(src, coord, loc=loc, ip=ip)
 
 
@@ -497,6 +541,7 @@ def dice(src, coord, loc=None, ip=None):
     if not isinstance(coord, ir.Value):
         coordTy, dyncElems = fly.infer_int_tuple_type(coord)
         coord = fly.make_coord(coordTy, dyncElems, loc=loc, ip=ip)
+    _check_profile(is_profile_weakly_congruent, coord, src)
     return fly.dice(src, coord, loc=loc, ip=ip)
 
 
@@ -539,6 +584,7 @@ def crd2idx(crd, layout, loc=None, ip=None):
             crd = tuple(_to_i32(c) for c in crd)
         crdTy, dyncElems = fly.infer_int_tuple_type(crd)
         crd = fly.make_coord(crdTy, dyncElems, loc=loc, ip=ip)
+    _check_profile(is_profile_weakly_congruent, crd, layout)
     return fly.crd2idx(crd, layout, loc=loc, ip=ip)
 
 
@@ -874,6 +920,7 @@ def memref_load(memref, indices, loc=None, ip=None):
         return fly.memref_load(memref, indices, loc=loc, ip=ip)
 
     indices = make_int_tuple(indices, loc=loc, ip=ip)
+    _check_profile(is_profile_weakly_congruent, indices, memref)
     return fly.memref_load(memref, indices, loc=loc, ip=ip)
 
 
@@ -888,6 +935,7 @@ def memref_store(value, memref, indices, loc=None, ip=None):
         return fly.memref_store(value, memref, indices, loc=loc, ip=ip)
 
     indices = make_int_tuple(indices, loc=loc, ip=ip)
+    _check_profile(is_profile_weakly_congruent, indices, memref)
     return fly.memref_store(value, memref, indices, loc=loc, ip=ip)
 
 

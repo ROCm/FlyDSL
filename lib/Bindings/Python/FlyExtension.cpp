@@ -7,6 +7,7 @@
 #include "mlir/IR/Value.h"
 
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
+#include "flydsl/Dialect/Fly/Utils/IntTupleUtils.h"
 
 #include "BindingUtils.h"
 #include "DLTensorAdaptor.h"
@@ -23,6 +24,32 @@ using namespace ::mlir;
 using namespace ::mlir::fly;
 
 namespace {
+namespace detail {
+
+IntTupleAttr getProfileAttrFromLayoutAttr(Attribute layout) {
+  if (auto layoutAttr = dyn_cast<LayoutAttr>(layout))
+    return layoutAttr.getShape();
+  if (auto composedAttr = dyn_cast<ComposedLayoutAttr>(layout))
+    return composedAttr.getOuter().getShape();
+  throw std::invalid_argument("expected LayoutAttr or ComposedLayoutAttr");
+}
+
+IntTupleAttr getProfileAttrFromType(Type ty) {
+  if (auto intTupleTy = dyn_cast<IntTupleType>(ty))
+    return intTupleTy.getAttr();
+  if (auto layoutTy = dyn_cast<LayoutType>(ty))
+    return layoutTy.getAttr().getShape();
+  if (auto composedTy = dyn_cast<ComposedLayoutType>(ty))
+    return composedTy.getAttr().getOuter().getShape();
+  if (auto memrefTy = dyn_cast<fly::MemRefType>(ty))
+    return getProfileAttrFromLayoutAttr(memrefTy.getLayout());
+  if (auto coordTensorTy = dyn_cast<CoordTensorType>(ty))
+    return getProfileAttrFromLayoutAttr(coordTensorTy.getLayout());
+  throw std::invalid_argument(
+      "expected IntTupleType, LayoutType, ComposedLayoutType, MemRefType or CoordTensorType");
+}
+
+} // namespace detail
 
 struct IntTupleAttrBuilder {
   MLIRContext *ctx;
@@ -100,6 +127,22 @@ bool has_none(MlirValue int_or_tuple) {
   if (auto t = ::mlir::dyn_cast<::mlir::fly::IntTupleType>(ty))
     return ::mlir::fly::intTupleHasNone(t.getAttr());
   throw std::invalid_argument("has_none() expected IntTupleType");
+}
+
+bool isProfileCongruent(MlirValue lhs, MlirValue rhs) {
+  Type lhsTy = unwrap(lhs).getType();
+  Type rhsTy = unwrap(rhs).getType();
+  auto lhsProfile = detail::getProfileAttrFromType(lhsTy);
+  auto rhsProfile = detail::getProfileAttrFromType(rhsTy);
+  return intTupleIsCongruent(lhsProfile, rhsProfile);
+}
+
+bool isProfileWeaklyCongruent(MlirValue lhs, MlirValue rhs) {
+  Type lhsTy = unwrap(lhs).getType();
+  Type rhsTy = unwrap(rhs).getType();
+  auto lhsProfile = detail::getProfileAttrFromType(lhsTy);
+  auto rhsProfile = detail::getProfileAttrFromType(rhsTy);
+  return intTupleIsWeaklyCongruent(lhsProfile, rhsProfile);
 }
 
 } // namespace
@@ -706,8 +749,8 @@ struct PyCopyOpUniversalAtomicType : PyConcreteType<PyCopyOpUniversalAtomicType>
         "get",
         [](int32_t atomicOp, PyType &valTypeObj, DefaultingPyMlirContext context) {
           MLIRContext *ctx = unwrap(context.get()->get());
-          auto atomicOpAttr = ::mlir::fly::AtomicOpAttr::get(
-              ctx, static_cast<::mlir::fly::AtomicOp>(atomicOp));
+          auto atomicOpAttr =
+              ::mlir::fly::AtomicOpAttr::get(ctx, static_cast<::mlir::fly::AtomicOp>(atomicOp));
           return PyCopyOpUniversalAtomicType(
               context->getRef(),
               wrap(CopyOpUniversalAtomicType::get(atomicOpAttr, unwrap(valTypeObj))));
@@ -801,6 +844,12 @@ NB_MODULE(_mlirDialectsFly, m) {
         nb::sig("def depth(int_or_tuple: " MAKE_MLIR_PYTHON_QUALNAME("ir.Value") ") -> int"));
   m.def("has_none", &has_none, "int_or_tuple"_a,
         nb::sig("def has_none(int_or_tuple: " MAKE_MLIR_PYTHON_QUALNAME("ir.Value") ") -> bool"));
+  m.def("is_profile_congruent", &isProfileCongruent, "lhs"_a, "rhs"_a,
+        nb::sig("def is_profile_congruent(lhs: " MAKE_MLIR_PYTHON_QUALNAME(
+            "ir.Value") ", rhs: " MAKE_MLIR_PYTHON_QUALNAME("ir.Value") ") -> bool"));
+  m.def("is_profile_weakly_congruent", &isProfileWeaklyCongruent, "lhs"_a, "rhs"_a,
+        nb::sig("def is_profile_weakly_congruent(lhs: " MAKE_MLIR_PYTHON_QUALNAME(
+            "ir.Value") ", rhs: " MAKE_MLIR_PYTHON_QUALNAME("ir.Value") ") -> bool"));
 
   // -------------------------------------------------------------------------
   // Bind Fly dialect types (PyConcreteType pattern)
