@@ -27,7 +27,7 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.compiler.kernel_function import CompilationContext
 
-from flydsl.expr import arith, vector, gpu, rocdl, buffer_ops, range_constexpr
+from flydsl.expr import arith, vector, gpu, rocdl, buffer_ops, range_constexpr, const_expr
 from flydsl.runtime.device import get_rocm_arch
 from flydsl.expr.typing import T
 from flydsl.utils.smem_allocator import SmemAllocator
@@ -366,7 +366,7 @@ def create_wmma_gemm_module(
                     g_row = tile_m0 + wmma_m_off + base8 + fx.Index(si)
                     g_col = tile_n0 + wmma_n_off + lane16
                     val = vector.extract(accs[idx], static_position=[si], dynamic_position=[])
-                    if out_dtype == "bf16":
+                    if const_expr(out_dtype == "bf16"):
                         val = arith.trunc_f(T.bf16, val)
                     elem_off = g_row * c_layout_n + g_col
                     buffer_ops.buffer_store(val, c_rsrc, elem_off)

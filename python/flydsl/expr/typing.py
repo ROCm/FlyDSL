@@ -5,7 +5,7 @@ import ctypes
 import enum
 import operator
 from inspect import isclass
-from typing import Generic, Type, TypeVar
+from typing import Generic, Type, TypeVar, overload
 
 from flydsl.runtime.device import get_rocm_arch
 
@@ -656,8 +656,18 @@ class CopyAtom(BuiltinDslType):
     def layout_ref_tv(self):
         return static(self.type.tv_layout_ref)
 
+    @overload
+    def set_value(self, field: str, value, loc=None, ip=None): ...
+    @overload
+    def set_value(self, field: dict, loc=None, ip=None): ...
+
     @traced_op
-    def set_value(self, field, value, loc=None, ip=None):
+    def set_value(self, field, value=None, loc=None, ip=None):
+        if isinstance(field, dict):
+            result = self
+            for k, v in field.items():
+                result = atom_set_value(result, k, v, loc=loc, ip=ip)
+            return result
         return atom_set_value(self, field, value, loc=loc, ip=ip)
 
 
@@ -687,8 +697,18 @@ class MmaAtom(BuiltinDslType):
     def layout_C_tv(self):
         return static(self.type.tv_layout_c)
 
+    @overload
+    def set_value(self, field: str, value, loc=None, ip=None): ...
+    @overload
+    def set_value(self, field: dict, loc=None, ip=None): ...
+
     @traced_op
-    def set_value(self, field, value, loc=None, ip=None):
+    def set_value(self, field, value=None, loc=None, ip=None):
+        if isinstance(field, dict):
+            result = self
+            for k, v in field.items():
+                result = atom_set_value(result, k, v, loc=loc, ip=ip)
+            return result
         return atom_set_value(self, field, value, loc=loc, ip=ip)
 
 
@@ -861,6 +881,9 @@ _VECTOR_OP_METHODS = {
     operator.truediv: "__truediv__",
     operator.floordiv: "__floordiv__",
     operator.mod: "__mod__",
+    operator.pow: "__pow__",
+    operator.lshift: "__lshift__",
+    operator.rshift: "__rshift__",
     operator.and_: "__and__",
     operator.or_: "__or__",
     operator.xor: "__xor__",
@@ -879,6 +902,9 @@ _VECTOR_REVERSE_OP_METHODS = {
     "__truediv__": "__rtruediv__",
     "__floordiv__": "__rfloordiv__",
     "__mod__": "__rmod__",
+    "__pow__": "__rpow__",
+    "__lshift__": "__rlshift__",
+    "__rshift__": "__rrshift__",
     "__and__": "__rand__",
     "__or__": "__ror__",
     "__xor__": "__rxor__",
@@ -1141,6 +1167,24 @@ class Vector(ArithValue):
 
     def __rmod__(self, other, *, loc=None, ip=None):
         return self.apply_op(operator.mod, other, flip=True, loc=loc, ip=ip)
+
+    def __pow__(self, other, *, loc=None, ip=None):
+        return self.apply_op(operator.pow, other, loc=loc, ip=ip)
+
+    def __rpow__(self, other, *, loc=None, ip=None):
+        return self.apply_op(operator.pow, other, flip=True, loc=loc, ip=ip)
+
+    def __lshift__(self, other, *, loc=None, ip=None):
+        return self.apply_op(operator.lshift, other, loc=loc, ip=ip)
+
+    def __rlshift__(self, other, *, loc=None, ip=None):
+        return self.apply_op(operator.lshift, other, flip=True, loc=loc, ip=ip)
+
+    def __rshift__(self, other, *, loc=None, ip=None):
+        return self.apply_op(operator.rshift, other, loc=loc, ip=ip)
+
+    def __rrshift__(self, other, *, loc=None, ip=None):
+        return self.apply_op(operator.rshift, other, flip=True, loc=loc, ip=ip)
 
     def __and__(self, other, *, loc=None, ip=None):
         return self.apply_op(operator.and_, other, loc=loc, ip=ip)

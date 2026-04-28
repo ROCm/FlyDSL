@@ -17,7 +17,7 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.compiler.kernel_function import CompilationContext
 
-from flydsl.expr import arith, gpu, range_constexpr
+from flydsl.expr import arith, const_expr, gpu, range_constexpr
 from flydsl.expr.arith import ArithValue
 from flydsl.expr.typing import T, Int32
 from flydsl.expr.vector import ReductionOp, full
@@ -82,14 +82,14 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
             for _sh_exp in range_constexpr(int(math.log2(WARP_SIZE))):
                 off = fx.Int32(WARP_SIZE // (2 << _sh_exp))
                 peer = w.shuffle_xor(off, width_i32)
-                if mode == "max":
+                if const_expr(mode == "max"):
                     w = w.maximumf(peer)
                 else:
                     w = w.addf(peer, fastmath=fm_fast)
             return w
 
-        def block_reduce(val, mode):
-            if RED_SLOTS == 1:
+        def block_reduce(val, mode, s_red_buffer):
+            if const_expr(RED_SLOTS == 1):
                 return wave_reduce(val, mode)
 
             lane = tid % WARP_SIZE
@@ -100,30 +100,30 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
 
             if lane == fx.Int32(0):
                 wave_idx = ArithValue(wave).index_cast(T.index)
-                s_red.store(w, [wave_idx])
+                SmemPtr.store(s_red_buffer, w, [wave_idx])
             gpu.barrier()
 
             if wave == fx.Int32(0):
                 in_range = lane < RED_SLOTS
                 lane_safe = in_range.select(lane, fx.Int32(0))
                 lane_safe_idx = ArithValue(lane_safe).index_cast(T.index)
-                v = s_red.load([lane_safe_idx])
+                v = SmemPtr.load(s_red_buffer, [lane_safe_idx])
                 z = neutral
                 ww = in_range.select(v, z)
                 ww = wave_reduce(ww, mode)
 
                 if lane == fx.Int32(0):
                     c0_idx = fx.Index(0)
-                    s_red.store(ww, [c0_idx])
+                    SmemPtr.store(s_red_buffer, ww, [c0_idx])
             gpu.barrier()
 
             c0_idx = fx.Index(0)
-            return s_red.load([c0_idx])
+            return SmemPtr.load(s_red_buffer, [c0_idx])
 
         # ==================================================================
         # Fast path: N is a multiple of tile_cols
         # ==================================================================
-        if False and N >= tile_cols and N % tile_cols == 0:
+        if const_expr(False and N >= tile_cols and N % tile_cols == 0):
             from flydsl.expr import math as fmath
 
             num_tiles = N // tile_cols
@@ -167,7 +167,7 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
                 red_max = x.reduce(ReductionOp.MAX)
                 thread_max = thread_max.maximumf(red_max)
 
-            global_max = block_reduce(thread_max, "max")
+            global_max = block_reduce(thread_max, "max", s_red)
 
             # 2. Exp + local sum
             thread_sum = c_zero_f
@@ -180,7 +180,7 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
                 red_sum = exp_val.reduce(ReductionOp.ADD, fastmath=fm_fast)
                 thread_sum = thread_sum + red_sum
 
-            global_sum = block_reduce(thread_sum, "sum")
+            global_sum = block_reduce(thread_sum, "sum", s_red)
 
             # 3. Normalize + store
             c_one = arith.constant(1.0, type=compute_type)
@@ -243,7 +243,7 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
                 row_buffer.append((safe_val, is_valid))
                 thread_max = thread_max.maximumf(safe_val)
 
-            global_max = block_reduce(thread_max, "max")
+            global_max = block_reduce(thread_max, "max", s_red)
 
             # 2. Exp + sum
             thread_sum = c_zero_f
@@ -256,7 +256,7 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
                 thread_sum = thread_sum + safe_exp
                 new_buffer.append((exp_val, is_valid))
 
-            global_sum = block_reduce(thread_sum, "sum")
+            global_sum = block_reduce(thread_sum, "sum", s_red)
             c_one = arith.constant(1.0, type=compute_type)
             inv_sum = c_one / ArithValue(global_sum)
 
@@ -268,7 +268,8 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
                 buf_idx += 1
                 if arith.cmpi(arith.CmpIPredicate.ult, idx, Int32(N)):
                     norm_val = ArithValue(exp_val) * inv_sum
-                    if dtype_str == "f32":
+                    out_e = norm_val
+                    if const_expr(dtype_str == "f32"):
                         out_e = norm_val
                     else:
                         out_e = norm_val.truncf(elem_type)

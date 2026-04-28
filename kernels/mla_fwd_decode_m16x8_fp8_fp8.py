@@ -25,6 +25,7 @@ from flydsl._mlir.dialects._arith_enum_gen import CmpIPredicate
 
 from flydsl.expr import arith, vector, gpu, buffer_ops, rocdl
 from flydsl.expr import range_constexpr
+from flydsl.expr import const_expr
 from flydsl.expr.arith import _to_raw as _raw
 from flydsl.expr.typing import T
 
@@ -312,7 +313,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
     from ``work_indptr`` / ``work_info_set`` and processes them sequentially.
     """
     _STUB_EARLY_RETURN = False  # Set True to skip all kernel body for testing launch
-    if _STUB_EARLY_RETURN:
+    if const_expr(_STUB_EARLY_RETURN):
         return
 
     # ---- Types ----
@@ -418,7 +419,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
         buffer_load -- avoids reading garbage from kv_page_indices.
         """
         row_idx_i32 = _raw(kv_ld_row_base_i32 + kv_tile_start_i32)
-        if check_boundary:
+        if const_expr(check_boundary):
             neg_one = _raw(arith.constant(-1, type=T.i32))
             if_op = scf.IfOp(
                 arith.cmpi(
@@ -459,7 +460,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
         )
         lds_base_i32 = _raw(arith.ArithValue(p_lds_kv_warp_i32) + _lds_adj)
 
-        if check_boundary:
+        if const_expr(check_boundary):
             neg_one = _raw(arith.constant(-1, type=T.i32))
             is_oob = arith.cmpi(CmpIPredicate.eq, _raw(row_i32), neg_one)
             # For OOB: write zero to LDS
@@ -578,14 +579,14 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
                 is_align_stack=False,
             )
 
-        if check_boundary is False:
+        if const_expr(check_boundary is False):
             _emit_normal_load()
         else:
             # Build OOB condition: row == -1
             neg_one = _raw(arith.constant(-1, type=T.i32))
             is_oob = arith.cmpi(CmpIPredicate.eq, _raw(row_i32), neg_one)
             # If check_boundary is a runtime i1, AND it in
-            if check_boundary is not True:
+            if const_expr(check_boundary is not True):
                 is_oob = _raw(arith.ArithValue(check_boundary) & arith.ArithValue(is_oob))
 
             if_op = scf.IfOp(is_oob, [], has_else=True)
@@ -704,11 +705,11 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
         # 4 x ds_read_b64: load 8 dwords at strides matching KvManagerV2
         v_vals = []
         for pass_idx in range_constexpr(4):
-            if pass_idx == 0:
+            if const_expr(pass_idx == 0):
                 off = 0
-            elif pass_idx == 1:
+            elif const_expr(pass_idx == 1):
                 off = KV_BYTES_PER_ROW
-            elif pass_idx == 2:
+            elif const_expr(pass_idx == 2):
                 off = KV_SUB_BYTES
             else:
                 off = KV_SUB_BYTES + KV_BYTES_PER_ROW
@@ -952,7 +953,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
             slot = i % 3
             issue_pass = i + 2
 
-            if issue_pass < 9:
+            if const_expr(issue_pass < 9):
                 rocdl.s_waitcnt(_encode_waitcnt(vmcnt=1))
                 loads[issue_pass % 3] = _q_buf_load(issue_pass)
             else:
@@ -981,7 +982,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
                 _raw(p_vals[i]), _raw(softmax_scale), fastmath=fm_fast
             ).result
 
-        if check_boundary is not False:
+        if const_expr(check_boundary is not False):
             for i in range_constexpr(8):
                 # Position of this element: col_0_start + (i//4)*16 + (i%4)
                 sub_offset = (i // 4) * 16 + (i % 4)
@@ -993,7 +994,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
                     CmpIPredicate.sge, pos_i32, _raw(kv_end_i32)
                 )
                 # If check_boundary is a runtime i1, AND it in
-                if check_boundary is not True:
+                if const_expr(check_boundary is not True):
                     is_oob = _raw(arith.ArithValue(check_boundary) & arith.ArithValue(is_oob))
                 result[i] = _raw(arith.select(is_oob, _raw(c_neg_inf_f32), result[i]))
         return result
@@ -1034,7 +1035,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
         local_max = _warp_reduce_max_16(local_max)
 
         # New row max
-        if is_first_iter:
+        if const_expr(is_first_iter):
             new_row_max = local_max
             rescale = _raw(c_one_f32)
         else:
@@ -1068,7 +1069,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
         local_sum = _warp_reduce_add_16(local_sum)
 
         # Update row_sum_e
-        if is_first_iter:
+        if const_expr(is_first_iter):
             row_sum_e_new = local_sum
         else:
             row_sum_e_new = arith.AddFOp(
@@ -1157,7 +1158,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
 
         def _maybe_prefetch(block_idx):
             """Issue prefetch (OOB check controlled by check_boundary_next)."""
-            if not do_prefetch:
+            if const_expr(not do_prefetch):
                 return
             _prefetch_k_tile_asm(
                 p_lds_kv_next_warp_i32,
@@ -1191,7 +1192,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
             q_0 = q_nope[tile_0]
             q_1 = q_nope[tile_1]
 
-            if nope_pair == 0:
+            if const_expr(nope_pair == 0):
                 p_comp[0] = _mfma_fp8(
                     T.f32x4, [k0_lo, q_0, _raw(c_zero_v4f32), 0, 0, 0]
                 )
@@ -1247,7 +1248,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
 
         # ---- Resolve row for tile+2 (2-ahead, matches HK line 407-426) ----
         # The buffer_load has softmax+V-transpose+GEMM2+barrier to complete.
-        if do_resolve_nn is not None:
+        if const_expr(do_resolve_nn is not None):
             neg_one_nn = _raw(arith.constant(-1, type=T.i32))
             if_nn = scf.IfOp(do_resolve_nn, [T.i32], has_else=True)
             with ir.InsertionPoint(if_nn.regions[0].blocks[0]):
@@ -1343,7 +1344,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
             )
             rocdl.sched_barrier(0)
 
-            if pv_pair < NUM_PV_ITERS // 2 - 1:
+            if const_expr(pv_pair < NUM_PV_ITERS // 2 - 1):
                 rocdl.s_nop(1)
 
         rocdl.s_setprio(0)
@@ -1616,7 +1617,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
             col_b1 = col_b0 + MFMA_N
 
             # Rescale 4 oaccu groups for this pair (skip if first iter)
-            if not is_first_iter_flag:
+            if const_expr(not is_first_iter_flag):
                 oaccu_in[iter_a * 2] = arith.MulFOp(
                     _raw(oaccu_in[iter_a * 2]),
                     _raw(rescale_vec),
@@ -1699,7 +1700,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
             ).result
 
             # Store immediately via LDS reshape (coalesced)
-            if is_split:
+            if const_expr(is_split):
                 _store_oaccu_pair_split(
                     oaccu_in[iter_a * 2],
                     oaccu_in[iter_a * 2 + 1],

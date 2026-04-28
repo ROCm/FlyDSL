@@ -769,16 +769,24 @@ def mma_make_fragment(operand_id, tiled_mma, input, *, stages=None, loc=None, ip
 
 
 @traced_op
-def copy(copy_atom, src, dst, *, pred=None, loc=None, ip=None):
-    return fly.copy(copy_atom, src, dst, pred=pred, loc=loc, ip=ip)
+def copy(copy_atom, src, dst, *, pred=None, loc=None, ip=None, **kwargs):
+    return fly.copy(copy_atom.set_value(kwargs), src, dst, pred=pred, loc=loc, ip=ip)
 
 
 @traced_op
-def gemm(mma_atom, d, a, b, c, *, traversal_order=None, traversal_layout=None, loc=None, ip=None):
+def gemm(mma_atom, d, a, b, c, *, traversal_order=None, traversal_layout=None, loc=None, ip=None, **kwargs):
     if traversal_order is not None and traversal_layout is not None:
         raise ValueError("Only one of 'traversal_order' or 'traversal_layout' can be specified, not both")
     return fly.gemm(
-        mma_atom, d, a, b, c, traversal_order=traversal_order, traversal_layout=traversal_layout, loc=loc, ip=ip
+        mma_atom if (not kwargs) else mma_atom.set_value(kwargs),
+        d,
+        a,
+        b,
+        c,
+        traversal_order=traversal_order,
+        traversal_layout=traversal_layout,
+        loc=loc,
+        ip=ip,
     )
 
 

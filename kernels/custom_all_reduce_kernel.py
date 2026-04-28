@@ -14,6 +14,7 @@ import math
 
 import flydsl.compiler as flyc
 from flydsl.expr import arith as ea, gpu, range_constexpr, vector as ev, buffer_ops
+from flydsl.expr import const_expr
 from flydsl.expr.typing import T, Int32, Int64, Stream
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import scf, llvm, rocdl
@@ -373,7 +374,7 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
         """
         i32, i64 = T.i32, T.i64
         v4i32 = T.i32x4
-        if is_f32:
+        if const_expr(is_f32):
             v4f32 = T.f32x4
         else:
             v8half = T.bf16x8 if is_bf16 else T.f16x8
@@ -445,14 +446,14 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
                     sm_i_idx = ea.index_cast(
                         T.index, ea.constant(wi, type=i32) * tnum_gpu_i32 + lane_id + sm_base)
                     raw_i = smem_ptr.load([sm_i_idx])
-                    if is_f32:
+                    if const_expr(is_f32):
                         vf = ev.bitcast(v4f32, raw_i)
                         acc = vf if acc is None else acc + vf
                     else:
                         v16 = ev.bitcast(v8half, raw_i)
                         v32 = v16.extf(v8f32)
                         acc = v32 if acc is None else acc + v32
-                if is_f32:
+                if const_expr(is_f32):
                     out_bits = ev.bitcast(v4i32, acc)
                 else:
                     out_bits = ev.bitcast(v4i32, acc.truncf(v8half))
@@ -483,7 +484,7 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
     ):
         i32, i64 = T.i32, T.i64
         v4i32 = T.i32x4
-        if is_f32:
+        if const_expr(is_f32):
             v4f32 = T.f32x4
         else:
             v8half = T.bf16x8 if is_bf16 else T.f16x8
@@ -542,7 +543,7 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
             """Emit reduce body: load → smem → barrier1 → warp0 reduce → [barrier2]."""
             off_i32 = cur * ea.constant(_ELEMS_PER_PACK, type=i32)
             raw = _load_v4i32(in_rsrc, off_i32)
-            if smem_base_expr is None:
+            if const_expr(smem_base_expr is None):
                 sm_idx = ea.index_cast(T.index, lane_i32)
             else:
                 sm_idx = ea.index_cast(T.index, smem_base_expr + lane_i32)
@@ -554,19 +555,19 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
             with ir.InsertionPoint(ifw0.then_block):
                 acc = None
                 for wi in range_constexpr(world_size):
-                    if smem_base_expr is None:
+                    if const_expr(smem_base_expr is None):
                         sm_r_idx = ea.index_cast(T.index, ea.constant(wi, type=i32) * tnum_gpu_i32 + lane_id)
                     else:
                         sm_r_idx = ea.index_cast(T.index, ea.constant(wi, type=i32) * tnum_gpu_i32 + lane_id + smem_base_expr)
                     raw_i = smem_ptr.load([sm_r_idx])
-                    if is_f32:
+                    if const_expr(is_f32):
                         vf = ev.bitcast(v4f32, raw_i)
                         acc = vf if acc is None else acc + vf
                     else:
                         v16 = ev.bitcast(v8half, raw_i)
                         v32 = v16.extf(v8f32)
                         acc = v32 if acc is None else acc + v32
-                if is_f32:
+                if const_expr(is_f32):
                     out_raw = ev.bitcast(v4i32, acc)
                 else:
                     out_raw = ev.bitcast(v4i32, acc.truncf(v8half))
@@ -576,7 +577,7 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
                 scf.YieldOp([])
 
         idx_p = start_p + tid_pack
-        if _use_single_buf_2stage:
+        if const_expr(_use_single_buf_2stage):
             # Single buffer: 8KB LDS, 2 barriers per iteration.
             loop1 = scf.WhileOp([i32], [idx_p])
             b1 = ir.Block.create_at_start(loop1.before, [i32])
@@ -617,7 +618,7 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
         # ---- Stage 2: all-gather ----
         out_rsrc = _make_rsrc(out_ptr_i64)
 
-        if vec_ok:
+        if const_expr(vec_ok):
             tmp_ptrs_vec = _pack_i64_vec(tmp_ptrs_arr)
             tid_pack2 = bid_i32 * tnum_gpu_i32 + lane_id
             stride_pack2 = gpu.grid_dim.x.ir_value() * tnum_gpu_i32
@@ -632,7 +633,7 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
             with ir.InsertionPoint(a2):
                 cur = a2.arguments[0]
                 sum_rw = rank_i32 + warp_id
-                if world_size in {2, 4, 8}:
+                if const_expr(world_size in {2, 4, 8}):
                     dst_rank = sum_rw & ea.constant(world_size - 1, type=i32)
                 else:
                     dst_rank = _u(sum_rw) % ea.constant(world_size, type=i32)
@@ -657,7 +658,7 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
             with ir.InsertionPoint(a2):
                 cur = a2.arguments[0]
                 for p in range_constexpr(world_size):
-                    if p == world_size - 1:
+                    if const_expr(p == world_size - 1):
                         ok = ea.constant(1, type=T.bool())
                     else:
                         ok = _u(cur) < ea.constant(part_p, type=i32)
@@ -686,7 +687,7 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
     ):
         i32, i64 = T.i32, T.i64
         v4i32 = T.i32x4
-        if is_f32:
+        if const_expr(is_f32):
             v4f32 = T.f32x4
         else:
             v8half = T.bf16x8 if is_bf16 else T.f16x8
@@ -836,14 +837,14 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
                     sm_i_idx = ea.index_cast(
                         T.index, ea.constant(wi * tnum_gpu, type=i32) + lane_id)
                     raw_i = smem_ptr.load([sm_i_idx])
-                    if is_f32:
+                    if const_expr(is_f32):
                         vf = ev.bitcast(v4f32, raw_i)
                         acc = vf if acc is None else acc + vf
                     else:
                         v16 = ev.bitcast(v8half, raw_i)
                         v32 = v16.extf(v8f32)
                         acc = v32 if acc is None else acc + v32
-                if is_f32:
+                if const_expr(is_f32):
                     out_raw = ev.bitcast(v4i32, acc)
                 else:
                     out_raw = ev.bitcast(v4i32, acc.truncf(v8half))
