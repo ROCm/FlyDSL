@@ -318,19 +318,19 @@ def build_fused_rope_cache_module(
                                 kc_byte_off = (
                                     pid_t_slot * (block_size * num_kv_heads * head_dim)
                                     + pid_b * (num_kv_heads * head_dim)
-                                    + ArithValue(head_idx) * head_dim
-                                    + ArithValue(tid) * VEC_WIDTH
+                                    + head_idx * head_dim
+                                    + tid * VEC_WIDTH
                                 )
                                 kc_dw = kc_byte_off // 4
                                 for wi in range_constexpr(VEC_WIDTH // 4):
                                     buffer_ops.buffer_store(k_fp8[wi], kc_fp8_rsrc, kc_dw + wi)
                                     buffer_ops.buffer_store(v_fp8[wi], vc_fp8_rsrc, kc_dw + wi)
                             else:
-                                dim_group = ArithValue(tid) * VEC_WIDTH // x_size
-                                sub_off = ArithValue(tid) * VEC_WIDTH % x_size
+                                dim_group = tid * VEC_WIDTH // x_size
+                                sub_off = tid * VEC_WIDTH % x_size
                                 kc_byte_off = (
                                     pid_t_slot * (num_kv_heads * (head_dim // x_size) * block_size * x_size)
-                                    + ArithValue(head_idx) * ((head_dim // x_size) * block_size * x_size)
+                                    + head_idx * ((head_dim // x_size) * block_size * x_size)
                                     + dim_group * (block_size * x_size)
                                     + pid_b * x_size
                                     + sub_off
@@ -340,16 +340,16 @@ def build_fused_rope_cache_module(
                                     buffer_ops.buffer_store(k_fp8[wi], kc_fp8_rsrc, kc_dw + wi)
 
                                 for vi in range_constexpr(VEC_WIDTH):
-                                    d_idx = ArithValue(tid) * VEC_WIDTH + vi
+                                    d_idx = tid * VEC_WIDTH + vi
                                     vc_byte_off = (
                                         pid_t_slot * (num_kv_heads * head_dim * block_size)
-                                        + ArithValue(head_idx) * (head_dim * block_size)
+                                        + head_idx * (head_dim * block_size)
                                         + d_idx * block_size
                                         + pid_b
                                     )
                                     i32_idx = vi // 4
                                     byte_in_i32 = vi % 4
-                                    shifted = ArithValue(v_fp8[i32_idx]) >> (byte_in_i32 * 8)
+                                    shifted = v_fp8[i32_idx] >> (byte_in_i32 * 8)
                                     fp8_byte = arith.trunci(T.i8, shifted)
                                     buffer_ops.buffer_store(fp8_byte, vc_fp8_rsrc, vc_byte_off)
                         else:
@@ -360,13 +360,13 @@ def build_fused_rope_cache_module(
                                 k_byte = arith.trunci(T.i8, k_pk)
                                 v_byte = arith.trunci(T.i8, v_pk)
 
-                                d_idx = ArithValue(tid) * VEC_WIDTH + vi
+                                d_idx = tid * VEC_WIDTH + vi
 
                                 if const_expr(flash_layout):
                                     byte_off = (
                                         pid_t_slot * (block_size * num_kv_heads * head_dim)
                                         + pid_b * (num_kv_heads * head_dim)
-                                        + ArithValue(head_idx) * head_dim
+                                        + head_idx * head_dim
                                         + d_idx
                                     )
                                     buffer_ops.buffer_store(k_byte, kc_fp8_rsrc, byte_off)
@@ -376,7 +376,7 @@ def build_fused_rope_cache_module(
                                     sub_o = d_idx % x_size
                                     kc_byte_off = (
                                         pid_t_slot * (num_kv_heads * (head_dim // x_size) * block_size * x_size)
-                                        + ArithValue(head_idx) * ((head_dim // x_size) * block_size * x_size)
+                                        + head_idx * ((head_dim // x_size) * block_size * x_size)
                                         + dim_grp * (block_size * x_size)
                                         + pid_b * x_size
                                         + sub_o
@@ -385,7 +385,7 @@ def build_fused_rope_cache_module(
 
                                     vc_byte_off = (
                                         pid_t_slot * (num_kv_heads * head_dim * block_size)
-                                        + ArithValue(head_idx) * (head_dim * block_size)
+                                        + head_idx * (head_dim * block_size)
                                         + d_idx * block_size
                                         + pid_b
                                     )
@@ -407,12 +407,12 @@ def build_fused_rope_cache_module(
                             kc_rsrc = buffer_ops.create_buffer_resource(KeyCache, max_size=True)
                             vc_rsrc = buffer_ops.create_buffer_resource(ValueCache, max_size=True)
                             for vi in range_constexpr(VEC_WIDTH):
-                                d_idx = ArithValue(tid) * VEC_WIDTH + vi
+                                d_idx = tid * VEC_WIDTH + vi
                                 dim_grp = d_idx // x_size
                                 sub_o = d_idx % x_size
                                 kc_nf_off = (
                                     pid_t_slot * (num_kv_heads * (head_dim // x_size) * block_size * x_size)
-                                    + ArithValue(head_idx) * ((head_dim // x_size) * block_size * x_size)
+                                    + head_idx * ((head_dim // x_size) * block_size * x_size)
                                     + dim_grp * (block_size * x_size)
                                     + pid_b * x_size
                                     + sub_o
@@ -421,10 +421,10 @@ def build_fused_rope_cache_module(
                                 buffer_ops.buffer_store(k_elem, kc_rsrc, kc_nf_off)
 
                             for vi in range_constexpr(VEC_WIDTH):
-                                d_idx = ArithValue(tid) * VEC_WIDTH + vi
+                                d_idx = tid * VEC_WIDTH + vi
                                 vc_nf_off = (
                                     pid_t_slot * (num_kv_heads * head_dim * block_size)
-                                    + ArithValue(head_idx) * (head_dim * block_size)
+                                    + head_idx * (head_dim * block_size)
                                     + d_idx * block_size
                                     + pid_b
                                 )
