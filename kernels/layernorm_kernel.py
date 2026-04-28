@@ -15,7 +15,7 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.compiler.kernel_function import CompilationContext
 
-from flydsl.expr import arith, gpu, range_constexpr
+from flydsl.expr import arith, const_expr, gpu, range_constexpr
 from flydsl.expr.arith import ArithValue
 from flydsl.expr.typing import T, Int32
 from flydsl.expr.vector import ReductionOp, full
@@ -93,7 +93,7 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
             return w
 
         def block_reduce_add2(val0, val1):
-            if RED_SLOTS == 1:
+            if const_expr(RED_SLOTS == 1):
                 return wave_reduce_add(val0), wave_reduce_add(val1)
 
             lane = tid % WARP_SIZE
@@ -104,16 +104,16 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
 
             if lane == fx.Int32(0):
                 wave_idx = ArithValue(wave).index_cast(T.index)
-                s_sum.store(w0, [wave_idx])
-                s_sumsq.store(w1, [wave_idx])
+                SmemPtr.store(s_sum, w0, [wave_idx])
+                SmemPtr.store(s_sumsq, w1, [wave_idx])
             gpu.barrier()
 
             if wave == fx.Int32(0):
                 in_range = lane < RED_SLOTS
                 lane_safe = in_range.select(lane, fx.Int32(0))
                 lane_safe_idx = ArithValue(lane_safe).index_cast(T.index)
-                v0 = s_sum.load([lane_safe_idx])
-                v1 = s_sumsq.load([lane_safe_idx])
+                v0 = SmemPtr.load(s_sum, [lane_safe_idx])
+                v1 = SmemPtr.load(s_sumsq, [lane_safe_idx])
                 z = fx.Float32(0.0)
                 ww0 = in_range.select(v0, z)
                 ww1 = in_range.select(v1, z)
@@ -122,12 +122,12 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
 
                 if lane == fx.Int32(0):
                     c0_idx = fx.Index(0)
-                    s_sum.store(ww0, [c0_idx])
-                    s_sumsq.store(ww1, [c0_idx])
+                    SmemPtr.store(s_sum, ww0, [c0_idx])
+                    SmemPtr.store(s_sumsq, ww1, [c0_idx])
             gpu.barrier()
 
             c0_idx = fx.Index(0)
-            return s_sum.load([c0_idx]), s_sumsq.load([c0_idx])
+            return SmemPtr.load(s_sum, [c0_idx]), SmemPtr.load(s_sumsq, [c0_idx])
 
         def compute_mean_rstd(sum_val, sumsq_val):
             inv_n = arith.constant(1.0 / float(N), type=compute_type)
@@ -149,7 +149,7 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
         # Uses buffer_load / buffer_store for high-bandwidth vectorised
         # memory access (same approach as preshuffle_gemm).
         # ==================================================================
-        if N == (BLOCK_THREADS * VEC_WIDTH * 4) and elem_bits <= 16:
+        if const_expr(N == (BLOCK_THREADS * VEC_WIDTH * 4) and elem_bits <= 16):
             num_tiles_py = 4
             elem_dtype = Numeric.from_ir_type(elem_type)
 
@@ -209,7 +209,9 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
 
             # ── Pass 2: normalize + affine + store ───────────────────────
             for tile_i in range_constexpr(num_tiles_py):
-                if tile_i + 1 < num_tiles_py:
+                g_next = g_cur
+                b_next = b_cur
+                if const_expr(tile_i + 1 < num_tiles_py):
                     next_idx = tid + (tile_i + 1) * BLOCK_THREADS
                     g_next = _load_vec(gamma_div, next_idx).to(Float32)
                     b_next = _load_vec(beta_div, next_idx).to(Float32)
@@ -221,8 +223,9 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                 y = (x - mean) * rstd
                 y = y * g_cur + b_cur
 
-                if dtype_str == "bf16":
-                    if USE_HW_CVT_PK_BF16_F32:
+                out_e = y.to(elem_dtype)
+                if const_expr(dtype_str == "bf16"):
+                    if const_expr(USE_HW_CVT_PK_BF16_F32):
                         out_e = y.to(elem_dtype)
                     else:
                         u = y.bitcast(Uint32)
@@ -236,7 +239,7 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                         odd_sh = odd << 16
                         packed = even | odd_sh
                         out_e = packed.bitcast(elem_dtype)
-                elif dtype_str == "f32":
+                elif const_expr(dtype_str == "f32"):
                     out_e = y
                 else:
                     out_e = y.to(elem_dtype)
@@ -342,9 +345,10 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                     norm = diff * rstd
                     scaled = norm * g
                     y = scaled + b
-                    if dtype_str == "bf16":
+                    y_e = y
+                    if const_expr(dtype_str == "bf16"):
                         y_e = y.truncf(elem_type)
-                    elif dtype_str == "f32":
+                    elif const_expr(dtype_str == "f32"):
                         y_e = y
                     else:
                         y_e = y.truncf(elem_type)

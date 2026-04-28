@@ -10,7 +10,7 @@ import flydsl.expr as fx
 
 from flydsl._mlir import ir
 from flydsl.compiler.kernel_function import CompilationContext
-from flydsl.expr import arith, buffer_ops, gpu, idx2crd, range_constexpr, rocdl, tdm_ops, vector
+from flydsl.expr import arith, buffer_ops, const_expr, gpu, idx2crd, range_constexpr, rocdl, tdm_ops, vector
 from flydsl.expr.arith import _to_raw as _raw
 from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
@@ -362,7 +362,7 @@ def compile_mxscale_gemm(
         # Enable back-to-back WMMA issue (SCHED_MODE bit[4] = DISABLE_VALU_STALL)
         rocdl.disable_xdl_arb_stall()
 
-        if inst_prefetch:
+        if const_expr(inst_prefetch):
             from flydsl._mlir.dialects import llvm as llvm_dialect
             if arith.cmpi(arith.CmpIPredicate.eq, rocdl.wave_id(),
                           arith.constant(0, type=T.i32)):
@@ -385,7 +385,7 @@ def compile_mxscale_gemm(
         blk_n = by * arith.index(tile_n)
         split_k_base = bz * arith.index(split_k_chunk)
 
-        if use_cluster:
+        if const_expr(use_cluster):
             local_x, local_y = gpu.compute_cluster_position()
             a_mcast_mask, b_mcast_mask = gpu.compute_mcast_masks(
                 local_x, local_y, cluster_m, cluster_n)
@@ -471,7 +471,7 @@ def compile_mxscale_gemm(
                 workgroup_mask=b_mcast_mask,
                 atomic_barrier_enable=atomic_barrier_enable)
 
-        if wave_specialized_tdm:
+        if const_expr(wave_specialized_tdm):
             tdm_wave_id = rocdl.wave_id()
             tdm_wave_is_a = arith.cmpi(
                 arith.CmpIPredicate.eq, tdm_wave_id,
@@ -515,7 +515,7 @@ def compile_mxscale_gemm(
             k_byte_off = arith.index(ks * WMMA_K // PACK_FACTOR_A)
             byte_off = a_lane_base + k_byte_off
             v0 = lds_load_b128_raw(lds_buffer, byte_off)
-            if is_fp4:
+            if const_expr(is_fp4):
                 # Interleaved stride=32: +0, +32
                 v1 = lds_load_b128_raw(lds_buffer, byte_off + arith.index(32))
                 return vector.shuffle(v0, v1, list(range(8)))
@@ -545,7 +545,7 @@ def compile_mxscale_gemm(
             # All formats: interleaved — kgrp offset = 1 tile = 256 bytes
             k_tile_off = lane_kgrp * arith.index(256)
             bases = []
-            if is_fp4:
+            if const_expr(is_fp4):
                 for wn_half in range_constexpr(wmma_n_rep * 2):
                     ngroup_off = _n_group_base * arith.index(_ngroup_stride) \
                         + arith.index(wn_half * _ngroup_stride)
@@ -569,7 +569,7 @@ def compile_mxscale_gemm(
               Stride = 2 tiles = 512 bytes between loads.
               kgrp0 reads tiles 0,2,4,6; kgrp1 reads tiles 1,3,5,7.
             """
-            if is_fp4:
+            if const_expr(is_fp4):
                 # FP4: 2 N-groups per wn, 4 tiles per N-group
                 # Interleaved stride=512 (2 tiles): kgrp0→tiles 0,2; kgrp1→tiles 1,3
                 _num_tiles = WMMA_K // PACK_FACTOR_B // 16  # 4 tiles total per N-group
@@ -583,7 +583,7 @@ def compile_mxscale_gemm(
                 v01 = vector.shuffle(v0, v1, list(range(8)))
                 v23 = vector.shuffle(v2, v3, list(range(8)))
                 return vector.shuffle(v01, v23, list(range(16)))
-            elif is_a8w4:
+            elif const_expr(is_a8w4):
                 # A8W4: FP4 weight, 4 tiles per N-group
                 # Interleaved stride=512: kgrp0→tiles 0,2; kgrp1→tiles 1,3
                 _num_tiles = WMMA_K // PACK_FACTOR_B // 16  # 4 tiles total
@@ -611,12 +611,12 @@ def compile_mxscale_gemm(
             """Precompute scale lane bases (byte offsets)."""
             warp_lds_row = warp_base / arith.index(reps) + lane16
             base = warp_lds_row * arith.index(interleaved_cols)
-            if is_fp4 or is_a8w4:
+            if const_expr(is_fp4 or is_a8w4):
                 # FP4/A8W4: always add lane_kgrp offset (no opsel on BScale)
                 base = base + lane_kgrp * arith.index(SCALES_PER_WMMA)
             else:
                 # FP8: conditional on opsel
-                if use_scale_opsel:
+                if const_expr(use_scale_opsel):
                     base = base + lane_kgrp * arith.index(SCALES_PER_WMMA)
             return lds_ptr, [base]
 
@@ -663,16 +663,16 @@ def compile_mxscale_gemm(
             b_scales_all = load_scale_b128(bs_buf, bs_bases[0],
                                            b_scale_load_rep, ks)
             a_scales_all = load_scale_b128(as_buf, as_bases[0], wmma_m_rep, ks)
-            if is_fp4:
+            if const_expr(is_fp4):
                 # FP4 32x16: scaleAType=0 fixed (no op_sel on BScale)
                 b_scales = b_scales_all
-                if use_scale_opsel:
+                if const_expr(use_scale_opsel):
                     a_scales = a_scales_all[::2]
                 else:
                     a_scales = a_scales_all
             else:
                 # FP8/A8W4 16x16: both scales support op_sel
-                if use_scale_opsel:
+                if const_expr(use_scale_opsel):
                     b_scales = b_scales_all[::2]
                     a_scales = a_scales_all[::2]
                 else:
@@ -683,14 +683,14 @@ def compile_mxscale_gemm(
         def _emit_wmma(accs, wm, wn, a_frag, b_frags, a_scales, b_scales):
             """Emit one WMMA instruction (format-specific)."""
             idx = wm * wmma_n_rep + wn
-            if use_scale_opsel:
+            if const_expr(use_scale_opsel):
                 a_scale_idx = wm // 2
                 a_opsel = wm % 2
             else:
                 a_scale_idx = wm
                 a_opsel = 0
 
-            if is_fp4:
+            if const_expr(is_fp4):
                 # 32x16 WMMA with A/B swap: SRC0=B, SRC1=A
                 accs[idx] = rocdl.wmma_scale_f32_32x16x128_f4(
                     T.vec(16, T.f32),
@@ -701,7 +701,7 @@ def compile_mxscale_gemm(
                 )
             else:
                 # 16x16x128 WMMA: A8W4 (fmtA=FP4) or FP8 (fmtA=FP8)
-                if use_scale_opsel:
+                if const_expr(use_scale_opsel):
                     b_scale_idx = wn // 2
                     b_opsel = wn % 2
                 else:
@@ -733,7 +733,7 @@ def compile_mxscale_gemm(
                 for frag_i in range_constexpr(len(a_frags)):
                     wm = start_wm + frag_i
                     is_last = (wm == wmma_m_rep - 1)
-                    if is_last and emit_filler is not None:
+                    if const_expr(is_last and emit_filler is not None):
                         rocdl.sched_barrier(0)
                         emit_filler()
                     for wn_raw in range_constexpr(wmma_n_rep):
@@ -749,7 +749,7 @@ def compile_mxscale_gemm(
                 and _front_wm * wmma_n_rep >= 4
             )
 
-            if _use_partial_drain:
+            if const_expr(_use_partial_drain):
                 nb_buf, nb_bases, nbs_buf, nbs_bases, \
                     nas_buf, nas_bases, n_ks = next_bs_info
                 next_result = _load_b_and_scales(
@@ -761,20 +761,20 @@ def compile_mxscale_gemm(
 
             _emit_rows(0, a_frags_front)
 
-            if mid_compute_callback is not None:
+            if const_expr(mid_compute_callback is not None):
                 rocdl.sched_barrier(0)
                 mid_compute_callback()
 
-            if _back_wm > 0:
+            if const_expr(_back_wm > 0):
                 a_frags_back = [load_a_frag(a_buf, a_bases[_front_wm + h], ks)
                                 for h in range_constexpr(_back_wm)]
                 _back_drain = _bs_ds_loads if _use_partial_drain else 0
                 rocdl.s_wait_dscnt(_back_drain)
                 _emit_rows(_front_wm, a_frags_back)
 
-            if _use_partial_drain:
+            if const_expr(_use_partial_drain):
                 return accs, next_result
-            if next_bs_info is not None:
+            if const_expr(next_bs_info is not None):
                 nb_buf, nb_bases, nbs_buf, nbs_bases, \
                     nas_buf, nas_bases, n_ks = next_bs_info
                 next_result = _load_b_and_scales(
@@ -794,7 +794,7 @@ def compile_mxscale_gemm(
             bs_buf, bs_bases = _precompute_scale_lane_bases(
                 lds_bs, warp_n_base, b_scale_load_rep, interleaved_scale_cols_b)
 
-            if k_wmma_steps == 1:
+            if const_expr(k_wmma_steps == 1):
                 b_frags, b_scales, a_scales = _load_b_and_scales(
                     b_buf, b_bases, bs_buf, bs_bases, as_buf, as_bases, 0)
                 current_accs = _a_streaming_compute(
@@ -832,7 +832,7 @@ def compile_mxscale_gemm(
             _b_half_scale_loads = (_bank_half_b_scale_rep + 3) // 4
 
             def _fp4_get_a_scale_and_opsel(a_scales_all, wm_idx):
-                if use_scale_opsel:
+                if const_expr(use_scale_opsel):
                     return a_scales_all[(wm_idx // 2) * 2], wm_idx % 2
                 return a_scales_all[wm_idx], 0
 
@@ -859,7 +859,7 @@ def compile_mxscale_gemm(
             def _emit_group_rows(group_base, wm_base, a_frags, b_frags, a_scales,
                                  b_scales, row_start, row_count,
                                  emit_filler_now=False):
-                if emit_filler_now and emit_filler is not None:
+                if const_expr(emit_filler_now and emit_filler is not None):
                     rocdl.sched_barrier(0)
                     emit_filler()
                 for row_offset in range_constexpr(row_count):
@@ -910,7 +910,7 @@ def compile_mxscale_gemm(
                     b_left_scales,
                 )
 
-                if ks == 0 and mid_compute_callback is not None:
+                if const_expr(ks == 0 and mid_compute_callback is not None):
                     rocdl.sched_barrier(0)
                     mid_compute_callback()
 
@@ -929,7 +929,7 @@ def compile_mxscale_gemm(
                     b_left_scales,
                 )
 
-                if not is_last_ks:
+                if const_expr(not is_last_ks):
                     next_left_frags, next_left_scales = _load_b_half_bundle(
                         0, 0, ks + 1)
                     # Older right-half loads must be ready before consuming
@@ -956,7 +956,7 @@ def compile_mxscale_gemm(
                     emit_filler_now=is_last_ks,
                 )
 
-                if not is_last_ks:
+                if const_expr(not is_last_ks):
                     b_left_frags = next_left_frags
                     b_left_scales = next_left_scales
 
@@ -968,7 +968,7 @@ def compile_mxscale_gemm(
             _b_loads_per_frag = 2 if is_a8w4 else 4
 
             for _ks in range_constexpr(k_wmma_steps):
-                if _ks == 0:
+                if const_expr(_ks == 0):
                     rocdl.sched_dsrd(wmma_n_rep * _b_loads_per_frag + 2
                                      + _half_wm * DS_LOADS_PER_A_FRAG)
                 else:
@@ -976,7 +976,7 @@ def compile_mxscale_gemm(
                 rocdl.sched_mfma(_half_wmma)
                 rocdl.sched_dsrd(_half_wm * DS_LOADS_PER_A_FRAG)
                 rocdl.sched_mfma(_half_wmma)
-                if _ks < k_wmma_steps - 1:
+                if const_expr(_ks < k_wmma_steps - 1):
                     rocdl.sched_dsrd(wmma_n_rep * _b_loads_per_frag + 2)
             rocdl.sched_barrier(0)
 
@@ -989,7 +989,7 @@ def compile_mxscale_gemm(
             _right_half_loads = _b_half_loads + _b_half_scale_loads
 
             for _ks in range_constexpr(k_wmma_steps):
-                if _ks == 0:
+                if const_expr(_ks == 0):
                     rocdl.sched_dsrd(
                         _a_all_loads + _a_scale_loads
                         + _b_half_loads + _b_half_scale_loads)
@@ -998,7 +998,7 @@ def compile_mxscale_gemm(
                 rocdl.sched_mfma(_group_wmma)
                 rocdl.sched_dsrd(_right_half_loads)
                 rocdl.sched_mfma(_group_wmma)
-                if _ks < k_wmma_steps - 1:
+                if const_expr(_ks < k_wmma_steps - 1):
                     rocdl.sched_dsrd(_right_half_loads)
                 rocdl.sched_mfma(_group_wmma)
                 rocdl.sched_mfma(_group_wmma)
@@ -1007,7 +1007,7 @@ def compile_mxscale_gemm(
         def compute_tile_scheduled(accs_in, lds_a, lds_b, lds_as, lds_bs,
                                    emit_filler=None,
                                    mid_compute_callback=None):
-            if compute_schedule_kind == COMPUTE_SCHEDULE_FP4_COL_BAND:
+            if const_expr(compute_schedule_kind == COMPUTE_SCHEDULE_FP4_COL_BAND):
                 return compute_tile_fp4_bank_friendly(
                     accs_in, lds_a, lds_b, lds_as, lds_bs,
                     emit_filler=emit_filler,
@@ -1018,7 +1018,7 @@ def compile_mxscale_gemm(
                 mid_compute_callback=mid_compute_callback)
 
         def hot_loop_scheduler_scheduled():
-            if compute_schedule_kind == COMPUTE_SCHEDULE_FP4_COL_BAND:
+            if const_expr(compute_schedule_kind == COMPUTE_SCHEDULE_FP4_COL_BAND):
                 hot_loop_scheduler_fp4_bank_friendly()
             else:
                 hot_loop_scheduler()
@@ -1026,7 +1026,7 @@ def compile_mxscale_gemm(
         # ── Epilogue (unified via _sub_tiles) ──
         def _get_acc_sub8(accs, acc_idx, vec_base):
             """Extract 8-element sub-vector from accumulator."""
-            if ACC_VEC_SIZE == 8:
+            if const_expr(ACC_VEC_SIZE == 8):
                 return accs[acc_idx]
             indices = [vec_base + i for i in range_constexpr(8)]
             return vector.shuffle(accs[acc_idx], accs[acc_idx], indices)
@@ -1038,7 +1038,7 @@ def compile_mxscale_gemm(
                 row = blk_m + warp_m_base + arith.index(m_off) + lane16
                 col_base = (blk_n + warp_n_base + arith.index(wn * WMMA_N)
                             + lane_kgrp * arith.index(8))
-                if _bf16_out:
+                if const_expr(_bf16_out):
                     c_off_bytes = (row * n_stride + col_base) \
                         * arith.index(elem_bytes_d)
                     addrs.append(c_off_bytes)
@@ -1057,7 +1057,7 @@ def compile_mxscale_gemm(
             addr_idx = 0
             for acc_idx, vec_base, m_off, wn in _sub_tiles:
                 sub8 = _get_acc_sub8(final_accs, acc_idx, vec_base)
-                if _bf16_out:
+                if const_expr(_bf16_out):
                     addr_idx += store_acc_vec8_to_buffer(
                         sub8, c_rsrc, addrs[addr_idx],
                         out_elem=_out_elem_local, offset_is_bytes=True)
@@ -1073,7 +1073,7 @@ def compile_mxscale_gemm(
                                       out_elem=_out_elem_local)
 
         def _atomic_add_acc_vec8_to_buffer(acc_vec8, addr):
-            if _bf16_out:
+            if const_expr(_bf16_out):
                 h_vec = arith.trunc_f(T.vec(8, _out_elem_local), acc_vec8)
                 pair_ty = T.vec(2, _out_elem_local)
                 for pair in range_constexpr(4):
@@ -1105,7 +1105,7 @@ def compile_mxscale_gemm(
             addr_idx = 0
             for acc_idx, vec_base, m_off, wn in _sub_tiles:
                 sub8 = _get_acc_sub8(final_accs, acc_idx, vec_base)
-                if _bf16_out:
+                if const_expr(_bf16_out):
                     addr_idx += _atomic_add_acc_vec8_to_buffer(
                         sub8, addrs[addr_idx])
                 else:
@@ -1119,16 +1119,16 @@ def compile_mxscale_gemm(
             return row_major
 
         def finalize_acc_layout(accs_in):
-            if compute_schedule_kind == COMPUTE_SCHEDULE_FP4_COL_BAND:
+            if const_expr(compute_schedule_kind == COMPUTE_SCHEDULE_FP4_COL_BAND):
                 return grouped_accs_to_row_major(accs_in)
             return accs_in
 
         _effective_l2_pf = l2_prefetch_distance
-        if use_cluster and l2_prefetch_distance > 0:
+        if const_expr(use_cluster and l2_prefetch_distance > 0):
             _effective_l2_pf = max(1, l2_prefetch_distance - 1)
 
         def _l2_prefetch(k_base):
-            if _effective_l2_pf <= 0:
+            if const_expr(_effective_l2_pf <= 0):
                 return
             pf_k = k_base + arith.index(_effective_l2_pf * tile_k)
             pf_k_packed_a = pf_k / arith.index(PACK_FACTOR_A)
@@ -1190,7 +1190,7 @@ def compile_mxscale_gemm(
         stages_bs_idx = [extract_lds_base_idx(stages_bs[i])
                          for i in range_constexpr(num_buffers)]
 
-        if use_tdm_store:
+        if const_expr(use_tdm_store):
             d_lds_base_ptr = arena_base_ptr
             d_lds_f16_count = total_d_bytes // 2
             d_smem = SmemPtr(d_lds_base_ptr, d_output_off, elem_ty_lds,
@@ -1255,7 +1255,7 @@ def compile_mxscale_gemm(
 
         pred_const = arith.constant(1, type=T.i32)
 
-        if wave_specialized_tdm:
+        if const_expr(wave_specialized_tdm):
             active_stage_lds_addr = [
                 _select_wave_tdm_value(
                     stages_a_lds_addr[i],
@@ -1301,7 +1301,7 @@ def compile_mxscale_gemm(
             dgroup1_bs = desc_bs_init.dgroup1
 
         # Prologue
-        if wave_specialized_tdm:
+        if const_expr(wave_specialized_tdm):
             for i in range_constexpr(pre_loaded):
                 dg0 = vector.from_elements(T.vec(4, T.i32), [
                     pred_const, active_stage_lds_addr[i],
@@ -1339,8 +1339,8 @@ def compile_mxscale_gemm(
         # This overlaps TDM DMA with the remaining WMMA instructions,
         _fence_outstanding = TDM_LOADS_PER_STEP * (num_buffers - 2)
 
-        if loop_iters > 0:
-            if wave_specialized_tdm:
+        if const_expr(loop_iters > 0):
+            if const_expr(wave_specialized_tdm):
                 init_args = list(accs) + [active_addr_lo]
 
                 for loop_iter, state in range(0, loop_iters, 1, init=init_args):
@@ -1463,17 +1463,17 @@ def compile_mxscale_gemm(
                 addr_lo_bs = results[n_accs + 3]
 
         # Tail — same acc_mixed pattern: fence at top, TDM mid-compute.
-        if loop_iters > 0:
+        if const_expr(loop_iters > 0):
             pipeline_fence(outstanding=0, use_cluster=use_cluster)
-        elif use_cluster:
+        elif const_expr(use_cluster):
             gpu.cluster_barrier()
         epi_addrs_box = [None]
         _tail_had_load = False
         for _load_stage, _compute_stage, _outstanding in tail_plan:
-            if _outstanding == -1:
-                if _tail_had_load:
+            if const_expr(_outstanding == -1):
+                if const_expr(_tail_had_load):
                     pipeline_fence(outstanding=0, use_cluster=use_cluster)
-                if use_tdm_store:
+                if const_expr(use_tdm_store):
                     accs = compute_tile_scheduled(
                         accs,
                         stages_a_idx[_compute_stage], stages_b_idx[_compute_stage],
@@ -1493,9 +1493,9 @@ def compile_mxscale_gemm(
                 pipeline_fence_wait(use_cluster=use_cluster)
 
                 _tail_mid_cb = None
-                if _load_stage is not None:
+                if const_expr(_load_stage is not None):
                     _tail_had_load = True
-                    if wave_specialized_tdm:
+                    if const_expr(wave_specialized_tdm):
                         _tail_addr_box = [active_addr_lo]
 
                         def _tail_mid_ws(_ls=_load_stage, _ab=_tail_addr_box):
@@ -1544,8 +1544,8 @@ def compile_mxscale_gemm(
                     stages_as_idx[_compute_stage], stages_bs_idx[_compute_stage],
                     mid_compute_callback=_tail_mid_cb)
 
-                if _load_stage is not None:
-                    if wave_specialized_tdm:
+                if const_expr(_load_stage is not None):
+                    if const_expr(wave_specialized_tdm):
                         active_addr_lo = _tail_addr_box[0]
                     else:
                         addr_lo_a = _tail_ab[0][0]
@@ -1557,8 +1557,8 @@ def compile_mxscale_gemm(
 
         accs = finalize_acc_layout(accs)
 
-        if use_tdm_store:
-            if d_need_epilogue_fence:
+        if const_expr(use_tdm_store):
+            if const_expr(d_need_epilogue_fence):
                 pipeline_fence(outstanding=0, use_cluster=use_cluster)
             rocdl.sched_barrier(0)
             epilogue_lds_stores(accs, d_lds_buffer, d_lane_base)
@@ -1567,9 +1567,9 @@ def compile_mxscale_gemm(
             tdm_ops.tensor_wait(0)
         else:
             rocdl.sched_barrier(0)
-            if epi_addrs_box[0] is None:
+            if const_expr(epi_addrs_box[0] is None):
                 epi_addrs_box[0] = epilogue_prepare_addrs()
-            if split_k > 1:
+            if const_expr(split_k > 1):
                 epilogue_atomic_adds(accs, epi_addrs_box[0])
             else:
                 epilogue_stores(accs, epi_addrs_box[0])
@@ -1608,13 +1608,13 @@ def compile_mxscale_gemm(
         launcher = kernel_mxscale_gemm(
             arg_c, arg_a, arg_b, arg_a_scale, arg_b_scale, i32_m, i32_n)
         for op in ctx.gpu_module_body.operations:
-            if hasattr(op, 'attributes') and op.OPERATION_NAME == "gpu.func":
-                if effective_waves_per_eu is not None:
+            if const_expr(hasattr(op, 'attributes') and op.OPERATION_NAME == "gpu.func"):
+                if const_expr(effective_waves_per_eu is not None):
                     _wpe = int(effective_waves_per_eu)
-                    if _wpe >= 1:
+                    if const_expr(_wpe >= 1):
                         op.attributes["rocdl.waves_per_eu"] = ir.IntegerAttr.get(
                             ir.IntegerType.get_signless(32), _wpe)
-                if use_cluster:
+                if const_expr(use_cluster):
                     op.attributes["rocdl.cluster_dims"] = ir.StringAttr.get(
                         f"{cluster_m},{cluster_n},1")
         cluster_arg = (cluster_m, cluster_n, 1) if use_cluster else None

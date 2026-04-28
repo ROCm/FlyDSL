@@ -4,7 +4,7 @@
 import ctypes
 import enum
 from inspect import isclass
-from typing import Generic, Type, TypeVar
+from typing import Generic, Type, TypeVar, overload
 
 from flydsl.runtime.device import get_rocm_arch
 
@@ -234,6 +234,7 @@ __all__ = [
     "T",
     "default_f8_type",
     # DSL value types
+    "Numeric",
     "Boolean",
     "Float",
     "BFloat16",
@@ -652,8 +653,18 @@ class CopyAtom(BuiltinDslType):
     def layout_ref_tv(self):
         return static(self.type.tv_layout_ref)
 
+    @overload
+    def set_value(self, field: str, value, loc=None, ip=None): ...
+    @overload
+    def set_value(self, field: dict, loc=None, ip=None): ...
+
     @traced_op
-    def set_value(self, field, value, loc=None, ip=None):
+    def set_value(self, field, value=None, loc=None, ip=None):
+        if isinstance(field, dict):
+            result = self
+            for k, v in field.items():
+                result = atom_set_value(result, k, v, loc=loc, ip=ip)
+            return result
         return atom_set_value(self, field, value, loc=loc, ip=ip)
 
 
@@ -683,8 +694,18 @@ class MmaAtom(BuiltinDslType):
     def layout_C_tv(self):
         return static(self.type.tv_layout_c)
 
+    @overload
+    def set_value(self, field: str, value, loc=None, ip=None): ...
+    @overload
+    def set_value(self, field: dict, loc=None, ip=None): ...
+
     @traced_op
-    def set_value(self, field, value, loc=None, ip=None):
+    def set_value(self, field, value=None, loc=None, ip=None):
+        if isinstance(field, dict):
+            result = self
+            for k, v in field.items():
+                result = atom_set_value(result, k, v, loc=loc, ip=ip)
+            return result
         return atom_set_value(self, field, value, loc=loc, ip=ip)
 
 
@@ -758,16 +779,16 @@ class TiledMma(BuiltinDslType):
         return self.get_slice(thr_idx)
 
     @traced_op
-    def make_fragment_A(self, a: Tensor, loc=None, ip=None):
-        return mma_make_fragment(MmaOperand.A, self, a, loc=loc, ip=ip)
+    def make_fragment_A(self, a: Tensor, *, stages=None, loc=None, ip=None):
+        return mma_make_fragment(MmaOperand.A, self, a, stages=stages, loc=loc, ip=ip)
 
     @traced_op
-    def make_fragment_B(self, b: Tensor, loc=None, ip=None):
-        return mma_make_fragment(MmaOperand.B, self, b, loc=loc, ip=ip)
+    def make_fragment_B(self, b: Tensor, *, stages=None, loc=None, ip=None):
+        return mma_make_fragment(MmaOperand.B, self, b, stages=stages, loc=loc, ip=ip)
 
     @traced_op
-    def make_fragment_C(self, c: Tensor, loc=None, ip=None):
-        return mma_make_fragment(MmaOperand.C, self, c, loc=loc, ip=ip)
+    def make_fragment_C(self, c: Tensor, *, stages=None, loc=None, ip=None):
+        return mma_make_fragment(MmaOperand.C, self, c, stages=stages, loc=loc, ip=ip)
 
 
 class Stream:
