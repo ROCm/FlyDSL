@@ -250,6 +250,42 @@ def _reference_rmsnorm_quant(input_dev, gamma_dev, *, xscale_dev=None):
     return expected, q, yscale
 
 
+def _bench_aiter_rmsnorm_quant(M: int, N: int, dtype: str, *, is_smooth: bool):
+    mode = "smoothquant" if is_smooth else "dynamicquant"
+    torch_dtype = _torch_dtype(dtype)
+
+    try:
+        if is_smooth:
+            from aiter.ops.triton.normalization.rmsnorm import (
+                rmsnorm2d_fwd_with_smoothquant as aiter_rmsnorm_quant,
+            )
+        else:
+            from aiter.ops.triton.normalization.rmsnorm import (
+                rmsnorm2d_fwd_with_dynamicquant as aiter_rmsnorm_quant,
+            )
+    except Exception as e:
+        print(f"[Perf] AIter rmsnorm {mode} skipped: {type(e).__name__}: {e!r}")
+        return None
+
+    x = torch.randn((M, N), device="cuda", dtype=torch_dtype).contiguous()
+    w = torch.rand((N,), device="cuda", dtype=torch_dtype).contiguous()
+    y = torch.empty((M, N), dtype=torch.int8, device="cuda")
+    yscale = torch.empty((M, 1), dtype=torch.float32, device="cuda")
+
+    if is_smooth:
+        xscale = (torch.rand((N,), device="cuda", dtype=torch_dtype) + 0.5).contiguous()
+
+        def run_aiter():
+            aiter_rmsnorm_quant(y, x, xscale, yscale, w, EPS)
+    else:
+        def run_aiter():
+            aiter_rmsnorm_quant(y, x, yscale, w, EPS)
+
+    aiter_us = bench_gpu_us_torch(run_aiter, warmup=WARMUP_ITERS, iters=BENCH_ITERS)
+    print(f"[Perf] AIter rmsnorm {mode} gpu: {aiter_us:.1f} us")
+    return aiter_us
+
+
 def run_quant_test(M: int, N: int, dtype: str, *, is_smooth: bool):
     mode = "smoothquant" if is_smooth else "dynamicquant"
     print(f"\nTesting RMSNorm {mode} (M={M}, N={N}, dtype={dtype})")
@@ -265,7 +301,7 @@ def run_quant_test(M: int, N: int, dtype: str, *, is_smooth: bool):
             f"[FAIL] Compile failed for {mode} (M={M}, N={N}, dtype={dtype}): "
             f"{type(e).__name__}: {e}"
         )
-        return False
+        return False, None
 
     torch.manual_seed(42)
     input_t = torch.randn((M, N), device="cuda", dtype=DTYPE_FP32)
@@ -289,18 +325,48 @@ def run_quant_test(M: int, N: int, dtype: str, *, is_smooth: bool):
     xscale_dev = None
     if is_smooth:
         xscale_dev = torch.rand((N,), device="cuda", dtype=torch_dtype).contiguous() + 0.5
-        launch_fn(
-            input_dev,
-            gamma_dev,
-            xscale_dev,
-            output_dev,
-            yscale_dev,
-            M,
-            stream=torch.cuda.current_stream(),
-        )
-    else:
-        launch_fn(input_dev, gamma_dev, output_dev, yscale_dev, M, stream=torch.cuda.current_stream())
+
+    print("Launching kernel...")
+    stream = torch.cuda.current_stream()
+
+    def kernel_launch():
+        if is_smooth:
+            launch_fn(
+                input_dev,
+                gamma_dev,
+                xscale_dev,
+                output_dev,
+                yscale_dev,
+                M,
+                stream=stream,
+            )
+        else:
+            launch_fn(input_dev, gamma_dev, output_dev, yscale_dev, M, stream=stream)
+
+    _, avg_us = run_perftest(
+        lambda: (kernel_launch(), torch.cuda.synchronize()),
+        num_iters=BENCH_ITERS,
+        num_warmup=WARMUP_ITERS,
+    )
     torch.cuda.synchronize()
+    flydsl_gpu_us = None
+    if os.environ.get("ROCDSL_COMPARE_AITER", "0") == "1":
+        flydsl_gpu_us = bench_gpu_us_torch(kernel_launch, warmup=WARMUP_ITERS, iters=BENCH_ITERS)
+    avg_ms = avg_us / 1000.0
+
+    elem_bytes = 4 if dtype == "f32" else 2
+    total_bytes = M * N * elem_bytes + N * elem_bytes + M * N + M * 4
+    if is_smooth:
+        total_bytes += N * elem_bytes
+    bandwidth_gbs = total_bytes / (avg_us / 1e6) / 1e9
+
+    print(
+        f"Kernel avg time: {avg_ms:.4f} ms via run_perftest "
+        f"(warmup={WARMUP_ITERS}, iters={BENCH_ITERS})"
+    )
+    print(f"Bandwidth: {bandwidth_gbs:.2f} GB/s")
+    if flydsl_gpu_us is not None:
+        print(f"[Perf] FlyDSL rmsnorm {mode} gpu: {flydsl_gpu_us:.1f} us")
 
     expected, q_ref, yscale_ref = _reference_rmsnorm_quant(
         input_dev,
@@ -329,21 +395,89 @@ def run_quant_test(M: int, N: int, dtype: str, *, is_smooth: bool):
         print("PASSED")
     else:
         print("FAILED")
-    return ok
+    return ok, flydsl_gpu_us
 
 
 def test_rmsnorm_dynamicquant():
+    print("="*80)
+    print("Running RMSNorm DynamicQuant Tests")
+    print("="*80)
+
+    do_compare = os.environ.get("ROCDSL_COMPARE_AITER", "0") == "1"
+    perf_rows = []
+
+    failures = 0
     for M, N, dtype in _get_rmsnorm_configs():
-        assert run_quant_test(M, N, dtype, is_smooth=False), (
-            f"dynamicquant failed for M={M}, N={N}, dtype={dtype}"
-        )
+        ok, flydsl_gpu_us = run_quant_test(M, N, dtype, is_smooth=False)
+        if not ok:
+            failures += 1
+
+        if do_compare:
+            aiter_us = None
+            if maybe_enable_aiter():
+                aiter_us = _bench_aiter_rmsnorm_quant(M, N, dtype, is_smooth=False)
+            perf_rows.append(
+                PerfRow(
+                    op="rmsnorm_dq",
+                    shape=f"{M}x{N}",
+                    dtype=dtype,
+                    flydsl_gpu_us=flydsl_gpu_us,
+                    aiter_gpu_us=aiter_us,
+                )
+            )
+
+    print("\n" + "="*80)
+    if failures == 0:
+        print("ALL TESTS PASSED")
+    else:
+        print(f"{failures} TESTS FAILED")
+    print("="*80)
+    if do_compare and perf_rows:
+        print_perf_table(perf_rows)
+    # Ensure a non-zero exit code on failure for shell wrappers.
+    if failures != 0:
+        raise SystemExit(1)
 
 
 def test_rmsnorm_smoothquant():
+    print("="*80)
+    print("Running RMSNorm SmoothQuant Tests")
+    print("="*80)
+
+    do_compare = os.environ.get("ROCDSL_COMPARE_AITER", "0") == "1"
+    perf_rows = []
+    failures = 0
+
     for M, N, dtype in _get_rmsnorm_configs():
-        assert run_quant_test(M, N, dtype, is_smooth=True), (
-            f"smoothquant failed for M={M}, N={N}, dtype={dtype}"
-        )
+        ok, flydsl_gpu_us = run_quant_test(M, N, dtype, is_smooth=True)
+        if not ok:
+            failures += 1
+
+        if do_compare:
+            aiter_us = None
+            if maybe_enable_aiter():
+                aiter_us = _bench_aiter_rmsnorm_quant(M, N, dtype, is_smooth=True)
+            perf_rows.append(
+                PerfRow(
+                    op="rmsnorm_sq",
+                    shape=f"{M}x{N}",
+                    dtype=dtype,
+                    flydsl_gpu_us=flydsl_gpu_us,
+                    aiter_gpu_us=aiter_us,
+                )
+            )
+
+    print("\n" + "="*80)
+    if failures == 0:
+        print("ALL TESTS PASSED")
+    else:
+        print(f"{failures} TESTS FAILED")
+    print("="*80)
+    if do_compare and perf_rows:
+        print_perf_table(perf_rows)
+    # Ensure a non-zero exit code on failure for shell wrappers.
+    if failures != 0:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
