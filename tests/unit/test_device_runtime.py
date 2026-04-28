@@ -44,10 +44,10 @@ def test_ensure_mismatch_raises():
 
 
 def test_unknown_runtime_kind_env(monkeypatch):
-    """Invalid FLYDSL_RUNTIME_KIND fails at compile/runtime pairing first."""
+    """Invalid FLYDSL_RUNTIME_KIND fails at install-caps check first."""
     monkeypatch.setenv("FLYDSL_RUNTIME_KIND", "not_a_real_kind")
     monkeypatch.setenv("FLYDSL_COMPILE_BACKEND", "rocm")
-    with pytest.raises(RuntimeError, match="requires device runtime kind"):
+    with pytest.raises(RuntimeError, match="does not support device runtime kind"):
         dr.get_device_runtime()
 
 
@@ -56,6 +56,10 @@ def test_unknown_runtime_kind_after_pairing_passes(monkeypatch):
     dr.register_compile_runtime_mapping("custom", "weird_kind")
     monkeypatch.setenv("FLYDSL_COMPILE_BACKEND", "custom")
     monkeypatch.setenv("FLYDSL_RUNTIME_KIND", "weird_kind")
+    monkeypatch.setattr(
+        "flydsl._install_limits.install_caps",
+        lambda: ("rocdl", ("rocm", "custom"), ("rocm", "weird_kind")),
+    )
     try:
         with pytest.raises(ValueError, match="Unknown FLYDSL_RUNTIME_KIND"):
             dr.get_device_runtime()
@@ -82,5 +86,5 @@ def test_pairing_from_env_no_singleton(monkeypatch):
 def test_pairing_from_env_mismatch_raises(monkeypatch):
     monkeypatch.setenv("FLYDSL_COMPILE_BACKEND", "rocm")
     monkeypatch.setenv("FLYDSL_RUNTIME_KIND", "not_a_registered_kind")
-    with pytest.raises(RuntimeError, match="requires device runtime kind"):
+    with pytest.raises(RuntimeError, match="does not support device runtime kind"):
         dr.ensure_compile_runtime_pairing_from_env("rocm")

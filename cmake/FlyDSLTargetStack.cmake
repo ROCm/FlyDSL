@@ -45,4 +45,7 @@ if(FLYDSL_TARGET_STACK STREQUAL "rocdl")
     MLIRCAPITransforms
     MLIRCAPIRegisterEverything
   )
+
+  set(FLYDSL_BUILD_CONFIG_BACKEND_IDS "\"rocm\", ")
+  set(FLYDSL_BUILD_CONFIG_RUNTIME_KINDS "\"rocm\", ")
 endif()

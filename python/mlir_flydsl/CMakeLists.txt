@@ -5,6 +5,12 @@ configure_file(
   "${CMAKE_CURRENT_BINARY_DIR}/FlyRegisterEverything.cpp"
   @ONLY)
 
+set(_FLYDSL_GENERATED_BUILD_CONFIG "${CMAKE_CURRENT_BINARY_DIR}/generated_flydsl_build_config/_build_config.py")
+configure_file(
+  "${PROJECT_SOURCE_DIR}/cmake/FlyDSLBuildConfig.py.in"
+  "${_FLYDSL_GENERATED_BUILD_CONFIG}"
+  @ONLY)
+
 add_compile_definitions("MLIR_PYTHON_PACKAGE_PREFIX=flydsl.${MLIR_PYTHON_PACKAGE_PREFIX}.")
 
 declare_mlir_python_sources(FlyPythonSources)
@@ -237,6 +243,9 @@ add_custom_target(CopyFlyPythonSources ALL
   COMMAND ${CMAKE_COMMAND} -E copy_directory
     "${PROJECT_SOURCE_DIR}/python/flydsl"
     "${MLIR_BINARY_DIR}/python_packages/flydsl"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    "${_FLYDSL_GENERATED_BUILD_CONFIG}"
+    "${MLIR_BINARY_DIR}/python_packages/flydsl/_build_config.py"
   # Copy auto-generated Python bindings from mlir-tblgen to the correct location
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
     "${MLIR_BINARY_DIR}/python/mlir_flydsl/dialects/_fly_ops_gen.py"

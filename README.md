@@ -88,6 +88,11 @@ MLIR_PATH=/path/to/mlir_install bash scripts/build.sh -j64
 After a successful build, you will have:
 - `build-fly/python_packages/flydsl/` — the complete Python package with embedded MLIR bindings
 
+**Target stack**: the CMake variable `FLYDSL_TARGET_STACK` selects the single
+active Fly target lowering stack per build (default `rocdl`). See
+[ADDING_TARGET_STACK.md](ADDING_TARGET_STACK.md) for details on extending
+this to additional GPU vendors.
+
 ### Step 3: Install (development mode)
 
 ```bash

@@ -18,6 +18,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Dict, Optional, Type
 
+from ... import _install_limits
 from ...utils import env
 from .base import BaseBackend, GPUTarget
 
@@ -74,10 +75,14 @@ def get_backend(name: Optional[str] = None, *, arch: str = "") -> BaseBackend:
     (via :func:`flydsl.runtime.device_runtime.ensure_compile_runtime_pairing_from_env`)
     and again on first :func:`flydsl.runtime.device_runtime.get_device_runtime`,
     not here.
+
+    Raises ``RuntimeError`` if the requested compile backend is not supported by this
+    install (CMake ``FLYDSL_TARGET_STACK`` / generated ``flydsl._build_config``).
     """
     if name is None:
         name = compile_backend_name()
     name = name.lower()
+    _install_limits.ensure_compile_backend_in_build(name)
     if not arch:
         backend_cls = _registry.get(name)
         if backend_cls is None:
