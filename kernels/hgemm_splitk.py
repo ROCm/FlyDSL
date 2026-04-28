@@ -246,7 +246,7 @@ def compile_hgemm_kernel(
             bc_ = STensor(smem_bc_ptr, T.i32, shape=(1,))
             semaphore_ = GTensor(semaphore, dtype=T.i32, shape=(-1,))
             signal_ = GTensor(signal, dtype=T.i32, shape=(-1,))
-            signal_idx = fx.Int32(fx.block_idx.y * fx.grid_dim.x + fx.block_idx.x)
+            signal_idx = fx.Int32(fx.block_idx.x)
         
         tid = fx.Int32(fx.thread_idx.x)
         wid = tid // WARP_SIZE
@@ -256,7 +256,7 @@ def compile_hgemm_kernel(
             return pid // N_BLOCKS, pid % N_BLOCKS
         
         block_m_idx, block_n_idx = swizzle_for_cache_reuse(fx.block_idx.x)
-        ks_idx = fx.Index(fx.block_idx.z)
+        ks_idx = fx.Index(fx.block_idx.y)
         ks_begin = arith.index_cast(T.i32, ks_idx * ks)
 
         m_offset = fx.Index(block_m_idx * BLOCK_M)
@@ -317,53 +317,55 @@ def compile_hgemm_kernel(
                     cond_boundary = arith.cmpi(arith.CmpIPredicate.ult, row_idx, fx.Index(m))
                     cond_boundary_if = scf.IfOp(cond_boundary, results_=[], has_else=False)
                     with ir.InsertionPoint(cond_boundary_if.then_block):
-                        C_.vec_store((row_idx, n_offset + n_local_idx), init_vec, LDG_VEC_SIZE)
+                        bytes_offset = C_.linear_offset((row_idx, n_offset + n_local_idx))
+                        bytes_offset_i32 = arith.index_cast(T.i32, bytes_offset)
+                        c_ptr = get_llvm_ptr(C, bytes_offset_i32, DTYPE_BYTES)
+                        llvm.InlineAsmOp(
+                            None, [c_ptr, init_vec],
+                            "global_store_dwordx4 $0, $1, off sc0 sc1", "v,v",
+                            has_side_effects=True,
+                        )
                         scf.YieldOp([])
-                scf.YieldOp([])
-            rocdl.sched_barrier(0)
-            gpu.barrier()
-            # trigger signal
-            cond_ks0_if = scf.IfOp(cond_ks0, results_=[], has_else=False)
-            with ir.InsertionPoint(cond_ks0_if.then_block):
-                is_t0_cond = arith.cmpi(arith.CmpIPredicate.eq, fx.Index(tid), fx.Index(0))
+                gpu.barrier()
+                # trigger signal when zeroc is done by the first arrived block
                 is_t0_cond_if = scf.IfOp(is_t0_cond, results_=[], has_else=False)
                 with ir.InsertionPoint(is_t0_cond_if.then_block):
                     signal_ptr = get_llvm_ptr(signal, signal_idx, 4)
-                    llvm.InlineAsmOp(None, [], "buffer_wbl2 sc0 sc1", "", has_side_effects=True)
                     llvm.InlineAsmOp(
                         None, [signal_ptr, arith.constant(1, type=T.i32)],
                         "global_store_dword $0, $1, off sc0 sc1", "v,v",
                         has_side_effects=True,
                     )
-                    rocdl.s_waitcnt(0)
                     scf.YieldOp([])
+                gpu.barrier()
+                scf.YieldOp([])
+
+        def split_k_barrier():
+            # spin-wait until signal triggered
+            is_t0_cond = arith.cmpi(arith.CmpIPredicate.eq, fx.Index(tid), fx.Index(0))
+            is_t0_cond_if = scf.IfOp(is_t0_cond, results_=[], has_else=False)
+            with ir.InsertionPoint(is_t0_cond_if.then_block):
+                init_cur = arith.constant(0, type=T.i32)
+                w = scf.WhileOp([T.i32], [init_cur])
+                before = ir.Block.create_at_start(w.before, [T.i32])
+                after = ir.Block.create_at_start(w.after, [T.i32])
+                with ir.InsertionPoint(before):
+                    cur = before.arguments[0]
+                    need_wait = arith.CmpIOp(arith.CmpIPredicate.eq, cur, arith.constant(0, type=T.i32)).result
+                    scf.ConditionOp(need_wait, [cur])
+                with ir.InsertionPoint(after):
+                    signal_ptr = get_llvm_ptr(signal, signal_idx, 4)
+                    data = llvm.InlineAsmOp(
+                        T.i32, [signal_ptr],
+                        "global_load_dword $0, $1, off sc1", "=v,v",
+                        has_side_effects=True,
+                    ).result
+                    rocdl.s_waitcnt(0)
+                    scf.YieldOp([data])
                 scf.YieldOp([])
             rocdl.sched_barrier(0)
             gpu.barrier()
-
-        def split_k_barrier():
-            # spin-wait util signal triggered
-            init_cur = arith.constant(0, type=T.i32)
-            w = scf.WhileOp([T.i32], [init_cur])
-            before = ir.Block.create_at_start(w.before, [T.i32])
-            after = ir.Block.create_at_start(w.after, [T.i32])
-            with ir.InsertionPoint(before):
-                cur = before.arguments[0]
-                need_wait = arith.CmpIOp(arith.CmpIPredicate.eq, cur, arith.constant(0, type=T.i32)).result
-                scf.ConditionOp(need_wait, [cur])
-            with ir.InsertionPoint(after):
-                signal_ptr = get_llvm_ptr(signal, signal_idx, 4)
-                data = llvm.InlineAsmOp(
-                    T.i32, [signal_ptr],
-                    "global_load_dword $0, $1, off sc1", "=v,v",
-                    has_side_effects=True,
-                ).result
-                rocdl.s_waitcnt(0)
-                scf.YieldOp([data])
-            rocdl.sched_barrier(0)
-            gpu.barrier()
             # clean semaphore and signal if this is the last block within split-k group
-            is_t0_cond = arith.cmpi(arith.CmpIPredicate.eq, fx.Index(tid), fx.Index(0))
             is_t0_cond_if = scf.IfOp(is_t0_cond, results_=[], has_else=False)
             with ir.InsertionPoint(is_t0_cond_if.then_block):
                 semaphore_ptr = get_llvm_ptr(semaphore, signal_idx, 4)
@@ -803,7 +805,7 @@ def compile_hgemm_kernel(
         
         bm = (m + BLOCK_M - 1) // BLOCK_M
         hgemm_kernel._func.__name__ = KERNEL_NAME
-        hgemm_kernel(C, A, B, BIAS, m, semaphore, signal).launch(grid=(bm * N_BLOCKS, 1, SPLIT_K), block=(BLOCK_THREADS, 1, 1), stream=stream)
+        hgemm_kernel(C, A, B, BIAS, m, semaphore, signal).launch(grid=(bm * N_BLOCKS, SPLIT_K, 1), block=(BLOCK_THREADS, 1, 1), stream=stream)
     
     return launch_hgemm_kernel
 
@@ -849,7 +851,7 @@ def get_default_kwargs(m, n, k):
 selections = {
     'TILE_M': [16, 32, 48, 64, 96, 128, 256],
     'TILE_N': [64, 128, 256],
-    'TILE_K': [64, 128],
+    'TILE_K': [64, 128, 256],
     'SPLIT_K': [i for i in range(1, 17)],
     'BLOCK_M_WARPS': [1, 2, 4],
     'BLOCK_N_WARPS': [1, 2, 4],
