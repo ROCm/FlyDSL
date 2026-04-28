@@ -149,6 +149,7 @@ _ods_wmma_f32_16x16x16_bf8_fp8 = globals().get("wmma_f32_16x16x16_bf8_fp8", None
 _ods_wmma_f32_16x16x16_bf8_bf8 = globals().get("wmma_f32_16x16x16_bf8_bf8", None)
 _ods_wmma_i32_16x16x32_iu4 = globals().get("wmma_i32_16x16x32_iu4", None)
 mask_mfma = 0x008
+mask_valu = 0x002
 mask_vmem_rd = 0x020
 mask_dsrd = 0x100
 mask_dswr = 0x200
@@ -156,6 +157,10 @@ mask_dswr = 0x200
 
 def sched_mfma(cnt):
     sched_group_barrier(mask_mfma, cnt, 0)
+
+
+def sched_valu(cnt):
+    sched_group_barrier(mask_valu, cnt, 0)
 
 
 def sched_vmem(cnt):
