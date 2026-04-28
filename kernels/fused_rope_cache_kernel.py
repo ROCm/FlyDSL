@@ -181,7 +181,7 @@ def build_fused_rope_cache_module(
                 peer_v_i32 = vector.from_elements(T.vec(n_i32, T.i32), peer_chunks)
                 return vector.bitcast(T.vec(VEC_WIDTH, elem_type), peer_v_i32)
 
-        if tid < fx.Int32(vecs_per_head):
+        if tid < vecs_per_head:
             # --- Load position (scalar i32) ---
             pos_rsrc = buffer_ops.create_buffer_resource(Positions, max_size=True)
             if const_expr(pos_dtype == "i64"):
@@ -190,13 +190,13 @@ def build_fused_rope_cache_module(
                 pos_elem_off = pid_t
             pos_val = buffer_ops.buffer_load(pos_rsrc, pos_elem_off, vec_width=1, dtype=T.i32)
 
-            is_first_half = tid < fx.Int32(vecs_per_half)
+            is_first_half = tid < vecs_per_half
             cos_vec_idx = tid % vecs_per_half if reuse_freqs_front_part else tid
 
             # Pair lane for ds_bpermute: tid XOR vecs_per_half (symmetric, works for both halves).
             # pair_byte_addr = pair_lane * 4 (ds_bpermute address unit is bytes, VGPR = 4 bytes).
-            pair_lane = tid ^ fx.Int32(vecs_per_half)
-            pair_byte_addr = pair_lane * fx.Int32(4)
+            pair_lane = tid ^ vecs_per_half
+            pair_byte_addr = pair_lane * 4
 
             # --- Shared cos/sin (loaded once, used by both Q and K) ---
             Cos_buf = fx.rocdl.make_buffer_tensor(CosCache)
@@ -209,7 +209,7 @@ def build_fused_rope_cache_module(
             sin_e = load_vec(sin_div, cos_vec_idx)
 
             # --- Q RoPE (head_idx < num_q_heads) ---
-            if head_idx < fx.Int32(num_q_heads_val):
+            if head_idx < num_q_heads_val:
                 Q_buf = fx.rocdl.make_buffer_tensor(Q)
                 Q_out_buf = fx.rocdl.make_buffer_tensor(Q_out)
 
@@ -231,7 +231,7 @@ def build_fused_rope_cache_module(
                 store_vec(q_rot_e.ir_value(), qo_div, tid)
 
             # --- K RoPE + KV cache (head_idx < num_kv_heads) ---
-            if head_idx < fx.Int32(num_kv_heads_val):
+            if head_idx < num_kv_heads_val:
                 K_buf = fx.rocdl.make_buffer_tensor(K)
                 K_out_buf = fx.rocdl.make_buffer_tensor(K_out)
 
@@ -261,7 +261,7 @@ def build_fused_rope_cache_module(
                     slot_elem_off = pid_t
                 slot_val = buffer_ops.buffer_load(slot_rsrc, slot_elem_off, vec_width=1, dtype=T.i32)
 
-                if slot_val >= fx.Int32(0):
+                if slot_val >= 0:
                     pid_t_slot = slot_val // block_size
                     pid_b = slot_val % block_size
 
@@ -279,8 +279,8 @@ def build_fused_rope_cache_module(
                         vs_div = fx.logical_divide(vs_buf, f32_reg_lay)
                         r_ks = fx.memref_alloca(f32_reg_ty, f32_reg_lay)
                         r_vs = fx.memref_alloca(f32_reg_ty, f32_reg_lay)
-                        fx.copy_atom_call(f32_copy_atom, fx.slice(ks_div, (None, fx.Int32(0))), r_ks)
-                        fx.copy_atom_call(f32_copy_atom, fx.slice(vs_div, (None, fx.Int32(0))), r_vs)
+                        fx.copy_atom_call(f32_copy_atom, fx.slice(ks_div, (None, 0)), r_ks)
+                        fx.copy_atom_call(f32_copy_atom, fx.slice(vs_div, (None, 0)), r_vs)
                         k_scale_val = fx.memref_load_vec(r_ks)[0]
                         v_scale_val = fx.memref_load_vec(r_vs)[0]
                         k_rcp = fx.rocdl.rcp(T.f32, k_scale_val)
@@ -304,9 +304,7 @@ def build_fused_rope_cache_module(
                             def pack_fp8(vals):
                                 i32s = []
                                 for i in range_constexpr(VEC_WIDTH // 4):
-                                    lo = fx.rocdl.cvt_pk_fp8_f32(
-                                        T.i32, vals[i * 4], vals[i * 4 + 1], fx.Int32(0), False
-                                    )
+                                    lo = fx.rocdl.cvt_pk_fp8_f32(T.i32, vals[i * 4], vals[i * 4 + 1], 0, False)
                                     wd = fx.rocdl.cvt_pk_fp8_f32(
                                         T.i32, vals[i * 4 + 2], vals[i * 4 + 3], lo, True
                                     )
@@ -323,10 +321,10 @@ def build_fused_rope_cache_module(
                                     + ArithValue(head_idx) * head_dim
                                     + ArithValue(tid) * VEC_WIDTH
                                 )
-                                kc_dw = kc_byte_off // fx.Int32(4)
+                                kc_dw = kc_byte_off // 4
                                 for wi in range_constexpr(VEC_WIDTH // 4):
-                                    buffer_ops.buffer_store(k_fp8[wi], kc_fp8_rsrc, kc_dw + fx.Int32(wi))
-                                    buffer_ops.buffer_store(v_fp8[wi], vc_fp8_rsrc, kc_dw + fx.Int32(wi))
+                                    buffer_ops.buffer_store(k_fp8[wi], kc_fp8_rsrc, kc_dw + wi)
+                                    buffer_ops.buffer_store(v_fp8[wi], vc_fp8_rsrc, kc_dw + wi)
                             else:
                                 dim_group = ArithValue(tid) * VEC_WIDTH // x_size
                                 sub_off = ArithValue(tid) * VEC_WIDTH % x_size
@@ -337,9 +335,9 @@ def build_fused_rope_cache_module(
                                     + pid_b * x_size
                                     + sub_off
                                 )
-                                kc_dw = kc_byte_off // fx.Int32(4)
+                                kc_dw = kc_byte_off // 4
                                 for wi in range_constexpr(VEC_WIDTH // 4):
-                                    buffer_ops.buffer_store(k_fp8[wi], kc_fp8_rsrc, kc_dw + fx.Int32(wi))
+                                    buffer_ops.buffer_store(k_fp8[wi], kc_fp8_rsrc, kc_dw + wi)
 
                                 for vi in range_constexpr(VEC_WIDTH):
                                     d_idx = ArithValue(tid) * VEC_WIDTH + vi
@@ -357,12 +355,8 @@ def build_fused_rope_cache_module(
                         else:
                             # VEC_WIDTH < 4: store individual fp8 bytes
                             for vi in range_constexpr(VEC_WIDTH):
-                                k_pk = fx.rocdl.cvt_pk_fp8_f32(
-                                    T.i32, k_scaled[vi], fx.Float32(0.0), fx.Int32(0), False
-                                )
-                                v_pk = fx.rocdl.cvt_pk_fp8_f32(
-                                    T.i32, v_scaled[vi], fx.Float32(0.0), fx.Int32(0), False
-                                )
+                                k_pk = fx.rocdl.cvt_pk_fp8_f32(T.i32, k_scaled[vi], 0.0, 0, False)
+                                v_pk = fx.rocdl.cvt_pk_fp8_f32(T.i32, v_scaled[vi], 0.0, 0, False)
                                 k_byte = arith.trunci(T.i8, k_pk)
                                 v_byte = arith.trunci(T.i8, v_pk)
 

@@ -172,7 +172,7 @@ def build_silu_and_mul_fq_module(
         tid_rsrc = buffer_ops.create_buffer_resource(sorted_ids, max_size=True)
         nv_rsrc = buffer_ops.create_buffer_resource(num_valid_ids, max_size=True)
 
-        num_valid = buffer_ops.buffer_load(nv_rsrc, fx.Int32(0), vec_width=1, dtype=T.i32)
+        num_valid = buffer_ops.buffer_load(nv_rsrc, 0, vec_width=1, dtype=T.i32)
         bid_i32 = ArithValue(bid)
 
         fused_tid_val = buffer_ops.buffer_load(tid_rsrc, bid_i32, vec_width=1, dtype=T.i32)
@@ -185,7 +185,7 @@ def build_silu_and_mul_fq_module(
         )
 
         def _store_scale(scale_rsrc, layout_scale, bid_i32, col0, val_i8):
-            if (col0 & 31) == fx.Int32(0):
+            if (col0 & 31) == 0:
                 s_off = _scale_byte_offset(layout_scale, bid_i32, col0 >> 5)
                 buffer_ops.buffer_store(
                     val_i8, scale_rsrc, s_off, offset_is_bytes=True,
@@ -263,7 +263,7 @@ def build_silu_and_mul_fq_module(
 
                         for sh_dist in SHUFFLE_DISTS:
                             local_max = local_max.maximumf(
-                                local_max.shuffle_xor(fx.Int32(sh_dist), fx.Int32(WARP_SIZE))
+                                local_max.shuffle_xor(sh_dist, WARP_SIZE)
                             )
 
                         # ── Compute e8m0 bias + quant_scale (fp4: h=2, fp8: h=8) ──

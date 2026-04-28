@@ -60,8 +60,8 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
         elem_dtype = dtype_to_elem_type(dtype_str)
         elem_type = elem_dtype.ir_type
         fm_fast = arith.FastMathFlags.fast
-        eps_c = fx.Float32(EPS)
-        n_float = fx.Float32(float(N))
+        eps_c = EPS
+        n_float = float(N)
 
         base_ptr = allocator.get_base()
         s_red = SmemPtr(base_ptr, red_offset, fx.Float32.ir_type, shape=(RED_SLOTS,))
@@ -70,11 +70,10 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
         s_red2.get()
 
         def wave_reduce_add(x):
-            width_i32 = fx.Int32(WARP_SIZE)
             w = x
             for _sh_exp in range_constexpr(int(math.log2(WARP_SIZE))):
-                off = fx.Int32(WARP_SIZE // (2 << _sh_exp))
-                peer = w.shuffle_xor(off, width_i32)
+                off = WARP_SIZE // (2 << _sh_exp)
+                peer = w.shuffle_xor(off, WARP_SIZE)
                 w = w.addf(peer, fastmath=fm_fast)
             return w
 
@@ -93,32 +92,27 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
             w0 = wave_reduce_add(val0)
             w1 = wave_reduce_add(val1)
 
-            if lane == fx.Int32(0):
-                wave_idx = fx.Index(wave)
-                SmemPtr.store(s_red, w0, [wave_idx])
-                SmemPtr.store(s_red2, w1, [wave_idx])
+            if lane == 0:
+                SmemPtr.store(s_red, w0, [wave])
+                SmemPtr.store(s_red2, w1, [wave])
             gpu.barrier()
 
-            if wave == fx.Int32(0):
+            if wave == 0:
                 in_range = lane < RED_SLOTS
-                lane_safe = in_range.select(lane, fx.Int32(0))
-                lane_safe_idx = fx.Index(lane_safe)
-                v0 = SmemPtr.load(s_red, [lane_safe_idx])
-                v1 = SmemPtr.load(s_red2, [lane_safe_idx])
-                z = fx.Float32(0.0)
-                ww0 = in_range.select(v0, z)
-                ww1 = in_range.select(v1, z)
+                lane_safe = in_range.select(lane, 0)
+                v0 = SmemPtr.load(s_red, [lane_safe])
+                v1 = SmemPtr.load(s_red2, [lane_safe])
+                ww0 = in_range.select(v0, 0.0)
+                ww1 = in_range.select(v1, 0.0)
                 ww0 = wave_reduce_add(ww0)
                 ww1 = wave_reduce_add(ww1)
 
-                if lane == fx.Int32(0):
-                    c0_idx = fx.Index(0)
-                    SmemPtr.store(s_red, ww0, [c0_idx])
-                    SmemPtr.store(s_red2, ww1, [c0_idx])
+                if lane == 0:
+                    SmemPtr.store(s_red, ww0, [0])
+                    SmemPtr.store(s_red2, ww1, [0])
             gpu.barrier()
 
-            c0_idx = fx.Index(0)
-            return SmemPtr.load(s_red, [c0_idx]), SmemPtr.load(s_red2, [c0_idx])
+            return SmemPtr.load(s_red, [0]), SmemPtr.load(s_red2, [0])
 
         # ==================================================================
         # Fast path: N is a multiple of tile_cols
@@ -247,10 +241,8 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
 
             for base_idx_int in range_constexpr(0, N, BLOCK_THREADS):
                 idx = tid + base_idx_int
-                c_N_i32 = fx.Int32(N)
-                is_valid = idx < c_N_i32
-                c0_i = fx.Int32(0)
-                idx_safe = is_valid.select(idx, c0_i)
+                is_valid = idx < N
+                idx_safe = is_valid.select(idx, 0)
                 x_e = _load_scalar(row_div, idx_safe)
                 x = x_e if dtype_str == "f32" else x_e.to(fx.Float32)
                 x2 = x * x
@@ -264,8 +256,7 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
 
             for base_idx_int in range_constexpr(0, N, BLOCK_THREADS):
                 idx = tid + base_idx_int
-                c_N_i32 = fx.Int32(N)
-                if idx < c_N_i32:
+                if idx < N:
                     x_e = _load_scalar(row_div, idx)
                     g_e = _load_scalar(gamma_div, idx)
                     x = x_e if dtype_str == "f32" else x_e.to(fx.Float32)
