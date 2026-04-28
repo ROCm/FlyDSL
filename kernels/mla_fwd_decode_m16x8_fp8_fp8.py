@@ -2013,27 +2013,20 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
                 _raw(v) if not isinstance(v, ir.Value) else v for v in init_args
             ]
 
-            for_op = scf.ForOp(
-                _raw(c_one_idx),
-                _raw(num_tiles_m1_idx),
-                _raw(c_one_idx),
-                init_args,
-            )
-            with ir.InsertionPoint(for_op.body):
-                tile_iv = for_op.induction_variable  # index type
+            for tile_iv, state in range(c_one_idx, num_tiles_m1_idx, c_one_idx, init=init_args):
                 tile_iv_i32 = _index_cast_to_i32(tile_iv)
                 kv_tile_start_i32 = _raw(
                     kv_start + arith.ArithValue(tile_iv_i32) * c_block_n
                 )
 
                 # Unpack carried state
-                rm_carried = for_op.inner_iter_args[0]
-                rse_carried = for_op.inner_iter_args[1]
+                rm_carried = state[0]
+                rse_carried = state[1]
                 oaccu_carried = [
-                    for_op.inner_iter_args[2 + i] for i in range(NUM_PV_ITERS * 2)
+                    state[2 + i] for i in range(NUM_PV_ITERS * 2)
                 ]
                 # 2-ahead: row resolved by previous iteration's _process_tile_gemm1
-                row_kv_ld_next = for_op.inner_iter_args[2 + NUM_PV_ITERS * 2]
+                row_kv_ld_next = state[2 + NUM_PV_ITERS * 2]
 
                 # Buffer parity
                 tile_parity = _raw(
@@ -2132,12 +2125,12 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
                 yield_vals = [
                     _raw(v) if not isinstance(v, ir.Value) else v for v in yield_vals
                 ]
-                scf.YieldOp(yield_vals)
+                results = yield yield_vals
 
             # Unpack results from middle tiles loop
-            row_max_mt = for_op.results[0]
-            row_sum_e_mt = for_op.results[1]
-            oaccu_mt = [for_op.results[2 + i] for i in range(NUM_PV_ITERS * 2)]
+            row_max_mt = results[0]
+            row_sum_e_mt = results[1]
+            oaccu_mt = [results[2 + i] for i in range(NUM_PV_ITERS * 2)]
 
             # --- Last tile: GEMM1 + interleaved GEMM2 store ---
             last_tile_iv_i32 = _raw(num_tiles_m1)
