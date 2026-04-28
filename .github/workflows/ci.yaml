@@ -25,11 +25,10 @@ jobs:
   build:
     uses: ./.github/workflows/build-whl.yaml
     with:
-      release_type: nightlies
+      release_type: ${{ github.event_name == 'schedule' && 'nightlies' || 'devreleases' }}
     permissions:
       id-token: write
       contents: read
-      packages: write
 
   test:
     needs: build
@@ -47,7 +46,7 @@ jobs:
           && !(inputs.skip_promote || false) }}
     uses: ./.github/workflows/promote.yaml
     with:
-      release_type: nightlies
+      release_type: ${{ github.event_name == 'schedule' && 'nightlies' || 'devreleases' }}
       wheel_names: ${{ needs.build.outputs.wheel_names }}
     permissions:
       id-token: write

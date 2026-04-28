@@ -191,72 +191,28 @@ build_one() {
   local venv="$2"
   local build_dir_rel="$3"
   local py_tag="$4"
-  local log_file="${5:-/dev/stderr}"
 
   echo "[build] ${py_tag} using ${pybin}"
   create_venv_and_deps "${pybin}" "${venv}"
 
-  # Use a per-version setuptools build base to avoid race conditions
-  # when building multiple versions in parallel (shared build/ dir).
-  local setup_build_base="${build_dir_rel}/setup_build"
-  mkdir -p "${setup_build_base}"
-
-  # Build C++ and Python packages
-  # Use --egg-base to isolate egg-info per version (avoid race on shared python/flydsl.egg-info/).
-  # FLY_WHEEL_BUILD=1 prevents setup.py and build.sh from mutating the shared source tree
-  # (python/flydsl/_mlir symlink), which would race across parallel builds.
   PATH="${venv}/bin:${PATH}" \
   MLIR_PATH="${MLIR_PATH}" \
   FLY_BUILD_DIR="${build_dir_rel}" \
   FLY_REBUILD="${FLY_REBUILD}" \
-  FLY_WHEEL_BUILD=1 \
   FLYDSL_RELEASE_TYPE="${FLYDSL_RELEASE_TYPE:-}" \
   FLYDSL_PACKAGE_VERSION_OVERRIDE="${FLYDSL_PACKAGE_VERSION_OVERRIDE:-}" \
-  "${venv}/bin/python" setup.py egg_info --egg-base "${setup_build_base}" build -b "${setup_build_base}"
-
-  # Strip shared libs in the build tree BEFORE bdist_wheel copies them.
-  # Remove unversioned libFlyPythonCAPI.so (symlink that bdist_wheel
-  # would copy as a second full-size file, doubling the wheel size).
-  local _mlir_libs="${build_dir_rel}/python_packages/flydsl/_mlir/_mlir_libs"
-  if [[ -d "${_mlir_libs}" ]]; then
-    rm -f "${_mlir_libs}/libFlyPythonCAPI.so"
-    find "${_mlir_libs}" \( -name '*.so' -o -name '*.so.*' \) ! -name '*nanobind*' \
-      -exec strip --strip-unneeded {} + 2>/dev/null || true
-    # Also strip the setuptools copy if it already exists
-    for d in "${setup_build_base}"/lib.*/flydsl/_mlir/_mlir_libs; do
-      [[ -d "${d}" ]] || continue
-      rm -f "${d}/libFlyPythonCAPI.so"
-      find "${d}" \( -name '*.so' -o -name '*.so.*' \) ! -name '*nanobind*' \
-        -exec strip --strip-unneeded {} + 2>/dev/null || true
-    done
-  fi
-
-  # Package wheel (C++ already built, skip rebuild)
-  PATH="${venv}/bin:${PATH}" \
-  MLIR_PATH="${MLIR_PATH}" \
-  FLY_BUILD_DIR="${build_dir_rel}" \
-  FLY_REBUILD=0 \
-  FLY_WHEEL_BUILD=1 \
-  FLYDSL_RELEASE_TYPE="${FLYDSL_RELEASE_TYPE:-}" \
-  FLYDSL_PACKAGE_VERSION_OVERRIDE="${FLYDSL_PACKAGE_VERSION_OVERRIDE:-}" \
-  "${venv}/bin/python" setup.py egg_info --egg-base "${setup_build_base}" build -b "${setup_build_base}" bdist_wheel
+  "${venv}/bin/python" setup.py bdist_wheel
 
   if ! ls -1 "dist/"*"-${py_tag}-${py_tag}-manylinux_"*.whl >/dev/null 2>&1; then
     echo "Error: expected a manylinux wheel for ${py_tag} under dist/ but didn't find one." >&2
     ls -1 dist || true
-    return 1
+    exit 1
   fi
 }
 
-# ---------------------------------------------------------------------------
-# Parallel build: max concurrency = PARALLEL_WHEELS (default: 3)
-# Each version gets its own build dir, venv, and log file — no conflicts.
-# ---------------------------------------------------------------------------
-PARALLEL_WHEELS="${PARALLEL_WHEELS:-3}"
 
 main() {
   echo "Building wheels for Python versions: ${PYTHON_VERSIONS[*]}"
-  echo "Parallel jobs: ${PARALLEL_WHEELS}"
 
   ensure_host_deps
   ensure_glibc
@@ -265,60 +221,17 @@ main() {
   mkdir -p dist
 
   if [[ "${SKIP_BUILD}" != "1" ]]; then
-    # Initialize submodules once before parallel builds to avoid git race conditions.
-    git -C "${REPO_ROOT}" submodule update --init --recursive
-
     rm -rf dist
     mkdir -p dist
 
-    local log_dir
-    log_dir="$(mktemp -d "${REPO_ROOT}/.wheel_build_logs.XXXXXX")"
-    local pids=()
-    local tags=()
-    local logs=()
-    local running=0
-
+    local ver py_bin py_tag venv build_dir
     for ver in "${PYTHON_VERSIONS[@]}"; do
-      local py_bin py_tag venv build_dir log_file
       py_bin="$(py_bin_for_version "${ver}")"
       py_tag="$(py_tag_for_version "${ver}")"
       venv="${VENV_ROOT}/${py_tag}"
       build_dir="build-fly/build_py${ver//./}"
-      log_file="${log_dir}/${py_tag}.log"
-
-      echo "[parallel] Starting ${py_tag} (log: ${log_file})"
-      build_one "${py_bin}" "${venv}" "${build_dir}" "${py_tag}" "${log_file}" \
-        > "${log_file}" 2>&1 &
-      pids+=($!)
-      tags+=("${py_tag}")
-      logs+=("${log_file}")
-      running=$((running + 1))
-
-      # Throttle: wait for a slot if we hit the concurrency limit
-      if [[ "${running}" -ge "${PARALLEL_WHEELS}" ]]; then
-        wait -n 2>/dev/null || true
-        running=$((running - 1))
-      fi
+      build_one "${py_bin}" "${venv}" "${build_dir}" "${py_tag}"
     done
-
-    # Wait for all remaining builds to finish
-    local failed=0
-    for i in "${!pids[@]}"; do
-      if ! wait "${pids[$i]}"; then
-        echo "FAILED: ${tags[$i]} (see ${logs[$i]})" >&2
-        tail -20 "${logs[$i]}" >&2
-        failed=1
-      else
-        echo "OK: ${tags[$i]}"
-      fi
-    done
-
-    # Show logs for any failures, then clean up
-    if [[ "${failed}" == "1" ]]; then
-      echo "Some wheel builds failed. Logs preserved at: ${log_dir}" >&2
-      exit 1
-    fi
-    rm -rf "${log_dir}"
   fi
 
   echo ""

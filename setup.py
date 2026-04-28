@@ -124,7 +124,7 @@ def _read_version() -> str:
 
     Release types (set via env var FLYDSL_RELEASE_TYPE):
       nightlies   -> {base}+{YYYYMMDD}.{git_hash}     (e.g. 0.1.0+20260309.a1b2c3d)
-      devreleases -> {base}.dev{commit_count}            (e.g. 0.1.0.dev472)
+      devreleases -> {base}.dev{YYYYMMDD}+{git_hash}   (e.g. 0.1.0.dev20260309+a1b2c3d)
       release     -> {base}                             (e.g. 0.1.0)
       <unset>     -> {base}.dev{commit_count}           (legacy local dev builds)
     """
@@ -149,8 +149,10 @@ def _read_version() -> str:
         local = ".".join(filter(None, [date_tag, git_hash]))
         return f"{base_version}+{local}"
     elif release_type == "devreleases":
-        commit_count = _git_rev_count() or "0"
-        return f"{base_version}.dev{commit_count}"
+        version = f"{base_version}.dev{date_tag}"
+        if git_hash:
+            version += f"+{git_hash}"
+        return version
     elif release_type == "release":
         return base_version
 
@@ -209,7 +211,7 @@ def _assert_embedded_mlir_exists() -> None:
 
 _assert_embedded_mlir_exists()
 
-IS_WHEEL_BUILD = any(a in {"bdist_wheel", "sdist"} for a in os.sys.argv[1:]) or os.environ.get("FLY_WHEEL_BUILD") == "1"
+IS_WHEEL_BUILD = any(a in {"bdist_wheel", "sdist"} for a in os.sys.argv[1:])
 
 def _strip_embedded_shared_libs() -> None:
     """Strip debug symbols from embedded shared libraries to reduce wheel size."""

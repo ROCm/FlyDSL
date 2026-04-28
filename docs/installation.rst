@@ -9,7 +9,7 @@ Prerequisites
 - **Build tools**: ``cmake`` (≥3.20), a C++17 compiler, and optionally ``ninja``
 - **Python deps**: ``nanobind``, ``numpy``, ``pybind11`` (installed automatically)
 - **Supported GPUs**: AMD MI300X/MI308X (gfx942), AMD MI350 (gfx950)
-- **Supported OS**: Linux with ROCm 7.x
+- **Supported OS**: Linux with ROCm 6.x or 7.x
 
 Step 1: Build LLVM/MLIR
 -------------------------

@@ -4,12 +4,6 @@ on:
   push:
     tags:
       - 'v*'
-  workflow_dispatch:
-    inputs:
-      skip_tests:
-        description: 'Skip test job for faster iteration'
-        type: boolean
-        default: false
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -17,12 +11,12 @@ concurrency:
 
 jobs:
   validate_tag:
-    if: ${{ github.event_name == 'push' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
     outputs:
       package_version: ${{ steps.version.outputs.package_version }}
+      tag_version: ${{ steps.version.outputs.tag_version }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -57,23 +51,21 @@ jobs:
           fi
 
           echo "package_version=${PACKAGE_VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "tag_version=${TAG_VERSION}" >> "${GITHUB_OUTPUT}"
 
   build:
     needs: validate_tag
-    if: ${{ always() && (needs.validate_tag.result == 'success' || needs.validate_tag.result == 'skipped') }}
     uses: ./.github/workflows/build-whl.yaml
     with:
-      release_type: ${{ github.event_name == 'push' && 'release' || 'devreleases' }}
+      release_type: release
       upload_s3_staging: false
       package_version_override: ${{ needs.validate_tag.outputs.package_version }}
     permissions:
       id-token: write
       contents: read
-      packages: write
 
   test:
     needs: [validate_tag, build]
-    if: ${{ always() && needs.build.result == 'success' && !(inputs.skip_tests || false) }}
     uses: ./.github/workflows/test-whl.yaml
     with:
       docker_image: rocm/pytorch:rocm7.2_ubuntu22.04_py3.10_pytorch_release_2.8.0
@@ -82,7 +74,6 @@ jobs:
 
   publish:
     needs: [validate_tag, build, test]
-    if: ${{ always() && needs.build.result == 'success' && (needs.test.result == 'success' || needs.test.result == 'skipped') }}
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -122,15 +113,8 @@ jobs:
           {
             echo "## PyPI Publish Summary"
             echo
-            if [ "${{ github.event_name }}" = "push" ]; then
-              echo "Published tag: \`${GITHUB_REF_NAME}\`"
-              echo "Package version: \`${{ needs.validate_tag.outputs.package_version }}\`"
-            else
-              echo "Manual dev release from branch: \`${GITHUB_REF_NAME}\`"
-              WHEEL_NAME=$(ls -1 pypi-dist/*.whl | head -1 | xargs basename)
-              DEV_VERSION=$(echo "${WHEEL_NAME}" | sed 's/^flydsl-//;s/-cp.*//')
-              echo "Package version: \`${DEV_VERSION}\`"
-            fi
+            echo "Published tag: \`${GITHUB_REF_NAME}\`"
+            echo "Package version: \`${{ needs.validate_tag.outputs.package_version }}\`"
             echo
             echo "Published package: \`flydsl\`"
             echo
@@ -141,10 +125,6 @@ jobs:
             echo
             echo "### Install"
             echo '```bash'
-            if [ "${{ github.event_name }}" = "push" ]; then
-              echo "pip install flydsl==${{ needs.validate_tag.outputs.package_version }}"
-            else
-              echo "pip install --pre flydsl"
-            fi
+            echo "pip install flydsl==${{ needs.validate_tag.outputs.package_version }}"
             echo '```'
           } >> "${GITHUB_STEP_SUMMARY}"

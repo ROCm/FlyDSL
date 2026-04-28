@@ -53,7 +53,7 @@ FlyDSL/
 
 ### Prerequisites
 
-- **ROCm**: required for GPU execution (tested on ROCm 7.x)
+- **ROCm**: required for GPU execution (tested on ROCm 6.x, 7.x)
 - **Build tools**: `cmake` (≥3.20), C++17 compiler, optionally `ninja`
 - **Python**: Python 3.10+ with `pip`
 - **Python deps**: `nanobind`, `numpy`, `pybind11` (installed by `build_llvm.sh`)
@@ -372,7 +372,7 @@ See `examples/` for more examples including tiled copy (`02-tiledCopy.py`), tile
 
 **Verified Platforms**:
 *   AMD MI300X/MI308X (gfx942), AMD MI350/MI355X (gfx950), AMD MI450 (gfx1250), Radeon AI PRO R9700 (gfx1201)
-*   Linux / ROCm 7.x
+*   Linux / ROCm 6.x, 7.x
 
 ## 🙏 Acknowledgements
 
