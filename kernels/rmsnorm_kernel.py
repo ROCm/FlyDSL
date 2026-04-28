@@ -14,7 +14,7 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.compiler.kernel_function import CompilationContext
 
-from flydsl.expr import arith, gpu, range_constexpr
+from flydsl.expr import arith, const_expr, gpu, range_constexpr
 from flydsl.expr.arith import ArithValue
 from flydsl.expr.typing import T, Int32
 from flydsl.expr.vector import ReductionOp, full
@@ -90,7 +90,7 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
             return r0
 
         def block_reduce_add2(val0, val1):
-            if RED_SLOTS == 1:
+            if const_expr(RED_SLOTS == 1):
                 return wave_reduce_add(val0), wave_reduce_add(val1)
 
             lane = tid % WARP_SIZE
@@ -101,16 +101,16 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
 
             if lane == fx.Int32(0):
                 wave_idx = ArithValue(wave).index_cast(T.index)
-                s_red.store(w0, [wave_idx])
-                s_red2.store(w1, [wave_idx])
+                SmemPtr.store(s_red, w0, [wave_idx])
+                SmemPtr.store(s_red2, w1, [wave_idx])
             gpu.barrier()
 
             if wave == fx.Int32(0):
                 in_range = lane < RED_SLOTS
                 lane_safe = in_range.select(lane, fx.Int32(0))
                 lane_safe_idx = ArithValue(lane_safe).index_cast(T.index)
-                v0 = s_red.load([lane_safe_idx])
-                v1 = s_red2.load([lane_safe_idx])
+                v0 = SmemPtr.load(s_red, [lane_safe_idx])
+                v1 = SmemPtr.load(s_red2, [lane_safe_idx])
                 z = fx.Float32(0.0)
                 ww0 = in_range.select(v0, z)
                 ww1 = in_range.select(v1, z)
@@ -119,17 +119,17 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
 
                 if lane == fx.Int32(0):
                     c0_idx = fx.Index(0)
-                    s_red.store(ww0, [c0_idx])
-                    s_red2.store(ww1, [c0_idx])
+                    SmemPtr.store(s_red, ww0, [c0_idx])
+                    SmemPtr.store(s_red2, ww1, [c0_idx])
             gpu.barrier()
 
             c0_idx = fx.Index(0)
-            return s_red.load([c0_idx]), s_red2.load([c0_idx])
+            return SmemPtr.load(s_red, [c0_idx]), SmemPtr.load(s_red2, [c0_idx])
 
         # ==================================================================
         # Fast path: N is a multiple of tile_cols
         # ==================================================================
-        if N >= tile_cols and N % tile_cols == 0 and elem_bits <= 16:
+        if const_expr(N >= tile_cols and N % tile_cols == 0 and elem_bits <= 16):
             num_tiles = N // tile_cols
             elem_dtype = Numeric.from_ir_type(elem_type)
 
@@ -191,8 +191,9 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
 
                 y = (x * rrms) * g
 
-                if dtype_str == "bf16":
-                    if USE_HW_CVT_PK_BF16_F32:
+                out_e = y.to(elem_dtype)
+                if const_expr(dtype_str == "bf16"):
+                    if const_expr(USE_HW_CVT_PK_BF16_F32):
                         out_e = y.to(elem_dtype)
                     else:
                         u = y.bitcast(Uint32)
@@ -206,7 +207,7 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
                         odd_sh = odd << 16
                         packed = even | odd_sh
                         out_e = packed.bitcast(elem_dtype)
-                elif dtype_str == "f32":
+                elif const_expr(dtype_str == "f32"):
                     out_e = y
                 else:
                     out_e = y.to(elem_dtype)
@@ -282,9 +283,9 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
                     g = g_e if dtype_str == "f32" else g_e.extf(compute_type)
                     norm = ArithValue(x) * rrms
                     y = norm * g
-                    if dtype_str == "f32":
+                    if const_expr(dtype_str == "f32"):
                         y_e = y
-                    elif dtype_str == "bf16":
+                    elif const_expr(dtype_str == "bf16"):
                         y_e = y.truncf(elem_type)
                     else:
                         y_e = y.truncf(elem_type)

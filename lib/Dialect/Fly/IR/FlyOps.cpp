@@ -581,8 +581,6 @@ FLY_INFER_RETURN_TYPES(CeilDivOp) {
   return success();
 }
 
-
-
 //===----------------------------------------------------------------------===//
 // IntTupleLike operations
 //===----------------------------------------------------------------------===//
@@ -1621,6 +1619,7 @@ FLY_INFER_RETURN_TYPES(TiledMmaPartitionShapeOp) {
 
 FLY_INFER_RETURN_TYPES(MmaMakeFragmentOp) {
   auto operandId = properties.as<Properties *>()->operand_id.getValue();
+  auto stagesAttr = properties.as<Properties *>()->stages;
   auto tiledMmaTy = dyn_cast<TiledMmaType>(operands[0].getType());
   auto memrefTy = dyn_cast<MemRefType>(operands[1].getType());
   if (!tiledMmaTy)
@@ -1656,6 +1655,32 @@ FLY_INFER_RETURN_TYPES(MmaMakeFragmentOp) {
   LayoutAttr inputLayout = GetLayoutAttrFromLayoutLikeType(memrefTy);
   if (!inputLayout)
     return emitOptionalError(location, "MmaMakeFragmentOp: unsupported layout type for operand #1");
+
+  if (stagesAttr) {
+    int32_t stages = static_cast<int32_t>(stagesAttr.getInt());
+    if (stages <= 0)
+      return emitOptionalError(location, "MmaMakeFragmentOp: stages must be positive, got ",
+                               stages);
+
+    IntTupleAttr inputShape = inputLayout.getShape();
+    IntTupleAttr inputStride = inputLayout.getStride();
+    if (inputShape.rank() < 2)
+      return emitOptionalError(
+          location, "MmaMakeFragmentOp: stages requires an input layout with at least two modes");
+
+    SmallVector<Attribute> stagedShapeElems;
+    stagedShapeElems.push_back(inputShape.at(0));
+    stagedShapeElems.push_back(inputShape.at(1));
+    stagedShapeElems.push_back(IntTupleAttr::getLeafStatic(context, stages));
+
+    SmallVector<Attribute> stagedStrideElems;
+    stagedStrideElems.push_back(inputStride.at(0));
+    stagedStrideElems.push_back(inputStride.at(1));
+    stagedStrideElems.push_back(IntTupleAttr::getLeafDynamic(context));
+
+    inputLayout = LayoutAttr::get(IntTupleAttr::get(ArrayAttr::get(context, stagedShapeElems)),
+                                  IntTupleAttr::get(ArrayAttr::get(context, stagedStrideElems)));
+  }
 
   LayoutAttr atomLayout = tiledMmaTy.getAtomLayout().getAttr();
   TileAttr permutationMNK = tiledMmaTy.getPermutation().getAttr();
