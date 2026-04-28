@@ -16,6 +16,11 @@ on:
         type: boolean
         required: false
         default: true
+      package_version_override:
+        description: 'Optional exact Python package version to build'
+        type: string
+        required: false
+        default: ''
     outputs:
       wheel_names:
         description: 'Space-separated list of built wheel filenames'
@@ -80,8 +85,15 @@ jobs:
           docker cp flydsl_build:/llvm-project/mlir_install.tgz ./mlir_install.tgz || true
 
       - name: Build wheels
+        env:
+          PACKAGE_VERSION_OVERRIDE: ${{ inputs.package_version_override }}
         run: |
-          docker exec flydsl_build bash -c "export MLIR_PATH=/llvm-project/mlir_install && export EXPECTED_GLIBC=2.35 && export FLYDSL_RELEASE_TYPE=${{ inputs.release_type }} && cd /flydsl && bash scripts/build_wheels.sh"
+          docker exec \
+            -e MLIR_PATH=/llvm-project/mlir_install \
+            -e EXPECTED_GLIBC=2.35 \
+            -e FLYDSL_RELEASE_TYPE=${{ inputs.release_type }} \
+            -e "FLYDSL_PACKAGE_VERSION_OVERRIDE=${PACKAGE_VERSION_OVERRIDE}" \
+            flydsl_build bash -c "cd /flydsl && bash scripts/build_wheels.sh"
           docker cp flydsl_build:/flydsl/dist ./dist
           # fly-opt is a Python-independent C++ binary; pick whichever per-version
           # build dir produced it (path is build-fly/build_py<MAJ><MIN>/bin/fly-opt).

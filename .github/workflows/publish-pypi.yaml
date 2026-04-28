@@ -20,21 +20,34 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Validate tag matches package version
+      - name: Validate tag version
         id: version
         run: |
           TAG_VERSION="${GITHUB_REF_NAME#v}"
-          PACKAGE_VERSION="$(awk -F'"' '/^__version__ = / {print $2; exit}' python/flydsl/__init__.py)"
+          SOURCE_VERSION="$(awk -F'"' '/^__version__ = / {print $2; exit}' python/flydsl/__init__.py)"
 
-          if [ -z "${PACKAGE_VERSION}" ]; then
+          if [ -z "${SOURCE_VERSION}" ]; then
             echo "Failed to find __version__ in python/flydsl/__init__.py" >&2
             exit 1
           fi
 
-          if [ "${TAG_VERSION}" != "${PACKAGE_VERSION}" ]; then
-            echo "Tag ${GITHUB_REF_NAME} does not match package version ${PACKAGE_VERSION}" >&2
-            exit 1
+          if [ "${TAG_VERSION}" = "${SOURCE_VERSION}" ]; then
+            PACKAGE_VERSION="${SOURCE_VERSION}"
+          else
+            DEV_NUMBER="$(git rev-list --count HEAD)"
+            if [ -z "${DEV_NUMBER}" ]; then
+              echo "Failed to derive dev version from git rev-list" >&2
+              exit 1
+            fi
+            EXPECTED_DEV_VERSION="${SOURCE_VERSION}.dev${DEV_NUMBER}"
+            if [ "${TAG_VERSION}" != "${EXPECTED_DEV_VERSION}" ]; then
+              echo "Tag ${GITHUB_REF_NAME} must match source version ${SOURCE_VERSION} or ${EXPECTED_DEV_VERSION}" >&2
+              exit 1
+            fi
+            PACKAGE_VERSION="${EXPECTED_DEV_VERSION}"
           fi
 
           echo "package_version=${PACKAGE_VERSION}" >> "${GITHUB_OUTPUT}"
@@ -47,6 +60,7 @@ jobs:
       release_type: release
       docker_image: rocm/pytorch:rocm7.2_ubuntu22.04_py3.10_pytorch_release_2.8.0
       upload_s3_staging: false
+      package_version_override: ${{ needs.validate_tag.outputs.package_version }}
     permissions:
       id-token: write
       contents: read
