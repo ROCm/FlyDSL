@@ -439,5 +439,11 @@ def raw_ptr_buffer_load_lds(rsrc, lds_ptr, size, voffset, soffset, offset, aux, 
     )
 
 
+def ds_bpermute(res, index, src, **kw):
+    from ..._mlir.dialects.rocdl import ds_bpermute as _op
+
+    return _op(res=res, index=_to_ir(index), src=_to_ir(src), **kw)
+
+
 def readfirstlane(res, src, **kw):
     return _ods_readfirstlane(res=res, src=_to_ir(src), **kw)
