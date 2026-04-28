@@ -6,20 +6,34 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${REPO_ROOT}"
 
+# Python versions to build wheels for. Aligned with TheRock's supported set
+# (https://github.com/ROCm/TheRock RELEASES.md): 3.10, 3.11, 3.12, 3.13.
+# Override via env: PYTHON_VERSIONS="3.10 3.13" bash scripts/build_wheels.sh
+DEFAULT_PYTHON_VERSIONS="3.10 3.11 3.12 3.13"
+IFS=' ' read -r -a PYTHON_VERSIONS <<< "${PYTHON_VERSIONS:-${DEFAULT_PYTHON_VERSIONS}}"
+
 usage() {
-  cat <<'EOF'
-Build FlyDSL wheels for Python 3.10 and 3.12.
+  cat <<EOF
+Build FlyDSL wheels for one or more CPython versions.
+
+Default versions: ${DEFAULT_PYTHON_VERSIONS}
 
 Usage:
   bash scripts/build_wheels.sh [--skip-build] [--install-deps]
+
+Override versions:
+  PYTHON_VERSIONS="3.10 3.13" bash scripts/build_wheels.sh
 
 Required env:
   MLIR_PATH    path to llvm-project build (defaults to ./llvm-project/mlir_install)
 
 Other knobs:
-  FLY_REBUILD=1|auto|0                 (default: 1)
-  EXPECTED_GLIBC=2.35                  (default: 2.35, set ALLOW_ANY_GLIBC=1 to skip check)
+  FLY_REBUILD=1|auto|0   (default: 1)
+  EXPECTED_GLIBC=2.35    (default: 2.35, set ALLOW_ANY_GLIBC=1 to skip check)
+  PYTHON_VERSIONS="..."  whitespace-separated list, default "${DEFAULT_PYTHON_VERSIONS}"
+  PY<MAJ><MIN>_BIN       per-version python binary override (e.g. PY313_BIN=/opt/py313/bin/python3.13)
   FLYDSL_PACKAGE_VERSION_OVERRIDE=...  exact package version for release automation
+  FLY_REBUILD=1|auto|0                 (default: 1)
 EOF
 }
 
@@ -39,15 +53,23 @@ FLY_REBUILD="${FLY_REBUILD:-1}"
 EXPECTED_GLIBC="${EXPECTED_GLIBC:-2.35}"
 ALLOW_ANY_GLIBC="${ALLOW_ANY_GLIBC:-0}"
 
-PY310_BIN="${PY310_BIN:-python3.10}"
-PY312_BIN="${PY312_BIN:-python3.12}"
-
 VENV_ROOT="${VENV_ROOT:-${REPO_ROOT}/.venvs/release}"
-VENV_310="${VENV_ROOT}/cp310"
-VENV_312="${VENV_ROOT}/cp312"
 
-FLY_BUILD_DIR_310="${FLY_BUILD_DIR_310:-build-fly/build_py310}"
-FLY_BUILD_DIR_312="${FLY_BUILD_DIR_312:-build-fly/build_py312}"
+# Resolve the python binary for a version like "3.13".
+# Honors PY<MAJ><MIN>_BIN env override (e.g. PY313_BIN), else falls back to
+# `python<ver>` on PATH.
+py_bin_for_version() {
+  local ver="$1"
+  local env_var_name="PY${ver//./}_BIN"
+  local val="${!env_var_name:-python${ver}}"
+  echo "${val}"
+}
+
+# Convert "3.13" -> "cp313".
+py_tag_for_version() {
+  local ver="$1"
+  echo "cp${ver//./}"
+}
 
 if [[ -z "${MLIR_PATH:-}" ]]; then
   MLIR_PATH="${REPO_ROOT}/llvm-project/mlir_install"
@@ -116,24 +138,30 @@ ensure_glibc() {
 }
 
 ensure_python_bins() {
-  local missing=0
-  for py in "${PY310_BIN}" "${PY312_BIN}"; do
-    if ! command -v "${py}" >/dev/null 2>&1; then
-      echo "Missing: ${py}" >&2
+  local ver py_bin missing=0
+  for ver in "${PYTHON_VERSIONS[@]}"; do
+    py_bin="$(py_bin_for_version "${ver}")"
+    if ! command -v "${py_bin}" >/dev/null 2>&1; then
+      echo "Missing: ${py_bin}" >&2
       missing=1
     fi
   done
 
   if [[ "${missing}" == "1" ]]; then
     local pkgs=()
-    command -v "${PY310_BIN}" >/dev/null 2>&1 || pkgs+=( python3.10 python3.10-dev python3.10-venv )
-    command -v "${PY312_BIN}" >/dev/null 2>&1 || pkgs+=( python3.12 python3.12-dev python3.12-venv )
+    for ver in "${PYTHON_VERSIONS[@]}"; do
+      py_bin="$(py_bin_for_version "${ver}")"
+      if ! command -v "${py_bin}" >/dev/null 2>&1; then
+        pkgs+=( "python${ver}" "python${ver}-dev" "python${ver}-venv" )
+      fi
+    done
     [[ "${#pkgs[@]}" -eq 0 ]] || apt_install_if_possible "${pkgs[@]}" || true
   fi
 
-  for py in "${PY310_BIN}" "${PY312_BIN}"; do
-    if ! command -v "${py}" >/dev/null 2>&1; then
-      echo "Error: Python not found: ${py}" >&2
+  for ver in "${PYTHON_VERSIONS[@]}"; do
+    py_bin="$(py_bin_for_version "${ver}")"
+    if ! command -v "${py_bin}" >/dev/null 2>&1; then
+      echo "Error: Python not found: ${py_bin}" >&2
       exit 1
     fi
   done
@@ -184,6 +212,8 @@ build_one() {
 
 
 main() {
+  echo "Building wheels for Python versions: ${PYTHON_VERSIONS[*]}"
+
   ensure_host_deps
   ensure_glibc
   ensure_python_bins
@@ -194,8 +224,14 @@ main() {
     rm -rf dist
     mkdir -p dist
 
-    build_one "${PY310_BIN}" "${VENV_310}" "${FLY_BUILD_DIR_310}" "cp310"
-    build_one "${PY312_BIN}" "${VENV_312}" "${FLY_BUILD_DIR_312}" "cp312"
+    local ver py_bin py_tag venv build_dir
+    for ver in "${PYTHON_VERSIONS[@]}"; do
+      py_bin="$(py_bin_for_version "${ver}")"
+      py_tag="$(py_tag_for_version "${ver}")"
+      venv="${VENV_ROOT}/${py_tag}"
+      build_dir="build-fly/build_py${ver//./}"
+      build_one "${py_bin}" "${venv}" "${build_dir}" "${py_tag}"
+    done
   fi
 
   echo ""
