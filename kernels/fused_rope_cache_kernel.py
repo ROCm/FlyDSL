@@ -277,8 +277,8 @@ def build_fused_rope_cache_module(
                         # --- fp8 KV cache path (raw buffer_ops for fp8 intrinsics) ---
                         ks_buf = fx.rocdl.make_buffer_tensor(KScale)
                         vs_buf = fx.rocdl.make_buffer_tensor(VScale)
-                        ks_div = fx.logical_divide(fx.slice(ks_buf, (None,)), f32_reg_lay)
-                        vs_div = fx.logical_divide(fx.slice(vs_buf, (None,)), f32_reg_lay)
+                        ks_div = fx.logical_divide(ks_buf, f32_reg_lay)
+                        vs_div = fx.logical_divide(vs_buf, f32_reg_lay)
                         r_ks = fx.memref_alloca(f32_reg_ty, f32_reg_lay)
                         r_vs = fx.memref_alloca(f32_reg_ty, f32_reg_lay)
                         fx.copy_atom_call(f32_copy_atom, fx.slice(ks_div, (None, fx.Int32(0))), r_ks)
