@@ -20,7 +20,7 @@ import flydsl.expr as fx
 from flydsl._mlir.ir import InsertionPoint
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, const_expr, gpu, range_constexpr
-from flydsl.expr.arith import ArithValue
+from flydsl.expr import math as fmath
 from flydsl.expr.numeric import Numeric
 from flydsl.expr.vector import ReductionOp, full
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
@@ -57,8 +57,6 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
         tid = fx.thread_idx.x
 
         elem_type = dtype_to_elem_type(dtype_str)
-        compute_type = fx.Float32.ir_type
-
         fm_fast = arith.FastMathFlags.fast
 
         base_ptr = allocator.get_base()
@@ -118,8 +116,6 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
         # Fast path: N is a multiple of tile_cols
         # ==================================================================
         if const_expr(False and N >= tile_cols and N % tile_cols == 0):
-            from flydsl.expr import math as fmath
-
             num_tiles = N // tile_cols
             elem_dtype = Numeric.from_ir_type(elem_type)
 
@@ -178,7 +174,7 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
 
             # 3. Normalize + store
             c_one = fx.Float32(1.0)
-            inv_sum = c_one / ArithValue(global_sum)
+            inv_sum = c_one / fx.Float32(global_sum)
 
             for tile_i in range_constexpr(num_tiles):
                 norm_vec = row_buffer[tile_i] * inv_sum
@@ -213,7 +209,7 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
                 view = fx.slice(divided, (None, index))
                 r = fx.memref_alloca(scalar_reg_ty, scalar_reg_lay)
                 fx.copy_atom_call(copy_atom_s, view, r)
-                return fx.memref_load_vec(r)[0].ir_value()
+                return fx.memref_load_vec(r)[0]
 
             def _store_scalar(divided, index, val):
                 r = fx.memref_alloca(scalar_reg_ty, scalar_reg_lay)
@@ -232,7 +228,7 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
                 is_valid = idx < c_N
                 idx_safe = is_valid.select(idx, fx.Int32(0))
                 val_e = _load_scalar(a_div, idx_safe)
-                val = val_e if dtype_str == "f32" else val_e.extf(compute_type)
+                val = val_e if dtype_str == "f32" else val_e.to(fx.Float32)
                 safe_val = is_valid.select(val, c_neg_inf)
                 row_buffer.append((safe_val, is_valid))
                 thread_max = thread_max.maximumf(safe_val)
@@ -243,7 +239,7 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
             thread_sum = c_zero_f
             new_buffer = []
             for safe_val, is_valid in row_buffer:
-                sub = safe_val - ArithValue(global_max)
+                sub = safe_val - fx.Float32(global_max)
                 scaled = sub * c_log2e
                 exp_val = scaled.exp2(fastmath=fm_fast)
                 safe_exp = is_valid.select(exp_val, c_zero_f)
@@ -252,7 +248,7 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
 
             global_sum = block_reduce(thread_sum, "sum", s_red)
             c_one = fx.Float32(1.0)
-            inv_sum = c_one / ArithValue(global_sum)
+            inv_sum = c_one / fx.Float32(global_sum)
 
             # 3. Normalize + store
             buf_idx = 0
@@ -261,12 +257,12 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
                 exp_val, is_valid = new_buffer[buf_idx]
                 buf_idx += 1
                 if idx < fx.Int32(N):
-                    norm_val = ArithValue(exp_val) * inv_sum
+                    norm_val = fx.Float32(exp_val) * inv_sum
                     out_e = norm_val
                     if const_expr(dtype_str == "f32"):
                         out_e = norm_val
                     else:
-                        out_e = norm_val.truncf(elem_type)
+                        out_e = norm_val.to(elem_dtype)
                     _store_scalar(c_div, idx, out_e)
 
     @flyc.jit

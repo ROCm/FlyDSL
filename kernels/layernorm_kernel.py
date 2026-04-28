@@ -18,7 +18,7 @@ import flydsl.expr as fx
 from flydsl._mlir.ir import InsertionPoint
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, const_expr, gpu, range_constexpr
-from flydsl.expr.arith import ArithValue
+from flydsl.expr import math as fmath
 from flydsl.expr.numeric import Numeric
 from flydsl.expr.vector import ReductionOp, full
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
@@ -64,8 +64,6 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
         tid = fx.thread_idx.x
 
         elem_type = dtype_to_elem_type(dtype_str)
-        compute_type = fx.Float32.ir_type
-
         fm_fast = arith.FastMathFlags.fast
         eps_c = fx.Float32(EPS)
 
@@ -124,8 +122,8 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
 
         def compute_mean_rstd(sum_val, sumsq_val):
             inv_n = fx.Float32(1.0 / float(N))
-            s = ArithValue(sum_val)
-            ss = ArithValue(sumsq_val)
+            s = fx.Float32(sum_val)
+            ss = fx.Float32(sumsq_val)
             mean = s * inv_n
             mean_sq = ss * inv_n
             mean2 = mean * mean
@@ -133,8 +131,8 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
             c0_f = fx.Float32(0.0)
             is_neg = var < c0_f
             var = is_neg.select(c0_f, var)
-            var_eps = ArithValue(var) + eps_c
-            rstd = var_eps.rsqrt(fastmath=fm_fast)
+            var_eps = var + eps_c
+            rstd = fmath.rsqrt(fx.Float32(var_eps), fastmath=fm_fast)
             return mean, rstd
 
         # ==================================================================
@@ -191,8 +189,8 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                 x2 = x * x
                 red = x.reduce(ReductionOp.ADD, fastmath=fm_fast)
                 red2 = x2.reduce(ReductionOp.ADD, fastmath=fm_fast)
-                thread_sum = ArithValue(thread_sum) + red
-                thread_sumsq = ArithValue(thread_sumsq) + red2
+                thread_sum = thread_sum + red
+                thread_sumsq = thread_sumsq + red2
 
             sum_val, sumsq_val = block_reduce_add2(thread_sum, thread_sumsq)
             mean, rstd = compute_mean_rstd(sum_val, sumsq_val)
@@ -279,7 +277,7 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                 view = fx.slice(divided_tensor, (None, index))
                 r = fx.memref_alloca(scalar_reg_ty, scalar_reg_lay)
                 fx.copy_atom_call(copy_atom_s, view, r)
-                return fx.memref_load_vec(r)[0].ir_value()
+                return fx.memref_load_vec(r)[0]
 
             def _store_scalar(divided_tensor, index, val):
                 r = fx.memref_alloca(scalar_reg_ty, scalar_reg_lay)
@@ -299,14 +297,14 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                 x = (
                     x_e
                     if dtype_str == "f32"
-                    else x_e.extf(compute_type)
+                    else x_e.to(fx.Float32)
                 )
-                x_av = ArithValue(x)
-                x2 = x_av * x_av
+                x = fx.Float32(x)
+                x2 = x * x
                 x_safe = is_valid.select(x, c_zero_f)
                 x2_safe = is_valid.select(x2, c_zero_f)
-                thread_sum = ArithValue(thread_sum) + x_safe
-                thread_sumsq = ArithValue(thread_sumsq) + x2_safe
+                thread_sum = thread_sum + x_safe
+                thread_sumsq = thread_sumsq + x2_safe
 
             sum_val, sumsq_val = block_reduce_add2(thread_sum, thread_sumsq)
             mean, rstd = compute_mean_rstd(sum_val, sumsq_val)
@@ -322,29 +320,29 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                     x = (
                         x_e
                         if dtype_str == "f32"
-                        else x_e.extf(compute_type)
+                        else x_e.to(fx.Float32)
                     )
                     g = (
                         g_e
                         if dtype_str == "f32"
-                        else g_e.extf(compute_type)
+                        else g_e.to(fx.Float32)
                     )
                     b = (
                         b_e
                         if dtype_str == "f32"
-                        else b_e.extf(compute_type)
+                        else b_e.to(fx.Float32)
                     )
-                    diff = ArithValue(x) - mean
+                    diff = fx.Float32(x) - mean
                     norm = diff * rstd
                     scaled = norm * g
                     y = scaled + b
                     y_e = y
                     if const_expr(dtype_str == "bf16"):
-                        y_e = y.truncf(elem_type)
+                        y_e = y.to(elem_dtype)
                     elif const_expr(dtype_str == "f32"):
                         y_e = y
                     else:
-                        y_e = y.truncf(elem_type)
+                        y_e = y.to(elem_dtype)
                     _store_scalar(out_div, idx, y_e)
 
     # ── JIT host launcher ─────────────────────────────────────────────────
