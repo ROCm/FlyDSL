@@ -7,6 +7,8 @@ import os
 import subprocess
 import shutil
 import sys
+import tempfile
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -257,34 +259,51 @@ def _latest_wheel_in(dist_dir: Path) -> Path | None:
     return max(wheels, key=lambda p: p.stat().st_mtime)
 
 
-def _detect_soname(lib_base: str) -> str:
-    """Detect the SONAME of a shared library by searching common paths.
+_AUDITWHEEL_EXCLUDE_LIB_PREFIXES = (
+    "libamdhip64.so",
+    "libhsa-runtime64.so",
+    "libamd_comgr.so",
+    "libdrm_amdgpu.so",
+    "libdrm.so",
+    "librocprofiler-register.so",
+)
 
-    For example, _detect_soname("libamdhip64.so") -> "libamdhip64.so.6" on ROCm 6.x.
-    Returns the SONAME string, or "" if not found.
-    """
-    search_dirs = [
-        Path("/opt/rocm/lib"),
-        Path("/opt/rocm/lib64"),
-        Path("/usr/lib/x86_64-linux-gnu"),
-        Path("/usr/lib64"),
-    ]
-    candidates: list[Path] = []
-    for d in search_dirs:
-        candidates.append(d / lib_base)
-        candidates.extend(sorted(d.glob(f"{lib_base}.*")))
 
-    for lib_path in dict.fromkeys(candidates):
-        if not lib_path.exists():
-            continue
-        try:
-            out = subprocess.check_output(["objdump", "-p", str(lib_path)], stderr=subprocess.DEVNULL, text=True)
-            for line in out.splitlines():
-                if "SONAME" in line:
-                    return line.split()[-1]
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            pass
-    return ""
+def _should_exclude_from_auditwheel(soname: str) -> bool:
+    return any(soname == prefix or soname.startswith(f"{prefix}.") for prefix in _AUDITWHEEL_EXCLUDE_LIB_PREFIXES)
+
+
+def _wheel_needed_sonames(wheel_path: Path) -> list[str]:
+    """Return DT_NEEDED entries from ELF payloads inside a wheel."""
+    objdump = shutil.which("objdump")
+    if not objdump:
+        print("Warning: objdump not found; cannot derive auditwheel excludes.")
+        return []
+
+    needed: set[str] = set()
+    with tempfile.TemporaryDirectory(prefix="wheel-elf-", dir=str(wheel_path.parent)) as tmp:
+        tmpdir = Path(tmp)
+        with zipfile.ZipFile(wheel_path) as wheel:
+            for idx, info in enumerate(wheel.infolist()):
+                name = Path(info.filename).name
+                if info.is_dir() or (not name.endswith(".so") and ".so." not in name):
+                    continue
+
+                elf_path = tmpdir / f"elf-{idx}"
+                with wheel.open(info) as src, elf_path.open("wb") as dst:
+                    shutil.copyfileobj(src, dst)
+
+                try:
+                    out = subprocess.check_output([objdump, "-p", str(elf_path)], stderr=subprocess.DEVNULL, text=True)
+                except subprocess.CalledProcessError:
+                    continue
+
+                for line in out.splitlines():
+                    fields = line.split()
+                    if len(fields) == 2 and fields[0] == "NEEDED":
+                        needed.add(fields[1])
+
+    return sorted(needed)
 
 
 def _auditwheel_repair_in_place(wheel_path: Path, dist_dir: Path) -> None:
@@ -309,7 +328,6 @@ def _auditwheel_repair_in_place(wheel_path: Path, dist_dir: Path) -> None:
         print("Warning: patchelf not found; skipping manylinux repair. (Install with `apt-get install patchelf`.)")
         return
 
-    import tempfile
     wheelhouse = Path(tempfile.mkdtemp(prefix="wheelhouse_", dir=str(dist_dir)))
 
     cmd = [
@@ -320,20 +338,11 @@ def _auditwheel_repair_in_place(wheel_path: Path, dist_dir: Path) -> None:
         str(wheelhouse),
     ]
 
-    # Do not bundle ROCm / system runtime libraries into the wheel.
-    # auditwheel --exclude matches SONAMEs (e.g. libamdhip64.so.6).
-    # Detect actual SONAMEs from the system so we don't hardcode ROCm versions.
-    _ROCM_EXCLUDE_LIBS = [
-        "libamdhip64.so",
-        "libhsa-runtime64.so",
-        "libamd_comgr.so",
-        "libdrm_amdgpu.so",
-        "libdrm.so",
-        "librocprofiler-register.so",
-    ]
-    for lib_base in _ROCM_EXCLUDE_LIBS:
-        soname = _detect_soname(lib_base)
-        if soname:
+    # auditwheel --exclude matches exact SONAMEs. Derive them from the wheel's
+    # own ELF NEEDED entries so the exclude list follows the ROCm version used
+    # during the build instead of probing host library paths.
+    for soname in _wheel_needed_sonames(wheel_path):
+        if _should_exclude_from_auditwheel(soname):
             cmd += ["--exclude", soname]
 
     # auditwheel needs to locate MLIR runtime libraries that are already
