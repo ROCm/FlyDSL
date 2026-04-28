@@ -347,7 +347,7 @@ def compile_fp8_gemm(
         init_state = _flatten_tile(a_cur) + list(accs) + _flatten_tile(b_cur)
 
         # Main K-loop: SCF outer with constexpr inner unroll
-        if full_outer_iters > 0:
+        if const_expr(full_outer_iters > 0):
             for iv, state in range(0, full_outer_iters * k_unroll, k_unroll, init=init_state):
                 s_a = _unflatten_a(list(state[:n_a]))
                 s_accs = list(state[n_a : n_a + n_acc])
@@ -369,7 +369,7 @@ def compile_fp8_gemm(
             b_cur = _unflatten_b(list(results[n_a + n_acc :]))
 
         # Handle remainder tiles
-        if remainder > 0:
+        if const_expr(remainder > 0):
             for j in range_constexpr(remainder):
                 next_kt = fx.Index(full_outer_iters * k_unroll + j + 1)
                 a_next = _load_a_tile(next_kt)

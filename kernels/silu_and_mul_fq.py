@@ -39,7 +39,7 @@ All arithmetic uses FlyDSL high-level APIs:
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.expr import arith, vector, rocdl, range_constexpr
+from flydsl.expr import arith, const_expr, vector, rocdl, range_constexpr
 from flydsl.expr import buffer_ops, math as fx_math
 from flydsl.expr.typing import T
 from flydsl.expr.arith import ArithValue
@@ -224,7 +224,7 @@ def build_silu_and_mul_fq_module(
                     row_div = fx.logical_divide(row_x, fx.make_layout(VEC, 1))
                     tile_idx = tid + iter_idx * BLOCK_THREADS
 
-                    if gui_layout:
+                    if const_expr(gui_layout):
                         # Block-interleaved per 16:
                         # [gate_0:16, up_0:16, gate_16:32, up_16:32, ...]
                         # VEC <= 16 guarantees one VEC-wide load is entirely
@@ -255,7 +255,7 @@ def build_silu_and_mul_fq_module(
                         sig = ArithValue(rocdl.rcp(T.f32, c1_f32 + emu))
                         act_vals.append(g * sig * u)
 
-                    if _need_quant:
+                    if const_expr(_need_quant):
                         # ── Per-32-block max for E8M0 scale ──────────
                         local_max = c0_f32
                         for vi in range_constexpr(VEC):
@@ -276,7 +276,7 @@ def build_silu_and_mul_fq_module(
                             (arith.constant(254, type=T.i32) - e8m0_biased) << 23
                         ).bitcast(T.f32)
 
-                        if _need_fp4:
+                        if const_expr(_need_fp4):
                             fp4_vals = []
                             for vi in range_constexpr(VEC):
                                 fp4_vals.append(_f32_to_e2m1(act_vals[vi] * quant_scale))
@@ -302,7 +302,7 @@ def build_silu_and_mul_fq_module(
                             # per dword (word_sel selects low/high pair).
                             scaled = [act_vals[vi] * quant_scale for vi in range_constexpr(VEC)]
                             fp8_byte_off = in_row * inter_dim + col0
-                            if VEC <= 4:
+                            if const_expr(VEC <= 4):
                                 packed_i32 = arith.constant(0, type=T.i32)
                                 for w in range_constexpr(VEC // 2):
                                     packed_i32 = rocdl.cvt_pk_fp8_f32(
@@ -312,7 +312,7 @@ def build_silu_and_mul_fq_module(
                                         packed_i32,
                                         w,
                                     )
-                                if VEC == 2:
+                                if const_expr(VEC == 2):
                                     buffer_ops.buffer_store(
                                         arith.trunci(T.i16, packed_i32),
                                         out_rsrc,
@@ -363,10 +363,10 @@ def build_silu_and_mul_fq_module(
                         act_bf16_vec = act_f32_av.truncf(T.vec(VEC, T.bf16))
                         # Write as packed i32 (VEC/2 dwords).
                         vec_dw = VEC // 2  # each dword = 2 bf16 elems
-                        if vec_dw >= 1:
+                        if const_expr(vec_dw >= 1):
                             act_i32 = vector.bitcast(T.vec(vec_dw, T.i32), act_bf16_vec)
                             bf16_byte_off = in_row * (inter_dim * 2) + col0 * 2
-                            if vec_dw == 1:
+                            if const_expr(vec_dw == 1):
                                 store_val = vector.extract(
                                     act_i32, static_position=[0], dynamic_position=[]
                                 )
@@ -387,7 +387,7 @@ def build_silu_and_mul_fq_module(
                     # Invalid (padding) row.  Only zero-fill the e8m0 scale
                     # when a scale tile exists (fp4/fp8); quant_mode="none"
                     # has no scale buffer to maintain.
-                    if _need_quant:
+                    if const_expr(_need_quant):
                         _store_scale(scale_rsrc, layout_scale, bid_i32, col0,
                                      arith.constant(0, type=T.i8))
 

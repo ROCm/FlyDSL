@@ -128,24 +128,24 @@ def build_quant_module(N):
 
             if arith.cmpi(arith.CmpIPredicate.eq, lane, Int32(0)):
                 wave_idx = arith.index_cast(T.index, wave)
-                s_red.store(w, [wave_idx])
+                SmemPtr.store(s_red, w, [wave_idx])
             gpu.barrier()
 
             if arith.cmpi(arith.CmpIPredicate.eq, wave, Int32(0)):
                 in_range = lane < RED_SLOTS
                 lane_safe = arith.select(in_range, lane, Int32(0))
                 lane_safe_idx = arith.index_cast(T.index, lane_safe)
-                v = s_red.load([lane_safe_idx])
+                v = SmemPtr.load(s_red, [lane_safe_idx])
                 ww = arith.select(in_range, v, c_zero_f)
                 ww = wave_reduce_max(ww)
 
                 if arith.cmpi(arith.CmpIPredicate.eq, lane, Int32(0)):
                     c0_idx = arith.constant(0, index=True)
-                    s_red.store(ww, [c0_idx])
+                    SmemPtr.store(s_red, ww, [c0_idx])
             gpu.barrier()
 
             c0_idx = arith.constant(0, index=True)
-            return s_red.load([c0_idx])
+            return SmemPtr.load(s_red, [c0_idx])
 
         # ── Layout API: buffer-backed tensors ────────────────────────────
         Input_buf = fx.rocdl.make_buffer_tensor(Input)
