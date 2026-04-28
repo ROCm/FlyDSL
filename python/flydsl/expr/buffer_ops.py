@@ -232,7 +232,8 @@ class BufferResourceDescriptor:
                     stride: int = 0, 
                     max_size: bool = True,
                     data_format: str = 'f32',
-                    num_records_bytes: Optional[Union[int, ir.Value]] = None) -> 'BufferResourceDescriptor':
+                    num_records_bytes: Optional[Union[int, ir.Value]] = None,
+                    base_byte_offset: Optional[Union[int, ir.Value]] = None) -> 'BufferResourceDescriptor':
         """Create buffer resource descriptor from memref.
         
         Args:
@@ -241,6 +242,7 @@ class BufferResourceDescriptor:
             max_size: If True, use max buffer size for flexibility
             num_records_bytes: Override buffer size (in BYTES) used by hardware OOB checking.
                               If provided, this takes precedence over `max_size`.
+            base_byte_offset: Optional byte offset added to the descriptor base pointer.
             data_format: Data format ('f32', 'f16', 'i32', etc.)
             
         Returns:
@@ -254,6 +256,8 @@ class BufferResourceDescriptor:
         from .._mlir.dialects import fly as _fly
         ptr_type = ir.Type.parse('!llvm.ptr')
         base_ptr = _fly.extract_aligned_pointer_as_index(ptr_type, raw_val)
+        if base_byte_offset is not None:
+            base_ptr = get_element_ptr(base_ptr, byte_offset=base_byte_offset)
         
         # Create buffer resource descriptor
         flags_val = _get_buffer_flags()
@@ -357,7 +361,8 @@ def create_buffer_resource(memref_val: ir.Value,
                            stride: int = 0,
                            max_size: bool = True,
                            *,
-                           num_records_bytes: Optional[Union[int, ir.Value]] = None) -> ir.Value:
+                           num_records_bytes: Optional[Union[int, ir.Value]] = None,
+                           base_byte_offset: Optional[Union[int, ir.Value]] = None) -> ir.Value:
     """Create AMD buffer resource descriptor from memref.
     
     This is a simplified wrapper around BufferResourceDescriptor.from_memref()
@@ -367,6 +372,8 @@ def create_buffer_resource(memref_val: ir.Value,
         memref_val: Memref value
         stride: Buffer stride (0 for contiguous)
         max_size: Use maximum buffer size
+        num_records_bytes: Override buffer size in bytes.
+        base_byte_offset: Optional byte offset added to the descriptor base pointer.
         
     Returns:
         ROCDL buffer resource descriptor (!llvm.ptr<8>)
@@ -376,7 +383,11 @@ def create_buffer_resource(memref_val: ir.Value,
         >>> data = buffer_load(rsrc, offset)
     """
     desc = BufferResourceDescriptor.from_memref(
-        memref_val, stride, max_size, num_records_bytes=num_records_bytes
+        memref_val,
+        stride,
+        max_size,
+        num_records_bytes=num_records_bytes,
+        base_byte_offset=base_byte_offset,
     )
     return desc.rsrc
 

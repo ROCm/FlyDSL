@@ -45,6 +45,7 @@ mask_mfma = 0x008
 mask_vmem_rd = 0x020
 mask_dsrd = 0x100
 mask_dswr = 0x200
+mask_compute = 0x001
 
 
 def sched_mfma(cnt):
