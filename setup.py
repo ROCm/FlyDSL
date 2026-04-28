@@ -263,19 +263,27 @@ def _detect_soname(lib_base: str) -> str:
     For example, _detect_soname("libamdhip64.so") -> "libamdhip64.so.6" on ROCm 6.x.
     Returns the SONAME string, or "" if not found.
     """
-    import subprocess
-
-    search_dirs = ["/opt/rocm/lib", "/usr/lib/x86_64-linux-gnu", "/usr/lib64"]
+    search_dirs = [
+        Path("/opt/rocm/lib"),
+        Path("/opt/rocm/lib64"),
+        Path("/usr/lib/x86_64-linux-gnu"),
+        Path("/usr/lib64"),
+    ]
+    candidates: list[Path] = []
     for d in search_dirs:
-        lib_path = os.path.join(d, lib_base)
-        if os.path.exists(lib_path):
-            try:
-                out = subprocess.check_output(["objdump", "-p", lib_path], stderr=subprocess.DEVNULL, text=True)
-                for line in out.splitlines():
-                    if "SONAME" in line:
-                        return line.split()[-1]
-            except (subprocess.CalledProcessError, FileNotFoundError):
-                pass
+        candidates.append(d / lib_base)
+        candidates.extend(sorted(d.glob(f"{lib_base}.*")))
+
+    for lib_path in dict.fromkeys(candidates):
+        if not lib_path.exists():
+            continue
+        try:
+            out = subprocess.check_output(["objdump", "-p", str(lib_path)], stderr=subprocess.DEVNULL, text=True)
+            for line in out.splitlines():
+                if "SONAME" in line:
+                    return line.split()[-1]
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            pass
     return ""
 
 
@@ -286,7 +294,7 @@ def _auditwheel_repair_in_place(wheel_path: Path, dist_dir: Path) -> None:
       - This does NOT guarantee a `manylinux_2_28` tag; the best achievable policy
         depends on your binary's ELF deps and glibc symbol versions.
     - For a guaranteed manylinux_2_28 wheel, build inside a manylinux_2_28 image
-        (see scripts/build_manylinux_2_28.sh).
+        (see Dockerfile.manylinux_2_28).
     """
     if sys.platform != "linux":
         return

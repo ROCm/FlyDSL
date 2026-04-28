@@ -43,11 +43,11 @@ jobs:
           if docker image inspect "${IMAGE}" >/dev/null 2>&1; then
             echo "Reusing existing image: ${IMAGE}"
           else
+            # The Dockerfile is self-contained, so avoid sending the full repo as build context.
             docker build \
-              -f flydsl/docker/Dockerfile.manylinux_2_28 \
               --build-arg ROCM_VERSION="${ROCM_VERSION}" \
               -t "${IMAGE}" \
-              flydsl/docker
+              - < flydsl/Dockerfile.manylinux_2_28
           fi
           echo "MANYLINUX_IMAGE=${IMAGE}" >> $GITHUB_ENV
 
