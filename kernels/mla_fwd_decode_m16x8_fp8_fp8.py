@@ -1208,12 +1208,9 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
         # ---- Extract p_comp values for softmax ----
         p_vals = []
         for sub in range_constexpr(2):
+            p_comp_sub = Vec(p_comp[sub])
             for ii in range_constexpr(4):
-                p_vals.append(
-                    vector.extract(
-                        p_comp[sub], static_position=[ii], dynamic_position=[]
-                    )
-                )
+                p_vals.append(p_comp_sub[ii])
 
         # ---- Load V from KV LDS ----
         v8_raw = _load_v_from_lds(p_lds_kv_base, warp_idx, lane_idx)
@@ -1343,11 +1340,11 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
     def _pack_f32x4_to_bf16_2dw(acc_val):
         """Convert f32x4 accumulator to 2 packed bf16 dwords."""
         bf16_vals = arith.trunc_f(T.bf16x4, acc_val)
-        i16_vals = _raw(vector.bitcast(T.i16x4, bf16_vals))
-        i16_0 = vector.extract(i16_vals, static_position=[0], dynamic_position=[])
-        i16_1 = vector.extract(i16_vals, static_position=[1], dynamic_position=[])
-        i16_2 = vector.extract(i16_vals, static_position=[2], dynamic_position=[])
-        i16_3 = vector.extract(i16_vals, static_position=[3], dynamic_position=[])
+        i16_vals = Vec(bf16_vals).bitcast(fx.Int16)
+        i16_0 = _raw(i16_vals[0])
+        i16_1 = _raw(i16_vals[1])
+        i16_2 = _raw(i16_vals[2])
+        i16_3 = _raw(i16_vals[3])
         c16 = arith.constant(16, type=T.i32)
         lo_0 = arith.ArithValue(i16_0).extui(T.i32)
         hi_0 = arith.ArithValue(i16_1).extui(T.i32)
@@ -1528,7 +1525,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
             * arith.constant(4, type=T.i32)  # sizeof(f32)
         )
         # Bitcast f32x4 -> i32x4 for buffer_store
-        data_0_i32 = _raw(vector.bitcast(T.i32x4, data_0))
+        data_0_i32 = _raw(Vec(data_0).bitcast(fx.Int32))
         buffer_ops.buffer_store(
             data_0_i32,
             split_output_rsrc,
@@ -1542,7 +1539,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
             (row_vram_1 * arith.constant(V_HEAD_DIM, type=T.i32) + col_vram)
             * arith.constant(4, type=T.i32)
         )
-        data_1_i32 = _raw(vector.bitcast(T.i32x4, data_1))
+        data_1_i32 = _raw(Vec(data_1).bitcast(fx.Int32))
         buffer_ops.buffer_store(
             data_1_i32,
             split_output_rsrc,
@@ -1747,10 +1744,11 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
             vec_width=1,
             dtype=T.i32,
         )
-        partial_qo_loc = rocdl.readfirstlane(T.i32, _raw(vector.extract(wi_dw1_4, [0])))
-        qo_start = rocdl.readfirstlane(T.i32, _raw(vector.extract(wi_dw1_4, [1])))
-        qo_end = rocdl.readfirstlane(T.i32, _raw(vector.extract(wi_dw1_4, [2])))
-        kv_start = rocdl.readfirstlane(T.i32, _raw(vector.extract(wi_dw1_4, [3])))
+        wi_dw1_4_vec = Vec(wi_dw1_4)
+        partial_qo_loc = rocdl.readfirstlane(T.i32, wi_dw1_4_vec[0])
+        qo_start = rocdl.readfirstlane(T.i32, wi_dw1_4_vec[1])
+        qo_end = rocdl.readfirstlane(T.i32, wi_dw1_4_vec[2])
+        kv_start = rocdl.readfirstlane(T.i32, wi_dw1_4_vec[3])
         kv_end = rocdl.readfirstlane(T.i32, _raw(wi_dw5))
         kv_len = arith.subi(kv_end, kv_start)
 
@@ -2029,43 +2027,29 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
                 row_kv_ld_next = state[2 + NUM_PV_ITERS * 2]
 
                 # Buffer parity
-                tile_parity = _raw(
-                    arith.ArithValue(tile_iv_i32) & arith.constant(1, type=T.i32)
-                )
-                is_odd = arith.cmpi(
-                    CmpIPredicate.ne, tile_parity, _raw(arith.constant(0, type=T.i32)),
-                )
-                curr_base_idx = _raw(arith.select(
-                    is_odd, _raw(p_lds_kv_1_base), _raw(p_lds_kv_0_base),
-                ))
-                next_warp = _raw(arith.select(
-                    is_odd, p_lds_kv_0_warp_i32, p_lds_kv_1_warp_i32,
-                ))
+                is_odd = (tile_iv_i32 & 1) != 0
+                curr_base_idx = is_odd.select(p_lds_kv_1_base, p_lds_kv_0_base)
+                next_warp = is_odd.select(p_lds_kv_0_warp_i32, p_lds_kv_1_warp_i32)
 
                 # check_boundary_next: True when tile_idx == num_tiles-2 AND last_tile_partial
-                is_second_to_last = arith.cmpi(
-                    CmpIPredicate.eq, tile_iv_i32, _raw(num_tiles_m2),
-                )
-                mid_cbn = _raw(
-                    arith.ArithValue(is_second_to_last) & arith.ArithValue(last_tile_partial)
-                )
+                is_second_to_last = tile_iv_i32 == num_tiles_m2
+                mid_cbn = is_second_to_last & last_tile_partial
 
                 # 2-ahead resolve params for this iteration:
-                nn_start_mid = _raw(
-                    arith.ArithValue(kv_tile_start_i32) + c_2bn
-                )
-                do_resolve_nn_mid = arith.cmpi(
-                    CmpIPredicate.slt, nn_start_mid, _raw(kv_end),
-                )
+                nn_start_mid = kv_tile_start_i32 + c_2bn
+                do_resolve_nn_mid = nn_start_mid < kv_end
 
                 # Process tile: cb=False always, cbn is compile-time via sub-branch
-                mid_gemm1_types = [T.f32, T.f32, T.i64, T.f32, T.i32]
-                if_mid_tile = scf.IfOp(mid_cbn, mid_gemm1_types, has_else=True)
-                with ir.InsertionPoint(if_mid_tile.regions[0].blocks[0]):
+                rm_m = c_neg_inf_f32
+                rse_m = c_zero_f32
+                pp_m = fx.Int64(0)
+                rs_m = c_one_f32
+                nn_m = fx.Int32(-1)
+                if mid_cbn:
                     # cbn=True: next tile needs boundary check
                     _barrier(vmcnt=0, lgkmcnt=0)
                     rocdl.sched_barrier(0)
-                    rm_ma, rse_ma, pp_ma, rs_ma, nn_ma = _process_tile_gemm1(
+                    rm_m, rse_m, pp_m, rs_m, nn_m = _process_tile_gemm1(
                         curr_base_idx,
                         kv_tile_start_i32,
                         _raw(kv_end),
@@ -2083,16 +2067,11 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
                         nn_resolve_end=_raw(kv_end),
                         do_resolve_nn=do_resolve_nn_mid,
                     )
-                    y_ma = [
-                        _raw(v) if not isinstance(v, ir.Value) else v
-                        for v in [rm_ma, rse_ma, pp_ma, rs_ma, nn_ma]
-                    ]
-                    scf.YieldOp(y_ma)
-                with ir.InsertionPoint(if_mid_tile.regions[1].blocks[0]):
+                else:
                     # cbn=False: next tile is full, no boundary check
                     _barrier(vmcnt=0, lgkmcnt=0)
                     rocdl.sched_barrier(0)
-                    rm_mb, rse_mb, pp_mb, rs_mb, nn_mb = _process_tile_gemm1(
+                    rm_m, rse_m, pp_m, rs_m, nn_m = _process_tile_gemm1(
                         curr_base_idx,
                         kv_tile_start_i32,
                         _raw(kv_end),
@@ -2110,16 +2089,6 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
                         nn_resolve_end=_raw(kv_end),
                         do_resolve_nn=do_resolve_nn_mid,
                     )
-                    y_mb = [
-                        _raw(v) if not isinstance(v, ir.Value) else v
-                        for v in [rm_mb, rse_mb, pp_mb, rs_mb, nn_mb]
-                    ]
-                    scf.YieldOp(y_mb)
-                rm_m = if_mid_tile.results[0]
-                rse_m = if_mid_tile.results[1]
-                pp_m = if_mid_tile.results[2]
-                rs_m = if_mid_tile.results[3]
-                nn_m = if_mid_tile.results[4]
                 oa_m = _gemm2_with_rescale(pp_m, rs_m, oaccu_carried, vt_base_i32)
                 yield_vals = [rm_m, rse_m] + oa_m + [nn_m]
                 yield_vals = [
