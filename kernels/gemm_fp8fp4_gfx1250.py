@@ -1243,10 +1243,10 @@ def compile_mxscale_gemm(
         desc_as_init = make_desc_as(stages_as_mem[0], split_k_base)
         desc_bs_init = make_desc_bs(stages_bs_mem[0], split_k_base)
 
-        adv_a_i32 = fx.Int32(tile_k // PACK_FACTOR_A)
-        adv_b_i32 = fx.Int32(packed_tile_k_b * 16)
-        adv_as_i32 = fx.Int32(tile_k // SCALE_BLOCK * wmma_m_rep)
-        adv_bs_i32 = fx.Int32(tile_k // SCALE_BLOCK * b_scale_load_rep)
+        adv_a_i32 = tile_k // PACK_FACTOR_A
+        adv_b_i32 = packed_tile_k_b * 16
+        adv_as_i32 = tile_k // SCALE_BLOCK * wmma_m_rep
+        adv_bs_i32 = tile_k // SCALE_BLOCK * b_scale_load_rep
 
         pred_const = fx.Int32(1)
 
