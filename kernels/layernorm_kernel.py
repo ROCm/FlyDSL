@@ -132,7 +132,7 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
             is_neg = var < c0_f
             var = is_neg.select(c0_f, var)
             var_eps = var + eps_c
-            rstd = fmath.rsqrt(fx.Float32(var_eps), fastmath=fm_fast)
+            rstd = fmath.rsqrt(var_eps, fastmath=fm_fast)
             return mean, rstd
 
         # ==================================================================
@@ -299,7 +299,6 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                     if dtype_str == "f32"
                     else x_e.to(fx.Float32)
                 )
-                x = fx.Float32(x)
                 x2 = x * x
                 x_safe = is_valid.select(x, c_zero_f)
                 x2_safe = is_valid.select(x2, c_zero_f)
@@ -332,7 +331,7 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                         if dtype_str == "f32"
                         else b_e.to(fx.Float32)
                     )
-                    diff = fx.Float32(x) - mean
+                    diff = x - mean
                     norm = diff * rstd
                     scaled = norm * g
                     y = scaled + b

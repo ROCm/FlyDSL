@@ -172,7 +172,7 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
                 thread_sumsq = thread_sumsq + red2
 
             _, sum_sq = block_reduce_add2(thread_dummy, thread_sumsq)
-            mean_sq = fx.Float32(sum_sq) / n_float
+            mean_sq = sum_sq / n_float
             ms_eps = mean_sq + eps_c
             rrms = ms_eps.rsqrt(fastmath=fm_fast)
 
@@ -257,13 +257,12 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
                 idx_safe = is_valid.select(idx, c0_i)
                 x_e = _load_scalar(row_div, idx_safe)
                 x = x_e if dtype_str == "f32" else x_e.to(fx.Float32)
-                x = fx.Float32(x)
                 x2 = x * x
                 x2_safe = is_valid.select(x2, c_zero_f)
                 thread_sumsq = thread_sumsq + x2_safe
 
             sum_sq = block_reduce_add(thread_sumsq)
-            mean_sq = fx.Float32(sum_sq) / n_float
+            mean_sq = sum_sq / n_float
             ms_eps = mean_sq + eps_c
             rrms = fmath.rsqrt(ms_eps, fastmath=fm_fast)
 
@@ -275,7 +274,7 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
                     g_e = _load_scalar(gamma_div, idx)
                     x = x_e if dtype_str == "f32" else x_e.to(fx.Float32)
                     g = g_e if dtype_str == "f32" else g_e.to(fx.Float32)
-                    norm = fx.Float32(x) * rrms
+                    norm = x * rrms
                     y = norm * g
                     if const_expr(dtype_str == "f32"):
                         y_e = y
