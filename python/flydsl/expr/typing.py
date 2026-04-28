@@ -854,6 +854,37 @@ _REDUCE_KINDS = {
     "min": (_vector.CombiningKind.MINIMUMF, _vector.CombiningKind.MINSI, _vector.CombiningKind.MINUI),
 }
 
+_VECTOR_OP_METHODS = {
+    operator.add: "__add__",
+    operator.sub: "__sub__",
+    operator.mul: "__mul__",
+    operator.truediv: "__truediv__",
+    operator.floordiv: "__floordiv__",
+    operator.mod: "__mod__",
+    operator.and_: "__and__",
+    operator.or_: "__or__",
+    operator.xor: "__xor__",
+    operator.lt: "__lt__",
+    operator.le: "__le__",
+    operator.gt: "__gt__",
+    operator.ge: "__ge__",
+    operator.eq: "__eq__",
+    operator.ne: "__ne__",
+}
+
+_VECTOR_REVERSE_OP_METHODS = {
+    "__add__": "__radd__",
+    "__sub__": "__rsub__",
+    "__mul__": "__rmul__",
+    "__truediv__": "__rtruediv__",
+    "__floordiv__": "__rfloordiv__",
+    "__mod__": "__rmod__",
+    "__and__": "__rand__",
+    "__or__": "__ror__",
+    "__xor__": "__rxor__",
+}
+
+
 def _resolve_combining_kind(op, is_float, signed):
     if isinstance(op, _vector.CombiningKind):
         return op
@@ -1059,28 +1090,18 @@ class Vector(ArithValue):
             lhs = self.broadcast_to(shape, loc=loc, ip=ip)
             rhs = other.broadcast_to(shape, loc=loc, ip=ip)
         method = getattr(ArithValue, method_name)
-        result = method(rhs, lhs, loc=loc, ip=ip) if flip else method(lhs, rhs, loc=loc, ip=ip)
+        if flip:
+            if isinstance(rhs, Vector):
+                result = method(rhs, lhs, loc=loc, ip=ip)
+            else:
+                reverse_name = _VECTOR_REVERSE_OP_METHODS.get(method_name, method_name)
+                result = getattr(ArithValue, reverse_name)(lhs, rhs, loc=loc, ip=ip)
+        else:
+            result = method(lhs, rhs, loc=loc, ip=ip)
         return self._wrap_op_result(result, shape)
 
     def apply_op(self, op, other, flip=False, *, loc=None, ip=None):
-        op_to_method = {
-            operator.add: "__add__",
-            operator.sub: "__sub__",
-            operator.mul: "__mul__",
-            operator.truediv: "__truediv__",
-            operator.floordiv: "__floordiv__",
-            operator.mod: "__mod__",
-            operator.and_: "__and__",
-            operator.or_: "__or__",
-            operator.xor: "__xor__",
-            operator.lt: "__lt__",
-            operator.le: "__le__",
-            operator.gt: "__gt__",
-            operator.ge: "__ge__",
-            operator.eq: "__eq__",
-            operator.ne: "__ne__",
-        }
-        method_name = op_to_method.get(op)
+        method_name = _VECTOR_OP_METHODS.get(op)
         if method_name is None:
             raise NotImplementedError(f"Vector.apply_op does not support {op}")
         return self._apply_op(method_name, op, other, flip=flip, loc=loc, ip=ip)
