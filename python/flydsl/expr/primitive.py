@@ -454,22 +454,7 @@ def make_fragment_like(tensor, dtype=None, loc=None, ip=None):
 
 @traced_op
 def get_scalar(int_tuple, loc=None, ip=None):
-    """Unwrap a rank-1, single-element tuple back to a plain scalar value.
-
-    Fails if the input has more than one leaf - use this only when you know
-    the tuple is a trivial wrapper.
-
-    Examples:
-        get_scalar(make_int_tuple(5))   -> 5
-    """
-
-    from .numeric import Numeric
-
-    if int_tuple.is_leaf and int_tuple.is_static:
-        return int_tuple.get_static_leaf_int
-
-    value = fly.get_scalar(int_tuple, loc=loc, ip=ip)
-    return Numeric.from_ir_type(value.type)(value)
+    return fly.get_scalar(int_tuple, loc=loc, ip=ip)
 
 
 @traced_op
