@@ -118,6 +118,10 @@ def _git_rev_count() -> str:
 def _read_version() -> str:
     """Build the package version based on FLYDSL_RELEASE_TYPE.
 
+    FLYDSL_PACKAGE_VERSION_OVERRIDE may be set by release automation to force
+    the exact package version, for example when publishing a tag-driven PyPI
+    dev release without changing the source base version.
+
     Release types (set via env var FLYDSL_RELEASE_TYPE):
       nightlies   -> {base}+{YYYYMMDD}.{git_hash}     (e.g. 0.1.0+20260309.a1b2c3d)
       devreleases -> {base}.dev{YYYYMMDD}+{git_hash}   (e.g. 0.1.0.dev20260309+a1b2c3d)
@@ -129,6 +133,10 @@ def _read_version() -> str:
     init_py = (PY_SRC / "flydsl" / "__init__.py").read_text(encoding="utf-8")
     m = re.search(r'^__version__\s*=\s*["\']([^"\']+)["\']', init_py, re.MULTILINE)
     base_version = m.group(1) if m else "0.0.0"
+
+    version_override = os.environ.get("FLYDSL_PACKAGE_VERSION_OVERRIDE", "").strip()
+    if version_override:
+        return version_override
 
     if "+" in base_version:
         return base_version

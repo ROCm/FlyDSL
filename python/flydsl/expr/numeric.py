@@ -10,15 +10,16 @@ import numpy as np
 from .._mlir import ir
 from .._mlir.dialects import arith
 from .._mlir.extras import types as T
+from ..utils import log
 from .utils.arith import (
     ArithValue,
+    _to_raw,
     arith_const,
     fp_to_fp,
     fp_to_int,
     int_to_fp,
     int_to_int,
     is_float_type,
-    _to_raw,
 )
 
 
@@ -213,6 +214,48 @@ def _extract_arith(val, signed):
     """Unwrap Numeric.value, attaching signedness if it's an ArithValue."""
     v = val.value
     return v.with_signedness(signed) if isinstance(v, ArithValue) else v
+
+
+def _unwrap_value(value):
+    """Convert FlyDSL wrappers to raw MLIR values when possible."""
+    if isinstance(value, ir.Value):
+        return value
+    if isinstance(value, (bool, int, float)):
+        try:
+            return as_numeric(value).ir_value()
+        except Exception:
+            log().error(f"failed to construct {as_numeric(value)} from {value}")
+            return value
+    if hasattr(value, "__fly_values__"):
+        values = value.__fly_values__()
+        if len(values) == 1:
+            return values[0]
+    if hasattr(value, "ir_value"):
+        return value.ir_value()
+    return value
+
+
+def _wrap_like(value, exemplar=None):
+    """Wrap an MLIR value back to a FlyDSL wrapper when possible."""
+    if not isinstance(value, ir.Value):
+        return value
+
+    if exemplar is not None:
+        if isinstance(exemplar, Numeric):
+            return type(exemplar)(value)
+        ctor = getattr(type(exemplar), "__fly_construct__", None)
+        if ctor is not None:
+            try:
+                return ctor([value])
+            except Exception:
+                log().error(f"failed to construct {type(exemplar)} from {value}")
+                return value
+
+    try:
+        return Numeric.from_ir_type(value.type)(value)
+    except Exception:
+        log().error(f"failed to construct {Numeric.from_ir_type(value.type)} from {value}")
+        return value
 
 
 def _make_binop(op, promote=True, widen_bool=False, swap=False):
@@ -500,7 +543,11 @@ class Integer(Numeric, metaclass=NumericMeta, width=32, signed=True, ir_type=T.i
                 x_val = fp_to_int(x, ty.signed, ty.ir_type, loc=loc, ip=ip)
         elif isinstance(x, Integer):
             if isinstance(x.value, ir.Value):
-                x_val = int_to_int(x.ir_value(), ty)
+                raw = x.ir_value(loc=loc, ip=ip)
+                if isinstance(raw.type, ir.IndexType):
+                    x_val = arith.index_cast(ty.ir_type, raw, loc=loc, ip=ip)
+                else:
+                    x_val = int_to_int(raw, ty)
             else:
                 src_dtype = type(x).numpy_dtype
                 dst_dtype = ty.numpy_dtype

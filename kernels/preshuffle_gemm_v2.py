@@ -10,7 +10,7 @@ Includes hot_loop_scheduler from the old pipeline for instruction scheduling.
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.expr import vector, gpu, rocdl, range_constexpr
+from flydsl.expr import vector, gpu, rocdl, range_constexpr, const_expr
 from flydsl.expr.typing import T, Float16, Float32, BFloat16, Float8E4M3FNUZ, Float8E4M3FN, Int8, Vector as Vec
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.runtime.device import get_rocm_arch
@@ -136,7 +136,7 @@ def compile_preshuffle_gemm_v2(
             fx.PointerType.get(layout_elem.ir_type, fx.AddressSpace.Shared, 512),
             fx.get_dyn_shared(),
         )
-        if is_fp8:
+        if const_expr(is_fp8):
             sA = fx.make_view(smem_ptr,
                 fx.make_ordered_layout((tile_m, tile_k, 2), (1, 0, 2)))
         else:
@@ -172,9 +172,9 @@ def compile_preshuffle_gemm_v2(
 
         # ── Scheduling hints (ported from old pipeline) ───────────
         def build_scheduler(numer: int, denom: int):
-            if denom <= 0:
+            if const_expr(denom <= 0):
                 return []
-            if numer <= 0:
+            if const_expr(numer <= 0):
                 return [0] * denom
             out = []
             prev = 0
@@ -187,33 +187,33 @@ def compile_preshuffle_gemm_v2(
         def hot_loop_scheduler():
             mfma_group = num_acc_n
 
-            if is_gfx942:
+            if const_expr(is_gfx942):
                 mfma_total = (k_iters * 2) * m_repeat * mfma_group
                 mfma_per_iter = 2 * mfma_group
                 sche_iters = 0 if mfma_per_iter == 0 else (mfma_total // mfma_per_iter)
 
                 rocdl.sched_dsrd(2)
                 rocdl.sched_mfma(1)
-                if tile_m == 16:
+                if const_expr(tile_m == 16):
                     rocdl.sched_vmem(1)
                 rocdl.sched_mfma(1)
-                if tile_m == 16:
+                if const_expr(tile_m == 16):
                     rocdl.sched_vmem(1)
 
-                if num_acc_n < 4:
+                if const_expr(num_acc_n < 4):
                     rocdl.sched_dsrd(1)
                     rocdl.sched_mfma(1)
-                    if tile_m == 16:
+                    if const_expr(tile_m == 16):
                         rocdl.sched_vmem(1)
                     rocdl.sched_dsrd(1)
                     rocdl.sched_mfma(1)
-                    if tile_m == 16:
+                    if const_expr(tile_m == 16):
                         rocdl.sched_vmem(1)
                     rocdl.sched_mfma(1)
 
                 dswr_tail = num_a_loads
                 dstr_advance = 2
-                if dswr_tail > sche_iters:
+                if const_expr(dswr_tail > sche_iters):
                     dswr_tail = sche_iters
                 dswr_start = max(sche_iters - dswr_tail - dstr_advance, 0)
 
@@ -222,13 +222,13 @@ def compile_preshuffle_gemm_v2(
                     rocdl.sched_mfma(mfma_group)
                     rocdl.sched_dsrd(1)
                     rocdl.sched_mfma(mfma_group)
-                    if sche_i >= dswr_start - 1:
+                    if const_expr(sche_i >= dswr_start - 1):
                         rocdl.sched_dswr(1)
             else:
                 # gfx950 path: distribute vmem/dsrd across MFMA slots
-                if use_mfma_k32:
+                if const_expr(use_mfma_k32):
                     element_k_per_mfma = 32
-                elif is_fp8:
+                elif const_expr(is_fp8):
                     element_k_per_mfma = 128  # mfma_scale_f32_16x16x128
                 else:
                     element_k_per_mfma = 16
@@ -236,13 +236,13 @@ def compile_preshuffle_gemm_v2(
                 mfma_total = num_mfma_per_tile_k * m_repeat * mfma_group
                 dswr_tail = num_a_loads
                 dstr_advance = 2
-                if dswr_tail > mfma_total:
+                if const_expr(dswr_tail > mfma_total):
                     dswr_tail = mfma_total
                 dsrd_preload_eff = min(int(dsrd_preload), num_ds_load)
                 dvmem_preload_eff = min(int(dvmem_preload), num_gmem_loads)
                 vmem_remaining = num_gmem_loads - dvmem_preload_eff
                 dsrd_remaining = num_ds_load - dsrd_preload_eff
-                if vmem_remaining > 0 and vmem_remaining < mfma_total:
+                if const_expr(vmem_remaining > 0 and vmem_remaining < mfma_total):
                     vmem_schedule = (build_scheduler(vmem_remaining, vmem_remaining)
                                      + [0] * (mfma_total - vmem_remaining))
                 else:
@@ -251,36 +251,36 @@ def compile_preshuffle_gemm_v2(
                 dswr_start = max(mfma_total - dswr_tail - dstr_advance, 0)
                 last_dsrd_mfma_idx = -1
                 for sched_idx in range_constexpr(mfma_total):
-                    if dsrd_schedule[sched_idx]:
+                    if const_expr(dsrd_schedule[sched_idx]):
                         last_dsrd_mfma_idx = sched_idx
                 dswr_start = max(dswr_start, last_dsrd_mfma_idx + 1)
                 idx_ds_read = dsrd_preload_eff
                 idx_gmem_load = dvmem_preload_eff
                 idx_ds_write = 0
-                if dvmem_preload_eff:
+                if const_expr(dvmem_preload_eff):
                     rocdl.sched_vmem(dvmem_preload_eff)
-                if dsrd_preload_eff:
+                if const_expr(dsrd_preload_eff):
                     rocdl.sched_dsrd(dsrd_preload_eff)
                 for mfma_idx in range_constexpr(mfma_total):
                     rocdl.sched_mfma(1)
                     n_dsrd = dsrd_schedule[mfma_idx]
-                    if n_dsrd and (idx_ds_read < num_ds_load):
-                        if idx_ds_read + n_dsrd > num_ds_load:
+                    if const_expr(n_dsrd and (idx_ds_read < num_ds_load)):
+                        if const_expr(idx_ds_read + n_dsrd > num_ds_load):
                             n_dsrd = num_ds_load - idx_ds_read
-                        if n_dsrd:
+                        if const_expr(n_dsrd):
                             rocdl.sched_dsrd(n_dsrd)
                             idx_ds_read += n_dsrd
                     n_vmem = vmem_schedule[mfma_idx]
-                    if n_vmem and (idx_gmem_load < num_gmem_loads):
-                        if idx_gmem_load + n_vmem > num_gmem_loads:
+                    if const_expr(n_vmem and (idx_gmem_load < num_gmem_loads)):
+                        if const_expr(idx_gmem_load + n_vmem > num_gmem_loads):
                             n_vmem = num_gmem_loads - idx_gmem_load
-                        if n_vmem:
+                        if const_expr(n_vmem):
                             rocdl.sched_vmem(n_vmem)
                             idx_gmem_load += n_vmem
-                    if (idx_ds_write < dswr_tail) and (mfma_idx >= dswr_start):
+                    if const_expr((idx_ds_write < dswr_tail) and (mfma_idx >= dswr_start)):
                         rocdl.sched_dswr(1)
                         idx_ds_write += 1
-                if idx_ds_write < num_a_loads:
+                if const_expr(idx_ds_write < num_a_loads):
                     rocdl.sched_dswr(num_a_loads - idx_ds_write)
 
             rocdl.sched_barrier(0)
@@ -290,11 +290,11 @@ def compile_preshuffle_gemm_v2(
             write_stage = read_stage ^ 1
             cur_frag_B = frag_B_stages[read_stage]
             # 1. Prefetch next A tile (global → register)
-            if read_next and next_k_val is not None:
+            if const_expr(read_next and next_k_val is not None):
                 fx.copy(buf_copy_g2s, pA_g[None, None, None, next_k_val], frag_copy_A)
             # 2. Load next B tile (before compute — matches v1 pipeline order,
             #    all vmem available for scheduler interleaving with MFMAs)
-            if read_next and next_k_val is not None:
+            if const_expr(read_next and next_k_val is not None):
                 fx.copy(mma_copy, pB_g[None, None, None, next_k_val],
                         frag_B_retile_stages[write_stage])
             # 3. Compute: A from LDS + MFMA with current B
@@ -310,7 +310,7 @@ def compile_preshuffle_gemm_v2(
                         frag_C)
             # 4. Write A tile to LDS + barrier
             fx.copy(uni_copy_g2s, frag_copy_A, pA_s[None, None, None, write_stage])
-            if enable_scheduler:
+            if const_expr(enable_scheduler):
                 hot_loop_scheduler()
             gpu.barrier()
 
@@ -323,9 +323,9 @@ def compile_preshuffle_gemm_v2(
         rocdl.sched_barrier(0)
 
         # ── Main tile loop (scf.for with ping-pong) ──────────────
-        if num_tiles == 1:
+        if const_expr(num_tiles == 1):
             pipeline_stage(read_stage=0, read_next=False)
-        elif num_tiles == 2:
+        elif const_expr(num_tiles == 2):
             pipeline_stage(read_stage=0, next_k_val=fx.Int32(1))
             pipeline_stage(read_stage=1, read_next=False)
         else:
@@ -336,7 +336,7 @@ def compile_preshuffle_gemm_v2(
             #   bf16/f16: acc + B stage 0 (B alloca types don't match for SROA)
             #   fp8: acc only (B alloca has uniform i64 types → SROA promotes it)
             acc_init = frag_C.load()
-            if is_fp8:
+            if const_expr(is_fp8):
                 for iv, state in range(loop_start, loop_end, loop_step,
                                        init=[acc_init]):
                     frag_C.store(state[0])
@@ -361,7 +361,7 @@ def compile_preshuffle_gemm_v2(
             pipeline_stage(read_stage=1, read_next=False)
 
         # ── Epilogue ─────────────────────────────────────────────
-        if is_fp8:
+        if const_expr(is_fp8):
             # FP8: inline scale multiply via layout API buffer loads
             # Accumulator layout: [mi*num_acc_n*4 + ni*4 + ii]
             #   scale_a depends on row (mi, ii), scale_b depends on col (ni)
@@ -431,13 +431,13 @@ def compile_preshuffle_gemm_v2(
         ctx = CompilationContext.get_current()
 
         # MMA atom — layout_elem carries the dtype (Float16/BFloat16/Float8E4M3FN/etc)
-        if use_mfma_k32:
+        if const_expr(use_mfma_k32):
             mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 32, layout_elem))
             k_perm = fx.make_layout((8, 4), (1, 8))
-        elif is_f16_or_bf16:
+        elif const_expr(is_f16_or_bf16):
             mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 16, layout_elem))
             k_perm = fx.make_layout((4, 4, 2), (1, 8, 4))
-        elif use_mfma_scale_128:
+        elif const_expr(use_mfma_scale_128):
             mma_atom = fx.make_mma_atom(fx.rocdl.cdna4.MFMA_Scale(16, 16, 128, layout_elem))
             k_perm = fx.make_layout((32, 4), (1, 32))
         else:
@@ -495,9 +495,9 @@ def compile_preshuffle_gemm_v2(
             arg_scale_a, arg_scale_b, i32_m, i32_n,
             tiled_mma, tiled_copy_g2s,
         )
-        if waves_per_eu is not None and int(waves_per_eu) >= 1:
+        if const_expr(waves_per_eu is not None and int(waves_per_eu) >= 1):
             for op in ctx.gpu_module_body.operations:
-                if hasattr(op, 'attributes') and op.OPERATION_NAME == "gpu.func":
+                if const_expr(hasattr(op, 'attributes') and op.OPERATION_NAME == "gpu.func"):
                     op.attributes["rocdl.waves_per_eu"] = ir.IntegerAttr.get(
                         T.i32, int(waves_per_eu))
         launcher.launch(

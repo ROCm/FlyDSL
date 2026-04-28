@@ -2052,7 +2052,6 @@ public:
 
   LogicalResult matchAndRewrite(MmaMakeFragmentOp op, PatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
-    auto *ctx = rewriter.getContext();
 
     auto tiledMmaTy = dyn_cast<TiledMmaType>(op.getTiledMma().getType());
     if (!tiledMmaTy)
@@ -2078,13 +2077,14 @@ public:
       break;
     }
 
-    IntTupleAttr zeroAttr = IntTupleAttr::getLeafStatic(ctx, 0);
-    Value coord = MakeIntTupleOp::create(rewriter, loc, IntTupleType::get(zeroAttr), ValueRange{});
+    auto resultTy = cast<fly::MemRefType>(op.getType());
+    auto layoutAttr = dyn_cast<LayoutAttr>(resultTy.getLayout());
+    if (!layoutAttr || !layoutAttr.isStatic())
+      return rewriter.notifyMatchFailure(op, "fragment layout must be fully static to alloca");
 
-    Value partitioned = TiledMmaPartitionOp::create(rewriter, loc, op.getOperandId(),
-                                                    op.getTiledMma(), op.getInput(), coord);
-
-    rewriter.replaceOpWithNewOp<MakeFragmentLikeOp>(op, partitioned, TypeAttr::get(elemTy));
+    LayoutBuilder<LayoutValueAdaptor> layoutBuilder(rewriter, loc);
+    Value fragmentLayout = layoutBuilder.materializeConstantLayout(layoutAttr).getValue();
+    rewriter.replaceOpWithNewOp<MemRefAllocaOp>(op, resultTy, fragmentLayout);
     return success();
   }
 };

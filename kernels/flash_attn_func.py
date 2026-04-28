@@ -26,7 +26,7 @@ import os
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.compiler.kernel_function import CompilationContext
-from flydsl.expr import arith, buffer_ops, gpu, range_constexpr, rocdl, vector
+from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, rocdl, vector
 from flydsl.expr.typing import T
 from kernels.kernels_common import dtype_to_elem_type
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
@@ -250,13 +250,13 @@ def build_flash_attn_func_module_primary(
         def _mfma(ods_fn, a, b, c):
             return ods_fn(v16f32_type, a, b, c, _mfma_zero, _mfma_zero, _mfma_zero).result
         def mfma_acc(a, b, c):
-            if dtype_str == "bf16":
-                if USE_K16:
+            if const_expr(dtype_str == "bf16"):
+                if const_expr(USE_K16):
                     return _mfma(rocdl.mfma_f32_32x32x16_bf16, a, b, c)
                 a = vector.bitcast(T.i16x4, a)
                 b = vector.bitcast(T.i16x4, b)
                 return _mfma(rocdl.mfma_f32_32x32x8bf16_1k, a, b, c)
-            if USE_K16:
+            if const_expr(USE_K16):
                 return _mfma(rocdl.mfma_f32_32x32x16_f16, a, b, c)
             return _mfma(rocdl.mfma_f32_32x32x8f16, a, b, c)
 
@@ -383,7 +383,7 @@ def build_flash_attn_func_module_primary(
             return vector.bitcast(v8f16_type, vector.from_elements(_v4i32, pairs))
 
         def k_buf_base(buf_id):
-            if isinstance(buf_id, int):
+            if const_expr(isinstance(buf_id, int)):
                 return arith.index(buf_id * LDS_K_TILE_SIZE)
             return buf_id * arith.index(LDS_K_TILE_SIZE)
 
@@ -401,7 +401,7 @@ def build_flash_attn_func_module_primary(
             for batch in range_constexpr(NUM_BATCHES_KV):
                 row_offset = batch * ROWS_PER_BATCH_LOAD
                 row_idx = tile_start + load_row_in_batch + row_offset
-                if KV_NEEDS_GUARD:
+                if const_expr(KV_NEEDS_GUARD):
                     row_valid = arith.cmpi(
                         arith.CmpIPredicate.ult,
                         load_row_in_batch,
@@ -446,7 +446,7 @@ def build_flash_attn_func_module_primary(
             for batch in range_constexpr(NUM_BATCHES_KV):
                 row_offset = batch * ROWS_PER_BATCH_LOAD
                 row_idx = tile_start + load_row_in_batch + row_offset
-                if KV_NEEDS_GUARD:
+                if const_expr(KV_NEEDS_GUARD):
                     row_valid = arith.cmpi(
                         arith.CmpIPredicate.ult,
                         load_row_in_batch,
@@ -480,7 +480,7 @@ def build_flash_attn_func_module_primary(
             v_base = v_buf_base(buf_id)
             for batch in range_constexpr(NUM_BATCHES_KV):
                 row_offset = batch * ROWS_PER_BATCH_LOAD
-                if KV_NEEDS_GUARD:
+                if const_expr(KV_NEEDS_GUARD):
                     row_valid = arith.cmpi(
                         arith.CmpIPredicate.ult,
                         load_row_in_batch,
@@ -496,7 +496,7 @@ def build_flash_attn_func_module_primary(
                     _v_store_to_lds(v_base, lds_row, vecs[batch])
 
         # ---- DMA loading for K (buffer_load_dwordx4 ... lds) ----
-        if ENABLE_DMA:
+        if const_expr(ENABLE_DMA):
             from flydsl._mlir.dialects import llvm
             k_rsrc = buffer_ops.create_buffer_resource(K, max_size=True)
             _lds_ptr_ty = _llvm_lds_ptr_ty()
@@ -514,7 +514,7 @@ def build_flash_attn_func_module_primary(
 
             def coop_dma_k(tile_start, buf_id=0):
                 """Load K tile via DMA with XOR-swizzled global fetch."""
-                if isinstance(buf_id, int):
+                if const_expr(isinstance(buf_id, int)):
                     k_lds_byte_base = lds_kv_base_idx + arith.index(buf_id * LDS_K_TILE_SIZE * 2)
                 else:
                     k_lds_byte_base = lds_kv_base_idx + buf_id * arith.index(LDS_K_TILE_SIZE * 2)
@@ -550,7 +550,7 @@ def build_flash_attn_func_module_primary(
             return col_idx ^ mask
 
         # ---- DMA loading for V (buffer_load_dwordx4 ... lds) ----
-        if ENABLE_DMA:
+        if const_expr(ENABLE_DMA):
             v_rsrc = buffer_ops.create_buffer_resource(V, max_size=True)
             V_TILE_BYTES = BLOCK_N * V_STRIDE * 2
             NUM_DMA_V = V_TILE_BYTES // DMA_BATCH_BYTES
@@ -615,7 +615,7 @@ def build_flash_attn_func_module_primary(
         lane_xor_32_byte = arith.MulIOp(lane_xor_32_i32, c4_i32).result
 
         def reduction_peer(v_f32):
-            if REDUCE_MODE == "ds_bpermute":
+            if const_expr(REDUCE_MODE == "ds_bpermute"):
                 v_i32 = arith.ArithValue(v_f32).bitcast(T.i32)
                 peer_i32 = rocdl.ds_bpermute(T.i32, lane_xor_32_byte, v_i32)
                 return arith.ArithValue(peer_i32).bitcast(compute_type)
@@ -623,7 +623,7 @@ def build_flash_attn_func_module_primary(
 
         # ---- KV loop upper bound ----
         _q_end = q_start + BLOCK_M
-        if CAUSAL:
+        if const_expr(CAUSAL):
             kv_upper = arith.MinSIOp(_q_end, seq_len_v).result
         else:
             kv_upper = seq_len_v
@@ -633,7 +633,7 @@ def build_flash_attn_func_module_primary(
         init_args = [c_neg_inf, c_zero_f]
         for _ in range_constexpr(D_CHUNKS):
             init_args.append(c_zero_v16f32)
-        if _use_dma_dbuf:
+        if const_expr(_use_dma_dbuf):
             init_args.append(arith.index(0))
             coop_dma_k(arith.index(0), buf_id=0)
 
@@ -653,15 +653,15 @@ def build_flash_attn_func_module_primary(
                 NUM_PREFETCH_K if NUM_PREFETCH_K < N_SUBTILES else N_SUBTILES
             )
 
-            if ENABLE_PREFETCH_3BUF:
+            if const_expr(ENABLE_PREFETCH_3BUF):
                 for pre_k in range_constexpr(preload_k_count):
                     pre_k_slot = CK_LDS_SEQ[pre_k % len(CK_LDS_SEQ)] % NUM_PREFETCH_K
                     pre_k_start = kv_block_start + pre_k * BLOCK_N
-                    if ENABLE_DMA:
+                    if const_expr(ENABLE_DMA):
                         coop_dma_k(pre_k_start, pre_k_slot)
                     else:
                         coop_load_k(pre_k_start, pre_k_slot)
-                if ENABLE_DMA:
+                if const_expr(ENABLE_DMA):
                     rocdl.s_waitcnt(0)
                 else:
                     rocdl.sched_group_barrier(rocdl.mask_vmem_rd, 1, 0)
@@ -670,17 +670,17 @@ def build_flash_attn_func_module_primary(
             for kv_sub in range_constexpr(N_SUBTILES):
                 kv_start = kv_block_start + kv_sub * BLOCK_N
 
-                if ENABLE_PREFETCH_3BUF:
+                if const_expr(ENABLE_PREFETCH_3BUF):
                     k_slot = CK_LDS_SEQ[kv_sub % len(CK_LDS_SEQ)] % NUM_PREFETCH_K
-                elif _use_dma_dbuf:
-                    if kv_sub % 2 == 0:
+                elif const_expr(_use_dma_dbuf):
+                    if const_expr(kv_sub % 2 == 0):
                         _k_buf_id = _cur_buf_id
                     else:
                         _k_buf_id = arith.index(1) - _cur_buf_id
                     rocdl.s_waitcnt(0)
                     gpu.barrier()
                     _next_k_buf_id = arith.index(1) - _k_buf_id
-                    if kv_sub + 1 < N_SUBTILES:
+                    if const_expr(kv_sub + 1 < N_SUBTILES):
                         coop_dma_k(
                             kv_block_start + (kv_sub + 1) * BLOCK_N,
                             _next_k_buf_id,
@@ -699,10 +699,10 @@ def build_flash_attn_func_module_primary(
                     k_slot = 0
                     coop_load_k(kv_start, k_slot)
                     gpu.barrier()
-                if not _use_dma_dbuf:
+                if const_expr(not _use_dma_dbuf):
                     k_base = k_buf_base(k_slot)
 
-                if not USE_HW_TR or (not ENABLE_DMA and not ENABLE_PREFETCH_3BUF):
+                if const_expr(not USE_HW_TR or (not ENABLE_DMA and not ENABLE_PREFETCH_3BUF)):
                     _v_vecs_prefetch = coop_load_v_global(kv_start)
 
                 # ==== GEMM1: bulk-read all K packs, then pipeline MFMAs ====
@@ -728,7 +728,7 @@ def build_flash_attn_func_module_primary(
                     k_packs_hi[p] = vector.load_op(
                         mfma_pack_type, lds_kv, [_k_idx_hi(p)])
 
-                if ENABLE_DMA and not ENABLE_PREFETCH_3BUF:
+                if const_expr(ENABLE_DMA and not ENABLE_PREFETCH_3BUF):
                     coop_dma_v(kv_start, 0)
                     rocdl.sched_barrier(0)
 
@@ -739,7 +739,7 @@ def build_flash_attn_func_module_primary(
                         k_packs_lo[ks], q_b_packs[ks], s_acc_lo)
                     s_acc_hi = mfma_acc(
                         k_packs_hi[ks], q_b_packs[ks], s_acc_hi)
-                    if ks + _QK_PREFETCH_DEPTH < K_STEPS_QK:
+                    if const_expr(ks + _QK_PREFETCH_DEPTH < K_STEPS_QK):
                         k_packs_lo[ks + _QK_PREFETCH_DEPTH] = vector.load_op(
                             mfma_pack_type, lds_kv,
                             [_k_idx_lo(ks + _QK_PREFETCH_DEPTH)])
@@ -756,7 +756,7 @@ def build_flash_attn_func_module_primary(
                     s_raw_hi.append(vector.extract(
                         s_acc_hi, static_position=[r], dynamic_position=[]))
 
-                if CAUSAL:
+                if const_expr(CAUSAL):
                     kv_start_i32 = arith.index_cast(T.i32, kv_start)
                     lane_div_32_i32 = arith.index_cast(T.i32, lane_div_32)
                     q_start_i32 = arith.index_cast(T.i32, q_start)
@@ -838,30 +838,30 @@ def build_flash_attn_func_module_primary(
 
                 # ==== Rescale O accumulators ====
                 corr_vec = vector.broadcast(v16f32_type, corr)
-                if not USE_HW_TR:
+                if const_expr(not USE_HW_TR):
                     o_accs[0] = arith.MulFOp(o_accs[0], corr_vec, fastmath=fm_fast).result
                 else:
                     for dc in range_constexpr(D_CHUNKS):
                         o_accs[dc] = arith.MulFOp(o_accs[dc], corr_vec, fastmath=fm_fast).result
 
-                if ENABLE_PREFETCH_3BUF and (kv_sub + preload_k_count) < N_SUBTILES:
+                if const_expr(ENABLE_PREFETCH_3BUF and (kv_sub + preload_k_count) < N_SUBTILES):
                     next_k_sub = kv_sub + preload_k_count
                     next_k_start = kv_block_start + next_k_sub * BLOCK_N
                     next_k_slot = (
                         CK_LDS_SEQ[next_k_sub % len(CK_LDS_SEQ)] % NUM_PREFETCH_K
                     )
-                    if ENABLE_DMA:
+                    if const_expr(ENABLE_DMA):
                         coop_dma_k(next_k_start, next_k_slot)
                     else:
                         coop_load_k(next_k_start, next_k_slot)
 
-                if ENABLE_PREFETCH_3BUF:
+                if const_expr(ENABLE_PREFETCH_3BUF):
                     v_slot = CK_LDS_SEQ[kv_sub % len(CK_LDS_SEQ)] % NUM_PREFETCH_V
                     v_base = v_buf_base(v_slot)
                     coop_load_v(kv_start, v_slot)
                     rocdl.sched_group_barrier(rocdl.mask_dswr, 1, 0)
                     gpu.barrier()
-                elif ENABLE_DMA:
+                elif const_expr(ENABLE_DMA):
                     v_base = v_buf_base(0)
                     rocdl.s_waitcnt(0)
                     gpu.barrier()
@@ -874,7 +874,7 @@ def build_flash_attn_func_module_primary(
                     gpu.barrier()
 
                 # ==== Build P packs for lo and hi halves ====
-                if dtype_str == "bf16" and not USE_K16:
+                if const_expr(dtype_str == "bf16" and not USE_K16):
                     p_packs_lo = []
                     p_packs_hi = []
                     for pks in range_constexpr(PV_K_STEPS):
@@ -883,7 +883,7 @@ def build_flash_attn_func_module_primary(
                             p_vals_lo[p_base:p_base+4]))
                         p_packs_hi.append(bf16_trunc_pack_v4(
                             p_vals_hi[p_base:p_base+4]))
-                elif dtype_str == "bf16" and USE_K16:
+                elif const_expr(dtype_str == "bf16" and USE_K16):
                     p_packs_lo = []
                     p_packs_hi = []
                     for pks in range_constexpr(PV_K_STEPS):
@@ -899,7 +899,7 @@ def build_flash_attn_func_module_primary(
                         p_f16_lo.append(arith.trunc_f(elem_type, p_vals_lo[r]))
                         p_f16_hi.append(arith.trunc_f(elem_type, p_vals_hi[r]))
 
-                    if USE_K16:
+                    if const_expr(USE_K16):
                         p_packs_lo = []
                         p_packs_hi = []
                         for pks in range_constexpr(PV_K_STEPS):
@@ -934,7 +934,7 @@ def build_flash_attn_func_module_primary(
 
                 def _read_v_pack(step_idx):
                     dc, pks = _steps[step_idx]
-                    if USE_HW_TR:
+                    if const_expr(USE_HW_TR):
                         d_col = (arith.index(dc * D_CHUNK)
                                  + tr_col_half * 16 + tr_col_sub * 4)
                         k_row = (arith.index(pks * PV_K_STEP)
@@ -942,7 +942,7 @@ def build_flash_attn_func_module_primary(
                         _d_col_eff = _v_swizzle(k_row, d_col) if ENABLE_DMA else d_col
                         lds_lo = v_base + k_row * V_STRIDE + _d_col_eff
                         lds_hi = lds_lo + arith.index(K_SUB_N * V_STRIDE)
-                        if USE_K16:
+                        if const_expr(USE_K16):
                             vl_a = ds_read_tr_v4f16(lds_lo)
                             vl_b = ds_read_tr_v4f16(
                                 lds_lo + arith.index(8 * V_STRIDE))
@@ -971,17 +971,17 @@ def build_flash_attn_func_module_primary(
                 # ==== GEMM2: O += V^T_lo @ P_lo + V^T_hi @ P_hi ====
                 for si in range_constexpr(TOTAL_PV):
                     dc, pks = _steps[si]
-                    if si + 1 < TOTAL_PV:
+                    if const_expr(si + 1 < TOTAL_PV):
                         v_lo_nxt, v_hi_nxt = _read_v_pack(si + 1)
                     o_accs[dc] = mfma_acc(
                         v_lo_cur, p_packs_lo[pks], o_accs[dc])
                     o_accs[dc] = mfma_acc(
                         v_hi_cur, p_packs_hi[pks], o_accs[dc])
-                    if not USE_HW_TR and dc == 0 and pks < D_CHUNKS - 1:
+                    if const_expr(not USE_HW_TR and dc == 0 and pks < D_CHUNKS - 1):
                         o_accs[pks + 1] = arith.MulFOp(
                             o_accs[pks + 1], corr_vec, fastmath=fm_fast,
                         ).result
-                    if si + 1 < TOTAL_PV:
+                    if const_expr(si + 1 < TOTAL_PV):
                         v_lo_cur = v_lo_nxt
                         v_hi_cur = v_hi_nxt
 
@@ -989,8 +989,8 @@ def build_flash_attn_func_module_primary(
                 l_running = l_new
 
             _yield_args = [m_running, l_running] + o_accs
-            if _use_dma_dbuf:
-                if N_SUBTILES % 2 == 1:
+            if const_expr(_use_dma_dbuf):
+                if const_expr(N_SUBTILES % 2 == 1):
                     _yield_args.append(arith.index(1) - _cur_buf_id)
                 else:
                     _yield_args.append(_cur_buf_id)
@@ -1053,25 +1053,25 @@ def build_flash_attn_func_module_primary(
 
         launcher = flash_attn_func_kernel(Q, K, V, O, seq_len)
 
-        if waves_per_eu is not None:
+        if const_expr(waves_per_eu is not None):
             _wpe = int(waves_per_eu)
-            if _wpe >= 1:
+            if const_expr(_wpe >= 1):
                 for op in ctx.gpu_module_body.operations:
-                    if getattr(op, "OPERATION_NAME", None) == "gpu.func":
+                    if const_expr(getattr(op, "OPERATION_NAME", None) == "gpu.func"):
                         op.attributes["rocdl.waves_per_eu"] = ir.IntegerAttr.get(
                             T.i32,
                             _wpe,
                         )
-        if flat_work_group_size is not None:
+        if const_expr(flat_work_group_size is not None):
             _fwgs = int(flat_work_group_size)
-            if _fwgs >= 1:
+            if const_expr(_fwgs >= 1):
                 flat_wg_attr = ir.StringAttr.get(f"{_fwgs},{_fwgs}")
                 for op in ctx.gpu_module_body.operations:
-                    if getattr(op, "OPERATION_NAME", None) == "gpu.func":
+                    if const_expr(getattr(op, "OPERATION_NAME", None) == "gpu.func"):
                         op.attributes["rocdl.flat_work_group_size"] = flat_wg_attr
 
         passthrough_entries = []
-        if daz:
+        if const_expr(daz):
             passthrough_entries.append(ir.ArrayAttr.get([
                 ir.StringAttr.get("denormal-fp-math-f32"),
                 ir.StringAttr.get("preserve-sign,preserve-sign"),
@@ -1085,7 +1085,7 @@ def build_flash_attn_func_module_primary(
                 ir.StringAttr.get("true"),
             ]))
         for op in ctx.gpu_module_body.operations:
-            if getattr(op, "OPERATION_NAME", None) == "gpu.func":
+            if const_expr(getattr(op, "OPERATION_NAME", None) == "gpu.func"):
                 op.attributes["passthrough"] = ir.ArrayAttr.get(passthrough_entries)
 
         launcher.launch(

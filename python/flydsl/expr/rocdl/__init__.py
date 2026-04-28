@@ -16,7 +16,7 @@ This module provides access to ROCm-specific GPU operations including:
 
 from ..._mlir.dialects.rocdl import *  # noqa: F401,F403
 from ..meta import traced_op
-from . import cdna4
+from . import cdna4 as cdna4
 
 # Keep references to ODS-generated builders so we can wrap them without losing access.
 _ods_wmma_scale_f32_16x16x128_f8f6f4 = globals().get("wmma_scale_f32_16x16x128_f8f6f4", None)
@@ -30,6 +30,7 @@ _ods_cluster_load_async_to_lds_b32 = cluster_load_async_to_lds_b32
 _ods_cluster_load_async_to_lds_b64 = cluster_load_async_to_lds_b64
 _ods_cluster_load_async_to_lds_b128 = cluster_load_async_to_lds_b128
 _ods_s_wait_asynccnt = s_wait_asynccnt
+_ods_readfirstlane = readfirstlane
 _ods_mfma_f32_16x16x16f16 = mfma_f32_16x16x16f16
 _ods_mfma_f32_16x16x16bf16_1k = globals().get("mfma_f32_16x16x16bf16_1k", None)
 _ods_mfma_f32_16x16x32_fp8_fp8 = mfma_f32_16x16x32_fp8_fp8
@@ -396,8 +397,8 @@ def lds_transpose_load(result_type, lds_memref, elem_offset, elem_bytes):
 
 
 # ── New high-level helpers from universal.py ──────────────────────────
-from .universal import *  # noqa: F401,F403
-from .inline_asm import *  # noqa: F401,F403
+from .universal import *  # noqa: E402,F401,F403,I001
+from .inline_asm import *  # noqa: E402,F401,F403,I001
 
 # ── Wrappers: accept DSL Numeric args (fx.Int32, fx.Float32, etc.) ─────────
 # ODS-generated ops require raw ir.Value. These wrappers auto-convert.
@@ -436,3 +437,7 @@ def raw_ptr_buffer_load_lds(rsrc, lds_ptr, size, voffset, soffset, offset, aux, 
     return _op(
         _to_ir(rsrc), _to_ir(lds_ptr), _to_ir(size), _to_ir(voffset), _to_ir(soffset), _to_ir(offset), _to_ir(aux), **kw
     )
+
+
+def readfirstlane(res, src, **kw):
+    return _ods_readfirstlane(res=res, src=_to_ir(src), **kw)
