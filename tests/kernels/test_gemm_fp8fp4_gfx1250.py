@@ -68,6 +68,60 @@ def preshuffle_e8m0_scale(scale: torch.Tensor, warp_tile: int,
     return g.reshape(-1, k_groups * k_wmma_steps * wmma_rep * SCALES_PER_WMMA)
 
 
+def preshuffle_e8m0_scale_for_wmma(scale: torch.Tensor, warp_tile: int,
+                                   scale_k_per_tile: int = 4,
+                                   WMMA_DIM: int = 16) -> torch.Tensor:
+    """Preshuffle E8M0 scale for WMMA-side ds_load_b128 consumption.
+
+    The inner panel layout still packs multiple WMMA row groups contiguously
+    for LDS ``ds_load_b128``. For async global-to-LDS copies, K tiles are made
+    the outer dimension so each CTA scale panel is contiguous in global memory.
+    """
+    shuffled = preshuffle_e8m0_scale(
+        scale, warp_tile, scale_k_per_tile=scale_k_per_tile,
+        WMMA_DIM=WMMA_DIM)
+    panel_cols = (warp_tile // WMMA_DIM) * scale_k_per_tile
+    k_groups = scale.shape[1] // scale_k_per_tile
+    panel_rows = shuffled.shape[0]
+    return (
+        shuffled.view(panel_rows, k_groups, panel_cols)
+        .permute(1, 0, 2)
+        .contiguous()
+        .reshape(k_groups * panel_rows, panel_cols)
+    )
+
+
+def _use_wmma_scale_preshuffle(tile_dim_a, tile_dim_b, tile_k,
+                               m_warp, n_warp, cluster_m, cluster_n,
+                               wave_specialized_tdm):
+    if not wave_specialized_tdm or cluster_m != 1 or cluster_n != 1:
+        return False
+    if os.environ.get("FLYDSL_GEMM_SPLIT_DATA_SCALE_ASYNC", "1") == "0":
+        return False
+    skt = tile_k // SCALE_BLOCK
+    a_reps = tile_dim_a // m_warp // WMMA_DIM
+    b_reps = tile_dim_b // n_warp // WMMA_DIM
+    return (a_reps * skt) % 32 == 0 and (b_reps * skt) % 32 == 0
+
+
+def test_wmma_scale_preshuffle_packs_reps_contiguously():
+    scale = torch.arange(128 * 8, dtype=torch.int64).reshape(128, 8)
+
+    shuffled = preshuffle_e8m0_scale_for_wmma(
+        scale, warp_tile=128, scale_k_per_tile=4)
+
+    assert shuffled.shape == (32, 32)
+    # row 0/lane16 0 packs all 8 WMMA reps contiguously for ks=0.
+    expected_k0 = torch.tensor(
+        [0, 1, 2, 3, 128, 129, 130, 131, 256, 257, 258, 259,
+         384, 385, 386, 387, 512, 513, 514, 515, 640, 641,
+         642, 643, 768, 769, 770, 771, 896, 897, 898, 899],
+        dtype=torch.int64)
+    expected_k1 = expected_k0 + 4
+    torch.testing.assert_close(shuffled[0], expected_k0)
+    torch.testing.assert_close(shuffled[16], expected_k1)
+
+
 def random_fp8_data(rows: int, cols: int, *, device="cpu") -> torch.Tensor:
     """Generate random FP8/E4M3 data as uint8. Avoids NaN (0x7F/0xFF)."""
     return torch.randint(0, 126, (rows, cols), dtype=torch.uint8, device=device)
@@ -217,7 +271,7 @@ def _run_mxscale_gemm_test(
     l2_prefetch_distance=0, cluster_m=1, cluster_n=1,
     inst_prefetch=False, waves_per_eu=None,
     expert_sched_mode=True, split_k=1,
-    return_launch_fn=False,
+    return_launch_fn=False, const_init=None,
 ):
     """Unified test body for FP4 and FP8."""
     is_fp4 = data_format == "fp4"
@@ -261,7 +315,27 @@ def _run_mxscale_gemm_test(
           f"{mcast_str}{tdm_str}, preshuffle, out={out_dtype}")
 
     # Generate data
-    if is_a8w4:
+    if const_init is not None:
+        val = const_init
+        fp8_byte = torch.tensor(val, dtype=torch.float32).to(
+            torch.float8_e4m3fn).view(torch.uint8).item()
+        e8m0_byte = fp4_utils.f32_to_e8m0(
+            torch.tensor([val], dtype=torch.float32)).view(torch.uint8).item()
+        if is_a8w4:
+            a = torch.full((M, K), fp8_byte, dtype=torch.uint8)
+            b = fp4_utils.f32_to_mxfp4(
+                torch.full((N, K), val, dtype=torch.float32)).view(torch.uint8)
+        elif is_fp4:
+            a = fp4_utils.f32_to_mxfp4(
+                torch.full((M, K), val, dtype=torch.float32)).view(torch.uint8)
+            b = fp4_utils.f32_to_mxfp4(
+                torch.full((N, K), val, dtype=torch.float32)).view(torch.uint8)
+        else:
+            a = torch.full((M, K), fp8_byte, dtype=torch.uint8)
+            b = torch.full((N, K), fp8_byte, dtype=torch.uint8)
+        a_scale = torch.full((M, K // SCALE_BLOCK), e8m0_byte, dtype=torch.uint8)
+        b_scale = torch.full((N, K // SCALE_BLOCK), e8m0_byte, dtype=torch.uint8)
+    elif is_a8w4:
         a = random_fp8_data(M, K)       # FP8 activation
         b = fp4_utils.random_fp4_packed(N, K)  # FP4 weight
     elif is_fp4:
@@ -291,10 +365,22 @@ def _run_mxscale_gemm_test(
 
     # Preshuffle scales
     skt = tile_k // SCALE_BLOCK
-    as_ps_tile = _compute_scale_preshuffle_tile(tile_m, tile_k, m_warp)
-    bs_ps_tile = _compute_scale_preshuffle_tile(tile_n, tile_k, n_warp)
-    a_scale = preshuffle_e8m0_scale(a_scale, as_ps_tile, scale_k_per_tile=skt)
-    b_scale = preshuffle_e8m0_scale(b_scale, bs_ps_tile, scale_k_per_tile=skt)
+    if _use_wmma_scale_preshuffle(
+        tile_m, tile_n, tile_k, m_warp, n_warp,
+        cluster_m, cluster_n, wave_specialized_tdm):
+        as_ps_tile = tile_m // m_warp
+        bs_ps_tile = tile_n // n_warp
+        a_scale = preshuffle_e8m0_scale_for_wmma(
+            a_scale, as_ps_tile, scale_k_per_tile=skt)
+        b_scale = preshuffle_e8m0_scale_for_wmma(
+            b_scale, bs_ps_tile, scale_k_per_tile=skt)
+    else:
+        as_ps_tile = _compute_scale_preshuffle_tile(tile_m, tile_k, m_warp)
+        bs_ps_tile = _compute_scale_preshuffle_tile(tile_n, tile_k, n_warp)
+        a_scale = preshuffle_e8m0_scale(
+            a_scale, as_ps_tile, scale_k_per_tile=skt)
+        b_scale = preshuffle_e8m0_scale(
+            b_scale, bs_ps_tile, scale_k_per_tile=skt)
 
     # Preshuffle B data
     K_packed = padded_k // padded_shape["pack_b"]
@@ -646,10 +732,22 @@ def _run_benchmark(args):
         a, b, a_scale, b_scale, padded_shape)
 
     skt = tile_k // SCALE_BLOCK
-    as_ps_tile = _compute_scale_preshuffle_tile(tile_m, tile_k, args.m_warp)
-    bs_ps_tile = _compute_scale_preshuffle_tile(tile_n, tile_k, args.n_warp)
-    a_scale = preshuffle_e8m0_scale(a_scale, as_ps_tile, scale_k_per_tile=skt)
-    b_scale = preshuffle_e8m0_scale(b_scale, bs_ps_tile, scale_k_per_tile=skt)
+    if _use_wmma_scale_preshuffle(
+        tile_m, tile_n, tile_k, args.m_warp, args.n_warp,
+        args.cluster_m, args.cluster_n, args.wave_spec_tdm):
+        as_ps_tile = tile_m // args.m_warp
+        bs_ps_tile = tile_n // args.n_warp
+        a_scale = preshuffle_e8m0_scale_for_wmma(
+            a_scale, as_ps_tile, scale_k_per_tile=skt)
+        b_scale = preshuffle_e8m0_scale_for_wmma(
+            b_scale, bs_ps_tile, scale_k_per_tile=skt)
+    else:
+        as_ps_tile = _compute_scale_preshuffle_tile(tile_m, tile_k, args.m_warp)
+        bs_ps_tile = _compute_scale_preshuffle_tile(tile_n, tile_k, args.n_warp)
+        a_scale = preshuffle_e8m0_scale(
+            a_scale, as_ps_tile, scale_k_per_tile=skt)
+        b_scale = preshuffle_e8m0_scale(
+            b_scale, bs_ps_tile, scale_k_per_tile=skt)
 
     K_packed = padded_k // PACK_B
     b = fp4_utils.preshuffle_b_16x16(b, padded_n, K_packed)
@@ -797,4 +895,5 @@ if __name__ == "__main__":
             inst_prefetch=args.inst_prefetch,
             waves_per_eu=args.waves_per_eu,
             expert_sched_mode=args.expert_sched_mode,
+            const_init=args.const_init,
         )

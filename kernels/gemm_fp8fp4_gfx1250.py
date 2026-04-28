@@ -11,6 +11,7 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 
 from flydsl._mlir import ir
+from flydsl._mlir.dialects import scf
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, buffer_ops, gpu, idx2crd, range_constexpr, rocdl, tdm_ops, vector
 from flydsl.expr.arith import _to_raw as _raw
@@ -206,6 +207,15 @@ def compile_mxscale_gemm(
     n_accs = wmma_m_rep * wmma_n_rep
     # FP4 A/B swap: BScale rep derived from WMMA_M, not WMMA_N_EFF
     b_scale_load_rep = warp_tile_n // WMMA_M if is_fp4 else wmma_n_rep
+    _enable_split_data_scale_async = os.environ.get(
+        "FLYDSL_GEMM_SPLIT_DATA_SCALE_ASYNC", "1") != "0"
+    split_data_tdm_scale_async = (
+        _enable_split_data_scale_async
+        and wave_specialized_tdm
+        and not use_cluster
+        and (wmma_m_rep * scale_k_per_tile) % WAVE_SIZE == 0
+        and (b_scale_load_rep * scale_k_per_tile) % WAVE_SIZE == 0
+    )
 
     _b_frag_loads_per_wn = 2 if is_a8w4 else 4
     _bs_ds_loads = (
@@ -231,11 +241,17 @@ def compile_mxscale_gemm(
         return g
 
     _as_total_m_reps = tile_m // WMMA_M
-    as_tdm_group_m = _scale_tdm_group(_as_total_m_reps, wmma_m_rep)
+    as_tdm_group_m = (
+        wmma_m_rep if split_data_tdm_scale_async
+        else _scale_tdm_group(_as_total_m_reps, wmma_m_rep)
+    )
     interleaved_scale_cols_a = as_tdm_group_m * scale_k_per_tile
 
     _bs_total_n_reps = tile_n // WMMA_M
-    bs_tdm_group_n = _scale_tdm_group(_bs_total_n_reps, b_scale_load_rep)
+    bs_tdm_group_n = (
+        b_scale_load_rep if split_data_tdm_scale_async
+        else _scale_tdm_group(_bs_total_n_reps, b_scale_load_rep)
+    )
     interleaved_scale_cols_b = bs_tdm_group_n * scale_k_per_tile
 
     def _align_up(value: int, align: int) -> int:
@@ -286,8 +302,10 @@ def compile_mxscale_gemm(
     # pipeline fence. A wave may be joined to at most one named barrier at
     # a time so a single workgroup-wide barrier is used.
     # See :func:`init_named_barriers` for the INIT+JOIN protocol.
-    _named_bar_enabled = wave_specialized_tdm and os.environ.get(
-        "FLYDSL_GEMM_NAMED_BAR", "0") == "1"
+    _named_bar_enabled = (
+        wave_specialized_tdm and not split_data_tdm_scale_async
+        and os.environ.get("FLYDSL_GEMM_NAMED_BAR", "0") == "1"
+    )
     if _named_bar_enabled:
         nbar_alloc = NamedBarrierAllocator(
             sym_prefix=(
@@ -500,6 +518,43 @@ def compile_mxscale_gemm(
                 elem_bytes=1,
                 pad_interval=0, pad_amount=0,
                 num_warps=tdm_desc_num_warps,
+                workgroup_mask=b_mcast_mask,
+                atomic_barrier_enable=atomic_barrier_enable)
+
+        def make_desc_a_half(memref, k_base, half_idx: int):
+            k_packed_off = k_base / arith.index(PACK_FACTOR_A)
+            half_m = tile_m // 2
+            half_m_off = arith.index(half_idx * half_m)
+            return tdm_ops.make_tensor_descriptor_2d(
+                global_ptr=arg_a, lds_memref=memref,
+                global_offset=(blk_m + half_m_off, k_packed_off),
+                tensor_shape=(half_m, packed_tile_k_a),
+                strides=(K_packed_a, 1),
+                tile_shape=(half_m, packed_tile_k_a),
+                elem_bytes=1,
+                pad_interval=packed_tile_k_a, pad_amount=LDS_PAD_A_BYTES,
+                num_warps=1,
+                lds_byte_offset=arith.index(
+                    half_idx * half_m * lds_a_stride_bytes),
+                workgroup_mask=a_mcast_mask,
+                atomic_barrier_enable=atomic_barrier_enable)
+
+        def make_desc_b_half(memref, k_base, half_idx: int):
+            k_packed_off = k_base / arith.index(PACK_FACTOR_B)
+            half_b_rows = (tile_n // 16) // 2
+            half_b_row_off = arith.index(half_idx * half_b_rows)
+            half_b_bytes = half_b_rows * packed_tile_k_b * 16
+            return tdm_ops.make_tensor_descriptor_2d(
+                global_ptr=arg_b, lds_memref=memref,
+                global_offset=(blk_n / arith.index(16) + half_b_row_off,
+                               k_packed_off * arith.index(16)),
+                tensor_shape=(N // 16, K_packed_b * 16),
+                strides=(K_packed_b * 16, 1),
+                tile_shape=(half_b_rows, packed_tile_k_b * 16),
+                elem_bytes=1,
+                pad_interval=0, pad_amount=0,
+                num_warps=1,
+                lds_byte_offset=arith.index(half_idx * half_b_bytes),
                 workgroup_mask=b_mcast_mask,
                 atomic_barrier_enable=atomic_barrier_enable)
 
@@ -1599,6 +1654,139 @@ def compile_mxscale_gemm(
         stages_bs_idx = [extract_lds_base_idx(stages_bs[i])
                          for i in range_constexpr(num_buffers)]
 
+        if split_data_tdm_scale_async:
+            a_scale_base_idx = buffer_ops.extract_base_index(
+                arg_a_scale, address_space=1)
+            b_scale_base_idx = buffer_ops.extract_base_index(
+                arg_b_scale, address_space=1)
+            a_scale_panel_cols = interleaved_scale_cols_a
+            b_scale_panel_cols = interleaved_scale_cols_b
+            a_scale_global_rows = M // as_tdm_group_m
+            b_scale_global_rows = N // bs_tdm_group_n
+            a_scale_k_tile_bytes = a_scale_global_rows * a_scale_panel_cols
+            b_scale_k_tile_bytes = b_scale_global_rows * b_scale_panel_cols
+            a_scale_tile_bytes = tile_m * scale_k_per_tile
+            b_scale_tile_bytes = tile_n * scale_k_per_tile
+            a_scale_tile_chunks = a_scale_tile_bytes // 16
+            b_scale_tile_chunks = b_scale_tile_bytes // 16
+            scale_tile_chunks = a_scale_tile_chunks + b_scale_tile_chunks
+            scale_bulk_copy_iters = scale_tile_chunks // block_threads
+            scale_side_copy_iters = (
+                scale_tile_chunks + block_threads - 1) // block_threads
+            scale_async_loads_per_stage = scale_side_copy_iters
+            scale_async_buffered_outstanding = (
+                scale_async_loads_per_stage * (pre_loaded - 1))
+
+            def _copy_scale_chunk(scale_base_idx, lds_memref, global_row_base,
+                                  global_k_tile_base, panel_cols, chunk):
+                from flydsl._mlir.dialects import memref as memref_dialect
+
+                local_byte_off = chunk * arith.index(16)
+                global_byte_off = (
+                    global_k_tile_base
+                    + global_row_base * arith.index(panel_cols)
+                    + local_byte_off)
+                global_ptr = buffer_ops.create_llvm_ptr(
+                    scale_base_idx + global_byte_off, address_space=1)
+                lds_base_idx = memref_dialect.extract_aligned_pointer_as_index(
+                    lds_memref)
+                lds_ptr = buffer_ops.create_llvm_ptr(
+                    lds_base_idx + local_byte_off, address_space=3)
+                rocdl.global_load_async_to_lds_b128(
+                    global_ptr, lds_ptr, 0, 0)
+
+            def issue_scale_async(stage_idx: int, k_base):
+                from flydsl._mlir.dialects import memref as memref_dialect
+
+                k_tile_idx = k_base / arith.index(tile_k)
+                a_global_row_base = blk_m / arith.index(as_tdm_group_m)
+                b_global_row_base = blk_n / arith.index(bs_tdm_group_n)
+                a_global_k_tile_base = (
+                    k_tile_idx * arith.index(a_scale_k_tile_bytes))
+                b_global_k_tile_base = (
+                    k_tile_idx * arith.index(b_scale_k_tile_bytes))
+                a_global_panel_base_idx = (
+                    a_scale_base_idx
+                    + a_global_k_tile_base
+                    + a_global_row_base * arith.index(a_scale_panel_cols))
+                b_global_panel_base_idx = (
+                    b_scale_base_idx
+                    + b_global_k_tile_base
+                    + b_global_row_base * arith.index(b_scale_panel_cols))
+                a_lds_base_idx = (
+                    memref_dialect.extract_aligned_pointer_as_index(
+                        stages_as_mem[stage_idx]))
+                b_lds_base_idx = (
+                    memref_dialect.extract_aligned_pointer_as_index(
+                        stages_bs_mem[stage_idx]))
+
+                def _issue_when(pred, body):
+                    if_op = scf.IfOp(pred)
+                    with ir.InsertionPoint(if_op.then_block):
+                        body()
+                        scf.YieldOp([])
+
+                def _copy_scale_chunk_selected(linear_chunk):
+                    is_b = arith.cmpi(
+                        arith.CmpIPredicate.uge, linear_chunk,
+                        arith.index(a_scale_tile_chunks))
+                    b_chunk = linear_chunk - arith.index(a_scale_tile_chunks)
+                    local_chunk = arith.select(is_b, b_chunk, linear_chunk)
+                    local_byte_off = local_chunk * arith.index(16)
+
+                    global_panel_base_idx = arith.select(
+                        is_b, b_global_panel_base_idx,
+                        a_global_panel_base_idx)
+                    lds_base_idx = arith.select(
+                        is_b, b_lds_base_idx, a_lds_base_idx)
+
+                    global_ptr = buffer_ops.create_llvm_ptr(
+                        global_panel_base_idx + local_byte_off,
+                        address_space=1)
+                    lds_ptr = buffer_ops.create_llvm_ptr(
+                        lds_base_idx + local_byte_off, address_space=3)
+                    rocdl.global_load_async_to_lds_b128(
+                        global_ptr, lds_ptr, 0, 0)
+
+                for it in range_constexpr(scale_bulk_copy_iters):
+                    linear_chunk = tx + arith.index(it * block_threads)
+                    _copy_scale_chunk_selected(linear_chunk)
+
+                for tail_it in range_constexpr(
+                        scale_side_copy_iters - scale_bulk_copy_iters):
+                    it = scale_bulk_copy_iters + tail_it
+                    linear_chunk = tx + arith.index(it * block_threads)
+                    in_a = arith.cmpi(
+                        arith.CmpIPredicate.ult, linear_chunk,
+                        arith.index(a_scale_tile_chunks))
+                    b_lower = arith.cmpi(
+                        arith.CmpIPredicate.uge, linear_chunk,
+                        arith.index(a_scale_tile_chunks))
+                    b_upper = arith.cmpi(
+                        arith.CmpIPredicate.ult, linear_chunk,
+                        arith.index(scale_tile_chunks))
+                    in_b = arith.andi(b_lower, b_upper)
+
+                    def _copy_a():
+                        _copy_scale_chunk(
+                            a_scale_base_idx, stages_as_mem[stage_idx],
+                            a_global_row_base, a_global_k_tile_base,
+                            a_scale_panel_cols, linear_chunk)
+
+                    def _copy_b():
+                        b_chunk = linear_chunk - arith.index(a_scale_tile_chunks)
+                        _copy_scale_chunk(
+                            b_scale_base_idx, stages_bs_mem[stage_idx],
+                            b_global_row_base, b_global_k_tile_base,
+                            b_scale_panel_cols, b_chunk)
+
+                    _issue_when(in_a, _copy_a)
+                    _issue_when(in_b, _copy_b)
+        else:
+            def issue_scale_async(stage_idx: int, k_base):
+                return
+            scale_async_buffered_outstanding = 0
+
         if use_tdm_store:
             d_lds_base_ptr = arena_base_ptr
             d_lds_f16_count = total_d_bytes // 2
@@ -1638,24 +1826,50 @@ def compile_mxscale_gemm(
         stages_b_lds_addr = []
         stages_as_lds_addr = []
         stages_bs_lds_addr = []
+        stages_a1_lds_addr = []
+        stages_b1_lds_addr = []
         for i in range_constexpr(num_buffers):
             stages_a_lds_addr.append(vector.extract(
-                make_desc_a(stages_a_mem[i], arith.index(0)).dgroup0,
+                (make_desc_a_half(stages_a_mem[i], arith.index(0), 0)
+                 if split_data_tdm_scale_async
+                 else make_desc_a(stages_a_mem[i], arith.index(0))).dgroup0,
                 static_position=[1], dynamic_position=[]))
             stages_b_lds_addr.append(vector.extract(
-                make_desc_b(stages_b_mem[i], arith.index(0)).dgroup0,
+                (make_desc_b_half(stages_b_mem[i], arith.index(0), 0)
+                 if split_data_tdm_scale_async
+                 else make_desc_b(stages_b_mem[i], arith.index(0))).dgroup0,
                 static_position=[1], dynamic_position=[]))
-            stages_as_lds_addr.append(vector.extract(
-                make_desc_as(stages_as_mem[i], arith.index(0)).dgroup0,
-                static_position=[1], dynamic_position=[]))
-            stages_bs_lds_addr.append(vector.extract(
-                make_desc_bs(stages_bs_mem[i], arith.index(0)).dgroup0,
-                static_position=[1], dynamic_position=[]))
+            if split_data_tdm_scale_async:
+                stages_a1_lds_addr.append(vector.extract(
+                    make_desc_a_half(stages_a_mem[i], arith.index(0), 1).dgroup0,
+                    static_position=[1], dynamic_position=[]))
+                stages_b1_lds_addr.append(vector.extract(
+                    make_desc_b_half(stages_b_mem[i], arith.index(0), 1).dgroup0,
+                    static_position=[1], dynamic_position=[]))
+            else:
+                stages_as_lds_addr.append(vector.extract(
+                    make_desc_as(stages_as_mem[i], arith.index(0)).dgroup0,
+                    static_position=[1], dynamic_position=[]))
+                stages_bs_lds_addr.append(vector.extract(
+                    make_desc_bs(stages_bs_mem[i], arith.index(0)).dgroup0,
+                    static_position=[1], dynamic_position=[]))
 
-        desc_a_init = make_desc_a(stages_a_mem[0], split_k_base)
-        desc_b_init = make_desc_b(stages_b_mem[0], split_k_base)
-        desc_as_init = make_desc_as(stages_as_mem[0], split_k_base)
-        desc_bs_init = make_desc_bs(stages_bs_mem[0], split_k_base)
+        desc_a_init = (
+            make_desc_a_half(stages_a_mem[0], split_k_base, 0)
+            if split_data_tdm_scale_async
+            else make_desc_a(stages_a_mem[0], split_k_base))
+        desc_b_init = (
+            make_desc_b_half(stages_b_mem[0], split_k_base, 0)
+            if split_data_tdm_scale_async
+            else make_desc_b(stages_b_mem[0], split_k_base))
+        desc_as_init = (
+            make_desc_a_half(stages_a_mem[0], split_k_base, 1)
+            if split_data_tdm_scale_async
+            else make_desc_as(stages_as_mem[0], split_k_base))
+        desc_bs_init = (
+            make_desc_b_half(stages_b_mem[0], split_k_base, 1)
+            if split_data_tdm_scale_async
+            else make_desc_bs(stages_bs_mem[0], split_k_base))
 
         adv_a_i32 = arith.constant(tile_k // PACK_FACTOR_A, type=T.i32)
         adv_b_i32 = arith.constant(packed_tile_k_b * 16, type=T.i32)
@@ -1669,8 +1883,10 @@ def compile_mxscale_gemm(
                 _select_wave_tdm_value(
                     stages_a_lds_addr[i],
                     stages_b_lds_addr[i],
-                    stages_as_lds_addr[i],
-                    stages_bs_lds_addr[i],
+                    (stages_a1_lds_addr[i] if split_data_tdm_scale_async
+                     else stages_as_lds_addr[i]),
+                    (stages_b1_lds_addr[i] if split_data_tdm_scale_async
+                     else stages_bs_lds_addr[i]),
                 )
                 for i in range_constexpr(num_buffers)
             ]
@@ -1692,8 +1908,13 @@ def compile_mxscale_gemm(
                 desc_as_init.dgroup1,
                 desc_bs_init.dgroup1,
             )
-            active_adv_i32 = _select_wave_tdm_value(
-                adv_a_i32, adv_b_i32, adv_as_i32, adv_bs_i32)
+            active_adv_i32 = (
+                _select_wave_tdm_value(
+                    adv_a_i32, adv_b_i32, adv_a_i32, adv_b_i32)
+                if split_data_tdm_scale_async
+                else _select_wave_tdm_value(
+                    adv_a_i32, adv_b_i32, adv_as_i32, adv_bs_i32)
+            )
         else:
             addr_lo_a = vector.extract(desc_a_init.dgroup0, static_position=[2], dynamic_position=[])
             addr_hi_a = vector.extract(desc_a_init.dgroup0, static_position=[3], dynamic_position=[])
@@ -1716,9 +1937,39 @@ def compile_mxscale_gemm(
         if nbar_alloc is not None:
             init_named_barriers([nbar_sync])
 
+        def _pipeline_fence(outstanding=0, async_outstanding=0):
+            if split_data_tdm_scale_async:
+                tdm_ops.tensor_wait(outstanding)
+                rocdl.s_wait_loadcnt(0)
+                rocdl.s_wait_dscnt(0)
+                rocdl.s_wait_asynccnt(async_outstanding)
+                gpu.barrier()
+            else:
+                pipeline_fence(outstanding=outstanding, use_cluster=use_cluster)
+
+        def _pipeline_fence_signal(outstanding=0, async_outstanding=0):
+            if split_data_tdm_scale_async:
+                tdm_ops.tensor_wait(outstanding)
+                rocdl.s_wait_loadcnt(0)
+                rocdl.s_wait_dscnt(0)
+                rocdl.s_wait_asynccnt(async_outstanding)
+                rocdl.s_barrier_signal(-1)
+            else:
+                pipeline_fence_signal(
+                    outstanding=outstanding, use_cluster=use_cluster)
+
+        def _pipeline_fence_wait():
+            if split_data_tdm_scale_async:
+                rocdl.s_barrier_wait(-1)
+            else:
+                pipeline_fence_wait(use_cluster=use_cluster)
+
         # Prologue
         if wave_specialized_tdm:
             for i in range_constexpr(pre_loaded):
+                if split_data_tdm_scale_async:
+                    issue_scale_async(
+                        i, split_k_base + arith.index(i * tile_k))
                 dg0 = vector.from_elements(T.vec(4, T.i32), [
                     pred_const, active_stage_lds_addr[i],
                     active_addr_lo, active_addr_hi])
@@ -1748,8 +1999,9 @@ def compile_mxscale_gemm(
                 addr_lo_as = arith.addi(addr_lo_as, adv_as_i32)
                 addr_lo_bs = arith.addi(addr_lo_bs, adv_bs_i32)
 
-        pipeline_fence(outstanding=TDM_LOADS_PER_STEP * (num_buffers - 2),
-                       use_cluster=use_cluster)
+        _pipeline_fence(
+            outstanding=TDM_LOADS_PER_STEP * (num_buffers - 2),
+            async_outstanding=scale_async_buffered_outstanding)
 
         # Main loop — acc_mixed style: fence at top, TDM_load mid-compute.
         # This overlaps TDM DMA with the remaining WMMA instructions,
@@ -1778,6 +2030,11 @@ def compile_mxscale_gemm(
                     for buf_idx in range_constexpr(num_buffers):
                         load_stage = (buf_idx + num_buffers - 1) % num_buffers
                         next_buf_idx = (buf_idx + 1) % num_buffers
+                        scale_load_k = (
+                            split_k_base
+                            + loop_iter * arith.index(num_buffers * tile_k)
+                            + arith.index((buf_idx + pre_loaded) * tile_k)
+                        )
 
                         addr_box = [cur_addr_lo]
 
@@ -1797,6 +2054,8 @@ def compile_mxscale_gemm(
                             _l2_prefetch(_k_off)
 
                         rocdl.sched_barrier(0)
+                        if split_data_tdm_scale_async:
+                            issue_scale_async(load_stage, scale_load_k)
                         if _col_band_prefetch_enabled:
                             def _prefetch_next(_nb=next_buf_idx):
                                 return _prefetch_b_left_head_for_stage(
@@ -1830,10 +2089,10 @@ def compile_mxscale_gemm(
                             pipeline_fence_wait_named_multi(
                                 _nbars, use_cluster=use_cluster)
                         else:
-                            pipeline_fence_signal(
+                            _pipeline_fence_signal(
                                 outstanding=_fence_outstanding,
-                                use_cluster=use_cluster)
-                            pipeline_fence_wait(use_cluster=use_cluster)
+                                async_outstanding=scale_async_buffered_outstanding)
+                            _pipeline_fence_wait()
 
                     if _col_band_prefetch_enabled:
                         _yield_values = (
@@ -1936,10 +2195,9 @@ def compile_mxscale_gemm(
                         cur_lo_bs = addr_boxes[3][0]
                         hot_loop_scheduler_scheduled()
 
-                        pipeline_fence_signal(
-                            outstanding=_fence_outstanding,
-                            use_cluster=use_cluster)
-                        pipeline_fence_wait(use_cluster=use_cluster)
+                        _pipeline_fence_signal(
+                            outstanding=_fence_outstanding)
+                        _pipeline_fence_wait()
 
                     if _col_band_prefetch_enabled:
                         _yield_values = list(accs_in) + [
@@ -1962,12 +2220,15 @@ def compile_mxscale_gemm(
 
         # Tail — same acc_mixed pattern: fence at top, TDM mid-compute.
         if loop_iters > 0:
-            pipeline_fence(outstanding=0, use_cluster=use_cluster)
+            _pipeline_fence(outstanding=0)
         elif use_cluster:
             gpu.cluster_barrier()
         epi_addrs_box = [None]
         _tail_had_load = False
         _tail_prefetch_box = [tail_leftover_prefetched]
+        _tail_scale_k_box = [
+            split_k_base + arith.index((_tail_start + pre_loaded) * tile_k)
+        ]
 
         def _consume_tail_prefetched():
             v = _tail_prefetch_box[0]
@@ -1977,7 +2238,7 @@ def compile_mxscale_gemm(
         for _load_stage, _compute_stage, _outstanding in tail_plan:
             if _outstanding == -1:
                 if _tail_had_load:
-                    pipeline_fence(outstanding=0, use_cluster=use_cluster)
+                    _pipeline_fence(outstanding=0)
                 if use_tdm_store:
                     accs, _ = compute_tile_scheduled(
                         accs,
@@ -1995,9 +2256,8 @@ def compile_mxscale_gemm(
                         emit_filler=_emit_epi_addrs,
                         prefetched_b_left_head=_consume_tail_prefetched())
             else:
-                pipeline_fence_signal(outstanding=_outstanding,
-                                      use_cluster=use_cluster)
-                pipeline_fence_wait(use_cluster=use_cluster)
+                _pipeline_fence_signal(outstanding=_outstanding)
+                _pipeline_fence_wait()
 
                 _tail_mid_cb = None
                 if _load_stage is not None:
@@ -2005,7 +2265,10 @@ def compile_mxscale_gemm(
                     if wave_specialized_tdm:
                         _tail_addr_box = [active_addr_lo]
 
-                        def _tail_mid_ws(_ls=_load_stage, _ab=_tail_addr_box):
+                        def _tail_mid_ws(
+                            _ls=_load_stage,
+                            _ab=_tail_addr_box,
+                        ):
                             dg0 = vector.from_elements(T.vec(4, T.i32), [
                                 pred_const, active_stage_lds_addr[_ls],
                                 _ab[0], active_addr_hi])
@@ -2045,6 +2308,14 @@ def compile_mxscale_gemm(
                         _tail_mid_cb = _tail_mid_nws
 
                 rocdl.sched_barrier(0)
+                if (
+                    split_data_tdm_scale_async
+                    and wave_specialized_tdm
+                    and _load_stage is not None
+                ):
+                    issue_scale_async(_load_stage, _tail_scale_k_box[0])
+                    _tail_scale_k_box[0] = (
+                        _tail_scale_k_box[0] + arith.index(tile_k))
                 accs, _ = compute_tile_scheduled(
                     accs,
                     stages_a_idx[_compute_stage], stages_b_idx[_compute_stage],
@@ -2067,7 +2338,7 @@ def compile_mxscale_gemm(
 
         if use_tdm_store:
             if d_need_epilogue_fence:
-                pipeline_fence(outstanding=0, use_cluster=use_cluster)
+                _pipeline_fence(outstanding=0)
             rocdl.sched_barrier(0)
             epilogue_lds_stores(accs, d_lds_buffer, d_lane_base)
             rocdl.s_wait_dscnt(0)
