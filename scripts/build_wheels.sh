@@ -17,8 +17,9 @@ Required env:
   MLIR_PATH    path to llvm-project build (defaults to ./llvm-project/mlir_install)
 
 Other knobs:
-  FLY_REBUILD=1|auto|0   (default: 1)
-  EXPECTED_GLIBC=2.35    (default: 2.35, set ALLOW_ANY_GLIBC=1 to skip check)
+  FLY_REBUILD=1|auto|0                 (default: 1)
+  EXPECTED_GLIBC=2.35                  (default: 2.35, set ALLOW_ANY_GLIBC=1 to skip check)
+  FLYDSL_PACKAGE_VERSION_OVERRIDE=...  exact package version for release automation
 EOF
 }
 
@@ -171,6 +172,7 @@ build_one() {
   FLY_BUILD_DIR="${build_dir_rel}" \
   FLY_REBUILD="${FLY_REBUILD}" \
   FLYDSL_RELEASE_TYPE="${FLYDSL_RELEASE_TYPE:-}" \
+  FLYDSL_PACKAGE_VERSION_OVERRIDE="${FLYDSL_PACKAGE_VERSION_OVERRIDE:-}" \
   "${venv}/bin/python" setup.py bdist_wheel
 
   if ! ls -1 "dist/"*"-${py_tag}-${py_tag}-manylinux_"*.whl >/dev/null 2>&1; then
