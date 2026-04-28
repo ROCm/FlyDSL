@@ -95,7 +95,7 @@ def extract(vector, static_position=None, dynamic_position=None, *, loc=None, ip
 
 
 @traced_op
-def load_op(result_type, memref, indices, *, loc=None, ip=None):
+def load_op(result_type, memref, indices, *, nontemporal=False, loc=None, ip=None):
     """Wrapper around `vector.LoadOp(...).result`."""
     from . import arith as _arith_ext
 
@@ -103,6 +103,7 @@ def load_op(result_type, memref, indices, *, loc=None, ip=None):
         result_type,
         _arith_ext.unwrap(memref),
         [_arith_ext.unwrap(i, index=True, loc=loc) for i in indices],
+        nontemporal=nontemporal,
         loc=loc,
         ip=ip,
     ).result
