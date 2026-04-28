@@ -73,8 +73,9 @@ jobs:
               ln -sf "${py}" "/usr/local/bin/python${ver}"
               echo "  python${ver} -> ${py}"
             done
+            ln -sf /usr/local/bin/python3.12 /usr/local/bin/python3
           '
-          docker exec flydsl_build bash -c "pip install -q numpy nanobind pybind11 auditwheel"
+          docker exec flydsl_build bash -c "python3 -m pip install -q nanobind"
           docker exec flydsl_build bash -c "git config --global --add safe.directory '*'"
 
       - name: Restore cached MLIR install tarball
