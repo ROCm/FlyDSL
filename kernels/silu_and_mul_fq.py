@@ -44,7 +44,7 @@ from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, buffer_ops, const_expr, range_constexpr, rocdl, vector
 from flydsl.expr import math as fx_math
 from flydsl.expr.arith import ArithValue
-from flydsl.expr.typing import T
+from flydsl.expr.typing import T, Vector as Vec
 from kernels.kernels_common import get_warp_size
 
 BLOCK_THREADS = 256
@@ -356,18 +356,14 @@ def build_silu_and_mul_fq_module(
                     else:
                         # quant_mode == "none": write bf16 out directly.
                         # out row stride = inter_dim * 2 bytes.
-                        act_f32_vec = vector.from_elements(vec_f32_ty, act_vals)
-                        act_f32_av = ArithValue(act_f32_vec)
-                        act_bf16_vec = act_f32_av.truncf(T.vec(VEC, T.bf16))
+                        act_bf16_vec = Vec.from_elements(act_vals, fx.Float32).to(fx.BFloat16)
                         # Write as packed i32 (VEC/2 dwords).
                         vec_dw = VEC // 2  # each dword = 2 bf16 elems
                         if const_expr(vec_dw >= 1):
-                            act_i32 = vector.bitcast(T.vec(vec_dw, T.i32), act_bf16_vec)
+                            act_i32 = act_bf16_vec.bitcast(fx.Int32)
                             bf16_byte_off = in_row * (inter_dim * 2) + col0 * 2
                             if const_expr(vec_dw == 1):
-                                store_val = vector.extract(
-                                    act_i32, static_position=[0], dynamic_position=[]
-                                )
+                                store_val = act_i32[0]
                                 buffer_ops.buffer_store(
                                     store_val,
                                     out_rsrc,
