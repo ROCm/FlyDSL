@@ -2434,10 +2434,20 @@ def run_moe_stage1_a8w4smooth(
 
     flops = 2 * tokens * topk * (2 * inter_dim) * model_dim
     tflops = flops / (us / 1e6) / 1e12
+    active_experts = min(experts, tokens * topk)
+    rows_s1 = 2 * inter_dim
+    bytes_moved = 0
+    bytes_moved += tokens * topk * model_dim * 1  # x int8
+    bytes_moved += (active_experts * rows_s1 * model_dim) // 2  # w packed int4
+    bytes_moved += tokens * topk * inter_dim * 2  # out fp16
+    bytes_moved += tokens * topk * 4  # scale_x f32
+    bytes_moved += active_experts * rows_s1 * 4  # scale_w f32
+    bytes_moved += active_experts * (rows_s1 // 16) * (model_dim // 256) * 16 * 4 * 2  # qscale+qzero i32
+    tbps = bytes_moved / 1e12 / (us / 1e6)
     print(
         f"FLIR MoE stage1[a8w4smooth]: tokens={tokens} M={model_dim} N={inter_dim} "
         f"E={experts} topk={topk} tile=({tile_m},{tile_n},{tile_k}) "
-        f"=> {us:.1f}us ({tflops:.1f} TFLOPS)"
+        f"=> {us:.1f}us ({tflops:.1f} TFLOPS) {tbps:.3f} TB/s"
     )
     return out
 
@@ -2591,10 +2601,20 @@ def run_moe_stage2_a8w4smooth(
 
     flops = 2 * tokens * topk * model_dim * inter_dim
     tflops = flops / (us / 1e6) / 1e12
+    active_experts = min(experts, tokens * topk)
+    rows_s2 = model_dim
+    bytes_moved = 0
+    bytes_moved += tokens * topk * inter_dim * 1  # a2 int8
+    bytes_moved += (active_experts * rows_s2 * inter_dim) // 2  # w2 packed int4
+    bytes_moved += tokens * model_dim * 2  # out fp16
+    bytes_moved += tokens * topk * 4  # scale_x f32
+    bytes_moved += active_experts * rows_s2 * 4  # scale_w f32
+    bytes_moved += active_experts * (rows_s2 // 16) * (inter_dim // 256) * 16 * 4 * 2  # qscale+qzero i32
+    tbps = bytes_moved / 1e12 / (us / 1e6)
     print(
         f"FLIR MoE stage2[a8w4smooth]: tokens={tokens} M={model_dim} N={inter_dim} "
         f"E={experts} topk={topk} tile=({tile_m},{tile_n},{tile_k}) "
-        f"=> {us:.1f}us ({tflops:.1f} TFLOPS)"
+        f"=> {us:.1f}us ({tflops:.1f} TFLOPS) {tbps:.3f} TB/s"
     )
     return out
 
