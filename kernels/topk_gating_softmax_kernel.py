@@ -122,8 +122,9 @@ def build_topk_gating_softmax_module(
         bid = fx.block_idx.x
         tid = fx.thread_idx.x
 
-        elem_type = dtype_to_elem_type(dtype_str)
+        elem_type = dtype_to_elem_type(dtype_str).ir_type
         compute_type = T.f32
+        register_addr_space = int(fx.AddressSpace.Register)
 
         fm_fast = arith.FastMathFlags.fast
 
@@ -210,7 +211,7 @@ def build_topk_gating_softmax_module(
         atom_reg_ty_in = fx.MemRefType.get(
             elem_type,
             fx.LayoutType.get(ELEMS_PER_ATOM, 1),
-            fx.AddressSpace.Register,
+            register_addr_space,
         )
         atom_reg_lay_in = fx.make_layout(ELEMS_PER_ATOM, 1)
 
@@ -219,7 +220,7 @@ def build_topk_gating_softmax_module(
         # near `_store_scalar_i32` below).
         copy_atom_f32 = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), 32)
         scalar_reg_ty_f32 = fx.MemRefType.get(
-            T.f32, fx.LayoutType.get(1, 1), fx.AddressSpace.Register
+            T.f32, fx.LayoutType.get(1, 1), register_addr_space
         )
         scalar_reg_lay = fx.make_layout(1, 1)
 
