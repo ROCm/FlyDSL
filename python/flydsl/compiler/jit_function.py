@@ -33,7 +33,7 @@ from .kernel_function import (
 from .protocol import fly_construct, fly_types
 
 
-@lru_cache(maxsize=2)
+@lru_cache(maxsize=1)
 def _flydsl_key() -> str:
     """Compute a hash fingerprint of the entire FlyDSL compiler toolchain.
 
