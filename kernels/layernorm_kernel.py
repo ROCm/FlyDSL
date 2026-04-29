@@ -65,7 +65,7 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
         elem_dtype = dtype_to_elem_type(dtype_str)
         elem_type = elem_dtype.ir_type
         fm_fast = arith.FastMathFlags.fast
-        eps_c = fx.Float32(EPS)
+        eps_c = EPS
 
         base_ptr = allocator.get_base()
         s_sum = SmemPtr(base_ptr, sum_offset, fx.Float32.ir_type, shape=(RED_SLOTS,))
@@ -75,11 +75,10 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
 
         # ── helpers: wave / block reduction ───────────────────────────────
         def wave_reduce_add(x):
-            width_i32 = fx.Int32(WARP_SIZE)
             w = x
             for _sh_exp in range_constexpr(int(math.log2(WARP_SIZE))):
-                off = fx.Int32(WARP_SIZE // (2 << _sh_exp))
-                peer = w.shuffle_xor(off, width_i32)
+                off = WARP_SIZE // (2 << _sh_exp)
+                peer = w.shuffle_xor(off, WARP_SIZE)
                 w = w.addf(peer, fastmath=fm_fast)
             return w
 
@@ -93,44 +92,36 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
             w0 = wave_reduce_add(val0)
             w1 = wave_reduce_add(val1)
 
-            if lane == fx.Int32(0):
-                wave_idx = fx.Index(wave)
-                SmemPtr.store(s_sum, w0, [wave_idx])
-                SmemPtr.store(s_sumsq, w1, [wave_idx])
+            if lane == 0:
+                SmemPtr.store(s_sum, w0, [wave])
+                SmemPtr.store(s_sumsq, w1, [wave])
             gpu.barrier()
 
-            if wave == fx.Int32(0):
+            if wave == 0:
                 in_range = lane < RED_SLOTS
-                lane_safe = in_range.select(lane, fx.Int32(0))
-                lane_safe_idx = fx.Index(lane_safe)
-                v0 = SmemPtr.load(s_sum, [lane_safe_idx])
-                v1 = SmemPtr.load(s_sumsq, [lane_safe_idx])
-                z = fx.Float32(0.0)
-                ww0 = in_range.select(v0, z)
-                ww1 = in_range.select(v1, z)
+                lane_safe = in_range.select(lane, 0)
+                v0 = SmemPtr.load(s_sum, [lane_safe])
+                v1 = SmemPtr.load(s_sumsq, [lane_safe])
+                ww0 = in_range.select(v0, 0.0)
+                ww1 = in_range.select(v1, 0.0)
                 ww0 = wave_reduce_add(ww0)
                 ww1 = wave_reduce_add(ww1)
 
-                if lane == fx.Int32(0):
-                    c0_idx = fx.Index(0)
-                    SmemPtr.store(s_sum, ww0, [c0_idx])
-                    SmemPtr.store(s_sumsq, ww1, [c0_idx])
+                if lane == 0:
+                    SmemPtr.store(s_sum, ww0, [0])
+                    SmemPtr.store(s_sumsq, ww1, [0])
             gpu.barrier()
 
-            c0_idx = fx.Index(0)
-            return SmemPtr.load(s_sum, [c0_idx]), SmemPtr.load(s_sumsq, [c0_idx])
+            return SmemPtr.load(s_sum, [0]), SmemPtr.load(s_sumsq, [0])
 
         def compute_mean_rstd(sum_val, sumsq_val):
-            inv_n = fx.Float32(1.0 / float(N))
-            s = fx.Float32(sum_val)
-            ss = fx.Float32(sumsq_val)
-            mean = s * inv_n
-            mean_sq = ss * inv_n
+            inv_n = 1.0 / float(N)
+            mean = sum_val * inv_n
+            mean_sq = sumsq_val * inv_n
             mean2 = mean * mean
             var = mean_sq - mean2
-            c0_f = fx.Float32(0.0)
-            is_neg = var < c0_f
-            var = is_neg.select(c0_f, var)
+            is_neg = var < 0.0
+            var = is_neg.select(0.0, var)
             var_eps = var + eps_c
             rstd = fmath.rsqrt(var_eps, fastmath=fm_fast)
             return mean, rstd
@@ -285,10 +276,8 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
             # ── Pass 1: sum + sumsq ──────────────────────────────────────
             for base_idx_int in range_constexpr(0, N, BLOCK_THREADS):
                 idx = tid + base_idx_int
-                c_N_i32 = fx.Int32(N)
-                is_valid = idx < c_N_i32
-                c0_i = fx.Int32(0)
-                idx_safe = is_valid.select(idx, c0_i)
+                is_valid = idx < N
+                idx_safe = is_valid.select(idx, 0)
                 x_e = _load_scalar(row_div, idx_safe)
                 x = (
                     x_e
@@ -307,8 +296,7 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
             # ── Pass 2: normalize + affine + store ───────────────────────
             for base_idx_int in range_constexpr(0, N, BLOCK_THREADS):
                 idx = tid + base_idx_int
-                c_N_i32 = fx.Int32(N)
-                if idx < c_N_i32:
+                if idx < N:
                     x_e = _load_scalar(row_div, idx)
                     g_e = _load_scalar(gamma_div, idx)
                     b_e = _load_scalar(beta_div, idx)

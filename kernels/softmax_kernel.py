@@ -65,15 +65,14 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
 
         c_zero_f = fx.Float32(0.0)
         c_neg_inf = fx.Float32(float("-inf"))
-        c_log2e = fx.Float32(1.4426950408889634)
+        c_log2e = 1.4426950408889634
 
         # ── wave / block reduction (supports max and sum) ─────────────────
         def wave_reduce(x, mode):
-            width_i32 = fx.Int32(WARP_SIZE)
             w = x
             for _sh_exp in range_constexpr(int(math.log2(WARP_SIZE))):
-                off = fx.Int32(WARP_SIZE // (2 << _sh_exp))
-                peer = w.shuffle_xor(off, width_i32)
+                off = WARP_SIZE // (2 << _sh_exp)
+                peer = w.shuffle_xor(off, WARP_SIZE)
                 if const_expr(mode == "max"):
                     w = w.maximumf(peer)
                 else:
@@ -90,27 +89,23 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
 
             w = wave_reduce(val, mode)
 
-            if lane == fx.Int32(0):
-                wave_idx = fx.Index(wave)
-                SmemPtr.store(s_red_buffer, w, [wave_idx])
+            if lane == 0:
+                SmemPtr.store(s_red_buffer, w, [wave])
             gpu.barrier()
 
-            if wave == fx.Int32(0):
+            if wave == 0:
                 in_range = lane < RED_SLOTS
-                lane_safe = in_range.select(lane, fx.Int32(0))
-                lane_safe_idx = fx.Index(lane_safe)
-                v = SmemPtr.load(s_red_buffer, [lane_safe_idx])
+                lane_safe = in_range.select(lane, 0)
+                v = SmemPtr.load(s_red_buffer, [lane_safe])
                 z = neutral
                 ww = in_range.select(v, z)
                 ww = wave_reduce(ww, mode)
 
-                if lane == fx.Int32(0):
-                    c0_idx = fx.Index(0)
-                    SmemPtr.store(s_red_buffer, ww, [c0_idx])
+                if lane == 0:
+                    SmemPtr.store(s_red_buffer, ww, [0])
             gpu.barrier()
 
-            c0_idx = fx.Index(0)
-            return SmemPtr.load(s_red_buffer, [c0_idx])
+            return SmemPtr.load(s_red_buffer, [0])
 
         # ==================================================================
         # Fast path: N is a multiple of tile_cols
@@ -171,8 +166,7 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
             global_sum = block_reduce(thread_sum, "sum", s_red)
 
             # 3. Normalize + store
-            c_one = fx.Float32(1.0)
-            inv_sum = c_one / fx.Float32(global_sum)
+            inv_sum = 1.0 / global_sum
 
             for tile_i in range_constexpr(num_tiles):
                 norm_vec = row_buffer[tile_i] * inv_sum
@@ -220,9 +214,8 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
 
             for base in range_constexpr(0, N, BLOCK_THREADS):
                 idx = tid + base
-                c_N = fx.Int32(N)
-                is_valid = idx < c_N
-                idx_safe = is_valid.select(idx, fx.Int32(0))
+                is_valid = idx < N
+                idx_safe = is_valid.select(idx, 0)
                 val_e = _load_scalar(a_div, idx_safe)
                 val = val_e if dtype_str == "f32" else val_e.to(fx.Float32)
                 safe_val = is_valid.select(val, c_neg_inf)
@@ -235,7 +228,7 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
             thread_sum = c_zero_f
             new_buffer = []
             for safe_val, is_valid in row_buffer:
-                sub = safe_val - fx.Float32(global_max)
+                sub = safe_val - global_max
                 scaled = sub * c_log2e
                 exp_val = scaled.exp2(fastmath=fm_fast)
                 safe_exp = is_valid.select(exp_val, c_zero_f)
@@ -243,8 +236,7 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
                 new_buffer.append((exp_val, is_valid))
 
             global_sum = block_reduce(thread_sum, "sum", s_red)
-            c_one = fx.Float32(1.0)
-            inv_sum = c_one / fx.Float32(global_sum)
+            inv_sum = 1.0 / global_sum
 
             # 3. Normalize + store
             buf_idx = 0
@@ -252,7 +244,7 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
                 idx = tid + base
                 exp_val, is_valid = new_buffer[buf_idx]
                 buf_idx += 1
-                if idx < fx.Int32(N):
+                if idx < N:
                     norm_val = fx.Float32(exp_val) * inv_sum
                     out_e = norm_val
                     if const_expr(dtype_str == "f32"):
