@@ -490,18 +490,22 @@ def compile_preshuffle_gemm_v2(
         gx = (i32_m + (tile_m - 1)) // tile_m
         gy = i32_n // tile_n
 
-        launcher = kernel_gemm(
-            arg_c_2d, arg_a_2d, preshuffle_B,
-            arg_scale_a, arg_scale_b, i32_m, i32_n,
-            tiled_mma, tiled_copy_g2s,
-        )
-        if const_expr(waves_per_eu is not None and int(waves_per_eu) >= 1):
-            for op in ctx.gpu_module_body.operations:
-                if const_expr(hasattr(op, 'attributes') and op.OPERATION_NAME == "gpu.func"):
-                    op.attributes["rocdl.waves_per_eu"] = ir.IntegerAttr.get(
-                        T.i32, int(waves_per_eu))
-        launcher.launch(
-            grid=(gx, gy, 1), block=(256, 1, 1), smem=smem_bytes, stream=stream,
+        kernel_gemm(
+            arg_c_2d,
+            arg_a_2d,
+            preshuffle_B,
+            arg_scale_a,
+            arg_scale_b,
+            i32_m,
+            i32_n,
+            tiled_mma,
+            tiled_copy_g2s,
+            value_attrs={"rocdl.waves_per_eu": waves_per_eu},
+        ).launch(
+            grid=(gx, gy, 1),
+            block=(256, 1, 1),
+            smem=smem_bytes,
+            stream=stream,
         )
 
     return launch_gemm

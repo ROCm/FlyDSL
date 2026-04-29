@@ -1202,7 +1202,7 @@ def compile_moe_blockscale_gemm1(
         gx = inter_in // fx.Index(tile_n)
         gy = size_expert_ids_in
 
-        launcher1 = moe_blockscale_gemm1(
+        moe_blockscale_gemm1(
             arg_out,
             arg_x,
             arg_w,
@@ -1216,14 +1216,8 @@ def compile_moe_blockscale_gemm1(
             i32_inter_in,
             i32_k_in,
             i32_size_expert_ids_in,
-        )
-        if const_expr(waves_per_eu is not None):
-            _wpe = int(waves_per_eu)
-            if const_expr(_wpe >= 1):
-                for op in ctx.gpu_module_body.operations:
-                    if const_expr(hasattr(op, 'attributes') and op.OPERATION_NAME == "gpu.func"):
-                        op.attributes["rocdl.waves_per_eu"] = ir.IntegerAttr.get(T.i32, _wpe)
-        launcher1.launch(grid=(gx, gy, 1), block=(256, 1, 1), stream=stream)
+            value_attrs={"rocdl.waves_per_eu": waves_per_eu},
+        ).launch(grid=(gx, gy, 1), block=(256, 1, 1), stream=stream)
 
     return launch_moe_blockscale_gemm1
 
@@ -2440,7 +2434,7 @@ def compile_moe_blockscale_gemm2(
         gx = n_in // fx.Index(tile_n)
         gy = size_expert_ids_in
 
-        launcher2 = moe_blockscale_gemm2(
+        moe_blockscale_gemm2(
             arg_out,
             arg_x,
             arg_w,
@@ -2454,14 +2448,8 @@ def compile_moe_blockscale_gemm2(
             i32_n_in,
             i32_k_in,
             i32_size_expert_ids_in,
-        )
-        if const_expr(waves_per_eu is not None):
-            _wpe = int(waves_per_eu)
-            if const_expr(_wpe >= 1):
-                for op in ctx.gpu_module_body.operations:
-                    if const_expr(hasattr(op, 'attributes') and op.OPERATION_NAME == "gpu.func"):
-                        op.attributes["rocdl.waves_per_eu"] = ir.IntegerAttr.get(T.i32, _wpe)
-        launcher2.launch(grid=(gx, gy, 1), block=(256, 1, 1), stream=stream)
+            value_attrs={"rocdl.waves_per_eu": waves_per_eu},
+        ).launch(grid=(gx, gy, 1), block=(256, 1, 1), stream=stream)
 
     return launch_moe_blockscale_gemm2
 
