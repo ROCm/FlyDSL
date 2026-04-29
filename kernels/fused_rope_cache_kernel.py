@@ -431,8 +431,14 @@ def build_fused_rope_cache_module(
                                 v_elem = vector.extract(v_e, static_position=[vi], dynamic_position=[])
                                 buffer_ops.buffer_store(v_elem, vc_rsrc, vc_nf_off)
 
+    def _dynamic_token_tensor(tensor):
+        leading_dim = len(tensor.shape) - 1 if hasattr(tensor, "shape") else None
+        if hasattr(tensor, "mark_layout_dynamic"):
+            return tensor.mark_layout_dynamic(leading_dim=leading_dim)
+        return flyc.from_dlpack(tensor).mark_layout_dynamic(leading_dim=leading_dim)
+
     @flyc.jit
-    def launch_fused_rope_cache(
+    def _launch_fused_rope_cache(
         Q: fx.Tensor,
         K: fx.Tensor,
         V: fx.Tensor,
@@ -456,6 +462,41 @@ def build_fused_rope_cache_module(
         launcher.launch(
             grid=(max_heads, num_tokens, 1),
             block=(BLOCK_THREADS, 1, 1),
+            stream=stream,
+        )
+
+    def launch_fused_rope_cache(
+        Q,
+        K,
+        V,
+        Positions,
+        CosCache,
+        SinCache,
+        SlotMapping,
+        KeyCache,
+        ValueCache,
+        Q_out,
+        K_out,
+        num_tokens,
+        KScale,
+        VScale,
+        stream=fx.Stream(None),
+    ):
+        return _launch_fused_rope_cache(
+            _dynamic_token_tensor(Q),
+            _dynamic_token_tensor(K),
+            _dynamic_token_tensor(V),
+            _dynamic_token_tensor(Positions),
+            CosCache,
+            SinCache,
+            _dynamic_token_tensor(SlotMapping),
+            KeyCache,
+            ValueCache,
+            _dynamic_token_tensor(Q_out),
+            _dynamic_token_tensor(K_out),
+            num_tokens,
+            KScale,
+            VScale,
             stream=stream,
         )
 
