@@ -26,16 +26,37 @@ class ClassBoundProgram:
         self.kernel(value, scale).launch(grid=(1, 1, 1), block=(1, 1, 1), stream=stream)
 
 
+class CacheProgramA:
+    @flyc.kernel
+    def kernel(self, value: fx.Int32):
+        fx.printf("cache program A value={}", value)
+
+    @flyc.jit
+    def run(self, value: fx.Int32, stream: fx.Stream = fx.Stream(None)):
+        self.kernel(value).launch(grid=(1, 1, 1), block=(1, 1, 1), stream=stream)
+
+
+class CacheProgramB:
+    @flyc.kernel
+    def kernel(self, value: fx.Int32):
+        fx.printf("cache program B value={}", value)
+
+    @flyc.jit
+    def run(self, value: fx.Int32, stream: fx.Stream = fx.Stream(None)):
+        self.kernel(value).launch(grid=(1, 1, 1), block=(1, 1, 1), stream=stream)
+
+
 def reset_jit(jit_fn):
     jit_fn._call_state_cache.clear()
     jit_fn._mem_cache.clear()
     jit_fn._last_compiled = None
     jit_fn.manager_key = None
+    jit_fn._manager_owner_cls = None
     jit_fn.cache_manager = None
     jit_fn._target = None
 
-    jit_fn.sig = None
-    jit_fn.has_self_param = False
+    jit_fn._sig = None
+    jit_fn._has_self_param = False
 
 
 @pytest.fixture(autouse=True)
@@ -53,6 +74,8 @@ def frontend_only_compile(monkeypatch):
     monkeypatch.setattr(jit_function.MlirCompiler, "compile", classmethod(compile_noop))
     reset_jit(ClassBoundProgram.run)
     reset_jit(ClassBoundProgram.__call__)
+    reset_jit(CacheProgramA.run)
+    reset_jit(CacheProgramB.run)
 
 
 def last_compile(jit_fn):
@@ -85,3 +108,10 @@ def test_class_defined_jit_call_special_method_binds_self():
     assert "gpu.func @kernel_0" in artifact.source_ir
     assert "gpu.launch_func" in artifact.source_ir
     assert "@kernels::@kernel_0" in artifact.source_ir
+
+
+def test_class_member_kernel_source_contributes_to_manager_key():
+    key_a = jit_function._jit_function_cache_key(CacheProgramA.run.func, owner_cls=CacheProgramA)
+    key_b = jit_function._jit_function_cache_key(CacheProgramB.run.func, owner_cls=CacheProgramB)
+
+    assert key_a != key_b

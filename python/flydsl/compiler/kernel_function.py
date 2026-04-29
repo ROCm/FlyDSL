@@ -432,11 +432,11 @@ class KernelFunction:
         full_sig = inspect.signature(self._func)
         params = list(full_sig.parameters.values())
 
-        self.has_self_param = bool(params) and params[0].name == "self"
-        if self.has_self_param:
-            self.sig = full_sig.replace(parameters=params[1:])
+        self._has_self_param = bool(params) and params[0].name == "self"
+        if self._has_self_param:
+            self._sig = full_sig.replace(parameters=params[1:])
         else:
-            self.sig = full_sig
+            self._sig = full_sig
 
     def __get__(self, obj, objtype=None):
         if obj is None:
@@ -451,7 +451,7 @@ class KernelFunction:
 
     def _emit_kernel(self, ctx: CompilationContext, args: Tuple, kwargs: Dict, bound_self: Any = None):
         """Emit gpu.func for this kernel into the GPU module."""
-        sig = self.sig
+        sig = self._sig
         bound = sig.bind(*args, **kwargs)
         bound.apply_defaults()
 
@@ -519,7 +519,7 @@ class KernelFunction:
         call_loc = create_caller_location(depth=2)
 
         bound_self = None
-        if self.has_self_param:
+        if self._has_self_param:
             if not args:
                 raise TypeError(f"{self._func.__name__}() missing 'self' argument")
             bound_self, args = args[0], args[1:]
