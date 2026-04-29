@@ -10,7 +10,7 @@ import pkgutil
 import threading
 import types
 from contextlib import nullcontext
-from functools import lru_cache
+from functools import lru_cache, partial
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set
 
@@ -30,7 +30,7 @@ from .kernel_function import (
     create_gpu_module,
     get_gpu_module_body,
 )
-from .protocol import fly_construct, fly_pointers, fly_types
+from .protocol import fly_construct, fly_types
 
 
 @lru_cache(maxsize=1)
@@ -378,6 +378,7 @@ class MlirCompiler:
         fragments, llvm_opts = _pipeline_fragments(backend)
 
         from .llvm_options import llvm_options as _llvm_options
+
         _llvm_ctx = _llvm_options(llvm_opts) if llvm_opts else nullcontext()
 
         if env.debug.print_origin_ir:
@@ -629,16 +630,31 @@ class JitFunction:
         self.manager_key = None
         self.cache_manager = None
         self._call_state_cache = {}  # cache_key -> CallState
-        self._sig = None  # lazy: set on first call
+        self.sig = None  # lazy: set on first call
+        self.has_self_param = False  # lazy: set in _ensure_sig
         self._target = None  # lazy: GPUTarget resolved once in _ensure_sig
         self._mem_cache = {}
         self._last_compiled = None  # (cache_key, CompiledArtifact) for compile()
 
+    def __get__(self, obj, objtype=None):
+        # when used as a method on a class bind the owning instance as the
+        # first positional argument.
+        if obj is None:
+            return self
+        return partial(self.__call__, obj)
+
     def _ensure_sig(self):
         """Initialize signature + param metadata on first call (not at decoration time)."""
-        if self._sig is not None:
+        if self.sig is not None:
             return
-        self._sig = inspect.signature(self.func)
+        full_sig = inspect.signature(self.func)
+        params = list(full_sig.parameters.values())
+
+        self.has_self_param = bool(params) and params[0].name == "self"
+        if self.has_self_param:
+            self.sig = full_sig.replace(parameters=params[1:])
+        else:
+            self.sig = full_sig
         self._target = get_backend().target  # resolve once; frozen dataclass, hashable
 
     def _ensure_cache_manager(self):
@@ -694,12 +710,11 @@ class JitFunction:
         recompilation when only runtime values change.
         """
         from .jit_argument import _is_constexpr_annotation, _is_type_param_annotation
-        sig = self._sig
+
+        sig = self.sig
         key_parts = [("_target_", self._target)]
         if self.compile_hints:
-            key_parts.append(("_hints_", tuple(sorted(
-                (k, str(v)) for k, v in self.compile_hints.items()
-            ))))
+            key_parts.append(("_hints_", tuple(sorted((k, str(v)) for k, v in self.compile_hints.items()))))
         for name, arg in bound_args.items():
             param = sig.parameters.get(name)
             ann = param.annotation if param else inspect.Parameter.empty
@@ -712,8 +727,7 @@ class JitFunction:
                 key_parts.append((name, "Type", arg))
                 continue
 
-            is_runtime = (ann is not inspect.Parameter.empty
-                          and hasattr(ann, '__fly_ptrs__'))
+            is_runtime = ann is not inspect.Parameter.empty and hasattr(ann, "__fly_ptrs__")
             if isinstance(arg, tuple):
                 key_parts.append((name, tuple(self._arg_cache_sig(a) for a in arg)))
             else:
@@ -732,11 +746,19 @@ class JitFunction:
         self._ensure_sig()
         self._ensure_cache_manager()
 
-        sig = self._sig
+        bound_self = None
+        if self.has_self_param:
+            if not args:
+                raise TypeError(f"{self.func.__name__}() missing 'self' argument")
+            bound_self, args = args[0], args[1:]
+
+        sig = self.sig
         bound = sig.bind(*args, **kwargs)
         bound.apply_defaults()
 
         cache_key = self._make_cache_key(bound.arguments)
+        if bound_self is not None:
+            cache_key = (("_self_type_", type(bound_self)),) + cache_key
 
         args_tuple = tuple(bound.arguments.values())
 
@@ -824,7 +846,10 @@ class JitFunction:
                         log().info(f"dsl_args={dsl_args}")
                         named_args = dict(zip(param_names, dsl_args))
                         named_args.update(constexpr_values)
-                        self.func(**named_args)
+                        if bound_self is not None:
+                            self.func(bound_self, **named_args)
+                        else:
+                            self.func(**named_args)
                         func.ReturnOp([])
 
             original_ir = module.operation.get_asm(enable_debug_info=True)
@@ -931,16 +956,14 @@ def _compile_impl(func, *args) -> CompiledFunction:
     calls; only runtime values (data pointers, scalars, stream) may change.
     """
     if not isinstance(func, JitFunction):
-        raise TypeError(
-            f"flyc.compile() expects a @flyc.jit function, got {type(func).__name__}"
-        )
+        raise TypeError(f"flyc.compile() expects a @flyc.jit function, got {type(func).__name__}")
 
     jf = func
 
     jf(*args)
 
     # Retrieve the CallState (already built by __call__ above).
-    sig = jf._sig  # guaranteed initialized after __call__
+    sig = jf.sig  # guaranteed initialized after __call__
     bound = sig.bind(*args)
     bound.apply_defaults()
     cache_key = jf._make_cache_key(bound.arguments)
@@ -957,9 +980,7 @@ def _compile_impl(func, *args) -> CompiledFunction:
         if last is not None and last[0] == cache_key:
             artifact = last[1]
     if artifact is None:
-        raise RuntimeError(
-            "flyc.compile(): compilation succeeded but no cached artifact found."
-        )
+        raise RuntimeError("flyc.compile(): compilation succeeded but no cached artifact found.")
 
     call_state = jf._call_state_cache.get(cache_key)
     if call_state is None:
@@ -990,9 +1011,7 @@ class CompileCallable:
     def __getitem__(self, hints: dict) -> "CompileCallable":
         """``flyc.compile[{...}]`` → new CompileCallable with compile hints."""
         if not isinstance(hints, dict):
-            raise TypeError(
-                f"flyc.compile[...] expects a dict of compile hints, got {type(hints).__name__}"
-            )
+            raise TypeError(f"flyc.compile[...] expects a dict of compile hints, got {type(hints).__name__}")
         return CompileCallable(compile_hints=hints)
 
     def __call__(self, func, *args):
