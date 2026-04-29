@@ -505,7 +505,7 @@ def compile_blockscale_preshuffle_gemm(
                 for mi in range_constexpr(m_repeat):
                     mi_combined = []
                     for ni in range_constexpr(num_acc_n):
-                        combined = ArithValue(s_a_vecs[mi]) * ArithValue(s_b_vecs[ni])
+                        combined = s_a_vecs[mi] * s_b_vecs[ni]
                         mi_combined.append(combined)
                     combined_scales.append(mi_combined)
                 all_combined.append(combined_scales)
@@ -531,8 +531,8 @@ def compile_blockscale_preshuffle_gemm(
 
                     for mi in range_constexpr(m_repeat):
                         curr_row_a_lds = row_a_lds + (mi * 16)
-                        a0 = ArithValue(arith.constant(-1, type=T.i64))
-                        a1 = ArithValue(arith.constant(-1, type=T.i64))
+                        a0 = fx.Int64(-1)
+                        a1 = fx.Int64(-1)
                         if const_expr(a0_prefetch is not None and sb == 0 and mi == 0):
                             a0, a1 = a0_prefetch
                         else:
