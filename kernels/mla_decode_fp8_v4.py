@@ -639,17 +639,54 @@ def compile_mla_decode_fp8(
             _raw(arith.constant(C_VOFF_G1_DELTA, type=T.i32)),
         ).result
 
-        def _coop_load_k_setup(kv_page_base, page_off, lds_wave_base_i32):
-            page_byte_base = (
-                kv_page_base + page_off * arith.index(STRIDE_TOKEN_KV)
-            ) * arith.index(elem_bytes)
-            page_byte_base_i32 = _index_cast_to_i32(page_byte_base)
-            voff_g0_i32 = _std_arith.AddIOp(
-                _raw(page_byte_base_i32), _raw(_voff_g0_const_i32),
+        def _lookup_phys_i32_for_token(kv_abs_pos):
+            log_block = _std_arith.MinUIOp(
+                _raw(kv_abs_pos), _raw(max_log_block)
             ).result
-            voff_g1_i32 = _std_arith.AddIOp(
-                _raw(page_byte_base_i32), _raw(_voff_g1_const_i32),
+            bt_byte_off = _index_cast_to_i32(log_block * arith.index(4))
+            return rocdl.raw_ptr_buffer_load(
+                i32_type, bt_rsrc, bt_byte_off,
+                _raw(_bt_soff), _raw(_bt_aux),
+            )
+
+        def _page1_voff_i32(kv_abs_pos):
+            phys_i32 = _lookup_phys_i32_for_token(kv_abs_pos)
+            phys = arith.index_cast(T.index, phys_i32)
+            page_byte_base_i32 = _index_cast_to_i32(
+                phys * arith.index(STRIDE_PAGE * elem_bytes)
+            )
+            token_byte_off_i32 = _index_cast_to_i32(
+                kv_head_offset * arith.index(elem_bytes)
+                + lane_mod_16_for_k * arith.index(4)
+            )
+            return _std_arith.AddIOp(
+                _raw(page_byte_base_i32), _raw(token_byte_off_i32),
             ).result
+
+        def _coop_load_k_setup(kv_page_base, page_off, lds_wave_base_i32,
+                               kv_abs_pos=None):
+            if PAGE_BLOCK_SIZE == 1:
+                g0_pos = (
+                    kv_abs_pos
+                    + wave_id
+                    + lane_div_16_for_k * arith.index(K_SEQ_STRIDE)
+                )
+                g1_pos = g0_pos + arith.index(
+                    CKV_TOKENS_PER_HALF * K_SEQ_STRIDE
+                )
+                voff_g0_i32 = _page1_voff_i32(g0_pos)
+                voff_g1_i32 = _page1_voff_i32(g1_pos)
+            else:
+                page_byte_base = (
+                    kv_page_base + page_off * arith.index(STRIDE_TOKEN_KV)
+                ) * arith.index(elem_bytes)
+                page_byte_base_i32 = _index_cast_to_i32(page_byte_base)
+                voff_g0_i32 = _std_arith.AddIOp(
+                    _raw(page_byte_base_i32), _raw(_voff_g0_const_i32),
+                ).result
+                voff_g1_i32 = _std_arith.AddIOp(
+                    _raw(page_byte_base_i32), _raw(_voff_g1_const_i32),
+                ).result
             return voff_g0_i32, voff_g1_i32, lds_wave_base_i32
 
         def _emit_k_chunk_pair(lds_wave_base_i32, voff_g0_i32, voff_g1_i32, j):
@@ -667,31 +704,35 @@ def compile_mla_decode_fp8(
                 voff_i32, _raw(c_soff_zero),
                 _raw(K_COL_OFFSETS[j]), _raw(aux))
 
-        def coop_load_k(kv_page_base, page_off, lds_ptr_wave):
+        def coop_load_k(kv_page_base, page_off, lds_ptr_wave, kv_abs_pos):
             voff_g0_i32, voff_g1_i32, lds_ptr_wave = \
-                _coop_load_k_setup(kv_page_base, page_off, lds_ptr_wave)
+                _coop_load_k_setup(kv_page_base, page_off, lds_ptr_wave,
+                                   kv_abs_pos)
             for j in range_constexpr(CKV_NUM_CHUNKS):
                 _emit_k_chunk_pair(
                     lds_ptr_wave, voff_g0_i32, voff_g1_i32, j)
 
-        def coop_load_k_lo(kv_page_base, page_off, lds_ptr_wave):
+        def coop_load_k_lo(kv_page_base, page_off, lds_ptr_wave, kv_abs_pos):
             voff_g0_i32, voff_g1_i32, lds_ptr_wave = \
-                _coop_load_k_setup(kv_page_base, page_off, lds_ptr_wave)
+                _coop_load_k_setup(kv_page_base, page_off, lds_ptr_wave,
+                                   kv_abs_pos)
             for j in range_constexpr(K_LO_CHUNKS):
                 _emit_k_chunk_pair(
                     lds_ptr_wave, voff_g0_i32, voff_g1_i32, j)
 
-        def coop_load_k_hi0(kv_page_base, page_off, lds_ptr_wave):
+        def coop_load_k_hi0(kv_page_base, page_off, lds_ptr_wave, kv_abs_pos):
             voff_g0_i32, voff_g1_i32, lds_ptr_wave = \
-                _coop_load_k_setup(kv_page_base, page_off, lds_ptr_wave)
+                _coop_load_k_setup(kv_page_base, page_off, lds_ptr_wave,
+                                   kv_abs_pos)
             for j in range_constexpr(K_HI0_CHUNKS):
                 _emit_k_chunk_pair(
                     lds_ptr_wave, voff_g0_i32, voff_g1_i32,
                     j + K_LO_CHUNKS)
 
-        def coop_load_k_hi1(kv_page_base, page_off, lds_ptr_wave):
+        def coop_load_k_hi1(kv_page_base, page_off, lds_ptr_wave, kv_abs_pos):
             voff_g0_i32, voff_g1_i32, lds_ptr_wave = \
-                _coop_load_k_setup(kv_page_base, page_off, lds_ptr_wave)
+                _coop_load_k_setup(kv_page_base, page_off, lds_ptr_wave,
+                                   kv_abs_pos)
             for j in range_constexpr(K_HI1_CHUNKS):
                 _emit_k_chunk_pair(
                     lds_ptr_wave, voff_g0_i32, voff_g1_i32,
@@ -1476,7 +1517,8 @@ def compile_mla_decode_fp8(
                 _nn_page_base_next = lookup_page_resolve(nnn_phys_i32)
                 gk_voff_g0_next, gk_voff_g1_next, _ = \
                     _coop_load_k_setup(
-                        _nn_page_base_next, nnn_p_off, wptr_cur)
+                        _nn_page_base_next, nnn_p_off, wptr_cur,
+                        nnn_start)
             rocdl.sched_barrier(0)
 
             # ---- GEMM1 tail: 10 groups of (2 MFMAs + 1 K read) ----
@@ -1521,10 +1563,11 @@ def compile_mla_decode_fp8(
             _raw(kv_split_start), _raw(kv_split_end),
         ).result
         page_base_0 = lookup_page_resolve(pf0_phys_i32)
-        coop_load_k(page_base_0, pf0_p_off, lds_wptr_cur)
+        coop_load_k(page_base_0, pf0_p_off, lds_wptr_cur, kv_split_start)
 
         page_base_1 = lookup_page_resolve(pf1_phys_early)
-        coop_load_k(page_base_1, pf1_p_off_early, lds_wptr_next)
+        coop_load_k(page_base_1, pf1_p_off_early, lds_wptr_next,
+                    tile1_start_early)
         _barrier(vmcnt=COOP_K_VMEM_OPS, lgkmcnt=0)
         coop_transpose_v_from_lds(lds_k_cur_buf)
 
@@ -1552,7 +1595,7 @@ def compile_mla_decode_fp8(
         _nn_pb_init = lookup_page_resolve(nn_phys_init)
         gk_voff_g0_init, gk_voff_g1_init, _ = \
             _coop_load_k_setup(_nn_pb_init, nn_p_off_init,
-                               lds_wptr_cur)
+                               lds_wptr_cur, nn_start_init)
 
         if has_kv_work:
             o_accs_init = [
