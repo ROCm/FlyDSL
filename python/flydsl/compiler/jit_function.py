@@ -32,6 +32,8 @@ from .kernel_function import (
 )
 from .protocol import fly_construct, fly_types
 
+_FLYDSL_COV = 6
+
 
 @lru_cache(maxsize=1)
 def _flydsl_key() -> str:
@@ -416,13 +418,20 @@ def _pipeline_fragments(backend) -> tuple:
 
 class MlirCompiler:
     @classmethod
-    def compile(cls, module: ir.Module, *, arch: str = "", func_name: str = "") -> ir.Module:
+    def compile(cls, module: ir.Module, *, arch: str = "", func_name: str = "", link_libs: list | None = None) -> ir.Module:
         module.operation.verify()
 
         backend = get_backend(arch=arch)
 
         module = ir.Module.parse(module.operation.get_asm(enable_debug_info=env.debug.enable_debug_info))
         fragments, llvm_opts = _pipeline_fragments(backend)
+
+        if link_libs:
+            link_opt = " " + " ".join(f"l={lib}" for lib in link_libs)
+            fragments = [
+                (f[:-1] + link_opt + "}") if "rocdl-attach-target" in f else f
+                for f in fragments
+            ]
 
         from .llvm_options import llvm_options as _llvm_options
 
@@ -433,6 +442,8 @@ class MlirCompiler:
 
         dump_enabled = env.debug.dump_ir
         dump_dir = Path(env.debug.dump_dir).resolve()
+
+        import time as _time
 
         with _llvm_ctx:
             if dump_enabled:
@@ -456,7 +467,10 @@ class MlirCompiler:
                     stage_name = f"{stage_num:02d}_{_stage_label_from_fragment(frag)}"
                     pm = PassManager.parse(f"builtin.module({frag})")
                     pm.enable_verifier(env.debug.enable_verifier)
+                    _t0 = _time.perf_counter()
                     pm.run(module.operation)
+                    _dt = _time.perf_counter() - _t0
+                    print(f"[flydsl.compile] pass {stage_name}  {_dt:.3f}s")
 
                     stage_asm = module.operation.get_asm(enable_debug_info=True)
                     out = _dump_ir(stage_name, dump_dir=dump_dir, asm=stage_asm)
@@ -488,7 +502,11 @@ class MlirCompiler:
                 pm = PassManager.parse(pipeline)
                 pm.enable_verifier(env.debug.enable_verifier)
                 pm.enable_ir_printing(print_after_all=env.debug.print_after_all)
+                _t0 = _time.perf_counter()
                 pm.run(module.operation)
+                _dt = _time.perf_counter() - _t0
+                if _dt > 1.0:
+                    print(f"[flydsl.compile] total pipeline  {_dt:.3f}s")
 
         return module
 
@@ -888,7 +906,7 @@ class JitFunction:
 
             with ir.InsertionPoint(module.body), loc:
                 backend = get_backend()
-                gpu_module = create_gpu_module("kernels", targets=backend.gpu_module_targets())
+                gpu_module = create_gpu_module("kernels")
 
                 func_op = func.FuncOp(self.func.__name__, (ir_types, []))
                 func_op.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()
@@ -915,12 +933,22 @@ class JitFunction:
 
             original_ir = module.operation.get_asm(enable_debug_info=True)
 
-            compiled_module = MlirCompiler.compile(module, arch=backend.target.arch, func_name=self.func.__name__)
+            link_libs = None
+            needs_shmem = False
+            if any(s.startswith("mori_shmem_") for s in comp_ctx.extern_symbols):
+                from mori.ir.bitcode import find_bitcode
+                link_libs = [find_bitcode(cov=_FLYDSL_COV)]
+                needs_shmem = True
+
+            compiled_module = MlirCompiler.compile(
+                module, arch=backend.target.arch, func_name=self.func.__name__, link_libs=link_libs,
+            )
 
             compiled_func = CompiledArtifact(
                 compiled_module,
                 self.func.__name__,
                 original_ir,
+                needs_shmem=needs_shmem,
             )
 
             # Always keep a reference to the latest compilation result so

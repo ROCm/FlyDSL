@@ -31,9 +31,21 @@
 
 thread_local static int32_t defaultDevice = 0;
 
+// Module load hook — called after hipModuleLoadData, if registered.
+// Used by mori shmem to inject globalGpuStates into dynamically loaded GPU modules.
+typedef void (*MgpuModuleLoadHook)(hipModule_t module);
+static MgpuModuleLoadHook s_moduleLoadHook = nullptr;
+
+extern "C" void mgpuSetModuleLoadHook(MgpuModuleLoadHook hook) {
+  s_moduleLoadHook = hook;
+}
+
 extern "C" hipModule_t mgpuModuleLoad(void *data, size_t /*gpuBlobSize*/) {
   hipModule_t module = nullptr;
   HIP_REPORT_IF_ERROR(hipModuleLoadData(&module, data));
+  if (module && s_moduleLoadHook) {
+    s_moduleLoadHook(module);
+  }
   return module;
 }
 

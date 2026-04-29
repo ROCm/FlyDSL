@@ -330,17 +330,13 @@ def create_buffer_resource_from_addr(addr_i64: ir.Value) -> ir.Value:
     Useful when working with runtime pointer arrays (e.g. IPC-mapped addresses
     or device-side pointer tables) where no fly.memref is available.
     The full address is encoded as the buffer base; callers should pass
-    byte offset 0 to buffer_load / buffer_store.
+    byte offset to buffer_load / buffer_store.
 
     Args:
         addr_i64: Raw 64-bit device address (i64 MLIR value).
 
     Returns:
         ROCDL buffer resource descriptor (!llvm.ptr<8>).
-
-    Example:
-        >>> rsrc = create_buffer_resource_from_addr(raw_addr_i64)
-        >>> data = buffer_load(rsrc, i32_zero, vec_width=4, dtype=T.i32)
     """
     addr_i64 = _unwrap_value(addr_i64)
     ptr_type = ir.Type.parse('!llvm.ptr')

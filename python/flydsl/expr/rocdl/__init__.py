@@ -22,9 +22,9 @@ from . import cdna4 as cdna4
 _ods_wmma_scale_f32_16x16x128_f8f6f4 = globals().get("wmma_scale_f32_16x16x128_f8f6f4", None)
 _ods_wmma_scale_f32_32x16x128_f4 = globals().get("wmma_scale_f32_32x16x128_f4", None)
 _ods_wave_id = wave_id  # ODS: wave_id(res, ...) -> i32
-_ods_cluster_workgroup_id_x = cluster_workgroup_id_x
-_ods_cluster_workgroup_id_y = cluster_workgroup_id_y
-_ods_cluster_workgroup_id_z = cluster_workgroup_id_z
+_ods_cluster_workgroup_id_x = cluster_id_x
+_ods_cluster_workgroup_id_y = cluster_id_y
+_ods_cluster_workgroup_id_z = cluster_id_z
 _ods_cluster_load_async_to_lds_b8 = cluster_load_async_to_lds_b8
 _ods_cluster_load_async_to_lds_b32 = cluster_load_async_to_lds_b32
 _ods_cluster_load_async_to_lds_b64 = cluster_load_async_to_lds_b64
@@ -468,3 +468,30 @@ def ds_bpermute(res, index, src, **kw):
 
 def readfirstlane(res, src, **kw):
     return _ods_readfirstlane(res=res, src=_to_ir(src), **kw)
+
+
+def ballot_i64(cond, *, loc=None):
+    """Warp ballot returning 64-bit lane mask, with auto i1 coercion."""
+    from ..._mlir.ir import IntegerType
+    from ..._mlir.dialects import llvm as _llvm, rocdl as _rocdl
+
+    pred = _to_ir(cond)
+    i1 = IntegerType.get_signless(1)
+    if pred.type != i1:
+        pred = _llvm.TruncOp(i1, pred).result
+    i64 = IntegerType.get_signless(64)
+    return _rocdl.BallotOp(i64, pred, loc=loc).result
+
+
+def readlane(val, lane, *, loc=None):
+    """Read a value from a specific warp lane, accepting Python int for *lane*."""
+    from ..._mlir.ir import IntegerType, IntegerAttr
+    from ..._mlir.dialects import rocdl as _rocdl, arith as _arith
+
+    src = _to_ir(val)
+    i32 = IntegerType.get_signless(32)
+    if isinstance(lane, int):
+        lane_v = _arith.ConstantOp(i32, IntegerAttr.get(i32, lane)).result
+    else:
+        lane_v = _to_ir(lane)
+    return _rocdl.ReadlaneOp(i32, src, lane_v, loc=loc).result
