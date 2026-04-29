@@ -17,11 +17,14 @@ import pytest
 import torch
 import triton
 
-import aiter
-from aiter import dtypes
-from aiter import per_tensor_quant, pertoken_quant
-from aiter.ops.triton.gluon.pa_decode_gluon import get_recommended_splits
-from aiter.test_common import checkAllclose
+try:
+    import aiter
+    from aiter import dtypes
+    from aiter import per_tensor_quant, pertoken_quant
+    from aiter.ops.triton.gluon.pa_decode_gluon import get_recommended_splits
+    from aiter.test_common import checkAllclose
+except Exception as exc:
+    pytest.skip(f"aiter is not available: {exc}", allow_module_level=True)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
