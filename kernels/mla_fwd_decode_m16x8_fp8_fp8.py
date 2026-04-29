@@ -323,8 +323,6 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
     c_zero_v4f32 = Vec.filled(4, 0.0, fx.Float32)
     c_log2e = fx.Float32(LOG2E)
     c_inv_log2e = fx.Float32(1.0 / LOG2E)
-    c_dword_sz = fx.Int32(4)
-    c_aux_zero = c_zero_i32
 
     # ---- Buffer resources ----
     query_rsrc = buffer_ops.create_buffer_resource(query)
@@ -398,11 +396,9 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
 
         def _emit_vram_to_lds():
             voff = _raw(ArithValue(row_i32) * QK_HEAD_DIM + col_base_i32)
-            col_off = fx.Int32(block_idx_const * KV_NUM_COLS)
-            lds_ptr = _lds_ptr_from_i32(lds_base_i32)
-            rocdl.raw_ptr_buffer_load_lds(
-                kv_rsrc, lds_ptr, _raw(c_dword_sz), voff,
-                _raw(c_aux_zero), _raw(col_off), _raw(c_aux_zero),
+            rocdl.buffer_load_to_lds(
+                kv_rsrc, _lds_ptr_from_i32(lds_base_i32), voff,
+                offset=block_idx_const * KV_NUM_COLS,
             )
 
         if const_expr(check_boundary):
