@@ -464,7 +464,7 @@ def main():
     parser.add_argument("--num_kv_heads", type=int, default=1)
     parser.add_argument("--kv_lora_rank", type=int, default=512)
     parser.add_argument("--qk_rope_head_dim", type=int, default=64)
-    parser.add_argument("--page_block_size", type=int, default=64)
+    parser.add_argument("--page_block_size", type=int, default=1)
     parser.add_argument("--no-causal", action="store_true")
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     args = parser.parse_args()

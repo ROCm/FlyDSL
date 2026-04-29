@@ -36,7 +36,7 @@ LDS layout (byte offsets, i8 element):
 
 Requires: kv_lora_rank % 16 == 0, qk_rope_head_dim % 16 == 0,
           GQA group size >= 4, seqlen_kv % BLOCK_N == 0,
-          page_block_size % BLOCK_N == 0, page_block_size <= 64.
+          page_block_size is 1 or a multiple of BLOCK_N, page_block_size <= 64.
 """
 
 import math
@@ -238,7 +238,7 @@ def compile_mla_decode_fp8(
     num_kv_heads=1,
     kv_lora_rank=512,
     qk_rope_head_dim=64,
-    page_block_size=64,
+    page_block_size=1,
     causal=True,
     sm_scale=None,
 ):
@@ -258,16 +258,20 @@ def compile_mla_decode_fp8(
     NUM_HEAD_GROUPS = NUM_Q_HEADS // HEADS_PER_WAVE
     CAUSAL = causal
     PAGE_BLOCK_SIZE = page_block_size
+    PAGE_BLOCK_SHIFT = int(math.log2(PAGE_BLOCK_SIZE))
 
     assert NUM_Q_HEADS % HEADS_PER_WAVE == 0
     assert GQA_GROUP >= HEADS_PER_WAVE
     assert HEAD_DIM_V % 16 == 0
     assert qk_rope_head_dim % 16 == 0
-    assert PAGE_BLOCK_SIZE % BLOCK_N == 0, (
-        f"page_block_size ({PAGE_BLOCK_SIZE}) must be a multiple of BLOCK_N ({BLOCK_N})"
+    assert PAGE_BLOCK_SIZE == 1 or PAGE_BLOCK_SIZE % BLOCK_N == 0, (
+        f"page_block_size ({PAGE_BLOCK_SIZE}) must be 1 or a multiple of BLOCK_N ({BLOCK_N})"
     )
     assert PAGE_BLOCK_SIZE <= 64, (
         f"page_block_size ({PAGE_BLOCK_SIZE}) must be <= 64"
+    )
+    assert 1 << PAGE_BLOCK_SHIFT == PAGE_BLOCK_SIZE, (
+        f"page_block_size ({PAGE_BLOCK_SIZE}) must be a power of two"
     )
 
     if sm_scale is None:
@@ -539,7 +543,7 @@ def compile_mla_decode_fp8(
         _bt_base_i32 = _index_cast_to_i32(
             batch_idx * max_num_blocks_v
         )
-        _c6_i32 = arith.constant(6, type=T.i32)
+        _c_page_shift_i32 = arith.constant(PAGE_BLOCK_SHIFT, type=T.i32)
         _c2_i32 = arith.constant(2, type=T.i32)
         _bt_soff = _std_arith.ShLIOp(
             _raw(_bt_base_i32),
@@ -571,7 +575,7 @@ def compile_mla_decode_fp8(
                 p_off = arith.index_cast(T.index, _and_res)
                 log_block_i32 = _std_arith.ShRUIOp(
                     _raw(pos_i32),
-                    _raw(_c6_i32),
+                    _raw(_c_page_shift_i32),
                 ).result
                 bt_byte_off = _std_arith.ShLIOp(
                     _raw(log_block_i32),
