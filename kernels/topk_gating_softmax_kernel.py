@@ -127,10 +127,10 @@ def build_topk_gating_softmax_module(
 
         fm_fast = arith.FastMathFlags.fast
 
-        c_zero_f = arith.constant(0.0, type=compute_type)
-        c_neg_inf = arith.constant(float("-inf"), type=compute_type)
-        c_log2e = arith.constant(1.4426950408889634, type=compute_type)
-        c_one_f = arith.constant(1.0, type=compute_type)
+        c_zero_f = fx.Float32(0.0)
+        c_neg_inf = fx.Float32(float("-inf"))
+        c_log2e = fx.Float32(1.4426950408889634)
+        c_one_f = fx.Float32(1.0)
 
         # ── Thread → (warp, token-in-warp, expert-lane) decomposition ────
         c_warp = fx.Int32(WARP_SIZE)
@@ -232,8 +232,7 @@ def build_topk_gating_softmax_module(
 
         def _store_scalar_f32(divided, index, val):
             r = fx.memref_alloca(scalar_reg_ty_f32, scalar_reg_lay)
-            vec_ty = T.vec(1, T.f32)
-            v = vector.from_elements(vec_ty, [val])
+            v = fx.Vector.from_elements([val], fx.Float32)
             fx.memref_store_vec(v, r)
             view = fx.slice(divided, (None, index))
             fx.copy_atom_call(copy_atom_f32, r, view)
@@ -245,8 +244,7 @@ def build_topk_gating_softmax_module(
             # failures when going through si32).
             val_f32 = ArithValue(val).bitcast(T.f32)
             r = fx.memref_alloca(scalar_reg_ty_f32, scalar_reg_lay)
-            vec_ty = T.vec(1, T.f32)
-            v = vector.from_elements(vec_ty, [val_f32])
+            v = fx.Vector.from_elements([val_f32], fx.Float32)
             fx.memref_store_vec(v, r)
             view = fx.slice(divided, (None, index))
             fx.copy_atom_call(copy_atom_f32, r, view)
@@ -284,7 +282,7 @@ def build_topk_gating_softmax_module(
         thread_sum = c_zero_f
         exp_list = []
         for v in range_constexpr(VPT):
-            sub = ArithValue(x_list[v]) - ArithValue(group_max)
+            sub = x_list[v] - group_max
             scaled = sub * c_log2e
             ev = scaled.exp2(fastmath=fm_fast)
             exp_list.append(ev)
@@ -295,10 +293,10 @@ def build_topk_gating_softmax_module(
         # ==================================================================
         # Pass 3: Normalize -> softmax probabilities (kept in registers)
         # ==================================================================
-        inv_sum = c_one_f / ArithValue(group_sum)
+        inv_sum = c_one_f / group_sum
         prob_list = []
         for v in range_constexpr(VPT):
-            prob_list.append(ArithValue(exp_list[v]) * ArithValue(inv_sum))
+            prob_list.append(exp_list[v] * inv_sum)
 
         # ==================================================================
         # Pass 4: Iterative Top-K (sub-warp argmax → mask)
@@ -339,9 +337,9 @@ def build_topk_gating_softmax_module(
         # ==================================================================
         # Pass 5: Leader writes weights/indices/tei (with optional renorm)
         # ==================================================================
-        c_eps = arith.constant(1e-20, type=compute_type)
+        c_eps = fx.Float32(1e-20)
         denom = selected_sum.maximumf(c_eps)
-        inv_denom = c_one_f / ArithValue(denom)
+        inv_denom = c_one_f / denom
 
         # Inline the leader-active predicate so the AST rewriter recognises it
         # as a dynamic test (it must contain a Call) and lowers `if ...` to
@@ -352,7 +350,7 @@ def build_topk_gating_softmax_module(
             for k_idx in range_constexpr(topk):
                 w_val = selected_weights[k_idx]
                 if renormalize:
-                    w_val = ArithValue(w_val) * ArithValue(inv_denom)
+                    w_val = w_val * inv_denom
                 _store_scalar_f32(weights_div, Int32(k_idx), w_val)
                 _store_scalar_i32(indices_div, Int32(k_idx), selected_indices[k_idx])
                 # tei[t, k] = k * num_tokens + t  (matches vLLM convention)
