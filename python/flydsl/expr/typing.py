@@ -334,15 +334,11 @@ class IntTuple(BuiltinDslType):
             raise ValueError("IntTuple is not a static leaf")
         return self.type.get_static_leaf_int
 
-    @traced_op
-    def to_py_value(self, loc=None, ip=None):
-        if self.is_static:
-            if self.is_leaf:
-                return self.get_static_leaf_int
-            return tuple(get_(self, i).to_py_value() for i in range(self.rank))
-        leaves = get_leaves(self, dynamic_only=True, loc=loc, ip=ip)
-        leaf_iter = iter(leaves)
-        return self._rebuild_py_value(leaf_iter)
+    @staticmethod
+    def _static_to_py_value(ty):
+        if ty.is_leaf:
+            return ty.get_static_leaf_int
+        return tuple(IntTuple._static_to_py_value(ty.at(i)) for i in range(ty.rank))
 
     def _rebuild_py_value(self, leaf_iter):
         if self.is_leaf:
@@ -353,6 +349,14 @@ class IntTuple(BuiltinDslType):
             wrapper = Int64 if width == 64 else Int32
             return wrapper(val)
         return tuple(IntTuple(get_(self, i))._rebuild_py_value(leaf_iter) for i in range(self.rank))
+
+    @traced_op
+    def to_py_value(self, loc=None, ip=None):
+        if self.is_static:
+            return IntTuple._static_to_py_value(self.type)
+        leaves = get_leaves(self, dynamic_only=True, loc=loc, ip=ip)
+        leaf_iter = iter(leaves)
+        return self._rebuild_py_value(leaf_iter)
 
     @traced_op
     def __getitem__(self, mode, loc=None, ip=None):
