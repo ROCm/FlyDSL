@@ -4,10 +4,11 @@
 # Copyright (c) 2025 FlyDSL Project Contributors
 
 """MoE GEMM tests for MXScale data types (fp4/fp8/a8w4) on gfx1250."""
+import argparse
 import math
 import os
 import sys
-from typing import Optional
+from typing import Optional, Tuple
 
 import pytest
 import torch
@@ -171,6 +172,26 @@ from kernels.moe_gemm_2stage_mxscale_gfx1250 import (
     compile_moe_gemm2_ex,
     MoeGemm2Mode,
 )
+
+
+def _perf_metrics_from_us(
+    us: Optional[float],
+    *,
+    flops: int,
+    bytes_moved: int,
+    read_bytes: int,
+    write_bytes: int,
+) -> Tuple[float, float, float, float]:
+    """Return throughput metrics, tolerating 0-us event timings for tiny kernels."""
+    if us is None or us <= 0:
+        return 0.0, 0.0, 0.0, 0.0
+    time_s = us / 1e6
+    return (
+        flops / time_s / 1e12,
+        bytes_moved / 1e12 / time_s,
+        read_bytes / 1e9 / time_s,
+        write_bytes / 1e9 / time_s,
+    )
 
 
 # ---- Stage1/Stage2 runners (helpers; NOT pytest tests) ----
@@ -479,7 +500,6 @@ def run_moe_stage1(
 
     # Note: kernel launches full expert-block range; effective work is gated by num_valid_ids.
     flops = 2 * tokens * topk * (2 * inter_dim) * _orig_model_dim
-    tflops = flops / (us / 1e6) / 1e12
 
     # Rough bytes-moved accounting (same spirit as GEMM tests: count each tensor once).
     bytes_moved = 0
@@ -494,11 +514,15 @@ def run_moe_stage1(
         + int(sorted_expert_ids.numel()) * 4
     )
     bytes_moved += bytes_x + bytes_w + bytes_out + bytes_scale_x + bytes_scale_w + bytes_route
-    tbps = bytes_moved / 1e12 / (us / 1e6)
     read_bytes = bytes_x + bytes_w + bytes_scale_x + bytes_scale_w + bytes_route
     write_bytes = bytes_out
-    read_bw_gbs = read_bytes / 1e9 / (us / 1e6)
-    write_bw_gbs = write_bytes / 1e9 / (us / 1e6)
+    tflops, tbps, read_bw_gbs, write_bw_gbs = _perf_metrics_from_us(
+        us,
+        flops=flops,
+        bytes_moved=bytes_moved,
+        read_bytes=read_bytes,
+        write_bytes=write_bytes,
+    )
 
     print(
         f"FlyDSL MoE stage1[{in_dtype}] benchmark | "
@@ -946,7 +970,6 @@ def run_moe_stage2(
 
     # Launches full expert-block range; effective work is gated by num_valid_ids.
     flops = 2 * tokens * topk * model_dim * _orig_inter_dim
-    tflops = flops / (us / 1e6) / 1e12
 
     bytes_moved = 0
     bytes_a2 = tokens * topk * _orig_inter_dim  # 1B elements (fp4/fp8/a8w4)
@@ -960,11 +983,15 @@ def run_moe_stage2(
         + int(sorted_expert_ids.numel()) * 4
     )
     bytes_moved += bytes_a2 + bytes_w2 + bytes_out + bytes_scale_a2 + bytes_scale_w2 + bytes_route
-    tbps = bytes_moved / 1e12 / (us / 1e6)
     read_bytes = bytes_a2 + bytes_w2 + bytes_scale_a2 + bytes_scale_w2 + bytes_route
     write_bytes = bytes_out
-    read_bw_gbs = read_bytes / 1e9 / (us / 1e6)
-    write_bw_gbs = write_bytes / 1e9 / (us / 1e6)
+    tflops, tbps, read_bw_gbs, write_bw_gbs = _perf_metrics_from_us(
+        us,
+        flops=flops,
+        bytes_moved=bytes_moved,
+        read_bytes=read_bytes,
+        write_bytes=write_bytes,
+    )
     print(
         f"FlyDSL MoE stage2[{kernel_name}] {in_dtype} {'reduce' if use_reduce else 'atomic'} benchmark | "
         f"shape=({tokens},{model_dim},{inter_dim}), E={experts}, K={topk}, "
@@ -1735,3 +1762,235 @@ def test_moe_stage2_standalone(
         use_valid_mask=True,
         kernel_name="moe_gemm2_reduce_flydsl_valid_mask",
     )
+
+
+if __name__ == "__main__":
+    torch.set_default_device("cuda")
+
+    def _str2bool(v):
+        if v is None:
+            return None
+        if isinstance(v, bool):
+            return v
+        s = str(v).strip().lower()
+        if s in {"1", "true", "t", "yes", "y", "on"}:
+            return True
+        if s in {"0", "false", "f", "no", "n", "off"}:
+            return False
+        raise argparse.ArgumentTypeError(f"invalid bool: {v} (use t/f, true/false, 1/0)")
+
+    def _str2tuple_dim(v: str) -> Tuple[int, int]:
+        s = str(v).strip()
+        parts = [p.strip() for p in s.split(",") if p.strip()]
+        if len(parts) != 2:
+            raise argparse.ArgumentTypeError(
+                f"invalid -dim {v!r}; expected 'model_dim,inter_dim' e.g. 256,128"
+            )
+        return int(parts[0]), int(parts[1])
+
+    parser = argparse.ArgumentParser(
+        formatter_class=argparse.RawTextHelpFormatter,
+        description="MoE 2-stage (FlyDSL MXScale fp4/fp8/a8w4) test/benchmark on gfx1250.",
+    )
+    parser.add_argument(
+        "--in_dtype",
+        type=str,
+        default="fp8",
+        help="Kernel input dtype: fp4, fp8, a8w4, or all. Comma-separated values are also accepted.",
+    )
+    parser.add_argument(
+        "-dim",
+        type=_str2tuple_dim,
+        default=(256, 128),
+        help="Model dimension: model_dim,inter_dim (e.g. -dim 256,128)",
+    )
+    parser.add_argument("-t", "--tokenNum", type=int, default=64, help="Number of tokens (e.g. -t 64)")
+    parser.add_argument("-e", "--expert", type=int, default=4, help="Number of experts (e.g. -e 4)")
+    parser.add_argument("-k", "--topk", type=int, default=2, help="Top-k (e.g. -k 2)")
+    parser.add_argument(
+        "-s",
+        "--doweight_stage1",
+        type=_str2bool,
+        nargs="?",
+        const=True,
+        default=False,
+        help="Whether to multiply routed weight in stage1 (t/f).",
+    )
+    parser.add_argument("--tile_m", type=int, default=16, help="Tile M / block_m (routing block size).")
+    parser.add_argument("--tile_n", type=int, default=64, help="Stage1 tile N (inter dim tile).")
+    parser.add_argument("--tile_k", type=int, default=128, help="Stage1 tile K (model dim tile).")
+    parser.add_argument(
+        "--tile_n2",
+        type=int,
+        default=None,
+        help="Stage2 tile N (model dim tile). Default: tile_n.",
+    )
+    parser.add_argument(
+        "--tile_k2",
+        type=int,
+        default=None,
+        help="Stage2 tile K (inter dim tile). Default: tile_k.",
+    )
+    parser.add_argument(
+        "--moe_sort_mode",
+        type=str,
+        default=None,
+        choices=["aiter", "torch"],
+        help="Routing buffer build mode (aiter moe_sorting vs torch fallback).",
+    )
+    parser.add_argument(
+        "--skip_ref",
+        type=_str2bool,
+        nargs="?",
+        const=True,
+        default=False,
+        help="Skip torch reference correctness checks (benchmark-only).",
+    )
+    parser.add_argument(
+        "--compare_aiter_ck",
+        type=_str2bool,
+        nargs="?",
+        const=True,
+        default=None,
+        help="Compatibility flag accepted for parity with other MoE scripts; ignored here.",
+    )
+    parser.add_argument(
+        "--gemm2_mode",
+        type=str,
+        default="both",
+        choices=["both", "atomic", "reduce"],
+        help="Stage2 accumulation mode: 'atomic', 'reduce', or 'both' (default: both).",
+    )
+    parser.add_argument(
+        "--out_dtype",
+        type=str,
+        default="f16",
+        choices=["f16", "f32"],
+        help="Stage2 output dtype.",
+    )
+    parser.add_argument(
+        "--use_valid_mask",
+        type=_str2bool,
+        nargs="?",
+        const=True,
+        default=False,
+        help="Use valid mask for reduce mode.",
+    )
+    parser.add_argument(
+        "--w_fp4_kernel",
+        type=_str2bool,
+        nargs="?",
+        const=True,
+        default=False,
+        help="Use the fp4 stage2 weight path when supported.",
+    )
+    parser.add_argument(
+        "--no_flush_l2",
+        action="store_true",
+        default=False,
+        help="Disable L2 flush in benchmark timing.",
+    )
+    parser.add_argument(
+        "--num_buffers",
+        type=int,
+        default=1,
+        choices=[1, 2, 3, 4],
+        help="Requested MXScale pipeline buffers for gfx1250 MoE kernels.",
+    )
+    parser.add_argument(
+        "--use_tdm_store",
+        type=_str2bool,
+        nargs="?",
+        const=True,
+        default=False,
+        help="Requested TDM store epilogue for gfx1250 MoE kernels.",
+    )
+    parser.add_argument(
+        "--inst_prefetch",
+        type=_str2bool,
+        nargs="?",
+        const=True,
+        default=False,
+        help="Enable instruction prefetch for gfx1250 MoE kernels.",
+    )
+    parser.add_argument(
+        "--wave_specialized_tdm",
+        type=_str2bool,
+        nargs="?",
+        const=True,
+        default=False,
+        help="Enable wave-specialized TDM loading for gfx1250 MoE kernels.",
+    )
+    parser.add_argument("--cluster_m", type=int, default=1, help="Requested cluster_m for gfx1250 MoE kernels.")
+    parser.add_argument("--cluster_n", type=int, default=1, help="Requested cluster_n for gfx1250 MoE kernels.")
+    parser.add_argument("--seed", type=int, default=0, help="torch.manual_seed(seed)")
+    parser.add_argument("--num_iters", type=int, default=2, help="Benchmark iters")
+    parser.add_argument("--num_warmup", type=int, default=1, help="Benchmark warmup iters")
+
+    args = parser.parse_args()
+
+    if args.compare_aiter_ck is not None:
+        print("[note] --compare_aiter_ck is ignored by the MXScale gfx1250 harness.")
+
+    model_dim, inter_dim = args.dim
+    tile_n2 = int(args.tile_n2) if args.tile_n2 is not None else int(args.tile_n)
+    tile_k2 = int(args.tile_k2) if args.tile_k2 is not None else int(args.tile_k)
+
+    if args.gemm2_mode == "both":
+        reduce_flags = [False, True]
+    elif args.gemm2_mode == "reduce":
+        reduce_flags = [True]
+    else:
+        reduce_flags = [False]
+
+    in_dtypes = [dt.strip().lower() for dt in str(args.in_dtype).split(",") if dt.strip()]
+    if "all" in in_dtypes:
+        in_dtypes = ["fp4", "fp8", "a8w4"]
+    invalid_dtypes = sorted(set(in_dtypes) - {"fp4", "fp8", "a8w4"})
+    if invalid_dtypes:
+        raise SystemExit(f"unsupported --in_dtype values: {', '.join(invalid_dtypes)}")
+
+    common = dict(
+        tokens=int(args.tokenNum),
+        model_dim=int(model_dim),
+        inter_dim=int(inter_dim),
+        experts=int(args.expert),
+        topk=int(args.topk),
+        doweight_stage1=bool(args.doweight_stage1),
+        tile_m=int(args.tile_m),
+        seed=int(args.seed),
+        num_iters=int(args.num_iters),
+        num_warmup=int(args.num_warmup),
+        moe_sort_mode=args.moe_sort_mode,
+        skip_ref=bool(args.skip_ref),
+        flush_l2=not bool(args.no_flush_l2),
+        num_buffers=int(args.num_buffers),
+        use_tdm_store=bool(args.use_tdm_store),
+        inst_prefetch=bool(args.inst_prefetch),
+        wave_specialized_tdm=bool(args.wave_specialized_tdm),
+        cluster_m=int(args.cluster_m),
+        cluster_n=int(args.cluster_n),
+        w_fp4_kernel=bool(args.w_fp4_kernel),
+    )
+
+    def run_one(dt: str, use_reduce: bool):
+        try:
+            run_moe_gemm_2stage(
+                **common,
+                in_dtype=dt,
+                out_dtype=str(args.out_dtype),
+                tile_n1=int(args.tile_n),
+                tile_k1=int(args.tile_k),
+                tile_n2=tile_n2,
+                tile_k2=tile_k2,
+                use_reduce=use_reduce,
+                use_valid_mask=bool(args.use_valid_mask),
+            )
+        except pytest.skip.Exception as exc:
+            print(f"[skip] {exc}")
+            return
+        print(f"PASSED: dtype={dt} reduce={use_reduce}")
+
+    for dt in in_dtypes:
+        for use_reduce in reduce_flags:
+            run_one(dt, use_reduce)

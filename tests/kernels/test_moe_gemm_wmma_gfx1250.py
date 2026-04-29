@@ -273,6 +273,26 @@ def build_routing_buffers(
     )
 
 
+def _perf_metrics_from_us(
+    us: Optional[float],
+    *,
+    flops: int,
+    bytes_moved: int,
+    read_bytes: int,
+    write_bytes: int,
+) -> Tuple[float, float, float, float]:
+    """Return throughput metrics, tolerating 0-us event timings for tiny kernels."""
+    if us is None or us <= 0:
+        return 0.0, 0.0, 0.0, 0.0
+    time_s = us / 1e6
+    return (
+        flops / time_s / 1e12,
+        bytes_moved / 1e12 / time_s,
+        read_bytes / 1e9 / time_s,
+        write_bytes / 1e9 / time_s,
+    )
+
+
 # ---- Stage1/Stage2 runners (helpers; NOT pytest tests) ----
 def run_moe_stage1(
     tokens: int,
@@ -448,7 +468,6 @@ def run_moe_stage1(
 
     # Note: kernel launches full expert-block range; effective work is gated by num_valid_ids.
     flops = 2 * tokens * topk * (2 * inter_dim) * model_dim
-    tflops = flops / (us / 1e6) / 1e12
 
     # Rough bytes-moved accounting (same spirit as GEMM tests: count each tensor once).
     x_elem_bytes = 2
@@ -463,11 +482,15 @@ def run_moe_stage1(
         + int(sorted_expert_ids.numel()) * 4
     )
     bytes_moved = bytes_x + bytes_w + bytes_out + bytes_scale_x + bytes_scale_w + bytes_route
-    tbps = bytes_moved / 1e12 / (us / 1e6)
     read_bytes = bytes_x + bytes_w + bytes_scale_x + bytes_scale_w + bytes_route
     write_bytes = bytes_out
-    read_bw_gbs = read_bytes / 1e9 / (us / 1e6)
-    write_bw_gbs = write_bytes / 1e9 / (us / 1e6)
+    tflops, tbps, read_bw_gbs, write_bw_gbs = _perf_metrics_from_us(
+        us,
+        flops=flops,
+        bytes_moved=bytes_moved,
+        read_bytes=read_bytes,
+        write_bytes=write_bytes,
+    )
 
     print(
         f"FlyDSL MoE stage1[{in_dtype}] benchmark | "
@@ -802,7 +825,6 @@ def run_moe_stage2(
 
     # Launches full expert-block range; effective work is gated by num_valid_ids.
     flops = 2 * tokens * topk * model_dim * inter_dim
-    tflops = flops / (us / 1e6) / 1e12
 
     a2_elem_bytes = 2
     bytes_a2 = tokens * topk * inter_dim * a2_elem_bytes
@@ -816,11 +838,15 @@ def run_moe_stage2(
         + int(sorted_expert_ids.numel()) * 4
     )
     bytes_moved = bytes_a2 + bytes_w2 + bytes_out + bytes_scale_a2 + bytes_scale_w2 + bytes_route
-    tbps = bytes_moved / 1e12 / (us / 1e6)
     read_bytes = bytes_a2 + bytes_w2 + bytes_scale_a2 + bytes_scale_w2 + bytes_route
     write_bytes = bytes_out
-    read_bw_gbs = read_bytes / 1e9 / (us / 1e6)
-    write_bw_gbs = write_bytes / 1e9 / (us / 1e6)
+    tflops, tbps, read_bw_gbs, write_bw_gbs = _perf_metrics_from_us(
+        us,
+        flops=flops,
+        bytes_moved=bytes_moved,
+        read_bytes=read_bytes,
+        write_bytes=write_bytes,
+    )
     print(
         f"FlyDSL MoE stage2[{kernel_name}] {in_dtype} {'reduce' if use_reduce else 'atomic'} benchmark | "
         f"shape=({tokens},{model_dim},{inter_dim}), E={experts}, K={topk}, "
