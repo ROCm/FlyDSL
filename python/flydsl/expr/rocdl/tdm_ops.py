@@ -49,6 +49,8 @@ __all__ = [
     "tensor_store_gather",
     "tensor_store_2d",
     "tensor_wait",
+    "update_tensor_descriptor_2d_addr_lo",
+    "update_tensor_gather_descriptor_addr_lo",
     "compute_padding_encoding",
     "compute_warp_distribution",
     "l2_prefetch_tile",
@@ -711,6 +713,85 @@ def tensor_store_gather(
         _raw(desc.dgroup0), _raw(desc.dgroup1),
         _raw(desc.dgroup2), _raw(desc.dgroup3),
         dg4, cache_policy,
+    )
+
+
+# ---------------------------------------------------------------------------
+# K-loop hoist helpers
+#
+# In the MoE GEMM K-reduction loop, only the global "addr_lo" (lane 2 of
+# dgroup0) actually advances per K-tile; the LDS layout (lane 1), addr_hi
+# (lane 3), predicate (lane 0), and the entire dgroup1 / dgroup2 / dgroup3
+# state are K-invariant. By building a base descriptor at K=0 once outside
+# the loop and patching only lane 2 inside the loop, we cut the per-iteration
+# work to a single vector.insert plus the addr_lo SGPR add.
+# ---------------------------------------------------------------------------
+
+def _replace_dgroup0_addr_lo(dgroup0, new_addr_lo):
+    """Return a new vector<4xi32> with lane 2 replaced by ``new_addr_lo``."""
+    from ..._mlir.dialects import vector as _vector_dialect
+
+    return _vector_dialect.InsertOp(
+        _raw(new_addr_lo),
+        _raw(dgroup0),
+        static_position=[2],
+        dynamic_position=[],
+    ).result
+
+
+def update_tensor_descriptor_2d_addr_lo(
+    desc: TDMDescriptor2D,
+    new_addr_lo,
+) -> TDMDescriptor2D:
+    """Return a TDMDescriptor2D with dgroup0 lane 2 (addr_lo) replaced.
+
+    The TDM 2D descriptor packs (predicate, lds_addr, addr_lo, addr_hi) in
+    lanes 0..3 of dgroup0; only addr_lo varies along the K dimension once the
+    rest of the descriptor (dgroup1 + addr_hi) has been hoisted out of the
+    K loop. Use this helper in K-reduction hot paths to advance the global
+    base offset cheaply.
+
+    Args:
+        desc:         Base TDMDescriptor2D built once at the start of the
+                      K loop (for example, with ``global_offset=(n_off, 0)``).
+        new_addr_lo:  i32 MLIR value, typically ``base_addr_lo + k_byte_off``.
+
+    Returns:
+        New TDMDescriptor2D that shares dgroup1 with ``desc`` and carries the
+        patched dgroup0.
+    """
+    return TDMDescriptor2D(
+        dgroup0=_replace_dgroup0_addr_lo(desc.dgroup0, new_addr_lo),
+        dgroup1=desc.dgroup1,
+    )
+
+
+def update_tensor_gather_descriptor_addr_lo(
+    desc: TDMGatherDescriptor,
+    new_addr_lo,
+) -> TDMGatherDescriptor:
+    """Return a TDMGatherDescriptor with dgroup0 lane 2 (addr_lo) replaced.
+
+    Only the global base address low-32 changes per K-tile; the dgroup1 config
+    + dgroup2 / dgroup3 row indices are K-invariant and can be cached. Pair
+    with ``make_tensor_gather_descriptor(..., global_byte_offset=None)`` to
+    build a base descriptor where dgroup0 lane 2 is exactly the truncated
+    global pointer, then advance via this helper at issue time.
+
+    Args:
+        desc:         Base TDMGatherDescriptor built once outside the K loop
+                      with ``global_byte_offset=None``.
+        new_addr_lo:  i32 MLIR value, typically ``base_addr_lo + k_byte_off``.
+
+    Returns:
+        New TDMGatherDescriptor that shares dgroup1/2/3 with ``desc`` and
+        carries the patched dgroup0.
+    """
+    return TDMGatherDescriptor(
+        dgroup0=_replace_dgroup0_addr_lo(desc.dgroup0, new_addr_lo),
+        dgroup1=desc.dgroup1,
+        dgroup2=desc.dgroup2,
+        dgroup3=desc.dgroup3,
     )
 
 

@@ -247,6 +247,14 @@ def _compile_stage1_mxscale_kernel_impl(
         i32_size_expert_ids_in: fx.Int32,
     ):
         _ = i32_k_in
+        # ASTRewriter strips ``const_expr(...)`` from ``if`` tests, which would
+        # otherwise eliminate every reference to ``const_expr`` from the
+        # rewritten function body and shrink ``co_freevars`` by one — causing
+        # CPython to reject ``f.__code__ = new_f_code_o`` because the original
+        # ``__closure__`` length no longer matches. Keep one explicit reference
+        # so the rewritten code object's free-vars list still includes
+        # ``const_expr``.
+        _keep_const_expr_ref = const_expr  # noqa: F841
         if const_expr(inst_prefetch):
             if arith.cmpi(arith.CmpIPredicate.eq, rocdl.wave_id(),
                           arith.constant(0, type=T.i32)):
@@ -510,17 +518,29 @@ def _compile_stage1_mxscale_kernel_impl(
                 _a_tokens_topk_sgpr = rocdl.readfirstlane(T.i32, _m_i32)
             return _a_tokens_topk_sgpr
 
-        def issue_a_load_tdm_gather(k_base, target_lds):
-            """Load A data using TDM gather mode — one TDM instruction per 8 rows."""
-            k_packed_base = k_base if PACK_FACTOR_A == 1 else k_base // fx.Index(PACK_FACTOR_A)
+        # Cache of K-invariant pieces of the TDM gather descriptor:
+        #   "desc"[_gi][buf_idx] — full TDMGatherDescriptor with addr_lo = base
+        #                          (built at global_byte_offset=None),
+        #   "pred"[_gi]          — issue predicate (valid_count > 0, wave owner),
+        #   "base_addr_lo"[_gi]  — dgroup0.lane2 at global_byte_offset=0,
+        # populated once by ``_build_a_gather_base_descs()`` before the K loop
+        # so the hot path (``issue_a_load_tdm_gather``) only advances addr_lo
+        # via vector.insert each iteration.
+        _a_gather_cache = {}
+
+        def _build_a_gather_base_descs(lds_bufs):
+            if "desc" in _a_gather_cache:
+                return
             _tokens_dim1 = _get_tokens_sgpr()
             _zero_i32 = arith.constant(0, type=T.i32)
+            _descs = []
+            _preds = []
+            _base_addr_lo = []
             for _gi in range_constexpr(_TDM_GATHER_GROUPS):
                 _start = _gi * _TDM_GATHER_CHUNK
                 _cnt = min(_TDM_GATHER_CHUNK, int(tile_m) - _start)
                 _row_indices = _a_tok_ids[_start:_start + _cnt]
                 _valid_count = _sum_i32_values(_a_load_valids[_start:_start + _cnt])
-                _lds_off = fx.Index(_start * lds_a_stride_bytes)
                 _has_valid = arith.cmpi(arith.CmpIPredicate.sgt, _valid_count, _zero_i32)
                 _issue_pred = _has_valid
                 if const_expr(wave_specialized_tdm):
@@ -531,11 +551,19 @@ def _compile_stage1_mxscale_kernel_impl(
                         arith.constant(_gather_owner, type=T.i32),
                     )
                     _issue_pred = arith.andi(_issue_pred, _is_gather_loader)
-                _if_issue = scf.IfOp(_issue_pred)
-                with ir.InsertionPoint(_if_issue.then_block):
-                    desc = tdm_ops.make_tensor_gather_descriptor(
+                _preds.append(_issue_pred)
+
+                _lds_off = fx.Index(_start * lds_a_stride_bytes)
+                _per_buf = []
+                # NOTE: must use range_constexpr here. The AST rewriter
+                # (InsertEmptyYieldForSCFFor) turns a plain `range` inside a
+                # kernel body into scf_range -> scf.ForOp, making the loop
+                # variable an MLIR induction value (ArithValue) and breaking
+                # Python list indexing below.
+                for _buf_i in range_constexpr(len(lds_bufs)):
+                    _base_desc = tdm_ops.make_tensor_gather_descriptor(
                         global_ptr=arg_x,
-                        lds_memref=target_lds,
+                        lds_memref=lds_bufs[_buf_i],
                         row_indices=_row_indices,
                         row_width=int(packed_tile_k_a),
                         tensor_dim0=K_packed_a,
@@ -547,10 +575,139 @@ def _compile_stage1_mxscale_kernel_impl(
                         index_size=32,
                         gather_tile_dim1=_valid_count,
                         lds_byte_offset=_lds_off,
-                        global_byte_offset=k_packed_base,
+                        global_byte_offset=None,
                     )
-                    tdm_ops.tensor_load_gather(desc)
+                    _per_buf.append(_base_desc)
+                _descs.append(_per_buf)
+                # addr_lo is independent of buf_idx (only lds_addr differs), so
+                # we can extract it from any buffer's base descriptor.
+                _base_addr_lo.append(vector.extract(
+                    _per_buf[0].dgroup0,
+                    static_position=[2],
+                    dynamic_position=[],
+                ))
+
+            _a_gather_cache["desc"] = _descs
+            _a_gather_cache["pred"] = _preds
+            _a_gather_cache["base_addr_lo"] = _base_addr_lo
+
+        def issue_a_load_tdm_gather(k_base, buf_idx):
+            """Hot path: advance addr_lo on the precomputed gather descriptor.
+
+            Requires ``_build_a_gather_base_descs(lds_bufs)`` to have been
+            called once before the K loop with the matching LDS buffer list.
+            """
+            k_packed_base = k_base if PACK_FACTOR_A == 1 else k_base // fx.Index(PACK_FACTOR_A)
+            _k_byte_off_i32 = arith.index_cast(T.i32, k_packed_base)
+            _descs = _a_gather_cache["desc"]
+            _preds = _a_gather_cache["pred"]
+            _base_addr_lo = _a_gather_cache["base_addr_lo"]
+            for _gi in range_constexpr(_TDM_GATHER_GROUPS):
+                _if_issue = scf.IfOp(_preds[_gi])
+                with ir.InsertionPoint(_if_issue.then_block):
+                    _curr_addr_lo = arith.addi(
+                        _base_addr_lo[_gi], _k_byte_off_i32)
+                    tdm_ops.tensor_load_gather(
+                        tdm_ops.update_tensor_gather_descriptor_addr_lo(
+                            _descs[_gi][buf_idx],
+                            _curr_addr_lo,
+                        )
+                    )
                     scf.YieldOp([])
+
+        # Cache of K-invariant 2D B / B-scale descriptors used by
+        # ``_issue_b_tdm_only``. Each entry stores a base TDMDescriptor2D
+        # built at k_base=0 plus its extracted scalar addr_lo, so the hot
+        # path only computes ``curr_addr_lo = base_addr_lo + k_off`` and
+        # calls ``update_tensor_descriptor_2d_addr_lo`` -- mirroring the
+        # hoist that wave_specialized_tdm already does internally via
+        # ``_active_stage_desc_base``. ``_build_b_base_descs()`` is closed
+        # over later-defined names (``_stage1_pair_row_base``, the
+        # ``make_desc_b*`` helpers, and the various ``lds_b*_bufs`` lists);
+        # those names are resolved at *call* time inside ``_if_blk``.
+        _b_desc_cache = {}
+
+        def _extract_desc_addr_lo(desc):
+            return vector.extract(
+                desc.dgroup0,
+                static_position=[2],
+                dynamic_position=[],
+            )
+
+        def _build_b_base_descs():
+            if "ready" in _b_desc_cache:
+                return
+            _zero_k = arith.index(0)
+            if const_expr(_merge_gate_up_tdm):
+                _n_pair = _stage1_pair_row_base()
+                _bg_pair = [
+                    make_desc_b_pair(lds_bg_pair_bufs[i], _n_pair, _zero_k)
+                    for i in range_constexpr(_nb)
+                ]
+                _bs_pair = [
+                    make_desc_bs_pair(lds_bs_pair_bufs[i], _n_pair, _zero_k)
+                    for i in range_constexpr(_nb)
+                ]
+                _b_desc_cache["bg_pair"] = _bg_pair
+                _b_desc_cache["bs_pair"] = _bs_pair
+                _b_desc_cache["bg_pair_addr_lo"] = [
+                    _extract_desc_addr_lo(d) for d in _bg_pair
+                ]
+                _b_desc_cache["bs_pair_addr_lo"] = [
+                    _extract_desc_addr_lo(d) for d in _bs_pair
+                ]
+            else:
+                _eid_row = (
+                    arith.index_cast(T.index, eid_i32)
+                    * arith.index(int(2 * N))
+                )
+                _n_gate = _eid_row + blk_n
+                _n_up = _eid_row + blk_n + arith.index(int(N))
+                _bg = [
+                    make_desc_b(lds_bg_bufs[i], _n_gate, _zero_k)
+                    for i in range_constexpr(_nb)
+                ]
+                _bu = [
+                    make_desc_b(lds_bu_bufs[i], _n_up, _zero_k)
+                    for i in range_constexpr(_nb)
+                ]
+                _bs = [
+                    make_desc_bs(lds_bs_bufs[i], _n_gate, _zero_k)
+                    for i in range_constexpr(_nb)
+                ]
+                _bsu = [
+                    make_desc_bs(lds_bsu_bufs[i], _n_up, _zero_k)
+                    for i in range_constexpr(_nb)
+                ]
+                _b_desc_cache["bg"] = _bg
+                _b_desc_cache["bu"] = _bu
+                _b_desc_cache["bs"] = _bs
+                _b_desc_cache["bsu"] = _bsu
+                _b_desc_cache["bg_addr_lo"] = [_extract_desc_addr_lo(d) for d in _bg]
+                _b_desc_cache["bu_addr_lo"] = [_extract_desc_addr_lo(d) for d in _bu]
+                _b_desc_cache["bs_addr_lo"] = [_extract_desc_addr_lo(d) for d in _bs]
+                _b_desc_cache["bsu_addr_lo"] = [_extract_desc_addr_lo(d) for d in _bsu]
+            _b_desc_cache["ready"] = True
+
+        def _b_data_k_byte_off(k_base):
+            # Byte offset along the fastest axis for a B-data descriptor:
+            #   non-fp4 / merged pair : (k_base / PACK_FACTOR_B) * 16 bytes
+            #   fp4                   : (k_base / PACK_FACTOR_B) bytes
+            # Matches `make_desc_b` / `make_desc_b_pair` global_offset math
+            # (elem_bytes=1 there, so element offset == byte offset).
+            _k_packed_b = (
+                k_base if PACK_FACTOR_B == 1
+                else k_base // fx.Index(PACK_FACTOR_B)
+            )
+            if const_expr(is_fp4):
+                return arith.index_cast(T.i32, _k_packed_b)
+            return arith.index_cast(
+                T.i32, _k_packed_b * fx.Index(16))
+
+        def _b_scale_k_byte_off(k_base):
+            # B-scale fastest-axis offset: k_base / SCALE_BLOCK bytes.
+            return arith.index_cast(
+                T.i32, k_base // fx.Index(SCALE_BLOCK))
 
         def make_desc_as(k_base):
             return k_base / arith.index(SCALE_BLOCK)
@@ -1124,17 +1281,31 @@ def _compile_stage1_mxscale_kernel_impl(
                         _scale_adv_i32,
                     )
 
+                # Pre-build per-stage TDMDescriptor2D bases at addr_lo=0 so the
+                # hot path only patches lane 2 via update_tensor_descriptor_2d_addr_lo,
+                # avoiding a fresh vector.from_elements + TDMDescriptor2D each issue.
+                _tdm_zero_addr_lo = arith.constant(0, type=T.i32)
+                _active_stage_desc_base = [
+                    tdm_ops.TDMDescriptor2D(
+                        vector.from_elements(T.vec(4, T.i32), [
+                            _tdm_pred,
+                            _active_stage_lds_addr[i],
+                            _tdm_zero_addr_lo,
+                            _active_addr_hi,
+                        ]),
+                        _active_dgroup1,
+                    )
+                    for i in range_constexpr(_nb)
+                ]
+
                 def _issue_active_b_tdm_only(stage_idx, curr_addr_lo):
                     _if_loader = scf.IfOp(_is_loader_wave)
                     with ir.InsertionPoint(_if_loader.then_block):
-                        _dg0 = vector.from_elements(T.vec(4, T.i32), [
-                            _tdm_pred,
-                            _active_stage_lds_addr[stage_idx],
-                            curr_addr_lo,
-                            _active_addr_hi,
-                        ])
                         tdm_ops.tensor_load_2d(
-                            tdm_ops.TDMDescriptor2D(_dg0, _active_dgroup1)
+                            tdm_ops.update_tensor_descriptor_2d_addr_lo(
+                                _active_stage_desc_base[stage_idx],
+                                curr_addr_lo,
+                            )
                         )
                         scf.YieldOp([])
                     _next_addr_lo = arith.addi(curr_addr_lo, _active_adv_i32)
@@ -1144,31 +1315,58 @@ def _compile_stage1_mxscale_kernel_impl(
                         curr_addr_lo,
                     )
 
+            if const_expr(_use_tdm_gather_a):
+                _build_a_gather_base_descs(lds_ag_bufs)
+            # Hoist K-invariant parts of B / B-scale 2D descriptors so the
+            # hot K loop only has to advance addr_lo per tile. In
+            # wave-specialized mode the hot path goes through
+            # ``_issue_active_b_tdm_only`` (which is already hoisted via
+            # ``_active_stage_desc_base``) and ``_issue_b_tdm_only`` is only
+            # reachable from the tail/non-pipelined paths; skip the build
+            # there to avoid emitting dead IR.
+            if const_expr(not wave_specialized_tdm):
+                _build_b_base_descs()
+
             # ── pipeline load helpers ─────────────────────────────────
             def _issue_b_tdm_only(k_base, buf_idx):
+                _k_data_off = _b_data_k_byte_off(k_base)
+                _k_scale_off = _b_scale_k_byte_off(k_base)
                 if const_expr(_merge_gate_up_tdm):
-                    _n_pair = _stage1_pair_row_base()
+                    _bg_addr = arith.addi(
+                        _b_desc_cache["bg_pair_addr_lo"][buf_idx], _k_data_off)
+                    _bs_addr = arith.addi(
+                        _b_desc_cache["bs_pair_addr_lo"][buf_idx], _k_scale_off)
                     tdm_ops.tensor_load_2d(
-                        make_desc_b_pair(lds_bg_pair_bufs[buf_idx], _n_pair, k_base))
+                        tdm_ops.update_tensor_descriptor_2d_addr_lo(
+                            _b_desc_cache["bg_pair"][buf_idx], _bg_addr))
                     tdm_ops.tensor_load_2d(
-                        make_desc_bs_pair(lds_bs_pair_bufs[buf_idx], _n_pair, k_base))
+                        tdm_ops.update_tensor_descriptor_2d_addr_lo(
+                            _b_desc_cache["bs_pair"][buf_idx], _bs_addr))
                 else:
-                    _eid_row = (arith.index_cast(T.index, eid_i32)
-                                * arith.index(int(2 * N)))
-                    _n_gate = _eid_row + blk_n
-                    _n_up = _eid_row + blk_n + arith.index(int(N))
+                    _bg_addr = arith.addi(
+                        _b_desc_cache["bg_addr_lo"][buf_idx], _k_data_off)
+                    _bu_addr = arith.addi(
+                        _b_desc_cache["bu_addr_lo"][buf_idx], _k_data_off)
+                    _bs_addr = arith.addi(
+                        _b_desc_cache["bs_addr_lo"][buf_idx], _k_scale_off)
+                    _bsu_addr = arith.addi(
+                        _b_desc_cache["bsu_addr_lo"][buf_idx], _k_scale_off)
                     tdm_ops.tensor_load_2d(
-                        make_desc_b(lds_bg_bufs[buf_idx], _n_gate, k_base))
+                        tdm_ops.update_tensor_descriptor_2d_addr_lo(
+                            _b_desc_cache["bg"][buf_idx], _bg_addr))
                     tdm_ops.tensor_load_2d(
-                        make_desc_b(lds_bu_bufs[buf_idx], _n_up, k_base))
+                        tdm_ops.update_tensor_descriptor_2d_addr_lo(
+                            _b_desc_cache["bu"][buf_idx], _bu_addr))
                     tdm_ops.tensor_load_2d(
-                        make_desc_bs(lds_bs_bufs[buf_idx], _n_gate, k_base))
+                        tdm_ops.update_tensor_descriptor_2d_addr_lo(
+                            _b_desc_cache["bs"][buf_idx], _bs_addr))
                     tdm_ops.tensor_load_2d(
-                        make_desc_bs(lds_bsu_bufs[buf_idx], _n_up, k_base))
+                        tdm_ops.update_tensor_descriptor_2d_addr_lo(
+                            _b_desc_cache["bsu"][buf_idx], _bsu_addr))
 
             def _issue_scalar_loads(k_base, buf_idx):
                 if const_expr(_use_tdm_gather_a):
-                    issue_a_load_tdm_gather(k_base, lds_ag_bufs[buf_idx])
+                    issue_a_load_tdm_gather(k_base, buf_idx)
                 else:
                     issue_a_load(make_desc_a(k_base), lds_ag_bufs[buf_idx])
                 issue_as_load(make_desc_as(k_base), lds_as_bufs[buf_idx])
@@ -1813,6 +2011,14 @@ def _compile_stage2_mxscale_kernel_impl(
         i32_size_expert_ids_in: fx.Int32,
     ):
         _ = i32_k_in
+        # ASTRewriter strips ``const_expr(...)`` from ``if`` tests, which would
+        # otherwise eliminate every reference to ``const_expr`` from the
+        # rewritten function body and shrink ``co_freevars`` by one — causing
+        # CPython to reject ``f.__code__ = new_f_code_o`` because the original
+        # ``__closure__`` length no longer matches. Keep one explicit reference
+        # so the rewritten code object's free-vars list still includes
+        # ``const_expr``.
+        _keep_const_expr_ref = const_expr  # noqa: F841
         if const_expr(inst_prefetch):
             if arith.cmpi(arith.CmpIPredicate.eq, rocdl.wave_id(),
                           arith.constant(0, type=T.i32)):
@@ -2046,17 +2252,26 @@ def _compile_stage2_mxscale_kernel_impl(
                     vector.store(v1, target_lds, [lds_idx], alignment=1)
                     scf.YieldOp([])
 
-        def issue_a_load_tdm_gather(k_base, target_lds):
-            """Load stage2 A rows via TDM gather using token-slot row ids."""
-            k_packed_base = k_base if PACK_FACTOR_A == 1 else k_base // fx.Index(PACK_FACTOR_A)
+        # Cache of K-invariant pieces of the stage2 TDM gather descriptor.
+        # See the stage1 equivalent for the field-by-field rationale; the
+        # only stage2 differences are using ``_a_row_ids`` /
+        # ``_a_row_valids`` and ``_get_tokens_topk_sgpr`` (rows already encode
+        # token*topk slots) instead of the stage1 row sources.
+        _a_gather_cache = {}
+
+        def _build_a_gather_base_descs(lds_bufs):
+            if "desc" in _a_gather_cache:
+                return
             _tokens_topk = _get_tokens_topk_sgpr()
             _zero_i32 = arith.constant(0, type=T.i32)
+            _descs = []
+            _preds = []
+            _base_addr_lo = []
             for _gi in range_constexpr(_TDM_GATHER_GROUPS):
                 _start = _gi * _TDM_GATHER_CHUNK
                 _cnt = min(_TDM_GATHER_CHUNK, int(tile_m) - _start)
                 _row_indices = _a_row_ids[_start:_start + _cnt]
                 _valid_count = _sum_i32_values(_a_row_valids[_start:_start + _cnt])
-                _lds_off = fx.Index(_start * lds_a_stride_bytes)
                 _has_valid = arith.cmpi(arith.CmpIPredicate.sgt, _valid_count, _zero_i32)
                 _issue_pred = _has_valid
                 if const_expr(wave_specialized_tdm):
@@ -2067,11 +2282,16 @@ def _compile_stage2_mxscale_kernel_impl(
                         arith.constant(_gather_owner, type=T.i32),
                     )
                     _issue_pred = arith.andi(_issue_pred, _is_gather_loader)
-                _if_issue = scf.IfOp(_issue_pred)
-                with ir.InsertionPoint(_if_issue.then_block):
-                    desc = tdm_ops.make_tensor_gather_descriptor(
+                _preds.append(_issue_pred)
+
+                _lds_off = fx.Index(_start * lds_a_stride_bytes)
+                _per_buf = []
+                # See stage1 note: range_constexpr is mandatory here so the
+                # AST rewriter does not turn this into an scf.ForOp.
+                for _buf_i in range_constexpr(len(lds_bufs)):
+                    _base_desc = tdm_ops.make_tensor_gather_descriptor(
                         global_ptr=arg_x,
-                        lds_memref=target_lds,
+                        lds_memref=lds_bufs[_buf_i],
                         row_indices=_row_indices,
                         row_width=int(packed_tile_k_a),
                         tensor_dim0=K_packed_a,
@@ -2083,9 +2303,42 @@ def _compile_stage2_mxscale_kernel_impl(
                         index_size=32,
                         gather_tile_dim1=_valid_count,
                         lds_byte_offset=_lds_off,
-                        global_byte_offset=k_packed_base,
+                        global_byte_offset=None,
                     )
-                    tdm_ops.tensor_load_gather(desc)
+                    _per_buf.append(_base_desc)
+                _descs.append(_per_buf)
+                _base_addr_lo.append(vector.extract(
+                    _per_buf[0].dgroup0,
+                    static_position=[2],
+                    dynamic_position=[],
+                ))
+
+            _a_gather_cache["desc"] = _descs
+            _a_gather_cache["pred"] = _preds
+            _a_gather_cache["base_addr_lo"] = _base_addr_lo
+
+        def issue_a_load_tdm_gather(k_base, buf_idx):
+            """Hot path: advance addr_lo on the precomputed gather descriptor.
+
+            Requires ``_build_a_gather_base_descs(lds_bufs)`` to have been
+            called once before the K loop with the matching LDS buffer list.
+            """
+            k_packed_base = k_base if PACK_FACTOR_A == 1 else k_base // fx.Index(PACK_FACTOR_A)
+            _k_byte_off_i32 = arith.index_cast(T.i32, k_packed_base)
+            _descs = _a_gather_cache["desc"]
+            _preds = _a_gather_cache["pred"]
+            _base_addr_lo = _a_gather_cache["base_addr_lo"]
+            for _gi in range_constexpr(_TDM_GATHER_GROUPS):
+                _if_issue = scf.IfOp(_preds[_gi])
+                with ir.InsertionPoint(_if_issue.then_block):
+                    _curr_addr_lo = arith.addi(
+                        _base_addr_lo[_gi], _k_byte_off_i32)
+                    tdm_ops.tensor_load_gather(
+                        tdm_ops.update_tensor_gather_descriptor_addr_lo(
+                            _descs[_gi][buf_idx],
+                            _curr_addr_lo,
+                        )
+                    )
                     scf.YieldOp([])
 
         def make_desc_as(k_base):
@@ -2171,6 +2424,59 @@ def _compile_stage2_mxscale_kernel_impl(
                 tile_shape=(int(tile_n), int(scale_k_per_tile)),
                 elem_bytes=1, pad_interval=0, pad_amount=0,
                 num_warps=tdm_desc_num_warps, workgroup_mask=b_mcast_mask)
+
+        # Cache of K-invariant 2D B / B-scale descriptors used by stage2's
+        # ``_issue_b_tdm_only``. Stage2 has no merge_gate_up_tdm path, so the
+        # cache is single-branched. Mirrors the stage1 helper pair; closed
+        # over ``make_desc_b``, ``make_desc_bs``, ``lds_b_bufs``,
+        # ``lds_bs_bufs`` and ``eid_i32`` / ``n_idx`` / ``blk_n``, all
+        # resolved at call time inside ``_if_blk``.
+        _b_desc_cache = {}
+
+        def _extract_desc_addr_lo(desc):
+            return vector.extract(
+                desc.dgroup0,
+                static_position=[2],
+                dynamic_position=[],
+            )
+
+        def _build_b_base_descs():
+            if "ready" in _b_desc_cache:
+                return
+            _zero_k = arith.index(0)
+            _eid_idx = arith.index_cast(T.index, eid_i32)
+            _n_off = _eid_idx * n_idx + blk_n
+            _b = [
+                make_desc_b(_n_off, _zero_k, lds_b_bufs[i])
+                for i in range_constexpr(_nb)
+            ]
+            _bs = [
+                make_desc_bs(_n_off, _zero_k, lds_bs_bufs[i])
+                for i in range_constexpr(_nb)
+            ]
+            _b_desc_cache["b"] = _b
+            _b_desc_cache["bs"] = _bs
+            _b_desc_cache["b_addr_lo"] = [_extract_desc_addr_lo(d) for d in _b]
+            _b_desc_cache["bs_addr_lo"] = [_extract_desc_addr_lo(d) for d in _bs]
+            _b_desc_cache["ready"] = True
+
+        def _b_data_k_byte_off(k_base):
+            # Fastest-axis byte offset for stage2 B data descriptor:
+            #   non-fp4 : (k_base / PACK_FACTOR_B) * 16 bytes
+            #   fp4     : (k_base / PACK_FACTOR_B) bytes
+            # Matches make_desc_b global_offset math (elem_bytes=1).
+            _k_packed_b = (
+                k_base if PACK_FACTOR_B == 1
+                else k_base // fx.Index(PACK_FACTOR_B)
+            )
+            if const_expr(is_fp4):
+                return arith.index_cast(T.i32, _k_packed_b)
+            return arith.index_cast(
+                T.i32, _k_packed_b * fx.Index(16))
+
+        def _b_scale_k_byte_off(k_base):
+            return arith.index_cast(
+                T.i32, k_base // fx.Index(SCALE_BLOCK))
 
         def issue_b_load(k_base, target_lds_b, target_lds_bs):
             eid_idx = arith.index_cast(T.index, eid_i32)
@@ -2515,17 +2821,32 @@ def _compile_stage2_mxscale_kernel_impl(
                     _data_adv_i32,
                     _scale_adv_i32,
                 )
+
+                # See stage1 for rationale: pre-build per-stage TDMDescriptor2D
+                # bases so the hot path only patches lane 2 via
+                # update_tensor_descriptor_2d_addr_lo.
+                _tdm_zero_addr_lo = arith.constant(0, type=T.i32)
+                _active_stage_desc_base = [
+                    tdm_ops.TDMDescriptor2D(
+                        vector.from_elements(T.vec(4, T.i32), [
+                            _tdm_pred,
+                            _active_stage_lds_addr[i],
+                            _tdm_zero_addr_lo,
+                            _active_addr_hi,
+                        ]),
+                        _active_dgroup1,
+                    )
+                    for i in range_constexpr(_nb)
+                ]
+
                 def _issue_active_b_tdm_only(stage_idx, curr_addr_lo):
                     _if_loader = scf.IfOp(_is_loader_wave)
                     with ir.InsertionPoint(_if_loader.then_block):
-                        _dg0 = vector.from_elements(T.vec(4, T.i32), [
-                            _tdm_pred,
-                            _active_stage_lds_addr[stage_idx],
-                            curr_addr_lo,
-                            _active_addr_hi,
-                        ])
                         tdm_ops.tensor_load_2d(
-                            tdm_ops.TDMDescriptor2D(_dg0, _active_dgroup1)
+                            tdm_ops.update_tensor_descriptor_2d_addr_lo(
+                                _active_stage_desc_base[stage_idx],
+                                curr_addr_lo,
+                            )
                         )
                         scf.YieldOp([])
                     _next_addr_lo = arith.addi(curr_addr_lo, _active_adv_i32)
@@ -2535,18 +2856,34 @@ def _compile_stage2_mxscale_kernel_impl(
                         curr_addr_lo,
                     )
 
+            if const_expr(_use_tdm_gather_a):
+                _build_a_gather_base_descs(lds_a_bufs)
+            # See stage1 for the rationale of guarding on wave_specialized_tdm:
+            # in wave-specialized mode the hot path goes through
+            # ``_issue_active_b_tdm_only``; ``_issue_b_tdm_only`` is only used
+            # in non-pipelined / tail paths, so skip the cache build to avoid
+            # emitting dead IR.
+            if const_expr(not wave_specialized_tdm):
+                _build_b_base_descs()
+
             # ── pipeline load helpers ─────────────────────────────────
             def _issue_b_tdm_only(k_base, buf_idx):
-                _eid = arith.index_cast(T.index, eid_i32)
-                _n = _eid * n_idx + blk_n
+                _k_data_off = _b_data_k_byte_off(k_base)
+                _k_scale_off = _b_scale_k_byte_off(k_base)
+                _b_addr = arith.addi(
+                    _b_desc_cache["b_addr_lo"][buf_idx], _k_data_off)
+                _bs_addr = arith.addi(
+                    _b_desc_cache["bs_addr_lo"][buf_idx], _k_scale_off)
                 tdm_ops.tensor_load_2d(
-                    make_desc_b(_n, k_base, lds_b_bufs[buf_idx]))
+                    tdm_ops.update_tensor_descriptor_2d_addr_lo(
+                        _b_desc_cache["b"][buf_idx], _b_addr))
                 tdm_ops.tensor_load_2d(
-                    make_desc_bs(_n, k_base, lds_bs_bufs[buf_idx]))
+                    tdm_ops.update_tensor_descriptor_2d_addr_lo(
+                        _b_desc_cache["bs"][buf_idx], _bs_addr))
 
             def _issue_scalar_loads(k_base, buf_idx):
                 if const_expr(_use_tdm_gather_a):
-                    issue_a_load_tdm_gather(k_base, lds_a_bufs[buf_idx])
+                    issue_a_load_tdm_gather(k_base, buf_idx)
                 else:
                     issue_a_load(make_desc_a(k_base), lds_a_bufs[buf_idx])
                 issue_as_load(make_desc_as(k_base), lds_as_bufs[buf_idx])
