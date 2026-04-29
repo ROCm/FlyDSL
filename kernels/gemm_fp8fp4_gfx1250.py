@@ -1691,9 +1691,49 @@ def compile_mxscale_gemm(
             scale_bulk_copy_iters = scale_tile_chunks // block_threads
             scale_side_copy_iters = (
                 scale_tile_chunks + block_threads - 1) // block_threads
-            scale_async_loads_per_stage = scale_side_copy_iters
+            # Hard-coded switch for isolating scale-copy behavior. Keep False
+            # for the async optimized path; set True to use sync load+LDS store.
+            scale_load_sync = False
+            scale_async_loads_per_stage = (
+                0 if scale_load_sync else scale_side_copy_iters)
             scale_async_buffered_outstanding = (
                 scale_async_loads_per_stage * (pre_loaded - 1))
+            scale_copy_vec_ty = ir.VectorType.get(
+                [4], ir.IntegerType.get_signless(32))
+            scale_async_needs_sched_guard = (
+                expert_sched_mode and not scale_load_sync)
+
+            def _set_sched_dependency_mode(mode: int):
+                from flydsl._mlir.dialects import llvm as llvm_dialect
+
+                llvm_dialect.inline_asm(
+                    None, [],
+                    ("s_setreg_imm32_b32 "
+                     f"hwreg(HW_REG_WAVE_SCHED_MODE, 0, 2), {mode}"),
+                    "",
+                    has_side_effects=True,
+                )
+
+            def _restore_scale_async_sched_mode():
+                from flydsl._mlir.dialects import llvm as llvm_dialect
+
+                llvm_dialect.inline_asm(
+                    None, [],
+                    "s_wait_alu depctr_vm_vsrc(0)\n"
+                    "s_setreg_imm32_b32 hwreg(HW_REG_WAVE_SCHED_MODE, 0, 2), 2",
+                    "",
+                    has_side_effects=True,
+                )
+
+            def _copy_scale_chunk_ptr(global_ptr, lds_ptr):
+                if scale_load_sync:
+                    from flydsl._mlir.dialects import llvm as llvm_dialect
+
+                    scale_vec = llvm_dialect.load(scale_copy_vec_ty, global_ptr)
+                    llvm_dialect.StoreOp(scale_vec, lds_ptr)
+                else:
+                    rocdl.global_load_async_to_lds_b128(
+                        global_ptr, lds_ptr, 0, 0)
 
             def _copy_scale_chunk(scale_base_idx, lds_memref, global_row_base,
                                   global_k_tile_base, panel_cols, chunk):
@@ -1710,8 +1750,7 @@ def compile_mxscale_gemm(
                     lds_memref)
                 lds_ptr = buffer_ops.create_llvm_ptr(
                     lds_base_idx + local_byte_off, address_space=3)
-                rocdl.global_load_async_to_lds_b128(
-                    global_ptr, lds_ptr, 0, 0)
+                _copy_scale_chunk_ptr(global_ptr, lds_ptr)
 
             def issue_scale_async(stage_idx: int, k_base):
                 from flydsl._mlir.dialects import memref as memref_dialect
@@ -1744,6 +1783,13 @@ def compile_mxscale_gemm(
                         body()
                         scf.YieldOp([])
 
+                if scale_async_needs_sched_guard:
+                    # Expert scheduling mode disables automatic VA_VDST/VM_VSRC
+                    # checks. Temporarily re-enable them for the direct async
+                    # VGLOBAL issue window, then restore mode 2 after source
+                    # VGPRs have been consumed. ASYNC data may remain in flight.
+                    _set_sched_dependency_mode(0)
+
                 def _copy_scale_chunk_selected(linear_chunk):
                     is_b = arith.cmpi(
                         arith.CmpIPredicate.uge, linear_chunk,
@@ -1763,8 +1809,7 @@ def compile_mxscale_gemm(
                         address_space=1)
                     lds_ptr = buffer_ops.create_llvm_ptr(
                         lds_base_idx + local_byte_off, address_space=3)
-                    rocdl.global_load_async_to_lds_b128(
-                        global_ptr, lds_ptr, 0, 0)
+                    _copy_scale_chunk_ptr(global_ptr, lds_ptr)
 
                 for it in range_constexpr(scale_bulk_copy_iters):
                     linear_chunk = tx + arith.index(it * block_threads)
@@ -1800,6 +1845,9 @@ def compile_mxscale_gemm(
 
                     _issue_when(in_a, _copy_a)
                     _issue_when(in_b, _copy_b)
+
+                if scale_async_needs_sched_guard:
+                    _restore_scale_async_sched_mode()
         else:
             def issue_scale_async(stage_idx: int, k_base):
                 return
