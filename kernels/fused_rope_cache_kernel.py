@@ -38,12 +38,10 @@ KV cache layouts:
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-
-from flydsl.expr import arith, vector, buffer_ops, range_constexpr, const_expr
+from flydsl.expr import arith, buffer_ops, const_expr, range_constexpr, vector
 from flydsl.expr.arith import ArithValue
 from flydsl.expr.typing import T
 from kernels.kernels_common import get_warp_size
-
 
 # WARP_SIZE is 32 on RDNA (wave32: gfx10xx/gfx11xx/gfx12xx) and 64 on CDNA (wave64: gfx9xx).
 # All derived values (VEC_WIDTH, vecs_per_half, BLOCK_THREADS) flow from this automatically.
@@ -162,7 +160,7 @@ def build_fused_rope_cache_module(
             """Return the copy of vec_val held by the rotary-pair thread, via ds_bpermute."""
             if const_expr(VEC_WIDTH == 1):
                 # vector<1xf16/bf16> → extract scalar → bitcast to i16 → zero-extend i32
-                elem_val = vector.extract(vec_val, static_position=[0], dynamic_position=[])
+                elem_val = vec_val[0]
                 i16_val = ArithValue(elem_val).bitcast(T.i16)
                 i32_val = ArithValue(i16_val).extui(T.i32)
                 # Cross-lane shuffle: get pair thread's 32-bit VGPR (pair elem in low 16 bits)
@@ -187,7 +185,7 @@ def build_fused_rope_cache_module(
             # --- Load position (scalar i32) ---
             pos_rsrc = buffer_ops.create_buffer_resource(Positions, max_size=True)
             if const_expr(pos_dtype == "i64"):
-                pos_elem_off = ArithValue(pid_t) * 2
+                pos_elem_off = pid_t * 2
             else:
                 pos_elem_off = pid_t
             pos_val = buffer_ops.buffer_load(pos_rsrc, pos_elem_off, vec_width=1, dtype=T.i32)
@@ -197,7 +195,7 @@ def build_fused_rope_cache_module(
 
             # Pair lane for ds_bpermute: tid XOR vecs_per_half (symmetric, works for both halves).
             # pair_byte_addr = pair_lane * 4 (ds_bpermute address unit is bytes, VGPR = 4 bytes).
-            pair_lane = ArithValue(tid) ^ fx.Int32(vecs_per_half)
+            pair_lane = tid ^ fx.Int32(vecs_per_half)
             pair_byte_addr = pair_lane * fx.Int32(4)
 
             # --- Shared cos/sin (loaded once, used by both Q and K) ---
@@ -221,12 +219,12 @@ def build_fused_rope_cache_module(
                 qo_div = fx.logical_divide(qo_row, vec_div_lay)
 
                 q_e_vec = load_vec(q_div, tid)
-                q_e = ArithValue(q_e_vec)
+                q_e = q_e_vec
                 # Use ds_bpermute to get pair element via LDS cross-lane shuffle (no VMEM).
-                q_pair_e = ArithValue(ds_bpermute_pair(q_e_vec, pair_byte_addr))
+                q_pair_e = ds_bpermute_pair(q_e_vec, pair_byte_addr)
 
-                q_cos = q_e * ArithValue(cos_e)
-                q_pair_sin = q_pair_e * ArithValue(sin_e)
+                q_cos = q_e * cos_e
+                q_pair_sin = q_pair_e * sin_e
                 q_sin_term = is_first_half.select(-q_pair_sin, q_pair_sin)
                 q_rot_e = q_cos + q_sin_term
 
@@ -243,12 +241,12 @@ def build_fused_rope_cache_module(
                 ko_div = fx.logical_divide(ko_row, vec_div_lay)
 
                 k_e_vec = load_vec(k_div, tid)
-                k_e = ArithValue(k_e_vec)
+                k_e = k_e_vec
                 # Use ds_bpermute to get pair element via LDS cross-lane shuffle (no VMEM).
-                k_pair_e = ArithValue(ds_bpermute_pair(k_e_vec, pair_byte_addr))
+                k_pair_e = ds_bpermute_pair(k_e_vec, pair_byte_addr)
 
-                k_cos = k_e * ArithValue(cos_e)
-                k_pair_sin = k_pair_e * ArithValue(sin_e)
+                k_cos = k_e * cos_e
+                k_pair_sin = k_pair_e * sin_e
                 k_sin_term = is_first_half.select(-k_pair_sin, k_pair_sin)
                 k_rot_e = k_cos + k_sin_term
 
@@ -258,14 +256,14 @@ def build_fused_rope_cache_module(
                 # --- KV Cache write ---
                 slot_rsrc = buffer_ops.create_buffer_resource(SlotMapping, max_size=True)
                 if const_expr(pos_dtype == "i64"):
-                    slot_elem_off = ArithValue(pid_t) * 2
+                    slot_elem_off = pid_t * 2
                 else:
                     slot_elem_off = pid_t
                 slot_val = buffer_ops.buffer_load(slot_rsrc, slot_elem_off, vec_width=1, dtype=T.i32)
 
                 if slot_val >= fx.Int32(0):
-                    pid_t_slot = ArithValue(slot_val) // block_size
-                    pid_b = ArithValue(slot_val) % block_size
+                    pid_t_slot = slot_val // block_size
+                    pid_b = slot_val % block_size
 
                     # Load V via layout API (deferred here to minimize SGPR liveness)
                     V_buf = fx.rocdl.make_buffer_tensor(V)
@@ -283,8 +281,8 @@ def build_fused_rope_cache_module(
                         r_vs = fx.memref_alloca(f32_reg_ty, f32_reg_lay)
                         fx.copy_atom_call(f32_copy_atom, fx.slice(ks_div, (None, fx.Int32(0))), r_ks)
                         fx.copy_atom_call(f32_copy_atom, fx.slice(vs_div, (None, fx.Int32(0))), r_vs)
-                        k_scale_val = vector.extract(fx.memref_load_vec(r_ks), static_position=[0], dynamic_position=[])
-                        v_scale_val = vector.extract(fx.memref_load_vec(r_vs), static_position=[0], dynamic_position=[])
+                        k_scale_val = fx.memref_load_vec(r_ks)[0]
+                        v_scale_val = fx.memref_load_vec(r_vs)[0]
                         k_rcp = fx.rocdl.rcp(T.f32, k_scale_val)
                         v_rcp = fx.rocdl.rcp(T.f32, v_scale_val)
 
