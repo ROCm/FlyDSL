@@ -779,7 +779,15 @@ class JitFunction:
                 key_parts.append((name, "Type", arg))
                 continue
 
-            is_runtime = ann is not inspect.Parameter.empty and hasattr(ann, "__fly_ptrs__")
+            # The stream selects the launch queue and does not affect generated code.
+            # Normalize equivalent host representations (raw pointer, Stream object)
+            # so CPU AOT artifacts can be reused by GPU runtime calls.
+            if ann is Stream:
+                key_parts.append((name, Stream))
+                continue
+
+            is_runtime = (ann is not inspect.Parameter.empty
+                          and hasattr(ann, '__fly_ptrs__'))
             if isinstance(arg, tuple):
                 key_parts.append((name, tuple(self._arg_cache_sig(a) for a in arg)))
             else:
