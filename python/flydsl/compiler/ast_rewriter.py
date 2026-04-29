@@ -923,7 +923,8 @@ class InsertEmptyYieldForSCFFor(Transformer):
         stop_val = InsertEmptyYieldForSCFFor._to_index(stop)
         step_val = InsertEmptyYieldForSCFFor._to_index(step)
         if init is not None:
-            for_op = scf.ForOp(start_val, stop_val, step_val, list(init))
+            init = [_unwrap_value(v) for v in init]
+            for_op = scf.ForOp(start_val, stop_val, step_val, init)
             with ir.InsertionPoint(for_op.body):
                 yield for_op.induction_variable, list(for_op.inner_iter_args)
         else:

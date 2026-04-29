@@ -288,6 +288,12 @@ def _invert_op(self, *, loc=None, ip=None):
     return arith.xori(self, arith_const(-1, self.type, loc=loc, ip=ip))
 
 
+def _select_raw_operand(value, other, *, loc=None):
+    if isinstance(value, (int, float, bool)):
+        return _to_raw(arith_const(value, _to_raw(other).type, loc=loc))
+    return _to_raw(value)
+
+
 @ir.register_value_caster(ir.Float4E2M1FNType.static_typeid)
 @ir.register_value_caster(ir.Float6E2M3FNType.static_typeid)
 @ir.register_value_caster(ir.Float6E3M2FNType.static_typeid)
@@ -356,8 +362,9 @@ class ArithValue(ir.Value):
 
     def select(self, true_value, false_value, *, loc=None):
         """Ternary select: self (i1 condition) ? true_value : false_value."""
-        return arith.SelectOp(_to_raw(self), _to_raw(true_value),
-                              _to_raw(false_value), loc=loc).result
+        true_value = _select_raw_operand(true_value, false_value, loc=loc)
+        false_value = _select_raw_operand(false_value, true_value, loc=loc)
+        return arith.SelectOp(_to_raw(self), true_value, false_value, loc=loc).result
 
     def extf(self, target_type, *, loc=None):
         """Extend float precision (e.g. bf16 → f32)."""
@@ -408,6 +415,10 @@ class ArithValue(ir.Value):
     def shuffle_xor(self, offset, width, *, loc=None):
         """GPU warp shuffle with XOR mode."""
         from ..._mlir.dialects.gpu import ShuffleOp
+        if isinstance(offset, int):
+            offset = constant(offset, type=T.i32(), loc=loc)
+        if isinstance(width, int):
+            width = constant(width, type=T.i32(), loc=loc)
         return ShuffleOp(_to_raw(self), _to_raw(offset),
                          _to_raw(width), mode="xor", loc=loc).shuffleResult
 
@@ -500,8 +511,9 @@ def index_cast(target_type, value, *, loc=None):
 @traced_op
 def select(condition, true_value, false_value, *, loc=None):
     """Select between two values based on a boolean condition."""
-    return arith.SelectOp(_to_raw(condition), _to_raw(true_value),
-                          _to_raw(false_value), loc=loc).result
+    true_value = _select_raw_operand(true_value, false_value, loc=loc)
+    false_value = _select_raw_operand(false_value, true_value, loc=loc)
+    return arith.SelectOp(_to_raw(condition), true_value, false_value, loc=loc).result
 
 
 @traced_op

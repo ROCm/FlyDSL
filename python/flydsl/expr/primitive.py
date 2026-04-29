@@ -205,6 +205,51 @@ UniversalAtomicDec = lambda val_type: CopyOpUniversalAtomicType.get(int(AtomicOp
 UniversalFMA = lambda ty: MmaOpUniversalFMAType.get(ty.ir_type)
 
 
+# ===----------------------------------------------------------------------=== #
+# Internal
+# ===----------------------------------------------------------------------=== #
+
+
+def _is_int_tuple_value(value):
+    return isinstance(value, ir.Value) and isinstance(value.type, IntTupleType)
+
+
+def _expand_int_tuple_leaves(value, loc=None, ip=None):
+    from .numeric import Numeric
+
+    if _is_int_tuple_value(value):
+        return _expand_int_tuple_leaves(value.to_py_value(loc=loc, ip=ip))
+    if isinstance(value, (list, tuple)):
+        return tuple(_expand_int_tuple_leaves(v, loc=loc, ip=ip) for v in value)
+    if isinstance(value, Numeric):
+        return value.value
+    return value
+
+
+def _infer_int_tuple_type(value, loc=None, ip=None):
+    return fly.infer_int_tuple_type(_expand_int_tuple_leaves(value, loc=loc, ip=ip))
+
+
+def _infer_variadic_int_tuple_type(values, loc=None, ip=None):
+    if len(values) == 1 and _is_int_tuple_value(values[0]):
+        values = values[0]
+    return _infer_int_tuple_type(values, loc=loc, ip=ip)
+
+
+is_profile_congruent = fly.is_profile_congruent
+is_profile_weakly_congruent = fly.is_profile_weakly_congruent
+
+
+def _check_profile(match_func, lhs, rhs):
+    if not match_func(lhs, rhs):
+        raise ValueError(f"profile mismatch: {match_func.__name__}({lhs.type}, {rhs.type}) is False")
+
+
+# ===----------------------------------------------------------------------=== #
+# Compile-time utility
+# ===----------------------------------------------------------------------=== #
+
+
 def const_expr(x):
     return x
 
@@ -214,10 +259,37 @@ def range_constexpr(*args):
 
 
 def rank(int_or_tuple):
+    """Number of top-level elements of a tuple / layout.
+
+    A leaf integer has rank 1; each child of a nested tuple counts as one mode.
+
+    Examples:
+        rank(8)              -> 1
+        rank((8, 16))        -> 2
+        rank((8, (4, 2)))    -> 2   (the nested (4, 2) still counts as one mode)
+    """
+    if isinstance(int_or_tuple, int):
+        return 1
+    if isinstance(int_or_tuple, tuple):
+        return len(int_or_tuple)
     return fly.rank(int_or_tuple)
 
 
 def depth(int_or_tuple):
+    """How deeply the tuple is nested.
+
+    A leaf integer has depth 0; a flat tuple has depth 1; each extra level of
+    nesting adds one.
+
+    Examples:
+        depth(8)             -> 0
+        depth((8, 16))       -> 1
+        depth((8, (4, 2)))   -> 2
+    """
+    if isinstance(int_or_tuple, int):
+        return 0
+    if isinstance(int_or_tuple, tuple):
+        return 1 + max((depth(c) for c in int_or_tuple), default=0)
     return fly.depth(int_or_tuple)
 
 
@@ -228,41 +300,90 @@ def depth(int_or_tuple):
 
 @traced_op
 def static(result_type, loc=None, ip=None):
+    """Materialize a value whose entire content is encoded in *result_type*.
+
+    Used for fully known compile-time objects: static tuples, tiles, swizzles, layout, etc.
+    All information lives in the type, so no runtime operands are needed.
+
+    Examples:
+        static(IntTupleType.get((4, 8)))          -> a static (4, 8) tuple
+        static(SwizzleType.get(3, 3, 3))          -> a static swizzle descriptor
+    """
     return fly.static(result_type, loc=loc, ip=ip)
 
 
 @traced_op
 def make_int_tuple(elems, loc=None, ip=None):
-    IntTupleTy, dyncElems = fly.infer_int_tuple_type(elems)
+    """Build a (possibly nested) integer tuple from Python ints or runtime values.
+
+    Integers become static entries; `ir.Value` operands become dynamic entries.
+
+    Examples:
+        make_int_tuple((4, 8))           -> static tuple (4, 8)
+        make_int_tuple((m, 8))           -> (m, 8) where m is a runtime int
+    """
+    IntTupleTy, dyncElems = _infer_int_tuple_type(elems, loc=loc, ip=ip)
     return fly.make_int_tuple(IntTupleTy, dyncElems, loc=loc, ip=ip)
 
 
 @traced_op
 def make_shape(*shape, loc=None, ip=None):
-    IntTupleTy, dyncElems = fly.infer_int_tuple_type(shape)
+    """Build a shape tuple describing the extent of each mode.
+
+    Supports nested shapes for hierarchical tiling.
+
+    Examples:
+        make_shape(8, 16)          -> (8, 16)
+        make_shape(9, (4, 8))      -> (9, (4, 8))  (second mode is sub-structured)
+    """
+    IntTupleTy, dyncElems = _infer_variadic_int_tuple_type(shape, loc=loc, ip=ip)
     return fly.make_shape(IntTupleTy, dyncElems, loc=loc, ip=ip)
 
 
 @traced_op
 def make_stride(*stride, loc=None, ip=None):
-    IntTupleTy, dyncElems = fly.infer_int_tuple_type(stride)
+    """Build a stride tuple: the step (in elements) when moving along each mode.
+
+    Nested structure must mirror the shape it will be paired with.
+
+    Examples:
+        make_stride(1, 8)                  -> column-major stride for (8, 16)
+        make_stride(16, 1)                 -> row-major stride for (8, 16)
+    """
+    IntTupleTy, dyncElems = _infer_variadic_int_tuple_type(stride, loc=loc, ip=ip)
     return fly.make_stride(IntTupleTy, dyncElems, loc=loc, ip=ip)
 
 
 @traced_op
 def make_coord(*coord, loc=None, ip=None):
-    IntTupleTy, dyncElems = fly.infer_int_tuple_type(coord)
+    """Build a coordinate used for indexing / slicing a layout.
+
+    Use `None` in a mode to mean "all positions of that mode" (a free axis).
+
+    Examples:
+        make_coord(3, 5)           -> point coordinate (row 3, col 5)
+        make_coord(None, bid)      -> (:, bid)  keep first axis free, pick second
+    """
+    IntTupleTy, dyncElems = _infer_variadic_int_tuple_type(coord, loc=loc, ip=ip)
     return fly.make_coord(IntTupleTy, dyncElems, loc=loc, ip=ip)
 
 
 @traced_op
 def make_layout(shape, stride, loc=None, ip=None):
+    """Pair a *shape* with a *stride* to describe how logical coords map to memory.
+
+    Accepts Python tuples directly (auto-converted). The mapping is:
+    `index = sum(coord_i * stride_i)`.
+
+    Examples:
+        make_layout((4, 8), (1, 4))      -> ((4, 8), (1, 4))
+        make_layout((4, 8), (8, 1))      -> ((4, 8), (8, 1))
+    """
     if not isinstance(shape, ir.Value):
-        shapeTy, dyncElems = fly.infer_int_tuple_type(shape)
-        shape = fly.make_shape(shapeTy, dyncElems, loc=loc, ip=ip)
+        shape = make_int_tuple(shape, loc=loc, ip=ip)
     if not isinstance(stride, ir.Value):
-        strideTy, dyncElems = fly.infer_int_tuple_type(stride)
-        stride = fly.make_stride(strideTy, dyncElems, loc=loc, ip=ip)
+        stride = make_int_tuple(stride, loc=loc, ip=ip)
+    _check_profile(is_profile_congruent, shape, stride)
     return fly.make_layout(shape, stride=stride, loc=loc, ip=ip)
 
 
@@ -273,12 +394,20 @@ def make_layout_like(ref, loc=None, ip=None):
 
 @traced_op
 def make_ordered_layout(shape, order, loc=None, ip=None):
+    """Build a compact layout whose stride order matches *order*.
+
+    `order[i]` says where mode *i* sits when ranking strides from fastest
+    (smallest value) to slowest. Lower means more contiguous.
+
+    Examples:
+        make_ordered_layout((M, N), (0, 1))  # column-major: M iterates fastest
+        make_ordered_layout((M, N), (1, 0))  # row-major:    N iterates fastest
+    """
     if not isinstance(shape, ir.Value):
-        shapeTy, dyncElems = fly.infer_int_tuple_type(shape)
-        shape = fly.make_shape(shapeTy, dyncElems, loc=loc, ip=ip)
+        shape = make_int_tuple(shape, loc=loc, ip=ip)
     if not isinstance(order, ir.Value):
-        orderTy, dyncElems = fly.infer_int_tuple_type(order)
-        order = fly.make_int_tuple(orderTy, dyncElems, loc=loc, ip=ip)
+        order = make_int_tuple(order, loc=loc, ip=ip)
+    _check_profile(is_profile_weakly_congruent, order, shape)
     return fly.make_ordered_layout(shape, order, loc=loc, ip=ip)
 
 
@@ -286,8 +415,6 @@ def make_ordered_layout(shape, order, loc=None, ip=None):
 def make_composed_layout(inner, offset, outer, loc=None, ip=None): ...
 @overload
 def make_composed_layout(inner, outer, loc=None, ip=None): ...
-
-
 @traced_op
 def make_composed_layout(inner, offset_or_outer, outer=None, loc=None, ip=None):
     if outer is None:
@@ -486,17 +613,34 @@ def prepend(base, elem, n: int | None = None, loc=None, ip=None):
 
 @traced_op
 def slice(src, coord, loc=None, ip=None):
+    """Keep the modes where *coord* has `None` (wildcard), drop the rest.
+
+    A None in coord means "all of this axis"; a fixed integer picks that index
+    and the mode disappears from the result.
+
+    Examples:
+        slice((4, 8, 16), (None, 3, None))   -> (4, 16)   # mode 1 fixed, dropped
+        slice(layout, make_coord(None, bid)) -> sub-layout for column `bid`
+    """
     if not isinstance(coord, ir.Value):
-        coordTy, dyncElems = fly.infer_int_tuple_type(coord)
-        coord = fly.make_coord(coordTy, dyncElems, loc=loc, ip=ip)
+        coord = make_int_tuple(coord, loc=loc, ip=ip)
+    _check_profile(is_profile_weakly_congruent, coord, src)
     return fly.slice(src, coord, loc=loc, ip=ip)
 
 
 @traced_op
 def dice(src, coord, loc=None, ip=None):
+    """Complement of `slice`: keep the *fixed* modes, drop the `None` (wildcard) ones.
+
+    Useful for extracting the per-tile / per-thread coordinate from a partitioned layout.
+
+    Examples:
+        dice((4, 8, 16), (None, 3, None))    -> (8,)
+        dice(coord_tensor, make_coord(tid, None)) -> the thread-only part
+    """
     if not isinstance(coord, ir.Value):
-        coordTy, dyncElems = fly.infer_int_tuple_type(coord)
-        coord = fly.make_coord(coordTy, dyncElems, loc=loc, ip=ip)
+        coord = make_int_tuple(coord, loc=loc, ip=ip)
+    _check_profile(is_profile_weakly_congruent, coord, src)
     return fly.dice(src, coord, loc=loc, ip=ip)
 
 
@@ -534,39 +678,70 @@ def _to_i32(v):
 
 @traced_op
 def crd2idx(crd, layout, loc=None, ip=None):
+    """Map a coordinate tuple to an index through *layout*.
+
+    For flat layouts this reduces to the familiar `sum(coord_i * stride_i)`.
+    Nested / composed layouts recurse through sub-layouts, apply offsets, and may
+    apply swizzles, so the general case is richer than a single multiply-add.
+
+    Examples:
+        crd2idx((1, 2), make_layout((4, 8), (1, 4)))   -> 9
+        crd2idx(7, make_layout((4, 8), (1, 4)))        -> 7
+    """
     if not isinstance(crd, ir.Value):
         if isinstance(crd, (list, tuple)):
             crd = tuple(_to_i32(c) for c in crd)
-        crdTy, dyncElems = fly.infer_int_tuple_type(crd)
-        crd = fly.make_coord(crdTy, dyncElems, loc=loc, ip=ip)
+        crd = make_int_tuple(crd, loc=loc, ip=ip)
+    _check_profile(is_profile_weakly_congruent, crd, layout)
     return fly.crd2idx(crd, layout, loc=loc, ip=ip)
 
 
 @traced_op
 def idx2crd(index, layout, loc=None, ip=None):
-    if isinstance(index, ir.Value) and not str(index.type).startswith("!fly.int_tuple"):
+    """Map an index back to a coordinate tuple for a plain `Layout`.
+
+    This is the inverse of `crd2idx` for non-composed layouts; the result keeps
+    the same nested structure as the layout's shape. Composed layouts / swizzles
+    are not accepted here.
+
+    Examples:
+        idx2crd(9, make_layout((4, 8), (1, 4)))        -> (1, 2)
+        idx2crd(5, make_layout((4, 8), (8, 1)))        -> (0, 5)
+    """
+    if isinstance(index, ir.Value) and not isinstance(index.type, IntTupleType):
         index = _to_i32(index)
-        IntTupleTy, dyncElems = fly.infer_int_tuple_type(index)
-        index = fly.make_int_tuple(IntTupleTy, dyncElems, loc=loc, ip=ip)
+        index = make_int_tuple(index, loc=loc, ip=ip)
     if not isinstance(index, ir.Value):
-        indexTy, dyncElems = fly.infer_int_tuple_type(index)
-        index = fly.make_int_tuple(indexTy, dyncElems, loc=loc, ip=ip)
+        index = make_int_tuple(index, loc=loc, ip=ip)
     return fly.idx2crd(index, layout, loc=loc, ip=ip)
 
 
 @traced_op
 def get_flat_coord(index, layout, loc=None, ip=None):
+    """Map an index to a *fully flattened* coordinate, ignoring nested grouping.
+
+    Unlike `idx2crd`, the result is always a flat tuple of length `rank` of
+    shape's flattened form - convenient when you want per-axis coordinates.
+
+    Examples:
+        get_flat_coord(9, make_layout((4, 8), (1, 4)))            -> (1, 2)
+        get_flat_coord(3, make_layout(((2, 2), 4), ((1, 2), 4)))  -> (1, 1, 0)
+    """
     if not isinstance(index, ir.Value):
-        indexTy, dyncElems = fly.infer_int_tuple_type(index)
-        index = fly.make_int_tuple(indexTy, dyncElems, loc=loc, ip=ip)
+        index = make_int_tuple(index, loc=loc, ip=ip)
     return fly.get_flat_coord(index, layout, loc=loc, ip=ip)
 
 
 @traced_op
 def get_1d_coord(index, layout, loc=None, ip=None):
+    """Map an index to a single 1-D coordinate in the layout's shape space.
+
+    Examples:
+        get_1d_coord(9, make_layout((4, 8), (1, 4)))   -> 9
+        get_1d_coord(5, make_layout((4, 8), (8, 1)))   -> 20
+    """
     if not isinstance(index, ir.Value):
-        indexTy, dyncElems = fly.infer_int_tuple_type(index)
-        index = fly.make_int_tuple(indexTy, dyncElems, loc=loc, ip=ip)
+        index = make_int_tuple(index, loc=loc, ip=ip)
     return fly.get_1d_coord(index, layout, loc=loc, ip=ip)
 
 
@@ -583,8 +758,7 @@ def composition(layout, tiler, loc=None, ip=None):
 @traced_op
 def complement(layout, codomain_size=None, loc=None, ip=None):
     if codomain_size is not None and not isinstance(codomain_size, ir.Value):
-        codomain_sizeTy, dyncElems = fly.infer_int_tuple_type(codomain_size)
-        codomain_size = fly.make_shape(codomain_sizeTy, dyncElems, loc=loc, ip=ip)
+        codomain_size = make_int_tuple(codomain_size, loc=loc, ip=ip)
     return fly.complement(layout, codomain_size=codomain_size, loc=loc, ip=ip)
 
 
@@ -874,6 +1048,7 @@ def memref_load(memref, indices, loc=None, ip=None):
         return fly.memref_load(memref, indices, loc=loc, ip=ip)
 
     indices = make_int_tuple(indices, loc=loc, ip=ip)
+    _check_profile(is_profile_weakly_congruent, indices, memref)
     return fly.memref_load(memref, indices, loc=loc, ip=ip)
 
 
@@ -888,6 +1063,7 @@ def memref_store(value, memref, indices, loc=None, ip=None):
         return fly.memref_store(value, memref, indices, loc=loc, ip=ip)
 
     indices = make_int_tuple(indices, loc=loc, ip=ip)
+    _check_profile(is_profile_weakly_congruent, indices, memref)
     return fly.memref_store(value, memref, indices, loc=loc, ip=ip)
 
 
@@ -957,6 +1133,9 @@ def printf(*args, format_str="", loc=None, ip=None):
 
 @traced_op
 def assume(result_type, dst, src, loc=None, ip=None):
+    """
+    WIP, unsupported for now
+    """
     return fly.assume(result_type, dst, src, loc=loc, ip=ip)
 
 

@@ -230,7 +230,8 @@ def build_flash_attn_func_module_primary(
         O: fx.Tensor,
         seq_len: fx.Int32,
     ):
-        elem_type = dtype_to_elem_type(dtype_str)
+        elem_dtype = dtype_to_elem_type(dtype_str)
+        elem_type = elem_dtype.ir_type
         compute_type = T.f32
         q_ptr = _fly.extract_aligned_pointer_as_index(_llvm_ptr_ty(), Q)
         k_ptr = _fly.extract_aligned_pointer_as_index(_llvm_ptr_ty(), K)
