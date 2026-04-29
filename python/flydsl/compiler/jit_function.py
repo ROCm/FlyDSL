@@ -714,6 +714,7 @@ class JitFunction:
                 key_parts.append((name, "Type", arg))
                 continue
 
+            # TODO: quick fix for cpu aot compilation.
             if ann is Stream:
                 key_parts.append((name, Stream))
                 continue
