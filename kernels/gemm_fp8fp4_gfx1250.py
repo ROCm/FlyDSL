@@ -7,20 +7,22 @@ Select precision with ``data_format="fp4"|"fp8"|"a8w4"``.
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-
 from flydsl._mlir import ir
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, buffer_ops, const_expr, gpu, idx2crd, range_constexpr, rocdl, tdm_ops, vector
-from flydsl.expr.arith import _to_raw as _raw
 from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr, check_smem_capacity
 from kernels.gemm_common_gfx1250 import (
-    extract_lds_base_idx, get_lds_memref,
+    extract_lds_base_idx,
+    get_lds_memref,
     issue_tdm_loads,
     lds_load_b128_raw,
-    pipeline_fence, pipeline_fence_signal, pipeline_fence_wait,
-    store_acc_vec8_to_buffer, store_acc_vec8_to_lds,
+    pipeline_fence,
+    pipeline_fence_signal,
+    pipeline_fence_wait,
+    store_acc_vec8_to_buffer,
+    store_acc_vec8_to_lds,
 )
 from kernels.pipeline_utils import make_tail_plan, tdm_epilogue_fence_threshold_bytes
 
@@ -364,8 +366,7 @@ def compile_mxscale_gemm(
 
         if const_expr(inst_prefetch):
             from flydsl._mlir.dialects import llvm as llvm_dialect
-            if arith.cmpi(arith.CmpIPredicate.eq, rocdl.wave_id(),
-                          arith.constant(0, type=T.i32)):
+            if rocdl.wave_id() == fx.Int32(0):
                 _prefetch_lines = ["s_setreg_imm32_b32 hwreg(HW_REG_WAVE_MODE, 8, 1), 1"]
                 for _pg in range_constexpr(10):
                     _prefetch_lines.append(
@@ -404,11 +405,11 @@ def compile_mxscale_gemm(
         warp_m_base = wave_m_idx * arith.index(warp_tile_m)
         warp_n_base = wave_n_idx * arith.index(warp_tile_n)
 
-        m_idx = arith.index_cast(T.index, i32_m.ir_value())
+        m_idx = fx.Index(i32_m)
         n_stride = arith.index(N)
         c_nrec = m_idx * n_stride * arith.index(elem_bytes_d)
         c_rsrc = buffer_ops.create_buffer_resource(arg_c, num_records_bytes=c_nrec)
-        zero_i32 = arith.constant(0, type=T.i32)
+        zero_i32 = fx.Int32(0)
 
         def make_desc_a(memref, k_base):
             k_packed_off = k_base / arith.index(PACK_FACTOR_A)
@@ -473,15 +474,9 @@ def compile_mxscale_gemm(
 
         if const_expr(wave_specialized_tdm):
             tdm_wave_id = rocdl.wave_id()
-            tdm_wave_is_a = arith.cmpi(
-                arith.CmpIPredicate.eq, tdm_wave_id,
-                arith.constant(0, type=T.i32))
-            tdm_wave_is_b = arith.cmpi(
-                arith.CmpIPredicate.eq, tdm_wave_id,
-                arith.constant(1, type=T.i32))
-            tdm_wave_is_as = arith.cmpi(
-                arith.CmpIPredicate.eq, tdm_wave_id,
-                arith.constant(2, type=T.i32))
+            tdm_wave_is_a = tdm_wave_id == fx.Int32(0)
+            tdm_wave_is_b = tdm_wave_id == fx.Int32(1)
+            tdm_wave_is_as = tdm_wave_id == fx.Int32(2)
 
             def _select_wave_tdm_value(a_value, b_value, as_value, bs_value):
                 result = arith.select(tdm_wave_is_as, as_value, bs_value)
@@ -1248,12 +1243,12 @@ def compile_mxscale_gemm(
         desc_as_init = make_desc_as(stages_as_mem[0], split_k_base)
         desc_bs_init = make_desc_bs(stages_bs_mem[0], split_k_base)
 
-        adv_a_i32 = arith.constant(tile_k // PACK_FACTOR_A, type=T.i32)
-        adv_b_i32 = arith.constant(packed_tile_k_b * 16, type=T.i32)
-        adv_as_i32 = arith.constant(tile_k // SCALE_BLOCK * wmma_m_rep, type=T.i32)
-        adv_bs_i32 = arith.constant(tile_k // SCALE_BLOCK * b_scale_load_rep, type=T.i32)
+        adv_a_i32 = fx.Int32(tile_k // PACK_FACTOR_A)
+        adv_b_i32 = fx.Int32(packed_tile_k_b * 16)
+        adv_as_i32 = fx.Int32(tile_k // SCALE_BLOCK * wmma_m_rep)
+        adv_bs_i32 = fx.Int32(tile_k // SCALE_BLOCK * b_scale_load_rep)
 
-        pred_const = arith.constant(1, type=T.i32)
+        pred_const = fx.Int32(1)
 
         if const_expr(wave_specialized_tdm):
             active_stage_lds_addr = [
@@ -1308,7 +1303,7 @@ def compile_mxscale_gemm(
                     active_addr_lo, active_addr_hi])
                 tdm_ops.tensor_load_2d(
                     tdm_ops.TDMDescriptor2D(dg0, active_dgroup1))
-                active_addr_lo = arith.addi(active_addr_lo, active_adv_i32)
+                active_addr_lo = active_addr_lo + active_adv_i32
         else:
             for i in range_constexpr(pre_loaded):
                 dg0_a = vector.from_elements(T.vec(4, T.i32), [
@@ -1327,10 +1322,10 @@ def compile_mxscale_gemm(
                     tdm_ops.TDMDescriptor2D(dg0_bs, dgroup1_bs),
                     wave_specialized=wave_specialized_tdm)
 
-                addr_lo_a = arith.addi(addr_lo_a, adv_a_i32)
-                addr_lo_b = arith.addi(addr_lo_b, adv_b_i32)
-                addr_lo_as = arith.addi(addr_lo_as, adv_as_i32)
-                addr_lo_bs = arith.addi(addr_lo_bs, adv_bs_i32)
+                addr_lo_a = addr_lo_a + adv_a_i32
+                addr_lo_b = addr_lo_b + adv_b_i32
+                addr_lo_as = addr_lo_as + adv_as_i32
+                addr_lo_bs = addr_lo_bs + adv_bs_i32
 
         pipeline_fence(outstanding=TDM_LOADS_PER_STEP * (num_buffers - 2),
                        use_cluster=use_cluster)
@@ -1369,7 +1364,7 @@ def compile_mxscale_gemm(
                                 _ab[0], active_addr_hi])
                             tdm_ops.tensor_load_2d(
                                 tdm_ops.TDMDescriptor2D(dg0, active_dgroup1))
-                            _ab[0] = arith.addi(_ab[0], active_adv_i32)
+                            _ab[0] = _ab[0] + active_adv_i32
                             _l2_prefetch(_k_off)
 
                         rocdl.sched_barrier(0)
@@ -1433,10 +1428,10 @@ def compile_mxscale_gemm(
                                 tdm_ops.TDMDescriptor2D(dg0_as, dgroup1_as),
                                 tdm_ops.TDMDescriptor2D(dg0_bs, dgroup1_bs),
                                 wave_specialized=wave_specialized_tdm)
-                            _ab[0][0] = arith.addi(_ab[0][0], adv_a_i32)
-                            _ab[1][0] = arith.addi(_ab[1][0], adv_b_i32)
-                            _ab[2][0] = arith.addi(_ab[2][0], adv_as_i32)
-                            _ab[3][0] = arith.addi(_ab[3][0], adv_bs_i32)
+                            _ab[0][0] = _ab[0][0] + adv_a_i32
+                            _ab[1][0] = _ab[1][0] + adv_b_i32
+                            _ab[2][0] = _ab[2][0] + adv_as_i32
+                            _ab[3][0] = _ab[3][0] + adv_bs_i32
                             _l2_prefetch(_k_off)
 
                         rocdl.sched_barrier(0)
@@ -1504,7 +1499,7 @@ def compile_mxscale_gemm(
                                 _ab[0], active_addr_hi])
                             tdm_ops.tensor_load_2d(
                                 tdm_ops.TDMDescriptor2D(dg0, active_dgroup1))
-                            _ab[0] = arith.addi(_ab[0], active_adv_i32)
+                            _ab[0] = _ab[0] + active_adv_i32
 
                         _tail_mid_cb = _tail_mid_ws
                     else:
@@ -1530,10 +1525,10 @@ def compile_mxscale_gemm(
                                 tdm_ops.TDMDescriptor2D(dg0_as, dgroup1_as),
                                 tdm_ops.TDMDescriptor2D(dg0_bs, dgroup1_bs),
                                 wave_specialized=wave_specialized_tdm)
-                            _ab[0][0] = arith.addi(_ab[0][0], adv_a_i32)
-                            _ab[1][0] = arith.addi(_ab[1][0], adv_b_i32)
-                            _ab[2][0] = arith.addi(_ab[2][0], adv_as_i32)
-                            _ab[3][0] = arith.addi(_ab[3][0], adv_bs_i32)
+                            _ab[0][0] = _ab[0][0] + adv_a_i32
+                            _ab[1][0] = _ab[1][0] + adv_b_i32
+                            _ab[2][0] = _ab[2][0] + adv_as_i32
+                            _ab[3][0] = _ab[3][0] + adv_bs_i32
 
                         _tail_mid_cb = _tail_mid_nws
 
@@ -1599,26 +1594,24 @@ def compile_mxscale_gemm(
             arena_alloc.finalized = False
             arena_alloc.finalize()
 
-        idx_m = arith.index_cast(T.index, i32_m.ir_value())
-        idx_n = arith.index_cast(T.index, i32_n.ir_value())
-        gx = _raw((idx_m + arith.index(tile_m - 1)) / arith.index(tile_m))
-        gy = _raw((idx_n + arith.index(tile_n - 1)) / arith.index(tile_n))
+        gx = (i32_m + (tile_m - 1)) // tile_m
+        gy = (i32_n + (tile_n - 1)) // tile_n
         gz = split_k
 
-        launcher = kernel_mxscale_gemm(
-            arg_c, arg_a, arg_b, arg_a_scale, arg_b_scale, i32_m, i32_n)
-        for op in ctx.gpu_module_body.operations:
-            if const_expr(hasattr(op, 'attributes') and op.OPERATION_NAME == "gpu.func"):
-                if const_expr(effective_waves_per_eu is not None):
-                    _wpe = int(effective_waves_per_eu)
-                    if const_expr(_wpe >= 1):
-                        op.attributes["rocdl.waves_per_eu"] = ir.IntegerAttr.get(
-                            ir.IntegerType.get_signless(32), _wpe)
-                if const_expr(use_cluster):
-                    op.attributes["rocdl.cluster_dims"] = ir.StringAttr.get(
-                        f"{cluster_m},{cluster_n},1")
         cluster_arg = (cluster_m, cluster_n, 1) if use_cluster else None
-        launcher.launch(
+        kernel_mxscale_gemm(
+            arg_c,
+            arg_a,
+            arg_b,
+            arg_a_scale,
+            arg_b_scale,
+            i32_m,
+            i32_n,
+            value_attrs={
+                "rocdl.waves_per_eu": effective_waves_per_eu,
+                "rocdl.cluster_dims": f"{cluster_m},{cluster_n},1" if const_expr(use_cluster) else None,
+            },
+        ).launch(
             grid=(gx, gy, gz),
             block=(block_threads, 1, 1),
             stream=stream,

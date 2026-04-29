@@ -949,19 +949,18 @@ def compile_wmma_gemm_tdm(
         gx = _raw((idx_m + arith.index(tile_m - 1)) / arith.index(tile_m))
         gy = _raw((idx_n + arith.index(tile_n - 1)) / arith.index(tile_n))
 
-        launcher = kernel_wmma_gemm_tdm(arg_c, arg_a, arg_b, i32_m, i32_n)
-        for op in ctx.gpu_module_body.operations:
-            if const_expr(hasattr(op, 'attributes') and op.OPERATION_NAME == "gpu.func"):
-                if const_expr(effective_waves_per_eu is not None):
-                    _wpe = int(effective_waves_per_eu)
-                    if const_expr(_wpe >= 1):
-                        op.attributes["rocdl.waves_per_eu"] = ir.IntegerAttr.get(
-                            ir.IntegerType.get_signless(32), _wpe)
-                if const_expr(use_cluster):
-                    op.attributes["rocdl.cluster_dims"] = ir.StringAttr.get(
-                        f"{cluster_m},{cluster_n},1")
         cluster_arg = (cluster_m, cluster_n, 1) if use_cluster else None
-        launcher.launch(
+        kernel_wmma_gemm_tdm(
+            arg_c,
+            arg_a,
+            arg_b,
+            i32_m,
+            i32_n,
+            value_attrs={
+                "rocdl.waves_per_eu": effective_waves_per_eu,
+                "rocdl.cluster_dims": f"{cluster_m},{cluster_n},1" if use_cluster else None,
+            },
+        ).launch(
             grid=(gx, gy, 1),
             block=(block_threads, 1, 1),
             stream=stream,

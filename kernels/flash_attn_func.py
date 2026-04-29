@@ -230,7 +230,8 @@ def build_flash_attn_func_module_primary(
         O: fx.Tensor,
         seq_len: fx.Int32,
     ):
-        elem_type = dtype_to_elem_type(dtype_str)
+        elem_dtype = dtype_to_elem_type(dtype_str)
+        elem_type = elem_dtype.ir_type
         compute_type = T.f32
         q_ptr = _fly.extract_aligned_pointer_as_index(_llvm_ptr_ty(), Q)
         k_ptr = _fly.extract_aligned_pointer_as_index(_llvm_ptr_ty(), K)
@@ -1051,44 +1052,29 @@ def build_flash_attn_func_module_primary(
         num_q_tiles = (sl_idx + BLOCK_M - 1) // BLOCK_M
         grid_x = bs_idx * num_q_tiles * NUM_HEADS
 
-        launcher = flash_attn_func_kernel(Q, K, V, O, seq_len)
-
-        if const_expr(waves_per_eu is not None):
-            _wpe = int(waves_per_eu)
-            if const_expr(_wpe >= 1):
-                for op in ctx.gpu_module_body.operations:
-                    if const_expr(getattr(op, "OPERATION_NAME", None) == "gpu.func"):
-                        op.attributes["rocdl.waves_per_eu"] = ir.IntegerAttr.get(
-                            T.i32,
-                            _wpe,
-                        )
-        if const_expr(flat_work_group_size is not None):
-            _fwgs = int(flat_work_group_size)
-            if const_expr(_fwgs >= 1):
-                flat_wg_attr = ir.StringAttr.get(f"{_fwgs},{_fwgs}")
-                for op in ctx.gpu_module_body.operations:
-                    if const_expr(getattr(op, "OPERATION_NAME", None) == "gpu.func"):
-                        op.attributes["rocdl.flat_work_group_size"] = flat_wg_attr
-
-        passthrough_entries = []
-        if const_expr(daz):
-            passthrough_entries.append(ir.ArrayAttr.get([
-                ir.StringAttr.get("denormal-fp-math-f32"),
-                ir.StringAttr.get("preserve-sign,preserve-sign"),
-            ]))
-            passthrough_entries.append(ir.ArrayAttr.get([
-                ir.StringAttr.get("no-nans-fp-math"),
-                ir.StringAttr.get("true"),
-            ]))
-            passthrough_entries.append(ir.ArrayAttr.get([
-                ir.StringAttr.get("unsafe-fp-math"),
-                ir.StringAttr.get("true"),
-            ]))
-        for op in ctx.gpu_module_body.operations:
-            if const_expr(getattr(op, "OPERATION_NAME", None) == "gpu.func"):
-                op.attributes["passthrough"] = ir.ArrayAttr.get(passthrough_entries)
-
-        launcher.launch(
+        passthrough_entries = (
+            [
+                ["denormal-fp-math-f32", "preserve-sign,preserve-sign"],
+                ["no-nans-fp-math", "true"],
+                ["unsafe-fp-math", "true"],
+            ]
+            if const_expr(daz)
+            else None
+        )
+        flash_attn_func_kernel(
+            Q,
+            K,
+            V,
+            O,
+            seq_len,
+            value_attrs={
+                "rocdl.waves_per_eu": waves_per_eu,
+                "rocdl.flat_work_group_size": f"{int(flat_work_group_size)},{int(flat_work_group_size)}"
+                if const_expr(flat_work_group_size is not None)
+                else None,
+                "passthrough": passthrough_entries,
+            },
+        ).launch(
             grid=(grid_x, 1, 1),
             block=(BLOCK_SIZE, 1, 1),
             stream=stream,

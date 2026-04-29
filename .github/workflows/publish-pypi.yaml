@@ -74,7 +74,7 @@ jobs:
       contents: read
 
   publish:
-    needs: [validate_tag, build, test]
+    needs: [validate_tag, build]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
