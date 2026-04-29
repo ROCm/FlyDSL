@@ -66,6 +66,41 @@ from kernels.mfma_epilogues import c_shuffle_epilog, default_epilog, mfma_epilog
 from kernels.mfma_preshuffle_pipeline import crd2idx, _buffer_load_vec
 
 
+def _normalize_mfma_k64(op):
+    """Return a callable with the wrapped (result_type, operands) signature.
+
+    Some installed flydsl builds expose `rocdl.mfma_i32_16x16x64_i8` as the raw
+    nanobind ODS class (positional `a, b, c, cbsz, abid, blgp`) rather than the
+    operands-list helper used by the K32 path. Wrap the raw class so kernel call
+    sites can use `mfma_fn_k64(res_ty, [a, b, acc, 0, 0, 0])` uniformly.
+    """
+    if op is None:
+        return None
+    import inspect
+
+    try:
+        params = list(inspect.signature(op).parameters.values())
+        if len(params) >= 2 and params[1].name == "operands":
+            return op
+    except (TypeError, ValueError):
+        pass
+
+    _split = getattr(rocdl, "_split_mfma_operands", None)
+
+    def _wrapped(result_type, operands, *, loc=None, ip=None):
+        if _split is not None:
+            a, b, c, cbsz, abid, blgp = _split(operands, loc=loc)
+        else:
+            a, b, c = operands[0], operands[1], operands[2]
+            cbsz = int(operands[3]) if len(operands) > 3 else 0
+            abid = int(operands[4]) if len(operands) > 4 else 0
+            blgp = int(operands[5]) if len(operands) > 5 else 0
+        res = op(result_type, a, b, c, cbsz, abid, blgp, loc=loc, ip=ip)
+        return getattr(res, "result", res)
+
+    return _wrapped
+
+
 @contextmanager
 def _if_then(if_op):
     """Compat helper for SCF IfOp then-region across old/new Python APIs."""
@@ -205,7 +240,7 @@ def compile_moe_gemm1(
     # gfx950+ has v_mfma_i32_16x16x64_i8 (K=64 INT8) which halves MFMA count
     # vs the K=32 op. Auto-dispatch on arch; gfx942 keeps the K=32 path.
     _is_gfx950 = str(gpu_arch).startswith("gfx95")
-    mfma_i32_k64 = getattr(rocdl, "mfma_i32_16x16x64_i8", None) if _is_gfx950 else None
+    mfma_i32_k64 = _normalize_mfma_k64(getattr(rocdl, "mfma_i32_16x16x64_i8", None)) if _is_gfx950 else None
     if _is_gfx950 and mfma_i32_k64 is None:
         raise AttributeError(
             "K64 INT8 MFMA op not found: expected `rocdl.mfma_i32_16x16x64_i8` on gfx950+."
@@ -1901,7 +1936,7 @@ def compile_moe_gemm2(
         )
     # gfx950+ uses K=64 INT8 MFMA (halves MFMA count vs K=32). Auto-dispatch.
     _is_gfx950 = str(gpu_arch).startswith("gfx95")
-    mfma_i32_k64 = getattr(rocdl, "mfma_i32_16x16x64_i8", None) if _is_gfx950 else None
+    mfma_i32_k64 = _normalize_mfma_k64(getattr(rocdl, "mfma_i32_16x16x64_i8", None)) if _is_gfx950 else None
     if _is_gfx950 and mfma_i32_k64 is None:
         raise AttributeError(
             "K64 INT8 MFMA op not found: expected `rocdl.mfma_i32_16x16x64_i8` on gfx950+."
