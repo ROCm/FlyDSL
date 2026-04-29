@@ -40,7 +40,7 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.expr import arith, buffer_ops, const_expr, range_constexpr, vector
 from flydsl.expr.arith import ArithValue
-from flydsl.expr.typing import T
+from flydsl.expr.typing import T, Vector as Vec
 from kernels.kernels_common import get_warp_size
 
 # WARP_SIZE is 32 on RDNA (wave32: gfx10xx/gfx11xx/gfx12xx) and 64 on CDNA (wave64: gfx9xx).
@@ -124,6 +124,7 @@ def build_fused_rope_cache_module(
         tid = fx.thread_idx.x
 
         elem_type = T.bf16 if dtype_str == "bf16" else T.f16
+        elem_dtype = fx.BFloat16 if dtype_str == "bf16" else fx.Float16
 
         # --- Layout API setup ---
         copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy(copy_bits), elem_bits)
@@ -168,18 +169,18 @@ def build_fused_rope_cache_module(
                 # Truncate back to i16, bitcast to elem_type, reconstruct vector<1xelem_type>
                 peer_i16 = ArithValue(peer_i32).trunci(T.i16)
                 peer_elem = ArithValue(peer_i16).bitcast(elem_type)
-                return vector.from_elements(T.vec(1, elem_type), [peer_elem])
+                return Vec.from_elements([peer_elem], elem_dtype)
             else:
                 # VEC_WIDTH>=2: VEC_WIDTH bf16/f16 elements → n_i32 x i32, one ds_bpermute per chunk.
                 # VEC_WIDTH=2 → n_i32=1 (32 bits); VEC_WIDTH=4 → n_i32=2 (64 bits), etc.
                 n_i32 = VEC_WIDTH // 2
-                v_i32 = vector.bitcast(T.vec(n_i32, T.i32), vec_val)
+                v_i32 = Vec(vec_val).bitcast(fx.Int32)
                 peer_chunks = []
                 for ci in range_constexpr(n_i32):
-                    chunk = vector.extract(v_i32, static_position=[ci], dynamic_position=[])
+                    chunk = v_i32[ci]
                     peer_chunks.append(fx.rocdl.ds_bpermute(T.i32, pair_byte_addr, chunk))
-                peer_v_i32 = vector.from_elements(T.vec(n_i32, T.i32), peer_chunks)
-                return vector.bitcast(T.vec(VEC_WIDTH, elem_type), peer_v_i32)
+                peer_v_i32 = Vec.from_elements(peer_chunks, fx.Int32)
+                return peer_v_i32.bitcast(elem_dtype)
 
         if tid < vecs_per_head:
             # --- Load position (scalar i32) ---
@@ -288,11 +289,13 @@ def build_fused_rope_cache_module(
 
                         k_scaled = []
                         v_scaled = []
+                        k_rot_vec = Vec(k_rot_e.ir_value())
+                        v_vec = Vec(v_e)
                         for i in range_constexpr(VEC_WIDTH):
                             # Always use vector.extract; works for VEC_WIDTH=1 (vector<1xbf16>)
                             # and VEC_WIDTH>1 equally.
-                            ke = ArithValue(vector.extract(k_rot_e.ir_value(), static_position=[i], dynamic_position=[])).extf(T.f32) * k_rcp
-                            ve = ArithValue(vector.extract(v_e, static_position=[i], dynamic_position=[])).extf(T.f32) * v_rcp
+                            ke = k_rot_vec[i].to(fx.Float32) * k_rcp
+                            ve = v_vec[i].to(fx.Float32) * v_rcp
                             k_scaled.append(ke)
                             v_scaled.append(ve)
 
@@ -417,7 +420,7 @@ def build_fused_rope_cache_module(
                                     + pid_b * x_size
                                     + sub_o
                                 )
-                                k_elem = vector.extract(k_rot_e.ir_value(), static_position=[vi], dynamic_position=[])
+                                k_elem = Vec(k_rot_e.ir_value())[vi]
                                 buffer_ops.buffer_store(k_elem, kc_rsrc, kc_nf_off)
 
                             for vi in range_constexpr(VEC_WIDTH):
@@ -428,7 +431,7 @@ def build_fused_rope_cache_module(
                                     + d_idx * block_size
                                     + pid_b
                                 )
-                                v_elem = vector.extract(v_e, static_position=[vi], dynamic_position=[])
+                                v_elem = Vec(v_e)[vi]
                                 buffer_ops.buffer_store(v_elem, vc_rsrc, vc_nf_off)
 
     @flyc.jit
