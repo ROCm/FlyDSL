@@ -65,6 +65,41 @@ from kernels.mfma_epilogues import c_shuffle_epilog, default_epilog, mfma_epilog
 from kernels.mfma_preshuffle_pipeline import crd2idx, _buffer_load_vec
 
 
+def _normalize_mfma_k64(op):
+    """Return a callable with the wrapped (result_type, operands) signature.
+
+    Some installed flydsl builds expose `rocdl.mfma_i32_16x16x64_i8` as the raw
+    nanobind ODS class (positional `a, b, c, cbsz, abid, blgp`) rather than the
+    operands-list helper used by the K32 path. Wrap the raw class so kernel call
+    sites can use `mfma_fn_k64(res_ty, [a, b, acc, 0, 0, 0])` uniformly.
+    """
+    if op is None:
+        return None
+    import inspect
+
+    try:
+        params = list(inspect.signature(op).parameters.values())
+        if len(params) >= 2 and params[1].name == "operands":
+            return op
+    except (TypeError, ValueError):
+        pass
+
+    _split = getattr(rocdl, "_split_mfma_operands", None)
+
+    def _wrapped(result_type, operands, *, loc=None, ip=None):
+        if _split is not None:
+            a, b, c, cbsz, abid, blgp = _split(operands, loc=loc)
+        else:
+            a, b, c = operands[0], operands[1], operands[2]
+            cbsz = int(operands[3]) if len(operands) > 3 else 0
+            abid = int(operands[4]) if len(operands) > 4 else 0
+            blgp = int(operands[5]) if len(operands) > 5 else 0
+        res = op(result_type, a, b, c, cbsz, abid, blgp, loc=loc, ip=ip)
+        return getattr(res, "result", res)
+
+    return _wrapped
+
+
 @contextmanager
 def _if_then(if_op):
     """Compat helper for SCF IfOp then-region across old/new Python APIs."""
@@ -249,6 +284,11 @@ def compile_moe_gemm1(
                 "INT8 K32 MFMA op not found: expected `rocdl.mfma_i32_16x16x32i8` "
                 "(or `rocdl.mfma_i32_16x16x32_i8`)."
             )
+
+    mfma_i32_k64 = None
+    if is_int8 and _is_gfx950:
+        mfma_i32_k64 = _normalize_mfma_k64(getattr(rocdl, "mfma_i32_16x16x64_i8", None))
+    _use_int8_k64 = is_int8 and _is_gfx950 and (mfma_i32_k64 is not None)
 
     mfma_f32_bf16_k16 = None
     if is_bf16:
@@ -1090,8 +1130,22 @@ def compile_moe_gemm1(
                                 raw_ku.append(raw)
                             raw_data.append(raw_ku)
                         return raw_data
+                    elif _use_int8_k64:
+                        # gfx950 int8 K=64: merge two K32 loads into one i32x4 per ni
+                        b_tile = []
+                        for ku in range_constexpr(k_unroll):
+                            packs = []
+                            for ni in range_constexpr(num_acc_n):
+                                ki0 = (ku * 2) + 0
+                                ki1 = (ku * 2) + 1
+                                b0 = load_b_pack(base_k, ki0, ni, blk_list, intra_list)
+                                b1 = load_b_pack(base_k, ki1, ni, blk_list, intra_list)
+                                b_merged = vector.bitcast(T.i32x4, vector.from_elements(T.i64x2, [b0, b1]))
+                                packs.append(b_merged)
+                            b_tile.append(packs)
+                        return b_tile
                     else:
-                        # fp8/int8/bf16/fp16: original code path
+                        # fp8/int8(gfx942)/bf16/fp16: original code path
                         b_tile = []
                         for ku in range_constexpr(k_unroll):
                             packs0 = []
@@ -1166,7 +1220,9 @@ def compile_moe_gemm1(
                                 vec_part_i32x1=vec_x_in_parts[i],
                             )
     
-                # --- A LDS load helper for K64 (load 16B once, extract 2x i64 halves) ---
+                # --- A LDS load helper for K64 (load 16B once) ---
+                # Returns (a_full, a0, a1). a_full is i32x4 (16B = K=64) for K=64 MFMA;
+                # a0/a1 are i64 halves (K=32 each) for the K=32 MFMA path. Unused values are DCE'd.
                 def lds_load_packs_k64(curr_row_a_lds, col_base_bytes, lds_base):
                     col_base_swz_bytes = swizzle_xor16(curr_row_a_lds, col_base_bytes, k_blocks16)
                     col_base_swz = (
@@ -1177,10 +1233,11 @@ def compile_moe_gemm1(
                     idx_a16 = crd2idx((curr_row_a_lds, col_base_swz), layout_lds)
                     idx_a16 = idx_a16 + lds_base
                     loaded_a16 = vector.load_op(vec16_x, lds_x, [idx_a16])
+                    a_full = vector.bitcast(T.i32x4, loaded_a16)
                     a_i64x2 = vector.bitcast(T.i64x2, loaded_a16)
                     a0 = vector.extract(a_i64x2, static_position=[0], dynamic_position=[])
                     a1 = vector.extract(a_i64x2, static_position=[1], dynamic_position=[])
-                    return a0, a1
+                    return a_full, a0, a1
 
                 def compute_tile(
                     acc_gate_in,
@@ -1296,9 +1353,9 @@ def compile_moe_gemm1(
                                 curr_row_a_lds = row_a_lds + mi_val
 
                                 if (a0_prefetch is not None) and (ku == 0) and (mi == 0):
-                                    a0, a1 = a0_prefetch
+                                    a_full, a0, a1 = a0_prefetch
                                 else:
-                                    a0, a1 = lds_load_packs_k64(curr_row_a_lds, col_base, lds_base)
+                                    a_full, a0, a1 = lds_load_packs_k64(curr_row_a_lds, col_base, lds_base)
 
                                 for ni in range_constexpr(num_acc_n):
                                     acc_idx = mi * num_acc_n + ni
@@ -1334,6 +1391,34 @@ def compile_moe_gemm1(
                             p_idx, p_g, p_u, p_sc_g, p_sc_u = _pending_gate_up
                             gate_list[p_idx] = _acc_scaled_f32(gate_list[p_idx], p_g, p_sc_g)
                             up_list[p_idx] = _acc_scaled_f32(up_list[p_idx], p_u, p_sc_u)
+                    elif _use_int8_k64:
+                        # gfx950 int8 K=64: single MFMA instruction per K=64 step
+                        def mfma_k64_one(acc_in, a_full, b_full):
+                            return mfma_i32_k64(T.i32x4, [a_full, b_full, acc_in, 0, 0, 0])
+
+                        for ku in range_constexpr(k_unroll):
+                            b_gate_packs = b_gate_tile_in[ku]
+                            b_up_packs = b_up_tile_in[ku]
+                            ki64 = arith.index(ku * 64)
+                            col_base = col_offset_base_bytes + ki64
+
+                            for mi in range_constexpr(m_repeat):
+                                mi_val = arith.index(mi * 16)
+                                curr_row_a_lds = row_a_lds + mi_val
+
+                                if (a0_prefetch is not None) and (ku == 0) and (mi == 0):
+                                    a_full, a0, a1 = a0_prefetch
+                                else:
+                                    a_full, a0, a1 = lds_load_packs_k64(curr_row_a_lds, col_base, lds_base)
+
+                                for ni in range_constexpr(num_acc_n):
+                                    acc_idx = mi * num_acc_n + ni
+                                    gate_list[acc_idx] = mfma_k64_one(
+                                        gate_list[acc_idx], a_full, b_gate_packs[ni]
+                                    )
+                                    up_list[acc_idx] = mfma_k64_one(
+                                        up_list[acc_idx], a_full, b_up_packs[ni]
+                                    )
                     else:
                         for ku in range_constexpr(k_unroll):
                             b_gate_packs0, b_gate_packs1 = b_gate_tile_in[ku]
@@ -1346,9 +1431,9 @@ def compile_moe_gemm1(
                                 curr_row_a_lds = row_a_lds + mi_val
 
                                 if (a0_prefetch is not None) and (ku == 0) and (mi == 0):
-                                    a0, a1 = a0_prefetch
+                                    a_full, a0, a1 = a0_prefetch
                                 else:
-                                    a0, a1 = lds_load_packs_k64(curr_row_a_lds, col_base, lds_base)
+                                    a_full, a0, a1 = lds_load_packs_k64(curr_row_a_lds, col_base, lds_base)
 
                                 for ni in range_constexpr(num_acc_n):
                                     acc_idx = mi * num_acc_n + ni
@@ -1560,7 +1645,8 @@ def compile_moe_gemm1(
                     #    Flattened as: [even_0..N, odd_0..N]  → 2 * num_acc_n values
                     #
                     int4_bf16_single_field = is_int4_bf16 and not is_int4_bf16_groupwise
-                    _fields_per_ku = 1 if int4_bf16_single_field else 2
+                    _single_field_ku = int4_bf16_single_field or _use_int8_k64
+                    _fields_per_ku = 1 if _single_field_ku else 2
                     _vals_per_b_tile = k_unroll * _fields_per_ku * num_acc_n
 
                     def _flatten_b_tile(b_tile):
@@ -1571,8 +1657,8 @@ def compile_moe_gemm1(
                                 # [(packed, scale), ...] → [packed_0..N, scale_0..N]
                                 flat.extend(t[0] for t in ku_entry)
                                 flat.extend(t[1] for t in ku_entry)
-                            elif int4_bf16_single_field:
-                                # [raw_i64, ...] → [raw_0..N]
+                            elif _single_field_ku:
+                                # [val, ...] → [val_0..N]  (int4_bf16 i64 or int8_k64 i32x4)
                                 flat.extend(ku_entry)
                             else:
                                 # (packs_even, packs_odd) → [even_0..N, odd_0..N]
@@ -1590,7 +1676,7 @@ def compile_moe_gemm1(
                                 scales = list(vals[idx:idx + num_acc_n])
                                 idx += num_acc_n
                                 b_tile.append([(packed[ni], scales[ni]) for ni in range_constexpr(num_acc_n)])
-                            elif int4_bf16_single_field:
+                            elif _single_field_ku:
                                 b_tile.append(list(vals[idx:idx + num_acc_n]))
                                 idx += num_acc_n
                             else:
@@ -1617,7 +1703,7 @@ def compile_moe_gemm1(
                         _au = list(state[_n_acc:_p_bg])
                         _bg = _unflatten_b_tile(list(state[_p_bg:_p_bu]))
                         _bu = _unflatten_b_tile(list(state[_p_bu:_p_a0]))
-                        _a0pf = (state[_p_a0], state[_p_a0 + 1])
+                        _a0pf = (state[_p_a0], state[_p_a0 + 1], state[_p_a0 + 2])
 
                         k_iv = k_base_idx + pair_iv * (c_tile_k + c_tile_k)
 
@@ -1660,7 +1746,7 @@ def compile_moe_gemm1(
                         acc_up = list(loop_results[_n_acc:_p_bg])
                         b_gate_cur = _unflatten_b_tile(list(loop_results[_p_bg:_p_bu]))
                         b_up_cur = _unflatten_b_tile(list(loop_results[_p_bu:_p_a0]))
-                        a0_prefetch_pong = (loop_results[_p_a0], loop_results[_p_a0 + 1])
+                        a0_prefetch_pong = (loop_results[_p_a0], loop_results[_p_a0 + 1], loop_results[_p_a0 + 2])
                     k_tail1 = k_base_idx + arith.index(_k_per_batch - tile_k)
                     x_regs_ping = load_x_tile(k_tail1)
                     b_gate_ping = load_b_tile(k_tail1, n_blk_gate, n_intra_gate)
@@ -2284,6 +2370,11 @@ def compile_moe_gemm2(
                 "INT8 K32 MFMA op not found: expected `rocdl.mfma_i32_16x16x32i8` "
                 "(or `rocdl.mfma_i32_16x16x32_i8`)."
             )
+
+    mfma_i32_k64 = None
+    if is_int8 and _is_gfx950:
+        mfma_i32_k64 = _normalize_mfma_k64(getattr(rocdl, "mfma_i32_16x16x64_i8", None))
+    _use_int8_k64 = is_int8 and _is_gfx950 and (mfma_i32_k64 is not None)
 
     mfma_f32_bf16_k16 = None
     if is_bf16:
@@ -3126,8 +3217,22 @@ def compile_moe_gemm2(
                                 raw_ku.append(raw)
                             raw_data.append(raw_ku)
                         return raw_data
+                    elif _use_int8_k64:
+                        # gfx950 int8 K=64: merge two K32 loads into one i32x4 per ni
+                        b_tile = []
+                        for ku in range_constexpr(k_unroll):
+                            packs = []
+                            for ni in range_constexpr(num_acc_n):
+                                ki0 = (ku * 2) + 0
+                                ki1 = (ku * 2) + 1
+                                b0 = load_b_pack(base_k, ki0, ni)
+                                b1 = load_b_pack(base_k, ki1, ni)
+                                b_merged = vector.bitcast(T.i32x4, vector.from_elements(T.i64x2, [b0, b1]))
+                                packs.append(b_merged)
+                            b_tile.append(packs)
+                        return b_tile
                     else:
-                        # fp8/int8/bf16/fp16: original code path
+                        # fp8/int8(gfx942)/bf16/fp16: original code path
                         b_tile = []
                         for ku in range_constexpr(k_unroll):
                             packs0 = []
@@ -3197,7 +3302,9 @@ def compile_moe_gemm2(
                                 vec_part_i32x1=vec_x_in_parts[i],
                             )
     
-                # --- A LDS load helper for K64 (load 16B once, extract 2x i64 halves) ---
+                # --- A LDS load helper for K64 (load 16B once) ---
+                # Returns (a_full, a0, a1). a_full is i32x4 (16B = K=64) for K=64 MFMA;
+                # a0/a1 are i64 halves (K=32 each) for the K=32 MFMA path. Unused values are DCE'd.
                 def lds_load_packs_k64(curr_row_a_lds, col_base_bytes, lds_base):
                     col_base_swz_bytes = swizzle_xor16(curr_row_a_lds, col_base_bytes, k_blocks16)
                     col_base_swz = (
@@ -3208,10 +3315,11 @@ def compile_moe_gemm2(
                     idx_a16 = crd2idx((curr_row_a_lds, col_base_swz), layout_lds)
                     idx_a16 = idx_a16 + lds_base
                     loaded_a16 = vector.load_op(vec16_x, lds_x, [idx_a16])
+                    a_full = vector.bitcast(T.i32x4, loaded_a16)
                     a_i64x2 = vector.bitcast(T.i64x2, loaded_a16)
                     a0 = vector.extract(a_i64x2, static_position=[0], dynamic_position=[])
                     a1 = vector.extract(a_i64x2, static_position=[1], dynamic_position=[])
-                    return a0, a1
+                    return a_full, a0, a1
 
                 def compute_tile(acc_in, b_tile_in, lds_base, *, prefetch_epilogue: bool = False, a0_prefetch=None):
                     acc_list = list(acc_in)
@@ -3324,9 +3432,9 @@ def compile_moe_gemm2(
                                 curr_row_a_lds = row_a_lds + mi_val
 
                                 if (a0_prefetch is not None) and (ku == 0) and (mi == 0):
-                                    a0, a1 = a0_prefetch
+                                    a_full, a0, a1 = a0_prefetch
                                 else:
-                                    a0, a1 = lds_load_packs_k64(curr_row_a_lds, col_base, lds_base)
+                                    a_full, a0, a1 = lds_load_packs_k64(curr_row_a_lds, col_base, lds_base)
 
                                 for ni in range_constexpr(num_acc_n):
                                     acc_idx = mi * num_acc_n + ni
@@ -3350,6 +3458,30 @@ def compile_moe_gemm2(
                         if _pending_acc is not None:
                             p_idx, p_tmp, p_sc = _pending_acc
                             acc_list[p_idx] = _acc_scaled_f32(acc_list[p_idx], p_tmp, p_sc)
+                    elif _use_int8_k64:
+                        # gfx950 int8 K=64: single MFMA instruction per K=64 step
+                        def mfma_k64_one(acc_in, a_full, b_full):
+                            return mfma_i32_k64(T.i32x4, [a_full, b_full, acc_in, 0, 0, 0])
+
+                        for ku in range_constexpr(k_unroll):
+                            b_packs = b_tile_in[ku]
+                            ki64 = arith.index(ku * 64)
+                            col_base = col_offset_base_bytes + ki64
+
+                            for mi in range_constexpr(m_repeat):
+                                mi_val = arith.index(mi * 16)
+                                curr_row_a_lds = row_a_lds + mi_val
+
+                                if (a0_prefetch is not None) and (ku == 0) and (mi == 0):
+                                    a_full, a0, a1 = a0_prefetch
+                                else:
+                                    a_full, a0, a1 = lds_load_packs_k64(curr_row_a_lds, col_base, lds_base)
+
+                                for ni in range_constexpr(num_acc_n):
+                                    acc_idx = mi * num_acc_n + ni
+                                    acc_list[acc_idx] = mfma_k64_one(
+                                        acc_list[acc_idx], a_full, b_packs[ni]
+                                    )
                     else:
                         for ku in range_constexpr(k_unroll):
                             b_packs0, b_packs1 = b_tile_in[ku]
@@ -3361,9 +3493,9 @@ def compile_moe_gemm2(
                                 curr_row_a_lds = row_a_lds + mi_val
 
                                 if (a0_prefetch is not None) and (ku == 0) and (mi == 0):
-                                    a0, a1 = a0_prefetch
+                                    a_full, a0, a1 = a0_prefetch
                                 else:
-                                    a0, a1 = lds_load_packs_k64(curr_row_a_lds, col_base, lds_base)
+                                    a_full, a0, a1 = lds_load_packs_k64(curr_row_a_lds, col_base, lds_base)
 
                                 for ni in range_constexpr(num_acc_n):
                                     acc_idx = mi * num_acc_n + ni
@@ -3375,7 +3507,7 @@ def compile_moe_gemm2(
                                         b_packs1[ni],
                                     )
                     return acc_list, epilogue_pf
-    
+
                 # ---------------- 2-stage pipeline (ping-pong LDS + B tile prefetch) ----------------
                 lds_tile_elems = arith.index(tile_m * lds_stride)
                 lds_base_cur = fx.Index(0)
@@ -3585,7 +3717,8 @@ def compile_moe_gemm2(
                     # B-tile data layout per k_unroll entry (3 variants):
                     #   See gemm1 _flatten_b_tile for full layout documentation.
                     int4_bf16_single_field = is_int4_bf16 and not is_int4_bf16_groupwise
-                    _fields_per_ku = 1 if int4_bf16_single_field else 2
+                    _single_field_ku = int4_bf16_single_field or _use_int8_k64
+                    _fields_per_ku = 1 if _single_field_ku else 2
                     _vals_per_b_tile = k_unroll * _fields_per_ku * num_acc_n
                     _n_acc = m_repeat * num_acc_n
                     _p_b = _n_acc
@@ -3598,7 +3731,7 @@ def compile_moe_gemm2(
                             if is_int4_bf16_groupwise:
                                 flat.extend(t[0] for t in ku_entry)
                                 flat.extend(t[1] for t in ku_entry)
-                            elif int4_bf16_single_field:
+                            elif _single_field_ku:
                                 flat.extend(ku_entry)
                             else:
                                 flat.extend(ku_entry[0])
@@ -3615,7 +3748,7 @@ def compile_moe_gemm2(
                                 scales = list(vals[idx:idx + num_acc_n])
                                 idx += num_acc_n
                                 b_tile.append([(packed[ni], scales[ni]) for ni in range_constexpr(num_acc_n)])
-                            elif int4_bf16_single_field:
+                            elif _single_field_ku:
                                 b_tile.append(list(vals[idx:idx + num_acc_n]))
                                 idx += num_acc_n
                             else:
@@ -3631,7 +3764,7 @@ def compile_moe_gemm2(
                     for pair_iv, state in range(0, pair_iters, 1, init=init_state):
                         _ac = list(state[:_n_acc])
                         _bc = _unflatten_b_tile(list(state[_p_b:_p_a0]))
-                        _a0 = (state[_p_a0], state[_p_a0 + 1])
+                        _a0 = (state[_p_a0], state[_p_a0 + 1], state[_p_a0 + 2])
 
                         k_iv = pair_iv * (c_tile_k_s2 + c_tile_k_s2)
 
@@ -3663,7 +3796,7 @@ def compile_moe_gemm2(
                     if pair_iters > 0:
                         acc = list(loop_results[:_n_acc])
                         b_cur = _unflatten_b_tile(list(loop_results[_p_b:_p_a0]))
-                        a0_prefetch_pong = (loop_results[_p_a0], loop_results[_p_a0 + 1])
+                        a0_prefetch_pong = (loop_results[_p_a0], loop_results[_p_a0 + 1], loop_results[_p_a0 + 2])
 
                     if odd_k_tiles:
                         acc, epilogue_pf = compute_tile(
