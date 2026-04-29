@@ -407,7 +407,12 @@ from .inline_asm import *  # noqa: E402,F401,F403,I001
 def _to_ir(v):
     """Coerce DSL Numeric to ir.Value if needed."""
     from ..._mlir import ir as _ir
+    from .. import arith as _arith_ext
 
+    if isinstance(v, int):
+        return _arith_ext.unwrap(_arith_ext.constant(v, type=_ir.IntegerType.get_signless(32)))
+    if isinstance(v, float):
+        return _arith_ext.unwrap(_arith_ext.constant(v, type=_ir.F32Type.get()))
     if not isinstance(v, _ir.Value) and hasattr(v, "ir_value"):
         return v.ir_value()
     return v
@@ -429,6 +434,12 @@ def cvt_pk_fp8_f32(res, src_a, src_b, old, word_sel, **kw):
     from ..._mlir.dialects.rocdl import cvt_pk_fp8_f32 as _op
 
     return _op(res=res, src_a=_to_ir(src_a), src_b=_to_ir(src_b), old=_to_ir(old), word_sel=word_sel, **kw)
+
+
+def rcp(res, arg, **kw):
+    from ..._mlir.dialects.rocdl import rcp as _op
+
+    return _op(res=res, arg=_to_ir(arg), **kw)
 
 
 def raw_ptr_buffer_load_lds(rsrc, lds_ptr, size, voffset, soffset, offset, aux, **kw):
