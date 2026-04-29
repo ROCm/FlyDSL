@@ -186,6 +186,9 @@ struct PyIntTupleType : PyConcreteType<PyIntTupleType> {
       assert(ty.isLeaf() && ty.isStatic());
       return ty.getAttr().getLeafAsInt().getValue();
     });
+    c.def("at", [](PyIntTupleType &self, int32_t idx) -> MlirType {
+      return wrap(self.toCppType().at(idx));
+    });
   }
 };
 

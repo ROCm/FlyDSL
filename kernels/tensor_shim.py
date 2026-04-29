@@ -7,12 +7,22 @@ from abc import ABC, abstractmethod
 
 import flydsl
 import flydsl.expr as fx
+import flydsl.compiler as flyc
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import fly, llvm
 from flydsl.compiler.protocol import fly_values
 from flydsl.expr.typing import T
 
 from flydsl.expr import buffer_ops, range_constexpr, vector, memref_load, memref_store
+
+
+def _run_compiled(exe, *args):
+    cf = getattr(exe, "_cf", None)
+    if cf is None:
+        cf = flyc.compile(exe, *args)
+        exe._cf = cf
+    else:
+        cf(*args)
 
 
 def _to_raw(v):
@@ -208,16 +218,16 @@ class TorchTensor(TensorBase):
 
 
 class GTensor(TensorBase):
-    def __init__(self, memref, dtype, shape, stride=None, base_offset=0):
+    def __init__(self, memref, dtype, shape, stride=None, base_offset=0, cache_modifier=0):
         super().__init__(dtype, shape, stride, base_offset)
         self.rsrc = buffer_ops.create_buffer_resource(memref, max_size=True)
+        self.cache_modifier = cache_modifier
     
     def load(self, offset, vec_size=1):
         return buffer_ops.buffer_load(self.rsrc, offset, vec_width=vec_size, dtype=self.dtype)
     
     def store(self, offset, value, vec_size=1):
-        buffer_ops.buffer_store(value, self.rsrc, offset)
-
+        buffer_ops.buffer_store(value, self.rsrc, offset, cache_modifier=self.cache_modifier)
 
 class STensor(TensorBase):
     def __init__(self, memptr, dtype, shape, stride=None, base_offset=0):
