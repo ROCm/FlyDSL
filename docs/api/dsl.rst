@@ -130,40 +130,42 @@ GPU Intrinsics (``flydsl.expr.gpu``)
 - **fx.gpu.barrier()** -- workgroup barrier synchronization
 - **fx.gpu.smem_space()** -- shared memory (LDS) address space attribute
 
-Arithmetic (``flydsl.expr.arith``)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Arithmetic and Numeric Types
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Operator-overloaded arithmetic via ``ArithValue``:
+Prefer typed DSL values and operator-overloaded arithmetic:
 
 .. code-block:: python
 
-   from flydsl.expr import arith
+   import flydsl.expr as fx
+   from flydsl.expr.typing import Vector as Vec
 
-   c = arith.constant(42, index=True)
-   v = arith.index_cast(T.index, val)
-   r = arith.select(cond, a, b)
+   c = fx.Index(42)
+   v = fx.Int32(idx)
+   f = fx.Float32(1.0)
+   r = cond.select(a, b)
+   y = (x + 1) * scale
 
-Key functions:
+Preferred APIs:
 
-- **arith.constant(value, type=None, index=False)** -- create constant
-- **arith.constant_vector(value, vec_type)** -- create splat vector constant
-- **arith.index_cast(target_type, value)** -- cast to/from index type
-- **arith.select(cond, true_val, false_val)** -- ternary select
+- **fx.Int32(value)**, **fx.Int64(value)**, **fx.Index(value)**, **fx.Float32(value)** -- constants and casts
+- **ArithValue / Numeric operators** -- ``+``, ``-``, ``*``, ``/``, ``%``, ``<<``, ``>>``
+- **cond.select(true_val, false_val)** -- ternary select when ``cond`` is an ``ArithValue``
 - **arith.cmpi(predicate, lhs, rhs)** -- integer comparison
 - **arith.cmpf(predicate, lhs, rhs)** -- float comparison
-- **arith.sitofp(type, value)** -- signed int to float
-- **arith.trunc_f(type, value)** -- truncate float precision
-- **ArithValue** -- wrapper class enabling ``+``, ``-``, ``*``, ``/``, ``%``, ``<<``, ``>>`` operators
+- **Direct ``arith.*FOp(..., fastmath=...)``** -- use only where explicit fastmath flags are required for performance
 
-Vector Operations (``flydsl.expr.vector``)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Vector Values (``flydsl.expr.typing.Vector``)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-- **vector.from_elements(type, elements)** -- construct vector from scalars (auto-unwraps ArithValue)
-- **vector.store(value, memref, indices)** -- store vector to memref
-- **vector.extract(vector, position)** -- extract element from vector
-- **vector.load_op(result_type, memref, indices)** -- load vector from memref
-- **vector.bitcast(result_type, source)** -- bitcast vector type
-- **vector.broadcast**, **vector.reduction** -- broadcast and reduce operations (from MLIR upstream)
+- **Vec.from_elements(elements, dtype)** -- construct vector from scalars
+- **Vec.filled(shape, value, dtype)** -- splat vector
+- **Vec(value)[i]** -- extract element
+- **Vec(value).bitcast(dtype)** -- bitcast vector element type
+- **Vec(value).to(dtype)** -- convert vector element type
+- **Vec(value).store(memref, indices)** -- store vector to memref
+
+Use direct ``flydsl.expr.vector`` only for low-level boundaries that ``Vector`` does not expose.
 
 Buffer Operations (``flydsl.expr.buffer_ops``)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

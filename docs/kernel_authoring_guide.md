@@ -18,7 +18,7 @@
 | **Tensor arg** | `fx.Tensor` | GPU tensor argument (via DLPack) |
 | **Stream arg** | `fx.Stream` | CUDA/HIP stream argument |
 | **Barrier** | `fx.gpu.barrier()` | Workgroup synchronization |
-| **Constants** | `arith.constant(val)` | Create MLIR constant value |
+| **Constants** | `fx.Int32` / `fx.Index` / `fx.Float32` | Create typed DSL constants |
 | **Range loop** | `range_constexpr(n)` | Compile-time unrolled loop |
 | **Buffer load** | `buffer_ops.buffer_load(rsrc, off)` | AMD buffer load intrinsic |
 
@@ -31,7 +31,7 @@
 ```python
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.expr import arith, gpu
+from flydsl.expr import gpu
 
 @flyc.kernel
 def vec_add_kernel(
@@ -43,7 +43,7 @@ def vec_add_kernel(
     tid = gpu.thread_idx.x
     bid = gpu.block_idx.x
     idx = bid * 256 + tid
-    # ... kernel body using arith/vector/buffer ops ...
+    # ... kernel body using fx.*, ArithValue, Vector, and buffer ops ...
 
 @flyc.jit
 def vec_add(
@@ -188,21 +188,15 @@ raw_bid = gpu.block_id("x")
 
 ## 4. Expression API (`flydsl.expr`)
 
-### 4.1 Arithmetic (`fx.arith`)
+### 4.1 Arithmetic and Numeric Types
 
 ```python
-from flydsl.expr import arith
-from flydsl.expr.typing import T
 import flydsl.expr as fx
 
 # Constants (prefer DSL numeric types)
 c42 = fx.Index(42)          # index type constant
 c3_14 = fx.Float32(3.14)    # f32 constant
 mask = fx.Int32(0xFF)       # i32 constant
-
-# Legacy constant API (still works)
-c42 = arith.constant(42, index=True)     # index type
-c3_14 = arith.constant(3.14, type=T.f32) # f32 type
 
 # Arithmetic (operator overloading via ArithValue / Numeric)
 result = a + b
@@ -215,28 +209,31 @@ idx = fx.Index(int_val)     # cast to index type
 i32_val = fx.Int32(idx)     # cast to i32
 
 # Select
-result = arith.select(cond, true_val, false_val)
+result = cond.select(true_val, false_val)  # when cond is an ArithValue
 
 # Bitwise
-result = arith.andi(a, b)
-result = arith.xori(a, b)
-result = arith.shli(a, b)
+result = a & b
+result = a ^ b
+result = a << 4
 ```
 
-### 4.2 Vector Operations (`fx.vector`)
+Use direct `arith.*FOp(..., fastmath=...)` only where explicit fastmath flags are performance-critical.
+
+### 4.2 Vector Values (`Vector`)
 
 ```python
-from flydsl.expr import vector
+from flydsl.expr.typing import Vector as Vec
 
 # Build vector from elements
-vec = vector.from_elements(vec_type, [a, b, c, d])
+vec = Vec.from_elements([a, b, c, d], fx.Float32)
 
 # Vector store to memref
-vector.store(vec, memref, [idx])
+vec.store(memref, [idx])
 
-# Extract/insert
-elem = vector.extractelement(vec, idx)
-vec2 = vector.insertelement(vec, elem, idx)
+# Extract, bitcast, and convert
+elem = vec[idx]
+as_i32 = vec.bitcast(fx.Int32)
+as_bf16 = vec.to(fx.BFloat16)
 ```
 
 ### 4.3 Buffer Operations (`fx.buffer_ops`)
@@ -342,7 +339,7 @@ addrspace_int = gpu.smem_space(int=True)
 
 ## 5. Control Flow
 
-### 5.1 Python Loops → MLIR SCF
+### 5.1 Python Loops
 
 The `ASTRewriter` automatically transforms Python `for` loops:
 
@@ -354,7 +351,7 @@ def my_kernel(data: fx.Tensor, N: fx.Constexpr[int]):
         # This loop is fully unrolled in the generated IR
         ...
 
-    # Runtime loop (lowered to scf.for)
+    # Runtime loop (lowered by the AST rewriter)
     for i in range(runtime_value):
         ...
 ```
@@ -402,7 +399,7 @@ lds_b_ptr.store(val, [idx])
 
 ### 6.2 Finalizing LDS Allocation
 
-For `@flyc.kernel` style kernels, emit `memref.global` in the GPU module:
+For `@flyc.kernel` style kernels, finalize the allocator in the GPU module:
 
 ```python
 comp_ctx = CompilationContext.get_current()
@@ -537,7 +534,7 @@ From `kernels/preshuffle_gemm.py`:
 ```python
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.expr import arith, vector, gpu, buffer_ops, rocdl, range_constexpr
+from flydsl.expr import gpu, buffer_ops, rocdl, range_constexpr
 from flydsl.expr.typing import T
 from flydsl.utils.smem_allocator import SmemAllocator
 
