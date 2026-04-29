@@ -139,20 +139,11 @@ def _extract_sub8(acc, vec_base: int, *, vector, range_constexpr, ACC_VEC_SIZE: 
     return vector.shuffle(acc, acc, [vec_base + i for i in range_constexpr(8)])
 
 
-def _finalize_alloc_and_launch_2d(*, ctx, alloc, launcher, gx, gy, block_threads: int, stream, waves_per_eu, ir,
+def _finalize_alloc_and_launch_2d(*, ctx, alloc, launcher, gx, gy, block_threads: int, stream, ir,
                                   cluster=None):
     with ir.InsertionPoint(ctx.gpu_module_body):
         alloc.finalized = False
         alloc.finalize()
-    for op in ctx.gpu_module_body.operations:
-        if hasattr(op, "attributes") and op.OPERATION_NAME == "gpu.func":
-            if waves_per_eu is not None and int(waves_per_eu) >= 1:
-                op.attributes["rocdl.waves_per_eu"] = ir.IntegerAttr.get(
-                    ir.IntegerType.get_signless(32), int(waves_per_eu)
-                )
-            if cluster is not None:
-                op.attributes["rocdl.cluster_dims"] = ir.StringAttr.get(
-                    f"{cluster[0]},{cluster[1]},{cluster[2]}")
     launcher.launch(
         grid=(gx, gy, 1),
         block=(block_threads, 1, 1),

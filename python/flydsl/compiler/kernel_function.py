@@ -11,6 +11,7 @@ from .._mlir import ir
 from .._mlir.dialects import arith, gpu
 from ..expr.typing import Constexpr
 from .ast_rewriter import ASTRewriter
+from .mlir_utils import convert_to_mlir_attr
 from .protocol import fly_construct, fly_types, fly_values
 
 # =============================================================================
@@ -509,9 +510,15 @@ class KernelFunction:
                     self._func(**dsl_args)
                 gpu.ReturnOp([])
 
-        return tuple(param_values)
+        return tuple(param_values), gpu_func
 
-    def __call__(self, *args, **kwargs) -> KernelLauncher:
+    def __call__(
+        self,
+        *args,
+        unit_attrs: Optional[List[str]] = None,
+        value_attrs: Optional[Dict[str, Any]] = None,
+        **kwargs,
+    ) -> KernelLauncher:
         ctx = CompilationContext.get_current()
         if ctx is None:
             raise RuntimeError("@kernel can only be called inside @jit function")
@@ -524,7 +531,17 @@ class KernelFunction:
                 raise TypeError(f"{self._func.__name__}() missing 'self' argument")
             bound_self, args = args[0], args[1:]
 
-        kernel_args = self._emit_kernel(ctx, args, kwargs, bound_self=bound_self)
+        kernel_args, gpu_func_op = self._emit_kernel(ctx, args, kwargs, bound_self=bound_self)
+
+        if unit_attrs:
+            unit = ir.UnitAttr.get()
+            for name in unit_attrs:
+                gpu_func_op.attributes[name] = unit
+        if value_attrs:
+            for name, value in value_attrs.items():
+                if value is None:
+                    continue
+                gpu_func_op.attributes[name] = convert_to_mlir_attr(value)
 
         return KernelLauncher(self._kernel_name, kernel_args, call_loc, self._known_block_size)
 
