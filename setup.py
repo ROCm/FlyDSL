@@ -7,8 +7,6 @@ import os
 import subprocess
 import shutil
 import sys
-import tempfile
-import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -259,53 +257,6 @@ def _latest_wheel_in(dist_dir: Path) -> Path | None:
     return max(wheels, key=lambda p: p.stat().st_mtime)
 
 
-_AUDITWHEEL_EXCLUDE_LIB_PREFIXES = (
-    "libamdhip64.so",
-    "libhsa-runtime64.so",
-    "libamd_comgr.so",
-    "libdrm_amdgpu.so",
-    "libdrm.so",
-    "librocprofiler-register.so",
-)
-
-
-def _should_exclude_from_auditwheel(soname: str) -> bool:
-    return any(soname == prefix or soname.startswith(f"{prefix}.") for prefix in _AUDITWHEEL_EXCLUDE_LIB_PREFIXES)
-
-
-def _wheel_needed_sonames(wheel_path: Path) -> list[str]:
-    """Return DT_NEEDED entries from ELF payloads inside a wheel."""
-    objdump = shutil.which("objdump")
-    if not objdump:
-        print("Warning: objdump not found; cannot derive auditwheel excludes.")
-        return []
-
-    needed: set[str] = set()
-    with tempfile.TemporaryDirectory(prefix="wheel-elf-", dir=str(wheel_path.parent)) as tmp:
-        tmpdir = Path(tmp)
-        with zipfile.ZipFile(wheel_path) as wheel:
-            for idx, info in enumerate(wheel.infolist()):
-                name = Path(info.filename).name
-                if info.is_dir() or (not name.endswith(".so") and ".so." not in name):
-                    continue
-
-                elf_path = tmpdir / f"elf-{idx}"
-                with wheel.open(info) as src, elf_path.open("wb") as dst:
-                    shutil.copyfileobj(src, dst)
-
-                try:
-                    out = subprocess.check_output([objdump, "-p", str(elf_path)], stderr=subprocess.DEVNULL, text=True)
-                except subprocess.CalledProcessError:
-                    continue
-
-                for line in out.splitlines():
-                    fields = line.split()
-                    if len(fields) == 2 and fields[0] == "NEEDED":
-                        needed.add(fields[1])
-
-    return sorted(needed)
-
-
 def _auditwheel_repair_in_place(wheel_path: Path, dist_dir: Path) -> None:
     """Run `auditwheel repair` to produce a manylinux-tagged wheel when possible.
 
@@ -313,7 +264,7 @@ def _auditwheel_repair_in_place(wheel_path: Path, dist_dir: Path) -> None:
       - This does NOT guarantee a `manylinux_2_28` tag; the best achievable policy
         depends on your binary's ELF deps and glibc symbol versions.
     - For a guaranteed manylinux_2_28 wheel, build inside a manylinux_2_28 image
-        (see Dockerfile.manylinux_2_28).
+        (see scripts/build_manylinux_2_28.sh).
     """
     if sys.platform != "linux":
         return
@@ -328,7 +279,8 @@ def _auditwheel_repair_in_place(wheel_path: Path, dist_dir: Path) -> None:
         print("Warning: patchelf not found; skipping manylinux repair. (Install with `apt-get install patchelf`.)")
         return
 
-    wheelhouse = Path(tempfile.mkdtemp(prefix="wheelhouse_", dir=str(dist_dir)))
+    wheelhouse = dist_dir / "wheelhouse"
+    wheelhouse.mkdir(parents=True, exist_ok=True)
 
     cmd = [
         auditwheel,
@@ -336,14 +288,14 @@ def _auditwheel_repair_in_place(wheel_path: Path, dist_dir: Path) -> None:
         str(wheel_path),
         "-w",
         str(wheelhouse),
+        # IMPORTANT: do not bundle ROCm user-space runtime libraries into the wheel.
+        "--exclude",
+        "libamdhip64.so.*",
+        "--exclude",
+        "libhsa-runtime64.so.*",
+        "--exclude",
+        "libdrm_amdgpu.so.*",
     ]
-
-    # auditwheel --exclude matches exact SONAMEs. Derive them from the wheel's
-    # own ELF NEEDED entries so the exclude list follows the ROCm version used
-    # during the build instead of probing host library paths.
-    for soname in _wheel_needed_sonames(wheel_path):
-        if _should_exclude_from_auditwheel(soname):
-            cmd += ["--exclude", soname]
 
     # auditwheel needs to locate MLIR runtime libraries that are already
     # bundled in the wheel.  Add the embedded _mlir_libs directory (and the
@@ -454,7 +406,7 @@ setup(
     long_description=(REPO_ROOT / "README.md").read_text(encoding="utf-8") if (REPO_ROOT / "README.md").exists() else "",
     long_description_content_type="text/markdown",
     license="Apache-2.0",
-    python_requires=">=3.10",
+    python_requires=">=3.8",
     packages=all_packages,
     package_dir=package_dir,
     include_package_data=True,
