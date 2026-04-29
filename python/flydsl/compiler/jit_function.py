@@ -762,7 +762,6 @@ class JitFunction:
         recompilation when only runtime values change.
         """
         from .jit_argument import _is_constexpr_annotation, _is_type_param_annotation
-        from ..expr.typing import Stream
 
         sig = self._sig
         key_parts = [("_target_", self._target)]
@@ -780,7 +779,9 @@ class JitFunction:
                 key_parts.append((name, "Type", arg))
                 continue
 
-            # TODO: quick fix for cpu aot compilation.
+            # The stream selects the launch queue and does not affect generated code.
+            # Normalize equivalent host representations (raw pointer, Stream object)
+            # so CPU AOT artifacts can be reused by GPU runtime calls.
             if ann is Stream:
                 key_parts.append((name, Stream))
                 continue
