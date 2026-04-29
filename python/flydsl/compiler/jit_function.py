@@ -762,10 +762,7 @@ class JitFunction:
         recompilation when only runtime values change.
         """
         from .jit_argument import _is_constexpr_annotation, _is_type_param_annotation
-<<<<<<< HEAD
         from ..expr.typing import Stream
-=======
->>>>>>> origin/main
 
         sig = self._sig
         key_parts = [("_target_", self._target)]
@@ -783,7 +780,6 @@ class JitFunction:
                 key_parts.append((name, "Type", arg))
                 continue
 
-<<<<<<< HEAD
             # TODO: quick fix for cpu aot compilation.
             if ann is Stream:
                 key_parts.append((name, Stream))
@@ -791,9 +787,6 @@ class JitFunction:
 
             is_runtime = (ann is not inspect.Parameter.empty
                           and hasattr(ann, '__fly_ptrs__'))
-=======
-            is_runtime = ann is not inspect.Parameter.empty and hasattr(ann, "__fly_ptrs__")
->>>>>>> origin/main
             if isinstance(arg, tuple):
                 key_parts.append((name, tuple(self._arg_cache_sig(a) for a in arg)))
             else:
