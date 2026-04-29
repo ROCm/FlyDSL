@@ -215,10 +215,11 @@ template <typename WmmaOp, WmmaVariant Variant>
 static FailureOr<Value> emitWmmaSSA(OpBuilder &builder, Location loc, VectorType accTy, Value a,
                                     Value b, Value c) {
   Value res;
+  // TODO by cguo: checkout to zan/dsl:a newer llvm commit than hash.txt
   if constexpr (Variant == WmmaVariant::ModsAllReuse) {
-    res = WmmaOp::create(builder, loc, accTy,
-                         /*signA=*/false, a, /*signB=*/false, b,
-                         /*modC=*/(uint16_t)0, c)
+    res = WmmaOp::create(builder, loc, accTy, a, b,
+                         /*modC=*/(uint16_t)0, c,
+                         /*reuseA=*/true, /*reuseB=*/true)
               .getResult();
   } else if constexpr (Variant == WmmaVariant::ModsC) {
     res = WmmaOp::create(builder, loc, accTy, a, b,

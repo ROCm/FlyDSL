@@ -125,12 +125,13 @@ Type applyOffsetOnTensorLike(LayoutBuilder<LayoutAttr> &builder, Type tensorLike
 }
 
 } // namespace
-
+// TODO by cguo: checkout to zan/dsl:a newer llvm commit than hash.txt
+// OpaqueProperties -> PropertyRef
 #define FLY_INFER_RETURN_TYPES(OP)                                                                 \
   llvm::LogicalResult OP::inferReturnTypes(                                                        \
       mlir::MLIRContext *context, std::optional<::mlir::Location> location,                        \
       mlir::ValueRange operands, mlir::DictionaryAttr attributes,                                  \
-      mlir::OpaqueProperties properties, mlir::RegionRange regions,                                \
+      mlir::PropertyRef properties, mlir::RegionRange regions,                                      \
       llvm::SmallVectorImpl<mlir::Type> &inferredReturnTypes)
 
 //===----------------------------------------------------------------------===//
