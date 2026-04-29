@@ -14,6 +14,7 @@ import math
 import torch
 import flydsl.compiler as flyc
 import flydsl.expr as fx
+import functools
 from flydsl.expr import arith, vector, gpu, rocdl, buffer_ops, range_constexpr, const_expr
 from flydsl.expr.typing import T, Int32
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
@@ -248,34 +249,16 @@ def _build_pa_thread_invariants(
     )
     pv_prob_read_base = rowid * fx.Int32(MFMA_N * PROB_ROW_STRIDE_BYTES) + lane16id * fx.Int32(PROB_ROW_STRIDE_BYTES)
 
-    sm_max_off = arith.index_cast(T.index, warp_id * c_mfma_n + lane16id)
-    sm_sum_off = arith.index_cast(
-        T.index,
-        fx.Int32(NUM_WARPS * MFMA_N) + warp_id * c_mfma_n + lane16id,
-    )
-    sm_rd_max_offs = [arith.index_cast(T.index, fx.Int32(w * MFMA_N) + lane16id) for w in range(NUM_WARPS)]
-    sm_rd_sum_offs = [
-        arith.index_cast(
-            T.index,
-            fx.Int32(NUM_WARPS * MFMA_N + w * MFMA_N) + lane16id,
-        )
-        for w in range(NUM_WARPS)
-    ]
+    sm_max_off = fx.Index(warp_id * c_mfma_n + lane16id)
+    sm_sum_off = fx.Index(fx.Int32(NUM_WARPS * MFMA_N) + warp_id * c_mfma_n + lane16id)
+    sm_rd_max_offs = [fx.Index(fx.Int32(w * MFMA_N) + lane16id) for w in range(NUM_WARPS)]
+    sm_rd_sum_offs = [fx.Index(fx.Int32(NUM_WARPS * MFMA_N + w * MFMA_N) + lane16id) for w in range(NUM_WARPS)]
 
     sm_vmax_wr_off = None
     sm_vmax_rd_offs = None
     if const_expr(per_token_kv):
-        sm_vmax_wr_off = arith.index_cast(
-            T.index,
-            fx.Int32(2 * NUM_WARPS * MFMA_N) + warp_id * c_mfma_n + lane16id,
-        )
-        sm_vmax_rd_offs = [
-            arith.index_cast(
-                T.index,
-                fx.Int32(2 * NUM_WARPS * MFMA_N + w * MFMA_N) + lane16id,
-            )
-            for w in range(NUM_WARPS)
-        ]
+        sm_vmax_wr_off = fx.Index(fx.Int32(2 * NUM_WARPS * MFMA_N) + warp_id * c_mfma_n + lane16id)
+        sm_vmax_rd_offs = [fx.Index(fx.Int32(2 * NUM_WARPS * MFMA_N + w * MFMA_N) + lane16id) for w in range(NUM_WARPS)]
 
     return (
         k_tok_thread_base,
@@ -464,13 +447,13 @@ def _load_q_fragments(
             vector.store(
                 fx.Vector.from_elements([query_scale_lane], dtype=fx.Float32),
                 softmax_lds_f32,
-                [arith.index_cast(T.index, local_qhead_idx)],
+                [fx.Index(local_qhead_idx)],
             )
             scf.YieldOp([])
 
     v01 = fx.Vector.from_elements([q_w0, q_w1], dtype=fx.Int32)
     lds_q_i32 = lds_q_base // arith.constant(4, type=T.i32)
-    vector.store(v01, logits_lds_i32, [arith.index_cast(T.index, lds_q_i32)])
+    vector.store(v01, logits_lds_i32, [fx.Index(lds_q_i32)])
 
     q_frags = []
     gpu.barrier()
@@ -479,7 +462,7 @@ def _load_q_fragments(
             vector.load_op(
                 T.vec(1, T.f32),
                 softmax_lds_f32,
-                [arith.index_cast(T.index, lane16id)],
+                [fx.Index(lane16id)],
             )
         )[0].ir_value()
     c_head_size = arith.constant(HEAD_SIZE, type=T.i32)
@@ -497,7 +480,7 @@ def _load_q_fragments(
             q_v1 = vector.load_op(
                 T.vec(1, T.i64),
                 logits_lds_i64,
-                [arith.index_cast(T.index, lds_rd_base)],
+                [fx.Index(lds_rd_base)],
             )
             q_frags.append(fx.Vector(q_v1)[0])
     return q_frags, query_scale_lane
@@ -847,7 +830,7 @@ def _make_pa_phase_helpers(
             byte_base = prob_wr_thread_base + arith.constant(td * MFMA_N * PROB_ROW_STRIDE_BYTES, type=T.i32)
             i32_off = byte_base // c_four
             pk_vec = vector.from_elements(T.vec(1, T.i32), [pk])
-            vector.store(pk_vec, logits_lds_i32, [arith.index_cast(T.index, i32_off)])
+            vector.store(pk_vec, logits_lds_i32, [fx.Index(i32_off)])
         return rmax, rsum, o0, o1, v_correction
 
     def _pv_mfma(v_ops, o0, o1, v_correction):
@@ -874,7 +857,7 @@ def _make_pa_phase_helpers(
                         vector.load_op(
                             T.vec(1, T.i32),
                             logits_lds_i32,
-                            [arith.index_cast(T.index, p_i32_idx)],
+                            [fx.Index(p_i32_idx)],
                         ),
                         static_position=[0],
                     )
@@ -882,7 +865,7 @@ def _make_pa_phase_helpers(
                         vector.load_op(
                             T.vec(1, T.i32),
                             logits_lds_i32,
-                            [arith.index_cast(T.index, p_i32_idx + c_one)],
+                            [fx.Index(p_i32_idx + c_one)],
                         ),
                         static_position=[0],
                     )
@@ -1190,6 +1173,7 @@ def _expand_pa_metadata_for_block_splits(
 # =====================================================================
 # compile_pa_decode_ps — Persistent Scheduling PA decode kernel
 # =====================================================================
+@functools.lru_cache(maxsize=256)
 def compile_pa_decode_ps(
     softmax_scale=None,
     trans_v=False,
@@ -1345,8 +1329,8 @@ def compile_pa_decode_ps(
         # Outer work loop — iterate over assigned work items
         # Each work item = one (batch, kv_head_range, kv_page_range)
         # ════════════════════════════════════════════════════════════
-        _work_start_idx = arith.index_cast(T.index, arith.unwrap(work_start))
-        _work_end_idx = arith.index_cast(T.index, arith.unwrap(work_end))
+        _work_start_idx = fx.Index(arith.unwrap(work_start))
+        _work_end_idx = fx.Index(arith.unwrap(work_end))
         _work_step = arith.index(1)
 
         for _wi in range(_work_start_idx, _work_end_idx, _work_step):
@@ -1508,7 +1492,7 @@ def compile_pa_decode_ps(
             num_blocks_in_work = kv_end - kv_start
             last_block_idx_val = num_blocks_in_work - c_one
             _loop_start_g = arith.index(0)
-            _loop_stop_g = arith.index_cast(T.index, arith.unwrap(num_blocks_in_work))
+            _loop_stop_g = fx.Index(arith.unwrap(num_blocks_in_work))
             _loop_step_g = arith.index(1)
 
             # ── MTP groups: Python compile-time loop — one MLIR KV-loop per group ──
@@ -1890,6 +1874,7 @@ def get_sw_ps_max_context_partition_num(
     return _cdiv(window_token_count - 1, context_partition_size) + 1
 
 
+@functools.lru_cache(maxsize=256)
 def compile_pa_decode_sw_reduce(
     *,
     max_context_partition_num: int,
@@ -1982,14 +1967,14 @@ def compile_pa_decode_sw_reduce(
             w = _wave_reduce_max_full(val) if const_expr(mode == "max") else _wave_reduce_sum_full(val)
 
             if lane == c_zero_i:
-                wave_idx = arith.index_cast(T.index, wave)
+                wave_idx = fx.Index(wave)
                 red_scratch.store(w, [wave_idx])
             gpu.barrier()
 
             if wave == c_zero_i:
                 in_range = lane < c_red_slots
                 lane_safe = arith.select(in_range, lane, c_zero_i)
-                lane_safe_idx = arith.index_cast(T.index, lane_safe)
+                lane_safe_idx = fx.Index(lane_safe)
                 red_val = red_scratch.load([lane_safe_idx])
                 red_val = arith.select(in_range, red_val, neutral)
                 red_val = (
@@ -2140,7 +2125,7 @@ def compile_pa_decode_sw_reduce(
                     part_max = part_max_raw
                     part_scale = ((part_max - global_max) * c_log2e).exp2(fastmath=fm_fast)
                     weight = (part_sum * part_scale) / safe_global_exp_sum
-                    part_idx_idx = arith.index_cast(T.index, part_i32)
+                    part_idx_idx = fx.Index(part_i32)
                     part_weights_lds.store(weight, [part_idx_idx])
 
             gpu.barrier()
@@ -2499,6 +2484,7 @@ def pa_decode_ps_launch(
 # Uses block_tables for physical block lookup instead of kv_page_indices.
 # Output: exp_sums, max_logits, temporary_output -> reduced by a separate kernel.
 # =====================================================================
+@functools.lru_cache(maxsize=256)
 def compile_pa_decode_sw(
     sliding_window: int,  # required > 0 -- baked as compile-time constant
     softmax_scale=None,
