@@ -34,7 +34,7 @@ from .protocol import fly_construct, fly_types
 
 
 @lru_cache(maxsize=2)
-def _flydsl_key(debug_info_enabled: bool) -> str:
+def _flydsl_key() -> str:
     """Compute a hash fingerprint of the entire FlyDSL compiler toolchain.
 
     Covers:
@@ -49,6 +49,8 @@ def _flydsl_key(debug_info_enabled: bool) -> str:
     bindings will produce a different key, invalidating stale disk caches.
     """
     import flydsl
+
+    debug_info_enabled = bool(env.debug.enable_debug_info)
 
     contents = []
 
@@ -93,11 +95,7 @@ def _flydsl_key(debug_info_enabled: bool) -> str:
                         h.update(chunk)
                 contents.append(h.hexdigest())
 
-    key = (
-        f"flydsl:{flydsl.__version__}:{backend.hash()}:"
-        f"debug_info={int(debug_info_enabled)}-"
-        + "-".join(contents)
-    )
+    key = f"flydsl:{flydsl.__version__}:{backend.hash()}:" f"debug_info={int(debug_info_enabled)}-" + "-".join(contents)
     log().debug(f"flydsl_key: {hashlib.sha256(key.encode()).hexdigest()[:16]}")
     return key
 
@@ -252,7 +250,7 @@ def _collect_dependency_sources(
 
 def _jit_function_cache_key(func: Callable, owner_cls=None) -> str:
     parts = []
-    parts.append(_flydsl_key(env.debug.enable_debug_info))
+    parts.append(_flydsl_key())
     parts.append(_get_func_source(func))
     try:
         source = inspect.getsource(func)
