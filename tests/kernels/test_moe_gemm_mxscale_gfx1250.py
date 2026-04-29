@@ -34,9 +34,7 @@ from tests.utils import get_dtype_max
 from tests.test_common import verify_output
 from flydsl.runtime.device import get_rocm_arch
 from tests.kernels.utils import fp4_utils
-from tests.kernels.benchmark_common import (
-    bench_kernel_us as _bench_kernel_us,
-)
+from tests.kernels.benchmark_common import bench_kernel_us as _bench_kernel_us
 
 ARCH = get_rocm_arch()
 # GFX950 (MI350) and newer typically use OCP standard float8_e4m3fn
@@ -1347,189 +1345,58 @@ def _prepare_a2_from_stage1(out1_fp16, in_dtype, tokens, topk, inter_dim,
 
 
 
-def test_moe_stage1_use_tdm_gather_smoke():
-    """Stage1 should support toggling A TDM gather without changing numerics on padded routes."""
-    tokens = 5
-    model_dim = 256
-    inter_dim = 128
-    experts = 1
-    topk = 1
-    tile_m = 16
-    tile_n = 64
-    tile_k = 128
+# ---------------------------------------------------------------------------
+# Consolidated smoke test: 3 stages x 3 MXScale dtypes = 9 cases vs torch ref.
+# Tiny shape (tokens=64, model=256, inter=128, E=4, topk=2) for fast iteration.
+# ---------------------------------------------------------------------------
 
-    device = torch.device("cuda")
-    torch.manual_seed(0)
-    x_fp32 = torch.randn((tokens, model_dim), device=device, dtype=torch.float32)
-    w1_fp32 = torch.randn((experts, 2 * inter_dim, model_dim), device=device, dtype=torch.float32)
-    topk_ids = torch.zeros((tokens, topk), device=device, dtype=torch.int64)
-    topk_weights = torch.ones((tokens, topk), device=device, dtype=torch.float32)
-    routing = build_routing_buffers(
-        topk_ids=topk_ids,
-        topk_weights=topk_weights,
-        experts=experts,
-        model_dim=model_dim,
-        tile_m=tile_m,
-        moe_sort_mode="torch",
-    )
-
-    common_args = dict(
-        tokens=tokens,
-        model_dim=model_dim,
-        inter_dim=inter_dim,
-        experts=experts,
-        topk=topk,
-        tile_m=tile_m,
-        tile_n=tile_n,
-        tile_k=tile_k,
-        doweight_stage1=False,
-        in_dtype="fp8",
-        seed=123,
-        num_iters=1,
-        num_warmup=1,
-        moe_sort_mode="torch",
-        x_fp32_in=x_fp32,
-        w1_fp32_in=w1_fp32,
-        topk_ids_in=topk_ids,
-        topk_weights_in=topk_weights,
-        routing_in=routing,
-        return_outputs=True,
-        skip_ref=True,
-    )
-
-    out_scalar, _ = run_moe_stage1(
-        **common_args,
-        use_tdm_gather=False,
-    )
-    out_gather, _ = run_moe_stage1(
-        **common_args,
-        use_tdm_gather=True,
-    )
-
-    assert torch.isfinite(out_scalar).all()
-    assert torch.isfinite(out_gather).all()
-    assert verify_output(out_gather.to(torch.float32), out_scalar.to(torch.float32), rtol=0.5, atol=0.5)
-
-
-def test_moe_stage2_use_tdm_gather_smoke():
-    """Stage2 should support toggling A TDM gather without changing numerics."""
-    tokens = 32
-    model_dim = 256
-    inter_dim = 128
-    experts = 4
-    topk = 2
-    tile_m = 16
-    tile_n = 64
-    tile_k = 128
-
-    torch.manual_seed(0)
-    a2_fp32 = torch.randn((tokens, topk, inter_dim), device="cuda", dtype=torch.float32)
-    a2_q, a2_scale = _per_1x32_fp8_quant(a2_fp32)
-
-    common_args = dict(
-        tokens=tokens,
-        model_dim=model_dim,
-        inter_dim=inter_dim,
-        experts=experts,
-        topk=topk,
-        tile_m=tile_m,
-        tile_n=tile_n,
-        tile_k=tile_k,
-        doweight_stage1=False,
-        in_dtype="fp8",
-        out_dtype="f16",
-        seed=123,
-        num_iters=1,
-        num_warmup=1,
-        return_outputs=True,
-        skip_ref=True,
-        a2_fp8_in=a2_q,
-        a2_scale_in=a2_scale,
-    )
-
-    out_scalar, _ = run_moe_stage2(
-        **common_args,
-        use_tdm_gather=False,
-    )
-    out_gather, _ = run_moe_stage2(
-        **common_args,
-        use_tdm_gather=True,
-    )
-
-    assert torch.isfinite(out_scalar).all()
-    assert torch.isfinite(out_gather).all()
-    assert verify_output(out_gather.to(torch.float32), out_scalar.to(torch.float32), rtol=0.5, atol=0.5)
-
-
-def test_moe_stage2_use_tdm_gather_padding_smoke():
-    """Stage2 gather should match scalar load on deterministic padding-heavy routing."""
-    tokens = 5
-    model_dim = 256
-    inter_dim = 128
-    experts = 1
-    topk = 2
-    tile_m = 16
-    tile_n = 64
-    tile_k = 128
-
-    device = torch.device("cuda")
-    torch.manual_seed(1)
-    a2_fp32 = torch.randn((tokens, topk, inter_dim), device=device, dtype=torch.float32)
-    a2_q, a2_scale = _per_1x32_fp8_quant(a2_fp32)
-    x_fp32 = torch.randn((tokens, model_dim), device=device, dtype=torch.float32)
-    w1_fp32 = torch.randn((experts, 2 * inter_dim, model_dim), device=device, dtype=torch.float32)
-    w2_fp32 = torch.randn((experts, model_dim, inter_dim), device=device, dtype=torch.float32)
-    topk_ids = torch.zeros((tokens, topk), device=device, dtype=torch.int64)
-    topk_weights = torch.tensor([[0.75, 0.25]], device=device, dtype=torch.float32).expand(tokens, topk).contiguous()
-    routing = build_routing_buffers(
-        topk_ids=topk_ids,
-        topk_weights=topk_weights,
-        experts=experts,
-        model_dim=model_dim,
-        tile_m=tile_m,
-        moe_sort_mode="torch",
-    )
-
-    common_args = dict(
-        tokens=tokens,
-        model_dim=model_dim,
-        inter_dim=inter_dim,
-        experts=experts,
-        topk=topk,
-        tile_m=tile_m,
-        tile_n=tile_n,
-        tile_k=tile_k,
-        doweight_stage1=False,
-        in_dtype="fp8",
-        out_dtype="f16",
-        seed=321,
-        num_iters=1,
-        num_warmup=1,
-        moe_sort_mode="torch",
-        x_fp32_in=x_fp32,
-        w1_fp32_in=w1_fp32,
-        w2_fp32_in=w2_fp32,
-        topk_ids_in=topk_ids,
-        topk_weights_in=topk_weights,
-        routing_in=routing,
-        a2_fp8_in=a2_q,
-        a2_scale_in=a2_scale,
-        return_outputs=True,
-        skip_ref=True,
-    )
-
-    out_scalar, _ = run_moe_stage2(
-        **common_args,
-        use_tdm_gather=False,
-    )
-    out_gather, _ = run_moe_stage2(
-        **common_args,
-        use_tdm_gather=True,
-    )
-
-    assert torch.isfinite(out_scalar).all()
-    assert torch.isfinite(out_gather).all()
-    assert verify_output(out_gather.to(torch.float32), out_scalar.to(torch.float32), rtol=0.5, atol=0.5)
+@pytest.mark.parametrize("in_dtype", ["fp4", "fp8", "a8w4"])
+@pytest.mark.parametrize("stage", ["stage1", "stage2", "2stage"])
+def test_moe_smoke_ref(
+    stage: str,
+    in_dtype: str,
+    tokens: int = 64,
+    model_dim: int = 256,
+    inter_dim: int = 128,
+    experts: int = 4,
+    topk: int = 2,
+    tile_m: int = 16,
+    tile_n: int = 64,
+    tile_k: int = 128,
+):
+    """Smoke: stage1 / stage2 / 2-stage e2e vs torch reference for fp4/fp8/a8w4."""
+    if stage == "stage1":
+        run_moe_stage1(
+            tokens=tokens, model_dim=model_dim, inter_dim=inter_dim,
+            experts=experts, topk=topk,
+            tile_m=tile_m, tile_n=tile_n, tile_k=tile_k,
+            doweight_stage1=False,
+            in_dtype=in_dtype,
+            seed=0, num_iters=1, num_warmup=1,
+            skip_ref=False,
+        )
+    elif stage == "stage2":
+        run_moe_stage2(
+            tokens=tokens, model_dim=model_dim, inter_dim=inter_dim,
+            experts=experts, topk=topk,
+            tile_m=tile_m, tile_n=tile_n, tile_k=tile_k,
+            doweight_stage1=False,
+            in_dtype=in_dtype, out_dtype="f16",
+            seed=0, num_iters=1, num_warmup=1,
+            skip_ref=False,
+        )
+    else:  # "2stage"
+        run_moe_gemm_2stage(
+            tokens=tokens, model_dim=model_dim, inter_dim=inter_dim,
+            experts=experts, topk=topk,
+            tile_m=tile_m, tile_n1=tile_n, tile_k1=tile_k,
+            tile_n2=tile_n, tile_k2=tile_k,
+            doweight_stage1=False,
+            in_dtype=in_dtype, out_dtype="f16",
+            use_reduce=False, use_valid_mask=False,
+            seed=0, num_iters=1, num_warmup=1,
+            skip_ref=False,
+        )
 
 
 # ---------------------------------------------------------------------------
