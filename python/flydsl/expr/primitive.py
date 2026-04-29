@@ -19,7 +19,6 @@ from .._mlir.dialects.fly import (
     GemmTraversalOrder,
     IntTupleType,
     LayoutType,
-    MemRefType,
     MmaAtomType,
     MmaOperand,
     MmaOpUniversalFMAType,
@@ -30,6 +29,9 @@ from .._mlir.dialects.fly import (
     TileType,
     #
     has_none,
+)
+from .._mlir.dialects.fly import (
+    MemRefType as _MemRefType,
 )
 from .._mlir.extras import types as T
 from .meta import traced_op
@@ -184,6 +186,23 @@ __all__ = [
     "assume",
     "make_tile",
 ]
+
+
+class MemRefType:
+    static_typeid = _MemRefType.static_typeid
+
+    def __new__(cls, *args, **kwargs):
+        return _MemRefType(*args, **kwargs)
+
+    @staticmethod
+    def get(elem_ty, layout, address_space=0, alignment=None, *, context=None):
+        if isinstance(elem_ty, type) and hasattr(elem_ty, "ir_type"):
+            elem_ty = elem_ty.ir_type
+        if elem_ty is None or not isinstance(elem_ty, ir.Type):
+            raise TypeError(f"MemRefType.get expected an MLIR type or DSL numeric type, got {elem_ty!r}")
+        if address_space is not None:
+            address_space = int(address_space)
+        return _MemRefType.get(elem_ty, layout, address_space, alignment, context=context)
 
 
 UniversalCopy = lambda bit_size: CopyOpUniversalCopyType.get(bit_size)
