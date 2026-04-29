@@ -25,19 +25,26 @@ cd "$(dirname "$0")"
 export PYTHONPATH=./
 export PYTHONPATH=/workspace/FLIR/build-fly/python_packages:${PYTHONPATH}
 export FLYDSL_RUNTIME_ENABLE_CACHE=0
-export FLIR_REBUILD=1
 export FLIR_A8W4SMOOTH_QPARAM_FORMAT=packed4
 export FLIR_A8W4SMOOTH_INTERLEAVE_K64=1
 export FLIR_A8W4SMOOTH_OVERFLOW_GUARD=1
 
 IN_DTYPES="${1:-fp8}"
-NUM_ITERS="${2:-20}"
+NUM_ITERS="${2:-32}"
 NUM_WARMUP="${3:-5}"
 
+export FLYDSL_REBUILD=1
+export FLYDSL_DUMP_IR=1
+export FLYDSL_DEBUG_DUMP_ASM=1
+export FLYDSL_DUMP_DIR="dumps"
+
+rm -fr dumps
+mkdir -p dumps
+
 # TOKENS=(256 512 1024 1536 2048)
-TOKENS=(256 4096)
-# DIMS=("3584,1024" "5120,1536" "7168,2048")
-DIMS=("3584,1024")
+TOKENS=(4096)
+DIMS=("3584,1024" "5120,1536" "7168,2048")
+# DIMS=("7168,2048")
 EXPERTS=48    # 384 total / ep=8
 TOPK=8
 
@@ -100,15 +107,15 @@ run_moe_stage2_a8w4smooth(**kwargs)
                 -t "$T" \
                 -e "$EXPERTS" \
                 -k "$TOPK" \
-                --tile_m 32 \
+                --tile_m 64 \
                 --tile_n 128 \
-                --tile_k 256 \
-                --tile_n2 256 \
-                --tile_k2 256 \
+                --tile_k 128 \
+                --tile_n2 128 \
+                --tile_k2 128 \
                 --gemm2_mode atomic \
                 --moe_sort_mode torch \
                 --compare_aiter_ck false \
-                --skip_ref False \
+                --skip_ref false \
                 --num_iters "$NUM_ITERS" \
                 --num_warmup "$NUM_WARMUP" \
                 2>&1 | grep -E "TFLOPS|TB/s|stage[12]|Error|SKIP|skip" || true
