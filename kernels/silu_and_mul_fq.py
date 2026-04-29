@@ -88,6 +88,7 @@ def build_silu_and_mul_fq_module(
     topk: int,
     quant_mode: str = "fp4",
     gui_layout: bool = False,
+    swiglu_limit: float = 0.0,
 ):
     """Return a JIT launcher for fused silu_and_mul + optional quant + scale sort.
 
@@ -108,6 +109,10 @@ def build_silu_and_mul_fq_module(
         ``False`` (default): input is gate-up separated [gate_0:N | up_0:N].
         ``True``: input is block-interleaved per-16
         [gate_0:16, up_0:16, gate_16:32, ...]; requires ``VEC <= 16``.
+    swiglu_limit : float
+        When non-zero, clamp ``gate <= swiglu_limit`` and
+        ``-swiglu_limit <= up <= swiglu_limit`` before applying
+        ``silu(gate) * up``. ``0.0`` (default) disables clamping.
     """
     assert inter_dim % 32 == 0, f"inter_dim={inter_dim} must be divisible by 32"
     if quant_mode not in ("fp4", "fp8", "none"):
@@ -247,10 +252,17 @@ def build_silu_and_mul_fq_module(
                     # ── SiLU(gate) * up ──────────────────────────────
                     neg_log2e = arith.constant(-1.4426950408889634, type=T.f32)
                     c1_f32 = arith.constant(1.0, type=T.f32)
+                    if const_expr(swiglu_limit != 0):
+                        _limit = arith.constant(float(swiglu_limit), type=T.f32)
+                        _neg_limit = arith.constant(-float(swiglu_limit), type=T.f32)
                     act_vals = []
                     for vi in range_constexpr(VEC):
                         g = vector.extract(gate_f32, static_position=[vi], dynamic_position=[])
                         u = vector.extract(up_f32, static_position=[vi], dynamic_position=[])
+                        if const_expr(swiglu_limit != 0):
+                            g = arith.minimumf(g, _limit)
+                            u = arith.minimumf(u, _limit)
+                            u = arith.maximumf(u, _neg_limit)
                         emu = ArithValue(rocdl.exp2(T.f32, g * neg_log2e))
                         sig = ArithValue(rocdl.rcp(T.f32, c1_f32 + emu))
                         act_vals.append(g * sig * u)
