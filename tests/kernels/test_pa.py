@@ -30,7 +30,8 @@ if str(REPO_ROOT) not in sys.path:
 try:
     from triton.experimental import gluon  # noqa: F401
     from triton.experimental.gluon import language as gl  # noqa: F401
-    HAS_GLUON = False
+
+    HAS_GLUON = True
 except ImportError:
     HAS_GLUON = False
     print("Warning: Triton Gluon is unavailable; Gluon reference checks will fail.")
@@ -41,6 +42,7 @@ try:
         get_pa_metadata as flydsl_get_pa_metadata,
         pa_decode_ps_launch as flydsl_ps_launch,
     )
+
     HAS_FLYDSL_PS = True
 except ImportError as exc:
     HAS_FLYDSL_PS = False
@@ -203,7 +205,6 @@ def create_kv_cache(
     return key_caches, value_caches
 
 
-
 def reference_masked_attention(
     query: torch.Tensor,
     key: torch.Tensor,
@@ -229,12 +230,10 @@ def reference_masked_attention(
     if is_causal:
         query_len = query.shape[0]
         key_len = key.shape[0]
-        attention_bias = torch.zeros(
-            query_len, key_len, dtype=torch.float32, device=query.device
+        attention_bias = torch.zeros(query_len, key_len, dtype=torch.float32, device=query.device)
+        causal_mask = torch.ones(query_len, key_len, dtype=torch.bool, device=query.device).tril(
+            diagonal=key_len - query_len
         )
-        causal_mask = torch.ones(
-            query_len, key_len, dtype=torch.bool, device=query.device
-        ).tril(diagonal=key_len - query_len)
         # attention_bias.masked_fill_(causal_mask.logical_not(), float(-3.4e38))
         attention_bias.masked_fill_(causal_mask.logical_not(), float(-3.4e38))
         attention_weights += attention_bias
@@ -246,9 +245,7 @@ def reference_masked_attention(
         key_positions = torch.arange(s_k, device=query.device)
     else:
         # Generation phase: query is at position s_k (after the cache)
-        query_positions = torch.arange(
-            s_k - s_q, s_k, device=query.device
-        )  # [s_k] for s_q=1
+        query_positions = torch.arange(s_k - s_q, s_k, device=query.device)  # [s_k] for s_q=1
         key_positions = torch.arange(s_k, device=query.device)  # [0,1,2,...,s_k-1]
 
     # Create position difference matrix: query_pos - key_pos
@@ -290,12 +287,8 @@ def torch_mha_extend(
     kv_dtype = key_cache.dtype
 
     queries_split = torch.tensor_split(query, query_output_indptr.tolist()[1:])
-    key_cache_flat = (
-        key_cache.permute(0, 3, 1, 2, 4).contiguous().view(-1, num_heads, head_size)
-    )
-    value_cache_flat = (
-        value_cache.permute(0, 3, 1, 2).contiguous().view(-1, num_heads, head_size)
-    )
+    key_cache_flat = key_cache.permute(0, 3, 1, 2, 4).contiguous().view(-1, num_heads, head_size)
+    value_cache_flat = value_cache.permute(0, 3, 1, 2).contiguous().view(-1, num_heads, head_size)
 
     batch_size = query_output_indptr.shape[0] - 1
     outputs = []
@@ -306,25 +299,15 @@ def torch_mha_extend(
         current_context_length = context_lengths[batch_idx].item()
 
         token_indices = (
-            current_block_table.repeat_interleave(block_size)[:current_context_length]
-            * block_size
-            + torch.arange(current_context_length, device=current_block_table.device)
-            % block_size
+            current_block_table.repeat_interleave(block_size)[:current_context_length] * block_size
+            + torch.arange(current_context_length, device=current_block_table.device) % block_size
         )
 
-        gathered_keys = (
-            key_cache_flat.view(torch.int8)[token_indices]
-            .view(kv_dtype)
-            .to(torch.float)
-        )
+        gathered_keys = key_cache_flat.view(torch.int8)[token_indices].view(kv_dtype).to(torch.float)
         if key_scale is not None:
             gathered_keys *= key_scale[:, token_indices].t().unsqueeze(-1)
 
-        gathered_values = (
-            value_cache_flat.view(torch.int8)[token_indices]
-            .view(kv_dtype)
-            .to(torch.float)
-        )
+        gathered_values = value_cache_flat.view(torch.int8)[token_indices].view(kv_dtype).to(torch.float)
         if value_scale is not None:
             gathered_values *= value_scale[:, token_indices].t().unsqueeze(-1)
 
@@ -356,22 +339,10 @@ def quantize_kv_cache_symmetric(
 ]:
     num_blocks, num_heads, head_dim, block_size = value_cache.shape
     total_tokens = num_blocks * block_size
-    key_cache_reshaped = (
-        key_cache.permute(0, 1, 3, 2, 4)
-        .reshape(num_blocks, num_heads, block_size, -1)
-        .contiguous()
-    )
-    value_cache_reshaped = (
-        value_cache.permute(0, 1, 3, 2)
-        .reshape(num_blocks, num_heads, block_size, -1)
-        .contiguous()
-    )
-    quantized_keys, key_scales_original = pertoken_quant(
-        key_cache_reshaped, quant_dtype=quant_dtype
-    )
-    quantized_values, value_scales_original = pertoken_quant(
-        value_cache_reshaped, quant_dtype=quant_dtype
-    )
+    key_cache_reshaped = key_cache.permute(0, 1, 3, 2, 4).reshape(num_blocks, num_heads, block_size, -1).contiguous()
+    value_cache_reshaped = value_cache.permute(0, 1, 3, 2).reshape(num_blocks, num_heads, block_size, -1).contiguous()
+    quantized_keys, key_scales_original = pertoken_quant(key_cache_reshaped, quant_dtype=quant_dtype)
+    quantized_values, value_scales_original = pertoken_quant(value_cache_reshaped, quant_dtype=quant_dtype)
     elements_per_vector = 16 // quant_dtype.itemsize
     quantized_keys = (
         quantized_keys.view(
@@ -385,16 +356,10 @@ def quantize_kv_cache_symmetric(
         .contiguous()
     )
     quantized_values = (
-        quantized_values.view(num_blocks, num_heads, block_size, head_dim)
-        .permute(0, 1, 3, 2)
-        .contiguous()
+        quantized_values.view(num_blocks, num_heads, block_size, head_dim).permute(0, 1, 3, 2).contiguous()
     )
-    key_scales_flat = (
-        key_scales_original.permute(1, 0, 2, 3).contiguous().view(num_heads, total_tokens)
-    )
-    value_scales_flat = (
-        value_scales_original.permute(1, 0, 2, 3).contiguous().view(num_heads, total_tokens)
-    )
+    key_scales_flat = key_scales_original.permute(1, 0, 2, 3).contiguous().view(num_heads, total_tokens)
+    value_scales_flat = value_scales_original.permute(1, 0, 2, 3).contiguous().view(num_heads, total_tokens)
     return (
         quantized_keys,
         key_scales_flat,
@@ -419,11 +384,7 @@ def quantize_kv_cache_per_tensor(
 ]:
     num_blocks, num_heads, head_dim, block_size = value_cache.shape
     elements_per_vector = 16 // quant_dtype.itemsize
-    key_cache_reshaped = (
-        key_cache.permute(0, 1, 3, 2, 4)
-        .reshape(num_blocks, num_heads, block_size, -1)
-        .contiguous()
-    )
+    key_cache_reshaped = key_cache.permute(0, 1, 3, 2, 4).reshape(num_blocks, num_heads, block_size, -1).contiguous()
     key_cache_reshaped = (
         key_cache_reshaped.view(
             num_blocks,
@@ -435,12 +396,8 @@ def quantize_kv_cache_per_tensor(
         .permute(0, 1, 3, 2, 4)
         .contiguous()
     )
-    quantized_keys, key_scales_original = per_tensor_quant(
-        key_cache_reshaped, quant_dtype=quant_dtype
-    )
-    quantized_values, value_scales_original = per_tensor_quant(
-        value_cache, quant_dtype=quant_dtype
-    )
+    quantized_keys, key_scales_original = per_tensor_quant(key_cache_reshaped, quant_dtype=quant_dtype)
+    quantized_values, value_scales_original = per_tensor_quant(value_cache, quant_dtype=quant_dtype)
     key_scales_flat = key_scales_original.expand(num_heads, num_blocks * block_size)
     value_scales_flat = value_scales_original.expand(num_heads, num_blocks * block_size)
     return (
@@ -500,9 +457,7 @@ def measure_us(
 
         except RuntimeError as exc:
             graph = None
-            print(
-                f"Warning: measure_us cuda graph capture failed, falling back to eager execution: {exc}"
-            )
+            print(f"Warning: measure_us cuda graph capture failed, falling back to eager execution: {exc}")
             torch.cuda.synchronize()
     start = torch.cuda.Event(enable_timing=True)
     end = torch.cuda.Event(enable_timing=True)
@@ -523,11 +478,13 @@ def get_gluon_partition_count(
     block_size: int,
     context_partition_size: int,
     sliding_window: int,
+    query_length: int = 1,
 ) -> int:
     if sliding_window > 0:
         return get_sw_ps_max_context_partition_num(
             sliding_window,
             context_partition_size,
+            query_length,
         )
     split_kv_blocks = triton.cdiv(block_size, context_partition_size)
     return get_recommended_splits(num_seqs, num_kv_heads, split_kv_blocks)
@@ -648,7 +605,6 @@ def get_tolerance(*, kv_varlen: bool, sliding_window: int) -> float:
     return diff_tolerance
 
 
-
 def get_ps_vs_gluon_tolerance(ps_tolerance: float, gluon_tolerance: float) -> float:
     """Cross-check tolerance should not be stricter than the Gluon reference itself."""
     return max(ps_tolerance, gluon_tolerance)
@@ -741,9 +697,7 @@ def run_pa_decode_ps_test(
         dtype=data_type,
         device=device,
     )
-    query, key, value = torch.split(
-        qkv_tensor, [num_query_heads, num_kv_heads, num_kv_heads], dim=1
-    )
+    query, key, value = torch.split(qkv_tensor, [num_query_heads, num_kv_heads, num_kv_heads], dim=1)
     query.uniform_(*UNIFORM_RANGE)
     if kv_varlen:
         kv_len_list = [random.randint(query_length, context_length) for _ in range(batch_size)]
@@ -756,9 +710,7 @@ def run_pa_decode_ps_test(
     blocks_per_sequence = triton.cdiv(context_length, block_size)
     block_tables_list: List[List[int]] = []
     for _ in range(batch_size):
-        block_tables_list.append(
-            [random.randint(0, total_blocks - 1) for _ in range(blocks_per_sequence)]
-        )
+        block_tables_list.append([random.randint(0, total_blocks - 1) for _ in range(blocks_per_sequence)])
     block_tables = torch.tensor(block_tables_list, dtype=torch.int32, device=device)
     key_caches, value_caches = create_kv_cache(
         total_blocks,
@@ -822,6 +774,7 @@ def run_pa_decode_ps_test(
             block_size,
             context_partition_size,
             sliding_window,
+            query_length,
         )
         equivalent_query_group_size = query_length * (num_query_heads // num_kv_heads)
         intermediate_shape = (
@@ -893,10 +846,11 @@ def run_pa_decode_ps_test(
     ps_key_scale: torch.Tensor = key_scale_original
     ps_value_scale: torch.Tensor = value_scale_original
     flydsl_ps_output = torch.empty_like(reference_output)
-    
+
     max_context_partition_num = get_sw_ps_max_context_partition_num(
         sliding_window,
         context_partition_size,
+        query_length,
     )
     flydsl_exp_sums = None
     flydsl_max_logits = None
@@ -908,12 +862,8 @@ def run_pa_decode_ps_test(
             max_context_partition_num,
             query_length * (num_query_heads // num_kv_heads),
         )
-        flydsl_exp_sums = torch.empty(
-            intermediate_shape, dtype=torch.float32, device=device
-        )
-        flydsl_max_logits = torch.empty(
-            intermediate_shape, dtype=torch.float32, device=device
-        )
+        flydsl_exp_sums = torch.empty(intermediate_shape, dtype=torch.float32, device=device)
+        flydsl_max_logits = torch.empty(intermediate_shape, dtype=torch.float32, device=device)
         flydsl_temporary_output = torch.empty(
             *intermediate_shape,
             head_size,
@@ -1213,18 +1163,14 @@ def parse_arg_and_run_test(sample_rate0: float = None, *, output_tag: str = TEST
         sample_rate=sample_rate,
         sliding_window_options=sliding_window_options,
     )
-    output_file = (
-        f"run_pa_decode_ps_test.{output_tag}.block_size_{block_sizes[0]}.triton.{TRITON_VERSION}.csv"
-    )
+    output_file = f"run_pa_decode_ps_test.{output_tag}.block_size_{block_sizes[0]}.triton.{TRITON_VERSION}.csv"
     results_df.to_csv(output_file, index=False)
     print(f"\nResults saved to {output_file}")
     print(f"\nSummary:\n{results_df}")
     flydsl_errors = int(results_df["err_flydsl_ps"].sum())
 
     if flydsl_errors:
-        raise AssertionError(
-            f"{flydsl_errors} FlyDSL PS case(s) exceeded the Torch-reference tolerance"
-        )
+        raise AssertionError(f"{flydsl_errors} FlyDSL PS case(s) exceeded the Torch-reference tolerance")
 
     print("\nAll PS-only tests passed!")
 
