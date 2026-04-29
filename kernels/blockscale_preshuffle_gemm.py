@@ -874,16 +874,16 @@ def compile_blockscale_preshuffle_gemm(
         gx = (i32_m + (tile_m - 1)) // tile_m
         gy = i32_n // tile_n
 
-        launcher = kernel_gemm(arg_c, arg_a, arg_b, arg_scale_a, arg_scale_b,
-                               i32_m, i32_n)
-        if const_expr(waves_per_eu is not None):
-            _wpe = int(waves_per_eu)
-            if const_expr(_wpe >= 1):
-                for op in ctx.gpu_module_body.operations:
-                    if const_expr(hasattr(op, 'attributes') and op.OPERATION_NAME == "gpu.func"):
-                        op.attributes["rocdl.waves_per_eu"] = ir.IntegerAttr.get(
-                            T.i32, _wpe)
-        launcher.launch(
+        kernel_gemm(
+            arg_c,
+            arg_a,
+            arg_b,
+            arg_scale_a,
+            arg_scale_b,
+            i32_m,
+            i32_n,
+            value_attrs={"rocdl.waves_per_eu": waves_per_eu},
+        ).launch(
             grid=(gx, gy, 1),
             block=(256, 1, 1),
             stream=stream,

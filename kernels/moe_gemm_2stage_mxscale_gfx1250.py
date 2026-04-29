@@ -1527,12 +1527,26 @@ def _compile_stage1_mxscale_kernel_impl(
         size_expert_ids_in = arith.index_cast(T.index, i32_size_expert_ids_in)
         gx = (inter_in + fx.Index(int(tile_n) - 1)) // fx.Index(int(tile_n))
         gy = size_expert_ids_in
-        launcher = moe_mxscale_stage1_single(
-            arg_out, arg_x, arg_w, arg_scale_x, arg_scale_w,
-            arg_sorted_token_ids, arg_expert_ids, arg_sorted_weights, arg_num_valid_ids,
-            i32_tokens_in, i32_inter_in, i32_k_in, i32_size_expert_ids_in,
-        )
         _cluster_arg = (int(cluster_m), int(cluster_n), 1) if use_cluster else None
+        launcher = moe_mxscale_stage1_single(
+            arg_out,
+            arg_x,
+            arg_w,
+            arg_scale_x,
+            arg_scale_w,
+            arg_sorted_token_ids,
+            arg_expert_ids,
+            arg_sorted_weights,
+            arg_num_valid_ids,
+            i32_tokens_in,
+            i32_inter_in,
+            i32_k_in,
+            i32_size_expert_ids_in,
+            value_attrs={
+                "rocdl.waves_per_eu": effective_waves_per_eu,
+                "rocdl.cluster_dims": f"{cluster_m},{cluster_n},1" if use_cluster else None,
+            },
+        )
         _finalize_alloc_and_launch_2d(
             ctx=ctx,
             alloc=alloc,
@@ -1541,7 +1555,6 @@ def _compile_stage1_mxscale_kernel_impl(
             gy=gy,
             block_threads=block_threads,
             stream=stream,
-            waves_per_eu=effective_waves_per_eu,
             ir=ir,
             cluster=_cluster_arg,
         )
@@ -2758,12 +2771,26 @@ def _compile_stage2_mxscale_kernel_impl(
         size_expert_ids_in = arith.index_cast(T.index, i32_size_expert_ids_in)
         gx = (n_in + fx.Index(int(tile_n) - 1)) // fx.Index(int(tile_n))
         gy = size_expert_ids_in
-        launcher = moe_mxscale_stage2_single(
-            arg_out, arg_x, arg_w, arg_scale_x, arg_scale_w,
-            arg_sorted_token_ids, arg_expert_ids, arg_sorted_weights, arg_num_valid_ids,
-            i32_tokens_in, i32_n_in, i32_k_in, i32_size_expert_ids_in,
-        )
         _cluster_arg = (int(cluster_m), int(cluster_n), 1) if use_cluster else None
+        launcher = moe_mxscale_stage2_single(
+            arg_out,
+            arg_x,
+            arg_w,
+            arg_scale_x,
+            arg_scale_w,
+            arg_sorted_token_ids,
+            arg_expert_ids,
+            arg_sorted_weights,
+            arg_num_valid_ids,
+            i32_tokens_in,
+            i32_n_in,
+            i32_k_in,
+            i32_size_expert_ids_in,
+            value_attrs={
+                "rocdl.waves_per_eu": effective_waves_per_eu,
+                "rocdl.cluster_dims": f"{cluster_m},{cluster_n},1" if use_cluster else None,
+            },
+        )
         _finalize_alloc_and_launch_2d(
             ctx=ctx,
             alloc=alloc,
@@ -2772,7 +2799,6 @@ def _compile_stage2_mxscale_kernel_impl(
             gy=gy,
             block_threads=block_threads,
             stream=stream,
-            waves_per_eu=effective_waves_per_eu,
             ir=ir,
             cluster=_cluster_arg,
         )
