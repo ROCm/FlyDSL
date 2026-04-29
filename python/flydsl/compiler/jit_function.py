@@ -694,6 +694,8 @@ class JitFunction:
         recompilation when only runtime values change.
         """
         from .jit_argument import _is_constexpr_annotation, _is_type_param_annotation
+        from ..expr.typing import Stream
+
         sig = self._sig
         key_parts = [("_target_", self._target)]
         if self.compile_hints:
@@ -710,6 +712,10 @@ class JitFunction:
 
             if ann is not inspect.Parameter.empty and _is_type_param_annotation(ann):
                 key_parts.append((name, "Type", arg))
+                continue
+
+            if ann is Stream:
+                key_parts.append((name, Stream))
                 continue
 
             is_runtime = (ann is not inspect.Parameter.empty
