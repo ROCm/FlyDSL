@@ -13,17 +13,7 @@ LLVM_INSTALL_DIR="${LLVM_INSTALL_DIR:-$LLVM_SRC_DIR/mlir_install}"
 LLVM_INSTALL_TGZ="${LLVM_INSTALL_TGZ:-$LLVM_SRC_DIR/mlir_install.tgz}"
 LLVM_PACKAGE_INSTALL="${LLVM_PACKAGE_INSTALL:-1}"
 
-# Read LLVM commit hash from thirdparty/llvm-hash.txt
-LLVM_HASH_FILE="${REPO_ROOT}/thirdparty/llvm-hash.txt"
-LLVM_COMMIT_DEFAULT=$(cat "${LLVM_HASH_FILE}" | tr -d '[:space:]')
-LLVM_COMMIT="${LLVM_COMMIT:-$LLVM_COMMIT_DEFAULT}"
 LLVM_BRANCH="${LLVM_BRANCH:-zan/dsl_mla}"
-
-if [[ ${#LLVM_COMMIT} -lt 40 ]]; then
-    echo "Error: LLVM_COMMIT must be a full 40-char SHA (got '${LLVM_COMMIT}')"
-    echo "Shallow fetch does not support short hashes."
-    exit 1
-fi
 
 echo "Base directory: $BASE_DIR"
 echo "LLVM Source:    $LLVM_SRC_DIR"
@@ -31,31 +21,22 @@ echo "LLVM Build:     $LLVM_BUILD_DIR"
 echo "LLVM Install:   $LLVM_INSTALL_DIR"
 echo "LLVM Tarball:   $LLVM_INSTALL_TGZ"
 echo "LLVM Branch:    $LLVM_BRANCH"
-echo "LLVM Commit:    $LLVM_COMMIT"
 
 # 1. Clone LLVM
 LLVM_REMOTE="${LLVM_REMOTE:-https://github.com/ROCm/llvm-project.git}"
 
 if [ ! -d "$LLVM_SRC_DIR" ]; then
-    echo "Fetching llvm-project from ${LLVM_REMOTE} (${LLVM_BRANCH})..."
+    echo "Fetching llvm-project branch ${LLVM_BRANCH} ..."
     git init "$LLVM_SRC_DIR"
     pushd "$LLVM_SRC_DIR"
     git remote add origin "$LLVM_REMOTE"
 else
     pushd "$LLVM_SRC_DIR"
-    git remote set-url origin "$LLVM_REMOTE"
 fi
 
-if ! git cat-file -e "${LLVM_COMMIT}^{commit}" 2>/dev/null; then
-    echo "Fetching branch ${LLVM_BRANCH} ..."
-    git fetch --depth 1 origin "${LLVM_BRANCH}"
-
-    if ! git cat-file -e "${LLVM_COMMIT}^{commit}" 2>/dev/null; then
-        echo "Fetching commit ${LLVM_COMMIT} from ${LLVM_BRANCH} ..."
-        git fetch --depth 1 origin "${LLVM_COMMIT}"
-    fi
-fi
-git checkout "${LLVM_COMMIT}"
+echo "Fetching branch ${LLVM_BRANCH} ..."
+git fetch origin "${LLVM_BRANCH}"
+git checkout -B "${LLVM_BRANCH}" "origin/${LLVM_BRANCH}"
 popd
 
 # 2. Create Build Directory
