@@ -239,9 +239,9 @@ def _to_mlir(val):
     return _raw(val) if not isinstance(val, ir.Value) else val
 
 
-def _pack_i32x2(lo, hi, c32):
+def _pack_i32x2(lo, hi):
     """Pack two i32 values into a single i64: lo | (hi << 32)."""
-    return _raw(ArithValue(lo).extui(T.i64) | (ArithValue(hi).extui(T.i64) << c32))
+    return _raw(ArithValue(lo).extui(T.i64) | (ArithValue(hi).extui(T.i64) << 32))
 
 
 # ---------------------------------------------------------------------------
@@ -678,31 +678,24 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
         return v0, v1
 
     # ---- Helper: warp reduce (butterfly XOR) ----
-    def _shfl_xor_f32(val_f32, offset_i32, width_i32):
+    def _shfl_xor_f32(val_f32, offset, width=WARP_SIZE):
         """XOR shuffle for f32 via bitcast to i32 and back."""
         val_i32 = _raw(ArithValue(val_f32).bitcast(T.i32))
-        peer_i32 = ArithValue(val_i32).shuffle_xor(offset_i32, width_i32)
+        peer_i32 = ArithValue(val_i32).shuffle_xor(offset, width)
         return _raw(ArithValue(peer_i32).bitcast(T.f32))
 
-    c_warp_size_i32 = fx.Int32(WARP_SIZE)
-
     def _warp_reduce_max_16(val):
-        """Butterfly max reduce across MFMA column groups.
-
-        HK: reduce_range=64, stop_stride=15 -> strides [32, 16].
-        """
+        """Butterfly max reduce across MFMA column groups (strides 32, 16)."""
         w = _to_mlir(val)
         for sh in [32, 16]:
-            peer = _shfl_xor_f32(w, fx.Int32(sh), c_warp_size_i32)
-            w = arith.MaximumFOp(w, peer, fastmath=fm_no_inf).result
+            w = arith.MaximumFOp(w, _shfl_xor_f32(w, sh), fastmath=fm_no_inf).result
         return w
 
     def _warp_reduce_add_16(val):
-        """Butterfly sum reduce across MFMA column groups."""
+        """Butterfly sum reduce across MFMA column groups (strides 32, 16)."""
         w = _to_mlir(val)
         for sh in [32, 16]:
-            peer = _shfl_xor_f32(w, fx.Int32(sh), c_warp_size_i32)
-            w = ArithValue(w).addf(peer, fastmath=fm_fast)
+            w = ArithValue(w).addf(_shfl_xor_f32(w, sh), fastmath=fm_fast)
         return w
 
     # ---- Helper: Q loading (QManagerV3) ----
@@ -909,15 +902,13 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
         return p_exp_vals, new_row_max, row_sum_e_new, rescale
 
     # ---- Helper: pack P from f32 to fp8 ----
-    c_32_i64 = fx.Int64(32)
-
     def _pack_p_to_fp8(p_exp_vals):
         """Pack 8 f32 -> 2 i32 (4x cvt_pk_fp8_f32) -> 1 i64 for MFMA."""
         w0 = rocdl.cvt_pk_fp8_f32(T.i32, _raw(p_exp_vals[0]), _raw(p_exp_vals[1]), c_zero_i32, 0)
         w0 = rocdl.cvt_pk_fp8_f32(T.i32, _raw(p_exp_vals[2]), _raw(p_exp_vals[3]), w0, 1)
         w1 = rocdl.cvt_pk_fp8_f32(T.i32, _raw(p_exp_vals[4]), _raw(p_exp_vals[5]), c_zero_i32, 0)
         w1 = rocdl.cvt_pk_fp8_f32(T.i32, _raw(p_exp_vals[6]), _raw(p_exp_vals[7]), w1, 1)
-        return _raw(ArithValue(w0).extui(T.i64) | (ArithValue(w1).extui(T.i64) << c_32_i64))
+        return _pack_i32x2(w0, w1)
 
     # ---- Helper: rescale oaccu ----
     def _rescale_oaccu(oaccu, rescale):
@@ -1110,20 +1101,20 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
 
             # MFMA pair A
             oaccu[iter_a * 2] = _mfma_fp8(
-                T.f32x4, [_pack_i32x2(vta0_lo, vta0_hi, c_32_i64), p_pack, oaccu[iter_a * 2], 0, 0, 0]
+                T.f32x4, [_pack_i32x2(vta0_lo, vta0_hi), p_pack, oaccu[iter_a * 2], 0, 0, 0]
             )
             oaccu[iter_a * 2 + 1] = _mfma_fp8(
-                T.f32x4, [_pack_i32x2(vta1_lo, vta1_hi, c_32_i64), p_pack, oaccu[iter_a * 2 + 1], 0, 0, 0]
+                T.f32x4, [_pack_i32x2(vta1_lo, vta1_hi), p_pack, oaccu[iter_a * 2 + 1], 0, 0, 0]
             )
             rocdl.sched_barrier(0)
             rocdl.s_waitcnt(_encode_waitcnt(lgkmcnt=0))
 
             # MFMA pair B
             oaccu[iter_b * 2] = _mfma_fp8(
-                T.f32x4, [_pack_i32x2(vtb0_lo, vtb0_hi, c_32_i64), p_pack, oaccu[iter_b * 2], 0, 0, 0]
+                T.f32x4, [_pack_i32x2(vtb0_lo, vtb0_hi), p_pack, oaccu[iter_b * 2], 0, 0, 0]
             )
             oaccu[iter_b * 2 + 1] = _mfma_fp8(
-                T.f32x4, [_pack_i32x2(vtb1_lo, vtb1_hi, c_32_i64), p_pack, oaccu[iter_b * 2 + 1], 0, 0, 0]
+                T.f32x4, [_pack_i32x2(vtb1_lo, vtb1_hi), p_pack, oaccu[iter_b * 2 + 1], 0, 0, 0]
             )
             rocdl.sched_barrier(0)
 
@@ -1295,8 +1286,8 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
         4. Multiply by reci_sum
         5. Store immediately (bf16 or f32 split)
         """
-        rescale_vec = _raw(Vec.filled(4, rescale, fx.Float32))
-        reci_vec = _raw(Vec.filled(4, reci_sum, fx.Float32))
+        rescale_vec = _raw(Vec.filled(4, fx.Float32(rescale), fx.Float32))
+        reci_vec = _raw(Vec.filled(4, fx.Float32(reci_sum), fx.Float32))
 
         _barrier(lgkmcnt=0)
         rocdl.sched_barrier(0)
@@ -1325,20 +1316,20 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
 
             # MFMA pair A
             oaccu_in[iter_a * 2] = _mfma_fp8(
-                T.f32x4, [_pack_i32x2(vta0_lo, vta0_hi, c_32_i64), p_pack, oaccu_in[iter_a * 2], 0, 0, 0]
+                T.f32x4, [_pack_i32x2(vta0_lo, vta0_hi), p_pack, oaccu_in[iter_a * 2], 0, 0, 0]
             )
             oaccu_in[iter_a * 2 + 1] = _mfma_fp8(
-                T.f32x4, [_pack_i32x2(vta1_lo, vta1_hi, c_32_i64), p_pack, oaccu_in[iter_a * 2 + 1], 0, 0, 0]
+                T.f32x4, [_pack_i32x2(vta1_lo, vta1_hi), p_pack, oaccu_in[iter_a * 2 + 1], 0, 0, 0]
             )
             rocdl.sched_barrier(0)
             rocdl.s_waitcnt(_encode_waitcnt(lgkmcnt=0))
 
             # MFMA pair B
             oaccu_in[iter_b * 2] = _mfma_fp8(
-                T.f32x4, [_pack_i32x2(vtb0_lo, vtb0_hi, c_32_i64), p_pack, oaccu_in[iter_b * 2], 0, 0, 0]
+                T.f32x4, [_pack_i32x2(vtb0_lo, vtb0_hi), p_pack, oaccu_in[iter_b * 2], 0, 0, 0]
             )
             oaccu_in[iter_b * 2 + 1] = _mfma_fp8(
-                T.f32x4, [_pack_i32x2(vtb1_lo, vtb1_hi, c_32_i64), p_pack, oaccu_in[iter_b * 2 + 1], 0, 0, 0]
+                T.f32x4, [_pack_i32x2(vtb1_lo, vtb1_hi), p_pack, oaccu_in[iter_b * 2 + 1], 0, 0, 0]
             )
             rocdl.sched_barrier(0)
 
@@ -1424,24 +1415,20 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
         row_sum_e = _raw(c_zero_f32)
 
         # Compute number of tiles
-        c_block_n = fx.Int32(BLOCK_N)
         kv_len_v = ArithValue(kv_len)
-        c_block_n_v = ArithValue(c_block_n)
-        num_tiles = arith.DivUIOp(
-            _raw(kv_len_v + BLOCK_N - 1), _raw(c_block_n)
-        ).result
+        num_tiles = _udiv(kv_len_v + BLOCK_N - 1, BLOCK_N)
 
         # --- Pre-compute boundary flags ---
-        first_tile_needs_boundary = kv_len_v < c_block_n_v
-        has_multi_tiles = kv_len_v > c_block_n_v
-        last_tile_partial = (kv_len_v & BLOCK_N - 1) != 0
+        first_tile_needs_boundary = kv_len_v < BLOCK_N
+        has_multi_tiles = kv_len_v > BLOCK_N
+        last_tile_partial = (kv_len_v & (BLOCK_N - 1)) != 0
 
         # --- First tile: resolve KV row (branched on boundary) ---
         row_kv_ld_first = fx.Int32(-1)
         if first_tile_needs_boundary:
             row_kv_ld_first = _get_kv_ld_row(kv_start, kv_end, True)
         else:
-            row_kv_ld_first = _get_kv_ld_row(kv_start, _raw(ArithValue(kv_start) + c_block_n_v), False)
+            row_kv_ld_first = _get_kv_ld_row(kv_start, _raw(ArithValue(kv_start) + BLOCK_N), False)
 
         # Load Q to GPR (independent of boundary check)
         q_nope_packs, q_rope_packs = _load_q_to_regs(qo_start)
@@ -1463,8 +1450,9 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
             )
 
         # --- Tile-1 row resolution (only meaningful for multi-tile) ---
-        kv_start_plus_bn = _raw(ArithValue(kv_start) + c_block_n_v)
-        kv_start_plus_2bn = _raw(ArithValue(kv_start) + 2 * BLOCK_N)
+        kv_start_v = ArithValue(kv_start)
+        kv_start_plus_bn = _raw(kv_start_v + BLOCK_N)
+        kv_start_plus_2bn = _raw(kv_start_v + 2 * BLOCK_N)
         tile1_is_full = ArithValue(kv_start_plus_2bn) <= ArithValue(kv_end)
         row_kv_ld_tile1 = fx.Int32(-1)
         if tile1_is_full:
@@ -1621,34 +1609,29 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
             oaccu_mt = _gemm2_first_iter(p_pack_first, vt_base_i32)
 
             # --- Middle tiles [1, num_tiles-1) via scf.ForOp ---
-            c_one_idx = arith.index(1)
-            num_tiles_m1 = _raw(ArithValue(num_tiles) - 1)
-            num_tiles_m1_idx = arith.index_cast(T.index, num_tiles_m1)
-            num_tiles_m2 = _raw(ArithValue(num_tiles) - 2)
+            num_tiles_v = ArithValue(num_tiles)
+            num_tiles_m1 = _raw(num_tiles_v - 1)
+            num_tiles_m2 = _raw(num_tiles_v - 2)
 
             init_args = [row_max, row_sum_e] + oaccu_mt + [row_kv_ld_nn_first]
 
-            for tile_iv, state in range(c_one_idx, num_tiles_m1_idx, c_one_idx, init=init_args):
-                tile_iv_i32 = arith.index_cast(T.i32, tile_iv)
-                kv_tile_start_i32 = _raw(ArithValue(kv_start) + ArithValue(tile_iv_i32) * c_block_n_v)
+            for tile_iv, state in range(arith.index(1), arith.index_cast(T.index, num_tiles_m1), arith.index(1), init=init_args):
+                tile_iv_i32 = ArithValue(arith.index_cast(T.i32, tile_iv))
+                kv_tile_start_i32 = _raw(kv_start_v + tile_iv_i32 * BLOCK_N)
 
                 # Unpack carried state
                 rm_carried = state[0]
                 rse_carried = state[1]
-                oaccu_carried = [
-                    state[2 + i] for i in range(NUM_PV_ITERS * 2)
-                ]
-                # 2-ahead: row resolved by previous iteration's _process_tile_gemm1
+                oaccu_carried = [state[2 + i] for i in range(NUM_PV_ITERS * 2)]
                 row_kv_ld_next = state[2 + NUM_PV_ITERS * 2]
 
                 # Buffer parity
-                tile_iv_av = ArithValue(tile_iv_i32)
-                is_odd = (tile_iv_av & 1) != 0
+                is_odd = (tile_iv_i32 & 1) != 0
                 curr_base_idx = ArithValue(is_odd).select(p_lds_kv_1_base, p_lds_kv_0_base)
                 next_warp = ArithValue(is_odd).select(p_lds_kv_0_warp_i32, p_lds_kv_1_warp_i32)
 
                 # check_boundary_next: True when tile_idx == num_tiles-2 AND last_tile_partial
-                is_second_to_last = tile_iv_av == ArithValue(num_tiles_m2)
+                is_second_to_last = tile_iv_i32 == ArithValue(num_tiles_m2)
                 mid_cbn = _raw(ArithValue(is_second_to_last) & ArithValue(last_tile_partial))
 
                 # 2-ahead resolve params
@@ -1715,7 +1698,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
 
             # --- Last tile: GEMM1 + interleaved GEMM2 store ---
             last_tile_iv = ArithValue(num_tiles_m1)
-            kv_last_start = _raw(ArithValue(kv_start) + last_tile_iv * c_block_n_v)
+            kv_last_start = _raw(kv_start_v + last_tile_iv * BLOCK_N)
             last_is_odd = (last_tile_iv & 1) != 0
             last_curr_base = ArithValue(last_is_odd).select(p_lds_kv_1_base, p_lds_kv_0_base)
 
