@@ -14,6 +14,7 @@ from .._mlir.dialects import arith, scf
 from ..expr import const_expr
 from ..expr.numeric import _unwrap_value, _wrap_like
 from ..utils import env, log
+from .scf_control_flow import FlyScfBuilder, clone_value_tree, is_dynamic_value
 
 
 def _set_lineno(node, n=1):
@@ -69,6 +70,14 @@ class ASTRewriter:
         assert isinstance(module.body[0], ast.FunctionDef), f"unexpected ast node {module.body[0]}"
 
         context = types.SimpleNamespace()
+        context.globals = f.__globals__
+        context.closure_vars = {}
+        if f.__closure__:
+            for name, cell in zip(f.__code__.co_freevars, f.__closure__):
+                try:
+                    context.closure_vars[name] = cell.cell_contents
+                except ValueError:
+                    pass
         for transformer_ctor in cls.transformers:
             orig_code = ast.unparse(module) if env.debug.ast_diff else None
             func_node = module.body[0]
@@ -125,6 +134,7 @@ class ASTRewriter:
 
 
 _ASTREWRITE_MARKER = "_flydsl_ast_rewriter_generated_"
+_INTERNAL_IFEXP_MARKER = "_flydsl_internal_ifexp_"
 
 
 class SymbolScopeTracker:
@@ -323,6 +333,7 @@ class RewriteBoolOps(Transformer):
                     keywords=[],
                 ),
             )
+            setattr(result, _INTERNAL_IFEXP_MARKER, True)
 
         return ast.copy_location(ast.fix_missing_locations(result), node)
 
@@ -344,11 +355,7 @@ class ReplaceIfWithDispatch(Transformer):
 
     @staticmethod
     def _is_dynamic(cond):
-        if isinstance(cond, ir.Value):
-            return True
-        if hasattr(cond, "value") and isinstance(cond.value, ir.Value):
-            return True
-        return False
+        return is_dynamic_value(cond)
 
     @staticmethod
     def _to_i1(cond):
@@ -459,7 +466,6 @@ class ReplaceIfWithDispatch(Transformer):
         result_values=(),
         state_names=(),
         state_values=(),
-        auto_else=False,
     ):
         # Backward compatibility: old call-sites pass state_* only.
         if not result_names and state_names:
@@ -494,87 +500,54 @@ class ReplaceIfWithDispatch(Transformer):
             )
             return ReplaceIfWithDispatch._pack_named_values(result_names, merged_values)
 
-        cond_i1 = ReplaceIfWithDispatch._to_i1(cond)
-        if not isinstance(cond_i1, ir.Value):
-            raise TypeError(f"dynamic if condition must lower to ir.Value, got {type(cond_i1).__name__}")
-
-        if not effective_result_names:
-            has_else = else_fn is not None
-            if_op = scf.IfOp(cond_i1, [], has_else=has_else, loc=ir.Location.unknown())
-            with ir.InsertionPoint(if_op.regions[0].blocks[0]):
-                ReplaceIfWithDispatch._call_branch(then_fn, effective_result_names, result_values)
-                scf.YieldOp([])
-            if has_else:
-                if len(if_op.regions[1].blocks) == 0:
-                    if_op.regions[1].blocks.append(*[])
-                with ir.InsertionPoint(if_op.regions[1].blocks[0]):
-                    ReplaceIfWithDispatch._call_branch(else_fn, effective_result_names, result_values)
-                    scf.YieldOp([])
-            return ReplaceIfWithDispatch._pack_named_values(result_names, result_values)
-
-        if else_fn is None:
-            else_fn = lambda *args: {}
-
-        state_raw = []
-        for name, value in zip(effective_result_names, effective_result_values):
-            raw = _unwrap_value(value)
-            if not isinstance(raw, ir.Value):
-                raise TypeError(
-                    f"state variable '{name}' is {type(raw).__name__}, not an MLIR Value; "
-                    "stateful dynamic if requires MLIR-backed values."
-                )
-            state_raw.append(raw)
-
-        result_types = [v.type for v in state_raw]
-        if_op = scf.IfOp(cond_i1, result_types, has_else=True, loc=ir.Location.unknown())
-
-        with ir.InsertionPoint(if_op.regions[0].blocks[0]):
-            then_result = ReplaceIfWithDispatch._call_branch(then_fn, effective_result_names, result_values)
-            then_values = ReplaceIfWithDispatch._normalize_branch_result(
+        def then_builder():
+            branch_values = tuple(clone_value_tree(value) for value in result_values)
+            then_result = ReplaceIfWithDispatch._call_branch(then_fn, effective_result_names, branch_values)
+            return ReplaceIfWithDispatch._normalize_branch_result(
                 then_result, effective_result_names, effective_result_map, "then-branch"
             )
-            then_raw = ReplaceIfWithDispatch._unwrap_mlir_values(then_values, effective_result_names, "then-branch")
-            for name, expect_ty, got in zip(effective_result_names, result_types, then_raw):
-                if got.type != expect_ty:
-                    raise TypeError(
-                        f"if/else variable '{name}' type mismatch in then-branch: "
-                        f"expected {expect_ty}, got {got.type}"
-                    )
-            scf.YieldOp(then_raw)
 
-        if len(if_op.regions[1].blocks) == 0:
-            if_op.regions[1].blocks.append(*[])
-        with ir.InsertionPoint(if_op.regions[1].blocks[0]):
-            else_result = ReplaceIfWithDispatch._call_branch(else_fn, effective_result_names, result_values)
-            else_values = ReplaceIfWithDispatch._normalize_branch_result(
+        def else_builder():
+            if else_fn is None:
+                return list(effective_result_values)
+            branch_values = tuple(clone_value_tree(value) for value in result_values)
+            else_result = ReplaceIfWithDispatch._call_branch(else_fn, effective_result_names, branch_values)
+            return ReplaceIfWithDispatch._normalize_branch_result(
                 else_result, effective_result_names, effective_result_map, "else-branch"
             )
-            else_raw = ReplaceIfWithDispatch._unwrap_mlir_values(else_values, effective_result_names, "else-branch")
-            for name, expect_ty, got in zip(effective_result_names, result_types, else_raw):
-                if got.type != expect_ty:
-                    raise TypeError(
-                        f"if/else variable '{name}' type mismatch in else-branch: "
-                        f"expected {expect_ty}, got {got.type}"
-                    )
-            scf.YieldOp(else_raw)
 
-        partial_wrapped = ReplaceIfWithDispatch._pack_dispatch_results(
-            list(if_op.results), effective_result_values
+        if not effective_result_names:
+            FlyScfBuilder.execute_if(
+                cond,
+                (),
+                (),
+                then_builder,
+                else_builder if else_fn is not None else None,
+            )
+            return ReplaceIfWithDispatch._pack_named_values(result_names, result_values)
+
+        partial_values = FlyScfBuilder.execute_if(
+            cond,
+            effective_result_names,
+            effective_result_values,
+            then_builder,
+            else_builder,
         )
-        if len(effective_result_names) == 1:
-            partial_values = [partial_wrapped]
-        else:
-            partial_values = list(partial_wrapped)
         merged_values = ReplaceIfWithDispatch._merge_partial_results(
             result_names, result_values, effective_result_names, partial_values
         )
         return ReplaceIfWithDispatch._pack_named_values(result_names, merged_values)
+
+    @staticmethod
+    def scf_if_expr_dispatch(cond, then_fn, else_fn):
+        return FlyScfBuilder.execute_if_expression(cond, then_fn, else_fn)
 
     @classmethod
     def rewrite_globals(cls):
         return {
             "const_expr": const_expr,
             "scf_if_dispatch": cls.scf_if_dispatch,
+            "scf_if_expr_dispatch": cls.scf_if_expr_dispatch,
             "scf_if_collect_results": cls._collect_result_dict,
         }
 
@@ -586,8 +559,7 @@ class ReplaceIfWithDispatch(Transformer):
         "hasattr",
     }
 
-    @staticmethod
-    def _could_be_dynamic(test_node):
+    def _could_be_dynamic(self, test_node):
         """Check if an if-condition AST could produce an MLIR Value at runtime.
 
         Layer-by-layer recursive check:
@@ -595,6 +567,28 @@ class ReplaceIfWithDispatch(Transformer):
         2) otherwise recurse into direct children,
         3) unresolved nodes default to static (no forced rewrite).
         """
+        def _is_static_python_value(value):
+            if isinstance(value, (bool, int, float, str, bytes, type(None))):
+                return True
+            if isinstance(value, (tuple, list, set)):
+                return all(_is_static_python_value(v) for v in value)
+            if isinstance(value, dict):
+                return all(_is_static_python_value(k) and _is_static_python_value(v) for k, v in value.items())
+            return False
+
+        def _try_static_name(node):
+            if not isinstance(node, ast.Name):
+                return False, None
+            if node.id in getattr(self.context, "closure_vars", {}):
+                value = self.context.closure_vars[node.id]
+            elif node.id in getattr(self.context, "globals", {}):
+                value = self.context.globals[node.id]
+            else:
+                return False, None
+            if _is_static_python_value(value):
+                return True, value
+            return False, None
+
         def _is_literal_expr(node):
             if isinstance(node, ast.Constant):
                 return True
@@ -608,6 +602,9 @@ class ReplaceIfWithDispatch(Transformer):
             return False
 
         def _try_static_value(node):
+            name_ok, name_val = _try_static_name(node)
+            if name_ok:
+                return True, name_val
             if not _is_literal_expr(node):
                 return False, None
             if isinstance(node, ast.Constant):
@@ -670,7 +667,8 @@ class ReplaceIfWithDispatch(Transformer):
                 if not (isinstance(func, ast.Name) and func.id in ReplaceIfWithDispatch._REWRITE_HELPER_NAMES):
                     return True
             if isinstance(node, ast.Name):
-                return True
+                is_static_name, _ = _try_static_name(node)
+                return not is_static_name
 
             for child in ast.iter_child_nodes(node):
                 if _visit(child):
@@ -761,6 +759,90 @@ class ReplaceIfWithDispatch(Transformer):
             keywords=[],
         )
 
+    @staticmethod
+    def _check_no_dynamic_early_exit(node: ast.If):
+        class EarlyExitChecker(ast.NodeVisitor):
+            def __init__(self):
+                self.loop_depth = 0
+                self.offending_node = None
+                self.offending_kind = None
+
+            def _record(self, node, kind):
+                if self.offending_node is None:
+                    self.offending_node = node
+                    self.offending_kind = kind
+
+            def visit_FunctionDef(self, node):
+                return
+
+            def visit_Lambda(self, node):
+                return
+
+            def visit_Return(self, node):
+                self._record(node, "return")
+
+            def visit_Raise(self, node):
+                self._record(node, "raise")
+
+            def visit_Break(self, node):
+                if self.loop_depth == 0:
+                    self._record(node, "break")
+
+            def visit_Continue(self, node):
+                if self.loop_depth == 0:
+                    self._record(node, "continue")
+
+            def visit_For(self, node):
+                self.loop_depth += 1
+                self.generic_visit(node)
+                self.loop_depth -= 1
+
+            def visit_While(self, node):
+                self.loop_depth += 1
+                self.generic_visit(node)
+                self.loop_depth -= 1
+
+        checker = EarlyExitChecker()
+        for stmt in node.body:
+            checker.visit(stmt)
+        for stmt in node.orelse:
+            checker.visit(stmt)
+        if checker.offending_node is not None:
+            raise SyntaxError(
+                f"Early exit ({checker.offending_kind}) is not supported inside dynamic if/else. "
+                "Use const_expr(...) for compile-time control flow or rewrite with a single exit path."
+            )
+
+    def visit_IfExp(self, node: ast.IfExp):
+        if getattr(node, _INTERNAL_IFEXP_MARKER, False):
+            return self.generic_visit(node)
+
+        if _is_constexpr(node.test):
+            node.test = _unwrap_constexpr(node.test)
+            node.body = self.visit(node.body)
+            node.orelse = self.visit(node.orelse)
+            return node
+
+        if not self._could_be_dynamic(node.test):
+            return self.generic_visit(node)
+
+        test = self.visit(node.test)
+        then_body = self.visit(node.body)
+        else_body = self.visit(node.orelse)
+
+        lambda_args = ast.arguments(posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[])
+        then_lambda = ast.Lambda(args=lambda_args, body=then_body)
+        else_lambda = ast.Lambda(
+            args=ast.arguments(posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[]),
+            body=else_body,
+        )
+        call = ast.Call(
+            func=ast.Name("scf_if_expr_dispatch", ctx=ast.Load()),
+            args=[test, then_lambda, else_lambda],
+            keywords=[],
+        )
+        return ast.copy_location(ast.fix_missing_locations(call), node)
+
     def visit_If(self, node: ast.If) -> List[ast.AST]:
         active_symbols_before_if = self.symbol_scopes.snapshot_symbol_scopes()
         if _is_constexpr(node.test):
@@ -774,6 +856,7 @@ class ReplaceIfWithDispatch(Transformer):
             if node.orelse:
                 node.orelse = self._visit_stmt_block(node.orelse)
             return node
+        self._check_no_dynamic_early_exit(node)
         with self.symbol_scopes.control_flow_scope():
             node.test = self.visit(node.test)
             with self.symbol_scopes.control_flow_scope():
@@ -833,7 +916,6 @@ class ReplaceIfWithDispatch(Transformer):
             result = [then_func]
 
             else_name = None
-            synthesized_else = False
             if node.orelse:
                 else_name = f"__else_{uid}"
                 else_func = ast.FunctionDef(
@@ -856,7 +938,6 @@ class ReplaceIfWithDispatch(Transformer):
                 result.append(else_func)
             elif result_names:
                 else_name = f"__else_{uid}"
-                synthesized_else = True
                 else_func = ast.FunctionDef(
                     name=else_name,
                     args=ast.arguments(
@@ -875,9 +956,6 @@ class ReplaceIfWithDispatch(Transformer):
                 else_func = ast.fix_missing_locations(else_func)
                 dispatch_args.append(ast.Name(else_name, ctx=ast.Load()))
                 result.append(else_func)
-
-            if synthesized_else:
-                dispatch_keywords.append(ast.keyword(arg="auto_else", value=ast.Constant(value=True)))
 
             dispatch_value = ast.Call(
                 func=ast.Name("scf_if_dispatch", ctx=ast.Load()),
