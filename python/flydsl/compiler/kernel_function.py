@@ -11,7 +11,7 @@ from .._mlir import ir
 from .._mlir.dialects import arith, gpu
 from ..expr.typing import Constexpr
 from .ast_rewriter import ASTRewriter
-from .mlir_helper import convert_to_mlir_attr
+from .mlir_utils import convert_to_mlir_attr
 from .protocol import fly_construct, fly_types, fly_values
 
 # =============================================================================
