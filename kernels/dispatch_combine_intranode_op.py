@@ -123,6 +123,13 @@ class FlyDSLDispatchCombineIntraNodeOp:
 
         _use_fp8_cast = (config.quant_type == "fp8_direct_cast" and config.data_type == torch.bfloat16)
         _comb_dtype = torch.float8_e4m3fn if _use_fp8_cast else config.data_type
+        # Mixed-dtype Stage 1 (mori UseFp8DirectCast equivalent): when
+        # _use_fp8_cast is on, the user feeds bf16 input to ``combine()`` and
+        # the kernel performs an inline bf16 → fp8 cast in Stage 1 before P2P
+        # scatter.  This avoids an extra ~12μs ``input.to(fp8).contiguous()``
+        # PyTorch elementwise kernel that would otherwise sit on the cudagraph
+        # critical path.  Wrapper-side allocation/views remain fp8-stride.
+        _comb_inp_dt = torch.bfloat16 if _use_fp8_cast else None
         self._comb_fn = make_combine_jit(
             rank=r, npes=config.world_size,
             experts_per_rank=config.num_experts_per_rank,
@@ -135,6 +142,7 @@ class FlyDSLDispatchCombineIntraNodeOp:
             enable_weights=True,
             enable_std_moe=config.enable_std_moe,
             use_p2p_read=not config.use_external_inp_buf,
+            inp_data_type=_comb_inp_dt,
         )
         self._use_fp8_cast = _use_fp8_cast
 
@@ -373,16 +381,22 @@ class FlyDSLDispatchCombineIntraNodeOp:
         cfg    = self.cfg
         stream = torch.cuda.current_stream()
 
-        if self._use_fp8_cast:
-            inp_c = input.to(torch.float8_e4m3fn).contiguous()
-        else:
-            inp_c = input if input.is_contiguous() else input.contiguous()
+        # In _use_fp8_cast mode, the combine kernel does the bf16 → fp8 cast
+        # inline in Stage 1 (mori UseFp8DirectCast equivalent), so the wrapper
+        # passes bf16 input straight through.  Skipping the PyTorch-level
+        # ``.to(fp8).contiguous()`` saves ~12μs per iter on the cudagraph
+        # critical path.
+        inp_c = input if input.is_contiguous() else input.contiguous()
         _cur_tok = cur_tok if cur_tok is not None else cfg.max_num_inp_token_per_rank
 
         wts_ptr = self.shmem_disp_out_wts.data_ptr() if weights is None else weights.data_ptr()
 
         _prx_ref = None
         if self._use_fp8_cast and packed_recv_x is not None:
+            # std-MoE expert-major buffer (`packed_recv_x`) is produced in bf16
+            # by the upstream pipeline; downstream Stage 1 reads it in fp8
+            # dtype, so we still cast here.  This branch is independent from
+            # the regular combine input path above.
             _prx_ref = packed_recv_x.view(torch.bfloat16).to(torch.float8_e4m3fn).contiguous()
             prx_ptr = _prx_ref.data_ptr()
         else:

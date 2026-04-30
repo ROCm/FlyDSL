@@ -453,6 +453,7 @@ def make_combine_kernel(
     use_p2p_read: bool = False,
     skip_stage1: bool = False,
     skip_stage1_keep_wts: bool = False,
+    inp_data_type=None,
 ):
     """创建 combine intranode @flyc.kernel。
 
@@ -468,6 +469,21 @@ def make_combine_kernel(
         当上游 fused_gemm2 的 token P2P 流量很重时，把权重写挂在同一个 kernel
         里会因为 fabric 饱和而出现写丢失；把 ~16-byte 的轻量权重写延后到
         combine kernel 的 Stage 1，跑在干净 fabric 上，反而更可靠。
+
+    inp_data_type:
+        外部 input buffer 的 dtype。当 inp_data_type 不为 None 且与 data_type
+        不同时，启用 mixed-dtype Stage 1：从 inp_data_type 读 → 内联 cast →
+        以 data_type 的 stride 写入 shmem_comb_inp。
+
+        当前唯一支持组合：
+            inp_data_type = torch.bfloat16
+            data_type     = torch.float8_e4m3fn (OCP)
+
+        对齐 mori 的 ``UseFp8DirectCast``：调用方喂 bf16 input，combine kernel
+        在 Stage 1 内联做 bf16 → fp8 cast 后 P2P，省掉 wrapper 端 ~12μs 的
+        ``input.to(fp8).contiguous()`` elementwise kernel。
+        Stage 3 仍按 ``data_type=fp8`` reduce 并写 fp8 输出，故 wrapper 在
+        kernel 之外按 fp8 视图读 shmem_comb_out_tok（与 baseline fp8 一致）。
     """
     max_recv   = npes * max_tok_per_rank
     _is_fp4 = (data_type == torch.float4_e2m1fn_x2)
@@ -478,6 +494,28 @@ def make_combine_kernel(
         n_i32  = (hidden_dim * hidden_elem_size) // 4
         nbytes = hidden_dim * hidden_elem_size
     tok_stride = n_i32 * 4
+
+    # Mixed-dtype Stage 1: external input has different dtype than P2P staging.
+    # Currently only supports bf16 input + OCP fp8 staging (mori UseFp8DirectCast).
+    _xfer_bf16_to_fp8 = (
+        inp_data_type is not None and inp_data_type != data_type
+        and inp_data_type == torch.bfloat16
+        and data_type == torch.float8_e4m3fn
+    )
+    if inp_data_type is not None and inp_data_type != data_type and not _xfer_bf16_to_fp8:
+        raise NotImplementedError(
+            f"combine_kernel mixed-dtype Stage 1 only supports "
+            f"inp_data_type=bfloat16 + data_type=float8_e4m3fn, "
+            f"got inp_data_type={inp_data_type}, data_type={data_type}")
+
+    if _xfer_bf16_to_fp8:
+        # bf16 input stride for Stage 1 source addressing only.  The output
+        # (P2P-scattered staging) uses ``nbytes`` (= fp8 stride) as before.
+        inp_nbytes = hidden_dim * 2
+        inp_n_i32  = (hidden_dim * 2) // 4
+    else:
+        inp_nbytes = nbytes
+        inp_n_i32  = n_i32
     if _is_fp4:
         from flydsl._mlir.dialects import rocdl as _rocdl_d
 
@@ -930,25 +968,53 @@ def make_combine_kernel(
             _safe_dual_end = (n_chunks // 128) * 128
             for tok_i in range(_to_idx(gw_id), _to_idx(total_recv_val), _to_idx(gw_num)):
                 tok_i    = _to_i32(tok_i)
-                _src_base = addr_inp_tok + arith.zext_i64(tok_i) * nbytes
+                # In mixed-mode (bf16 input → fp8 staging), the source uses
+                # bf16 stride (inp_nbytes) while the dest uses fp8 stride
+                # (nbytes); in same-dtype mode the two strides are identical.
+                _src_base = addr_inp_tok + arith.zext_i64(tok_i) * inp_nbytes
                 _dst_base = addr_comb_inp + arith.zext_i64(tok_i) * nbytes
                 _rsrc_src = create_buffer_resource_from_addr(_lv_unwrap(_src_base))
                 _rsrc_dst = create_buffer_resource_from_addr(_lv_unwrap(_dst_base))
-                if const_expr(_safe_dual_end >= 128):
-                    for cj in range(_to_idx(lane), _to_idx(_safe_dual_end), _to_idx(128)):
-                        cj       = _to_i32(cj)
-                        cj_elem  = cj * 4
-                        cj2_elem = (cj + 64) * 4
-                        vec4_a   = buffer_load(_rsrc_src, cj_elem, vec_width=4, dtype=T.i32())
-                        vec4_b   = buffer_load(_rsrc_src, cj2_elem, vec_width=4, dtype=T.i32())
-                        buffer_store(vec4_a, _rsrc_dst, cj_elem)
-                        buffer_store(vec4_b, _rsrc_dst, cj2_elem)
-                if const_expr(_safe_dual_end < n_chunks):
-                    for cj in range(_to_idx(lane + arith.constant(_safe_dual_end)), _to_idx(n_chunks), _to_idx(64)):
-                        cj      = _to_i32(cj)
-                        cj_elem = cj * 4
-                        vec4_a  = buffer_load(_rsrc_src, cj_elem, vec_width=4, dtype=T.i32())
-                        buffer_store(vec4_a, _rsrc_dst, cj_elem)
+                if const_expr(_xfer_bf16_to_fp8):
+                    # Mixed-dtype Stage 1: load bf16 (2 i32 / lane = 4 bf16
+                    # elems) → ExtF v4f32 → cvt_pk_fp8_f32 ×2 → store 1
+                    # fp8 i32 (4 fp8 elems) at staging offset ``ec``.
+                    from flydsl._mlir.dialects import rocdl as _rocdl_s1a
+                    _v4bf16_a = T.VectorType.get([4], T.bf16())
+                    _v4f32_a  = T.VectorType.get([4], T.f32())
+                    _i32t_a   = T.i32()
+                    for ec in range(_to_idx(lane), _to_idx(n_i32), _to_idx(64)):
+                        ec = _to_i32(ec)
+                        bf_pair = buffer_load(_rsrc_src, ec * 2,
+                                              vec_width=2, dtype=T.i32())
+                        _v4bf = _llvm_d.BitcastOp(_v4bf16_a, _lv_unwrap(bf_pair)).res
+                        _v4f  = arith.ExtFOp(_v4f32_a, _v4bf).result
+                        _f0 = _llvm_d.ExtractElementOp(_v4f, _lv_unwrap(arith.constant(0))).res
+                        _f1 = _llvm_d.ExtractElementOp(_v4f, _lv_unwrap(arith.constant(1))).res
+                        _f2 = _llvm_d.ExtractElementOp(_v4f, _lv_unwrap(arith.constant(2))).res
+                        _f3 = _llvm_d.ExtractElementOp(_v4f, _lv_unwrap(arith.constant(3))).res
+                        _z = _lv_unwrap(arith.constant(0, type=_i32t_a))
+                        _lo_p = _rocdl_s1a.cvt_pk_fp8_f32(res=_i32t_a, src_a=_f0, src_b=_f1,
+                                                          old=_z, word_sel=False)
+                        _fp8_i32 = _rocdl_s1a.cvt_pk_fp8_f32(res=_i32t_a, src_a=_f2, src_b=_f3,
+                                                              old=_lo_p, word_sel=True)
+                        buffer_store(_fp8_i32, _rsrc_dst, ec)
+                else:
+                    if const_expr(_safe_dual_end >= 128):
+                        for cj in range(_to_idx(lane), _to_idx(_safe_dual_end), _to_idx(128)):
+                            cj       = _to_i32(cj)
+                            cj_elem  = cj * 4
+                            cj2_elem = (cj + 64) * 4
+                            vec4_a   = buffer_load(_rsrc_src, cj_elem, vec_width=4, dtype=T.i32())
+                            vec4_b   = buffer_load(_rsrc_src, cj2_elem, vec_width=4, dtype=T.i32())
+                            buffer_store(vec4_a, _rsrc_dst, cj_elem)
+                            buffer_store(vec4_b, _rsrc_dst, cj2_elem)
+                    if const_expr(_safe_dual_end < n_chunks):
+                        for cj in range(_to_idx(lane + arith.constant(_safe_dual_end)), _to_idx(n_chunks), _to_idx(64)):
+                            cj      = _to_i32(cj)
+                            cj_elem = cj * 4
+                            vec4_a  = buffer_load(_rsrc_src, cj_elem, vec_width=4, dtype=T.i32())
+                            buffer_store(vec4_a, _rsrc_dst, cj_elem)
 
             if const_expr(enable_weights):
                 for tok_i in range(_to_idx(gw_id), _to_idx(total_recv_val), _to_idx(gw_num)):
@@ -973,26 +1039,53 @@ def make_combine_kernel(
                     dest_pe  = arith.divui(dest_enc, max_tok_per_rank)
                     dest_lid = arith.remui(dest_enc, max_tok_per_rank)
                 _pe_base   = _lds_p2p_bases.load([_to_idx(dest_pe)])
+                # Dest stride uses ``nbytes`` (staging dtype, fp8 in mixed mode).
                 _dest_off  = arith.zext_i64(arith.constant(rank) * max_tok_per_rank + dest_lid) * nbytes
                 _dest_base = _lv_unwrap(_pe_base) + _dest_off
-                _src_base  = addr_inp_tok + arith.zext_i64(tok_i) * nbytes
+                # Src stride uses ``inp_nbytes`` (input dtype, bf16 in mixed mode).
+                _src_base  = addr_inp_tok + arith.zext_i64(tok_i) * inp_nbytes
                 _rsrc_src  = create_buffer_resource_from_addr(_lv_unwrap(_src_base))
                 _rsrc_dst  = create_buffer_resource_from_addr(_dest_base)
-                if const_expr(_safe_dual_end_s1 >= 128):
-                    for cj in range(_to_idx(lane), _to_idx(_safe_dual_end_s1), _to_idx(128)):
-                        cj       = _to_i32(cj)
-                        cj_elem  = cj * 4
-                        cj2_elem = (cj + 64) * 4
-                        vec4_a   = buffer_load(_rsrc_src, cj_elem, vec_width=4, dtype=T.i32())
-                        vec4_b   = buffer_load(_rsrc_src, cj2_elem, vec_width=4, dtype=T.i32())
-                        buffer_store(vec4_a, _rsrc_dst, cj_elem)
-                        buffer_store(vec4_b, _rsrc_dst, cj2_elem)
-                if const_expr(_safe_dual_end_s1 < n_chunks):
-                    for cj in range(_to_idx(lane + arith.constant(_safe_dual_end_s1)), _to_idx(n_chunks), _to_idx(64)):
-                        cj      = _to_i32(cj)
-                        cj_elem = cj * 4
-                        vec4_a  = buffer_load(_rsrc_src, cj_elem, vec_width=4, dtype=T.i32())
-                        buffer_store(vec4_a, _rsrc_dst, cj_elem)
+                if const_expr(_xfer_bf16_to_fp8):
+                    # Mixed-dtype Stage 1: load 2 bf16 i32 (=4 bf16 elems) →
+                    # ExtF v4f32 → cvt_pk_fp8_f32 ×2 → store 1 fp8 i32 (=4
+                    # fp8 elems).  Loop unit is 1 fp8-i32 per lane per step.
+                    from flydsl._mlir.dialects import rocdl as _rocdl_s1b
+                    _v4bf16_b = T.VectorType.get([4], T.bf16())
+                    _v4f32_b  = T.VectorType.get([4], T.f32())
+                    _i32t_b   = T.i32()
+                    for ec in range(_to_idx(lane), _to_idx(n_i32), _to_idx(64)):
+                        ec = _to_i32(ec)
+                        bf_pair = buffer_load(_rsrc_src, ec * 2,
+                                              vec_width=2, dtype=T.i32())
+                        _v4bf = _llvm_d.BitcastOp(_v4bf16_b, _lv_unwrap(bf_pair)).res
+                        _v4f  = arith.ExtFOp(_v4f32_b, _v4bf).result
+                        _f0 = _llvm_d.ExtractElementOp(_v4f, _lv_unwrap(arith.constant(0))).res
+                        _f1 = _llvm_d.ExtractElementOp(_v4f, _lv_unwrap(arith.constant(1))).res
+                        _f2 = _llvm_d.ExtractElementOp(_v4f, _lv_unwrap(arith.constant(2))).res
+                        _f3 = _llvm_d.ExtractElementOp(_v4f, _lv_unwrap(arith.constant(3))).res
+                        _z = _lv_unwrap(arith.constant(0, type=_i32t_b))
+                        _lo_p = _rocdl_s1b.cvt_pk_fp8_f32(res=_i32t_b, src_a=_f0, src_b=_f1,
+                                                          old=_z, word_sel=False)
+                        _fp8_i32 = _rocdl_s1b.cvt_pk_fp8_f32(res=_i32t_b, src_a=_f2, src_b=_f3,
+                                                              old=_lo_p, word_sel=True)
+                        buffer_store(_fp8_i32, _rsrc_dst, ec)
+                else:
+                    if const_expr(_safe_dual_end_s1 >= 128):
+                        for cj in range(_to_idx(lane), _to_idx(_safe_dual_end_s1), _to_idx(128)):
+                            cj       = _to_i32(cj)
+                            cj_elem  = cj * 4
+                            cj2_elem = (cj + 64) * 4
+                            vec4_a   = buffer_load(_rsrc_src, cj_elem, vec_width=4, dtype=T.i32())
+                            vec4_b   = buffer_load(_rsrc_src, cj2_elem, vec_width=4, dtype=T.i32())
+                            buffer_store(vec4_a, _rsrc_dst, cj_elem)
+                            buffer_store(vec4_b, _rsrc_dst, cj2_elem)
+                    if const_expr(_safe_dual_end_s1 < n_chunks):
+                        for cj in range(_to_idx(lane + arith.constant(_safe_dual_end_s1)), _to_idx(n_chunks), _to_idx(64)):
+                            cj      = _to_i32(cj)
+                            cj_elem = cj * 4
+                            vec4_a  = buffer_load(_rsrc_src, cj_elem, vec_width=4, dtype=T.i32())
+                            buffer_store(vec4_a, _rsrc_dst, cj_elem)
 
                 if const_expr(enable_weights):
                     _wt_pe_base  = _lds_p2p_wt_bases.load([_to_idx(dest_pe)])
@@ -1286,7 +1379,8 @@ def make_combine_jit(*, rank, npes, experts_per_rank=0, experts_per_token,
                      warp_num_per_block, data_type,
                      enable_weights=False, enable_std_moe=False,
                      use_p2p_read=False, skip_stage1=False,
-                     skip_stage1_keep_wts=False):
+                     skip_stage1_keep_wts=False,
+                     inp_data_type=None):
     hidden_elem_size = torch.tensor([], dtype=data_type).element_size()
     kernel = make_combine_kernel(
         rank=rank, npes=npes,
@@ -1303,6 +1397,7 @@ def make_combine_jit(*, rank, npes, experts_per_rank=0, experts_per_token,
         use_p2p_read=use_p2p_read,
         skip_stage1=skip_stage1,
         skip_stage1_keep_wts=skip_stage1_keep_wts,
+        inp_data_type=inp_data_type,
     )
 
     # JIT cache key 所需闭包变量
@@ -1311,6 +1406,7 @@ def make_combine_jit(*, rank, npes, experts_per_rank=0, experts_per_token,
     _en_wts, _en_smoe, _p2p_rd = enable_weights, enable_std_moe, use_p2p_read
     _skip_s1 = skip_stage1
     _skip_s1_kw = skip_stage1_keep_wts
+    _inp_dt = str(inp_data_type) if inp_data_type is not None else "none"
     _allocator = kernel._allocator
 
     @flyc.jit
@@ -1330,7 +1426,7 @@ def make_combine_jit(*, rank, npes, experts_per_rank=0, experts_per_token,
         stream: Stream = Stream(None),
     ):
         _ = (_rank_id, _npes_id, _block_num, _wpb, _max_tok,
-             _en_wts, _en_smoe, _p2p_rd, _skip_s1, _skip_s1_kw)
+             _en_wts, _en_smoe, _p2p_rd, _skip_s1, _skip_s1_kw, _inp_dt)
         from flydsl.compiler.kernel_function import CompilationContext
         from flydsl._mlir import ir
         _allocator.finalized = False
