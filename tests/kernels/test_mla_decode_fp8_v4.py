@@ -371,6 +371,9 @@ def run_config(
     arbitrary_indices=False,
     kv_lens=None,
     topk_lengths=None,
+    extra_kv_lens=None,
+    extra_topk_lengths=None,
+    extra_num_kv_splits=1,
 ):
     device = "cuda"
     results = {}
@@ -386,18 +389,38 @@ def run_config(
         topk_lengths = list(topk_lengths)
         assert len(topk_lengths) == B
         assert all(0 <= topk_lengths[i] <= kv_lens[i] for i in range(B))
+    has_extra = extra_kv_lens is not None
+    if has_extra:
+        assert arbitrary_indices, "extra_* tests require arbitrary packed indices"
+        assert page_block_size == 1, "extra_* tests require page_block_size=1"
+        extra_kv_lens = list(extra_kv_lens)
+        assert len(extra_kv_lens) == B
+        assert all(length > 0 for length in extra_kv_lens)
+        extra_skv = max(extra_kv_lens)
+        if extra_topk_lengths is not None:
+            extra_topk_lengths = list(extra_topk_lengths)
+            assert len(extra_topk_lengths) == B
+            assert all(0 <= extra_topk_lengths[i] <= extra_kv_lens[i] for i in range(B))
+    else:
+        extra_skv = 0
+        extra_num_kv_splits = 0
     Hq, Hkv = num_q_heads, num_kv_heads
     D_QK = kv_lora_rank + qk_rope_head_dim
     D_V = kv_lora_rank
     total_q = B * Sq
+    total_num_kv_splits = num_kv_splits + extra_num_kv_splits
 
     setup_seed(seed)
     fp8_dtype = torch.float8_e4m3fnuz
     q_f32 = torch.randn(B, Sq, Hq, D_QK, dtype=torch.float32, device=device)
     kv_f32 = torch.randn(B, Skv, Hkv, D_QK, dtype=torch.float32, device=device)
+    extra_kv_f32 = None
+    if has_extra:
+        extra_kv_f32 = torch.randn(B, extra_skv, Hkv, D_QK, dtype=torch.float32, device=device)
 
     q_4d = q_f32.to(fp8_dtype)
     kv_4d = kv_f32.to(fp8_dtype)
+    extra_kv_4d = extra_kv_f32.to(fp8_dtype) if has_extra else None
 
     if arbitrary_indices:
         assert page_block_size == 1, "arbitrary indices require page_block_size=1"
@@ -405,6 +428,11 @@ def run_config(
             kv_4d, kv_lens, seed=seed + 17,
         )
         num_blocks_per_seq = Skv
+        if has_extra:
+            extra_kv_paged, extra_block_table, extra_kv_indptr = create_arbitrary_indexed_kv(
+                extra_kv_4d, extra_kv_lens, seed=seed + 31,
+            )
+            extra_num_blocks_per_seq = extra_skv
     else:
         kv_paged, block_table = create_paged_kv(kv_4d, page_block_size, shuffle=shuffle)
         num_blocks_per_seq = block_table.shape[1]
@@ -415,39 +443,68 @@ def run_config(
     q_flat = q_4d.contiguous().view(torch.uint8).view(-1)
     kv_paged_flat = kv_paged.contiguous().view(torch.uint8).view(-1)
     bt_flat = block_table.contiguous().view(-1)
+    extra_kv_paged_flat = None
+    extra_bt_flat = None
+    if has_extra:
+        extra_kv_paged_flat = extra_kv_paged.contiguous().view(torch.uint8).view(-1)
+        extra_bt_flat = extra_block_table.contiguous().view(-1)
     topk_length_tensor = None
     if topk_lengths is not None:
         topk_length_tensor = torch.tensor(
             topk_lengths, dtype=torch.int32, device=device,
         )
+    extra_topk_length_tensor = None
+    if extra_topk_lengths is not None:
+        extra_topk_length_tensor = torch.tensor(
+            extra_topk_lengths, dtype=torch.int32, device=device,
+        )
 
     mid_o_flat = torch.zeros(
-        total_q * num_kv_splits * Hq * D_V,
+        total_q * total_num_kv_splits * Hq * D_V,
         dtype=torch.float32, device=device,
     )
     mid_lse_flat = torch.full(
-        (total_q * num_kv_splits * Hq,),
+        (total_q * total_num_kv_splits * Hq,),
         float("-inf"), dtype=torch.float32, device=device,
     )
 
-    mid_o_4d = mid_o_flat.view(total_q, num_kv_splits, Hq, D_V)
-    mid_lse_3d = mid_lse_flat.view(total_q, num_kv_splits, Hq)
+    mid_o_4d = mid_o_flat.view(total_q, total_num_kv_splits, Hq, D_V)
+    mid_lse_3d = mid_lse_flat.view(total_q, total_num_kv_splits, Hq)
     output = torch.empty(total_q, Hq, D_V, dtype=torch.float16, device=device)
 
     qo_indptr = torch.arange(
         0, (B + 1) * Sq, Sq, dtype=torch.int32, device=device,
     )
     nkv_splits_indptr = torch.arange(
-        0, (B + 1) * num_kv_splits, num_kv_splits,
+        0, (B + 1) * total_num_kv_splits, total_num_kv_splits,
         dtype=torch.int32, device=device,
     )
+    stage2_kv_indptr = kv_indptr
+    if has_extra:
+        stage2_lengths = [kv_lens[i] + extra_kv_lens[i] for i in range(B)]
+        stage2_kv_indptr = torch.tensor(
+            [0] + list(np.cumsum(stage2_lengths)),
+            dtype=torch.int32, device=device,
+        )
     Lv = D_V
     BLOCK_DV = triton.next_power_of_2(Lv)
     grid_s2 = (B, Hq)
     stream = torch.cuda.current_stream()
 
     def _run():
-        if topk_length_tensor is None:
+        if has_extra:
+            exe(
+                q_flat, kv_paged_flat, mid_o_flat, mid_lse_flat,
+                bt_flat, B, Sq, kv_indptr, num_blocks_per_seq, num_kv_splits,
+                stream, topk_length=topk_length_tensor,
+                extra_kv=extra_kv_paged_flat,
+                extra_block_table=extra_bt_flat,
+                extra_kv_indptr=extra_kv_indptr,
+                extra_max_num_blocks=extra_num_blocks_per_seq,
+                extra_num_kv_splits=extra_num_kv_splits,
+                extra_topk_length=extra_topk_length_tensor,
+            )
+        elif topk_length_tensor is None:
             exe(
                 q_flat, kv_paged_flat, mid_o_flat, mid_lse_flat,
                 bt_flat, B, Sq, kv_indptr, num_blocks_per_seq, num_kv_splits,
@@ -461,7 +518,7 @@ def run_config(
             )
         _fwd_kernel_stage2_asm[grid_s2](
             mid_o_4d, mid_lse_3d, output,
-            qo_indptr, kv_indptr, nkv_splits_indptr,
+            qo_indptr, stage2_kv_indptr, nkv_splits_indptr,
             mid_lse_3d.stride(0), mid_lse_3d.stride(2), mid_lse_3d.stride(1),
             output.stride(0), output.stride(1),
             MAYBE_FINAL_OUT=False,
@@ -490,9 +547,16 @@ def run_config(
             block_table, kv_lens, Sq, causal, device,
         )
         ref_k_cache = kv_paged
+        if has_extra:
+            extra_sparse_ref_indices = build_ref_indices_from_packed(
+                extra_block_table, extra_kv_lens, Sq, False, device,
+            )
+            extra_ref_k_cache = extra_kv_paged
     else:
         sparse_ref_indices = build_sparse_ref_indices(B, Sq, Skv, causal, device)
         ref_k_cache = kv_4d
+        extra_sparse_ref_indices = None
+        extra_ref_k_cache = None
     ref_4d, _ = ref_sparse_attn_decode_from_tensors(
         q=q_4d.float(),
         k_cache=ref_k_cache.float(),
@@ -500,6 +564,9 @@ def run_config(
         sm_scale=sm,
         d_v=kv_lora_rank,
         topk_length=topk_length_tensor,
+        extra_k_cache=extra_ref_k_cache.float() if has_extra else None,
+        extra_indices_in_kvcache=extra_sparse_ref_indices if has_extra else None,
+        extra_topk_length=extra_topk_length_tensor,
     )
     ref_4d = ref_4d.to(torch.float16)
     ref_flat = ref_4d.contiguous().view(total_q, Hq, D_V).float()
@@ -660,6 +727,41 @@ def main():
             causal, exe, seed=args.seed + Skv_c + B_c + 303, shuffle=False,
             num_kv_splits=nkv_c, arbitrary_indices=True,
             kv_lens=kv_lens_c, topk_lengths=topk_lengths_c,
+        )
+        status_c = "PASS" if r_c.get("passed") else "FAIL"
+        if not r_c.get("passed"):
+            all_passed = False
+        print(f"  {tag_c:>60s} | {status_c}")
+
+    extra_configs = [
+        ([64, 96], None, [16, 24], None),
+        ([64, 96], [33, 80], [32, 48], [17, 31]),
+        ([96, 128, 160], [63, 127, 129], [17, 33, 65], [16, 32, 64]),
+        ([256] * 4, [31, 129, 191, 255], [64] * 4, [1, 32, 33, 63]),
+    ]
+
+    print("--- Arbitrary packed indices with extra_* sweep ---")
+    for kv_lens_c, topk_lengths_c, extra_kv_lens_c, extra_topk_lengths_c in extra_configs:
+        B_c = len(kv_lens_c)
+        Skv_c = max(kv_lens_c)
+        main_eff = topk_lengths_c if topk_lengths_c is not None else kv_lens_c
+        extra_eff = extra_topk_lengths_c if extra_topk_lengths_c is not None else extra_kv_lens_c
+        nkv_c = auto_num_kv_splits(B_c, max(main_eff), num_q_heads)
+        extra_nkv_c = auto_num_kv_splits(B_c, max(extra_eff), num_q_heads)
+        tag_c = (
+            f"B={B_c} main={_format_kv_lens(kv_lens_c)} topk={_format_kv_lens(topk_lengths_c or kv_lens_c)}"
+            f" extra={_format_kv_lens(extra_kv_lens_c)} extra_topk={_format_kv_lens(extra_topk_lengths_c or extra_kv_lens_c)}"
+            f" sp={nkv_c}+{extra_nkv_c}"
+        )
+        r_c = run_config(
+            B_c, NUM_WAVES, Skv_c, num_q_heads, num_kv_heads,
+            kv_lora_rank, qk_rope_head_dim, page_block_size,
+            causal, exe, seed=args.seed + Skv_c + B_c + 707, shuffle=False,
+            num_kv_splits=nkv_c, arbitrary_indices=True,
+            kv_lens=kv_lens_c, topk_lengths=topk_lengths_c,
+            extra_kv_lens=extra_kv_lens_c,
+            extra_topk_lengths=extra_topk_lengths_c,
+            extra_num_kv_splits=extra_nkv_c,
         )
         status_c = "PASS" if r_c.get("passed") else "FAIL"
         if not r_c.get("passed"):

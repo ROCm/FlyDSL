@@ -17,6 +17,8 @@ Key design:
 - Paged/sparse KV cache via block_table.  When page_block_size == 1,
   block_table may be a packed flat indices array delimited by kv_indptr.
   Optional topk_length masks the valid prefix of those logical indices per batch.
+  Optional extra_* KV cache is launched as a second sparse scope and appended
+  after the main scope, matching ref_sparse_attn_decode_from_tensors.
 
 GEMM1: S[16×32] = K @ Q^T  (2 subtiles of 16×16, K_STEPS=18 per subtile)
 GEMM2: O^T = V^T @ P       (mfma_f32_16x16x32_fp8_fp8, PV_K_STEPS=1)
@@ -28,6 +30,7 @@ Layout (1D flattened):
   Mid_lse : [batch*seqlen_q, num_kv_splits, num_q_heads]              (fp32)
   block_table : [batch, max_num_blocks] or packed [sum_kv_len] (i32 physical block ids)
   topk_length : optional [batch] (i32 valid logical-index prefix)
+  extra_*     : optional second KV/cache/index scope, page_block_size == 1 only
 
 Grid:  (batch, num_head_groups, num_kv_splits)
 Block: (256,) -- 4 waves of 64
@@ -121,13 +124,9 @@ def _barrier(vmcnt=63, lgkmcnt=63):
     )
 
 
-_LDS_PTR_TYPE = None
 def _inttoptr_lds(i64_val):
     """Convert i64 scalar to !llvm.ptr<3> (LDS pointer)."""
-    global _LDS_PTR_TYPE
-    if _LDS_PTR_TYPE is None:
-        _LDS_PTR_TYPE = ir.Type.parse("!llvm.ptr<3>")
-    return llvm.inttoptr(_LDS_PTR_TYPE, i64_val)
+    return llvm.inttoptr(ir.Type.parse("!llvm.ptr<3>"), i64_val)
 
 
 def _get_element_ptr(
@@ -409,8 +408,11 @@ def compile_mla_decode_fp8(
         kv_indptr: fx.Tensor,
         max_num_blocks: fx.Int32,
         num_kv_splits: fx.Int32,
+        output_num_kv_splits: fx.Int32,
+        split_offset: fx.Int32,
         topk_length: fx.Tensor,
         use_topk_length: fx.Constexpr[bool],
+        apply_causal: fx.Constexpr[bool],
     ):
         compute_type = T.f32
         lds_elem_type = ir.IntegerType.get_signless(8)  # LDS indexed in bytes
@@ -431,6 +433,10 @@ def compile_mla_decode_fp8(
         seqlen_q_v = arith.index_cast(T.index, seqlen_q.ir_value())
         max_num_blocks_v = arith.index_cast(T.index, max_num_blocks.ir_value())
         num_kv_splits_v_raw = arith.index_cast(T.index, num_kv_splits.ir_value())
+        output_num_kv_splits_v = arith.index_cast(
+            T.index, output_num_kv_splits.ir_value()
+        )
+        split_offset_v = arith.index_cast(T.index, split_offset.ir_value())
 
         base_ptr = allocator_pong.get_base()
         base_ptr1 = allocator_ping.get_base()
@@ -484,6 +490,7 @@ def compile_mla_decode_fp8(
         attention_len_v = arith.index_cast(T.index, attention_len_i32)
         head_group_idx = gpu.block_id("y")
         split_id = gpu.block_id("z")
+        output_split_id = split_id + split_offset_v
         tid = gpu.thread_id("x")
 
         wave_id = tid / arith.index(WARP_SIZE)
@@ -525,8 +532,8 @@ def compile_mla_decode_fp8(
         kv_split_end = _std_arith.MinUIOp(_raw(_kv_split_end_raw), _raw(_aligned_seqlen)).result
 
         # ---- Mid_O / Mid_lse strides ----
-        stride_mid_o_token = num_kv_splits_v * arith.index(NUM_Q_HEADS * HEAD_DIM_V)
-        stride_mid_lse_token = num_kv_splits_v * arith.index(NUM_Q_HEADS)
+        stride_mid_o_token = output_num_kv_splits_v * arith.index(NUM_Q_HEADS * HEAD_DIM_V)
+        stride_mid_lse_token = output_num_kv_splits_v * arith.index(NUM_Q_HEADS)
 
         # ---- V^T transpose decomposition (fp8 byte-level perm) ----
         c_perm0 = arith.constant(0x05010400, type=i32_type)
@@ -547,7 +554,7 @@ def compile_mla_decode_fp8(
             total_q = batch_idx * seqlen_q_v + q_row
             return (
                 total_q * stride_mid_lse_token
-                + split_id * arith.index(NUM_Q_HEADS)
+                + output_split_id * arith.index(NUM_Q_HEADS)
                 + q_head_idx
             )
 
@@ -1098,7 +1105,7 @@ def compile_mla_decode_fp8(
                         _std_arith.CmpIPredicate.uge,
                         _raw(kv_abs_i64), _raw(attention_len_i64),
                     ).result
-                    if CAUSAL and do_causal:
+                    if CAUSAL and apply_causal and do_causal:
                         q_abs_pos = seqlen_kv_v - seqlen_q_v + q_row
                         q_abs_i64 = arith.index_cast(T.i64, q_abs_pos)
                         is_causal_masked = _std_arith.CmpIOp(
@@ -1996,7 +2003,7 @@ def compile_mla_decode_fp8(
                         )
                         g_idx = (
                             total_q_epi * stride_mid_o_token
-                            + split_id * arith.index(
+                            + output_split_id * arith.index(
                                 NUM_Q_HEADS * HEAD_DIM_V)
                             + new_head * arith.index(HEAD_DIM_V)
                             + d_col
@@ -2043,7 +2050,7 @@ def compile_mla_decode_fp8(
         mla_decode_kernel(
             Q, KV, Mid_O, Mid_lse, block_table,
             batch_size, seqlen_q, kv_indptr, max_num_blocks, num_kv_splits,
-            kv_indptr, False,
+            num_kv_splits, fx.Int32(0), kv_indptr, False, True,
         ).launch(
             grid=(bs_val, c_nhg, nkv_splits_val),
             block=(BLOCK_SIZE, 1, 1),
@@ -2083,9 +2090,71 @@ def compile_mla_decode_fp8(
         mla_decode_kernel(
             Q, KV, Mid_O, Mid_lse, block_table,
             batch_size, seqlen_q, kv_indptr, max_num_blocks, num_kv_splits,
-            topk_length, True,
+            num_kv_splits, fx.Int32(0), topk_length, True, True,
         ).launch(
             grid=(bs_val, c_nhg, nkv_splits_val),
+            block=(BLOCK_SIZE, 1, 1),
+            stream=stream,
+        )
+
+    @flyc.jit
+    def launch_mla_decode_with_extra(
+        Q: fx.Tensor,
+        KV: fx.Tensor,
+        Mid_O: fx.Tensor,
+        Mid_lse: fx.Tensor,
+        block_table: fx.Tensor,
+        batch_size: fx.Int32,
+        seqlen_q: fx.Int32,
+        kv_indptr: fx.Tensor,
+        max_num_blocks: fx.Int32,
+        num_kv_splits: fx.Int32,
+        topk_length: fx.Tensor,
+        use_topk_length: fx.Constexpr[bool],
+        Extra_KV: fx.Tensor,
+        extra_block_table: fx.Tensor,
+        extra_kv_indptr: fx.Tensor,
+        extra_max_num_blocks: fx.Int32,
+        extra_num_kv_splits: fx.Int32,
+        extra_topk_length: fx.Tensor,
+        use_extra_topk_length: fx.Constexpr[bool],
+        stream: fx.Stream,
+    ):
+        allocator_pong.finalized = False
+        allocator_ping.finalized = False
+        allocator_vt.finalized = False
+        allocator_red.finalized = False
+        ctx = CompilationContext.get_current()
+        with ir.InsertionPoint(ctx.gpu_module_body):
+            allocator_pong.finalize()
+            allocator_ping.finalize()
+            allocator_vt.finalize()
+            allocator_red.finalize()
+
+        bs_val = arith.index_cast(T.index, batch_size.ir_value())
+        c_nhg = arith.index(NUM_HEAD_GROUPS)
+        main_splits_val = arith.index_cast(T.index, num_kv_splits.ir_value())
+        extra_splits_val = arith.index_cast(T.index, extra_num_kv_splits.ir_value())
+        output_num_kv_splits = num_kv_splits + extra_num_kv_splits
+
+        mla_decode_kernel(
+            Q, KV, Mid_O, Mid_lse, block_table,
+            batch_size, seqlen_q, kv_indptr, max_num_blocks, num_kv_splits,
+            output_num_kv_splits, fx.Int32(0),
+            topk_length, use_topk_length, True,
+        ).launch(
+            grid=(bs_val, c_nhg, main_splits_val),
+            block=(BLOCK_SIZE, 1, 1),
+            stream=stream,
+        )
+
+        mla_decode_kernel(
+            Q, Extra_KV, Mid_O, Mid_lse, extra_block_table,
+            batch_size, seqlen_q, extra_kv_indptr, extra_max_num_blocks,
+            extra_num_kv_splits, output_num_kv_splits, num_kv_splits,
+            extra_topk_length, use_extra_topk_length, False,
+        ).launch(
+            grid=(bs_val, c_nhg, extra_splits_val),
             block=(BLOCK_SIZE, 1, 1),
             stream=stream,
         )
@@ -2103,7 +2172,30 @@ def compile_mla_decode_fp8(
         num_kv_splits,
         stream,
         topk_length=None,
+        extra_kv=None,
+        extra_block_table=None,
+        extra_kv_indptr=None,
+        extra_max_num_blocks=None,
+        extra_num_kv_splits=None,
+        extra_topk_length=None,
     ):
+        if extra_kv is not None:
+            if PAGE_BLOCK_SIZE != 1:
+                raise ValueError("extra_* KV cache is currently supported only for page_block_size=1")
+            if extra_block_table is None or extra_kv_indptr is None:
+                raise ValueError("extra_block_table and extra_kv_indptr are required with extra_kv")
+            if extra_max_num_blocks is None or extra_num_kv_splits is None:
+                raise ValueError("extra_max_num_blocks and extra_num_kv_splits are required with extra_kv")
+            main_topk = topk_length if topk_length is not None else kv_indptr
+            extra_topk = extra_topk_length if extra_topk_length is not None else extra_kv_indptr
+            return launch_mla_decode_with_extra(
+                Q, KV, Mid_O, Mid_lse, block_table,
+                batch_size, seqlen_q, kv_indptr, max_num_blocks,
+                num_kv_splits, main_topk, topk_length is not None,
+                extra_kv, extra_block_table, extra_kv_indptr,
+                extra_max_num_blocks, extra_num_kv_splits,
+                extra_topk, extra_topk_length is not None, stream,
+            )
         if topk_length is None:
             return launch_mla_decode_no_topk(
                 Q, KV, Mid_O, Mid_lse, block_table,
