@@ -38,8 +38,10 @@ from kernels.grouped_gemm_blockscale_common import (
     compute_compile_constants,
     make_a_tile_loaders,
     make_b_loader,
+    make_compute_tile,
     make_hot_loop_scheduler,
     make_lds_loader,
+    make_prefetch_scales,
     out_mlir_for,
     pack_i64x4_to_i32x8,
     setup_lds_allocation,
@@ -311,140 +313,25 @@ def compile_grouped_gemm_blockscale_contiguous(
                 ku_per_sb=ku_per_sb,
             )
 
-            # ── Helper: prefetch E8M0 scales for one K-tile (gfx950 HW path) ──
-            # Returns (sa_e8m0_pf, sb_e8m0_pf) — outer index = sb (sb_per_tile),
-            # inner = m_repeat / num_acc_n. Issued ahead of compute_tile so
-            # scale-load latency overlaps with prior tile's MFMA work + B-tile load.
-            def prefetch_scales(k_tile_idx_py):
-                if not _is_gfx950:
-                    return None
-                sa_pf = []
-                sb_pf = []
-                sb_group_offset = group_idx * fx.Index(scale_n * scale_k)
-                for sb in range_constexpr(sb_per_tile):
-                    kb = fx.Index(k_tile_idx_py * sb_per_tile + sb)
-                    sa_base_pf = kb * m_in
+            prefetch_scales = make_prefetch_scales(
+                _is_gfx950=_is_gfx950, sa_rsrc=sa_rsrc, sb_rsrc=sb_rsrc,
+                group_idx=group_idx, scale_n=scale_n, scale_k=scale_k,
+                c_scale_k=c_scale_k, n_block_for_scale=n_block_for_scale,
+                bx_m=bx_m, lane_mod_16=lane_mod_16, m_in=m_in,
+                sb_per_tile=sb_per_tile, m_repeat=m_repeat, num_acc_n=num_acc_n,
+            )
 
-                    sa_sb = []
-                    for mi in range_constexpr(m_repeat):
-                        sa_row = bx_m + arith.index(mi * 16) + lane_mod_16
-                        sa_idx = sa_base_pf + sa_row
-                        sa_i8 = buffer_ops.buffer_load(sa_rsrc, sa_idx, vec_width=1, dtype=T.i8)
-                        sa_e8m0 = ArithValue(sa_i8).extui(T.i32)
-                        sa_sb.append(sa_e8m0)
-                    sa_pf.append(sa_sb)
-
-                    sb_sb = []
-                    for ni in range_constexpr(num_acc_n):
-                        sb_idx = sb_group_offset + n_block_for_scale[ni] * c_scale_k + kb
-                        sb_i8 = buffer_ops.buffer_load(sb_rsrc, sb_idx, vec_width=1, dtype=T.i8)
-                        sb_i32 = ArithValue(sb_i8).extui(T.i32)
-                        sb_e8m0 = rocdl.readfirstlane(T.i32, sb_i32)
-                        sb_sb.append(sb_e8m0)
-                    sb_pf.append(sb_sb)
-                return (sa_pf, sb_pf)
-
-            def compute_tile(accs_in, k_tile_idx_py, lds_base, b_tile_in, scales_pf, *, a0_prefetch=None):
-                """Compute MFMA tiles for one K-tile, return updated accumulators.
-
-                scales_pf: result of prefetch_scales(k_tile_idx_py) for the gfx950
-                HW path; None for the gfx942 SW path (which loads scales locally).
-                """
-                current_accs = list(accs_in)
-
-                for sb in range_constexpr(sb_per_tile):
-                    kb = fx.Index(k_tile_idx_py * sb_per_tile + sb)
-
-                    # gfx942 SW path needs s_a_vecs (4 loads/mi, lane_div_16 layout)
-                    # and s_b_vals as f32. gfx950 HW path uses prefetched E8M0 bytes.
-                    s_a_vecs = []
-                    s_b_vals = []
-                    if not _is_gfx950:
-                        sa_base = kb * m_in
-                        row_off_base = lane_div_16 * fx.Index(4)
-                        for mi in range_constexpr(m_repeat):
-                            s_a_row = []
-                            for ii in range_constexpr(4):
-                                row_in_tile = arith.index(mi * 16) + row_off_base + fx.Index(ii)
-                                row_global = bx_m + row_in_tile
-                                sa_idx = sa_base + row_global
-                                s_a_val = buffer_ops.buffer_load(sa_rsrc, sa_idx, vec_width=1, dtype=T.f32)
-                                s_a_row.append(s_a_val)
-                            s_a_vec4 = vector.from_elements(T.f32x4, s_a_row)
-                            s_a_vecs.append(s_a_vec4)
-
-                        sb_group_offset = group_idx * fx.Index(scale_n * scale_k)
-                        for ni in range_constexpr(num_acc_n):
-                            sb_idx = sb_group_offset + n_block_for_scale[ni] * c_scale_k + kb
-                            s_b_val = buffer_ops.buffer_load(sb_rsrc, sb_idx, vec_width=1, dtype=T.f32)
-                            s_b_val = rocdl.readfirstlane(T.f32, s_b_val)
-                            s_b_vals.append(s_b_val)
-
-                    # MFMA computation for this scale block
-                    if _is_gfx950:
-                        # gfx950: single K=128 MFMA with HW E8M0 scales prefetched
-                        # ahead of compute_tile (scales_pf passed by caller).
-                        sa_pf, sb_pf = scales_pf
-                        sa_e8m0_list = sa_pf[sb]
-                        sb_e8m0_list = sb_pf[sb]
-
-                        ku0 = sb * ku_per_sb
-                        ku1 = ku0 + 1
-                        b0_packs0, b0_packs1 = b_tile_in[ku0]
-                        b1_packs0, b1_packs1 = b_tile_in[ku1]
-                        col_base0 = col_offset_base_bytes + fx.Index(ku0 * 64)
-                        col_base1 = col_offset_base_bytes + fx.Index(ku1 * 64)
-
-                        for mi in range_constexpr(m_repeat):
-                            curr_row_a_lds = lane_mod_16 + arith.index(mi * 16)
-                            if a0_prefetch is not None and sb == 0 and mi == 0:
-                                a0, a1 = a0_prefetch
-                            else:
-                                a0, a1 = lds_load_packs_k64(curr_row_a_lds, col_base0, lds_base)
-                            a2, a3 = lds_load_packs_k64(curr_row_a_lds, col_base1, lds_base)
-                            a128 = pack_i64x4_to_i32x8(a0, a1, a2, a3)
-
-                            for ni in range_constexpr(num_acc_n):
-                                b128 = pack_i64x4_to_i32x8(
-                                    b0_packs0[ni], b0_packs1[ni],
-                                    b1_packs0[ni], b1_packs1[ni],
-                                )
-                                acc_idx = mi * num_acc_n + ni
-                                # Hardware scaling + direct accumulation
-                                current_accs[acc_idx] = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
-                                    mfma_res_ty,
-                                    [a128, b128, current_accs[acc_idx],
-                                     0, 0, 0, sa_e8m0_list[mi], 0, sb_e8m0_list[ni]],
-                                )
-                    else:
-                        # gfx942: two K=32 MFMAs per K64 micro-step
-                        for ku_local in range_constexpr(ku_per_sb):
-                            ku = sb * ku_per_sb + ku_local
-                            k_offset_bytes = ku * 64
-                            b_packs0, b_packs1 = b_tile_in[ku]
-
-                            for mi in range_constexpr(m_repeat):
-                                if a0_prefetch is not None and sb == 0 and ku_local == 0 and mi == 0:
-                                    a0, a1 = a0_prefetch
-                                else:
-                                    row_a_lds = lane_mod_16 + arith.index(mi * 16)
-                                    col_a_base_bytes = lane_div_16 * fx.Index(16) + fx.Index(k_offset_bytes)
-                                    a0, a1 = lds_load_packs_k64(row_a_lds, col_a_base_bytes, lds_base)
-
-                                for ni in range_constexpr(num_acc_n):
-                                    acc_idx = mi * num_acc_n + ni
-
-                                    mfma_fn = rocdl.mfma_f32_16x16x32_fp8_fp8
-                                    mfma_mid = mfma_fn(T.f32x4, [a0, b_packs0[ni], acc_init, 0, 0, 0])
-                                    mfma_result = mfma_fn(T.f32x4, [a1, b_packs1[ni], mfma_mid, 0, 0, 0])
-
-                                    # Apply scales: accum += mfma_result * scale_a * scale_b
-                                    s_a_v4 = s_a_vecs[mi]
-                                    s_b_bc = vector.broadcast(T.f32x4, s_b_vals[ni])
-                                    scaled = ArithValue(mfma_result) * ArithValue(s_a_v4)
-                                    current_accs[acc_idx] = math_dialect.fma(scaled, s_b_bc, current_accs[acc_idx])
-
-                return current_accs
+            compute_tile = make_compute_tile(
+                _is_gfx950=_is_gfx950, lds_load_packs_k64=lds_load_packs_k64,
+                sa_rsrc=sa_rsrc, sb_rsrc=sb_rsrc,
+                group_idx=group_idx, scale_n=scale_n, scale_k=scale_k,
+                c_scale_k=c_scale_k, n_block_for_scale=n_block_for_scale,
+                bx_m=bx_m, lane_mod_16=lane_mod_16, lane_div_16=lane_div_16,
+                m_in=m_in, sb_per_tile=sb_per_tile, m_repeat=m_repeat,
+                num_acc_n=num_acc_n, ku_per_sb=ku_per_sb,
+                col_offset_base_bytes=col_offset_base_bytes,
+                mfma_res_ty=mfma_res_ty, acc_init=acc_init,
+            )
 
             # ===== Ping-pong K-loop =====
             # Prologue: prefetch first A tile into VGPRs, store to LDS, load B + scales
