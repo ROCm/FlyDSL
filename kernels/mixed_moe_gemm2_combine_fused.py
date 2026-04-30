@@ -185,9 +185,13 @@ def compile_fused_moe_gemm2_combine(
         )
 
     out_s = str(out_dtype).strip().lower()
-    if out_s not in ("bf16", "bfloat16", "f16", "fp16"):
+    _fused_fp8_cast = out_s in (
+        "fp8", "fp8e4m3", "fp8e4m3fn", "f8e4m3fn", "float8_e4m3fn"
+    )
+    if (out_s not in ("bf16", "bfloat16", "f16", "fp16")) and not _fused_fp8_cast:
         raise ValueError(
-            f"fused 模式输出必须是 combine 可读的浮点类型 (bf16/f16), got {out_dtype!r}"
+            f"fused 模式输出必须是 combine 可读的浮点类型 (bf16/f16) 或 fp8e4m3fn, "
+            f"got {out_dtype!r}"
         )
 
     if mode == "full":
@@ -213,13 +217,22 @@ def compile_fused_moe_gemm2_combine(
     # 将权重 P2P scatter 延后到 combine_no_stage1 的轻量 Stage 1 里去做
     # （make_combine_jit(skip_stage1=True, skip_stage1_keep_wts=True)），
     # 跑在干净 fabric 上更可靠。
+    # When fp8 direct cast is requested we keep the underlying GEMM2's
+    # `out_dtype` as bf16 (so c_shuffle's LDS shuffle/frag stays bf16) and
+    # signal the fused store_pair to do the bf16->fp32->cvt_pk_fp8 round-trip
+    # via the 6-tuple fused_p2p_scatter form.  This mirrors the baseline
+    # combine wrapper's `input.to(torch.float8_e4m3fn)` cast happening before
+    # Stage 1 P2P scatter — but inlined into the GEMM2 epilogue so we avoid
+    # the round-trip through the local arg_out / inp_tok_local buffer.
     fused_cfg = (
         int(npes),
         int(rank),
         int(max_tok_per_rank),
         False,
         int(experts_per_token),
+        bool(_fused_fp8_cast),
     )
+    _gemm2_out_dtype = "bf16" if _fused_fp8_cast else out_dtype
 
     return compile_mixed_moe_gemm2(
         model_dim=model_dim,
@@ -228,7 +241,7 @@ def compile_fused_moe_gemm2_combine(
         topk=topk,
         tile_m=tile_m, tile_n=tile_n, tile_k=tile_k,
         persist_m=persist_m,
-        a_dtype=a_dtype, b_dtype=b_dtype, out_dtype=out_dtype,
+        a_dtype=a_dtype, b_dtype=b_dtype, out_dtype=_gemm2_out_dtype,
         # fused 路径强制：accumulate=False, doweight_stage2=False, bias=False
         accumulate=False,
         doweight_stage2=False,

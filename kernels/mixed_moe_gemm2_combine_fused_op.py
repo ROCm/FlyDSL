@@ -103,8 +103,22 @@ class FlyDSLMoeGemm2CombineOp:
             )
         self.force_mode = force_mode
 
-        out_dtype = "bf16" if cfg.data_type == torch.bfloat16 else "f16"
+        # Default out_dtype mirrors cfg.data_type (bf16/f16).  When the
+        # combine config requests fp8_direct_cast (and data_type is bf16),
+        # bypass the local arg_out round-trip by routing GEMM2's epilogue
+        # directly through cvt_pk_fp8_f32 + 1B/elem P2P scatter.  This keeps
+        # baseline (which casts via input.to(fp8) before combine wrapper) and
+        # fused on the same fp8 byte stride for fair head-to-head benches.
+        _fp8_cast = (
+            getattr(cfg, "quant_type", "none") == "fp8_direct_cast"
+            and cfg.data_type == torch.bfloat16
+        )
+        if _fp8_cast:
+            out_dtype = "fp8e4m3fn"
+        else:
+            out_dtype = "bf16" if cfg.data_type == torch.bfloat16 else "f16"
         self._out_dtype_str = out_dtype
+        self._fp8_cast = _fp8_cast
 
         max_resident = estimate_max_resident_blocks(
             chip=cfg.chip, block_dim=256,
@@ -150,6 +164,7 @@ class FlyDSLMoeGemm2CombineOp:
             xcd_swizzle=self.xcd_swizzle,
             a_dtype=self.a_dtype, b_dtype=self.b_dtype,
             out_dtype=self._out_dtype_str,
+            fp8_cast=self._fp8_cast,
             inter_dim=self.inter_dim,
         )
 
