@@ -374,6 +374,7 @@ def run_config(
     extra_kv_lens=None,
     extra_topk_lengths=None,
     extra_num_kv_splits=1,
+    use_attn_sink=False,
 ):
     device = "cuda"
     results = {}
@@ -408,12 +409,15 @@ def run_config(
     D_QK = kv_lora_rank + qk_rope_head_dim
     D_V = kv_lora_rank
     total_q = B * Sq
-    total_num_kv_splits = num_kv_splits + extra_num_kv_splits
+    total_num_kv_splits = num_kv_splits + extra_num_kv_splits + (1 if use_attn_sink else 0)
 
     setup_seed(seed)
     fp8_dtype = torch.float8_e4m3fnuz
     q_f32 = torch.randn(B, Sq, Hq, D_QK, dtype=torch.float32, device=device)
     kv_f32 = torch.randn(B, Skv, Hkv, D_QK, dtype=torch.float32, device=device)
+    attn_sink_tensor = None
+    if use_attn_sink:
+        attn_sink_tensor = torch.empty(Hq, dtype=torch.float32, device=device).uniform_(-0.25, 0.35)
     extra_kv_f32 = None
     if has_extra:
         extra_kv_f32 = torch.randn(B, extra_skv, Hkv, D_QK, dtype=torch.float32, device=device)
@@ -486,6 +490,15 @@ def run_config(
             [0] + list(np.cumsum(stage2_lengths)),
             dtype=torch.int32, device=device,
         )
+    if use_attn_sink:
+        stage2_lengths = [
+            int((stage2_kv_indptr[i + 1] - stage2_kv_indptr[i]).item()) + 16
+            for i in range(B)
+        ]
+        stage2_kv_indptr = torch.tensor(
+            [0] + list(np.cumsum(stage2_lengths)),
+            dtype=torch.int32, device=device,
+        )
     Lv = D_V
     BLOCK_DV = triton.next_power_of_2(Lv)
     grid_s2 = (B, Hq)
@@ -503,18 +516,19 @@ def run_config(
                 extra_max_num_blocks=extra_num_blocks_per_seq,
                 extra_num_kv_splits=extra_num_kv_splits,
                 extra_topk_length=extra_topk_length_tensor,
+                attn_sink=attn_sink_tensor,
             )
         elif topk_length_tensor is None:
             exe(
                 q_flat, kv_paged_flat, mid_o_flat, mid_lse_flat,
                 bt_flat, B, Sq, kv_indptr, num_blocks_per_seq, num_kv_splits,
-                stream,
+                stream, attn_sink=attn_sink_tensor,
             )
         else:
             exe(
                 q_flat, kv_paged_flat, mid_o_flat, mid_lse_flat,
                 bt_flat, B, Sq, kv_indptr, num_blocks_per_seq, num_kv_splits,
-                stream, topk_length=topk_length_tensor,
+                stream, topk_length=topk_length_tensor, attn_sink=attn_sink_tensor,
             )
         _fwd_kernel_stage2_asm[grid_s2](
             mid_o_4d, mid_lse_3d, output,
@@ -563,6 +577,7 @@ def run_config(
         indices_in_kvcache=sparse_ref_indices,
         sm_scale=sm,
         d_v=kv_lora_rank,
+        attn_sink=attn_sink_tensor,
         topk_length=topk_length_tensor,
         extra_k_cache=extra_ref_k_cache.float() if has_extra else None,
         extra_indices_in_kvcache=extra_sparse_ref_indices if has_extra else None,
@@ -762,6 +777,45 @@ def main():
             extra_kv_lens=extra_kv_lens_c,
             extra_topk_lengths=extra_topk_lengths_c,
             extra_num_kv_splits=extra_nkv_c,
+        )
+        status_c = "PASS" if r_c.get("passed") else "FAIL"
+        if not r_c.get("passed"):
+            all_passed = False
+        print(f"  {tag_c:>60s} | {status_c}")
+
+    attn_sink_configs = [
+        ([64, 96], None, None, None),
+        ([96, 128, 160], [32, 63, 129], None, None),
+        ([64, 96], [33, 80], [32, 48], [17, 31]),
+    ]
+
+    print("--- Arbitrary packed indices with attn_sink sweep ---")
+    for kv_lens_c, topk_lengths_c, extra_kv_lens_c, extra_topk_lengths_c in attn_sink_configs:
+        B_c = len(kv_lens_c)
+        Skv_c = max(kv_lens_c)
+        main_eff = topk_lengths_c if topk_lengths_c is not None else kv_lens_c
+        extra_eff = extra_topk_lengths_c if extra_topk_lengths_c is not None else extra_kv_lens_c
+        nkv_c = auto_num_kv_splits(B_c, max(main_eff), num_q_heads)
+        extra_nkv_c = (
+            auto_num_kv_splits(B_c, max(extra_eff), num_q_heads)
+            if extra_kv_lens_c is not None else 1
+        )
+        tag_c = (
+            f"B={B_c} main={_format_kv_lens(kv_lens_c)}"
+            f" topk={_format_kv_lens(topk_lengths_c or kv_lens_c)}"
+            f" extra={_format_kv_lens(extra_kv_lens_c) if extra_kv_lens_c is not None else 'None'}"
+            f" sink sp={nkv_c}+{extra_nkv_c if extra_kv_lens_c is not None else 0}+1"
+        )
+        r_c = run_config(
+            B_c, NUM_WAVES, Skv_c, num_q_heads, num_kv_heads,
+            kv_lora_rank, qk_rope_head_dim, page_block_size,
+            causal, exe, seed=args.seed + Skv_c + B_c + 909, shuffle=False,
+            num_kv_splits=nkv_c, arbitrary_indices=True,
+            kv_lens=kv_lens_c, topk_lengths=topk_lengths_c,
+            extra_kv_lens=extra_kv_lens_c,
+            extra_topk_lengths=extra_topk_lengths_c,
+            extra_num_kv_splits=extra_nkv_c,
+            use_attn_sink=True,
         )
         status_c = "PASS" if r_c.get("passed") else "FAIL"
         if not r_c.get("passed"):

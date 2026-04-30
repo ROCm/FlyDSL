@@ -2017,6 +2017,72 @@ def compile_mla_decode_fp8(
             ).result
             buffer_ops.buffer_store(lse_val, mid_lse_rsrc, lse_off_i32)
 
+    @flyc.kernel
+    def attn_sink_kernel(
+        Mid_O: fx.Tensor,
+        Mid_lse: fx.Tensor,
+        attn_sink: fx.Tensor,
+        batch_size: fx.Int32,
+        seqlen_q: fx.Int32,
+        output_num_kv_splits: fx.Int32,
+        sink_split_offset: fx.Int32,
+    ):
+        total_q_idx = gpu.block_id("x")
+        head_idx = gpu.block_id("y")
+        tid = gpu.thread_id("x")
+
+        output_num_kv_splits_v = arith.index_cast(
+            T.index, output_num_kv_splits.ir_value()
+        )
+        sink_split_offset_v = arith.index_cast(
+            T.index, sink_split_offset.ir_value()
+        )
+
+        mid_o_rsrc = buffer_ops.create_buffer_resource(Mid_O)
+        mid_lse_rsrc = buffer_ops.create_buffer_resource(Mid_lse)
+        sink_rsrc = buffer_ops.create_buffer_resource(attn_sink)
+
+        zero_f = arith.constant(0.0, type=T.f32)
+        stride_mid_o_token = output_num_kv_splits_v * arith.index(NUM_Q_HEADS * HEAD_DIM_V)
+        stride_mid_lse_token = output_num_kv_splits_v * arith.index(NUM_Q_HEADS)
+
+        for r in range_constexpr((HEAD_DIM_V + BLOCK_SIZE - 1) // BLOCK_SIZE):
+            d_col = tid + arith.index(r * BLOCK_SIZE)
+            d_in_bounds = _std_arith.CmpIOp(
+                _std_arith.CmpIPredicate.ult,
+                _raw(d_col), _raw(arith.index(HEAD_DIM_V)),
+            ).result
+            if_d = _scf.IfOp(d_in_bounds)
+            with ir.InsertionPoint(if_d.then_block):
+                o_idx = (
+                    total_q_idx * stride_mid_o_token
+                    + sink_split_offset_v * arith.index(NUM_Q_HEADS * HEAD_DIM_V)
+                    + head_idx * arith.index(HEAD_DIM_V)
+                    + d_col
+                )
+                buffer_ops.buffer_store(
+                    zero_f, mid_o_rsrc, _index_cast_to_i32(o_idx))
+                _scf.YieldOp([])
+
+        tid_is_zero = _std_arith.CmpIOp(
+            _std_arith.CmpIPredicate.eq,
+            _raw(tid), _raw(arith.index(0)),
+        ).result
+        if_lse = _scf.IfOp(tid_is_zero)
+        with ir.InsertionPoint(if_lse.then_block):
+            sink_val = buffer_ops.buffer_load(
+                sink_rsrc, _index_cast_to_i32(head_idx),
+                vec_width=1, dtype=T.f32,
+            )
+            lse_idx = (
+                total_q_idx * stride_mid_lse_token
+                + sink_split_offset_v * arith.index(NUM_Q_HEADS)
+                + head_idx
+            )
+            buffer_ops.buffer_store(
+                sink_val, mid_lse_rsrc, _index_cast_to_i32(lse_idx))
+            _scf.YieldOp([])
+
     # ── Host launcher ──
     @flyc.jit
     def launch_mla_decode_no_topk(
@@ -2098,6 +2164,61 @@ def compile_mla_decode_fp8(
         )
 
     @flyc.jit
+    def launch_mla_decode_with_attn_sink(
+        Q: fx.Tensor,
+        KV: fx.Tensor,
+        Mid_O: fx.Tensor,
+        Mid_lse: fx.Tensor,
+        block_table: fx.Tensor,
+        batch_size: fx.Int32,
+        seqlen_q: fx.Int32,
+        kv_indptr: fx.Tensor,
+        max_num_blocks: fx.Int32,
+        num_kv_splits: fx.Int32,
+        topk_length: fx.Tensor,
+        use_topk_length: fx.Constexpr[bool],
+        attn_sink: fx.Tensor,
+        stream: fx.Stream,
+    ):
+        allocator_pong.finalized = False
+        allocator_ping.finalized = False
+        allocator_vt.finalized = False
+        allocator_red.finalized = False
+        ctx = CompilationContext.get_current()
+        with ir.InsertionPoint(ctx.gpu_module_body):
+            allocator_pong.finalize()
+            allocator_ping.finalize()
+            allocator_vt.finalize()
+            allocator_red.finalize()
+
+        bs_val = arith.index_cast(T.index, batch_size.ir_value())
+        seqlen_q_val = arith.index_cast(T.index, seqlen_q.ir_value())
+        c_nhg = arith.index(NUM_HEAD_GROUPS)
+        c_heads = arith.index(NUM_Q_HEADS)
+        nkv_splits_val = arith.index_cast(T.index, num_kv_splits.ir_value())
+        output_num_kv_splits = num_kv_splits + fx.Int32(1)
+
+        mla_decode_kernel(
+            Q, KV, Mid_O, Mid_lse, block_table,
+            batch_size, seqlen_q, kv_indptr, max_num_blocks, num_kv_splits,
+            output_num_kv_splits, fx.Int32(0),
+            topk_length, use_topk_length, True,
+        ).launch(
+            grid=(bs_val, c_nhg, nkv_splits_val),
+            block=(BLOCK_SIZE, 1, 1),
+            stream=stream,
+        )
+
+        attn_sink_kernel(
+            Mid_O, Mid_lse, attn_sink,
+            batch_size, seqlen_q, output_num_kv_splits, num_kv_splits,
+        ).launch(
+            grid=(bs_val * seqlen_q_val, c_heads),
+            block=(BLOCK_SIZE, 1, 1),
+            stream=stream,
+        )
+
+    @flyc.jit
     def launch_mla_decode_with_extra(
         Q: fx.Tensor,
         KV: fx.Tensor,
@@ -2118,6 +2239,8 @@ def compile_mla_decode_fp8(
         extra_num_kv_splits: fx.Int32,
         extra_topk_length: fx.Tensor,
         use_extra_topk_length: fx.Constexpr[bool],
+        attn_sink: fx.Tensor,
+        use_attn_sink: fx.Constexpr[bool],
         stream: fx.Stream,
     ):
         allocator_pong.finalized = False
@@ -2133,9 +2256,13 @@ def compile_mla_decode_fp8(
 
         bs_val = arith.index_cast(T.index, batch_size.ir_value())
         c_nhg = arith.index(NUM_HEAD_GROUPS)
+        c_heads = arith.index(NUM_Q_HEADS)
         main_splits_val = arith.index_cast(T.index, num_kv_splits.ir_value())
         extra_splits_val = arith.index_cast(T.index, extra_num_kv_splits.ir_value())
         output_num_kv_splits = num_kv_splits + extra_num_kv_splits
+        sink_split_offset = output_num_kv_splits
+        if const_expr(use_attn_sink):
+            output_num_kv_splits = output_num_kv_splits + fx.Int32(1)
 
         mla_decode_kernel(
             Q, KV, Mid_O, Mid_lse, block_table,
@@ -2159,6 +2286,17 @@ def compile_mla_decode_fp8(
             stream=stream,
         )
 
+        if const_expr(use_attn_sink):
+            seqlen_q_val = arith.index_cast(T.index, seqlen_q.ir_value())
+            attn_sink_kernel(
+                Mid_O, Mid_lse, attn_sink,
+                batch_size, seqlen_q, output_num_kv_splits, sink_split_offset,
+            ).launch(
+                grid=(bs_val * seqlen_q_val, c_heads),
+                block=(BLOCK_SIZE, 1, 1),
+                stream=stream,
+            )
+
     def launch_mla_decode(
         Q,
         KV,
@@ -2178,6 +2316,7 @@ def compile_mla_decode_fp8(
         extra_max_num_blocks=None,
         extra_num_kv_splits=None,
         extra_topk_length=None,
+        attn_sink=None,
     ):
         if extra_kv is not None:
             if PAGE_BLOCK_SIZE != 1:
@@ -2188,13 +2327,23 @@ def compile_mla_decode_fp8(
                 raise ValueError("extra_max_num_blocks and extra_num_kv_splits are required with extra_kv")
             main_topk = topk_length if topk_length is not None else kv_indptr
             extra_topk = extra_topk_length if extra_topk_length is not None else extra_kv_indptr
+            sink_tensor = attn_sink if attn_sink is not None else kv_indptr
             return launch_mla_decode_with_extra(
                 Q, KV, Mid_O, Mid_lse, block_table,
                 batch_size, seqlen_q, kv_indptr, max_num_blocks,
                 num_kv_splits, main_topk, topk_length is not None,
                 extra_kv, extra_block_table, extra_kv_indptr,
                 extra_max_num_blocks, extra_num_kv_splits,
-                extra_topk, extra_topk_length is not None, stream,
+                extra_topk, extra_topk_length is not None,
+                sink_tensor, attn_sink is not None, stream,
+            )
+        if attn_sink is not None:
+            main_topk = topk_length if topk_length is not None else kv_indptr
+            return launch_mla_decode_with_attn_sink(
+                Q, KV, Mid_O, Mid_lse, block_table,
+                batch_size, seqlen_q, kv_indptr, max_num_blocks,
+                num_kv_splits, main_topk, topk_length is not None,
+                attn_sink, stream,
             )
         if topk_length is None:
             return launch_mla_decode_no_topk(
