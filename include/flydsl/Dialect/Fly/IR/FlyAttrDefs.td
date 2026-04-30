@@ -20,9 +20,10 @@ def Fly_CachePolicy : Fly_I32EnumAttr<"CachePolicy", "", [
 def Fly_CachePolicyAttr : Fly_EnumAttr<Fly_CachePolicy, "cache_policy"> {}
 
 def Fly_AddressSpace : Fly_I32EnumAttr<"AddressSpace", "", [
-  I32EnumAttrCase<"Global", 0, "global">,
-  I32EnumAttrCase<"Shared", 1, "shared">,
-  I32EnumAttrCase<"Register", 2, "register">
+  I32EnumAttrCase<"Generic", 0, "generic">,
+  I32EnumAttrCase<"Global", 1, "global">,
+  I32EnumAttrCase<"Shared", 2, "shared">,
+  I32EnumAttrCase<"Register", 3, "register">
 ]>;
 def Fly_AddressSpaceAttr : Fly_EnumAttr<Fly_AddressSpace, "address_space"> {}
 

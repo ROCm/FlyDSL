@@ -160,6 +160,9 @@ Attribute getAddressSpaceFromObj(MLIRContext *ctx, nb::object obj, AddressSpace 
   }
   if (PyLong_Check(obj.ptr())) {
     int32_t addrInt = nb::cast<int32_t>(obj);
+    if (addrInt < static_cast<int32_t>(AddressSpace::Generic) ||
+        addrInt > static_cast<int32_t>(AddressSpace::Register))
+      throw std::invalid_argument("address_space int must be a valid Fly_AddressSpace case");
     return AddressSpaceAttr::get(ctx, static_cast<AddressSpace>(addrInt));
   }
   throw std::invalid_argument(
