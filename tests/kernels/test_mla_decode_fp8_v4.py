@@ -370,6 +370,7 @@ def run_config(
     num_kv_splits=1,
     arbitrary_indices=False,
     kv_lens=None,
+    topk_lengths=None,
 ):
     device = "cuda"
     results = {}
@@ -381,6 +382,10 @@ def run_config(
         kv_lens = list(kv_lens)
         assert len(kv_lens) == B
     Skv = max(kv_lens)
+    if topk_lengths is not None:
+        topk_lengths = list(topk_lengths)
+        assert len(topk_lengths) == B
+        assert all(0 <= topk_lengths[i] <= kv_lens[i] for i in range(B))
     Hq, Hkv = num_q_heads, num_kv_heads
     D_QK = kv_lora_rank + qk_rope_head_dim
     D_V = kv_lora_rank
@@ -410,6 +415,11 @@ def run_config(
     q_flat = q_4d.contiguous().view(torch.uint8).view(-1)
     kv_paged_flat = kv_paged.contiguous().view(torch.uint8).view(-1)
     bt_flat = block_table.contiguous().view(-1)
+    topk_length_tensor = None
+    if topk_lengths is not None:
+        topk_length_tensor = torch.tensor(
+            topk_lengths, dtype=torch.int32, device=device,
+        )
 
     mid_o_flat = torch.zeros(
         total_q * num_kv_splits * Hq * D_V,
@@ -437,11 +447,18 @@ def run_config(
     stream = torch.cuda.current_stream()
 
     def _run():
-        exe(
-            q_flat, kv_paged_flat, mid_o_flat, mid_lse_flat,
-            bt_flat, B, Sq, kv_indptr, num_blocks_per_seq, num_kv_splits,
-            stream,
-        )
+        if topk_length_tensor is None:
+            exe(
+                q_flat, kv_paged_flat, mid_o_flat, mid_lse_flat,
+                bt_flat, B, Sq, kv_indptr, num_blocks_per_seq, num_kv_splits,
+                stream,
+            )
+        else:
+            exe(
+                q_flat, kv_paged_flat, mid_o_flat, mid_lse_flat,
+                bt_flat, B, Sq, kv_indptr, num_blocks_per_seq, num_kv_splits,
+                stream, topk_length=topk_length_tensor,
+            )
         _fwd_kernel_stage2_asm[grid_s2](
             mid_o_4d, mid_lse_3d, output,
             qo_indptr, kv_indptr, nkv_splits_indptr,
@@ -482,6 +499,7 @@ def run_config(
         indices_in_kvcache=sparse_ref_indices,
         sm_scale=sm,
         d_v=kv_lora_rank,
+        topk_length=topk_length_tensor,
     )
     ref_4d = ref_4d.to(torch.float16)
     ref_flat = ref_4d.contiguous().view(total_q, Hq, D_V).float()
@@ -613,6 +631,35 @@ def main():
             causal, exe, seed=args.seed + Skv_c + 101, shuffle=False,
             num_kv_splits=nkv_c, arbitrary_indices=True,
             kv_lens=kv_lens_c,
+        )
+        status_c = "PASS" if r_c.get("passed") else "FAIL"
+        if not r_c.get("passed"):
+            all_passed = False
+        print(f"  {tag_c:>60s} | {status_c}")
+
+    topk_length_configs = [
+        ([32, 64], [32, 64]),
+        ([64, 96], [17, 65]),
+        ([96, 128, 160], [32, 63, 129]),
+        ([48, 80, 112, 144, 176], [1, 33, 79, 97, 175]),
+        ([256] * 8, [31, 32, 33, 127, 128, 129, 191, 255]),
+    ]
+
+    print("--- Arbitrary packed indices with topk_length sweep ---")
+    for kv_lens_c, topk_lengths_c in topk_length_configs:
+        B_c = len(kv_lens_c)
+        Skv_c = max(kv_lens_c)
+        nkv_c = auto_num_kv_splits(B_c, max(topk_lengths_c), num_q_heads)
+        tag_c = (
+            f"B={B_c} Sq={NUM_WAVES} kv_lens={_format_kv_lens(kv_lens_c)}"
+            f" topk_lengths={_format_kv_lens(topk_lengths_c)} sp={nkv_c}"
+        )
+        r_c = run_config(
+            B_c, NUM_WAVES, Skv_c, num_q_heads, num_kv_heads,
+            kv_lora_rank, qk_rope_head_dim, page_block_size,
+            causal, exe, seed=args.seed + Skv_c + B_c + 303, shuffle=False,
+            num_kv_splits=nkv_c, arbitrary_indices=True,
+            kv_lens=kv_lens_c, topk_lengths=topk_lengths_c,
         )
         status_c = "PASS" if r_c.get("passed") else "FAIL"
         if not r_c.get("passed"):

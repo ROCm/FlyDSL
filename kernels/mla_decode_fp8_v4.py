@@ -16,6 +16,7 @@ Key design:
 - BLOCK_N=32 (32 KV tokens per tile), N_KV_SUBTILES=2 for GEMM1.
 - Paged/sparse KV cache via block_table.  When page_block_size == 1,
   block_table may be a packed flat indices array delimited by kv_indptr.
+  Optional topk_length masks the valid prefix of those logical indices per batch.
 
 GEMM1: S[16×32] = K @ Q^T  (2 subtiles of 16×16, K_STEPS=18 per subtile)
 GEMM2: O^T = V^T @ P       (mfma_f32_16x16x32_fp8_fp8, PV_K_STEPS=1)
@@ -26,6 +27,7 @@ Layout (1D flattened):
   Mid_O   : [batch*seqlen_q, num_kv_splits, num_q_heads, HEAD_DIM_V]  (fp32)
   Mid_lse : [batch*seqlen_q, num_kv_splits, num_q_heads]              (fp32)
   block_table : [batch, max_num_blocks] or packed [sum_kv_len] (i32 physical block ids)
+  topk_length : optional [batch] (i32 valid logical-index prefix)
 
 Grid:  (batch, num_head_groups, num_kv_splits)
 Block: (256,) -- 4 waves of 64
@@ -407,6 +409,8 @@ def compile_mla_decode_fp8(
         kv_indptr: fx.Tensor,
         max_num_blocks: fx.Int32,
         num_kv_splits: fx.Int32,
+        topk_length: fx.Tensor,
+        use_topk_length: fx.Constexpr[bool],
     ):
         compute_type = T.f32
         lds_elem_type = ir.IntegerType.get_signless(8)  # LDS indexed in bytes
@@ -467,6 +471,17 @@ def compile_mla_decode_fp8(
         )
         kv_len_i32 = _std_arith.SubIOp(kv_end_i32, kv_start_i32).result
         seqlen_kv_v = arith.index_cast(T.index, kv_len_i32)
+        attention_len_i32 = kv_len_i32
+        if const_expr(use_topk_length):
+            topk_length_rsrc = buffer_ops.create_buffer_resource(topk_length)
+            topk_len_i32 = buffer_ops.buffer_load(
+                topk_length_rsrc, batch_off_i32,
+                vec_width=1, dtype=ir.IntegerType.get_signless(32),
+            )
+            attention_len_i32 = _std_arith.MinUIOp(
+                _raw(topk_len_i32), _raw(kv_len_i32),
+            ).result
+        attention_len_v = arith.index_cast(T.index, attention_len_i32)
         head_group_idx = gpu.block_id("y")
         split_id = gpu.block_id("z")
         tid = gpu.thread_id("x")
@@ -499,7 +514,7 @@ def compile_mla_decode_fp8(
 
         # ---- KV split range ----
         num_kv_splits_v = num_kv_splits_v_raw
-        total_kv_tiles = (seqlen_kv_v + arith.index(BLOCK_N - 1)) / arith.index(BLOCK_N)
+        total_kv_tiles = (attention_len_v + arith.index(BLOCK_N - 1)) / arith.index(BLOCK_N)
         tiles_nkv_m1 = num_kv_splits_v - arith.index(1)
         tiles_plus = total_kv_tiles + tiles_nkv_m1
         tiles_per_split = tiles_plus / num_kv_splits_v
@@ -1073,21 +1088,29 @@ def compile_mla_decode_fp8(
                     s_val = vector.extract(
                         s_acc, static_position=[ii], dynamic_position=[],
                     )
+                    kv_abs = (kv_pos
+                              + arith.index(sub * 16)
+                              + lane_div_16 * arith.index(4)
+                              + arith.index(ii))
+                    kv_abs_i64 = arith.index_cast(T.i64, kv_abs)
+                    attention_len_i64 = arith.index_cast(T.i64, attention_len_v)
+                    is_masked = _std_arith.CmpIOp(
+                        _std_arith.CmpIPredicate.uge,
+                        _raw(kv_abs_i64), _raw(attention_len_i64),
+                    ).result
                     if CAUSAL and do_causal:
-                        kv_abs = (kv_pos
-                                  + arith.index(sub * 16)
-                                  + lane_div_16 * arith.index(4)
-                                  + arith.index(ii))
                         q_abs_pos = seqlen_kv_v - seqlen_q_v + q_row
-                        kv_abs_i64 = arith.index_cast(T.i64, kv_abs)
                         q_abs_i64 = arith.index_cast(T.i64, q_abs_pos)
-                        is_masked = _std_arith.CmpIOp(
+                        is_causal_masked = _std_arith.CmpIOp(
                             _std_arith.CmpIPredicate.ugt,
                             _raw(kv_abs_i64), _raw(q_abs_i64),
                         ).result
-                        s_val = _std_arith.SelectOp(
-                            is_masked, _raw(c_neg_large), _raw(s_val),
+                        is_masked = _std_arith.OrIOp(
+                            is_masked, is_causal_masked,
                         ).result
+                    s_val = _std_arith.SelectOp(
+                        is_masked, _raw(c_neg_large), _raw(s_val),
+                    ).result
                     s_vals.append(s_val)
 
             local_max = s_vals[0]
@@ -1989,7 +2012,7 @@ def compile_mla_decode_fp8(
 
     # ── Host launcher ──
     @flyc.jit
-    def launch_mla_decode(
+    def launch_mla_decode_no_topk(
         Q: fx.Tensor,
         KV: fx.Tensor,
         Mid_O: fx.Tensor,
@@ -2020,10 +2043,77 @@ def compile_mla_decode_fp8(
         mla_decode_kernel(
             Q, KV, Mid_O, Mid_lse, block_table,
             batch_size, seqlen_q, kv_indptr, max_num_blocks, num_kv_splits,
+            kv_indptr, False,
         ).launch(
             grid=(bs_val, c_nhg, nkv_splits_val),
             block=(BLOCK_SIZE, 1, 1),
             stream=stream,
+        )
+
+    @flyc.jit
+    def launch_mla_decode_with_topk(
+        Q: fx.Tensor,
+        KV: fx.Tensor,
+        Mid_O: fx.Tensor,
+        Mid_lse: fx.Tensor,
+        block_table: fx.Tensor,
+        batch_size: fx.Int32,
+        seqlen_q: fx.Int32,
+        kv_indptr: fx.Tensor,
+        max_num_blocks: fx.Int32,
+        num_kv_splits: fx.Int32,
+        topk_length: fx.Tensor,
+        stream: fx.Stream,
+    ):
+        allocator_pong.finalized = False
+        allocator_ping.finalized = False
+        allocator_vt.finalized = False
+        allocator_red.finalized = False
+        ctx = CompilationContext.get_current()
+        with ir.InsertionPoint(ctx.gpu_module_body):
+            allocator_pong.finalize()
+            allocator_ping.finalize()
+            allocator_vt.finalize()
+            allocator_red.finalize()
+
+        bs_val = arith.index_cast(T.index, batch_size.ir_value())
+        c_nhg = arith.index(NUM_HEAD_GROUPS)
+        nkv_splits_val = arith.index_cast(T.index, num_kv_splits.ir_value())
+
+        mla_decode_kernel(
+            Q, KV, Mid_O, Mid_lse, block_table,
+            batch_size, seqlen_q, kv_indptr, max_num_blocks, num_kv_splits,
+            topk_length, True,
+        ).launch(
+            grid=(bs_val, c_nhg, nkv_splits_val),
+            block=(BLOCK_SIZE, 1, 1),
+            stream=stream,
+        )
+
+    def launch_mla_decode(
+        Q,
+        KV,
+        Mid_O,
+        Mid_lse,
+        block_table,
+        batch_size,
+        seqlen_q,
+        kv_indptr,
+        max_num_blocks,
+        num_kv_splits,
+        stream,
+        topk_length=None,
+    ):
+        if topk_length is None:
+            return launch_mla_decode_no_topk(
+                Q, KV, Mid_O, Mid_lse, block_table,
+                batch_size, seqlen_q, kv_indptr, max_num_blocks,
+                num_kv_splits, stream,
+            )
+        return launch_mla_decode_with_topk(
+            Q, KV, Mid_O, Mid_lse, block_table,
+            batch_size, seqlen_q, kv_indptr, max_num_blocks,
+            num_kv_splits, topk_length, stream,
         )
 
     return launch_mla_decode
