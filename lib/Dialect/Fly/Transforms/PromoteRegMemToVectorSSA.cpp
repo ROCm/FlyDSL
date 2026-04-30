@@ -68,9 +68,9 @@ struct RegAllocaInfo {
 
 bool isRegValue(Value value) {
   if (auto ptrTy = dyn_cast<PointerType>(value.getType()))
-    return ptrTy.getAddressSpace().getValue() == AddressSpace::Register;
+    return isGenericAddressSpace<AddressSpace::Register>(ptrTy.getAddressSpace());
   if (auto memRefTy = dyn_cast<fly::MemRefType>(value.getType()))
-    return memRefTy.getAddressSpace().getValue() == AddressSpace::Register;
+    return isGenericAddressSpace<AddressSpace::Register>(memRefTy.getAddressSpace());
   return false;
 }
 

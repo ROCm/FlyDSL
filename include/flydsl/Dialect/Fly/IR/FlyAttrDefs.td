@@ -13,38 +13,28 @@ include "flydsl/Dialect/Fly/IR/FlyDialect.td"
 //===----------------------------------------------------------------------===//
 // Enum attributes
 //===----------------------------------------------------------------------===//
-def Fly_CachePolicy : I32EnumAttr<"CachePolicy", "", [
+def Fly_CachePolicy : Fly_I32EnumAttr<"CachePolicy", "", [
   I32EnumAttrCase<"CacheGlobal", 0, "cache_global">,
   I32EnumAttrCase<"CacheAlways", 1, "cache_always">
-]> {
-  let genSpecializedAttr = 0;
-  let cppNamespace = Fly_Dialect.cppNamespace;
-}
-def Fly_CachePolicyAttr : EnumAttr<Fly_Dialect, Fly_CachePolicy, "cache_policy"> {}
+]>;
+def Fly_CachePolicyAttr : Fly_EnumAttr<Fly_CachePolicy, "cache_policy"> {}
 
-def Fly_AddressSpace : I32EnumAttr<"AddressSpace", "", [
+def Fly_AddressSpace : Fly_I32EnumAttr<"AddressSpace", "", [
   I32EnumAttrCase<"Global", 0, "global">,
   I32EnumAttrCase<"Shared", 1, "shared">,
-  I32EnumAttrCase<"Register", 2, "register">,
-  I32EnumAttrCase<"BufferDesc", 8, "buffer_desc">
-]> {
-  let genSpecializedAttr = 0;
-  let cppNamespace = Fly_Dialect.cppNamespace;
-}
-def Fly_AddressSpaceAttr : EnumAttr<Fly_Dialect, Fly_AddressSpace, "address_space"> {}
+  I32EnumAttrCase<"Register", 2, "register">
+]>;
+def Fly_AddressSpaceAttr : Fly_EnumAttr<Fly_AddressSpace, "address_space"> {}
 
-def Fly_MmaOperand : I32EnumAttr<"MmaOperand", "", [
+def Fly_MmaOperand : Fly_I32EnumAttr<"MmaOperand", "", [
   I32EnumAttrCase<"A", 0, "a">,
   I32EnumAttrCase<"B", 1, "b">,
   I32EnumAttrCase<"C", 2, "c">,
   I32EnumAttrCase<"D", 3, "d">
-]> {
-  let genSpecializedAttr = 0;
-  let cppNamespace = Fly_Dialect.cppNamespace;
-}
-def Fly_MmaOperandAttr : EnumAttr<Fly_Dialect, Fly_MmaOperand, "mma_operand"> {}
+]>;
+def Fly_MmaOperandAttr : Fly_EnumAttr<Fly_MmaOperand, "mma_operand"> {}
 
-def Fly_AtomicOp : I32EnumAttr<"AtomicOp", "", [
+def Fly_AtomicOp : Fly_I32EnumAttr<"AtomicOp", "", [
   I32EnumAttrCase<"Add", 0, "add">,
   I32EnumAttrCase<"Max", 1, "max">,
   I32EnumAttrCase<"Min", 2, "min">,
@@ -52,13 +42,10 @@ def Fly_AtomicOp : I32EnumAttr<"AtomicOp", "", [
   I32EnumAttrCase<"Or", 4, "or">,
   I32EnumAttrCase<"Inc", 5, "inc">,
   I32EnumAttrCase<"Dec", 6, "dec">
-]> {
-  let genSpecializedAttr = 0;
-  let cppNamespace = Fly_Dialect.cppNamespace;
-}
-def Fly_AtomicOpAttr : EnumAttr<Fly_Dialect, Fly_AtomicOp, "atomic_op"> {}
+]>;
+def Fly_AtomicOpAttr : Fly_EnumAttr<Fly_AtomicOp, "atomic_op"> {}
 
-def Fly_GemmTraversalOrder : I32EnumAttr<"GemmTraversalOrder", "", [
+def Fly_GemmTraversalOrder : Fly_I32EnumAttr<"GemmTraversalOrder", "", [
   I32EnumAttrCase<"KMN", 0, "kmn">,
   I32EnumAttrCase<"KNM", 1, "knm">,
   I32EnumAttrCase<"MKN", 2, "mkn">,
@@ -71,11 +58,8 @@ def Fly_GemmTraversalOrder : I32EnumAttr<"GemmTraversalOrder", "", [
   I32EnumAttrCase<"MNK_Serpentine", 9, "mnk_serpentine">,
   I32EnumAttrCase<"NKM_Serpentine", 10, "nkm_serpentine">,
   I32EnumAttrCase<"NMK_Serpentine", 11, "nmk_serpentine">
-]> {
-  let genSpecializedAttr = 0;
-  let cppNamespace = Fly_Dialect.cppNamespace;
-}
-def Fly_GemmTraversalOrderAttr : EnumAttr<Fly_Dialect, Fly_GemmTraversalOrder, "gemm_traversal_order"> {}
+]>;
+def Fly_GemmTraversalOrderAttr : Fly_EnumAttr<Fly_GemmTraversalOrder, "gemm_traversal_order"> {}
 
 //===----------------------------------------------------------------------===//
 // Type attributes
