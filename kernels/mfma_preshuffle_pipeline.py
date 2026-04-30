@@ -99,7 +99,7 @@ class PreshuffleBLayout:
     kpack_bytes: int
 
 
-def make_preshuffle_b_layout(
+def make_preshuffle_b_layout_packed4bit(
     arith,
     *,
     c_n: ir.Value,
@@ -108,10 +108,10 @@ def make_preshuffle_b_layout(
     elem_bytes: int = 1,
     packed_4bit: bool = False,
 ) -> PreshuffleBLayout:
-    """Build B layout matching aiter/CK preshuffle for A8 MFMA kernels.
+    """Build B layout for packed UINT4 (a8w4smooth W4A8 + qparam).
 
-    For packed UINT4 (a8w4smooth W4A8 + qparam): use packed_4bit=True + kpack_bytes=16. In this
-    mode, the logical K element domain is mapped to packed bytes by KBytes = K/2.
+    Use packed_4bit=True + kpack_bytes=16. In this mode, the logical K element
+    domain is mapped to packed bytes by KBytes = K/2.
     """
     if kpack_bytes not in (8, 16):
         raise ValueError(f"kpack_bytes must be 8 or 16, got {kpack_bytes!r}")

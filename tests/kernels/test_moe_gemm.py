@@ -45,219 +45,22 @@ else:
     DTYPE_FP8 = torch.float8_e4m3fnuz
 
 def _pack_shuffled_int8_to_packed_int4_no_perm(x_shuf_i8: torch.Tensor) -> torch.Tensor:
-    """Pack a K64-interleaved int8 tensor into packed int4 bytes.
+    """Pack a preshuffled int8 tensor (values in [-8, 7]) into packed int4 bytes.
 
-    Input is K64-interleaved: [lo[0], hi[0], lo[1], hi[1], ...].
-    Each contiguous 8-value block [v0..v7] -> 4 bytes with adjacent pairing:
-      b0=(v1<<4)|v0, b1=(v3<<4)|v2, b2=(v5<<4)|v4, b3=(v7<<4)|v6.
+    Each contiguous 8-value block [v0..v7] -> 4 bytes:
+      b0=(v4<<4)|v0, b1=(v5<<4)|v1, b2=(v6<<4)|v2, b3=(v7<<4)|v3.
 
-    This ensures each byte contains (lo_nibble, hi_nibble), so the kernel's
-    even/odd split cleanly separates lo64 from hi64.
+    This matches the 7-op in-kernel unpack sequence and avoids any v_perm.
     """
     flat = x_shuf_i8.contiguous().view(-1).to(torch.int16)
     assert flat.numel() % 8 == 0
     u = (flat & 0xF).to(torch.uint8).view(-1, 8)
     out = torch.empty((u.shape[0], 4), device=u.device, dtype=torch.uint8)
-    out[:, 0] = u[:, 0] | (u[:, 1] << 4)
-    out[:, 1] = u[:, 2] | (u[:, 3] << 4)
-    out[:, 2] = u[:, 4] | (u[:, 5] << 4)
-    out[:, 3] = u[:, 6] | (u[:, 7] << 4)
+    out[:, 0] = u[:, 0] | (u[:, 4] << 4)
+    out[:, 1] = u[:, 1] | (u[:, 5] << 4)
+    out[:, 2] = u[:, 2] | (u[:, 6] << 4)
+    out[:, 3] = u[:, 3] | (u[:, 7] << 4)
     return out.view(-1).to(torch.int8)
-
-
-def _inverse_interleave_k64_in_128(x: torch.Tensor) -> torch.Tensor:
-    """Inverse of 128-wise K-interleave (0,64,1,65,...).
-
-    Input/Output are in the same dtype/shape except the last dim must be K%128==0.
-    """
-    K = x.shape[-1]
-    if K % 128 != 0:
-        raise ValueError(f"requires K%128==0, got K={K}")
-    x128 = x.view(*x.shape[:-1], K // 128, 128)
-    low = x128[..., 0::2]
-    high = x128[..., 1::2]
-    y128 = torch.cat([low, high], dim=-1)
-    return y128.view(*x.shape)
-
-
-def _unshuffle_weight_base(x_shuf: torch.Tensor, layout=(16, 16), use_int4: bool = False) -> torch.Tensor:
-    """Inverse of tests.utils.shuffle_weight (without interleave)."""
-    x_type = x_shuf.dtype
-    if hasattr(torch, "float4_e2m1fn_x2") and x_type == torch.float4_e2m1fn_x2:
-        x_shuf = x_shuf.view(torch.uint8)
-
-    IN, IK = layout
-    BK = IK * 2
-    Kpack = 16 // x_shuf.element_size() if not use_int4 else 32
-    BN = IN
-
-    assert x_shuf.shape[-2] % BN == 0, f"{x_shuf.shape[-2]} % {BN} != 0"
-    assert x_shuf.shape[-1] % BK == 0, f"{x_shuf.shape[-1]} % {BK} != 0"
-
-    x_ = x_shuf
-    x_ = x_.view(-1, x_shuf.shape[-2] // BN, x_shuf.shape[-1] // BK, BK // Kpack, BN, Kpack)
-    x_ = x_.permute(0, 1, 4, 2, 3, 5).contiguous()
-    return x_.view(*x_shuf.shape).view(x_type)
-
-
-def build_a8w4smooth_moe_weight(
-    *,
-    experts: int,
-    rows_per_expert: int,
-    K: int,
-    device: torch.device,
-    seed: int = 0,
-    interleave_k64: bool = True,
-) -> Tuple[
-    torch.Tensor,  # w_packed_i8 (packed 4-bit bytes)
-    torch.Tensor,  # qscale_u8 (physical u8 5D)
-    torch.Tensor,  # qzero_u8  (physical u8 5D)
-    torch.Tensor,  # qscale_packed_i32 (physical packed4 i32 4D)
-    torch.Tensor,  # qzero_packed_i32  (physical packed4 i32 4D)
-    torch.Tensor,  # w_int8_unshuffled_flat [experts*rows_per_expert, K]
-]:
-    """Generate a8w4smooth weights + qparams in the agreed PDF physical layouts."""
-    if int(experts) <= 0 or int(rows_per_expert) <= 0:
-        raise ValueError(f"invalid experts/rows_per_expert: {experts=}, {rows_per_expert=}")
-    if K % 256 != 0:
-        raise ValueError(f"requires K%256==0, got K={K}")
-    if interleave_k64 and (K % 128 != 0):
-        raise ValueError(f"interleave_k64 requires K%128==0, got K={K}")
-    if rows_per_expert % 16 != 0:
-        raise ValueError(f"requires rows_per_expert%16==0, got rows_per_expert={rows_per_expert}")
-
-    torch.manual_seed(int(seed))
-
-    nb = rows_per_expert // 16
-    g256 = K // 256
-
-    u4_unshuf = torch.randint(0, 16, (experts, rows_per_expert, K), device=device, dtype=torch.uint8)
-    u4_unshuf_i8 = u4_unshuf.view(torch.int8)
-
-    u4_shuf_base_i8 = shuffle_weight(u4_unshuf_i8, use_int4=True, interleave_k64=False)
-    u4_shuf_base = (u4_shuf_base_i8.view(torch.uint8) & 0xF).contiguous()
-
-    u4_shuf_i8 = shuffle_weight(u4_unshuf_i8, use_int4=True, interleave_k64=bool(interleave_k64))
-    u4_shuf = (u4_shuf_i8.view(torch.uint8) & 0xF).contiguous()
-
-    qparam_shape = (experts, nb, g256, 16, 4)
-    qs_i32 = torch.randint(1, 3, qparam_shape, device=device, dtype=torch.int32)
-    qz_i32 = torch.randint(0, 16, qparam_shape, device=device, dtype=torch.int32)
-    qscale_u8 = qs_i32.to(torch.uint8)
-    qzero_u8 = qz_i32.to(torch.uint8)
-
-    u4_logical_view = u4_unshuf.view(experts, nb, 16, g256, 4, 64).to(torch.int32)
-    u4_logical_view = u4_logical_view.permute(0, 1, 3, 2, 4, 5)
-
-    u8_logical_view = (u4_logical_view * qs_i32.unsqueeze(-1)) + qz_i32.unsqueeze(-1)
-    u8_logical_view = torch.clamp(u8_logical_view, 0, 255).to(torch.uint8)
-
-    u8_unshuf = u8_logical_view.permute(0, 1, 3, 2, 4, 5).reshape(experts, rows_per_expert, K)
-
-    w_u8_shuf_i8 = shuffle_weight(u8_unshuf.view(torch.int8), use_int4=True, interleave_k64=bool(interleave_k64))
-    w_u8_shuf = w_u8_shuf_i8.view(torch.uint8)
-
-    w_i8_shuf = (w_u8_shuf ^ 0x80).view(torch.int8)
-
-    w_packed = _pack_shuffled_int8_to_packed_int4_no_perm(u4_shuf.reshape(-1, K).to(torch.int8))
-
-    qscale_i32 = (
-        qscale_u8[..., 0].to(torch.int32)
-        | (qscale_u8[..., 1].to(torch.int32) << 8)
-        | (qscale_u8[..., 2].to(torch.int32) << 16)
-        | (qscale_u8[..., 3].to(torch.int32) << 24)
-    )
-    qzero_i32 = (
-        qzero_u8[..., 0].to(torch.int32)
-        | (qzero_u8[..., 1].to(torch.int32) << 8)
-        | (qzero_u8[..., 2].to(torch.int32) << 16)
-        | (qzero_u8[..., 3].to(torch.int32) << 24)
-    )
-
-    w_i8_unshuffled_flat = (u8_unshuf.to(torch.int32) ^ 0x80).to(torch.int8).reshape(-1, K).contiguous()
-
-    w_packed_u8 = w_packed.view(torch.uint8).contiguous()
-    assert w_packed_u8.numel() == (experts * rows_per_expert * K) // 2
-    w_bytes_view = w_packed_u8.view(experts, rows_per_expert // 16, K // 128, 4, 16, 16)
-    lo = w_bytes_view & 0xF
-    hi = (w_bytes_view >> 4) & 0xF
-    w_u4_view = torch.stack([lo, hi], dim=-1).reshape(experts, rows_per_expert // 16, K // 128, 4, 16, 32)
-    assert tuple(w_u4_view.shape) == (experts, rows_per_expert // 16, K // 128, 4, 16, 32)
-
-    return w_packed, qscale_u8, qzero_u8, qscale_i32, qzero_i32, w_i8_unshuffled_flat
-
-
-def _a8w4smooth_packed_w_to_unshuffled_int8(
-    w_packed_i8: torch.Tensor,
-    qscale_kn: torch.Tensor,  # [K//block, N] int32
-    qzero_kn: torch.Tensor,   # [K//block, N] int32
-    *,
-    N: int,
-    K: int,
-    experts: int,
-    rows_per_expert: int,
-    scale_block_k: int = 64,
-    layout=(16, 16),
-) -> torch.Tensor:
-    """Rebuild unshuffled int8 weights from packed 4-bit + qscale/qzero.
-
-    Dequant contract (byte-wise): int8_bits = (u4 * qscale + qzero) ^ 0x80
-    """
-
-    def _unshuffle_weight(x_shuf: torch.Tensor, layout=(16, 16), use_int4: bool = False) -> torch.Tensor:
-        x_type = x_shuf.dtype
-        if hasattr(torch, "float4_e2m1fn_x2") and x_type == torch.float4_e2m1fn_x2:
-            x_shuf = x_shuf.view(torch.uint8)
-
-        IN, IK = layout
-        BK = IK * 2
-        Kpack = 16 // x_shuf.element_size() if not use_int4 else 32
-        BN = IN
-
-        assert x_shuf.shape[-2] % BN == 0, f"{x_shuf.shape[-2]} % {BN} != 0"
-        assert x_shuf.shape[-1] % BK == 0, f"{x_shuf.shape[-1]} % {BK} != 0"
-
-        x_ = x_shuf
-        x_ = x_.view(-1, x_shuf.shape[-2] // BN, x_shuf.shape[-1] // BK, BK // Kpack, BN, Kpack)
-        x_ = x_.permute(0, 1, 4, 2, 3, 5).contiguous()
-        x_ = x_.view(*x_shuf.shape).view(x_type)
-        return x_
-
-    def _unpack_uint4_from_packed_int4_no_perm(packed_i8: torch.Tensor) -> torch.Tensor:
-        p = packed_i8.view(torch.uint8).contiguous().view(-1, 4)
-        out = torch.empty((p.shape[0], 8), device=p.device, dtype=torch.uint8)
-
-        b0, b1, b2, b3 = p[:, 0], p[:, 1], p[:, 2], p[:, 3]
-        out[:, 0] = b0 & 0xF
-        out[:, 1] = b0 >> 4
-        out[:, 2] = b1 & 0xF
-        out[:, 3] = b1 >> 4
-        out[:, 4] = b2 & 0xF
-        out[:, 5] = b2 >> 4
-        out[:, 6] = b3 & 0xF
-        out[:, 7] = b3 >> 4
-
-        return out.view(-1)
-
-    assert int(experts) > 0 and int(rows_per_expert) > 0
-    assert int(N) == int(experts) * int(rows_per_expert), f"N={N}, experts={experts}, rows_per_expert={rows_per_expert}"
-    assert K % scale_block_k == 0
-    num_blocks = K // scale_block_k
-    assert tuple(qscale_kn.shape) == (num_blocks, N), f"qscale_kn.shape={tuple(qscale_kn.shape)}"
-    assert tuple(qzero_kn.shape) == (num_blocks, N), f"qzero_kn.shape={tuple(qzero_kn.shape)}"
-
-    w_u4 = _unpack_uint4_from_packed_int4_no_perm(w_packed_i8).view(N, K).to(torch.int32)
-    w_u4 = w_u4.view(N, num_blocks, scale_block_k)
-
-    qs = qscale_kn.t().contiguous().to(torch.int32)
-    qz = qzero_kn.t().contiguous().to(torch.int32)
-
-    u8 = w_u4 * qs.unsqueeze(-1) + qz.unsqueeze(-1)
-    u8 = u8.clamp(0, 255).to(torch.uint8)
-    w_i8_shuf = (u8 ^ 0x80).view(torch.int8).view(experts, rows_per_expert, K)
-
-    w_i8 = _unshuffle_weight(w_i8_shuf, layout=layout, use_int4=False)
-    return w_i8.view(N, K)
 
 # Optional: use aiter's exact routing/sorting implementation (matches `aiter/op_tests/test_moe_2stage.py`).
 # Some environments ship aiter python but miss required JIT .so dependencies; we fall back gracefully.
@@ -609,15 +412,14 @@ def run_moe_stage1(
     #     f"{' (even)' if even_dispatch else ' (random)'}"
     # )
 
-    if in_dtype not in ("fp8", "fp16", "bf16", "int8", "int8smooth", "int4", "int4_bf16", "fp4", "a8w4smooth"):
+    if in_dtype not in ("fp8", "fp16", "bf16", "int8", "int8smooth", "int4", "int4_bf16", "fp4", "a8w4"):
         raise ValueError(
-            f"in_dtype must be one of ('fp8','fp16','bf16','int8','int8smooth','int4','int4_bf16','fp4','a8w4smooth'), got {in_dtype!r}"
+            f"in_dtype must be one of ('fp8','fp16','bf16','int8','int8smooth','int4','int4_bf16','fp4','a8w4'), got {in_dtype!r}"
         )
     is_int4 = in_dtype == "int4"
     is_int4_bf16 = in_dtype == "int4_bf16"  # W4A16: bf16 activations, packed int4 weights
-    is_a8w4smooth = in_dtype == "a8w4smooth"
-    w_is_int4 = is_int4 or is_int4_bf16 or is_a8w4smooth
-    is_int8 = in_dtype in ("int8", "int8smooth", "int4", "a8w4smooth")
+    w_is_int4 = is_int4 or is_int4_bf16
+    is_int8 = in_dtype in ("int8", "int8smooth", "int4")
     is_int8smooth = in_dtype == "int8smooth"
     is_fp4 = in_dtype == "fp4"
     is_a8w4 = in_dtype == "a8w4"            # MX-FP8 activation + MX-FP4 weight
@@ -687,14 +489,6 @@ def run_moe_stage1(
         w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.int8, dtypeMax=7)
         w2_q, _scale_w2_unused = pertoken_quant(w2_fp32, quant_dtype=torch.int8, dtypeMax=7)
         scale_x = None
-    elif in_dtype == "a8w4smooth":
-        # W4A8 smooth: X is int8 repeated to [topk, tokens, model_dim] (slot-major).
-        x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=torch.int8)
-        x_q = x_q.unsqueeze(0).expand(topk, tokens, model_dim).contiguous()
-        scale_x = scale_x.unsqueeze(0).expand(topk, tokens, 1).contiguous()
-        # Weights are generated directly via build_a8w4smooth_moe_weight (PDF packed4 layout).
-        w1_q, scale_w1 = None, None
-        w2_q = None
     else:
         # W4A8: X is int8, W is int4 packed (host packs from int8 values in [-8,7]).
         x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=torch.int8)
@@ -744,35 +538,6 @@ def run_moe_stage1(
         # mxfp8 detection needs dtype=float8_e4m3fn.  The kernel itself always reads uint8.
         x_q_ref = x_q
         x_q = x_q.view(torch.uint8).contiguous().view(tokens, -1)
-    elif is_a8w4smooth:
-        # ---- A8W4SMOOTH (PDF packed4 layout): build weights + qparams directly. ----
-        a8w4smooth_qparam_format = os.environ.get("FLIR_A8W4SMOOTH_QPARAM_FORMAT", "packed4").strip().lower()
-        a8w4smooth_interleave = os.environ.get("FLIR_A8W4SMOOTH_INTERLEAVE_K64", "1").strip().lower() not in ("0", "false", "no")
-        if a8w4smooth_qparam_format != "packed4":
-            raise ValueError(f"a8w4smooth only supports FLIR_A8W4SMOOTH_QPARAM_FORMAT=packed4, got {a8w4smooth_qparam_format!r}")
-        (
-            w_packed,
-            qscale_u8_w1,
-            qzero_u8_w1,
-            qscale_i32_w1,
-            qzero_i32_w1,
-            w1_int8_unshuffled_flat,
-        ) = build_a8w4smooth_moe_weight(
-            experts=experts,
-            rows_per_expert=(2 * inter_dim),
-            K=model_dim,
-            device=device,
-            seed=seed + 11,
-            interleave_k64=bool(a8w4smooth_interleave),
-        )
-        w_kernel = w_packed.contiguous()
-        qscale_w1_1d = qscale_i32_w1.contiguous().view(-1)
-        qzero_w1_1d = qzero_i32_w1.contiguous().view(-1)
-        scale_w1_1d = torch.full((experts * (2 * inter_dim),), 1e-3, device=device, dtype=torch.float32)
-        scale_w1_flat = scale_w1_1d.view(experts * (2 * inter_dim), 1)
-        w1_q_flat = w1_int8_unshuffled_flat
-        x_q = x_q.contiguous().view(tokens * topk, model_dim)
-        scale_x_1d = scale_x.view(-1).contiguous()
     else:
         w1_shuffled = shuffle_weight(w1_q)
         w2_shuffled = shuffle_weight(w2_q) if in_dtype == "fp8" else None
@@ -806,9 +571,6 @@ def run_moe_stage1(
             scale_w1_1d = torch.empty((0,), device=device, dtype=torch.float32)
         else:
             scale_w1_1d = scale_w1_flat.view(-1).contiguous()
-        # a8w4smooth qparam buffers (zero-pad placeholder for non-a8w4smooth dtypes; kernel ignores them).
-        qscale_w1_1d = torch.zeros((1,), device=device, dtype=torch.int32)
-        qzero_w1_1d = torch.zeros((1,), device=device, dtype=torch.int32)
     sorted_weights_1d = sorted_weights.contiguous().view(-1)  # [sorted_size]
 
     # Output: normal=[tokens, topk, inter_dim] f16/bf16, split-K=[tokens*topk, 2*inter_dim] f32
@@ -848,7 +610,7 @@ def run_moe_stage1(
 
         compiled_exe = flyc.compile(exe, *_s1_args_fp4(out, x_q, w_kernel, scale_x_1d, scale_w1_1d,
                                                         sorted_token_ids, sorted_expert_ids, sorted_weights_1d))
-        def launch(o, x, w, sx, sw, qs, qz, st, eids, sw_sorted):
+        def launch(o, x, w, sx, sw, st, eids, sw_sorted):
             compiled_exe(*_s1_args_fp4(o, x, w, sx, sw, st, eids, sw_sorted))
     else:
         exe = compile_moe_gemm1(
@@ -868,18 +630,17 @@ def run_moe_stage1(
             k_batch=k_batch,
         )
 
-        def _s1_args(o, x, w, sx, sw, qs, qz, st, eids, sw_sorted):
-            return (o, x, w, sx, sw, qs, qz, st, eids, sw_sorted,
+        def _s1_args(o, x, w, sx, sw, st, eids, sw_sorted):
+            return (o, x, w, sx, sw, st, eids, sw_sorted,
                     num_valid_ids, tokens, inter_dim, model_dim, int(blocks),
                     torch.cuda.current_stream())
 
         compiled_exe = flyc.compile(exe, *_s1_args(out, x_q, w_kernel, scale_x_1d, scale_w1_1d,
-                                                    qscale_w1_1d, qzero_w1_1d,
                                                     sorted_token_ids, sorted_expert_ids, sorted_weights_1d))
-        def launch(o, x, w, sx, sw, qs, qz, st, eids, sw_sorted):
+        def launch(o, x, w, sx, sw, st, eids, sw_sorted):
             if _is_splitk:
                 o.zero_()
-            compiled_exe(*_s1_args(o, x, w, sx, sw, qs, qz, st, eids, sw_sorted))
+            compiled_exe(*_s1_args(o, x, w, sx, sw, st, eids, sw_sorted))
 
     _, us = run_perftest(
         launch,
@@ -888,8 +649,6 @@ def run_moe_stage1(
         w_kernel,
         scale_x_1d,
         scale_w1_1d,
-        qscale_w1_1d,
-        qzero_w1_1d,
         sorted_token_ids,
         sorted_expert_ids,
         sorted_weights_1d,
@@ -908,7 +667,7 @@ def run_moe_stage1(
         out = (torch.nn.functional.silu(gate) * up).to(_out_torch_dtype).view(tokens, topk, inter_dim)
 
     if not bool(skip_ref):
-        if is_int8smooth or is_a8w4smooth:
+        if is_int8smooth:
             # x_q is slot-major [topk, tokens, K]; convert to [tokens, topk, K] for ref.
             x_ref = x_q.view(topk, tokens, model_dim).permute(1, 0, 2).contiguous()
             sx_ref = scale_x.view(topk, tokens, 1).permute(1, 0, 2).contiguous()
@@ -918,8 +677,8 @@ def run_moe_stage1(
                 inter_dim=inter_dim, doweight_stage1=doweight_stage1,
                 group_size=group_size, scale_w1_groups=scale_w1_groups,
             )
-            rtol = 0.5 if (is_int4 or is_int4_bf16 or is_a8w4smooth) else 0.25
-            atol = 0.5 if (is_int4 or is_int4_bf16 or is_a8w4smooth) else 0.25
+            rtol = 0.5 if (is_int4 or is_int4_bf16) else 0.25
+            atol = 0.5 if (is_int4 or is_int4_bf16) else 0.25
             assert verify_output(out.to(torch.float32), ref, rtol=rtol, atol=atol)
         else:
             # Use original-dtype view for fp4/a8w4 so `_detect_scale_kind` picks the right branch.
@@ -949,9 +708,14 @@ def run_moe_stage1(
     # Only activated experts load weights/scales: E_active = min(E, tokens * topk).
     active_experts = min(experts, tokens * topk)
     is_f16_or_bf16_s1 = is_int4_bf16 or in_dtype in ("bf16", "fp16")
+    # Per-element bits for X and W (W1 total cols = 2*inter_dim).
+    #   fp4:   x=4b,  w=4b      (both MX-FP4)
+    #   a8w4:  x=8b,  w=4b      (MX-FP8 act + MX-FP4 weight)
+    #   f16/bf16/int4_bf16: x=16b
+    #   int4/int8/fp8 etc.:     x=8b, w packed to 4b when W4A*.
     x_bits = 4 if is_fp4 else (16 if is_f16_or_bf16_s1 else 8)
-    w_bits = 4 if (is_fp4_path or use_packed_int4 or is_a8w4smooth) else (16 if is_f16_or_bf16_s1 else 8)
-    x_rows = tokens * topk if (is_int8smooth or is_a8w4smooth) else tokens
+    w_bits = 4 if (is_fp4_path or use_packed_int4) else (16 if is_f16_or_bf16_s1 else 8)
+    x_rows = tokens * topk if is_int8smooth else tokens
     x_elems = x_rows * model_dim
     w_elems = active_experts * (2 * inter_dim) * model_dim
 
@@ -962,6 +726,7 @@ def run_moe_stage1(
 
     # scale bytes
     if is_fp4_path:
+        # Per-1x32 E8M0 scale: 1 byte per 32 logical elements for both x and w1.
         bytes_moved += x_elems // 32
         bytes_moved += w_elems // 32
     elif use_groupwise_scale:
@@ -1210,15 +975,14 @@ def run_moe_stage2(
     #     f"{' (even)' if even_dispatch else ' (random)'}"
     # )
 
-    if in_dtype not in ("fp8", "fp16", "bf16", "int8", "int8smooth", "int4", "int4_bf16", "fp4", "a8w4smooth"):
+    if in_dtype not in ("fp8", "fp16", "bf16", "int8", "int8smooth", "int4", "int4_bf16", "fp4", "a8w4"):
         raise ValueError(
-            f"in_dtype must be one of ('fp8','fp16','bf16','int8','int8smooth','int4','int4_bf16','fp4','a8w4smooth'), got {in_dtype!r}"
+            f"in_dtype must be one of ('fp8','fp16','bf16','int8','int8smooth','int4','int4_bf16','fp4','a8w4'), got {in_dtype!r}"
         )
     is_int4 = in_dtype == "int4"
     is_int4_bf16 = in_dtype == "int4_bf16"  # W4A16: bf16 activations, packed int4 weights
-    is_a8w4smooth = in_dtype == "a8w4smooth"
-    w_is_int4 = is_int4 or is_int4_bf16 or is_a8w4smooth
-    is_int8 = in_dtype in ("int8", "int8smooth", "int4", "a8w4smooth")
+    w_is_int4 = is_int4 or is_int4_bf16
+    is_int8 = in_dtype in ("int8", "int8smooth", "int4")
     is_int8smooth = in_dtype == "int8smooth"
     is_fp4 = in_dtype == "fp4"
     is_a8w4 = in_dtype == "a8w4"  # MX-FP8 activation + MX-FP4 weight
@@ -1261,12 +1025,6 @@ def run_moe_stage2(
         w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.int8, dtypeMax=7)
         w2_q, scale_w2 = pertoken_quant(w2_fp32, quant_dtype=torch.int8, dtypeMax=7)
         scale_x = None
-    elif in_dtype == "a8w4smooth":
-        # W4A8 zero-point: A2 is int8, W2 is 4-bit packed with per-block qscale/qzero.
-        x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=torch.int8)
-        # Weights are generated directly via build_a8w4smooth_moe_weight (PDF packed4 layout).
-        w1_q, scale_w1 = None, None
-        w2_q, scale_w2 = None, None
     elif in_dtype in ("fp4", "a8w4"):
         from tests.kernels.utils import fp4_utils
         if fp4_utils is None:
@@ -1344,54 +1102,6 @@ def run_moe_stage2(
         w1_shuffled = None
         w2_shuffled_orig = None
         sorted_weights_1d = sorted_weights.contiguous().view(-1)
-        # a8w4smooth qparam placeholders (kernel ignores; needed only to satisfy launch signature).
-        qscale_w2_1d = torch.zeros((1,), device=device, dtype=torch.int32)
-        qzero_w2_1d = torch.zeros((1,), device=device, dtype=torch.int32)
-    elif is_a8w4smooth:
-        # ---- A8W4SMOOTH (PDF packed4 layout): build weights + qparams directly. ----
-        a8w4smooth_qparam_format = os.environ.get("FLIR_A8W4SMOOTH_QPARAM_FORMAT", "packed4").strip().lower()
-        a8w4smooth_interleave = os.environ.get("FLIR_A8W4SMOOTH_INTERLEAVE_K64", "1").strip().lower() not in ("0", "false", "no")
-        if a8w4smooth_qparam_format != "packed4":
-            raise ValueError(f"a8w4smooth only supports FLIR_A8W4SMOOTH_QPARAM_FORMAT=packed4, got {a8w4smooth_qparam_format!r}")
-        (
-            w2_packed,
-            qscale_u8_w2,
-            qzero_u8_w2,
-            qscale_i32_w2,
-            qzero_i32_w2,
-            w2_int8_unshuffled_flat,
-        ) = build_a8w4smooth_moe_weight(
-            experts=experts,
-            rows_per_expert=model_dim,
-            K=inter_dim,
-            device=device,
-            seed=seed + 22,
-            interleave_k64=bool(a8w4smooth_interleave),
-        )
-        w2_kernel = w2_packed.contiguous()
-        qscale_w2_1d = qscale_i32_w2.contiguous().view(-1)
-        qzero_w2_1d = qzero_i32_w2.contiguous().view(-1)
-        w2_scale_1d = torch.full((experts * model_dim,), 1e-3, device=device, dtype=torch.float32)
-        scale_w2 = w2_scale_1d.view(experts, model_dim, 1)
-        # a8w4smooth uses logical int8 unshuffled weights for the torch ref path.
-        w2_q_ref = w2_int8_unshuffled_flat.view(experts, model_dim, inter_dim)
-
-        # A2 must be supplied (a8w4smooth doesn't synthesize a2 from torch_moe_gemm1 here).
-        if a2_fp8_in is None or a2_scale_in is None:
-            raise RuntimeError(
-                "run_moe_stage2(in_dtype='a8w4smooth') requires a2_fp8_in and a2_scale_in "
-                "(stage2 does not synthesize int8 A2 internally for this dtype)."
-            )
-        a2_q = a2_fp8_in
-        a2_scale = a2_scale_in
-        if a2_scale is None:
-            a2_scale_1d = torch.empty((0,), device=device, dtype=torch.float32)
-        else:
-            a2_scale_1d = a2_scale.view(-1).contiguous()
-        sorted_weights_1d = sorted_weights.contiguous().view(-1)
-        w1_shuffled = None
-        w2_shuffled = None
-        scale_w2_flat = scale_w2.view(experts * model_dim, 1)
     else:
         # Preshuffle weights on the *unpacked* tensor.
         w1_shuffled = shuffle_weight(w1_q)
@@ -1467,9 +1177,6 @@ def run_moe_stage2(
         else:
             w2_scale_1d = scale_w2_flat.view(-1).contiguous()  # [experts*model_dim]
         sorted_weights_1d = sorted_weights.contiguous().view(-1)  # [sorted_size]
-        # a8w4smooth qparam buffers (zero-pad placeholder for non-a8w4smooth dtypes; kernel ignores them).
-        qscale_w2_1d = torch.zeros((1,), device=device, dtype=torch.int32)
-        qzero_w2_1d = torch.zeros((1,), device=device, dtype=torch.int32)
 
     out_s = str(out_dtype).strip().lower()
     if out_s in ("f16", "fp16", "half"):
@@ -1517,7 +1224,7 @@ def run_moe_stage2(
                 a2_scale_1d, w2_scale_1d, sorted_token_ids,
                 sorted_expert_ids, sorted_weights_1d))
 
-            def launch(o, x, w, sx, sw, qs, qz, st, eids, sw_sorted):
+            def launch(o, x, w, sx, sw, st, eids, sw_sorted):
                 intermediate = torch.empty(
                     tokens * topk, model_dim, device=device, dtype=torch.float16
                 )
@@ -1535,7 +1242,7 @@ def run_moe_stage2(
                 a2_scale_1d, w2_scale_1d, sorted_token_ids,
                 sorted_expert_ids, sorted_weights_1d))
 
-            def launch(o, x, w, sx, sw, qs, qz, st, eids, sw_sorted):
+            def launch(o, x, w, sx, sw, st, eids, sw_sorted):
                 compiled_exe(*_s2_args_fp4(o, x, w, sx, sw, st, eids, sw_sorted))
     else:
         exe = compile_fn(
@@ -1554,9 +1261,9 @@ def run_moe_stage2(
         )
     is_reduce_exe = (getattr(exe, "mode", None) == MoeGemm2Mode.REDUCE) or bool(use_reduce)
 
-    if not is_fp4:
-        def _s2_args_atomic(o, x, w, sx, sw, qs, qz, st, eids, sw_sorted):
-            return (o, x, w, sx, sw, qs, qz, st, eids, sw_sorted,
+    if not is_fp4_path:
+        def _s2_args_atomic(o, x, w, sx, sw, st, eids, sw_sorted):
+            return (o, x, w, sx, sw, st, eids, sw_sorted,
                     num_valid_ids, tokens, model_dim, inter_dim, int(blocks),
                     torch.cuda.current_stream())
 
@@ -1566,36 +1273,27 @@ def run_moe_stage2(
         if not is_reduce_exe and hasattr(flyc, 'compile'):
             compiled_exe = flyc.compile(exe, *_s2_args_atomic(
                 out_perf, a2_q.view(-1), w2_kernel.view(-1),
-                a2_scale_1d, w2_scale_1d, qscale_w2_1d, qzero_w2_1d,
-                sorted_token_ids, sorted_expert_ids, sorted_weights_1d))
+                a2_scale_1d, w2_scale_1d, sorted_token_ids,
+                sorted_expert_ids, sorted_weights_1d))
         elif not is_reduce_exe:
             compiled_exe = exe
 
-        def launch(o, x, w, sx, sw, qs, qz, st, eids, sw_sorted):
+        def launch(o, x, w, sx, sw, st, eids, sw_sorted):
             if is_reduce_exe:
                 stream = torch.cuda.current_stream()
-                topk_ids_arg = None
-                expert_mask_arg = None
+                valid_mask = None
                 if bool(use_valid_mask):
-                    # Pass raw topk_ids + a synthetic all-ones expert_mask so the
-                    # kernel-side `expert_mask[topk_ids[t,k]] != 0` lookup matches
-                    # the prior `get_topk_valid_mask(topk_ids, expert_mask=None)`
-                    # behavior (every expert id is valid).
-                    topk_ids_arg = topk_ids.contiguous().to(torch.int32)
-                    n_experts_local = int(topk_ids.max().item()) + 1 if topk_ids.numel() > 0 else 1
-                    expert_mask_arg = torch.ones(
-                        (n_experts_local,), device=o.device, dtype=torch.int32
-                    )
+                    valid_mask = get_topk_valid_mask(topk_ids, expert_mask=None).contiguous()
                 exe(
-                    o, x, w, sx, sw, qs, qz, st, eids, sw_sorted,
+                    o, x, w, sx, sw, st, eids, sw_sorted,
                     num_valid_ids, tokens, model_dim, inter_dim, int(blocks),
-                    topk_ids=topk_ids_arg, expert_mask=expert_mask_arg, stream_ptr=stream,
+                    valid_mask, stream,
                 )
             else:
                 if hasattr(flyc, 'compile'):
-                    compiled_exe(*_s2_args_atomic(o, x, w, sx, sw, qs, qz, st, eids, sw_sorted))
+                    compiled_exe(*_s2_args_atomic(o, x, w, sx, sw, st, eids, sw_sorted))
                 else:
-                    exe(*_s2_args_atomic(o, x, w, sx, sw, qs, qz, st, eids, sw_sorted))
+                    exe(*_s2_args_atomic(o, x, w, sx, sw, st, eids, sw_sorted))
  
     # Flat byte view of A2 consumed by the kernel.  For the FP4/A8W4 path we
     # already built a dedicated uint8 `a2_q_kernel`; for the other paths the
@@ -1612,8 +1310,6 @@ def run_moe_stage2(
         w2_kernel.view(-1),
         a2_scale_1d,
         w2_scale_1d,
-        qscale_w2_1d,
-        qzero_w2_1d,
         sorted_token_ids,
         sorted_expert_ids,
         sorted_weights_1d,
@@ -1631,8 +1327,6 @@ def run_moe_stage2(
         w2_kernel.view(-1),
         a2_scale_1d,
         w2_scale_1d,
-        qscale_w2_1d,
-        qzero_w2_1d,
         sorted_token_ids,
         sorted_expert_ids,
         sorted_weights_1d,
@@ -1642,7 +1336,7 @@ def run_moe_stage2(
     if not bool(skip_ref):
         ref2 = torch_moe_gemm2(
             a2_q,
-            (w2_q_ref if is_a8w4smooth else w2_q),
+            w2_q,
             a2_scale,
             scale_w2,
             topk_ids.to(torch.int64),
@@ -1664,6 +1358,12 @@ def run_moe_stage2(
     # Only activated experts load weights/scales: E_active = min(E, tokens * topk).
     active_experts = min(experts, tokens * topk)
 
+    # One row per in_dtype: (a_bits, w_bits, a_scale_mode, w_scale_mode).
+    #   a/w *_bits*:      element width in bits for a2 / w2 bytes moved.
+    #   a_scale_mode:     "none" | "per_token_f32" | "per_block_e8m0_32"
+    #   w_scale_mode:     "none" | "per_row_f32"   | "per_block_e8m0_32" | "groupwise"
+    # 'groupwise' is the int4_bf16 + group_size>0 path; it is handled as a
+    # one-off override below because its W2 scale element bytes is configurable.
     _BYTES_SPEC = {
         "fp8":        ( 8,  8, "per_token_f32", "per_row_f32"),
         "fp16":       (16, 16, "none",          "none"),
@@ -1674,7 +1374,6 @@ def run_moe_stage2(
         "int4_bf16":  (16,  4, "none",          "per_row_f32"),
         "fp4":        ( 4,  4, "per_block_e8m0_32", "per_block_e8m0_32"),
         "a8w4":       ( 8,  4, "per_block_e8m0_32", "per_block_e8m0_32"),
-        "a8w4smooth": ( 8,  4, "per_token_f32", "per_row_f32"),
     }
     a_bits, w_bits, a_scale_mode, w_scale_mode = _BYTES_SPEC[in_dtype]
     if use_groupwise_scale:
@@ -1823,7 +1522,6 @@ def run_moe_stage2(
 @pytest.mark.parametrize("in_dtype", [
     "fp8", "fp16", "bf16", "int8", "int8smooth", "int4", "int4_bf16",
     pytest.param("fp4", marks=pytest.mark.skipif("gfx95" not in ARCH, reason="FP4 requires gfx950+")),
-    "a8w4smooth",
 ])
 @pytest.mark.parametrize("out_dtype", ["f16", "bf16", "f32"], ids=["out_f16", "out_bf16", "out_f32"])
 @pytest.mark.parametrize("use_reduce", [False, True], ids=["atomic", "reduce"])
@@ -1886,13 +1584,6 @@ def test_moe_gemm_2stage(
             pytest.skip(f"{in_dtype} stage2 requires inter_dim >= 256 and tile_k2 >= 256, got {inter_dim}, {tile_k2}")
         if tile_m < 32 or tile_m % 32 != 0:
             pytest.skip(f"{in_dtype} requires tile_m % 32 == 0 and tile_m >= 32, got {tile_m}")
-    if in_dtype == "a8w4smooth":
-        if out_s not in ("f16", "fp16", "half"):
-            pytest.skip("a8w4smooth only supports f16 output")
-        if group_size > 0:
-            pytest.skip("a8w4smooth does not support groupwise scale")
-        if model_dim % 256 != 0 or inter_dim % 256 != 0:
-            pytest.skip(f"a8w4smooth requires model_dim%256==0 and inter_dim%256==0, got {model_dim}, {inter_dim}")
     device = torch.device("cuda")
     # torch.manual_seed(int(seed))
 
@@ -1984,9 +1675,6 @@ def test_moe_gemm_2stage(
         # W4A16: A2 is bf16 (no quant)
         a2_q = out1_fp16.to(torch.bfloat16)
         a2_scale = None
-    elif in_dtype == "a8w4smooth":
-        out1_fp32 = out1_fp16.to(torch.float32)
-        a2_q, a2_scale = pertoken_quant(out1_fp32, quant_dtype=torch.int8)
     else:
         out1_fp32 = out1_fp16.to(torch.float32)
         if in_dtype == "int8smooth":
@@ -2373,352 +2061,6 @@ def test_moe_stage2_standalone(
     )
 
 
-# ---------------------------------------------------------------------------
-# a8w4smooth dedicated runner
-# ---------------------------------------------------------------------------
-def run_moe_stage1_a8w4smooth(
-    *,
-    tokens: int,
-    model_dim: int,
-    inter_dim: int,
-    experts: int,
-    topk: int,
-    tile_m: int,
-    tile_n: int,
-    tile_k: int,
-    seed: int = 0,
-    num_iters: int = 5,
-    num_warmup: int = 2,
-    moe_sort_mode: Optional[str] = None,
-    skip_ref: bool = False,
-):
-    """Stage1 a8w4smooth runner: W4A8 + smoothquant + zero-point dequant."""
-    if model_dim % 256 != 0:
-        raise ValueError(f"a8w4smooth requires model_dim%256==0, got {model_dim}")
-    if int(tile_k) not in (128, 256):
-        raise ValueError(f"a8w4smooth requires tile_k in (128,256), got {tile_k}")
-
-    os.environ.setdefault("FLIR_A8W4SMOOTH_QPARAM_FORMAT", "packed4")
-    os.environ.setdefault("FLIR_A8W4SMOOTH_INTERLEAVE_K64", "1")
-
-    device = torch.device("cuda")
-    torch.manual_seed(int(seed))
-
-    # --- Activations (int8, smooth-expanded to [tokens*topk, K]) ---
-    x_fp32 = torch.randn(tokens, model_dim, device=device, dtype=torch.float32)
-
-    # Routing
-    gating = torch.randn(tokens, experts, device=device, dtype=torch.float32)
-    topk_weights, topk_ids = torch.topk(torch.softmax(gating, dim=-1), k=int(topk), dim=-1)
-    topk_weights = topk_weights.to(torch.float32).contiguous()
-    topk_ids = topk_ids.to(torch.int32).contiguous()
-
-    routing = build_routing_buffers(
-        topk_ids=topk_ids,
-        topk_weights=topk_weights,
-        experts=int(experts),
-        model_dim=int(model_dim),
-        tile_m=int(tile_m),
-        moe_sort_mode=moe_sort_mode,
-    )
-    sorted_token_ids, sorted_weights, sorted_expert_ids, num_valid_ids, sorted_size, blocks = routing
-
-    # smoothquant: per-expert smooth scale, then dynamic quant to int8 per (t,slot).
-    smooth_scale = (0.75 + 0.5 * torch.rand((experts, model_dim), device=device, dtype=torch.float32))
-    x_route = x_fp32[:, None, :].expand(tokens, topk, model_dim)
-    x_route = x_route * smooth_scale[topk_ids.to(torch.int64)]
-    amax = torch.amax(torch.abs(x_route), dim=-1, keepdim=True)
-    scale_x = amax / 127.0
-    scale_x[scale_x == 0] = 1.0
-    x_q = (x_route / scale_x).to(torch.int8)
-    x_q = x_q.permute(1, 0, 2).contiguous()
-    scale_x = scale_x.permute(1, 0, 2).contiguous()
-    x_q_flat = x_q.view(tokens * topk, model_dim)
-    scale_x_1d = scale_x.view(-1).contiguous()
-
-    # --- Weights (a8w4smooth packed4) ---
-    rows_per_expert = 2 * inter_dim
-    (
-        w_packed_i8,
-        qscale_u8,
-        qzero_u8,
-        qscale_i32,
-        qzero_i32,
-        w_i8_unshuffled_flat,
-    ) = build_a8w4smooth_moe_weight(
-        experts=int(experts),
-        rows_per_expert=int(rows_per_expert),
-        K=int(model_dim),
-        device=device,
-        seed=int(seed),
-        interleave_k64=True,
-    )
-
-    # Kernel buffers (flat 1D as required).
-    w_kernel = w_packed_i8.view(-1).contiguous()
-    qs_1d = qscale_i32.view(-1).contiguous()
-    qz_1d = qzero_i32.view(-1).contiguous()
-    sw_1d = sorted_weights.contiguous().view(-1)
-    # scale_w IS read by the a8w4smooth path (per-row f32). Match FlyDSL: 1e-3 constant.
-    scale_w_1d = torch.full((experts * rows_per_expert,), 1e-3, device=device, dtype=torch.float32)
-    scale_w1_flat_ref = scale_w_1d.view(experts * rows_per_expert, 1)
-
-    out = torch.empty((tokens, topk, inter_dim), device=device, dtype=torch.float16)
-
-    exe = compile_moe_gemm1(
-        model_dim=int(model_dim),
-        inter_dim=int(inter_dim),
-        experts=int(experts),
-        topk=int(topk),
-        in_dtype="a8w4smooth",
-        tile_m=int(tile_m),
-        tile_n=int(tile_n),
-        tile_k=int(tile_k),
-        doweight_stage1=False,
-        use_cshuffle_epilog=False,
-        out_dtype="f16",
-    )
-
-    def _args(o, x, w, sx, sw, qs, qz, st, eids, sw_sorted):
-        return (o, x, w, sx, sw, qs, qz, st, eids, sw_sorted,
-                num_valid_ids, tokens, inter_dim, model_dim, int(blocks),
-                torch.cuda.current_stream())
-
-    compiled_exe = flyc.compile(exe, *_args(out, x_q_flat, w_kernel, scale_x_1d, scale_w_1d,
-                                             qs_1d, qz_1d,
-                                             sorted_token_ids, sorted_expert_ids, sw_1d))
-
-    def launch(o, x, w, sx, sw, qs, qz, st, eids, sw_sorted):
-        compiled_exe(*_args(o, x, w, sx, sw, qs, qz, st, eids, sw_sorted))
-
-    _, us = run_perftest(
-        launch, out, x_q_flat, w_kernel, scale_x_1d, scale_w_1d, qs_1d, qz_1d,
-        sorted_token_ids, sorted_expert_ids, sw_1d,
-        num_iters=int(num_iters), num_warmup=int(num_warmup),
-    )
-    torch.cuda.synchronize()
-
-    if not bool(skip_ref):
-        # Reference path: use w_i8_unshuffled_flat returned directly from build_a8w4smooth_moe_weight
-        # (matching FlyDSL line 704: w1_q_flat_ref = w1_int8_unshuffled_flat). The round-trip
-        # helper _a8w4smooth_packed_w_to_unshuffled_int8 does not invert the K64 interleave.
-        K = model_dim
-        # x_q is slot-major [topk, tokens, K]; ref expects [tokens, topk, K]
-        x_ref = x_q.view(topk, tokens, model_dim).permute(1, 0, 2).contiguous()
-        sx_ref = scale_x.view(topk, tokens, 1).permute(1, 0, 2).contiguous()
-        ref = torch_moe_gemm1(
-            x_ref,
-            w_i8_unshuffled_flat.view(experts * rows_per_expert, K).to(torch.float32),
-            sx_ref,
-            scale_w1_flat_ref,
-            topk_ids.to(torch.int64),
-            topk_weights,
-            inter_dim=inter_dim, doweight_stage1=False,
-        )
-        diff = (out.to(torch.float32) - ref)
-        print(f"[DEBUG a8w4smooth] out shape={out.shape}, ref shape={ref.shape}")
-        print(f"[DEBUG a8w4smooth] out[0,0,:16]={[f'{v:.4f}' for v in out[0,0,:16].tolist()]}")
-        print(f"[DEBUG a8w4smooth] ref[0,0,:16]={[f'{v:.4f}' for v in ref[0,0,:16].tolist()]}")
-        print(f"[DEBUG a8w4smooth] diff[0,0,:16]={[f'{v:.4f}' for v in diff[0,0,:16].tolist()]}")
-        assert verify_output(out.to(torch.float32), ref, rtol=0.5, atol=0.5)
-
-    flops = 2 * tokens * topk * (2 * inter_dim) * model_dim
-    tflops = flops / (us / 1e6) / 1e12
-    active_experts = min(experts, tokens * topk)
-    rows_s1 = 2 * inter_dim
-    bytes_moved = 0
-    bytes_moved += tokens * topk * model_dim * 1  # x int8
-    bytes_moved += (active_experts * rows_s1 * model_dim) // 2  # w packed int4
-    bytes_moved += tokens * topk * inter_dim * 2  # out fp16
-    bytes_moved += tokens * topk * 4  # scale_x f32
-    bytes_moved += active_experts * rows_s1 * 4  # scale_w f32
-    bytes_moved += active_experts * (rows_s1 // 16) * (model_dim // 256) * 16 * 4 * 2  # qscale+qzero i32
-    tbps = bytes_moved / 1e12 / (us / 1e6)
-    print(
-        f"FLIR MoE stage1[a8w4smooth]: tokens={tokens} M={model_dim} N={inter_dim} "
-        f"E={experts} topk={topk} tile=({tile_m},{tile_n},{tile_k}) "
-        f"=> {us:.1f}us ({tflops:.1f} TFLOPS) {tbps:.3f} TB/s"
-    )
-    return out
-
-
-@pytest.mark.parametrize("in_dtype", ["a8w4smooth"])
-@pytest.mark.parametrize("tile_k", [256, 128])
-def test_moe_gemm_a8w4smooth(in_dtype, tile_k):
-    run_moe_stage1_a8w4smooth(
-        tokens=256, model_dim=1024, inter_dim=256, experts=4, topk=2,
-        tile_m=32, tile_n=64, tile_k=int(tile_k),
-        num_iters=3, num_warmup=1, skip_ref=False,
-    )
-
-
-def run_moe_stage2_a8w4smooth(
-    *,
-    tokens: int,
-    model_dim: int,
-    inter_dim: int,
-    experts: int,
-    topk: int,
-    tile_m: int,
-    tile_n: int,
-    tile_k: int,
-    seed: int = 0,
-    num_iters: int = 5,
-    num_warmup: int = 2,
-    moe_sort_mode: Optional[str] = None,
-    skip_ref: bool = False,
-):
-    """Stage2 a8w4smooth runner: W4A8 + smoothquant + zero-point dequant on the down-projection."""
-    if inter_dim % 256 != 0:
-        raise ValueError(f"a8w4smooth stage2 requires inter_dim%256==0, got {inter_dim}")
-    if int(tile_k) not in (128, 256):
-        raise ValueError(f"a8w4smooth requires tile_k in (128,256), got {tile_k}")
-
-    os.environ.setdefault("FLIR_A8W4SMOOTH_QPARAM_FORMAT", "packed4")
-    os.environ.setdefault("FLIR_A8W4SMOOTH_INTERLEAVE_K64", "1")
-
-    device = torch.device("cuda")
-    torch.manual_seed(int(seed))
-
-    # Routing
-    gating = torch.randn(tokens, experts, device=device, dtype=torch.float32)
-    topk_weights, topk_ids = torch.topk(torch.softmax(gating, dim=-1), k=int(topk), dim=-1)
-    topk_weights = topk_weights.to(torch.float32).contiguous()
-    topk_ids = topk_ids.to(torch.int32).contiguous()
-
-    routing = build_routing_buffers(
-        topk_ids=topk_ids,
-        topk_weights=topk_weights,
-        experts=int(experts),
-        model_dim=int(model_dim),
-        tile_m=int(tile_m),
-        moe_sort_mode=moe_sort_mode,
-    )
-    sorted_token_ids, sorted_weights, sorted_expert_ids, num_valid_ids, sorted_size, blocks = routing
-
-    # A2 (stage2 input): per-(t,slot) int8 with scale_x. Build directly from random fp32.
-    a2_fp32 = torch.randn(tokens, topk, inter_dim, device=device, dtype=torch.float32)
-    a2_q, a2_scale = pertoken_quant(a2_fp32, quant_dtype=torch.int8)
-    a2_q_flat = a2_q.view(tokens * topk, inter_dim).contiguous()
-    a2_scale_1d = a2_scale.view(-1).contiguous()
-
-    # Stage2 weights (a8w4smooth packed4): rows_per_expert = model_dim, K = inter_dim.
-    rows_per_expert = model_dim
-    (
-        w_packed_i8,
-        qscale_u8,
-        qzero_u8,
-        qscale_i32,
-        qzero_i32,
-        w_i8_unshuffled_flat,
-    ) = build_a8w4smooth_moe_weight(
-        experts=int(experts),
-        rows_per_expert=int(rows_per_expert),
-        K=int(inter_dim),
-        device=device,
-        seed=int(seed) + 22,
-        interleave_k64=True,
-    )
-
-    w_kernel = w_packed_i8.view(-1).contiguous()
-    qs_1d = qscale_i32.view(-1).contiguous()
-    qz_1d = qzero_i32.view(-1).contiguous()
-    sw_1d = sorted_weights.contiguous().view(-1)
-    # scale_w (per-row f32) is applied by the kernel; use 1e-3 constant matching FlyDSL.
-    scale_w_1d = torch.full((experts * rows_per_expert,), 1e-3, device=device, dtype=torch.float32)
-    scale_w_ref = scale_w_1d.view(experts, model_dim, 1)
-
-    out = torch.zeros((tokens, model_dim), device=device, dtype=torch.float16)
-    out_perf = torch.zeros_like(out)
-
-    exe = compile_moe_gemm2(
-        model_dim=int(model_dim),
-        inter_dim=int(inter_dim),
-        experts=int(experts),
-        topk=int(topk),
-        in_dtype="a8w4smooth",
-        tile_m=int(tile_m),
-        tile_n=int(tile_n),
-        tile_k=int(tile_k),
-        doweight_stage2=True,
-        out_dtype="f16",
-    )
-
-    def _args(o, x, w, sx, sw, qs, qz, st, eids, sw_sorted):
-        return (o, x, w, sx, sw, qs, qz, st, eids, sw_sorted,
-                num_valid_ids, tokens, model_dim, inter_dim, int(blocks),
-                torch.cuda.current_stream())
-
-    compiled_exe = flyc.compile(exe, *_args(out_perf, a2_q_flat, w_kernel, a2_scale_1d, scale_w_1d,
-                                              qs_1d, qz_1d,
-                                              sorted_token_ids, sorted_expert_ids, sw_1d))
-
-    def launch(o, x, w, sx, sw, qs, qz, st, eids, sw_sorted):
-        compiled_exe(*_args(o, x, w, sx, sw, qs, qz, st, eids, sw_sorted))
-
-    _, us = run_perftest(
-        launch, out_perf, a2_q_flat, w_kernel, a2_scale_1d, scale_w_1d, qs_1d, qz_1d,
-        sorted_token_ids, sorted_expert_ids, sw_1d,
-        num_iters=int(num_iters), num_warmup=int(num_warmup),
-    )
-    torch.cuda.synchronize()
-
-    # Correctness run into a clean buffer (stage2 atomic-adds).
-    out.zero_()
-    launch(out, a2_q_flat, w_kernel, a2_scale_1d, scale_w_1d, qs_1d, qz_1d,
-           sorted_token_ids, sorted_expert_ids, sw_1d)
-    torch.cuda.synchronize()
-
-    if not bool(skip_ref):
-        # Reference: dequanted weight is w_i8_unshuffled_flat; scale_w applied by ref.
-        w_ref = w_i8_unshuffled_flat.view(experts, model_dim, inter_dim).to(torch.float32)
-        ref2 = torch_moe_gemm2(
-            a2_q,                       # [tokens, topk, inter_dim] int8
-            w_ref,
-            a2_scale,                   # [tokens, topk, 1]
-            scale_w_ref,                # [experts, model_dim, 1]
-            topk_ids.to(torch.int64),
-            topk_weights,
-            model_dim=model_dim,
-            doweight_stage2=True,
-        )
-        diff = (out.to(torch.float32) - ref2)
-        print(f"[DEBUG a8w4smooth stage2] out shape={out.shape}, ref shape={ref2.shape}")
-        print(f"[DEBUG a8w4smooth stage2] out[0,:16]={[f'{v:.4f}' for v in out[0,:16].tolist()]}")
-        print(f"[DEBUG a8w4smooth stage2] ref[0,:16]={[f'{v:.4f}' for v in ref2[0,:16].tolist()]}")
-        print(f"[DEBUG a8w4smooth stage2] diff[0,:16]={[f'{v:.4f}' for v in diff[0,:16].tolist()]}")
-        assert verify_output(out.to(torch.float32), ref2, rtol=0.5, atol=0.5)
-
-    flops = 2 * tokens * topk * model_dim * inter_dim
-    tflops = flops / (us / 1e6) / 1e12
-    active_experts = min(experts, tokens * topk)
-    rows_s2 = model_dim
-    bytes_moved = 0
-    bytes_moved += tokens * topk * inter_dim * 1  # a2 int8
-    bytes_moved += (active_experts * rows_s2 * inter_dim) // 2  # w2 packed int4
-    bytes_moved += tokens * model_dim * 2  # out fp16
-    bytes_moved += tokens * topk * 4  # scale_x f32
-    bytes_moved += active_experts * rows_s2 * 4  # scale_w f32
-    bytes_moved += active_experts * (rows_s2 // 16) * (inter_dim // 256) * 16 * 4 * 2  # qscale+qzero i32
-    tbps = bytes_moved / 1e12 / (us / 1e6)
-    print(
-        f"FLIR MoE stage2[a8w4smooth]: tokens={tokens} M={model_dim} N={inter_dim} "
-        f"E={experts} topk={topk} tile=({tile_m},{tile_n},{tile_k}) "
-        f"=> {us:.1f}us ({tflops:.1f} TFLOPS) {tbps:.3f} TB/s"
-    )
-    return out
-
-
-@pytest.mark.parametrize("in_dtype", ["a8w4smooth"])
-@pytest.mark.parametrize("tile_k", [256, 128])
-def test_moe_gemm2_a8w4smooth(in_dtype, tile_k):
-    run_moe_stage2_a8w4smooth(
-        tokens=256, model_dim=1024, inter_dim=256, experts=4, topk=2,
-        tile_m=32, tile_n=64, tile_k=int(tile_k),
-        num_iters=3, num_warmup=1, skip_ref=False,
-    )
-
-
 if __name__ == "__main__":
     torch.set_default_device("cuda")
     # CLI (mirrors key knobs from aiter/op_tests/test_moe_2stage.py, stage1 subset)
@@ -2750,8 +2092,8 @@ if __name__ == "__main__":
         "--in_dtype",
         type=str,
         default="fp8",
-        choices=["fp8", "fp16", "bf16", "int8", "int8smooth", "int4", "int4_bf16", "fp4", "a8w4smooth", "all"],
-        help="Kernel input dtype: fp8 / fp16 / int8 / int8smooth / int4 / int4_bf16 / fp4 / a8w4smooth / all (default: all). "
+        choices=["fp8", "fp16", "bf16", "int8", "int8smooth", "int4", "int4_bf16", "fp4", "a8w4", "all"],
+        help="Kernel input dtype: fp8 / fp16 / int8 / int8smooth / int4 / int4_bf16 / fp4 / a8w4 / all (default: all). "
         "int8smooth expands X to [tokens*topk, K] with per-(token,slot) scales. "
         "int4 means W4A8: A int8, W packed int4. "
         "int4_bf16 means W4A16: A bf16, W packed int4. "
@@ -2880,24 +2222,6 @@ if __name__ == "__main__":
     for dt in in_dtypes:
         if dt in ("fp4", "a8w4") and "gfx95" not in ARCH:
             print(f"Skipping {dt}: requires gfx950+, got {ARCH}")
-            continue
-        if dt == "a8w4smooth":
-            # a8w4smooth has its own dedicated stage1 runner (skips the legacy harness).
-            run_moe_stage1_a8w4smooth(
-                tokens=int(args.tokenNum),
-                model_dim=int(model_dim),
-                inter_dim=int(inter_dim),
-                experts=int(args.expert),
-                topk=int(args.topk),
-                tile_m=int(args.tile_m),
-                tile_n=int(args.tile_n),
-                tile_k=int(args.tile_k),
-                seed=int(args.seed),
-                num_iters=int(args.num_iters),
-                num_warmup=int(args.num_warmup),
-                moe_sort_mode=args.moe_sort_mode,
-                skip_ref=bool(args.skip_ref),
-            )
             continue
         for use_reduce in reduce_flags:
             run_one(dt, use_reduce)
