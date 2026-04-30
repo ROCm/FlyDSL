@@ -92,6 +92,73 @@ def _buffer_load_vec(
 
 
 @dataclass(frozen=True)
+class PreshuffleBLayout:
+    """Container returned by `make_preshuffle_b_layout`."""
+
+    layout_b: object
+    kpack_bytes: int
+
+
+def make_preshuffle_b_layout_packed4bit(
+    arith,
+    *,
+    c_n: ir.Value,
+    c_k: ir.Value,
+    kpack_bytes: int = 16,
+    elem_bytes: int = 1,
+    packed_4bit: bool = False,
+) -> PreshuffleBLayout:
+    """Build B layout for packed UINT4 (a8w4smooth W4A8 + qparam).
+
+    Use packed_4bit=True + kpack_bytes=16. In this mode, the logical K element
+    domain is mapped to packed bytes by KBytes = K/2.
+    """
+    if kpack_bytes not in (8, 16):
+        raise ValueError(f"kpack_bytes must be 8 or 16, got {kpack_bytes!r}")
+
+    c16 = fx.Index(16)
+    c64 = fx.Index(64)
+    c4 = fx.Index(4)
+    c_kpack = fx.Index(kpack_bytes)
+
+    if elem_bytes not in (1, 2):
+        raise ValueError(f"elem_bytes must be 1 or 2, got {elem_bytes!r}")
+    if packed_4bit:
+        if elem_bytes != 1:
+            raise ValueError(f"packed_4bit requires elem_bytes==1, got {elem_bytes!r}")
+        if kpack_bytes != 16:
+            raise ValueError(
+                f"packed_4bit requires kpack_bytes==16 (innermost 16B == 32x4bits), got {kpack_bytes!r}"
+            )
+        c_k_bytes = c_k // arith.constant(2, index=True)
+    else:
+        c_k_bytes = c_k * arith.constant(int(elem_bytes), index=True)
+    c_k0 = c_k_bytes // c64
+    n0 = c_n // c16
+
+    c_kpack_elems = c_kpack if elem_bytes == 1 else (c_kpack // arith.constant(int(elem_bytes), index=True))
+
+    stride_nlane = c_kpack_elems
+    stride_klane = c16 * stride_nlane
+    stride_k0 = c4 * stride_klane
+    stride_n0 = c_k0 * stride_k0
+
+    # fly.make_shape requires i32/i64 for dynamic operands (not index).
+    # Convert dynamic index values to i32; use Python ints for static constants.
+    kpack_elems_static = kpack_bytes if elem_bytes == 1 else kpack_bytes // elem_bytes
+    n0_i32 = arith.index_cast(T.i32, n0)
+    c_k0_i32 = arith.index_cast(T.i32, c_k0)
+    stride_n0_i32 = arith.index_cast(T.i32, stride_n0)
+    stride_k0_i32 = arith.index_cast(T.i32, stride_k0)
+    stride_klane_i32 = arith.index_cast(T.i32, stride_klane)
+    stride_nlane_i32 = arith.index_cast(T.i32, stride_nlane)
+
+    stride_b = (stride_n0_i32, stride_k0_i32, stride_klane_i32, stride_nlane_i32, 1)
+    layout_b = fx.make_layout((n0_i32, c_k0_i32, 4, 16, kpack_elems_static), stride_b)
+    return PreshuffleBLayout(layout_b=layout_b, kpack_bytes=kpack_bytes)
+
+
+@dataclass(frozen=True)
 class PreshuffleScaleLayout:
     """Container returned by `make_preshuffle_scale_layout`.
 
