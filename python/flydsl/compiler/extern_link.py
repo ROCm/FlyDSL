@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, Optional
 
-from .extern import ExternFunction as FFIExternFunction
+from ..expr.extern import ExternFunction as FFIExternFunction
 
 _EXTERN_RESOLVERS = []
 

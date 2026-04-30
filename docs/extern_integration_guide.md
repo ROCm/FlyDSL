@@ -49,9 +49,9 @@ The wrapper registers:
 * `module_init_fn` in `CompilationContext.post_load_processors`, which is
   invoked once per loaded `hipModule_t`.
 
-`flydsl.expr.extern.ExternFunction` remains as a compatibility wrapper that
-constructs `ffi(...)` and applies `link_extern(...)` in one step, but new
-integrations should prefer the explicit two-layer form.
+`flydsl.expr.extern.ExternFunction` is the same pure FFI callable exposed as
+`ffi`.  Integrations that need external bitcode or post-load initialization
+should explicitly wrap it with `link_extern(...)`.
 
 ## 3. How the JIT pipeline picks things up
 
@@ -127,9 +127,8 @@ method closing over runtime state), the caller should either:
 
 | File | Role |
 |---|---|
-| [`python/flydsl/compiler/extern.py`](../python/flydsl/compiler/extern.py) | Pure FFI `ExternFunction` class + `llvm.call` emitter |
 | [`python/flydsl/compiler/extern_link.py`](../python/flydsl/compiler/extern_link.py) | `link_extern`, linked extern wrapper, resolver registration |
-| [`python/flydsl/expr/extern.py`](../python/flydsl/expr/extern.py) | Public expression API: `ffi`, compatibility `ExternFunction`, `link_extern` |
+| [`python/flydsl/expr/extern.py`](../python/flydsl/expr/extern.py) | Pure FFI `ExternFunction` class + `llvm.call` emitter |
 | [`python/flydsl/compiler/kernel_function.py`](../python/flydsl/compiler/kernel_function.py) | `CompilationContext` (carries `link_libs`, `post_load_processors`) |
 | [`python/flydsl/compiler/jit_function.py`](../python/flydsl/compiler/jit_function.py) | Passes `link_libs` into `MlirCompiler.compile` and propagates `post_load_processors` to `CompiledArtifact` |
 | [`python/flydsl/compiler/jit_executor.py`](../python/flydsl/compiler/jit_executor.py) | Looks up FlyDSL ROCm module loader symbols, owns `GpuJitModule`, and runs `post_load_processors` |
