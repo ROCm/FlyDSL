@@ -83,7 +83,13 @@ def _pack_ciface_args(*args) -> ctypes.c_void_p:
     # Keep the intermediate ctypes objects alive by attaching them to the
     # returned c_void_p for the duration of the call expression.
     packed_ciface_arg = ctypes.cast(packed_addr_ptr_ptr, ctypes.c_void_p)
-    packed_ciface_arg._keepalive = (packed, packed_addr, packed_addr_ptr, packed_addr_ptr_ptr)  # type: ignore[attr-defined]
+    packed_ciface_arg._keepalive = (  # type: ignore[attr-defined]
+        packed,
+        packed_addr,
+        packed_addr_ptr,
+        packed_addr_ptr_ptr,
+        args,
+    )
     return packed_ciface_arg
 
 

@@ -31,7 +31,7 @@ def _register_link_metadata(bitcode_path: Optional[str], module_init_fn: Optiona
     if ctx is None:
         return
     if bitcode_path is not None:
-        ctx.link_libs.add(bitcode_path)
+        ctx.add_link_lib(bitcode_path)
     if module_init_fn is not None and module_init_fn not in ctx.post_load_processors:
         ctx.post_load_processors.append(module_init_fn)
 

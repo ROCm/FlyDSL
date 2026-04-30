@@ -218,7 +218,7 @@ class CompilationContext:
     - Location trackers for debugging
     """
 
-    _current: Optional["CompilationContext"] = None
+    _current = threading.local()
 
     # Thread-local storage for compile hints (waves_per_eu, maxnreg, etc.)
     _compile_hints = threading.local()
@@ -250,25 +250,32 @@ class CompilationContext:
         self.func_tracker = func_tracker
         self.kernel_trackers: Dict[str, FuncLocationTracker] = {}
         self.stream_arg = None
-        self.link_libs: set = set()
+        self.link_libs: list = []
+        self._link_libs_seen: set = set()
         # Callables invoked on each GPU hipModule_t after ExecutionEngine
         # loads it.  Populated by ExternFunction when module_init_fn is set.
         self.post_load_processors: list = []
 
     @classmethod
     def get_current(cls) -> Optional["CompilationContext"]:
-        return cls._current
+        return getattr(cls._current, "value", None)
 
     @classmethod
     @contextmanager
     def create(cls, func_tracker: Optional[FuncLocationTracker] = None):
-        prev = cls._current
+        prev = getattr(cls._current, "value", None)
         ctx = CompilationContext(func_tracker)
-        cls._current = ctx
+        cls._current.value = ctx
         try:
             yield ctx
         finally:
-            cls._current = prev
+            cls._current.value = prev
+
+    def add_link_lib(self, path: str) -> None:
+        if path in self._link_libs_seen:
+            return
+        self._link_libs_seen.add(path)
+        self.link_libs.append(path)
 
     def next_kernel_id(self) -> int:
         """Get next unique kernel ID."""
@@ -392,8 +399,6 @@ class KernelLauncher:
                 ctx = CompilationContext.get_current()
                 stream_val = ctx.stream_arg if ctx and ctx.stream_arg else None
 
-            async_deps = [stream_val] if stream_val is not None else None
-
             cluster_size = None
             if cluster is not None:
                 cx, cy, cz = _normalize_dim(cluster)
@@ -403,17 +408,20 @@ class KernelLauncher:
                     _to_index_value(cz),
                 )
 
-            gpu.LaunchFuncOp(
+            launch_op = gpu.LaunchFuncOp(
                 ["kernels", self._kernel_name],
                 (grid_x, grid_y, grid_z),
                 (block_x, block_y, block_z),
                 kernel_operands,
-                async_dependencies=async_deps,
                 dynamic_shared_memory_size=smem_val,
                 cluster_size=cluster_size,
                 loc=launch_loc,
                 ip=None,
             )
+            if stream_val is not None and hasattr(stream_val, "arg_number"):
+                launch_op.operation.attributes["fly.stream_arg_number"] = ir.IntegerAttr.get(
+                    ir.IntegerType.get_signless(32), int(stream_val.arg_number)
+                )
 
 
 # =============================================================================

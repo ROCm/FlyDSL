@@ -952,7 +952,9 @@ class Vector(ArithValue):
         if not all(isinstance(dim, int) for dim in self._flatten_static(shape)):
             raise ValueError("dynamic vector shape is not supported")
         if self._numel_from_shape(shape) != self._numel_from_shape(tuple(vty.shape)):
-            raise ValueError(f"shape {shape} has {self._numel_from_shape(shape)} elements, but value has type {value.type}")
+            raise ValueError(
+                f"shape {shape} has {self._numel_from_shape(shape)} elements, but value has type {value.type}"
+            )
         if dtype.ir_type != vty.element_type:
             raise ValueError(f"dtype {dtype} does not match vector element type {vty.element_type}")
         signed = dtype.signed if isclass(dtype) and issubclass(dtype, Integer) else False

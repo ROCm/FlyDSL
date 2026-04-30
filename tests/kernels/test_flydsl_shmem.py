@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import sys
+import importlib.util
 
 import pytest
 
@@ -23,7 +24,7 @@ pytest.importorskip("mori", reason="mori package required for shmem tests")
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _FLYDSL_PY = os.path.join(_HERE, "../../python")
-if os.path.isdir(_FLYDSL_PY) and _FLYDSL_PY not in sys.path:
+if importlib.util.find_spec("flydsl._mlir") is None and os.path.isdir(_FLYDSL_PY) and _FLYDSL_PY not in sys.path:
     sys.path.insert(0, _FLYDSL_PY)
 
 import torch

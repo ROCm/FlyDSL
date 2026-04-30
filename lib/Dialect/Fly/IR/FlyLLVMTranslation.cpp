@@ -26,7 +26,6 @@
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Module.h"
-#include "llvm/ADT/ScopeExit.h"
 #include "llvm/Support/FormatVariadic.h"
 
 using namespace mlir;
@@ -46,9 +45,8 @@ static Twine getModuleIdentifier(StringRef moduleName) {
   return moduleName + "_module";
 }
 
-LogicalResult embedExplicitModule(StringRef moduleName,
-                                      gpu::ObjectAttr object,
-                                      llvm::Module &module) {
+LogicalResult embedExplicitModule(StringRef moduleName, gpu::ObjectAttr object,
+                                  llvm::Module &module) {
   bool addNull = (object.getFormat() == gpu::CompilationTarget::Assembly);
   StringRef serializedStr = object.getObject().getValue();
   llvm::Constant *serializedCst =
@@ -176,7 +174,7 @@ public:
             voidTy,
             ArrayRef<Type *>({ptrTy, intPtrTy, intPtrTy, intPtrTy, intPtrTy,
                               intPtrTy, intPtrTy, intPtrTy, intPtrTy, intPtrTy,
-                              i32Ty, ptrTy, ptrTy, ptrTy}),
+                              i32Ty, ptrTy, ptrTy, ptrTy, i64Ty}),
             false));
   }
 
@@ -267,15 +265,17 @@ public:
         builder.CreateCall(getModuleFunctionFn(), {moduleObj, functionName});
 
     Value *stream = nullptr;
-    llvm::scope_exit destroyStream([&]() {
-      builder.CreateCall(getStreamSyncFn(), {stream});
-      builder.CreateCall(getStreamDestroyFn(), {stream});
-    });
     if (mlir::Value asyncObject = op.getAsyncObject()) {
       stream = llvmValue(asyncObject);
-      destroyStream.release();
+    } else if (auto streamArgNumber =
+                   op->getAttrOfType<IntegerAttr>("fly.stream_arg_number")) {
+      Block &parentBlock = op->getParentRegion()->front();
+      unsigned argIndex = streamArgNumber.getInt();
+      if (argIndex >= parentBlock.getNumArguments())
+        return op.emitError() << "invalid fly.stream_arg_number: " << argIndex;
+      stream = llvmValue(parentBlock.getArgument(argIndex));
     } else {
-      stream = builder.CreateCall(getStreamCreateFn(), {});
+      stream = ConstantPointerNull::get(ptrTy);
     }
 
     llvm::Constant *paramsCount =
@@ -290,7 +290,7 @@ public:
           getClusterKernelLaunchFn(),
           ArrayRef<Value *>({moduleFunction, cx, cy, cz, gx, gy, gz, bx, by,
                              bz, dynamicMemorySize, stream, argArray,
-                             nullPtr}));
+                             nullPtr, paramsCount}));
     } else {
       builder.CreateCall(getKernelLaunchFn(),
                          ArrayRef<Value *>({moduleFunction, gx, gy, gz, bx, by,
@@ -330,7 +330,7 @@ public:
     if (!object)
       return failure();
     return embedExplicitModule(op.getName(), object,
-                                   *moduleTranslation.getLLVMModule());
+                               *moduleTranslation.getLLVMModule());
   }
 
   LogicalResult launchKernel(Attribute attribute, Operation *launchFuncOp,
