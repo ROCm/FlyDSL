@@ -472,15 +472,15 @@ class Numeric(metaclass=NumericMeta):
         return _make_binop(operator.ne)(self, other, loc=loc, ip=ip)
 
     # ── Proxy methods: delegate ArithValue-specific ops via ir_value() ──
-    def maximumf(self, other, *, loc=None):
+    def maximumf(self, other, *, fastmath=arith.FastMathFlags.fast, loc=None):
         """Float maximum — delegates to ArithValue.maximumf."""
-        return type(self)(self.ir_value().maximumf(_to_raw(other), loc=loc))
+        return type(self)(self.ir_value().maximumf(_to_raw(other), fastmath=fastmath, loc=loc))
 
     def minimumf(self, other, *, loc=None):
         """Float minimum — delegates to ArithValue.minimumf."""
         return type(self)(self.ir_value().minimumf(_to_raw(other), loc=loc))
 
-    def exp2(self, *, fastmath=None, loc=None):
+    def exp2(self, *, fastmath=arith.FastMathFlags.fast, loc=None):
         """Base-2 exponential — delegates to ArithValue.exp2."""
         return type(self)(self.ir_value().exp2(fastmath=fastmath, loc=loc))
 
@@ -492,7 +492,7 @@ class Numeric(metaclass=NumericMeta):
         """Unsigned right shift — delegates to ArithValue.shrui."""
         return type(self)(self.ir_value().shrui(amount, loc=loc))
 
-    def addf(self, other, *, fastmath=None, loc=None):
+    def addf(self, other, *, fastmath=arith.FastMathFlags.fast, loc=None):
         """Float add with fastmath — delegates to ArithValue.addf."""
         return type(self)(self.ir_value().addf(_to_raw(other), fastmath=fastmath, loc=loc))
 

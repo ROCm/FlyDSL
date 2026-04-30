@@ -24,10 +24,12 @@ Example:
     >>> buffer_ops.buffer_store(data, rsrc, offset)
 """
 
-from .._mlir import ir
-from .._mlir.dialects import llvm, rocdl, arith as std_arith
-from .._mlir.extras import types as T
 from typing import Optional, Union
+
+from .._mlir import ir
+from .._mlir.dialects import arith as std_arith
+from .._mlir.dialects import llvm, rocdl
+from .._mlir.extras import types as T
 from ..runtime.device import is_rdna_arch
 from .meta import traced_op
 
@@ -70,7 +72,10 @@ def _get_buffer_flags(arch=None):
 
 __all__ = [
     'create_llvm_ptr',
+    'extract_aligned_pointer',
     'get_element_ptr',
+    'pointer_load',
+    'pointer_store',
     'create_buffer_resource',
     'create_buffer_resource_from_addr',
     'buffer_load',
@@ -140,6 +145,15 @@ def create_llvm_ptr(value, address_space: int = 0) -> ir.Value:
     return llvm.IntToPtrOp(ptr_type, value).result
 
 
+def extract_aligned_pointer(tensor, address_space: Optional[int] = None) -> ir.Value:
+    """Extract the aligned LLVM pointer from a FlyDSL tensor/memref."""
+    from .._mlir.dialects import fly as _fly
+
+    raw = _unwrap_value(tensor)
+    ptr_type = ir.Type.parse("!llvm.ptr" if address_space is None else f"!llvm.ptr<{address_space}>")
+    return _fly.extract_aligned_pointer_as_index(ptr_type, raw)
+
+
 def extract_base_index(tensor, address_space: int = 1) -> ir.Value:
     """Extract the base address of a fly.memref as an index value.
 
@@ -148,11 +162,29 @@ def extract_base_index(tensor, address_space: int = 1) -> ir.Value:
     (e.g. global_atomic_pk_add_bf16 on gfx942).
     """
     from .._mlir.dialects import fly as _fly
+    from .._mlir.dialects import memref as _memref
+
     raw = _unwrap_value(tensor)
+    try:
+        ir.MemRefType(raw.type)
+        return _memref.extract_aligned_pointer_as_index(raw)
+    except ValueError:
+        pass
+
     ptr_type = ir.Type.parse(f'!llvm.ptr<{address_space}>')
     ptr = _fly.extract_aligned_pointer_as_index(ptr_type, raw)
     i64_val = llvm.PtrToIntOp(ir.IntegerType.get_signless(64), ptr).result
     return _unwrap_value(std_arith.IndexCastOp(ir.IndexType.get(), i64_val).result)
+
+
+def pointer_load(result_type: ir.Type, ptr: ir.Value) -> ir.Value:
+    """Load from an LLVM pointer, accepting FlyDSL wrapper values."""
+    return llvm.LoadOp(result_type, _unwrap_value(ptr)).result
+
+
+def pointer_store(value: ir.Value, ptr: ir.Value):
+    """Store to an LLVM pointer, accepting FlyDSL wrapper values."""
+    return llvm.StoreOp(_unwrap_value(value), _unwrap_value(ptr))
 
 
 def get_element_ptr(

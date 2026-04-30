@@ -31,6 +31,10 @@ _ods_cluster_load_async_to_lds_b64 = cluster_load_async_to_lds_b64
 _ods_cluster_load_async_to_lds_b128 = cluster_load_async_to_lds_b128
 _ods_s_wait_asynccnt = s_wait_asynccnt
 _ods_readfirstlane = readfirstlane
+_ods_mfma_f32_32x32x8f16 = globals().get("mfma_f32_32x32x8f16", None)
+_ods_mfma_f32_32x32x8bf16_1k = globals().get("mfma_f32_32x32x8bf16_1k", None)
+_ods_mfma_f32_32x32x16_f16 = globals().get("mfma_f32_32x32x16_f16", None)
+_ods_mfma_f32_32x32x16_bf16 = globals().get("mfma_f32_32x32x16_bf16", None)
 _ods_mfma_f32_16x16x16f16 = mfma_f32_16x16x16f16
 _ods_mfma_f32_16x16x16bf16_1k = globals().get("mfma_f32_16x16x16bf16_1k", None)
 _ods_mfma_f32_16x16x32_fp8_fp8 = mfma_f32_16x16x32_fp8_fp8
@@ -86,6 +90,38 @@ def _split_mfma_operands(operands, *, loc=None):
     abid = int(operands[4]) if len(operands) > 4 else 0
     blgp = int(operands[5]) if len(operands) > 5 else 0
     return a, b, c, cbsz, abid, blgp
+
+
+@traced_op
+def mfma_f32_32x32x8f16(result_type, operands, *, loc=None, ip=None):
+    if _ods_mfma_f32_32x32x8f16 is None:
+        raise AttributeError("ROCDL op not found: mfma_f32_32x32x8f16")
+    a, b, c, cbsz, abid, blgp = _split_mfma_operands(operands, loc=loc)
+    return _ods_mfma_f32_32x32x8f16(result_type, a, b, c, cbsz, abid, blgp, loc=loc, ip=ip).result
+
+
+@traced_op
+def mfma_f32_32x32x8bf16_1k(result_type, operands, *, loc=None, ip=None):
+    if _ods_mfma_f32_32x32x8bf16_1k is None:
+        raise AttributeError("ROCDL op not found: mfma_f32_32x32x8bf16_1k")
+    a, b, c, cbsz, abid, blgp = _split_mfma_operands(operands, loc=loc)
+    return _ods_mfma_f32_32x32x8bf16_1k(result_type, a, b, c, cbsz, abid, blgp, loc=loc, ip=ip).result
+
+
+@traced_op
+def mfma_f32_32x32x16_f16(result_type, operands, *, loc=None, ip=None):
+    if _ods_mfma_f32_32x32x16_f16 is None:
+        raise AttributeError("ROCDL op not found: mfma_f32_32x32x16_f16")
+    a, b, c, cbsz, abid, blgp = _split_mfma_operands(operands, loc=loc)
+    return _ods_mfma_f32_32x32x16_f16(result_type, a, b, c, cbsz, abid, blgp, loc=loc, ip=ip).result
+
+
+@traced_op
+def mfma_f32_32x32x16_bf16(result_type, operands, *, loc=None, ip=None):
+    if _ods_mfma_f32_32x32x16_bf16 is None:
+        raise AttributeError("ROCDL op not found: mfma_f32_32x32x16_bf16")
+    a, b, c, cbsz, abid, blgp = _split_mfma_operands(operands, loc=loc)
+    return _ods_mfma_f32_32x32x16_bf16(result_type, a, b, c, cbsz, abid, blgp, loc=loc, ip=ip).result
 
 
 @traced_op
@@ -440,6 +476,21 @@ def rcp(res, arg, **kw):
     from ..._mlir.dialects.rocdl import rcp as _op
 
     return _op(res=res, arg=_to_ir(arg), **kw)
+
+
+def perm_b32(src_hi, src_lo, sel, **kw):
+    """Wrapper for ``llvm.amdgcn.perm`` returning one i32 lane value."""
+    from ..._mlir.dialects import llvm as _llvm
+    from ..typing import T
+
+    return _llvm.call_intrinsic(
+        T.i32,
+        "llvm.amdgcn.perm",
+        [_to_ir(src_hi), _to_ir(src_lo), _to_ir(sel)],
+        [],
+        [],
+        **kw,
+    )
 
 
 def raw_ptr_buffer_load_lds(rsrc, lds_ptr, size, voffset, soffset, offset, aux, **kw):
