@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+
 """FlyDSL Paged Attention Decode with Persistent Scheduling — FP8.
 
 Extends pa_decode_sw_fp8.py with persistent scheduling (PS) mode:
