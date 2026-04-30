@@ -16,16 +16,35 @@ sys.path.insert(1, ".")
 
 os.environ.setdefault("FLYDSL_DUMP_IR", "1")
 
-from kernels.pa_mqa_logits_fp4 import (
-    build_pa_mqa_logits_fp4_module,
-    compute_varctx_schedule,
-    HEADS,
-    HEAD_DIM,
-    HEAD_DIM_PACKED,
-    HEAD_DIM_SCALES,
-    BLOCK_THREADS,
-    allocator as _alloc_ref,
-)
+_VARIANT = os.environ.get("PA_MQA_VARIANT",
+    "pipelined" if os.environ.get("PA_MQA_PIPELINED", "0") == "1" else "baseline")
+_USE_PIPELINED = _VARIANT in ("pipelined", "single")
+if _VARIANT == "single":
+    from kernels.pa_mqa_logits_fp4_single import (
+        build_pa_mqa_logits_fp4_module,
+        compute_varctx_schedule,
+        HEADS, HEAD_DIM, HEAD_DIM_PACKED, HEAD_DIM_SCALES,
+        BLOCK_THREADS,
+        allocator as _alloc_ref,
+    )
+    print("[test] using pa_mqa_logits_fp4_SINGLE kernel (single chunk per CTA)")
+elif _VARIANT == "pipelined":
+    from kernels.pa_mqa_logits_fp4_pipelined import (
+        build_pa_mqa_logits_fp4_module,
+        compute_varctx_schedule,
+        HEADS, HEAD_DIM, HEAD_DIM_PACKED, HEAD_DIM_SCALES,
+        BLOCK_THREADS,
+        allocator as _alloc_ref,
+    )
+    print("[test] using pa_mqa_logits_fp4_PIPELINED kernel")
+else:
+    from kernels.pa_mqa_logits_fp4 import (
+        build_pa_mqa_logits_fp4_module,
+        compute_varctx_schedule,
+        HEADS, HEAD_DIM, HEAD_DIM_PACKED, HEAD_DIM_SCALES,
+        BLOCK_THREADS,
+        allocator as _alloc_ref,
+    )
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl._mlir import ir as _ir
 import flydsl.compiler as flyc
@@ -232,6 +251,7 @@ def _make_varctx(batch, max_ctx, kv_block_size):
 def test_pa_mqa_logits_fp4(
     batch, max_ctx, kv_block_size, block_k,
     num_iters=20, num_warmup=3,
+    num_warps=4, parallel_unit_num=512,
 ):
     """End-to-end varctx FP4 MQA logits: correctness vs ref + perf vs torch baselines."""
     setup_seed(SEED)
@@ -274,22 +294,25 @@ def test_pa_mqa_logits_fp4(
     ref_logits = ref_mqa_logits_fp4(
         q_packed, q_e8m0, kv_packed_dense, kv_e8m0_dense, weights, context_lens)
 
-    # ---- Build flydsl kernel ----
-    kfn, alloc = build_pa_mqa_logits_fp4_module(
-        block_k=block_k, kv_block_size=kv_block_size,
-        max_blocks_per_seq=max_blocks_per_seq)
+    # ── Persistent-grid schedule (gluon-style safe_chunks_per_cta) ──
+    # parallel_unit_num: target CTA count (MI355X has 256 CUs; default 256×2).
+    safe, cta_b, cta_cs, cta_cc, total_ctas = compute_varctx_schedule(
+        context_lens, block_k, parallel_unit_num)
+    print(f"  schedule: parallel_unit={parallel_unit_num} num_warps={num_warps} "
+          f"safe_chunks_per_cta={safe}  total_ctas={total_ctas}  "
+          f"(naive grid would be {naive_ctas})")
+
+    # ---- Build flydsl kernel (pipelined kernel uses safe + num_warps as constexpr) ----
+    _build_kwargs = dict(block_k=block_k, kv_block_size=kv_block_size,
+                         max_blocks_per_seq=max_blocks_per_seq)
+    if _USE_PIPELINED:
+        _build_kwargs["max_chunks_per_cta"] = safe
+        _build_kwargs["num_warps"] = num_warps
+    kfn, alloc = build_pa_mqa_logits_fp4_module(**_build_kwargs)
+    block_threads = getattr(alloc, "block_threads", BLOCK_THREADS)
 
     out_logits = torch.full((batch_size, t_max), float("-inf"),
                             dtype=torch.float32, device=dev)
-
-    # ── Persistent-grid schedule (gluon-style safe_chunks_per_cta) ──
-    # Aim for ~= TotalCuCount * WavePerEU CTAs to fully populate the GPU
-    # without over-launching. MI355X has 256 CUs; pick WavePerEU=2.
-    parallel_unit_num = 256 * 2
-    safe, cta_b, cta_cs, cta_cc, total_ctas = compute_varctx_schedule(
-        context_lens, block_k, parallel_unit_num)
-    print(f"  schedule: safe_chunks_per_cta={safe}  total_ctas={total_ctas}  "
-          f"(naive grid would be {naive_ctas})")
 
     qe = q_e8m0.view(torch.uint8)
     stream = torch.cuda.current_stream()
@@ -307,7 +330,7 @@ def test_pa_mqa_logits_fp4(
         gxi = arith.index_cast(T.index, gx.ir_value())
         kfn(out, q, qs, kv, kvs, bt, w, ctx_lens,
             cta_b_, cta_cs_, cta_cc_, stride_out).launch(
-            grid=(gxi,), block=(BLOCK_THREADS, 1, 1), stream=stream)
+            grid=(gxi,), block=(block_threads, 1, 1), stream=stream)
 
     def launch_flydsl():
         launch_kernel(out_logits, q_packed, qe, kv_cache, kv_scale,
@@ -396,9 +419,15 @@ if __name__ == "__main__":
     parser.add_argument("--ctx", type=int, default=0,
                         help="Context length (0 = run default sweep)")
     parser.add_argument("--kv_block_size", type=int, default=16)
-    parser.add_argument("--block_k", type=int, default=64)
+    parser.add_argument("--block_k", type=int,
+                        default=(128 if _USE_PIPELINED else 64),
+                        help="Default 128 when PA_MQA_PIPELINED=1, else 64")
     parser.add_argument("--num_iters", type=int, default=20)
     parser.add_argument("--num_warmup", type=int, default=5)
+    parser.add_argument("--num_warps", type=int, default=4,
+                        help="warps per CTA (pipelined kernel only); BLOCK=num_warps*64")
+    parser.add_argument("--parallel_unit_num", type=int, default=512,
+                        help="target CTA count for host schedule (default 512)")
     args = parser.parse_args()
 
     if args.batch > 0 and args.ctx > 0:
@@ -415,7 +444,8 @@ if __name__ == "__main__":
             test_pa_mqa_logits_fp4(
                 batch=b, max_ctx=c,
                 kv_block_size=args.kv_block_size, block_k=args.block_k,
-                num_iters=args.num_iters, num_warmup=args.num_warmup)
+                num_iters=args.num_iters, num_warmup=args.num_warmup,
+                num_warps=args.num_warps, parallel_unit_num=args.parallel_unit_num)
         except AssertionError as e:
             print(f"  FAIL: {e}\n")
         except Exception:
