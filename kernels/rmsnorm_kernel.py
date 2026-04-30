@@ -415,7 +415,7 @@ def _build_rmsnorm_quant_module(
             return r0
 
         def block_reduce_add2(val0, val1):
-            if RED_SLOTS == 1:
+            if const_expr(RED_SLOTS == 1):
                 return wave_reduce_add(val0), wave_reduce_add(val1)
 
             lane = tid % WARP_SIZE
@@ -426,16 +426,16 @@ def _build_rmsnorm_quant_module(
 
             if lane == fx.Int32(0):
                 wave_idx = ArithValue(wave).index_cast(T.index)
-                s_red.store(w0, [wave_idx])
-                s_red2.store(w1, [wave_idx])
+                SmemPtr.store(s_red, w0, [wave_idx])
+                SmemPtr.store(s_red2, w1, [wave_idx])
             gpu.barrier()
 
             if wave == fx.Int32(0):
                 in_range = lane < RED_SLOTS
                 lane_safe = in_range.select(lane, fx.Int32(0))
                 lane_safe_idx = ArithValue(lane_safe).index_cast(T.index)
-                v0 = s_red.load([lane_safe_idx])
-                v1 = s_red2.load([lane_safe_idx])
+                v0 = SmemPtr.load(s_red, [lane_safe_idx])
+                v1 = SmemPtr.load(s_red2, [lane_safe_idx])
                 ww0 = in_range.select(v0, c_zero_f)
                 ww1 = in_range.select(v1, c_zero_f)
                 ww0 = wave_reduce_add(ww0)
@@ -443,15 +443,15 @@ def _build_rmsnorm_quant_module(
 
                 if lane == fx.Int32(0):
                     c0_idx = fx.Index(0)
-                    s_red.store(ww0, [c0_idx])
-                    s_red2.store(ww1, [c0_idx])
+                    SmemPtr.store(s_red, ww0, [c0_idx])
+                    SmemPtr.store(s_red2, ww1, [c0_idx])
             gpu.barrier()
 
             c0_idx = fx.Index(0)
-            return s_red.load([c0_idx]), s_red2.load([c0_idx])
+            return SmemPtr.load(s_red, [c0_idx]), SmemPtr.load(s_red2, [c0_idx])
 
         def block_reduce_max(val):
-            if RED_SLOTS == 1:
+            if const_expr(RED_SLOTS == 1):
                 return wave_reduce_max(val)
 
             lane = tid % WARP_SIZE
@@ -460,28 +460,28 @@ def _build_rmsnorm_quant_module(
             w = wave_reduce_max(val)
             if lane == fx.Int32(0):
                 wave_idx = ArithValue(wave).index_cast(T.index)
-                s_red.store(w, [wave_idx])
+                SmemPtr.store(s_red, w, [wave_idx])
             gpu.barrier()
 
             if wave == fx.Int32(0):
                 in_range = lane < RED_SLOTS
                 lane_safe = in_range.select(lane, fx.Int32(0))
                 lane_safe_idx = ArithValue(lane_safe).index_cast(T.index)
-                v = s_red.load([lane_safe_idx])
+                v = SmemPtr.load(s_red, [lane_safe_idx])
                 ww = in_range.select(v, c_neg_inf)
                 ww = wave_reduce_max(ww)
                 if lane == fx.Int32(0):
                     c0_idx = fx.Index(0)
-                    s_red.store(ww, [c0_idx])
+                    SmemPtr.store(s_red, ww, [c0_idx])
             gpu.barrier()
 
             c0_idx = fx.Index(0)
-            return s_red.load([c0_idx])
+            return SmemPtr.load(s_red, [c0_idx])
 
         # ==================================================================
         # Fast path: N is a multiple of tile_cols
         # ==================================================================
-        if N >= tile_cols and N % tile_cols == 0 and elem_bits <= 16:
+        if const_expr(N >= tile_cols and N % tile_cols == 0 and elem_bits <= 16):
             num_tiles = N // tile_cols
             quant_half_width = VEC_WIDTH // 2
             abs_mask = full(VEC_WIDTH, Uint32(0x7FFFFFFF), Uint32)
@@ -489,7 +489,7 @@ def _build_rmsnorm_quant_module(
             Input_buf = fx.rocdl.make_buffer_tensor(Input)
             Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma)
             Output_buf = fx.rocdl.make_buffer_tensor(Output)
-            if is_smooth:
+            if const_expr(is_smooth):
                 XScale_buf = fx.rocdl.make_buffer_tensor(XScale)
 
             row_in = fx.slice(Input_buf, (bid, None))
@@ -498,7 +498,7 @@ def _build_rmsnorm_quant_module(
             in_div = fx.logical_divide(row_in, fx.make_layout(VEC_WIDTH, 1))
             out_div_q = fx.logical_divide(row_out, fx.make_layout(quant_half_width, 1))
             gamma_div = fx.logical_divide(Gamma_buf, fx.make_layout(VEC_WIDTH, 1))
-            if is_smooth:
+            if const_expr(is_smooth):
                 xscale_div = fx.logical_divide(XScale_buf, fx.make_layout(VEC_WIDTH, 1))
 
             copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), elem_bits)
@@ -549,7 +549,7 @@ def _build_rmsnorm_quant_module(
                 g = _load_vec(gamma_div, idx).to(Float32)
                 x = in_local[tile_i].to(Float32)
                 y = (x * rrms) * g
-                if is_smooth:
+                if const_expr(is_smooth):
                     s = _load_vec(xscale_div, idx).to(Float32)
                     y = y * s
 
@@ -583,7 +583,7 @@ def _build_rmsnorm_quant_module(
             Input_buf = fx.rocdl.make_buffer_tensor(Input)
             Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma)
             Output_buf = fx.rocdl.make_buffer_tensor(Output)
-            if is_smooth:
+            if const_expr(is_smooth):
                 XScale_buf = fx.rocdl.make_buffer_tensor(XScale)
 
             copy_atom_s = fx.make_copy_atom(
@@ -603,7 +603,7 @@ def _build_rmsnorm_quant_module(
             row_div = fx.logical_divide(row_in, fx.make_layout(1, 1))
             gamma_div = fx.logical_divide(Gamma_buf, fx.make_layout(1, 1))
             out_div = fx.logical_divide(row_out, fx.make_layout(1, 1))
-            if is_smooth:
+            if const_expr(is_smooth):
                 xscale_div = fx.logical_divide(XScale_buf, fx.make_layout(1, 1))
 
             def _load_scalar(divided_tensor, index):
@@ -652,7 +652,7 @@ def _build_rmsnorm_quant_module(
                 x = x_e if dtype_str == "f32" else x_e.extf(compute_type)
                 g = g_e if dtype_str == "f32" else g_e.extf(compute_type)
                 y = (ArithValue(x) * ArithValue(rrms)) * ArithValue(g)
-                if is_smooth:
+                if const_expr(is_smooth):
                     s_e = _load_scalar(xscale_div, idx_safe)
                     s = s_e if dtype_str == "f32" else s_e.extf(compute_type)
                     y = ArithValue(y) * ArithValue(s)
@@ -676,7 +676,7 @@ def _build_rmsnorm_quant_module(
                     x = x_e if dtype_str == "f32" else x_e.extf(compute_type)
                     g = g_e if dtype_str == "f32" else g_e.extf(compute_type)
                     y = (ArithValue(x) * ArithValue(rrms)) * ArithValue(g)
-                    if is_smooth:
+                    if const_expr(is_smooth):
                         s_e = _load_scalar(xscale_div, idx)
                         s = s_e if dtype_str == "f32" else s_e.extf(compute_type)
                         y = ArithValue(y) * ArithValue(s)
