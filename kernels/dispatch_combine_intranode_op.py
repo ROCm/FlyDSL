@@ -476,7 +476,16 @@ class FlyDSLDispatchCombineIntraNodeOp:
         cfg    = self.cfg
         stream = torch.cuda.current_stream()
 
-        if self._use_fp8_cast:
+        # When skip_stage1=True (the only mode this method ever compiles for),
+        # the combine kernel does NOT read inp_c — Stage 1 is bypassed and the
+        # kernel reads from shmem_comb_inp_tok directly (already populated by
+        # the upstream fused GEMM2 epilogue P2P scatter).  So skip the
+        # potentially-expensive Python-level fp8 cast (.to(fp8) + .contiguous())
+        # if the caller gave us a fp8 input or even a placeholder bf16: the
+        # cast is a ~12us elementwise kernel that gets captured by cudagraph
+        # and ends up serially on the chain critical path for nothing.
+        # Caller (fused op wrapper) already CV-casted in the GEMM2 epilogue.
+        if self._use_fp8_cast and input.dtype != torch.float8_e4m3fn:
             inp_c = input.to(torch.float8_e4m3fn).contiguous()
         else:
             inp_c = input if input.is_contiguous() else input.contiguous()

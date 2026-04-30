@@ -149,9 +149,17 @@ class FlyDSLMoeGemm2CombineOp:
         self._dummy_bias = torch.empty(0, dtype=cfg.data_type, device=_dev)
         # _dummy_inp 用于 _run_stage1_only 的 combine_no_stage1 调用 (skip_stage1
         # 路径下 kernel 不读它, 但需要 valid tensor 占位).
+        # When fp8_cast is on, alloc the dummy directly as fp8 so the combine
+        # wrapper short-circuits the bf16->fp8 .to() + .contiguous() copies
+        # (those would otherwise add ~12us per chain to the critical path
+        # purely for a tensor the kernel never reads — see
+        # dispatch_combine_intranode_op.combine_no_stage1 dtype check).
         _mr = cfg.world_size * cfg.max_num_inp_token_per_rank
+        _dummy_dtype = (
+            torch.float8_e4m3fn if self._fp8_cast else cfg.data_type
+        )
         self._dummy_inp = torch.zeros(_mr, cfg.hidden_dim,
-                                      dtype=cfg.data_type, device=_dev)
+                                      dtype=_dummy_dtype, device=_dev)
 
     # ── 公开接口 ──────────────────────────────────────────────────────────
     def info(self) -> dict:
@@ -344,7 +352,10 @@ class FlyDSLMoeGemm2CombineOp:
         if not hasattr(self, "_dummy_inp") or self._dummy_inp is None:
             mr = cfg.world_size * cfg.max_num_inp_token_per_rank
             hd = cfg.hidden_dim
-            self._dummy_inp = torch.zeros(mr, hd, dtype=cfg.data_type, device=a2.device)
+            _dummy_dtype = (
+                torch.float8_e4m3fn if self._fp8_cast else cfg.data_type
+            )
+            self._dummy_inp = torch.zeros(mr, hd, dtype=_dummy_dtype, device=a2.device)
 
         # Debug switch: 用 baseline combine（带 stage1）替代 combine_no_stage1，
         # 验证 skip_stage1 路径是否是 hang 元凶。
