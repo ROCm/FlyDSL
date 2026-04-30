@@ -34,7 +34,12 @@ from tests.utils import get_dtype_max
 from tests.test_common import verify_output
 from flydsl.runtime.device import get_rocm_arch
 from tests.kernels.utils import fp4_utils
-from tests.kernels.benchmark_common import bench_kernel_us as _bench_kernel_us
+from tests.kernels.benchmark_common import (
+    bench_bytes_moved_stage1 as _bench_bytes_moved_stage1,
+    bench_bytes_moved_stage2 as _bench_bytes_moved_stage2,
+    bench_dtype_bpe as _bench_dtype_bpe,
+    bench_kernel_us as _bench_kernel_us,
+)
 
 ARCH = get_rocm_arch()
 # GFX950 (MI350) and newer typically use OCP standard float8_e4m3fn
@@ -192,6 +197,48 @@ def _perf_metrics_from_us(
     )
 
 
+def _bench_active_experts(tokens: int, topk: int, experts: int) -> int:
+    return min(int(tokens) * int(topk), int(experts))
+
+
+def _bench_stage1_byte_breakdown(
+    tokens: int,
+    model_dim: int,
+    inter_dim: int,
+    experts: int,
+    topk: int,
+    in_dtype: str,
+) -> Tuple[int, int, int, int, int, int]:
+    """Return logical bench bytes matching benchmark_common stage1 accounting."""
+    active_experts = _bench_active_experts(tokens, topk, experts)
+    a_bpe, w_bpe, w_scale_bpg = _bench_dtype_bpe(in_dtype)
+    bytes_x = int(tokens * model_dim * a_bpe)
+    bytes_w = int(active_experts * (2 * inter_dim) * model_dim * w_bpe)
+    bytes_scale_w = int(active_experts * (2 * inter_dim) * math.ceil(model_dim / SCALE_BLOCK) * w_scale_bpg)
+    bytes_out = int(tokens * topk * inter_dim * 2)
+    bytes_moved = _bench_bytes_moved_stage1(tokens, topk, model_dim, inter_dim, experts, in_dtype)
+    return bytes_moved, bytes_x, bytes_w, bytes_scale_w, bytes_out, active_experts
+
+
+def _bench_stage2_byte_breakdown(
+    tokens: int,
+    model_dim: int,
+    inter_dim: int,
+    experts: int,
+    topk: int,
+    in_dtype: str,
+) -> Tuple[int, int, int, int, int, int]:
+    """Return logical bench bytes matching benchmark_common stage2 accounting."""
+    active_experts = _bench_active_experts(tokens, topk, experts)
+    a_bpe, w_bpe, w_scale_bpg = _bench_dtype_bpe(in_dtype)
+    bytes_a2 = int(tokens * topk * inter_dim * a_bpe)
+    bytes_w2 = int(active_experts * model_dim * inter_dim * w_bpe)
+    bytes_scale_w2 = int(active_experts * model_dim * math.ceil(inter_dim / SCALE_BLOCK) * w_scale_bpg)
+    bytes_out = int(tokens * topk * model_dim * 2)
+    bytes_moved = _bench_bytes_moved_stage2(tokens, topk, model_dim, inter_dim, experts, in_dtype)
+    return bytes_moved, bytes_a2, bytes_w2, bytes_scale_w2, bytes_out, active_experts
+
+
 # ---- Stage1/Stage2 runners (helpers; NOT pytest tests) ----
 def run_moe_stage1(
     tokens: int,
@@ -221,6 +268,7 @@ def run_moe_stage1(
     flush_l2: bool = True,
     num_buffers: int = 1,
     use_tdm_gather: bool = True,
+    use_tdm_gather_as: bool = True,
     use_tdm_store: bool = False,
     inst_prefetch: bool = False,
     wave_specialized_tdm: bool = False,
@@ -392,6 +440,7 @@ def run_moe_stage1(
         waves_per_eu=waves_per_eu,
         num_buffers=int(num_buffers),
         use_tdm_gather=bool(use_tdm_gather),
+        use_tdm_gather_as=bool(use_tdm_gather_as),
         use_tdm_store=bool(use_tdm_store),
         inst_prefetch=bool(inst_prefetch),
         wave_specialized_tdm=bool(wave_specialized_tdm),
@@ -499,20 +548,15 @@ def run_moe_stage1(
     # Note: kernel launches full expert-block range; effective work is gated by num_valid_ids.
     flops = 2 * tokens * topk * (2 * inter_dim) * _orig_model_dim
 
-    # Rough bytes-moved accounting (same spirit as GEMM tests: count each tensor once).
-    bytes_moved = 0
-    bytes_x = tokens * _orig_model_dim  # 1B elements (fp4/fp8/a8w4)
-    bytes_w = (experts * (2 * inter_dim) * _orig_model_dim) // (2 if is_a8w4 else 1)
-    bytes_out = tokens * topk * inter_dim * 2
-    bytes_scale_x = tokens * 4
-    bytes_scale_w = experts * (2 * inter_dim) * 4
-    bytes_route = (
-        int(sorted_weights.numel()) * 4
-        + int(sorted_token_ids.numel()) * 4
-        + int(sorted_expert_ids.numel()) * 4
-    )
-    bytes_moved += bytes_x + bytes_w + bytes_out + bytes_scale_x + bytes_scale_w + bytes_route
-    read_bytes = bytes_x + bytes_w + bytes_scale_x + bytes_scale_w + bytes_route
+    (
+        bytes_moved,
+        bytes_x,
+        bytes_w,
+        bytes_scale_w,
+        bytes_out,
+        active_experts,
+    ) = _bench_stage1_byte_breakdown(tokens, _orig_model_dim, inter_dim, experts, topk, in_dtype)
+    read_bytes = bytes_moved - bytes_out
     write_bytes = bytes_out
     tflops, tbps, read_bw_gbs, write_bw_gbs = _perf_metrics_from_us(
         us,
@@ -532,10 +576,11 @@ def run_moe_stage1(
         f"{tflops:.2f} TFLOPS(logical, M={tokens*topk}) | {tbps:.3f} TB/s"
     )
     print(
-        f"  bandwidth: read {read_bw_gbs:.1f} GB/s + write {write_bw_gbs:.1f} GB/s | "
+        f"  bandwidth(logical active_E={active_experts}): "
+        f"read {read_bw_gbs:.1f} GB/s + write {write_bw_gbs:.1f} GB/s | "
         f"bytes: x={bytes_x/1e6:.1f}MB w={bytes_w/1e6:.1f}MB "
-        f"sx={bytes_scale_x/1e6:.1f}MB sw={bytes_scale_w/1e6:.1f}MB "
-        f"route={bytes_route/1e6:.1f}MB out={bytes_out/1e6:.1f}MB"
+        f"sw={bytes_scale_w/1e6:.1f}MB out={bytes_out/1e6:.1f}MB "
+        f"total={bytes_moved/1e6:.1f}MB"
     )
     if return_outputs:
         return out, us
@@ -578,6 +623,7 @@ def run_moe_stage2(
     flush_l2: bool = True,
     num_buffers: int = 1,
     use_tdm_gather: bool = True,
+    use_tdm_gather_as: bool = True,
     use_tdm_store: bool = False,
     inst_prefetch: bool = False,
     wave_specialized_tdm: bool = False,
@@ -824,6 +870,7 @@ def run_moe_stage2(
         doweight_stage2=bool(doweight_stage2),
         num_buffers=int(num_buffers),
         use_tdm_gather=bool(use_tdm_gather),
+        use_tdm_gather_as=bool(use_tdm_gather_as),
         use_tdm_store=bool(use_tdm_store),
         inst_prefetch=bool(inst_prefetch),
         wave_specialized_tdm=bool(wave_specialized_tdm),
@@ -969,19 +1016,15 @@ def run_moe_stage2(
     # Launches full expert-block range; effective work is gated by num_valid_ids.
     flops = 2 * tokens * topk * model_dim * _orig_inter_dim
 
-    bytes_moved = 0
-    bytes_a2 = tokens * topk * _orig_inter_dim  # 1B elements (fp4/fp8/a8w4)
-    bytes_w2 = (experts * model_dim * _orig_inter_dim) // (2 if is_a8w4 else 1)
-    bytes_out = tokens * model_dim * (2 if out_torch_dtype == torch.float16 else 4)
-    bytes_scale_a2 = tokens * topk * 4
-    bytes_scale_w2 = experts * model_dim * 4
-    bytes_route = (
-        int(sorted_weights.numel()) * 4
-        + int(sorted_token_ids.numel()) * 4
-        + int(sorted_expert_ids.numel()) * 4
-    )
-    bytes_moved += bytes_a2 + bytes_w2 + bytes_out + bytes_scale_a2 + bytes_scale_w2 + bytes_route
-    read_bytes = bytes_a2 + bytes_w2 + bytes_scale_a2 + bytes_scale_w2 + bytes_route
+    (
+        bytes_moved,
+        bytes_a2,
+        bytes_w2,
+        bytes_scale_w2,
+        bytes_out,
+        active_experts,
+    ) = _bench_stage2_byte_breakdown(tokens, model_dim, _orig_inter_dim, experts, topk, in_dtype)
+    read_bytes = bytes_moved - bytes_out
     write_bytes = bytes_out
     tflops, tbps, read_bw_gbs, write_bw_gbs = _perf_metrics_from_us(
         us,
@@ -1000,10 +1043,11 @@ def run_moe_stage2(
         f"{tflops:.2f} TFLOPS(logical, M={tokens*topk}) | {tbps:.3f} TB/s"
     )
     print(
-        f"  bandwidth: read {read_bw_gbs:.1f} GB/s + write {write_bw_gbs:.1f} GB/s | "
+        f"  bandwidth(logical active_E={active_experts}): "
+        f"read {read_bw_gbs:.1f} GB/s + write {write_bw_gbs:.1f} GB/s | "
         f"bytes: a2={bytes_a2/1e6:.1f}MB w2={bytes_w2/1e6:.1f}MB "
-        f"sa2={bytes_scale_a2/1e6:.1f}MB sw2={bytes_scale_w2/1e6:.1f}MB "
-        f"route={bytes_route/1e6:.1f}MB out={bytes_out/1e6:.1f}MB"
+        f"sw2={bytes_scale_w2/1e6:.1f}MB out={bytes_out/1e6:.1f}MB "
+        f"total={bytes_moved/1e6:.1f}MB"
     )
     # Print profile breakdown if the executor supports it
     if hasattr(exe, 'print_profile_stats'):
@@ -1040,6 +1084,7 @@ def run_moe_gemm_2stage(
     w_fp4_kernel: bool = False,
     flush_l2: bool = True,
     num_buffers: int = 1,
+    use_tdm_gather_as: bool = True,
     use_tdm_store: bool = False,
     inst_prefetch: bool = False,
     wave_specialized_tdm: bool = False,
@@ -1119,6 +1164,7 @@ def run_moe_gemm_2stage(
         skip_ref=bool(skip_ref),
         flush_l2=bool(flush_l2),
         num_buffers=int(num_buffers),
+        use_tdm_gather_as=bool(use_tdm_gather_as),
         use_tdm_store=bool(use_tdm_store),
         inst_prefetch=bool(inst_prefetch),
         wave_specialized_tdm=bool(wave_specialized_tdm),
@@ -1162,6 +1208,7 @@ def run_moe_gemm_2stage(
         use_valid_mask=use_valid_mask,
         flush_l2=bool(flush_l2),
         num_buffers=int(num_buffers),
+        use_tdm_gather_as=bool(use_tdm_gather_as),
         use_tdm_store=bool(use_tdm_store),
         inst_prefetch=bool(inst_prefetch),
         wave_specialized_tdm=bool(wave_specialized_tdm),
@@ -1194,6 +1241,7 @@ def _make_reduce_mode_compile_fn(use_flydsl_reduce: bool = True, use_valid_mask:
         expert_sched_mode: bool = True,
         num_buffers: int = 1,
         use_tdm_gather: bool = True,
+        use_tdm_gather_as: bool = True,
         use_tdm_store: bool = False,
         inst_prefetch: bool = False,
         wave_specialized_tdm: bool = False,
@@ -1219,6 +1267,7 @@ def _make_reduce_mode_compile_fn(use_flydsl_reduce: bool = True, use_valid_mask:
                 expert_sched_mode=bool(expert_sched_mode),
                 num_buffers=int(num_buffers),
                 use_tdm_gather=bool(use_tdm_gather),
+                use_tdm_gather_as=bool(use_tdm_gather_as),
                 use_tdm_store=bool(use_tdm_store),
                 inst_prefetch=bool(inst_prefetch),
                 wave_specialized_tdm=bool(wave_specialized_tdm),
@@ -1242,6 +1291,7 @@ def _make_reduce_mode_compile_fn(use_flydsl_reduce: bool = True, use_valid_mask:
                 expert_sched_mode=bool(expert_sched_mode),
                 num_buffers=int(num_buffers),
                 use_tdm_gather=bool(use_tdm_gather),
+                use_tdm_gather_as=bool(use_tdm_gather_as),
                 use_tdm_store=bool(use_tdm_store),
                 inst_prefetch=bool(inst_prefetch),
                 wave_specialized_tdm=bool(wave_specialized_tdm),
@@ -1773,6 +1823,14 @@ if __name__ == "__main__":
         help="Requested TDM store epilogue for gfx1250 MoE kernels.",
     )
     parser.add_argument(
+        "--use_tdm_gather_as",
+        type=_str2bool,
+        nargs="?",
+        const=True,
+        default=True,
+        help="Enable TDM gather for A-scale loads in gfx1250 MoE kernels.",
+    )
+    parser.add_argument(
         "--inst_prefetch",
         type=_str2bool,
         nargs="?",
@@ -1832,6 +1890,7 @@ if __name__ == "__main__":
         skip_ref=bool(args.skip_ref),
         flush_l2=not bool(args.no_flush_l2),
         num_buffers=int(args.num_buffers),
+        use_tdm_gather_as=bool(args.use_tdm_gather_as),
         use_tdm_store=bool(args.use_tdm_store),
         inst_prefetch=bool(args.inst_prefetch),
         wave_specialized_tdm=bool(args.wave_specialized_tdm),
