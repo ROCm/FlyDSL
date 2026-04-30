@@ -405,6 +405,7 @@ def _build_gemm2_callable(args, gemm2_in, out_dtype):
         model_dim=args.hidden_dim,
         inter_dim=args.inter_dim,
         experts=args.num_experts_per_rank,
+        xcd_swizzle=args.xcd_swizzle,
         topk=1,                     # EP 场景 reinterpret topk=1
         tile_m=args.tile_m2,
         tile_n=args.tile_n2,
@@ -1208,6 +1209,7 @@ def run_acceptance(rank, world_size, args):
             persist_m=args.persist_m,
             a_dtype=args.gemm2_a_dtype, b_dtype=args.gemm2_b_dtype,
             force_mode=args.fuse_mode,
+            xcd_swizzle=args.xcd_swizzle,
         )
 
     ms.shmem_barrier_all()
@@ -1420,6 +1422,8 @@ def _parse_args():
                    help="GEMM2 tile_k；FP4 路径必须 >=256")
     p.add_argument("--persist-m",            type=int, default=4,
                    help="moe_gemm2 沿 M 持久化 block 数")
+    p.add_argument("--xcd-swizzle",          type=int, default=0,
+                   help="moe_gemm2 跨 XCD swizzle 因子（=0 关闭；MI300 推荐 8）")
     p.add_argument("--gemm2-accumulate",     action="store_true", default=True,
                    help="GEMM2 epilogue 走 atomic-add（默认 True；fp4 reduce 模式时关掉）")
     # 模式

@@ -122,6 +122,7 @@ def compile_fused_moe_gemm2_combine(
     enable_bias: bool = False,
     model_dim_pad: int = 0,
     inter_dim_pad: int = 0,
+    xcd_swizzle: int = 0,
 ):
     """编译融合 GEMM2+combine kernel。
 
@@ -235,6 +236,7 @@ def compile_fused_moe_gemm2_combine(
         model_dim_pad=model_dim_pad,
         inter_dim_pad=inter_dim_pad,
         use_cshuffle_epilog=True,
+        xcd_swizzle=xcd_swizzle,
         fused_p2p_scatter=fused_cfg,
     )
 

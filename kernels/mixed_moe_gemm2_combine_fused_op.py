@@ -78,16 +78,18 @@ class FlyDSLMoeGemm2CombineOp:
         a_dtype: str = "fp8",
         b_dtype: str = "fp4",
         force_mode: str = "auto",
+        xcd_swizzle: int = 0,
     ):
-        self.cfg       = cfg
-        self.disp_op   = disp_op
-        self.inter_dim = inter_dim
-        self.tile_m    = tile_m
-        self.tile_n    = tile_n
-        self.tile_k    = tile_k
-        self.persist_m = persist_m
-        self.a_dtype   = a_dtype
-        self.b_dtype   = b_dtype
+        self.cfg         = cfg
+        self.disp_op     = disp_op
+        self.inter_dim   = inter_dim
+        self.tile_m      = tile_m
+        self.tile_n      = tile_n
+        self.tile_k      = tile_k
+        self.persist_m   = persist_m
+        self.a_dtype     = a_dtype
+        self.b_dtype     = b_dtype
+        self.xcd_swizzle = xcd_swizzle
 
         env_force = os.environ.get(_FORCE_MODE_ENV, "").strip().lower()
         if env_force:
@@ -145,6 +147,7 @@ class FlyDSLMoeGemm2CombineOp:
             force_mode=self.force_mode,
             tile=(self.tile_m, self.tile_n, self.tile_k),
             persist_m=self.persist_m,
+            xcd_swizzle=self.xcd_swizzle,
             a_dtype=self.a_dtype, b_dtype=self.b_dtype,
             out_dtype=self._out_dtype_str,
             inter_dim=self.inter_dim,
@@ -230,6 +233,7 @@ class FlyDSLMoeGemm2CombineOp:
             enable_weights=_en_wts,
             enable_std_moe=cfg.enable_std_moe,
             use_p2p_read=not cfg.use_external_inp_buf,
+            xcd_swizzle=self.xcd_swizzle,
         )
 
     def _run_stage1_only(self, *, a2, w2, a2_scale, w2_scale,
