@@ -179,6 +179,11 @@ class FlyDSLDispatchCombineIntraNodeOp:
 
         self._disp_compiled = None
         self._comb_compiled = None
+        # combine kernel 的 skip_stage1 变体：给 fused_gemm2_combine 算子使用，
+        # 此时 fused kernel 已经把 token / 权重 P2P 写入 shmem_comb_inp[_wts]，
+        # combine 只跑 Stage 2 (CrossDeviceBarrier) + Stage 3 (本地 weighted-accum)。
+        self._comb_no_s1_fn = None
+        self._comb_no_s1_compiled = None
 
     def _alloc_buffers(self):
         cfg  = self.cfg
@@ -207,6 +212,22 @@ class FlyDSLDispatchCombineIntraNodeOp:
         self.shmem_comb_inp_wts  = mori_shmem_create_tensor((mr * k,),     torch.float32)
         self.shmem_comb_out_wts  = mori_shmem_create_tensor((mt * k,),     torch.float32)
         self.shmem_xdev_bar_mem  = mori_shmem_create_tensor((npes,),        torch.int64)
+
+        # mori_shmem_create_tensor 走 shmem_malloc，分配的是未初始化的 raw memory。
+        # 对 fused MoE-GEMM2 + EP-Combine 路径，GEMM2 需要在 epilogue 用
+        # shmem_tok_id_to_src 解码 dest_pe / dest_lid，越界 garbage 会触发 LDS
+        # OOB → 写到任意全局地址 → 破坏 control state。这里把所有 combine 路径
+        # 直接读写的 symmetric buffer 显式清零，保证：
+        #   - shmem_tok_id_to_src[t] 对未被 dispatch 写入的 t 解码为 (pe=0, lid=0)，
+        #     P2P scatter 退化成"安全无副作用"（多写同一槽位）
+        #   - shmem_xdev_bar_mem 起始 0，CrossDeviceBarrier 第一次 wait 不会读到
+        #     残留值（依赖 cur_flag 单调递增）
+        #   - shmem_comb_inp_{tok,wts} 起始 0，combine_no_stage1 在 stage 3 累加
+        #     时不会读到 garbage
+        self.shmem_tok_id_to_src.zero_()
+        self.shmem_comb_inp_tok.zero_()
+        self.shmem_comb_inp_wts.zero_()
+        self.shmem_xdev_bar_mem.zero_()
 
         # Local device buffers
         self.dest_pe_ctr  = torch.zeros(npes, dtype=torch.int32, device=self._dev)
@@ -425,6 +446,131 @@ class FlyDSLDispatchCombineIntraNodeOp:
 
         if self._use_fp8_cast:
             fp8_bytes = mt * hdim  # 1 byte per fp8 element
+            out_tok = self.shmem_comb_out_tok.view(torch.int8)[
+                :fp8_bytes].view(torch.float8_e4m3fn).view(mt, hdim).to(torch.bfloat16)
+        else:
+            out_tok = self.shmem_comb_out_tok.view(torch.int8)[
+                :mt * cfg.token_bytes].view(cfg.data_type).view(mt, cfg.token_view_dim)
+        out_wts = self.shmem_comb_out_wts.view(mt, k)
+
+        if call_reset:
+            self.reset()
+        return out_tok, out_wts
+
+    def combine_no_stage1(self, input, weights, indices,
+                          packed_recv_x=None, cur_tok=None,
+                          call_reset=False):
+        """combine 的 stage1-skipped 变体。
+
+        语义：跳过 P2P scatter（外部 fused kernel 已把数据写入 shmem_comb_inp[_wts]），
+              只执行 Stage 2 (CrossDeviceBarrier) + Stage 3 (本地 weighted-accum)。
+
+        为简化实现，本变体复用 _fx_comb_inp 等所有 fx.Int64 常量，
+        与 self._comb_compiled 共用同一组 shmem buffer / P2P table。
+
+        约定：调用前 fused kernel 必须保证：
+              - shmem_comb_inp_tok 已写入本 PE 应接收的所有 token（按 max_tok_per_rank 槽位）
+              - shmem_comb_inp_wts 已写入对应权重（若 enable_weights）
+              - total_recv 已被 dispatch 设置完毕（Stage 3 用于读 cur_rank_num_token）
+        """
+        cfg    = self.cfg
+        stream = torch.cuda.current_stream()
+
+        if self._use_fp8_cast:
+            inp_c = input.to(torch.float8_e4m3fn).contiguous()
+        else:
+            inp_c = input if input.is_contiguous() else input.contiguous()
+        _cur_tok = cur_tok if cur_tok is not None else cfg.max_num_inp_token_per_rank
+
+        wts_ptr = self.shmem_disp_out_wts.data_ptr() if weights is None else weights.data_ptr()
+
+        _prx_ref = None
+        if self._use_fp8_cast and packed_recv_x is not None:
+            _prx_ref = packed_recv_x.view(torch.bfloat16).to(torch.float8_e4m3fn).contiguous()
+            prx_ptr = _prx_ref.data_ptr()
+        else:
+            prx_ptr = packed_recv_x.data_ptr() if packed_recv_x is not None else 0
+
+        if self._comb_no_s1_fn is None:
+            from .dispatch_combine_intranode_kernel import make_combine_jit
+            _use_fp8_cast = self._use_fp8_cast
+            _comb_dtype = torch.float8_e4m3fn if _use_fp8_cast else cfg.data_type
+            self._comb_no_s1_fn = make_combine_jit(
+                rank=cfg.rank, npes=cfg.world_size,
+                experts_per_rank=cfg.num_experts_per_rank,
+                experts_per_token=cfg.num_experts_per_token,
+                hidden_dim=cfg.hidden_dim,
+                max_tok_per_rank=cfg.max_num_inp_token_per_rank,
+                block_num=cfg.block_num,
+                warp_num_per_block=cfg.warp_num_per_block,
+                data_type=_comb_dtype,
+                enable_weights=True,
+                enable_std_moe=cfg.enable_std_moe,
+                use_p2p_read=not cfg.use_external_inp_buf,
+                skip_stage1=True,
+                # Weight P2P scatter is intentionally KEPT inside combine
+                # rather than done by the upstream fused_gemm2 kernel: doing
+                # the small weight stores in fused_gemm2 (concurrent with the
+                # heavy token P2P traffic) caused weight stores to be silently
+                # dropped on certain (src_pe, dst_pe) xGMI paths.  Running
+                # them here, on a quiet fabric, fixes that.
+                skip_stage1_keep_wts=True,
+            )
+
+        if self._comb_no_s1_compiled is None:
+            args = (
+                fx.Int64(inp_c.data_ptr()),
+                self._fx_comb_inp,
+                self._fx_comb_out,
+                self._fx_xdb_mem,
+                self._fx_xdev_flag,
+                self._fx_tok_map,
+                self._fx_comb_bar,
+                self._fx_trecv,
+                self._fx_tis,
+                self._fx_p2p_comb_inp,
+                self._fx_p2p_xdb_mem,
+                fx.Int64(wts_ptr),
+                self._fx_comb_inp_wts,
+                self._fx_comb_out_wts,
+                self._fx_p2p_comb_inp_wts,
+                fx.Int64(prx_ptr),
+                self._fx_disp_tok_map,
+                self._fx_disp_out_wts,
+                _cur_tok,
+                stream,
+            )
+            self._comb_no_s1_compiled = flyc.compile(self._comb_no_s1_fn, *args)
+        else:
+            self._comb_no_s1_compiled(
+                inp_c.data_ptr(),
+                self._fx_comb_inp,
+                self._fx_comb_out,
+                self._fx_xdb_mem,
+                self._fx_xdev_flag,
+                self._fx_tok_map,
+                self._fx_comb_bar,
+                self._fx_trecv,
+                self._fx_tis,
+                self._fx_p2p_comb_inp,
+                self._fx_p2p_xdb_mem,
+                wts_ptr,
+                self._fx_comb_inp_wts,
+                self._fx_comb_out_wts,
+                self._fx_p2p_comb_inp_wts,
+                prx_ptr,
+                self._fx_disp_tok_map,
+                self._fx_disp_out_wts,
+                _cur_tok,
+                stream,
+            )
+
+        mt   = cfg.max_num_inp_token_per_rank
+        hdim = cfg.hidden_dim
+        k    = cfg.num_experts_per_token
+
+        if self._use_fp8_cast:
+            fp8_bytes = mt * hdim
             out_tok = self.shmem_comb_out_tok.view(torch.int8)[
                 :fp8_bytes].view(torch.float8_e4m3fn).view(mt, hdim).to(torch.bfloat16)
         else:

@@ -2719,6 +2719,33 @@ def compile_mixed_moe_gemm2(
     sort_block_m: int = 0,
     b_nt: int = 2,
     xcd_swizzle: int = 0,
+    # ── Fused MoE-GEMM2 + EP-Combine (Stage 1 inline) ─────────────────────────
+    # If not None, the kernel epilogue replaces local atomic_add into ``arg_out``
+    # with a P2P buffer_store into the receiving rank's ``shmem_comb_inp_tok``,
+    # equivalent to inlining the combine kernel's Stage 1 (P2P scatter).
+    #
+    # Must be hashable (this whole function is wrapped in ``@lru_cache``).
+    # We accept a 5-tuple ``(npes, rank, max_tok_per_rank, enable_weights, k)``
+    # rather than a dict so the cache key works.
+    #   - npes:              int     (number of EP peers, == world_size)
+    #   - rank:              int     (this PE's rank)
+    #   - max_tok_per_rank:  int     (per-rank token budget; == cfg.max_num_inp_token_per_rank)
+    #   - enable_weights:    bool    (also P2P scatter sorted_weights → shmem_comb_inp_wts)
+    #   - experts_per_token: int     (== dispatch routing k)
+    # When enabled the launcher's signature is extended:
+    #   * ``arg_out`` is KEPT but is unused (callers may pass a dummy 1-element
+    #     tensor to keep the existing API surface small).
+    #   * 4 new i64 scalar params are appended after ``arg_bias`` and BEFORE
+    #     the trailing i32 shape params:
+    #         addr_tis              i32[max_recv]   shmem_tok_id_to_src
+    #         addr_p2p_comb_inp     i64[npes]       remote shmem_comb_inp_tok bases
+    #         addr_wts_buf          f32[max_recv*k] dispatch-output weights
+    #         addr_p2p_comb_inp_wts i64[npes]       remote shmem_comb_inp_wts bases
+    # And several baseline behaviors are forced:
+    #   * accumulate=False, doweight_stage2=False, enable_bias=False
+    #   * out_dtype must be bf16 or f16
+    #   * use_cshuffle_epilog must be True (we need LDS shuffle to coalesce P2P stores)
+    fused_p2p_scatter: tuple | None = None,
 ):
     """Compile stage2 kernel (`moe_gemm2`) and return the compiled executable.
 
@@ -2906,6 +2933,92 @@ def compile_mixed_moe_gemm2(
     def out_elem():
         return T.f32 if out_is_f32 else (T.bf16 if out_is_bf16 else T.f16)
 
+    # ── Decode & validate fused_p2p_scatter cfg (Stage 1 inline path) ────────
+    # Accepts a hashable 5-tuple
+    #   (npes, rank, max_tok_per_rank, enable_weights, experts_per_token).
+    # ``experts_per_token`` (= dispatch routing k) controls how many f32 weight
+    # slots the epilogue scatters per token row — combine 期望
+    # ``shmem_comb_inp_wts`` 是 ``[npes][max_tok][k]``，每个 (pe, lid) 槽位
+    # 都有 k 个 f32 权重；fused 必须按 k 个 f32 一并写过去，否则 stage 3
+    # 在 (pe, lid, slot=s>0) 槽位读到 garbage / zero。
+    _fp2p_enabled = fused_p2p_scatter is not None
+    if _fp2p_enabled:
+        if not (isinstance(fused_p2p_scatter, tuple) and len(fused_p2p_scatter) == 5):
+            raise TypeError(
+                "fused_p2p_scatter must be a 5-tuple "
+                "(npes, rank, max_tok_per_rank, enable_weights, experts_per_token), "
+                f"got {type(fused_p2p_scatter).__name__}={fused_p2p_scatter!r}"
+            )
+        (
+            _fp2p_npes, _fp2p_rank, _fp2p_max_tok,
+            _fp2p_enable_wts, _fp2p_k,
+        ) = (
+            int(fused_p2p_scatter[0]),
+            int(fused_p2p_scatter[1]),
+            int(fused_p2p_scatter[2]),
+            bool(fused_p2p_scatter[3]),
+            int(fused_p2p_scatter[4]),
+        )
+        if _fp2p_k <= 0:
+            raise ValueError(
+                f"fused_p2p_scatter.experts_per_token must be > 0, got {_fp2p_k}"
+            )
+        if _fp2p_max_tok <= 0 or (_fp2p_max_tok & (_fp2p_max_tok - 1)) != 0:
+            raise ValueError(
+                f"fused_p2p_scatter.max_tok_per_rank must be a power of two, "
+                f"got {_fp2p_max_tok}"
+            )
+        _fp2p_log2_max_tok = _fp2p_max_tok.bit_length() - 1
+        _fp2p_mask_max_tok = _fp2p_max_tok - 1
+        if not (0 <= _fp2p_rank < _fp2p_npes):
+            raise ValueError(
+                f"fused_p2p_scatter.rank ({_fp2p_rank}) must be in [0, {_fp2p_npes})"
+            )
+        # Forced baseline-behavior constraints under fused mode:
+        if not out_is_bf16 and not (out_s in ("f16", "fp16", "half")):
+            raise ValueError(
+                f"fused_p2p_scatter requires out_dtype bf16/f16, got {out_dtype!r}"
+            )
+        if accumulate:
+            raise ValueError(
+                "fused_p2p_scatter requires accumulate=False (no local atomic_add)."
+            )
+        if doweight_stage2:
+            raise ValueError(
+                "fused_p2p_scatter requires doweight_stage2=False (combine handles weighting)."
+            )
+        if enable_bias:
+            raise ValueError(
+                "fused_p2p_scatter does not support enable_bias=True (PR1 MVP)."
+            )
+        if topk != 1:
+            raise ValueError(
+                "fused_p2p_scatter requires topk=1 (EP scenario reinterprets received "
+                f"tokens as per-token single-expert), got topk={topk}."
+            )
+        if use_cshuffle_epilog is False:
+            raise ValueError(
+                "fused_p2p_scatter requires use_cshuffle_epilog=True (LDS shuffle "
+                "is needed to coalesce P2P stores along model_dim)."
+            )
+        # Bytes per row (along model_dim) of the destination shmem_comb_inp_tok.
+        # combine kernel uses `nbytes = hidden_dim * hidden_elem_size`; we mirror it.
+        if out_is_bf16 or out_s in ("f16", "fp16", "half"):
+            _fp2p_token_nbytes = int(model_dim) * 2
+        else:
+            raise ValueError(
+                f"unexpected out_dtype under fused_p2p_scatter: {out_dtype!r}"
+            )
+    else:
+        _fp2p_npes = 0
+        _fp2p_rank = 0
+        _fp2p_max_tok = 0
+        _fp2p_enable_wts = False
+        _fp2p_k = 0
+        _fp2p_log2_max_tok = None
+        _fp2p_mask_max_tok = None
+        _fp2p_token_nbytes = 0
+
     epilog_tag = "cshuffle"
     # IMPORTANT: include tiling in the module name to avoid accidentally reusing a compiled
     # binary for a different (tile_m, tile_n, tile_k) configuration.
@@ -2923,10 +3036,17 @@ def compile_mixed_moe_gemm2(
     _sbm_tag = "" if _sort_block_m == tile_m else f"_sbm{_sort_block_m}"
     _pm_tag = f"_persist_cu{_cu_num}" if _persistent else f"_pm{persist_m}"
     _xcd_tag = f"_xcd{xcd_swizzle}" if xcd_swizzle > 0 else ""
+    _fp2p_modtag = ""
+    if _fp2p_enabled:
+        _fp2p_modtag = (
+            f"_fusedP2P_pe{_fp2p_npes}_mt{_fp2p_max_tok}"
+            f"_k{_fp2p_k}"
+            f"{'_wts' if _fp2p_enable_wts else ''}"
+        )
     module_name = (
         f"mfma_moe2_a{a_dtype}_w{b_dtype}_{out_s}_{epilog_tag}"
         f"_t{tile_m}x{tile_n}x{tile_k}"
-        f"_vscale_fix3{_pm_tag}{_sbm_tag}{_xcd_tag}"
+        f"_vscale_fix3{_pm_tag}{_sbm_tag}{_xcd_tag}{_fp2p_modtag}"
     ).replace("-", "_")
     # -- LDS sizing (pure Python; no MLIR Context needed) ---------------------
     # Ping-pong A2 tiles via separate allocators (like stage1).
@@ -2951,6 +3071,29 @@ def compile_mixed_moe_gemm2(
     _lds_tid_offset_pong = allocator_pong._align(allocator_pong.ptr, 4)
     allocator_pong.ptr = _lds_tid_offset_pong + lds_tid_bytes
 
+    # ── Fused P2P scatter LDS tables (allocated alongside lds_tid in pong) ──
+    # Layout (after lds_tid):
+    #   [npes] i64  tok bases   (always when _fp2p_enabled)
+    #   [npes] i64  wts bases   (when _fp2p_enable_wts)
+    #   [tile_m] i32 dest_enc cache (always when _fp2p_enabled)
+    # Each entry's byte alignment kept by `_align()`.  When _fp2p_enabled
+    # is False all offsets are 0 and the corresponding code paths are
+    # dead-code-eliminated (Python compile-time constant).
+    if _fp2p_enabled:
+        _lds_p2p_tok_bases_offset = allocator_pong._align(allocator_pong.ptr, 8)
+        allocator_pong.ptr = _lds_p2p_tok_bases_offset + int(_fp2p_npes) * 8
+        if _fp2p_enable_wts:
+            _lds_p2p_wts_bases_offset = allocator_pong._align(allocator_pong.ptr, 8)
+            allocator_pong.ptr = _lds_p2p_wts_bases_offset + int(_fp2p_npes) * 8
+        else:
+            _lds_p2p_wts_bases_offset = 0
+        _lds_addr_tis_offset = allocator_pong._align(allocator_pong.ptr, 4)
+        allocator_pong.ptr = _lds_addr_tis_offset + int(tile_m) * 4
+    else:
+        _lds_p2p_tok_bases_offset = 0
+        _lds_p2p_wts_bases_offset = 0
+        _lds_addr_tis_offset = 0
+
     lds_ping_offset = allocator_ping._align(allocator_ping.ptr, 16)
     allocator_ping.ptr = lds_ping_offset + _ping_buffer_bytes
 
@@ -2968,6 +3111,16 @@ def compile_mixed_moe_gemm2(
             arg_sorted_weights: fx.Tensor,
             arg_num_valid_ids: fx.Tensor,
             arg_bias: fx.Tensor,
+            # Fused MoE-GEMM2 + EP-Combine Stage 1 (P2P scatter): always reserved
+            # in the kernel signature so a single @flyc.kernel def serves both
+            # the baseline path (callers pass fx.Int64(0) placeholders) and the
+            # fused path (callers pass real shmem / P2P-table base addresses).
+            # The kernel body uses the Python flag _fp2p_enabled (a closure-time
+            # constant) to dead-code-eliminate the unused branch.
+            addr_tis: fx.Int64,                 # i32[max_recv]   shmem_tok_id_to_src
+            addr_p2p_comb_inp: fx.Int64,        # i64[npes]       remote shmem_comb_inp_tok bases
+            addr_wts_buf: fx.Int64,             # f32[max_recv*k] dispatch-output weights (per slot)
+            addr_p2p_comb_inp_wts: fx.Int64,    # i64[npes]       remote shmem_comb_inp_wts bases
             i32_tokens_in: fx.Int32,
             i32_n_in: fx.Int32,
             i32_k_in: fx.Int32,
@@ -3090,6 +3243,44 @@ def compile_mixed_moe_gemm2(
                 base_ptr_pong, _lds_tid_offset_pong, T.i32, shape=(tile_m,)
             ).get()
 
+            # Fused-P2P path: alias LDS for the per-block P2P address tables.
+            # Layout (after lds_tid):
+            #   [npes] i64  tok bases   (always when _fp2p_enabled)
+            #   [npes] i64  wts bases   (when _fp2p_enable_wts)
+            #   [tile_m] i32 dest_enc cache (always when _fp2p_enabled)
+            # Keep SmemPtr objects (not .get()) for the *_ptr aliases so prologue
+            # / epilogue can use the cleaner SmemPtr.load() / SmemPtr.store() API,
+            # matching the combine kernel.  The dest_enc cache is read by simple
+            # memref.load (per row) so we keep its memref view via .get().
+            if const_expr(_fp2p_enabled):
+                lds_p2p_tok_bases_ptr = SmemPtr(
+                    base_ptr_pong,
+                    _lds_p2p_tok_bases_offset,
+                    T.i64,
+                    shape=(int(_fp2p_npes),),
+                )
+                lds_p2p_tok_bases_ptr.get()
+                if _fp2p_enable_wts:
+                    lds_p2p_wts_bases_ptr = SmemPtr(
+                        base_ptr_pong,
+                        _lds_p2p_wts_bases_offset,
+                        T.i64,
+                        shape=(int(_fp2p_npes),),
+                    )
+                    lds_p2p_wts_bases_ptr.get()
+                else:
+                    lds_p2p_wts_bases_ptr = None
+                lds_addr_tis = SmemPtr(
+                    base_ptr_pong,
+                    _lds_addr_tis_offset,
+                    T.i32,
+                    shape=(int(tile_m),),
+                ).get()
+            else:
+                lds_p2p_tok_bases_ptr = None
+                lds_p2p_wts_bases_ptr = None
+                lds_addr_tis = None
+
             # Buffer resources.
             # For dynamic memrefs, `max_size=False` cannot infer the logical size from the memref *type*,
             # so we should pass `num_records_bytes` explicitly for stable hardware OOB behavior.
@@ -3141,6 +3332,43 @@ def compile_mixed_moe_gemm2(
             # expensive waterfall loop the compiler would otherwise emit.
             num_valid_i32 = rocdl.ReadfirstlaneOp(T.i32, num_valid_i32).res
             num_valid_idx = arith.index_cast(ir.IndexType.get(), num_valid_i32)
+
+            # ── Fused-P2P prologue: populate per-block LDS P2P address tables ──
+            # Mirrors the combine kernel: lane[0..npes) of warp 0 buffer_loads
+            # one i64 base per peer and stores it into LDS, so the epilogue
+            # can do an O(1) LDS lookup keyed by `dest_pe` to get the remote
+            # shmem_comb_inp_tok base address.  This is dead-code-eliminated
+            # when _fp2p_enabled is False (Python-time constant).
+            if const_expr(_fp2p_enabled):
+                _r_p2p_tok = buffer_ops.create_buffer_resource_from_addr(
+                    addr_p2p_comb_inp
+                )
+                _c_npes_idx = arith.constant(int(_fp2p_npes), index=True)
+                _is_p2p_lane = arith.cmpi(
+                    arith.CmpIPredicate.ult, tx, _c_npes_idx
+                )
+                _if_load_tok_p2p = scf.IfOp(_is_p2p_lane)
+                with ir.InsertionPoint(_if_load_tok_p2p.then_block):
+                    _tx_i32 = arith.index_cast(T.i32, tx)
+                    _v = buffer_ops.buffer_load(
+                        _r_p2p_tok, _tx_i32, vec_width=1, dtype=T.i64
+                    )
+                    lds_p2p_tok_bases_ptr.store(_v, [tx])
+                    scf.YieldOp([])
+
+                if const_expr(_fp2p_enable_wts):
+                    _r_p2p_wts = buffer_ops.create_buffer_resource_from_addr(
+                        addr_p2p_comb_inp_wts
+                    )
+                    _if_load_wts_p2p = scf.IfOp(_is_p2p_lane)
+                    with ir.InsertionPoint(_if_load_wts_p2p.then_block):
+                        _tx_i32_w = arith.index_cast(T.i32, tx)
+                        _vw = buffer_ops.buffer_load(
+                            _r_p2p_wts, _tx_i32_w, vec_width=1, dtype=T.i64
+                        )
+                        lds_p2p_wts_bases_ptr.store(_vw, [tx])
+                        scf.YieldOp([])
+                gpu.barrier()
 
             # fp16 path ignores scales completely (implicit scale=1.0).
             sx_rsrc = 1
@@ -3982,6 +4210,10 @@ def compile_mixed_moe_gemm2(
 
                 # Preload sorted_idx into lds_tid for epilogue precompute_row
                 # (N-independent; placed before N-tile loop so it's done once per M-tile.)
+                # When _fp2p_enabled, also resolve addr_tis[t] for this row in
+                # the same prologue lane and stash into lds_addr_tis, so the
+                # epilogue reads dest_enc from LDS instead of reissuing a
+                # 4-byte VMEM load every store_pair invocation.
                 _c_tile_m_idx = arith.constant(tile_m, index=True)
                 _tid_in_range = arith.cmpi(CmpIPredicate.ult, tx, _c_tile_m_idx)
                 _if_tid = scf.IfOp(_tid_in_range)
@@ -3992,6 +4224,22 @@ def compile_mixed_moe_gemm2(
                     )
                     _tid_vec1 = vector.from_elements(T.vec(1, T.i32), [_tid_val])
                     vector.store(_tid_vec1, lds_tid, [tx])
+                    if const_expr(_fp2p_enabled):
+                        # `t = fused2 & 0x00FFFFFF` — same decode as in
+                        # precompute_row; we resolve addr_tis here so the hot
+                        # epilogue path does an LDS load only.
+                        _mask24_pre = arith.constant(0xFFFFFF)
+                        _tid_t_i32 = _tid_val & _mask24_pre
+                        _r_tis_pre = buffer_ops.create_buffer_resource_from_addr(
+                            addr_tis
+                        )
+                        _dest_enc_pre = buffer_ops.buffer_load(
+                            _r_tis_pre, _tid_t_i32, vec_width=1, dtype=T.i32
+                        )
+                        _dest_enc_vec1 = vector.from_elements(
+                            T.vec(1, T.i32), [_dest_enc_pre]
+                        )
+                        vector.store(_dest_enc_vec1, lds_addr_tis, [tx])
                     scf.YieldOp([])
 
                 gpu.barrier()
@@ -4388,6 +4636,114 @@ def compile_mixed_moe_gemm2(
                             alignment=_e_vec * out_elem_bytes,
                         )
 
+                # ── Fused-P2P epilogue (Stage 1 inline) ─────────────────────
+                # When _fp2p_enabled, replace the baseline precompute_row +
+                # store_pair to write directly into the destination peer's
+                # shmem_comb_inp_tok via P2P `buffer_store(cache_modifier=SLC)`,
+                # instead of writing local arg_out + atomic_add.
+                #
+                # Hoist all per-row constants (log2/mask/rank*max_tok/nbytes/
+                # out_elem_bytes) here so the inner column loop in store_pair
+                # is reduced to a single int32 add + one buffer_store.
+                #
+                # NOTE on hoisting: addr_tis lookup + LDS p2p_bases load +
+                # buffer-resource construction are done ONCE per row inside
+                # precompute_row (called once per m_local in c_shuffle_epilog)
+                # rather than per (row, col) pair.
+                #
+                # NOTE: weight P2P scatter is intentionally NOT done here.
+                # Earlier attempts to inline the small ~16-byte weight stores
+                # alongside heavy concurrent token P2P stores caused weights
+                # to be silently dropped on certain (src_pe, dst_pe) xGMI
+                # paths.  Weight scatter is delegated to combine_no_stage1's
+                # Stage 1 (skip_stage1=True, skip_stage1_keep_wts=True), which
+                # runs on a quiesced fabric (no concurrent token traffic).
+                if const_expr(_fp2p_enabled):
+                    _c_log2_max_tok = arith.constant(int(_fp2p_log2_max_tok))
+                    _c_mask_max_tok = arith.constant(int(_fp2p_mask_max_tok))
+                    _c_rank_x_maxtok = arith.constant(
+                        int(_fp2p_rank) * int(_fp2p_max_tok)
+                    )
+                    _c_token_nbytes = arith.constant(int(_fp2p_token_nbytes))
+                    _c_out_elem_bytes_i32 = arith.constant(int(out_elem_bytes))
+
+                    def precompute_row(*, row_local, row):
+                        # Use lds_tid (sorted_idx preloaded to LDS) — same
+                        # row_valid check as baseline.
+                        fused2 = memref.load(lds_tid, [row_local])
+                        row_i32 = arith.index_cast(T.i32, row)
+                        row_valid0 = arith.cmpi(
+                            CmpIPredicate.ult, row_i32, num_valid_i32
+                        )
+                        t = fused2 & mask24_i32
+                        s = fused2 >> 24
+                        t_ok = arith.cmpi(CmpIPredicate.ult, t, tokens_i32)
+                        s_ok = arith.cmpi(CmpIPredicate.ult, s, topk_i32_v)
+                        row_valid = arith.andi(
+                            row_valid0, arith.andi(t_ok, s_ok)
+                        )
+
+                        # Read pre-resolved dest_enc from LDS (populated in
+                        # the kernel prologue) to avoid a per-row VMEM load.
+                        dest_enc = memref.load(lds_addr_tis, [row_local])
+                        dest_pe = dest_enc >> _c_log2_max_tok
+                        dest_lid = dest_enc & _c_mask_max_tok
+                        dest_pe_idx = arith.index_cast(
+                            ir.IndexType.get(), dest_pe
+                        )
+                        pe_base_i64 = lds_p2p_tok_bases_ptr.load(
+                            [dest_pe_idx]
+                        )
+                        slot_id_i32 = _c_rank_x_maxtok + dest_lid
+                        slot_off_bytes_i32 = slot_id_i32 * _c_token_nbytes
+                        rsrc_dst = (
+                            buffer_ops.create_buffer_resource_from_addr(
+                                pe_base_i64
+                            )
+                        )
+                        # row_ctx packs (fused2, slot_off_bytes_i32, rsrc_dst).
+                        # store_pair only uses the latter two; fused2 is kept
+                        # for parity with baseline (in case future branches
+                        # want to re-decode (t, s)).
+                        return (
+                            (fused2, slot_off_bytes_i32, rsrc_dst),
+                            row_valid,
+                        )
+
+                    def store_pair(
+                        *, row_local, row, row_ctx, col_pair0, col_g0, frag
+                    ):
+                        # row_ctx packed in precompute_row above.  We do NOT
+                        # redo addr_tis[t] / lds_p2p_tok_bases[dest_pe] /
+                        # buffer-resource construction here — that all happens
+                        # once per row.  Per-column work is reduced to a
+                        # single int32 add + one buffer_store.
+                        _, slot_off_bytes_i32, rsrc_dst = row_ctx
+                        col_i32 = arith.index_cast(T.i32, col_g0)
+                        col_off_bytes = col_i32 * _c_out_elem_bytes_i32
+                        total_off_bytes = slot_off_bytes_i32 + col_off_bytes
+                        # SLC (cache_modifier=2): bypass L1 since this write
+                        # targets a peer GPU's HBM via xGMI; caching it in
+                        # local L1 just pollutes the cache and adds a
+                        # writeback round-trip.  Mirrors what the baseline
+                        # combine kernel does for stage1 P2P writes.
+                        # NOTE: buffer_store treats `offset` as ELEMENT count
+                        # by default (auto-scales by element_bytes of `frag`).
+                        # `frag` is vector<EVecxbf16/f16>, element_bytes=2.
+                        # We pass a byte offset and set `offset_is_bytes=True`
+                        # to bypass the implicit scale; without this flag the
+                        # byte offset would be doubled, landing every write at
+                        # slot=2*dest_lid and column=2*col_g0 (the bug that
+                        # left half the columns filled and corrupted neighbor
+                        # lid slots).
+                        buffer_ops.buffer_store(
+                            frag,
+                            rsrc_dst,
+                            total_off_bytes,
+                            offset_is_bytes=True,
+                            cache_modifier=2,
+                        )
+
                 _e_vec = 2 if accumulate else min(tile_n // 32, 8)
                 c_shuffle_epilog(
                     arith=arith,
@@ -4429,7 +4785,18 @@ def compile_mixed_moe_gemm2(
                     _moe_gemm2_then_body()
                     scf.YieldOp([])
 
-                gpu.barrier()
+                # m-tile boundary barrier:
+                #   baseline: gpu.barrier() = s_waitcnt vmcnt(0) lgkmcnt(0) + s_barrier
+                #   fused:    skip vmcnt(0); only wait LDS counters.  Epilogue VMEM
+                #     stores are SLC P2P scatter to remote shmem_comb_inp_tok and
+                #     have no producer/consumer relationship with the next m-tile
+                #     prologue (ping-pong LDS region).  Letting them complete
+                #     out-of-order across the m-tile boundary lets the next tile's
+                #     A/B prefetch + MFMA hide the xGMI scatter latency.
+                if const_expr(_fp2p_enabled):
+                    _barrier(vmcnt=63, lgkmcnt=0)
+                else:
+                    gpu.barrier()
                 scf.YieldOp([_cur_active])
             else:
                 _if_valid = scf.IfOp(_all_valid)
@@ -4437,7 +4804,10 @@ def compile_mixed_moe_gemm2(
                     _moe_gemm2_then_body()
                     scf.YieldOp([])
 
-                gpu.barrier()
+                if const_expr(_fp2p_enabled):
+                    _barrier(vmcnt=63, lgkmcnt=0)
+                else:
+                    gpu.barrier()
                 scf.YieldOp([expert_i32, _expert_b_base])
             _for_ip.__exit__(None, None, None)
 
@@ -4461,6 +4831,81 @@ def compile_mixed_moe_gemm2(
         _cu_num if _persistent else 0,
         xcd_swizzle,
     )
+
+    if _fp2p_enabled:
+
+        @flyc.jit
+        def launch_mixed_moe_gemm2_fused(
+            arg_out: fx.Tensor,
+            arg_x: fx.Tensor,
+            arg_w: fx.Tensor,
+            arg_scale_x: fx.Tensor,
+            arg_scale_w: fx.Tensor,
+            arg_sorted_token_ids: fx.Tensor,
+            arg_expert_ids: fx.Tensor,
+            arg_sorted_weights: fx.Tensor,
+            arg_num_valid_ids: fx.Tensor,
+            arg_bias: fx.Tensor,
+            addr_tis: fx.Int64,
+            addr_p2p_comb_inp: fx.Int64,
+            addr_wts_buf: fx.Int64,
+            addr_p2p_comb_inp_wts: fx.Int64,
+            i32_tokens_in: fx.Int32,
+            i32_n_in: fx.Int32,
+            i32_k_in: fx.Int32,
+            i32_size_expert_ids_in: fx.Int32,
+            stream: fx.Stream,
+        ):
+            _ = _cache_tag
+            allocator_pong.finalized = False
+            allocator_ping.finalized = False
+            ctx = CompilationContext.get_current()
+            with ir.InsertionPoint(ctx.gpu_module_body):
+                allocator_pong.finalize()
+                allocator_ping.finalize()
+
+            n_in = arith.index_cast(ir.IndexType.get(), i32_n_in.ir_value())
+            _tile_n_idx = arith.constant(tile_n, index=True)
+            _model_dim_pad_idx = arith.constant(model_dim_pad, index=True)
+            gx = (
+                n_in - _model_dim_pad_idx + _tile_n_idx - arith.constant(1, index=True)
+            ) / _tile_n_idx
+            if const_expr(_persistent):
+                gy = arith.constant(_cu_num, index=True)
+            else:
+                _c_pm_l = arith.constant(persist_m, index=True)
+                gy = (
+                    arith.index_cast(ir.IndexType.get(), i32_size_expert_ids_in.ir_value())
+                    + _c_pm_l
+                    - arith.constant(1, index=True)
+                ) / _c_pm_l
+
+            moe_gemm2(
+                arg_out,
+                arg_x,
+                arg_w,
+                arg_scale_x,
+                arg_scale_w,
+                arg_sorted_token_ids,
+                arg_expert_ids,
+                arg_sorted_weights,
+                arg_num_valid_ids,
+                arg_bias,
+                addr_tis,
+                addr_p2p_comb_inp,
+                addr_wts_buf,
+                addr_p2p_comb_inp_wts,
+                i32_tokens_in,
+                i32_n_in,
+                i32_k_in,
+                i32_size_expert_ids_in,
+            ).launch(
+                grid=(gx, gy, 1),
+                block=(256, 1, 1),
+                stream=stream,
+            )
+
+        return launch_mixed_moe_gemm2_fused
 
     @flyc.jit
     def launch_mixed_moe_gemm2(
@@ -4504,6 +4949,12 @@ def compile_mixed_moe_gemm2(
                 - arith.constant(1, index=True)
             ) / _c_pm_l
 
+        # Baseline path: pass i64(0) placeholders for the fused-only address
+        # parameters; the kernel body's _fp2p_enabled flag (Python compile-time
+        # constant) ensures the corresponding LDS-table-load / P2P-store ops
+        # are not emitted, so the unused arguments cost nothing at runtime.
+        _zero_i64 = fx.Int64(0)
+
         moe_gemm2(
             arg_out,
             arg_x,
@@ -4515,6 +4966,10 @@ def compile_mixed_moe_gemm2(
             arg_sorted_weights,
             arg_num_valid_ids,
             arg_bias,
+            _zero_i64,
+            _zero_i64,
+            _zero_i64,
+            _zero_i64,
             i32_tokens_in,
             i32_n_in,
             i32_k_in,

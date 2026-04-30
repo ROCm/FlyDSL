@@ -16,7 +16,7 @@ for _p in [os.path.join(_HERE, "../python"), "/home/yashao/FlyDSL/python",
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.expr import range_constexpr
+from flydsl.expr import range_constexpr, const_expr
 from flydsl.expr import arith
 from flydsl.expr.typing import Stream
 import torch
@@ -34,7 +34,9 @@ from flydsl.expr.buffer_ops import (
     buffer_store,
 )
 from flydsl._mlir import ir as _ir
+from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm as _llvm_d
+from flydsl._mlir.dialects import scf as scf
 from flydsl._mlir.ir import IntegerAttr as _IntAttr, IntegerType as _IntTy
 
 
@@ -270,7 +272,7 @@ def make_dispatch_kernel(
                         buffer_load(_r_p2p_out_idx, dest_pe, vec_width=1, dtype=T.i64()))
                     buffer_store(ix_val, _r_idx_remote, dst_slot)
 
-            if enable_scales:
+            if const_expr(enable_scales):
                 if arith.cmpi(arith.CmpIPredicate.ult, lane, arith.constant(scale_n_i32)):
                     if arith.cmpi(arith.CmpIPredicate.eq, dup_ballot, arith.constant(0, type=T.i64())):
                         _r_scales = create_buffer_resource_from_addr(_lv_unwrap(addr_scales))
@@ -291,23 +293,23 @@ def make_dispatch_kernel(
             rsrc_dst = create_buffer_resource_from_addr(_lv_unwrap(tok_remote))
             lane4    = lane * 4
             _safe_disp_end = (n_i32 // 512) * 512
-            if n_i32 >= 512 and _safe_disp_end > 0:
+            if const_expr(n_i32 >= 512 and _safe_disp_end > 0):
                 safe_copy_end = arith.select(is_dup, lane4, arith.constant(_safe_disp_end))
-                for ec4 in range(_to_idx(lane4), _to_idx(safe_copy_end), 512):
+                for ec4 in range(_to_idx(lane4), _to_idx(safe_copy_end), _to_idx(512)):
                     ec4      = _to_i32(ec4)
                     vec4_0   = buffer_load(rsrc_src, ec4, vec_width=4, dtype=T.i32())
                     vec4_1   = buffer_load(rsrc_src, ec4 + 256, vec_width=4, dtype=T.i32())
                     buffer_store(vec4_0, rsrc_dst, ec4)
                     buffer_store(vec4_1, rsrc_dst, ec4 + 256)
-            if _safe_disp_end < n_i32:
+            if const_expr(_safe_disp_end < n_i32):
                 tail_copy_end = arith.select(is_dup, lane4, arith.constant(n_i32))
-                for ec4 in range(_to_idx(lane4 + arith.constant(_safe_disp_end)), _to_idx(tail_copy_end), 256):
+                for ec4 in range(_to_idx(lane4 + arith.constant(_safe_disp_end)), _to_idx(tail_copy_end), _to_idx(256)):
                     ec4      = _to_i32(ec4)
                     vec4_0   = buffer_load(rsrc_src, ec4, vec_width=4, dtype=T.i32())
                     buffer_store(vec4_0, rsrc_dst, ec4)
-            elif n_i32 < 512:
+            elif const_expr(n_i32 < 512):
                 copy_end = arith.select(is_dup, lane4, arith.constant(n_i32))
-                for ec4 in range(_to_idx(lane4), _to_idx(copy_end), 256):
+                for ec4 in range(_to_idx(lane4), _to_idx(copy_end), _to_idx(256)):
                     ec4      = _to_i32(ec4)
                     vec4_0   = buffer_load(rsrc_src, ec4, vec_width=4, dtype=T.i32())
                     buffer_store(vec4_0, rsrc_dst, ec4)
@@ -318,7 +320,7 @@ def make_dispatch_kernel(
             atomic_add_global_at(addr_disp_bar, arith.constant(1))
 
         rtn_local_off = arith.zext_i64(arith.constant(rank)) * 4
-        for dest_pe in range(_to_idx(lane), _to_idx(npes), 64):
+        for dest_pe in range(_to_idx(lane), _to_idx(npes), _to_idx(64)):
             dest_pe = _to_i32(dest_pe)
             if arith.cmpi(arith.CmpIPredicate.eq, gw_id, arith.constant(0)):
                 mori_shmem.int32_wait_until_equals(addr_disp_bar, block_num)
@@ -329,7 +331,7 @@ def make_dispatch_kernel(
                 store_i32_system(rtn_remote, arith.constant(0), nsig)
 
         # Phase 3: 接收信号，累计 total_recv
-        for src_pe in range(_to_idx(lane), _to_idx(npes), 64):
+        for src_pe in range(_to_idx(lane), _to_idx(npes), _to_idx(64)):
             src_pe = _to_i32(src_pe)
             if arith.cmpi(arith.CmpIPredicate.eq, gw_id, arith.constant(0)):
                 rtn_src  = addr_recv_num + arith.zext_i64(src_pe) * 4
@@ -344,7 +346,7 @@ def make_dispatch_kernel(
                 buffer_store(_lv_unwrap(arith.constant(0)), _r_tok_off, arith.constant(0))
 
         # Phase 4: ConvertDispatchOutput (StdMoE)
-        if enable_std_moe:
+        if const_expr(enable_std_moe):
             from flydsl._mlir.dialects import scf as _scf_d
             from flydsl._mlir.ir import InsertionPoint as _IP
             _i32_ty = T.i32()
@@ -412,7 +414,7 @@ def make_dispatch_kernel(
                 _safe_cdo_end = (n_i32 // 512) * 512
                 if n_i32 >= 512 and _safe_cdo_end > 0:
                     _copy_end_dual = arith.select(is_local, arith.constant(_safe_cdo_end), _lane4)
-                    for ec4 in range(_to_idx(_lane4), _to_idx(_copy_end_dual), 512):
+                    for ec4 in range(_to_idx(_lane4), _to_idx(_copy_end_dual), _to_idx(512)):
                         ec4 = _to_i32(ec4)
                         _v0 = buffer_load(_rsrc_s, ec4, vec_width=4, dtype=T.i32())
                         _v1 = buffer_load(_rsrc_s, ec4 + 256, vec_width=4, dtype=T.i32())
@@ -420,13 +422,13 @@ def make_dispatch_kernel(
                         buffer_store(_v1, _rsrc_d, ec4 + 256)
                 if _safe_cdo_end < n_i32:
                     _copy_end_tail = arith.select(is_local, arith.constant(n_i32), _lane4)
-                    for ec4 in range(_to_idx(_lane4 + arith.constant(_safe_cdo_end)), _to_idx(_copy_end_tail), 256):
+                    for ec4 in range(_to_idx(_lane4 + arith.constant(_safe_cdo_end)), _to_idx(_copy_end_tail), _to_idx(256)):
                         ec4 = _to_i32(ec4)
                         _v0 = buffer_load(_rsrc_s, ec4, vec_width=4, dtype=T.i32())
                         buffer_store(_v0, _rsrc_d, ec4)
                 elif n_i32 < 512:
                     _copy_end_single = arith.select(is_local, arith.constant(n_i32), _lane4)
-                    for ec4 in range(_to_idx(_lane4), _to_idx(_copy_end_single), 256):
+                    for ec4 in range(_to_idx(_lane4), _to_idx(_copy_end_single), _to_idx(256)):
                         ec4 = _to_i32(ec4)
                         _v0 = buffer_load(_rsrc_s, ec4, vec_width=4, dtype=T.i32())
                         buffer_store(_v0, _rsrc_d, ec4)
@@ -449,8 +451,24 @@ def make_combine_kernel(
     enable_weights: bool = False,
     enable_std_moe: bool = False,
     use_p2p_read: bool = False,
+    skip_stage1: bool = False,
+    skip_stage1_keep_wts: bool = False,
 ):
-    """创建 combine intranode @flyc.kernel。"""
+    """创建 combine intranode @flyc.kernel。
+
+    skip_stage1:
+        若为 True，则编译期裁掉 Stage 1（P2P scatter / ConvertCombineInput）。
+        外部上游 kernel（例如 fused_gemm2_combine 的 stage1_only 变体）需提前
+        把 token / 权重 P2P 写入 shmem_comb_inp[_wts]，本 combine kernel 只
+        负责 Stage 2 (CrossDeviceBarrier) + Stage 3 (本地读 + WarpAccum)。
+
+    skip_stage1_keep_wts:
+        与 skip_stage1=True 配合使用。意为"上游 kernel 只完成了 token P2P
+        scatter，权重 P2P scatter 仍由 combine kernel 自己做"。设计动机：
+        当上游 fused_gemm2 的 token P2P 流量很重时，把权重写挂在同一个 kernel
+        里会因为 fabric 饱和而出现写丢失；把 ~16-byte 的轻量权重写延后到
+        combine kernel 的 Stage 1，跑在干净 fabric 上，反而更可靠。
+    """
     max_recv   = npes * max_tok_per_rank
     _is_fp4 = (data_type == torch.float4_e2m1fn_x2)
     if _is_fp4:
@@ -787,25 +805,63 @@ def make_combine_kernel(
                                  shape=(npes,))
         _lds_p2p_bases.get()
 
-        if arith.cmpi(arith.CmpIPredicate.ult, lane, arith.constant(npes)):
+        # Manual scf.IfOp construction: ast_rewriter would otherwise treat
+        # `_lds_p2p_bases.store(...)` inside the if-then as a mutation of the
+        # captured SmemPtr (because SmemPtr.store internally calls .get() which
+        # mutates self._view_cache), and reject the if since SmemPtr is not an
+        # MLIR-backed value that can be carried through scf.if's yield.
+        _if_p2p_lane = scf.IfOp(_lv_unwrap(arith.cmpi(arith.CmpIPredicate.ult, lane, arith.constant(npes))))
+        with ir.InsertionPoint(_if_p2p_lane.then_block):
             _p2p_base = buffer_load(_r_p2p_comb, lane, vec_width=1, dtype=T.i64())
             _lds_p2p_bases.store(_p2p_base, [_to_idx(lane)])
+            scf.YieldOp([])
 
-        if enable_weights:
+        if const_expr(enable_weights):
             _r_p2p_comb_wt = create_buffer_resource_from_addr(_lv_unwrap(addr_p2p_comb_inp_wts))
             _lds_p2p_wt_bases = SmemPtr(base_ptr, p2p_wt_base_offset, T.i64(),
                                         shape=(npes,))
             _lds_p2p_wt_bases.get()
-            if arith.cmpi(arith.CmpIPredicate.ult, lane, arith.constant(npes)):
+            _if_p2p_wt_lane = scf.IfOp(_lv_unwrap(arith.cmpi(arith.CmpIPredicate.ult, lane, arith.constant(npes))))
+            with ir.InsertionPoint(_if_p2p_wt_lane.then_block):
                 _p2p_wt_base = buffer_load(_r_p2p_comb_wt, lane, vec_width=1, dtype=T.i64())
                 _lds_p2p_wt_bases.store(_p2p_wt_base, [_to_idx(lane)])
+                scf.YieldOp([])
 
         fx.barrier()
 
         # Stage 1: P2P scatter / ConvertCombineInput
+        # 编译期 skip_stage1：若上游 kernel 已完成 Stage 1 等价的 P2P 写入，
+        # 则整段 Stage 1 在 Python 层被裁掉（dead-code elimination at compile time）。
         n_chunks = nbytes // 16
 
-        if enable_std_moe:
+        if const_expr(skip_stage1):
+            if const_expr(skip_stage1_keep_wts and enable_weights):
+                # Weight-only Stage 1: same as default path but only writes
+                # the small weight slot (no per-token hidden bytes).  Used by
+                # fused_gemm2_combine to keep weight scatter off the heavy
+                # token-write fabric.
+                for tok_i in range(_to_idx(gw_id), _to_idx(total_recv_val), _to_idx(gw_num)):
+                    tok_i = _to_i32(tok_i)
+                    dest_enc = buffer_load(_r_tis, tok_i, vec_width=1, dtype=T.i32())
+                    if const_expr(_log2_max_tok is not None):
+                        dest_pe  = dest_enc >> arith.constant(_log2_max_tok)
+                        dest_lid = dest_enc & arith.constant(_mask_max_tok)
+                    else:
+                        dest_pe  = arith.divui(dest_enc, max_tok_per_rank)
+                        dest_lid = arith.remui(dest_enc, max_tok_per_rank)
+                    _wt_pe_base  = _lds_p2p_wt_bases.load([_to_idx(dest_pe)])
+                    _wt_dest_off = arith.zext_i64(
+                        arith.constant(rank) * max_tok_per_rank + dest_lid) * weight_bytes
+                    _wt_dest     = _lv_unwrap(_wt_pe_base) + _wt_dest_off
+                    _wt_src      = _lv_unwrap(addr_wts_buf) + arith.zext_i64(tok_i) * weight_bytes
+                    _rsrc_wt_s   = create_buffer_resource_from_addr(_wt_src)
+                    _rsrc_wt_d   = create_buffer_resource_from_addr(_wt_dest)
+                    if arith.cmpi(arith.CmpIPredicate.ult, lane, arith.constant(wt_n_i32)):
+                        _wv = buffer_load(_rsrc_wt_s, lane, vec_width=1, dtype=T.i32())
+                        buffer_store(_lv_unwrap(_wv), _rsrc_wt_d, lane)
+            else:
+                pass
+        elif const_expr(enable_std_moe):
             _rsrc_dtm = create_buffer_resource_from_addr(_lv_unwrap(addr_disp_tok_map))
             _rsrc_dow = create_buffer_resource_from_addr(_lv_unwrap(addr_disp_out_wts))
             _all_vld_moe = False
@@ -813,14 +869,14 @@ def make_combine_kernel(
             for tok_i in range(_to_idx(gw_id), _to_idx(total_recv_val), _to_idx(gw_num)):
                 tok_i = _to_i32(tok_i)
                 dest_enc = buffer_load(_r_tis, tok_i, vec_width=1, dtype=T.i32())
-                if _log2_max_tok is not None:
+                if const_expr(_log2_max_tok is not None):
                     dest_pe  = dest_enc >> arith.constant(_log2_max_tok)
                     dest_lid = dest_enc & arith.constant(_mask_max_tok)
                 else:
                     dest_pe  = arith.divui(dest_enc, max_tok_per_rank)
                     dest_lid = arith.remui(dest_enc, max_tok_per_rank)
 
-                if use_p2p_read:
+                if const_expr(use_p2p_read):
                     _dest_off  = arith.zext_i64(tok_i) * nbytes
                     _dest_base = _lv_unwrap(addr_comb_inp) + _dest_off
                 else:
@@ -854,8 +910,8 @@ def make_combine_kernel(
                                                        _exp_vlds, _all_vld_moe)
                     buffer_store(_res_raw, _rsrc_dst, _ec)
 
-                if enable_weights:
-                    if use_p2p_read:
+                if const_expr(enable_weights):
+                    if const_expr(use_p2p_read):
                         _wt_dest_off = arith.zext_i64(tok_i) * weight_bytes
                         _wt_dest     = _lv_unwrap(addr_comb_inp_wts) + _wt_dest_off
                     else:
@@ -870,7 +926,7 @@ def make_combine_kernel(
                         _wv = buffer_load(_rsrc_wt_s, lane, vec_width=1, dtype=T.i32())
                         buffer_store(_lv_unwrap(_wv), _rsrc_wt_d, lane)
 
-        elif use_p2p_read:
+        elif const_expr(use_p2p_read):
             _safe_dual_end = (n_chunks // 128) * 128
             for tok_i in range(_to_idx(gw_id), _to_idx(total_recv_val), _to_idx(gw_num)):
                 tok_i    = _to_i32(tok_i)
@@ -878,7 +934,7 @@ def make_combine_kernel(
                 _dst_base = addr_comb_inp + arith.zext_i64(tok_i) * nbytes
                 _rsrc_src = create_buffer_resource_from_addr(_lv_unwrap(_src_base))
                 _rsrc_dst = create_buffer_resource_from_addr(_lv_unwrap(_dst_base))
-                if _safe_dual_end >= 128:
+                if const_expr(_safe_dual_end >= 128):
                     for cj in range(_to_idx(lane), _to_idx(_safe_dual_end), _to_idx(128)):
                         cj       = _to_i32(cj)
                         cj_elem  = cj * 4
@@ -887,14 +943,14 @@ def make_combine_kernel(
                         vec4_b   = buffer_load(_rsrc_src, cj2_elem, vec_width=4, dtype=T.i32())
                         buffer_store(vec4_a, _rsrc_dst, cj_elem)
                         buffer_store(vec4_b, _rsrc_dst, cj2_elem)
-                if _safe_dual_end < n_chunks:
+                if const_expr(_safe_dual_end < n_chunks):
                     for cj in range(_to_idx(lane + arith.constant(_safe_dual_end)), _to_idx(n_chunks), _to_idx(64)):
                         cj      = _to_i32(cj)
                         cj_elem = cj * 4
                         vec4_a  = buffer_load(_rsrc_src, cj_elem, vec_width=4, dtype=T.i32())
                         buffer_store(vec4_a, _rsrc_dst, cj_elem)
 
-            if enable_weights:
+            if const_expr(enable_weights):
                 for tok_i in range(_to_idx(gw_id), _to_idx(total_recv_val), _to_idx(gw_num)):
                     tok_i = _to_i32(tok_i)
                     _wt_src = _lv_unwrap(addr_wts_buf) + arith.zext_i64(tok_i) * weight_bytes
@@ -910,7 +966,7 @@ def make_combine_kernel(
             for tok_i in range(_to_idx(gw_id), _to_idx(total_recv_val), _to_idx(gw_num)):
                 tok_i    = _to_i32(tok_i)
                 dest_enc = buffer_load(_r_tis, tok_i, vec_width=1, dtype=T.i32())
-                if _log2_max_tok is not None:
+                if const_expr(_log2_max_tok is not None):
                     dest_pe  = dest_enc >> arith.constant(_log2_max_tok)
                     dest_lid = dest_enc & arith.constant(_mask_max_tok)
                 else:
@@ -922,7 +978,7 @@ def make_combine_kernel(
                 _src_base  = addr_inp_tok + arith.zext_i64(tok_i) * nbytes
                 _rsrc_src  = create_buffer_resource_from_addr(_lv_unwrap(_src_base))
                 _rsrc_dst  = create_buffer_resource_from_addr(_dest_base)
-                if _safe_dual_end_s1 >= 128:
+                if const_expr(_safe_dual_end_s1 >= 128):
                     for cj in range(_to_idx(lane), _to_idx(_safe_dual_end_s1), _to_idx(128)):
                         cj       = _to_i32(cj)
                         cj_elem  = cj * 4
@@ -931,14 +987,14 @@ def make_combine_kernel(
                         vec4_b   = buffer_load(_rsrc_src, cj2_elem, vec_width=4, dtype=T.i32())
                         buffer_store(vec4_a, _rsrc_dst, cj_elem)
                         buffer_store(vec4_b, _rsrc_dst, cj2_elem)
-                if _safe_dual_end_s1 < n_chunks:
+                if const_expr(_safe_dual_end_s1 < n_chunks):
                     for cj in range(_to_idx(lane + arith.constant(_safe_dual_end_s1)), _to_idx(n_chunks), _to_idx(64)):
                         cj      = _to_i32(cj)
                         cj_elem = cj * 4
                         vec4_a  = buffer_load(_rsrc_src, cj_elem, vec_width=4, dtype=T.i32())
                         buffer_store(vec4_a, _rsrc_dst, cj_elem)
 
-                if enable_weights:
+                if const_expr(enable_weights):
                     _wt_pe_base  = _lds_p2p_wt_bases.load([_to_idx(dest_pe)])
                     _wt_dest_off = arith.zext_i64(
                         arith.constant(rank) * max_tok_per_rank + dest_lid) * weight_bytes
@@ -999,19 +1055,19 @@ def make_combine_kernel(
             _expert_rsrc = []
             _expert_vld  = []
             for j_py in range_constexpr(experts_per_token):
-                if j_py < 4:
+                if const_expr(j_py < 4):
                     enc_j = _llvm_d.ExtractElementOp(
                         _tm_vec0, arith.constant(j_py)).res
                 else:
                     enc_j = _llvm_d.ExtractElementOp(
                         _tm_vec1, arith.constant(j_py - 4)).res
-                if _log2_max_recv is not None:
+                if const_expr(_log2_max_recv is not None):
                     dest_pe_j = enc_j >> arith.constant(_log2_max_recv)
                 else:
                     dest_pe_j = arith.divui(enc_j, max_recv)
                 vld_j     = arith.cmpi(arith.CmpIPredicate.ult, dest_pe_j, arith.constant(npes))
                 safe_pe   = arith.select(vld_j, dest_pe_j, arith.constant(rank))
-                if use_p2p_read:
+                if const_expr(use_p2p_read):
                     _dtok_all  = arith.remui(enc_j, max_recv)
                     _safe_ta   = arith.select(vld_j, _dtok_all, arith.constant(0))
                     _pe_base   = _lds_p2p_bases.load([_to_idx(safe_pe)])
@@ -1035,7 +1091,7 @@ def make_combine_kernel(
                 _adj_end_128 = arith.select(
                     arith.cmpi(arith.CmpIPredicate.ult, _n_rem_128, hpw), _n_rem_128, hpw)
 
-                if n_i32 % 256 == 0 and warp_num_per_block < 16:
+                if const_expr(n_i32 % 256 == 0 and warp_num_per_block < 16):
                     _hpw_rem256  = arith.remui(hpw, arith.constant(256))
                     _is_256aln   = arith.cmpi(arith.CmpIPredicate.ult, _hpw_rem256, arith.constant(1))
                     _if_256aln   = _scf_d.IfOp(_lv_unwrap(_is_256aln), [], has_else=True)
@@ -1107,7 +1163,7 @@ def make_combine_kernel(
                 _scf_d.YieldOp([])
 
         # Stage 3b: Weight accumulation
-        if enable_weights:
+        if const_expr(enable_weights):
             _rsrc_out_wts = create_buffer_resource_from_addr(_lv_unwrap(addr_comb_out_wts))
             for wt_tok in range(_to_idx(gw_id), _to_idx(cur_rank_num_token), _to_idx(gw_num)):
                 wt_tok = _to_i32(wt_tok)
@@ -1115,22 +1171,26 @@ def make_combine_kernel(
                 _wtm_vec0 = buffer_load(_rsrc_tok_map, _wtm_off, vec_width=4, dtype=T.i32())
                 _wtm_vec1 = buffer_load(_rsrc_tok_map, _wtm_off + 4, vec_width=4, dtype=T.i32())
 
-                if arith.cmpi(arith.CmpIPredicate.ult, lane, arith.constant(experts_per_token)):
+                # Manual scf.IfOp to avoid ast_rewriter mis-classifying SmemPtr
+                # method calls (e.g. _lds_p2p_wt_bases.load) as state mutation.
+                _wt_outer_cond = arith.cmpi(arith.CmpIPredicate.ult, lane, arith.constant(experts_per_token))
+                _if_wt_outer = scf.IfOp(_lv_unwrap(_wt_outer_cond))
+                with ir.InsertionPoint(_if_wt_outer.then_block):
                     wt_acc = arith.constant(0.0, type=T.f32())
                     for _wj in range_constexpr(experts_per_token):
-                        if _wj < 4:
+                        if const_expr(_wj < 4):
                             _wenc = _llvm_d.ExtractElementOp(
                                 _wtm_vec0, arith.constant(_wj)).res
                         else:
                             _wenc = _llvm_d.ExtractElementOp(
                                 _wtm_vec1, arith.constant(_wj - 4)).res
-                        if _log2_max_recv is not None:
+                        if const_expr(_log2_max_recv is not None):
                             _wpe = _wenc >> arith.constant(_log2_max_recv)
                         else:
                             _wpe = arith.divui(_wenc, max_recv)
                         _wvld = arith.cmpi(arith.CmpIPredicate.ult, _wpe, arith.constant(npes))
                         _wsafe = arith.select(_wvld, _wpe, arith.constant(rank))
-                        if use_p2p_read:
+                        if const_expr(use_p2p_read):
                             _wt_tok_all = arith.remui(_wenc, max_recv)
                             _wt_safe_ta = arith.select(_wvld, _wt_tok_all, arith.constant(0))
                             _wt_pe_base = _lds_p2p_wt_bases.load([_to_idx(_wsafe)])
@@ -1143,13 +1203,14 @@ def make_combine_kernel(
                             _wt_rsrc = create_buffer_resource_from_addr(
                                 _lv_unwrap(addr_comb_inp_wts + _wt_src_off))
                         _wv = buffer_load(_wt_rsrc, lane, vec_width=1, dtype=T.f32())
-                        if npes >= experts_per_token:
+                        if const_expr(npes >= experts_per_token):
                             wt_acc = wt_acc + _wv
                         else:
                             wt_acc = wt_acc + arith.select(_wvld, _wv,
                                 arith.constant(0.0, type=T.f32()))
                     _wt_out_off = wt_tok * experts_per_token + lane
                     buffer_store(_lv_unwrap(wt_acc), _rsrc_out_wts, _wt_out_off)
+                    scf.YieldOp([])
 
     ep_combine_intranode._allocator = allocator
     return ep_combine_intranode
@@ -1224,7 +1285,8 @@ def make_combine_jit(*, rank, npes, experts_per_rank=0, experts_per_token,
                      hidden_dim, max_tok_per_rank, block_num,
                      warp_num_per_block, data_type,
                      enable_weights=False, enable_std_moe=False,
-                     use_p2p_read=False):
+                     use_p2p_read=False, skip_stage1=False,
+                     skip_stage1_keep_wts=False):
     hidden_elem_size = torch.tensor([], dtype=data_type).element_size()
     kernel = make_combine_kernel(
         rank=rank, npes=npes,
@@ -1239,12 +1301,16 @@ def make_combine_jit(*, rank, npes, experts_per_rank=0, experts_per_token,
         enable_weights=enable_weights,
         enable_std_moe=enable_std_moe,
         use_p2p_read=use_p2p_read,
+        skip_stage1=skip_stage1,
+        skip_stage1_keep_wts=skip_stage1_keep_wts,
     )
 
     # JIT cache key 所需闭包变量
     _rank_id, _npes_id, _block_num = rank, npes, block_num
     _wpb, _max_tok = warp_num_per_block, max_tok_per_rank
     _en_wts, _en_smoe, _p2p_rd = enable_weights, enable_std_moe, use_p2p_read
+    _skip_s1 = skip_stage1
+    _skip_s1_kw = skip_stage1_keep_wts
     _allocator = kernel._allocator
 
     @flyc.jit
@@ -1263,7 +1329,8 @@ def make_combine_jit(*, rank, npes, experts_per_rank=0, experts_per_token,
         cur_rank_num_token: fx.Int32,
         stream: Stream = Stream(None),
     ):
-        _ = (_rank_id, _npes_id, _block_num, _wpb, _max_tok, _en_wts, _en_smoe, _p2p_rd)
+        _ = (_rank_id, _npes_id, _block_num, _wpb, _max_tok,
+             _en_wts, _en_smoe, _p2p_rd, _skip_s1, _skip_s1_kw)
         from flydsl.compiler.kernel_function import CompilationContext
         from flydsl._mlir import ir
         _allocator.finalized = False

@@ -57,6 +57,7 @@ MORI_KERNEL_SUFFIX = {
     "f32": "f32",
     "fp8_ocp": "fp8_ocp",
     "fp8_fnuz": "fp8_fnuz",
+    "fp4": "fp4",
 }
 
 _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
@@ -106,7 +107,7 @@ def cleanup():
         dist.destroy_process_group()
 
 
-_MORI_SUPPORTED_DTYPES = {torch.bfloat16, torch.float32, torch.float8_e4m3fn}
+_MORI_SUPPORTED_DTYPES = {torch.bfloat16, torch.float32, torch.float8_e4m3fn, torch.float4_e2m1fn_x2}
 
 
 def build_mori_ref(rank, world_size, cfg,
@@ -169,7 +170,8 @@ def _save_profile_json(prof, out_path: str, rank: int, op_tag: str, meta: dict):
 
 def _allreduce_stats(prof, op_tag: str, rank: int, world_size: int,
                      dev: torch.device, dtype_key: str = "bf16",
-                     quant_type: str = "none") -> dict:
+                     quant_type: str = "none",
+                     use_p2p_read: bool = False) -> dict:
     """从本卡 profiler 提取关键指标，跨卡 all_reduce 后返回 avg/min/max 字典。
 
     采集 6 项指标（顺序固定，打包成 float64 tensor 做 all_reduce）：
@@ -181,13 +183,14 @@ def _allreduce_stats(prof, op_tag: str, rank: int, world_size: int,
       5: combine  record_function CPU  time (μs/call)
     """
     msuf = MORI_KERNEL_SUFFIX.get(dtype_key, "bf16")
-    _cast_suf = "_fp8cast" if quant_type == "fp8_direct_cast" else ""
+    _cast_suf = "_fp8cast" if (quant_type == "fp8_direct_cast" and not use_p2p_read) else ""
+    _p2p_suf = "_p2p" if use_p2p_read else "_nop2p"
     if op_tag == "flydsl":
         d_kernel = "ep_dispatch_intranode_0"
         c_kernel = "ep_combine_intranode_0"
     else:
         d_kernel = f"EpDispatchIntraNodeKernel_{msuf}"
-        c_kernel = f"EpCombineIntraNodeKernel_{msuf}_nop2p{_cast_suf}"
+        c_kernel = f"EpCombineIntraNodeKernel_{msuf}{_p2p_suf}{_cast_suf}"
     d_label = f"{op_tag}::dispatch"
     c_label  = f"{op_tag}::combine"
 
@@ -248,7 +251,8 @@ def _print_aggregated(stats: dict, op_tag: str, world_size: int, meta: dict):
 def _allreduce_cudagraph_stats_from_key_averages(
         prof, op_tag: str, rank: int, world_size: int,
         dev: torch.device, dtype_key: str = "bf16",
-        quant_type: str = "none") -> dict:
+        quant_type: str = "none",
+        use_p2p_read: bool = False) -> dict:
     """从 key_averages() 提取指标（仅含 active 阶段数据），跨卡 all_reduce。
 
     采集 4 项：
@@ -258,13 +262,14 @@ def _allreduce_cudagraph_stats_from_key_averages(
       3: cudagraph_replay CPU  E2E time
     """
     msuf = MORI_KERNEL_SUFFIX.get(dtype_key, "bf16")
-    _cast_suf = "_fp8cast" if quant_type == "fp8_direct_cast" else ""
+    _cast_suf = "_fp8cast" if (quant_type == "fp8_direct_cast" and not use_p2p_read) else ""
+    _p2p_suf = "_p2p" if use_p2p_read else "_nop2p"
     if op_tag == "flydsl":
         d_kernel = "ep_dispatch_intranode_0"
         c_kernel = "ep_combine_intranode_0"
     else:
         d_kernel = f"EpDispatchIntraNodeKernel_{msuf}"
-        c_kernel = f"EpCombineIntraNodeKernel_{msuf}_nop2p{_cast_suf}"
+        c_kernel = f"EpCombineIntraNodeKernel_{msuf}{_p2p_suf}{_cast_suf}"
     cg_label = f"{op_tag}::cudagraph_replay"
 
     ev = {e.key: e for e in prof.key_averages()}
@@ -297,7 +302,8 @@ def _cudagraph_stats_from_trace(trace_path: str, op_tag: str,
                                 dev: torch.device,
                                 active_iters: int, skip_first: int = 5,
                                 dtype_key: str = "bf16",
-                                quant_type: str = "none") -> dict:
+                                quant_type: str = "none",
+                                use_p2p_read: bool = False) -> dict:
     """从 chrome trace JSON 手动统计 kernel 性能，跳过前 skip_first 次 active 调用。
 
     流程：解析 trace → 按时间排序取最后 active_iters 个事件 → 丢弃前 skip_first 个 → 跨卡聚合。
@@ -306,12 +312,13 @@ def _cudagraph_stats_from_trace(trace_path: str, op_tag: str,
         tr = json.load(f)
 
     msuf = MORI_KERNEL_SUFFIX.get(dtype_key, "bf16")
-    _cast_suf = "_fp8cast" if quant_type == "fp8_direct_cast" else ""
+    _cast_suf = "_fp8cast" if (quant_type == "fp8_direct_cast" and not use_p2p_read) else ""
+    _p2p_suf = "_p2p" if use_p2p_read else "_nop2p"
     if op_tag == "flydsl":
         d_name, c_name = "ep_dispatch_intranode_0", "ep_combine_intranode_0"
     else:
         d_name = f"EpDispatchIntraNodeKernel_{msuf}"
-        c_name = f"EpCombineIntraNodeKernel_{msuf}_nop2p{_cast_suf}"
+        c_name = f"EpCombineIntraNodeKernel_{msuf}{_p2p_suf}{_cast_suf}"
     cg_name = f"{op_tag}::cudagraph_replay"
 
     kernel_events = [e for e in tr["traceEvents"] if e.get("cat") == "kernel"]
@@ -585,7 +592,8 @@ def profile_op(op, op_tag: str, inp, wts, idx, wc_buf, k,
                iters: int, out_dir: str, meta: dict,
                scales=None, packed_recv_x=None,
                dtype_key: str = "bf16",
-               quant_type: str = "none"):
+               quant_type: str = "none",
+               use_p2p_read: bool = False):
     """对单个算子（FlyDSL 或 mori）独立 profiling，保存 JSON 并打印全卡聚合统计。
 
     使用 schedule(wait=1, warmup=10, active=iters) 让 ROCTracer 在前 11 步
@@ -625,7 +633,8 @@ def profile_op(op, op_tag: str, inp, wts, idx, wc_buf, k,
 
     # 跨卡聚合统计（all_reduce），rank 0 打印
     agg_stats = _allreduce_stats(prof, op_tag, rank, world_size, dev,
-                                 dtype_key=dtype_key, quant_type=quant_type)
+                                 dtype_key=dtype_key, quant_type=quant_type,
+                                 use_p2p_read=use_p2p_read)
     if rank == 0:
         _print_aggregated(agg_stats, op_tag, world_size, meta)
     return prof
@@ -637,7 +646,8 @@ def profile_cudagraph_op(op, op_tag: str, inp, wts, idx, wc_buf, k,
                          warmup: int, iters: int, out_dir: str, meta: dict,
                          scales=None, packed_recv_x=None,
                          dtype_key: str = "bf16",
-                         quant_type: str = "none"):
+                         quant_type: str = "none",
+                         use_p2p_read: bool = False):
     """torch.profiler 采集 CUDAGraph replay，保存 JSON 并打印全卡聚合统计。
 
     流程：eager warmup → graph capture → replay warmup → profiler 包裹的 replay。
@@ -688,7 +698,8 @@ def profile_cudagraph_op(op, op_tag: str, inp, wts, idx, wc_buf, k,
     agg_stats = _cudagraph_stats_from_trace(
         trace_path, op_tag, rank, world_size, dev,
         active_iters=active_iters, skip_first=skip_first,
-        dtype_key=dtype_key, quant_type=quant_type)
+        dtype_key=dtype_key, quant_type=quant_type,
+        use_p2p_read=use_p2p_read)
     if rank == 0:
         _print_cudagraph_aggregated(agg_stats, op_tag, world_size, meta,
                                     active_iters=valid_iters)
@@ -1081,32 +1092,38 @@ def run_profiler(rank, world_size, args):
                          rank, world_size, dev, args.warmup, args.iters, meta)
 
     elif args.mode == "profile" and not args.cudagraph:
+        _p2p = not args.use_external_inp_buf
         if test_flydsl:
             profile_op(op_fly, "flydsl", inp, wts, idx, wc_buf, k,
                        rank, world_size, dev, args.iters, out_dir, meta,
                        scales=scales, packed_recv_x=packed_recv_x,
-                       dtype_key=args.dtype, quant_type=args.quant_type)
+                       dtype_key=args.dtype, quant_type=args.quant_type,
+                       use_p2p_read=_p2p)
         if test_mori:
             ms.shmem_barrier_all()
             profile_op(op_ref, "mori", inp, wts, idx, wc_buf, k,
                        rank, world_size, dev, args.iters, out_dir, meta,
-                       dtype_key=args.dtype, quant_type=args.quant_type)
+                       dtype_key=args.dtype, quant_type=args.quant_type,
+                       use_p2p_read=_p2p)
         if rank == 0:
             print(f"\n[profiler] 全部结果已保存到: {out_dir}/")
 
     elif args.mode == "profile" and args.cudagraph:
+        _p2p = not args.use_external_inp_buf
         if test_flydsl:
             profile_cudagraph_op(op_fly, "flydsl", inp, wts, idx, wc_buf, k,
                                  rank, world_size, dev, args.warmup, args.iters,
                                  out_dir, meta,
                                  scales=scales, packed_recv_x=packed_recv_x,
-                                 dtype_key=args.dtype, quant_type=args.quant_type)
+                                 dtype_key=args.dtype, quant_type=args.quant_type,
+                                 use_p2p_read=_p2p)
         if test_mori:
             ms.shmem_barrier_all()
             profile_cudagraph_op(op_ref, "mori", inp, wts, idx, wc_buf, k,
                                  rank, world_size, dev, args.warmup, args.iters,
                                  out_dir, meta,
-                                 dtype_key=args.dtype, quant_type=args.quant_type)
+                                 dtype_key=args.dtype, quant_type=args.quant_type,
+                                 use_p2p_read=_p2p)
         if rank == 0:
             print(f"\n[profiler] 全部结果已保存到: {out_dir}/")
 

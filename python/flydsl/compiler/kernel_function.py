@@ -246,6 +246,10 @@ class CompilationContext:
         self.func_tracker = func_tracker
         self.kernel_trackers: Dict[str, FuncLocationTracker] = {}
         self.stream_arg = None
+        # ExternFunction (e.g. mori_shmem) registers its symbol here once
+        # declared in the GPU module so downstream passes (auto-detection
+        # for shmem etc.) can enumerate them.
+        self.extern_symbols: set = set()
 
     @classmethod
     def get_current(cls) -> Optional["CompilationContext"]:
