@@ -60,11 +60,12 @@ _N_V = VHELOOP * VTLOOP * 2  # 16
 # Tiles per block (1024 tokens / 256 tokens per tile = 4, matches SP3 kNumBlockTiles)
 TILES_PER_BLOCK = KV_BLOCK_SIZE // KV_COMPUTE_BLOCK  # 4
 
-# Sliding-window decode can fuse two 16-wide execution subgroups into one
-# 24-wide logical MTP group for the qgs=6, mtp=4 case.
+# Sliding-window decode follows the same 16-wide MTP path for all qgs values.
+# For qgs=6, mtp=4, the 24 logical query/head pairs are handled as two
+# independent 16-wide passes instead of a fused two-subgroup pass.
 SW_MTP_EXEC_GROUP_SIZE = MFMA_N
-SW_LOGICAL_MTP_GROUP_SIZE = 24
-SW_MAX_MTP_SUBGROUPS_PER_GROUP = 2
+SW_LOGICAL_MTP_GROUP_SIZE = MFMA_N
+SW_MAX_MTP_SUBGROUPS_PER_GROUP = 1
 
 _PACKED_FP8_QUERY_DTYPES = tuple(
     dtype
