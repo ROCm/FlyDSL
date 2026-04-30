@@ -169,20 +169,34 @@ add_mlir_python_modules(FlyPythonModules
 set(_FLYDSL_PYTHON_PACKAGES_DIR "${MLIR_BINARY_DIR}/python_packages")
 set(_MLIR_LIBS_DIR "${FlyPythonModules_ROOT_PREFIX}/_mlir_libs")
 set(_STUB_MARKER_FILE "${_MLIR_LIBS_DIR}/.stubs_generated")
+set(_STUBGEN_PYTHONPATH "${_FLYDSL_PYTHON_PACKAGES_DIR}")
+if(DEFINED nanobind_DIR AND NOT "${nanobind_DIR}" STREQUAL "")
+  get_filename_component(_NANOBIND_MODULE_DIR "${nanobind_DIR}/.." ABSOLUTE)
+  get_filename_component(_NANOBIND_SITE_PACKAGES_DIR "${_NANOBIND_MODULE_DIR}/.." ABSOLUTE)
+  if(EXISTS "${_NANOBIND_SITE_PACKAGES_DIR}" AND
+     (EXISTS "${_NANOBIND_SITE_PACKAGES_DIR}/nanobind" OR
+      EXISTS "${_NANOBIND_SITE_PACKAGES_DIR}/nanobind.py"))
+    list(APPEND _STUBGEN_PYTHONPATH "${_NANOBIND_SITE_PACKAGES_DIR}")
+  endif()
+endif()
+list(JOIN _STUBGEN_PYTHONPATH ":" _STUBGEN_PYTHONPATH_VALUE)
 
 add_custom_command(
   OUTPUT "${_STUB_MARKER_FILE}"
   COMMAND /bin/bash -c "\
-    PYTHONPATH='${_FLYDSL_PYTHON_PACKAGES_DIR}' \
-    '${Python3_EXECUTABLE}' -m nanobind.stubgen \
-      -q -r \
-      -m flydsl._mlir._mlir_libs._mlir \
-      -m flydsl._mlir._mlir_libs._mlirDialectsFly \
-      -m flydsl._mlir._mlir_libs._mlirDialectsFlyROCDL \
-      -m flydsl._mlir._mlir_libs._mlirDialectsGPU \
-      -m flydsl._mlir._mlir_libs._mlirDialectsLLVM \
-      -O '${_MLIR_LIBS_DIR}' \
-    || echo 'Warning: nanobind.stubgen not available -- skipping stub generation'"
+    export PYTHONPATH='${_STUBGEN_PYTHONPATH_VALUE}'\"\${PYTHONPATH:+:\${PYTHONPATH}}\"; \
+    if '${Python3_EXECUTABLE}' -c 'import nanobind.stubgen' >/dev/null 2>&1; then \
+      '${Python3_EXECUTABLE}' -m nanobind.stubgen \
+        -q -r \
+        -m flydsl._mlir._mlir_libs._mlir \
+        -m flydsl._mlir._mlir_libs._mlirDialectsFly \
+        -m flydsl._mlir._mlir_libs._mlirDialectsFlyROCDL \
+        -m flydsl._mlir._mlir_libs._mlirDialectsGPU \
+        -m flydsl._mlir._mlir_libs._mlirDialectsLLVM \
+        -O '${_MLIR_LIBS_DIR}'; \
+    else \
+      echo 'Warning: nanobind.stubgen not available -- skipping stub generation'; \
+    fi"
   COMMAND ${CMAKE_COMMAND} -E touch "${_STUB_MARKER_FILE}"
   DEPENDS CopyFlyPythonSources
   COMMENT "Generating Python stub files for all extension modules"

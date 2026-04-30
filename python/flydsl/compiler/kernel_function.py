@@ -4,12 +4,14 @@
 import inspect
 import threading
 from contextlib import contextmanager
+from functools import partial
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union, get_origin
 
 from .._mlir import ir
 from .._mlir.dialects import arith, gpu
 from ..expr.typing import Constexpr
 from .ast_rewriter import ASTRewriter
+from .mlir_utils import convert_to_mlir_attr
 from .protocol import fly_construct, fly_types, fly_values
 
 # =============================================================================
@@ -66,19 +68,13 @@ def _validate_known_block_size(value):
         ) from None
 
     if len(elems) != 3:
-        raise ValueError(
-            f"known_block_size must have exactly 3 elements (x, y, z), got {len(elems)}"
-        )
+        raise ValueError(f"known_block_size must have exactly 3 elements (x, y, z), got {len(elems)}")
 
     for i, v in enumerate(elems):
         if not isinstance(v, int):
-            raise TypeError(
-                f"known_block_size[{i}] must be an int, got {type(v).__name__}"
-            )
+            raise TypeError(f"known_block_size[{i}] must be an int, got {type(v).__name__}")
         if v <= 0:
-            raise ValueError(
-                f"known_block_size[{i}] must be positive, got {v}"
-            )
+            raise ValueError(f"known_block_size[{i}] must be positive, got {v}")
 
     return elems
 
@@ -236,7 +232,7 @@ class CompilationContext:
             with CompilationContext.compile_hints({"waves_per_eu": 2}):
                 fn(*args, **kwargs)
         """
-        prev = getattr(cls._compile_hints, 'data', None)
+        prev = getattr(cls._compile_hints, "data", None)
         cls._compile_hints.data = hints
         try:
             yield
@@ -246,7 +242,7 @@ class CompilationContext:
     @classmethod
     def get_compile_hints(cls):
         """Get compiler hints for the current thread, or empty dict."""
-        return getattr(cls._compile_hints, 'data', None) or {}
+        return getattr(cls._compile_hints, "data", None) or {}
 
     def __init__(self, func_tracker: Optional[FuncLocationTracker] = None):
         self.gpu_module_op = None
@@ -440,19 +436,29 @@ class KernelFunction:
         self._kernel_name: Optional[str] = None
         self._location_tracker = FuncLocationTracker(func)
 
+        full_sig = inspect.signature(self._func)
+        params = list(full_sig.parameters.values())
+
+        self._has_self_param = bool(params) and params[0].name == "self"
+        if self._has_self_param:
+            self._sig = full_sig.replace(parameters=params[1:])
+        else:
+            self._sig = full_sig
+
+    def __get__(self, obj, objtype=None):
+        if obj is None:
+            return self
+        return partial(self.__call__, obj)
+
     @staticmethod
     def _is_constexpr_annotation(annotation) -> bool:
         if annotation is Constexpr:
             return True
         return get_origin(annotation) is Constexpr
 
-    def _emit_kernel(self, ctx: CompilationContext, args: Tuple, kwargs: Dict) -> Tuple[Any, ...]:
-        """Emit gpu.func for this kernel into the GPU module.
-
-        Returns:
-            Tuple of non-constexpr argument values for use in launch.
-        """
-        sig = inspect.signature(self._func)
+    def _emit_kernel(self, ctx: CompilationContext, args: Tuple, kwargs: Dict, bound_self: Any = None):
+        """Emit gpu.func for this kernel into the GPU module."""
+        sig = self._sig
         bound = sig.bind(*args, **kwargs)
         bound.apply_defaults()
 
@@ -504,19 +510,44 @@ class KernelFunction:
                     idx += n
 
                 dsl_args.update(constexpr_values)
-                self._func(**dsl_args)
+                if bound_self is not None:
+                    self._func(bound_self, **dsl_args)
+                else:
+                    self._func(**dsl_args)
                 gpu.ReturnOp([])
 
-        return tuple(param_values)
+        return tuple(param_values), gpu_func
 
-    def __call__(self, *args, **kwargs) -> KernelLauncher:
+    def __call__(
+        self,
+        *args,
+        unit_attrs: Optional[List[str]] = None,
+        value_attrs: Optional[Dict[str, Any]] = None,
+        **kwargs,
+    ) -> KernelLauncher:
         ctx = CompilationContext.get_current()
         if ctx is None:
             raise RuntimeError("@kernel can only be called inside @jit function")
 
         call_loc = create_caller_location(depth=2)
 
-        kernel_args = self._emit_kernel(ctx, args, kwargs)
+        bound_self = None
+        if self._has_self_param:
+            if not args:
+                raise TypeError(f"{self._func.__name__}() missing 'self' argument")
+            bound_self, args = args[0], args[1:]
+
+        kernel_args, gpu_func_op = self._emit_kernel(ctx, args, kwargs, bound_self=bound_self)
+
+        if unit_attrs:
+            unit = ir.UnitAttr.get()
+            for name in unit_attrs:
+                gpu_func_op.attributes[name] = unit
+        if value_attrs:
+            for name, value in value_attrs.items():
+                if value is None:
+                    continue
+                gpu_func_op.attributes[name] = convert_to_mlir_attr(value)
 
         return KernelLauncher(self._kernel_name, kernel_args, call_loc, self._known_block_size)
 

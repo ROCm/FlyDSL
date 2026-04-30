@@ -154,7 +154,12 @@ class TensorAdaptor:
             dlpack_tensor = dlpack_tensor.view(torch.uint8)
         self._tensor_keepalive = dlpack_tensor
 
-        self.tensor_adaptor = DLTensorAdaptor(dlpack_tensor.__dlpack__(stream=-1), assumed_align, use_32bit_stride)
+        try:
+            dl = dlpack_tensor.__dlpack__(stream=-1)
+        except Exception:
+            # CPU tensors (e.g. COMPILE_ONLY AOT) don't accept stream arg
+            dl = dlpack_tensor.__dlpack__()
+        self.tensor_adaptor = DLTensorAdaptor(dl, assumed_align, use_32bit_stride)
         self.assumed_align = assumed_align
         self.use_32bit_stride = use_32bit_stride
         self._orig_dtype = tensor.dtype

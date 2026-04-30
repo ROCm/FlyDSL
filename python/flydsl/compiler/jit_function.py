@@ -10,7 +10,7 @@ import pkgutil
 import threading
 import types
 from contextlib import nullcontext
-from functools import lru_cache
+from functools import lru_cache, partial
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set
 
@@ -30,7 +30,7 @@ from .kernel_function import (
     create_gpu_module,
     get_gpu_module_body,
 )
-from .protocol import fly_construct, fly_pointers, fly_types
+from .protocol import fly_construct, fly_types
 
 
 @lru_cache(maxsize=1)
@@ -102,9 +102,18 @@ def _get_underlying_func(obj):
         return obj._func
     if isinstance(obj, JitFunction):
         return obj.func
+    if isinstance(obj, types.MethodType):
+        return obj.__func__
     if isinstance(obj, types.FunctionType):
         return obj
     return None
+
+
+def _get_func_source(func) -> str:
+    try:
+        return inspect.getsource(func)
+    except OSError:
+        return func.__code__.co_code.hex()
 
 
 def _is_user_function(func, rootFile):
@@ -113,6 +122,47 @@ def _is_user_function(func, rootFile):
     except (TypeError, OSError):
         return False
     return os.path.dirname(os.path.abspath(funcFile)) == os.path.dirname(os.path.abspath(rootFile))
+
+
+def _owner_class_from_func(func):
+    qualname = getattr(func, "__qualname__", "")
+    parts = qualname.split(".")[:-1]
+    if not parts or "<locals>" in parts:
+        return None
+
+    obj = func.__globals__.get(parts[0])
+    for part in parts[1:]:
+        obj = getattr(obj, part, None)
+        if obj is None:
+            return None
+    return obj if isinstance(obj, type) else None
+
+
+def _collect_class_member_dependency_sources(
+    func,
+    rootFile,
+    owner_cls,
+    visited: Set[int],
+) -> List[str]:
+    sources = []
+
+    for name in func.__code__.co_names:
+        try:
+            obj = getattr(owner_cls, name)
+        except AttributeError:
+            continue
+
+        underlying = _get_underlying_func(obj)
+        if underlying is None or id(underlying) in visited:
+            continue
+        if not _is_user_function(underlying, rootFile):
+            continue
+
+        visited.add(id(underlying))
+        sources.append(f"class:{owner_cls.__qualname__}.{name}:{_get_func_source(underlying)}")
+        sources.extend(_collect_dependency_sources(underlying, rootFile, visited, owner_cls=owner_cls))
+
+    return sources
 
 
 def _collect_closure_scalar_vals(func, visited_ids: Optional[Set[int]] = None) -> List[str]:
@@ -150,7 +200,12 @@ def _collect_closure_scalar_vals(func, visited_ids: Optional[Set[int]] = None) -
     return vals
 
 
-def _collect_dependency_sources(func, rootFile, visited: Optional[Set[int]] = None) -> List[str]:
+def _collect_dependency_sources(
+    func,
+    rootFile,
+    visited: Optional[Set[int]] = None,
+    owner_cls=None,
+) -> List[str]:
     if visited is None:
         visited = set()
     sources = []
@@ -164,11 +219,7 @@ def _collect_dependency_sources(func, rootFile, visited: Optional[Set[int]] = No
         if not _is_user_function(underlying, rootFile):
             continue
         visited.add(id(underlying))
-        try:
-            src = inspect.getsource(underlying)
-        except OSError:
-            src = underlying.__code__.co_code.hex()
-        sources.append(f"{name}:{src}")
+        sources.append(f"{name}:{_get_func_source(underlying)}")
         sources.extend(_collect_dependency_sources(underlying, rootFile, visited))
 
     # 2) Scan closure variables (co_freevars → __closure__) for callable
@@ -184,29 +235,25 @@ def _collect_dependency_sources(func, rootFile, visited: Optional[Set[int]] = No
             if underlying is None or id(underlying) in visited:
                 continue
             visited.add(id(underlying))
-            try:
-                src = inspect.getsource(underlying)
-            except OSError:
-                src = underlying.__code__.co_code.hex()
-            sources.append(f"closure:{name}:{src}")
+            sources.append(f"closure:{name}:{_get_func_source(underlying)}")
             sources.extend(_collect_dependency_sources(underlying, rootFile, visited))
+
+    owner_cls = owner_cls or _owner_class_from_func(func)
+    if owner_cls is not None:
+        sources.extend(_collect_class_member_dependency_sources(func, rootFile, owner_cls, visited))
 
     return sources
 
 
-def _jit_function_cache_key(func: Callable) -> str:
+def _jit_function_cache_key(func: Callable, owner_cls=None) -> str:
     parts = []
     parts.append(_flydsl_key())
-    try:
-        source = inspect.getsource(func)
-    except OSError:
-        source = func.__code__.co_code.hex()
-    parts.append(source)
+    parts.append(_get_func_source(func))
     try:
         rootFile = inspect.getfile(func)
     except (TypeError, OSError):
         rootFile = ""
-    depSources = _collect_dependency_sources(func, rootFile)
+    depSources = _collect_dependency_sources(func, rootFile, owner_cls=owner_cls)
     depSources.sort()
     parts.extend(depSources)
 
@@ -398,6 +445,7 @@ class MlirCompiler:
             fragments = new_fragments
 
         from .llvm_options import llvm_options as _llvm_options
+
         _llvm_ctx = _llvm_options(llvm_opts) if llvm_opts else nullcontext()
 
         if env.debug.print_origin_ir:
@@ -647,31 +695,51 @@ class JitFunction:
         self.func = ASTRewriter.transform(func)
         self.compile_hints = dict(compile_hints) if compile_hints is not None else {}
         self.manager_key = None
+        self._manager_owner_cls = None
         self.cache_manager = None
         self._call_state_cache = {}  # cache_key -> CallState
         self._sig = None  # lazy: set on first call
+        self._has_self_param = False  # lazy: set in _ensure_sig
         self._target = None  # lazy: GPUTarget resolved once in _ensure_sig
         self._mem_cache = {}
         self._last_compiled = None  # (cache_key, CompiledArtifact) for compile()
+
+    def __get__(self, obj, objtype=None):
+        # when used as a method on a class bind the owning instance as the
+        # first positional argument.
+        if obj is None:
+            return self
+        return partial(self.__call__, obj)
 
     def _ensure_sig(self):
         """Initialize signature + param metadata on first call (not at decoration time)."""
         if self._sig is not None:
             return
-        self._sig = inspect.signature(self.func)
+        full_sig = inspect.signature(self.func)
+        params = list(full_sig.parameters.values())
+
+        self._has_self_param = bool(params) and params[0].name == "self"
+        if self._has_self_param:
+            self._sig = full_sig.replace(parameters=params[1:])
+        else:
+            self._sig = full_sig
         self._target = get_backend().target  # resolve once; frozen dataclass, hashable
 
-    def _ensure_cache_manager(self):
-        if self.manager_key is not None:
+    def _ensure_cache_manager(self, owner_cls=None):
+        if self.manager_key is not None and self._manager_owner_cls is owner_cls:
             return
-        self.manager_key = _jit_function_cache_key(self.func)
+        self._manager_owner_cls = owner_cls
+        self.manager_key = _jit_function_cache_key(self.func, owner_cls=owner_cls)
         if not env.runtime.enable_cache:
+            self.cache_manager = None
             return
         cache_root = env.runtime.cache_dir
         if cache_root:
             cache_dir = Path(cache_root) / f"{self.func.__name__}_{self.manager_key}"
             self.cache_manager = JitCacheManager(cache_dir)
             self.cache_manager.load_all()
+        else:
+            self.cache_manager = None
 
     @staticmethod
     def _arg_cache_sig(arg, *, runtime=False):
@@ -714,12 +782,11 @@ class JitFunction:
         recompilation when only runtime values change.
         """
         from .jit_argument import _is_constexpr_annotation, _is_type_param_annotation
+
         sig = self._sig
         key_parts = [("_target_", self._target)]
         if self.compile_hints:
-            key_parts.append(("_hints_", tuple(sorted(
-                (k, str(v)) for k, v in self.compile_hints.items()
-            ))))
+            key_parts.append(("_hints_", tuple(sorted((k, str(v)) for k, v in self.compile_hints.items()))))
         for name, arg in bound_args.items():
             param = sig.parameters.get(name)
             ann = param.annotation if param else inspect.Parameter.empty
@@ -730,6 +797,13 @@ class JitFunction:
 
             if ann is not inspect.Parameter.empty and _is_type_param_annotation(ann):
                 key_parts.append((name, "Type", arg))
+                continue
+
+            # The stream selects the launch queue and does not affect generated code.
+            # Normalize equivalent host representations (raw pointer, Stream object)
+            # so CPU AOT artifacts can be reused by GPU runtime calls.
+            if ann is Stream:
+                key_parts.append((name, Stream))
                 continue
 
             is_runtime = (ann is not inspect.Parameter.empty
@@ -750,13 +824,22 @@ class JitFunction:
             return self.func(*args, **kwargs)
 
         self._ensure_sig()
-        self._ensure_cache_manager()
+
+        bound_self = None
+        if self._has_self_param:
+            if not args:
+                raise TypeError(f"{self.func.__name__}() missing 'self' argument")
+            bound_self, args = args[0], args[1:]
+        owner_cls = type(bound_self) if bound_self is not None else None
+        self._ensure_cache_manager(owner_cls)
 
         sig = self._sig
         bound = sig.bind(*args, **kwargs)
         bound.apply_defaults()
 
         cache_key = self._make_cache_key(bound.arguments)
+        if bound_self is not None:
+            cache_key = (("_self_type_", type(bound_self)),) + cache_key
 
         args_tuple = tuple(bound.arguments.values())
 
@@ -768,6 +851,8 @@ class JitFunction:
         # Fast path: reuse pre-built CallState (no ctypes alloc, no DLPack)
         call_state = self._call_state_cache.get(cache_key)
         if call_state is not None:
+            if env.compile.compile_only:
+                return None
             return call_state(args_tuple)
 
         # Normal path: check in-process cache first, then optional disk cache.
@@ -780,6 +865,8 @@ class JitFunction:
                 self._mem_cache[cache_key] = cached_func
 
         if cached_func is not None:
+            if env.compile.compile_only:
+                return None
             # Build CallState via JitArgument registry (same dispatch as compile path)
             try:
                 state = _build_call_state(
@@ -844,7 +931,10 @@ class JitFunction:
                         log().info(f"dsl_args={dsl_args}")
                         named_args = dict(zip(param_names, dsl_args))
                         named_args.update(constexpr_values)
-                        self.func(**named_args)
+                        if bound_self is not None:
+                            self.func(bound_self, **named_args)
+                        else:
+                            self.func(**named_args)
                         func.ReturnOp([])
 
             original_ir = module.operation.get_asm(enable_debug_info=True)
@@ -961,9 +1051,7 @@ def _compile_impl(func, *args) -> CompiledFunction:
     calls; only runtime values (data pointers, scalars, stream) may change.
     """
     if not isinstance(func, JitFunction):
-        raise TypeError(
-            f"flyc.compile() expects a @flyc.jit function, got {type(func).__name__}"
-        )
+        raise TypeError(f"flyc.compile() expects a @flyc.jit function, got {type(func).__name__}")
 
     jf = func
 
@@ -987,9 +1075,7 @@ def _compile_impl(func, *args) -> CompiledFunction:
         if last is not None and last[0] == cache_key:
             artifact = last[1]
     if artifact is None:
-        raise RuntimeError(
-            "flyc.compile(): compilation succeeded but no cached artifact found."
-        )
+        raise RuntimeError("flyc.compile(): compilation succeeded but no cached artifact found.")
 
     call_state = jf._call_state_cache.get(cache_key)
     if call_state is None:
@@ -1020,9 +1106,7 @@ class CompileCallable:
     def __getitem__(self, hints: dict) -> "CompileCallable":
         """``flyc.compile[{...}]`` → new CompileCallable with compile hints."""
         if not isinstance(hints, dict):
-            raise TypeError(
-                f"flyc.compile[...] expects a dict of compile hints, got {type(hints).__name__}"
-            )
+            raise TypeError(f"flyc.compile[...] expects a dict of compile hints, got {type(hints).__name__}")
         return CompileCallable(compile_hints=hints)
 
     def __call__(self, func, *args):

@@ -1,0 +1,406 @@
+name: FlyDSL ATOM nightly
+
+on:
+  schedule:
+    # Run after the FlyDSL nightly wheel publish/promote flow.
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ATOM_BASE_IMAGE: rocm/atom-dev:latest
+  ATOM_REPOSITORY: ROCm/ATOM
+  ATOM_REF: main
+  FLYDSL_REPOSITORY: ROCm/FlyDSL
+  FLYDSL_CI_WORKFLOW: ci.yaml
+  FLYDSL_WHEEL_BUCKET: framework-whls-nightlies
+  FLYDSL_WHEEL_PREFIX: whl/gfx942-gfx950
+
+jobs:
+  atom-accuracy:
+    name: ATOM accuracy / ${{ matrix.model_name }}
+    timeout-minutes: 180
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      actions: read
+      id-token: write
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - model_name: DeepSeek-R1-0528
+            model_path: deepseek-ai/DeepSeek-R1-0528
+            extra_args: --kv_cache_dtype fp8 -tp 8
+            accuracy_threshold: 0.94
+            runner: linux-flydsl-mi355-8
+            env_vars: ""
+          - model_name: gpt-oss-120b
+            model_path: openai/gpt-oss-120b
+            extra_args: --kv_cache_dtype fp8 --gpu-memory-utilization 0.3
+            accuracy_threshold: 0.38
+            runner: linux-flydsl-mi355-1
+            env_vars: ""
+
+    env:
+      CONTAINER_NAME: flydsl_atom_${{ strategy.job-index }}
+
+    steps:
+      - name: Checkout FlyDSL utility scripts
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            scripts/install_awscli.sh
+          path: flydsl
+
+      - name: Checkout upstream ATOM repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.ATOM_REPOSITORY }}
+          ref: ${{ env.ATOM_REF }}
+          path: atom-upstream
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: us-east-1
+          role-to-assume: arn:aws:iam::661452401056:role/framework-flydsl-nightlies
+
+      - name: Install AWS CLI
+        run: bash ./flydsl/scripts/install_awscli.sh
+
+      - name: Start CI container
+        run: |
+          set -euo pipefail
+
+          echo "Cleaning up any stale container..."
+          (docker ps -aq -f name="^${CONTAINER_NAME}$" | xargs -r docker stop) || true
+          (docker ps -aq -f name="^${CONTAINER_NAME}$" | xargs -r docker rm) || true
+
+          if [ -f "/etc/podinfo/gha-render-devices" ]; then
+            DEVICE_FLAG=$(cat /etc/podinfo/gha-render-devices)
+          else
+            DEVICE_FLAG="--device /dev/dri"
+          fi
+
+          MODEL_MOUNT=""
+          if [ -d "/models" ]; then
+            MODEL_MOUNT="-v /models:/models"
+          fi
+
+          printf '%s\n' "${MODEL_ENV_VARS:-}" | grep -v '^$' > /tmp/flydsl_atom_env.txt || true
+
+          docker run -dt --pull always --device=/dev/kfd $DEVICE_FLAG \
+            -v "${GITHUB_WORKSPACE:-$PWD}:/workspace" \
+            $MODEL_MOUNT \
+            -w /workspace \
+            --ipc=host --group-add video \
+            --shm-size=16G \
+            --privileged \
+            --cap-add=SYS_PTRACE \
+            --env-file /tmp/flydsl_atom_env.txt \
+            --security-opt seccomp=unconfined \
+            --ulimit memlock=-1 \
+            --ulimit stack=67108864 \
+            -e ATOM_DISABLE_MMAP=true \
+            -e HF_HUB_ENABLE_HF_TRANSFER=1 \
+            -e HF_TOKEN="${HF_TOKEN:-${AMD_HF_TOKEN:-${HF_TOKEN_TEST:-}}}" \
+            --name "${CONTAINER_NAME}" \
+            "${{ env.ATOM_BASE_IMAGE }}"
+        env:
+          GITHUB_WORKSPACE: ${{ github.workspace }}
+          MODEL_ENV_VARS: ${{ matrix.env_vars }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          AMD_HF_TOKEN: ${{ secrets.AMD_HF_TOKEN }}
+          HF_TOKEN_TEST: ${{ secrets.HF_TOKEN_TEST }}
+
+      - name: Install CI dependencies
+        run: |
+          docker exec "${CONTAINER_NAME}" bash -lc "
+            set -euo pipefail
+            command -v curl python3
+            python3 --version
+            python3 -m pip install --timeout 60 --retries 10 -U pip setuptools wheel
+            python3 -m pip install --timeout 60 --retries 10 'lm-eval[api]' hf_transfer 'huggingface_hub[cli]'
+            chmod +x /workspace/atom-upstream/.github/scripts/atom_test.sh
+          "
+
+      - name: Resolve latest FlyDSL CI run
+        id: latest-ci-run
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          FLYDSL_REPOSITORY: ${{ env.FLYDSL_REPOSITORY }}
+          FLYDSL_CI_WORKFLOW: ${{ env.FLYDSL_CI_WORKFLOW }}
+        run: |
+          set -euo pipefail
+
+          PY_TAG=$(docker exec "${CONTAINER_NAME}" python3 -c "import sys; print(f'cp{sys.version_info.major}{sys.version_info.minor}')")
+          echo "Detected Python tag inside atom-dev image: ${PY_TAG}"
+          echo "python_tag=${PY_TAG}" >> "${GITHUB_OUTPUT}"
+
+          python3 - <<'PY'
+          import json
+          import os
+          import urllib.request
+
+          token = os.environ["GITHUB_TOKEN"]
+          repo = os.environ["FLYDSL_REPOSITORY"]
+          workflow = os.environ["FLYDSL_CI_WORKFLOW"]
+          url = f"https://api.github.com/repos/{repo}/actions/workflows/{workflow}/runs?branch=main&status=completed&per_page=20"
+
+          req = urllib.request.Request(
+              url,
+              headers={
+                  "Authorization": f"Bearer {token}",
+                  "Accept": "application/vnd.github+json",
+                  "X-GitHub-Api-Version": "2022-11-28",
+              },
+          )
+
+          with urllib.request.urlopen(req) as resp:
+              data = json.load(resp)
+
+          run = next((r for r in data.get("workflow_runs", []) if r.get("conclusion") == "success"), None)
+          if run is None:
+              raise SystemExit("No successful FlyDSL CI run found on main.")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
+              f.write(f"run_id={run['id']}\n")
+              f.write(f"run_url={run['html_url']}\n")
+              f.write(f"head_sha={run['head_sha']}\n")
+              f.write(f"head_sha_short={run['head_sha'][:7]}\n")
+
+          print(f"Selected FlyDSL CI run: {run['html_url']} @ {run['head_sha'][:7]}")
+          PY
+
+      - name: Try download wheel from S3
+        id: s3-wheel
+        continue-on-error: true
+        env:
+          PY_TAG: ${{ steps.latest-ci-run.outputs.python_tag }}
+          SHA_SHORT: ${{ steps.latest-ci-run.outputs.head_sha_short }}
+        run: |
+          set -euo pipefail
+          mkdir -p wheel-input
+
+          aws s3 ls "s3://${{ env.FLYDSL_WHEEL_BUCKET }}/${{ env.FLYDSL_WHEEL_PREFIX }}/" | awk '{print $4}' > /tmp/flydsl-s3-wheels.txt
+
+          WHEEL_NAME=$(PY_TAG="${PY_TAG}" SHA_SHORT="${SHA_SHORT}" python3 - <<'PY'
+          import os
+
+          py_tag = os.environ["PY_TAG"]
+          sha_short = os.environ["SHA_SHORT"]
+          with open("/tmp/flydsl-s3-wheels.txt", encoding="utf-8") as f:
+              wheels = [line.strip() for line in f if line.strip()]
+
+          matches = [w for w in wheels if w.startswith("flydsl-") and w.endswith(".whl") and py_tag in w and sha_short in w]
+          if not matches:
+              raise SystemExit(f"No S3 wheel found for run sha {sha_short} and tag {py_tag}.")
+
+          print(sorted(matches)[-1])
+          PY
+          )
+
+          WHEEL_PATH="wheel-input/${WHEEL_NAME}"
+          WHEEL_S3_URI="s3://${{ env.FLYDSL_WHEEL_BUCKET }}/${{ env.FLYDSL_WHEEL_PREFIX }}/${WHEEL_NAME}"
+          echo "Downloading wheel from S3: ${WHEEL_S3_URI}"
+          aws s3 cp "${WHEEL_S3_URI}" "${WHEEL_PATH}"
+
+          echo "wheel_name=${WHEEL_NAME}" >> "${GITHUB_OUTPUT}"
+          echo "wheel_path=${WHEEL_PATH}" >> "${GITHUB_OUTPUT}"
+          echo "wheel_source=s3" >> "${GITHUB_OUTPUT}"
+
+      - name: Download latest CI wheel artifact
+        if: steps.s3-wheel.outcome != 'success'
+        uses: actions/download-artifact@v4
+        with:
+          name: flydsl-wheels
+          repository: ${{ env.FLYDSL_REPOSITORY }}
+          run-id: ${{ steps.latest-ci-run.outputs.run_id }}
+          github-token: ${{ github.token }}
+          path: latest-ci-artifact
+
+      - name: Select wheel from artifact fallback
+        if: steps.s3-wheel.outcome != 'success'
+        id: artifact-wheel
+        env:
+          PY_TAG: ${{ steps.latest-ci-run.outputs.python_tag }}
+          SHA_SHORT: ${{ steps.latest-ci-run.outputs.head_sha_short }}
+        run: |
+          set -euo pipefail
+
+          WHEEL_PATH=$(PY_TAG="${PY_TAG}" SHA_SHORT="${SHA_SHORT}" python3 - <<'PY'
+          import glob
+          import os
+          import pathlib
+
+          py_tag = os.environ["PY_TAG"]
+          sha_short = os.environ["SHA_SHORT"]
+          wheels = sorted(glob.glob("latest-ci-artifact/**/*.whl", recursive=True))
+          candidates = [w for w in wheels if pathlib.Path(w).name.startswith("flydsl-") and py_tag in pathlib.Path(w).name and sha_short in pathlib.Path(w).name]
+          if not candidates:
+              candidates = [w for w in wheels if pathlib.Path(w).name.startswith("flydsl-") and py_tag in pathlib.Path(w).name]
+          if not candidates:
+              raise SystemExit(f"No artifact wheel found for tag {py_tag}.")
+          print(candidates[-1])
+          PY
+          )
+
+          WHEEL_NAME=$(basename "${WHEEL_PATH}")
+          echo "Using artifact fallback wheel: ${WHEEL_PATH}"
+          echo "wheel_name=${WHEEL_NAME}" >> "${GITHUB_OUTPUT}"
+          echo "wheel_path=${WHEEL_PATH}" >> "${GITHUB_OUTPUT}"
+          echo "wheel_source=artifact" >> "${GITHUB_OUTPUT}"
+
+      - name: Install FlyDSL wheel from latest CI output
+        run: |
+          set -euo pipefail
+          WHEEL_PATH="${S3_WHEEL_PATH:-${ARTIFACT_WHEEL_PATH:-}}"
+          WHEEL_NAME="${S3_WHEEL_NAME:-${ARTIFACT_WHEEL_NAME:-}}"
+          if [ -z "${WHEEL_PATH}" ] || [ -z "${WHEEL_NAME}" ]; then
+            echo "No FlyDSL wheel resolved from S3 or artifact."
+            exit 1
+          fi
+
+          docker cp "${WHEEL_PATH}" "${CONTAINER_NAME}:/tmp/${WHEEL_NAME}"
+          docker exec "${CONTAINER_NAME}" bash -lc "
+            set -euo pipefail
+            python3 -m pip install --no-deps --ignore-installed /tmp/${WHEEL_NAME}
+            python3 -m pip show flydsl
+            python3 -c \"import flydsl; print('flydsl package:', flydsl.__file__); print('flydsl version:', getattr(flydsl, '__version__', 'unknown'))\"
+          "
+        env:
+          S3_WHEEL_PATH: ${{ steps.s3-wheel.outputs.wheel_path }}
+          S3_WHEEL_NAME: ${{ steps.s3-wheel.outputs.wheel_name }}
+          ARTIFACT_WHEEL_PATH: ${{ steps.artifact-wheel.outputs.wheel_path }}
+          ARTIFACT_WHEEL_NAME: ${{ steps.artifact-wheel.outputs.wheel_name }}
+
+      - name: Record selected FlyDSL wheel
+        run: |
+          WHEEL_NAME="${S3_WHEEL_NAME:-${ARTIFACT_WHEEL_NAME:-unknown}}"
+          WHEEL_SOURCE="${S3_WHEEL_SOURCE:-${ARTIFACT_WHEEL_SOURCE:-unknown}}"
+          {
+            echo "## Selected FlyDSL Wheel"
+            echo
+            echo "- Source: \`${WHEEL_SOURCE}\`"
+            echo "- Wheel: \`${WHEEL_NAME}\`"
+            echo "- FlyDSL CI run: [latest successful main run](${{ steps.latest-ci-run.outputs.run_url }})"
+          } >> "${GITHUB_STEP_SUMMARY}"
+        env:
+          S3_WHEEL_NAME: ${{ steps.s3-wheel.outputs.wheel_name }}
+          S3_WHEEL_SOURCE: ${{ steps.s3-wheel.outputs.wheel_source }}
+          ARTIFACT_WHEEL_NAME: ${{ steps.artifact-wheel.outputs.wheel_name }}
+          ARTIFACT_WHEEL_SOURCE: ${{ steps.artifact-wheel.outputs.wheel_source }}
+
+      - name: Pre-download model when cache mount exists
+        run: |
+          set -euo pipefail
+          if [ -d "/models" ]; then
+            docker exec "${CONTAINER_NAME}" bash -lc "
+              set -euo pipefail
+              hf download '${{ matrix.model_path }}' --local-dir '/models/${{ matrix.model_path }}'
+            "
+          else
+            echo "/models is not available on this runner; using Hugging Face model path directly."
+          fi
+
+      - name: Run ATOM accuracy test
+        run: |
+          set -euo pipefail
+          docker exec "${CONTAINER_NAME}" bash -lc "
+            set -euo pipefail
+            cd /workspace/atom-upstream
+
+            if [ -d '/models/${{ matrix.model_path }}' ]; then
+              model_path='/models/${{ matrix.model_path }}'
+            else
+              model_path='${{ matrix.model_path }}'
+            fi
+
+            ATOM_SERVER_LOG=/tmp/atom_server.log \
+            ATOM_CLIENT_LOG=/tmp/atom_client.log \
+            ATOM_DOCKER_IMAGE='${{ env.ATOM_BASE_IMAGE }}' \
+            bash .github/scripts/atom_test.sh launch \"\$model_path\" ${{ matrix.extra_args }}
+
+            ATOM_SERVER_LOG=/tmp/atom_server.log \
+            ATOM_CLIENT_LOG=/tmp/atom_client.log \
+            ATOM_DOCKER_IMAGE='${{ env.ATOM_BASE_IMAGE }}' \
+            bash .github/scripts/atom_test.sh accuracy \"\$model_path\"
+          " 2>&1 | tee atom_accuracy_output.txt
+
+      - name: Check accuracy threshold
+        if: success()
+        env:
+          ACCURACY_THRESHOLD: ${{ matrix.accuracy_threshold }}
+        run: |
+          set -euo pipefail
+          RESULT_FILE=$(python3 - <<'PY'
+          import glob
+          files = sorted(glob.glob('atom-upstream/accuracy_test_results/*.json'))
+          print(files[-1] if files else '')
+          PY
+          )
+          if [ -z "${RESULT_FILE:-}" ] || [ ! -f "${RESULT_FILE}" ]; then
+            echo "No accuracy result JSON found in atom-upstream/accuracy_test_results/"
+            exit 1
+          fi
+
+          RESULT_FILE="${RESULT_FILE}" python3 - <<'PY'
+          import json
+          import os
+
+          result_file = os.environ["RESULT_FILE"]
+          threshold = float(os.environ["ACCURACY_THRESHOLD"])
+
+          with open(result_file, encoding="utf-8") as f:
+              result = json.load(f)
+
+          value = result["results"]["gsm8k"]["exact_match,flexible-extract"]
+          print(f"RESULT_FILE: {result_file}")
+          print(f"Flexible extract value: {value}")
+          print(f"Accuracy threshold: {threshold}")
+
+          if value < threshold:
+              raise SystemExit(f"Accuracy test failed: {value} < {threshold}")
+          print(f"Accuracy test passed: {value} >= {threshold}")
+          PY
+
+      - name: Collect test summary
+        if: success()
+        run: |
+          echo "Accuracy Test Summary for ${{ matrix.model_name }}:" >> "${GITHUB_STEP_SUMMARY}"
+          awk '/\|Tasks\|Version\|/,/^$/ { if (NF > 0) print }' atom_accuracy_output.txt >> "${GITHUB_STEP_SUMMARY}" || true
+
+      - name: Collect ATOM logs
+        if: always()
+        run: |
+          docker cp "${CONTAINER_NAME}:/tmp/atom_server.log" atom_server.log 2>/dev/null || true
+          docker cp "${CONTAINER_NAME}:/tmp/atom_client.log" atom_client.log 2>/dev/null || true
+
+      - name: Upload logs and accuracy results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: flydsl-atom-${{ matrix.model_name }}
+          path: |
+            latest-ci-artifact/**/*.whl
+            atom_accuracy_output.txt
+            atom_server.log
+            atom_client.log
+            atom-upstream/accuracy_test_results/*.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Clean up
+        if: always()
+        run: |
+          docker exec "${CONTAINER_NAME}" bash -lc "
+            set -euo pipefail
+            cd /workspace/atom-upstream
+            bash .github/scripts/atom_test.sh stop || true
+          " || true
+          docker stop "${CONTAINER_NAME}" || true
+          docker rm "${CONTAINER_NAME}" || true

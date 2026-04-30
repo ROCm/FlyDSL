@@ -57,8 +57,7 @@ The simplest pattern. Each thread processes `VEC_WIDTH` elements independently.
 import torch
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.expr import arith
-from flydsl._mlir.ir import VectorType
+from flydsl.expr.typing import Vector as Vec
 
 BLOCK_DIM = 256
 VEC_WIDTH = 4
@@ -100,9 +99,9 @@ def elementwise_kernel(
     # === Step 5: Load -> Compute -> Store ===
     fx.copy_atom_call(copy_atom, fx.slice(tA, (None, tid)), rA)
 
-    vA = fx.memref_load_vec(rA)
+    vA = Vec(fx.memref_load_vec(rA))
     # --- YOUR COMPUTE HERE ---
-    vOut = arith.mulf(vA, vA)  # example: square
+    vOut = vA * vA  # example: square
     # --- END COMPUTE ---
     fx.memref_store_vec(vOut, rOut)
 
@@ -282,33 +281,31 @@ def buffer_kernel(A: fx.Tensor, B: fx.Tensor, N: fx.Constexpr[int]):
 Common compute recipes (all work on vectors):
 
 ```python
-from flydsl.expr import arith
-from flydsl._mlir.ir import VectorType
-
-vec_ty = VectorType.get([VEC_WIDTH], fx.T.f32())
+from flydsl.expr.typing import Vector as Vec
 
 # Scale: C = A * scalar
-scale = arith.constant_vector(2.0, vec_ty)
-vC = arith.mulf(vA, scale)
+scale = Vec.filled(VEC_WIDTH, 2.0, fx.Float32)
+vC = Vec(vA) * scale
 
 # Add: C = A + B
-vC = arith.addf(vA, vB)
+vC = Vec(vA) + Vec(vB)
 
 # FMA: D = A * B + C
-vC = arith.addf(arith.mulf(vA, vB), vC)
+vC = Vec(vA) * Vec(vB) + Vec(vC)
 
 # ReLU: C = max(A, 0)
-zero = arith.constant_vector(0.0, vec_ty)
-vC = arith.maximumf(vA, zero)
+zero = Vec.filled(VEC_WIDTH, 0.0, fx.Float32)
+vC = Vec(vA).maximumf(zero)
 
-# Abs: C = |A| (no arith.absf -- use this pattern)
-neg = arith.negf(vA)
-is_neg = arith.cmpf(vA, arith.constant_vector(0.0, vec_ty), predicate="olt")
-vC = arith.select(is_neg, neg, vA)
+# Abs: C = |A|
+v = Vec(vA)
+neg = -v
+is_neg = v < zero
+vC = is_neg.select(neg, v)
 
 # Type conversion
-vC = arith.sitofp(vI32, fx.T.f32())   # int -> float
-vC = arith.trunc_f(vF32, fx.T.f16())  # f32 -> f16
+vC = Vec(vI32).to(fx.Float32)  # int -> float
+vC = Vec(vF32).to(fx.Float16)  # f32 -> f16
 ```
 
 ---
@@ -322,13 +319,12 @@ from flydsl.expr import range_constexpr
 for i in range_constexpr(K):
     ...
 
-# Runtime loop (dynamic bounds -> scf.for)
+# Runtime loop (dynamic bounds)
 for i in range(runtime_N):
     ...
 
 # Loop with carried state (software pipelining)
-from flydsl.expr import arith as ar
-start, stop, step = ar.index(0), ar.index(N-1), ar.index(1)
+start, stop, step = fx.Index(0), fx.Index(N - 1), fx.Index(1)
 for iv, state in range(start, stop, step, init=[acc_init, ...]):
     acc = state[0]
     # ... compute ...
@@ -340,7 +336,7 @@ from flydsl.expr import const_expr
 if const_expr(USE_FAST_PATH):
     ...
 
-# Dynamic if (runtime -> scf.IfOp, automatic)
+# Dynamic if (runtime, rewritten by the frontend)
 if bid == 0:
     ...
 ```
@@ -420,13 +416,13 @@ FLYDSL_DUMP_IR=1 PYTHONPATH=./ python my_kernel.py
 
 | Error | Cause | Fix |
 |-------|-------|-----|
-| `TypeError: 'int' has no attribute 'type'` | Passing Python int where MLIR Value expected | Use `arith.constant(N, type=T.i32())` |
+| `TypeError: 'int' has no attribute 'type'` | Passing Python int where a DSL value is expected | Use `fx.Int32(N)` / `fx.Index(N)` |
 | `NameError: name 'x' not defined` inside `__then_*` | AST rewriter extracted if-body as function, variable not captured | Use `const_expr()` for static conditions |
-| `arith.absf` not found | FlyDSL doesn't expose absf | Use `negf + cmpf + select` |
-| Scalar + vector type mismatch | Can't use scalar with vector arith ops | Use `arith.constant_vector()` to splat |
+| `arith.absf` not found | Prefer `Vector`/`ArithValue` operators | Use `-v`, comparison, and `cond.select(...)` |
+| Scalar + vector type mismatch | Can't use scalar with raw vector ops | Use `Vec.filled()` to splat |
 | LDS overflow / wrong results | Exceeds per-CU LDS capacity | Check total LDS bytes vs limit |
 | `buffer_load` returns wrong data | Offset is in elements, not bytes | Don't multiply by sizeof yourself |
-| `scf.for init=` ignored, loop unrolled | Bounds are Python int constants | Use `arith.index(N)` for bounds |
+| `range(..., init=...)` ignored, loop unrolled | Bounds are Python int constants | Use `fx.Index(N)` for bounds |
 | Cache stale after C++ pass edit | Disk cache not auto-invalidated for C++ changes | `rm -rf ~/.flydsl/cache` or `FLYDSL_RUNTIME_ENABLE_CACHE=0` |
 
 ---

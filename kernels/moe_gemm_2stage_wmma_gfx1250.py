@@ -403,6 +403,7 @@ def _compile_stage1_wmma_kernel_impl(
             i32_inter_in,
             i32_k_in,
             i32_size_expert_ids_in,
+            value_attrs={"rocdl.waves_per_eu": waves_per_eu},
         )
         _finalize_alloc_and_launch_2d(
             ctx=ctx,
@@ -412,7 +413,6 @@ def _compile_stage1_wmma_kernel_impl(
             gy=gy,
             block_threads=block_threads,
             stream=stream,
-            waves_per_eu=waves_per_eu,
             ir=ir,
         )
 
@@ -449,7 +449,7 @@ def _compile_stage2_wmma_kernel_impl(
     from flydsl._mlir.dialects import llvm as llvm_dialect
     from flydsl._mlir.dialects import scf
     from flydsl.compiler.kernel_function import CompilationContext
-    from flydsl.expr import arith, buffer_ops, gpu, idx2crd, range_constexpr, rocdl, tdm_ops, vector
+    from flydsl.expr import arith, buffer_ops, const_expr, gpu, idx2crd, range_constexpr, rocdl, tdm_ops, vector
     from flydsl.expr.typing import T
     from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr, get_op_result_or_value
 
@@ -536,7 +536,7 @@ def _compile_stage2_wmma_kernel_impl(
         x_rows = tokens_idx * arith.index(int(topk))
         x_nbytes = x_rows * arith.index(int(inter_dim)) * arith.index(2)
         out_nbytes = tokens_idx * n_idx * arith.index(2)
-        if not bool(accumulate):
+        if const_expr(not bool(accumulate)):
             out_nbytes = x_rows * n_idx * arith.index(2)
 
         sorted_rsrc = buffer_ops.create_buffer_resource(arg_sorted_token_ids, max_size=False, num_records_bytes=sorted_nbytes)
@@ -788,6 +788,7 @@ def _compile_stage2_wmma_kernel_impl(
             i32_n_in,
             i32_k_in,
             i32_size_expert_ids_in,
+            value_attrs={"rocdl.waves_per_eu": waves_per_eu},
         )
         _finalize_alloc_and_launch_2d(
             ctx=ctx,
@@ -797,7 +798,6 @@ def _compile_stage2_wmma_kernel_impl(
             gy=gy,
             block_threads=block_threads,
             stream=stream,
-            waves_per_eu=waves_per_eu,
             ir=ir,
         )
 

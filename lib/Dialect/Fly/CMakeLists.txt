@@ -14,6 +14,7 @@ add_mlir_dialect_library(MLIRFlyDialect
   Transforms/RewriteFuncSignature.cpp
   Transforms/ConvertAtomCallToSSAForm.cpp
   Transforms/PromoteRegMemToVectorSSA.cpp
+  Transforms/IntSwizzleSimplify.cpp
 
   DEPENDS
   MLIRFlyIncGen

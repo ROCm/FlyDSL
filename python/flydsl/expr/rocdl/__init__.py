@@ -16,7 +16,7 @@ This module provides access to ROCm-specific GPU operations including:
 
 from ..._mlir.dialects.rocdl import *  # noqa: F401,F403
 from ..meta import traced_op
-from . import cdna4
+from . import cdna4 as cdna4
 
 # Keep references to ODS-generated builders so we can wrap them without losing access.
 _ods_wmma_scale_f32_16x16x128_f8f6f4 = globals().get("wmma_scale_f32_16x16x128_f8f6f4", None)
@@ -30,6 +30,7 @@ _ods_cluster_load_async_to_lds_b32 = cluster_load_async_to_lds_b32
 _ods_cluster_load_async_to_lds_b64 = cluster_load_async_to_lds_b64
 _ods_cluster_load_async_to_lds_b128 = cluster_load_async_to_lds_b128
 _ods_s_wait_asynccnt = s_wait_asynccnt
+_ods_readfirstlane = readfirstlane
 _ods_mfma_f32_16x16x16f16 = mfma_f32_16x16x16f16
 _ods_mfma_f32_16x16x16bf16_1k = globals().get("mfma_f32_16x16x16bf16_1k", None)
 _ods_mfma_f32_16x16x32_fp8_fp8 = mfma_f32_16x16x32_fp8_fp8
@@ -396,8 +397,8 @@ def lds_transpose_load(result_type, lds_memref, elem_offset, elem_bytes):
 
 
 # ── New high-level helpers from universal.py ──────────────────────────
-from .universal import *  # noqa: F401,F403
-from .inline_asm import *  # noqa: F401,F403
+from .universal import *  # noqa: E402,F401,F403,I001
+from .inline_asm import *  # noqa: E402,F401,F403,I001
 
 # ── Wrappers: accept DSL Numeric args (fx.Int32, fx.Float32, etc.) ─────────
 # ODS-generated ops require raw ir.Value. These wrappers auto-convert.
@@ -406,7 +407,12 @@ from .inline_asm import *  # noqa: F401,F403
 def _to_ir(v):
     """Coerce DSL Numeric to ir.Value if needed."""
     from ..._mlir import ir as _ir
+    from .. import arith as _arith_ext
 
+    if isinstance(v, int):
+        return _arith_ext.unwrap(_arith_ext.constant(v, type=_ir.IntegerType.get_signless(32)))
+    if isinstance(v, float):
+        return _arith_ext.unwrap(_arith_ext.constant(v, type=_ir.F32Type.get()))
     if not isinstance(v, _ir.Value) and hasattr(v, "ir_value"):
         return v.ir_value()
     return v
@@ -430,9 +436,35 @@ def cvt_pk_fp8_f32(res, src_a, src_b, old, word_sel, **kw):
     return _op(res=res, src_a=_to_ir(src_a), src_b=_to_ir(src_b), old=_to_ir(old), word_sel=word_sel, **kw)
 
 
+def rcp(res, arg, **kw):
+    from ..._mlir.dialects.rocdl import rcp as _op
+
+    return _op(res=res, arg=_to_ir(arg), **kw)
+
+
 def raw_ptr_buffer_load_lds(rsrc, lds_ptr, size, voffset, soffset, offset, aux, **kw):
     from ..._mlir.dialects.rocdl import raw_ptr_buffer_load_lds as _op
 
     return _op(
         _to_ir(rsrc), _to_ir(lds_ptr), _to_ir(size), _to_ir(voffset), _to_ir(soffset), _to_ir(offset), _to_ir(aux), **kw
     )
+
+
+def buffer_load_to_lds(rsrc, lds_ptr, voffset, size_bytes=4, soffset=0, offset=0):
+    """Load ``size_bytes`` from a buffer resource into LDS.
+
+    Simplified wrapper around :func:`raw_ptr_buffer_load_lds` with
+    sensible defaults (``soffset=0``, ``offset=0``, ``aux=0``).
+    Python int arguments are auto-materialised as i32 constants.
+    """
+    return raw_ptr_buffer_load_lds(rsrc, lds_ptr, size_bytes, voffset, soffset, offset, 0)
+
+
+def ds_bpermute(res, index, src, **kw):
+    from ..._mlir.dialects.rocdl import ds_bpermute as _op
+
+    return _op(res=res, index=_to_ir(index), src=_to_ir(src), **kw)
+
+
+def readfirstlane(res, src, **kw):
+    return _ods_readfirstlane(res=res, src=_to_ir(src), **kw)
