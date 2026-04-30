@@ -31,9 +31,7 @@ from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import scf
-from flydsl._mlir.dialects import math as math_dialect
 from flydsl.expr.typing import T
-from flydsl.expr.arith import ArithValue
 
 from kernels.grouped_gemm_blockscale_common import (
     compute_compile_constants,
@@ -46,19 +44,11 @@ from kernels.grouped_gemm_blockscale_common import (
     make_pingpong_kloop,
     make_prefetch_scales,
     out_mlir_for,
-    pack_i64x4_to_i32x8,
     setup_lds_allocation,
     validate_params,
 )
 from kernels.mfma_epilogues import mfma_epilog
-from kernels.mfma_preshuffle_pipeline import (
-    crd2idx,
-    lds_store_16b_xor16,
-    load_b_pack_k32,
-    make_preshuffle_b_layout,
-    swizzle_xor16,
-    tile_chunk_coord_i32,
-)
+from kernels.mfma_preshuffle_pipeline import make_preshuffle_b_layout
 
 
 @functools.lru_cache(maxsize=128)
