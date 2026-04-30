@@ -37,6 +37,7 @@ from flydsl.expr.arith import ArithValue
 from kernels.grouped_gemm_blockscale_common import (
     compute_compile_constants,
     out_mlir_for,
+    setup_lds_allocation,
     validate_params,
 )
 from kernels.mfma_epilogues import mfma_epilog
@@ -112,14 +113,9 @@ def compile_grouped_gemm_blockscale_contiguous(
     chunk_i32_a = _c.chunk_i32_a
     num_a_loads = _c.num_a_loads
 
-    # LDS allocation: max of ping-pong A tiles and CShuffle epilogue output
-    lds_a_bytes = tile_m * tile_k * elem_bytes
-    lds_pingpong_bytes = 2 * lds_a_bytes
-    lds_out_bytes = tile_m * tile_n * 2  # bf16/f16 = 2 bytes per element
-    lds_total_bytes = max(lds_pingpong_bytes, lds_out_bytes)
-    lds_alloc_offset = allocator._align(allocator.ptr, 16)
-    allocator.ptr = lds_alloc_offset + lds_total_bytes
-    lds_tile_elems = tile_m * tile_k  # element offset between ping and pong
+    lds_alloc_offset, lds_tile_elems = setup_lds_allocation(
+        allocator=allocator, tile_m=tile_m, tile_k=tile_k, tile_n=tile_n, elem_bytes=elem_bytes,
+    )
 
     # Module name for caching
     module_name = (

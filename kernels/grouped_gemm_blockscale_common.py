@@ -97,3 +97,21 @@ def compute_compile_constants(*, n, k, tile_m, tile_n, tile_k, scale_block_k, sc
         chunk_i32_a=chunk_i32_a,
         num_a_loads=num_a_loads,
     )
+
+
+def setup_lds_allocation(*, allocator, tile_m, tile_k, tile_n, elem_bytes):
+    """Reserve LDS for ping-pong A tiles and the CShuffle epilogue output.
+
+    The ping-pong A buffers and the FP16/BF16 epilogue output share the same
+    LDS arena (alias), so we reserve the max of the two. Returns
+    `(lds_alloc_offset, lds_tile_elems)` where `lds_tile_elems` is the
+    A-element stride between the ping and pong halves.
+    """
+    lds_a_bytes = tile_m * tile_k * elem_bytes
+    lds_pingpong_bytes = 2 * lds_a_bytes
+    lds_out_bytes = tile_m * tile_n * 2  # bf16/f16 = 2 bytes per element
+    lds_total_bytes = max(lds_pingpong_bytes, lds_out_bytes)
+    lds_alloc_offset = allocator._align(allocator.ptr, 16)
+    allocator.ptr = lds_alloc_offset + lds_total_bytes
+    lds_tile_elems = tile_m * tile_k  # element offset between ping and pong
+    return lds_alloc_offset, lds_tile_elems
