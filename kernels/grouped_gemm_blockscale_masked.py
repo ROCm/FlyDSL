@@ -35,12 +35,15 @@ from flydsl.expr.typing import T
 
 from kernels.grouped_gemm_blockscale_common import (
     compute_compile_constants,
+    compute_mfma_tiling,
+    init_accumulators,
     make_a_tile_loaders,
     make_b_loader,
     make_compute_tile,
     make_epilogue_writers,
     make_hot_loop_scheduler,
     make_lds_loader,
+    make_n_block_coords,
     make_pingpong_kloop,
     make_prefetch_scales,
     out_mlir_for,
@@ -48,7 +51,6 @@ from kernels.grouped_gemm_blockscale_common import (
     validate_params,
 )
 from kernels.mfma_epilogues import mfma_epilog
-from kernels.mfma_preshuffle_pipeline import make_preshuffle_b_layout
 
 
 @functools.lru_cache(maxsize=128)
@@ -225,50 +227,26 @@ def compile_grouped_gemm_blockscale_masked(
         _if_valid = scf.IfOp(is_valid)
         with ir.InsertionPoint(_if_valid.then_block):
 
-            # MFMA tiling constants
-            m_repeat = tile_m // 16  # 8 for tile_m=128
-            num_waves = 4
-            n_per_wave = tile_n // num_waves  # 32 for tile_n=128
-            num_acc_n = n_per_wave // 16  # 2 for n_per_wave=32
+            _t = compute_mfma_tiling(tile_m=tile_m, tile_n=tile_n)
+            m_repeat = _t.m_repeat
+            n_per_wave = _t.n_per_wave
+            num_acc_n = _t.num_acc_n
 
-            # Initialize accumulators (FP32)
-            acc_init = arith.constant_vector(0.0, T.f32x4)
-            num_accs = m_repeat * num_acc_n
-            accs = [acc_init] * num_accs
+            acc_init, accs = init_accumulators(_t.num_accs)
 
-            # Wave's N-tile base
-            wave_mod_4 = wave_id % fx.Index(4)
-            n_tile_base = wave_mod_4 * fx.Index(n_per_wave)
-
-            # Precompute N-block indices for scale_b
-            c_scale_block_n = fx.Index(scale_block_n)
-            c_scale_k = fx.Index(scale_k)
-            n_block_for_scale = []
-            for ni in range_constexpr(num_acc_n):
-                col_base = by_n + n_tile_base + arith.index(ni * 16)
-                n_blk = col_base // c_scale_block_n
-                n_block_for_scale.append(n_blk)
-
-            # B preshuffle layout: total N = num_groups * N (all groups concatenated)
-            c_n_total = num_groups_in * n_in
-            b_layout = make_preshuffle_b_layout(
-                arith, c_n=c_n_total, c_k=k_in,
-                kpack_bytes=kpack_bytes, elem_bytes=elem_bytes,
+            _nb = make_n_block_coords(
+                wave_id=wave_id, by_n=by_n, group_idx=group_idx,
+                num_groups_in=num_groups_in, n_in=n_in, k_in=k_in,
+                lane_mod_16=lane_mod_16, kpack_bytes=kpack_bytes, elem_bytes=elem_bytes,
+                scale_block_n=scale_block_n, scale_k=scale_k,
+                n_per_wave=n_per_wave, num_acc_n=num_acc_n,
             )
-            layout_b = b_layout.layout_b
-
-            # Decompose global N column into (n_blk, n_intra) for preshuffle layout
-            c_n0 = c_n_total // fx.Index(16)
-            c_n0_i32 = arith.index_cast(T.i32, c_n0)
-            layout_n_blk_intra = fx.make_layout((c_n0_i32, 16), stride=(16, 1))
-            n_blk_list = []
-            n_intra_list = []
-            group_n_off = group_idx * n_in  # N-offset for this group in concatenated B
-            for ni in range_constexpr(num_acc_n):
-                col_global = group_n_off + by_n + n_tile_base + arith.index(ni * 16) + lane_mod_16
-                coord_ni = fx.idx2crd(col_global, layout_n_blk_intra)
-                n_blk_list.append(fx.get(coord_ni, 0))
-                n_intra_list.append(fx.get(coord_ni, 1))
+            n_tile_base = _nb.n_tile_base
+            n_block_for_scale = _nb.n_block_for_scale
+            layout_b = _nb.layout_b
+            n_blk_list = _nb.n_blk_list
+            n_intra_list = _nb.n_intra_list
+            c_scale_k = _nb.c_scale_k
 
             (prefetch_a_tile, store_a_tile_to_lds,
              a_row_local, a_col_local_i32, k_blocks16) = make_a_tile_loaders(

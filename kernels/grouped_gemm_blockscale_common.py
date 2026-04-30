@@ -22,6 +22,7 @@ from kernels.mfma_preshuffle_pipeline import (
     crd2idx,
     lds_store_16b_xor16,
     load_b_pack_k32,
+    make_preshuffle_b_layout,
     swizzle_xor16,
     tile_chunk_coord_i32,
 )
@@ -660,3 +661,104 @@ def make_epilogue_writers(
             )
 
     return write_row_to_lds, store_pair
+
+
+MfmaTilingConstants = namedtuple(
+    "MfmaTilingConstants",
+    ["m_repeat", "num_waves", "n_per_wave", "num_acc_n", "num_accs"],
+)
+
+
+def compute_mfma_tiling(*, tile_m, tile_n):
+    """Pure-Python derivation of the MFMA tiling constants.
+
+    Returns an `MfmaTilingConstants` namedtuple with `m_repeat`,
+    `num_waves`, `n_per_wave`, `num_acc_n`, `num_accs`. Emits no MLIR.
+    """
+    m_repeat = tile_m // 16  # 8 for tile_m=128
+    num_waves = 4
+    n_per_wave = tile_n // num_waves  # 32 for tile_n=128
+    num_acc_n = n_per_wave // 16  # 2 for n_per_wave=32
+    num_accs = m_repeat * num_acc_n
+    return MfmaTilingConstants(
+        m_repeat=m_repeat, num_waves=num_waves, n_per_wave=n_per_wave,
+        num_acc_n=num_acc_n, num_accs=num_accs,
+    )
+
+
+def init_accumulators(num_accs):
+    """Emit the FP32 zero-vector accumulator constant and replicate it
+    for all `num_accs` MFMA result slots. Returns `(acc_init, accs)`."""
+    acc_init = arith.constant_vector(0.0, T.f32x4)
+    accs = [acc_init] * num_accs
+    return acc_init, accs
+
+
+NBlockCoords = namedtuple(
+    "NBlockCoords",
+    ["n_tile_base", "n_block_for_scale", "layout_b", "n_blk_list", "n_intra_list", "c_scale_k"],
+)
+
+
+def make_n_block_coords(
+    *,
+    wave_id,
+    by_n,
+    group_idx,
+    num_groups_in,
+    n_in,
+    k_in,
+    lane_mod_16,
+    kpack_bytes,
+    elem_bytes,
+    scale_block_n,
+    scale_k,
+    n_per_wave,
+    num_acc_n,
+):
+    """Compute per-wave N-tile base, scale_b N-block indices, the
+    preshuffle B layout, and the per-MFMA (n_blk, n_intra) coordinate
+    lists for all groups concatenated along N.
+
+    Byte-identical between contig and masked. Returns an `NBlockCoords`
+    namedtuple matching the original local variable names so the caller
+    can keep referring to them unchanged.
+    """
+    wave_mod_4 = wave_id % fx.Index(4)
+    n_tile_base = wave_mod_4 * fx.Index(n_per_wave)
+
+    c_scale_block_n = fx.Index(scale_block_n)
+    c_scale_k = fx.Index(scale_k)
+    n_block_for_scale = []
+    for ni in range_constexpr(num_acc_n):
+        col_base = by_n + n_tile_base + arith.index(ni * 16)
+        n_blk = col_base // c_scale_block_n
+        n_block_for_scale.append(n_blk)
+
+    c_n_total = num_groups_in * n_in
+    b_layout = make_preshuffle_b_layout(
+        arith, c_n=c_n_total, c_k=k_in,
+        kpack_bytes=kpack_bytes, elem_bytes=elem_bytes,
+    )
+    layout_b = b_layout.layout_b
+
+    c_n0 = c_n_total // fx.Index(16)
+    c_n0_i32 = arith.index_cast(T.i32, c_n0)
+    layout_n_blk_intra = fx.make_layout((c_n0_i32, 16), stride=(16, 1))
+    n_blk_list = []
+    n_intra_list = []
+    group_n_off = group_idx * n_in
+    for ni in range_constexpr(num_acc_n):
+        col_global = group_n_off + by_n + n_tile_base + arith.index(ni * 16) + lane_mod_16
+        coord_ni = fx.idx2crd(col_global, layout_n_blk_intra)
+        n_blk_list.append(fx.get(coord_ni, 0))
+        n_intra_list.append(fx.get(coord_ni, 1))
+
+    return NBlockCoords(
+        n_tile_base=n_tile_base,
+        n_block_for_scale=n_block_for_scale,
+        layout_b=layout_b,
+        n_blk_list=n_blk_list,
+        n_intra_list=n_intra_list,
+        c_scale_k=c_scale_k,
+    )
