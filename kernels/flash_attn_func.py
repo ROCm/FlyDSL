@@ -55,6 +55,14 @@ def _llvm_value(value):
     return value
 
 
+def _extract_aligned_pointer(tensor, address_space=None) -> ir.Value:
+    """Extract the aligned LLVM pointer from a FlyDSL tensor/memref."""
+    from flydsl._mlir.dialects import fly as _fly
+
+    ptr_type = ir.Type.parse("!llvm.ptr" if address_space is None else f"!llvm.ptr<{address_space}>")
+    return _fly.extract_aligned_pointer_as_index(ptr_type, _llvm_value(tensor))
+
+
 def _pointer_load(result_type: ir.Type, ptr: ir.Value) -> ir.Value:
     return llvm.LoadOp(result_type, _llvm_value(ptr)).result
 
@@ -241,10 +249,10 @@ def build_flash_attn_func_module_primary(
         elem_dtype = dtype_to_elem_type(dtype_str)
         elem_type = elem_dtype.ir_type
         compute_type = fx.Float32.ir_type
-        q_ptr = buffer_ops.extract_aligned_pointer(Q)
-        k_ptr = buffer_ops.extract_aligned_pointer(K)
-        v_ptr = buffer_ops.extract_aligned_pointer(V)
-        o_ptr = buffer_ops.extract_aligned_pointer(O)
+        q_ptr = _extract_aligned_pointer(Q)
+        k_ptr = _extract_aligned_pointer(K)
+        v_ptr = _extract_aligned_pointer(V)
+        o_ptr = _extract_aligned_pointer(O)
 
         # All FP operations use aggressive fast-math (no NaN/Inf checks, reassociation).
         # The unsafe_fp_math/fast_fp_math builder params control LLVM-level attributes only.

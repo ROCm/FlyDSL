@@ -72,7 +72,6 @@ def _get_buffer_flags(arch=None):
 
 __all__ = [
     'create_llvm_ptr',
-    'extract_aligned_pointer',
     'get_element_ptr',
     'create_buffer_resource',
     'create_buffer_resource_from_addr',
@@ -141,15 +140,6 @@ def create_llvm_ptr(value, address_space: int = 0) -> ir.Value:
         value = _unwrap_value(std_arith.IndexCastOp(i64_type, value).result)
     ptr_type = ir.Type.parse(f'!llvm.ptr<{address_space}>')
     return llvm.IntToPtrOp(ptr_type, value).result
-
-
-def extract_aligned_pointer(tensor, address_space: Optional[int] = None) -> ir.Value:
-    """Extract the aligned LLVM pointer from a FlyDSL tensor/memref."""
-    from .._mlir.dialects import fly as _fly
-
-    raw = _unwrap_value(tensor)
-    ptr_type = ir.Type.parse("!llvm.ptr" if address_space is None else f"!llvm.ptr<{address_space}>")
-    return _fly.extract_aligned_pointer_as_index(ptr_type, raw)
 
 
 def extract_base_index(tensor, address_space: int = 1) -> ir.Value:
