@@ -161,8 +161,7 @@ fx.slice(src, coord)                       # Slice at coordinate (None = keep mo
 ```python
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.expr import gpu, buffer_ops, range_constexpr
-from flydsl.expr.typing import T
+from flydsl.expr import buffer_ops, const_expr, gpu, range_constexpr, rocdl
 
 @flyc.kernel
 def my_kernel(
@@ -170,8 +169,8 @@ def my_kernel(
     B: fx.Tensor,
     N: fx.Constexpr[int], # Compile-time constant
 ):
-    tid = gpu.thread_idx.x    # Returns Int32
-    bid = gpu.block_idx.x
+    tid = gpu.thread_id("x")
+    bid = gpu.block_id("x")
     # ... kernel body ...
 
 @flyc.jit
@@ -192,6 +191,37 @@ B = torch.empty(1024, device="cuda", dtype=torch.float32)
 launch(A, B, 1024)
 ```
 
+### Current Syntax Quick Reference
+
+Use the current public FlyDSL surface from `kernels/preshuffle_gemm.py` when writing new kernels:
+
+```python
+Vec = fx.Vector
+
+tx = gpu.thread_id("x")
+bx = gpu.block_id("x")
+by = gpu.block_id("y")
+
+i32_m: fx.Int32
+c_m = fx.Index(i32_m)
+c4 = fx.Index(4)
+zero_f = fx.Float32(0.0)
+
+layout = fx.make_layout((4, 64), (64, 1))
+coord = fx.idx2crd(tx, layout)
+wave_id = fx.get(coord, 0)
+lane_id = fx.get(coord, 1)
+
+acc = Vec.filled(4, 0.0, fx.Float32)
+v_i64 = Vec(raw_vec).bitcast(fx.Int64)
+elem0 = v_i64[0]
+
+rsrc = buffer_ops.create_buffer_resource(tensor, max_size=True)
+word = buffer_ops.buffer_load(rsrc, fx.Int32(offset), vec_width=4, dtype=fx.Int32)
+```
+
+Older code may use `gpu.thread_idx.x`, `gpu.block_idx.x`, `arith.constant(...)`, `T.i32`, and raw `vector.*` helpers. Keep those when editing existing code that already uses them heavily, but prefer `gpu.thread_id/block_id`, `fx.Index`/`fx.Int32`/`fx.Float32`, and `fx.Vector` for new code.
+
 ### Parameter Types
 | Type | Description | At host boundary |
 |------|-------------|-----------------|
@@ -204,10 +234,14 @@ launch(A, B, 1024)
 ```python
 from flydsl.expr import gpu
 
-tid_x = gpu.thread_idx.x    # Thread index (Int32)
-bid_x = gpu.block_idx.x     # Block index (Int32)
-bdim_x = gpu.block_dim.x    # Block dimension
-gdim_x = gpu.grid_dim.x     # Grid dimension
+tid_x = gpu.thread_id("x")   # Preferred current spelling
+bid_x = gpu.block_id("x")
+bid_y = gpu.block_id("y")
+
+# Legacy spelling still appears in older kernels:
+tid_x = gpu.thread_idx.x
+bid_x = gpu.block_idx.x
+
 gpu.barrier()                # Workgroup synchronization
 ```
 
@@ -222,6 +256,56 @@ for i in range_constexpr(N):
 # Runtime loop (lowered by AST rewriting)
 for i in range(runtime_value):
     ...
+```
+
+### Runtime vs Compile-Time Conditions (Current Style)
+
+Use Python/DSL operators for runtime SSA comparisons. The AST rewriter lowers dynamic `if` conditions to `scf.IfOp`, and comparison operators like `==`, `<`, `>=` generate the needed MLIR predicates.
+
+```python
+tid = gpu.thread_id("x")
+lane = tid % fx.Index(64)
+c_zero = fx.Index(0)
+c_limit = fx.Index(8)
+
+# Preferred: readable DSL comparisons
+if lane == c_zero:
+    ...
+
+in_range = lane < c_limit
+val = fx.arith.select(in_range, good_val, zero_val)
+
+# Avoid for simple integer comparisons
+in_range = arith.cmpi(arith.CmpIPredicate.slt, lane, c_limit)
+```
+
+Use `const_expr(...)` only for values known at trace/compile time, such as Python booleans, constexpr arguments, loop-unroll choices, or type/layout branches:
+
+```python
+if const_expr(trans_v):
+    ...
+
+if const_expr(max_context_partition_num <= WARP_SIZE):
+    ...
+```
+
+Do **not** wrap GPU runtime values in `const_expr`. Even with `@flyc.kernel(known_block_size=(256, 1, 1))`, `gpu.thread_id("x")`, `lane`, and `warp_id` are runtime SSA values; the compiler knows their range, not the current lane instance.
+
+```python
+# Wrong: lane depends on gpu.thread_id("x")
+if const_expr(lane == c_zero):
+    ...
+
+# Correct
+if lane == c_zero:
+    ...
+```
+
+Keep explicit `arith.cmpi(...)` / `arith.unwrap(...)` for low-level manual MLIR construction, such as passing a raw condition to `scf.IfOp` directly:
+
+```python
+cond = arith.unwrap(partition_idx >= visible_tile_count)
+if_op = scf.IfOp(cond, has_else=False)
 ```
 
 ### Frontend Semantic Restrictions
@@ -346,7 +430,7 @@ result = cond.select(true_val, false_val)
 Use FlyDSL's internal typed system instead of raw MLIR ops. The `Vector` class wraps `vector<NxTy>` with operator overloading and type-safe methods.
 
 ```python
-from flydsl.expr.typing import Vector as Vec, Float32, Float16, BFloat16
+Vec = fx.Vector
 
 # Wrap raw vector values
 acc = Vec(frag_C.load())      # vector<Nxf32> → Vector with * / + operators
@@ -355,16 +439,16 @@ acc = Vec(frag_C.load())      # vector<Nxf32> → Vector with * / + operators
 val = acc[idx]                 # returns Float32 scalar
 
 # Bitcast (replaces vector.bitcast)
-v_f32 = Vec(raw_vec).bitcast(Float32)  # vector<Nxi32> → vector<Nxf32>
+v_f32 = Vec(raw_vec).bitcast(fx.Float32)  # vector<Nxi32> → vector<Nxf32>
 
 # Type conversion (replaces arith.trunc_f / arith.ext_f)
-bf16_val = f32_val.to(BFloat16)        # f32 → bf16
+bf16_val = f32_val.to(fx.BFloat16)     # f32 → bf16
 
 # Arithmetic — use Python operators, not arith.mulf/addf
 result = (val * scale_a) * scale_b
 
 # Splat constant vector
-zeros = Vec.filled(N, 0.0, Float32)
+zeros = Vec.filled(N, 0.0, fx.Float32)
 
 # Index cast — use fx.Int32 instead of arith.index_cast
 idx = fx.Int32(gpu.block_id("x") * tile_m)
@@ -643,7 +727,7 @@ vC = is_neg.select(neg_vA, vA)
 def naive_gemm(A: fx.Tensor, B: fx.Tensor, C: fx.Tensor,
                M: fx.Constexpr[int], N: fx.Constexpr[int], K: fx.Constexpr[int],
                BM: fx.Constexpr[int], BN: fx.Constexpr[int]):
-    tid, bid = gpu.thread_idx.x, gpu.block_idx.x
+    tid, bid = gpu.thread_id("x"), gpu.block_id("x")
     bm, bn = bid // (N // BN), bid % (N // BN)
     tm, tn = tid // BN, tid % BN
     row, col = bm * BM + tm, bn * BN + tn

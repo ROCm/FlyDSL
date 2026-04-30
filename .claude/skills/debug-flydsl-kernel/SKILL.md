@@ -152,19 +152,37 @@ for i in range(4): result[i] = ...
 for i in range_constexpr(4): result[i] = ...
 ```
 
-### 6.2 Runtime conditional as Python bool
+### 6.2 Runtime vs compile-time conditionals
 
-FlyDSL tracing evaluates Python `if` at trace time. Runtime GPU values can't be used:
+Current FlyDSL supports runtime comparisons in Python `if`; the AST rewriter lowers dynamic conditions to `scf.IfOp`. Prefer readable DSL operators for runtime SSA values:
 ```python
-# WRONG: "cannot evaluate dynamic 'Boolean' as Python bool during tracing"
-if kv_tok < context_len:  # runtime comparison
-    fx.printf(...)
+tid = gpu.thread_id("x")
+lane = tid % fx.Index(64)
+c_zero = fx.Index(0)
+c_limit = fx.Index(8)
 
-# CORRECT: use ArithValue.select for runtime value selection
-val = (kv_tok < context_len).select(good_val, bad_val)
+# Runtime condition, lowered to scf.IfOp
+if lane == c_zero:
+    fx.printf("lane zero")
+
+# Runtime predicate for select
+val = (lane < c_limit).select(good_val, zero_val)
+
 ```
 
-Python `if` is fine for COMPILE-TIME decisions (e.g., `if trans_v:` where trans_v is a Python bool).
+Avoid spelling simple integer comparisons as `arith.cmpi(arith.CmpIPredicate.slt, lane, c_limit)` unless you are manually constructing low-level MLIR. If you pass a condition directly to `scf.IfOp`, unwrap the DSL boolean:
+```python
+cond = arith.unwrap(partition_idx >= visible_tile_count)
+if_op = scf.IfOp(cond, has_else=False)
+```
+
+Use `const_expr(...)` only for compile-time decisions:
+```python
+if const_expr(trans_v):
+    ...
+```
+
+Do not use `const_expr(lane == 0)`: even with `known_block_size`, `gpu.thread_id("x")`, `lane`, and `warp_id` are runtime SSA values. The compiler knows their range, not the current executing lane.
 
 ### 6.3 Loop-carried state packing
 
