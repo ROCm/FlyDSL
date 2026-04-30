@@ -2451,268 +2451,355 @@ def compile_pa_decode_sw(
                 causal_bound = context_len + arith.constant(1 - query_length, type=T.i32) + qi_val
                 seq_start = context_len - arith.constant(sliding_window, type=T.i32) + qi_val
 
-                if _mtp_g > 0:
-                    gpu.barrier()
                 q_row = batch_idx * arith.constant(query_length, type=T.i32) + qi_for_q
                 q_base = q_row * stride_q_seq + (kv_h * arith.constant(query_group_size, type=T.i32) + local_qhead_idx_for_q) * stride_q_head
-                query_scale_lane = None
-                q_frags, kernel_query_scale_lane = _load_q_fragments(
-                    q_rsrc,
-                    logits_lds_i32,
-                    logits_lds_i64,
-                    softmax_lds_f32,
-                    q_base,
-                    lane16id,
-                    lane4id,
-                    rowid,
-                    local_qhead_idx,
-                    query_packed_fp8=query_packed_fp8,
-                    query_load_is_bf16=query_load_is_bf16,
-                    compute_query_scale_in_kernel=query_scale_in_kernel,
+                # ── Inlined _load_q_fragments (Q buffer_load separated) ──
+                # Phase 1: Issue Q buffer_loads (can overlap with other work)
+                _q_elem = q_base + lane16id * arith.constant(FP8_ELEMS_16B, type=T.i32)
+                _q_raw_chunks = []
+                for _qwi in range_constexpr(4):
+                    _q_raw_chunks.append(buffer_ops.buffer_load(
+                        q_rsrc,
+                        _q_elem + arith.constant(_qwi * 4, type=T.i32),
+                        vec_width=4,
+                        dtype=T.bf16 if query_load_is_bf16 else T.f16,
+                    ))
+                if _mtp_g > 0:
+                    gpu.barrier()
+
+                # Phase 2: FP8 quantize + LDS write + barrier + LDS read
+                _offset1 = lane16id // arith.constant(4, type=T.i32)
+                _lds_q_base = (
+                    _offset1 * arith.constant(2048, type=T.i32)
+                    + lane4id * arith.constant(512, type=T.i32)
+                    + local_qhead_idx * arith.constant(32, type=T.i32)
                 )
+                query_scale_lane = None
                 if query_scale_in_kernel:
-                    query_scale_lane = kernel_query_scale_lane
+                    _i32_vec_ty = T.i32x4
+                    _abs_mask = arith.constant_vector(0x7FFFFFFF, _i32_vec_ty)
+                    _c_zero_f = arith.constant(0.0, type=T.f32)
+                    _c_one_f = arith.constant(1.0, type=T.f32)
+                    _c_inv_fp8_max = arith.constant(1.0 / FP8_MAX, type=T.f32)
+                    _c_wave16 = arith.constant(16, type=T.i32)
+                    _q_f32_chunks = []
+                    _local_max = _c_zero_f
+                    for _qwi in range_constexpr(4):
+                        _q_f32 = _mlir_arith.ExtFOp(T.f32x4, _q_raw_chunks[_qwi]).result
+                        _q_f32_chunks.append(_q_f32)
+                        _q_i32 = vector.bitcast(_i32_vec_ty, _q_f32)
+                        _q_abs_i32 = arith.andi(_q_i32, _abs_mask)
+                        _q_abs = vector.bitcast(T.f32x4, _q_abs_i32)
+                        _chunk_max = vector.reduction(T.f32, "maxnumf", _q_abs)
+                        _local_max = _local_max.maximumf(_chunk_max)
+                    for _sh in [8, 4, 2, 1]:
+                        _local_max = _local_max.maximumf(
+                            _local_max.shuffle_xor(arith.constant(_sh, type=T.i32), _c_wave16)
+                        )
+                    query_scale_lane = arith.select(
+                        _local_max > _c_zero_f,
+                        _local_max * _c_inv_fp8_max,
+                        _c_one_f,
+                    )
+                    _inv_query_scale = rocdl.rcp(T.f32, query_scale_lane)
+                    _q_words = []
+                    for _q_f32 in _q_f32_chunks:
+                        _p0 = vector.extract(_q_f32, static_position=[0], dynamic_position=[]) * _inv_query_scale
+                        _p1 = vector.extract(_q_f32, static_position=[1], dynamic_position=[]) * _inv_query_scale
+                        _p2 = vector.extract(_q_f32, static_position=[2], dynamic_position=[]) * _inv_query_scale
+                        _p3 = vector.extract(_q_f32, static_position=[3], dynamic_position=[]) * _inv_query_scale
+                        _lo = rocdl.cvt_pk_fp8_f32(T.i32, _p0, _p1, arith.constant(0, type=T.i32), False)
+                        _q_words.append(rocdl.cvt_pk_fp8_f32(T.i32, _p2, _p3, _lo, True))
+                    _q_w0, _q_w1, _q_w2, _q_w3 = _q_words
+                    _scale_store_if = scf.IfOp(
+                        arith.unwrap(lane16id == arith.constant(0, type=T.i32)), has_else=False
+                    )
+                    with _if_then(_scale_store_if):
+                        vector.store(
+                            vector.from_elements(T.vec(1, T.f32), [query_scale_lane]),
+                            softmax_lds_f32,
+                            [arith.index_cast(T.index, local_qhead_idx)],
+                        )
+                else:
+                    _q_w0, _q_w1, _q_w2, _q_w3 = _load_q_words(
+                        q_rsrc, q_base, lane16id,
+                        query_packed_fp8=query_packed_fp8,
+                        query_load_is_bf16=query_load_is_bf16,
+                    )
+                _v01 = vector.from_elements(T.vec(2, T.i32), [_q_w0, _q_w1])
+                _v23 = vector.from_elements(T.vec(2, T.i32), [_q_w2, _q_w3])
+                _lds_q_i32 = _lds_q_base // arith.constant(4, type=T.i32)
+                vector.store(_v01, logits_lds_i32, [arith.index_cast(T.index, _lds_q_i32)])
+                vector.store(
+                    _v23, logits_lds_i32,
+                    [arith.index_cast(T.index, _lds_q_i32 + arith.constant(2, type=T.i32))],
+                )
+                q_frags = []
+                gpu.barrier()
+                if query_scale_in_kernel:
+                    query_scale_lane = vector.extract(
+                        vector.load_op(
+                            T.vec(1, T.f32), softmax_lds_f32,
+                            [arith.index_cast(T.index, lane16id)],
+                        ),
+                        static_position=[0],
+                    )
+                for _qkhe in range_constexpr(QKHELOOP):
+                    for _qkr in range_constexpr(2):
+                        _lds_rd_byte = (
+                            arith.constant(_qkhe * 2048, type=T.i32)
+                            + rowid * arith.constant(512, type=T.i32)
+                            + lane16id * arith.constant(32, type=T.i32)
+                            + arith.constant(_qkr * 8, type=T.i32)
+                        )
+                        _lds_rd_base = _lds_rd_byte // arith.constant(8, type=T.i32)
+                        _q_v1 = vector.load_op(
+                            T.vec(1, T.i64), logits_lds_i64,
+                            [arith.index_cast(T.index, _lds_rd_base)],
+                        )
+                        q_frags.append(vector.extract(_q_v1, static_position=[0]))
 
                 # ── Per-warp visibility check (wavefront-uniform) ──
-                # _warp_tok_start = kv_seq_start + warp_id * arith.constant(TOKENS_PER_WARP, type=T.i32)
-                # _warp_tok_end = _warp_tok_start + arith.constant(TOKENS_PER_WARP, type=T.i32)
-                # if global_window_limit is not None:
-                #     _warp_visible = (_warp_tok_start < global_window_limit) | (_warp_tok_end > seq_start)
-                # else:
-                #     _warp_visible = _warp_tok_end > seq_start
-                # _warp_visible = _warp_visible | (_warp_tok_start < causal_bound)
+                _warp_tok_start = kv_seq_start + warp_id * arith.constant(TOKENS_PER_WARP, type=T.i32)
+                _warp_tok_end = _warp_tok_start + arith.constant(TOKENS_PER_WARP, type=T.i32)
+                if global_window_limit is not None:
+                    _warp_visible = (_warp_tok_start < global_window_limit) | (_warp_tok_end > seq_start)
+                else:
+                    _warp_visible = _warp_tok_end > seq_start
+                _warp_visible = _warp_visible | (_warp_tok_start < causal_bound)
 
                 eqgs_lane = qi_val * arith.constant(query_group_size, type=T.i32) + qhi_pos
 
-                # warp_visible_if = scf.IfOp(arith.unwrap(_warp_visible), has_else=True)
+                warp_visible_if = scf.IfOp(arith.unwrap(_warp_visible), has_else=True)
 
                 # ══ VISIBLE WARP: full QK + softmax + PV pipeline ══
                 # (inlined _qk_and_intra_softmax with scale loads hoisted)
-                # with _if_then(warp_visible_if):
-                # K-load
-                k_base = (phys_block * c_kb + _k_head_off) // c_four
-                k0_flat = _load_k_flat(
-                    k_rsrc, k_base, tile_token_offset,
-                    _k_tok_thread_base, _c_tok_stride_dw, _k_he_off_dw,
-                )
-                k0_ops = _unflatten_k(k0_flat)
-
-                # V-address computation
-                v_base = (phys_block * c_vb + _v_head_off) // c_four
-                va_dws = []
-                for vt in range_constexpr(VTLOOP):
-                    vhe_data = []
-                    for vhe in range_constexpr(VHELOOP):
-                        v_token_in_block = tile_token_offset + _v_tok_thread_off[vt]
-                        if trans_v:
-                            vt_group = v_token_in_block // arith.constant(
-                                FP8_ELEMS_16B, type=T.i32
-                            )
-                            va_dw = (
-                                v_base
-                                + vt_group
-                                * arith.constant(HEAD_SIZE * FP8_ELEMS_16B // 4, type=T.i32)
-                                + _vhead_elem_dw[vhe]
-                            )
-                        else:
-                            va_dw = (
-                                v_base
-                                + _vhead_elem_dw[vhe]
-                                + v_token_in_block // c_four
-                            )
-                        vhe_data.append(va_dw)
-                    va_dws.append(vhe_data)
-
-                # Scale bpermute (uses hoisted k_scale_x4)
-                def _build_scale_vec(scale_x4, td):
-                    bcast_addr = (arith.constant(td * 4, type=T.i32) + rowid) * c_four
-                    scale_vals = []
-                    for i in range_constexpr(4):
-                        scale_i32 = vector.extract(
-                            scale_x4, static_position=[i], dynamic_position=[]
-                        )
-                        out_i32 = rocdl.ds_bpermute(
-                            T.i32, arith.unwrap(bcast_addr), arith.unwrap(scale_i32)
-                        )
-                        scale_vals.append(arith.bitcast(T.f32, out_i32))
-                    return vector.from_elements(T.f32x4, scale_vals)
-
-                # QK MFMA + V-load interleave
-                v_results = []
-                d_out = []
-                query_scale_vec = None
-                if query_scale_in_kernel:
-                    query_scale_vec = vector.broadcast(
-                        T.f32x4, query_scale_lane * _softmax_scale_const
+                with _if_then(warp_visible_if):
+                    # K-load
+                    k_base = (phys_block * c_kb + _k_head_off) // c_four
+                    k0_flat = _load_k_flat(
+                        k_rsrc, k_base, tile_token_offset,
+                        _k_tok_thread_base, _c_tok_stride_dw, _k_he_off_dw,
                     )
-                for td in range_constexpr(TLOOP):
-                    vhe_data = []
-                    acc = arith.constant_vector(0.0, T.f32x4)
-                    for k_step in range_constexpr(QKHELOOP * 2):
-                        if k_step % 2 == 0:
-                            v_4xi32 = buffer_ops.buffer_load(
-                                v_rsrc, va_dws[td][k_step // 2], vec_width=4, dtype=T.i32
-                            )
-                            vhe_data.append(v_4xi32)
-                        acc = rocdl.mfma_f32_16x16x32_fp8_fp8(
-                            T.f32x4, [k0_ops[td][k_step], q_frags[k_step], acc, 0, 0, 0]
-                        )
-                    v_results.append(vhe_data)
-                    if per_token_kv:
-                        k_scale_vec = _build_scale_vec(k_scale_x4, td)
-                        scale_vec = (
-                            k_scale_vec * query_scale_vec
-                            if query_scale_in_kernel
-                            else k_scale_vec * vector.broadcast(T.f32x4, _softmax_q_scale)
-                        )
-                        d_out.append(acc * scale_vec)
-                    else:
-                        if query_scale_in_kernel:
-                            d_out.append(
-                                acc * (query_scale_vec * vector.broadcast(T.f32x4, k_scale_val))
-                            )
-                        else:
-                            d_out.append(acc * vector.broadcast(T.f32x4, _scale))
+                    k0_ops = _unflatten_k(k0_flat)
 
-                # Masking + softmax
-                def _is_visible_token(kv_tok):
-                    if global_window_limit is not None:
-                        return (kv_tok >= seq_start) | (kv_tok < global_window_limit)
-                    return kv_tok >= seq_start
+                    # V-address computation
+                    v_base = (phys_block * c_vb + _v_head_off) // c_four
+                    va_dws = []
+                    for vt in range_constexpr(VTLOOP):
+                        vhe_data = []
+                        for vhe in range_constexpr(VHELOOP):
+                            v_token_in_block = tile_token_offset + _v_tok_thread_off[vt]
+                            if trans_v:
+                                vt_group = v_token_in_block // arith.constant(
+                                    FP8_ELEMS_16B, type=T.i32
+                                )
+                                va_dw = (
+                                    v_base
+                                    + vt_group
+                                    * arith.constant(HEAD_SIZE * FP8_ELEMS_16B // 4, type=T.i32)
+                                    + _vhead_elem_dw[vhe]
+                                )
+                            else:
+                                va_dw = (
+                                    v_base
+                                    + _vhead_elem_dw[vhe]
+                                    + v_token_in_block // c_four
+                                )
+                            vhe_data.append(va_dw)
+                        va_dws.append(vhe_data)
 
-                kv_tok_base = kv_seq_start + _kv_tok_thread_base
-
-                qk_max = NEG_INF
-                for td in range_constexpr(TLOOP):
-                    for i in range_constexpr(4):
-                        s = vector.extract(d_out[td], static_position=[i], dynamic_position=[])
-                        kv_tok = kv_tok_base + arith.constant(td * MFMA_N + i, type=T.i32)
-                        s = arith.select(kv_tok < causal_bound, s, NEG_INF)
-                        s = arith.select(_is_visible_token(kv_tok), s, NEG_INF)
-                        qk_max = qk_max.maximumf(s)
-                for sh in [32, 16]:
-                    qk_max = qk_max.maximumf(
-                        qk_max.shuffle_xor(arith.constant(sh, type=T.i32), c_w)
-                    )
-                vector.store(
-                    vector.from_elements(T.vec(1, T.f32), [qk_max]),
-                    softmax_lds_f32, [_sm_max_off],
-                )
-
-                exp_sum = ZERO_F
-                for td in range_constexpr(TLOOP):
-                    for i in range_constexpr(4):
-                        s = vector.extract(d_out[td], static_position=[i], dynamic_position=[])
-                        diff = s - qk_max
-                        p = (diff * arith.constant(LOG2E, type=T.f32)).exp2(
-                            fastmath=arith.FastMathFlags.fast
-                        )
-                        kv_tok = kv_tok_base + arith.constant(td * MFMA_N + i, type=T.i32)
-                        p = arith.select(kv_tok < causal_bound, p, ZERO_F)
-                        p = arith.select(_is_visible_token(kv_tok), p, ZERO_F)
-                        exp_sum = exp_sum + p
-                        d_out[td] = vector.insert(
-                            p, d_out[td], static_position=[i], dynamic_position=[]
-                        )
-                for sh in [32, 16]:
-                    exp_sum = exp_sum + exp_sum.shuffle_xor(
-                        arith.constant(sh, type=T.i32), c_w
-                    )
-                vector.store(
-                    vector.from_elements(T.vec(1, T.f32), [exp_sum]),
-                    softmax_lds_f32, [_sm_sum_off],
-                )
-
-                v_scale_vecs = None
-                if per_token_kv:
-                    v_scale_vecs = []
-                    v_max_warp = ZERO_F
-                    for td in range_constexpr(TLOOP):
-                        vs = _build_scale_vec(v_scale_x4, td)
-                        v_scale_vecs.append(vs)
+                    # Scale bpermute (uses hoisted k_scale_x4)
+                    def _build_scale_vec(scale_x4, td):
+                        bcast_addr = (arith.constant(td * 4, type=T.i32) + rowid) * c_four
+                        scale_vals = []
                         for i in range_constexpr(4):
-                            kv_tok = kv_tok_base + arith.constant(td * MFMA_N + i, type=T.i32)
-                            vs_i = vector.extract(vs, static_position=[i], dynamic_position=[])
-                            vs_i = arith.select(kv_tok < causal_bound, vs_i, ZERO_F)
-                            vs_i = arith.select(_is_visible_token(kv_tok), vs_i, ZERO_F)
-                            vs = vector.insert(vs_i, vs, static_position=[i], dynamic_position=[])
-                        v_max_warp = v_max_warp.maximumf(
-                            vector.reduction(T.f32, "maxnumf", vs)
+                            scale_i32 = vector.extract(
+                                scale_x4, static_position=[i], dynamic_position=[]
+                            )
+                            out_i32 = rocdl.ds_bpermute(
+                                T.i32, arith.unwrap(bcast_addr), arith.unwrap(scale_i32)
+                            )
+                            scale_vals.append(arith.bitcast(T.f32, out_i32))
+                        return vector.from_elements(T.f32x4, scale_vals)
+
+                    # QK MFMA + V-load interleave
+                    v_results = []
+                    d_out = []
+                    query_scale_vec = None
+                    if query_scale_in_kernel:
+                        query_scale_vec = vector.broadcast(
+                            T.f32x4, query_scale_lane * _softmax_scale_const
                         )
+                    for td in range_constexpr(TLOOP):
+                        vhe_data = []
+                        acc = arith.constant_vector(0.0, T.f32x4)
+                        for k_step in range_constexpr(QKHELOOP * 2):
+                            if k_step % 2 == 0:
+                                v_4xi32 = buffer_ops.buffer_load(
+                                    v_rsrc, va_dws[td][k_step // 2], vec_width=4, dtype=T.i32
+                                )
+                                vhe_data.append(v_4xi32)
+                            acc = rocdl.mfma_f32_16x16x32_fp8_fp8(
+                                T.f32x4, [k0_ops[td][k_step], q_frags[k_step], acc, 0, 0, 0]
+                            )
+                        v_results.append(vhe_data)
+                        if per_token_kv:
+                            k_scale_vec = _build_scale_vec(k_scale_x4, td)
+                            scale_vec = (
+                                k_scale_vec * query_scale_vec
+                                if query_scale_in_kernel
+                                else k_scale_vec * vector.broadcast(T.f32x4, _softmax_q_scale)
+                            )
+                            d_out.append(acc * scale_vec)
+                        else:
+                            if query_scale_in_kernel:
+                                d_out.append(
+                                    acc * (query_scale_vec * vector.broadcast(T.f32x4, k_scale_val))
+                                )
+                            else:
+                                d_out.append(acc * vector.broadcast(T.f32x4, _scale))
+                        rocdl.sched_vmem(2)
+                        rocdl.sched_mfma(2)
+                    # Masking + softmax
+                    def _is_visible_token(kv_tok):
+                        if global_window_limit is not None:
+                            return (kv_tok >= seq_start) | (kv_tok < global_window_limit)
+                        return kv_tok >= seq_start
+
+                    kv_tok_base = kv_seq_start + _kv_tok_thread_base
+
+                    qk_max = NEG_INF
+                    for td in range_constexpr(TLOOP):
+                        for i in range_constexpr(4):
+                            s = vector.extract(d_out[td], static_position=[i], dynamic_position=[])
+                            kv_tok = kv_tok_base + arith.constant(td * MFMA_N + i, type=T.i32)
+                            s = arith.select(kv_tok < causal_bound, s, NEG_INF)
+                            s = arith.select(_is_visible_token(kv_tok), s, NEG_INF)
+                            qk_max = qk_max.maximumf(s)
                     for sh in [32, 16]:
-                        v_max_warp = v_max_warp.maximumf(
-                            v_max_warp.shuffle_xor(arith.constant(sh, type=T.i32), c_w)
+                        qk_max = qk_max.maximumf(
+                            qk_max.shuffle_xor(arith.constant(sh, type=T.i32), c_w)
                         )
                     vector.store(
-                        vector.from_elements(T.vec(1, T.f32), [v_max_warp]),
-                        softmax_lds_f32, [_sm_vmax_wr_off],
+                        vector.from_elements(T.vec(1, T.f32), [qk_max]),
+                        softmax_lds_f32, [_sm_max_off],
                     )
 
-                # Cross-warp softmax + PV MFMA
-                gpu.barrier()
-                running_max, running_sum, out0, out1, vc0 = (
+                    exp_sum = ZERO_F
+                    for td in range_constexpr(TLOOP):
+                        for i in range_constexpr(4):
+                            s = vector.extract(d_out[td], static_position=[i], dynamic_position=[])
+                            diff = s - qk_max
+                            p = (diff * arith.constant(LOG2E, type=T.f32)).exp2(
+                                fastmath=arith.FastMathFlags.fast
+                            )
+                            kv_tok = kv_tok_base + arith.constant(td * MFMA_N + i, type=T.i32)
+                            p = arith.select(kv_tok < causal_bound, p, ZERO_F)
+                            p = arith.select(_is_visible_token(kv_tok), p, ZERO_F)
+                            exp_sum = exp_sum + p
+                            d_out[td] = vector.insert(
+                                p, d_out[td], static_position=[i], dynamic_position=[]
+                            )
+                    for sh in [32, 16]:
+                        exp_sum = exp_sum + exp_sum.shuffle_xor(
+                            arith.constant(sh, type=T.i32), c_w
+                        )
+                    vector.store(
+                        vector.from_elements(T.vec(1, T.f32), [exp_sum]),
+                        softmax_lds_f32, [_sm_sum_off],
+                    )
+
+                    v_scale_vecs = None
+                    if per_token_kv:
+                        v_scale_vecs = []
+                        v_max_warp = ZERO_F
+                        for td in range_constexpr(TLOOP):
+                            vs = _build_scale_vec(v_scale_x4, td)
+                            v_scale_vecs.append(vs)
+                            for i in range_constexpr(4):
+                                kv_tok = kv_tok_base + arith.constant(td * MFMA_N + i, type=T.i32)
+                                vs_i = vector.extract(vs, static_position=[i], dynamic_position=[])
+                                vs_i = arith.select(kv_tok < causal_bound, vs_i, ZERO_F)
+                                vs_i = arith.select(_is_visible_token(kv_tok), vs_i, ZERO_F)
+                                vs = vector.insert(vs_i, vs, static_position=[i], dynamic_position=[])
+                            v_max_warp = v_max_warp.maximumf(
+                                vector.reduction(T.f32, "maxnumf", vs)
+                            )
+                        for sh in [32, 16]:
+                            v_max_warp = v_max_warp.maximumf(
+                                v_max_warp.shuffle_xor(arith.constant(sh, type=T.i32), c_w)
+                            )
+                        vector.store(
+                            vector.from_elements(T.vec(1, T.f32), [v_max_warp]),
+                            softmax_lds_f32, [_sm_vmax_wr_off],
+                        )
+
+                    # Cross-warp softmax + PV MFMA
+                    gpu.barrier()
+                    running_max, running_sum, out0, out1, vc0 = (
+                        _cross_warp_softmax_and_prob_pack(
+                            d_out, NEG_INF, ZERO_F,
+                            arith.constant_vector(0.0, T.f32x4),
+                            arith.constant_vector(0.0, T.f32x4),
+                            v_scale_vecs,
+                        )
+                    )
+                    gpu.barrier()
+                    out0, out1 = _pv_mfma(v_results, out0, out1, vc0)
+                    outelems_norm = _normalize_pa_output(running_sum, out0, out1, ZERO_F)
+                    _store_partition_results(eqgs_lane, running_sum, running_max, outelems_norm)
+
+                # ══ INVISIBLE WARP: skip QK/V/PV, write defaults ══
+                with _if_else(warp_visible_if):
+                    # Write defaults to softmax LDS
+                    vector.store(
+                        vector.from_elements(T.vec(1, T.f32), [NEG_INF]),
+                        softmax_lds_f32, [_sm_max_off],
+                    )
+                    vector.store(
+                        vector.from_elements(T.vec(1, T.f32), [ZERO_F]),
+                        softmax_lds_f32, [_sm_sum_off],
+                    )
+                    if per_token_kv:
+                        vector.store(
+                            vector.from_elements(T.vec(1, T.f32), [ZERO_F]),
+                            softmax_lds_f32, [_sm_vmax_wr_off],
+                        )
+                    # Zero prob in logits LDS
+                    _zero_i32 = arith.constant(0, type=T.i32)
+                    _zero_i32_vec = vector.from_elements(T.vec(1, T.i32), [_zero_i32])
+                    # rocdl.s_setprio(3)
+                    for _td in range_constexpr(TLOOP):
+                        _prob_off = _prob_wr_thread_base + arith.constant(
+                            _td * MFMA_N * PROB_ROW_STRIDE_BYTES, type=T.i32
+                        )
+                        vector.store(
+                            _zero_i32_vec, logits_lds_i32,
+                            [arith.index_cast(T.index, _prob_off // c_four)],
+                        )
+                    # rocdl.s_setprio(0)
+
+                    gpu.barrier()  # aligned with visible branch barrier 1
+
+                    # Participate in cross-warp softmax with dummy inputs
+                    _dummy_d_out = [arith.constant_vector(0.0, T.f32x4) for _ in range(TLOOP)]
+                    _dummy_vs = [arith.constant_vector(0.0, T.f32x4) for _ in range(TLOOP)] if per_token_kv else None
                     _cross_warp_softmax_and_prob_pack(
-                        d_out, NEG_INF, ZERO_F,
+                        _dummy_d_out, NEG_INF, ZERO_F,
                         arith.constant_vector(0.0, T.f32x4),
                         arith.constant_vector(0.0, T.f32x4),
-                        v_scale_vecs,
+                        _dummy_vs,
                     )
-                )
-                gpu.barrier()
-                out0, out1 = _pv_mfma(v_results, out0, out1, vc0)
-                outelems_norm = _normalize_pa_output(running_sum, out0, out1, ZERO_F)
-                _store_partition_results(eqgs_lane, running_sum, running_max, outelems_norm)
 
-                # # ══ INVISIBLE WARP: skip QK/V/PV, write defaults ══
-                # with _if_else(warp_visible_if):
-                #     # Write defaults to softmax LDS
-                #     vector.store(
-                #         vector.from_elements(T.vec(1, T.f32), [NEG_INF]),
-                #         softmax_lds_f32, [_sm_max_off],
-                #     )
-                #     vector.store(
-                #         vector.from_elements(T.vec(1, T.f32), [ZERO_F]),
-                #         softmax_lds_f32, [_sm_sum_off],
-                #     )
-                #     if per_token_kv:
-                #         vector.store(
-                #             vector.from_elements(T.vec(1, T.f32), [ZERO_F]),
-                #             softmax_lds_f32, [_sm_vmax_wr_off],
-                #         )
-                #     # Zero prob in logits LDS
-                #     _zero_i32 = arith.constant(0, type=T.i32)
-                #     _zero_i32_vec = vector.from_elements(T.vec(1, T.i32), [_zero_i32])
-                #     # rocdl.s_setprio(3)
-                #     for _td in range_constexpr(TLOOP):
-                #         _prob_off = _prob_wr_thread_base + arith.constant(
-                #             _td * MFMA_N * PROB_ROW_STRIDE_BYTES, type=T.i32
-                #         )
-                #         vector.store(
-                #             _zero_i32_vec, logits_lds_i32,
-                #             [arith.index_cast(T.index, _prob_off // c_four)],
-                #         )
-                #     # rocdl.s_setprio(0)
+                    gpu.barrier()  # aligned with visible branch barrier 2
 
-                #     gpu.barrier()  # aligned with visible branch barrier 1
-
-                #     # Participate in cross-warp softmax with dummy inputs
-                #     _dummy_d_out = [arith.constant_vector(0.0, T.f32x4) for _ in range(TLOOP)]
-                #     _dummy_vs = [arith.constant_vector(0.0, T.f32x4) for _ in range(TLOOP)] if per_token_kv else None
-                #     _cross_warp_softmax_and_prob_pack(
-                #         _dummy_d_out, NEG_INF, ZERO_F,
-                #         arith.constant_vector(0.0, T.f32x4),
-                #         arith.constant_vector(0.0, T.f32x4),
-                #         _dummy_vs,
-                #     )
-
-                #     gpu.barrier()  # aligned with visible branch barrier 2
-
-                #     # Skip PV MFMA — write zero output directly
-                #     _zero_output = [
-                #         arith.constant_vector(0.0, T.f32x4),
-                #         arith.constant_vector(0.0, T.f32x4),
-                #     ]
-                #     _store_partition_results(eqgs_lane, ZERO_F, NEG_INF, _zero_output)
+                    # Skip PV MFMA — write zero output directly
+                    _zero_output = [
+                        arith.constant_vector(0.0, T.f32x4),
+                        arith.constant_vector(0.0, T.f32x4),
+                    ]
+                    _store_partition_results(eqgs_lane, ZERO_F, NEG_INF, _zero_output)
 
         invalid_cta_if = scf.IfOp(
             arith.unwrap(partition_idx >= visible_tile_count), has_else=False
