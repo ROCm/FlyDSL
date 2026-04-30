@@ -362,7 +362,7 @@ def _load_q_fragments(
             q_rsrc,
             q_elem + fx.Int32(qwi * 4),
             vec_width=4,
-            dtype=T.bf16 if const_expr(query_load_is_bf16) else T.f16,
+            dtype=fx.BFloat16 if query_load_is_bf16 else fx.Float16,
         )
         q_f32 = fx.Vector(q_src).to(fx.Float32)
         q_f32_chunks.append(q_f32)
@@ -403,7 +403,7 @@ def _load_q_fragments(
 
     q_frags = []
     gpu.barrier()
-    query_scale_lane = fx.Vector.load(T.vec(1, T.f32), softmax_lds_f32, [fx.Index(lane16id)])[0].ir_value()
+    query_scale_lane = fx.Vector.load(T.vec(1, fx.Float32.ir_type), softmax_lds_f32, [fx.Index(lane16id)])[0].ir_value()
     for qkhe in range_constexpr(QKHELOOP):
         for qkr in range_constexpr(2):
             # See layout comment above. Byte offset:
@@ -466,8 +466,9 @@ def _load_sw_mtp_group_q_fragments(
 
 
 def _normalize_pa_output(running_sum, out0, out1, zero_f):
-    safe_sum = arith.select(running_sum > zero_f, running_sum, arith.constant(1.0, type=T.f32))
-    inv_sum = arith.constant(1.0, type=T.f32) / safe_sum
+    one_f = fx.Float32(1.0).ir_value()
+    safe_sum = arith.select(running_sum > zero_f, running_sum, one_f)
+    inv_sum = one_f / safe_sum
     return [
         out0 * vector.broadcast(T.f32x4, inv_sum),
         out1 * vector.broadcast(T.f32x4, inv_sum),
@@ -554,8 +555,12 @@ def _make_pa_phase_helpers(
             v_scale_vecs = []
             for td in range_constexpr(TLOOP):
                 tok_off = scale_tok_base_pt + arith.constant(td * MFMA_N, type=T.i32)
-                k_scale_lane = buffer_ops.buffer_load(ks_rsrc, scale_block_base + tok_off, vec_width=1, dtype=T.f32)
-                v_scale_lane = buffer_ops.buffer_load(vs_rsrc, scale_block_base + tok_off, vec_width=1, dtype=T.f32)
+                k_scale_lane = buffer_ops.buffer_load(
+                    ks_rsrc, scale_block_base + tok_off, vec_width=1, dtype=fx.Float32
+                )
+                v_scale_lane = buffer_ops.buffer_load(
+                    vs_rsrc, scale_block_base + tok_off, vec_width=1, dtype=fx.Float32
+                )
                 k_scale_i32 = arith.bitcast(T.i32, k_scale_lane)
                 v_scale_i32 = arith.bitcast(T.i32, v_scale_lane)
                 k_scale_vals = []
@@ -564,8 +569,8 @@ def _make_pa_phase_helpers(
                     bcast_addr = (scale_src_lane_base + arith.constant(i, type=T.i32)) * c_four
                     sk_i32 = rocdl.ds_bpermute(T.i32, arith.unwrap(bcast_addr), arith.unwrap(k_scale_i32))
                     sv_i32 = rocdl.ds_bpermute(T.i32, arith.unwrap(bcast_addr), arith.unwrap(v_scale_i32))
-                    k_scale_vals.append(arith.bitcast(T.f32, sk_i32))
-                    v_scale_vals.append(arith.bitcast(T.f32, sv_i32))
+                    k_scale_vals.append(arith.bitcast(fx.Float32.ir_type, sk_i32))
+                    v_scale_vals.append(arith.bitcast(fx.Float32.ir_type, sv_i32))
                 k_scale_vecs.append(vector.from_elements(T.f32x4, k_scale_vals))
                 v_scale_vecs.append(vector.from_elements(T.f32x4, v_scale_vals))
         else:
@@ -611,7 +616,7 @@ def _make_pa_phase_helpers(
         for sh in [32, 16]:
             qk_max = qk_max.maximumf(qk_max.shuffle_xor(arith.constant(sh, type=T.i32), c_w))
         vector.store(
-            vector.from_elements(T.vec(1, T.f32), [qk_max]),
+            fx.Vector.from_elements([qk_max], dtype=fx.Float32),
             softmax_lds_f32,
             [sm_max_off],
         )
@@ -621,7 +626,7 @@ def _make_pa_phase_helpers(
             for i in range_constexpr(4):
                 s = vector.extract(d_out[td], static_position=[i], dynamic_position=[])
                 diff = s - qk_max
-                p = (diff * arith.constant(LOG2E, type=T.f32)).exp2(fastmath=arith.FastMathFlags.fast)
+                p = (diff * fx.Float32(LOG2E).ir_value()).exp2(fastmath=arith.FastMathFlags.fast)
                 if const_expr(kv_tok_base is not None):
                     kv_tok = kv_tok_base + arith.constant(td * MFMA_N + i, type=T.i32)
                     if const_expr(apply_causal_mask):
@@ -633,7 +638,7 @@ def _make_pa_phase_helpers(
         for sh in [32, 16]:
             exp_sum = exp_sum + exp_sum.shuffle_xor(arith.constant(sh, type=T.i32), c_w)
         vector.store(
-            vector.from_elements(T.vec(1, T.f32), [exp_sum]),
+            fx.Vector.from_elements([exp_sum], dtype=fx.Float32),
             softmax_lds_f32,
             [sm_sum_off],
         )
@@ -651,11 +656,11 @@ def _make_pa_phase_helpers(
                         if const_expr(apply_range_mask):
                             vs_i = arith.select(kv_tok >= seq_start, vs_i, zero_f)
                         vs = vector.insert(vs_i, vs, static_position=[i], dynamic_position=[])
-                v_max_warp = v_max_warp.maximumf(vector.reduction(T.f32, "maxnumf", vs))
+                v_max_warp = v_max_warp.maximumf(fx.Vector(vs).reduce("max"))
             for sh in [32, 16]:
                 v_max_warp = v_max_warp.maximumf(v_max_warp.shuffle_xor(arith.constant(sh, type=T.i32), c_w))
             vector.store(
-                vector.from_elements(T.vec(1, T.f32), [v_max_warp]),
+                fx.Vector.from_elements([v_max_warp], dtype=fx.Float32),
                 softmax_lds_f32,
                 [sm_vmax_wr_off],
             )
@@ -667,7 +672,7 @@ def _make_pa_phase_helpers(
         warp_rescale_factors = []
         for w in range_constexpr(NUM_WARPS):
             w_max = vector.extract(
-                vector.load_op(T.vec(1, T.f32), softmax_lds_f32, [sm_rd_max_offs[w]]),
+                fx.Vector.load(T.vec(1, fx.Float32.ir_type), softmax_lds_f32, [sm_rd_max_offs[w]]),
                 static_position=[0],
             )
             partition_max = partition_max.maximumf(w_max)
@@ -676,9 +681,9 @@ def _make_pa_phase_helpers(
             diff_w = warp_rescale_factors[w] - partition_max
             if const_expr(needs_mask):
                 diff_w = arith.select(partition_max > neg_inf, diff_w, zero_f)
-            wf = (diff_w * arith.constant(LOG2E, type=T.f32)).exp2(fastmath=arith.FastMathFlags.fast)
+            wf = (diff_w * fx.Float32(LOG2E).ir_value()).exp2(fastmath=arith.FastMathFlags.fast)
             w_sum = vector.extract(
-                vector.load_op(T.vec(1, T.f32), softmax_lds_f32, [sm_rd_sum_offs[w]]),
+                fx.Vector.load(T.vec(1, fx.Float32.ir_type), softmax_lds_f32, [sm_rd_sum_offs[w]]),
                 static_position=[0],
             )
             partition_sum = partition_sum + w_sum * wf
@@ -696,21 +701,17 @@ def _make_pa_phase_helpers(
         if const_expr(needs_mask):
             accum_scale = arith.select(
                 rmax > neg_inf,
-                ((rmax - new_rmax) * arith.constant(LOG2E, type=T.f32)).exp2(fastmath=arith.FastMathFlags.fast),
+                ((rmax - new_rmax) * fx.Float32(LOG2E).ir_value()).exp2(fastmath=arith.FastMathFlags.fast),
                 zero_f,
             )
             part_to_new = arith.select(
                 partition_max > neg_inf,
-                ((partition_max - new_rmax) * arith.constant(LOG2E, type=T.f32)).exp2(
-                    fastmath=arith.FastMathFlags.fast
-                ),
+                ((partition_max - new_rmax) * fx.Float32(LOG2E).ir_value()).exp2(fastmath=arith.FastMathFlags.fast),
                 zero_f,
             )
         else:
-            accum_scale = ((rmax - new_rmax) * arith.constant(LOG2E, type=T.f32)).exp2(
-                fastmath=arith.FastMathFlags.fast
-            )
-            part_to_new = ((partition_max - new_rmax) * arith.constant(LOG2E, type=T.f32)).exp2(
+            accum_scale = ((rmax - new_rmax) * fx.Float32(LOG2E).ir_value()).exp2(fastmath=arith.FastMathFlags.fast)
+            part_to_new = ((partition_max - new_rmax) * fx.Float32(LOG2E).ir_value()).exp2(
                 fastmath=arith.FastMathFlags.fast
             )
 
@@ -723,12 +724,12 @@ def _make_pa_phase_helpers(
             v_max_global = zero_f
             for w in range_constexpr(NUM_WARPS):
                 w_vmax = vector.extract(
-                    vector.load_op(T.vec(1, T.f32), softmax_lds_f32, [sm_vmax_rd_offs[w]]),
+                    fx.Vector.load(T.vec(1, fx.Float32.ir_type), softmax_lds_f32, [sm_vmax_rd_offs[w]]),
                     static_position=[0],
                 )
                 v_max_global = v_max_global.maximumf(w_vmax)
-            v_max_safe = v_max_global + arith.constant(1e-8, type=T.f32)
-            c_fp8_max = arith.constant(FP8_MAX, type=T.f32)
+            v_max_safe = v_max_global + fx.Float32(1e-8).ir_value()
+            c_fp8_max = fx.Float32(FP8_MAX).ir_value()
             norm_factor = c_fp8_max / v_max_safe
             prob_scale = my_warp_rescale
             v_correction = v_max_global / c_fp8_max * part_to_new
@@ -848,8 +849,12 @@ def _make_pa_phase_helpers(
             v_scale_vecs = []
             for td in range_constexpr(TLOOP):
                 tok_off = scale_tok_base_pt + arith.constant(td * MFMA_N, type=T.i32)
-                k_scale_lane = buffer_ops.buffer_load(ks_rsrc, scale_block_base + tok_off, vec_width=1, dtype=T.f32)
-                v_scale_lane = buffer_ops.buffer_load(vs_rsrc, scale_block_base + tok_off, vec_width=1, dtype=T.f32)
+                k_scale_lane = buffer_ops.buffer_load(
+                    ks_rsrc, scale_block_base + tok_off, vec_width=1, dtype=fx.Float32
+                )
+                v_scale_lane = buffer_ops.buffer_load(
+                    vs_rsrc, scale_block_base + tok_off, vec_width=1, dtype=fx.Float32
+                )
                 k_scale_i32 = arith.bitcast(T.i32, k_scale_lane)
                 v_scale_i32 = arith.bitcast(T.i32, v_scale_lane)
                 k_scale_vals = []
@@ -858,8 +863,8 @@ def _make_pa_phase_helpers(
                     bcast_addr = (scale_src_lane_base + arith.constant(i, type=T.i32)) * c_four
                     sk_i32 = rocdl.ds_bpermute(T.i32, arith.unwrap(bcast_addr), arith.unwrap(k_scale_i32))
                     sv_i32 = rocdl.ds_bpermute(T.i32, arith.unwrap(bcast_addr), arith.unwrap(v_scale_i32))
-                    k_scale_vals.append(arith.bitcast(T.f32, sk_i32))
-                    v_scale_vals.append(arith.bitcast(T.f32, sv_i32))
+                    k_scale_vals.append(arith.bitcast(fx.Float32.ir_type, sk_i32))
+                    v_scale_vals.append(arith.bitcast(fx.Float32.ir_type, sv_i32))
                 k_scale_vecs.append(vector.from_elements(T.f32x4, k_scale_vals))
                 v_scale_vecs.append(vector.from_elements(T.f32x4, v_scale_vals))
         else:
@@ -941,7 +946,7 @@ def _make_pa_phase_helpers(
         for sh in [32, 16]:
             qk_max = qk_max.maximumf(qk_max.shuffle_xor(arith.constant(sh, type=T.i32), c_w))
         vector.store(
-            vector.from_elements(T.vec(1, T.f32), [qk_max]),
+            fx.Vector.from_elements([qk_max], dtype=fx.Float32),
             softmax_lds_f32,
             [sm_max_off],
         )
@@ -951,7 +956,7 @@ def _make_pa_phase_helpers(
             for i in range_constexpr(4):
                 s = vector.extract(d_out[td], static_position=[i], dynamic_position=[])
                 diff = s - qk_max
-                p = (diff * arith.constant(LOG2E, type=T.f32)).exp2(fastmath=arith.FastMathFlags.fast)
+                p = (diff * fx.Float32(LOG2E).ir_value()).exp2(fastmath=arith.FastMathFlags.fast)
                 if const_expr(kv_tok_base is not None):
                     kv_tok = kv_tok_base + arith.constant(td * MFMA_N + i, type=T.i32)
                     if const_expr(apply_causal_mask):
@@ -963,7 +968,7 @@ def _make_pa_phase_helpers(
         for sh in [32, 16]:
             exp_sum = exp_sum + exp_sum.shuffle_xor(arith.constant(sh, type=T.i32), c_w)
         vector.store(
-            vector.from_elements(T.vec(1, T.f32), [exp_sum]),
+            fx.Vector.from_elements([exp_sum], dtype=fx.Float32),
             softmax_lds_f32,
             [sm_sum_off],
         )
@@ -981,11 +986,11 @@ def _make_pa_phase_helpers(
                         if const_expr(apply_range_mask):
                             vs_i = arith.select(kv_tok >= seq_start, vs_i, zero_f)
                         vs = vector.insert(vs_i, vs, static_position=[i], dynamic_position=[])
-                v_max_warp = v_max_warp.maximumf(vector.reduction(T.f32, "maxnumf", vs))
+                v_max_warp = v_max_warp.maximumf(fx.Vector(vs).reduce("max"))
             for sh in [32, 16]:
                 v_max_warp = v_max_warp.maximumf(v_max_warp.shuffle_xor(arith.constant(sh, type=T.i32), c_w))
             vector.store(
-                vector.from_elements(T.vec(1, T.f32), [v_max_warp]),
+                fx.Vector.from_elements([v_max_warp], dtype=fx.Float32),
                 softmax_lds_f32,
                 [sm_vmax_wr_off],
             )
@@ -1968,7 +1973,7 @@ def compile_pa_decode_sw_reduce(
                     + eqgs_idx * stride_logits_group
                     + tid
                 )
-                part_logits_bf16 = buffer_ops.buffer_load(logits_rsrc, logits_off, vec_width=1, dtype=T.bf16)
+                part_logits_bf16 = buffer_ops.buffer_load(logits_rsrc, logits_off, vec_width=1, dtype=fx.BFloat16)
                 part_logits = fx.Float32(part_logits_bf16)
                 acc = acc + part_logits * weight
         else:
@@ -1986,7 +1991,7 @@ def compile_pa_decode_sw_reduce(
                     + part_i32 * stride_exp_sums_part
                     + eqgs_idx
                 )
-                part_max_raw = buffer_ops.buffer_load(ml_rsrc, es_off, vec_width=1, dtype=T.f32)
+                part_max_raw = buffer_ops.buffer_load(ml_rsrc, es_off, vec_width=1, dtype=fx.Float32)
                 part_max = arith.select(in_chunk, part_max_raw, c_neg_inf)
                 chunk_max = _block_reduce(part_max, "max")
                 global_max = global_max.maximumf(chunk_max)
@@ -2058,7 +2063,7 @@ def compile_pa_decode_sw_reduce(
                     + eqgs_idx * stride_logits_group
                     + tid
                 )
-                part_logits_bf16 = buffer_ops.buffer_load(logits_rsrc, logits_off, vec_width=1, dtype=T.bf16)
+                part_logits_bf16 = buffer_ops.buffer_load(logits_rsrc, logits_off, vec_width=1, dtype=fx.BFloat16)
                 part_logits = fx.Float32(part_logits_bf16)
                 acc = acc + part_logits * weight
 
