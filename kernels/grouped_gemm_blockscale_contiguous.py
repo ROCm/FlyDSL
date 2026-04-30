@@ -41,6 +41,7 @@ from kernels.grouped_gemm_blockscale_common import (
     make_compute_tile,
     make_hot_loop_scheduler,
     make_lds_loader,
+    make_pingpong_kloop,
     make_prefetch_scales,
     out_mlir_for,
     pack_i64x4_to_i32x8,
@@ -333,62 +334,21 @@ def compile_grouped_gemm_blockscale_contiguous(
                 mfma_res_ty=mfma_res_ty, acc_init=acc_init,
             )
 
-            # ===== Ping-pong K-loop =====
-            # Prologue: prefetch first A tile into VGPRs, store to LDS, load B + scales
-            a_regs0 = prefetch_a_tile(0)
-            store_a_tile_to_lds(a_regs0, lds_base_pong)
-            b_tile_pong = load_b_tile(fx.Index(0))
-            scales_pong_pf = prefetch_scales(0)
-            gpu.barrier()
-
-            # Prefetch first A pack from pong (hides LDS latency behind upcoming VMEM)
-            a0_prefetch_pong = lds_load_packs_k64(row_a_lds_base, col_offset_base_bytes, lds_base_pong)
-
-            for k_pair in range_constexpr(0, num_k_tiles, 2):
-                # Prefetch next scales BEFORE B-tile VMEM (per moe-2stage pattern:
-                # scale-load latency hides behind heavy B VMEM); then A+B regs.
-                if k_pair + 1 < num_k_tiles:
-                    scales_ping_pf = prefetch_scales(k_pair + 1)
-                    a_regs_ping = prefetch_a_tile(k_pair + 1)
-                    b_tile_ping = load_b_tile(fx.Index((k_pair + 1) * tile_k))
-
-                # Compute current tile from pong LDS
-                accs = compute_tile(accs, k_pair, lds_base_pong, b_tile_pong, scales_pong_pf,
-                                    a0_prefetch=a0_prefetch_pong)
-                a0_prefetch_pong = None
-
-                # Store next A to LDS (ds_write after compute, overlaps with trailing MFMAs)
-                if k_pair + 1 < num_k_tiles:
-                    store_a_tile_to_lds(a_regs_ping, lds_base_ping)
-                    hot_loop_scheduler()
-                gpu.barrier()
-
-                if k_pair + 1 < num_k_tiles:
-                    # Prefetch first A pack from ping
-                    a0_prefetch_ping = lds_load_packs_k64(
-                        row_a_lds_base, col_offset_base_bytes, lds_base_ping)
-
-                    # Prefetch next scales + A+B
-                    if k_pair + 2 < num_k_tiles:
-                        scales_pong_pf = prefetch_scales(k_pair + 2)
-                        a_regs_pong = prefetch_a_tile(k_pair + 2)
-                        b_tile_pong = load_b_tile(fx.Index((k_pair + 2) * tile_k))
-
-                    # Compute current tile from ping LDS
-                    accs = compute_tile(accs, k_pair + 1, lds_base_ping, b_tile_ping, scales_ping_pf,
-                                        a0_prefetch=a0_prefetch_ping)
-                    a0_prefetch_ping = None
-
-                    # Store next A to LDS
-                    if k_pair + 2 < num_k_tiles:
-                        store_a_tile_to_lds(a_regs_pong, lds_base_pong)
-                        hot_loop_scheduler()
-                    gpu.barrier()
-
-                    # Prefetch first A pack from pong for next iteration
-                    if k_pair + 2 < num_k_tiles:
-                        a0_prefetch_pong = lds_load_packs_k64(
-                            row_a_lds_base, col_offset_base_bytes, lds_base_pong)
+            run_kloop = make_pingpong_kloop(
+                num_k_tiles=num_k_tiles, tile_k=tile_k,
+                prefetch_a_tile=prefetch_a_tile,
+                store_a_tile_to_lds=store_a_tile_to_lds,
+                load_b_tile=load_b_tile,
+                prefetch_scales=prefetch_scales,
+                compute_tile=compute_tile,
+                hot_loop_scheduler=hot_loop_scheduler,
+                lds_load_packs_k64=lds_load_packs_k64,
+                lds_base_pong=lds_base_pong,
+                lds_base_ping=lds_base_ping,
+                row_a_lds_base=row_a_lds_base,
+                col_offset_base_bytes=col_offset_base_bytes,
+            )
+            accs = run_kloop(accs)
 
             # ===== Epilogue: CShuffle vectorized stores =====
             c_n = n_in
