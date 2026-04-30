@@ -414,6 +414,27 @@ def _pipeline_fragments(backend) -> tuple:
     return fragments, llvm_opts
 
 
+def _format_link_lib_options(link_libs: list) -> str:
+    """Format external bitcode paths for rocdl-attach-target.
+
+    The MLIR pass-pipeline option parser treats whitespace, commas, and braces
+    as structural syntax.  Until FlyDSL grows proper MLIR option escaping here,
+    reject such paths loudly instead of producing a malformed pipeline.
+    """
+    opts = []
+    for lib in link_libs:
+        path = os.fspath(lib)
+        bad_chars = sorted({ch for ch in path if ch.isspace() or ch in ",{}\"'"})
+        if not path or bad_chars:
+            chars = "empty path" if not path else f"unsupported character(s) {bad_chars!r}"
+            raise ValueError(
+                f"Cannot pass external bitcode path {path!r} to rocdl-attach-target: {chars}. "
+                "Use a path without whitespace, commas, braces, or quotes, or add MLIR pass-option escaping."
+            )
+        opts.append(f"l={path}")
+    return " ".join(opts)
+
+
 class MlirCompiler:
     @classmethod
     def compile(
@@ -427,7 +448,7 @@ class MlirCompiler:
         fragments, llvm_opts = _pipeline_fragments(backend)
 
         if link_libs:
-            link_opt = " ".join(f"l={lib}" for lib in link_libs)
+            link_opt = _format_link_lib_options(link_libs)
             new_fragments = []
             found_rocdl = False
             for f in fragments:

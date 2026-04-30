@@ -268,6 +268,9 @@ public:
     if (mlir::Value asyncObject = op.getAsyncObject()) {
       stream = llvmValue(asyncObject);
     } else if (!op.getAsyncDependencies().empty()) {
+      // FlyDSL carries the HIP stream as the first gpu.launch_func async
+      // dependency.  This is a FlyDSL convention, not generic MLIR
+      // gpu.async.token semantics.
       stream = llvmValue(op.getAsyncDependencies().front());
     } else {
       stream = ConstantPointerNull::get(ptrTy);

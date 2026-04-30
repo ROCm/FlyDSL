@@ -60,6 +60,13 @@ class ExternFunction:
         bitcode_path: Optional[str] = None,
         module_init_fn: Optional[Any] = None,
     ):
+        if bitcode_path is not None or module_init_fn is not None:
+            raise TypeError(
+                "flydsl.expr.extern.ffi is link-agnostic and does not accept "
+                "bitcode_path/module_init_fn. Wrap it with "
+                "flydsl.compiler.extern_link.link_extern(..., bitcode_path=..., "
+                "module_init_fn=...) instead."
+            )
         self.symbol = symbol
         self._arg_type_names = list(arg_types)
         self._ret_type_name = ret_type
