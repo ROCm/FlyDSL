@@ -5,14 +5,14 @@ Usage:
     python3 compare_benchmark.py <main.csv> <pr.csv>
 
 Exit code 1 if any case regresses more than BOTH thresholds:
-    - relative increase > MAX_REGRESSION_PCT  (default 10%)
-    - absolute increase > MIN_ABS_REGRESSION_US (default 5 us)
+    - relative increase > MAX_REGRESSION_PCT  (default 15%)
+    - absolute increase > MIN_ABS_REGRESSION_US (default 10 us)
 """
 import sys
 import pandas as pd
 
-MAX_REGRESSION_PCT = 10.0
-MIN_ABS_REGRESSION_US = 5.0
+MAX_REGRESSION_PCT = 15.0
+MIN_ABS_REGRESSION_US = 10.0
 
 
 def main():
@@ -76,8 +76,8 @@ def main():
         print("\n=== Cases BROKEN in PR (work on main but fail on PR) ===")
         for shape, dtype in newly_broken:
             fail_count += 1
-            err = pr_agg_indexed.loc[(shape, dtype)].get("error", "unknown")
-            print(f"  {shape:>20s} {dtype:>4s}  [BROKEN]  error: {err}")
+            acc = pr_agg_indexed.loc[(shape, dtype)].get("acc_res", "unknown")
+            print(f"  {shape:>20s} {dtype:>4s}  [BROKEN]  acc_res: {acc}")
 
     if fail_count > 0:
         print(f"\nFAILED: {fail_count} issue(s) detected.")

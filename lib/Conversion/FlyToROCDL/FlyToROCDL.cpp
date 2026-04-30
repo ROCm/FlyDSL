@@ -75,7 +75,8 @@ public:
       unsigned llvmAS = mapToLLVMAddressSpace(AddressSpace::Register);
       auto llvmPtrTy = LLVM::LLVMPointerType::get(rewriter.getContext(), llvmAS);
       Value nElems = arith::ConstantIntOp::create(rewriter, loc, allocSize.getInt(), 64);
-      Value ptr = LLVM::AllocaOp::create(rewriter, loc, llvmPtrTy, flyPtrTy.getElemTy(), nElems, 0);
+      Type elemTy = projectToLLVMCompatibleElemTy(flyPtrTy.getElemTy());
+      Value ptr = LLVM::AllocaOp::create(rewriter, loc, llvmPtrTy, elemTy, nElems, 0);
       rewriter.replaceOp(op, ptr);
       return success();
     } else if (addrSpace == AddressSpace::BufferDesc) {
@@ -261,7 +262,7 @@ public:
     if (!ptrTy)
       return failure();
 
-    Type elemTy = flyPtrTy.getElemTy();
+    Type elemTy = projectToLLVMCompatibleElemTy(flyPtrTy.getElemTy());
     Value gep = LLVM::GEPOp::create(rewriter, loc, ptrTy, elemTy, base, ValueRange{offsetVal});
     rewriter.replaceOp(op, gep);
     return success();
@@ -690,6 +691,17 @@ public:
   FlyTypeConverter() {
     addConversion([](Type type) { return type; });
 
+    addConversion([&](FloatType floatTy) -> std::optional<Type> {
+      if (floatTy.getWidth() < 16)
+        return IntegerType::get(floatTy.getContext(), floatTy.getWidth());
+      return std::nullopt;
+    });
+    addConversion([&](VectorType vecTy) -> std::optional<Type> {
+      Type convertedElem = convertType(vecTy.getElementType());
+      if (!convertedElem || convertedElem == vecTy.getElementType())
+        return std::nullopt;
+      return VectorType::get(vecTy.getShape(), convertedElem, vecTy.getScalableDims());
+    });
     addConversion([&](fly::MemRefType flyMemRefTy) -> Type {
       if (flyMemRefTy.getAddressSpace().getValue() == AddressSpace::BufferDesc)
         return BufferFatPtr::getType(flyMemRefTy.getContext());

@@ -119,7 +119,7 @@ LogicalResult CopyOpCDNA4LdsReadTransposeType::emitAtomCall(OpBuilder &builder, 
                                                             Type copyAtomTyArg, Type srcMemTyArg,
                                                             Type dstMemTyArg, Value atomVal,
                                                             Value src, Value dst) const {
-  auto dstSSATy = fly::RegMem2SSAType(cast<fly::MemRefType>(dstMemTyArg));
+  auto dstSSATy = fly::RegMem2SSAType(cast<fly::MemRefType>(dstMemTyArg), true);
   auto res = emitAtomCallSSA(builder, loc, dstSSATy, copyAtomTyArg, srcMemTyArg, Type{}, atomVal,
                              src, Value{});
   if (failed(res))

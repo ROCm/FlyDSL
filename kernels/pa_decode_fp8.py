@@ -15,7 +15,7 @@ import math as _math
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.expr import arith, vector, gpu, rocdl, buffer_ops
+from flydsl.expr import arith, buffer_ops, const_expr, gpu, rocdl, vector
 from flydsl.expr.typing import T, Int32
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
@@ -239,7 +239,7 @@ def build_pa_decode_module(
         # ================================================================
         def _issue_bt_k_loads(part_val):
             result = {}
-            if _use_large_block:
+            if const_expr(_use_large_block):
                 bt_idx = part_val // _partitions_per_block
                 page_off_v = (part_val % _partitions_per_block) * KV_COMPUTE_BLOCK
                 partition_start_v = part_val * KV_COMPUTE_BLOCK
@@ -273,7 +273,7 @@ def build_pa_decode_module(
             for n_tile in [0, 1, 2, 3]:
                 pb = phys_list[n_tile]
                 _k_blk_base = pb * c_kb + _k_head_off
-                if _use_large_block:
+                if const_expr(_use_large_block):
                     tok_in_blk = page_off_v + warp_id * 64 + fx.Int32(n_tile * 16) + mfma_row
                     kb0 = _k_blk_base + tok_in_blk * 16
                     kb1 = _k_blk_base + fx.Int32(2 * _bs * 16) + tok_in_blk * 16
@@ -301,7 +301,7 @@ def build_pa_decode_module(
         # -- Partition loop --
         for _pi in range(int(_max_pps)):
             # Compute partition index for this iteration
-            if _ps_mode:
+            if const_expr(_ps_mode):
                 _pi_i32 = arith.index_cast(T.i32, _pi)
                 part = part_z * int(_max_pps) + _pi_i32
             else:
@@ -311,7 +311,7 @@ def build_pa_decode_module(
             pf = _issue_bt_k_loads(part)
             kv = pf['kv']
             partition_start = pf['partition_start']
-            if _use_large_block:
+            if const_expr(_use_large_block):
                 phys_block = pf['phys_block']
                 page_off = pf['page_off']
             else:
@@ -347,7 +347,7 @@ def build_pa_decode_module(
                     )
 
             # -- STEP 7: BT LDS staging (for V loads) --
-            if _use_large_block:
+            if const_expr(_use_large_block):
                 token_page_base = page_off // 16
                 tp0 = token_page_base + warp_id
                 tp1 = token_page_base + warp_id + 4
@@ -379,14 +379,14 @@ def build_pa_decode_module(
             for n_tile in [0, 1]:
                 h_py = n_tile * MFMA_N
                 pv_pb = phys_pv_0 if n_tile == 0 else phys_pv_1
-                if _use_large_block and trans_v:
+                if const_expr(_use_large_block and trans_v):
                     _v_blk_base = (
                         phys_block * c_vb
                         + _v_head_off
                         + pv_pb * fx.Int32(HEAD_SIZE * 16)
                         + fx.Int32(h_py * 16)
                     )
-                elif _use_large_block:
+                elif const_expr(_use_large_block):
                     _v_blk_base = pv_pb * c_vb + _v_head_off + fx.Int32(h_py * _bs) + page_off
                 else:
                     _v_blk_base = pv_pb * c_vb + _v_head_off + fx.Int32(h_py * KV_BLOCK_SIZE)
@@ -411,7 +411,7 @@ def build_pa_decode_module(
                 .maximumf(s_max_p.load([_mi3]))
             )
 
-            if _ps_mode:
+            if const_expr(_ps_mode):
                 rescale = ((running_max - global_max_new) * LOG2E_C).exp2(fastmath=arith.FastMathFlags.fast)
                 acc_pv_running = [_vsplat_mul(t, rescale) for t in acc_pv_running]
                 running_sum = running_sum * rescale
@@ -485,8 +485,8 @@ def build_pa_decode_module(
 
             # -- STEP 14: Output --
             _is_last_iter = (_pi == int(_max_pps) - 1)
-            if not _ps_mode or _is_last_iter:
-                if one_shot or _ps_mode:
+            if const_expr(not _ps_mode or _is_last_iter):
+                if const_expr(one_shot or _ps_mode):
                     rcp = fx.Float32(1.0) / running_sum
                     pv_out = [
                         _vsplat_mul(_vsplat_mul(acc_pv_running[0], PROB_SCALE_C), rcp),
@@ -626,7 +626,7 @@ def build_ps_reduce_kernel(
                 rescaled = es_val * _exp_f32(ml_val - global_max, LOG2E_C)
                 total_exp_sum = total_exp_sum + rescaled
 
-            if use_sinks:
+            if const_expr(use_sinks):
                 sink_rsrc = buffer_ops.create_buffer_resource(sink_token_ptr, max_size=True)
                 sink_off = kv_head_idx * fx.Int32(query_group_size) + gr_idx
                 sink_val = buffer_ops.buffer_load(sink_rsrc, sink_off, vec_width=1, dtype=T.f32)
@@ -810,7 +810,7 @@ def build_v2_reduce_kernel(
                     rescaled = es_val * _exp_f32(ml_val - global_max, LOG2E_C)
                     global_exp_sum = global_exp_sum + rescaled
 
-            if use_sinks:
+            if const_expr(use_sinks):
                 sink_rsrc = buffer_ops.create_buffer_resource(sink_token_ptr, max_size=True)
                 sink_off = kv_head_idx * fx.Int32(query_seq_len * query_group_size) + qg_i32
                 sink_val = buffer_ops.buffer_load(sink_rsrc, sink_off, vec_width=1, dtype=T.f32)

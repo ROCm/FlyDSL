@@ -56,6 +56,8 @@ IntAttr intCeilDiv(IntAttr lhs, IntAttr rhs);
 IntAttr intShapeDiv(IntAttr lhs, IntAttr rhs);
 IntAttr intApplySwizzle(IntAttr v, SwizzleAttr swizzle);
 
+bool isDivisibleBy(IntAttr attr, int32_t divisor);
+
 //===----------------------------------------------------------------------===//
 // BasisAttr operations
 //===----------------------------------------------------------------------===//
