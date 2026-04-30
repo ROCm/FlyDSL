@@ -28,13 +28,6 @@
 #define GET_ATTRDEF_CLASSES
 #include "flydsl/Dialect/FlyROCDL/IR/AttrDefs.h.inc"
 
-namespace mlir::fly_rocdl {
-
-template <TargetAddressSpace expectedAddressSpace> bool isTargetAddressSpace(Attribute attr) {
-  auto addressSpace = llvm::dyn_cast_if_present<TargetAddressSpaceAttr>(attr);
-  return addressSpace && addressSpace.getValue() == expectedAddressSpace;
-}
-
-} // namespace mlir::fly_rocdl
+namespace mlir::fly_rocdl {} // namespace mlir::fly_rocdl
 
 #endif // FLYDSL_DIALECT_FLYROCDL_IR_DIALECT_H

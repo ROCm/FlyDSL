@@ -23,7 +23,7 @@ class BufferFatPtr {
 
 public:
   BufferFatPtr(fly::PointerType ptrTy, Value v) : ptrTy(ptrTy), fatPtr(v) {
-    assert(isTargetAddressSpace<TargetAddressSpace::BufferDesc>(ptrTy.getAddressSpace()));
+    assert(fly::isTargetAddressSpace<BufferDescAddressAttr>(ptrTy.getAddressSpace()));
   }
 
   static LLVM::LLVMStructType getType(MLIRContext *ctx) {

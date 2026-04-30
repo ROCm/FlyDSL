@@ -53,8 +53,8 @@ unsigned mapToLLVMAddressSpace(AddressSpace addrSpace) {
 unsigned mapAttrToLLVMAddressSpace(Attribute attr) {
   if (auto e = dyn_cast<AddressSpaceAttr>(attr))
     return mapToLLVMAddressSpace(e.getValue());
-  if (auto e = dyn_cast<TargetAddressSpaceAttr>(attr))
-    return static_cast<unsigned>(e.getValue());
+  if (isTargetAddressSpace<BufferDescAddressAttr>(attr))
+    return 8;
   assert(false && "Unsupported address space attribute");
   return 0;
 }
@@ -87,7 +87,7 @@ public:
       Value ptr = LLVM::AllocaOp::create(rewriter, loc, llvmPtrTy, elemTy, nElems, 0);
       rewriter.replaceOp(op, ptr);
       return success();
-    } else if (isTargetAddressSpace<TargetAddressSpace::BufferDesc>(addrSpaceAttr)) {
+    } else if (isTargetAddressSpace<BufferDescAddressAttr>(addrSpaceAttr)) {
       auto args = adaptor.getArgs();
       if (args.size() != 4)
         return rewriter.notifyMatchFailure(
@@ -260,7 +260,7 @@ public:
       offsetVal = defOp->getOperand(0);
     }
 
-    if (isTargetAddressSpace<TargetAddressSpace::BufferDesc>(flyPtrTy.getAddressSpace())) {
+    if (isTargetAddressSpace<BufferDescAddressAttr>(flyPtrTy.getAddressSpace())) {
       BufferFatPtr bp(flyPtrTy, base);
       rewriter.replaceOp(op, bp.addOffset(rewriter, loc, offsetVal));
       return success();
@@ -324,7 +324,7 @@ public:
       }
     }
 
-    if (isTargetAddressSpace<TargetAddressSpace::BufferDesc>(flyPtrTy.getAddressSpace())) {
+    if (isTargetAddressSpace<BufferDescAddressAttr>(flyPtrTy.getAddressSpace())) {
       BufferFatPtr bp(flyPtrTy, ptr);
       Value zero = arith::ConstantIntOp::create(rewriter, loc, 0, 32);
       ArrayAttr noAttrs;
@@ -369,7 +369,7 @@ public:
       }
     }
 
-    if (isTargetAddressSpace<TargetAddressSpace::BufferDesc>(flyPtrTy.getAddressSpace())) {
+    if (isTargetAddressSpace<BufferDescAddressAttr>(flyPtrTy.getAddressSpace())) {
       BufferFatPtr bp(flyPtrTy, ptr);
       Value zero = arith::ConstantIntOp::create(rewriter, loc, 0, 32);
       ArrayAttr noAttrs;
@@ -711,13 +711,13 @@ public:
       return VectorType::get(vecTy.getShape(), convertedElem, vecTy.getScalableDims());
     });
     addConversion([&](fly::MemRefType flyMemRefTy) -> Type {
-      if (isTargetAddressSpace<TargetAddressSpace::BufferDesc>(flyMemRefTy.getAddressSpace()))
+      if (isTargetAddressSpace<BufferDescAddressAttr>(flyMemRefTy.getAddressSpace()))
         return BufferFatPtr::getType(flyMemRefTy.getContext());
       unsigned as = mapAttrToLLVMAddressSpace(flyMemRefTy.getAddressSpace());
       return LLVM::LLVMPointerType::get(flyMemRefTy.getContext(), as);
     });
     addConversion([&](fly::PointerType flyPtrTy) -> Type {
-      if (isTargetAddressSpace<TargetAddressSpace::BufferDesc>(flyPtrTy.getAddressSpace()))
+      if (isTargetAddressSpace<BufferDescAddressAttr>(flyPtrTy.getAddressSpace()))
         return BufferFatPtr::getType(flyPtrTy.getContext());
       unsigned as = mapAttrToLLVMAddressSpace(flyPtrTy.getAddressSpace());
       return LLVM::LLVMPointerType::get(flyPtrTy.getContext(), as);
