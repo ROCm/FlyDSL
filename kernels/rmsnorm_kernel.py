@@ -10,27 +10,22 @@ Two paths:
   - Generic path (arbitrary N): scalar copy_atom_call.
 """
 
+import math
+
 import flydsl.compiler as flyc
 import flydsl.expr as fx
+from flydsl._mlir.ir import InsertionPoint
 from flydsl.compiler.kernel_function import CompilationContext
-
 from flydsl.expr import arith, const_expr, gpu, range_constexpr
-from flydsl.expr.arith import ArithValue
-from flydsl.expr.typing import T, Int32
+from flydsl.expr import math as fmath
 from flydsl.expr.vector import ReductionOp, full
-from flydsl.expr.numeric import Numeric, Float32, Uint32
-from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
-
-from flydsl._mlir import ir
-
+from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
+from kernels.kernels_common import dtype_to_elem_type, get_warp_size
 
 KERNEL_NAME = "rmsnorm"
 
 EPS = 1e-5
-
-import math
-from kernels.kernels_common import dtype_to_elem_type, get_warp_size
 
 BLOCK_THREADS = 256
 WARP_SIZE = get_warp_size()
@@ -62,25 +57,23 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
         bid = fx.block_idx.x
         tid = fx.thread_idx.x
 
-        elem_type = dtype_to_elem_type(dtype_str)
-        compute_type = T.f32
-
+        elem_dtype = dtype_to_elem_type(dtype_str)
+        elem_type = elem_dtype.ir_type
         fm_fast = arith.FastMathFlags.fast
-        eps_c = arith.constant(EPS, type=compute_type)
-        n_float = arith.constant(float(N), type=compute_type)
+        eps_c = EPS
+        n_float = float(N)
 
         base_ptr = allocator.get_base()
-        s_red = SmemPtr(base_ptr, red_offset, T.f32, shape=(RED_SLOTS,))
-        s_red2 = SmemPtr(base_ptr, red2_offset, T.f32, shape=(RED_SLOTS,))
+        s_red = SmemPtr(base_ptr, red_offset, fx.Float32.ir_type, shape=(RED_SLOTS,))
+        s_red2 = SmemPtr(base_ptr, red2_offset, fx.Float32.ir_type, shape=(RED_SLOTS,))
         s_red.get()
         s_red2.get()
 
         def wave_reduce_add(x):
-            width_i32 = fx.Int32(WARP_SIZE)
             w = x
             for _sh_exp in range_constexpr(int(math.log2(WARP_SIZE))):
-                off = fx.Int32(WARP_SIZE // (2 << _sh_exp))
-                peer = w.shuffle_xor(off, width_i32)
+                off = WARP_SIZE // (2 << _sh_exp)
+                peer = w.shuffle_xor(off, WARP_SIZE)
                 w = w.addf(peer, fastmath=fm_fast)
             return w
 
@@ -99,40 +92,33 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
             w0 = wave_reduce_add(val0)
             w1 = wave_reduce_add(val1)
 
-            if lane == fx.Int32(0):
-                wave_idx = ArithValue(wave).index_cast(T.index)
-                SmemPtr.store(s_red, w0, [wave_idx])
-                SmemPtr.store(s_red2, w1, [wave_idx])
+            if lane == 0:
+                SmemPtr.store(s_red, w0, [wave])
+                SmemPtr.store(s_red2, w1, [wave])
             gpu.barrier()
 
-            if wave == fx.Int32(0):
+            if wave == 0:
                 in_range = lane < RED_SLOTS
-                lane_safe = in_range.select(lane, fx.Int32(0))
-                lane_safe_idx = ArithValue(lane_safe).index_cast(T.index)
-                v0 = SmemPtr.load(s_red, [lane_safe_idx])
-                v1 = SmemPtr.load(s_red2, [lane_safe_idx])
-                z = fx.Float32(0.0)
-                ww0 = in_range.select(v0, z)
-                ww1 = in_range.select(v1, z)
+                lane_safe = in_range.select(lane, 0)
+                v0 = SmemPtr.load(s_red, [lane_safe])
+                v1 = SmemPtr.load(s_red2, [lane_safe])
+                ww0 = in_range.select(v0, 0.0)
+                ww1 = in_range.select(v1, 0.0)
                 ww0 = wave_reduce_add(ww0)
                 ww1 = wave_reduce_add(ww1)
 
-                if lane == fx.Int32(0):
-                    c0_idx = fx.Index(0)
-                    SmemPtr.store(s_red, ww0, [c0_idx])
-                    SmemPtr.store(s_red2, ww1, [c0_idx])
+                if lane == 0:
+                    SmemPtr.store(s_red, ww0, [0])
+                    SmemPtr.store(s_red2, ww1, [0])
             gpu.barrier()
 
-            c0_idx = fx.Index(0)
-            return SmemPtr.load(s_red, [c0_idx]), SmemPtr.load(s_red2, [c0_idx])
+            return SmemPtr.load(s_red, [0]), SmemPtr.load(s_red2, [0])
 
         # ==================================================================
         # Fast path: N is a multiple of tile_cols
         # ==================================================================
         if const_expr(N >= tile_cols and N % tile_cols == 0 and elem_bits <= 16):
             num_tiles = N // tile_cols
-            elem_dtype = Numeric.from_ir_type(elem_type)
-
             # ── Layout API: buffer-backed tensors + tiled access ─────
             Input_buf = fx.rocdl.make_buffer_tensor(Input)
             Output_buf = fx.rocdl.make_buffer_tensor(Output)
@@ -161,7 +147,7 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
                 fx.memref_store_vec(val, r)
                 fx.copy_atom_call(copy_atom, r, fx.slice(div_tensor, (None, idx)))
 
-            c_zero_f = arith.constant(0.0, type=compute_type)
+            c_zero_f = fx.Float32(0.0)
             thread_sumsq = c_zero_f
             thread_dummy = c_zero_f
             in_local = []
@@ -171,14 +157,14 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
                 idx = tid + tile_i * BLOCK_THREADS
                 vec = _load_vec(in_div, idx)
                 in_local.append(vec)
-                x = vec.to(Float32)
+                x = vec.to(fx.Float32)
 
                 x2 = x * x
                 red2 = x2.reduce(ReductionOp.ADD, fastmath=fm_fast)
-                thread_sumsq = ArithValue(thread_sumsq) + red2
+                thread_sumsq = thread_sumsq + red2
 
             _, sum_sq = block_reduce_add2(thread_dummy, thread_sumsq)
-            mean_sq = ArithValue(sum_sq) / n_float
+            mean_sq = sum_sq / n_float
             ms_eps = mean_sq + eps_c
             rrms = ms_eps.rsqrt(fastmath=fm_fast)
 
@@ -186,8 +172,8 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
             for tile_i in range_constexpr(num_tiles):
                 idx = tid + tile_i * BLOCK_THREADS
 
-                g = _load_vec(gamma_div, idx).to(Float32)
-                x = in_local[tile_i].to(Float32)
+                g = _load_vec(gamma_div, idx).to(fx.Float32)
+                x = in_local[tile_i].to(fx.Float32)
 
                 y = (x * rrms) * g
 
@@ -196,11 +182,11 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
                     if const_expr(USE_HW_CVT_PK_BF16_F32):
                         out_e = y.to(elem_dtype)
                     else:
-                        u = y.bitcast(Uint32)
+                        u = y.bitcast(fx.Uint32)
                         upper = u >> 16
                         lsb = upper & 1
                         bias = lsb + 0x7FFF
-                        u_round = y.bitcast(Uint32) + bias
+                        u_round = y.bitcast(fx.Uint32) + bias
                         bf16_bits = u_round >> 16
                         even = bf16_bits.shuffle(bf16_bits, [0, 2, 4, 6])
                         odd = bf16_bits.shuffle(bf16_bits, [1, 3, 5, 7])
@@ -219,8 +205,6 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
             # ==============================================================
             # Generic path: scalar 2-pass for arbitrary N
             # ==============================================================
-            elem_dtype = Numeric.from_ir_type(elem_type)
-
             Input_buf = fx.rocdl.make_buffer_tensor(Input)
             Output_buf = fx.rocdl.make_buffer_tensor(Output)
             Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma)
@@ -243,7 +227,7 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
                 view = fx.slice(divided_tensor, (None, index))
                 r = fx.memref_alloca(scalar_reg_ty, scalar_reg_lay)
                 fx.copy_atom_call(copy_atom_s, view, r)
-                return fx.memref_load_vec(r)[0].ir_value()
+                return fx.memref_load_vec(r)[0]
 
             def _store_scalar(divided_tensor, index, val):
                 r = fx.memref_alloca(scalar_reg_ty, scalar_reg_lay)
@@ -252,43 +236,39 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
                 view = fx.slice(divided_tensor, (None, index))
                 fx.copy_atom_call(copy_atom_s, r, view)
 
-            c_zero_f = arith.constant(0.0, type=compute_type)
+            c_zero_f = fx.Float32(0.0)
             thread_sumsq = c_zero_f
 
             for base_idx_int in range_constexpr(0, N, BLOCK_THREADS):
                 idx = tid + base_idx_int
-                c_N_i32 = Int32(N)
-                is_valid = idx < c_N_i32
-                c0_i = Int32(0)
-                idx_safe = is_valid.select(idx, c0_i)
+                is_valid = idx < N
+                idx_safe = is_valid.select(idx, 0)
                 x_e = _load_scalar(row_div, idx_safe)
-                x = x_e if dtype_str == "f32" else x_e.extf(compute_type)
-                x_av = ArithValue(x)
-                x2 = x_av * x_av
+                x = x_e if dtype_str == "f32" else x_e.to(fx.Float32)
+                x2 = x * x
                 x2_safe = is_valid.select(x2, c_zero_f)
-                thread_sumsq = ArithValue(thread_sumsq) + x2_safe
+                thread_sumsq = thread_sumsq + x2_safe
 
             sum_sq = block_reduce_add(thread_sumsq)
-            mean_sq = ArithValue(sum_sq) / n_float
+            mean_sq = sum_sq / n_float
             ms_eps = mean_sq + eps_c
-            rrms = ms_eps.rsqrt(fastmath=fm_fast)
+            rrms = fmath.rsqrt(ms_eps, fastmath=fm_fast)
 
             for base_idx_int in range_constexpr(0, N, BLOCK_THREADS):
                 idx = tid + base_idx_int
-                c_N_i32 = Int32(N)
-                if arith.cmpi(arith.CmpIPredicate.ult, idx, c_N_i32):
+                if idx < N:
                     x_e = _load_scalar(row_div, idx)
                     g_e = _load_scalar(gamma_div, idx)
-                    x = x_e if dtype_str == "f32" else x_e.extf(compute_type)
-                    g = g_e if dtype_str == "f32" else g_e.extf(compute_type)
-                    norm = ArithValue(x) * rrms
+                    x = x_e if dtype_str == "f32" else x_e.to(fx.Float32)
+                    g = g_e if dtype_str == "f32" else g_e.to(fx.Float32)
+                    norm = x * rrms
                     y = norm * g
                     if const_expr(dtype_str == "f32"):
                         y_e = y
                     elif const_expr(dtype_str == "bf16"):
-                        y_e = y.truncf(elem_type)
+                        y_e = y.to(elem_dtype)
                     else:
-                        y_e = y.truncf(elem_type)
+                        y_e = y.to(elem_dtype)
                     _store_scalar(out_div, idx, y_e)
 
     @flyc.jit
@@ -301,13 +281,12 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
     ):
         allocator.finalized = False
         ctx = CompilationContext.get_current()
-        with ir.InsertionPoint(ctx.gpu_module_body):
+        with InsertionPoint(ctx.gpu_module_body):
             allocator.finalize()
 
-        idx_m = ArithValue(m_in).index_cast(T.index)
         launcher = rmsnorm_kernel(Input, Gamma, Gamma, Output)
         launcher.launch(
-            grid=(idx_m, 1, 1),
+            grid=(m_in, 1, 1),
             block=(BLOCK_THREADS, 1, 1),
             stream=stream,
         )

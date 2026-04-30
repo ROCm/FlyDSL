@@ -403,6 +403,7 @@ def _compile_stage1_wmma_kernel_impl(
             i32_inter_in,
             i32_k_in,
             i32_size_expert_ids_in,
+            value_attrs={"rocdl.waves_per_eu": waves_per_eu},
         )
         _finalize_alloc_and_launch_2d(
             ctx=ctx,
@@ -412,7 +413,6 @@ def _compile_stage1_wmma_kernel_impl(
             gy=gy,
             block_threads=block_threads,
             stream=stream,
-            waves_per_eu=waves_per_eu,
             ir=ir,
         )
 
@@ -788,6 +788,7 @@ def _compile_stage2_wmma_kernel_impl(
             i32_n_in,
             i32_k_in,
             i32_size_expert_ids_in,
+            value_attrs={"rocdl.waves_per_eu": waves_per_eu},
         )
         _finalize_alloc_and_launch_2d(
             ctx=ctx,
@@ -797,7 +798,6 @@ def _compile_stage2_wmma_kernel_impl(
             gy=gy,
             block_threads=block_threads,
             stream=stream,
-            waves_per_eu=waves_per_eu,
             ir=ir,
         )
 

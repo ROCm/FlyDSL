@@ -21,18 +21,11 @@ Tile config (tuned for M=32):
   wave_reg_m=2, wave_reg_n=4 → 8 accumulators per wave
 """
 
-import os
 import functools
-import time
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.compiler.kernel_function import CompilationContext
-
-from flydsl.expr import arith, gpu, buffer_ops, vector, rocdl, range_constexpr
-from flydsl.runtime.device import get_rocm_arch
-from flydsl.expr.typing import T
-
+from flydsl.expr import buffer_ops, const_expr, gpu, range_constexpr, rocdl
 
 WMMA_M = 16
 WMMA_N = 16
@@ -132,8 +125,6 @@ def compile_fp8_gemm(
     if k_unroll is None:
         k_unroll = 1 if M >= 256 else 2
 
-    gpu_arch = get_rocm_arch()
-
     WAVE_SIZE = 32
     assert tile_m % WMMA_M == 0, f"tile_m={tile_m} must be multiple of {WMMA_M}"
     assert tile_n % WMMA_N == 0, f"tile_n={tile_n} must be multiple of {WMMA_N}"
@@ -187,44 +178,31 @@ def compile_fp8_gemm(
         arg_scale_a: fx.Tensor,
         arg_scale_b: fx.Tensor,
     ):
-        # === Types ===
-        f32 = T.f32
-        bf16 = T.bf16
-        i32 = T.i32
-        v8f32_ty = T.vec(8, T.f32)
-        v2i32_ty = T.i32x2
-
         # === Thread/block IDs ===
         tid = gpu.thread_id("x")
         pid = gpu.block_id("x")
 
-        c32 = fx.Index(32)
-        c16 = fx.Index(16)
-        c8 = fx.Index(8)
-        wave_id = tid // c32
-        lane = tid % c32
-        lane16 = lane % c16
-        klane = lane // c16
+        wave_id = tid // 32
+        lane = tid % 32
+        lane16 = lane % 16
+        klane = lane // 16
 
         # === L2 cache swizzle ===
         effective_group_m = min(group_m, grid_m)
-        c_grid_n = fx.Index(grid_n)
-        c_group_m = fx.Index(effective_group_m)
-        num_pid_in_group = c_group_m * c_grid_n
+        num_pid_in_group = effective_group_m * grid_n
         group_id = pid // num_pid_in_group
-        first_pid_m = group_id * c_group_m
-        group_size_m = c_group_m
+        first_pid_m = group_id * effective_group_m
+        group_size_m = effective_group_m
         pid_in_group = pid % num_pid_in_group
         bid_m = first_pid_m + (pid_in_group % group_size_m)
         bid_n = pid_in_group // group_size_m
 
         # === Wave position within workgroup ===
-        c_wn = fx.Index(waves_n)
-        wave_m = wave_id // c_wn
-        wave_n = wave_id % c_wn
+        wave_m = wave_id // waves_n
+        wave_n = wave_id % waves_n
 
-        tile_m0 = bid_m * fx.Index(tile_m)
-        tile_n0 = bid_n * fx.Index(tile_n)
+        tile_m0 = bid_m * tile_m
+        tile_n0 = bid_n * tile_n
 
         # === Buffer resources ===
         a_rsrc = buffer_ops.create_buffer_resource(arg_a, max_size=True)
@@ -246,15 +224,14 @@ def compile_fp8_gemm(
               col = k_tile_idx*tile_k + rk*16 + klane*8
             """
             a_vecs = []
-            c_K = fx.Index(K)
             for rk in range_constexpr(reg_k):
                 rk_vecs = []
-                col_base = k_tile_idx * fx.Index(tile_k) + fx.Index(rk * 16) + klane * c8
+                col_base = k_tile_idx * tile_k + 16 * rk + klane * 8
                 for rm in range_constexpr(wave_reg_m):
-                    row = tile_m0 + wave_m * fx.Index(wave_reg_m * WMMA_M) + fx.Index(rm * WMMA_M) + lane16
-                    byte_off = row * c_K + col_base
-                    dword_off = byte_off // fx.Index(4)
-                    a_raw = buffer_ops.buffer_load(a_rsrc, dword_off, vec_width=2, dtype=i32)
+                    row = tile_m0 + wave_m * (wave_reg_m * WMMA_M) + 16 * rm + lane16
+                    byte_off = row * K + col_base
+                    dword_off = byte_off // 4
+                    a_raw = buffer_ops.buffer_load(a_rsrc, dword_off, vec_width=2, dtype=fx.Int32)
                     rk_vecs.append(a_raw)
                 a_vecs.append(rk_vecs)
             return a_vecs
@@ -262,20 +239,20 @@ def compile_fp8_gemm(
         def _load_b_tile(k_tile_idx):
             """Load B fp8 tile. Returns [reg_k][wave_reg_n] of v2i32."""
             b_vecs = []
-            n0_base = tile_n0 // c16 + wave_n * fx.Index(wave_reg_n)
+            n0_base = tile_n0 // 16 + wave_n * wave_reg_n
             for rk in range_constexpr(reg_k):
                 rk_vecs = []
-                k0 = k_tile_idx * fx.Index(reg_k) + fx.Index(rk)
+                k0 = k_tile_idx * reg_k + rk
                 for rn in range_constexpr(wave_reg_n):
-                    n0 = n0_base + fx.Index(rn)
+                    n0 = n0_base + rn
                     byte_off = (
-                        n0 * fx.Index(B_STRIDE_N0)
-                        + k0 * fx.Index(B_STRIDE_K0)
-                        + klane * fx.Index(B_STRIDE_KLANE)
-                        + lane16 * fx.Index(B_STRIDE_NLANE)
+                        n0 * B_STRIDE_N0
+                        + k0 * B_STRIDE_K0
+                        + klane * B_STRIDE_KLANE
+                        + lane16 * B_STRIDE_NLANE
                     )
-                    dword_off = byte_off // fx.Index(4)
-                    b_raw = buffer_ops.buffer_load(b_rsrc, dword_off, vec_width=2, dtype=i32)
+                    dword_off = byte_off // 4
+                    b_raw = buffer_ops.buffer_load(b_rsrc, dword_off, vec_width=2, dtype=fx.Int32)
                     rk_vecs.append(b_raw)
                 b_vecs.append(rk_vecs)
             return b_vecs
@@ -291,21 +268,21 @@ def compile_fp8_gemm(
                     for rn in range_constexpr(wave_reg_n):
                         idx = rm * wave_reg_n + rn
                         new_accs[idx] = rocdl.wmma_f32_16x16x16_fp8_fp8(
-                            v8f32_ty,
+                            new_accs[idx].type,
                             a_vecs[rk][rm],
                             b_vecs[rk][rn],
-                            arith.unwrap(new_accs[idx]),
+                            new_accs[idx],
                         ).result
             return new_accs
 
         # === Initialize accumulators ===
-        zero_acc = arith.constant_vector(0.0, v8f32_ty)
+        zero_acc = fx.full(8, 0.0, fx.Float32)
         accs = [zero_acc for _ in range_constexpr(wave_reg_m * wave_reg_n)]
 
         # === Software-pipelined K-loop ===
         # Prologue: load first tile
-        a_cur = _load_a_tile(fx.Index(0))
-        b_cur = _load_b_tile(fx.Index(0))
+        a_cur = _load_a_tile(0)
+        b_cur = _load_b_tile(0)
 
         full_outer_iters = (num_k_tiles - 1) // k_unroll
         remainder = (num_k_tiles - 1) % k_unroll
@@ -340,7 +317,6 @@ def compile_fp8_gemm(
             return out
 
         n_a = reg_k * wave_reg_m
-        n_b = reg_k * wave_reg_n
         n_acc = wave_reg_m * wave_reg_n
 
         # Build initial state: [a_flat, accs, b_flat]
@@ -355,7 +331,7 @@ def compile_fp8_gemm(
 
                 # Inner unroll: pipeline load-before-compute
                 for j in range_constexpr(k_unroll):
-                    next_kt = iv + fx.Index(j + 1)
+                    next_kt = iv + (j + 1)
                     a_next = _load_a_tile(next_kt)
                     b_next = _load_b_tile(next_kt)
                     s_accs = _do_compute(s_accs, s_a, s_b)
@@ -371,7 +347,7 @@ def compile_fp8_gemm(
         # Handle remainder tiles
         if const_expr(remainder > 0):
             for j in range_constexpr(remainder):
-                next_kt = fx.Index(full_outer_iters * k_unroll + j + 1)
+                next_kt = full_outer_iters * k_unroll + j + 1
                 a_next = _load_a_tile(next_kt)
                 b_next = _load_b_tile(next_kt)
                 accs = _do_compute(accs, a_cur, b_cur)
@@ -382,37 +358,32 @@ def compile_fp8_gemm(
         accs = _do_compute(accs, a_cur, b_cur)
 
         # === Store results with scaling ===
-        c_n = fx.Index(N)
-        base8 = klane * c8
+        base8 = klane * 8
         # Pre-load scale_b for each N column this lane writes to
         sb_cache = []
         for rn in range_constexpr(wave_reg_n):
-            g_col = tile_n0 + wave_n * fx.Index(wave_reg_n * WMMA_N) + fx.Index(rn * WMMA_N) + lane16
-            sb_cache.append(buffer_ops.buffer_load(scale_b_rsrc, g_col, vec_width=1, dtype=f32))
+            g_col = tile_n0 + wave_n * (wave_reg_n * WMMA_N) + 16 * rn + lane16
+            sb_cache.append(buffer_ops.buffer_load(scale_b_rsrc, g_col, vec_width=1, dtype=fx.Float32))
 
         for rm in range_constexpr(wave_reg_m):
-            wmma_m_off = wave_m * fx.Index(wave_reg_m * WMMA_M) + fx.Index(rm * WMMA_M)
+            wmma_m_off = wave_m * (wave_reg_m * WMMA_M) + 16 * rm
             # Pre-load scale_a for the 8 rows in this WMMA M tile
             sa_cache = []
             for si in range_constexpr(8):
-                g_row_si = tile_m0 + wmma_m_off + base8 + fx.Index(si)
-                sa_cache.append(buffer_ops.buffer_load(scale_a_rsrc, g_row_si, vec_width=1, dtype=f32))
+                g_row_si = tile_m0 + wmma_m_off + base8 + si
+                sa_cache.append(buffer_ops.buffer_load(scale_a_rsrc, g_row_si, vec_width=1, dtype=fx.Float32))
 
             for rn in range_constexpr(wave_reg_n):
                 idx = rm * wave_reg_n + rn
-                wmma_n_off = wave_n * fx.Index(wave_reg_n * WMMA_N) + fx.Index(rn * WMMA_N)
+                wmma_n_off = wave_n * (wave_reg_n * WMMA_N) + 16 * rn
                 sb_val = sb_cache[rn]
                 for si in range_constexpr(8):
-                    g_row = tile_m0 + wmma_m_off + base8 + fx.Index(si)
+                    g_row = tile_m0 + wmma_m_off + base8 + si
                     g_col = tile_n0 + wmma_n_off + lane16
-                    val = vector.extract(
-                        accs[idx],
-                        static_position=[si],
-                        dynamic_position=[],
-                    )
+                    val = accs[idx][si]
                     val = val * sa_cache[si] * sb_val
-                    val_bf16 = arith.trunc_f(bf16, val)
-                    elem_off = g_row * c_n + g_col
+                    val_bf16 = val.to(fx.BFloat16)
+                    elem_off = g_row * N + g_col
                     buffer_ops.buffer_store(val_bf16, c_rsrc, elem_off)
 
     # ── Host launcher ──────────────────────────────────────────────────────

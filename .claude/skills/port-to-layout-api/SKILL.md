@@ -59,7 +59,8 @@ For f32 with VEC_WIDTH=8 (256 bits), fall back to scalar path or split into two 
 **Before (raw buffer_ops):**
 ```python
 from flydsl.expr import buffer_ops
-from flydsl.expr.arith import ArithValue
+from flydsl.expr.utils.arith import ArithValue
+from flydsl.expr.typing import Vector as Vec
 
 rsrc = buffer_ops.create_buffer_resource(Input, max_size=True)
 
@@ -67,13 +68,13 @@ elem_bytes = 2  # f16
 row_soffset = ArithValue(bid) * (N * elem_bytes)
 thr_col_bytes = ArithValue(tid) * (VEC_WIDTH * elem_bytes)
 col_bytes = ArithValue(thr_col_bytes) + (tile_i * tile_cols * elem_bytes)
-dw = col_bytes.shrui(arith.constant(2, type=T.i32))
+dw = col_bytes.shrui(fx.Int32(2))
 
 raw_data = buffer_ops.buffer_load(
     rsrc, dw, vec_width=vec_dwords, dtype=T.i32,
     soffset_bytes=row_soffset, mask=is_valid,
 )
-vec_f16 = vector.bitcast(vec_type_f16, raw_data)
+vec_f16 = Vec(raw_data).bitcast(fx.Float16)
 ```
 
 **After (layout API):**
@@ -96,7 +97,7 @@ vec_reg_lay = fx.make_layout(VEC_WIDTH, 1)
 idx = tid + tile_i * BLOCK_THREADS
 r = fx.memref_alloca(vec_reg_ty, vec_reg_lay)
 fx.copy_atom_call(copy_atom, fx.slice(in_div, (None, idx)), r)
-vec_f16 = ArithValue(fx.memref_load_vec(r))
+vec_f16 = Vec(fx.memref_load_vec(r))
 ```
 
 ### Step 4: Handle Multi-Dimensional Tensors
@@ -130,7 +131,7 @@ The layout API's `copy_atom_call` does NOT accept a mask parameter.
 
 **For loads**: With `make_buffer_tensor` using max_size (0xFFFFFFFF num_records),
 out-of-bounds loads read adjacent memory or return 0 at allocation boundary.
-Guard results with `arith.select(is_valid, value, zero)` as needed.
+Guard results with `is_valid.select(value, zero)` as needed.
 
 **For stores**: Wrap in a conditional to prevent OOB writes:
 ```python
@@ -172,7 +173,7 @@ After porting, remove:
 - `elem_bytes` / `vec_dwords` constants (no longer needed)
 - `row_soffset` / `thr_col_bytes` byte-offset computations
 - `shrui(..., 2)` dword conversion
-- `vector.bitcast` from i32 to element type (loads produce the right type)
+- raw `vector.bitcast` from i32 to element type (use `Vec(...).bitcast(...)` when a bitcast is still needed)
 
 ## Known Limitation: Dynamic Tensor Shapes & JIT Cache
 
