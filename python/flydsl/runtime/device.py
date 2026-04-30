@@ -29,6 +29,14 @@ def _arch_from_rocm_agent_enumerator() -> Optional[str]:
 
 
 @functools.lru_cache(maxsize=None)
+def _arch_from_hardware() -> str:
+    """Cached hardware detection (rocm_agent_enumerator is slow)."""
+    arch = _arch_from_rocm_agent_enumerator()
+    if arch:
+        return arch.split(":", 1)[0]
+    return "gfx942"
+
+
 def get_rocm_arch() -> str:
     """Best-effort ROCm GPU arch string (e.g. 'gfx942')."""
     env = os.environ.get("FLYDSL_GPU_ARCH") or os.environ.get("HSA_OVERRIDE_GFX_VERSION")
@@ -39,11 +47,7 @@ def get_rocm_arch() -> str:
             parts = env.split(".")
             return f"gfx{parts[0]}{parts[1]}{parts[2]}"
 
-    arch = _arch_from_rocm_agent_enumerator()
-    if arch:
-        return arch.split(":", 1)[0]
-
-    return "gfx942"
+    return _arch_from_hardware()
 
 
 @functools.lru_cache(maxsize=None)

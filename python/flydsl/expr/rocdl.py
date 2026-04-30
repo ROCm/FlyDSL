@@ -737,3 +737,30 @@ def raw_ptr_buffer_load_lds(rsrc, lds_ptr, size, voffset, soffset, offset, aux, 
     return _op(
         _to_ir(rsrc), _to_ir(lds_ptr), _to_ir(size), _to_ir(voffset), _to_ir(soffset), _to_ir(offset), _to_ir(aux), **kw
     )
+
+
+def buffer_load_to_lds(rsrc, lds_ptr, voffset, size_bytes=4, soffset=0, offset=0):
+    """Load ``size_bytes`` from a buffer resource into LDS (``buffer_load_dword lds``).
+
+    Simplified wrapper around :func:`raw_ptr_buffer_load_lds` with sensible
+    defaults.  ``soffset`` and ``offset`` accept Python ints and are
+    materialised as i32 constants automatically.
+
+    Args:
+        rsrc: Buffer resource descriptor (from ``buffer_ops.create_buffer_resource``).
+        lds_ptr: LDS destination pointer (``!llvm.ptr<3>``).
+        voffset: Per-lane byte offset into the buffer (i32 value).
+        size_bytes: Number of bytes to load per lane (Python int, default 4).
+        soffset: Scalar byte offset added to *voffset* (Python int or i32, default 0).
+        offset: Immediate byte offset (Python int or i32, default 0).
+    """
+    from .utils.arith import constant as _const
+
+    _size = _const(size_bytes, type=T.i32()) if isinstance(size_bytes, int) else _to_ir(size_bytes)
+    _soff = _const(soffset, type=T.i32()) if isinstance(soffset, int) else _to_ir(soffset)
+    _off = _const(offset, type=T.i32()) if isinstance(offset, int) else _to_ir(offset)
+    _aux = _const(0, type=T.i32())
+
+    from .._mlir.dialects.rocdl import raw_ptr_buffer_load_lds as _op
+
+    return _op(_to_ir(rsrc), _to_ir(lds_ptr), _size, _to_ir(voffset), _soff, _off, _aux)

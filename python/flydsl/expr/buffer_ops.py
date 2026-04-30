@@ -422,8 +422,10 @@ def buffer_load(rsrc: ir.Value,
     elif hasattr(dtype, "ir_type"):
         dtype = dtype.ir_type
 
-    # Unwrap offset first (accept DSL Numeric values via ir_value())
-    if hasattr(offset, "ir_value"):
+    # Unwrap offset first (accept Python ints and DSL Numeric values).
+    if isinstance(offset, int):
+        offset = _create_i32_constant(offset)
+    elif hasattr(offset, "ir_value"):
         offset = offset.ir_value()
     offset = _unwrap_value(offset)
     
@@ -506,7 +508,9 @@ def buffer_store(data: ir.Value,
     # Unwrap all inputs (accept DSL Numeric values via ir_value())
     if hasattr(data, "ir_value"):
         data = data.ir_value()
-    if hasattr(offset, "ir_value"):
+    if isinstance(offset, int):
+        offset = _create_i32_constant(offset)
+    elif hasattr(offset, "ir_value"):
         offset = offset.ir_value()
     data = _unwrap_value(data)
     rsrc = _unwrap_value(rsrc)

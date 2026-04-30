@@ -59,6 +59,16 @@ def get_op_result_or_value(op_or_val):
         return op_or_val.results[0]
     return op_or_val
 
+
+def get_index_value(op_or_val):
+    """Unwrap a value for memref indices, materializing/casting to index."""
+    if isinstance(op_or_val, int):
+        return get_op_result_or_value(arith.constant(T.index(), op_or_val))
+    val = get_op_result_or_value(op_or_val)
+    if isinstance(val, ir.Value) and not isinstance(val.type, ir.IndexType):
+        return get_op_result_or_value(arith.index_cast(T.index(), val))
+    return val
+
 # ==============================================================================
 # Pointer Abstraction
 # ==============================================================================
@@ -117,7 +127,7 @@ class SmemPtr:
                 for _ in range(len(self.shape) if self.shape else 1)
             ]
         else:
-            idxs = [get_op_result_or_value(i) for i in idxs]
+            idxs = [get_index_value(i) for i in idxs]
         return memref.load(get_op_result_or_value(view), idxs)
     
     def store(self, val, idxs=None):
@@ -129,7 +139,7 @@ class SmemPtr:
                 for _ in range(len(self.shape) if self.shape else 1)
             ]
         else:
-            idxs = [get_op_result_or_value(i) for i in idxs]
+            idxs = [get_index_value(i) for i in idxs]
         memref.store(get_op_result_or_value(val), get_op_result_or_value(view), idxs)
 
 # ==============================================================================
