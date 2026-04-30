@@ -12,6 +12,16 @@ NB_MODULE(_mlirRegisterEverything, m) {
   m.doc() = "MLIR All Upstream Dialects, Translations and Passes Registration";
 
   m.def("register_dialects", [](MlirDialectRegistry registry) {
+    // Attach FlyDSL's gpu::TargetAttrInterface external model on
+    // #rocdl.target *before* mlirRegisterAllDialects.  MLIR's InterfaceMap
+    // ignores repeated attachInterface for the same interface id (see
+    // detail::InterfaceMap::insert in mlir/lib/Support/InterfaceSupport.cpp),
+    // so the FIRST registration wins.  If we registered after upstream,
+    // upstream's ROCDLTargetAttrImpl would silently win and our serializer
+    // (which injects our two AMDGPU MachineFunctionPasses at PreRegAlloc)
+    // would never run.  See docs/codegen_pass_plugin.md.
+    mlirRegisterFlyAMDGPUTargetInterfaceExternalModels(registry);
+
     mlirRegisterAllDialects(registry);
 
     MlirDialectHandle flyHandle = mlirGetDialectHandle__fly__();
@@ -26,4 +36,5 @@ NB_MODULE(_mlirRegisterEverything, m) {
   mlirRegisterFlyPasses();
   mlirRegisterFlyToROCDLConversionPass();
   mlirRegisterFlyROCDLClusterAttrPass();
+  mlirRegisterFlyAMDGPUCodegenPasses();
 }
