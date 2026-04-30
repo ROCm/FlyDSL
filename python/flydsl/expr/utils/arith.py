@@ -136,6 +136,7 @@ _ARITH_OPS = {
     "mul": (arith.mulf, arith.muli),
 }
 
+
 def _binary_op(self, other, op, *, loc=None, ip=None):
     other = _coerce_other(self, other, loc=loc, ip=ip)
     if other is NotImplemented:
@@ -144,23 +145,23 @@ def _binary_op(self, other, op, *, loc=None, ip=None):
     if op in _ARITH_OPS:
         float_fn, int_fn = _ARITH_OPS[op]
         if self.is_float:
-            return float_fn(self, other, fastmath=arith.FastMathFlags.fast, loc=loc, ip=ip)
+            return float_fn(self, other, loc=loc, ip=ip)
         return int_fn(self, other, loc=loc, ip=ip)
 
     if op == "div":
         if self.is_float:
-            return arith.divf(self, other, fastmath=arith.FastMathFlags.fast, loc=loc, ip=ip)
+            return arith.divf(self, other, loc=loc, ip=ip)
         et = element_type(self.type)
         if isinstance(et, ir.IndexType):
             return arith.divui(self, other, loc=loc, ip=ip)
         fp_ty = T.f64() if et.width > 32 else T.f32()
         lhs = int_to_fp(self, self.signed, fp_ty, loc=loc, ip=ip)
         rhs = int_to_fp(other, other.signed, fp_ty, loc=loc, ip=ip)
-        return arith.divf(lhs, rhs, fastmath=arith.FastMathFlags.fast, loc=loc, ip=ip)
+        return arith.divf(lhs, rhs, loc=loc, ip=ip)
 
     if op == "floordiv":
         if self.is_float:
-            q = arith.divf(self, other, fastmath=arith.FastMathFlags.fast, loc=loc, ip=ip)
+            q = arith.divf(self, other, loc=loc, ip=ip)
             return math.floor(q, loc=loc, ip=ip)
         et = element_type(self.type)
         if isinstance(et, ir.IndexType):
@@ -397,9 +398,9 @@ class ArithValue(ir.Value):
         """Float add with optional fastmath flags."""
         return arith.addf(self, _to_raw(other), fastmath=fastmath, loc=loc)
 
-    def maximumf(self, other, *, fastmath=arith.FastMathFlags.fast, loc=None):
-        """Float maxnum."""
-        return arith.MaxNumFOp(self, _to_raw(other), fastmath=fastmath, loc=loc).result
+    def maximumf(self, other, *, loc=None):
+        """Float maximum (NaN-propagating)."""
+        return arith.maximumf(self, _to_raw(other), loc=loc)
 
     def rsqrt(self, *, fastmath=None, loc=None):
         """Reciprocal square root: 1/sqrt(self)."""
@@ -437,7 +438,7 @@ class ArithValue(ir.Value):
             op_name = owner.name
             return f"ArithValue(type={ty}, op={op_name})"
         except Exception:
-            return "ArithValue(type=?)"
+            return f"ArithValue(type=?)"
 
     def __repr__(self):
         return self.__str__()

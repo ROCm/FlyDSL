@@ -1,4 +1,8 @@
-"""Arith dialect API - operator overloading + function-level builders.
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+
+from .._mlir.dialects.arith import *  # noqa: F401,F403
+"""Arith dialect API — operator overloading + function-level builders.
 
 Usage:
     from flydsl.expr import arith
@@ -8,29 +12,26 @@ Usage:
     r = arith.select(cond, a, b)
     # ArithValue operator overloading: c + 1, c * 2, c / 4, c % 16
 """
-
-# SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2025 FlyDSL Project Contributors
-
-from .._mlir.dialects import arith as _mlir_arith
-from .._mlir.dialects.arith import *  # noqa: F401,F403
 from .meta import traced_op
 from .utils.arith import (  # noqa: F401
     ArithValue,
-    _to_raw,
-    andi,
     constant,
     constant_vector,
     index,
     index_cast,
     int_to_fp,
     select,
-    shli,
     sitofp,
     trunc_f,
-    unwrap,
+    andi,
     xori,
+    shli,
+    unwrap,
+    _to_raw,
 )
+
+# Override star-import cmpi/cmpf to accept Numeric types (Int32, etc.)
+from .._mlir.dialects import arith as _mlir_arith  # noqa: E402
 
 
 @traced_op
@@ -61,5 +62,6 @@ def cmpf(predicate, lhs, rhs, **kwargs):
         An ``i1`` comparison result.
     """
     return _mlir_arith.cmpf(predicate, _to_raw(lhs), _to_raw(rhs), **kwargs)
+
 
 

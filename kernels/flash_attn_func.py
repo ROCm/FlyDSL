@@ -28,10 +28,10 @@ import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm
 from flydsl.compiler.kernel_function import CompilationContext
-from flydsl.expr import buffer_ops, const_expr, gpu, range_constexpr, rocdl
+from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr import math as fmath
 from flydsl.expr.typing import Vector as Vec
-from flydsl.expr.utils.arith import ArithValue
+from flydsl.expr.utils.arith import ArithValue, _to_raw as _raw
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from kernels.kernels_common import dtype_to_elem_type
@@ -265,6 +265,18 @@ def build_flash_attn_func_module_primary(
 
         def _mfma(mfma_fn, a, b, c):
             return mfma_fn(v16f32_type, [a, b, c])
+
+        def _fadd(a, b):
+            return arith.addf(_raw(a), _raw(b), fastmath=fm_fast)
+
+        def _fsub(a, b):
+            return arith.subf(_raw(a), _raw(b), fastmath=fm_fast)
+
+        def _fmul(a, b):
+            return arith.mulf(_raw(a), _raw(b), fastmath=fm_fast)
+
+        def _fmax(a, b):
+            return arith.MaxNumFOp(_raw(a), _raw(b), fastmath=fm_fast).result
 
         def mfma_acc(a, b, c):
             if const_expr(dtype_str == "bf16"):
@@ -860,46 +872,50 @@ def build_flash_attn_func_module_primary(
 
                 local_max = s_raw_lo[0]
                 for r in range_constexpr(15):
-                    local_max = fx.Float32(local_max).maximumf(s_raw_lo[r + 1])
+                    local_max = _fmax(local_max, s_raw_lo[r + 1])
                 for r in range_constexpr(16):
-                    local_max = fx.Float32(local_max).maximumf(s_raw_hi[r])
+                    local_max = _fmax(local_max, s_raw_hi[r])
                 peer_max = reduction_peer(local_max)
-                row_max = fx.Float32(local_max).maximumf(peer_max)
-                m_new_raw = fx.Float32(m_running).maximumf(row_max)
+                row_max = _fmax(local_max, peer_max)
+                m_new_raw = _fmax(m_running, row_max)
 
-                diff_m_raw = fx.Float32(m_running) - m_new_raw
-                diff_m_scaled = fx.Float32(diff_m_raw) * c_sm_scale_log2e
+                diff_m_raw = _fsub(m_running, m_new_raw)
+                diff_m_scaled = _fmul(diff_m_raw, c_sm_scale_log2e)
                 corr = ArithValue(diff_m_scaled).exp2(fastmath=fm_fast)
 
-                scaled_max = c_sm_scale_log2e * m_new_raw
-                neg_scaled_max = c_zero_f - scaled_max
+                scaled_max = _fmul(c_sm_scale_log2e, m_new_raw)
+                neg_scaled_max = _fsub(c_zero_f, scaled_max)
 
                 p_vals_lo = []
                 p_vals_hi = []
                 local_sum = c_zero_f
                 for r in range_constexpr(16):
-                    diff_lo = fmath.fma(s_raw_lo[r], c_sm_scale_log2e, neg_scaled_max)
+                    diff_lo = fmath.fma(
+                        s_raw_lo[r], c_sm_scale_log2e, neg_scaled_max, fastmath=fm_fast
+                    )
                     p_lo = ArithValue(diff_lo).exp2(fastmath=fm_fast)
                     p_vals_lo.append(p_lo)
-                    local_sum = fx.Float32(local_sum) + p_lo
+                    local_sum = _fadd(local_sum, p_lo)
                 for r in range_constexpr(16):
-                    diff_hi = fmath.fma(s_raw_hi[r], c_sm_scale_log2e, neg_scaled_max)
+                    diff_hi = fmath.fma(
+                        s_raw_hi[r], c_sm_scale_log2e, neg_scaled_max, fastmath=fm_fast
+                    )
                     p_hi = ArithValue(diff_hi).exp2(fastmath=fm_fast)
                     p_vals_hi.append(p_hi)
-                    local_sum = fx.Float32(local_sum) + p_hi
+                    local_sum = _fadd(local_sum, p_hi)
 
                 peer_sum = reduction_peer(local_sum)
-                tile_sum = fx.Float32(local_sum) + peer_sum
-                l_corr = fx.Float32(corr) * l_running
-                l_new = fx.Float32(l_corr) + tile_sum
+                tile_sum = _fadd(local_sum, peer_sum)
+                l_corr = _fmul(corr, l_running)
+                l_new = _fadd(l_corr, tile_sum)
 
                 # ==== Rescale O accumulators ====
                 corr_vec = Vec.from_elements([corr], fx.Float32).broadcast_to(16)
                 if const_expr(not USE_HW_TR):
-                    o_accs[0] = Vec(o_accs[0]) * corr_vec
+                    o_accs[0] = _fmul(Vec(o_accs[0]), corr_vec)
                 else:
                     for dc in range_constexpr(D_CHUNKS):
-                        o_accs[dc] = Vec(o_accs[dc]) * corr_vec
+                        o_accs[dc] = _fmul(Vec(o_accs[dc]), corr_vec)
 
                 if const_expr(ENABLE_PREFETCH_3BUF and (kv_sub + preload_k_count) < N_SUBTILES):
                     next_k_sub = kv_sub + preload_k_count
