@@ -34,6 +34,11 @@ from flydsl._mlir.dialects import math as math_dialect
 from flydsl.expr.typing import T
 from flydsl.expr.arith import ArithValue
 
+from kernels.grouped_gemm_blockscale_common import (
+    compute_compile_constants,
+    out_mlir_for,
+    validate_params,
+)
 from kernels.mfma_epilogues import mfma_epilog
 from kernels.mfma_preshuffle_pipeline import (
     crd2idx,
@@ -80,30 +85,32 @@ def compile_grouped_gemm_blockscale_contiguous(
 
     allocator = SmemAllocator(None, arch=gpu_arch, global_sym_name="smem_grouped_gemm")
 
-    # Validate parameters
-    if k % tile_k != 0:
-        raise ValueError(f"k ({k}) must be divisible by tile_k ({tile_k})")
-    if n % tile_n != 0:
-        raise ValueError(f"n ({n}) must be divisible by tile_n ({tile_n})")
-    if tile_k % scale_block_k != 0:
-        raise ValueError(f"tile_k ({tile_k}) must be divisible by scale_block_k ({scale_block_k})")
-    if tile_n % scale_block_n != 0:
-        raise ValueError(f"tile_n ({tile_n}) must be divisible by scale_block_n ({scale_block_n})")
+    validate_params(
+        n=n, k=k, tile_n=tile_n, tile_k=tile_k,
+        scale_block_k=scale_block_k, scale_block_n=scale_block_n,
+        out_dtype=out_dtype,
+    )
+    out_mlir = out_mlir_for(out_dtype)
 
-    # Output type
-    if out_dtype not in ("bf16", "f16"):
-        raise ValueError(f"out_dtype must be 'bf16' or 'f16', got {out_dtype!r}")
-    out_mlir = lambda: T.bf16 if out_dtype == "bf16" else T.f16
-
-    # Compile-time constants
-    total_threads = 256
-    elem_bytes = 1  # FP8
-    num_k_tiles = k // tile_k
-    scale_k = k // scale_block_k
-    scale_n = n // scale_block_n
-    sb_per_tile = tile_k // scale_block_k  # scale blocks per K-tile
-    k_unroll = tile_k // 64  # K64-byte micro-steps (for K32 MFMA pairs)
-    kpack_bytes = 16  # 16-byte packs for FP8
+    _c = compute_compile_constants(
+        n=n, k=k, tile_m=tile_m, tile_n=tile_n, tile_k=tile_k,
+        scale_block_k=scale_block_k, scale_block_n=scale_block_n,
+    )
+    total_threads = _c.total_threads
+    elem_bytes = _c.elem_bytes
+    num_k_tiles = _c.num_k_tiles
+    scale_k = _c.scale_k
+    scale_n = _c.scale_n
+    sb_per_tile = _c.sb_per_tile
+    k_unroll = _c.k_unroll
+    kpack_bytes = _c.kpack_bytes
+    tile_k_bytes = _c.tile_k_bytes
+    tile_k_dwords = _c.tile_k_dwords
+    bytes_a_per_tile = _c.bytes_a_per_tile
+    bytes_per_thread_a = _c.bytes_per_thread_a
+    a_load_bytes = _c.a_load_bytes
+    chunk_i32_a = _c.chunk_i32_a
+    num_a_loads = _c.num_a_loads
 
     # LDS allocation: max of ping-pong A tiles and CShuffle epilogue output
     lds_a_bytes = tile_m * tile_k * elem_bytes
@@ -121,15 +128,6 @@ def compile_grouped_gemm_blockscale_contiguous(
         f"_t{tile_m}x{tile_n}x{tile_k}"
         f"_pingpong"
     ).replace("-", "_")
-
-    # Thread -> tile element mapping for A loads
-    tile_k_bytes = tile_k * elem_bytes
-    tile_k_dwords = tile_k_bytes // 4
-    bytes_a_per_tile = tile_m * tile_k * elem_bytes
-    bytes_per_thread_a = bytes_a_per_tile // total_threads
-    a_load_bytes = 16  # 16-byte loads (dwordx4)
-    chunk_i32_a = a_load_bytes // 4  # 4 dwords per load
-    num_a_loads = bytes_per_thread_a // a_load_bytes
 
     @flyc.kernel(name=module_name)
     def grouped_gemm_blockscale_contiguous_kernel(
