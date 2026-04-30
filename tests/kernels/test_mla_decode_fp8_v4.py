@@ -109,6 +109,53 @@ def build_sparse_ref_indices(batch, s_q, s_kv, causal, device):
     return indices
 
 
+def create_arbitrary_indexed_kv(kv_4d, kv_lens, seed):
+    """Build a page_size=1 KV cache plus packed arbitrary physical indices."""
+    B, max_skv, Hkv, D_QK = kv_4d.shape
+    assert len(kv_lens) == B
+    assert all(0 < length <= max_skv for length in kv_lens)
+
+    total_tokens = sum(kv_lens)
+    kv_paged = torch.zeros(
+        total_tokens, 1, Hkv, D_QK,
+        dtype=kv_4d.dtype, device=kv_4d.device,
+    )
+    indices_flat = torch.empty(total_tokens, dtype=torch.int32, device=kv_4d.device)
+
+    phys_ids = list(range(total_tokens))
+    random.Random(seed).shuffle(phys_ids)
+
+    cursor = 0
+    indptr = [0]
+    for b in range(B):
+        for t in range(kv_lens[b]):
+            phys = phys_ids[cursor]
+            kv_paged[phys, 0, :, :] = kv_4d[b, t, :, :]
+            indices_flat[cursor] = phys
+            cursor += 1
+        indptr.append(cursor)
+
+    kv_indptr = torch.tensor(indptr, dtype=torch.int32, device=kv_4d.device)
+    return kv_paged, indices_flat, kv_indptr
+
+
+def build_ref_indices_from_packed(flat_indices, kv_lens, s_q, causal, device):
+    max_len = max(kv_lens)
+    ref_indices = torch.full(
+        (len(kv_lens), s_q, max_len), -1, dtype=torch.int64, device=device,
+    )
+
+    cursor = 0
+    for b, length in enumerate(kv_lens):
+        batch_indices = flat_indices[cursor:cursor + length].to(torch.int64)
+        cursor += length
+        for q_pos in range(s_q):
+            valid_kv_count = length - s_q + q_pos + 1 if causal else length
+            valid_kv_count = max(0, min(valid_kv_count, length))
+            ref_indices[b, q_pos, :valid_kv_count] = batch_indices[:valid_kv_count]
+    return ref_indices
+
+
 @triton.jit
 def _fwd_kernel_stage2_asm(
     Mid_O,
@@ -321,11 +368,19 @@ def run_config(
     kv_lora_rank, qk_rope_head_dim, page_block_size,
     causal, exe, seed=DEFAULT_SEED, shuffle=False,
     num_kv_splits=1,
+    arbitrary_indices=False,
+    kv_lens=None,
 ):
     device = "cuda"
     results = {}
 
-    B, Sq, Skv = batch, q_len, kv_len
+    B, Sq = batch, q_len
+    if kv_lens is None:
+        kv_lens = [kv_len] * B
+    else:
+        kv_lens = list(kv_lens)
+        assert len(kv_lens) == B
+    Skv = max(kv_lens)
     Hq, Hkv = num_q_heads, num_kv_heads
     D_QK = kv_lora_rank + qk_rope_head_dim
     D_V = kv_lora_rank
@@ -339,12 +394,22 @@ def run_config(
     q_4d = q_f32.to(fp8_dtype)
     kv_4d = kv_f32.to(fp8_dtype)
 
-    kv_paged, block_table = create_paged_kv(kv_4d, page_block_size, shuffle=shuffle)
+    if arbitrary_indices:
+        assert page_block_size == 1, "arbitrary indices require page_block_size=1"
+        kv_paged, block_table, kv_indptr = create_arbitrary_indexed_kv(
+            kv_4d, kv_lens, seed=seed + 17,
+        )
+        num_blocks_per_seq = Skv
+    else:
+        kv_paged, block_table = create_paged_kv(kv_4d, page_block_size, shuffle=shuffle)
+        num_blocks_per_seq = block_table.shape[1]
+        kv_indptr = torch.arange(
+            0, (B + 1) * Skv, Skv, dtype=torch.int32, device=device,
+        )
 
     q_flat = q_4d.contiguous().view(torch.uint8).view(-1)
     kv_paged_flat = kv_paged.contiguous().view(torch.uint8).view(-1)
     bt_flat = block_table.contiguous().view(-1)
-    num_blocks_per_seq = block_table.shape[1]
 
     mid_o_flat = torch.zeros(
         total_q * num_kv_splits * Hq * D_V,
@@ -361,9 +426,6 @@ def run_config(
 
     qo_indptr = torch.arange(
         0, (B + 1) * Sq, Sq, dtype=torch.int32, device=device,
-    )
-    kv_indptr = torch.arange(
-        0, (B + 1) * Skv, Skv, dtype=torch.int32, device=device,
     )
     nkv_splits_indptr = torch.arange(
         0, (B + 1) * num_kv_splits, num_kv_splits,
@@ -406,10 +468,17 @@ def run_config(
 
     sm = 1.0 / math.sqrt(D_QK)
     assert Hkv == 1, "ref_sparse_attn_decode_from_tensors expects num_kv_heads == 1"
-    sparse_ref_indices = build_sparse_ref_indices(B, Sq, Skv, causal, device)
+    if arbitrary_indices:
+        sparse_ref_indices = build_ref_indices_from_packed(
+            block_table, kv_lens, Sq, causal, device,
+        )
+        ref_k_cache = kv_paged
+    else:
+        sparse_ref_indices = build_sparse_ref_indices(B, Sq, Skv, causal, device)
+        ref_k_cache = kv_4d
     ref_4d, _ = ref_sparse_attn_decode_from_tensors(
         q=q_4d.float(),
-        k_cache=kv_4d.float(),
+        k_cache=ref_k_cache.float(),
         indices_in_kvcache=sparse_ref_indices,
         sm_scale=sm,
         d_v=kv_lora_rank,
@@ -498,41 +567,57 @@ def main():
         causal=causal,
     )
     print("Compiled OK.\n", flush=True)
-    correctness_configs = [
-        (1, 32, SHUFFLE),
-    ]
+
+    rng = random.Random(args.seed + 7)
+    random_configs = []
+    for _ in range(20):
+        b = rng.choice([1, 2, 3, 5, 7, 9, 11, 13, 15, 17, 19, 23, 31, 33, 47, 50, 63])
+        skv = rng.randint(33, 10000)
+        if skv % 16 == 0:
+            skv += rng.choice([1, 3, 5, 7, 9, 11, 13, 15])
+        shuf = rng.choice([True, False])
+        random_configs.append((b, skv, shuf))
+
+    arbitrary_base_configs = [
+        (1,   32,  False),
+        (1,   64,  False),
+        (1,  256,  False),
+        (1, 2048,  False),
+        (64, 8192, True),
+    ] + random_configs
 
     all_passed = True
-    print("--- Correctness sweep ---")
-    for B_c, Skv_c, shuf_c in correctness_configs:
+    if page_block_size != 1:
+        raise ValueError("Arbitrary packed indices sweep requires --page_block_size 1")
+
+    arbitrary_configs = [(2, [32, 64])] + [
+        (B_c, [Skv_c] * B_c) for B_c, Skv_c, _ in arbitrary_base_configs
+    ]
+
+    def _format_kv_lens(kv_lens):
+        if len(kv_lens) > 1 and all(length == kv_lens[0] for length in kv_lens):
+            return f"[{kv_lens[0]}]*{len(kv_lens)}"
+        return str(kv_lens)
+
+    print("--- Arbitrary packed indices sweep ---")
+    for B_c, kv_lens_c in arbitrary_configs:
+        Skv_c = max(kv_lens_c)
         nkv_c = auto_num_kv_splits(B_c, Skv_c, num_q_heads)
         tag_c = (
-            f"B={B_c} Sq={NUM_WAVES} Skv={Skv_c}"
-            f"{' shuf' if shuf_c else ''} sp={nkv_c}"
+            f"B={B_c} Sq={NUM_WAVES} kv_lens={_format_kv_lens(kv_lens_c)}"
+            f" arbitrary sp={nkv_c}"
         )
         r_c = run_config(
             B_c, NUM_WAVES, Skv_c, num_q_heads, num_kv_heads,
             kv_lora_rank, qk_rope_head_dim, page_block_size,
-            causal, exe, seed=args.seed + Skv_c, shuffle=shuf_c,
-            num_kv_splits=nkv_c,
+            causal, exe, seed=args.seed + Skv_c + 101, shuffle=False,
+            num_kv_splits=nkv_c, arbitrary_indices=True,
+            kv_lens=kv_lens_c,
         )
         status_c = "PASS" if r_c.get("passed") else "FAIL"
         if not r_c.get("passed"):
             all_passed = False
         print(f"  {tag_c:>60s} | {status_c}")
-        if not r_c.get("passed") and nkv_c > 1:
-            tag_sp1 = (
-                f"B={B_c} Sq={NUM_WAVES} Skv={Skv_c}"
-                f"{' shuf' if shuf_c else ''} sp=1 (ref)"
-            )
-            r_sp1 = run_config(
-                B_c, NUM_WAVES, Skv_c, num_q_heads, num_kv_heads,
-                kv_lora_rank, qk_rope_head_dim, page_block_size,
-                causal, exe, seed=args.seed + Skv_c, shuffle=shuf_c,
-                num_kv_splits=1,
-            )
-            status_sp1 = "PASS" if r_sp1.get("passed") else "FAIL"
-            print(f"  {tag_sp1:>60s} | {status_sp1}")
 
     print("=" * 110)
     if all_passed:
