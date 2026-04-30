@@ -295,7 +295,7 @@ def test_my_layout_op(ctx, insert_point):
 import torch
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.expr import arith, gpu
+from flydsl.expr import gpu
 from tests.test_common import checkAllclose
 
 @flyc.kernel

@@ -76,7 +76,6 @@ IntTuples encode structure at the type level:
 
 ```python
 import flydsl.expr as fx
-from flydsl.expr import arith
 from flydsl.expr.typing import T
 
 # Shapes and strides (static constants auto-materialized)

@@ -3,7 +3,7 @@ name: debug-flydsl-kernel
 description: >
   Debug FlyDSL GPU kernels that produce NaN, inf, wrong results, or crash.
   Covers cache invalidation, tracing pitfalls (runtime conditionals, range vs
-  range_constexpr), scf.for state packing, buffer_load addressing, MFMA operand
+  range_constexpr), loop-carried state packing, buffer_load addressing, MFMA operand
   layout verification, LDS bank conflict diagnosis, and systematic error
   isolation (all-1s test, single-partition test, host-side tensor inspection).
   Use when a FlyDSL kernel produces incorrect output or compilation errors.
@@ -34,7 +34,7 @@ compile_my_kernel.cache_clear()
 | All zeros output | Wrong output address, uninitialized temp buffer | Section 3 |
 | Partially wrong (>50% mismatch) | Wrong partition count, missing partitions, layout mismatch | Section 4 |
 | Small errors (1-5% mismatch) | FP8 quantization, scale factor, off-by-one masking | Section 5 |
-| Compilation error / crash | Type mismatch, scf.for state, range vs range_constexpr | Section 6 |
+| Compilation error / crash | Type mismatch, loop-carried state, range vs range_constexpr | Section 6 |
 | GPU hang | Infinite loop, deadlock in barrier, OOB memory access | Section 7 |
 
 ## 2. Debugging NaN
@@ -45,7 +45,7 @@ When ALL tokens in a partition are masked (out of context), `qk_max = -inf`. The
 
 **Fix**: Guard the exp calculation:
 ```python
-safe_diff = arith.select(qk_max > NEG_INF, diff, ZERO_F)
+safe_diff = (qk_max > NEG_INF).select(diff, ZERO_F)
 ```
 
 ### 2.2 Division by zero in normalization
@@ -54,8 +54,8 @@ When `exp_sum = 0` (all probs zero), `1/exp_sum = inf`.
 
 **Fix**:
 ```python
-safe_sum = arith.select(running_sum > ZERO_F, running_sum, arith.constant(1.0, type=T.f32))
-inv_sum = arith.constant(1.0, type=T.f32) / safe_sum
+safe_sum = (running_sum > ZERO_F).select(running_sum, fx.Float32(1.0))
+inv_sum = fx.Float32(1.0) / safe_sum
 ```
 
 ### 2.3 Host-side NaN check
@@ -143,7 +143,7 @@ Verify `_scale = softmax_scale * q_scale * k_scale` matches the reference. Commo
 
 ### 6.1 `range()` vs `range_constexpr()` inside @flyc.kernel
 
-FlyDSL's AST rewriter converts ALL `range()` to `scf.for` (runtime loops). Use `range_constexpr()` for compile-time unrolled loops:
+FlyDSL's AST rewriter converts runtime `range()` loops into MLIR loops. Use `range_constexpr()` for compile-time unrolled loops:
 ```python
 # WRONG: i becomes an ArithValue, can't index Python lists
 for i in range(4): result[i] = ...
@@ -160,15 +160,15 @@ FlyDSL tracing evaluates Python `if` at trace time. Runtime GPU values can't be 
 if kv_tok < context_len:  # runtime comparison
     fx.printf(...)
 
-# CORRECT: use arith.select for runtime conditionals
-val = arith.select(kv_tok < context_len, good_val, bad_val)
+# CORRECT: use ArithValue.select for runtime value selection
+val = (kv_tok < context_len).select(good_val, bad_val)
 ```
 
 Python `if` is fine for COMPILE-TIME decisions (e.g., `if trans_v:` where trans_v is a Python bool).
 
-### 6.3 scf.for state packing
+### 6.3 Loop-carried state packing
 
-All loop-carried values must be raw SSA values (not Python wrappers):
+Prefer FlyDSL internal types (`fx.Int32`, `fx.Float32`, `Vector`, `ArithValue`) for loop-carried state. Unwrap only when a low-level helper explicitly requires raw `ir.Value`:
 ```python
 def _unwrap(v):
     return v.ir_value() if hasattr(v, 'ir_value') else v
@@ -176,7 +176,7 @@ def _unwrap(v):
 init_state = [_unwrap(v) for v in [val1, val2, vec_val]]
 ```
 
-Supported state types: `f32` (scalar), `f32x4` (vector), `i32`, `i64`, `index`.
+Supported state types: `f32` (scalar), vector values, `i32`, `i64`, `index`.
 
 ### 6.4 buffer_load type mismatch
 
@@ -186,21 +186,21 @@ k_addr_bytes = ...  # address in FP8 elements (= bytes for FP8)
 k_4xi32 = buffer_ops.buffer_load(k_rsrc, k_addr_bytes // 4, vec_width=4, dtype=T.i32)
 ```
 
-### 6.5 vector.store requires vector type
+### 6.5 Vector stores require vector values
 
-LDS `vector.store` requires the value to be a vector, not scalar:
+`Vector.store` requires the value to be a vector, not scalar:
 ```python
 # WRONG
-vector.store(scalar_i32, lds_ptr, [idx])
+Vec(scalar_i32).store(lds_ptr, [idx])
 
 # CORRECT
-vec = vector.from_elements(T.vec(1, T.i32), [scalar_i32])
-vector.store(vec, lds_ptr, [idx])
+vec = Vec.from_elements([scalar_i32], fx.Int32)
+vec.store(lds_ptr, [idx])
 ```
 
 ## 7. GPU Hang
 
-### 7.1 Infinite scf.for loop
+### 7.1 Infinite runtime loop
 
 If loop bounds are wrong (`stop < start` with unsigned comparison issues, or `step=0`), the GPU hangs. Verify bounds on host:
 ```python
@@ -239,8 +239,8 @@ sudo amdgpu-reset  # or reboot
 - [ ] `range_constexpr()` for all compile-time loops (not `range()`)
 - [ ] No Python `if` on runtime GPU values
 - [ ] `buffer_load` offset units match dtype (bytes/4 for i32)
-- [ ] `vector.store` uses vector type (not scalar)
-- [ ] `scf.for` state packed with `_unwrap()` (raw SSA values)
+- [ ] Vector stores use `Vector` values (not scalars)
+- [ ] `range(..., init=...)` state uses internal types, unwrapped only at hard boundaries
 - [ ] Output written to correct partition slot (`part_z`, not absolute index)
 - [ ] `exp_sums`/`max_logits` strides match actual tensor layout
 - [ ] Softmax guards against `-inf - (-inf) = NaN`

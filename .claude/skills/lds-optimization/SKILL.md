@@ -223,7 +223,6 @@ row index into the LDS address when computing store/load offsets:
 
 ```python
 from flydsl.utils.smem_allocator import SmemAllocator
-from flydsl.expr import arith
 
 allocator = SmemAllocator(None, arch="gfx942", global_sym_name="smem0")
 lds_key = allocator.allocate_array(T.f16, KV_BLOCK_SIZE * HEAD_SIZE)
@@ -236,7 +235,7 @@ def my_kernel(...):
     # XOR-swizzle address: distribute bank accesses
     # row_idx and col_idx are the logical 2D coordinates
     # XOR_BITS controls swizzle width (typically 4 for fp16 vec=8)
-    swizzled_col = arith.xori(col_idx, arith.andi(row_idx, XOR_MASK))
+    swizzled_col = col_idx ^ (row_idx & XOR_MASK)
     lds_offset = row_idx * PADDED_STRIDE + swizzled_col
     lds_key_ptr.store(data, [lds_offset])
 ```
@@ -273,7 +272,7 @@ After (swizzled, conflict-free):
 # XOR-swizzle distributes accesses across banks
 XOR_BITS = 4  # for fp16 vec=8: covers 4 banks per vec
 lds_key = allocator.allocate_array(T.f16, KV_BLOCK_SIZE * HEAD_SIZE)
-swizzled_col = arith.xori(col, arith.shli(arith.andi(row, 0x7), XOR_BITS))
+swizzled_col = col ^ ((row & 0x7) << XOR_BITS)
 lds_offset = row * HEAD_SIZE + swizzled_col
 lds_key_ptr.store(data, [lds_offset])  # now conflict-free
 ```

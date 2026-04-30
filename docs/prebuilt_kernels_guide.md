@@ -246,12 +246,12 @@ Used by `preshuffle_gemm.py`:
 ```python
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.expr import arith, gpu, buffer_ops, rocdl
+from flydsl.expr import gpu, buffer_ops, rocdl
 
 @flyc.kernel
 def gemm_kernel(arg_c: fx.Tensor, arg_a: fx.Tensor, ...):
     tid = gpu.thread_idx.x
-    # ... uses fx.*, arith.*, buffer_ops.*, rocdl.* ...
+    # ... uses fx.*, ArithValue/Vector, buffer_ops.*, rocdl.* ...
 
 @flyc.jit
 def launch_fn(arg_c: fx.Tensor, ..., stream: fx.Stream = fx.Stream(None)):
