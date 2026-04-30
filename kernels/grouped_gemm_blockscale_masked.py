@@ -37,6 +37,7 @@ from flydsl.expr.arith import ArithValue
 
 from kernels.grouped_gemm_blockscale_common import (
     compute_compile_constants,
+    make_a_tile_loaders,
     out_mlir_for,
     setup_lds_allocation,
     validate_params,
@@ -271,56 +272,16 @@ def compile_grouped_gemm_blockscale_masked(
                 n_blk_list.append(fx.get(coord_ni, 0))
                 n_intra_list.append(fx.get(coord_ni, 1))
 
-            # A load mapping: thread -> (row, col_i32) in tile (dword-indexed K)
-            layout_a_tile_div4 = fx.make_layout(
-                (tile_m, tile_k_dwords), stride=(tile_k_dwords, 1)
+            (prefetch_a_tile, store_a_tile_to_lds,
+             a_row_local, a_col_local_i32, k_blocks16) = make_a_tile_loaders(
+                a_rsrc=a_rsrc, lds_a=lds_a, layout_lds=layout_lds,
+                bx_m=bx_m, tx=tx,
+                tile_m=tile_m, tile_k=tile_k,
+                tile_k_bytes=tile_k_bytes, tile_k_dwords=tile_k_dwords,
+                chunk_i32_a=chunk_i32_a, num_a_loads=num_a_loads,
+                total_threads=total_threads, elem_bytes=elem_bytes,
+                k_in=k_in, m_in=m_in, group_idx=group_idx,
             )
-            c_chunk_a = fx.Index(chunk_i32_a)
-            tx_i32_base = tx * c_chunk_a
-            _k_div4_factor = k_in // fx.Index(4)
-            group_a_off_div4 = group_idx * m_in * _k_div4_factor  # 3D A Offset
-            k_blocks16 = arith.index(tile_k_bytes // 16)
-            c4_bytes = fx.Index(4)
-
-            # Precompute per-load tile coordinates (row_local, col_local_i32)
-            a_row_local = []
-            a_col_local_i32 = []
-            for i in range_constexpr(num_a_loads):
-                row_local, col_local_i32 = tile_chunk_coord_i32(
-                    arith, tx_i32_base=tx_i32_base, i=i,
-                    total_threads=total_threads,
-                    layout_tile_div4=layout_a_tile_div4,
-                    chunk_i32=chunk_i32_a,
-                )
-                a_row_local.append(row_local)
-                a_col_local_i32.append(col_local_i32)
-
-            # ── Helper: prefetch A tile (gmem -> regs) ─────────────────
-            def prefetch_a_tile(k_tile_idx_py):
-                """Load A tile from global memory into VGPRs."""
-                base_k_div4 = fx.Index(k_tile_idx_py * tile_k_dwords)
-                parts = []
-                for i in range_constexpr(num_a_loads):
-                    row_global = bx_m + a_row_local[i]
-                    idx_i32 = group_a_off_div4 + row_global * _k_div4_factor + base_k_div4 + a_col_local_i32[i]
-                    a_vec = buffer_ops.buffer_load(a_rsrc, idx_i32, vec_width=4, dtype=T.i32)
-                    parts.append(vector.bitcast(T.i32x4, a_vec))
-                return parts
-
-            # ── Helper: store A regs to LDS with XOR swizzle ───────────
-            def store_a_tile_to_lds(a_parts, lds_base):
-                """Write prefetched A tile from VGPRs into LDS with XOR16 swizzle."""
-                for i in range_constexpr(num_a_loads):
-                    lds_store_16b_xor16(
-                        arith, vector,
-                        lds_memref=lds_a, vec16_ty=T.f8x16,
-                        layout_lds=layout_lds,
-                        row_local=a_row_local[i],
-                        col_local_i32=a_col_local_i32[i],
-                        tx_c4=c4_bytes, k_blocks16=k_blocks16,
-                        lds_base=lds_base,
-                        vec_part_i32x4=a_parts[i], elem_bytes=elem_bytes,
-                    )
 
             # ── Helper: load A K64 pack from LDS with XOR swizzle ────────
             def lds_load_packs_k64(curr_row_a_lds, col_base_bytes, lds_base):

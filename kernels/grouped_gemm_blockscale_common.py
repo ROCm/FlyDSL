@@ -11,7 +11,15 @@ scalar constants, helper closures) so they live in one place.
 
 from collections import namedtuple
 
+import flydsl.expr as fx
+from flydsl.expr import arith, buffer_ops, vector
+from flydsl.expr import range_constexpr
 from flydsl.expr.typing import T
+
+from kernels.mfma_preshuffle_pipeline import (
+    lds_store_16b_xor16,
+    tile_chunk_coord_i32,
+)
 
 
 CompileConstants = namedtuple(
@@ -115,3 +123,88 @@ def setup_lds_allocation(*, allocator, tile_m, tile_k, tile_n, elem_bytes):
     allocator.ptr = lds_alloc_offset + lds_total_bytes
     lds_tile_elems = tile_m * tile_k  # element offset between ping and pong
     return lds_alloc_offset, lds_tile_elems
+
+
+def make_a_tile_loaders(
+    *,
+    a_rsrc,
+    lds_a,
+    layout_lds,
+    bx_m,
+    tx,
+    tile_m,
+    tile_k,
+    tile_k_bytes,
+    tile_k_dwords,
+    chunk_i32_a,
+    num_a_loads,
+    total_threads,
+    elem_bytes,
+    k_in,
+    m_in=None,
+    group_idx=None,
+):
+    """Build the prefetch + LDS-store closures for the A tile.
+
+    Returns `(prefetch_a_tile, store_a_tile_to_lds, a_row_local,
+    a_col_local_i32, k_blocks16)`. When `m_in` and `group_idx` are both
+    None (contig path) no group offset is emitted; when both are provided
+    (masked path), `group_idx * m_in * (k_in/4)` is added as the leading
+    term inside `prefetch_a_tile`, exactly matching the original masked
+    code so the resulting MLIR (and ISA) is byte-identical. `k_blocks16`
+    is returned for reuse by the downstream LDS-load helper.
+    """
+    layout_a_tile_div4 = fx.make_layout(
+        (tile_m, tile_k_dwords), stride=(tile_k_dwords, 1)
+    )
+    c_chunk_a = fx.Index(chunk_i32_a)
+    tx_i32_base = tx * c_chunk_a
+    _k_div4_factor = k_in // fx.Index(4)
+    if m_in is not None and group_idx is not None:
+        a_tile_offset_div4 = group_idx * m_in * _k_div4_factor  # 3D A Offset
+    else:
+        a_tile_offset_div4 = None
+    k_blocks16 = arith.index(tile_k_bytes // 16)
+    c4_bytes = fx.Index(4)
+
+    a_row_local = []
+    a_col_local_i32 = []
+    for i in range_constexpr(num_a_loads):
+        row_local, col_local_i32 = tile_chunk_coord_i32(
+            arith, tx_i32_base=tx_i32_base, i=i,
+            total_threads=total_threads,
+            layout_tile_div4=layout_a_tile_div4,
+            chunk_i32=chunk_i32_a,
+        )
+        a_row_local.append(row_local)
+        a_col_local_i32.append(col_local_i32)
+
+    def prefetch_a_tile(k_tile_idx_py):
+        """Load A tile from global memory into VGPRs."""
+        base_k_div4 = fx.Index(k_tile_idx_py * tile_k_dwords)
+        parts = []
+        for i in range_constexpr(num_a_loads):
+            row_global = bx_m + a_row_local[i]
+            if a_tile_offset_div4 is None:
+                idx_i32 = row_global * _k_div4_factor + base_k_div4 + a_col_local_i32[i]
+            else:
+                idx_i32 = a_tile_offset_div4 + row_global * _k_div4_factor + base_k_div4 + a_col_local_i32[i]
+            a_vec = buffer_ops.buffer_load(a_rsrc, idx_i32, vec_width=4, dtype=T.i32)
+            parts.append(vector.bitcast(T.i32x4, a_vec))
+        return parts
+
+    def store_a_tile_to_lds(a_parts, lds_base):
+        """Write prefetched A tile from VGPRs into LDS with XOR16 swizzle."""
+        for i in range_constexpr(num_a_loads):
+            lds_store_16b_xor16(
+                arith, vector,
+                lds_memref=lds_a, vec16_ty=T.f8x16,
+                layout_lds=layout_lds,
+                row_local=a_row_local[i],
+                col_local_i32=a_col_local_i32[i],
+                tx_c4=c4_bytes, k_blocks16=k_blocks16,
+                lds_base=lds_base,
+                vec_part_i32x4=a_parts[i], elem_bytes=elem_bytes,
+            )
+
+    return prefetch_a_tile, store_a_tile_to_lds, a_row_local, a_col_local_i32, k_blocks16
