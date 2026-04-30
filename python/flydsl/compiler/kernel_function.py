@@ -399,6 +399,8 @@ class KernelLauncher:
                 ctx = CompilationContext.get_current()
                 stream_val = ctx.stream_arg if ctx and ctx.stream_arg else None
 
+            async_deps = [stream_val] if stream_val is not None else None
+
             cluster_size = None
             if cluster is not None:
                 cx, cy, cz = _normalize_dim(cluster)
@@ -408,20 +410,17 @@ class KernelLauncher:
                     _to_index_value(cz),
                 )
 
-            launch_op = gpu.LaunchFuncOp(
+            gpu.LaunchFuncOp(
                 ["kernels", self._kernel_name],
                 (grid_x, grid_y, grid_z),
                 (block_x, block_y, block_z),
                 kernel_operands,
+                async_dependencies=async_deps,
                 dynamic_shared_memory_size=smem_val,
                 cluster_size=cluster_size,
                 loc=launch_loc,
                 ip=None,
             )
-            if stream_val is not None and hasattr(stream_val, "arg_number"):
-                launch_op.operation.attributes["fly.stream_arg_number"] = ir.IntegerAttr.get(
-                    ir.IntegerType.get_signless(32), int(stream_val.arg_number)
-                )
 
 
 # =============================================================================

@@ -267,13 +267,8 @@ public:
     Value *stream = nullptr;
     if (mlir::Value asyncObject = op.getAsyncObject()) {
       stream = llvmValue(asyncObject);
-    } else if (auto streamArgNumber =
-                   op->getAttrOfType<IntegerAttr>("fly.stream_arg_number")) {
-      Block &parentBlock = op->getParentRegion()->front();
-      unsigned argIndex = streamArgNumber.getInt();
-      if (argIndex >= parentBlock.getNumArguments())
-        return op.emitError() << "invalid fly.stream_arg_number: " << argIndex;
-      stream = llvmValue(parentBlock.getArgument(argIndex));
+    } else if (!op.getAsyncDependencies().empty()) {
+      stream = llvmValue(op.getAsyncDependencies().front());
     } else {
       stream = ConstantPointerNull::get(ptrTy);
     }

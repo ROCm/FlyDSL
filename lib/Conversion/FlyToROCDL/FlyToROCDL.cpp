@@ -673,19 +673,15 @@ public:
         return rewriter.notifyMatchFailure(
             op, "launch_func has both asyncObject and asyncDependencies");
 
-      auto newOp = rewriter.replaceOpWithNewOp<gpu::LaunchFuncOp>(
+      rewriter.replaceOpWithNewOp<gpu::LaunchFuncOp>(
           op, kernelRef, grid, block, adaptor.getDynamicSharedMemorySize(),
           adaptor.getKernelOperands(), asyncObj, clusterSize);
-      if (Attribute streamArg = op->getAttr("fly.stream_arg_number"))
-        newOp->setAttr("fly.stream_arg_number", streamArg);
       return success();
     }
 
-    auto newOp = rewriter.replaceOpWithNewOp<gpu::LaunchFuncOp>(
+    rewriter.replaceOpWithNewOp<gpu::LaunchFuncOp>(
         op, kernelRef, grid, block, adaptor.getDynamicSharedMemorySize(),
         adaptor.getKernelOperands(), asyncTokenType, adaptor.getAsyncDependencies(), clusterSize);
-    if (Attribute streamArg = op->getAttr("fly.stream_arg_number"))
-      newOp->setAttr("fly.stream_arg_number", streamArg);
     return success();
   }
 };
