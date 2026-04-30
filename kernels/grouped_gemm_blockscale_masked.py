@@ -38,7 +38,11 @@ from flydsl.expr.arith import ArithValue
 from kernels.grouped_gemm_blockscale_common import (
     compute_compile_constants,
     make_a_tile_loaders,
+    make_b_loader,
+    make_hot_loop_scheduler,
+    make_lds_loader,
     out_mlir_for,
+    pack_i64x4_to_i32x8,
     setup_lds_allocation,
     validate_params,
 )
@@ -283,79 +287,32 @@ def compile_grouped_gemm_blockscale_masked(
                 k_in=k_in, m_in=m_in, group_idx=group_idx,
             )
 
-            # ── Helper: load A K64 pack from LDS with XOR swizzle ────────
-            def lds_load_packs_k64(curr_row_a_lds, col_base_bytes, lds_base):
-                """Load 16B from LDS with XOR16 swizzle, return two i64 halves."""
-                col_base_swz_bytes = swizzle_xor16(curr_row_a_lds, col_base_bytes, k_blocks16)
-                idx_a16 = crd2idx((curr_row_a_lds, col_base_swz_bytes), layout_lds) + lds_base
-                loaded_a16 = vector.load_op(T.vec(16, T.f8), lds_a, [idx_a16])
-                a_i64x2 = vector.bitcast(T.i64x2, loaded_a16)
-                a0 = vector.extract(a_i64x2, static_position=[0], dynamic_position=[])
-                a1 = vector.extract(a_i64x2, static_position=[1], dynamic_position=[])
-                return a0, a1
+            lds_load_packs_k64 = make_lds_loader(
+                lds_a=lds_a, layout_lds=layout_lds, k_blocks16=k_blocks16,
+            )
 
-            # ── Helper: load one B pack (K32 micro-step) ────────────────
-            def load_b_pack(base_k, ki_step, ni):
-                return load_b_pack_k32(
-                    buffer_ops, arith, vector,
-                    arg_b=arg_b, b_rsrc=b_rsrc,
-                    layout_b=layout_b,
-                    base_k=base_k, ki_step=ki_step,
-                    n_blk=n_blk_list[ni],
-                    n_intra=n_intra_list[ni],
-                    lane_div_16=lane_div_16,
-                    elem_type=T.f8,
-                    kpack_bytes=kpack_bytes,
-                    elem_bytes=elem_bytes,
-                )
-
-            # ── Helper: prefetch entire B tile (gmem -> regs) ───────────
-            def load_b_tile(base_k):
-                """Load all B packs for one K-tile.
-
-                Returns list of length k_unroll, each entry is
-                (packs_half0[ni], packs_half1[ni]) for one K64 micro-step.
-                """
-                b_tile = []
-                for ku in range_constexpr(k_unroll):
-                    packs0 = []
-                    packs1 = []
-                    for ni in range_constexpr(num_acc_n):
-                        ki0 = (ku * 2) + 0
-                        ki1 = (ku * 2) + 1
-                        b0 = load_b_pack(base_k, ki0, ni)
-                        b1 = load_b_pack(base_k, ki1, ni)
-                        packs0.append(b0)
-                        packs1.append(b1)
-                    b_tile.append((packs0, packs1))
-                return b_tile
+            load_b_tile = make_b_loader(
+                arg_b=arg_b, b_rsrc=b_rsrc, layout_b=layout_b,
+                n_blk_list=n_blk_list, n_intra_list=n_intra_list,
+                lane_div_16=lane_div_16, kpack_bytes=kpack_bytes,
+                elem_bytes=elem_bytes, k_unroll=k_unroll, num_acc_n=num_acc_n,
+            )
 
             # Base coordinates for A0 prefetch (mi=0, ku=0)
             row_a_lds_base = lane_mod_16  # mi=0
             col_offset_base_bytes = lane_div_16 * fx.Index(16)  # ku=0
 
-            # ── Pack helper for gfx950 K=128 MFMA ──────────────────────
             mfma_res_ty = T.f32x4
 
-            def pack_i64x4_to_i32x8(x0, x1, x2, x3):
-                v4 = vector.from_elements(T.vec(4, T.i64), [x0, x1, x2, x3])
-                return vector.bitcast(T.vec(8, T.i32), v4)
-
-            # ── Scheduling hints (sched_group_barrier, MoE stage 2 pattern) ──
             ku_per_sb = scale_block_k // 64
             rocdl.sched_barrier(0)
 
-            def hot_loop_scheduler():
-                mfma_group = num_acc_n
-                if _is_gfx950:
-                    total_mfma = sb_per_tile * m_repeat * mfma_group
-                else:
-                    total_mfma = k_unroll * m_repeat * mfma_group * 2
-                rocdl.sched_group_barrier(rocdl.mask_dsrd, ku_per_sb * m_repeat, 0)
-                rocdl.sched_group_barrier(rocdl.mask_mfma, total_mfma, 1)
-                rocdl.sched_group_barrier(rocdl.mask_vmem_rd, num_a_loads, 2)
-                rocdl.sched_group_barrier(rocdl.mask_dswr, num_a_loads, 3)
-                rocdl.sched_barrier(0)
+            hot_loop_scheduler = make_hot_loop_scheduler(
+                _is_gfx950=_is_gfx950, sb_per_tile=sb_per_tile,
+                m_repeat=m_repeat, num_acc_n=num_acc_n,
+                k_unroll=k_unroll, num_a_loads=num_a_loads,
+                ku_per_sb=ku_per_sb,
+            )
 
             sa_group_off = group_idx * c_scale_k * m_in  # 3D scale_a Offset
 

@@ -12,12 +12,15 @@ scalar constants, helper closures) so they live in one place.
 from collections import namedtuple
 
 import flydsl.expr as fx
-from flydsl.expr import arith, buffer_ops, vector
+from flydsl.expr import arith, buffer_ops, rocdl, vector
 from flydsl.expr import range_constexpr
 from flydsl.expr.typing import T
 
 from kernels.mfma_preshuffle_pipeline import (
+    crd2idx,
     lds_store_16b_xor16,
+    load_b_pack_k32,
+    swizzle_xor16,
     tile_chunk_coord_i32,
 )
 
@@ -208,3 +211,113 @@ def make_a_tile_loaders(
             )
 
     return prefetch_a_tile, store_a_tile_to_lds, a_row_local, a_col_local_i32, k_blocks16
+
+
+def make_lds_loader(*, lds_a, layout_lds, k_blocks16):
+    """Build the LDS-side A K64 pack loader.
+
+    Returns `lds_load_packs_k64(curr_row_a_lds, col_base_bytes, lds_base)`
+    which loads 16B from LDS with the XOR16 swizzle and returns the two
+    i64 halves.
+    """
+    def lds_load_packs_k64(curr_row_a_lds, col_base_bytes, lds_base):
+        col_base_swz_bytes = swizzle_xor16(curr_row_a_lds, col_base_bytes, k_blocks16)
+        idx_a16 = crd2idx((curr_row_a_lds, col_base_swz_bytes), layout_lds) + lds_base
+        loaded_a16 = vector.load_op(T.vec(16, T.f8), lds_a, [idx_a16])
+        a_i64x2 = vector.bitcast(T.i64x2, loaded_a16)
+        a0 = vector.extract(a_i64x2, static_position=[0], dynamic_position=[])
+        a1 = vector.extract(a_i64x2, static_position=[1], dynamic_position=[])
+        return a0, a1
+
+    return lds_load_packs_k64
+
+
+def make_b_loader(
+    *,
+    arg_b,
+    b_rsrc,
+    layout_b,
+    n_blk_list,
+    n_intra_list,
+    lane_div_16,
+    kpack_bytes,
+    elem_bytes,
+    k_unroll,
+    num_acc_n,
+):
+    """Build the B-tile loader closure.
+
+    Returns `load_b_tile(base_k)` which loads all B packs for one K-tile,
+    returning a list of length `k_unroll` where each entry is
+    `(packs_half0[ni], packs_half1[ni])` for one K64 micro-step.
+    """
+    def load_b_pack(base_k, ki_step, ni):
+        return load_b_pack_k32(
+            buffer_ops, arith, vector,
+            arg_b=arg_b, b_rsrc=b_rsrc,
+            layout_b=layout_b,
+            base_k=base_k, ki_step=ki_step,
+            n_blk=n_blk_list[ni],
+            n_intra=n_intra_list[ni],
+            lane_div_16=lane_div_16,
+            elem_type=T.f8,
+            kpack_bytes=kpack_bytes,
+            elem_bytes=elem_bytes,
+        )
+
+    def load_b_tile(base_k):
+        b_tile = []
+        for ku in range_constexpr(k_unroll):
+            packs0 = []
+            packs1 = []
+            for ni in range_constexpr(num_acc_n):
+                ki0 = (ku * 2) + 0
+                ki1 = (ku * 2) + 1
+                b0 = load_b_pack(base_k, ki0, ni)
+                b1 = load_b_pack(base_k, ki1, ni)
+                packs0.append(b0)
+                packs1.append(b1)
+            b_tile.append((packs0, packs1))
+        return b_tile
+
+    return load_b_tile
+
+
+def pack_i64x4_to_i32x8(x0, x1, x2, x3):
+    """Pack four i64 values into a single i32x8 vector via i64x4 bitcast.
+
+    Used to assemble the K=128 MFMA A/B operands on gfx950.
+    """
+    v4 = vector.from_elements(T.vec(4, T.i64), [x0, x1, x2, x3])
+    return vector.bitcast(T.vec(8, T.i32), v4)
+
+
+def make_hot_loop_scheduler(
+    *,
+    _is_gfx950,
+    sb_per_tile,
+    m_repeat,
+    num_acc_n,
+    k_unroll,
+    num_a_loads,
+    ku_per_sb,
+):
+    """Build the per-tile sched_group_barrier scheduler closure.
+
+    Emits the dsrd / mfma / vmem_rd / dswr group barriers in the order
+    matching the MoE stage-2 pattern. Returns a zero-arg closure to be
+    invoked once per K-tile body inside the ping-pong loop.
+    """
+    def hot_loop_scheduler():
+        mfma_group = num_acc_n
+        if _is_gfx950:
+            total_mfma = sb_per_tile * m_repeat * mfma_group
+        else:
+            total_mfma = k_unroll * m_repeat * mfma_group * 2
+        rocdl.sched_group_barrier(rocdl.mask_dsrd, ku_per_sb * m_repeat, 0)
+        rocdl.sched_group_barrier(rocdl.mask_mfma, total_mfma, 1)
+        rocdl.sched_group_barrier(rocdl.mask_vmem_rd, num_a_loads, 2)
+        rocdl.sched_group_barrier(rocdl.mask_dswr, num_a_loads, 3)
+        rocdl.sched_barrier(0)
+
+    return hot_loop_scheduler
