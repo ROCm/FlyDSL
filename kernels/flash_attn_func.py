@@ -26,6 +26,7 @@ import os
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
+from flydsl._mlir.dialects import llvm
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import buffer_ops, const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr import math as fmath
@@ -45,6 +46,21 @@ _VMCNT_LO_MASK = 0xF
 _LGKMCNT_EXPCNT_BASE = 0x3F70
 _VMCNT_HI_SHIFT = 14
 _VMCNT_HI_MASK = 0x3
+
+
+def _llvm_value(value):
+    """Unwrap FlyDSL scalar/vector wrappers for LLVM pointer load ops."""
+    if hasattr(value, "ir_value") and not isinstance(value, ir.Value):
+        return value.ir_value()
+    return value
+
+
+def _pointer_load(result_type: ir.Type, ptr: ir.Value) -> ir.Value:
+    return llvm.LoadOp(result_type, _llvm_value(ptr)).result
+
+
+def _pointer_store(value: ir.Value, ptr: ir.Value):
+    return llvm.StoreOp(_llvm_value(value), _llvm_value(ptr))
 
 
 def _waitcnt_vm_n(n):
@@ -322,20 +338,20 @@ def build_flash_attn_func_module_primary(
 
         def _load_global_half_vec(ptr, base_idx, vec_elems: int):
             gep = buffer_ops.get_element_ptr(ptr, fx.Int64(base_idx), elem_type=elem_type)
-            return buffer_ops.pointer_load(Vec.make_type(vec_elems, elem_dtype), gep)
+            return _pointer_load(Vec.make_type(vec_elems, elem_dtype), gep)
 
         def _store_global_half(ptr, base_idx, val):
             gep = buffer_ops.get_element_ptr(ptr, fx.Int64(base_idx), elem_type=elem_type)
-            buffer_ops.pointer_store(val, gep)
+            _pointer_store(val, gep)
 
-        def load_global_f16x4(ptr, base_idx):
-            return _load_global_half_vec(ptr, base_idx, 4)
+        def load_global_f16x4(rsrc, base_idx):
+            return _load_global_half_vec(rsrc, base_idx, 4)
 
-        def load_global_mfma_pack(ptr, base_idx):
-            return _load_global_half_vec(ptr, base_idx, MFMA_LANE_K)
+        def load_global_mfma_pack(rsrc, base_idx):
+            return _load_global_half_vec(rsrc, base_idx, MFMA_LANE_K)
 
-        def load_global_f16xN(ptr, base_idx):
-            return _load_global_half_vec(ptr, base_idx, VEC_WIDTH)
+        def load_global_f16xN(rsrc, base_idx):
+            return _load_global_half_vec(rsrc, base_idx, VEC_WIDTH)
 
         def _bitcast_i32(value):
             return fx.Int32(ArithValue(value).bitcast(fx.Int32.ir_type))
