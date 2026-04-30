@@ -30,7 +30,7 @@ from flydsl._mlir.dialects import llvm
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr import math as fmath
-from flydsl.expr.typing import Vector as Vec
+from flydsl.expr.typing import T, Vector as Vec
 from flydsl.expr.utils.arith import ArithValue, _to_raw as _raw
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
@@ -1071,7 +1071,7 @@ def build_flash_attn_func_module_primary(
             loop_results[2 + dc] for dc in range_constexpr(D_CHUNKS)
         ]
 
-        inv_l = c_one_f / fx.Float32(l_final)
+        inv_l = rocdl.rcp(T.f32, l_final)
         inv_l_vec = Vec.from_elements([inv_l], fx.Float32).broadcast_to(16)
 
         if q_in_bounds:

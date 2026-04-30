@@ -313,6 +313,9 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
     def _mfma_fp8(result_type, operands, **kw):
         return rocdl.mfma_f32_16x16x32_fp8_fp8(result_type, operands, **kw)
 
+    def _fadd(a, b, fastmath=fm_no_inf):
+        return arith.addf(_raw(a), _raw(b), fastmath=fastmath)
+
     def _fsub(a, b, fastmath=fm_no_inf):
         return arith.subf(_raw(a), _raw(b), fastmath=fastmath)
 
@@ -877,7 +880,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
         for i in range_constexpr(8):
             exp_arg = _fmul(_fsub(scaled[i], new_row_max, fm_no_inf), c_log2e, fm_no_inf)
             p_exp_vals[i] = _fast_exp2(exp_arg)
-            local_sum = _f32(local_sum) + p_exp_vals[i]
+            local_sum = _fadd(local_sum, p_exp_vals[i], fm_no_inf)
 
         # Warp reduce sum
         local_sum = _warp_reduce_add_16(local_sum)
@@ -886,7 +889,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
         if const_expr(is_first_iter):
             row_sum_e_new = local_sum
         else:
-            row_sum_e_new = (_f32(rescale) * row_sum_e_old) + local_sum
+            row_sum_e_new = _fadd(_f32(rescale) * row_sum_e_old, local_sum, fm_no_inf)
 
         return p_exp_vals, new_row_max, row_sum_e_new, rescale
 
@@ -1573,7 +1576,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
             outputs for every work item; the host reduce kernel produces the
             final bf16 output.
             """
-            reci = c_one_f32 / rse
+            reci = rocdl.rcp(T.f32, rse)
             rb_split = _raw(_idx(partial_qo_loc) * NUM_QO_HEADS + warp_idx * 16)
             _write_lse(_raw(partial_qo_loc), rm, rse)
             _gemm2_last_with_store(
