@@ -2,7 +2,7 @@
 name: flydsl-kernel-authoring
 description: >
   Comprehensive reference for authoring FlyDSL GPU kernels on AMD GPUs.
-  Covers the layout algebra, tiled copy/MMA, buffer ops, scf.for loops,
+  Covers the layout algebra, tiled copy/MMA, buffer ops, loop-carried range loops,
   SmemAllocator, autotuning, and common patterns. Use when writing,
   reviewing, or understanding FlyDSL kernel code.
 allowed-tools: Read Edit Bash Grep Glob Agent
@@ -161,8 +161,7 @@ fx.slice(src, coord)                       # Slice at coordinate (None = keep mo
 ```python
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.expr import arith, gpu, buffer_ops, range_constexpr
-from flydsl.expr.typing import T
+from flydsl.expr import buffer_ops, const_expr, gpu, range_constexpr, rocdl
 
 @flyc.kernel
 def my_kernel(
@@ -170,8 +169,8 @@ def my_kernel(
     B: fx.Tensor,
     N: fx.Constexpr[int], # Compile-time constant
 ):
-    tid = gpu.thread_idx.x    # Returns Int32
-    bid = gpu.block_idx.x
+    tid = gpu.thread_id("x")
+    bid = gpu.block_id("x")
     # ... kernel body ...
 
 @flyc.jit
@@ -192,6 +191,37 @@ B = torch.empty(1024, device="cuda", dtype=torch.float32)
 launch(A, B, 1024)
 ```
 
+### Current Syntax Quick Reference
+
+Use the current public FlyDSL surface from `kernels/preshuffle_gemm.py` when writing new kernels:
+
+```python
+Vec = fx.Vector
+
+tx = gpu.thread_id("x")
+bx = gpu.block_id("x")
+by = gpu.block_id("y")
+
+i32_m: fx.Int32
+c_m = fx.Index(i32_m)
+c4 = fx.Index(4)
+zero_f = fx.Float32(0.0)
+
+layout = fx.make_layout((4, 64), (64, 1))
+coord = fx.idx2crd(tx, layout)
+wave_id = fx.get(coord, 0)
+lane_id = fx.get(coord, 1)
+
+acc = Vec.filled(4, 0.0, fx.Float32)
+v_i64 = Vec(raw_vec).bitcast(fx.Int64)
+elem0 = v_i64[0]
+
+rsrc = buffer_ops.create_buffer_resource(tensor, max_size=True)
+word = buffer_ops.buffer_load(rsrc, fx.Int32(offset), vec_width=4, dtype=fx.Int32)
+```
+
+Older code may use `gpu.thread_idx.x`, `gpu.block_idx.x`, `arith.constant(...)`, `T.i32`, and raw `vector.*` helpers. Keep those when editing existing code that already uses them heavily, but prefer `gpu.thread_id/block_id`, `fx.Index`/`fx.Int32`/`fx.Float32`, and `fx.Vector` for new code.
+
 ### Parameter Types
 | Type | Description | At host boundary |
 |------|-------------|-----------------|
@@ -204,10 +234,14 @@ launch(A, B, 1024)
 ```python
 from flydsl.expr import gpu
 
-tid_x = gpu.thread_idx.x    # Thread index (Int32)
-bid_x = gpu.block_idx.x     # Block index (Int32)
-bdim_x = gpu.block_dim.x    # Block dimension
-gdim_x = gpu.grid_dim.x     # Grid dimension
+tid_x = gpu.thread_id("x")   # Preferred current spelling
+bid_x = gpu.block_id("x")
+bid_y = gpu.block_id("y")
+
+# Legacy spelling still appears in older kernels:
+tid_x = gpu.thread_idx.x
+bid_x = gpu.block_idx.x
+
 gpu.barrier()                # Workgroup synchronization
 ```
 
@@ -219,9 +253,59 @@ from flydsl.expr import range_constexpr
 for i in range_constexpr(N):
     ...
 
-# Runtime loop (lowered to scf.for via AST rewriting)
+# Runtime loop (lowered by AST rewriting)
 for i in range(runtime_value):
     ...
+```
+
+### Runtime vs Compile-Time Conditions (Current Style)
+
+Use Python/DSL operators for runtime SSA comparisons. The AST rewriter lowers dynamic `if` conditions to `scf.IfOp`, and comparison operators like `==`, `<`, `>=` generate the needed MLIR predicates.
+
+```python
+tid = gpu.thread_id("x")
+lane = tid % fx.Index(64)
+c_zero = fx.Index(0)
+c_limit = fx.Index(8)
+
+# Preferred: readable DSL comparisons
+if lane == c_zero:
+    ...
+
+in_range = lane < c_limit
+val = fx.arith.select(in_range, good_val, zero_val)
+
+# Avoid for simple integer comparisons
+in_range = arith.cmpi(arith.CmpIPredicate.slt, lane, c_limit)
+```
+
+Use `const_expr(...)` only for values known at trace/compile time, such as Python booleans, constexpr arguments, loop-unroll choices, or type/layout branches:
+
+```python
+if const_expr(trans_v):
+    ...
+
+if const_expr(max_context_partition_num <= WARP_SIZE):
+    ...
+```
+
+Do **not** wrap GPU runtime values in `const_expr`. Even with `@flyc.kernel(known_block_size=(256, 1, 1))`, `gpu.thread_id("x")`, `lane`, and `warp_id` are runtime SSA values; the compiler knows their range, not the current lane instance.
+
+```python
+# Wrong: lane depends on gpu.thread_id("x")
+if const_expr(lane == c_zero):
+    ...
+
+# Correct
+if lane == c_zero:
+    ...
+```
+
+Keep explicit `arith.cmpi(...)` / `arith.unwrap(...)` for low-level manual MLIR construction, such as passing a raw condition to `scf.IfOp` directly:
+
+```python
+cond = arith.unwrap(partition_idx >= visible_tile_count)
+if_op = scf.IfOp(cond, has_else=False)
 ```
 
 ### Frontend Semantic Restrictions
@@ -257,9 +341,29 @@ When writing or reviewing `@flyc.kernel` / `@flyc.jit` code, proactively avoid t
    return out
    ```
 
-### scf.for with Loop-Carried Values (Software Pipelining)
+4. **Compile-time conditions must use `const_expr(...)`.** Use `if const_expr(flag): ...` for constexpr flags and other static decisions. A plain Python `if` is only safe when the condition is already a Python `bool`.
 
-Use `init=` on `range()` to create an `scf.for` with explicit SSA phi nodes for loop-carried state. This is required for software pipelining (prefetch patterns) where data must flow across iterations.
+5. **Runtime branches inside helper functions should be dispatched via local `@flyc.jit`.** When a branch body has side effects, loop-carried values, or branch-local definitions, split the branch bodies into local helpers and wrap the `if` in a local JIT helper:
+   ```python
+   def then_path():
+       ...
+
+   def else_path():
+       ...
+
+   @flyc.jit
+   def dispatch():
+       if runtime_cond:
+           then_path()
+       else:
+           else_path()
+
+   dispatch()
+   ```
+
+### Runtime Loops with Loop-Carried Values (Software Pipelining)
+
+Use `init=` on `range()` to create a runtime loop with explicit SSA phi nodes for loop-carried state. This is required for software pipelining (prefetch patterns) where data must flow across iterations.
 
 **Pattern** (from `preshuffle_gemm.py`):
 ```python
@@ -267,11 +371,11 @@ Use `init=` on `range()` to create an `scf.for` with explicit SSA phi nodes for 
 tile_0 = prefetch(0)
 init_state = [acc_init, tile_0_flat_val1, tile_0_flat_val2, ...]
 
-# scf.for with loop-carried state
-# CRITICAL: bounds MUST be arith.index() values, NOT Python ints!
-_start = arith.index(0)
-_stop = arith.index(N - 1)
-_step = arith.index(1)
+# Runtime loop with loop-carried state
+# Use fx.Index(...) bounds so the AST rewriter does not treat this as a Python unrolled range.
+_start = fx.Index(0)
+_stop = fx.Index(N - 1)
+_step = fx.Index(1)
 for iv, state in range(_start, _stop, _step, init=init_state):
     acc_in = state[0]
     tile_in = state[1:]
@@ -290,47 +394,35 @@ compute(acc_final, tile_final)
 **How it works in MLIR:**
 | Element | Meaning |
 |---|---|
-| `init=init_state` | List of SSA values that seed the `scf.for` block arguments for iteration 0 |
+| `init=init_state` | List of SSA values that seed the runtime loop block arguments for iteration 0 |
 | `state` | The loop-carried block arguments (phi nodes) for THIS iteration |
-| `yield [...]` | `scf.yield` feeds values back as next iteration's `state` |
-| `results` | After loop exits, holds the last `yield`'s values (the `scf.for` op results) |
+| `yield [...]` | Feeds values back as next iteration's `state` |
+| `results` | After loop exits, holds the last yielded values |
 
 **Three critical pitfalls (all verified by debugging):**
 
-1. **Loop bounds must be `arith.index()`, NOT Python ints.** If you write `range(0, 15, 1, init=...)`, the AST rewriter treats constant bounds as a Python `range` and unrolls the loop — silently ignoring `init=`. Use `arith.index(0)`, `arith.index(15)`, `arith.index(1)` instead.
+1. **Loop bounds must be DSL index values, NOT Python ints.** If you write `range(0, 15, 1, init=...)`, the AST rewriter treats constant bounds as a Python `range` and unrolls the loop — silently ignoring `init=`. Use `fx.Index(0)`, `fx.Index(15)`, `fx.Index(1)` instead.
 
-2. **All `init` values must be raw MLIR `ir.Value`s.** FlyDSL wrappers like `Int32` / `Float32` don't have `.type` (only `.dtype`), and `scf.ForOp.__init__` calls `arg.type`. Unwrap via:
-   ```python
-   def _unwrap(v):
-       return v.ir_value() if hasattr(v, 'ir_value') else v
-   init_state = [_unwrap(v) for v in raw_list]
-   ```
+2. **Prefer internal types, but unwrap at hard boundaries.** Most `range(..., init=...)` uses accept DSL numeric/vector values. If a lower-level helper explicitly expects raw `ir.Value`, unwrap with `v.ir_value()` / `_raw(v)` at that boundary only.
 
-3. **Clear `SmemPtr._view_cache` before epilogue.** `SmemPtr.get()` caches the `memref.view` it creates. If called inside the `scf.for` body, the cached view is defined in the loop scope. Using it in the epilogue (outside the loop) causes an SSA dominance error. Fix:
+3. **Clear `SmemPtr._view_cache` before epilogue.** `SmemPtr.get()` caches the view it creates. If called inside the runtime loop body, the cached view is defined in the loop scope. Using it in the epilogue (outside the loop) causes an SSA dominance error. Fix:
    ```python
-   # After the scf.for loop, before epilogue compute:
+   # After the runtime loop, before epilogue compute:
    my_smem_ptr._view_cache = None
    ```
 
 ### Arithmetic Operations
 ```python
-from flydsl.expr import arith
-
 c42 = fx.Index(42)                              # index type constant (preferred)
 c3_14 = fx.Float32(3.14)                        # f32 constant (preferred)
 mask = fx.Int32(0xFF)                            # i32 constant (preferred)
-c42 = arith.constant(42, index=True)            # legacy index constant
-c3_14 = arith.constant(3.14, type=T.f32())     # legacy f32 constant
 
-# NOTE: arith.constant takes `type` as keyword arg, NOT positional
-result = arith.addf(a, b)    # float add
-result = arith.mulf(a, b)    # float multiply
-result = arith.negf(a)       # float negate
-result = arith.maximumf(a, b)  # float max (works on scalars AND vectors)
-result = arith.select(cond, true_val, false_val)
+# Prefer operators / Numeric methods
+result = a + b
+result = a * scale
+result = cond.select(true_val, false_val)
 
-# Compare floats (returns i1/vector<Nxi1>)
-is_less = arith.cmpf(a, b, predicate="olt")    # ordered less-than
+# Keep direct arith.*FOp only when explicit fastmath flags are required.
 ```
 
 ### Internal Types: Vector and Numeric (PREFERRED)
@@ -338,7 +430,7 @@ is_less = arith.cmpf(a, b, predicate="olt")    # ordered less-than
 Use FlyDSL's internal typed system instead of raw MLIR ops. The `Vector` class wraps `vector<NxTy>` with operator overloading and type-safe methods.
 
 ```python
-from flydsl.expr.typing import Vector as Vec, Float32, Float16, BFloat16
+Vec = fx.Vector
 
 # Wrap raw vector values
 acc = Vec(frag_C.load())      # vector<Nxf32> → Vector with * / + operators
@@ -347,16 +439,16 @@ acc = Vec(frag_C.load())      # vector<Nxf32> → Vector with * / + operators
 val = acc[idx]                 # returns Float32 scalar
 
 # Bitcast (replaces vector.bitcast)
-v_f32 = Vec(raw_vec).bitcast(Float32)  # vector<Nxi32> → vector<Nxf32>
+v_f32 = Vec(raw_vec).bitcast(fx.Float32)  # vector<Nxi32> → vector<Nxf32>
 
 # Type conversion (replaces arith.trunc_f / arith.ext_f)
-bf16_val = f32_val.to(BFloat16)        # f32 → bf16
+bf16_val = f32_val.to(fx.BFloat16)     # f32 → bf16
 
 # Arithmetic — use Python operators, not arith.mulf/addf
-result = (val * scale_a) * scale_b     # auto-dispatches to mulf
+result = (val * scale_a) * scale_b
 
 # Splat constant vector
-zeros = Vec.filled(N, 0.0, Float32)
+zeros = Vec.filled(N, 0.0, fx.Float32)
 
 # Index cast — use fx.Int32 instead of arith.index_cast
 idx = fx.Int32(gpu.block_id("x") * tile_m)
@@ -372,20 +464,20 @@ idx = fx.Int32(gpu.block_id("x") * tile_m)
 | `arith.addf(a, b)` | `a + b` |
 | `arith.index_cast(T.i32, v)` | `fx.Int32(v)` |
 
-Still use `arith.constant_vector` for splat and `vector.from_elements` for building vectors from scalars (no Vector equivalent yet).
+Use `Vec.filled(...)` for splats and `Vec.from_elements(...)` for vectors from scalars.
 
 ### Arith Ops Availability Table
 | Operation | Function | Works on Vectors | Notes |
 |-----------|----------|-----------------|-------|
-| Add | `a + b` or `arith.addf(a, b)` | Yes | |
-| Multiply | `a * b` or `arith.mulf(a, b)` | Yes | |
-| Negate | `arith.negf(a)` | Yes | |
-| Max | `arith.maximumf(a, b)` | Yes | Good for ReLU |
+| Add | `a + b` | Yes | Use direct FOp only for explicit fastmath |
+| Multiply | `a * b` | Yes | Use direct FOp only for explicit fastmath |
+| Negate | `-a` | Yes | |
+| Max | `a.maximumf(b)` | Yes | Good for ReLU |
 | Compare | `arith.cmpf(a, b, pred)` | Yes | Returns i1/vec<i1> |
-| Select | `arith.select(cond, t, f)` | Yes | |
-| Abs | `arith.absf(a)` | **NO - does not exist** | Use `negf+cmpf+select` |
-| FMA | `arith.fma(a, b, c)` | Not verified | Use `mulf+addf` instead |
-| Splat const | `arith.constant_vector(val, vty)` | Creates vector | For scalar broadcast |
+| Select | `cond.select(t, f)` | Yes | |
+| Abs | no direct helper | Use `-v`, comparison, and `cond.select(...)` |
+| FMA | `a * b + c` | Yes | Use direct FOp only when explicit fastmath is needed |
+| Splat const | `Vec.filled(width, val, dtype)` | Creates vector | For scalar broadcast |
 
 ### Printf Debugging
 ```python
@@ -556,11 +648,11 @@ The preshuffle GEMM pattern in `kernels/preshuffle_gemm.py`:
 ### Warp Reduction (AMD wave64)
 XOR-shuffle-based intra-wave reduction:
 ```python
-width_i32 = arith.constant(64, type=T.i32())
+width_i32 = fx.Int32(64)
 for sh in [32, 16, 8, 4, 2, 1]:
-    off = arith.constant(sh, type=T.i32())
+    off = fx.Int32(sh)
     peer = gpu.ShuffleOp(val, off, width_i32, mode="xor").shuffleResult
-    val = arith.AddFOp(val, peer).result  # or MaximumFOp for max
+    val = ArithValue(val) + peer  # use explicit FOp only if fastmath flags are needed
 ```
 
 ### Block Reduction
@@ -593,8 +685,8 @@ def elementwise_kernel(In: fx.Tensor, Out: fx.Tensor, BLOCK: fx.Constexpr[int], 
     rOut = fx.memref_alloca(MemTy, fx.make_layout(VEC, 1))
     fx.copy_atom_call(copy, fx.slice(tIn, (None, tid)), rIn)
     # Transform
-    v = fx.memref_load_vec(rIn)
-    v = fx.arith.mulf(v, v)  # example: square
+v = Vec(fx.memref_load_vec(rIn))
+v = v * v  # example: square
     fx.memref_store_vec(v, rOut)
     fx.copy_atom_call(copy, rOut, fx.slice(tOut, (None, tid)))
 ```
@@ -604,34 +696,29 @@ All recipes below follow the same vectorized copy_atom pattern (256 threads, vec
 Only the compute section between `memref_load_vec` and `memref_store_vec` differs.
 
 ```python
-from flydsl._mlir.ir import VectorType
-
 # --- Scale: C = A * scalar ---
-vA = fx.memref_load_vec(rA)
-vec_ty = VectorType.get([vec_width], fx.T.f32())
-scale = arith.constant_vector(2.0, vec_ty)
-vC = arith.mulf(vA, scale)
+vA = Vec(fx.memref_load_vec(rA))
+scale = Vec.filled(vec_width, 2.0, fx.Float32)
+vC = vA * scale
 
 # --- Multiply: C = A * B ---
-vC = arith.mulf(fx.memref_load_vec(rA), fx.memref_load_vec(rB))
+vC = Vec(fx.memref_load_vec(rA)) * Vec(fx.memref_load_vec(rB))
 
 # --- FMA: D = A * B + C ---
-vAB = arith.mulf(fx.memref_load_vec(rA), fx.memref_load_vec(rB))
-vD = arith.addf(vAB, fx.memref_load_vec(rC))
+vAB = Vec(fx.memref_load_vec(rA)) * Vec(fx.memref_load_vec(rB))
+vD = vAB + Vec(fx.memref_load_vec(rC))
 
 # --- ReLU: C = max(A, 0) ---
-vA = fx.memref_load_vec(rA)
-vec_ty = VectorType.get([vec_width], fx.T.f32())
-zero_vec = arith.constant_vector(0.0, vec_ty)
-vC = arith.maximumf(vA, zero_vec)
+vA = Vec(fx.memref_load_vec(rA))
+zero_vec = Vec.filled(vec_width, 0.0, fx.Float32)
+vC = vA.maximumf(zero_vec)
 
 # --- Abs: C = |A| (arith.absf does NOT exist) ---
 vA = fx.memref_load_vec(rA)
-vec_ty = VectorType.get([vec_width], fx.T.f32())
-zero_vec = arith.constant_vector(0.0, vec_ty)
-neg_vA = arith.negf(vA)
-is_neg = arith.cmpf(vA, zero_vec, predicate="olt")
-vC = arith.select(is_neg, neg_vA, vA)
+zero_vec = Vec.filled(vec_width, 0.0, fx.Float32)
+neg_vA = -vA
+is_neg = vA < zero_vec
+vC = is_neg.select(neg_vA, vA)
 ```
 
 ### Naive GEMM Template (for understanding, not performance)
@@ -640,18 +727,18 @@ vC = arith.select(is_neg, neg_vA, vA)
 def naive_gemm(A: fx.Tensor, B: fx.Tensor, C: fx.Tensor,
                M: fx.Constexpr[int], N: fx.Constexpr[int], K: fx.Constexpr[int],
                BM: fx.Constexpr[int], BN: fx.Constexpr[int]):
-    tid, bid = gpu.thread_idx.x, gpu.block_idx.x
+    tid, bid = gpu.thread_id("x"), gpu.block_id("x")
     bm, bn = bid // (N // BN), bid % (N // BN)
     tm, tn = tid // BN, tid % BN
     row, col = bm * BM + tm, bn * BN + tn
     rsrc_a = buffer_ops.create_buffer_resource(A)
     rsrc_b = buffer_ops.create_buffer_resource(B)
     rsrc_c = buffer_ops.create_buffer_resource(C)
-    acc = arith.constant(0.0, type=fx.T.f32())
+    acc = fx.Float32(0.0)
     for k in range_constexpr(K):
         a = buffer_ops.buffer_load(rsrc_a, row * K + k, vec_width=1)
         b = buffer_ops.buffer_load(rsrc_b, k * N + col, vec_width=1)
-        acc = arith.addf(acc, arith.mulf(a, b))
+        acc = acc + a * b
     buffer_ops.buffer_store(acc, rsrc_c, row * N + col)
 ```
 
@@ -749,7 +836,7 @@ Pass raw `torch.Tensor` objects instead.
 
 ### Common Issues
 
-1. **`arith.constant` signature**: Use `arith.constant(value, type=T.f32())` -- `type` is a keyword argument, NOT positional.
+1. **Constants/casts**: Prefer `fx.Int32(...)`, `fx.Int64(...)`, `fx.Index(...)`, and `fx.Float32(...)`. Use `arith.constant(...)` only at low-level boundaries.
 
 2. **`buffer_ops.buffer_load` offset**: The `offset` parameter is in ELEMENTS, not bytes.
 
@@ -769,9 +856,9 @@ Pass raw `torch.Tensor` objects instead.
 
 10. **INT4 (W4A8)**: A matrix is int8, B matrix is packed int4 (2 values/byte), unpacked to int8 in-kernel.
 
-11. **`arith.absf` does not exist**: FlyDSL does not expose `arith.absf`. Use `negf + cmpf("olt") + select` pattern instead. See Element-wise Kernel Cookbook.
+11. **`arith.absf` does not exist**: Prefer `Vector`/`ArithValue` operators: `neg = -v`, `is_neg = v < zero`, `out = is_neg.select(neg, v)`.
 
-12. **Scalar broadcast to vector**: Use `arith.constant_vector(value, VectorType.get([width], fx.T.f32()))` to create a splat constant vector. Do NOT try to use a scalar directly with vector `mulf`/`addf` — types must match.
+12. **Scalar broadcast to vector**: Use `Vec.filled(width, value, fx.Float32)` to create a splat constant vector. Do NOT use raw vector ops for ordinary arithmetic.
 
 ---
 

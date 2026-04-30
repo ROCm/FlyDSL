@@ -3,7 +3,7 @@ name: prefetch-data-load
 description: >
   Apply prefetch optimization to FlyDSL kernel loops: pre-load the first
   iteration's data before the loop, issue async loads for the next iteration
-  inside the loop body, and swap buffers at the loop tail via scf.for
+  inside the loop body, and swap buffers at the loop tail via runtime
   loop-carried values. This overlaps data load latency with compute
   instructions. Use when a kernel has a loop where buffer_load feeds into
   MFMA/compute and load latency is exposed.
@@ -64,16 +64,16 @@ Timeline:
 The total time drops from `N * (load + compute)` to roughly
 `load + N * max(load, compute)`.
 
-## FlyDSL Implementation: scf.for with Loop-Carried Prefetch
+## FlyDSL Implementation: `range(..., init=...)` with Loop-Carried Prefetch
 
 In FlyDSL kernels, Python-level `for _pi in range(N)` gets traced into N flat
 copies that LLVM re-rolls. This makes the `data = next_data` swap **invisible**
 to MLIR — both variables alias the same SSA value, so LLVM hoists loads as
 loop-invariant.
 
-**Solution**: Use FlyDSL's `scf.for` with `init=` (loop-carried values) to
+**Solution**: Use FlyDSL's runtime `range(..., init=...)` (loop-carried values) to
 create genuine SSA phi nodes. See the `flydsl-kernel-authoring` skill, section
-"scf.for with Loop-Carried Values", for the full pattern and three critical
+"Runtime Loops with Loop-Carried Values", for the full pattern and three critical
 pitfalls.
 
 ### Transformation Steps
@@ -91,7 +91,7 @@ for i in range(START, END):
     result = rocdl.mfma_f32_16x16x16_f16(transform(data_A), transform(data_B), acc)
 ```
 
-Apply the following transformation using `scf.for` with `init=`:
+Apply the following transformation using `range(..., init=...)`:
 
 #### Step 1: Prologue — load first iteration before loop
 
@@ -103,12 +103,12 @@ next_data_B = buffer_ops.buffer_load(rsrc_B, offsets_0, vec_width=4)
 init_state = [_unwrap(v) for v in [next_data_A, next_data_B, acc]]
 ```
 
-#### Step 2: scf.for with loop-carried state
+#### Step 2: Runtime loop with loop-carried state
 
 ```python
-_start = arith.index(0)
-_stop = arith.index(N - 1)  # N-1 iterations; last handled in epilogue
-_step = arith.index(1)
+_start = fx.Index(0)
+_stop = fx.Index(N - 1)  # N-1 iterations; last handled in epilogue
+_step = fx.Index(1)
 
 for iv, state in range(_start, _stop, _step, init=init_state):
     # Swap: prefetched -> current
@@ -190,8 +190,8 @@ def _unpack(state):
 pf_0 = issue_bt_k_loads(partition_0)
 init_state = _pack(flatten(pf_0['kv']), pf_0['part_start'], ...)
 
-# scf.for (bounds MUST be arith.index, not Python ints!)
-for iv, state in range(arith.index(0), arith.index(N-1), arith.index(1), init=init_state):
+# Runtime loop (bounds MUST be fx.Index, not Python ints!)
+for iv, state in range(fx.Index(0), fx.Index(N - 1), fx.Index(1), init=init_state):
     kv, part_start, bt, rmax, rsum, acc = _unpack(state)
     rmax, rsum, acc = compute_qk_softmax_pv(kv, part_start, bt, rmax, rsum, acc)
     pf_next = issue_bt_k_loads(next_partition(iv + 1))
@@ -211,22 +211,17 @@ K loads needed).
 
 ### Three Critical Pitfalls
 
-1. **Loop bounds must be `arith.index()`, NOT Python ints.** If you write
+1. **Loop bounds must be `fx.Index(...)`, NOT Python ints.** If you write
    `range(0, 15, 1, init=...)`, the AST rewriter treats constant bounds as a
    Python `range` and unrolls the loop — silently ignoring `init=`. Use
-   `arith.index(0)`, `arith.index(15)`, `arith.index(1)` instead.
+   `fx.Index(0)`, `fx.Index(15)`, `fx.Index(1)` instead.
 
-2. **All `init` values must be raw MLIR `ir.Value`s.** FlyDSL wrappers like
-   `Int32` / `Float32` don't have `.type` (only `.dtype`), and
-   `scf.ForOp.__init__` calls `arg.type`. Unwrap via:
-   ```python
-   def _unwrap(v):
-       return v.ir_value() if hasattr(v, 'ir_value') else v
-   init_state = [_unwrap(v) for v in raw_list]
-   ```
+2. **Prefer internal types; unwrap only at hard boundaries.** Most loop-carried
+   values can remain `fx.Int32`, `fx.Float32`, `ArithValue`, or `Vector`. If a
+   low-level helper explicitly expects raw `ir.Value`, unwrap at that boundary.
 
 3. **Clear `SmemPtr._view_cache` before epilogue.** `SmemPtr.get()` caches the
-   `memref.view` it creates. If called inside the `scf.for` body, the cached
+   view it creates. If called inside the runtime loop body, the cached
    view is defined in the loop scope. Using it in the epilogue (outside the loop)
    causes an SSA dominance error. Fix:
    ```python
@@ -301,7 +296,7 @@ regression).
 ### What Prefetch Can and Cannot Do
 
 **CAN do:**
-- Restructure the loop so `buffer_load` is issued earlier via `scf.for` loop-carried values
+- Restructure the loop so `buffer_load` is issued earlier via `range(..., init=...)` loop-carried values
 - The compiler will then schedule the corresponding `s_waitcnt` further from the load
 - Overlap next iteration's loads with current iteration's MFMA compute
 
@@ -342,7 +337,7 @@ This works because:
 ### Do
 - **Prefetch ALL data** needed for the next iteration: keys, values, scales, block table entries
 - **Place prefetch loads** immediately after the swap, BEFORE any compute that consumes current data
-- **Use scf.for with init=** to carry prefetched data across iterations (Python variable swap is invisible to MLIR)
+- **Use `range(..., init=...)`** to carry prefetched data across iterations (Python variable swap is invisible to MLIR)
 - **Minimize work between load and consume**: the more compute between prefetch issue and data use, the better the overlap
 - **Keep the swap simple**: just unpack from `state`, no computation
 - **Check VGPR budget**: calculate `current_arch_vgpr + prefetch_vgprs <= 256` to avoid spills
@@ -355,8 +350,8 @@ This works because:
 - **Don't assume occupancy can increase**: on MI308 with 512 max VGPRs, adding prefetch buffers that push total VGPRs above 256 will drop occupancy from 2 to 1 wave/SIMD. This may or may not be acceptable — profile both configurations.
 - **Don't reorder loads that have data dependencies**: if `load_B` depends on the result of `load_A` (e.g., block table lookup -> cache load), they must stay sequential within the prefetch block.
 - **Don't forget to handle conditional branches**: if scale loads are conditional (`KV_QUANT_MODE`), the prefetch must replicate the same conditions.
-- **Don't break the prologue/epilogue semantics**: the prologue covers iteration 0; `scf.for` runs N-1 iterations carrying prefetched data; epilogue processes the last iteration from `results`.
-- **Don't use Python ints as scf.for bounds**: use `arith.index()` or the loop will be unrolled, silently ignoring `init=`.
+- **Don't break the prologue/epilogue semantics**: the prologue covers iteration 0; the runtime loop runs N-1 iterations carrying prefetched data; epilogue processes the last iteration from `results`.
+- **Don't use Python ints as loop bounds when using `init=`**: use `fx.Index(...)` or the loop will be unrolled, silently ignoring `init=`.
 
 ## Verification
 
