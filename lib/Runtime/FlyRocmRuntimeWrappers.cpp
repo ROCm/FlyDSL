@@ -31,53 +31,9 @@
 
 thread_local static int32_t defaultDevice = 0;
 
-// Optional per-thread callback fired by mgpuModuleLoad after each
-// successful hipModuleLoadData.  The callback — and any storage it
-// writes into — lives on the Python side; the C++ runtime holds only
-// a single function pointer and stays free of per-module state.
-//
-// Concurrency contract (read before changing anything here):
-//
-//   The state is thread_local on purpose.  Multiple Python threads
-//   may be compiling kernels concurrently, and each installs its own
-//   independent callback without interfering with the others.  DO
-//   NOT replace the thread_local storage with a global + mutex: a
-//   global slot causes two concurrent installers to overwrite each
-//   other's callback, silently re-routing module-load events from
-//   artifact A into artifact B's post-load processors (data
-//   corruption with no crash).
-//
-//   The thread_local design assumes MLIR ExecutionEngine calls
-//   mgpuModuleLoad *synchronously on the same thread* that called
-//   ExecutionEngine.initialize().  This holds for every MLIR release
-//   we currently build against.  If a future MLIR version starts
-//   loading GPU modules on a worker thread, the Python-side
-//   post-condition check in jit_executor.py::_ensure_engine will
-//   raise immediately at engine-init time; at that point the correct
-//   fix is *upstream* — MLIR must expose a per-ExecutionEngine hook
-//   — not a mutex here.
-//
-//   Usage contract:
-//     1. mgpuSetModuleLoadCallback(cb, user)   // on caller thread
-//     2. ExecutionEngine.initialize()          // same thread
-//     3. mgpuSetModuleLoadCallback(nullptr, 0) // same thread
-//     4. all hipModule_t handles must be consumed before any
-//        mgpuModuleUnload on the same thread.
-using FlyModuleLoadCallback = void (*)(hipModule_t, void *);
-static thread_local FlyModuleLoadCallback s_moduleLoadCb = nullptr;
-static thread_local void *s_moduleLoadCbUser = nullptr;
-
-extern "C" void mgpuSetModuleLoadCallback(FlyModuleLoadCallback cb,
-                                          void *user) {
-  s_moduleLoadCb = cb;
-  s_moduleLoadCbUser = user;
-}
-
 extern "C" hipModule_t mgpuModuleLoad(void *data, size_t /*gpuBlobSize*/) {
   hipModule_t module = nullptr;
   HIP_REPORT_IF_ERROR(hipModuleLoadData(&module, data));
-  if (module && s_moduleLoadCb)
-    s_moduleLoadCb(module, s_moduleLoadCbUser);
   return module;
 }
 

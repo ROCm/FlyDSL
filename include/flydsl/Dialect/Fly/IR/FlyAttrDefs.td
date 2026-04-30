@@ -7,6 +7,7 @@
 include "mlir/IR/AttrTypeBase.td"
 include "mlir/IR/BuiltinAttributeInterfaces.td"
 include "mlir/IR/Constraints.td"
+include "mlir/Dialect/GPU/IR/CompilationAttrInterfaces.td"
 
 include "flydsl/Dialect/Fly/IR/FlyDialect.td"
 
@@ -156,6 +157,8 @@ def Fly_SwizzleAttr : Fly_Attr<"Swizzle", "swizzle", []> {
   let extraClassDeclaration = [{
     bool isTrivialSwizzle() const;
     static SwizzleAttr getTrivialSwizzle(MLIRContext *context);
+
+    int32_t period() const { return 1 << (getMask() + getBase() + getShift()); }
   }];
 }
 
@@ -272,5 +275,17 @@ def Fly_TileAttr : Fly_Attr<"Tile", "tile", []> {
   }];
 }
 
+def Fly_ExplicitModuleAttr : Fly_Attr<"ExplicitModule", "explicit_module", [
+    OffloadingTranslationAttrTrait
+]> {
+  let summary = "ROCm GPU binary offloading handler with explicit Python-side module loading";
+  let description = [{
+    Offloading handler for FlyDSL JIT.  During LLVM translation it embeds the
+    selected GPU binary and emits externally lookup-able
+    `flydsl_gpu_module_init` and `flydsl_gpu_module_load_to_device`
+    functions instead of loading through a global ctor.
+  }];
+  let assemblyFormat = "``";
+}
 
 #endif // FLY_ATTRDEFS

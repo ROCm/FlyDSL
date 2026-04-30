@@ -1,26 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""ExternFunction — emit ``llvm.call`` to external LLVM bitcode symbols.
+"""ExternFunction — emit ``llvm.call`` to external symbols.
 
-Provides the low-level ``ExternFunction`` class that framework integration
-layers (e.g. ``mori.ir.flydsl``) use to wrap external device functions as
-callable objects inside ``@flyc.kernel`` bodies.
+Provides the low-level expression object that wraps external device functions
+as callable objects inside ``@flyc.kernel`` bodies.
 
 End users typically do **not** import this directly; instead they use the
-pre-built wrappers from the integration layer::
+pre-built wrappers from an integration layer::
 
-    import mori.ir.flydsl as mori_shmem
+    from my_framework.flydsl_ops import device_func
 
     @flyc.kernel
     def my_kernel(...):
-        pe = mori_shmem.my_pe()        # calls ExternFunction internally
-        mori_shmem.quiet_thread()
+        value = device_func()        # calls ExternFunction internally
 
-When ``bitcode_path`` is set on an ``ExternFunction``, the compilation
-pipeline links the bitcode automatically via ``rocdl-attach-target``.
-When omitted, the pipeline falls back to prefix-based auto-detection
-(e.g. ``mori_shmem_*`` → ``mori.ir.bitcode.find_bitcode()``).
+This module is intentionally link-agnostic: it declares the symbol and emits
+the call only.  Use ``flydsl.compiler.extern_link`` to attach external bitcode
+and post-load module initialization metadata.
 """
 
 from __future__ import annotations
@@ -38,15 +35,14 @@ from .._mlir.ir import (
     TypeAttr,
 )
 
-
 # ---------------------------------------------------------------------------
 # Type mapping: mori ABI type strings → MLIR ir.Type factories
 # ---------------------------------------------------------------------------
 _TYPE_MAP = {
-    "int32":   lambda: IntegerType.get_signless(32),
-    "uint32":  lambda: IntegerType.get_signless(32),   # signless; signedness in semantics
-    "int64":   lambda: IntegerType.get_signless(64),
-    "uint64":  lambda: IntegerType.get_signless(64),
+    "int32": lambda: IntegerType.get_signless(32),
+    "uint32": lambda: IntegerType.get_signless(32),  # signless; signedness in semantics
+    "int64": lambda: IntegerType.get_signless(64),
+    "uint64": lambda: IntegerType.get_signless(64),
     "float32": lambda: ir.F32Type.get(),
     "float64": lambda: ir.F64Type.get(),
 }
@@ -61,10 +57,7 @@ def _resolve_type(name: str) -> Optional[ir.Type]:
         return None
     factory = _TYPE_MAP.get(name)
     if factory is None:
-        raise ValueError(
-            f"ExternFunction: unknown type '{name}'. "
-            f"Supported: {list(_TYPE_MAP)} or 'void'."
-        )
+        raise ValueError(f"ExternFunction: unknown type '{name}'. " f"Supported: {list(_TYPE_MAP)} or 'void'.")
     return factory()
 
 
@@ -90,23 +83,16 @@ class ExternFunction:
     Parameters
     ----------
     symbol:
-        Mangled C symbol name in the bitcode (e.g. ``"mori_shmem_ptr_p2p"``).
+        Mangled C symbol name in the linked bitcode.
     arg_types:
         List of argument type strings (``"int32"``, ``"uint64"``, etc.).
     ret_type:
         Return type string, or ``"void"`` for functions returning nothing.
     is_pure:
         Hint for future optimisations (currently unused).
-    bitcode_path:
-        Optional path to the LLVM bitcode file (``.bc``) that provides this
-        symbol.  When set, the compilation pipeline automatically links it
-        via ``rocdl-attach-target l=<path>``.
-    module_init_fn:
-        Optional callable ``fn(hipModule_t) -> None`` invoked once on every
-        GPU module that the JIT runtime loads for a kernel using this
-        ExternFunction.  Use it to initialise device-side globals that the
-        bitcode relies on (for example, writing runtime pointers into a
-        ``__global__`` struct).  Must be deterministic and idempotent.
+    bitcode_path, module_init_fn:
+        Accepted for source compatibility but ignored by this FFI layer. Attach
+        these through ``flydsl.compiler.extern_link.link_extern``.
     """
 
     def __init__(
@@ -118,24 +104,16 @@ class ExternFunction:
         bitcode_path: Optional[str] = None,
         module_init_fn: Optional[Any] = None,
     ):
-        self.symbol    = symbol
+        self.symbol = symbol
         self._arg_type_names = list(arg_types)
-        self._ret_type_name  = ret_type
-        self.is_pure   = is_pure
-        self.bitcode_path = bitcode_path
-        self.module_init_fn = module_init_fn
-        # Cache resolved MLIR types per context (keyed by Context object id).
-        self._types_cache: dict = {}
+        self._ret_type_name = ret_type
+        self.is_pure = is_pure
 
     # -- type resolution (lazy, per context) --------------------------------
     def _resolve_types(self) -> tuple:
-        ctx = ir.Context.current
-        key = id(ctx)
-        if key not in self._types_cache:
-            arg_types = [_resolve_type(t) for t in self._arg_type_names]
-            ret_type  = _resolve_type(self._ret_type_name)
-            self._types_cache[key] = (arg_types, ret_type)
-        return self._types_cache[key]
+        arg_types = [_resolve_type(t) for t in self._arg_type_names]
+        ret_type = _resolve_type(self._ret_type_name)
+        return arg_types, ret_type
 
     # -- declaration in GPU module ------------------------------------------
     def _already_declared(self, gpu_module_body) -> bool:
@@ -183,18 +161,6 @@ class ExternFunction:
                     sym_visibility="private",
                 )
 
-        # Registration on the compile context is idempotent: link_libs
-        # is a set, and post_load_processors uses explicit membership
-        # guarding, so repeated calls are cheap no-ops.
-        from .kernel_function import CompilationContext
-        ctx = CompilationContext.get_current()
-        if ctx is not None:
-            if self.bitcode_path is not None:
-                ctx.link_libs.add(self.bitcode_path)
-            if self.module_init_fn is not None and \
-                    self.module_init_fn not in ctx.post_load_processors:
-                ctx.post_load_processors.append(self.module_init_fn)
-
     # -- callable interface -------------------------------------------------
     def __call__(self, *args: Any) -> Any:
         """Emit ``llvm.call`` at the current insertion point.
@@ -218,10 +184,7 @@ class ExternFunction:
         arg_types, ret_type = self._resolve_types()
 
         if len(args) != len(arg_types):
-            raise TypeError(
-                f"ExternFunction '{self.symbol}' expects {len(arg_types)} "
-                f"argument(s), got {len(args)}"
-            )
+            raise TypeError(f"ExternFunction '{self.symbol}' expects {len(arg_types)} " f"argument(s), got {len(args)}")
 
         # Unwrap arguments to raw ir.Value and coerce types as needed.
         from .._mlir.dialects import llvm as _llvm
@@ -242,18 +205,15 @@ class ExternFunction:
             elif hasattr(a, "__fly_values__"):
                 vals = a.__fly_values__()
                 if len(vals) != 1:
-                    raise ValueError(
-                        f"ExternFunction arg must produce exactly 1 ir.Value, got {len(vals)}"
-                    )
+                    raise ValueError(f"ExternFunction arg must produce exactly 1 ir.Value, got {len(vals)}")
                 val = vals[0]
             else:
-                raise TypeError(
-                    f"ExternFunction: cannot use arg of type {type(a).__name__} as ir.Value"
-                )
+                raise TypeError(f"ExternFunction: cannot use arg of type {type(a).__name__} as ir.Value")
 
             # Coerce type if needed (e.g. i64 → i32 via trunc, i32 → i64 via zext)
             if expected_type is not None and val.type != expected_type:
                 from .._mlir.dialects import arith as _arith
+
                 val_is_int = isinstance(val.type, IntegerType)
                 exp_is_int = isinstance(expected_type, IntegerType)
                 if val_is_int and exp_is_int:
@@ -277,6 +237,7 @@ class ExternFunction:
             # mirrors what CallOp would emit; if the MLIR version
             # changes attribute names this will need updating.
             from .._mlir.ir import Operation
+
             Operation.create(
                 "llvm.call",
                 results=[],
@@ -302,8 +263,4 @@ class ExternFunction:
             return call.result
 
     def __repr__(self) -> str:
-        bc = f", bitcode={self.bitcode_path!r}" if self.bitcode_path else ""
-        return (
-            f"ExternFunction(symbol={self.symbol!r}, "
-            f"args={self._arg_type_names}, ret={self._ret_type_name!r}{bc})"
-        )
+        return f"ExternFunction(symbol={self.symbol!r}, " f"args={self._arg_type_names}, ret={self._ret_type_name!r})"

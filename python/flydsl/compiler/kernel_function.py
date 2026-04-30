@@ -32,7 +32,11 @@ def create_gpu_module(
             else:
                 target_attrs.append(t)
     module_op = gpu.GPUModuleOp(
-        sym_name, targets=ir.ArrayAttr.get(target_attrs) if target_attrs else None, loc=loc, ip=ip
+        sym_name,
+        targets=ir.ArrayAttr.get(target_attrs) if target_attrs else None,
+        offloadingHandler=ir.Attribute.parse("#fly.explicit_module"),
+        loc=loc,
+        ip=ip,
     )
     module_op.regions[0].blocks.append()
     return module_op

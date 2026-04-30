@@ -6,7 +6,7 @@
 FlyDSL + mori shmem integration test — cross-PE basic operations.
 
 Validates the full pipeline:
-  ExternFunction → extern_symbols → bitcode linking → post-load module init
+  ffi → link_extern → bitcode linking → post-load module init
 
 Usage:
     torchrun --nproc_per_node=2 tests/kernels/test_flydsl_shmem.py
@@ -32,18 +32,43 @@ import torch.distributed as dist
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.expr import arith
+from flydsl.expr.extern import ffi
+from flydsl.compiler.extern_link import link_extern
 
-import mori.ir.flydsl as mori_shmem
 import mori.shmem as ms
+from mori.ir.flydsl.runtime import get_bitcode_path
 
 from flydsl._mlir import ir as _ir
 from flydsl._mlir.dialects import llvm as _llvm_d
 from flydsl._mlir.ir import IntegerAttr as _IntAttr, IntegerType as _IntTy
 
 
+def _mori_shmem_module_init(hip_module: int) -> None:
+    ms.shmem_module_init(hip_module)
+
+
+_MORI_SHMEM_BITCODE = get_bitcode_path()
+
+
+def _mori_extern(symbol, args, ret):
+    return link_extern(
+        ffi(symbol, args, ret),
+        bitcode_path=_MORI_SHMEM_BITCODE,
+        module_init_fn=_mori_shmem_module_init,
+    )
+
+
+class mori_shmem:
+    my_pe = _mori_extern("mori_shmem_my_pe", [], "int32")
+    n_pes = _mori_extern("mori_shmem_n_pes", [], "int32")
+    int32_p = _mori_extern("mori_shmem_int32_p", ["uint64", "int32", "int32", "int32"], "int32")
+    quiet_thread = _mori_extern("mori_shmem_quiet_thread", [], "int32")
+
+
 # ===================================================================
 # Pointer helpers: pass a 64-bit address as two Int32 halves
 # ===================================================================
+
 
 def _split_ptr(ptr: int):
     """Split a 64-bit pointer into (lo, hi) 32-bit halves."""
@@ -104,10 +129,13 @@ def _store_i32_at(addr_i64, offset_i32, val_i32):
     ).result
     addr = _llvm_d.AddOp(addr_i64, byte_off, _nuw).result
     gptr = _llvm_d.IntToPtrOp(
-        _llvm_d.PointerType.get(address_space=1), addr,
+        _llvm_d.PointerType.get(address_space=1),
+        addr,
     ).result
     _llvm_d.StoreOp(
-        val, gptr, alignment=4,
+        val,
+        gptr,
+        alignment=4,
         ordering=_llvm_d.AtomicOrdering.monotonic,
         syncscope="one-as",
     )
@@ -116,6 +144,7 @@ def _store_i32_at(addr_i64, offset_i32, val_i32):
 # ===================================================================
 # 1. Kernels
 # ===================================================================
+
 
 @flyc.kernel
 def shmem_basic_kernel(out_lo: fx.Int32, out_hi: fx.Int32):
@@ -142,6 +171,7 @@ def shmem_put_kernel(symm_lo: fx.Int32, symm_hi: fx.Int32, value: fx.Int32):
 # 2. JIT launchers
 # ===================================================================
 
+
 @flyc.jit
 def launch_basic(out_lo: fx.Int32, out_hi: fx.Int32, stream: fx.Stream = fx.Stream(None)):
     shmem_basic_kernel(out_lo, out_hi).launch(grid=(1, 1, 1), block=(1, 1, 1), stream=stream)
@@ -155,6 +185,7 @@ def launch_put(symm_lo: fx.Int32, symm_hi: fx.Int32, value: fx.Int32, stream: fx
 # ===================================================================
 # 3. Distributed setup
 # ===================================================================
+
 
 def setup_distributed():
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
@@ -178,6 +209,7 @@ def cleanup():
 # ===================================================================
 # 4. Tests
 # ===================================================================
+
 
 def run_basic(mype, npes):
     """Verify my_pe() and n_pes() return correct values."""
@@ -222,6 +254,7 @@ def run_put(mype, npes):
 # main
 # ===================================================================
 
+
 def main():
     mype, npes = setup_distributed()
     try:
@@ -233,6 +266,7 @@ def main():
             print(f"{'=' * 60}")
     except Exception:
         import traceback
+
         traceback.print_exc()
         sys.exit(1)
     finally:

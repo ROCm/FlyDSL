@@ -5,7 +5,6 @@ import ctypes
 import importlib
 import pickle
 import threading
-import warnings
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, List, Optional
@@ -14,12 +13,8 @@ from .._mlir import ir
 from .._mlir.execution_engine import ExecutionEngine
 from .protocol import fly_pointers
 
-
-# C prototype for the runtime callback installed by
-# mgpuSetModuleLoadCallback.  Keep at module scope so ctypes generates
-# the type once; per-compilation wrappers simply wrap a fresh Python
-# closure in this CFUNCTYPE.
-_ModuleLoadCb = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p)
+_GPU_MODULE_INIT = "flydsl_gpu_module_init"
+_GPU_MODULE_LOAD_TO_DEVICE = "flydsl_gpu_module_load_to_device"
 
 
 def _qualname(fn: Callable) -> Optional[str]:
@@ -73,11 +68,74 @@ def _resolve_runtime_libs() -> List[str]:
     libs = [mlir_libs_dir / name for name in backend.jit_runtime_lib_basenames()]
     for lib in libs:
         if not lib.exists():
-            raise FileNotFoundError(
-                f"Required JIT runtime library not found: {lib}\n"
-                f"Please rebuild the project."
-            )
+            raise FileNotFoundError(f"Required JIT runtime library not found: {lib}\n" f"Please rebuild the project.")
     return [str(p) for p in libs]
+
+
+def _pack_ciface_args(*args) -> ctypes.c_void_p:
+    """Pack argument addresses for MLIR's `_mlir_ciface_*` wrapper ABI."""
+    packed = (ctypes.c_void_p * len(args))()
+    for i, arg in enumerate(args):
+        packed[i] = ctypes.addressof(arg)
+    packed_addr = ctypes.c_void_p(ctypes.addressof(packed))
+    packed_addr_ptr = ctypes.pointer(packed_addr)
+    packed_addr_ptr_ptr = ctypes.pointer(packed_addr_ptr)
+    # Keep the intermediate ctypes objects alive by attaching them to the
+    # returned c_void_p for the duration of the call expression.
+    packed_ciface_arg = ctypes.cast(packed_addr_ptr_ptr, ctypes.c_void_p)
+    packed_ciface_arg._keepalive = (packed, packed_addr, packed_addr_ptr, packed_addr_ptr_ptr)  # type: ignore[attr-defined]
+    return packed_ciface_arg
+
+
+class GpuJitModule:
+    """Owns GPU modules loaded for one ExecutionEngine."""
+
+    def __init__(self, engine: ExecutionEngine, modules: List[int]):
+        self.engine = engine
+        self.modules = list(modules)
+        self._runtime_lib = ctypes.CDLL(str(_resolve_runtime_libs()[0]))
+        self._runtime_lib.mgpuModuleUnload.argtypes = [ctypes.c_void_p]
+        self._runtime_lib.mgpuModuleUnload.restype = None
+        self._unloaded = False
+
+    def unload(self) -> None:
+        if self._unloaded:
+            return
+        try:
+            for module in self.modules:
+                if module:
+                    self._runtime_lib.mgpuModuleUnload(ctypes.c_void_p(module))
+            self.modules.clear()
+        finally:
+            self._unloaded = True
+
+    def __del__(self):
+        self.unload()
+
+
+def _load_gpu_modules(engine: ExecutionEngine) -> List[int]:
+    """Load embedded GPU modules through explicit symbols emitted by FlyDSL."""
+    init_ptr = engine.raw_lookup(_GPU_MODULE_INIT)
+    load_ptr = engine.raw_lookup(_GPU_MODULE_LOAD_TO_DEVICE)
+    if not init_ptr or not load_ptr:
+        raise RuntimeError(
+            "compiled module does not expose FlyDSL ROCm module loader symbols; "
+            "make sure the FlyDSL ROCm explicit-module offloading handler is registered"
+        )
+
+    init = ctypes.CFUNCTYPE(None, ctypes.c_void_p)(init_ptr)
+    load = ctypes.CFUNCTYPE(None, ctypes.c_void_p)(load_ptr)
+
+    module = ctypes.c_void_p()
+    err = ctypes.c_int32(0)
+    packed_ciface_arg = _pack_ciface_args(module, err)
+    init(packed_ciface_arg)
+    if err.value != 0:
+        raise RuntimeError(f"{_GPU_MODULE_INIT} failed with error code {err.value}")
+    load(packed_ciface_arg)
+    if err.value != 0 or not module.value:
+        raise RuntimeError(f"{_GPU_MODULE_LOAD_TO_DEVICE} failed with error code {err.value}")
+    return [module.value]
 
 
 class _ArgPacker:
@@ -106,13 +164,16 @@ class CompiledArtifact:
         func_name: str,
         source_ir: Optional[str] = None,
         post_load_processors: Optional[List[Callable]] = None,
+        link_libs: Optional[List[str]] = None,
     ):
         self._ir_text = str(compiled_module)
         self._entry = func_name
         self._source_ir = source_ir
         self._post_load_processors = post_load_processors or []
+        self._link_libs = link_libs or []
         self._module = None
         self._engine = None
+        self._jit_module = None
         self._func_exe = None
         self._lock = threading.Lock()
         self._packer = _ArgPacker()
@@ -157,12 +218,14 @@ class CompiledArtifact:
             "entry": self._entry,
             "source_ir": self._source_ir,
             "processor_refs": refs,
+            "link_libs": self._link_libs,
         }
 
     def __setstate__(self, state):
         self._ir_text = state["ir_text"]
         self._entry = state["entry"]
         self._source_ir = state["source_ir"]
+        self._link_libs = state.get("link_libs", [])
         self._post_load_processors = []
         missing: List[str] = []
         for ref in state.get("processor_refs", []):
@@ -172,21 +235,12 @@ class CompiledArtifact:
             else:
                 self._post_load_processors.append(fn)
         if missing:
-            # The referenced module/qualname could not be imported in this
-            # process even though the artifact was pickled successfully.
-            # This is usually an environment mismatch (different installed
-            # packages) rather than an artifact bug, so warn loudly — the
-            # kernel may still work if its processors were for a different
-            # optional integration — but let the user decide.
-            warnings.warn(
-                "CompiledArtifact was unpickled without some post-load "
-                f"processors (could not resolve: {missing}); kernels that "
-                "rely on them may fail at launch time.",
-                RuntimeWarning,
-                stacklevel=2,
+            raise pickle.UnpicklingError(
+                "CompiledArtifact could not resolve required post-load " f"processors: {missing}"
             )
         self._module = None
         self._engine = None
+        self._jit_module = None
         self._func_exe = None
         self._lock = threading.Lock()
         self._packer = _ArgPacker()
@@ -196,77 +250,47 @@ class CompiledArtifact:
             if self._engine is not None:
                 return
 
-            loaded_modules: List[int] = []
-            cb_ref: Optional[Any] = None
-            runtime_lib: Optional[ctypes.CDLL] = None
-
-            if self._post_load_processors:
-                runtime_lib = ctypes.CDLL(str(_resolve_runtime_libs()[0]))
-                # argtypes use c_void_p so both a ctypes CFUNCTYPE
-                # instance (via ctypes.cast) and None (NULL) share the
-                # same entry point.
-                runtime_lib.mgpuSetModuleLoadCallback.argtypes = [
-                    ctypes.c_void_p, ctypes.c_void_p,
-                ]
-                runtime_lib.mgpuSetModuleLoadCallback.restype = None
-
-                @_ModuleLoadCb
-                def _on_module_load(module, _user):
-                    loaded_modules.append(module)
-
-                # Keep a strong reference to the ctypes trampoline for
-                # the entire engine-init window; letting it be GC'd
-                # while the C++ runtime still holds the pointer would
-                # SIGSEGV on the next hipModuleLoadData.
-                cb_ref = _on_module_load
-                runtime_lib.mgpuSetModuleLoadCallback(
-                    ctypes.cast(cb_ref, ctypes.c_void_p), None,
+            # Keep the Context alive on self._ctx: destroying it
+            # while ExecutionEngine still holds HSA code objects
+            # causes GPU memory access faults.
+            ctx = ir.Context()
+            with ctx:
+                ctx.load_all_available_dialects()
+                module = ir.Module.parse(self._ir_text)
+                engine = ExecutionEngine(
+                    module,
+                    opt_level=3,
+                    shared_libs=_resolve_runtime_libs(),
                 )
-
-            try:
-                # Keep the Context alive on self._ctx: destroying it
-                # while ExecutionEngine still holds HSA code objects
-                # causes GPU memory access faults.
-                ctx = ir.Context()
-                with ctx:
-                    ctx.load_all_available_dialects()
-                    self._module = ir.Module.parse(self._ir_text)
-                    self._engine = ExecutionEngine(
-                        self._module,
-                        opt_level=3,
-                        shared_libs=_resolve_runtime_libs(),
-                    )
-                    self._engine.initialize()
-                self._ctx = ctx
-            finally:
-                if runtime_lib is not None:
-                    runtime_lib.mgpuSetModuleLoadCallback(None, None)
-                del cb_ref
+                engine.initialize()
+                loaded_modules = _load_gpu_modules(engine)
 
             # Post-condition: if callers registered post-load
             # processors, at least one module load MUST have been
-            # observed on this thread.  Zero observations means the
-            # C++ runtime's thread_local callback contract is violated
-            # — e.g. MLIR started loading modules on a worker thread.
-            # Fail loud here rather than let kernel launch segfault
-            # on uninitialised device globals.
+            # observed while the engine initialized.  Zero observations
+            # means the runtime loader hook did not run; fail loud here
+            # rather than let kernel launch segfault on uninitialised
+            # device globals.
             if self._post_load_processors and not loaded_modules:
                 raise RuntimeError(
                     "post_load_processors registered but no hipModuleLoad "
-                    "was observed in the engine-init thread.  This breaks "
-                    "the thread_local callback contract in "
-                    "FlyRocmRuntimeWrappers.cpp (mgpuSetModuleLoadCallback) "
-                    "— the most likely cause is that MLIR ExecutionEngine "
-                    "started loading GPU modules asynchronously on a "
-                    "worker thread.  Device-side globals (e.g. mori shmem's "
+                    "was observed during ExecutionEngine.initialize(). "
+                    "Device-side globals (e.g. mori shmem's "
                     "globalGpuStates) will be uninitialised at kernel "
-                    "launch.  See jit_executor.py and the contract "
-                    "comment atop FlyRocmRuntimeWrappers.cpp."
+                    "launch.  Check that the compiled module contains a GPU "
+                    "binary and that mgpuModuleLoad is still the ROCm runtime "
+                    "loader symbol used by MLIR."
                 )
 
+            jit_module = GpuJitModule(engine, loaded_modules)
             for proc in self._post_load_processors:
                 for module in loaded_modules:
                     proc(module)
+
+            self._module = module
+            self._engine = engine
+            self._jit_module = jit_module
+            self._ctx = ctx
 
     def _get_func_exe(self):
         if self._func_exe is None:
