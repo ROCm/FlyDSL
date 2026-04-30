@@ -22,7 +22,6 @@ from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.env import runtime as flydsl_runtime_env
 from flydsl._mlir import ir
 from flydsl.compiler.kernel_function import CompilationContext
-from flydsl._mlir.dialects import scf
 
 # ── Kernel geometry constants ────────────────────────────────────────
 QUERY_GROUP_SIZE = 16
@@ -155,37 +154,6 @@ def _chunk_buffer_resource_for_block(memref_val, phys_block, block_stride):
     rsrc = _make_shifted_buffer_resource(memref_val, chunk_byte_offset_i64, chunk_span_bytes_i64)
     local_phys_block_i32 = arith.ArithValue(local_phys_block_i64).trunci(T.i32)
     return rsrc, local_phys_block_i32
-
-
-def _load_q_words(q_rsrc, q_base_elem, lane16id, *, query_packed_fp8, query_load_is_bf16):
-    q_elem = q_base_elem + lane16id * fx.Int32(FP8_ELEMS_16B)
-    if const_expr(query_packed_fp8):
-        q_vec = buffer_ops.buffer_load(
-            q_rsrc,
-            q_elem // fx.Int32(4),
-            vec_width=4,
-            dtype=T.i32,
-        )
-        q_words = fx.Vector(q_vec)
-        return [q_words[i] for i in range(4)]
-
-    q_words = []
-    for qwi in range_constexpr(4):
-        q_src = buffer_ops.buffer_load(
-            q_rsrc,
-            q_elem + fx.Int32(qwi * 4),
-            vec_width=4,
-            dtype=T.bf16 if const_expr(query_load_is_bf16) else T.f16,
-        )
-        q_f32 = fx.Vector(q_src).to(fx.Float32)
-        p0 = q_f32[0]
-        p1 = q_f32[1]
-        p2 = q_f32[2]
-        p3 = q_f32[3]
-        lo = rocdl.cvt_pk_fp8_f32(T.i32, p0, p1, fx.Int32(0), False)
-        pk = rocdl.cvt_pk_fp8_f32(T.i32, p2, p3, lo, True)
-        q_words.append(pk)
-    return q_words
 
 
 def _load_k_flat(
@@ -335,6 +303,7 @@ def _compute_sw_mtp_group_state(
     return qi_val, qhi_pos, qi_for_q, local_qhead_idx_for_q
 
 
+@flyc.jit
 def _load_q_fragments(
     q_rsrc,
     logits_lds_i32,
@@ -342,13 +311,10 @@ def _load_q_fragments(
     softmax_lds_f32,
     q_base,
     lane16id,
-    lane4id,
     rowid,
     local_qhead_idx,
     *,
-    query_packed_fp8,
     query_load_is_bf16,
-    compute_query_scale_in_kernel=False,
 ):
     # LDS Q layout (compact, per-qhead contiguous):
     #   Q[head=h][hd=d]  at byte offset  h * HEAD_SIZE + d   (FP8 after conversion)
@@ -373,116 +339,79 @@ def _load_q_fragments(
     # read `lane16id*16` elements past `q_base`.  For bf16/f16 (2 B/elem) lane16id
     # ∈ {8..15} crossed the qhead boundary and faulted once the query tensor
     # ended mid-block.
-    lds_q_base = local_qhead_idx * arith.constant(HEAD_SIZE, type=T.i32) + lane16id * arith.constant(8, type=T.i32)
-    query_scale_lane = None
-    if const_expr(query_packed_fp8 or not compute_query_scale_in_kernel):
-        # NB: _load_q_words() is unreachable under compile_pswa_decode_sw today
-        # (that entry point rejects packed_fp8 and always forces
-        # compute_query_scale_in_kernel=True).  Keep the call site intact for
-        # any out-of-tree callers but only consume the first two i32 words so
-        # the per-lane footprint matches the new 8-B LDS slot.
-        q_words = _load_q_words(
+    c_four = fx.Int32(4)
+    c_eight = fx.Int32(8)
+    c_sixteen = fx.Int32(16)
+    c_head_size = fx.Int32(HEAD_SIZE)
+    lds_q_base = local_qhead_idx * c_head_size + lane16id * c_eight
+    # bf16/f16 + in-kernel query_scale path.  Each lane owns 8 Q elements,
+    # loaded as 2 × vec_width=4 buffer loads (4 bf16/f16 elems per load = 8 B,
+    # element offset += 4 per iter).  After FP8 packing each load produces
+    # one i32 word, so the per-lane store is `vec<2, i32>` = 8 B = 1 i64.
+    q_elem = q_base + lane16id * c_eight
+
+    abs_mask = fx.Vector.filled(4, 0x7FFFFFFF, fx.Int32)
+    c_zero_f = fx.Float32(0.0)
+    c_one_f = fx.Float32(1.0)
+    c_fp8_max = fx.Float32(FP8_MAX)
+    c_wave16 = fx.Int32(16)
+    q_f32_chunks = []
+    local_max = c_zero_f
+    for qwi in range_constexpr(2):
+        q_src = buffer_ops.buffer_load(
             q_rsrc,
-            q_base,
-            lane16id,
-            query_packed_fp8=query_packed_fp8,
-            query_load_is_bf16=query_load_is_bf16,
+            q_elem + fx.Int32(qwi * 4),
+            vec_width=4,
+            dtype=T.bf16 if const_expr(query_load_is_bf16) else T.f16,
         )
-        q_w0, q_w1 = q_words[0], q_words[1]
-    else:
-        # bf16/f16 + in-kernel query_scale path.  Each lane owns 8 Q elements,
-        # loaded as 2 × vec_width=4 buffer loads (4 bf16/f16 elems per load = 8 B,
-        # element offset += 4 per iter).  After FP8 packing each load produces
-        # one i32 word, so the per-lane store is `vec<2, i32>` = 8 B = 1 i64.
-        q_elem = q_base + lane16id * arith.constant(8, type=T.i32)
+        q_f32 = fx.Vector(q_src).to(fx.Float32)
+        q_f32_chunks.append(q_f32)
+        q_i32 = q_f32.bitcast(fx.Int32)
+        q_abs_i32 = q_i32 & abs_mask
+        q_abs = q_abs_i32.bitcast(fx.Float32)
+        chunk_max = q_abs.reduce("max")
+        local_max = local_max.maximumf(chunk_max)
 
-        i32_vec_ty = T.i32x4
-        abs_mask = arith.constant_vector(0x7FFFFFFF, i32_vec_ty)
-        c_zero_f = arith.constant(0.0, type=T.f32)
-        c_one_f = arith.constant(1.0, type=T.f32)
-        c_fp8_max = arith.constant(FP8_MAX, type=T.f32)
-        c_wave16 = arith.constant(16, type=T.i32)
-        q_f32_chunks = []
-        local_max = c_zero_f
-        for qwi in range_constexpr(2):
-            q_src = buffer_ops.buffer_load(
-                q_rsrc,
-                q_elem + arith.constant(qwi * 4, type=T.i32),
-                vec_width=4,
-                dtype=T.bf16 if const_expr(query_load_is_bf16) else T.f16,
-            )
-            q_f32 = fx.Vector(q_src).to(fx.Float32)
-            q_f32_chunks.append(q_f32)
-            q_i32 = q_f32.bitcast(fx.Int32)
-            q_abs_i32 = arith.andi(q_i32, abs_mask)
-            q_abs = fx.Vector(q_abs_i32).bitcast(fx.Float32)
-            chunk_max = q_abs.reduce("max")
-            local_max = local_max.maximumf(chunk_max)
-
-        for sh in [8, 4, 2, 1]:
-            local_max = local_max.maximumf(local_max.shuffle_xor(arith.constant(sh, type=T.i32), c_wave16))
-        query_scale_lane = arith.select(
+    for sh in [8, 4, 2, 1]:
+        local_max = local_max.maximumf(local_max.shuffle_xor(fx.Int32(sh), c_wave16))
+    query_scale_lane = fx.Float32(
+        arith.select(
             local_max > c_zero_f,
             local_max / c_fp8_max,
             c_one_f,
         )
-        inv_query_scale = c_one_f / query_scale_lane
-        q_words = []
-        for q_f32 in q_f32_chunks:
-            p0 = q_f32[0] * inv_query_scale
-            p1 = q_f32[1] * inv_query_scale
-            p2 = q_f32[2] * inv_query_scale
-            p3 = q_f32[3] * inv_query_scale
-            lo = rocdl.cvt_pk_fp8_f32(T.i32, p0, p1, fx.Int32(0), False)
-            q_words.append(rocdl.cvt_pk_fp8_f32(T.i32, p2, p3, lo, True))
-        q_w0, q_w1 = q_words
+    )
+    inv_query_scale = c_one_f / query_scale_lane
+    q_words = []
+    for q_f32 in q_f32_chunks:
+        p0 = q_f32[0] * inv_query_scale
+        p1 = q_f32[1] * inv_query_scale
+        p2 = q_f32[2] * inv_query_scale
+        p3 = q_f32[3] * inv_query_scale
+        lo = rocdl.cvt_pk_fp8_f32(T.i32, p0, p1, fx.Int32(0), False)
+        q_words.append(rocdl.cvt_pk_fp8_f32(T.i32, p2, p3, lo, True))
+    q_w0, q_w1 = q_words
 
-        lane0 = arith.cmpi(
-            arith.CmpIPredicate.eq,
-            lane16id,
-            arith.constant(0, type=T.i32),
+    if lane16id == fx.Int32(0):
+        fx.Vector.from_elements([query_scale_lane], dtype=fx.Float32).store(
+            softmax_lds_f32, [fx.Index(local_qhead_idx)]
         )
-        lane0_if = scf.IfOp(lane0)
-        with ir.InsertionPoint(lane0_if.then_block):
-            vector.store(
-                fx.Vector.from_elements([query_scale_lane], dtype=fx.Float32),
-                softmax_lds_f32,
-                [fx.Index(local_qhead_idx)],
-            )
-            scf.YieldOp([])
 
     v01 = fx.Vector.from_elements([q_w0, q_w1], dtype=fx.Int32)
-    lds_q_i32 = lds_q_base // arith.constant(4, type=T.i32)
-    vector.store(v01, logits_lds_i32, [fx.Index(lds_q_i32)])
+    lds_q_i32 = lds_q_base // c_four
+    v01.store(logits_lds_i32, [fx.Index(lds_q_i32)])
 
     q_frags = []
     gpu.barrier()
-    if const_expr(compute_query_scale_in_kernel):
-        query_scale_lane = fx.Vector(
-            vector.load_op(
-                T.vec(1, T.f32),
-                softmax_lds_f32,
-                [fx.Index(lane16id)],
-            )
-        )[0].ir_value()
-    c_head_size = arith.constant(HEAD_SIZE, type=T.i32)
+    query_scale_lane = fx.Vector.load(T.vec(1, T.f32), softmax_lds_f32, [fx.Index(lane16id)])[0].ir_value()
     for qkhe in range_constexpr(QKHELOOP):
         for qkr in range_constexpr(2):
             # See layout comment above. Byte offset:
             #   lane16id * HEAD_SIZE + qkhe*64 + rowid*16 + qkr*8
-            lds_rd_byte = (
-                lane16id * c_head_size
-                + arith.constant(qkhe * 64, type=T.i32)
-                + rowid * arith.constant(16, type=T.i32)
-                + arith.constant(qkr * 8, type=T.i32)
-            )
-            lds_rd_base = lds_rd_byte // arith.constant(8, type=T.i32)
-            q_v1 = vector.load_op(
-                T.vec(1, T.i64),
-                logits_lds_i64,
-                [fx.Index(lds_rd_base)],
-            )
-            q_frags.append(fx.Vector(q_v1)[0])
+            lds_rd_byte = lane16id * c_head_size + fx.Int32(qkhe * 64) + rowid * c_sixteen + fx.Int32(qkr * 8)
+            lds_rd_base = lds_rd_byte // c_eight
+            q_v1 = fx.Vector.load(T.vec(1, T.i64), logits_lds_i64, [fx.Index(lds_rd_base)])
+            q_frags.append(q_v1[0])
     return q_frags, query_scale_lane
 
 
@@ -496,7 +425,6 @@ def _load_sw_mtp_group_q_fragments(
     stride_q_seq,
     stride_q_head,
     lane16id,
-    lane4id,
     rowid,
     local_qhead_idx,
     *,
@@ -504,9 +432,7 @@ def _load_sw_mtp_group_q_fragments(
     mtp_subgroup_count,
     query_length,
     query_group_size,
-    query_packed_fp8,
     query_load_is_bf16,
-    compute_query_scale_in_kernel=False,
 ):
     mtp_states = []
     c_query_length = arith.constant(query_length, type=T.i32)
@@ -524,23 +450,17 @@ def _load_sw_mtp_group_q_fragments(
         )
         q_row = batch_idx * c_query_length + qi_for_q
         q_base = q_row * stride_q_seq + (kv_h * c_query_group_size + local_qhead_idx_for_q) * stride_q_head
-        query_scale_lane = None
-        q_frags, kernel_query_scale_lane = _load_q_fragments(
+        q_frags, query_scale_lane = _load_q_fragments(
             q_rsrc,
             logits_lds_i32,
             logits_lds_i64,
             softmax_lds_f32,
             q_base,
             lane16id,
-            lane4id,
             rowid,
             local_qhead_idx,
-            query_packed_fp8=query_packed_fp8,
             query_load_is_bf16=query_load_is_bf16,
-            compute_query_scale_in_kernel=compute_query_scale_in_kernel,
         )
-        if const_expr(compute_query_scale_in_kernel):
-            query_scale_lane = kernel_query_scale_lane
         mtp_states.append((qi_val, qhi_pos, q_frags, query_scale_lane))
     return mtp_states
 
@@ -1246,7 +1166,6 @@ def compile_pa_decode_ps(
 
         # ── Thread decomposition ──
         lane16id = tid & arith.constant(15, type=T.i32)
-        lane4id = tid & arith.constant(3, type=T.i32)
         rowid = (tid >> arith.constant(4, type=T.i32)) & arith.constant(3, type=T.i32)
         warp_id = tid >> arith.constant(6, type=T.i32)
 
@@ -1525,12 +1444,9 @@ def compile_pa_decode_ps(
                     softmax_lds_f32,
                     q_base,
                     lane16id,
-                    lane4id,
                     rowid,
                     local_qhead_idx,
-                    query_packed_fp8=query_packed_fp8,
                     query_load_is_bf16=query_load_is_bf16,
-                    compute_query_scale_in_kernel=query_scale_in_kernel,
                 )
 
                 # ── K init: load this CTA's 256-token block split for the first block ──
@@ -1914,10 +1830,10 @@ def compile_pa_decode_sw_reduce(
         stride_logits_part: Int32,
         stride_logits_group: Int32,
     ):
-        tid = gpu.thread_idx.x
-        batch_idx = gpu.block_idx.x
-        kv_head_idx = gpu.block_idx.y
-        eqgs_idx = gpu.block_idx.z
+        tid = fx.Int32(gpu.thread_id("x"))
+        batch_idx = fx.Int32(gpu.block_id("x"))
+        kv_head_idx = fx.Int32(gpu.block_id("y"))
+        eqgs_idx = fx.Int32(gpu.block_id("z"))
 
         smem_base = allocator.get_base()
         red_scratch = SmemPtr(smem_base, red_off, T.f32, shape=(red_slots,))
@@ -1931,30 +1847,31 @@ def compile_pa_decode_sw_reduce(
         ml_rsrc = buffer_ops.create_buffer_resource(max_logits_ptr, max_size=True)
         logits_rsrc = buffer_ops.create_buffer_resource(logits_ptr, max_size=True)
 
-        c_zero_f = arith.constant(0.0, type=T.f32)
-        c_one_f = arith.constant(1.0, type=T.f32)
-        c_neg_inf = arith.constant(float("-inf"), type=T.f32)
-        c_log2e = arith.constant(LOG2E, type=T.f32)
+        c_zero_f = fx.Float32(0.0)
+        c_one_f = fx.Float32(1.0)
+        c_neg_inf = fx.Float32(float("-inf"))
+        c_log2e = fx.Float32(LOG2E)
         fm_fast = arith.FastMathFlags.fast
-        c_zero_i = arith.constant(0, type=T.i32)
-        c_w = arith.constant(WARP_SIZE, type=T.i32)
-        c_wave_mask = arith.constant(WARP_SIZE - 1, type=T.i32)
-        c_wave_shift = arith.constant(6, type=T.i32)
-        c_red_slots = arith.constant(red_slots, type=T.i32)
+        c_zero_i = fx.Int32(0)
+        c_w = fx.Int32(WARP_SIZE)
+        c_wave_mask = fx.Int32(WARP_SIZE - 1)
+        c_wave_shift = fx.Int32(6)
+        c_red_slots = fx.Int32(red_slots)
+        c_four = fx.Int32(4)
         lane = tid & c_wave_mask
         wave = tid >> c_wave_shift
 
         def _wave_reduce_max_full(val):
             red = val
             for sh in [32, 16, 8, 4, 2, 1]:
-                red = red.maximumf(red.shuffle_xor(arith.constant(sh, type=T.i32), c_w))
+                red = red.maximumf(red.shuffle_xor(fx.Int32(sh), c_w))
             return red
 
         def _wave_reduce_sum_full(val):
             red = val
             for sh in [32, 16, 8, 4, 2, 1]:
                 red = red.addf(
-                    red.shuffle_xor(arith.constant(sh, type=T.i32), c_w),
+                    red.shuffle_xor(fx.Int32(sh), c_w),
                     fastmath=fm_fast,
                 )
             return red
@@ -1981,27 +1898,26 @@ def compile_pa_decode_sw_reduce(
                     _wave_reduce_max_full(red_val) if const_expr(mode == "max") else _wave_reduce_sum_full(red_val)
                 )
                 if lane == c_zero_i:
-                    red_scratch.store(red_val, [arith.constant(0, index=True)])
+                    red_scratch.store(red_val, [fx.Index(0)])
             gpu.barrier()
 
-            return red_scratch.load([arith.constant(0, index=True)])
+            return red_scratch.load([fx.Index(0)])
 
         if const_expr(max_context_partition_num <= WARP_SIZE):
-            c_part_num = arith.constant(max_context_partition_num, type=T.i32)
-            c_reduce_width = arith.constant(reduce_width, type=T.i32)
-            c_four = arith.constant(4, type=T.i32)
+            c_part_num = fx.Int32(max_context_partition_num)
+            c_reduce_width = fx.Int32(reduce_width)
 
             def _wave_reduce_max(val):
                 red = val
                 for sh in reduce_shuffle_offsets:
-                    red = red.maximumf(red.shuffle_xor(arith.constant(sh, type=T.i32), c_w))
+                    red = red.maximumf(red.shuffle_xor(fx.Int32(sh), c_w))
                 return red
 
             def _wave_reduce_sum(val):
                 red = val
                 for sh in reduce_shuffle_offsets:
                     red = red.addf(
-                        red.shuffle_xor(arith.constant(sh, type=T.i32), c_w),
+                        red.shuffle_xor(fx.Int32(sh), c_w),
                         fastmath=fm_fast,
                     )
                 return red
@@ -2041,7 +1957,7 @@ def compile_pa_decode_sw_reduce(
 
             acc = c_zero_f
             for part_idx in range_constexpr(max_context_partition_num):
-                part_i32 = arith.constant(part_idx, type=T.i32)
+                part_i32 = fx.Int32(part_idx)
                 bcast_addr = part_i32 * c_four
                 weight_i32 = rocdl.ds_bpermute(T.i32, arith.unwrap(bcast_addr), arith.unwrap(weight_local_i32))
                 weight = arith.bitcast(T.f32, weight_i32)
@@ -2060,8 +1976,8 @@ def compile_pa_decode_sw_reduce(
             global_max = c_neg_inf
             for chunk_base in range(0, max_context_partition_num, block_threads):
                 chunk_size = min(block_threads, max_context_partition_num - chunk_base)
-                c_chunk_size = arith.constant(chunk_size, type=T.i32)
-                c_chunk_base = arith.constant(chunk_base, type=T.i32)
+                c_chunk_size = fx.Int32(chunk_size)
+                c_chunk_base = fx.Int32(chunk_base)
                 in_chunk = tid < c_chunk_size
                 part_i32 = arith.select(in_chunk, tid + c_chunk_base, c_zero_i)
                 es_off = (
@@ -2078,8 +1994,8 @@ def compile_pa_decode_sw_reduce(
             global_exp_sum = c_zero_f
             for chunk_base in range(0, max_context_partition_num, block_threads):
                 chunk_size = min(block_threads, max_context_partition_num - chunk_base)
-                c_chunk_size = arith.constant(chunk_size, type=T.i32)
-                c_chunk_base = arith.constant(chunk_base, type=T.i32)
+                c_chunk_size = fx.Int32(chunk_size)
+                c_chunk_base = fx.Int32(chunk_base)
                 in_chunk = tid < c_chunk_size
                 part_i32 = arith.select(in_chunk, tid + c_chunk_base, c_zero_i)
                 es_off = (
@@ -2108,8 +2024,8 @@ def compile_pa_decode_sw_reduce(
 
             for chunk_base in range(0, max_context_partition_num, block_threads):
                 chunk_size = min(block_threads, max_context_partition_num - chunk_base)
-                c_chunk_size = arith.constant(chunk_size, type=T.i32)
-                c_chunk_base = arith.constant(chunk_base, type=T.i32)
+                c_chunk_size = fx.Int32(chunk_size)
+                c_chunk_base = fx.Int32(chunk_base)
                 in_chunk = tid < c_chunk_size
                 part_i32 = arith.select(in_chunk, tid + c_chunk_base, c_zero_i)
                 es_off = (
@@ -2132,8 +2048,8 @@ def compile_pa_decode_sw_reduce(
 
             acc = c_zero_f
             for part_idx in range_constexpr(max_context_partition_num):
-                part_i32 = arith.constant(part_idx, type=T.i32)
-                part_idx_idx = arith.constant(part_idx, index=True)
+                part_i32 = fx.Int32(part_idx)
+                part_idx_idx = fx.Index(part_idx)
                 weight = part_weights_lds.load([part_idx_idx])
                 logits_off = (
                     batch_idx * stride_logits_seq
@@ -2146,7 +2062,7 @@ def compile_pa_decode_sw_reduce(
                 part_logits = fx.Float32(part_logits_bf16)
                 acc = acc + part_logits * weight
 
-        c_qgs = arith.constant(query_group_size, type=T.i32)
+        c_qgs = fx.Int32(query_group_size)
         query_idx = eqgs_idx // c_qgs
         group_idx = eqgs_idx % c_qgs
         out_off = (
@@ -2159,9 +2075,9 @@ def compile_pa_decode_sw_reduce(
         if const_expr(output_dtype_str == "f32"):
             out_val = acc
         elif const_expr(output_dtype_str == "f16"):
-            out_val = arith.trunc_f(T.f16, acc)
+            out_val = acc.to(fx.Float16)
         else:
-            out_val = arith.trunc_f(T.bf16, acc)
+            out_val = acc.to(fx.BFloat16)
         buffer_ops.buffer_store(out_val, out_rsrc, out_off)
 
     @flyc.jit
@@ -2550,15 +2466,21 @@ def compile_pa_decode_sw(
         stride_ks_block: Int32,
         stride_ks_head: Int32,
     ):
-        tid = gpu.thread_idx.x
-        batch_idx = gpu.block_idx.x
-        kv_h = gpu.block_idx.y
-        partition_idx = gpu.block_idx.z
+        tid = fx.Int32(gpu.thread_id("x"))
+        batch_idx = fx.Int32(gpu.block_id("x"))
+        kv_h = fx.Int32(gpu.block_id("y"))
+        partition_idx = fx.Int32(gpu.block_id("z"))
 
-        lane16id = tid & arith.constant(15, type=T.i32)
-        lane4id = tid & arith.constant(3, type=T.i32)
-        rowid = (tid >> arith.constant(4, type=T.i32)) & arith.constant(3, type=T.i32)
-        warp_id = tid >> arith.constant(6, type=T.i32)
+        c_zero = fx.Int32(0)
+        c_one = fx.Int32(1)
+        c_two = fx.Int32(2)
+        c_three = fx.Int32(3)
+        c_four = fx.Int32(4)
+        c_fifteen = fx.Int32(15)
+
+        lane16id = tid & c_fifteen
+        rowid = (tid >> c_four) & c_three
+        warp_id = tid >> fx.Int32(6)
 
         q_rsrc = buffer_ops.create_buffer_resource(query_ptr, max_size=True)
         k_rsrc = buffer_ops.create_buffer_resource(key_cache_ptr, max_size=True)
@@ -2571,13 +2493,13 @@ def compile_pa_decode_sw(
 
         ks_rsrc = buffer_ops.create_buffer_resource(key_scale_ptr, max_size=True)
         vs_rsrc = buffer_ops.create_buffer_resource(value_scale_ptr, max_size=True)
-        q_scale_val = arith.constant(1.0, type=T.f32)
+        q_scale_val = fx.Float32(1.0).ir_value()
         if const_expr(per_token_kv):
-            k_scale_val = arith.constant(1.0, type=T.f32)
-            v_scale_val = arith.constant(1.0, type=T.f32)
+            k_scale_val = fx.Float32(1.0).ir_value()
+            v_scale_val = fx.Float32(1.0).ir_value()
         else:
-            k_scale_val = buffer_ops.buffer_load(ks_rsrc, arith.constant(0, type=T.i32), vec_width=1)
-            v_scale_val = buffer_ops.buffer_load(vs_rsrc, arith.constant(0, type=T.i32), vec_width=1)
+            k_scale_val = buffer_ops.buffer_load(ks_rsrc, c_zero, vec_width=1)
+            v_scale_val = buffer_ops.buffer_load(vs_rsrc, c_zero, vec_width=1)
 
         smem_base = allocator.get_base()
         logits_lds_i32 = SmemPtr(smem_base, logits_off, T.i32, shape=(LDS_LOGITS_BYTES // 4,)).get()
@@ -2592,17 +2514,14 @@ def compile_pa_decode_sw(
         _softmax_scale_const = arith.constant(_softmax_scale, type=T.f32)
         _softmax_q_scale = _softmax_scale_const * q_scale_val
         _scale = _softmax_q_scale * k_scale_val  # per-tensor only; per-token uses per-token k_scale
-        c_w = arith.constant(WARP_SIZE, type=T.i32)
-        NEG_INF = arith.constant(float("-inf"), type=T.f32)
-        ZERO_F = arith.constant(0.0, type=T.f32)
-        c_cps = arith.constant(KV_COMPUTE_BLOCK, type=T.i32)
-        c_one = arith.constant(1, type=T.i32)
-        c_bs = arith.constant(_bs, type=T.i32)
-        c_four = arith.constant(4, type=T.i32)
-        c_tpb = arith.constant(TILES_PER_BLOCK, type=T.i32)
-        c_zero = arith.constant(0, type=T.i32)
+        c_w = fx.Int32(WARP_SIZE)
+        NEG_INF = fx.Float32(float("-inf")).ir_value()
+        ZERO_F = fx.Float32(0.0).ir_value()
+        c_cps = fx.Int32(KV_COMPUTE_BLOCK)
+        c_bs = fx.Int32(_bs)
+        c_tpb = fx.Int32(TILES_PER_BLOCK)
 
-        local_qhead_idx = warp_id * arith.constant(4, type=T.i32) + rowid
+        local_qhead_idx = warp_id * c_four + rowid
         (
             _k_tok_thread_base,
             _c_tok_stride_dw,
@@ -2630,8 +2549,8 @@ def compile_pa_decode_sw(
         # ── Context length and partition mapping ──
         # Visible tiles cover the union of all per-query sliding windows.
         context_len = buffer_ops.buffer_load(cl_rsrc, batch_idx, vec_width=1, dtype=T.i32)
-        _c_sw = arith.constant(sliding_window, type=T.i32)
-        _c_query_len = arith.constant(query_length, type=T.i32)
+        _c_sw = fx.Int32(sliding_window)
+        _c_query_len = fx.Int32(query_length)
         num_tiles_for_seq = (context_len + c_cps - c_one) // c_cps
         seq_start_global = context_len - _c_query_len - _c_sw
         seq_start_global = arith.select(seq_start_global > c_zero, seq_start_global, c_zero)
@@ -2647,7 +2566,7 @@ def compile_pa_decode_sw(
         tile_token_offset = block_split_idx * c_cps
         kv_seq_start = seq_partition_idx * c_bs + tile_token_offset
         # For invalid partitions, set context_len to 0 so all tokens get masked
-        context_len = arith.select(_is_valid, context_len, arith.constant(0, type=T.i32))
+        context_len = arith.select(_is_valid, context_len, c_zero)
 
         # Look up physical block (clamped index is always safe)
         bt_off = batch_idx * stride_bt_seq + seq_partition_idx
@@ -2798,11 +2717,7 @@ def compile_pa_decode_sw(
 
         def _store_partition_results(eqgs_lane, running_sum, running_max, outelems_norm):
             for vhe in range_constexpr(VHELOOP):
-                hs_base = (
-                    arith.constant(vhe * NUM_WARPS * MFMA_N, type=T.i32)
-                    + warp_id * arith.constant(MFMA_N, type=T.i32)
-                    + rowid * arith.constant(4, type=T.i32)
-                )
+                hs_base = fx.Int32(vhe * NUM_WARPS * MFMA_N) + warp_id * fx.Int32(MFMA_N) + rowid * c_four
                 to_off = (
                     batch_idx * stride_to_seq
                     + kv_h * stride_to_head
@@ -2810,25 +2725,24 @@ def compile_pa_decode_sw(
                     + eqgs_lane * stride_to_group
                     + hs_base
                 )
-                out_bf16 = arith.trunc_f(T.vec(4, T.bf16), outelems_norm[vhe])
-                out_i32 = vector.bitcast(T.vec(2, T.i32), out_bf16)
-                buffer_ops.buffer_store(out_i32, to_rsrc, to_off * arith.constant(2, type=T.i32), offset_is_bytes=True)
+                out_i32 = fx.Vector(outelems_norm[vhe]).to(fx.BFloat16).bitcast(fx.Int32)
+                buffer_ops.buffer_store(out_i32, to_rsrc, to_off * c_two, offset_is_bytes=True)
 
             es_off = batch_idx * stride_es_seq + kv_h * stride_es_head + partition_idx * stride_es_part + eqgs_lane
             es_i32 = arith.bitcast(T.i32, running_sum)
             ml_i32 = arith.bitcast(T.i32, running_max)
-            buffer_ops.buffer_store(es_i32, es_rsrc, es_off * arith.constant(4, type=T.i32), offset_is_bytes=True)
-            buffer_ops.buffer_store(ml_i32, ml_rsrc, es_off * arith.constant(4, type=T.i32), offset_is_bytes=True)
+            buffer_ops.buffer_store(es_i32, es_rsrc, es_off * c_four, offset_is_bytes=True)
+            buffer_ops.buffer_store(ml_i32, ml_rsrc, es_off * c_four, offset_is_bytes=True)
 
         def _store_group_results(qi_val, qhi_pos, running_sum, running_max, out0, out1):
             outelems_norm = _normalize_pa_output(running_sum, out0, out1, ZERO_F)
-            eqgs_lane = qi_val * arith.constant(query_group_size, type=T.i32) + qhi_pos
+            eqgs_lane = qi_val * fx.Int32(query_group_size) + qhi_pos
             _store_partition_results(eqgs_lane, running_sum, running_max, outelems_norm)
 
         def _write_empty_partition():
             zero_output = [
-                arith.constant_vector(0.0, T.f32x4),
-                arith.constant_vector(0.0, T.f32x4),
+                fx.Vector.filled(4, 0.0, fx.Float32),
+                fx.Vector.filled(4, 0.0, fx.Float32),
             ]
             for _mtp_g in range_constexpr(_mtp_groups):
                 _mtp_subgroups = _get_sw_mtp_subgroup_count(query_length, query_group_size, _mtp_g)
@@ -2841,7 +2755,7 @@ def compile_pa_decode_sw(
                         query_length=query_length,
                         query_group_size=query_group_size,
                     )
-                    eqgs_lane = qi_val * arith.constant(query_group_size, type=T.i32) + qhi_pos
+                    eqgs_lane = qi_val * fx.Int32(query_group_size) + qhi_pos
                     _store_partition_results(eqgs_lane, ZERO_F, NEG_INF, zero_output)
 
         def _run_valid_partition():
@@ -2859,16 +2773,13 @@ def compile_pa_decode_sw(
                     stride_q_seq,
                     stride_q_head,
                     lane16id,
-                    lane4id,
                     rowid,
                     local_qhead_idx,
                     mtp_group_idx=_mtp_g,
                     mtp_subgroup_count=_mtp_subgroups,
                     query_length=query_length,
                     query_group_size=query_group_size,
-                    query_packed_fp8=query_packed_fp8,
                     query_load_is_bf16=query_load_is_bf16,
-                    compute_query_scale_in_kernel=query_scale_in_kernel,
                 )
                 gpu.barrier()
 
@@ -2887,8 +2798,8 @@ def compile_pa_decode_sw(
 
                 if const_expr(_mtp_subgroups == 1):
                     qi_val, qhi_pos, q_frags, query_scale_lane = mtp_states[0]
-                    causal_bound = context_len + arith.constant(1 - query_length, type=T.i32) + qi_val
-                    seq_start = context_len - arith.constant(query_length + sliding_window, type=T.i32) + qi_val
+                    causal_bound = context_len + fx.Int32(1 - query_length) + qi_val
+                    seq_start = context_len - fx.Int32(query_length + sliding_window) + qi_val
 
                     running_max, running_sum, out0, out1 = _process_block_split(
                         NEG_INF,
@@ -2906,10 +2817,10 @@ def compile_pa_decode_sw(
                 else:
                     qi_val_0, qhi_pos_0, q_frags_0, query_scale_lane_0 = mtp_states[0]
                     qi_val_1, qhi_pos_1, q_frags_1, query_scale_lane_1 = mtp_states[1]
-                    causal_bound_0 = context_len + arith.constant(1 - query_length, type=T.i32) + qi_val_0
-                    causal_bound_1 = context_len + arith.constant(1 - query_length, type=T.i32) + qi_val_1
-                    seq_start_0 = context_len - arith.constant(query_length + sliding_window, type=T.i32) + qi_val_0
-                    seq_start_1 = context_len - arith.constant(query_length + sliding_window, type=T.i32) + qi_val_1
+                    causal_bound_0 = context_len + fx.Int32(1 - query_length) + qi_val_0
+                    causal_bound_1 = context_len + fx.Int32(1 - query_length) + qi_val_1
+                    seq_start_0 = context_len - fx.Int32(query_length + sliding_window) + qi_val_0
+                    seq_start_1 = context_len - fx.Int32(query_length + sliding_window) + qi_val_1
 
                     (
                         running_max_0,
