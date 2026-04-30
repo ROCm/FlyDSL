@@ -39,6 +39,7 @@ from kernels.grouped_gemm_blockscale_common import (
     make_a_tile_loaders,
     make_b_loader,
     make_compute_tile,
+    make_epilogue_writers,
     make_hot_loop_scheduler,
     make_lds_loader,
     make_pingpong_kloop,
@@ -352,39 +353,12 @@ def compile_grouped_gemm_blockscale_contiguous(
 
             # ===== Epilogue: CShuffle vectorized stores =====
             c_n = n_in
-            vec1_out = T.vec(1, out_mlir())
             e_vec = 4 if (tile_n % (32 * 4)) == 0 else 2
 
-            def write_row_to_lds(
-                *, mi, ii, row_in_tile, row,
-                row_base_lds, col_base_local, num_acc_n, lds_out,
-            ):
-                for ni in range_constexpr(num_acc_n):
-                    col_local = col_base_local + (ni * 16)
-                    acc_idx = mi * num_acc_n + ni
-                    acc = accs[acc_idx]
-                    val = vector.extract(acc, static_position=[ii], dynamic_position=[])
-                    v_out = arith.trunc_f(out_mlir(), val)
-                    lds_idx = row_base_lds + col_local
-                    v1 = vector.from_elements(vec1_out, [v_out])
-                    vector.store(v1, lds_out, [lds_idx], alignment=2)
-
-            def store_pair(*, row_local, row, row_ctx, col_pair0, col_g0, frag):
-                idx_out = row * c_n + col_g0
-                byte_off = idx_out * 2
-                if e_vec == 4:
-                    frag_i32x2 = vector.bitcast(T.vec(2, T.i32), frag)
-                    buffer_ops.buffer_store(
-                        frag_i32x2, d_rsrc, byte_off, offset_is_bytes=True
-                    )
-                else:
-                    frag_i32x1 = vector.bitcast(T.vec(1, T.i32), frag)
-                    frag_i32 = vector.extract(
-                        frag_i32x1, static_position=[0], dynamic_position=[]
-                    )
-                    buffer_ops.buffer_store(
-                        frag_i32, d_rsrc, byte_off, offset_is_bytes=True
-                    )
+            write_row_to_lds, store_pair = make_epilogue_writers(
+                accs=accs, d_rsrc=d_rsrc, out_mlir=out_mlir,
+                e_vec=e_vec, c_n=c_n,
+            )
 
             mfma_epilog(
                 use_cshuffle=True,
