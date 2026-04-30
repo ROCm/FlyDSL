@@ -2943,10 +2943,17 @@ def compile_mixed_moe_gemm2(
     # 在 (pe, lid, slot=s>0) 槽位读到 garbage / zero。
     _fp2p_enabled = fused_p2p_scatter is not None
     if _fp2p_enabled:
-        if not (isinstance(fused_p2p_scatter, tuple) and len(fused_p2p_scatter) == 5):
+        # Accept legacy 5-tuple (fp8_cast defaults to False) or 6-tuple where
+        # the trailing element selects fp8_direct_cast P2P scatter.  The
+        # 6-tuple form lets fused GEMM2 cvt_pk_fp8_f32 + 1B/elem store the
+        # output directly into shmem_comb_inp_tok, halving the per-token xGMI
+        # traffic at the cost of a bf16->fp32->fp8 round-trip in the epilogue
+        # (precision-equivalent to baseline `input.to(fp8)` before combine).
+        if not (isinstance(fused_p2p_scatter, tuple) and len(fused_p2p_scatter) in (5, 6)):
             raise TypeError(
                 "fused_p2p_scatter must be a 5-tuple "
-                "(npes, rank, max_tok_per_rank, enable_weights, experts_per_token), "
+                "(npes, rank, max_tok_per_rank, enable_weights, experts_per_token) "
+                "or 6-tuple with trailing fp8_cast bool, "
                 f"got {type(fused_p2p_scatter).__name__}={fused_p2p_scatter!r}"
             )
         (
@@ -2959,6 +2966,7 @@ def compile_mixed_moe_gemm2(
             bool(fused_p2p_scatter[3]),
             int(fused_p2p_scatter[4]),
         )
+        _fp2p_fp8_cast = bool(fused_p2p_scatter[5]) if len(fused_p2p_scatter) == 6 else False
         if _fp2p_k <= 0:
             raise ValueError(
                 f"fused_p2p_scatter.experts_per_token must be > 0, got {_fp2p_k}"
@@ -3003,7 +3011,11 @@ def compile_mixed_moe_gemm2(
             )
         # Bytes per row (along model_dim) of the destination shmem_comb_inp_tok.
         # combine kernel uses `nbytes = hidden_dim * hidden_elem_size`; we mirror it.
-        if out_is_bf16 or out_s in ("f16", "fp16", "half"):
+        # Under fp8_cast the epilogue packs each bf16 frag element into 1 byte
+        # (matches combine_no_stage1 compiled with data_type=float8_e4m3fn).
+        if _fp2p_fp8_cast:
+            _fp2p_token_nbytes = int(model_dim) * 1
+        elif out_is_bf16 or out_s in ("f16", "fp16", "half"):
             _fp2p_token_nbytes = int(model_dim) * 2
         else:
             raise ValueError(
@@ -3015,6 +3027,7 @@ def compile_mixed_moe_gemm2(
         _fp2p_max_tok = 0
         _fp2p_enable_wts = False
         _fp2p_k = 0
+        _fp2p_fp8_cast = False
         _fp2p_log2_max_tok = None
         _fp2p_mask_max_tok = None
         _fp2p_token_nbytes = 0
@@ -3042,6 +3055,7 @@ def compile_mixed_moe_gemm2(
             f"_fusedP2P_pe{_fp2p_npes}_mt{_fp2p_max_tok}"
             f"_k{_fp2p_k}"
             f"{'_wts' if _fp2p_enable_wts else ''}"
+            f"{'_fp8' if _fp2p_fp8_cast else ''}"
         )
     module_name = (
         f"mfma_moe2_a{a_dtype}_w{b_dtype}_{out_s}_{epilog_tag}"
@@ -4720,29 +4734,142 @@ def compile_mixed_moe_gemm2(
                         # single int32 add + one buffer_store.
                         _, slot_off_bytes_i32, rsrc_dst = row_ctx
                         col_i32 = arith.index_cast(T.i32, col_g0)
-                        col_off_bytes = col_i32 * _c_out_elem_bytes_i32
-                        total_off_bytes = slot_off_bytes_i32 + col_off_bytes
                         # SLC (cache_modifier=2): bypass L1 since this write
                         # targets a peer GPU's HBM via xGMI; caching it in
                         # local L1 just pollutes the cache and adds a
                         # writeback round-trip.  Mirrors what the baseline
                         # combine kernel does for stage1 P2P writes.
-                        # NOTE: buffer_store treats `offset` as ELEMENT count
-                        # by default (auto-scales by element_bytes of `frag`).
-                        # `frag` is vector<EVecxbf16/f16>, element_bytes=2.
-                        # We pass a byte offset and set `offset_is_bytes=True`
-                        # to bypass the implicit scale; without this flag the
-                        # byte offset would be doubled, landing every write at
-                        # slot=2*dest_lid and column=2*col_g0 (the bug that
-                        # left half the columns filled and corrupted neighbor
-                        # lid slots).
-                        buffer_ops.buffer_store(
-                            frag,
-                            rsrc_dst,
-                            total_off_bytes,
-                            offset_is_bytes=True,
-                            cache_modifier=2,
-                        )
+                        if const_expr(_fp2p_fp8_cast):
+                            # ── fp8 P2P scatter (1 byte / elem) ────────────
+                            # frag is vector<E_vec x bf16> (LDS shuffle stays
+                            # bf16 to avoid changing c_shuffle's LDS dtype).
+                            # Round-trip bf16 -> fp32 -> cvt_pk_fp8_f32 -> i8/
+                            # i16/i32 packed word -> 1B-stride buffer_store.
+                            # This is precision-equivalent to baseline
+                            # `input.to(torch.float8_e4m3fn)` before combine
+                            # (combine wrapper, line 376-377), since baseline
+                            # also goes bf16 -> fp8 via the same ROCm convert.
+                            #
+                            # Per fp8-elem byte stride = 1, so byte offset is
+                            # just col_i32; no multiply needed.
+                            total_off_bytes = slot_off_bytes_i32 + col_i32
+                            _v_f32_ty = ir.VectorType.get(
+                                [_e_vec], T.f32
+                            )
+                            # frag from c_shuffle_epilog is a raw ir.Value
+                            # (vector.load_op result), not an ArithValue, so
+                            # call arith.ExtFOp directly instead of .extf().
+                            _frag_raw = (
+                                frag._value if hasattr(frag, "_value") else frag
+                            )
+                            frag_f32 = arith.ExtFOp(
+                                _v_f32_ty, _frag_raw
+                            ).result
+                            _vals_f32 = []
+                            for _i in range_constexpr(_e_vec):
+                                _vals_f32.append(
+                                    vector.extract(
+                                        frag_f32,
+                                        static_position=[_i],
+                                        dynamic_position=[],
+                                    )
+                                )
+                            _c0_i32_local = arith.constant(0)
+                            if const_expr(_e_vec == 4):
+                                # 4 fp8 = 32 bits = 1 i32 store
+                                _packed = _c0_i32_local
+                                for _w in range_constexpr(2):
+                                    _packed = rocdl.cvt_pk_fp8_f32(
+                                        T.i32,
+                                        _vals_f32[2 * _w],
+                                        _vals_f32[2 * _w + 1],
+                                        _packed,
+                                        _w,
+                                    )
+                                buffer_ops.buffer_store(
+                                    _packed,
+                                    rsrc_dst,
+                                    total_off_bytes,
+                                    offset_is_bytes=True,
+                                    cache_modifier=2,
+                                )
+                            elif const_expr(_e_vec == 8):
+                                # 8 fp8 = 64 bits = 2 i32 stores (effectively
+                                # a v_store_dwordx2 if LLVM merges them).
+                                for _wg in range_constexpr(2):
+                                    _b = _wg * 4
+                                    _packed = _c0_i32_local
+                                    _packed = rocdl.cvt_pk_fp8_f32(
+                                        T.i32,
+                                        _vals_f32[_b],
+                                        _vals_f32[_b + 1],
+                                        _packed,
+                                        0,
+                                    )
+                                    _packed = rocdl.cvt_pk_fp8_f32(
+                                        T.i32,
+                                        _vals_f32[_b + 2],
+                                        _vals_f32[_b + 3],
+                                        _packed,
+                                        1,
+                                    )
+                                    _word_off = (
+                                        total_off_bytes
+                                        + arith.constant(_wg * 4)
+                                    )
+                                    buffer_ops.buffer_store(
+                                        _packed,
+                                        rsrc_dst,
+                                        _word_off,
+                                        offset_is_bytes=True,
+                                        cache_modifier=2,
+                                    )
+                            elif const_expr(_e_vec == 2):
+                                # 2 fp8 = 16 bits = 1 i16 store
+                                _packed = _c0_i32_local
+                                _packed = rocdl.cvt_pk_fp8_f32(
+                                    T.i32,
+                                    _vals_f32[0],
+                                    _vals_f32[1],
+                                    _packed,
+                                    0,
+                                )
+                                _packed_i16 = arith.TruncIOp(
+                                    T.i16, _packed
+                                ).result
+                                buffer_ops.buffer_store(
+                                    _packed_i16,
+                                    rsrc_dst,
+                                    total_off_bytes,
+                                    offset_is_bytes=True,
+                                    cache_modifier=2,
+                                )
+                            else:
+                                raise ValueError(
+                                    f"fused fp8 store_pair unsupported _e_vec={_e_vec}; "
+                                    "supported: 2, 4, 8"
+                                )
+                        else:
+                            # ── bf16/f16 P2P scatter (2 bytes / elem) ──────
+                            # NOTE: buffer_store treats `offset` as ELEMENT
+                            # count by default (auto-scales by element_bytes
+                            # of `frag`).  `frag` is vector<EVecxbf16/f16>,
+                            # element_bytes=2.  We pass a byte offset and set
+                            # `offset_is_bytes=True` to bypass the implicit
+                            # scale; without this flag the byte offset would
+                            # be doubled, landing every write at
+                            # slot=2*dest_lid and column=2*col_g0 (the bug
+                            # that left half the columns filled and
+                            # corrupted neighbor lid slots).
+                            col_off_bytes = col_i32 * _c_out_elem_bytes_i32
+                            total_off_bytes = slot_off_bytes_i32 + col_off_bytes
+                            buffer_ops.buffer_store(
+                                frag,
+                                rsrc_dst,
+                                total_off_bytes,
+                                offset_is_bytes=True,
+                                cache_modifier=2,
+                            )
 
                 _e_vec = 2 if accumulate else min(tile_n // 32, 8)
                 c_shuffle_epilog(
@@ -4830,6 +4957,7 @@ def compile_mixed_moe_gemm2(
         _sort_block_m,
         _cu_num if _persistent else 0,
         xcd_swizzle,
+        _fp2p_fp8_cast,
     )
 
     if _fp2p_enabled:
