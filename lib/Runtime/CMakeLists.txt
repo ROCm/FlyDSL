@@ -2,4 +2,6 @@
 # Copyright (c) 2025 FlyDSL Project Contributors
 
 # Per-vendor JIT runtime subdirectories; each defines a FlyJitRuntime target.
-add_subdirectory(ROCm)
+if(FLYDSL_BUILD_ROCDL_STACK)
+  add_subdirectory(ROCm)
+endif()
