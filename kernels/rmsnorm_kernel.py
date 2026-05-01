@@ -17,7 +17,10 @@ import flydsl.expr as fx
 from flydsl._mlir.ir import InsertionPoint
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, const_expr, gpu, range_constexpr
+from flydsl.expr.arith import ArithValue
 from flydsl.expr import math as fmath
+from flydsl.expr.numeric import Numeric, Float32, Uint32
+from flydsl.expr.typing import T, Int32
 from flydsl.expr.vector import ReductionOp, full
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
@@ -339,7 +342,8 @@ def _build_rmsnorm_quant_module(
         bid = fx.block_idx.x
         tid = fx.thread_idx.x
 
-        elem_type = dtype_to_elem_type(dtype_str)
+        elem_dtype = dtype_to_elem_type(dtype_str)
+        elem_type = elem_dtype.ir_type
         quant_elem_type = _quant_dtype_to_elem_type(quant_dtype_str)
         quant_dtype = Numeric.from_ir_type(quant_elem_type)
         compute_type = T.f32
@@ -676,13 +680,12 @@ def _build_rmsnorm_quant_module(
         ):
             allocator.finalized = False
             ctx = CompilationContext.get_current()
-            with ir.InsertionPoint(ctx.gpu_module_body):
+            with InsertionPoint(ctx.gpu_module_body):
                 allocator.finalize()
 
-            idx_m = ArithValue(m_in).index_cast(T.index)
             launcher = rmsnorm_quant_kernel(Input, Gamma, XScale, YScale, Output)
             launcher.launch(
-                grid=(idx_m, 1, 1),
+                grid=(m_in, 1, 1),
                 block=(BLOCK_THREADS, 1, 1),
                 stream=stream,
             )
@@ -700,13 +703,12 @@ def _build_rmsnorm_quant_module(
     ):
         allocator.finalized = False
         ctx = CompilationContext.get_current()
-        with ir.InsertionPoint(ctx.gpu_module_body):
+        with InsertionPoint(ctx.gpu_module_body):
             allocator.finalize()
 
-        idx_m = ArithValue(m_in).index_cast(T.index)
         launcher = rmsnorm_quant_kernel(Input, Gamma, Gamma, YScale, Output)
         launcher.launch(
-            grid=(idx_m, 1, 1),
+            grid=(m_in, 1, 1),
             block=(BLOCK_THREADS, 1, 1),
             stream=stream,
         )
