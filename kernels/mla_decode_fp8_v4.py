@@ -66,6 +66,7 @@ from flydsl._mlir.dialects import arith as _std_arith
 from flydsl.expr import arith, vector, gpu, buffer_ops, rocdl
 from flydsl.expr.arith import _to_raw as _raw
 from flydsl.expr.typing import T
+from flydsl.expr.typing import Vector as Vec
 
 def _encode_waitcnt(vmcnt=63, expcnt=7, lgkmcnt=63):
     """Encode s_waitcnt bitfield for CDNA3 (gfx94x).
@@ -162,8 +163,7 @@ def _lds_load_prefer_agpr(byte_addr_index, vec_type, static_byte_offset=0):
     AGPR register-allocation hint on the destination virtual register.
     """
     raw_addr = _raw(byte_addr_index) if not isinstance(byte_addr_index, ir.Value) else byte_addr_index
-    i64_type = ir.IntegerType.get_signless(64)
-    addr_i64 = _std_arith.IndexCastOp(i64_type, raw_addr).result
+    addr_i64 = _raw(fx.Int64(raw_addr))
     lds_ptr = _inttoptr_lds(addr_i64)
     if static_byte_offset != 0:
         lds_ptr = _get_element_ptr(
@@ -199,8 +199,9 @@ _set_mfma_vgpr_form()
 def _index_cast_to_i32(value):
     """Cast index/ArithValue to i32."""
     raw = _raw(value) if not isinstance(value, ir.Value) else value
-    i32_type = ir.IntegerType.get_signless(32)
-    return _std_arith.IndexCastOp(i32_type, raw).result
+    if raw.type == T.i32:
+        return raw
+    return _raw(fx.Int32(raw))
 
 
 def _fast_exp2(val):
@@ -375,23 +376,18 @@ def compile_mla_decode_fp8(
 
         v4f32_type = ir.VectorType.get([4], compute_type)
         i32_type = ir.IntegerType.get_signless(32)
-        v4i32_type = ir.VectorType.get([4], i32_type)
-        v2i32_type = ir.VectorType.get([2], i32_type)
-        v1i32_type = ir.VectorType.get([1], i32_type)
         i64_type = ir.IntegerType.get_signless(64)
         v2i64_type = ir.VectorType.get([2], i64_type)
 
         def _mfma_fp8(result_type, operands, **kw):
             return rocdl.mfma_f32_16x16x32_fp8_fp8(result_type, operands, **kw)
 
-        batch_size_v = arith.index_cast(T.index, batch_size.ir_value())
-        seqlen_q_v = arith.index_cast(T.index, seqlen_q.ir_value())
-        max_num_blocks_v = arith.index_cast(T.index, max_num_blocks.ir_value())
-        num_kv_splits_v_raw = arith.index_cast(T.index, num_kv_splits.ir_value())
-        output_num_kv_splits_v = arith.index_cast(
-            T.index, output_num_kv_splits.ir_value()
-        )
-        split_offset_v = arith.index_cast(T.index, split_offset.ir_value())
+        batch_size_v = fx.Index(batch_size.ir_value())
+        seqlen_q_v = fx.Index(seqlen_q.ir_value())
+        max_num_blocks_v = fx.Index(max_num_blocks.ir_value())
+        num_kv_splits_v_raw = fx.Index(num_kv_splits.ir_value())
+        output_num_kv_splits_v = fx.Index(output_num_kv_splits.ir_value())
+        split_offset_v = fx.Index(split_offset.ir_value())
 
         base_ptr = allocator_pong.get_base()
         base_ptr1 = allocator_ping.get_base()
@@ -420,7 +416,7 @@ def compile_mla_decode_fp8(
         batch_off_i32 = _index_cast_to_i32(batch_idx)
         batch_off_plus1_i32 = _std_arith.AddIOp(
             _raw(batch_off_i32),
-            _raw(arith.constant(1, type=T.i32)),
+            _raw(fx.Int32(1)),
         ).result
         kv_start_i32 = buffer_ops.buffer_load(
             kv_indptr_rsrc, batch_off_i32,
@@ -431,7 +427,7 @@ def compile_mla_decode_fp8(
             vec_width=1, dtype=ir.IntegerType.get_signless(32),
         )
         kv_len_i32 = _std_arith.SubIOp(kv_end_i32, kv_start_i32).result
-        seqlen_kv_v = arith.index_cast(T.index, kv_len_i32)
+        seqlen_kv_v = fx.Index(kv_len_i32)
         attention_len_i32 = kv_len_i32
         if const_expr(use_topk_length):
             topk_length_rsrc = buffer_ops.create_buffer_resource(topk_length)
@@ -442,7 +438,7 @@ def compile_mla_decode_fp8(
             attention_len_i32 = _std_arith.MinUIOp(
                 _raw(topk_len_i32), _raw(kv_len_i32),
             ).result
-        attention_len_v = arith.index_cast(T.index, attention_len_i32)
+        attention_len_v = fx.Index(attention_len_i32)
         head_group_idx = gpu.block_id("y")
         split_id = gpu.block_id("z")
         output_split_id = split_id + split_offset_v
@@ -489,10 +485,10 @@ def compile_mla_decode_fp8(
         stride_mid_lse_token = output_num_kv_splits_v * arith.index(NUM_Q_HEADS)
 
         # ---- V^T transpose decomposition (fp8 byte-level perm) ----
-        c_perm0 = arith.constant(0x05010400, type=i32_type)
-        c_perm1 = arith.constant(0x07030602, type=i32_type)
-        c_perm2 = arith.constant(0x05040100, type=i32_type)
-        c_perm3 = arith.constant(0x07060302, type=i32_type)
+        c_perm0 = fx.Int32(0x05010400)
+        c_perm1 = fx.Int32(0x07030602)
+        c_perm2 = fx.Int32(0x05040100)
+        c_perm3 = fx.Int32(0x07060302)
 
         # ---- Global index helpers ----
         def mid_lse_global_idx(q_row):
@@ -511,22 +507,20 @@ def compile_mla_decode_fp8(
 
         bt_rsrc = buffer_ops.create_buffer_resource(block_table)
 
-        _bt_aux = arith.constant(0, type=T.i32)
+        _bt_aux = fx.Int32(0)
         if const_expr(PAGE_BLOCK_SIZE == 1):
             _bt_base_i32 = rocdl.readfirstlane(i32_type, kv_start_i32)
         else:
             _bt_base_i32 = _index_cast_to_i32(
                 batch_idx * max_num_blocks_v
             )
-        _c_page_shift_i32 = arith.constant(PAGE_BLOCK_SHIFT, type=T.i32)
-        _c2_i32 = arith.constant(2, type=T.i32)
+        _c_page_shift_i32 = fx.Int32(PAGE_BLOCK_SHIFT)
+        _c2_i32 = fx.Int32(2)
         _bt_soff = _std_arith.ShLIOp(
             _raw(_bt_base_i32),
             _raw(_c2_i32),
         ).result
-        _c_pbs_mask_i32 = arith.constant(
-            PAGE_BLOCK_SIZE - 1, type=T.i32
-        )
+        _c_pbs_mask_i32 = fx.Int32(PAGE_BLOCK_SIZE - 1)
 
         def lookup_page_issue(kv_abs_pos, clamp=True,
                                pos_i32=None):
@@ -547,7 +541,7 @@ def compile_mla_decode_fp8(
                     _raw(pos_i32),
                     _raw(_c_pbs_mask_i32),
                 ).result
-                p_off = arith.index_cast(T.index, _and_res)
+                p_off = fx.Index(_and_res)
                 log_block_i32 = _std_arith.ShRUIOp(
                     _raw(pos_i32),
                     _raw(_c_page_shift_i32),
@@ -563,13 +557,13 @@ def compile_mla_decode_fp8(
             return phys_i32, p_off
 
         def lookup_page_resolve(phys_i32):
-            phys = arith.index_cast(T.index, phys_i32)
+            phys = fx.Index(phys_i32)
             return phys * arith.index(STRIDE_PAGE)
 
-        c_soff_zero = arith.constant(0, type=T.i32)
+        c_soff_zero = fx.Int32(0)
 
         K_COL_OFFSETS = [
-            arith.constant(j * (CKV_CHUNK_COLS * elem_bytes), type=T.i32)
+            fx.Int32(j * (CKV_CHUNK_COLS * elem_bytes))
             for j in range(CKV_NUM_CHUNKS)
         ]
 
@@ -578,7 +572,7 @@ def compile_mla_decode_fp8(
 
         _wave_id_i32 = _index_cast_to_i32(wave_id)
         _wave_id_sgpr = rocdl.readfirstlane(i32_type, _wave_id_i32)
-        _ckv_wave_bytes_c = arith.constant(CKV_WAVE_BYTES, type=T.i32)
+        _ckv_wave_bytes_c = fx.Int32(CKV_WAVE_BYTES)
         _wave_offset_sgpr = _std_arith.MulIOp(
             _raw(_wave_id_sgpr), _raw(_ckv_wave_bytes_c),
         ).result
@@ -611,7 +605,7 @@ def compile_mla_decode_fp8(
         _voff_g0_const_i32 = _index_cast_to_i32(_voff_g0_const)
         _voff_g1_const_i32 = _std_arith.AddIOp(
             _raw(_voff_g0_const_i32),
-            _raw(arith.constant(C_VOFF_G1_DELTA, type=T.i32)),
+            _raw(fx.Int32(C_VOFF_G1_DELTA)),
         ).result
 
         def _lookup_phys_i32_for_token(kv_abs_pos):
@@ -626,7 +620,7 @@ def compile_mla_decode_fp8(
 
         def _page1_voff_i32(kv_abs_pos):
             phys_i32 = _lookup_phys_i32_for_token(kv_abs_pos)
-            phys = arith.index_cast(T.index, phys_i32)
+            phys = fx.Index(phys_i32)
             page_byte_base_i32 = _index_cast_to_i32(
                 phys * arith.index(STRIDE_PAGE * elem_bytes)
             )
@@ -671,7 +665,7 @@ def compile_mla_decode_fp8(
         def _emit_k_single(lds_wave_base_i32, voff_i32, j, half_offset):
             m0_val = _std_arith.AddIOp(
                 lds_wave_base_i32,
-                _raw(arith.constant(half_offset + j * K_LDS_M0_STRIDE, type=T.i32)),
+                _raw(fx.Int32(half_offset + j * K_LDS_M0_STRIDE)),
             ).result
             lds_ptr = _i32_to_lds_ptr(m0_val)
             rocdl.raw_ptr_buffer_load_lds(
@@ -699,18 +693,18 @@ def compile_mla_decode_fp8(
         def _vt_perm(src_hi, src_lo, sel):
             return llvm.call_intrinsic(
                 i32_type, "llvm.amdgcn.perm",
-                [src_hi, src_lo, sel], [], [],
+                [_raw(src_hi), _raw(src_lo), _raw(sel)], [], [],
             )
 
         v16i8_type = ir.VectorType.get([16], lds_elem_type)
 
         def _vt_store_b128(data_list, byte_idx):
             """Store 4 x i32 as ds_write_b128 to VT buffer. No swizzle."""
-            packed = vector.from_elements(v4i32_type, data_list)
-            packed_i8 = vector.bitcast(v16i8_type, packed)
-            vector.store(packed_i8, lds_vt, [_raw(byte_idx)])
+            packed = Vec.from_elements(data_list, fx.Int32)
+            packed_i8 = Vec(packed).bitcast(fx.Int8)
+            packed_i8.store(lds_vt, [_raw(byte_idx)])
 
-        _half_bytes_const = arith.constant(CKV_HALF_BYTES, type=i32_type)
+        _half_bytes_const = fx.Int32(CKV_HALF_BYTES)
         _half_bytes_opaque = llvm.InlineAsmOp(
             res=i32_type,
             operands_=[_raw(_half_bytes_const)],
@@ -747,10 +741,7 @@ def compile_mla_decode_fp8(
                         ).result
                     dw_bytes = vector.load_op(
                         v4i8_type, k_buf, [lds_byte_idx_raw])
-                    dw = vector.extract(
-                        vector.bitcast(v1i32_type, dw_bytes),
-                        static_position=[0], dynamic_position=[],
-                    )
+                    dw = _raw(Vec(dw_bytes).bitcast(fx.Int32)[0])
                     src.append(dw)
             return src
 
@@ -876,8 +867,8 @@ def compile_mla_decode_fp8(
         mid_o_rsrc = buffer_ops.create_buffer_resource(Mid_O)
         mid_lse_rsrc = buffer_ops.create_buffer_resource(Mid_lse)
         lds_base_byte_idx = _memref.ExtractAlignedPointerAsIndexOp(lds_k_cur_buf).result
-        c_dword_sz = arith.constant(4, type=T.i32)
-        aux = arith.constant(0, type=T.i32)
+        c_dword_sz = fx.Int32(4)
+        aux = fx.Int32(0)
 
         q_packs = [None] * K_STEPS
 
@@ -895,14 +886,13 @@ def compile_mla_decode_fp8(
         Q_LDS_QUAD_BYTES = 4 * Q_TILE_DIM * elem_bytes
         Q_GLOBAL_QUAD_BYTES = 4 * HEAD_DIM_QK * elem_bytes
         Q_CALL_SOFFSETS = [
-            arith.constant(
+            fx.Int32(
                 c * (Q_GLOBAL_QUAD_BYTES - Q_LDS_QUAD_BYTES),
-                type=i32_type,
             )
             for c in range(Q_CALLS_PER_WAVE)
         ]
         Q_CALL_INST_OFFSETS = [
-            arith.constant(c * Q_LDS_QUAD_BYTES, type=i32_type)
+            fx.Int32(c * Q_LDS_QUAD_BYTES)
             for c in range(Q_CALLS_PER_WAVE)
         ]
 
@@ -925,7 +915,7 @@ def compile_mla_decode_fp8(
                     + wave_id
                     * arith.index(HEADS_PER_WAVE * Q_TILE_DIM * elem_bytes)
                 )
-                tile_lds_i64 = arith.index_cast(T.i64, tile_lds_byte)
+                tile_lds_i64 = fx.Int64(tile_lds_byte)
                 tile_lds_scalar = rocdl.readfirstlane(
                     T.i64, tile_lds_i64
                 )
@@ -966,24 +956,21 @@ def compile_mla_decode_fp8(
                 q_b128 = _lds_load_prefer_agpr(
                     q_tile_byte_base, v2i64_type,
                 )
-                q_packs[d_tile * 2] = vector.extract(
-                    q_b128, static_position=[0], dynamic_position=[],
-                )
-                q_packs[d_tile * 2 + 1] = vector.extract(
-                    q_b128, static_position=[1], dynamic_position=[],
-                )
+                q_vec = Vec(q_b128)
+                q_packs[d_tile * 2] = _raw(q_vec[0])
+                q_packs[d_tile * 2 + 1] = _raw(q_vec[1])
 
             gpu.barrier()
 
         # ---- Constants ----
-        c_neg_large = arith.constant(-1e6, type=compute_type)
-        c_zero_f = arith.constant(0.0, type=compute_type)
-        c_one_f = arith.constant(1.0, type=compute_type)
-        c_sm_scale = arith.constant(sm_scale, type=compute_type)
-        c_sm_scale_log2e = arith.constant(sm_scale * 1.4426950408889634, type=compute_type)
-        c_zero_v4f32 = arith.constant_vector(0.0, v4f32_type)
+        c_neg_large = fx.Float32(-1e6)
+        c_zero_f = fx.Float32(0.0)
+        c_one_f = fx.Float32(1.0)
+        c_sm_scale = fx.Float32(sm_scale)
+        c_sm_scale_log2e = fx.Float32(sm_scale * 1.4426950408889634)
+        c_zero_v4f32 = _raw(Vec.filled(4, 0.0, fx.Float32))
 
-        c_zero_i32 = arith.constant(0, type=i32_type)
+        c_zero_i32 = fx.Int32(0)
 
         def _vt_load_b128(n):
             """Load VT data for 2 MFMA tiles via ds_read_b128.
@@ -998,7 +985,7 @@ def compile_mla_decode_fp8(
             raw = vector.load_op(
                 v16i8_type, lds_vt, [_raw(vt_idx)],
                 nontemporal=True)
-            return vector.bitcast(v2i64_type, raw)
+            return _raw(Vec(raw).bitcast(fx.Int64))
 
         def _softmax_reduce_write_fp8(s_acc0, s_acc1,
                                       kv_pos=None, do_causal=False):
@@ -1006,22 +993,20 @@ def compile_mla_decode_fp8(
             s_vals = []
             for sub, s_acc in enumerate([s_acc0, s_acc1]):
                 for ii in range_constexpr(4):
-                    s_val = vector.extract(
-                        s_acc, static_position=[ii], dynamic_position=[],
-                    )
+                    s_val = Vec(s_acc)[ii]
                     kv_abs = (kv_pos
                               + arith.index(sub * 16)
                               + lane_div_16 * arith.index(4)
                               + arith.index(ii))
-                    kv_abs_i64 = arith.index_cast(T.i64, kv_abs)
-                    attention_len_i64 = arith.index_cast(T.i64, attention_len_v)
+                    kv_abs_i64 = fx.Int64(kv_abs)
+                    attention_len_i64 = fx.Int64(attention_len_v)
                     is_masked = _std_arith.CmpIOp(
                         _std_arith.CmpIPredicate.uge,
                         _raw(kv_abs_i64), _raw(attention_len_i64),
                     ).result
                     if CAUSAL and apply_causal and do_causal:
                         q_abs_pos = seqlen_kv_v - seqlen_q_v + q_row
-                        q_abs_i64 = arith.index_cast(T.i64, q_abs_pos)
+                        q_abs_i64 = fx.Int64(q_abs_pos)
                         is_causal_masked = _std_arith.CmpIOp(
                             _std_arith.CmpIPredicate.ugt,
                             _raw(kv_abs_i64), _raw(q_abs_i64),
@@ -1062,9 +1047,7 @@ def compile_mla_decode_fp8(
             """Wait for max_vec ds_read and compute global max."""
             global_max = c_neg_large
             for g in range_constexpr(4):
-                max_g = vector.extract(
-                    max_vec, static_position=[g], dynamic_position=[],
-                )
+                max_g = Vec(max_vec)[g]
                 global_max = _std_arith.MaximumFOp(
                     _raw(global_max), _raw(max_g),
                     fastmath=fm_fast,
@@ -1124,14 +1107,13 @@ def compile_mla_decode_fp8(
                 i32_type, _raw(p_vals[6]), _raw(p_vals[7]), w1, 1)
             w0_i64 = _std_arith.ExtUIOp(i64_type, w0).result
             w1_i64 = _std_arith.ExtUIOp(i64_type, w1).result
-            c32_i64 = _std_arith.ConstantOp(
-                i64_type, ir.IntegerAttr.get(i64_type, 32)).result
+            c32_i64 = _raw(fx.Int64(32))
             w1_shifted = _std_arith.ShLIOp(w1_i64, c32_i64).result
             p_pack = _std_arith.OrIOp(w0_i64, w1_shifted).result
             return m_new, l_new, p_pack, rescale
 
         def _make_rescale_vec(rescale):
-            return vector.broadcast(v4f32_type, rescale)
+            return _raw(Vec.filled(4, fx.Float32(rescale), fx.Float32))
 
         def _rescale_acc(acc, rescale_vec):
             return _std_arith.MulFOp(
@@ -1160,8 +1142,7 @@ def compile_mla_decode_fp8(
             v_raw_c1 = [None] * 8
 
             def _mfma_sub(sub_idx, k_sub, kc, half):
-                k = vector.extract(
-                    k_sub[kc], static_position=[half], dynamic_position=[])
+                k = _raw(Vec(k_sub[kc])[half])
                 s_accs[sub_idx] = _mfma_fp8(
                     v4f32_type,
                     [k, q_packs[kc * 2 + half],
@@ -1169,10 +1150,9 @@ def compile_mla_decode_fp8(
 
             def _vt_read(n):
                 vt_b128 = _vt_load_b128(n)
-                v_buf[n * 2] = vector.extract(
-                    vt_b128, static_position=[0], dynamic_position=[])
-                v_buf[n * 2 + 1] = vector.extract(
-                    vt_b128, static_position=[1], dynamic_position=[])
+                vt_vec = Vec(vt_b128)
+                v_buf[n * 2] = _raw(vt_vec[0])
+                v_buf[n * 2 + 1] = _raw(vt_vec[1])
 
             def _do_v_read(vi):
                 _V_MAP = [
@@ -1196,10 +1176,7 @@ def compile_mla_decode_fp8(
                 dw_bytes = vector.load_op(
                     v4i8_type, k_next_buf, [lds_byte_idx],
                     nontemporal=True)
-                dw = vector.extract(
-                    vector.bitcast(v1i32_type, dw_bytes),
-                    static_position=[0], dynamic_position=[],
-                )
+                dw = _raw(Vec(dw_bytes).bitcast(fx.Int32)[0])
                 if const_expr(ci == 0):
                     v_raw_c0[h * 4 + s] = dw
                 else:
@@ -1276,7 +1253,7 @@ def compile_mla_decode_fp8(
 
             # Fill None v_raw entries for do_vt=False
             if const_expr(not do_vt):
-                _vz = arith.constant(0, type=i32_type)
+                _vz = fx.Int32(0)
                 v_raw_c0 = [_vz] * 8
                 v_raw_c1 = [_vz] * 8
 
@@ -1391,36 +1368,36 @@ def compile_mla_decode_fp8(
             def _k_read_pair(kc):
                 _ki0 = k_read_base_sub0 + arith.index(
                     K_CHUNK_OFFSETS[kc])
-                k_sub0_next[kc] = vector.bitcast(
-                    v2i64_type,
+                k_sub0_next[kc] = _raw(Vec(
                     vector.load_op(
                         v16i8_type, k_next_buf, [_raw(_ki0)],
-                        nontemporal=True))
+                        nontemporal=True)
+                ).bitcast(fx.Int64))
                 _ki1 = k_read_base_sub1 + arith.index(
                     K_CHUNK_OFFSETS[kc])
-                k_sub1_next[kc] = vector.bitcast(
-                    v2i64_type,
+                k_sub1_next[kc] = _raw(Vec(
                     vector.load_op(
                         v16i8_type, k_next_buf, [_raw(_ki1)],
-                        nontemporal=True))
+                        nontemporal=True)
+                ).bitcast(fx.Int64))
 
             def _k_read_single(kc, sub):
                 if const_expr(sub == 0):
                     _ki = k_read_base_sub0 + arith.index(
                         K_CHUNK_OFFSETS[kc])
-                    k_sub0_next[kc] = vector.bitcast(
-                        v2i64_type,
+                    k_sub0_next[kc] = _raw(Vec(
                         vector.load_op(
                             v16i8_type, k_next_buf,
-                            [_raw(_ki)], nontemporal=True))
+                            [_raw(_ki)], nontemporal=True)
+                    ).bitcast(fx.Int64))
                 else:
                     _ki = k_read_base_sub1 + arith.index(
                         K_CHUNK_OFFSETS[kc])
-                    k_sub1_next[kc] = vector.bitcast(
-                        v2i64_type,
+                    k_sub1_next[kc] = _raw(Vec(
                         vector.load_op(
                             v16i8_type, k_next_buf,
-                            [_raw(_ki)], nontemporal=True))
+                            [_raw(_ki)], nontemporal=True)
+                    ).bitcast(fx.Int64))
 
             # ---- MFMA[8] + K reads chunk 0 ----
             rocdl.sched_barrier(0)
@@ -1497,18 +1474,18 @@ def compile_mla_decode_fp8(
                 rocdl.sched_barrier(0)
 
             if const_expr(not do_vt):
-                _k_dummy_0 = arith.constant(0, type=i64_type)
-                _k_pair_dummy = vector.from_elements(
-                    v2i64_type, [_k_dummy_0, _k_dummy_0])
+                _k_dummy_0 = fx.Int64(0)
+                _k_pair_dummy = _raw(Vec.from_elements(
+                    [_k_dummy_0, _k_dummy_0], fx.Int64))
                 k_sub0_next = [_k_pair_dummy] * K_CHUNKS
                 k_sub1_next = [_k_pair_dummy] * K_CHUNKS
 
             if const_expr(nnn_phys_i32 is None):
-                nnn_phys_i32 = arith.constant(0, type=T.i32)
+                nnn_phys_i32 = fx.Int32(0)
                 nnn_p_off = arith.index(0)
             if const_expr(gk_voff_g0_next is None):
-                gk_voff_g0_next = arith.constant(0, type=T.i32)
-                gk_voff_g1_next = arith.constant(0, type=T.i32)
+                gk_voff_g0_next = fx.Int32(0)
+                gk_voff_g1_next = fx.Int32(0)
 
             return (m_new, l_new, o_accs, k_sub0_next, k_sub1_next,
                     nnn_phys_i32, nnn_p_off,
@@ -1531,13 +1508,13 @@ def compile_mla_decode_fp8(
             _k0_raw = vector.load_op(
                 v16i8_type, lds_k_cur_buf, [_raw(_ki0)],
                 nontemporal=True)
-            k_sub0_init[kc] = vector.bitcast(v2i64_type, _k0_raw)
+            k_sub0_init[kc] = _raw(Vec(_k0_raw).bitcast(fx.Int64))
 
             _ki1 = k_read_base_sub1 + arith.index(K_CHUNK_OFFSETS[kc])
             _k1_raw = vector.load_op(
                 v16i8_type, lds_k_cur_buf, [_raw(_ki1)],
                 nontemporal=True)
-            k_sub1_init[kc] = vector.bitcast(v2i64_type, _k1_raw)
+            k_sub1_init[kc] = _raw(Vec(_k1_raw).bitcast(fx.Int64))
 
         # Prefetch page info for tile 2
         nn_start_init = kv_split_start + arith.index(2 * BLOCK_N)
@@ -1551,7 +1528,7 @@ def compile_mla_decode_fp8(
 
         if const_expr(True):
             o_accs_init = [
-                arith.constant_vector(0.0, v4f32_type)
+                _raw(Vec.filled(4, 0.0, fx.Float32))
                 for _ in range_constexpr(D_CHUNKS)]
             m_init = c_neg_large
             l_init = c_zero_f
@@ -1723,7 +1700,7 @@ def compile_mla_decode_fp8(
                 _raw(body_end),
             ).result
 
-            _pg_dummy_i32 = arith.constant(0, type=T.i32)
+            _pg_dummy_i32 = fx.Int32(0)
             _pg_dummy_idx = arith.index(0)
 
             penult_init = ([m_body, l_body] + list(o_body)
@@ -1832,15 +1809,13 @@ def compile_mla_decode_fp8(
                                     [_raw(red_rd_base_epi)])
             l_final = c_zero_f
             for g in range_constexpr(4):
-                l_g = vector.extract(
-                    l_vec, static_position=[g], dynamic_position=[],
-                )
+                l_g = Vec(l_vec)[g]
                 l_final = _std_arith.AddFOp(
                     _raw(l_final), _raw(l_g), fastmath=fm_fast
                 ).result
             rocdl.s_waitcnt(_encode_waitcnt(lgkmcnt=0))
 
-            c_eps = arith.constant(1.0e-30, type=compute_type)
+            c_eps = fx.Float32(1.0e-30)
             l_safe = _std_arith.MaximumFOp(
                 _raw(l_final), _raw(c_eps),
             ).result
@@ -1848,7 +1823,7 @@ def compile_mla_decode_fp8(
                 _raw(c_one_f), _raw(l_safe),
                 fastmath=fm_fast,
             ).result
-            inv_l_vec = vector.broadcast(v4f32_type, l_rcp)
+            inv_l_vec = _raw(Vec.filled(4, fx.Float32(l_rcp), fx.Float32))
 
             m_final_scaled = _std_arith.MulFOp(
                 _raw(m_final), _raw(c_sm_scale), fastmath=fm_fast
@@ -1873,21 +1848,17 @@ def compile_mla_decode_fp8(
                 base_k = rbatch * RESHAPE_CPB
                 for hs in range_constexpr(4):
                     vals = [
-                        vector.extract(
-                            o_scaled[base_k + dk],
-                            static_position=[hs], dynamic_position=[],
-                        )
+                        Vec(o_scaled[base_k + dk])[hs]
                         for dk in range_constexpr(4)
                     ]
-                    wr_data = vector.from_elements(v4f32_type, vals)
+                    wr_data = Vec.from_elements(vals, fx.Float32)
                     wr_idx = (
                         reshape_wb
                         + lane_mod_16 * arith.index(RESHAPE_ROW)
                         + lane_div_16 * arith.index(16)
                         + arith.index(hs * 4)
                     )
-                    vector.store(
-                        wr_data, lds_reshape, [_raw(wr_idx)])
+                    wr_data.store(lds_reshape, [_raw(wr_idx)])
 
                 rocdl.s_waitcnt(_encode_waitcnt(lgkmcnt=0))
 
@@ -1945,18 +1916,14 @@ def compile_mla_decode_fp8(
         head_idx = gpu.block_id("y")
         tid = gpu.thread_id("x")
 
-        output_num_kv_splits_v = arith.index_cast(
-            T.index, output_num_kv_splits.ir_value()
-        )
-        sink_split_offset_v = arith.index_cast(
-            T.index, sink_split_offset.ir_value()
-        )
+        output_num_kv_splits_v = fx.Index(output_num_kv_splits.ir_value())
+        sink_split_offset_v = fx.Index(sink_split_offset.ir_value())
 
         mid_o_rsrc = buffer_ops.create_buffer_resource(Mid_O)
         mid_lse_rsrc = buffer_ops.create_buffer_resource(Mid_lse)
         sink_rsrc = buffer_ops.create_buffer_resource(attn_sink)
 
-        zero_f = arith.constant(0.0, type=T.f32)
+        zero_f = fx.Float32(0.0)
         stride_mid_o_token = output_num_kv_splits_v * arith.index(NUM_Q_HEADS * HEAD_DIM_V)
         stride_mid_lse_token = output_num_kv_splits_v * arith.index(NUM_Q_HEADS)
 
@@ -2023,9 +1990,9 @@ def compile_mla_decode_fp8(
             allocator_vt.finalize()
             allocator_red.finalize()
 
-        bs_val = arith.index_cast(T.index, batch_size.ir_value())
+        bs_val = fx.Index(batch_size.ir_value())
         c_nhg = arith.index(NUM_HEAD_GROUPS)
-        nkv_splits_val = arith.index_cast(T.index, num_kv_splits.ir_value())
+        nkv_splits_val = fx.Index(num_kv_splits.ir_value())
 
         mla_decode_kernel(
             Q, KV, Mid_O, Mid_lse, block_table,
@@ -2063,9 +2030,9 @@ def compile_mla_decode_fp8(
             allocator_vt.finalize()
             allocator_red.finalize()
 
-        bs_val = arith.index_cast(T.index, batch_size.ir_value())
+        bs_val = fx.Index(batch_size.ir_value())
         c_nhg = arith.index(NUM_HEAD_GROUPS)
-        nkv_splits_val = arith.index_cast(T.index, num_kv_splits.ir_value())
+        nkv_splits_val = fx.Index(num_kv_splits.ir_value())
 
         mla_decode_kernel(
             Q, KV, Mid_O, Mid_lse, block_table,
@@ -2105,11 +2072,11 @@ def compile_mla_decode_fp8(
             allocator_vt.finalize()
             allocator_red.finalize()
 
-        bs_val = arith.index_cast(T.index, batch_size.ir_value())
-        seqlen_q_val = arith.index_cast(T.index, seqlen_q.ir_value())
+        bs_val = fx.Index(batch_size.ir_value())
+        seqlen_q_val = fx.Index(seqlen_q.ir_value())
         c_nhg = arith.index(NUM_HEAD_GROUPS)
         c_heads = arith.index(NUM_Q_HEADS)
-        nkv_splits_val = arith.index_cast(T.index, num_kv_splits.ir_value())
+        nkv_splits_val = fx.Index(num_kv_splits.ir_value())
         output_num_kv_splits = num_kv_splits + fx.Int32(1)
 
         mla_decode_kernel(
@@ -2168,11 +2135,11 @@ def compile_mla_decode_fp8(
             allocator_vt.finalize()
             allocator_red.finalize()
 
-        bs_val = arith.index_cast(T.index, batch_size.ir_value())
+        bs_val = fx.Index(batch_size.ir_value())
         c_nhg = arith.index(NUM_HEAD_GROUPS)
         c_heads = arith.index(NUM_Q_HEADS)
-        main_splits_val = arith.index_cast(T.index, num_kv_splits.ir_value())
-        extra_splits_val = arith.index_cast(T.index, extra_num_kv_splits.ir_value())
+        main_splits_val = fx.Index(num_kv_splits.ir_value())
+        extra_splits_val = fx.Index(extra_num_kv_splits.ir_value())
         output_num_kv_splits = num_kv_splits + extra_num_kv_splits
         sink_split_offset = output_num_kv_splits
         if const_expr(use_attn_sink):
@@ -2201,7 +2168,7 @@ def compile_mla_decode_fp8(
         )
 
         if const_expr(use_attn_sink):
-            seqlen_q_val = arith.index_cast(T.index, seqlen_q.ir_value())
+            seqlen_q_val = fx.Index(seqlen_q.ir_value())
             attn_sink_kernel(
                 Mid_O, Mid_lse, attn_sink,
                 batch_size, seqlen_q, output_num_kv_splits, sink_split_offset,
