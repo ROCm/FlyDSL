@@ -1005,34 +1005,78 @@ def compile_mla_decode_fp8(
 
         def _softmax_reduce_write_fp8(s_acc0, s_acc1,
                                       kv_pos=None, do_causal=False):
-            """Extract s_vals, compute local max, ds_write to LDS."""
+            """Extract s_vals, compute local max, ds_write to LDS.
+
+            Mask logic (all booleans below resolve at trace time):
+              * causal mask: kv_abs > q_abs_pos.  Emitted only on the
+                boundary tiles where do_causal is True.
+              * tail mask:   kv_abs >= attention_len_v.  Needed only when
+                topk truncation is active OR when there is no causal
+                mask to fall back on.  In the common
+                apply_causal=True + use_topk_length=False decode case,
+                attention_len_v == seqlen_kv_v == q_abs_pos+1, so the
+                causal mask already strictly covers the tail and the
+                explicit tail check is redundant — skip it entirely
+                instead of paying for one CmpI + one Select per s_val
+                on every tile (this is what v1 effectively does).
+            """
+            need_causal_mask = bool(
+                CAUSAL and apply_causal and do_causal)
+            # Tail can be skipped only when the causal mask is guaranteed
+            # to be emitted on every boundary tile AND its predicate
+            # (kv_abs > seqlen_kv-1) actually covers (kv_abs >= attn_len).
+            # That requires CAUSAL & apply_causal at compile time and
+            # no topk truncation at runtime; otherwise emit tail mask.
+            causal_covers_tail = bool(
+                CAUSAL and apply_causal and not use_topk_length)
+            need_tail_mask = not causal_covers_tail
+            need_kv_abs = need_causal_mask or need_tail_mask
+            # const_expr(...) wraps each branch test so FlyDSL's AST
+            # rewriter keeps these as plain Python ifs (no scf.if
+            # dispatch).  Without the wrap the dispatch would filter
+            # variables that are None at entry, so the assignments
+            # inside wouldn't propagate back out.
+
+            attention_len_i64 = None
+            if const_expr(need_tail_mask):
+                attention_len_i64 = fx.Int64(attention_len_v)
+            q_abs_i64 = None
+            if const_expr(need_causal_mask):
+                q_abs_pos = seqlen_kv_v - seqlen_q_v + q_row
+                q_abs_i64 = fx.Int64(q_abs_pos)
+
             s_vals = []
             for sub, s_acc in enumerate([s_acc0, s_acc1]):
                 for ii in range_constexpr(4):
                     s_val = Vec(s_acc)[ii]
-                    kv_abs = (kv_pos
-                              + arith.index(sub * 16)
-                              + lane_div_16 * arith.index(4)
-                              + arith.index(ii))
-                    kv_abs_i64 = fx.Int64(kv_abs)
-                    attention_len_i64 = fx.Int64(attention_len_v)
-                    is_masked = _std_arith.CmpIOp(
-                        _std_arith.CmpIPredicate.uge,
-                        _raw(kv_abs_i64), _raw(attention_len_i64),
-                    ).result
-                    if CAUSAL and apply_causal and do_causal:
-                        q_abs_pos = seqlen_kv_v - seqlen_q_v + q_row
-                        q_abs_i64 = fx.Int64(q_abs_pos)
+                    kv_abs_i64 = None
+                    if const_expr(need_kv_abs):
+                        kv_abs = (kv_pos
+                                  + arith.index(sub * 16)
+                                  + lane_div_16 * arith.index(4)
+                                  + arith.index(ii))
+                        kv_abs_i64 = fx.Int64(kv_abs)
+                    is_masked = None
+                    if const_expr(need_tail_mask):
+                        is_masked = _std_arith.CmpIOp(
+                            _std_arith.CmpIPredicate.uge,
+                            _raw(kv_abs_i64), _raw(attention_len_i64),
+                        ).result
+                    if const_expr(need_causal_mask):
                         is_causal_masked = _std_arith.CmpIOp(
                             _std_arith.CmpIPredicate.ugt,
                             _raw(kv_abs_i64), _raw(q_abs_i64),
                         ).result
-                        is_masked = _std_arith.OrIOp(
-                            is_masked, is_causal_masked,
+                        if const_expr(need_tail_mask):
+                            is_masked = _std_arith.OrIOp(
+                                is_masked, is_causal_masked,
+                            ).result
+                        else:
+                            is_masked = is_causal_masked
+                    if const_expr(need_kv_abs):
+                        s_val = _std_arith.SelectOp(
+                            is_masked, _raw(c_neg_large), _raw(s_val),
                         ).result
-                    s_val = _std_arith.SelectOp(
-                        is_masked, _raw(c_neg_large), _raw(s_val),
-                    ).result
                     s_vals.append(s_val)
 
             local_max = s_vals[0]
