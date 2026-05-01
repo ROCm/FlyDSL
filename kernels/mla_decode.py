@@ -52,7 +52,7 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.compiler.kernel_function import CompilationContext
 
-from flydsl.expr import range_constexpr
+from flydsl.expr import const_expr, range_constexpr
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 
@@ -416,7 +416,7 @@ def compile_mla_decode(
         v1i32_type = ir.VectorType.get([1], i32_type)
         i64_type = ir.IntegerType.get_signless(64)
 
-        if dtype_str == "bf16":
+        if const_expr(dtype_str == "bf16"):
             _v4i16_type = ir.VectorType.get(
                 [4], ir.IntegerType.get_signless(16))
             _mfma_raw = rocdl.mfma_f32_16x16x16bf16_1k
@@ -586,7 +586,7 @@ def compile_mla_decode(
 
         def lookup_page_issue(kv_abs_pos, clamp=True,
                                pos_i32=None):
-            if clamp:
+            if const_expr(clamp):
                 p_off = kv_abs_pos % arith.index(PAGE_BLOCK_SIZE)
                 log_block = kv_abs_pos / arith.index(PAGE_BLOCK_SIZE)
                 log_block = _std_arith.MinUIOp(
@@ -596,7 +596,7 @@ def compile_mla_decode(
                     log_block * arith.index(4)
                 )
             else:
-                if pos_i32 is None:
+                if const_expr(pos_i32 is None):
                     pos_i32 = _index_cast_to_i32(
                         kv_abs_pos)
                 _and_res = _std_arith.AndIOp(
@@ -1122,7 +1122,7 @@ def compile_mla_decode(
                 _raw(l_scaled), _raw(local_sum), fastmath=fm_fast
             ).result
 
-            if dtype_str == "bf16":
+            if const_expr(dtype_str == "bf16"):
                 _c16 = arith.constant(16, type=T.i32)
                 _cmask = arith.constant(0xFFFF0000, type=T.i32)
                 bits_0 = _std_arith.BitcastOp(T.i32, _raw(p_vals[0])).result
@@ -1180,7 +1180,7 @@ def compile_mla_decode(
                        do_causal=False):
             rocdl.sched_barrier(0)
 
-            if load_knn:
+            if const_expr(load_knn):
                 nn_start = kv_pos + arith.index(2 * BLOCK_N)
                 nn_phys_i32, nn_p_off = lookup_page_issue(nn_start)
 
@@ -1223,23 +1223,23 @@ def compile_mla_decode(
 
             coop_perm_store_v_half(1, v_raw_h1_in)
 
-            if load_knn:
+            if const_expr(load_knn):
                 nn_page_base = lookup_page_resolve(nn_phys_i32)
                 voff_g0_t, voff_g1_t, wbase_t = \
                     _coop_load_k_setup(nn_page_base, nn_p_off, wptr_cur)
 
-            if do_vt:
+            if const_expr(do_vt):
                 v_raw_h0 = coop_load_v_half(0, k_next_buf)
 
             # ---- GEMM1 Phase 2 (with interleaved K loads) ----
             GEMM1_HALF = K_STEPS - DS_READ_INTER
             _N_LOADS = K_LO_CHUNKS * 2 if load_knn else 0
             for ks in range_constexpr(GEMM1_HALF):
-                if load_knn and ks < _N_LOADS:
+                if const_expr(load_knn and ks < _N_LOADS):
                     rocdl.sched_vmem(1)
                     rocdl.sched_mfma(2)
                     _chunk = ks // 2
-                    if ks % 2 == 0:
+                    if const_expr(ks % 2 == 0):
                         _emit_k_single(wbase_t, voff_g0_t, _chunk, 0)
                     else:
                         _emit_k_single(wbase_t, voff_g1_t, _chunk,
@@ -1265,7 +1265,7 @@ def compile_mla_decode(
             s_vals, max_vec = _softmax_reduce_issue(
                 s_accs[0], kv_pos=kv_pos, do_causal=do_causal)
 
-            if load_knn:
+            if const_expr(load_knn):
                 coop_load_k_hi0(nn_page_base, nn_p_off, wptr_cur)
                 coop_load_k_hi1(nn_page_base, nn_p_off, wptr_cur)
 
@@ -1312,7 +1312,7 @@ def compile_mla_decode(
 
             k_buf_next = [None] * K_STEPS
             for dp in range_constexpr(N_DP):
-                if dp < K_PREFETCH:
+                if const_expr(dp < K_PREFETCH):
                     _kni = k_read_base + arith.index(K_STEP_OFFSETS_F16[dp])
                     k_buf_next[dp] = vector.load_op(
                         v8f16_type, k_next_buf, [_raw(_kni)],
@@ -1389,13 +1389,13 @@ def compile_mla_decode(
                     [v_hi, p_pack, o_accs[dp_inner * 2 + 1], 0, 0, 0],
                 )
 
-            if do_vt:
+            if const_expr(do_vt):
                 coop_perm_store_v_half(0, v_raw_h0)
                 v_raw_h1_out = coop_load_v_half(1, k_next_buf)
             else:
                 v_raw_h1_out = _vh_dummy()
 
-            if do_vt:
+            if const_expr(do_vt):
                 rocdl.sched_mfma(1)
                 rocdl.sched_dswr(1)
                 rocdl.sched_mfma(1)
@@ -1414,7 +1414,7 @@ def compile_mla_decode(
             rocdl.sched_barrier(0)
 
             nn_a_phys_next = None
-            if load_knn:
+            if const_expr(load_knn):
                 nn_a_phys = nn_a_phys_in
                 kv_pos_i32 = _index_cast_to_i32(kv_pos)
                 c_2bn_i32 = arith.constant(2 * BLOCK_N, type=T.i32)
@@ -1481,11 +1481,11 @@ def compile_mla_decode(
             GEMM1_HALF = K_STEPS - DS_READ_INTER
             _N_LOADS = K_LO_CHUNKS * 2
             for ks in range_constexpr(GEMM1_HALF):
-                if ks < _N_LOADS:
+                if const_expr(ks < _N_LOADS):
                     rocdl.sched_vmem(1)
                     rocdl.sched_mfma(2)
                     _chunk = ks // 2
-                    if ks % 2 == 0:
+                    if const_expr(ks % 2 == 0):
                         _emit_k_single(wbase_a, voff_g0_a, _chunk, 0)
                     else:
                         _emit_k_single(wbase_a, voff_g1_a, _chunk,
@@ -1513,7 +1513,7 @@ def compile_mla_decode(
             coop_load_k_hi0(nn_a_base, nn_a_poff, wptr_cur)
             coop_load_k_hi1(nn_a_base, nn_a_poff, wptr_cur)
 
-            if load_knn:
+            if const_expr(load_knn):
                 _c4_i32 = arith.constant(4, type=T.i32)
                 kv_block_i32 = _std_arith.ShRUIOp(
                     _raw(kv_pos_i32), _raw(_c6_i32),
@@ -1576,7 +1576,7 @@ def compile_mla_decode(
             v_raw_b_h0 = coop_load_v_half(0, k_next_buf)
 
             for dp in range_constexpr(N_DP):
-                if dp < K_PREFETCH:
+                if const_expr(dp < K_PREFETCH):
                     _kbi = k_read_base + arith.index(K_STEP_OFFSETS_F16[dp])
                     k_buf[dp] = vector.load_op(
                         v8f16_type, k_next_buf, [_raw(_kbi)],
@@ -1715,11 +1715,11 @@ def compile_mla_decode(
 
             _N_LOADS = K_LO_CHUNKS * 2
             for ks in range_constexpr(GEMM1_HALF):
-                if ks < _N_LOADS:
+                if const_expr(ks < _N_LOADS):
                     rocdl.sched_vmem(1)
                     rocdl.sched_mfma(2)
                     _chunk = ks // 2
-                    if ks % 2 == 0:
+                    if const_expr(ks % 2 == 0):
                         _emit_k_single(wbase_b, voff_g0_b, _chunk, 0)
                     else:
                         _emit_k_single(wbase_b, voff_g1_b, _chunk,
@@ -1791,7 +1791,7 @@ def compile_mla_decode(
             v_raw_next_h0 = coop_load_v_half(0, k_cur_buf)
 
             for dp in range_constexpr(N_DP):
-                if dp < K_PREFETCH:
+                if const_expr(dp < K_PREFETCH):
                     _kni = k_read_base + arith.index(K_STEP_OFFSETS_F16[dp])
                     k_buf[dp] = vector.load_op(
                         v8f16_type, k_cur_buf, [_raw(_kni)])
@@ -1886,10 +1886,6 @@ def compile_mla_decode(
             return (m, l, o_accs, k_buf,
                     nn_a_phys_next, v_raw_h1_out)
 
-        has_kv_work = _std_arith.CmpIOp(
-            _std_arith.CmpIPredicate.ult,
-            _raw(kv_split_start), _raw(kv_split_end),
-        ).result
         page_base_0 = lookup_page_resolve(pf0_phys_i32)
         coop_load_k(page_base_0, pf0_p_off, lds_wptr_cur)
 
@@ -1920,7 +1916,7 @@ def compile_mla_decode(
         for ks in range_constexpr(K_REMAINING):
             k_buf_init.append(_k_dummy)
 
-        if has_kv_work:
+        if const_expr(True):
             o_accs_init = [
                 arith.constant_vector(0.0, v4f32_type)
                 for _ in range_constexpr(D_CHUNKS)]
