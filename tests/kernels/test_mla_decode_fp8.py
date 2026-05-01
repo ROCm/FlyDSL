@@ -31,7 +31,7 @@ if not torch.cuda.is_available():
     print("CUDA/ROCm not available")
     sys.exit(1)
 
-from kernels.mla_decode_fp8_v4 import compile_mla_decode_fp8
+from kernels.mla_decode_fp8 import compile_mla_decode_fp8
 from tests.test_common import verify_output
 from aiter.test_common import run_perftest
 
@@ -381,7 +381,7 @@ def main():
     parser.add_argument("--num_kv_heads", type=int, default=1)
     parser.add_argument("--kv_lora_rank", type=int, default=512)
     parser.add_argument("--qk_rope_head_dim", type=int, default=64)
-    parser.add_argument("--page_block_size", type=int, default=1)
+    parser.add_argument("--page_block_size", type=int, default=64)
     parser.add_argument("--no-causal", action="store_true")
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     parser.add_argument("--warmup", type=int, default=50)

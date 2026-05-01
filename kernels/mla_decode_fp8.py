@@ -45,7 +45,7 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.compiler.kernel_function import CompilationContext
 
-from flydsl.expr import range_constexpr
+from flydsl.expr import const_expr, range_constexpr
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 
@@ -551,7 +551,7 @@ def compile_mla_decode_fp8(
 
         def lookup_page_issue(kv_abs_pos, clamp=True,
                                pos_i32=None):
-            if clamp:
+            if const_expr(clamp):
                 p_off = kv_abs_pos % arith.index(PAGE_BLOCK_SIZE)
                 log_block = kv_abs_pos / arith.index(PAGE_BLOCK_SIZE)
                 log_block = _std_arith.MinUIOp(
@@ -561,7 +561,7 @@ def compile_mla_decode_fp8(
                     log_block * arith.index(4)
                 )
             else:
-                if pos_i32 is None:
+                if const_expr(pos_i32 is None):
                     pos_i32 = _index_cast_to_i32(
                         kv_abs_pos)
                 _and_res = _std_arith.AndIOp(
@@ -746,7 +746,7 @@ def compile_mla_decode_fp8(
                         + lane_div_16 * arith.index(CKV_TOKEN_BYTES)
                         + vt_col_bytes
                     )
-                    if h == 1:
+                    if const_expr(h == 1):
                         lds_byte_idx_raw = _std_arith.AddIOp(
                             lds_byte_idx_raw,
                             _half_bytes_opaque_idx,
@@ -1187,7 +1187,7 @@ def compile_mla_decode_fp8(
                     + lane_div_16 * arith.index(CKV_TOKEN_BYTES)
                     + vt_cb
                 )
-                if h == 1:
+                if const_expr(h == 1):
                     lds_byte_idx = _std_arith.AddIOp(
                         lds_byte_idx,
                         _raw(arith.index(CKV_HALF_BYTES)),
@@ -1199,7 +1199,7 @@ def compile_mla_decode_fp8(
                     vector.bitcast(v1i32_type, dw_bytes),
                     static_position=[0], dynamic_position=[],
                 )
-                if ci == 0:
+                if const_expr(ci == 0):
                     v_raw_c0[h * 4 + s] = dw
                 else:
                     v_raw_c1[h * 4 + s] = dw
@@ -1250,22 +1250,22 @@ def compile_mla_decode_fp8(
 
             for _gi, (_sub, _kc, _half, _kl, _vi, _vti) \
                     in enumerate(_SCHED):
-                if _gi == 14:
+                if const_expr(_gi == 14):
                     rocdl.s_waitcnt(_encode_waitcnt(lgkmcnt=14))
                 _ks = k_sub0 if _sub == 0 else k_sub1
                 _mfma_sub(_sub, _ks, _kc, _half)
-                if _kl is not None and load_knn:
+                if const_expr(_kl is not None and load_knn):
                     _ksub, _kchunk = _kl
-                    if _ksub == 0:
+                    if const_expr(_ksub == 0):
                         _emit_k_single(
                             _gk_lds_ptr, _gk_voff_g0, _kchunk, 0)
                     else:
                         _emit_k_single(
                             _gk_lds_ptr, _gk_voff_g1, _kchunk,
                             CKV_HALF_BYTES)
-                if _vi is not None and do_vt:
+                if const_expr(_vi is not None and do_vt):
                     _do_v_read(_vi)
-                if _vti is not None:
+                if const_expr(_vti is not None):
                     _vt_read(_vti)
                 rocdl.sched_barrier(0)
 
@@ -1274,7 +1274,7 @@ def compile_mla_decode_fp8(
                 rocdl.sched_barrier(0)
 
             # Fill None v_raw entries for do_vt=False
-            if not do_vt:
+            if const_expr(not do_vt):
                 _vz = arith.constant(0, type=i32_type)
                 v_raw_c0 = [_vz] * 8
                 v_raw_c1 = [_vz] * 8
@@ -1282,7 +1282,7 @@ def compile_mla_decode_fp8(
             # ---- Issue page lookup for NEXT iteration's tile ----
             nnn_phys_i32 = None
             nnn_p_off = None
-            if load_knn:
+            if const_expr(load_knn):
                 nnn_start = kv_pos + arith.index(3 * BLOCK_N)
                 nnn_phys_i32, nnn_p_off = lookup_page_issue(nnn_start)
 
@@ -1294,7 +1294,7 @@ def compile_mla_decode_fp8(
 
             # ---- VT perm col0 (fills ds_write latency) ----
             vt_base_c0 = vt_lo_c0 = vt_hi_c0 = None
-            if do_vt:
+            if const_expr(do_vt):
                 vt_base_c0, vt_lo_c0, vt_hi_c0 = _coop_perm_only(
                     0, v_raw_c0)
 
@@ -1303,7 +1303,7 @@ def compile_mla_decode_fp8(
 
             # ---- VT perm col1 (fills ds_read latency) ----
             vt_base_c1 = vt_lo_c1 = vt_hi_c1 = None
-            if do_vt:
+            if const_expr(do_vt):
                 vt_base_c1, vt_lo_c1, vt_hi_c1 = _coop_perm_only(
                     1, v_raw_c1)
 
@@ -1325,7 +1325,7 @@ def compile_mla_decode_fp8(
                 [v_buf[0], p_pack, o_accs[0], 0, 0, 0])
 
             rocdl.sched_barrier(0)
-            if do_vt:
+            if const_expr(do_vt):
                 _vt_store_b128(vt_lo_c0, vt_base_c0)
             rocdl.sched_barrier(0)
 
@@ -1339,7 +1339,7 @@ def compile_mla_decode_fp8(
                 v4f32_type,
                 [v_buf[2], p_pack, o_accs[2], 0, 0, 0])
             rocdl.sched_barrier(0)
-            if do_vt:
+            if const_expr(do_vt):
                 _vt_store_b128(
                     vt_hi_c0,
                     vt_base_c0 + arith.index(VT_DP_STRIDE))
@@ -1355,7 +1355,7 @@ def compile_mla_decode_fp8(
                 v4f32_type,
                 [v_buf[4], p_pack, o_accs[4], 0, 0, 0])
             rocdl.sched_barrier(0)
-            if do_vt:
+            if const_expr(do_vt):
                 _vt_store_b128(vt_lo_c1, vt_base_c1)
             rocdl.sched_barrier(0)
 
@@ -1371,7 +1371,7 @@ def compile_mla_decode_fp8(
                 [v_buf[6], p_pack, o_accs[6], 0, 0, 0])
 
             rocdl.sched_barrier(0)
-            if do_vt:
+            if const_expr(do_vt):
                 _vt_store_b128(
                     vt_hi_c1,
                     vt_base_c1 + arith.index(VT_DP_STRIDE))
@@ -1404,7 +1404,7 @@ def compile_mla_decode_fp8(
                         nontemporal=True))
 
             def _k_read_single(kc, sub):
-                if sub == 0:
+                if const_expr(sub == 0):
                     _ki = k_read_base_sub0 + arith.index(
                         K_CHUNK_OFFSETS[kc])
                     k_sub0_next[kc] = vector.bitcast(
@@ -1427,7 +1427,7 @@ def compile_mla_decode_fp8(
                 v4f32_type,
                 [v_buf[7], p_pack, o_accs[7], 0, 0, 0])
             rocdl.sched_barrier(0)
-            if do_vt:
+            if const_expr(do_vt):
                 _k_read_pair(0)
             rocdl.sched_barrier(0)
 
@@ -1436,7 +1436,7 @@ def compile_mla_decode_fp8(
                 v4f32_type,
                 [v_buf[8], p_pack, o_accs[8], 0, 0, 0])
             rocdl.sched_barrier(0)
-            if do_vt:
+            if const_expr(do_vt):
                 _k_read_pair(1)
             rocdl.sched_barrier(0)
 
@@ -1452,7 +1452,7 @@ def compile_mla_decode_fp8(
                 v4f32_type,
                 [v_buf[9], p_pack, o_accs[9], 0, 0, 0])
             rocdl.sched_barrier(0)
-            if do_vt:
+            if const_expr(do_vt):
                 _k_read_pair(2)
             rocdl.sched_barrier(0)
 
@@ -1461,14 +1461,14 @@ def compile_mla_decode_fp8(
                 v4f32_type,
                 [v_buf[10], p_pack, o_accs[10], 0, 0, 0])
             rocdl.sched_barrier(0)
-            if do_vt:
+            if const_expr(do_vt):
                 _k_read_pair(3)
             rocdl.sched_barrier(0)
 
             # ---- Page resolve for NEXT iteration (fills MFMA gap) ----
             gk_voff_g0_next = None
             gk_voff_g1_next = None
-            if load_knn:
+            if const_expr(load_knn):
                 _nn_page_base_next = lookup_page_resolve(nnn_phys_i32)
                 gk_voff_g0_next, gk_voff_g1_next, _ = \
                     _coop_load_k_setup(
@@ -1490,21 +1490,21 @@ def compile_mla_decode_fp8(
                      o_accs[_dc1 + 11], 0, 0, 0])
                 _kc = grp // 2 + 4
                 _ksub = grp % 2
-                if do_vt:
+                if const_expr(do_vt):
                     _k_read_single(_kc, _ksub)
                 rocdl.sched_barrier(0)
 
-            if not do_vt:
+            if const_expr(not do_vt):
                 _k_dummy_0 = arith.constant(0, type=i64_type)
                 _k_pair_dummy = vector.from_elements(
                     v2i64_type, [_k_dummy_0, _k_dummy_0])
                 k_sub0_next = [_k_pair_dummy] * K_CHUNKS
                 k_sub1_next = [_k_pair_dummy] * K_CHUNKS
 
-            if nnn_phys_i32 is None:
+            if const_expr(nnn_phys_i32 is None):
                 nnn_phys_i32 = arith.constant(0, type=T.i32)
                 nnn_p_off = arith.index(0)
-            if gk_voff_g0_next is None:
+            if const_expr(gk_voff_g0_next is None):
                 gk_voff_g0_next = arith.constant(0, type=T.i32)
                 gk_voff_g1_next = arith.constant(0, type=T.i32)
 
@@ -1512,10 +1512,6 @@ def compile_mla_decode_fp8(
                     nnn_phys_i32, nnn_p_off,
                     gk_voff_g0_next, gk_voff_g1_next)
 
-        has_kv_work = _std_arith.CmpIOp(
-            _std_arith.CmpIPredicate.ult,
-            _raw(kv_split_start), _raw(kv_split_end),
-        ).result
         page_base_0 = lookup_page_resolve(pf0_phys_i32)
         coop_load_k(page_base_0, pf0_p_off, lds_wptr_cur)
 
@@ -1550,7 +1546,7 @@ def compile_mla_decode_fp8(
             _coop_load_k_setup(_nn_pb_init, nn_p_off_init,
                                lds_wptr_cur)
 
-        if has_kv_work:
+        if const_expr(True):
             o_accs_init = [
                 arith.constant_vector(0.0, v4f32_type)
                 for _ in range_constexpr(D_CHUNKS)]
