@@ -45,11 +45,12 @@ NUM_WAVES = 4  # seqlen_q
 def auto_num_kv_splits(bs, skv, num_q_heads, block_n=32, min_tiles_per_split=3):
     cu_num = torch.cuda.get_device_properties(0).multi_processor_count
     overhead = 84.1
+    head_groups = max(1, (num_q_heads + 15) // 16)
     total_tiles = (skv + block_n - 1) // block_n
     max_sp = max(1, total_tiles // min_tiles_per_split)
     best_score, best_sp = -1.0, 1
     for sp in range(1, min(17, max_sp + 1)):
-        wgs = bs * sp
+        wgs = bs * head_groups * sp
         occupancy = wgs / (((wgs + cu_num - 1) // cu_num) * cu_num)
         kv_eff = skv / (skv + overhead * sp)
         score = occupancy * kv_eff
