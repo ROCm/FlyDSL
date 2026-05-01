@@ -38,16 +38,16 @@ namespace {
 
 unsigned mapToLLVMAddressSpace(AddressSpace addrSpace) {
   switch (addrSpace) {
+  case AddressSpace::Generic:
+    return 0;
   case AddressSpace::Global:
     return 1;
   case AddressSpace::Shared:
     return 3;
   case AddressSpace::Register:
     return 5;
-  default:
-    assert(false && "Unsupported address space");
-    return 0;
   }
+  llvm_unreachable("unsupported address space");
 }
 
 unsigned mapAttrToLLVMAddressSpace(Attribute attr) {
@@ -55,8 +55,7 @@ unsigned mapAttrToLLVMAddressSpace(Attribute attr) {
     return mapToLLVMAddressSpace(e.getValue());
   if (isTargetAddressSpace<BufferDescAddressAttr>(attr))
     return 8;
-  assert(false && "Unsupported address space attribute");
-  return 0;
+  return 0; // default to generic address space
 }
 
 class MakePtrOpLowering : public OpConversionPattern<MakePtrOp> {
