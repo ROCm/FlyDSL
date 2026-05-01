@@ -767,6 +767,9 @@ class JitFunction:
         key_parts = [("_target_", self._target)]
         if self.compile_hints:
             key_parts.append(("_hints_", tuple(sorted((k, str(v)) for k, v in self.compile_hints.items()))))
+        # Include ASan flag in cache key to separate ASan and non-ASan builds
+        if env.debug.enable_asan:
+            key_parts.append(("_asan_", True))
         for name, arg in bound_args.items():
             param = sig.parameters.get(name)
             ann = param.annotation if param else inspect.Parameter.empty

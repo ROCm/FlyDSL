@@ -2,6 +2,8 @@
 # Copyright (c) 2025 FlyDSL Project Contributors
 
 import ctypes
+import os
+import subprocess
 import threading
 from functools import lru_cache
 from pathlib import Path
@@ -9,7 +11,81 @@ from typing import List
 
 from .._mlir import ir
 from .._mlir.execution_engine import ExecutionEngine
+from ..utils import env
 from .protocol import fly_pointers
+
+
+def _find_asan_runtime_lib() -> str:
+    """Find the AddressSanitizer runtime library path.
+
+    Searches common locations for libasan.so on ROCm/AMD platforms.
+    Returns empty string if not found.
+    """
+    # Common ASan library names (versioned)
+    asan_names = [
+        "libasan.so",
+        "libasan.so.8",
+        "libasan.so.7",
+        "libasan.so.6",
+        "libasan.so.5",
+        "libasan.so.4",
+    ]
+
+    # Search paths
+    search_paths = []
+
+    # 1. Check ROCM_PATH
+    rocm_path = os.environ.get("ROCM_PATH", "/opt/rocm")
+    if rocm_path:
+        search_paths.extend([
+            Path(rocm_path) / "lib",
+            Path(rocm_path) / "llvm" / "lib",
+        ])
+
+    # 2. Check system library paths
+    search_paths.extend([
+        Path("/usr/lib/x86_64-linux-gnu"),
+        Path("/usr/lib64"),
+        Path("/usr/lib"),
+        Path("/lib/x86_64-linux-gnu"),
+        Path("/lib64"),
+    ])
+
+    # 3. Check LD_LIBRARY_PATH
+    ld_lib_path = os.environ.get("LD_LIBRARY_PATH", "")
+    for path in ld_lib_path.split(":"):
+        if path:
+            search_paths.append(Path(path))
+
+    # Try to find the library
+    for search_dir in search_paths:
+        if not search_dir.exists():
+            continue
+        for name in asan_names:
+            lib_path = search_dir / name
+            if lib_path.exists():
+                return str(lib_path)
+
+    # Try using ldconfig as a last resort
+    try:
+        result = subprocess.run(
+            ["ldconfig", "-p"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode == 0:
+            for line in result.stdout.split("\n"):
+                if "libasan.so" in line:
+                    parts = line.split("=>")
+                    if len(parts) >= 2:
+                        path = parts[-1].strip()
+                        if os.path.exists(path):
+                            return path
+    except (subprocess.SubprocessError, FileNotFoundError):
+        pass
+
+    return ""
 
 
 @lru_cache(maxsize=1)
@@ -25,7 +101,27 @@ def _resolve_runtime_libs() -> List[str]:
                 f"Required JIT runtime library not found: {lib}\n"
                 f"Please rebuild the project."
             )
-    return [str(p) for p in libs]
+
+    result = [str(p) for p in libs]
+
+    # Add ASan runtime library if enabled
+    if env.debug.enable_asan:
+        asan_lib = _find_asan_runtime_lib()
+        if asan_lib:
+            result.append(asan_lib)
+        else:
+            import warnings
+
+            warnings.warn(
+                "FLYDSL_DEBUG_ENABLE_ASAN is set but libasan.so was not found. "
+                "ASan instrumentation may not work. "
+                "Please ensure ROCm ASan is installed (e.g., install rocm-llvm packages) "
+                "or set LD_LIBRARY_PATH to include the ASan runtime library path.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+
+    return result
 
 
 class _ArgPacker:

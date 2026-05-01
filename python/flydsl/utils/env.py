@@ -249,6 +249,10 @@ class DebugEnvManager(EnvManager):
     enable_debug_info = OptBool(False, description="Generate debug info in compiled code")
     enable_verifier = OptBool(True, description="Verify IR module")
 
+    # AddressSanitizer options for GPU memory debugging
+    enable_asan = OptBool(False, env_var="FLYDSL_DEBUG_ENABLE_ASAN", description="Enable AddressSanitizer for GPU memory debugging (requires xnack+ enabled GPU)")
+    asan_instrument_lds = OptBool(False, env_var="FLYDSL_DEBUG_ASAN_INSTRUMENT_LDS", description="Instrument LDS/shared memory with ASan (experimental, may have false positives)")
+
 
 class RuntimeEnvManager(EnvManager):
     """Runtime options (``FLYDSL_RUNTIME_*`` environment variables)."""

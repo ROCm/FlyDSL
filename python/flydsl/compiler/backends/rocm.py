@@ -46,6 +46,15 @@ class RocmBackend(BaseBackend):
         if maxnreg:
             bin_cli_opts.append(f"--amdgpu-num-vgpr={maxnreg}")
 
+        # AddressSanitizer options for GPU memory debugging
+        if env.debug.enable_asan:
+            bin_cli_opts.append("-fsanitize=address")
+            bin_cli_opts.append("-shared-libsan")
+            # xnack+ is required for ASan on AMD GPUs
+            # Modify chip to include xnack+ if not already present
+            if ":xnack" not in chip:
+                chip = f"{chip}:xnack+"
+
         rocdl_opts = {
             "O": 2,
             "abi": 600,
@@ -92,9 +101,21 @@ class RocmBackend(BaseBackend):
 
     def gpu_module_targets(self) -> List[str]:
         chip = self.target.arch
+        # When ASan is enabled, xnack+ is required for memory tracking
+        if env.debug.enable_asan and ":xnack" not in chip:
+            chip = f"{chip}:xnack+"
         return [f'#rocdl.target<chip = "{chip}">']
 
     # -- cache / fingerprint ---------------------------------------------
+
+    def hash(self) -> str:
+        """Return a string uniquely identifying this backend + target.
+
+        Includes ASan status in the hash to ensure ASan and non-ASan
+        compiled kernels are cached separately.
+        """
+        asan_suffix = ":asan" if env.debug.enable_asan else ""
+        return f"{self.target}{asan_suffix}"
 
     def native_lib_patterns(self) -> List[str]:
         return [
