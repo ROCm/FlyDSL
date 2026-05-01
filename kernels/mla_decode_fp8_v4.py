@@ -67,26 +67,6 @@ from flydsl.expr import arith, vector, gpu, buffer_ops, rocdl
 from flydsl.expr.arith import _to_raw as _raw
 from flydsl.expr.typing import T
 
-def _vt_swizzle(byte_idx):
-    """XOR swizzle on VT byte index to avoid LDS bank conflicts.
-
-    Mask 0x78 XORs bits [6:3] with bits [10:7] of the address.
-    For ds_read_b128: read addresses are 16-byte aligned (bits 0-3 = 0),
-    so (addr+8)>>4 == addr>>4 → swizzle(addr+8) = swizzle(addr)+8, which
-    preserves stride-8 contiguity within b128 reads.
-    Formula: swizzled = addr XOR ((addr >> 4) & 0x78).
-    """
-    raw = _raw(byte_idx) if not isinstance(byte_idx, ir.Value) else byte_idx
-    i32_ty = ir.IntegerType.get_signless(32)
-    idx32 = _std_arith.IndexCastOp(i32_ty, raw).result
-    c4 = _std_arith.ConstantOp(i32_ty, ir.IntegerAttr.get(i32_ty, 4)).result
-    c0x78 = _std_arith.ConstantOp(i32_ty, ir.IntegerAttr.get(i32_ty, 0x78)).result
-    shifted = _std_arith.ShRUIOp(idx32, c4).result
-    masked = _std_arith.AndIOp(shifted, c0x78).result
-    swizzled = _std_arith.XOrIOp(idx32, masked).result
-    return _std_arith.IndexCastOp(ir.IndexType.get(), swizzled).result
-
-
 def _encode_waitcnt(vmcnt=63, expcnt=7, lgkmcnt=63):
     """Encode s_waitcnt bitfield for CDNA3 (gfx94x).
 
@@ -281,9 +261,7 @@ def compile_mla_decode_fp8(
         sm_scale = 1.0 / math.sqrt(HEAD_DIM_QK)
 
     K_STEPS = HEAD_DIM_QK // 32  # 18 (each fp8 MFMA has K=32)
-    N_KV_SUBTILES = BLOCK_N // 16  # 2
     D_CHUNKS = HEAD_DIM_V // 16    # 32
-    PV_K_STEPS = 1                 # mfma K=32 covers all 32 tokens at once
 
     RESHAPE_CPB = 4
     RESHAPE_BATCHES = D_CHUNKS // RESHAPE_CPB
@@ -311,27 +289,8 @@ def compile_mla_decode_fp8(
     COOP_K_VMEM_OPS = CKV_NUM_CHUNKS * K_PAIRS_PER_WAVE  # 18
 
     K_CHUNKS = CKV_NUM_CHUNKS         # 9 (each chunk = 2 MFMA steps)
-    K_PREFETCH_CHUNKS = 8             # prefetch 8 sub0 chunks in prev GEMM2
-    K_REMAINING_CHUNKS = K_CHUNKS - K_PREFETCH_CHUNKS  # 1
-    K_PREFETCH = K_PREFETCH_CHUNKS * 2  # 16 steps
-    K_REMAINING = K_STEPS - K_PREFETCH  # 2
-
-    _GEMM1_HALF = K_STEPS             # s_accs[1] phase has all steps for KV lo interleave
-    K_LO_CHUNKS = min(5, _GEMM1_HALF // K_PAIRS_PER_WAVE)
-    K_HI0_CHUNKS = min(2, CKV_NUM_CHUNKS - K_LO_CHUNKS)
-    K_HI1_CHUNKS = CKV_NUM_CHUNKS - K_LO_CHUNKS - K_HI0_CHUNKS
-    K_LO_OPS = K_LO_CHUNKS * K_PAIRS_PER_WAVE
-    K_HI0_OPS = K_HI0_CHUNKS * K_PAIRS_PER_WAVE
-    K_HI1_OPS = K_HI1_CHUNKS * K_PAIRS_PER_WAVE
 
     K_CHUNK_OFFSETS = [kc * CKV_CHUNK_BYTES for kc in range(K_CHUNKS)]
-
-    # K_STEP byte offsets within the token's data across chunks
-    # Each K_STEP: 8 bytes per lane; 2 K_STEPS per chunk (64 bytes per token per chunk)
-    K_STEP_OFFSETS_BYTES = [
-        (ks // 2) * CKV_CHUNK_BYTES + (ks % 2) * 32
-        for ks in range(K_STEPS)
-    ]
 
     # M0 stride per chunk for buffer_load_lds: offset param adds to both global and LDS
     # addresses, so M0 stride = CKV_CHUNK_BYTES - K_COL_OFFSET_STRIDE
@@ -350,7 +309,6 @@ def compile_mla_decode_fp8(
     K_BUF_BYTES = CKV_WAVE_BYTES * NUM_WAVES  # total K buffer in bytes
     K_BUF_ELEMS = K_BUF_BYTES  # 1 byte per fp8 element
     VT_BUF_ELEMS = VT_BUF_BYTES
-    VT_BUF_OFFSET = 2 * K_BUF_ELEMS
     KV_LDS_SIZE = 2 * K_BUF_ELEMS + VT_BUF_ELEMS
 
     MAX_SEQLEN_Q = 4
@@ -363,8 +321,6 @@ def compile_mla_decode_fp8(
     )
     Q_CALLS_PER_WAVE = HEADS_PER_WAVE // 4
     Q_MAX_BATCH = KV_LDS_SIZE // Q_TILE_ELEMS
-
-    LDS_SIZE = max(KV_LDS_SIZE, Q_TILE_ELEMS)
 
     assert HEAD_DIM_V % 16 == 0 and HEAD_DIM_V <= BLOCK_SIZE * 2
 
@@ -418,7 +374,6 @@ def compile_mla_decode_fp8(
         lds_elem_type = ir.IntegerType.get_signless(8)  # LDS indexed in bytes
 
         v4f32_type = ir.VectorType.get([4], compute_type)
-        v2f32_type = ir.VectorType.get([2], compute_type)
         i32_type = ir.IntegerType.get_signless(32)
         v4i32_type = ir.VectorType.get([4], i32_type)
         v2i32_type = ir.VectorType.get([2], i32_type)
@@ -511,8 +466,6 @@ def compile_mla_decode_fp8(
         )
         k_read_base_sub1 = k_read_base_sub0 + arith.index(CKV_HALF_BYTES)
 
-        lane_mod_16_x2 = lane_mod_16 * arith.index(2)
-
         q_head_idx = head_group_idx * arith.index(HEADS_PER_WAVE) + lane_mod_16
         q_head_base = head_group_idx * arith.index(HEADS_PER_WAVE)
         kv_head_idx = q_head_base / arith.index(GQA_GROUP)
@@ -542,14 +495,6 @@ def compile_mla_decode_fp8(
         c_perm3 = arith.constant(0x07060302, type=i32_type)
 
         # ---- Global index helpers ----
-        def q_global_idx(q_row, d_col):
-            token = batch_idx * seqlen_q_v + q_row
-            return (
-                token * arith.index(STRIDE_TOKEN_Q)
-                + q_head_idx * arith.index(HEAD_DIM_QK)
-                + d_col
-            )
-
         def mid_lse_global_idx(q_row):
             total_q = batch_idx * seqlen_q_v + q_row
             return (
@@ -742,32 +687,6 @@ def compile_mla_decode_fp8(
                 _emit_k_chunk_pair(
                     lds_ptr_wave, voff_g0_i32, voff_g1_i32, j)
 
-        def coop_load_k_lo(kv_page_base, page_off, lds_ptr_wave, kv_abs_pos):
-            voff_g0_i32, voff_g1_i32, lds_ptr_wave = \
-                _coop_load_k_setup(kv_page_base, page_off, lds_ptr_wave,
-                                   kv_abs_pos)
-            for j in range_constexpr(K_LO_CHUNKS):
-                _emit_k_chunk_pair(
-                    lds_ptr_wave, voff_g0_i32, voff_g1_i32, j)
-
-        def coop_load_k_hi0(kv_page_base, page_off, lds_ptr_wave, kv_abs_pos):
-            voff_g0_i32, voff_g1_i32, lds_ptr_wave = \
-                _coop_load_k_setup(kv_page_base, page_off, lds_ptr_wave,
-                                   kv_abs_pos)
-            for j in range_constexpr(K_HI0_CHUNKS):
-                _emit_k_chunk_pair(
-                    lds_ptr_wave, voff_g0_i32, voff_g1_i32,
-                    j + K_LO_CHUNKS)
-
-        def coop_load_k_hi1(kv_page_base, page_off, lds_ptr_wave, kv_abs_pos):
-            voff_g0_i32, voff_g1_i32, lds_ptr_wave = \
-                _coop_load_k_setup(kv_page_base, page_off, lds_ptr_wave,
-                                   kv_abs_pos)
-            for j in range_constexpr(K_HI1_CHUNKS):
-                _emit_k_chunk_pair(
-                    lds_ptr_wave, voff_g0_i32, voff_g1_i32,
-                    j + K_LO_CHUNKS + K_HI0_CHUNKS)
-
         # ---- V transpose: K_buf(LDS) → V^T_buf(LDS) (fp8 byte-level) ----
         v4i8_type = ir.VectorType.get([4], lds_elem_type)
 
@@ -901,10 +820,6 @@ def compile_mla_decode_fp8(
             (wave_id + arith.index(4)) * arith.index(CKV_CHUNK_COLS)
             + lane_mod_16 * arith.index(4)
         )
-
-        def coop_load_v_call(call_idx, k_buf):
-            vt_cb = _vt_col_bytes_c0 if call_idx == 0 else _vt_col_bytes_c1
-            return _coop_load_v(vt_cb, k_buf)
 
         def _coop_perm_only(call_idx, src):
             """Apply VT perm only, return (write_base, lo_packet, hi_packet).
@@ -1061,7 +976,6 @@ def compile_mla_decode_fp8(
             gpu.barrier()
 
         # ---- Constants ----
-        c_neg_inf = arith.constant(float("-inf"), type=compute_type)
         c_neg_large = arith.constant(-1e6, type=compute_type)
         c_zero_f = arith.constant(0.0, type=compute_type)
         c_one_f = arith.constant(1.0, type=compute_type)
