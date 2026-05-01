@@ -618,19 +618,35 @@ def compile_mla_decode_fp8(
                 _raw(_bt_soff), _raw(_bt_aux),
             )
 
-        def _page1_voff_i32(kv_abs_pos):
-            phys_i32 = _lookup_phys_i32_for_token(kv_abs_pos)
-            phys = fx.Index(phys_i32)
-            page_byte_base_i32 = _index_cast_to_i32(
-                phys * arith.index(STRIDE_PAGE * elem_bytes)
-            )
-            token_byte_off_i32 = _index_cast_to_i32(
+        # Precomputed constants for the page=1 K-load path.  Both are
+        # invariant across all _page1_voff_i32 calls, so hoist them out of
+        # the helper instead of relying on CSE to dedup per call site.
+        if const_expr(PAGE_BLOCK_SIZE == 1):
+            _page1_token_byte_off_i32 = _index_cast_to_i32(
                 kv_head_offset * arith.index(elem_bytes)
                 + lane_mod_16_for_k * arith.index(4)
             )
-            return _std_arith.AddIOp(
-                _raw(page_byte_base_i32), _raw(token_byte_off_i32),
+            _c_page_byte_stride_i32 = fx.Int32(STRIDE_PAGE * elem_bytes)
+        else:
+            _page1_token_byte_off_i32 = None
+            _c_page_byte_stride_i32 = None
+
+        def _page1_voff_from_phys(phys_i32):
+            """Resolve a per-lane phys_i32 to a per-lane KV byte voff.
+            Split from the buffer_load so callers can issue the lookup
+            early (top of iter) and resolve late (just before yield),
+            letting vmcnt overlap with the body's MFMA / softmax work.
+            """
+            page_byte_base_i32 = _std_arith.MulIOp(
+                _raw(phys_i32), _raw(_c_page_byte_stride_i32),
             ).result
+            return _std_arith.AddIOp(
+                page_byte_base_i32, _raw(_page1_token_byte_off_i32),
+            ).result
+
+        def _page1_voff_i32(kv_abs_pos):
+            return _page1_voff_from_phys(
+                _lookup_phys_i32_for_token(kv_abs_pos))
 
         def _coop_load_k_setup(kv_page_base, page_off, lds_wave_base_i32,
                                kv_abs_pos=None):
@@ -1258,11 +1274,32 @@ def compile_mla_decode_fp8(
                 v_raw_c1 = [_vz] * 8
 
             # ---- Issue page lookup for NEXT iteration's tile ----
+            # PAGE_BLOCK_SIZE != 1: one scalar block_table load (uniform
+            # across the wave) is enough — the existing helper handles it.
+            # PAGE_BLOCK_SIZE == 1: each lane needs its own phys for both
+            # g0 and g1.  Issue both buffer_loads here (early in the body)
+            # so vmcnt overlaps with softmax + GEMM1; voff mul/add stays
+            # at the original site below.
             nnn_phys_i32 = None
             nnn_p_off = None
+            nnn_start = None
+            nnn_g0_phys_p1 = None
+            nnn_g1_phys_p1 = None
             if const_expr(load_knn):
                 nnn_start = kv_pos + arith.index(3 * BLOCK_N)
-                nnn_phys_i32, nnn_p_off = lookup_page_issue(nnn_start)
+                if const_expr(PAGE_BLOCK_SIZE != 1):
+                    nnn_phys_i32, nnn_p_off = lookup_page_issue(nnn_start)
+                else:
+                    _g0_pos_p1 = (
+                        nnn_start
+                        + wave_id
+                        + lane_div_16_for_k * arith.index(K_SEQ_STRIDE)
+                    )
+                    _g1_pos_p1 = _g0_pos_p1 + arith.index(
+                        CKV_TOKENS_PER_HALF * K_SEQ_STRIDE
+                    )
+                    nnn_g0_phys_p1 = _lookup_phys_i32_for_token(_g0_pos_p1)
+                    nnn_g1_phys_p1 = _lookup_phys_i32_for_token(_g1_pos_p1)
 
             rocdl.sched_barrier(0)
 
@@ -1444,14 +1481,22 @@ def compile_mla_decode_fp8(
             rocdl.sched_barrier(0)
 
             # ---- Page resolve for NEXT iteration (fills MFMA gap) ----
+            # PAGE_BLOCK_SIZE == 1: phys was already issued at the top of
+            # the body — only the mul+add to turn phys into voff stays
+            # here, so vmcnt for the block_table loads has had the entire
+            # softmax+GEMM1 to drain.
             gk_voff_g0_next = None
             gk_voff_g1_next = None
             if const_expr(load_knn):
-                _nn_page_base_next = lookup_page_resolve(nnn_phys_i32)
-                gk_voff_g0_next, gk_voff_g1_next, _ = \
-                    _coop_load_k_setup(
-                        _nn_page_base_next, nnn_p_off, wptr_cur,
-                        nnn_start)
+                if const_expr(PAGE_BLOCK_SIZE == 1):
+                    gk_voff_g0_next = _page1_voff_from_phys(nnn_g0_phys_p1)
+                    gk_voff_g1_next = _page1_voff_from_phys(nnn_g1_phys_p1)
+                else:
+                    _nn_page_base_next = lookup_page_resolve(nnn_phys_i32)
+                    gk_voff_g0_next, gk_voff_g1_next, _ = \
+                        _coop_load_k_setup(
+                            _nn_page_base_next, nnn_p_off, wptr_cur,
+                            nnn_start)
             rocdl.sched_barrier(0)
 
             # ---- GEMM1 tail: 10 groups of (2 MFMAs + 1 K read) ----
