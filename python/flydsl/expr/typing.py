@@ -234,6 +234,8 @@ __all__ = [
     "Types",
     "T",
     "default_f8_type",
+    "is_generic_address_space",
+    "is_target_address_space",
     # DSL value types
     "Numeric",
     "Boolean",
@@ -282,6 +284,41 @@ __all__ = [
     "ones_like",
     "zeros_like",
 ]
+
+
+def address_space_from_attr(address_space):
+    """Normalize core Fly address spaces while preserving target-specific attrs."""
+    if isinstance(address_space, AddressSpace):
+        return address_space
+    if isinstance(address_space, int):
+        try:
+            return AddressSpace(address_space)
+        except ValueError as exc:
+            valid = ", ".join(f"{int(candidate)} ({candidate})" for candidate in AddressSpace)
+            raise ValueError(f"unknown Fly address space integer {address_space}; expected one of: {valid}") from exc
+
+    text = str(address_space)
+    for candidate in AddressSpace:
+        if text == str(candidate) or text == f"#fly<address_space {candidate}>":
+            return candidate
+    return address_space
+
+
+def is_generic_address_space(address_space, expected: AddressSpace) -> bool:
+    if not isinstance(expected, AddressSpace):
+        raise TypeError(f"expected must be an AddressSpace enum, got {type(expected).__name__}")
+    return address_space_from_attr(address_space) == expected
+
+
+def is_target_address_space(address_space, expected) -> bool:
+    if isinstance(expected, AddressSpace):
+        raise TypeError("expected must be a target-specific address-space attribute; use is_generic_address_space")
+
+    exp = address_space_from_attr(expected)
+    actual = address_space_from_attr(address_space)
+    if isinstance(actual, AddressSpace):
+        return False
+    return str(actual) == str(exp)
 
 
 ValueT = TypeVar("ValueT")
@@ -544,7 +581,7 @@ class Pointer(BuiltinDslType):
 
     @property
     def address_space(self):
-        return AddressSpace(self.type.address_space)
+        return address_space_from_attr(self.type.address_space)
 
     @property
     def memspace(self):
@@ -574,7 +611,7 @@ class Tensor(BuiltinDslType):
 
     @property
     def address_space(self):
-        return AddressSpace(self.type.address_space)
+        return address_space_from_attr(self.type.address_space)
 
     @property
     def memspace(self):

@@ -11,6 +11,7 @@ from ..._mlir.dialects.fly_rocdl import (
     CopyOpCDNA3BufferCopyLDSType,
     CopyOpCDNA3BufferCopyType,
     MmaOpCDNA3_MFMAType,
+    TargetAddressSpace,
 )
 from ..._mlir.extras import types as T
 from ..primitive import (
@@ -132,7 +133,7 @@ def make_buffer_tensor(tensor: Tensor, max_size: bool = True) -> Tensor:
     src_ptr_ty = PointerType(ptr.type)
     buf_ptr_ty = PointerType.get(
         elem_ty=elem_ty.ir_type,
-        address_space=int(AddressSpace.BufferDesc),
+        address_space=TargetAddressSpace.BufferDesc,
         alignment=src_ptr_ty.alignment,
     )
     buf_ptr = make_ptr(buf_ptr_ty, [ptr, stride_val, num_records_val, flags_val])

@@ -31,6 +31,15 @@ class Fly_Attr<string attrName, string attrMnemonic, list<Trait> traits = []>
   let mnemonic = attrMnemonic;
 }
 
+class Fly_I32EnumAttr<string enumName, string summary, list<I32EnumAttrCase> cases>
+    : I32EnumAttr<enumName, summary, cases> {
+  let genSpecializedAttr = 0;
+  let cppNamespace = Fly_Dialect.cppNamespace;
+}
+
+class Fly_EnumAttr<Fly_I32EnumAttr enumInfo, string attrMnemonic, list<Trait> traits = []>
+    : EnumAttr<Fly_Dialect, enumInfo, attrMnemonic, traits>;
+
 class Fly_Op<string mnemonic, list<Trait> traits = []> 
     : Op<Fly_Dialect, mnemonic, traits> {
   // set default assembly format

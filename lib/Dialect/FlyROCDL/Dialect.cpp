@@ -12,15 +12,22 @@ using namespace mlir;
 using namespace mlir::fly;
 using namespace mlir::fly_rocdl;
 
-#include "flydsl/Dialect/FlyROCDL/IR/Dialect.cpp.inc"
 #include "flydsl/Dialect/FlyROCDL/IR/AtomStateEnums.cpp.inc"
+#include "flydsl/Dialect/FlyROCDL/IR/AttrEnums.cpp.inc"
+#include "flydsl/Dialect/FlyROCDL/IR/Dialect.cpp.inc"
 
 #define GET_TYPEDEF_CLASSES
 #include "flydsl/Dialect/FlyROCDL/IR/Atom.cpp.inc"
+#define GET_ATTRDEF_CLASSES
+#include "flydsl/Dialect/FlyROCDL/IR/AttrDefs.cpp.inc"
 
 void FlyROCDLDialect::initialize() {
   addTypes<
 #define GET_TYPEDEF_LIST
 #include "flydsl/Dialect/FlyROCDL/IR/Atom.cpp.inc"
+      >();
+  addAttributes<
+#define GET_ATTRDEF_LIST
+#include "flydsl/Dialect/FlyROCDL/IR/AttrDefs.cpp.inc"
       >();
 }
