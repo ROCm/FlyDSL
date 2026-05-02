@@ -202,6 +202,20 @@ bool FlyAMDGPUMFMATieVDSTToSrc2Impl::run(MachineFunction &MF) {
       if (!Src2.isReg() || Src2.isTied())
         continue;
 
+      // Skip when src2's def is a trivially-rematerializable constant
+      // (e.g. V_MOV_B32_e32 of an immediate, the lowering of a zero-acc
+      // `arith.constant_vector(0.0, ...)`).  Between us (PreRegAlloc) and
+      // TwoAddressInstructionPass, SIFoldOperands may fold that constant
+      // into an inline immediate operand on the MFMA, at which point our
+      // tied marker still points at the (now non-reg) src2 slot and
+      // TwoAddressInstructionPass asserts `regB.isVirtual()`.
+      Register Src2Reg = Src2.getReg();
+      if (!Src2Reg.isVirtual())
+        continue;
+      if (MachineInstr *Def = MRI.getUniqueVRegDef(Src2Reg))
+        if (TII.isTriviallyReMaterializable(*Def))
+          continue;
+
       MI.tieOperands(VDstIdx, Src2Idx);
       Changed = true;
     }

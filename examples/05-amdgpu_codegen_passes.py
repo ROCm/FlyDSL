@@ -73,11 +73,7 @@ def mfma_lds_nontemporal_kernel(C: fx.Tensor):
     # vector<8xf16>, then split into two vector<4xf16> via vector.extract.
     # This avoids LLVM's load-merger combining two adjacent ds_read_b64 into
     # a single ds_read2_b64 (which the AGPR pin pass does not handle).
-    # acc comes from a real load (NOT arith.constant_vector(0.0,...)) — a
-    # constant accumulator gets folded to an immediate src2 slot, which then
-    # confuses the MFMA-tie pass at PreRegAlloc.
-    lds_ab = SmemPtr(base, 0,   T.f16, shape=(8,)).get()
-    lds_c  = SmemPtr(base, 32,  T.f32, shape=(4,)).get()
+    lds_ab = SmemPtr(base, 0, T.f16, shape=(8,)).get()
 
     vec_f16x4 = T.vec(4, T.f16)
     vec_f16x8 = T.vec(8, T.f16)
@@ -90,7 +86,12 @@ def mfma_lds_nontemporal_kernel(C: fx.Tensor):
     ab_vec = vector.load_op(vec_f16x8, lds_ab, [zero_idx], nontemporal=True)
     a_vec = _v.ExtractStridedSliceOp(vec_f16x4, ab_vec, [0], [4], [1]).result
     b_vec = _v.ExtractStridedSliceOp(vec_f16x4, ab_vec, [4], [4], [1]).result
-    acc   = vector.load_op(vec_f32x4, lds_c, [zero_idx])
+
+    # Constant-zero accumulator.  SIFoldOperands folds this to an inline
+    # immediate src2 slot on the MFMA between PreRegAlloc and TwoAddress —
+    # the MFMA-tie pass guards against that case (see
+    # lib/Codegen/AMDGPU/MFMATieVDSTToSrc2.cpp), so this no longer crashes.
+    acc = arith.constant_vector(0.0, vec_f32x4)
 
     out_vec = rocdl.mfma_f32_16x16x16f16(vec_f32x4, [a_vec, b_vec, acc, 0, 0, 0])
 
