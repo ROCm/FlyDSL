@@ -797,8 +797,11 @@ def run_moe_stage2(
                 inter_dim=inter_dim, doweight_stage1=bool(doweight_stage1),
             )
         else:
+            # For a8w4 the activation is fp8 stored as raw uint8 bytes; the shared
+            # ref helper detects fp8 via dtype, so view it as torch.float8_e4m3fn here.
+            x_q_for_ref = x_q.view(torch.float8_e4m3fn) if is_a8w4 else x_q
             out1_ref = torch_moe_gemm1(
-                x_q,
+                x_q_for_ref,
                 w1_q_flat,
                 scale_x,
                 scale_w1_flat,
@@ -984,7 +987,7 @@ def run_moe_stage2(
             )
         elif in_dtype == "fp8":
             a2_dequant = _dequant_blockscale_fp8(a2_q.view(-1, inter_dim), a2_scale.reshape(-1, inter_dim // 32))
-            a2_dequant = a2_dequant.view(a2_q.shape[0], a2_q.shape[1], inter_dim)
+            a2_dequant = a2_dequant.view(tokens, topk, inter_dim)
             w2_dequant = _dequant_blockscale_fp8(
                 w2_q.view(experts * model_dim, inter_dim),
                 scale_w2.view(experts * model_dim, inter_dim // 32),
@@ -998,7 +1001,7 @@ def run_moe_stage2(
             a2_dequant = _dequant_blockscale_fp4(
                 a2_q.view(-1, inter_dim // 2), a2_scale.reshape(-1, inter_dim // 32), inter_dim
             )
-            a2_dequant = a2_dequant.view(a2_q.shape[0], a2_q.shape[1], inter_dim)
+            a2_dequant = a2_dequant.view(tokens, topk, inter_dim)
             w2_dequant = _dequant_blockscale_fp4(
                 w2_q.view(experts * model_dim, inter_dim // 2),
                 scale_w2.view(experts * model_dim, inter_dim // 32),
