@@ -1087,6 +1087,7 @@ def run_moe_gemm_2stage(
     w_fp4_kernel: bool = False,
     flush_l2: bool = True,
     num_buffers: int = 1,
+    num_buffers2: Optional[int] = None,
     use_tdm_gather_as: bool = True,
     use_tdm_store: bool = False,
     inst_prefetch: bool = False,
@@ -1095,6 +1096,7 @@ def run_moe_gemm_2stage(
     cluster_n: int = 1,
 ):
     """Single 2-stage test: gemm1 -> quantize -> gemm2, with routing built once."""
+    nb_stage2 = int(num_buffers2) if num_buffers2 is not None else int(num_buffers)
     if (not bool(use_reduce)) and bool(use_valid_mask):
         pytest.skip("valid_mask is only used in reduce mode (atomic mode ignores it).")
     if out_dtype in ("f32", "fp32", "float"):
@@ -1210,7 +1212,7 @@ def run_moe_gemm_2stage(
         use_reduce=bool(use_reduce),
         use_valid_mask=use_valid_mask,
         flush_l2=bool(flush_l2),
-        num_buffers=int(num_buffers),
+        num_buffers=int(nb_stage2),
         use_tdm_gather_as=bool(use_tdm_gather_as),
         use_tdm_store=bool(use_tdm_store),
         inst_prefetch=bool(inst_prefetch),
@@ -1742,14 +1744,14 @@ if __name__ == "__main__":
     parser.add_argument(
         "--tile_n2",
         type=int,
-        default=None,
-        help="Stage2 tile N (model dim tile). Default: tile_n.",
+        default=256,
+        help="Stage2 tile N (model dim tile). Default: 256 (DS-TP fp8 atomic optimal).",
     )
     parser.add_argument(
         "--tile_k2",
         type=int,
-        default=None,
-        help="Stage2 tile K (inter dim tile). Default: tile_k.",
+        default=128,
+        help="Stage2 tile K (inter dim tile). Default: 128 (DS-TP fp8 atomic optimal).",
     )
     parser.add_argument(
         "--moe_sort_mode",
@@ -1813,9 +1815,16 @@ if __name__ == "__main__":
     parser.add_argument(
         "--num_buffers",
         type=int,
+        default=3,
+        choices=[1, 2, 3, 4],
+        help="Requested MXScale pipeline buffers for Stage1 (DS-TP fp8 atomic optimal: 3). Stage2 uses --num_buffers2.",
+    )
+    parser.add_argument(
+        "--num_buffers2",
+        type=int,
         default=1,
         choices=[1, 2, 3, 4],
-        help="Requested MXScale pipeline buffers for gfx1250 MoE kernels.",
+        help="Stage2 num_buffers (DS-TP fp8 atomic optimal: 1).",
     )
     parser.add_argument(
         "--use_tdm_store",
@@ -1893,6 +1902,7 @@ if __name__ == "__main__":
         skip_ref=bool(args.skip_ref),
         flush_l2=not bool(args.no_flush_l2),
         num_buffers=int(args.num_buffers),
+        num_buffers2=(int(args.num_buffers2) if args.num_buffers2 is not None else None),
         use_tdm_gather_as=bool(args.use_tdm_gather_as),
         use_tdm_store=bool(args.use_tdm_store),
         inst_prefetch=bool(args.inst_prefetch),

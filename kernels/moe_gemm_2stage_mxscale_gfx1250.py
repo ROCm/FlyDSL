@@ -178,11 +178,21 @@ def _compile_stage1_mxscale_kernel_impl(
     # of at least 4 bytes (TDM gather hardware constraint: row_width * elem_bytes % 4 == 0 and > 0).
     _as_layout_rowmajor = bool(is_fp4) or (int(wmma_m_rep) == 1)
     _as_row_bytes_ok = int(scale_k_per_tile) >= 4 and (int(scale_k_per_tile) % 4 == 0)
+    # In non-WST mode all waves redundantly issue the AS gather. With num_buffers >= 3
+    # and few waves (e.g. tn=64 → 4 waves), the tiny-row (row_width=scale_k_per_tile=4B)
+    # redundant gathers corrupt LDS scale loads (logits_diff ≈ 0.01 at T=64). Gate AS
+    # gather off in this regime to fall back to the scalar buffer_load path.
+    _as_redundancy_safe = (
+        bool(wave_specialized_tdm)
+        or int(num_buffers) <= 2
+        or int(num_warps_s1) >= 8
+    )
     _use_tdm_gather_as = (
         bool(use_tdm_gather_as)
         and bool(use_tdm_gather)
         and _as_layout_rowmajor
         and _as_row_bytes_ok
+        and _as_redundancy_safe
     )
 
     # Pipeline calculations for multi-buffer
@@ -2196,11 +2206,20 @@ def _compile_stage2_mxscale_kernel_impl(
     # that is a positive multiple of 4 bytes (TDM gather hardware constraint).
     _as_layout_rowmajor = bool(is_fp4) or (int(wmma_m_rep) == 1)
     _as_row_bytes_ok = int(scale_k_per_tile) >= 4 and (int(scale_k_per_tile) % 4 == 0)
+    # Same redundancy guard as stage1: redundant N-way AS gathers with
+    # tiny row_width (=scale_k_per_tile) corrupt LDS scale loads when
+    # num_buffers>=3 and num_warps is small. Fall back to scalar AS load.
+    _as_redundancy_safe = (
+        bool(wave_specialized_tdm)
+        or int(num_buffers) <= 2
+        or int(num_warps) >= 8
+    )
     _use_tdm_gather_as = (
         bool(use_tdm_gather_as)
         and bool(use_tdm_gather)
         and _as_layout_rowmajor
         and _as_row_bytes_ok
+        and _as_redundancy_safe
     )
 
     _use_pipeline = int(num_buffers) >= 2
