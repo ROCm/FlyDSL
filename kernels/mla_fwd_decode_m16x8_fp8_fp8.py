@@ -1387,7 +1387,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
     # ==================================================================
     # Main kernel body: persistent-thread work loop
     # ==================================================================
-    for work_idx in range(work_start_idx, work_end_idx):
+    for work_idx, _state in range(work_start_idx, work_end_idx, init=[]):
         # Load MlaWorkInfo
         wi_base_i32 = _i32(work_idx * SIZE_MLA_WORK_INFO_IN_DW)
         wi_dw1_4 = buffer_ops.buffer_load(
