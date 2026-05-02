@@ -372,32 +372,26 @@ def checkAllclose(
     a, b, rtol=1e-2, atol=1e-2, tol_err_ratio=0.05, msg="", printNum=8, printLog=True
 ):
     isClose = torch.isclose(a, b, rtol=rtol, atol=atol)
+    # Avoid GPU bool reductions / scalar item() here. Some ROCm/PyTorch builds
+    # can spin indefinitely when converting CUDA scalar reductions to Python
+    # bools. Copy the elementwise mask and reduce on CPU instead.
+    isClose_cpu = isClose.detach().cpu()
 
-    if isClose.all():
+    if bool(isClose_cpu.all()):
         if printLog:
             logger.info(f"{msg}[checkAllclose {atol=} {rtol=} \033[32mpassed~\033[0m]")
         return 0
     else:
-        try:
-            mask = ~isClose
-            num = mask.sum()
-            printNum = min(printNum, num)
-            percent = (num / a.numel()).item()
-            if not printLog:
-                return percent
-            a_msked = a[mask]
-            b_msked = b[mask]
-            delta = (a_msked - b_msked).abs()
-        except RuntimeError as e:
-            mask = ~isClose.to("cpu")
-            num = mask.sum()
-            printNum = min(printNum, num)
-            percent = (num / a.numel()).item()
-            if not printLog:
-                return percent
-            a_msked = a[mask]
-            b_msked = b[mask]
-            delta = (a_msked - b_msked).abs()
+        mask_cpu = ~isClose_cpu
+        num = int(mask_cpu.sum().item())
+        printNum = min(int(printNum), num)
+        percent = num / a.numel()
+        if not printLog:
+            return percent
+        mask = mask_cpu.to(device=a.device) if getattr(a, "is_cuda", False) else mask_cpu
+        a_msked = a[mask].detach().cpu()
+        b_msked = b[mask].detach().cpu()
+        delta = (a_msked - b_msked).abs()
         if percent > tol_err_ratio:
             logger.info(
                 f"""{msg}[checkAllclose {atol=} {rtol=} \033[31mfailed!\033[0m]
@@ -413,7 +407,7 @@ def checkAllclose(
                 f"""{msg}[checkAllclose {atol=} {rtol=} \033[33mwarning!\033[0m] a and b results are not all close"""
             )
         logger.info(
-            f"-->max abs delta:{delta.max()}, delta details: {percent:.1%} ({num} of {a.numel()}) elements"
+            f"-->max abs delta:{delta.max().item()}, delta details: {percent:.1%} ({num} of {a.numel()}) elements"
         )
         return percent
 
@@ -423,21 +417,23 @@ def verify_output(c_out, c_ref, atol=1e-2, rtol=1e-2, msg='', logits_diff_thresh
         return True
     
     # Calculate various error metrics
-    abs_diff = (c_out - c_ref).abs()
+    c_out_cpu = c_out.detach().cpu()
+    c_ref_cpu = c_ref.detach().cpu()
+    abs_diff = (c_out_cpu - c_ref_cpu).abs()
     max_diff = abs_diff.max().item()
     mean_diff = abs_diff.mean().item()
     
     def calc_diff(x: torch.Tensor, y: torch.Tensor):
         x, y = x.double(), y.double()
         denominator = (x * x + y * y).sum()
-        if denominator == 0:
+        if denominator.item() == 0:
             return 0.0
         numerator = 2 * (x * y).sum()
         sim = numerator / denominator
         diff = (1 - sim).item()
         return diff if not torch.isnan(torch.tensor(diff)) else 1.0 # NaN means mismatch
 
-    logits_diff = calc_diff(c_out, c_ref)
+    logits_diff = calc_diff(c_out_cpu, c_ref_cpu)
     print(f"Logits Diff: {logits_diff:.6f}, Max Diff: {max_diff:.6f}, Mean Diff: {mean_diff:.6f}")
     if logits_diff > logits_diff_threshold:
         print(f"✗ Check failed: logits_diff {logits_diff} > {logits_diff_threshold}")
