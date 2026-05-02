@@ -27,6 +27,7 @@
 namespace mlir {
 #define GEN_PASS_DEF_FLYTOROCDLCONVERSIONPASS
 #define GEN_PASS_DEF_FLYROCDLCLUSTERATTRPASS
+#define GEN_PASS_DEF_FLYROCDLTAGAMDGPUCODEGENPASSESPASS
 #include "flydsl/Conversion/FlyToROCDL/Passes.h.inc"
 } // namespace mlir
 
@@ -869,6 +870,74 @@ public:
       func.setPassthroughAttr(ArrayAttr::get(ctx, passthroughAttrs));
       func->removeAttr("rocdl.cluster_dims");
     });
+  }
+};
+
+// ---------------------------------------------------------------------------
+// FlyROCDLTagAMDGPUCodegenPassesPass — opt-in marker for FlyDSL's AMDGPU
+// MachineFunctionPasses.
+//
+// This pass attaches a `fly.amdgpu_codegen_passes` DictionaryAttr (with one
+// UnitAttr entry per enabled pass) on each `gpu.module` it sees.  FlyDSL's
+// `gpu::TargetAttrInterface` impl on `#rocdl.target` reads this attribute
+// when serializing the module to AMDGPU object code and decides whether to
+// inject the corresponding MachineFunctionPasses at PreRegAlloc.
+//
+// Default behaviour: no option set → the pass is a no-op → the
+// gpu.module is serialized via the stock upstream codegen pipeline.
+// ---------------------------------------------------------------------------
+class FlyROCDLTagAMDGPUCodegenPassesPass
+    : public mlir::impl::FlyROCDLTagAMDGPUCodegenPassesPassBase<
+          FlyROCDLTagAMDGPUCodegenPassesPass> {
+public:
+  using mlir::impl::FlyROCDLTagAMDGPUCodegenPassesPassBase<
+      FlyROCDLTagAMDGPUCodegenPassesPass>::
+      FlyROCDLTagAMDGPUCodegenPassesPassBase;
+
+  void runOnOperation() override {
+    if (!preferAGPRForDSRead && !mfmaTieVDSTToSrc2)
+      return;
+
+    Operation *root = getOperation();
+    MLIRContext *ctx = root->getContext();
+
+    SmallVector<NamedAttribute, 2> entries;
+    if (preferAGPRForDSRead)
+      entries.emplace_back(StringAttr::get(ctx, "prefer_agpr_for_ds_read"),
+                           UnitAttr::get(ctx));
+    if (mfmaTieVDSTToSrc2)
+      entries.emplace_back(StringAttr::get(ctx, "mfma_tie_vdst_to_src2"),
+                           UnitAttr::get(ctx));
+
+    auto setOnGPUModule = [&](gpu::GPUModuleOp mod) {
+      DictionaryAttr existing =
+          mod->getAttrOfType<DictionaryAttr>("fly.amdgpu_codegen_passes");
+      if (existing) {
+        // Merge: keep any pre-existing entries and overwrite with ours.
+        SmallVector<NamedAttribute> merged(existing.getValue().begin(),
+                                           existing.getValue().end());
+        for (NamedAttribute e : entries) {
+          auto *it = llvm::find_if(merged, [&](NamedAttribute m) {
+            return m.getName() == e.getName();
+          });
+          if (it != merged.end())
+            *it = e;
+          else
+            merged.push_back(e);
+        }
+        mod->setAttr("fly.amdgpu_codegen_passes",
+                     DictionaryAttr::get(ctx, merged));
+      } else {
+        mod->setAttr("fly.amdgpu_codegen_passes",
+                     DictionaryAttr::get(ctx, entries));
+      }
+    };
+
+    if (auto mod = dyn_cast<gpu::GPUModuleOp>(root)) {
+      setOnGPUModule(mod);
+      return;
+    }
+    root->walk(setOnGPUModule);
   }
 };
 

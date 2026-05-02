@@ -99,13 +99,17 @@ C-API surface (`include/flydsl-c/FlyROCDLDialect.h`,
                                 │
                                 ▼
            Override moduleToObject(llvm::Module &):
+              0. Read `fly.amdgpu_codegen_passes` from the gpu.module.
+                 If empty → defer to SerializeGPUModuleBase (stock path).
               1. Translate to LLVM IR (parent helper)
               2. Build AMDGPU TargetMachine
               3. legacy::PassManager PM;
                  TargetPassConfig *PC = TM->createPassConfig(PM);
                  PM.add(PC);
-                 PC->insertPass(&AnchorPassID, &OurPass1ID);  ◄─ injection point
-                 PC->insertPass(&AnchorPassID, &OurPass2ID);
+                 if (flags.preferAGPRForDSRead)
+                     PC->insertPass(&AnchorPassID, &OurPass1ID);
+                 if (flags.mfmaTieVDSTToSrc2)
+                     PC->insertPass(&AnchorPassID, &OurPass2ID);
                  PC->addISelPasses(); PC->addMachinePasses(); ...
                  PM.run(*module);
               4. Return ELF bytes
@@ -190,21 +194,84 @@ LLVM releases.
 
 ## Surfacing the passes from Python
 
-A new compile hint toggles each pass via `cl::opt` (already supported by
-`flydsl.compiler.llvm_options`):
+The two FlyDSL passes are **opt-in per kernel**. They are *not* part of
+the default AMDGPU codegen pipeline — a `gpu.module` without the opt-in
+attribute serializes through stock upstream codegen unchanged.
+
+### User-facing API
 
 ```python
-@flyc.kernel(compile_hints={
-    "prefer_agpr_for_ds_read": True,           # default off
-    # "mfma_tie_vdst_src2_for_128": False,     # default on, escape hatch
+@flyc.jit(compile_hints={
+    "prefer_agpr_for_ds_read": True,   # default False
+    "mfma_tie_vdst_to_src2":   True,   # default False
 })
 def my_kernel(...): ...
 ```
 
-`RocmBackend.default_llvm_options(compile_hints=...)` translates these
-into `{"fly-amdgpu-prefer-agpr-for-ds-read": True, ...}` which the
-`llvm_options` context manager pushes into `cl::opt` storage before
-codegen runs.
+When neither hint is set, neither pass runs.
+
+### How the opt-in flows through the pipeline
+
+```text
+@flyc.jit(compile_hints={"prefer_agpr_for_ds_read": True, ...})
+                │
+                ▼
+RocmBackend.pipeline_fragments(compile_hints)
+                │  reads the two bool hints; if any is true, splices
+                │  `fly-rocdl-tag-amdgpu-codegen-passes{...}` into the
+                │  existing `gpu.module(...)` pipeline group.
+                ▼
+fly-rocdl-tag-amdgpu-codegen-passes pass
+                │  walks the gpu.module and writes the discardable attr:
+                │    fly.amdgpu_codegen_passes = {
+                │      prefer_agpr_for_ds_read,    // UnitAttr if enabled
+                │      mfma_tie_vdst_to_src2,      // UnitAttr if enabled
+                │    }
+                ▼
+gpu-module-to-binary{format=fatbin opts=...}
+                │
+                ▼
+FlyROCDLTargetAttrImpl::serializeToObject
+                │  reads `fly.amdgpu_codegen_passes` from the gpu.module.
+                │  - missing/empty → constructs the serializer with all
+                │    flags=false; FlySerializeAMDGPUModule::moduleToObject
+                │    short-circuits to SerializeGPUModuleBase (no
+                │    insertPass calls, stock pipeline).
+                │  - any flag set → emitWithFlyPasses runs and only
+                │    insertPass-es the enabled subset.
+                ▼
+LLVM AMDGPU codegen pipeline (with opt-in passes spliced after
+                              AMDGPUPrepareAGPRAllocLegacyID)
+```
+
+### Bypassing the Python frontend (raw MLIR, fly-opt, tests)
+
+If you build a `gpu.module` by hand or run pieces of the pipeline via
+`fly-opt`, you have two equivalent ways to turn the passes on:
+
+1. Run the tag pass yourself:
+   ```
+   gpu.module(fly-rocdl-tag-amdgpu-codegen-passes{
+       prefer-agpr-for-ds-read=true
+       mfma-tie-vdst-to-src2=true
+   })
+   ```
+2. Or write the attribute directly on the gpu.module:
+   ```mlir
+   gpu.module @m [#rocdl.target<chip = "gfx942">]
+       attributes {fly.amdgpu_codegen_passes =
+           {prefer_agpr_for_ds_read, mfma_tie_vdst_to_src2}} {
+     ...
+   }
+   ```
+
+### Tuning behaviour (independent of opt-in)
+
+A handful of `cl::opt`s control *behaviour within* each pass once it
+runs (e.g. `fly-amdgpu-prefer-agpr-for-ds-read` extends the AGPR pin to
+plain DS loads, not just nontemporal). Toggle them via
+`flydsl.compiler.llvm_options` as before — they have no effect when the
+opt-in attribute is absent because the pass itself never executes.
 
 ## Caveats
 

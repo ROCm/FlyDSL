@@ -15,6 +15,7 @@ MLIR_DECLARE_CAPI_DIALECT_REGISTRATION(FlyROCDL, fly_rocdl);
 
 MLIR_CAPI_EXPORTED void mlirRegisterFlyToROCDLConversionPass(void);
 MLIR_CAPI_EXPORTED void mlirRegisterFlyROCDLClusterAttrPass(void);
+MLIR_CAPI_EXPORTED void mlirRegisterFlyROCDLTagAMDGPUCodegenPassesPass(void);
 
 /// Register FlyDSL-owned AMDGPU MachineFunctionPasses with the global LLVM
 /// PassRegistry.  Idempotent.  See lib/Codegen/AMDGPU/.

@@ -53,14 +53,26 @@ extern char &AMDGPUPrepareAGPRAllocLegacyID;
 
 namespace {
 
+/// Per-module switches read from the `fly.amdgpu_codegen_passes` attribute on
+/// the gpu.module being serialized.  Both default to false: when *all* are
+/// false, FlySerializeAMDGPUModule does no insertPass and lets upstream
+/// codegen run unmodified.
+struct FlyAMDGPUCodegenPassFlags {
+  bool preferAGPRForDSRead = false;
+  bool mfmaTieVDSTToSrc2 = false;
+
+  bool any() const { return preferAGPRForDSRead || mfmaTieVDSTToSrc2; }
+};
+
 /// FlyDSL's serializer subclass.  Same flow as
 /// mlir::ROCDL::SerializeGPUModuleBase's default, plus our pass insertion.
 class FlySerializeAMDGPUModule : public SerializeGPUModuleBase {
 public:
   FlySerializeAMDGPUModule(Operation &module, ROCDLTargetAttr target,
-                           const gpu::TargetOptions &targetOptions = {})
+                           const gpu::TargetOptions &targetOptions,
+                           FlyAMDGPUCodegenPassFlags flags)
       : SerializeGPUModuleBase(module, target, targetOptions),
-        flyTargetOptions(targetOptions) {}
+        flyTargetOptions(targetOptions), flyFlags(flags) {}
 
 protected:
   /// Override: produce object bytes from the (already linked & optimized)
@@ -83,6 +95,7 @@ private:
   /// own copy so moduleToObject can branch on getCompilationTarget()
   /// (Assembly vs Binary vs Offload), matching upstream's behavior.
   gpu::TargetOptions flyTargetOptions;
+  FlyAMDGPUCodegenPassFlags flyFlags;
 };
 
 FailureOr<SmallVector<char, 0>>
@@ -116,10 +129,17 @@ FlySerializeAMDGPUModule::emitWithFlyPasses(llvm::Module &llvmModule,
     // the last pass scheduled in GCNPassConfig::addPreRegAlloc().  insertPass
     // records the pair into the per-TPC InsertedPasses list; the splice fires
     // when addMachinePasses() reaches the anchor's addPass() call.
-    PC->insertPass(&llvm::AMDGPUPrepareAGPRAllocLegacyID,
-                   &llvm::FlyAMDGPUPreferAGPRForDSReadLegacyID);
-    PC->insertPass(&llvm::AMDGPUPrepareAGPRAllocLegacyID,
-                   &llvm::FlyAMDGPUMFMATieVDSTToSrc2LegacyID);
+    //
+    // Each pass is opt-in via `fly.amdgpu_codegen_passes` on the gpu.module;
+    // emitWithFlyPasses isn't reached at all when no flag is set (see
+    // moduleToObject below), so reaching this point implies at least one
+    // flag is true.
+    if (flyFlags.preferAGPRForDSRead)
+      PC->insertPass(&llvm::AMDGPUPrepareAGPRAllocLegacyID,
+                     &llvm::FlyAMDGPUPreferAGPRForDSReadLegacyID);
+    if (flyFlags.mfmaTieVDSTToSrc2)
+      PC->insertPass(&llvm::AMDGPUPrepareAGPRAllocLegacyID,
+                     &llvm::FlyAMDGPUMFMATieVDSTToSrc2LegacyID);
 
     if (PC->addISelPasses())
       return failure();
@@ -158,16 +178,23 @@ FlySerializeAMDGPUModule::emitWithFlyPasses(llvm::Module &llvmModule,
 
 FailureOr<SmallVector<char, 0>>
 FlySerializeAMDGPUModule::moduleToObject(llvm::Module &llvmModule) {
-  // Offload target = LLVM IR; no codegen to run.  Parent already returns the
-  // bitcode bytes for that case, so don't bother building a TargetMachine.
+  // Opt-in: with no FlyDSL pass requested for this gpu.module, run the
+  // stock upstream ROCDL codegen path (moduleToObjectImpl is protected on
+  // SerializeGPUModuleBase and is exactly what AMDGPUSerializer calls).
+  // We never touch the codegen pipeline unless the user opts in.
+  if (!flyFlags.any())
+    return moduleToObjectImpl(flyTargetOptions, llvmModule);
+
+  // Offload target = LLVM IR; no codegen to run.  Defer to upstream which
+  // returns the bitcode bytes directly without building a TargetMachine.
   if (flyTargetOptions.getCompilationTarget() ==
       gpu::CompilationTarget::Offload)
-    return SerializeGPUModuleBase::moduleToObject(llvmModule);
+    return moduleToObjectImpl(flyTargetOptions, llvmModule);
 
   auto TMOrErr = getOrCreateTargetMachine();
   if (failed(TMOrErr) || !*TMOrErr) {
-    // Fall back to parent.  Parent does its own diagnostics.
-    return SerializeGPUModuleBase::moduleToObject(llvmModule);
+    // Fall back to upstream codegen.  Parent does its own diagnostics.
+    return moduleToObjectImpl(flyTargetOptions, llvmModule);
   }
 
   auto Result = emitWithFlyPasses(llvmModule, **TMOrErr);
@@ -177,7 +204,7 @@ FlySerializeAMDGPUModule::moduleToObject(llvm::Module &llvmModule) {
   // If our path failed for any reason, defer to upstream so the user still
   // gets a build (without our optimizations).  This keeps the failure mode
   // visible (no perf gain) rather than fatal.
-  return SerializeGPUModuleBase::moduleToObject(llvmModule);
+  return moduleToObjectImpl(flyTargetOptions, llvmModule);
 }
 
 // ---------------------------------------------------------------------------
@@ -208,10 +235,23 @@ FlyROCDLTargetAttrImpl::serializeToObject(
   // is idempotent.
   SerializeGPUModuleBase::init();
   // Make sure FlyDSL passes are known to the global PassRegistry; this is
-  // also idempotent and cheap.
+  // also idempotent and cheap.  Doing it unconditionally keeps the symbols
+  // discoverable for fly-opt and tests, even when the per-module opt-in is
+  // off.
   flydsl::registerFlyAMDGPUCodegenPasses();
 
-  FlySerializeAMDGPUModule serializer(*module, target, options);
+  // Read the per-gpu.module opt-in attribute.  See
+  // `fly-rocdl-tag-amdgpu-codegen-passes` in lib/Conversion/FlyToROCDL.
+  FlyAMDGPUCodegenPassFlags flags;
+  if (auto dict =
+          module->getAttrOfType<DictionaryAttr>("fly.amdgpu_codegen_passes")) {
+    flags.preferAGPRForDSRead =
+        static_cast<bool>(dict.get("prefer_agpr_for_ds_read"));
+    flags.mfmaTieVDSTToSrc2 =
+        static_cast<bool>(dict.get("mfma_tie_vdst_to_src2"));
+  }
+
+  FlySerializeAMDGPUModule serializer(*module, target, options, flags);
   std::optional<SmallVector<char, 0>> bytes = serializer.run();
   if (!bytes)
     return std::nullopt;

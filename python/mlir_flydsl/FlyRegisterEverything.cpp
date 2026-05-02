@@ -36,5 +36,6 @@ NB_MODULE(_mlirRegisterEverything, m) {
   mlirRegisterFlyPasses();
   mlirRegisterFlyToROCDLConversionPass();
   mlirRegisterFlyROCDLClusterAttrPass();
+  mlirRegisterFlyROCDLTagAMDGPUCodegenPassesPass();
   mlirRegisterFlyAMDGPUCodegenPasses();
 }

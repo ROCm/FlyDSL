@@ -15,6 +15,9 @@ MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(FlyROCDL, fly_rocdl, mlir::fly_rocdl::FlyR
 
 void mlirRegisterFlyToROCDLConversionPass(void) { mlir::registerFlyToROCDLConversionPass(); }
 void mlirRegisterFlyROCDLClusterAttrPass(void) { mlir::registerFlyROCDLClusterAttrPass(); }
+void mlirRegisterFlyROCDLTagAMDGPUCodegenPassesPass(void) {
+  mlir::registerFlyROCDLTagAMDGPUCodegenPassesPass();
+}
 
 void mlirRegisterFlyAMDGPUCodegenPasses(void) {
   flydsl::registerFlyAMDGPUCodegenPasses();

@@ -23,6 +23,7 @@ No GPU is required — only ``fly-opt``-style codegen via the embedded
 LLVM AMDGPU backend that lives in libFlyPythonCAPI.so.
 """
 
+import difflib
 import re
 import textwrap
 
@@ -82,7 +83,7 @@ def _compile_to_isa(mlir_text: str, *, llvm_opts: dict | None = None) -> str:
 # ---------------------------------------------------------------------------
 _MFMA_KERNEL_TMPL = """
 module attributes {{gpu.container_module}} {{
-  gpu.module @m [#rocdl.target<chip = "gfx942">] {{
+  gpu.module @m [#rocdl.target<chip = "gfx942">] {tag_attr} {{
     llvm.func @k(
         %arg_a:   !llvm.ptr<1>,
         %arg_b:   !llvm.ptr<1>,
@@ -101,14 +102,22 @@ module attributes {{gpu.container_module}} {{
 }}
 """
 
+# Default opt-in: both FlyDSL AMDGPU passes are enabled via the discardable
+# attribute that FlySerializeAMDGPUModule reads.  Tests that want to verify
+# "default off" behaviour pass tag_attr="" explicitly.
+_TAG_ATTR_BOTH = (
+    'attributes {fly.amdgpu_codegen_passes = '
+    '{prefer_agpr_for_ds_read, mfma_tie_vdst_to_src2}}'
+)
 
-def _mfma_kernel_global_a() -> str:
+
+def _mfma_kernel_global_a(*, tag_attr: str = _TAG_ATTR_BOTH) -> str:
     """%a comes from a plain global load (no AGPR hint expected)."""
     load_a = "%a = llvm.load %arg_a : !llvm.ptr<1> -> vector<4xf16>"
-    return _MFMA_KERNEL_TMPL.format(load_a=load_a)
+    return _MFMA_KERNEL_TMPL.format(load_a=load_a, tag_attr=tag_attr)
 
 
-def _mfma_kernel_lds_nontemporal_a() -> str:
+def _mfma_kernel_lds_nontemporal_a(*, tag_attr: str = _TAG_ATTR_BOTH) -> str:
     """%a comes from an LDS (addrspace 3) load tagged nontemporal — the
     AGPR pass should pin its destination to AGPR, which we expect to
     surface as an a* register in the MFMA src0 in the final ISA."""
@@ -117,7 +126,7 @@ def _mfma_kernel_lds_nontemporal_a() -> str:
         %lds_ptr  = llvm.inttoptr %lds_addr : i32 to !llvm.ptr<3>
         %a = llvm.load %lds_ptr {nontemporal} : !llvm.ptr<3> -> vector<4xf16>
     """).strip()
-    return _MFMA_KERNEL_TMPL.format(load_a=load_a)
+    return _MFMA_KERNEL_TMPL.format(load_a=load_a, tag_attr=tag_attr)
 
 
 # ---------------------------------------------------------------------------
@@ -251,7 +260,7 @@ class TestPreferAGPRForDSRead:
             %lds_ptr  = llvm.inttoptr %lds_addr : i32 to !llvm.ptr<3>
             %a = llvm.load %lds_ptr : !llvm.ptr<3> -> vector<4xf16>
         """).strip()
-        kernel = _MFMA_KERNEL_TMPL.format(load_a=load_a)
+        kernel = _MFMA_KERNEL_TMPL.format(load_a=load_a, tag_attr=_TAG_ATTR_BOTH)
 
         isa_off = _compile_to_isa(kernel)
         mfmas_off = _mfma_lines(isa_off)
@@ -270,4 +279,120 @@ class TestPreferAGPRForDSRead:
         assert agpr_on, (
             f"cl::opt on did NOT extend AGPR pinning to plain DS loads; "
             f"ISA:\n{isa_on[:1500]}"
+        )
+
+
+class TestOptInGating:
+    """`fly.amdgpu_codegen_passes` is opt-in: a gpu.module without the
+    attribute must serialize through the stock upstream codegen pipeline
+    (no FlyDSL MachineFunctionPasses inserted)."""
+
+    def test_no_tag_attr_means_pass_does_not_run(self):
+        """A nontemporal LDS load is the AGPR pass's strongest trigger; with
+        the opt-in attribute absent, the pass shouldn't fire and src0 must
+        stay in a VGPR."""
+        kernel = _mfma_kernel_lds_nontemporal_a(tag_attr="")
+        isa = _compile_to_isa(kernel)
+        mfmas = _mfma_lines(isa)
+        assert mfmas, f"no v_mfma_* in ISA:\n{isa[:1000]}"
+        agpr_src0 = [
+            (op, src0) for op, _dst, src0, _s1, _src2 in mfmas
+            if src0.startswith("a")
+        ]
+        assert not agpr_src0, (
+            "AGPR pass ran without `fly.amdgpu_codegen_passes` opt-in attr; "
+            f"got src0 pinned to AGPR.  ISA snippet:\n{isa[:2000]}"
+        )
+
+    def test_partial_tag_only_runs_named_pass(self):
+        """When only `prefer_agpr_for_ds_read` is opted in, the AGPR pass
+        runs (nontemporal LDS load → src0 in AGPR) but the MFMA tie pass is
+        not invoked.  We can't directly observe the tie pass NOT running on
+        16x16x16f16 (TableGen already produces the tied form), so this test
+        only positively asserts the AGPR effect — its value is proving the
+        partial-tag path compiles + serializes correctly."""
+        tag = (
+            'attributes {fly.amdgpu_codegen_passes = '
+            '{prefer_agpr_for_ds_read}}'
+        )
+        kernel = _mfma_kernel_lds_nontemporal_a(tag_attr=tag)
+        isa = _compile_to_isa(kernel)
+        mfmas = _mfma_lines(isa)
+        assert mfmas, f"no v_mfma_* in ISA:\n{isa[:1000]}"
+        agpr_src0 = [
+            src0 for _op, _dst, src0, _s1, _src2 in mfmas
+            if src0.startswith("a")
+        ]
+        assert agpr_src0, (
+            "AGPR pass did not fire even though prefer_agpr_for_ds_read was "
+            f"opted in.  ISA snippet:\n{isa[:2000]}"
+        )
+
+    def test_same_kernel_isa_changes_with_hint(self):
+        """End-to-end opt-in proof: identical kernel source compiled twice,
+        once with the `fly.amdgpu_codegen_passes` opt-in attribute and once
+        without.  The two ISA outputs must differ — that difference is the
+        only direct evidence that flipping the hint actually drives the
+        injected AMDGPU MachineFunctionPass through codegen.
+
+        Uses the LDS-nontemporal kernel because that's the one shape where
+        `FlyAMDGPUPreferAGPRForDSRead` produces a behaviour change visible
+        in the textual ISA (src0 of the MFMA moves from v* to a*)."""
+        kernel_off = _mfma_kernel_lds_nontemporal_a(tag_attr="")
+        kernel_on = _mfma_kernel_lds_nontemporal_a()  # default: both on
+        # Sanity-check that the only difference between the two MLIR inputs
+        # is the opt-in attribute — otherwise an ISA diff wouldn't prove
+        # what we claim it proves.
+        assert kernel_off.replace("\n", "") + " " != kernel_on.replace(
+            "\n", ""
+        ), "test setup error: kernel_off and kernel_on are identical"
+        for line_off, line_on in zip(
+            kernel_off.splitlines(), kernel_on.splitlines()
+        ):
+            if line_off != line_on:
+                assert "fly.amdgpu_codegen_passes" in line_on, (
+                    "test setup error: MLIR diff between off/on kernels is "
+                    f"not just the opt-in attr.  off: {line_off!r}  on: "
+                    f"{line_on!r}"
+                )
+
+        isa_off = _compile_to_isa(kernel_off)
+        isa_on = _compile_to_isa(kernel_on)
+
+        if isa_off == isa_on:
+            # Build a short context-line diff for the failure message so a
+            # human can see at a glance what we expected to change but didn't.
+            diff = "\n".join(
+                difflib.unified_diff(
+                    isa_off.splitlines(),
+                    isa_on.splitlines(),
+                    fromfile="hint=off",
+                    tofile="hint=on",
+                    n=2,
+                    lineterm="",
+                )
+            )
+            pytest.fail(
+                "ISA was identical with and without the opt-in attr — the "
+                "FlyDSL AMDGPU passes appear to NOT have run when opted in, "
+                "or to have run when opted out.  Diff (empty == identical):\n"
+                f"{diff or '<no diff>'}\n\n"
+                f"--- ISA (hint=off, first 800 chars) ---\n{isa_off[:800]}"
+            )
+
+        # Concrete behavioural assertion: src0 of at least one MFMA flipped
+        # from VGPR (v*) to AGPR (a*) when the hint was turned on.  This is
+        # the load-bearing perf change the AGPR pass is supposed to deliver.
+        src0_off = {
+            src0 for _op, _d, src0, _s1, _s2 in _mfma_lines(isa_off)
+        }
+        src0_on = {
+            src0 for _op, _d, src0, _s1, _s2 in _mfma_lines(isa_on)
+        }
+        flipped_to_agpr = any(s.startswith("a") for s in src0_on - src0_off)
+        assert flipped_to_agpr, (
+            "ISA differs but no MFMA src0 moved from v* (hint=off) to a* "
+            "(hint=on) — diff is in something other than AGPR pinning.\n"
+            f"src0 off: {sorted(src0_off)}\n"
+            f"src0 on : {sorted(src0_on)}"
         )
