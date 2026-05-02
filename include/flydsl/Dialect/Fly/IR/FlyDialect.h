@@ -33,6 +33,15 @@ namespace mlir::fly {
 #include "flydsl/Dialect/Fly/IR/FlyAttrConstraints.h.inc"
 #include "flydsl/Dialect/Fly/IR/FlyTypeConstraints.h.inc"
 
+template <AddressSpace addressSpace> bool isGenericAddressSpace(Attribute attr) {
+  auto addressSpaceAttr = llvm::dyn_cast_if_present<AddressSpaceAttr>(attr);
+  return addressSpaceAttr && addressSpaceAttr.getValue() == addressSpace;
+}
+
+template <class TargetAddressSpace> bool isTargetAddressSpace(Attribute attr) {
+  return llvm::isa_and_nonnull<TargetAddressSpace>(attr);
+}
+
 ParseResult parseMNKDimensionList(AsmParser &parser, int32_t &m, int32_t &n, int32_t &k);
 void printMNKDimensionList(AsmPrinter &printer, int32_t m, int32_t n, int32_t k);
 

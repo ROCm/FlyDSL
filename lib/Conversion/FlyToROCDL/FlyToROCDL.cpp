@@ -32,23 +32,30 @@ namespace mlir {
 
 using namespace mlir;
 using namespace mlir::fly;
+using namespace mlir::fly_rocdl;
 
 namespace {
 
 unsigned mapToLLVMAddressSpace(AddressSpace addrSpace) {
   switch (addrSpace) {
+  case AddressSpace::Generic:
+    return 0;
   case AddressSpace::Global:
     return 1;
   case AddressSpace::Shared:
     return 3;
   case AddressSpace::Register:
     return 5;
-  case AddressSpace::BufferDesc:
-    return 8;
-  default:
-    assert(false && "Unsupported address space");
-    return 0;
   }
+  llvm_unreachable("unsupported address space");
+}
+
+unsigned mapAttrToLLVMAddressSpace(Attribute attr) {
+  if (auto e = dyn_cast<AddressSpaceAttr>(attr))
+    return mapToLLVMAddressSpace(e.getValue());
+  if (isTargetAddressSpace<BufferDescAddressAttr>(attr))
+    return 8;
+  return 0; // default to generic address space
 }
 
 class MakePtrOpLowering : public OpConversionPattern<MakePtrOp> {
@@ -63,9 +70,9 @@ public:
       return failure();
 
     Location loc = op.getLoc();
-    AddressSpace addrSpace = flyPtrTy.getAddressSpace().getValue();
+    Attribute addrSpaceAttr = flyPtrTy.getAddressSpace();
 
-    if (addrSpace == AddressSpace::Register) {
+    if (isGenericAddressSpace<AddressSpace::Register>(addrSpaceAttr)) {
       auto dictAttrs = op.getDictAttrs();
       if (!dictAttrs)
         return rewriter.notifyMatchFailure(op, "register make_ptr requires dictAttrs");
@@ -79,7 +86,7 @@ public:
       Value ptr = LLVM::AllocaOp::create(rewriter, loc, llvmPtrTy, elemTy, nElems, 0);
       rewriter.replaceOp(op, ptr);
       return success();
-    } else if (addrSpace == AddressSpace::BufferDesc) {
+    } else if (isTargetAddressSpace<BufferDescAddressAttr>(addrSpaceAttr)) {
       auto args = adaptor.getArgs();
       if (args.size() != 4)
         return rewriter.notifyMatchFailure(
@@ -90,8 +97,8 @@ public:
       Value numRecords = args[2];
       Value flags = args[3];
 
-      auto rsrcPtrTy = LLVM::LLVMPointerType::get(rewriter.getContext(),
-                                                  mapToLLVMAddressSpace(AddressSpace::BufferDesc));
+      unsigned llvmAS = mapAttrToLLVMAddressSpace(addrSpaceAttr);
+      auto rsrcPtrTy = LLVM::LLVMPointerType::get(rewriter.getContext(), llvmAS);
       Value bufferRsrc = ROCDL::MakeBufferRsrcOp::create(rewriter, loc, rsrcPtrTy, base, stride,
                                                          numRecords, flags);
       rewriter.replaceOp(op, BufferFatPtr::pack(rewriter, loc, bufferRsrc));
@@ -110,7 +117,7 @@ public:
                                 ConversionPatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
     auto flyPtrTy = cast<fly::PointerType>(op.getResult().getType());
-    unsigned addrSpace = mapToLLVMAddressSpace(flyPtrTy.getAddressSpace().getValue());
+    unsigned addrSpace = mapAttrToLLVMAddressSpace(flyPtrTy.getAddressSpace());
 
     auto moduleOp = op->getParentOfType<gpu::GPUModuleOp>();
     if (!moduleOp)
@@ -252,7 +259,7 @@ public:
       offsetVal = defOp->getOperand(0);
     }
 
-    if (flyPtrTy.getAddressSpace().getValue() == AddressSpace::BufferDesc) {
+    if (isTargetAddressSpace<BufferDescAddressAttr>(flyPtrTy.getAddressSpace())) {
       BufferFatPtr bp(flyPtrTy, base);
       rewriter.replaceOp(op, bp.addOffset(rewriter, loc, offsetVal));
       return success();
@@ -316,7 +323,7 @@ public:
       }
     }
 
-    if (flyPtrTy.getAddressSpace().getValue() == AddressSpace::BufferDesc) {
+    if (isTargetAddressSpace<BufferDescAddressAttr>(flyPtrTy.getAddressSpace())) {
       BufferFatPtr bp(flyPtrTy, ptr);
       Value zero = arith::ConstantIntOp::create(rewriter, loc, 0, 32);
       ArrayAttr noAttrs;
@@ -361,7 +368,7 @@ public:
       }
     }
 
-    if (flyPtrTy.getAddressSpace().getValue() == AddressSpace::BufferDesc) {
+    if (isTargetAddressSpace<BufferDescAddressAttr>(flyPtrTy.getAddressSpace())) {
       BufferFatPtr bp(flyPtrTy, ptr);
       Value zero = arith::ConstantIntOp::create(rewriter, loc, 0, 32);
       ArrayAttr noAttrs;
@@ -703,15 +710,15 @@ public:
       return VectorType::get(vecTy.getShape(), convertedElem, vecTy.getScalableDims());
     });
     addConversion([&](fly::MemRefType flyMemRefTy) -> Type {
-      if (flyMemRefTy.getAddressSpace().getValue() == AddressSpace::BufferDesc)
+      if (isTargetAddressSpace<BufferDescAddressAttr>(flyMemRefTy.getAddressSpace()))
         return BufferFatPtr::getType(flyMemRefTy.getContext());
-      unsigned as = mapToLLVMAddressSpace(flyMemRefTy.getAddressSpace().getValue());
+      unsigned as = mapAttrToLLVMAddressSpace(flyMemRefTy.getAddressSpace());
       return LLVM::LLVMPointerType::get(flyMemRefTy.getContext(), as);
     });
     addConversion([&](fly::PointerType flyPtrTy) -> Type {
-      if (flyPtrTy.getAddressSpace().getValue() == AddressSpace::BufferDesc)
+      if (isTargetAddressSpace<BufferDescAddressAttr>(flyPtrTy.getAddressSpace()))
         return BufferFatPtr::getType(flyPtrTy.getContext());
-      unsigned as = mapToLLVMAddressSpace(flyPtrTy.getAddressSpace().getValue());
+      unsigned as = mapAttrToLLVMAddressSpace(flyPtrTy.getAddressSpace());
       return LLVM::LLVMPointerType::get(flyPtrTy.getContext(), as);
     });
     addConversion([&](fly::CopyAtomType atomTy) -> Type {
