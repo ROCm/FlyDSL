@@ -493,7 +493,7 @@ def perm_b32(src_hi, src_lo, sel, **kw):
     )
 
 
-def raw_ptr_buffer_load_lds(rsrc, lds_ptr, size, voffset, soffset=0, offset=0, aux=0, **kw):
+def raw_ptr_buffer_load_lds(rsrc, lds_ptr, size, voffset, soffset, offset, aux, **kw):
     from ..._mlir.dialects.rocdl import raw_ptr_buffer_load_lds as _op
 
     return _op(
