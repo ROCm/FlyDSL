@@ -154,7 +154,13 @@ class ExternFunction:
                     if value_bits > expected_bits:
                         value = _arith.TruncIOp(expected_type, value).result
                     elif value_bits < expected_bits:
-                        value = _arith.ExtUIOp(expected_type, value).result
+                        # Use sign-extension for signed type names,
+                        # zero-extension for unsigned.
+                        type_name = self._arg_type_names[arg_pos]
+                        if type_name.startswith("int"):
+                            value = _arith.ExtSIOp(expected_type, value).result
+                        else:
+                            value = _arith.ExtUIOp(expected_type, value).result
 
             raw_args.append(value)
 

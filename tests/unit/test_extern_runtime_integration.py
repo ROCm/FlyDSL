@@ -13,12 +13,13 @@ from flydsl.expr.extern import ffi
 
 
 def test_explicit_module_loader_args_follow_ciface_packing():
+    """Verify the packed layout matches C++ expectations: void** slots."""
     module = ctypes.c_void_p()
     err = ctypes.c_int32()
 
     packed = _pack_ciface_args(module, err)
-    packed_addr_ptr = ctypes.cast(packed, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
-    slots = ctypes.cast(packed_addr_ptr.contents, ctypes.POINTER(ctypes.c_void_p))
+    # C++ side does: slots[i] = ((void**)packed)[i]
+    slots = ctypes.cast(packed, ctypes.POINTER(ctypes.c_void_p))
 
     assert slots[0] == ctypes.addressof(module)
     assert slots[1] == ctypes.addressof(err)

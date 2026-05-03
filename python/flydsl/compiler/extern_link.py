@@ -94,8 +94,12 @@ class BoundExternFunction(LinkedExternFunction):
         )
 
 
+# Backward-compatible alias — downstream may import the old name.
+ExternFunction = BoundExternFunction
+
 __all__ = [
     "BoundExternFunction",
+    "ExternFunction",
     "LinkedExternFunction",
     "link_extern",
     "register_extern_resolver",
