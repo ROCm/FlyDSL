@@ -43,14 +43,11 @@ def _flydsl_key() -> str:
       2. Native shared libraries (_mlirDialectsFly*.so, libFly*.so, libfly_jit_runtime.so,
          libmlir_rocm_runtime.so)
       3. flydsl.__version__
-      4. Debug-info emission mode that changes the generated binary metadata
 
     Any change to compiler code, pass pipeline, runtime wrappers, or C++
     bindings will produce a different key, invalidating stale disk caches.
     """
     import flydsl
-
-    debug_info_enabled = bool(env.debug.enable_debug_info)
 
     contents = []
 
@@ -95,7 +92,7 @@ def _flydsl_key() -> str:
                         h.update(chunk)
                 contents.append(h.hexdigest())
 
-    key = f"flydsl:{flydsl.__version__}:{backend.hash()}:" f"debug_info={int(debug_info_enabled)}-" + "-".join(contents)
+    key = f"flydsl:{flydsl.__version__}:{backend.hash()}-" + "-".join(contents)
     log().debug(f"flydsl_key: {hashlib.sha256(key.encode()).hexdigest()[:16]}")
     return key
 
@@ -252,11 +249,6 @@ def _jit_function_cache_key(func: Callable, owner_cls=None) -> str:
     parts = []
     parts.append(_flydsl_key())
     parts.append(_get_func_source(func))
-    try:
-        source = inspect.getsource(func)
-    except OSError:
-        source = func.__code__.co_code.hex()
-    parts.append(source)
     try:
         rootFile = inspect.getfile(func)
     except (TypeError, OSError):
@@ -787,7 +779,15 @@ class JitFunction:
                 key_parts.append((name, "Type", arg))
                 continue
 
-            is_runtime = ann is not inspect.Parameter.empty and hasattr(ann, "__fly_ptrs__")
+            # The stream selects the launch queue and does not affect generated code.
+            # Normalize equivalent host representations (raw pointer, Stream object)
+            # so CPU AOT artifacts can be reused by GPU runtime calls.
+            if ann is Stream:
+                key_parts.append((name, Stream))
+                continue
+
+            is_runtime = (ann is not inspect.Parameter.empty
+                          and hasattr(ann, '__fly_ptrs__'))
             if isinstance(arg, tuple):
                 key_parts.append((name, tuple(self._arg_cache_sig(a) for a in arg)))
             else:

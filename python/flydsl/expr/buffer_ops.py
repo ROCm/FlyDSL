@@ -24,10 +24,12 @@ Example:
     >>> buffer_ops.buffer_store(data, rsrc, offset)
 """
 
-from .._mlir import ir
-from .._mlir.dialects import llvm, rocdl, arith as std_arith
-from .._mlir.extras import types as T
 from typing import Optional, Union
+
+from .._mlir import ir
+from .._mlir.dialects import arith as std_arith
+from .._mlir.dialects import llvm, rocdl
+from .._mlir.extras import types as T
 from ..runtime.device import is_rdna_arch
 from .meta import traced_op
 
@@ -148,7 +150,15 @@ def extract_base_index(tensor, address_space: int = 1) -> ir.Value:
     (e.g. global_atomic_pk_add_bf16 on gfx942).
     """
     from .._mlir.dialects import fly as _fly
+    from .._mlir.dialects import memref as _memref
+
     raw = _unwrap_value(tensor)
+    try:
+        ir.MemRefType(raw.type)
+        return _memref.extract_aligned_pointer_as_index(raw)
+    except ValueError:
+        pass
+
     ptr_type = ir.Type.parse(f'!llvm.ptr<{address_space}>')
     ptr = _fly.extract_aligned_pointer_as_index(ptr_type, raw)
     i64_val = llvm.PtrToIntOp(ir.IntegerType.get_signless(64), ptr).result
@@ -232,8 +242,7 @@ class BufferResourceDescriptor:
                     stride: int = 0, 
                     max_size: bool = True,
                     data_format: str = 'f32',
-                    num_records_bytes: Optional[Union[int, ir.Value]] = None,
-                    base_byte_offset: Optional[Union[int, ir.Value]] = None) -> 'BufferResourceDescriptor':
+                    num_records_bytes: Optional[Union[int, ir.Value]] = None) -> 'BufferResourceDescriptor':
         """Create buffer resource descriptor from memref.
         
         Args:
@@ -242,7 +251,6 @@ class BufferResourceDescriptor:
             max_size: If True, use max buffer size for flexibility
             num_records_bytes: Override buffer size (in BYTES) used by hardware OOB checking.
                               If provided, this takes precedence over `max_size`.
-            base_byte_offset: Optional byte offset added to the descriptor base pointer.
             data_format: Data format ('f32', 'f16', 'i32', etc.)
             
         Returns:
@@ -256,8 +264,6 @@ class BufferResourceDescriptor:
         from .._mlir.dialects import fly as _fly
         ptr_type = ir.Type.parse('!llvm.ptr')
         base_ptr = _fly.extract_aligned_pointer_as_index(ptr_type, raw_val)
-        if base_byte_offset is not None:
-            base_ptr = get_element_ptr(base_ptr, byte_offset=base_byte_offset)
         
         # Create buffer resource descriptor
         flags_val = _get_buffer_flags()
@@ -361,8 +367,7 @@ def create_buffer_resource(memref_val: ir.Value,
                            stride: int = 0,
                            max_size: bool = True,
                            *,
-                           num_records_bytes: Optional[Union[int, ir.Value]] = None,
-                           base_byte_offset: Optional[Union[int, ir.Value]] = None) -> ir.Value:
+                           num_records_bytes: Optional[Union[int, ir.Value]] = None) -> ir.Value:
     """Create AMD buffer resource descriptor from memref.
     
     This is a simplified wrapper around BufferResourceDescriptor.from_memref()
@@ -372,8 +377,6 @@ def create_buffer_resource(memref_val: ir.Value,
         memref_val: Memref value
         stride: Buffer stride (0 for contiguous)
         max_size: Use maximum buffer size
-        num_records_bytes: Override buffer size in bytes.
-        base_byte_offset: Optional byte offset added to the descriptor base pointer.
         
     Returns:
         ROCDL buffer resource descriptor (!llvm.ptr<8>)
@@ -383,11 +386,7 @@ def create_buffer_resource(memref_val: ir.Value,
         >>> data = buffer_load(rsrc, offset)
     """
     desc = BufferResourceDescriptor.from_memref(
-        memref_val,
-        stride,
-        max_size,
-        num_records_bytes=num_records_bytes,
-        base_byte_offset=base_byte_offset,
+        memref_val, stride, max_size, num_records_bytes=num_records_bytes
     )
     return desc.rsrc
 
@@ -433,8 +432,10 @@ def buffer_load(rsrc: ir.Value,
     elif hasattr(dtype, "ir_type"):
         dtype = dtype.ir_type
 
-    # Unwrap offset first (accept DSL Numeric values via ir_value())
-    if hasattr(offset, "ir_value"):
+    # Unwrap offset first (accept Python ints and DSL Numeric values).
+    if isinstance(offset, int):
+        offset = _create_i32_constant(offset)
+    elif hasattr(offset, "ir_value"):
         offset = offset.ir_value()
     offset = _unwrap_value(offset)
     
@@ -517,7 +518,9 @@ def buffer_store(data: ir.Value,
     # Unwrap all inputs (accept DSL Numeric values via ir_value())
     if hasattr(data, "ir_value"):
         data = data.ir_value()
-    if hasattr(offset, "ir_value"):
+    if isinstance(offset, int):
+        offset = _create_i32_constant(offset)
+    elif hasattr(offset, "ir_value"):
         offset = offset.ir_value()
     data = _unwrap_value(data)
     rsrc = _unwrap_value(rsrc)
