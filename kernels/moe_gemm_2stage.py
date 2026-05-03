@@ -3361,14 +3361,24 @@ class _MoeGemm2ReduceWrapper:
         size_expert_ids_in,
         valid_mask = None,
         stream = None,
+        arg_bias = None,
     ):
         """Execute GEMM2 + reduce.
 
         Args match moe_gemm2 kernel signature (see compile_moe_gemm2).
+        ``arg_bias`` is the per-expert (E*model_dim, fp32 flat) tensor
+        threaded into the gemm2 epilogue when the kernel was compiled
+        with ``enable_bias=True``; pass ``None`` (default) and we'll
+        forward an empty fp32 tensor so the kernel sees a positional
+        slot it can ignore.  Required because the underlying mxscale
+        gfx1250 stage2 kernel keeps ``arg_bias`` as a stable positional
+        regardless of ``enable_bias``.
         """
         import torch
         if stream is None:
             stream = torch.cuda.current_stream()
+        if arg_bias is None:
+            arg_bias = torch.empty(0, device=arg_out.device, dtype=torch.float32)
         intermediate = torch.empty(
                 tokens_in * self._topk, self._model_dim,
                 device=arg_out.device,
@@ -3381,7 +3391,8 @@ class _MoeGemm2ReduceWrapper:
             intermediate.view(-1),
             arg_x, arg_w, arg_scale_x, arg_scale_w,
             arg_sorted_token_ids, arg_expert_ids, arg_sorted_weights,
-            arg_num_valid_ids, tokens_in, n_in, k_in, size_expert_ids_in,
+            arg_num_valid_ids, arg_bias,
+            tokens_in, n_in, k_in, size_expert_ids_in,
             stream,
         )
         # Phase 2: Reduce over topk -> [tokens, model_dim]

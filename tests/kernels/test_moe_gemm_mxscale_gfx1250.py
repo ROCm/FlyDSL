@@ -450,6 +450,11 @@ def run_moe_stage1(
         k_batch=int(k_batch),
     )
 
+    # Empty bias slot -- the gfx1250 mxscale stage1 kernel keeps
+    # ``arg_bias`` as a stable positional even when compiled with
+    # ``enable_bias=False``; pass an empty fp32 tensor (it is never read).
+    _empty_bias_s1 = torch.empty(0, device=x_q.device, dtype=torch.float32)
+
     def launch(o, x, w, sx, sw, st, eids, sw_sorted):
         stream = torch.cuda.current_stream()
         exe(
@@ -462,6 +467,7 @@ def run_moe_stage1(
             eids,
             sw_sorted,
             num_valid_ids,
+            _empty_bias_s1,
             tokens,
             inter_dim,
             model_dim,
@@ -889,6 +895,13 @@ def run_moe_stage2(
         exe = compile_fn(**compile_kwargs)
     is_reduce_exe = (getattr(exe, "mode", None) == MoeGemm2Mode.REDUCE) or bool(use_reduce)
 
+    # Empty bias slot -- the gfx1250 mxscale stage2 kernel keeps
+    # ``arg_bias`` as a stable positional even when compiled with
+    # ``enable_bias=False``; pass an empty fp32 tensor (it is never read).
+    # In reduce mode, ``_MoeGemm2ReduceWrapper.__call__`` takes ``arg_bias``
+    # as a kwarg (so we don't have to interleave it with valid_mask/stream).
+    _empty_bias_s2 = torch.empty(0, device=out_perf.device, dtype=torch.float32)
+
     def launch(o, x, w, sx, sw, st, eids, sw_sorted):
         stream = torch.cuda.current_stream()
         valid_mask = None
@@ -912,6 +925,7 @@ def run_moe_stage2(
                 int(blocks),
                 valid_mask,
                 stream,
+                arg_bias=_empty_bias_s2,
             )
         else:
             # Atomic mode does not take valid_mask.
@@ -925,6 +939,7 @@ def run_moe_stage2(
                 eids,
                 sw_sorted,
                 num_valid_ids,
+                _empty_bias_s2,
                 tokens,
                 model_dim,
                 inter_dim,
