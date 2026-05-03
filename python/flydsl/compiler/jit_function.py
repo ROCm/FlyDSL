@@ -932,11 +932,7 @@ class JitFunction:
 
             with ir.InsertionPoint(module.body), loc:
                 backend = get_backend()
-                # rocdl-attach-target is the sole source of GPU target
-                # attributes on the JIT path; passing targets here would
-                # double them up and break bitcode linking
-                # (hipErrorNoBinaryForGpu).
-                gpu_module = create_gpu_module("kernels")
+                gpu_module = create_gpu_module("kernels", targets=backend.gpu_module_targets())
 
                 func_op = func.FuncOp(self.func.__name__, (ir_types, []))
                 func_op.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()
@@ -972,6 +968,14 @@ class JitFunction:
             extern_linked = bool(link_libs or post_load_processors)
             if extern_linked:
                 self._extern_linkage_keys.add(cache_key)
+                # Switch to explicit Python-side module loading so
+                # post_load_processors can receive hipModule_t handles.
+                # Also clear targets set at construction: rocdl-attach-target
+                # is the sole source when link_libs is used; duplicating
+                # targets causes hipErrorNoBinaryForGpu.
+                gpu_module.offloadingHandler = ir.Attribute.parse("#fly.explicit_module")
+                if "targets" in gpu_module.operation.attributes:
+                    del gpu_module.operation.attributes["targets"]
 
             compiled_module = MlirCompiler.compile(
                 module,
@@ -986,6 +990,7 @@ class JitFunction:
                 original_ir,
                 post_load_processors=post_load_processors,
                 link_libs=link_libs,
+                uses_explicit_module=extern_linked,
             )
 
             # Always keep a reference to the latest compilation result so

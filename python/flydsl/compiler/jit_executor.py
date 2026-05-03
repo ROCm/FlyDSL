@@ -171,12 +171,14 @@ class CompiledArtifact:
         source_ir: Optional[str] = None,
         post_load_processors: Optional[List[Callable]] = None,
         link_libs: Optional[List[str]] = None,
+        uses_explicit_module: bool = False,
     ):
         self._ir_text = str(compiled_module)
         self._entry = func_name
         self._source_ir = source_ir
         self._post_load_processors = post_load_processors or []
         self._link_libs = link_libs or []
+        self._uses_explicit_module = uses_explicit_module
         self._module = None
         self._engine = None
         self._jit_module = None
@@ -225,6 +227,7 @@ class CompiledArtifact:
             "source_ir": self._source_ir,
             "processor_refs": refs,
             "link_libs": self._link_libs,
+            "uses_explicit_module": self._uses_explicit_module,
         }
 
     def __setstate__(self, state):
@@ -232,6 +235,7 @@ class CompiledArtifact:
         self._entry = state["entry"]
         self._source_ir = state["source_ir"]
         self._link_libs = state.get("link_libs", [])
+        self._uses_explicit_module = state.get("uses_explicit_module", False)
         self._post_load_processors = []
         missing: List[str] = []
         for ref in state.get("processor_refs", []):
@@ -269,29 +273,32 @@ class CompiledArtifact:
                     shared_libs=_resolve_runtime_libs(),
                 )
                 engine.initialize()
+
+            if self._uses_explicit_module:
                 loaded_modules = _load_gpu_modules(engine)
 
-            # Post-condition: if callers registered post-load
-            # processors, at least one module load MUST have been
-            # observed while the engine initialized.  Zero observations
-            # means the runtime loader hook did not run; fail loud here
-            # rather than let kernel launch segfault on uninitialised
-            # device globals.
-            if self._post_load_processors and not loaded_modules:
-                raise RuntimeError(
-                    "post_load_processors registered but no hipModuleLoad "
-                    "was observed during ExecutionEngine.initialize(). "
-                    "Device-side globals (e.g. mori shmem's "
-                    "globalGpuStates) will be uninitialised at kernel "
-                    "launch.  Check that the compiled module contains a GPU "
-                    "binary and that mgpuModuleLoad is still the ROCm runtime "
-                    "loader symbol used by MLIR."
-                )
+                # Post-condition: if callers registered post-load
+                # processors, at least one module load MUST have been
+                # observed.  Zero observations means the explicit module
+                # loader did not run; fail loud here rather than let
+                # kernel launch segfault on uninitialised device globals.
+                if self._post_load_processors and not loaded_modules:
+                    raise RuntimeError(
+                        "post_load_processors registered but no hipModuleLoad "
+                        "was observed during ExecutionEngine.initialize(). "
+                        "Device-side globals (e.g. mori shmem's "
+                        "globalGpuStates) will be uninitialised at kernel "
+                        "launch.  Check that the compiled module contains a GPU "
+                        "binary and that mgpuModuleLoad is still the ROCm runtime "
+                        "loader symbol used by MLIR."
+                    )
 
-            jit_module = GpuJitModule(engine, loaded_modules)
-            for proc in self._post_load_processors:
-                for module in loaded_modules:
-                    proc(module)
+                jit_module = GpuJitModule(engine, loaded_modules)
+                for proc in self._post_load_processors:
+                    for mod_handle in loaded_modules:
+                        proc(mod_handle)
+            else:
+                jit_module = None
 
             self._module = module
             self._engine = engine

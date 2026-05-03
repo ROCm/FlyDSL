@@ -23,6 +23,7 @@ def create_gpu_module(
     sym_name: str,
     targets: Optional[List[str]] = None,
     *,
+    use_explicit_module: bool = False,
     loc=None,
     ip=None,
 ) -> gpu.GPUModuleOp:
@@ -33,10 +34,11 @@ def create_gpu_module(
                 target_attrs.append(ir.Attribute.parse(t))
             else:
                 target_attrs.append(t)
+    offloading = ir.Attribute.parse("#fly.explicit_module") if use_explicit_module else None
     module_op = gpu.GPUModuleOp(
         sym_name,
         targets=ir.ArrayAttr.get(target_attrs) if target_attrs else None,
-        offloadingHandler=ir.Attribute.parse("#fly.explicit_module"),
+        offloadingHandler=offloading,
         loc=loc,
         ip=ip,
     )

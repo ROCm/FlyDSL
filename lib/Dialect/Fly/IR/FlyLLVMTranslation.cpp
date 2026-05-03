@@ -30,6 +30,10 @@
 
 using namespace mlir;
 
+static llvm::Twine getModuleIdentifier(llvm::StringRef moduleName) {
+  return moduleName + "_module";
+}
+
 namespace {
 
 gpu::ObjectAttr getFirstObject(gpu::BinaryOp op) {
@@ -39,10 +43,6 @@ gpu::ObjectAttr getFirstObject(gpu::BinaryOp op) {
     return nullptr;
   }
   return dyn_cast<gpu::ObjectAttr>(objects.front());
-}
-
-static Twine getModuleIdentifier(StringRef moduleName) {
-  return moduleName + "_module";
 }
 
 LogicalResult embedExplicitModule(StringRef moduleName, gpu::ObjectAttr object,
@@ -140,10 +140,6 @@ LogicalResult embedExplicitModule(StringRef moduleName, gpu::ObjectAttr object,
 } // namespace
 
 namespace llvm {
-
-static Twine getModuleIdentifier(StringRef moduleName) {
-  return moduleName + "_module";
-}
 
 class LaunchKernel {
 public:

@@ -74,8 +74,8 @@ def link_extern(
     )
 
 
-class ExternFunction(LinkedExternFunction):
-    """Compatibility wrapper: construct an FFI and attach link metadata."""
+class BoundExternFunction(LinkedExternFunction):
+    """Convenience wrapper: construct an FFI and attach link metadata in one step."""
 
     def __init__(
         self,
@@ -95,7 +95,7 @@ class ExternFunction(LinkedExternFunction):
 
 
 __all__ = [
-    "ExternFunction",
+    "BoundExternFunction",
     "LinkedExternFunction",
     "link_extern",
     "register_extern_resolver",
