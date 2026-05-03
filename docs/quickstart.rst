@@ -16,6 +16,7 @@ with ``@flyc.kernel``, use layout algebra to partition data, then launch with
    import torch
    import flydsl.compiler as flyc
    import flydsl.expr as fx
+   from flydsl.expr.typing import Vector as Vec
 
    @flyc.kernel
    def vectorAddKernel(
@@ -51,7 +52,7 @@ with ``@flyc.kernel``, use layout algebra to partition data, then launch with
        fx.copy_atom_call(copyAtom, fx.slice(tA, (None, tid)), rA)
        fx.copy_atom_call(copyAtom, fx.slice(tB, (None, tid)), rB)
 
-       vC = fx.arith.addf(fx.memref_load_vec(rA), fx.memref_load_vec(rB))
+       vC = Vec(fx.memref_load_vec(rA)) + Vec(fx.memref_load_vec(rB))
        fx.memref_store_vec(vC, rC)
        fx.copy_atom_call(copyAtom, rC, fx.slice(tC, (None, tid)))
 

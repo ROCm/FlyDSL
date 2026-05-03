@@ -57,6 +57,13 @@ NHEAD = 128
 NHEAD_KV = 1
 PAGE_SIZE = 1
 
+MLA_DECODE_BENCH_CONFIGS = [
+    (1, 128),
+    (4, 2048),
+    (33, 2333),
+    (32, 8192),
+]
+
 
 # ── Pure-PyTorch reference ──────────────────────────────────────
 
@@ -220,7 +227,7 @@ def run_single(batch_size, ctx_len, decode_qlen=1, max_split_per_batch=32):
     )
 
     # ── Launch FlyDSL kernel ──
-    def launch_kernel():
+    def launch_decode():
         flydsl_mla_fwd_decode(
             q_fp8,
             kv_buffer_fp8.view(num_page, page_size, nhead_kv, QK_HEAD_DIM),
@@ -232,20 +239,23 @@ def run_single(batch_size, ctx_len, decode_qlen=1, max_split_per_batch=32):
             attn_lse,
             sm_scale,
         )
+
+    def launch_reduce():
         mla_reduce_v1(
             logits, attn_lse,
             reduce_indptr, reduce_final_map, reduce_partial_map,
             max_seqlen_qo, out_asm, None,
         )
 
-    _, us = run_perftest(launch_kernel, num_iters=10, num_warmup=3)
+    _, us = run_perftest(launch_decode, num_iters=10, num_warmup=3)
+    launch_reduce()
     torch.cuda.synchronize()
 
     # ── Verify ──
     total_kv = seq_lens_kv.sum().item()
     err = checkAllclose(
         out_ref, out_asm,
-        msg=f"[b={batch_size} c={ctx_len}] golden vs flydsl: {us:>8.2f} us ... ",
+        msg=f"[b={batch_size} c={ctx_len}] golden vs flydsl decode-only: {us:>8.2f} us ... ",
     )
 
     # Cosine similarity check
@@ -280,11 +290,7 @@ def run_single(batch_size, ctx_len, decode_qlen=1, max_split_per_batch=32):
         "nh=16 layout, which this FlyDSL MLA kernel does not support."
     ),
 )
-@pytest.mark.parametrize("batch_size,ctx_len", [
-    (1, 128),
-    (4, 2048),
-    (32, 8192),
-])
+@pytest.mark.parametrize("batch_size,ctx_len", MLA_DECODE_BENCH_CONFIGS)
 def test_mla_decode(batch_size, ctx_len):
     run_single(batch_size, ctx_len)
 
@@ -293,17 +299,23 @@ def test_mla_decode(batch_size, ctx_len):
 
 def main():
     parser = argparse.ArgumentParser(description="FlyDSL MLA decode test")
-    parser.add_argument("-b", "--batch", type=int, nargs="*", default=[1, 32])
-    parser.add_argument("-c", "--ctx_len", type=int, nargs="*", default=[128, 8192])
+    parser.add_argument("-b", "--batch", type=int, nargs="*", default=None)
+    parser.add_argument("-c", "--ctx_len", type=int, nargs="*", default=None)
     parser.add_argument("-ms", "--max_splits", type=int, default=32)
     args = parser.parse_args()
 
-    for b in args.batch:
-        for c in args.ctx_len:
-            logger.info(f"\n{'='*60}")
-            logger.info(f"batch={b}  ctx_len={c}")
-            logger.info(f"{'='*60}")
-            run_single(b, c, max_split_per_batch=args.max_splits)
+    if args.batch is None and args.ctx_len is None:
+        configs = MLA_DECODE_BENCH_CONFIGS
+    else:
+        batches = args.batch if args.batch is not None else [b for b, _ in MLA_DECODE_BENCH_CONFIGS]
+        ctx_lens = args.ctx_len if args.ctx_len is not None else [c for _, c in MLA_DECODE_BENCH_CONFIGS]
+        configs = [(b, c) for b in batches for c in ctx_lens]
+
+    for b, c in configs:
+        logger.info(f"\n{'='*60}")
+        logger.info(f"batch={b}  ctx_len={c}")
+        logger.info(f"{'='*60}")
+        run_single(b, c, max_split_per_batch=args.max_splits)
 
     logger.info("\nAll tests passed.")
 

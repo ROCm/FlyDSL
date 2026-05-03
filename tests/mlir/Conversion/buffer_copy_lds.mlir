@@ -22,7 +22,7 @@ func.func @test_buffer_copy_lds_type(
 
 // CHECK-LABEL: @test_make_copy_atom_lds_default
 func.func @test_make_copy_atom_lds_default(
-    %src: !fly.memref<f32, buffer_desc, 1:1>,
+    %src: !fly.memref<f32, #fly_rocdl.buffer_desc, 1:1>,
     %dst: !fly.memref<f32, shared, 1:1>) {
   // CHECK-DAG: %[[UNDEF:.*]] = llvm.mlir.undef : !llvm.struct<(i32, i32)>
   // CHECK-DAG: %[[C0:.*]] = arith.constant 0 : i32
@@ -30,7 +30,7 @@ func.func @test_make_copy_atom_lds_default(
   // CHECK: %[[ATOM:.*]] = llvm.insertvalue %[[C0]], %[[S1]][1]
   %atom = fly.make_copy_atom {valBits = 32 : i32} : !fly.copy_atom<!fly_rocdl.cdna3.buffer_copy_lds<32>, 32>
   // CHECK: rocdl.raw.ptr.buffer.load.lds
-  fly.copy_atom_call(%atom, %src, %dst) : (!fly.copy_atom<!fly_rocdl.cdna3.buffer_copy_lds<32>, 32>, !fly.memref<f32, buffer_desc, 1:1>, !fly.memref<f32, shared, 1:1>) -> ()
+  fly.copy_atom_call(%atom, %src, %dst) : (!fly.copy_atom<!fly_rocdl.cdna3.buffer_copy_lds<32>, 32>, !fly.memref<f32, #fly_rocdl.buffer_desc, 1:1>, !fly.memref<f32, shared, 1:1>) -> ()
   return
 }
 
@@ -43,7 +43,7 @@ func.func @test_make_copy_atom_lds_default(
 func.func @test_buffer_copy_lds_set_soffset(
     %atom: !fly.copy_atom<!fly_rocdl.cdna3.buffer_copy_lds<32>, 32>,
     %soff: i32,
-    %src: !fly.memref<f32, buffer_desc, 1:1>,
+    %src: !fly.memref<f32, #fly_rocdl.buffer_desc, 1:1>,
     %dst: !fly.memref<f32, shared, 1:1>) {
   // CHECK: %[[NEW_ATOM:.*]] = llvm.insertvalue %[[SOFF]], %[[ATOM]][0]
   %new_atom = fly.atom.set_value(%atom, "soffset", %soff) : (!fly.copy_atom<!fly_rocdl.cdna3.buffer_copy_lds<32>, 32>, i32) -> !fly.copy_atom<!fly_rocdl.cdna3.buffer_copy_lds<32>, 32>
@@ -51,7 +51,7 @@ func.func @test_buffer_copy_lds_set_soffset(
   // CHECK: %[[IMM_OFF:.*]] = llvm.extractvalue %[[NEW_ATOM]][1]
   // CHECK: %[[SOFF_BYTES:.*]] = arith.muli %[[SOFF_RAW]], %{{.*}}
   // CHECK: rocdl.raw.ptr.buffer.load.lds %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %[[SOFF_BYTES]], %[[IMM_OFF]]
-  fly.copy_atom_call(%new_atom, %src, %dst) : (!fly.copy_atom<!fly_rocdl.cdna3.buffer_copy_lds<32>, 32>, !fly.memref<f32, buffer_desc, 1:1>, !fly.memref<f32, shared, 1:1>) -> ()
+  fly.copy_atom_call(%new_atom, %src, %dst) : (!fly.copy_atom<!fly_rocdl.cdna3.buffer_copy_lds<32>, 32>, !fly.memref<f32, #fly_rocdl.buffer_desc, 1:1>, !fly.memref<f32, shared, 1:1>) -> ()
   return
 }
 
@@ -64,7 +64,7 @@ func.func @test_buffer_copy_lds_set_soffset(
 func.func @test_buffer_copy_lds_set_imm_offset(
     %atom: !fly.copy_atom<!fly_rocdl.cdna3.buffer_copy_lds<32>, 32>,
     %imm: i32,
-    %src: !fly.memref<f32, buffer_desc, 1:1>,
+    %src: !fly.memref<f32, #fly_rocdl.buffer_desc, 1:1>,
     %dst: !fly.memref<f32, shared, 1:1>) {
   // CHECK: %[[NEW_ATOM:.*]] = llvm.insertvalue %[[IMM]], %[[ATOM]][1]
   %new_atom = fly.atom.set_value(%atom, "imm_offset", %imm) : (!fly.copy_atom<!fly_rocdl.cdna3.buffer_copy_lds<32>, 32>, i32) -> !fly.copy_atom<!fly_rocdl.cdna3.buffer_copy_lds<32>, 32>
@@ -72,7 +72,7 @@ func.func @test_buffer_copy_lds_set_imm_offset(
   // CHECK: %[[IMM_OFF:.*]] = llvm.extractvalue %[[NEW_ATOM]][1]
   // CHECK: %[[SOFF_BYTES:.*]] = arith.muli %[[SOFF_RAW]], %{{.*}}
   // CHECK: rocdl.raw.ptr.buffer.load.lds %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %[[SOFF_BYTES]], %[[IMM_OFF]]
-  fly.copy_atom_call(%new_atom, %src, %dst) : (!fly.copy_atom<!fly_rocdl.cdna3.buffer_copy_lds<32>, 32>, !fly.memref<f32, buffer_desc, 1:1>, !fly.memref<f32, shared, 1:1>) -> ()
+  fly.copy_atom_call(%new_atom, %src, %dst) : (!fly.copy_atom<!fly_rocdl.cdna3.buffer_copy_lds<32>, 32>, !fly.memref<f32, #fly_rocdl.buffer_desc, 1:1>, !fly.memref<f32, shared, 1:1>) -> ()
   return
 }
 
@@ -85,7 +85,7 @@ func.func @test_buffer_copy_lds_set_both(
     %atom: !fly.copy_atom<!fly_rocdl.cdna3.buffer_copy_lds<128>, 128>,
     %soff: i32,
     %imm: i32,
-    %src: !fly.memref<f32, buffer_desc, 1:1>,
+    %src: !fly.memref<f32, #fly_rocdl.buffer_desc, 1:1>,
     %dst: !fly.memref<f32, shared, 1:1>) {
   %a1 = fly.atom.set_value(%atom, "soffset", %soff) : (!fly.copy_atom<!fly_rocdl.cdna3.buffer_copy_lds<128>, 128>, i32) -> !fly.copy_atom<!fly_rocdl.cdna3.buffer_copy_lds<128>, 128>
   %a2 = fly.atom.set_value(%a1, "imm_offset", %imm) : (!fly.copy_atom<!fly_rocdl.cdna3.buffer_copy_lds<128>, 128>, i32) -> !fly.copy_atom<!fly_rocdl.cdna3.buffer_copy_lds<128>, 128>
@@ -93,7 +93,7 @@ func.func @test_buffer_copy_lds_set_both(
   // CHECK: %[[IMM_OFF:.*]] = llvm.extractvalue %{{.*}}[1]
   // CHECK: %[[SOFF_BYTES:.*]] = arith.muli %[[SOFF_RAW]], %{{.*}}
   // CHECK: rocdl.raw.ptr.buffer.load.lds %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %[[SOFF_BYTES]], %[[IMM_OFF]]
-  fly.copy_atom_call(%a2, %src, %dst) : (!fly.copy_atom<!fly_rocdl.cdna3.buffer_copy_lds<128>, 128>, !fly.memref<f32, buffer_desc, 1:1>, !fly.memref<f32, shared, 1:1>) -> ()
+  fly.copy_atom_call(%a2, %src, %dst) : (!fly.copy_atom<!fly_rocdl.cdna3.buffer_copy_lds<128>, 128>, !fly.memref<f32, #fly_rocdl.buffer_desc, 1:1>, !fly.memref<f32, shared, 1:1>) -> ()
   return
 }
 
@@ -103,7 +103,7 @@ func.func @test_buffer_copy_lds_set_both(
 
 // LLVM-LABEL: @test_buffer_copy_lds_const_imm_offset
 func.func @test_buffer_copy_lds_const_imm_offset(
-    %src: !fly.memref<f32, buffer_desc, 1:1>,
+    %src: !fly.memref<f32, #fly_rocdl.buffer_desc, 1:1>,
     %dst: !fly.memref<f32, shared, 1:1>) {
   %atom = fly.make_copy_atom {valBits = 32 : i32} : !fly.copy_atom<!fly_rocdl.cdna3.buffer_copy_lds<32>, 32>
   %c128 = arith.constant 128 : i32
@@ -111,7 +111,7 @@ func.func @test_buffer_copy_lds_const_imm_offset(
   // LLVM-DAG: %[[C128:.*]] = llvm.mlir.constant(128 : i32) : i32
   // LLVM-DAG: %[[C0:.*]] = llvm.mlir.constant(0 : i32) : i32
   // LLVM: rocdl.raw.ptr.buffer.load.lds %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %[[C128]], %[[C0]]
-  fly.copy_atom_call(%a1, %src, %dst) : (!fly.copy_atom<!fly_rocdl.cdna3.buffer_copy_lds<32>, 32>, !fly.memref<f32, buffer_desc, 1:1>, !fly.memref<f32, shared, 1:1>) -> ()
+  fly.copy_atom_call(%a1, %src, %dst) : (!fly.copy_atom<!fly_rocdl.cdna3.buffer_copy_lds<32>, 32>, !fly.memref<f32, #fly_rocdl.buffer_desc, 1:1>, !fly.memref<f32, shared, 1:1>) -> ()
   return
 }
 
@@ -121,7 +121,7 @@ func.func @test_buffer_copy_lds_const_imm_offset(
 
 // LLVM-LABEL: @test_buffer_copy_lds_const_both
 func.func @test_buffer_copy_lds_const_both(
-    %src: !fly.memref<f32, buffer_desc, 1:1>,
+    %src: !fly.memref<f32, #fly_rocdl.buffer_desc, 1:1>,
     %dst: !fly.memref<f32, shared, 1:1>) {
   %atom = fly.make_copy_atom {valBits = 32 : i32} : !fly.copy_atom<!fly_rocdl.cdna3.buffer_copy_lds<32>, 32>
   %c64 = arith.constant 64 : i32
@@ -135,6 +135,6 @@ func.func @test_buffer_copy_lds_const_both(
   // LLVM-DAG: %[[C0:.*]] = llvm.mlir.constant(0 : i32) : i32
   // LLVM: %[[SOFF:.*]] = llvm.mul %[[C64]], %[[C4]]
   // LLVM: rocdl.raw.ptr.buffer.load.lds %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %[[SOFF]], %[[C256]], %[[C0]]
-  fly.copy_atom_call(%a2, %src, %dst) : (!fly.copy_atom<!fly_rocdl.cdna3.buffer_copy_lds<32>, 32>, !fly.memref<f32, buffer_desc, 1:1>, !fly.memref<f32, shared, 1:1>) -> ()
+  fly.copy_atom_call(%a2, %src, %dst) : (!fly.copy_atom<!fly_rocdl.cdna3.buffer_copy_lds<32>, 32>, !fly.memref<f32, #fly_rocdl.buffer_desc, 1:1>, !fly.memref<f32, shared, 1:1>) -> ()
   return
 }

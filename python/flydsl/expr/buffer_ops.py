@@ -24,10 +24,12 @@ Example:
     >>> buffer_ops.buffer_store(data, rsrc, offset)
 """
 
-from .._mlir import ir
-from .._mlir.dialects import llvm, rocdl, arith as std_arith
-from .._mlir.extras import types as T
 from typing import Optional, Union
+
+from .._mlir import ir
+from .._mlir.dialects import arith as std_arith
+from .._mlir.dialects import llvm, rocdl
+from .._mlir.extras import types as T
 from ..runtime.device import is_rdna_arch
 from .meta import traced_op
 
@@ -148,7 +150,15 @@ def extract_base_index(tensor, address_space: int = 1) -> ir.Value:
     (e.g. global_atomic_pk_add_bf16 on gfx942).
     """
     from .._mlir.dialects import fly as _fly
+    from .._mlir.dialects import memref as _memref
+
     raw = _unwrap_value(tensor)
+    try:
+        ir.MemRefType(raw.type)
+        return _memref.extract_aligned_pointer_as_index(raw)
+    except ValueError:
+        pass
+
     ptr_type = ir.Type.parse(f'!llvm.ptr<{address_space}>')
     ptr = _fly.extract_aligned_pointer_as_index(ptr_type, raw)
     i64_val = llvm.PtrToIntOp(ir.IntegerType.get_signless(64), ptr).result
@@ -433,8 +443,10 @@ def buffer_load(rsrc: ir.Value,
     elif hasattr(dtype, "ir_type"):
         dtype = dtype.ir_type
 
-    # Unwrap offset first (accept DSL Numeric values via ir_value())
-    if hasattr(offset, "ir_value"):
+    # Unwrap offset first (accept Python ints and DSL Numeric values).
+    if isinstance(offset, int):
+        offset = _create_i32_constant(offset)
+    elif hasattr(offset, "ir_value"):
         offset = offset.ir_value()
     offset = _unwrap_value(offset)
     
@@ -517,7 +529,9 @@ def buffer_store(data: ir.Value,
     # Unwrap all inputs (accept DSL Numeric values via ir_value())
     if hasattr(data, "ir_value"):
         data = data.ir_value()
-    if hasattr(offset, "ir_value"):
+    if isinstance(offset, int):
+        offset = _create_i32_constant(offset)
+    elif hasattr(offset, "ir_value"):
         offset = offset.ir_value()
     data = _unwrap_value(data)
     rsrc = _unwrap_value(rsrc)
