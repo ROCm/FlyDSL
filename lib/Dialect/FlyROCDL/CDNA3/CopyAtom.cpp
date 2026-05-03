@@ -94,7 +94,7 @@ FailureOr<Value> CopyOpCDNA3BufferCopyType::emitAtomCallSSA(OpBuilder &builder, 
   auto srcMemTy = srcTyArg ? dyn_cast<fly::MemRefType>(srcTyArg) : fly::MemRefType();
   auto dstMemTy = dstTyArg ? dyn_cast<fly::MemRefType>(dstTyArg) : fly::MemRefType();
 
-  if (srcMemTy && srcMemTy.getAddressSpace().getValue() == AddressSpace::BufferDesc) {
+  if (srcMemTy && isTargetAddressSpace<BufferDescAddressAttr>(srcMemTy.getAddressSpace())) {
     // buffer -> reg
     Value soffset = computeSoffset(srcMemTy.getElemTy().getIntOrFloatBitWidth());
     BufferFatPtr bp(srcMemTy.getPointerType(), src);
@@ -108,7 +108,7 @@ FailureOr<Value> CopyOpCDNA3BufferCopyType::emitAtomCallSSA(OpBuilder &builder, 
     return loaded;
   }
 
-  if (dstMemTy && dstMemTy.getAddressSpace().getValue() == AddressSpace::BufferDesc) {
+  if (dstMemTy && isTargetAddressSpace<BufferDescAddressAttr>(dstMemTy.getAddressSpace())) {
     // reg -> buffer
     Value soffset = computeSoffset(dstMemTy.getElemTy().getIntOrFloatBitWidth());
     BufferFatPtr bp(dstMemTy.getPointerType(), dst);
@@ -161,8 +161,8 @@ LogicalResult CopyOpCDNA3BufferCopyType::emitAtomCall(OpBuilder &builder, Locati
   auto srcMemTy = cast<fly::MemRefType>(srcMemTyArg);
   auto dstMemTy = cast<fly::MemRefType>(dstMemTyArg);
 
-  bool srcIsBuffer = (srcMemTy.getAddressSpace().getValue() == AddressSpace::BufferDesc);
-  bool dstIsBuffer = (dstMemTy.getAddressSpace().getValue() == AddressSpace::BufferDesc);
+  bool srcIsBuffer = isTargetAddressSpace<BufferDescAddressAttr>(srcMemTy.getAddressSpace());
+  bool dstIsBuffer = isTargetAddressSpace<BufferDescAddressAttr>(dstMemTy.getAddressSpace());
 
   if (srcIsBuffer == dstIsBuffer)
     return failure();
@@ -287,10 +287,8 @@ LogicalResult CopyOpCDNA3BufferCopyLDSType::emitAtomCall(OpBuilder &builder, Loc
   auto srcMemTy = cast<fly::MemRefType>(srcMemTyArg);
   auto dstMemTy = cast<fly::MemRefType>(dstMemTyArg);
 
-  AddressSpace srcAS = srcMemTy.getAddressSpace().getValue();
-  AddressSpace dstAS = dstMemTy.getAddressSpace().getValue();
-
-  if (srcAS != AddressSpace::BufferDesc || dstAS != AddressSpace::Shared)
+  if (!isTargetAddressSpace<BufferDescAddressAttr>(srcMemTy.getAddressSpace()) ||
+      !isGenericAddressSpace<fly::AddressSpace::Shared>(dstMemTy.getAddressSpace()))
     return failure();
 
   int32_t sizeBytes = getBitSize() / 8;
@@ -399,7 +397,7 @@ FailureOr<Value> CopyOpCDNA3BufferAtomicType::emitAtomCallSSA(OpBuilder &builder
                                                               Value atomVal, Value src,
                                                               Value dst) const {
   auto dstMemTy = cast<fly::MemRefType>(dstTyArg);
-  if (dstMemTy.getAddressSpace().getValue() != AddressSpace::BufferDesc)
+  if (!isTargetAddressSpace<BufferDescAddressAttr>(dstMemTy.getAddressSpace()))
     return failure();
 
   Type valTy = getValType();

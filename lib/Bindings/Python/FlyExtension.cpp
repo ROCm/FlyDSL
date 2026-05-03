@@ -145,6 +145,30 @@ bool isProfileWeaklyCongruent(MlirValue lhs, MlirValue rhs) {
   return intTupleIsWeaklyCongruent(lhsProfile, rhsProfile);
 }
 
+// Setter accepts either an int (interpreted as a Fly_AddressSpace enum case)
+// or any AddressSpaceAttr-compatible MLIR Attribute (e.g. `#fly_rocdl.buffer_desc`).
+Attribute getAddressSpaceFromObj(MLIRContext *ctx, nb::object obj, AddressSpace defaultAS) {
+  if (obj.is_none())
+    return AddressSpaceAttr::get(ctx, defaultAS);
+  if (nb::hasattr(obj, MLIR_PYTHON_CAPI_PTR_ATTR)) {
+    auto capsule = nb::cast<nb::capsule>(obj.attr(MLIR_PYTHON_CAPI_PTR_ATTR));
+    MlirAttribute mlirAttr = mlirPythonCapsuleToAttribute(capsule.ptr());
+    Attribute attr = unwrap(mlirAttr);
+    if (!attr)
+      throw std::invalid_argument("address_space: invalid Attribute");
+    return attr;
+  }
+  if (PyLong_Check(obj.ptr())) {
+    int32_t addrInt = nb::cast<int32_t>(obj);
+    if (addrInt < static_cast<int32_t>(AddressSpace::Generic) ||
+        addrInt > static_cast<int32_t>(AddressSpace::Register))
+      throw std::invalid_argument("address_space int must be a valid Fly_AddressSpace case");
+    return AddressSpaceAttr::get(ctx, static_cast<AddressSpace>(addrInt));
+  }
+  throw std::invalid_argument(
+      "address_space must be int (Fly_AddressSpace case) or an MLIR Attribute");
+}
+
 } // namespace
 
 // =============================================================================
@@ -377,14 +401,12 @@ struct PyPointerType : PyConcreteType<PyPointerType> {
   static void bindDerived(ClassTy &c) {
     c.def_static(
         "get",
-        [](PyType &elemTyObj, std::optional<int32_t> addressSpace, std::optional<int32_t> alignment,
+        [](PyType &elemTyObj, nb::object addressSpace, std::optional<int32_t> alignment,
            DefaultingPyMlirContext context) {
           MLIRContext *ctx = unwrap(context.get()->get());
           auto elemType = unwrap(elemTyObj);
 
-          auto addr = AddressSpace::Global;
-          if (addressSpace.has_value())
-            addr = static_cast<AddressSpace>(addressSpace.value());
+          Attribute addrAttr = getAddressSpaceFromObj(ctx, addressSpace, AddressSpace::Global);
 
           int32_t alignSize =
               alignment.value_or(AlignAttr::getTrivialAlignment(elemType).getAlignment());
@@ -394,18 +416,22 @@ struct PyPointerType : PyConcreteType<PyPointerType> {
                 "alignment must be a positive multiple of element byte size (" +
                 std::to_string(elemByte) + "), got " + std::to_string(alignSize));
 
-          return PyPointerType(context->getRef(),
-                               wrap(PointerType::get(elemType, AddressSpaceAttr::get(ctx, addr),
-                                                     AlignAttr::get(ctx, alignSize))));
+          return PyPointerType(
+              context->getRef(),
+              wrap(PointerType::get(elemType, addrAttr, AlignAttr::get(ctx, alignSize))));
         },
         "elem_ty"_a, "address_space"_a = nb::none(), "alignment"_a = nb::none(), nb::kw_only(),
-        "context"_a = nb::none(), "Create a PointerType with element type and address space");
+        "context"_a = nb::none(),
+        "Create a PointerType. address_space accepts an int (Fly_AddressSpace "
+        "case) or a target-specific MLIR Attribute (e.g. "
+        "`#fly_rocdl.buffer_desc`).");
 
     c.def_prop_ro("element_type", [](PyPointerType &self) -> MlirType {
       return wrap(self.toCppType().getElemTy());
     });
-    c.def_prop_ro("address_space", [](PyPointerType &self) -> int32_t {
-      return static_cast<int32_t>(self.toCppType().getAddressSpace().getValue());
+    c.def_prop_ro("address_space", [](PyPointerType &self) -> nb::typed<nb::object, PyAttribute> {
+      return PyAttribute(self.getContext(), wrap(self.toCppType().getAddressSpace()))
+          .maybeDownCast();
     });
     c.def_prop_ro("alignment", [](PyPointerType &self) -> int32_t {
       return self.toCppType().getAlignment().getAlignment();
@@ -425,7 +451,7 @@ struct PyMemRefType : PyConcreteType<PyMemRefType> {
   static void bindDerived(ClassTy &c) {
     c.def_static(
         "get",
-        [](PyType &elemTyObj, PyType &layoutObj, std::optional<int32_t> addressSpace,
+        [](PyType &elemTyObj, PyType &layoutObj, nb::object addressSpace,
            std::optional<int32_t> alignment, DefaultingPyMlirContext context) {
           MLIRContext *ctx = unwrap(context.get()->get());
 
@@ -438,9 +464,7 @@ struct PyMemRefType : PyConcreteType<PyMemRefType> {
           else
             throw std::invalid_argument("layout must be a LayoutType or ComposedLayoutType");
 
-          auto addr = AddressSpace::Register;
-          if (addressSpace.has_value())
-            addr = static_cast<AddressSpace>(addressSpace.value());
+          Attribute addrAttr = getAddressSpaceFromObj(ctx, addressSpace, AddressSpace::Register);
 
           auto elemType = unwrap(elemTyObj);
           int32_t alignSize =
@@ -451,14 +475,15 @@ struct PyMemRefType : PyConcreteType<PyMemRefType> {
                 "alignment must be a positive multiple of element byte size (" +
                 std::to_string(elemByte) + "), got " + std::to_string(alignSize));
 
-          return PyMemRefType(context->getRef(), wrap(::mlir::fly::MemRefType::get(
-                                                     elemType, AddressSpaceAttr::get(ctx, addr),
-                                                     layoutAttr, AlignAttr::get(ctx, alignSize))));
+          return PyMemRefType(context->getRef(),
+                              wrap(::mlir::fly::MemRefType::get(elemType, addrAttr, layoutAttr,
+                                                                AlignAttr::get(ctx, alignSize))));
         },
-        "elem_ty"_a, "layout"_a, "address_space"_a = 0, "alignment"_a = nb::none(), nb::kw_only(),
-        "context"_a = nb::none(),
-        "Create a MemRefType with element type, layout, address space and "
-        "alignment");
+        "elem_ty"_a, "layout"_a, "address_space"_a = nb::none(), "alignment"_a = nb::none(),
+        nb::kw_only(), "context"_a = nb::none(),
+        "Create a MemRefType. address_space accepts an int (Fly_AddressSpace "
+        "case) or a target-specific MLIR Attribute (e.g. "
+        "`#fly_rocdl.buffer_desc`).");
 
     c.def_prop_ro("element_type", [](PyMemRefType &self) -> MlirType {
       return wrap(self.toCppType().getElemTy());
@@ -469,8 +494,9 @@ struct PyMemRefType : PyConcreteType<PyMemRefType> {
         return wrap(LayoutType::get(la));
       return wrap(ComposedLayoutType::get(cast<ComposedLayoutAttr>(layout)));
     });
-    c.def_prop_ro("address_space", [](PyMemRefType &self) -> int32_t {
-      return static_cast<int32_t>(self.toCppType().getAddressSpace().getValue());
+    c.def_prop_ro("address_space", [](PyMemRefType &self) -> nb::typed<nb::object, PyAttribute> {
+      return PyAttribute(self.getContext(), wrap(self.toCppType().getAddressSpace()))
+          .maybeDownCast();
     });
     c.def_prop_ro("alignment", [](PyMemRefType &self) -> int32_t {
       return self.toCppType().getAlignment().getAlignment();

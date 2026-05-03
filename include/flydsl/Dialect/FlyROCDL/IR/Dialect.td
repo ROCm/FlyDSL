@@ -19,6 +19,21 @@ def FlyROCDL_Dialect : Dialect {
   ];
 
   let useDefaultTypePrinterParser = 1;
+  let useDefaultAttributePrinterParser = 1;
+}
+
+class FlyROCDL_I32EnumAttr<string enumName, string summary, list<I32EnumAttrCase> cases>
+    : I32EnumAttr<enumName, summary, cases> {
+  let genSpecializedAttr = 0;
+  let cppNamespace = FlyROCDL_Dialect.cppNamespace;
+}
+
+class FlyROCDL_EnumAttr<EnumInfo enumInfo, string attrMnemonic, list<Trait> traits = []>
+    : EnumAttr<FlyROCDL_Dialect, enumInfo, attrMnemonic, traits>;
+
+class FlyROCDL_Attr<string attrName, string attrMnemonic, list<Trait> traits = []>
+    : AttrDef<FlyROCDL_Dialect, attrName, traits> {
+  let mnemonic = attrMnemonic;
 }
 
 class FlyROCL_MmaOp<string typeName, string typeMnemonic, list<Trait> traits = []> 

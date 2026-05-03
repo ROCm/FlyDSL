@@ -10,8 +10,9 @@
 #include "mlir/IR/BuiltinTypes.h"
 
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
+#include "flydsl/Dialect/FlyROCDL/IR/Dialect.h"
 
-namespace mlir::fly {
+namespace mlir::fly_rocdl {
 
 class BufferFatPtr {
   static constexpr unsigned kRsrcAddrSpace = 8;   // BufferDesc
@@ -22,7 +23,7 @@ class BufferFatPtr {
 
 public:
   BufferFatPtr(fly::PointerType ptrTy, Value v) : ptrTy(ptrTy), fatPtr(v) {
-    assert(ptrTy.getAddressSpace().getValue() == AddressSpace::BufferDesc);
+    assert(fly::isTargetAddressSpace<BufferDescAddressAttr>(ptrTy.getAddressSpace()));
   }
 
   static LLVM::LLVMStructType getType(MLIRContext *ctx) {
@@ -65,7 +66,7 @@ public:
 
   Value swizzleByteOffset(OpBuilder &b, Location loc) const {
     Value off = byteOffset(b, loc);
-    SwizzleAttr swizzle = ptrTy.getSwizzle();
+    fly::SwizzleAttr swizzle = ptrTy.getSwizzle();
     if (swizzle.isTrivialSwizzle())
       return off;
     auto offsetTy = IntegerType::get(b.getContext(), kOffsetBitWidth);
@@ -93,6 +94,6 @@ public:
   }
 };
 
-} // namespace mlir::fly
+} // namespace mlir::fly_rocdl
 
 #endif // FLYDSL_DIALECT_FLYROCDL_UTILS_BUFFERFATPTR_H

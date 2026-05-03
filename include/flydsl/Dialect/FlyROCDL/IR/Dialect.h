@@ -19,10 +19,15 @@
 
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
 
-#include "flydsl/Dialect/FlyROCDL/IR/Dialect.h.inc"
 #include "flydsl/Dialect/FlyROCDL/IR/AtomStateEnums.h.inc"
+#include "flydsl/Dialect/FlyROCDL/IR/AttrEnums.h.inc"
+#include "flydsl/Dialect/FlyROCDL/IR/Dialect.h.inc"
 
 #define GET_TYPEDEF_CLASSES
 #include "flydsl/Dialect/FlyROCDL/IR/Atom.h.inc"
+#define GET_ATTRDEF_CLASSES
+#include "flydsl/Dialect/FlyROCDL/IR/AttrDefs.h.inc"
+
+namespace mlir::fly_rocdl {} // namespace mlir::fly_rocdl
 
 #endif // FLYDSL_DIALECT_FLYROCDL_IR_DIALECT_H
