@@ -493,22 +493,12 @@ def perm_b32(src_hi, src_lo, sel, **kw):
     )
 
 
-def raw_ptr_buffer_load_lds(rsrc, lds_ptr, size, voffset, soffset, offset, aux, **kw):
+def raw_ptr_buffer_load_lds(rsrc, lds_ptr, size, voffset, soffset=0, offset=0, aux=0, **kw):
     from ..._mlir.dialects.rocdl import raw_ptr_buffer_load_lds as _op
 
     return _op(
         _to_ir(rsrc), _to_ir(lds_ptr), _to_ir(size), _to_ir(voffset), _to_ir(soffset), _to_ir(offset), _to_ir(aux), **kw
     )
-
-
-def buffer_load_to_lds(rsrc, lds_ptr, voffset, size_bytes=4, soffset=0, offset=0):
-    """Load ``size_bytes`` from a buffer resource into LDS.
-
-    Simplified wrapper around :func:`raw_ptr_buffer_load_lds` with
-    sensible defaults (``soffset=0``, ``offset=0``, ``aux=0``).
-    Python int arguments are auto-materialised as i32 constants.
-    """
-    return raw_ptr_buffer_load_lds(rsrc, lds_ptr, size_bytes, voffset, soffset, offset, 0)
 
 
 def ds_bpermute(res, index, src, **kw):

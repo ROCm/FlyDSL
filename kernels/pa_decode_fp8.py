@@ -130,17 +130,12 @@ def _compute_block_base_dw(phys_block, block_stride, head_offset):
 
 
 def _make_shifted_buffer_resource(memref_val, byte_offset_i64, num_records_bytes_i64):
-    from flydsl._mlir.dialects import fly as _fly
-    from flydsl._mlir.dialects import rocdl as _rocdl
-
-    raw_val = buffer_ops._unwrap_value(memref_val)
-    ptr_type = ir.Type.parse("!llvm.ptr")
-    base_ptr = _fly.extract_aligned_pointer_as_index(ptr_type, raw_val)
-    base_ptr = buffer_ops.get_element_ptr(base_ptr, byte_offset=byte_offset_i64)
-    flags = buffer_ops._create_i32_constant(buffer_ops._get_buffer_flags())
-    stride = buffer_ops._create_i16_constant(0)
-    rsrc_type = ir.Type.parse("!llvm.ptr<8>")
-    return _rocdl.MakeBufferRsrcOp(rsrc_type, base_ptr, stride, num_records_bytes_i64, flags).result
+    return buffer_ops.create_buffer_resource(
+        memref_val,
+        max_size=True,
+        num_records_bytes=num_records_bytes_i64,
+        base_byte_offset=byte_offset_i64,
+    )
 
 
 def _chunk_buffer_resource_for_block(memref_val, phys_block, block_stride):
