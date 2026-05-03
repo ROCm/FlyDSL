@@ -51,6 +51,11 @@ __all__ = [
     "tensor_wait",
     "update_tensor_descriptor_2d_addr_lo",
     "update_tensor_gather_descriptor_addr_lo",
+    "update_tensor_descriptor_2d_addr_lo_hi",
+    "update_tensor_gather_descriptor_addr_lo_hi",
+    "update_tensor_descriptor_2d_addr64",
+    "update_tensor_gather_descriptor_addr64",
+    "add_addr_with_carry",
     "compute_padding_encoding",
     "compute_warp_distribution",
     "l2_prefetch_tile",
@@ -751,6 +756,19 @@ def update_tensor_descriptor_2d_addr_lo(
     K loop. Use this helper in K-reduction hot paths to advance the global
     base offset cheaply.
 
+    .. warning::
+
+       This helper is **carry-unsafe**: the caller is expected to feed in a
+       fresh ``new_addr_lo`` per iteration and a 32-bit wrap of
+       ``base_addr_lo + k_off`` is *not* propagated into addr_hi. Whenever
+       the descriptor's per-CTA base + cumulative K-tile delta can cross a
+       4 GiB boundary in lo-32-bit arithmetic (typical for large MoE
+       expert-weight buffers, e.g. ~3.5 GiB fp4 tensors on gfx1250), use
+       :func:`update_tensor_descriptor_2d_addr64` instead. Otherwise the
+       descriptor silently aliases into the wrong 4 GiB page and the GPU
+       deadlocks in ``amdgpu_mes_reg_write_reg_wait`` with no recoverable
+       signal.
+
     Args:
         desc:         Base TDMDescriptor2D built once at the start of the
                       K loop (for example, with ``global_offset=(n_off, 0)``).
@@ -778,6 +796,13 @@ def update_tensor_gather_descriptor_addr_lo(
     build a base descriptor where dgroup0 lane 2 is exactly the truncated
     global pointer, then advance via this helper at issue time.
 
+    .. warning::
+
+       Carry-unsafe: see :func:`update_tensor_descriptor_2d_addr_lo`. Use
+       :func:`update_tensor_gather_descriptor_addr64` in K-loops over global
+       buffers that may exceed 4 GiB or whose per-CTA base lands close to a
+       4 GiB boundary in lo-32-bit arithmetic.
+
     Args:
         desc:         Base TDMGatherDescriptor built once outside the K loop
                       with ``global_byte_offset=None``.
@@ -793,6 +818,187 @@ def update_tensor_gather_descriptor_addr_lo(
         dgroup2=desc.dgroup2,
         dgroup3=desc.dgroup3,
     )
+
+
+# ---------------------------------------------------------------------------
+# Carry-safe 64-bit address advance
+#
+# The plain ``update_tensor_descriptor_2d_addr_lo`` shortcut patches only
+# dgroup0 lane 2 (addr_lo). When the per-K-tile delta makes
+# ``base_addr_lo + delta`` overflow the i32 boundary the wraparound is silent
+# and addr_hi is left stale, so the descriptor points into the wrong 4 GiB
+# page of global memory. On gfx1250 this manifests as a TDM page fault that
+# never raises a completion signal -- the host hangs in
+# ``amdgpu_mes_reg_write_reg_wait`` with no way to recover other than a host
+# reboot. The helpers below propagate the carry into addr_hi while
+# preserving the descriptor's type-field bits in the top of lane 3.
+#
+# Lane 3 layout (matching ``make_tensor_descriptor_2d`` /
+# ``make_tensor_gather_dgroup0``):
+#     [31:30]  type field (always set to 2 = ``0b10`` via ``| (1 << 31)``)
+#     [29:0]   addr_hi[29:0] (high 32 bits of the original 64-bit address;
+#              only [15:0] are meaningful for 48-bit AMDGPU virtual addresses)
+# ---------------------------------------------------------------------------
+
+# Mask covering the address bits in lane 3 (everything except the type field).
+_TDM_ADDR_HI_MASK = 0x3FFFFFFF  # bits [29:0]
+# Mask covering the type-field bits at the top of lane 3.
+_TDM_ADDR_HI_FLAG_MASK = 0xC0000000  # bits [31:30]
+
+
+def add_addr_with_carry(base_addr_lo, base_addr_hi, delta_i32):
+    """Carry-safe ``(base_lo, base_hi) += delta`` for TDM descriptor lanes 2/3.
+
+    The TDM hardware splits the 64-bit global base into ``addr_lo`` (lane 2)
+    and ``addr_hi`` (lane 3, with the top two bits used as the descriptor
+    type field). When the per-tile delta is added to ``addr_lo`` alone, an
+    i32 overflow silently wraps and leaves ``addr_hi`` stale, redirecting the
+    descriptor to the wrong 4 GiB page. This helper performs the addition in
+    i64 so the carry naturally propagates into ``addr_hi`` while preserving
+    the type-field bits.
+
+    Args:
+        base_addr_lo:    i32 MLIR value -- dgroup0 lane 2 of a base descriptor
+                         built at K=0 (e.g. ``vector.extract(desc.dgroup0,
+                         position=[2])``). Typically cached once per CTA in an
+                         SGPR.
+        base_addr_hi:    i32 MLIR value -- dgroup0 lane 3 of the same base
+                         descriptor, including the type-field bits.
+        delta_i32:       i32 MLIR value -- per-tile byte delta to add to the
+                         global base address.
+
+    Returns:
+        Tuple ``(new_addr_lo, new_addr_hi)`` of i32 MLIR values ready to be
+        spliced back into ``dgroup0`` via
+        :func:`update_tensor_descriptor_2d_addr_lo_hi` /
+        :func:`update_tensor_gather_descriptor_addr_lo_hi`. ``new_addr_hi``
+        re-encodes the original type-field bits.
+    """
+    # Sum (base_lo + delta) in i64 so the carry into bit 32 is recoverable.
+    # ``ArithValue`` methods like ``extui``/``shrui``/``trunci`` return raw
+    # ``ir.Value`` results, so each link in the chain has to be re-wrapped
+    # before further method dispatch / operator overloading.
+    base_lo_i64 = _ArithValue(_ArithValue(base_addr_lo).extui(T.i64))
+    delta_i64 = _ArithValue(_ArithValue(delta_i32).extui(T.i64))
+    sum_i64 = _ArithValue(base_lo_i64 + delta_i64)
+    new_addr_lo = sum_i64.trunci(T.i32)
+    carry_i64 = _ArithValue(sum_i64.shrui(arith.constant(32, type=T.i64)))
+    carry_i32 = _ArithValue(carry_i64.trunci(T.i32))
+
+    # Strip and re-apply the type-field bits so the carry only touches the
+    # address portion of lane 3. ``base_addr_hi`` may be a raw ``ir.Value``
+    # (e.g. produced by ``vector.extract``); wrap before relying on operator
+    # overloads.
+    base_hi = _ArithValue(base_addr_hi)
+    addr_hi_only = _ArithValue(
+        base_hi & arith.constant(_TDM_ADDR_HI_MASK, type=T.i32)
+    )
+    flag_bits = _ArithValue(
+        base_hi & arith.constant(_TDM_ADDR_HI_FLAG_MASK, type=T.i32)
+    )
+    new_hi_addr = _ArithValue(
+        (addr_hi_only + carry_i32)
+        & arith.constant(_TDM_ADDR_HI_MASK, type=T.i32)
+    )
+    new_addr_hi = new_hi_addr | flag_bits
+
+    return new_addr_lo, new_addr_hi
+
+
+def _replace_dgroup0_addr_lo_hi(dgroup0, new_addr_lo, new_addr_hi):
+    """Return a new vector<4xi32> with lanes 2 and 3 replaced."""
+    from ..._mlir.dialects import vector as _vector_dialect
+
+    g0 = _vector_dialect.InsertOp(
+        _raw(new_addr_lo),
+        _raw(dgroup0),
+        static_position=[2],
+        dynamic_position=[],
+    ).result
+    return _vector_dialect.InsertOp(
+        _raw(new_addr_hi),
+        _raw(g0),
+        static_position=[3],
+        dynamic_position=[],
+    ).result
+
+
+def update_tensor_descriptor_2d_addr_lo_hi(
+    desc: TDMDescriptor2D,
+    new_addr_lo,
+    new_addr_hi,
+) -> TDMDescriptor2D:
+    """Return a TDMDescriptor2D with both addr_lo and addr_hi replaced.
+
+    Use together with :func:`add_addr_with_carry` when the per-tile delta can
+    cross a 4 GiB boundary in i32 arithmetic. ``new_addr_hi`` must already
+    include the descriptor's type-field bits (the helper above preserves
+    them).
+    """
+    return TDMDescriptor2D(
+        dgroup0=_replace_dgroup0_addr_lo_hi(
+            desc.dgroup0, new_addr_lo, new_addr_hi
+        ),
+        dgroup1=desc.dgroup1,
+    )
+
+
+def update_tensor_gather_descriptor_addr_lo_hi(
+    desc: TDMGatherDescriptor,
+    new_addr_lo,
+    new_addr_hi,
+) -> TDMGatherDescriptor:
+    """Gather analogue of :func:`update_tensor_descriptor_2d_addr_lo_hi`."""
+    return TDMGatherDescriptor(
+        dgroup0=_replace_dgroup0_addr_lo_hi(
+            desc.dgroup0, new_addr_lo, new_addr_hi
+        ),
+        dgroup1=desc.dgroup1,
+        dgroup2=desc.dgroup2,
+        dgroup3=desc.dgroup3,
+    )
+
+
+def update_tensor_descriptor_2d_addr64(
+    desc: TDMDescriptor2D,
+    base_addr_lo,
+    base_addr_hi,
+    delta_i32,
+) -> TDMDescriptor2D:
+    """Carry-safe drop-in replacement for ``update_tensor_descriptor_2d_addr_lo``.
+
+    Computes ``(new_lo, new_hi) = (base_lo : base_hi) + delta`` in i64 and
+    splices both back into the descriptor's dgroup0. Use this in K-loop hot
+    paths whenever the descriptor's per-CTA base address combined with the
+    cumulative K-tile delta can exceed 4 GiB in lo-32-bit arithmetic --
+    typical for large MoE expert-weight buffers (e.g. ~3.5 GiB fp4 tensors
+    with E=257 experts on gfx1250). When this overflow happens with the plain
+    addr-lo update, the descriptor silently points into a wrong 4 GiB page
+    and the resulting TDM access deadlocks the GPU in
+    ``amdgpu_mes_reg_write_reg_wait``.
+
+    Args:
+        desc:           Base TDMDescriptor2D built once at the start of the
+                        K loop (e.g. with ``global_offset=(n_off, 0)``).
+        base_addr_lo:   Cached i32 SGPR holding ``desc.dgroup0[lane 2]``.
+        base_addr_hi:   Cached i32 SGPR holding ``desc.dgroup0[lane 3]`` --
+                        keep the type-field bits intact, the helper masks
+                        them out before adding the carry and re-applies them.
+        delta_i32:      i32 byte delta to add to the global base address.
+    """
+    new_lo, new_hi = add_addr_with_carry(base_addr_lo, base_addr_hi, delta_i32)
+    return update_tensor_descriptor_2d_addr_lo_hi(desc, new_lo, new_hi)
+
+
+def update_tensor_gather_descriptor_addr64(
+    desc: TDMGatherDescriptor,
+    base_addr_lo,
+    base_addr_hi,
+    delta_i32,
+) -> TDMGatherDescriptor:
+    """Gather analogue of :func:`update_tensor_descriptor_2d_addr64`."""
+    new_lo, new_hi = add_addr_with_carry(base_addr_lo, base_addr_hi, delta_i32)
+    return update_tensor_gather_descriptor_addr_lo_hi(desc, new_lo, new_hi)
 
 
 def _zero_dgroup_v4i32():
