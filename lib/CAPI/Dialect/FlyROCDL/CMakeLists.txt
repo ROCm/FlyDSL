@@ -4,3 +4,5 @@ add_mlir_public_c_api_library(MLIRCPIFlyROCDL
   MLIRFlyROCDLDialect
   MLIRFlyToROCDL
 )
+
+target_compile_definitions(MLIRCPIFlyROCDL PRIVATE FLYDSL_HAS_ROCDL_TARGET_STACK)

@@ -44,6 +44,7 @@ add_definitions(${LLVM_DEFINITIONS})
 set(MLIR_PYTHON_PACKAGE_PREFIX "_mlir" CACHE STRING "" FORCE)
 set(MLIR_BINDINGS_PYTHON_INSTALL_PREFIX "python_packages/flydsl/${MLIR_PYTHON_PACKAGE_PREFIX}" CACHE STRING "" FORCE)
 
+include(cmake/FlyDSLTargetStack.cmake)
 
 add_subdirectory(include/flydsl)
 add_subdirectory(lib)
