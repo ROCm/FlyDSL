@@ -10,12 +10,15 @@ scalar constants, helper closures) so they live in one place.
 """
 
 from collections import namedtuple
+from contextlib import contextmanager
 
 import flydsl.expr as fx
 from flydsl.expr import arith, buffer_ops, gpu, rocdl, vector
 from flydsl.expr import range_constexpr
 from flydsl.expr.arith import ArithValue
 from flydsl.expr.typing import T
+from flydsl._mlir import ir
+from flydsl._mlir.dialects import scf
 from flydsl._mlir.dialects import math as math_dialect
 
 from kernels.mfma_preshuffle_pipeline import (
@@ -26,6 +29,23 @@ from kernels.mfma_preshuffle_pipeline import (
     swizzle_xor16,
     tile_chunk_coord_i32,
 )
+
+
+@contextmanager
+def scf_then_region(if_op):
+    """Context manager for the then-region of a `scf.IfOp`.
+
+    Hides the `ir.InsertionPoint(if_op.then_block)` boilerplate and
+    auto-appends a `scf.YieldOp([])` terminator if the body did not
+    add one.
+    """
+    with ir.InsertionPoint(if_op.then_block):
+        try:
+            yield if_op.then_block
+        finally:
+            blk = if_op.then_block
+            if (not blk.operations) or not isinstance(blk.operations[-1], scf.YieldOp):
+                scf.YieldOp([])
 
 
 CompileConstants = namedtuple(

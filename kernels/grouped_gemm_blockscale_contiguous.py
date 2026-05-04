@@ -46,6 +46,7 @@ from kernels.grouped_gemm_blockscale_common import (
     make_pingpong_kloop,
     make_prefetch_scales,
     out_mlir_for,
+    scf_then_region,
     setup_lds_allocation,
     validate_params,
 )
@@ -221,7 +222,7 @@ def compile_grouped_gemm_blockscale_contiguous(
 
         # Early exit for invalid blocks (padding rows)
         _if_valid = scf.IfOp(is_valid)
-        with ir.InsertionPoint(_if_valid.then_block):
+        with scf_then_region(_if_valid):
             group_idx = arith.index_cast(T.index, group_id_i32)
 
             _t = compute_mfma_tiling(tile_m=tile_m, tile_n=tile_n)
@@ -341,8 +342,6 @@ def compile_grouped_gemm_blockscale_contiguous(
                 write_row_to_lds=write_row_to_lds,
                 store_pair=store_pair,
             )
-
-            scf.YieldOp([])
 
     # ===== JIT Launcher =====
     @flyc.jit
