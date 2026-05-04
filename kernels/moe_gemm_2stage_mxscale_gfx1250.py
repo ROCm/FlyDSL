@@ -346,7 +346,6 @@ def _compile_stage1_mxscale_kernel_impl(
         )
         sorted_num = size_expert_ids * arith.index(int(route_tile_m))
         sorted_nbytes = sorted_num * arith.index(4)
-        eid_nbytes = size_expert_ids * arith.index(4)
         x_nbytes = tokens_idx * arith.index(K_packed_a)
         sx_nbytes = tokens_idx * arith.index(K_scale)
         w_rows = arith.index(int(experts * (2 * N)))
@@ -354,7 +353,11 @@ def _compile_stage1_mxscale_kernel_impl(
         sw_nbytes = w_rows * arith.index(K_scale)
 
         sorted_rsrc = buffer_ops.create_buffer_resource(arg_sorted_token_ids, max_size=False, num_records_bytes=sorted_nbytes)
-        eid_rsrc = buffer_ops.create_buffer_resource(arg_expert_ids, max_size=False, num_records_bytes=eid_nbytes)
+        # B1-with-max_size (2026-05-03): drop scalar-arg dep on size_expert_ids so
+        # eid_i32 vmem load can issue alongside num_valid_i32 (single shared loadcnt
+        # wait). Safety: block_in_valid gates downstream consumers regardless.
+        # See docs/moe_b1_max_size_plan_2026_05_03.md.
+        eid_rsrc = buffer_ops.create_buffer_resource(arg_expert_ids, max_size=True)
         x_rsrc = buffer_ops.create_buffer_resource(arg_x, max_size=False, num_records_bytes=x_nbytes)
         sx_rsrc = buffer_ops.create_buffer_resource(arg_scale_x, max_size=False, num_records_bytes=sx_nbytes)
         w_rsrc = buffer_ops.create_buffer_resource(arg_w, max_size=False, num_records_bytes=w_nbytes)
@@ -2360,7 +2363,6 @@ def _compile_stage2_mxscale_kernel_impl(
 
         sorted_num = size_expert_ids * arith.index(int(route_tile_m))
         sorted_nbytes = sorted_num * arith.index(4)
-        eid_nbytes = size_expert_ids * arith.index(4)
         x_rows = tokens_idx * arith.index(int(topk))
         x_nbytes = x_rows * arith.index(K_packed_a)
         sx_nbytes = x_rows * arith.index(K_scale)
@@ -2372,7 +2374,11 @@ def _compile_stage2_mxscale_kernel_impl(
             out_nbytes = x_rows * n_idx * arith.index(2)
 
         sorted_rsrc = buffer_ops.create_buffer_resource(arg_sorted_token_ids, max_size=False, num_records_bytes=sorted_nbytes)
-        eid_rsrc = buffer_ops.create_buffer_resource(arg_expert_ids, max_size=False, num_records_bytes=eid_nbytes)
+        # B1-with-max_size (2026-05-03): drop scalar-arg dep on size_expert_ids so
+        # eid_i32 vmem load can issue alongside num_valid_i32 (single shared loadcnt
+        # wait). Safety: block_in_valid gates downstream consumers regardless.
+        # See docs/moe_b1_max_size_plan_2026_05_03.md.
+        eid_rsrc = buffer_ops.create_buffer_resource(arg_expert_ids, max_size=True)
         x_rsrc = buffer_ops.create_buffer_resource(arg_x, max_size=False, num_records_bytes=x_nbytes)
         sx_rsrc = buffer_ops.create_buffer_resource(arg_scale_x, max_size=False, num_records_bytes=sx_nbytes)
         w_rsrc = buffer_ops.create_buffer_resource(arg_w, max_size=False, num_records_bytes=w_nbytes)
