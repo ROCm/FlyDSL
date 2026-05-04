@@ -81,6 +81,7 @@ from kernels.moe_gemm_2stage import (
     MoeGemm2Mode,
 )
 from kernels.mixed_moe_gemm_2stage import (
+    compile_a16w4_moe_gemm2,
     compile_mixed_moe_gemm1,
     compile_mixed_moe_gemm2,
 )
@@ -2059,6 +2060,138 @@ def test_moe_stage2_standalone(
         use_valid_mask=True,
         kernel_name="moe_gemm2_reduce_flydsl_valid_mask",
     )
+
+
+# ---------------------------------------------------------------------------
+# A16W4 stage2 test: BF16 activations x MXFP4 (FP4 E2M1) weights
+# ---------------------------------------------------------------------------
+
+_A16W4_SHAPES = [
+    pytest.param(16, 3072, 3072, 128, 4, 32, 256, 256, 1, id="a16w4-s2-small"),
+    pytest.param(128, 3072, 3072, 128, 4, 64, 256, 256, 1, id="a16w4-s2-medium"),
+    pytest.param(4, 3072, 3072, 128, 4, 16, 128, 256, 2, id="a16w4-s2-kbatch2"),
+]
+
+_A16W4_SKIP = pytest.mark.skipif(
+    "gfx95" not in ARCH,
+    reason=f"A16W4 stage2 requires gfx950+, got {ARCH}",
+)
+
+
+@_A16W4_SKIP
+@pytest.mark.parametrize(
+    "tokens, model_dim, inter_dim, experts, topk, tile_m, tile_n, tile_k, k_batch",
+    _A16W4_SHAPES,
+)
+def test_moe_gemm2_a16w4(
+    tokens: int,
+    model_dim: int,
+    inter_dim: int,
+    experts: int,
+    topk: int,
+    tile_m: int,
+    tile_n: int,
+    tile_k: int,
+    k_batch: int,
+    *,
+    seed: int = 0,
+    atol: float = 1.0,
+    rtol: float = 0.05,
+):
+    """Stage2 correctness test for compile_a16w4_moe_gemm2.
+
+    Activations are BF16 (no FP4 quantisation on the A side).
+    Weights are MXFP4 E2M1 with E8M0 per-1x32 block scales,
+    pre-shuffled via shuffle_weight_a16w4 / shuffle_scale_a16w4 from aiter.
+    Result is compared against torch_moe_gemm2 in FP32.
+    """
+    from aiter.ops.shuffle import shuffle_weight_a16w4, shuffle_scale_a16w4
+    from aiter.fused_moe import moe_sorting
+
+    device = torch.device("cuda")
+    torch.manual_seed(seed)
+
+    # Generate BF16 activations and quantised FP4 weights
+    dtype = torch.bfloat16
+    a2_bf16 = torch.randn((tokens * topk, inter_dim), device=device, dtype=dtype) * 0.2
+    w2_fp32 = torch.randn((experts, model_dim, inter_dim), device=device, dtype=torch.float32) / 10
+
+    # Quantize weights to MXFP4 per-1x32
+    try:
+        from tests.kernels.utils import fp4_utils
+    except ImportError:
+        fp4_utils = None
+    if fp4_utils is None:
+        pytest.skip("FP4 dependencies not available")
+
+    from aiter import QuantType
+    import aiter
+    torch_quant = aiter.get_torch_quant(QuantType.per_1x32)
+    w2_qt_raw, w2_scale = torch_quant(w2_fp32.to(dtype), quant_dtype=aiter.dtypes.fp4x2)
+    w2_qt_raw = w2_qt_raw.view(experts, model_dim, inter_dim // 2)
+
+    # Pre-shuffle weights and scales for the kernel; view as uint8 for DLPack.
+    w2_qt_shuf = shuffle_weight_a16w4(w2_qt_raw, 16, False).view(torch.uint8).contiguous()
+    w2_scale_shuf = shuffle_scale_a16w4(w2_scale, experts, False).view(torch.uint8).contiguous()
+
+    # MoE routing: uniform assignment so every token routes to expert 0..topk-1
+    topk_ids = torch.zeros((tokens, topk), device=device, dtype=torch.int32)
+    for k in range(topk):
+        topk_ids[:, k] = k % experts
+    topk_weights = torch.ones((tokens, topk), device=device, dtype=torch.float32) / topk
+
+    sorted_ids, sorted_weights, sorted_expert_ids, num_valid_ids, _ = moe_sorting(
+        topk_ids, topk_weights, experts, model_dim, dtype, tile_m
+    )
+
+    # Compile and run kernel (atomic accumulation mode)
+    exe = compile_a16w4_moe_gemm2(
+        model_dim=model_dim,
+        inter_dim=inter_dim,
+        experts=experts,
+        topk=topk,
+        tile_m=tile_m,
+        tile_n=tile_n,
+        tile_k=tile_k,
+        doweight_stage2=True,
+        out_dtype="bf16",
+        accumulate=True,
+        k_batch=k_batch,
+    )
+
+    out_kernel = torch.zeros((tokens, model_dim), device=device, dtype=dtype)
+    exe(
+        out_kernel,
+        a2_bf16,
+        w2_qt_shuf,
+        w2_scale_shuf,
+        sorted_ids,
+        sorted_expert_ids,
+        sorted_weights,
+        num_valid_ids,
+        torch.empty(0, device=device, dtype=dtype),  # no bias
+        tokens,
+        model_dim,
+        inter_dim,
+        sorted_ids.shape[0],
+        torch.cuda.current_stream(),
+    )
+    torch.cuda.synchronize()
+
+    # Reference: dequantize weights to fp32, compute via torch_moe_gemm2
+    ref = torch_moe_gemm2(
+        a2_q=a2_bf16.view(tokens, topk, inter_dim),
+        w2_q=w2_fp32,
+        scale_a2=None,
+        scale_w2=None,
+        topk_ids=topk_ids,
+        topk_weights=topk_weights,
+        model_dim=model_dim,
+        doweight_stage2=True,
+    )
+    ref = ref.to(dtype)
+
+    verify_output(out_kernel, ref, atol=atol, rtol=rtol)
 
 
 if __name__ == "__main__":
