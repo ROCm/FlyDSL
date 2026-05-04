@@ -141,10 +141,10 @@ def compile_grouped_gemm_blockscale_contiguous(
         i32_num_groups: fx.Int32,
     ):
         # Convert runtime parameters to index type
-        m_in = arith.index_cast(T.index, i32_m)
-        n_in = arith.index_cast(T.index, i32_n)
-        k_in = arith.index_cast(T.index, i32_k)
-        num_groups_in = arith.index_cast(T.index, i32_num_groups)
+        m_in = fx.Index(i32_m)
+        n_in = fx.Index(i32_n)
+        k_in = fx.Index(i32_k)
+        num_groups_in = fx.Index(i32_num_groups)
 
         # Thread and block IDs
         tx = gpu.thread_id("x")
@@ -364,8 +364,8 @@ def compile_grouped_gemm_blockscale_contiguous(
             allocator.finalize()
 
         # Grid dimensions
-        m_in = arith.index_cast(T.index, i32_m)
-        n_in = arith.index_cast(T.index, i32_n)
+        m_in = fx.Index(i32_m)
+        n_in = fx.Index(i32_n)
         gx = n_in // fx.Index(tile_n)  # N-blocks
         gy = (m_in + fx.Index(tile_m - 1)) // fx.Index(tile_m)  # M-blocks (ceil)
 

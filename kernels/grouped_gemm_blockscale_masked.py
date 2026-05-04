@@ -143,10 +143,10 @@ def compile_grouped_gemm_blockscale_masked(
     ):
         # Convert runtime parameters to index type
         # In the masked kernel, expected_m acts as our padded max capacity per group.
-        m_in = arith.index_cast(T.index, i32_expected_m)
-        n_in = arith.index_cast(T.index, i32_n)
-        k_in = arith.index_cast(T.index, i32_k)
-        num_groups_in = arith.index_cast(T.index, i32_num_groups)
+        m_in = fx.Index(i32_expected_m)
+        n_in = fx.Index(i32_n)
+        k_in = fx.Index(i32_k)
+        num_groups_in = fx.Index(i32_num_groups)
 
         # Thread and 3D block IDs
         tx = gpu.thread_id("x")
@@ -372,9 +372,9 @@ def compile_grouped_gemm_blockscale_masked(
             allocator.finalize()
 
         # Grid dimensions
-        max_m_in = arith.index_cast(T.index, i32_expected_m)
-        n_in = arith.index_cast(T.index, i32_n)
-        num_groups_in = arith.index_cast(T.index, i32_num_groups)
+        max_m_in = fx.Index(i32_expected_m)
+        n_in = fx.Index(i32_n)
+        num_groups_in = fx.Index(i32_num_groups)
 
         gx = n_in // fx.Index(tile_n)  # N-blocks
         gy = (max_m_in + fx.Index(tile_m - 1)) // fx.Index(tile_m)  # M-blocks (ceil)
