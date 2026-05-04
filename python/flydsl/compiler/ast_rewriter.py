@@ -48,6 +48,85 @@ def _unwrap_constexpr(node):
     return node
 
 
+def _collect_assigned_vars(body_stmts, active_symbols, orelse_stmts=None):
+    write_args = []
+    invoked_args = []
+
+    def add_unique(items, name):
+        if isinstance(name, str) and name not in items:
+            items.append(name)
+
+    def in_active_symbols(name):
+        return any(name in symbol_scope for symbol_scope in active_symbols)
+
+    class RegionAnalyzer(ast.NodeVisitor):
+        force_store = False
+
+        @staticmethod
+        def _get_call_base(func_node):
+            if isinstance(func_node, ast.Attribute):
+                if isinstance(func_node.value, ast.Attribute):
+                    return RegionAnalyzer._get_call_base(func_node.value)
+                if isinstance(func_node.value, ast.Name):
+                    return func_node.value.id
+            return None
+
+        def visit_Name(self, node):
+            if isinstance(node.ctx, ast.Store) or self.force_store:
+                add_unique(write_args, node.id)
+
+        def visit_Subscript(self, node):
+            if isinstance(node.ctx, ast.Store):
+                self.force_store = True
+                self.visit(node.value)
+                self.force_store = False
+                self.visit(node.slice)
+            else:
+                self.generic_visit(node)
+
+        def visit_Assign(self, node):
+            self.force_store = True
+            for target in node.targets:
+                self.visit(target)
+            self.force_store = False
+            self.visit(node.value)
+
+        def visit_AugAssign(self, node):
+            self.force_store = True
+            self.visit(node.target)
+            self.force_store = False
+            self.visit(node.value)
+
+        def visit_Call(self, node):
+            base_name = RegionAnalyzer._get_call_base(node.func)
+            if base_name is not None and base_name != "self":
+                add_unique(invoked_args, base_name)
+
+            self.generic_visit(node)
+
+    analyzer = RegionAnalyzer()
+    analyzer.visit(ast.Module(body=body_stmts, type_ignores=[]))
+    if orelse_stmts:
+        analyzer.visit(ast.Module(body=orelse_stmts, type_ignores=[]))
+
+    invoked_args = [name for name in invoked_args if name not in write_args]
+    write_args = [name for name in write_args if in_active_symbols(name)]
+    invoked_args = [name for name in invoked_args if in_active_symbols(name)]
+    return write_args + invoked_args
+
+
+def _state_value_expr(name):
+    return ast.Call(
+        func=ast.Attribute(
+            value=ast.Call(func=ast.Name(id="locals", ctx=ast.Load()), args=[], keywords=[]),
+            attr="get",
+            ctx=ast.Load(),
+        ),
+        args=[ast.Constant(value=name), ast.Constant(value=None)],
+        keywords=[],
+    )
+
+
 class ASTRewriter:
     transformers: List = []
     rewrite_globals: dict = {}
@@ -430,12 +509,6 @@ class ReplaceIfWithDispatch(Transformer):
         return tuple(values)
 
     @staticmethod
-    def _merge_partial_results(base_names, base_values, part_names, part_values):
-        merged = {name: value for name, value in zip(base_names, base_values)}
-        merged.update({name: value for name, value in zip(part_names, part_values)})
-        return [merged[name] for name in base_names]
-
-    @staticmethod
     def _call_branch(fn, result_names, state_values):
         sig = inspect.signature(fn)
         params = list(sig.parameters.values())
@@ -469,46 +542,49 @@ class ReplaceIfWithDispatch(Transformer):
         result_names, result_values = ReplaceIfWithDispatch._normalize_named_values(
             result_names, result_values, "result_names", "result_values"
         )
-        # Only variables with an incoming value can be scf.if results/yields.
-        effective_result_pairs = [
-            (name, value)
-            for name, value in zip(result_names, result_values)
-            if _unwrap_value(value) is not None
-        ]
-        effective_result_names = tuple(name for name, _ in effective_result_pairs)
-        effective_result_values = tuple(value for _, value in effective_result_pairs)
-        effective_result_map = {name: value for name, value in effective_result_pairs}
+        result_map = {name: value for name, value in zip(result_names, result_values)}
 
         if not ReplaceIfWithDispatch._is_dynamic(cond):
             taken = then_fn if cond else else_fn
             if taken is None:
                 return ReplaceIfWithDispatch._pack_named_values(result_names, result_values)
-            result = ReplaceIfWithDispatch._call_branch(taken, effective_result_names, result_values)
-            if not effective_result_names:
+            result = ReplaceIfWithDispatch._call_branch(taken, result_names, result_values)
+            if not result_names:
                 return ReplaceIfWithDispatch._pack_named_values(result_names, result_values)
             partial_values = ReplaceIfWithDispatch._normalize_branch_result(
-                result, effective_result_names, effective_result_map, "selected branch"
+                result, result_names, result_map, "selected branch"
             )
-            merged_values = ReplaceIfWithDispatch._merge_partial_results(
-                result_names, result_values, effective_result_names, partial_values
-            )
-            return ReplaceIfWithDispatch._pack_named_values(result_names, merged_values)
+            return ReplaceIfWithDispatch._pack_named_values(result_names, partial_values)
 
         cond_i1 = ReplaceIfWithDispatch._to_i1(cond)
         if not isinstance(cond_i1, ir.Value):
             raise TypeError(f"dynamic if condition must lower to ir.Value, got {type(cond_i1).__name__}")
 
-        if not effective_result_names:
+        none_vars = [
+            name for name, value in zip(result_names, result_values)
+            if _unwrap_value(value) is None
+        ]
+        if none_vars:
+            raise TypeError(
+                f"Variable(s) {none_vars} initialized as None before a dynamic "
+                f"if/else (scf.if). Branches assign to these variables, but "
+                f"None cannot be yielded as an scf.if result. Initialize them "
+                f"with a value whose type matches the branch assignment (e.g. "
+                f"fx.Int32(0), fx.Float32(0.0)), or wrap the condition with "
+                f"const_expr() if it is a compile-time constant."
+            )
+
+        if not result_names:
             has_else = else_fn is not None
             if_op = scf.IfOp(cond_i1, [], has_else=has_else, loc=ir.Location.unknown())
             with ir.InsertionPoint(if_op.regions[0].blocks[0]):
-                ReplaceIfWithDispatch._call_branch(then_fn, effective_result_names, result_values)
+                ReplaceIfWithDispatch._call_branch(then_fn, result_names, result_values)
                 scf.YieldOp([])
             if has_else:
                 if len(if_op.regions[1].blocks) == 0:
                     if_op.regions[1].blocks.append(*[])
                 with ir.InsertionPoint(if_op.regions[1].blocks[0]):
-                    ReplaceIfWithDispatch._call_branch(else_fn, effective_result_names, result_values)
+                    ReplaceIfWithDispatch._call_branch(else_fn, result_names, result_values)
                     scf.YieldOp([])
             return ReplaceIfWithDispatch._pack_named_values(result_names, result_values)
 
@@ -516,7 +592,7 @@ class ReplaceIfWithDispatch(Transformer):
             else_fn = lambda *args: {}
 
         state_raw = []
-        for name, value in zip(effective_result_names, effective_result_values):
+        for name, value in zip(result_names, result_values):
             raw = _unwrap_value(value)
             if not isinstance(raw, ir.Value):
                 raise TypeError(
@@ -529,12 +605,12 @@ class ReplaceIfWithDispatch(Transformer):
         if_op = scf.IfOp(cond_i1, result_types, has_else=True, loc=ir.Location.unknown())
 
         with ir.InsertionPoint(if_op.regions[0].blocks[0]):
-            then_result = ReplaceIfWithDispatch._call_branch(then_fn, effective_result_names, result_values)
+            then_result = ReplaceIfWithDispatch._call_branch(then_fn, result_names, result_values)
             then_values = ReplaceIfWithDispatch._normalize_branch_result(
-                then_result, effective_result_names, effective_result_map, "then-branch"
+                then_result, result_names, result_map, "then-branch"
             )
-            then_raw = ReplaceIfWithDispatch._unwrap_mlir_values(then_values, effective_result_names, "then-branch")
-            for name, expect_ty, got in zip(effective_result_names, result_types, then_raw):
+            then_raw = ReplaceIfWithDispatch._unwrap_mlir_values(then_values, result_names, "then-branch")
+            for name, expect_ty, got in zip(result_names, result_types, then_raw):
                 if got.type != expect_ty:
                     raise TypeError(
                         f"if/else variable '{name}' type mismatch in then-branch: "
@@ -545,12 +621,12 @@ class ReplaceIfWithDispatch(Transformer):
         if len(if_op.regions[1].blocks) == 0:
             if_op.regions[1].blocks.append(*[])
         with ir.InsertionPoint(if_op.regions[1].blocks[0]):
-            else_result = ReplaceIfWithDispatch._call_branch(else_fn, effective_result_names, result_values)
+            else_result = ReplaceIfWithDispatch._call_branch(else_fn, result_names, result_values)
             else_values = ReplaceIfWithDispatch._normalize_branch_result(
-                else_result, effective_result_names, effective_result_map, "else-branch"
+                else_result, result_names, result_map, "else-branch"
             )
-            else_raw = ReplaceIfWithDispatch._unwrap_mlir_values(else_values, effective_result_names, "else-branch")
-            for name, expect_ty, got in zip(effective_result_names, result_types, else_raw):
+            else_raw = ReplaceIfWithDispatch._unwrap_mlir_values(else_values, result_names, "else-branch")
+            for name, expect_ty, got in zip(result_names, result_types, else_raw):
                 if got.type != expect_ty:
                     raise TypeError(
                         f"if/else variable '{name}' type mismatch in else-branch: "
@@ -558,17 +634,14 @@ class ReplaceIfWithDispatch(Transformer):
                     )
             scf.YieldOp(else_raw)
 
-        partial_wrapped = ReplaceIfWithDispatch._pack_dispatch_results(
-            list(if_op.results), effective_result_values
+        wrapped = ReplaceIfWithDispatch._pack_dispatch_results(
+            list(if_op.results), result_values
         )
-        if len(effective_result_names) == 1:
-            partial_values = [partial_wrapped]
+        if len(result_names) == 1:
+            final_values = [wrapped]
         else:
-            partial_values = list(partial_wrapped)
-        merged_values = ReplaceIfWithDispatch._merge_partial_results(
-            result_names, result_values, effective_result_names, partial_values
-        )
-        return ReplaceIfWithDispatch._pack_named_values(result_names, merged_values)
+            final_values = list(wrapped)
+        return ReplaceIfWithDispatch._pack_named_values(result_names, final_values)
 
     @classmethod
     def rewrite_globals(cls):
@@ -682,85 +755,6 @@ class ReplaceIfWithDispatch(Transformer):
 
         return _visit(test_node)
 
-    @staticmethod
-    def _collect_assigned_vars(node: ast.If, active_symbols):
-        write_args = []
-        invoked_args = []
-
-        def add_unique(items, name):
-            if isinstance(name, str) and name not in items:
-                items.append(name)
-
-        def in_active_symbols(name):
-            return any(name in symbol_scope for symbol_scope in active_symbols)
-
-        class RegionAnalyzer(ast.NodeVisitor):
-            force_store = False
-
-            @staticmethod
-            def _get_call_base(func_node):
-                if isinstance(func_node, ast.Attribute):
-                    if isinstance(func_node.value, ast.Attribute):
-                        return RegionAnalyzer._get_call_base(func_node.value)
-                    if isinstance(func_node.value, ast.Name):
-                        return func_node.value.id
-                return None
-
-            def visit_Name(self, node):
-                if isinstance(node.ctx, ast.Store) or self.force_store:
-                    add_unique(write_args, node.id)
-
-            def visit_Subscript(self, node):
-                if isinstance(node.ctx, ast.Store):
-                    self.force_store = True
-                    self.visit(node.value)
-                    self.force_store = False
-                    self.visit(node.slice)
-                else:
-                    self.generic_visit(node)
-
-            def visit_Assign(self, node):
-                self.force_store = True
-                for target in node.targets:
-                    self.visit(target)
-                self.force_store = False
-                self.visit(node.value)
-
-            def visit_AugAssign(self, node):
-                self.force_store = True
-                self.visit(node.target)
-                self.force_store = False
-                self.visit(node.value)
-
-            def visit_Call(self, node):
-                base_name = RegionAnalyzer._get_call_base(node.func)
-                if base_name is not None and base_name != "self":
-                    add_unique(invoked_args, base_name)
-
-                self.generic_visit(node)
-
-        analyzer = RegionAnalyzer()
-        analyzer.visit(ast.Module(body=node.body, type_ignores=[]))
-        if node.orelse:
-            analyzer.visit(ast.Module(body=node.orelse, type_ignores=[]))
-
-        invoked_args = [name for name in invoked_args if name not in write_args]
-        write_args = [name for name in write_args if in_active_symbols(name)]
-        invoked_args = [name for name in invoked_args if in_active_symbols(name)]
-        return write_args + invoked_args
-
-    @staticmethod
-    def _state_value_expr(name):
-        return ast.Call(
-            func=ast.Attribute(
-                value=ast.Call(func=ast.Name(id="locals", ctx=ast.Load()), args=[], keywords=[]),
-                attr="get",
-                ctx=ast.Load(),
-            ),
-            args=[ast.Constant(value=name), ast.Constant(value=None)],
-            keywords=[],
-        )
-
     def visit_If(self, node: ast.If) -> List[ast.AST]:
         active_symbols_before_if = self.symbol_scopes.snapshot_symbol_scopes()
         if _is_constexpr(node.test):
@@ -785,7 +779,7 @@ class ReplaceIfWithDispatch(Transformer):
             ReplaceIfWithDispatch._counter += 1
 
             then_name = f"__then_{uid}"
-            result_names = self._collect_assigned_vars(node, active_symbols_before_if)
+            result_names = _collect_assigned_vars(node.body, active_symbols_before_if, node.orelse)
 
             fn_args = [ast.arg(arg="__ret_names", annotation=None)] + [ast.arg(arg=v, annotation=None) for v in result_names]
 
@@ -824,7 +818,7 @@ class ReplaceIfWithDispatch(Transformer):
                         ast.keyword(
                             arg="result_values",
                             value=ast.Tuple(
-                                elts=[self._state_value_expr(v) for v in result_names],
+                                elts=[_state_value_expr(v) for v in result_names],
                                 ctx=ast.Load(),
                             ),
                         ),
@@ -901,6 +895,8 @@ class ReplaceIfWithDispatch(Transformer):
 
 @ASTRewriter.register
 class InsertEmptyYieldForSCFFor(Transformer):
+    _counter = 0
+
     @staticmethod
     def _to_index(val):
         if isinstance(val, ir.Value):
@@ -938,10 +934,91 @@ class InsertEmptyYieldForSCFFor(Transformer):
             with ir.InsertionPoint(for_op.body):
                 yield for_op.induction_variable
 
+    @staticmethod
+    def scf_for_dispatch(start, stop, step, body_fn, *, result_names=(), result_values=()):
+        start_val = InsertEmptyYieldForSCFFor._to_index(start)
+        stop_val = InsertEmptyYieldForSCFFor._to_index(stop)
+        step_val = InsertEmptyYieldForSCFFor._to_index(step)
+
+        result_names = tuple(result_names)
+        result_values = tuple(result_values)
+        result_map = {name: value for name, value in zip(result_names, result_values)}
+
+        none_vars = [
+            name for name, value in zip(result_names, result_values)
+            if _unwrap_value(value) is None
+        ]
+        if none_vars:
+            raise TypeError(
+                f"Variable(s) {none_vars} initialized as None before a dynamic "
+                f"for loop (scf.for). The loop body assigns to these variables, "
+                f"but None cannot be yielded as an scf.for iter_arg. Initialize "
+                f"them with a value whose type matches the loop body assignment "
+                f"(e.g. fx.Int32(0), fx.Float32(0.0))."
+            )
+
+        if not result_names:
+            for_op = scf.ForOp(start_val, stop_val, step_val)
+            with ir.InsertionPoint(for_op.body):
+                iv = for_op.induction_variable
+                body_fn(iv, result_names)
+                scf.YieldOp([])
+            return ReplaceIfWithDispatch._pack_named_values(result_names, result_values)
+
+        state_raw = []
+        for name, value in zip(result_names, result_values):
+            raw = _unwrap_value(value)
+            if not isinstance(raw, ir.Value):
+                raise TypeError(
+                    f"for-loop variable '{name}' is {type(raw).__name__}, not an MLIR Value; "
+                    "only MLIR-backed values can be loop-carried in dynamic for loops."
+                )
+            state_raw.append(raw)
+
+        for_op = scf.ForOp(start_val, stop_val, step_val, state_raw)
+
+        with ir.InsertionPoint(for_op.body):
+            iv = for_op.induction_variable
+            inner_args = [
+                _wrap_like(a, ex)
+                for a, ex in zip(for_op.inner_iter_args, result_values)
+            ]
+
+            body_result = body_fn(iv, result_names, *inner_args)
+
+            body_values = ReplaceIfWithDispatch._normalize_branch_result(
+                body_result, result_names, result_map, "for-body"
+            )
+            body_raw = ReplaceIfWithDispatch._unwrap_mlir_values(
+                body_values, result_names, "for-body"
+            )
+            result_types = [v.type for v in state_raw]
+            for idx, (name, expect_ty, got) in enumerate(zip(result_names, result_types, body_raw)):
+                if got.type != expect_ty:
+                    if got.type == ir.IndexType.get() or expect_ty == ir.IndexType.get():
+                        body_raw[idx] = arith.IndexCastOp(expect_ty, got).result
+                    else:
+                        raise TypeError(
+                            f"for-loop variable '{name}' type mismatch: "
+                            f"expected {expect_ty}, got {got.type}"
+                        )
+            scf.YieldOp(body_raw)
+
+        wrapped = ReplaceIfWithDispatch._pack_dispatch_results(
+            list(for_op.results), result_values
+        )
+        if len(result_names) == 1:
+            final_values = [wrapped]
+        else:
+            final_values = list(wrapped)
+        return ReplaceIfWithDispatch._pack_named_values(result_names, final_values)
+
     @classmethod
     def rewrite_globals(cls):
         return {
             "scf_range": cls.scf_range,
+            "scf_for_dispatch": cls.scf_for_dispatch,
+            "scf_for_collect_results": ReplaceIfWithDispatch._collect_result_dict,
         }
 
     @staticmethod
@@ -965,12 +1042,180 @@ class InsertEmptyYieldForSCFFor(Transformer):
     def _is_range(cls, iter_node):
         return cls._iter_call_name(iter_node) == "range"
 
+    @staticmethod
+    def _has_init_kwarg(iter_node):
+        if not isinstance(iter_node, ast.Call):
+            return False
+        return any(kw.arg == "init" for kw in iter_node.keywords)
+
+    @staticmethod
+    def _extract_range_args(iter_node):
+        args = iter_node.args
+        if len(args) == 1:
+            return ast.Constant(value=0), args[0], ast.Constant(value=1)
+        elif len(args) == 2:
+            return args[0], args[1], ast.Constant(value=1)
+        else:
+            return args[0], args[1], args[2]
+
+    def _transform_for_auto(self, node):
+        start, stop, step = self._extract_range_args(node.iter)
+
+        if isinstance(node.target, ast.Name):
+            iv_name = node.target.id
+        else:
+            raise TypeError(
+                "auto for-loop iter_args inference only supports a single loop variable; "
+                f"got {ast.dump(node.target)}. Use range(..., init=[...]) for tuple unpacking."
+            )
+
+        active_symbols_before_for = self.symbol_scopes.snapshot_symbol_scopes()
+
+        iv_active_before = any(iv_name in scope for scope in active_symbols_before_for)
+
+        uid = InsertEmptyYieldForSCFFor._counter
+        InsertEmptyYieldForSCFFor._counter += 1
+
+        loop_carried_var_name = None
+        if iv_active_before:
+            loop_carried_var_name = f"__loop_carried_{uid}"
+
+        with self.symbol_scopes.control_flow_scope():
+            self.symbol_scopes.record_symbol(iv_name)
+            node.body = self._visit_stmt_block(node.body)
+
+        if loop_carried_var_name:
+            node.body.append(
+                ast.copy_location(
+                    ast.Assign(
+                        targets=[ast.Name(id=loop_carried_var_name, ctx=ast.Store())],
+                        value=ast.Name(id=iv_name, ctx=ast.Load()),
+                    ),
+                    node,
+                )
+            )
+            active_symbols_before_for = list(active_symbols_before_for) + [{loop_carried_var_name}]
+
+        result_names = _collect_assigned_vars(node.body, active_symbols_before_for)
+        result_names = [n for n in result_names if n != iv_name]
+
+        body_name = f"__for_body_{uid}"
+        fn_args = (
+            [ast.arg(arg=iv_name, annotation=None)]
+            + [ast.arg(arg="__ret_names", annotation=None)]
+            + [ast.arg(arg=v, annotation=None) for v in result_names]
+        )
+
+        if result_names:
+            body_return = ast.Return(
+                value=ast.Call(
+                    func=ast.Name(id="scf_for_collect_results", ctx=ast.Load()),
+                    args=[
+                        ast.Name(id="__ret_names", ctx=ast.Load()),
+                        ast.Call(func=ast.Name(id="locals", ctx=ast.Load()), args=[], keywords=[]),
+                    ],
+                    keywords=[],
+                )
+            )
+            body_stmts = list(node.body) + [body_return]
+        else:
+            body_stmts = list(node.body)
+
+        body_func = ast.FunctionDef(
+            name=body_name,
+            args=ast.arguments(
+                posonlyargs=[],
+                args=fn_args,
+                kwonlyargs=[],
+                kw_defaults=[],
+                defaults=[],
+            ),
+            body=body_stmts,
+            decorator_list=[],
+            type_params=[],
+        )
+        setattr(body_func, _ASTREWRITE_MARKER, True)
+        body_func = ast.copy_location(body_func, node)
+        body_func = ast.fix_missing_locations(body_func)
+
+        dispatch_args = [start, stop, step, ast.Name(body_name, ctx=ast.Load())]
+        dispatch_keywords = []
+        if result_names:
+            dispatch_keywords.extend(
+                [
+                    ast.keyword(
+                        arg="result_names",
+                        value=ast.Tuple(
+                            elts=[ast.Constant(value=v) for v in result_names],
+                            ctx=ast.Load(),
+                        ),
+                    ),
+                    ast.keyword(
+                        arg="result_values",
+                        value=ast.Tuple(
+                            elts=[_state_value_expr(v) for v in result_names],
+                            ctx=ast.Load(),
+                        ),
+                    ),
+                ]
+            )
+
+        dispatch_value = ast.Call(
+            func=ast.Name("scf_for_dispatch", ctx=ast.Load()),
+            args=dispatch_args,
+            keywords=dispatch_keywords,
+        )
+
+        if result_names:
+            if len(result_names) == 1:
+                target = ast.Name(id=result_names[0], ctx=ast.Store())
+            else:
+                target = ast.Tuple(
+                    elts=[ast.Name(id=v, ctx=ast.Store()) for v in result_names],
+                    ctx=ast.Store(),
+                )
+            dispatch_stmt = ast.Assign(targets=[target], value=dispatch_value)
+        else:
+            dispatch_stmt = ast.Expr(value=dispatch_value)
+
+        dispatch_stmt = ast.copy_location(dispatch_stmt, node)
+        dispatch_stmt = ast.fix_missing_locations(dispatch_stmt)
+
+        pre_stmts = []
+        post_stmts = []
+        if loop_carried_var_name:
+            pre_stmt = ast.copy_location(
+                ast.Assign(
+                    targets=[ast.Name(id=loop_carried_var_name, ctx=ast.Store())],
+                    value=ast.Name(id=iv_name, ctx=ast.Load()),
+                ),
+                node,
+            )
+            ast.fix_missing_locations(pre_stmt)
+            pre_stmts.append(pre_stmt)
+
+            post_stmt = ast.copy_location(
+                ast.Assign(
+                    targets=[ast.Name(id=iv_name, ctx=ast.Store())],
+                    value=ast.Name(id=loop_carried_var_name, ctx=ast.Load()),
+                ),
+                node,
+            )
+            ast.fix_missing_locations(post_stmt)
+            post_stmts.append(post_stmt)
+
+        return pre_stmts + [body_func, dispatch_stmt] + post_stmts
+
     def visit_For(self, node: ast.For) -> ast.For:
         if self._is_range_constexpr(node.iter):
             node.iter.func = ast.Name(id="range", ctx=ast.Load())
             node = self.generic_visit(node)
             node = ast.fix_missing_locations(node)
             return node
+
+        if self._is_range(node.iter) and not self._has_init_kwarg(node.iter):
+            return self._transform_for_auto(node)
+
         if self._is_range(node.iter):
             node.iter.func = ast.Name(id="scf_range", ctx=ast.Load())
         line = ast.dump(node.iter)
