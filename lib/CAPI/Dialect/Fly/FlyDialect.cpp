@@ -4,9 +4,17 @@
 #include "flydsl-c/FlyDialect.h"
 
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
+#include "flydsl/Dialect/Fly/IR/FlyLLVMTranslation.h"
 #include "flydsl/Dialect/Fly/Transforms/Passes.h"
+#include "mlir/CAPI/IR.h"
 #include "mlir/CAPI/Registration.h"
 
 MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(Fly, fly, mlir::fly::FlyDialect)
 
 void mlirRegisterFlyPasses(void) { mlir::fly::registerFlyPasses(); }
+
+void mlirRegisterFlyExplicitModuleOffloadingLLVMTranslation(
+    MlirContext context) {
+  mlir::fly::registerExplicitModuleOffloadingLLVMTranslation(
+      *unwrap(context));
+}

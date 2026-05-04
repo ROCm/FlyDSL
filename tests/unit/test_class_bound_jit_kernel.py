@@ -68,7 +68,7 @@ def frontend_only_compile(monkeypatch):
     monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", "0")
     monkeypatch.setattr(jit_function, "_flydsl_key", lambda: "test-flydsl-key")
 
-    def compile_noop(cls, module, *, arch: str = "", func_name: str = ""):
+    def compile_noop(cls, module, *, arch: str = "", func_name: str = "", link_libs=None):
         return module
 
     monkeypatch.setattr(jit_function.MlirCompiler, "compile", classmethod(compile_noop))
