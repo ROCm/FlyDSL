@@ -37,6 +37,14 @@ class RocmBackend(BaseBackend):
         chip = self.target.arch
         waves_per_eu = compile_hints.get("waves_per_eu")
         maxnreg = compile_hints.get("maxnreg")
+        # Opt-in flags for FlyDSL's AMDGPU MachineFunctionPasses.  Translated
+        # below into a `fly-rocdl-tag-amdgpu-codegen-passes{...}` fragment that
+        # marks the gpu.module so FlySerializeAMDGPUModule injects the
+        # corresponding passes at PreRegAlloc.  Default (absent/False) =>
+        # stock upstream codegen pipeline.
+        prefer_agpr_for_ds_read = bool(compile_hints.get("prefer_agpr_for_ds_read"))
+        mfma_tie_vdst_to_src2 = bool(compile_hints.get("mfma_tie_vdst_to_src2"))
+        tag_codegen_passes = prefer_agpr_for_ds_read or mfma_tie_vdst_to_src2
 
         bin_cli_opts = []
         if env.debug.enable_debug_info:
@@ -73,7 +81,15 @@ class RocmBackend(BaseBackend):
             "canonicalize",
             f"gpu.module(convert-scf-to-cf,cse,"
             f"convert-gpu-to-rocdl{{chipset={chip} index-bitwidth=0 runtime=HIP use-bare-ptr-memref-call-conv=true}},"
-            f"fly-rocdl-cluster-attr)",
+            f"fly-rocdl-cluster-attr"
+            + (
+                f",fly-rocdl-tag-amdgpu-codegen-passes{{"
+                f"prefer-agpr-for-ds-read={'true' if prefer_agpr_for_ds_read else 'false'} "
+                f"mfma-tie-vdst-to-src2={'true' if mfma_tie_vdst_to_src2 else 'false'}}}"
+                if tag_codegen_passes
+                else ""
+            )
+            + ")",
             f"rocdl-attach-target{{{self._format_pass_opts(rocdl_opts)}}}",
             "convert-scf-to-cf",
             "convert-cf-to-llvm",

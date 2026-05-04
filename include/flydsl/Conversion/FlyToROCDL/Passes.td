@@ -28,3 +28,28 @@ def FlyROCDLClusterAttrPass : Pass<"fly-rocdl-cluster-attr"> {
     "LLVM::LLVMDialect"
   ];
 }
+
+def FlyROCDLTagAMDGPUCodegenPassesPass
+    : Pass<"fly-rocdl-tag-amdgpu-codegen-passes"> {
+  let summary = "Mark gpu.module to opt into FlyDSL AMDGPU codegen passes";
+  let description = [{
+    Attaches a `fly.amdgpu_codegen_passes` DictionaryAttr on each
+    `gpu.module` with a UnitAttr entry per enabled FlyDSL-owned AMDGPU
+    MachineFunctionPass.  FlyDSL's `gpu::TargetAttrInterface` impl on
+    `#rocdl.target` reads this attribute and only injects the named
+    passes into the AMDGPU codegen pipeline; modules without the
+    attribute fall back to the stock upstream pipeline.
+
+    Run inside `gpu.module(...)` so `getOperation()` is the gpu.module.
+    The pass is a no-op when no option is set, so it's safe to add to
+    the pipeline unconditionally and toggle via options.
+  }];
+  let options = [
+    Option<"preferAGPRForDSRead", "prefer-agpr-for-ds-read", "bool",
+           /*default=*/"false",
+           "Inject FlyAMDGPUPreferAGPRForDSRead at PreRegAlloc.">,
+    Option<"mfmaTieVDSTToSrc2", "mfma-tie-vdst-to-src2", "bool",
+           /*default=*/"false",
+           "Inject FlyAMDGPUMFMATieVDSTToSrc2 at PreRegAlloc.">,
+  ];
+}

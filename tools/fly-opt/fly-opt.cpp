@@ -21,6 +21,7 @@ int main(int argc, char **argv) {
   mlir::fly::registerFlyPasses();
   mlir::registerFlyToROCDLConversionPass();
   mlir::registerFlyROCDLClusterAttrPass();
+  mlir::registerFlyROCDLTagAMDGPUCodegenPassesPass();
 
   mlir::DialectRegistry registry;
   mlir::registerAllDialects(registry);

@@ -94,14 +94,21 @@ def extract(vector, static_position=None, dynamic_position=None, *, loc=None, ip
 
 
 @traced_op
-def load_op(result_type, memref, indices, *, loc=None, ip=None):
-    """Wrapper around `vector.LoadOp(...).result`."""
+def load_op(result_type, memref, indices, *, nontemporal=False, alignment=None, loc=None, ip=None):
+    """Wrapper around `vector.LoadOp(...).result`.
+
+    ``nontemporal=True`` lowers to ``llvm.load {nontemporal}`` and is the hint
+    `FlyAMDGPUPreferAGPRForDSRead` looks for to pin a `ds_read` destination
+    (and the downstream MFMA src) into AGPR.
+    """
     from . import arith as _arith_ext
 
     return _vector.LoadOp(
         result_type,
         _arith_ext.unwrap(memref),
         [_arith_ext.unwrap(i, index=True, loc=loc) for i in indices],
+        nontemporal=nontemporal,
+        alignment=alignment,
         loc=loc,
         ip=ip,
     ).result

@@ -11,3 +11,5 @@ add_mlir_dialect_library(MLIRFlyROCDLDialect
   DEPENDS
   MLIRFlyROCDLIncGen
 )
+
+add_subdirectory(Target)
