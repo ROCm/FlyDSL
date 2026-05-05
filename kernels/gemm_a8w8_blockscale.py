@@ -32,6 +32,7 @@ from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import (
     arith,
     buffer_ops,
+    const_expr,
     gpu,
     idx2crd,
     range_constexpr,
@@ -171,7 +172,7 @@ def compile_gemm_a8w8_blockscale(
         raise ValueError(
             f"variant must be 'reg_preload' or 'no_op_preload', got {variant!r}"
         )
-    if variant == "reg_preload":
+    if const_expr(variant == "reg_preload"):
         _w_is_wave_uniform = (tile_n // n_warp) <= scale_block_n
         if not _w_is_wave_uniform:
             raise ValueError(
@@ -282,7 +283,7 @@ def compile_gemm_a8w8_blockscale(
         off = alloc._align(alloc.ptr, 16)
         stage_b_data_off.append(off)
         alloc.ptr = off + lds_b_data_bytes
-        if USES_X_SCALE_TDM:
+        if const_expr(USES_X_SCALE_TDM):
             off = alloc._align(alloc.ptr, 16)
             stage_x_scale_off.append(off)
             alloc.ptr = off + lds_x_scale_data_bytes
@@ -384,18 +385,6 @@ def compile_gemm_a8w8_blockscale(
         stages_a_mem = [p.get() for p in stages_a]
         stages_b_mem = [p.get() for p in stages_b]
 
-        if USES_X_SCALE_TDM:
-            stages_x_scale = [
-                SmemPtr(
-                    stage_allocators[i].get_base(),
-                    stage_x_scale_off[i],
-                    T.f8,
-                    shape=(lds_x_scale_data_bytes,),
-                )
-                for i in range(num_buffers)
-            ]
-            stages_x_scale_mem = [p.get() for p in stages_x_scale]
-
         # TDM descriptors built once at entry; GROUP1 + addr_hi stay in SGPRs, lo32 advances per K-tile.
         def _make_desc_x(lds_mem, k_base):
             return tdm_ops.make_tensor_descriptor_2d(
@@ -483,8 +472,21 @@ def compile_gemm_a8w8_blockscale(
             # rocdl.s_setprio(0)
             return arith.addi(lo_x, adv_x_i32), arith.addi(lo_w, adv_w_i32)
 
-        # ── Experimental x_scale TDM descriptor (hoisted) ──────────────────
-        if USES_X_SCALE_TDM:
+        # ── X-scale TDM descriptor + LDS staging (hoisted) ──────────────────
+        if const_expr(USES_X_SCALE_TDM):
+            # Single block so stages_x_scale_mem and downstream helpers
+            # all live in the same scope, no cross-closure references.
+            stages_x_scale = [
+                SmemPtr(
+                    stage_allocators[i].get_base(),
+                    stage_x_scale_off[i],
+                    T.f8,
+                    shape=(lds_x_scale_data_bytes,),
+                )
+                for i in range(num_buffers)
+            ]
+            stages_x_scale_mem = [p.get() for p in stages_x_scale]
+
             def _make_desc_x_scale(lds_mem, kb_base):
                 return tdm_ops.make_tensor_descriptor_2d(
                     global_ptr=arg_x_scale,
@@ -562,11 +564,12 @@ def compile_gemm_a8w8_blockscale(
                 return out
 
         w_is_wave_uniform = warp_tile_n <= scale_block_n
-        if w_is_wave_uniform:
-            wave_n_block = (blk_n + warp_n_base) / arith.index(scale_block_n)
+        # Hoisted out of `if const_expr(w_is_wave_uniform):` so closures wrapped by the
+        # AST rewriter for downstream branches can resolve it.
+        wave_n_block = (blk_n + warp_n_base) / arith.index(scale_block_n)
 
         # Bulk W-scale load: 1 buffer_load_b32 covers 32 K-blocks; chunk-prefetch chain when scale_k > 32.
-        if variant == "reg_preload":
+        if const_expr(variant == "reg_preload"):
             lane_id_full = lane_kgrp * arith.index(16) + lane16
 
             def _issue_w_chunk_const(chunk_i):
@@ -604,7 +607,7 @@ def compile_gemm_a8w8_blockscale(
             Single-chunk: direct readlane from bulk_w_cur. Multi-chunk:
             picks bulk_w_cur or bulk_w_prefetch based on kb's chunk index
             (vs. the loop-carried cur_chunk_idx_i32), then readlanes."""
-            if NUM_W_CHUNKS == 1:
+            if const_expr(NUM_W_CHUNKS == 1):
                 return rocdl.readlane(T.f32, bulk_w_cur, kb_i32)
             kb_chunk_i32 = arith.shrui(
                 kb_i32, arith.constant(5, type=T.i32)
@@ -644,7 +647,7 @@ def compile_gemm_a8w8_blockscale(
                             x_scale_buf, idx, vec_width=1, dtype=T.f32
                         )
                     )
-                if w_is_wave_uniform:
+                if const_expr(w_is_wave_uniform):
                     idx = wave_n_block * arith.index(scale_k) + kb
                     w_val = buffer_ops.buffer_load(
                         w_scale_buf, idx, vec_width=1, dtype=T.f32
@@ -702,7 +705,7 @@ def compile_gemm_a8w8_blockscale(
             w_raw = []
             for sc in range_constexpr(scales_per_tile):
                 kb = kb_base + arith.index(sc)
-                if w_is_wave_uniform:
+                if const_expr(w_is_wave_uniform):
                     kb_i32 = arith.index_cast(T.i32, kb)
                     w_val = _w_readlane(kb_i32)
                     for wn in range_constexpr(wmma_n_rep):
@@ -854,34 +857,23 @@ def compile_gemm_a8w8_blockscale(
                 # rocdl.s_setprio(2)
                 # hold onto a temp wmma to prevent the next instr from using fma on same vgpr (vnop issue)
                 temp0 = issue_wmma_temp(sc, wm0, wn0)
-                if n_accs > 1:
+                if const_expr(n_accs > 1):
                     wm1, wn1, idx1 = acc_coords[1]
                     temp1 = issue_wmma_temp(sc, wm1, wn1)
                 # Might not need this since dscnt 0 is gone
                 # rocdl.s_setprio(0)
 
-                # Case where we only have 1 wmma, usually skipped
-                if n_accs == 1:
+                if const_expr(n_accs == 1):
                     wmma_with_scale(temp0, wm0, wn0, idx0, sc_x_base, sc_w_base)
-                    continue
-
-                # fma -> wmma -> repeat
-                for i in range_constexpr(n_accs - wmma_pipeline_depth):
-                    # fma done here
+                else:
+                    for i in range_constexpr(n_accs - wmma_pipeline_depth):
+                        wmma_with_scale(temp0, wm0, wn0, idx0, sc_x_base, sc_w_base)
+                        wm0, wn0, idx0 = wm1, wn1, idx1
+                        temp0 = temp1
+                        wm1, wn1, idx1 = acc_coords[i + wmma_pipeline_depth]
+                        temp1 = issue_wmma_temp(sc, wm1, wn1)
                     wmma_with_scale(temp0, wm0, wn0, idx0, sc_x_base, sc_w_base)
-
-                    wm0, wn0, idx0 = wm1, wn1, idx1
-                    temp0 = temp1
-
-                    # new wmma
-                    wm1, wn1, idx1 = acc_coords[i + wmma_pipeline_depth]
-                    # rocdl.s_setprio(2)
-                    temp1 = issue_wmma_temp(sc, wm1, wn1)
-                    # rocdl.s_setprio(0)
-
-                # drain remaining
-                wmma_with_scale(temp0, wm0, wn0, idx0, sc_x_base, sc_w_base)
-                wmma_with_scale(temp1, wm1, wn1, idx1, sc_x_base, sc_w_base)
+                    wmma_with_scale(temp1, wm1, wn1, idx1, sc_x_base, sc_w_base)
 
             return global_accs
 
@@ -930,28 +922,22 @@ def compile_gemm_a8w8_blockscale(
                 wm0, wn0, idx0 = acc_coords[0]
                 # rocdl.s_setprio(2)
                 temp0 = issue_wmma_temp(sc, wm0, wn0)
-                if n_accs > 1:
+                if const_expr(n_accs > 1):
                     wm1, wn1, idx1 = acc_coords[1]
                     temp1 = issue_wmma_temp(sc, wm1, wn1)
                 # rocdl.s_setprio(0)
 
-                if n_accs == 1:
+                if const_expr(n_accs == 1):
                     wmma_with_scale(temp0, wm0, wn0, idx0, sc_x_base, sc_w_base)
-                    continue
-
-                for i in range_constexpr(n_accs - wmma_pipeline_depth):
+                else:
+                    for i in range_constexpr(n_accs - wmma_pipeline_depth):
+                        wmma_with_scale(temp0, wm0, wn0, idx0, sc_x_base, sc_w_base)
+                        wm0, wn0, idx0 = wm1, wn1, idx1
+                        temp0 = temp1
+                        wm1, wn1, idx1 = acc_coords[i + wmma_pipeline_depth]
+                        temp1 = issue_wmma_temp(sc, wm1, wn1)
                     wmma_with_scale(temp0, wm0, wn0, idx0, sc_x_base, sc_w_base)
-
-                    wm0, wn0, idx0 = wm1, wn1, idx1
-                    temp0 = temp1
-
-                    wm1, wn1, idx1 = acc_coords[i + wmma_pipeline_depth]
-                    # rocdl.s_setprio(2)
-                    temp1 = issue_wmma_temp(sc, wm1, wn1)
-                    # rocdl.s_setprio(0)
-
-                wmma_with_scale(temp0, wm0, wn0, idx0, sc_x_base, sc_w_base)
-                wmma_with_scale(temp1, wm1, wn1, idx1, sc_x_base, sc_w_base)
+                    wmma_with_scale(temp1, wm1, wn1, idx1, sc_x_base, sc_w_base)
 
             return global_accs
 
@@ -1053,14 +1039,14 @@ def compile_gemm_a8w8_blockscale(
         # Prologue: issue TDMs for the first prologue_tiles, X-scale interleaved per-tile.
         lo_x = addr_lo_x_init
         lo_w = addr_lo_w_init
-        if USES_X_SCALE_TDM:
+        if const_expr(USES_X_SCALE_TDM):
             lo_x_scale = addr_lo_x_scale_init
 
         # Boost wave priority for the TDM issue burst to compress wave-dispatch skew.
         rocdl.s_setprio(2)
         for i in range_constexpr(prologue_tiles):
             lo_x, lo_w = issue_tdm_loads(i, lo_x, lo_w)
-            if USES_X_SCALE_TDM:
+            if const_expr(USES_X_SCALE_TDM):
                 lo_x_scale = issue_x_scale_tdm(i, lo_x_scale)
         rocdl.s_setprio(0)
 
@@ -1069,10 +1055,10 @@ def compile_gemm_a8w8_blockscale(
         # MAIN LOOP
         # asm is unrolled in flydsl for range_constexpr, so we see more in asm
 
-        if variant == "reg_preload":
+        if const_expr(variant == "reg_preload"):
             # Bulk W-scale buffer_load deferred to here (after prologue TDM issues).
             bulk_w_cur = _issue_w_chunk_const(0)
-            if USES_W_CHUNK_PREFETCH:
+            if const_expr(USES_W_CHUNK_PREFETCH):
                 bulk_w_prefetch = _issue_w_chunk_const(1)
             else:
                 bulk_w_prefetch = bulk_w_cur
@@ -1087,13 +1073,13 @@ def compile_gemm_a8w8_blockscale(
             # sched_barrier pins readlane after wait so vmcnt is near zero.
             rocdl.sched_barrier(0)
             cur_w_raw = issue_w_raw_scales_for_tile_experimental(0)
-            if num_k_tiles > 1:
+            if const_expr(num_k_tiles > 1):
                 prefetch_w_raw = issue_w_raw_scales_for_tile_experimental(1)
             else:
                 prefetch_w_raw = zero_w_raw
 
             main_loop_end_k = main_loop_iters * num_buffers * tile_k
-            if main_loop_iters > 0:
+            if const_expr(main_loop_iters > 0):
                 init_state = _pack_state_experimental(
                     accs,
                     cur_a,
@@ -1102,7 +1088,7 @@ def compile_gemm_a8w8_blockscale(
                     cur_w_raw,
                     prefetch_w_raw,
                 )
-                if USES_W_CHUNK_PREFETCH:
+                if const_expr(USES_W_CHUNK_PREFETCH):
                     init_state = init_state + [
                         bulk_w_cur,
                         bulk_w_prefetch,
@@ -1115,7 +1101,7 @@ def compile_gemm_a8w8_blockscale(
                     cur_lo_x_scale = state[-1]
                     cur_lo_w = state[-2]
                     cur_lo_x = state[-3]
-                    if USES_W_CHUNK_PREFETCH:
+                    if const_expr(USES_W_CHUNK_PREFETCH):
                         cur_chunk_idx_i32 = state[-4]
                         bulk_w_prefetch = state[-5]
                         bulk_w_cur = state[-6]
@@ -1167,7 +1153,7 @@ def compile_gemm_a8w8_blockscale(
                         )
 
                     # End-of-iteration W-scale chunk advance 
-                    if USES_W_CHUNK_PREFETCH:
+                    if const_expr(USES_W_CHUNK_PREFETCH):
                         next_iter_first_tile = tile_idx_rt + arith.index(num_buffers)
                         next_iter_first_kb = (
                             next_iter_first_tile * arith.index(scales_per_tile)
@@ -1207,7 +1193,7 @@ def compile_gemm_a8w8_blockscale(
                         cur_w_raw,
                         prefetch_w_raw,
                     )
-                    if USES_W_CHUNK_PREFETCH:
+                    if const_expr(USES_W_CHUNK_PREFETCH):
                         _new_state = _new_state + [
                             bulk_w_cur,
                             bulk_w_prefetch,
@@ -1215,7 +1201,7 @@ def compile_gemm_a8w8_blockscale(
                         ]
                     _new_state = _new_state + [cur_lo_x, cur_lo_w, cur_lo_x_scale]
                     results = yield _new_state
-                if USES_W_CHUNK_PREFETCH:
+                if const_expr(USES_W_CHUNK_PREFETCH):
                     cur_chunk_idx_i32 = results[-4]
                     bulk_w_prefetch = results[-5]
                     bulk_w_cur = results[-6]
@@ -1262,7 +1248,7 @@ def compile_gemm_a8w8_blockscale(
 
                 next_cur_w_raw = prefetch_w_raw
                 future_tile = extra_base_tile + step + 2
-                if future_tile < num_k_tiles:
+                if const_expr(future_tile < num_k_tiles):
                     next_prefetch_w = issue_w_raw_scales_for_tile_experimental(
                         future_tile
                     )
@@ -1293,7 +1279,7 @@ def compile_gemm_a8w8_blockscale(
 
                 next_cur_w_raw = prefetch_w_raw
                 future_tile = drain_base_tile + drain_i + 2
-                if future_tile < num_k_tiles:
+                if const_expr(future_tile < num_k_tiles):
                     next_prefetch_w = issue_w_raw_scales_for_tile_experimental(
                         future_tile
                     )
@@ -1313,13 +1299,13 @@ def compile_gemm_a8w8_blockscale(
             # frags are loaded fresh per K-tile, but scales still use the
             # lane16-strided layout).
             cur_x_raw, cur_w_raw = issue_raw_scales_for_tile(0)
-            if num_k_tiles > 1:
+            if const_expr(num_k_tiles > 1):
                 prefetch_x_raw, prefetch_w_raw = issue_raw_scales_for_tile(1)
             else:
                 prefetch_x_raw, prefetch_w_raw = zero_x_raw, zero_w_raw
 
             main_loop_end_k = main_loop_iters * num_buffers * tile_k
-            if main_loop_iters > 0:
+            if const_expr(main_loop_iters > 0):
                 init_state = _pack_state_no_op_preload(
                     accs, cur_x_raw, cur_w_raw, prefetch_x_raw, prefetch_w_raw
                 ) + [lo_x, lo_w]
@@ -1390,7 +1376,7 @@ def compile_gemm_a8w8_blockscale(
                 cur_w_raw = prefetch_w_raw
 
                 future_tile = extra_base_tile + step + 2
-                if future_tile < num_k_tiles:
+                if const_expr(future_tile < num_k_tiles):
                     prefetch_x_raw, prefetch_w_raw = issue_raw_scales_for_tile(
                         future_tile
                     )
@@ -1415,7 +1401,7 @@ def compile_gemm_a8w8_blockscale(
                 cur_w_raw = prefetch_w_raw
 
                 future_tile = drain_base_tile + drain_i + 2
-                if future_tile < num_k_tiles:
+                if const_expr(future_tile < num_k_tiles):
                     prefetch_x_raw, prefetch_w_raw = issue_raw_scales_for_tile(
                         future_tile
                     )
@@ -1429,7 +1415,7 @@ def compile_gemm_a8w8_blockscale(
             accs = compute_wmma_with_frags(accs, fresh_a, fresh_b, cur_x_raw, cur_w_raw)
 
         # Step 4: convert f32 accs to out_dtype, buffer_store to Y.
-        if num_buffers > 2:
+        if const_expr(num_buffers > 2):
             rocdl.sched_barrier(0)
 
         out_elem = (
