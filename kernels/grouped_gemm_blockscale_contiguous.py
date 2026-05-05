@@ -181,17 +181,17 @@ def compile_grouped_gemm_blockscale_contiguous(
         # Buffer resources
         a_nbytes = m_in * k_in
         a_rsrc = buffer_ops.create_buffer_resource(
-            arg_a, max_size=False, num_records_bytes=arith.index_cast(T.i64, a_nbytes)
+            arg_a, max_size=False, num_records_bytes=a_nbytes
         )
 
         b_nbytes = num_groups_in * n_in * k_in
         b_rsrc = buffer_ops.create_buffer_resource(
-            arg_b, max_size=False, num_records_bytes=arith.index_cast(T.i64, b_nbytes)
+            arg_b, max_size=False, num_records_bytes=b_nbytes
         )
 
         d_nbytes = m_in * n_in * fx.Index(2)  # bf16/f16 = 2 bytes
         d_rsrc = buffer_ops.create_buffer_resource(
-            arg_d, max_size=False, num_records_bytes=arith.index_cast(T.i64, d_nbytes)
+            arg_d, max_size=False, num_records_bytes=d_nbytes
         )
 
         # Scale buffers — gfx950 HW E8M0 path consumes int8 (one byte/scale,
@@ -201,19 +201,19 @@ def compile_grouped_gemm_blockscale_contiguous(
         # scale_a: [scale_k, M] - transposed layout
         sa_nbytes = fx.Index(scale_k) * m_in * fx.Index(scale_byte_size)
         sa_rsrc = buffer_ops.create_buffer_resource(
-            arg_scale_a, max_size=False, num_records_bytes=arith.index_cast(T.i64, sa_nbytes)
+            arg_scale_a, max_size=False, num_records_bytes=sa_nbytes
         )
 
         # scale_b: [num_groups, scale_n, scale_k]
         sb_nbytes = num_groups_in * fx.Index(scale_n * scale_k * scale_byte_size)
         sb_rsrc = buffer_ops.create_buffer_resource(
-            arg_scale_b, max_size=False, num_records_bytes=arith.index_cast(T.i64, sb_nbytes)
+            arg_scale_b, max_size=False, num_records_bytes=sb_nbytes
         )
 
         # grouped_layout: [M]
         gl_nbytes = m_in * fx.Index(4)
         gl_rsrc = buffer_ops.create_buffer_resource(
-            arg_grouped_layout, max_size=False, num_records_bytes=arith.index_cast(T.i64, gl_nbytes)
+            arg_grouped_layout, max_size=False, num_records_bytes=gl_nbytes
         )
 
         # Load group ID for this M-block (use first row of tile)
@@ -223,7 +223,7 @@ def compile_grouped_gemm_blockscale_contiguous(
         # Early exit for invalid blocks (padding rows)
         _if_valid = scf.IfOp(is_valid)
         with scf_then_region(_if_valid):
-            group_idx = arith.index_cast(T.index, group_id_i32)
+            group_idx = fx.Index(group_id_i32)
 
             _t = compute_mfma_tiling(tile_m=tile_m, tile_n=tile_n)
             m_repeat = _t.m_repeat

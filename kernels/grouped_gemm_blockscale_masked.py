@@ -185,17 +185,17 @@ def compile_grouped_gemm_blockscale_masked(
         # Buffer resources
         a_nbytes = num_groups_in * m_in * k_in
         a_rsrc = buffer_ops.create_buffer_resource(
-            arg_a, max_size=False, num_records_bytes=arith.index_cast(T.i64, a_nbytes)
+            arg_a, max_size=False, num_records_bytes=a_nbytes
         )
 
         b_nbytes = num_groups_in * n_in * k_in
         b_rsrc = buffer_ops.create_buffer_resource(
-            arg_b, max_size=False, num_records_bytes=arith.index_cast(T.i64, b_nbytes)
+            arg_b, max_size=False, num_records_bytes=b_nbytes
         )
 
         d_nbytes = num_groups_in * m_in * n_in * fx.Index(2)  # bf16/f16 = 2 bytes
         d_rsrc = buffer_ops.create_buffer_resource(
-            arg_d, max_size=False, num_records_bytes=arith.index_cast(T.i64, d_nbytes)
+            arg_d, max_size=False, num_records_bytes=d_nbytes
         )
 
         # Scale buffers — gfx950 HW E8M0 path consumes int8 (one byte/scale,
@@ -205,19 +205,19 @@ def compile_grouped_gemm_blockscale_masked(
         # scale_a: [G, scale_k, max_m]
         sa_nbytes = num_groups_in * fx.Index(scale_k) * m_in * fx.Index(scale_byte_size)
         sa_rsrc = buffer_ops.create_buffer_resource(
-            arg_scale_a, max_size=False, num_records_bytes=arith.index_cast(T.i64, sa_nbytes)
+            arg_scale_a, max_size=False, num_records_bytes=sa_nbytes
         )
 
         # scale_b: [G, scale_n, scale_k]
         sb_nbytes = num_groups_in * fx.Index(scale_n * scale_k * scale_byte_size)
         sb_rsrc = buffer_ops.create_buffer_resource(
-            arg_scale_b, max_size=False, num_records_bytes=arith.index_cast(T.i64, sb_nbytes)
+            arg_scale_b, max_size=False, num_records_bytes=sb_nbytes
         )
 
         # masked_m: [G]
         mask_nbytes = num_groups_in * fx.Index(4)
         mask_rsrc = buffer_ops.create_buffer_resource(
-            arg_masked_m, max_size=False, num_records_bytes=arith.index_cast(T.i64, mask_nbytes)
+            arg_masked_m, max_size=False, num_records_bytes=mask_nbytes
         )
 
         # Early exit for invalid blocks that fall entirely within the padded garbage
