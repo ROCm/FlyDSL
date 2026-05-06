@@ -262,7 +262,7 @@ def Fly_CosizeOp : Fly_Op<"cosize", [Pure, DeclareOpInterfaceMethods<InferTypeOp
 }
 
 def Fly_Crd2IdxOp : Fly_Op<"crd2idx", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
-  let arguments = (ins Fly_IntTuple:$coord, AnyTypeOf<[Fly_NarrowLayoutType, Fly_Swizzle]>:$layout);
+  let arguments = (ins Fly_IntTuple:$coord, AnyTypeOf<[Fly_NarrowLayoutType, Fly_Swizzle, Fly_CoordSwizzle]>:$layout);
   let results = (outs Fly_IntTuple:$index);
 }
 def Fly_Idx2CrdOp : Fly_Op<"idx2crd", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {

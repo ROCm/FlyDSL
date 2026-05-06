@@ -67,6 +67,32 @@ Attribute sliceComposedLayoutAttr(LayoutBuilder<LayoutAttr> &builder, Attribute 
   return ComposedLayoutAttr::get(composed.getInner(), composed.getOffset(), newOuter);
 }
 
+std::pair<LayoutAttr, IntTupleAttr> decomposeComposedLayoutAttr(LayoutBuilder<LayoutAttr> &builder,
+                                                                ComposedLayoutAttr composed) {
+  Attribute outer = composed.getOuter();
+  LayoutAttr linearLayout;
+  IntTupleAttr inputOffset = composed.getOffset();
+  if (auto outerLayout = dyn_cast<LayoutAttr>(outer)) {
+    linearLayout = outerLayout;
+  } else {
+    IntTupleAttr outerOffset;
+    std::tie(linearLayout, outerOffset) =
+        decomposeComposedLayoutAttr(builder, cast<ComposedLayoutAttr>(outer));
+    inputOffset = intTupleAdd(builder, inputOffset, outerOffset);
+  }
+
+  Attribute inner = composed.getInner();
+  IntTupleAttr currentOffset;
+  if (auto swizzleInner = dyn_cast<SwizzleAttr>(inner))
+    currentOffset = builder.applySwizzle(inputOffset, swizzleInner);
+  else if (auto coordSwizzleInner = dyn_cast<CoordSwizzleAttr>(inner))
+    currentOffset = builder.applyCoordSwizzle(inputOffset, coordSwizzleInner);
+  else
+    currentOffset = layoutCrd2Idx(builder, inputOffset, inner);
+
+  return {linearLayout, currentOffset};
+}
+
 LayoutAttr GetLayoutAttrFromLayoutLikeType(Type type) {
   Attribute layoutAttr;
   if (auto memrefTy = dyn_cast<fly::MemRefType>(type)) {
@@ -990,11 +1016,15 @@ FLY_INFER_RETURN_TYPES(Crd2IdxOp) {
     IntTupleAttr result = builder.applySwizzle(coordAttr, swizzleTy.getAttr());
     inferredReturnTypes.assign({IntTupleType::get(result)});
     return success();
+  } else if (auto coordSwizzleTy = dyn_cast<CoordSwizzleType>(operands[1].getType())) {
+    IntTupleAttr result = builder.applyCoordSwizzle(coordAttr, coordSwizzleTy.getAttr());
+    inferredReturnTypes.assign({IntTupleType::get(result)});
+    return success();
   }
 
   return emitOptionalError(location,
-                           "Crd2IdxOp: expected LayoutType, ComposedLayoutType or SwizzleType "
-                           "for layout, got ",
+                           "Crd2IdxOp: expected LayoutType, ComposedLayoutType, SwizzleType or "
+                           "CoordSwizzleType for layout, got ",
                            operands[1].getType());
 }
 
@@ -1858,15 +1888,7 @@ FLY_INFER_RETURN_TYPES(DecompositionOp) {
         location, "DecompositionOp: expected LayoutAttr or ComposedLayoutAttr, got ", layoutAttr);
 
   LayoutBuilder<LayoutAttr> builder(context);
-  Attribute inner = composed.getInner();
-  IntTupleAttr offset = composed.getOffset();
-  Attribute outer = composed.getOuter();
-
-  IntTupleAttr iterOffset;
-  if (auto swizzleInner = dyn_cast<SwizzleAttr>(inner))
-    iterOffset = builder.applySwizzle(offset, swizzleInner);
-  else
-    iterOffset = layoutCrd2Idx(builder, offset, inner);
+  auto [linearLayout, iterOffset] = decomposeComposedLayoutAttr(builder, composed);
 
   if (auto memrefTy = dyn_cast<fly::MemRefType>(tensorTy)) {
     int32_t valDiv = memrefTy.getValueDivisibility();
@@ -1875,12 +1897,12 @@ FLY_INFER_RETURN_TYPES(DecompositionOp) {
         offsetInt.isStatic() ? std::abs(offsetInt.getValue()) : offsetInt.getDivisibility();
     int32_t newValDiv = (offsetDiv == 0) ? valDiv : utils::divisibilityAdd(valDiv, offsetDiv);
     inferredReturnTypes.assign({fly::MemRefType::get(
-        memrefTy.getElemTy(), memrefTy.getAddressSpace(), outer,
+        memrefTy.getElemTy(), memrefTy.getAddressSpace(), linearLayout,
         AlignAttr::get(memrefTy.getElemTy(), newValDiv), memrefTy.getSwizzle())});
   } else {
     auto coordTensorTy = cast<CoordTensorType>(tensorTy);
     IntTupleAttr newBase = intTupleAdd(builder, coordTensorTy.getBase(), iterOffset);
-    inferredReturnTypes.assign({CoordTensorType::get(newBase, outer)});
+    inferredReturnTypes.assign({CoordTensorType::get(newBase, linearLayout)});
   }
   return success();
 }

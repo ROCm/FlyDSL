@@ -383,9 +383,9 @@ Value unpackComposedLayoutFromStruct(OpBuilder &builder, Location loc, Value str
     outer = unpackNarrowLayoutFromStruct(builder, loc, fieldVal, attr.getOuter(), fieldTy);
     idx++;
   } else {
-    if (auto layout = dyn_cast<LayoutAttr>(attr))
+    if (auto layout = dyn_cast<LayoutAttr>(attr.getOuter()))
       outer = LayoutType::get(layout).rebuildStaticValue(builder, loc, nullptr);
-    if (auto composed = dyn_cast<ComposedLayoutAttr>(attr))
+    if (auto composed = dyn_cast<ComposedLayoutAttr>(attr.getOuter()))
       outer = ComposedLayoutType::get(composed).rebuildStaticValue(builder, loc, nullptr);
   }
 

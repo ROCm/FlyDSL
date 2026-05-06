@@ -205,6 +205,46 @@ func.func @test_crd2idx_composed_outer() -> !fly.int_tuple<28> {
   return %idx : !fly.int_tuple<28>
 }
 
+// Decomposition recursively peels composed outers until only a linear LayoutAttr
+// remains in the resulting tensor type.
+// CHECK-LABEL: @test_decomposition_composed_outer
+func.func @test_decomposition_composed_outer(%ptr: !fly.ptr<f32, global>)
+    -> !fly.memref<f32, global, (4,8):(1,4)> {
+  %off1 = fly.make_int_tuple() : () -> !fly.int_tuple<5>
+  %off2 = fly.make_int_tuple() : () -> !fly.int_tuple<7>
+
+  %sa = fly.make_int_tuple() : () -> !fly.int_tuple<128>
+  %da = fly.make_int_tuple() : () -> !fly.int_tuple<2>
+  %inner = fly.make_layout(%sa, %da) : (!fly.int_tuple<128>, !fly.int_tuple<2>) -> !fly.layout<128:2>
+
+  %sb = fly.make_int_tuple() : () -> !fly.int_tuple<128>
+  %db = fly.make_int_tuple() : () -> !fly.int_tuple<3>
+  %mid = fly.make_layout(%sb, %db) : (!fly.int_tuple<128>, !fly.int_tuple<3>) -> !fly.layout<128:3>
+
+  %sc = fly.make_int_tuple() : () -> !fly.int_tuple<(4, 8)>
+  %dc = fly.make_int_tuple() : () -> !fly.int_tuple<(1, 4)>
+  %outer = fly.make_layout(%sc, %dc) : (!fly.int_tuple<(4, 8)>, !fly.int_tuple<(1, 4)>) -> !fly.layout<(4, 8) : (1, 4)>
+
+  %cl1 = fly.make_composed_layout(%mid, %off2, %outer)
+      : (!fly.layout<128:3>, !fly.int_tuple<7>, !fly.layout<(4, 8) : (1, 4)>)
+      -> !fly.composed_layout<128:3 o 7 o (4, 8) : (1, 4)>
+  %cl2 = fly.make_composed_layout(%inner, %off1, %cl1)
+      : (!fly.layout<128:2>, !fly.int_tuple<5>,
+         !fly.composed_layout<128:3 o 7 o (4, 8) : (1, 4)>)
+      -> !fly.composed_layout<128:2 o 5 o [128:3 o 7 o (4, 8) : (1, 4)]>
+  %view = fly.make_view(%ptr, %cl2)
+      : (!fly.ptr<f32, global>,
+         !fly.composed_layout<128:2 o 5 o [128:3 o 7 o (4, 8) : (1, 4)]>)
+      -> !fly.memref<f32, global, 128:2 o 5 o [128:3 o 7 o (4, 8) : (1, 4)]>
+  // CHECK-NOT: fly.decomposition
+  // CHECK: fly.make_int_tuple() : () -> !fly.int_tuple<52>
+  // CHECK: fly.make_view{{.*}} -> !fly.memref<f32, global, (4,8):(1,4)>
+  %decomp = fly.decomposition(%view)
+      : (!fly.memref<f32, global, 128:2 o 5 o [128:3 o 7 o (4, 8) : (1, 4)]>)
+      -> !fly.memref<f32, global, (4, 8) : (1, 4)>
+  return %decomp : !fly.memref<f32, global, (4, 8) : (1, 4)>
+}
+
 // Dynamic crd2idx: c0*1 + c1*4 lowered to arith.muli + arith.addi
 // CHECK-LABEL: @test_crd2idx_dynamic
 // CHECK-SAME: (%[[C0:.*]]: i32, %[[C1:.*]]: i32)

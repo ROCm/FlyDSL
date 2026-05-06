@@ -433,6 +433,8 @@ def make_composed_layout(inner, offset_or_outer, outer=None, loc=None, ip=None):
         offset = coprofile(outer, loc=loc, ip=ip)
     else:
         offset = offset_or_outer
+        if not isinstance(offset, ir.Value):
+            offset = make_int_tuple(offset, loc=loc, ip=ip)
     return fly.make_composed_layout(inner, offset, outer, loc=loc, ip=ip)
 
 
@@ -442,7 +444,7 @@ def make_identity_layout(shape, loc=None, ip=None):
 
     The result keeps *shape* and uses basis-tuple strides derived from that
     shape's profile (e.g. `(4, 8) -> (1E0, 1E1)`), so coordinates stay symbolic
-    instead of being collapsed to one flat linear address.d
+    instead of being collapsed to one flat linear address.
 
     Examples:
         make_identity_layout((4, 8))   -> ((4, 8), (1E0, 1E1))

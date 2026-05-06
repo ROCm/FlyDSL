@@ -1130,6 +1130,14 @@ public:
       IntTupleValueAdaptor result = layoutBuilder.applySwizzle(coordAdaptor, swizzleTy.getAttr());
       rewriter.replaceOp(op, layoutBuilder.finalize(result));
       return success();
+    } else if (auto coordSwizzleTy = dyn_cast<CoordSwizzleType>(layout.getType())) {
+      LayoutBuilder<LayoutValueAdaptor> layoutBuilder(rewriter, loc);
+      IntTupleValueAdaptor coordAdaptor =
+          IntTupleValueAdaptor::create(layoutBuilder, coord, coordTy.getAttr());
+      IntTupleValueAdaptor result =
+          layoutBuilder.applyCoordSwizzle(coordAdaptor, coordSwizzleTy.getAttr());
+      rewriter.replaceOp(op, layoutBuilder.finalize(result));
+      return success();
     } else {
       return failure();
     }
@@ -2464,6 +2472,69 @@ public:
   }
 };
 
+class DecompositionOpLowering : public OpRewritePattern<DecompositionOp> {
+  struct DecomposedLayoutValue {
+    LayoutValueAdaptor linearLayout;
+    IntTupleValueAdaptor offset;
+  };
+
+  DecomposedLayoutValue decomposeComposedLayoutValue(LayoutBuilder<LayoutValueAdaptor> &builder,
+                                                     LayoutValueAdaptor composed) const {
+    LayoutValueAdaptor outer = builder.getOuter(composed);
+    LayoutValueAdaptor linearLayout;
+    IntTupleValueAdaptor inputOffset = builder.getOffset(composed);
+
+    if (builder.isComposedLayout(outer)) {
+      DecomposedLayoutValue outerDecomp = decomposeComposedLayoutValue(builder, outer);
+      linearLayout = outerDecomp.linearLayout;
+      inputOffset = builder.add(inputOffset, outerDecomp.offset);
+    } else {
+      linearLayout = outer;
+    }
+
+    LayoutValueAdaptor inner = builder.getInner(composed);
+    IntTupleValueAdaptor currentOffset;
+    if (builder.isSwizzle(inner)) {
+      currentOffset = builder.applySwizzle(inputOffset, builder.getSwizzleAttr(inner));
+    } else if (builder.isCoordSwizzle(inner)) {
+      currentOffset = builder.applyCoordSwizzle(inputOffset, builder.getCoordSwizzleAttr(inner));
+    } else {
+      currentOffset = layoutCrd2Idx(builder, inputOffset, inner);
+    }
+
+    return {linearLayout, currentOffset};
+  }
+
+public:
+  using OpRewritePattern<DecompositionOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(DecompositionOp op, PatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    Value tensor = op.getTensor();
+
+    auto makeViewOp = tensor.getDefiningOp<MakeViewOp>();
+    if (!makeViewOp)
+      return failure();
+
+    Value layout = makeViewOp.getLayout();
+    auto composedTy = dyn_cast<ComposedLayoutType>(layout.getType());
+    if (!composedTy)
+      return failure();
+    if (!isNormalForm(cast<TypedValue<ComposedLayoutType>>(layout)))
+      return failure();
+
+    LayoutBuilder<LayoutValueAdaptor> layoutBuilder(rewriter, loc);
+    LayoutValueAdaptor composedAdaptor(layout, composedTy.getAttr());
+    DecomposedLayoutValue decomposed = decomposeComposedLayoutValue(layoutBuilder, composedAdaptor);
+
+    Value offset = layoutBuilder.finalize(decomposed.offset);
+    Value iter = AddOffsetOp::create(rewriter, loc, makeViewOp.getIter(), offset);
+    Value result = MakeViewOp::create(rewriter, loc, iter, decomposed.linearLayout.getValue());
+    rewriter.replaceOp(op, result);
+    return success();
+  }
+};
+
 class MemRefLoadVecOpLowering : public OpRewritePattern<MemRefLoadVecOp> {
 public:
   using OpRewritePattern<MemRefLoadVecOp>::OpRewritePattern;
@@ -2780,7 +2851,8 @@ public:
     patterns.add<CoprofileOpLowering, CoshapeOpLowering, CosizeOpLowering>(context);
     patterns.add<Crd2IdxLowering, Idx2CrdLowering>(context);
     patterns.add<GetFlatCoordOpLowering, Get1DCoordOpLowering>(context);
-    patterns.add<CoalesceOpLowering, CompositionOpLowering, ComplementOpLowering>(context);
+    patterns.add<CoalesceOpLowering, CompositionOpLowering, ComplementOpLowering,
+                 DecompositionOpLowering>(context);
     patterns.add<RightInverseOpLowering, LeftInverseOpLowering>(context);
     patterns.add<LogicalDivideOpLowering, ZippedDivideOpLowering, TiledDivideOpLowering,
                  FlatDivideOpLowering>(context);
