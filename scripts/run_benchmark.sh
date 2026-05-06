@@ -147,6 +147,15 @@ MOE_A8W4_SHAPES='
 8192,3072,3072,128,4,32,128,256,256,256
 '
 
+# RDNA4 Flash Attention shapes backed by AITER's FlyDSL kernel:
+# "seq_len,num_heads,head_dim,dtype"
+if [ -z "${RDNA_FA_SHAPES:-}" ]; then
+RDNA_FA_SHAPES='
+1024,12,128,bf16
+8192,12,128,bf16
+'
+fi
+
 # Memory bound threshold (M or tokens <= threshold => memory bound)
 MEMORY_BOUND_THRESHOLD=512
 
@@ -164,7 +173,7 @@ Usage:
   bash scripts/run_benchmark.sh --list
 
 Supported ops:
-  softmax | layernorm | rmsnorm | gemm | moe
+  softmax | layernorm | rmsnorm | gemm | moe | rdna_fa
 USAGE
 }
 
@@ -222,13 +231,14 @@ _normalize_op() {
   esac
 }
 
-# Default: run softmax, norms, and GEMM unless user selected a subset.
-# Use positional args or --only to enable others: softmax, layernorm, rmsnorm, gemm, moe
+# Default: run softmax, norms, GEMM, MoE, and RDNA FA where supported.
+# Use positional args or --only to enable others: softmax, layernorm, rmsnorm, gemm, moe, rdna_fa
 RUN_SOFTMAX=1
 RUN_LAYERNORM=1
 RUN_RMSNORM=1
 RUN_PRESHUFFLE_GEMM=1
 RUN_MOE=1
+RUN_RDNA_FA=1
 
 _enable_only_ops() {
   RUN_SOFTMAX=0
@@ -236,6 +246,7 @@ _enable_only_ops() {
   RUN_RMSNORM=0
   RUN_PRESHUFFLE_GEMM=0
   RUN_MOE=0
+  RUN_RDNA_FA=0
   for op in "$@"; do
     op="$(_normalize_op "${op}")"
     case "${op}" in
@@ -244,6 +255,7 @@ _enable_only_ops() {
       rmsnorm) RUN_RMSNORM=1 ;;
       gemm) RUN_PRESHUFFLE_GEMM=1 ;;
       moe) RUN_MOE=1 ;;
+      rdna_fa|rdna-fa|fa|flash_attn|flash-attn) RUN_RDNA_FA=1 ;;
       "" ) ;;
       *) _die "unknown op '${op}'" ;;
     esac
@@ -280,6 +292,7 @@ if [ "$#" -gt 0 ]; then
         echo "rmsnorm"
         echo "gemm"
         echo "moe"
+        echo "rdna_fa"
         exit 0
         ;;
       --only)
@@ -893,7 +906,7 @@ if [ "${RUN_MOE}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
 fi
 
 # RDNA4 WMMA GEMM benchmarks (via benchmark_common.py)
-if [ "${IS_RDNA4}" = "true" ]; then
+if [ "${RUN_PRESHUFFLE_GEMM}" -eq 1 ] && [ "${IS_RDNA4}" = "true" ]; then
   echo ""
   echo "========================================================================"
   echo "RDNA4 WMMA Benchmarks"
@@ -907,6 +920,34 @@ if [ "${IS_RDNA4}" = "true" ]; then
     echo "RDNA4 WMMA benchmark failed. Log: ${log}" >&2
     tail -20 "${log}" >&2
   fi
+fi
+
+# RDNA4 Flash Attention benchmark (AITER FlyDSL kernel).
+if [ "${RUN_RDNA_FA}" -eq 1 ] && [ "${IS_RDNA4}" = "true" ]; then
+  for shape in $RDNA_FA_SHAPES; do
+    oldIFS=$IFS
+    IFS=,
+    # shellcheck disable=SC2086 # intentional word-splitting on IFS=,
+    set -- $shape
+    IFS=$oldIFS
+    seq_len=$1; heads=$2; head_dim=$3; dtype=$4
+    shape_tag="${seq_len}x${heads}x${head_dim}"
+    log="${BENCH_LOG_DIR}/rdna_fa_${shape_tag}_${dtype}.log"
+    json="${BENCH_LOG_DIR}/rdna_fa_${shape_tag}_${dtype}.json"
+
+    if python3 tests/kernels/test_rdna_flash_attention.py \
+      --shapes "${shape}" \
+      --out-json "${json}" >"${log}" 2>&1; then
+      SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+    else
+      FAIL_COUNT=$((FAIL_COUNT + 1))
+      echo "RDNA FA benchmark failed. Log: ${log}" >&2
+      _show_fail_log "${log}" "rdna_fa"
+    fi
+    row="$(_py_parse_and_emit rdna_fa "${shape_tag}" "${dtype}" "${log}")"
+    set -- $row
+    _emit_row "$1" "$2" "$3" "$4" "$5"
+  done
 fi
 
 # Summary
