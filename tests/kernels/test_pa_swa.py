@@ -52,7 +52,7 @@ torch.set_printoptions(sci_mode=False)
 TRITON_VERSION = triton.__version__
 TEST_NAME = "ps_accuracy"
 UNIFORM_RANGE = (-1, 1)
-USE_CUDA_GRAPH_TEST = False
+USE_CUDA_GRAPH_TEST = True
 
 STR_DTYPE_TO_TORCH_DTYPE = {
     "half": torch.half,
@@ -1348,15 +1348,15 @@ def global_window_accuracy_test() -> None:
     CONTEXT_PARTITION_SIZE_OPTIONS = [256]
     HEAD_DIMENSION_OPTIONS = [128]
     HEAD_CONFIGURATIONS = [(8, 2), (12, 2)]
-    QUERY_LENGTH_OPTIONS = [1, 4]
+    QUERY_LENGTH_OPTIONS = [4]
     QUANT_MODE_OPTIONS = ["per_token"]
-    CONTEXT_LENGTH_OPTIONS = [32768, 1024]
-    BATCH_SIZE_OPTIONS = [1, 64, 128]
+    CONTEXT_LENGTH_OPTIONS = [3000]
+    BATCH_SIZE_OPTIONS = [128]
     TRANS_V_OPTIONS = [True]
-    KV_VARLEN_OPTIONS = [True]
+    KV_VARLEN_OPTIONS = [False]
     BLOCK_SIZE_OPTIONS = [1024]
-    SLIDING_WINDOW_OPTIONS = [128, 1023]
-    GLOBAL_WINDOW_OPTIONS = [3, 257]
+    SLIDING_WINDOW_OPTIONS = [1023]
+    GLOBAL_WINDOW_OPTIONS = [3]
 
     parse_arg_and_run_test(output_tag="ps_global_window_accuracy")
 

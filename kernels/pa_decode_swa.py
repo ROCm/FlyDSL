@@ -57,7 +57,8 @@ PROB_ROW_STRIDE_BYTES = 40  # 32 data + 8 padding -> 0 bank conflict
 LDS_LOGITS_BYTES = NUM_WARPS * 4 * MFMA_N * PROB_ROW_STRIDE_BYTES  # 10240
 LDS_SOFTMAX_BYTES = 2 * NUM_WARPS * MFMA_N * 4     # 512
 
-FP8_MAX = 240.0
+FP8_E4M3FN_MAX = 448.0
+FP8_E4M3FNUZ_MAX = 240.0
 LOG2E = 1.4426950408889634
 
 # Number of loop-carried K values (i64)
@@ -84,6 +85,30 @@ _PACKED_FP8_QUERY_DTYPES = tuple(
     )
     if dtype is not None
 )
+
+
+def _get_torch_dtype_max(dtype, fallback: float) -> float:
+    if dtype is None:
+        return fallback
+    try:
+        return float(torch.finfo(dtype).max)
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _uses_ocp_fp8(arch: str) -> bool:
+    arch = str(arch)
+    return "gfx95" in arch or "gfx12" in arch
+
+
+def _get_arch_fp8_max(arch: str) -> float:
+    if _uses_ocp_fp8(arch):
+        return _get_torch_dtype_max(getattr(torch, "float8_e4m3fn", None), FP8_E4M3FN_MAX)
+    return _get_torch_dtype_max(getattr(torch, "float8_e4m3fnuz", None), FP8_E4M3FNUZ_MAX)
+
+
+def _get_current_arch_fp8_max() -> float:
+    return _get_arch_fp8_max(get_hip_arch())
 
 
 def _cdiv(numer: int, denom: int) -> int:
@@ -508,7 +533,7 @@ def _load_q_fragments(
         abs_mask = arith.constant_vector(0x7FFFFFFF, i32_vec_ty)
         c_zero_f = arith.constant(0.0, type=T.f32)
         c_one_f = arith.constant(1.0, type=T.f32)
-        c_fp8_max = arith.constant(FP8_MAX, type=T.f32)
+        c_fp8_max = arith.constant(_get_current_arch_fp8_max(), type=T.f32)
         c_wave16 = arith.constant(16, type=T.i32)
         q_f32_chunks = []
         local_max = c_zero_f
@@ -533,10 +558,10 @@ def _load_q_fragments(
             )
         query_scale_lane = arith.select(
             local_max > c_zero_f,
-            local_max / c_fp8_max,
+            local_max * rocdl.rcp(T.f32, c_fp8_max),
             c_one_f,
         )
-        inv_query_scale = c_one_f / query_scale_lane
+        inv_query_scale = rocdl.rcp(T.f32, query_scale_lane)
         q_words = []
         for q_f32 in q_f32_chunks:
             p0 = (
@@ -672,7 +697,7 @@ def _normalize_pa_output(running_sum, out0, out1, zero_f):
     safe_sum = arith.select(
         running_sum > zero_f, running_sum, arith.constant(1.0, type=T.f32)
     )
-    inv_sum = arith.constant(1.0, type=T.f32) / safe_sum
+    inv_sum = rocdl.rcp(T.f32, safe_sum)
     return [
         out0 * vector.broadcast(T.f32x4, inv_sum),
         out1 * vector.broadcast(T.f32x4, inv_sum),
@@ -996,10 +1021,10 @@ def _make_pa_phase_helpers(
                 )
                 v_max_global = v_max_global.maximumf(w_vmax)
             v_max_safe = v_max_global + arith.constant(1e-8, type=T.f32)
-            c_fp8_max = arith.constant(FP8_MAX, type=T.f32)
-            norm_factor = c_fp8_max / v_max_safe
+            c_fp8_max = arith.constant(_get_current_arch_fp8_max(), type=T.f32)
+            norm_factor = c_fp8_max * rocdl.rcp(T.f32, v_max_safe)
             prob_scale = my_warp_rescale
-            v_correction = v_max_global / c_fp8_max * part_to_new
+            v_correction = v_max_global * rocdl.rcp(T.f32, c_fp8_max) * part_to_new
             for td in range_constexpr(TLOOP):
                 d_out[td] = d_out[td] * (
                     v_scale_vecs[td]
@@ -2275,7 +2300,8 @@ def compile_pa_decode_sw_reduce(
                 global_exp_sum,
                 c_one_f,
             )
-            weight_local = scaled_sum / safe_global_exp_sum
+            inv_global_exp_sum = rocdl.rcp(T.f32, safe_global_exp_sum)
+            weight_local = scaled_sum * inv_global_exp_sum
             weight_local_i32 = arith.bitcast(T.i32, weight_local)
 
             acc = c_zero_f
@@ -2354,6 +2380,7 @@ def compile_pa_decode_sw_reduce(
                 global_exp_sum,
                 c_one_f,
             )
+            inv_global_exp_sum = rocdl.rcp(T.f32, safe_global_exp_sum)
 
             for chunk_base in range(0, max_context_partition_num, block_threads):
                 chunk_size = min(block_threads, max_context_partition_num - chunk_base)
@@ -2377,7 +2404,7 @@ def compile_pa_decode_sw_reduce(
                     part_sum = part_sum_raw
                     part_max = part_max_raw
                     part_scale = ((part_max - global_max) * c_log2e).exp2(fastmath=fm_fast)
-                    weight = (part_sum * part_scale) / safe_global_exp_sum
+                    weight = part_sum * part_scale * inv_global_exp_sum
                     part_idx_idx = arith.index_cast(T.index, part_i32)
                     part_weights_lds.store(weight, [part_idx_idx])
 
