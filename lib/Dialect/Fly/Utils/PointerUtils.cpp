@@ -38,7 +38,7 @@ Type projectToLLVMCompatibleElemTy(Type elemTy) {
 }
 
 Type RegMem2SSAType(fly::MemRefType memRefTy, bool llvmCompatibleType) {
-  if (memRefTy.getAddressSpace().getValue() != AddressSpace::Register)
+  if (!isGenericAddressSpace<AddressSpace::Register>(memRefTy.getAddressSpace()))
     return Type();
   LayoutBuilder<LayoutAttr> builder(memRefTy.getContext());
   auto layoutAttr = cast<LayoutAttr>(memRefTy.getLayout());

@@ -19,8 +19,10 @@ NB_MODULE(_mlirRegisterEverything, m) {
     MlirDialectHandle flyROCDLHandle = mlirGetDialectHandle__fly_rocdl__();
     mlirDialectHandleInsertDialect(flyROCDLHandle, registry);
   });
-  m.def("register_llvm_translations",
-        [](MlirContext context) { mlirRegisterAllLLVMTranslations(context); });
+  m.def("register_llvm_translations", [](MlirContext context) {
+    mlirRegisterAllLLVMTranslations(context);
+    mlirRegisterFlyExplicitModuleOffloadingLLVMTranslation(context);
+  });
 
   mlirRegisterAllPasses();
   mlirRegisterFlyPasses();

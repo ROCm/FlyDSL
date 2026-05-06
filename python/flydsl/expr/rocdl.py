@@ -17,8 +17,12 @@ Example:
     >>> rocdl.barrier()
 """
 
-from .._mlir._mlir_libs._mlirDialectsFlyROCDL import CopyOpCDNA3BufferCopyType, MmaOpCDNA3_MFMAType
-from .._mlir._mlir_libs._mlirDialectsFlyROCDL import MmaOpGFX1250_WMMAType
+from .._mlir._mlir_libs._mlirDialectsFlyROCDL import (
+    CopyOpCDNA3BufferCopyType,
+    MmaOpCDNA3_MFMAType,
+    MmaOpGFX1250_WMMAType,
+)
+from .._mlir.dialects import fly_rocdl as _fly_rocdl
 from .._mlir.dialects._fly_rocdl_enum_gen import AtomStateField
 from .._mlir.dialects.rocdl import *  # noqa: F401,F403
 from .._mlir.extras import types as T
@@ -105,7 +109,7 @@ def make_buffer_tensor(memref, alignment=4, loc=None, ip=None):
 
     bd_ptr_type = fly.PointerType.get(
         elem_type,
-        address_space=int(fly.AddressSpace.BufferDesc),
+        address_space=_fly_rocdl.TargetAddressSpace.BufferDesc,
         alignment=alignment,
     )
     bd_ptr = _prim.make_ptr(bd_ptr_type, [base, stride, num_records, flags], loc=loc, ip=ip)

@@ -24,7 +24,7 @@ namespace fly {
 namespace {
 
 bool isEligibleToPromote(fly::MemRefType memRefTy) {
-  if (memRefTy.getAddressSpace().getValue() != AddressSpace::Register)
+  if (!isGenericAddressSpace<AddressSpace::Register>(memRefTy.getAddressSpace()))
     return false;
   auto layoutAttr = dyn_cast<LayoutAttr>(memRefTy.getLayout());
   if (!layoutAttr)

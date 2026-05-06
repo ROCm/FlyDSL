@@ -316,13 +316,38 @@ static void printAlignAndSwizzle(AsmPrinter &printer, Type elemTy, AlignAttr ali
   }
 }
 
+// Parses the address-space. Accepts either:
+//   * a fly address space enum keyword (`global`, `shared`, `register`) parsed as
+//     `AddressSpaceAttr`, or
+//   * a dialect-qualified attribute (e.g. `#fly_rocdl.buffer_desc`) for
+//     target-specific spaces.
+static FailureOr<Attribute> parseAddressSpaceAttribute(AsmParser &parser) {
+  Attribute attr;
+  OptionalParseResult opt = parser.parseOptionalAttribute(attr);
+  if (opt.has_value()) {
+    if (failed(*opt))
+      return failure();
+    return attr;
+  }
+  auto enumAttr = FieldParser<AddressSpaceAttr>::parse(parser);
+  if (failed(enumAttr))
+    return failure();
+  return Attribute(*enumAttr);
+}
+
+static void printAddressSpaceAttribute(AsmPrinter &printer, Attribute attr) {
+  if (auto e = dyn_cast<AddressSpaceAttr>(attr))
+    printer.printStrippedAttrOrType(e);
+  else
+    printer.printAttribute(attr);
+}
+
 Type PointerType::parse(AsmParser &parser) {
   parser.getContext()->getOrLoadDialect<FlyDialect>();
   Type elemTy;
-  FailureOr<AddressSpaceAttr> addressSpace;
   if (parser.parseLess() || parser.parseType(elemTy) || parser.parseComma())
     return {};
-  addressSpace = FieldParser<AddressSpaceAttr>::parse(parser);
+  auto addressSpace = parseAddressSpaceAttribute(parser);
   if (failed(addressSpace))
     return {};
   AlignAttr alignment;
@@ -334,7 +359,7 @@ Type PointerType::parse(AsmParser &parser) {
 
 void PointerType::print(AsmPrinter &printer) const {
   printer << "<" << getElemTy() << ", ";
-  printer.printStrippedAttrOrType(getAddressSpace());
+  printAddressSpaceAttribute(printer, getAddressSpace());
   printAlignAndSwizzle(printer, getElemTy(), getAlignment(), getSwizzle(), getContext());
   printer << ">";
 }
@@ -342,10 +367,9 @@ void PointerType::print(AsmPrinter &printer) const {
 Type MemRefType::parse(AsmParser &parser) {
   parser.getContext()->getOrLoadDialect<FlyDialect>();
   Type elemTy;
-  FailureOr<AddressSpaceAttr> addressSpace;
   if (parser.parseLess() || parser.parseType(elemTy) || parser.parseComma())
     return {};
-  addressSpace = FieldParser<AddressSpaceAttr>::parse(parser);
+  auto addressSpace = parseAddressSpaceAttribute(parser);
   if (failed(addressSpace))
     return {};
   if (parser.parseComma())
@@ -362,7 +386,7 @@ Type MemRefType::parse(AsmParser &parser) {
 
 void MemRefType::print(AsmPrinter &printer) const {
   printer << "<" << getElemTy() << ", ";
-  printer.printStrippedAttrOrType(getAddressSpace());
+  printAddressSpaceAttribute(printer, getAddressSpace());
   printer << ", ";
   Attribute layoutAttr = getLayout();
   if (auto layout = dyn_cast<LayoutAttr>(layoutAttr))

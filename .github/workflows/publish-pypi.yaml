@@ -58,7 +58,6 @@ jobs:
     uses: ./.github/workflows/build-whl.yaml
     with:
       release_type: release
-      docker_image: rocm/pytorch:rocm7.2_ubuntu22.04_py3.10_pytorch_release_2.8.0
       upload_s3_staging: false
       package_version_override: ${{ needs.validate_tag.outputs.package_version }}
     permissions:

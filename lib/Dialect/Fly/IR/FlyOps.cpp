@@ -1723,19 +1723,14 @@ FLY_INFER_RETURN_TYPES(PtrToIntOp) {
   if (!ptrTy)
     return emitOptionalError(location, "PtrToIntOp: expected PointerType, got ",
                              operands[0].getType());
-  AddressSpace addrSpace = ptrTy.getAddressSpace().getValue();
   unsigned width;
-
-  switch (addrSpace) {
-  case AddressSpace::Shared:
+  if (isGenericAddressSpace<AddressSpace::Shared>(ptrTy.getAddressSpace())) {
     width = 32;
-    break;
-  case AddressSpace::Global:
+  } else if (isGenericAddressSpace<AddressSpace::Global>(ptrTy.getAddressSpace())) {
     width = 64;
-    break;
-  default:
+  } else {
     return emitOptionalError(location, "PtrToIntOp: expected Shared or Global address space, got ",
-                             addrSpace);
+                             ptrTy.getAddressSpace());
   }
 
   inferredReturnTypes.assign({IntegerType::get(context, width)});
@@ -1786,10 +1781,6 @@ FLY_INFER_RETURN_TYPES(ApplySwizzleOp) {
   if (!swizzleTy)
     return emitOptionalError(location, "ApplySwizzleOp: expected SwizzleType, got ",
                              operands[1].getType());
-  if (ptrTy.getAddressSpace().getValue() == AddressSpace::BufferDesc &&
-      !swizzleTy.getAttr().isTrivialSwizzle())
-    return emitOptionalError(location,
-                             "ApplySwizzleOp: BufferDesc pointer does not support swizzle");
   int32_t valDiv = ptrTy.getValueDivisibility();
   int32_t newValDiv = utils::divisibilityApplySwizzle(valDiv, swizzleTy.getAttr());
   inferredReturnTypes.assign(
