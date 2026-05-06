@@ -1,12 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2025 FlyDSL Project Contributors
 
+#include "mlir/IR/BuiltinAttributes.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/TypeSwitch.h"
 
-#include "mlir/IR/BuiltinAttributes.h"
-
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
-#include "flydsl/Dialect/Fly/Utils/IntUtils.h"
 
 namespace mlir::fly {
 
@@ -51,6 +50,12 @@ int32_t BasisAttr::depth() { return static_cast<int32_t>(getModes().size()); }
 
 bool SwizzleAttr::isTrivialSwizzle() const { return getMask() == 0; }
 SwizzleAttr SwizzleAttr::getTrivialSwizzle(MLIRContext *context) { return get(context, 0, 0, 0); }
+
+//===----------------------------------------------------------------------===//
+// CoordSwizzleAttr
+//===----------------------------------------------------------------------===//
+
+bool CoordSwizzleAttr::isTrivialCoordSwizzle() const { return getMask() == 0; }
 
 //===----------------------------------------------------------------------===//
 // IntTupleAttr
@@ -229,7 +234,9 @@ LayoutAttr LayoutAttr::at(ArrayRef<int32_t> idxs) const {
 bool ComposedLayoutAttr::isStatic() const {
   return isStaticOuter() && isStaticOffset() && isStaticInner();
 }
-bool ComposedLayoutAttr::isStaticOuter() const { return getOuter().isStatic(); }
+bool ComposedLayoutAttr::isStaticOuter() const {
+  return cast<MayStaticAttrInterface>(getOuter()).isStatic();
+}
 bool ComposedLayoutAttr::isStaticOffset() const { return getOffset().isStatic(); }
 bool ComposedLayoutAttr::isStaticInner() const {
   if (auto inner = dyn_cast<ComposedLayoutAttr>(getInner())) {
@@ -238,26 +245,46 @@ bool ComposedLayoutAttr::isStaticInner() const {
     return layout.isStatic();
   } else if (auto basis = dyn_cast<SwizzleAttr>(getInner())) {
     return true;
+  } else if (auto coordSwizzle = dyn_cast<CoordSwizzleAttr>(getInner())) {
+    return true;
   } else {
     assert(false && "invalid InnerAttr of ComposedLayoutAttr");
     return false;
   }
 }
 
-bool ComposedLayoutAttr::isLeaf() const { return getOuter().isLeaf(); }
+bool ComposedLayoutAttr::isLeaf() const { return cast<NestedAttrInterface>(getOuter()).isLeaf(); }
 
-int32_t ComposedLayoutAttr::rank() const { return getOuter().rank(); }
-int32_t ComposedLayoutAttr::rank(int32_t idx) const { return getOuter().rank(idx); }
-int32_t ComposedLayoutAttr::rank(ArrayRef<int32_t> idxs) const { return getOuter().rank(idxs); }
-int32_t ComposedLayoutAttr::depth() const { return getOuter().depth(); }
-int32_t ComposedLayoutAttr::depth(int32_t idx) const { return getOuter().depth(idx); }
-int32_t ComposedLayoutAttr::depth(ArrayRef<int32_t> idxs) const { return getOuter().depth(idxs); }
+int32_t ComposedLayoutAttr::rank() const { return cast<NestedAttrInterface>(getOuter()).rank(); }
+int32_t ComposedLayoutAttr::rank(int32_t idx) const {
+  return cast<NestedAttrInterface>(getOuter()).rank(idx);
+}
+int32_t ComposedLayoutAttr::rank(ArrayRef<int32_t> idxs) const {
+  return cast<NestedAttrInterface>(getOuter()).rank(idxs);
+}
+int32_t ComposedLayoutAttr::depth() const { return cast<NestedAttrInterface>(getOuter()).depth(); }
+int32_t ComposedLayoutAttr::depth(int32_t idx) const {
+  return cast<NestedAttrInterface>(getOuter()).depth(idx);
+}
+int32_t ComposedLayoutAttr::depth(ArrayRef<int32_t> idxs) const {
+  return cast<NestedAttrInterface>(getOuter()).depth(idxs);
+}
 
 ComposedLayoutAttr ComposedLayoutAttr::at(int32_t idx) const {
-  return ComposedLayoutAttr::get(getContext(), getInner(), getOffset(), getOuter().at(idx));
+  Attribute outer = getOuter();
+  if (auto layout = dyn_cast<LayoutAttr>(outer)) {
+    return ComposedLayoutAttr::get(getContext(), getInner(), getOffset(), layout.at(idx));
+  }
+  return ComposedLayoutAttr::get(getContext(), getInner(), getOffset(),
+                                 cast<ComposedLayoutAttr>(outer).at(idx));
 }
 ComposedLayoutAttr ComposedLayoutAttr::at(ArrayRef<int32_t> idxs) const {
-  return ComposedLayoutAttr::get(getContext(), getInner(), getOffset(), getOuter().at(idxs));
+  Attribute outer = getOuter();
+  if (auto layout = dyn_cast<LayoutAttr>(outer)) {
+    return ComposedLayoutAttr::get(getContext(), getInner(), getOffset(), layout.at(idxs));
+  }
+  return ComposedLayoutAttr::get(getContext(), getInner(), getOffset(),
+                                 cast<ComposedLayoutAttr>(outer).at(idxs));
 }
 
 //===----------------------------------------------------------------------===//
@@ -447,6 +474,55 @@ void IntTupleAttr::print(::mlir::AsmPrinter &odsPrinter) const {
   }
 }
 
+static ParseResult parseInt32Array(::mlir::AsmParser &odsParser, SmallVectorImpl<int32_t> &values) {
+  if (odsParser.parseLSquare())
+    return failure();
+  if (odsParser.parseOptionalRSquare().succeeded())
+    return success();
+  do {
+    int32_t value;
+    if (odsParser.parseInteger(value))
+      return failure();
+    values.push_back(value);
+  } while (odsParser.parseOptionalComma().succeeded());
+  return odsParser.parseRSquare();
+}
+
+static void printInt32Array(::mlir::AsmPrinter &odsPrinter, ArrayRef<int32_t> values) {
+  odsPrinter << "[";
+  llvm::interleaveComma(values, odsPrinter);
+  odsPrinter << "]";
+}
+
+static ::mlir::Attribute parseCoordSwizzleBody(::mlir::AsmParser &odsParser, MLIRContext *ctx) {
+  int32_t mask, baseRow, baseCol;
+  SmallVector<int32_t> modeRow;
+  SmallVector<int32_t> modeCol;
+  if (odsParser.parseLess() || odsParser.parseInteger(mask) || odsParser.parseComma() ||
+      odsParser.parseInteger(baseRow) || odsParser.parseComma() ||
+      parseInt32Array(odsParser, modeRow) || odsParser.parseComma() ||
+      odsParser.parseInteger(baseCol) || odsParser.parseComma() ||
+      parseInt32Array(odsParser, modeCol) || odsParser.parseGreater()) {
+    return {};
+  }
+  return CoordSwizzleAttr::get(ctx, mask, baseRow, modeRow, baseCol, modeCol);
+}
+
+::mlir::Attribute CoordSwizzleAttr::parse(::mlir::AsmParser &odsParser, ::mlir::Type odsType) {
+  auto *ctx = odsParser.getBuilder().getContext();
+  if (odsParser.parseKeyword("CS"))
+    return {};
+  return parseCoordSwizzleBody(odsParser, ctx);
+}
+
+void CoordSwizzleAttr::print(::mlir::AsmPrinter &odsPrinter) const {
+  odsPrinter << "CS<" << getMask() << "," << getBaseRow() << ",";
+  printInt32Array(odsPrinter, getModeRow());
+  odsPrinter << "," << getBaseCol() << ",";
+  printInt32Array(odsPrinter, getModeCol());
+  odsPrinter << ">";
+}
+
 ::mlir::Attribute TileAttr::parse(::mlir::AsmParser &odsParser, ::mlir::Type odsType) {
   auto *ctx = odsParser.getBuilder().getContext();
   auto parseElement = [&](auto &&self) -> Attribute {
@@ -538,56 +614,60 @@ void TileAttr::print(::mlir::AsmPrinter &odsPrinter) const {
   odsPrinter << "]";
 }
 
-static void printInnermostAttr(::mlir::AsmPrinter &odsPrinter, Attribute inner) {
-  if (auto swizzle = dyn_cast<SwizzleAttr>(inner)) {
-    odsPrinter << "S<" << swizzle.getMask() << "," << swizzle.getBase() << "," << swizzle.getShift()
-               << ">";
-  } else if (auto layout = dyn_cast<LayoutAttr>(inner)) {
-    layout.print(odsPrinter);
-  } else {
-    llvm_unreachable("invalid innermost attr in ComposedLayoutAttr");
-  }
-}
-
 static void printComposedFlat(::mlir::AsmPrinter &odsPrinter, ComposedLayoutAttr composed) {
   if (auto nestedComposed = dyn_cast<ComposedLayoutAttr>(composed.getInner())) {
     printComposedFlat(odsPrinter, nestedComposed);
   } else {
-    printInnermostAttr(odsPrinter, composed.getInner());
+    Attribute inner = composed.getInner();
+    if (auto swizzle = dyn_cast<SwizzleAttr>(inner)) {
+      odsPrinter << "S<" << swizzle.getMask() << "," << swizzle.getBase() << ","
+                 << swizzle.getShift() << ">";
+    } else if (auto coordSwizzle = dyn_cast<CoordSwizzleAttr>(inner)) {
+      coordSwizzle.print(odsPrinter);
+    } else if (auto layout = dyn_cast<LayoutAttr>(inner)) {
+      layout.print(odsPrinter);
+    } else {
+      llvm_unreachable("invalid innermost attr in ComposedLayoutAttr");
+    }
   }
   odsPrinter << " o ";
-  composed.getOffset().print(odsPrinter);
+  cast<IntTupleAttr>(composed.getOffset()).print(odsPrinter);
   odsPrinter << " o ";
-  composed.getOuter().print(odsPrinter);
+  if (auto outerComposed = dyn_cast<ComposedLayoutAttr>(composed.getOuter())) {
+    odsPrinter << "[";
+    printComposedFlat(odsPrinter, outerComposed);
+    odsPrinter << "]";
+  } else {
+    cast<LayoutAttr>(composed.getOuter()).print(odsPrinter);
+  }
 }
 
-static Attribute parseInnermostAttr(::mlir::AsmParser &odsParser) {
+::mlir::Attribute ComposedLayoutAttr::parse(::mlir::AsmParser &odsParser, ::mlir::Type odsType) {
   auto *ctx = odsParser.getBuilder().getContext();
+  Attribute inner;
   if (odsParser.parseOptionalKeyword("S").succeeded()) {
     int32_t mask, base, shift;
     if (odsParser.parseLess() || odsParser.parseInteger(mask) || odsParser.parseComma() ||
         odsParser.parseInteger(base) || odsParser.parseComma() || odsParser.parseInteger(shift) ||
         odsParser.parseGreater())
       return {};
-    return SwizzleAttr::get(ctx, mask, base, shift);
-  }
-  auto shapeAttr = IntTupleAttr::parse(odsParser, {});
-  if (!shapeAttr)
-    return {};
-  auto shape = cast<IntTupleAttr>(shapeAttr);
-  if (odsParser.parseOptionalColon().succeeded()) {
+    inner = SwizzleAttr::get(ctx, mask, base, shift);
+  } else if (odsParser.parseOptionalKeyword("CS").succeeded()) {
+    inner = parseCoordSwizzleBody(odsParser, ctx);
+    if (!inner)
+      return {};
+  } else {
+    auto shapeAttr = IntTupleAttr::parse(odsParser, {});
+    if (!shapeAttr)
+      return {};
+    auto shape = cast<IntTupleAttr>(shapeAttr);
+    if (!odsParser.parseOptionalColon().succeeded())
+      return {};
     auto strideAttr = IntTupleAttr::parse(odsParser, {});
     if (!strideAttr)
       return {};
-    return LayoutAttr::get(ctx, shape, cast<IntTupleAttr>(strideAttr));
+    inner = LayoutAttr::get(ctx, shape, cast<IntTupleAttr>(strideAttr));
   }
-  return {};
-}
-
-::mlir::Attribute ComposedLayoutAttr::parse(::mlir::AsmParser &odsParser, ::mlir::Type odsType) {
-  Attribute inner = parseInnermostAttr(odsParser);
-  if (!inner)
-    return {};
 
   while (odsParser.parseOptionalKeyword("o").succeeded()) {
     auto offsetAttr = IntTupleAttr::parse(odsParser, odsType);
@@ -598,18 +678,24 @@ static Attribute parseInnermostAttr(::mlir::AsmParser &odsParser) {
     if (odsParser.parseKeyword("o"))
       return {};
 
-    auto shapeAttr = IntTupleAttr::parse(odsParser, odsType);
-    if (!shapeAttr)
-      return {};
-    auto shape = cast<IntTupleAttr>(shapeAttr);
-    if (odsParser.parseColon())
-      return {};
-    auto strideAttr = IntTupleAttr::parse(odsParser, odsType);
-    if (!strideAttr)
-      return {};
-    auto stride = cast<IntTupleAttr>(strideAttr);
-
-    auto outer = LayoutAttr::get(offset.getContext(), shape, stride);
+    Attribute outer;
+    if (odsParser.parseOptionalLSquare().succeeded()) {
+      outer = ComposedLayoutAttr::parse(odsParser, odsType);
+      if (!outer || !isa<LayoutAttr, ComposedLayoutAttr>(outer) || odsParser.parseRSquare())
+        return {};
+    } else {
+      auto shapeAttr = IntTupleAttr::parse(odsParser, odsType);
+      if (!shapeAttr)
+        return {};
+      auto shape = cast<IntTupleAttr>(shapeAttr);
+      if (odsParser.parseColon())
+        return {};
+      auto strideAttr = IntTupleAttr::parse(odsParser, odsType);
+      if (!strideAttr)
+        return {};
+      auto stride = cast<IntTupleAttr>(strideAttr);
+      outer = LayoutAttr::get(offset.getContext(), shape, stride);
+    }
     inner = ComposedLayoutAttr::get(inner.getContext(), inner, offset, outer);
   }
   return inner;

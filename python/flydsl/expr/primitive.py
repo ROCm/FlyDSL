@@ -12,6 +12,7 @@ from .._mlir.dialects.fly import (
     AtomicOp,
     CachePolicy,
     ComposedLayoutType,
+    CoordSwizzleType,
     CoordTensorType,
     CopyAtomType,
     CopyOpUniversalAtomicType,
@@ -49,6 +50,7 @@ __all__ = [
     "TileType",
     "LayoutType",
     "SwizzleType",
+    "CoordSwizzleType",
     "ComposedLayoutType",
     "PointerType",
     "MemRefType",
@@ -417,9 +419,18 @@ def make_composed_layout(inner, offset, outer, loc=None, ip=None): ...
 def make_composed_layout(inner, outer, loc=None, ip=None): ...
 @traced_op
 def make_composed_layout(inner, offset_or_outer, outer=None, loc=None, ip=None):
+    """Stack two layouts: a coord is first mapped by *outer*, then by *inner*.
+
+    An optional constant *offset* is added after the outer mapping. The outer
+    mapping may itself be a composed layout, allowing composition chains.
+
+    Examples:
+        make_composed_layout(swizzle, layout)           # no offset
+        make_composed_layout(swizzle, 16, layout)       # with offset = 16
+    """
     if outer is None:
         outer = offset_or_outer
-        offset = make_int_tuple(0, loc=loc, ip=ip)
+        offset = coprofile(outer, loc=loc, ip=ip)
     else:
         offset = offset_or_outer
     return fly.make_composed_layout(inner, offset, outer, loc=loc, ip=ip)
@@ -427,6 +438,17 @@ def make_composed_layout(inner, offset_or_outer, outer=None, loc=None, ip=None):
 
 @traced_op
 def make_identity_layout(shape, loc=None, ip=None):
+    """Build the identity layout in FlyDSL's layout-algebra sense.
+
+    The result keeps *shape* and uses basis-tuple strides derived from that
+    shape's profile (e.g. `(4, 8) -> (1E0, 1E1)`), so coordinates stay symbolic
+    instead of being collapsed to one flat linear address.d
+
+    Examples:
+        make_identity_layout((4, 8))   -> ((4, 8), (1E0, 1E1))
+    """
+    if not isinstance(shape, ir.Value):
+        shape = make_int_tuple(shape, loc=loc, ip=ip)
     return fly.make_identity_layout(shape, loc=loc, ip=ip)
 
 

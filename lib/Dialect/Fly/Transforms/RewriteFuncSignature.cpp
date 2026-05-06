@@ -72,12 +72,13 @@ LLVM::LLVMStructType getLayoutStructType(MLIRContext *ctx, LayoutAttr attr) {
   return LLVM::LLVMStructType::getLiteral(ctx, fields, true);
 }
 
+LLVM::LLVMStructType getNarrowLayoutStructType(MLIRContext *ctx, Attribute attr);
 LLVM::LLVMStructType getComposedInnerStructType(MLIRContext *ctx, Attribute attr);
 
 LLVM::LLVMStructType getComposedLayoutStructType(MLIRContext *ctx, ComposedLayoutAttr attr) {
   SmallVector<Type> fields;
   if (!attr.isStaticOuter())
-    fields.push_back(getLayoutStructType(ctx, attr.getOuter()));
+    fields.push_back(getNarrowLayoutStructType(ctx, attr.getOuter()));
   if (!attr.isStaticOffset())
     fields.push_back(getIntTupleStructType(ctx, attr.getOffset()));
   if (!attr.isStaticInner())
@@ -213,20 +214,22 @@ Value packLayoutToStruct(OpBuilder &builder, Location loc, Value layout, LayoutA
 
 Value packComposedInnerToStruct(OpBuilder &builder, Location loc, Value inner, Attribute attr,
                                 LLVM::LLVMStructType innerStructTy);
+Value packNarrowLayoutToStruct(OpBuilder &builder, Location loc, Value layout, Attribute attr,
+                               LLVM::LLVMStructType structTy);
 
 Value packComposedLayoutToStruct(OpBuilder &builder, Location loc, Value composed,
                                  ComposedLayoutAttr attr, LLVM::LLVMStructType structTy) {
   Value result = LLVM::UndefOp::create(builder, loc, structTy);
   int64_t idx = 0;
-  if (!attr.getOuter().isStatic()) {
+  if (!attr.isStaticOuter()) {
     auto fieldTy = cast<LLVM::LLVMStructType>(structTy.getBody()[idx]);
     Value outerVal = ComposedGetOuterOp::create(builder, loc, composed);
-    Value outerStruct = packLayoutToStruct(builder, loc, outerVal, attr.getOuter(), fieldTy);
+    Value outerStruct = packNarrowLayoutToStruct(builder, loc, outerVal, attr.getOuter(), fieldTy);
     result = LLVM::InsertValueOp::create(builder, loc, structTy, result, outerStruct,
                                          ArrayRef<int64_t>{idx});
     idx++;
   }
-  if (!attr.getOffset().isStatic()) {
+  if (!attr.isStaticOffset()) {
     auto fieldTy = cast<LLVM::LLVMStructType>(structTy.getBody()[idx]);
     Value offsetVal = ComposedGetOffsetOp::create(builder, loc, composed);
     Value offsetStruct = packIntTupleToStruct(builder, loc, offsetVal, attr.getOffset(), fieldTy);
@@ -358,6 +361,8 @@ Value unpackLayoutFromStruct(OpBuilder &builder, Location loc, Value structVal, 
 
 Value unpackComposedInnerFromStruct(OpBuilder &builder, Location loc, Value structVal,
                                     Attribute attr, LLVM::LLVMStructType innerStructTy);
+Value unpackNarrowLayoutFromStruct(OpBuilder &builder, Location loc, Value structVal,
+                                   Attribute attr, LLVM::LLVMStructType structTy);
 
 Type getNarrowLayoutType(Attribute attr) {
   if (auto layout = dyn_cast<LayoutAttr>(attr))
@@ -371,18 +376,21 @@ Value unpackComposedLayoutFromStruct(OpBuilder &builder, Location loc, Value str
                                      ComposedLayoutAttr attr, LLVM::LLVMStructType structTy) {
   int64_t idx = 0;
   Value outer;
-  if (!attr.getOuter().isStatic()) {
+  if (!attr.isStaticOuter()) {
     auto fieldTy = cast<LLVM::LLVMStructType>(structTy.getBody()[idx]);
     Value fieldVal =
         LLVM::ExtractValueOp::create(builder, loc, fieldTy, structVal, ArrayRef<int64_t>{idx});
-    outer = unpackLayoutFromStruct(builder, loc, fieldVal, attr.getOuter(), fieldTy);
+    outer = unpackNarrowLayoutFromStruct(builder, loc, fieldVal, attr.getOuter(), fieldTy);
     idx++;
   } else {
-    outer = StaticOp::create(builder, loc, LayoutType::get(attr.getOuter()));
+    if (auto layout = dyn_cast<LayoutAttr>(attr))
+      outer = LayoutType::get(layout).rebuildStaticValue(builder, loc, nullptr);
+    if (auto composed = dyn_cast<ComposedLayoutAttr>(attr))
+      outer = ComposedLayoutType::get(composed).rebuildStaticValue(builder, loc, nullptr);
   }
 
   Value offset;
-  if (!attr.getOffset().isStatic()) {
+  if (!attr.isStaticOffset()) {
     auto fieldTy = cast<LLVM::LLVMStructType>(structTy.getBody()[idx]);
     Value fieldVal =
         LLVM::ExtractValueOp::create(builder, loc, fieldTy, structVal, ArrayRef<int64_t>{idx});
@@ -408,6 +416,8 @@ Value unpackComposedLayoutFromStruct(OpBuilder &builder, Location loc, Value str
       innerTy = ComposedLayoutType::get(composed);
     if (auto swizzle = dyn_cast<SwizzleAttr>(innerAttr))
       innerTy = SwizzleType::get(swizzle);
+    if (auto coordSwizzle = dyn_cast<CoordSwizzleAttr>(innerAttr))
+      innerTy = CoordSwizzleType::get(coordSwizzle);
     inner = StaticOp::create(builder, loc, innerTy);
   }
 
@@ -424,13 +434,11 @@ Value unpackComposedInnerFromStruct(OpBuilder &builder, Location loc, Value stru
 }
 
 Value unpackNarrowLayoutFromStruct(OpBuilder &builder, Location loc, Value structVal,
-                                   Attribute attr, Type structTy) {
-  if (auto layout = dyn_cast<LayoutAttr>(attr))
-    return unpackLayoutFromStruct(builder, loc, structVal, layout,
-                                  cast<LLVM::LLVMStructType>(structTy));
-  if (auto composedLayout = dyn_cast<ComposedLayoutAttr>(attr))
-    return unpackComposedLayoutFromStruct(builder, loc, structVal, composedLayout,
-                                          cast<LLVM::LLVMStructType>(structTy));
+                                   Attribute attr, LLVM::LLVMStructType structTy) {
+  if (auto layoutAttr = dyn_cast<LayoutAttr>(attr))
+    return unpackLayoutFromStruct(builder, loc, structVal, layoutAttr, structTy);
+  if (auto composedAttr = dyn_cast<ComposedLayoutAttr>(attr))
+    return unpackComposedLayoutFromStruct(builder, loc, structVal, composedAttr, structTy);
   llvm_unreachable("unexpected layout attribute type");
 }
 
@@ -452,7 +460,7 @@ Value unpackCoordTensorFromStruct(OpBuilder &builder, Location loc, Value struct
 
   Value layout;
   if (!isStaticNarrowLayout(coordTy.getLayout())) {
-    Type fieldTy = outerStructTy.getBody()[idx];
+    auto fieldTy = cast<LLVM::LLVMStructType>(outerStructTy.getBody()[idx]);
     Value fieldVal =
         LLVM::ExtractValueOp::create(builder, loc, fieldTy, structVal, ArrayRef<int64_t>{idx});
     layout = unpackNarrowLayoutFromStruct(builder, loc, fieldVal, coordTy.getLayout(), fieldTy);
@@ -607,8 +615,9 @@ bool rewriteDSLArgsToStructFromFunc(FunctionOpInterface op) {
       BlockArgument ptrArg = entry.getArgument(newArgIdx);
       BlockArgument layoutStructArg = entry.getArgument(newArgIdx + 1);
 
-      Value layout = unpackNarrowLayoutFromStruct(builder, loc, layoutStructArg,
-                                                  memrefTy.getLayout(), layoutStructArg.getType());
+      Value layout =
+          unpackNarrowLayoutFromStruct(builder, loc, layoutStructArg, memrefTy.getLayout(),
+                                       cast<LLVM::LLVMStructType>(layoutStructArg.getType()));
       Value view = MakeViewOp::create(builder, loc, ptrArg, layout);
 
       llvm::SmallPtrSet<Operation *, 8> except;

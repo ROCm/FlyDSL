@@ -250,6 +250,24 @@ IntAttr intApplySwizzle(IntAttr v, SwizzleAttr swizzle) {
                              utils::divisibilityApplySwizzle(v.getDivisibility(), swizzle));
 }
 
+IntAttr intApplyCoordSwizzle(IntAttr row, IntAttr col, CoordSwizzleAttr swizzle) {
+  auto *ctx = col.getContext();
+  if (swizzle.isTrivialCoordSwizzle()) {
+    return col;
+  }
+  if (row.isStatic() && col.isStatic()) {
+    int32_t maskBits = (1 << swizzle.getMask()) - 1;
+    int32_t rowBits = (row.getValue() >> swizzle.getBaseRow()) & maskBits;
+    int32_t result = col.getValue() ^ (rowBits << swizzle.getBaseCol());
+    return IntAttr::getStatic(ctx, result);
+  }
+  int32_t width = std::max(row.getWidth(), col.getWidth());
+  int32_t rowDiv = row.isStatic() ? row.getValue() : row.getDivisibility();
+  int32_t colDiv = col.isStatic() ? col.getValue() : col.getDivisibility();
+  return IntAttr::getDynamic(ctx, width,
+                             utils::divisibilityApplyCoordSwizzle(rowDiv, colDiv, swizzle));
+}
+
 bool isDivisibleBy(IntAttr attr, int32_t divisor) {
   if (attr.isStatic())
     return attr.getValue() % divisor == 0;

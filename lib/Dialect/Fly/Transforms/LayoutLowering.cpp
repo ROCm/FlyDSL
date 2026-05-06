@@ -28,6 +28,7 @@
 #include "flydsl/Dialect/Fly/Utils/NormalForm.h"
 #include "flydsl/Dialect/Fly/Utils/TiledOpUtils.h"
 
+#include <functional>
 #include <string>
 
 using namespace mlir;
@@ -174,6 +175,18 @@ bool appendIntTuplePrintfStatic(IntTupleAttr attr, std::string &format) {
   }
   format += ")";
   return true;
+}
+
+LayoutValueAdaptor replaceLeafOuterLayout(LayoutBuilder<LayoutValueAdaptor> &layoutBuilder,
+                                          LayoutValueAdaptor layout,
+                                          LayoutValueAdaptor newLeafOuter) {
+  if (!layoutBuilder.isComposedLayout(layout))
+    return newLeafOuter;
+
+  LayoutValueAdaptor newOuter =
+      replaceLeafOuterLayout(layoutBuilder, layoutBuilder.getOuter(layout), newLeafOuter);
+  return layoutBuilder.makeComposedLayout(layoutBuilder.getInner(layout),
+                                          layoutBuilder.getOffset(layout), newOuter);
 }
 
 struct ContigSegment {
@@ -1766,9 +1779,9 @@ public:
       layoutAttr = cast<ComposedLayoutType>(layoutValue.getType()).getAttr();
     LayoutValueAdaptor fullLayoutAdaptor(layoutValue, layoutAttr);
 
-    LayoutValueAdaptor outerAdaptor = layoutBuilder.isComposedLayout(fullLayoutAdaptor)
-                                          ? layoutBuilder.getOuter(fullLayoutAdaptor)
-                                          : fullLayoutAdaptor;
+    LayoutValueAdaptor outerAdaptor = fullLayoutAdaptor;
+    while (layoutBuilder.isComposedLayout(outerAdaptor))
+      outerAdaptor = layoutBuilder.getOuter(outerAdaptor);
     LayoutAttr outerLayout = layoutBuilder.getLayoutAttr(outerAdaptor);
 
     LayoutValueAdaptor thrValView =
@@ -1781,11 +1794,7 @@ public:
     LayoutValueAdaptor expandedLayout = layoutBuilder.makeLayout(expandedShape, expandedStride);
 
     LayoutValueAdaptor expandedFullLayout =
-        layoutBuilder.isComposedLayout(fullLayoutAdaptor)
-            ? layoutBuilder.makeComposedLayout(layoutBuilder.getInner(fullLayoutAdaptor),
-                                               layoutBuilder.getOffset(fullLayoutAdaptor),
-                                               expandedLayout)
-            : expandedLayout;
+        replaceLeafOuterLayout(layoutBuilder, fullLayoutAdaptor, expandedLayout);
 
     Value expandedView = MakeViewOp::create(rewriter, loc, iter, expandedFullLayout.getValue());
 
@@ -1901,19 +1910,15 @@ public:
       inputLayoutAttr = cast<ComposedLayoutType>(inputLayoutValue.getType()).getAttr();
     LayoutValueAdaptor fullLayoutAdaptor(inputLayoutValue, inputLayoutAttr);
 
-    LayoutValueAdaptor outerAdaptor = layoutBuilder.isComposedLayout(fullLayoutAdaptor)
-                                          ? layoutBuilder.getOuter(fullLayoutAdaptor)
-                                          : fullLayoutAdaptor;
+    LayoutValueAdaptor outerAdaptor = fullLayoutAdaptor;
+    while (layoutBuilder.isComposedLayout(outerAdaptor))
+      outerAdaptor = layoutBuilder.getOuter(outerAdaptor);
 
     LayoutValueAdaptor thrValView = layoutTiledMmaThrValOperandView(
         layoutBuilder, mmaAtom, atomLayoutMNK, permutationMNK, operandId, outerAdaptor);
 
     LayoutValueAdaptor thrValFullLayout =
-        layoutBuilder.isComposedLayout(fullLayoutAdaptor)
-            ? layoutBuilder.makeComposedLayout(layoutBuilder.getInner(fullLayoutAdaptor),
-                                               layoutBuilder.getOffset(fullLayoutAdaptor),
-                                               thrValView)
-            : thrValView;
+        replaceLeafOuterLayout(layoutBuilder, fullLayoutAdaptor, thrValView);
 
     Value thrValMemref = MakeViewOp::create(rewriter, loc, inputIter, thrValFullLayout.getValue());
 
@@ -2109,11 +2114,10 @@ public:
     auto dstMemRefTy = cast<fly::MemRefType>(dst.getType());
     auto predMemRefTy = pred ? cast<fly::MemRefType>(pred.getType()) : nullptr;
 
-    auto getLayoutAttr = [&](Attribute attr) -> LayoutAttr {
+    std::function<LayoutAttr(Attribute)> getLayoutAttr = [&](Attribute attr) -> LayoutAttr {
       if (auto layout = dyn_cast<LayoutAttr>(attr))
         return layout;
-      else
-        return cast<ComposedLayoutAttr>(attr).getOuter();
+      return getLayoutAttr(cast<ComposedLayoutAttr>(attr).getOuter());
     };
 
     LayoutAttr srcLayoutAttr = getLayoutAttr(srcMemRefTy.getLayout());

@@ -25,6 +25,49 @@ using namespace mlir::fly;
 
 namespace {
 
+LayoutAttr getLinearLayoutAttr(Attribute layoutAttr) {
+  if (auto layout = dyn_cast<LayoutAttr>(layoutAttr))
+    return layout;
+  if (auto composed = dyn_cast<ComposedLayoutAttr>(layoutAttr))
+    return getLinearLayoutAttr(composed.getOuter());
+  return nullptr;
+}
+
+Type getNarrowLayoutType(Attribute attr) {
+  if (auto layout = dyn_cast<LayoutAttr>(attr))
+    return LayoutType::get(layout);
+  if (auto composed = dyn_cast<ComposedLayoutAttr>(attr))
+    return ComposedLayoutType::get(composed);
+  llvm_unreachable("expected LayoutAttr or ComposedLayoutAttr");
+}
+
+Attribute replaceLinearLayoutAttr(Attribute oldLayout, LayoutAttr newLayoutAttr) {
+  if (isa<LayoutAttr>(oldLayout))
+    return newLayoutAttr;
+  auto composed = cast<ComposedLayoutAttr>(oldLayout);
+  Attribute newOuter = replaceLinearLayoutAttr(composed.getOuter(), newLayoutAttr);
+  return ComposedLayoutAttr::get(composed.getInner(), composed.getOffset(), newOuter);
+}
+
+Attribute sliceLinearLayoutAttrAndAddNearestOffset(
+    LayoutBuilder<LayoutAttr> &builder, Attribute layoutAttr, IntTupleAttr coordAttr,
+    function_ref<LayoutAttr(LayoutAttr)> sliceLayout) {
+  if (auto layout = dyn_cast<LayoutAttr>(layoutAttr))
+    return sliceLayout(layout);
+
+  auto composed = cast<ComposedLayoutAttr>(layoutAttr);
+  Attribute outer = composed.getOuter();
+  if (auto outerLayout = dyn_cast<LayoutAttr>(outer)) {
+    IntTupleAttr offset = layoutCrd2Idx(builder, coordAttr, outerLayout);
+    IntTupleAttr newOffset = intTupleAdd(builder, composed.getOffset(), offset);
+    return ComposedLayoutAttr::get(composed.getInner(), newOffset, sliceLayout(outerLayout));
+  }
+
+  Attribute newOuter =
+      sliceLinearLayoutAttrAndAddNearestOffset(builder, outer, coordAttr, sliceLayout);
+  return ComposedLayoutAttr::get(composed.getInner(), composed.getOffset(), newOuter);
+}
+
 LayoutAttr GetLayoutAttrFromLayoutLikeType(Type type) {
   Attribute layoutAttr;
   if (auto memrefTy = dyn_cast<fly::MemRefType>(type)) {
@@ -39,21 +82,12 @@ LayoutAttr GetLayoutAttrFromLayoutLikeType(Type type) {
     return nullptr;
   }
 
-  if (auto layout = dyn_cast<LayoutAttr>(layoutAttr)) {
-    return layout;
-  } else if (auto composed = dyn_cast<ComposedLayoutAttr>(layoutAttr)) {
-    return composed.getOuter();
-  } else {
-    return nullptr;
-  }
+  return getLinearLayoutAttr(layoutAttr);
 }
 
 Type RebuildLayoutLikeType(Type type, LayoutAttr newLayoutAttr) {
   auto replaceOuter = [&](Attribute oldLayout) -> Attribute {
-    if (isa<LayoutAttr>(oldLayout))
-      return newLayoutAttr;
-    auto composed = cast<ComposedLayoutAttr>(oldLayout);
-    return ComposedLayoutAttr::get(composed.getInner(), composed.getOffset(), newLayoutAttr);
+    return replaceLinearLayoutAttr(oldLayout, newLayoutAttr);
   };
 
   if (auto memrefTy = dyn_cast<fly::MemRefType>(type)) {
@@ -87,7 +121,8 @@ Type applyOffsetOnMemRef(LayoutBuilder<LayoutAttr> &builder, fly::MemRefType mem
                          IntTupleAttr offset, LayoutAttr layoutAttr) {
   if (auto composed = dyn_cast<ComposedLayoutAttr>(memrefTy.getLayout())) {
     IntTupleAttr newOffset = intTupleAdd(builder, composed.getOffset(), offset);
-    Attribute newLayout = ComposedLayoutAttr::get(composed.getInner(), newOffset, layoutAttr);
+    Attribute newLayout = ComposedLayoutAttr::get(
+        composed.getInner(), newOffset, replaceLinearLayoutAttr(composed.getOuter(), layoutAttr));
     return fly::MemRefType::get(memrefTy.getElemTy(), memrefTy.getAddressSpace(), newLayout,
                                 memrefTy.getAlignment(), memrefTy.getSwizzle());
   } else {
@@ -106,7 +141,8 @@ Type applyOffsetOnCoordTensor(LayoutBuilder<LayoutAttr> &builder, CoordTensorTyp
                               IntTupleAttr offset, LayoutAttr layoutAttr) {
   if (auto composed = dyn_cast<ComposedLayoutAttr>(coordTensorTy.getLayout())) {
     IntTupleAttr newOffset = intTupleAdd(builder, composed.getOffset(), offset);
-    Attribute newLayout = ComposedLayoutAttr::get(composed.getInner(), newOffset, layoutAttr);
+    Attribute newLayout = ComposedLayoutAttr::get(
+        composed.getInner(), newOffset, replaceLinearLayoutAttr(composed.getOuter(), layoutAttr));
     return CoordTensorType::get(coordTensorTy.getBase(), newLayout);
   } else {
     IntTupleAttr newBase = intTupleAdd(builder, coordTensorTy.getBase(), offset);
@@ -180,14 +216,21 @@ FLY_INFER_RETURN_TYPES(MakeOrderedLayoutOp) {
 
 FLY_INFER_RETURN_TYPES(MakeComposedLayoutOp) {
   auto offsetTy = dyn_cast<IntTupleType>(operands[1].getType());
-  auto outerTy = dyn_cast<LayoutType>(operands[2].getType());
   if (!offsetTy)
     return emitOptionalError(location,
                              "MakeComposedLayoutOp: expected IntTupleType for offset, got ",
                              operands[1].getType());
-  if (!outerTy)
-    return emitOptionalError(location, "MakeComposedLayoutOp: expected LayoutType for outer, got ",
+  Attribute outerAttr;
+  if (auto outerLayoutTy = dyn_cast<LayoutType>(operands[2].getType())) {
+    outerAttr = outerLayoutTy.getAttr();
+  } else if (auto outerComposedTy = dyn_cast<ComposedLayoutType>(operands[2].getType())) {
+    outerAttr = outerComposedTy.getAttr();
+  } else {
+    return emitOptionalError(location,
+                             "MakeComposedLayoutOp: expected LayoutType or ComposedLayoutType for "
+                             "outer, got ",
                              operands[2].getType());
+  }
   Attribute innerAttr = nullptr;
   if (auto innerLayoutTy = dyn_cast<LayoutType>(operands[0].getType())) {
     innerAttr = innerLayoutTy.getAttr();
@@ -195,13 +238,15 @@ FLY_INFER_RETURN_TYPES(MakeComposedLayoutOp) {
     innerAttr = innerComposedTy.getAttr();
   } else if (auto innerSwizzleTy = dyn_cast<SwizzleType>(operands[0].getType())) {
     innerAttr = innerSwizzleTy.getAttr();
+  } else if (auto innerCoordSwizzleTy = dyn_cast<CoordSwizzleType>(operands[0].getType())) {
+    innerAttr = innerCoordSwizzleTy.getAttr();
   } else {
     return emitOptionalError(
-        location, "MakeComposedLayoutOp: expected Layout/ComposedLayout/Swizzle for inner, got ",
+        location,
+        "MakeComposedLayoutOp: expected Layout/ComposedLayout/Swizzle/CoordSwizzle for inner, got ",
         operands[0].getType());
   }
-  auto composedAttr =
-      ComposedLayoutAttr::get(context, innerAttr, offsetTy.getAttr(), outerTy.getAttr());
+  auto composedAttr = ComposedLayoutAttr::get(context, innerAttr, offsetTy.getAttr(), outerAttr);
   inferredReturnTypes.assign({ComposedLayoutType::get(context, composedAttr)});
   return success();
 }
@@ -409,6 +454,9 @@ FLY_INFER_RETURN_TYPES(ComposedGetInnerOp) {
   if (auto swizzleAttr = dyn_cast<SwizzleAttr>(innerAttr)) {
     inferredReturnTypes.assign({SwizzleType::get(context, swizzleAttr)});
     return success();
+  } else if (auto coordSwizzleAttr = dyn_cast<CoordSwizzleAttr>(innerAttr)) {
+    inferredReturnTypes.assign({CoordSwizzleType::get(context, coordSwizzleAttr)});
+    return success();
   } else if (auto layoutAttr = dyn_cast<LayoutAttr>(innerAttr)) {
     inferredReturnTypes.assign({LayoutType::get(context, layoutAttr)});
     return success();
@@ -433,7 +481,7 @@ FLY_INFER_RETURN_TYPES(ComposedGetOuterOp) {
   if (!inputTy)
     return emitOptionalError(location, "ComposedGetOuterOp: expected ComposedLayoutType, got ",
                              operands[0].getType());
-  inferredReturnTypes.assign({LayoutType::get(context, inputTy.getAttr().getOuter())});
+  inferredReturnTypes.assign({getNarrowLayoutType(inputTy.getAttr().getOuter())});
   return success();
 }
 
@@ -705,13 +753,14 @@ FLY_INFER_RETURN_TYPES(AppendOp) {
       return emitOptionalError(location,
                                "AppendOp: elem must be LayoutType when tuple is ComposedLayout");
     ComposedLayoutAttr ca = composedTy.getAttr();
-    LayoutAttr outer = ca.getOuter();
+    LayoutAttr outer = getLinearLayoutAttr(ca.getOuter());
     LayoutAttr eAttr = elemLayout.getAttr();
     IntTupleAttr newShape = intTupleAppend(builder, outer.getShape(), eAttr.getShape(), n);
     IntTupleAttr newStride = intTupleAppend(builder, outer.getStride(), eAttr.getStride(), n);
     LayoutAttr newOuter = LayoutAttr::get(context, newShape, newStride);
     inferredReturnTypes.assign({ComposedLayoutType::get(
-        context, ComposedLayoutAttr::get(context, ca.getInner(), ca.getOffset(), newOuter))});
+        context, ComposedLayoutAttr::get(context, ca.getInner(), ca.getOffset(),
+                                         replaceLinearLayoutAttr(ca.getOuter(), newOuter)))});
     return success();
   }
 
@@ -758,12 +807,13 @@ FLY_INFER_RETURN_TYPES(PrependOp) {
       return emitOptionalError(location,
                                "PrependOp: elem must be LayoutType when tuple is ComposedLayout");
     ComposedLayoutAttr ca = composedTy.getAttr();
-    LayoutAttr outer = ca.getOuter();
+    LayoutAttr outer = getLinearLayoutAttr(ca.getOuter());
     LayoutAttr eAttr = elemLayout.getAttr();
     IntTupleAttr newShape = intTuplePrepend(builder, outer.getShape(), eAttr.getShape(), n);
     IntTupleAttr newStride = intTuplePrepend(builder, outer.getStride(), eAttr.getStride(), n);
     LayoutAttr newOuter = LayoutAttr::get(newShape, newStride);
-    inferredReturnTypes.assign({ComposedLayoutType::get(ca.getInner(), ca.getOffset(), newOuter)});
+    inferredReturnTypes.assign({ComposedLayoutType::get(
+        ca.getInner(), ca.getOffset(), replaceLinearLayoutAttr(ca.getOuter(), newOuter))});
     return success();
   }
 
@@ -778,7 +828,7 @@ FLY_INFER_RETURN_TYPES(SliceOp) {
                              operands[1].getType());
 
   IntTupleAttr coordAttr = coordTy.getAttr();
-  IntTupleBuilder<IntTupleAttr> builder(context);
+  LayoutBuilder<LayoutAttr> builder(context);
 
   auto sliceLayout = [&](LayoutAttr layout) -> LayoutAttr {
     IntTupleAttr newShape = intTupleSlice(builder, layout.getShape(), coordAttr);
@@ -786,10 +836,8 @@ FLY_INFER_RETURN_TYPES(SliceOp) {
     return LayoutAttr::get(context, newShape, newStride);
   };
   auto sliceComposed = [&](ComposedLayoutAttr composed) -> ComposedLayoutAttr {
-    LayoutAttr outer = composed.getOuter();
-    IntTupleAttr offset = layoutCrd2Idx(builder, coordAttr, outer.getShape(), outer.getStride());
-    IntTupleAttr newOffset = intTupleAdd(builder, composed.getOffset(), offset);
-    return ComposedLayoutAttr::get(composed.getInner(), newOffset, sliceLayout(outer));
+    return cast<ComposedLayoutAttr>(
+        sliceLinearLayoutAttrAndAddNearestOffset(builder, composed, coordAttr, sliceLayout));
   };
 
   if (auto srcTupleTy = dyn_cast<IntTupleType>(srcTy)) {
@@ -1813,7 +1861,7 @@ FLY_INFER_RETURN_TYPES(DecompositionOp) {
   LayoutBuilder<LayoutAttr> builder(context);
   Attribute inner = composed.getInner();
   IntTupleAttr offset = composed.getOffset();
-  LayoutAttr outer = composed.getOuter();
+  Attribute outer = composed.getOuter();
 
   IntTupleAttr iterOffset;
   if (auto swizzleInner = dyn_cast<SwizzleAttr>(inner))
