@@ -710,16 +710,31 @@ class JitFunction:
             return
         self._manager_owner_cls = owner_cls
         self.manager_key = _jit_function_cache_key(self.func, owner_cls=owner_cls)
-        if not env.runtime.enable_cache:
+
+        run_only = env.runtime.run_only
+        if run_only and env.debug.dump_ir:
+            raise ValueError(
+                "FLYDSL_RUNTIME_RUN_ONLY=1 is incompatible with FLYDSL_DUMP_IR=1: "
+                "run-only mode skips the MLIR pass pipeline that would produce IR dumps."
+            )
+
+        need_cache = env.runtime.enable_cache or run_only
+        if not need_cache:
             self.cache_manager = None
             return
+
         cache_root = env.runtime.cache_dir
-        if cache_root:
-            cache_dir = Path(cache_root) / f"{self.func.__name__}_{self.manager_key}"
-            self.cache_manager = JitCacheManager(cache_dir)
-            self.cache_manager.load_all()
-        else:
+        if not cache_root:
+            if run_only:
+                raise RuntimeError(
+                    "FLYDSL_RUNTIME_RUN_ONLY=1 but FLYDSL_RUNTIME_CACHE_DIR is empty."
+                )
             self.cache_manager = None
+            return
+
+        cache_dir = Path(cache_root) / f"{self.func.__name__}_{self.manager_key}"
+        self.cache_manager = JitCacheManager(cache_dir)
+        self.cache_manager.load_all()
 
     @staticmethod
     def _arg_cache_sig(arg, *, runtime=False):
@@ -836,7 +851,10 @@ class JitFunction:
             return call_state(args_tuple)
 
         # Normal path: check in-process cache first, then optional disk cache.
-        use_disk_cache = env.runtime.enable_cache
+        # In run_only mode the disk cache is read regardless of enable_cache, since
+        # AOT-only execution treats the on-disk cache as the deployment artifact.
+        run_only = env.runtime.run_only
+        use_disk_cache = env.runtime.enable_cache or run_only
         cached_func = self._mem_cache.get(cache_key)
         if cached_func is None and use_disk_cache and not env.debug.dump_ir:
             str_key = self._cache_key_to_str(cache_key)
@@ -869,6 +887,17 @@ class JitFunction:
                 _, jit_args, _, _ = convert_to_jit_arguments(sig, bound)
                 _ensure_stream_arg(jit_args)
                 return cached_func(*jit_args)
+
+        if run_only:
+            cdir = getattr(self.cache_manager, "cache_dir", None)
+            cdir_exists = cdir.exists() if cdir is not None else False
+            raise RuntimeError(
+                f"FLYDSL_RUNTIME_RUN_ONLY=1 but no AOT cache for "
+                f"{self.func.__name__}: "
+                f"manager_key={self.manager_key}, "
+                f"cache_key={self._cache_key_to_str(cache_key)[:96]}..., "
+                f"cache_dir={cdir} (exists={cdir_exists})"
+            )
 
         _hints_ctx = CompilationContext.compile_hints(self.compile_hints) if self.compile_hints else nullcontext()
 
