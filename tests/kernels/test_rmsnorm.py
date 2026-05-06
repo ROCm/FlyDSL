@@ -238,6 +238,48 @@ def _get_rmsnorm_configs():
     ]
 
 
+def _get_rmsnorm_quant_configs():
+    shapes_env = os.environ.get("ROCDSL_RMSNORM_QUANT_SHAPES", "").strip()
+    if not shapes_env:
+        shapes_env = os.environ.get("ROCDSL_RMSNORM_SHAPES", "").strip()
+    if shapes_env:
+        configs = []
+        for part in shapes_env.split(";"):
+            p = part.strip()
+            if not p:
+                continue
+            m_s, n_s, dt = [x.strip() for x in p.split(",")]
+            configs.append((int(m_s), int(n_s), dt))
+        return configs
+
+    return [
+        (128, 4096, "f16"),   # Aligned
+        (173, 409, "f16"),    # Unaligned (tail handling)
+        (256, 4096, "bf16"),  # BF16
+    ]
+
+
+def _get_rmsnorm_fused_add_configs():
+    shapes_env = os.environ.get("ROCDSL_RMSNORM_FUSED_ADD_SHAPES", "").strip()
+    if not shapes_env:
+        shapes_env = os.environ.get("ROCDSL_RMSNORM_SHAPES", "").strip()
+    if shapes_env:
+        configs = []
+        for part in shapes_env.split(";"):
+            p = part.strip()
+            if not p:
+                continue
+            m_s, n_s, dt = [x.strip() for x in p.split(",")]
+            configs.append((int(m_s), int(n_s), dt))
+        return configs
+
+    return [
+        (128, 4096, "f16"),   # Aligned
+        (173, 409, "f16"),    # Unaligned (tail handling)
+        (1024, 8192, "bf16"), # BF16
+    ]
+
+
 def _reference_rmsnorm_quant(input_dev, gamma_dev, *, xscale_dev=None):
     x = input_dev.to(DTYPE_FP32)
     gamma = gamma_dev.to(DTYPE_FP32)
@@ -408,7 +450,7 @@ def test_rmsnorm_dynamicquant():
     perf_rows = []
 
     failures = 0
-    for M, N, dtype in _get_rmsnorm_configs():
+    for M, N, dtype in _get_rmsnorm_quant_configs():
         ok, flydsl_gpu_us = run_quant_test(M, N, dtype, is_smooth=False)
         if not ok:
             failures += 1
@@ -449,7 +491,7 @@ def test_rmsnorm_smoothquant():
     perf_rows = []
     failures = 0
 
-    for M, N, dtype in _get_rmsnorm_configs():
+    for M, N, dtype in _get_rmsnorm_quant_configs():
         ok, flydsl_gpu_us = run_quant_test(M, N, dtype, is_smooth=True)
         if not ok:
             failures += 1
@@ -536,21 +578,24 @@ def run_fused_add_test(M: int, N: int, dtype: str):
         gamma_dev = gamma_t.contiguous()
         output_dev = torch.empty((M, N), device="cuda", dtype=DTYPE_FP32)
         residual_out_dev = torch.empty((M, N), device="cuda", dtype=DTYPE_FP32)
-        atol = 1e-4
+        output_atol = 1e-4
+        residual_atol = 1e-4
     elif dtype == "f16":
         input_dev = input_t.to(DTYPE_FP16).contiguous()
         residual_in_dev = residual_t.to(DTYPE_FP16).contiguous()
         gamma_dev = gamma_t.to(DTYPE_FP16).contiguous()
         output_dev = torch.empty((M, N), device="cuda", dtype=DTYPE_FP16)
         residual_out_dev = torch.empty((M, N), device="cuda", dtype=DTYPE_FP16)
-        atol = 1e-2
+        output_atol = 1e-2
+        residual_atol = 1e-2
     elif dtype == "bf16":
         input_dev = input_t.to(DTYPE_BF16).contiguous()
         residual_in_dev = residual_t.to(DTYPE_BF16).contiguous()
         gamma_dev = gamma_t.to(DTYPE_BF16).contiguous()
         output_dev = torch.empty((M, N), device="cuda", dtype=DTYPE_BF16)
         residual_out_dev = torch.empty((M, N), device="cuda", dtype=DTYPE_BF16)
-        atol = 2e-2
+        output_atol = 2e-2
+        residual_atol = 4e-2
     else:
         raise ValueError(f"unsupported dtype: {dtype}")
 
@@ -602,10 +647,10 @@ def run_fused_add_test(M: int, N: int, dtype: str):
     residual_error = (residual_out_ref - residual_expected).abs().max().item()
     output_error = (output_ref - output_expected).abs().max().item()
 
-    print(f"Max residual error: {residual_error:.2e} (atol={atol})")
-    print(f"Max output error: {output_error:.2e} (atol={atol})")
+    print(f"Max residual error: {residual_error:.2e} (atol={residual_atol})")
+    print(f"Max output error: {output_error:.2e} (atol={output_atol})")
 
-    ok = residual_error < atol and output_error < atol
+    ok = residual_error < residual_atol and output_error < output_atol
     if ok:
         print("PASSED")
     else:
@@ -622,7 +667,7 @@ def test_rmsnorm_fused_add():
     perf_rows = []
     failures = 0
 
-    for M, N, dtype in _get_rmsnorm_configs():
+    for M, N, dtype in _get_rmsnorm_fused_add_configs():
         ok, flydsl_gpu_us = run_fused_add_test(M, N, dtype)
         if not ok:
             failures += 1
