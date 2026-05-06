@@ -49,9 +49,9 @@ Attribute replaceLinearLayoutAttr(Attribute oldLayout, LayoutAttr newLayoutAttr)
   return ComposedLayoutAttr::get(composed.getInner(), composed.getOffset(), newOuter);
 }
 
-Attribute sliceLinearLayoutAttrAndAddNearestOffset(
-    LayoutBuilder<LayoutAttr> &builder, Attribute layoutAttr, IntTupleAttr coordAttr,
-    function_ref<LayoutAttr(LayoutAttr)> sliceLayout) {
+Attribute sliceComposedLayoutAttr(LayoutBuilder<LayoutAttr> &builder, Attribute layoutAttr,
+                                  IntTupleAttr coordAttr,
+                                  function_ref<LayoutAttr(LayoutAttr)> sliceLayout) {
   if (auto layout = dyn_cast<LayoutAttr>(layoutAttr))
     return sliceLayout(layout);
 
@@ -63,8 +63,7 @@ Attribute sliceLinearLayoutAttrAndAddNearestOffset(
     return ComposedLayoutAttr::get(composed.getInner(), newOffset, sliceLayout(outerLayout));
   }
 
-  Attribute newOuter =
-      sliceLinearLayoutAttrAndAddNearestOffset(builder, outer, coordAttr, sliceLayout);
+  Attribute newOuter = sliceComposedLayoutAttr(builder, outer, coordAttr, sliceLayout);
   return ComposedLayoutAttr::get(composed.getInner(), composed.getOffset(), newOuter);
 }
 
@@ -837,7 +836,7 @@ FLY_INFER_RETURN_TYPES(SliceOp) {
   };
   auto sliceComposed = [&](ComposedLayoutAttr composed) -> ComposedLayoutAttr {
     return cast<ComposedLayoutAttr>(
-        sliceLinearLayoutAttrAndAddNearestOffset(builder, composed, coordAttr, sliceLayout));
+        sliceComposedLayoutAttr(builder, composed, coordAttr, sliceLayout));
   };
 
   if (auto srcTupleTy = dyn_cast<IntTupleType>(srcTy)) {
