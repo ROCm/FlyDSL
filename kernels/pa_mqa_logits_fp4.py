@@ -436,18 +436,30 @@ def build_pa_mqa_logits_fp4_module(
                 # [token_base + lane_div_16*4 + 0..3]. After the cross-lane
                 # reduction the value is replicated across all 16 lane_mod_16
                 # lanes within the same lane_div_16 group, so only one writer
-                # per group is needed. Mask via address: non-writer lanes get
-                # an OOB offset that the buffer resource silently drops.
+                # per group is needed. Pack the 4 partials into a vec4 and
+                # emit ONE buffer_store_dwordx4 instead of four scalar dwords.
+                #
+                # The 4 tokens are contiguous in memory and the base address
+                # is naturally 16-byte aligned (token_base is a multiple of
+                # MFMA_N=16, lane_div_16*4 advances in steps of 4 dwords =
+                # 16 bytes). Whole N-tile fits in/out of context together
+                # because context_len is a multiple of MFMA_N — so a single
+                # in_ctx check on the base token covers all 4 tokens.
+                #
+                # Mask via address: non-writer lanes / out-of-context groups
+                # get OOB offset that the buffer resource silently drops.
+                val_vec = vector.from_elements(
+                    T.vec(4, T.f32),
+                    [partials[0], partials[1], partials[2], partials[3]],
+                )
                 oob_off = fx.Int32(-1)
-                is_writer = lane_mod_16 < fx.Int32(1)  # lane_mod_16 == 0
-                for elem_idx in range_constexpr(4):
-                    out_token = token_base + lane_div_16 * fx.Int32(4) + fx.Int32(elem_idx)
-                    in_ctx = out_token < context_len
-                    val = partials[elem_idx]
-                    out_off_real = pid_b * stride_out_batch + out_token
-                    out_off = in_ctx.select(out_off_real, oob_off)
-                    out_off = is_writer.select(out_off, oob_off)
-                    buffer_ops.buffer_store(val, out_rsrc, out_off)
+                is_writer = lane_mod_16 < fx.Int32(1)
+                out_token0 = token_base + lane_div_16 * fx.Int32(4)
+                in_ctx = out_token0 < context_len
+                out_off_real = pid_b * stride_out_batch + out_token0
+                out_off = in_ctx.select(out_off_real, oob_off)
+                out_off = is_writer.select(out_off, oob_off)
+                buffer_ops.buffer_store(val_vec, out_rsrc, out_off)
 
         # === Prologue ===
         # (1) Load phys for chunk 0, then issue KV[0] prefetch using it.
