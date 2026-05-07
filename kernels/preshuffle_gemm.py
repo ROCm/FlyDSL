@@ -18,6 +18,7 @@ from kernels.mfma_preshuffle_pipeline import (
     load_b_pack_k32,
     swizzle_xor16,
     tile_chunk_coord_i32,
+    xcd_remap_bx_by,
 )
 
 _TILE_PRELOAD_TABLE = {
@@ -128,6 +129,7 @@ def compile_preshuffle_gemm_a8(
     dsrd_preload: int = -1,
     dvmem_preload: int = -1,
     epilogue: str = "none",  # "none", "bias", "bias_relu", "bias_silu", "bias_gelu"
+    xcd_swizzle: int = 0,
 ):
     """Compile the preshuffle GEMM kernel using the @flyc.kernel API.
 
@@ -364,6 +366,12 @@ def compile_preshuffle_gemm_a8(
         tx = gpu.thread_id("x")
         bx = gpu.block_id("x")
         by = gpu.block_id("y")
+
+        bx, by = xcd_remap_bx_by(
+            bx, by, c_m,
+            tile_m=tile_m, tile_n=tile_n, N=N,
+            xcd_swizzle=xcd_swizzle,
+        )
 
         # ---- LDS (separate ping/pong buffers for no-alias guarantee) ----
         base_ptr_pong = allocator_pong.get_base()
@@ -1877,6 +1885,7 @@ def compile_preshuffle_gemm_w4(
     use_async_copy: bool = False,
     dsrd_preload: int = 2,
     dvmem_preload: int = 2,
+    xcd_swizzle: int = 0,
 ):
     """MXFP4 preshuffle GEMM — delegates to compile_preshuffle_gemm_a8 with fp4 config."""
     if a_dtype == "fp8":
@@ -1894,6 +1903,7 @@ def compile_preshuffle_gemm_w4(
         use_async_copy=use_async_copy,
         dsrd_preload=dsrd_preload,
         dvmem_preload=dvmem_preload,
+        xcd_swizzle=xcd_swizzle,
     )
     return inner
 

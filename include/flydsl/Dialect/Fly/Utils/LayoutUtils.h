@@ -238,6 +238,8 @@ auto layoutCrd2Idx(LayoutBuilder<Layout> &builder, typename LayoutBuilder<Layout
     auto inner = builder.getInner(layout);
     if (builder.isSwizzle(inner)) {
       return builder.applySwizzle(intermediate, builder.getSwizzleAttr(inner));
+    } else if (builder.isCoordSwizzle(inner)) {
+      return builder.applyCoordSwizzle(intermediate, builder.getCoordSwizzleAttr(inner));
     } else {
       return layoutCrd2Idx(builder, intermediate, inner);
     }
@@ -274,9 +276,13 @@ public:
 
   bool isComposedLayout(Attribute attr) const { return isa<ComposedLayoutAttr>(attr); }
   bool isSwizzle(Attribute attr) const { return isa<SwizzleAttr>(attr); }
+  bool isCoordSwizzle(Attribute attr) const { return isa<CoordSwizzleAttr>(attr); }
   SwizzleAttr getSwizzleAttr(Attribute attr) const { return cast<SwizzleAttr>(attr); }
+  CoordSwizzleAttr getCoordSwizzleAttr(Attribute attr) const {
+    return cast<CoordSwizzleAttr>(attr);
+  }
 
-  LayoutAttr getOuter(Attribute attr) const { return cast<ComposedLayoutAttr>(attr).getOuter(); }
+  Attribute getOuter(Attribute attr) const { return cast<ComposedLayoutAttr>(attr).getOuter(); }
   IntTuple getOffset(Attribute attr) const { return cast<ComposedLayoutAttr>(attr).getOffset(); }
   Attribute getInner(Attribute attr) const { return cast<ComposedLayoutAttr>(attr).getInner(); }
 
@@ -294,11 +300,12 @@ public:
     return attr;
   }
   Attribute materializeSwizzle(SwizzleAttr swizzle) const { return swizzle; }
+  Attribute materializeCoordSwizzle(CoordSwizzleAttr coordSwizzle) const { return coordSwizzle; }
 
   LayoutAttr makeLayout(IntTupleAttr shape, IntTupleAttr stride) const {
     return LayoutAttr::get(shape, stride);
   }
-  Attribute makeComposedLayout(Attribute inner, IntTupleAttr offset, LayoutAttr outer) const {
+  Attribute makeComposedLayout(Attribute inner, IntTupleAttr offset, Attribute outer) const {
     return ComposedLayoutAttr::get(inner, offset, outer);
   }
 };
@@ -312,9 +319,15 @@ public:
     return isa<ComposedLayoutAttr>(adaptor.attr);
   }
   bool isSwizzle(LayoutValueAdaptor adaptor) const { return isa<SwizzleAttr>(adaptor.attr); }
+  bool isCoordSwizzle(LayoutValueAdaptor adaptor) const {
+    return isa<CoordSwizzleAttr>(adaptor.attr);
+  }
 
   SwizzleAttr getSwizzleAttr(LayoutValueAdaptor adaptor) const {
     return cast<SwizzleAttr>(adaptor.attr);
+  }
+  CoordSwizzleAttr getCoordSwizzleAttr(LayoutValueAdaptor adaptor) const {
+    return cast<CoordSwizzleAttr>(adaptor.attr);
   }
 
   ComposedLayoutAttr getComposedLayoutAttr(LayoutValueAdaptor adaptor) const {
@@ -361,6 +374,11 @@ public:
     auto value = StaticOp::create(this->builder, this->loc, SwizzleType::get(swizzle)).getResult();
     return LayoutValueAdaptor(value, swizzle);
   }
+  LayoutValueAdaptor materializeCoordSwizzle(CoordSwizzleAttr coordSwizzle) const {
+    auto value =
+        StaticOp::create(this->builder, this->loc, CoordSwizzleType::get(coordSwizzle)).getResult();
+    return LayoutValueAdaptor(value, coordSwizzle);
+  }
 
   LayoutValueAdaptor makeLayout(IntTuple shape, IntTuple stride) const {
     auto value = MakeLayoutOp::create(this->builder, this->loc, this->finalize(shape),
@@ -373,8 +391,8 @@ public:
     auto value = MakeComposedLayoutOp::create(this->builder, this->loc, inner.getValue(),
                                               this->finalize(offset), outer.getValue())
                      .getResult();
-    return LayoutValueAdaptor(
-        value, ComposedLayoutAttr::get(inner.attr, offset.getAttr(), cast<LayoutAttr>(outer.attr)));
+    return LayoutValueAdaptor(value,
+                              ComposedLayoutAttr::get(inner.attr, offset.getAttr(), outer.attr));
   }
 };
 
@@ -550,11 +568,10 @@ typename LayoutBuilder<Layout>::IntTuple layoutCoshape(LayoutBuilder<Layout> &bu
   IntTuple stride = builder.getStride(layout);
   IntTuple one = builder.materializeConstantLeaf(1);
 
-  IntTuple m1Shapes = intTupleTransformLeaf(
-      builder, [&](IntTuple s) { return builder.sub(s, one); }, shape);
+  IntTuple m1Shapes =
+      intTupleTransformLeaf(builder, [&](IntTuple s) { return builder.sub(s, one); }, shape);
   IntTuple coCoord = intTupleInnerProduct(builder, m1Shapes, stride);
-  return intTupleTransformLeaf(
-      builder, [&](IntTuple c) { return builder.add(c, one); }, coCoord);
+  return intTupleTransformLeaf(builder, [&](IntTuple c) { return builder.add(c, one); }, coCoord);
 }
 
 template <class Layout>
@@ -1097,6 +1114,20 @@ auto layoutUpcastImpl(LayoutBuilder<Layout> &builder, SwizzleAttr swizzle, int32
 }
 
 template <class Layout>
+auto layoutUpcastImpl(LayoutBuilder<Layout> &builder, CoordSwizzleAttr coordSwizzle,
+                      int32_t factor) {
+  assert(utils::isPowerOf2(factor) && "layoutUpcast: factor must be a power of 2");
+  int32_t log_factor = std::log2(factor);
+  int32_t baseRow = coordSwizzle.getBaseRow();
+  int32_t baseCol = coordSwizzle.getBaseCol();
+  assert(baseRow >= log_factor);
+  assert(baseCol >= log_factor);
+  return builder.materializeCoordSwizzle(CoordSwizzleAttr::get(
+      coordSwizzle.getContext(), coordSwizzle.getMask(), baseRow - log_factor,
+      coordSwizzle.getModeRow(), baseCol - log_factor, coordSwizzle.getModeCol()));
+}
+
+template <class Layout>
 std::pair<typename LayoutBuilder<Layout>::IntTuple, typename LayoutBuilder<Layout>::IntTuple>
 layoutDowncastImpl(LayoutBuilder<Layout> &builder, typename LayoutBuilder<Layout>::IntTuple shape,
                    typename LayoutBuilder<Layout>::IntTuple stride, int32_t factor) {
@@ -1138,6 +1169,17 @@ auto layoutDowncastImpl(LayoutBuilder<Layout> &builder, SwizzleAttr swizzle, int
       swizzle.getContext(), swizzle.getMask(), swizzle.getBase() + log_factor, swizzle.getShift()));
 }
 
+template <class Layout>
+auto layoutDowncastImpl(LayoutBuilder<Layout> &builder, CoordSwizzleAttr coordSwizzle,
+                        int32_t factor) {
+  assert(utils::isPowerOf2(factor) && "layoutDowncast: factor must be a power of 2");
+  int32_t log_factor = std::log2(factor);
+  return builder.materializeCoordSwizzle(
+      CoordSwizzleAttr::get(coordSwizzle.getContext(), coordSwizzle.getMask(),
+                            coordSwizzle.getBaseRow() + log_factor, coordSwizzle.getModeRow(),
+                            coordSwizzle.getBaseCol() + log_factor, coordSwizzle.getModeCol()));
+}
+
 } // namespace detail
 
 template <class Layout, class NarrowLayout>
@@ -1166,6 +1208,8 @@ auto layoutUpcast(LayoutBuilder<Layout> &builder, NarrowLayout layout, int32_t f
 
       if (builder.isSwizzle(inner)) {
         inner = detail::layoutUpcastImpl(builder, builder.getSwizzleAttr(inner), factor);
+      } else if (builder.isCoordSwizzle(inner)) {
+        inner = detail::layoutUpcastImpl(builder, builder.getCoordSwizzleAttr(inner), factor);
       } else {
         inner = layoutUpcast(builder, inner, factor);
       }
@@ -1200,6 +1244,8 @@ auto layoutDowncast(LayoutBuilder<Layout> &builder, NarrowLayout layout, int32_t
 
       if (builder.isSwizzle(inner)) {
         inner = detail::layoutDowncastImpl(builder, builder.getSwizzleAttr(inner), factor);
+      } else if (builder.isCoordSwizzle(inner)) {
+        inner = detail::layoutDowncastImpl(builder, builder.getCoordSwizzleAttr(inner), factor);
       } else {
         inner = layoutDowncast(builder, inner, factor);
       }

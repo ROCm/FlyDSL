@@ -81,6 +81,19 @@ def Fly_Swizzle : Fly_Type<"Swizzle", "swizzle", [
   ];
 }
 
+def Fly_CoordSwizzle : Fly_Type<"CoordSwizzle", "coord_swizzle", [
+    DeclareTypeInterfaceMethods<Fly_MayStaticTypeInterface>
+]> {
+  let parameters = (ins Fly_CoordSwizzleAttr:$attr);
+  let assemblyFormat = "`<` $attr `>`";
+
+  let builders = [
+    TypeBuilderWithInferredContext<(ins "CoordSwizzleAttr":$attr), [{
+      return $_get(attr.getContext(), attr);
+    }]>
+  ];
+}
+
 def Fly_ComposedLayout : Fly_Type<"ComposedLayout", "composed_layout", [
     DeclareTypeInterfaceMethods<Fly_NestedTypeInterface>,
     DeclareTypeInterfaceMethods<Fly_MayStaticTypeInterface>
@@ -101,7 +114,7 @@ def Fly_ComposedLayout : Fly_Type<"ComposedLayout", "composed_layout", [
     TypeBuilderWithInferredContext<(ins "ComposedLayoutAttr":$attr), [{
       return $_get(attr.getContext(), attr);
     }]>,
-    TypeBuilderWithInferredContext<(ins "Attribute":$inner, "IntTupleAttr":$offset, "LayoutAttr":$outer), [{
+    TypeBuilderWithInferredContext<(ins "Attribute":$inner, "IntTupleAttr":$offset, "Attribute":$outer), [{
       return $_get(inner.getContext(), ComposedLayoutAttr::get(inner, offset, outer));
     }]>
   ];
