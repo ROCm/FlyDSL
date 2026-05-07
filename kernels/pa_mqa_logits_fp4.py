@@ -268,37 +268,32 @@ def build_pa_mqa_logits_fp4_module(
             for elem in [0, 1, 2, 3]:
                 w_per_lane.append(vector.extract(w_vec4, static_position=[elem]))
 
-        # ── Step 2A: prefetch all phys_block indices in prologue ──
-        # block_k=128, 4 warps × N_TILES_PER_WARP=2 N-tiles per chunk.
-        # For each (chunk, n_tile) pair, prefetch phys_block. Each warp's
-        # phys_block for a given (c, n_tile) is uniform across lanes since
-        # lane_mod_16 < kv_block_size keeps token_global / kv_block_size constant.
-        # We use N_TILES_PER_WARP separate vectors indexed by chunk_idx.
-        phys_blocks_vecs = [
-            arith.constant_vector(0, T.vec(MAX_CHUNKS_PER_CTA, T.i32))
-            for _ in range_constexpr(N_TILES_PER_WARP)
-        ]
-        for c in range_constexpr(MAX_CHUNKS_PER_CTA):
-            c_i32 = fx.Int32(c)
+        # ── Step 3 (block_k=128): prologue + N-1 prefetch loop + epilogue ──
+        # Per chunk: each warp handles N_TILES_PER_WARP=2 N-tiles (32 tokens).
+        # Carry across iters: kv_cur, kvs_cur (consumed this iter) and
+        # phys_next (used to issue NEXT iter's KV prefetch — pre-loaded one
+        # iter ahead so its load latency is hidden by current iter's compute).
+        # Splitting phys load from KV prefetch lets the compiler issue both
+        # buffer_loads in parallel rather than serializing on the dependency
+        # phys → kv_off → kv_load.
+
+        def _load_phys(c_i32_arg):
+            """Load phys_block for chunk c, all N_TILES_PER_WARP N-tiles."""
+            phys_list = []
             for nt in range_constexpr(N_TILES_PER_WARP):
                 ni_c = warp_id * fx.Int32(N_TILES_PER_WARP) + fx.Int32(nt)
-                warp_chunk_token = (
-                    (chunk_start + c_i32) * fx.Int32(block_k)
+                token_global_c = (
+                    (chunk_start + c_i32_arg) * fx.Int32(block_k)
                     + ni_c * fx.Int32(MFMA_N)
                     + lane_mod_16
                 )
-                bi_c = warp_chunk_token // fx.Int32(kv_block_size)
-                pb_c = buffer_ops.buffer_load(
-                    bt_rsrc, pid_b * _stride_bt + bi_c, vec_width=1, dtype=T.i32)
-                phys_blocks_vecs[nt] = vector.insert(
-                    pb_c, phys_blocks_vecs[nt], static_position=[c], dynamic_position=[])
+                bi_c = token_global_c // kv_block_size
+                phys_list.append(buffer_ops.buffer_load(
+                    bt_rsrc, pid_b * _stride_bt + bi_c, vec_width=1, dtype=T.i32))
+            return phys_list
 
-        # ── Step 3 (block_k=128): prologue + N-1 prefetch loop + epilogue ──
-        # Per chunk: each warp handles N_TILES_PER_WARP=2 N-tiles (32 tokens).
-        # Carry across iters: list of (kv_4xi32, kvs_4b) for every N-tile of cur.
-
-        def _prefetch_chunk(c_i32_arg, c_idx_arg):
-            """Issue KV+scale loads for chunk c (all N_TILES_PER_WARP N-tiles).
+        def _prefetch_chunk(c_i32_arg, phys_list):
+            """Issue KV+scale loads for chunk c using pre-loaded phys_list.
             Returns (kv_list, kvs_list) of length N_TILES_PER_WARP."""
             kv_list = []
             kvs_list = []
@@ -309,20 +304,18 @@ def build_pa_mqa_logits_fp4_module(
                     + ni_c * fx.Int32(MFMA_N)
                     + lane_mod_16
                 )
-                token_valid_c = token_global_c < context_len
-                safe_token_c = token_valid_c.select(token_global_c, c0_i32)
-                token_in_block_c = safe_token_c % kv_block_size
-                phys_block_c = vector.extract(
-                    phys_blocks_vecs[nt], dynamic_position=[c_idx_arg])
-                phys_block_c_safe = token_valid_c.select(phys_block_c, c0_i32)
+                # No address clamping — OOB tokens read garbage that is later
+                # overwritten by NEG_INF via in_bounds.select on the store path.
+                token_in_block_c = token_global_c % kv_block_size
+                phys_block_c = phys_list[nt]
                 kv_off_bytes_c = (
-                    phys_block_c_safe * _stride_kv_block
+                    phys_block_c * _stride_kv_block
                     + lane_div_16 * kv_block_size * 16
                     + token_in_block_c * 16
                 )
                 kv_4xi32_c = buffer_ops.buffer_load(
                     kv_rsrc, kv_off_bytes_c // 4, vec_width=4, dtype=T.i32)
-                kvs_off_c = phys_block_c_safe * kv_block_size + token_in_block_c
+                kvs_off_c = phys_block_c * kv_block_size + token_in_block_c
                 kvs_4b_c = buffer_ops.buffer_load(
                     kvs_rsrc, kvs_off_c, vec_width=1, dtype=T.i32)
                 kv_list.append(kv_4xi32_c)
@@ -337,21 +330,22 @@ def build_pa_mqa_logits_fp4_module(
                     (chunk_start + c_i32_arg) * fx.Int32(block_k)
                     + ni_warp * fx.Int32(MFMA_N)
                 )
-                token_global = token_base + lane_mod_16
-                token_valid = token_global < context_len
-
                 kv_4xi32 = kv_list_in[nt]
                 kvs_4b = kvs_list_in[nt]
 
-                kv_0 = token_valid.select(vector.extract(kv_4xi32, static_position=[0]), c0_i32)
-                kv_1 = token_valid.select(vector.extract(kv_4xi32, static_position=[1]), c0_i32)
-                kv_2 = token_valid.select(vector.extract(kv_4xi32, static_position=[2]), c0_i32)
-                kv_3 = token_valid.select(vector.extract(kv_4xi32, static_position=[3]), c0_i32)
-                kv_i64_0 = _pack_i32_pair_to_i64(kv_0, kv_1)
-                kv_i64_1 = _pack_i32_pair_to_i64(kv_2, kv_3)
+                # No data masking on KV / scale — out-of-bounds tokens go through
+                # MFMA producing garbage logits, which are then overwritten by
+                # NEG_INF via the in_bounds.select on the store path.
+                kv_i64_0 = _pack_i32_pair_to_i64(
+                    vector.extract(kv_4xi32, static_position=[0]),
+                    vector.extract(kv_4xi32, static_position=[1]),
+                )
+                kv_i64_1 = _pack_i32_pair_to_i64(
+                    vector.extract(kv_4xi32, static_position=[2]),
+                    vector.extract(kv_4xi32, static_position=[3]),
+                )
                 kv_b = _pack_i64x4_to_i32x8(kv_i64_0, kv_i64_1, c0_i64, c0_i64)
                 kv_scale_val = (kvs_4b >> (lane_div_16 * fx.Int32(8))) & fx.Int32(0xFF)
-                kv_scale_val = token_valid.select(kv_scale_val, c0_i32)
 
                 zero = arith.constant_vector(0.0, T.f32x4)
                 accs = []
@@ -384,40 +378,64 @@ def build_pa_mqa_logits_fp4_module(
                     partials.append((e0 + e1) + (e2 + e3))
                 logit_val = (partials[0] + partials[1]) + (partials[2] + partials[3])
 
+                # XOR-shuffle reduction across the 4 lane_div_16 groups via
+                # ds_bpermute (no per-lane select, unlike gpu.shuffle xor on
+                # CDNA4 which lowers to v_permlane*_swap + v_cndmask).
+                # lane_id is an arith op result; treat it raw for arith.xor.
+                lane_raw = lane_id if not hasattr(lane_id, 'ir_value') else lane_id.ir_value()
+                c4_i32 = arith.constant(4, type=T.i32)
                 for sh in [16, 32]:
-                    peer = logit_val.shuffle_xor(fx.Int32(sh), c_w)
-                    logit_val = logit_val + peer
+                    sh_c = arith.constant(sh, type=T.i32)
+                    peer_lane = arith.XOrIOp(lane_raw, sh_c).result
+                    peer_byte = arith.MulIOp(peer_lane, c4_i32).result
+                    logit_raw = logit_val if not hasattr(logit_val, 'ir_value') else logit_val.ir_value()
+                    logit_i32 = arith.ArithValue(logit_raw).bitcast(T.i32)
+                    peer_i32 = rocdl.ds_bpermute(T.i32, peer_byte, logit_i32)
+                    peer_f32 = arith.ArithValue(peer_i32).bitcast(T.f32)
+                    logit_val = arith.ArithValue(logit_raw).addf(peer_f32)
 
                 out_token = token_base + lane_mod_16
                 in_bounds = out_token < context_len
+                logit_val = arith.ArithValue(
+                    logit_val if not hasattr(logit_val, 'ir_value') else logit_val.ir_value()
+                )
                 logit_val = in_bounds.select(logit_val, NEG_INF)
                 out_off = pid_b * stride_out_batch + out_token
                 buffer_ops.buffer_store(logit_val, out_rsrc, out_off)
 
-        # === Prologue: prefetch chunk 0 ===
-        c0_idx_const = arith.constant(0, type=T.index)
-        kv_list_pre, kvs_list_pre = _prefetch_chunk(c0_i32, c0_idx_const)
+        # === Prologue ===
+        # (1) Load phys for chunk 0, then issue KV[0] prefetch using it.
+        # (2) Pre-load phys for chunk 1 (carried into the loop's first iter
+        #     so KV[1] prefetch doesn't have to wait on a fresh phys load).
+        phys_pre = _load_phys(c0_i32)
+        kv_list_pre, kvs_list_pre = _prefetch_chunk(c0_i32, phys_pre)
+        phys_next_pre = _load_phys(fx.Int32(1))
 
         # === Main loop: chunk_count - 1 iterations ===
-        # Carry = [kv_t0, kv_t1, ..., kvs_t0, kvs_t1, ...]
+        # Carry = [kv_cur_*, kvs_cur_*, phys_next_*]
         chunk_count_minus_1_i32 = chunk_count - fx.Int32(1)
         chunk_count_minus_1_idx = arith.index_cast(T.index, chunk_count_minus_1_i32)
-        init_args = list(kv_list_pre) + list(kvs_list_pre)
+        init_args = list(kv_list_pre) + list(kvs_list_pre) + list(phys_next_pre)
         for c_idx, state in range(
                 0, chunk_count_minus_1_idx, 1, init=init_args):
             kv_cur_list = [state[i] for i in range(N_TILES_PER_WARP)]
             kvs_cur_list = [state[N_TILES_PER_WARP + i] for i in range(N_TILES_PER_WARP)]
+            phys_next_list = [state[2 * N_TILES_PER_WARP + i] for i in range(N_TILES_PER_WARP)]
             c_idx_i32 = arith.index_cast(T.i32, c_idx)
             c_next_i32 = c_idx_i32 + fx.Int32(1)
-            c_next_idx = arith.index_cast(T.index, c_next_i32)
+            c_next_next_i32 = c_next_i32 + fx.Int32(1)
 
-            # Issue prefetch for chunk c+1
-            kv_next_list, kvs_next_list = _prefetch_chunk(c_next_i32, c_next_idx)
+            # Issue KV prefetch for chunk c+1 using carry phys (no extra wait).
+            kv_next_list, kvs_next_list = _prefetch_chunk(c_next_i32, phys_next_list)
+
+            # Issue phys load for chunk c+2 — its latency overlaps with
+            # _compute_chunk on the current chunk below.
+            phys_next_next_list = _load_phys(c_next_next_i32)
 
             # Compute MFMA + store on current chunk
             _compute_chunk(kv_cur_list, kvs_cur_list, c_idx_i32)
 
-            results = yield list(kv_next_list) + list(kvs_next_list)
+            results = yield list(kv_next_list) + list(kvs_next_list) + list(phys_next_next_list)
 
         # === Epilogue: process last chunk (chunk_count - 1) ===
         kv_last_list = [results[i] for i in range(N_TILES_PER_WARP)]
