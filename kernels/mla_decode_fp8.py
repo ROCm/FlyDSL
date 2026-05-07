@@ -1,12 +1,15 @@
 """MLA (Multi-Latent Attention) decode kernel — FP8 (e4m3fnuz on gfx942) variant.
 
-Optimized for short query sequences (seqlen_q <= 4) with GQA.
+Optimized for short query sequences with GQA.  Supports two wave mappings:
+  * num_q_heads=16, seqlen_q=4: each wave handles one query row.
+  * num_q_heads=64, seqlen_q=1: each wave handles one 16-head group.
 Implements absorbed MLA where the KV cache stores [c_kv || k_rope] per token.
 
 Key design:
 - MFMA mfma_f32_16x16x32_fp8_fp8 for both GEMM stages.
-- 4 waves per workgroup, each wave handles one seqlen_q position.
-  Each MFMA tile computes 16 Q heads simultaneously (lane_mod_16 = head).
+- 4 waves per workgroup.  Each MFMA tile computes 16 Q heads
+  simultaneously (lane_mod_16 = head).  In head-parallel q=1 mode the
+  four waves share the same batch/KV tile and cover 64 heads.
 - No if-else boundary checks for KV loads (assumes seqlen_kv % BLOCK_N == 0).
 - Online softmax in registers; P converted to fp8 via v_cvt_pk_fp8_f32.
 - Three LDS buffers: two for K (double-buffered prefetch), one for V^T.
@@ -26,7 +29,7 @@ Layout (1D flattened):
   Mid_lse : [batch*seqlen_q, num_kv_splits, num_q_heads]              (fp32)
   block_table : [batch, max_num_blocks]   (i32 physical block ids)
 
-Grid:  (batch, num_head_groups, num_kv_splits)
+Grid:  (batch, num_head_group_blocks, num_kv_splits)
 Block: (256,) -- 4 waves of 64
 
 LDS layout (byte offsets, i8 element):
@@ -98,13 +101,10 @@ def _barrier(vmcnt=63, lgkmcnt=63):
     )
 
 
-_LDS_PTR_TYPE = None
 def _inttoptr_lds(i64_val):
     """Convert i64 scalar to !llvm.ptr<3> (LDS pointer)."""
-    global _LDS_PTR_TYPE
-    if _LDS_PTR_TYPE is None:
-        _LDS_PTR_TYPE = ir.Type.parse("!llvm.ptr<3>")
-    return llvm.inttoptr(_LDS_PTR_TYPE, i64_val)
+    lds_ptr_type = ir.Type.parse("!llvm.ptr<3>")
+    return llvm.inttoptr(lds_ptr_type, i64_val)
 
 
 def _get_element_ptr(
@@ -237,6 +237,22 @@ def compile_mla_decode_fp8(
     HEAD_DIM_V = kv_lora_rank
     GQA_GROUP = NUM_Q_HEADS // NUM_KV_HEADS
     NUM_HEAD_GROUPS = NUM_Q_HEADS // HEADS_PER_WAVE
+    HEAD_PARALLEL_Q1 = NUM_HEAD_GROUPS >= NUM_WAVES
+    if HEAD_PARALLEL_Q1:
+        assert NUM_HEAD_GROUPS % NUM_WAVES == 0, (
+            "head-parallel q=1 mode requires the number of 16-head groups "
+            f"({NUM_HEAD_GROUPS}) to be a multiple of NUM_WAVES ({NUM_WAVES})"
+        )
+        # One block's four waves cooperatively load a single KV tile.  All
+        # wave-local head groups in that block must therefore map to the same
+        # KV head.
+        assert GQA_GROUP >= HEADS_PER_WAVE * NUM_WAVES, (
+            "head-parallel q=1 mode requires all four 16-head wave groups "
+            "in a block to share one KV head"
+        )
+        NUM_HEAD_GROUP_BLOCKS = NUM_HEAD_GROUPS // NUM_WAVES
+    else:
+        NUM_HEAD_GROUP_BLOCKS = NUM_HEAD_GROUPS
     CAUSAL = causal
     PAGE_BLOCK_SIZE = page_block_size
 
@@ -436,9 +452,22 @@ def compile_mla_decode_fp8(
         )
         k_read_base_sub1 = k_read_base_sub0 + arith.index(CKV_HALF_BYTES)
 
-        q_head_idx = head_group_idx * arith.index(HEADS_PER_WAVE) + lane_mod_16
-        q_head_base = head_group_idx * arith.index(HEADS_PER_WAVE)
-        kv_head_idx = q_head_base / arith.index(GQA_GROUP)
+        if const_expr(HEAD_PARALLEL_Q1):
+            q_row = arith.index(0)
+            q_head_group_idx = (
+                head_group_idx * arith.index(NUM_WAVES) + wave_id
+            )
+            kv_head_base = (
+                head_group_idx * arith.index(HEADS_PER_WAVE * NUM_WAVES)
+            )
+        else:
+            q_row = wave_id
+            q_head_group_idx = head_group_idx
+            kv_head_base = q_head_group_idx * arith.index(HEADS_PER_WAVE)
+
+        q_head_base = q_head_group_idx * arith.index(HEADS_PER_WAVE)
+        q_head_idx = q_head_base + lane_mod_16
+        kv_head_idx = kv_head_base / arith.index(GQA_GROUP)
 
         kv_head_offset = kv_head_idx * arith.index(HEAD_DIM_QK)
 
@@ -778,8 +807,6 @@ def compile_mla_decode_fp8(
                     [dst4, dst5, dst6, dst7])
 
         # ---- Preload Q via 64×64 tiled loop ----
-        q_row = wave_id
-
         q_rsrc = buffer_ops.create_buffer_resource(Q)
 
         kv_total_blocks = batch_size_v * max_num_blocks_v
@@ -802,9 +829,8 @@ def compile_mla_decode_fp8(
             batch_idx
             * seqlen_q_v
             * arith.index(STRIDE_TOKEN_Q * elem_bytes)
-            + wave_id * arith.index(STRIDE_TOKEN_Q * elem_bytes)
-            + head_group_idx
-            * arith.index(HEADS_PER_WAVE * HEAD_DIM_QK * elem_bytes)
+            + q_row * arith.index(STRIDE_TOKEN_Q * elem_bytes)
+            + q_head_base * arith.index(HEAD_DIM_QK * elem_bytes)
             + lane_div_16 * arith.index(HEAD_DIM_QK * elem_bytes)
             + lane_mod_16 * arith.index(4)
         )
@@ -1792,8 +1818,7 @@ def compile_mla_decode_fp8(
                             v4f32_type, lds_reshape,
                             [_raw(rd_idx)])
                         new_head = (
-                            head_group_idx
-                                * arith.index(HEADS_PER_WAVE)
+                            q_head_base
                             + arith.index(rp * 8)
                             + lane_div_8
                         )
@@ -1846,7 +1871,7 @@ def compile_mla_decode_fp8(
             allocator_red.finalize()
 
         bs_val = fx.Index(batch_size.ir_value())
-        c_nhg = arith.index(NUM_HEAD_GROUPS)
+        c_nhg = arith.index(NUM_HEAD_GROUP_BLOCKS)
         nkv_splits_val = fx.Index(num_kv_splits.ir_value())
 
         mla_decode_kernel(
