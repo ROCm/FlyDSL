@@ -126,11 +126,46 @@ def fp4_dequant_e2m1_with_e8m0(packed, e8m0_scales, block_size=32):
     return x_dequant.reshape(*prefix, d)
 
 
+# ── FP8 E4M3 (OCP) quant / dequant — gfx950 cbsz=0 ────────────────────
+
+_FP8_E4M3_MAX = 448.0  # OCP E4M3 (torch.float8_e4m3fn)
+
+
+def fp8_quant_e4m3_with_e8m0(x: torch.Tensor, block_size: int = 32):
+    """Quantize bf16/fp32 tensor to FP8 E4M3 (OCP) with UE8M0 block scales."""
+    *prefix, d = x.shape
+    assert d % block_size == 0
+    x_f = x.float()
+
+    x_blk = x_f.reshape(*prefix, d // block_size, block_size)
+    amax = x_blk.abs().amax(dim=-1, keepdim=True).clamp(min=1e-8)
+
+    exp_unbiased = torch.ceil(torch.log2(amax / _FP8_E4M3_MAX))
+    exp_biased = (exp_unbiased + 127.0).clamp(0.0, 255.0).to(torch.uint8)
+    e8m0_scales = exp_biased.squeeze(-1).contiguous()
+
+    scale = torch.pow(2.0, exp_biased.float() - 127.0)
+    x_scaled = (x_blk / scale).reshape(*prefix, d)
+    x_fp8 = x_scaled.to(torch.float8_e4m3fn)
+    return x_fp8.contiguous(), e8m0_scales
+
+
+def fp8_dequant_e4m3_with_e8m0(x_fp8, e8m0_scales, block_size=32):
+    """Dequantize FP8 E4M3 + UE8M0 back to float32."""
+    *prefix, d = x_fp8.shape
+    x_vals = x_fp8.float()
+    e8m0_u8 = e8m0_scales.float()
+    scale = torch.pow(2.0, e8m0_u8 - 127.0)
+    x_blk = x_vals.reshape(*prefix, d // block_size, block_size)
+    x_dequant = x_blk * scale.unsqueeze(-1)
+    return x_dequant.reshape(*prefix, d)
+
+
 # ── Preshuffle layout helpers ─────────────────────────────────────
 
 
-def create_paged_preshuffle_kv_fp4(kv_bf16, kv_block_size, num_blocks, block_tables):
-    """Create paged preshuffle FP4 KV cache from dense bf16 KV.
+def create_paged_preshuffle_kv_fp8(kv_bf16, kv_block_size, num_blocks, block_tables):
+    """Create paged preshuffle FP8 E4M3 KV cache from dense bf16 KV.
 
     Args:
         kv_bf16: [B, T, D] bf16 dense KV
@@ -139,50 +174,67 @@ def create_paged_preshuffle_kv_fp4(kv_bf16, kv_block_size, num_blocks, block_tab
         block_tables: [B, max_blocks_per_seq] i32
 
     Returns:
-        kv_cache: [num_blocks, 4, kv_block_size, 16] uint8 (preshuffle fp4)
+        kv_cache: [num_blocks, 4 (K-chunks), kv_block_size, 32 bytes] uint8 (FP8 E4M3)
         kv_scale: [num_blocks, kv_block_size, 4] uint8 (e8m0)
+        kv_fp8:   [B, T, D] float8_e4m3fn (for reference dequant)
+        kv_e8m0:  [B, T, 4] uint8 scales (for reference dequant)
     """
     batch, t_max, d = kv_bf16.shape
     assert d == HEAD_DIM
 
-    # Quantize per-token to FP4
+    # Quantize per-token to FP8 E4M3
     kv_flat = kv_bf16.reshape(-1, d)
-    kv_packed, kv_e8m0 = fp4_quant_e2m1_with_e8m0(kv_flat, block_size=SCALE_BLOCK)
-    kv_packed = kv_packed.reshape(batch, t_max, HEAD_DIM_PACKED)
+    kv_fp8, kv_e8m0 = fp8_quant_e4m3_with_e8m0(kv_flat, block_size=SCALE_BLOCK)
+    kv_fp8 = kv_fp8.reshape(batch, t_max, d)            # [B, T, 128] fp8
     kv_e8m0 = kv_e8m0.reshape(batch, t_max, HEAD_DIM_SCALES)
+    kv_fp8_bytes = kv_fp8.view(torch.uint8)             # raw bytes for shuffling
 
-    # Create paged preshuffle layout
-    kv_cache = torch.zeros(num_blocks, 4, kv_block_size, 16, dtype=torch.uint8, device=dev)
+    # Preshuffle for MFMA scaled f8f6f4 (cbsz=0): per-thread K layout for FP8
+    # is INTERLEAVED — bytes [0..15] of the 32-byte chunk are K elements
+    # [chunk*16..chunk*16+15], bytes [16..31] are K elements
+    # [chunk*16+64..chunk*16+79]. (Matches the +64 column stride mixed_moe
+    # uses on its FP8 LDS load path.) Pre-baking the interleave here lets the
+    # kernel issue a single contiguous 32-byte load per (block, chunk, token).
+    #
+    # Vectorized: build the per-byte source-K table once, gather with fancy
+    # indexing, then scatter into the cache via block_tables (all unique).
+    assert t_max % kv_block_size == 0
+    t_blocks = t_max // kv_block_size
+
+    chunk_ar = torch.arange(4, device=dev).view(4, 1)            # [4, 1]
+    byte_ar = torch.arange(32, device=dev).view(1, 32)           # [1, 32]
+    src_k = chunk_ar * 16 + torch.where(byte_ar < 16, byte_ar, byte_ar + 48)  # [4, 32]
+
+    # Gather: [B, T, 128] → [B, T, 4, 32]
+    kv_chunks = kv_fp8_bytes[:, :, src_k]
+    # Group T into (T_blocks, kv_block_size) and put K-chunk axis ahead of token.
+    kv_chunks_perm = (
+        kv_chunks.view(batch, t_blocks, kv_block_size, 4, 32)
+                 .permute(0, 1, 3, 2, 4)
+                 .contiguous()
+                 .view(batch * t_blocks, 4, kv_block_size, 32)
+    )
+    kv_e8m0_grp = kv_e8m0.view(batch * t_blocks, kv_block_size, HEAD_DIM_SCALES)
+
+    phys_flat = block_tables.reshape(-1).long()                  # [B * T_blocks]
+    kv_cache = torch.zeros(num_blocks, 4, kv_block_size, 32, dtype=torch.uint8, device=dev)
     kv_scale = torch.zeros(num_blocks, kv_block_size, HEAD_DIM_SCALES, dtype=torch.uint8, device=dev)
+    kv_cache[phys_flat] = kv_chunks_perm
+    kv_scale[phys_flat] = kv_e8m0_grp
 
-    for b_idx in range(batch):
-        for t_idx in range(t_max):
-            block_idx = t_idx // kv_block_size
-            token_in_block = t_idx % kv_block_size
-            phys_block = block_tables[b_idx, block_idx].item()
-
-            # Preshuffle: split 64 packed bytes into 4 tiles of 16 bytes
-            for tile_idx in range(4):
-                start = tile_idx * 16
-                end = start + 16
-                kv_cache[phys_block, tile_idx, token_in_block, :] = kv_packed[b_idx, t_idx, start:end]
-
-            # Scale
-            kv_scale[phys_block, token_in_block, :] = kv_e8m0[b_idx, t_idx, :]
-
-    return kv_cache, kv_scale, kv_packed, kv_e8m0
+    return kv_cache, kv_scale, kv_fp8, kv_e8m0
 
 
 # ── Reference implementation ─────────────────────────────────────
 
 
-def ref_mqa_logits_fp4(q_packed, q_scale, kv_packed, kv_scale, weights, context_lens):
-    """Reference: dequantize → einsum → relu → weight → sum."""
+def ref_mqa_logits_mixed(q_packed, q_scale, kv_fp8, kv_scale, weights, context_lens):
+    """Reference: Q (FP4) + KV (FP8 E4M3) dequant → einsum → relu → weight → sum."""
     batch = q_packed.shape[0]
-    t_max = kv_packed.shape[1]
+    t_max = kv_fp8.shape[1]
 
-    q_dq = fp4_dequant_e2m1_with_e8m0(q_packed, q_scale)  # [B, H, D] float32
-    kv_dq = fp4_dequant_e2m1_with_e8m0(kv_packed, kv_scale)  # [B, T, D] float32
+    q_dq = fp4_dequant_e2m1_with_e8m0(q_packed, q_scale)   # [B, H, D] float32
+    kv_dq = fp8_dequant_e4m3_with_e8m0(kv_fp8, kv_scale)   # [B, T, D] float32
 
     ref_logits = torch.full((batch, t_max), float("-inf"), device=dev, dtype=torch.float32)
 
@@ -276,12 +328,12 @@ def test_pa_mqa_logits_fp4(
 
     block_tables = torch.arange(num_blocks, dtype=torch.int32, device=dev).reshape(
         batch_size, max_blocks_per_seq)
-    kv_cache, kv_scale, kv_packed_dense, kv_e8m0_dense = create_paged_preshuffle_kv_fp4(
+    kv_cache, kv_scale, kv_fp8_dense, kv_e8m0_dense = create_paged_preshuffle_kv_fp8(
         kv_bf16, kv_block_size, num_blocks, block_tables)
 
-    # ---- Reference (FP4 dequant + matmul) — uses per-batch ctx_lens ----
-    ref_logits = ref_mqa_logits_fp4(
-        q_packed, q_e8m0, kv_packed_dense, kv_e8m0_dense, weights, context_lens)
+    # ---- Reference (Q FP4 + KV FP8 dequant + matmul) — per-batch ctx_lens ----
+    ref_logits = ref_mqa_logits_mixed(
+        q_packed, q_e8m0, kv_fp8_dense, kv_e8m0_dense, weights, context_lens)
 
     # ── Persistent-grid schedule (gluon-style safe_chunks_per_cta) ──
     # parallel_unit_num: target CTA count (MI355X has 256 CUs; default 256×2).
@@ -381,7 +433,8 @@ def test_pa_mqa_logits_fp4(
     # ---- USEFUL FLOPs / bytes (varctx — based on real ctx_lens, not max) ----
     flops = total_tokens * HEADS * (2 * HEAD_DIM + 3)
     bytes_q = batch_size * HEADS * (HEAD_DIM_PACKED + HEAD_DIM_SCALES)
-    bytes_kv = total_tokens * (HEAD_DIM_PACKED + HEAD_DIM_SCALES)
+    # KV is FP8 (128 bytes per token, 1 byte per element) + 4 e8m0 scales
+    bytes_kv = total_tokens * (HEAD_DIM + HEAD_DIM_SCALES)
     bytes_w = batch_size * HEADS * 4
     bytes_bt = batch_size * max_blocks_per_seq * 4
     bytes_out = total_tokens * 4
@@ -433,6 +486,7 @@ if __name__ == "__main__":
             # (4, 16384),
             # (4, 32768),
             (8, 65536),
+            # (64, 65536),
         ]
 
     for b, c in configs:
