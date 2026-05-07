@@ -458,13 +458,12 @@ class FlyDSLDispatchCombineIntraNodeOp:
         hdim = cfg.hidden_dim
         k    = cfg.num_experts_per_token
 
-        if self._use_fp8_cast:
-            fp8_bytes = mt * hdim  # 1 byte per fp8 element
-            out_tok = self.shmem_comb_out_tok.view(torch.int8)[
-                :fp8_bytes].view(torch.float8_e4m3fn).view(mt, hdim).to(torch.bfloat16)
-        else:
-            out_tok = self.shmem_comb_out_tok.view(torch.int8)[
-                :mt * cfg.token_bytes].view(cfg.data_type).view(mt, cfg.token_view_dim)
+        # fp8_direct_cast contract: external dtype is bf16 on both ends; the
+        # combine kernel itself writes bf16 to ``shmem_comb_out_tok`` (Stage 3
+        # _from_accum casts v4f32 → v4bf16 inline), so we view the buffer as
+        # bf16 directly with no extra PyTorch-level cast on the critical path.
+        out_tok = self.shmem_comb_out_tok.view(torch.int8)[
+            :mt * cfg.token_bytes].view(cfg.data_type).view(mt, cfg.token_view_dim)
         out_wts = self.shmem_comb_out_wts.view(mt, k)
 
         if call_reset:
@@ -518,6 +517,11 @@ class FlyDSLDispatchCombineIntraNodeOp:
             from .dispatch_combine_intranode_kernel import make_combine_jit
             _use_fp8_cast = self._use_fp8_cast
             _comb_dtype = torch.float8_e4m3fn if _use_fp8_cast else cfg.data_type
+            # Mixed-dtype contract for fp8_direct_cast: external dtype = bf16,
+            # transport dtype = fp8.  Stage 3 _from_accum will cast f32 → bf16
+            # inline so kernel writes bf16 directly to shmem_comb_out_tok and
+            # the wrapper does NOT need a post .to(bf16) cast.
+            _comb_inp_dt = torch.bfloat16 if _use_fp8_cast else None
             self._comb_no_s1_fn = make_combine_jit(
                 rank=cfg.rank, npes=cfg.world_size,
                 experts_per_rank=cfg.num_experts_per_rank,
@@ -531,6 +535,7 @@ class FlyDSLDispatchCombineIntraNodeOp:
                 enable_std_moe=cfg.enable_std_moe,
                 use_p2p_read=not cfg.use_external_inp_buf,
                 skip_stage1=True,
+                inp_data_type=_comb_inp_dt,
                 # Weight P2P scatter is intentionally KEPT inside combine
                 # rather than done by the upstream fused_gemm2 kernel: doing
                 # the small weight stores in fused_gemm2 (concurrent with the
@@ -592,13 +597,10 @@ class FlyDSLDispatchCombineIntraNodeOp:
         hdim = cfg.hidden_dim
         k    = cfg.num_experts_per_token
 
-        if self._use_fp8_cast:
-            fp8_bytes = mt * hdim
-            out_tok = self.shmem_comb_out_tok.view(torch.int8)[
-                :fp8_bytes].view(torch.float8_e4m3fn).view(mt, hdim).to(torch.bfloat16)
-        else:
-            out_tok = self.shmem_comb_out_tok.view(torch.int8)[
-                :mt * cfg.token_bytes].view(cfg.data_type).view(mt, cfg.token_view_dim)
+        # fp8_direct_cast contract: combine kernel writes bf16 to
+        # ``shmem_comb_out_tok`` directly (see ``combine`` above for details).
+        out_tok = self.shmem_comb_out_tok.view(torch.int8)[
+            :mt * cfg.token_bytes].view(cfg.data_type).view(mt, cfg.token_view_dim)
         out_wts = self.shmem_comb_out_wts.view(mt, k)
 
         if call_reset:

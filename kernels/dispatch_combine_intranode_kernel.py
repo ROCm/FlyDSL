@@ -495,8 +495,17 @@ def make_combine_kernel(
         nbytes = hidden_dim * hidden_elem_size
     tok_stride = n_i32 * 4
 
-    # Mixed-dtype Stage 1: external input has different dtype than P2P staging.
-    # Currently only supports bf16 input + OCP fp8 staging (mori UseFp8DirectCast).
+    # Mixed-dtype combine: external dtype (kernel input AND output) differs
+    # from the on-wire/staging dtype used for P2P transport.  Currently only
+    # supports bf16 external + OCP fp8 transport (mori UseFp8DirectCast).
+    #
+    # Semantics ("fp8_direct_cast"):
+    #   - kernel reads bf16 input  → Stage 1 inline cast bf16→fp8 → P2P fp8
+    #   - kernel reads fp8 staging → Stage 3 reduce in f32 → cast f32→bf16
+    #     → kernel writes bf16 output to ``addr_comb_out``
+    #
+    # ``inp_data_type`` is the legacy parameter name; conceptually it now
+    # represents the external (input/output-shared) dtype.
     _xfer_bf16_to_fp8 = (
         inp_data_type is not None and inp_data_type != data_type
         and inp_data_type == torch.bfloat16
@@ -504,18 +513,28 @@ def make_combine_kernel(
     )
     if inp_data_type is not None and inp_data_type != data_type and not _xfer_bf16_to_fp8:
         raise NotImplementedError(
-            f"combine_kernel mixed-dtype Stage 1 only supports "
+            f"combine_kernel mixed-dtype only supports "
             f"inp_data_type=bfloat16 + data_type=float8_e4m3fn, "
             f"got inp_data_type={inp_data_type}, data_type={data_type}")
+    if _xfer_bf16_to_fp8 and enable_std_moe:
+        raise NotImplementedError(
+            "combine_kernel mixed-dtype path does not yet support "
+            "enable_std_moe=True (the std-MoE Stage 1 / Stage 3 use "
+            "_weighted_accum_experts which has not been retrofitted for "
+            "asymmetric I/O dtypes)")
 
     if _xfer_bf16_to_fp8:
-        # bf16 input stride for Stage 1 source addressing only.  The output
+        # bf16 input stride for Stage 1 source addressing only.  The transport
         # (P2P-scattered staging) uses ``nbytes`` (= fp8 stride) as before.
+        # Stage 3 output addressing also uses bf16 stride (= 2 × fp8 stride).
         inp_nbytes = hidden_dim * 2
         inp_n_i32  = (hidden_dim * 2) // 4
+        # bf16-stride i32 count per token for Stage 3 output offsets.
+        out_n_i32  = (hidden_dim * 2) // 4
     else:
         inp_nbytes = nbytes
         inp_n_i32  = n_i32
+        out_n_i32  = n_i32
     if _is_fp4:
         from flydsl._mlir.dialects import rocdl as _rocdl_d
 
@@ -606,6 +625,15 @@ def make_combine_kernel(
                 _tf = _am_f8.ConstantOp(_ft, _ir.FloatAttr.get(_ft, 2.0)).result
                 _tv = _vd_f8.BroadcastOp(_v4f32, _tf).result
                 src = _am_f8.MulFOp(src, _tv).result
+            if const_expr(_xfer_bf16_to_fp8):
+                # Mixed-dtype path: write bf16 output (8 bytes per lane).
+                # v4f32 → TruncF v4bf16 → bitcast v2i32.  Caller stores via
+                # ``buffer_store(..., vec_width=2, dtype=T.i32())`` at an i32
+                # offset doubled relative to fp8 mode (2 i32 = 4 bf16 = 8 B).
+                _v4bf16 = T.VectorType.get([4], T.bf16())
+                _v2i32  = T.VectorType.get([2], _i32_ty)
+                _bf = _am_f8.TruncFOp(_v4bf16, src).result
+                return _llvm_d.BitcastOp(_v2i32, _bf).res
             f0 = _llvm_d.ExtractElementOp(src, arith.constant(0)).res
             f1 = _llvm_d.ExtractElementOp(src, arith.constant(1)).res
             f2 = _llvm_d.ExtractElementOp(src, arith.constant(2)).res
@@ -1201,15 +1229,26 @@ def make_combine_kernel(
                             _vb.append(_maybe_load(_rj, glob_ec, _vj, vec_width=1, dtype=T.i32(), cache_modifier=_SLC, soffset_bytes=256))
                             _vc.append(_maybe_load(_rj, glob_ec, _vj, vec_width=1, dtype=T.i32(), cache_modifier=_SLC, soffset_bytes=512))
                             _vd.append(_maybe_load(_rj, glob_ec, _vj, vec_width=1, dtype=T.i32(), cache_modifier=_SLC, soffset_bytes=768))
-                        _i32a = _accum_experts(_va, _expert_vld, _eff_all_vld)
-                        _i32b = _accum_experts(_vb, _expert_vld, _eff_all_vld)
-                        _i32c = _accum_experts(_vc, _expert_vld, _eff_all_vld)
-                        _i32d = _accum_experts(_vd, _expert_vld, _eff_all_vld)
-                        _out_elem = tok_id * n_i32 + glob_ec
-                        buffer_store(_lv_unwrap(_i32a), _rsrc_out, _out_elem, cache_modifier=_SLC)
-                        buffer_store(_lv_unwrap(_i32b), _rsrc_out, _out_elem, cache_modifier=_SLC, soffset_bytes=256)
-                        buffer_store(_lv_unwrap(_i32c), _rsrc_out, _out_elem, cache_modifier=_SLC, soffset_bytes=512)
-                        buffer_store(_lv_unwrap(_i32d), _rsrc_out, _out_elem, cache_modifier=_SLC, soffset_bytes=768)
+                        _pa = _accum_experts(_va, _expert_vld, _eff_all_vld)
+                        _pb = _accum_experts(_vb, _expert_vld, _eff_all_vld)
+                        _pc = _accum_experts(_vc, _expert_vld, _eff_all_vld)
+                        _pd = _accum_experts(_vd, _expert_vld, _eff_all_vld)
+                        if const_expr(_xfer_bf16_to_fp8):
+                            # bf16 output: data is v2i32 (8 bytes / lane); offset
+                            # is in i32 elements (4 B), so we double the per-token
+                            # stride and the per-lane stride; soffset_bytes also
+                            # doubles between the 4 sub-stores (256→512 each).
+                            _oe = tok_id * out_n_i32 + glob_ec * 2
+                            buffer_store(_lv_unwrap(_pa), _rsrc_out, _oe, cache_modifier=_SLC)
+                            buffer_store(_lv_unwrap(_pb), _rsrc_out, _oe, cache_modifier=_SLC, soffset_bytes=512)
+                            buffer_store(_lv_unwrap(_pc), _rsrc_out, _oe, cache_modifier=_SLC, soffset_bytes=1024)
+                            buffer_store(_lv_unwrap(_pd), _rsrc_out, _oe, cache_modifier=_SLC, soffset_bytes=1536)
+                        else:
+                            _out_elem = tok_id * n_i32 + glob_ec
+                            buffer_store(_lv_unwrap(_pa), _rsrc_out, _out_elem, cache_modifier=_SLC)
+                            buffer_store(_lv_unwrap(_pb), _rsrc_out, _out_elem, cache_modifier=_SLC, soffset_bytes=256)
+                            buffer_store(_lv_unwrap(_pc), _rsrc_out, _out_elem, cache_modifier=_SLC, soffset_bytes=512)
+                            buffer_store(_lv_unwrap(_pd), _rsrc_out, _out_elem, cache_modifier=_SLC, soffset_bytes=768)
                       _scf_d.YieldOp([])
                     with _IP(_if_256aln.else_block):
                       _dual_end_safe = arith.divui(_adj_end_128, arith.constant(128)) * 128
@@ -1222,20 +1261,29 @@ def make_combine_kernel(
                             _vj = _expert_vld[_j_py]
                             _va.append(_maybe_load(_rj, glob_ec, _vj, vec_width=1, dtype=T.i32(), cache_modifier=_SLC))
                             _vb.append(_maybe_load(_rj, glob_ec, _vj, vec_width=1, dtype=T.i32(), cache_modifier=_SLC, soffset_bytes=256))
-                        _i32a = _accum_experts(_va, _expert_vld, _eff_all_vld)
-                        _i32b = _accum_experts(_vb, _expert_vld, _eff_all_vld)
-                        _out_elem = tok_id * n_i32 + glob_ec
-                        buffer_store(_lv_unwrap(_i32a), _rsrc_out, _out_elem, cache_modifier=_SLC)
-                        buffer_store(_lv_unwrap(_i32b), _rsrc_out, _out_elem, cache_modifier=_SLC, soffset_bytes=256)
+                        _pa = _accum_experts(_va, _expert_vld, _eff_all_vld)
+                        _pb = _accum_experts(_vb, _expert_vld, _eff_all_vld)
+                        if const_expr(_xfer_bf16_to_fp8):
+                            _oe = tok_id * out_n_i32 + glob_ec * 2
+                            buffer_store(_lv_unwrap(_pa), _rsrc_out, _oe, cache_modifier=_SLC)
+                            buffer_store(_lv_unwrap(_pb), _rsrc_out, _oe, cache_modifier=_SLC, soffset_bytes=512)
+                        else:
+                            _out_elem = tok_id * n_i32 + glob_ec
+                            buffer_store(_lv_unwrap(_pa), _rsrc_out, _out_elem, cache_modifier=_SLC)
+                            buffer_store(_lv_unwrap(_pb), _rsrc_out, _out_elem, cache_modifier=_SLC, soffset_bytes=256)
                       for ec in range(_to_idx(lane + _dual_end_safe), _to_idx(_adj_end_128), _to_idx(64)):
                         ec      = _to_i32(ec)
                         glob_ec = h_off + ec
                         _vals_tail = []
                         for _j_py in range_constexpr(experts_per_token):
                             _vals_tail.append(_maybe_load(_expert_rsrc[_j_py], glob_ec, _expert_vld[_j_py], vec_width=1, dtype=T.i32(), cache_modifier=_SLC))
-                        _i32t = _accum_experts(_vals_tail, _expert_vld, _eff_all_vld)
-                        _out_elem_t = tok_id * n_i32 + glob_ec
-                        buffer_store(_lv_unwrap(_i32t), _rsrc_out, _out_elem_t, cache_modifier=_SLC)
+                        _pt = _accum_experts(_vals_tail, _expert_vld, _eff_all_vld)
+                        if const_expr(_xfer_bf16_to_fp8):
+                            _oe_t = tok_id * out_n_i32 + glob_ec * 2
+                            buffer_store(_lv_unwrap(_pt), _rsrc_out, _oe_t, cache_modifier=_SLC)
+                        else:
+                            _out_elem_t = tok_id * n_i32 + glob_ec
+                            buffer_store(_lv_unwrap(_pt), _rsrc_out, _out_elem_t, cache_modifier=_SLC)
                       _scf_d.YieldOp([])
                 _scf_d.YieldOp([])
 
@@ -1250,9 +1298,13 @@ def make_combine_kernel(
                     _vals = []
                     for _j_py in range_constexpr(experts_per_token):
                         _vals.append(_maybe_load(_expert_rsrc[_j_py], glob_ec, _expert_vld[_j_py], vec_width=1, dtype=T.i32(), cache_modifier=_SLC))
-                    _i32v = _accum_experts(_vals, _expert_vld, _eff_all_vld)
-                    _out_elem = tok_id * n_i32 + glob_ec
-                    buffer_store(_lv_unwrap(_i32v), _rsrc_out, _out_elem, cache_modifier=_SLC)
+                    _pv = _accum_experts(_vals, _expert_vld, _eff_all_vld)
+                    if const_expr(_xfer_bf16_to_fp8):
+                        _oe = tok_id * out_n_i32 + glob_ec * 2
+                        buffer_store(_lv_unwrap(_pv), _rsrc_out, _oe, cache_modifier=_SLC)
+                    else:
+                        _out_elem = tok_id * n_i32 + glob_ec
+                        buffer_store(_lv_unwrap(_pv), _rsrc_out, _out_elem, cache_modifier=_SLC)
                 _scf_d.YieldOp([])
 
         # Stage 3b: Weight accumulation
