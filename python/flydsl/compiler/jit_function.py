@@ -30,7 +30,7 @@ from .kernel_function import (
     create_gpu_module,
     get_gpu_module_body,
 )
-from .protocol import fly_construct, fly_types
+from .protocol import construct_from_ir_values, get_ir_types
 
 
 @lru_cache(maxsize=1)
@@ -604,7 +604,7 @@ def _resolve_jit_arg_type(arg, annotation):
 
     if isinstance(arg, int) and annotation is Stream:
         return Stream
-    if hasattr(arg, "__fly_ptrs__"):
+    if hasattr(arg, "__get_c_pointers__"):
         return type(arg)
     constructor, _ = JitArgumentRegistry.get(type(arg))
     return constructor
@@ -768,7 +768,7 @@ class JitFunction:
         """Cache signature for a single argument value.
 
         When runtime=True the parameter's annotation indicates a runtime
-        type (has __fly_ptrs__, e.g. Int32, Stream) — value is passed to
+        type (has __get_c_pointers__, e.g. Int32, Stream) — value is passed to
         the kernel at launch time and does NOT affect compiled code, so
         only the Python type is recorded.
 
@@ -799,7 +799,7 @@ class JitFunction:
         """Build a tuple cache key from bound arguments.
 
         For parameters annotated with a runtime type (one that implements
-        __fly_ptrs__, e.g. Int32, Stream), the value is excluded from the
+        __get_c_pointers__, e.g. Int32, Stream), the value is excluded from the
         key — only the Python type matters.  This prevents unnecessary
         recompilation when only runtime values change.
         """
@@ -828,7 +828,7 @@ class JitFunction:
                 key_parts.append((name, Stream))
                 continue
 
-            is_runtime = ann is not inspect.Parameter.empty and hasattr(ann, "__fly_ptrs__")
+            is_runtime = ann is not inspect.Parameter.empty and hasattr(ann, "__get_c_pointers__")
             if isinstance(arg, tuple):
                 key_parts.append((name, tuple(self._arg_cache_sig(a) for a in arg)))
             else:
@@ -919,7 +919,7 @@ class JitFunction:
         with ir.Context() as ctx, _hints_ctx:
             param_names, jit_args, dsl_types, constexpr_values = convert_to_jit_arguments(sig, bound)
             has_user_stream = _ensure_stream_arg(jit_args)
-            ir_types = fly_types(jit_args)
+            ir_types = get_ir_types(jit_args)
             loc = ir.Location.unknown(ctx)
 
             log().info(f"jit_args={jit_args}")
@@ -947,7 +947,7 @@ class JitFunction:
                         if not has_user_stream:
                             comp_ctx.stream_arg = ir_args[-1]
                         user_jit_args = jit_args[: len(param_names)]
-                        dsl_args = fly_construct(dsl_types, user_jit_args, ir_args)
+                        dsl_args = construct_from_ir_values(dsl_types, user_jit_args, ir_args)
                         log().info(f"dsl_args={dsl_args}")
                         named_args = dict(zip(param_names, dsl_args))
                         named_args.update(constexpr_values)

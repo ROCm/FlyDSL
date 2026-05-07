@@ -462,7 +462,7 @@ Supports:
 - `ir.Value` — dynamic values
 - `int`, `float`, `bool` — auto-converted to constants
 - `str`, `type` — embedded as static text
-- DSL types with `__fly_values__` — auto-unwrapped
+- DSL types with `__extract_to_ir_values__` — auto-unwrapped
 
 ---
 

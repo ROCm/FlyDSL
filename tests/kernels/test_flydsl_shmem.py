@@ -84,8 +84,8 @@ def _reconstruct_i64(lo, hi):
     def _lv(v):
         if isinstance(v, _ir.Value):
             return v
-        if hasattr(v, "__fly_values__"):
-            vals = v.__fly_values__()
+        if hasattr(v, "__extract_to_ir_values__"):
+            vals = v.__extract_to_ir_values__()
             if len(vals) == 1:
                 return vals[0]
         if isinstance(v, int):
@@ -112,8 +112,8 @@ def _store_i32_at(addr_i64, offset_i32, val_i32):
     def _lv(v):
         if isinstance(v, _ir.Value):
             return v
-        if hasattr(v, "__fly_values__"):
-            vals = v.__fly_values__()
+        if hasattr(v, "__extract_to_ir_values__"):
+            vals = v.__extract_to_ir_values__()
             if len(vals) == 1:
                 return vals[0]
         if isinstance(v, int):

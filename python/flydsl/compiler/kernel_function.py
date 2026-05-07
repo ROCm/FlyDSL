@@ -12,7 +12,7 @@ from .._mlir.dialects import arith, gpu
 from ..expr.typing import Constexpr
 from .ast_rewriter import ASTRewriter
 from .mlir_utils import convert_to_mlir_attr
-from .protocol import fly_construct, fly_types, fly_values
+from .protocol import construct_from_ir_values, extract_to_ir_values, get_ir_types
 
 # =============================================================================
 # GPU Operation Helpers
@@ -180,8 +180,8 @@ DimType = Union[int, ir.Value, Tuple[DimValueType, ...], List[DimValueType]]
 def _unwrap_to_raw(val):
     if isinstance(val, ir.Value):
         return val
-    if hasattr(val, "__fly_values__"):
-        values = val.__fly_values__()
+    if hasattr(val, "__extract_to_ir_values__"):
+        values = val.__extract_to_ir_values__()
         if len(values) == 1:
             return values[0]
     return val
@@ -367,7 +367,7 @@ class KernelLauncher:
 
         kernel_operands = []
         for arg in self._kernel_args:
-            kernel_operands.extend(fly_values(arg))
+            kernel_operands.extend(extract_to_ir_values(arg))
 
         grid_dims = _normalize_dim(grid)
         block_dims = _normalize_dim(block)
@@ -486,7 +486,7 @@ class KernelFunction:
 
         kernel_arg_types = []
         for value in param_values:
-            kernel_arg_types.extend(fly_types(value))
+            kernel_arg_types.extend(get_ir_types(value))
 
         kernel_id = ctx.next_kernel_id()
         if self._name is not None:
@@ -514,8 +514,8 @@ class KernelFunction:
                 dsl_args: Dict[str, Any] = {}
                 idx = 0
                 for param_name, value in zip(param_names, param_values):
-                    n = len(fly_types(value))
-                    dsl_args[param_name] = fly_construct(type(value), value, list(block_args[idx : idx + n]))
+                    n = len(get_ir_types(value))
+                    dsl_args[param_name] = construct_from_ir_values(type(value), value, list(block_args[idx : idx + n]))
                     idx += n
 
                 dsl_args.update(constexpr_values)

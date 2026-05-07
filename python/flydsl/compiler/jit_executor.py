@@ -7,11 +7,11 @@ import pickle
 import threading
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Callable, List, Optional
+from typing import Callable, List, Optional
 
 from .._mlir import ir
 from .._mlir.execution_engine import ExecutionEngine
-from .protocol import fly_pointers
+from .protocol import get_c_pointers
 
 _GPU_MODULE_INIT = "flydsl_gpu_module_init"
 _GPU_MODULE_LOAD_TO_DEVICE = "flydsl_gpu_module_load_to_device"
@@ -68,7 +68,7 @@ def _resolve_runtime_libs() -> List[str]:
     libs = [mlir_libs_dir / name for name in backend.jit_runtime_lib_basenames()]
     for lib in libs:
         if not lib.exists():
-            raise FileNotFoundError(f"Required JIT runtime library not found: {lib}\n" f"Please rebuild the project.")
+            raise FileNotFoundError(f"Required JIT runtime library not found: {lib}\nPlease rebuild the project.")
     return [str(p) for p in libs]
 
 
@@ -315,7 +315,7 @@ class CompiledArtifact:
         owned: list = []
         all_c_ptrs: List[ctypes.c_void_p] = []
         for arg in args:
-            ptrs = fly_pointers(arg)
+            ptrs = get_c_pointers(arg)
             owned.append(ptrs)
             owned.append(arg)
             all_c_ptrs.extend(ptrs)
