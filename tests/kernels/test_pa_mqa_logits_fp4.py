@@ -285,7 +285,8 @@ def test_pa_mqa_logits_fp4(
 
     # ── Persistent-grid schedule (gluon-style safe_chunks_per_cta) ──
     # parallel_unit_num: target CTA count (MI355X has 256 CUs; default 256×2).
-    safe, cta_b, cta_cs, cta_cc, total_ctas = compute_varctx_schedule(
+    # cta_info shape [total_ctas, 4]: [batch, chunk_start, chunk_count, ctx_len]
+    safe, cta_info, total_ctas = compute_varctx_schedule(
         context_lens, block_k, parallel_unit_num)
     print(f"  schedule: parallel_unit={parallel_unit_num} num_warps={num_warps} "
           f"safe_chunks_per_cta={safe}  total_ctas={total_ctas}  "
@@ -301,12 +302,23 @@ def test_pa_mqa_logits_fp4(
     out_logits = torch.full((batch_size, t_max), float("-inf"),
                             dtype=torch.float32, device=dev)
 
-    qe = q_e8m0.view(torch.uint8)
+    # ── Pre-shuffle scales for kernel layout (avoids runtime v_bfe_u32) ──
+    # Q scale: [B, H=64, K_chunks=4] → [B, K_chunks=4, lane_mod_16=16, mi_idx=4]
+    # H is decomposed as (mi_idx=4, lane_mod_16=16). Permute so that for each
+    # thread (lane_div_16, lane_mod_16), one dword load returns 4 bytes — one
+    # scale per mi_idx — at compile-time-known byte offsets.
+    qe = q_e8m0.view(torch.uint8).reshape(
+        batch_size, 4, 16, HEAD_DIM_SCALES).permute(0, 3, 2, 1).contiguous()
+
+    # KV scale: [num_blocks, kv_block_size, K_chunks=4] →
+    #          [num_blocks, K_chunks=4, kv_block_size]
+    # Each thread loads 1 byte at byte 0 of an i32 register (no extraction).
+    kv_scale_shuf = kv_scale.permute(0, 2, 1).contiguous()
+
     stream = torch.cuda.current_stream()
 
     @flyc.jit
-    def launch_kernel(out, q, qs, kv, kvs, bt, w, ctx_lens,
-                      cta_b_, cta_cs_, cta_cc_,
+    def launch_kernel(out, q, qs, kv, kvs, bt, w, cta_info_,
                       stride_out: fx.Int32,
                       gx: fx.Int32, stream: fx.Stream):
         _ = (batch_size, kv_block_size, max_blocks_per_seq, block_k)
@@ -315,14 +327,12 @@ def test_pa_mqa_logits_fp4(
         with _ir.InsertionPoint(cctx.gpu_module_body):
             alloc.finalize()
         gxi = arith.index_cast(T.index, gx.ir_value())
-        kfn(out, q, qs, kv, kvs, bt, w, ctx_lens,
-            cta_b_, cta_cs_, cta_cc_, stride_out).launch(
+        kfn(out, q, qs, kv, kvs, bt, w, cta_info_, stride_out).launch(
             grid=(gxi,), block=(block_threads, 1, 1), stream=stream)
 
     def launch_flydsl():
-        launch_kernel(out_logits, q_packed, qe, kv_cache, kv_scale,
-                      block_tables, weights, context_lens,
-                      cta_b, cta_cs, cta_cc,
+        launch_kernel(out_logits, q_packed, qe, kv_cache, kv_scale_shuf,
+                      block_tables, weights, cta_info,
                       t_max, total_ctas, stream)
 
     # ---- Correctness: one launch + cosine_sim ----

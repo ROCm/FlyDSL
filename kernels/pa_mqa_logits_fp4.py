@@ -83,6 +83,10 @@ def compute_varctx_schedule(
 ):
     """Compute persistent-grid schedule for varctx MQA logits.
 
+    Returns a SINGLE packed [total_ctas, 4] int32 tensor so the kernel can
+    fetch its assignment in one buffer_load_dwordx4 instead of four separate
+    dword loads. Layout per CTA: [batch, chunk_start, chunk_count, context_len].
+
     Args:
         context_lens: int32 CUDA tensor [batch], per-batch context length.
         block_k: chunk size in tokens.
@@ -90,9 +94,7 @@ def compute_varctx_schedule(
 
     Returns:
         safe_chunks_per_cta: int — chunks each CTA processes (≤ this many).
-        cta_batch: int32 CUDA tensor [total_ctas] — which batch each CTA serves.
-        cta_chunk_start: int32 CUDA tensor [total_ctas] — first chunk index in batch.
-        cta_chunk_count: int32 CUDA tensor [total_ctas] — actual chunks for this CTA.
+        cta_info: int32 CUDA tensor [total_ctas, 4] — packed CTA assignment.
         total_ctas: int — grid.x size.
     """
     device = context_lens.device
@@ -107,7 +109,7 @@ def compute_varctx_schedule(
             safe = s
             break
 
-    cta_batch, cta_chunk_start, cta_chunk_count = [], [], []
+    rows = []  # each row: [batch, chunk_start, chunk_count, context_len]
     for b, n_chunks in enumerate(chunks_per_batch):
         if n_chunks == 0:
             continue
@@ -115,20 +117,15 @@ def compute_varctx_schedule(
         for split in range(ctas_b):
             start = split * safe
             count = min(safe, n_chunks - start)
-            cta_batch.append(b)
-            cta_chunk_start.append(start)
-            cta_chunk_count.append(count)
+            rows.append([b, start, count, ctx_list[b]])
 
-    total = len(cta_batch)
-    if total == 0:  # all-zero context — launch one no-op CTA
-        cta_batch, cta_chunk_start, cta_chunk_count, total = [0], [0], [0], 1
+    if not rows:  # all-zero context — launch one no-op CTA
+        rows = [[0, 0, 0, 0]]
 
     return (
         safe,
-        torch.tensor(cta_batch, dtype=torch.int32, device=device),
-        torch.tensor(cta_chunk_start, dtype=torch.int32, device=device),
-        torch.tensor(cta_chunk_count, dtype=torch.int32, device=device),
-        total,
+        torch.tensor(rows, dtype=torch.int32, device=device).contiguous(),
+        len(rows),
     )
 
 
@@ -190,10 +187,7 @@ def build_pa_mqa_logits_fp4_module(
         kv_scale_ptr: fx.Tensor,
         kv_indices_ptr: fx.Tensor,
         weights_ptr: fx.Tensor,
-        context_lens_ptr: fx.Tensor,    # varctx: [B] int32
-        cta_batch_ptr: fx.Tensor,       # [total_ctas] i32 — which batch
-        cta_chunk_start_ptr: fx.Tensor, # [total_ctas] i32 — first chunk in batch
-        cta_chunk_count_ptr: fx.Tensor, # [total_ctas] i32 — chunks to process
+        cta_info_ptr: fx.Tensor,        # [total_ctas, 4] i32: [batch, chunk_start, chunk_count, ctx_len]
         stride_out_batch: Int32,
     ):
         tid = gpu.thread_idx.x
@@ -213,27 +207,25 @@ def build_pa_mqa_logits_fp4_module(
         bt_rsrc = buffer_ops.create_buffer_resource(kv_indices_ptr, max_size=True)
         w_rsrc = buffer_ops.create_buffer_resource(weights_ptr, max_size=True)
         out_rsrc = buffer_ops.create_buffer_resource(out_logits_ptr, max_size=True)
-        ctx_lens_rsrc = buffer_ops.create_buffer_resource(context_lens_ptr, max_size=True)
-        cta_b_rsrc = buffer_ops.create_buffer_resource(cta_batch_ptr, max_size=True)
-        cta_cs_rsrc = buffer_ops.create_buffer_resource(cta_chunk_start_ptr, max_size=True)
-        cta_cc_rsrc = buffer_ops.create_buffer_resource(cta_chunk_count_ptr, max_size=True)
+        cta_info_rsrc = buffer_ops.create_buffer_resource(cta_info_ptr, max_size=True)
 
         NEG_INF = arith.constant(float("-inf"), type=T.f32)
         ZERO_F = fx.Float32(0.0)
         c0_i64 = arith.constant(0, type=T.i64)
         c0_i32 = fx.Int32(0)
 
-        # ── Persistent CTA assignment lookup ───────────────────────
-        pid_b = buffer_ops.buffer_load(cta_b_rsrc, pid, vec_width=1, dtype=T.i32)
-        chunk_start = buffer_ops.buffer_load(cta_cs_rsrc, pid, vec_width=1, dtype=T.i32)
-        chunk_count = buffer_ops.buffer_load(cta_cc_rsrc, pid, vec_width=1, dtype=T.i32)
-        context_len = buffer_ops.buffer_load(
-            ctx_lens_rsrc, pid_b, vec_width=1, dtype=T.i32)
+        # ── Persistent CTA assignment lookup (one dwordx4 load) ────
+        # Layout per CTA: [batch, chunk_start, chunk_count, ctx_len]
+        cta_info_4xi32 = buffer_ops.buffer_load(
+            cta_info_rsrc, pid * fx.Int32(4), vec_width=4, dtype=T.i32)
+        pid_b = vector.extract(cta_info_4xi32, static_position=[0])
+        chunk_start = vector.extract(cta_info_4xi32, static_position=[1])
+        chunk_count = vector.extract(cta_info_4xi32, static_position=[2])
+        context_len = vector.extract(cta_info_4xi32, static_position=[3])
 
         # ── Q load (HOISTED out of chunk loop — reused across chunks) ──
         # Each thread holds its slice of Q for this batch's 64 heads.
         q_a_ops = []
-        q_scale_ops = []
         for mi_idx in [0, 1, 2, 3]:
             q_row = mi_idx * MFMA_M + lane_mod_16
             q_col_bytes = lane_div_16 * 16
@@ -250,10 +242,18 @@ def build_pa_mqa_logits_fp4_module(
             )
             q_a_ops.append(_pack_i64x4_to_i32x8(q_i64_0, q_i64_1, c0_i64, c0_i64))
 
-            qs_off_i32 = pid_b * HEADS + q_row
-            qs_4b = buffer_ops.buffer_load(qs_rsrc, qs_off_i32, vec_width=1, dtype=T.i32)
-            q_scale_ops.append(
-                (qs_4b >> (lane_div_16 * fx.Int32(8))) & fx.Int32(0xFF))
+        # Q scale: pre-shuffled host-side as [B, K_chunks=4, lane_mod_16=16, mi_idx=4].
+        # ONE dword load gives this thread's 4 mi_idx scales packed as bytes
+        # [m0, m1, m2, m3]. Per-mi_idx extraction is a compile-time shift —
+        # MFMA only reads byte 0, so upper-byte garbage is irrelevant.
+        qs_off_i32 = pid_b * fx.Int32(HEADS) + lane_div_16 * fx.Int32(16) + lane_mod_16
+        qs_4b = buffer_ops.buffer_load(qs_rsrc, qs_off_i32, vec_width=1, dtype=T.i32)
+        q_scale_ops = [
+            qs_4b,                          # mi_idx=0: byte 0 already correct
+            qs_4b >> fx.Int32(8),           # mi_idx=1
+            qs_4b >> fx.Int32(16),          # mi_idx=2
+            qs_4b >> fx.Int32(24),          # mi_idx=3
+        ]
 
         # Weights for this batch (HOISTED out of chunk loop too).
         # Each lane needs 16 contiguous f32 weights (4 per mi_idx, 4 mi_idx).
@@ -315,11 +315,18 @@ def build_pa_mqa_logits_fp4_module(
                 )
                 kv_4xi32_c = buffer_ops.buffer_load(
                     kv_rsrc, kv_off_bytes_c // 4, vec_width=4, dtype=T.i32)
-                kvs_off_c = phys_block_c * kv_block_size + token_in_block_c
-                kvs_4b_c = buffer_ops.buffer_load(
-                    kvs_rsrc, kvs_off_c, vec_width=1, dtype=T.i32)
+                # KV scale pre-shuffled host-side as
+                # [num_blocks, K_chunks=4, kv_block_size]. Each thread loads
+                # its single byte directly — MFMA reads byte 0, no extraction.
+                kvs_off_byte = (
+                    phys_block_c * (kv_block_size * HEAD_DIM_SCALES)
+                    + lane_div_16 * kv_block_size
+                    + token_in_block_c
+                )
+                kvs_byte_c = buffer_ops.buffer_load(
+                    kvs_rsrc, kvs_off_byte, vec_width=1, dtype=T.i8)
                 kv_list.append(kv_4xi32_c)
-                kvs_list.append(kvs_4b_c)
+                kvs_list.append(kvs_byte_c)
             return kv_list, kvs_list
 
         def _compute_chunk(kv_list_in, kvs_list_in, c_i32_arg):
@@ -331,7 +338,7 @@ def build_pa_mqa_logits_fp4_module(
                     + ni_warp * fx.Int32(MFMA_N)
                 )
                 kv_4xi32 = kv_list_in[nt]
-                kvs_4b = kvs_list_in[nt]
+                kvs_byte = kvs_list_in[nt]
 
                 # No data masking on KV / scale — out-of-bounds tokens go through
                 # MFMA producing garbage logits, which are then overwritten by
@@ -345,7 +352,9 @@ def build_pa_mqa_logits_fp4_module(
                     vector.extract(kv_4xi32, static_position=[3]),
                 )
                 kv_b = _pack_i64x4_to_i32x8(kv_i64_0, kv_i64_1, c0_i64, c0_i64)
-                kv_scale_val = (kvs_4b >> (lane_div_16 * fx.Int32(8))) & fx.Int32(0xFF)
+                # Pre-shuffled scale: byte already in byte 0 of i8; zero-extend
+                # to i32 (MFMA scale operand type). No bfe needed.
+                kv_scale_val = arith.ArithValue(kvs_byte).extui(T.i32)
 
                 zero = arith.constant_vector(0.0, T.f32x4)
                 accs = []
