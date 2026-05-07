@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Test for MLA decode attention kernel (FP8 variant, MFMA 16x16x32, GQA, seqlen_q <= 4).
+"""Test for MLA decode attention kernel (FP8 variant, MFMA 16x16x32, GQA).
 
 Tests absorbed MLA with kv_lora_rank + qk_rope_head_dim split.
 Paged KV cache: [num_physical_blocks, page_block_size, num_kv_heads, HEAD_DIM_QK].
@@ -8,6 +8,10 @@ Block table maps logical block indices to physical block indices.
 The kernel outputs fp32 partial results (Mid_O, Mid_lse) per KV-split.
 A Python combine step merges splits via online log-sum-exp, matching
 the stage-2 Triton combine kernel interface.
+
+Supported wave mappings:
+  * num_q_heads=16, q_len=4: one wave per query row.
+  * num_q_heads=64, q_len=1: one wave per 16-head group.
 """
 
 import sys
@@ -24,6 +28,7 @@ _repo = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_repo))
 
 import torch
+import pytest
 import numpy as np
 import triton
 import triton.language as tl
@@ -39,18 +44,30 @@ DEFAULT_SEED = 42
 UNIFORM_RANGE = (-0.3, 0.3)
 
 SHUFFLE = False
-NUM_WAVES = 4  # seqlen_q
+NUM_WAVES = 4
+HEADS_PER_WAVE = 16
+
+
+def head_group_blocks_for_num_heads(num_q_heads):
+    head_groups = max(1, (num_q_heads + HEADS_PER_WAVE - 1) // HEADS_PER_WAVE)
+    if head_groups >= NUM_WAVES and head_groups % NUM_WAVES == 0:
+        return head_groups // NUM_WAVES
+    return head_groups
+
+
+def default_q_len_for_num_heads(num_q_heads):
+    return 1 if num_q_heads >= HEADS_PER_WAVE * NUM_WAVES else NUM_WAVES
 
 
 def auto_num_kv_splits(bs, skv, num_q_heads, block_n=32, min_tiles_per_split=3):
     cu_num = torch.cuda.get_device_properties(0).multi_processor_count
     overhead = 84.1
-    head_groups = max(1, (num_q_heads + 15) // 16)
+    head_group_blocks = head_group_blocks_for_num_heads(num_q_heads)
     total_tiles = (skv + block_n - 1) // block_n
     max_sp = max(1, total_tiles // min_tiles_per_split)
     best_score, best_sp = -1.0, 1
     for sp in range(1, min(17, max_sp + 1)):
-        wgs = bs * head_groups * sp
+        wgs = bs * head_group_blocks * sp
         occupancy = wgs / (((wgs + cu_num - 1) // cu_num) * cu_num)
         kv_eff = skv / (skv + overhead * sp)
         score = occupancy * kv_eff
@@ -628,6 +645,38 @@ def run_config(
     return results
 
 
+@pytest.mark.parametrize("num_q_heads,q_len", [(16, 4), (64, 1)])
+def test_mla_decode_fp8_v4_supported_wave_mappings(num_q_heads, q_len):
+    num_kv_heads = 1
+    kv_lora_rank = 512
+    qk_rope_head_dim = 64
+    page_block_size = 1
+    causal = True
+
+    exe = compile_mla_decode_fp8(
+        num_q_heads=num_q_heads,
+        num_kv_heads=num_kv_heads,
+        kv_lora_rank=kv_lora_rank,
+        qk_rope_head_dim=qk_rope_head_dim,
+        page_block_size=page_block_size,
+        causal=causal,
+    )
+
+    for batch, kv_len, shuffle in [(1, 32, False), (2, 64, True)]:
+        num_kv_splits = auto_num_kv_splits(batch, kv_len, num_q_heads)
+        result = run_config(
+            batch, q_len, kv_len, num_q_heads, num_kv_heads,
+            kv_lora_rank, qk_rope_head_dim, page_block_size,
+            causal, exe, seed=DEFAULT_SEED + num_q_heads + kv_len,
+            shuffle=shuffle, num_kv_splits=num_kv_splits,
+        )
+        assert "err" not in result
+        assert result.get("passed"), (
+            f"failed for Hq={num_q_heads}, Sq={q_len}, "
+            f"B={batch}, Skv={kv_len}, splits={num_kv_splits}"
+        )
+
+
 def main():
     parser = argparse.ArgumentParser(description="MLA Decode Attention Test (FP8)")
     parser.add_argument("--num_q_heads", type=int, default=16)
@@ -635,6 +684,7 @@ def main():
     parser.add_argument("--kv_lora_rank", type=int, default=512)
     parser.add_argument("--qk_rope_head_dim", type=int, default=64)
     parser.add_argument("--page_block_size", type=int, default=1)
+    parser.add_argument("--q_len", type=int, default=None)
     parser.add_argument("--no-causal", action="store_true")
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     args = parser.parse_args()
@@ -646,6 +696,9 @@ def main():
     kv_lora_rank = args.kv_lora_rank
     qk_rope_head_dim = args.qk_rope_head_dim
     page_block_size = args.page_block_size
+    q_len = args.q_len
+    if q_len is None:
+        q_len = default_q_len_for_num_heads(num_q_heads)
     head_dim_qk = kv_lora_rank + qk_rope_head_dim
     head_dim_v = kv_lora_rank
 
@@ -654,6 +707,7 @@ def main():
     print(f"  kv_lora_rank={kv_lora_rank}, qk_rope_head_dim={qk_rope_head_dim}")
     print(f"  HEAD_DIM_QK={head_dim_qk}, HEAD_DIM_V={head_dim_v}")
     print(f"  num_q_heads={num_q_heads}, num_kv_heads={num_kv_heads}")
+    print(f"  q_len={q_len}")
     print(f"  page_block_size={page_block_size}")
     print(f"  GPU: {torch.cuda.get_device_name(0)}")
     print("=" * 110)
@@ -705,11 +759,11 @@ def main():
         Skv_c = max(kv_lens_c)
         nkv_c = auto_num_kv_splits(B_c, Skv_c, num_q_heads)
         tag_c = (
-            f"B={B_c} Sq={NUM_WAVES} kv_lens={_format_kv_lens(kv_lens_c)}"
+            f"B={B_c} Sq={q_len} kv_lens={_format_kv_lens(kv_lens_c)}"
             f" arbitrary sp={nkv_c}"
         )
         r_c = run_config(
-            B_c, NUM_WAVES, Skv_c, num_q_heads, num_kv_heads,
+            B_c, q_len, Skv_c, num_q_heads, num_kv_heads,
             kv_lora_rank, qk_rope_head_dim, page_block_size,
             causal, exe, seed=args.seed + Skv_c + 101, shuffle=False,
             num_kv_splits=nkv_c, arbitrary_indices=True,
@@ -734,11 +788,11 @@ def main():
         Skv_c = max(kv_lens_c)
         nkv_c = auto_num_kv_splits(B_c, max(topk_lengths_c), num_q_heads)
         tag_c = (
-            f"B={B_c} Sq={NUM_WAVES} kv_lens={_format_kv_lens(kv_lens_c)}"
+            f"B={B_c} Sq={q_len} kv_lens={_format_kv_lens(kv_lens_c)}"
             f" topk_lengths={_format_kv_lens(topk_lengths_c)} sp={nkv_c}"
         )
         r_c = run_config(
-            B_c, NUM_WAVES, Skv_c, num_q_heads, num_kv_heads,
+            B_c, q_len, Skv_c, num_q_heads, num_kv_heads,
             kv_lora_rank, qk_rope_head_dim, page_block_size,
             causal, exe, seed=args.seed + Skv_c + B_c + 303, shuffle=False,
             num_kv_splits=nkv_c, arbitrary_indices=True,
@@ -770,7 +824,7 @@ def main():
             f" sp={nkv_c}+{extra_nkv_c}"
         )
         r_c = run_config(
-            B_c, NUM_WAVES, Skv_c, num_q_heads, num_kv_heads,
+            B_c, q_len, Skv_c, num_q_heads, num_kv_heads,
             kv_lora_rank, qk_rope_head_dim, page_block_size,
             causal, exe, seed=args.seed + Skv_c + B_c + 707, shuffle=False,
             num_kv_splits=nkv_c, arbitrary_indices=True,
@@ -808,7 +862,7 @@ def main():
             f" sink sp={nkv_c}+{extra_nkv_c if extra_kv_lens_c is not None else 0}+1"
         )
         r_c = run_config(
-            B_c, NUM_WAVES, Skv_c, num_q_heads, num_kv_heads,
+            B_c, q_len, Skv_c, num_q_heads, num_kv_heads,
             kv_lora_rank, qk_rope_head_dim, page_block_size,
             causal, exe, seed=args.seed + Skv_c + B_c + 909, shuffle=False,
             num_kv_splits=nkv_c, arbitrary_indices=True,
