@@ -7,6 +7,39 @@
 
 namespace mlir::fly {
 
+namespace {
+
+template <class IntTuple>
+IntTuple selectPath(const IntTupleBuilder<IntTuple> &builder, IntTuple coord,
+                    ArrayRef<int32_t> path) {
+  IntTuple result = coord;
+  for (int32_t idx : path)
+    result = builder.at(result, idx);
+  return result;
+}
+
+template <class IntTuple>
+IntTuple replacePath(const IntTupleBuilder<IntTuple> &builder, IntTuple coord,
+                     ArrayRef<int32_t> path, IntTuple replacement) {
+  if (path.empty())
+    return replacement;
+
+  assert(!coord.isLeaf() && "replacePath expects a non-leaf tuple before the target leaf");
+  typename IntTupleBuilder<IntTuple>::ElemCollector collector;
+  int32_t targetIdx = path.front();
+  for (int32_t i = 0; i < coord.rank(); ++i) {
+    if (i == targetIdx) {
+      collector.push_back(
+          replacePath(builder, builder.at(coord, i), path.drop_front(), replacement));
+    } else {
+      collector.push_back(builder.at(coord, i));
+    }
+  }
+  return builder.makeTuple(collector);
+}
+
+} // namespace
+
 bool intTupleHasNone(IntTupleAttr attr) {
   if (attr.isLeaf()) {
     return attr.isLeafNone();
@@ -184,6 +217,21 @@ IntTupleAttr IntTupleBuilder<IntTupleAttr>::applySwizzle(IntTupleAttr v,
                                                          SwizzleAttr swizzle) const {
   assert(v.isLeafInt() && "applySwizzle only supports leafInt IntTupleAttr");
   return IntTupleAttr::get(intApplySwizzle(v.getLeafAsInt(), swizzle));
+}
+
+IntTupleAttr IntTupleBuilder<IntTupleAttr>::applyCoordSwizzle(IntTupleAttr coord,
+                                                              CoordSwizzleAttr swizzle) const {
+  if (swizzle.isTrivialCoordSwizzle()) {
+    return coord;
+  }
+  IntTupleAttr row = selectPath(*this, coord, swizzle.getModeRow());
+  IntTupleAttr col = selectPath(*this, coord, swizzle.getModeCol());
+  assert(row.isLeafInt() && "coord swizzle row mode must select a leaf int");
+  assert(col.isLeafInt() && "coord swizzle col mode must select a leaf int");
+
+  IntTupleAttr newCol =
+      IntTupleAttr::get(intApplyCoordSwizzle(row.getLeafAsInt(), col.getLeafAsInt(), swizzle));
+  return replacePath(*this, coord, swizzle.getModeCol(), newCol);
 }
 
 //===----------------------------------------------------------------------===//
@@ -544,6 +592,45 @@ IntTupleBuilder<IntTupleValueAdaptor>::applySwizzle(IntTupleValueAdaptor v,
   auto shifted = arith::ShRUIOp::create(builder, loc, masked, shiftAmount).getResult();
   auto result = arith::XOrIOp::create(builder, loc, input, shifted).getResult();
   return IntTupleValueAdaptor{result, retAttr};
+}
+
+IntTupleValueAdaptor
+IntTupleBuilder<IntTupleValueAdaptor>::applyCoordSwizzle(IntTupleValueAdaptor coord,
+                                                         CoordSwizzleAttr swizzle) const {
+  if (swizzle.isTrivialCoordSwizzle()) {
+    return coord;
+  }
+
+  auto retAttr = attrBuilder.applyCoordSwizzle(coord.attr, swizzle);
+  if (retAttr.isStatic()) {
+    return materializeConstantTuple(retAttr);
+  }
+
+  IntTupleValueAdaptor row = selectPath(*this, coord, swizzle.getModeRow());
+  IntTupleValueAdaptor col = selectPath(*this, coord, swizzle.getModeCol());
+  assert(row.isLeafInt() && "coord swizzle row mode must select a leaf int");
+  assert(col.isLeafInt() && "coord swizzle col mode must select a leaf int");
+
+  IntTupleAttr newColAttr = retAttr.at(swizzle.getModeCol());
+  if (newColAttr.isStatic()) {
+    return replacePath(*this, coord, swizzle.getModeCol(),
+                       materializeConstantLeaf(newColAttr.getLeafAsInt()));
+  }
+
+  auto intType = getCommonIntType(row.attr, col.attr);
+  auto rowInput = extendToIntType(row.value, intType);
+  auto colInput = extendToIntType(col.value, intType);
+  int64_t maskValue = (int64_t{1} << swizzle.getMask()) - 1;
+  auto mask = arith::ConstantIntOp::create(builder, loc, intType, maskValue).getResult();
+  auto rowShift =
+      arith::ConstantIntOp::create(builder, loc, intType, swizzle.getBaseRow()).getResult();
+  auto colShift =
+      arith::ConstantIntOp::create(builder, loc, intType, swizzle.getBaseCol()).getResult();
+  auto shiftedRow = arith::ShRUIOp::create(builder, loc, rowInput, rowShift).getResult();
+  auto maskedRow = arith::AndIOp::create(builder, loc, shiftedRow, mask).getResult();
+  auto shiftedMask = arith::ShLIOp::create(builder, loc, maskedRow, colShift).getResult();
+  auto result = arith::XOrIOp::create(builder, loc, colInput, shiftedMask).getResult();
+  return replacePath(*this, coord, swizzle.getModeCol(), IntTupleValueAdaptor{result, newColAttr});
 }
 
 IntTupleAttr intTupleWrap(const IntTupleBuilder<IntTupleAttr> &builder, IntTupleAttr attr) {

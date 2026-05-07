@@ -414,15 +414,56 @@ def _pipeline_fragments(backend) -> tuple:
     return fragments, llvm_opts
 
 
+def _format_link_lib_options(link_libs: list) -> str:
+    """Format external bitcode paths for rocdl-attach-target.
+
+    The MLIR pass-pipeline option parser treats whitespace, commas, and braces
+    as structural syntax.  Until FlyDSL grows proper MLIR option escaping here,
+    reject such paths loudly instead of producing a malformed pipeline.
+    """
+    opts = []
+    for lib in link_libs:
+        path = os.fspath(lib)
+        bad_chars = sorted({ch for ch in path if ch.isspace() or ch in ",{}\"'"})
+        if not path or bad_chars:
+            chars = "empty path" if not path else f"unsupported character(s) {bad_chars!r}"
+            raise ValueError(
+                f"Cannot pass external bitcode path {path!r} to rocdl-attach-target: {chars}. "
+                "Use a path without whitespace, commas, braces, or quotes, or add MLIR pass-option escaping."
+            )
+        opts.append(f"l={path}")
+    return " ".join(opts)
+
+
 class MlirCompiler:
     @classmethod
-    def compile(cls, module: ir.Module, *, arch: str = "", func_name: str = "") -> ir.Module:
+    def compile(
+        cls, module: ir.Module, *, arch: str = "", func_name: str = "", link_libs: Optional[list] = None
+    ) -> ir.Module:
         module.operation.verify()
 
         backend = get_backend(arch=arch)
 
         module = ir.Module.parse(module.operation.get_asm(enable_debug_info=env.debug.enable_debug_info))
         fragments, llvm_opts = _pipeline_fragments(backend)
+
+        if link_libs:
+            link_opt = _format_link_lib_options(link_libs)
+            new_fragments = []
+            found_rocdl = False
+            for f in fragments:
+                if "rocdl-attach-target" in f:
+                    if f.endswith("}"):
+                        base = f[:-1].rstrip()
+                    else:
+                        base = f.rstrip()
+                    new_fragments.append(f"{base} {link_opt}" + "}")
+                    found_rocdl = True
+                else:
+                    new_fragments.append(f)
+            if not found_rocdl:
+                raise RuntimeError("link_libs specified but no 'rocdl-attach-target' fragment found in pipeline")
+            fragments = new_fragments
 
         from .llvm_options import llvm_options as _llvm_options
 
@@ -683,6 +724,7 @@ class JitFunction:
         self._target = None  # lazy: GPUTarget resolved once in _ensure_sig
         self._mem_cache = {}
         self._last_compiled = None  # (cache_key, CompiledArtifact) for compile()
+        self._extern_linkage_keys = set()
 
     def __get__(self, obj, objtype=None):
         # when used as a method on a class bind the owning instance as the
@@ -786,8 +828,7 @@ class JitFunction:
                 key_parts.append((name, Stream))
                 continue
 
-            is_runtime = (ann is not inspect.Parameter.empty
-                          and hasattr(ann, '__fly_ptrs__'))
+            is_runtime = ann is not inspect.Parameter.empty and hasattr(ann, "__fly_ptrs__")
             if isinstance(arg, tuple):
                 key_parts.append((name, tuple(self._arg_cache_sig(a) for a in arg)))
             else:
@@ -837,10 +878,13 @@ class JitFunction:
 
         # Normal path: check in-process cache first, then optional disk cache.
         use_disk_cache = env.runtime.enable_cache
+        allow_disk_cache = use_disk_cache and cache_key not in self._extern_linkage_keys
         cached_func = self._mem_cache.get(cache_key)
-        if cached_func is None and use_disk_cache and not env.debug.dump_ir:
+        if cached_func is None and allow_disk_cache and not env.debug.dump_ir:
             str_key = self._cache_key_to_str(cache_key)
             cached_func = self.cache_manager.get(str_key) if self.cache_manager else None
+            if cached_func is not None and getattr(cached_func, "_link_libs", None):
+                cached_func = None
             if cached_func is not None:
                 self._mem_cache[cache_key] = cached_func
 
@@ -915,12 +959,38 @@ class JitFunction:
 
             original_ir = module.operation.get_asm(enable_debug_info=True)
 
-            compiled_module = MlirCompiler.compile(module, arch=backend.target.arch, func_name=self.func.__name__)
+            # Extern-symbol integration is carried entirely via
+            # CompilationContext: each ExternFunction populates
+            # link_libs and post_load_processors at declaration time,
+            # so the JIT path depends on no framework-specific import.
+            link_libs = list(comp_ctx.link_libs) if comp_ctx.link_libs else None
+            post_load_processors = list(comp_ctx.post_load_processors)
+            extern_linked = bool(link_libs or post_load_processors)
+            if extern_linked:
+                self._extern_linkage_keys.add(cache_key)
+                # Switch to explicit Python-side module loading so
+                # post_load_processors can receive hipModule_t handles.
+                # Also clear targets set at construction: rocdl-attach-target
+                # is the sole source when link_libs is used; duplicating
+                # targets causes hipErrorNoBinaryForGpu.
+                gpu_module.offloadingHandler = ir.Attribute.parse("#fly.explicit_module")
+                if "targets" in gpu_module.operation.attributes:
+                    del gpu_module.operation.attributes["targets"]
+
+            compiled_module = MlirCompiler.compile(
+                module,
+                arch=backend.target.arch,
+                func_name=self.func.__name__,
+                link_libs=link_libs,
+            )
 
             compiled_func = CompiledArtifact(
                 compiled_module,
                 self.func.__name__,
                 original_ir,
+                post_load_processors=post_load_processors,
+                link_libs=link_libs,
+                uses_explicit_module=extern_linked,
             )
 
             # Always keep a reference to the latest compilation result so
@@ -931,7 +1001,7 @@ class JitFunction:
             # cache is disabled. This preserves code object lifetime for
             # profiler/roctracer teardown and enables fast same-process reuse.
             self._mem_cache[cache_key] = compiled_func
-            if use_disk_cache and self.cache_manager and not env.debug.dump_ir:
+            if use_disk_cache and not extern_linked and self.cache_manager and not env.debug.dump_ir:
                 str_key = self._cache_key_to_str(cache_key)
                 self.cache_manager.set(str_key, compiled_func)
 
