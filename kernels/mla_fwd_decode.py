@@ -10,6 +10,8 @@ import subprocess
 
 import torch
 
+from flydsl.compiler.kernel_function import CompilationContext
+
 
 def _gcn_arch_base(arch_name: str) -> str:
     """Strip target features (':sramecc+:xnack-') from a gcnArchName."""
@@ -154,20 +156,27 @@ def flydsl_mla_fwd_decode(
         arch = _gcn_arch_base(torch.cuda.get_device_properties(dev).gcnArchName)
         lds_size = _get_lds_size_per_cu(arch) // OCCUPANCY
 
-        launch_mla_fwd_decode_m16x8_fp8_fp8(
-            query_flat,
-            kv_flat,
-            kv_idx_flat,
-            work_indptr_flat,
-            work_info_flat,
-            final_flat,
-            split_o_flat,
-            split_lse_flat,
-            softmax_scale,
-            num_cus,
-            lds_size,
-            stream=torch.cuda.current_stream(),
-        )
+        _mla_compile_hints = {
+            "maxnreg": 72,
+            "llvm_options": {
+                "enable-post-misched": False,
+            },
+        }
+        with CompilationContext.compile_hints(_mla_compile_hints):
+            launch_mla_fwd_decode_m16x8_fp8_fp8(
+                query_flat,
+                kv_flat,
+                kv_idx_flat,
+                work_indptr_flat,
+                work_info_flat,
+                final_flat,
+                split_o_flat,
+                split_lse_flat,
+                softmax_scale,
+                num_cus,
+                lds_size,
+                stream=torch.cuda.current_stream(),
+            )
     else:
         raise NotImplementedError(
             f"flydsl_mla_fwd_decode: unsupported num_heads={num_heads}, "

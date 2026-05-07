@@ -132,10 +132,40 @@ MFMA_N: int = 16
 MFMA_K: int = 32  # mfma_f32_16x16x32_fp8_fp8
 MFMA_ELEM_PER_THR: int = MFMA_M * MFMA_K // WARP_SIZE  # 8
 
+# HK's mma_ABt for this kernel relies on rt_16x32_s/rt_16x16_s register layouts
+# to present the right-hand operand as B^T. The gfx942 intrinsic control fields
+# are left at the same zero values used by the corresponding aiter fp8 MFMA path.
+MFMA_ABT_CBSZ: int = 0
+MFMA_ABT_ABID: int = 0
+MFMA_ABT_BLGP: int = 0
+
+# Fixed VGPR map from the HK/hkdart kernel. The p_comp/p_mfma overlap
+# is intentionally preserved by the fixed-register asm pack below.
+HK_P_COMP_BEGIN: int = 120
+HK_P_COMP_END: int = 127
+HK_P_MFMA_BEGIN: int = 120
+HK_P_MFMA_END: int = 121
+HK_KV0_BEGIN: int = 112
+HK_KV0_END: int = 115
+HK_KV1_BEGIN: int = 116
+HK_KV1_END: int = 119
+HK_Q_NOPE_BEGIN: int = 76
+HK_Q_NOPE_END: int = 107
+HK_Q_ROPE_BEGIN: int = 108
+HK_Q_ROPE_END: int = 111
+HK_O_BEGIN: int = 128
+HK_O_END: int = 255
+
 # Number of QK sub-tile iterations
 NUM_NOPE_ITERS: int = QK_NOPE_HEAD_DIM // (MFMA_K * 2)  # 512/64 = 8
 NUM_ROPE_ITERS: int = QK_ROPE_HEAD_DIM // (MFMA_K * 2)  # 64/64 = 1
 NUM_PV_ITERS: int = V_HEAD_DIM // (MFMA_N * 2)  # 512/32 = 16
+
+HK_FIXED_VGPR_CLOBBERS = tuple(f"~{{v{i}}}" for i in range(HK_Q_NOPE_BEGIN, HK_O_END + 1))
+
+USE_FIXED_P_PACK: bool = True
+USE_FIXED_QK_MFMA: bool = True
+USE_FIXED_PV_MFMA: bool = True
 
 
 # ---------------------------------------------------------------------------
@@ -313,6 +343,13 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
     def _mfma_fp8(result_type, operands, **kw):
         return rocdl.mfma_f32_16x16x32_fp8_fp8(result_type, operands, **kw)
 
+    def _mfma_abt_fp8(a_frag, b_frag, acc):
+        """HK mma_ABt-compatible fp8 MFMA wrapper."""
+        return _mfma_fp8(
+            T.f32x4,
+            [a_frag, b_frag, acc, MFMA_ABT_CBSZ, MFMA_ABT_ABID, MFMA_ABT_BLGP],
+        )
+
     def _fadd(a, b, fastmath=fm_no_inf):
         return arith.addf(_raw(a), _raw(b), fastmath=fastmath)
 
@@ -324,6 +361,153 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
 
     def _fmax(a, b, fastmath=fm_no_inf):
         return arith.maximumf(_raw(a), _raw(b), fastmath=fastmath)
+
+    def _max3_f32(a, b, c):
+        """v_max3_f32 — max of 3 f32 values in 1 instruction."""
+        return llvm.inline_asm(
+            T.f32, [_raw(a), _raw(b), _raw(c)],
+            "v_max3_f32 $0, $1, $2, $3", "=v,v,v,v",
+            has_side_effects=False,
+        )
+
+    def _pack_p_to_fp8_fixed_vgpr(p_exp_vals):
+        """HK pack_4f32_to_fp8 lowered as one fixed-vgpr asm block.
+
+        Mirrors:
+          pack_4f32_to_fp8<120, 120, true/false>()
+          pack_4f32_to_fp8<121, 124, true/false>()
+
+        LLVM cannot allocate an output directly with a constraint like
+        ={v[120]}, so the block writes fixed VGPRs explicitly, declares them
+        clobbered, then copies v[120:121] back to one i64 SSA value.
+        """
+        asm = "\n".join(
+            [
+                "v_mov_b32 v[120], $1",
+                "v_mov_b32 v[121], $2",
+                "v_mov_b32 v[122], $3",
+                "v_mov_b32 v[123], $4",
+                "v_mov_b32 v[124], $5",
+                "v_mov_b32 v[125], $6",
+                "v_mov_b32 v[126], $7",
+                "v_mov_b32 v[127], $8",
+                "v_cvt_pk_fp8_f32 v[120], v[120], v[121]",
+                "v_cvt_pk_fp8_f32 v[120], v[122], v[123] op_sel:[0, 0, 1]",
+                "v_cvt_pk_fp8_f32 v[121], v[124], v[125]",
+                "v_cvt_pk_fp8_f32 v[121], v[126], v[127] op_sel:[0, 0, 1]",
+                "v_mov_b64 $0, v[120:121]",
+            ]
+        )
+        constraints = ",".join(["=v", "v", "v", "v", "v", "v", "v", "v", "v"] + list(HK_FIXED_VGPR_CLOBBERS))
+        return llvm.inline_asm(
+            T.i64,
+            [_raw(v) for v in p_exp_vals],
+            asm,
+            constraints,
+            has_side_effects=True,
+        )
+
+    def _f32x4_from_i64_pair(lo, hi):
+        lo_av = ArithValue(lo)
+        hi_av = ArithValue(hi)
+        c32_i64 = fx.Int64(32)
+        words = [
+            lo_av.trunci(T.i32),
+            ArithValue(lo_av >> c32_i64).trunci(T.i32),
+            hi_av.trunci(T.i32),
+            ArithValue(hi_av >> c32_i64).trunci(T.i32),
+        ]
+        elems = [ArithValue(w).bitcast(T.f32) for w in words]
+        return _raw(Vec.from_elements(elems, fx.Float32))
+
+    def _mfma_abt_fp8_fixed_vgpr(a_frag, b_frag, acc, a_base, d_base):
+        """Run one fp8 mma_ABt through the HK fixed VGPR windows.
+
+        a_base is 112 (kv_0) or 116 (kv_1); b is p_mfma v[120:121].
+        d_base selects the corresponding oaccu slice in v[128:255].
+        """
+        if const_expr(not USE_FIXED_PV_MFMA):
+            return _mfma_abt_fp8(a_frag, b_frag, acc)
+
+        acc_v = Vec(acc)
+        asm = "\n".join(
+            [
+                f"v_mov_b64 v[{a_base}:{a_base + 1}], $2",
+                "v_mov_b64 v[120:121], $3",
+                f"v_mov_b32 v[{d_base}], $4",
+                f"v_mov_b32 v[{d_base + 1}], $5",
+                f"v_mov_b32 v[{d_base + 2}], $6",
+                f"v_mov_b32 v[{d_base + 3}], $7",
+                (
+                    "v_mfma_f32_16x16x32_fp8_fp8 "
+                    f"v[{d_base}:{d_base + 3}], "
+                    f"v[{a_base}:{a_base + 1}], v[120:121], v[{d_base}:{d_base + 3}]"
+                ),
+                f"v_mov_b64 $0, v[{d_base}:{d_base + 1}]",
+                f"v_mov_b64 $1, v[{d_base + 2}:{d_base + 3}]",
+            ]
+        )
+        constraints = ",".join(["=v", "=v", "v", "v", "v", "v", "v", "v"] + list(HK_FIXED_VGPR_CLOBBERS))
+        pair = llvm.inline_asm(
+            ir.Type.parse("!llvm.struct<(i64, i64)>"),
+            [
+                _raw(a_frag),
+                _raw(b_frag),
+                _raw(acc_v[0]),
+                _raw(acc_v[1]),
+                _raw(acc_v[2]),
+                _raw(acc_v[3]),
+            ],
+            asm,
+            constraints,
+            has_side_effects=True,
+        )
+        lo = llvm.extractvalue(T.i64, pair, [0])
+        hi = llvm.extractvalue(T.i64, pair, [1])
+        return _f32x4_from_i64_pair(lo, hi)
+
+    def _qk_mfma_abt_fp8_fixed_vgpr(k_frag, q_frag, acc, k_base, q_base, p_base):
+        """Run one QK mma_ABt through HK's fixed q/kv/p_comp VGPR windows."""
+        if const_expr(not USE_FIXED_QK_MFMA):
+            return _mfma_abt_fp8(k_frag, q_frag, acc)
+
+        acc_v = Vec(acc)
+        asm = "\n".join(
+            [
+                f"v_mov_b64 v[{k_base}:{k_base + 1}], $2",
+                f"v_mov_b64 v[{q_base}:{q_base + 1}], $3",
+                f"v_mov_b32 v[{p_base}], $4",
+                f"v_mov_b32 v[{p_base + 1}], $5",
+                f"v_mov_b32 v[{p_base + 2}], $6",
+                f"v_mov_b32 v[{p_base + 3}], $7",
+                (
+                    "v_mfma_f32_16x16x32_fp8_fp8 "
+                    f"v[{p_base}:{p_base + 3}], "
+                    f"v[{k_base}:{k_base + 1}], v[{q_base}:{q_base + 1}], "
+                    f"v[{p_base}:{p_base + 3}]"
+                ),
+                f"v_mov_b64 $0, v[{p_base}:{p_base + 1}]",
+                f"v_mov_b64 $1, v[{p_base + 2}:{p_base + 3}]",
+            ]
+        )
+        constraints = ",".join(["=v", "=v", "v", "v", "v", "v", "v", "v"] + list(HK_FIXED_VGPR_CLOBBERS))
+        pair = llvm.inline_asm(
+            ir.Type.parse("!llvm.struct<(i64, i64)>"),
+            [
+                _raw(k_frag),
+                _raw(q_frag),
+                _raw(acc_v[0]),
+                _raw(acc_v[1]),
+                _raw(acc_v[2]),
+                _raw(acc_v[3]),
+            ],
+            asm,
+            constraints,
+            has_side_effects=True,
+        )
+        lo = llvm.extractvalue(T.i64, pair, [0])
+        hi = llvm.extractvalue(T.i64, pair, [1])
+        return _f32x4_from_i64_pair(lo, hi)
 
     # ---- LDS setup ----
     arch = get_hip_arch()
@@ -797,6 +981,10 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
             slot = i % 3
             issue_pass = i + 2
 
+            # Descending s_setprio (7->0) starting at iteration 2 (matches HK QManagerV3)
+            if const_expr(i >= 2):
+                rocdl.s_setprio(max(7 - (i - 2), 0))
+
             if const_expr(issue_pass < 9):
                 rocdl.s_waitcnt(_encode_waitcnt(vmcnt=1))
                 loads[issue_pass % 3] = _q_buf_load(issue_pass)
@@ -835,20 +1023,19 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
                 result[i] = ArithValue(is_oob).select(_raw(c_neg_inf), result[i])
         return result
 
-    # ---- Helper: online softmax ----
-    def _softmax(
+    # ---- Helper: online softmax (split into p0 + p1, matching HK) ----
+    def _softmax_p0(
         p_vals,
         row_max_old,
-        row_sum_e_old,
         is_first_iter,
         kv_tile_start_i32,
         kv_end_i32,
         check_boundary,
     ):
-        """Online softmax: scale -> max -> exp2 -> sum -> rescale.
+        """Softmax phase 0: scale + max + warp reduce -> (scaled, row_max, rescale).
 
-        p_vals: 8 f32 attention scores for this thread
-        Returns: (p_exp_vals, row_max_new, row_sum_e_new, rescale)
+        Matches HK softmax_p0: stops after computing row_max and rescale,
+        before exp/sum. Caller can overlap V load between p0 and p1.
         """
         # Column index for this thread's first element
         col_0_start = lane_idx / 16 * 4 + _idx(kv_tile_start_i32)
@@ -856,10 +1043,11 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
         # Scale and mask
         scaled = _softmax_scale_p(p_vals, col_0_start, kv_end_i32, check_boundary)
 
-        # Local max of 8 values
-        local_max = scaled[0]
-        for i in range_constexpr(1, 8):
-            local_max = _fmax(local_max, scaled[i], fm_no_inf)
+        # Local max of 8 values (v_max3_f32 tree: 4 instructions instead of 7)
+        tmp0 = _max3_f32(scaled[0], scaled[1], scaled[2])
+        tmp1 = _max3_f32(scaled[3], scaled[4], scaled[5])
+        tmp2 = _fmax(scaled[6], scaled[7], fm_no_inf)
+        local_max = _max3_f32(tmp0, tmp1, tmp2)
 
         # Warp reduce max (within 16-lane groups)
         local_max = _warp_reduce_max_16(local_max)
@@ -874,6 +1062,20 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
             diff = _fsub(row_max_old, new_row_max, fm_no_inf)
             rescale = _fast_exp2(_fmul(diff, c_log2e, fm_no_inf))
 
+        return scaled, new_row_max, rescale
+
+    def _softmax_p1(
+        scaled,
+        new_row_max,
+        rescale,
+        row_sum_e_old,
+        is_first_iter,
+    ):
+        """Softmax phase 1: exp + sum + warp reduce -> (p_exp_vals, row_sum_e).
+
+        Matches HK softmax_p1: takes the scaled values and row_max from p0,
+        computes exp2, local sum, warp reduce sum, and updates row_sum_e.
+        """
         # exp(p - max) for each value, and sum
         p_exp_vals = [None] * 8
         local_sum = c_zero_f32
@@ -891,11 +1093,13 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
         else:
             row_sum_e_new = _fadd(_f32(rescale) * row_sum_e_old, local_sum, fm_no_inf)
 
-        return p_exp_vals, new_row_max, row_sum_e_new, rescale
+        return p_exp_vals, row_sum_e_new
 
     # ---- Helper: pack P from f32 to fp8 ----
     def _pack_p_to_fp8(p_exp_vals):
-        """Pack 8 f32 -> 2 i32 (4x cvt_pk_fp8_f32) -> 1 i64 for MFMA."""
+        """Pack 8 f32 -> fixed v[120:121] -> i64 p_mfma for PV MFMA."""
+        if const_expr(USE_FIXED_P_PACK):
+            return _pack_p_to_fp8_fixed_vgpr(p_exp_vals)
         w0 = rocdl.cvt_pk_fp8_f32(T.i32, p_exp_vals[0], p_exp_vals[1], c_zero_i32, 0)
         w0 = rocdl.cvt_pk_fp8_f32(T.i32, p_exp_vals[2], p_exp_vals[3], w0, 1)
         w1 = rocdl.cvt_pk_fp8_f32(T.i32, p_exp_vals[4], p_exp_vals[5], c_zero_i32, 0)
@@ -905,14 +1109,15 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
     # ---- Helper: rescale oaccu ----
     def _rescale_oaccu(oaccu, rescale):
         """Multiply all oaccu accumulators by rescale factor.
-        Descending s_setprio 3->0 across 4 groups of 8 muls."""
+        Descending s_setprio 8->0 across 8 groups of 4 muls (matches HK)."""
         rv = _raw(Vec.filled(4, rescale, fx.Float32))
         result = [None] * len(oaccu)
-        for group in range_constexpr(4):
-            rocdl.s_setprio(3 - group)
-            for j in range_constexpr(8):
-                i = group * 8 + j
+        for group in range_constexpr(8):
+            rocdl.s_setprio(8 - group)
+            for j in range_constexpr(4):
+                i = group * 4 + j
                 result[i] = _f32(oaccu[i]) * rv
+        rocdl.s_setprio(0)
         return result
 
     # ---- Helper: process one KV tile (GEMM1 + softmax + V + GEMM2) ----
@@ -984,23 +1189,33 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
 
             q_0 = q_nope[tile_0]
             q_1 = q_nope[tile_1]
+            q0_base = HK_Q_NOPE_BEGIN + tile_0 * 2
+            q1_base = HK_Q_NOPE_BEGIN + tile_1 * 2
 
             if const_expr(nope_pair == 0):
-                p_comp[0] = _mfma_fp8(
-                    T.f32x4, [k0_lo, q_0, c_zero_v4f32, 0, 0, 0]
+                p_comp[0] = _qk_mfma_abt_fp8_fixed_vgpr(
+                    k0_lo, q_0, c_zero_v4f32, HK_KV0_BEGIN, q0_base, HK_P_COMP_BEGIN
                 )
-                p_comp[1] = _mfma_fp8(
-                    T.f32x4, [k0_hi, q_0, c_zero_v4f32, 0, 0, 0]
+                p_comp[1] = _qk_mfma_abt_fp8_fixed_vgpr(
+                    k0_hi, q_0, c_zero_v4f32, HK_KV0_BEGIN + 2, q0_base, HK_P_COMP_BEGIN + 4
                 )
                 rocdl.s_setprio(15)
             else:
-                p_comp[0] = _mfma_fp8(T.f32x4, [k0_lo, q_0, p_comp[0], 0, 0, 0])
-                p_comp[1] = _mfma_fp8(T.f32x4, [k0_hi, q_0, p_comp[1], 0, 0, 0])
+                p_comp[0] = _qk_mfma_abt_fp8_fixed_vgpr(
+                    k0_lo, q_0, p_comp[0], HK_KV0_BEGIN, q0_base, HK_P_COMP_BEGIN
+                )
+                p_comp[1] = _qk_mfma_abt_fp8_fixed_vgpr(
+                    k0_hi, q_0, p_comp[1], HK_KV0_BEGIN + 2, q0_base, HK_P_COMP_BEGIN + 4
+                )
 
             rocdl.s_waitcnt(_encode_waitcnt(lgkmcnt=0))
 
-            p_comp[0] = _mfma_fp8(T.f32x4, [k1_lo, q_1, p_comp[0], 0, 0, 0])
-            p_comp[1] = _mfma_fp8(T.f32x4, [k1_hi, q_1, p_comp[1], 0, 0, 0])
+            p_comp[0] = _qk_mfma_abt_fp8_fixed_vgpr(
+                k1_lo, q_1, p_comp[0], HK_KV1_BEGIN, q1_base, HK_P_COMP_BEGIN
+            )
+            p_comp[1] = _qk_mfma_abt_fp8_fixed_vgpr(
+                k1_hi, q_1, p_comp[1], HK_KV1_BEGIN + 2, q1_base, HK_P_COMP_BEGIN + 4
+            )
 
         for rope_pair in range_constexpr(NUM_ROPE_ITERS):
             tile_0 = rope_pair * 2
@@ -1014,13 +1229,23 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
             rocdl.sched_barrier(0)
             rocdl.s_waitcnt(_encode_waitcnt(lgkmcnt=2))
 
-            p_comp[0] = _mfma_fp8(T.f32x4, [k0_lo, q_rope[tile_0], p_comp[0], 0, 0, 0])
-            p_comp[1] = _mfma_fp8(T.f32x4, [k0_hi, q_rope[tile_0], p_comp[1], 0, 0, 0])
+            q0_base = HK_Q_ROPE_BEGIN + tile_0 * 2
+            q1_base = HK_Q_ROPE_BEGIN + tile_1 * 2
+            p_comp[0] = _qk_mfma_abt_fp8_fixed_vgpr(
+                k0_lo, q_rope[tile_0], p_comp[0], HK_KV0_BEGIN, q0_base, HK_P_COMP_BEGIN
+            )
+            p_comp[1] = _qk_mfma_abt_fp8_fixed_vgpr(
+                k0_hi, q_rope[tile_0], p_comp[1], HK_KV0_BEGIN + 2, q0_base, HK_P_COMP_BEGIN + 4
+            )
 
             rocdl.s_waitcnt(_encode_waitcnt(lgkmcnt=0))
 
-            p_comp[0] = _mfma_fp8(T.f32x4, [k1_lo, q_rope[tile_1], p_comp[0], 0, 0, 0])
-            p_comp[1] = _mfma_fp8(T.f32x4, [k1_hi, q_rope[tile_1], p_comp[1], 0, 0, 0])
+            p_comp[0] = _qk_mfma_abt_fp8_fixed_vgpr(
+                k1_lo, q_rope[tile_1], p_comp[0], HK_KV1_BEGIN, q1_base, HK_P_COMP_BEGIN
+            )
+            p_comp[1] = _qk_mfma_abt_fp8_fixed_vgpr(
+                k1_hi, q_rope[tile_1], p_comp[1], HK_KV1_BEGIN + 2, q1_base, HK_P_COMP_BEGIN + 4
+            )
 
         rocdl.s_setprio(14)
 
@@ -1031,7 +1256,17 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
             for ii in range_constexpr(4):
                 p_vals.append(p_comp_sub[ii])
 
-        # ---- Load V from KV LDS ----
+        # ---- Softmax phase 0: scale + max + warp reduce ----
+        scaled, row_max_new, rescale = _softmax_p0(
+            p_vals,
+            row_max_in,
+            is_first_iter,
+            kv_tile_start_i32,
+            kv_end_i32,
+            check_boundary,
+        )
+
+        # ---- Load V from KV LDS (overlapped with softmax_p1) ----
         v8_raw = _load_v_from_lds(p_lds_kv_base, warp_idx, lane_idx)
         rocdl.s_waitcnt(_encode_waitcnt(lgkmcnt=0))
         rocdl.sched_barrier(0)
@@ -1045,15 +1280,13 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
         else:
             row_kv_ld_nn = fx.Int32(-1)
 
-        # ---- Softmax ----
-        p_exp_vals, row_max_new, row_sum_e_new, rescale = _softmax(
-            p_vals,
-            row_max_in,
+        # ---- Softmax phase 1: exp + sum + warp reduce ----
+        p_exp_vals, row_sum_e_new = _softmax_p1(
+            scaled,
+            row_max_new,
+            rescale,
             row_sum_e_in,
             is_first_iter,
-            kv_tile_start_i32,
-            kv_end_i32,
-            check_boundary,
         )
 
         # ---- Pack P to fp8 ----
@@ -1092,21 +1325,29 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
             rocdl.s_waitcnt(_encode_waitcnt(lgkmcnt=4))
 
             # MFMA pair A
-            oaccu[iter_a * 2] = _mfma_fp8(
-                T.f32x4, [_pack_i32x2(vta0_lo, vta0_hi), p_pack, oaccu[iter_a * 2], 0, 0, 0]
+            d_base_a = HK_O_BEGIN + iter_a * 8
+            d_base_b = HK_O_BEGIN + iter_b * 8
+            oaccu[iter_a * 2] = _mfma_abt_fp8_fixed_vgpr(
+                _pack_i32x2(vta0_lo, vta0_hi), p_pack, oaccu[iter_a * 2], HK_KV0_BEGIN, d_base_a
             )
-            oaccu[iter_a * 2 + 1] = _mfma_fp8(
-                T.f32x4, [_pack_i32x2(vta1_lo, vta1_hi), p_pack, oaccu[iter_a * 2 + 1], 0, 0, 0]
+            oaccu[iter_a * 2 + 1] = _mfma_abt_fp8_fixed_vgpr(
+                _pack_i32x2(vta1_lo, vta1_hi),
+                p_pack,
+                oaccu[iter_a * 2 + 1],
+                HK_KV0_BEGIN + 2,
+                d_base_a + 4,
             )
             rocdl.sched_barrier(0)
             rocdl.s_waitcnt(_encode_waitcnt(lgkmcnt=0))
-
-            # MFMA pair B
-            oaccu[iter_b * 2] = _mfma_fp8(
-                T.f32x4, [_pack_i32x2(vtb0_lo, vtb0_hi), p_pack, oaccu[iter_b * 2], 0, 0, 0]
+            oaccu[iter_b * 2] = _mfma_abt_fp8_fixed_vgpr(
+                _pack_i32x2(vtb0_lo, vtb0_hi), p_pack, oaccu[iter_b * 2], HK_KV1_BEGIN, d_base_b
             )
-            oaccu[iter_b * 2 + 1] = _mfma_fp8(
-                T.f32x4, [_pack_i32x2(vtb1_lo, vtb1_hi), p_pack, oaccu[iter_b * 2 + 1], 0, 0, 0]
+            oaccu[iter_b * 2 + 1] = _mfma_abt_fp8_fixed_vgpr(
+                _pack_i32x2(vtb1_lo, vtb1_hi),
+                p_pack,
+                oaccu[iter_b * 2 + 1],
+                HK_KV1_BEGIN + 2,
+                d_base_b + 4,
             )
             rocdl.sched_barrier(0)
 
@@ -1308,21 +1549,29 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
             rocdl.s_waitcnt(_encode_waitcnt(lgkmcnt=4))
 
             # MFMA pair A
-            acc_a0 = _mfma_fp8(
-                T.f32x4, [_pack_i32x2(vta0_lo, vta0_hi), p_pack, oaccu_in[iter_a * 2], 0, 0, 0]
+            d_base_a = HK_O_BEGIN + iter_a * 8
+            d_base_b = HK_O_BEGIN + iter_b * 8
+            acc_a0 = _mfma_abt_fp8_fixed_vgpr(
+                _pack_i32x2(vta0_lo, vta0_hi), p_pack, oaccu_in[iter_a * 2], HK_KV0_BEGIN, d_base_a
             )
-            acc_a1 = _mfma_fp8(
-                T.f32x4, [_pack_i32x2(vta1_lo, vta1_hi), p_pack, oaccu_in[iter_a * 2 + 1], 0, 0, 0]
+            acc_a1 = _mfma_abt_fp8_fixed_vgpr(
+                _pack_i32x2(vta1_lo, vta1_hi),
+                p_pack,
+                oaccu_in[iter_a * 2 + 1],
+                HK_KV0_BEGIN + 2,
+                d_base_a + 4,
             )
             rocdl.sched_barrier(0)
             rocdl.s_waitcnt(_encode_waitcnt(lgkmcnt=0))
-
-            # MFMA pair B
-            acc_b0 = _mfma_fp8(
-                T.f32x4, [_pack_i32x2(vtb0_lo, vtb0_hi), p_pack, oaccu_in[iter_b * 2], 0, 0, 0]
+            acc_b0 = _mfma_abt_fp8_fixed_vgpr(
+                _pack_i32x2(vtb0_lo, vtb0_hi), p_pack, oaccu_in[iter_b * 2], HK_KV1_BEGIN, d_base_b
             )
-            acc_b1 = _mfma_fp8(
-                T.f32x4, [_pack_i32x2(vtb1_lo, vtb1_hi), p_pack, oaccu_in[iter_b * 2 + 1], 0, 0, 0]
+            acc_b1 = _mfma_abt_fp8_fixed_vgpr(
+                _pack_i32x2(vtb1_lo, vtb1_hi),
+                p_pack,
+                oaccu_in[iter_b * 2 + 1],
+                HK_KV1_BEGIN + 2,
+                d_base_b + 4,
             )
             rocdl.sched_barrier(0)
 
@@ -1768,6 +2017,12 @@ def launch_mla_fwd_decode_m16x8_fp8_fp8(
         split_output,
         split_lse,
         softmax_scale,
+        value_attrs={
+            "passthrough": [
+                ["denormal-fp-math-f32", "preserve-sign,preserve-sign"],
+                ["no-nans-fp-math", "true"],
+            ],
+        },
     ).launch(
         grid=(num_cus, 1, 1),
         block=(NUM_THREADS, 1, 1),
