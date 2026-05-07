@@ -274,5 +274,51 @@ def main():
         cleanup()
 
 
+# Pytest entrypoint: spawn torchrun in a subprocess so this file's
+# multi-PE main() actually runs under ``pytest -m multi_gpu``.
+
+
+def _count_physical_gpus() -> int:
+    """Physical GPU count (subprocess to bypass HIP_VISIBLE_DEVICES)."""
+    import subprocess as _sp
+
+    env = {k: v for k, v in os.environ.items() if k != "HIP_VISIBLE_DEVICES"}
+    try:
+        r = _sp.run(
+            [sys.executable, "-c", "import torch; print(torch.cuda.device_count())"],
+            capture_output=True, text=True, timeout=30, env=env,
+        )
+        return int(r.stdout.strip()) if r.returncode == 0 else 0
+    except Exception:
+        return 0
+
+
+@pytest.mark.multi_gpu
+def test_flydsl_shmem_two_pe():
+    """Regression guard for the FlyDSL+mori shmem SIGSEGV (2 PEs)."""
+    import subprocess as _sp
+
+    phys_ng = _count_physical_gpus()
+    if phys_ng < 2:
+        pytest.skip(f"Requires >= 2 physical GPUs, found {phys_ng}.")
+
+    env = {k: v for k, v in os.environ.items() if k != "HIP_VISIBLE_DEVICES"}
+    cmd = [
+        "torchrun",
+        "--nproc_per_node=2",
+        "--master_port=29790",
+        __file__,
+    ]
+    result = _sp.run(cmd, env=env, timeout=180, capture_output=True, text=True)
+    assert result.returncode == 0, (
+        f"flydsl shmem test FAILED (exit code {result.returncode})\n"
+        f"stdout (last 4000 chars):\n{result.stdout[-4000:]}\n"
+        f"stderr (last 4000 chars):\n{result.stderr[-4000:]}"
+    )
+    assert "All tests PASSED" in result.stdout, (
+        f"expected success banner in stdout, got:\n{result.stdout[-4000:]}"
+    )
+
+
 if __name__ == "__main__":
     main()

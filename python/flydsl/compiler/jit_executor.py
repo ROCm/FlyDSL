@@ -73,19 +73,13 @@ def _resolve_runtime_libs() -> List[str]:
 
 
 def _pack_ciface_args(*args) -> ctypes.c_void_p:
-    """Pack argument addresses into a void** slot array.
-
-    The C++ side (flydsl_gpu_module_init / flydsl_gpu_module_load_to_device)
-    treats the incoming void* as a void** and indexes it directly:
-        slots[i] = ((void**)packed)[i]
-    So we return a pointer to the flat slot array — no extra indirection.
-    """
+    """Pack args for MLIR's packed-args wrapper (one holder cell per arg)."""
+    holders = [ctypes.c_void_p(ctypes.addressof(a)) for a in args]
     packed = (ctypes.c_void_p * len(args))()
-    for i, arg in enumerate(args):
-        packed[i] = ctypes.addressof(arg)
+    for i, h in enumerate(holders):
+        packed[i] = ctypes.addressof(h)
     result = ctypes.c_void_p(ctypes.addressof(packed))
-    # Keep the slot array and original args alive for the caller's scope.
-    result._keepalive = (packed, args)  # type: ignore[attr-defined]
+    result._keepalive = (packed, holders, args)  # keep intermediates alive  # type: ignore[attr-defined]
     return result
 
 
