@@ -469,9 +469,9 @@ if __name__ == "__main__":
     parser.add_argument("--ctx", type=int, default=0,
                         help="Context length (0 = run default sweep)")
     parser.add_argument("--kv_block_size", type=int, default=16)
-    parser.add_argument("--block_k", type=int, default=128,
+    parser.add_argument("--block_k", type=int, default=256,
                         help="Tokens per chunk (multiple of MFMA_N=16, divisible by num_warps)")
-    parser.add_argument("--num_iters", type=int, default=20)
+    parser.add_argument("--num_iters", type=int, default=30)
     parser.add_argument("--num_warmup", type=int, default=5)
     parser.add_argument("--num_warps", type=int, default=4,
                         help="warps per CTA (pipelined kernel only); BLOCK=num_warps*64")

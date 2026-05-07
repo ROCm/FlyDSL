@@ -417,19 +417,38 @@ def build_pa_mqa_logits_fp4_module(
                 # we stay within the same lane_div_16 group). After this each
                 # thread's `partials[elem]` holds the full 64-head sum for
                 # token = lane_div_16*4 + elem within this N-tile.
+                #
+                # XOR by 1, 2 stay within 4-lane quad — use DPP quad_perm
+                # (~4 cyc, no LDS). XOR by 4, 8 cross quads — ds_bpermute.
+                #   XOR 1: perm [1,0,3,2] = 1 | 0<<2 | 3<<4 | 2<<6 = 0xB1
+                #   XOR 2: perm [2,3,0,1] = 2 | 3<<2 | 0<<4 | 1<<6 = 0x4E
                 lane_raw = lane_id if not hasattr(lane_id, 'ir_value') else lane_id.ir_value()
                 c4_i32 = arith.constant(4, type=T.i32)
+
+                def _dpp_xor_add(val, dpp_ctrl):
+                    val_raw = val if not hasattr(val, 'ir_value') else val.ir_value()
+                    val_i32 = arith.ArithValue(val_raw).bitcast(T.i32)
+                    peer_i32 = rocdl.update_dpp(
+                        T.i32, val_i32, val_i32, dpp_ctrl, 0xF, 0xF, True)
+                    peer_f32 = arith.ArithValue(peer_i32).bitcast(T.f32)
+                    return arith.ArithValue(val_raw).addf(peer_f32)
+
+                def _bperm_xor_add(val, sh):
+                    sh_c = arith.constant(sh, type=T.i32)
+                    peer_lane = arith.XOrIOp(lane_raw, sh_c).result
+                    peer_byte = arith.MulIOp(peer_lane, c4_i32).result
+                    val_raw = val if not hasattr(val, 'ir_value') else val.ir_value()
+                    val_i32 = arith.ArithValue(val_raw).bitcast(T.i32)
+                    peer_i32 = rocdl.ds_bpermute(T.i32, peer_byte, val_i32)
+                    peer_f32 = arith.ArithValue(peer_i32).bitcast(T.f32)
+                    return arith.ArithValue(val_raw).addf(peer_f32)
+
                 for elem_idx in range_constexpr(4):
                     val = partials[elem_idx]
-                    for sh in [1, 2, 4, 8]:
-                        sh_c = arith.constant(sh, type=T.i32)
-                        peer_lane = arith.XOrIOp(lane_raw, sh_c).result
-                        peer_byte = arith.MulIOp(peer_lane, c4_i32).result
-                        val_raw = val if not hasattr(val, 'ir_value') else val.ir_value()
-                        val_i32 = arith.ArithValue(val_raw).bitcast(T.i32)
-                        peer_i32 = rocdl.ds_bpermute(T.i32, peer_byte, val_i32)
-                        peer_f32 = arith.ArithValue(peer_i32).bitcast(T.f32)
-                        val = arith.ArithValue(val_raw).addf(peer_f32)
+                    val = _dpp_xor_add(val, 0xB1)  # XOR by 1
+                    val = _dpp_xor_add(val, 0x4E)  # XOR by 2
+                    val = _bperm_xor_add(val, 4)
+                    val = _bperm_xor_add(val, 8)
                     partials[elem_idx] = val
 
                 # Each thread holds 4 final logits for tokens
