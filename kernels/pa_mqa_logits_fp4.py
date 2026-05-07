@@ -34,6 +34,7 @@ import torch
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.expr import arith, buffer_ops, const_expr, gpu, rocdl, vector
+from flydsl.expr.primitive import range_constexpr
 from flydsl.expr.typing import T, Int32
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from flydsl._mlir import ir as _ir
@@ -132,21 +133,37 @@ def compute_varctx_schedule(
 
 
 def build_pa_mqa_logits_fp4_module(
-    block_k=64,
+    block_k=128,
     kv_block_size=16,
     max_blocks_per_seq=256,
+    max_chunks_per_cta=16,
+    num_warps=4,
 ):
-    """Build FP4 MQA logits kernel.
+    """Build FP4 MQA logits kernel (pipelined, block_k=128).
 
     Returns (kernel_fn, allocator).
 
-    Grid: (batch_size, cdiv(T_max, block_k))
+    Grid: (total_ctas,) from compute_varctx_schedule
     Block: (BLOCK_THREADS=256,)
+
+    `max_chunks_per_cta`: compile-time upper bound on the number of chunks any
+    CTA will process. Used to statically unroll block-table prefetch in the
+    prologue. Must be >= host-side `safe_chunks_per_cta`.
+
+    With block_k=128 and 4 warps, each warp processes N_TILES_PER_WARP=2 N-tiles
+    per chunk (= 32 tokens), giving more compute window per chunk to hide load
+    latency.
     """
+    MAX_CHUNKS_PER_CTA = max_chunks_per_cta
+    NUM_WARPS_K = num_warps          # build-time scoped (overrides module default)
+    BLOCK_THREADS_K = NUM_WARPS_K * WARP_SIZE
     global allocator
 
     N_TILES = block_k // MFMA_N
     N_TILES_PACKED = N_TILES // FP4_PACK_N  # packed N-tile groups
+    assert N_TILES % NUM_WARPS_K == 0, \
+        f"block_k={block_k} → N_TILES={N_TILES} must be multiple of num_warps={NUM_WARPS_K}"
+    N_TILES_PER_WARP = N_TILES // NUM_WARPS_K
 
     _stride_q_batch = HEADS * HEAD_DIM_PACKED
     _stride_qs_batch = HEADS * HEAD_DIM_SCALES
@@ -239,98 +256,176 @@ def build_pa_mqa_logits_fp4_module(
                 (qs_4b >> (lane_div_16 * fx.Int32(8))) & fx.Int32(0xFF))
 
         # Weights for this batch (HOISTED out of chunk loop too).
+        # Each lane needs 16 contiguous f32 weights (4 per mi_idx, 4 mi_idx).
+        # Per mi_idx the 4 elem values are at offsets [0..3] from a common
+        # base, so they fold into a single dwordx4 load.
         w_per_lane = []
         for mi_idx in [0, 1, 2, 3]:
+            h_base = mi_idx * MFMA_M + lane_div_16 * 4
+            w_vec4 = buffer_ops.buffer_load(
+                w_rsrc, pid_b * _stride_w_batch + h_base,
+                vec_width=4, dtype=T.f32)
             for elem in [0, 1, 2, 3]:
-                h_idx = mi_idx * MFMA_M + lane_div_16 * 4 + elem
-                w_per_lane.append(
-                    buffer_ops.buffer_load(
-                        w_rsrc, pid_b * _stride_w_batch + h_idx,
-                        vec_width=1, dtype=T.f32))
+                w_per_lane.append(vector.extract(w_vec4, static_position=[elem]))
 
-        # ── Loop over this CTA's chunks (1..safe_chunks_per_cta) ──
-        # FlyDSL scf.for needs at least one carried value; pass a dummy.
-        # Loop bounds must be index type; loop var c_idx is index too.
-        _dummy = arith.constant(0, type=T.i32)
-        chunk_count_idx = arith.index_cast(T.index, chunk_count)
-        for c_idx, _state in range(0, chunk_count_idx, 1, init=[_dummy]):
-            c_idx_i32 = arith.index_cast(T.i32, c_idx)
-            kv_chunk_start = (chunk_start + c_idx_i32) * fx.Int32(block_k)
-
-            # Each warp processes one N-tile of 16 tokens within this chunk.
-            ni_warp = warp_id
-            token_base = kv_chunk_start + ni_warp * MFMA_N
-            token_global = token_base + lane_mod_16
-            token_valid = token_global < context_len
-
-            safe_token = token_valid.select(token_global, c0_i32)
-            block_idx_in_seq = safe_token // kv_block_size
-            token_in_block = safe_token % kv_block_size
-
-            phys_block = buffer_ops.buffer_load(
-                bt_rsrc, pid_b * _stride_bt + block_idx_in_seq,
-                vec_width=1, dtype=T.i32)
-            phys_block = token_valid.select(phys_block, c0_i32)
-
-            kv_off_bytes = (
-                phys_block * _stride_kv_block
-                + lane_div_16 * kv_block_size * 16
-                + token_in_block * 16
-            )
-            kv_4xi32 = buffer_ops.buffer_load(
-                kv_rsrc, kv_off_bytes // 4, vec_width=4, dtype=T.i32)
-
-            kv_0 = token_valid.select(vector.extract(kv_4xi32, static_position=[0]), c0_i32)
-            kv_1 = token_valid.select(vector.extract(kv_4xi32, static_position=[1]), c0_i32)
-            kv_2 = token_valid.select(vector.extract(kv_4xi32, static_position=[2]), c0_i32)
-            kv_3 = token_valid.select(vector.extract(kv_4xi32, static_position=[3]), c0_i32)
-
-            kv_i64_0 = _pack_i32_pair_to_i64(kv_0, kv_1)
-            kv_i64_1 = _pack_i32_pair_to_i64(kv_2, kv_3)
-            kv_b = _pack_i64x4_to_i32x8(kv_i64_0, kv_i64_1, c0_i64, c0_i64)
-
-            kvs_off_i32 = phys_block * kv_block_size + token_in_block
-            kvs_4b = buffer_ops.buffer_load(
-                kvs_rsrc, kvs_off_i32, vec_width=1, dtype=T.i32)
-            kv_scale_val = (kvs_4b >> (lane_div_16 * fx.Int32(8))) & fx.Int32(0xFF)
-            kv_scale_val = token_valid.select(kv_scale_val, c0_i32)
-
-            zero = arith.constant_vector(0.0, T.f32x4)
-            accs = []
-            for mi_idx in [0, 1, 2, 3]:
-                acc = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
-                    T.f32x4,
-                    [q_a_ops[mi_idx], kv_b, zero,
-                     4, 4,
-                     0, q_scale_ops[mi_idx],
-                     0, kv_scale_val],
+        # ── Step 2A: prefetch all phys_block indices in prologue ──
+        # block_k=128, 4 warps × N_TILES_PER_WARP=2 N-tiles per chunk.
+        # For each (chunk, n_tile) pair, prefetch phys_block. Each warp's
+        # phys_block for a given (c, n_tile) is uniform across lanes since
+        # lane_mod_16 < kv_block_size keeps token_global / kv_block_size constant.
+        # We use N_TILES_PER_WARP separate vectors indexed by chunk_idx.
+        phys_blocks_vecs = [
+            arith.constant_vector(0, T.vec(MAX_CHUNKS_PER_CTA, T.i32))
+            for _ in range_constexpr(N_TILES_PER_WARP)
+        ]
+        for c in range_constexpr(MAX_CHUNKS_PER_CTA):
+            c_i32 = fx.Int32(c)
+            for nt in range_constexpr(N_TILES_PER_WARP):
+                ni_c = warp_id * fx.Int32(N_TILES_PER_WARP) + fx.Int32(nt)
+                warp_chunk_token = (
+                    (chunk_start + c_i32) * fx.Int32(block_k)
+                    + ni_c * fx.Int32(MFMA_N)
+                    + lane_mod_16
                 )
-                accs.append(acc)
+                bi_c = warp_chunk_token // fx.Int32(kv_block_size)
+                pb_c = buffer_ops.buffer_load(
+                    bt_rsrc, pid_b * _stride_bt + bi_c, vec_width=1, dtype=T.i32)
+                phys_blocks_vecs[nt] = vector.insert(
+                    pb_c, phys_blocks_vecs[nt], static_position=[c], dynamic_position=[])
 
-            for mi_idx in [0, 1, 2, 3]:
-                for elem in [0, 1, 2, 3]:
-                    v = vector.extract(accs[mi_idx], static_position=[elem])
-                    v = v.maximumf(ZERO_F)
-                    v = v * w_per_lane[mi_idx * 4 + elem]
-                    accs[mi_idx] = vector.insert(
-                        v, accs[mi_idx], static_position=[elem], dynamic_position=[])
+        # ── Step 3 (block_k=128): prologue + N-1 prefetch loop + epilogue ──
+        # Per chunk: each warp handles N_TILES_PER_WARP=2 N-tiles (32 tokens).
+        # Carry across iters: list of (kv_4xi32, kvs_4b) for every N-tile of cur.
 
-            logit_val = ZERO_F
-            for mi_idx in [0, 1, 2, 3]:
-                for elem in [0, 1, 2, 3]:
-                    v = vector.extract(accs[mi_idx], static_position=[elem])
-                    logit_val = logit_val + v
+        def _prefetch_chunk(c_i32_arg, c_idx_arg):
+            """Issue KV+scale loads for chunk c (all N_TILES_PER_WARP N-tiles).
+            Returns (kv_list, kvs_list) of length N_TILES_PER_WARP."""
+            kv_list = []
+            kvs_list = []
+            for nt in range_constexpr(N_TILES_PER_WARP):
+                ni_c = warp_id * fx.Int32(N_TILES_PER_WARP) + fx.Int32(nt)
+                token_global_c = (
+                    (chunk_start + c_i32_arg) * fx.Int32(block_k)
+                    + ni_c * fx.Int32(MFMA_N)
+                    + lane_mod_16
+                )
+                token_valid_c = token_global_c < context_len
+                safe_token_c = token_valid_c.select(token_global_c, c0_i32)
+                token_in_block_c = safe_token_c % kv_block_size
+                phys_block_c = vector.extract(
+                    phys_blocks_vecs[nt], dynamic_position=[c_idx_arg])
+                phys_block_c_safe = token_valid_c.select(phys_block_c, c0_i32)
+                kv_off_bytes_c = (
+                    phys_block_c_safe * _stride_kv_block
+                    + lane_div_16 * kv_block_size * 16
+                    + token_in_block_c * 16
+                )
+                kv_4xi32_c = buffer_ops.buffer_load(
+                    kv_rsrc, kv_off_bytes_c // 4, vec_width=4, dtype=T.i32)
+                kvs_off_c = phys_block_c_safe * kv_block_size + token_in_block_c
+                kvs_4b_c = buffer_ops.buffer_load(
+                    kvs_rsrc, kvs_off_c, vec_width=1, dtype=T.i32)
+                kv_list.append(kv_4xi32_c)
+                kvs_list.append(kvs_4b_c)
+            return kv_list, kvs_list
 
-            for sh in [16, 32]:
-                peer = logit_val.shuffle_xor(fx.Int32(sh), c_w)
-                logit_val = logit_val + peer
+        def _compute_chunk(kv_list_in, kvs_list_in, c_i32_arg):
+            """Process chunk c using prefetched (kv_list, kvs_list)."""
+            for nt in range_constexpr(N_TILES_PER_WARP):
+                ni_warp = warp_id * fx.Int32(N_TILES_PER_WARP) + fx.Int32(nt)
+                token_base = (
+                    (chunk_start + c_i32_arg) * fx.Int32(block_k)
+                    + ni_warp * fx.Int32(MFMA_N)
+                )
+                token_global = token_base + lane_mod_16
+                token_valid = token_global < context_len
 
-            out_token = token_base + lane_mod_16
-            in_bounds = out_token < context_len
-            logit_val = in_bounds.select(logit_val, NEG_INF)
-            out_off = pid_b * stride_out_batch + out_token
-            buffer_ops.buffer_store(logit_val, out_rsrc, out_off)
+                kv_4xi32 = kv_list_in[nt]
+                kvs_4b = kvs_list_in[nt]
 
-            yield [_dummy]   # carry the dummy through the loop
+                kv_0 = token_valid.select(vector.extract(kv_4xi32, static_position=[0]), c0_i32)
+                kv_1 = token_valid.select(vector.extract(kv_4xi32, static_position=[1]), c0_i32)
+                kv_2 = token_valid.select(vector.extract(kv_4xi32, static_position=[2]), c0_i32)
+                kv_3 = token_valid.select(vector.extract(kv_4xi32, static_position=[3]), c0_i32)
+                kv_i64_0 = _pack_i32_pair_to_i64(kv_0, kv_1)
+                kv_i64_1 = _pack_i32_pair_to_i64(kv_2, kv_3)
+                kv_b = _pack_i64x4_to_i32x8(kv_i64_0, kv_i64_1, c0_i64, c0_i64)
+                kv_scale_val = (kvs_4b >> (lane_div_16 * fx.Int32(8))) & fx.Int32(0xFF)
+                kv_scale_val = token_valid.select(kv_scale_val, c0_i32)
 
+                zero = arith.constant_vector(0.0, T.f32x4)
+                accs = []
+                for mi_idx in [0, 1, 2, 3]:
+                    acc = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
+                        T.f32x4,
+                        [q_a_ops[mi_idx], kv_b, zero,
+                         4, 4,
+                         0, q_scale_ops[mi_idx],
+                         0, kv_scale_val],
+                    )
+                    accs.append(acc)
+
+                for mi_idx in [0, 1, 2, 3]:
+                    for elem in [0, 1, 2, 3]:
+                        v = vector.extract(accs[mi_idx], static_position=[elem])
+                        v = v.maximumf(ZERO_F)
+                        v = v * w_per_lane[mi_idx * 4 + elem]
+                        accs[mi_idx] = vector.insert(
+                            v, accs[mi_idx], static_position=[elem], dynamic_position=[])
+
+                # Tree reduction: 16 dependent adds → 4 (within vec4) + 2 (across mi_idx) = depth 4.
+                # 4 partial sums execute on independent registers in parallel.
+                partials = []
+                for mi_idx in [0, 1, 2, 3]:
+                    e0 = vector.extract(accs[mi_idx], static_position=[0])
+                    e1 = vector.extract(accs[mi_idx], static_position=[1])
+                    e2 = vector.extract(accs[mi_idx], static_position=[2])
+                    e3 = vector.extract(accs[mi_idx], static_position=[3])
+                    partials.append((e0 + e1) + (e2 + e3))
+                logit_val = (partials[0] + partials[1]) + (partials[2] + partials[3])
+
+                for sh in [16, 32]:
+                    peer = logit_val.shuffle_xor(fx.Int32(sh), c_w)
+                    logit_val = logit_val + peer
+
+                out_token = token_base + lane_mod_16
+                in_bounds = out_token < context_len
+                logit_val = in_bounds.select(logit_val, NEG_INF)
+                out_off = pid_b * stride_out_batch + out_token
+                buffer_ops.buffer_store(logit_val, out_rsrc, out_off)
+
+        # === Prologue: prefetch chunk 0 ===
+        c0_idx_const = arith.constant(0, type=T.index)
+        kv_list_pre, kvs_list_pre = _prefetch_chunk(c0_i32, c0_idx_const)
+
+        # === Main loop: chunk_count - 1 iterations ===
+        # Carry = [kv_t0, kv_t1, ..., kvs_t0, kvs_t1, ...]
+        chunk_count_minus_1_i32 = chunk_count - fx.Int32(1)
+        chunk_count_minus_1_idx = arith.index_cast(T.index, chunk_count_minus_1_i32)
+        init_args = list(kv_list_pre) + list(kvs_list_pre)
+        for c_idx, state in range(
+                0, chunk_count_minus_1_idx, 1, init=init_args):
+            kv_cur_list = [state[i] for i in range(N_TILES_PER_WARP)]
+            kvs_cur_list = [state[N_TILES_PER_WARP + i] for i in range(N_TILES_PER_WARP)]
+            c_idx_i32 = arith.index_cast(T.i32, c_idx)
+            c_next_i32 = c_idx_i32 + fx.Int32(1)
+            c_next_idx = arith.index_cast(T.index, c_next_i32)
+
+            # Issue prefetch for chunk c+1
+            kv_next_list, kvs_next_list = _prefetch_chunk(c_next_i32, c_next_idx)
+
+            # Compute MFMA + store on current chunk
+            _compute_chunk(kv_cur_list, kvs_cur_list, c_idx_i32)
+
+            results = yield list(kv_next_list) + list(kvs_next_list)
+
+        # === Epilogue: process last chunk (chunk_count - 1) ===
+        kv_last_list = [results[i] for i in range(N_TILES_PER_WARP)]
+        kvs_last_list = [results[N_TILES_PER_WARP + i] for i in range(N_TILES_PER_WARP)]
+        last_c_i32 = chunk_count - fx.Int32(1)
+        _compute_chunk(kv_last_list, kvs_last_list, last_c_i32)
+
+    # Attach actual block threads count for the launcher (so the test can use
+    # the right block dim when num_warps != module-level default).
+    allocator.block_threads = BLOCK_THREADS_K
     return pa_mqa_logits_fp4_kernel, allocator

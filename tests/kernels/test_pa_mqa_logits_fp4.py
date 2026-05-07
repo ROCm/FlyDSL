@@ -16,9 +16,7 @@ sys.path.insert(1, ".")
 
 os.environ.setdefault("FLYDSL_DUMP_IR", "1")
 
-_VARIANT = os.environ.get("PA_MQA_VARIANT",
-    "pipelined" if os.environ.get("PA_MQA_PIPELINED", "0") == "1" else "baseline")
-_USE_PIPELINED = _VARIANT in ("pipelined", "single")
+_VARIANT = os.environ.get("PA_MQA_VARIANT", "baseline")
 if _VARIANT == "single":
     from kernels.pa_mqa_logits_fp4_single import (
         build_pa_mqa_logits_fp4_module,
@@ -28,15 +26,6 @@ if _VARIANT == "single":
         allocator as _alloc_ref,
     )
     print("[test] using pa_mqa_logits_fp4_SINGLE kernel (single chunk per CTA)")
-elif _VARIANT == "pipelined":
-    from kernels.pa_mqa_logits_fp4_pipelined import (
-        build_pa_mqa_logits_fp4_module,
-        compute_varctx_schedule,
-        HEADS, HEAD_DIM, HEAD_DIM_PACKED, HEAD_DIM_SCALES,
-        BLOCK_THREADS,
-        allocator as _alloc_ref,
-    )
-    print("[test] using pa_mqa_logits_fp4_PIPELINED kernel")
 else:
     from kernels.pa_mqa_logits_fp4 import (
         build_pa_mqa_logits_fp4_module,
@@ -304,10 +293,8 @@ def test_pa_mqa_logits_fp4(
 
     # ---- Build flydsl kernel (pipelined kernel uses safe + num_warps as constexpr) ----
     _build_kwargs = dict(block_k=block_k, kv_block_size=kv_block_size,
-                         max_blocks_per_seq=max_blocks_per_seq)
-    if _USE_PIPELINED:
-        _build_kwargs["max_chunks_per_cta"] = safe
-        _build_kwargs["num_warps"] = num_warps
+                         max_blocks_per_seq=max_blocks_per_seq,
+                         max_chunks_per_cta=safe, num_warps=num_warps)
     kfn, alloc = build_pa_mqa_logits_fp4_module(**_build_kwargs)
     block_threads = getattr(alloc, "block_threads", BLOCK_THREADS)
 
@@ -419,9 +406,8 @@ if __name__ == "__main__":
     parser.add_argument("--ctx", type=int, default=0,
                         help="Context length (0 = run default sweep)")
     parser.add_argument("--kv_block_size", type=int, default=16)
-    parser.add_argument("--block_k", type=int,
-                        default=(128 if _USE_PIPELINED else 64),
-                        help="Default 128 when PA_MQA_PIPELINED=1, else 64")
+    parser.add_argument("--block_k", type=int, default=128,
+                        help="Tokens per chunk (multiple of MFMA_N=16, divisible by num_warps)")
     parser.add_argument("--num_iters", type=int, default=20)
     parser.add_argument("--num_warmup", type=int, default=5)
     parser.add_argument("--num_warps", type=int, default=4,
