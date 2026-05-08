@@ -273,6 +273,15 @@ def build_pa_mqa_logits_fp4_module(
         lane_mod_16 = lane_id & 15
         lane_div_16 = (lane_id >> 4) & 3
 
+        # ── Persistent CTA assignment lookup (one dwordx4 load) ────
+        # Layout per CTA: [batch_packed, chunk_start, chunk_count, ctx_len].
+        # Issued FIRST so its VMEM latency overlaps with the 7 other SRD scalar
+        # setups below. Every subsequent address calc depends on these 4 values,
+        # so any extra hiding here directly cuts the prologue critical path.
+        cta_info_rsrc = buffer_ops.create_buffer_resource(cta_info_ptr, max_size=True)
+        cta_info_4xi32 = buffer_ops.buffer_load(
+            cta_info_rsrc, pid * fx.Int32(4), vec_width=4, dtype=T.i32)
+
         q_rsrc = buffer_ops.create_buffer_resource(q_ptr, max_size=True)
         qs_rsrc = buffer_ops.create_buffer_resource(q_scale_ptr, max_size=True)
         kv_rsrc = buffer_ops.create_buffer_resource(kv_cache_ptr, max_size=True)
@@ -280,16 +289,10 @@ def build_pa_mqa_logits_fp4_module(
         bt_rsrc = buffer_ops.create_buffer_resource(kv_indices_ptr, max_size=True)
         w_rsrc = buffer_ops.create_buffer_resource(weights_ptr, max_size=True)
         out_rsrc = buffer_ops.create_buffer_resource(out_logits_ptr, max_size=True)
-        cta_info_rsrc = buffer_ops.create_buffer_resource(cta_info_ptr, max_size=True)
 
         ZERO_F = fx.Float32(0.0)
         c0_i32 = fx.Int32(0)
 
-        # ── Persistent CTA assignment lookup (one dwordx4 load) ────
-        # Layout per CTA: [batch_packed, chunk_start, chunk_count, ctx_len]
-        # batch_packed = pid_b * NEXT_N + pid_next_n. Decoded below.
-        cta_info_4xi32 = buffer_ops.buffer_load(
-            cta_info_rsrc, pid * fx.Int32(4), vec_width=4, dtype=T.i32)
         batch_packed = vector.extract(cta_info_4xi32, static_position=[0])
         chunk_start = vector.extract(cta_info_4xi32, static_position=[1])
         chunk_count = vector.extract(cta_info_4xi32, static_position=[2])
@@ -498,13 +501,15 @@ def build_pa_mqa_logits_fp4_module(
                 # token=lane_mod_16. Summing over (mi_idx, elem) within the
                 # thread gives the partial logit for the thread's token using
                 # 16 of the 64 heads (one quarter, picked by lane_div_16).
+                # Vectorized over the 4 elems of each f32x4: ReLU + weight mul
+                # become single v4f32 arith ops → backend packs into v_pk_max_f32
+                # / v_pk_mul_f32 pairs (~halves the scalar VALU count).
                 thread_sum = ZERO_F
                 for mi_idx in range_constexpr(M_TILES):
+                    relu_v = arith.maximumf(accs[mi_idx], zero)
+                    prod_v = arith.mulf(relu_v, w_per_lane[mi_idx])
                     for elem in [0, 1, 2, 3]:
-                        v = vector.extract(accs[mi_idx], static_position=[elem])
-                        v = v.maximumf(ZERO_F)
-                        w = vector.extract(w_per_lane[mi_idx], static_position=[elem])
-                        thread_sum = thread_sum + v * w
+                        thread_sum = thread_sum + vector.extract(prod_v, static_position=[elem])
 
                 # Cross-lane reduction across the 4 lane_div_16 groups: XOR by
                 # 16 swaps groups 0↔1, 2↔3 (toggles bit 4 of lane_id); XOR by
