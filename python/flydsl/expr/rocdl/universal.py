@@ -2,7 +2,10 @@
 # Copyright (c) 2025 FlyDSL Project Contributors
 
 from ..._mlir import ir
-from ..._mlir._mlir_libs._mlirDialectsFlyROCDL import MmaOpGFX1250_WMMAType
+from ..._mlir._mlir_libs._mlirDialectsFlyROCDL import (
+    MmaOpGFX1250_WMMAType,
+    MmaOpRDNA3_WMMAType,
+)
 from ..._mlir.dialects import arith, fly
 from ..._mlir.dialects._fly_enum_gen import AddressSpace
 from ..._mlir.dialects.fly import AtomicOp, PointerType
@@ -14,6 +17,7 @@ from ..._mlir.dialects.fly_rocdl import (
     TargetAddressSpace,
 )
 from ..._mlir.extras import types as T
+from ...runtime.device import get_rocm_arch
 from ..primitive import (
     get_iter,
     get_layout,
@@ -83,13 +87,52 @@ def MFMA(m, n, k, elem_ty_ab, elem_ty_acc=None):
     return MmaOpCDNA3_MFMAType.get(m, n, k, ty_ab, ty_ab, ty_acc)
 
 
-def WMMA(m, n, k, elem_ty_ab, elem_ty_acc=None):
+def WMMA_GFX1250(m, n, k, elem_ty_ab, elem_ty_acc=None):
+    """Create a GFX1250-class WMMA atom (MI450, K=4/32/64/128, FP8/FP4/scaled OK)."""
     ty_ab = elem_ty_ab.ir_type if hasattr(elem_ty_ab, "ir_type") else elem_ty_ab
     if elem_ty_acc is None:
         ty_acc = ir.F32Type.get()
     else:
         ty_acc = elem_ty_acc.ir_type if hasattr(elem_ty_acc, "ir_type") else elem_ty_acc
     return MmaOpGFX1250_WMMAType.get(m, n, k, ty_ab, ty_ab, ty_acc)
+
+
+def WMMA_RDNA3(m, n, k, elem_ty_ab, elem_ty_acc=None):
+    """Create an RDNA 3 / 3.5 WMMA atom (gfx1100/gfx1150).
+
+    Only M=N=K=16 with F16/BF16/IU8/IU4 input dtypes is supported. FP8/FP4,
+    scaled WMMA, sparse SWMMAC, and K != 16 require gfx12+ and are rejected
+    by the C++ ``verify`` of ``MmaOpRDNA3_WMMAType``.
+    """
+    ty_ab = elem_ty_ab.ir_type if hasattr(elem_ty_ab, "ir_type") else elem_ty_ab
+    if elem_ty_acc is None:
+        ty_acc = ir.F32Type.get()
+    else:
+        ty_acc = elem_ty_acc.ir_type if hasattr(elem_ty_acc, "ir_type") else elem_ty_acc
+    return MmaOpRDNA3_WMMAType.get(m, n, k, ty_ab, ty_ab, ty_acc)
+
+
+def _is_rdna3_arch(arch: str) -> bool:
+    """Return True for arch strings that match RDNA 3 / RDNA 3.5 (gfx110x / gfx115x)."""
+    return arch.startswith("gfx110") or arch.startswith("gfx115")
+
+
+def WMMA(m, n, k, elem_ty_ab, elem_ty_acc=None):
+    """Create a wave32 WMMA atom appropriate for the current GPU arch.
+
+    Dispatches to :func:`WMMA_RDNA3` for gfx110x / gfx115x (RDNA 3 / 3.5,
+    K=16-only intrinsics) and to :func:`WMMA_GFX1250` for gfx12+ MI450-class
+    chips (K=4/32/64/128, FP8/FP4, scaled). Use the explicit ``WMMA_RDNA3`` /
+    ``WMMA_GFX1250`` constructors when a kernel must pin a specific atom
+    regardless of the runtime arch (e.g. tests).
+    """
+    try:
+        arch = str(get_rocm_arch())
+    except Exception:
+        arch = ""
+    if _is_rdna3_arch(arch):
+        return WMMA_RDNA3(m, n, k, elem_ty_ab, elem_ty_acc)
+    return WMMA_GFX1250(m, n, k, elem_ty_ab, elem_ty_acc)
 
 
 def make_buffer_tensor(tensor: Tensor, max_size: bool = True) -> Tensor:

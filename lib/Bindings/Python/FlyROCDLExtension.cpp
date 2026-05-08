@@ -78,6 +78,26 @@ struct PyMmaOpGFX1250_WMMAType : PyConcreteType<PyMmaOpGFX1250_WMMAType> {
   }
 };
 
+struct PyMmaOpRDNA3_WMMAType : PyConcreteType<PyMmaOpRDNA3_WMMAType> {
+  FLYDSL_REGISTER_TYPE_BINDING(MmaOpRDNA3_WMMAType, "MmaOpRDNA3_WMMAType");
+
+  static void bindDerived(ClassTy &c) {
+    c.def_static(
+        "get",
+        [](int32_t m, int32_t n, int32_t k, PyType &elemTyA, PyType &elemTyB, PyType &elemTyAcc,
+           DefaultingPyMlirContext context) {
+          return PyMmaOpRDNA3_WMMAType(
+              context->getRef(),
+              wrap(MmaOpRDNA3_WMMAType::get(m, n, k, unwrap(elemTyA), unwrap(elemTyB),
+                                            unwrap(elemTyAcc))));
+        },
+        "m"_a, "n"_a, "k"_a, "elem_ty_a"_a, "elem_ty_b"_a, "elem_ty_acc"_a, nb::kw_only(),
+        "context"_a = nb::none(),
+        "Create a MmaOpRDNA3_WMMAType for RDNA 3 / 3.5 WMMA (gfx1100/gfx1150). "
+        "Only M=N=K=16 with F16/BF16/IU8/IU4 inputs is accepted.");
+  }
+};
+
 struct PyCopyOpCDNA3BufferCopyType : PyConcreteType<PyCopyOpCDNA3BufferCopyType> {
   FLYDSL_REGISTER_TYPE_BINDING(CopyOpCDNA3BufferCopyType, "CopyOpCDNA3BufferCopyType");
 
@@ -158,6 +178,7 @@ NB_MODULE(_mlirDialectsFlyROCDL, m) {
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyMmaOpCDNA3_MFMAType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyMmaOpCDNA4_MFMAScaleType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyMmaOpGFX1250_WMMAType::bind(m);
+  ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyMmaOpRDNA3_WMMAType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyCopyOpCDNA3BufferCopyType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyCopyOpCDNA3BufferCopyLDSType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyCopyOpCDNA3BufferAtomicType::bind(m);
