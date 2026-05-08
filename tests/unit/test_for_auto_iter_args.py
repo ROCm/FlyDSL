@@ -84,6 +84,42 @@ def _run_range_3args(n: fx.Int32, stream: fx.Stream = fx.Stream(None)):
     _kernel_range_3args(n).launch(grid=(1, 1, 1), block=(1, 1, 1), stream=stream.value)
 
 
+# ── Case 5: iv liveout (i initialized before loop, used after) ──────────────
+
+
+@flyc.kernel
+def _kernel_iv_liveout(Out: fx.Tensor, n: fx.Int32):
+    i = fx.Int32(999)
+    acc = fx.Int32(0)
+    for i in range(n):
+        acc = acc + fx.Int32(1)
+    rsrc = fx.buffer_ops.create_buffer_resource(Out)
+    fx.buffer_ops.buffer_store(i, rsrc, fx.Int32(0))
+    fx.buffer_ops.buffer_store(acc, rsrc, fx.Int32(1))
+
+
+@flyc.jit
+def _run_iv_liveout(Out: fx.Tensor, n: fx.Int32, stream: fx.Stream = fx.Stream(None)):
+    _kernel_iv_liveout(Out, n).launch(grid=(1, 1, 1), block=(1, 1, 1), stream=stream.value)
+
+
+# ── Case 6: iv assigned to iter_arg (count = iv) ───────────────────────────
+
+
+@flyc.kernel
+def _kernel_iv_assign(Out: fx.Tensor, start: fx.Int32, stop: fx.Int32):
+    count = fx.Int32(0)
+    for iv in range(start, stop):
+        count = iv
+    rsrc = fx.buffer_ops.create_buffer_resource(Out)
+    fx.buffer_ops.buffer_store(count, rsrc, fx.Int32(0))
+
+
+@flyc.jit
+def _run_iv_assign(Out: fx.Tensor, start: fx.Int32, stop: fx.Int32, stream: fx.Stream = fx.Stream(None)):
+    _kernel_iv_assign(Out, start, stop).launch(grid=(1, 1, 1), block=(1, 1, 1), stream=stream.value)
+
+
 # ── Tests ─────────────────────────────────────────────────────────────────────
 
 
@@ -103,3 +139,18 @@ class TestForAutoIterArgs:
     def test_range_3args(self):
         _run_range_3args(fx.Int32(8))
         torch.cuda.synchronize()
+
+    def test_iv_liveout(self):
+        out = torch.zeros(2, device="cuda", dtype=torch.int32)
+        t_out = flyc.from_dlpack(out).mark_layout_dynamic(leading_dim=0, divisibility=1)
+        _run_iv_liveout(t_out, fx.Int32(5))
+        torch.cuda.synchronize()
+        assert out[0].item() == 4, f"iv liveout: expected 4, got {out[0].item()}"
+        assert out[1].item() == 5, f"acc: expected 5, got {out[1].item()}"
+
+    def test_iv_assign(self):
+        out = torch.zeros(1, device="cuda", dtype=torch.int32)
+        t_out = flyc.from_dlpack(out).mark_layout_dynamic(leading_dim=0, divisibility=1)
+        _run_iv_assign(t_out, fx.Int32(0), fx.Int32(10))
+        torch.cuda.synchronize()
+        assert out[0].item() == 9, f"iv assign: expected 9, got {out[0].item()}"

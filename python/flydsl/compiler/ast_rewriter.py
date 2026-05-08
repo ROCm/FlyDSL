@@ -914,6 +914,7 @@ class InsertEmptyYieldForSCFFor(Transformer):
             f"_to_index expected ir.Value, object with ir_value(), or int; got {type(val).__name__}"
         )
 
+
     @staticmethod
     def scf_range(start, stop=None, step=None, *, init=None):
         if stop is None:
@@ -936,9 +937,17 @@ class InsertEmptyYieldForSCFFor(Transformer):
 
     @staticmethod
     def scf_for_dispatch(start, stop, step, body_fn, *, result_names=(), result_values=()):
-        start_val = InsertEmptyYieldForSCFFor._to_index(start)
-        stop_val = InsertEmptyYieldForSCFFor._to_index(stop)
-        step_val = InsertEmptyYieldForSCFFor._to_index(step)
+        start_val = _unwrap_value(start)
+        stop_val = _unwrap_value(stop)
+        step_val = _unwrap_value(step)
+
+        i32_ty = ir.IntegerType.get_signless(32)
+        for name, val in [("start", start_val), ("stop", stop_val), ("step", step_val)]:
+            if not isinstance(val, ir.Value) or val.type != i32_ty:
+                got = val.type if isinstance(val, ir.Value) else type(val).__name__
+                raise TypeError(
+                    f"for-loop {name} must be i32, got {got}"
+                )
 
         result_names = tuple(result_names)
         result_values = tuple(result_values)
@@ -993,15 +1002,12 @@ class InsertEmptyYieldForSCFFor(Transformer):
                 body_values, result_names, "for-body"
             )
             result_types = [v.type for v in state_raw]
-            for idx, (name, expect_ty, got) in enumerate(zip(result_names, result_types, body_raw)):
+            for name, expect_ty, got in zip(result_names, result_types, body_raw):
                 if got.type != expect_ty:
-                    if got.type == ir.IndexType.get() or expect_ty == ir.IndexType.get():
-                        body_raw[idx] = arith.IndexCastOp(expect_ty, got).result
-                    else:
-                        raise TypeError(
-                            f"for-loop variable '{name}' type mismatch: "
-                            f"expected {expect_ty}, got {got.type}"
-                        )
+                    raise TypeError(
+                        f"for-loop variable '{name}' type mismatch: "
+                        f"expected {expect_ty}, got {got.type}"
+                    )
             scf.YieldOp(body_raw)
 
         wrapped = ReplaceIfWithDispatch._pack_dispatch_results(
