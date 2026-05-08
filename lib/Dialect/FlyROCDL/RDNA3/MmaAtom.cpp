@@ -11,14 +11,19 @@
 //   V_WMMA_I32_16X16X16_IU8    IU8 -> I32  (clamp + signed/unsigned per operand)
 //   V_WMMA_I32_16X16X16_IU4    IU4 -> I32  (clamp + signed/unsigned per operand)
 //
-// The hardware uses the "WMMA256bInsts" convention: lanes 0-15 hold the
-// matrix data; lanes 16-31 are duplicates populated by the LLVM AMDGPU
-// codegen (round-tripped through the LLVM intrinsic interface). At the
-// IR / atom level we use the same lane-group-split logical layout as the
-// gfx1250 K=4 path, with each lane holding K/2 = 8 unique elements.
-// Concretely, lane group 0 (lane/16=0) covers K = 0..7 and lane group 1
-// (lane/16=1) covers K = 8..15. This mirrors what `kernels/rdna_f16_gemm.py`
-// (the existing wave32 raw-intrinsic kernel) constructs by hand.
+// A/B operand convention. The hardware "WMMA256bInsts" intrinsic expects
+// each lane to hold a 16-K-wide vector for one M (or N) row, with lanes
+// 0-15 and 16-31 holding identical data (replication invariant). Within
+// the FlyDSL atom we keep a compact 8-element-per-lane fragment where
+// lane group 0 (lane/16=0) carries K = 0..7 and lane group 1 (lane/16=1)
+// carries K = 8..15. At lowering time `expandTo16WideWmma256` merges the
+// two K halves into a 16-wide per-lane vector via cross-lane bpermute.
+//
+// C/D operand convention. The hardware writes the per-lane f32 / i32
+// accumulator with M *interleaved* between lane groups, NOT split into
+// contiguous halves. Lane n holds N = n%16 and val v -> M = 2*v + n/16.
+// `getThrValLayoutCD` describes this real layout, so the C-side fragment
+// requires no runtime cross-lane shuffles.
 //
 // FP8/FP4/scaled/sparse WMMA, K=4 / K=32 / K=64 / K=128 shapes, and the
 // transpose-load atoms are gfx12+ only and rejected by `verify` here.
@@ -59,29 +64,28 @@ LayoutAttr getThrValLayoutAB(MLIRContext *ctx) {
 // C/D operand register layout for RDNA 3 / 3.5 WMMA (wave32, M=N=16).
 //
 // The accumulator is always 16x16. Lane l covers N = l%16 (one column).
-// The two lane groups split M into two halves of 8 rows each:
-//   group 0 -> M = 0..7
-//   group 1 -> M = 8..15
+// Empirically validated against gfx1151: the hardware writes the per-lane
+// 8-wide accumulator with M *interleaved* between the two lane groups, not
+// split into contiguous halves:
+//   group 0 (l < 16) -> M = 0, 2, 4, 6, 8, 10, 12, 14   (even rows)
+//   group 1 (l >= 16) -> M = 1, 3, 5, 7, 9, 11, 13, 15  (odd rows)
+// i.e. for f32/i32 acc: lane l, val v -> M = 2*v + (l/16), N = l%16.
 //
-// 32-bit accumulator (f32, i32): 8 VGPRs, one element per VGPR.
-//   M = (l/16)*8 + v
-//
-// 16-bit accumulator (f16, bf16): the LLVM intrinsic returns a 16-wide
-// vector with the OpSel[2] hi/lo bit selecting which half is live; from
-// the FlyDSL atom perspective each lane still holds 8 distinct M
-// coordinates, packed two-per-VGPR (4 VGPRs, sub-element index within VGPR).
-//   M = (l/16)*8 + v*2 + s
+// This matches the AMD gfx11 WMMA hardware natural output ordering. The
+// previous implementation declared a contiguous {M = (l/16)*8 + v} layout
+// and "fixed" the mismatch with cross-lane ds_bpermute swizzles at every
+// WMMA call (~32 ds_bpermute per call). Describing the real layout removes
+// all C-side runtime shuffles.
 //
 // Reference space is column-major (M, N) with stride (1, M=16).
 LayoutAttr getThrValLayoutCD(MLIRContext *ctx, Type elemTyAcc) {
   auto getContext = [&]() { return ctx; };
 
   (void)elemTyAcc;
-  // Keep a single canonical 8-value lane fragment layout for all accumulator
-  // types. The lowering may internally use packed/native forms, but the atom
-  // interface exposes a consistent vec8 fragment to tiled_copy_C.
+  // pos = (l%16)*16 + (l/16)*1 + v*2
+  //     = N*M_stride(=16) + (M = 2v + l/16)*1
   return FxLayout(FxShape(FxThr(16, 2), FxVal(8)),
-                  FxStride(FxThr(16, 8), FxVal(1)));
+                  FxStride(FxThr(16, 1), FxVal(2)));
 }
 
 } // namespace rdna3
@@ -346,112 +350,23 @@ FailureOr<Value> MmaOpRDNA3_WMMAType::emitAtomCallSSA(
                                          concatMask);
   };
 
-  auto duplicateTo16WideSimple = [&](Value v) -> Value {
-    auto vt = dyn_cast<VectorType>(v.getType());
-    if (!vt || vt.getShape().size() != 1 || vt.getShape()[0] != 8)
-      return v;
-    auto wideTy = VectorType::get({16}, vt.getElementType());
-    SmallVector<int32_t> mask = {0, 1, 2, 3, 4, 5, 6, 7,
-                                 0, 1, 2, 3, 4, 5, 6, 7};
-    return LLVM::ShuffleVectorOp::create(builder, loc, wideTy, v, v, mask);
-  };
-
-  // Empirically, RDNA3/3.5 `rocdl.wmma.f32.16x16x16.*` returns the per-lane
-  // 8-wide accumulator in a lane-local order different from the default
-  // FlyDSL f32 C-fragment order. Reorder to the fragment convention expected
-  // by `getThrValLayoutCD` / tiled_copy_C.
-  auto reorderAccLaneValues = [&](Value v) -> Value {
-    auto vt = dyn_cast<VectorType>(v.getType());
-    if (!vt || vt.getShape().size() != 1 || vt.getShape()[0] != 8)
-      return v;
-    bool isF32 = vt.getElementType().isF32();
-    bool isI32 = vt.getElementType().isInteger(32);
-    if (!isF32 && !isI32)
-      return v;
-    auto i32Ty = IntegerType::get(ctx, 32);
-    auto i64Ty = IntegerType::get(ctx, 64);
-    auto i32VecTy = VectorType::get({8}, i32Ty);
-
-    // First, apply the observed lane-local reorder from WMMA result encoding.
-    SmallVector<int32_t> laneLocalMask = {0, 4, 1, 5, 2, 6, 3, 7};
-    Value laneLocal = LLVM::ShuffleVectorOp::create(builder, loc, vt, v, v, laneLocalMask);
-
-    // Then fix the cross-lane row bit permutation (bit0 <-> bit3) by pulling
-    // companion values from lane^16 and selecting by lane-group.
-    Value lane = ROCDL::ThreadIdXOp::create(builder, loc, i32Ty).getResult();
-    Value c31 = LLVM::ConstantOp::create(builder, loc, i32Ty,
-                                         builder.getI32IntegerAttr(31));
-    Value cNeg32 = LLVM::ConstantOp::create(builder, loc, i32Ty,
-                                            builder.getI32IntegerAttr(-32));
-    Value c16 = LLVM::ConstantOp::create(builder, loc, i32Ty,
-                                         builder.getI32IntegerAttr(16));
-    Value c2 = LLVM::ConstantOp::create(builder, loc, i32Ty,
-                                        builder.getI32IntegerAttr(2));
-    Value c0 = LLVM::ConstantOp::create(builder, loc, i32Ty,
-                                        builder.getI32IntegerAttr(0));
-
-    Value laneInWave = LLVM::AndOp::create(builder, loc, lane, c31);
-    Value waveBase = LLVM::AndOp::create(builder, loc, lane, cNeg32);
-    Value pairedLaneInWave = LLVM::XOrOp::create(builder, loc, laneInWave, c16);
-    Value pairedLane = LLVM::OrOp::create(builder, loc, waveBase, pairedLaneInWave);
-    Value pairedLaneByteAddr = LLVM::ShlOp::create(builder, loc, pairedLane, c2);
-
-    Value packed = isF32 ? LLVM::BitcastOp::create(builder, loc, i32VecTy, laneLocal)
-                         : laneLocal;
-    Value pairedPacked = LLVM::UndefOp::create(builder, loc, i32VecTy);
-    for (int i = 0; i < 8; ++i) {
-      Value idx = LLVM::ConstantOp::create(builder, loc, i64Ty,
-                                           builder.getI64IntegerAttr(i));
-      Value laneWord = LLVM::ExtractElementOp::create(builder, loc, packed, idx);
-      Value pairedWord = ROCDL::DsBpermuteOp::create(builder, loc, i32Ty,
-                                                     pairedLaneByteAddr, laneWord)
-                             .getResult();
-      pairedPacked = LLVM::InsertElementOp::create(builder, loc, pairedPacked,
-                                                   pairedWord, idx);
-    }
-    Value pairedLaneLocal = isF32 ? LLVM::BitcastOp::create(builder, loc, vt, pairedPacked)
-                                  : pairedPacked;
-
-    SmallVector<int32_t> maskGroup0 = {0, 8, 2, 10, 4, 12, 6, 14};
-    SmallVector<int32_t> maskGroup1 = {9, 1, 11, 3, 13, 5, 15, 7};
-    Value outGroup0 = LLVM::ShuffleVectorOp::create(builder, loc, vt, laneLocal,
-                                                    pairedLaneLocal, maskGroup0);
-    Value outGroup1 = LLVM::ShuffleVectorOp::create(builder, loc, vt, laneLocal,
-                                                    pairedLaneLocal, maskGroup1);
-
-    Value laneGroupBit = LLVM::AndOp::create(builder, loc, laneInWave, c16);
-    Value isUpperGroup =
-        LLVM::ICmpOp::create(builder, loc, LLVM::ICmpPredicate::ne, laneGroupBit, c0);
-    return LLVM::SelectOp::create(builder, loc, isUpperGroup, outGroup1, outGroup0);
-  };
-
   // F32 <- F16/F16
   if (elemTyA.isF16() && elemTyB.isF16() && elemTyAcc.isF32()) {
-    constexpr bool crossLaneA = true;
-    constexpr bool crossLaneB = true;
-    Value aDup = crossLaneA ? expandTo16WideWmma256(a) : duplicateTo16WideSimple(a);
-    Value bDup = crossLaneB ? expandTo16WideWmma256(b) : duplicateTo16WideSimple(b);
-    Value cPacked =
-        reorderAccLaneValues(reorderAccLaneValues(reorderAccLaneValues(c)));
+    Value aDup = expandTo16WideWmma256(a);
+    Value bDup = expandTo16WideWmma256(b);
     Value res = ROCDL::wmma_f32_16x16x16_f16::create(builder, loc, accTy, aDup,
-                                                     bDup, cPacked)
+                                                     bDup, c)
                     .getResult();
-    return reorderAccLaneValues(res);
+    return res;
   }
   // F32 <- BF16/BF16 (op A/B input ty is AnyInteger -> bitcast bf16 to i16)
   if (elemTyA.isBF16() && elemTyB.isBF16() && elemTyAcc.isF32()) {
-    constexpr bool crossLaneA = true;
-    constexpr bool crossLaneB = true;
-    Value aI = castToI16Vec(crossLaneA ? expandTo16WideWmma256(a)
-                                       : duplicateTo16WideSimple(a));
-    Value bI = castToI16Vec(crossLaneB ? expandTo16WideWmma256(b)
-                                       : duplicateTo16WideSimple(b));
-    Value cPacked =
-        reorderAccLaneValues(reorderAccLaneValues(reorderAccLaneValues(c)));
+    Value aI = castToI16Vec(expandTo16WideWmma256(a));
+    Value bI = castToI16Vec(expandTo16WideWmma256(b));
     Value res =
-        ROCDL::wmma_f32_16x16x16_bf16::create(builder, loc, accTy, aI, bI, cPacked)
+        ROCDL::wmma_f32_16x16x16_bf16::create(builder, loc, accTy, aI, bI, c)
             .getResult();
-    return reorderAccLaneValues(res);
+    return res;
   }
   // F16 <- F16/F16.
   //
@@ -464,57 +379,51 @@ FailureOr<Value> MmaOpRDNA3_WMMAType::emitAtomCallSSA(
     Value bDup = expandTo16WideWmma256(b);
     auto accF32Ty = VectorType::get({accVecSize}, builder.getF32Type());
     Value cF32 = LLVM::FPExtOp::create(builder, loc, accF32Ty, c);
-    Value cPacked =
-        reorderAccLaneValues(reorderAccLaneValues(reorderAccLaneValues(cF32)));
     Value resF32 = ROCDL::wmma_f32_16x16x16_f16::create(
-                       builder, loc, accF32Ty, aDup, bDup, cPacked)
+                       builder, loc, accF32Ty, aDup, bDup, cF32)
                        .getResult();
-    Value resCanonicalF32 = reorderAccLaneValues(resF32);
-    return LLVM::FPTruncOp::create(builder, loc, accTy, resCanonicalF32).getResult();
+    return LLVM::FPTruncOp::create(builder, loc, accTy, resF32).getResult();
   }
-  // BF16 <- BF16/BF16 (op_sel = 0). Op signature is AnyInteger for both A/B
-  // and C/D, so we bitcast to / from i16 vectors and extract low half.
+  // BF16 <- BF16/BF16.
+  //
+  // The native bf16-acc WMMA variant uses op_sel-packed 16-wide C/D lanes,
+  // which conflicts with the FlyDSL vec8 fragment representation. For
+  // correctness and consistency with the f16-acc path, we promote to f32
+  // acc, run the F32_BF16 WMMA, and truncate back to bf16. (BF16 has the
+  // same exponent range as f32, so no value can overflow during the
+  // promote/truncate round-trip.)
   if (elemTyA.isBF16() && elemTyB.isBF16() && elemTyAcc.isBF16()) {
     Value aI = castToI16Vec(expandTo16WideWmma256(a));
     Value bI = castToI16Vec(expandTo16WideWmma256(b));
-    Value cI = castToI16Vec(expandTo16WideWmma256(c));
-    auto wideIntTy = cast<VectorType>(cI.getType());
-    Value resWideI = ROCDL::wmma_bf16_16x16x16_bf16::create(
-                         builder, loc, wideIntTy, aI, bI, cI, /*opsel=*/false)
-                         .getResult();
-    SmallVector<int32_t> mask = {0, 1, 2, 3, 4, 5, 6, 7};
-    auto narrowIntTy = VectorType::get({8}, i16Ty);
-    Value resI = LLVM::ShuffleVectorOp::create(builder, loc, narrowIntTy,
-                                               resWideI, resWideI, mask);
-    Value res = LLVM::BitcastOp::create(builder, loc, accTy, resI);
-    return res;
+    auto accF32Ty = VectorType::get({accVecSize}, builder.getF32Type());
+    Value cF32 = LLVM::FPExtOp::create(builder, loc, accF32Ty, c);
+    Value resF32 =
+        ROCDL::wmma_f32_16x16x16_bf16::create(builder, loc, accF32Ty, aI, bI, cF32)
+            .getResult();
+    return LLVM::FPTruncOp::create(builder, loc, accTy, resF32).getResult();
   }
   // I32 <- IU8 (signA = signB = 0 = unsigned, clamp = 0).
   // For RDNA 3 / 3.5 WMMA256b, the upper half must come from lane^16.
   if (elemTyA.isInteger(8) && elemTyB.isInteger(8) && elemTyAcc.isInteger(32)) {
     Value aWide = expandPackedI32To4WideWmma256(a);
     Value bWide = expandPackedI32To4WideWmma256(b);
-    Value cPacked =
-        reorderAccLaneValues(reorderAccLaneValues(reorderAccLaneValues(c)));
     Value res = ROCDL::wmma_i32_16x16x16_iu8::create(
                     builder, loc, accTy,
-                    /*signA=*/false, aWide, /*signB=*/false, bWide, cPacked,
+                    /*signA=*/false, aWide, /*signB=*/false, bWide, c,
                     /*clamp=*/false)
                     .getResult();
-    return reorderAccLaneValues(res);
+    return res;
   }
   // I32 <- IU4. Same WMMA256b lane^16 upper-half rule as IU8.
   if (elemTyA.isInteger(4) && elemTyB.isInteger(4) && elemTyAcc.isInteger(32)) {
     Value aWide = expandPackedI32To4WideWmma256(a);
     Value bWide = expandPackedI32To4WideWmma256(b);
-    Value cPacked =
-        reorderAccLaneValues(reorderAccLaneValues(reorderAccLaneValues(c)));
     Value res = ROCDL::wmma_i32_16x16x16_iu4::create(
                     builder, loc, accTy,
-                    /*signA=*/false, aWide, /*signB=*/false, bWide, cPacked,
+                    /*signA=*/false, aWide, /*signB=*/false, bWide, c,
                     /*clamp=*/false)
                     .getResult();
-    return reorderAccLaneValues(res);
+    return res;
   }
 
   return failure();

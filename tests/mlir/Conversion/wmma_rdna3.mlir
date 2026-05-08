@@ -68,7 +68,11 @@ func.func @test_rdna3_wmma_i32_iu8(
 }
 
 // CHECK-LABEL: @test_rdna3_wmma_bf16_bf16
-// CHECK: rocdl.wmma.bf16.16x16x16.bf16
+// For stable multi-K accumulation semantics, bf16-acc lowers through the f32
+// WMMA op (BF16 has the same exponent range as f32, no overflow risk) and
+// truncates lane-local results back to bf16.
+// CHECK: rocdl.wmma.f32.16x16x16.bf16
+// CHECK: llvm.fptrunc {{.*}} : vector<8xf32> to vector<8xbf16>
 func.func @test_rdna3_wmma_bf16_bf16(
     %d: !fly.memref<bf16, register, 8:1>,
     %a: !fly.memref<bf16, register, 8:1>,
