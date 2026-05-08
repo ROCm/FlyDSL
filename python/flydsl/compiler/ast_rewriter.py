@@ -1134,7 +1134,6 @@ class InsertEmptyYieldForSCFFor(Transformer):
             decorator_list=[],
             type_params=[],
         )
-        setattr(body_func, _ASTREWRITE_MARKER, True)
         body_func = ast.copy_location(body_func, node)
         body_func = ast.fix_missing_locations(body_func)
 
