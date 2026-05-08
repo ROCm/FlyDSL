@@ -582,15 +582,16 @@ def build_pa_mqa_logits_fp4_module(
             c_next_i32 = c_idx_i32 + fx.Int32(1)
             c_next_next_i32 = c_next_i32 + fx.Int32(1)
 
-            # Issue KV prefetch for chunk c+1 using carry phys (no extra wait).
+            # Compute MFMA + store on current chunk FIRST — gets the 4 stores
+            # in flight early so they drain before the loop-back vmcnt(0) wait
+            # on phys. (vmcnt counts loads+stores together on gfx9/CDNA.)
+            _compute_chunk(kv_cur_list, kvs_cur_list, c_idx_i32)
+
+            # Issue KV prefetch for chunk c+1 using carry phys.
             kv_next, kvs_next = _prefetch_chunk(c_next_i32, phys_next_list)
 
-            # Issue phys load for chunk c+2 — its latency overlaps with
-            # _compute_chunk on the current chunk below.
+            # Issue phys load for chunk c+2 last.
             phys_next_next_list = _load_phys(c_next_next_i32)
-
-            # Compute MFMA + store on current chunk
-            _compute_chunk(kv_cur_list, kvs_cur_list, c_idx_i32)
 
             results = yield (
                 list(kv_next) + list(kvs_next) + list(phys_next_next_list)
