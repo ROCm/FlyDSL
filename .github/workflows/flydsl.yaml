@@ -267,6 +267,26 @@ jobs:
         run: |
           docker exec flydsl_test bash -c "export MLIR_PATH=/llvm-project/mlir_install && cd /flydsl-test && python3 -m pip install -e . --use-pep517"
 
+      - name: Install mori (for shmem regression test)
+        timeout-minutes: 15
+        run: |
+          docker exec flydsl_test bash -c "
+            apt-get install -y libpci-dev libibverbs-dev &&
+            rm -rf /tmp/mori &&
+            git clone --depth 1 --recursive --shallow-submodules https://github.com/ROCm/mori.git /tmp/mori &&
+            cd /tmp/mori && python3 -m pip install . &&
+            MORI_PRECOMPILE=1 python3 -c 'import mori'
+          "
+
+      - name: Run multi-GPU shmem regression test
+        timeout-minutes: 10
+        run: |
+          docker exec flydsl_test bash -c "
+            cd /flydsl-test
+            python3 -m pytest tests/kernels/test_flydsl_shmem.py \
+              -m multi_gpu -v --no-header --tb=short
+          "
+
       - name: Run multi-GPU allreduce tests
         timeout-minutes: 30
         run: |
