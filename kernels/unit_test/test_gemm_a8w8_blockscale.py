@@ -443,6 +443,168 @@ def test_gemm_a8w8_blockscale_tdm_store_preallocated_output(M, N, K):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# Experimental variant: bulk W-scale load
+# ═════════════════════════════════════════════════════════════════════════════
+# Constraints (validated at compile time inside compile_gemm_a8w8_blockscale):
+#   - w_is_wave_uniform: warp_tile_n (= tile_n / n_warp) <= scale_block_n
+#   - single-chunk:      scale_k (= K / scale_block_k) <= 32
+# With test defaults (tile_n=128, n_warp=4, scale_block_k=128) the first
+# always holds; the second filters out shapes with K > 4096.
+
+
+def _experimental_supported(
+    M, N, K, tile_n=128, n_warp=4,
+    scale_block_k=SCALE_BLOCK_K, scale_block_n=SCALE_BLOCK_N,
+):
+    warp_tile_n = tile_n // n_warp
+    scale_k = (K + scale_block_k - 1) // scale_block_k
+    return warp_tile_n <= scale_block_n and scale_k <= 32
+
+
+_EXPERIMENTAL_BASIC_SHAPES = [s for s in get_basic_shapes() if _experimental_supported(*s)]
+_EXPERIMENTAL_TDM_SHAPES = [s for s in get_tdm_store_shapes() if _experimental_supported(*s)]
+
+
+@pytest.mark.parametrize("M, N, K", _EXPERIMENTAL_BASIC_SHAPES)
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_gemm_a8w8_blockscale_experimental_basic(M, N, K, dtype):
+    """Experimental variant: bulk W-scale load + per-tile v_readlane."""
+    _check_gfx1250()
+    _check_shape_compat(M, N, K)
+    torch.cuda.empty_cache()
+
+    x, w, x_scale, w_scale = _generate_inputs(M, N, K)
+    ref = _reference_output(x, w, x_scale, w_scale, dtype=dtype)
+
+    out = gemm_a8w8_blockscale(
+        x, w, x_scale, w_scale, dtype=dtype, variant="experimental",
+    )
+
+    assert verify_output(
+        out.cpu().to(torch.float32),
+        ref.cpu().to(torch.float32),
+        rtol=1e-2, atol=1e-2,
+    )
+
+
+@pytest.mark.parametrize("M, N, K", [(128, 256, 256), (256, 512, 512)])
+@pytest.mark.parametrize("num_buffers", [2, 3, 4])
+def test_gemm_a8w8_blockscale_experimental_num_buffers(M, N, K, num_buffers):
+    """Experimental variant: pipeline depth sweep (2/3/4 buffers)."""
+    _check_gfx1250()
+    _check_shape_compat(M, N, K, num_buffers=num_buffers)
+    torch.cuda.empty_cache()
+
+    x, w, x_scale, w_scale = _generate_inputs(M, N, K)
+    ref = _reference_output(x, w, x_scale, w_scale, dtype=torch.bfloat16)
+
+    out = gemm_a8w8_blockscale(
+        x, w, x_scale, w_scale,
+        dtype=torch.bfloat16,
+        num_buffers=num_buffers,
+        variant="experimental",
+    )
+
+    assert verify_output(
+        out.cpu().to(torch.float32),
+        ref.cpu().to(torch.float32),
+        rtol=1e-2, atol=1e-2,
+    )
+
+
+@pytest.mark.parametrize("M, N, K", _EXPERIMENTAL_TDM_SHAPES)
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_gemm_a8w8_blockscale_experimental_tdm_store(M, N, K, dtype):
+    """Experimental variant + TDM-store epilogue path."""
+    _check_gfx1250()
+    _check_shape_compat(M, N, K)
+    torch.cuda.empty_cache()
+
+    x, w, x_scale, w_scale = _generate_inputs(M, N, K)
+    ref = _reference_output(x, w, x_scale, w_scale, dtype=dtype)
+
+    out = gemm_a8w8_blockscale(
+        x, w, x_scale, w_scale,
+        dtype=dtype,
+        variant="experimental",
+        use_tdm_store=True,
+    )
+
+    assert verify_output(
+        out.cpu().to(torch.float32),
+        ref.cpu().to(torch.float32),
+        rtol=1e-2, atol=1e-2,
+    )
+
+
+@pytest.mark.parametrize(
+    "M, N, K",
+    [
+        (128, 256, 256),
+        (128, 128, 512),
+        (1024, 1024, 1024),
+    ],
+)
+def test_gemm_a8w8_blockscale_experimental_scales_per_tile(M, N, K):
+    """Experimental variant with tile_k=256, scale_block_k=128 → 2 scale chunks/tile.
+    Verifies the readlane lookup keys on K-block index, not K-tile index."""
+    _check_gfx1250()
+    _check_shape_compat(M, N, K, tile_k=256)
+    torch.cuda.empty_cache()
+
+    x, w, x_scale, w_scale = _generate_inputs(M, N, K)
+    ref = _reference_output(x, w, x_scale, w_scale, dtype=torch.bfloat16)
+
+    out = gemm_a8w8_blockscale(
+        x, w, x_scale, w_scale,
+        dtype=torch.bfloat16,
+        tile_k=256,
+        variant="experimental",
+    )
+
+    assert verify_output(
+        out.cpu().to(torch.float32),
+        ref.cpu().to(torch.float32),
+        rtol=1e-2, atol=1e-2,
+    )
+
+
+@pytest.mark.parametrize(
+    "M, N, K",
+    [
+        # scale_k > 32 → multi-chunk W-scale prefetch chain.
+        # K=4224, scale_block_k=128 → scale_k=33 (just over 1 chunk).
+        (128, 256, 4224),
+        # K=8192 → scale_k=64 (exactly 2 chunks).
+        (128, 256, 8192),
+        # K=12288 → scale_k=96 (3 chunks; multiple boundary crossings).
+        (128, 256, 12288),
+    ],
+)
+def test_gemm_a8w8_blockscale_experimental_multi_chunk(M, N, K):
+    """Experimental variant with scale_k > 32 — exercises the cur/prefetch
+    chunk chain, including chunk-boundary advancement in the main loop."""
+    _check_gfx1250()
+    _check_shape_compat(M, N, K)
+    torch.cuda.empty_cache()
+
+    x, w, x_scale, w_scale = _generate_inputs(M, N, K)
+    ref = _reference_output(x, w, x_scale, w_scale, dtype=torch.bfloat16)
+
+    out = gemm_a8w8_blockscale(
+        x, w, x_scale, w_scale,
+        dtype=torch.bfloat16,
+        variant="experimental",
+    )
+
+    assert verify_output(
+        out.cpu().to(torch.float32),
+        ref.cpu().to(torch.float32),
+        rtol=1e-2, atol=1e-2,
+    )
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # Standalone runner: python test_gemm_a8w8_blockscale.py -M 128 -N 256 -K 256
 # ═════════════════════════════════════════════════════════════════════════════
 
@@ -458,6 +620,8 @@ if __name__ == "__main__":
     parser.add_argument("--num-buffers", type=int, default=2, choices=[2, 3, 4])
     parser.add_argument("--tdm-store", action="store_true",
                         help="Use the LDS-staged TDM-store epilogue.")
+    parser.add_argument("--variant", type=str, default="reg_preload",
+                        choices=["reg_preload", "no_op_preload", "experimental"])
     args = parser.parse_args()
 
     dtype_map = {
@@ -477,6 +641,7 @@ if __name__ == "__main__":
         dtype=dtype,
         num_buffers=args.num_buffers,
         use_tdm_store=args.tdm_store,
+        variant=args.variant,
     )
 
     torch.cuda.synchronize()
@@ -486,5 +651,6 @@ if __name__ == "__main__":
         rtol=1e-2, atol=1e-2,
     )
     print(f"M={args.M} N={args.N} K={args.K} dtype={args.dtype} "
-          f"num_buffers={args.num_buffers} tdm_store={args.tdm_store}")
+          f"num_buffers={args.num_buffers} tdm_store={args.tdm_store} "
+          f"variant={args.variant}")
     print("PASSED" if passed else "FAILED")

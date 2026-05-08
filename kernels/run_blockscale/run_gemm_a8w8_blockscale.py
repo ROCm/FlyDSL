@@ -10,8 +10,8 @@ Edit the CONFIG block below — no CLI args. Run with:
 # ═══════════════════════════════════════════════════════════════════════════
 
 # Problem shape
-M = 32
-N = 5120
+M = 32 #896
+N = 1024
 K = 2880
 
 # Scale granularity (must match how the scales were quantized)
@@ -20,7 +20,7 @@ SCALE_BLOCK_N = 128
 
 # Tile dims (tile_k must equal SCALE_BLOCK_K for Phase 1)
 TILE_M = 32 #224
-TILE_N = 64
+TILE_N = 32
 TILE_K = 512
 
 # Warp grid
@@ -31,12 +31,18 @@ N_WARP = 2
 NUM_BUFFERS = 3
 WAVES_PER_EU = None
 L2_PREFETCH_DISTANCE = 0
-USE_TDM_STORE = True
-
-
-# Kernel variant: "reg_preload" (operand frags loop-carried) or
-# "no_op_preload" (operand frags loaded fresh per sub-stage, ~256 VGPR
-# cheaper). Both variants share the 2-sub-stage-ahead scale prefetch.
+USE_TDM_STORE = False
+# Experimental: forwards to AMDGPU LLVM `amdgpu-loop-carried-load-percent`
+# function attribute via passthrough. Set to 0 to try less-conservative
+# scheduling of loop-carried VGPRs. None disables (no attribute set).
+LOOP_CARRIED_LOAD_PERCENT = 100
+# Kernarg preload: marks each kernel arg as `inreg` so the AMDGPU backend
+# preloads them into user SGPRs at dispatch (no s_load + s_wait_kmcnt at
+# wave entry). Saves ~1786 cycles of prologue stall on the gfx1250 sim.
+KERNARG_PRELOAD = True
+# Kernel variant: "reg_preload" / "no_op_preload" / "experimental"
+#   experimental = reg_preload + bulk W-scale load (1 buffer_load_b32 at
+#   kernel entry covering all K-tiles + per-tile v_readlane).
 VARIANT = "reg_preload"
 
 # Output dtype ("bf16" / "fp16" / "f32")
@@ -124,6 +130,8 @@ def main():
         out_dtype=OUT_DTYPE,
         variant=VARIANT,
         use_tdm_store=USE_TDM_STORE,
+        loop_carried_load_percent=LOOP_CARRIED_LOAD_PERCENT,
+        kernarg_preload=KERNARG_PRELOAD,
     )
 
     print("Launching kernel...")
