@@ -16,26 +16,20 @@ LLVM_PACKAGE_INSTALL="${LLVM_PACKAGE_INSTALL:-1}"
 # Read LLVM commit hash from thirdparty/llvm-hash.txt
 LLVM_HASH_FILE="${REPO_ROOT}/thirdparty/llvm-hash.txt"
 LLVM_COMMIT_DEFAULT=$(cat "${LLVM_HASH_FILE}" | tr -d '[:space:]')
-LLVM_COMMIT="${LLVM_COMMIT:-$LLVM_COMMIT_DEFAULT}"
-
-if [[ ${#LLVM_COMMIT} -lt 40 ]]; then
-    echo "Error: LLVM_COMMIT must be a full 40-char SHA (got '${LLVM_COMMIT}')"
-    echo "Shallow fetch does not support short hashes."
-    exit 1
-fi
+LLVM_REF="${LLVM_REF:-${LLVM_COMMIT:-$LLVM_COMMIT_DEFAULT}}"
 
 echo "Base directory: $BASE_DIR"
 echo "LLVM Source:    $LLVM_SRC_DIR"
 echo "LLVM Build:     $LLVM_BUILD_DIR"
 echo "LLVM Install:   $LLVM_INSTALL_DIR"
 echo "LLVM Tarball:   $LLVM_INSTALL_TGZ"
-echo "LLVM Commit:    $LLVM_COMMIT"
+echo "LLVM Ref:       $LLVM_REF"
 
 # 1. Clone LLVM
 LLVM_REMOTE="${LLVM_REMOTE:-https://github.com/llvm/llvm-project.git}"
 
 if [ ! -d "$LLVM_SRC_DIR" ]; then
-    echo "Fetching llvm-project commit ${LLVM_COMMIT} (shallow, single commit)..."
+    echo "Preparing llvm-project checkout for ${LLVM_REF} ..."
     git init "$LLVM_SRC_DIR"
     pushd "$LLVM_SRC_DIR"
     git remote add origin "$LLVM_REMOTE"
@@ -43,12 +37,20 @@ else
     pushd "$LLVM_SRC_DIR"
 fi
 
-if ! git cat-file -e "${LLVM_COMMIT}^{commit}" 2>/dev/null; then
-    echo "Fetching commit ${LLVM_COMMIT} ..."
-    git fetch --depth 1 origin "${LLVM_COMMIT}"
+if [[ "$LLVM_REF" =~ ^[0-9a-fA-F]{40}$ ]]; then
+    if ! git cat-file -e "${LLVM_REF}^{commit}" 2>/dev/null; then
+        echo "Fetching commit ${LLVM_REF} ..."
+        git fetch --depth 1 origin "${LLVM_REF}"
+    fi
+    git checkout "${LLVM_REF}"
+else
+    echo "Fetching ref ${LLVM_REF} ..."
+    git fetch --depth 1 origin "${LLVM_REF}"
+    git checkout FETCH_HEAD
 fi
-git checkout "${LLVM_COMMIT}"
+LLVM_COMMIT_RESOLVED=$(git rev-parse HEAD)
 popd
+echo "LLVM Commit:    $LLVM_COMMIT_RESOLVED"
 
 # 2. Create Build Directory
 mkdir -p "$LLVM_BUILD_DIR"
