@@ -36,6 +36,7 @@ if torch is None or not torch.cuda.is_available():
 DTYPE_FP32 = torch.float32
 DTYPE_FP16 = torch.float16
 DTYPE_BF16 = torch.bfloat16
+DTYPE_INT8 = torch.int8
 
 EPS: float = 1e-5
 from kernels.rmsnorm_kernel import (
@@ -238,48 +239,6 @@ def _get_rmsnorm_configs():
     ]
 
 
-def _get_rmsnorm_quant_configs():
-    shapes_env = os.environ.get("ROCDSL_RMSNORM_QUANT_SHAPES", "").strip()
-    if not shapes_env:
-        shapes_env = os.environ.get("ROCDSL_RMSNORM_SHAPES", "").strip()
-    if shapes_env:
-        configs = []
-        for part in shapes_env.split(";"):
-            p = part.strip()
-            if not p:
-                continue
-            m_s, n_s, dt = [x.strip() for x in p.split(",")]
-            configs.append((int(m_s), int(n_s), dt))
-        return configs
-
-    return [
-        (128, 4096, "f16"),   # Aligned
-        (173, 409, "f16"),    # Unaligned (tail handling)
-        (256, 4096, "bf16"),  # BF16
-    ]
-
-
-def _get_rmsnorm_fused_add_configs():
-    shapes_env = os.environ.get("ROCDSL_RMSNORM_FUSED_ADD_SHAPES", "").strip()
-    if not shapes_env:
-        shapes_env = os.environ.get("ROCDSL_RMSNORM_SHAPES", "").strip()
-    if shapes_env:
-        configs = []
-        for part in shapes_env.split(";"):
-            p = part.strip()
-            if not p:
-                continue
-            m_s, n_s, dt = [x.strip() for x in p.split(",")]
-            configs.append((int(m_s), int(n_s), dt))
-        return configs
-
-    return [
-        (128, 4096, "f16"),   # Aligned
-        (173, 409, "f16"),    # Unaligned (tail handling)
-        (1024, 8192, "bf16"), # BF16
-    ]
-
-
 def _reference_rmsnorm_quant(input_dev, gamma_dev, *, xscale_dev=None):
     x = input_dev.to(DTYPE_FP32)
     gamma = gamma_dev.to(DTYPE_FP32)
@@ -345,7 +304,6 @@ def run_quant_test(M: int, N: int, dtype: str, *, is_smooth: bool):
             f"{type(e).__name__}: {e}"
         )
         return False, None
-
     torch.manual_seed(42)
     input_t = torch.randn((M, N), device="cuda", dtype=DTYPE_FP32)
     gamma_t = torch.rand((N,), device="cuda", dtype=DTYPE_FP32)
@@ -362,30 +320,33 @@ def run_quant_test(M: int, N: int, dtype: str, *, is_smooth: bool):
     else:
         raise ValueError(f"unsupported dtype: {dtype}")
 
-    output_dev = torch.empty((M, N), device="cuda", dtype=torch.int8)
-    yscale_dev = torch.empty((M,), device="cuda", dtype=torch.float32)
-
+    output_dev = torch.empty((M, N), device="cuda", dtype=DTYPE_INT8)
+    yscale_dev = torch.empty((M,), device="cuda", dtype=DTYPE_FP32)
     xscale_dev = None
     if is_smooth:
         xscale_dev = torch.rand((N,), device="cuda", dtype=torch_dtype).contiguous() + 0.5
+    dequant_tol = 0.25 if is_smooth else 0.2
+    scale_tol = 1e-2 if is_smooth else 5e-3
+
+    # PyTorch Reference:
+    # RMS(x) = sqrt(mean(x^2) + eps) ; RMSNorm(x) = x / RMS(x) * gamma
+    # Quant path additionally computes per-row yscale and int8 output from the fp32 reference.
+    expected, q_ref, yscale_ref = _reference_rmsnorm_quant(
+        input_dev,
+        gamma_dev,
+        xscale_dev=xscale_dev,
+    )
 
     print("Launching kernel...")
     stream = torch.cuda.current_stream()
 
     def kernel_launch():
         if is_smooth:
-            launch_fn(
-                input_dev,
-                gamma_dev,
-                xscale_dev,
-                output_dev,
-                yscale_dev,
-                M,
-                stream=stream,
-            )
+            launch_fn(input_dev, gamma_dev, xscale_dev, output_dev, yscale_dev, M, stream=stream)
         else:
             launch_fn(input_dev, gamma_dev, output_dev, yscale_dev, M, stream=stream)
 
+    # run_perftest returns (data, avg_us)
     _, avg_us = run_perftest(
         lambda: (kernel_launch(), torch.cuda.synchronize()),
         num_iters=BENCH_ITERS,
@@ -397,47 +358,51 @@ def run_quant_test(M: int, N: int, dtype: str, *, is_smooth: bool):
         flydsl_gpu_us = bench_gpu_us_torch(kernel_launch, warmup=WARMUP_ITERS, iters=BENCH_ITERS)
     avg_ms = avg_us / 1000.0
 
+    # Bandwidth estimate: read input + read gamma + write output
     elem_bytes = 4 if dtype == "f32" else 2
     total_bytes = M * N * elem_bytes + N * elem_bytes + M * N + M * 4
     if is_smooth:
         total_bytes += N * elem_bytes
     bandwidth_gbs = total_bytes / (avg_us / 1e6) / 1e9
 
-    print(
-        f"Kernel avg time: {avg_ms:.4f} ms via run_perftest "
-        f"(warmup={WARMUP_ITERS}, iters={BENCH_ITERS})"
-    )
+    print(f"Kernel avg time: {avg_ms:.4f} ms via run_perftest (warmup={WARMUP_ITERS}, iters={BENCH_ITERS})")
     print(f"Bandwidth: {bandwidth_gbs:.2f} GB/s")
     if flydsl_gpu_us is not None:
         print(f"[Perf] FlyDSL rmsnorm {mode} gpu: {flydsl_gpu_us:.1f} us")
 
-    expected, q_ref, yscale_ref = _reference_rmsnorm_quant(
-        input_dev,
-        gamma_dev,
-        xscale_dev=xscale_dev,
-    )
     q_out = output_dev.to(torch.int16)
     q_expected = q_ref.to(torch.int16)
     yscale_out = yscale_dev.cpu()
     yscale_expected = yscale_ref.cpu()
+    output_ref = output_dev.to(DTYPE_FP32) * yscale_dev.unsqueeze(1)
 
-    q_diff = (q_out - q_expected).abs().max().item()
+    error = (output_ref - expected).abs().max().item()
     scale_diff = (yscale_out - yscale_expected).abs().max().item()
-    recon = output_dev.to(DTYPE_FP32) * yscale_dev.unsqueeze(1)
-    recon_err = (recon - expected).abs().max().item()
+    quant_diff = (q_out - q_expected).abs().max().item()
 
-    scale_tol = 1e-2 if is_smooth else 5e-3
-    recon_tol = 0.25 if is_smooth else 0.2
-
-    print(f"Max quant diff: {q_diff}")
+    print(f"Max dequant error: {error:.2e} (tol={dequant_tol})")
     print(f"Max scale diff: {scale_diff:.2e} (tol={scale_tol})")
-    print(f"Max recon error: {recon_err:.2e} (tol={recon_tol})")
+    print(f"Max quant diff: {quant_diff}")
 
-    ok = q_diff <= 1 and scale_diff < scale_tol and recon_err < recon_tol
+    ok = error < dequant_tol and scale_diff < scale_tol and quant_diff <= 1
     if ok:
         print("PASSED")
+        ok = True
     else:
         print("FAILED")
+        print("First row Expected:")
+        print(expected[0, :5])
+        print("First row Actual:")
+        print(output_ref[0, :5])
+        print("First row Quant Expected:")
+        print(q_expected[0, :8])
+        print("First row Quant Actual:")
+        print(q_out[0, :8])
+        print("First few YScale Expected:")
+        print(yscale_expected[:5])
+        print("First few YScale Actual:")
+        print(yscale_out[:5])
+        ok = False
     return ok, flydsl_gpu_us
 
 
@@ -450,7 +415,7 @@ def test_rmsnorm_dynamicquant():
     perf_rows = []
 
     failures = 0
-    for M, N, dtype in _get_rmsnorm_quant_configs():
+    for M, N, dtype in _get_rmsnorm_configs():
         ok, flydsl_gpu_us = run_quant_test(M, N, dtype, is_smooth=False)
         if not ok:
             failures += 1
@@ -491,7 +456,7 @@ def test_rmsnorm_smoothquant():
     perf_rows = []
     failures = 0
 
-    for M, N, dtype in _get_rmsnorm_quant_configs():
+    for M, N, dtype in _get_rmsnorm_configs():
         ok, flydsl_gpu_us = run_quant_test(M, N, dtype, is_smooth=True)
         if not ok:
             failures += 1
@@ -524,10 +489,11 @@ def test_rmsnorm_smoothquant():
 
 
 def _reference_fused_add_rmsnorm(input_dev, residual_in_dev, gamma_dev):
-    added = input_dev.to(DTYPE_FP32) + residual_in_dev.to(DTYPE_FP32)
+    added = input_dev + residual_in_dev
+    added_fp32 = added.to(DTYPE_FP32)
     gamma = gamma_dev.to(DTYPE_FP32)
-    expected = (added / torch.sqrt((added * added).mean(dim=1, keepdim=True) + EPS)) * gamma
-    return added, expected
+    expected = (added_fp32 / torch.sqrt((added_fp32 * added_fp32).mean(dim=1, keepdim=True) + EPS)) * gamma
+    return added_fp32, expected
 
 
 def _bench_aiter_fused_add_rmsnorm(M: int, N: int, dtype: str):
@@ -595,7 +561,7 @@ def run_fused_add_test(M: int, N: int, dtype: str):
         output_dev = torch.empty((M, N), device="cuda", dtype=DTYPE_BF16)
         residual_out_dev = torch.empty((M, N), device="cuda", dtype=DTYPE_BF16)
         output_atol = 2e-2
-        residual_atol = 4e-2
+        residual_atol = 2e-2
     else:
         raise ValueError(f"unsupported dtype: {dtype}")
 
@@ -667,7 +633,7 @@ def test_rmsnorm_fused_add():
     perf_rows = []
     failures = 0
 
-    for M, N, dtype in _get_rmsnorm_fused_add_configs():
+    for M, N, dtype in _get_rmsnorm_configs():
         ok, flydsl_gpu_us = run_fused_add_test(M, N, dtype)
         if not ok:
             failures += 1

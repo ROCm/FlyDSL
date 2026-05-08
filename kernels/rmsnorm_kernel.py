@@ -441,14 +441,15 @@ def build_fused_add_rmsnorm_module(M: int, N: int, dtype_str: str):
                 idx = tid + tile_i * BLOCK_THREADS
                 x = _load_vec(in_div, idx).to(fx.Float32)
                 residual = _load_vec(residual_in_div, idx).to(fx.Float32)
-                added = x + residual
-                add_local.append(added)
+                added_e = _to_elem_vec(x + residual)
+                add_local.append(added_e)
+                added = added_e if dtype_str == "f32" else added_e.to(fx.Float32)
 
                 added2 = added * added
                 red2 = added2.reduce(ReductionOp.ADD, fastmath=fm_fast)
                 thread_sumsq = thread_sumsq + red2
 
-                _store_vec(_to_elem_vec(added), residual_out_div, idx)
+                _store_vec(added_e, residual_out_div, idx)
 
             _, sum_sq = block_reduce_add2(thread_dummy, thread_sumsq)
             mean_sq = sum_sq / n_float
@@ -458,7 +459,8 @@ def build_fused_add_rmsnorm_module(M: int, N: int, dtype_str: str):
             for tile_i in range_constexpr(num_tiles):
                 idx = tid + tile_i * BLOCK_THREADS
                 g = _load_vec(gamma_div, idx).to(fx.Float32)
-                y = (add_local[tile_i] * rrms) * g
+                added = add_local[tile_i] if dtype_str == "f32" else add_local[tile_i].to(fx.Float32)
+                y = (added * rrms) * g
                 _store_vec(_to_elem_vec(y), out_div, idx)
 
         else:
@@ -515,7 +517,8 @@ def build_fused_add_rmsnorm_module(M: int, N: int, dtype_str: str):
                 residual_e = _load_scalar(residual_in_div, idx_safe)
                 x = x_e if dtype_str == "f32" else x_e.to(fx.Float32)
                 residual = residual_e if dtype_str == "f32" else residual_e.to(fx.Float32)
-                added = x + residual
+                added_e = _to_elem_scalar(x + residual)
+                added = added_e if dtype_str == "f32" else added_e.to(fx.Float32)
                 added2 = added * added
                 thread_sumsq = thread_sumsq + is_valid.select(added2, c_zero_f)
 
@@ -533,9 +536,10 @@ def build_fused_add_rmsnorm_module(M: int, N: int, dtype_str: str):
                     x = x_e if dtype_str == "f32" else x_e.to(fx.Float32)
                     residual = residual_e if dtype_str == "f32" else residual_e.to(fx.Float32)
                     g = g_e if dtype_str == "f32" else g_e.to(fx.Float32)
-                    added = x + residual
+                    added_e = _to_elem_scalar(x + residual)
+                    added = added_e if dtype_str == "f32" else added_e.to(fx.Float32)
                     y = (added * rrms) * g
-                    _store_scalar(residual_out_div, idx, _to_elem_scalar(added))
+                    _store_scalar(residual_out_div, idx, added_e)
                     _store_scalar(out_div, idx, _to_elem_scalar(y))
 
     @flyc.jit
