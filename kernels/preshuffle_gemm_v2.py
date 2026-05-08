@@ -85,11 +85,6 @@ def compile_preshuffle_gemm_v2(
 
     total_threads = 256
     a_load_bytes = 16
-    bytes_per_thread_a = (tile_m * tile_k * elem_bytes) // total_threads
-    num_a_loads = bytes_per_thread_a // a_load_bytes
-    num_b_loads = (tile_n * tile_k * elem_bytes) // total_threads // 16
-    num_ds_load = (tile_m * tile_k * elem_bytes) // 64 // 16  # A LDS reads per wave
-    num_gmem_loads = num_a_loads + num_b_loads
     if is_fp8 and is_gfx950:
         dsrd_preload, dvmem_preload = _get_preload(tile_m, tile_n, tile_k)
     else:
@@ -151,6 +146,13 @@ def compile_preshuffle_gemm_v2(
         pA_s = thr_g2s.partition_D(sA)
         pA_s2r = thr_s2r.partition_S(sA)
         pB_g = thr_g2r_B.partition_S(tB)
+
+        # Derive load counts from partition shapes: ((AtomV, TileV), TileM, TileK, LoopK/stages)
+        # TileV × TileM × TileK = number of copy instructions per thread (excludes AtomV)
+        num_a_loads = fx.size(fx.make_shape(pA_g.shape[0][1], pA_g.shape[1], pA_g.shape[2])).static_leaf_int
+        num_b_loads = fx.size(fx.make_shape(pB_g.shape[0][1], pB_g.shape[1], pB_g.shape[2])).static_leaf_int
+        num_ds_load = fx.size(fx.make_shape(pA_s2r.shape[0][1], pA_s2r.shape[1], pA_s2r.shape[2])).static_leaf_int
+        num_gmem_loads = num_a_loads + num_b_loads
 
         # Fragments — 2 separate B fragments (split double buffer for VGPR lifetime)
         frag_copy_A = fx.make_fragment_like(pA_s[None, None, None, 0])

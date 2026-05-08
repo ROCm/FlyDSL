@@ -334,6 +334,10 @@ class IntTuple(BuiltinDslType):
             raise ValueError("IntTuple is not a static leaf")
         return self.type.get_static_leaf_int
 
+    @property
+    def static_leaf_int(self) -> int:
+        return self.get_static_leaf_int
+
     @staticmethod
     def _static_to_py_value(ty):
         if ty.is_leaf:
