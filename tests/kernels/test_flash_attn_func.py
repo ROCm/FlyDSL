@@ -46,35 +46,39 @@ FLASH_ATTN_FUNC_KERNEL_CONFIG = {
     "daz": True,
 }
 
-# (batch, seq_len, num_heads, head_dim)
+# (batch, seq_len, num_heads, num_kv_heads, head_dim)
+# num_kv_heads == num_heads -> MHA; num_kv_heads < num_heads -> GQA/MQA.
 DEFAULT_CONFIGS = [
-    (8, 128, 64, 128),
-    (8, 256, 64, 128),
-    (8, 512, 64, 128),
-    (1, 128, 64, 128),
-    (1, 256, 64, 128),
-    (1, 512, 64, 128),
-    (1, 1024, 64, 128),
+    (8, 128, 64, 64, 128),
+    (8, 256, 64, 64, 128),
+    (8, 512, 64, 64, 128),
+    (1, 128, 64, 64, 128),
+    (1, 256, 64, 64, 128),
+    (1, 512, 64, 64, 128),
+    (1, 1024, 64, 64, 128),
 
-    (1, 2048, 64, 128),
-    (1, 4096, 64, 128),
-    (1, 8192, 64, 128),
-    (4, 8192, 64, 128),
+    (1, 2048, 64, 64, 128),
+    (1, 4096, 64, 64, 128),
+    (1, 8192, 64, 64, 128),
+    (4, 8192, 64, 64, 128),
 
-    (1, 2048, 32, 128),
-    (1, 4096, 32, 128),
-    (1, 8192, 32, 128),
-    (8, 8192, 32, 128),
+    (1, 2048, 32, 32, 128),
+    (1, 4096, 32, 32, 128),
+    (1, 8192, 32, 32, 128),
+    (8, 8192, 32, 32, 128),
 
-    (1, 2048, 16, 128),
-    (1, 4096, 16, 128),
-    (1, 8192, 16, 128),
-    (16, 8192, 16, 128),
+    (1, 2048, 16, 16, 128),
+    (1, 4096, 16, 16, 128),
+    (1, 8192, 16, 16, 128),
+    (16, 8192, 16, 16, 128),
 
-    (1, 2048, 8, 128),
-    (1, 4096, 8, 128),
-    (1, 8192, 8, 128),
-    (32, 8192, 8, 128),
+    (1, 2048, 8, 8, 128),
+    (1, 4096, 8, 8, 128),
+    (1, 8192, 8, 8, 128),
+    (32, 8192, 8, 8, 128),
+
+    # GQA configs (num_kv_heads < num_heads).
+    (16, 8192, 64, 8, 128),
 ]
 
 
@@ -90,6 +94,14 @@ def pytorch_ref_attention(q, k, v, causal=True):
     q_t = q.transpose(1, 2).float()
     k_t = k.transpose(1, 2).float()
     v_t = v.transpose(1, 2).float()
+    nh_q, nh_kv = q_t.shape[1], k_t.shape[1]
+    if nh_q != nh_kv:
+        assert nh_q % nh_kv == 0, (
+            f"num_heads ({nh_q}) must be divisible by num_kv_heads ({nh_kv})"
+        )
+        rep = nh_q // nh_kv
+        k_t = k_t.repeat_interleave(rep, dim=1)
+        v_t = v_t.repeat_interleave(rep, dim=1)
     out = F.scaled_dot_product_attention(q_t, k_t, v_t, is_causal=causal)
     return out.transpose(1, 2)
 
@@ -193,7 +205,7 @@ def compare_arrays(
 
 def run_config(
     batch, seq_len, num_heads, head_dim, dtype, causal, warmup, iters,
-    seed=DEFAULT_SEED, dtype_str="f16", verbose=True,
+    seed=DEFAULT_SEED, dtype_str="f16", verbose=True, num_kv_heads=None,
 ):
     device = "cuda"
     results = {}
@@ -204,6 +216,13 @@ def run_config(
     if head_dim % 32 != 0 or head_dim < 64:
         results["err"] = f"head_dim ({head_dim}) must be >= 64 and divisible by 32"
         return results
+    if num_kv_heads is None:
+        num_kv_heads = num_heads
+    if num_heads % num_kv_heads != 0:
+        results["err"] = (
+            f"num_heads ({num_heads}) must be divisible by num_kv_heads ({num_kv_heads})"
+        )
+        return results
 
     try:
         exe = build_flash_attn_func_module(
@@ -213,6 +232,7 @@ def run_config(
             dtype_str=dtype_str,
             waves_per_eu=FLASH_ATTN_FUNC_KERNEL_CONFIG["waves_per_eu"],
             daz=FLASH_ATTN_FUNC_KERNEL_CONFIG.get("daz", False),
+            num_kv_heads=num_kv_heads,
         )
     except Exception as e:
         results["err"] = f"build: {e}"
@@ -222,10 +242,11 @@ def run_config(
         return results
 
     B, S, H, D = batch, seq_len, num_heads, head_dim
+    H_KV = num_kv_heads
     setup_seed(seed)
     q_4d = torch.empty(B, S, H, D, dtype=dtype, device=device).uniform_(*UNIFORM_RANGE)
-    k_4d = torch.empty(B, S, H, D, dtype=dtype, device=device).uniform_(*UNIFORM_RANGE)
-    v_4d = torch.empty(B, S, H, D, dtype=dtype, device=device).uniform_(*UNIFORM_RANGE)
+    k_4d = torch.empty(B, S, H_KV, D, dtype=dtype, device=device).uniform_(*UNIFORM_RANGE)
+    v_4d = torch.empty(B, S, H_KV, D, dtype=dtype, device=device).uniform_(*UNIFORM_RANGE)
 
     q_flat = q_4d.contiguous().view(-1)
     k_flat = k_4d.contiguous().view(-1)
@@ -291,7 +312,7 @@ def run_config(
 
 def run_aiter_bench(
     batch, seq_len, nheads, head_dim, dtype, causal,
-    warmup, iters, seed=DEFAULT_SEED, backend="ck",
+    warmup, iters, seed=DEFAULT_SEED, backend="ck", num_kv_heads=None,
 ):
     """Run true CK or true ASM kernel via aiter and return {tflops, max_err, us}."""
     try:
@@ -307,57 +328,54 @@ def run_aiter_bench(
     torch.cuda.empty_cache()
 
     B, S, H, D = batch, seq_len, nheads, head_dim
+    H_KV = num_kv_heads if num_kv_heads is not None else H
     q = torch.empty(B, S, H, D, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
-    k = torch.empty(B, S, H, D, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
-    v = torch.empty(B, S, H, D, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
+    k = torch.empty(B, S, H_KV, D, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
+    v = torch.empty(B, S, H_KV, D, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
     softmax_scale = 1.0 / math.sqrt(D)
 
     if backend == "ck":
         def aiter_forward():
             return aiter.mha_fwd(
-                q,
-                k,
-                v,
-                0.0,
-                softmax_scale,
-                causal,
-                -1,
-                -1,
-                0,
-                True,
-                False,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
+                q,                  # q
+                k,                  # k
+                v,                  # v
+                0.0,                # dropout_p
+                softmax_scale,      # softmax_scale
+                causal,             # is_causal
+                -1,                 # window_size_left
+                -1,                 # window_size_right
+                0,                  # sink_size
+                True,               # return_softmax_lse
+                False,              # return_dropout_randval
+                cu_seqlens_q=None,
+                cu_seqlens_kv=None,
+                out=None,
+                bias=None,
+                alibi_slopes=None,
+                q_descale=None,
+                k_descale=None,
+                v_descale=None,
+                gen=None,
             )
     elif backend == "asm":
         def aiter_forward():
             return aiter.fmha_v3_fwd(
-                q,
-                k,
-                v,
-                0.0,
-                softmax_scale,
-                causal,
-                -1,
-                -1,
-                True,
-                False,
-                2,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
+                q,                  # q
+                k,                  # k
+                v,                  # v
+                0.0,                # dropout_p
+                softmax_scale,      # softmax_scale
+                causal,             # is_causal
+                -1,                 # window_size_left
+                -1,                 # window_size_right
+                True,               # return_softmax_lse
+                False,              # return_dropout_randval
+                2,                  # how_v3_bf16_cvt
+                out=None,
+                bias=None,
+                alibi_slopes=None,
+                gen=None,
             )
     else:
         return {"err": f"unsupported backend: {backend}"}
@@ -454,7 +472,7 @@ def _csv_cmp(fly_r, other_r):
 def _write_cmp_csv(csv_path, data_rows, avg_rows):
     """Write compare-mode results to CSV."""
     header = [
-        "B", "S", "H", "D", "dtype", "causal",
+        "B", "S", "H", "Hkv", "D", "dtype", "causal",
         "FlyDSL_Time(us)", "FlyDSL_TFLOPS", "FlyDSL_MaxErr",
         "CK_Time(us)", "CK_TFLOPS", "CK_MaxErr",
         "ASM_Time(us)", "ASM_TFLOPS", "ASM_MaxErr",
@@ -476,12 +494,13 @@ def _write_cmp_csv(csv_path, data_rows, avg_rows):
         for cfg, fr, cr, ar in data_rows:
             w.writerow(list(cfg) + _metrics(fr, cr, ar))
         for label, fa, ca, aa in avg_rows:
-            w.writerow([label, "", "", "", "", ""] + _metrics(fa, ca, aa))
+            # label + 6 empty cfg columns (S, H, Hkv, D, dtype, causal)
+            w.writerow([label, "", "", "", "", "", ""] + _metrics(fa, ca, aa))
 
 
 def _write_normal_csv(csv_path, data_rows, avg_rows):
     """Write normal-mode results to CSV."""
-    header = ["B", "S", "H", "D", "dtype", "causal", "Path", "Status",
+    header = ["B", "S", "H", "Hkv", "D", "dtype", "causal", "Path", "Status",
               "MaxErr", "MinCos", "Time(us)", "TFLOPS"]
     with open(csv_path, "w", newline="") as f:
         w = csv.writer(f)
@@ -493,7 +512,8 @@ def _write_normal_csv(csv_path, data_rows, avg_rows):
                 _csv_val(r, "us"), _csv_val(r, "tflops"),
             ])
         for label, avg in avg_rows:
-            w.writerow([label, "", "", "", "", "", "", "--",
+            # label + 7 empty (S, H, Hkv, D, dtype, causal, Path) + Status + 4 metrics
+            w.writerow([label, "", "", "", "", "", "", "", "--",
                 _csv_val(avg, "max_err"), _csv_val(avg, "min_cos"),
                 _csv_val(avg, "us"), _csv_val(avg, "tflops"),
             ])
@@ -513,8 +533,8 @@ def _avg_results(results_list, keys=("us", "tflops", "max_err")):
 
 
 def _tag_group(cfg):
-    """Extract (dtype_key, causal_tag) from config tuple."""
-    return cfg[4], cfg[5]
+    """Extract (dtype_key, causal_tag) from config tuple (B, S, H, Hkv, D, dtype, causal)."""
+    return cfg[5], cfg[6]
 
 
 def _print_grouped_avgs(rows, tag_fn, print_avg_fn):
@@ -545,15 +565,18 @@ def _print_grouped_avgs(rows, tag_fn, print_avg_fn):
                 print_avg_fn(f"AVG ({ct})", subset)
 
 
-_CFG_HDR = f"{'B':>4s} {'S':>6s} {'H':>4s} {'D':>4s} {'dtype':>5s} {'causal':>8s}"
+_CFG_HDR = (
+    f"{'B':>4s} {'S':>6s} {'H':>4s} {'Hkv':>4s} {'D':>4s} "
+    f"{'dtype':>5s} {'causal':>8s}"
+)
 _CFG_W = len(_CFG_HDR)
 _PATH_W = 20
 
 
 def _fmt_cfg(cfg):
-    """Format config tuple (B, S, H, D, dtype, causal) as fixed-width columns."""
-    B, S, H, D, dt, cs = cfg
-    return f"{B:>4d} {S:>6d} {H:>4d} {D:>4d} {dt:>5s} {cs:>8s}"
+    """Format config tuple (B, S, H, Hkv, D, dtype, causal) as fixed-width columns."""
+    B, S, H, Hkv, D, dt, cs = cfg
+    return f"{B:>4d} {S:>6d} {H:>4d} {Hkv:>4d} {D:>4d} {dt:>5s} {cs:>8s}"
 
 
 def _fmt_normal_row(cfg, path, status, r):
@@ -577,6 +600,11 @@ def main():
     parser.add_argument("--batch", type=int, default=None)
     parser.add_argument("--seq_len", type=int, default=None)
     parser.add_argument("--num_heads", type=int, default=None)
+    parser.add_argument(
+        "--num_kv_heads", type=int, default=None,
+        help="KV head count for GQA/MQA. Default = num_heads (MHA). "
+             "Requires num_heads %% num_kv_heads == 0.",
+    )
     parser.add_argument("--head_dim", type=int, default=None)
     causal_group = parser.add_mutually_exclusive_group()
     causal_group.add_argument("--causal", action="store_true", dest="causal")
@@ -602,8 +630,15 @@ def main():
     dtypes_to_test = [args.dtype] if args.dtype else ["bf16", "fp16"]
     causals_to_test = [args.causal] if args.causal is not None else [True, False]
 
-    if args.batch or args.seq_len or args.num_heads or args.head_dim:
-        configs = [(args.batch or 1, args.seq_len or 128, args.num_heads or 8, args.head_dim or 128)]
+    if args.batch or args.seq_len or args.num_heads or args.head_dim or args.num_kv_heads:
+        nh_single = args.num_heads or 8
+        configs = [(
+            args.batch or 1,
+            args.seq_len or 128,
+            nh_single,
+            args.num_kv_heads if args.num_kv_heads is not None else nh_single,
+            args.head_dim or 128,
+        )]
     else:
         configs = DEFAULT_CONFIGS
 
@@ -624,25 +659,30 @@ def main():
         for dtype_key in dtypes_to_test:
             dtype, dtype_str = dtype_map[dtype_key]
             for causal in causals_to_test:
-                for batch, seq_len, nh, hd in configs:
+                for batch, seq_len, nh, nh_kv_default, hd in configs:
                     causal_tag = "causal" if causal else "nocausal"
-                    cfg = (batch, seq_len, nh, hd, dtype_key, causal_tag)
+                    # CLI --num_kv_heads (if set) overrides the per-config default.
+                    nh_kv = args.num_kv_heads if args.num_kv_heads is not None else nh_kv_default
+                    cfg = (batch, seq_len, nh, nh_kv, hd, dtype_key, causal_tag)
                     print(f"  {_fmt_cfg(cfg)} ...", flush=True)
 
                     fly_r = run_config(
                         batch, seq_len, nh, hd, dtype, causal,
                         warmup=args.warmup, iters=args.iters,
                         seed=args.seed, dtype_str=dtype_str, verbose=False,
+                        num_kv_heads=nh_kv,
                     )
                     ck_r = run_aiter_bench(
                         batch, seq_len, nh, hd, dtype, causal,
                         warmup=args.warmup, iters=args.iters,
                         seed=args.seed, backend="ck",
+                        num_kv_heads=nh_kv,
                     )
                     asm_r = run_aiter_bench(
                         batch, seq_len, nh, hd, dtype, causal,
                         warmup=args.warmup, iters=args.iters,
                         seed=args.seed, backend="asm",
+                        num_kv_heads=nh_kv,
                     )
                     rows.append((cfg, fly_r, ck_r, asm_r))
 
@@ -708,14 +748,17 @@ def main():
         for dtype_key in dtypes_to_test:
             dtype, dtype_str = dtype_map[dtype_key]
             for causal in causals_to_test:
-                for batch, seq_len, nh, hd in configs:
+                for batch, seq_len, nh, nh_kv_default, hd in configs:
                     causal_tag = "causal" if causal else "nocausal"
-                    cfg = (batch, seq_len, nh, hd, dtype_key, causal_tag)
+                    # CLI --num_kv_heads (if set) overrides the per-config default.
+                    nh_kv = args.num_kv_heads if args.num_kv_heads is not None else nh_kv_default
+                    cfg = (batch, seq_len, nh, nh_kv, hd, dtype_key, causal_tag)
                     try:
                         r = run_config(
                             batch, seq_len, nh, hd, dtype, causal,
                             warmup=args.warmup, iters=args.iters,
                             seed=args.seed, dtype_str=dtype_str,
+                            num_kv_heads=nh_kv,
                         )
                         path = ""
                         if "err" in r:

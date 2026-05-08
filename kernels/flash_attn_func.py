@@ -90,9 +90,23 @@ def build_flash_attn_func_module_primary(
     fast_fp_math=True,
     daz=True,
     path_tag="auto",
+    num_kv_heads=None,
 ):
-    """Build the flash_attn_func launcher using the post-refactor FlyDSL API."""
+    """Build the flash_attn_func launcher using the post-refactor FlyDSL API.
+
+    For GQA/MQA pass ``num_kv_heads < num_heads``. ``num_heads`` is the Q head
+    count, ``num_kv_heads`` is the KV head count, and we require
+    ``num_heads % num_kv_heads == 0``. Default ``num_kv_heads = num_heads`` (MHA).
+    Q/O still have ``num_heads`` heads; K/V have ``num_kv_heads`` heads, with
+    every ``num_heads // num_kv_heads`` consecutive Q heads sharing one KV head.
+    """
     gpu_arch = get_hip_arch()
+
+    if num_kv_heads is None:
+        num_kv_heads = num_heads
+    assert num_heads % num_kv_heads == 0, (
+        f"num_heads ({num_heads}) must be divisible by num_kv_heads ({num_kv_heads})"
+    )
 
     BLOCK_N = 64
     K_SUB_N = 32
@@ -105,12 +119,12 @@ def build_flash_attn_func_module_primary(
             num_heads, head_dim, causal, dtype_str, sm_scale, waves_per_eu,
             flat_work_group_size=256, block_m=128,
             unsafe_fp_math=unsafe_fp_math, fast_fp_math=fast_fp_math,
-            daz=daz, path_tag=path_tag)
+            daz=daz, path_tag=path_tag, num_kv_heads=num_kv_heads)
         _launcher_m256 = build_flash_attn_func_module_primary(
             num_heads, head_dim, causal, dtype_str, sm_scale, waves_per_eu,
             flat_work_group_size=512, block_m=256,
             unsafe_fp_math=unsafe_fp_math, fast_fp_math=fast_fp_math,
-            daz=daz, path_tag=path_tag)
+            daz=daz, path_tag=path_tag, num_kv_heads=num_kv_heads)
         _BS_THRESHOLD = 4096 * num_heads
 
         def _auto_launch(*args, **kwargs):
@@ -189,10 +203,13 @@ def build_flash_attn_func_module_primary(
     if sm_scale is None:
         sm_scale = 1.0 / host_math.sqrt(head_dim)
 
-    NUM_HEADS = num_heads
+    NUM_HEADS_Q = num_heads
+    NUM_HEADS_KV = num_kv_heads
+    GQA_GROUP_SIZE = NUM_HEADS_Q // NUM_HEADS_KV
     HEAD_DIM = head_dim
     CAUSAL = causal
-    STRIDE_TOKEN = NUM_HEADS * HEAD_DIM
+    STRIDE_TOKEN_Q = NUM_HEADS_Q * HEAD_DIM
+    STRIDE_TOKEN_KV = NUM_HEADS_KV * HEAD_DIM
 
     # Bank-conflict-free LDS strides.
     # K uses XOR swizzle (col ^ ((row & 7) << 4)) at 16-element granularity
@@ -339,22 +356,35 @@ def build_flash_attn_func_module_primary(
         wave_q_offset = wave_id * ROWS_PER_WAVE
 
         # ---- Decompose block_id ----
-        head_idx = block_id % NUM_HEADS
-        batch_q_tile_id = block_id // NUM_HEADS
+        # Each block computes one Q head (per batch, per Q-tile).
+        q_head_idx = block_id % NUM_HEADS_Q
+        batch_q_tile_id = block_id // NUM_HEADS_Q
         num_q_tiles = (seq_len_v + BLOCK_M - 1) // BLOCK_M
         q_tile_idx = batch_q_tile_id % num_q_tiles
         batch_idx = batch_q_tile_id // num_q_tiles
         q_start = q_tile_idx * BLOCK_M
+        # GQA/MQA: every GQA_GROUP_SIZE consecutive Q heads share one KV head.
+        # Use Python ternary (ast.IfExp) so FlyDSL's `if`-rewriter doesn't
+        # turn this into a dynamic dispatch and lose `kv_head_idx`.
+        kv_head_idx = (
+            q_head_idx if GQA_GROUP_SIZE == 1
+            else q_head_idx // GQA_GROUP_SIZE
+        )
 
         # ---- Cooperative load decomposition ----
         load_row_in_batch = tid // THREADS_PER_ROW_LOAD
         load_lane_in_row = tid % THREADS_PER_ROW_LOAD
         load_col_base = load_lane_in_row * VEC_WIDTH
 
-        # ---- Helper: global flat index ----
-        def global_idx(token_idx, col):
+        # ---- Helper: global flat indices ----
+        # Q/O are laid out with NUM_HEADS_Q heads; K/V with NUM_HEADS_KV.
+        def global_idx_q(token_idx, col):
             token = batch_idx * seq_len_v + token_idx
-            return token * STRIDE_TOKEN + head_idx * HEAD_DIM + col
+            return token * STRIDE_TOKEN_Q + q_head_idx * HEAD_DIM + col
+
+        def global_idx_kv(token_idx, col):
+            token = batch_idx * seq_len_v + token_idx
+            return token * STRIDE_TOKEN_KV + kv_head_idx * HEAD_DIM + col
 
         def _load_global_half_vec(ptr, base_idx, vec_elems: int):
             gep = buffer_ops.get_element_ptr(ptr, fx.Int64(base_idx), elem_type=elem_type)
@@ -422,14 +452,14 @@ def build_flash_attn_func_module_primary(
                 if const_expr(KV_NEEDS_GUARD):
                     row_valid = load_row_in_batch < fx.Index(BLOCK_N)
                     if row_valid:
-                        g_idx = global_idx(row_idx, load_col_base)
+                        g_idx = global_idx_kv(row_idx, load_col_base)
                         lds_row = load_row_in_batch + row_offset
                         swz_col = _k_swizzle(lds_row, load_col_base)
                         lds_idx = k_base + lds_row * K_STRIDE + swz_col
                         vec = load_global_f16xN(k_ptr, g_idx)
                         Vec(vec).store(lds_kv, [lds_idx])
                 else:
-                    g_idx = global_idx(row_idx, load_col_base)
+                    g_idx = global_idx_kv(row_idx, load_col_base)
                     lds_row = load_row_in_batch + row_offset
                     swz_col = _k_swizzle(lds_row, load_col_base)
                     lds_idx = k_base + lds_row * K_STRIDE + swz_col
@@ -459,12 +489,12 @@ def build_flash_attn_func_module_primary(
                 if const_expr(KV_NEEDS_GUARD):
                     row_valid = load_row_in_batch < fx.Index(BLOCK_N)
                     if row_valid:
-                        g_idx = global_idx(row_idx, load_col_base)
+                        g_idx = global_idx_kv(row_idx, load_col_base)
                         lds_row = load_row_in_batch + row_offset
                         vec = load_global_f16xN(v_ptr, g_idx)
                         _v_store_to_lds(v_base, lds_row, vec)
                 else:
-                    g_idx = global_idx(row_idx, load_col_base)
+                    g_idx = global_idx_kv(row_idx, load_col_base)
                     lds_row = load_row_in_batch + row_offset
                     vec = load_global_f16xN(v_ptr, g_idx)
                     _v_store_to_lds(v_base, lds_row, vec)
@@ -475,7 +505,7 @@ def build_flash_attn_func_module_primary(
             for batch in range_constexpr(NUM_BATCHES_KV):
                 row_offset = batch * ROWS_PER_BATCH_LOAD
                 row_idx = tile_start + load_row_in_batch + row_offset
-                g_idx = global_idx(row_idx, load_col_base)
+                g_idx = global_idx_kv(row_idx, load_col_base)
                 vecs.append(load_global_f16xN(v_ptr, g_idx))
             return vecs
 
@@ -530,8 +560,8 @@ def build_flash_attn_func_module_primary(
                     col_byte = unsw_col_f16 * 2
                     global_row = (batch_idx * seq_len_v + tile_start
                                   + row_in_tile)
-                    global_byte = (global_row * fx.Index(STRIDE_TOKEN * 2)
-                                   + head_idx * fx.Index(HEAD_DIM * 2)
+                    global_byte = (global_row * fx.Index(STRIDE_TOKEN_KV * 2)
+                                   + kv_head_idx * fx.Index(HEAD_DIM * 2)
                                    + col_byte)
                     voffset = fx.Int32(global_byte)
 
@@ -573,8 +603,8 @@ def build_flash_attn_func_module_primary(
                     col_byte = unsw_col_f16 * 2
                     global_row = (batch_idx * seq_len_v + tile_start
                                   + row_in_tile)
-                    global_byte = (global_row * fx.Index(STRIDE_TOKEN * 2)
-                                   + head_idx * fx.Index(HEAD_DIM * 2)
+                    global_byte = (global_row * fx.Index(STRIDE_TOKEN_KV * 2)
+                                   + kv_head_idx * fx.Index(HEAD_DIM * 2)
                                    + col_byte)
                     voffset = fx.Int32(global_byte)
 
@@ -593,7 +623,7 @@ def build_flash_attn_func_module_primary(
         q_b_packs = []
         for ks in range_constexpr(K_STEPS_QK):
             q_col = fx.Index(ks * K_STEP_QK) + lane_div_32 * MFMA_LANE_K
-            g_idx = global_idx(q_row_safe, q_col)
+            g_idx = global_idx_q(q_row_safe, q_col)
             raw = load_global_mfma_pack(q_ptr, g_idx)
             q_b_packs.append(ArithValue(q_in_bounds).select(raw, c_zero_mfma_pack))
 
@@ -1083,7 +1113,7 @@ def build_flash_attn_func_module_primary(
 
                     d_row_rel = lane_div_32 * 4 + (r // 4) * 8 + (r % 4)
                     d_col = fx.Index(dc * D_CHUNK) + d_row_rel
-                    o_global = global_idx(q_row, d_col)
+                    o_global = global_idx_q(q_row, d_col)
                     _store_global_half(o_ptr, o_global, o_f16)
 
     @flyc.jit
@@ -1104,7 +1134,7 @@ def build_flash_attn_func_module_primary(
         bs_idx = fx.Index(batch_size)
         sl_idx = fx.Index(seq_len)
         num_q_tiles = (sl_idx + BLOCK_M - 1) // BLOCK_M
-        grid_x = bs_idx * num_q_tiles * NUM_HEADS
+        grid_x = bs_idx * num_q_tiles * NUM_HEADS_Q
 
         passthrough_entries = (
             [
