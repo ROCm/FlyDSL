@@ -8,32 +8,20 @@ import os
 import math
 import random
 
-import torch
-import pytest
-
 sys.path.insert(0, "build-fly/python_packages")
 sys.path.insert(1, ".")
 
-os.environ.setdefault("FLYDSL_DUMP_IR", "1")
+import torch
+import pytest
 
-_VARIANT = os.environ.get("PA_MQA_VARIANT", "baseline")
-if _VARIANT == "single":
-    from kernels.pa_mqa_logits_fp4_single import (
-        build_pa_mqa_logits_fp4_module,
-        compute_varctx_schedule,
-        HEADS, HEAD_DIM, HEAD_DIM_PACKED, HEAD_DIM_SCALES,
-        BLOCK_THREADS,
-        allocator as _alloc_ref,
-    )
-    print("[test] using pa_mqa_logits_fp4_SINGLE kernel (single chunk per CTA)")
-else:
-    from kernels.pa_mqa_logits_fp4 import (
-        build_pa_mqa_logits_fp4_module,
-        compute_varctx_schedule,
-        HEADS, HEAD_DIM, HEAD_DIM_PACKED, HEAD_DIM_SCALES,
-        BLOCK_THREADS,
-        allocator as _alloc_ref,
-    )
+
+from kernels.pa_mqa_logits_fp4 import (
+    build_pa_mqa_logits_fp4_module,
+    compute_varctx_schedule,
+    HEADS, HEAD_DIM, HEAD_DIM_PACKED, HEAD_DIM_SCALES,
+    BLOCK_THREADS,
+    allocator as _alloc_ref,
+)
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl._mlir import ir as _ir
 import flydsl.compiler as flyc
@@ -228,28 +216,45 @@ def create_paged_preshuffle_kv_fp8(kv_bf16, kv_block_size, num_blocks, block_tab
 # ── Reference implementation ─────────────────────────────────────
 
 
-def ref_mqa_logits_mixed(q_packed, q_scale, kv_fp8, kv_scale, weights, context_lens):
-    """Reference: Q (FP4) + KV (FP8 E4M3) dequant → einsum → relu → weight → sum."""
+def ref_mqa_logits_mixed(q_packed, q_scale, kv_fp8, kv_scale, weights, context_lens, next_n=1):
+    """Reference: Q (FP4) + KV (FP8 E4M3) dequant → einsum → relu → weight → sum.
+
+    Shapes:
+      q_packed: [B, NEXT_N, H, D/2] uint8
+      q_scale:  [B, NEXT_N, H, D/32] uint8
+      weights:  [B*NEXT_N, H] fp32
+      output:   [B*NEXT_N, T_max] fp32
+    For NEXT_N>1 each row n has causal limit k <= context_len - NEXT_N + n.
+    """
     batch = q_packed.shape[0]
     t_max = kv_fp8.shape[1]
 
-    q_dq = fp4_dequant_e2m1_with_e8m0(q_packed, q_scale)   # [B, H, D] float32
+    # Dequant Q over flattened (B, NEXT_N) leading dims.
+    q_dq = fp4_dequant_e2m1_with_e8m0(
+        q_packed.reshape(batch * next_n, HEADS, HEAD_DIM_PACKED),
+        q_scale.reshape(batch * next_n, HEADS, HEAD_DIM_SCALES),
+    ).reshape(batch, next_n, HEADS, HEAD_DIM)
     kv_dq = fp8_dequant_e4m3_with_e8m0(kv_fp8, kv_scale)   # [B, T, D] float32
 
-    ref_logits = torch.full((batch, t_max), float("-inf"), device=dev, dtype=torch.float32)
+    ref_logits = torch.full(
+        (batch * next_n, t_max), float("-inf"), device=dev, dtype=torch.float32)
 
     for b in range(batch):
         ctx = context_lens[b].item()
         if ctx == 0:
             continue
-        qi = q_dq[b]            # [H, D]
-        kvi = kv_dq[b, :ctx]    # [ctx, D]
-        wi = weights[b]         # [H]
-
-        qk = qi @ kvi.T         # [H, ctx]
-        qk = torch.relu(qk) * wi[:, None]
-        logits_i = qk.sum(dim=0)  # [ctx]
-        ref_logits[b, :ctx] = logits_i
+        kvi = kv_dq[b, :ctx]                      # [ctx, D]
+        for n in range(next_n):
+            qi = q_dq[b, n]                       # [H, D]
+            wi = weights[b * next_n + n]          # [H]
+            qk = qi @ kvi.T                       # [H, ctx]
+            qk = torch.relu(qk) * wi[:, None]
+            logits_i = qk.sum(dim=0)              # [ctx]
+            # Per-row causal mask: valid k <= ctx - next_n + n (inclusive).
+            valid_max = ctx - next_n + n
+            if valid_max + 1 < ctx:
+                logits_i[valid_max + 1:] = float("-inf")
+            ref_logits[b * next_n + n, :ctx] = logits_i
 
     return ref_logits
 
@@ -257,16 +262,23 @@ def ref_mqa_logits_mixed(q_packed, q_scale, kv_fp8, kv_scale, weights, context_l
 # ── Test + Benchmark ─────────────────────────────────────────────
 
 
-def _torch_ref_step(q_dq, kv_dq, w):
-    """logits[b,t] = sum_h(relu(Q[b,h,:] · K[b,t,:]) * w[b,h]).
+def _torch_ref_step(q_dq_bn, kv_dq, w_bn, next_n=1):
+    """logits[bn,t] = sum_h(relu(Q[bn,h,:] · K[b,t,:]) * w[bn,h]).
 
-    Note: torch baseline does the full t_max matmul (no varctx skip).
-    The TFLOPS we report for it is based on USEFUL flops, so it'll look
-    lower than its raw matmul throughput — that's the point: it wastes
-    work on padded tokens.
+    q_dq_bn: [B*NEXT_N, H, D], kv_dq: [B, T, D] (broadcast across NEXT_N),
+    w_bn:    [B*NEXT_N, H]. Returns [B*NEXT_N, T].
+
+    Note: torch baseline does the full t_max matmul (no varctx skip, no
+    causal mask). The TFLOPS we report for it is based on USEFUL flops,
+    so it'll look lower than its raw matmul throughput.
     """
-    qk = torch.bmm(q_dq, kv_dq.transpose(1, 2))   # [B, H, T_max]
-    qk = torch.relu(qk) * w[:, :, None]
+    if next_n != 1:
+        # Broadcast KV across NEXT_N (zero-copy view).
+        b_kv, t_kv, d_kv = kv_dq.shape
+        kv_dq = kv_dq.unsqueeze(1).expand(-1, next_n, -1, -1).reshape(
+            b_kv * next_n, t_kv, d_kv)
+    qk = torch.bmm(q_dq_bn, kv_dq.transpose(1, 2))   # [B*NEXT_N, H, T_max]
+    qk = torch.relu(qk) * w_bn[:, :, None]
     return qk.sum(dim=1)
 
 
@@ -282,15 +294,17 @@ def _make_varctx(batch, max_ctx, kv_block_size):
 
 
 @pytest.mark.parametrize(
-    "batch, max_ctx, kv_block_size, block_k",
+    "batch, max_ctx, kv_block_size, block_k, next_n",
     [
-        pytest.param(4, 16384, 16, 64, id="4x16k"),
-        pytest.param(4, 32768, 16, 64, id="4x32k"),
-        pytest.param(8, 65536, 16, 64, id="8x65k"),
+        pytest.param(4, 16384, 16, 64, 1, id="4x16k_n1"),
+        pytest.param(4, 32768, 16, 64, 1, id="4x32k_n1"),
+        pytest.param(8, 65536, 16, 64, 1, id="8x65k_n1"),
+        pytest.param(4, 16384, 16, 64, 2, id="4x16k_n2"),
+        pytest.param(8, 65536, 16, 64, 2, id="8x65k_n2"),
     ],
 )
 def test_pa_mqa_logits_fp4(
-    batch, max_ctx, kv_block_size, block_k,
+    batch, max_ctx, kv_block_size, block_k, next_n,
     num_iters=20, num_warmup=3,
     num_warps=4, parallel_unit_num=512,
 ):
@@ -305,10 +319,10 @@ def test_pa_mqa_logits_fp4(
 
     print("=" * 96)
     print(f"FP4 MQA Logits varctx: batch={batch_size}, max_ctx={max_ctx}, "
-          f"kv_block={kv_block_size}, block_k={block_k}")
+          f"kv_block={kv_block_size}, block_k={block_k}, next_n={next_n}")
     print(f"  ctx_lens = {ctx_list}  (sum={total_tokens}, "
           f"avg={total_tokens // batch_size}, util={total_tokens/(batch_size*max_ctx):.1%})")
-    naive_ctas = batch_size * ((max_ctx + block_k - 1) // block_k)
+    naive_ctas = batch_size * next_n * ((max_ctx + block_k - 1) // block_k)
     print("=" * 96)
 
     max_blocks_per_seq = (max_ctx + kv_block_size - 1) // kv_block_size
@@ -316,15 +330,17 @@ def test_pa_mqa_logits_fp4(
     t_max = max_blocks_per_seq * kv_block_size
 
     # ---- Generate data ----
-    q_bf16 = torch.randn(batch_size, HEADS, HEAD_DIM, dtype=torch.bfloat16, device=dev)
+    q_bf16 = torch.randn(batch_size, next_n, HEADS, HEAD_DIM,
+                         dtype=torch.bfloat16, device=dev)
     kv_bf16 = torch.randn(batch_size, t_max, HEAD_DIM, dtype=torch.bfloat16, device=dev)
-    weights = torch.randn(batch_size, HEADS, dtype=torch.float32, device=dev) * 0.1
+    weights = torch.randn(batch_size * next_n, HEADS,
+                          dtype=torch.float32, device=dev) * 0.1
 
     q_packed, q_e8m0 = fp4_quant_e2m1_with_e8m0(
-        q_bf16.reshape(batch_size * HEADS, HEAD_DIM), block_size=SCALE_BLOCK
+        q_bf16.reshape(batch_size * next_n * HEADS, HEAD_DIM), block_size=SCALE_BLOCK
     )
-    q_packed = q_packed.reshape(batch_size, HEADS, HEAD_DIM_PACKED)
-    q_e8m0 = q_e8m0.reshape(batch_size, HEADS, HEAD_DIM_SCALES)
+    q_packed = q_packed.reshape(batch_size, next_n, HEADS, HEAD_DIM_PACKED)
+    q_e8m0 = q_e8m0.reshape(batch_size, next_n, HEADS, HEAD_DIM_SCALES)
 
     block_tables = torch.arange(num_blocks, dtype=torch.int32, device=dev).reshape(
         batch_size, max_blocks_per_seq)
@@ -333,13 +349,15 @@ def test_pa_mqa_logits_fp4(
 
     # ---- Reference (Q FP4 + KV FP8 dequant + matmul) — per-batch ctx_lens ----
     ref_logits = ref_mqa_logits_mixed(
-        q_packed, q_e8m0, kv_fp8_dense, kv_e8m0_dense, weights, context_lens)
+        q_packed, q_e8m0, kv_fp8_dense, kv_e8m0_dense, weights, context_lens,
+        next_n=next_n)
 
     # ── Persistent-grid schedule (gluon-style safe_chunks_per_cta) ──
     # parallel_unit_num: target CTA count (MI355X has 256 CUs; default 256×2).
-    # cta_info shape [total_ctas, 4]: [batch, chunk_start, chunk_count, ctx_len]
+    # cta_info shape [total_ctas, 4]: [batch_packed, chunk_start, chunk_count, ctx_len]
+    # batch_packed = batch * next_n + next_n_idx; kernel decodes via /, %.
     safe, cta_info, total_ctas = compute_varctx_schedule(
-        context_lens, block_k, parallel_unit_num)
+        context_lens, block_k, parallel_unit_num, next_n=next_n)
     print(f"  schedule: parallel_unit={parallel_unit_num} num_warps={num_warps} "
           f"safe_chunks_per_cta={safe}  total_ctas={total_ctas}  "
           f"(naive grid would be {naive_ctas})")
@@ -347,20 +365,21 @@ def test_pa_mqa_logits_fp4(
     # ---- Build flydsl kernel (pipelined kernel uses safe + num_warps as constexpr) ----
     _build_kwargs = dict(block_k=block_k, kv_block_size=kv_block_size,
                          max_blocks_per_seq=max_blocks_per_seq,
-                         max_chunks_per_cta=safe, num_warps=num_warps)
+                         max_chunks_per_cta=safe, num_warps=num_warps,
+                         next_n=next_n)
     kfn, alloc = build_pa_mqa_logits_fp4_module(**_build_kwargs)
     block_threads = getattr(alloc, "block_threads", BLOCK_THREADS)
 
-    out_logits = torch.full((batch_size, t_max), float("-inf"),
+    out_logits = torch.full((batch_size * next_n, t_max), float("-inf"),
                             dtype=torch.float32, device=dev)
 
     # ── Pre-shuffle scales for kernel layout (avoids runtime v_bfe_u32) ──
-    # Q scale: [B, H=64, K_chunks=4] → [B, K_chunks=4, lane_mod_16=16, mi_idx=4]
-    # H is decomposed as (mi_idx=4, lane_mod_16=16). Permute so that for each
-    # thread (lane_div_16, lane_mod_16), one dword load returns 4 bytes — one
-    # scale per mi_idx — at compile-time-known byte offsets.
+    # Q scale: [B, NEXT_N, H=64, K_chunks=4] → [B, NEXT_N, K_chunks=4,
+    #          lane_mod_16=16, mi_idx=4]. H decomposed as (mi_idx=4,
+    #          lane_mod_16=16). One dword load gives this thread's 4 mi_idx
+    #          scales packed as 4 bytes.
     qe = q_e8m0.view(torch.uint8).reshape(
-        batch_size, 4, 16, HEAD_DIM_SCALES).permute(0, 3, 2, 1).contiguous()
+        batch_size, next_n, 4, 16, HEAD_DIM_SCALES).permute(0, 1, 4, 3, 2).contiguous()
 
     # KV scale: [num_blocks, kv_block_size, K_chunks=4] →
     #          [num_blocks, K_chunks=4, kv_block_size]
@@ -392,7 +411,9 @@ def test_pa_mqa_logits_fp4(
     launch_flydsl()
     torch.cuda.synchronize()
 
-    mask = torch.arange(t_max, device=dev).unsqueeze(0) < context_lens.unsqueeze(1)
+    # Mask = positions where ref is NOT -inf (valid logit). Works for both
+    # next_n=1 (full ctx valid) and next_n>1 (per-row causal cut tail).
+    mask = ~torch.isneginf(ref_logits)
     valid_out = out_logits[mask].double()
     valid_ref = ref_logits[mask].double()
     cos = (valid_out * valid_ref).sum() / (
@@ -402,7 +423,8 @@ def test_pa_mqa_logits_fp4(
     err_ratio = checkAllclose(valid_ref.float(), valid_out.float(),
                               rtol=0.05, atol=0.05,
                               msg="flydsl-fp4 vs ref", printLog=False)
-    # Verify NEG_INF is preserved past each batch's ctx_len.
+    # Verify NEG_INF is preserved at every position the ref also marked -inf
+    # (past ctx_len, plus per-row causal-mask tail when next_n > 1).
     out_past_ctx = out_logits.masked_select(~mask)
     neg_inf_ok = bool(torch.isneginf(out_past_ctx).all().item()) if out_past_ctx.numel() else True
     print(f"  correctness: cosine_sim={cos.item():.6f}  "
@@ -416,28 +438,32 @@ def test_pa_mqa_logits_fp4(
     torch.cuda.synchronize()
 
     # ---- Perf: torch baselines (dequant excluded — pure matmul + relu/wsum) ----
-    # Torch does full t_max matmul per batch (no varctx skip).
+    # Torch does full t_max matmul per batch (no varctx skip). Use the actual
+    # Q FP4-dequanted + KV FP8-dequanted tensors that the kernel sees, so the
+    # baseline runs on numerically equivalent data (same quant noise floor).
     q_dq_bf16 = fp4_dequant_e2m1_with_e8m0(
         q_packed.reshape(-1, HEAD_DIM_PACKED),
         q_e8m0.reshape(-1, HEAD_DIM_SCALES),
-    ).reshape(batch_size, HEADS, HEAD_DIM).to(torch.bfloat16)
-    kv_dq_bf16 = kv_bf16
+    ).reshape(batch_size * next_n, HEADS, HEAD_DIM).to(torch.bfloat16)
+    kv_dq_bf16 = fp8_dequant_e4m3_with_e8m0(
+        kv_fp8_dense, kv_e8m0_dense).to(torch.bfloat16)
     w_bf16 = weights.to(torch.bfloat16)
 
-    _, us_bf16 = run_perftest(_torch_ref_step, q_dq_bf16, kv_dq_bf16, w_bf16,
-                              num_iters=num_iters, num_warmup=num_warmup)
-    _, us_fp32 = run_perftest(_torch_ref_step,
-                              q_dq_bf16.float(), kv_dq_bf16.float(), weights,
+    _, us_bf16 = run_perftest(_torch_ref_step, q_dq_bf16, kv_dq_bf16, w_bf16, next_n,
                               num_iters=num_iters, num_warmup=num_warmup)
 
     # ---- USEFUL FLOPs / bytes (varctx — based on real ctx_lens, not max) ----
-    flops = total_tokens * HEADS * (2 * HEAD_DIM + 3)
-    bytes_q = batch_size * HEADS * (HEAD_DIM_PACKED + HEAD_DIM_SCALES)
-    # KV is FP8 (128 bytes per token, 1 byte per element) + 4 e8m0 scales
+    # Each token is processed next_n times (once per MTP query).
+    flops = total_tokens * next_n * HEADS * (2 * HEAD_DIM + 3)
+    bytes_q = batch_size * next_n * HEADS * (HEAD_DIM_PACKED + HEAD_DIM_SCALES)
+    # KV is FP8 (128 bytes per token, 1 byte per element) + 4 e8m0 scales.
+    # Counted once: kernel issues 2× reads for next_n=2 but L2 absorbs the
+    # second; HBM traffic stays ≈1×. (If L2 missing, BW report will look
+    # better than reality — that's the cost of this accounting choice.)
     bytes_kv = total_tokens * (HEAD_DIM + HEAD_DIM_SCALES)
-    bytes_w = batch_size * HEADS * 4
+    bytes_w = batch_size * next_n * HEADS * 4
     bytes_bt = batch_size * max_blocks_per_seq * 4
-    bytes_out = total_tokens * 4
+    bytes_out = total_tokens * next_n * 4
     bytes_total = bytes_q + bytes_kv + bytes_w + bytes_bt + bytes_out
 
     def metrics(us):
@@ -448,14 +474,40 @@ def test_pa_mqa_logits_fp4(
 
     tflops_fly, gbps_fly = metrics(us_fly)
     tflops_bf16, _ = metrics(us_bf16)
-    tflops_fp32, _ = metrics(us_fp32)
 
     print(f"\n  {'':>16} | {'us':>10} | {'TFLOPS':>8} | {'GB/s':>8} | {'vs flydsl':>10}")
     print(f"  {'flydsl-fp4':>16} | {us_fly:>10.2f} | {tflops_fly:>8.2f} | {gbps_fly:>8.1f} |")
     print(f"  {'torch-bf16':>16} | {us_bf16:>10.2f} | {tflops_bf16:>8.2f} | {'-':>8} | "
           f"{us_bf16/us_fly:>9.2f}x")
-    print(f"  {'torch-fp32':>16} | {us_fp32:>10.2f} | {tflops_fp32:>8.2f} | {'-':>8} | "
-          f"{us_fp32/us_fly:>9.2f}x")
+    print()
+
+    # Append to cross-shape summary; print once at the end via the
+    # session-scoped fixture below (or explicit call in __main__).
+    _PERF_SUMMARY.append((
+        batch_size, max_ctx, next_n, block_k, cos.item(),
+        us_fly, tflops_fly, gbps_fly))
+
+
+_PERF_SUMMARY = []
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _perf_summary_at_end():
+    yield
+    if _PERF_SUMMARY:
+        _print_perf_summary()
+
+
+def _print_perf_summary():
+    print("\n" + "=" * 80)
+    print("Perf summary (flydsl-fp4 across shapes)")
+    print("=" * 80)
+    print(f"  {'batch':>5} | {'ctx_len':>7} | {'next_n':>6} | {'block_k':>7} | "
+          f"{'cos_sim':>8} | {'us':>9} | {'TFLOPS':>7} | {'GB/s':>7}")
+    print("  " + "-" * 78)
+    for b, ctx, nn, blk, cos_v, us, tflops, gbps in _PERF_SUMMARY:
+        print(f"  {b:>5} | {ctx:>7} | {nn:>6} | {blk:>7} | "
+              f"{cos_v:>8.4f} | {us:>9.2f} | {tflops:>7.2f} | {gbps:>7.1f}")
     print()
 
 
@@ -477,23 +529,35 @@ if __name__ == "__main__":
                         help="warps per CTA (pipelined kernel only); BLOCK=num_warps*64")
     parser.add_argument("--parallel_unit_num", type=int, default=512,
                         help="target CTA count for host schedule (default 512)")
+    parser.add_argument("--next_n", type=int, default=1,
+                        help="MTP queries per batch (1 = standard MQA, 2 = MTP-1)")
     args = parser.parse_args()
 
-    if args.batch > 0 and args.ctx > 0:
-        configs = [(args.batch, args.ctx)]
+    if args.batch > 0 and args.ctx > 0 and args.next_n > 0:
+        configs = [(args.batch, args.ctx, args.next_n)]
     else:
         configs = [
-            # (4, 16384),
-            # (4, 32768),
-            (256, 2 * 65536),
-            # (64, 65536),
+            (1, 2 * 65536, 1),
+            (2, 2 * 65536, 1),
+            (4, 2 * 65536, 1),
+            (8, 2 * 65536, 1),
+            (1, 2 * 16384, 2),
+            (1, 2 * 32768, 2),
+            (1, 2 * 65536, 2),
+            (2, 2 * 16384, 2),
+            (2, 2 * 32768, 2),
+            (2, 2 * 65536, 2),
+            (4, 2 * 16384, 2),
+            (4, 2 * 32768, 2),
+            (4, 2 * 65536, 2),
         ]
 
-    for b, c in configs:
+    for b, c, n in configs:
         try:
             test_pa_mqa_logits_fp4(
                 batch=b, max_ctx=c,
                 kv_block_size=args.kv_block_size, block_k=args.block_k,
+                next_n=n,
                 num_iters=args.num_iters, num_warmup=args.num_warmup,
                 num_warps=args.num_warps, parallel_unit_num=args.parallel_unit_num)
         except AssertionError as e:
@@ -501,3 +565,6 @@ if __name__ == "__main__":
         except Exception:
             import traceback
             traceback.print_exc()
+
+    if _PERF_SUMMARY:
+        _print_perf_summary()

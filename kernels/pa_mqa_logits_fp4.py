@@ -69,28 +69,27 @@ def _pack_i64x4_to_i32x8(x0, x1, x2, x3):
 allocator = None
 
 
-# ── Host-side schedule for varctx + persistent CTA assignment ──────
-# Inspired by gluon's `safe_chunks_per_cta`: pick the smallest "chunks per
-# CTA" such that total CTAs ≤ available parallel units, then build a
-# (cta → batch, chunk_start, chunk_count) lookup table so each CTA loads
-# its assignment in one shot (vs. gluon's in-kernel scf.while walk).
-
-
 def compute_varctx_schedule(
     context_lens,
     block_k,
     parallel_unit_num,
+    next_n=1,
 ):
     """Compute persistent-grid schedule for varctx MQA logits.
 
     Returns a SINGLE packed [total_ctas, 4] int32 tensor so the kernel can
     fetch its assignment in one buffer_load_dwordx4 instead of four separate
-    dword loads. Layout per CTA: [batch, chunk_start, chunk_count, context_len].
+    dword loads. Layout per CTA: [batch_packed, chunk_start, chunk_count, context_len]
+    where batch_packed = batch * next_n + next_n_idx (kernel decodes via /, %).
+
+    Each (batch, chunk-split) is expanded into next_n CTAs — one per next_n
+    query. KV is shared across them via L2 (matching gluon's approach).
 
     Args:
         context_lens: int32 CUDA tensor [batch], per-batch context length.
         block_k: chunk size in tokens.
         parallel_unit_num: target CTA count (typically TotalCuCount * WavePerEU).
+        next_n: number of MTP queries per batch (1 = standard, 2 = MTP-1, ...).
 
     Returns:
         safe_chunks_per_cta: int — chunks each CTA processes (≤ this many).
@@ -105,11 +104,11 @@ def compute_varctx_schedule(
     safe = max_chunks  # worst case: 1 CTA does all chunks of biggest batch
     for s in range(1, max_chunks + 1):
         ctas_per_b = [(c + s - 1) // s for c in chunks_per_batch]
-        if sum(ctas_per_b) <= parallel_unit_num:
+        if sum(ctas_per_b) * next_n <= parallel_unit_num:
             safe = s
             break
 
-    rows = []  # each row: [batch, chunk_start, chunk_count, context_len]
+    rows = []  # each row: [batch_packed, chunk_start, chunk_count, context_len]
     for b, n_chunks in enumerate(chunks_per_batch):
         if n_chunks == 0:
             continue
@@ -117,7 +116,8 @@ def compute_varctx_schedule(
         for split in range(ctas_b):
             start = split * safe
             count = min(safe, n_chunks - start)
-            rows.append([b, start, count, ctx_list[b]])
+            for n in range(next_n):
+                rows.append([b * next_n + n, start, count, ctx_list[b]])
 
     if not rows:  # all-zero context — launch one no-op CTA
         rows = [[0, 0, 0, 0]]
@@ -135,17 +135,23 @@ def build_pa_mqa_logits_fp4_module(
     max_blocks_per_seq=256,
     max_chunks_per_cta=16,
     num_warps=4,
+    next_n=1,
 ):
     """Build FP4 MQA logits kernel (pipelined, block_k=128).
 
     Returns (kernel_fn, allocator).
 
-    Grid: (total_ctas,) from compute_varctx_schedule
+    Grid: (total_ctas,) from compute_varctx_schedule(..., next_n=next_n)
     Block: (BLOCK_THREADS=256,)
 
     `max_chunks_per_cta`: compile-time upper bound on the number of chunks any
     CTA will process. Used to statically unroll block-table prefetch in the
     prologue. Must be >= host-side `safe_chunks_per_cta`.
+
+    `next_n`: number of MTP queries per batch (default 1 = standard MQA).
+    Following gluon's design, each (batch, next_n_idx) is a separate CTA;
+    KV is shared across the next_n CTAs via L2 cache. cta_info[0] holds
+    batch_packed = batch * next_n + next_n_idx; the kernel decodes it.
 
     With block_k=128 and 4 warps, each warp processes N_TILES_PER_WARP=2 N-tiles
     per chunk (= 32 tokens), giving more compute window per chunk to hide load
@@ -154,6 +160,7 @@ def build_pa_mqa_logits_fp4_module(
     MAX_CHUNKS_PER_CTA = max_chunks_per_cta
     NUM_WARPS_K = num_warps          # build-time scoped (overrides module default)
     BLOCK_THREADS_K = NUM_WARPS_K * WARP_SIZE
+    NEXT_N = next_n                  # build-time constexpr
     global allocator
 
     N_TILES = block_k // MFMA_N
@@ -162,8 +169,14 @@ def build_pa_mqa_logits_fp4_module(
         f"block_k={block_k} → N_TILES={N_TILES} must be multiple of num_warps={NUM_WARPS_K}"
     N_TILES_PER_WARP = N_TILES // NUM_WARPS_K
 
-    _stride_q_batch = HEADS * HEAD_DIM_PACKED
-    _stride_qs_batch = HEADS * HEAD_DIM_SCALES
+    # Q/Q_scale layout: [B, NEXT_N, H, D/2 or D/32]
+    _stride_q_next_n = HEADS * HEAD_DIM_PACKED            # bytes per next_n slice
+    _stride_q_batch = NEXT_N * _stride_q_next_n           # bytes per batch
+    _stride_qs_next_n = HEADS * HEAD_DIM_SCALES           # bytes per next_n slice
+    _stride_qs_batch = NEXT_N * _stride_qs_next_n         # bytes per batch
+    # qs_off is in i32 units (×4 bytes). _stride_qs_*_i32 = bytes / 4.
+    _stride_qs_next_n_i32 = _stride_qs_next_n // 4        # = HEADS * HEAD_DIM_SCALES // 4
+    # Weights/output addressed by batch_packed (= b*NEXT_N + n) directly.
     _stride_w_batch = HEADS
     _stride_bt = max_blocks_per_seq
 
@@ -217,21 +230,35 @@ def build_pa_mqa_logits_fp4_module(
         c0_i32 = fx.Int32(0)
 
         # ── Persistent CTA assignment lookup (one dwordx4 load) ────
-        # Layout per CTA: [batch, chunk_start, chunk_count, ctx_len]
+        # Layout per CTA: [batch_packed, chunk_start, chunk_count, ctx_len]
+        # batch_packed = pid_b * NEXT_N + pid_next_n. Decoded below.
         cta_info_4xi32 = buffer_ops.buffer_load(
             cta_info_rsrc, pid * fx.Int32(4), vec_width=4, dtype=T.i32)
-        pid_b = vector.extract(cta_info_4xi32, static_position=[0])
+        batch_packed = vector.extract(cta_info_4xi32, static_position=[0])
         chunk_start = vector.extract(cta_info_4xi32, static_position=[1])
         chunk_count = vector.extract(cta_info_4xi32, static_position=[2])
         context_len = vector.extract(cta_info_4xi32, static_position=[3])
 
+        # Decode batch + next_n. NEXT_N=1 ⇒ /1, %1: MLIR canonicalizer folds
+        # the divide-by-1 to identity and the mod-by-1 to 0. NEXT_N=power-of-2
+        # ⇒ shift/and. No Python-if here because @flyc.kernel rewrites all
+        # `if` to scf.if (variables defined inside become branch-local).
+        pid_b = batch_packed // fx.Int32(NEXT_N)
+        pid_next_n = batch_packed % fx.Int32(NEXT_N)
+
         # ── Q load (HOISTED out of chunk loop — reused across chunks) ──
-        # Each thread holds its slice of Q for this batch's 64 heads.
+        # Q layout: [B, NEXT_N, H, D/2]. Each thread holds its slice of Q
+        # for this (batch, next_n_idx)'s 64 heads.
         q_a_ops = []
         for mi_idx in [0, 1, 2, 3]:
             q_row = mi_idx * MFMA_M + lane_mod_16
             q_col_bytes = lane_div_16 * 16
-            q_off_bytes = pid_b * _stride_q_batch + q_row * HEAD_DIM_PACKED + q_col_bytes
+            q_off_bytes = (
+                pid_b * _stride_q_batch
+                + pid_next_n * fx.Int32(_stride_q_next_n)
+                + q_row * HEAD_DIM_PACKED
+                + q_col_bytes
+            )
             q_4xi32 = buffer_ops.buffer_load(
                 q_rsrc, q_off_bytes // 4, vec_width=4, dtype=T.i32)
             q_i64_0 = _pack_i32_pair_to_i64(
@@ -244,11 +271,16 @@ def build_pa_mqa_logits_fp4_module(
             )
             q_a_ops.append(_pack_i64x4_to_i32x8(q_i64_0, q_i64_1, c0_i64, c0_i64))
 
-        # Q scale: pre-shuffled host-side as [B, K_chunks=4, lane_mod_16=16, mi_idx=4].
+        # Q scale: pre-shuffled host-side as [B, NEXT_N, K_chunks=4, lane_mod_16=16, mi_idx=4].
         # ONE dword load gives this thread's 4 mi_idx scales packed as bytes
         # [m0, m1, m2, m3]. Per-mi_idx extraction is a compile-time shift —
         # MFMA only reads byte 0, so upper-byte garbage is irrelevant.
-        qs_off_i32 = pid_b * fx.Int32(HEADS) + lane_div_16 * fx.Int32(16) + lane_mod_16
+        qs_off_i32 = (
+            pid_b * fx.Int32(NEXT_N * HEADS)
+            + pid_next_n * fx.Int32(_stride_qs_next_n_i32)
+            + lane_div_16 * fx.Int32(16)
+            + lane_mod_16
+        )
         qs_4b = buffer_ops.buffer_load(qs_rsrc, qs_off_i32, vec_width=1, dtype=T.i32)
         q_scale_ops = [
             qs_4b,                          # mi_idx=0: byte 0 already correct
@@ -262,11 +294,12 @@ def build_pa_mqa_logits_fp4_module(
         # warp loads 4 scalar weights addressed by lane_mod_16. (We can't
         # vec4-load: 4 mi_idx slices are 16 heads apart, not contiguous;
         # within a slice 16 lanes load 16 distinct heads via scalar dwords.)
+        # weights shape: [B*NEXT_N, H] — addressed by batch_packed directly.
         w_per_lane_swap = []
         for mi_idx in [0, 1, 2, 3]:
             h_swap = mi_idx * MFMA_M + lane_mod_16
             w_scalar = buffer_ops.buffer_load(
-                w_rsrc, pid_b * _stride_w_batch + h_swap,
+                w_rsrc, batch_packed * _stride_w_batch + h_swap,
                 vec_width=1, dtype=T.f32)
             w_per_lane_swap.append(w_scalar)
 
@@ -458,26 +491,33 @@ def build_pa_mqa_logits_fp4_module(
                 # per group is needed. Pack the 4 partials into a vec4 and
                 # emit ONE buffer_store_dwordx4 instead of four scalar dwords.
                 #
-                # The 4 tokens are contiguous in memory and the base address
-                # is naturally 16-byte aligned (token_base is a multiple of
-                # MFMA_N=16, lane_div_16*4 advances in steps of 4 dwords =
-                # 16 bytes). Whole N-tile fits in/out of context together
-                # because context_len is a multiple of MFMA_N — so a single
-                # in_ctx check on the base token covers all 4 tokens.
-                #
-                # Mask via address: non-writer lanes / out-of-context groups
-                # get OOB offset that the buffer resource silently drops.
+                # Per-(next_n) causal mask: query at next_n_idx n sees tokens
+                # up to and including (context_len - NEXT_N + n). Equivalent:
+                # out_token + (NEXT_N - 1 - n) < context_len. With NEXT_N>1
+                # the effective bound is NOT a multiple of 4 (e.g. n=0 ⇒
+                # context_len-1), so the boundary can split a vec4 group.
+                # Apply mask per-elem BEFORE packing — OOB elems get NEG_INF
+                # so the single vec4 store still works without losing BW.
+                # NEXT_N=1: mask_off=0 → equivalent to old single base check.
+                out_token0 = token_base + lane_div_16 * fx.Int32(4)
+                mask_off = fx.Int32(NEXT_N - 1) - pid_next_n
+                for elem in range_constexpr(4):
+                    out_token_e = out_token0 + fx.Int32(elem)
+                    in_ctx_e = (out_token_e + mask_off) < context_len
+                    partials[elem] = in_ctx_e.select(partials[elem], NEG_INF)
+
                 val_vec = vector.from_elements(
                     T.vec(4, T.f32),
                     [partials[0], partials[1], partials[2], partials[3]],
                 )
+                # Mask via address: non-writer lanes get OOB offset that the
+                # buffer resource silently drops. The 4 tokens are contiguous
+                # and the base is 16-byte aligned (token_base ≡ 0 mod 16,
+                # lane_div_16*4 advances in 16-byte steps).
                 oob_off = fx.Int32(-1)
                 is_writer = lane_mod_16 < fx.Int32(1)
-                out_token0 = token_base + lane_div_16 * fx.Int32(4)
-                in_ctx = out_token0 < context_len
-                out_off_real = pid_b * stride_out_batch + out_token0
-                out_off = in_ctx.select(out_off_real, oob_off)
-                out_off = is_writer.select(out_off, oob_off)
+                out_off_real = batch_packed * stride_out_batch + out_token0
+                out_off = is_writer.select(out_off_real, oob_off)
                 buffer_ops.buffer_store(val_vec, out_rsrc, out_off)
 
         # === Prologue ===
