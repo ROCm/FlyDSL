@@ -281,6 +281,7 @@ if __name__ == "__main__":
     test_blockscale_preshuffle_gemm(
         M=args.M, N=args.N, K=args.K,
         out_dtype=args.out_dtype,
+        test_graph=False,
         bench_iters=args.num_iters,
         bench_warmup=args.num_warmup,
         use_async_copy=args.use_async_copy,

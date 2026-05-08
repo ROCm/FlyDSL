@@ -9,7 +9,7 @@ import pytest
 
 from flydsl._mlir.ir import Context, FunctionType, InsertionPoint, IntegerType, Location, Module
 from flydsl._mlir.dialects import arith, func
-from flydsl.compiler.ast_rewriter import ASTRewriter, ReplaceIfWithDispatch
+from flydsl.compiler.ast_rewriter import ASTRewriter, ReplaceIfWithDispatch, _collect_assigned_vars
 from flydsl.expr.numeric import Int32
 
 
@@ -19,9 +19,8 @@ a, (b, c) = foo()
 d += 1
 """
     stmts = ast.parse(code).body
-    node = ast.If(test=ast.Constant(value=True), body=stmts, orelse=[])
     active_symbols = [{"a", "b", "c", "d"}]
-    assigned = ReplaceIfWithDispatch._collect_assigned_vars(node, active_symbols)
+    assigned = _collect_assigned_vars(stmts, active_symbols)
     assert assigned == ["a", "b", "c", "d"]
 
 
@@ -40,9 +39,8 @@ if (n := foo()):
     out = n
 """
     stmts = ast.parse(code).body
-    node = ast.If(test=ast.Constant(value=True), body=stmts, orelse=[])
     active_symbols = [{"x", "i", "y", "w", "z", "e", "err", "n", "out"}]
-    assigned = ReplaceIfWithDispatch._collect_assigned_vars(node, active_symbols)
+    assigned = _collect_assigned_vars(stmts, active_symbols)
     assert assigned == ["x", "i", "y", "w", "z", "err", "n", "out"]
 
 
