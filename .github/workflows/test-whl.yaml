@@ -59,6 +59,23 @@ jobs:
           docker exec flydsl_test bash -c "mkdir -p /flydsl/build-fly/bin && cp /dist/fly-opt /flydsl/build-fly/bin/fly-opt && chmod +x /flydsl/build-fly/bin/fly-opt"
           docker exec flydsl_test bash -c "git config --global --add safe.directory /flydsl"
 
+      - name: Smoke test external LLVM tools
+        id: external-tools
+        run: |
+          docker exec flydsl_test bash -c '
+            set -euo pipefail
+            TOOL_ARCHIVE=$(ls -1 /dist/flydsl-mlir-tools-*.tar.gz | head -n1)
+            test -n "${TOOL_ARCHIVE}"
+            rm -rf /opt/flydsl-mlir-tools
+            mkdir -p /opt/flydsl-mlir-tools
+            tar -xzf "${TOOL_ARCHIVE}" -C /opt/flydsl-mlir-tools
+            /opt/flydsl-mlir-tools/bin/mlir-opt --version
+            cd /flydsl
+            FLYDSL_COMPILE_LLVM_DIR=/opt/flydsl-mlir-tools \
+            FLYDSL_RUNTIME_ENABLE_CACHE=0 \
+              python3 -m pytest tests/unit/test_compile_hints.py::TestCompileHintsPropagation::test_llvm_options_in_compile_hints -v
+          '
+
       - name: Run tests
         id: tests
         run: |
@@ -94,6 +111,7 @@ jobs:
         env:
           SUMMARY_RUNNER: ${{ matrix.runners }}
           SUMMARY_INSTALL_OUTCOME: ${{ steps.install.outcome }}
+          SUMMARY_EXTERNAL_TOOLS_OUTCOME: ${{ steps.external-tools.outcome }}
           SUMMARY_TESTS_OUTCOME: ${{ steps.tests.outcome }}
           SUMMARY_BENCHMARKS_OUTCOME: ${{ steps.benchmarks.outcome }}
           SUMMARY_TEST_LOG: /tmp/test_output.log

@@ -17,16 +17,25 @@ on:
         type: string
         required: false
         default: ''
+      llvm_ref:
+        description: 'Optional LLVM branch, tag, or full commit SHA for building external mlir tools'
+        type: string
+        required: false
+        default: ''
     outputs:
       wheel_names:
         description: 'Space-separated list of built wheel filenames'
         value: ${{ jobs.build.outputs.wheel_names }}
+      llvm_tool_names:
+        description: 'Space-separated list of built LLVM tool archive filenames'
+        value: ${{ jobs.build.outputs.llvm_tool_names }}
 
 jobs:
   build:
     runs-on: linux-flydsl-mi325-1
     outputs:
       wheel_names: ${{ steps.collect-wheels.outputs.wheel_names }}
+      llvm_tool_names: ${{ steps.collect-llvm-tools.outputs.llvm_tool_names }}
     permissions:
       id-token: write
       contents: read
@@ -78,12 +87,25 @@ jobs:
           docker exec flydsl_build bash -c "python3 -m pip install -q nanobind"
           docker exec flydsl_build bash -c "git config --global --add safe.directory '*'"
 
+      - name: Resolve LLVM ref for cache key
+        id: llvm-ref
+        run: |
+          if [ -n "${{ inputs.llvm_ref }}" ]; then
+            REF="${{ inputs.llvm_ref }}"
+          else
+            REF="$(tr -d '[:space:]' < flydsl/thirdparty/llvm-hash.txt)"
+          fi
+          SAFE_REF=$(printf '%s' "${REF}" | sed 's|[^A-Za-z0-9_.-]|-|g')
+          echo "ref=${REF}" >> "$GITHUB_OUTPUT"
+          echo "safe_ref=${SAFE_REF}" >> "$GITHUB_OUTPUT"
+          echo "LLVM ref: ${REF}"
+
       - name: Restore cached MLIR install tarball
         id: mlir-cache
         uses: actions/cache@v4
         with:
           path: mlir_install.tgz
-          key: mlir-install-manylinux228-${{ hashFiles('flydsl/thirdparty/llvm-hash.txt', 'flydsl/scripts/build_llvm.sh', 'flydsl/CMakeLists.txt') }}
+          key: mlir-install-manylinux228-${{ steps.llvm-ref.outputs.safe_ref }}-${{ hashFiles('flydsl/scripts/build_llvm.sh', 'flydsl/CMakeLists.txt') }}
 
       - name: Use cached MLIR install tarball
         if: steps.mlir-cache.outputs.cache-hit == 'true'
@@ -95,7 +117,9 @@ jobs:
       - name: Build LLVM
         if: steps.mlir-cache.outputs.cache-hit != 'true'
         run: |
-          docker exec flydsl_build bash -c "cd /flydsl && bash scripts/build_llvm.sh"
+          docker exec \
+            -e "LLVM_REF=${{ steps.llvm-ref.outputs.ref }}" \
+            flydsl_build bash -c "cd /flydsl && bash scripts/build_llvm.sh"
           docker cp flydsl_build:/llvm-project/mlir_install.tgz ./mlir_install.tgz || true
 
       - name: Build wheels
@@ -119,12 +143,40 @@ jobs:
           echo "Copying fly-opt from ${FLY_OPT_SRC}"
           docker cp "flydsl_build:${FLY_OPT_SRC}" ./dist/fly-opt
 
+      - name: Package external LLVM tools
+        run: |
+          LLVM_SHA=$(docker exec flydsl_build bash -c "cd /llvm-project && git rev-parse HEAD")
+          LLVM_SHA_SHORT="${LLVM_SHA:0:12}"
+          TOOL_ARCHIVE="flydsl-mlir-tools-${LLVM_SHA_SHORT}-manylinux_2_28-x86_64.tar.gz"
+          echo "Packaging ${TOOL_ARCHIVE}"
+          docker exec flydsl_build bash -c "
+            set -euo pipefail
+            test -x /llvm-project/mlir_install/bin/mlir-opt
+            cd /llvm-project/mlir_install
+            tar -czf /flydsl/dist/${TOOL_ARCHIVE} bin/mlir-opt lib
+          "
+          docker exec flydsl_build bash -c "
+            set -euo pipefail
+            rm -rf /tmp/flydsl-mlir-tools-smoke
+            mkdir -p /tmp/flydsl-mlir-tools-smoke
+            tar -xzf /flydsl/dist/${TOOL_ARCHIVE} -C /tmp/flydsl-mlir-tools-smoke
+            /tmp/flydsl-mlir-tools-smoke/bin/mlir-opt --version
+          "
+          ls -lh "dist/${TOOL_ARCHIVE}"
+
       - name: Collect wheel names
         id: collect-wheels
         run: |
           WHEELS=$(ls dist/*.whl | xargs -n1 basename | tr '\n' ' ')
           echo "wheel_names=${WHEELS}" >> $GITHUB_OUTPUT
           echo "Built wheels: ${WHEELS}"
+
+      - name: Collect LLVM tool archive names
+        id: collect-llvm-tools
+        run: |
+          TOOLS=$(ls dist/flydsl-mlir-tools-*.tar.gz | xargs -n1 basename | tr '\n' ' ')
+          echo "llvm_tool_names=${TOOLS}" >> $GITHUB_OUTPUT
+          echo "Built LLVM tool archives: ${TOOLS}"
 
       - name: Upload wheel artifacts
         uses: actions/upload-artifact@v4
@@ -133,6 +185,7 @@ jobs:
           path: |
             dist/*.whl
             dist/fly-opt
+            dist/flydsl-mlir-tools-*.tar.gz
           retention-days: 3
 
       - name: Build summary
@@ -161,6 +214,12 @@ jobs:
         run: |
           aws s3 cp dist/ s3://framework-whls-${{ inputs.release_type }}/whl-staging/gfx942-gfx950/ \
             --recursive --exclude "*" --include "*.whl"
+
+      - name: Upload LLVM tools to S3 staging
+        if: ${{ github.repository_owner == 'ROCm' && inputs.upload_s3_staging }}
+        run: |
+          aws s3 cp dist/ s3://framework-whls-${{ inputs.release_type }}/llvm-tools-staging/gfx942-gfx950/ \
+            --recursive --exclude "*" --include "flydsl-mlir-tools-*.tar.gz"
 
       - name: Clean up
         if: always()

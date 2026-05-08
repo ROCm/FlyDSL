@@ -11,6 +11,11 @@ on:
         description: 'Space-separated list of wheel filenames to promote'
         type: string
         required: true
+      llvm_tool_names:
+        description: 'Space-separated list of LLVM tool archive filenames to promote'
+        type: string
+        required: false
+        default: ''
 
 jobs:
   promote:
@@ -58,6 +63,41 @@ jobs:
           done
           echo "All wheels promoted successfully"
 
+      - name: Download LLVM tools from staging
+        if: ${{ inputs.llvm_tool_names != '' }}
+        run: |
+          STAGING="s3://framework-whls-${{ inputs.release_type }}/llvm-tools-staging/gfx942-gfx950"
+          mkdir -p /tmp/promote-llvm-tools
+          echo "Downloading LLVM tools from ${STAGING}"
+          for TOOL in ${{ inputs.llvm_tool_names }}; do
+            echo "Downloading ${TOOL}..."
+            aws s3 cp "${STAGING}/${TOOL}" "/tmp/promote-llvm-tools/${TOOL}"
+          done
+          echo "Downloaded LLVM tools:"
+          ls -lh /tmp/promote-llvm-tools/
+
+      - name: Smoke test LLVM tool archives
+        if: ${{ inputs.llvm_tool_names != '' }}
+        run: |
+          set -euo pipefail
+          for TOOL in ${{ inputs.llvm_tool_names }}; do
+            WORKDIR="/tmp/promote-llvm-tools-smoke/${TOOL%.tar.gz}"
+            mkdir -p "${WORKDIR}"
+            tar -xzf "/tmp/promote-llvm-tools/${TOOL}" -C "${WORKDIR}"
+            "${WORKDIR}/bin/mlir-opt" --version
+          done
+
+      - name: Upload LLVM tools to ${{ inputs.release_type }}
+        if: ${{ inputs.llvm_tool_names != '' }}
+        run: |
+          RELEASE="s3://framework-whls-${{ inputs.release_type }}/llvm-tools/gfx942-gfx950"
+          echo "Uploading LLVM tools to ${RELEASE}"
+          for TOOL in ${{ inputs.llvm_tool_names }}; do
+            echo "Uploading ${TOOL}..."
+            aws s3 cp "/tmp/promote-llvm-tools/${TOOL}" "${RELEASE}/${TOOL}"
+          done
+          echo "All LLVM tools promoted successfully"
+
       - name: Promote summary
         if: always()
         env:
@@ -65,5 +105,6 @@ jobs:
           SUMMARY_S3_SOURCE: "s3://framework-whls-${{ inputs.release_type }}/whl-staging/gfx942-gfx950"
           SUMMARY_S3_DEST: "s3://framework-whls-${{ inputs.release_type }}/whl/gfx942-gfx950"
           SUMMARY_WHEEL_NAMES: ${{ inputs.wheel_names }}
+          SUMMARY_LLVM_TOOL_NAMES: ${{ inputs.llvm_tool_names }}
         run: python3 flydsl/scripts/generate_summary.py promote
 
