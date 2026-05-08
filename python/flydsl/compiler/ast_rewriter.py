@@ -83,10 +83,10 @@ class ASTRewriter:
                         lineterm="",
                     )
                 )
-                log().info("[%s diff]\n%s", rewriter.__class__.__name__, "\n".join(diff))
+                log().debug("[%s diff]\n%s", rewriter.__class__.__name__, "\n".join(diff))
             module.body[0] = func_node
 
-        log().info("[final transformed code]\n\n%s", ast.unparse(module))
+        log().debug("[final transformed code]\n\n%s", ast.unparse(module))
 
         if f.__closure__:
             enclosing_mod = ast.FunctionDef(
