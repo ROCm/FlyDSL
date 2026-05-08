@@ -392,18 +392,18 @@ def build_pa_mqa_logits_fp4_module(
 
         def _load_phys(c_i32_arg):
             """Load phys_block for chunk c, all N_TILES_PER_WARP N-tiles."""
-            phys_list = []
-            for nt in range_constexpr(N_TILES_PER_WARP):
-                ni_c = warp_id * fx.Int32(N_TILES_PER_WARP) + fx.Int32(nt)
-                token_global_c = (
-                    (chunk_start + c_i32_arg) * fx.Int32(block_k)
-                    + ni_c * fx.Int32(MFMA_N)
-                    + lane_mod_16
-                )
-                bi_c = token_global_c // kv_block_size
-                phys_list.append(buffer_ops.buffer_load(
-                    bt_rsrc, pid_b * _stride_bt + bi_c, vec_width=1, dtype=T.i32))
-            return phys_list
+            ni_base = warp_id * fx.Int32(N_TILES_PER_WARP)
+            token_global_base = (
+                (chunk_start + c_i32_arg) * fx.Int32(block_k)
+                + ni_base * fx.Int32(MFMA_N)
+                + lane_mod_16
+            )
+            bi_base = token_global_base // kv_block_size
+            phys_vec = buffer_ops.buffer_load(
+                bt_rsrc, pid_b * _stride_bt + bi_base,
+                vec_width=N_TILES_PER_WARP, dtype=T.i32)
+            return [vector.extract(phys_vec, static_position=[nt])
+                    for nt in range(N_TILES_PER_WARP)]
 
         def _prefetch_chunk(c_i32_arg, phys_list):
             """Issue KV+scale loads for chunk c using pre-loaded phys_list.
