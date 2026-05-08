@@ -942,12 +942,17 @@ class InsertEmptyYieldForSCFFor(Transformer):
         step_val = _unwrap_value(step)
 
         i32_ty = ir.IntegerType.get_signless(32)
-        for name, val in [("start", start_val), ("stop", stop_val), ("step", step_val)]:
-            if not isinstance(val, ir.Value) or val.type != i32_ty:
-                got = val.type if isinstance(val, ir.Value) else type(val).__name__
-                raise TypeError(
-                    f"for-loop {name} must be i32, got {got}"
-                )
+        idx_ty = ir.IndexType.get()
+        bounds = [("start", start_val), ("stop", stop_val), ("step", step_val)]
+        for i, (name, val) in enumerate(bounds):
+            if not isinstance(val, ir.Value):
+                raise TypeError(f"for-loop {name} must be i32, got {type(val).__name__}")
+            if val.type == idx_ty:
+                log().warning("for-loop %s is index type, consider using fx.Int32 instead", name)
+                bounds[i] = (name, arith.IndexCastOp(i32_ty, val).result)
+            elif val.type != i32_ty:
+                raise TypeError(f"for-loop {name} must be i32, got {val.type}")
+        start_val, stop_val, step_val = bounds[0][1], bounds[1][1], bounds[2][1]
 
         result_names = tuple(result_names)
         result_values = tuple(result_values)
