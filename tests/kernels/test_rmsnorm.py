@@ -275,7 +275,7 @@ def _bench_aiter_rmsnorm_quant(M: int, N: int, dtype: str, *, is_smooth: bool):
     yscale = torch.empty((M, 1), dtype=torch.float32, device="cuda")
 
     if is_smooth:
-        xscale = (torch.rand((N,), device="cuda", dtype=torch_dtype) + 0.5).contiguous()
+        xscale = (torch.rand((N,), device="cuda", dtype=DTYPE_FP32) + 0.5).contiguous()
 
         def run_aiter():
             aiter_rmsnorm_quant(y, x, xscale, yscale, w, EPS)
@@ -324,7 +324,7 @@ def run_quant_test(M: int, N: int, dtype: str, *, is_smooth: bool):
     yscale_dev = torch.empty((M,), device="cuda", dtype=DTYPE_FP32)
     xscale_dev = None
     if is_smooth:
-        xscale_dev = torch.rand((N,), device="cuda", dtype=torch_dtype).contiguous() + 0.5
+        xscale_dev = (torch.rand((N,), device="cuda", dtype=DTYPE_FP32) + 0.5).contiguous()
     dequant_tol = 0.25 if is_smooth else 0.2
     scale_tol = 1e-2 if is_smooth else 5e-3
 
@@ -362,7 +362,7 @@ def run_quant_test(M: int, N: int, dtype: str, *, is_smooth: bool):
     elem_bytes = 4 if dtype == "f32" else 2
     total_bytes = M * N * elem_bytes + N * elem_bytes + M * N + M * 4
     if is_smooth:
-        total_bytes += N * elem_bytes
+        total_bytes += N * 4
     bandwidth_gbs = total_bytes / (avg_us / 1e6) / 1e9
 
     print(f"Kernel avg time: {avg_ms:.4f} ms via run_perftest (warmup={WARMUP_ITERS}, iters={BENCH_ITERS})")

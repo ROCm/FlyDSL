@@ -18,6 +18,7 @@ from flydsl._mlir.ir import InsertionPoint
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, const_expr, gpu, range_constexpr
 from flydsl.expr import math as fmath
+from flydsl.expr.typing import Vector as Vec
 from flydsl.expr.vector import ReductionOp, full
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
@@ -729,6 +730,7 @@ def _build_rmsnorm_quant_module(
             num_tiles = N // tile_cols
             quant_half_width = VEC_WIDTH // 2
             abs_mask = full(VEC_WIDTH, fx.Uint32(0x7FFFFFFF), fx.Uint32)
+            xscale_vec_width = 4
 
             Input_buf = fx.rocdl.make_buffer_tensor(Input)
             Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma)
@@ -743,13 +745,21 @@ def _build_rmsnorm_quant_module(
             out_div_q = fx.logical_divide(row_out, fx.make_layout(quant_half_width, 1))
             gamma_div = fx.logical_divide(Gamma_buf, fx.make_layout(VEC_WIDTH, 1))
             if const_expr(is_smooth):
-                xscale_div = fx.logical_divide(XScale_buf, fx.make_layout(VEC_WIDTH, 1))
+                xscale_div = fx.logical_divide(XScale_buf, fx.make_layout(xscale_vec_width, 1))
 
             copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), elem_bits)
             vec_reg_ty = fx.MemRefType.get(
                 elem_type, fx.LayoutType.get(VEC_WIDTH, 1), fx.AddressSpace.Register
             )
             vec_reg_lay = fx.make_layout(VEC_WIDTH, 1)
+            if const_expr(is_smooth):
+                copy_atom_xs = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), 32)
+                xscale_reg_ty = fx.MemRefType.get(
+                    fx.Float32.ir_type,
+                    fx.LayoutType.get(xscale_vec_width, 1),
+                    fx.AddressSpace.Register,
+                )
+                xscale_reg_lay = fx.make_layout(xscale_vec_width, 1)
             copy_atom_q = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), 8)
             vec_reg_ty_q = fx.MemRefType.get(
                 quant_elem_type, fx.LayoutType.get(quant_half_width, 1), fx.AddressSpace.Register
@@ -765,6 +775,12 @@ def _build_rmsnorm_quant_module(
                 r = fx.memref_alloca(vec_reg_ty_q, vec_reg_lay_q)
                 fx.memref_store_vec(val, r)
                 fx.copy_atom_call(copy_atom_q, r, fx.slice(div_tensor, (None, idx)))
+
+            if const_expr(is_smooth):
+                def _load_xscale_vec(div_tensor, idx):
+                    r = fx.memref_alloca(xscale_reg_ty, xscale_reg_lay)
+                    fx.copy_atom_call(copy_atom_xs, fx.slice(div_tensor, (None, idx)), r)
+                    return fx.memref_load_vec(r)
 
             thread_sumsq = c_zero_f
             thread_dummy = c_zero_f
@@ -794,7 +810,9 @@ def _build_rmsnorm_quant_module(
                 x = in_local[tile_i].to(fx.Float32)
                 y = (x * rrms) * g
                 if const_expr(is_smooth):
-                    s = _load_vec(xscale_div, idx).to(fx.Float32)
+                    s_lo = _load_xscale_vec(xscale_div, idx * 2)
+                    s_hi = _load_xscale_vec(xscale_div, idx * 2 + 1)
+                    s = Vec(s_lo).shuffle(Vec(s_hi), [0, 1, 2, 3, 4, 5, 6, 7]).ir_value()
                     y = y * s
 
                 y_local.append(y)
@@ -837,6 +855,12 @@ def _build_rmsnorm_quant_module(
             copy_atom_qs = fx.make_copy_atom(fx.rocdl.BufferCopy(8), 8)
             scalar_reg_ty = fx.MemRefType.get(elem_type, fx.LayoutType.get(1, 1), fx.AddressSpace.Register)
             scalar_reg_lay = fx.make_layout(1, 1)
+            if const_expr(is_smooth):
+                copy_atom_xs = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), 32)
+                xscale_scalar_reg_ty = fx.MemRefType.get(
+                    fx.Float32.ir_type, fx.LayoutType.get(1, 1), fx.AddressSpace.Register
+                )
+                xscale_scalar_reg_lay = fx.make_layout(1, 1)
             scalar_reg_ty_q = fx.MemRefType.get(
                 quant_elem_type, fx.LayoutType.get(1, 1), fx.AddressSpace.Register
             )
@@ -862,6 +886,13 @@ def _build_rmsnorm_quant_module(
                 fx.memref_store_vec(ts, r)
                 view = fx.slice(divided_tensor, (None, index))
                 fx.copy_atom_call(copy_atom_qs, r, view)
+
+            if const_expr(is_smooth):
+                def _load_xscale_scalar(divided_tensor, index):
+                    view = fx.slice(divided_tensor, (None, index))
+                    r = fx.memref_alloca(xscale_scalar_reg_ty, xscale_scalar_reg_lay)
+                    fx.copy_atom_call(copy_atom_xs, view, r)
+                    return fx.memref_load_vec(r)[0]
 
             def _abs_scalar(val):
                 is_neg = val < c_zero_f
@@ -895,8 +926,7 @@ def _build_rmsnorm_quant_module(
                 g = g_e if dtype_str == "f32" else g_e.to(fx.Float32)
                 y = (x * rrms) * g
                 if const_expr(is_smooth):
-                    s_e = _load_scalar(xscale_div, idx_safe)
-                    s = s_e if dtype_str == "f32" else s_e.to(fx.Float32)
+                    s = _load_xscale_scalar(xscale_div, idx_safe)
                     y = y * s
                 y_abs = _abs_scalar(y)
                 thread_row_max = thread_row_max.maximumf(is_valid.select(y_abs, c_zero_f))
@@ -919,8 +949,7 @@ def _build_rmsnorm_quant_module(
                     g = g_e if dtype_str == "f32" else g_e.to(fx.Float32)
                     y = (x * rrms) * g
                     if const_expr(is_smooth):
-                        s_e = _load_scalar(xscale_div, idx)
-                        s = s_e if dtype_str == "f32" else s_e.to(fx.Float32)
+                        s = _load_xscale_scalar(xscale_div, idx)
                         y = y * s
                     q = y * inv_scale
                     q_i8 = q.to(quant_dtype)
