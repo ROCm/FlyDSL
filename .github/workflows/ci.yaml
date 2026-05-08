@@ -40,7 +40,7 @@ jobs:
       contents: read
 
   promote:
-    needs: [build]
+    needs: [build, test]
     if: >-
       ${{ github.repository_owner == 'ROCm'
           && !(inputs.skip_promote || false) }}
