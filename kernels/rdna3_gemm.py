@@ -1,23 +1,36 @@
 #!/usr/bin/env python3
-"""Optimized WMMA GEMM kernel for RDNA 3 / 3.5 (gfx1100/gfx1150/gfx1151, wave32).
+"""PoC WMMA GEMM kernel for RDNA 3 / 3.5 (gfx1100/gfx1150/gfx1151, wave32).
 
-Builds on the atom-based path (``MmaOpRDNA3_WMMAType``) and applies the
-standard atom-API optimizations:
+Status: **PoC baseline** — exercises the atom path end-to-end at
+production-shape sizes (≤4096³). This is *not* a rocBLAS replacement.
+Reaches roughly **56% of rocBLAS hgemm at 4096³ on gfx1151** (Strix
+Halo iGPU, ≈30% of WMMA F16 peak). Missing optimizations relative to
+rocBLAS / `kernels.preshuffle_gemm` (CDNA reference):
+
+  * LDS bank-conflict XOR swizzle (estimated +5-10%)
+  * CShuffle epilogue for coalesced C write-back (+5%)
+  * Hot-loop scheduler hints (``fx.rocdl.sched_dsrd / sched_mfma``) (+5-10%)
+  * ``waves_per_eu`` / ``maxnreg`` occupancy tuning
+  * Tail-tile predication for non-aligned shapes
+
+The intent of this kernel is twofold: (a) demonstrate that the
+``MmaOpRDNA3_WMMAType`` atom path lowers correctly through
+``make_tiled_mma`` / ``make_tiled_copy`` for production-shape kernels,
+and (b) provide a starting baseline for follow-up perf work. For peak
+GEMM perf on RDNA 3 / 3.5 today, fall back to PyTorch/rocBLAS hgemm.
+
+Atom-API optimizations already applied here:
 
   * Multi-wave workgroup (2x2 wave layout = 4 wave32 = 128 threads).
   * Per-warp reg_m × reg_n WMMA tile (4x4 = 16 WMMAs per warp per K-step
     by default, giving a 64x64 output tile per warp).
-  * BLOCK = 128 x 128 x 32 (BLOCK_K = 2 x WMMA_K so each iteration issues
-    2 K-tiles' worth of WMMAs per warp).
+  * BLOCK = 128 × 128 × 32 (BLOCK_K = 2 × WMMA_K).
   * LDS staging for A and B with a 2-stage ping-pong buffer: each loop
     iteration writes the next K-tile into one half of LDS while reading
-    the current K-tile from the other half, then swaps. This keeps a
-    single barrier per iteration (instead of two for single-buffered).
+    the current K-tile from the other half, then swaps. Software
+    pipelining hides GMEM latency behind WMMA compute.
 
-Compared to ``kernels.rdna3_f16_gemm`` (single-wave PoC for atom
-validation), this kernel is intended as a production starting point on
-RDNA 3 / 3.5. Subsequent commits add software pipelining (overlapping
-GMEM prefetch with WMMA compute) and bank-conflict swizzle.
+For atom unit-tests at single-warp scope see ``kernels.rdna3_f16_gemm``.
 
 Computes ``C[M, N] = A[M, K] @ B[N, K]^T`` (B is supplied transposed,
 so both A and B are stored row-major contiguous along K).
@@ -44,9 +57,8 @@ def create_rdna3_gemm_module(
     reg_m: int = 4,
     reg_n: int = 4,
     reg_k: int = 2,
-    group_m: int = 1,
 ):
-    """Build an optimized RDNA 3 / 3.5 atom-based WMMA GEMM.
+    """Build the PoC RDNA 3 / 3.5 atom-based WMMA GEMM.
 
     Parameters
     ----------
@@ -58,10 +70,6 @@ def create_rdna3_gemm_module(
     reg_k : int
         Number of WMMA_K-sized K-tiles per workgroup loop iteration. Default 2,
         so BLOCK_K = 32.
-    group_m : int
-        Workgroup swizzle group size along M (Triton-style super-grouping)
-        for L2 locality. Default 1 (no swizzle). Empirically gfx1151 with
-        4 MB L2 doesn't benefit from this at 4096^3 — left as a tunable.
     """
     BLOCK_M = WMMA_M * reg_m * waves_m
     BLOCK_N = WMMA_N * reg_n * waves_n
@@ -93,7 +101,6 @@ def create_rdna3_gemm_module(
     THREADS_PER_BLOCK = NUM_WAVES * 32
     GRID_M = M // BLOCK_M
     GRID_N = N // BLOCK_N
-    EFFECTIVE_GROUP_M = min(group_m, GRID_M)
 
     # GMEM->LDS thread layout. Each thread loads a 128-bit vector
     # (val_per_thr f16 elements). thrs_col threads cover BLOCK_K, thrs_row
@@ -131,18 +138,8 @@ def create_rdna3_gemm_module(
         C: fx.Tensor,
     ):
         tid = fx.thread_idx.x
-        # Workgroup swizzle for L2 locality: visit EFFECTIVE_GROUP_M × GRID_N
-        # tiles in M-fast order, then advance EFFECTIVE_GROUP_M M-tiles.
-        # Triton-style "super-grouping". With EFFECTIVE_GROUP_M == 1 this
-        # degenerates to plain N-major linear scheduling (same correctness,
-        # no L2 reuse benefit).
-        pid = fx.block_idx.x
-        num_pid_in_group = EFFECTIVE_GROUP_M * GRID_N
-        group_id = pid // num_pid_in_group
-        first_pid_m = group_id * EFFECTIVE_GROUP_M
-        pid_in_group = pid % num_pid_in_group
-        bid_m = first_pid_m + (pid_in_group % EFFECTIVE_GROUP_M)
-        bid_n = pid_in_group // EFFECTIVE_GROUP_M
+        bid_m = fx.block_idx.x
+        bid_n = fx.block_idx.y
 
         A = fx.rocdl.make_buffer_tensor(A)
         B = fx.rocdl.make_buffer_tensor(B)
@@ -339,7 +336,7 @@ def create_rdna3_gemm_module(
         stream: fx.Stream = fx.Stream(None),
     ):
         gemm_kernel(A, B, C).launch(
-            grid=(GRID_M * GRID_N, 1, 1),
+            grid=(GRID_M, GRID_N, 1),
             block=(THREADS_PER_BLOCK, 1, 1),
             smem=LDS_BYTES,
             stream=stream,
