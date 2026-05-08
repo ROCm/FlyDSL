@@ -439,12 +439,14 @@ def raw_ptr_buffer_atomic_fmax(vdata, rsrc, offset, soffset, aux, **kw):
     return _op(_to_ir(vdata), _to_ir(rsrc), _to_ir(offset), _to_ir(soffset), _to_ir(aux), **kw)
 
 
+@traced_op
 def cvt_pk_fp8_f32(res, src_a, src_b, old, word_sel, **kw):
     from ..._mlir.dialects.rocdl import cvt_pk_fp8_f32 as _op
 
     return _op(res=res, src_a=_to_ir(src_a), src_b=_to_ir(src_b), old=_to_ir(old), word_sel=word_sel, **kw)
 
 
+@traced_op
 def rcp(res, arg, **kw):
     from ..._mlir.dialects.rocdl import rcp as _op
 
@@ -469,11 +471,13 @@ def buffer_load_to_lds(rsrc, lds_ptr, voffset, size_bytes=4, soffset=0, offset=0
     return raw_ptr_buffer_load_lds(rsrc, lds_ptr, size_bytes, voffset, soffset, offset, 0)
 
 
+@traced_op
 def ds_bpermute(res, index, src, **kw):
     from ..._mlir.dialects.rocdl import ds_bpermute as _op
 
     return _op(res=res, index=_to_ir(index), src=_to_ir(src), **kw)
 
 
+@traced_op
 def readfirstlane(res, src, **kw):
     return _ods_readfirstlane(res=res, src=_to_ir(src), **kw)
