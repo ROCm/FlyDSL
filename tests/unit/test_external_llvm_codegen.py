@@ -78,8 +78,10 @@ def test_external_llvm_fingerprint_uses_configured_tools(tmp_path, monkeypatch):
     finally:
         external_llvm_fingerprint.cache_clear()
 
-    assert f"external-binary:{llvm_dir.resolve()}" in fingerprint
-    assert "fake mlir-opt 1.2.3" in fingerprint
+    assert f"external-binary:{llvm_dir.resolve()}:" in fingerprint
+    # Fingerprint should contain a hex SHA-256 hash of the mlir-opt binary.
+    hash_part = fingerprint.split(":")[-1]
+    assert len(hash_part) == 64 and all(c in "0123456789abcdef" for c in hash_part)
 
 
 def test_run_external_binary_codegen_embeds_external_bin(tmp_path, monkeypatch):

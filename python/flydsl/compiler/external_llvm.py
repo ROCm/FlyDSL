@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import subprocess
 import tempfile
@@ -67,28 +68,23 @@ def _subprocess_env(prefix: Path) -> dict:
     return run_env
 
 
+def _file_hash(path: Path) -> str:
+    """SHA-256 hash of a file, read in 1 MiB chunks."""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while True:
+            chunk = f.read(1024 * 1024)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
+
+
 @lru_cache(maxsize=8)
 def external_llvm_fingerprint(llvm_dir: Optional[str] = None) -> str:
     prefix = Path(llvm_dir).expanduser().resolve() if llvm_dir else _llvm_dir()
     mlir_opt = _tool(prefix, "mlir-opt")
-
-    try:
-        result = subprocess.run(
-            [str(mlir_opt), "--version"],
-            check=True,
-            capture_output=True,
-            text=True,
-            env=_subprocess_env(prefix),
-        )
-    except subprocess.CalledProcessError as exc:
-        raise ExternalLLVMError(
-            f"Failed to query external LLVM version with {mlir_opt}.\n"
-            f"stdout:\n{exc.stdout}\n"
-            f"stderr:\n{exc.stderr}"
-        ) from exc
-
-    version = (result.stdout or result.stderr).strip()
-    return f"external-binary:{prefix}:{version}"
+    return f"external-binary:{prefix}:{_file_hash(mlir_opt)}"
 
 
 def _single_top_level_op(module: ir.Module, op_name: str) -> ir.Operation:
