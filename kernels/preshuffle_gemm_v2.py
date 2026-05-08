@@ -147,13 +147,11 @@ def compile_preshuffle_gemm_v2(
         pA_s2r = thr_s2r.partition_S(sA)
         pB_g = thr_g2r_B.partition_S(tB)
 
-        # Derive load counts from partition shapes: (V, outer_0, outer_1, tiles/stages)
-        _a_dims = fx.int_tuple_product_each(pA_g.shape).to_py_value()
-        _b_dims = fx.int_tuple_product_each(pB_g.shape).to_py_value()
-        _s2r_dims = fx.int_tuple_product_each(pA_s2r.shape).to_py_value()
-        num_a_loads = _a_dims[1] * _a_dims[2]
-        num_b_loads = _b_dims[1] * _b_dims[2]
-        num_ds_load = _s2r_dims[1] * _s2r_dims[2]
+        # Derive load counts from partition shapes: ((AtomV, TileV), TileM, TileK, LoopK/stages)
+        # TileV × TileM × TileK = number of copy instructions per thread (excludes AtomV)
+        num_a_loads = fx.size(fx.make_shape(pA_g.shape[0][1], pA_g.shape[1], pA_g.shape[2])).static_leaf_int
+        num_b_loads = fx.size(fx.make_shape(pB_g.shape[0][1], pB_g.shape[1], pB_g.shape[2])).static_leaf_int
+        num_ds_load = fx.size(fx.make_shape(pA_s2r.shape[0][1], pA_s2r.shape[1], pA_s2r.shape[2])).static_leaf_int
         num_gmem_loads = num_a_loads + num_b_loads
 
         # Fragments — 2 separate B fragments (split double buffer for VGPR lifetime)
