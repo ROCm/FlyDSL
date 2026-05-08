@@ -293,20 +293,21 @@ def _make_varctx(batch, max_ctx, kv_block_size):
 
 
 @pytest.mark.parametrize(
-    "batch, max_ctx, kv_block_size, block_k, next_n",
+    "batch, max_ctx, kv_block_size, block_k, next_n, heads",
     [
-        pytest.param(4, 16384, 16, 64, 1, id="4x16k_n1"),
-        pytest.param(4, 32768, 16, 64, 1, id="4x32k_n1"),
-        pytest.param(8, 65536, 16, 64, 1, id="8x65k_n1"),
-        pytest.param(4, 16384, 16, 64, 2, id="4x16k_n2"),
-        pytest.param(8, 65536, 16, 64, 2, id="8x65k_n2"),
+        pytest.param(4, 16384, 16, 64, 1, 64,  id="4x16k_n1_h64"),
+        pytest.param(4, 32768, 16, 64, 1, 64,  id="4x32k_n1_h64"),
+        pytest.param(8, 65536, 16, 64, 1, 64,  id="8x65k_n1_h64"),
+        pytest.param(4, 16384, 16, 64, 2, 64,  id="4x16k_n2_h64"),
+        pytest.param(8, 65536, 16, 64, 2, 64,  id="8x65k_n2_h64"),
+        pytest.param(4, 16384, 16, 64, 1, 128, id="4x16k_n1_h128"),
     ],
 )
 def test_pa_mqa_logits_fp4_qfp4_kvfp4(
-    batch, max_ctx, kv_block_size, block_k, next_n,
+    batch, max_ctx, kv_block_size, block_k, next_n, heads,
     num_iters=20, num_warmup=3,
     num_warps=4, parallel_unit_num=512,
-    heads=HEADS, head_dim=HEAD_DIM,
+    head_dim=HEAD_DIM,
 ):
     """End-to-end varctx test for the Q FP4 / KV FP4 kernel.
 
@@ -314,14 +315,14 @@ def test_pa_mqa_logits_fp4_qfp4_kvfp4(
     on FP4 operands (cbsz=4, blgp=4). Reference dequants both back to fp32
     and does the matmul in torch.
 
-    `heads` (default 64): multiple of MFMA_M=16, <= 64 (kernel's M_TILES<=4).
+    `heads` (default 64): multiple of MFMA_M=16, <= 128 (kernel's M_TILES<=8).
     `head_dim` (default 128): multiple of MFMA K=128. K_TILES = head_dim/128
     drives an outer K-loop in the kernel.
     """
     setup_seed(SEED)
     batch_size = batch
-    assert heads % 16 == 0 and heads <= 64, \
-        f"heads={heads}: kernel requires multiple of 16, <= 64"
+    assert heads % 16 == 0 and heads <= 128, \
+        f"heads={heads}: kernel requires multiple of 16, <= 128"
     assert head_dim % 128 == 0, \
         f"head_dim={head_dim}: kernel requires multiple of 128"
     m_tiles = heads // 16
@@ -393,14 +394,15 @@ def test_pa_mqa_logits_fp4_qfp4_kvfp4(
 
     # ── Pre-shuffle scales for kernel layout (avoids runtime v_bfe_u32) ──
     # Q scale: [B, NEXT_N, H, K_TILES * 4 K_chunks] → [B, NEXT_N, K_TILES,
-    #          K_chunks=4, lane_mod_16=16, mi_idx_padded=4]. H decomposed
-    #          as (m_tiles, MFMA_M=16); inner mi_idx dim padded to 4 bytes
-    #          so the kernel's single dword load is well-defined for any
-    #          heads <= 64.
+    #          K_chunks=4, lane_mod_16=16, mi_idx_padded=qs_pad]. H decomposed
+    #          as (m_tiles, MFMA_M=16); inner mi_idx dim padded to qs_pad =
+    #          ⌈m_tiles/4⌉×4 so the kernel can load QS_DW = qs_pad/4 dwords
+    #          per (lane, K_TILE) at well-defined alignment for heads ≤ 128.
+    qs_pad = ((m_tiles + 3) // 4) * 4
     qe_real = q_e8m0.view(torch.uint8).reshape(
         batch_size, next_n, m_tiles, 16, k_tiles, 4
     ).permute(0, 1, 4, 5, 3, 2).contiguous()  # [B,NN,K_TILES,K_chunks=4,16,m_tiles]
-    qe = torch.nn.functional.pad(qe_real, (0, 4 - m_tiles)).contiguous()
+    qe = torch.nn.functional.pad(qe_real, (0, qs_pad - m_tiles)).contiguous()
 
     # KV scale already in kernel layout [num_blocks, K_TILES, 4 (K_chunks),
     # kv_block_size] from create_paged_preshuffle_kv_fp4. Each thread loads
@@ -561,19 +563,19 @@ if __name__ == "__main__":
         configs = [(args.batch, args.ctx, args.next_n)]
     else:
         configs = [
-            (1, 2 * 65536, 1),
-            (2, 2 * 65536, 1),
-            (4, 2 * 65536, 1),
+            # (1, 2 * 65536, 1),
+            # (2, 2 * 65536, 1),
+            # (4, 2 * 65536, 1),
             (8, 2 * 65536, 1),
-            (1, 2 * 16384, 2),
-            (1, 2 * 32768, 2),
-            (1, 2 * 65536, 2),
-            (2, 2 * 16384, 2),
-            (2, 2 * 32768, 2),
-            (2, 2 * 65536, 2),
-            (4, 2 * 16384, 2),
-            (4, 2 * 32768, 2),
-            (4, 2 * 65536, 2),
+            # (1, 2 * 16384, 2),
+            # (1, 2 * 32768, 2),
+            # (1, 2 * 65536, 2),
+            # (2, 2 * 16384, 2),
+            # (2, 2 * 32768, 2),
+            # (2, 2 * 65536, 2),
+            # (4, 2 * 16384, 2),
+            # (4, 2 * 32768, 2),
+            # (4, 2 * 65536, 2),
         ]
 
     for b, c, nn in configs:

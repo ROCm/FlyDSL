@@ -10,7 +10,9 @@ output layout (M=head, N=token), same as the qfp8/kvfp8 variant.
 
 Computes: logits[b, t] = sum_h(relu(Q[b,h,:] · K[b,t,:]) * weight[b,h])
 
-PoC constraints: H=64, D=128, gfx950 only.
+Supports parameterized heads (multiple of 16, ≤ 64) and head_dim
+(multiple of 128, K_TILES = head_dim // 128 outer MFMA-K iterations).
+gfx950 only.
 
 Data format:
   Q:        [B, NEXT_N, H=64, D/2=64] uint8 (packed fp4 e2m1)
@@ -52,6 +54,7 @@ from flydsl.expr.typing import T, Int32
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from flydsl._mlir import ir as _ir
 from flydsl._mlir.dialects import scf as _scf
+from flydsl._mlir.dialects import llvm as _llvm
 
 HEADS = 64
 HEAD_DIM = 128
@@ -59,13 +62,10 @@ HEAD_DIM_PACKED = 64       # D/2 bytes (fp4 packed)
 HEAD_DIM_SCALES = 4        # D/32 scale groups
 MFMA_M = 16
 MFMA_N = 16
-FP4_PACK_M = 2             # sub-tiles in M per MFMA logical tile
-FP4_PACK_N = 2             # sub-tiles in N per MFMA logical tile
 NUM_WARPS = 4
 WARP_SIZE = 64
 BLOCK_THREADS = NUM_WARPS * WARP_SIZE  # 256
 M_TILES = HEADS // MFMA_M  # 4
-M_TILES_PACKED = M_TILES // FP4_PACK_M  # 2
 
 
 def _pack_i32_pair_to_i64(a_i32, b_i32):
@@ -76,6 +76,17 @@ def _pack_i32_pair_to_i64(a_i32, b_i32):
 
 def _pack_i64x4_to_i32x8(x0, x1, x2, x3):
     v4 = vector.from_elements(T.vec(4, T.i64), [x0, x1, x2, x3])
+    return vector.bitcast(T.vec(8, T.i32), v4)
+
+
+def _pack_lo_i64x2_to_i32x8(x0, x1):
+    """Build vec<8xi32> with lower 16 bytes = (x0, x1) and upper 16 bytes
+    poisoned. For FP4 MFMA operands (cbsz=4 / blgp=4) the upper half is
+    ignored by hardware, so leaving it undef lets the register allocator
+    reuse those VGPRs instead of pinning them to a constant zero."""
+    undef0 = _llvm.mlir_undef(T.i64)
+    undef1 = _llvm.mlir_undef(T.i64)
+    v4 = vector.from_elements(T.vec(4, T.i64), [x0, x1, undef0, undef1])
     return vector.bitcast(T.vec(8, T.i32), v4)
 
 
@@ -166,9 +177,9 @@ def build_pa_mqa_logits_fp4_module(
     Grid: (total_ctas,) from compute_varctx_schedule(..., next_n=next_n)
     Block: (BLOCK_THREADS=256,)
 
-    `max_chunks_per_cta`: compile-time upper bound on the number of chunks any
-    CTA will process. Used to statically unroll block-table prefetch in the
-    prologue. Must be >= host-side `safe_chunks_per_cta`.
+    `max_chunks_per_cta`: accepted for API compatibility with the host
+    scheduler caller; currently unused inside the kernel (the chunk loop
+    bounds are taken from the per-CTA `chunk_count` runtime value).
 
     `next_n`: number of MTP queries per batch (default 1 = standard MQA).
     Following gluon's design, each (batch, next_n_idx) is a separate CTA;
@@ -184,7 +195,6 @@ def build_pa_mqa_logits_fp4_module(
     per chunk (= 32 tokens), giving more compute window per chunk to hide load
     latency.
     """
-    MAX_CHUNKS_PER_CTA = max_chunks_per_cta
     NUM_WARPS_K = num_warps          # build-time scoped (overrides module default)
     BLOCK_THREADS_K = NUM_WARPS_K * WARP_SIZE
     NEXT_N = next_n                  # build-time constexpr
@@ -201,7 +211,6 @@ def build_pa_mqa_logits_fp4_module(
     global allocator
 
     N_TILES = block_k // MFMA_N
-    N_TILES_PACKED = N_TILES // FP4_PACK_N  # packed N-tile groups
     assert N_TILES % NUM_WARPS_K == 0, \
         f"block_k={block_k} → N_TILES={N_TILES} must be multiple of num_warps={NUM_WARPS_K}"
     N_TILES_PER_WARP = N_TILES // NUM_WARPS_K
@@ -209,10 +218,6 @@ def build_pa_mqa_logits_fp4_module(
     # Q/Q_scale layout: [B, NEXT_N, H, D/2 or D/32]
     _stride_q_next_n = HEADS * HEAD_DIM_PACKED            # bytes per next_n slice
     _stride_q_batch = NEXT_N * _stride_q_next_n           # bytes per batch
-    _stride_qs_next_n = HEADS * HEAD_DIM_SCALES           # bytes per next_n slice
-    _stride_qs_batch = NEXT_N * _stride_qs_next_n         # bytes per batch
-    # qs_off is in i32 units (×4 bytes). _stride_qs_*_i32 = bytes / 4.
-    _stride_qs_next_n_i32 = _stride_qs_next_n // 4        # = HEADS * HEAD_DIM_SCALES // 4
     # Weights/output addressed by batch_packed (= b*NEXT_N + n) directly.
     _stride_w_batch = HEADS
     _stride_bt = max_blocks_per_seq
@@ -233,6 +238,21 @@ def build_pa_mqa_logits_fp4_module(
     allocator = SmemAllocator(None, arch="gfx950", global_sym_name="mqa_fp4_smem")
     allocator.ptr = 16  # minimal, no LDS needed for this approach
 
+    # Q-scale dword loader, dispatched at build time on QS_DW so the @flyc.kernel
+    # body never sees a Python `if` (which would lower to scf.if and make
+    # branch-local defs). Defined here, captured into the kernel closure.
+    QS_DW = (M_TILES + 3) // 4
+    if QS_DW == 1:
+        def _load_qs_dws(qs_rsrc_, qs_off_i32_):
+            return [buffer_ops.buffer_load(
+                qs_rsrc_, qs_off_i32_, vec_width=1, dtype=T.i32)]
+    else:
+        def _load_qs_dws(qs_rsrc_, qs_off_i32_):
+            v = buffer_ops.buffer_load(
+                qs_rsrc_, qs_off_i32_, vec_width=QS_DW, dtype=T.i32)
+            return [vector.extract(v, static_position=[i])
+                    for i in range(QS_DW)]
+
     @flyc.kernel
     def pa_mqa_logits_fp4_kernel(
         out_logits_ptr: fx.Tensor,
@@ -242,7 +262,7 @@ def build_pa_mqa_logits_fp4_module(
         kv_scale_ptr: fx.Tensor,
         kv_indices_ptr: fx.Tensor,
         weights_ptr: fx.Tensor,
-        cta_info_ptr: fx.Tensor,        # [total_ctas, 4] i32: [batch, chunk_start, chunk_count, ctx_len]
+        cta_info_ptr: fx.Tensor,        # [total_ctas, 4] i32: [batch_packed, chunk_start, chunk_count, ctx_len]
         stride_out_batch: Int32,
     ):
         tid = gpu.thread_idx.x
@@ -253,8 +273,6 @@ def build_pa_mqa_logits_fp4_module(
         lane_mod_16 = lane_id & 15
         lane_div_16 = (lane_id >> 4) & 3
 
-        c_w = fx.Int32(WARP_SIZE)
-
         q_rsrc = buffer_ops.create_buffer_resource(q_ptr, max_size=True)
         qs_rsrc = buffer_ops.create_buffer_resource(q_scale_ptr, max_size=True)
         kv_rsrc = buffer_ops.create_buffer_resource(kv_cache_ptr, max_size=True)
@@ -264,9 +282,7 @@ def build_pa_mqa_logits_fp4_module(
         out_rsrc = buffer_ops.create_buffer_resource(out_logits_ptr, max_size=True)
         cta_info_rsrc = buffer_ops.create_buffer_resource(cta_info_ptr, max_size=True)
 
-        NEG_INF = arith.constant(float("-inf"), type=T.f32)
         ZERO_F = fx.Float32(0.0)
-        c0_i64 = arith.constant(0, type=T.i64)
         c0_i32 = fx.Int32(0)
 
         # ── Persistent CTA assignment lookup (one dwordx4 load) ────
@@ -317,35 +333,37 @@ def build_pa_mqa_logits_fp4_module(
                     vector.extract(q_4xi32, static_position=[2]),
                     vector.extract(q_4xi32, static_position=[3]),
                 )
-                q_a_ops_kt.append(_pack_i64x4_to_i32x8(
-                    q_i64_0, q_i64_1, c0_i64, c0_i64))
+                # Upper 16 bytes of v8i32 are poisoned (cbsz=4 ignores them).
+                q_a_ops_kt.append(_pack_lo_i64x2_to_i32x8(q_i64_0, q_i64_1))
             q_a_ops.append(q_a_ops_kt)
 
         # Q scale: pre-shuffled host-side as
-        # [B, NEXT_N, K_TILES, K_chunks=4, lane_mod_16=16, mi_idx_padded=4].
-        # ONE dword load per K_TILE gives this thread's M_TILES mi_idx scales
-        # packed as bytes [m0, m1, ...] (test pads inner dim to 4 bytes when
-        # M_TILES < 4). MFMA only reads byte 0 of each scale operand, so
-        # upper-byte garbage is irrelevant. Constraint: M_TILES <= 4 (single
-        # dword per K_TILE). For heads > 64, would need ⌈M_TILES/4⌉ loads.
-        assert M_TILES <= 4, (
-            f"M_TILES={M_TILES} > 4 not supported (would need multiple "
-            f"q_scale dword loads per K_TILE). Use heads <= 64.")
-        # Stride per K_TILE in i32 units = 4 K_chunks * 16 lane_mod_16 = 64 i32.
-        _stride_qs_ktile_i32 = 4 * 16
+        # [B, NEXT_N, K_TILES, K_chunks=4, lane_mod_16=16, mi_idx_padded=QS_PAD]
+        # where QS_PAD = ⌈M_TILES/4⌉ * 4 bytes per (lane, K_chunk). Each thread
+        # loads QS_DW = QS_PAD/4 dwords per K_TILE; the M_TILES mi_idx scales
+        # are packed as bytes across those dwords (4 mi_idx per dword). MFMA
+        # reads byte 0 of each scale operand, so per-mi_idx selection is just
+        # `dword[mi//4] >> (8 * (mi%4))` — both operands fold at trace time.
+        # Upper-byte garbage past M_TILES is irrelevant.
+        # Constraint: M_TILES <= 8 (heads <= 128). Lifting further is mechanical
+        # — bump QS_DW and the host-side pad — but VGPR pressure starts to bite.
+        assert M_TILES <= 8, (
+            f"M_TILES={M_TILES} > 8 not supported. Use heads <= 128.")
+        # Stride per K_TILE in i32 units = 4 K_chunks * 16 lane_mod_16 * QS_DW.
+        _stride_qs_ktile_i32 = 4 * 16 * QS_DW
         q_scale_ops = []
         for k_tile in range_constexpr(K_TILES):
             qs_off_i32 = (
                 pid_b * fx.Int32(NEXT_N * K_TILES * _stride_qs_ktile_i32)
                 + pid_next_n * fx.Int32(K_TILES * _stride_qs_ktile_i32)
                 + fx.Int32(k_tile * _stride_qs_ktile_i32)
-                + lane_div_16 * fx.Int32(16)
-                + lane_mod_16
+                + lane_div_16 * fx.Int32(16 * QS_DW)
+                + lane_mod_16 * fx.Int32(QS_DW)
             )
-            qs_4b = buffer_ops.buffer_load(
-                qs_rsrc, qs_off_i32, vec_width=1, dtype=T.i32)
+            qs_dws = _load_qs_dws(qs_rsrc, qs_off_i32)
             q_scale_ops.append(
-                [qs_4b >> fx.Int32(8 * mi_idx) for mi_idx in range(M_TILES)])
+                [qs_dws[mi // 4] >> fx.Int32(8 * (mi % 4))
+                 for mi in range(M_TILES)])
 
         # Weights (HOISTED). With A=Q (M=head), per-thread output covers heads
         # head = mi_idx*16 + lane_div_16*4 + elem (16 heads per thread, 4 per
@@ -443,14 +461,15 @@ def build_pa_mqa_logits_fp4_module(
                 )
 
                 zero = arith.constant_vector(0.0, T.f32x4)
-                accs = [zero for _ in range(M_TILES)]
+                accs = [zero] * M_TILES
 
                 for k_tile in range_constexpr(K_TILES):
                     kv_4xi32 = kv_list_in[nt * K_TILES + k_tile]
                     kvs_byte = kvs_list_in[nt * K_TILES + k_tile]
 
-                    # Pack 16 KV bytes (lower 128 bits) into i32x8 with upper
-                    # half zeroed — FP4 B operand uses only the lower 16 bytes.
+                    # Pack 16 KV bytes (lower 128 bits) into i32x8 with the
+                    # upper half poisoned — FP4 B operand uses only the lower
+                    # 16 bytes (blgp=4 ignores upper bits).
                     kv_i64_0 = _pack_i32_pair_to_i64(
                         vector.extract(kv_4xi32, static_position=[0]),
                         vector.extract(kv_4xi32, static_position=[1]),
@@ -459,7 +478,7 @@ def build_pa_mqa_logits_fp4_module(
                         vector.extract(kv_4xi32, static_position=[2]),
                         vector.extract(kv_4xi32, static_position=[3]),
                     )
-                    kv_b = _pack_i64x4_to_i32x8(kv_i64_0, kv_i64_1, c0_i64, c0_i64)
+                    kv_b = _pack_lo_i64x2_to_i32x8(kv_i64_0, kv_i64_1)
                     kv_scale_val = arith.ArithValue(kvs_byte).extui(T.i32)
 
                     for mi_idx in range_constexpr(M_TILES):
