@@ -141,3 +141,17 @@ func.func @pyir_complement_rank2() -> !fly.layout<2 : 6> {
   %result = fly.complement(%tiler, %codom) : (!fly.layout<(3, 2) : (2, 1)>, !fly.int_tuple<12>) -> !fly.layout<2 : 6>
   return %result : !fly.layout<2 : 6>
 }
+
+// CHECK-LABEL: @test_slice_nested_composed_outer_updates_nearest_offset
+func.func @test_slice_nested_composed_outer_updates_nearest_offset(
+    %cl: !fly.composed_layout<32:2 o 5 o [32:1 o 7 o (4,8):(1,4)]>)
+    -> !fly.composed_layout<32:2 o 5 o [32:1 o 8 o 8:4]> {
+  %coord = fly.static : !fly.int_tuple<(1, *)>
+  // CHECK: fly.slice
+  // CHECK-SAME: -> !fly.composed_layout<32:2 o 5 o [32:1 o 8 o 8:4]>
+  %result = fly.slice(%cl, %coord)
+      : (!fly.composed_layout<32:2 o 5 o [32:1 o 7 o (4, 8) : (1, 4)]>,
+         !fly.int_tuple<(1, *)>)
+      -> !fly.composed_layout<32:2 o 5 o [32:1 o 8 o 8:4]>
+  return %result : !fly.composed_layout<32:2 o 5 o [32:1 o 8 o 8:4]>
+}

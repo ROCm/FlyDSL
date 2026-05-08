@@ -45,7 +45,16 @@ bool isNormalForm(TypedValue<ComposedLayoutType> value) {
       return isNormalForm(composedTyped);
     } else if (auto swizzleTyped = dyn_cast<TypedValue<SwizzleType>>(inner)) {
       return true;
+    } else if (auto coordSwizzleTyped = dyn_cast<TypedValue<CoordSwizzleType>>(inner)) {
+      return true;
     }
+    return false;
+  };
+  auto isNormalComposedOuter = [](Value outer) -> bool {
+    if (auto layoutTyped = dyn_cast<TypedValue<LayoutType>>(outer))
+      return isNormalForm(layoutTyped);
+    if (auto composedTyped = dyn_cast<TypedValue<ComposedLayoutType>>(outer))
+      return isNormalForm(composedTyped);
     return false;
   };
   if (auto makeComposedOp = dyn_cast<MakeComposedLayoutOp>(defOp)) {
@@ -55,7 +64,7 @@ bool isNormalForm(TypedValue<ComposedLayoutType> value) {
     if (!isNormalForm(makeComposedOp.getOffset())) {
       return false;
     }
-    if (!isNormalForm(makeComposedOp.getOuter())) {
+    if (!isNormalComposedOuter(makeComposedOp.getOuter())) {
       return false;
     }
     return true;

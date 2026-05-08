@@ -13,6 +13,7 @@ namespace mlir::fly {
 bool BasisType::isStatic() const { return getAttr().isStatic(); }
 bool IntTupleType::isStatic() const { return getAttr().isStatic(); }
 bool SwizzleType::isStatic() const { return true; }
+bool CoordSwizzleType::isStatic() const { return true; }
 bool LayoutType::isStatic() const { return getAttr().isStatic(); }
 bool ComposedLayoutType::isStatic() const { return getAttr().isStatic(); }
 bool TileType::isStatic() const { return true; }
@@ -49,6 +50,13 @@ Value SwizzleType::rebuildStaticValue(OpBuilder &builder, Location loc, Value cu
   return StaticOp::create(builder, loc, *this);
 }
 
+Value CoordSwizzleType::rebuildStaticValue(OpBuilder &builder, Location loc,
+                                           Value currentValue) const {
+  if (currentValue)
+    return nullptr;
+  return StaticOp::create(builder, loc, *this);
+}
+
 Value ComposedLayoutType::rebuildStaticValue(OpBuilder &builder, Location loc,
                                              Value currentValue) const {
   if (currentValue && isNormalForm(cast<TypedValue<ComposedLayoutType>>(currentValue)))
@@ -62,10 +70,20 @@ Value ComposedLayoutType::rebuildStaticValue(OpBuilder &builder, Location loc,
     inner = ComposedLayoutType::get(composedAttr).rebuildStaticValue(builder, loc, nullptr);
   else if (auto swizzleAttr = dyn_cast<SwizzleAttr>(innerAttr))
     inner = SwizzleType::get(swizzleAttr).rebuildStaticValue(builder, loc, nullptr);
+  else if (auto coordSwizzleAttr = dyn_cast<CoordSwizzleAttr>(innerAttr))
+    inner = CoordSwizzleType::get(coordSwizzleAttr).rebuildStaticValue(builder, loc, nullptr);
   if (!inner)
     return nullptr;
   Value offset = IntTupleType::get(attr.getOffset()).rebuildStaticValue(builder, loc, nullptr);
-  Value outer = LayoutType::get(attr.getOuter()).rebuildStaticValue(builder, loc, nullptr);
+  if (!offset)
+    return nullptr;
+  Value outer;
+  if (auto layoutAttr = dyn_cast<LayoutAttr>(attr.getOuter()))
+    outer = LayoutType::get(layoutAttr).rebuildStaticValue(builder, loc, nullptr);
+  else if (auto composedAttr = dyn_cast<ComposedLayoutAttr>(attr.getOuter()))
+    outer = ComposedLayoutType::get(composedAttr).rebuildStaticValue(builder, loc, nullptr);
+  if (!outer)
+    return nullptr;
   return MakeComposedLayoutOp::create(builder, loc, *this, inner, offset, outer);
 }
 

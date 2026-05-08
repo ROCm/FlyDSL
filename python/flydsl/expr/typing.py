@@ -493,6 +493,29 @@ class Swizzle(BuiltinDslType):
         return self.type.shift
 
 
+@ir.register_value_caster(CoordSwizzleType.static_typeid, replace=True)
+class CoordSwizzle(BuiltinDslType):
+    @property
+    def mask(self) -> int:
+        return self.type.mask
+
+    @property
+    def base_row(self) -> int:
+        return self.type.base_row
+
+    @property
+    def mode_row(self) -> list[int]:
+        return self.type.mode_row
+
+    @property
+    def base_col(self) -> int:
+        return self.type.base_col
+
+    @property
+    def mode_col(self) -> list[int]:
+        return self.type.mode_col
+
+
 @ir.register_value_caster(ComposedLayoutType.static_typeid, replace=True)
 class ComposedLayout(BuiltinDslType):
     @property
@@ -543,7 +566,7 @@ class ComposedLayout(BuiltinDslType):
 
     @property
     @traced_op
-    def outer(self, loc=None, ip=None) -> Layout:
+    def outer(self, loc=None, ip=None) -> "Layout | ComposedLayout":
         return composed_get_outer(self, loc=loc, ip=ip)
 
     @traced_op
