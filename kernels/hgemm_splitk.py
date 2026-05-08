@@ -12,7 +12,6 @@ import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import fly, llvm, memref, scf
 from flydsl.compiler.kernel_function import CompilationContext
-from flydsl.compiler.protocol import extract_to_ir_values
 from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, rocdl, vector
 from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch
@@ -269,7 +268,7 @@ def compile_hgemm_kernel(
         c_frags = [acc_init] * C_FRAGS_LEN
 
         def get_llvm_ptr(ptr, offset, dtype_bytes):
-            base_ptr = fly.extract_aligned_pointer_as_index(_ptr_type, extract_to_ir_values(ptr)[0])
+            base_ptr = fly.extract_aligned_pointer_as_index(_ptr_type, ptr)
             base_ptr = llvm.PtrToIntOp(_i64_type, base_ptr).result
             byte_offset = arith.index_cast(T.i64, fx.Index(offset) * fx.Index(dtype_bytes))
             llvm_ptr = llvm.AddOp(base_ptr, byte_offset, llvm.IntegerOverflowFlags(0)).result
@@ -729,7 +728,7 @@ def compile_hgemm_kernel(
         # write back to global
         if const_expr(IS_SPLIT_K):
             split_k_barrier()
-            out_raw = extract_to_ir_values(C)[0]
+            out_raw = C
             out_base_ptr = fly.extract_aligned_pointer_as_index(_ptr_type, out_raw)
             out_base_int = llvm.PtrToIntOp(_i64_type, out_base_ptr).result
             for i in range_constexpr(LDG_REG_C_COUNT):
