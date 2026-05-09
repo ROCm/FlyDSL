@@ -648,6 +648,7 @@ class ReplaceIfWithDispatch(Transformer):
         return {
             "const_expr": const_expr,
             "scf_if_dispatch": cls.scf_if_dispatch,
+            "scf_ifexp_dispatch": cls.scf_ifexp_dispatch,
             "scf_if_collect_results": cls._collect_result_dict,
         }
 
@@ -891,6 +892,69 @@ class ReplaceIfWithDispatch(Transformer):
             result.append(dispatch_stmt)
 
             return result
+
+    def visit_IfExp(self, node: ast.IfExp):
+        node = self.generic_visit(node)
+        empty_args = ast.arguments(
+            posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[],
+        )
+        return ast.copy_location(
+            ast.Call(
+                func=ast.Name("scf_ifexp_dispatch", ctx=ast.Load()),
+                args=[
+                    node.test,
+                    ast.Lambda(args=empty_args, body=node.body),
+                    ast.Lambda(args=empty_args, body=node.orelse),
+                ],
+                keywords=[],
+            ),
+            node,
+        )
+
+    @staticmethod
+    def scf_ifexp_dispatch(cond, then_fn, else_fn):
+        if not ReplaceIfWithDispatch._is_dynamic(cond):
+            return then_fn() if cond else else_fn()
+
+        cond_i1 = ReplaceIfWithDispatch._to_i1(cond)
+        if not isinstance(cond_i1, ir.Value):
+            raise TypeError(f"dynamic ifexp condition must lower to ir.Value, got {type(cond_i1).__name__}")
+
+        sandbox = scf.ExecuteRegionOp(result=[])
+        sandbox.region.blocks.append()
+        with ir.InsertionPoint(sandbox.region.blocks[0]):
+            probe_then = then_fn()
+            probe_then_raw = _unwrap_value(probe_then)
+            probe_else = else_fn()
+            probe_else_raw = _unwrap_value(probe_else)
+            if not isinstance(probe_then_raw, ir.Value):
+                raise TypeError(
+                    f"dynamic ifexp then-branch must produce an MLIR Value, "
+                    f"got {type(probe_then_raw).__name__}"
+                )
+            if not isinstance(probe_else_raw, ir.Value):
+                raise TypeError(
+                    f"dynamic ifexp else-branch must produce an MLIR Value, "
+                    f"got {type(probe_else_raw).__name__}"
+                )
+            if probe_then_raw.type != probe_else_raw.type:
+                raise TypeError(
+                    f"dynamic ifexp type mismatch: "
+                    f"then-branch produces {probe_then_raw.type}, "
+                    f"else-branch produces {probe_else_raw.type}"
+                )
+            yield_type = probe_then_raw.type
+
+        op = scf.IfOp(cond_i1, [yield_type], has_else=True, loc=ir.Location.unknown())
+        with ir.InsertionPoint(op.regions[0].blocks[0]):
+            scf.YieldOp([_unwrap_value(then_fn())])
+        if len(op.regions[1].blocks) == 0:
+            op.regions[1].blocks.append()
+        with ir.InsertionPoint(op.regions[1].blocks[0]):
+            scf.YieldOp([_unwrap_value(else_fn())])
+
+        sandbox.operation.erase()
+        return _wrap_like(op.results[0], probe_then)
 
 
 @ASTRewriter.register
