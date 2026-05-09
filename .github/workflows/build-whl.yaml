@@ -92,18 +92,42 @@ jobs:
         env:
           LLVM_REF_INPUT: ${{ inputs.llvm_ref }}
         run: |
-          # Priority: workflow input > llvm-tools-config.json > llvm-hash.txt
+          set -euo pipefail
+          CONFIG="flydsl/thirdparty/custom-llvm-tools.json"
+          LLVM_REMOTE="https://github.com/llvm/llvm-project.git"
+
+          # Priority: workflow input > custom-llvm-tools.json > llvm-hash.txt
           if [ -n "${LLVM_REF_INPUT}" ]; then
             REF="${LLVM_REF_INPUT}"
-          elif [ -f flydsl/thirdparty/llvm-tools-config.json ]; then
-            REF="$(python3 -c "import json; print(json.load(open('flydsl/thirdparty/llvm-tools-config.json'))['llvm_ref'])")"
+          elif [ -f "${CONFIG}" ]; then
+            REF="$(python3 -c "import json; print(json.load(open('${CONFIG}'))['llvm_ref'])")"
+            LLVM_REMOTE="$(python3 -c "import json; print(json.load(open('${CONFIG}')).get('llvm_remote', '${LLVM_REMOTE}'))")"
           else
             REF="$(tr -d '[:space:]' < flydsl/thirdparty/llvm-hash.txt)"
           fi
-          SAFE_REF=$(printf '%s' "${REF}" | sed 's|[^A-Za-z0-9_.-]|-|g')
+
+          # Resolve branch/tag refs to commit SHA via ls-remote so the cache
+          # key is always a stable content hash, not a moving pointer.
+          if [[ "${REF}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            COMMIT="${REF}"
+          else
+            echo "Resolving ref '${REF}' via ls-remote on ${LLVM_REMOTE} ..."
+            COMMIT="$(git ls-remote "${LLVM_REMOTE}" "${REF}" | head -1 | cut -f1)"
+            if [ -z "${COMMIT}" ]; then
+              echo "::error::Could not resolve LLVM ref '${REF}' from ${LLVM_REMOTE}"
+              exit 1
+            fi
+            echo "Resolved '${REF}' -> ${COMMIT}"
+          fi
+
+          SAFE_REF=$(printf '%s' "${COMMIT}" | sed 's|[^A-Za-z0-9_.-]|-|g')
           echo "ref=${REF}" >> "$GITHUB_OUTPUT"
+          echo "commit=${COMMIT}" >> "$GITHUB_OUTPUT"
           echo "safe_ref=${SAFE_REF}" >> "$GITHUB_OUTPUT"
-          echo "LLVM ref: ${REF}"
+          echo "LLVM ref: ${REF}  commit: ${COMMIT}"
+          if [ -f "${CONFIG}" ]; then
+            echo "Config: $(cat ${CONFIG})"
+          fi
 
       - name: Restore cached MLIR install tarball
         id: mlir-cache
@@ -124,8 +148,14 @@ jobs:
         env:
           LLVM_REF: ${{ steps.llvm-ref.outputs.ref }}
         run: |
+          CONFIG="flydsl/thirdparty/custom-llvm-tools.json"
+          LLVM_REMOTE=""
+          if [ -f "${CONFIG}" ]; then
+            LLVM_REMOTE="$(python3 -c "import json; print(json.load(open('${CONFIG}')).get('llvm_remote', ''))")"
+          fi
           docker exec \
             -e "LLVM_REF=${LLVM_REF}" \
+            ${LLVM_REMOTE:+-e "LLVM_REMOTE=${LLVM_REMOTE}"} \
             flydsl_build bash -c "cd /flydsl && bash scripts/build_llvm.sh"
           docker cp flydsl_build:/llvm-project/mlir_install.tgz ./mlir_install.tgz || true
 
@@ -152,15 +182,20 @@ jobs:
           docker cp "flydsl_build:${FLY_OPT_SRC}" ./dist/fly-opt
 
       - name: Package external LLVM tools
+        env:
+          LLVM_SHA: ${{ steps.llvm-ref.outputs.commit }}
         run: |
           set -euo pipefail
-          LLVM_SHA=$(docker exec flydsl_build bash -c "cd /llvm-project && git rev-parse HEAD")
+          CONFIG="flydsl/thirdparty/custom-llvm-tools.json"
+          # LLVM_SHA comes from the "Resolve LLVM ref" step — works regardless
+          # of whether LLVM was built fresh or restored from cache (no .git).
           LLVM_SHA_SHORT="${LLVM_SHA:0:12}"
-          if [ -f flydsl/thirdparty/llvm-tools-config.json ]; then
-            ARCHIVE_NAME="$(python3 -c "import json; print(json.load(open('flydsl/thirdparty/llvm-tools-config.json')).get('archive_name', 'flydsl-mlir-tools'))")"
+          if [ -f "${CONFIG}" ]; then
+            ARCHIVE_NAME="$(python3 -c "import json; print(json.load(open('${CONFIG}')).get('archive_name', 'flydsl-mlir-tools'))")"
           else
             ARCHIVE_NAME="flydsl-mlir-tools"
           fi
+          # Final tarball: {archive_name}-{commit_id_12char}-manylinux_2_28-x86_64.tar.gz
           TOOL_ARCHIVE="${ARCHIVE_NAME}-${LLVM_SHA_SHORT}-manylinux_2_28-x86_64.tar.gz"
           echo "Packaging ${TOOL_ARCHIVE}"
           BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -194,7 +229,7 @@ jobs:
       - name: Collect LLVM tool archive names
         id: collect-llvm-tools
         run: |
-          TOOLS=$(ls dist/flydsl-mlir-tools-*.tar.gz | xargs -n1 basename | tr '\n' ' ')
+          TOOLS=$(ls dist/*-manylinux_2_28-*.tar.gz | xargs -n1 basename | tr '\n' ' ')
           echo "llvm_tool_names=${TOOLS}" >> $GITHUB_OUTPUT
           echo "Built LLVM tool archives: ${TOOLS}"
 
@@ -205,7 +240,7 @@ jobs:
           path: |
             dist/*.whl
             dist/fly-opt
-            dist/flydsl-mlir-tools-*.tar.gz
+            dist/*-manylinux_2_28-*.tar.gz
           retention-days: 3
 
       - name: Build summary
@@ -245,7 +280,7 @@ jobs:
           RELEASE_TYPE: ${{ inputs.release_type }}
         run: |
           aws s3 cp dist/ "s3://framework-whls-${RELEASE_TYPE}/llvm-tools-staging/gfx942-gfx950/" \
-            --recursive --exclude "*" --include "flydsl-mlir-tools-*.tar.gz"
+            --recursive --exclude "*" --include "*-manylinux_2_28-*.tar.gz"
 
       - name: Clean up
         if: always()

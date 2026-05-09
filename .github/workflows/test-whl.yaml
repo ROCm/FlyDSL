@@ -66,14 +66,14 @@ jobs:
         run: |
           docker exec flydsl_test bash -c '
             set -euo pipefail
-            TOOL_ARCHIVE=$(ls -1 /dist/flydsl-mlir-tools-*.tar.gz | head -n1)
+            TOOL_ARCHIVE=$(ls -1 /dist/*-manylinux_2_28-*.tar.gz | head -n1)
             test -n "${TOOL_ARCHIVE}"
-            rm -rf /opt/flydsl-mlir-tools
-            mkdir -p /opt/flydsl-mlir-tools
-            tar -xzf "${TOOL_ARCHIVE}" -C /opt/flydsl-mlir-tools
-            /opt/flydsl-mlir-tools/bin/mlir-opt --version
+            rm -rf /opt/custom-llvm-tools
+            mkdir -p /opt/custom-llvm-tools
+            tar -xzf "${TOOL_ARCHIVE}" -C /opt/custom-llvm-tools
+            /opt/custom-llvm-tools/bin/mlir-opt --version
             cd /flydsl
-            FLYDSL_COMPILE_LLVM_DIR=/opt/flydsl-mlir-tools \
+            FLYDSL_COMPILE_LLVM_DIR=/opt/custom-llvm-tools \
             FLYDSL_RUNTIME_ENABLE_CACHE=0 \
               python3 -m pytest tests/unit/test_compile_hints.py::TestCompileHintsPropagation::test_llvm_options_in_compile_hints -v
           '
