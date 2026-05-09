@@ -196,35 +196,9 @@ jobs:
         env:
           RELEASE_TYPE: ${{ inputs.release_type }}
         run: |
-          S3_DEST="s3://framework-whls-${RELEASE_TYPE}/llvm-tools/gfx942-gfx950/"
-          aws s3 cp flydsl/dist/ "${S3_DEST}" \
+          aws s3 cp flydsl/dist/ "s3://framework-whls-${RELEASE_TYPE}/llvm-tools/gfx942-gfx950/" \
             --recursive --exclude "*" --include "*-manylinux_2_28-*.tar.gz"
-          aws s3 ls "${S3_DEST}" | awk '{print $4}' | sort > /tmp/llvm-tools-files.txt
-          python3 - <<'PY'
-          import html
-          from pathlib import Path
-
-          files = [
-              name
-              for name in Path("/tmp/llvm-tools-files.txt").read_text().splitlines()
-              if name.endswith(".tar.gz")
-          ]
-          lines = [
-              "<!DOCTYPE html>",
-              "<html>",
-              "  <body>",
-              "    <h1>Links for gfx942-gfx950</h1>",
-          ]
-          for name in files:
-              escaped = html.escape(name)
-              lines.append(f'    <a href="{escaped}">{escaped}</a><br>')
-          lines.extend(["  </body>", "</html>"])
-          Path("/tmp/llvm-tools-index.html").write_text("\n".join(lines) + "\n")
-          PY
-          aws s3 cp /tmp/llvm-tools-index.html "${S3_DEST}index.html" \
-            --content-type "text/html" \
-            --cache-control "no-cache,no-store,must-revalidate"
-          echo "Uploaded to ${S3_DEST}"
+          echo "Uploaded to s3://framework-whls-${RELEASE_TYPE}/llvm-tools/gfx942-gfx950/"
 
       - name: Summary
         if: always()
