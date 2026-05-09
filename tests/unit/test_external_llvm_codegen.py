@@ -7,6 +7,7 @@ from pathlib import Path
 from flydsl._mlir import ir
 from flydsl.compiler.backends.rocm import RocmBackend
 from flydsl.compiler.external_llvm import (
+    _external_llvm_fingerprint_cached,
     _format_llvm_cli_options,
     external_llvm_fingerprint,
     run_external_binary_codegen,
@@ -71,12 +72,12 @@ def test_rocm_external_pipeline_split_matches_full_pipeline():
 def test_external_llvm_fingerprint_uses_configured_tools(tmp_path, monkeypatch):
     llvm_dir = _make_fake_llvm(tmp_path)
     monkeypatch.setenv("FLYDSL_COMPILE_LLVM_DIR", str(llvm_dir))
-    external_llvm_fingerprint.cache_clear()
+    _external_llvm_fingerprint_cached.cache_clear()
 
     try:
         fingerprint = external_llvm_fingerprint()
     finally:
-        external_llvm_fingerprint.cache_clear()
+        _external_llvm_fingerprint_cached.cache_clear()
 
     assert f"external-binary:{llvm_dir.resolve()}" in fingerprint
     assert "fake mlir-opt 1.2.3" in fingerprint

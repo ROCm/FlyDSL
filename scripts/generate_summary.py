@@ -28,17 +28,25 @@ DOMAIN_MAP = {
 }
 
 
-def _out(path: Path, line: str = "") -> None:
-    with open(path, "a") as f:
-        f.write(line + "\n")
+class SummaryWriter:
+    """Collects lines in memory, flushes once to GITHUB_STEP_SUMMARY."""
 
+    def __init__(self) -> None:
+        self._lines: list[str] = []
 
-def _table(path: Path, headers: list[str], rows: list[list[str]]) -> None:
-    _out(path, "| " + " | ".join(headers) + " |")
-    _out(path, "| " + " | ".join("---" for _ in headers) + " |")
-    for row in rows:
-        _out(path, "| " + " | ".join(row) + " |")
-    _out(path)
+    def line(self, text: str = "") -> None:
+        self._lines.append(text)
+
+    def table(self, headers: list[str], rows: list[list[str]]) -> None:
+        self.line("| " + " | ".join(headers) + " |")
+        self.line("| " + " | ".join("---" for _ in headers) + " |")
+        for row in rows:
+            self.line("| " + " | ".join(row) + " |")
+        self.line()
+
+    def flush(self, path: Path) -> None:
+        with open(path, "a") as f:
+            f.write("\n".join(self._lines) + "\n")
 
 
 # ── Build summary ───────────────────────────────────────────────────────────
@@ -50,26 +58,28 @@ def build_summary(summary: Path) -> None:
     release_type = os.environ.get("SUMMARY_RELEASE_TYPE", "unknown")
     wheel_dir = os.environ.get("SUMMARY_WHEEL_DIR", "dist")
 
-    _out(summary, "## Build Summary")
-    _out(summary)
-    _table(summary, ["Item", "Value"], [
+    w = SummaryWriter()
+    w.line("## Build Summary")
+    w.line()
+    w.table(["Item", "Value"], [
         ["Docker image", f"`{docker_image}`"],
         ["LLVM commit", f"`{llvm_commit}`"],
         ["MLIR cache", mlir_cache],
         ["Release type", f"`{release_type}`"],
     ])
 
-    _out(summary, "### Wheels")
-    _out(summary, "```")
+    w.line("### Wheels")
+    w.line("```")
     whl_dir = Path(wheel_dir)
     wheels = sorted(whl_dir.glob("*.whl")) if whl_dir.is_dir() else []
     if wheels:
-        for w in wheels:
-            size_mb = w.stat().st_size / (1024 * 1024)
-            _out(summary, f"  {w.name}  ({size_mb:.1f} MB)")
+        for wh in wheels:
+            size_mb = wh.stat().st_size / (1024 * 1024)
+            w.line(f"  {wh.name}  ({size_mb:.1f} MB)")
     else:
-        _out(summary, "  No wheels found")
-    _out(summary, "```")
+        w.line("  No wheels found")
+    w.line("```")
+    w.flush(summary)
 
 
 # ── Test summary ────────────────────────────────────────────────────────────
@@ -83,39 +93,41 @@ def test_summary(summary: Path) -> None:
     test_log = os.environ.get("SUMMARY_TEST_LOG", "/tmp/test_output.log")
     bench_log = os.environ.get("SUMMARY_BENCH_LOG", "/tmp/bench_output.log")
 
-    _out(summary, f"## Test Summary (`{runner}`)")
-    _out(summary)
-    _table(summary, ["Step", "Status"], [
+    w = SummaryWriter()
+    w.line(f"## Test Summary (`{runner}`)")
+    w.line()
+    w.table(["Step", "Status"], [
         ["Install wheels", f"`{install_outcome}`"],
         ["Smoke test external LLVM tools", f"`{external_tools_outcome}`"],
         ["Run tests", f"`{tests_outcome}`"],
         ["Run benchmarks", f"`{bench_outcome}`"],
     ])
 
-    _write_test_results(summary, test_log)
-    _write_bench_results(summary, bench_log)
+    _write_test_results(w, test_log)
+    _write_bench_results(w, bench_log)
+    w.flush(summary)
 
 
-def _write_test_results(summary: Path, log_path: str) -> None:
+def _write_test_results(w: SummaryWriter, log_path: str) -> None:
     log = Path(log_path)
     if not log.is_file():
         return
 
     text = log.read_text(errors="replace")
     mlir = _first_match(r"^MLIR Tests:.*", text) or "N/A"
-    ir = _first_match(r"^IR Tests:.*", text) or "N/A"
+    ir_result = _first_match(r"^IR Tests:.*", text) or "N/A"
     gpu = _first_match(r"^GPU Tests:.*", text) or "N/A"
 
-    _out(summary, "### Test Results")
-    _out(summary)
-    _table(summary, ["Suite", "Result"], [
+    w.line("### Test Results")
+    w.line()
+    w.table(["Suite", "Result"], [
         ["MLIR IR (Lowering)", mlir],
-        ["Python IR (Generation)", ir],
+        ["Python IR (Generation)", ir_result],
         ["GPU Execution", gpu],
     ])
 
 
-def _write_bench_results(summary: Path, log_path: str) -> None:
+def _write_bench_results(w: SummaryWriter, log_path: str) -> None:
     log = Path(log_path)
     if not log.is_file():
         return
@@ -124,19 +136,19 @@ def _write_bench_results(summary: Path, log_path: str) -> None:
 
     perf_block = _extract_perf_table(text)
     if perf_block:
-        _out(summary, "### Benchmark Results")
-        _out(summary)
-        _out(summary, "```")
+        w.line("### Benchmark Results")
+        w.line()
+        w.line("```")
         for line in perf_block[:30]:
-            _out(summary, line)
-        _out(summary, "```")
-        _out(summary)
+            w.line(line)
+        w.line("```")
+        w.line()
 
     for pattern in (r"^Total:.*", r"^Success:.*", r"^Failed:.*"):
         match = _first_match(pattern, text)
         if match:
-            _out(summary, match)
-    _out(summary)
+            w.line(match)
+    w.line()
 
 
 def _extract_perf_table(text: str) -> list[str]:
@@ -162,45 +174,47 @@ def promote_summary(summary: Path) -> None:
     wheel_names = os.environ.get("SUMMARY_WHEEL_NAMES", "").strip()
     llvm_tool_names = os.environ.get("SUMMARY_LLVM_TOOL_NAMES", "").strip()
 
-    _out(summary, "## Promote Summary")
-    _out(summary)
-    _table(summary, ["Item", "Value"], [
+    w = SummaryWriter()
+    w.line("## Promote Summary")
+    w.line()
+    w.table(["Item", "Value"], [
         ["Release type", f"`{release_type}`"],
         ["Source", f"`{source}`"],
         ["Destination", f"`{dest}`"],
     ])
 
     if wheel_names:
-        _out(summary, "### Promoted Wheels")
-        _out(summary, "```")
+        w.line("### Promoted Wheels")
+        w.line("```")
         for whl in wheel_names.split():
-            _out(summary, f"  {whl}")
-        _out(summary, "```")
-        _out(summary)
+            w.line(f"  {whl}")
+        w.line("```")
+        w.line()
 
     if llvm_tool_names:
-        _out(summary, "### Promoted LLVM Tools")
-        _out(summary, "```")
+        w.line("### Promoted LLVM Tools")
+        w.line("```")
         for tool in llvm_tool_names.split():
-            _out(summary, f"  {tool}")
-        _out(summary, "```")
-        _out(summary)
+            w.line(f"  {tool}")
+        w.line("```")
+        w.line()
 
     domain = DOMAIN_MAP.get(release_type)
     if domain:
         index_url = f"https://{domain}/whl/gfx942-gfx950/"
         llvm_tools_url = f"https://{domain}/llvm-tools/gfx942-gfx950/"
-        _out(summary, "### Wheels Available At")
-        _out(summary, f"- {index_url}")
+        w.line("### Wheels Available At")
+        w.line(f"- {index_url}")
         if llvm_tool_names:
-            _out(summary, "### LLVM Tools Available At")
-            _out(summary, f"- {llvm_tools_url}")
-        _out(summary)
-        _out(summary, "### Install")
-        _out(summary, "```bash")
-        _out(summary, f"pip install --index-url {index_url} flydsl")
-        _out(summary, "```")
-        _out(summary)
+            w.line("### LLVM Tools Available At")
+            w.line(f"- {llvm_tools_url}")
+        w.line()
+        w.line("### Install")
+        w.line("```bash")
+        w.line(f"pip install --index-url {index_url} flydsl")
+        w.line("```")
+        w.line()
+    w.flush(summary)
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────

@@ -89,9 +89,11 @@ jobs:
 
       - name: Resolve LLVM ref for cache key
         id: llvm-ref
+        env:
+          LLVM_REF_INPUT: ${{ inputs.llvm_ref }}
         run: |
-          if [ -n "${{ inputs.llvm_ref }}" ]; then
-            REF="${{ inputs.llvm_ref }}"
+          if [ -n "${LLVM_REF_INPUT}" ]; then
+            REF="${LLVM_REF_INPUT}"
           else
             REF="$(tr -d '[:space:]' < flydsl/thirdparty/llvm-hash.txt)"
           fi
@@ -116,20 +118,23 @@ jobs:
 
       - name: Build LLVM
         if: steps.mlir-cache.outputs.cache-hit != 'true'
+        env:
+          LLVM_REF: ${{ steps.llvm-ref.outputs.ref }}
         run: |
           docker exec \
-            -e "LLVM_REF=${{ steps.llvm-ref.outputs.ref }}" \
+            -e "LLVM_REF=${LLVM_REF}" \
             flydsl_build bash -c "cd /flydsl && bash scripts/build_llvm.sh"
           docker cp flydsl_build:/llvm-project/mlir_install.tgz ./mlir_install.tgz || true
 
       - name: Build wheels
         env:
           PACKAGE_VERSION_OVERRIDE: ${{ inputs.package_version_override }}
+          RELEASE_TYPE: ${{ inputs.release_type }}
         run: |
           docker exec \
             -e MLIR_PATH=/llvm-project/mlir_install \
             -e EXPECTED_GLIBC=2.28 \
-            -e FLYDSL_RELEASE_TYPE=${{ inputs.release_type }} \
+            -e "FLYDSL_RELEASE_TYPE=${RELEASE_TYPE}" \
             -e "FLYDSL_PACKAGE_VERSION_OVERRIDE=${PACKAGE_VERSION_OVERRIDE}" \
             flydsl_build bash -c "cd /flydsl && bash scripts/build_wheels.sh"
           docker cp flydsl_build:/flydsl/dist ./dist
@@ -145,15 +150,21 @@ jobs:
 
       - name: Package external LLVM tools
         run: |
+          set -euo pipefail
           LLVM_SHA=$(docker exec flydsl_build bash -c "cd /llvm-project && git rev-parse HEAD")
           LLVM_SHA_SHORT="${LLVM_SHA:0:12}"
           TOOL_ARCHIVE="flydsl-mlir-tools-${LLVM_SHA_SHORT}-manylinux_2_28-x86_64.tar.gz"
           echo "Packaging ${TOOL_ARCHIVE}"
+          BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           docker exec flydsl_build bash -c "
             set -euo pipefail
             test -x /llvm-project/mlir_install/bin/mlir-opt
             cd /llvm-project/mlir_install
-            tar -czf /flydsl/dist/${TOOL_ARCHIVE} bin/mlir-opt lib
+            strip bin/mlir-opt
+            printf 'llvm_commit=%s\nbuild_date=%s\nbuild_cmd=scripts/build_llvm.sh  # BUILD_SHARED_LIBS=OFF, static mlir-opt\n' \
+              '${LLVM_SHA}' '${BUILD_DATE}' > BUILD_INFO
+            tar -czf /flydsl/dist/${TOOL_ARCHIVE} bin/mlir-opt BUILD_INFO
+            rm -f BUILD_INFO
           "
           docker exec flydsl_build bash -c "
             set -euo pipefail
@@ -161,6 +172,7 @@ jobs:
             mkdir -p /tmp/flydsl-mlir-tools-smoke
             tar -xzf /flydsl/dist/${TOOL_ARCHIVE} -C /tmp/flydsl-mlir-tools-smoke
             /tmp/flydsl-mlir-tools-smoke/bin/mlir-opt --version
+            cat /tmp/flydsl-mlir-tools-smoke/BUILD_INFO
           "
           ls -lh "dist/${TOOL_ARCHIVE}"
 
@@ -192,11 +204,13 @@ jobs:
         if: always()
         env:
           SUMMARY_DOCKER_IMAGE: ${{ env.MANYLINUX_IMAGE }}
-          SUMMARY_LLVM_COMMIT: $(cat flydsl/thirdparty/llvm-hash.txt | tr -d '[:space:]')
           SUMMARY_MLIR_CACHE: ${{ steps.mlir-cache.outputs.cache-hit == 'true' && 'Hit' || 'Miss (rebuilt)' }}
           SUMMARY_RELEASE_TYPE: ${{ inputs.release_type }}
           SUMMARY_WHEEL_DIR: dist
-        run: python3 flydsl/scripts/generate_summary.py build
+        run: |
+          SUMMARY_LLVM_COMMIT="$(tr -d '[:space:]' < flydsl/thirdparty/llvm-hash.txt)"
+          export SUMMARY_LLVM_COMMIT
+          python3 flydsl/scripts/generate_summary.py build
 
       - name: Configure AWS credentials
         if: ${{ github.repository_owner == 'ROCm' && inputs.upload_s3_staging }}
@@ -211,14 +225,18 @@ jobs:
 
       - name: Upload wheels to S3 staging
         if: ${{ github.repository_owner == 'ROCm' && inputs.upload_s3_staging }}
+        env:
+          RELEASE_TYPE: ${{ inputs.release_type }}
         run: |
-          aws s3 cp dist/ s3://framework-whls-${{ inputs.release_type }}/whl-staging/gfx942-gfx950/ \
+          aws s3 cp dist/ "s3://framework-whls-${RELEASE_TYPE}/whl-staging/gfx942-gfx950/" \
             --recursive --exclude "*" --include "*.whl"
 
       - name: Upload LLVM tools to S3 staging
         if: ${{ github.repository_owner == 'ROCm' && inputs.upload_s3_staging }}
+        env:
+          RELEASE_TYPE: ${{ inputs.release_type }}
         run: |
-          aws s3 cp dist/ s3://framework-whls-${{ inputs.release_type }}/llvm-tools-staging/gfx942-gfx950/ \
+          aws s3 cp dist/ "s3://framework-whls-${RELEASE_TYPE}/llvm-tools-staging/gfx942-gfx950/" \
             --recursive --exclude "*" --include "flydsl-mlir-tools-*.tar.gz"
 
       - name: Clean up

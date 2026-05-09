@@ -38,7 +38,7 @@ def _flydsl_key() -> str:
     return _flydsl_key_cached(_use_external_binary_codegen(), env.compile.llvm_dir)
 
 
-@lru_cache(maxsize=8)
+@lru_cache(maxsize=2)
 def _flydsl_key_cached(use_external_binary: bool, llvm_dir: str) -> str:
     """Compute a hash fingerprint of the entire FlyDSL compiler toolchain.
 
@@ -423,11 +423,17 @@ def _extract_llvm_ir(module: ir.Module):
 class PipelineConfig:
     """Result of :func:`_pipeline_fragments_for_mode`."""
 
-    fragments: list
     pre_binary: Optional[list]
     binary_fragment: Optional[str]
     llvm_opts: Optional[dict]
     external: bool
+
+    @property
+    def fragments(self) -> list:
+        """Full ordered fragment list (pre_binary + binary, or just pre_binary in non-external mode)."""
+        if self.external:
+            return [*self.pre_binary, self.binary_fragment]
+        return list(self.pre_binary)
 
 
 def _pipeline_fragments_for_mode(backend) -> PipelineConfig:
@@ -439,7 +445,6 @@ def _pipeline_fragments_for_mode(backend) -> PipelineConfig:
     if _use_external_binary_codegen():
         pre_binary_fragments, binary_fragment = backend.external_binary_pipeline_fragments(compile_hints=hints)
         return PipelineConfig(
-            fragments=[*pre_binary_fragments, binary_fragment],
             pre_binary=pre_binary_fragments,
             binary_fragment=binary_fragment,
             llvm_opts=llvm_opts,
@@ -448,8 +453,7 @@ def _pipeline_fragments_for_mode(backend) -> PipelineConfig:
 
     fragments = backend.pipeline_fragments(compile_hints=hints)
     return PipelineConfig(
-        fragments=fragments,
-        pre_binary=None,
+        pre_binary=fragments,
         binary_fragment=None,
         llvm_opts=llvm_opts,
         external=False,
@@ -486,6 +490,26 @@ def _run_pipeline(module: ir.Module, fragments: list, *, verifier: bool, print_a
     pm.run(module.operation)
 
 
+def _run_external_codegen(
+    module: ir.Module,
+    cfg: PipelineConfig,
+    *,
+    work_dir: Optional[Path] = None,
+    stage_prefix: str = "external_binary",
+) -> None:
+    """Run external LLVM binary codegen and verify the result."""
+    from .external_llvm import run_external_binary_codegen
+
+    run_external_binary_codegen(
+        module,
+        cfg.binary_fragment,
+        llvm_options=cfg.llvm_opts,
+        work_dir=work_dir,
+        stage_prefix=stage_prefix,
+    )
+    module.operation.verify()
+
+
 class MlirCompiler:
     @classmethod
     def compile(
@@ -497,18 +521,21 @@ class MlirCompiler:
 
         module = ir.Module.parse(module.operation.get_asm(enable_debug_info=env.debug.enable_debug_info))
         cfg = _pipeline_fragments_for_mode(backend)
-        fragments = cfg.fragments
-        pre_binary_fragments = cfg.pre_binary
-        binary_fragment = cfg.binary_fragment
-        llvm_opts = cfg.llvm_opts
-        external_binary = cfg.external
 
-        if external_binary and link_libs:
+        if cfg.external and env.debug.dump_asm:
+            raise RuntimeError(
+                "FLYDSL_DEBUG_DUMP_ASM is not supported with "
+                "FLYDSL_COMPILE_LLVM_DIR external codegen; use FLYDSL_DUMP_IR=1 "
+                "to inspect pre-binary/final MLIR, or run external LLVM tools directly for ISA dumps."
+            )
+
+        if cfg.external and link_libs:
             raise RuntimeError(
                 "FLYDSL_COMPILE_LLVM_DIR external codegen does not support extern link_libs yet; "
                 "use embedded codegen for kernels that require #fly.explicit_module."
             )
 
+        fragments = list(cfg.fragments)
         if link_libs:
             link_opt = _format_link_lib_options(link_libs)
             new_fragments = []
@@ -529,7 +556,7 @@ class MlirCompiler:
 
         from .llvm_options import llvm_options as _llvm_options
 
-        _llvm_ctx = _llvm_options(llvm_opts) if llvm_opts else nullcontext()
+        _llvm_ctx = _llvm_options(cfg.llvm_opts) if cfg.llvm_opts else nullcontext()
 
         if env.debug.print_origin_ir:
             log().info(f"Origin IR: \n{module}")
@@ -551,7 +578,7 @@ class MlirCompiler:
                 asm_for_isa = None
                 llir = None
                 stage_num_base = 1
-                dump_fragments = pre_binary_fragments if external_binary else fragments
+                dump_fragments = cfg.pre_binary if cfg.external else fragments
                 for idx, frag in enumerate(dump_fragments):
                     if frag.strip().startswith("gpu-module-to-binary"):
                         llir = _extract_llvm_ir(module)
@@ -570,19 +597,10 @@ class MlirCompiler:
                         asm_for_isa = stage_asm
 
                 next_stage = stage_num_base + len(dump_fragments)
-                if external_binary:
-                    from .external_llvm import run_external_binary_codegen
-
+                if cfg.external:
                     llir = _extract_llvm_ir(module)
                     stage_name = f"{next_stage:02d}_external_binary"
-                    run_external_binary_codegen(
-                        module,
-                        binary_fragment,
-                        llvm_options=llvm_opts,
-                        work_dir=dump_dir,
-                        stage_prefix=stage_name,
-                    )
-                    module.operation.verify()
+                    _run_external_codegen(module, cfg, work_dir=dump_dir, stage_prefix=stage_name)
                     print(f"[flydsl.compile] dump {stage_name}_input -> {dump_dir / f'{stage_name}_input.mlir'}")
                     print(
                         f"[flydsl.compile] dump {stage_name}_external_output -> "
@@ -598,7 +616,7 @@ class MlirCompiler:
                     next_stage += 1
 
                 if asm_for_isa is not None:
-                    if not external_binary:
+                    if not cfg.external:
                         isa_stage = f"{next_stage:02d}_final_isa"
                         isa_out = _dump_isa(
                             dump_dir=dump_dir,
@@ -612,29 +630,14 @@ class MlirCompiler:
                     else:
                         print("[flydsl.compile] ISA dump skipped (external LLVM mode)")
             else:
-                if external_binary:
-                    from .external_llvm import run_external_binary_codegen
-
+                if cfg.external:
                     _run_pipeline(
                         module,
-                        pre_binary_fragments,
+                        cfg.pre_binary,
                         verifier=env.debug.enable_verifier,
                         print_after_all=env.debug.print_after_all,
                     )
-
-                    if env.debug.dump_asm:
-                        raise RuntimeError(
-                            "FLYDSL_DEBUG_DUMP_ASM is not supported with "
-                            "FLYDSL_COMPILE_LLVM_DIR external codegen; use FLYDSL_DUMP_IR=1 "
-                            "to inspect pre-binary/final MLIR, or run external LLVM tools directly for ISA dumps."
-                        )
-
-                    run_external_binary_codegen(
-                        module,
-                        binary_fragment,
-                        llvm_options=llvm_opts,
-                    )
-                    module.operation.verify()
+                    _run_external_codegen(module, cfg)
                 else:
                     _run_pipeline(
                         module,

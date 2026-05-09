@@ -42,22 +42,28 @@ jobs:
         run: bash ./flydsl/scripts/install_awscli.sh
 
       - name: Download wheels from staging
+        env:
+          RELEASE_TYPE: ${{ inputs.release_type }}
+          WHEEL_NAMES: ${{ inputs.wheel_names }}
         run: |
-          STAGING="s3://framework-whls-${{ inputs.release_type }}/whl-staging/gfx942-gfx950"
+          STAGING="s3://framework-whls-${RELEASE_TYPE}/whl-staging/gfx942-gfx950"
           mkdir -p /tmp/promote-wheels
           echo "Downloading wheels from ${STAGING}"
-          for WHL in ${{ inputs.wheel_names }}; do
+          for WHL in ${WHEEL_NAMES}; do
             echo "Downloading ${WHL}..."
             aws s3 cp "${STAGING}/${WHL}" "/tmp/promote-wheels/${WHL}"
           done
           echo "Downloaded wheels:"
           ls -lh /tmp/promote-wheels/
 
-      - name: Upload wheels to ${{ inputs.release_type }}
+      - name: Upload wheels to release
+        env:
+          RELEASE_TYPE: ${{ inputs.release_type }}
+          WHEEL_NAMES: ${{ inputs.wheel_names }}
         run: |
-          RELEASE="s3://framework-whls-${{ inputs.release_type }}/whl/gfx942-gfx950"
+          RELEASE="s3://framework-whls-${RELEASE_TYPE}/whl/gfx942-gfx950"
           echo "Uploading wheels to ${RELEASE}"
-          for WHL in ${{ inputs.wheel_names }}; do
+          for WHL in ${WHEEL_NAMES}; do
             echo "Uploading ${WHL}..."
             aws s3 cp "/tmp/promote-wheels/${WHL}" "${RELEASE}/${WHL}"
           done
@@ -65,11 +71,14 @@ jobs:
 
       - name: Download LLVM tools from staging
         if: ${{ inputs.llvm_tool_names != '' }}
+        env:
+          RELEASE_TYPE: ${{ inputs.release_type }}
+          LLVM_TOOL_NAMES: ${{ inputs.llvm_tool_names }}
         run: |
-          STAGING="s3://framework-whls-${{ inputs.release_type }}/llvm-tools-staging/gfx942-gfx950"
+          STAGING="s3://framework-whls-${RELEASE_TYPE}/llvm-tools-staging/gfx942-gfx950"
           mkdir -p /tmp/promote-llvm-tools
           echo "Downloading LLVM tools from ${STAGING}"
-          for TOOL in ${{ inputs.llvm_tool_names }}; do
+          for TOOL in ${LLVM_TOOL_NAMES}; do
             echo "Downloading ${TOOL}..."
             aws s3 cp "${STAGING}/${TOOL}" "/tmp/promote-llvm-tools/${TOOL}"
           done
@@ -78,21 +87,26 @@ jobs:
 
       - name: Smoke test LLVM tool archives
         if: ${{ inputs.llvm_tool_names != '' }}
+        env:
+          LLVM_TOOL_NAMES: ${{ inputs.llvm_tool_names }}
         run: |
           set -euo pipefail
-          for TOOL in ${{ inputs.llvm_tool_names }}; do
+          for TOOL in ${LLVM_TOOL_NAMES}; do
             WORKDIR="/tmp/promote-llvm-tools-smoke/${TOOL%.tar.gz}"
             mkdir -p "${WORKDIR}"
             tar -xzf "/tmp/promote-llvm-tools/${TOOL}" -C "${WORKDIR}"
             "${WORKDIR}/bin/mlir-opt" --version
           done
 
-      - name: Upload LLVM tools to ${{ inputs.release_type }}
+      - name: Upload LLVM tools to release
         if: ${{ inputs.llvm_tool_names != '' }}
+        env:
+          RELEASE_TYPE: ${{ inputs.release_type }}
+          LLVM_TOOL_NAMES: ${{ inputs.llvm_tool_names }}
         run: |
-          RELEASE="s3://framework-whls-${{ inputs.release_type }}/llvm-tools/gfx942-gfx950"
+          RELEASE="s3://framework-whls-${RELEASE_TYPE}/llvm-tools/gfx942-gfx950"
           echo "Uploading LLVM tools to ${RELEASE}"
-          for TOOL in ${{ inputs.llvm_tool_names }}; do
+          for TOOL in ${LLVM_TOOL_NAMES}; do
             echo "Uploading ${TOOL}..."
             aws s3 cp "/tmp/promote-llvm-tools/${TOOL}" "${RELEASE}/${TOOL}"
           done
