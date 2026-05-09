@@ -9,7 +9,7 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl.compiler.kernel_function import CompilationContext
-from flydsl.expr import arith, buffer_ops, const_expr, gpu, idx2crd, range_constexpr, rocdl, tdm_ops, vector
+from flydsl.expr import arith, buffer_ops, const_expr, gpu, idx2crd, range_constexpr, rocdl, tdm_ops
 from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr, check_smem_capacity
@@ -365,17 +365,8 @@ def compile_mxscale_gemm(
         rocdl.disable_xdl_arb_stall()
 
         if const_expr(inst_prefetch):
-            from flydsl._mlir.dialects import llvm as llvm_dialect
             if rocdl.wave_id() == fx.Int32(0):
-                _prefetch_lines = ["s_setreg_imm32_b32 hwreg(HW_REG_WAVE_MODE, 8, 1), 1"]
-                for _pg in range_constexpr(10):
-                    _prefetch_lines.append(
-                        f"s_prefetch_inst_pc_rel {_pg * 4096}, s0, 31")
-                llvm_dialect.inline_asm(
-                    None, [],
-                    "\n".join(_prefetch_lines),
-                    "", has_side_effects=True,
-                )
+                rocdl.s_prefetch_inst_burst(num_pages=10)
 
         tx = gpu.thread_id("x")
         bx = gpu.block_id("x")
@@ -509,19 +500,19 @@ def compile_mxscale_gemm(
             """
             k_byte_off = arith.index(ks * WMMA_K // PACK_FACTOR_A)
             byte_off = a_lane_base + k_byte_off
-            v0 = lds_load_b128_raw(lds_buffer, byte_off)
+            v0 = fx.Vector(lds_load_b128_raw(lds_buffer, byte_off))
             if const_expr(is_fp4):
                 # Interleaved stride=32: +0, +32
-                v1 = lds_load_b128_raw(lds_buffer, byte_off + arith.index(32))
-                return vector.shuffle(v0, v1, list(range(8)))
+                v1 = fx.Vector(lds_load_b128_raw(lds_buffer, byte_off + arith.index(32)))
+                return v0.shuffle(v1, list(range(8)))
             else:
                 # Interleaved stride=32: +0, +32, +64, +96
-                v1 = lds_load_b128_raw(lds_buffer, byte_off + arith.index(32))
-                v2 = lds_load_b128_raw(lds_buffer, byte_off + arith.index(64))
-                v3 = lds_load_b128_raw(lds_buffer, byte_off + arith.index(96))
-                v01 = vector.shuffle(v0, v1, list(range(8)))
-                v23 = vector.shuffle(v2, v3, list(range(8)))
-                return vector.shuffle(v01, v23, list(range(16)))
+                v1 = fx.Vector(lds_load_b128_raw(lds_buffer, byte_off + arith.index(32)))
+                v2 = fx.Vector(lds_load_b128_raw(lds_buffer, byte_off + arith.index(64)))
+                v3 = fx.Vector(lds_load_b128_raw(lds_buffer, byte_off + arith.index(96)))
+                v01 = v0.shuffle(v1, list(range(8)))
+                v23 = v2.shuffle(v3, list(range(8)))
+                return v01.shuffle(v23, list(range(16)))
 
         def _precompute_b_lane_bases(lds_ptr):
             """Precompute per-wn B fragment lane base addresses (byte offsets).
@@ -570,36 +561,36 @@ def compile_mxscale_gemm(
                 _num_tiles = WMMA_K // PACK_FACTOR_B // 16  # 4 tiles total per N-group
                 k_subtile_off = arith.index(ks * _num_tiles * 256)
                 base0 = b_lane_bases[wn * 2] + k_subtile_off
-                v0 = lds_load_b128_raw(lds_buffer, base0)
-                v1 = lds_load_b128_raw(lds_buffer, base0 + arith.index(512))
+                v0 = fx.Vector(lds_load_b128_raw(lds_buffer, base0))
+                v1 = fx.Vector(lds_load_b128_raw(lds_buffer, base0 + arith.index(512)))
                 base1 = b_lane_bases[wn * 2 + 1] + k_subtile_off
-                v2 = lds_load_b128_raw(lds_buffer, base1)
-                v3 = lds_load_b128_raw(lds_buffer, base1 + arith.index(512))
-                v01 = vector.shuffle(v0, v1, list(range(8)))
-                v23 = vector.shuffle(v2, v3, list(range(8)))
-                return vector.shuffle(v01, v23, list(range(16)))
+                v2 = fx.Vector(lds_load_b128_raw(lds_buffer, base1))
+                v3 = fx.Vector(lds_load_b128_raw(lds_buffer, base1 + arith.index(512)))
+                v01 = v0.shuffle(v1, list(range(8)))
+                v23 = v2.shuffle(v3, list(range(8)))
+                return v01.shuffle(v23, list(range(16)))
             elif const_expr(is_a8w4):
                 # A8W4: FP4 weight, 4 tiles per N-group
                 # Interleaved stride=512: kgrp0→tiles 0,2; kgrp1→tiles 1,3
                 _num_tiles = WMMA_K // PACK_FACTOR_B // 16  # 4 tiles total
                 k_subtile_off = arith.index(ks * _num_tiles * 256)
                 base0 = b_lane_bases[wn] + k_subtile_off
-                v0 = lds_load_b128_raw(lds_buffer, base0)
-                v1 = lds_load_b128_raw(lds_buffer, base0 + arith.index(512))
-                return vector.shuffle(v0, v1, list(range(8)))
+                v0 = fx.Vector(lds_load_b128_raw(lds_buffer, base0))
+                v1 = fx.Vector(lds_load_b128_raw(lds_buffer, base0 + arith.index(512)))
+                return v0.shuffle(v1, list(range(8)))
             else:
                 # FP8: 8 tiles per N-group
                 # Interleaved stride=512: kgrp0→tiles 0,2,4,6; kgrp1→tiles 1,3,5,7
                 _num_tiles = WMMA_K // PACK_FACTOR_B // 16  # 8 tiles total
                 k_subtile_off = arith.index(ks * _num_tiles * 256)
                 base0 = b_lane_bases[wn] + k_subtile_off
-                v0 = lds_load_b128_raw(lds_buffer, base0)
-                v1 = lds_load_b128_raw(lds_buffer, base0 + arith.index(512))
-                v2 = lds_load_b128_raw(lds_buffer, base0 + arith.index(1024))
-                v3 = lds_load_b128_raw(lds_buffer, base0 + arith.index(1536))
-                v01 = vector.shuffle(v0, v1, list(range(8)))
-                v23 = vector.shuffle(v2, v3, list(range(8)))
-                return vector.shuffle(v01, v23, list(range(16)))
+                v0 = fx.Vector(lds_load_b128_raw(lds_buffer, base0))
+                v1 = fx.Vector(lds_load_b128_raw(lds_buffer, base0 + arith.index(512)))
+                v2 = fx.Vector(lds_load_b128_raw(lds_buffer, base0 + arith.index(1024)))
+                v3 = fx.Vector(lds_load_b128_raw(lds_buffer, base0 + arith.index(1536)))
+                v01 = v0.shuffle(v1, list(range(8)))
+                v23 = v2.shuffle(v3, list(range(8)))
+                return v01.shuffle(v23, list(range(16)))
 
         def _precompute_scale_lane_bases(lds_ptr, warp_base, reps,
                                          interleaved_cols):
@@ -624,12 +615,10 @@ def compile_mxscale_gemm(
             vecs = []
             for ld in range_constexpr(num_loads):
                 off = eff_base if ld == 0 else eff_base + arith.index(ld * 16)
-                vecs.append(lds_load_b128_raw(lds_buffer, off))
+                vecs.append(fx.Vector(lds_load_b128_raw(lds_buffer, off)))
             results = []
             for i in range_constexpr(reps):
-                vi = vector.extract(vecs[i // 4],
-                                    static_position=[i % 4], dynamic_position=[])
-                results.append(vi)
+                results.append(vecs[i // 4][i % 4])
             return results
 
         def load_scale_slice_b128(lds_buffer, scale_base, full_reps,
@@ -642,12 +631,10 @@ def compile_mxscale_gemm(
             vecs = []
             for ld in range_constexpr(num_loads):
                 off = eff_base if ld == 0 else eff_base + arith.index(ld * 16)
-                vecs.append(lds_load_b128_raw(lds_buffer, off))
+                vecs.append(fx.Vector(lds_load_b128_raw(lds_buffer, off)))
             results = []
             for i in range_constexpr(rep_count):
-                vi = vector.extract(vecs[i // 4],
-                                    static_position=[i % 4], dynamic_position=[])
-                results.append(vi)
+                results.append(vecs[i // 4][i % 4])
             return results
 
         def _load_b_and_scales(b_buf, b_bases, bs_buf, bs_bases,
@@ -1024,7 +1011,8 @@ def compile_mxscale_gemm(
             if const_expr(ACC_VEC_SIZE == 8):
                 return accs[acc_idx]
             indices = [vec_base + i for i in range_constexpr(8)]
-            return vector.shuffle(accs[acc_idx], accs[acc_idx], indices)
+            acc = fx.Vector(accs[acc_idx])
+            return acc.shuffle(acc, indices)
 
         def epilogue_prepare_addrs():
             addrs = []
@@ -1069,27 +1057,20 @@ def compile_mxscale_gemm(
 
         def _atomic_add_acc_vec8_to_buffer(acc_vec8, addr):
             if const_expr(_bf16_out):
-                h_vec = arith.trunc_f(T.vec(8, _out_elem_local), acc_vec8)
-                pair_ty = T.vec(2, _out_elem_local)
+                h_vec = fx.Vector(arith.trunc_f(T.vec(8, _out_elem_local), acc_vec8))
                 for pair in range_constexpr(4):
-                    e0 = vector.extract(
-                        h_vec, static_position=[pair * 2], dynamic_position=[])
-                    e1 = vector.extract(
-                        h_vec, static_position=[pair * 2 + 1], dynamic_position=[])
-                    pair_vec = vector.from_elements(pair_ty, [e0, e1])
+                    pair_vec = fx.Vector.from_elements(
+                        [h_vec[pair * 2], h_vec[pair * 2 + 1]])
                     byte_off = arith.index_cast(T.i32, addr + arith.index(pair * 4))
                     rocdl.raw_ptr_buffer_atomic_fadd(
                         pair_vec, c_rsrc, byte_off, zero_i32, zero_i32)
                 return 1
 
+            acc_vec = fx.Vector(acc_vec8)
             for half in range_constexpr(2):
                 base_addr = addr[half] if isinstance(addr, (list, tuple)) else addr
                 for vi in range_constexpr(4):
-                    val = vector.extract(
-                        acc_vec8,
-                        static_position=[half * 4 + vi],
-                        dynamic_position=[],
-                    )
+                    val = acc_vec[half * 4 + vi]
                     byte_off = arith.index_cast(
                         T.i32, (base_addr + arith.index(vi)) * arith.index(4))
                     rocdl.raw_ptr_buffer_atomic_fadd(
@@ -1219,24 +1200,28 @@ def compile_mxscale_gemm(
                 for_store=True,
             )
 
+        # TDM descriptor lane layout: dgroup0 = [predicate, lds_addr, addr_lo, addr_hi].
+        def _dg0_lane(desc, lane):
+            return fx.Vector(desc.dgroup0)[lane]
+
+        def _pack_dg0(pred, lds_addr, addr_lo, addr_hi):
+            return fx.Vector.from_elements(
+                [pred, lds_addr, addr_lo, addr_hi], fx.Int32)
+
         # Precompute LDS addresses for TDM descriptor switching
         stages_a_lds_addr = []
         stages_b_lds_addr = []
         stages_as_lds_addr = []
         stages_bs_lds_addr = []
         for i in range_constexpr(num_buffers):
-            stages_a_lds_addr.append(vector.extract(
-                make_desc_a(stages_a_mem[i], arith.index(0)).dgroup0,
-                static_position=[1], dynamic_position=[]))
-            stages_b_lds_addr.append(vector.extract(
-                make_desc_b(stages_b_mem[i], arith.index(0)).dgroup0,
-                static_position=[1], dynamic_position=[]))
-            stages_as_lds_addr.append(vector.extract(
-                make_desc_as(stages_as_mem[i], arith.index(0)).dgroup0,
-                static_position=[1], dynamic_position=[]))
-            stages_bs_lds_addr.append(vector.extract(
-                make_desc_bs(stages_bs_mem[i], arith.index(0)).dgroup0,
-                static_position=[1], dynamic_position=[]))
+            stages_a_lds_addr.append(_dg0_lane(
+                make_desc_a(stages_a_mem[i], arith.index(0)), 1))
+            stages_b_lds_addr.append(_dg0_lane(
+                make_desc_b(stages_b_mem[i], arith.index(0)), 1))
+            stages_as_lds_addr.append(_dg0_lane(
+                make_desc_as(stages_as_mem[i], arith.index(0)), 1))
+            stages_bs_lds_addr.append(_dg0_lane(
+                make_desc_bs(stages_bs_mem[i], arith.index(0)), 1))
 
         desc_a_init = make_desc_a(stages_a_mem[0], split_k_base)
         desc_b_init = make_desc_b(stages_b_mem[0], split_k_base)
@@ -1261,16 +1246,16 @@ def compile_mxscale_gemm(
                 for i in range_constexpr(num_buffers)
             ]
             active_addr_lo = _select_wave_tdm_value(
-                vector.extract(desc_a_init.dgroup0, static_position=[2], dynamic_position=[]),
-                vector.extract(desc_b_init.dgroup0, static_position=[2], dynamic_position=[]),
-                vector.extract(desc_as_init.dgroup0, static_position=[2], dynamic_position=[]),
-                vector.extract(desc_bs_init.dgroup0, static_position=[2], dynamic_position=[]),
+                _dg0_lane(desc_a_init, 2),
+                _dg0_lane(desc_b_init, 2),
+                _dg0_lane(desc_as_init, 2),
+                _dg0_lane(desc_bs_init, 2),
             )
             active_addr_hi = _select_wave_tdm_value(
-                vector.extract(desc_a_init.dgroup0, static_position=[3], dynamic_position=[]),
-                vector.extract(desc_b_init.dgroup0, static_position=[3], dynamic_position=[]),
-                vector.extract(desc_as_init.dgroup0, static_position=[3], dynamic_position=[]),
-                vector.extract(desc_bs_init.dgroup0, static_position=[3], dynamic_position=[]),
+                _dg0_lane(desc_a_init, 3),
+                _dg0_lane(desc_b_init, 3),
+                _dg0_lane(desc_as_init, 3),
+                _dg0_lane(desc_bs_init, 3),
             )
             active_dgroup1 = _select_wave_tdm_value(
                 desc_a_init.dgroup1,
@@ -1281,14 +1266,14 @@ def compile_mxscale_gemm(
             active_adv_i32 = _select_wave_tdm_value(
                 adv_a_i32, adv_b_i32, adv_as_i32, adv_bs_i32)
         else:
-            addr_lo_a = vector.extract(desc_a_init.dgroup0, static_position=[2], dynamic_position=[])
-            addr_hi_a = vector.extract(desc_a_init.dgroup0, static_position=[3], dynamic_position=[])
-            addr_lo_b = vector.extract(desc_b_init.dgroup0, static_position=[2], dynamic_position=[])
-            addr_hi_b = vector.extract(desc_b_init.dgroup0, static_position=[3], dynamic_position=[])
-            addr_lo_as = vector.extract(desc_as_init.dgroup0, static_position=[2], dynamic_position=[])
-            addr_hi_as = vector.extract(desc_as_init.dgroup0, static_position=[3], dynamic_position=[])
-            addr_lo_bs = vector.extract(desc_bs_init.dgroup0, static_position=[2], dynamic_position=[])
-            addr_hi_bs = vector.extract(desc_bs_init.dgroup0, static_position=[3], dynamic_position=[])
+            addr_lo_a = _dg0_lane(desc_a_init, 2)
+            addr_hi_a = _dg0_lane(desc_a_init, 3)
+            addr_lo_b = _dg0_lane(desc_b_init, 2)
+            addr_hi_b = _dg0_lane(desc_b_init, 3)
+            addr_lo_as = _dg0_lane(desc_as_init, 2)
+            addr_hi_as = _dg0_lane(desc_as_init, 3)
+            addr_lo_bs = _dg0_lane(desc_bs_init, 2)
+            addr_hi_bs = _dg0_lane(desc_bs_init, 3)
 
             dgroup1_a = desc_a_init.dgroup1
             dgroup1_b = desc_b_init.dgroup1
@@ -1298,22 +1283,21 @@ def compile_mxscale_gemm(
         # Prologue
         if const_expr(wave_specialized_tdm):
             for i in range_constexpr(pre_loaded):
-                dg0 = vector.from_elements(T.vec(4, T.i32), [
-                    pred_const, active_stage_lds_addr[i],
-                    active_addr_lo, active_addr_hi])
+                dg0 = _pack_dg0(pred_const, active_stage_lds_addr[i],
+                                active_addr_lo, active_addr_hi)
                 tdm_ops.tensor_load_2d(
                     tdm_ops.TDMDescriptor2D(dg0, active_dgroup1))
                 active_addr_lo = active_addr_lo + active_adv_i32
         else:
             for i in range_constexpr(pre_loaded):
-                dg0_a = vector.from_elements(T.vec(4, T.i32), [
-                    pred_const, stages_a_lds_addr[i], addr_lo_a, addr_hi_a])
-                dg0_b = vector.from_elements(T.vec(4, T.i32), [
-                    pred_const, stages_b_lds_addr[i], addr_lo_b, addr_hi_b])
-                dg0_as = vector.from_elements(T.vec(4, T.i32), [
-                    pred_const, stages_as_lds_addr[i], addr_lo_as, addr_hi_as])
-                dg0_bs = vector.from_elements(T.vec(4, T.i32), [
-                    pred_const, stages_bs_lds_addr[i], addr_lo_bs, addr_hi_bs])
+                dg0_a = _pack_dg0(pred_const, stages_a_lds_addr[i],
+                                  addr_lo_a, addr_hi_a)
+                dg0_b = _pack_dg0(pred_const, stages_b_lds_addr[i],
+                                  addr_lo_b, addr_hi_b)
+                dg0_as = _pack_dg0(pred_const, stages_as_lds_addr[i],
+                                   addr_lo_as, addr_hi_as)
+                dg0_bs = _pack_dg0(pred_const, stages_bs_lds_addr[i],
+                                   addr_lo_bs, addr_hi_bs)
 
                 issue_tdm_loads(
                     tdm_ops.TDMDescriptor2D(dg0_a, dgroup1_a),
@@ -1359,9 +1343,8 @@ def compile_mxscale_gemm(
                                     + loop_iter * arith.index(num_buffers * tile_k)
                                     + arith.index(buf_idx * tile_k)),
                         ):
-                            dg0 = vector.from_elements(T.vec(4, T.i32), [
-                                pred_const, active_stage_lds_addr[_ls],
-                                _ab[0], active_addr_hi])
+                            dg0 = _pack_dg0(pred_const, active_stage_lds_addr[_ls],
+                                            _ab[0], active_addr_hi)
                             tdm_ops.tensor_load_2d(
                                 tdm_ops.TDMDescriptor2D(dg0, active_dgroup1))
                             _ab[0] = _ab[0] + active_adv_i32
@@ -1410,18 +1393,14 @@ def compile_mxscale_gemm(
                                     + loop_iter * arith.index(num_buffers * tile_k)
                                     + arith.index(buf_idx * tile_k)),
                         ):
-                            dg0_a = vector.from_elements(T.vec(4, T.i32), [
-                                pred_const, stages_a_lds_addr[_ls],
-                                _ab[0][0], addr_hi_a])
-                            dg0_b = vector.from_elements(T.vec(4, T.i32), [
-                                pred_const, stages_b_lds_addr[_ls],
-                                _ab[1][0], addr_hi_b])
-                            dg0_as = vector.from_elements(T.vec(4, T.i32), [
-                                pred_const, stages_as_lds_addr[_ls],
-                                _ab[2][0], addr_hi_as])
-                            dg0_bs = vector.from_elements(T.vec(4, T.i32), [
-                                pred_const, stages_bs_lds_addr[_ls],
-                                _ab[3][0], addr_hi_bs])
+                            dg0_a = _pack_dg0(pred_const, stages_a_lds_addr[_ls],
+                                              _ab[0][0], addr_hi_a)
+                            dg0_b = _pack_dg0(pred_const, stages_b_lds_addr[_ls],
+                                              _ab[1][0], addr_hi_b)
+                            dg0_as = _pack_dg0(pred_const, stages_as_lds_addr[_ls],
+                                               _ab[2][0], addr_hi_as)
+                            dg0_bs = _pack_dg0(pred_const, stages_bs_lds_addr[_ls],
+                                               _ab[3][0], addr_hi_bs)
                             issue_tdm_loads(
                                 tdm_ops.TDMDescriptor2D(dg0_a, dgroup1_a),
                                 tdm_ops.TDMDescriptor2D(dg0_b, dgroup1_b),
@@ -1494,9 +1473,8 @@ def compile_mxscale_gemm(
                         _tail_addr_box = [active_addr_lo]
 
                         def _tail_mid_ws(_ls=_load_stage, _ab=_tail_addr_box):
-                            dg0 = vector.from_elements(T.vec(4, T.i32), [
-                                pred_const, active_stage_lds_addr[_ls],
-                                _ab[0], active_addr_hi])
+                            dg0 = _pack_dg0(pred_const, active_stage_lds_addr[_ls],
+                                            _ab[0], active_addr_hi)
                             tdm_ops.tensor_load_2d(
                                 tdm_ops.TDMDescriptor2D(dg0, active_dgroup1))
                             _ab[0] = _ab[0] + active_adv_i32
@@ -1507,18 +1485,14 @@ def compile_mxscale_gemm(
                                     [addr_lo_as], [addr_lo_bs]]
 
                         def _tail_mid_nws(_ls=_load_stage, _ab=_tail_ab):
-                            dg0_a = vector.from_elements(T.vec(4, T.i32), [
-                                pred_const, stages_a_lds_addr[_ls],
-                                _ab[0][0], addr_hi_a])
-                            dg0_b = vector.from_elements(T.vec(4, T.i32), [
-                                pred_const, stages_b_lds_addr[_ls],
-                                _ab[1][0], addr_hi_b])
-                            dg0_as = vector.from_elements(T.vec(4, T.i32), [
-                                pred_const, stages_as_lds_addr[_ls],
-                                _ab[2][0], addr_hi_as])
-                            dg0_bs = vector.from_elements(T.vec(4, T.i32), [
-                                pred_const, stages_bs_lds_addr[_ls],
-                                _ab[3][0], addr_hi_bs])
+                            dg0_a = _pack_dg0(pred_const, stages_a_lds_addr[_ls],
+                                              _ab[0][0], addr_hi_a)
+                            dg0_b = _pack_dg0(pred_const, stages_b_lds_addr[_ls],
+                                              _ab[1][0], addr_hi_b)
+                            dg0_as = _pack_dg0(pred_const, stages_as_lds_addr[_ls],
+                                               _ab[2][0], addr_hi_as)
+                            dg0_bs = _pack_dg0(pred_const, stages_bs_lds_addr[_ls],
+                                               _ab[3][0], addr_hi_bs)
                             issue_tdm_loads(
                                 tdm_ops.TDMDescriptor2D(dg0_a, dgroup1_a),
                                 tdm_ops.TDMDescriptor2D(dg0_b, dgroup1_b),

@@ -9,7 +9,7 @@ import flydsl.expr as fx
 
 from flydsl._mlir import ir
 from flydsl.compiler.kernel_function import CompilationContext
-from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, rocdl, tdm_ops, vector
+from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, rocdl, tdm_ops
 from flydsl.expr.arith import _to_raw as _raw
 from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
@@ -264,6 +264,8 @@ def compile_wmma_gemm_tdm(
         warp_n_base = wave_n_idx * arith.index(warp_tile_n)
 
         elem_ty = _elem_type()
+        from flydsl.expr.typing import Numeric as _Numeric
+        elem_dtype = _Numeric.from_ir_type(elem_ty)
 
         # --- Epilogue setup ---
         m_idx = arith.index_cast(T.index, i32_m.ir_value())
@@ -317,18 +319,14 @@ def compile_wmma_gemm_tdm(
             a_lane_base is precomputed by _precompute_a_lane_bases.
             ks is the K-subtile index (compile-time constant).
             """
-            vec8_ty = ir.VectorType.get([8], elem_ty)
-
             k_byte_off = arith.index(ks * WMMA_K * elem_bytes)
             off0 = a_lane_base + k_byte_off
             off1 = a_lane_base + k_byte_off + arith.index(32)
 
-            raw0 = lds_load_b128_raw(a_lds_base_idx, off0)
-            raw1 = lds_load_b128_raw(a_lds_base_idx, off1)
-            v0 = vector.bitcast(vec8_ty, raw0)
-            v1 = vector.bitcast(vec8_ty, raw1)
+            v0 = fx.Vector(lds_load_b128_raw(a_lds_base_idx, off0)).bitcast(elem_dtype)
+            v1 = fx.Vector(lds_load_b128_raw(a_lds_base_idx, off1)).bitcast(elem_dtype)
 
-            return vector.shuffle(v0, v1, list(range(16)))
+            return v0.shuffle(v1, list(range(16)))
 
         def _precompute_b_lane_bases(lds_base_idx):
             """Precompute per-wn B fragment lane base addresses.
@@ -371,8 +369,8 @@ def compile_wmma_gemm_tdm(
                 k_row_off = (ks * WMMA_K + k_half * 16) * lds_b_stride * elem_bytes
                 elem_off = b_lane_base + arith.index(k_row_off)
                 v = lds_transpose_load_raw(vec8_ty, lds_base_idx, elem_off)
-                results.append(v)
-            return vector.shuffle(results[0], results[1], list(range(16)))
+                results.append(fx.Vector(v))
+            return results[0].shuffle(results[1], list(range(16)))
 
         # --- K-subtile compute (A-streaming pipeline) ---
         def _load_b_frags(b_lds_buffer, b_bases, ks):
@@ -654,23 +652,29 @@ def compile_wmma_gemm_tdm(
                 for_store=True,
             )
 
+        # TDM descriptor lane layout: dgroup0 = [predicate, lds_addr, addr_lo, addr_hi].
+        def _dg0_lane(desc, lane):
+            return fx.Vector(desc.dgroup0)[lane]
+
+        def _pack_dg0(pred, lds_addr, addr_lo, addr_hi):
+            return fx.Vector.from_elements(
+                [pred, lds_addr, addr_lo, addr_hi], fx.Int32)
+
         # --- TDM descriptor addr_lo management (FP4-style) ---
         stages_a_lds_addr = []
         stages_b_lds_addr = []
         for i in range_constexpr(num_buffers):
-            stages_a_lds_addr.append(vector.extract(
-                make_desc_a(stages_a_mem[i], arith.index(0)).dgroup0,
-                static_position=[1], dynamic_position=[]))
-            stages_b_lds_addr.append(vector.extract(
-                make_desc_b(stages_b_mem[i], arith.index(0)).dgroup0,
-                static_position=[1], dynamic_position=[]))
+            stages_a_lds_addr.append(_dg0_lane(
+                make_desc_a(stages_a_mem[i], arith.index(0)), 1))
+            stages_b_lds_addr.append(_dg0_lane(
+                make_desc_b(stages_b_mem[i], arith.index(0)), 1))
 
         desc_a_init = make_desc_a(stages_a_mem[0], arith.index(0))
         desc_b_init = make_desc_b(stages_b_mem[0], arith.index(0))
 
-        adv_a_i32 = arith.constant(tile_k * elem_bytes, type=T.i32)
-        adv_b_i32 = arith.constant(tile_k * N * elem_bytes, type=T.i32)
-        pred_const = arith.constant(1, type=T.i32)
+        adv_a_i32 = fx.Int32(tile_k * elem_bytes)
+        adv_b_i32 = fx.Int32(tile_k * N * elem_bytes)
+        pred_const = fx.Int32(1)
 
         if const_expr(wave_specialized_tdm):
             tdm_wave_id = rocdl.wave_id()
@@ -687,43 +691,40 @@ def compile_wmma_gemm_tdm(
                 for i in range_constexpr(num_buffers)
             ]
             active_addr_lo = _select_wave_tdm_value(
-                vector.extract(desc_a_init.dgroup0, static_position=[2], dynamic_position=[]),
-                vector.extract(desc_b_init.dgroup0, static_position=[2], dynamic_position=[]))
+                _dg0_lane(desc_a_init, 2), _dg0_lane(desc_b_init, 2))
             active_addr_hi = _select_wave_tdm_value(
-                vector.extract(desc_a_init.dgroup0, static_position=[3], dynamic_position=[]),
-                vector.extract(desc_b_init.dgroup0, static_position=[3], dynamic_position=[]))
+                _dg0_lane(desc_a_init, 3), _dg0_lane(desc_b_init, 3))
             active_dgroup1 = _select_wave_tdm_value(
                 desc_a_init.dgroup1, desc_b_init.dgroup1)
             active_adv_i32 = _select_wave_tdm_value(adv_a_i32, adv_b_i32)
         else:
-            addr_lo_a = vector.extract(desc_a_init.dgroup0, static_position=[2], dynamic_position=[])
-            addr_hi_a = vector.extract(desc_a_init.dgroup0, static_position=[3], dynamic_position=[])
-            addr_lo_b = vector.extract(desc_b_init.dgroup0, static_position=[2], dynamic_position=[])
-            addr_hi_b = vector.extract(desc_b_init.dgroup0, static_position=[3], dynamic_position=[])
+            addr_lo_a = _dg0_lane(desc_a_init, 2)
+            addr_hi_a = _dg0_lane(desc_a_init, 3)
+            addr_lo_b = _dg0_lane(desc_b_init, 2)
+            addr_hi_b = _dg0_lane(desc_b_init, 3)
             dgroup1_a = desc_a_init.dgroup1
             dgroup1_b = desc_b_init.dgroup1
 
         # --- Prologue ---
         if const_expr(wave_specialized_tdm):
             for i in range_constexpr(pre_loaded):
-                dg0 = vector.from_elements(T.vec(4, T.i32), [
-                    pred_const, active_stage_lds_addr[i],
-                    active_addr_lo, active_addr_hi])
+                dg0 = _pack_dg0(pred_const, active_stage_lds_addr[i],
+                                active_addr_lo, active_addr_hi)
                 tdm_ops.tensor_load_2d(
                     tdm_ops.TDMDescriptor2D(dg0, active_dgroup1))
-                active_addr_lo = arith.addi(active_addr_lo, active_adv_i32)
+                active_addr_lo = (active_addr_lo + active_adv_i32)
         else:
             for i in range_constexpr(pre_loaded):
-                dg0_a = vector.from_elements(T.vec(4, T.i32), [
-                    pred_const, stages_a_lds_addr[i], addr_lo_a, addr_hi_a])
-                dg0_b = vector.from_elements(T.vec(4, T.i32), [
-                    pred_const, stages_b_lds_addr[i], addr_lo_b, addr_hi_b])
+                dg0_a = _pack_dg0(pred_const, stages_a_lds_addr[i],
+                                  addr_lo_a, addr_hi_a)
+                dg0_b = _pack_dg0(pred_const, stages_b_lds_addr[i],
+                                  addr_lo_b, addr_hi_b)
                 issue_tdm_loads(
                     tdm_ops.TDMDescriptor2D(dg0_a, dgroup1_a),
                     tdm_ops.TDMDescriptor2D(dg0_b, dgroup1_b),
                     wave_specialized=wave_specialized_tdm)
-                addr_lo_a = arith.addi(addr_lo_a, adv_a_i32)
-                addr_lo_b = arith.addi(addr_lo_b, adv_b_i32)
+                addr_lo_a = (addr_lo_a + adv_a_i32)
+                addr_lo_b = (addr_lo_b + adv_b_i32)
 
         pipeline_fence(outstanding=TDM_LOADS_PER_STEP * (num_buffers - 2),
                        use_cluster=use_cluster)
@@ -755,12 +756,11 @@ def compile_wmma_gemm_tdm(
                             _k_off=(loop_iter * arith.index(num_buffers * tile_k)
                                     + arith.index(buf_idx * tile_k)),
                         ):
-                            dg0 = vector.from_elements(T.vec(4, T.i32), [
-                                pred_const, active_stage_lds_addr[_ls],
-                                _ab[0], active_addr_hi])
+                            dg0 = _pack_dg0(pred_const, active_stage_lds_addr[_ls],
+                                            _ab[0], active_addr_hi)
                             tdm_ops.tensor_load_2d(
                                 tdm_ops.TDMDescriptor2D(dg0, active_dgroup1))
-                            _ab[0] = arith.addi(_ab[0], active_adv_i32)
+                            _ab[0] = (_ab[0] + active_adv_i32)
                             _l2_prefetch(_k_off)
 
                         rocdl.sched_barrier(0)
@@ -800,18 +800,16 @@ def compile_wmma_gemm_tdm(
                             _k_off=(loop_iter * arith.index(num_buffers * tile_k)
                                     + arith.index(buf_idx * tile_k)),
                         ):
-                            dg0_a = vector.from_elements(T.vec(4, T.i32), [
-                                pred_const, stages_a_lds_addr[_ls],
-                                _ab[0][0], addr_hi_a])
-                            dg0_b = vector.from_elements(T.vec(4, T.i32), [
-                                pred_const, stages_b_lds_addr[_ls],
-                                _ab[1][0], addr_hi_b])
+                            dg0_a = _pack_dg0(pred_const, stages_a_lds_addr[_ls],
+                                              _ab[0][0], addr_hi_a)
+                            dg0_b = _pack_dg0(pred_const, stages_b_lds_addr[_ls],
+                                              _ab[1][0], addr_hi_b)
                             issue_tdm_loads(
                                 tdm_ops.TDMDescriptor2D(dg0_a, dgroup1_a),
                                 tdm_ops.TDMDescriptor2D(dg0_b, dgroup1_b),
                                 wave_specialized=wave_specialized_tdm)
-                            _ab[0][0] = arith.addi(_ab[0][0], adv_a_i32)
-                            _ab[1][0] = arith.addi(_ab[1][0], adv_b_i32)
+                            _ab[0][0] = (_ab[0][0] + adv_a_i32)
+                            _ab[1][0] = (_ab[1][0] + adv_b_i32)
                             _l2_prefetch(_k_off)
 
                         rocdl.sched_barrier(0)
@@ -869,30 +867,27 @@ def compile_wmma_gemm_tdm(
                         _tail_addr_box = [active_addr_lo]
 
                         def _tail_mid_ws(_ls=_load_stage, _ab=_tail_addr_box):
-                            dg0 = vector.from_elements(T.vec(4, T.i32), [
-                                pred_const, active_stage_lds_addr[_ls],
-                                _ab[0], active_addr_hi])
+                            dg0 = _pack_dg0(pred_const, active_stage_lds_addr[_ls],
+                                            _ab[0], active_addr_hi)
                             tdm_ops.tensor_load_2d(
                                 tdm_ops.TDMDescriptor2D(dg0, active_dgroup1))
-                            _ab[0] = arith.addi(_ab[0], active_adv_i32)
+                            _ab[0] = (_ab[0] + active_adv_i32)
 
                         _tail_mid_cb = _tail_mid_ws
                     else:
                         _tail_ab = [[addr_lo_a], [addr_lo_b]]
 
                         def _tail_mid_nws(_ls=_load_stage, _ab=_tail_ab):
-                            dg0_a = vector.from_elements(T.vec(4, T.i32), [
-                                pred_const, stages_a_lds_addr[_ls],
-                                _ab[0][0], addr_hi_a])
-                            dg0_b = vector.from_elements(T.vec(4, T.i32), [
-                                pred_const, stages_b_lds_addr[_ls],
-                                _ab[1][0], addr_hi_b])
+                            dg0_a = _pack_dg0(pred_const, stages_a_lds_addr[_ls],
+                                              _ab[0][0], addr_hi_a)
+                            dg0_b = _pack_dg0(pred_const, stages_b_lds_addr[_ls],
+                                              _ab[1][0], addr_hi_b)
                             issue_tdm_loads(
                                 tdm_ops.TDMDescriptor2D(dg0_a, dgroup1_a),
                                 tdm_ops.TDMDescriptor2D(dg0_b, dgroup1_b),
                                 wave_specialized=wave_specialized_tdm)
-                            _ab[0][0] = arith.addi(_ab[0][0], adv_a_i32)
-                            _ab[1][0] = arith.addi(_ab[1][0], adv_b_i32)
+                            _ab[0][0] = (_ab[0][0] + adv_a_i32)
+                            _ab[1][0] = (_ab[1][0] + adv_b_i32)
 
                         _tail_mid_cb = _tail_mid_nws
 

@@ -63,3 +63,25 @@ def cvt_pk_bf16_f32(src_a_f32, src_b_f32):
         "=v,v,v",
         has_side_effects=False,
     )
+
+
+def s_prefetch_inst_burst(num_pages: int = 10, page_bytes: int = 4096):
+    """gfx1250: prefetch ``num_pages`` cache lines of instructions ahead of PC.
+
+    Sets HW_REG_WAVE_MODE bit 8 (allow s_prefetch) then issues
+    ``s_prefetch_inst_pc_rel offset, s0, 31`` for ``offset = 0, page_bytes,
+    2*page_bytes, ...``.  Used by GEMM kernels to warm the I-cache before the
+    main loop starts so the first few iterations don't stall on instruction
+    fetch.
+
+    Wraps the inline-asm sequence so callers do not need to import the raw
+    ``llvm`` dialect.
+    """
+    from ..._mlir.dialects import llvm as _llvm
+
+    lines = ["s_setreg_imm32_b32 hwreg(HW_REG_WAVE_MODE, 8, 1), 1"]
+    for pg in range(num_pages):
+        lines.append(f"s_prefetch_inst_pc_rel {pg * page_bytes}, s0, 31")
+    _llvm.inline_asm(
+        None, [], "\n".join(lines), "", has_side_effects=True,
+    )
