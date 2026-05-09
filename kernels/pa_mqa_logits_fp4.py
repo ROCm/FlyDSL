@@ -140,6 +140,9 @@ def compute_varctx_schedule(
             for n in range(next_n):
                 rows.append([b * next_n + n, start, count, ctx_list[b]])
 
+    if not rows:  # all-zero context — launch one no-op CTA
+        rows = [[0, 0, 0, 0]]
+
     return (
         safe,
         torch.tensor(rows, dtype=torch.int32, device=device).reshape(-1, 4).contiguous(),
@@ -182,9 +185,7 @@ def build_pa_mqa_logits_fp4_module(
     multiple of `num_warps`. Each warp processes
     N_TILES_PER_WARP = (block_k / 16) / num_warps N-tiles per chunk.
     """
-    num_warps_k = num_warps
-    block_threads_k = num_warps_k * WARP_SIZE
-    next_n_k = next_n
+    block_threads_k = num_warps * WARP_SIZE
     head_dim_packed = head_dim // 2
     m_tiles = heads // MFMA_M
     k_tiles = head_dim // 128  # outer K-loop iters (MFMA K=128)
@@ -194,13 +195,13 @@ def build_pa_mqa_logits_fp4_module(
 
     N_TILES = block_k // MFMA_N
     assert (
-        N_TILES % num_warps_k == 0
-    ), f"block_k={block_k} → N_TILES={N_TILES} must be multiple of num_warps={num_warps_k}"
-    N_TILES_PER_WARP = N_TILES // num_warps_k
+        N_TILES % num_warps == 0
+    ), f"block_k={block_k} → N_TILES={N_TILES} must be multiple of num_warps={num_warps}"
+    N_TILES_PER_WARP = N_TILES // num_warps
 
     # Q/Q_scale layout: [B, NEXT_N, H, D/2 or D/32]
     _stride_q_next_n = heads * head_dim_packed  # bytes per next_n slice
-    _stride_q_batch = next_n_k * _stride_q_next_n  # bytes per batch
+    _stride_q_batch = next_n * _stride_q_next_n  # bytes per batch
     # Weights/output addressed by batch_packed (= b*NEXT_N + n) directly.
     _stride_w_batch = heads
     _stride_bt = max_blocks_per_seq
@@ -236,15 +237,19 @@ def build_pa_mqa_logits_fp4_module(
             v = buffer_ops.buffer_load(qs_rsrc_, qs_off_i32_, vec_width=QS_DW, dtype=T.i32)
             return [vector.extract(v, static_position=[i]) for i in range(QS_DW)]
 
-    def _load_phys_impl(bt_rsrc_, pid_b_, chunk_start_, c_i32_arg_, warp_id_, lane_mod_16_):
-        """Load phys_block per N tile; several N tiles may share one KV page."""
-        phys_list = []
-        for nt in range_constexpr(N_TILES_PER_WARP):
-            ni = warp_id_ * fx.Int32(N_TILES_PER_WARP) + fx.Int32(nt)
-            token_global = (chunk_start_ + c_i32_arg_) * fx.Int32(block_k) + ni * fx.Int32(MFMA_N) + lane_mod_16_
-            bi = token_global // kv_block_size
-            phys_list.append(buffer_ops.buffer_load(bt_rsrc_, pid_b_ * _stride_bt + bi, vec_width=1, dtype=T.i32))
-        return phys_list
+    # Phys block-table loader: dispatched on N_TILES_PER_WARP at build time so
+    # the kernel body sees one shape (no scf.if). vec_width=1 returns a scalar
+    # (no vector to extract from); vec_width>1 returns a vector — extract.
+    if N_TILES_PER_WARP == 1:
+
+        def _phys_to_list(phys_v):
+            return [phys_v]
+
+    else:
+
+        def _phys_to_list(phys_v):
+            return [vector.extract(phys_v, static_position=[nt])
+                    for nt in range(N_TILES_PER_WARP)]
 
     @flyc.kernel
     def pa_mqa_logits_fp4_kernel(
@@ -294,8 +299,8 @@ def build_pa_mqa_logits_fp4_module(
         # the divide-by-1 to identity and the mod-by-1 to 0. NEXT_N=power-of-2
         # ⇒ shift/and. No Python-if here because @flyc.kernel rewrites all
         # `if` to scf.if (variables defined inside become branch-local).
-        pid_b = batch_packed // fx.Int32(next_n_k)
-        pid_next_n = batch_packed % fx.Int32(next_n_k)
+        pid_b = batch_packed // fx.Int32(next_n)
+        pid_next_n = batch_packed % fx.Int32(next_n)
 
         # ── Q load (HOISTED out of chunk loop — reused across chunks) ──
         # Q layout: [B, NEXT_N, H, D/2]. FP4 (cbsz=4) per-K-chunk layout is
@@ -344,7 +349,7 @@ def build_pa_mqa_logits_fp4_module(
         q_scale_ops = []
         for k_tile in range_constexpr(k_tiles):
             qs_off_i32 = (
-                pid_b * fx.Int32(next_n_k * k_tiles * _stride_qs_ktile_i32)
+                pid_b * fx.Int32(next_n * k_tiles * _stride_qs_ktile_i32)
                 + pid_next_n * fx.Int32(k_tiles * _stride_qs_ktile_i32)
                 + fx.Int32(k_tile * _stride_qs_ktile_i32)
                 + lane_div_16 * fx.Int32(16 * QS_DW)
@@ -354,26 +359,17 @@ def build_pa_mqa_logits_fp4_module(
             q_scale_ops.append([qs_dws[mi // 4] >> fx.Int32(8 * (mi % 4)) for mi in range(m_tiles)])
 
         # Weights (HOISTED). With A=Q (M=head), per-thread output covers heads
-        # head = mi_idx*16 + lane_div_16*4 + elem. Only lanes 0..3 within each
-        # lane_div_16 group are needed to materialize the vec4 weight, but using
-        # lane_mod_16 & 3 lets every lane issue one scalar load without a
-        # runtime branch, then ds_bpermute gathers elem 0..3 from the first four
-        # lanes in the group. This avoids the previous 16x duplicate vec4 loads.
+        # head = mi_idx*16 + lane_div_16*4 + elem. One vec4 buffer_load per
+        # mi_idx — within a lane_div_16 group all 16 lanes compute the same
+        # address (only lane_div_16 matters), so the hardware coalesces to a
+        # single 16-byte transaction per group. weights shape: [B*NEXT_N, H]
+        # — addressed by batch_packed directly.
         w_per_lane = []  # w_per_lane[mi_idx] = vec<4xf32>, indexed by elem
-        lane_raw = lane_id if not hasattr(lane_id, "ir_value") else lane_id.ir_value()
-        c4_i32 = arith.constant(4, type=T.i32)
         for mi_idx in range_constexpr(m_tiles):
-            w_elem = lane_mod_16 & 3
-            w_off = batch_packed * _stride_w_batch + mi_idx * MFMA_M + lane_div_16 * fx.Int32(4) + w_elem
-            w_scalar = buffer_ops.buffer_load(w_rsrc, w_off, vec_width=1, dtype=T.f32)
-            w_i32 = arith.ArithValue(w_scalar).bitcast(T.i32)
-            w_vals = []
-            for elem in range_constexpr(4):
-                src_lane = lane_div_16 * fx.Int32(16) + fx.Int32(elem)
-                src_byte = arith.MulIOp(src_lane.ir_value(), c4_i32).result
-                elem_i32 = rocdl.ds_bpermute(T.i32, src_byte, w_i32)
-                w_vals.append(arith.ArithValue(elem_i32).bitcast(T.f32))
-            w_per_lane.append(vector.from_elements(T.f32x4, w_vals))
+            w_off = batch_packed * _stride_w_batch + mi_idx * MFMA_M + lane_div_16 * fx.Int32(4)
+            w_vec4 = buffer_ops.buffer_load(
+                w_rsrc, w_off, vec_width=4, dtype=T.f32)
+            w_per_lane.append(w_vec4)
 
         # ── Step 3: prologue + N-1 prefetch loop + epilogue ──
         # Per chunk: each warp handles N_TILES_PER_WARP=2 N-tiles (32 tokens).
@@ -385,8 +381,23 @@ def build_pa_mqa_logits_fp4_module(
         # phys → kv_off → kv_load.
 
         def _load_phys(c_i32_arg):
-            """Load phys_block for chunk c, all N_TILES_PER_WARP N-tiles."""
-            return _load_phys_impl(bt_rsrc, pid_b, chunk_start, c_i32_arg, warp_id, lane_mod_16)
+            """Load phys_block for chunk c, all N_TILES_PER_WARP N-tiles in
+            one wider buffer_load. The N-tiles' first tokens land in
+            consecutive page slots (each nt advances MFMA_N=16 tokens, which
+            equals kv_block_size=16), so bi_base..bi_base+N_TILES_PER_WARP-1
+            are consecutive. -32% kernel cycle vs N_TILES_PER_WARP scalar
+            loads — see commit be8f998b."""
+            ni_base = warp_id * fx.Int32(N_TILES_PER_WARP)
+            token_global_base = (
+                (chunk_start + c_i32_arg) * fx.Int32(block_k)
+                + ni_base * fx.Int32(MFMA_N)
+                + lane_mod_16
+            )
+            bi_base = token_global_base // kv_block_size
+            phys_vec = buffer_ops.buffer_load(
+                bt_rsrc, pid_b * _stride_bt + bi_base,
+                vec_width=N_TILES_PER_WARP, dtype=T.i32)
+            return _phys_to_list(phys_vec)
 
         def _prefetch_chunk(c_i32_arg, phys_list):
             """Issue KV+scale loads for chunk c using pre-loaded phys_list.
@@ -499,6 +510,9 @@ def build_pa_mqa_logits_fp4_module(
                 # for that lane_mod_16's token. lane_mod_16 stays unchanged so
                 # each lane keeps its own token. Both crossings need
                 # ds_bpermute (DPP can't reach across the row boundary).
+                lane_raw = lane_id if not hasattr(lane_id, "ir_value") else lane_id.ir_value()
+                c4_i32 = arith.constant(4, type=T.i32)
+
                 def _bperm_xor_add(val, sh):
                     sh_c = arith.constant(sh, type=T.i32)
                     peer_lane = arith.XOrIOp(lane_raw, sh_c).result
@@ -524,7 +538,7 @@ def build_pa_mqa_logits_fp4_module(
                 oob_off = fx.Int32(-1)
                 is_writer = lane_div_16 < fx.Int32(1)
                 out_token = token_base + lane_mod_16
-                mask_off = fx.Int32(next_n_k - 1) - pid_next_n
+                mask_off = fx.Int32(next_n - 1) - pid_next_n
                 in_ctx = (out_token + mask_off) < context_len
                 out_off_real = batch_packed * stride_out_batch + out_token
                 out_off = in_ctx.select(out_off_real, oob_off)
@@ -536,17 +550,15 @@ def build_pa_mqa_logits_fp4_module(
         # (2) Pre-load phys for chunk 1 (carried into the loop's first iter
         #     so KV[1] prefetch doesn't have to wait on a fresh phys load).
         #
-        # Lookahead phys loads may be unused by the epilogue, but the loads
-        # themselves still must stay in-bounds for single-chunk CTAs.
+        # Lookahead phys/KV loads past chunk_count are silently dropped by the
+        # buffer SRD (max_size=True) and their results are never consumed —
+        # no clamping needed.
         N_KV = k_tiles * N_TILES_PER_WARP
         last_c_i32 = chunk_count - fx.Int32(1)
 
-        def _clamp_prefetch_c(c_i32_arg):
-            return (c_i32_arg < chunk_count).select(c_i32_arg, last_c_i32)
-
         phys_pre = _load_phys(c0_i32)
         kv_pre, kvs_pre = _prefetch_chunk(c0_i32, phys_pre)
-        phys_next_pre = _load_phys(_clamp_prefetch_c(fx.Int32(1)))
+        phys_next_pre = _load_phys(fx.Int32(1))
 
         # === Main loop: chunk_count - 1 iterations ===
         # Carry layout (flat list):
@@ -574,7 +586,7 @@ def build_pa_mqa_logits_fp4_module(
             kv_next, kvs_next = _prefetch_chunk(c_next_i32, phys_next_list)
 
             # Issue phys load for chunk c+2 last.
-            phys_next_next_list = _load_phys(_clamp_prefetch_c(c_next_next_i32))
+            phys_next_next_list = _load_phys(c_next_next_i32)
 
             results = yield (list(kv_next) + list(kvs_next) + list(phys_next_next_list))
 

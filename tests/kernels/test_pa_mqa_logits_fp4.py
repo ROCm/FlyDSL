@@ -543,6 +543,13 @@ def test_pa_mqa_logits_fp4_qfp4_kvfp4(
 _PERF_SUMMARY = []
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _perf_summary_at_end():
+    yield
+    if _PERF_SUMMARY:
+        _print_perf_summary()
+
+
 def _print_perf_summary():
     print("\n" + "=" * 96)
     print("Perf summary (flydsl-qfp4/kvfp4 across shapes)")
