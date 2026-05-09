@@ -10,6 +10,7 @@ import pkgutil
 import threading
 import types
 from contextlib import nullcontext
+from dataclasses import dataclass
 from functools import lru_cache, partial
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set
@@ -33,8 +34,12 @@ from .kernel_function import (
 from .protocol import construct_from_ir_values, get_ir_types
 
 
-@lru_cache(maxsize=1)
 def _flydsl_key() -> str:
+    return _flydsl_key_cached(_use_external_binary_codegen(), env.compile.llvm_dir)
+
+
+@lru_cache(maxsize=8)
+def _flydsl_key_cached(use_external_binary: bool, llvm_dir: str) -> str:
     """Compute a hash fingerprint of the entire FlyDSL compiler toolchain.
 
     Covers:
@@ -92,9 +97,19 @@ def _flydsl_key() -> str:
                         h.update(chunk)
                 contents.append(h.hexdigest())
 
+    contents.append(f"external_binary_codegen={use_external_binary}")
+    if use_external_binary:
+        from .external_llvm import external_llvm_fingerprint
+
+        contents.append(external_llvm_fingerprint(llvm_dir or None))
+
     key = f"flydsl:{flydsl.__version__}:{backend.hash()}-" + "-".join(contents)
     log().debug(f"flydsl_key: {hashlib.sha256(key.encode()).hexdigest()[:16]}")
     return key
+
+
+def _use_external_binary_codegen() -> bool:
+    return bool(env.compile.llvm_dir.strip())
 
 
 def _get_underlying_func(obj):
@@ -404,14 +419,41 @@ def _extract_llvm_ir(module: ir.Module):
         return None
 
 
-def _pipeline_fragments(backend) -> tuple:
-    """Return the MLIR pass-pipeline fragments and llvm_options for *backend*."""
+@dataclass
+class PipelineConfig:
+    """Result of :func:`_pipeline_fragments_for_mode`."""
+
+    fragments: list
+    pre_binary: Optional[list]
+    binary_fragment: Optional[str]
+    llvm_opts: Optional[dict]
+    external: bool
+
+
+def _pipeline_fragments_for_mode(backend) -> PipelineConfig:
+    """Return pipeline configuration including optional external split."""
     from .kernel_function import CompilationContext
 
     hints = CompilationContext.get_compile_hints()
-    fragments = backend.pipeline_fragments(compile_hints=hints)
     llvm_opts = hints.get("llvm_options")
-    return fragments, llvm_opts
+    if _use_external_binary_codegen():
+        pre_binary_fragments, binary_fragment = backend.external_binary_pipeline_fragments(compile_hints=hints)
+        return PipelineConfig(
+            fragments=[*pre_binary_fragments, binary_fragment],
+            pre_binary=pre_binary_fragments,
+            binary_fragment=binary_fragment,
+            llvm_opts=llvm_opts,
+            external=True,
+        )
+
+    fragments = backend.pipeline_fragments(compile_hints=hints)
+    return PipelineConfig(
+        fragments=fragments,
+        pre_binary=None,
+        binary_fragment=None,
+        llvm_opts=llvm_opts,
+        external=False,
+    )
 
 
 def _format_link_lib_options(link_libs: list) -> str:
@@ -435,6 +477,15 @@ def _format_link_lib_options(link_libs: list) -> str:
     return " ".join(opts)
 
 
+def _run_pipeline(module: ir.Module, fragments: list, *, verifier: bool, print_after_all: bool) -> None:
+    """Parse and run a comma-joined pass pipeline on *module*."""
+    pipeline = f"builtin.module({','.join(fragments)})"
+    pm = PassManager.parse(pipeline)
+    pm.enable_verifier(verifier)
+    pm.enable_ir_printing(print_after_all=print_after_all)
+    pm.run(module.operation)
+
+
 class MlirCompiler:
     @classmethod
     def compile(
@@ -445,7 +496,18 @@ class MlirCompiler:
         backend = get_backend(arch=arch)
 
         module = ir.Module.parse(module.operation.get_asm(enable_debug_info=env.debug.enable_debug_info))
-        fragments, llvm_opts = _pipeline_fragments(backend)
+        cfg = _pipeline_fragments_for_mode(backend)
+        fragments = cfg.fragments
+        pre_binary_fragments = cfg.pre_binary
+        binary_fragment = cfg.binary_fragment
+        llvm_opts = cfg.llvm_opts
+        external_binary = cfg.external
+
+        if external_binary and link_libs:
+            raise RuntimeError(
+                "FLYDSL_COMPILE_LLVM_DIR external codegen does not support extern link_libs yet; "
+                "use embedded codegen for kernels that require #fly.explicit_module."
+            )
 
         if link_libs:
             link_opt = _format_link_lib_options(link_libs)
@@ -489,7 +551,8 @@ class MlirCompiler:
                 asm_for_isa = None
                 llir = None
                 stage_num_base = 1
-                for idx, frag in enumerate(fragments):
+                dump_fragments = pre_binary_fragments if external_binary else fragments
+                for idx, frag in enumerate(dump_fragments):
                     if frag.strip().startswith("gpu-module-to-binary"):
                         llir = _extract_llvm_ir(module)
 
@@ -506,7 +569,28 @@ class MlirCompiler:
                     if frag.strip() == "reconcile-unrealized-casts":
                         asm_for_isa = stage_asm
 
-                next_stage = stage_num_base + len(fragments)
+                next_stage = stage_num_base + len(dump_fragments)
+                if external_binary:
+                    from .external_llvm import run_external_binary_codegen
+
+                    llir = _extract_llvm_ir(module)
+                    stage_name = f"{next_stage:02d}_external_binary"
+                    run_external_binary_codegen(
+                        module,
+                        binary_fragment,
+                        llvm_options=llvm_opts,
+                        work_dir=dump_dir,
+                        stage_prefix=stage_name,
+                    )
+                    module.operation.verify()
+                    print(f"[flydsl.compile] dump {stage_name}_input -> {dump_dir / f'{stage_name}_input.mlir'}")
+                    print(
+                        f"[flydsl.compile] dump {stage_name}_external_output -> "
+                        f"{dump_dir / f'{stage_name}_external_output.mlir'}"
+                    )
+                    print(f"[flydsl.compile] dump {stage_name}_output -> {dump_dir / f'{stage_name}_output.mlir'}")
+                    next_stage += 1
+
                 if llir is not None:
                     ll_name = f"{next_stage:02d}_llvm_ir"
                     (dump_dir / f"{ll_name}.ll").write_text(llir, encoding="utf-8")
@@ -514,22 +598,50 @@ class MlirCompiler:
                     next_stage += 1
 
                 if asm_for_isa is not None:
-                    isa_stage = f"{next_stage:02d}_final_isa"
-                    isa_out = _dump_isa(
-                        dump_dir=dump_dir,
-                        ctx=module.context,
-                        asm=asm_for_isa,
-                        verify=env.debug.enable_verifier,
-                        stage_name=isa_stage,
-                    )
-                    if isa_out is not None:
-                        print(f"[flydsl.compile] dump {isa_stage} -> {isa_out}")
+                    if not external_binary:
+                        isa_stage = f"{next_stage:02d}_final_isa"
+                        isa_out = _dump_isa(
+                            dump_dir=dump_dir,
+                            ctx=module.context,
+                            asm=asm_for_isa,
+                            verify=env.debug.enable_verifier,
+                            stage_name=isa_stage,
+                        )
+                        if isa_out is not None:
+                            print(f"[flydsl.compile] dump {isa_stage} -> {isa_out}")
+                    else:
+                        print("[flydsl.compile] ISA dump skipped (external LLVM mode)")
             else:
-                pipeline = f"builtin.module({','.join(fragments)})"
-                pm = PassManager.parse(pipeline)
-                pm.enable_verifier(env.debug.enable_verifier)
-                pm.enable_ir_printing(print_after_all=env.debug.print_after_all)
-                pm.run(module.operation)
+                if external_binary:
+                    from .external_llvm import run_external_binary_codegen
+
+                    _run_pipeline(
+                        module,
+                        pre_binary_fragments,
+                        verifier=env.debug.enable_verifier,
+                        print_after_all=env.debug.print_after_all,
+                    )
+
+                    if env.debug.dump_asm:
+                        raise RuntimeError(
+                            "FLYDSL_DEBUG_DUMP_ASM is not supported with "
+                            "FLYDSL_COMPILE_LLVM_DIR external codegen; use FLYDSL_DUMP_IR=1 "
+                            "to inspect pre-binary/final MLIR, or run external LLVM tools directly for ISA dumps."
+                        )
+
+                    run_external_binary_codegen(
+                        module,
+                        binary_fragment,
+                        llvm_options=llvm_opts,
+                    )
+                    module.operation.verify()
+                else:
+                    _run_pipeline(
+                        module,
+                        fragments,
+                        verifier=env.debug.enable_verifier,
+                        print_after_all=env.debug.print_after_all,
+                    )
 
         return module
 
@@ -752,16 +864,31 @@ class JitFunction:
             return
         self._manager_owner_cls = owner_cls
         self.manager_key = _jit_function_cache_key(self.func, owner_cls=owner_cls)
-        if not env.runtime.enable_cache:
+
+        run_only = env.runtime.run_only
+        if run_only and env.debug.dump_ir:
+            raise ValueError(
+                "FLYDSL_RUNTIME_RUN_ONLY=1 is incompatible with FLYDSL_DUMP_IR=1: "
+                "run-only mode skips the MLIR pass pipeline that would produce IR dumps."
+            )
+
+        need_cache = env.runtime.enable_cache or run_only
+        if not need_cache:
             self.cache_manager = None
             return
+
         cache_root = env.runtime.cache_dir
-        if cache_root:
-            cache_dir = Path(cache_root) / f"{self.func.__name__}_{self.manager_key}"
-            self.cache_manager = JitCacheManager(cache_dir)
-            self.cache_manager.load_all()
-        else:
+        if not cache_root:
+            if run_only:
+                raise RuntimeError(
+                    "FLYDSL_RUNTIME_RUN_ONLY=1 but FLYDSL_RUNTIME_CACHE_DIR is empty."
+                )
             self.cache_manager = None
+            return
+
+        cache_dir = Path(cache_root) / f"{self.func.__name__}_{self.manager_key}"
+        self.cache_manager = JitCacheManager(cache_dir)
+        self.cache_manager.load_all()
 
     @staticmethod
     def _arg_cache_sig(arg, *, runtime=False):
@@ -877,7 +1004,10 @@ class JitFunction:
             return call_state(args_tuple)
 
         # Normal path: check in-process cache first, then optional disk cache.
-        use_disk_cache = env.runtime.enable_cache
+        # In run_only mode the disk cache is read regardless of enable_cache, since
+        # AOT-only execution treats the on-disk cache as the deployment artifact.
+        run_only = env.runtime.run_only
+        use_disk_cache = env.runtime.enable_cache or run_only
         allow_disk_cache = use_disk_cache and cache_key not in self._extern_linkage_keys
         cached_func = self._mem_cache.get(cache_key)
         if cached_func is None and allow_disk_cache and not env.debug.dump_ir:
@@ -913,6 +1043,17 @@ class JitFunction:
                 _, jit_args, _, _ = convert_to_jit_arguments(sig, bound)
                 _ensure_stream_arg(jit_args)
                 return cached_func(*jit_args)
+
+        if run_only:
+            cdir = getattr(self.cache_manager, "cache_dir", None)
+            cdir_exists = cdir.exists() if cdir is not None else False
+            raise RuntimeError(
+                f"FLYDSL_RUNTIME_RUN_ONLY=1 but no AOT cache for "
+                f"{self.func.__name__}: "
+                f"manager_key={self.manager_key}, "
+                f"cache_key={self._cache_key_to_str(cache_key)[:96]}..., "
+                f"cache_dir={cdir} (exists={cdir_exists})"
+            )
 
         _hints_ctx = CompilationContext.compile_hints(self.compile_hints) if self.compile_hints else nullcontext()
 
@@ -966,6 +1107,11 @@ class JitFunction:
             link_libs = list(comp_ctx.link_libs) if comp_ctx.link_libs else None
             post_load_processors = list(comp_ctx.post_load_processors)
             extern_linked = bool(link_libs or post_load_processors)
+            if extern_linked and _use_external_binary_codegen():
+                raise RuntimeError(
+                    "FLYDSL_COMPILE_LLVM_DIR external codegen does not support extern-linked kernels yet; "
+                    "use embedded codegen for kernels that require #fly.explicit_module."
+                )
             if extern_linked:
                 self._extern_linkage_keys.add(cache_key)
                 # Switch to explicit Python-side module loading so

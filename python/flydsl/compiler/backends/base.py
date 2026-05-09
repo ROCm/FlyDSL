@@ -3,7 +3,7 @@
 
 from abc import ABCMeta, abstractmethod
 from dataclasses import dataclass
-from typing import List
+from typing import List, Tuple
 
 
 @dataclass(frozen=True)
@@ -70,6 +70,15 @@ class BaseBackend(metaclass=ABCMeta):
         and ``maxnreg`` (from ``CompilationContext.get_compile_hints()``).
         """
         ...
+
+    def external_binary_pipeline_fragments(self, *, compile_hints: dict) -> Tuple[List[str], str]:
+        """Split the pipeline for external device binary code generation.
+
+        Returns ``(pre_binary_fragments, binary_fragment)``.  The former runs
+        in the bundled MLIR runtime; the latter is run by the external LLVM
+        toolchain to produce device code object bytes.
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not support external LLVM codegen")
 
     @abstractmethod
     def gpu_module_targets(self) -> List[str]:

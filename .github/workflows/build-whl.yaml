@@ -24,7 +24,7 @@ on:
 
 jobs:
   build:
-    runs-on: linux-flydsl-mi325-1
+    runs-on: build-only-flydsl
     outputs:
       wheel_names: ${{ steps.collect-wheels.outputs.wheel_names }}
     permissions:

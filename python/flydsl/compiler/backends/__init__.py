@@ -54,6 +54,10 @@ def _make_backend(name: str, arch: str) -> BaseBackend:
     environment variables change after the first call.
     """
     if name not in _registry:
+        if name in _import_errors:
+            raise ImportError(
+                f"Compile backend '{name}' failed to import"
+            ) from _import_errors[name]
         available = ", ".join(sorted(_registry)) or "(none)"
         raise ValueError(
             f"Unknown compile backend '{name}'. Registered backends: {available}"
@@ -81,6 +85,10 @@ def get_backend(name: Optional[str] = None, *, arch: str = "") -> BaseBackend:
     if not arch:
         backend_cls = _registry.get(name)
         if backend_cls is None:
+            if name in _import_errors:
+                raise ImportError(
+                    f"Compile backend '{name}' failed to import"
+                ) from _import_errors[name]
             available = ", ".join(sorted(_registry)) or "(none)"
             raise ValueError(
                 f"Unknown compile backend '{name}'. Registered backends: {available}"
@@ -89,10 +97,74 @@ def get_backend(name: Optional[str] = None, *, arch: str = "") -> BaseBackend:
     return _make_backend(name, arch)
 
 
-# -- auto-register built-in backends ------------------------------------
-from .rocm import RocmBackend  # noqa: E402
+# -- auto-discover built-in backends (Triton-style directory scan) --------
+_import_errors: Dict[str, Exception] = {}
 
-register_backend("rocm", RocmBackend)
+
+def _discover_backends() -> None:
+    """Scan this package for concrete :class:`BaseBackend` subclasses.
+
+    Import errors are stored in ``_import_errors`` and surfaced when the
+    user actually requests that backend (see ``_make_backend``).
+    """
+    import importlib
+    from pathlib import Path
+
+    root = Path(__file__).parent
+    for item in sorted(root.iterdir()):
+        name = item.stem
+        if name.startswith("_") or name == "base":
+            continue
+        if not (item.suffix == ".py" or (item.is_dir() and (item / "__init__.py").exists())):
+            continue
+        try:
+            mod = importlib.import_module(f".{name}", __package__)
+            for attr in dir(mod):
+                cls = getattr(mod, attr)
+                if (
+                    isinstance(cls, type)
+                    and issubclass(cls, BaseBackend)
+                    and cls is not BaseBackend
+                    and not getattr(cls, "__abstractmethods__", None)
+                ):
+                    register_backend(name, cls, force=False)
+                    break
+        except Exception as exc:
+            _import_errors[name] = exc
+
+
+_discover_backends()
+
+
+def _discover_entry_point_backends() -> None:
+    """Discover third-party backends via ``entry_points(group='flydsl.backends')``.
+
+    Each entry point should point to a concrete :class:`BaseBackend` subclass.
+    The entry point *name* becomes the backend name. Built-in backends
+    (already registered by ``_discover_backends``) take precedence.
+    """
+    try:
+        from importlib.metadata import entry_points
+    except ImportError:
+        return
+    eps = entry_points()
+    # Python 3.12+: eps.select(); 3.9-3.11: dict-like
+    if hasattr(eps, "select"):
+        backend_eps = eps.select(group="flydsl.backends")
+    else:
+        backend_eps = eps.get("flydsl.backends", [])
+    for ep in backend_eps:
+        name = ep.name.lower()
+        if name in _registry:
+            continue  # built-in takes precedence
+        try:
+            cls = ep.load()
+            register_backend(name, cls, force=False)
+        except Exception as exc:
+            _import_errors[name] = exc
+
+
+_discover_entry_point_backends()
 
 __all__ = [
     "BaseBackend",
