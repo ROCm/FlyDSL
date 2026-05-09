@@ -739,3 +739,51 @@ def preshuffle_b_16x16(b: Tensor, rows: int, cols: int) -> Tensor:
     b = b.view(rows // 16, 16, cols // 16, 16)
     b = b.permute(0, 2, 1, 3).contiguous()
     return b.view(rows, cols)
+
+
+def preshuffle_a_scale_for_wmma(
+    scale: Tensor,
+    M: int,
+    K: int,
+    tile_m: int,
+    m_warp: int,
+    scale_block_k: int = 128,
+    scale_k_per_tile: int = 1,
+) -> Tensor:
+    """Preshuffle A scale from DeepSeek-native ``[M, K/scale_block_k]`` (fp32, row-major)
+    into a wave32-friendly layout that lets each lane fetch
+    ``scale_k_per_tile * wmma_m_rep`` contiguous fp32 with one ``buffer_load`` call.
+
+    Output layout (flat fp32, total M * K/scale_block_k elements):
+        [N_wg_m, N_tile_k, m_warp, 16(lane16), scale_k_per_tile, wmma_m_rep]
+
+    where ``wmma_m_rep = (tile_m // m_warp) // 16`` and
+    ``N_wg_m = M // tile_m``, ``N_tile_k = (K // scale_block_k) // scale_k_per_tile``.
+
+    Production deployment note
+    --------------------------
+    A is an activation tensor that changes every inference step, so this
+    standalone preshuffle adds host-side cost per call (a permute + contiguous
+    on the GPU, ~5-10 μs including launch overhead).
+
+    For production inference the preshuffle should be **fused into the
+    activation quantization kernel** that produces the FP8 activation and its
+    FP32 scale: the quant kernel writes ``x_scale`` directly in the
+    wave32-friendly layout above, so the kernel-side ``vec_width=4``
+    coalesced ``buffer_load`` benefit (~70 μs / inference for typical
+    DeepSeek prefill shapes) becomes pure profit with **zero extra cost**.
+    """
+    K_scale = K // scale_block_k
+    wmma_m_rep = (tile_m // m_warp) // 16
+    N_wg_m = M // tile_m
+    N_tile_k = K_scale // scale_k_per_tile
+    assert M % tile_m == 0, f"M={M} not divisible by tile_m={tile_m}"
+    assert K_scale % scale_k_per_tile == 0, (
+        f"K_scale={K_scale} not divisible by scale_k_per_tile={scale_k_per_tile}")
+    assert (tile_m // m_warp) % 16 == 0, (
+        f"warp_tile_m={tile_m // m_warp} must be a multiple of 16")
+    s = scale.contiguous().view(
+        N_wg_m, m_warp, wmma_m_rep, 16, N_tile_k, scale_k_per_tile)
+    # Permute to: [N_wg_m, N_tile_k, m_warp, 16(lane16), scale_k_per_tile, wmma_m_rep]
+    s = s.permute(0, 4, 1, 3, 5, 2).contiguous()
+    return s.view(-1)

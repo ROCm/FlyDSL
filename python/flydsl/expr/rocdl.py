@@ -152,6 +152,11 @@ _ods_wmma_f32_16x16x16_fp8_bf8 = globals().get("wmma_f32_16x16x16_fp8_bf8", None
 _ods_wmma_f32_16x16x16_bf8_fp8 = globals().get("wmma_f32_16x16x16_bf8_fp8", None)
 _ods_wmma_f32_16x16x16_bf8_bf8 = globals().get("wmma_f32_16x16x16_bf8_bf8", None)
 _ods_wmma_i32_16x16x32_iu4 = globals().get("wmma_i32_16x16x32_iu4", None)
+# gfx1250 raw K=128 fp8/bf8 WMMA (no scale).
+_ods_wmma_f32_16x16x128_fp8_fp8 = globals().get("wmma_f32_16x16x128_fp8_fp8", None)
+_ods_wmma_f32_16x16x128_fp8_bf8 = globals().get("wmma_f32_16x16x128_fp8_bf8", None)
+_ods_wmma_f32_16x16x128_bf8_fp8 = globals().get("wmma_f32_16x16x128_bf8_fp8", None)
+_ods_wmma_f32_16x16x128_bf8_bf8 = globals().get("wmma_f32_16x16x128_bf8_bf8", None)
 mask_mfma = 0x008
 mask_vmem_rd = 0x020
 mask_dsrd = 0x100
@@ -323,6 +328,60 @@ def wmma_f32_16x16x16_bf8_bf8(result_type, operands, *, loc=None, ip=None):
         raise AttributeError("ROCDL op not found: wmma_f32_16x16x16_bf8_bf8")
     ops = [_unwrap_wmma_operand(v, loc=loc) for v in operands]
     return _ods_wmma_f32_16x16x16_bf8_bf8(result_type, ops, loc=loc, ip=ip).result
+
+
+# --- Raw K=128 fp8/bf8 WMMA (no scale, gfx1250 wave32) ---
+
+
+def wmma_f32_16x16x128_fp8_fp8(result_type, operands, *,
+                                modC=None, reuseA=None, reuseB=None,
+                                loc=None, ip=None):
+    """V_WMMA_F32_16X16X128_FP8_FP8 raw (no scale) for gfx1250 wave32.
+
+    Operands: [A: vec<8xi32>, B: vec<8xi32>, C: vec<8xf32>].  Returns vec<8xf32>.
+    """
+    if _ods_wmma_f32_16x16x128_fp8_fp8 is None:
+        raise AttributeError("ROCDL op not found: wmma_f32_16x16x128_fp8_fp8")
+    a, b, c = [_unwrap_wmma_operand(v, loc=loc) for v in operands]
+    return _ods_wmma_f32_16x16x128_fp8_fp8(
+        result_type, a, b, c,
+        modC=modC, reuseA=reuseA, reuseB=reuseB, loc=loc, ip=ip).result
+
+
+def wmma_f32_16x16x128_fp8_bf8(result_type, operands, *,
+                                modC=None, reuseA=None, reuseB=None,
+                                loc=None, ip=None):
+    """V_WMMA_F32_16X16X128_FP8_BF8 raw (no scale) for gfx1250 wave32."""
+    if _ods_wmma_f32_16x16x128_fp8_bf8 is None:
+        raise AttributeError("ROCDL op not found: wmma_f32_16x16x128_fp8_bf8")
+    a, b, c = [_unwrap_wmma_operand(v, loc=loc) for v in operands]
+    return _ods_wmma_f32_16x16x128_fp8_bf8(
+        result_type, a, b, c,
+        modC=modC, reuseA=reuseA, reuseB=reuseB, loc=loc, ip=ip).result
+
+
+def wmma_f32_16x16x128_bf8_fp8(result_type, operands, *,
+                                modC=None, reuseA=None, reuseB=None,
+                                loc=None, ip=None):
+    """V_WMMA_F32_16X16X128_BF8_FP8 raw (no scale) for gfx1250 wave32."""
+    if _ods_wmma_f32_16x16x128_bf8_fp8 is None:
+        raise AttributeError("ROCDL op not found: wmma_f32_16x16x128_bf8_fp8")
+    a, b, c = [_unwrap_wmma_operand(v, loc=loc) for v in operands]
+    return _ods_wmma_f32_16x16x128_bf8_fp8(
+        result_type, a, b, c,
+        modC=modC, reuseA=reuseA, reuseB=reuseB, loc=loc, ip=ip).result
+
+
+def wmma_f32_16x16x128_bf8_bf8(result_type, operands, *,
+                                modC=None, reuseA=None, reuseB=None,
+                                loc=None, ip=None):
+    """V_WMMA_F32_16X16X128_BF8_BF8 raw (no scale) for gfx1250 wave32."""
+    if _ods_wmma_f32_16x16x128_bf8_bf8 is None:
+        raise AttributeError("ROCDL op not found: wmma_f32_16x16x128_bf8_bf8")
+    a, b, c = [_unwrap_wmma_operand(v, loc=loc) for v in operands]
+    return _ods_wmma_f32_16x16x128_bf8_bf8(
+        result_type, a, b, c,
+        modC=modC, reuseA=reuseA, reuseB=reuseB, loc=loc, ip=ip).result
 
 
 # --- f16/bf16 output variants (OPSEL: operands include op_sel flag) ---
@@ -623,6 +682,10 @@ __all__ = [
     "wmma_f32_16x16x16_bf8_fp8",
     "wmma_f32_16x16x16_bf8_bf8",
     "wmma_i32_16x16x32_iu4",
+    "wmma_f32_16x16x128_fp8_fp8",        # gfx1250 raw K=128 fp8 WMMA (no scale)
+    "wmma_f32_16x16x128_fp8_bf8",
+    "wmma_f32_16x16x128_bf8_fp8",
+    "wmma_f32_16x16x128_bf8_bf8",
     "wmma_scale_f32_16x16x128_f8f6f4",   # gfx1250 WMMA_SCALE 16x16x128 (FP4/FP6/FP8)
     "wmma_scale_f32_32x16x128_f4",        # gfx1250 WMMA_SCALE 32x16x128 (FP4 only)
     # Matrix operations - SMFMAC (Sparse Matrix FMA)

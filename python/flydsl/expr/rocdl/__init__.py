@@ -21,6 +21,11 @@ from . import cdna4 as cdna4
 # Keep references to ODS-generated builders so we can wrap them without losing access.
 _ods_wmma_scale_f32_16x16x128_f8f6f4 = globals().get("wmma_scale_f32_16x16x128_f8f6f4", None)
 _ods_wmma_scale_f32_32x16x128_f4 = globals().get("wmma_scale_f32_32x16x128_f4", None)
+# gfx1250 raw K=128 fp8/bf8 WMMA (no scale) — used by blockscale_gemm_gfx1250.
+_ods_wmma_f32_16x16x128_fp8_fp8 = globals().get("wmma_f32_16x16x128_fp8_fp8", None)
+_ods_wmma_f32_16x16x128_fp8_bf8 = globals().get("wmma_f32_16x16x128_fp8_bf8", None)
+_ods_wmma_f32_16x16x128_bf8_fp8 = globals().get("wmma_f32_16x16x128_bf8_fp8", None)
+_ods_wmma_f32_16x16x128_bf8_bf8 = globals().get("wmma_f32_16x16x128_bf8_bf8", None)
 _ods_wave_id = wave_id  # ODS: wave_id(res, ...) -> i32
 _ods_cluster_workgroup_id_x = cluster_workgroup_id_x
 _ods_cluster_workgroup_id_y = cluster_workgroup_id_y
@@ -193,6 +198,61 @@ def mfma_scale_f32_16x16x128_f8f6f4(result_type, operands, *, loc=None, ip=None)
         loc=loc,
         ip=ip,
     ).result
+
+
+@traced_op
+def wmma_f32_16x16x128_fp8_fp8(result_type, operands, *,
+                                modC=None, reuseA=None, reuseB=None,
+                                loc=None, ip=None):
+    """V_WMMA_F32_16X16X128_FP8_FP8 raw (no scale) for gfx1250 wave32.
+
+    Operands: [A: vec<8xi32>, B: vec<8xi32>, C: vec<8xf32>].  Returns vec<8xf32>.
+    """
+    if _ods_wmma_f32_16x16x128_fp8_fp8 is None:
+        raise AttributeError("ROCDL op not found: wmma_f32_16x16x128_fp8_fp8")
+    a, b, c = [_unwrap_mfma_operand(v, loc=loc) for v in operands]
+    return _ods_wmma_f32_16x16x128_fp8_fp8(
+        result_type, a, b, c,
+        modC=modC, reuseA=reuseA, reuseB=reuseB, loc=loc, ip=ip).result
+
+
+@traced_op
+def wmma_f32_16x16x128_fp8_bf8(result_type, operands, *,
+                                modC=None, reuseA=None, reuseB=None,
+                                loc=None, ip=None):
+    """V_WMMA_F32_16X16X128_FP8_BF8 raw (no scale) for gfx1250 wave32."""
+    if _ods_wmma_f32_16x16x128_fp8_bf8 is None:
+        raise AttributeError("ROCDL op not found: wmma_f32_16x16x128_fp8_bf8")
+    a, b, c = [_unwrap_mfma_operand(v, loc=loc) for v in operands]
+    return _ods_wmma_f32_16x16x128_fp8_bf8(
+        result_type, a, b, c,
+        modC=modC, reuseA=reuseA, reuseB=reuseB, loc=loc, ip=ip).result
+
+
+@traced_op
+def wmma_f32_16x16x128_bf8_fp8(result_type, operands, *,
+                                modC=None, reuseA=None, reuseB=None,
+                                loc=None, ip=None):
+    """V_WMMA_F32_16X16X128_BF8_FP8 raw (no scale) for gfx1250 wave32."""
+    if _ods_wmma_f32_16x16x128_bf8_fp8 is None:
+        raise AttributeError("ROCDL op not found: wmma_f32_16x16x128_bf8_fp8")
+    a, b, c = [_unwrap_mfma_operand(v, loc=loc) for v in operands]
+    return _ods_wmma_f32_16x16x128_bf8_fp8(
+        result_type, a, b, c,
+        modC=modC, reuseA=reuseA, reuseB=reuseB, loc=loc, ip=ip).result
+
+
+@traced_op
+def wmma_f32_16x16x128_bf8_bf8(result_type, operands, *,
+                                modC=None, reuseA=None, reuseB=None,
+                                loc=None, ip=None):
+    """V_WMMA_F32_16X16X128_BF8_BF8 raw (no scale) for gfx1250 wave32."""
+    if _ods_wmma_f32_16x16x128_bf8_bf8 is None:
+        raise AttributeError("ROCDL op not found: wmma_f32_16x16x128_bf8_bf8")
+    a, b, c = [_unwrap_mfma_operand(v, loc=loc) for v in operands]
+    return _ods_wmma_f32_16x16x128_bf8_bf8(
+        result_type, a, b, c,
+        modC=modC, reuseA=reuseA, reuseB=reuseB, loc=loc, ip=ip).result
 
 
 def wmma_scale_f32_16x16x128_f8f6f4(

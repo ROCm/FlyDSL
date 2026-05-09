@@ -241,6 +241,77 @@ def store_acc_vec8_to_buffer(acc_vec8, c_rsrc, addr,
         return 2
 
 
+def validate_tdm_descriptor_2d(
+    name, *, tile_shape, strides, tensor_shape, num_warps, elem_bytes,
+):
+    """Validate a 2D TDM descriptor's per-warp tile / stride / extent against
+    the descriptor's bit-width limits encoded in tdm_ops.make_tensor_descriptor_2d.
+
+    Field bit-widths (per gfx1250 TDM ISA, see python/flydsl/expr/rocdl/tdm_ops.py):
+      - tile_d0/tile_d1  : 16-bit each → per-warp tile dim ≤ 65535 elements
+      - tdim0/tdim1      : 32-bit each → per-warp tensor extent ≤ 2^32 - 1 elements
+      - stride0          : 32-bit       → outermost stride (in elements) ≤ 2^32 - 1
+
+    Raises ValueError with a descriptive message when any bound is exceeded.
+
+    Args:
+        name: Descriptor name for error messages (e.g. "A", "B", "AScale").
+        tile_shape:   (outer_tile, inner_tile)  in elements.
+        strides:      (outer_stride, inner_stride)  in elements.
+        tensor_shape: (outer_size, inner_size)  in elements (full tensor extent).
+        num_warps: Total warps that cooperatively load this descriptor (= 1 for
+                   wave_specialized_tdm).
+        elem_bytes: Element size in bytes (used for 32-bit stride byte check).
+    """
+    from flydsl.expr.rocdl.tdm_ops import compute_warp_distribution
+
+    outer_tile, inner_tile = tile_shape
+    outer_stride, _inner_stride = strides
+    _outer_size, _inner_size = tensor_shape
+
+    warps_per_dim, block_per_warp = compute_warp_distribution(
+        [outer_tile, inner_tile], num_warps,
+    )
+    bpw_outer, bpw_inner = block_per_warp
+
+    # tile_d0 = bpw_inner, tile_d1 = bpw_outer; both encoded in 16 bits.
+    if bpw_inner > 0xFFFF:
+        raise ValueError(
+            f"TDM descriptor {name!r} per-warp inner tile = {bpw_inner} elements "
+            f"exceeds 16-bit limit (65535). Reduce inner tile dim "
+            f"(inner_tile={inner_tile}, after split across {warps_per_dim[1]} "
+            f"warps along inner) or increase num_warps along inner.")
+    if bpw_outer > 0xFFFF:
+        raise ValueError(
+            f"TDM descriptor {name!r} per-warp outer tile = {bpw_outer} elements "
+            f"exceeds 16-bit limit (65535). Reduce outer tile dim "
+            f"(outer_tile={outer_tile}, after split across {warps_per_dim[0]} "
+            f"warps along outer) or increase num_warps along outer.")
+
+    # outermost stride (in elements) must fit 32-bit.
+    if outer_stride > 0xFFFFFFFF:
+        raise ValueError(
+            f"TDM descriptor {name!r} outermost stride = {outer_stride} elements "
+            f"exceeds 32-bit limit (2^32 - 1). Reduce K (or other outer-dim "
+            f"factor); for FP8 + B 16x16 preshuffle this caps K ≈ "
+            f"{(0xFFFFFFFF // 16):,} elements.")
+
+    # Total byte stride (informational, also caps reachable address per row).
+    stride_bytes = outer_stride * elem_bytes
+    if stride_bytes > 0xFFFFFFFF:
+        raise ValueError(
+            f"TDM descriptor {name!r} outer stride in bytes = {stride_bytes} "
+            f"({outer_stride} elem × {elem_bytes} bytes/elem) exceeds 32-bit; "
+            f"this is unreachable for the TDM hw addr generator.")
+
+    # Per-warp tensor extents go into tdim0/tdim1 (32-bit). bpw values are also
+    # what gets encoded as tdim0/tdim1 in the current tdm_ops impl.
+    if bpw_inner > 0xFFFFFFFF or bpw_outer > 0xFFFFFFFF:
+        raise ValueError(
+            f"TDM descriptor {name!r} per-warp extents bpw_inner={bpw_inner} "
+            f"bpw_outer={bpw_outer} exceed 32-bit tdim limit.")
+
+
 __all__ = [
     # LDS helpers
     "get_lds_memref",
@@ -257,4 +328,6 @@ __all__ = [
     # Epilogue
     "store_acc_vec8_to_lds",
     "store_acc_vec8_to_buffer",
+    # Validation
+    "validate_tdm_descriptor_2d",
 ]
