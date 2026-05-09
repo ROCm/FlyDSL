@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """WMMA GEMM using TDM tests for gfx1250.
 
-Kernel implementation lives in `kernels/wmma_gemm_gfx1250.py`.
+Kernel implementation lives in `kernels/hgemm_gfx1250.py`.
 This file is the correctness harness.
 """
 
@@ -25,7 +25,7 @@ import torch
 pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
 
 from flydsl.runtime.device import get_rocm_arch
-from kernels.wmma_gemm_gfx1250 import compile_wmma_gemm_tdm
+from kernels.hgemm_gfx1250 import compile_wmma_gemm_tdm
 from tests.test_common import verify_output
 
 

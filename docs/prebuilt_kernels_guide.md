@@ -313,9 +313,10 @@ What operation do you need?
 | `kernels/custom_all_reduce.py` | Multi-GPU all-reduce |
 | `kernels/rdna_f16_gemm.py` | RDNA FP16 GEMM |
 | `kernels/rdna_fp8_preshuffle_gemm.py` | RDNA FP8 GEMM |
-| `kernels/gemm_common_gfx1250.py` | GFX1250 GEMM common |
-| `kernels/gemm_fp8fp4_gfx1250.py` | GFX1250 FP8/FP4 GEMM |
-| `kernels/wmma_gemm_gfx1250.py` | GFX1250 WMMA GEMM |
+| `kernels/gemm_common_gfx1250.py` | GFX1250 GEMM common helpers (LDS, pipeline fence, TDM, epilogue store) |
+| `kernels/hgemm_gfx1250.py` | GFX1250 FP16/BF16 WMMA GEMM (HGEMM) |
+| `kernels/mxscale_gemm_gfx1250.py` | GFX1250 OCP MX (E8M0 1×32 scale) GEMM: MXFP4 / MXFP8 / A8W4 |
+| `kernels/blockscale_gemm_gfx1250.py` | GFX1250 DeepSeek-style blockscale FP8 GEMM (FP32 scale, 1×128 act / 128×128 weight) |
 | `kernels/mfma_epilogues.py` | MFMA epilogue helpers |
 | `kernels/mfma_preshuffle_pipeline.py` | Preshuffle data movement and layout utilities |
 | `kernels/pipeline_utils.py` | Pipeline utility helpers |
@@ -340,8 +341,9 @@ What operation do you need?
 | `tests/kernels/test_fused_rope_cache.py` | Fused RoPE + KV cache |
 | `tests/kernels/test_allreduce.py` | Multi-GPU all-reduce |
 | `tests/kernels/test_rdna_gemm.py` | RDNA GEMM |
-| `tests/kernels/test_gemm_fp8fp4_gfx1250.py` | GFX1250 FP8/FP4 GEMM |
-| `tests/kernels/test_wmma_gemm_gfx1250.py` | GFX1250 WMMA GEMM |
+| `tests/kernels/test_hgemm_gfx1250.py` | GFX1250 FP16/BF16 WMMA GEMM (HGEMM) |
+| `tests/kernels/test_mxscale_gemm_gfx1250.py` | GFX1250 OCP MX (MXFP4/MXFP8/A8W4) GEMM |
+| `tests/kernels/test_blockscale_gemm_gfx1250.py` | GFX1250 DeepSeek blockscale FP8 GEMM |
 | `tests/kernels/test_vec_add.py` | Vector addition |
 | `tests/kernels/test_quant.py` | Quantization utilities |
 | `tests/kernels/benchmark_common.py` | Shared benchmark infrastructure |

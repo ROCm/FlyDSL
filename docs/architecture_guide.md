@@ -93,9 +93,10 @@ FlyDSL/
 │   ├── custom_all_reduce.py          # Multi-GPU all-reduce
 │   ├── rdna_f16_gemm.py              # RDNA FP16 GEMM
 │   ├── rdna_fp8_preshuffle_gemm.py   # RDNA FP8 GEMM
-│   ├── gemm_common_gfx1250.py        # GFX1250 GEMM common
-│   ├── gemm_fp8fp4_gfx1250.py        # GFX1250 FP8/FP4 GEMM
-│   ├── wmma_gemm_gfx1250.py          # GFX1250 WMMA GEMM
+│   ├── gemm_common_gfx1250.py        # GFX1250 GEMM common helpers
+│   ├── hgemm_gfx1250.py          # GFX1250 FP16/BF16 WMMA GEMM (HGEMM)
+│   ├── mxscale_gemm_gfx1250.py       # GFX1250 OCP MX (E8M0 scale) GEMM: MXFP4/MXFP8/A8W4
+│   ├── blockscale_gemm_gfx1250.py    # GFX1250 DeepSeek blockscale FP8 GEMM (FP32 scale)
 │   ├── mfma_epilogues.py             # MFMA epilogue helpers
 │   ├── mfma_preshuffle_pipeline.py   # Preshuffle helpers for MFMA kernels
 │   ├── pipeline_utils.py             # Pipeline utility helpers

@@ -365,8 +365,9 @@ See `examples/` for more examples including tiled copy (`02-tiledCopy.py`), tile
 | **Fused RoPE** | `test_fused_rope_cache.py` | Fused RoPE + KV cache |
 | **AllReduce** | `test_allreduce.py` | Multi-GPU all-reduce |
 | **RDNA GEMM** | `test_rdna_gemm.py` | RDNA FP16/FP8 GEMM |
-| **GFX1250 GEMM** | `test_gemm_fp8fp4_gfx1250.py` | GFX1250 FP8/FP4 GEMM |
-| **WMMA GEMM** | `test_wmma_gemm_gfx1250.py` | GFX1250 WMMA GEMM |
+| **GFX1250 HGEMM** | `test_hgemm_gfx1250.py` | GFX1250 FP16/BF16 WMMA GEMM |
+| **GFX1250 MX GEMM** | `test_mxscale_gemm_gfx1250.py` | GFX1250 OCP MX (MXFP4/MXFP8/A8W4) GEMM |
+| **GFX1250 Blockscale GEMM** | `test_blockscale_gemm_gfx1250.py` | GFX1250 DeepSeek blockscale FP8 GEMM |
 | **VecAdd** | `test_vec_add.py` | Basic vector addition |
 | **Quantization** | `test_quant.py` | Quantization utilities |
 

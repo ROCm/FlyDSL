@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Unified MXFP4/MXFP8/A8W4 GEMM correctness tests for gfx1250.
 
-Kernel implementation: kernels/gemm_fp8fp4_gfx1250.py
+Kernel implementation: kernels/mxscale_gemm_gfx1250.py
 """
 
 import os
@@ -24,7 +24,7 @@ import torch
 pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
 
 from flydsl.runtime.device import get_rocm_arch
-from kernels.gemm_fp8fp4_gfx1250 import compile_mxscale_gemm
+from kernels.mxscale_gemm_gfx1250 import compile_mxscale_gemm
 from tests.kernels.utils import fp4_utils
 
 
