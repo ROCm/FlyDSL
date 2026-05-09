@@ -1,0 +1,218 @@
+name: Build Custom LLVM Tools
+
+on:
+  workflow_dispatch:
+    inputs:
+      llvm_ref:
+        description: 'LLVM branch, tag, or commit SHA (leave empty to use custom-llvm-tools.json)'
+        type: string
+        default: ''
+      release_type:
+        description: 'S3 bucket type for upload'
+        type: string
+        default: 'devreleases'
+      upload_s3:
+        description: 'Upload tarball to S3'
+        type: boolean
+        default: true
+
+jobs:
+  build:
+    runs-on: build-only-flydsl
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          path: flydsl
+
+      - name: Build manylinux Docker image
+        run: |
+          ROCM_VERSION=7.2
+          IMAGE="flydsl/manylinux_2_28:rocm${ROCM_VERSION}"
+          if docker image inspect "${IMAGE}" >/dev/null 2>&1; then
+            echo "Reusing existing image: ${IMAGE}"
+          else
+            docker build \
+              --build-arg ROCM_VERSION="${ROCM_VERSION}" \
+              -t "${IMAGE}" \
+              - < flydsl/.github/workflows/Dockerfile.manylinux_2_28
+          fi
+          echo "MANYLINUX_IMAGE=${IMAGE}" >> $GITHUB_ENV
+
+      - name: Start build container
+        run: |
+          docker run -dt --network=host --user root \
+            -v "${GITHUB_WORKSPACE}/flydsl:/flydsl" \
+            --ipc=host --shm-size 16g \
+            -w /flydsl \
+            --name llvm_build \
+            "${MANYLINUX_IMAGE}"
+          docker exec llvm_build bash -c "python3 -m pip install -q nanobind"
+          docker exec llvm_build bash -c "git config --global --add safe.directory '*'"
+
+      - name: Resolve LLVM ref
+        id: llvm-ref
+        env:
+          LLVM_REF_INPUT: ${{ inputs.llvm_ref }}
+        run: |
+          set -euo pipefail
+          CONFIG="flydsl/thirdparty/custom-llvm-tools.json"
+          LLVM_REMOTE="https://github.com/llvm/llvm-project.git"
+
+          if [ -n "${LLVM_REF_INPUT}" ]; then
+            REF="${LLVM_REF_INPUT}"
+          elif [ -f "${CONFIG}" ]; then
+            REF="$(python3 -c "import json; print(json.load(open('${CONFIG}'))['llvm_ref'])")"
+            LLVM_REMOTE="$(python3 -c "import json; print(json.load(open('${CONFIG}')).get('llvm_remote', '${LLVM_REMOTE}'))")"
+          else
+            REF="$(tr -d '[:space:]' < flydsl/thirdparty/llvm-hash.txt)"
+          fi
+
+          # Resolve branch/tag to commit SHA for stable cache key
+          if [[ "${REF}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            COMMIT="${REF}"
+          else
+            echo "Resolving ref '${REF}' via ls-remote on ${LLVM_REMOTE} ..."
+            COMMIT="$(git ls-remote "${LLVM_REMOTE}" "${REF}" | head -1 | cut -f1)"
+            if [ -z "${COMMIT}" ]; then
+              echo "::error::Could not resolve LLVM ref '${REF}' from ${LLVM_REMOTE}"
+              exit 1
+            fi
+            echo "Resolved '${REF}' -> ${COMMIT}"
+          fi
+
+          SAFE_REF=$(printf '%s' "${COMMIT}" | sed 's|[^A-Za-z0-9_.-]|-|g')
+          echo "ref=${REF}" >> "$GITHUB_OUTPUT"
+          echo "commit=${COMMIT}" >> "$GITHUB_OUTPUT"
+          echo "safe_ref=${SAFE_REF}" >> "$GITHUB_OUTPUT"
+          echo "remote=${LLVM_REMOTE}" >> "$GITHUB_OUTPUT"
+          echo "LLVM ref: ${REF}  commit: ${COMMIT}  remote: ${LLVM_REMOTE}"
+
+      - name: Restore cached MLIR install tarball
+        id: mlir-cache
+        uses: actions/cache@v4
+        with:
+          path: mlir_install.tgz
+          key: mlir-tools-${{ steps.llvm-ref.outputs.safe_ref }}-${{ hashFiles('flydsl/scripts/build_llvm.sh') }}
+
+      - name: Use cached MLIR install tarball
+        if: steps.mlir-cache.outputs.cache-hit == 'true'
+        run: |
+          docker cp mlir_install.tgz llvm_build:/tmp/mlir_install.tgz
+          docker exec llvm_build bash -c "mkdir -p /llvm-project && tar -xzf /tmp/mlir_install.tgz -C /llvm-project"
+
+      - name: Build LLVM
+        if: steps.mlir-cache.outputs.cache-hit != 'true'
+        env:
+          LLVM_REF: ${{ steps.llvm-ref.outputs.ref }}
+          LLVM_REMOTE: ${{ steps.llvm-ref.outputs.remote }}
+        run: |
+          docker exec \
+            -e "LLVM_REF=${LLVM_REF}" \
+            -e "LLVM_REMOTE=${LLVM_REMOTE}" \
+            llvm_build bash -c "cd /flydsl && bash scripts/build_llvm.sh"
+          docker cp llvm_build:/llvm-project/mlir_install.tgz ./mlir_install.tgz || true
+
+      - name: Package LLVM tools
+        env:
+          LLVM_SHA: ${{ steps.llvm-ref.outputs.commit }}
+        run: |
+          set -euo pipefail
+          CONFIG="flydsl/thirdparty/custom-llvm-tools.json"
+          LLVM_SHA_SHORT="${LLVM_SHA:0:12}"
+          if [ -f "${CONFIG}" ]; then
+            ARCHIVE_NAME="$(python3 -c "import json; print(json.load(open('${CONFIG}')).get('archive_name', 'flydsl-mlir-tools'))")"
+          else
+            ARCHIVE_NAME="flydsl-mlir-tools"
+          fi
+          TOOL_ARCHIVE="${ARCHIVE_NAME}-${LLVM_SHA_SHORT}-manylinux_2_28-x86_64.tar.gz"
+          echo "Packaging ${TOOL_ARCHIVE}"
+
+          BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          mkdir -p flydsl/dist
+          docker exec llvm_build bash -c "
+            set -euo pipefail
+            test -x /llvm-project/mlir_install/bin/mlir-opt
+            cd /llvm-project/mlir_install
+            strip bin/mlir-opt
+            printf 'llvm_commit=%s\nbuild_date=%s\nbuild_cmd=scripts/build_llvm.sh  # BUILD_SHARED_LIBS=OFF, static mlir-opt\n' \
+              '${LLVM_SHA}' '${BUILD_DATE}' > BUILD_INFO
+            tar -czf /flydsl/dist/${TOOL_ARCHIVE} bin/mlir-opt BUILD_INFO
+            rm -f BUILD_INFO
+          "
+          # Smoke test: version check + gpu-module-to-binary round-trip
+          docker exec llvm_build bash -c "
+            set -euo pipefail
+            rm -rf /tmp/smoke && mkdir -p /tmp/smoke
+            tar -xzf /flydsl/dist/${TOOL_ARCHIVE} -C /tmp/smoke
+            /tmp/smoke/bin/mlir-opt --version
+            cat /tmp/smoke/BUILD_INFO
+
+            # Verify gpu-module-to-binary can produce a gpu.binary (HSACO).
+            cat > /tmp/smoke/test_input.mlir <<'MLIR'
+          module attributes {gpu.container_module} {
+            gpu.module @test_module [#rocdl.target<chip = \"gfx942\">] {
+              llvm.func @test_kernel() attributes {gpu.kernel, rocdl.kernel} {
+                llvm.return
+              }
+            }
+          }
+          MLIR
+            /tmp/smoke/bin/mlir-opt /tmp/smoke/test_input.mlir \
+              --pass-pipeline='builtin.module(gpu-module-to-binary{format=fatbin})' \
+              -o /tmp/smoke/test_output.mlir
+            grep -q 'gpu.binary' /tmp/smoke/test_output.mlir
+            grep -q 'bin = ' /tmp/smoke/test_output.mlir
+            echo 'gpu-module-to-binary smoke test passed'
+          "
+          ls -lh "flydsl/dist/${TOOL_ARCHIVE}"
+          echo "TOOL_ARCHIVE=${TOOL_ARCHIVE}" >> "$GITHUB_ENV"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: custom-llvm-tools
+          path: flydsl/dist/*-manylinux_2_28-*.tar.gz
+          retention-days: 7
+
+      - name: Configure AWS credentials
+        if: ${{ github.repository_owner == 'ROCm' && inputs.upload_s3 }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: us-east-1
+          role-to-assume: arn:aws:iam::661452401056:role/framework-flydsl-${{ inputs.release_type }}
+
+      - name: Install AWS CLI
+        if: ${{ github.repository_owner == 'ROCm' && inputs.upload_s3 }}
+        run: bash ./flydsl/scripts/install_awscli.sh
+
+      - name: Upload to S3
+        if: ${{ github.repository_owner == 'ROCm' && inputs.upload_s3 }}
+        env:
+          RELEASE_TYPE: ${{ inputs.release_type }}
+        run: |
+          aws s3 cp flydsl/dist/ "s3://framework-whls-${RELEASE_TYPE}/llvm-tools/gfx942-gfx950/" \
+            --recursive --exclude "*" --include "*-manylinux_2_28-*.tar.gz"
+          echo "Uploaded to s3://framework-whls-${RELEASE_TYPE}/llvm-tools/gfx942-gfx950/"
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Custom LLVM Tools Build" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Item | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| --- | --- |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| LLVM ref | \`${{ steps.llvm-ref.outputs.ref }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| LLVM commit | \`${{ steps.llvm-ref.outputs.commit }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| LLVM remote | \`${{ steps.llvm-ref.outputs.remote }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Cache | ${{ steps.mlir-cache.outputs.cache-hit == 'true' && 'Hit' || 'Miss (rebuilt)' }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Archive | \`${TOOL_ARCHIVE}\` |" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Clean up
+        if: always()
+        run: |
+          docker stop llvm_build || true
+          docker rm llvm_build || true

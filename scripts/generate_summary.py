@@ -77,7 +77,6 @@ def build_summary(summary: Path) -> None:
 def test_summary(summary: Path) -> None:
     runner = os.environ.get("SUMMARY_RUNNER", "unknown")
     install_outcome = os.environ.get("SUMMARY_INSTALL_OUTCOME", "unknown")
-    external_tools_outcome = os.environ.get("SUMMARY_EXTERNAL_TOOLS_OUTCOME", "unknown")
     tests_outcome = os.environ.get("SUMMARY_TESTS_OUTCOME", "unknown")
     bench_outcome = os.environ.get("SUMMARY_BENCHMARKS_OUTCOME", "unknown")
     test_log = os.environ.get("SUMMARY_TEST_LOG", "/tmp/test_output.log")
@@ -87,7 +86,6 @@ def test_summary(summary: Path) -> None:
     _out(summary)
     _table(summary, ["Step", "Status"], [
         ["Install wheels", f"`{install_outcome}`"],
-        ["Smoke test external LLVM tools", f"`{external_tools_outcome}`"],
         ["Run tests", f"`{tests_outcome}`"],
         ["Run benchmarks", f"`{bench_outcome}`"],
     ])
@@ -160,7 +158,6 @@ def promote_summary(summary: Path) -> None:
     source = os.environ.get("SUMMARY_S3_SOURCE", "unknown")
     dest = os.environ.get("SUMMARY_S3_DEST", "unknown")
     wheel_names = os.environ.get("SUMMARY_WHEEL_NAMES", "").strip()
-    llvm_tool_names = os.environ.get("SUMMARY_LLVM_TOOL_NAMES", "").strip()
 
     _out(summary, "## Promote Summary")
     _out(summary)
@@ -178,23 +175,11 @@ def promote_summary(summary: Path) -> None:
         _out(summary, "```")
         _out(summary)
 
-    if llvm_tool_names:
-        _out(summary, "### Promoted LLVM Tools")
-        _out(summary, "```")
-        for tool in llvm_tool_names.split():
-            _out(summary, f"  {tool}")
-        _out(summary, "```")
-        _out(summary)
-
     domain = DOMAIN_MAP.get(release_type)
     if domain:
         index_url = f"https://{domain}/whl/gfx942-gfx950/"
-        llvm_tools_url = f"https://{domain}/llvm-tools/gfx942-gfx950/"
         _out(summary, "### Wheels Available At")
         _out(summary, f"- {index_url}")
-        if llvm_tool_names:
-            _out(summary, "### LLVM Tools Available At")
-            _out(summary, f"- {llvm_tools_url}")
         _out(summary)
         _out(summary, "### Install")
         _out(summary, "```bash")

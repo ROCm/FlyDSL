@@ -30,8 +30,6 @@ jobs:
           path: dist
 
       - name: Start GPU test container
-        env:
-          DOCKER_IMAGE: ${{ inputs.docker_image }}
         run: |
           docker ps -aq -f name=flydsl_test | xargs -r docker stop | xargs -r docker rm || true
 
@@ -50,7 +48,7 @@ jobs:
             --security-opt seccomp=unconfined \
             -w /flydsl \
             --name flydsl_test \
-            "${DOCKER_IMAGE}"
+            ${{ inputs.docker_image }}
 
       - name: Install wheels and dependencies
         id: install
@@ -60,26 +58,6 @@ jobs:
           docker exec flydsl_test bash -c "python3 -m pip install -U 'hypothesis>=6.82.0'"
           docker exec flydsl_test bash -c "mkdir -p /flydsl/build-fly/bin && cp /dist/fly-opt /flydsl/build-fly/bin/fly-opt && chmod +x /flydsl/build-fly/bin/fly-opt"
           docker exec flydsl_test bash -c "git config --global --add safe.directory /flydsl"
-
-      - name: Smoke test external LLVM tools
-        id: external-tools
-        run: |
-          docker exec flydsl_test bash -c '
-            set -euo pipefail
-            TOOL_ARCHIVE=$(ls -1 /dist/*-manylinux_2_28-*.tar.gz 2>/dev/null | head -n1)
-            if [ -z "${TOOL_ARCHIVE}" ]; then
-              echo "No LLVM tool archive found, skipping"
-              exit 0
-            fi
-            rm -rf /opt/custom-llvm-tools
-            mkdir -p /opt/custom-llvm-tools
-            tar -xzf "${TOOL_ARCHIVE}" -C /opt/custom-llvm-tools
-            /opt/custom-llvm-tools/bin/mlir-opt --version
-            cd /flydsl
-            FLYDSL_COMPILE_LLVM_DIR=/opt/custom-llvm-tools \
-            FLYDSL_RUNTIME_ENABLE_CACHE=0 \
-              python3 -m pytest tests/unit/test_compile_hints.py::TestCompileHintsPropagation::test_llvm_options_in_compile_hints -v
-          '
 
       - name: Run tests
         id: tests
@@ -116,7 +94,6 @@ jobs:
         env:
           SUMMARY_RUNNER: ${{ matrix.runners }}
           SUMMARY_INSTALL_OUTCOME: ${{ steps.install.outcome }}
-          SUMMARY_EXTERNAL_TOOLS_OUTCOME: ${{ steps.external-tools.outcome }}
           SUMMARY_TESTS_OUTCOME: ${{ steps.tests.outcome }}
           SUMMARY_BENCHMARKS_OUTCOME: ${{ steps.benchmarks.outcome }}
           SUMMARY_TEST_LOG: /tmp/test_output.log

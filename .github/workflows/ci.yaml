@@ -17,10 +17,6 @@ on:
         description: 'Docker base image for test'
         type: string
         default: "rocm/pytorch:rocm7.2_ubuntu22.04_py3.10_pytorch_release_2.8.0"
-      llvm_ref:
-        description: 'Optional LLVM branch, tag, or full commit SHA for external mlir tools'
-        type: string
-        default: ''
 concurrency:
   group: ${{ github.workflow }}-${{ github.sha }}
   cancel-in-progress: true
@@ -30,7 +26,6 @@ jobs:
     uses: ./.github/workflows/build-whl.yaml
     with:
       release_type: ${{ github.event_name == 'schedule' && 'nightlies' || 'devreleases' }}
-      llvm_ref: ${{ inputs.llvm_ref || '' }}
     permissions:
       id-token: write
       contents: read
@@ -53,7 +48,6 @@ jobs:
     with:
       release_type: ${{ github.event_name == 'schedule' && 'nightlies' || 'devreleases' }}
       wheel_names: ${{ needs.build.outputs.wheel_names }}
-      llvm_tool_names: ${{ needs.build.outputs.llvm_tool_names }}
     permissions:
       id-token: write
       contents: read

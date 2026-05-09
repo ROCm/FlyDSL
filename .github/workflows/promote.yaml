@@ -11,12 +11,6 @@ on:
         description: 'Space-separated list of wheel filenames to promote'
         type: string
         required: true
-      llvm_tool_names:
-        description: 'Space-separated list of LLVM tool archive filenames to promote'
-        type: string
-        required: false
-        default: ''
-
 jobs:
   promote:
     runs-on: linux-flydsl-mi325-1
@@ -69,47 +63,6 @@ jobs:
           done
           echo "All wheels promoted successfully"
 
-      - name: Download LLVM tools from staging
-        if: ${{ inputs.llvm_tool_names != '' }}
-        env:
-          RELEASE_TYPE: ${{ inputs.release_type }}
-          LLVM_TOOL_NAMES: ${{ inputs.llvm_tool_names }}
-        run: |
-          STAGING="s3://framework-whls-${RELEASE_TYPE}/llvm-tools-staging/gfx942-gfx950"
-          mkdir -p /tmp/promote-llvm-tools
-          echo "Downloading LLVM tools from ${STAGING}"
-          for TOOL in ${LLVM_TOOL_NAMES}; do
-            echo "Downloading ${TOOL}..."
-            aws s3 cp "${STAGING}/${TOOL}" "/tmp/promote-llvm-tools/${TOOL}"
-          done
-
-      - name: Smoke test LLVM tool archives
-        if: ${{ inputs.llvm_tool_names != '' }}
-        env:
-          LLVM_TOOL_NAMES: ${{ inputs.llvm_tool_names }}
-        run: |
-          set -euo pipefail
-          for TOOL in ${LLVM_TOOL_NAMES}; do
-            WORKDIR="/tmp/promote-llvm-tools-smoke/${TOOL%.tar.gz}"
-            mkdir -p "${WORKDIR}"
-            tar -xzf "/tmp/promote-llvm-tools/${TOOL}" -C "${WORKDIR}"
-            "${WORKDIR}/bin/mlir-opt" --version
-          done
-
-      - name: Upload LLVM tools to release
-        if: ${{ inputs.llvm_tool_names != '' }}
-        env:
-          RELEASE_TYPE: ${{ inputs.release_type }}
-          LLVM_TOOL_NAMES: ${{ inputs.llvm_tool_names }}
-        run: |
-          RELEASE="s3://framework-whls-${RELEASE_TYPE}/llvm-tools/gfx942-gfx950"
-          echo "Uploading LLVM tools to ${RELEASE}"
-          for TOOL in ${LLVM_TOOL_NAMES}; do
-            echo "Uploading ${TOOL}..."
-            aws s3 cp "/tmp/promote-llvm-tools/${TOOL}" "${RELEASE}/${TOOL}"
-          done
-          echo "All LLVM tools promoted successfully"
-
       - name: Promote summary
         if: always()
         env:
@@ -117,6 +70,5 @@ jobs:
           SUMMARY_S3_SOURCE: "s3://framework-whls-${{ inputs.release_type }}/whl-staging/gfx942-gfx950"
           SUMMARY_S3_DEST: "s3://framework-whls-${{ inputs.release_type }}/whl/gfx942-gfx950"
           SUMMARY_WHEEL_NAMES: ${{ inputs.wheel_names }}
-          SUMMARY_LLVM_TOOL_NAMES: ${{ inputs.llvm_tool_names }}
         run: python3 flydsl/scripts/generate_summary.py promote
 
