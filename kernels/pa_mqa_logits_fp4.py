@@ -53,7 +53,7 @@ import torch
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir.dialects import llvm as _llvm
-from flydsl.expr import arith, buffer_ops, gpu, rocdl, vector
+from flydsl.expr import arith, buffer_ops, gpu, rocdl
 from flydsl.expr.primitive import range_constexpr
 from flydsl.expr.typing import Int32, T
 from flydsl.utils.smem_allocator import SmemAllocator
@@ -68,16 +68,13 @@ DEFAULT_BLOCK_THREADS = DEFAULT_NUM_WARPS * WARP_SIZE  # 256
 
 
 def _pack_i32_pair_to_i64(a_i32, b_i32):
-    v = vector.from_elements(T.vec(2, T.i32), [a_i32, b_i32])
-    v1 = vector.bitcast(T.vec(1, T.i64), v)
-    return vector.extract(v1, static_position=[0])
+    return fx.Vector.from_elements([a_i32, b_i32], dtype=fx.Int32).bitcast(fx.Int64)[0]
 
 
 def _pack_lo_i64x2_to_i32x8(x0, x1):
     undef0 = _llvm.mlir_undef(T.i64)
     undef1 = _llvm.mlir_undef(T.i64)
-    v4 = vector.from_elements(T.vec(4, T.i64), [x0, x1, undef0, undef1])
-    return vector.bitcast(T.vec(8, T.i32), v4)
+    return fx.Vector.from_elements([x0, x1, undef0, undef1], dtype=fx.Int64).bitcast(fx.Int32)
 
 
 allocator = None
@@ -222,20 +219,24 @@ def build_pa_mqa_logits_fp4_module(
     allocator = SmemAllocator(None, arch="gfx950", global_sym_name="mqa_fp4_smem")
     allocator.ptr = 16  # minimal, no LDS needed for this approach
 
-    # Q-scale dword loader, dispatched at build time on QS_DW so the @flyc.kernel
-    # body never sees a Python `if` (which would lower to scf.if and make
-    # branch-local defs). Defined here, captured into the kernel closure.
+    # Q-scale per-thread loader. The host-side preshuffled tensor is
+    # uint8 with shape [B, NEXT_N, K_TILES, 4 (K_chunks), 16, qs_pad];
+    # each thread loads its qs_pad bytes (= QS_DW i32 dwords) by slicing
+    # all 5 outer dims and copying the innermost row via a single buffer atom.
+    # Whole-row load → bitcast to i32 dwords in register.
     QS_DW = (m_tiles + 3) // 4
-    if QS_DW == 1:
+    qs_pad = QS_DW * 4
+    qs_pad_bits = qs_pad * 8
 
-        def _load_qs_dws(qs_rsrc_, qs_off_i32_):
-            return [buffer_ops.buffer_load(qs_rsrc_, qs_off_i32_, vec_width=1, dtype=T.i32)]
-
-    else:
-
-        def _load_qs_dws(qs_rsrc_, qs_off_i32_):
-            v = buffer_ops.buffer_load(qs_rsrc_, qs_off_i32_, vec_width=QS_DW, dtype=T.i32)
-            return [vector.extract(v, static_position=[i]) for i in range(QS_DW)]
+    def _make_qs_buf_copy():
+        if qs_pad_bits == 32:
+            return fx.rocdl.BufferCopy32b()
+        elif qs_pad_bits == 64:
+            return fx.rocdl.BufferCopy64b()
+        elif qs_pad_bits == 128:
+            return fx.rocdl.BufferCopy128b()
+        else:
+            raise ValueError(f"unsupported QS_DW={QS_DW} (qs_pad_bits={qs_pad_bits})")
 
     # Phys block-table loader: dispatched on N_TILES_PER_WARP at build time so
     # the kernel body sees one shape (no scf.if). vec_width=1 returns a scalar
@@ -248,8 +249,7 @@ def build_pa_mqa_logits_fp4_module(
     else:
 
         def _phys_to_list(phys_v):
-            return [vector.extract(phys_v, static_position=[nt])
-                    for nt in range(N_TILES_PER_WARP)]
+            return [fx.Vector(phys_v)[nt] for nt in range(N_TILES_PER_WARP)]
 
     @flyc.kernel
     def pa_mqa_logits_fp4_kernel(
@@ -279,21 +279,19 @@ def build_pa_mqa_logits_fp4_module(
         cta_info_rsrc = buffer_ops.create_buffer_resource(cta_info_ptr, max_size=True)
         cta_info_4xi32 = buffer_ops.buffer_load(cta_info_rsrc, pid * fx.Int32(4), vec_width=4, dtype=T.i32)
 
-        q_rsrc = buffer_ops.create_buffer_resource(q_ptr, max_size=True)
-        qs_rsrc = buffer_ops.create_buffer_resource(q_scale_ptr, max_size=True)
         kv_rsrc = buffer_ops.create_buffer_resource(kv_cache_ptr, max_size=True)
         kvs_rsrc = buffer_ops.create_buffer_resource(kv_scale_ptr, max_size=True)
         bt_rsrc = buffer_ops.create_buffer_resource(kv_indices_ptr, max_size=True)
-        w_rsrc = buffer_ops.create_buffer_resource(weights_ptr, max_size=True)
         out_rsrc = buffer_ops.create_buffer_resource(out_logits_ptr, max_size=True)
 
         ZERO_F = fx.Float32(0.0)
         c0_i32 = fx.Int32(0)
 
-        batch_packed = vector.extract(cta_info_4xi32, static_position=[0])
-        chunk_start = vector.extract(cta_info_4xi32, static_position=[1])
-        chunk_count = vector.extract(cta_info_4xi32, static_position=[2])
-        context_len = vector.extract(cta_info_4xi32, static_position=[3])
+        cta_info_vec = fx.Vector(cta_info_4xi32)
+        batch_packed = cta_info_vec[0]
+        chunk_start = cta_info_vec[1]
+        chunk_count = cta_info_vec[2]
+        context_len = cta_info_vec[3]
 
         # Decode batch + next_n. NEXT_N=1 ⇒ /1, %1: MLIR canonicalizer folds
         # the divide-by-1 to identity and the mod-by-1 to 0. NEXT_N=power-of-2
@@ -303,32 +301,31 @@ def build_pa_mqa_logits_fp4_module(
         pid_next_n = batch_packed % fx.Int32(next_n)
 
         # ── Q load (HOISTED out of chunk loop — reused across chunks) ──
-        # Q layout: [B, NEXT_N, H, D/2]. FP4 (cbsz=4) per-K-chunk layout is
-        # contiguous (16 bytes = 32 K elements). For head_dim > 128, an outer
+        # Q layout: [B, NEXT_N, H, D/2] uint8. FP4 (cbsz=4) per-K-chunk layout
+        # is contiguous (16 bytes = 32 K elements). For head_dim > 128, an outer
         # K_TILE loop covers head_dim // 128 MFMA-K iterations; each K_TILE
         # contributes 64 bytes per head row (= MFMA_K/2). q_a_ops is indexed
         # as q_a_ops[k_tile][mi_idx].
+        # Layout API form: per-thread 16-byte vec load via slice (B, NEXT_N,
+        # mi_idx*16+lane_mod_16, k_tile*4+lane_div_16-th 16-byte chunk) →
+        # BufferCopy128b → bitcast vec<16xi8> to vec<4xi32>.
+        Q_buf = fx.rocdl.make_buffer_tensor(q_ptr)
+        q_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), 8)
+        q_reg_ty = fx.MemRefType.get(T.i8, fx.LayoutType.get(16, 1), fx.AddressSpace.Register)
+        q_reg_lay = fx.make_layout(16, 1)
         q_a_ops = []
         for k_tile in range_constexpr(k_tiles):
             q_a_ops_kt = []
             for mi_idx in range_constexpr(m_tiles):
-                q_row = mi_idx * MFMA_M + lane_mod_16
-                q_col_bytes = fx.Int32(k_tile * 64) + lane_div_16 * fx.Int32(16)
-                q_off_bytes = (
-                    pid_b * _stride_q_batch
-                    + pid_next_n * fx.Int32(_stride_q_next_n)
-                    + q_row * head_dim_packed
-                    + q_col_bytes
-                )
-                q_4xi32 = buffer_ops.buffer_load(q_rsrc, q_off_bytes // 4, vec_width=4, dtype=T.i32)
-                q_i64_0 = _pack_i32_pair_to_i64(
-                    vector.extract(q_4xi32, static_position=[0]),
-                    vector.extract(q_4xi32, static_position=[1]),
-                )
-                q_i64_1 = _pack_i32_pair_to_i64(
-                    vector.extract(q_4xi32, static_position=[2]),
-                    vector.extract(q_4xi32, static_position=[3]),
-                )
+                q_row = fx.Int32(mi_idx * MFMA_M) + lane_mod_16
+                q_row_bytes = fx.slice(Q_buf, (pid_b, pid_next_n, q_row, None))
+                q_row_div = fx.logical_divide(q_row_bytes, fx.make_layout(16, 1))
+                col_idx = fx.Int32(k_tile * 4) + lane_div_16
+                r = fx.memref_alloca(q_reg_ty, q_reg_lay)
+                fx.copy_atom_call(q_atom, fx.slice(q_row_div, (None, col_idx)), r)
+                q_4xi32 = fx.Vector(fx.memref_load_vec(r)).bitcast(fx.Int32)
+                q_i64_0 = _pack_i32_pair_to_i64(q_4xi32[0], q_4xi32[1])
+                q_i64_1 = _pack_i32_pair_to_i64(q_4xi32[2], q_4xi32[3])
                 # Upper 16 bytes of v8i32 are poisoned (cbsz=4 ignores them).
                 q_a_ops_kt.append(_pack_lo_i64x2_to_i32x8(q_i64_0, q_i64_1))
             q_a_ops.append(q_a_ops_kt)
@@ -344,18 +341,19 @@ def build_pa_mqa_logits_fp4_module(
         # Constraint: m_tiles <= 8 (heads <= 128). Lifting further is mechanical
         # — bump QS_DW and the host-side pad — but VGPR pressure starts to bite.
         assert m_tiles <= 8, f"m_tiles={m_tiles} > 8 not supported. Use heads <= 128."
-        # Stride per K_TILE in i32 units = 4 K_chunks * 16 lane_mod_16 * QS_DW.
-        _stride_qs_ktile_i32 = 4 * 16 * QS_DW
+        # Layout API form: 6D buffer_tensor → slice all outer dims to a 1D row
+        # of qs_pad uint8 → load via single byte-atom → bitcast to QS_DW i32.
+        QS_buf = fx.rocdl.make_buffer_tensor(q_scale_ptr)
+        qs_atom = fx.make_copy_atom(_make_qs_buf_copy(), 8)
+        qs_reg_ty = fx.MemRefType.get(T.i8, fx.LayoutType.get(qs_pad, 1), fx.AddressSpace.Register)
+        qs_reg_lay = fx.make_layout(qs_pad, 1)
         q_scale_ops = []
         for k_tile in range_constexpr(k_tiles):
-            qs_off_i32 = (
-                pid_b * fx.Int32(next_n * k_tiles * _stride_qs_ktile_i32)
-                + pid_next_n * fx.Int32(k_tiles * _stride_qs_ktile_i32)
-                + fx.Int32(k_tile * _stride_qs_ktile_i32)
-                + lane_div_16 * fx.Int32(16 * QS_DW)
-                + lane_mod_16 * fx.Int32(QS_DW)
-            )
-            qs_dws = _load_qs_dws(qs_rsrc, qs_off_i32)
+            row = fx.slice(QS_buf, (pid_b, pid_next_n, fx.Int32(k_tile), lane_div_16, lane_mod_16, None))
+            r = fx.memref_alloca(qs_reg_ty, qs_reg_lay)
+            fx.copy_atom_call(qs_atom, row, r)
+            qs_dws_vec = fx.Vector(fx.memref_load_vec(r)).bitcast(fx.Int32)
+            qs_dws = [qs_dws_vec[i] for i in range(QS_DW)]
             q_scale_ops.append([qs_dws[mi // 4] >> fx.Int32(8 * (mi % 4)) for mi in range(m_tiles)])
 
         # Weights (HOISTED). With A=Q (M=head), per-thread output covers heads
@@ -364,12 +362,20 @@ def build_pa_mqa_logits_fp4_module(
         # address (only lane_div_16 matters), so the hardware coalesces to a
         # single 16-byte transaction per group. weights shape: [B*NEXT_N, H]
         # — addressed by batch_packed directly.
+        # Layout API form: row → 16-elem mi_idx tile → 4-elem lane_div_16 chunk.
+        W_buf = fx.rocdl.make_buffer_tensor(weights_ptr)
+        w_row = fx.slice(W_buf, (batch_packed, None))
+        w_tiled_mi = fx.logical_divide(w_row, fx.make_layout(MFMA_M, 1))
+        w_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), 32)
+        w_reg_ty = fx.MemRefType.get(T.f32, fx.LayoutType.get(4, 1), fx.AddressSpace.Register)
+        w_reg_lay = fx.make_layout(4, 1)
         w_per_lane = []  # w_per_lane[mi_idx] = vec<4xf32>, indexed by elem
         for mi_idx in range_constexpr(m_tiles):
-            w_off = batch_packed * _stride_w_batch + mi_idx * MFMA_M + lane_div_16 * fx.Int32(4)
-            w_vec4 = buffer_ops.buffer_load(
-                w_rsrc, w_off, vec_width=4, dtype=T.f32)
-            w_per_lane.append(w_vec4)
+            tile = fx.slice(w_tiled_mi, (None, fx.Int32(mi_idx)))
+            tile_div = fx.logical_divide(tile, fx.make_layout(4, 1))
+            r = fx.memref_alloca(w_reg_ty, w_reg_lay)
+            fx.copy_atom_call(w_atom, fx.slice(tile_div, (None, lane_div_16)), r)
+            w_per_lane.append(fx.memref_load_vec(r))
 
         # ── Step 3: prologue + N-1 prefetch loop + epilogue ──
         # Per chunk: each warp handles N_TILES_PER_WARP=2 N-tiles (32 tokens).
@@ -448,24 +454,18 @@ def build_pa_mqa_logits_fp4_module(
                 ni_warp = warp_id * fx.Int32(N_TILES_PER_WARP) + fx.Int32(nt)
                 token_base = (chunk_start + c_i32_arg) * fx.Int32(block_k) + ni_warp * fx.Int32(MFMA_N)
 
-                zero = arith.constant_vector(0.0, T.f32x4)
+                zero = fx.Vector.filled(4, 0.0, fx.Float32)
                 accs = [zero] * m_tiles
 
                 for k_tile in range_constexpr(k_tiles):
-                    kv_4xi32 = kv_list_in[nt * k_tiles + k_tile]
+                    kv_4xi32 = fx.Vector(kv_list_in[nt * k_tiles + k_tile])
                     kvs_byte = kvs_list_in[nt * k_tiles + k_tile]
 
                     # Pack 16 KV bytes (lower 128 bits) into i32x8 with the
                     # upper half poisoned — FP4 B operand uses only the lower
                     # 16 bytes (blgp=4 ignores upper bits).
-                    kv_i64_0 = _pack_i32_pair_to_i64(
-                        vector.extract(kv_4xi32, static_position=[0]),
-                        vector.extract(kv_4xi32, static_position=[1]),
-                    )
-                    kv_i64_1 = _pack_i32_pair_to_i64(
-                        vector.extract(kv_4xi32, static_position=[2]),
-                        vector.extract(kv_4xi32, static_position=[3]),
-                    )
+                    kv_i64_0 = _pack_i32_pair_to_i64(kv_4xi32[0], kv_4xi32[1])
+                    kv_i64_1 = _pack_i32_pair_to_i64(kv_4xi32[2], kv_4xi32[3])
                     kv_b = _pack_lo_i64x2_to_i32x8(kv_i64_0, kv_i64_1)
                     kv_scale_val = arith.ArithValue(kvs_byte).extui(T.i32)
 
@@ -498,10 +498,10 @@ def build_pa_mqa_logits_fp4_module(
                 # / v_pk_mul_f32 pairs (~halves the scalar VALU count).
                 thread_sum = ZERO_F
                 for mi_idx in range_constexpr(m_tiles):
-                    relu_v = arith.maximumf(accs[mi_idx], zero)
-                    prod_v = arith.mulf(relu_v, w_per_lane[mi_idx])
+                    relu_v = fx.Vector(accs[mi_idx]).maximumf(zero)
+                    prod_v = relu_v * fx.Vector(w_per_lane[mi_idx])
                     for elem in [0, 1, 2, 3]:
-                        thread_sum = thread_sum + vector.extract(prod_v, static_position=[elem])
+                        thread_sum = thread_sum + prod_v[elem]
 
                 # Cross-lane reduction across the 4 lane_div_16 groups: XOR by
                 # 16 swaps groups 0↔1, 2↔3 (toggles bit 4 of lane_id); XOR by
@@ -510,18 +510,15 @@ def build_pa_mqa_logits_fp4_module(
                 # for that lane_mod_16's token. lane_mod_16 stays unchanged so
                 # each lane keeps its own token. Both crossings need
                 # ds_bpermute (DPP can't reach across the row boundary).
-                lane_raw = lane_id if not hasattr(lane_id, "ir_value") else lane_id.ir_value()
-                c4_i32 = arith.constant(4, type=T.i32)
+                lane_i32 = fx.Int32(lane_id)
 
                 def _bperm_xor_add(val, sh):
-                    sh_c = arith.constant(sh, type=T.i32)
-                    peer_lane = arith.XOrIOp(lane_raw, sh_c).result
-                    peer_byte = arith.MulIOp(peer_lane, c4_i32).result
-                    val_raw = val if not hasattr(val, "ir_value") else val.ir_value()
-                    val_i32 = arith.ArithValue(val_raw).bitcast(T.i32)
+                    peer_lane = lane_i32 ^ fx.Int32(sh)
+                    peer_byte = peer_lane * fx.Int32(4)
+                    val_i32 = arith.ArithValue(val).bitcast(T.i32)
                     peer_i32 = rocdl.ds_bpermute(T.i32, peer_byte, val_i32)
                     peer_f32 = arith.ArithValue(peer_i32).bitcast(T.f32)
-                    return arith.ArithValue(val_raw).addf(peer_f32)
+                    return arith.ArithValue(val).addf(peer_f32)
 
                 thread_sum = _bperm_xor_add(thread_sum, 16)
                 thread_sum = _bperm_xor_add(thread_sum, 32)
@@ -567,13 +564,13 @@ def build_pa_mqa_logits_fp4_module(
         #   phys_next: N_TILES_PER_WARP entries
         # Total = (2 * K_TILES + 1) * N_TILES_PER_WARP
         chunk_count_minus_1_i32 = chunk_count - fx.Int32(1)
-        chunk_count_minus_1_idx = arith.index_cast(T.index, chunk_count_minus_1_i32)
+        chunk_count_minus_1_idx = fx.Index(chunk_count_minus_1_i32)
         init_args = list(kv_pre) + list(kvs_pre) + list(phys_next_pre)
         for c_idx, state in range(0, chunk_count_minus_1_idx, 1, init=init_args):
             kv_cur_list = [state[i] for i in range(N_KV)]
             kvs_cur_list = [state[N_KV + i] for i in range(N_KV)]
             phys_next_list = [state[2 * N_KV + i] for i in range(N_TILES_PER_WARP)]
-            c_idx_i32 = arith.index_cast(T.i32, c_idx)
+            c_idx_i32 = fx.Int32(c_idx)
             c_next_i32 = c_idx_i32 + fx.Int32(1)
             c_next_next_i32 = c_next_i32 + fx.Int32(1)
 
