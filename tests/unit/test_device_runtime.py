@@ -29,6 +29,21 @@ class _FakeCudaRuntime(dr.DeviceRuntime):
         return 1
 
 
+def test_default_runtime_kind_stays_rocm(monkeypatch):
+    """Community users that do not opt into another runtime keep the ROCm default."""
+    monkeypatch.delenv("FLYDSL_COMPILE_BACKEND", raising=False)
+    monkeypatch.delenv("FLYDSL_RUNTIME_KIND", raising=False)
+    rt = dr.get_device_runtime()
+    assert rt.kind == "rocm"
+
+
+def test_default_compile_runtime_pairing_does_not_need_env(monkeypatch):
+    monkeypatch.delenv("FLYDSL_COMPILE_BACKEND", raising=False)
+    monkeypatch.delenv("FLYDSL_RUNTIME_KIND", raising=False)
+    dr.ensure_compile_runtime_pairing_from_env("rocm")
+    assert dr._instance is None
+
+
 def test_rocm_runtime_kind_matches_compile_backend(monkeypatch):
     monkeypatch.delenv("FLYDSL_RUNTIME_KIND", raising=False)
     monkeypatch.setenv("FLYDSL_COMPILE_BACKEND", "rocm")
