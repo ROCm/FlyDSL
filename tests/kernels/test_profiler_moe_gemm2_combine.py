@@ -1202,8 +1202,8 @@ def run_acceptance(rank, world_size, args):
     fused_op = None
     if HAS_FUSED_OP and args.bench_op in ("fused", "both"):
         fused_op = FlyDSLMoeGemm2CombineOp(
-            cfg=cfg,
-            disp_op=disp_op,
+            comb_cfg=cfg,
+            comb_op=disp_op,
             inter_dim=args.inter_dim,
             tile_m=args.tile_m2, tile_n=args.tile_n2, tile_k=args.tile_k2,
             persist_m=args.persist_m,
@@ -1395,8 +1395,10 @@ def _parse_args():
                    help="单卡 dispatch 输入 token 数；max_recv = world_size * max_tokens")
     p.add_argument("--hidden-dim",           type=int, default=7168,
                    help="GEMM2 输出维度（== combine token 维度 == dispatch token 维度）")
-    p.add_argument("--inter-dim",            type=int, default=4096,
-                   help="GEMM2 输入维度（GEMM1 输出维度，本骨架不跑 GEMM1）")
+    p.add_argument("--inter-dim",            type=int, default=2048,
+                   help="GEMM2 输入维度（GEMM1 输出维度，本骨架不跑 GEMM1）。"
+                        "默认 2048 对齐 production a4w4（参考 ut_per1x32.py: "
+                        "model_dim=7168, inter_dim=2048）。")
     p.add_argument("--num-experts-per-rank", type=int, default=32)
     p.add_argument("--k",                    type=int, default=8)
     # dispatch / combine
@@ -1412,7 +1414,9 @@ def _parse_args():
                    choices=list(DTYPE_MAP.keys()),
                    help="dispatch / combine token dtype")
     # GEMM2
-    p.add_argument("--gemm2-a-dtype",        type=str, default="fp8",
+    # 默认 a=fp4/b=fp4（production a4w4：GEMM1 输出经 SiLU + per-1x32 量化为 fp4
+    # 后再喂 GEMM2，参考 ut_per1x32.py）。早期默认是 a=fp8，性能数字偏离 production。
+    p.add_argument("--gemm2-a-dtype",        type=str, default="fp4",
                    choices=["fp8", "fp4", "fp16", "int8"])
     p.add_argument("--gemm2-b-dtype",        type=str, default="fp4",
                    choices=["fp8", "fp4", "fp16", "int8", "int4"])
