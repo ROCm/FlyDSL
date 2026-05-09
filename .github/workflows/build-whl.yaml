@@ -92,8 +92,11 @@ jobs:
         env:
           LLVM_REF_INPUT: ${{ inputs.llvm_ref }}
         run: |
+          # Priority: workflow input > llvm-tools-config.json > llvm-hash.txt
           if [ -n "${LLVM_REF_INPUT}" ]; then
             REF="${LLVM_REF_INPUT}"
+          elif [ -f flydsl/thirdparty/llvm-tools-config.json ]; then
+            REF="$(python3 -c "import json; print(json.load(open('flydsl/thirdparty/llvm-tools-config.json'))['llvm_ref'])")"
           else
             REF="$(tr -d '[:space:]' < flydsl/thirdparty/llvm-hash.txt)"
           fi
@@ -153,7 +156,12 @@ jobs:
           set -euo pipefail
           LLVM_SHA=$(docker exec flydsl_build bash -c "cd /llvm-project && git rev-parse HEAD")
           LLVM_SHA_SHORT="${LLVM_SHA:0:12}"
-          TOOL_ARCHIVE="flydsl-mlir-tools-${LLVM_SHA_SHORT}-manylinux_2_28-x86_64.tar.gz"
+          if [ -f flydsl/thirdparty/llvm-tools-config.json ]; then
+            ARCHIVE_NAME="$(python3 -c "import json; print(json.load(open('flydsl/thirdparty/llvm-tools-config.json')).get('archive_name', 'flydsl-mlir-tools'))")"
+          else
+            ARCHIVE_NAME="flydsl-mlir-tools"
+          fi
+          TOOL_ARCHIVE="${ARCHIVE_NAME}-${LLVM_SHA_SHORT}-manylinux_2_28-x86_64.tar.gz"
           echo "Packaging ${TOOL_ARCHIVE}"
           BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           docker exec flydsl_build bash -c "
