@@ -119,6 +119,8 @@ jobs:
       - name: Package LLVM tools
         env:
           LLVM_SHA: ${{ steps.llvm-ref.outputs.commit }}
+          LLVM_REF: ${{ steps.llvm-ref.outputs.ref }}
+          LLVM_REMOTE: ${{ steps.llvm-ref.outputs.remote }}
         run: |
           set -euo pipefail
           CONFIG="flydsl/thirdparty/custom-llvm-tools.json"
@@ -138,8 +140,8 @@ jobs:
             test -x /llvm-project/mlir_install/bin/mlir-opt
             cd /llvm-project/mlir_install
             strip bin/mlir-opt
-            printf 'llvm_commit=%s\nbuild_date=%s\nbuild_cmd=scripts/build_llvm.sh  # BUILD_SHARED_LIBS=OFF, static mlir-opt\n' \
-              '${LLVM_SHA}' '${BUILD_DATE}' > BUILD_INFO
+            printf 'llvm_remote=%s\nllvm_ref=%s\nllvm_commit=%s\nbuild_date=%s\nbuild_cmd=scripts/build_llvm.sh  # BUILD_SHARED_LIBS=OFF, static mlir-opt\n' \
+              '${LLVM_REMOTE}' '${LLVM_REF}' '${LLVM_SHA}' '${BUILD_DATE}' > BUILD_INFO
             tar -czf /flydsl/dist/${TOOL_ARCHIVE} bin/mlir-opt BUILD_INFO
             rm -f BUILD_INFO
           "
@@ -194,9 +196,35 @@ jobs:
         env:
           RELEASE_TYPE: ${{ inputs.release_type }}
         run: |
-          aws s3 cp flydsl/dist/ "s3://framework-whls-${RELEASE_TYPE}/llvm-tools/gfx942-gfx950/" \
+          S3_DEST="s3://framework-whls-${RELEASE_TYPE}/llvm-tools/gfx942-gfx950/"
+          aws s3 cp flydsl/dist/ "${S3_DEST}" \
             --recursive --exclude "*" --include "*-manylinux_2_28-*.tar.gz"
-          echo "Uploaded to s3://framework-whls-${RELEASE_TYPE}/llvm-tools/gfx942-gfx950/"
+          aws s3 ls "${S3_DEST}" | awk '{print $4}' | sort > /tmp/llvm-tools-files.txt
+          python3 - <<'PY'
+          import html
+          from pathlib import Path
+
+          files = [
+              name
+              for name in Path("/tmp/llvm-tools-files.txt").read_text().splitlines()
+              if name.endswith(".tar.gz")
+          ]
+          lines = [
+              "<!DOCTYPE html>",
+              "<html>",
+              "  <body>",
+              "    <h1>Links for gfx942-gfx950</h1>",
+          ]
+          for name in files:
+              escaped = html.escape(name)
+              lines.append(f'    <a href="{escaped}">{escaped}</a><br>')
+          lines.extend(["  </body>", "</html>"])
+          Path("/tmp/llvm-tools-index.html").write_text("\n".join(lines) + "\n")
+          PY
+          aws s3 cp /tmp/llvm-tools-index.html "${S3_DEST}index.html" \
+            --content-type "text/html" \
+            --cache-control "no-cache,no-store,must-revalidate"
+          echo "Uploaded to ${S3_DEST}"
 
       - name: Summary
         if: always()

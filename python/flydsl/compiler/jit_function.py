@@ -2,14 +2,18 @@
 # Copyright (c) 2025 FlyDSL Project Contributors
 
 import ctypes
+import fcntl
 import hashlib
 import inspect
 import os
 import pickle
 import pkgutil
+import tempfile
 import threading
+import time
 import types
-from contextlib import nullcontext
+from collections import namedtuple
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from functools import lru_cache, partial
 from pathlib import Path
@@ -33,13 +37,116 @@ from .kernel_function import (
 )
 from .protocol import construct_from_ir_values, get_ir_types
 
+EXTRA_SOURCE_DIRS: List[str] = []
+
+CacheInfo = namedtuple("CacheInfo", ["hits", "misses", "currsize", "disk_size"])
+
+
+class FileLock:
+    """fcntl-based file lock supporting shared and exclusive modes."""
+
+    def __init__(self, path, *, exclusive=True, timeout=30):
+        self._path = str(path)
+        self._exclusive = exclusive
+        self._timeout = timeout
+        self._fd = None
+
+    def __enter__(self):
+        fd = os.open(self._path, os.O_RDWR | os.O_CREAT, 0o644)
+        self._fd = fd
+        op = fcntl.LOCK_EX if self._exclusive else fcntl.LOCK_SH
+        deadline = time.monotonic() + self._timeout
+        while True:
+            try:
+                fcntl.flock(fd, op | fcntl.LOCK_NB)
+                return self
+            except (OSError, BlockingIOError):
+                if time.monotonic() >= deadline:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+                    self._fd = None
+                    raise RuntimeError(
+                        f"Timed out waiting for {'exclusive' if self._exclusive else 'shared'} "
+                        f"lock on {self._path} after {self._timeout}s"
+                    )
+                time.sleep(0.05)
+
+    def __exit__(self, *exc):
+        fd = self._fd
+        if fd is not None:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            self._fd = None
+        return False
+
+
+def _create_mlir_context(*, load_dialects=True):
+    """Create an ``ir.Context`` with multithreading disabled.
+
+    Disabling multithreading avoids LLVM global-state races when multiple
+    processes or threads compile concurrently through the same MLIR install.
+    """
+    ctx = ir.Context()
+    ctx.enable_multithreading(False)
+    if load_dialects:
+        ctx.load_all_available_dialects()
+    return ctx
+
+
+class FlyDSLCompileError(RuntimeError):
+    """Raised when an MLIR pass pipeline fails.
+
+    ``diagnostics`` carries the list of error-severity messages collected
+    during the failed ``pm.run()``.
+    """
+
+    def __init__(self, message: str, diagnostics: Optional[List[str]] = None):
+        super().__init__(message)
+        self.diagnostics = diagnostics or []
+
+
+@contextmanager
+def _mlir_diagnostics(ctx):
+    """Collect MLIR error diagnostics emitted during a ``with`` block.
+
+    Yields a list that the caller can inspect after the block.  Only
+    ``ERROR`` severity messages are captured; non-error diagnostics are
+    left to the default handler (returns ``False``).
+    """
+    diags: List[str] = []
+
+    def _handler(d):
+        if d.severity == ir.DiagnosticSeverity.ERROR:
+            diags.append(str(d))
+            return True
+        return False
+
+    handler = ctx.attach_diagnostic_handler(_handler)
+    try:
+        yield diags
+    finally:
+        if handler.attached:
+            handler.detach()
+
 
 def _flydsl_key() -> str:
-    return _flydsl_key_cached(_use_external_binary_codegen(), env.compile.llvm_dir)
+    extra = list(EXTRA_SOURCE_DIRS)
+    env_extra = os.environ.get("FLYDSL_EXTRA_SOURCE_DIRS", "")
+    if env_extra:
+        extra.extend(d.strip() for d in env_extra.split(":") if d.strip())
+    return _flydsl_key_cached(_use_external_binary_codegen(), env.compile.llvm_dir, tuple(extra))
 
 
-@lru_cache(maxsize=8)
-def _flydsl_key_cached(use_external_binary: bool, llvm_dir: str) -> str:
+@lru_cache(maxsize=4)
+def _flydsl_key_cached(use_external_binary: bool, llvm_dir: str, extra_source_dirs: tuple = ()) -> str:
     """Compute a hash fingerprint of the entire FlyDSL compiler toolchain.
 
     Covers:
@@ -96,6 +203,14 @@ def _flydsl_key_cached(use_external_binary: bool, llvm_dir: str) -> str:
                             break
                         h.update(chunk)
                 contents.append(h.hexdigest())
+
+    # 3) Hash .py files in extra source directories (downstream fingerprint).
+    for src_dir in extra_source_dirs:
+        src_path = Path(src_dir)
+        if src_path.is_dir():
+            for py_file in sorted(src_path.rglob("*.py")):
+                with open(py_file, "rb") as f:
+                    contents.append(hashlib.sha256(f.read()).hexdigest())
 
     contents.append(f"external_binary_codegen={use_external_binary}")
     if use_external_binary:
@@ -483,7 +598,11 @@ def _run_pipeline(module: ir.Module, fragments: list, *, verifier: bool, print_a
     pm = PassManager.parse(pipeline)
     pm.enable_verifier(verifier)
     pm.enable_ir_printing(print_after_all=print_after_all)
-    pm.run(module.operation)
+    with _mlir_diagnostics(module.context) as diags:
+        try:
+            pm.run(module.operation)
+        except Exception as exc:
+            raise FlyDSLCompileError(str(exc), diagnostics=diags) from exc
 
 
 class MlirCompiler:
@@ -560,7 +679,11 @@ class MlirCompiler:
                     stage_name = f"{stage_num:02d}_{_stage_label_from_fragment(frag)}"
                     pm = PassManager.parse(f"builtin.module({frag})")
                     pm.enable_verifier(env.debug.enable_verifier)
-                    pm.run(module.operation)
+                    with _mlir_diagnostics(module.context) as diags:
+                        try:
+                            pm.run(module.operation)
+                        except Exception as exc:
+                            raise FlyDSLCompileError(str(exc), diagnostics=diags) from exc
 
                     stage_asm = module.operation.get_asm(enable_debug_info=True)
                     out = _dump_ir(stage_name, dump_dir=dump_dir, asm=stage_asm)
@@ -647,63 +770,155 @@ class MlirCompiler:
 
 
 class JitCacheManager:
-    """Directory-based cache manager.
+    """Directory-based cache manager with multi-process safety.
 
     Cache directory structure:
         {cache_root}/{func_name}_{manager_key}/
             {cache_key}.pkl  - serialized compiled kernel
+            {cache_key}.lock - per-key advisory lock file
 
-    Each compiled kernel is saved immediately after compilation.
+    All disk reads use shared (reader) locks; writes use exclusive locks
+    with atomic ``tempfile`` + ``os.rename`` to prevent partial reads.
     """
 
     def __init__(self, cache_dir: Path):
         self.cache_dir = cache_dir
         self.memory_cache: Dict[str, Any] = {}
+        self._hits = 0
+        self._misses = 0
+
+    @staticmethod
+    def _safe_key(cache_key: str) -> str:
+        return hashlib.sha256(cache_key.encode()).hexdigest()[:16]
 
     def _cache_file(self, cache_key: str) -> Path:
-        safe_key = hashlib.sha256(cache_key.encode()).hexdigest()[:16]
-        return self.cache_dir / f"{safe_key}.pkl"
+        return self.cache_dir / f"{self._safe_key(cache_key)}.pkl"
+
+    def _lock_file(self, cache_key: str) -> Path:
+        return self.cache_dir / f"{self._safe_key(cache_key)}.lock"
+
+    @staticmethod
+    def _atomic_write(cache_file: Path, value: Any) -> None:
+        """Write *value* atomically via tempfile + rename."""
+        cache_file.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=str(cache_file.parent), suffix=".tmp")
+        try:
+            with os.fdopen(fd, "wb") as f:
+                pickle.dump(value, f)
+            os.rename(tmp, str(cache_file))
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
 
     def get(self, cache_key: str) -> Optional[Any]:
         if cache_key in self.memory_cache:
+            self._hits += 1
             return self.memory_cache[cache_key]
 
         cache_file = self._cache_file(cache_key)
         if cache_file.exists():
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+            lock_path = self._lock_file(cache_key)
             try:
-                with open(cache_file, "rb") as f:
-                    value = pickle.load(f)
+                with FileLock(lock_path, exclusive=False, timeout=30):
+                    if not cache_file.exists():
+                        self._misses += 1
+                        return None
+                    with open(cache_file, "rb") as f:
+                        value = pickle.load(f)
                 self.memory_cache[cache_key] = value
+                self._hits += 1
                 log().debug(f"Cache hit from disk: {cache_file.name}")
                 return value
             except Exception as e:
                 log().warning(f"Failed to load cache {cache_file}: {e}")
+        self._misses += 1
         return None
 
     def set(self, cache_key: str, value: Any) -> None:
         self.memory_cache[cache_key] = value
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         cache_file = self._cache_file(cache_key)
+        lock_path = self._lock_file(cache_key)
         try:
-            with open(cache_file, "wb") as f:
-                pickle.dump(value, f)
+            with FileLock(lock_path, exclusive=True, timeout=30):
+                if cache_file.exists():
+                    log().debug(f"Cache already exists, skipping write: {cache_file.name}")
+                    return
+                self._atomic_write(cache_file, value)
             log().debug(f"Cache saved: {cache_file.name}")
         except Exception as e:
             log().warning(f"Failed to save cache {cache_file}: {e}")
+
+    @contextmanager
+    def compile_lock(self, cache_key: str):
+        """Acquire an exclusive compile lock, re-check disk, yield (existing_or_None, writer_or_None).
+
+        If *existing* is not None, another process already wrote the artifact
+        and *writer* is None.  Otherwise *writer* is a callable that performs
+        an atomic write under the already-held lock (no re-locking).
+        """
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        lock_path = self._lock_file(cache_key)
+        cache_file = self._cache_file(cache_key)
+
+        lock = FileLock(lock_path, exclusive=True, timeout=600)
+        lock.__enter__()
+        try:
+            # Re-check disk under exclusive lock.
+            if cache_file.exists():
+                try:
+                    with open(cache_file, "rb") as f:
+                        value = pickle.load(f)
+                    self.memory_cache[cache_key] = value
+                    self._hits += 1
+                    yield (value, None)
+                    return
+                except Exception:
+                    # Corrupt cache — remove so writer can overwrite.
+                    try:
+                        cache_file.unlink()
+                    except OSError:
+                        pass
+
+            # Cache miss — provide a writer that writes under the already-held lock.
+            def _writer(value):
+                self._atomic_write(cache_file, value)
+                self.memory_cache[cache_key] = value
+
+            yield (None, _writer)
+        finally:
+            lock.__exit__(None, None, None)
 
     def load_all(self) -> int:
         if not self.cache_dir.exists():
             return 0
         count = 0
-        for cache_file in self.cache_dir.glob("*.pkl"):
+        for cache_file in sorted(self.cache_dir.glob("*.pkl")):
+            lock_path = cache_file.with_suffix(".lock")
             try:
-                with open(cache_file, "rb") as f:
-                    pickle.load(f)
+                with FileLock(lock_path, exclusive=False, timeout=30):
+                    with open(cache_file, "rb") as f:
+                        pickle.load(f)
                 count += 1
             except Exception:
                 pass
         log().debug(f"Found {count} cached entries in {self.cache_dir}")
         return count
+
+    def cache_info(self) -> CacheInfo:
+        disk_count = 0
+        if self.cache_dir.exists():
+            disk_count = sum(1 for _ in self.cache_dir.glob("*.pkl"))
+        return CacheInfo(
+            hits=self._hits,
+            misses=self._misses,
+            currsize=len(self.memory_cache),
+            disk_size=disk_count,
+        )
 
     def __contains__(self, cache_key: str) -> bool:
         return cache_key in self.memory_cache or self._cache_file(cache_key).exists()
@@ -844,6 +1059,12 @@ class JitFunction:
         if obj is None:
             return self
         return partial(self.__call__, obj)
+
+    def cache_info(self) -> Optional[CacheInfo]:
+        """Return cache statistics, or ``None`` if the disk cache is disabled."""
+        if self.cache_manager is None:
+            return None
+        return self.cache_manager.cache_info()
 
     def _ensure_sig(self):
         """Initialize signature + param metadata on first call (not at decoration time)."""
@@ -1009,11 +1230,13 @@ class JitFunction:
         run_only = env.runtime.run_only
         use_disk_cache = env.runtime.enable_cache or run_only
         allow_disk_cache = use_disk_cache and cache_key not in self._extern_linkage_keys
+        _rejected_link_libs = False
         cached_func = self._mem_cache.get(cache_key)
         if cached_func is None and allow_disk_cache and not env.debug.dump_ir:
             str_key = self._cache_key_to_str(cache_key)
             cached_func = self.cache_manager.get(str_key) if self.cache_manager else None
             if cached_func is not None and getattr(cached_func, "_link_libs", None):
+                _rejected_link_libs = True
                 cached_func = None
             if cached_func is not None:
                 self._mem_cache[cache_key] = cached_func
@@ -1037,8 +1260,7 @@ class JitFunction:
             # Fallback: run through DLPack (should not happen for static layout)
             log().warning("CallState build failed on cache hit, falling back to DLPack path")
             if not hasattr(self, "_cached_ctx"):
-                self._cached_ctx = ir.Context()
-                self._cached_ctx.load_all_available_dialects()
+                self._cached_ctx = _create_mlir_context()
             with self._cached_ctx:
                 _, jit_args, _, _ = convert_to_jit_arguments(sig, bound)
                 _ensure_stream_arg(jit_args)
@@ -1047,131 +1269,165 @@ class JitFunction:
         if run_only:
             cdir = getattr(self.cache_manager, "cache_dir", None)
             cdir_exists = cdir.exists() if cdir is not None else False
-            raise RuntimeError(
-                f"FLYDSL_RUNTIME_RUN_ONLY=1 but no AOT cache for "
+            msg = (
+                f"FLYDSL_RUNTIME_RUN_ONLY=1 but no usable AOT cache for "
                 f"{self.func.__name__}: "
                 f"manager_key={self.manager_key}, "
                 f"cache_key={self._cache_key_to_str(cache_key)[:96]}..., "
                 f"cache_dir={cdir} (exists={cdir_exists})"
             )
+            if _rejected_link_libs:
+                msg += (
+                    "; note: a cached artifact was found but rejected because "
+                    "it contains external link libraries (extern-linked kernels "
+                    "are not cached to disk)"
+                )
+            raise RuntimeError(msg)
 
         _hints_ctx = CompilationContext.compile_hints(self.compile_hints) if self.compile_hints else nullcontext()
 
-        with ir.Context() as ctx, _hints_ctx:
-            param_names, jit_args, dsl_types, constexpr_values = convert_to_jit_arguments(sig, bound)
-            has_user_stream = _ensure_stream_arg(jit_args)
-            ir_types = get_ir_types(jit_args)
-            loc = ir.Location.unknown(ctx)
+        compiled_func = None  # will be set inside lock or compile path
 
-            log().info(f"jit_args={jit_args}")
-            log().info(f"dsl_types={dsl_types}")
+        # Determine whether to use compile_lock for cross-process safety.
+        _use_compile_lock = use_disk_cache and self.cache_manager and not env.debug.dump_ir
+        if _use_compile_lock:
+            str_key = self._cache_key_to_str(cache_key)
+            _compile_lock_ctx = self.cache_manager.compile_lock(str_key)
+        else:
+            _compile_lock_ctx = nullcontext()
 
-            module = ir.Module.create(loc=loc)
-            module.operation.attributes["gpu.container_module"] = ir.UnitAttr.get()
+        with _compile_lock_ctx as _lock_result_or_none:
+            if _use_compile_lock:
+                _lock_result, _cache_writer = _lock_result_or_none
+            else:
+                _lock_result, _cache_writer = None, None
 
-            func_tracker = FuncLocationTracker(self.func)
+            if _lock_result is not None and not getattr(_lock_result, "_link_libs", None):
+                # Cache hit after waiting for another process to compile.
+                compiled_func = _lock_result
+                self._mem_cache[cache_key] = compiled_func
+                self._last_compiled = (cache_key, compiled_func)
+            else:
+                with _create_mlir_context() as ctx, _hints_ctx:
+                    param_names, jit_args, dsl_types, constexpr_values = convert_to_jit_arguments(sig, bound)
+                    has_user_stream = _ensure_stream_arg(jit_args)
+                    ir_types = get_ir_types(jit_args)
+                    loc = ir.Location.unknown(ctx)
 
-            with ir.InsertionPoint(module.body), loc:
-                backend = get_backend()
-                gpu_module = create_gpu_module("kernels", targets=backend.gpu_module_targets())
+                    log().info(f"jit_args={jit_args}")
+                    log().info(f"dsl_types={dsl_types}")
 
-                func_op = func.FuncOp(self.func.__name__, (ir_types, []))
-                func_op.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()
-                entry_block = func_op.add_entry_block()
+                    module = ir.Module.create(loc=loc)
+                    module.operation.attributes["gpu.container_module"] = ir.UnitAttr.get()
 
-                with CompilationContext.create(func_tracker) as comp_ctx:
-                    comp_ctx.gpu_module_op = gpu_module
-                    comp_ctx.gpu_module_body = get_gpu_module_body(gpu_module)
+                    func_tracker = FuncLocationTracker(self.func)
 
-                    with ir.InsertionPoint(entry_block):
-                        ir_args = list(func_op.regions[0].blocks[0].arguments)
-                        if not has_user_stream:
-                            comp_ctx.stream_arg = ir_args[-1]
-                        user_jit_args = jit_args[: len(param_names)]
-                        dsl_args = construct_from_ir_values(dsl_types, user_jit_args, ir_args)
-                        log().info(f"dsl_args={dsl_args}")
-                        named_args = dict(zip(param_names, dsl_args))
-                        named_args.update(constexpr_values)
-                        if bound_self is not None:
-                            self.func(bound_self, **named_args)
-                        else:
-                            self.func(**named_args)
-                        func.ReturnOp([])
+                    with ir.InsertionPoint(module.body), loc:
+                        backend = get_backend()
+                        gpu_module = create_gpu_module("kernels", targets=backend.gpu_module_targets())
 
-            original_ir = module.operation.get_asm(enable_debug_info=True)
+                        func_op = func.FuncOp(self.func.__name__, (ir_types, []))
+                        func_op.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()
+                        entry_block = func_op.add_entry_block()
 
-            # Extern-symbol integration is carried entirely via
-            # CompilationContext: each ExternFunction populates
-            # link_libs and post_load_processors at declaration time,
-            # so the JIT path depends on no framework-specific import.
-            link_libs = list(comp_ctx.link_libs) if comp_ctx.link_libs else None
-            post_load_processors = list(comp_ctx.post_load_processors)
-            extern_linked = bool(link_libs or post_load_processors)
-            if extern_linked and _use_external_binary_codegen():
-                raise RuntimeError(
-                    "FLYDSL_COMPILE_LLVM_DIR external codegen does not support extern-linked kernels yet; "
-                    "use embedded codegen for kernels that require #fly.explicit_module."
-                )
-            if extern_linked:
-                self._extern_linkage_keys.add(cache_key)
-                # Switch to explicit Python-side module loading so
-                # post_load_processors can receive hipModule_t handles.
-                # Also clear targets set at construction: rocdl-attach-target
-                # is the sole source when link_libs is used; duplicating
-                # targets causes hipErrorNoBinaryForGpu.
-                gpu_module.offloadingHandler = ir.Attribute.parse("#fly.explicit_module")
-                if "targets" in gpu_module.operation.attributes:
-                    del gpu_module.operation.attributes["targets"]
+                        with CompilationContext.create(func_tracker) as comp_ctx:
+                            comp_ctx.gpu_module_op = gpu_module
+                            comp_ctx.gpu_module_body = get_gpu_module_body(gpu_module)
 
-            compiled_module = MlirCompiler.compile(
-                module,
-                arch=backend.target.arch,
-                func_name=self.func.__name__,
-                link_libs=link_libs,
+                            with ir.InsertionPoint(entry_block):
+                                ir_args = list(func_op.regions[0].blocks[0].arguments)
+                                if not has_user_stream:
+                                    comp_ctx.stream_arg = ir_args[-1]
+                                user_jit_args = jit_args[: len(param_names)]
+                                dsl_args = construct_from_ir_values(dsl_types, user_jit_args, ir_args)
+                                log().info(f"dsl_args={dsl_args}")
+                                named_args = dict(zip(param_names, dsl_args))
+                                named_args.update(constexpr_values)
+                                if bound_self is not None:
+                                    self.func(bound_self, **named_args)
+                                else:
+                                    self.func(**named_args)
+                                func.ReturnOp([])
+
+                    original_ir = module.operation.get_asm(enable_debug_info=True)
+
+                    # Extern-symbol integration is carried entirely via
+                    # CompilationContext: each ExternFunction populates
+                    # link_libs and post_load_processors at declaration time,
+                    # so the JIT path depends on no framework-specific import.
+                    link_libs = list(comp_ctx.link_libs) if comp_ctx.link_libs else None
+                    post_load_processors = list(comp_ctx.post_load_processors)
+                    extern_linked = bool(link_libs or post_load_processors)
+                    if extern_linked and _use_external_binary_codegen():
+                        raise RuntimeError(
+                            "FLYDSL_COMPILE_LLVM_DIR external codegen does not support extern-linked kernels yet; "
+                            "use embedded codegen for kernels that require #fly.explicit_module."
+                        )
+                    if extern_linked:
+                        self._extern_linkage_keys.add(cache_key)
+                        # Switch to explicit Python-side module loading so
+                        # post_load_processors can receive hipModule_t handles.
+                        # Also clear targets set at construction: rocdl-attach-target
+                        # is the sole source when link_libs is used; duplicating
+                        # targets causes hipErrorNoBinaryForGpu.
+                        gpu_module.offloadingHandler = ir.Attribute.parse("#fly.explicit_module")
+                        if "targets" in gpu_module.operation.attributes:
+                            del gpu_module.operation.attributes["targets"]
+
+                    compiled_module = MlirCompiler.compile(
+                        module,
+                        arch=backend.target.arch,
+                        func_name=self.func.__name__,
+                        link_libs=link_libs,
+                    )
+
+                    compiled_func = CompiledArtifact(
+                        compiled_module,
+                        self.func.__name__,
+                        original_ir,
+                        post_load_processors=post_load_processors,
+                        link_libs=link_libs,
+                        uses_explicit_module=extern_linked,
+                    )
+
+                    # Always keep a reference to the latest compilation result so
+                    # flyc.compile() can retrieve it even when caching is disabled.
+                    self._last_compiled = (cache_key, compiled_func)
+
+                    # Keep compiled artifacts alive within the process even when disk
+                    # cache is disabled. This preserves code object lifetime for
+                    # profiler/roctracer teardown and enables fast same-process reuse.
+                    self._mem_cache[cache_key] = compiled_func
+                    if _cache_writer and not extern_linked:
+                        _cache_writer(compiled_func)
+
+        # OUTSIDE lock: engine init + kernel launch
+        if env.compile.compile_only:
+            print(f"[flydsl] COMPILE_ONLY=1, compilation succeeded (arch={get_backend().target.arch})")
+            return None
+
+        # Build CallState so subsequent calls skip DLPack. The in-process
+        # CompiledArtifact cache above owns the ExecutionEngine/code object,
+        # so the function pointer remains valid even when disk cache is off.
+        try:
+            state = _build_call_state(
+                sig,
+                args_tuple,
+                compiled_func._get_func_exe(),
             )
+        except Exception:
+            state = None
+        if state is not None:
+            self._call_state_cache[cache_key] = state
+            return state(args_tuple)
 
-            compiled_func = CompiledArtifact(
-                compiled_module,
-                self.func.__name__,
-                original_ir,
-                post_load_processors=post_load_processors,
-                link_libs=link_libs,
-                uses_explicit_module=extern_linked,
-            )
-
-            # Always keep a reference to the latest compilation result so
-            # flyc.compile() can retrieve it even when caching is disabled.
-            self._last_compiled = (cache_key, compiled_func)
-
-            # Keep compiled artifacts alive within the process even when disk
-            # cache is disabled. This preserves code object lifetime for
-            # profiler/roctracer teardown and enables fast same-process reuse.
-            self._mem_cache[cache_key] = compiled_func
-            if use_disk_cache and not extern_linked and self.cache_manager and not env.debug.dump_ir:
-                str_key = self._cache_key_to_str(cache_key)
-                self.cache_manager.set(str_key, compiled_func)
-
-            if env.compile.compile_only:
-                print(f"[flydsl] COMPILE_ONLY=1, compilation succeeded (arch={backend.target.arch})")
-                return None
-
-            result = compiled_func(*jit_args)
-
-            # Build CallState so subsequent calls skip DLPack. The in-process
-            # CompiledArtifact cache above owns the ExecutionEngine/code object,
-            # so the function pointer remains valid even when disk cache is off.
-            try:
-                state = _build_call_state(
-                    sig,
-                    args_tuple,
-                    compiled_func._get_func_exe(),
-                )
-                if state is not None:
-                    self._call_state_cache[cache_key] = state
-            except Exception:
-                pass
-
-            return result
+        # Fallback: run through DLPack
+        if not hasattr(self, "_cached_ctx"):
+            self._cached_ctx = _create_mlir_context()
+        with self._cached_ctx:
+            _, jit_args, _, _ = convert_to_jit_arguments(sig, bound)
+            _ensure_stream_arg(jit_args)
+            return compiled_func(*jit_args)
 
 
 def _ensure_stream_arg(jit_args: list) -> bool:
