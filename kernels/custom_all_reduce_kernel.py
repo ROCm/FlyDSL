@@ -13,7 +13,8 @@ from __future__ import annotations
 import math
 
 import flydsl.compiler as flyc
-from flydsl.expr import arith as ea, gpu, range_constexpr, vector as ev, buffer_ops
+import flydsl.expr as fx
+from flydsl.expr import arith as ea, gpu, range_constexpr, buffer_ops
 from flydsl.expr import const_expr
 from flydsl.expr.typing import T, Int32, Int64, Stream
 from flydsl._mlir import ir
@@ -49,8 +50,8 @@ def _make_rsrc(addr_i64):
 
 def _load_v4i32(rsrc, elem_off_i32):
     """Buffer-load vector<4xi32> (16 bytes) with pre-built descriptor."""
-    return buffer_ops.buffer_load(rsrc, elem_off_i32,
-                                  vec_width=4, dtype=T.i32)
+    raw = buffer_ops.buffer_load(rsrc, elem_off_i32, vec_width=4, dtype=T.i32)
+    return fx.Vector(raw)
 
 
 def _store_v4i32(rsrc, elem_off_i32, data):
@@ -70,13 +71,13 @@ def _store_v4i32_nt(rsrc, elem_off_i32, v4i32_val):
 
 def _store_i32(rsrc, val_i32):
     """Store i32 with default caching via pre-built rsrc descriptor."""
-    buffer_ops.buffer_store(val_i32, rsrc, ea.constant(0, type=T.i32),
+    buffer_ops.buffer_store(val_i32, rsrc, 0,
                             cache_modifier=_CM_CACHED)
 
 
 def _load_i32_uncached(rsrc):
     """Load i32 bypassing L2 (sc1) via pre-built rsrc descriptor."""
-    val = buffer_ops.buffer_load(rsrc, ea.constant(0, type=T.i32),
+    val = buffer_ops.buffer_load(rsrc, 0,
                                  vec_width=1, dtype=T.i32,
                                  cache_modifier=_CM_SC1)
     rocdl.s_waitcnt(0)
@@ -85,7 +86,7 @@ def _load_i32_uncached(rsrc):
 
 def _store_i32_uncached(rsrc, val_i32):
     """Store i32 bypassing L1+L2 (sc0+sc1) via pre-built rsrc descriptor."""
-    buffer_ops.buffer_store(val_i32, rsrc, ea.constant(0, type=T.i32),
+    buffer_ops.buffer_store(val_i32, rsrc, 0,
                             cache_modifier=_CM_SC0_SC1)
     rocdl.s_waitcnt(0)
 
@@ -105,7 +106,7 @@ def _store_i32_uncached_flush(rsrc, val_i32):
     buffer_wbl2 flushes dirty L2 lines to HBM before the signal store.
     """
     llvm.InlineAsmOp(None, [], "buffer_wbl2 sc0 sc1", "", has_side_effects=True)
-    buffer_ops.buffer_store(val_i32, rsrc, ea.constant(0, type=T.i32),
+    buffer_ops.buffer_store(val_i32, rsrc, 0,
                             cache_modifier=_CM_SC0_SC1)
     rocdl.s_waitcnt(0)
 
@@ -115,19 +116,19 @@ def _store_i32_uncached_flush(rsrc, val_i32):
 def _pack_i64_vec(values):
     """Pack preloaded i64 values into vector<Nxi64> for contiguous VGPR storage.
 
-    On AMDGPU the subsequent ``ev.extract`` with a dynamic index lowers
+    On AMDGPU the subsequent ``fx.Vector.__getitem__`` with a dynamic index lowers
     through ``ConvertVectorToLLVM`` to ``llvm.extractelement`` which the
     backend emits as ``v_movrels_b32`` (VGPR-relative addressing, ~3 insns)
     instead of a chained ``arith.select`` costing 2*(N-1) insns.
     """
-    vec_type = T.vec(len(values), T.i64)
-    return ev.from_elements(vec_type, values)
+    return fx.Vector.from_elements(values, dtype=fx.Int64)
 
 
 def _extract_i64(vec, index):
     """Extract i64 from a packed vector by dynamic index (VGPR-relative)."""
-    idx = ea.index_cast(T.index, index)
-    return ev.extract(vec, dynamic_position=[idx])
+    if not isinstance(vec, fx.Vector):
+        vec = fx.Vector(vec)
+    return vec[index]
 
 
 def _load_device_ptr(array_base_i64, index):
@@ -186,6 +187,11 @@ def _u(v):
     return v.with_signedness(False)
 
 
+def _c64(v):
+    """Create i64 constant with concise syntax."""
+    return ea.constant(v, type=T.i64)
+
+
 # ---------------------------------------------------------------------------
 # Signal synchronization primitives
 # ---------------------------------------------------------------------------
@@ -194,21 +200,18 @@ def _signal_start_sync(*, lane_i32, rank_i32, bid_i32, self_sg_i64, sgs_i64, ngp
     """Start-sync: write start flag to all peers, wait for all to arrive."""
     i32, i64 = T.i32, T.i64
 
-    flag_addr = (self_sg_i64 + ea.constant(_SG_FLAG_OFF_B, type=i64)
-                 + bid_i32.extui(i64) * ea.constant(4, type=i64))
+    flag_addr = self_sg_i64 + _c64(_SG_FLAG_OFF_B) + bid_i32.extui(i64) * _c64(4)
     flag_rsrc = _make_rsrc(flag_addr)
-    flag = _load_i32_uncached(flag_rsrc) + ea.constant(1, type=i32)
+    flag = _load_i32_uncached(flag_rsrc) + 1
 
-    bid8 = bid_i32 * ea.constant(8, type=i32)
+    bid8 = bid_i32 * 8
     lin_lane = bid8 + lane_i32
-    start_wait_addr = (self_sg_i64 + ea.constant(_SG_START_OFF_B, type=i64)
-                       + lin_lane.extui(i64) * ea.constant(4, type=i64))
+    start_wait_addr = self_sg_i64 + _c64(_SG_START_OFF_B) + lin_lane.extui(i64) * _c64(4)
     wait_rsrc = _make_rsrc(start_wait_addr)
     lin_rank = bid8 + rank_i32
-    start_rank_off = (ea.constant(_SG_START_OFF_B, type=i64)
-                      + lin_rank.extui(i64) * ea.constant(4, type=i64))
+    start_rank_off = _c64(_SG_START_OFF_B) + lin_rank.extui(i64) * _c64(4)
 
-    is_lane = _u(lane_i32) < ea.constant(ngpus, type=i32)
+    is_lane = _u(lane_i32) < ngpus
     if_op = scf.IfOp(is_lane, results_=[], has_else=False)
     with ir.InsertionPoint(if_op.then_block):
         peer_sg = _extract_i64(_pack_i64_vec(sgs_i64), lane_i32)
@@ -227,7 +230,7 @@ def _signal_start_sync(*, lane_i32, rank_i32, bid_i32, self_sg_i64, sgs_i64, ngp
         scf.YieldOp([])
 
     gpu.barrier()
-    is_t0 = lane_i32 == ea.constant(0, type=i32)
+    is_t0 = lane_i32 == 0
     if_t0 = scf.IfOp(is_t0, results_=[], has_else=False)
     with ir.InsertionPoint(if_t0.then_block):
         _store_i32(flag_rsrc, flag)
@@ -241,21 +244,18 @@ def _signal_end_sync(*, lane_i32, rank_i32, bid_i32, self_sg_i64, sgs_i64,
 
     i32, i64 = T.i32, T.i64
 
-    flag_addr = (self_sg_i64 + ea.constant(_SG_FLAG_OFF_B, type=i64)
-                 + bid_i32.extui(i64) * ea.constant(4, type=i64))
+    flag_addr = self_sg_i64 + _c64(_SG_FLAG_OFF_B) + bid_i32.extui(i64) * _c64(4)
     flag_rsrc = _make_rsrc(flag_addr)
-    flag = _load_i32_uncached(flag_rsrc) + ea.constant(1, type=i32)
+    flag = _load_i32_uncached(flag_rsrc) + 1
 
-    bid8 = bid_i32 * ea.constant(8, type=i32)
+    bid8 = bid_i32 * 8
     lin_lane = bid8 + lane_i32
-    end_wait_addr = (self_sg_i64 + ea.constant(_SG_END_OFF_B, type=i64)
-                     + lin_lane.extui(i64) * ea.constant(4, type=i64))
+    end_wait_addr = self_sg_i64 + _c64(_SG_END_OFF_B) + lin_lane.extui(i64) * _c64(4)
     wait_rsrc = _make_rsrc(end_wait_addr)
     lin_rank = bid8 + rank_i32
-    end_rank_off = (ea.constant(_SG_END_OFF_B, type=i64)
-                    + lin_rank.extui(i64) * ea.constant(4, type=i64))
+    end_rank_off = _c64(_SG_END_OFF_B) + lin_rank.extui(i64) * _c64(4)
 
-    is_lane = _u(lane_i32) < ea.constant(ngpus, type=i32)
+    is_lane = _u(lane_i32) < ngpus
     if_op = scf.IfOp(is_lane, results_=[], has_else=False)
     with ir.InsertionPoint(if_op.then_block):
         peer_sg = _extract_i64(_pack_i64_vec(sgs_i64), lane_i32)
@@ -276,7 +276,7 @@ def _signal_end_sync(*, lane_i32, rank_i32, bid_i32, self_sg_i64, sgs_i64,
         scf.YieldOp([])
 
     gpu.barrier()
-    is_t0 = lane_i32 == ea.constant(0, type=i32)
+    is_t0 = lane_i32 == 0
     if_t0 = scf.IfOp(is_t0, results_=[], has_else=False)
     with ir.InsertionPoint(if_t0.then_block):
         _store_i32(flag_rsrc, flag)
@@ -287,17 +287,10 @@ def _signal_end_sync(*, lane_i32, rank_i32, bid_i32, self_sg_i64, sgs_i64,
 # Kernel work group size attribute helper
 # ---------------------------------------------------------------------------
 
-def _set_workgroup_size(threads: int):
-    """Get the enclosing gpu.func and set rocdl.flat_work_group_size.
-
-    rocdl.reqd_work_group_size is set by the MLIR lowering from the
-    known_block_size attribute declared on the @flyc.kernel decorator;
-    setting it here as well would create a duplicate attribute in the
-    LLVMFuncOp and trigger a DictionaryAttr assertion failure.
-    """
+def _current_gpu_func():
+    """Return the enclosing gpu.func op for current kernel emission."""
     entry_block = ir.InsertionPoint.current.block
     gpu_func_op = entry_block.owner
-    gpu_func_op.operation.attributes["rocdl.flat_work_group_size"] = ir.StringAttr.get(f"{threads},{threads}")
     return gpu_func_op
 
 
@@ -374,24 +367,21 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
         """
         i32, i64 = T.i32, T.i64
         v4i32 = T.i32x4
-        if const_expr(is_f32):
-            v4f32 = T.f32x4
-        else:
-            v8half = T.bf16x8 if is_bf16 else T.f16x8
-            v8f32 = T.vec(8, T.f32)
+        if const_expr(not is_f32):
+            half_dtype = fx.BFloat16 if is_bf16 else fx.Float16
 
-        gpu_func_op = _set_workgroup_size(threads)
+        gpu_func_op = _current_gpu_func()
 
-        lane_i32    = ea.index_cast(i32, gpu.thread_id("x"))
-        bid_i32     = ea.index_cast(i32, gpu.block_id("x"))
-        rank_i32    = rank.ir_value()
-        self_sg_i64 = self_sg.ir_value()
-        sg_ptrs_i64 = sg_ptrs.ir_value()
-        in_ptrs_i64 = in_ptrs.ir_value()
-        out_ptr_i64 = out_ptr.ir_value()
+        lane_i32 = fx.thread_idx.x
+        bid_i32 = fx.block_idx.x
+        rank_i32 = rank
+        self_sg_i64 = self_sg
+        sg_ptrs_i64 = sg_ptrs
+        in_ptrs_i64 = in_ptrs
+        out_ptr_i64 = out_ptr
 
-        sgs         = [_load_device_ptr(sg_ptrs_i64, ea.constant(i, type=i32)) for i in range(world_size)]
-        in_ptrs_arr = [_load_device_ptr(in_ptrs_i64, ea.constant(i, type=i32)) for i in range(world_size)]
+        sgs = [_load_device_ptr(sg_ptrs_i64, i) for i in range(world_size)]
+        in_ptrs_arr = [_load_device_ptr(in_ptrs_i64, i) for i in range(world_size)]
         in_ptrs_vec = _pack_i64_vec(in_ptrs_arr)
 
         smem_sym = f"allreduce_1s_smem_ws{world_size}_t{threads}"
@@ -404,7 +394,7 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
         smem_ptr = SmemPtr(allocator.get_base(), smem_off, v4i32, shape=(n_smem,))
         smem_ptr.get()
 
-        tnum_gpu_i32 = ea.constant(tnum_gpu, type=i32)
+        tnum_gpu_i32 = tnum_gpu
         warp_id = _u(lane_i32) // tnum_gpu_i32
         lane_id = _u(lane_i32) % tnum_gpu_i32
 
@@ -414,59 +404,41 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
         # Grid-stride loop: each warp loads from its assigned rank,
         # then warp 0 reduces and writes output.
         tid_pack = bid_i32 * tnum_gpu_i32 + lane_id
-        stride_pack = gpu.grid_dim.x.ir_value() * tnum_gpu_i32
+        stride_pack = fx.grid_dim.x * tnum_gpu_i32
 
         out_rsrc = _make_rsrc(out_ptr_i64)
         in_rsrc = _make_rsrc(_extract_i64(in_ptrs_vec, warp_id))
 
-        loop = scf.WhileOp([i32, i32], [tid_pack, ea.constant(0, type=i32)])
-        bfor = ir.Block.create_at_start(loop.before, [i32, i32])
-        afor = ir.Block.create_at_start(loop.after,  [i32, i32])
-        with ir.InsertionPoint(bfor):
-            p = bfor.arguments[0]
-            cond = _u(p) < ea.constant(num_packs, type=i32)
-            scf.ConditionOp(cond, [p, bfor.arguments[1]])
-        with ir.InsertionPoint(afor):
-            p = afor.arguments[0]
-            parity = afor.arguments[1]
-
-            off_i32 = p * ea.constant(_ELEMS_PER_PACK, type=i32)
+        parity = 0
+        for p in range(tid_pack, num_packs, stride_pack):
+            off_i32 = p * _ELEMS_PER_PACK
             raw = _load_v4i32(in_rsrc, off_i32)
-            sm_base = parity * ea.constant(threads, type=i32)
-            sm_idx = ea.index_cast(T.index, sm_base + lane_i32)
+            sm_base = parity * threads
+            sm_idx = fx.Index(sm_base + lane_i32)
             smem_ptr.store(raw, [sm_idx])
             gpu.barrier()
 
             # Warp 0 reduces across all warps and writes to output
-            is_w0 = warp_id == ea.constant(0, type=i32)
-            ifw0 = scf.IfOp(is_w0, results_=[], has_else=False)
-            with ir.InsertionPoint(ifw0.then_block):
+            if warp_id == 0:
                 acc = None
                 for wi in range_constexpr(world_size):
                     sm_i_idx = ea.index_cast(
-                        T.index, ea.constant(wi, type=i32) * tnum_gpu_i32 + lane_id + sm_base)
-                    raw_i = smem_ptr.load([sm_i_idx])
+                        T.index, wi * tnum_gpu_i32 + lane_id + sm_base)
+                    raw_i = fx.Vector(smem_ptr.load([sm_i_idx]))
                     if const_expr(is_f32):
-                        vf = ev.bitcast(v4f32, raw_i)
+                        vf = raw_i.bitcast(fx.Float32)
                         acc = vf if acc is None else acc + vf
                     else:
-                        v16 = ev.bitcast(v8half, raw_i)
-                        v32 = v16.extf(v8f32)
+                        v16 = raw_i.bitcast(half_dtype)
+                        v32 = v16.to(fx.Float32)
                         acc = v32 if acc is None else acc + v32
                 if const_expr(is_f32):
-                    out_bits = ev.bitcast(v4i32, acc)
+                    out_bits = acc.bitcast(fx.Int32)
                 else:
-                    out_bits = ev.bitcast(v4i32, acc.truncf(v8half))
-                dst_off_i32 = p * ea.constant(_ELEMS_PER_PACK, type=i32)
+                    out_bits = acc.to(half_dtype).bitcast(fx.Int32)
+                dst_off_i32 = p * _ELEMS_PER_PACK
                 _store_v4i32(out_rsrc, dst_off_i32, out_bits)
-                scf.YieldOp([])
-
-            # No barrier 2 needed: parity double-buffer ensures next iteration
-            # writes to the opposite smem half, so warp-0 reads from parity_N half
-            # are disjoint from all-warp writes to (1-parity_N) half in the next
-            # iteration. The barrier at the top of the next iteration guarantees
-            # warp-0 finishes before any thread reads the new data.
-            scf.YieldOp([p + stride_pack, ea.constant(1, type=i32) - parity])
+            parity = 1 - parity
 
         # 1-stage does not use end_sync to avoid hangs.
 
@@ -484,42 +456,41 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
     ):
         i32, i64 = T.i32, T.i64
         v4i32 = T.i32x4
-        if const_expr(is_f32):
-            v4f32 = T.f32x4
-        else:
-            v8half = T.bf16x8 if is_bf16 else T.f16x8
-            v8f32 = T.vec(8, T.f32)
+        if const_expr(not is_f32):
+            half_dtype = fx.BFloat16 if is_bf16 else fx.Float16
 
-        gpu_func_op = _set_workgroup_size(threads)
+        gpu_func_op = _current_gpu_func()
 
-        lane_i32 = ea.index_cast(i32, gpu.thread_id("x"))
-        bid_i32 = ea.index_cast(i32, gpu.block_id("x"))
-        rank_i32 = rank.ir_value()
-        self_sg_i64 = self_sg.ir_value()
-        sg_ptrs_i64 = sg_ptrs.ir_value()
-        in_ptrs_i64 = in_ptrs.ir_value()
-        tmp_ptrs_i64 = tmp_ptrs.ir_value()
-        out_ptr_i64 = out_ptr.ir_value()
+        lane_i32 = fx.thread_idx.x
+        bid_i32 = fx.block_idx.x
+        rank_i32 = rank
+        self_sg_i64 = self_sg
+        sg_ptrs_i64 = sg_ptrs
+        in_ptrs_i64 = in_ptrs
+        tmp_ptrs_i64 = tmp_ptrs
+        out_ptr_i64 = out_ptr
 
-        sgs = [_load_device_ptr(sg_ptrs_i64, ea.constant(i, type=i32)) for i in range(world_size)]
-        in_ptrs_arr = [_load_device_ptr(in_ptrs_i64, ea.constant(i, type=i32)) for i in range(world_size)]
-        tmp_ptrs_arr = [_load_device_ptr(tmp_ptrs_i64, ea.constant(i, type=i32)) for i in range(world_size)]
+        sgs = [_load_device_ptr(sg_ptrs_i64, i) for i in range(world_size)]
+        in_ptrs_arr = [_load_device_ptr(in_ptrs_i64, i) for i in range(world_size)]
+        tmp_ptrs_arr = [_load_device_ptr(tmp_ptrs_i64, i) for i in range(world_size)]
         in_ptrs_vec = _pack_i64_vec(in_ptrs_arr)
 
         # Compute pack range for this rank's reduce-scatter partition
-        start_p = rank_i32 * ea.constant(part_p, type=i32)
-        is_last = rank_i32 == ea.constant(world_size - 1, type=i32)
-        end_p = ea.select(is_last, ea.constant(num_packs, type=i32),
-                          start_p + ea.constant(part_p, type=i32))
+        start_p = rank_i32 * part_p
+        is_last = rank_i32 == (world_size - 1)
+        end_p = is_last.select(
+            num_packs,
+            start_p + part_p,
+        )
 
         _signal_start_sync(lane_i32=lane_i32, rank_i32=rank_i32, bid_i32=bid_i32,
                            self_sg_i64=self_sg_i64, sgs_i64=sgs, ngpus=world_size)
 
-        tnum_gpu_i32 = ea.constant(tnum_gpu, type=i32)
+        tnum_gpu_i32 = tnum_gpu
         warp_id = _u(lane_i32) // tnum_gpu_i32
         lane_id = _u(lane_i32) % tnum_gpu_i32
         tid_pack = bid_i32 * tnum_gpu_i32 + lane_id
-        stride_pack = gpu.grid_dim.x.ir_value() * tnum_gpu_i32
+        stride_pack = fx.grid_dim.x * tnum_gpu_i32
 
         _buf_tag = "1b" if _use_single_buf_2stage else "2b"
         smem_sym = f"allreduce_smem_ws{world_size}_t{threads}_{_buf_tag}"
@@ -541,75 +512,57 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
 
         def _build_reduce_body(cur, smem_base_expr=None):
             """Emit reduce body: load → smem → barrier1 → warp0 reduce → [barrier2]."""
-            off_i32 = cur * ea.constant(_ELEMS_PER_PACK, type=i32)
+            off_i32 = cur * _ELEMS_PER_PACK
             raw = _load_v4i32(in_rsrc, off_i32)
             if const_expr(smem_base_expr is None):
-                sm_idx = ea.index_cast(T.index, lane_i32)
+                sm_idx = fx.Index(lane_i32)
             else:
-                sm_idx = ea.index_cast(T.index, smem_base_expr + lane_i32)
+                sm_idx = fx.Index(smem_base_expr + lane_i32)
             smem_ptr.store(raw, [sm_idx])
             gpu.barrier()  # barrier 1: all warps have written smem
 
-            is_w0 = warp_id == ea.constant(0, type=i32)
-            ifw0 = scf.IfOp(is_w0, results_=[], has_else=False)
-            with ir.InsertionPoint(ifw0.then_block):
+            if warp_id == 0:
                 acc = None
                 for wi in range_constexpr(world_size):
                     if const_expr(smem_base_expr is None):
-                        sm_r_idx = ea.index_cast(T.index, ea.constant(wi, type=i32) * tnum_gpu_i32 + lane_id)
+                        sm_r_idx = fx.Index(wi * tnum_gpu_i32 + lane_id)
                     else:
-                        sm_r_idx = ea.index_cast(T.index, ea.constant(wi, type=i32) * tnum_gpu_i32 + lane_id + smem_base_expr)
-                    raw_i = smem_ptr.load([sm_r_idx])
+                        sm_r_idx = fx.Index(
+                            wi * tnum_gpu_i32 + lane_id + smem_base_expr
+                        )
+                    raw_i = fx.Vector(smem_ptr.load([sm_r_idx]))
                     if const_expr(is_f32):
-                        vf = ev.bitcast(v4f32, raw_i)
+                        vf = raw_i.bitcast(fx.Float32)
                         acc = vf if acc is None else acc + vf
                     else:
-                        v16 = ev.bitcast(v8half, raw_i)
-                        v32 = v16.extf(v8f32)
+                        v16 = raw_i.bitcast(half_dtype)
+                        v32 = v16.to(fx.Float32)
                         acc = v32 if acc is None else acc + v32
                 if const_expr(is_f32):
-                    out_raw = ev.bitcast(v4i32, acc)
+                    out_raw = acc.bitcast(fx.Int32)
                 else:
-                    out_raw = ev.bitcast(v4i32, acc.truncf(v8half))
+                    out_raw = acc.to(half_dtype).bitcast(fx.Int32)
                 rel_p = cur - start_p
-                rel_off_i32 = rel_p * ea.constant(_ELEMS_PER_PACK, type=i32)
+                rel_off_i32 = rel_p * _ELEMS_PER_PACK
                 _store_v4i32(tmp_out_rsrc, rel_off_i32, out_raw)
-                scf.YieldOp([])
 
         idx_p = start_p + tid_pack
         if const_expr(_use_single_buf_2stage):
             # Single buffer: 8KB LDS, 2 barriers per iteration.
-            loop1 = scf.WhileOp([i32], [idx_p])
-            b1 = ir.Block.create_at_start(loop1.before, [i32])
-            a1 = ir.Block.create_at_start(loop1.after, [i32])
-            with ir.InsertionPoint(b1):
-                cur = b1.arguments[0]
-                cond = _u(cur) < end_p
-                scf.ConditionOp(cond, [cur])
-            with ir.InsertionPoint(a1):
-                cur = a1.arguments[0]
+            for cur in range(idx_p, end_p, stride_pack):
                 _build_reduce_body(cur, smem_base_expr=None)
                 gpu.barrier()  # barrier 2: protect smem before next iter's writes
-                scf.YieldOp([cur + stride_pack])
         else:
             # Double buffer: 16KB LDS, 1 barrier per iteration (parity trick).
             # The parity alternates between the two smem halves so warp-0 reads
             # from half-A while all warps write the next pack to half-B.
-            loop1 = scf.WhileOp([i32, i32], [idx_p, ea.constant(0, type=i32)])
-            b1 = ir.Block.create_at_start(loop1.before, [i32, i32])
-            a1 = ir.Block.create_at_start(loop1.after, [i32, i32])
-            with ir.InsertionPoint(b1):
-                cur = b1.arguments[0]
-                cond = _u(cur) < end_p
-                scf.ConditionOp(cond, [cur, b1.arguments[1]])
-            with ir.InsertionPoint(a1):
-                cur = a1.arguments[0]
-                parity = a1.arguments[1]
-                sm_base = parity * ea.constant(threads, type=i32)
+            parity = 0
+            for cur in range(idx_p, end_p, stride_pack):
+                sm_base = parity * threads
                 _build_reduce_body(cur, smem_base_expr=sm_base)
                 # No barrier 2: parity ensures next iteration writes to opposite
                 # smem half, so warp-0 reads and all-warp writes are disjoint.
-                scf.YieldOp([cur + stride_pack, ea.constant(1, type=i32) - parity])
+                parity = 1 - parity
 
         gpu.barrier()
         _signal_end_sync(lane_i32=lane_i32, rank_i32=rank_i32, bid_i32=bid_i32,
@@ -621,56 +574,36 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
         if const_expr(vec_ok):
             tmp_ptrs_vec = _pack_i64_vec(tmp_ptrs_arr)
             tid_pack2 = bid_i32 * tnum_gpu_i32 + lane_id
-            stride_pack2 = gpu.grid_dim.x.ir_value() * tnum_gpu_i32
+            stride_pack2 = fx.grid_dim.x * tnum_gpu_i32
             tmp_rsrc = _make_rsrc(_extract_i64(tmp_ptrs_vec, warp_id))
-            loop2 = scf.WhileOp([i32], [tid_pack2])
-            b2 = ir.Block.create_at_start(loop2.before, [i32])
-            a2 = ir.Block.create_at_start(loop2.after, [i32])
-            with ir.InsertionPoint(b2):
-                cur = b2.arguments[0]
-                cond = _u(cur) < ea.constant(part_p, type=i32)
-                scf.ConditionOp(cond, [cur])
-            with ir.InsertionPoint(a2):
-                cur = a2.arguments[0]
+            for cur in range(tid_pack2, part_p, stride_pack2):
                 sum_rw = rank_i32 + warp_id
                 if const_expr(world_size in {2, 4, 8}):
-                    dst_rank = sum_rw & ea.constant(world_size - 1, type=i32)
+                    dst_rank = sum_rw & (world_size - 1)
                 else:
-                    dst_rank = _u(sum_rw) % ea.constant(world_size, type=i32)
-                src_off_i32 = cur * ea.constant(_ELEMS_PER_PACK, type=i32)
+                    dst_rank = _u(sum_rw) % world_size
+                src_off_i32 = cur * _ELEMS_PER_PACK
                 raw = _load_v4i32(tmp_rsrc, src_off_i32)
-                dst_pack = dst_rank * ea.constant(part_p, type=i32) + cur
-                dst_off_i32 = dst_pack * ea.constant(_ELEMS_PER_PACK, type=i32)
+                dst_pack = dst_rank * part_p + cur
+                dst_off_i32 = dst_pack * _ELEMS_PER_PACK
                 _store_v4i32(out_rsrc, dst_off_i32, raw)
-                scf.YieldOp([cur + stride_pack2])
         else:
             tmp_rsrcs = [_make_rsrc(tmp_ptrs_arr[i]) for i in range(world_size)]
-            tid_i32 = bid_i32 * ea.constant(threads, type=i32) + lane_i32
-            stride_i32 = gpu.grid_dim.x.ir_value() * ea.constant(threads, type=i32)
+            tid_i32 = bid_i32 * threads + lane_i32
+            stride_i32 = fx.grid_dim.x * threads
 
-            loop2 = scf.WhileOp([i32], [tid_i32])
-            b2 = ir.Block.create_at_start(loop2.before, [i32])
-            a2 = ir.Block.create_at_start(loop2.after, [i32])
-            with ir.InsertionPoint(b2):
-                cur = b2.arguments[0]
-                cond = _u(cur) < ea.constant(largest_part_p, type=i32)
-                scf.ConditionOp(cond, [cur])
-            with ir.InsertionPoint(a2):
-                cur = a2.arguments[0]
+            for cur in range(tid_i32, largest_part_p, stride_i32):
                 for p in range_constexpr(world_size):
                     if const_expr(p == world_size - 1):
-                        ok = ea.constant(1, type=T.bool())
+                        ok = True
                     else:
-                        ok = _u(cur) < ea.constant(part_p, type=i32)
-                    ifp = scf.IfOp(ok, results_=[], has_else=False)
-                    with ir.InsertionPoint(ifp.then_block):
-                        src_off_i32 = cur * ea.constant(_ELEMS_PER_PACK, type=i32)
+                        ok = _u(cur) < part_p
+                    if ok:
+                        src_off_i32 = cur * _ELEMS_PER_PACK
                         raw = _load_v4i32(tmp_rsrcs[p], src_off_i32)
-                        dst_pack_idx = ea.constant(p * part_p, type=i32) + cur
-                        dst_off_i32 = dst_pack_idx * ea.constant(_ELEMS_PER_PACK, type=i32)
+                        dst_pack_idx = (p * part_p) + cur
+                        dst_off_i32 = dst_pack_idx * _ELEMS_PER_PACK
                         _store_v4i32(out_rsrc, dst_off_i32, raw)
-                        scf.YieldOp([])
-                scf.YieldOp([cur + stride_i32])
 
     # -----------------------------------------------------------------------
     # GPU Kernel: 2-stage write-mode (large tensors, writes reduced result
@@ -687,36 +620,33 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
     ):
         i32, i64 = T.i32, T.i64
         v4i32 = T.i32x4
-        if const_expr(is_f32):
-            v4f32 = T.f32x4
-        else:
-            v8half = T.bf16x8 if is_bf16 else T.f16x8
-            v8f32 = T.vec(8, T.f32)
+        if const_expr(not is_f32):
+            half_dtype = fx.BFloat16 if is_bf16 else fx.Float16
 
-        gpu_func_op = _set_workgroup_size(threads)
+        gpu_func_op = _current_gpu_func()
 
-        lane_i32 = ea.index_cast(i32, gpu.thread_id("x"))
-        bid_i32 = ea.index_cast(i32, gpu.block_id("x"))
-        rank_i32 = rank.ir_value()
-        self_sg_i64 = self_sg.ir_value()
-        sg_ptrs_i64 = sg_ptrs.ir_value()
-        inp_ptr_i64 = inp_ptr.ir_value()
-        out_ptrs_i64 = out_ptrs.ir_value()
-        tmp_ptrs_i64 = tmp_ptrs.ir_value()
+        lane_i32 = fx.thread_idx.x
+        bid_i32 = fx.block_idx.x
+        rank_i32 = rank
+        self_sg_i64 = self_sg
+        sg_ptrs_i64 = sg_ptrs
+        inp_ptr_i64 = inp_ptr
+        out_ptrs_i64 = out_ptrs
+        tmp_ptrs_i64 = tmp_ptrs
 
-        sgs = [_load_device_ptr(sg_ptrs_i64, ea.constant(i, type=i32)) for i in range(world_size)]
-        out_ptrs_arr = [_load_device_ptr(out_ptrs_i64, ea.constant(i, type=i32)) for i in range(world_size)]
-        tmp_ptrs_arr = [_load_device_ptr(tmp_ptrs_i64, ea.constant(i, type=i32)) for i in range(world_size)]
+        sgs = [_load_device_ptr(sg_ptrs_i64, i) for i in range(world_size)]
+        out_ptrs_arr = [_load_device_ptr(out_ptrs_i64, i) for i in range(world_size)]
+        tmp_ptrs_arr = [_load_device_ptr(tmp_ptrs_i64, i) for i in range(world_size)]
         tmp_ptrs_vec = _pack_i64_vec(tmp_ptrs_arr)
         out_ptrs_vec = _pack_i64_vec(out_ptrs_arr)
 
-        tnum_gpu_i32 = ea.constant(tnum_gpu, type=i32)
+        tnum_gpu_i32 = tnum_gpu
         log2_tnum = int(math.log2(tnum_gpu))
-        warp_id = _u(lane_i32) >> ea.constant(log2_tnum, type=i32)
+        warp_id = _u(lane_i32) >> log2_tnum
         warp_base = warp_id * tnum_gpu_i32
         lane_id = lane_i32 - warp_base
         tid_pack = bid_i32 * tnum_gpu_i32 + lane_id
-        stride_pack = gpu.grid_dim.x.ir_value() * tnum_gpu_i32
+        stride_pack = fx.grid_dim.x * tnum_gpu_i32
 
         smem_sym_wm = f"allreduce_smem_wm_ws{world_size}_t{threads}"
         n_smem_wm = 2 * threads
@@ -732,45 +662,29 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
         # ---- Stage 1: scatter local input to REMOTE tmp buffers ----
         inp_rsrc = _make_rsrc(inp_ptr_i64)
 
-        start_w = warp_id * ea.constant(part_p, type=i32)
-        is_last_w = warp_id == ea.constant(world_size - 1, type=i32)
-        end_w_if = scf.IfOp(is_last_w, results_=[i32], has_else=True)
-        with ir.InsertionPoint(end_w_if.then_block):
-            scf.YieldOp([ea.constant(num_packs, type=i32)])
-        with ir.InsertionPoint(end_w_if.else_block):
-            scf.YieldOp([start_w + ea.constant(part_p, type=i32)])
-        end_w = end_w_if.results[0]
+        start_w = warp_id * part_p
+        is_last_w = warp_id == (world_size - 1)
+        end_w = is_last_w.select(
+            num_packs,
+            start_w + part_p,
+        )
 
         dst_tmp = _extract_i64(tmp_ptrs_vec, warp_id)
-        is_tmp_null = dst_tmp == ea.constant(0, type=i64)
-        dst_tmp_low4 = dst_tmp & ea.constant(0xF, type=i64)
-        is_tmp_misaligned = dst_tmp_low4 != ea.constant(0, type=i64)
+        is_tmp_null = dst_tmp == _c64(0)
+        dst_tmp_low4 = dst_tmp & _c64(0xF)
+        is_tmp_misaligned = dst_tmp_low4 != _c64(0)
         bad_tmp_addr = is_tmp_null | is_tmp_misaligned
         dst_tmp_rsrc = _make_rsrc(dst_tmp)
 
         idx_s1 = start_w + tid_pack
-        loop_s1 = scf.WhileOp([i32, i32], [idx_s1, stride_pack])
-        bs1 = ir.Block.create_at_start(loop_s1.before, [i32, i32])
-        as1 = ir.Block.create_at_start(loop_s1.after, [i32, i32])
-        with ir.InsertionPoint(bs1):
-            cur = bs1.arguments[0]
-            cond = _u(cur) < end_w
-            scf.ConditionOp(cond, [cur, bs1.arguments[1]])
-        with ir.InsertionPoint(as1):
-            cur = as1.arguments[0]
-            stride_s1 = as1.arguments[1]
-            cur_off_i32 = cur * ea.constant(_ELEMS_PER_PACK, type=i32)
+        for cur in range(idx_s1, end_w, stride_pack):
+            cur_off_i32 = cur * _ELEMS_PER_PACK
             raw = _load_v4i32(inp_rsrc, cur_off_i32)
             rel_idx = cur - start_w
-            dst_off = rank_i32 * ea.constant(part_p, type=i32) + rel_idx
-            if_tmp_ok = scf.IfOp(bad_tmp_addr, results_=[], has_else=True)
-            with ir.InsertionPoint(if_tmp_ok.then_block):
-                scf.YieldOp([])
-            with ir.InsertionPoint(if_tmp_ok.else_block):
-                dst_off_i32 = dst_off * ea.constant(_ELEMS_PER_PACK, type=i32)
+            dst_off = rank_i32 * part_p + rel_idx
+            if not bad_tmp_addr:
+                dst_off_i32 = dst_off * _ELEMS_PER_PACK
                 _store_v4i32(dst_tmp_rsrc, dst_off_i32, raw)
-                scf.YieldOp([])
-            scf.YieldOp([cur + stride_s1, stride_s1])
 
         # Signal all ranks that stage 1 is complete
         _signal_start_sync(lane_i32=lane_i32, rank_i32=rank_i32, bid_i32=bid_i32,
@@ -778,49 +692,31 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
 
         # ---- Stage 2: reduce local tmp and write to REMOTE outputs ----
         tmp_out_rsrc = _make_rsrc(tmp_out_i64)
-        part_p_i32 = ea.constant(part_p, type=i32)
-        is_last_rank_s2 = rank_i32 == ea.constant(world_size - 1, type=i32)
-        end_s2_if = scf.IfOp(is_last_rank_s2, results_=[i32], has_else=True)
-        with ir.InsertionPoint(end_s2_if.then_block):
-            scf.YieldOp([ea.constant(largest_part_p, type=i32)])
-        with ir.InsertionPoint(end_s2_if.else_block):
-            scf.YieldOp([part_p_i32])
-        end_s2 = end_s2_if.results[0]
+        part_p_i32 = part_p
+        is_last_rank_s2 = rank_i32 == (world_size - 1)
+        end_s2 = is_last_rank_s2.select(largest_part_p, part_p_i32)
 
-        is_tmpout_null = tmp_out_i64 == ea.constant(0, type=i64)
-        tmpout_low4 = tmp_out_i64 & ea.constant(0xF, type=i64)
-        is_load_misaligned = tmpout_low4 != ea.constant(0, type=i64)
+        is_tmpout_null = tmp_out_i64 == _c64(0)
+        tmpout_low4 = tmp_out_i64 & _c64(0xF)
+        is_load_misaligned = tmpout_low4 != _c64(0)
         bad_load_addr = is_tmpout_null | is_load_misaligned
 
         dst_ptr = _extract_i64(out_ptrs_vec, warp_id)
         dst_out_rsrc = _make_rsrc(dst_ptr)
-        is_out_null = dst_ptr == ea.constant(0, type=i64)
-        dst_ptr_low4 = dst_ptr & ea.constant(0xF, type=i64)
-        is_out_misaligned = dst_ptr_low4 != ea.constant(0, type=i64)
+        is_out_null = dst_ptr == _c64(0)
+        dst_ptr_low4 = dst_ptr & _c64(0xF)
+        is_out_misaligned = dst_ptr_low4 != _c64(0)
         bad_out_addr = is_out_null | is_out_misaligned
 
-        loop_s2 = scf.WhileOp([i32, i32], [tid_pack, stride_pack])
-        bs2 = ir.Block.create_at_start(loop_s2.before, [i32, i32])
-        as2 = ir.Block.create_at_start(loop_s2.after, [i32, i32])
-        with ir.InsertionPoint(bs2):
-            cur = bs2.arguments[0]
-            cond = _u(cur) < end_s2
-            scf.ConditionOp(cond, [cur, bs2.arguments[1]])
-        with ir.InsertionPoint(as2):
-            cur = as2.arguments[0]
-            stride_s2 = as2.arguments[1]
-
+        for cur in range(tid_pack, end_s2, stride_pack):
             # All warps load their chunk from tmp into smem
-            src_off = warp_id * ea.constant(part_p, type=i32) + cur
-            src_off_i32 = src_off * ea.constant(_ELEMS_PER_PACK, type=i32)
-            raw_if = scf.IfOp(bad_load_addr, results_=[v4i32], has_else=True)
-            with ir.InsertionPoint(raw_if.then_block):
-                scf.YieldOp([ea.constant_vector(0, v4i32)])
-            with ir.InsertionPoint(raw_if.else_block):
-                scf.YieldOp([_load_v4i32(tmp_out_rsrc, src_off_i32)])
-            raw = raw_if.results[0]
+            src_off = warp_id * part_p + cur
+            src_off_i32 = src_off * _ELEMS_PER_PACK
+            raw = fx.Vector.filled(4, 0, fx.Int32)
+            if not bad_load_addr:
+                raw = _load_v4i32(tmp_out_rsrc, src_off_i32)
 
-            sm_idx = ea.index_cast(T.index, lane_i32)
+            sm_idx = fx.Index(lane_i32)
             smem_ptr.store(raw, [sm_idx])
             gpu.barrier()
 
@@ -829,47 +725,38 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
             # matching aiter: barrier1 guards tmp_smem, barrier2 guards
             # res_smem; between iterations tmp and res are disjoint so no
             # WAR hazard exists.
-            is_w0 = warp_id == ea.constant(0, type=i32)
-            ifw0 = scf.IfOp(is_w0, results_=[], has_else=False)
-            with ir.InsertionPoint(ifw0.then_block):
+            if warp_id == 0:
                 acc = None
                 for wi in range_constexpr(world_size):
                     sm_i_idx = ea.index_cast(
-                        T.index, ea.constant(wi * tnum_gpu, type=i32) + lane_id)
-                    raw_i = smem_ptr.load([sm_i_idx])
+                        T.index, (wi * tnum_gpu) + lane_id)
+                    raw_i = fx.Vector(smem_ptr.load([sm_i_idx]))
                     if const_expr(is_f32):
-                        vf = ev.bitcast(v4f32, raw_i)
+                        vf = raw_i.bitcast(fx.Float32)
                         acc = vf if acc is None else acc + vf
                     else:
-                        v16 = ev.bitcast(v8half, raw_i)
-                        v32 = v16.extf(v8f32)
+                        v16 = raw_i.bitcast(half_dtype)
+                        v32 = v16.to(fx.Float32)
                         acc = v32 if acc is None else acc + v32
                 if const_expr(is_f32):
-                    out_raw = ev.bitcast(v4i32, acc)
+                    out_raw = acc.bitcast(fx.Int32)
                 else:
-                    out_raw = ev.bitcast(v4i32, acc.truncf(v8half))
-                res_idx = ea.index_cast(T.index, ea.constant(threads, type=i32) + lane_id)
+                    out_raw = acc.to(half_dtype).bitcast(fx.Int32)
+                res_idx = fx.Index(threads + lane_id)
                 smem_ptr.store(out_raw, [res_idx])
-                scf.YieldOp([])
 
             gpu.barrier()
 
             # All warps read the same reduced result from res area and
             # nontemporal-write to their respective remote output buffers.
-            res_read_idx = ea.index_cast(T.index, ea.constant(threads, type=i32) + lane_id)
+            res_read_idx = fx.Index(threads + lane_id)
             reduced_val = smem_ptr.load([res_read_idx])
 
-            dst_out_off = rank_i32 * ea.constant(part_p, type=i32) + cur
-            dst_off_i32 = dst_out_off * ea.constant(_ELEMS_PER_PACK, type=i32)
+            dst_out_off = rank_i32 * part_p + cur
+            dst_off_i32 = dst_out_off * _ELEMS_PER_PACK
 
-            if_out_ok = scf.IfOp(bad_out_addr, results_=[], has_else=True)
-            with ir.InsertionPoint(if_out_ok.then_block):
-                scf.YieldOp([])
-            with ir.InsertionPoint(if_out_ok.else_block):
+            if not bad_out_addr:
                 _store_v4i32_nt(dst_out_rsrc, dst_off_i32, reduced_val)
-                scf.YieldOp([])
-
-            scf.YieldOp([cur + stride_s2, stride_s2])
 
         gpu.barrier()
         _signal_end_sync(lane_i32=lane_i32, rank_i32=rank_i32, bid_i32=bid_i32,
@@ -878,6 +765,7 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
     # -----------------------------------------------------------------------
     # Host launchers (@flyc.jit)
     # -----------------------------------------------------------------------
+    flat_wg_size_attr = f"{threads},{threads}"
 
     @flyc.jit
     def run_1stage_arr(
@@ -889,7 +777,14 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
         out_ptr: Int64,
         stream: Stream = Stream(None),
     ):
-        allreduce_1stage_arr(rank, self_sg, sg_ptrs, in_ptrs, out_ptr).launch(
+        allreduce_1stage_arr(
+            rank,
+            self_sg,
+            sg_ptrs,
+            in_ptrs,
+            out_ptr,
+            value_attrs={"rocdl.flat_work_group_size": flat_wg_size_attr},
+        ).launch(
             grid=(grid_x, 1, 1),
             block=(threads, 1, 1),
             stream=stream,
@@ -907,7 +802,15 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
         stream: Stream = Stream(None),
     ):
         """Launch 2-stage allreduce (arr variant, CUDAGraph-compatible)."""
-        allreduce_2stage_arr(rank, self_sg, sg_ptrs, in_ptrs, tmp_ptrs, out_ptr).launch(
+        allreduce_2stage_arr(
+            rank,
+            self_sg,
+            sg_ptrs,
+            in_ptrs,
+            tmp_ptrs,
+            out_ptr,
+            value_attrs={"rocdl.flat_work_group_size": flat_wg_size_attr},
+        ).launch(
             grid=(grid_x, 1, 1),
             block=(threads, 1, 1),
             stream=stream,
@@ -925,7 +828,15 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
         stream: Stream = Stream(None),
     ):
         """Launch 2-stage write-mode allreduce (large tensors)."""
-        allreduce_2stage_write_mode(rank, self_sg, sg_ptrs, inp_ptr, out_ptrs, tmp_ptrs).launch(
+        allreduce_2stage_write_mode(
+            rank,
+            self_sg,
+            sg_ptrs,
+            inp_ptr,
+            out_ptrs,
+            tmp_ptrs,
+            value_attrs={"rocdl.flat_work_group_size": flat_wg_size_attr},
+        ).launch(
             grid=(grid_x, 1, 1),
             block=(threads, 1, 1),
             stream=stream,
