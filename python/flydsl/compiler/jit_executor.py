@@ -259,9 +259,10 @@ class CompiledArtifact:
             # Keep the Context alive on self._ctx: destroying it
             # while ExecutionEngine still holds HSA code objects
             # causes GPU memory access faults.
-            ctx = ir.Context()
+            from .jit_function import _create_mlir_context
+
+            ctx = _create_mlir_context()
             with ctx:
-                ctx.load_all_available_dialects()
                 module = ir.Module.parse(self._ir_text)
                 engine = ExecutionEngine(
                     module,

@@ -38,39 +38,53 @@ def _llvm_dir() -> Path:
     return Path(raw).expanduser().resolve()
 
 
-def _tool_candidates(prefix: Path, name: str) -> list[Path]:
-    return [prefix / "bin" / name]
-
-
 def _tool(prefix: Path, name: str) -> Path:
-    for path in _tool_candidates(prefix, name):
-        if path.is_file():
-            if not os.access(path, os.X_OK):
-                raise ExternalLLVMError(f"External LLVM tool is not executable: {path}")
-            return path
-    candidates = ", ".join(str(p) for p in _tool_candidates(prefix, name))
-    raise ExternalLLVMError(f"External LLVM tool '{name}' not found. Tried: {candidates}")
+    path = prefix / "bin" / name
+    if not path.is_file():
+        raise ExternalLLVMError(f"External LLVM tool '{name}' not found at {path}")
+    if not os.access(path, os.X_OK):
+        raise ExternalLLVMError(f"External LLVM tool is not executable: {path}")
+    return path
+
+
+_SUBPROCESS_ENV_PASSTHROUGH = ("HOME", "TMPDIR", "TEMP", "TMP", "ROCM_PATH", "HIP_PATH", "HSA_OVERRIDE_GFX_VERSION")
 
 
 def _subprocess_env(prefix: Path) -> dict:
-    run_env = dict(os.environ)
-    lib_dirs = [prefix / "lib"]
-    existing = run_env.get("LD_LIBRARY_PATH", "")
-    found_lib_dirs = [str(p) for p in lib_dirs if p.is_dir()]
-    if found_lib_dirs:
-        run_env["LD_LIBRARY_PATH"] = ":".join(found_lib_dirs + ([existing] if existing else []))
-    path_dirs = [prefix / "bin"]
-    existing_path = run_env.get("PATH", "")
-    found_path_dirs = [str(p) for p in path_dirs if p.is_dir()]
-    if found_path_dirs:
-        run_env["PATH"] = ":".join(found_path_dirs + ([existing_path] if existing_path else []))
+    """Build a minimal environment for the external mlir-opt subprocess.
+
+    Only forwards PATH, LD_LIBRARY_PATH (prepended with the external prefix),
+    and a small allowlist of variables needed by the ROCm toolchain.  This
+    avoids leaking CI secrets or unrelated env vars to the subprocess.
+    """
+    run_env: dict[str, str] = {}
+    for key in _SUBPROCESS_ENV_PASSTHROUGH:
+        val = os.environ.get(key)
+        if val is not None:
+            run_env[key] = val
+    existing_path = os.environ.get("PATH", "")
+    bin_dir = prefix / "bin"
+    run_env["PATH"] = f"{bin_dir}:{existing_path}" if bin_dir.is_dir() else existing_path
+    existing_ld = os.environ.get("LD_LIBRARY_PATH", "")
+    lib_dir = prefix / "lib"
+    if lib_dir.is_dir():
+        run_env["LD_LIBRARY_PATH"] = f"{lib_dir}:{existing_ld}" if existing_ld else str(lib_dir)
+    elif existing_ld:
+        run_env["LD_LIBRARY_PATH"] = existing_ld
     return run_env
 
 
-@lru_cache(maxsize=8)
 def external_llvm_fingerprint(llvm_dir: Optional[str] = None) -> str:
     prefix = Path(llvm_dir).expanduser().resolve() if llvm_dir else _llvm_dir()
     mlir_opt = _tool(prefix, "mlir-opt")
+    mtime = mlir_opt.stat().st_mtime
+    return _external_llvm_fingerprint_cached(str(prefix), mtime)
+
+
+@lru_cache(maxsize=2)
+def _external_llvm_fingerprint_cached(prefix_str: str, _mtime: float) -> str:
+    prefix = Path(prefix_str)
+    mlir_opt = prefix / "bin" / "mlir-opt"
 
     try:
         result = subprocess.run(
