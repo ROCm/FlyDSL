@@ -628,6 +628,7 @@ def run_moe_stage1(
             scale_is_bf16=(scale_dtype == "bf16"),
             out_dtype=out_dtype,
             k_batch=k_batch,
+            use_async_copy=os.environ.get("FLYDSL_MOE_USE_ASYNC_COPY", "0") in ("1", "true", "True", "YES", "yes"),
         )
 
         def _s1_args(o, x, w, sx, sw, st, eids, sw_sorted):
@@ -1258,6 +1259,7 @@ def run_moe_stage2(
             tile_k=tile_k,
             doweight_stage2=bool(doweight_stage2),
             scale_is_bf16=(scale_dtype == "bf16"),
+            use_async_copy=os.environ.get("FLYDSL_MOE_USE_ASYNC_COPY", "0") in ("1", "true", "True", "YES", "yes"),
         )
     is_reduce_exe = (getattr(exe, "mode", None) == MoeGemm2Mode.REDUCE) or bool(use_reduce)
 
@@ -1558,6 +1560,7 @@ def test_moe_gemm_2stage(
     init_scale: float = 1.0,
     skip_ref: bool = False,
     w_fp4_kernel: bool = False,
+    tile_m2: Optional[int] = None,
 ):
     """Single 2-stage test: gemm1 -> quantize -> gemm2, with routing built once.
 
@@ -1613,6 +1616,20 @@ def test_moe_gemm_2stage(
         tile_m=tile_m,
         moe_sort_mode=moe_sort_mode,
     )
+
+    # Stage2 may use a different routing block_size than stage1 (--tile_m2).
+    tile_m_stage2 = int(tile_m) if tile_m2 is None else int(tile_m2)
+    if tile_m_stage2 != int(tile_m):
+        routing_stage2 = build_routing_buffers(
+            topk_ids=topk_ids,
+            topk_weights=topk_weights,
+            experts=experts,
+            model_dim=model_dim,
+            tile_m=tile_m_stage2,
+            moe_sort_mode=moe_sort_mode,
+        )
+    else:
+        routing_stage2 = routing
 
     # Default routing + comparison knobs for test stability:
     # - Use torch routing (no aiter dependency for sorting).
@@ -1695,7 +1712,7 @@ def test_moe_gemm_2stage(
         in_dtype=in_dtype,
         out_dtype=out_dtype,
         group_size=group_size,
-        tile_m=tile_m,
+        tile_m=tile_m_stage2,
         tile_n=tile_n2,
         tile_k=tile_k2,
         doweight_stage1=bool(doweight_stage1),
@@ -1709,7 +1726,7 @@ def test_moe_gemm_2stage(
         w2_fp32_in=w2_fp32,
         topk_ids_in=topk_ids,
         topk_weights_in=topk_weights,
-        routing_in=routing,
+        routing_in=routing_stage2,
         a2_fp8_in=a2_q,
         a2_scale_in=a2_scale,
         return_outputs=True,
@@ -1794,6 +1811,7 @@ def _make_reduce_mode_compile_fn(use_flydsl_reduce: bool = True, use_valid_mask:
         group_size: int = -1,
         out_dtype: str = "f16",
         scale_is_bf16: bool = False,
+        use_async_copy: bool = False,
     ):
         if use_flydsl_reduce:
             return compile_moe_gemm2_ex(
@@ -1828,6 +1846,7 @@ def _make_reduce_mode_compile_fn(use_flydsl_reduce: bool = True, use_valid_mask:
                 out_dtype=out_dtype,
                 accumulate=False,
                 scale_is_bf16=(scale_dtype == "bf16"),
+                use_async_copy=use_async_copy,
             )
             return _TorchReduceWrapper(gemm2_exe, topk, model_dim)
     return _compile
@@ -2111,6 +2130,7 @@ if __name__ == "__main__":
     parser.add_argument("--tile_m", type=int, default=32, help="Tile M / block_m (routing block size).")
     parser.add_argument("--tile_n", type=int, default=128, help="Tile N (inter dim tile).")
     parser.add_argument("--tile_k", type=int, default=256, help="Tile K (model dim tile).")
+    parser.add_argument("--tile_m2", type=int, default=None, help="Stage2 tile M (routing block size). Default: tile_m. When set differently from tile_m, a separate routing buffer is built for stage2.")
     parser.add_argument("--tile_n2", type=int, default=None, help="Stage2 tile N (model dim tile). Default: 2*tile_n.")
     parser.add_argument("--tile_k2", type=int, default=None, help="Stage2 tile K (inter dim tile). Default: tile_k.")
 
@@ -2170,6 +2190,7 @@ if __name__ == "__main__":
 
     tile_n2 = int(args.tile_n2) if args.tile_n2 is not None else int(args.tile_n) * 2
     tile_k2 = int(args.tile_k2) if args.tile_k2 is not None else args.tile_k
+    tile_m2_arg = int(args.tile_m2) if args.tile_m2 is not None else None
 
     # Determine which gemm2 modes to run.
     if args.gemm2_mode == "both":
@@ -2212,6 +2233,7 @@ if __name__ == "__main__":
             use_reduce=use_reduce,
             use_valid_mask=bool(args.use_valid_mask),
             test_graph=bool(args.test_graph),
+            tile_m2=tile_m2_arg,
         )
 
     # Run 2-stage (gemm1 -> quantize -> gemm2) aiter-style test/benchmark.

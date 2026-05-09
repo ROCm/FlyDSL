@@ -12,12 +12,13 @@
 # Supported dtypes: fp8, int8smooth, a8w4smooth (and others from test_moe_gemm.py CLI)
 #
 # Usage:
-#   bash bench_moe.sh                              # default: fp8, all sizes
+#   bash bench_moe.sh                              # default: fp8, all sizes, sync
 #   bash bench_moe.sh fp8                          # fp8 only
 #   bash bench_moe.sh int8smooth                   # int8smooth only
 #   bash bench_moe.sh a8w4smooth                   # a8w4smooth (stage1 + stage2)
 #   bash bench_moe.sh fp8,int8smooth,a8w4smooth    # all three dtypes sequentially
-#   bash bench_moe.sh fp8 20 5                     # fp8, 20 iters, 5 warmup
+#   bash bench_moe.sh fp8 async                    # async-copy path (buffer_load_lds)
+#   bash bench_moe.sh fp8 both                     # run sync then async, back-to-back
 
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -30,8 +31,17 @@ export FLIR_A8W4SMOOTH_INTERLEAVE_K64=1
 export FLIR_A8W4SMOOTH_OVERFLOW_GUARD=1
 
 IN_DTYPES="${1:-fp8}"
-NUM_ITERS="${2:-32}"
-NUM_WARMUP="${3:-5}"
+# Copy mode: sync | async | both (only affects moe_gemm_2stage path; a8w4smooth ignores it)
+MODE="${2:-sync}"
+NUM_ITERS=32
+NUM_WARMUP=5
+
+case "$MODE" in
+    sync)  MODE_LIST=(sync) ;;
+    async) MODE_LIST=(async) ;;
+    both)  MODE_LIST=(sync async) ;;
+    *) echo "ERROR: MODE must be one of: sync | async | both (got: $MODE)" >&2; exit 1 ;;
+esac
 
 export FLYDSL_REBUILD=1
 export FLYDSL_DUMP_IR=1
@@ -43,8 +53,8 @@ mkdir -p dumps
 
 # TOKENS=(256 512 1024 1536 2048)
 TOKENS=(4096)
-DIMS=("3584,1024" "5120,1536" "7168,2048")
-# DIMS=("7168,2048")
+# DIMS=("3584,1024" "5120,1536" "7168,2048")
+DIMS=("7168,2048")
 EXPERTS=48    # 384 total / ep=8
 TOPK=8
 
@@ -55,6 +65,7 @@ echo "  MoE 2-stage GEMM Benchmark"
 echo "  dtype=$IN_DTYPES  experts=$EXPERTS  topk=$TOPK  iters=$NUM_ITERS  warmup=$NUM_WARMUP"
 echo "  tokens: ${TOKENS[*]}"
 echo "  dims:   ${DIMS[*]}"
+echo "  mode:   ${MODE_LIST[*]}"
 echo "$SEP"
 echo ""
 
@@ -75,8 +86,14 @@ for DIM in "${DIMS[@]}"; do
     echo "  model_dim=$MODEL_DIM  inter_dim=$INTER_DIM"
     echo "──────────────────────────────────────────────────────────────────"
     for T in "${TOKENS[@]}"; do
+      for COPY_MODE in "${MODE_LIST[@]}"; do
+        if [ "$COPY_MODE" = "async" ]; then
+            export FLYDSL_MOE_USE_ASYNC_COPY=1
+        else
+            export FLYDSL_MOE_USE_ASYNC_COPY=0
+        fi
         echo ""
-        echo ">>> tokens=$T  dim=${MODEL_DIM}x${INTER_DIM}  E=$EXPERTS  topk=$TOPK"
+        echo ">>> tokens=$T  dim=${MODEL_DIM}x${INTER_DIM}  E=$EXPERTS  topk=$TOPK  copy=$COPY_MODE"
 
         if [ "$IN_DTYPE" = "a8w4smooth" ]; then
             # a8w4smooth: __main__ only runs stage1; use inline python for both stages
@@ -107,9 +124,10 @@ run_moe_stage2_a8w4smooth(**kwargs)
                 -t "$T" \
                 -e "$EXPERTS" \
                 -k "$TOPK" \
-                --tile_m 64 \
+                --tile_m 128 \
                 --tile_n 128 \
                 --tile_k 128 \
+                --tile_m2 64 \
                 --tile_n2 128 \
                 --tile_k2 128 \
                 --gemm2_mode atomic \
@@ -118,9 +136,10 @@ run_moe_stage2_a8w4smooth(**kwargs)
                 --skip_ref false \
                 --num_iters "$NUM_ITERS" \
                 --num_warmup "$NUM_WARMUP" \
-                2>&1 | grep -E "TFLOPS|TB/s|stage[12]|Error|SKIP|skip" || true
+                2>&1 # | grep -E "TFLOPS|TB/s|stage[12]|Error|SKIP|skip" || true
         fi
         echo "---"
+      done
     done
     echo ""
 done
