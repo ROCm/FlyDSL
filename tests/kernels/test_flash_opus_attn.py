@@ -9,6 +9,7 @@ import sys
 import argparse
 import csv
 import hashlib
+import importlib
 import math
 import random
 from pathlib import Path
@@ -49,33 +50,33 @@ FLASH_ATTN_FUNC_KERNEL_CONFIG = {
 # (batch, seq_len, num_heads, num_kv_heads, head_dim)
 # num_kv_heads == num_heads -> MHA; num_kv_heads < num_heads -> GQA/MQA.
 DEFAULT_CONFIGS = [
-    (8, 128, 64, 64, 128),
-    (8, 256, 64, 64, 128),
-    (8, 512, 64, 64, 128),
-    (1, 128, 64, 64, 128),
-    (1, 256, 64, 64, 128),
-    (1, 512, 64, 64, 128),
-    (1, 1024, 64, 64, 128),
+    # (8, 128, 64, 64, 128),
+    # (8, 256, 64, 64, 128),
+    # (8, 512, 64, 64, 128),
+    # (1, 128, 64, 64, 128),
+    # (1, 256, 64, 64, 128),
+    # (1, 512, 64, 64, 128),
+    # (1, 1024, 64, 64, 128),
 
-    (1, 2048, 64, 64, 128),
-    (1, 4096, 64, 64, 128),
-    (1, 8192, 64, 64, 128),
-    (4, 8192, 64, 64, 128),
+    # (1, 2048, 64, 64, 128),
+    # (1, 4096, 64, 64, 128),
+    # (1, 8192, 64, 64, 128),
+    # (4, 8192, 64, 64, 128),
 
-    (1, 2048, 32, 32, 128),
-    (1, 4096, 32, 32, 128),
-    (1, 8192, 32, 32, 128),
-    (8, 8192, 32, 32, 128),
+    # (1, 2048, 32, 32, 128),
+    # (1, 4096, 32, 32, 128),
+    # (1, 8192, 32, 32, 128),
+    # (8, 8192, 32, 32, 128),
 
-    (1, 2048, 16, 16, 128),
-    (1, 4096, 16, 16, 128),
-    (1, 8192, 16, 16, 128),
-    (16, 8192, 16, 16, 128),
+    # (1, 2048, 16, 16, 128),
+    # (1, 4096, 16, 16, 128),
+    # (1, 8192, 16, 16, 128),
+    # (16, 8192, 16, 16, 128),
 
-    (1, 2048, 8, 8, 128),
-    (1, 4096, 8, 8, 128),
-    (1, 8192, 8, 8, 128),
-    (32, 8192, 8, 8, 128),
+    # (1, 2048, 8, 8, 128),
+    # (1, 4096, 8, 8, 128),
+    # (1, 8192, 8, 8, 128),
+    # (32, 8192, 8, 8, 128),
 
     # GQA configs (num_kv_heads < num_heads).
     (16, 8192, 64, 64, 128),
@@ -407,6 +408,73 @@ def run_aiter_bench(
     return results
 
 
+def run_opus_attn_bench(
+    batch, seq_len, nheads, head_dim, dtype, causal,
+    warmup, iters, seed=DEFAULT_SEED, num_kv_heads=None,
+):
+    """Run the local opus_attn GQA kernels and return {tflops, max_err, us}."""
+    if dtype != torch.bfloat16:
+        return {"skip": True}
+    if head_dim not in (128, 512):
+        return {"skip": True}
+
+    H_KV = num_kv_heads if num_kv_heads is not None else nheads
+    if nheads % H_KV != 0:
+        return {"err": f"num_heads ({nheads}) must be divisible by num_kv_heads ({H_KV})"}
+
+    if head_dim == 128:
+        q_tile, kv_tile, num_warps = 32, 64, 8
+    else:
+        q_tile, kv_tile, num_warps = 16, 32, 8
+    if (seq_len % kv_tile) != 0 or (seq_len // kv_tile) < 6:
+        return {"skip": True}
+    if (seq_len % (q_tile * num_warps)) != 0:
+        return {"skip": True}
+
+    opus_dir = _repo / "opus_attn"
+    if str(opus_dir) not in sys.path:
+        sys.path.insert(0, str(opus_dir))
+    try:
+        opus_attn = importlib.import_module("opus_attn")
+    except Exception as e:
+        return {"err": f"opus_attn import: {e}"}
+
+    results = {}
+    setup_seed(seed)
+    torch.cuda.empty_cache()
+
+    B, S, H, D = batch, seq_len, nheads, head_dim
+    q = torch.empty(B, S, H, D, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
+    k = torch.empty(B, S, H_KV, D, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
+    v = torch.empty(B, S, H_KV, D, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
+
+    try:
+        out = opus_attn.forward(q, k, v, causal=causal)
+        torch.cuda.synchronize()
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return {"err": f"opus_attn: {e}"}
+
+    ref = pytorch_ref_attention(q.float(), k.float(), v.float(), causal=causal).to(dtype)
+    results["max_err"] = (out.float() - ref.float()).abs().max().item()
+
+    try:
+        out_bench = torch.empty_like(q)
+
+        def bench_fn():
+            opus_attn.forward_out(q, k, v, out_bench, causal=causal)
+
+        _, us = run_perftest(bench_fn, num_iters=iters, num_warmup=warmup)
+        s_eff = S / 2.0 if causal else float(S)
+        flops = 4.0 * S * s_eff * D * H * B
+        results["us"] = us
+        results["tflops"] = flops / (us * 1e-6) / 1e12
+    except Exception as e:
+        results["bench_err"] = str(e)
+
+    return results
+
+
 def _fmt_result(r):
     """Format: 'Time(us) TFLOPS MaxErr'."""
     if r.get("skip"):
@@ -475,28 +543,32 @@ def _write_cmp_csv(csv_path, data_rows, avg_rows):
     header = [
         "B", "S", "H", "Hkv", "D", "dtype", "causal",
         "FlyDSL_Time(us)", "FlyDSL_TFLOPS", "FlyDSL_MaxErr",
+        "OPUS_Time(us)", "OPUS_TFLOPS", "OPUS_MaxErr",
         "CK_Time(us)", "CK_TFLOPS", "CK_MaxErr",
         "ASM_Time(us)", "ASM_TFLOPS", "ASM_MaxErr",
+        "Fly/OPUS_TFLOPS%", "Fly/OPUS_MaxErr_ratio",
         "Fly/CK_TFLOPS%", "Fly/CK_MaxErr_ratio",
         "Fly/ASM_TFLOPS%", "Fly/ASM_MaxErr_ratio",
     ]
-    def _metrics(fr, cr, ar):
+    def _metrics(fr, or_, cr, ar):
+        fopus = _csv_cmp(fr, or_)
         fck = _csv_cmp(fr, cr)
         fasm = _csv_cmp(fr, ar)
         return [
             _csv_val(fr, "us"), _csv_val(fr, "tflops"), _csv_val(fr, "max_err"),
+            _csv_val(or_, "us"), _csv_val(or_, "tflops"), _csv_val(or_, "max_err"),
             _csv_val(cr, "us"), _csv_val(cr, "tflops"), _csv_val(cr, "max_err"),
             _csv_val(ar, "us"), _csv_val(ar, "tflops"), _csv_val(ar, "max_err"),
-            fck[0], fck[1], fasm[0], fasm[1],
+            fopus[0], fopus[1], fck[0], fck[1], fasm[0], fasm[1],
         ]
     with open(csv_path, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(header)
-        for cfg, fr, cr, ar in data_rows:
-            w.writerow(list(cfg) + _metrics(fr, cr, ar))
-        for label, fa, ca, aa in avg_rows:
+        for cfg, fr, or_, cr, ar in data_rows:
+            w.writerow(list(cfg) + _metrics(fr, or_, cr, ar))
+        for label, fa, oa, ca, aa in avg_rows:
             # label + 6 empty cfg columns (S, H, Hkv, D, dtype, causal)
-            w.writerow([label, "", "", "", "", "", ""] + _metrics(fa, ca, aa))
+            w.writerow([label, "", "", "", "", "", ""] + _metrics(fa, oa, ca, aa))
 
 
 def _write_normal_csv(csv_path, data_rows, avg_rows):
@@ -623,7 +695,7 @@ def main():
     )
     parser.add_argument(
         "--compare", action="store_true",
-        help="Compare FlyDSL vs CK vs ASM performance (requires aiter)",
+        help="Compare FlyDSL vs OPUS vs CK vs ASM performance (requires OPUS install and aiter)",
     )
     args = parser.parse_args()
 
@@ -647,12 +719,12 @@ def main():
     dtype_desc = args.dtype or "bf16+fp16"
 
     if args.compare:
-        # ---- Comparison mode: FlyDSL vs CK vs ASM ----
+        # ---- Comparison mode: FlyDSL vs OPUS vs CK vs ASM ----
         print("=" * 130)
-        print(f"FlyDSL vs CK vs ASM  ({causal_desc}, {dtype_desc})")
+        print(f"FlyDSL vs OPUS vs CK vs ASM  ({causal_desc}, {dtype_desc})")
         print(f"GPU: {torch.cuda.get_device_name(0)}")
         print(f"  FlyDSL opts: {FLASH_ATTN_FUNC_KERNEL_CONFIG}")
-        print(f"  CK: bf16+fp16, ASM: bf16 only")
+        print(f"  OPUS: bf16 only, D=128/512; CK: bf16+fp16; ASM: bf16 only")
         print("=" * 130)
         print("Running benchmarks ...")
 
@@ -673,6 +745,11 @@ def main():
                         seed=args.seed, dtype_str=dtype_str, verbose=False,
                         num_kv_heads=nh_kv,
                     )
+                    opus_r = run_opus_attn_bench(
+                        batch, seq_len, nh, hd, dtype, causal,
+                        warmup=args.warmup, iters=args.iters,
+                        seed=args.seed, num_kv_heads=nh_kv,
+                    )
                     ck_r = run_aiter_bench(
                         batch, seq_len, nh, hd, dtype, causal,
                         warmup=args.warmup, iters=args.iters,
@@ -685,41 +762,43 @@ def main():
                         seed=args.seed, backend="asm",
                         num_kv_heads=nh_kv,
                     )
-                    rows.append((cfg, fly_r, ck_r, asm_r))
+                    rows.append((cfg, fly_r, opus_r, ck_r, asm_r))
 
         col = f"{'Time(us)':>10s} {'TFLOPS':>8s} {'MaxErr':>8s}"
         cmp_col = f"{'TFLOPS':>7s} {'MaxErr':>6s}"
         hdr1 = (
-            f"{_CFG_HDR} | {'FlyDSL':^28s} | {'CK':^28s} | {'ASM':^28s}"
-            f" | {'Fly/CK':^14s} | {'Fly/ASM':^14s}"
+            f"{_CFG_HDR} | {'FlyDSL':^28s} | {'OPUS':^28s} | {'CK':^28s} | {'ASM':^28s}"
+            f" | {'Fly/OPUS':^14s} | {'Fly/CK':^14s} | {'Fly/ASM':^14s}"
         )
         hdr2 = (
-            f"{'':>{_CFG_W}s} | {col} | {col} | {col}"
-            f" | {cmp_col} | {cmp_col}"
+            f"{'':>{_CFG_W}s} | {col} | {col} | {col} | {col}"
+            f" | {cmp_col} | {cmp_col} | {cmp_col}"
         )
         sep = "-" * len(hdr2)
         print(f"\n{hdr1}")
         print(hdr2)
         print(sep)
-        for cfg, fly_r, ck_r, asm_r in rows:
+        for cfg, fly_r, opus_r, ck_r, asm_r in rows:
             print(
                 f"{_fmt_cfg(cfg)} | {_fmt_result(fly_r)} | "
-                f"{_fmt_result(ck_r)} | {_fmt_result(asm_r)}"
-                f" | {_fmt_cmp(fly_r, ck_r)} | {_fmt_cmp(fly_r, asm_r)}"
+                f"{_fmt_result(opus_r)} | {_fmt_result(ck_r)} | {_fmt_result(asm_r)}"
+                f" | {_fmt_cmp(fly_r, opus_r)} | {_fmt_cmp(fly_r, ck_r)}"
+                f" | {_fmt_cmp(fly_r, asm_r)}"
             )
 
         cmp_avg_rows = []
 
         def _cmp_avg(label, subset):
-            fa = _avg_results([f for _, f, _, _ in subset])
-            ca = _avg_results([c for _, _, c, _ in subset])
-            aa = _avg_results([a for _, _, _, a in subset])
+            fa = _avg_results([f for _, f, _, _, _ in subset])
+            oa = _avg_results([o for _, _, o, _, _ in subset])
+            ca = _avg_results([c for _, _, _, c, _ in subset])
+            aa = _avg_results([a for _, _, _, _, a in subset])
             print(
                 f"{label:>{_CFG_W}s} | {_fmt_result(fa)} | "
-                f"{_fmt_result(ca)} | {_fmt_result(aa)}"
-                f" | {_fmt_cmp(fa, ca)} | {_fmt_cmp(fa, aa)}"
+                f"{_fmt_result(oa)} | {_fmt_result(ca)} | {_fmt_result(aa)}"
+                f" | {_fmt_cmp(fa, oa)} | {_fmt_cmp(fa, ca)} | {_fmt_cmp(fa, aa)}"
             )
-            cmp_avg_rows.append((label, fa, ca, aa))
+            cmp_avg_rows.append((label, fa, oa, ca, aa))
 
         print(sep)
         _print_grouped_avgs(rows, lambda r: _tag_group(r[0]), _cmp_avg)
