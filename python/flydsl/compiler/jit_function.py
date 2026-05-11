@@ -109,8 +109,12 @@ class FlyDSLCompileError(RuntimeError):
     """
 
     def __init__(self, message: str, diagnostics: Optional[List[str]] = None):
-        super().__init__(message)
         self.diagnostics = diagnostics or []
+        if self.diagnostics:
+            full = message + "\nMLIR diagnostics:\n" + "\n".join(f"  - {d}" for d in self.diagnostics)
+        else:
+            full = message
+        super().__init__(full)
 
 
 @contextmanager
@@ -820,7 +824,6 @@ class JitCacheManager:
 
         cache_file = self._cache_file(cache_key)
         if cache_file.exists():
-            self.cache_dir.mkdir(parents=True, exist_ok=True)
             lock_path = self._lock_file(cache_key)
             try:
                 with FileLock(lock_path, exclusive=False, timeout=30):
@@ -1397,7 +1400,10 @@ class JitFunction:
                     # profiler/roctracer teardown and enables fast same-process reuse.
                     self._mem_cache[cache_key] = compiled_func
                     if _cache_writer and not extern_linked:
-                        _cache_writer(compiled_func)
+                        try:
+                            _cache_writer(compiled_func)
+                        except Exception as e:
+                            log().warning(f"Failed to write compile cache: {e}")
 
         # OUTSIDE lock: engine init + kernel launch
         if env.compile.compile_only:
