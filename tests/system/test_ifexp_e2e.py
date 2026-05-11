@@ -112,3 +112,64 @@ def test_ifexp_dynamic_cond_false(monkeypatch):
     torch.cuda.synchronize()
     assert out[0].item() == -13, f"expected -13 (-3-10), got {out[0].item()}"
     print(f"[PASS] ifexp dynamic false: x=-3, out={out[0].item()}")
+
+
+def test_ifexp_nested(monkeypatch):
+    """Nested IfExp: ``1 if (x > 0 if flag > 0 else x < 0) else 0``."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA/ROCm device required")
+    monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", "0")
+
+    @flyc.kernel
+    def ifexp_nested_kernel(Out: fx.Tensor, x: fx.Int32, flag: fx.Int32):
+        cond = (x > fx.Int32(0)) if (flag > fx.Int32(0)) else (x < fx.Int32(0))
+        a = fx.Int32(1) if cond else fx.Int32(0)
+        rsrc = fx.buffer_ops.create_buffer_resource(Out)
+        fx.buffer_ops.buffer_store(a, rsrc, fx.Int32(0))
+
+    @flyc.jit
+    def ifexp_nested_launch(Out: fx.Tensor, x: fx.Int32, flag: fx.Int32, stream: fx.Stream = fx.Stream(None)):
+        ifexp_nested_kernel(Out, x, flag).launch(grid=(1, 1, 1), block=(1, 1, 1), stream=stream.value)
+
+    out = torch.zeros(1, device="cuda", dtype=torch.int32)
+    t_out = flyc.from_dlpack(out).mark_layout_dynamic(leading_dim=0, divisibility=1)
+
+    ifexp_nested_launch(t_out, fx.Int32(5), fx.Int32(1))
+    torch.cuda.synchronize()
+    assert out[0].item() == 1, f"expected 1 (x=5, flag=1 → x>0 true), got {out[0].item()}"
+
+    ifexp_nested_launch(t_out, fx.Int32(5), fx.Int32(-1))
+    torch.cuda.synchronize()
+    assert out[0].item() == 0, f"expected 0 (x=5, flag=-1 → x<0 false), got {out[0].item()}"
+    print("[PASS] ifexp nested")
+
+
+def test_ifexp_in_for_loop(monkeypatch):
+    """IfExp inside a for-loop with loop-carried accumulator."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA/ROCm device required")
+    monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", "0")
+
+    @flyc.kernel
+    def ifexp_loop_kernel(Out: fx.Tensor, x: fx.Int32):
+        acc = fx.Int32(0)
+        for i in range(fx.Int32(4)):
+            acc = acc + fx.Int32(1) if x > fx.Int32(0) else acc - fx.Int32(1)
+        rsrc = fx.buffer_ops.create_buffer_resource(Out)
+        fx.buffer_ops.buffer_store(acc, rsrc, fx.Int32(0))
+
+    @flyc.jit
+    def ifexp_loop_launch(Out: fx.Tensor, x: fx.Int32, stream: fx.Stream = fx.Stream(None)):
+        ifexp_loop_kernel(Out, x).launch(grid=(1, 1, 1), block=(1, 1, 1), stream=stream.value)
+
+    out = torch.zeros(1, device="cuda", dtype=torch.int32)
+    t_out = flyc.from_dlpack(out).mark_layout_dynamic(leading_dim=0, divisibility=1)
+
+    ifexp_loop_launch(t_out, fx.Int32(5))
+    torch.cuda.synchronize()
+    assert out[0].item() == 4, f"expected 4 (4 iterations of +1), got {out[0].item()}"
+
+    ifexp_loop_launch(t_out, fx.Int32(-3))
+    torch.cuda.synchronize()
+    assert out[0].item() == -4, f"expected -4 (4 iterations of -1), got {out[0].item()}"
+    print("[PASS] ifexp in for loop")
