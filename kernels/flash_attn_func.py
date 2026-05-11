@@ -112,6 +112,59 @@ def build_flash_attn_func_module_primary(
     K_SUB_N = 32
     WARP_SIZE = 64
 
+    # ── OPUS-style fast path (gfx950 D=128 bf16) ──
+    # Built when:
+    #   * outermost call (block_m is None)
+    #   * head_dim == 128, dtype == bf16, gpu_arch startswith "gfx950"
+    #   * FLYDSL_ENABLE_OPUS_PATH=1 (opt-in until the port matches/beats baseline)
+    # Runtime dispatch additionally requires seq_len >= 384 and seq_len % 256 == 0.
+    _opus_launch = None
+    _opus_path_requested = os.getenv("FLYDSL_ENABLE_OPUS_PATH", "0") == "1"
+    if (
+        block_m is None
+        and head_dim == 128
+        and dtype_str == "bf16"
+        and gpu_arch.startswith("gfx950")
+        and _opus_path_requested
+    ):
+        try:
+            from kernels.flash_attn_opus import build_flash_attn_opus_module
+            _opus_launch = build_flash_attn_opus_module(
+                num_heads=num_heads,
+                head_dim=head_dim,
+                causal=causal,
+                dtype_str=dtype_str,
+                num_kv_heads=num_kv_heads,
+                waves_per_eu=waves_per_eu,
+                daz=daz,
+            )
+        except Exception as _opus_err:
+            import sys
+            print(
+                f"[flash_attn_func] OPUS path build failed, falling back: {_opus_err}",
+                file=sys.stderr,
+            )
+            _opus_launch = None
+
+    def _wrap_with_opus(_fallback):
+        """Return a dispatcher that routes eligible runtime shapes to OPUS."""
+        if _opus_launch is None:
+            return _fallback
+
+        def _opus_dispatch(*args, **kwargs):
+            S = args[5] if len(args) > 5 else kwargs.get("seq_len", 0)
+            try:
+                S_int = int(S)
+            except (TypeError, ValueError):
+                S_int = 0
+            if S_int >= 384 and S_int % 256 == 0:
+                return _opus_launch(*args, **kwargs)
+            return _fallback(*args, **kwargs)
+
+        if hasattr(_fallback, "compile"):
+            _opus_dispatch.compile = _fallback.compile
+        return _opus_dispatch
+
     # Auto tile selection: for H>=32, build both M=128 and M=256 variants
     # and dispatch at runtime based on B*S.
     if block_m is None and num_heads >= 32:
@@ -135,7 +188,7 @@ def build_flash_attn_func_module_primary(
                 return _launcher_m256(*args, **kwargs)
             return _launcher_m128(*args, **kwargs)
 
-        return _auto_launch
+        return _wrap_with_opus(_auto_launch)
 
     if block_m is not None:
         BLOCK_M = block_m
@@ -1189,7 +1242,7 @@ def build_flash_attn_func_module_primary(
 
     _launch.compile = _compile
 
-    return _launch
+    return _wrap_with_opus(_launch)
 
 
 build_flash_attn_func_module = build_flash_attn_func_module_primary

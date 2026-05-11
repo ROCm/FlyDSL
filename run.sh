@@ -39,9 +39,13 @@ function run_flydsl_op {
     export FLYDSL_LOG_MORE=1
     export FLYDSL_DEBUG_LOG_TO_CONSOLE=1
     export FLYDSL_DEBUG_LOG_LEVEL=INFO
-    export FLYDSL_DUMP_IR=1
+
     # export FLYDSL_RUNTIME_ENABLE_CACHE=1
+    export FLYDSL_DUMP_IR=1
     export FLYDSL_DUMP_DIR=./flydsl_dump
+
+    export FLYDSL_ENABLE_OPUS_PATH=1
+
 
     # python tests/kernels/test_moe_stage1_simple.py --size M
 
