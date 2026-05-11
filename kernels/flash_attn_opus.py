@@ -226,6 +226,33 @@ def build_flash_attn_opus_module(
         def mfma_acc(a, b, c):
             return _mfma(rocdl.mfma_f32_32x32x16_bf16, a, b, c)
 
+        # ── P3: sched_group_barrier discipline (matches C++ template lines 14-30) ──
+        # __builtin_amdgcn_sched_group_barrier(mask, count, group_id)
+        # masks (LLVM AMDGPU convention):
+        _MFMA_MASK = 0x008
+        _VALU_MASK = 0x002
+        _EXP_MASK = 0x400
+
+        def _sched_barrier_pairs(pairs, valu_cnt, group):
+            """Emit `pairs` × {1 MFMA + valu_cnt VALU} sched_group_barrier groups.
+
+            Matches gqa_d128_kernel_template.hpp's
+            `sched_barrier_pairs<Pairs, VALU_CNT, Group>()` (lines 18-23).
+            """
+            for _ in range(pairs):
+                rocdl.sched_group_barrier(_MFMA_MASK, 1, group)
+                rocdl.sched_group_barrier(_VALU_MASK, valu_cnt, group)
+
+        def _sched_barrier_exp_pairs(pairs, exp_cnt, group):
+            """Emit `pairs` × {1 MFMA + exp_cnt EXP} sched_group_barrier groups.
+
+            Matches gqa_d128_kernel_template.hpp's
+            `sched_barrier_exp_pairs<Pairs, EXP_CNT, Group>()` (lines 25-30).
+            """
+            for _ in range(pairs):
+                rocdl.sched_group_barrier(_MFMA_MASK, 1, group)
+                rocdl.sched_group_barrier(_EXP_MASK, exp_cnt, group)
+
         seq_len_v = fx.Index(seq_len)
 
         # LDS view
@@ -727,6 +754,10 @@ def build_flash_attn_opus_module(
                 v_s_0_hi_partial,
             )
             l_row = _fadd(l_row, tile_sum_a)
+            # P3 schedule hints (C++ lines 455-456): tell scheduler about
+            # the 16-MFMA mma0 + interleaved softmax pipeline.
+            _sched_barrier_exp_pairs(6, 3, 1)
+            _sched_barrier_pairs(10, 5, 1)
             rocdl.sched_barrier(0)
             gpu.barrier()
             rocdl.sched_barrier(0)
@@ -756,6 +787,10 @@ def build_flash_attn_opus_module(
             s_hi_a = [Vec(v_s_1_hi_raw)[r] for r in range_constexpr(16)]
             # NOTE: main loop's v_s[1] (S[j-2]) is "deep below diagonal" — no causal mask needed.
             m_tile_max_a = _wave_row_max(s_lo_a, s_hi_a)
+            # P3 schedule hint (C++ line 474): 4 MFMA + VALU pairs around
+            # the lazy-rescale row_max computation, between step_k(0) and
+            # the subsequent step_k(1..3).
+            _sched_barrier_pairs(4, 5, 2)
             # P2: m_row and m_tile_max_a are already log2-scaled (Q was pre-scaled).
             m_diff_a = _fsub(m_tile_max_a, m_row)
             if const_expr(OPUS_LAZY_RESCALE):
@@ -791,6 +826,9 @@ def build_flash_attn_opus_module(
             v_s_1_lo_partial = Vec.from_elements(lo_part_a, fx.Float32).ir_value()
             v_s_1_hi_partial = Vec.from_elements(hi_part_a, fx.Float32).ir_value()
 
+            # P3 schedule hints (C++ lines 491-492): finish GEMM2 + softmax head.
+            _sched_barrier_pairs(6, 5, 2)
+            _sched_barrier_exp_pairs(6, 3, 2)
             if const_expr(OPUS_SETPRIO):
                 rocdl.s_setprio(0)
             rocdl.sched_barrier(0)
@@ -815,6 +853,9 @@ def build_flash_attn_opus_module(
                 v_s_1_hi_partial,
             )
             l_row = _fadd(l_row, tile_sum_b)
+            # P3 schedule hints (C++ lines 513-514).
+            _sched_barrier_exp_pairs(6, 3, 3)
+            _sched_barrier_pairs(10, 5, 3)
             rocdl.sched_barrier(0)
             gpu.barrier()
             rocdl.sched_barrier(0)
@@ -845,6 +886,8 @@ def build_flash_attn_opus_module(
 
             # row_max + lazy rescale on v_s[0] (= S[j-1], already masked)
             m_tile_max_b = _wave_row_max(s_lo_b, s_hi_b)
+            # P3 schedule hint (C++ line 538).
+            _sched_barrier_pairs(4, 5, 4)
             # P2: m_row and m_tile_max_b are already log2-scaled (Q was pre-scaled).
             m_diff_b = _fsub(m_tile_max_b, m_row)
             if const_expr(OPUS_LAZY_RESCALE):
@@ -880,6 +923,9 @@ def build_flash_attn_opus_module(
             v_s_0_lo_yield = Vec.from_elements(lo_part_b, fx.Float32).ir_value()
             v_s_0_hi_yield = Vec.from_elements(hi_part_b, fx.Float32).ir_value()
 
+            # P3 schedule hints (C++ lines 555-556).
+            _sched_barrier_pairs(6, 5, 4)
+            _sched_barrier_exp_pairs(6, 3, 4)
             if const_expr(OPUS_SETPRIO):
                 rocdl.s_setprio(0)
             rocdl.sched_barrier(0)
@@ -920,6 +966,9 @@ def build_flash_attn_opus_module(
             v_s_0_hi_partial,
         )
         l_row = _fadd(l_row, tile_sum_e1)
+        # P3 schedule hints (C++ lines 579-580).
+        _sched_barrier_exp_pairs(6, 3, 5)
+        _sched_barrier_pairs(10, 5, 5)
         rocdl.sched_barrier(0)
         gpu.barrier()
         rocdl.sched_barrier(0)
@@ -962,6 +1011,9 @@ def build_flash_attn_opus_module(
         v_s_1_lo_e_partial = Vec.from_elements(lo_e3, fx.Float32).ir_value()
         v_s_1_hi_e_partial = Vec.from_elements(hi_e3, fx.Float32).ir_value()
 
+        # P3 schedule hints (C++ lines 609-610).
+        _sched_barrier_pairs(10, 5, 6)
+        _sched_barrier_exp_pairs(6, 3, 6)
         rocdl.sched_barrier(0)
         _scale_o(o_accs, rescale_e3)
 
@@ -990,6 +1042,9 @@ def build_flash_attn_opus_module(
             v_s_1_hi_e_partial,
         )
         l_row = _fadd(l_row, tile_sum_e5)
+        # P3 schedule hints (C++ lines 636-637).
+        _sched_barrier_exp_pairs(6, 3, 7)
+        _sched_barrier_pairs(10, 5, 7)
         rocdl.sched_barrier(0)
         gpu.barrier()
         rocdl.sched_barrier(0)
@@ -1031,6 +1086,9 @@ def build_flash_attn_opus_module(
         v_s_0_lo_e_partial = Vec.from_elements(lo_e7, fx.Float32).ir_value()
         v_s_0_hi_e_partial = Vec.from_elements(hi_e7, fx.Float32).ir_value()
 
+        # P3 schedule hints (C++ lines 665-666).
+        _sched_barrier_pairs(10, 5, 8)
+        _sched_barrier_exp_pairs(6, 3, 8)
         rocdl.sched_barrier(0)
         _scale_o(o_accs, rescale_e7)
 
@@ -1059,6 +1117,9 @@ def build_flash_attn_opus_module(
             v_s_0_hi_e_partial,
         )
         l_row = _fadd(l_row, tile_sum_e9)
+        # P3 schedule hints (C++ lines 691-692).
+        _sched_barrier_exp_pairs(6, 3, 9)
+        _sched_barrier_pairs(10, 5, 9)
         rocdl.sched_barrier(0)
         gpu.barrier()
         rocdl.sched_barrier(0)
@@ -1095,6 +1156,9 @@ def build_flash_attn_opus_module(
 
         # sub_row + first-half exp v_s[1]
         lo_e11, hi_e11 = _sub_row_first_half_exp(s_lo_e9, s_hi_e9, row_max_e11)
+        # P3 schedule hints (C++ lines 719-720).
+        _sched_barrier_pairs(10, 5, 10)
+        _sched_barrier_exp_pairs(6, 3, 10)
         rocdl.sched_barrier(0)
 
         # Second-half exp v_s[1] (FULL exp now); l_row *= rescale_e11; sum; cast P[max-1]
