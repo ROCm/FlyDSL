@@ -418,240 +418,742 @@ def build_flash_attn_opus_module(
         def reduction_peer(v_f32):
             return fx.Float32(v_f32).shuffle_xor(shuf_32_i32, width_i32)
 
-        # ── KV loop bound ──
-        _q_end = q_start + BLOCK_M
+        # ──────────────────────────────────────────────────────────────────────
+        # P1: Restructure to match opus_attn/gqa_d128_kernel_template.hpp
+        # exactly at the cluster level. Each labelled section maps to the
+        # corresponding C++ source range.
+        # ──────────────────────────────────────────────────────────────────────
+
+        # ── Compute max_num_tiles (matches C++ lines 383-390) ──
+        kv_tile_size = fx.Index(BLOCK_N)
+        num_kv_tiles = (seq_len_v + kv_tile_size - fx.Index(1)) // kv_tile_size
         if const_expr(CAUSAL):
-            kv_upper = fx.Index(ArithValue(_q_end < seq_len_v).select(_q_end, seq_len_v))
+            q_block_end = q_start + fx.Index(BLOCK_M)
+            causal_num_tiles = (q_block_end + kv_tile_size - fx.Index(1)) // kv_tile_size
+            max_num_tiles = fx.Index(
+                ArithValue(causal_num_tiles < num_kv_tiles).select(
+                    causal_num_tiles, num_kv_tiles
+                )
+            )
         else:
-            kv_upper = seq_len_v
+            max_num_tiles = num_kv_tiles
 
-        # ── Pre-launch K[0] DMA (OPUS prologue, line 398) ──
-        coop_dma_k(fx.Index(0), 0)
-
-        init_args = [c_neg_inf, c_zero_f]
-        for _ in range_constexpr(D_CHUNKS):
-            init_args.append(c_zero_v16f32)
-        # carry the K buffer id (0/1) across iterations
-        init_args.append(fx.Index(0))
-
-        loop_results = init_args
-        for kv_block_start, inner_iter_args in range(0, kv_upper, BLOCK_N_OUT, init=init_args):
-            m_running = inner_iter_args[0]
-            l_running = inner_iter_args[1]
-            o_accs = [inner_iter_args[2 + i] for i in range_constexpr(D_CHUNKS)]
-            cur_k_buf = inner_iter_args[2 + D_CHUNKS]
-
-            kv_start = kv_block_start
-
-            # ── Cluster 0: wait current K DMA, barrier, prefetch next K ──
-            _next_k_buf = fx.Index(1) - cur_k_buf
-            # Wait for current K to land
-            rocdl.s_waitcnt(0)
-            rocdl.sched_barrier(0)
-            gpu.barrier()
-
-            # Issue next K prefetch (if any) and current V load
-            _next_kv = kv_block_start + fx.Index(BLOCK_N_OUT)
-            _has_next = _next_kv < kv_upper
-            if _has_next:
-                coop_dma_k(_next_kv, _next_k_buf)
-            coop_dma_v(kv_start, fx.Index(0))   # V single-buffered for simplicity
-            rocdl.sched_barrier(0)
-
-            # ── Cluster 1: GEMM0 (S = Q @ K^T) ──
-            k_base = k_buf_base(cur_k_buf)
+        # ── Helper: K LDS → register packs (8 lo + 8 hi) ──
+        def _read_k_packs_for_buf(buf_id):
+            """Read all 16 K MFMA packs from LDS buffer `buf_id`."""
+            k_base = k_buf_base(buf_id)
             k_hi_offset = K_SUB_N * K_STRIDE
             k_swz_mask = (lane_mod_32 & fx.Index(0x7)) << fx.Index(4)
-
-            def _k_idx_lo(ks):
-                col = fx.Index(ks * K_STEP_QK) + lane_div_32 * MFMA_LANE_K
-                return k_base + lane_mod_32 * fx.Index(K_STRIDE) + (col ^ k_swz_mask)
-
-            def _k_idx_hi(ks):
-                col = fx.Index(ks * K_STEP_QK) + lane_div_32 * MFMA_LANE_K
-                return (k_base + fx.Index(k_hi_offset)
-                        + lane_mod_32 * fx.Index(K_STRIDE) + (col ^ k_swz_mask))
-
-            _QK_PREFETCH_DEPTH = 2
-            k_packs_lo = [None] * K_STEPS_QK
-            k_packs_hi = [None] * K_STEPS_QK
-            for p in range_constexpr(_QK_PREFETCH_DEPTH):
-                k_packs_lo[p] = Vec.load(mfma_pack_type, lds_kv, [_k_idx_lo(p)])
-                k_packs_hi[p] = Vec.load(mfma_pack_type, lds_kv, [_k_idx_hi(p)])
-
-            s_acc_lo = c_zero_v16f32
-            s_acc_hi = c_zero_v16f32
+            k_lo = [None] * K_STEPS_QK
+            k_hi = [None] * K_STEPS_QK
             for ks in range_constexpr(K_STEPS_QK):
-                s_acc_lo = mfma_acc(k_packs_lo[ks], q_b_packs[ks], s_acc_lo)
-                s_acc_hi = mfma_acc(k_packs_hi[ks], q_b_packs[ks], s_acc_hi)
-                if const_expr(ks + _QK_PREFETCH_DEPTH < K_STEPS_QK):
-                    k_packs_lo[ks + _QK_PREFETCH_DEPTH] = Vec.load(
-                        mfma_pack_type, lds_kv, [_k_idx_lo(ks + _QK_PREFETCH_DEPTH)]
+                col = fx.Index(ks * K_STEP_QK) + lane_div_32 * MFMA_LANE_K
+                idx_lo = (
+                    k_base + lane_mod_32 * fx.Index(K_STRIDE) + (col ^ k_swz_mask)
+                )
+                idx_hi = (
+                    k_base
+                    + fx.Index(k_hi_offset)
+                    + lane_mod_32 * fx.Index(K_STRIDE)
+                    + (col ^ k_swz_mask)
+                )
+                k_lo[ks] = Vec.load(mfma_pack_type, lds_kv, [idx_lo])
+                k_hi[ks] = Vec.load(mfma_pack_type, lds_kv, [idx_hi])
+            return k_lo, k_hi
+
+        # ── Helper: V LDS → register packs for ONE K-substep (4 packs / D-chunk) ──
+        # k_substep ∈ {0, 1, 2, 3}, mapping to MFMA W_K=16 sub-step of GEMM2:
+        #   0 → lo N-strip, pks=0, KV cols 0..15
+        #   1 → lo N-strip, pks=1, KV cols 16..31
+        #   2 → hi N-strip, pks=0, KV cols 32..47
+        #   3 → hi N-strip, pks=1, KV cols 48..63
+        # Mirrors C++ mma1.step_k(K_idx)'s V operand requirement.
+        def _read_v_packs_for_k_substep(buf_id, k_substep):
+            v_base = v_buf_base(buf_id)
+            is_hi = k_substep // 2
+            pks = k_substep % 2
+            packs = []
+            for dc in range_constexpr(D_CHUNKS):
+                d_col = (
+                    fx.Index(dc * D_CHUNK)
+                    + tr_col_half * fx.Index(16)
+                    + tr_col_sub * fx.Index(4)
+                )
+                if const_expr(is_hi == 0):
+                    k_row = (
+                        fx.Index(pks * PV_K_STEP)
+                        + lane_div_32 * fx.Index(4)
+                        + tr_k_group
                     )
-                    k_packs_hi[ks + _QK_PREFETCH_DEPTH] = Vec.load(
-                        mfma_pack_type, lds_kv, [_k_idx_hi(ks + _QK_PREFETCH_DEPTH)]
+                else:
+                    k_row = (
+                        fx.Index(pks * PV_K_STEP + K_SUB_N)
+                        + lane_div_32 * fx.Index(4)
+                        + tr_k_group
                     )
+                v_xor_mask = (k_row & fx.Index(0x3)) << fx.Index(4)
+                d_col_eff = d_col ^ v_xor_mask
+                lds = v_base + k_row * fx.Index(V_STRIDE) + d_col_eff
+                a = ds_read_tr_v4f16(lds)
+                b = ds_read_tr_v4f16(lds + fx.Index(8 * V_STRIDE))
+                packs.append(
+                    Vec(a).shuffle(Vec(b), [0, 1, 2, 3, 4, 5, 6, 7]).ir_value()
+                )
+            return packs
 
-            # ── Cluster 2: extract S into 32 f32 elements, apply causal mask ──
-            s_raw_lo = [Vec(s_acc_lo)[r] for r in range_constexpr(16)]
-            s_raw_hi = [Vec(s_acc_hi)[r] for r in range_constexpr(16)]
+        # ── Helper: GEMM0 (S = Q @ K^T) – 16 MFMAs ──
+        def _gemm0(k_lo, k_hi):
+            v_s_lo = c_zero_v16f32
+            v_s_hi = c_zero_v16f32
+            for ks in range_constexpr(K_STEPS_QK):
+                v_s_lo = mfma_acc(k_lo[ks], q_b_packs[ks], v_s_lo)
+                v_s_hi = mfma_acc(k_hi[ks], q_b_packs[ks], v_s_hi)
+            return v_s_lo, v_s_hi
 
-            if const_expr(CAUSAL):
-                kv_start_i32 = fx.Int32(kv_start)
-                lane_div_32_i32 = fx.Int32(lane_div_32)
-                lane_off_i32 = lane_div_32_i32 * c4_i32
-                # Always apply causal mask via per-element v_cmp + v_cndmask.
-                # The MFMA C output lane holds elements at
-                #   K-col-within-N-strip = lane_div_32*4 + (r//4)*8 + (r%4)
-                # which gives offsets {0..3, 8..11, 16..19, 24..27}.
-                for r in range_constexpr(16):
-                    rept = r // 4
-                    pair_off = r % 4
-                    kv_col_off = rept * 8 + pair_off
-                    kv_col_lo = kv_start_i32 + lane_off_i32 + fx.Int32(kv_col_off)
-                    s_raw_lo[r] = ArithValue(kv_col_lo > q_row_i32).select(c_neg_inf, s_raw_lo[r])
-                    kv_col_hi = kv_col_lo + fx.Int32(K_SUB_N)
-                    s_raw_hi[r] = ArithValue(kv_col_hi > q_row_i32).select(c_neg_inf, s_raw_hi[r])
+        # ── Helper: causal mask in-place on extracted s_lo[16] / s_hi[16] ──
+        def _causal_mask_inplace(s_lo, s_hi, tile_idx):
+            """Apply causal mask. tile_idx is the KV tile number (fx.Index).
 
-            # ── Cluster 3: row-max, softmax exp, online sum ──
-            m_raw = c_neg_inf
+            Per-element layout: MFMA C-output lane holds elements at
+              kv_col_in_strip = lane_div_32*4 + (r//4)*8 + (r%4)
+            giving offsets {0..3, 8..11, 16..19, 24..27} within each W_N=32 strip.
+            """
+            kv_tile_start = tile_idx * fx.Index(BLOCK_N)
+            kv_start_i32 = fx.Int32(kv_tile_start)
+            lane_off_i32 = fx.Int32(lane_div_32) * c4_i32
             for r in range_constexpr(16):
-                m_raw = _fmax(m_raw, s_raw_lo[r])
-                m_raw = _fmax(m_raw, s_raw_hi[r])
-            m_peer = reduction_peer(m_raw)
-            m_tile_max = _fmax(m_raw, m_peer)
-            m_candidate = _fmax(m_running, m_tile_max)
+                rept = r // 4
+                pair_off = r % 4
+                kv_col_off = rept * 8 + pair_off
+                kv_col_lo = kv_start_i32 + lane_off_i32 + fx.Int32(kv_col_off)
+                s_lo[r] = ArithValue(kv_col_lo > q_row_i32).select(
+                    c_neg_inf, s_lo[r]
+                )
+                kv_col_hi = kv_col_lo + fx.Int32(K_SUB_N)
+                s_hi[r] = ArithValue(kv_col_hi > q_row_i32).select(
+                    c_neg_inf, s_hi[r]
+                )
 
-            # ── Lazy rescale (OPUS lines 475-484, 539-548) ──
-            # If (row_max - m_row) <= 8.0 in scaled-space for ALL lanes,
-            # CLAMP row_max := m_running. This keeps the running max stationary
-            # and skips O *= corr (since corr = exp2(0) = 1).
-            if const_expr(OPUS_LAZY_RESCALE):
-                # OPUS threshold is in scaled space; we work in unscaled here, so
-                # scale the difference. m_diff_scaled = (m_tile_max - m_running) * SM_SCALE_LOG2E.
-                m_diff_unscaled = _fsub(m_tile_max, m_running)
-                m_diff_scaled = _fmul(m_diff_unscaled, c_sm_scale_log2e)
-                below_pred = ArithValue(fx.Float32(m_diff_scaled) <= c_eight_f)
-                ballot_val = rocdl.ballot(T.i64, _raw(below_pred))
-                neg_one_i64 = fx.Int64(-1)
-                all_below = fx.Int64(ballot_val) == neg_one_i64
-                _all_below_pred = ArithValue(all_below)
-                # When lazy, m_new := m_running (no rescale needed downstream).
-                m_new_raw = _all_below_pred.select(m_running, m_candidate)
-            else:
-                m_new_raw = m_candidate
+        # ── Helper: wave-wide row_max over a 32-element extended vector ──
+        def _wave_row_max(s_lo, s_hi):
+            m = c_neg_inf
+            for r in range_constexpr(16):
+                m = _fmax(m, s_lo[r])
+                m = _fmax(m, s_hi[r])
+            return _fmax(m, reduction_peer(m))
 
-            # corr = exp2((m_running - m_new_raw) * SM_SCALE_LOG2E). When lazy is
-            # active, m_new_raw == m_running so corr == 1.
-            corr_arg = _fmul(_fsub(m_running, m_new_raw), c_sm_scale_log2e)
-            corr = rocdl.exp2(T.f32, _raw(corr_arg))
+        # ── Helper: sub_row + first-half exp2 (matches C++ attn_sub_row + exp2_slice<0,16>) ──
+        # Returns:
+        #   lo_partial[16] = exp2((s_lo - m_row) * sm_scale_log2e)
+        #   hi_partial[16] = (s_hi - m_row) * sm_scale_log2e  (NOT yet exp'd)
+        def _sub_row_first_half_exp(s_lo, s_hi, m_row):
+            neg_scaled_m = arith.negf(
+                _raw(_fmul(m_row, c_sm_scale_log2e)), fastmath=fm_fast
+            )
+            lo_partial = []
+            hi_partial = []
+            for r in range_constexpr(16):
+                diff_lo = fmath.fma(
+                    s_lo[r], c_sm_scale_log2e, neg_scaled_m, fastmath=fm_fast
+                )
+                lo_partial.append(ArithValue(diff_lo).exp2(fastmath=fm_fast))
+            for r in range_constexpr(16):
+                diff_hi = fmath.fma(
+                    s_hi[r], c_sm_scale_log2e, neg_scaled_m, fastmath=fm_fast
+                )
+                hi_partial.append(diff_hi)
+            return lo_partial, hi_partial
 
-            # Compute scaled exp values relative to m_new_raw
-            neg_scaled_max_raw = _fmul(m_new_raw, c_sm_scale_log2e)
-            neg_scaled_max = arith.negf(_raw(neg_scaled_max_raw), fastmath=fm_fast)
-            p_vals_lo = []
-            p_vals_hi = []
+        # ── Helper: finish second-half exp + sum + cast → P bf16 packs ──
+        # Matches C++ cluster 1 / cluster 5 body:
+        #   attn_exp2_slice<T, s_half_len, s_half_len>(v_s[?]);
+        #   l_row += attn_sum<T>(v_s[?]);
+        #   v_p = cast<bf16>(v_s[?]);
+        def _finish_softmax_cast_p(lo_partial_list, hi_partial_vec):
+            hi_full = []
+            for r in range_constexpr(16):
+                hi_full.append(
+                    ArithValue(Vec(hi_partial_vec)[r]).exp2(fastmath=fm_fast)
+                )
             local_sum = c_zero_f
             for r in range_constexpr(16):
-                diff_lo = fmath.fma(s_raw_lo[r], c_sm_scale_log2e, neg_scaled_max, fastmath=fm_fast)
-                p_lo = ArithValue(diff_lo).exp2(fastmath=fm_fast)
-                p_vals_lo.append(p_lo)
-                local_sum = _fadd(local_sum, p_lo)
+                local_sum = _fadd(local_sum, lo_partial_list[r])
             for r in range_constexpr(16):
-                diff_hi = fmath.fma(s_raw_hi[r], c_sm_scale_log2e, neg_scaled_max, fastmath=fm_fast)
-                p_hi = ArithValue(diff_hi).exp2(fastmath=fm_fast)
-                p_vals_hi.append(p_hi)
-                local_sum = _fadd(local_sum, p_hi)
-
+                local_sum = _fadd(local_sum, hi_full[r])
             peer_sum = reduction_peer(local_sum)
             tile_sum = _fadd(local_sum, peer_sum)
-            # l_new = l_running * corr + tile_sum  (corr = 1 when lazy active)
-            l_corr_full = _fmul(corr, l_running)
-            l_new = _fadd(l_corr_full, tile_sum)
+            p_lo_packs = []
+            p_hi_packs = []
+            for pks in range_constexpr(PV_K_STEPS):
+                p_base = pks * 8
+                lo_slice = [lo_partial_list[p_base + s] for s in range_constexpr(8)]
+                p_lo_packs.append(bf16_trunc_pack_v8(lo_slice))
+                hi_slice = hi_full[p_base:p_base + 8]
+                p_hi_packs.append(bf16_trunc_pack_v8(hi_slice))
+            return p_lo_packs, p_hi_packs, tile_sum
 
-            # ── Cluster 4: rescale O + GEMM2 ──
+        # ── Helper: scale o_accs by a scalar f32 (broadcast 16-wide vec mul) ──
+        def _scale_o(o_accs, scale_scalar):
+            scale_vec = Vec.from_elements([scale_scalar], fx.Float32).broadcast_to(16)
+            for dc in range_constexpr(D_CHUNKS):
+                o_accs[dc] = _fmul(Vec(o_accs[dc]), scale_vec)
+
+        # s_waitcnt encoding helpers
+        _LGKMCNT_0_ONLY = 0xC07F   # vmcnt=63, expcnt=7, lgkmcnt=0, vmcnt_hi=3
+
+        def _waitcnt_lgkm_0_vm_n(n):
+            """Combined: lgkmcnt(0) + vmcnt(n)."""
+            val = (
+                (n & _VMCNT_LO_MASK)
+                | (7 << 4)
+                | (0 << 8)
+                | (((n >> 4) & _VMCNT_HI_MASK) << _VMCNT_HI_SHIFT)
+            )
+            rocdl.s_waitcnt(val)
+
+        # Causal-mask q_start_pos (C++ line 394). Each warp computes its first Q row
+        # position so that causal_mask_tile can decide whether to apply.
+        # For P1 we apply causal mask unconditionally inside the const_expr branch;
+        # the runtime gate is deferred to later phases.
+
+        # ─────────────────────── PROLOGUE (C++ lines 397-436) ───────────────────────
+
+        # [P1] async_load K[0] → s_k[0]   (C++ line 398)
+        coop_dma_k(fx.Index(0), 0)
+
+        # [P2] s_waitcnt(0); sched_barrier(0); s_barrier   (C++ lines 399-401)
+        rocdl.s_waitcnt(0)
+        rocdl.sched_barrier(0)
+        gpu.barrier()
+
+        # [P3] Q is already preloaded above (q_b_packs).
+        # NOTE: For P1 we do NOT yet pre-multiply Q by temperature_scale.
+        # The scaling is still applied per-element in the softmax FMA below.
+        # This optimization is deferred to phase P2.
+
+        # [P4] async_load K[1] → s_k[1], V[0] → s_v[0]   (C++ lines 408-409)
+        coop_dma_k(fx.Index(BLOCK_N), 1)
+        coop_dma_v(fx.Index(0), 0)
+
+        # [P5] v_k = load(s_k[0], u_rk)   (C++ line 410)
+        k_pl_pro, k_ph_pro = _read_k_packs_for_buf(0)
+
+        # [P6] sched_barrier; s_waitcnt_lgkmcnt(0); s_waitcnt_vmcnt(v_buffer_load_insts)
+        #     (C++ lines 411-413)
+        rocdl.sched_barrier(0)
+        rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
+        _waitcnt_vm_n(NUM_DMA_V)   # vmcnt(2)
+
+        # [P7] stagger barrier: skipped for P1; will be added in phase P5.
+
+        # [P8] v_s[0] = mma0(v_q, v_k)   (C++ line 420)
+        v_s_0_lo_raw, v_s_0_hi_raw = _gemm0(k_pl_pro, k_ph_pro)
+        rocdl.sched_barrier(0)
+
+        # [P9] Causal mask for tile 0 (C++ lines 422-427)
+        s_lo_pro = [Vec(v_s_0_lo_raw)[r] for r in range_constexpr(16)]
+        s_hi_pro = [Vec(v_s_0_hi_raw)[r] for r in range_constexpr(16)]
+        if const_expr(CAUSAL):
+            _causal_mask_inplace(s_lo_pro, s_hi_pro, fx.Index(0))
+
+        # [P10] m_row = attn_row_max<T>(v_s[0])   (C++ line 428)
+        m_row_pro = _wave_row_max(s_lo_pro, s_hi_pro)
+
+        # [P11] attn_sub_row(v_s[0], m_row); first-half exp2(v_s[0])  (C++ lines 429-431)
+        lo_pro, hi_pro = _sub_row_first_half_exp(s_lo_pro, s_hi_pro, m_row_pro)
+        v_s_0_lo_init = Vec.from_elements(lo_pro, fx.Float32).ir_value()
+        v_s_0_hi_init = Vec.from_elements(hi_pro, fx.Float32).ir_value()
+
+        # [P12] sched_barrier(0); s_barrier; sched_barrier(0)   (C++ lines 432-434)
+        rocdl.sched_barrier(0)
+        gpu.barrier()
+        rocdl.sched_barrier(0)
+
+        # [P13] async_load K[2] → s_k[0]   (C++ line 436)
+        coop_dma_k(fx.Index(2 * BLOCK_N), 0)
+
+        # ─────────────────── MAIN LOOP (C++ lines 439-560) ──────────────────────────
+        # for j = 3; j < max_num_tiles - 1; j += 2
+        # Each iter processes 2 KV tiles in 8 clusters.
+        #
+        # Loop state: [m_row, l_row, o_accs[0..3], v_s_0_lo_partial, v_s_0_hi_partial]
+        l_row_init = c_zero_f
+        init_args = [m_row_pro, l_row_init]
+        for _ in range_constexpr(D_CHUNKS):
+            init_args.append(c_zero_v16f32)
+        init_args.append(v_s_0_lo_init)
+        init_args.append(v_s_0_hi_init)
+
+        loop_results = init_args
+        for j, loop_args in range(
+            fx.Index(3),
+            max_num_tiles - fx.Index(1),
+            fx.Index(2),
+            init=init_args,
+        ):
+            m_row = loop_args[0]
+            l_row = loop_args[1]
+            o_accs = [loop_args[2 + i] for i in range_constexpr(D_CHUNKS)]
+            v_s_0_lo_partial = loop_args[2 + D_CHUNKS]
+            v_s_0_hi_partial = loop_args[3 + D_CHUNKS]
+
+            j_idx = j  # fx.Index value in {3, 5, 7, ...}
+
+            # ─── Cluster 0 (C++ lines 441-447) ───
+            # V[j-2] async + K[j-2] ds_read + wait + barrier
+            coop_dma_v((j_idx - fx.Index(2)) * fx.Index(BLOCK_N), 1)
+            k_pl_a, k_ph_a = _read_k_packs_for_buf(1)
+            rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
+            _waitcnt_vm_n(NUM_DMA_K + NUM_DMA_V)
+            rocdl.sched_barrier(0)
+            gpu.barrier()
+            rocdl.sched_barrier(0)
+
+            # ─── Cluster 1 (C++ lines 449-459) ───
+            # v_s[1] = mma0(v_q, K[j-2]); finish exp v_s[0]; sum; cast v_p = P[j-3]
+            v_s_1_lo_raw, v_s_1_hi_raw = _gemm0(k_pl_a, k_ph_a)
+            v_p_lo_a, v_p_hi_a, tile_sum_a = _finish_softmax_cast_p(
+                [Vec(v_s_0_lo_partial)[r] for r in range_constexpr(16)],
+                v_s_0_hi_partial,
+            )
+            l_row = _fadd(l_row, tile_sum_a)
+            rocdl.sched_barrier(0)
+            gpu.barrier()
+            rocdl.sched_barrier(0)
+
+            # ─── Cluster 2 (C++ lines 461-468) ───
+            # K[j] async + (tr_load V[j-3] is folded into Cluster 3's step_k reads) + wait
+            coop_dma_k(j_idx * fx.Index(BLOCK_N), 1)
+            rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
+            _waitcnt_vm_n(NUM_DMA_K + NUM_DMA_V)
+            rocdl.sched_barrier(0)
+            gpu.barrier()
+            rocdl.sched_barrier(0)
+
+            # ─── Cluster 3 (C++ lines 470-496) ───
+            # GEMM2 P[j-3] @ V[j-3] via step_k(0..3) + lazy rescale + softmax v_s[1] head
             if const_expr(OPUS_SETPRIO):
                 rocdl.s_setprio(1)
 
+            # step_k(0): 4 MFMAs (one per D-chunk), KV cols 0-15 of V[j-3] (from s_v[0])
+            v_pk = _read_v_packs_for_k_substep(0, 0)
+            p_pk = v_p_lo_a[0]
+            for dc in range_constexpr(D_CHUNKS):
+                o_accs[dc] = mfma_acc(v_pk[dc], p_pk, o_accs[dc])
+
+            # row_max + lazy rescale on v_s[1] (= S[j-2])
+            s_lo_a = [Vec(v_s_1_lo_raw)[r] for r in range_constexpr(16)]
+            s_hi_a = [Vec(v_s_1_hi_raw)[r] for r in range_constexpr(16)]
+            # NOTE: main loop's v_s[1] (S[j-2]) is "deep below diagonal" — no causal mask needed.
+            m_tile_max_a = _wave_row_max(s_lo_a, s_hi_a)
+            m_diff_scaled_a = _fmul(
+                _fsub(m_tile_max_a, m_row), c_sm_scale_log2e
+            )
             if const_expr(OPUS_LAZY_RESCALE):
-                # When all_below is true, replace corr with 1.0 so the multiply
-                # is a no-op (LLVM can fold). Saves the actual multiplication
-                # work when the running max is stationary.
-                eff_corr_scalar = _all_below_pred.select(c_one_f, corr)
-                eff_corr_vec = Vec.from_elements([eff_corr_scalar], fx.Float32).broadcast_to(16)
-                for dc in range_constexpr(D_CHUNKS):
-                    o_accs[dc] = _fmul(Vec(o_accs[dc]), eff_corr_vec)
+                below_a = ArithValue(fx.Float32(m_diff_scaled_a) <= c_eight_f)
+                ballot_a = rocdl.ballot(T.i64, _raw(below_a))
+                all_below_a = fx.Int64(ballot_a) == fx.Int64(-1)
+                ab_a = ArithValue(all_below_a)
+                m_new_a = ab_a.select(m_row, _fmax(m_row, m_tile_max_a))
+                corr_a = rocdl.exp2(
+                    T.f32, _raw(_fmul(_fsub(m_row, m_new_a), c_sm_scale_log2e))
+                )
+                eff_corr_a = ab_a.select(c_one_f, corr_a)
             else:
-                corr_vec = Vec.from_elements([corr], fx.Float32).broadcast_to(16)
+                m_new_a = _fmax(m_row, m_tile_max_a)
+                corr_a = rocdl.exp2(
+                    T.f32, _raw(_fmul(_fsub(m_row, m_new_a), c_sm_scale_log2e))
+                )
+                eff_corr_a = corr_a
+
+            _scale_o(o_accs, eff_corr_a)
+            l_row = _fmul(l_row, corr_a)
+            m_row = m_new_a
+
+            # step_k(1..3): 12 more MFMAs
+            for kss in range_constexpr(3):
+                actual = kss + 1
+                v_pk = _read_v_packs_for_k_substep(0, actual)
+                if const_expr(actual < 2):
+                    p_pk = v_p_lo_a[actual]
+                else:
+                    p_pk = v_p_hi_a[actual - 2]
                 for dc in range_constexpr(D_CHUNKS):
-                    o_accs[dc] = _fmul(Vec(o_accs[dc]), corr_vec)
+                    o_accs[dc] = mfma_acc(v_pk[dc], p_pk, o_accs[dc])
 
-            # Pack P
-            p_packs_lo = []
-            p_packs_hi = []
-            for pks in range_constexpr(PV_K_STEPS):
-                p_base = pks * 8
-                p_packs_lo.append(bf16_trunc_pack_v8(p_vals_lo[p_base:p_base + 8]))
-                p_packs_hi.append(bf16_trunc_pack_v8(p_vals_hi[p_base:p_base + 8]))
+            # sub_row + first-half exp on v_s[1]
+            lo_part_a, hi_part_a = _sub_row_first_half_exp(s_lo_a, s_hi_a, m_new_a)
+            v_s_1_lo_partial = Vec.from_elements(lo_part_a, fx.Float32).ir_value()
+            v_s_1_hi_partial = Vec.from_elements(hi_part_a, fx.Float32).ir_value()
 
-            # GEMM2: O += V^T @ P (using ds_read_tr16_b64 for V)
-            v_base = v_buf_base(fx.Index(0))
-            _steps = [(dc, pks) for dc in range(D_CHUNKS) for pks in range(PV_K_STEPS)]
-            TOTAL_PV = len(_steps)
-
-            def _read_v_pack(step_idx):
-                dc, pks = _steps[step_idx]
-                d_col = fx.Index(dc * D_CHUNK) + tr_col_half * fx.Index(16) + tr_col_sub * fx.Index(4)
-                k_row = fx.Index(pks * PV_K_STEP) + lane_div_32 * fx.Index(4) + tr_k_group
-                v_xor_mask = (k_row & fx.Index(0x3)) << fx.Index(4)
-                d_col_eff = d_col ^ v_xor_mask
-                lds_lo = v_base + k_row * fx.Index(V_STRIDE) + d_col_eff
-                lds_hi = lds_lo + fx.Index(K_SUB_N * V_STRIDE)
-                vl_a = ds_read_tr_v4f16(lds_lo)
-                vl_b = ds_read_tr_v4f16(lds_lo + fx.Index(8 * V_STRIDE))
-                vl = Vec(vl_a).shuffle(Vec(vl_b), [0, 1, 2, 3, 4, 5, 6, 7]).ir_value()
-                vh_a = ds_read_tr_v4f16(lds_hi)
-                vh_b = ds_read_tr_v4f16(lds_hi + fx.Index(8 * V_STRIDE))
-                vh = Vec(vh_a).shuffle(Vec(vh_b), [0, 1, 2, 3, 4, 5, 6, 7]).ir_value()
-                return vl, vh
-
-            # Wait for V DMA to complete and barrier
-            _waitcnt_vm_n(0)
-            rocdl.sched_barrier(0)
-            gpu.barrier()
-
-            v_lo_cur, v_hi_cur = _read_v_pack(0)
-            for si in range_constexpr(TOTAL_PV):
-                dc, pks = _steps[si]
-                if const_expr(si + 1 < TOTAL_PV):
-                    v_lo_nxt, v_hi_nxt = _read_v_pack(si + 1)
-                o_accs[dc] = mfma_acc(v_lo_cur, p_packs_lo[pks], o_accs[dc])
-                o_accs[dc] = mfma_acc(v_hi_cur, p_packs_hi[pks], o_accs[dc])
-                if const_expr(si + 1 < TOTAL_PV):
-                    v_lo_cur = v_lo_nxt
-                    v_hi_cur = v_hi_nxt
-
-            # ── End of cluster: s_setprio(0), yield window ──
             if const_expr(OPUS_SETPRIO):
                 rocdl.s_setprio(0)
-            if const_expr(OPUS_YIELD_NOP):
-                rocdl.sched_barrier(0)
-                rocdl.s_nop(15)
-                rocdl.s_nop(7)
-                rocdl.sched_barrier(0)
+            rocdl.sched_barrier(0)
+            gpu.barrier()
+            rocdl.sched_barrier(0)
 
-            _yield_args = [m_new_raw, l_new] + o_accs + [_next_k_buf]
-            loop_results = yield _yield_args
+            # ─── Cluster 4 (C++ lines 498-505) ───
+            # V[j-1] async + K[j-1] ds_read + wait
+            coop_dma_v((j_idx - fx.Index(1)) * fx.Index(BLOCK_N), 0)
+            k_pl_b, k_ph_b = _read_k_packs_for_buf(0)
+            rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
+            _waitcnt_vm_n(NUM_DMA_K + NUM_DMA_V)
+            rocdl.sched_barrier(0)
+            gpu.barrier()
+            rocdl.sched_barrier(0)
 
-        # ── Normalize and store O ──
-        l_final = loop_results[1]
-        o_finals = [loop_results[2 + dc] for dc in range_constexpr(D_CHUNKS)]
-        inv_l = rocdl.rcp(T.f32, _raw(l_final))
+            # ─── Cluster 5 (C++ lines 507-517) ───
+            # v_s[0] = mma0(v_q, K[j-1]); finish exp v_s[1]; sum; cast v_p = P[j-2]
+            v_s_0_lo_raw_b, v_s_0_hi_raw_b = _gemm0(k_pl_b, k_ph_b)
+            v_p_lo_b, v_p_hi_b, tile_sum_b = _finish_softmax_cast_p(
+                [Vec(v_s_1_lo_partial)[r] for r in range_constexpr(16)],
+                v_s_1_hi_partial,
+            )
+            l_row = _fadd(l_row, tile_sum_b)
+            rocdl.sched_barrier(0)
+            gpu.barrier()
+            rocdl.sched_barrier(0)
+
+            # ─── Cluster 6 (C++ lines 519-532) ───
+            # K[j+1] async + causal mask on v_s[0] = S[j-1] + wait
+            coop_dma_k((j_idx + fx.Index(1)) * fx.Index(BLOCK_N), 0)
+            s_lo_b = [Vec(v_s_0_lo_raw_b)[r] for r in range_constexpr(16)]
+            s_hi_b = [Vec(v_s_0_hi_raw_b)[r] for r in range_constexpr(16)]
+            if const_expr(CAUSAL):
+                _causal_mask_inplace(s_lo_b, s_hi_b, j_idx - fx.Index(1))
+            rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
+            _waitcnt_vm_n(NUM_DMA_K + NUM_DMA_V)
+            rocdl.sched_barrier(0)
+            gpu.barrier()
+            rocdl.sched_barrier(0)
+
+            # ─── Cluster 7 (C++ lines 534-560) ───
+            # GEMM2 P[j-2] @ V[j-2] via step_k(0..3) + lazy rescale + softmax v_s[0] head
+            if const_expr(OPUS_SETPRIO):
+                rocdl.s_setprio(1)
+
+            # step_k(0)
+            v_pk = _read_v_packs_for_k_substep(1, 0)
+            p_pk = v_p_lo_b[0]
+            for dc in range_constexpr(D_CHUNKS):
+                o_accs[dc] = mfma_acc(v_pk[dc], p_pk, o_accs[dc])
+
+            # row_max + lazy rescale on v_s[0] (= S[j-1], already masked)
+            m_tile_max_b = _wave_row_max(s_lo_b, s_hi_b)
+            m_diff_scaled_b = _fmul(
+                _fsub(m_tile_max_b, m_row), c_sm_scale_log2e
+            )
+            if const_expr(OPUS_LAZY_RESCALE):
+                below_b = ArithValue(fx.Float32(m_diff_scaled_b) <= c_eight_f)
+                ballot_b = rocdl.ballot(T.i64, _raw(below_b))
+                all_below_b = fx.Int64(ballot_b) == fx.Int64(-1)
+                ab_b = ArithValue(all_below_b)
+                m_new_b = ab_b.select(m_row, _fmax(m_row, m_tile_max_b))
+                corr_b = rocdl.exp2(
+                    T.f32, _raw(_fmul(_fsub(m_row, m_new_b), c_sm_scale_log2e))
+                )
+                eff_corr_b = ab_b.select(c_one_f, corr_b)
+            else:
+                m_new_b = _fmax(m_row, m_tile_max_b)
+                corr_b = rocdl.exp2(
+                    T.f32, _raw(_fmul(_fsub(m_row, m_new_b), c_sm_scale_log2e))
+                )
+                eff_corr_b = corr_b
+
+            _scale_o(o_accs, eff_corr_b)
+            l_row = _fmul(l_row, corr_b)
+            m_row = m_new_b
+
+            # step_k(1..3)
+            for kss in range_constexpr(3):
+                actual = kss + 1
+                v_pk = _read_v_packs_for_k_substep(1, actual)
+                if const_expr(actual < 2):
+                    p_pk = v_p_lo_b[actual]
+                else:
+                    p_pk = v_p_hi_b[actual - 2]
+                for dc in range_constexpr(D_CHUNKS):
+                    o_accs[dc] = mfma_acc(v_pk[dc], p_pk, o_accs[dc])
+
+            # sub_row + first-half exp on v_s[0]
+            lo_part_b, hi_part_b = _sub_row_first_half_exp(s_lo_b, s_hi_b, m_new_b)
+            v_s_0_lo_yield = Vec.from_elements(lo_part_b, fx.Float32).ir_value()
+            v_s_0_hi_yield = Vec.from_elements(hi_part_b, fx.Float32).ir_value()
+
+            if const_expr(OPUS_SETPRIO):
+                rocdl.s_setprio(0)
+            rocdl.sched_barrier(0)
+            gpu.barrier()
+            rocdl.sched_barrier(0)
+
+            yield_args = [m_row, l_row] + o_accs + [v_s_0_lo_yield, v_s_0_hi_yield]
+            loop_results = yield yield_args
+
+        # ─────────────────── EPILOGUE (C++ lines 564-742) ───────────────────────────
+        # Drains the last 3 KV tiles + completes the partial tile carried from the loop.
+        # 13 clusters total.
+        m_row = loop_results[0]
+        l_row = loop_results[1]
+        o_accs = [loop_results[2 + i] for i in range_constexpr(D_CHUNKS)]
+        v_s_0_lo_partial = loop_results[2 + D_CHUNKS]
+        v_s_0_hi_partial = loop_results[3 + D_CHUNKS]
+
+        max_m3 = max_num_tiles - fx.Index(3)
+        max_m2 = max_num_tiles - fx.Index(2)
+        max_m1 = max_num_tiles - fx.Index(1)
+
+        # ─── Cluster 0 (epi, C++ lines 565-571) ───
+        # V[max-3] async + K[max-3] ds_read + wait
+        coop_dma_v(max_m3 * fx.Index(BLOCK_N), 1)
+        k_pl_e0, k_ph_e0 = _read_k_packs_for_buf(1)
+        rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
+        _waitcnt_vm_n(NUM_DMA_K + NUM_DMA_V)
+        rocdl.sched_barrier(0)
+        gpu.barrier()
+        rocdl.sched_barrier(0)
+
+        # ─── Cluster 1 (epi, C++ lines 573-583) ───
+        # v_s[1] = mma0(v_q, K[max-3]); finish exp v_s[0]; sum; cast v_p = P[max-4]
+        v_s_1_lo_e, v_s_1_hi_e = _gemm0(k_pl_e0, k_ph_e0)
+        v_p_lo_e1, v_p_hi_e1, tile_sum_e1 = _finish_softmax_cast_p(
+            [Vec(v_s_0_lo_partial)[r] for r in range_constexpr(16)],
+            v_s_0_hi_partial,
+        )
+        l_row = _fadd(l_row, tile_sum_e1)
+        rocdl.sched_barrier(0)
+        gpu.barrier()
+        rocdl.sched_barrier(0)
+
+        # ─── Cluster 2 (epi, C++ lines 585-598) ───
+        # K[max-1] async + causal mask on v_s[1] (= S[max-3]) + wait
+        coop_dma_k(max_m1 * fx.Index(BLOCK_N), 1)
+        s_lo_e1 = [Vec(v_s_1_lo_e)[r] for r in range_constexpr(16)]
+        s_hi_e1 = [Vec(v_s_1_hi_e)[r] for r in range_constexpr(16)]
+        if const_expr(CAUSAL):
+            _causal_mask_inplace(s_lo_e1, s_hi_e1, max_m3)
+        rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
+        _waitcnt_vm_n(NUM_DMA_K + NUM_DMA_V)
+        rocdl.sched_barrier(0)
+        gpu.barrier()
+        rocdl.sched_barrier(0)
+
+        # ─── Cluster 3 (epi, C++ lines 600-618) ───
+        # FULL GEMM2 (no lazy) + softmax start v_s[1] + scale o
+        if const_expr(OPUS_SETPRIO):
+            rocdl.s_setprio(1)
+
+        # mma1 (full 16 MFMAs): GEMM2 with v_p = P[max-4] and V[max-4] (from s_v[0])
+        for kss in range_constexpr(4):
+            v_pk = _read_v_packs_for_k_substep(0, kss)
+            if const_expr(kss < 2):
+                p_pk = v_p_lo_e1[kss]
+            else:
+                p_pk = v_p_hi_e1[kss - 2]
+            for dc in range_constexpr(D_CHUNKS):
+                o_accs[dc] = mfma_acc(v_pk[dc], p_pk, o_accs[dc])
+
+        # row_max + rescale_m + sub_row + first-half exp on v_s[1]
+        m_tile_max_e3 = _wave_row_max(s_lo_e1, s_hi_e1)
+        row_max_e3 = _fmax(m_row, m_tile_max_e3)
+        rescale_e3 = rocdl.exp2(
+            T.f32, _raw(_fmul(_fsub(m_row, row_max_e3), c_sm_scale_log2e))
+        )
+        m_row = row_max_e3
+        lo_e3, hi_e3 = _sub_row_first_half_exp(s_lo_e1, s_hi_e1, row_max_e3)
+        v_s_1_lo_e_partial = Vec.from_elements(lo_e3, fx.Float32).ir_value()
+        v_s_1_hi_e_partial = Vec.from_elements(hi_e3, fx.Float32).ir_value()
+
+        rocdl.sched_barrier(0)
+        _scale_o(o_accs, rescale_e3)
+
+        if const_expr(OPUS_SETPRIO):
+            rocdl.s_setprio(0)
+        rocdl.sched_barrier(0)
+        gpu.barrier()
+        rocdl.sched_barrier(0)
+
+        # ─── Cluster 4 (epi, C++ lines 620-627) ───
+        # V[max-2] async + K[max-2] ds_read + wait
+        coop_dma_v(max_m2 * fx.Index(BLOCK_N), 0)
+        k_pl_e4, k_ph_e4 = _read_k_packs_for_buf(0)
+        rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
+        _waitcnt_vm_n(NUM_DMA_K + NUM_DMA_V)
+        rocdl.sched_barrier(0)
+        gpu.barrier()
+        rocdl.sched_barrier(0)
+
+        # ─── Cluster 5 (epi, C++ lines 629-640) ───
+        # v_s[0] = mma0(v_q, K[max-2]); l_row *= rescale_e3; finish exp v_s[1]; sum; cast P[max-3]
+        v_s_0_lo_e5, v_s_0_hi_e5 = _gemm0(k_pl_e4, k_ph_e4)
+        l_row = _fmul(l_row, rescale_e3)
+        v_p_lo_e5, v_p_hi_e5, tile_sum_e5 = _finish_softmax_cast_p(
+            [Vec(v_s_1_lo_e_partial)[r] for r in range_constexpr(16)],
+            v_s_1_hi_e_partial,
+        )
+        l_row = _fadd(l_row, tile_sum_e5)
+        rocdl.sched_barrier(0)
+        gpu.barrier()
+        rocdl.sched_barrier(0)
+
+        # ─── Cluster 6 (epi, C++ lines 642-654) ───
+        # tr_load V[max-3] (folded into Cluster 7 step_k) + causal mask on v_s[0] (= S[max-2])
+        # + wait (lgkm(0), vmcnt(v_buffer_load_insts))
+        s_lo_e5 = [Vec(v_s_0_lo_e5)[r] for r in range_constexpr(16)]
+        s_hi_e5 = [Vec(v_s_0_hi_e5)[r] for r in range_constexpr(16)]
+        if const_expr(CAUSAL):
+            _causal_mask_inplace(s_lo_e5, s_hi_e5, max_m2)
+        rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
+        _waitcnt_vm_n(NUM_DMA_V)
+        rocdl.sched_barrier(0)
+        gpu.barrier()
+        rocdl.sched_barrier(0)
+
+        # ─── Cluster 7 (epi, C++ lines 656-673) ───
+        # FULL GEMM2 (no lazy) + softmax start v_s[0] + scale o
+        if const_expr(OPUS_SETPRIO):
+            rocdl.s_setprio(1)
+
+        # mma1 (full 16 MFMAs): GEMM2 with v_p = P[max-3] and V[max-3] (from s_v[1])
+        for kss in range_constexpr(4):
+            v_pk = _read_v_packs_for_k_substep(1, kss)
+            if const_expr(kss < 2):
+                p_pk = v_p_lo_e5[kss]
+            else:
+                p_pk = v_p_hi_e5[kss - 2]
+            for dc in range_constexpr(D_CHUNKS):
+                o_accs[dc] = mfma_acc(v_pk[dc], p_pk, o_accs[dc])
+
+        m_tile_max_e7 = _wave_row_max(s_lo_e5, s_hi_e5)
+        row_max_e7 = _fmax(m_row, m_tile_max_e7)
+        rescale_e7 = rocdl.exp2(
+            T.f32, _raw(_fmul(_fsub(m_row, row_max_e7), c_sm_scale_log2e))
+        )
+        m_row = row_max_e7
+        lo_e7, hi_e7 = _sub_row_first_half_exp(s_lo_e5, s_hi_e5, row_max_e7)
+        v_s_0_lo_e_partial = Vec.from_elements(lo_e7, fx.Float32).ir_value()
+        v_s_0_hi_e_partial = Vec.from_elements(hi_e7, fx.Float32).ir_value()
+
+        rocdl.sched_barrier(0)
+        _scale_o(o_accs, rescale_e7)
+
+        if const_expr(OPUS_SETPRIO):
+            rocdl.s_setprio(0)
+        rocdl.sched_barrier(0)
+        gpu.barrier()
+        rocdl.sched_barrier(0)
+
+        # ─── Cluster 8 (epi, C++ lines 675-682) ───
+        # V[max-1] async + K[max-1] ds_read + wait (lgkm(0), vmcnt(v_buffer_load_insts))
+        coop_dma_v(max_m1 * fx.Index(BLOCK_N), 1)
+        k_pl_e8, k_ph_e8 = _read_k_packs_for_buf(1)
+        rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
+        _waitcnt_vm_n(NUM_DMA_V)
+        rocdl.sched_barrier(0)
+        gpu.barrier()
+        rocdl.sched_barrier(0)
+
+        # ─── Cluster 9 (epi, C++ lines 684-695) ───
+        # v_s[1] = mma0(v_q, K[max-1]); l_row *= rescale_e7; finish exp v_s[0]; sum; cast P[max-2]
+        v_s_1_lo_e9, v_s_1_hi_e9 = _gemm0(k_pl_e8, k_ph_e8)
+        l_row = _fmul(l_row, rescale_e7)
+        v_p_lo_e9, v_p_hi_e9, tile_sum_e9 = _finish_softmax_cast_p(
+            [Vec(v_s_0_lo_e_partial)[r] for r in range_constexpr(16)],
+            v_s_0_hi_e_partial,
+        )
+        l_row = _fadd(l_row, tile_sum_e9)
+        rocdl.sched_barrier(0)
+        gpu.barrier()
+        rocdl.sched_barrier(0)
+
+        # ─── Cluster 10 (epi, C++ lines 697-709) ───
+        # tr_load V[max-2] (folded into Cluster 11) + causal mask on v_s[1] (= S[max-1]) + wait vmcnt(0)
+        s_lo_e9 = [Vec(v_s_1_lo_e9)[r] for r in range_constexpr(16)]
+        s_hi_e9 = [Vec(v_s_1_hi_e9)[r] for r in range_constexpr(16)]
+        if const_expr(CAUSAL):
+            _causal_mask_inplace(s_lo_e9, s_hi_e9, max_m1)
+        rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
+        _waitcnt_vm_n(0)
+        rocdl.sched_barrier(0)
+        gpu.barrier()
+        rocdl.sched_barrier(0)
+
+        # ─── Cluster 11 (epi, C++ lines 711-732) ───
+        # FULL GEMM2 (P[max-2] @ V[max-2]) + row_max + sub_row + FULL exp v_s[1] + cast P[max-1] + scale o
+        # mma1: GEMM2 with v_p = P[max-2] and V[max-2] (from s_v[0])
+        for kss in range_constexpr(4):
+            v_pk = _read_v_packs_for_k_substep(0, kss)
+            if const_expr(kss < 2):
+                p_pk = v_p_lo_e9[kss]
+            else:
+                p_pk = v_p_hi_e9[kss - 2]
+            for dc in range_constexpr(D_CHUNKS):
+                o_accs[dc] = mfma_acc(v_pk[dc], p_pk, o_accs[dc])
+
+        m_tile_max_e11 = _wave_row_max(s_lo_e9, s_hi_e9)
+        row_max_e11 = _fmax(m_row, m_tile_max_e11)
+        rescale_e11 = rocdl.exp2(
+            T.f32, _raw(_fmul(_fsub(m_row, row_max_e11), c_sm_scale_log2e))
+        )
+        m_row = row_max_e11
+
+        # sub_row + first-half exp v_s[1]
+        lo_e11, hi_e11 = _sub_row_first_half_exp(s_lo_e9, s_hi_e9, row_max_e11)
+        rocdl.sched_barrier(0)
+
+        # Second-half exp v_s[1] (FULL exp now); l_row *= rescale_e11; sum; cast P[max-1]
+        hi_e11_full = []
+        for r in range_constexpr(16):
+            hi_e11_full.append(ArithValue(hi_e11[r]).exp2(fastmath=fm_fast))
+        l_row = _fmul(l_row, rescale_e11)
+        local_sum_e11 = c_zero_f
+        for r in range_constexpr(16):
+            local_sum_e11 = _fadd(local_sum_e11, lo_e11[r])
+        for r in range_constexpr(16):
+            local_sum_e11 = _fadd(local_sum_e11, hi_e11_full[r])
+        peer_sum_e11 = reduction_peer(local_sum_e11)
+        tile_sum_e11 = _fadd(local_sum_e11, peer_sum_e11)
+        l_row = _fadd(l_row, tile_sum_e11)
+
+        v_p_lo_e11 = []
+        v_p_hi_e11 = []
+        for pks in range_constexpr(PV_K_STEPS):
+            p_base = pks * 8
+            lo_slice = [lo_e11[p_base + s] for s in range_constexpr(8)]
+            v_p_lo_e11.append(bf16_trunc_pack_v8(lo_slice))
+            hi_slice = hi_e11_full[p_base:p_base + 8]
+            v_p_hi_e11.append(bf16_trunc_pack_v8(hi_slice))
+
+        rocdl.sched_barrier(0)
+        _scale_o(o_accs, rescale_e11)
+        gpu.barrier()
+        rocdl.sched_barrier(0)
+
+        # ─── Cluster 12 (epi, C++ lines 735-739) ───
+        # tr_load V[max-1] (folded into Cluster 13 step_k reads) + s_waitcnt_lgkmcnt(0) + barrier
+        rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
+        rocdl.sched_barrier(0)
+        gpu.barrier()
+        rocdl.sched_barrier(0)
+
+        # ─── Cluster 13 (epi, C++ line 742) ───
+        # FINAL mma1: GEMM2 with v_p = P[max-1] and V[max-1] (from s_v[1])
+        for kss in range_constexpr(4):
+            v_pk = _read_v_packs_for_k_substep(1, kss)
+            if const_expr(kss < 2):
+                p_pk = v_p_lo_e11[kss]
+            else:
+                p_pk = v_p_hi_e11[kss - 2]
+            for dc in range_constexpr(D_CHUNKS):
+                o_accs[dc] = mfma_acc(v_pk[dc], p_pk, o_accs[dc])
+
+        # ─── Normalize O and store to gmem (C++ lines 744-754) ───
+        # l_inv = (l_row > 0) ? 1/l_row : 0
+        inv_l = rocdl.rcp(T.f32, _raw(l_row))
         inv_l_vec = Vec.from_elements([inv_l], fx.Float32).broadcast_to(16)
 
         if q_in_bounds:
             for dc in range_constexpr(D_CHUNKS):
-                o_norm_vec = Vec(o_finals[dc]) * inv_l_vec
+                o_norm_vec = Vec(o_accs[dc]) * inv_l_vec
                 for r in range_constexpr(16):
                     o_val = Vec(o_norm_vec)[r]
                     o_f16 = fx.Float32(o_val).to(elem_dtype)
