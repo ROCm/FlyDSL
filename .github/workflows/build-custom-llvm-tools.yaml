@@ -28,13 +28,11 @@ jobs:
         with:
           path: flydsl
 
-      - name: Build manylinux Docker image
+      - name: Pull or build manylinux Docker image
         run: |
           ROCM_VERSION=7.2
-          IMAGE="flydsl/manylinux_2_28:rocm${ROCM_VERSION}"
-          if docker image inspect "${IMAGE}" >/dev/null 2>&1; then
-            echo "Reusing existing image: ${IMAGE}"
-          else
+          IMAGE="ghcr.io/rocm/flydsl-manylinux_2_28:rocm${ROCM_VERSION}-a3c082a2ac9c"
+          if ! docker pull "${IMAGE}"; then
             docker build \
               --build-arg ROCM_VERSION="${ROCM_VERSION}" \
               -t "${IMAGE}" \
