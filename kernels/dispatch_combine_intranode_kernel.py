@@ -245,7 +245,7 @@ def make_dispatch_kernel(
     enable_scales  = scale_bytes > 0
     max_tokens_per_expert = npes * max_tok_per_rank  # per-expert bucket capacity
 
-    @flyc.kernel
+    @flyc.kernel(known_block_size=[warp_num_per_block * 64, 1, 1])
     def ep_dispatch_intranode(
         addr_inp_tok:  fx.Int64,  # [cur_tok, hidden_dim]  bf16
         addr_idx:      fx.Int64,  # [cur_tok, k]           i32  (token_indices)
@@ -835,7 +835,7 @@ def make_combine_kernel(
         allocator.ptr = p2p_wt_base_offset + p2p_wt_base_size
 
 
-    @flyc.kernel
+    @flyc.kernel(known_block_size=[warp_num_per_block * 64, 1, 1])
     def ep_combine_intranode(
         addr_inp_tok:  fx.Int64,   # inp_tok  基地址（expert 处理后的 token）
         addr_comb_inp: fx.Int64,   # shmem_comb_inp 基地址（symmetric）

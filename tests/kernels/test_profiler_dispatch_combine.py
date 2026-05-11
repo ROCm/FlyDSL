@@ -106,7 +106,13 @@ def cleanup():
         dist.destroy_process_group()
 
 
-_MORI_SUPPORTED_DTYPES = {torch.bfloat16, torch.float32, torch.float8_e4m3fn}
+_MORI_SUPPORTED_DTYPES = {
+    torch.bfloat16,
+    torch.float32,
+    torch.float8_e4m3fn,
+    torch.float8_e4m3fnuz,
+    torch.float4_e2m1fn_x2,
+}
 
 
 def build_mori_ref(rank, world_size, cfg,
