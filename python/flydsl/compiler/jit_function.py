@@ -22,11 +22,11 @@ from typing import Any, Callable, Dict, List, Optional, Set
 from .._mlir import ir
 from .._mlir.dialects import func
 from .._mlir.passmanager import PassManager
-from ..expr.typing import Stream
+from ..expr.typing import Constexpr, Stream
 from ..utils import env, log
 from .ast_rewriter import ASTRewriter
 from .backends import compile_backend_name, get_backend
-from .jit_argument import convert_to_jit_arguments
+from .jit_argument import convert_to_jit_arguments, is_type_param_annotation
 from .jit_executor import CompiledArtifact
 from .kernel_function import (
     CompilationContext,
@@ -945,7 +945,6 @@ def _build_call_state(sig, args_tuple, func_exe):
 
     Returns a CallState, or None if any parameter can't be fast-pathed.
     """
-    from .jit_argument import _is_constexpr_annotation, _is_type_param_annotation
 
     slot_specs = []
     has_user_stream = False
@@ -953,10 +952,10 @@ def _build_call_state(sig, args_tuple, func_exe):
     for i, (param_name, param) in enumerate(sig.parameters.items()):
         annotation = param.annotation
 
-        if annotation is not inspect.Parameter.empty and _is_constexpr_annotation(annotation):
+        if annotation is not inspect.Parameter.empty and Constexpr.is_constexpr_annotation(annotation):
             continue
 
-        if annotation is not inspect.Parameter.empty and _is_type_param_annotation(annotation):
+        if annotation is not inspect.Parameter.empty and is_type_param_annotation(annotation):
             continue
 
         if getattr(annotation, "_is_stream_param", False):
@@ -1148,7 +1147,6 @@ class JitFunction:
         key — only the Python type matters.  This prevents unnecessary
         recompilation when only runtime values change.
         """
-        from .jit_argument import _is_constexpr_annotation, _is_type_param_annotation
 
         sig = self._sig
         key_parts = [("_target_", self._target)]
@@ -1158,11 +1156,11 @@ class JitFunction:
             param = sig.parameters.get(name)
             ann = param.annotation if param else inspect.Parameter.empty
 
-            if ann is not inspect.Parameter.empty and _is_constexpr_annotation(ann):
+            if ann is not inspect.Parameter.empty and Constexpr.is_constexpr_annotation(ann):
                 key_parts.append((name, type(arg), arg))
                 continue
 
-            if ann is not inspect.Parameter.empty and _is_type_param_annotation(ann):
+            if ann is not inspect.Parameter.empty and is_type_param_annotation(ann):
                 key_parts.append((name, "Type", arg))
                 continue
 

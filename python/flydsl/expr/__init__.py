@@ -6,6 +6,7 @@ from .typing import *
 from .primitive import *
 from .gpu import *
 from .derived import *
+from .struct import *
 
 from . import utils
 

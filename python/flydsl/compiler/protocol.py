@@ -22,6 +22,18 @@ class JitArgument(Protocol):
     def __get_c_pointers__(self) -> List[ctypes.c_void_p]: ...
 
 
+@runtime_checkable
+class Storable(Protocol):
+    @classmethod
+    def __dsl_size_of__(cls) -> int: ...
+    @classmethod
+    def __dsl_align_of__(cls) -> int: ...
+    @classmethod
+    def __peek_from_ptr__(cls, ptr: ir.Value): ...
+    @classmethod
+    def __poke_into_ptr__(cls, ptr: ir.Value, value): ...
+
+
 def get_ir_types(obj) -> List[ir.Type]:
     if isinstance(obj, ir.Value):
         return [obj.type]
@@ -80,3 +92,27 @@ def construct_from_ir_values(dsl_type, args, values: List[ir.Value]) -> DslType:
             values = values[count:]
         return type(dsl_type)(elems)
     raise TypeError(f"Cannot construct DSL value for {dsl_type}")
+
+
+def dsl_size_of(dsl_type) -> int:
+    if hasattr(dsl_type, "__dsl_size_of__"):
+        return dsl_type.__dsl_size_of__()
+    raise TypeError(f"type {dsl_type} does not implement the Storable protocol")
+
+
+def dsl_align_of(dsl_type) -> int:
+    if hasattr(dsl_type, "__dsl_align_of__"):
+        return dsl_type.__dsl_align_of__()
+    raise TypeError(f"type {dsl_type} does not implement the Storable protocol")
+
+
+def peek_from_ptr(dsl_type, ptr: ir.Value):
+    if hasattr(dsl_type, "__peek_from_ptr__"):
+        return dsl_type.__peek_from_ptr__(ptr)
+    raise TypeError(f"type {dsl_type} does not implement the Storable protocol")
+
+
+def poke_into_ptr(dsl_type, ptr: ir.Value, value):
+    if hasattr(dsl_type, "__poke_into_ptr__"):
+        return dsl_type.__poke_into_ptr__(ptr, value)
+    raise TypeError(f"type {dsl_type} does not implement the Storable protocol")
