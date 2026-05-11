@@ -340,10 +340,10 @@ class BuiltinDslType(ir.Value):
         return f"{type(self).__name__}<{super().__str__()}>"
 
     @classmethod
-    def __fly_construct__(cls, values):
+    def __construct_from_ir_values__(cls, values):
         return cls(values[0])
 
-    def __fly_values__(self):
+    def __extract_to_ir_values__(self):
         return [self]
 
 
@@ -872,10 +872,10 @@ class Stream:
         self.value = value
         self._stream_storage = None
 
-    def __fly_types__(self):
+    def __get_ir_types__(self):
         return [gpu.AsyncTokenType.get()]
 
-    def __fly_ptrs__(self):
+    def __get_c_pointers__(self):
         if isinstance(self.value, int):
             self._stream_storage = ctypes.c_void_p(self.value)
         elif self.value is None:
@@ -898,10 +898,10 @@ class Stream:
         return ctypes.c_void_p, cls._extract_stream_value
 
     @classmethod
-    def __fly_construct__(cls, values):
+    def __construct_from_ir_values__(cls, values):
         return Stream(values[0])
 
-    def __fly_values__(self):
+    def __extract_to_ir_values__(self):
         return [self.value]
 
 
@@ -1128,15 +1128,12 @@ class Vector(ArithValue):
 
     __hash__ = ArithValue.__hash__
 
-    def __fly_values__(self):
+    def __extract_to_ir_values__(self):
         return [self]
 
     @classmethod
-    def __fly_construct__(cls, values):
+    def __construct_from_ir_values__(cls, values):
         return cls(values[0])
-
-    def __fly_construct_from_values__(self, values):
-        return Vector(values[0], self.shape, self.dtype)
 
     def to(self, dtype: Type[Numeric], *, loc=None, ip=None) -> "Vector":
         if dtype is ir.Value:

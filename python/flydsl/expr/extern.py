@@ -135,8 +135,8 @@ class ExternFunction:
 
             if isinstance(arg, ir.Value):
                 value = arg
-            elif hasattr(arg, "__fly_values__"):
-                values = arg.__fly_values__()
+            elif hasattr(arg, "__extract_to_ir_values__"):
+                values = arg.__extract_to_ir_values__()
                 if len(values) != 1:
                     raise ValueError(f"ffi argument must produce exactly 1 ir.Value, got {len(values)}")
                 value = values[0]

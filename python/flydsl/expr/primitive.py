@@ -1125,9 +1125,9 @@ def printf(*args, format_str="", loc=None, ip=None):
         elif isinstance(val, int):
             return (False, _arith.constant(T.i32(), val))
         elif isinstance(val, float):
-            return (False, _arith.constant(T.f64(), val))
-        elif hasattr(val, "__fly_values__"):
-            ir_values = val.__fly_values__()
+            return (True, val)
+        elif hasattr(val, "__extract_to_ir_values__"):
+            ir_values = val.__extract_to_ir_values__()
             if len(ir_values) == 1:
                 return (False, ir_values[0])
             raise ValueError(f"Cannot use multi-value type in printf: {type(val)}")

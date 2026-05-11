@@ -79,36 +79,31 @@ LogicalResult embedExplicitModule(StringRef moduleName, gpu::ObjectAttr object,
       module, ptrTy, /*isConstant=*/false, llvm::GlobalValue::InternalLinkage,
       llvm::ConstantPointerNull::get(ptrTy), getModuleIdentifier(moduleName));
 
-  auto loadPackedArg = [&](llvm::Value *packed, uint32_t index) {
-    llvm::Value *slot = builder.CreateConstGEP1_32(ptrTy, packed, index);
-    return builder.CreateLoad(ptrTy, slot);
-  };
-
+  // init/load take their outputs as explicit pointer args
+  // (void** module_out, int32_t* err) so they fit MLIR's packed-args wrapper.
   auto *initFn = llvm::Function::Create(
-      llvm::FunctionType::get(voidTy, {ptrTy}, /*isVarArg=*/false),
+      llvm::FunctionType::get(voidTy, {ptrTy, ptrTy}, /*isVarArg=*/false),
       llvm::GlobalValue::ExternalLinkage, "flydsl_gpu_module_init", module);
   auto *initBlock =
       llvm::BasicBlock::Create(module.getContext(), "entry", initFn);
   builder.SetInsertPoint(initBlock);
   auto initArgs = initFn->arg_begin();
-  llvm::Value *initPacked = initArgs++;
-  llvm::Value *outModulePtr = loadPackedArg(initPacked, 0);
-  llvm::Value *errPtr = loadPackedArg(initPacked, 1);
+  llvm::Value *outModulePtr = initArgs++;
+  llvm::Value *errPtr = initArgs++;
   builder.CreateStore(llvm::ConstantPointerNull::get(ptrTy), outModulePtr);
   builder.CreateStore(llvm::ConstantInt::get(i32Ty, 0), errPtr);
   builder.CreateRetVoid();
 
   auto *loadFn = llvm::Function::Create(
-      llvm::FunctionType::get(voidTy, {ptrTy}, /*isVarArg=*/false),
+      llvm::FunctionType::get(voidTy, {ptrTy, ptrTy}, /*isVarArg=*/false),
       llvm::GlobalValue::ExternalLinkage, "flydsl_gpu_module_load_to_device",
       module);
   auto *loadBlock =
       llvm::BasicBlock::Create(module.getContext(), "entry", loadFn);
   builder.SetInsertPoint(loadBlock);
   auto loadArgs = loadFn->arg_begin();
-  llvm::Value *loadPacked = loadArgs++;
-  llvm::Value *moduleOutPtr = loadPackedArg(loadPacked, 0);
-  llvm::Value *loadErrPtr = loadPackedArg(loadPacked, 1);
+  llvm::Value *moduleOutPtr = loadArgs++;
+  llvm::Value *loadErrPtr = loadArgs++;
   llvm::Value *moduleObj = nullptr;
   if (object.getFormat() == gpu::CompilationTarget::Assembly) {
     llvm::FunctionCallee moduleLoadFn = module.getOrInsertFunction(

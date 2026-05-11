@@ -36,13 +36,11 @@ jobs:
         with:
           path: flydsl
 
-      - name: Build manylinux Docker image
+      - name: Pull or build manylinux Docker image
         run: |
           ROCM_VERSION=7.2
-          IMAGE="flydsl/manylinux_2_28:rocm${ROCM_VERSION}"
-          if docker image inspect "${IMAGE}" >/dev/null 2>&1; then
-            echo "Reusing existing image: ${IMAGE}"
-          else
+          IMAGE="ghcr.io/rocm/flydsl-manylinux_2_28:rocm${ROCM_VERSION}-a3c082a2ac9c"
+          if ! docker pull "${IMAGE}"; then
             # The Dockerfile is self-contained, so avoid sending the full repo as build context.
             docker build \
               --build-arg ROCM_VERSION="${ROCM_VERSION}" \
@@ -77,6 +75,28 @@ jobs:
           '
           docker exec flydsl_build bash -c "python3 -m pip install -q nanobind"
           docker exec flydsl_build bash -c "git config --global --add safe.directory '*'"
+
+      - name: Checkout source and submodules in build container
+        env:
+          CHECKOUT_REPOSITORY: ${{ github.repository }}
+          CHECKOUT_SHA: ${{ github.sha }}
+        run: |
+          docker exec \
+            -e CHECKOUT_REPOSITORY="${CHECKOUT_REPOSITORY}" \
+            -e CHECKOUT_SHA="${CHECKOUT_SHA}" \
+            flydsl_build bash -c '
+              set -euo pipefail
+              echo "Checking out ${CHECKOUT_REPOSITORY}@${CHECKOUT_SHA} inside the build container."
+              cd /flydsl
+              find . -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+              git init
+              git remote add origin "https://github.com/${CHECKOUT_REPOSITORY}.git"
+              git fetch --no-tags --depth=1 origin "${CHECKOUT_SHA}"
+              git checkout --force FETCH_HEAD
+              git config --global --add safe.directory /flydsl
+              git submodule sync --recursive
+              git submodule update --init --recursive
+            '
 
       - name: Restore cached MLIR install tarball
         id: mlir-cache
@@ -139,11 +159,13 @@ jobs:
         if: always()
         env:
           SUMMARY_DOCKER_IMAGE: ${{ env.MANYLINUX_IMAGE }}
-          SUMMARY_LLVM_COMMIT: $(cat flydsl/thirdparty/llvm-hash.txt | tr -d '[:space:]')
           SUMMARY_MLIR_CACHE: ${{ steps.mlir-cache.outputs.cache-hit == 'true' && 'Hit' || 'Miss (rebuilt)' }}
           SUMMARY_RELEASE_TYPE: ${{ inputs.release_type }}
           SUMMARY_WHEEL_DIR: dist
-        run: python3 flydsl/scripts/generate_summary.py build
+        run: |
+          SUMMARY_LLVM_COMMIT="$(tr -d '[:space:]' < flydsl/thirdparty/llvm-hash.txt)"
+          export SUMMARY_LLVM_COMMIT
+          python3 flydsl/scripts/generate_summary.py build
 
       - name: Configure AWS credentials
         if: ${{ github.repository_owner == 'ROCm' && inputs.upload_s3_staging }}
@@ -158,8 +180,10 @@ jobs:
 
       - name: Upload wheels to S3 staging
         if: ${{ github.repository_owner == 'ROCm' && inputs.upload_s3_staging }}
+        env:
+          RELEASE_TYPE: ${{ inputs.release_type }}
         run: |
-          aws s3 cp dist/ s3://framework-whls-${{ inputs.release_type }}/whl-staging/gfx942-gfx950/ \
+          aws s3 cp dist/ "s3://framework-whls-${RELEASE_TYPE}/whl-staging/gfx942-gfx950/" \
             --recursive --exclude "*" --include "*.whl"
 
       - name: Clean up
