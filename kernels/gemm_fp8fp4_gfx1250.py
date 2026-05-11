@@ -1600,9 +1600,16 @@ def compile_mxscale_gemm(
     return launch_mxscale_gemm
 
 
-compile_mxfp4_gemm = lambda **kw: compile_mxscale_gemm(data_format="fp4", **kw)
-compile_mxfp8_gemm = lambda **kw: compile_mxscale_gemm(data_format="fp8", **kw)
-compile_a8w4_gemm = lambda **kw: compile_mxscale_gemm(data_format="a8w4", **kw)
+def compile_mxfp4_gemm(**kw):
+    return compile_mxscale_gemm(data_format="fp4", **kw)
+
+
+def compile_mxfp8_gemm(**kw):
+    return compile_mxscale_gemm(data_format="fp8", **kw)
+
+
+def compile_a8w4_gemm(**kw):
+    return compile_mxscale_gemm(data_format="a8w4", **kw)
 
 __all__ = ["compile_mxscale_gemm", "compile_mxfp4_gemm", "compile_mxfp8_gemm",
            "compile_a8w4_gemm"]
