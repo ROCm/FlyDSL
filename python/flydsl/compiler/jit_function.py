@@ -868,9 +868,7 @@ class JitCacheManager:
         lock_path = self._lock_file(cache_key)
         cache_file = self._cache_file(cache_key)
 
-        lock = FileLock(lock_path, exclusive=True, timeout=600)
-        lock.__enter__()
-        try:
+        with FileLock(lock_path, exclusive=True, timeout=600):
             # Re-check disk under exclusive lock.
             if cache_file.exists():
                 try:
@@ -893,8 +891,6 @@ class JitCacheManager:
                 self.memory_cache[cache_key] = value
 
             yield (None, _writer)
-        finally:
-            lock.__exit__(None, None, None)
 
     def load_all(self) -> int:
         if not self.cache_dir.exists():
@@ -1295,13 +1291,9 @@ class JitFunction:
             str_key = self._cache_key_to_str(cache_key)
             _compile_lock_ctx = self.cache_manager.compile_lock(str_key)
         else:
-            _compile_lock_ctx = nullcontext()
+            _compile_lock_ctx = nullcontext((None, None))
 
-        with _compile_lock_ctx as _lock_result_or_none:
-            if _use_compile_lock:
-                _lock_result, _cache_writer = _lock_result_or_none
-            else:
-                _lock_result, _cache_writer = None, None
+        with _compile_lock_ctx as (_lock_result, _cache_writer):
 
             if _lock_result is not None and not getattr(_lock_result, "_link_libs", None):
                 # Cache hit after waiting for another process to compile.
