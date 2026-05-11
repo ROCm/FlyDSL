@@ -28,10 +28,10 @@ When this skill is invoked, the argument passed in is the target hostname. Repla
 
 ## Customization
 
-- **Triton**: Replace stock triton 3.4.0 with custom build from https://<GITHUB_TOKEN>@github.com/ROCm/triton branch `rocm-maxnreg-support-v35`
-- **vLLM**: Replace pre-installed version with https://<GITHUB_TOKEN>@github.com/ROCm/vllm branch `ps_pa`
-- **aiter**: Replace pre-installed version with latest from https://<GITHUB_TOKEN>@github.com/ROCm/aiter main branch (develop)
-- **FlyDSL**: Install from https://<GITHUB_TOKEN>@github.com/ROCm/FlyDSL develop branch
+- **Triton**: Replace stock triton 3.4.0 with custom build from https://github.com/ROCm/triton branch `rocm-maxnreg-support-v35`
+- **vLLM**: Replace pre-installed version with https://github.com/ROCm/vllm branch `ps_pa`
+- **aiter**: Replace pre-installed version with latest from https://github.com/ROCm/aiter main branch (develop)
+- **FlyDSL**: Install from https://github.com/ROCm/FlyDSL develop branch
 
 ## Build Steps
 
@@ -49,35 +49,35 @@ RUN pip install ninja cmake pybind11
 
 # Clone and build custom triton from ROCm fork (rocm-maxnreg-support-v35 branch)
 RUN cd /tmp && \
-    git clone --depth 1 --branch rocm-maxnreg-support-v35 https://<GITHUB_TOKEN>@github.com/ROCm/triton.git triton-custom && \
+    git clone --depth 1 --branch rocm-maxnreg-support-v35 https://github.com/ROCm/triton.git triton-custom && \
     cd triton-custom/python && \
     pip install -e . && \
     cd / && rm -rf /tmp/triton-custom
 
 # Clone and install aiter from main branch (develop)
 RUN cd /tmp && \
-    git clone --depth 1 --branch main https://<GITHUB_TOKEN>@github.com/ROCm/aiter.git && \
+    git clone --depth 1 --branch main https://github.com/ROCm/aiter.git && \
     cd aiter && \
     pip install -e . && \
     cd / && rm -rf /tmp/aiter
 
 # Clone and install FlyDSL from develop branch
 RUN cd /tmp && \
-    git clone --depth 1 --branch develop https://<GITHUB_TOKEN>@github.com/ROCm/FlyDSL.git && \
+    git clone --depth 1 --branch develop https://github.com/ROCm/FlyDSL.git && \
     cd FlyDSL && \
     pip install -e . && \
     cd / && rm -rf /tmp/FlyDSL
 
 # Clone and install vllm from ROCm/vllm ps_pa branch
 RUN cd /tmp && \
-    git clone --depth 1 --branch ps_pa https://<GITHUB_TOKEN>@github.com/ROCm/vllm.git && \
+    git clone --depth 1 --branch ps_pa https://github.com/ROCm/vllm.git && \
     cd vllm && \
     pip install -e . && \
     cd / && rm -rf /tmp/vllm
 
 # Install rocprof-trace-decoder: download installer, extract .so, copy to /opt/rocm/lib
 RUN cd /tmp && \
-    wget -q https://<GITHUB_TOKEN>@github.com/ROCm/rocprof-trace-decoder/releases/download/0.1.6/rocprof-trace-decoder-manylinux-2.28-0.1.6-Linux.sh && \
+    wget -q https://github.com/ROCm/rocprof-trace-decoder/releases/download/0.1.6/rocprof-trace-decoder-manylinux-2.28-0.1.6-Linux.sh && \
     chmod +x rocprof-trace-decoder-manylinux-2.28-0.1.6-Linux.sh && \
     ./rocprof-trace-decoder-manylinux-2.28-0.1.6-Linux.sh --skip-license --prefix=/tmp/rtd-install && \
     find /tmp/rtd-install -name '*.so*' -exec cp -a {} /opt/rocm/lib/ \; && \
