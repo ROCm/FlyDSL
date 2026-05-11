@@ -536,7 +536,8 @@ def test_pa_mqa_logits_fp4_qfp4_kvfp4(
     # Append to cross-shape summary; print once at the end via the
     # session-scoped fixture below (or explicit call in __main__).
     _PERF_SUMMARY.append(
-        (batch_size, heads, head_dim, max_ctx, next_n, block_k, cos.item(), us_fly, tflops_fly, gbps_fly)
+        (batch_size, heads, head_dim, max_ctx, next_n, kv_block_size, block_k,
+         cos.item(), us_fly, tflops_fly, gbps_fly)
     )
 
 
@@ -556,12 +557,12 @@ def _print_perf_summary():
     print("=" * 96)
     print(
         f"  {'batch':>5} | {'heads':>5} | {'h_dim':>5} | {'ctx_len':>7} | {'next_n':>6} | "
-        f"{'block_k':>7} | {'cos_sim':>8} | {'us':>9} | {'TFLOPS':>7} | {'GB/s':>7}"
+        f"{'kv_blk':>6} | {'block_k':>7} | {'cos_sim':>8} | {'us':>9} | {'TFLOPS':>7} | {'GB/s':>7}"
     )
-    print("  " + "-" * 94)
-    for b, h, hd, ctx, nn, blk, cos_v, us, tflops, gbps in _PERF_SUMMARY:
+    print("  " + "-" * 103)
+    for b, h, hd, ctx, nn, kvb, blk, cos_v, us, tflops, gbps in _PERF_SUMMARY:
         print(
-            f"  {b:>5} | {h:>5} | {hd:>5} | {ctx:>7} | {nn:>6} | {blk:>7} | "
+            f"  {b:>5} | {h:>5} | {hd:>5} | {ctx:>7} | {nn:>6} | {kvb:>6} | {blk:>7} | "
             f"{cos_v:>8.4f} | {us:>9.2f} | {tflops:>7.2f} | {gbps:>7.1f}"
         )
     print()

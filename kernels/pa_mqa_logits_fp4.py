@@ -196,6 +196,22 @@ def build_pa_mqa_logits_fp4_module(
     ), f"block_k={block_k} → N_TILES={N_TILES} must be multiple of num_warps={num_warps}"
     N_TILES_PER_WARP = N_TILES // num_warps
 
+    # The phys vec-load coalesces N_TILES_PER_WARP page lookups. Kernel
+    # currently requires kv_block_size to be a multiple of MFMA_N so each
+    # KV page holds an integer number of N-tiles (TILES_PER_BLOCK).
+    assert kv_block_size % MFMA_N == 0, (
+        f"kv_block_size={kv_block_size} must be a multiple of MFMA_N={MFMA_N}; "
+        f"sub-tile pages would require splitting one MFMA over multiple page lookups"
+    )
+    assert block_k % kv_block_size == 0, (
+        f"block_k={block_k} must be a multiple of kv_block_size={kv_block_size}"
+    )
+    TILES_PER_BLOCK = kv_block_size // MFMA_N
+    # Per-warp: each KV page holds TILES_PER_BLOCK consecutive N-tiles, so the
+    # warp's NTPW n-tiles span ceil(NTPW/TPB) pages. Distinct phys lookups per
+    # warp = N_PHYS; the rest is replication (nt → nt // TPB).
+    N_PHYS = (N_TILES_PER_WARP + TILES_PER_BLOCK - 1) // TILES_PER_BLOCK
+
     # Q/Q_scale layout: [B, NEXT_N, H, D/2 or D/32]
     _stride_q_next_n = heads * head_dim_packed  # bytes per next_n slice
     _stride_q_batch = next_n * _stride_q_next_n  # bytes per batch
@@ -238,18 +254,20 @@ def build_pa_mqa_logits_fp4_module(
         else:
             raise ValueError(f"unsupported QS_DW={QS_DW} (qs_pad_bits={qs_pad_bits})")
 
-    # Phys block-table loader: dispatched on N_TILES_PER_WARP at build time so
-    # the kernel body sees one shape (no scf.if). vec_width=1 returns a scalar
-    # (no vector to extract from); vec_width>1 returns a vector — extract.
-    if N_TILES_PER_WARP == 1:
+    # Phys block-table loader: dispatched on N_PHYS at build time so the
+    # kernel body sees one shape (no scf.if). vec_width=1 returns a scalar
+    # (no vector to extract from); vec_width>1 returns a vector. Each loaded
+    # phys covers TILES_PER_BLOCK consecutive N-tiles → replicate per nt.
+    if N_PHYS == 1:
 
         def _phys_to_list(phys_v):
-            return [phys_v]
+            return [phys_v] * N_TILES_PER_WARP
 
     else:
 
         def _phys_to_list(phys_v):
-            return [fx.Vector(phys_v)[nt] for nt in range(N_TILES_PER_WARP)]
+            return [fx.Vector(phys_v)[nt // TILES_PER_BLOCK]
+                    for nt in range(N_TILES_PER_WARP)]
 
     @flyc.kernel
     def pa_mqa_logits_fp4_kernel(
@@ -388,11 +406,14 @@ def build_pa_mqa_logits_fp4_module(
 
         def _load_phys(c_i32_arg):
             """Load phys_block for chunk c, all N_TILES_PER_WARP N-tiles in
-            one wider buffer_load. The N-tiles' first tokens land in
-            consecutive page slots (each nt advances MFMA_N=16 tokens, which
-            equals kv_block_size=16), so bi_base..bi_base+N_TILES_PER_WARP-1
-            are consecutive. -32% kernel cycle vs N_TILES_PER_WARP scalar
-            loads — see commit be8f998b."""
+            ONE wider buffer_load (vec_width=N_PHYS). When kv_block_size ==
+            MFMA_N, TILES_PER_BLOCK==1 and N_PHYS == NTPW (one phys per
+            n-tile, all distinct). When kv_block_size > MFMA_N, multiple
+            consecutive n-tiles share a single phys — _phys_to_list maps
+            nt → loaded[nt // TILES_PER_BLOCK]. bi_base alignment:
+            chunk_offset/kvbs = chunk_idx * num_warps * N_PHYS, so
+            bi_base % N_PHYS == 0 holds for every warp. -32% kernel cycle
+            vs scalar loads when NTPW > 1 — see commit be8f998b."""
             ni_base = warp_id * fx.Int32(N_TILES_PER_WARP)
             token_global_base = (
                 (chunk_start + c_i32_arg) * fx.Int32(block_k)
@@ -402,7 +423,7 @@ def build_pa_mqa_logits_fp4_module(
             bi_base = token_global_base // kv_block_size
             phys_vec = buffer_ops.buffer_load(
                 bt_rsrc, pid_b * _stride_bt + bi_base,
-                vec_width=N_TILES_PER_WARP, dtype=T.i32)
+                vec_width=N_PHYS, dtype=T.i32)
             return _phys_to_list(phys_vec)
 
         def _prefetch_chunk(c_i32_arg, phys_list):
