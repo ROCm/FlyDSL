@@ -158,13 +158,13 @@ class SharedAllocator(Arena):
     def __init__(self, base_alignment: int = Arena.DEFAULT_BASE_ALIGNMENT):
         super().__init__(base_alignment=base_alignment)
 
-        self._base = get_dyn_shared()
         from ..compiler.kernel_function import KernelFunction
 
         kf = KernelFunction.get_current()
         if kf is None:
             raise RuntimeError("SharedAllocator can only be created inside a @kernel function")
         kf.register_shared_allocator(self)
+        self._base = get_dyn_shared()
 
     @property
     def base_ptr(self):
