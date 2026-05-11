@@ -36,12 +36,12 @@ function run_flydsl_op {
     # export FLYDSL_FLASH_ATTN_FUNC_PATH=fallback_n32
     # export FLYDSL_WAVES_PER_EU=3
 
-    # export FLYDSL_DUMP_IR=1
-    # export FLYDSL_RUNTIME_ENABLE_CACHE=1
     export FLYDSL_LOG_MORE=1
     export FLYDSL_DEBUG_LOG_TO_CONSOLE=1
     export FLYDSL_DEBUG_LOG_LEVEL=INFO
-    # export FLYDSL_DUMP_DIR=./flydsl_dump
+    export FLYDSL_DUMP_IR=1
+    # export FLYDSL_RUNTIME_ENABLE_CACHE=1
+    export FLYDSL_DUMP_DIR=./flydsl_dump
 
     # python tests/kernels/test_moe_stage1_simple.py --size M
 
@@ -60,9 +60,10 @@ function run_flydsl_op {
     # python tests/test_triton_flash_attn.py --compare --warmup 5 --iters 100
 
 
-    python tests/kernels/test_flash_opus_attn.py --warmup 5 --iters 100 --compare
+    # python tests/kernels/test_flash_opus_attn.py --warmup 5 --iters 100 --compare
     # python tests/kernels/test_flash_opus_attn.py --dtype bf16 --batch 16 --num_heads 64 --num_kv_heads 64 --seq_len 8192 --head_dim 128 --iters 100 --compare
     # python tests/kernels/test_flash_opus_attn.py --dtype bf16 --batch 16 --num_heads 64 --num_kv_heads 8 --seq_len 8192 --head_dim 128 --iters 100 --compare
+    python tests/kernels/test_flash_opus_attn.py --causal --dtype bf16 --batch 16 --num_heads 64 --num_kv_heads 64 --seq_len 8192 --head_dim 128 --iters 100 --compare
 
 
 
