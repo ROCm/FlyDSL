@@ -1101,9 +1101,7 @@ class JitFunction:
         cache_root = env.runtime.cache_dir
         if not cache_root:
             if run_only:
-                raise RuntimeError(
-                    "FLYDSL_RUNTIME_RUN_ONLY=1 but FLYDSL_RUNTIME_CACHE_DIR is empty."
-                )
+                raise RuntimeError("FLYDSL_RUNTIME_RUN_ONLY=1 but FLYDSL_RUNTIME_CACHE_DIR is empty.")
             self.cache_manager = None
             return
 
