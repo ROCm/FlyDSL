@@ -36,7 +36,7 @@ import os
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
-from flydsl._mlir.dialects import llvm
+from flydsl._mlir.dialects import llvm, scf
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr import math as fmath
@@ -184,6 +184,14 @@ def build_flash_attn_opus_module(
     # Enable / disable individual OPUS optimizations via env vars (debug).
     OPUS_LAZY_RESCALE = os.getenv("FLYDSL_OPUS_LAZY_RESCALE", "1") == "1"
     OPUS_SETPRIO = os.getenv("FLYDSL_OPUS_SETPRIO", "1") == "1"
+    # P5 stagger (`if (warp_id/4) s_barrier;` in prologue + reverse in
+    # pre-store) is wired in but disabled by default because it requires
+    # V LDS reads to happen one cluster earlier (see the comment block in
+    # the kernel body where `stagger_is_one_i1` is computed). Set
+    # `FLYDSL_OPUS_STAGGER=1` once that restructuring lands. Until then,
+    # both stagger sites compile to unconditional `gpu.barrier()` calls
+    # so the kernel keeps producing correct results.
+    OPUS_ENABLE_STAGGER = os.getenv("FLYDSL_OPUS_STAGGER", "0") == "1"
     OPUS_YIELD_NOP = os.getenv("FLYDSL_OPUS_YIELD_NOP", "1") == "1"
 
     @flyc.kernel(known_block_size=[BLOCK_SIZE, 1, 1])
@@ -275,6 +283,44 @@ def build_flash_attn_opus_module(
         lane = tid % WARP_SIZE
         lane_mod_32 = lane % 32
         lane_div_32 = lane // 32
+
+        # P5 stagger: warps 0-3 → stagger=0, warps 4-7 → stagger=1.
+        # Matches C++ template gqa_d128_kernel_template.hpp lines 306-308:
+        #     const int warp_id = __builtin_amdgcn_readfirstlane(thread_id_x() / WARP_SIZE);
+        #     const int stagger = warp_id / 4;
+        # readfirstlane forces the value into an SGPR so the resulting
+        # conditional `if (stagger ...) { s_barrier }` is a SCALAR
+        # (wave-uniform) branch — that is essential for the conditional
+        # s_barrier to be skipped per-wave rather than masked per-lane.
+        #
+        # NOTE: although the asymmetric `s_cmp_eq_u32 + s_cbranch_scc +
+        # s_barrier` triple is correctly emitted in the final ISA (see
+        # commit notes), the kernel currently cannot RUN with the dual-
+        # group phase shift enabled. The C++ template loads `v_v` into
+        # registers in Cluster 2 (tr_load BEFORE the cluster-2 barrier),
+        # so a wave can keep using `v_v` after a peer wave overwrites
+        # `s_v[0]` via the Cluster-4 async_load. Our FlyDSL port currently
+        # defers V LDS reads into Cluster 3 via
+        # `_read_v_packs_for_k_substep(...)`, which means warps 4-7 (one
+        # phase behind under stagger) end up reading from `s_v[0]` after
+        # warps 0-3 have already issued the Cluster-4 async_load that
+        # overwrites it. Until V reads are hoisted into Cluster 2 (and the
+        # symmetric V[max-1] reads in the epilogue), the asymmetric barrier
+        # MUST be disabled — see `OPUS_ENABLE_STAGGER` below.
+        _tid_i32 = arith.index_cast(T.i32, _raw(tid))
+        _wave_id_uni_i32 = rocdl.readfirstlane(
+            T.i32,
+            arith.divsi(_tid_i32, arith.constant(WARP_SIZE, type=T.i32)),
+        )
+        _stagger_i32 = arith.divsi(
+            _wave_id_uni_i32, arith.constant(4, type=T.i32)
+        )
+        stagger_is_one_i1 = arith.cmpi(
+            arith.CmpIPredicate.ne, _stagger_i32, arith.constant(0, type=T.i32)
+        )
+        stagger_is_zero_i1 = arith.cmpi(
+            arith.CmpIPredicate.eq, _stagger_i32, arith.constant(0, type=T.i32)
+        )
 
         # HW transpose decomp for ds_read_tr16_b64 (gfx950)
         tr_k_group = (lane % 16) // 4
@@ -376,6 +422,53 @@ def build_flash_attn_opus_module(
 
         def _anchor_packs(packs):
             return [_anchor_vec(p) for p in packs]
+
+        def _stagger_extra_barrier_if_one():
+            """Emit `sched_barrier(0); s_barrier;` only when stagger == 1.
+
+            Matches C++ template gqa_d128_kernel_template.hpp lines 415-418.
+            The body runs on warps 4-7 only, advancing their s_barrier ordinal
+            by one relative to warps 0-3 → starts the dual-group phase shift.
+
+            Implemented via inline assembly with the stagger value forced into
+            an SGPR via the `s` constraint, so the conditional branch is a
+            scalar `s_cbranch_scc*` (per-wave) rather than a per-lane VGPR
+            predicate. This mirrors how the C++ builtin compiles.
+            """
+            rocdl.sched_barrier(0)
+            llvm.inline_asm(
+                ir.Type.parse("!llvm.void"),
+                [_stagger_i32],
+                (
+                    "s_cmp_eq_u32 $0, 0\n\t"
+                    "s_cbranch_scc1 1f\n\t"
+                    "s_barrier\n\t"
+                    "1:"
+                ),
+                "s",
+                has_side_effects=True,
+            )
+
+        def _stagger_extra_barrier_if_zero():
+            """Emit `s_barrier;` only when stagger == 0.
+
+            Matches C++ template gqa_d128_kernel_template.hpp lines 748-750.
+            The body runs on warps 0-3 only, letting them catch up by one
+            s_barrier ordinal before the final global store → closes the
+            dual-group phase shift opened in the prologue.
+            """
+            llvm.inline_asm(
+                ir.Type.parse("!llvm.void"),
+                [_stagger_i32],
+                (
+                    "s_cmp_eq_u32 $0, 0\n\t"
+                    "s_cbranch_scc0 1f\n\t"
+                    "s_barrier\n\t"
+                    "1:"
+                ),
+                "s",
+                has_side_effects=True,
+            )
 
         def _pack_bf16_pair(lo, hi, shift, mask):
             lo_i32 = _bitcast_i32(lo)
@@ -780,7 +873,21 @@ def build_flash_attn_opus_module(
         rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
         _waitcnt_vm_n(NUM_DMA_V)   # vmcnt(2)
 
-        # [P7] stagger barrier: skipped for P1; will be added in phase P5.
+        # [P7] stagger barrier — extra s_barrier for warps 4-7 only.
+        #       Mirrors C++ lines 415-418:
+        #           if (stagger) {
+        #               __builtin_amdgcn_sched_barrier(0);
+        #               __builtin_amdgcn_s_barrier();
+        #           }
+        # The asymmetric (per-wave-group) version is gated by
+        # OPUS_ENABLE_STAGGER. With the flag OFF (default), we emit an
+        # unconditional `gpu.barrier()` so both wave groups stay in
+        # lockstep — see the OPUS_ENABLE_STAGGER comment for context.
+        if const_expr(OPUS_ENABLE_STAGGER):
+            _stagger_extra_barrier_if_one()
+        else:
+            rocdl.sched_barrier(0)
+            gpu.barrier()
 
         # [P8] v_s[0] = mma0(v_q, v_k)   (C++ line 420)
         v_s_0_lo_raw, v_s_0_hi_raw = _gemm0(k_pl_pro, k_ph_pro)
@@ -1336,6 +1443,19 @@ def build_flash_attn_opus_module(
         # l_inv = (l_row > 0) ? 1/l_row : 0
         inv_l = rocdl.rcp(T.f32, _raw(l_row))
         inv_l_vec = Vec.from_elements([inv_l], fx.Float32).broadcast_to(16)
+
+        # P5 stagger closeout — extra s_barrier for warps 0-3 only,
+        # mirrors C++ lines 748-750:
+        #     if (!stagger) {
+        #         __builtin_amdgcn_s_barrier();
+        #     }
+        # Same gating as the prologue half: OPUS_ENABLE_STAGGER=0 falls
+        # back to an unconditional barrier so total barrier counts stay
+        # symmetric across both wave groups.
+        if const_expr(OPUS_ENABLE_STAGGER):
+            _stagger_extra_barrier_if_zero()
+        else:
+            gpu.barrier()
 
         if q_in_bounds:
             for dc in range_constexpr(D_CHUNKS):
