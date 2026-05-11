@@ -227,7 +227,7 @@ def _chunk_buffer_resource_for_block(memref_val, phys_block, block_stride):
 
 def _load_q_words(q_rsrc, q_base_elem, lane16id, *, query_packed_fp8, query_load_is_bf16):
     q_elem = q_base_elem + lane16id * arith.constant(FP8_ELEMS_16B, type=T.i32)
-    if query_packed_fp8:
+    if const_expr(query_packed_fp8):
         q_vec = buffer_ops.buffer_load(
             q_rsrc,
             q_elem // arith.constant(4, type=T.i32),
@@ -324,7 +324,7 @@ def _build_pa_thread_invariants(
         + rowid * arith.constant(MFMA_N, type=T.i32)
         for vt in range(VTLOOP)
     ]
-    if trans_v:
+    if const_expr(trans_v):
         vhead_elem_dw = [
             vhead_elems[vhe] * arith.constant(FP8_ELEMS_16B // 4, type=T.i32)
             for vhe in range(VHELOOP)
@@ -376,7 +376,7 @@ def _build_pa_thread_invariants(
 
     sm_vmax_wr_off = None
     sm_vmax_rd_offs = None
-    if per_token_kv:
+    if const_expr(per_token_kv):
         sm_vmax_wr_off = arith.index_cast(
             T.index,
             arith.constant(2 * NUM_WARPS * MFMA_N, type=T.i32)
@@ -508,7 +508,7 @@ def _load_q_fragments(
         + lane16id * arith.constant(8, type=T.i32)
     )
     query_scale_lane = None
-    if query_packed_fp8 or not compute_query_scale_in_kernel:
+    if const_expr(query_packed_fp8 or not compute_query_scale_in_kernel):
         # NB: _load_q_words() is unreachable under compile_pswa_decode_sw today
         # (that entry point rejects packed_fp8 and always forces
         # compute_query_scale_in_kernel=True).  Keep the call site intact for
@@ -601,7 +601,7 @@ def _load_q_fragments(
 
     q_frags = []
     gpu.barrier()
-    if compute_query_scale_in_kernel:
+    if const_expr(compute_query_scale_in_kernel):
         query_scale_lane = vector.extract(
             vector.load_op(
                 T.vec(1, T.f32),
@@ -657,7 +657,7 @@ def _load_sw_mtp_group_q_fragments(
     c_query_length = arith.constant(query_length, type=T.i32)
     c_query_group_size = arith.constant(query_group_size, type=T.i32)
     for mtp_subgroup_idx in range_constexpr(mtp_subgroup_count):
-        if mtp_subgroup_idx > 0:
+        if const_expr(mtp_subgroup_idx > 0):
             gpu.barrier()
         qi_val, qhi_pos, qi_for_q, local_qhead_idx_for_q = _compute_sw_mtp_group_state(
             lane16id,
@@ -687,7 +687,7 @@ def _load_sw_mtp_group_q_fragments(
             query_load_is_bf16=query_load_is_bf16,
             compute_query_scale_in_kernel=compute_query_scale_in_kernel,
         )
-        if compute_query_scale_in_kernel:
+        if const_expr(compute_query_scale_in_kernel):
             query_scale_lane = kernel_query_scale_lane
         mtp_states.append((qi_val, qhi_pos, q_frags, query_scale_lane))
     return mtp_states
@@ -764,7 +764,7 @@ def _make_pa_phase_helpers(
             vhe_data = []
             for vhe in range_constexpr(VHELOOP):
                 v_token_in_block = tile_token_offset_i32 + v_tok_thread_off[vt]
-                if trans_v:
+                if const_expr(trans_v):
                     vt_group = v_token_in_block // arith.constant(
                         FP8_ELEMS_16B, type=T.i32
                     )
@@ -786,7 +786,7 @@ def _make_pa_phase_helpers(
                 vhe_data.append(v_4xi32)
             v_results.append(vhe_data)
 
-        if per_token_kv:
+        if const_expr(per_token_kv):
             scale_block_base = phys_block * stride_ks_block + kv_h * stride_ks_head
             scale_tok_base_pt = tile_token_offset_i32 + k_tok_thread_base
             scale_src_lane_base = rowid * arith.constant(20, type=T.i32)
@@ -823,7 +823,7 @@ def _make_pa_phase_helpers(
 
         d_out = []
         query_scale_vec = None
-        if per_token_q:
+        if const_expr(per_token_q):
             query_scale_vec = vector.broadcast(
                 T.f32x4, query_scale_lane * softmax_scale_base
             )
@@ -833,17 +833,17 @@ def _make_pa_phase_helpers(
                 acc = rocdl.mfma_f32_16x16x32_fp8_fp8(
                     T.f32x4, [k_ops[td][k_step], q_frags[k_step], acc, 0, 0, 0]
                 )
-            if per_token_kv:
+            if const_expr(per_token_kv):
                 scale_vec = (
                     k_scale_vecs[td] * query_scale_vec
-                    if per_token_q
+                    if const_expr(per_token_q)
                     else k_scale_vecs[td] * vector.broadcast(T.f32x4, softmax_q_scale)
                 )
                 d_out.append(
                     acc * scale_vec
                 )
             else:
-                if per_token_q:
+                if const_expr(per_token_q):
                     d_out.append(
                         acc
                         * (
@@ -859,26 +859,26 @@ def _make_pa_phase_helpers(
         apply_range_mask = apply_window_mask or apply_global_window
 
         def _is_visible_token(kv_tok):
-            if apply_window_mask and apply_global_window:
+            if const_expr(apply_window_mask and apply_global_window):
                 return (kv_tok >= seq_start) | (kv_tok < global_window_limit)
-            if apply_window_mask:
+            if const_expr(apply_window_mask):
                 return kv_tok >= seq_start
             return kv_tok < global_window_limit
 
         kv_tok_base = (
             partition_start + kv_tok_thread_base
-            if apply_causal_mask or apply_range_mask
+            if const_expr(apply_causal_mask or apply_range_mask)
             else None
         )
         qk_max = neg_inf
         for td in range_constexpr(TLOOP):
             for i in range_constexpr(4):
                 s = vector.extract(d_out[td], static_position=[i], dynamic_position=[])
-                if kv_tok_base is not None:
+                if const_expr(kv_tok_base is not None):
                     kv_tok = kv_tok_base + arith.constant(td * MFMA_N + i, type=T.i32)
-                    if apply_causal_mask:
+                    if const_expr(apply_causal_mask):
                         s = arith.select(kv_tok < causal_bound, s, neg_inf)
-                    if apply_range_mask:
+                    if const_expr(apply_range_mask):
                         s = arith.select(_is_visible_token(kv_tok), s, neg_inf)
                 qk_max = qk_max.maximumf(s)
         for sh in [32, 16]:
@@ -899,16 +899,17 @@ def _make_pa_phase_helpers(
                 p = (diff * arith.constant(LOG2E, type=T.f32)).exp2(
                     fastmath=arith.FastMathFlags.fast
                 )
-                if kv_tok_base is not None:
+                if const_expr(kv_tok_base is not None):
                     kv_tok = kv_tok_base + arith.constant(td * MFMA_N + i, type=T.i32)
-                    if apply_causal_mask:
+                    if const_expr(apply_causal_mask):
                         p = arith.select(kv_tok < causal_bound, p, zero_f)
-                    if apply_range_mask:
+                    if const_expr(apply_range_mask):
                         p = arith.select(_is_visible_token(kv_tok), p, zero_f)
                 exp_sum = exp_sum + p
                 d_out[td] = vector.insert(
                     p, d_out[td], static_position=[i], dynamic_position=[]
                 )
+            rocdl.sched_barrier(0)
         for sh in [32, 16]:
             exp_sum = exp_sum + exp_sum.shuffle_xor(
                 arith.constant(sh, type=T.i32), c_w
@@ -919,19 +920,19 @@ def _make_pa_phase_helpers(
             [sm_sum_off],
         )
 
-        if per_token_kv:
+        if const_expr(per_token_kv):
             v_max_warp = zero_f
             for td in range_constexpr(TLOOP):
                 vs = v_scale_vecs[td]
                 for i in range_constexpr(4):
-                    if kv_tok_base is not None:
+                    if const_expr(kv_tok_base is not None):
                         kv_tok = kv_tok_base + arith.constant(td * MFMA_N + i, type=T.i32)
                         vs_i = vector.extract(
                             vs, static_position=[i], dynamic_position=[]
                         )
-                        if apply_causal_mask:
+                        if const_expr(apply_causal_mask):
                             vs_i = arith.select(kv_tok < causal_bound, vs_i, zero_f)
-                        if apply_range_mask:
+                        if const_expr(apply_range_mask):
                             vs_i = arith.select(_is_visible_token(kv_tok), vs_i, zero_f)
                         vs = vector.insert(
                             vs_i, vs, static_position=[i], dynamic_position=[]
@@ -939,6 +940,7 @@ def _make_pa_phase_helpers(
                 v_max_warp = v_max_warp.maximumf(
                     vector.reduction(T.f32, "maxnumf", vs)
                 )
+                rocdl.sched_barrier(0)
             for sh in [32, 16]:
                 v_max_warp = v_max_warp.maximumf(
                     v_max_warp.shuffle_xor(arith.constant(sh, type=T.i32), c_w)
@@ -963,7 +965,7 @@ def _make_pa_phase_helpers(
             warp_rescale_factors.append(w_max)
         for w in range_constexpr(NUM_WARPS):
             diff_w = warp_rescale_factors[w] - partition_max
-            if needs_mask:
+            if const_expr(needs_mask):
                 diff_w = arith.select(partition_max > neg_inf, diff_w, zero_f)
             wf = (diff_w * arith.constant(LOG2E, type=T.f32)).exp2(
                 fastmath=arith.FastMathFlags.fast
@@ -984,7 +986,7 @@ def _make_pa_phase_helpers(
             )
 
         new_rmax = rmax.maximumf(partition_max)
-        if needs_mask:
+        if const_expr(needs_mask):
             accum_scale = arith.select(
                 rmax > neg_inf,
                 ((rmax - new_rmax) * arith.constant(LOG2E, type=T.f32)).exp2(
@@ -1012,7 +1014,7 @@ def _make_pa_phase_helpers(
         o0 = o0 * vector.broadcast(T.f32x4, accum_scale)
         o1 = o1 * vector.broadcast(T.f32x4, accum_scale)
 
-        if per_token_kv and v_scale_vecs is not None:
+        if const_expr(per_token_kv and v_scale_vecs is not None):
             v_max_global = zero_f
             for w in range_constexpr(NUM_WARPS):
                 w_vmax = vector.extract(
@@ -1127,12 +1129,12 @@ def _make_pa_phase_helpers(
         *,
         phys_block,
     ):
-        va_dws = []
+        v_results = []
         for vt in range_constexpr(VTLOOP):
             vhe_data = []
             for vhe in range_constexpr(VHELOOP):
                 v_token_in_block = tile_token_offset_i32 + v_tok_thread_off[vt]
-                if trans_v:
+                if const_expr(trans_v):
                     vt_group = v_token_in_block // arith.constant(
                         FP8_ELEMS_16B, type=T.i32
                     )
@@ -1148,10 +1150,13 @@ def _make_pa_phase_helpers(
                         + vhead_elem_dw[vhe]
                         + v_token_in_block // c_four
                     )
-                vhe_data.append(va_dw)
-            va_dws.append(vhe_data)
+                v_4xi32 = buffer_ops.buffer_load(
+                    v_rsrc_cur, va_dw, vec_width=4, dtype=T.i32
+                )
+                vhe_data.append(v_4xi32)
+            v_results.append(vhe_data)
 
-        if per_token_kv:
+        if const_expr(per_token_kv):
             scale_block_base = phys_block * stride_ks_block + kv_h * stride_ks_head
             scale_tok_base_pt = tile_token_offset_i32 + k_tok_thread_base
             scale_src_lane_base = rowid * arith.constant(20, type=T.i32)
@@ -1189,10 +1194,10 @@ def _make_pa_phase_helpers(
 
         d_out_0 = []
         d_out_1 = []
-        v_results = []
+
         query_scale_vec_0 = None
         query_scale_vec_1 = None
-        if per_token_q:
+        if const_expr(per_token_q):
             query_scale_vec_0 = vector.broadcast(
                 T.f32x4, query_scale_lane_0 * softmax_scale_base
             )
@@ -1204,11 +1209,6 @@ def _make_pa_phase_helpers(
             acc_0 = arith.constant_vector(0.0, T.f32x4)
             acc_1 = arith.constant_vector(0.0, T.f32x4)
             for k_step in range_constexpr(QKHELOOP * 2):
-                if k_step % 2 == 0:
-                    v_4xi32 = buffer_ops.buffer_load(
-                        v_rsrc_cur, va_dws[td][k_step // 2], vec_width=4, dtype=T.i32
-                    )
-                    vhe_data.append(v_4xi32)
                 acc_0 = rocdl.mfma_f32_16x16x32_fp8_fp8(
                     T.f32x4,
                     [k_ops[td][k_step], q_frags_0[k_step], acc_0, 0, 0, 0],
@@ -1217,9 +1217,9 @@ def _make_pa_phase_helpers(
                     T.f32x4,
                     [k_ops[td][k_step], q_frags_1[k_step], acc_1, 0, 0, 0],
                 )
-            v_results.append(vhe_data)
-            if per_token_kv:
-                if per_token_q:
+
+            if const_expr(per_token_kv):
+                if const_expr(per_token_q):
                     scale_vec_0 = k_scale_vecs[td] * query_scale_vec_0
                     scale_vec_1 = k_scale_vecs[td] * query_scale_vec_1
                 else:
@@ -1230,7 +1230,7 @@ def _make_pa_phase_helpers(
                 d_out_0.append(acc_0 * scale_vec_0)
                 d_out_1.append(acc_1 * scale_vec_1)
             else:
-                if per_token_q:
+                if const_expr(per_token_q):
                     d_out_0.append(
                         acc_0
                         * (
@@ -1268,26 +1268,26 @@ def _make_pa_phase_helpers(
         apply_range_mask = apply_window_mask or apply_global_window
 
         def _is_visible_token(kv_tok):
-            if apply_window_mask and apply_global_window:
+            if const_expr(apply_window_mask and apply_global_window):
                 return (kv_tok >= seq_start) | (kv_tok < global_window_limit)
-            if apply_window_mask:
+            if const_expr(apply_window_mask):
                 return kv_tok >= seq_start
             return kv_tok < global_window_limit
 
         kv_tok_base = (
             partition_start + kv_tok_thread_base
-            if apply_causal_mask or apply_range_mask
+            if const_expr(apply_causal_mask or apply_range_mask)
             else None
         )
         qk_max = neg_inf
         for td in range_constexpr(TLOOP):
             for i in range_constexpr(4):
                 s = vector.extract(d_out[td], static_position=[i], dynamic_position=[])
-                if kv_tok_base is not None:
+                if const_expr(kv_tok_base is not None):
                     kv_tok = kv_tok_base + arith.constant(td * MFMA_N + i, type=T.i32)
-                    if apply_causal_mask:
+                    if const_expr(apply_causal_mask):
                         s = arith.select(kv_tok < causal_bound, s, neg_inf)
-                    if apply_range_mask:
+                    if const_expr(apply_range_mask):
                         s = arith.select(_is_visible_token(kv_tok), s, neg_inf)
                 qk_max = qk_max.maximumf(s)
         for sh in [32, 16]:
@@ -1308,11 +1308,11 @@ def _make_pa_phase_helpers(
                 p = (diff * arith.constant(LOG2E, type=T.f32)).exp2(
                     fastmath=arith.FastMathFlags.fast
                 )
-                if kv_tok_base is not None:
+                if const_expr(kv_tok_base is not None):
                     kv_tok = kv_tok_base + arith.constant(td * MFMA_N + i, type=T.i32)
-                    if apply_causal_mask:
+                    if const_expr(apply_causal_mask):
                         p = arith.select(kv_tok < causal_bound, p, zero_f)
-                    if apply_range_mask:
+                    if const_expr(apply_range_mask):
                         p = arith.select(_is_visible_token(kv_tok), p, zero_f)
                 exp_sum = exp_sum + p
                 d_out[td] = vector.insert(
@@ -1328,19 +1328,19 @@ def _make_pa_phase_helpers(
             [sm_sum_off],
         )
 
-        if per_token_kv and v_scale_vecs is not None:
+        if const_expr(per_token_kv and v_scale_vecs is not None):
             v_max_warp = zero_f
             for td in range_constexpr(TLOOP):
                 vs = v_scale_vecs[td]
                 for i in range_constexpr(4):
-                    if kv_tok_base is not None:
+                    if const_expr(kv_tok_base is not None):
                         kv_tok = kv_tok_base + arith.constant(td * MFMA_N + i, type=T.i32)
                         vs_i = vector.extract(
                             vs, static_position=[i], dynamic_position=[]
                         )
-                        if apply_causal_mask:
+                        if const_expr(apply_causal_mask):
                             vs_i = arith.select(kv_tok < causal_bound, vs_i, zero_f)
-                        if apply_range_mask:
+                        if const_expr(apply_range_mask):
                             vs_i = arith.select(_is_visible_token(kv_tok), vs_i, zero_f)
                         vs = vector.insert(
                             vs_i, vs, static_position=[i], dynamic_position=[]
