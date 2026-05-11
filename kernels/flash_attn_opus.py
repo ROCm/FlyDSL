@@ -185,12 +185,20 @@ def build_flash_attn_opus_module(
     OPUS_LAZY_RESCALE = os.getenv("FLYDSL_OPUS_LAZY_RESCALE", "1") == "1"
     OPUS_SETPRIO = os.getenv("FLYDSL_OPUS_SETPRIO", "1") == "1"
     # P5 stagger (`if (warp_id/4) s_barrier;` in prologue + reverse in
-    # pre-store) is wired in but disabled by default because it requires
-    # V LDS reads to happen one cluster earlier (see the comment block in
-    # the kernel body where `stagger_is_one_i1` is computed). Set
-    # `FLYDSL_OPUS_STAGGER=1` once that restructuring lands. Until then,
-    # both stagger sites compile to unconditional `gpu.barrier()` calls
-    # so the kernel keeps producing correct results.
+    # pre-store) is now functionally CORRECT in this port because all 6 V
+    # LDS read sites have been hoisted into the cluster immediately
+    # preceding their consumer (Clusters 2/6/10/12), mirroring the C++
+    # template. With V already in VGPRs before each cluster boundary
+    # barrier, the dual-group phase shift cannot race against the next
+    # async_load that overwrites the V LDS buffer.
+    #
+    # Default remains OFF because in the current FlyDSL pipeline the
+    # extra register pressure from holding 4 V substeps in VGPRs across
+    # the barrier (plus the asymmetric barrier itself) regresses
+    # throughput vs. the symmetric (lockstep) path. Setting
+    # `FLYDSL_OPUS_STAGGER=1` enables the C++-equivalent asymmetric
+    # barrier and is verified to produce correct outputs at all tested
+    # scales (MaxErr matches the unstaggered path bit-for-bit).
     OPUS_ENABLE_STAGGER = os.getenv("FLYDSL_OPUS_STAGGER", "0") == "1"
     OPUS_YIELD_NOP = os.getenv("FLYDSL_OPUS_YIELD_NOP", "1") == "1"
 
@@ -293,20 +301,15 @@ def build_flash_attn_opus_module(
         # (wave-uniform) branch — that is essential for the conditional
         # s_barrier to be skipped per-wave rather than masked per-lane.
         #
-        # NOTE: although the asymmetric `s_cmp_eq_u32 + s_cbranch_scc +
-        # s_barrier` triple is correctly emitted in the final ISA (see
-        # commit notes), the kernel currently cannot RUN with the dual-
-        # group phase shift enabled. The C++ template loads `v_v` into
-        # registers in Cluster 2 (tr_load BEFORE the cluster-2 barrier),
-        # so a wave can keep using `v_v` after a peer wave overwrites
-        # `s_v[0]` via the Cluster-4 async_load. Our FlyDSL port currently
-        # defers V LDS reads into Cluster 3 via
-        # `_read_v_packs_for_k_substep(...)`, which means warps 4-7 (one
-        # phase behind under stagger) end up reading from `s_v[0]` after
-        # warps 0-3 have already issued the Cluster-4 async_load that
-        # overwrites it. Until V reads are hoisted into Cluster 2 (and the
-        # symmetric V[max-1] reads in the epilogue), the asymmetric barrier
-        # MUST be disabled — see `OPUS_ENABLE_STAGGER` below.
+        # The V LDS reads have been hoisted out of Clusters 3/7/11/13 into
+        # the immediately preceding cluster (2/6/10/12) so V[*] is held in
+        # registers BEFORE the cluster boundary barrier. This mirrors the
+        # C++ template's `tr_load V into v_v` before the s_barrier and is
+        # what makes the asymmetric stagger barrier safe: even when warps
+        # 4-7 are one phase behind warps 0-3, the lagging group has already
+        # captured V into VGPRs in its own preceding cluster, so a peer
+        # wave overwriting `s_v[buf]` via a subsequent async_load is
+        # harmless.
         _tid_i32 = arith.index_cast(T.i32, _raw(tid))
         _wave_id_uni_i32 = rocdl.readfirstlane(
             T.i32,
@@ -880,9 +883,11 @@ def build_flash_attn_opus_module(
         #               __builtin_amdgcn_s_barrier();
         #           }
         # The asymmetric (per-wave-group) version is gated by
-        # OPUS_ENABLE_STAGGER. With the flag OFF (default), we emit an
+        # OPUS_ENABLE_STAGGER. The path is now correctness-safe thanks to
+        # V LDS reads being hoisted one cluster earlier (see Clusters
+        # 2/6/10/12). With the flag OFF (default) we fall back to an
         # unconditional `gpu.barrier()` so both wave groups stay in
-        # lockstep — see the OPUS_ENABLE_STAGGER comment for context.
+        # lockstep.
         if const_expr(OPUS_ENABLE_STAGGER):
             _stagger_extra_barrier_if_one()
         else:
@@ -974,8 +979,19 @@ def build_flash_attn_opus_module(
             rocdl.sched_barrier(0)
 
             # ─── Cluster 2 (C++ lines 461-468) ───
-            # K[j] async + (tr_load V[j-3] is folded into Cluster 3's step_k reads) + wait
+            # K[j] async + tr_load V[j-3] (4 substeps) from s_v[0] into registers + wait.
+            # Mirrors C++ kernel line 466 `v_v = tr_load<...>(s_v[0], u_rv);` which
+            # happens BEFORE the cluster-2 s_barrier. Hoisting the V reads out of
+            # Cluster 3 is required for the P5 stagger path to be correct: with
+            # the phase-shifted execution, warps 4-7 would otherwise read
+            # `s_v[0]` AFTER warps 0-3 have already issued the Cluster-4
+            # async_load that overwrites it. With the reads here, V[j-3] is
+            # held in VGPRs across the barrier, so the next async_load into
+            # `s_v[0]` is harmless.
             coop_dma_k(j_idx * fx.Index(BLOCK_N), 1)
+            v_packs_a = []
+            for kss in range_constexpr(4):
+                v_packs_a.append(_read_v_packs_for_k_substep(0, kss))
             rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
             _waitcnt_vm_n(NUM_DMA_K + NUM_DMA_V)
             rocdl.sched_barrier(0)
@@ -988,7 +1004,7 @@ def build_flash_attn_opus_module(
                 rocdl.s_setprio(1)
 
             # step_k(0): 4 MFMAs (one per D-chunk), KV cols 0-15 of V[j-3] (from s_v[0])
-            v_pk = _read_v_packs_for_k_substep(0, 0)
+            v_pk = v_packs_a[0]
             p_pk = v_p_lo_a[0]
             for dc in range_constexpr(D_CHUNKS):
                 o_accs[dc] = mfma_acc(v_pk[dc], p_pk, o_accs[dc])
@@ -1021,10 +1037,10 @@ def build_flash_attn_opus_module(
             l_row = _fmul(l_row, corr_a)
             m_row = m_new_a
 
-            # step_k(1..3): 12 more MFMAs
+            # step_k(1..3): 12 more MFMAs (V packs were pre-loaded in Cluster 2)
             for kss in range_constexpr(3):
                 actual = kss + 1
-                v_pk = _read_v_packs_for_k_substep(0, actual)
+                v_pk = v_packs_a[actual]
                 if const_expr(actual < 2):
                     p_pk = v_p_lo_a[actual]
                 else:
@@ -1079,8 +1095,17 @@ def build_flash_attn_opus_module(
             rocdl.sched_barrier(0)
 
             # ─── Cluster 6 (C++ lines 519-532) ───
-            # K[j+1] async + causal mask on v_s[0] = S[j-1] + wait
+            # K[j+1] async + tr_load V[j-2] (4 substeps) from s_v[1] into registers
+            # + causal mask on v_s[0] = S[j-1] + wait.
+            # Hoisted V reads mirror C++ line 522 `v_v = tr_load<...>(s_v[1], u_rv);`
+            # before the cluster-6 s_barrier. Required for P5 stagger correctness:
+            # without the hoist warps 4-7 would read `s_v[1]` after warps 0-3
+            # have already issued the next iteration's Cluster-0 async_load
+            # into the same buffer.
             coop_dma_k((j_idx + fx.Index(1)) * fx.Index(BLOCK_N), 0)
+            v_packs_b = []
+            for kss in range_constexpr(4):
+                v_packs_b.append(_read_v_packs_for_k_substep(1, kss))
             s_lo_b = [Vec(v_s_0_lo_raw_b)[r] for r in range_constexpr(16)]
             s_hi_b = [Vec(v_s_0_hi_raw_b)[r] for r in range_constexpr(16)]
             if const_expr(CAUSAL):
@@ -1096,8 +1121,8 @@ def build_flash_attn_opus_module(
             if const_expr(OPUS_SETPRIO):
                 rocdl.s_setprio(1)
 
-            # step_k(0)
-            v_pk = _read_v_packs_for_k_substep(1, 0)
+            # step_k(0): V packs were pre-loaded in Cluster 6
+            v_pk = v_packs_b[0]
             p_pk = v_p_lo_b[0]
             for dc in range_constexpr(D_CHUNKS):
                 o_accs[dc] = mfma_acc(v_pk[dc], p_pk, o_accs[dc])
@@ -1125,10 +1150,10 @@ def build_flash_attn_opus_module(
             l_row = _fmul(l_row, corr_b)
             m_row = m_new_b
 
-            # step_k(1..3)
+            # step_k(1..3): V packs were pre-loaded in Cluster 6
             for kss in range_constexpr(3):
                 actual = kss + 1
-                v_pk = _read_v_packs_for_k_substep(1, actual)
+                v_pk = v_packs_b[actual]
                 if const_expr(actual < 2):
                     p_pk = v_p_lo_b[actual]
                 else:
@@ -1199,8 +1224,16 @@ def build_flash_attn_opus_module(
         rocdl.sched_barrier(0)
 
         # ─── Cluster 2 (epi, C++ lines 585-598) ───
-        # K[max-1] async + causal mask on v_s[1] (= S[max-3]) + wait
+        # K[max-1] async + tr_load V[max-4] (4 substeps) from s_v[0] into registers
+        # + causal mask on v_s[1] (= S[max-3]) + wait.
+        # Hoisted V reads mirror C++ epilogue line 588 `v_v = tr_load<...>(s_v[0], u_rv);`
+        # before the cluster-2 s_barrier. Required for P5 stagger correctness:
+        # the symmetric epilogue Cluster-4 async_load overwrites `s_v[0]`,
+        # so V[max-4] must be held in registers across the cluster boundary.
         coop_dma_k(max_m1 * fx.Index(BLOCK_N), 1)
+        v_packs_e3 = []
+        for kss in range_constexpr(4):
+            v_packs_e3.append(_read_v_packs_for_k_substep(0, kss))
         s_lo_e1 = [Vec(v_s_1_lo_e)[r] for r in range_constexpr(16)]
         s_hi_e1 = [Vec(v_s_1_hi_e)[r] for r in range_constexpr(16)]
         if const_expr(CAUSAL):
@@ -1217,8 +1250,9 @@ def build_flash_attn_opus_module(
             rocdl.s_setprio(1)
 
         # mma1 (full 16 MFMAs): GEMM2 with v_p = P[max-4] and V[max-4] (from s_v[0])
+        # V packs were pre-loaded in Cluster 2 (epi).
         for kss in range_constexpr(4):
-            v_pk = _read_v_packs_for_k_substep(0, kss)
+            v_pk = v_packs_e3[kss]
             if const_expr(kss < 2):
                 p_pk = v_p_lo_e1[kss]
             else:
@@ -1282,8 +1316,15 @@ def build_flash_attn_opus_module(
         rocdl.sched_barrier(0)
 
         # ─── Cluster 6 (epi, C++ lines 642-654) ───
-        # tr_load V[max-3] (folded into Cluster 7 step_k) + causal mask on v_s[0] (= S[max-2])
-        # + wait (lgkm(0), vmcnt(v_buffer_load_insts))
+        # tr_load V[max-3] (4 substeps) from s_v[1] into registers + causal mask
+        # on v_s[0] (= S[max-2]) + wait (lgkm(0), vmcnt(v_buffer_load_insts)).
+        # Hoisted V reads mirror C++ epilogue line 645 `v_v = tr_load<...>(s_v[1], u_rv);`
+        # before the cluster-6 s_barrier. Required for P5 stagger correctness:
+        # epilogue Cluster-8 async_load overwrites `s_v[1]`, so V[max-3] must
+        # be held in registers across the cluster boundary.
+        v_packs_e7 = []
+        for kss in range_constexpr(4):
+            v_packs_e7.append(_read_v_packs_for_k_substep(1, kss))
         s_lo_e5 = [Vec(v_s_0_lo_e5)[r] for r in range_constexpr(16)]
         s_hi_e5 = [Vec(v_s_0_hi_e5)[r] for r in range_constexpr(16)]
         if const_expr(CAUSAL):
@@ -1300,8 +1341,9 @@ def build_flash_attn_opus_module(
             rocdl.s_setprio(1)
 
         # mma1 (full 16 MFMAs): GEMM2 with v_p = P[max-3] and V[max-3] (from s_v[1])
+        # V packs were pre-loaded in Cluster 6 (epi).
         for kss in range_constexpr(4):
-            v_pk = _read_v_packs_for_k_substep(1, kss)
+            v_pk = v_packs_e7[kss]
             if const_expr(kss < 2):
                 p_pk = v_p_lo_e5[kss]
             else:
@@ -1357,7 +1399,17 @@ def build_flash_attn_opus_module(
         rocdl.sched_barrier(0)
 
         # ─── Cluster 10 (epi, C++ lines 697-709) ───
-        # tr_load V[max-2] (folded into Cluster 11) + causal mask on v_s[1] (= S[max-1]) + wait vmcnt(0)
+        # tr_load V[max-2] (4 substeps) from s_v[0] into registers + causal mask
+        # on v_s[1] (= S[max-1]) + wait vmcnt(0).
+        # Hoisted V reads mirror C++ epilogue line 700 `v_v = tr_load<...>(s_v[0], u_rv);`
+        # before the cluster-10 s_barrier. While no further async_load
+        # overwrites s_v[0] in this epilogue, hoisting here keeps the V-read
+        # placement uniformly one cluster before consumption — matching the
+        # C++ kernel exactly and removing all V LDS reads from the MFMA
+        # window for cleaner scheduling under stagger.
+        v_packs_e11 = []
+        for kss in range_constexpr(4):
+            v_packs_e11.append(_read_v_packs_for_k_substep(0, kss))
         s_lo_e9 = [Vec(v_s_1_lo_e9)[r] for r in range_constexpr(16)]
         s_hi_e9 = [Vec(v_s_1_hi_e9)[r] for r in range_constexpr(16)]
         if const_expr(CAUSAL):
@@ -1371,8 +1423,9 @@ def build_flash_attn_opus_module(
         # ─── Cluster 11 (epi, C++ lines 711-732) ───
         # FULL GEMM2 (P[max-2] @ V[max-2]) + row_max + sub_row + FULL exp v_s[1] + cast P[max-1] + scale o
         # mma1: GEMM2 with v_p = P[max-2] and V[max-2] (from s_v[0])
+        # V packs were pre-loaded in Cluster 10 (epi).
         for kss in range_constexpr(4):
-            v_pk = _read_v_packs_for_k_substep(0, kss)
+            v_pk = v_packs_e11[kss]
             if const_expr(kss < 2):
                 p_pk = v_p_lo_e9[kss]
             else:
@@ -1422,7 +1475,13 @@ def build_flash_attn_opus_module(
         rocdl.sched_barrier(0)
 
         # ─── Cluster 12 (epi, C++ lines 735-739) ───
-        # tr_load V[max-1] (folded into Cluster 13 step_k reads) + s_waitcnt_lgkmcnt(0) + barrier
+        # tr_load V[max-1] (4 substeps) from s_v[1] into registers + s_waitcnt_lgkmcnt(0)
+        # + barrier. Hoisted V reads mirror C++ epilogue line 736
+        # `v_v = tr_load<...>(s_v[1], u_rv);` before the cluster-12 s_barrier.
+        # Keeps V-read placement uniformly one cluster before consumption.
+        v_packs_e13 = []
+        for kss in range_constexpr(4):
+            v_packs_e13.append(_read_v_packs_for_k_substep(1, kss))
         rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
         rocdl.sched_barrier(0)
         gpu.barrier()
@@ -1430,8 +1489,9 @@ def build_flash_attn_opus_module(
 
         # ─── Cluster 13 (epi, C++ line 742) ───
         # FINAL mma1: GEMM2 with v_p = P[max-1] and V[max-1] (from s_v[1])
+        # V packs were pre-loaded in Cluster 12 (epi).
         for kss in range_constexpr(4):
-            v_pk = _read_v_packs_for_k_substep(1, kss)
+            v_pk = v_packs_e13[kss]
             if const_expr(kss < 2):
                 p_pk = v_p_lo_e11[kss]
             else:
@@ -1449,9 +1509,11 @@ def build_flash_attn_opus_module(
         #     if (!stagger) {
         #         __builtin_amdgcn_s_barrier();
         #     }
-        # Same gating as the prologue half: OPUS_ENABLE_STAGGER=0 falls
-        # back to an unconditional barrier so total barrier counts stay
-        # symmetric across both wave groups.
+        # Same gating as the prologue half: with OPUS_ENABLE_STAGGER ON,
+        # warps 0-3 hit one extra barrier here so that across the whole
+        # kernel both groups observe the same total barrier count. With
+        # the flag OFF (default) we fall back to an unconditional barrier
+        # on every wave.
         if const_expr(OPUS_ENABLE_STAGGER):
             _stagger_extra_barrier_if_zero()
         else:
