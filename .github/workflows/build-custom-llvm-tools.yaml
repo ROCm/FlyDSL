@@ -51,6 +51,26 @@ jobs:
           docker exec llvm_build bash -c "python3 -m pip install -q nanobind"
           docker exec llvm_build bash -c "git config --global --add safe.directory '*'"
 
+      - name: Checkout source in build container
+        env:
+          CHECKOUT_REPOSITORY: ${{ github.repository }}
+          CHECKOUT_SHA: ${{ github.sha }}
+        run: |
+          docker exec \
+            -e CHECKOUT_REPOSITORY="${CHECKOUT_REPOSITORY}" \
+            -e CHECKOUT_SHA="${CHECKOUT_SHA}" \
+            llvm_build bash -c '
+              set -euo pipefail
+              echo "Checking out ${CHECKOUT_REPOSITORY}@${CHECKOUT_SHA} inside the build container."
+              cd /flydsl
+              find . -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+              git init
+              git remote add origin "https://github.com/${CHECKOUT_REPOSITORY}.git"
+              git fetch --no-tags --depth=1 origin "${CHECKOUT_SHA}"
+              git checkout --force FETCH_HEAD
+              git config --global --add safe.directory /flydsl
+            '
+
       - name: Resolve LLVM ref
         id: llvm-ref
         env:

@@ -76,7 +76,7 @@ jobs:
           docker exec flydsl_build bash -c "python3 -m pip install -q nanobind"
           docker exec flydsl_build bash -c "git config --global --add safe.directory '*'"
 
-      - name: Ensure git metadata and submodules
+      - name: Checkout source and submodules in build container
         env:
           CHECKOUT_REPOSITORY: ${{ github.repository }}
           CHECKOUT_SHA: ${{ github.sha }}
@@ -86,22 +86,16 @@ jobs:
             -e CHECKOUT_SHA="${CHECKOUT_SHA}" \
             flydsl_build bash -c '
               set -euo pipefail
+              echo "Checking out ${CHECKOUT_REPOSITORY}@${CHECKOUT_SHA} inside the build container."
               cd /flydsl
-
-              if [ ! -d .git ]; then
-                echo "Checkout has no .git directory; reconstructing it inside the build container."
-                git init
-                git remote add origin "https://github.com/${CHECKOUT_REPOSITORY}.git"
-                git fetch --no-tags --depth=1 origin "${CHECKOUT_SHA}"
-                find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
-                git checkout --force FETCH_HEAD
-              fi
-
-              if [ ! -f thirdparty/dlpack/include/dlpack/dlpack.h ]; then
-                echo "Initializing git submodules..."
-                git submodule sync --recursive
-                git submodule update --init --recursive
-              fi
+              find . -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+              git init
+              git remote add origin "https://github.com/${CHECKOUT_REPOSITORY}.git"
+              git fetch --no-tags --depth=1 origin "${CHECKOUT_SHA}"
+              git checkout --force FETCH_HEAD
+              git config --global --add safe.directory /flydsl
+              git submodule sync --recursive
+              git submodule update --init --recursive
             '
 
       - name: Restore cached MLIR install tarball
