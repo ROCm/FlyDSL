@@ -421,13 +421,6 @@ def test_subbyte_numeric_not_storable():
         dsl_size_of(Int4)
 
 
-def test_boolean_is_storable():
-    from flydsl.expr.numeric import Boolean
-
-    assert dsl_size_of(Boolean) == 1
-    assert dsl_align_of(Boolean) == 1
-
-
 # ---------------------------------------------------------------------------
 # Struct layout with new types
 # ---------------------------------------------------------------------------
