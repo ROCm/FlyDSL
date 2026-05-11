@@ -71,8 +71,7 @@ class NumericMeta(type):
             return [ptr]
 
         inferred_np = np_dtype if np_dtype is not None else _infer_np_dtype(width, signed, name)
-
-        is_storable = width >= 8 or (width == 1 and name == "Boolean")
+        is_storable = width >= 8
 
         def _dsl_size_of(cls):
             return 1 if cls.width < 8 else (cls.width + 7) // 8
