@@ -44,6 +44,14 @@ jobs:
             accuracy_threshold: 0.92
             runner: linux-flydsl-mi355-8
             env_vars: ""
+          - model_name: gpt-oss-120b
+            model_path: openai/gpt-oss-120b
+            extra_args: --kv_cache_dtype fp8 --gpu-memory-utilization 0.3
+            accuracy_threshold: 0.38
+            runner: linux-flydsl-mi355-1
+            env_vars: |
+              ATOM_GPT_OSS_MODEL=1
+              HSA_NO_SCRATCH_RECLAIM=1
 
     env:
       CONTAINER_NAME: flydsl_atom_${{ strategy.job-index }}

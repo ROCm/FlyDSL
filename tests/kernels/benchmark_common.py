@@ -42,10 +42,10 @@ class PerfRow:
     aiter_gpu_us: Optional[float]
 
     @property
-    def speedup_flydsl_vs_aiter(self) -> Optional[float]:
+    def speedup_aiter_vs_flydsl(self) -> Optional[float]:
         if self.flydsl_gpu_us is None or self.aiter_gpu_us is None:
             return None
-        return self.aiter_gpu_us / self.flydsl_gpu_us
+        return self.flydsl_gpu_us / self.aiter_gpu_us
 
 
 def _fmt_us(x: Optional[float]) -> str:
@@ -58,7 +58,7 @@ def print_perf_table(rows: List[PerfRow]) -> None:
     print("=" * 100)
     print(f"{'op':10s} {'shape':18s} {'dtype':6s} {'FlyDSL(gpu us)':>14s} {'AIter(gpu us)':>14s} {'speedup':>10s}")
     for r in rows:
-        sp = r.speedup_flydsl_vs_aiter
+        sp = r.speedup_aiter_vs_flydsl
         sp_s = "-" if sp is None else f"{sp:,.2f}x"
         print(
             f"{r.op:10s} {r.shape:18s} {r.dtype:6s} {_fmt_us(r.flydsl_gpu_us):>14s} {_fmt_us(r.aiter_gpu_us):>14s} {sp_s:>10s}"
@@ -487,11 +487,19 @@ def bench_resolve_tiles(in_dtype, model_dim, inter_dim):
 
     tile_n1 = bench_best_tile(target_n, inter_dim, 16)
     tile_k1 = bench_best_tile(target_k, model_dim, wmma_k)
+    if tile_k1 is None:
+        tile_k1 = wmma_k
     tile_n2 = bench_best_tile(target_n, model_dim, 16)
 
     tile_k2 = None
     for k in range(target_k, 0, -wmma_k):
         if inter_dim % k != 0:
+            # K-padding: run_moe_stage2 auto-pads inter_dim, so accept
+            # any tile_k that satisfies the load-mapping constraints.
+            total = tile_m * k
+            if total % 256 == 0 and (total // 256) % 4 == 0:
+                if tile_k2 is None:
+                    tile_k2 = k
             continue
         total = tile_m * k
         if total % 256 == 0 and (total // 256) % 4 == 0:
@@ -859,7 +867,7 @@ def main() -> None:
         print("=" * 100)
         print(f"{'op':10s} {'shape':18s} {'dtype':6s} {'FlyDSL(gpu us)':>14s} {'torch(gpu us)':>14s} {'speedup':>10s}")
         for r in wmma_rows:
-            sp = r.speedup_flydsl_vs_aiter
+            sp = r.speedup_aiter_vs_flydsl
             sp_s = "-" if sp is None else f"{sp:,.2f}x"
             print(
                 f"{r.op:10s} {r.shape:18s} {r.dtype:6s} {_fmt_us(r.flydsl_gpu_us):>14s} {_fmt_us(r.aiter_gpu_us):>14s} {sp_s:>10s}"

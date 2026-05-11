@@ -139,17 +139,55 @@ def _extract_sub8(acc, vec_base: int, *, vector, range_constexpr, ACC_VEC_SIZE: 
     return vector.shuffle(acc, acc, [vec_base + i for i in range_constexpr(8)])
 
 
-def _finalize_alloc_and_launch_2d(*, ctx, alloc, launcher, gx, gy, block_threads: int, stream, ir,
-                                  cluster=None):
+def _finalize_alloc_and_launch_2d(*, ctx, alloc, launcher, gx, gy, block_threads: int, stream, waves_per_eu, ir,
+                                  cluster=None, gz=1):
     with ir.InsertionPoint(ctx.gpu_module_body):
         alloc.finalized = False
         alloc.finalize()
+    for op in ctx.gpu_module_body.operations:
+        if hasattr(op, "attributes") and op.OPERATION_NAME == "gpu.func":
+            if waves_per_eu is not None and int(waves_per_eu) >= 1:
+                op.attributes["rocdl.waves_per_eu"] = ir.IntegerAttr.get(
+                    ir.IntegerType.get_signless(32), int(waves_per_eu)
+                )
+            if cluster is not None:
+                op.attributes["rocdl.cluster_dims"] = ir.StringAttr.get(
+                    f"{cluster[0]},{cluster[1]},{cluster[2]}")
     launcher.launch(
-        grid=(gx, gy, 1),
+        grid=(gx, gy, gz),
         block=(block_threads, 1, 1),
         stream=stream,
         cluster=cluster,
     )
+
+
+# GPT-OSS SwiGLU activation parameters. Matches
+# `aiter.fused_moe.swiglu(alpha=1.702, limit=7.0)` (the torch reference
+# used in `torch_moe_stage1`). Hardcoded because the corresponding torch
+# helper does not expose them as kwargs at the dispatch level either.
+_SWIGLU_ALPHA = 1.702
+_SWIGLU_LIMIT = 7.0
+# log2(e) = 1 / ln(2). exp(x) = exp2(x * log2(e)). For sigmoid(alpha*x) we
+# need exp(-alpha * x) = exp2(-alpha * x * log2(e)).
+_NEG_ALPHA_LOG2E = -float(_SWIGLU_ALPHA) * 1.4426950408889634
+
+
+def _emit_swiglu(vg, vu, *, arith, rocdl, T):
+    """Apply GPT-OSS SwiGLU: silu(clamp(g, max=L)) * (clamp(u, -L, L) + 1).
+
+    silu(x) here is x * sigmoid(alpha * x) with alpha=1.702 (matches
+    `aiter.fused_moe.swiglu`).
+    """
+    limit = arith.constant(float(_SWIGLU_LIMIT), type=T.f32)
+    neg_limit = arith.constant(-float(_SWIGLU_LIMIT), type=T.f32)
+    g_clamped = arith.minimumf(vg, limit)
+    u_clamped = arith.maximumf(arith.minimumf(vu, limit), neg_limit)
+    t = g_clamped * arith.constant(float(_NEG_ALPHA_LOG2E), type=T.f32)
+    emu = rocdl.exp2(T.f32, t)
+    one_f32 = arith.constant(1.0, type=T.f32)
+    sig = rocdl.rcp(T.f32, one_f32 + emu)
+    out_glu = g_clamped * sig
+    return out_glu * (u_clamped + one_f32)
 
 
 def _emit_stage1_gate_up_epilogue(
@@ -169,6 +207,8 @@ def _emit_stage1_gate_up_epilogue(
     topk: int,
     num_valid_i32=None,
     block_row_start=None,
+    lds_tid=None,
+    memref=None,
     sorted_rsrc,
     tw_rsrc,
     out_rsrc,
@@ -184,10 +224,41 @@ def _emit_stage1_gate_up_epilogue(
     vector,
     range_constexpr,
     T,
+    # ── optional: bias + activation ─────────────────────────────────
+    # ``bias_rsrc``: f32 buffer resource of shape (E, 2*inter_dim) flat,
+    # gate-half then up-half per expert. ``eid_i32`` is the per-block
+    # expert id (already loaded from arg_expert_ids by caller). When
+    # both are provided, bias is added before activation. ``act_kind``
+    # controls activation: ``"silu"`` (default) uses ``silu_fn(vg)*vu``,
+    # ``"swiglu"`` uses GPT-OSS SwiGLU(g,u).
+    bias_rsrc=None,
+    eid_i32=None,
+    act_kind: str = "silu",
+    rocdl=None,
 ):
+    # ``lds_tid``: optional memref<tile_m x i32, shared> holding the pre-decoded
+    # ``sorted_token_ids`` for the current M-tile. Invalid rows (outside the
+    # route slot range or beyond ``num_valid``) are pre-filled with the sentinel
+    # ``0xFFFFFFFF`` so that ``tok_ok``/``slot_ok`` below naturally reject them.
+    # When provided (together with ``memref``), the per-row ``fused`` i32 comes
+    # from a single ``ds_read_b32`` instead of a ``buffer_load(sorted_rsrc,...)``,
+    # eliminating redundant VMEM traffic in the epilogue. When ``lds_tid`` is
+    # ``None`` we fall back to the original per-row buffer_load.
+    _use_lds = lds_tid is not None and memref is not None
+    _use_bias = bias_rsrc is not None and eid_i32 is not None
+    _use_swiglu = str(act_kind).lower() == "swiglu"
+    if _use_swiglu and rocdl is None:
+        raise ValueError("_emit_stage1_gate_up_epilogue: act_kind='swiglu' requires rocdl")
     c_topk_i32 = arith.constant(int(topk), type=T.i32)
+    c2_n_i32 = arith.constant(2, type=T.i32)
     default_block_row_start = arith.index_cast(T.i32, by * arith.index(int(route_tile_m)))
     row_base_i32 = block_row_start if block_row_start is not None else default_block_row_start
+    if _use_bias:
+        # Each expert's bias slab is (gate || up), 2*inter_dim f32 entries.
+        # Index gate at column ``c`` as eid * 2*inter + c, and up as
+        # eid * 2*inter + inter + c.
+        n_per_exp_i32 = i32_inter_in * c2_n_i32
+        bias_row_base_i32 = eid_i32 * n_per_exp_i32
     for acc_idx, vec_base, m_off, wn in sub_tiles:
         row_local = warp_m_base + fx.Index(m_off) + lane16
         sorted_row = by * arith.index(int(tile_m)) + row_local
@@ -208,7 +279,10 @@ def _emit_stage1_gate_up_epilogue(
             sorted_i32,
             row_base_i32,
         )
-        fused = buffer_ops.buffer_load(sorted_rsrc, sorted_safe, vec_width=1, dtype=T.i32)
+        if _use_lds:
+            fused = memref.load(lds_tid, [row_local])
+        else:
+            fused = buffer_ops.buffer_load(sorted_rsrc, sorted_safe, vec_width=1, dtype=T.i32)
         tok = fused & arith.constant((1 << 24) - 1, type=T.i32)
         slot = fused >> arith.constant(24, type=T.i32)
         tok_ok = arith.cmpi(arith.CmpIPredicate.ult, tok, i32_tokens_in)
@@ -220,19 +294,196 @@ def _emit_stage1_gate_up_epilogue(
         col_base = blk_n + warp_n_base + fx.Index(wn * WMMA_N) + lane_kgrp * fx.Index(8)
         for vi in range_constexpr(8):
             col = col_base + fx.Index(vi)
-            col_ok = arith.cmpi(arith.CmpIPredicate.ult, arith.index_cast(T.i32, col), i32_inter_in)
+            col_i32 = arith.index_cast(T.i32, col)
+            col_ok = arith.cmpi(arith.CmpIPredicate.ult, col_i32, i32_inter_in)
             out_ok = arith.andi(row_ok, col_ok)
             _if_out = scf.IfOp(out_ok)
             with ir.InsertionPoint(_if_out.then_block):
                 vg = vector.extract(sub8g, static_position=[vi], dynamic_position=[])
                 vu = vector.extract(sub8u, static_position=[vi], dynamic_position=[])
-                y = silu_fn(vg) * vu
+                if _use_bias:
+                    bg = buffer_ops.buffer_load(
+                        bias_rsrc, bias_row_base_i32 + col_i32,
+                        vec_width=1, dtype=T.f32)
+                    bu = buffer_ops.buffer_load(
+                        bias_rsrc, bias_row_base_i32 + i32_inter_in + col_i32,
+                        vec_width=1, dtype=T.f32)
+                    vg = vg + bg
+                    vu = vu + bu
+                if _use_swiglu:
+                    y = _emit_swiglu(vg, vu, arith=arith, rocdl=rocdl, T=T)
+                else:
+                    y = silu_fn(vg) * vu
                 if bool(doweight_stage1):
                     y = y * tw
                 out_v = arith.trunc_f(out_elem_ty, y)
                 out_idx = ((tok * c_topk_i32 + slot) * i32_inter_in
-                           + arith.index_cast(T.i32, col))
+                           + col_i32)
                 buffer_ops.buffer_store(out_v, out_rsrc, out_idx)
+                scf.YieldOp([])
+
+
+def _emit_stage1_gate_up_splitk_epilogue(
+    *,
+    sub_tiles,
+    by,
+    tile_m: int,
+    route_tile_m: int,
+    warp_m_base,
+    warp_n_base,
+    blk_n,
+    lane16,
+    lane_kgrp,
+    WMMA_N: int,
+    i32_tokens_in,
+    i32_inter_in,
+    topk: int,
+    num_valid_i32,
+    block_row_start,
+    lds_tid=None,
+    memref=None,
+    sorted_rsrc,
+    out_rsrc,
+    out_elem_ty,
+    load_gate_up_sub8,
+    ir,
+    fx,
+    arith,
+    buffer_ops,
+    scf,
+    vector,
+    range_constexpr,
+    rocdl,
+    T,
+    # ── optional bias (split-K does not fuse activation, so swiglu is
+    # handled by the external silu_and_mul reduction; bias is added per
+    # K-slice so it must be scaled by 1/k_batch to match torch ref).
+    # Caller is responsible for passing ``bias_scale`` = 1/k_batch when
+    # split-K is enabled. ────────────────────────────────────────────
+    bias_rsrc=None,
+    eid_i32=None,
+    bias_scale: float | None = None,
+):
+    """Stage1 split-K epilogue.
+
+    Writes per-K-slice gate/up partial sums to a ``[tokens*topk, 2*inter_dim]``
+    output tensor with atomic fadd. The silu/mul fusion is skipped and must
+    be applied by a separate reduction kernel (which also folds in the
+    per-slot routing weight).
+
+    Layout:
+      out[row, col]                   += gate_partial[row, col]
+      out[row, col + inter_dim]       += up_partial[row, col]
+    where ``row = tok * topk + slot`` and ``col < inter_dim``.
+
+    ``lds_tid`` (optional): see ``_emit_stage1_gate_up_epilogue``.
+    """
+    _use_lds = lds_tid is not None and memref is not None
+    _use_bias = bias_rsrc is not None and eid_i32 is not None
+    c_topk_i32 = arith.constant(int(topk), type=T.i32)
+    c2_i32 = arith.constant(2, type=T.i32)
+    zero_i32 = arith.constant(0, type=T.i32)
+    mask_even_i32 = arith.constant(0xFFFFFFFE, type=T.i32)
+
+    def atomic_add_x2(val_x2, byte_off_i32):
+        rocdl.raw_ptr_buffer_atomic_fadd(val_x2, out_rsrc, byte_off_i32, zero_i32, zero_i32)
+
+    inter_stride_i32 = i32_inter_in * c2_i32  # row stride for [tokens*topk, 2*inter_dim]
+    if _use_bias:
+        # Each expert's bias slab is gate||up = 2*inter_dim f32 entries.
+        # Per-K-slice bias contribution must be scaled by 1/k_batch so the
+        # atomic-fadd accumulation reproduces ``+ bias`` once across all
+        # K-slices. Caller passes ``bias_scale = 1.0 / k_batch``.
+        bias_row_base_i32 = eid_i32 * inter_stride_i32
+        if bias_scale is None:
+            bias_scale_const = arith.constant(1.0, type=T.f32)
+        else:
+            bias_scale_const = arith.constant(float(bias_scale), type=T.f32)
+
+    for acc_idx, vec_base, m_off, wn in sub_tiles:
+        row_local = warp_m_base + fx.Index(m_off) + lane16
+        sorted_row = by * arith.index(int(tile_m)) + row_local
+        row_i32 = arith.index_cast(T.i32, row_local)
+        sorted_i32 = arith.index_cast(T.i32, sorted_row)
+        row_in_route = arith.cmpi(
+            arith.CmpIPredicate.ult,
+            row_i32,
+            arith.constant(int(route_tile_m), type=T.i32),
+        )
+        row_in_valid = arith.cmpi(arith.CmpIPredicate.slt, sorted_i32, num_valid_i32)
+        row_ok_meta = arith.andi(row_in_route, row_in_valid)
+        sorted_safe = arith.select(row_ok_meta, sorted_i32, block_row_start)
+        if _use_lds:
+            fused = memref.load(lds_tid, [row_local])
+        else:
+            fused = buffer_ops.buffer_load(sorted_rsrc, sorted_safe, vec_width=1, dtype=T.i32)
+        tok = fused & arith.constant((1 << 24) - 1, type=T.i32)
+        slot = fused >> arith.constant(24, type=T.i32)
+        tok_ok = arith.cmpi(arith.CmpIPredicate.ult, tok, i32_tokens_in)
+        slot_ok0 = arith.cmpi(arith.CmpIPredicate.sge, slot, arith.constant(0, type=T.i32))
+        slot_ok1 = arith.cmpi(arith.CmpIPredicate.slt, slot, c_topk_i32)
+        row_ok = arith.andi(row_ok_meta, arith.andi(tok_ok, arith.andi(slot_ok0, slot_ok1)))
+
+        sub8g, sub8u = load_gate_up_sub8(acc_idx, vec_base)
+        col_base = blk_n + warp_n_base + fx.Index(wn * WMMA_N) + lane_kgrp * fx.Index(8)
+        row_elem_base = (tok * c_topk_i32 + slot) * inter_stride_i32
+
+        for vpair in range_constexpr(4):
+            vi0 = vpair * 2
+            vi1 = vi0 + 1
+            col0 = col_base + fx.Index(vi0)
+            col1 = col_base + fx.Index(vi1)
+            col0_i32 = arith.index_cast(T.i32, col0)
+            col1_i32 = arith.index_cast(T.i32, col1)
+            col0_ok = arith.cmpi(arith.CmpIPredicate.ult, col0_i32, i32_inter_in)
+            col1_ok = arith.cmpi(arith.CmpIPredicate.ult, col1_i32, i32_inter_in)
+            out_ok = arith.andi(row_ok, col0_ok)
+            _if_out = scf.IfOp(out_ok)
+            with ir.InsertionPoint(_if_out.then_block):
+                # ---- gate partial ----
+                vg0 = vector.extract(sub8g, static_position=[vi0], dynamic_position=[])
+                vg1 = vector.extract(sub8g, static_position=[vi1], dynamic_position=[])
+                vg1 = arith.select(col1_ok, vg1, arith.constant(0.0, type=T.f32))
+                if _use_bias:
+                    bg0 = buffer_ops.buffer_load(
+                        bias_rsrc, bias_row_base_i32 + col0_i32,
+                        vec_width=1, dtype=T.f32) * bias_scale_const
+                    bg1 = buffer_ops.buffer_load(
+                        bias_rsrc, bias_row_base_i32 + col1_i32,
+                        vec_width=1, dtype=T.f32) * bias_scale_const
+                    bg1 = arith.select(col1_ok, bg1, arith.constant(0.0, type=T.f32))
+                    vg0 = vg0 + bg0
+                    vg1 = vg1 + bg1
+                g0 = arith.trunc_f(out_elem_ty, vg0)
+                g1 = arith.trunc_f(out_elem_ty, vg1)
+                frag_g = vector.from_elements(T.vec(2, out_elem_ty), [g0, g1])
+                idx_g0 = row_elem_base + col0_i32
+                idx_g_even = idx_g0 & mask_even_i32
+                byte_off_g = idx_g_even * c2_i32
+                atomic_add_x2(frag_g, byte_off_g)
+
+                # ---- up partial (offset by inter_dim) ----
+                vu0 = vector.extract(sub8u, static_position=[vi0], dynamic_position=[])
+                vu1 = vector.extract(sub8u, static_position=[vi1], dynamic_position=[])
+                vu1 = arith.select(col1_ok, vu1, arith.constant(0.0, type=T.f32))
+                if _use_bias:
+                    bu0 = buffer_ops.buffer_load(
+                        bias_rsrc, bias_row_base_i32 + i32_inter_in + col0_i32,
+                        vec_width=1, dtype=T.f32) * bias_scale_const
+                    bu1 = buffer_ops.buffer_load(
+                        bias_rsrc, bias_row_base_i32 + i32_inter_in + col1_i32,
+                        vec_width=1, dtype=T.f32) * bias_scale_const
+                    bu1 = arith.select(col1_ok, bu1, arith.constant(0.0, type=T.f32))
+                    vu0 = vu0 + bu0
+                    vu1 = vu1 + bu1
+                u0 = arith.trunc_f(out_elem_ty, vu0)
+                u1 = arith.trunc_f(out_elem_ty, vu1)
+                frag_u = vector.from_elements(T.vec(2, out_elem_ty), [u0, u1])
+                idx_u0 = row_elem_base + i32_inter_in + col0_i32
+                idx_u_even = idx_u0 & mask_even_i32
+                byte_off_u = idx_u_even * c2_i32
+                atomic_add_x2(frag_u, byte_off_u)
+
                 scf.YieldOp([])
 
 
@@ -253,6 +504,8 @@ def _emit_stage2_store_epilogue(
     topk: int,
     num_valid_i32,
     block_row_start,
+    lds_tid=None,
+    memref=None,
     sorted_rsrc,
     tw_rsrc,
     out_rsrc,
@@ -269,7 +522,25 @@ def _emit_stage2_store_epilogue(
     range_constexpr,
     rocdl,
     T,
+    # ── optional: per-expert bias of shape (E, model_dim). ``eid_i32`` is
+    # the per-block expert id; ``bias_rsrc`` is the f32 buffer resource.
+    #
+    # The torch reference (``aiter.fused_moe.torch_moe_stage2``) computes
+    # the per-slot contribution as ``topk_weight[slot] * (gemm[slot] +
+    # bias[expert_of_slot])`` and then sums across the ``topk`` slots
+    # for each output token. To reproduce this with a per-slot atomic
+    # add, the bias loaded from ``bias_rsrc`` must be scaled by the same
+    # factor that scales the GEMM term (``tw`` when
+    # ``doweight_stage2=True``, else ``1.0``). The split-K-style
+    # ``bias_scale`` override is intentionally unused on stage2 — pass
+    # ``None`` (the default) to use the routing-weight-aware scaling.
+    bias_rsrc=None,
+    eid_i32=None,
+    bias_scale: float | None = None,
 ):
+    # ``lds_tid`` (optional): see ``_emit_stage1_gate_up_epilogue``.
+    _use_lds = lds_tid is not None and memref is not None
+    _use_bias = bias_rsrc is not None and eid_i32 is not None
     c_topk_i32 = arith.constant(int(topk), type=T.i32)
     c2_i32 = arith.constant(2, type=T.i32)
     zero_i32 = arith.constant(0, type=T.i32)
@@ -277,6 +548,18 @@ def _emit_stage2_store_epilogue(
 
     def atomic_add_x2(val_x2, byte_off_i32):
         rocdl.raw_ptr_buffer_atomic_fadd(val_x2, out_rsrc, byte_off_i32, zero_i32, zero_i32)
+
+    if _use_bias:
+        # bias[e, n] f32; flat index = e * model_dim + n. Routing-weight
+        # awareness is handled per-slot below (multiply bias by ``tw``
+        # when ``doweight_stage2=True``); the optional ``bias_scale``
+        # override is kept for callers that need to inject an extra
+        # constant factor (currently unused on stage2).
+        bias_row_base_i32 = eid_i32 * i32_n_in
+        if bias_scale is None:
+            bias_scale_const = arith.constant(1.0, type=T.f32)
+        else:
+            bias_scale_const = arith.constant(float(bias_scale), type=T.f32)
 
     for acc_idx, vec_base, m_off, wn in sub_tiles:
         row_local = warp_m_base + fx.Index(m_off) + lane16
@@ -287,7 +570,10 @@ def _emit_stage2_store_epilogue(
         row_in_valid = arith.cmpi(arith.CmpIPredicate.slt, sorted_i32, num_valid_i32)
         row_ok = arith.andi(row_in_route, row_in_valid)
         sorted_safe = arith.select(row_ok, sorted_i32, block_row_start)
-        fused = buffer_ops.buffer_load(sorted_rsrc, sorted_safe, vec_width=1, dtype=T.i32)
+        if _use_lds:
+            fused = memref.load(lds_tid, [row_local])
+        else:
+            fused = buffer_ops.buffer_load(sorted_rsrc, sorted_safe, vec_width=1, dtype=T.i32)
         tok = fused & arith.constant((1 << 24) - 1, type=T.i32)
         slot = fused >> arith.constant(24, type=T.i32)
         tok_ok = arith.cmpi(arith.CmpIPredicate.ult, tok, i32_tokens_in)
@@ -316,6 +602,25 @@ def _emit_stage2_store_epilogue(
                     if bool(doweight_stage2):
                         v0 = v0 * tw
                         v1 = v1 * tw
+                    if _use_bias:
+                        # Each per-slot atomic_add must contribute
+                        # ``tw * (gemm + bias)`` to match
+                        # ``torch_moe_stage2``: bias scales by the same
+                        # routing weight as GEMM. When doweight is off
+                        # ``tw == 1.0``, so this collapses to ``+ bias``
+                        # per slot, which matches the
+                        # doweight_stage1=True path of the torch
+                        # reference (bias added per slot, weight applied
+                        # in stage1).
+                        bias_w = bias_scale_const * tw
+                        b0 = buffer_ops.buffer_load(
+                            bias_rsrc, bias_row_base_i32 + col0_i32,
+                            vec_width=1, dtype=T.f32) * bias_w
+                        b1 = buffer_ops.buffer_load(
+                            bias_rsrc, bias_row_base_i32 + col1_i32,
+                            vec_width=1, dtype=T.f32) * bias_w
+                        v0 = v0 + b0
+                        v1 = v1 + b1
                     v1 = arith.select(col1_ok, v1, arith.constant(0.0, type=T.f32))
                     out0 = arith.trunc_f(out_elem_ty, v0)
                     out1 = arith.trunc_f(out_elem_ty, v1)
@@ -328,14 +633,22 @@ def _emit_stage2_store_epilogue(
         else:
             for vi in range_constexpr(8):
                 col = col_base + fx.Index(vi)
-                col_ok = arith.cmpi(arith.CmpIPredicate.ult, arith.index_cast(T.i32, col), i32_n_in)
+                col_i32 = arith.index_cast(T.i32, col)
+                col_ok = arith.cmpi(arith.CmpIPredicate.ult, col_i32, i32_n_in)
                 out_ok = arith.andi(row_store_ok, col_ok)
                 _if_out = scf.IfOp(out_ok)
                 with ir.InsertionPoint(_if_out.then_block):
                     v = vector.extract(sub8, static_position=[vi], dynamic_position=[])
                     if bool(doweight_stage2):
                         v = v * tw
-                    col_i32 = arith.index_cast(T.i32, col)
+                    if _use_bias:
+                        # See the accumulate=True branch above: bias
+                        # scales by ``tw`` to keep per-slot semantics
+                        # consistent with torch_moe_stage2.
+                        b = buffer_ops.buffer_load(
+                            bias_rsrc, bias_row_base_i32 + col_i32,
+                            vec_width=1, dtype=T.f32) * (bias_scale_const * tw)
+                        v = v + b
                     out_idx = ts * i32_n_in + col_i32
                     out_v = arith.trunc_f(out_elem_ty, v)
                     buffer_ops.buffer_store(out_v, out_rsrc, out_idx)
@@ -880,8 +1193,14 @@ def _compute_pipeline_plan(
     use_tdm_gather: bool,
     wave_specialized_tdm: bool,
     tdm_loader_waves: int,
+    use_tdm_gather_as: bool = False,
 ) -> dict:
-    """Compute pipeline pre-load / tail plan shared by mxscale stages."""
+    """Compute pipeline pre-load / tail plan shared by mxscale stages.
+
+    ``use_tdm_gather_as`` reserves TDM slots for the A-scale gather path so that
+    ``TDM_PER_STEP`` and the derived fence counts account for the extra
+    ``tensor_load_gather`` instructions issued for scales.
+    """
     from kernels.pipeline_utils import make_tail_plan
 
     pre_loaded = int(num_buffers) - 1
@@ -889,13 +1208,24 @@ def _compute_pipeline_plan(
     tail_start = loop_iters * int(num_buffers)
     extra = num_k_tiles - tail_start - pre_loaded
     A_GATHER_GROUPS = (int(tile_m) + 7) // 8 if bool(use_tdm_gather) else 0
-    if bool(use_tdm_gather) and bool(wave_specialized_tdm):
-        A_GATHER_TDM_PER_STEP = (
-            (A_GATHER_GROUPS + tdm_loader_waves - 1) // tdm_loader_waves
-        )
+    AS_GATHER_GROUPS = (int(tile_m) + 7) // 8 if bool(use_tdm_gather_as) else 0
+    if bool(wave_specialized_tdm):
+        if bool(use_tdm_gather):
+            A_GATHER_TDM_PER_STEP = (
+                (A_GATHER_GROUPS + tdm_loader_waves - 1) // tdm_loader_waves
+            )
+        else:
+            A_GATHER_TDM_PER_STEP = 0
+        if bool(use_tdm_gather_as):
+            AS_GATHER_TDM_PER_STEP = (
+                (AS_GATHER_GROUPS + tdm_loader_waves - 1) // tdm_loader_waves
+            )
+        else:
+            AS_GATHER_TDM_PER_STEP = 0
     else:
         A_GATHER_TDM_PER_STEP = A_GATHER_GROUPS
-    TDM_PER_STEP = B_TDM_PER_STEP + A_GATHER_TDM_PER_STEP
+        AS_GATHER_TDM_PER_STEP = AS_GATHER_GROUPS
+    TDM_PER_STEP = B_TDM_PER_STEP + A_GATHER_TDM_PER_STEP + AS_GATHER_TDM_PER_STEP
     fence_outstanding = TDM_PER_STEP * (int(num_buffers) - 2)
     base_tail_plan = make_tail_plan(int(num_buffers), pre_loaded, extra)
     tail_plan = [
@@ -913,6 +1243,7 @@ def _compute_pipeline_plan(
         tail_start=tail_start,
         extra=extra,
         A_GATHER_GROUPS=A_GATHER_GROUPS,
+        AS_GATHER_GROUPS=AS_GATHER_GROUPS,
         TDM_PER_STEP=TDM_PER_STEP,
         fence_outstanding=fence_outstanding,
         tail_plan=tail_plan,
