@@ -63,10 +63,7 @@ RUN cd /tmp && \
 # Install the rocprof-trace-decoder release that matches the ROCm version.
 RUN set -eux; \
     ROCM_VERSION="$(sed -E 's/^([0-9]+)\.([0-9]+).*/\1.\2/' /opt/rocm/.info/version)"; \
-    case "$ROCM_VERSION" in \
-        7.0) RTD_VERSION="0.1.4" ;; \
-        *) echo "No rocprof-trace-decoder mapping for ROCm ${ROCM_VERSION}; update this Dockerfile mapping." >&2; exit 1 ;; \
-    esac; \
+    RTD_VERSION="0.1.5"; \
     echo "Using rocprof-trace-decoder ${RTD_VERSION} for ROCm ${ROCM_VERSION}"; \
     RTD_INSTALLER="rocprof-trace-decoder-manylinux-2.28-${RTD_VERSION}-Linux.sh"; \
     cd /tmp; \
