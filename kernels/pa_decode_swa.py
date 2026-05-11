@@ -1132,139 +1132,6 @@ def _make_pa_phase_helpers(
         o1 = o1 + pv_results[1] * vector.broadcast(T.f32x4, v_correction)
         return o0, o1
 
-    def _prepare_block_split_pair(
-        k_ops,
-        v_rsrc_cur,
-        v_block_base_dw,
-        tile_token_offset_i32,
-        q_frags_0,
-        q_frags_1,
-        query_scale_lane_0,
-        query_scale_lane_1,
-        *,
-        phys_block,
-    ):
-        v_results = []
-        for vt in range_constexpr(VTLOOP):
-            vhe_data = []
-            for vhe in range_constexpr(VHELOOP):
-                v_token_in_block = tile_token_offset_i32 + v_tok_thread_off[vt]
-                if const_expr(trans_v):
-                    vt_group = v_token_in_block // arith.constant(
-                        FP8_ELEMS_16B, type=T.i32
-                    )
-                    va_dw = (
-                        v_block_base_dw
-                        + vt_group
-                        * arith.constant(HEAD_SIZE * FP8_ELEMS_16B // 4, type=T.i32)
-                        + vhead_elem_dw[vhe]
-                    )
-                else:
-                    va_dw = (
-                        v_block_base_dw
-                        + vhead_elem_dw[vhe]
-                        + v_token_in_block // c_four
-                    )
-                v_4xi32 = buffer_ops.buffer_load(
-                    v_rsrc_cur, va_dw, vec_width=4, dtype=T.i32
-                )
-                vhe_data.append(v_4xi32)
-            v_results.append(vhe_data)
-
-        if const_expr(per_token_kv):
-            scale_block_base = phys_block * stride_ks_block + kv_h * stride_ks_head
-            scale_tok_base_pt = tile_token_offset_i32 + k_tok_thread_base
-            scale_src_lane_base = rowid * arith.constant(20, type=T.i32)
-            k_scale_vecs = []
-            v_scale_vecs = []
-            for td in range_constexpr(TLOOP):
-                tok_off = scale_tok_base_pt + arith.constant(td * MFMA_N, type=T.i32)
-                k_scale_lane = buffer_ops.buffer_load(
-                    ks_rsrc, scale_block_base + tok_off, vec_width=1, dtype=T.f32
-                )
-                v_scale_lane = buffer_ops.buffer_load(
-                    vs_rsrc, scale_block_base + tok_off, vec_width=1, dtype=T.f32
-                )
-                k_scale_i32 = arith.bitcast(T.i32, k_scale_lane)
-                v_scale_i32 = arith.bitcast(T.i32, v_scale_lane)
-                k_scale_vals = []
-                v_scale_vals = []
-                for i in range_constexpr(4):
-                    bcast_addr = (
-                        scale_src_lane_base + arith.constant(i, type=T.i32)
-                    ) * c_four
-                    sk_i32 = rocdl.ds_bpermute(
-                        T.i32, arith.unwrap(bcast_addr), arith.unwrap(k_scale_i32)
-                    )
-                    sv_i32 = rocdl.ds_bpermute(
-                        T.i32, arith.unwrap(bcast_addr), arith.unwrap(v_scale_i32)
-                    )
-                    k_scale_vals.append(arith.bitcast(T.f32, sk_i32))
-                    v_scale_vals.append(arith.bitcast(T.f32, sv_i32))
-                k_scale_vecs.append(vector.from_elements(T.f32x4, k_scale_vals))
-                v_scale_vecs.append(vector.from_elements(T.f32x4, v_scale_vals))
-        else:
-            k_scale_vecs = None
-            v_scale_vecs = None
-
-        d_out_0 = []
-        d_out_1 = []
-
-        query_scale_vec_0 = None
-        query_scale_vec_1 = None
-        if const_expr(per_token_q):
-            query_scale_vec_0 = vector.broadcast(
-                T.f32x4, query_scale_lane_0 * softmax_scale_base
-            )
-            query_scale_vec_1 = vector.broadcast(
-                T.f32x4, query_scale_lane_1 * softmax_scale_base
-            )
-        for td in range_constexpr(TLOOP):
-            vhe_data = []
-            acc_0 = arith.constant_vector(0.0, T.f32x4)
-            acc_1 = arith.constant_vector(0.0, T.f32x4)
-            for k_step in range_constexpr(QKHELOOP * 2):
-                acc_0 = rocdl.mfma_f32_16x16x32_fp8_fp8(
-                    T.f32x4,
-                    [k_ops[td][k_step], q_frags_0[k_step], acc_0, 0, 0, 0],
-                )
-                acc_1 = rocdl.mfma_f32_16x16x32_fp8_fp8(
-                    T.f32x4,
-                    [k_ops[td][k_step], q_frags_1[k_step], acc_1, 0, 0, 0],
-                )
-
-            if const_expr(per_token_kv):
-                if const_expr(per_token_q):
-                    scale_vec_0 = k_scale_vecs[td] * query_scale_vec_0
-                    scale_vec_1 = k_scale_vecs[td] * query_scale_vec_1
-                else:
-                    scale_vec_0 = k_scale_vecs[td] * vector.broadcast(
-                        T.f32x4, softmax_q_scale
-                    )
-                    scale_vec_1 = scale_vec_0
-                d_out_0.append(acc_0 * scale_vec_0)
-                d_out_1.append(acc_1 * scale_vec_1)
-            else:
-                if const_expr(per_token_q):
-                    d_out_0.append(
-                        acc_0
-                        * (
-                            query_scale_vec_0
-                            * vector.broadcast(T.f32x4, k_scale_val)
-                        )
-                    )
-                    d_out_1.append(
-                        acc_1
-                        * (
-                            query_scale_vec_1
-                            * vector.broadcast(T.f32x4, k_scale_val)
-                        )
-                    )
-                else:
-                    d_out_0.append(acc_0 * vector.broadcast(T.f32x4, scale))
-                    d_out_1.append(acc_1 * vector.broadcast(T.f32x4, scale))
-        return d_out_0, d_out_1, v_results, v_scale_vecs
-
     def _finalize_block_split_group(
         d_out,
         v_ops,
@@ -1386,7 +1253,6 @@ def _make_pa_phase_helpers(
         _qk_and_intra_softmax,
         _cross_warp_softmax_and_prob_pack,
         _pv_mfma,
-        _prepare_block_split_pair,
         _finalize_block_split_group,
     )
 
@@ -1682,7 +1548,6 @@ def compile_pa_decode_ps(
                 _qk_and_intra_softmax,
                 _cross_warp_softmax_and_prob_pack,
                 _pv_mfma,
-                _prepare_block_split_pair_unused,
                 _finalize_block_split_group_unused,
             ) = _make_pa_phase_helpers(
                 trans_v=trans_v,
@@ -2956,7 +2821,6 @@ def compile_pa_decode_sw(
             _qk_and_intra_softmax,
             _cross_warp_softmax_and_prob_pack,
             _pv_mfma,
-            _prepare_block_split_pair,
             _finalize_block_split_group,
         ) = _make_pa_phase_helpers(
             trans_v=trans_v,
@@ -3032,68 +2896,6 @@ def compile_pa_decode_sw(
             gpu.barrier()
             o0, o1 = _pv_mfma(v0_ops, o0, o1, vc0)
             return rmax, rsum, o0, o1
-
-        def _process_block_split_pair(
-            rmax_0,
-            rsum_0,
-            o0_0,
-            o1_0,
-            rmax_1,
-            rsum_1,
-            o0_1,
-            o1_1,
-            tile_token_offset_i32,
-            k_ops,
-            q_frags_0,
-            q_frags_1,
-            causal_bound_0,
-            causal_bound_1,
-            query_scale_lane_0,
-            query_scale_lane_1,
-            seq_start_0,
-            seq_start_1,
-        ):
-            v_block_rsrc, v_local_phys_block = _chunk_buffer_resource_for_block(
-                value_cache_ptr, phys_block, c_vb
-            )
-            v_base = _compute_block_base_dw(v_local_phys_block, c_vb, _v_head_off)
-            d_out_0, d_out_1, v0_ops, vs0 = _prepare_block_split_pair(
-                k_ops,
-                v_block_rsrc,
-                v_base,
-                tile_token_offset_i32,
-                q_frags_0,
-                q_frags_1,
-                query_scale_lane_0,
-                query_scale_lane_1,
-                phys_block=phys_block,
-            )
-            rmax_0, rsum_0, o0_0, o1_0 = _finalize_block_split_group(
-                d_out_0,
-                v0_ops,
-                vs0,
-                kv_seq_start,
-                causal_bound_0,
-                rmax_0,
-                rsum_0,
-                o0_0,
-                o1_0,
-                seq_start=seq_start_0,
-            )
-            gpu.barrier()
-            rmax_1, rsum_1, o0_1, o1_1 = _finalize_block_split_group(
-                d_out_1,
-                v0_ops,
-                vs0,
-                kv_seq_start,
-                causal_bound_1,
-                rmax_1,
-                rsum_1,
-                o0_1,
-                o1_1,
-                seq_start=seq_start_1,
-            )
-            return rmax_0, rsum_0, o0_0, o1_0, rmax_1, rsum_1, o0_1, o1_1
 
         _mtp_groups = _get_sw_mtp_group_count(query_length, query_group_size)
         def _store_partition_results(eqgs_lane, running_sum, running_max, outelems_norm):
@@ -3192,8 +2994,8 @@ def compile_pa_decode_sw(
                 )
                 k0_ops = _unflatten_k(k0_flat)
 
-                if const_expr(_mtp_subgroups == 1):
-                    qi_val, qhi_pos, q_frags, query_scale_lane = mtp_states[0]
+                for _mtp_subgroup in range_constexpr(_mtp_subgroups):
+                    qi_val, qhi_pos, q_frags, query_scale_lane = mtp_states[_mtp_subgroup]
                     causal_bound = (
                         context_len + arith.constant(1 - query_length, type=T.i32) + qi_val
                     )
@@ -3217,71 +3019,6 @@ def compile_pa_decode_sw(
                     )
                     _store_group_results(
                         qi_val, qhi_pos, running_sum, running_max, out0, out1
-                    )
-                else:
-                    qi_val_0, qhi_pos_0, q_frags_0, query_scale_lane_0 = mtp_states[0]
-                    qi_val_1, qhi_pos_1, q_frags_1, query_scale_lane_1 = mtp_states[1]
-                    causal_bound_0 = (
-                        context_len + arith.constant(1 - query_length, type=T.i32) + qi_val_0
-                    )
-                    causal_bound_1 = (
-                        context_len + arith.constant(1 - query_length, type=T.i32) + qi_val_1
-                    )
-                    seq_start_0 = (
-                        context_len
-                        - arith.constant(sliding_window + query_length, type=T.i32)
-                        + qi_val_0
-                    )
-                    seq_start_1 = (
-                        context_len
-                        - arith.constant(sliding_window + query_length, type=T.i32)
-                        + qi_val_1
-                    )
-
-                    (
-                        running_max_0,
-                        running_sum_0,
-                        out0_0,
-                        out1_0,
-                        running_max_1,
-                        running_sum_1,
-                        out0_1,
-                        out1_1,
-                    ) = _process_block_split_pair(
-                        NEG_INF,
-                        ZERO_F,
-                        arith.constant_vector(0.0, T.f32x4),
-                        arith.constant_vector(0.0, T.f32x4),
-                        NEG_INF,
-                        ZERO_F,
-                        arith.constant_vector(0.0, T.f32x4),
-                        arith.constant_vector(0.0, T.f32x4),
-                        tile_token_offset,
-                        k0_ops,
-                        q_frags_0,
-                        q_frags_1,
-                        causal_bound_0,
-                        causal_bound_1,
-                        query_scale_lane_0,
-                        query_scale_lane_1,
-                        seq_start_0,
-                        seq_start_1,
-                    )
-                    _store_group_results(
-                        qi_val_0,
-                        qhi_pos_0,
-                        running_sum_0,
-                        running_max_0,
-                        out0_0,
-                        out1_0,
-                    )
-                    _store_group_results(
-                        qi_val_1,
-                        qhi_pos_1,
-                        running_sum_1,
-                        running_max_1,
-                        out0_1,
-                        out1_1,
                     )
 
         invalid_cta_if = scf.IfOp(
