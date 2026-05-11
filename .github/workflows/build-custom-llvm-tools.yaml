@@ -28,13 +28,11 @@ jobs:
         with:
           path: flydsl
 
-      - name: Build manylinux Docker image
+      - name: Pull or build manylinux Docker image
         run: |
           ROCM_VERSION=7.2
-          IMAGE="flydsl/manylinux_2_28:rocm${ROCM_VERSION}"
-          if docker image inspect "${IMAGE}" >/dev/null 2>&1; then
-            echo "Reusing existing image: ${IMAGE}"
-          else
+          IMAGE="ghcr.io/rocm/flydsl-manylinux_2_28:rocm${ROCM_VERSION}-a3c082a2ac9c"
+          if ! docker pull "${IMAGE}"; then
             docker build \
               --build-arg ROCM_VERSION="${ROCM_VERSION}" \
               -t "${IMAGE}" \
@@ -52,6 +50,26 @@ jobs:
             "${MANYLINUX_IMAGE}"
           docker exec llvm_build bash -c "python3 -m pip install -q nanobind"
           docker exec llvm_build bash -c "git config --global --add safe.directory '*'"
+
+      - name: Checkout source in build container
+        env:
+          CHECKOUT_REPOSITORY: ${{ github.repository }}
+          CHECKOUT_SHA: ${{ github.sha }}
+        run: |
+          docker exec \
+            -e CHECKOUT_REPOSITORY="${CHECKOUT_REPOSITORY}" \
+            -e CHECKOUT_SHA="${CHECKOUT_SHA}" \
+            llvm_build bash -c '
+              set -euo pipefail
+              echo "Checking out ${CHECKOUT_REPOSITORY}@${CHECKOUT_SHA} inside the build container."
+              cd /flydsl
+              find . -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+              git init
+              git remote add origin "https://github.com/${CHECKOUT_REPOSITORY}.git"
+              git fetch --no-tags --depth=1 origin "${CHECKOUT_SHA}"
+              git checkout --force FETCH_HEAD
+              git config --global --add safe.directory /flydsl
+            '
 
       - name: Resolve LLVM ref
         id: llvm-ref
@@ -119,6 +137,8 @@ jobs:
       - name: Package LLVM tools
         env:
           LLVM_SHA: ${{ steps.llvm-ref.outputs.commit }}
+          LLVM_REF: ${{ steps.llvm-ref.outputs.ref }}
+          LLVM_REMOTE: ${{ steps.llvm-ref.outputs.remote }}
         run: |
           set -euo pipefail
           CONFIG="flydsl/thirdparty/custom-llvm-tools.json"
@@ -138,8 +158,8 @@ jobs:
             test -x /llvm-project/mlir_install/bin/mlir-opt
             cd /llvm-project/mlir_install
             strip bin/mlir-opt
-            printf 'llvm_commit=%s\nbuild_date=%s\nbuild_cmd=scripts/build_llvm.sh  # BUILD_SHARED_LIBS=OFF, static mlir-opt\n' \
-              '${LLVM_SHA}' '${BUILD_DATE}' > BUILD_INFO
+            printf 'llvm_remote=%s\nllvm_ref=%s\nllvm_commit=%s\nbuild_date=%s\nbuild_cmd=scripts/build_llvm.sh  # BUILD_SHARED_LIBS=OFF, static mlir-opt\n' \
+              '${LLVM_REMOTE}' '${LLVM_REF}' '${LLVM_SHA}' '${BUILD_DATE}' > BUILD_INFO
             tar -czf /flydsl/dist/${TOOL_ARCHIVE} bin/mlir-opt BUILD_INFO
             rm -f BUILD_INFO
           "
