@@ -16,7 +16,8 @@ dialect ops for v_cvt_off_f32_i4 and v_cvt_pk_bf16_f32.
 def _to_ir(v):
     """Coerce DSL Numeric to ir.Value if needed."""
     from ..._mlir import ir as _ir
-    if not isinstance(v, _ir.Value) and hasattr(v, 'ir_value'):
+
+    if not isinstance(v, _ir.Value) and hasattr(v, "ir_value"):
         return v.ir_value()
     return v
 
@@ -27,8 +28,8 @@ def cvt_off_f32_i4(src_i32, byte_sel=None):
     With byte_sel=0..3, uses SDWA to select the byte before conversion,
     avoiding an explicit shift.  byte_sel=None uses the plain VOP1 form.
     """
-    from ..._mlir.dialects import llvm as _llvm
     from ..._mlir import ir
+    from ..._mlir.dialects import llvm as _llvm
 
     if byte_sel is not None:
         sel = ["BYTE_0", "BYTE_1", "BYTE_2", "BYTE_3"][int(byte_sel)]
@@ -54,8 +55,9 @@ def cvt_pk_bf16_f32(src_a_f32, src_b_f32):
     Pack two f32 values into 2xbf16 in i32.
     dst[15:0] = bf16(src_a), dst[31:16] = bf16(src_b).
     """
-    from ..._mlir.dialects import llvm as _llvm
     from ..._mlir import ir
+    from ..._mlir.dialects import llvm as _llvm
+
     return _llvm.inline_asm(
         ir.IntegerType.get_signless(32),
         [_to_ir(src_a_f32), _to_ir(src_b_f32)],
@@ -83,5 +85,9 @@ def s_prefetch_inst_burst(num_pages: int = 10, page_bytes: int = 4096):
     for pg in range(num_pages):
         lines.append(f"s_prefetch_inst_pc_rel {pg * page_bytes}, s0, 31")
     _llvm.inline_asm(
-        None, [], "\n".join(lines), "", has_side_effects=True,
+        None,
+        [],
+        "\n".join(lines),
+        "",
+        has_side_effects=True,
     )
