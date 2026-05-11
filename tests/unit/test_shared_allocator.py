@@ -224,7 +224,7 @@ class TestAllocateNestedComposite:
             @fx.struct
             class Outer:
                 inner: Inner
-                scratch: fx.Union["f16" : Array[Float16, 32], "f32" : Array[Float32, 32]]
+                scratch: fx.Union["f16" : Array[Float16, 32], "f32" : Array[Float32, 32]]  # noqa: F821
 
             with _kernel_context():
                 alloc = SharedAllocator()
