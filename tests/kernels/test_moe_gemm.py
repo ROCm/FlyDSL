@@ -2080,7 +2080,7 @@ _A16W4_SKIP = pytest.mark.skipif(
 
 @_A16W4_SKIP
 @pytest.mark.parametrize(
-    "tokens, model_dim, inter_dim, experts, topk, tile_m, tile_n, tile_k, k_batch",
+    "tokens, model_dim, inter_dim, experts, topk, tile_m, tile_n, tile_k, split_k_intra",
     _A16W4_SHAPES,
 )
 def test_moe_gemm2_a16w4(
@@ -2092,7 +2092,7 @@ def test_moe_gemm2_a16w4(
     tile_m: int,
     tile_n: int,
     tile_k: int,
-    k_batch: int,
+    split_k_intra: int,
     *,
     seed: int = 0,
     atol: float = 1.0,
@@ -2156,14 +2156,18 @@ def test_moe_gemm2_a16w4(
         doweight_stage2=True,
         out_dtype="bf16",
         accumulate=True,
-        k_batch=k_batch,
+        split_k_intra=split_k_intra,
     )
 
     out_kernel = torch.zeros((tokens, model_dim), device=device, dtype=dtype)
+    # NOTE: launcher signature now matches the unified generic mixed-stage2 launcher,
+    # which accepts arg_scale_x (unused for A16W4 since is_f16_a=True). Pass empty.
+    _empty_scale_x = torch.empty(0, device=device, dtype=torch.float32)
     exe(
         out_kernel,
         a2_bf16,
         w2_qt_shuf,
+        _empty_scale_x,
         w2_scale_shuf,
         sorted_ids,
         sorted_expert_ids,
