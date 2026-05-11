@@ -25,6 +25,7 @@ ARCH = str(get_rocm_arch())
 if not torch.cuda.is_available():
     pytest.skip("CUDA/ROCm not available. Skipping GPU tests.", allow_module_level=True)
 
+
 def _run_torch(a, b, scale_a, scale_b, dtype=torch.float32):
     if scale_a is not None and scale_b is not None:
         a_f32 = a.to(torch.float32) * scale_a.view(-1, 1)
@@ -35,12 +36,18 @@ def _run_torch(a, b, scale_a, scale_b, dtype=torch.float32):
     c = torch.mm(a_f32, b_f32.T)
     return c.to(dtype)
 
-def test_fp8_gemm_4wave(M: int, N: int, K: int,
-                        tile_m: int, tile_n: int,
-                        *,
-                        disable_xcd_remap: bool = False,
-                        num_warmups: int = 2,
-                        num_iters: int = 10):
+
+def test_fp8_gemm_4wave(
+    M: int,
+    N: int,
+    K: int,
+    tile_m: int,
+    tile_n: int,
+    *,
+    disable_xcd_remap: bool = False,
+    num_warmups: int = 2,
+    num_iters: int = 10,
+):
     if "gfx95" not in ARCH:
         pytest.skip("FP8 GEMM requires CDNA4")
 
@@ -62,9 +69,7 @@ def test_fp8_gemm_4wave(M: int, N: int, K: int,
 
     c_ref = _run_torch(a_q, b_q, scale_a, scale_b)
 
-    launch_fn = compile_fp8_gemm(M=M, N=N, K=K,
-                                 BLOCK_M=tile_m, BLOCK_N=tile_n,
-                                 use_xcd_remap=not disable_xcd_remap)
+    launch_fn = compile_fp8_gemm(M=M, N=N, K=K, BLOCK_M=tile_m, BLOCK_N=tile_n, use_xcd_remap=not disable_xcd_remap)
     print(f"✓ Kernel prepared (disable_xcd_remap={disable_xcd_remap})")
 
     def _as_i8(t):
@@ -113,6 +118,7 @@ def test_fp8_gemm_4wave(M: int, N: int, K: int,
 
 if __name__ == "__main__":
     import argparse
+
     parser = argparse.ArgumentParser(description="FP8 4-Wave GEMM benchmark")
     parser.add_argument("-M", type=int, default=8192)
     parser.add_argument("-N", type=int, default=8192)
@@ -127,11 +133,14 @@ if __name__ == "__main__":
 
     try:
         test_fp8_gemm_4wave(
-            M=args.M, N=args.N, K=args.K,
-            tile_m=args.tile_m, tile_n=args.tile_n,
+            M=args.M,
+            N=args.N,
+            K=args.K,
+            tile_m=args.tile_m,
+            tile_n=args.tile_n,
             disable_xcd_remap=args.disable_xcd_remap,
             num_warmups=args.num_warmups,
-            num_iters=args.num_iters
+            num_iters=args.num_iters,
         )
     except pytest.skip.Exception as e:
         print(f"Skipped: {e}")
