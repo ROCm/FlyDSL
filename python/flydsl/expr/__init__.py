@@ -8,7 +8,11 @@ from .gpu import *
 from .derived import *
 from .struct import *
 
-from . import utils
-
-from . import arith, vector, gpu, buffer_ops, rocdl, math
-from .rocdl import tdm_ops
+from . import utils as utils
+from . import arith as arith
+from . import buffer_ops as buffer_ops
+from . import gpu as gpu
+from . import math as math
+from . import rocdl as rocdl
+from . import vector as vector
+from .rocdl import tdm_ops as tdm_ops
