@@ -78,6 +78,34 @@ jobs:
           docker exec flydsl_build bash -c "python3 -m pip install -q nanobind"
           docker exec flydsl_build bash -c "git config --global --add safe.directory '*'"
 
+      - name: Ensure git metadata and submodules
+        env:
+          CHECKOUT_REPOSITORY: ${{ github.repository }}
+          CHECKOUT_SHA: ${{ github.sha }}
+        run: |
+          docker exec \
+            -e CHECKOUT_REPOSITORY="${CHECKOUT_REPOSITORY}" \
+            -e CHECKOUT_SHA="${CHECKOUT_SHA}" \
+            flydsl_build bash -c '
+              set -euo pipefail
+              cd /flydsl
+
+              if [ ! -d .git ]; then
+                echo "Checkout has no .git directory; reconstructing it inside the build container."
+                git init
+                git remote add origin "https://github.com/${CHECKOUT_REPOSITORY}.git"
+                git fetch --no-tags --depth=1 origin "${CHECKOUT_SHA}"
+                find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+                git checkout --force FETCH_HEAD
+              fi
+
+              if [ ! -f thirdparty/dlpack/include/dlpack/dlpack.h ]; then
+                echo "Initializing git submodules..."
+                git submodule sync --recursive
+                git submodule update --init --recursive
+              fi
+            '
+
       - name: Restore cached MLIR install tarball
         id: mlir-cache
         uses: actions/cache@v4
