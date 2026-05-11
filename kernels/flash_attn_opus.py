@@ -389,19 +389,6 @@ def build_flash_attn_opus_module(
                     v_rsrc, lds_ptr, _dma_size, voffset, _dma_soff, _dma_off, _dma_aux
                 )
 
-        # ── Q preload (B-operand for MFMA, register-resident) ──
-        q_row = q_start + wave_q_offset + lane_mod_32
-        q_row_i32 = fx.Int32(q_row)
-        q_in_bounds = q_row < seq_len_v
-        q_row_safe = fx.Index(ArithValue(q_in_bounds).select(q_row, fx.Index(0)))
-        c_zero_mfma_pack = Vec.filled(MFMA_LANE_K, 0.0, elem_dtype).ir_value()
-        q_b_packs = []
-        for ks in range_constexpr(K_STEPS_QK):
-            q_col = fx.Index(ks * K_STEP_QK) + lane_div_32 * MFMA_LANE_K
-            g_idx = global_idx_q(q_row_safe, q_col)
-            raw = load_global_mfma_pack(q_ptr, g_idx)
-            q_b_packs.append(ArithValue(q_in_bounds).select(raw, c_zero_mfma_pack))
-
         # ── Constants ──
         c_neg_inf = fx.Float32(float("-inf"))
         c_zero_f = fx.Float32(0.0)
@@ -413,6 +400,33 @@ def build_flash_attn_opus_module(
         shuf_32_i32 = fx.Int32(32)
         c4_i32 = fx.Int32(4)
         lane_i32 = fx.Int32(lane)
+        v8f32_type = Vec.make_type(MFMA_LANE_K, fx.Float32)
+
+        # ── Q preload (B-operand for MFMA, register-resident) ──
+        # P2: pre-multiply Q by temperature_scale = (1/sqrt(D)) * log2(e)
+        # so that softmax can operate directly in log2 space without per-FMA
+        # multiplications. Matches OPUS C++ lines 404-406 (kernel template).
+        q_row = q_start + wave_q_offset + lane_mod_32
+        q_row_i32 = fx.Int32(q_row)
+        q_in_bounds = q_row < seq_len_v
+        q_row_safe = fx.Index(ArithValue(q_in_bounds).select(q_row, fx.Index(0)))
+        c_zero_mfma_pack = Vec.filled(MFMA_LANE_K, 0.0, elem_dtype).ir_value()
+        q_b_packs = []
+        for ks in range_constexpr(K_STEPS_QK):
+            q_col = fx.Index(ks * K_STEP_QK) + lane_div_32 * MFMA_LANE_K
+            g_idx = global_idx_q(q_row_safe, q_col)
+            raw = load_global_mfma_pack(q_ptr, g_idx)
+            raw_safe = ArithValue(q_in_bounds).select(raw, c_zero_mfma_pack)
+            # bf16x8 → f32x8 → multiply by c_sm_scale_log2e → bf16x8
+            pack_f32 = Vec(raw_safe).extf(v8f32_type)
+            scaled_elems = []
+            for k in range_constexpr(MFMA_LANE_K):
+                scaled_elems.append(
+                    _fmul(Vec(pack_f32)[k], c_sm_scale_log2e)
+                )
+            pack_scaled_f32 = Vec.from_elements(scaled_elems, fx.Float32)
+            pack_scaled_bf16 = pack_scaled_f32.truncf(v8f16_type)
+            q_b_packs.append(pack_scaled_bf16.ir_value())
 
         # Use shuffle_xor by 32 for the cross-half reduction (== permlane32_swap+max in OPUS).
         def reduction_peer(v_f32):
@@ -543,24 +557,19 @@ def build_flash_attn_opus_module(
             return _fmax(m, reduction_peer(m))
 
         # ── Helper: sub_row + first-half exp2 (matches C++ attn_sub_row + exp2_slice<0,16>) ──
+        # P2: Q has been pre-multiplied by sm_scale*log2e in the prologue, so s_lo, s_hi
+        # and m_row are already in log2 space. The FMA collapses to a plain subtract.
         # Returns:
-        #   lo_partial[16] = exp2((s_lo - m_row) * sm_scale_log2e)
-        #   hi_partial[16] = (s_hi - m_row) * sm_scale_log2e  (NOT yet exp'd)
+        #   lo_partial[16] = exp2(s_lo - m_row)
+        #   hi_partial[16] = s_hi - m_row              (NOT yet exp'd)
         def _sub_row_first_half_exp(s_lo, s_hi, m_row):
-            neg_scaled_m = arith.negf(
-                _raw(_fmul(m_row, c_sm_scale_log2e)), fastmath=fm_fast
-            )
             lo_partial = []
             hi_partial = []
             for r in range_constexpr(16):
-                diff_lo = fmath.fma(
-                    s_lo[r], c_sm_scale_log2e, neg_scaled_m, fastmath=fm_fast
-                )
+                diff_lo = _fsub(s_lo[r], m_row)
                 lo_partial.append(ArithValue(diff_lo).exp2(fastmath=fm_fast))
             for r in range_constexpr(16):
-                diff_hi = fmath.fma(
-                    s_hi[r], c_sm_scale_log2e, neg_scaled_m, fastmath=fm_fast
-                )
+                diff_hi = _fsub(s_hi[r], m_row)
                 hi_partial.append(diff_hi)
             return lo_partial, hi_partial
 
@@ -627,9 +636,10 @@ def build_flash_attn_opus_module(
         gpu.barrier()
 
         # [P3] Q is already preloaded above (q_b_packs).
-        # NOTE: For P1 we do NOT yet pre-multiply Q by temperature_scale.
-        # The scaling is still applied per-element in the softmax FMA below.
-        # This optimization is deferred to phase P2.
+        # P2 (in-flight Q scaling): Q packs were pre-multiplied by
+        # (sm_scale * log2e) during the load loop above, matching the C++
+        # template (gqa_d128_kernel_template.hpp lines 404-406). The softmax
+        # path now operates directly in log2 space (no per-FMA scale).
 
         # [P4] async_load K[1] → s_k[1], V[0] → s_v[0]   (C++ lines 408-409)
         coop_dma_k(fx.Index(BLOCK_N), 1)
@@ -746,24 +756,19 @@ def build_flash_attn_opus_module(
             s_hi_a = [Vec(v_s_1_hi_raw)[r] for r in range_constexpr(16)]
             # NOTE: main loop's v_s[1] (S[j-2]) is "deep below diagonal" — no causal mask needed.
             m_tile_max_a = _wave_row_max(s_lo_a, s_hi_a)
-            m_diff_scaled_a = _fmul(
-                _fsub(m_tile_max_a, m_row), c_sm_scale_log2e
-            )
+            # P2: m_row and m_tile_max_a are already log2-scaled (Q was pre-scaled).
+            m_diff_a = _fsub(m_tile_max_a, m_row)
             if const_expr(OPUS_LAZY_RESCALE):
-                below_a = ArithValue(fx.Float32(m_diff_scaled_a) <= c_eight_f)
+                below_a = ArithValue(fx.Float32(m_diff_a) <= c_eight_f)
                 ballot_a = rocdl.ballot(T.i64, _raw(below_a))
                 all_below_a = fx.Int64(ballot_a) == fx.Int64(-1)
                 ab_a = ArithValue(all_below_a)
                 m_new_a = ab_a.select(m_row, _fmax(m_row, m_tile_max_a))
-                corr_a = rocdl.exp2(
-                    T.f32, _raw(_fmul(_fsub(m_row, m_new_a), c_sm_scale_log2e))
-                )
+                corr_a = rocdl.exp2(T.f32, _raw(_fsub(m_row, m_new_a)))
                 eff_corr_a = ab_a.select(c_one_f, corr_a)
             else:
                 m_new_a = _fmax(m_row, m_tile_max_a)
-                corr_a = rocdl.exp2(
-                    T.f32, _raw(_fmul(_fsub(m_row, m_new_a), c_sm_scale_log2e))
-                )
+                corr_a = rocdl.exp2(T.f32, _raw(_fsub(m_row, m_new_a)))
                 eff_corr_a = corr_a
 
             _scale_o(o_accs, eff_corr_a)
@@ -840,24 +845,19 @@ def build_flash_attn_opus_module(
 
             # row_max + lazy rescale on v_s[0] (= S[j-1], already masked)
             m_tile_max_b = _wave_row_max(s_lo_b, s_hi_b)
-            m_diff_scaled_b = _fmul(
-                _fsub(m_tile_max_b, m_row), c_sm_scale_log2e
-            )
+            # P2: m_row and m_tile_max_b are already log2-scaled (Q was pre-scaled).
+            m_diff_b = _fsub(m_tile_max_b, m_row)
             if const_expr(OPUS_LAZY_RESCALE):
-                below_b = ArithValue(fx.Float32(m_diff_scaled_b) <= c_eight_f)
+                below_b = ArithValue(fx.Float32(m_diff_b) <= c_eight_f)
                 ballot_b = rocdl.ballot(T.i64, _raw(below_b))
                 all_below_b = fx.Int64(ballot_b) == fx.Int64(-1)
                 ab_b = ArithValue(all_below_b)
                 m_new_b = ab_b.select(m_row, _fmax(m_row, m_tile_max_b))
-                corr_b = rocdl.exp2(
-                    T.f32, _raw(_fmul(_fsub(m_row, m_new_b), c_sm_scale_log2e))
-                )
+                corr_b = rocdl.exp2(T.f32, _raw(_fsub(m_row, m_new_b)))
                 eff_corr_b = ab_b.select(c_one_f, corr_b)
             else:
                 m_new_b = _fmax(m_row, m_tile_max_b)
-                corr_b = rocdl.exp2(
-                    T.f32, _raw(_fmul(_fsub(m_row, m_new_b), c_sm_scale_log2e))
-                )
+                corr_b = rocdl.exp2(T.f32, _raw(_fsub(m_row, m_new_b)))
                 eff_corr_b = corr_b
 
             _scale_o(o_accs, eff_corr_b)
@@ -953,11 +953,10 @@ def build_flash_attn_opus_module(
                 o_accs[dc] = mfma_acc(v_pk[dc], p_pk, o_accs[dc])
 
         # row_max + rescale_m + sub_row + first-half exp on v_s[1]
+        # P2: m_row and m_tile_max_e3 are already log2-scaled (Q pre-scaled).
         m_tile_max_e3 = _wave_row_max(s_lo_e1, s_hi_e1)
         row_max_e3 = _fmax(m_row, m_tile_max_e3)
-        rescale_e3 = rocdl.exp2(
-            T.f32, _raw(_fmul(_fsub(m_row, row_max_e3), c_sm_scale_log2e))
-        )
+        rescale_e3 = rocdl.exp2(T.f32, _raw(_fsub(m_row, row_max_e3)))
         m_row = row_max_e3
         lo_e3, hi_e3 = _sub_row_first_half_exp(s_lo_e1, s_hi_e1, row_max_e3)
         v_s_1_lo_e_partial = Vec.from_elements(lo_e3, fx.Float32).ir_value()
@@ -1023,11 +1022,10 @@ def build_flash_attn_opus_module(
             for dc in range_constexpr(D_CHUNKS):
                 o_accs[dc] = mfma_acc(v_pk[dc], p_pk, o_accs[dc])
 
+        # P2: m_row and m_tile_max_e7 are already log2-scaled.
         m_tile_max_e7 = _wave_row_max(s_lo_e5, s_hi_e5)
         row_max_e7 = _fmax(m_row, m_tile_max_e7)
-        rescale_e7 = rocdl.exp2(
-            T.f32, _raw(_fmul(_fsub(m_row, row_max_e7), c_sm_scale_log2e))
-        )
+        rescale_e7 = rocdl.exp2(T.f32, _raw(_fsub(m_row, row_max_e7)))
         m_row = row_max_e7
         lo_e7, hi_e7 = _sub_row_first_half_exp(s_lo_e5, s_hi_e5, row_max_e7)
         v_s_0_lo_e_partial = Vec.from_elements(lo_e7, fx.Float32).ir_value()
@@ -1089,11 +1087,10 @@ def build_flash_attn_opus_module(
             for dc in range_constexpr(D_CHUNKS):
                 o_accs[dc] = mfma_acc(v_pk[dc], p_pk, o_accs[dc])
 
+        # P2: m_row and m_tile_max_e11 are already log2-scaled.
         m_tile_max_e11 = _wave_row_max(s_lo_e9, s_hi_e9)
         row_max_e11 = _fmax(m_row, m_tile_max_e11)
-        rescale_e11 = rocdl.exp2(
-            T.f32, _raw(_fmul(_fsub(m_row, row_max_e11), c_sm_scale_log2e))
-        )
+        rescale_e11 = rocdl.exp2(T.f32, _raw(_fsub(m_row, row_max_e11)))
         m_row = row_max_e11
 
         # sub_row + first-half exp v_s[1]
