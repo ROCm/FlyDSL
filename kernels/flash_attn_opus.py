@@ -319,6 +319,64 @@ def build_flash_attn_opus_module(
         def _bitcast_i32(value):
             return fx.Int32(ArithValue(value).bitcast(fx.Int32.ir_type))
 
+        def _bitcast_f32(value):
+            return fx.Float32(ArithValue(value).bitcast(fx.Float32.ir_type))
+
+        # ── P4: opus::attn_mask_vec2_imm inline asm (matches C++ lines 233-249) ──
+        # We split the C++ 4-op block into two 2-op pairs because MLIR's
+        # llvm.inline_asm with struct return + multiple "=s" outputs has
+        # proven brittle. The resulting ISA is the same {cmp_lt + cndmask}
+        # pattern that OPUS depends on.
+        def _attn_mask_imm_single(rel_i32, neg_inf_i32, thr, x_ref_i32):
+            """Single asm: x_new = (rel < thr) ? neg_inf : x_ref.
+
+            asm:
+              v_cmp_lt_i32_e64 sgpr_mask, rel, thr
+              v_cndmask_b32_e64 vdst, x_ref, neg_inf, sgpr_mask
+            """
+            asm_str = (
+                f"v_cmp_lt_i32_e64 $1, $2, {int(thr)}\n\t"
+                "v_cndmask_b32_e64 $0, $3, $4, $1"
+            )
+            # $0 = new_x (=v), $1 = mask (=s, early-clobber), $2 = rel, $3 = x_ref, $4 = neg_inf
+            constraints = "=v,=&s,v,v,v"
+            ret_struct_ty = ir.Type.parse("!llvm.struct<(i32, i64)>")
+            ret = llvm.inline_asm(
+                ret_struct_ty,
+                [_llvm_value(rel_i32), _llvm_value(x_ref_i32),
+                 _llvm_value(neg_inf_i32)],
+                asm_str,
+                constraints,
+                has_side_effects=False,
+            )
+            return llvm.extractvalue(T.i32, ret, [0])
+
+        def _attn_mask_vec2_imm(rel_i32, neg_inf_i32, thr_x, thr_y, x_ref_i32, y_ref_i32):
+            new_x = _attn_mask_imm_single(rel_i32, neg_inf_i32, thr_x, x_ref_i32)
+            new_y = _attn_mask_imm_single(rel_i32, neg_inf_i32, thr_y, y_ref_i32)
+            return new_x, new_y
+
+        # ── P4: register anchor (matches C++ `asm volatile("" : "+v"(v) ::)`) ──
+        # Forces the scheduler to treat `value` as both used and defined at this
+        # point, preventing it from being reordered across the anchor. We use a
+        # tied "=v,0" constraint so the input and output occupy the same VGPR(s);
+        # has_side_effects=True keeps the asm anchored through DCE.
+        def _anchor_vec(value):
+            val_ir = _llvm_value(value)
+            return llvm.inline_asm(
+                val_ir.type,
+                [val_ir],
+                "",
+                "=v,0",
+                has_side_effects=True,
+            )
+
+        def _anchor_pair(lo, hi):
+            return _anchor_vec(lo), _anchor_vec(hi)
+
+        def _anchor_packs(packs):
+            return [_anchor_vec(p) for p in packs]
+
         def _pack_bf16_pair(lo, hi, shift, mask):
             lo_i32 = _bitcast_i32(lo)
             hi_i32 = _bitcast_i32(hi)
@@ -552,28 +610,69 @@ def build_flash_attn_opus_module(
             return v_s_lo, v_s_hi
 
         # ── Helper: causal mask in-place on extracted s_lo[16] / s_hi[16] ──
-        def _causal_mask_inplace(s_lo, s_hi, tile_idx):
-            """Apply causal mask. tile_idx is the KV tile number (fx.Index).
+        # P4: -inf as i32 bitpattern for the cndmask source.
+        _NEG_INF_F32_BITS = 0xFF800000
 
-            Per-element layout: MFMA C-output lane holds elements at
+        def _causal_mask_inplace(s_lo, s_hi, tile_idx):
+            """Apply causal mask using OPUS inline-asm attn_mask_vec2_imm.
+
+            Mirrors gqa_d128_kernel_template.hpp::attn_mask_causal_tile
+            (lines 251-289) with GEMM0_E_N=2 (BLOCK_N=64 → s_lo + s_hi).
+
+            Each MFMA C-output lane holds elements at:
               kv_col_in_strip = lane_div_32*4 + (r//4)*8 + (r%4)
-            giving offsets {0..3, 8..11, 16..19, 24..27} within each W_N=32 strip.
+            giving threshold pairs {(0,1),(2,3),(8,9),(10,11),(16,17),
+            (18,19),(24,25),(26,27)} within each W_N=32 strip.
+
+            For s_hi the strip shifts by W_N=32, so the per-lane absolute K
+            column is (kv_start + 32 + lane_div_32*4 + offset). The mask
+            condition `q_pos < absolute_K_col` is rewritten as
+            `rel < thr` where rel = q_pos - (kv_start + i_n*W_N + lane_group*c_pack)
+            and thr is the per-element offset (immediate).
             """
             kv_tile_start = tile_idx * fx.Index(BLOCK_N)
             kv_start_i32 = fx.Int32(kv_tile_start)
             lane_off_i32 = fx.Int32(lane_div_32) * c4_i32
-            for r in range_constexpr(16):
-                rept = r // 4
-                pair_off = r % 4
-                kv_col_off = rept * 8 + pair_off
-                kv_col_lo = kv_start_i32 + lane_off_i32 + fx.Int32(kv_col_off)
-                s_lo[r] = ArithValue(kv_col_lo > q_row_i32).select(
-                    c_neg_inf, s_lo[r]
+            # rel = q_pos - (kv_start + i_n*W_N + lane_group*c_pack)
+            rel_lo_i32 = fx.Int32(q_row_i32 - kv_start_i32 - lane_off_i32)
+            rel_hi_i32 = fx.Int32(rel_lo_i32 - fx.Int32(K_SUB_N))
+            neg_inf_i32 = fx.Int32(_NEG_INF_F32_BITS)
+
+            # 8 (thr_x, thr_y) pairs, matching C++ static_for nest:
+            #   i_rept in [0,4), i_pair in [0, c_pack/2) = [0, 2)
+            #   thr_x = i_rept * c_rept_stride + i_pair * 2
+            #   thr_y = thr_x + 1
+            #   c_rept_stride = (WARP_SIZE / W_M) * c_pack = 8
+            pair_thresholds = [
+                (0, 1), (2, 3),
+                (8, 9), (10, 11),
+                (16, 17), (18, 19),
+                (24, 25), (26, 27),
+            ]
+            for p in range_constexpr(len(pair_thresholds)):
+                thr_x, thr_y = pair_thresholds[p]
+                idx_x = p * 2
+                idx_y = p * 2 + 1
+
+                # s_lo pair (i_n = 0)
+                x_lo_bits = _raw(_bitcast_i32(s_lo[idx_x]))
+                y_lo_bits = _raw(_bitcast_i32(s_lo[idx_y]))
+                new_x_lo, new_y_lo = _attn_mask_vec2_imm(
+                    rel_lo_i32, neg_inf_i32, thr_x, thr_y,
+                    x_lo_bits, y_lo_bits,
                 )
-                kv_col_hi = kv_col_lo + fx.Int32(K_SUB_N)
-                s_hi[r] = ArithValue(kv_col_hi > q_row_i32).select(
-                    c_neg_inf, s_hi[r]
+                s_lo[idx_x] = _raw(_bitcast_f32(new_x_lo))
+                s_lo[idx_y] = _raw(_bitcast_f32(new_y_lo))
+
+                # s_hi pair (i_n = 1, rel shifted by W_N)
+                x_hi_bits = _raw(_bitcast_i32(s_hi[idx_x]))
+                y_hi_bits = _raw(_bitcast_i32(s_hi[idx_y]))
+                new_x_hi, new_y_hi = _attn_mask_vec2_imm(
+                    rel_hi_i32, neg_inf_i32, thr_x, thr_y,
+                    x_hi_bits, y_hi_bits,
                 )
+                s_hi[idx_x] = _raw(_bitcast_f32(new_x_hi))
+                s_hi[idx_y] = _raw(_bitcast_f32(new_y_hi))
 
         # ── Helper: wave-wide row_max over a 32-element extended vector ──
         def _wave_row_max(s_lo, s_hi):
@@ -700,6 +799,8 @@ def build_flash_attn_opus_module(
         lo_pro, hi_pro = _sub_row_first_half_exp(s_lo_pro, s_hi_pro, m_row_pro)
         v_s_0_lo_init = Vec.from_elements(lo_pro, fx.Float32).ir_value()
         v_s_0_hi_init = Vec.from_elements(hi_pro, fx.Float32).ir_value()
+        # P4 anchor #1: matches C++ line 430 `asm volatile("" : "+v"(v_s[0]) ::);`
+        v_s_0_lo_init, v_s_0_hi_init = _anchor_pair(v_s_0_lo_init, v_s_0_hi_init)
 
         # [P12] sched_barrier(0); s_barrier; sched_barrier(0)   (C++ lines 432-434)
         rocdl.sched_barrier(0)
@@ -754,6 +855,9 @@ def build_flash_attn_opus_module(
                 v_s_0_hi_partial,
             )
             l_row = _fadd(l_row, tile_sum_a)
+            # P4 anchor #2: matches C++ line 454 `asm volatile("" : "+v"(v_p) ::);`
+            v_p_lo_a = _anchor_packs(v_p_lo_a)
+            v_p_hi_a = _anchor_packs(v_p_hi_a)
             # P3 schedule hints (C++ lines 455-456): tell scheduler about
             # the 16-MFMA mma0 + interleaved softmax pipeline.
             _sched_barrier_exp_pairs(6, 3, 1)
@@ -825,6 +929,10 @@ def build_flash_attn_opus_module(
             lo_part_a, hi_part_a = _sub_row_first_half_exp(s_lo_a, s_hi_a, m_new_a)
             v_s_1_lo_partial = Vec.from_elements(lo_part_a, fx.Float32).ir_value()
             v_s_1_hi_partial = Vec.from_elements(hi_part_a, fx.Float32).ir_value()
+            # P4 anchor #3: matches C++ line 489 `asm volatile("" : "+v"(v_s[1]) ::);`
+            v_s_1_lo_partial, v_s_1_hi_partial = _anchor_pair(
+                v_s_1_lo_partial, v_s_1_hi_partial
+            )
 
             # P3 schedule hints (C++ lines 491-492): finish GEMM2 + softmax head.
             _sched_barrier_pairs(6, 5, 2)
@@ -853,6 +961,9 @@ def build_flash_attn_opus_module(
                 v_s_1_hi_partial,
             )
             l_row = _fadd(l_row, tile_sum_b)
+            # P4 anchor #4: matches C++ line 512 `asm volatile("" : "+v"(v_p) ::);`
+            v_p_lo_b = _anchor_packs(v_p_lo_b)
+            v_p_hi_b = _anchor_packs(v_p_hi_b)
             # P3 schedule hints (C++ lines 513-514).
             _sched_barrier_exp_pairs(6, 3, 3)
             _sched_barrier_pairs(10, 5, 3)
@@ -922,6 +1033,10 @@ def build_flash_attn_opus_module(
             lo_part_b, hi_part_b = _sub_row_first_half_exp(s_lo_b, s_hi_b, m_new_b)
             v_s_0_lo_yield = Vec.from_elements(lo_part_b, fx.Float32).ir_value()
             v_s_0_hi_yield = Vec.from_elements(hi_part_b, fx.Float32).ir_value()
+            # P4 anchor #5: matches C++ line 553 `asm volatile("" : "+v"(v_s[0]) ::);`
+            v_s_0_lo_yield, v_s_0_hi_yield = _anchor_pair(
+                v_s_0_lo_yield, v_s_0_hi_yield
+            )
 
             # P3 schedule hints (C++ lines 555-556).
             _sched_barrier_pairs(6, 5, 4)
@@ -966,6 +1081,9 @@ def build_flash_attn_opus_module(
             v_s_0_hi_partial,
         )
         l_row = _fadd(l_row, tile_sum_e1)
+        # P4 anchor #6: matches C++ line 578 `asm volatile("" : "+v"(v_p) ::);`
+        v_p_lo_e1 = _anchor_packs(v_p_lo_e1)
+        v_p_hi_e1 = _anchor_packs(v_p_hi_e1)
         # P3 schedule hints (C++ lines 579-580).
         _sched_barrier_exp_pairs(6, 3, 5)
         _sched_barrier_pairs(10, 5, 5)
@@ -1010,6 +1128,10 @@ def build_flash_attn_opus_module(
         lo_e3, hi_e3 = _sub_row_first_half_exp(s_lo_e1, s_hi_e1, row_max_e3)
         v_s_1_lo_e_partial = Vec.from_elements(lo_e3, fx.Float32).ir_value()
         v_s_1_hi_e_partial = Vec.from_elements(hi_e3, fx.Float32).ir_value()
+        # P4 anchor #7: matches C++ line 607 `asm volatile("" : "+v"(v_s[1]) ::);`
+        v_s_1_lo_e_partial, v_s_1_hi_e_partial = _anchor_pair(
+            v_s_1_lo_e_partial, v_s_1_hi_e_partial
+        )
 
         # P3 schedule hints (C++ lines 609-610).
         _sched_barrier_pairs(10, 5, 6)
@@ -1042,6 +1164,9 @@ def build_flash_attn_opus_module(
             v_s_1_hi_e_partial,
         )
         l_row = _fadd(l_row, tile_sum_e5)
+        # P4 anchor #8: matches C++ line 635 `asm volatile("" : "+v"(v_p) ::);`
+        v_p_lo_e5 = _anchor_packs(v_p_lo_e5)
+        v_p_hi_e5 = _anchor_packs(v_p_hi_e5)
         # P3 schedule hints (C++ lines 636-637).
         _sched_barrier_exp_pairs(6, 3, 7)
         _sched_barrier_pairs(10, 5, 7)
