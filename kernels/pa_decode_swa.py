@@ -115,6 +115,20 @@ def _cdiv(numer: int, denom: int) -> int:
     return (numer + denom - 1) // denom
 
 
+def _encode_waitcnt(*, vmcnt: int = 63, expcnt: int = 7, lgkmcnt: int = 15) -> int:
+    """Encode AMDGPU s_waitcnt immediate fields.
+
+    Defaults leave VM/EXP/LGKM counters unwaited. Override only the counter that
+    needs draining, e.g. ``_encode_waitcnt(lgkmcnt=0)``.
+    """
+    return (
+        (vmcnt & 0xF)
+        | ((expcnt & 0x7) << 4)
+        | ((lgkmcnt & 0xF) << 8)
+        | (((vmcnt >> 4) & 0x3) << 14)
+    )
+
+
 def _get_sw_mtp_group_count(query_length: int, query_group_size: int) -> int:
     return _cdiv(query_length * query_group_size, SW_LOGICAL_MTP_GROUP_SIZE)
 
@@ -921,6 +935,7 @@ def _make_pa_phase_helpers(
         )
 
         if const_expr(per_token_kv):
+            rocdl.s_waitcnt(_encode_waitcnt(lgkmcnt=0))
             v_max_warp = zero_f
             for td in range_constexpr(TLOOP):
                 vs = v_scale_vecs[td]
@@ -1329,6 +1344,7 @@ def _make_pa_phase_helpers(
         )
 
         if const_expr(per_token_kv and v_scale_vecs is not None):
+            rocdl.s_waitcnt(_encode_waitcnt(lgkmcnt=0))
             v_max_warp = zero_f
             for td in range_constexpr(TLOOP):
                 vs = v_scale_vecs[td]
