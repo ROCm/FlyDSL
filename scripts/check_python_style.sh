@@ -11,6 +11,7 @@ Usage: scripts/check_python_style.sh [options]
 Options:
   --base <ref>        Base ref for the branch check. Defaults to origin/main.
   --head <ref>        Head ref for the branch check. Defaults to HEAD.
+  --fix               Format changed Python files before checking.
   --include-local     Also check uncommitted, staged, and untracked Python files.
   --install           Install/upgrade black and ruff before checking.
   -h, --help          Show this help text.
@@ -22,8 +23,9 @@ Environment overrides:
 
 Examples:
   bash scripts/check_python_style.sh --install
+  bash scripts/check_python_style.sh --fix
   bash scripts/check_python_style.sh --base origin/main --head HEAD
-  bash scripts/check_python_style.sh --include-local
+  bash scripts/check_python_style.sh --fix --include-local
 EOF
 }
 
@@ -31,6 +33,7 @@ BASE_REF="${BASE_REF:-origin/main}"
 HEAD_REF="${HEAD_SHA:-HEAD}"
 EXPLICIT_BASE_SHA="${BASE_SHA:-}"
 INSTALL_TOOLS=false
+FIX_STYLE=false
 INCLUDE_LOCAL=false
 
 while [ "$#" -gt 0 ]; do
@@ -51,6 +54,10 @@ while [ "$#" -gt 0 ]; do
       fi
       HEAD_REF="$2"
       shift 2
+      ;;
+    --fix)
+      FIX_STYLE=true
+      shift
       ;;
     --include-local)
       INCLUDE_LOCAL=true
@@ -131,9 +138,44 @@ for path in sys.stdin:
 '
 }
 
+changed_python_files() {
+  git diff --name-only --diff-filter=ACMR "${RESOLVED_BASE_SHA}" "${HEAD_REF}" -- '*.py' |
+    filter_python_files
+}
+
+local_python_files() {
+  {
+    git diff --name-only --diff-filter=ACMR
+    git diff --name-only --cached --diff-filter=ACMR
+    git ls-files --others --exclude-standard -- '*.py'
+  } | filter_python_files | sort -u
+}
+
+format_python_files() {
+  if [ "$#" -eq 0 ]; then
+    return
+  fi
+
+  printf 'Formatting Python files:\n'
+  printf '  %s\n' "$@"
+  python3 -m black "$@"
+  python3 -m ruff check --fix "$@"
+  python3 -m black "$@"
+}
+
 ensure_style_tools
 
 RESOLVED_BASE_SHA="$(resolve_base_sha)"
+mapfile -t BRANCH_PY_FILES < <(changed_python_files)
+
+if [ "${FIX_STYLE}" = true ]; then
+  if [ "${#BRANCH_PY_FILES[@]}" -eq 0 ]; then
+    echo "No committed Python files to format."
+  else
+    format_python_files "${BRANCH_PY_FILES[@]}"
+  fi
+fi
+
 echo "Checking committed Python changes between ${RESOLVED_BASE_SHA} and ${HEAD_REF}."
 BASE_SHA="${RESOLVED_BASE_SHA}" HEAD_SHA="${HEAD_REF}" USE_REVIEWDOG=false \
   bash .github/scripts/check_python_style.sh
@@ -142,17 +184,15 @@ if [ "${INCLUDE_LOCAL}" != true ]; then
   exit 0
 fi
 
-mapfile -t LOCAL_PY_FILES < <(
-  {
-    git diff --name-only --diff-filter=ACMR
-    git diff --name-only --cached --diff-filter=ACMR
-    git ls-files --others --exclude-standard -- '*.py'
-  } | filter_python_files | sort -u
-)
+mapfile -t LOCAL_PY_FILES < <(local_python_files)
 
 if [ "${#LOCAL_PY_FILES[@]}" -eq 0 ]; then
   echo "No uncommitted Python files to check."
   exit 0
+fi
+
+if [ "${FIX_STYLE}" = true ]; then
+  format_python_files "${LOCAL_PY_FILES[@]}"
 fi
 
 printf 'Checking uncommitted Python files:\n'

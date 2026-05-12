@@ -36,11 +36,16 @@ bash scripts/check_python_style.sh --include-local
 
 ## Fixing Failures
 
-If Black reports files, format only the listed files and rerun the script:
+To format the same committed Python diff before checking, use:
 
 ```bash
-python3 -m black <listed-files>
-bash scripts/check_python_style.sh
+bash scripts/check_python_style.sh --fix
+```
+
+To also format local uncommitted, staged, and untracked Python files, use:
+
+```bash
+bash scripts/check_python_style.sh --fix --include-local
 ```
 
 If local checks pass but PR CI still checks unrelated files, the PR branch is
