@@ -177,7 +177,7 @@ def _widen_nonnegative_i32_to_i64(value):
     value = arith.unwrap(value)
     if value.type == T.i64:
         return value
-    return _mlir_arith.ExtUIOp(T.i64, value).result
+    return _mlir_arith.ExtSIOp(T.i64, value).result
 
 
 def _compute_block_base_dw(phys_block, block_stride, head_offset):
