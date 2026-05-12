@@ -5,7 +5,8 @@
 
 RMSNorm(x) = x / sqrt(mean(x^2) + eps) * gamma
 
-Two paths:
+Three paths:
+  - Large-M/small-N specialized path.
   - Fast path (N % tile_cols == 0): buffer_load/store vectorised access.
   - Generic path (arbitrary N): scalar copy_atom_call.
 """
@@ -33,7 +34,129 @@ WARP_SIZE = get_warp_size()
 VEC_WIDTH = 8
 
 
+def _should_use_large_m_small_n(M: int, N: int) -> bool:
+    return M > 8192 and N <= 2048
+
+
+def _build_rmsnorm_large_m_small_n_module(M: int, N: int, dtype_str: str):
+    BLOCK_N = 1 << (N - 1).bit_length()
+    BLOCK_M = max(min(16384 // BLOCK_N, 32), 8)
+    THREADS_PER_ROW = min(WARP_SIZE, 1024 // BLOCK_M)
+    BLOCK_THREADS_SPECIAL = BLOCK_M * THREADS_PER_ROW
+    elem_bits = 32 if dtype_str == "f32" else 16
+
+    @flyc.kernel
+    def rmsnorm_large_m_small_n_kernel(
+        Input: fx.Tensor,
+        Gamma: fx.Tensor,
+        _Unused: fx.Tensor,
+        Output: fx.Tensor,
+    ):
+        bid = fx.block_idx.x
+        tid = fx.thread_idx.x
+
+        lane = tid % THREADS_PER_ROW
+        row_local = tid // THREADS_PER_ROW
+        row = bid * fx.Int32(BLOCK_M) + row_local
+
+        if row < M:
+            elem_dtype = dtype_to_elem_type(dtype_str)
+            elem_type = elem_dtype.ir_type
+            fm_fast = arith.FastMathFlags.fast
+            eps_c = EPS
+            n_float = float(N)
+
+            Input_buf = fx.rocdl.make_buffer_tensor(Input)
+            Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma)
+            Output_buf = fx.rocdl.make_buffer_tensor(Output)
+
+            row_in = fx.slice(Input_buf, (row, None))
+            row_out = fx.slice(Output_buf, (row, None))
+
+            copy_atom_s = fx.make_copy_atom(
+                fx.rocdl.BufferCopy16b() if elem_bits <= 16 else fx.rocdl.BufferCopy32b(),
+                elem_bits,
+            )
+            scalar_reg_ty = fx.MemRefType.get(
+                elem_type, fx.LayoutType.get(1, 1), fx.AddressSpace.Register
+            )
+            scalar_reg_lay = fx.make_layout(1, 1)
+
+            row_div = fx.logical_divide(row_in, fx.make_layout(1, 1))
+            gamma_div = fx.logical_divide(Gamma_buf, fx.make_layout(1, 1))
+            out_div = fx.logical_divide(row_out, fx.make_layout(1, 1))
+
+            def _load_scalar(divided_tensor, index):
+                view = fx.slice(divided_tensor, (None, index))
+                r = fx.memref_alloca(scalar_reg_ty, scalar_reg_lay)
+                fx.copy_atom_call(copy_atom_s, view, r)
+                return fx.memref_load_vec(r)[0]
+
+            def _store_scalar(divided_tensor, index, val):
+                r = fx.memref_alloca(scalar_reg_ty, scalar_reg_lay)
+                ts = full(1, elem_dtype(val), elem_dtype)
+                fx.memref_store_vec(ts, r)
+                view = fx.slice(divided_tensor, (None, index))
+                fx.copy_atom_call(copy_atom_s, r, view)
+
+            def group_reduce_add(x):
+                w = x
+                for _sh_exp in range_constexpr(int(math.log2(THREADS_PER_ROW))):
+                    off = THREADS_PER_ROW // (2 << _sh_exp)
+                    peer = w.shuffle_xor(off, fx.Int32(THREADS_PER_ROW))
+                    w = w.addf(peer, fastmath=fm_fast)
+                return w
+
+            c_zero_f = fx.Float32(0.0)
+            thread_sumsq = c_zero_f
+
+            for base_idx_int in range_constexpr(0, BLOCK_N, THREADS_PER_ROW):
+                idx = lane + base_idx_int
+                is_valid = idx < N
+                idx_safe = is_valid.select(idx, 0)
+                x_e = _load_scalar(row_div, idx_safe)
+                x = x_e if dtype_str == "f32" else x_e.to(fx.Float32)
+                x2 = x * x
+                thread_sumsq = thread_sumsq + is_valid.select(x2, c_zero_f)
+
+            sum_sq = group_reduce_add(thread_sumsq)
+            mean_sq = sum_sq / n_float
+            ms_eps = mean_sq + eps_c
+            rrms = fmath.rsqrt(ms_eps, fastmath=fm_fast)
+
+            for base_idx_int in range_constexpr(0, BLOCK_N, THREADS_PER_ROW):
+                idx = lane + base_idx_int
+                if idx < N:
+                    x_e = _load_scalar(row_div, idx)
+                    g_e = _load_scalar(gamma_div, idx)
+                    x = x_e if dtype_str == "f32" else x_e.to(fx.Float32)
+                    g = g_e if dtype_str == "f32" else g_e.to(fx.Float32)
+                    y = (x * rrms) * g
+                    y_e = y if dtype_str == "f32" else y.to(elem_dtype)
+                    _store_scalar(out_div, idx, y_e)
+
+    @flyc.jit
+    def launch_rmsnorm_large_m_small_n(
+        Input: fx.Tensor,
+        Gamma: fx.Tensor,
+        Output: fx.Tensor,
+        m_in: fx.Int32,
+        stream: fx.Stream = fx.Stream(None),
+    ):
+        launcher = rmsnorm_large_m_small_n_kernel(Input, Gamma, Gamma, Output)
+        launcher.launch(
+            grid=((M + BLOCK_M - 1) // BLOCK_M, 1, 1),
+            block=(BLOCK_THREADS_SPECIAL, 1, 1),
+            stream=stream,
+        )
+
+    return launch_rmsnorm_large_m_small_n
+
+
 def build_rmsnorm_module(M: int, N: int, dtype_str: str):
+    if _should_use_large_m_small_n(M, N):
+        return _build_rmsnorm_large_m_small_n_module(M, N, dtype_str)
+
     arch = get_hip_arch()
     USE_HW_CVT_PK_BF16_F32 = (arch == "gfx950") or str(arch).startswith("gfx95")
 
@@ -519,6 +642,8 @@ def build_fused_add_rmsnorm_module(M: int, N: int, dtype_str: str):
                 x = x_e if dtype_str == "f32" else x_e.to(fx.Float32)
                 residual = residual_e if dtype_str == "f32" else residual_e.to(fx.Float32)
                 added_e = _to_elem_scalar(x + residual)
+                if idx < N:
+                    _store_scalar(residual_out_div, idx, added_e)
                 added = added_e if dtype_str == "f32" else added_e.to(fx.Float32)
                 added2 = added * added
                 thread_sumsq = thread_sumsq + is_valid.select(added2, c_zero_f)
@@ -531,16 +656,11 @@ def build_fused_add_rmsnorm_module(M: int, N: int, dtype_str: str):
             for base_idx_int in range_constexpr(0, N, BLOCK_THREADS):
                 idx = tid + base_idx_int
                 if idx < N:
-                    x_e = _load_scalar(row_div, idx)
-                    residual_e = _load_scalar(residual_in_div, idx)
                     g_e = _load_scalar(gamma_div, idx)
-                    x = x_e if dtype_str == "f32" else x_e.to(fx.Float32)
-                    residual = residual_e if dtype_str == "f32" else residual_e.to(fx.Float32)
+                    added_e = _load_scalar(residual_out_div, idx)
                     g = g_e if dtype_str == "f32" else g_e.to(fx.Float32)
-                    added_e = _to_elem_scalar(x + residual)
                     added = added_e if dtype_str == "f32" else added_e.to(fx.Float32)
                     y = (added * rrms) * g
-                    _store_scalar(residual_out_div, idx, added_e)
                     _store_scalar(out_div, idx, _to_elem_scalar(y))
 
     @flyc.jit
@@ -1420,6 +1540,8 @@ def _build_fused_add_rmsnorm_quant_module(
                 x = x_e if dtype_str == "f32" else x_e.to(fx.Float32)
                 residual = residual_e if dtype_str == "f32" else residual_e.to(fx.Float32)
                 added_e = _to_elem_scalar(x + residual)
+                if idx < N:
+                    _store_scalar(residual_out_div, idx, added_e)
                 added = added_e if dtype_str == "f32" else added_e.to(fx.Float32)
                 added2 = added * added
                 thread_sumsq = thread_sumsq + is_valid.select(added2, c_zero_f)
@@ -1434,13 +1556,9 @@ def _build_fused_add_rmsnorm_quant_module(
                 idx = tid + base_idx_int
                 is_valid = idx < N
                 idx_safe = is_valid.select(idx, 0)
-                x_e = _load_scalar(row_div, idx_safe)
-                residual_e = _load_scalar(residual_in_div, idx_safe)
                 g_e = _load_scalar(gamma_div, idx_safe)
-                x = x_e if dtype_str == "f32" else x_e.to(fx.Float32)
-                residual = residual_e if dtype_str == "f32" else residual_e.to(fx.Float32)
+                added_e = _load_scalar(residual_out_div, idx_safe)
                 g = g_e if dtype_str == "f32" else g_e.to(fx.Float32)
-                added_e = _to_elem_scalar(x + residual)
                 added = added_e if dtype_str == "f32" else added_e.to(fx.Float32)
                 y = (added * rrms) * g
                 if const_expr(is_smooth):
@@ -1461,13 +1579,9 @@ def _build_fused_add_rmsnorm_quant_module(
             for base_idx_int in range_constexpr(0, N, BLOCK_THREADS):
                 idx = tid + base_idx_int
                 if idx < N:
-                    x_e = _load_scalar(row_div, idx)
-                    residual_e = _load_scalar(residual_in_div, idx)
                     g_e = _load_scalar(gamma_div, idx)
-                    x = x_e if dtype_str == "f32" else x_e.to(fx.Float32)
-                    residual = residual_e if dtype_str == "f32" else residual_e.to(fx.Float32)
+                    added_e = _load_scalar(residual_out_div, idx)
                     g = g_e if dtype_str == "f32" else g_e.to(fx.Float32)
-                    added_e = _to_elem_scalar(x + residual)
                     added = added_e if dtype_str == "f32" else added_e.to(fx.Float32)
                     y = (added * rrms) * g
                     if const_expr(is_smooth):
@@ -1475,7 +1589,6 @@ def _build_fused_add_rmsnorm_quant_module(
                         y = y * s
                     q = y * inv_scale
                     q_i8 = q.to(quant_dtype)
-                    _store_scalar(residual_out_div, idx, added_e)
                     _store_quant_scalar(out_div, idx, q_i8)
 
     if is_smooth:
