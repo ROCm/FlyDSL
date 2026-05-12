@@ -371,6 +371,14 @@ class Numeric(metaclass=NumericMeta):
     def ir_value(self, *, loc=None, ip=None) -> ir.Value:
         return self.to(ir.Value, loc=loc, ip=ip)
 
+    def with_signedness(self, signed):
+        """Return an arithmetic view with explicit integer signedness."""
+        return ArithValue(self, signed)
+
+    def extui(self, target_type, *, loc=None, ip=None):
+        """Zero-extend integer value to a wider integer type."""
+        return ArithValue(self).extui(target_type, loc=loc)
+
     def __get_ir_types__(self):
         return [type(self).ir_type]
 
