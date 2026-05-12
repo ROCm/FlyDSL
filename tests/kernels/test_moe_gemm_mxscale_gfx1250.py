@@ -548,7 +548,17 @@ def run_moe_stage1(
         rtol = 0.5 if (is_a8w4 or is_fp4) else 0.25
         atol = 0.5 if is_a8w4 else 0.25
         logits_thr = 1.0 if (is_a8w4 or is_fp4) else 2e-3
-        assert verify_output(out.to(torch.float32), ref, rtol=rtol, atol=atol,
+        _out_f32 = out.to(torch.float32)
+        _out_flat = _out_f32.flatten()
+        _ref_flat = ref.flatten()
+        _o, _r = _out_flat.double(), _ref_flat.double()
+        _denom = (_o * _o + _r * _r).sum()
+        _logits_diff_s1 = (1 - 2 * (_o * _r).sum() / _denom).item() if _denom.item() != 0 else 0.0
+        print(f"[stage1] Logits Diff: {_logits_diff_s1:.6f}")
+        print(f"[stage1] out first 10: {_out_flat[:10].tolist()}")
+        print(f"[stage1] ref first 10: {_ref_flat[:10].tolist()}")
+        print(f"[stage1] diff first 10: {(_out_flat[:10] - _ref_flat[:10]).tolist()}")
+        assert verify_output(_out_f32, ref, rtol=rtol, atol=atol,
                              logits_diff_threshold=logits_thr)
 
     # Note: kernel launches full expert-block range; effective work is gated by num_valid_ids.
@@ -1028,7 +1038,17 @@ def run_moe_stage2(
                 model_dim=model_dim, doweight_stage2=doweight_stage2,
             )
         logits_thr2 = 1.0 if (is_a8w4 or is_fp4) else 2e-3
-        assert verify_output(out.to(torch.float32), ref2, rtol=0.5, atol=0.5,
+        _out2_f32 = out.to(torch.float32)
+        _out2_flat = _out2_f32.flatten()
+        _ref2_flat = ref2.flatten()
+        _o2, _r2 = _out2_flat.double(), _ref2_flat.double()
+        _denom2 = (_o2 * _o2 + _r2 * _r2).sum()
+        _logits_diff_s2 = (1 - 2 * (_o2 * _r2).sum() / _denom2).item() if _denom2.item() != 0 else 0.0
+        print(f"[stage2] Logits Diff: {_logits_diff_s2:.6f}")
+        print(f"[stage2] out first 10: {_out2_flat[:10].tolist()}")
+        print(f"[stage2] ref first 10: {_ref2_flat[:10].tolist()}")
+        print(f"[stage2] diff first 10: {(_out2_flat[:10] - _ref2_flat[:10]).tolist()}")
+        assert verify_output(_out2_f32, ref2, rtol=0.5, atol=0.5,
                              logits_diff_threshold=logits_thr2)
 
     # Launches full expert-block range; effective work is gated by num_valid_ids.

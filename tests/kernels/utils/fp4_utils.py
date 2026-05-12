@@ -735,7 +735,16 @@ def preshuffle_b_16x16(b: Tensor, rows: int, cols: int) -> Tensor:
     """
     assert rows % 16 == 0, f"rows must be a multiple of 16, got {rows}"
     assert cols % 16 == 0, f"cols must be a multiple of 16, got {cols}"
+    # torch's `copy_` (used by `.contiguous()`) is not implemented for
+    # `float4_e2m1fn_x2` on every backend; reinterpret as uint8 for the
+    # byte-level shuffle and restore the original dtype afterwards.
+    orig_dtype = b.dtype
+    if orig_dtype == fp4x2:
+        b = b.view(torch.uint8)
     b = b.view(rows, cols)
     b = b.view(rows // 16, 16, cols // 16, 16)
     b = b.permute(0, 2, 1, 3).contiguous()
-    return b.view(rows, cols)
+    b = b.view(rows, cols)
+    if orig_dtype == fp4x2:
+        b = b.view(orig_dtype)
+    return b
