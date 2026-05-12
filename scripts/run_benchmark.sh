@@ -213,37 +213,6 @@ _emit_row() {
   printf "%-22.22s %-34.34s %-10.10s %10s %10s\n" "${op}" "${shape}" "${dtype}" "${tbps}" "${tflops}"
 }
 
-_emit_scaledmm_compare_rows() {
-  # Args: shape_tag dtype log_path
-  # Emits two rows: gemm_async_torch_scaledmm, gemm_async_flydsl
-  shape_tag="$1"; dtype="$2"; log_path="$3"
-  python3 - "$shape_tag" "$dtype" "$log_path" <<'PY'
-import re, sys
-
-shape, dtype, path = sys.argv[1], sys.argv[2], sys.argv[3]
-try:
-    txt = open(path, "r", errors="ignore").read()
-except Exception:
-    txt = ""
-
-def last_float(pat):
-    m_last = None
-    for m in re.finditer(pat, txt):
-        m_last = m
-    return None if m_last is None else float(m_last.group(1))
-
-torch_tf = last_float(r"torch\._scaled_mm.*?([0-9.]+)\s*TFLOPS")
-fly_tf = last_float(r"FlyDSL preshuffle GEMM.*?([0-9.]+)\s*TFLOPS")
-
-def fmt(x):
-    return "-" if x is None else f"{x:.3f}"
-
-# TB/s isn't printed by this compare benchmark; keep it blank ("-").
-print(f"gemm_async_torch_scaledmm\t{shape}\t{dtype}\t-\t{fmt(torch_tf)}")
-print(f"gemm_async_flydsl\t{shape}\t{dtype}\t-\t{fmt(fly_tf)}")
-PY
-}
-
 _normalize_op() {
   # Normalize aliases to canonical op names.
   op="${1:-}"
@@ -567,8 +536,6 @@ if [ "${RUN_PRESHUFFLE_GEMM}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
 
   GEMM_USE_ASYNC_COPY="${GEMM_USE_ASYNC_COPY:-1}"
   GEMM_WAVES_PER_EU="${GEMM_WAVES_PER_EU:-2}"
-  # Also run torch._scaled_mm vs FlyDSL compare for fp8 async sweeps when enabled.
-  GEMM_COMPARE_TORCH_SCALEMM="${GEMM_COMPARE_TORCH_SCALEMM:-0}"
 
   for shape in $GEMM_SHAPES_ASYNC; do
     oldIFS=$IFS
@@ -610,31 +577,6 @@ if [ "${RUN_PRESHUFFLE_GEMM}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
     row="$(_py_parse_and_emit gemm_async "${shape_tag}" "${dtype}" "${log}")"
     set -- $row
     _emit_row "$1" "$2" "$3" "$4" "$5"
-
-    # Optional: compare against torch._scaled_mm using the same tile config.
-    if [ "${GEMM_COMPARE_TORCH_SCALEMM}" = "1" ] || [ "${GEMM_COMPARE_TORCH_SCALEMM}" = "true" ]; then
-      if [ "${dtype}" = "fp8" ]; then
-        log2="${BENCH_LOG_DIR}/preshuffle_gemm_scaledmm_compare_${M}x${N}x${K}_${dtype}_t${tile_m}x${tile_n}x${tile_k}_${async_copy_tag}_${waves_per_eu_tag}.log"
-        if FLYDSL_BENCH_FP8_ASYNC_SCALEDMM_COMPARE=1 \
-          FLYDSL_BENCH_M="${M}" FLYDSL_BENCH_N="${N}" FLYDSL_BENCH_K="${K}" \
-          FLYDSL_BENCH_TILE_M="${tile_m}" FLYDSL_BENCH_TILE_N="${tile_n}" FLYDSL_BENCH_TILE_K="${tile_k}" \
-          FLYDSL_BENCH_WAVES_PER_EU="${waves_per_eu}" \
-          FLYDSL_BENCH_ITERS_8K=50 FLYDSL_BENCH_WARMUP_8K=10 \
-          python3 -m pytest -q tests/kernels/test_preshuffle_gemm.py \
-            -k "perf_torch_scaled_mm_vs_flydsl_fp8_gemm_8k_async" -s >"${log2}" 2>&1; then
-          SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
-        else
-          FAIL_COUNT=$((FAIL_COUNT + 1))
-          echo "gemm scaledmm compare failed. Log: ${log2}" >&2
-          _show_fail_log "${log2}" "gemm_scaledmm_compare"
-        fi
-
-        shape_tag2="${M}x${N}x${K}_tile${tile_m}x${tile_n}x${tile_k}_${waves_per_eu}tg"
-        _emit_scaledmm_compare_rows "${shape_tag2}" "${dtype}" "${log2}" | while IFS="$(printf '\t')" read -r _op _sh _dt _tb _tf; do
-          _emit_row "${_op}" "${_sh}" "${_dt}" "${_tb}" "${_tf}"
-        done
-      fi
-    fi
   done
   
   # FP4 GEMM (gfx950 only)

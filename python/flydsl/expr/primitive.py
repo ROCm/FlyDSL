@@ -909,9 +909,7 @@ def make_copy_atom(copy_op_type, elem_type, loc=None, ip=None):
 def atom_set_value(atom, field, value, loc=None, ip=None):
     if isinstance(field, IntEnum):
         field = str(field)
-    if isinstance(field, str):
-        field = ir.StringAttr.get(field)
-    return fly.atom_set_value(atom, field, value, results=[atom.type], loc=loc, ip=ip)
+    return fly.atom_set_value(atom, field, value, loc=loc, ip=ip)
 
 
 @traced_op
@@ -965,11 +963,6 @@ def tiled_mma_partition_shape(operand_id, tiled_mma, shape, loc=None, ip=None):
 
 @traced_op
 def mma_make_fragment(operand_id, tiled_mma, input, *, stages=None, loc=None, ip=None):
-    # The C++ binding only accepts ``stages`` on builds where the op declares
-    # the optional attribute; older bindings reject the keyword. Forward it
-    # only when the caller actually asked for staging.
-    if stages is None:
-        return fly.mma_make_fragment(operand_id, tiled_mma, input, loc=loc, ip=ip)
     return fly.mma_make_fragment(operand_id, tiled_mma, input, stages=stages, loc=loc, ip=ip)
 
 
