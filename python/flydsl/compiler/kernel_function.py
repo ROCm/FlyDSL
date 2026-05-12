@@ -5,7 +5,7 @@ import inspect
 import threading
 from contextlib import contextmanager
 from functools import partial
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union, get_origin
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 from .._mlir import ir
 from .._mlir.dialects import arith, gpu
@@ -412,16 +412,21 @@ class KernelLauncher:
                     _to_index_value(cz),
                 )
 
+            launch_kwargs = {
+                "async_dependencies": async_deps,
+                "dynamic_shared_memory_size": smem_val,
+                "loc": launch_loc,
+                "ip": None,
+            }
+            if cluster_size is not None:
+                launch_kwargs["cluster_size"] = cluster_size
+
             gpu.LaunchFuncOp(
                 ["kernels", self._kernel_name],
                 (grid_x, grid_y, grid_z),
                 (block_x, block_y, block_z),
                 kernel_operands,
-                async_dependencies=async_deps,
-                dynamic_shared_memory_size=smem_val,
-                cluster_size=cluster_size,
-                loc=launch_loc,
-                ip=None,
+                **launch_kwargs,
             )
 
 
@@ -459,12 +464,6 @@ class KernelFunction:
             return self
         return partial(self.__call__, obj)
 
-    @staticmethod
-    def _is_constexpr_annotation(annotation) -> bool:
-        if annotation is Constexpr:
-            return True
-        return get_origin(annotation) is Constexpr
-
     def _emit_kernel(self, ctx: CompilationContext, args: Tuple, kwargs: Dict, bound_self: Any = None):
         """Emit gpu.func for this kernel into the GPU module."""
         sig = self._sig
@@ -478,7 +477,7 @@ class KernelFunction:
         for param_name, value in bound.arguments.items():
             param = sig.parameters[param_name]
             annotation = param.annotation
-            if annotation is not inspect.Parameter.empty and self._is_constexpr_annotation(annotation):
+            if annotation is not inspect.Parameter.empty and Constexpr.is_constexpr_annotation(annotation):
                 constexpr_values[param_name] = value
             else:
                 param_names.append(param_name)

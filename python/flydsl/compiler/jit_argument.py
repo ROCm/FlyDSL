@@ -70,14 +70,7 @@ class JitArgumentRegistry:
         return cls.jit_arg2dsl_type[jit_arg_type]
 
 
-def _is_constexpr_annotation(annotation) -> bool:
-    """Check if annotation is Constexpr or Constexpr[T]."""
-    if annotation is Constexpr:
-        return True
-    return get_origin(annotation) is Constexpr
-
-
-def _is_type_param_annotation(annotation) -> bool:
+def is_type_param_annotation(annotation) -> bool:
     """Check if annotation is Type, Type[T]."""
     origin = get_origin(annotation)
     return annotation is Type or origin is Type or origin is type
@@ -95,11 +88,11 @@ def convert_to_jit_arguments(
         param = sig.parameters[param_name]
         annotation = param.annotation
 
-        if annotation is not inspect.Parameter.empty and _is_constexpr_annotation(annotation):
+        if annotation is not inspect.Parameter.empty and Constexpr.is_constexpr_annotation(annotation):
             constexpr_values[param_name] = value
             continue
 
-        if annotation is not inspect.Parameter.empty and _is_type_param_annotation(annotation):
+        if annotation is not inspect.Parameter.empty and is_type_param_annotation(annotation):
             constexpr_values[param_name] = value
             continue
 

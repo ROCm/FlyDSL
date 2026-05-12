@@ -71,11 +71,44 @@ class NumericMeta(type):
             return [ptr]
 
         inferred_np = np_dtype if np_dtype is not None else _infer_np_dtype(width, signed, name)
+        is_storable = width >= 8
+
+        def _dsl_size_of(cls):
+            return 1 if cls.width < 8 else (cls.width + 7) // 8
+
+        def _dsl_align_of(cls):
+            return 1 if cls.width < 8 else (cls.width + 7) // 8
+
+        def _peek_from_ptr(cls, ptr):
+            from .primitive import ptr_load, recast_iter
+
+            typed_ptr = recast_iter(cls, ptr)
+            return cls(ptr_load(typed_ptr, cls))
+
+        def _poke_into_ptr(cls, ptr, value):
+            from .primitive import ptr_store, recast_iter
+
+            typed_ptr = recast_iter(cls, ptr)
+            coerced = value.to(cls) if isinstance(value, Numeric) else cls(value)
+            return ptr_store(coerced.ir_value(), typed_ptr)
+
+        def _not_storable(cls):
+            raise TypeError(f"sub-byte type {cls.__name__} (width={cls.width}) is not Storable")
 
         new_attrs = {
             "__extract_to_ir_values__": _extract_to_ir_values,
             "__construct_from_ir_values__": classmethod(_construct_from_ir_values),
         }
+        if is_storable:
+            new_attrs["__dsl_size_of__"] = classmethod(_dsl_size_of)
+            new_attrs["__dsl_align_of__"] = classmethod(_dsl_align_of)
+            new_attrs["__peek_from_ptr__"] = classmethod(_peek_from_ptr)
+            new_attrs["__poke_into_ptr__"] = classmethod(_poke_into_ptr)
+        elif any(hasattr(base, "__dsl_size_of__") for base in bases):
+            new_attrs["__dsl_size_of__"] = classmethod(_not_storable)
+            new_attrs["__dsl_align_of__"] = classmethod(_not_storable)
+            new_attrs["__peek_from_ptr__"] = classmethod(_not_storable)
+            new_attrs["__poke_into_ptr__"] = classmethod(lambda cls, ptr, value: _not_storable(cls))
         if signed is not None:
             new_attrs["__get_c_pointers__"] = _get_c_pointers
 
@@ -299,6 +332,15 @@ class Numeric(metaclass=NumericMeta):
     def select(self, true_value, false_value, *, loc=None):
         """Ternary select (for Boolean conditions from Int32 comparisons)."""
         return ArithValue(self).select(true_value, false_value, loc=loc)
+
+    @classmethod
+    def __coerce__(cls, value):
+        if isinstance(value, cls):
+            return value
+        try:
+            return cls(value)
+        except Exception:
+            raise TypeError(f"expects {cls.__name__}, got {type(value).__name__}")
 
     @property
     def dtype(self) -> Type["Numeric"]:
