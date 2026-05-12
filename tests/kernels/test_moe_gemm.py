@@ -2080,7 +2080,7 @@ _A16W4_SKIP = pytest.mark.skipif(
 
 @_A16W4_SKIP
 @pytest.mark.parametrize(
-    "tokens, model_dim, inter_dim, experts, topk, tile_m, tile_n, tile_k, split_k_intra",
+    "tokens, model_dim, inter_dim, experts, topk, tile_m, tile_n, tile_k, k_batch",
     _A16W4_SHAPES,
 )
 def test_moe_gemm2_a16w4(
@@ -2092,7 +2092,7 @@ def test_moe_gemm2_a16w4(
     tile_m: int,
     tile_n: int,
     tile_k: int,
-    split_k_intra: int,
+    k_batch: int,
     *,
     seed: int = 0,
     atol: float = 1.0,
@@ -2156,7 +2156,7 @@ def test_moe_gemm2_a16w4(
         doweight_stage2=True,
         out_dtype="bf16",
         accumulate=True,
-        split_k_intra=split_k_intra,
+        k_batch=k_batch,
     )
 
     out_kernel = torch.zeros((tokens, model_dim), device=device, dtype=dtype)
