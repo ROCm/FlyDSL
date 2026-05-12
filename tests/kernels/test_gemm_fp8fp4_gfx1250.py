@@ -23,6 +23,8 @@ import torch
 
 pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
 
+import flydsl.compiler as flyc
+
 from flydsl.runtime.device import get_rocm_arch
 from kernels.gemm_fp8fp4_gfx1250 import compile_mxscale_gemm
 from tests.kernels.utils import fp4_utils
@@ -309,12 +311,23 @@ def _run_mxscale_gemm_test(
         use_scale_opsel=use_scale_opsel,
         expert_sched_mode=expert_sched_mode,
     )
-    launch_fn(
-        c_gpu.contiguous().view(-1),
-        a_gpu.contiguous().view(-1),
-        b_gpu.contiguous().view(-1),
-        as_gpu.contiguous().view(-1),
-        bs_gpu.contiguous().view(-1),
+
+    # Pre-bind via flyc.compile so the launch goes through the CompiledFunction
+    # ctypes fast path (matches test_blockscale_preshuffle_gemm.py and any
+    # production caller that bench-times this kernel). The slow JitFunction
+    # path adds ~17us of inspect.Signature.bind + _make_cache_key per call,
+    # which would mask genuine kernel timing differences in the bench path.
+    # flyc.compile() launches the kernel once internally to trigger
+    # compilation, so no separate eager call is needed for correctness.
+    c_flat = c_gpu.contiguous().view(-1)
+    a_flat = a_gpu.contiguous().view(-1)
+    b_flat = b_gpu.contiguous().view(-1)
+    as_flat = as_gpu.contiguous().view(-1)
+    bs_flat = bs_gpu.contiguous().view(-1)
+
+    flyc.compile(
+        launch_fn,
+        c_flat, a_flat, b_flat, as_flat, bs_flat,
         padded_m, padded_n, torch.cuda.current_stream(),
     )
     torch.cuda.synchronize()
@@ -525,6 +538,173 @@ def test_mxfp4_gemm_mcast(M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp,
         cluster_m=cluster_m, cluster_n=cluster_n)
 
 
+@pytest.mark.parametrize(
+    "data_format, M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp",
+    [
+        ("fp8", 128, 256, 256, 128, 256, 128, 2, 2),
+        ("fp4", 128, 256, 256, 128, 256, 128, 2, 2),
+    ],
+    ids=["fp8-128x256x256", "fp4-128x256x256"],
+)
+def test_mxscale_gemm_cudagraph(data_format, M, N, K,
+                                 tile_m, tile_n, tile_k,
+                                 m_warp, n_warp):
+    """Verify that the gfx1250 MX-scale GEMM kernel works inside a hipGraph.
+
+    Captures one launch, replays once, and checks the replay output is
+    bit-equivalent to an eager launch with the same inputs. Catches kernel
+    regressions that would break graph capture / replay (accidental host
+    syncs, allocator allocations on the kernel path, stream-event API misuse).
+    """
+    arch = str(get_rocm_arch())
+    if arch != "gfx1250":
+        pytest.skip(f"WMMA_SCALE requires gfx1250, got {arch}")
+
+    is_fp4 = data_format == "fp4"
+
+    # Build inputs (mirrors _run_mxscale_gemm_test, but no padding needed
+    # because we pick a clean shape).
+    torch.manual_seed(0)
+    if is_fp4:
+        a = fp4_utils.random_fp4_packed(M, K)
+        b = fp4_utils.random_fp4_packed(N, K)
+    else:
+        a = random_fp8_data(M, K)
+        b = random_fp8_data(N, K)
+    a_scale = fp4_utils.random_e8m0(M, K // SCALE_BLOCK)
+    b_scale = fp4_utils.random_e8m0(N, K // SCALE_BLOCK)
+
+    skt = tile_k // SCALE_BLOCK
+    warp_tile_m = tile_m // m_warp
+    warp_tile_n = tile_n // n_warp
+    a_scale_ps = preshuffle_e8m0_scale(a_scale, warp_tile_m, scale_k_per_tile=skt)
+    b_scale_ps = preshuffle_e8m0_scale(b_scale, warp_tile_n, scale_k_per_tile=skt)
+    pack_b = 2 if is_fp4 else 1
+    b_ps = fp4_utils.preshuffle_b_16x16(b, N, K // pack_b)
+
+    a_gpu = a.cuda()
+    b_gpu = b_ps.cuda()
+    as_gpu = a_scale_ps.cuda()
+    bs_gpu = b_scale_ps.cuda()
+    c_gpu = torch.zeros(M, N, dtype=torch.bfloat16, device="cuda")
+
+    launch_fn = compile_mxscale_gemm(
+        data_format=data_format,
+        M=M, N=N, K=K,
+        tile_m=tile_m, tile_n=tile_n, tile_k=tile_k,
+        m_warp=m_warp, n_warp=n_warp,
+        num_buffers=2,
+        use_tdm_store=True,
+        out_dtype="bf16",
+        wave_specialized_tdm=False,
+        split_k=1,
+    )
+
+    c_flat = c_gpu.contiguous().view(-1)
+    a_flat = a_gpu.contiguous().view(-1)
+    b_flat = b_gpu.contiguous().view(-1)
+    as_flat = as_gpu.contiguous().view(-1)
+    bs_flat = bs_gpu.contiguous().view(-1)
+    compiled_exe = flyc.compile(
+        launch_fn,
+        c_flat, a_flat, b_flat, as_flat, bs_flat,
+        M, N, torch.cuda.current_stream(),
+    )
+
+    # Resolve stream lazily inside the launch closure so graph capture sees
+    # the active capture stream rather than a stream bound before capture.
+    def launch():
+        compiled_exe(c_flat, a_flat, b_flat, as_flat, bs_flat,
+                     M, N, torch.cuda.current_stream())
+
+    # ── Eager run (reference) ──
+    c_gpu.zero_()
+    launch()
+    torch.cuda.synchronize()
+    eager_result = c_gpu.clone()
+    assert eager_result.abs().max().item() > 0, (
+        "Eager run produced all zeros — kernel did not execute properly.")
+
+    # ── hipGraph capture ──
+    g = torch.cuda.CUDAGraph()
+    s = torch.cuda.Stream()
+    s.wait_stream(torch.cuda.current_stream())
+    # Warmup on the capture stream so allocator state is stable
+    with torch.cuda.stream(s):
+        launch()
+    torch.cuda.current_stream().wait_stream(s)
+    torch.cuda.synchronize()
+
+    c_gpu.zero_()
+    with torch.cuda.graph(g, stream=s):
+        launch()
+    torch.cuda.synchronize()
+
+    # ── Replay ──
+    c_gpu.zero_()
+    g.replay()
+    torch.cuda.synchronize()
+    graph_result = c_gpu.clone()
+
+    # ── Verify ──
+    assert graph_result.abs().max().item() > 0, (
+        "hipGraph replay produced all zeros — kernel was NOT captured.")
+    # Same inputs + same kernel + same stream-order = bit-exact equality
+    assert torch.equal(eager_result, graph_result), (
+        f"Eager vs hipGraph result mismatch: max abs diff = "
+        f"{(eager_result.float() - graph_result.float()).abs().max().item():.6f}"
+    )
+
+
+def _bench_kernel_us_cudagraph(run_fn, warmup=10, iters=100, prep_fn=None):
+    """Per-launch timer that strips host launch overhead via hipGraph.
+
+    How it works:
+      - Capture a single kernel launch into a hipGraph
+      - Replay it N times in one stream submission burst
+      - Per-launch time = total_burst_time / N
+
+    NB: stream-ordered execution guarantees the N replays serialise — each
+    g.replay() is one submission to the stream and the next one cannot
+    start until the previous one finishes.
+
+    NB: no L2 flush between replays. The whole point of the graph is to
+    measure the kernel in a hot, back-to-back launch scenario (which is
+    what production serving looks like). For cold-cache numbers use the
+    regular _bench_kernel_us with flush_l2=True.
+    """
+    capture_stream = torch.cuda.Stream()
+    capture_stream.wait_stream(torch.cuda.current_stream())
+
+    # Warmup on the capture stream so the allocator / JIT cache is settled.
+    with torch.cuda.stream(capture_stream):
+        for _ in range(warmup):
+            if prep_fn is not None:
+                prep_fn()
+            run_fn()
+    torch.cuda.current_stream().wait_stream(capture_stream)
+    torch.cuda.synchronize()
+
+    # Capture exactly one kernel launch into the graph.
+    g = torch.cuda.CUDAGraph()
+    if prep_fn is not None:
+        prep_fn()
+    with torch.cuda.graph(g, stream=capture_stream):
+        run_fn()
+    torch.cuda.synchronize()
+
+    # Time iters replays as one batch.
+    start_ev = torch.cuda.Event(enable_timing=True)
+    end_ev = torch.cuda.Event(enable_timing=True)
+    start_ev.record()
+    for _ in range(iters):
+        g.replay()
+    end_ev.record()
+    torch.cuda.synchronize()
+    total_us = start_ev.elapsed_time(end_ev) * 1e3
+    return total_us / iters
+
+
 def _bench_kernel_us(run_fn, warmup=10, iters=50, flush_l2=True, prep_fn=None):
     """Per-iteration CUDA events timer with L2 flush, IQR outlier removal, median.
 
@@ -681,21 +861,33 @@ def _run_benchmark(args):
         atomic_barrier_enable=args.atomic_barrier_enable,
     )
 
-    stream = torch.cuda.current_stream()
     c_flat = c_gpu.view(-1)
     a_flat = a_gpu.view(-1)
     b_flat = b_gpu.view(-1)
     as_flat = as_gpu.view(-1)
     bs_flat = bs_gpu.view(-1)
 
+    # Pre-bind via flyc.compile so the bench loop calls go through the
+    # CompiledFunction ctypes fast path. The slow JitFunction path adds
+    # ~17us of inspect.Signature.bind + _make_cache_key per call, which
+    # would dominate per-launch latency for short kernels.
+    compiled_exe = flyc.compile(
+        launch_fn,
+        c_flat, a_flat, b_flat, as_flat, bs_flat,
+        padded_m, padded_n, torch.cuda.current_stream(),
+    )
+
     def prep_kernel():
         c_gpu.zero_()
 
+    # Resolve the stream lazily inside the closure so the graph-bench path
+    # captures on the active capture stream rather than the stream bound
+    # before capture. Same value on the eager path.
     def run_kernel():
-        launch_fn(
+        compiled_exe(
             c_flat, a_flat, b_flat,
             as_flat, bs_flat,
-            padded_m, padded_n, stream,
+            padded_m, padded_n, torch.cuda.current_stream(),
         )
 
     prep_kernel()
@@ -704,9 +896,22 @@ def _run_benchmark(args):
     compile_ms = (time.perf_counter() - t0) * 1e3
     print(f"      Compile + first launch: {compile_ms:.0f} ms")
 
-    print(f"[2/3] Warming up ({args.warmup} iters) + benchmarking ({args.iters} iters)...")
-    us = _bench_kernel_us(run_kernel, warmup=args.warmup, iters=args.iters,
-                          flush_l2=not args.no_flush_l2, prep_fn=prep_kernel)
+    use_graph = getattr(args, "use_graph", False)
+    if use_graph:
+        print(f"[2/3] Warming up ({args.warmup} iters) + bench via hipGraph "
+              f"({args.iters} replays)...")
+        # Graph mode prep: don't zero c_gpu inside the captured kernel
+        # (zero would be baked into the graph and runs every replay, but
+        # that's also fine — it would add a trivial memset per replay).
+        # We omit prep_fn here because the c_gpu state across replays
+        # doesn't matter for timing.
+        us = _bench_kernel_us_cudagraph(
+            run_kernel, warmup=args.warmup, iters=args.iters)
+    else:
+        print(f"[2/3] Warming up ({args.warmup} iters) + benchmarking "
+              f"({args.iters} iters)...")
+        us = _bench_kernel_us(run_kernel, warmup=args.warmup, iters=args.iters,
+                              flush_l2=not args.no_flush_l2, prep_fn=prep_kernel)
 
     logical_flops = 2.0 * M * N * K
     kernel_flops = 2.0 * padded_m * padded_n * padded_k
@@ -806,6 +1011,11 @@ if __name__ == "__main__":
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--iters", type=int, default=20)
     parser.add_argument("--no-flush-l2", action="store_true", default=False)
+    parser.add_argument("--use-graph", action="store_true", default=False,
+                        help="Time via hipGraph capture+replay to strip "
+                             "host launch overhead from per-launch latency. "
+                             "Implicitly disables L2 flush (graph replays "
+                             "are back-to-back, hot-cache).")
     args = parser.parse_args()
 
     if args.benchmark:

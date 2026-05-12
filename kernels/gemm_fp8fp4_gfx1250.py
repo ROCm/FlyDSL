@@ -5,6 +5,8 @@ data with E8M0 block scales via V_WMMA_SCALE instructions.
 Select precision with ``data_format="fp4"|"fp8"|"a8w4"``.
 """
 
+import functools
+
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
@@ -36,6 +38,7 @@ LDS_PAD_A_BYTES = 16
 LDS_PAD_D_BYTES = 16
 
 
+@functools.lru_cache(maxsize=64)
 def compile_mxscale_gemm(
     *,
     data_format: str = "fp4",
