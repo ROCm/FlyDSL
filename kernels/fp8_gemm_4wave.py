@@ -12,17 +12,16 @@ Global IO, scale loads, and bf16 stores go through the layout API
 the chained Vec(4, f32) accumulator stays on AGPR. The XOR swizzle and
 the 8-buffer LDS pipeline ping-pong are kept as direct arithmetic to
 preserve the original kernel's interleaved-cluster scheduling.
-
-LDS destination pointers for ``buffer_load_lds`` go through
-``ptrtoint+add+inttoptr`` (``_lds_dst_at``) to break LLVM's alias chain
-on the LDS sub-buffer symbols; otherwise the AMDGPU backend inserts
-defensive ``s_waitcnt vmcnt(N)`` between G→LDS writes and the
-subsequent ``ds_read``, despite our explicit ``_wait_barrier``.
 """
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
+from flydsl._mlir.dialects import arith as _arith_dialect
+from flydsl._mlir.dialects import fly as _fly_dialect
 from flydsl._mlir.dialects import llvm as _llvm
+from flydsl._mlir.dialects import memref as _memref_dialect
+from flydsl._mlir.dialects.fly_rocdl import TargetAddressSpace as _TgtAS
+from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, const_expr, range_constexpr, rocdl
 from flydsl.expr.typing import Vector as Vec
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
@@ -122,9 +121,6 @@ def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int
         b_next0 = SmemPtr(B_lds_next0_alloc.get_base(), 0, F8_IR_t, shape=(b_lds_size,)).get()
         b_next1 = SmemPtr(B_lds_next1_alloc.get_base(), 0, F8_IR_t, shape=(b_lds_size,)).get()
 
-        from flydsl._mlir.dialects import memref as _memref_dialect
-        from flydsl._mlir.dialects import arith as _arith_dialect
-
         _AS_SHARED = 2
         _shared_ptr_ty = fx.PointerType.get(F8_IR_t, _AS_SHARED, 512)
 
@@ -144,10 +140,8 @@ def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int
         B1_gl_offset = (tile_j * BLOCK_N + LDS_BLOCK_N) * K
 
         # A/B come in as torch.int8 (PyTorch fp8 view restriction); recast
-        # the buffer-desc pointer's element type to fp8 so the typed copy
+        # the buffer-desc pointer's element type to fp8 so typed copy
         # atoms (BufferCopyLDS128b) accept them.
-        from flydsl._mlir.dialects.fly_rocdl import TargetAddressSpace as _TgtAS
-
         def _make_fp8_buf_tensor(arg_i8):
             t_i8 = fx.rocdl.make_buffer_tensor(arg_i8)
             iter_i8 = fx.get_iter(t_i8)
@@ -198,11 +192,15 @@ def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int
                 lds_swz.append(swz)
             return lds_swz
 
-        # G→LDS atom: 128 bits per thread = 16 fp8 elements. The atom
-        # state carries the runtime `soffset` we set to `k_offset`.
+        # G->LDS atom: 128 bits per thread = 16 fp8 elements. The atom
+        # state carries the runtime ``soffset`` set to ``k_offset``.
         g2lds_atom = fx.make_copy_atom(fx.rocdl.BufferCopyLDS128b(), 128)
 
-        # See module docstring re: ptrtoint/inttoptr alias-chain break.
+        # LDS dst pointers for ``buffer_load_lds`` go through
+        # ``extract_aligned_pointer_as_index + add + inttoptr`` to break
+        # LLVM's alias chain on the LDS sub-buffer symbols; otherwise the
+        # AMDGPU backend inserts defensive ``s_waitcnt vmcnt(N)`` between
+        # G->LDS writes and the subsequent ``ds_read``.
         def _lds_dst_at(lds_dst_mem, byte_offset_runtime):
             base_idx = _memref_dialect.extract_aligned_pointer_as_index(lds_dst_mem)
             offset_idx = base_idx + fx.Index(byte_offset_runtime)
@@ -246,9 +244,9 @@ def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int
         def _c_idx(i, j):
             return i * N_TILES_B + j
 
-        # C++ AddressSpace adds a Generic=0 ahead of Python's enum, so
-        # AddressSpace.Register (Python=2) gets misinterpreted as Shared
-        # (C++=2). Pass C++'s integer value (3) directly.
+        # The C++ AddressSpace enum prepends Generic=0, so the Python
+        # AddressSpace.Register value (2) maps to Shared on the C++ side.
+        # Pass the C++ integer (3) directly to MemRefType.get.
         _AS_REG = 3
         scale_atom_4 = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), fx.Float32)
         scale_atom_1 = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Float32)
@@ -299,11 +297,10 @@ def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int
                 has_side_effects=True,
             )
 
-        # MFMA via fly.mma_atom_call_ssa. The atom carries scale_a/scale_b
-        # state (default 0x7F7F7F7F = no scaling). Returns a chained
-        # Vec(4, f32) SSA so the accumulator stays on AGPR.
+        # MFMA via ``fly.mma_atom_call_ssa``. The atom carries scale_a /
+        # scale_b state (default 0x7F7F7F7F = no scaling). Returns a
+        # chained Vec(4, f32) SSA so the accumulator stays on AGPR.
         mma_atom = fx.make_mma_atom(fx.rocdl.cdna4.MFMA_Scale(16, 16, 128, fx.Float8E4M3FN))
-        from flydsl._mlir.dialects import fly as _fly_dialect
 
         def _mfma(a_val, b_val, c_val):
             return _fly_dialect.mma_atom_call_ssa(
@@ -491,7 +488,6 @@ def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int
                 c11_frag,
             )
 
-            # Swap cur and next
             a_cur0, a_next0 = a_next0, a_cur0
             a_cur1, a_next1 = a_next1, a_cur1
             b_cur0, b_next0 = b_next0, b_cur0
@@ -540,7 +536,6 @@ def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int
         stream: fx.Stream,
     ):
         from flydsl._mlir import ir
-        from flydsl.compiler.kernel_function import CompilationContext
 
         A_lds_cur0_alloc.finalized = False
         A_lds_cur1_alloc.finalized = False
