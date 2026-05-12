@@ -449,16 +449,21 @@ class KernelLauncher:
                     _to_index_value(cz),
                 )
 
+            launch_kwargs = {
+                "async_dependencies": async_deps,
+                "dynamic_shared_memory_size": smem_val,
+                "loc": launch_loc,
+                "ip": None,
+            }
+            if cluster_size is not None:
+                launch_kwargs["cluster_size"] = cluster_size
+
             launch_op = gpu.LaunchFuncOp(
                 ["kernels", self._kernel_name],
                 (grid_x, grid_y, grid_z),
                 (block_x, block_y, block_z),
                 kernel_operands,
-                async_dependencies=async_deps,
-                dynamic_shared_memory_size=smem_val,
-                cluster_size=cluster_size,
-                loc=launch_loc,
-                ip=None,
+                **launch_kwargs,
             )
             _attach_attrs(launch_op, unit_attrs, value_attrs)
 
