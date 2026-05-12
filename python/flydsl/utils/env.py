@@ -225,6 +225,7 @@ class CompileEnvManager(EnvManager):
     compile_only = OptBool(False, env_var="COMPILE_ONLY", description="Only compile without execution, useful for verifying compilation without a GPU")
     arch = OptStr("", env_var="ARCH", description="Override target GPU architecture (e.g. gfx942, gfx950)")
     backend = OptStr("rocm", description="GPU compile backend id (e.g. rocm)")
+    llvm_dir = OptStr("", description="External LLVM/MLIR install prefix for final code generation")
 
 
 class DebugEnvManager(EnvManager):
@@ -261,6 +262,13 @@ class RuntimeEnvManager(EnvManager):
     )
     cache_dir = OptStr(str(Path.home() / ".flydsl" / "cache"), description="Directory for caching compiled kernels")
     enable_cache = OptBool(True, description="Enable kernel caching")
+    run_only = OptBool(
+        False,
+        description=(
+            "Skip JIT compilation; only load AOT cache. "
+            "Raise RuntimeError on cache miss."
+        ),
+    )
 
 
 compile = CompileEnvManager()

@@ -147,6 +147,21 @@ def Fly_SwizzleAttr : Fly_Attr<"Swizzle", "swizzle", []> {
   }];
 }
 
+def Fly_CoordSwizzleAttr : Fly_Attr<"CoordSwizzle", "coord_swizzle", []> {
+  let parameters = (ins
+    "int32_t":$mask,
+    "int32_t":$baseRow,
+    ArrayRefParameter<"int32_t">:$modeRow,
+    "int32_t":$baseCol,
+    ArrayRefParameter<"int32_t">:$modeCol
+  );
+  let hasCustomAssemblyFormat = 1;
+
+  let extraClassDeclaration = [{
+    bool isTrivialCoordSwizzle() const;
+  }];
+}
+
 def Fly_IntTupleAttr : Fly_Attr<"IntTuple", "int_tuple", [
     DeclareAttrInterfaceMethods<Fly_NestedAttrInterface>,
     DeclareAttrInterfaceMethods<Fly_MayStaticAttrInterface>
@@ -217,12 +232,12 @@ def Fly_ComposedLayoutAttr : Fly_Attr<"ComposedLayout", "composed_layout", [
   let parameters = (ins
     "Attribute":$inner,
     Fly_IntTupleAttr:$offset,
-    Fly_LayoutAttr:$outer
+    "Attribute":$outer
   );
   let hasCustomAssemblyFormat = 1;
     
   let builders = [
-    AttrBuilderWithInferredContext<(ins "Attribute":$inner, "IntTupleAttr":$offset, "LayoutAttr":$outer), [{
+    AttrBuilderWithInferredContext<(ins "Attribute":$inner, "IntTupleAttr":$offset, "Attribute":$outer), [{
       return $_get(inner.getContext(), inner, offset, outer);
     }]>
   ];

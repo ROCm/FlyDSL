@@ -779,21 +779,24 @@ class TestFmath:
 # J. scf.for integration
 # ===========================================================================
 
-class TestProtocol:
 
-    def test_fly_values_roundtrip(self):
+class TestProtocol:
+    def test_extract_to_ir_values_roundtrip(self):
         def build(a):
             ta = Vector(a, 8, Float32)
-            values = ta.__fly_values__()
+            values = ta.__extract_to_ir_values__()
             assert len(values) == 1
-            reconstructed = Vector.__fly_construct__(values)
+            reconstructed = Vector.__construct_from_ir_values__(values)
             assert isinstance(reconstructed, ir.Value)
+
         _build_module(build)
 
     def test_hash(self):
         """Vector must be hashable since __eq__ is overridden."""
+
         def build(a):
             ta = Vector(a, 8, Float32)
             h = hash(ta)
             assert isinstance(h, int)
+
         _build_module(build)

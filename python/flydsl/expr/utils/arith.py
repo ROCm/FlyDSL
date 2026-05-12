@@ -424,6 +424,8 @@ class ArithValue(ir.Value):
 
     def index_cast(self, target_type, *, loc=None):
         """Cast between index and integer types."""
+        if self.type == target_type:
+            return self
         return arith.IndexCastOp(target_type, self, loc=loc).result
 
     def __hash__(self):
@@ -505,6 +507,8 @@ def constant_vector(element_value, vector_type, *, loc=None):
 def index_cast(target_type, value, *, loc=None):
     """Cast between index and integer types."""
     v = _to_raw(value)
+    if v.type == target_type:
+        return v
     return arith.IndexCastOp(target_type, v, loc=loc).result
 
 

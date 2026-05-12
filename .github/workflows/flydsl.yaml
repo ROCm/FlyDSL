@@ -7,6 +7,7 @@ on:
   pull_request:
     branches:
       - main
+    types: [opened, synchronize, reopened, labeled]
   workflow_dispatch:
 
 permissions:
@@ -20,15 +21,31 @@ concurrency:
 
 env:
   DOCKER_IMAGE: "rocm/pytorch:rocm7.1_ubuntu24.04_py3.12_pytorch_release_2.9.1"
-  GITHUB_REPO_NAME: ${{ github.event.pull_request.head.repo.full_name || 'ROCm/FlyDSL' }}
-  GITHUB_COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.event.head_commit.id }}
+  GITHUB_REPO_NAME: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+  GITHUB_COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.event.head_commit.id || github.sha }}
 
 jobs:
+  check-signal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Wait for Checks workflow
+        run: ./.github/scripts/check_signal.sh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_SHA: ${{ github.sha }}
+          MAX_RETRIES: 5
+          RETRY_INTERVAL_SECONDS: 30
+
   # ---------------------------------------------------------------------------
   # Single-GPU tests: kernels, unit, examples, MLIR FileCheck, benchmarks.
   # Runs on 1-GPU and Navi runners only.
   # ---------------------------------------------------------------------------
   test:
+    needs: check-signal
     strategy:
       matrix:
         runners: [
@@ -186,12 +203,20 @@ jobs:
   # ---------------------------------------------------------------------------
   # Multi-GPU allreduce tests: ONLY for 8-GPU runners.
   # Runs on BOTH linux-flydsl-mi325-8 AND linux-flydsl-mi355-8 independently.
+  # Triggered when PR has label "multi-gpu" (added by a maintainer), or when
+  # the workflow is manually dispatched.
   # fail-fast: false ensures both runners always complete even if one fails.
   # ---------------------------------------------------------------------------
   multi-gpu:
     needs: test
     name: Multi-GPU AllReduce Tests (${{ matrix.runners }})
     timeout-minutes: 120
+    if: |
+      always() && (
+        (github.event_name == 'pull_request' &&
+         contains(github.event.pull_request.labels.*.name, 'multi-gpu')) ||
+        github.event_name == 'workflow_dispatch'
+      )
     strategy:
       matrix:
         runners: [
@@ -266,6 +291,26 @@ jobs:
       - name: Build FlyDSL (uses MLIR install prefix)
         run: |
           docker exec flydsl_test bash -c "export MLIR_PATH=/llvm-project/mlir_install && cd /flydsl-test && python3 -m pip install -e . --use-pep517"
+
+      - name: Install mori (for shmem regression test)
+        timeout-minutes: 15
+        run: |
+          docker exec flydsl_test bash -c "
+            apt-get install -y libpci-dev libibverbs-dev &&
+            rm -rf /tmp/mori &&
+            git clone --depth 1 --recursive --shallow-submodules https://github.com/ROCm/mori.git /tmp/mori &&
+            cd /tmp/mori && python3 -m pip install . &&
+            MORI_PRECOMPILE=1 python3 -c 'import mori'
+          "
+
+      - name: Run multi-GPU shmem regression test
+        timeout-minutes: 10
+        run: |
+          docker exec flydsl_test bash -c "
+            cd /flydsl-test
+            python3 -m pytest tests/kernels/test_flydsl_shmem.py \
+              -m multi_gpu -v --no-header --tb=short
+          "
 
       - name: Run multi-GPU allreduce tests
         timeout-minutes: 30
