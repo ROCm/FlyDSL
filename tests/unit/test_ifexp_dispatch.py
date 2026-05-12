@@ -53,7 +53,7 @@ def test_ifexp_static_false_no_scf_if():
         assert "scf.if" not in str(module)
 
 
-def test_ifexp_dynamic_builds_scf_if():
+def test_ifexp_dynamic_builds_arith_select():
     with Context(), Location.unknown():
         module = Module.create()
         i1 = IntegerType.get_signless(1)
@@ -73,8 +73,8 @@ def test_ifexp_dynamic_builds_scf_if():
 
         assert module.operation.verify()
         ir_text = str(module)
-        assert "scf.if" in ir_text
-        assert "-> (i32)" in ir_text
+        assert "arith.select" in ir_text
+        assert "scf.if" not in ir_text
 
 
 def test_ifexp_dynamic_type_mismatch_raises():
@@ -122,7 +122,8 @@ def test_ifexp_nested_condition():
 
         assert module.operation.verify()
         ir_text = str(module)
-        assert ir_text.count("scf.if") == 2
+        assert ir_text.count("arith.select") == 2
+        assert "scf.if" not in ir_text
 
 
 def test_ifexp_dynamic_float32():
@@ -145,8 +146,8 @@ def test_ifexp_dynamic_float32():
 
         assert module.operation.verify()
         ir_text = str(module)
-        assert "scf.if" in ir_text
-        assert "-> (f32)" in ir_text
+        assert "arith.select" in ir_text
+        assert "scf.if" not in ir_text
 
 
 def test_ifexp_dynamic_float16():
@@ -169,5 +170,5 @@ def test_ifexp_dynamic_float16():
 
         assert module.operation.verify()
         ir_text = str(module)
-        assert "scf.if" in ir_text
-        assert "-> (f16)" in ir_text
+        assert "arith.select" in ir_text
+        assert "scf.if" not in ir_text
