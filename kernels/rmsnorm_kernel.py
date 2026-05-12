@@ -501,9 +501,12 @@ def build_fused_add_rmsnorm_module(M: int, N: int, dtype_str: str):
 
             return SmemPtr.load(s_red, [0]), SmemPtr.load(s_red2, [0])
 
+        # ==================================================================
+        # Fast path: N is a multiple of tile_cols
+        # ==================================================================
         if const_expr(N >= tile_cols and N % tile_cols == 0 and elem_bits <= 16):
             num_tiles = N // tile_cols
-
+            # ── Layout API: buffer-backed tensors + tiled access ─────
             Input_buf = fx.rocdl.make_buffer_tensor(Input)
             ResidualIn_buf = fx.rocdl.make_buffer_tensor(ResidualIn)
             Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma)
@@ -561,6 +564,7 @@ def build_fused_add_rmsnorm_module(M: int, N: int, dtype_str: str):
             thread_dummy = c_zero_f
             add_local = []
 
+            # Pass 1: add + cache + sumsq (also write residual_out)
             for tile_i in range_constexpr(num_tiles):
                 idx = tid + tile_i * BLOCK_THREADS
                 x = _load_vec(in_div, idx).to(fx.Float32)
@@ -580,6 +584,7 @@ def build_fused_add_rmsnorm_module(M: int, N: int, dtype_str: str):
             ms_eps = mean_sq + eps_c
             rrms = ms_eps.rsqrt(fastmath=fm_fast)
 
+            # Pass 2: normalize + gamma + store (reuse cached added values)
             for tile_i in range_constexpr(num_tiles):
                 idx = tid + tile_i * BLOCK_THREADS
                 g = _load_vec(gamma_div, idx).to(fx.Float32)
@@ -588,6 +593,9 @@ def build_fused_add_rmsnorm_module(M: int, N: int, dtype_str: str):
                 _store_vec(_to_elem_vec(y), out_div, idx)
 
         else:
+            # ==============================================================
+            # Generic path: scalar 2-pass for arbitrary N
+            # ==============================================================
             Input_buf = fx.rocdl.make_buffer_tensor(Input)
             ResidualIn_buf = fx.rocdl.make_buffer_tensor(ResidualIn)
             Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma)
@@ -851,7 +859,7 @@ def _build_rmsnorm_quant_module(
             quant_half_width = VEC_WIDTH // 2
             abs_mask = full(VEC_WIDTH, fx.Uint32(0x7FFFFFFF), fx.Uint32)
             xscale_vec_width = 4
-
+            # ── Layout API: buffer-backed tensors + tiled access ─────
             Input_buf = fx.rocdl.make_buffer_tensor(Input)
             Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma)
             Output_buf = fx.rocdl.make_buffer_tensor(Output)
@@ -906,6 +914,7 @@ def _build_rmsnorm_quant_module(
             thread_dummy = c_zero_f
             in_local = []
 
+            # Pass 1: load + cache + sumsq
             for tile_i in range_constexpr(num_tiles):
                 idx = tid + tile_i * BLOCK_THREADS
                 vec = _load_vec(in_div, idx)
@@ -923,6 +932,7 @@ def _build_rmsnorm_quant_module(
             thread_row_max = c_zero_f
             y_local = []
 
+            # Pass 2: normalize + gamma (+ optional smooth scale), cache output, and accumulate row max
             for tile_i in range_constexpr(num_tiles):
                 idx = tid + tile_i * BLOCK_THREADS
 
@@ -949,6 +959,7 @@ def _build_rmsnorm_quant_module(
 
             inv_scale = c_one_f / final_scale
 
+            # Pass 3: quantize + store using per-row scale
             for tile_i in range_constexpr(num_tiles):
                 q = y_local[tile_i] * inv_scale
                 q_i8 = q.to(quant_dtype)
@@ -960,7 +971,7 @@ def _build_rmsnorm_quant_module(
 
         else:
             # ==============================================================
-            # Generic path: scalar 2-pass for arbitrary N
+            # Generic path: scalar 3-pass for arbitrary N
             # ==============================================================
             Input_buf = fx.rocdl.make_buffer_tensor(Input)
             Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma)
@@ -1021,6 +1032,7 @@ def _build_rmsnorm_quant_module(
 
             thread_sumsq = c_zero_f
 
+            # Pass 1: accumulate sumsq
             for base_idx_int in range_constexpr(0, N, BLOCK_THREADS):
                 idx = tid + base_idx_int
                 is_valid = idx < N
@@ -1036,6 +1048,7 @@ def _build_rmsnorm_quant_module(
             rrms = fmath.rsqrt(ms_eps, fastmath=fm_fast)
 
             thread_row_max = c_zero_f
+            # Pass 2: normalize, apply gamma (+ optional smooth scale), and accumulate row max
             for base_idx_int in range_constexpr(0, N, BLOCK_THREADS):
                 idx = tid + base_idx_int
                 is_valid = idx < N
@@ -1060,6 +1073,7 @@ def _build_rmsnorm_quant_module(
 
             inv_scale = c_one_f / final_scale
 
+            # Pass 3: quantize + store using per-row scale
             for base_idx_int in range_constexpr(0, N, BLOCK_THREADS):
                 idx = tid + base_idx_int
                 if idx < N:
@@ -1100,28 +1114,29 @@ def _build_rmsnorm_quant_module(
 
         return launch_rmsnorm_smoothquant
 
-    @flyc.jit
-    def launch_rmsnorm_dynamicquant(
-        Input: fx.Tensor,
-        Gamma: fx.Tensor,
-        Output: fx.Tensor,
-        YScale: fx.Tensor,
-        m_in: fx.Int32,
-        stream: fx.Stream = fx.Stream(None),
-    ):
-        allocator.finalized = False
-        ctx = CompilationContext.get_current()
-        with InsertionPoint(ctx.gpu_module_body):
-            allocator.finalize()
+    else:
+        @flyc.jit
+        def launch_rmsnorm_dynamicquant(
+            Input: fx.Tensor,
+            Gamma: fx.Tensor,
+            Output: fx.Tensor,
+            YScale: fx.Tensor,
+            m_in: fx.Int32,
+            stream: fx.Stream = fx.Stream(None),
+        ):
+            allocator.finalized = False
+            ctx = CompilationContext.get_current()
+            with InsertionPoint(ctx.gpu_module_body):
+                allocator.finalize()
 
-        launcher = rmsnorm_quant_kernel(Input, Gamma, Gamma, YScale, Output)
-        launcher.launch(
-            grid=(m_in, 1, 1),
-            block=(BLOCK_THREADS, 1, 1),
-            stream=stream,
-        )
+            launcher = rmsnorm_quant_kernel(Input, Gamma, Gamma, YScale, Output)
+            launcher.launch(
+                grid=(m_in, 1, 1),
+                block=(BLOCK_THREADS, 1, 1),
+                stream=stream,
+            )
 
-    return launch_rmsnorm_dynamicquant
+        return launch_rmsnorm_dynamicquant
 
 
 def build_rmsnorm_dynamicquant_module(
@@ -1300,12 +1315,15 @@ def _build_fused_add_rmsnorm_quant_module(
 
             return SmemPtr.load(s_red, [0])
 
+        # ==================================================================
+        # Fast path: N is a multiple of tile_cols
+        # ==================================================================
         if const_expr(N >= tile_cols and N % tile_cols == 0 and elem_bits <= 16):
             num_tiles = N // tile_cols
             quant_half_width = VEC_WIDTH // 2
             abs_mask = full(VEC_WIDTH, fx.Uint32(0x7FFFFFFF), fx.Uint32)
             xscale_vec_width = 4
-
+            # ── Layout API: buffer-backed tensors + tiled access ─────
             Input_buf = fx.rocdl.make_buffer_tensor(Input)
             ResidualIn_buf = fx.rocdl.make_buffer_tensor(ResidualIn)
             Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma)
@@ -1396,6 +1414,7 @@ def _build_fused_add_rmsnorm_quant_module(
             thread_dummy = c_zero_f
             add_local = []
 
+            # Pass 1: add + cache + sumsq (also write residual_out)
             for tile_i in range_constexpr(num_tiles):
                 idx = tid + tile_i * BLOCK_THREADS
                 x = _load_vec(in_div, idx).to(fx.Float32)
@@ -1416,6 +1435,7 @@ def _build_fused_add_rmsnorm_quant_module(
             thread_row_max = c_zero_f
             y_local = []
 
+            # Pass 2: normalize + gamma (+ optional smooth scale), cache output, and accumulate row max
             for tile_i in range_constexpr(num_tiles):
                 idx = tid + tile_i * BLOCK_THREADS
                 g = _load_vec(gamma_div, idx).to(fx.Float32)
@@ -1441,6 +1461,7 @@ def _build_fused_add_rmsnorm_quant_module(
 
             inv_scale = c_one_f / final_scale
 
+            # Pass 3: quantize + store using per-row scale
             for tile_i in range_constexpr(num_tiles):
                 q = y_local[tile_i] * inv_scale
                 q_i8 = q.to(quant_dtype)
@@ -1451,6 +1472,9 @@ def _build_fused_add_rmsnorm_quant_module(
                 _store_q_vec(q_hi, out_div_q, out_idx + 1)
 
         else:
+            # ==============================================================
+            # Generic path: scalar 3-pass for arbitrary N
+            # ==============================================================
             Input_buf = fx.rocdl.make_buffer_tensor(Input)
             ResidualIn_buf = fx.rocdl.make_buffer_tensor(ResidualIn)
             Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma)
@@ -1531,6 +1555,7 @@ def _build_fused_add_rmsnorm_quant_module(
 
             thread_sumsq = c_zero_f
 
+            # Pass 1: add, write residual_out, and accumulate sumsq
             for base_idx_int in range_constexpr(0, N, BLOCK_THREADS):
                 idx = tid + base_idx_int
                 is_valid = idx < N
@@ -1552,6 +1577,7 @@ def _build_fused_add_rmsnorm_quant_module(
             rrms = fmath.rsqrt(ms_eps, fastmath=fm_fast)
 
             thread_row_max = c_zero_f
+            # Pass 2: normalize, apply gamma (+ optional smooth scale), and accumulate row max
             for base_idx_int in range_constexpr(0, N, BLOCK_THREADS):
                 idx = tid + base_idx_int
                 is_valid = idx < N
@@ -1576,6 +1602,7 @@ def _build_fused_add_rmsnorm_quant_module(
 
             inv_scale = c_one_f / final_scale
 
+            # Pass 3: quantize + store using per-row scale
             for base_idx_int in range_constexpr(0, N, BLOCK_THREADS):
                 idx = tid + base_idx_int
                 if idx < N:
@@ -1620,32 +1647,33 @@ def _build_fused_add_rmsnorm_quant_module(
 
         return launch_fused_add_rmsnorm_smoothquant
 
-    @flyc.jit
-    def launch_fused_add_rmsnorm_dynamicquant(
-        Input: fx.Tensor,
-        ResidualIn: fx.Tensor,
-        Gamma: fx.Tensor,
-        Output: fx.Tensor,
-        ResidualOut: fx.Tensor,
-        YScale: fx.Tensor,
-        m_in: fx.Int32,
-        stream: fx.Stream = fx.Stream(None),
-    ):
-        allocator.finalized = False
-        ctx = CompilationContext.get_current()
-        with InsertionPoint(ctx.gpu_module_body):
-            allocator.finalize()
+    else:
+        @flyc.jit
+        def launch_fused_add_rmsnorm_dynamicquant(
+            Input: fx.Tensor,
+            ResidualIn: fx.Tensor,
+            Gamma: fx.Tensor,
+            Output: fx.Tensor,
+            ResidualOut: fx.Tensor,
+            YScale: fx.Tensor,
+            m_in: fx.Int32,
+            stream: fx.Stream = fx.Stream(None),
+        ):
+            allocator.finalized = False
+            ctx = CompilationContext.get_current()
+            with InsertionPoint(ctx.gpu_module_body):
+                allocator.finalize()
 
-        launcher = fused_add_rmsnorm_quant_kernel(
-            Input, ResidualIn, Gamma, Gamma, YScale, Output, ResidualOut
-        )
-        launcher.launch(
-            grid=(m_in, 1, 1),
-            block=(BLOCK_THREADS, 1, 1),
-            stream=stream,
-        )
+            launcher = fused_add_rmsnorm_quant_kernel(
+                Input, ResidualIn, Gamma, Gamma, YScale, Output, ResidualOut
+            )
+            launcher.launch(
+                grid=(m_in, 1, 1),
+                block=(BLOCK_THREADS, 1, 1),
+                stream=stream,
+            )
 
-    return launch_fused_add_rmsnorm_dynamicquant
+        return launch_fused_add_rmsnorm_dynamicquant
 
 
 def build_fused_add_rmsnorm_dynamicquant_module(
