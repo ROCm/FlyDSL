@@ -22,11 +22,8 @@ import flydsl.compiler as flyc
 pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
 
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
-_PYFLYDSL_SRC = os.path.join(_REPO_ROOT, "flydsl", "src")
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
-if _PYFLYDSL_SRC not in sys.path:
-    sys.path.insert(0, _PYFLYDSL_SRC)
 
 from flydsl.runtime.device import get_rocm_arch
 from kernels.fp8_gemm_4wave_v2 import compile_fp8_gemm_4wave
