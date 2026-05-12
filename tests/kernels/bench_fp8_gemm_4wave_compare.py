@@ -3,12 +3,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""Three-way FP8 4-wave GEMM perf comparison.
+"""FP8 4-wave GEMM perf comparison vs torch._scaled_mm.
 
-Runs FlyDSL layout-API kernel (``kernels.fp8_gemm_4wave_v2``), the PR
-reference kernel (``kernels.fp8_gemm_4wave``) and ``torch._scaled_mm`` on
-the same input tensors with the same warmup/iter config, then prints a
-side-by-side TFLOPS / us table.
+Runs the FlyDSL kernel (``kernels.fp8_gemm_4wave``) and
+``torch._scaled_mm`` on the same input tensors with the same warmup/iter
+config, then prints a side-by-side TFLOPS / us table.
 """
 
 import argparse
@@ -24,8 +23,7 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 from flydsl.runtime.device import get_rocm_arch
-from kernels.fp8_gemm_4wave import compile_fp8_gemm as compile_pr
-from kernels.fp8_gemm_4wave_v2 import compile_fp8_gemm_4wave as compile_v2
+from kernels.fp8_gemm_4wave import compile_fp8_gemm
 from tests.test_common import run_perftest, verify_output
 from tests.utils import pertoken_quant
 
@@ -60,9 +58,9 @@ def _ref_dequant_mm(a, b, sa, sb):
     return torch.mm(a_f32, b_f32.T).to(torch.float32)
 
 
-def _bench_flydsl(compile_fn, label, M, N, K, tile_m, tile_n, a_q, b_q, sa, sb, c_ref, num_warmups, num_iters):
+def _bench_flydsl(M, N, K, tile_m, tile_n, a_q, b_q, sa, sb, c_ref, num_warmups, num_iters):
     c_out = torch.zeros((M, N), dtype=OUT_DTYPE, device="cuda")
-    launch_fn = compile_fn(M=M, N=N, K=K, BLOCK_M=tile_m, BLOCK_N=tile_n, use_xcd_remap=True)
+    launch_fn = compile_fp8_gemm(M=M, N=N, K=K, BLOCK_M=tile_m, BLOCK_N=tile_n, use_xcd_remap=True)
     compiled = flyc.compile(launch_fn, *_flydsl_args(c_out, a_q, b_q, sa, sb))
 
     def _launch(c, a, b, s_a, s_b):
@@ -111,12 +109,8 @@ def _bench_one(M, N, K, tile_m, tile_n, *, num_warmups, num_iters, skip_torch):
     flops = 2 * M * N * K
 
     results = []
-
-    us, ok = _bench_flydsl(compile_v2, "v2", M, N, K, tile_m, tile_n, a_q, b_q, sa, sb, c_ref, num_warmups, num_iters)
-    results.append(("flydsl-v2", us, ok))
-
-    us, ok = _bench_flydsl(compile_pr, "pr", M, N, K, tile_m, tile_n, a_q, b_q, sa, sb, c_ref, num_warmups, num_iters)
-    results.append(("flydsl-pr", us, ok))
+    us, ok = _bench_flydsl(M, N, K, tile_m, tile_n, a_q, b_q, sa, sb, c_ref, num_warmups, num_iters)
+    results.append(("flydsl-4wave", us, ok))
 
     if not skip_torch:
         try:
@@ -126,18 +120,18 @@ def _bench_one(M, N, K, tile_m, tile_n, *, num_warmups, num_iters, skip_torch):
             print(f"  torch._scaled_mm failed: {e}")
             results.append(("torch._scaled_mm", float("nan"), False))
 
-    base_us = next((us for label, us, _ in results if label == "flydsl-pr"), None)
-    print(f"  {'kernel':<22} {'us':>10} {'TFLOPS':>10} {'vs PR':>10}  ok")
+    base_us = next((us for label, us, _ in results if label == "flydsl-4wave"), None)
+    print(f"  {'kernel':<22} {'us':>10} {'TFLOPS':>10} {'vs flydsl':>11}  ok")
     for label, us, ok in results:
-        tflops = flops / (us / 1e6) / 1e12 if us == us and us > 0 else float("nan")  # nan guard
+        tflops = flops / (us / 1e6) / 1e12 if us == us and us > 0 else float("nan")
         rel = (base_us / us * 100.0) if base_us and us == us and us > 0 else float("nan")
-        print(f"  {label:<22} {us:>10.2f} {tflops:>10.2f} {rel:>9.1f}%  {ok}")
+        print(f"  {label:<22} {us:>10.2f} {tflops:>10.2f} {rel:>10.1f}%  {ok}")
 
     return results
 
 
 def main():
-    parser = argparse.ArgumentParser(description="FP8 4-Wave GEMM three-way comparison")
+    parser = argparse.ArgumentParser(description="FP8 4-wave GEMM comparison vs torch._scaled_mm")
     parser.add_argument(
         "--shapes",
         type=str,

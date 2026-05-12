@@ -1,5 +1,12 @@
+#!/usr/bin/env python3
+
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
+
+"""FP8 4-wave GEMM correctness + perf harness.
+
+Kernel implementation: ``kernels/fp8_gemm_4wave.py``.
+"""
 
 import os
 import sys
@@ -9,12 +16,11 @@ import torch
 
 import flydsl.compiler as flyc
 
+pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
+
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
-_PYFLYDSL_SRC = os.path.join(_REPO_ROOT, "flydsl", "src")
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
-if _PYFLYDSL_SRC not in sys.path:
-    sys.path.insert(0, _PYFLYDSL_SRC)
 
 from flydsl.runtime.device import get_rocm_arch  # noqa: E402
 from kernels.fp8_gemm_4wave import compile_fp8_gemm  # noqa: E402
@@ -30,44 +36,31 @@ if not torch.cuda.is_available():
 
 
 def _run_torch(a, b, scale_a, scale_b, dtype=torch.float32):
-    if scale_a is not None and scale_b is not None:
-        a_f32 = a.to(torch.float32) * scale_a.view(-1, 1)
-        b_f32 = b.to(torch.float32) * scale_b.view(-1, 1)
-    else:
-        a_f32 = a.to(torch.float32)
-        b_f32 = b.to(torch.float32)
-    c = torch.mm(a_f32, b_f32.T)
-    return c.to(dtype)
+    a_f32 = a.to(torch.float32) * scale_a.view(-1, 1)
+    b_f32 = b.to(torch.float32) * scale_b.view(-1, 1)
+    return torch.mm(a_f32, b_f32.T).to(dtype)
 
 
-@pytest.mark.parametrize(
-    "M, N, K, tile_m, tile_n",
-    [
-        pytest.param(8192, 8192, 8192, 256, 256, marks=pytest.mark.large_shape, id="8192x8192x8192"),
-    ],
-)
-def test_fp8_gemm_4wave(
+def _bench_fp8_gemm_4wave(
     M: int,
     N: int,
     K: int,
+    *,
     tile_m: int,
     tile_n: int,
-    *,
     disable_xcd_remap: bool = False,
     num_warmups: int = 2,
     num_iters: int = 10,
 ):
+    """Run + verify a single (M, N, K, tile) configuration. Returns TFLOPS."""
     if "gfx95" not in ARCH:
-        pytest.skip("FP8 GEMM requires CDNA4")
-
-    size_c = M * N
-    size_a = M * K
-    size_b = N * K
+        pytest.skip("FP8 4-wave GEMM requires CDNA4 (gfx95*)")
 
     device = torch.device("cuda")
     a_fp32 = torch.rand(M, K, device=device, dtype=torch.float32)
     b_fp32_t = torch.rand(N, K, device=device, dtype=torch.float32)
     c_out_raw = torch.zeros((M, N), dtype=OUT_DTYPE, device=device)
+
     a_q, scale_a = pertoken_quant(a_fp32, quant_dtype=FP8_DTYPE)
     b_q, scale_b = pertoken_quant(b_fp32_t, quant_dtype=FP8_DTYPE)
 
@@ -78,10 +71,20 @@ def test_fp8_gemm_4wave(
 
     c_ref = _run_torch(a_q, b_q, scale_a, scale_b)
 
-    launch_fn = compile_fp8_gemm(M=M, N=N, K=K, BLOCK_M=tile_m, BLOCK_N=tile_n, use_xcd_remap=not disable_xcd_remap)
-    print(f"✓ Kernel prepared (disable_xcd_remap={disable_xcd_remap})")
+    launch_fn = compile_fp8_gemm(
+        M=M,
+        N=N,
+        K=K,
+        BLOCK_M=tile_m,
+        BLOCK_N=tile_n,
+        use_xcd_remap=not disable_xcd_remap,
+    )
+    print(
+        f"\n[fp8_gemm_4wave] M={M} N={N} K={K} "
+        f"BLOCK_M={tile_m} BLOCK_N={tile_n} xcd_remap={not disable_xcd_remap}"
+    )
 
-    def _as_i8(t):
+    def _as_i8(t: torch.Tensor) -> torch.Tensor:
         return t.view(torch.int8) if "float8" in str(t.dtype) else t
 
     def _args(c, a, b, sa, sb):
@@ -100,7 +103,6 @@ def test_fp8_gemm_4wave(
         compiled(*_args(c, a, b, sa, sb))
 
     num_iters = max(2, int(num_iters))
-
     _, us = run_perftest(
         _launch,
         c_out_raw,
@@ -112,11 +114,11 @@ def test_fp8_gemm_4wave(
         num_warmup=num_warmups,
     )
     torch.cuda.synchronize()
+
     c_out_f32 = c_out_raw.to(torch.float32)
     assert verify_output(c_out_f32, c_ref, rtol=0.1, atol=0.1)
 
-    # A/B fp8, C bf16, scales fp32
-    bytes_moved = size_a + size_b + size_c * 2 + (M + N) * 4
+    bytes_moved = M * K + N * K + M * N * 2 + (M + N) * 4
     flops = 2 * M * N * K
     tflops = flops / (us / 1e6) / 1e12
     tbps = bytes_moved / 1e12 / (us / 1e6)
@@ -125,10 +127,23 @@ def test_fp8_gemm_4wave(
     return tflops
 
 
+@pytest.mark.parametrize(
+    "M, N, K, tile_m, tile_n",
+    [
+        pytest.param(512, 2112, 7168, 64, 64, id="512x2112x7168"),
+        pytest.param(5120, 5120, 8320, 256, 256, id="5120x5120x8320"),
+        pytest.param(8192, 8192, 8192, 256, 256, marks=pytest.mark.large_shape, id="8192x8192x8192"),
+        pytest.param(9728, 8192, 8320, 256, 256, marks=pytest.mark.large_shape, id="9728x8192x8320"),
+    ],
+)
+def test_fp8_gemm_4wave(M, N, K, tile_m, tile_n):
+    _bench_fp8_gemm_4wave(M=M, N=N, K=K, tile_m=tile_m, tile_n=tile_n)
+
+
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="FP8 4-Wave GEMM benchmark")
+    parser = argparse.ArgumentParser(description="FP8 4-wave GEMM benchmark")
     parser.add_argument("-M", type=int, default=8192)
     parser.add_argument("-N", type=int, default=8192)
     parser.add_argument("-K", type=int, default=8192)
@@ -138,10 +153,11 @@ if __name__ == "__main__":
     parser.add_argument("--num_iters", type=int, default=10)
     parser.add_argument("--num_warmups", type=int, default=2)
     args = parser.parse_args()
+
     torch.set_default_device("cuda")
 
     try:
-        test_fp8_gemm_4wave(
+        _bench_fp8_gemm_4wave(
             M=args.M,
             N=args.N,
             K=args.K,
