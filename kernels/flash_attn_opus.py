@@ -192,14 +192,11 @@ def build_flash_attn_opus_module(
     # barrier, the dual-group phase shift cannot race against the next
     # async_load that overwrites the V LDS buffer.
     #
-    # Default remains OFF because in the current FlyDSL pipeline the
-    # extra register pressure from holding 4 V substeps in VGPRs across
-    # the barrier (plus the asymmetric barrier itself) regresses
-    # throughput vs. the symmetric (lockstep) path. Setting
-    # `FLYDSL_OPUS_STAGGER=1` enables the C++-equivalent asymmetric
-    # barrier and is verified to produce correct outputs at all tested
-    # scales (MaxErr matches the unstaggered path bit-for-bit).
-    OPUS_ENABLE_STAGGER = os.getenv("FLYDSL_OPUS_STAGGER", "0") == "1"
+    # Default ON: the P1-P6 OPUS path requires this flag set to truly
+    # mirror gqa_d128_kernel_template.hpp end-to-end. Setting
+    # `FLYDSL_OPUS_STAGGER=0` falls back to a symmetric (lockstep)
+    # barrier — useful for A/B testing only.
+    OPUS_ENABLE_STAGGER = os.getenv("FLYDSL_OPUS_STAGGER", "1") == "1"
     OPUS_YIELD_NOP = os.getenv("FLYDSL_OPUS_YIELD_NOP", "1") == "1"
 
     @flyc.kernel(known_block_size=[BLOCK_SIZE, 1, 1])
@@ -883,9 +880,9 @@ def build_flash_attn_opus_module(
         #               __builtin_amdgcn_s_barrier();
         #           }
         # The asymmetric (per-wave-group) version is gated by
-        # OPUS_ENABLE_STAGGER. The path is now correctness-safe thanks to
-        # V LDS reads being hoisted one cluster earlier (see Clusters
-        # 2/6/10/12). With the flag OFF (default) we fall back to an
+        # OPUS_ENABLE_STAGGER (default ON). The path is correctness-safe
+        # thanks to V LDS reads being hoisted one cluster earlier (see
+        # Clusters 2/6/10/12). With the flag OFF we fall back to an
         # unconditional `gpu.barrier()` so both wave groups stay in
         # lockstep.
         if const_expr(OPUS_ENABLE_STAGGER):
@@ -1509,11 +1506,11 @@ def build_flash_attn_opus_module(
         #     if (!stagger) {
         #         __builtin_amdgcn_s_barrier();
         #     }
-        # Same gating as the prologue half: with OPUS_ENABLE_STAGGER ON,
-        # warps 0-3 hit one extra barrier here so that across the whole
-        # kernel both groups observe the same total barrier count. With
-        # the flag OFF (default) we fall back to an unconditional barrier
-        # on every wave.
+        # Same gating as the prologue half: with OPUS_ENABLE_STAGGER ON
+        # (default) warps 0-3 hit one extra barrier here so that across
+        # the whole kernel both groups observe the same total barrier
+        # count. With the flag OFF we fall back to an unconditional
+        # barrier on every wave.
         if const_expr(OPUS_ENABLE_STAGGER):
             _stagger_extra_barrier_if_zero()
         else:
