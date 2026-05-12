@@ -8,9 +8,8 @@ Inline Compare — AST rewriter generates scf.IfOp correctly for
 ``if tid < threshold: buffer_ops.buffer_store(arith.constant(1), rsrc, tid)``.
 
 The compare ``tid < threshold`` is between two MLIR runtime values
-(threadIdx.x and a kernel argument), so _could_be_dynamic returns True
-and visit_If rewrites it into scf_if_dispatch → scf.IfOp with no
-live-out (no results, no yield).
+(threadIdx.x and a kernel argument), so visit_If rewrites it into
+scf_if_dispatch → scf.IfOp with no live-out (no results, no yield).
 """
 
 import pytest
