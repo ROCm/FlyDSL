@@ -201,9 +201,7 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
             gamma_div = fx.logical_divide(Gamma_buf, fx.make_layout(VEC_WIDTH, 1))
 
             copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), elem_bits)
-            vec_reg_ty = fx.MemRefType.get(
-                elem_type, fx.LayoutType.get(VEC_WIDTH, 1), fx.AddressSpace.Register
-            )
+            vec_reg_ty = fx.MemRefType.get(elem_type, fx.LayoutType.get(VEC_WIDTH, 1), fx.AddressSpace.Register)
             vec_reg_lay = fx.make_layout(VEC_WIDTH, 1)
 
             c_zero_f = fx.Float32(0.0)
@@ -255,9 +253,7 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
                 fx.rocdl.BufferCopy16b() if elem_bits <= 16 else fx.rocdl.BufferCopy32b(),
                 elem_bits,
             )
-            scalar_reg_ty = fx.MemRefType.get(
-                elem_type, fx.LayoutType.get(1, 1), fx.AddressSpace.Register
-            )
+            scalar_reg_ty = fx.MemRefType.get(elem_type, fx.LayoutType.get(1, 1), fx.AddressSpace.Register)
             scalar_reg_lay = fx.make_layout(1, 1)
 
             row_div = fx.logical_divide(row_in, fx.make_layout(1, 1))
@@ -356,9 +352,7 @@ def _build_rmsnorm_large_m_small_n_module(M: int, N: int, dtype_str: str):
                 fx.rocdl.BufferCopy16b() if elem_bits <= 16 else fx.rocdl.BufferCopy32b(),
                 elem_bits,
             )
-            scalar_reg_ty = fx.MemRefType.get(
-                elem_type, fx.LayoutType.get(1, 1), fx.AddressSpace.Register
-            )
+            scalar_reg_ty = fx.MemRefType.get(elem_type, fx.LayoutType.get(1, 1), fx.AddressSpace.Register)
             scalar_reg_lay = fx.make_layout(1, 1)
 
             row_div = fx.logical_divide(row_in, fx.make_layout(1, 1))
@@ -521,9 +515,7 @@ def build_fused_add_rmsnorm_module(M: int, N: int, dtype_str: str):
             gamma_div = fx.logical_divide(Gamma_buf, fx.make_layout(VEC_WIDTH, 1))
 
             copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), elem_bits)
-            vec_reg_ty = fx.MemRefType.get(
-                elem_type, fx.LayoutType.get(VEC_WIDTH, 1), fx.AddressSpace.Register
-            )
+            vec_reg_ty = fx.MemRefType.get(elem_type, fx.LayoutType.get(VEC_WIDTH, 1), fx.AddressSpace.Register)
             vec_reg_lay = fx.make_layout(VEC_WIDTH, 1)
 
             c_zero_f = fx.Float32(0.0)
@@ -579,9 +571,7 @@ def build_fused_add_rmsnorm_module(M: int, N: int, dtype_str: str):
                 fx.rocdl.BufferCopy16b() if elem_bits <= 16 else fx.rocdl.BufferCopy32b(),
                 elem_bits,
             )
-            scalar_reg_ty = fx.MemRefType.get(
-                elem_type, fx.LayoutType.get(1, 1), fx.AddressSpace.Register
-            )
+            scalar_reg_ty = fx.MemRefType.get(elem_type, fx.LayoutType.get(1, 1), fx.AddressSpace.Register)
             scalar_reg_lay = fx.make_layout(1, 1)
 
             row_div = fx.logical_divide(row_in, fx.make_layout(1, 1))
@@ -603,7 +593,9 @@ def build_fused_add_rmsnorm_module(M: int, N: int, dtype_str: str):
                 residual = residual_e if dtype_str == "f32" else residual_e.to(fx.Float32)
                 added_e = _to_elem_scalar(dtype_str, elem_dtype, x + residual)
                 if idx < N:
-                    _store_scalar(copy_atom_s, scalar_reg_ty, scalar_reg_lay, elem_dtype, residual_out_div, idx, added_e)
+                    _store_scalar(
+                        copy_atom_s, scalar_reg_ty, scalar_reg_lay, elem_dtype, residual_out_div, idx, added_e
+                    )
                 added = added_e if dtype_str == "f32" else added_e.to(fx.Float32)
                 added2 = added * added
                 thread_sumsq = thread_sumsq + is_valid.select(added2, c_zero_f)
@@ -711,9 +703,7 @@ def _build_rmsnorm_quant_module(
         YScale_buf = fx.rocdl.make_buffer_tensor(YScale)
         yscale_div = fx.logical_divide(YScale_buf, fx.make_layout(1, 1))
         scale_copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), 32)
-        scale_reg_ty = fx.MemRefType.get(
-            fx.Float32.ir_type, fx.LayoutType.get(1, 1), fx.AddressSpace.Register
-        )
+        scale_reg_ty = fx.MemRefType.get(fx.Float32.ir_type, fx.LayoutType.get(1, 1), fx.AddressSpace.Register)
         scale_reg_lay = fx.make_layout(1, 1)
 
         def wave_reduce_add(x):
@@ -818,9 +808,7 @@ def _build_rmsnorm_quant_module(
                 xscale_div = fx.logical_divide(XScale_buf, fx.make_layout(xscale_vec_width, 1))
 
             copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), elem_bits)
-            vec_reg_ty = fx.MemRefType.get(
-                elem_type, fx.LayoutType.get(VEC_WIDTH, 1), fx.AddressSpace.Register
-            )
+            vec_reg_ty = fx.MemRefType.get(elem_type, fx.LayoutType.get(VEC_WIDTH, 1), fx.AddressSpace.Register)
             vec_reg_lay = fx.make_layout(VEC_WIDTH, 1)
             if const_expr(is_smooth):
                 copy_atom_xs = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), 32)
@@ -918,9 +906,7 @@ def _build_rmsnorm_quant_module(
                     fx.Float32.ir_type, fx.LayoutType.get(1, 1), fx.AddressSpace.Register
                 )
                 xscale_scalar_reg_lay = fx.make_layout(1, 1)
-            scalar_reg_ty_q = fx.MemRefType.get(
-                quant_elem_type, fx.LayoutType.get(1, 1), fx.AddressSpace.Register
-            )
+            scalar_reg_ty_q = fx.MemRefType.get(quant_elem_type, fx.LayoutType.get(1, 1), fx.AddressSpace.Register)
             scalar_reg_lay_q = fx.make_layout(1, 1)
 
             row_in = fx.slice(Input_buf, (bid, None))
@@ -996,6 +982,7 @@ def _build_rmsnorm_quant_module(
                     _store_scalar(copy_atom_qs, scalar_reg_ty_q, scalar_reg_lay_q, quant_dtype, out_div, idx, q_i8)
 
     if is_smooth:
+
         @flyc.jit
         def launch_rmsnorm_smoothquant(
             Input: fx.Tensor,
@@ -1021,6 +1008,7 @@ def _build_rmsnorm_quant_module(
         return launch_rmsnorm_smoothquant
 
     else:
+
         @flyc.jit
         def launch_rmsnorm_dynamicquant(
             Input: fx.Tensor,
@@ -1128,9 +1116,7 @@ def _build_fused_add_rmsnorm_quant_module(
         YScale_buf = fx.rocdl.make_buffer_tensor(YScale)
         yscale_div = fx.logical_divide(YScale_buf, fx.make_layout(1, 1))
         scale_copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), 32)
-        scale_reg_ty = fx.MemRefType.get(
-            fx.Float32.ir_type, fx.LayoutType.get(1, 1), fx.AddressSpace.Register
-        )
+        scale_reg_ty = fx.MemRefType.get(fx.Float32.ir_type, fx.LayoutType.get(1, 1), fx.AddressSpace.Register)
         scale_reg_lay = fx.make_layout(1, 1)
 
         def wave_reduce_add(x):
@@ -1233,23 +1219,15 @@ def _build_fused_add_rmsnorm_quant_module(
             row_residual_out = fx.slice(ResidualOut_buf, (bid, None))
 
             in_div = fx.logical_divide(row_in, fx.make_layout(VEC_WIDTH, 1))
-            residual_in_div = fx.logical_divide(
-                row_residual_in, fx.make_layout(VEC_WIDTH, 1)
-            )
+            residual_in_div = fx.logical_divide(row_residual_in, fx.make_layout(VEC_WIDTH, 1))
             out_div_q = fx.logical_divide(row_out, fx.make_layout(quant_half_width, 1))
-            residual_out_div = fx.logical_divide(
-                row_residual_out, fx.make_layout(VEC_WIDTH, 1)
-            )
+            residual_out_div = fx.logical_divide(row_residual_out, fx.make_layout(VEC_WIDTH, 1))
             gamma_div = fx.logical_divide(Gamma_buf, fx.make_layout(VEC_WIDTH, 1))
             if const_expr(is_smooth):
-                xscale_div = fx.logical_divide(
-                    XScale_buf, fx.make_layout(xscale_vec_width, 1)
-                )
+                xscale_div = fx.logical_divide(XScale_buf, fx.make_layout(xscale_vec_width, 1))
 
             copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), elem_bits)
-            vec_reg_ty = fx.MemRefType.get(
-                elem_type, fx.LayoutType.get(VEC_WIDTH, 1), fx.AddressSpace.Register
-            )
+            vec_reg_ty = fx.MemRefType.get(elem_type, fx.LayoutType.get(VEC_WIDTH, 1), fx.AddressSpace.Register)
             vec_reg_lay = fx.make_layout(VEC_WIDTH, 1)
             if const_expr(is_smooth):
                 copy_atom_xs = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), 32)
@@ -1343,9 +1321,7 @@ def _build_fused_add_rmsnorm_quant_module(
                 elem_bits,
             )
             copy_atom_qs = fx.make_copy_atom(fx.rocdl.BufferCopy(8), 8)
-            scalar_reg_ty = fx.MemRefType.get(
-                elem_type, fx.LayoutType.get(1, 1), fx.AddressSpace.Register
-            )
+            scalar_reg_ty = fx.MemRefType.get(elem_type, fx.LayoutType.get(1, 1), fx.AddressSpace.Register)
             scalar_reg_lay = fx.make_layout(1, 1)
             if const_expr(is_smooth):
                 copy_atom_xs = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), 32)
@@ -1353,9 +1329,7 @@ def _build_fused_add_rmsnorm_quant_module(
                     fx.Float32.ir_type, fx.LayoutType.get(1, 1), fx.AddressSpace.Register
                 )
                 xscale_scalar_reg_lay = fx.make_layout(1, 1)
-            scalar_reg_ty_q = fx.MemRefType.get(
-                quant_elem_type, fx.LayoutType.get(1, 1), fx.AddressSpace.Register
-            )
+            scalar_reg_ty_q = fx.MemRefType.get(quant_elem_type, fx.LayoutType.get(1, 1), fx.AddressSpace.Register)
             scalar_reg_lay_q = fx.make_layout(1, 1)
 
             row_in = fx.slice(Input_buf, (bid, None))
@@ -1389,7 +1363,9 @@ def _build_fused_add_rmsnorm_quant_module(
                 residual = residual_e if dtype_str == "f32" else residual_e.to(fx.Float32)
                 added_e = _to_elem_scalar(dtype_str, elem_dtype, x + residual)
                 if idx < N:
-                    _store_scalar(copy_atom_s, scalar_reg_ty, scalar_reg_lay, elem_dtype, residual_out_div, idx, added_e)
+                    _store_scalar(
+                        copy_atom_s, scalar_reg_ty, scalar_reg_lay, elem_dtype, residual_out_div, idx, added_e
+                    )
                 added = added_e if dtype_str == "f32" else added_e.to(fx.Float32)
                 added2 = added * added
                 thread_sumsq = thread_sumsq + is_valid.select(added2, c_zero_f)
@@ -1442,6 +1418,7 @@ def _build_fused_add_rmsnorm_quant_module(
                     _store_scalar(copy_atom_qs, scalar_reg_ty_q, scalar_reg_lay_q, quant_dtype, out_div, idx, q_i8)
 
     if is_smooth:
+
         @flyc.jit
         def launch_fused_add_rmsnorm_smoothquant(
             Input: fx.Tensor,
@@ -1459,9 +1436,7 @@ def _build_fused_add_rmsnorm_quant_module(
             with InsertionPoint(ctx.gpu_module_body):
                 allocator.finalize()
 
-            launcher = fused_add_rmsnorm_quant_kernel(
-                Input, ResidualIn, Gamma, XScale, YScale, Output, ResidualOut
-            )
+            launcher = fused_add_rmsnorm_quant_kernel(Input, ResidualIn, Gamma, XScale, YScale, Output, ResidualOut)
             launcher.launch(
                 grid=(m_in, 1, 1),
                 block=(BLOCK_THREADS, 1, 1),
@@ -1471,6 +1446,7 @@ def _build_fused_add_rmsnorm_quant_module(
         return launch_fused_add_rmsnorm_smoothquant
 
     else:
+
         @flyc.jit
         def launch_fused_add_rmsnorm_dynamicquant(
             Input: fx.Tensor,
@@ -1487,9 +1463,7 @@ def _build_fused_add_rmsnorm_quant_module(
             with InsertionPoint(ctx.gpu_module_body):
                 allocator.finalize()
 
-            launcher = fused_add_rmsnorm_quant_kernel(
-                Input, ResidualIn, Gamma, Gamma, YScale, Output, ResidualOut
-            )
+            launcher = fused_add_rmsnorm_quant_kernel(Input, ResidualIn, Gamma, Gamma, YScale, Output, ResidualOut)
             launcher.launch(
                 grid=(m_in, 1, 1),
                 block=(BLOCK_THREADS, 1, 1),
