@@ -6,6 +6,7 @@ set(LIBS
   MLIRRegisterAllExtensions
 
   MLIRMlirOptMain
+  MLIRToLLVMIRTranslationRegistration
 )
 
 add_llvm_tool(fly-opt

@@ -4,8 +4,8 @@
 """fly-opt tool usage guardrails."""
 
 import os
-from pathlib import Path
 import subprocess
+from pathlib import Path
 
 import pytest
 
