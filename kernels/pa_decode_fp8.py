@@ -1643,7 +1643,7 @@ def get_pa_metadata(
     reduce_final_map, reduce_partial_map, num_sm, partial_output,
     partial_lse, stride_po_partial, stride_pl_partial.
     """
-    import aiter
+    from aiter.ops.attention import get_pa_metadata_info_v1, get_pa_metadata_v1
 
     dev = query.device
     batch_size = context_lengths.shape[0]
@@ -1664,7 +1664,7 @@ def get_pa_metadata(
         (reduce_indptr_size, reduce_indptr_type),
         (reduce_final_map_size, reduce_final_map_type),
         (reduce_partial_map_size, reduce_partial_map_type),
-    ) = aiter.get_pa_metadata_info_v1(batch_size, num_kv_heads)
+    ) = get_pa_metadata_info_v1(batch_size, num_kv_heads)
 
     work_metadata_ptrs = torch.empty(work_meta_data_size, dtype=work_meta_data_type, device=dev)
     work_indptr = torch.empty(work_indptr_size, dtype=work_indptr_type, device=dev)
@@ -1673,7 +1673,7 @@ def get_pa_metadata(
     reduce_final_map = torch.empty(reduce_final_map_size, dtype=reduce_final_map_type, device=dev)
     reduce_partial_map = torch.empty(reduce_partial_map_size, dtype=reduce_partial_map_type, device=dev)
 
-    aiter.get_pa_metadata_v1(
+    get_pa_metadata_v1(
         seqlens_qo_indptr,
         kv_indptr,
         context_lengths,
