@@ -17,8 +17,9 @@ Layout-API surface used (vs PR's raw rocdl path):
 * ``fx.make_copy_atom`` with ``BufferCopyLDS128b`` (G→LDS),
   ``BufferCopy128b`` (vec4 A scale), ``BufferCopy32b`` (scalar B scale)
   and ``BufferCopy16b`` (bf16 output stores).
-* ``fx.copy_atom_call`` with ``atom.set_value("soffset", ...)`` carrying
-  PR's per-call ``k_offset`` through the atom state struct.
+* ``fx.copy`` (the high-level wrapper around ``fly.copy_atom_call``) with
+  ``soffset=...`` kwarg carrying PR's per-call ``k_offset`` through the
+  atom state struct.
 * ``fx.memref_alloca`` / ``fx.memref_load_vec`` / ``fx.memref_store_vec``
   for the per-thread accumulator scratch in the epilogue.
 
@@ -300,18 +301,16 @@ def compile_fp8_gemm_4wave(
 
         def _load_lds(gl_src_div, lds_dst_mem, k_offset, gl_offsets, n_tiles):
             assert len(gl_offsets) >= n_tiles
-            atom = g2lds_atom.set_value({"soffset": fx.Int32(k_offset)})
             for step in range_constexpr(n_tiles):
                 src = fx.slice(gl_src_div, (None, fx.Int32(gl_offsets[step])))
                 dst = _lds_dst_at(lds_dst_mem, wave_id * 1024 + step * 4096)
-                fx.copy_atom_call(atom, src, dst)
+                fx.copy(g2lds_atom, src, dst, soffset=fx.Int32(k_offset))
 
         def _load_one_lds(gl_src_div, lds_dst_mem, k_offset, gl_offsets, tile_idx):
             assert len(gl_offsets) > tile_idx
-            atom = g2lds_atom.set_value({"soffset": fx.Int32(k_offset)})
             src = fx.slice(gl_src_div, (None, fx.Int32(gl_offsets[tile_idx])))
             dst = _lds_dst_at(lds_dst_mem, wave_id * 1024 + tile_idx * 4096)
-            fx.copy_atom_call(atom, src, dst)
+            fx.copy(g2lds_atom, src, dst, soffset=fx.Int32(k_offset))
 
         def _pack_i32x4_i32x8(lo, hi):
             # Pack two i32x4 as one i32x8
@@ -355,18 +354,18 @@ def compile_fp8_gemm_4wave(
         def _store_C_scaled(c_frag, base_row, base_col):
             def _load_scale_vec4(row):
                 r = fx.memref_alloca(reg_f32_4_ty, fx.make_layout(4, 1))
-                fx.copy_atom_call(scale_atom_4, fx.slice(sa_div, (None, fx.Int32(row))), r)
+                fx.copy(scale_atom_4, fx.slice(sa_div, (None, fx.Int32(row))), r)
                 return Vec(fx.memref_load_vec(r))
 
             def _load_scale_scalar(col):
                 r = fx.memref_alloca(reg_f32_1_ty, fx.make_layout(1, 1))
-                fx.copy_atom_call(scale_atom_1, fx.slice(sb_div, (None, fx.Int32(col))), r)
+                fx.copy(scale_atom_1, fx.slice(sb_div, (None, fx.Int32(col))), r)
                 return Vec(fx.memref_load_vec(r))[0]
 
             def _store_bf16(value_bf16, c_index):
                 r = fx.memref_alloca(reg_bf16_1_ty, fx.make_layout(1, 1))
                 fx.memref_store_vec(Vec.filled(1, value_bf16, fx.BFloat16), r)
-                fx.copy_atom_call(out_atom_1, r, fx.slice(c_div, (None, fx.Int32(c_index))))
+                fx.copy(out_atom_1, r, fx.slice(c_div, (None, fx.Int32(c_index))))
 
             a_scales = [
                 _load_scale_vec4(base_row + i * 16 + (lane_id // 16) * 4)

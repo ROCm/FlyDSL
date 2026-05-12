@@ -412,8 +412,11 @@ def compile_preshuffle_gemm_a8(
         lds_out = lds_out_ptr.get()
 
         # ---- Buffer resources (runtime byte sizes for OOB protection) ----
-        _a_nrec = fx.Int64(c_m * (K * elem_bytes // a_elem_vec_pack))
-        _c_nrec = fx.Int64(c_m * c_n * 2)
+        # `fx.Int64(Integer)` path in older runtimes may not correctly handle
+        # Index-typed IR values; explicitly pass the raw IR value so the
+        # constructor takes the IndexType->i64 cast path.
+        _a_nrec = fx.Int64((c_m * (K * elem_bytes // a_elem_vec_pack)).ir_value())
+        _c_nrec = fx.Int64((c_m * c_n * 2).ir_value())
         a_rsrc = buffer_ops.create_buffer_resource(arg_a, max_size=False,
                                                    num_records_bytes=_a_nrec)
         c_rsrc = buffer_ops.create_buffer_resource(arg_c, max_size=False,
@@ -1849,17 +1852,35 @@ def compile_preshuffle_gemm_a8(
         gx = (i32_m + (tile_m - 1)) // tile_m
         gy = i32_n // tile_n
 
-        kernel_gemm(
-            arg_c,
-            arg_a,
-            arg_b,
-            arg_scale_a,
-            arg_scale_b,
-            arg_bias,
-            i32_m,
-            i32_n,
-            value_attrs={"rocdl.waves_per_eu": waves_per_eu},
-        ).launch(
+        # Older FlyDSL runtimes don't support passing `value_attrs` through the
+        # kernel call. Keep compatibility by only passing it when accepted.
+        try:
+            k = kernel_gemm(
+                arg_c,
+                arg_a,
+                arg_b,
+                arg_scale_a,
+                arg_scale_b,
+                arg_bias,
+                i32_m,
+                i32_n,
+                value_attrs={"rocdl.waves_per_eu": waves_per_eu},
+            )
+        except TypeError as e:
+            if "value_attrs" not in str(e):
+                raise
+            k = kernel_gemm(
+                arg_c,
+                arg_a,
+                arg_b,
+                arg_scale_a,
+                arg_scale_b,
+                arg_bias,
+                i32_m,
+                i32_n,
+            )
+
+        k.launch(
             grid=(gx, gy, 1),
             block=(256, 1, 1),
             stream=stream,
