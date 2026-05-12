@@ -15,14 +15,23 @@ RMSNorm(x) = x / sqrt(mean(x^2) + eps) * gamma
 
 import os
 
-from tests.test_common import run_perftest
+import pytest
+
+from kernels.rmsnorm_kernel import (
+    build_fused_add_rmsnorm_dynamicquant_module,
+    build_fused_add_rmsnorm_module,
+    build_fused_add_rmsnorm_smoothquant_module,
+    build_rmsnorm_dynamicquant_module,
+    build_rmsnorm_module,
+    build_rmsnorm_smoothquant_module,
+)
 from tests.kernels.benchmark_common import (
     PerfRow,
     bench_gpu_us_torch,
     maybe_enable_aiter,
     print_perf_table,
 )
-import pytest
+from tests.test_common import run_perftest
 
 pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
 
@@ -39,19 +48,10 @@ DTYPE_BF16 = torch.bfloat16
 DTYPE_INT8 = torch.int8
 
 EPS: float = 1e-5
-from kernels.rmsnorm_kernel import (
-    build_rmsnorm_module,
-    build_fused_add_rmsnorm_module,
-    build_rmsnorm_dynamicquant_module,
-    build_rmsnorm_smoothquant_module,
-    build_fused_add_rmsnorm_dynamicquant_module,
-    build_fused_add_rmsnorm_smoothquant_module,
-    KERNEL_NAME as RMSNORM_KERNEL_NAME,
-    BLOCK_THREADS,
-)
 
 WARMUP_ITERS = 10
 BENCH_ITERS = 100
+
 
 def run_test(M: int, N: int, dtype: str = "f32"):
     print(f"\nTesting RMSNorm (M={M}, N={N}, dtype={dtype})")
@@ -105,7 +105,9 @@ def run_test(M: int, N: int, dtype: str = "f32"):
         launch_fn(input_dev, gamma_dev, output_dev, M, stream=stream)
 
     # run_perftest returns (data, avg_us)
-    _, avg_us = run_perftest(lambda: (kernel_launch(), torch.cuda.synchronize()), num_iters=BENCH_ITERS, num_warmup=WARMUP_ITERS)
+    _, avg_us = run_perftest(
+        lambda: (kernel_launch(), torch.cuda.synchronize()), num_iters=BENCH_ITERS, num_warmup=WARMUP_ITERS
+    )
     torch.cuda.synchronize()
     flydsl_gpu_us = None
     if os.environ.get("ROCDSL_COMPARE_AITER", "0") == "1":
@@ -140,10 +142,11 @@ def run_test(M: int, N: int, dtype: str = "f32"):
         ok = False
     return ok, flydsl_gpu_us
 
+
 def test_all():
-    print("="*80)
+    print("=" * 80)
     print("Running RMSNorm Tests")
-    print("="*80)
+    print("=" * 80)
 
     shapes_env = os.environ.get("ROCDSL_RMSNORM_SHAPES", "").strip()
     if shapes_env:
@@ -155,7 +158,7 @@ def test_all():
             m_s, n_s, dt = [x.strip() for x in p.split(",")]
             configs.append((int(m_s), int(n_s), dt))
     else:
-        # Prefer N multiples of BLOCK_THREADS*VEC_WIDTH (=2048) to exercise the fast path.
+        # Prefer N multiples of 2048 to exercise the fast path.
         configs = [
             # (64, 256, "f32"),     # Aligned
             # (128, 1024, "f32"),   # Aligned
@@ -177,11 +180,17 @@ def test_all():
 
         if do_compare:
             import torch
+
             aiter_us = None
             if maybe_enable_aiter():
                 try:
                     from aiter.ops.triton.rmsnorm import rms_norm as aiter_rms_norm
-                    x = torch.randn((M, N), device="cuda", dtype=DTYPE_BF16 if dtype == "bf16" else (DTYPE_FP16 if dtype == "f16" else DTYPE_FP32))
+
+                    x = torch.randn(
+                        (M, N),
+                        device="cuda",
+                        dtype=DTYPE_BF16 if dtype == "bf16" else (DTYPE_FP16 if dtype == "f16" else DTYPE_FP32),
+                    )
                     w = torch.rand((N,), device="cuda", dtype=x.dtype)
 
                     def run_aiter():
@@ -192,14 +201,16 @@ def test_all():
                 except Exception as e:
                     print(f"[Perf] AIter rmsnorm skipped: {type(e).__name__}: {e!r}")
 
-            perf_rows.append(PerfRow(op="rmsnorm", shape=f"{M}x{N}", dtype=dtype, flydsl_gpu_us=flydsl_gpu_us, aiter_gpu_us=aiter_us))
+            perf_rows.append(
+                PerfRow(op="rmsnorm", shape=f"{M}x{N}", dtype=dtype, flydsl_gpu_us=flydsl_gpu_us, aiter_gpu_us=aiter_us)
+            )
 
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     if failures == 0:
         print("ALL TESTS PASSED")
     else:
         print(f"{failures} TESTS FAILED")
-    print("="*80)
+    print("=" * 80)
     if do_compare and perf_rows:
         print_perf_table(perf_rows)
     # Ensure a non-zero exit code on failure for shell wrappers.
@@ -229,7 +240,7 @@ def _get_rmsnorm_configs():
             configs.append((int(m_s), int(n_s), dt))
         return configs
 
-    # Prefer N multiples of BLOCK_THREADS*VEC_WIDTH (=2048) to exercise the fast path.
+    # Prefer N multiples of 2048 to exercise the fast path.
     return [
         # (64, 256, "f32"),     # Aligned
         # (128, 1024, "f32"),   # Aligned
@@ -281,7 +292,9 @@ def _bench_aiter_rmsnorm_quant(M: int, N: int, dtype: str, *, is_smooth: bool):
 
         def run_aiter():
             aiter_rmsnorm_quant(y, x, xscale, yscale, w, EPS)
+
     else:
+
         def run_aiter():
             aiter_rmsnorm_quant(y, x, yscale, w, EPS)
 
@@ -294,17 +307,13 @@ def run_quant_test(M: int, N: int, dtype: str, *, is_smooth: bool):
     mode = "smoothquant" if is_smooth else "dynamicquant"
     print(f"\nTesting RMSNorm {mode} (M={M}, N={N}, dtype={dtype})")
 
-    torch_dtype = _torch_dtype(dtype)
     try:
         if is_smooth:
             launch_fn = build_rmsnorm_smoothquant_module(M, N, dtype)
         else:
             launch_fn = build_rmsnorm_dynamicquant_module(M, N, dtype)
     except Exception as e:
-        print(
-            f"[FAIL] Compile failed for {mode} (M={M}, N={N}, dtype={dtype}): "
-            f"{type(e).__name__}: {e}"
-        )
+        print(f"[FAIL] Compile failed for {mode} (M={M}, N={N}, dtype={dtype}): " f"{type(e).__name__}: {e}")
         return False, None
     torch.manual_seed(42)
     input_t = torch.randn((M, N), device="cuda", dtype=DTYPE_FP32)
@@ -409,9 +418,9 @@ def run_quant_test(M: int, N: int, dtype: str, *, is_smooth: bool):
 
 
 def test_rmsnorm_dynamicquant():
-    print("="*80)
+    print("=" * 80)
     print("Running RMSNorm DynamicQuant Tests")
-    print("="*80)
+    print("=" * 80)
 
     do_compare = os.environ.get("ROCDSL_COMPARE_AITER", "0") == "1"
     perf_rows = []
@@ -436,12 +445,12 @@ def test_rmsnorm_dynamicquant():
                 )
             )
 
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     if failures == 0:
         print("ALL TESTS PASSED")
     else:
         print(f"{failures} TESTS FAILED")
-    print("="*80)
+    print("=" * 80)
     if do_compare and perf_rows:
         print_perf_table(perf_rows)
     # Ensure a non-zero exit code on failure for shell wrappers.
@@ -450,9 +459,9 @@ def test_rmsnorm_dynamicquant():
 
 
 def test_rmsnorm_smoothquant():
-    print("="*80)
+    print("=" * 80)
     print("Running RMSNorm SmoothQuant Tests")
-    print("="*80)
+    print("=" * 80)
 
     do_compare = os.environ.get("ROCDSL_COMPARE_AITER", "0") == "1"
     perf_rows = []
@@ -477,12 +486,12 @@ def test_rmsnorm_smoothquant():
                 )
             )
 
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     if failures == 0:
         print("ALL TESTS PASSED")
     else:
         print(f"{failures} TESTS FAILED")
-    print("="*80)
+    print("=" * 80)
     if do_compare and perf_rows:
         print_perf_table(perf_rows)
     # Ensure a non-zero exit code on failure for shell wrappers.
@@ -529,10 +538,7 @@ def run_fused_add_test(M: int, N: int, dtype: str):
     try:
         launch_fn = build_fused_add_rmsnorm_module(M, N, dtype)
     except Exception as e:
-        print(
-            f"[FAIL] Compile failed for fused_add rmsnorm (M={M}, N={N}, dtype={dtype}): "
-            f"{type(e).__name__}: {e}"
-        )
+        print(f"[FAIL] Compile failed for fused_add rmsnorm (M={M}, N={N}, dtype={dtype}): " f"{type(e).__name__}: {e}")
         return False, None
 
     torch.manual_seed(42)
@@ -596,10 +602,7 @@ def run_fused_add_test(M: int, N: int, dtype: str):
     total_bytes = (4 * M * N + N) * elem_bytes
     bandwidth_gbs = total_bytes / (avg_us / 1e6) / 1e9
 
-    print(
-        f"Kernel avg time: {avg_ms:.4f} ms via run_perftest "
-        f"(warmup={WARMUP_ITERS}, iters={BENCH_ITERS})"
-    )
+    print(f"Kernel avg time: {avg_ms:.4f} ms via run_perftest " f"(warmup={WARMUP_ITERS}, iters={BENCH_ITERS})")
     print(f"Bandwidth: {bandwidth_gbs:.2f} GB/s")
     if flydsl_gpu_us is not None:
         print(f"[Perf] FlyDSL fused_add rmsnorm gpu: {flydsl_gpu_us:.1f} us")
@@ -627,9 +630,9 @@ def run_fused_add_test(M: int, N: int, dtype: str):
 
 
 def test_rmsnorm_fused_add():
-    print("="*80)
+    print("=" * 80)
     print("Running FusedAdd RMSNorm Tests")
-    print("="*80)
+    print("=" * 80)
 
     do_compare = os.environ.get("ROCDSL_COMPARE_AITER", "0") == "1"
     perf_rows = []
@@ -654,12 +657,12 @@ def test_rmsnorm_fused_add():
                 )
             )
 
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     if failures == 0:
         print("ALL TESTS PASSED")
     else:
         print(f"{failures} TESTS FAILED")
-    print("="*80)
+    print("=" * 80)
     if do_compare and perf_rows:
         print_perf_table(perf_rows)
     # Ensure a non-zero exit code on failure for shell wrappers.
@@ -718,14 +721,12 @@ def _bench_aiter_fused_add_rmsnorm_quant(
         xscale = (torch.rand((N,), device="cuda", dtype=DTYPE_FP32) + 0.5).contiguous()
 
         def run_aiter():
-            aiter_fused_add_rmsnorm_quant(
-                y, x, residual_in, residual_out, xscale, yscale, w, EPS
-            )
+            aiter_fused_add_rmsnorm_quant(y, x, residual_in, residual_out, xscale, yscale, w, EPS)
+
     else:
+
         def run_aiter():
-            aiter_fused_add_rmsnorm_quant(
-                y, x, residual_in, residual_out, yscale, w, EPS
-            )
+            aiter_fused_add_rmsnorm_quant(y, x, residual_in, residual_out, yscale, w, EPS)
 
     aiter_us = bench_gpu_us_torch(run_aiter, warmup=WARMUP_ITERS, iters=BENCH_ITERS)
     print(f"[Perf] AIter fused_add rmsnorm {mode} gpu: {aiter_us:.1f} us")
@@ -856,12 +857,7 @@ def run_fused_add_quant_test(M: int, N: int, dtype: str, *, is_smooth: bool):
     print(f"Max scale diff: {scale_diff:.2e} (tol={scale_tol})")
     print(f"Max quant diff: {quant_diff}")
 
-    ok = (
-        residual_error < residual_atol
-        and dequant_error < dequant_tol
-        and scale_diff < scale_tol
-        and quant_diff <= 1
-    )
+    ok = residual_error < residual_atol and dequant_error < dequant_tol and scale_diff < scale_tol and quant_diff <= 1
     if ok:
         print("PASSED")
     else:
@@ -886,9 +882,9 @@ def run_fused_add_quant_test(M: int, N: int, dtype: str, *, is_smooth: bool):
 
 
 def test_rmsnorm_fused_add_dynamicquant():
-    print("="*80)
+    print("=" * 80)
     print("Running FusedAdd RMSNorm DynamicQuant Tests")
-    print("="*80)
+    print("=" * 80)
 
     do_compare = os.environ.get("ROCDSL_COMPARE_AITER", "0") == "1"
     perf_rows = []
@@ -913,12 +909,12 @@ def test_rmsnorm_fused_add_dynamicquant():
                 )
             )
 
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     if failures == 0:
         print("ALL TESTS PASSED")
     else:
         print(f"{failures} TESTS FAILED")
-    print("="*80)
+    print("=" * 80)
     if do_compare and perf_rows:
         print_perf_table(perf_rows)
     if failures != 0:
@@ -926,9 +922,9 @@ def test_rmsnorm_fused_add_dynamicquant():
 
 
 def test_rmsnorm_fused_add_smoothquant():
-    print("="*80)
+    print("=" * 80)
     print("Running FusedAdd RMSNorm SmoothQuant Tests")
-    print("="*80)
+    print("=" * 80)
 
     do_compare = os.environ.get("ROCDSL_COMPARE_AITER", "0") == "1"
     perf_rows = []
@@ -953,12 +949,12 @@ def test_rmsnorm_fused_add_smoothquant():
                 )
             )
 
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     if failures == 0:
         print("ALL TESTS PASSED")
     else:
         print(f"{failures} TESTS FAILED")
-    print("="*80)
+    print("=" * 80)
     if do_compare and perf_rows:
         print_perf_table(perf_rows)
     if failures != 0:
