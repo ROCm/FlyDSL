@@ -41,6 +41,26 @@ def _run_torch(a, b, scale_a, scale_b, dtype=torch.float32):
     return torch.mm(a_f32, b_f32.T).to(dtype)
 
 
+def _as_i8(t: torch.Tensor) -> torch.Tensor:
+    return t.view(torch.int8) if "float8" in str(t.dtype) else t
+
+
+def _bench_torch_scaled_mm(M, N, K, a_q, b_q, scale_a, scale_b, c_ref, num_warmups, num_iters):
+    """Run torch._scaled_mm with the same inputs / perf harness as flydsl."""
+    b_t = b_q.t()
+    sa_v = scale_a.view(M, 1).to(torch.float32).contiguous()
+    sb_v = scale_b.view(1, N).to(torch.float32).contiguous()
+    out = torch.empty((M, N), dtype=OUT_DTYPE, device="cuda")
+
+    def _launch(_out):
+        torch._scaled_mm(a_q, b_t, scale_a=sa_v, scale_b=sb_v, out_dtype=OUT_DTYPE, out=_out)
+
+    _, us = run_perftest(_launch, out, num_iters=num_iters, num_warmup=num_warmups)
+    torch.cuda.synchronize()
+    ok = verify_output(out.to(torch.float32), c_ref, rtol=0.1, atol=0.1)
+    return us, ok
+
+
 def _bench_fp8_gemm_4wave(
     M: int,
     N: int,
@@ -51,6 +71,7 @@ def _bench_fp8_gemm_4wave(
     disable_xcd_remap: bool = False,
     num_warmups: int = 2,
     num_iters: int = 10,
+    vs_torch: bool = False,
 ):
     """Run + verify a single (M, N, K, tile) configuration. Returns TFLOPS."""
     if "gfx95" not in ARCH:
@@ -84,9 +105,6 @@ def _bench_fp8_gemm_4wave(
         f"BLOCK_M={tile_m} BLOCK_N={tile_n} xcd_remap={not disable_xcd_remap}"
     )
 
-    def _as_i8(t: torch.Tensor) -> torch.Tensor:
-        return t.view(torch.int8) if "float8" in str(t.dtype) else t
-
     def _args(c, a, b, sa, sb):
         return (
             _as_i8(a).contiguous().view(-1),
@@ -118,11 +136,25 @@ def _bench_fp8_gemm_4wave(
     c_out_f32 = c_out_raw.to(torch.float32)
     assert verify_output(c_out_f32, c_ref, rtol=0.1, atol=0.1)
 
-    bytes_moved = M * K + N * K + M * N * 2 + (M + N) * 4
     flops = 2 * M * N * K
+    bytes_moved = M * K + N * K + M * N * 2 + (M + N) * 4
     tflops = flops / (us / 1e6) / 1e12
     tbps = bytes_moved / 1e12 / (us / 1e6)
     print(f"[flyc] Throughput: {us:.1f} us, {tflops:.2f} TFLOPS, BW: {tbps:.3f} TB/s")
+
+    if vs_torch:
+        try:
+            us_t, ok_t = _bench_torch_scaled_mm(
+                M, N, K, a_q, b_q, scale_a, scale_b, c_ref,
+                num_warmups, num_iters,
+            )
+            tflops_t = flops / (us_t / 1e6) / 1e12
+            print(
+                f"[torch._scaled_mm] Throughput: {us_t:.1f} us, "
+                f"{tflops_t:.2f} TFLOPS, flydsl/torch={us_t / us * 100:.1f}%, ok={ok_t}"
+            )
+        except Exception as e:
+            print(f"[torch._scaled_mm] failed: {e}")
 
     return tflops
 
@@ -152,6 +184,12 @@ if __name__ == "__main__":
     parser.add_argument("--disable_xcd_remap", action="store_true", default=False)
     parser.add_argument("--num_iters", type=int, default=10)
     parser.add_argument("--num_warmups", type=int, default=2)
+    parser.add_argument(
+        "--vs_torch",
+        action="store_true",
+        default=False,
+        help="Also run torch._scaled_mm with the same input + harness for perf comparison.",
+    )
     args = parser.parse_args()
 
     torch.set_default_device("cuda")
@@ -166,6 +204,7 @@ if __name__ == "__main__":
             disable_xcd_remap=args.disable_xcd_remap,
             num_warmups=args.num_warmups,
             num_iters=args.num_iters,
+            vs_torch=args.vs_torch,
         )
     except pytest.skip.Exception as e:
         print(f"Skipped: {e}")
