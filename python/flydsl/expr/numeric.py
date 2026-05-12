@@ -371,14 +371,6 @@ class Numeric(metaclass=NumericMeta):
     def ir_value(self, *, loc=None, ip=None) -> ir.Value:
         return self.to(ir.Value, loc=loc, ip=ip)
 
-    def with_signedness(self, signed):
-        """Return an arithmetic view with explicit integer signedness."""
-        return ArithValue(self, signed)
-
-    def extui(self, target_type, *, loc=None, ip=None):
-        """Zero-extend integer value to a wider integer type."""
-        return ArithValue(self).extui(target_type, loc=loc)
-
     def __get_ir_types__(self):
         return [type(self).ir_type]
 
@@ -521,6 +513,14 @@ class Numeric(metaclass=NumericMeta):
         return _make_binop(operator.ne)(self, other, loc=loc, ip=ip)
 
     # ── Proxy methods: delegate ArithValue-specific ops via ir_value() ──
+    def with_signedness(self, signed, *, loc=None, ip=None):
+        """Set integer signedness view — delegates to ArithValue.with_signedness."""
+        return self.ir_value(loc=loc, ip=ip).with_signedness(signed)
+
+    def extui(self, target_type, *, loc=None, ip=None):
+        """Zero-extend integer — delegates to ArithValue.extui."""
+        return self.ir_value(loc=loc, ip=ip).extui(target_type, loc=loc)
+
     def maximumf(self, other, *, loc=None):
         """Float maximum — delegates to ArithValue.maximumf."""
         return type(self)(self.ir_value().maximumf(_to_raw(other), loc=loc))

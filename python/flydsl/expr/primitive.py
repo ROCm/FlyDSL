@@ -12,6 +12,7 @@ from .._mlir.dialects.fly import (
     AtomicOp,
     CachePolicy,
     ComposedLayoutType,
+    CoordSwizzleType,
     CoordTensorType,
     CopyAtomType,
     CopyOpUniversalAtomicType,
@@ -34,9 +35,6 @@ from .._mlir.dialects.fly import (
 from .._mlir.extras import types as T
 from .meta import traced_op
 
-# Older/partial Fly dialect Python bindings may not expose CoordSwizzleType.
-CoordSwizzleType = getattr(fly, "CoordSwizzleType", None)
-
 __all__ = [
     # Maybe remove it in the future
     "T",
@@ -52,6 +50,7 @@ __all__ = [
     "TileType",
     "LayoutType",
     "SwizzleType",
+    "CoordSwizzleType",
     "ComposedLayoutType",
     "PointerType",
     "MemRefType",
@@ -187,9 +186,6 @@ __all__ = [
     "assume",
     "make_tile",
 ]
-
-if CoordSwizzleType is not None:
-    __all__.append("CoordSwizzleType")
 
 
 UniversalCopy = lambda bit_size: CopyOpUniversalCopyType.get(bit_size)
