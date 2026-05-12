@@ -40,6 +40,12 @@ def _run_torch(a, b, scale_a, scale_b, dtype=torch.float32):
     return c.to(dtype)
 
 
+@pytest.mark.parametrize(
+    "M, N, K, tile_m, tile_n",
+    [
+        pytest.param(8192, 8192, 8192, 256, 256, marks=pytest.mark.large_shape, id="8192x8192x8192"),
+    ],
+)
 def test_fp8_gemm_4wave(
     M: int,
     N: int,
