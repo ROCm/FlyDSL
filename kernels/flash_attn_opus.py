@@ -146,17 +146,54 @@ def build_flash_attn_opus_module(
     STRIDE_TOKEN_Q = NUM_HEADS_Q * HEAD_DIM
     STRIDE_TOKEN_KV = NUM_HEADS_KV * HEAD_DIM
 
-    # K/V LDS double-buffered, XOR-swizzled (16B = 8 bf16 swizzle granularity).
-    K_STRIDE = HEAD_DIM
-    V_STRIDE = HEAD_DIM
-    LDS_K_TILE_SIZE = BLOCK_N * K_STRIDE
-    LDS_V_TILE_SIZE = BLOCK_N * V_STRIDE
+    # ── OPUS LDS trait constants (matches gqa_d128_kernel_template.hpp §4-5) ──
+    # K/V LDS layout: interleaved double-buffer K0, V0, K1, V1.
+    # Per-warp slab line stride: smem_linear_wave + smem_padding.
+    #   K: 512 + 8 = 520 bf16 per line (smem_padding_16B = 16 B = 8 bf16)
+    #   V: 512 + 32 = 544 bf16 per line (smem_padding_64B = 64 B = 32 bf16)
+    # Per-buffer: smem_n_rpt * smem_d_rpt * line_stride = 8 * 2 * line_stride
+    #   K: 8320 bf16 (16640 B), V: 8704 bf16 (17408 B)
+    # Total LDS (2 K + 2 V): 68096 B
+    BF16_BYTES = 2
+    D_128B_SIZE = 64                            # = 128 B / sizeof(bf16) = 64 bf16
+    VEC_KV = 8                                  # bf16 per ds_read pack (also MFMA pack_a/pack_b)
+    VEC_TR_V = 4                                # bf16 per ds_read_tr16_b64
+    SMEM_LINEAR_WAVE = WARP_SIZE * 16 // BF16_BYTES   # 64 * 8 = 512 bf16 per wave per "line"
+    SMEM_N_PER_WAVE = SMEM_LINEAR_WAVE // D_128B_SIZE  # 8 KV rows per wave per line
+    SMEM_N_RPT = BLOCK_N // SMEM_N_PER_WAVE      # 64 / 8 = 8 lines along N
+    SMEM_D_RPT = HEAD_DIM // D_128B_SIZE         # 128 / 64 = 2 lines along D
+    SMEM_K_PAD = 16 // BF16_BYTES                # 8 bf16 (= 16 B padding)
+    SMEM_V_PAD = 64 // BF16_BYTES                # 32 bf16 (= 64 B padding)
+    SMEM_K_LINE_STRIDE = SMEM_LINEAR_WAVE + SMEM_K_PAD   # 520 bf16
+    SMEM_V_LINE_STRIDE = SMEM_LINEAR_WAVE + SMEM_V_PAD   # 544 bf16
+    SMEM_K_TILE_ELEMS = SMEM_N_RPT * SMEM_D_RPT * SMEM_K_LINE_STRIDE   # 8 * 2 * 520 = 8320
+    SMEM_V_TILE_ELEMS = SMEM_N_RPT * SMEM_D_RPT * SMEM_V_LINE_STRIDE   # 8 * 2 * 544 = 8704
     NUM_PREFETCH_K = 2     # OPUS double-buffer
     NUM_PREFETCH_V = 2
-    LDS_K_TOTAL_SIZE = NUM_PREFETCH_K * LDS_K_TILE_SIZE
-    LDS_V_BASE = LDS_K_TOTAL_SIZE
-    LDS_V_TOTAL_SIZE = NUM_PREFETCH_V * LDS_V_TILE_SIZE
-    LDS_KV_TOTAL_SIZE = LDS_K_TOTAL_SIZE + LDS_V_TOTAL_SIZE
+    # OPUS interleaved layout: [K0][V0][K1][V1]
+    OPUS_KV_PER_BUFFER = SMEM_K_TILE_ELEMS + SMEM_V_TILE_ELEMS   # 17024 bf16 per (K, V) pair
+    LDS_KV_TOTAL_SIZE = NUM_PREFETCH_K * OPUS_KV_PER_BUFFER       # 34048 bf16 = 68096 B
+    # K and V buffer bases (bf16 element offsets within the unified LDS region).
+    OPUS_K_BUF_BASE = (0, OPUS_KV_PER_BUFFER)                     # K[0]=0, K[1]=17024
+    OPUS_V_BUF_BASE = (SMEM_K_TILE_ELEMS,                         # V[0]=8320
+                       SMEM_K_TILE_ELEMS + OPUS_KV_PER_BUFFER)    # V[1]=25344
+    # u_rk OPUS strides (per derived element strides for the 8-axis u_rk layout).
+    #   N-grp y-axis (axis 2)  : stride 256 bf16 (between v_s_lo and v_s_hi)
+    #   K-step axis (axes 4, 5): inner stride 16 (i_5 step), outer 4160 (i_4 d_rpt)
+    OPUS_URK_N_STRIP_STRIDE = 256       # bf16 offset to add for v_s_hi (n_strip=1)
+    OPUS_URK_KSTEP_INNER = 16            # bf16 stride between consecutive K-steps within a d_rpt
+    OPUS_URK_KSTEP_OUTER = SMEM_N_RPT * SMEM_K_LINE_STRIDE   # 4160 bf16 between d_rpt=0/1 arrays
+    # u_rv OPUS per-lane base coefficients and step strides.
+    #   base_per_lane(lane) = (lane/32)*OPUS_URV_GRPK + ((lane%16)/4)*OPUS_URV_LANE_HI
+    #                       + ((lane/16)%2)*OPUS_URV_GRP_N + (lane%4)*OPUS_URV_LANE_LO
+    OPUS_URV_GRPK     = 2176             # = 4 * 544 (grp_k stride, axes 2)
+    OPUS_URV_LANE_HI  = SMEM_V_LINE_STRIDE   # 544 (lane_hi stride, axes 3)
+    OPUS_URV_GRP_N    = 16               # 4 (lane_lo) * 4 (VEC_TR_V) = grp_n stride
+    OPUS_URV_LANE_LO  = 4                # VEC_TR_V (lane_lo stride)
+    OPUS_URV_STEP_K_STRIDE = 128         # = 2 * 64 = lane_hi_y * D_128B_SIZE (axis 4 element stride)
+    OPUS_URV_DC_AXIS0 = SMEM_N_RPT * SMEM_V_LINE_STRIDE   # 4352 (d_rpt array, axis 0 element stride)
+    OPUS_URV_DC_AXIS1 = 32               # axis 1 element stride (within half-D sub-row)
+    OPUS_URV_I5_STRIDE = D_128B_SIZE     # 64 (axis 5 element stride within a step_k)
 
     # DMA load chunking
     VEC_WIDTH = 16
@@ -176,7 +213,7 @@ def build_flash_attn_opus_module(
         global_sym_name=f"flash_attn_opus_smem_{PATH_TAG}",
     )
     lds_kv_offset = allocator._align(allocator.ptr, 16)
-    allocator.ptr = lds_kv_offset + LDS_KV_TOTAL_SIZE * 2   # bf16 = 2 bytes
+    allocator.ptr = lds_kv_offset + LDS_KV_TOTAL_SIZE * BF16_BYTES   # 68096 B for OPUS K0/V0/K1/V1
 
     # OPUS lazy-rescale threshold (line 374)
     OPUS_RESCALE_THRESHOLD = 8.0
@@ -483,84 +520,95 @@ def build_flash_attn_opus_module(
                 pairs.append(_pack_bf16_pair(f32_vals[j * 2], f32_vals[j * 2 + 1], _c16, _cmask))
             return Vec.from_elements(pairs, fx.Int32).bitcast(elem_dtype).ir_value()
 
+        # OPUS interleaved buffer layout: K0=0, V0=8320, K1=17024, V1=25344 (bf16 elements).
         def k_buf_base(buf_id):
             if const_expr(isinstance(buf_id, int)):
-                return fx.Index(buf_id * LDS_K_TILE_SIZE)
-            return buf_id * fx.Index(LDS_K_TILE_SIZE)
+                return fx.Index(OPUS_K_BUF_BASE[buf_id])
+            # runtime buf_id (rare): K0=0, K1=OPUS_KV_PER_BUFFER
+            return buf_id * fx.Index(OPUS_KV_PER_BUFFER)
 
         def v_buf_base(buf_id):
             if const_expr(isinstance(buf_id, int)):
-                return fx.Index(LDS_V_BASE + buf_id * LDS_V_TILE_SIZE)
-            return fx.Index(LDS_V_BASE) + buf_id * fx.Index(LDS_V_TILE_SIZE)
+                return fx.Index(OPUS_V_BUF_BASE[buf_id])
+            # runtime buf_id (rare): V0=SMEM_K_TILE_ELEMS, V1=SMEM_K_TILE_ELEMS+OPUS_KV_PER_BUFFER
+            return fx.Index(SMEM_K_TILE_ELEMS) + buf_id * fx.Index(OPUS_KV_PER_BUFFER)
 
         # ── DMA loaders (buffer_load_dwordx4_lds, gfx950) ──
         k_rsrc = buffer_ops.create_buffer_resource(K, max_size=True)
         v_rsrc = buffer_ops.create_buffer_resource(V, max_size=True)
+        # DMA constants. NUM_DMA_K = # of DMA instructions per WARP per K tile.
+        # Per OPUS u_gk: each warp loads 8 N rows × 128 D = 1024 bf16 (= 2048 B) per tile,
+        # split across smem_d_rpt = 2 DMA invocations (one per d_rpt array). Each DMA writes
+        # 64 lanes × 16 B = 1024 B contiguously to one d_rpt slab in LDS.
         DMA_BYTES = 16
-        DMA_BATCH_BYTES = BLOCK_SIZE * DMA_BYTES
-        K_TILE_BYTES = BLOCK_N * K_STRIDE * 2
-        NUM_DMA_K = K_TILE_BYTES // DMA_BATCH_BYTES
-        LANES_PER_K_ROW = HEAD_DIM * 2 // DMA_BYTES
-        ROWS_PER_DMA_BATCH = DMA_BATCH_BYTES // (HEAD_DIM * 2)
-        V_TILE_BYTES = BLOCK_N * V_STRIDE * 2
-        NUM_DMA_V = V_TILE_BYTES // DMA_BATCH_BYTES
-        LANES_PER_V_ROW = HEAD_DIM * 2 // DMA_BYTES
+        NUM_DMA_K = SMEM_D_RPT                                          # 2 — # of DMA calls per warp per K tile
+        NUM_DMA_V = SMEM_D_RPT                                          # 2 — same for V
 
         _dma_size = fx.Int32(DMA_BYTES)
         _dma_soff = fx.Int32(0)
         _dma_off = fx.Int32(0)
         _dma_aux = fx.Int32(1)
 
+        # ── OPUS u_gk + u_sk DMA loader ──
+        # Per OPUS C++ template gqa_d128_kernel_template.hpp §4-5:
+        #   u_gk: lane l in warp w reads global K[N = w*8 + l/8, D = (l%8)*8 + d*64 + 0..7]
+        #   u_sk: lane l in warp w writes LDS[w*SMEM_K_LINE_STRIDE + l*VEC_KV + 0..7]
+        #          (within d_rpt array; d_rpt=1 array starts at SMEM_N_RPT*SMEM_K_LINE_STRIDE
+        #          bf16 elements past d_rpt=0 array).
+        # Per-warp LDS slab is contiguous (520 bf16 per d_rpt), unlike FlyDSL's
+        # batch-major layout. NUM_DMA_K=2 (one DMA per d_rpt).
+        lane_in_warp = tid % fx.Index(WARP_SIZE)
+        n_in_warp = lane_in_warp // fx.Index(VEC_KV)
+        d_bucket = lane_in_warp % fx.Index(VEC_KV)
+
         def coop_dma_k(tile_start, buf_id):
-            k_lds_byte_base = lds_kv_base_idx + k_buf_base(buf_id) * fx.Index(2)
+            k_lds_byte_base = lds_kv_base_idx + k_buf_base(buf_id) * fx.Index(BF16_BYTES)
             for d in range_constexpr(NUM_DMA_K):
                 lds_addr = (
                     k_lds_byte_base
-                    + wave_id * fx.Index(WARP_SIZE * DMA_BYTES)
-                    + fx.Index(d * DMA_BATCH_BYTES)
+                    + wave_id * fx.Index(SMEM_K_LINE_STRIDE * BF16_BYTES)
+                    + fx.Index(d * SMEM_N_RPT * SMEM_K_LINE_STRIDE * BF16_BYTES)
                 )
                 lds_i64 = fx.Int64(lds_addr)
                 lds_lane0 = rocdl.readfirstlane(fx.Int64.ir_type, lds_i64)
                 lds_ptr = buffer_ops.create_llvm_ptr(lds_lane0, address_space=3)
 
-                row_in_tile = tid // LANES_PER_K_ROW + fx.Index(d * ROWS_PER_DMA_BATCH)
-                swiz_col_f16 = (tid % LANES_PER_K_ROW) * (DMA_BYTES // 2)
-                xor_mask = (row_in_tile & fx.Index(0x7)) << fx.Index(4)
-                unsw_col_f16 = swiz_col_f16 ^ xor_mask
-                col_byte = unsw_col_f16 * 2
-                global_row = batch_idx * seq_len_v + tile_start + row_in_tile
+                global_n = wave_id * fx.Index(SMEM_N_PER_WAVE) + n_in_warp
+                global_d = d_bucket * fx.Index(VEC_KV) + fx.Index(d * D_128B_SIZE)
+                global_row = batch_idx * seq_len_v + tile_start + global_n
                 global_byte = (
-                    global_row * fx.Index(STRIDE_TOKEN_KV * 2)
-                    + kv_head_idx * fx.Index(HEAD_DIM * 2)
-                    + col_byte
+                    global_row * fx.Index(STRIDE_TOKEN_KV * BF16_BYTES)
+                    + kv_head_idx * fx.Index(HEAD_DIM * BF16_BYTES)
+                    + global_d * fx.Index(BF16_BYTES)
                 )
                 voffset = fx.Int32(global_byte)
                 rocdl.raw_ptr_buffer_load_lds(
                     k_rsrc, lds_ptr, _dma_size, voffset, _dma_soff, _dma_off, _dma_aux
                 )
 
+        # ── OPUS u_gv + u_sv DMA loader ──
+        # Mirrors coop_dma_k but with V_LINE_STRIDE = 544 (smem_padding_64B = 32 bf16).
+        # Per-lane (warp_id, lane_in_warp) → V[N = warp_id*8 + lane_in_warp/8,
+        # D = (lane_in_warp%8)*8 + d*64 + 0..7] for d_rpt=d.
         def coop_dma_v(tile_start, buf_id):
-            v_lds_byte_base = lds_kv_base_idx + v_buf_base(buf_id) * fx.Index(2)
+            v_lds_byte_base = lds_kv_base_idx + v_buf_base(buf_id) * fx.Index(BF16_BYTES)
             for d in range_constexpr(NUM_DMA_V):
                 lds_addr = (
                     v_lds_byte_base
-                    + wave_id * fx.Index(WARP_SIZE * DMA_BYTES)
-                    + fx.Index(d * DMA_BATCH_BYTES)
+                    + wave_id * fx.Index(SMEM_V_LINE_STRIDE * BF16_BYTES)
+                    + fx.Index(d * SMEM_N_RPT * SMEM_V_LINE_STRIDE * BF16_BYTES)
                 )
                 lds_i64 = fx.Int64(lds_addr)
                 lds_lane0 = rocdl.readfirstlane(fx.Int64.ir_type, lds_i64)
                 lds_ptr = buffer_ops.create_llvm_ptr(lds_lane0, address_space=3)
 
-                row_in_tile = tid // LANES_PER_V_ROW + fx.Index(d * (DMA_BATCH_BYTES // (HEAD_DIM * 2)))
-                swiz_col_f16 = (tid % LANES_PER_V_ROW) * (DMA_BYTES // 2)
-                xor_mask = (row_in_tile & fx.Index(0x3)) << fx.Index(4)
-                unsw_col_f16 = swiz_col_f16 ^ xor_mask
-                col_byte = unsw_col_f16 * 2
-                global_row = batch_idx * seq_len_v + tile_start + row_in_tile
+                global_n = wave_id * fx.Index(SMEM_N_PER_WAVE) + n_in_warp
+                global_d = d_bucket * fx.Index(VEC_KV) + fx.Index(d * D_128B_SIZE)
+                global_row = batch_idx * seq_len_v + tile_start + global_n
                 global_byte = (
-                    global_row * fx.Index(STRIDE_TOKEN_KV * 2)
-                    + kv_head_idx * fx.Index(HEAD_DIM * 2)
-                    + col_byte
+                    global_row * fx.Index(STRIDE_TOKEN_KV * BF16_BYTES)
+                    + kv_head_idx * fx.Index(HEAD_DIM * BF16_BYTES)
+                    + global_d * fx.Index(BF16_BYTES)
                 )
                 voffset = fx.Int32(global_byte)
                 rocdl.raw_ptr_buffer_load_lds(
@@ -630,64 +678,76 @@ def build_flash_attn_opus_module(
         else:
             max_num_tiles = num_kv_tiles
 
-        # ── Helper: K LDS → register packs (8 lo + 8 hi) ──
+        # ── OPUS u_rk: K LDS → register packs (8 lo + 8 hi) ──
+        # Per-lane base offset (bf16):
+        #     base = (lane%32%8)*SMEM_K_LINE_STRIDE
+        #          + (lane%32/8)*D_128B_SIZE
+        #          + (lane/32)*VEC_KV
+        # For ks in 0..7:
+        #     ks_offset = (ks/4)*OPUS_URK_KSTEP_OUTER + (ks%4)*OPUS_URK_KSTEP_INNER
+        # n_strip=0 (v_s_lo) reads at base + ks_offset; n_strip=1 (v_s_hi) adds 256.
+        # The resulting MFMA-A m_a = lane%32 corresponds to N_attention = π(lane%32)
+        # for v_s_lo, and π(lane%32) + 4 for v_s_hi (where π is OPUS's u_rk M-axis
+        # permutation; see Section 5 of GQA_D128_KERNEL_Analysis_Detail.md).
+        urk_base_per_lane = (
+            (lane_mod_32 % fx.Index(8)) * fx.Index(SMEM_K_LINE_STRIDE)
+            + (lane_mod_32 // fx.Index(8)) * fx.Index(D_128B_SIZE)
+            + lane_div_32 * fx.Index(VEC_KV)
+        )
+
         def _read_k_packs_for_buf(buf_id):
-            """Read all 16 K MFMA packs from LDS buffer `buf_id`."""
+            """Read all 16 K MFMA packs from LDS buffer `buf_id` (OPUS u_rk)."""
             k_base = k_buf_base(buf_id)
-            k_hi_offset = K_SUB_N * K_STRIDE
-            k_swz_mask = (lane_mod_32 & fx.Index(0x7)) << fx.Index(4)
             k_lo = [None] * K_STEPS_QK
             k_hi = [None] * K_STEPS_QK
             for ks in range_constexpr(K_STEPS_QK):
-                col = fx.Index(ks * K_STEP_QK) + lane_div_32 * MFMA_LANE_K
-                idx_lo = (
-                    k_base + lane_mod_32 * fx.Index(K_STRIDE) + (col ^ k_swz_mask)
-                )
-                idx_hi = (
-                    k_base
-                    + fx.Index(k_hi_offset)
-                    + lane_mod_32 * fx.Index(K_STRIDE)
-                    + (col ^ k_swz_mask)
-                )
+                ks_offset = (ks // 4) * OPUS_URK_KSTEP_OUTER + (ks % 4) * OPUS_URK_KSTEP_INNER
+                idx_lo = k_base + urk_base_per_lane + fx.Index(ks_offset)
+                idx_hi = idx_lo + fx.Index(OPUS_URK_N_STRIP_STRIDE)
                 k_lo[ks] = Vec.load(mfma_pack_type, lds_kv, [idx_lo])
                 k_hi[ks] = Vec.load(mfma_pack_type, lds_kv, [idx_hi])
             return k_lo, k_hi
 
-        # ── Helper: V LDS → register packs for ONE K-substep (4 packs / D-chunk) ──
-        # k_substep ∈ {0, 1, 2, 3}, mapping to MFMA W_K=16 sub-step of GEMM2:
-        #   0 → lo N-strip, pks=0, KV cols 0..15
-        #   1 → lo N-strip, pks=1, KV cols 16..31
-        #   2 → hi N-strip, pks=0, KV cols 32..47
-        #   3 → hi N-strip, pks=1, KV cols 48..63
-        # Mirrors C++ mma1.step_k(K_idx)'s V operand requirement.
+        # ── OPUS u_rv: V LDS → register packs (4 D-chunks) per step_k ──
+        # Per-lane base offset (bf16):
+        #     base = (lane/32) * OPUS_URV_GRPK            # grp_k axis 2
+        #          + ((lane%16)/4) * OPUS_URV_LANE_HI     # lane_hi axis 3
+        #          + ((lane/16)%2) * OPUS_URV_GRP_N       # grp_n axis 6
+        #          + (lane%4) * OPUS_URV_LANE_LO          # lane_lo axis 7
+        # Per step_k=K_idx in 0..3 (axis 4, stride OPUS_URV_STEP_K_STRIDE = 128):
+        #   - D-chunk (dc) maps to (i_0, i_1) ∈ axes 0, 1:
+        #       dc=0: (i_0=0, i_1=0), dc=1: (i_0=0, i_1=1),
+        #       dc=2: (i_0=1, i_1=0), dc=3: (i_0=1, i_1=1)
+        #   - Per dc, 2 ds_read_tr16_b64 calls cover axis 5 = 0, 1 (stride D_128B_SIZE=64).
+        #     The 4-bf16 result of each call is shuffled into one bf16x8 pack matching
+        #     MFMA-A pack_a = 8.
+        urv_base_per_lane = (
+            lane_div_32 * fx.Index(OPUS_URV_GRPK)
+            + ((lane % fx.Index(16)) // fx.Index(4)) * fx.Index(OPUS_URV_LANE_HI)
+            + ((lane // fx.Index(16)) % fx.Index(2)) * fx.Index(OPUS_URV_GRP_N)
+            + (lane % fx.Index(4)) * fx.Index(OPUS_URV_LANE_LO)
+        )
+
         def _read_v_packs_for_k_substep(buf_id, k_substep):
+            """Read V packs from LDS buffer `buf_id` for mma1.step_k = k_substep (OPUS u_rv).
+
+            Returns a list of D_CHUNKS=4 bf16x8 packs (one per output D-chunk).
+            """
             v_base = v_buf_base(buf_id)
-            is_hi = k_substep // 2
-            pks = k_substep % 2
+            step_k_off = k_substep * OPUS_URV_STEP_K_STRIDE
             packs = []
             for dc in range_constexpr(D_CHUNKS):
-                d_col = (
-                    fx.Index(dc * D_CHUNK)
-                    + tr_col_half * fx.Index(16)
-                    + tr_col_sub * fx.Index(4)
+                i_0 = dc // 2     # axes 0 selection: 0 → D < 64, 1 → D >= 64 (d_rpt)
+                i_1 = dc % 2      # axes 1 selection: half-D sub-row group
+                dc_off = i_0 * OPUS_URV_DC_AXIS0 + i_1 * OPUS_URV_DC_AXIS1
+                lds_off_lo = (
+                    v_base
+                    + urv_base_per_lane
+                    + fx.Index(step_k_off + dc_off)
                 )
-                if const_expr(is_hi == 0):
-                    k_row = (
-                        fx.Index(pks * PV_K_STEP)
-                        + lane_div_32 * fx.Index(4)
-                        + tr_k_group
-                    )
-                else:
-                    k_row = (
-                        fx.Index(pks * PV_K_STEP + K_SUB_N)
-                        + lane_div_32 * fx.Index(4)
-                        + tr_k_group
-                    )
-                v_xor_mask = (k_row & fx.Index(0x3)) << fx.Index(4)
-                d_col_eff = d_col ^ v_xor_mask
-                lds = v_base + k_row * fx.Index(V_STRIDE) + d_col_eff
-                a = ds_read_tr_v4f16(lds)
-                b = ds_read_tr_v4f16(lds + fx.Index(8 * V_STRIDE))
+                # axis 5 = 0 and axis 5 = 1 reads (in-register K stride 64 bf16)
+                a = ds_read_tr_v4f16(lds_off_lo)
+                b = ds_read_tr_v4f16(lds_off_lo + fx.Index(OPUS_URV_I5_STRIDE))
                 packs.append(
                     Vec(a).shuffle(Vec(b), [0, 1, 2, 3, 4, 5, 6, 7]).ir_value()
                 )
@@ -707,47 +767,49 @@ def build_flash_attn_opus_module(
         _NEG_INF_F32_BITS = 0xFF800000
 
         def _causal_mask_inplace(s_lo, s_hi, tile_idx):
-            """Apply causal mask using OPUS inline-asm attn_mask_vec2_imm.
+            """Apply causal mask using OPUS inline-asm attn_mask_vec2_imm (OPUS u_rk path).
 
-            Mirrors gqa_d128_kernel_template.hpp::attn_mask_causal_tile
-            (lines 251-289) with GEMM0_E_N=2 (BLOCK_N=64 → s_lo + s_hi).
+            In the OPUS K LDS layout, lane k%32 reads K[N = π(lane%32), D = ...] for
+            v_s_lo (n_strip=0), and K[N = π(lane%32) + 4, D = ...] for v_s_hi (n_strip=1),
+            where π(m) = (m%8)*8 + m/8 is the 4×8 transpose permutation.
 
-            Each MFMA C-output lane holds elements at:
-              kv_col_in_strip = lane_div_32*4 + (r//4)*8 + (r%4)
-            giving threshold pairs {(0,1),(2,3),(8,9),(10,11),(16,17),
-            (18,19),(24,25),(26,27)} within each W_N=32 strip.
+            For MFMA-C output lane k (n_b=k%32, grpm_c=k/32):
+              v_s_lo[r] of lane k → N = π((r//4)*8 + grpm*4 + (r%4))
+              v_s_hi[r] of lane k → N = π((r//4)*8 + grpm*4 + (r%4)) + 4
 
-            For s_hi the strip shifts by W_N=32, so the per-lane absolute K
-            column is (kv_start + 32 + lane_div_32*4 + offset). The mask
-            condition `q_pos < absolute_K_col` is rewritten as
-            `rel < thr` where rel = q_pos - (kv_start + i_n*W_N + lane_group*c_pack)
-            and thr is the per-element offset (immediate).
+            Mask if M = q_row < kv_start + N → set to -inf.
+            Rewrite as `rel < thr` with:
+              rel_lo = q_row - kv_start - grpm*32       (grpm offset: π adds 32 for grpm=1)
+              rel_hi = rel_lo - 4                        (v_s_hi adds +4 to N)
+              thr(r) = π((r//4)*8 + (r%4)) = (r%4)*8 + (r//4)
             """
             kv_tile_start = tile_idx * fx.Index(BLOCK_N)
             kv_start_i32 = fx.Int32(kv_tile_start)
-            lane_off_i32 = fx.Int32(lane_div_32) * c4_i32
-            # rel = q_pos - (kv_start + i_n*W_N + lane_group*c_pack)
+            # OPUS grpm offset: grpm=1 maps to N += 32 (since π(m_a+4)=π(m_a)+32 for m_a%8<4)
+            lane_off_i32 = fx.Int32(lane_div_32) * fx.Int32(32)
             rel_lo_i32 = fx.Int32(q_row_i32 - kv_start_i32 - lane_off_i32)
-            rel_hi_i32 = fx.Int32(rel_lo_i32 - fx.Int32(K_SUB_N))
+            # v_s_hi: N += 4
+            rel_hi_i32 = fx.Int32(rel_lo_i32 - fx.Int32(4))
             neg_inf_i32 = fx.Int32(_NEG_INF_F32_BITS)
 
-            # 8 (thr_x, thr_y) pairs, matching C++ static_for nest:
-            #   i_rept in [0,4), i_pair in [0, c_pack/2) = [0, 2)
-            #   thr_x = i_rept * c_rept_stride + i_pair * 2
-            #   thr_y = thr_x + 1
-            #   c_rept_stride = (WARP_SIZE / W_M) * c_pack = 8
+            # 8 (thr_x, thr_y) pairs, OPUS-permuted thresholds.
+            # For r=0..15 grpm=0: thr(r) = (r%4)*8 + (r//4):
+            #   r= 0: 0  r= 1: 8   r= 2:16  r= 3:24
+            #   r= 4: 1  r= 5: 9   r= 6:17  r= 7:25
+            #   r= 8: 2  r= 9:10   r=10:18  r=11:26
+            #   r=12: 3  r=13:11   r=14:19  r=15:27
             pair_thresholds = [
-                (0, 1), (2, 3),
-                (8, 9), (10, 11),
-                (16, 17), (18, 19),
-                (24, 25), (26, 27),
+                (0, 8), (16, 24),       # r=0,1  r=2,3
+                (1, 9), (17, 25),       # r=4,5  r=6,7
+                (2, 10), (18, 26),      # r=8,9  r=10,11
+                (3, 11), (19, 27),      # r=12,13 r=14,15
             ]
             for p in range_constexpr(len(pair_thresholds)):
                 thr_x, thr_y = pair_thresholds[p]
                 idx_x = p * 2
                 idx_y = p * 2 + 1
 
-                # s_lo pair (i_n = 0)
+                # s_lo pair (n_strip = 0)
                 x_lo_bits = _raw(_bitcast_i32(s_lo[idx_x]))
                 y_lo_bits = _raw(_bitcast_i32(s_lo[idx_y]))
                 new_x_lo, new_y_lo = _attn_mask_vec2_imm(
@@ -757,7 +819,7 @@ def build_flash_attn_opus_module(
                 s_lo[idx_x] = _raw(_bitcast_f32(new_x_lo))
                 s_lo[idx_y] = _raw(_bitcast_f32(new_y_lo))
 
-                # s_hi pair (i_n = 1, rel shifted by W_N)
+                # s_hi pair (n_strip = 1, rel shifted by 4)
                 x_hi_bits = _raw(_bitcast_i32(s_hi[idx_x]))
                 y_hi_bits = _raw(_bitcast_i32(s_hi[idx_y]))
                 new_x_hi, new_y_hi = _attn_mask_vec2_imm(
