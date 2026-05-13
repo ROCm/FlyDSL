@@ -21,7 +21,6 @@ treats cross-buffer accesses as no-alias.
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl._mlir.dialects import fly as _fly_dialect
 from flydsl._mlir.dialects import llvm as _llvm
 from flydsl._mlir.dialects.fly_rocdl import TargetAddressSpace as _TgtAS
 from flydsl.expr import arith, const_expr, range_constexpr, rocdl
@@ -107,7 +106,6 @@ def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int
         A_scale: fx.Tensor,
         B_scale: fx.Tensor,
     ):
-        MfmaAccum_t = Vec.make_type(4, fx.Float32)
         RT_C_i = Vec.filled(4, 0.0, fx.Float32)
         F8_IR_t = fx.Float8E4M3FN.ir_type
 
@@ -298,11 +296,11 @@ def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int
 
         mma_atom = fx.make_mma_atom(fx.rocdl.cdna4.MFMA_Scale(16, 16, 128, fx.Float8E4M3FN))
 
-        # Non-interleaved path goes through ``fx.gemm``. Each call
-        # spills the Vec operands into register memref fragments
-        # (i32x8 for A/B, f32x4 for the accumulator) and pulls the
-        # accumulator back out; ``fly-convert-atom-call-to-ssa-form`` +
-        # ``fly-promote-regmem-to-vectorssa`` then elide the alloca /
+        # All MFMAs go through ``fx.gemm``. Each call spills the Vec
+        # operands into register memref fragments (i32x8 for A/B,
+        # f32x4 for the accumulator) and pulls the accumulator back
+        # out; ``fly-convert-atom-call-to-ssa-form`` +
+        # ``fly-promote-regmem-to-vectorssa`` elide the alloca /
         # store / load round trip and leave a plain
         # ``llvm.amdgcn.mfma.scale.f32.16x16x128`` call chained on
         # ``<4 x float>`` SSA values, which ISel maps to AGPR.
@@ -319,13 +317,7 @@ def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int
             fx.make_layout((2, 2, 1), (1, 2, 0)),
         )
 
-        # Direct ``fly.mma_atom_call_ssa`` is kept for the interleaved
-        # BLOCK==256 cluster where the manual MFMA / load schedule
-        # matters more than the layout-API abstraction.
-        def _mfma(a_val, b_val, c_val):
-            return _fly_dialect.mma_atom_call_ssa([MfmaAccum_t], mma_atom, a_val, b_val, c_val)
-
-        def _mfma_fxgemm(a_vec, b_vec, c_vec):
+        def _mfma(a_vec, b_vec, c_vec):
             a_mem = fx.memref_alloca(a_reg_ty, fx.make_layout(a_atom_i32_elems, 1))
             b_mem = fx.memref_alloca(b_reg_ty, fx.make_layout(b_atom_i32_elems, 1))
             c_mem = fx.memref_alloca(c_reg_ty, fx.make_layout(c_atom_f32_elems, 1))
@@ -340,10 +332,9 @@ def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int
             assert len(b) == N_TILES_B
             assert len(c) == N_TILES_A * N_TILES_B
 
-            mma = _mfma if const_expr(_use_interleaved_block) else _mfma_fxgemm
             for i in range_constexpr(N_TILES_A):
                 for j in range_constexpr(N_TILES_B):
-                    c[_c_idx(i, j)] = mma(a[i], b[j], c[_c_idx(i, j)])
+                    c[_c_idx(i, j)] = _mfma(a[i], b[j], c[_c_idx(i, j)])
             return c
 
         def _mfma_ABt_one(a, b, c, m, n):
