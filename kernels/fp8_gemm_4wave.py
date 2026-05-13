@@ -251,9 +251,11 @@ def compile_fp8_gemm(
             # LDS read byte for (R, C) within one sub-buffer:
             #   * Non-preshuffled: ``byte = R*BLOCK_K + C_swizzled`` (XOR
             #     swizzle on col by R-bits to avoid bank conflicts).
-            #   * Preshuffled: ``byte = (R//8)*1024 + (R%8)*16 +
-            #     (C//16)*128 + (C%16)``. col-major-within-wave-portion;
-            #     8 lanes per 128-byte LDS row utilise all 32 banks.
+            #   * Preshuffled: ``byte = (R//8)*1024 + (R%8)*16 + (C//16)*128``.
+            #     col-major-within-wave-portion; ``C`` is always a multiple of
+            #     16 here (``C = (lane//16)*16 + step*64``) so ``C%16 == 0``
+            #     drops out. 8 lanes per 128-byte LDS row utilise all 32 banks,
+            #     producing the MI350-optimal 2-way ds_read_b128 bank pattern.
             lds_swz = []
             for row_offset in range_constexpr(n_tiles):
                 row = wave_idx * (n_tiles * 16) + row_offset * 16 + lane_id % 16
@@ -261,7 +263,7 @@ def compile_fp8_gemm(
                 for i in range_constexpr(2):
                     col = (lane_id // 16) * 16 + i * 64
                     if const_expr(preshuffled):
-                        swz.append((row // 8) * 1024 + (row % 8) * 16 + (col // 16) * 128 + (col % 16))
+                        swz.append((row // 8) * 1024 + (row % 8) * 16 + (col // 16) * 128)
                     else:
                         r, c = _swizzle_128(row, col)
                         swz.append(r * BLOCK_K + c)
@@ -308,7 +310,8 @@ def compile_fp8_gemm(
                 for step in range_constexpr(2):
                     col = (lane_id // 16) * 16 + step * 64
                     if const_expr(preshuffled):
-                        byte = (row // 8) * 1024 + (row % 8) * 16 + (col // 16) * 128 + (col % 16)
+                        # C%16 == 0 by construction; drop it.
+                        byte = (row // 8) * 1024 + (row % 8) * 16 + (col // 16) * 128
                     else:
                         r, c = _swizzle_128(row, col)
                         byte = r * BLOCK_K + c
