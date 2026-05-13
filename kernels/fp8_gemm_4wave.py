@@ -184,17 +184,6 @@ def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int
                 offsets.append(fx.crd2idx((row, col), _gl_swz_layout).to_py_value())
             return offsets
 
-        def _compute_lds_swizzle(wave_idx, n_tiles):
-            lds_swz = []
-            for row_offset in range_constexpr(n_tiles):
-                row = wave_idx * (n_tiles * 16) + row_offset * 16 + lane_id % 16
-                swz = []
-                for i in range_constexpr(2):
-                    col = (lane_id // 16) * 16 + i * 64
-                    swz.append(fx.crd2idx((row, col), _lds_swz_layout).to_py_value())
-                lds_swz.append(swz)
-            return lds_swz
-
         # 128 bits per thread = 16 fp8 elements; soffset carries the
         # runtime k offset.
         g2lds_atom = fx.make_copy_atom(fx.rocdl.BufferCopyLDS128b(), 128)
@@ -245,8 +234,10 @@ def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int
                 frag.append(_pack_i32x4_i32x8(halves[0], halves[1]))
             return frag
 
-        def _load_one_rt(name, lds_swz, row, k):
-            return _vec_load_lds_i32x4(name, lds_swz[row][k])
+        def _load_one_rt(name, wave_idx, n_tiles, row_idx, k):
+            row = wave_idx * (n_tiles * 16) + row_idx * 16 + lane_id % 16
+            col = (lane_id // 16) * 16 + k * 64
+            return _vec_load_lds_i32x4(name, fx.crd2idx((row, col), _lds_swz_layout).to_py_value())
 
         def _c_idx(i, j):
             return i * N_TILES_B + j
@@ -349,48 +340,47 @@ def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int
             c = _mfma_ABt_one(a, b, c, 0, 0)
             c = _mfma_ABt_one(a, b, c, 0, 1)
 
-            lds_swz = _compute_lds_swizzle(wave_idx, n_tiles_lds)
             _load_one_lds(gl_src, lds_dst, k_offset, gl_offsets, 0)
-            rt_dst_0 = _load_one_rt(lds_src, lds_swz, 0, 0)
+            rt_dst_0 = _load_one_rt(lds_src, wave_idx, n_tiles_lds, 0, 0)
 
             c = _mfma_ABt_one(a, b, c, 0, 2)
 
-            rt_dst_1 = _load_one_rt(lds_src, lds_swz, 0, 1)
+            rt_dst_1 = _load_one_rt(lds_src, wave_idx, n_tiles_lds, 0, 1)
             rt_dst.append(_pack_i32x4_i32x8(rt_dst_0, rt_dst_1))
 
             c = _mfma_ABt_one(a, b, c, 0, 3)
 
             _load_one_lds(gl_src, lds_dst, k_offset, gl_offsets, 1)
-            rt_dst_0 = _load_one_rt(lds_src, lds_swz, 1, 0)
+            rt_dst_0 = _load_one_rt(lds_src, wave_idx, n_tiles_lds, 1, 0)
 
             c = _mfma_ABt_one(a, b, c, 1, 0)
             c = _mfma_ABt_one(a, b, c, 1, 1)
 
-            rt_dst_1 = _load_one_rt(lds_src, lds_swz, 1, 1)
+            rt_dst_1 = _load_one_rt(lds_src, wave_idx, n_tiles_lds, 1, 1)
             rt_dst.append(_pack_i32x4_i32x8(rt_dst_0, rt_dst_1))
 
             c = _mfma_ABt_one(a, b, c, 1, 2)
             c = _mfma_ABt_one(a, b, c, 1, 3)
 
             _load_one_lds(gl_src, lds_dst, k_offset, gl_offsets, 2)
-            rt_dst_0 = _load_one_rt(lds_src, lds_swz, 2, 0)
+            rt_dst_0 = _load_one_rt(lds_src, wave_idx, n_tiles_lds, 2, 0)
 
             c = _mfma_ABt_one(a, b, c, 2, 0)
             c = _mfma_ABt_one(a, b, c, 2, 1)
 
-            rt_dst_1 = _load_one_rt(lds_src, lds_swz, 2, 1)
+            rt_dst_1 = _load_one_rt(lds_src, wave_idx, n_tiles_lds, 2, 1)
             rt_dst.append(_pack_i32x4_i32x8(rt_dst_0, rt_dst_1))
 
             c = _mfma_ABt_one(a, b, c, 2, 2)
             c = _mfma_ABt_one(a, b, c, 2, 3)
 
             _load_one_lds(gl_src, lds_dst, k_offset, gl_offsets, 3)
-            rt_dst_0 = _load_one_rt(lds_src, lds_swz, 3, 0)
+            rt_dst_0 = _load_one_rt(lds_src, wave_idx, n_tiles_lds, 3, 0)
 
             c = _mfma_ABt_one(a, b, c, 3, 0)
             c = _mfma_ABt_one(a, b, c, 3, 1)
 
-            rt_dst_1 = _load_one_rt(lds_src, lds_swz, 3, 1)
+            rt_dst_1 = _load_one_rt(lds_src, wave_idx, n_tiles_lds, 3, 1)
             rt_dst.append(_pack_i32x4_i32x8(rt_dst_0, rt_dst_1))
 
             c = _mfma_ABt_one(a, b, c, 3, 2)
