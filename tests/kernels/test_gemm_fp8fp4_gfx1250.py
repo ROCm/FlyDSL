@@ -201,6 +201,7 @@ def _run_mxscale_gemm_test(
     l2_prefetch_distance=0, cluster_m=1, cluster_n=1,
     inst_prefetch=False, waves_per_eu=None,
     expert_sched_mode=True, split_k=1,
+    b_streaming=False,
     return_launch_fn=False,
 ):
     """Unified test body for FP4 and FP8."""
@@ -310,6 +311,7 @@ def _run_mxscale_gemm_test(
         split_k=split_k,
         use_scale_opsel=use_scale_opsel,
         expert_sched_mode=expert_sched_mode,
+        b_streaming=b_streaming,
     )
 
     # Pre-bind via flyc.compile so the launch goes through the CompiledFunction
@@ -509,6 +511,74 @@ def test_a8w4_gemm_irregular_m_tile16(M, N, K, use_tdm_store):
         out_dtype="bf16",
         l2_prefetch_distance=2,
         use_scale_opsel=False,
+    )
+
+
+@pytest.mark.parametrize(
+    "data_format, M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp",
+    [
+        # Small-M cases where B-streaming theory predicts VGPR savings.
+        ("fp4", 128, 512, 7168, 128, 128, 256, 2, 2),
+        ("fp8", 128, 256, 256, 128, 256, 128, 2, 4),
+        ("a8w4", 128, 256, 256, 128, 256, 128, 2, 4),
+    ],
+)
+def test_b_streaming_correctness(data_format, M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp):
+    """B-streaming opt-in correctness: numerics must match the default path."""
+    _run_mxscale_gemm_test(
+        data_format, M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp,
+        num_buffers=2, use_tdm_store=True, out_dtype="bf16",
+        l2_prefetch_distance=2, b_streaming=True,
+    )
+
+
+@pytest.mark.parametrize(
+    "data_format, M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp",
+    [
+        # wave_specialized_tdm requires num_warps == 4 (m_warp * n_warp == 4).
+        # K must satisfy K/tile_k >= num_buffers (2 here).
+        ("fp4", 128, 256, 512, 128, 128, 256, 2, 2),
+        ("fp8", 128, 256, 256, 128, 256, 128, 2, 2),
+        ("a8w4", 128, 256, 256, 128, 256, 128, 2, 2),
+    ],
+)
+def test_b_streaming_with_wave_spec_tdm(
+    data_format, M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp
+):
+    """B-streaming + wave_specialized_tdm orthogonality check."""
+    _run_mxscale_gemm_test(
+        data_format, M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp,
+        num_buffers=2, use_tdm_store=True, out_dtype="bf16",
+        l2_prefetch_distance=2, b_streaming=True,
+        wave_specialized_tdm=True,
+    )
+
+
+@pytest.mark.parametrize(
+    "data_format, M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, cluster_m, cluster_n",
+    [
+        # MCAST requires real hardware; skipped on AM simulator (see CLAUDE.md).
+        ("fp4", 256, 512, 256, 128, 256, 128, 2, 2, 2, 2),
+        ("fp8", 256, 512, 256, 128, 256, 128, 2, 2, 2, 2),
+    ],
+)
+def test_b_streaming_with_cluster_mcast(
+    data_format, M, N, K, tile_m, tile_n, tile_k,
+    m_warp, n_warp, cluster_m, cluster_n,
+):
+    """B-streaming + cluster MCAST orthogonality check (HW-only)."""
+    pytest.importorskip("torch")
+    arch = str(get_rocm_arch())
+    if arch != "gfx1250":
+        pytest.skip(f"requires gfx1250, got {arch}")
+    # AM/FFM simulators do not implement cluster multicast (CLAUDE.md).
+    if "FFMLITE_TOPOLOGY" in os.environ or "AM_TOPOLOGY" in os.environ:
+        pytest.skip("cluster multicast not supported on AM/FFM simulator")
+    _run_mxscale_gemm_test(
+        data_format, M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp,
+        num_buffers=2, use_tdm_store=True, out_dtype="bf16",
+        l2_prefetch_distance=2, b_streaming=True,
+        cluster_m=cluster_m, cluster_n=cluster_n,
     )
 
 
@@ -859,6 +929,7 @@ def _run_benchmark(args):
         use_scale_opsel=args.use_scale_opsel,
         expert_sched_mode=args.expert_sched_mode,
         atomic_barrier_enable=args.atomic_barrier_enable,
+        b_streaming=args.b_streaming,
     )
 
     c_flat = c_gpu.view(-1)
@@ -1003,6 +1074,8 @@ if __name__ == "__main__":
     parser.add_argument("--use-scale-opsel", action="store_true", default=False)
     parser.add_argument("--disable-expert-sched-mode", dest="expert_sched_mode",
                         action="store_false", default=True)
+    parser.add_argument("--b-streaming", action="store_true", default=False,
+                        help="Enable B-streaming compute path (Hold-A, stream B).")
     parser.add_argument("--atomic-barrier-enable", action="store_true", default=False,
                         help="Enable TDM atomic_barrier_enable (hardware auto-barrier)")
 
@@ -1039,4 +1112,5 @@ if __name__ == "__main__":
             inst_prefetch=args.inst_prefetch,
             waves_per_eu=args.waves_per_eu,
             expert_sched_mode=args.expert_sched_mode,
+            b_streaming=args.b_streaming,
         )
