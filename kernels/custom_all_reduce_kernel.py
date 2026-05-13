@@ -13,18 +13,16 @@ from __future__ import annotations
 import math
 
 import flydsl.compiler as flyc
+import flydsl.expr as fx
+from flydsl._mlir import ir
+from flydsl._mlir.dialects import llvm, rocdl, scf
 from flydsl.compiler.ast_rewriter import ASTRewriter
 from flydsl.compiler.kernel_function import CompilationContext
-import flydsl.expr as fx
-from flydsl.expr import arith as ea, gpu, range_constexpr, buffer_ops
-from flydsl.expr import const_expr
-from flydsl.expr.typing import T, Int32, Int64, Stream
-from flydsl._mlir import ir
-from flydsl._mlir.dialects import scf, llvm, rocdl
+from flydsl.expr import arith as ea
+from flydsl.expr import buffer_ops, const_expr, gpu, range_constexpr
+from flydsl.expr.typing import Int32, Int64, Stream, T
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
-
 from kernels.custom_all_reduce import _KMAXBLOCKS as _MAX_BLOCKS
-
 
 # ---------------------------------------------------------------------------
 # Low-level memory helpers — all operate on raw i64 device addresses.
@@ -34,13 +32,14 @@ from kernels.custom_all_reduce import _KMAXBLOCKS as _MAX_BLOCKS
 #   bit 1 = SC1  — bypass L2/TCC cache
 #   bit 2 = NT   — nontemporal (bypass hardware prefetcher)
 # ---------------------------------------------------------------------------
-_CM_CACHED  = 0  # normal cached access
-_CM_SC1     = 2  # bypass L2 only  (reads from signal bufs across GPUs)
+_CM_CACHED = 0  # normal cached access
+_CM_SC1 = 2  # bypass L2 only  (reads from signal bufs across GPUs)
 _CM_SC0_SC1 = 3  # bypass L1+L2   (writes to signal bufs: fully uncached)
-_CM_NT      = 4  # nontemporal    (bulk data writes, bypasses L2 prefetch)
+_CM_NT = 4  # nontemporal    (bulk data writes, bypasses L2 prefetch)
 
 
 # ---- buffer resource descriptor helper ------------------------------------
+
 
 def _make_rsrc(addr_i64):
     """Create buffer resource descriptor from a wave-uniform i64 base address."""
@@ -50,6 +49,7 @@ def _make_rsrc(addr_i64):
 # ---- bulk data: 16-byte (128-bit) load / store ----------------------------
 # These accept a pre-built rsrc descriptor and a per-lane element offset (i32).
 
+
 def _load_v4i32(rsrc, elem_off_i32):
     """Buffer-load vector<4xi32> (16 bytes) with pre-built descriptor."""
     raw = buffer_ops.buffer_load(rsrc, elem_off_i32, vec_width=4, dtype=T.i32)
@@ -58,38 +58,33 @@ def _load_v4i32(rsrc, elem_off_i32):
 
 def _store_v4i32(rsrc, elem_off_i32, data):
     """Buffer-store vector<4xi32> (16 bytes), cached."""
-    buffer_ops.buffer_store(data, rsrc, elem_off_i32,
-                            cache_modifier=_CM_CACHED)
+    buffer_ops.buffer_store(data, rsrc, elem_off_i32, cache_modifier=_CM_CACHED)
 
 
 def _store_v4i32_nt(rsrc, elem_off_i32, v4i32_val):
     """Buffer-store vector<4xi32> nontemporal — bypasses L2 prefetcher."""
-    buffer_ops.buffer_store(v4i32_val, rsrc, elem_off_i32,
-                            cache_modifier=_CM_NT)
+    buffer_ops.buffer_store(v4i32_val, rsrc, elem_off_i32, cache_modifier=_CM_NT)
     rocdl.s_waitcnt(0)
 
 
 # ---- signal buffer: i32 load / store --------------------------------------
 
+
 def _store_i32(rsrc, val_i32):
     """Store i32 with default caching via pre-built rsrc descriptor."""
-    buffer_ops.buffer_store(val_i32, rsrc, 0,
-                            cache_modifier=_CM_CACHED)
+    buffer_ops.buffer_store(val_i32, rsrc, 0, cache_modifier=_CM_CACHED)
 
 
 def _load_i32_uncached(rsrc):
     """Load i32 bypassing L2 (sc1) via pre-built rsrc descriptor."""
-    val = buffer_ops.buffer_load(rsrc, 0,
-                                 vec_width=1, dtype=T.i32,
-                                 cache_modifier=_CM_SC1)
+    val = buffer_ops.buffer_load(rsrc, 0, vec_width=1, dtype=T.i32, cache_modifier=_CM_SC1)
     rocdl.s_waitcnt(0)
     return val
 
 
 def _store_i32_uncached(rsrc, val_i32):
     """Store i32 bypassing L1+L2 (sc0+sc1) via pre-built rsrc descriptor."""
-    buffer_ops.buffer_store(val_i32, rsrc, 0,
-                            cache_modifier=_CM_SC0_SC1)
+    buffer_ops.buffer_store(val_i32, rsrc, 0, cache_modifier=_CM_SC0_SC1)
     rocdl.s_waitcnt(0)
 
 
@@ -103,6 +98,7 @@ def _invalidate_l1():
 
 
 # ---- pointer array helpers -----------------------------------------------
+
 
 def _pack_i64_vec(values):
     """Pack preloaded i64 values into vector<Nxi64> for contiguous VGPR storage.
@@ -135,8 +131,8 @@ def _load_device_ptr(array_base_i64, index):
 # Signal buffer layout offsets (bytes), derived from _MAX_BLOCKS.
 # start[_MAX_BLOCKS][8] of uint32 | end[_MAX_BLOCKS][8] of uint32 | flag[_MAX_BLOCKS] of uint32
 _SG_START_OFF_B = 0
-_SG_END_OFF_B = _MAX_BLOCKS * 8 * 4            # 2560 when _MAX_BLOCKS=80
-_SG_FLAG_OFF_B = _MAX_BLOCKS * 8 * 4 * 2       # 5120 when _MAX_BLOCKS=80
+_SG_END_OFF_B = _MAX_BLOCKS * 8 * 4  # 2560 when _MAX_BLOCKS=80
+_SG_FLAG_OFF_B = _MAX_BLOCKS * 8 * 4 * 2  # 5120 when _MAX_BLOCKS=80
 
 
 # ---------------------------------------------------------------------------
@@ -207,6 +203,7 @@ def _dsl_if_only(func):
 # Signal synchronization primitives
 # ---------------------------------------------------------------------------
 
+
 @_dsl_if_only
 def _signal_start_sync(*, lane_i32, rank_i32, bid_i32, self_sg_i64, sgs_i64, ngpus: int):
     """Start-sync: write start flag to all peers, wait for all to arrive."""
@@ -252,8 +249,7 @@ def _signal_start_sync(*, lane_i32, rank_i32, bid_i32, self_sg_i64, sgs_i64, ngp
 
 
 @_dsl_if_only
-def _signal_end_sync(*, lane_i32, rank_i32, bid_i32, self_sg_i64, sgs_i64,
-                     ngpus: int):
+def _signal_end_sync(*, lane_i32, rank_i32, bid_i32, self_sg_i64, sgs_i64, ngpus: int):
     """End-sync: write end flag to all peers, wait for all to finish."""
 
     i32, i64 = T.i32, T.i64
@@ -303,6 +299,7 @@ def _signal_end_sync(*, lane_i32, rank_i32, bid_i32, self_sg_i64, sgs_i64,
 # Main entry point
 # ---------------------------------------------------------------------------
 
+
 def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: int = 512):
     """Build and return compiled allreduce launcher functions.
 
@@ -350,9 +347,8 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
     #   better for small tensors where the kernel runs only 1-2 iterations and
     #   occupancy is already saturated by register usage rather than LDS.
     # Threshold: use single buffer when estimated iterations per block >= 3.
-    _est_iters_2stage = max(1, (max(1, part_p) + _MAX_BLOCKS * tnum_gpu - 1)
-                            // (_MAX_BLOCKS * tnum_gpu))
-    _use_single_buf_2stage = (_est_iters_2stage >= 3)
+    _est_iters_2stage = max(1, (max(1, part_p) + _MAX_BLOCKS * tnum_gpu - 1) // (_MAX_BLOCKS * tnum_gpu))
+    _use_single_buf_2stage = _est_iters_2stage >= 3
 
     # -----------------------------------------------------------------------
     # GPU Kernel: 1-stage arr (full allreduce in one pass, CUDAGraph-compatible)
@@ -370,7 +366,6 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
         Each warp loads data from one rank into shared memory, then warp 0
         reduces across all warps and writes the result to global memory.
         """
-        i32, i64 = T.i32, T.i64
         v4i32 = T.i32x4
         if const_expr(not is_f32):
             half_dtype = fx.BFloat16 if is_bf16 else fx.Float16
@@ -403,8 +398,14 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
         warp_id = _u(lane_i32) // threads_per_rank_i32
         lane_id = _u(lane_i32) % threads_per_rank_i32
 
-        _signal_start_sync(lane_i32=lane_i32, rank_i32=rank_i32, bid_i32=bid_i32,
-                           self_sg_i64=self_sg_i64, sgs_i64=sgs, ngpus=world_size)
+        _signal_start_sync(
+            lane_i32=lane_i32,
+            rank_i32=rank_i32,
+            bid_i32=bid_i32,
+            self_sg_i64=self_sg_i64,
+            sgs_i64=sgs,
+            ngpus=world_size,
+        )
 
         # Grid-stride loop: each warp loads from its assigned rank,
         # then warp 0 reduces and writes output.
@@ -429,8 +430,7 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
                 acc = None
                 for wi in range_constexpr(world_size):
                     # SmemPtr index operand must be MLIR index type.
-                    smem_read_idx = ea.index_cast(
-                        T.index, wi * threads_per_rank_i32 + lane_id + smem_base)
+                    smem_read_idx = ea.index_cast(T.index, wi * threads_per_rank_i32 + lane_id + smem_base)
                     raw_i = fx.Vector(_smem_load(smem_ptr, smem_read_idx))
                     if const_expr(is_f32):
                         # Raw LDS payload is i32x4; reinterpret as f32x4.
@@ -464,7 +464,6 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
         tmp_ptrs: Int64,
         out_ptr: Int64,
     ):
-        i32, i64 = T.i32, T.i64
         v4i32 = T.i32x4
         if const_expr(not is_f32):
             half_dtype = fx.BFloat16 if is_bf16 else fx.Float16
@@ -491,8 +490,14 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
             start_pack + part_p,
         )
 
-        _signal_start_sync(lane_i32=lane_i32, rank_i32=rank_i32, bid_i32=bid_i32,
-                           self_sg_i64=self_sg_i64, sgs_i64=sgs, ngpus=world_size)
+        _signal_start_sync(
+            lane_i32=lane_i32,
+            rank_i32=rank_i32,
+            bid_i32=bid_i32,
+            self_sg_i64=self_sg_i64,
+            sgs_i64=sgs,
+            ngpus=world_size,
+        )
 
         threads_per_rank_i32 = tnum_gpu
         # lane -> (rank-local warp id, lane-in-warp) under packed launch.
@@ -537,9 +542,7 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
                     if const_expr(smem_base_expr is None):
                         smem_read_idx = fx.Index(wi * threads_per_rank_i32 + lane_id)
                     else:
-                        smem_read_idx = fx.Index(
-                            wi * threads_per_rank_i32 + lane_id + smem_base_expr
-                        )
+                        smem_read_idx = fx.Index(wi * threads_per_rank_i32 + lane_id + smem_base_expr)
                     raw_i = fx.Vector(_smem_load(smem_ptr, smem_read_idx))
                     if const_expr(is_f32):
                         vf = raw_i.bitcast(fx.Float32)
@@ -575,8 +578,14 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
                 parity = 1 - parity
 
         gpu.barrier()
-        _signal_end_sync(lane_i32=lane_i32, rank_i32=rank_i32, bid_i32=bid_i32,
-                         self_sg_i64=self_sg_i64, sgs_i64=sgs, ngpus=world_size)
+        _signal_end_sync(
+            lane_i32=lane_i32,
+            rank_i32=rank_i32,
+            bid_i32=bid_i32,
+            self_sg_i64=self_sg_i64,
+            sgs_i64=sgs,
+            ngpus=world_size,
+        )
 
         # ---- Stage 2: all-gather ----
         out_rsrc = _make_rsrc(out_ptr_i64)
@@ -629,7 +638,6 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
         out_ptrs: Int64,
         tmp_ptrs: Int64,
     ):
-        i32, i64 = T.i32, T.i64
         v4i32 = T.i32x4
         if const_expr(not is_f32):
             half_dtype = fx.BFloat16 if is_bf16 else fx.Float16
@@ -699,8 +707,14 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
                 _store_v4i32(dst_tmp_rsrc_desc, dst_off_i32, raw)
 
         # Signal all ranks that stage 1 is complete
-        _signal_start_sync(lane_i32=lane_i32, rank_i32=rank_i32, bid_i32=bid_i32,
-                           self_sg_i64=self_sg_i64, sgs_i64=sgs, ngpus=world_size)
+        _signal_start_sync(
+            lane_i32=lane_i32,
+            rank_i32=rank_i32,
+            bid_i32=bid_i32,
+            self_sg_i64=self_sg_i64,
+            sgs_i64=sgs,
+            ngpus=world_size,
+        )
 
         # ---- Stage 2: reduce local tmp and write to REMOTE outputs ----
         tmp_out_rsrc_desc = _make_rsrc(tmp_out_base_i64)
@@ -744,8 +758,7 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
                 acc = None
                 for wi in range_constexpr(world_size):
                     # SmemPtr index operand must be MLIR index type.
-                    smem_read_idx = ea.index_cast(
-                        T.index, (wi * tnum_gpu) + lane_id)
+                    smem_read_idx = ea.index_cast(T.index, (wi * tnum_gpu) + lane_id)
                     raw_i = fx.Vector(_smem_load(smem_ptr, smem_read_idx))
                     if const_expr(is_f32):
                         # Raw LDS payload is i32x4; reinterpret as f32x4.
@@ -778,8 +791,14 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
                 _store_v4i32_nt(dst_out_rsrc_desc, dst_off_i32, reduced_val)
 
         gpu.barrier()
-        _signal_end_sync(lane_i32=lane_i32, rank_i32=rank_i32, bid_i32=bid_i32,
-                         self_sg_i64=self_sg_i64, sgs_i64=sgs, ngpus=world_size)
+        _signal_end_sync(
+            lane_i32=lane_i32,
+            rank_i32=rank_i32,
+            bid_i32=bid_i32,
+            self_sg_i64=self_sg_i64,
+            sgs_i64=sgs,
+            ngpus=world_size,
+        )
 
     # -----------------------------------------------------------------------
     # Host launchers (@flyc.jit)
@@ -864,8 +883,8 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
     # Unique function names per (N, dtype_str, world_size, threads) to prevent
     # file-cache collisions (N is baked into kernel body, not the cache key).
     _suffix = f"_N{N}_{dtype_str}_ws{world_size}_t{threads}"
-    run_1stage_arr.func.__name__        = f"run_1stage_arr{_suffix}"
-    run_2stage_arr.func.__name__        = f"run_2stage_arr{_suffix}"
+    run_1stage_arr.func.__name__ = f"run_1stage_arr{_suffix}"
+    run_2stage_arr.func.__name__ = f"run_2stage_arr{_suffix}"
     run_2stage_write_mode.func.__name__ = f"run_2stage_write_mode{_suffix}"
 
     return {
