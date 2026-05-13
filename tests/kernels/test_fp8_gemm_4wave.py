@@ -101,8 +101,7 @@ def _bench_fp8_gemm_4wave(
         use_xcd_remap=not disable_xcd_remap,
     )
     print(
-        f"\n[fp8_gemm_4wave] M={M} N={N} K={K} "
-        f"BLOCK_M={tile_m} BLOCK_N={tile_n} xcd_remap={not disable_xcd_remap}"
+        f"\n[fp8_gemm_4wave] M={M} N={N} K={K} " f"BLOCK_M={tile_m} BLOCK_N={tile_n} xcd_remap={not disable_xcd_remap}"
     )
 
     def _args(c, a, b, sa, sb):
@@ -145,8 +144,16 @@ def _bench_fp8_gemm_4wave(
     if vs_torch:
         try:
             us_t, ok_t = _bench_torch_scaled_mm(
-                M, N, K, a_q, b_q, scale_a, scale_b, c_ref,
-                num_warmups, num_iters,
+                M,
+                N,
+                K,
+                a_q,
+                b_q,
+                scale_a,
+                scale_b,
+                c_ref,
+                num_warmups,
+                num_iters,
             )
             tflops_t = flops / (us_t / 1e6) / 1e12
             print(

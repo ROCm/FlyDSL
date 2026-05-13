@@ -22,7 +22,7 @@ from flydsl._mlir.dialects import llvm as _llvm
 from flydsl._mlir.dialects import memref as _memref_dialect
 from flydsl._mlir.dialects.fly_rocdl import TargetAddressSpace as _TgtAS
 from flydsl.compiler.kernel_function import CompilationContext
-from flydsl.expr import arith, const_expr, range_constexpr, rocdl
+from flydsl.expr import arith, const_expr, range_constexpr
 from flydsl.expr.typing import Vector as Vec
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 
@@ -271,14 +271,8 @@ def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int
                 fx.memref_store_vec(Vec.filled(1, value_bf16, fx.BFloat16), r)
                 fx.copy(out_atom_1, r, fx.slice(c_div, (None, fx.Int32(c_index))))
 
-            a_scales = [
-                _load_scale_vec4(base_row + i * 16 + (lane_id // 16) * 4)
-                for i in range_constexpr(N_TILES_A)
-            ]
-            b_scales = [
-                _load_scale_scalar(base_col + i * 16 + lane_id % 16)
-                for i in range_constexpr(N_TILES_B)
-            ]
+            a_scales = [_load_scale_vec4(base_row + i * 16 + (lane_id // 16) * 4) for i in range_constexpr(N_TILES_A)]
+            b_scales = [_load_scale_scalar(base_col + i * 16 + lane_id % 16) for i in range_constexpr(N_TILES_B)]
             for ti in range_constexpr(N_TILES_A):
                 row = base_row + ti * 16 + (lane_id // 16) * 4
                 for tj in range_constexpr(N_TILES_B):
@@ -303,9 +297,7 @@ def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int
         mma_atom = fx.make_mma_atom(fx.rocdl.cdna4.MFMA_Scale(16, 16, 128, fx.Float8E4M3FN))
 
         def _mfma(a_val, b_val, c_val):
-            return _fly_dialect.mma_atom_call_ssa(
-                [MfmaAccum_t], mma_atom, a_val, b_val, c_val
-            )
+            return _fly_dialect.mma_atom_call_ssa([MfmaAccum_t], mma_atom, a_val, b_val, c_val)
 
         def _mfma_ABt_all(a, b, c):
             assert len(a) == N_TILES_A
@@ -388,9 +380,7 @@ def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int
             c = _mfma_ABt_all(a, b, c)
             return c, rt_dst
 
-        def _compute_block(
-            lds_dst, gl_src, k_offset, gl_offsets, wave_idx, lds_src, n_tiles_lds, n_tiles_rt, a, b, c
-        ):
+        def _compute_block(lds_dst, gl_src, k_offset, gl_offsets, wave_idx, lds_src, n_tiles_lds, n_tiles_rt, a, b, c):
             if const_expr(_use_interleaved_block):
                 return _interleaved_cluster(
                     lds_dst, gl_src, k_offset, gl_offsets, wave_idx, lds_src, n_tiles_lds, a, b, c
