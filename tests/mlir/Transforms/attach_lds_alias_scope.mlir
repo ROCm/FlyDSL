@@ -84,3 +84,60 @@ gpu.module @static_lds {
     llvm.return %v : vector<4xi32>
   }
 }
+
+// -----
+
+// -----------------------------------------------------------------------------
+// Ambiguous provenance: an `add` whose lhs is `ptrtoint(@A)` and rhs is
+// `ptrtoint(@B)` produces an int that simultaneously carries provenance for
+// both globals. Anything downstream must NOT be tagged with a single scope,
+// otherwise we'd be telling LLVM "no alias to @B" about a load that may very
+// well land in @B's region.
+// -----------------------------------------------------------------------------
+
+// CHECK-LABEL: gpu.module @ambiguous_add
+gpu.module @ambiguous_add {
+  llvm.mlir.global external @amb_a() {addr_space = 3 : i32, alignment = 1024 : i64, dso_local} : !llvm.array<0 x i8>
+  llvm.mlir.global external @amb_b() {addr_space = 3 : i32, alignment = 1024 : i64, dso_local} : !llvm.array<0 x i8>
+
+  // CHECK-LABEL: llvm.func @load_ambiguous
+  llvm.func @load_ambiguous(%c: i32) -> vector<4xi32> {
+    %a = llvm.mlir.addressof @amb_a : !llvm.ptr<3>
+    %b = llvm.mlir.addressof @amb_b : !llvm.ptr<3>
+    %ai = llvm.ptrtoint %a : !llvm.ptr<3> to i32
+    %bi = llvm.ptrtoint %b : !llvm.ptr<3> to i32
+    %amb = llvm.add %ai, %bi : i32
+    %off = llvm.add %amb, %c : i32
+    %p = llvm.inttoptr %off : i32 to !llvm.ptr<3>
+    // CHECK: llvm.load
+    // CHECK-NOT: alias_scopes
+    %v = llvm.load %p : !llvm.ptr<3> -> vector<4xi32>
+    llvm.return %v : vector<4xi32>
+  }
+}
+
+// -----
+
+// -----------------------------------------------------------------------------
+// `or`/`sub`/`xor` are NOT canonical pointer arithmetic via int. Even when
+// they happen to be equivalent to `add` they can break provenance, so the
+// pass refuses to forward through them.
+// -----------------------------------------------------------------------------
+
+// CHECK-LABEL: gpu.module @nontracked_op
+gpu.module @nontracked_op {
+  llvm.mlir.global external @nt_a() {addr_space = 3 : i32, alignment = 1024 : i64, dso_local} : !llvm.array<0 x i8>
+  llvm.mlir.global external @nt_b() {addr_space = 3 : i32, alignment = 1024 : i64, dso_local} : !llvm.array<0 x i8>
+
+  // CHECK-LABEL: llvm.func @load_via_or
+  llvm.func @load_via_or(%mask: i32) -> vector<4xi32> {
+    %a = llvm.mlir.addressof @nt_a : !llvm.ptr<3>
+    %ai = llvm.ptrtoint %a : !llvm.ptr<3> to i32
+    %off = llvm.or %ai, %mask : i32
+    %p = llvm.inttoptr %off : i32 to !llvm.ptr<3>
+    // CHECK: llvm.load
+    // CHECK-NOT: alias_scopes
+    %v = llvm.load %p : !llvm.ptr<3> -> vector<4xi32>
+    llvm.return %v : vector<4xi32>
+  }
+}

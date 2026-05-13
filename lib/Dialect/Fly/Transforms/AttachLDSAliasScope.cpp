@@ -43,8 +43,14 @@ static bool isDynSharedGlobal(LLVM::GlobalOp g) {
   return arrTy.getNumElements() == 0;
 }
 
-/// Per-SSA-value provenance maps. Absent entry == "no provenance".
-/// A null mapped value means "ambiguous (mixes multiple globals)".
+/// Per-SSA-value provenance, encoded as a tri-state DenseMap:
+///   - absent entry      => unknown / not derived from any tracked global
+///   - mapped to G       => derived from exactly the LDS global G
+///   - mapped to nullptr => *known* to mix two or more globals (ambiguous);
+///                          downstream uses that consume this value must
+///                          also be marked ambiguous so the pass never
+///                          tags an access with a single scope when its
+///                          true scope set is larger.
 using PtrProvenance = llvm::DenseMap<Value, LLVM::GlobalOp>;
 using IntProvenance = llvm::DenseMap<Value, LLVM::GlobalOp>;
 
@@ -87,21 +93,37 @@ static Value memoryPointerForOp(Operation *op) {
 }
 
 /// Forward dataflow that maps SSA values back to the LDS global they
-/// derive from. Only tracks the patterns we care about:
+/// derive from. Only the canonical pointer-arithmetic chain is tracked
+/// so that we never tag an access whose pointer might really span more
+/// than one global:
 ///   * `LLVM::AddressOfOp(@g)` -> ptr provenance(@g)
-///   * `LLVM::PtrToIntOp(p)` -> int provenance(p)
-///   * `LLVM::AddOp(a, b)` / `LLVM::OrOp(a, b)` / `LLVM::SubOp(a, b)` ->
-///       int provenance(a)|provenance(b) (single non-null wins;
-///       conflict marks ambiguous so we don't tag downstream uses)
-///   * `LLVM::IntToPtrOp(i)` -> ptr provenance(i)
-///   * `LLVM::GEPOp(p)` -> ptr provenance(p)
+///   * `LLVM::PtrToIntOp(p)`   -> int provenance(p)
+///   * `LLVM::AddOp(a, b)`     -> int provenance(a) iff *exactly one*
+///                                 operand carries provenance; if both
+///                                 carry provenance, the result mixes
+///                                 globals and is recorded as ambiguous
+///   * `LLVM::IntToPtrOp(i)`   -> ptr provenance(i)
+///   * `LLVM::GEPOp(p)`        -> ptr provenance(p)
+///
+/// `or`/`sub`/`xor`/`and`/`shl`/`shr`/`bitcast` and any other op are
+/// treated as provenance-destroying. The dataflow is intentionally
+/// fail-safe: when in doubt, drop the tag rather than emit one that
+/// could wrongly tell LLVM "no alias" about pointers that really do
+/// alias at runtime.
 static void computeProvenance(
     LLVM::LLVMFuncOp func,
     const llvm::DenseMap<StringRef, LLVM::GlobalOp> &nameToGlobal,
     PtrProvenance &ptrProv, IntProvenance &intProv) {
-  // Combine two provenance entries. Returns (global, hasInfo) where
-  // hasInfo=false means "still no info" and a null global with
-  // hasInfo=true means "ambiguous".
+  // Tri-state DenseMap merge. Mirrors the encoding documented on
+  // `IntProvenance` / `PtrProvenance`:
+  //   - absent entry  => unknown
+  //   - present, G    => provenance(G)
+  //   - present, null => ambiguous
+  //
+  // Returns (resultProvenance, hasInfo). When hasInfo is false the
+  // caller stores nothing (keeps the value unknown); when hasInfo is
+  // true and resultProvenance is null the caller stores a sentinel
+  // entry so subsequent uses also propagate as ambiguous.
   auto combine = [](LLVM::GlobalOp a, bool aSeen, LLVM::GlobalOp b,
                     bool bSeen) -> std::pair<LLVM::GlobalOp, bool> {
     if (!aSeen && !bSeen)
@@ -110,9 +132,15 @@ static void computeProvenance(
       return {b, true};
     if (!bSeen)
       return {a, true};
-    if (a == b)
-      return {a, true};
-    return {nullptr, true};  // ambiguous
+    // Both operands have known provenance entries.
+    // - either is ambiguous (null) -> ambiguous
+    // - same non-null global       -> *still* ambiguous, because adding
+    //   a pointer-derived int to itself doesn't represent any single
+    //   well-formed pointer
+    // - different non-null globals -> ambiguous
+    if (!a || !b || a != b)
+      return {nullptr, true};
+    return {nullptr, true};  // see comment above (a == b case)
   };
 
   func.walk<WalkOrder::PreOrder>([&](Operation *op) {
@@ -124,45 +152,33 @@ static void computeProvenance(
     }
     if (auto p2i = dyn_cast<LLVM::PtrToIntOp>(op)) {
       auto it = ptrProv.find(p2i.getArg());
-      if (it != ptrProv.end() && it->second)
-        intProv[p2i.getResult()] = it->second;
+      if (it != ptrProv.end())
+        intProv[p2i.getResult()] = it->second;  // may store ambiguous
       return;
     }
-    auto handleAddLike = [&](Value lhs, Value rhs, Value result) {
-      auto la = intProv.find(lhs);
-      auto lb = intProv.find(rhs);
+    if (auto add = dyn_cast<LLVM::AddOp>(op)) {
+      auto la = intProv.find(add.getLhs());
+      auto lb = intProv.find(add.getRhs());
       bool aSeen = la != intProv.end();
       bool bSeen = lb != intProv.end();
-      auto [g, hasInfo] =
-          combine(aSeen ? la->second : nullptr, aSeen,
-                  bSeen ? lb->second : nullptr, bSeen);
-      if (hasInfo && g)
-        intProv[result] = g;
-    };
-    if (auto add = dyn_cast<LLVM::AddOp>(op)) {
-      handleAddLike(add.getLhs(), add.getRhs(), add.getResult());
-      return;
-    }
-    if (auto orOp = dyn_cast<LLVM::OrOp>(op)) {
-      handleAddLike(orOp.getLhs(), orOp.getRhs(), orOp.getResult());
-      return;
-    }
-    if (auto sub = dyn_cast<LLVM::SubOp>(op)) {
-      handleAddLike(sub.getLhs(), sub.getRhs(), sub.getResult());
+      auto [g, hasInfo] = combine(aSeen ? la->second : nullptr, aSeen,
+                                  bSeen ? lb->second : nullptr, bSeen);
+      if (hasInfo)
+        intProv[add.getResult()] = g;  // g may be null = ambiguous sentinel
       return;
     }
     if (auto i2p = dyn_cast<LLVM::IntToPtrOp>(op)) {
       auto it = intProv.find(i2p.getArg());
-      if (it != intProv.end() && it->second) {
+      if (it != intProv.end()) {
         auto ptrTy = dyn_cast<LLVM::LLVMPointerType>(i2p.getResult().getType());
         if (ptrTy && ptrTy.getAddressSpace() == kLDSAddrSpace)
-          ptrProv[i2p.getResult()] = it->second;
+          ptrProv[i2p.getResult()] = it->second;  // propagate ambiguous too
       }
       return;
     }
     if (auto gep = dyn_cast<LLVM::GEPOp>(op)) {
       auto it = ptrProv.find(gep.getBase());
-      if (it != ptrProv.end() && it->second) {
+      if (it != ptrProv.end()) {
         auto ptrTy = dyn_cast<LLVM::LLVMPointerType>(gep.getResult().getType());
         if (ptrTy && ptrTy.getAddressSpace() == kLDSAddrSpace)
           ptrProv[gep.getResult()] = it->second;
