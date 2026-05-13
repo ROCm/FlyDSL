@@ -23,7 +23,7 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 from flydsl.runtime.device import get_rocm_arch  # noqa: E402
-from kernels.fp8_gemm_4wave import compile_fp8_gemm  # noqa: E402
+from kernels.fp8_gemm_4wave import compile_fp8_gemm, preshuffle_b  # noqa: E402
 from tests.test_common import run_perftest, verify_output  # noqa: E402
 from tests.utils import pertoken_quant  # noqa: E402
 
@@ -72,6 +72,7 @@ def _bench_fp8_gemm_4wave(
     num_warmups: int = 2,
     num_iters: int = 10,
     vs_torch: bool = False,
+    b_preshuffled: bool = False,
 ):
     """Run + verify a single (M, N, K, tile) configuration. Returns TFLOPS."""
     if "gfx95" not in ARCH:
@@ -92,6 +93,8 @@ def _bench_fp8_gemm_4wave(
 
     c_ref = _run_torch(a_q, b_q, scale_a, scale_b)
 
+    b_kernel = preshuffle_b(b_q) if b_preshuffled else b_q
+
     launch_fn = compile_fp8_gemm(
         M=M,
         N=N,
@@ -99,9 +102,12 @@ def _bench_fp8_gemm_4wave(
         BLOCK_M=tile_m,
         BLOCK_N=tile_n,
         use_xcd_remap=not disable_xcd_remap,
+        b_preshuffled=b_preshuffled,
     )
     print(
-        f"\n[fp8_gemm_4wave] M={M} N={N} K={K} " f"BLOCK_M={tile_m} BLOCK_N={tile_n} xcd_remap={not disable_xcd_remap}"
+        f"\n[fp8_gemm_4wave] M={M} N={N} K={K} "
+        f"BLOCK_M={tile_m} BLOCK_N={tile_n} xcd_remap={not disable_xcd_remap} "
+        f"preshuffle_b={b_preshuffled}"
     )
 
     def _args(c, a, b, sa, sb):
@@ -114,7 +120,7 @@ def _bench_fp8_gemm_4wave(
             torch.cuda.current_stream(),
         )
 
-    compiled = flyc.compile(launch_fn, *_args(c_out_raw, a_q, b_q, scale_a, scale_b))
+    compiled = flyc.compile(launch_fn, *_args(c_out_raw, a_q, b_kernel, scale_a, scale_b))
 
     def _launch(c, a, b, sa, sb):
         compiled(*_args(c, a, b, sa, sb))
@@ -124,7 +130,7 @@ def _bench_fp8_gemm_4wave(
         _launch,
         c_out_raw,
         a_q,
-        b_q,
+        b_kernel,
         scale_a,
         scale_b,
         num_iters=num_iters,
@@ -197,6 +203,12 @@ if __name__ == "__main__":
         default=False,
         help="Also run torch._scaled_mm with the same input + harness for perf comparison.",
     )
+    parser.add_argument(
+        "--preshuffle_b",
+        action="store_true",
+        default=False,
+        help="Preshuffle B into per-MFMA-atom DRAM blocks (16 N x 128 K, 2 KB contig).",
+    )
     args = parser.parse_args()
 
     torch.set_default_device("cuda")
@@ -212,6 +224,7 @@ if __name__ == "__main__":
             num_warmups=args.num_warmups,
             num_iters=args.num_iters,
             vs_torch=args.vs_torch,
+            b_preshuffled=args.preshuffle_b,
         )
     except pytest.skip.Exception as e:
         print(f"Skipped: {e}")

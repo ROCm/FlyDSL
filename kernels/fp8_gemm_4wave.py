@@ -34,6 +34,22 @@ def _min(a, b):
     return arith.select(a < b, a, b)
 
 
+def preshuffle_b(b_t):
+    """Permute a row-major ``B_T`` (shape ``(N, K)``, K-contiguous) into
+    the per-K-slab DRAM layout consumed by ``compile_fp8_gemm`` when
+    ``b_preshuffled=True``.
+
+    Output is K-major outermost: shape ``(K//128, N//16, 16, 128)``,
+    so all N rows of one 128-K-col atom slab live in a contiguous
+    ``N * 128`` byte block. The per-thread row coord then walks the
+    inner ``(N//16, 16)`` split at 2 KB / 128 B strides instead of
+    the row-major ``K``-byte stride.
+    """
+    n, k = b_t.shape[-2:]
+    assert n % 16 == 0 and k % 128 == 0, f"need N%16==0 and K%128==0, got N={n} K={k}"
+    return b_t.reshape(n // 16, 16, k // 128, 128).permute(2, 0, 1, 3).contiguous()
+
+
 def _xcd_swizzle(num_pid_m, num_pid_n):
     NUM_XCDS = 8
     WGM = 4
@@ -58,7 +74,24 @@ def _xcd_swizzle(num_pid_m, num_pid_n):
     return (pid_m, pid_n)
 
 
-def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int = 256, use_xcd_remap: bool = True):
+def compile_fp8_gemm(
+    *,
+    M: int,
+    N: int,
+    K: int,
+    BLOCK_M: int = 256,
+    BLOCK_N: int = 256,
+    use_xcd_remap: bool = True,
+    b_preshuffled: bool = False,
+):
+    """4-wave FP8 GEMM kernel compile entry point.
+
+    When ``b_preshuffled`` is True, ``B_T`` is assumed to be already
+    permuted into per-MFMA-atom (16 N rows x 128 K cols = 2 KB) DRAM
+    blocks. The host-side helper :func:`preshuffle_b` performs this
+    permutation offline. LDS layout, MFMA operand layout and wave
+    assignment are unchanged.
+    """
     BLOCK_K = 128  # MFMA_Scale 16x16x128 atom; 4-wave 2x2 layout needs BLOCK >= 64.
     LDS_BLOCK_M = BLOCK_M // 2
     LDS_BLOCK_N = BLOCK_N // 2
@@ -132,8 +165,17 @@ def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int
         wave_j = wave_id % 2
         A0_gl_offset = (tile_i * BLOCK_M) * K
         A1_gl_offset = (tile_i * BLOCK_M + LDS_BLOCK_M) * K
-        B0_gl_offset = (tile_j * BLOCK_N) * K
-        B1_gl_offset = (tile_j * BLOCK_N + LDS_BLOCK_N) * K
+        if const_expr(b_preshuffled):
+            # K-major preshuffle: tile_j's slot in k_outer=0 slab is
+            # (tile_j * BLOCK_N // 16) * 2048 = (tile_j * BLOCK_N) * 128.
+            B0_gl_offset = (tile_j * BLOCK_N) * BLOCK_K
+            B1_gl_offset = (tile_j * BLOCK_N + LDS_BLOCK_N) * BLOCK_K
+            B_K_STEP = N * BLOCK_K  # one K-atom slab forward
+        else:
+            B0_gl_offset = (tile_j * BLOCK_N) * K
+            B1_gl_offset = (tile_j * BLOCK_N + LDS_BLOCK_N) * K
+            B_K_STEP = BLOCK_K
+        A_K_STEP = BLOCK_K
 
         # A/B arrive as torch.int8 (PyTorch fp8 view limitation); recast
         # the buffer-desc element type to fp8 so BufferCopyLDS128b takes
@@ -163,7 +205,7 @@ def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int
         # XOR 3 bits of dim-0 (row, bit-1 base) with 3 bits of dim-1
         # (col, bit-4 base). Same as the manual
         # ((offset>>8)<<4) ^ offset; shared between LDS and global
-        # access via two outer layouts with different row strides.
+        # access via outer layouts with different strides.
         _swz_attr = fx.CoordSwizzleType.get(3, 1, [0], 4, [1])
         _swz_shape = (LDS_BLOCK_M, BLOCK_K)
         _coord_swz = fx.make_composed_layout(
@@ -172,16 +214,33 @@ def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int
         _lds_swz_layout = fx.make_composed_layout(
             fx.make_layout(_swz_shape, (BLOCK_K, 1)), _coord_swz
         )
-        _gl_swz_layout = fx.make_composed_layout(
+        _gl_swz_layout_a = fx.make_composed_layout(
             fx.make_layout(_swz_shape, (K, 1)), _coord_swz
         )
+        if const_expr(b_preshuffled):
+            # Preshuffled B (K-major outermost): per K_iter all N rows of
+            # one K atom (= ``N * BLOCK_K`` bytes) live in a contiguous
+            # slab; within the slab, ``(n_outer, n_inner, k_inner)`` is
+            # row-major. The k_outer step is fed via ``soffset``
+            # (``k * N * BLOCK_K``); the per-thread row coord splits
+            # into ``(n_inner=16, n_outer)`` with strides ``(128, 2048)``
+            # so 8 row_parts span only 16 KB vs ~64 KB in row-major.
+            _gl_swz_layout_b = fx.make_composed_layout(
+                fx.make_layout(
+                    ((16, LDS_BLOCK_M // 16), BLOCK_K),
+                    ((BLOCK_K, 16 * BLOCK_K), 1),
+                ),
+                _coord_swz,
+            )
+        else:
+            _gl_swz_layout_b = _gl_swz_layout_a
 
-        def _compute_global_swizzle():
+        def _compute_global_swizzle(layout):
             offsets = []
             for round in range_constexpr(max(N_TILES_A, N_TILES_B)):
                 row = lane_id // 8 + wave_id * 8 + round * 32
                 col = (lane_id % 8) * 16
-                offsets.append(fx.crd2idx((row, col), _gl_swz_layout).to_py_value())
+                offsets.append(fx.crd2idx((row, col), layout).to_py_value())
             return offsets
 
         # 128 bits per thread = 16 fp8 elements; soffset carries the
@@ -412,18 +471,19 @@ def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int
         c10_frag = [RT_C_i] * N_ACCUMS
         c11_frag = [RT_C_i] * N_ACCUMS
 
-        global_offsets = _compute_global_swizzle()
+        gl_off_a = _compute_global_swizzle(_gl_swz_layout_a)
+        gl_off_b = _compute_global_swizzle(_gl_swz_layout_b)
 
         # Prologue: 8-buffer LDS pipeline pre-fill.
-        _load_lds(ga_div, a_cur0, A0_gl_offset + 0 * BLOCK_K, global_offsets, N_TILES_A)
-        _load_lds(gb_div, b_cur0, B0_gl_offset + 0 * BLOCK_K, global_offsets, N_TILES_B)
-        _load_lds(gb_div, b_cur1, B1_gl_offset + 0 * BLOCK_K, global_offsets, N_TILES_B)
-        _load_lds(ga_div, a_cur1, A1_gl_offset + 0 * BLOCK_K, global_offsets, N_TILES_A)
+        _load_lds(ga_div, a_cur0, A0_gl_offset + 0 * A_K_STEP, gl_off_a, N_TILES_A)
+        _load_lds(gb_div, b_cur0, B0_gl_offset + 0 * B_K_STEP, gl_off_b, N_TILES_B)
+        _load_lds(gb_div, b_cur1, B1_gl_offset + 0 * B_K_STEP, gl_off_b, N_TILES_B)
+        _load_lds(ga_div, a_cur1, A1_gl_offset + 0 * A_K_STEP, gl_off_a, N_TILES_A)
 
-        _load_lds(ga_div, a_next0, A0_gl_offset + 1 * BLOCK_K, global_offsets, N_TILES_A)
-        _load_lds(gb_div, b_next0, B0_gl_offset + 1 * BLOCK_K, global_offsets, N_TILES_B)
-        _load_lds(gb_div, b_next1, B1_gl_offset + 1 * BLOCK_K, global_offsets, N_TILES_B)
-        _load_lds(ga_div, a_next1, A1_gl_offset + 1 * BLOCK_K, global_offsets, N_TILES_A)
+        _load_lds(ga_div, a_next0, A0_gl_offset + 1 * A_K_STEP, gl_off_a, N_TILES_A)
+        _load_lds(gb_div, b_next0, B0_gl_offset + 1 * B_K_STEP, gl_off_b, N_TILES_B)
+        _load_lds(gb_div, b_next1, B1_gl_offset + 1 * B_K_STEP, gl_off_b, N_TILES_B)
+        _load_lds(ga_div, a_next1, A1_gl_offset + 1 * A_K_STEP, gl_off_a, N_TILES_A)
 
         _wait_barrier((3 * N_TILES_A) + (4 * N_TILES_B))
 
@@ -439,8 +499,8 @@ def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int
             c00_frag, b1_frag = _compute_block(
                 a_cur0,
                 ga_div,
-                A0_gl_offset + (k + 2) * BLOCK_K,
-                global_offsets,
+                A0_gl_offset + (k + 2) * A_K_STEP,
+                gl_off_a,
                 wave_j,
                 b_cur1,
                 N_TILES_A,
@@ -453,8 +513,8 @@ def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int
             c01_frag, a1_frag = _compute_block(
                 b_cur0,
                 gb_div,
-                B0_gl_offset + (k + 2) * BLOCK_K,
-                global_offsets,
+                B0_gl_offset + (k + 2) * B_K_STEP,
+                gl_off_b,
                 wave_i,
                 a_cur1,
                 N_TILES_B,
@@ -469,8 +529,8 @@ def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int
             c10_frag, a0_frag = _compute_block(
                 b_cur1,
                 gb_div,
-                B1_gl_offset + (k + 2) * BLOCK_K,
-                global_offsets,
+                B1_gl_offset + (k + 2) * B_K_STEP,
+                gl_off_b,
                 wave_i,
                 a_next0,
                 N_TILES_B,
@@ -483,8 +543,8 @@ def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int
             c11_frag, b0_frag = _compute_block(
                 a_cur1,
                 ga_div,
-                A1_gl_offset + (k + 2) * BLOCK_K,
-                global_offsets,
+                A1_gl_offset + (k + 2) * A_K_STEP,
+                gl_off_a,
                 wave_j,
                 b_next0,
                 N_TILES_A,
