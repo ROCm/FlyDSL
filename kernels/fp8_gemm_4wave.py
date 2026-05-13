@@ -160,20 +160,28 @@ def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int
         sa_div = fx.logical_divide(gSA, fx.make_layout(1, 1))
         sb_div = fx.logical_divide(gSB, fx.make_layout(1, 1))
 
-        # XOR bits[4..6] of the tile-local linear offset with bits[8..10].
-        def _swizzle_128(row, col):
-            offset = row * BLOCK_K + col
-            swz = ((offset % (16 * BLOCK_K)) >> 8) << 4
-            swizzled = offset ^ swz
-            return swizzled // BLOCK_K, swizzled % BLOCK_K
+        # XOR 3 bits of dim-0 (row, bit-1 base) with 3 bits of dim-1
+        # (col, bit-4 base). Same as the manual
+        # ((offset>>8)<<4) ^ offset; shared between LDS and global
+        # access via two outer layouts with different row strides.
+        _swz_attr = fx.CoordSwizzleType.get(3, 1, [0], 4, [1])
+        _swz_shape = (LDS_BLOCK_M, BLOCK_K)
+        _coord_swz = fx.make_composed_layout(
+            fx.static(_swz_attr), fx.make_identity_layout(_swz_shape)
+        )
+        _lds_swz_layout = fx.make_composed_layout(
+            fx.make_layout(_swz_shape, (BLOCK_K, 1)), _coord_swz
+        )
+        _gl_swz_layout = fx.make_composed_layout(
+            fx.make_layout(_swz_shape, (K, 1)), _coord_swz
+        )
 
         def _compute_global_swizzle():
             offsets = []
             for round in range_constexpr(max(N_TILES_A, N_TILES_B)):
                 row = lane_id // 8 + wave_id * 8 + round * 32
                 col = (lane_id % 8) * 16
-                r, c = _swizzle_128(row, col)
-                offsets.append(r * K + c)
+                offsets.append(fx.crd2idx((row, col), _gl_swz_layout).to_py_value())
             return offsets
 
         def _compute_lds_swizzle(wave_idx, n_tiles):
@@ -183,8 +191,7 @@ def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int
                 swz = []
                 for i in range_constexpr(2):
                     col = (lane_id // 16) * 16 + i * 64
-                    r, c = _swizzle_128(row, col)
-                    swz.append(r * BLOCK_K + c)
+                    swz.append(fx.crd2idx((row, col), _lds_swz_layout).to_py_value())
                 lds_swz.append(swz)
             return lds_swz
 
@@ -234,8 +241,7 @@ def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int
                 halves = []
                 for step in range_constexpr(2):
                     col = (lane_id // 16) * 16 + step * 64
-                    r, c = _swizzle_128(row, col)
-                    halves.append(_vec_load_lds_i32x4(name, r * BLOCK_K + c))
+                    halves.append(_vec_load_lds_i32x4(name, fx.crd2idx((row, col), _lds_swz_layout).to_py_value()))
                 frag.append(_pack_i32x4_i32x8(halves[0], halves[1]))
             return frag
 
