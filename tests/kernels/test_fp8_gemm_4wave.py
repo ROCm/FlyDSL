@@ -23,7 +23,7 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 from flydsl.runtime.device import get_rocm_arch  # noqa: E402
-from kernels.fp8_gemm_4wave import compile_fp8_gemm, preshuffle_a, preshuffle_b  # noqa: E402
+from kernels.fp8_gemm_4wave import compile_fp8_gemm, preshuffle_b  # noqa: E402
 from tests.test_common import run_perftest, verify_output  # noqa: E402
 from tests.utils import pertoken_quant  # noqa: E402
 
@@ -72,7 +72,6 @@ def _bench_fp8_gemm_4wave(
     num_warmups: int = 2,
     num_iters: int = 10,
     vs_torch: bool = False,
-    a_preshuffled: bool = False,
     b_preshuffled: bool = False,
 ):
     """Run + verify a single (M, N, K, tile) configuration. Returns TFLOPS."""
@@ -94,7 +93,6 @@ def _bench_fp8_gemm_4wave(
 
     c_ref = _run_torch(a_q, b_q, scale_a, scale_b)
 
-    a_kernel = preshuffle_a(a_q) if a_preshuffled else a_q
     b_kernel = preshuffle_b(b_q) if b_preshuffled else b_q
 
     launch_fn = compile_fp8_gemm(
@@ -104,13 +102,12 @@ def _bench_fp8_gemm_4wave(
         BLOCK_M=tile_m,
         BLOCK_N=tile_n,
         use_xcd_remap=not disable_xcd_remap,
-        a_preshuffled=a_preshuffled,
         b_preshuffled=b_preshuffled,
     )
     print(
         f"\n[fp8_gemm_4wave] M={M} N={N} K={K} "
         f"BLOCK_M={tile_m} BLOCK_N={tile_n} xcd_remap={not disable_xcd_remap} "
-        f"preshuffle_a={a_preshuffled} preshuffle_b={b_preshuffled}"
+        f"preshuffle_b={b_preshuffled}"
     )
 
     def _args(c, a, b, sa, sb):
@@ -123,7 +120,7 @@ def _bench_fp8_gemm_4wave(
             torch.cuda.current_stream(),
         )
 
-    compiled = flyc.compile(launch_fn, *_args(c_out_raw, a_kernel, b_kernel, scale_a, scale_b))
+    compiled = flyc.compile(launch_fn, *_args(c_out_raw, a_q, b_kernel, scale_a, scale_b))
 
     def _launch(c, a, b, sa, sb):
         compiled(*_args(c, a, b, sa, sb))
@@ -132,7 +129,7 @@ def _bench_fp8_gemm_4wave(
     _, us = run_perftest(
         _launch,
         c_out_raw,
-        a_kernel,
+        a_q,
         b_kernel,
         scale_a,
         scale_b,
@@ -184,16 +181,15 @@ def _bench_fp8_gemm_4wave(
         pytest.param(9728, 8192, 8320, 256, 256, marks=pytest.mark.large_shape, id="9728x8192x8320"),
     ],
 )
-@pytest.mark.parametrize("preshuffle", [False, True], ids=["rowmajor", "preshuffle"])
-def test_fp8_gemm_4wave(M, N, K, tile_m, tile_n, preshuffle):
+@pytest.mark.parametrize("preshuffle_b", [False, True], ids=["rowmajor", "preshuffle_b"])
+def test_fp8_gemm_4wave(M, N, K, tile_m, tile_n, preshuffle_b):
     _bench_fp8_gemm_4wave(
         M=M,
         N=N,
         K=K,
         tile_m=tile_m,
         tile_n=tile_n,
-        a_preshuffled=preshuffle,
-        b_preshuffled=preshuffle,
+        b_preshuffled=preshuffle_b,
     )
 
 
@@ -226,12 +222,6 @@ if __name__ == "__main__":
         help="Also run torch._scaled_mm with the same input + harness for perf comparison.",
     )
     parser.add_argument(
-        "--preshuffle_a",
-        action="store_true",
-        default=False,
-        help="Preshuffle A into K-major slabs (each K atom = M*128 byte contig).",
-    )
-    parser.add_argument(
         "--preshuffle_b",
         action="store_true",
         default=False,
@@ -252,7 +242,6 @@ if __name__ == "__main__":
             num_warmups=args.num_warmups,
             num_iters=args.num_iters,
             vs_torch=args.vs_torch,
-            a_preshuffled=args.preshuffle_a,
             b_preshuffled=args.preshuffle_b,
         )
     except pytest.skip.Exception as e:
