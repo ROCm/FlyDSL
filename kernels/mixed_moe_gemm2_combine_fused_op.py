@@ -111,9 +111,18 @@ class FlyDSLMoeGemm2CombineOp:
         self._alloc_dummy_tensors()
 
     def _select_mode(self) -> str:
-        """auto: 若 GEMM2 自然 grid 能整 resident 选 ``full``，否则 ``stage1_only``。"""
+        """auto: 若 GEMM2 自然 grid 能整 resident 选 ``full``，否则 ``stage1_only``。
+
+        Note: ``persist_m <= 0`` triggers GEMM2 ``persistent`` mode (grid_y = cu_num,
+        CTA round-robin over M tiles). In that mode ``nat_blocks`` is bounded by
+        cu_num by construction; but ``_run_full`` (single-kernel fusion) is still
+        a PR2 stub, so we hard-fall back to ``stage1_only`` to avoid hitting
+        ``NotImplementedError("_run_full ...")``.
+        """
         if self.force_mode != "auto":
             return self.force_mode
+        if self.persist_m <= 0:
+            return "stage1_only"
         comb_cfg = self.comb_cfg
         max_resident = estimate_max_resident_blocks(chip=comb_cfg.chip, block_dim=256)
         max_recv = comb_cfg.world_size * comb_cfg.max_num_inp_token_per_rank
@@ -203,18 +212,27 @@ class FlyDSLMoeGemm2CombineOp:
         if self._launch_fn is not None:
             return
         comb_cfg = self.comb_cfg
+        # Plan B: topk 与 dispatch experts_per_token 一致（s 字段当 j_global 用）。
+        # baseline shmem_comb_inp_tok size 沿用 mr 不变；Plan B 写入 [0, mt*k)
+        # 子区间，由构造时 k <= npes 保证不越界。
+        k = comb_cfg.num_experts_per_token
+        if k > comb_cfg.world_size:
+            raise ValueError(
+                f"FlyDSLMoeGemm2CombineOp (Plan B) requires k <= npes; "
+                f"got k={k}, npes={comb_cfg.world_size}."
+            )
         self._launch_fn = compile_fused_moe_gemm2_combine(
             model_dim=comb_cfg.hidden_dim,
             inter_dim=self.inter_dim,
             experts=comb_cfg.num_experts_per_rank,
-            topk=1,
+            topk=k,
             tile_m=self.tile_m, tile_n=self.tile_n, tile_k=self.tile_k,
             persist_m=self.persist_m,
             a_dtype=self.a_dtype, b_dtype=self.b_dtype,
             out_dtype=self._out_dtype_str,
             rank=comb_cfg.rank, npes=comb_cfg.world_size,
             max_tok_per_rank=comb_cfg.max_num_inp_token_per_rank,
-            experts_per_token=comb_cfg.num_experts_per_token,
+            experts_per_token=k,
             mode=self.chosen_mode,
             xcd_swizzle=self.xcd_swizzle,
         )
@@ -240,6 +258,46 @@ class FlyDSLMoeGemm2CombineOp:
         n_in            = comb_cfg.hidden_dim
         k_in            = self.inter_dim
         size_expert_ids = sorted_expert_ids.numel()
+
+        # === Plan B 防 stale 数据 ===
+        # 方案 B：fused 路径写 shmem_comb_inp_tok 的有效区是
+        #     slot_id = dest_lid * k + s ∈ [0, mt*k)
+        # 而 baseline 路径写 [0, mr) = [0, mt*npes)。两者 layout 不同：
+        # 若上一步 baseline 写过 [mt*k, mt*npes)，本步 fused 不会覆盖
+        # 那段；但 baseline 同样不会读那段（要看 Plan B 是否会读取它，
+        # 答案是不会 —— combine_fused_branch 的 _slot_idx ∈ [0, mt*k)）。
+        # 真正风险在生产场景：连续两步 fused，若第一步某些 (src_lid, j)
+        # 槽位被路由而第二步没被路由，第二步该槽残留第一步的部分和。
+        # 用 in-place .zero_() 在 GEMM2 launch 前清掉 [0, mt*k) 字节区。
+        # cudagraph capture 会捕获这个 hipMemset，每次 replay 自动重置。
+        # 开销实测 ~0.2-0.3 μs（mt*k*token_bytes = 32*8*7168/2 = 896 KB
+        # @ HBM ≈ 1 TB/s）。
+        # === Plan B 无需 zero_() ===
+        # 历史代码这里曾 `shmem_comb_inp_tok[:mt*k].zero_()` 防止上一步残留
+        # 数据。实测此 zero 是 P0 race 的根因：本卡 zero (写本地 HBM) 与
+        # 远端 peer 的 fused_gemm2 P2P 写（同 HBM 区段）无 cross-device
+        # 排序。若本卡 zero 比 peer gemm2 第一波写到达晚，整块被 clobber
+        # → 失败 rank 出现 slots_with_data 远低于 mt*k、per-j 均匀（一个
+        # src_pe 的 ~32 fragments 整体被覆盖）的模式。~5-10% 偶发 fail。
+        #
+        # Plan B 实际不需要 zero：每次 fused_gemm2 epilogue 都把所有
+        # (tok_id, j) for tok_id < total_recv 全量覆写到 shmem_comb_inp_tok
+        # 的 [0, total_recv*k) 区段；下游 combine_no_stage1 只读该区段。
+        # 标准 MoE 路由每个 token 恒有 k 个 expert（无 dropout），所有
+        # (tok_id, j) 都会被某张 R-rank 写入；故无残留风险。
+        # FlyDSLMoeGemm2CombineOp 构造时已 hard-assert k <= npes 保证
+        # mt*k <= mr。
+        #
+        # 注：若未来支持 token-level dropout（某些 j 不发送），需在 combine
+        # Stage 3 加 (tok_id, j) 有效性掩码，而不是回退 zero_()。
+        # 调试开关：FLYDSL_FUSED_ZERO_MODE=normal 强制开启 zero（仅用于
+        # 复现历史 race）。
+        if os.environ.get("FLYDSL_FUSED_ZERO_MODE", "").strip().lower() == "normal":
+            _mt_k_bytes = (comb_cfg.max_num_inp_token_per_rank
+                           * comb_cfg.num_experts_per_token
+                           * comb_cfg.token_bytes)
+            _mt_k_i16   = (_mt_k_bytes + 1) // 2
+            comb_op.shmem_comb_inp_tok[:_mt_k_i16].zero_()
 
         # 权重源默认走 shmem_disp_out_wts（f32[max_recv*k]，索引语义
         # wts[t*k + s]）；上层若传 wts_buf 必须保持同一布局。
@@ -277,7 +335,16 @@ class FlyDSLMoeGemm2CombineOp:
                 s_fx,
             )
 
-        return comb_op.combine_no_stage1(self._dummy_inp, None, None)
+        # fused 路径的 weight 处理与 baseline 一致：combine_no_stage1 内部
+        # 跑 Stage 1 weight-only P2P scatter (skip_stage1=True 时由
+        # skip_stage1_keep_wts=True 保留 weight scatter) + Stage 3b 累加。
+        # 这样 fused 与 baseline 端到端 (out_tok, out_wts) 完全一致，verify
+        # 直接对照 baseline 的双输出；fused 仅去掉 token 的 P2P 流量，weight
+        # 流量仍走原生 baseline 通道（数据量 ≈ k*4B/token，远小于 token 流量
+        # k*hidden_bytes，对 e2e 时间影响微）。
+        return comb_op.combine_no_stage1(
+            self._dummy_inp, None, None, enable_weights=True,
+        )
 
     def _run_full(self, a2, w2, a2_scale, w2_scale,
                   sti, eids, sw, num_valid_ids, bias):

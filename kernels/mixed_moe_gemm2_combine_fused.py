@@ -50,8 +50,19 @@ def compile_fused_moe_gemm2_combine(
     if mode != "stage1_only":
         raise ValueError(f"mode must be 'stage1_only' or 'full', got {mode!r}")
 
-    if topk != 1:
-        raise ValueError(f"fused GEMM2+combine 仅支持 topk=1，got topk={topk}.")
+    # 方案 B (slot = dest_lid * k + s) 要求 mt*k <= mr 才能复用 baseline 的
+    # shmem_comb_inp_tok (size = mr)；等价于 k <= npes。
+    if topk > npes:
+        raise ValueError(
+            f"fused GEMM2+combine (Plan B) requires topk <= npes; "
+            f"got topk={topk}, npes={npes}. "
+            "Plan B 的 (dest_lid * k + s) slot 需要 mt*k <= mr 才能复用 baseline buffer。"
+        )
+    if topk != experts_per_token:
+        raise ValueError(
+            f"topk ({topk}) must equal experts_per_token ({experts_per_token}) "
+            "in Plan B; sorted_token_ids 的 s 字段直接当 j_global slot id 用。"
+        )
     if model_dim % tile_n != 0:
         raise ValueError(f"model_dim={model_dim} must be divisible by tile_n={tile_n}")
     if inter_dim % tile_k != 0:

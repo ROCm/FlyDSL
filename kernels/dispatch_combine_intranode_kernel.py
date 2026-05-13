@@ -791,22 +791,43 @@ def make_combine_kernel(
     _mask_max_tok = max_tok_per_rank - 1 if _log2_max_tok is not None else None
     _mask_max_recv = max_recv - 1 if _log2_max_recv is not None else None
 
-    _use_compaction = (npes < experts_per_token)
+    # 历史值: `_use_compaction = (npes < experts_per_token)`，假设 npes>=k 时
+    # 不会出现 dup 哨兵，可以无条件 fast load。但 dispatch dedup 是 runtime
+    # 动态的：当一个 token 的 k 个 expert 中有多个落到同一 dest_pe 时，
+    # tok_map 中 dup 槽位会被编码为 `dest_pe=npes`（哨兵），fast path 不
+    # 检查 vld_j 会让 `safe_pe = select(vld_j, dest_pe_j, rank)` fallback 到
+    # 本地 (rank * max_tok + tok_id) slot —— 该 slot stage 1 已写过 valid
+    # GEMM2 fragment，重复累加 k 次会导致结果 ×k 倍。
+    #
+    # 修复：用 `scf.IfOp(vld_flag)` 真正跳过 invalid 路径的 buffer_load，
+    # then-branch 内 emit load + yield，else-branch 直接 yield 0。等价于
+    # mori `EpCombineIntraNodeKernel` 的 `srcPtrs[j]=nullptr` + `WarpAccum`
+    # nullptr-check 短路。累加层 `_accum_experts` 仍可走 fast path：invalid
+    # 路径的 vals 已被替换为 0，对加法无贡献。
+    #
+    # 注：实测 IfOp 嵌套多层 ForOp/IfOp 时偶尔出现量级异常（疑似 hoist/CSE
+    # 把 then-block 内的 buffer_load + soffset_bytes constant 折叠到外层）。
+    # 这里通过两个保障避免：
+    #   (a) `_create_i32_constant` 在 buffer_load 内部按当前 IP emit，确保
+    #       soffset 常量在 then_block 内；
+    #   (b) 严格用 `.results[0]` 而非 `.result` 取 SSA value（部分 MLIR py
+    #       绑定下 `.result` 是 property + 返回 OpResultList，类型不稳）。
+    _use_compaction = True
 
     def _maybe_load(rsrc, offset, vld_flag, **kwargs):
-        """Conditional load: returns loaded value or 0 when invalid."""
-        if not _use_compaction:
-            return buffer_load(rsrc, offset, **kwargs)
-        from flydsl._mlir.dialects import scf as _scf_cl
-        from flydsl._mlir.ir import InsertionPoint as _IP_cl
+        """Conditional load with `scf.IfOp(vld_flag)`：vld=True 才真正发 buffer
+        load；vld=False 直接 yield 0，跳过远端访存，等价 mori nullptr-skip。"""
+        from flydsl._mlir.dialects import scf as _scf_dyn
+        from flydsl._mlir.ir import InsertionPoint as _IP_dyn
         _i32_ty = T.i32()
-        _if_v = _scf_cl.IfOp(_lv_unwrap(vld_flag), [_i32_ty], has_else=True)
-        with _IP_cl(_if_v.then_block):
+        _if_v = _scf_dyn.IfOp(_lv_unwrap(vld_flag), [_i32_ty], has_else=True)
+        with _IP_dyn(_if_v.then_block):
             _v = buffer_load(rsrc, offset, **kwargs)
-            _scf_cl.YieldOp([_lv_unwrap(_v)])
-        with _IP_cl(_if_v.else_block):
-            _scf_cl.YieldOp([_lv_unwrap(arith.constant(0))])
-        return _if_v.result
+            _scf_dyn.YieldOp([_lv_unwrap(_v)])
+        with _IP_dyn(_if_v.else_block):
+            _zero = arith.constant(0, type=T.i32())
+            _scf_dyn.YieldOp([_lv_unwrap(_zero)])
+        return _if_v.results[0]
 
     weight_bytes = experts_per_token * 4 if enable_weights else 0
     wt_n_i32     = experts_per_token if enable_weights else 0
@@ -1169,39 +1190,64 @@ def make_combine_kernel(
             part_id = arith.remui(si, wpt)
             h_off   = part_id * hpw
 
-            _tm_off_elem = tok_id * experts_per_token
-            _tm_vec0     = buffer_load(_rsrc_tok_map, _tm_off_elem, vec_width=4, dtype=T.i32())
-            _tm_vec1     = buffer_load(_rsrc_tok_map, _tm_off_elem + 4, vec_width=4, dtype=T.i32())
-
             _expert_rsrc = []
             _expert_vld  = []
-            for j_py in range_constexpr(experts_per_token):
-                if const_expr(j_py < 4):
-                    enc_j = _llvm_d.ExtractElementOp(
-                        _tm_vec0, arith.constant(j_py)).res
-                else:
-                    enc_j = _llvm_d.ExtractElementOp(
-                        _tm_vec1, arith.constant(j_py - 4)).res
-                if const_expr(_log2_max_recv is not None):
-                    dest_pe_j = enc_j >> arith.constant(_log2_max_recv)
-                else:
-                    dest_pe_j = arith.divui(enc_j, max_recv)
-                vld_j     = arith.cmpi(arith.CmpIPredicate.ult, dest_pe_j, arith.constant(npes))
-                safe_pe   = arith.select(vld_j, dest_pe_j, arith.constant(rank))
-                if const_expr(use_p2p_read):
-                    _dtok_all  = arith.remui(enc_j, max_recv)
-                    _safe_ta   = arith.select(vld_j, _dtok_all, arith.constant(0))
-                    _pe_base   = _lds_p2p_bases.load([_to_idx(safe_pe)])
-                    _tok_off   = arith.zext_i64(_safe_ta) * nbytes
-                    _ebase     = _lv_unwrap(_pe_base) + _tok_off
-                else:
-                    _tok_off  = arith.zext_i64(safe_pe * max_tok_per_rank + tok_id) * nbytes
-                    _ebase    = _lv_unwrap(addr_comb_inp + _tok_off)
-                _expert_rsrc.append(create_buffer_resource_from_addr(_ebase))
-                _expert_vld.append(vld_j)
 
-            _all_vld  = (npes >= experts_per_token)
-            _eff_all_vld = _all_vld or _use_compaction
+            if const_expr(skip_stage1):
+                # ─── Plan B (fused gemm2_combine) Stage 3 ─────────────────
+                # 上游 fused GEMM2 epilogue 把每个 (src_lid, j_global) 的部分
+                # 和 plain-store 到本卡 shmem_comb_inp_tok[(src_lid*k + j)*tok_bytes]。
+                # 这里 j_py 直接当 j_global 用：每个 (tok_id, j) 对应唯一槽位，
+                # 不需要 tok_map 解 (dest_pe, dest_lid)，本地读+累加即可。
+                # 未被 dispatch 路由的 (tok_id, j) 在 buffer 初始化时为 0
+                # (见 _alloc_buffers `shmem_comb_inp_tok.zero_()`)，贡献 0。
+                # 注：方案 B 的 buffer 切片用 [0, mt*k)，要求 k <= npes，由
+                # FlyDSLMoeGemm2CombineOp 构造时 hard-assert 保证。
+                for j_py in range_constexpr(experts_per_token):
+                    _slot_idx  = tok_id * arith.constant(experts_per_token) + arith.constant(j_py)
+                    _tok_off   = arith.zext_i64(_slot_idx) * nbytes
+                    _ebase     = _lv_unwrap(addr_comb_inp + _tok_off)
+                    _expert_rsrc.append(create_buffer_resource_from_addr(_ebase))
+                    _expert_vld.append(arith.constant(1, type=T.bool()))
+                _eff_all_vld = True
+            else:
+                # ─── Baseline Stage 3 ─────────────────────────────────────
+                # Stage 1 把每张 (src_pe, src_lid) 的 GEMM2 结果 P2P 写到
+                # `shmem_comb_inp_tok[(peer_pe*mt + src_lid) * tok_bytes]`，
+                # 同 peer 上多 D-experts 在 GEMM2 epilogue 已 atomic_fadd
+                # 累加到该 peer 单 slot。这里按 tok_map 解出 peer_pe 后本地
+                # 读对应 slot，j 维度做 weighted-accum。
+                _tm_off_elem = tok_id * experts_per_token
+                _tm_vec0     = buffer_load(_rsrc_tok_map, _tm_off_elem, vec_width=4, dtype=T.i32())
+                _tm_vec1     = buffer_load(_rsrc_tok_map, _tm_off_elem + 4, vec_width=4, dtype=T.i32())
+
+                for j_py in range_constexpr(experts_per_token):
+                    if const_expr(j_py < 4):
+                        enc_j = _llvm_d.ExtractElementOp(
+                            _tm_vec0, arith.constant(j_py)).res
+                    else:
+                        enc_j = _llvm_d.ExtractElementOp(
+                            _tm_vec1, arith.constant(j_py - 4)).res
+                    if const_expr(_log2_max_recv is not None):
+                        dest_pe_j = enc_j >> arith.constant(_log2_max_recv)
+                    else:
+                        dest_pe_j = arith.divui(enc_j, max_recv)
+                    vld_j     = arith.cmpi(arith.CmpIPredicate.ult, dest_pe_j, arith.constant(npes))
+                    safe_pe   = arith.select(vld_j, dest_pe_j, arith.constant(rank))
+                    if const_expr(use_p2p_read):
+                        _dtok_all  = arith.remui(enc_j, max_recv)
+                        _safe_ta   = arith.select(vld_j, _dtok_all, arith.constant(0))
+                        _pe_base   = _lds_p2p_bases.load([_to_idx(safe_pe)])
+                        _tok_off   = arith.zext_i64(_safe_ta) * nbytes
+                        _ebase     = _lv_unwrap(_pe_base) + _tok_off
+                    else:
+                        _tok_off  = arith.zext_i64(safe_pe * max_tok_per_rank + tok_id) * nbytes
+                        _ebase    = _lv_unwrap(addr_comb_inp + _tok_off)
+                    _expert_rsrc.append(create_buffer_resource_from_addr(_ebase))
+                    _expert_vld.append(vld_j)
+
+                _all_vld  = (npes >= experts_per_token)
+                _eff_all_vld = _all_vld or _use_compaction
 
             _use_wide = arith.cmpi(arith.CmpIPredicate.ult, arith.constant(895), hpw)
             _if_wide  = _scf_d.IfOp(_lv_unwrap(_use_wide), [], has_else=True)

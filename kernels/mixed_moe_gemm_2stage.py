@@ -2950,8 +2950,11 @@ def compile_mixed_moe_gemm2(
             raise ValueError("fused_p2p_scatter requires doweight_stage2=False (combine handles weighting).")
         if enable_bias:
             raise ValueError("fused_p2p_scatter does not support enable_bias=True (PR1 MVP).")
-        if topk != 1:
-            raise ValueError(f"fused_p2p_scatter requires topk=1, got topk={topk}.")
+        if topk != _fp2p_k:
+            raise ValueError(
+                f"fused_p2p_scatter: compile-time topk ({topk}) must match "
+                f"fused_p2p_scatter.experts_per_token ({_fp2p_k})."
+            )
         if use_cshuffle_epilog is False:
             raise ValueError(
                 "fused_p2p_scatter requires use_cshuffle_epilog=True (LDS shuffle to coalesce P2P stores)."
@@ -4565,24 +4568,31 @@ def compile_mixed_moe_gemm2(
                             alignment=_e_vec * out_elem_bytes,
                         )
 
-                # ── Fused-P2P epilogue (Stage 1 inline) ─────────────────────
-                # 用 P2P `buffer_store(SLC)` 写远端 shmem_comb_inp_tok，替代
-                # 本地 arg_out + atomic_add。所有 per-row 常量（log2/mask/
-                # rank*max_tok/nbytes/out_elem_bytes）+ addr_tis lookup +
-                # LDS p2p_bases load + buffer-resource 构造都 hoist 到
-                # precompute_row（每个 m_local 一次），inner 列循环只剩
-                # 一个 i32 add + 一个 buffer_store。
-                # 注意：权重 P2P scatter 不在这里做 —— 与 token P2P 并发的
-                # ~16B 小写在某些 xGMI 路径会被静默丢弃；权重交给
-                # combine_no_stage1 (skip_stage1_keep_wts=True) 在静态 fabric
-                # 上完成。
+                # ── Fused-P2P epilogue, 方案 B (per-(src_tok, s) slot) ──────
+                # 用 P2P `buffer_store(SLC)` 写远端 shmem_comb_inp_tok 的
+                # 独立 slot：
+                #     slot_id = dest_lid * k + s
+                #     slot_off_bytes = slot_id * token_nbytes
+                # 与 v1 (slot = rank * max_tok + dest_lid) 的区别：v1 共享同一
+                # 槽位，多个 D-experts 写同 src_lid 必须 atomic_fadd；方案 B 每
+                # 个 (src_tok, s) 独占 slot，纯 plain store，跨卡 atomic 完全消
+                # 失。下游 combine (skip_stage1=True) 在本地按 (tok_id*k + j)
+                # 逐 j 累加完成 reduce。
+                # 前提：sorted_token_ids 的 `s` 必须是 j_global (top-k 位置)，
+                # 否则 (peer_A, s_A) 与 (peer_B, s_B) 可能写到同 slot。
+                # FlyDSLMoeGemm2CombineOp 构造时 hard-assert k <= npes，保证
+                # buffer 容量 mt*k <= mr 与 baseline 共用。
+                #
+                # 注意：权重 P2P scatter 仍交给 combine_no_stage1
+                # (skip_stage1_keep_wts=True) 在静态 fabric 上完成；与 token
+                # P2P 并发的 ~16B 小写在某些 xGMI 路径会被静默丢弃。
                 if const_expr(_fp2p_enabled):
                     _c_log2_max_tok = arith.constant(int(_fp2p_log2_max_tok))
                     _c_mask_max_tok = arith.constant(int(_fp2p_mask_max_tok))
-                    _c_rank_x_maxtok = arith.constant(
-                        int(_fp2p_rank) * int(_fp2p_max_tok)
-                    )
                     _c_token_nbytes = arith.constant(int(_fp2p_token_nbytes))
+                    # Plan B：slot_id = dest_lid * k + s。k 与 compile-time `topk`
+                    # 必须一致（同一份 sorted_token_ids 喂给 GEMM2 / Stage 3）。
+                    _c_topk_v2 = arith.constant(int(_fp2p_k))
                     _c_out_elem_bytes_i32 = arith.constant(int(out_elem_bytes))
 
                     def precompute_row(*, row_local, row):
@@ -4609,15 +4619,15 @@ def compile_mixed_moe_gemm2(
                         pe_base_i64 = lds_p2p_tok_bases_ptr.load(
                             [dest_pe_idx]
                         )
-                        slot_id_i32 = _c_rank_x_maxtok + dest_lid
+                        # 方案 B 核心：slot id 由 (dest_lid, s) 决定，与 source
+                        # peer rank 无关（每张 src_pe 的 comb buffer 独立编址）。
+                        slot_id_i32 = dest_lid * _c_topk_v2 + s
                         slot_off_bytes_i32 = slot_id_i32 * _c_token_nbytes
                         rsrc_dst = (
                             buffer_ops.create_buffer_resource_from_addr(
                                 pe_base_i64
                             )
                         )
-                        # row_ctx = (fused2, slot_off_bytes_i32, rsrc_dst)。
-                        # fused2 当前没用，保留以便未来分支重新解 (t, s)。
                         return (
                             (fused2, slot_off_bytes_i32, rsrc_dst),
                             row_valid,
@@ -4628,9 +4638,10 @@ def compile_mixed_moe_gemm2(
                     ):
                         _, slot_off_bytes_i32, rsrc_dst = row_ctx
                         col_i32 = arith.index_cast(T.i32, col_g0)
-                        # cache_modifier=2 (SLC): 跨 xGMI 写远端 HBM，绕过本地
-                        # L1 避免 cache 污染（与 baseline combine stage1 P2P
-                        # 行为对齐）。
+                        # cache_modifier=2 (SLC): bypass L1 减少本地 cache 污
+                        # 染，跨 xGMI 写远端 HBM 走 L2 + fabric。LLVM 在 kernel
+                        # exit 自动插入 `s_waitcnt vmcnt(0) + buffer_wbinvl1`
+                        # 保证本卡 store 离开 GPU pipeline。
                         if const_expr(_fp2p_fp8_cast):
                             # fp8 P2P scatter (1B/elem): frag 是 vec<E_vec×bf16>，
                             # 走 bf16→fp32→cvt_pk_fp8_f32 打包成 i32 word 后写。

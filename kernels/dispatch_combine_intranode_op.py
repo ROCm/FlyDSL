@@ -472,18 +472,27 @@ class FlyDSLDispatchCombineIntraNodeOp:
 
     def combine_no_stage1(self, input, weights, indices,
                           packed_recv_x=None, cur_tok=None,
-                          call_reset=False):
+                          call_reset=False,
+                          enable_weights: bool = True):
         """combine 的 stage1-skipped 变体。
 
         语义：跳过 P2P scatter（外部 fused kernel 已把数据写入 shmem_comb_inp[_wts]），
               只执行 Stage 2 (CrossDeviceBarrier) + Stage 3 (本地 weighted-accum)。
 
-        为简化实现，本变体复用 _fx_comb_inp 等所有 fx.Int64 常量，
-        与 self._comb_compiled 共用同一组 shmem buffer / P2P table。
+        Parameters
+        ----------
+        enable_weights
+            ``True`` (默认) 兼容当前 fused-with-weight 链路：保留 Stage 1
+            的 weight scatter (``skip_stage1_keep_wts=True``) + Stage 3b
+            的 weight accumulate。
+            ``False`` 给 weight-free fused 路径（fused MoE 上游已经把
+            weight 处理掉了，combine 端不需要 out_wts）：完全 DCE 掉
+            weight scatter + Stage 3b，省 ~3-5 μs。
+            两种变体走不同的 JIT 缓存，互不污染。
 
         约定：调用前 fused kernel 必须保证：
               - shmem_comb_inp_tok 已写入本 PE 应接收的所有 token（按 max_tok_per_rank 槽位）
-              - shmem_comb_inp_wts 已写入对应权重（若 enable_weights）
+              - shmem_comb_inp_wts 已写入对应权重（仅 enable_weights=True 时需要）
               - total_recv 已被 dispatch 设置完毕（Stage 3 用于读 cur_rank_num_token）
         """
         cfg    = self.cfg
@@ -513,7 +522,13 @@ class FlyDSLDispatchCombineIntraNodeOp:
         else:
             prx_ptr = packed_recv_x.data_ptr() if packed_recv_x is not None else 0
 
-        if self._comb_no_s1_fn is None:
+        # JIT 缓存按 enable_weights 区分（两份编译产物）。
+        # 历史 self._comb_no_s1_fn / _compiled 升级为 dict[bool, fn]。
+        if not isinstance(self._comb_no_s1_fn, dict):
+            self._comb_no_s1_fn = {}
+            self._comb_no_s1_compiled = {}
+
+        if enable_weights not in self._comb_no_s1_fn:
             from .dispatch_combine_intranode_kernel import make_combine_jit
             _use_fp8_cast = self._use_fp8_cast
             _comb_dtype = torch.float8_e4m3fn if _use_fp8_cast else cfg.data_type
@@ -522,7 +537,14 @@ class FlyDSLDispatchCombineIntraNodeOp:
             # inline so kernel writes bf16 directly to shmem_comb_out_tok and
             # the wrapper does NOT need a post .to(bf16) cast.
             _comb_inp_dt = torch.bfloat16 if _use_fp8_cast else None
-            self._comb_no_s1_fn = make_combine_jit(
+            # enable_weights=False 路径（fused MoE 不需要 out_wts）：
+            # weight scatter + Stage 3b weight accumulate 都在 const_expr
+            # 处被 DCE 掉，省 ~3-5μs。
+            # enable_weights=True 路径（兼容 fused-with-weight）：
+            # 保留 Stage 1 weight scatter（skip_stage1_keep_wts=True），
+            # 因为同 fabric 上与 token P2P 并发的 16B 小写会被静默丢，必须
+            # 放在静态 fabric 上由 combine kernel 完成。
+            self._comb_no_s1_fn[enable_weights] = make_combine_jit(
                 rank=cfg.rank, npes=cfg.world_size,
                 experts_per_rank=cfg.num_experts_per_rank,
                 experts_per_token=cfg.num_experts_per_token,
@@ -531,21 +553,15 @@ class FlyDSLDispatchCombineIntraNodeOp:
                 block_num=cfg.block_num,
                 warp_num_per_block=cfg.warp_num_per_block,
                 data_type=_comb_dtype,
-                enable_weights=True,
+                enable_weights=bool(enable_weights),
                 enable_std_moe=cfg.enable_std_moe,
                 use_p2p_read=not cfg.use_external_inp_buf,
                 skip_stage1=True,
                 inp_data_type=_comb_inp_dt,
-                # Weight P2P scatter is intentionally KEPT inside combine
-                # rather than done by the upstream fused_gemm2 kernel: doing
-                # the small weight stores in fused_gemm2 (concurrent with the
-                # heavy token P2P traffic) caused weight stores to be silently
-                # dropped on certain (src_pe, dst_pe) xGMI paths.  Running
-                # them here, on a quiet fabric, fixes that.
-                skip_stage1_keep_wts=True,
+                skip_stage1_keep_wts=bool(enable_weights),
             )
 
-        if self._comb_no_s1_compiled is None:
+        if enable_weights not in self._comb_no_s1_compiled:
             args = (
                 fx.Int64(inp_c.data_ptr()),
                 self._fx_comb_inp,
@@ -568,9 +584,11 @@ class FlyDSLDispatchCombineIntraNodeOp:
                 _cur_tok,
                 stream,
             )
-            self._comb_no_s1_compiled = flyc.compile(self._comb_no_s1_fn, *args)
+            self._comb_no_s1_compiled[enable_weights] = flyc.compile(
+                self._comb_no_s1_fn[enable_weights], *args
+            )
         else:
-            self._comb_no_s1_compiled(
+            self._comb_no_s1_compiled[enable_weights](
                 inp_c.data_ptr(),
                 self._fx_comb_inp,
                 self._fx_comb_out,

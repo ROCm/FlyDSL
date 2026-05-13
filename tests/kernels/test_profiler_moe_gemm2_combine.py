@@ -106,6 +106,28 @@ except Exception as _e:  # noqa: BLE001
     HAS_FUSED_OP = False
     _FUSED_IMPORT_ERR = repr(_e)
 
+# aiter moe_sorting：低层 in-place 接口，cudagraph-friendly
+# (高层 fused_moe.moe_sorting 每次会重新 alloc 5 个 tensor，无法 capture)。
+#
+# Backend 优先级 (env `FLYDSL_AITER_SORTING_BACKEND` 覆盖；默认 opus)：
+#   * opus  → aiter.moe_sorting_opus_fwd   (raw CUDA, self-contained,
+#              不依赖 composable_kernel submodule)
+#   * cktile→ aiter.moe_sorting_fwd         (ck_tile, 依赖
+#              3rdparty/composable_kernel/example/ck_tile/13_moe_sorting/)
+# 两者完全相同接口签名，sorted_token_ids 都按 (j_global<<24)|t 编码。
+_AITER_SORTING_BACKEND = os.environ.get("FLYDSL_AITER_SORTING_BACKEND", "opus")
+try:
+    if _AITER_SORTING_BACKEND == "cktile":
+        from aiter import moe_sorting_fwd as _aiter_moe_sorting_fwd  # type: ignore
+    else:
+        from aiter import moe_sorting_opus_fwd as _aiter_moe_sorting_fwd  # type: ignore
+    HAS_AITER_SORTING = True
+    _AITER_SORTING_ERR = ""
+except Exception as _e:  # noqa: BLE001
+    _aiter_moe_sorting_fwd = None  # type: ignore[assignment]
+    HAS_AITER_SORTING = False
+    _AITER_SORTING_ERR = repr(_e)
+
 
 # ─── 分布式初始化 ─────────────────────────────────────────────────────────────
 def setup_distributed(rank, world_size, master_port=29700):
@@ -169,6 +191,103 @@ def _build_dispatch_inputs(rank, world_size, dev, args, cfg):
     wts = wts / wts.sum(-1, keepdim=True)
 
     idx = torch.zeros(cur_tok, k, dtype=torch.int32, device=dev)
+    routing = getattr(args, "routing", "random")
+    if routing == "uniform":
+        # 确定性均匀路由（生产 balanced EP 等价）：
+        #   idx[t, j] = dest_pe * epr + local_eid
+        #   dest_pe   = (rank + t + j) % world_size          ← 每 token 的 k 个
+        #                                                       expert 散到 k 个不同
+        #                                                       PE，且不同 rank/token
+        #                                                       的起点交错，避免热点
+        #   local_eid = ((rank*cur_tok + t)*k + j) % epr     ← rank、t、j 三维循环
+        #                                                       填遍所有 (PE, local_e)
+        # 单卡 cur_tok*k 个 (t,j) 对均匀洒满 [0, ws*epr) → 每 expert 命中次数 ≈
+        #   cur_tok*k / (ws*epr)。在 cur_tok=32/ws=8/epr=32/k=8 默认值下 = 1.0，
+        #   完美均衡。同 token 的 k 个 expert 必定跨 k 个不同 PE → dispatch dedup
+        #   不会触发 (dup_ballot == 0 always)，每条 (T, j_global) 都进 sorted_token_ids。
+        for t in range(cur_tok):
+            for j in range(k):
+                dest_pe   = (rank + t + j) % world_size
+                local_eid = ((rank * cur_tok + t) * k + j) % epr
+                idx[t, j] = dest_pe * epr + local_eid
+        return inp, wts, idx
+
+    if routing == "consec_same_pe":
+        # 场景 2：单 token 的 k 个 expert 全压到同 1 个 dest_pe，构造
+        # GEMM2 atomic-contention worst case (atomic k=8 同 (t, *) row)，
+        # 同时保证卡间 / 卡内均衡：
+        #   - 全局 token 顺序 g = rank * cur_tok + t  ∈ [0, world_size * cur_tok)
+        #   - dest_pe = g % world_size           ← 卡间均衡 (每 PE 收 cur_tok 个 token)
+        #   - eid_base = (g // world_size) % epr ← 按 g 排序后该 token 在
+        #     *本 dp* 上的相对序号 (0..cur_tok*npes-1) mod epr，让 8 个 rank
+        #     各 cur_tok/npes 个 token 共同覆盖 dp 内全部 epr 个 local_eid，
+        #     **真正卡内均衡** (每 local_eid 命中 cur_tok*npes*k/(npes*epr)
+        #     = cur_tok*k/epr 次)。
+        # local_eid[j] = (eid_base + j) % epr → 每 token 连续 k 个 expert。
+        if epr % k != 0:
+            raise ValueError(
+                f"routing=consec_same_pe requires epr ({epr}) divisible by k ({k}) "
+                "to keep per-expert load balanced; got mismatch."
+            )
+        for t in range(cur_tok):
+            g          = rank * cur_tok + t
+            dest_pe    = g % world_size
+            eid_base   = (g // world_size) % epr
+            for j in range(k):
+                local_eid = (eid_base + j) % epr
+                idx[t, j] = dest_pe * epr + local_eid
+        return inp, wts, idx
+
+    if routing == "atomic2_4pe":
+        # 场景 3：每 token 的 k 个 expert 分布到 *4 个不同* PE 上，每 PE 上
+        # 落 atomic_per_pe = k/4 个命中 (k=8 → atomic_per_pe=2)，即 GEMM2 同
+        # 一 output row 上仅 2 次 atomic_fadd 竞争 — 介于 uniform (atomic=1)
+        # 和 consec_same_pe (atomic=k=8 worst case) 之间的中等 contention 场景。
+        #
+        # 卡间 / 卡内均衡构造：
+        #   - 全局 token 顺序 g = rank * cur_tok + t  ∈ [0, world_size * cur_tok)
+        #   - 选 PE: base_pe = g % world_size；
+        #     dest_pe[j] = (base_pe + j_group) % world_size, j_group = j // atomic_per_pe
+        #     ∈ [0, 4)。同一 token 的 4 个 PE = {base, base+1, base+2, base+3} (mod ws),
+        #     必然 4 个不同 PE（要求 world_size >= 4）。base_pe 在 g 上 round-robin
+        #     取遍 [0, ws)，每张 PE 接收的 (rank,t,j_group) 三元组数 = num_pe * cur_tok
+        #     (= 4*cur_tok per rank)，atomic 总数 = atomic_per_pe * num_pe * cur_tok =
+        #     k * cur_tok per PE per rank, 全局 ws * cur_tok * k / ws = cur_tok * k →
+        #     **卡间完美均衡**。
+        #   - 选 local_eid: local_eid = (g // world_size + j) % epr
+        #     关键: 用 g // ws (而非 g % ws) 当 eid_base，避开 dest_pe 的 g%ws lattice
+        #     和 local_eid 的"塌缩" — PE 限制下 g 在 r 维步长为 ws，若 local_eid 公式
+        #     里 r 的系数与 epr 不互质 (例如系数=ws=8, epr=32, gcd=8) 会让 32 个 r
+        #     mod 后只覆盖 epr/gcd = 4 个 local_eid。改用 g//ws 取 [0, cur_tok)，配合
+        #     j 的 [0, k) offset，在每个 PE 上把 cur_tok * k = 256 个 atomic 均匀洒到
+        #     epr=32 个 local_eid → 每 (PE, local_eid) cell 命中 cur_tok*k/epr = 8 次
+        #     (默认 cur_tok=32, k=8, epr=32 下完美均衡)。
+        #
+        # 约束: k % 4 == 0 (默认 8/4=2 ✓); world_size >= 4 (默认 8 ✓)。
+        num_pe = 4
+        if k % num_pe != 0:
+            raise ValueError(
+                f"routing=atomic2_4pe requires k ({k}) divisible by {num_pe}; "
+                "got mismatch (atomic_per_pe = k/4 must be integer)."
+            )
+        if world_size < num_pe:
+            raise ValueError(
+                f"routing=atomic2_4pe requires world_size >= {num_pe}; "
+                f"got world_size={world_size}."
+            )
+        atomic_per_pe = k // num_pe  # k=8 → 2
+        for t in range(cur_tok):
+            g        = rank * cur_tok + t
+            base_pe  = g %  world_size
+            eid_base = g // world_size
+            for j in range(k):
+                j_group   = j // atomic_per_pe              # 0..num_pe-1 (4 个 PE 槽)
+                dest_pe   = (base_pe + j_group) % world_size
+                local_eid = (eid_base + j) % epr
+                idx[t, j] = dest_pe * epr + local_eid
+        return inp, wts, idx
+
+    # routing == "random" (legacy 行为)
     if k <= world_size:
         for t in range(cur_tok):
             pes = torch.randperm(world_size, device=dev)[:k]
@@ -182,25 +301,35 @@ def _build_dispatch_inputs(rank, world_size, dev, args, cfg):
     return inp, wts, idx
 
 
-def _build_gemm2_static_inputs(rank, world_size, dev, args, cfg, *, valid_recv=None):
+def _build_gemm2_static_inputs(rank, world_size, dev, args, cfg, *, disp_op=None, valid_recv=None):
     """为 GEMM2 / combine 构造 *静态* 输入（capture 期间不变）。
 
-    关键点：
-      - GEMM2 输入 A2 形状 [max_recv, inter_dim]，dtype=fp8（与 fp4 W2 配对）。
-        实际 EP 场景下 A2 应由 GEMM1+SiLU 产生；本骨架为简化 perf 测量，直接
-        随机初始化（accuracy 验证另走 verify 路径，本次未实现）。
-      - W2 形状 [num_experts_per_rank, model_dim, inter_dim]，per-expert FP4。
-      - 路由 sorted buffer 按 max_recv 上界构造，num_valid_ids 设为最大，
-        让 GEMM2 在 cudagraph 中跑满负载（worst-case latency）。
+    Layout（生产对齐, topk=k）：
+      - kernel 看到的 `tokens_in` = max_recv = world_size * bs (去重后上界)。
+      - A2 (input) capacity = [max_recv * topk, inter_dim] —— 每个 (t, s) 占独立一行，
+        kernel 内 A2 行寻址公式为 `t * topk + s`。
+      - a2_scale (e8m0): [max_recv * topk, inter_dim/32]，覆盖 worst-case 大小。
+      - W2 (weights): [num_experts_per_rank, model_dim, inter_dim]，per-expert FP4。
+      - sorted_token_ids 的来源由 ``args.sorting`` 控制：
+          fixture: 手工 round-robin 拼 (s<<24)|t，跟 dispatch 真实路由解耦
+          aiter:   aiter.moe_sorting_fwd 真实 sorting (capture 进 chain 每次重跑)
+        两种模式都按生产约定 (s<<24)|t 编码 entry，s = j_global ∈ [0, k)。
+      - accumulate=True 时 output buffer = [max_recv, model_dim]（同一 t 的多个 s 走
+        atomic_fadd 累加到同一行）；accumulate=False 时 output 扩到 [max_recv*topk, ...]。
 
     Parameters
     ----------
+    disp_op
+        ``--sorting aiter`` 时必传。setup 阶段第一次 sorting 需要从
+        ``disp_op.shmem_disp_out_idx / shmem_disp_out_wts`` 拿真实路由表
+        (须在 build 之前先跑过一次 dispatch)。fixture 模式忽略此参数。
     valid_recv
-        若给出，则 sorted_token_ids 只取 [0, valid_recv) 的 local-recv 槽位
-        作为有效 token，其余仍以 max_recv 哨兵 padding。fused 路径必须传入
-        实际 dispatch 后的 total_recv，否则 GEMM2 epilogue 会读到未被 dispatch
-        写入的 addr_tis[t]（zeros / 残留），把结果 P2P scatter 到错误位置，
-        进一步污染 combine 的 stage 3 输出。
+        若给出，则 sorted_token_ids 的 `t` 字段只取 [0, valid_recv) 的 local-recv
+        槽位作为有效 token，其余以 max_recv 哨兵 padding。fused 路径必须传入实际
+        dispatch 后的 total_recv，否则 GEMM2 epilogue 会读到未被 dispatch 写入的
+        addr_tis[t]（zeros / 残留），把结果 P2P scatter 到错误位置。
+        仅 ``--sorting fixture`` 路径使用；aiter 路径下由 dispatch 真实
+        ``total_recv`` 通过 ``num_local_tokens`` 自动 trim。
     """
     epr        = args.num_experts_per_rank
     max_recv   = world_size * args.max_num_inp_token_per_rank
@@ -209,13 +338,23 @@ def _build_gemm2_static_inputs(rank, world_size, dev, args, cfg, *, valid_recv=N
     tile_m     = args.tile_m2
     a_dtype    = args.gemm2_a_dtype
     b_dtype    = args.gemm2_b_dtype
+    gemm2_topk = max(1, int(args.k))   # GEMM2 compile-time topk
+    # A2 容量：worst-case 每个 recv token 都被 topk 个本地 expert 命中
+    a2_rows    = max_recv * gemm2_topk
 
     torch.manual_seed(123 + rank)
 
-    # ── A2: [max_recv, inter_dim] (fp8 / bf16 / fp4) ──
+    # e8m0 micro-scale = 127 表示 2^0=1.0；headroom>0 时降到 127-h 即 2^-h，
+    # 同时缩 a2 和 w2 → GEMM2 输出乘 2^-2h，避免 random fp4×fp4 over-flow 到
+    # fp8 e4m3 max=±448 引发 NaN（见 --gemm2-scale-headroom 帮助）。headroom=0
+    # 保持历史行为。clamp 到 [0, 127] 防止 e8m0 编码变成 0 (=2^-127 ≈ 0) 整列坍缩。
+    _e8m0_headroom = max(0, min(127, int(getattr(args, "gemm2_scale_headroom", 0))))
+    _e8m0_val = 127 - _e8m0_headroom
+
+    # ── A2: [max_recv * topk, inter_dim] (fp8 / bf16 / fp4) ──
     if a_dtype == "fp8":
         a2_view = (
-            torch.randn(max_recv, inter_dim, dtype=torch.bfloat16, device=dev)
+            torch.randn(a2_rows, inter_dim, dtype=torch.bfloat16, device=dev)
             .to(torch.float8_e4m3fn)
             .contiguous()
         )
@@ -230,22 +369,22 @@ def _build_gemm2_static_inputs(rank, world_size, dev, args, cfg, *, valid_recv=N
         #   2. mfma_scale_* would interpret the f32 bits as 4 packed e8m0
         #      bytes anyway, silently producing garbage results.
         a2_scale_1d = torch.full(
-            (max_recv * (inter_dim // 32),), 127,
+            (a2_rows * (inter_dim // 32),), _e8m0_val,
             dtype=torch.uint8, device=dev,
         )
     elif a_dtype == "fp4":
         # FP4 占位：2 个 fp4 element / 字节
         a2_view = torch.randint(
-            0, 256, (max_recv, inter_dim // 2), dtype=torch.uint8, device=dev,
+            0, 256, (a2_rows, inter_dim // 2), dtype=torch.uint8, device=dev,
         )
         a2_storage = a2_view.view(-1)
         # 1x32 group scale (e8m0: 127 = 2^0 = 1.0；用 0 会让 GEMM2 输出全 0)
         a2_scale_1d = torch.full(
-            (max_recv * (inter_dim // 32),), 127, dtype=torch.uint8, device=dev,
+            (a2_rows * (inter_dim // 32),), _e8m0_val, dtype=torch.uint8, device=dev,
         )
     elif a_dtype in ("bf16", "fp16"):
         torch_a = torch.bfloat16 if a_dtype == "bf16" else torch.float16
-        a2_view = torch.randn(max_recv, inter_dim, dtype=torch_a, device=dev)
+        a2_view = torch.randn(a2_rows, inter_dim, dtype=torch_a, device=dev)
         a2_storage = a2_view.view(-1)
         a2_scale_1d = torch.empty((0,), dtype=torch.float32, device=dev)
     else:
@@ -277,7 +416,7 @@ def _build_gemm2_static_inputs(rank, world_size, dev, args, cfg, *, valid_recv=N
         # 注意：e8m0 = 127 表示 2^0 = 1.0；用 0 (= 2^-127 ≈ 0) 会让 GEMM2
         # 整列输出坍缩为 0，导致 verify 出现 0=0 假阳性 PASS。
         w2_scale_2d = torch.full(
-            (epr * model_dim, inter_dim // 32), 127,
+            (epr * model_dim, inter_dim // 32), _e8m0_val,
             dtype=torch.uint8, device=dev,
         )
         if fp4_utils is not None:
@@ -301,7 +440,7 @@ def _build_gemm2_static_inputs(rank, world_size, dev, args, cfg, *, valid_recv=N
         # so we have to allocate exactly that and (optionally) push it through
         # the same e8m0_shuffle the fp4 path uses.
         w2_scale_2d_f8 = torch.full(
-            (epr * model_dim, inter_dim // 32), 127,
+            (epr * model_dim, inter_dim // 32), _e8m0_val,
             dtype=torch.uint8, device=dev,
         )
         if fp4_utils is not None:
@@ -324,46 +463,138 @@ def _build_gemm2_static_inputs(rank, world_size, dev, args, cfg, *, valid_recv=N
     else:
         raise ValueError(f"unsupported gemm2_b_dtype={b_dtype!r}")
 
-    # ── Sorted buffer (aiter / torch fallback) ──
-    # 简化：直接构造 sorted_token_ids = arange(0..effective_recv) 均匀分给 epr 个 expert。
-    # 每个 expert 拿到约 effective_recv/epr 个 token，padding 到 tile_m。
-    # effective_recv 默认 = max_recv（cudagraph 上界，baseline 路径用），
-    # fused 路径必须传入 valid_recv = total_recv 让 GEMM2 只覆盖
-    # 真正被 dispatch 写入了 addr_tis 的 [0, total_recv) 槽位。
-    effective_recv = int(valid_recv) if valid_recv is not None else max_recv
-    per_e = (effective_recv + epr - 1) // epr
-    per_e_pad = ((per_e + tile_m - 1) // tile_m) * tile_m
-    blocks = epr * (per_e_pad // tile_m)
-    sorted_size = blocks * tile_m
+    sorting_mode = getattr(args, "sorting", "fixture")
+    aiter_state = None  # 仅 aiter 模式填充
 
-    sorted_token_ids = torch.full(
-        (sorted_size,), max_recv, dtype=torch.int32, device=dev,  # max_recv 作 padding 哨兵
-    )
-    sorted_weights = torch.zeros(sorted_size, dtype=torch.float32, device=dev)
-    sorted_expert_ids = torch.zeros(blocks, dtype=torch.int32, device=dev)
-    for e in range(epr):
-        e_start = e * (per_e_pad // tile_m)
-        e_end = (e + 1) * (per_e_pad // tile_m)
-        sorted_expert_ids[e_start:e_end] = e
-        # 把 effective_recv 个 token 平均分到 epr 个 expert
-        valid_n = min(per_e, effective_recv - e * per_e)
-        if valid_n > 0:
-            row_start = e * per_e_pad
-            sorted_token_ids[row_start:row_start + valid_n] = (
-                torch.arange(e * per_e, e * per_e + valid_n,
-                             dtype=torch.int32, device=dev)
-                .clamp(max=effective_recv - 1)
+    if sorting_mode == "aiter":
+        # ── aiter moe_sorting_fwd 真实路由 sorting ────────────────────────
+        # 输入: disp_op.shmem_disp_out_idx [mr, k] i32 (全 global expert id)
+        #       disp_op.shmem_disp_out_wts [mr, k] f32
+        # 输出: sorted_token_ids[max_padded] i32 = (j_global<<24)|t
+        #       sorted_expert_ids[max_blocks] i32 = local_expert_id_per_block
+        #       sorted_weights[max_padded] f32
+        #       num_valid_ids[2] i32 = [padding-after-total, num_input_tokens]
+        if not HAS_AITER_SORTING:
+            raise RuntimeError(
+                f"--sorting aiter requires aiter.moe_sorting_fwd; import failed: "
+                f"{_AITER_SORTING_ERR}"
             )
-            sorted_weights[row_start:row_start + valid_n] = 1.0
+        if disp_op is None:
+            raise RuntimeError(
+                "--sorting aiter requires disp_op (must dispatch once before build)"
+            )
+        num_experts_global = world_size * epr
+        # aiter 公式上界 (op_tests/test_moe_sorting.py::moe_sorting_native):
+        #   max_padded = topk_ids.numel() + num_experts * block_size - topk
+        # bs=32,k=8,ws=8,epr=32,tile_m=32: 256*8 + 256*32 - 8 = 10232
+        max_padded = max_recv * gemm2_topk + num_experts_global * tile_m - gemm2_topk
+        max_blocks = (max_padded + tile_m - 1) // tile_m
 
-    # 让 GEMM2 跑满负载：所有 block 都视作有效。
-    num_valid_ids = torch.tensor([sorted_size], dtype=torch.int32, device=dev)
+        sorted_token_ids  = torch.empty((max_padded,), dtype=torch.int32, device=dev)
+        sorted_weights    = torch.empty((max_padded,), dtype=torch.float32, device=dev)
+        sorted_expert_ids = torch.empty((max_blocks,), dtype=torch.int32, device=dev)
+        # aiter 输出 [2]: [0]=padded-total, [1]=num_input；GEMM2 只读 [0]
+        num_valid_ids     = torch.empty((2,), dtype=torch.int32, device=dev)
+
+        # local_expert_mask: 本卡 [rank*epr, (rank+1)*epr) 段为 1，其他为 0
+        expert_mask = torch.zeros(num_experts_global, dtype=torch.int32, device=dev)
+        expert_mask[rank * epr:(rank + 1) * epr] = 1
+        # moe_buf API 占位 (内容 unused，仅 alloc 形状对齐)
+        moe_buf = torch.empty((max_recv, model_dim), dtype=torch.bfloat16, device=dev)
+
+        # 用 dispatch 真实输出跑首次 sorting，把 sorted_* buffer fill 满 ──
+        # 这一次跑出来的 sorted 可能在 cudagraph capture 时被覆盖；chain
+        # 内 _run_aiter_sorting 每次 replay 会重填这些 buffer (in-place)。
+        _aiter_moe_sorting_fwd(  # type: ignore[misc]
+            disp_op.shmem_disp_out_idx.view(max_recv, gemm2_topk),
+            disp_op.shmem_disp_out_wts.view(max_recv, gemm2_topk),
+            sorted_token_ids,
+            sorted_weights,
+            sorted_expert_ids,
+            num_valid_ids,
+            moe_buf,
+            num_experts_global,
+            int(tile_m),
+            expert_mask,
+            disp_op.total_recv,
+            0,
+        )
+
+        sorted_size = max_padded
+        blocks      = max_blocks
+        effective_valid = -1  # 由 num_valid_ids[0] 在设备端动态决定
+        aiter_state = dict(
+            expert_mask=expert_mask,
+            moe_buf=moe_buf,
+            num_experts_global=num_experts_global,
+            tile_m=int(tile_m),
+            topk=int(gemm2_topk),
+            mr=int(max_recv),
+        )
+    else:
+        # ── fixture: 手工 round-robin 拼 (s<<24)|t (legacy 行为) ──────────
+        # 总 valid (t, s) 对数 = args.valid_m (默认 = bs*topk 均衡路由结果)。
+        # 分布策略：n_unique_t 个唯一 token，每个全 topk slot，rotating 到 epr 个 expert。
+        # valid_recv 限制 `t` 的取值范围 (fused P2P 需要 t<total_recv)；不限制 s。
+        valid_m_default = args.max_num_inp_token_per_rank * gemm2_topk  # bs * topk
+        effective_valid = int(getattr(args, "valid_m", None) or valid_m_default)
+        effective_valid = max(0, min(effective_valid, a2_rows))  # cap 到 A2 上界
+
+        t_cap = int(valid_recv) if valid_recv is not None else max_recv
+        n_unique_t = min((effective_valid + gemm2_topk - 1) // gemm2_topk, t_cap)
+        pairs: list[tuple[int, int]] = []
+        for ti in range(n_unique_t):
+            for si in range(gemm2_topk):
+                pairs.append((ti, si))
+                if len(pairs) >= effective_valid:
+                    break
+            if len(pairs) >= effective_valid:
+                break
+
+        per_e = (len(pairs) + epr - 1) // epr
+        per_e_pad = ((max(per_e, 1) + tile_m - 1) // tile_m) * tile_m
+        blocks = epr * (per_e_pad // tile_m)
+        sorted_size = blocks * tile_m
+
+        sorted_token_ids = torch.full(
+            (sorted_size,), max_recv, dtype=torch.int32, device=dev,
+        )
+        sorted_weights = torch.zeros(sorted_size, dtype=torch.float32, device=dev)
+        sorted_expert_ids = torch.zeros(blocks, dtype=torch.int32, device=dev)
+        for e in range(epr):
+            e_start = e * (per_e_pad // tile_m)
+            e_end = (e + 1) * (per_e_pad // tile_m)
+            sorted_expert_ids[e_start:e_end] = e
+
+        if pairs:
+            fused_host = []
+            e_count = [0] * epr
+            for i, (ti, si) in enumerate(pairs):
+                e = i % epr
+                j = e_count[e]
+                e_count[e] += 1
+                if j >= per_e_pad:
+                    continue
+                fused = (int(si) << 24) | int(ti)
+                fused_host.append((e * per_e_pad + j, fused))
+            if fused_host:
+                idxs = torch.tensor([p[0] for p in fused_host], dtype=torch.long, device=dev)
+                vals = torch.tensor([p[1] for p in fused_host], dtype=torch.int32, device=dev)
+                sorted_token_ids[idxs] = vals
+                sorted_weights[idxs] = 1.0
+
+        # num_valid_ids = sorted_size：让 kernel 走满所有 expert block；
+        # 哨兵 pad 由 t_ok / s_ok 在 row level 过滤。
+        num_valid_ids = torch.tensor([sorted_size], dtype=torch.int32, device=dev)
 
     bias_dummy = torch.empty((0,), dtype=torch.float32, device=dev)
 
-    # GEMM2 输出缓冲：[max_recv, model_dim] of bf16，与 combine.input dtype 对齐
+    # GEMM2 输出缓冲：
+    #   accumulate=True  → [max_recv, model_dim]      (atomic_fadd 累加同 t 的多个 s)
+    #   accumulate=False → [max_recv * topk, model_dim] (每个 (t,s) 独立 slot)
     out_dtype = cfg.data_type if cfg.data_type in (torch.bfloat16, torch.float16) else torch.bfloat16
-    gemm2_out = torch.zeros(max_recv, model_dim, dtype=out_dtype, device=dev)
+    out_rows = max_recv if args.gemm2_accumulate else a2_rows
+    gemm2_out = torch.zeros(out_rows, model_dim, dtype=out_dtype, device=dev)
 
     return dict(
         a2_storage=a2_storage,
@@ -383,7 +614,155 @@ def _build_gemm2_static_inputs(rank, world_size, dev, args, cfg, *, valid_recv=N
         blocks=blocks,
         sorted_size=sorted_size,
         out_dtype=out_dtype,
+        gemm2_topk=gemm2_topk,
+        a2_rows=a2_rows,
+        effective_valid=effective_valid,
+        sorting_mode=sorting_mode,
+        aiter_state=aiter_state,
     )
+
+
+def _run_aiter_sorting(gemm2_in, disp_op):
+    """Chain 内每次 dispatch 之后调一次：in-place 把 sorted_* / num_valid_ids
+    重填为基于本次 dispatch 真实路由结果 (shmem_disp_out_idx) 的 sorting 输出。
+
+    必须 capture-friendly：仅调 `aiter.moe_sorting_fwd` 一个 hipKernel，所有
+    buffer 都是预分配的（``_build_gemm2_static_inputs`` 在 setup 阶段已分配）。
+    每次 replay 用同一份 buffer，只刷新内容。
+    """
+    st = gemm2_in["aiter_state"]
+    if st is None:
+        return  # fixture 模式，no-op
+    _aiter_moe_sorting_fwd(  # type: ignore[misc]
+        disp_op.shmem_disp_out_idx.view(st["mr"], st["topk"]),
+        disp_op.shmem_disp_out_wts.view(st["mr"], st["topk"]),
+        gemm2_in["sorted_token_ids"],
+        gemm2_in["sorted_weights"],
+        gemm2_in["sorted_expert_ids"],
+        gemm2_in["num_valid_ids"],
+        st["moe_buf"],
+        st["num_experts_global"],
+        st["tile_m"],
+        st["expert_mask"],
+        disp_op.total_recv,
+        0,
+    )
+
+
+def _dump_gemm2_inputs(args, gemm2_in, out_dtype, *, prefix="[gemm2-dump]"):
+    """打印 GEMM2 的全部 compile-time / runtime 入参，方便调试与对齐生产。
+
+    覆盖 launch 签名：
+        compiled(o, x, w, sx, sw, st, eids, sw_sorted,
+                 num_valid_ids, bias,
+                 tokens_in, n_in, k_in, size_expert_ids,
+                 stream)
+    """
+    import torch as _torch
+
+    def _tinfo(t):
+        if not isinstance(t, _torch.Tensor):
+            return f"(scalar) {t!r}"
+        try:
+            nbytes = t.numel() * t.element_size()
+        except Exception:
+            nbytes = -1
+        return (f"shape={list(t.shape)} dtype={t.dtype} dev={t.device} "
+                f"contig={t.is_contiguous()} bytes={nbytes}")
+
+    out_s = "bf16" if out_dtype == _torch.bfloat16 else (
+        "f16" if out_dtype == _torch.float16 else "f32"
+    )
+
+    print(f"\n{prefix} ═══ COMPILE-TIME (compile_mixed_moe_gemm2 kwargs) ═══")
+    print(f"{prefix}   model_dim       = {args.hidden_dim}")
+    print(f"{prefix}   inter_dim       = {args.inter_dim}")
+    print(f"{prefix}   experts         = {args.num_experts_per_rank}")
+    print(f"{prefix}   topk            = {gemm2_in['gemm2_topk']}  "
+          f"(A2 行寻址: row = t * topk + s)")
+    print(f"{prefix}   tile_m / n / k  = {args.tile_m2} / {args.tile_n2} / {args.tile_k2}")
+    print(f"{prefix}   a_dtype         = {args.gemm2_a_dtype}")
+    print(f"{prefix}   b_dtype         = {args.gemm2_b_dtype}")
+    print(f"{prefix}   out_dtype       = {out_s}")
+    print(f"{prefix}   accumulate      = {args.gemm2_accumulate}  "
+          f"({'atomic_fadd 跨 s 累加到 output row t' if args.gemm2_accumulate else 'plain store, (t,s) 独占行'})")
+    print(f"{prefix}   persist_m       = {args.persist_m}")
+    print(f"{prefix}   xcd_swizzle     = {args.xcd_swizzle}")
+    print(f"{prefix}   doweight_stage2 = False")
+
+    print(f"\n{prefix} ═══ RUNTIME TENSORS (launch 参数, dtype/shape/dev) ═══")
+    print(f"{prefix}  [pos  0] o   = arg_out (gemm2_out)         "
+          f"{_tinfo(gemm2_in['gemm2_out'])}")
+    print(f"{prefix}  [pos  1] x   = arg_x (A2 storage 1D)        "
+          f"{_tinfo(gemm2_in['a2_storage'])}")
+    print(f"{prefix}  [pos  2] w   = arg_w (W2 storage 1D)        "
+          f"{_tinfo(gemm2_in['w2_storage'])}")
+    print(f"{prefix}  [pos  3] sx  = arg_scale_x (A2 e8m0 scale)  "
+          f"{_tinfo(gemm2_in['a2_scale_1d'])}")
+    print(f"{prefix}  [pos  4] sw  = arg_scale_w (W2 e8m0 scale)  "
+          f"{_tinfo(gemm2_in['w2_scale_1d'])}")
+    print(f"{prefix}  [pos  5] st  = sorted_token_ids (fused i32) "
+          f"{_tinfo(gemm2_in['sorted_token_ids'])}")
+    print(f"{prefix}  [pos  6] eids= sorted_expert_ids            "
+          f"{_tinfo(gemm2_in['sorted_expert_ids'])}")
+    print(f"{prefix}  [pos  7] sws = sorted_weights               "
+          f"{_tinfo(gemm2_in['sorted_weights'])}")
+    print(f"{prefix}  [pos  8] num_valid_ids (i32 device scalar)  "
+          f"{_tinfo(gemm2_in['num_valid_ids'])}")
+    print(f"{prefix}  [pos  9] bias (empty placeholder)           "
+          f"{_tinfo(gemm2_in['bias'])}")
+
+    print(f"\n{prefix} ═══ RUNTIME SCALARS (launch 后 4 个 i32) ═══")
+    print(f"{prefix}  [pos 10] tokens_in       = {gemm2_in['max_recv']}  "
+          f"(= world_size * bs, A2 行 = tokens_in * topk = {gemm2_in['a2_rows']})")
+    print(f"{prefix}  [pos 11] n_in (=model_dim) = {args.hidden_dim}")
+    print(f"{prefix}  [pos 12] k_in (=inter_dim) = {args.inter_dim}")
+    print(f"{prefix}  [pos 13] size_expert_ids = {gemm2_in['blocks']}  "
+          f"(= epr * ceil(per_e / tile_m), expert-grouped m_block 数)")
+    print(f"{prefix}  [pos 14] stream          = torch.cuda.current_stream()")
+
+    print(f"\n{prefix} ═══ DERIVED / SEMANTIC ═══")
+    print(f"{prefix}  num_valid_ids value     = {int(gemm2_in['num_valid_ids'][0].item())}  "
+          f"(kernel 走 row ∈ [0, this); row-level t/s 哨兵在内部 DCE)")
+    print(f"{prefix}  effective_valid (real)  = {gemm2_in['effective_valid']}  "
+          f"(真正有效 (t, s) 对数 = host 视角的 valid_m)")
+    print(f"{prefix}  sorted_size             = {gemm2_in['sorted_size']}")
+
+    # 解码 sorted_token_ids，统计 atomic contention
+    try:
+        all_raw = gemm2_in["sorted_token_ids"].tolist()
+        max_recv_sentinel = int(gemm2_in["max_recv"])
+        real = [(v & 0x00FFFFFF, (v >> 24) & 0xFF) for v in all_raw
+                if (v & 0x00FFFFFF) < max_recv_sentinel]
+
+        from collections import Counter
+        t_counter: Counter = Counter(t for (t, _s) in real)
+        s_counter: Counter = Counter(s for (_t, s) in real)
+        cont_hist: Counter = Counter(t_counter.values())  # 多少个 t 有 d 个 s
+
+        # 显示 expert 0 / 1 / 7 各自的前 8 条，证明同一 t 落到不同 expert
+        tile_m = int(args.tile_m2)
+        st_t = gemm2_in["sorted_token_ids"]
+        for e in (0, 1, 7):
+            block_start = e * tile_m
+            head_e = st_t[block_start:block_start + 8].tolist()
+            decoded_e = [(v & 0x00FFFFFF, (v >> 24) & 0xFF) for v in head_e]
+            print(f"{prefix}  expert={e:2d} block[:8] decoded (t, s) = {decoded_e}")
+
+        print(f"{prefix}  sorted_expert_ids[:16] = "
+              f"{gemm2_in['sorted_expert_ids'][:16].tolist()}")
+        print(f"{prefix}  real (t, s) pair count          = {len(real)}")
+        print(f"{prefix}  unique t count                  = {len(t_counter)}  "
+              f"(每个唯一 t 对应一个 output row, atomic_fadd target)")
+        print(f"{prefix}  s value distribution            = "
+              f"{dict(sorted(s_counter.items()))}")
+        print(f"{prefix}  atomic contention histogram (#s-per-t -> #t) = "
+              f"{dict(sorted(cont_hist.items()))}")
+        print(f"{prefix}    -> 含义: 同一 output row 被几次 atomic_fadd 命中的统计")
+    except Exception as exc:
+        print(f"{prefix}  (decode failed: {exc!r})")
+
+    print()
 
 
 def _build_gemm2_callable(args, gemm2_in, out_dtype):
@@ -392,21 +771,20 @@ def _build_gemm2_callable(args, gemm2_in, out_dtype):
         "f16" if out_dtype == torch.float16 else "f32"
     )
 
-    # accumulate=True 走 atomic; accumulate=False 走 reduce 模式（fp4 时常用）
-    # FP4 weight 必须用 reduce 模式 (accumulate=False)，否则 atomic_fadd 路径
-    # 在某些 (a_dtype, b_dtype) 组合下会被 lowering 优化掉/silent-drop，
-    # 导致 gemm2_out 全 0（典型症状：base_inp_tok nz=0 == fused_inp_tok nz=0）。
-    if args.gemm2_b_dtype == "fp4":
-        accumulate = False
-    else:
-        accumulate = args.gemm2_accumulate
+    # accumulate=True 走 atomic; accumulate=False 走 reduce 模式
+    # 注：历史上 fp4 b_dtype 曾被强制 accumulate=False（因怀疑 atomic_fadd 在
+    # mixed fp4 lowering 下 silent-drop），现解除该强制以 empirically 验证。
+    # 若发现 gemm2_out 全 0，再单独 PR 修 kernel。
+    accumulate = args.gemm2_accumulate
 
+    # GEMM2 topk 与 dispatch 路由 topk (args.k) 对齐：每个 recv token 在本地最多
+    # 被 topk 个 expert 命中, A2 buffer 按 [tokens_in * topk, inter_dim] 寻址。
     exe = compile_mixed_moe_gemm2(
         model_dim=args.hidden_dim,
         inter_dim=args.inter_dim,
         experts=args.num_experts_per_rank,
         xcd_swizzle=args.xcd_swizzle,
-        topk=1,                     # EP 场景 reinterpret topk=1
+        topk=gemm2_in["gemm2_topk"],
         tile_m=args.tile_m2,
         tile_n=args.tile_n2,
         tile_k=args.tile_k2,
@@ -478,11 +856,16 @@ def _build_gemm2_callable(args, gemm2_in, out_dtype):
 # 固定开销 (实测 bs=256 时仅 ~17us), 不反映真实 Stage 1 P2P + Stage 3 工作.
 def _baseline_chain(disp_op, gemm2_launch, gemm2_in, combine_idx,
                     dispatch_inputs=None):
-    """baseline: [dispatch ->] moe_gemm2 -> combine.
+    """baseline: [dispatch ->] [aiter_sorting ->] moe_gemm2 -> combine.
 
     dispatch_inputs=None  : 旧路径, 仅 launch GEMM2 + combine (combine 跑空).
     dispatch_inputs=(inp, wts, scales, idx) : 每次 chain 都重跑 dispatch,
         让 combine 内部的 total_recv / routing tables 永远 fresh.
+
+    aiter sorting 在 dispatch 之后插入：必须每次 replay 都重跑 sorting，
+    因为 dispatch 的 dest_tok_all 分配 (atomic_add 顺序) 不是 deterministic，
+    每次 replay shmem_disp_out_idx 的行内容会变；sorted 里的 t 索引必须
+    跟着 dispatch 当前 replay 的 addr_tis 一致。
     """
     if dispatch_inputs is not None:
         inp, wts, scales, idx = dispatch_inputs
@@ -490,6 +873,8 @@ def _baseline_chain(disp_op, gemm2_launch, gemm2_in, combine_idx,
         # launch; routing tables / total_recv 在 disp_op 内部 shmem buffer 上
         # 原地更新, combine_idx (= shmem_disp_out_idx 视图) 引用不变.
         disp_op.dispatch(inp, wts, scales, idx)
+        # fixture 模式下 no-op；aiter 模式下 capture aiter.moe_sorting_fwd
+        _run_aiter_sorting(gemm2_in, disp_op)
     if os.environ.get("FLYDSL_DEBUG_CHAIN_DISPATCH_ONLY", "0") == "1":
         return None
     if os.environ.get("FLYDSL_DEBUG_CHAIN_SKIP_GEMM2", "0") != "1":
@@ -502,7 +887,9 @@ def _baseline_chain(disp_op, gemm2_launch, gemm2_in, combine_idx,
 
 def _fused_chain(disp_op, fused_op, gemm2_in, combine_idx, dispatch_total_recv,
                  dispatch_inputs=None):
-    """fused: [dispatch ->] fused_gemm2_combine [-> combine_no_stage1].
+    """fused: [dispatch ->] [aiter_sorting ->] fused_gemm2_combine [-> combine_no_stage1].
+
+    见 _baseline_chain 关于 aiter sorting 必须 capture 进 chain 的说明.
 
     dispatch_inputs 见 _baseline_chain 注释. 不跑 dispatch 时, fused 路径里的
     combine_no_stage1 (Stage 1 weight P2P + Stage 3 read+accum) 也会跑空,
@@ -515,6 +902,7 @@ def _fused_chain(disp_op, fused_op, gemm2_in, combine_idx, dispatch_total_recv,
     if dispatch_inputs is not None:
         inp, wts, scales, idx = dispatch_inputs
         disp_op.dispatch(inp, wts, scales, idx)
+        _run_aiter_sorting(gemm2_in, disp_op)
     out = fused_op.run(
         a2=gemm2_in["a2_storage"],
         w2=gemm2_in["w2_storage"],
@@ -824,30 +1212,65 @@ def _snapshot_combine_out(disp_op):
 
 
 def _compare_two(name_a, ta, name_b, tb, *, rank, atol_abs=2e-2, atol_rel=5e-2,
-                 max_print=8):
+                 atol_ulp_k=16, max_print=8):
     """逐 token 对比两个张量，输出统计 + 部分逐元素差异。返回 pass:bool。"""
     assert ta.shape == tb.shape, (
         f"shape mismatch: {name_a}={tuple(ta.shape)} vs {name_b}={tuple(tb.shape)}"
     )
     a_f = ta.detach().float()
     b_f = tb.detach().float()
-    diff   = (a_f - b_f).abs()
-    a_norm = a_f.abs().clamp_min(1e-6)
+    nan_a  = torch.isnan(a_f) | torch.isinf(a_f)
+    nan_b  = torch.isnan(b_f) | torch.isinf(b_f)
+    n_nan_a  = int(nan_a.sum().item())
+    n_nan_b  = int(nan_b.sum().item())
+    nan_match = bool(torch.equal(nan_a, nan_b))
+
+    # 用 finite 掩码裁掉两边都 NaN/Inf 的位置再算 abs/rel 统计：fp8_direct_cast
+    # 下 random fp4 数据偶尔触发 cvt_pk_fp8_f32 输出 fp8 NaN 编码（baseline 与
+    # fused 同源数据 → 同一组位置出 NaN，本不影响数值一致性比较）。
+    # 失败判定：(1) NaN 位置 mismatch (a 路径有 NaN，b 路径没有 / 反之) 才算 FAIL；
+    #         (2) finite 部分内 abs/rel 超 thr 才算 FAIL。
+    finite_mask = ~(nan_a | nan_b)
+    a_finite = torch.where(finite_mask, a_f, torch.zeros_like(a_f))
+    b_finite = torch.where(finite_mask, b_f, torch.zeros_like(b_f))
+    diff   = (a_finite - b_finite).abs()
+    # 用 max(|a|,|b|) 当分母，避免 a=0 时 rel 爆炸（baseline 在 dup 哨兵 +
+    # zero-fragment 边界上偶有 0 输出而 fused 有 ~1 ULP non-zero）。
+    a_norm = torch.maximum(a_finite.abs(), b_finite.abs()).clamp_min(1e-6)
     rel    = diff / a_norm
-    nan_a  = torch.isnan(a_f)
-    nan_b  = torch.isnan(b_f)
 
     abs_max  = diff.max().item() if diff.numel() > 0 else 0.0
     abs_mean = diff.mean().item() if diff.numel() > 0 else 0.0
     rel_max  = rel.max().item() if rel.numel() > 0 else 0.0
     rel_mean = rel.mean().item() if rel.numel() > 0 else 0.0
-    n_nan_a  = int(nan_a.sum().item())
-    n_nan_b  = int(nan_b.sum().item())
 
-    n_diff_per_tok = (diff > atol_abs).reshape(diff.shape[0], -1).any(dim=-1).sum().item()
-    fail_abs = abs_max > atol_abs
-    fail_rel = rel_max > atol_rel
-    pass_ok  = (not fail_abs) and (not fail_rel) and (n_nan_a == 0) and (n_nan_b == 0)
+    # Element-wise pass: 四阈值任一满足即通过：
+    #   (1) |diff| <= atol_abs  → 绝对阈值（覆盖小值噪声）
+    #   (2) |diff| / max(|a|,|b|) <= atol_rel → 相对阈值（覆盖大值 round）
+    #   (3) |diff| <= atol_ulp_k * max(|a|,|b|) * 2^-mantissa → dtype-aware
+    #       k-ULP 累加预算（bf16: 2^-7, atol_ulp_k=8 → 容忍 6.25% 的 round 累加）
+    #   (4) max(|a|,|b|) <= near_zero_floor → near-zero 噪声地带，sign-flip 视
+    #       为 atomic_fadd 顺序与 fp32 single-accum 顺序的真实非结合性差异
+    #       （在 consec_same_pe / atomic-k stress 场景下不可避免）
+    if ta.dtype == torch.bfloat16:
+        _mantissa_bits = 7
+    elif ta.dtype == torch.float16:
+        _mantissa_bits = 10
+    elif ta.dtype == torch.float32:
+        _mantissa_bits = 23
+    else:
+        _mantissa_bits = 7
+    _ulp_thr = (a_norm * (atol_ulp_k * (2.0 ** -_mantissa_bits)))
+    # near-zero floor: 取 tensor abs max 的 (k * 2^-mantissa) 倍，对 bf16 k=8 ≈
+    # 输出量级的 6.25% — 该量级下任何 sign-flip 都属于 accumulation noise。
+    _out_max = a_finite.abs().max().clamp_min(1e-6)
+    _near_zero_floor = _out_max * (atol_ulp_k * (2.0 ** -_mantissa_bits))
+    _is_near_zero = (a_finite.abs() < _near_zero_floor) & (b_finite.abs() < _near_zero_floor)
+    fail_mask = ((diff > atol_abs) & (rel > atol_rel) & (diff > _ulp_thr)
+                 & (~_is_near_zero))
+    n_diff_per_tok = fail_mask.reshape(fail_mask.shape[0], -1).any(dim=-1).sum().item()
+    n_fail = int(fail_mask.sum().item())
+    pass_ok  = (n_fail == 0) and nan_match
 
     # 所有 rank 都打印（hang 调试 / 跨卡定位）—— rank 0 同步打印过去主导，
     # 其他 rank 仅在 FAIL 时简短报告
@@ -859,8 +1282,9 @@ def _compare_two(name_a, ta, name_b, tb, *, rank, atol_abs=2e-2, atol_rel=5e-2,
               f"(thr={atol_abs:.2e})")
         print(f"  [rank {rank}]         rel: max={rel_max:.4e} mean={rel_mean:.4e}  "
               f"(thr={atol_rel:.2e})")
-        print(f"  [rank {rank}]         nan: a={n_nan_a} b={n_nan_b}  "
-              f"tokens_with_diff={n_diff_per_tok}")
+        print(f"  [rank {rank}]         nan/inf: a={n_nan_a} b={n_nan_b} "
+              f"match={'yes' if nan_match else 'NO'}  "
+              f"fail_elems={n_fail} tokens_with_fail={n_diff_per_tok}")
         if not pass_ok and ta.numel() > 0:
             flat = diff.reshape(-1)
             top  = torch.topk(flat, k=min(max_print, flat.numel()))
@@ -911,6 +1335,12 @@ def _run_verify(disp_op, fused_op,
     # weight 循环），不恢复就会变成 0 次迭代 → fused_out_wts 全 0。snapshot
     # 一下 baseline 之前的真值，跑完再 restore。
     _saved_total_recv = disp_op.total_recv.detach().clone()
+    # accumulate=True 走 atomic_fadd，gemm2_out 必须在每次 launch 前清零；
+    # 否则 setup 阶段 _build_gemm2_callable 的 flyc.compile() 已经跑过一次
+    # GEMM2，本次 launch 会把 frag 累加到上次残留值 → gemm2_out = 2*frag →
+    # base_out_tok = 2*fused_out_tok 的根因（fused 路径走 plain store 不受影响）。
+    gemm2_in["gemm2_out"].zero_()
+    torch.cuda.synchronize()
     # 在 baseline_chain 内部 GEMM2 launch 完成后立即 snapshot gemm2_out,
     # 用于排查 base_out_tok=0 的来源 (是 GEMM2 出 0 还是 stage1/3 的 P2P 路径出 0).
     gemm2_launch()
@@ -923,12 +1353,24 @@ def _run_verify(disp_op, fused_op,
         torch.cuda.synchronize()
     _gemm2_out_snap = gemm2_in["gemm2_out"].detach().clone()
     if rank == 0:
+        _g32 = _gemm2_out_snap.float()
+        _g_isnan = torch.isnan(_g32)
+        _g_isinf = torch.isinf(_g32)
+        _g_finite = ~(_g_isnan | _g_isinf)
+        _g_finite_vals = _g32[_g_finite]
+        if _g_finite_vals.numel() == 0:
+            _gmin = _gmax = _gabs = float("nan")
+        else:
+            _gmin = _g_finite_vals.min().item()
+            _gmax = _g_finite_vals.max().item()
+            _gabs = _g_finite_vals.abs().mean().item()
         print(f"  [rank {rank}] post-GEMM2 gemm2_out: "
               f"shape={tuple(_gemm2_out_snap.shape)} "
-              f"min={_gemm2_out_snap.float().min().item():.4e} "
-              f"max={_gemm2_out_snap.float().max().item():.4e} "
-              f"abs_mean={_gemm2_out_snap.float().abs().mean().item():.4e} "
-              f"nz={int((_gemm2_out_snap != 0).sum().item())}", flush=True)
+              f"finite_min={_gmin:.4e} finite_max={_gmax:.4e} "
+              f"finite_abs_mean={_gabs:.4e} "
+              f"nz={int((_gemm2_out_snap != 0).sum().item())} "
+              f"nan_count={int(_g_isnan.sum().item())} "
+              f"inf_count={int(_g_isinf.sum().item())}", flush=True)
     base_tok, base_wts = disp_op.combine(
         gemm2_in["gemm2_out"], None, combine_idx,
     )
@@ -1054,6 +1496,45 @@ def _run_verify(disp_op, fused_op,
                           f"sample={b_row[:4].tolist()} | "
                           f"fused nz={fnz} max={f_row.abs().max().item():.4e} "
                           f"sample={f_row[:4].tolist()}", flush=True)
+            # 直接比 base 单 slot (atomic-8 累加值) 与 fused 8 slots 之和 (Plan B 期望相等):
+            # baseline (intra-rank) 写到 b_tok[0, src_lid] = sum 8 frag (atomic).
+            # fused 写到 raw slot (src_lid * k + s) for s in 0..7 → 这 8 个 slot 的和应等于 baseline 1 slot.
+            # 注意: shmem_comb_inp_tok 是 int16 1D buffer, 真实数据是 bf16, 必须 view 回 bf16 再比较.
+            try:
+                b_bf16 = base_inp_tok_step1.view(torch.bfloat16)
+                f_bf16 = fused_inp_tok_only.view(torch.bfloat16)
+                k_t = cfg_t.num_experts_per_token
+                tot_recv = int(_saved_total_recv.item())
+                log2_mt2 = int(mt_t).bit_length() - 1
+                mask_mt2 = mt_t - 1
+                npes_t2  = cfg_t.world_size
+                # 找几个 dest_pe=self_pe 的 intra-rank t (rank 0 自己 P2P self)
+                cnt = 0
+                for t in range(tot_recv):
+                    enc = int(tis_view[t].item())
+                    if (enc >> log2_mt2) != self_pe:
+                        continue
+                    src_lid = enc & mask_mt2
+                    # baseline 写 view[dest_pe=self_pe, src_lid] = 1 slot
+                    b_row = b_bf16.view(npes_t2, mt_t, hd_t)[self_pe, src_lid].float()
+                    # fused 写 raw slot (src_lid * k + s) for s in 0..k-1, 在 1D buffer 里
+                    # 也即 view (max_recv, hd) → 行 src_lid*k+s. 此处用 view (max_recv, hd) 切.
+                    mr = npes_t2 * mt_t
+                    f_2d = f_bf16.view(mr, hd_t)
+                    slot_vals = [f_2d[src_lid * k_t + s].float() for s in range(k_t)]
+                    f_sum = sum(slot_vals)
+                    diff  = (b_row - f_sum).abs()
+                    print(f"  [rank {rank}] CMP_SLOT t={t} src_lid={src_lid}: "
+                          f"base[0,{src_lid}] max={b_row.abs().max().item():.4e}  "
+                          f"fused_sum(slot[{src_lid*k_t}..{src_lid*k_t+k_t-1}]) "
+                          f"max={f_sum.abs().max().item():.4e}  "
+                          f"diff_max={diff.max().item():.4e}  diff_mean={diff.mean().item():.4e}",
+                          flush=True)
+                    cnt += 1
+                    if cnt >= 4:
+                        break
+            except Exception as _e:
+                print(f"  [rank {rank}] CMP_SLOT err: {_e}", flush=True)
         # 重置后跑完整的 fused (stage1+stage2+stage3) 用于后续 out 对比
         _reset_combine_shmem(disp_op)
         disp_op.total_recv.copy_(_saved_total_recv)
@@ -1076,6 +1557,48 @@ def _run_verify(disp_op, fused_op,
               f"max={base_tok_s.float().max().item():.4e} "
               f"abs_mean={base_tok_s.float().abs().mean().item():.4e} "
               f"nz={int((base_tok_s != 0).sum().item())}", flush=True)
+        print(f"  [rank {rank}] fused_out_tok stats: "
+              f"min={fused_tok_s.float().min().item():.4e} "
+              f"max={fused_tok_s.float().max().item():.4e} "
+              f"abs_mean={fused_tok_s.float().abs().mean().item():.4e} "
+              f"nz={int((fused_tok_s != 0).sum().item())}", flush=True)
+        # P0 诊断：dump fused_gemm2 P2P scatter 后 shmem_comb_inp_tok 内
+        # mt*k=256 slot 各自 nz，找 race 源头。slot_id = src_lid * k + j；
+        # 期望全 256 slot 非零；fail 时部分 slot=0 → 那些 (src_lid, j) 的
+        # fragment 没 land。配合 j 维统计推断是某些 dest_pe 全 miss。
+        _cfg_d = disp_op.cfg
+        _mt_d2  = _cfg_d.max_num_inp_token_per_rank
+        _k_d2   = _cfg_d.num_experts_per_token
+        _hd_d2  = _cfg_d.hidden_dim
+        _post_fused_inp_tok = disp_op.shmem_comb_inp_tok.detach().clone()
+        _slot_view = _post_fused_inp_tok.view(torch.bfloat16).view(_mt_d2 * 8, -1)[:_mt_d2 * _k_d2]
+        _slot_any = (_slot_view != 0).any(dim=-1).cpu().tolist()
+        _slot_nz_cnt = sum(_slot_any)
+        # 按 j 维统计：第 j 维 nz slot 数 = sum_{src_lid} _slot_any[src_lid*k+j]
+        _per_j_nz = [sum(_slot_any[src*_k_d2 + j] for src in range(_mt_d2))
+                     for j in range(_k_d2)]
+        # 列出 src_lid 是否完整接收 8 个 j fragment：sum_{j} slot_any[src*k+j]
+        _per_src_nz = [sum(_slot_any[src*_k_d2 + j] for j in range(_k_d2))
+                       for src in range(_mt_d2)]
+        _full_src = [s for s, v in enumerate(_per_src_nz) if v == _k_d2]
+        _empty_src = [s for s, v in enumerate(_per_src_nz) if v == 0]
+        # P0 关键诊断：dump sorted_token_ids 是否包含所有 32*8=256 (t, j) 对。
+        # 若 sorted 内 valid row 不足 256，说明上游 aiter_sorting 漏了 row → 
+        # fused_gemm2 没处理那些 row → 对应 slot=0。
+        # num_valid_ids[0] 是 aiter 给的 padded-total，包含 padding；
+        # num_valid_ids[1] 是 actual input tokens (= total_recv)。
+        _nv0 = int(gemm2_in["num_valid_ids"][0].item())
+        _nv1 = int(gemm2_in["num_valid_ids"][1].item()) if gemm2_in["num_valid_ids"].numel() >= 2 else -1
+        _sti = gemm2_in["sorted_token_ids"].detach().cpu()
+        _sti_valid = (_sti[:_nv0] >> 24 < _k_d2)  # s_ok = (s < k)
+        _sti_ok = int(_sti_valid.sum().item())
+        print(f"  [rank {rank}] fused stage3 inp_tok: "
+              f"slots_with_data={_slot_nz_cnt}/{_mt_d2 * _k_d2} (mt*k); "
+              f"per-j nz: {_per_j_nz}; "
+              f"full_src({len(_full_src)})={_full_src[:8]}; "
+              f"empty_src({len(_empty_src)})={_empty_src[:8]}; "
+              f"aiter num_valid=[{_nv0},{_nv1}] sti_s_ok={_sti_ok}",
+              flush=True)
         print(f"  [rank {rank}] base_out_wts stats: "
               f"min={base_wts_s.float().min().item():.4e} "
               f"max={base_wts_s.float().max().item():.4e} "
@@ -1112,12 +1635,21 @@ def _run_verify(disp_op, fused_op,
         rank=rank, atol_abs=1e-5, atol_rel=1e-5,
     )
 
-    # 跨卡聚合 pass/fail
+    # 跨卡聚合 pass/fail（rank 维 SUM 出 fail rank 列表帮定位）
     local = torch.tensor([1 if pass_tok else 0, 1 if pass_wts else 0],
                          dtype=torch.int32, device=dev)
     dist.all_reduce(local, op=dist.ReduceOp.MIN)
     all_pass_tok = bool(local[0].item())
     all_pass_wts = bool(local[1].item())
+
+    pass_tok_vec = torch.tensor([1 if pass_tok else 0] * world_size,
+                                dtype=torch.int32, device=dev)
+    pass_tok_vec.zero_(); pass_tok_vec[rank] = (1 if pass_tok else 0)
+    dist.all_reduce(pass_tok_vec, op=dist.ReduceOp.SUM)
+    if rank == 0:
+        fail_ranks = [i for i in range(world_size) if pass_tok_vec[i].item() == 0]
+        if fail_ranks:
+            print(f"  [verify] out_tok FAIL on ranks: {fail_ranks}")
 
     if rank == 0:
         print(f"\n  RESULT (all-reduce min): "
@@ -1164,10 +1696,9 @@ def run_acceptance(rank, world_size, args):
     # FlyDSL FP4 mfma_scale_x128 path 隐式假设：
     #   * tile_k >= 256 （scale layout 一格覆盖 128 fp4 elements，<256 直接全 0）
     #   * inter_dim/model_dim >= 256 且能整除 256
-    #   * accumulate=False（reduce 模式；atomic_fadd 在 mixed fp8/fp4 下被
-    #     lowering 优化掉，gemm2_out 全 0）
-    # 不满足这些约束时不抛错，只是 GEMM2 sile-output 0；为了不再让下次踩坑，
+    # 不满足这些约束时不抛错，只是 GEMM2 silent-output 0；为了不再让下次踩坑，
     # 在 verify/bench 入口直接报错。
+    # accumulate=True/False 不再做硬约束，由 --gemm2-accumulate 控制。
     if args.gemm2_b_dtype == "fp4" or args.gemm2_a_dtype == "fp4":
         if args.tile_k2 < 256:
             raise ValueError(
@@ -1184,13 +1715,19 @@ def run_acceptance(rank, world_size, args):
             )
 
     if rank == 0:
+        _max_recv = world_size * cur_tok
+        _a2_rows  = _max_recv * max(1, k)
+        _valid_m_eff = args.valid_m if args.valid_m is not None else cur_tok * max(1, k)
         print(f"\n{'='*78}")
         print(f"[acceptance] EP={world_size}, bs={cur_tok}, "
               f"h={cfg.hidden_dim}, inter={args.inter_dim}, k={k}, "
               f"epr={cfg.num_experts_per_rank}")
         print(f"  GEMM2: a={args.gemm2_a_dtype}/b={args.gemm2_b_dtype}, "
               f"tile_m2={args.tile_m2}, tile_n2={args.tile_n2}, "
-              f"tile_k2={args.tile_k2}, persist_m={args.persist_m}")
+              f"tile_k2={args.tile_k2}, persist_m={args.persist_m}, "
+              f"accumulate={args.gemm2_accumulate}")
+        print(f"  GEMM2 layout: tokens_in=max_recv={_max_recv}, topk={k}, "
+              f"A2 rows={_a2_rows} (= bs*ep*topk), valid_m={_valid_m_eff}")
         print(f"  bench-op={args.bench_op}, fuse-mode={args.fuse_mode}, "
               f"fused_op_available={HAS_FUSED_OP}")
         if not HAS_FUSED_OP:
@@ -1229,6 +1766,17 @@ def run_acceptance(rank, world_size, args):
     # combine 依赖 disp_op 内部的 shmem_disp_out_* 表, 由 dispatch 写入;
     # 跑一次后这些表保持不变, chain 内 combine 直接读取静态视图.
     if rank == 0:
+        _sm = getattr(args, "sorting", "fixture")
+        _rt = getattr(args, "routing", "random")
+        _hr = int(getattr(args, "gemm2_scale_headroom", 0))
+        print(f"[setup] routing={_rt} sorting={_sm} "
+              f"aiter_backend={_AITER_SORTING_BACKEND}; "
+              f"aiter sorting available = {HAS_AITER_SORTING}; "
+              f"gemm2_scale_headroom={_hr} (e8m0 scale = {127 - _hr}, "
+              f"GEMM2 magnitude × 2^-{2*_hr})")
+        if _sm == "aiter" and not HAS_AITER_SORTING:
+            print(f"[setup] WARNING: --sorting aiter requested but aiter import "
+                  f"failed: {_AITER_SORTING_ERR}; will fail in _build_gemm2_static_inputs.")
         print(f"[setup] running one-shot dispatch to populate routing tables…")
     disp_ret = disp_op.dispatch(inp, wts, scales, idx)
     combine_idx = disp_ret[3]                # shmem_disp_out_idx 视图
@@ -1249,13 +1797,29 @@ def run_acceptance(rank, world_size, args):
             print(f"[setup] dispatch total_recv (rank0) = {valid_recv_for_gemm2}; "
                   "will constrain sorted_token_ids to [0, total_recv) for fused path")
 
+    # 注意 (aiter sorting 时序)：build 必须在 hard-reset *之前* 跑。
+    # aiter 模式下 _build_gemm2_static_inputs 会调一次 moe_sorting_fwd
+    # (做首次 JIT + 占住 buffer)，需要 disp_op.total_recv 仍是 setup
+    # dispatch 写入的真实值；hard-reset 清 total_recv=0 之后跑 aiter，
+    # num_local_tokens 会被读成 0，sorted 全空（仅 buffer 形状有效）。
+    # 实际 chain 内每次 replay 重跑 dispatch 后 _run_aiter_sorting 会
+    # 用 fresh total_recv 重填 sorted_*。
+    gemm2_in = _build_gemm2_static_inputs(
+        rank, world_size, dev, args, cfg,
+        disp_op=disp_op, valid_recv=valid_recv_for_gemm2,
+    )
+
     # ── 方案 A 的 hard-reset: 只清 setup dispatch 留下的 *local* counter
     # (dest_pe_ctr / disp_bar / comb_bar / total_recv / disp_grid_bar),
     # **不要** 清 cross-device shmem buffer (shmem_xdev_bar_mem 用 monotonic
     # cur_flag 模式 mori 自己管理; shmem_comb_inp_* 下次 chain 自然覆盖).
     # 任意 zero shmem_* 会让 mori shmem 内部 cur_flag 跟实际 buffer 值脱节,
     # 表现为 capture 阶段第 1 次 fused gemm2 launch 时 hipErrorInvalidValue.
-    if args.chain_include_dispatch:
+    #
+    # 仅 profile/cudagraph 模式需要（chain 内 dispatch 会重新填这些 counter）。
+    # verify 模式不走 cudagraph、也不会再跑一次 dispatch，hard-reset 会把
+    # total_recv 清成 0 → 后续 combine Stage 1 跑 0 次循环 → 全 0 输出。
+    if args.chain_include_dispatch and args.mode != "verify":
         if rank == 0:
             print(f"[setup] hard-reset disp_op local counters before capture "
                   f"(chain_include_dispatch=True)…")
@@ -1268,10 +1832,8 @@ def run_acceptance(rank, world_size, args):
         disp_op.disp_grid_bar.zero_()
         torch.cuda.synchronize()
         ms.shmem_barrier_all()
-
-    gemm2_in = _build_gemm2_static_inputs(
-        rank, world_size, dev, args, cfg, valid_recv=valid_recv_for_gemm2,
-    )
+    if rank == 0:
+        _dump_gemm2_inputs(args, gemm2_in, gemm2_in["out_dtype"])
     gemm2_launch = _build_gemm2_callable(args, gemm2_in, gemm2_in["out_dtype"])
 
     meta = dict(
@@ -1391,8 +1953,9 @@ def _parse_args():
     )
     # 形状 / 路由
     p.add_argument("--world-size",           type=int, default=8)
-    p.add_argument("--max-tokens",           type=int, default=512,
-                   help="单卡 dispatch 输入 token 数；max_recv = world_size * max_tokens")
+    p.add_argument("--max-tokens",           type=int, default=32,
+                   help="单卡 dispatch 输入 token 数 (bs)；max_recv = world_size * bs。"
+                        "默认 32 对齐生产均衡场景 (bs=32, ep=8, topk=8 → valid_m=bs*topk=256)。")
     p.add_argument("--hidden-dim",           type=int, default=7168,
                    help="GEMM2 输出维度（== combine token 维度 == dispatch token 维度）")
     p.add_argument("--inter-dim",            type=int, default=2048,
@@ -1400,7 +1963,38 @@ def _parse_args():
                         "默认 2048 对齐 production a4w4（参考 ut_per1x32.py: "
                         "model_dim=7168, inter_dim=2048）。")
     p.add_argument("--num-experts-per-rank", type=int, default=32)
-    p.add_argument("--k",                    type=int, default=8)
+    p.add_argument("--k",                    type=int, default=8,
+                   help="MoE top-k：同时驱动 dispatch 路由 topk 和 GEMM2 compile-time "
+                        "topk（A2 行寻址 t*topk+s, output atomic accumulate 跨 s）。")
+    p.add_argument("--valid-m",              type=int, default=None,
+                   help="GEMM2 本卡实际工作量 = 有效 (token, expert_slot) 对数。"
+                        "默认 = bs * topk（均衡路由：每张卡 bs*topk*ep/ep 条 assignment）。"
+                        "上限 = max_recv * topk = bs * topk * ep（worst-case 全部落本卡）。")
+    p.add_argument("--routing",
+                   choices=["random", "uniform", "consec_same_pe", "atomic2_4pe"],
+                   default="random",
+                   help="dispatch 输入 idx 的构造方式："
+                        "random=每 token 在 k 个 PE 随机 expert（默认，保持历史行为）；"
+                        "uniform=确定性循环填充，同 token 的 k 个 expert 跨 k 个 PE，"
+                        "atomic contention=1，dispatch dedup 不触发，对应 production "
+                        "balanced EP routing（精度 verify 推荐用此模式）；"
+                        "consec_same_pe=同 token 的 k 个 expert 是连续 k 个 local_eid，"
+                        "全压同 1 个 dest_pe (atomic-k 累加 worst case)，卡间/卡内均衡。"
+                        "require epr%%k==0 (32/8=4 ✓)；"
+                        "atomic2_4pe=同 token 的 k 个 expert 分布在 *4 个* 不同 PE 上，"
+                        "每 PE 上 k/4=2 个 atomic（atomic-2 中等 contention），dest_pe "
+                        "为 (g%%ws + j_group) mod ws 四连 PE，local_eid 用 g//ws+j 避免"
+                        " lattice 塌缩 → 卡间命中数 = cur_tok*k 完美均衡，卡内每 "
+                        "(PE,local_eid) cell 命中 cur_tok*k/epr 次。"
+                        "require k%%4==0 (8/4=2 ✓) 且 ws>=4 (8 ✓)。")
+    p.add_argument("--sorting", choices=["fixture", "aiter"], default="fixture",
+                   help="sorted_token_ids 的来源："
+                        "fixture=手工 round-robin 拼 (s<<24)|t，跟 dispatch 真实路由"
+                        " 解耦（默认，保持历史行为，atomic contention 是 worst-case "
+                        "全 k）；"
+                        "aiter=每次 chain 在 dispatch 之后用 aiter.moe_sorting_fwd 真实"
+                        " sorting (capture-friendly in-place call)，sorted 内容反映"
+                        " 实际路由，contention 跟 routing/dup 联动。")
     # dispatch / combine
     # NOTE: empirically bn=256 is ~30% faster than bn=80 on combine
     # (27→19us @ bs=256/h=7168/k=8/EP=8) — the small grid was leaving
@@ -1424,12 +2018,24 @@ def _parse_args():
     p.add_argument("--tile-n2",              type=int, default=128)
     p.add_argument("--tile-k2",              type=int, default=256,
                    help="GEMM2 tile_k；FP4 路径必须 >=256")
-    p.add_argument("--persist-m",            type=int, default=4,
+    p.add_argument("--persist-m",            type=int, default=-1,
                    help="moe_gemm2 沿 M 持久化 block 数")
     p.add_argument("--xcd-swizzle",          type=int, default=0,
                    help="moe_gemm2 跨 XCD swizzle 因子（=0 关闭；MI300 推荐 8）")
-    p.add_argument("--gemm2-accumulate",     action="store_true", default=True,
-                   help="GEMM2 epilogue 走 atomic-add（默认 True；fp4 reduce 模式时关掉）")
+    p.add_argument("--gemm2-accumulate",     dest="gemm2_accumulate",
+                   action="store_true", default=True,
+                   help="GEMM2 epilogue 走 atomic-add（默认 True）")
+    p.add_argument("--no-gemm2-accumulate",  dest="gemm2_accumulate",
+                   action="store_false",
+                   help="GEMM2 epilogue 走 plain store 的 reduce 模式（每行独立 slot）")
+    p.add_argument("--gemm2-scale-headroom", type=int, default=0,
+                   help="把 A2/W2 的 e8m0 micro-scale 从 127 降到 127-headroom "
+                        "(每降 1 缩小 2×)。fp4×fp4 random fixture 在 inter_dim=2048 "
+                        "下 GEMM2 输出 ~±4000，经 fp8_direct_cast 的 bf16→fp8 cast "
+                        "会 saturate 到 ±inf → 后续 cast 回 bf16 出 NaN，污染 verify "
+                        "数值对比。verify 时建议 headroom=4 (256× 缩放) → GEMM2 "
+                        "输出 ~±15，完全落在 fp8e4m3 max=±448 安全范围。profile/"
+                        "bench 默认 0 不影响性能数据。")
     # 模式
     p.add_argument("--mode", choices=["profile", "bench", "verify"], default="profile",
                    help="本骨架仅 profile 模式有效")
