@@ -123,7 +123,8 @@ public:
     if (!moduleOp)
       return op->emitError("get_dyn_shared must be inside a gpu.module");
 
-    LLVM::GlobalOp sharedGlobal = getOrCreateDynSharedGlobal(rewriter, moduleOp, loc, addrSpace);
+    LLVM::GlobalOp sharedGlobal =
+        getOrCreateDynSharedGlobal(rewriter, moduleOp, loc, addrSpace, op.getSymNameAttr());
 
     OpBuilder::InsertionGuard guard(rewriter);
     rewriter.setInsertionPoint(op);
@@ -142,21 +143,39 @@ public:
 private:
   static LLVM::GlobalOp getOrCreateDynSharedGlobal(ConversionPatternRewriter &rewriter,
                                                    gpu::GPUModuleOp moduleOp, Location loc,
-                                                   unsigned addrSpace) {
+                                                   unsigned addrSpace,
+                                                   StringAttr requestedName) {
+    // When sym_name is requested we look up by exact name and create a
+    // distinct external [0 x i8] LDS global if missing. Otherwise we
+    // reuse the first existing matching dyn-shared global, falling back
+    // to a freshly generated `__dynamic_shared_<n>` symbol.
     llvm::StringSet<> existingNames;
+    LLVM::GlobalOp firstMatch = nullptr;
     for (auto globalOp : moduleOp.getBody()->getOps<LLVM::GlobalOp>()) {
       existingNames.insert(globalOp.getSymName());
-      if (auto arrayType = dyn_cast<LLVM::LLVMArrayType>(globalOp.getType())) {
-        if (globalOp.getAddrSpace() == addrSpace && arrayType.getNumElements() == 0 &&
-            globalOp.getAlignment().value_or(0) == 1024)
-          return globalOp;
+      if (requestedName && globalOp.getSymName() == requestedName.getValue())
+        return globalOp;
+      if (!requestedName) {
+        if (auto arrayType = dyn_cast<LLVM::LLVMArrayType>(globalOp.getType())) {
+          if (!firstMatch && globalOp.getAddrSpace() == addrSpace &&
+              arrayType.getNumElements() == 0 &&
+              globalOp.getAlignment().value_or(0) == 1024)
+            firstMatch = globalOp;
+        }
       }
     }
+    if (!requestedName && firstMatch)
+      return firstMatch;
 
-    unsigned counter = 0;
-    SmallString<128> symName = SymbolTable::generateSymbolName<128>(
-        "__dynamic_shared_", [&](StringRef candidate) { return existingNames.contains(candidate); },
-        counter);
+    SmallString<128> symName;
+    if (requestedName) {
+      symName.assign(requestedName.getValue());
+    } else {
+      unsigned counter = 0;
+      symName = SymbolTable::generateSymbolName<128>(
+          "__dynamic_shared_",
+          [&](StringRef candidate) { return existingNames.contains(candidate); }, counter);
+    }
 
     OpBuilder::InsertionGuard guard(rewriter);
     rewriter.setInsertionPointToStart(moduleOp.getBody());

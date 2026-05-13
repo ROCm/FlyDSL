@@ -103,4 +103,30 @@ def FlyPromoteRegMemToVectorSSAPass : Pass<"fly-promote-regmem-to-vectorssa"> {
   ];
 }
 
+def FlyAttachLDSAliasScopePass : Pass<"fly-attach-lds-alias-scope", "::mlir::gpu::GPUModuleOp"> {
+  let summary = "Attach alias scope metadata to dyn-shared LDS accesses";
+  let description = [{
+    Walks every external `[0 x i8] addrspace(3)` LLVM global in the
+    `gpu.module` (the dyn-shared LDS bases produced by
+    `fly.get_dyn_shared(sym_name="...")`) and attaches per-symbol
+    `alias_scopes` / `noalias_scopes` metadata to every load, store,
+    and `llvm.amdgcn.raw.ptr.buffer.load.lds` call whose addrspace(3)
+    pointer can be statically traced back to a single global through
+    `addressof / ptrtoint / add / inttoptr / getelementptr`.
+
+    Without this metadata, AMDGPU's `LowerModuleLDS` pass collapses
+    the named dyn-shared globals into one underlying allocation and
+    `SIInsertWaitcnts` then conservatively serialises every cross-name
+    LDS access with `s_waitcnt vmcnt(N)`. The metadata flows through
+    the merge and lets the SI Wait Counter pass treat distinct-named
+    accesses as no-alias, restoring static-LDS-class scheduling.
+
+    Single-global modules are skipped (no benefit).
+  }];
+
+  let dependentDialects = [
+    "LLVM::LLVMDialect"
+  ];
+}
+
 #endif // FLY_PASSES

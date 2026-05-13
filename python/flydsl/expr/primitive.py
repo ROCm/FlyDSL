@@ -999,8 +999,19 @@ def make_ptr(result_type, args, loc=None, ip=None):
 
 
 @traced_op
-def get_dyn_shared(loc=None, ip=None):
-    return fly.get_dyn_shared(loc=loc, ip=ip)
+def get_dyn_shared(sym_name=None, loc=None, ip=None):
+    """Get a base pointer into the kernel's dynamic shared memory.
+
+    If ``sym_name`` is provided the lowering emits a distinct external
+    ``[0 x i8] addrspace(3) align 1024`` global with that exact name.
+    All named bases share the same runtime LDS region (each starts at
+    offset 0 of the dynamic LDS area) but the
+    ``fly-attach-lds-alias-scope`` pass uses the distinct symbols to
+    attach ``alias_scope``/``noalias`` metadata, so AMDGPU's
+    ``SIInsertWaitcnts`` pass treats accesses through different names
+    as no-alias even though ``LowerModuleLDS`` later merges them.
+    """
+    return fly.get_dyn_shared(sym_name=sym_name, loc=loc, ip=ip)
 
 
 @traced_op

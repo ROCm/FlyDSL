@@ -435,7 +435,22 @@ def Fly_MakePtrOp : Fly_Op<"make_ptr", []> {
   let results = (outs Fly_Pointer:$result);
 }
 def Fly_GetDynSharedOp : Fly_Op<"get_dyn_shared", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
-  let arguments = (ins);
+  let summary = "Pointer to the kernel's dynamic shared memory";
+  let description = [{
+    Returns a pointer into the kernel's dynamic shared memory region.
+
+    By default, the lowering reuses a single ``__dynamic_shared_*`` LLVM
+    global for all calls in a kernel. When `sym_name` is provided, the
+    lowering instead emits a distinct external ``[0 x i8]`` LDS global
+    with that exact name. Multiple named bases all alias the same
+    runtime LDS region (each starts at offset 0 of the dynamic LDS
+    area), but their distinct LLVM symbols give the
+    ``fly-attach-lds-alias-scope`` pass the provenance it needs to
+    attach ``alias_scope``/``noalias`` metadata, which lets AMDGPU's SI
+    Wait Counter pass elide defensive ``s_waitcnt vmcnt(N)`` between
+    accesses through different names.
+  }];
+  let arguments = (ins OptionalAttr<StrAttr>:$sym_name);
   let results = (outs Fly_Pointer:$result);
   let assemblyFormat = "`(` `)` attr-dict `:` qualified(type($result))";
 }

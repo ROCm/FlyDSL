@@ -84,6 +84,7 @@ class RocmBackend(BaseBackend):
             "convert-arith-to-llvm",
             "convert-func-to-llvm",
             "reconcile-unrealized-casts",
+            "gpu.module(fly-attach-lds-alias-scope)",
             *(
                 ["ensure-debug-info-scope-on-llvm-func{emission-kind=LineTablesOnly}"]
                 if env.debug.enable_debug_info
