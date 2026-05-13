@@ -198,8 +198,18 @@ if __name__ == "__main__":
     parser.add_argument("--tile_m", type=int, default=256)
     parser.add_argument("--tile_n", type=int, default=256)
     parser.add_argument("--disable_xcd_remap", action="store_true", default=False)
-    parser.add_argument("--num_iters", type=int, default=10)
-    parser.add_argument("--num_warmups", type=int, default=2)
+    parser.add_argument(
+        "--num_iters",
+        type=int,
+        default=100,
+        help="Number of timed iterations. Use 100+ for stable steady-state perf",
+    )
+    parser.add_argument(
+        "--num_warmups",
+        type=int,
+        default=10,
+        help="Warmup iterations (>=10 needed to reach steady state on large shapes)",
+    )
     parser.add_argument(
         "--vs_torch",
         action="store_true",
