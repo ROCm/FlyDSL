@@ -4,6 +4,8 @@ Supports double-buffer (2-stage) and triple-buffer (3-stage) pipelining
 with TDM (Tensor Data Mover) hardware async copy for both A and B tiles.
 """
 
+import functools
+
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
@@ -39,6 +41,7 @@ LDS_PAD_D_BYTES = 16
 _make_tail_plan = make_tail_plan
 
 
+@functools.lru_cache(maxsize=64)
 def compile_wmma_gemm_tdm(
     *,
     M: int = 0,
@@ -60,6 +63,7 @@ def compile_wmma_gemm_tdm(
     inst_prefetch: bool = False,
     wave_specialized_tdm: bool = False,
     expert_sched_mode: bool = True,
+    pipeline_mode: str = "a_streaming",
 ):
     """Compile a WMMA GEMM kernel with TDM async copy and multi-stage buffering.
 
@@ -79,10 +83,20 @@ def compile_wmma_gemm_tdm(
         wave_specialized_tdm: Each wave handles one TDM descriptor direction
                               (wave 0 → A, wave 1 → B, others compute-only).
         expert_sched_mode: Enable AMDGPU expert scheduling mode.
+        pipeline_mode: "a_streaming" (default) — per-wm A streaming + B-frag
+            prefetch + emit_filler + hot_loop_scheduler hints. 
+            "simple" — load all A/B frags per ks, wait, issue
+            all WMMAs and let LLVM schedule. Drops sched_mfma/dsrd hints and
+            emit_filler. 
     """
     _ = (M, N)
     if num_buffers not in (2, 3, 4):
         raise ValueError(f"num_buffers must be 2, 3 or 4, got {num_buffers}")
+    if pipeline_mode not in ("a_streaming", "simple"):
+        raise ValueError(
+            f"pipeline_mode must be 'a_streaming' or 'simple', got {pipeline_mode!r}"
+        )
+    _is_simple = pipeline_mode == "simple"
     if in_dtype not in ("fp16", "bf16"):
         raise ValueError(f"in_dtype must be 'fp16' or 'bf16', got {in_dtype!r}")
     is_f16 = in_dtype == "fp16"
@@ -521,6 +535,61 @@ def compile_wmma_gemm_tdm(
 
             return current_accs
 
+        # --- Simple compute: load-all-then-wmma-all per ks; no A-streaming ---
+        def compute_tile_simple(accs_in, lds_a_idx, lds_b_idx, emit_filler=None, mid_compute_callback=None):
+            """Loads all A/B frags for the current ks, waits, issues all WMMAs 
+            and lets LLVM schedule.
+
+            Drops A-streaming, B-frag prefetch, hot_loop_scheduler hints. Lower
+            instruction-level complexity gives the hardware OOO unit room to
+            overlap ds_read with WMMA.
+
+            mid_compute_callback (if any) is invoked once at the very start to
+            issue TDM loads / L2 prefetch for the next pipeline stage —
+            overlaps with the ks-loop work below.
+            emit_filler is invoked just before the LAST wmma group; matches
+            compute_tile semantics so the same call sites work in both modes.
+            """
+            current_accs = list(accs_in)
+            a_buf, a_bases = _precompute_a_lane_bases(lds_a_idx)
+            b_buf, b_bases = _precompute_b_lane_bases(lds_b_idx)
+
+            if const_expr(mid_compute_callback is not None):
+                mid_compute_callback()
+
+            for ks in range_constexpr(k_wmma_steps):
+                a_frags = [
+                    load_wmma_frag(a_buf, a_bases[wm], ks)
+                    for wm in range_constexpr(wmma_m_rep)
+                ]
+                b_frags = [
+                    load_wmma_frag_tr(b_buf, b_bases[wn], ks)
+                    for wn in range_constexpr(wmma_n_rep)
+                ]
+                rocdl.s_wait_dscnt(0)
+                _is_last_ks = ks == k_wmma_steps - 1
+                for wm in range_constexpr(wmma_m_rep):
+                    for wn in range_constexpr(wmma_n_rep):
+                        _is_very_last = _is_last_ks and (wm == wmma_m_rep - 1) and (wn == wmma_n_rep - 1)
+                        if const_expr(_is_very_last and emit_filler is not None):
+                            emit_filler()
+                        idx = wm * wmma_n_rep + wn
+                        current_accs[idx] = wmma_op(
+                            T.vec(8, T.f32),
+                            b_frags[wn],
+                            a_frags[wm],
+                            current_accs[idx],
+                            signA=False,
+                            signB=False,
+                            modC=0,
+                            reuseA=False,
+                            reuseB=False,
+                        ).result
+            return current_accs
+
+        # Pick which compute_tile implementation to use throughout main/tail.
+        _compute_tile_impl = compute_tile_simple if _is_simple else compute_tile
+
         # --- Scheduling ---
         def hot_loop_scheduler():
             if const_expr(not use_half_streaming_schedule):
@@ -757,12 +826,14 @@ def compile_wmma_gemm_tdm(
                             _ab[0] = _ab[0] + active_adv_i32
                             _l2_prefetch(_k_off)
 
-                        rocdl.sched_barrier(0)
-                        accs_in = compute_tile(
+                        if const_expr(not _is_simple):
+                            rocdl.sched_barrier(0)
+                        accs_in = _compute_tile_impl(
                             accs_in, stages_a_idx[buf_idx], stages_b_idx[buf_idx], mid_compute_callback=_mid_tdm_ws
                         )
                         cur_addr_lo = addr_box[0]
-                        hot_loop_scheduler()
+                        if const_expr(not _is_simple):
+                            hot_loop_scheduler()
 
                     results = yield list(accs_in) + [cur_addr_lo]
 
@@ -800,13 +871,15 @@ def compile_wmma_gemm_tdm(
                             _ab[1][0] = _ab[1][0] + adv_b_i32
                             _l2_prefetch(_k_off)
 
-                        rocdl.sched_barrier(0)
-                        accs_in = compute_tile(
+                        if const_expr(not _is_simple):
+                            rocdl.sched_barrier(0)
+                        accs_in = _compute_tile_impl(
                             accs_in, stages_a_idx[buf_idx], stages_b_idx[buf_idx], mid_compute_callback=_mid_tdm_nws
                         )
                         cur_lo_a = addr_boxes[0][0]
                         cur_lo_b = addr_boxes[1][0]
-                        hot_loop_scheduler()
+                        if const_expr(not _is_simple):
+                            hot_loop_scheduler()
 
                     results = yield list(accs_in) + [cur_lo_a, cur_lo_b]
 
@@ -828,13 +901,13 @@ def compile_wmma_gemm_tdm(
                 if const_expr(_tail_had_load):
                     pipeline_fence(outstanding=0, use_cluster=use_cluster)
                 if const_expr(use_tdm_store):
-                    accs = compute_tile(accs, stages_a_idx[_compute_stage], stages_b_idx[_compute_stage])
+                    accs = _compute_tile_impl(accs, stages_a_idx[_compute_stage], stages_b_idx[_compute_stage])
                 else:
 
                     def _emit_epi_addrs():
                         epi_addrs_box[0] = epilogue_prepare_addrs()
 
-                    accs = compute_tile(
+                    accs = _compute_tile_impl(
                         accs, stages_a_idx[_compute_stage], stages_b_idx[_compute_stage], emit_filler=_emit_epi_addrs
                     )
             else:
@@ -869,11 +942,13 @@ def compile_wmma_gemm_tdm(
 
                         _tail_mid_cb = _tail_mid_nws
 
-                rocdl.sched_barrier(0)
-                accs = compute_tile(
+                if const_expr(not _is_simple):
+                    rocdl.sched_barrier(0)
+                accs = _compute_tile_impl(
                     accs, stages_a_idx[_compute_stage], stages_b_idx[_compute_stage], mid_compute_callback=_tail_mid_cb
                 )
-                hot_loop_scheduler()
+                if const_expr(not _is_simple):
+                    hot_loop_scheduler()
 
                 if const_expr(_load_stage is not None):
                     if const_expr(wave_specialized_tdm):
@@ -913,6 +988,7 @@ def compile_wmma_gemm_tdm(
         wave_specialized_tdm,
         inst_prefetch,
         expert_sched_mode,
+        pipeline_mode,
     )
 
     @flyc.jit
@@ -953,13 +1029,13 @@ def compile_wmma_gemm_tdm(
             cluster=cluster_arg,
         )
 
-        llvm_opts = {}
-        if const_expr(expert_sched_mode):
-            llvm_opts["amdgpu-expert-scheduling-mode"] = True
-        if const_expr(inst_prefetch):
-            llvm_opts["amdgpu-inst-prefetch-distance"] = 8
-        if const_expr(llvm_opts):
-            launch_wmma_gemm_tdm.compile_hints["llvm_options"] = llvm_opts
+    llvm_opts = {}
+    if expert_sched_mode:
+        llvm_opts["amdgpu-expert-scheduling-mode"] = True
+    if inst_prefetch:
+        llvm_opts["amdgpu-inst-prefetch-distance"] = 8
+    if llvm_opts:
+        launch_wmma_gemm_tdm.compile_hints["llvm_options"] = llvm_opts
 
     return launch_wmma_gemm_tdm
 
