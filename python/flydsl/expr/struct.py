@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2025 FlyDSL Project Contributors
+# Copyright (c) 2026 FlyDSL Project Contributors
 
 from __future__ import annotations
 
@@ -29,6 +29,7 @@ __all__ = [
     "Array",
     "Align",
     "Storage",
+    "Arena",
 ]
 
 
@@ -63,7 +64,13 @@ def _display_name(schema: type) -> str:
     return getattr(schema, "__dsl_display_name__", getattr(schema, "__name__", repr(schema)))
 
 
-_RESERVED_FIELD_NAMES = frozenset({"peek", "poke", "replace"})
+_RESERVED_FIELD_NAMES = frozenset(
+    {
+        "replace",  # used by Struct
+        "peek",  # used by Storage
+        "poke",  # used by Storage
+    }
+)
 
 
 def _validate_field_name(name: str, context: str):
@@ -578,6 +585,7 @@ class Storage:
     """Typed memory view: ``Storage[T]`` wraps an ``i8`` pointer for Storable ``T``.
 
     - ``._ptr`` — underlying i8* pointer
+    - ``._target_type`` — the Storable type `T`
     - ``.peek()`` — calls ``T.__peek_from_ptr__(ptr)``
     - ``.poke(value)`` — calls ``T.__poke_into_ptr__(ptr, value)``
     - For composite T: attribute access (``storage.field_name``) returns ``Storage[FieldType]``
@@ -636,3 +644,48 @@ class Storage:
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
+
+
+class Arena:
+    DEFAULT_BASE_ALIGNMENT = 16
+
+    def __init__(self, base_alignment: int = DEFAULT_BASE_ALIGNMENT):
+        self._offset = 0
+        self._base_alignment = base_alignment
+
+    @property
+    def base_ptr(self):
+        raise NotImplementedError
+
+    @property
+    def allocated_bytes(self) -> int:
+        return self._offset
+
+    def _bump(self, nbytes: int, align: int) -> int:
+        offset = _align_up(self._offset, align)
+        self._offset = offset + nbytes
+        return offset
+
+    def allocate(self, storable_or_int, alignment=None):
+        """Allocate a Storable type or raw bytes, returning ``Storage[T]``.
+
+        - ``allocate(StorableType)`` — allocate by storable layout, return ``Storage[StorableType]``
+        - ``allocate(N: int)`` — allocate N raw bytes, return ``Storage[Array[UInt8, N]]``
+        """
+        if isinstance(storable_or_int, int):
+            from .numeric import Uint8
+
+            nbytes = storable_or_int
+            if nbytes <= 0:
+                raise ValueError(f"allocate size must be > 0, got {nbytes}")
+            align = alignment if alignment is not None else self._base_alignment
+            offset = self._bump(nbytes, align)
+            base = add_offset(self.base_ptr, offset)
+            return Storage[Array[Uint8, nbytes]](base)
+        else:
+            storable = storable_or_int
+            nbytes = dsl_size_of(storable)
+            align = dsl_align_of(storable) if alignment is None else max(dsl_align_of(storable), alignment)
+            offset = self._bump(nbytes, align)
+            base = add_offset(self.base_ptr, offset)
+            return Storage[storable](base)

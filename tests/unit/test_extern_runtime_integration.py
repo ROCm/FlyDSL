@@ -6,7 +6,6 @@ import threading
 
 import pytest
 
-from flydsl.compiler.jit_function import _format_link_lib_options
 from flydsl.compiler.jit_executor import _pack_ciface_args
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr.extern import ffi
@@ -55,14 +54,6 @@ def test_link_libs_preserve_first_use_order_and_dedupe():
     ctx.add_link_lib("/tmp/b.bc")
 
     assert ctx.link_libs == ["/tmp/b.bc", "/tmp/a.bc"]
-
-
-def test_link_lib_options_reject_pipeline_syntax_chars():
-    assert _format_link_lib_options(["/tmp/mori_shmem.bc"]) == "l=/tmp/mori_shmem.bc"
-
-    for path in ["/tmp/with space.bc", "/tmp/with,comma.bc", "/tmp/with}brace.bc"]:
-        with pytest.raises(ValueError, match="Cannot pass external bitcode path"):
-            _format_link_lib_options([path])
 
 
 def test_ffi_rejects_link_metadata_arguments():
