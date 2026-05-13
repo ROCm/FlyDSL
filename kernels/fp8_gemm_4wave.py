@@ -6,12 +6,11 @@
 Algorithm derived from HipKittens FP8_4wave
 (https://github.com/HazyResearch/HipKittens/blob/7782744ba1fd259a377a99e2ea8f71384cc80e55/kernels/gemm/fp8fp32/FP8_4wave/4_wave.cu#L1).
 
-Global IO, scale loads, and bf16 stores go through the layout API
-(``fx.rocdl.make_buffer_tensor`` + ``fx.copy`` with ``BufferCopyLDS128b``
-/ ``BufferCopy{16,32,128}b``). MFMAs use ``fly.mma_atom_call_ssa`` so
-the chained Vec(4, f32) accumulator stays on AGPR. The XOR swizzle and
-the 8-buffer LDS pipeline ping-pong are kept as direct arithmetic to
-preserve the original kernel's interleaved-cluster scheduling.
+Global IO, scale loads, bf16 stores, and the per-atom MFMA all go
+through the layout API (``fx.rocdl.make_buffer_tensor`` + ``fx.copy``
++ ``fx.gemm``). The XOR swizzle and the 8-buffer LDS pipeline are
+kept as direct arithmetic to preserve the kernel's interleaved
+cluster scheduling.
 
 LDS storage uses 8 named ``fx.get_dyn_shared`` bases carved into one
 dyn-shared region; the ``fly-attach-lds-alias-scope`` MLIR pass
@@ -60,8 +59,7 @@ def _xcd_swizzle(num_pid_m, num_pid_n):
 
 
 def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int = 256, use_xcd_remap: bool = True):
-    # MFMA atom is 16x16x128; 4 waves in a 2x2 config require BLOCK >= 64.
-    BLOCK_K = 128
+    BLOCK_K = 128  # MFMA_Scale 16x16x128 atom; 4-wave 2x2 layout needs BLOCK >= 64.
     LDS_BLOCK_M = BLOCK_M // 2
     LDS_BLOCK_N = BLOCK_N // 2
     assert BLOCK_M >= 64 and BLOCK_N >= 64
@@ -69,7 +67,7 @@ def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int
 
     N_BLOCKS = N // BLOCK_N
     K_ITERS = K // BLOCK_K
-    # Number of 16-row 16x128 tiles per wave per A/B partition.
+    # 16-row 16x128 atom tiles per wave per A/B partition.
     N_TILES_A = BLOCK_M // 4 // 16
     N_TILES_B = BLOCK_N // 4 // 16
     N_ACCUMS = N_TILES_A * N_TILES_B
@@ -80,12 +78,10 @@ def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int
     a_lds_size = LDS_BLOCK_M * BLOCK_K
     b_lds_size = LDS_BLOCK_N * BLOCK_K
 
-    # 8 disjoint sub-buffers carved out of a single dyn-shared LDS region:
-    #   A_lds_cur_{0,1}, A_lds_next_{0,1}, B_lds_cur_{0,1}, B_lds_next_{0,1}.
-    # ``fx.get_dyn_shared(sym_name=...)`` emits one external [0 x i8]
-    # addrspace(3) global per name; ``fly-attach-lds-alias-scope``
-    # gives each global its own alias scope so the AMDGPU SI Wait
-    # Counter pass treats cross-name accesses as no-alias.
+    # 8 disjoint sub-buffers within one dyn-shared region. Each named
+    # ``fx.get_dyn_shared`` emits a distinct LDS global so the
+    # ``fly-attach-lds-alias-scope`` pass can give it its own alias
+    # scope.
     _LDS_SUBBUFS = [
         ("A_lds_cur_0", 0 * a_lds_size),
         ("A_lds_cur_1", 1 * a_lds_size),
@@ -113,10 +109,6 @@ def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int
         _shared_f8_ptr_ty = fx.PointerType.get(F8_IR_t, _AS_SHARED, 512)
         _shared_i32_ptr_ty = fx.PointerType.get(fx.T.i32(), _AS_SHARED, 512)
 
-        # One ptrtoint per named base; per-access offsets are added in i32
-        # before ``fx.inttoptr``. ``fly-attach-lds-alias-scope`` traces
-        # each access back to its base symbol and tags loads / stores /
-        # buffer_load_lds with the corresponding alias scope.
         _lds_int = {
             name: fx.ptrtoint(fx.get_dyn_shared(sym_name=name))
             for name, _ in _LDS_SUBBUFS
@@ -143,9 +135,9 @@ def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int
         B0_gl_offset = (tile_j * BLOCK_N) * K
         B1_gl_offset = (tile_j * BLOCK_N + LDS_BLOCK_N) * K
 
-        # A/B come in as torch.int8 (PyTorch fp8 view restriction); recast
-        # the buffer-desc pointer's element type to fp8 so typed copy
-        # atoms (BufferCopyLDS128b) accept them.
+        # A/B arrive as torch.int8 (PyTorch fp8 view limitation); recast
+        # the buffer-desc element type to fp8 so BufferCopyLDS128b takes
+        # them.
         def _make_fp8_buf_tensor(arg_i8):
             t_i8 = fx.rocdl.make_buffer_tensor(arg_i8)
             iter_i8 = fx.get_iter(t_i8)
@@ -168,7 +160,7 @@ def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int
         sa_div = fx.logical_divide(gSA, fx.make_layout(1, 1))
         sb_div = fx.logical_divide(gSB, fx.make_layout(1, 1))
 
-        # XOR bits 4..6 of the tile-local linear offset with bits 8..10.
+        # XOR bits[4..6] of the tile-local linear offset with bits[8..10].
         def _swizzle_128(row, col):
             offset = row * BLOCK_K + col
             swz = ((offset % (16 * BLOCK_K)) >> 8) << 4
@@ -196,8 +188,8 @@ def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int
                 lds_swz.append(swz)
             return lds_swz
 
-        # G->LDS atom: 128 bits per thread = 16 fp8 elements. The atom
-        # state carries the runtime ``soffset`` set to ``k_offset``.
+        # 128 bits per thread = 16 fp8 elements; soffset carries the
+        # runtime k offset.
         g2lds_atom = fx.make_copy_atom(fx.rocdl.BufferCopyLDS128b(), 128)
 
         def _lds_dst_at(name, byte_offset_runtime):
@@ -221,8 +213,8 @@ def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int
         def _pack_i32x4_i32x8(lo, hi):
             return lo.shuffle(hi, list(range(8)))
 
-        # 16 fp8 == 4 i32; load via i32-typed ptr to sidestep the missing
-        # LLVM vector type for vector<16xf8>.
+        # 16 fp8 == 4 i32; load as i32x4 because LLVM has no
+        # vector<16xf8>.
         def _vec_load_lds_i32x4(name, fp8_elem_offset):
             off = _lds_int[name] + fx.Int32(_lds_off[name] + fp8_elem_offset)
             ptr = fx.inttoptr(_shared_i32_ptr_ty, off)
@@ -247,9 +239,9 @@ def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int
         def _c_idx(i, j):
             return i * N_TILES_B + j
 
-        # The C++ AddressSpace enum prepends Generic=0, so the Python
-        # AddressSpace.Register value (2) maps to Shared on the C++ side.
-        # Pass the C++ integer (3) directly to MemRefType.get.
+        # C++ AddressSpace enum prepends Generic=0; pass the C++ index
+        # (3 = Register) directly to MemRefType.get to avoid the
+        # Python AddressSpace.Register (=2) being read as Shared.
         _AS_REG = 3
         scale_atom_4 = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), fx.Float32)
         scale_atom_1 = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Float32)
@@ -296,31 +288,25 @@ def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int
 
         mma_atom = fx.make_mma_atom(fx.rocdl.cdna4.MFMA_Scale(16, 16, 128, fx.Float8E4M3FN))
 
-        # All MFMAs go through ``fx.gemm``. Each call spills the Vec
-        # operands into register memref fragments (i32x8 for A/B,
-        # f32x4 for the accumulator) and pulls the accumulator back
-        # out; ``fly-convert-atom-call-to-ssa-form`` +
-        # ``fly-promote-regmem-to-vectorssa`` elide the alloca /
-        # store / load round trip and leave a plain
-        # ``llvm.amdgcn.mfma.scale.f32.16x16x128`` call chained on
-        # ``<4 x float>`` SSA values, which ISel maps to AGPR.
-        a_atom_i32_elems = 8
-        b_atom_i32_elems = 8
-        c_atom_f32_elems = 4
-        a_reg_ty = fx.MemRefType.get(fx.T.i32(), fx.LayoutType.get(a_atom_i32_elems, 1), _AS_REG)
-        b_reg_ty = fx.MemRefType.get(fx.T.i32(), fx.LayoutType.get(b_atom_i32_elems, 1), _AS_REG)
-        c_reg_ty = fx.MemRefType.get(fx.T.f32(), fx.LayoutType.get(c_atom_f32_elems, 1), _AS_REG)
-
-        # Single-atom tiled_mma over the 4-wave 2x2 layout in (M, N).
+        # MFMA goes through fx.gemm. The Vec operands are spilled into
+        # register-memref fragments around each call; the alloca /
+        # store / load round trip is folded away by
+        # ``fly-convert-atom-call-to-ssa-form`` +
+        # ``fly-promote-regmem-to-vectorssa``, leaving a plain
+        # ``llvm.amdgcn.mfma.scale.f32.16x16x128`` chained on
+        # ``<4 x float>`` SSA so ISel keeps the accumulator on AGPR.
+        a_reg_ty = fx.MemRefType.get(fx.T.i32(), fx.LayoutType.get(8, 1), _AS_REG)
+        b_reg_ty = fx.MemRefType.get(fx.T.i32(), fx.LayoutType.get(8, 1), _AS_REG)
+        c_reg_ty = fx.MemRefType.get(fx.T.f32(), fx.LayoutType.get(4, 1), _AS_REG)
         tiled_mma_single = fx.make_tiled_mma(
             mma_atom,
             fx.make_layout((2, 2, 1), (1, 2, 0)),
         )
 
         def _mfma(a_vec, b_vec, c_vec):
-            a_mem = fx.memref_alloca(a_reg_ty, fx.make_layout(a_atom_i32_elems, 1))
-            b_mem = fx.memref_alloca(b_reg_ty, fx.make_layout(b_atom_i32_elems, 1))
-            c_mem = fx.memref_alloca(c_reg_ty, fx.make_layout(c_atom_f32_elems, 1))
+            a_mem = fx.memref_alloca(a_reg_ty, fx.make_layout(8, 1))
+            b_mem = fx.memref_alloca(b_reg_ty, fx.make_layout(8, 1))
+            c_mem = fx.memref_alloca(c_reg_ty, fx.make_layout(4, 1))
             fx.memref_store_vec(a_vec, a_mem)
             fx.memref_store_vec(b_vec, b_mem)
             fx.memref_store_vec(c_vec, c_mem)
@@ -344,7 +330,7 @@ def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int
             return c
 
         def _interleaved_cluster(lds_dst, gl_src, k_offset, gl_offsets, wave_idx, lds_src, n_tiles_lds, a, b, c):
-            # 64x64 output via 4x4 MFMAs, with per-tile G→LDS and LDS→reg
+            # 4x4 MFMAs over 64x64, with per-tile G->LDS and LDS->reg
             # loads interleaved between MFMAs to hide latency.
             rt_dst = []
 
