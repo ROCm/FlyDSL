@@ -192,6 +192,12 @@ def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int
         # runtime k offset.
         g2lds_atom = fx.make_copy_atom(fx.rocdl.BufferCopyLDS128b(), 128)
 
+        # Routed through ptrtoint + add + inttoptr instead of the
+        # natural fx.add_offset+fx.recast_iter chain: empirically the
+        # natural route compiles ~5-9% slower on BLOCK=256 shapes
+        # (probably because the extra int_tuple / recast_iter ops
+        # survive canonicalization and disrupt the AMDGPU back-end's
+        # common-base + offset pattern matching).
         def _lds_dst_at(name, byte_offset_runtime):
             off = _lds_int[name] + fx.Int32(_lds_off[name] + byte_offset_runtime)
             ptr = fx.inttoptr(_shared_f8_ptr_ty, off)
