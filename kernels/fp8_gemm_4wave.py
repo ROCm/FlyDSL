@@ -34,20 +34,29 @@ def _min(a, b):
     return arith.select(a < b, a, b)
 
 
-def preshuffle_b(b_t):
-    """Permute a row-major ``B_T`` (shape ``(N, K)``, K-contiguous) into
-    the per-K-slab DRAM layout consumed by ``compile_fp8_gemm`` when
-    ``b_preshuffled=True``.
+def _preshuffle_2d(t):
+    """K-major outermost preshuffle for a row-major ``(rows, K)`` tensor.
 
-    Output is K-major outermost: shape ``(K//128, N//16, 16, 128)``,
-    so all N rows of one 128-K-col atom slab live in a contiguous
-    ``N * 128`` byte block. The per-thread row coord then walks the
-    inner ``(N//16, 16)`` split at 2 KB / 128 B strides instead of
-    the row-major ``K``-byte stride.
+    Output shape ``(K//128, rows//16, 16, 128)`` is K-major outermost so
+    every 128-K-col atom slab of ``rows * 128`` bytes lives contiguously.
     """
-    n, k = b_t.shape[-2:]
-    assert n % 16 == 0 and k % 128 == 0, f"need N%16==0 and K%128==0, got N={n} K={k}"
-    return b_t.reshape(n // 16, 16, k // 128, 128).permute(2, 0, 1, 3).contiguous()
+    rows, k = t.shape[-2:]
+    assert rows % 16 == 0 and k % 128 == 0, f"need rows%16==0 and K%128==0, got rows={rows} K={k}"
+    return t.reshape(rows // 16, 16, k // 128, 128).permute(2, 0, 1, 3).contiguous()
+
+
+def preshuffle_a(a):
+    """Permute row-major ``A`` ``(M, K)`` into the layout used when
+    ``a_preshuffled=True``. Same K-major outermost packing as
+    :func:`preshuffle_b`."""
+    return _preshuffle_2d(a)
+
+
+def preshuffle_b(b_t):
+    """Permute row-major ``B_T`` ``(N, K)`` into the layout used when
+    ``b_preshuffled=True``. Same K-major outermost packing as
+    :func:`preshuffle_a`."""
+    return _preshuffle_2d(b_t)
 
 
 def _xcd_swizzle(num_pid_m, num_pid_n):
@@ -82,15 +91,16 @@ def compile_fp8_gemm(
     BLOCK_M: int = 256,
     BLOCK_N: int = 256,
     use_xcd_remap: bool = True,
+    a_preshuffled: bool = False,
     b_preshuffled: bool = False,
 ):
     """4-wave FP8 GEMM kernel compile entry point.
 
-    When ``b_preshuffled`` is True, ``B_T`` is assumed to be already
-    permuted into per-MFMA-atom (16 N rows x 128 K cols = 2 KB) DRAM
-    blocks. The host-side helper :func:`preshuffle_b` performs this
-    permutation offline. LDS layout, MFMA operand layout and wave
-    assignment are unchanged.
+    When ``a_preshuffled`` / ``b_preshuffled`` is True, the matching
+    operand is assumed to be already permuted by
+    :func:`preshuffle_a` / :func:`preshuffle_b` into a K-major
+    outermost layout (``(K//128, rows//16, 16, 128)``). LDS layout,
+    MFMA operand layout and wave assignment are unchanged.
     """
     BLOCK_K = 128  # MFMA_Scale 16x16x128 atom; 4-wave 2x2 layout needs BLOCK >= 64.
     LDS_BLOCK_M = BLOCK_M // 2
@@ -163,19 +173,25 @@ def compile_fp8_gemm(
 
         wave_i = wave_id // 2
         wave_j = wave_id % 2
-        A0_gl_offset = (tile_i * BLOCK_M) * K
-        A1_gl_offset = (tile_i * BLOCK_M + LDS_BLOCK_M) * K
+        # K-major preshuffle: tile's slot in k_outer=0 slab is
+        # (tile_row // 16) * 2048 = tile_row * 128; the per-K-iter step
+        # then jumps to the next ``rows * BLOCK_K`` byte slab.
+        if const_expr(a_preshuffled):
+            A0_gl_offset = (tile_i * BLOCK_M) * BLOCK_K
+            A1_gl_offset = (tile_i * BLOCK_M + LDS_BLOCK_M) * BLOCK_K
+            A_K_STEP = M * BLOCK_K
+        else:
+            A0_gl_offset = (tile_i * BLOCK_M) * K
+            A1_gl_offset = (tile_i * BLOCK_M + LDS_BLOCK_M) * K
+            A_K_STEP = BLOCK_K
         if const_expr(b_preshuffled):
-            # K-major preshuffle: tile_j's slot in k_outer=0 slab is
-            # (tile_j * BLOCK_N // 16) * 2048 = (tile_j * BLOCK_N) * 128.
             B0_gl_offset = (tile_j * BLOCK_N) * BLOCK_K
             B1_gl_offset = (tile_j * BLOCK_N + LDS_BLOCK_N) * BLOCK_K
-            B_K_STEP = N * BLOCK_K  # one K-atom slab forward
+            B_K_STEP = N * BLOCK_K
         else:
             B0_gl_offset = (tile_j * BLOCK_N) * K
             B1_gl_offset = (tile_j * BLOCK_N + LDS_BLOCK_N) * K
             B_K_STEP = BLOCK_K
-        A_K_STEP = BLOCK_K
 
         # A/B arrive as torch.int8 (PyTorch fp8 view limitation); recast
         # the buffer-desc element type to fp8 so BufferCopyLDS128b takes
@@ -214,26 +230,29 @@ def compile_fp8_gemm(
         _lds_swz_layout = fx.make_composed_layout(
             fx.make_layout(_swz_shape, (BLOCK_K, 1)), _coord_swz
         )
-        _gl_swz_layout_a = fx.make_composed_layout(
-            fx.make_layout(_swz_shape, (K, 1)), _coord_swz
-        )
-        if const_expr(b_preshuffled):
-            # Preshuffled B (K-major outermost): per K_iter all N rows of
-            # one K atom (= ``N * BLOCK_K`` bytes) live in a contiguous
-            # slab; within the slab, ``(n_outer, n_inner, k_inner)`` is
-            # row-major. The k_outer step is fed via ``soffset``
-            # (``k * N * BLOCK_K``); the per-thread row coord splits
-            # into ``(n_inner=16, n_outer)`` with strides ``(128, 2048)``
-            # so 8 row_parts span only 16 KB vs ~64 KB in row-major.
-            _gl_swz_layout_b = fx.make_composed_layout(
+        # Preshuffled (K-major outermost): per K_iter all rows of one K
+        # atom (= ``rows * BLOCK_K`` bytes) live in a contiguous slab;
+        # within the slab, ``(outer, inner, k_inner)`` is row-major. The
+        # k_outer step is fed via ``soffset`` (``k * rows * BLOCK_K``).
+        def _preshuffle_layout():
+            return fx.make_composed_layout(
                 fx.make_layout(
                     ((16, LDS_BLOCK_M // 16), BLOCK_K),
                     ((BLOCK_K, 16 * BLOCK_K), 1),
                 ),
                 _coord_swz,
             )
-        else:
-            _gl_swz_layout_b = _gl_swz_layout_a
+
+        _gl_swz_layout_a = (
+            _preshuffle_layout()
+            if const_expr(a_preshuffled)
+            else fx.make_composed_layout(fx.make_layout(_swz_shape, (K, 1)), _coord_swz)
+        )
+        _gl_swz_layout_b = (
+            _preshuffle_layout()
+            if const_expr(b_preshuffled)
+            else fx.make_composed_layout(fx.make_layout(_swz_shape, (K, 1)), _coord_swz)
+        )
 
         def _compute_global_swizzle(layout):
             offsets = []
