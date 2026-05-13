@@ -12,6 +12,14 @@ Global IO, scale loads, and bf16 stores go through the layout API
 the chained Vec(4, f32) accumulator stays on AGPR. The XOR swizzle and
 the 8-buffer LDS pipeline ping-pong are kept as direct arithmetic to
 preserve the original kernel's interleaved-cluster scheduling.
+
+Optional K-major operand preshuffle. ``compile_fp8_gemm(..., a_preshuffled=True)``
+and ``b_preshuffled=True`` switch the per-thread DRAM access for that
+operand to a K-major outermost layout (each K atom slab of
+``rows * 128`` bytes contiguous). The host-side helpers
+:func:`preshuffle_a` / :func:`preshuffle_b` perform the offline
+permute. LDS layout, MFMA fragment shape, and wave assignment are
+unchanged.
 """
 
 import flydsl.compiler as flyc
@@ -25,6 +33,31 @@ from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, const_expr, range_constexpr
 from flydsl.expr.typing import Vector as Vec
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
+
+
+def _preshuffle_2d(t):
+    """K-major outermost preshuffle for a row-major ``(rows, K)`` tensor.
+
+    Output shape ``(K//128, rows//16, 16, 128)`` is K-major outermost so
+    every 128-K-col atom slab of ``rows * 128`` bytes lives contiguously.
+    """
+    rows, k = t.shape[-2:]
+    assert rows % 16 == 0 and k % 128 == 0, f"need rows%16==0 and K%128==0, got rows={rows} K={k}"
+    return t.reshape(rows // 16, 16, k // 128, 128).permute(2, 0, 1, 3).contiguous()
+
+
+def preshuffle_a(a):
+    """Permute row-major ``A`` ``(M, K)`` into the layout consumed when
+    ``compile_fp8_gemm(..., a_preshuffled=True)``. K-major outermost
+    (each K atom slab = ``M * 128`` byte contig)."""
+    return _preshuffle_2d(a)
+
+
+def preshuffle_b(b_t):
+    """Permute row-major ``B_T`` ``(N, K)`` into the layout consumed when
+    ``compile_fp8_gemm(..., b_preshuffled=True)``. K-major outermost
+    (each K atom slab = ``N * 128`` byte contig)."""
+    return _preshuffle_2d(b_t)
 
 
 def _divmod(a, b):
@@ -59,7 +92,17 @@ def _xcd_swizzle(num_pid_m, num_pid_n):
     return (pid_m, pid_n)
 
 
-def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int = 256, use_xcd_remap: bool = True):
+def compile_fp8_gemm(
+    *,
+    M: int,
+    N: int,
+    K: int,
+    BLOCK_M: int = 256,
+    BLOCK_N: int = 256,
+    use_xcd_remap: bool = True,
+    a_preshuffled: bool = False,
+    b_preshuffled: bool = False,
+):
     # MFMA atom is 16x16x128; 4 waves in a 2x2 config require BLOCK >= 64.
     BLOCK_K = 128
     LDS_BLOCK_M = BLOCK_M // 2
@@ -134,10 +177,25 @@ def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int
 
         wave_i = wave_id // 2
         wave_j = wave_id % 2
-        A0_gl_offset = (tile_i * BLOCK_M) * K
-        A1_gl_offset = (tile_i * BLOCK_M + LDS_BLOCK_M) * K
-        B0_gl_offset = (tile_j * BLOCK_N) * K
-        B1_gl_offset = (tile_j * BLOCK_N + LDS_BLOCK_N) * K
+        # K-major preshuffle: tile_row's slot in k_outer=0 slab is
+        # ``(tile_row // 16) * 2048 = tile_row * BLOCK_K``; per-K-iter
+        # step jumps to next ``rows * BLOCK_K`` byte slab.
+        if const_expr(a_preshuffled):
+            A0_gl_offset = (tile_i * BLOCK_M) * BLOCK_K
+            A1_gl_offset = (tile_i * BLOCK_M + LDS_BLOCK_M) * BLOCK_K
+            A_K_STEP = M * BLOCK_K
+        else:
+            A0_gl_offset = (tile_i * BLOCK_M) * K
+            A1_gl_offset = (tile_i * BLOCK_M + LDS_BLOCK_M) * K
+            A_K_STEP = BLOCK_K
+        if const_expr(b_preshuffled):
+            B0_gl_offset = (tile_j * BLOCK_N) * BLOCK_K
+            B1_gl_offset = (tile_j * BLOCK_N + LDS_BLOCK_N) * BLOCK_K
+            B_K_STEP = N * BLOCK_K
+        else:
+            B0_gl_offset = (tile_j * BLOCK_N) * K
+            B1_gl_offset = (tile_j * BLOCK_N + LDS_BLOCK_N) * K
+            B_K_STEP = BLOCK_K
 
         # A/B come in as torch.int8 (PyTorch fp8 view restriction); recast
         # the buffer-desc pointer's element type to fp8 so typed copy
@@ -171,13 +229,19 @@ def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int
             swizzled = offset ^ swz
             return swizzled // BLOCK_K, swizzled % BLOCK_K
 
-        def _compute_global_swizzle():
+        def _compute_global_swizzle(preshuffled):
+            # Row-major: ``r * K + c``. Preshuffled: same swizzled (r, c)
+            # but linearised with the K-major slab layout
+            # ``(r // 16) * 2048 + (r % 16) * 128 + c``.
             offsets = []
             for round in range_constexpr(max(N_TILES_A, N_TILES_B)):
                 row = lane_id // 8 + wave_id * 8 + round * 32
                 col = (lane_id % 8) * 16
                 r, c = _swizzle_128(row, col)
-                offsets.append(r * K + c)
+                if const_expr(preshuffled):
+                    offsets.append((r // 16) * (16 * BLOCK_K) + (r % 16) * BLOCK_K + c)
+                else:
+                    offsets.append(r * K + c)
             return offsets
 
         def _compute_lds_swizzle(wave_idx, n_tiles):
@@ -396,18 +460,19 @@ def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int
         c10_frag = [RT_C_i] * N_ACCUMS
         c11_frag = [RT_C_i] * N_ACCUMS
 
-        global_offsets = _compute_global_swizzle()
+        gl_off_a = _compute_global_swizzle(a_preshuffled)
+        gl_off_b = _compute_global_swizzle(b_preshuffled)
 
         # Prologue: 8-buffer LDS pipeline pre-fill.
-        _load_lds(ga_div, a_cur0, A0_gl_offset + 0 * BLOCK_K, global_offsets, N_TILES_A)
-        _load_lds(gb_div, b_cur0, B0_gl_offset + 0 * BLOCK_K, global_offsets, N_TILES_B)
-        _load_lds(gb_div, b_cur1, B1_gl_offset + 0 * BLOCK_K, global_offsets, N_TILES_B)
-        _load_lds(ga_div, a_cur1, A1_gl_offset + 0 * BLOCK_K, global_offsets, N_TILES_A)
+        _load_lds(ga_div, a_cur0, A0_gl_offset + 0 * A_K_STEP, gl_off_a, N_TILES_A)
+        _load_lds(gb_div, b_cur0, B0_gl_offset + 0 * B_K_STEP, gl_off_b, N_TILES_B)
+        _load_lds(gb_div, b_cur1, B1_gl_offset + 0 * B_K_STEP, gl_off_b, N_TILES_B)
+        _load_lds(ga_div, a_cur1, A1_gl_offset + 0 * A_K_STEP, gl_off_a, N_TILES_A)
 
-        _load_lds(ga_div, a_next0, A0_gl_offset + 1 * BLOCK_K, global_offsets, N_TILES_A)
-        _load_lds(gb_div, b_next0, B0_gl_offset + 1 * BLOCK_K, global_offsets, N_TILES_B)
-        _load_lds(gb_div, b_next1, B1_gl_offset + 1 * BLOCK_K, global_offsets, N_TILES_B)
-        _load_lds(ga_div, a_next1, A1_gl_offset + 1 * BLOCK_K, global_offsets, N_TILES_A)
+        _load_lds(ga_div, a_next0, A0_gl_offset + 1 * A_K_STEP, gl_off_a, N_TILES_A)
+        _load_lds(gb_div, b_next0, B0_gl_offset + 1 * B_K_STEP, gl_off_b, N_TILES_B)
+        _load_lds(gb_div, b_next1, B1_gl_offset + 1 * B_K_STEP, gl_off_b, N_TILES_B)
+        _load_lds(ga_div, a_next1, A1_gl_offset + 1 * A_K_STEP, gl_off_a, N_TILES_A)
 
         _wait_barrier((3 * N_TILES_A) + (4 * N_TILES_B))
 
@@ -423,8 +488,8 @@ def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int
             c00_frag, b1_frag = _compute_block(
                 a_cur0,
                 ga_div,
-                A0_gl_offset + (k + 2) * BLOCK_K,
-                global_offsets,
+                A0_gl_offset + (k + 2) * A_K_STEP,
+                gl_off_a,
                 wave_j,
                 b_cur1,
                 N_TILES_A,
@@ -437,8 +502,8 @@ def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int
             c01_frag, a1_frag = _compute_block(
                 b_cur0,
                 gb_div,
-                B0_gl_offset + (k + 2) * BLOCK_K,
-                global_offsets,
+                B0_gl_offset + (k + 2) * B_K_STEP,
+                gl_off_b,
                 wave_i,
                 a_cur1,
                 N_TILES_B,
@@ -453,8 +518,8 @@ def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int
             c10_frag, a0_frag = _compute_block(
                 b_cur1,
                 gb_div,
-                B1_gl_offset + (k + 2) * BLOCK_K,
-                global_offsets,
+                B1_gl_offset + (k + 2) * B_K_STEP,
+                gl_off_b,
                 wave_i,
                 a_next0,
                 N_TILES_B,
@@ -467,8 +532,8 @@ def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int
             c11_frag, b0_frag = _compute_block(
                 a_cur1,
                 ga_div,
-                A1_gl_offset + (k + 2) * BLOCK_K,
-                global_offsets,
+                A1_gl_offset + (k + 2) * A_K_STEP,
+                gl_off_a,
                 wave_j,
                 b_next0,
                 N_TILES_A,
