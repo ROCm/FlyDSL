@@ -39,7 +39,7 @@ jobs:
       - name: Pull or build manylinux Docker image
         run: |
           ROCM_VERSION=7.2
-          IMAGE="ghcr.io/rocm/flydsl-manylinux_2_28:rocm${ROCM_VERSION}-cp314"
+          IMAGE="ghcr.io/rocm/flydsl-manylinux_2_28:rocm${ROCM_VERSION}-cp310-cp314"
           if ! docker pull "${IMAGE}"; then
             # The Dockerfile is self-contained, so avoid sending the full repo as build context.
             docker build \
