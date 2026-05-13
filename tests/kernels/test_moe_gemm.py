@@ -2097,6 +2097,9 @@ def test_moe_gemm2_a16w4(
     seed: int = 0,
     atol: float = 1.0,
     rtol: float = 0.05,
+    num_iters: int = 5,
+    num_warmup: int = 2,
+    skip_ref: bool = False,
 ):
     """Stage2 correctness test for compile_a16w4_moe_gemm2.
 
@@ -2160,42 +2163,73 @@ def test_moe_gemm2_a16w4(
     )
 
     out_kernel = torch.zeros((tokens, model_dim), device=device, dtype=dtype)
+    out_perf = torch.zeros_like(out_kernel)
     # NOTE: launcher signature now matches the unified generic mixed-stage2 launcher,
     # which accepts arg_scale_x (unused for A16W4 since is_f16_a=True). Pass empty.
     _empty_scale_x = torch.empty(0, device=device, dtype=torch.float32)
-    exe(
-        out_kernel,
-        a2_bf16,
-        w2_qt_shuf,
-        _empty_scale_x,
-        w2_scale_shuf,
-        sorted_ids,
-        sorted_expert_ids,
-        sorted_weights,
-        num_valid_ids,
-        torch.empty(0, device=device, dtype=dtype),  # no bias
-        tokens,
-        model_dim,
-        inter_dim,
-        sorted_ids.shape[0],
-        torch.cuda.current_stream(),
-    )
+    _bias_empty = torch.empty(0, device=device, dtype=dtype)
+
+    def _launch(o):
+        o.zero_()
+        exe(
+            o,
+            a2_bf16,
+            w2_qt_shuf,
+            _empty_scale_x,
+            w2_scale_shuf,
+            sorted_ids,
+            sorted_expert_ids,
+            sorted_weights,
+            num_valid_ids,
+            _bias_empty,
+            tokens,
+            model_dim,
+            inter_dim,
+            sorted_ids.shape[0],
+            torch.cuda.current_stream(),
+        )
+
+    _, us = run_perftest(_launch, out_perf, num_iters=num_iters, num_warmup=num_warmup)
     torch.cuda.synchronize()
 
-    # Reference: dequantize weights to fp32, compute via torch_moe_gemm2
-    ref = torch_moe_gemm2(
-        a2_q=a2_bf16.view(tokens, topk, inter_dim),
-        w2_q=w2_fp32,
-        scale_a2=None,
-        scale_w2=None,
-        topk_ids=topk_ids,
-        topk_weights=topk_weights,
-        model_dim=model_dim,
-        doweight_stage2=True,
-    )
-    ref = ref.to(dtype)
+    flops = 2 * tokens * topk * model_dim * inter_dim
+    tflops = float("nan") if us <= 0 else flops / (us / 1e6) / 1e12
 
-    verify_output(out_kernel, ref, atol=atol, rtol=rtol)
+    active_experts = min(experts, tokens * topk)
+    # a2: bf16 (2 bytes/elem), w2: fp4 (0.5 bytes/elem), w2_scale: e8m0 per-1x32 (1 byte per 32 elems)
+    bytes_moved = (
+        tokens * topk * inter_dim * 2               # a2 bf16
+        + active_experts * model_dim * inter_dim // 2  # w2 fp4
+        + active_experts * model_dim * inter_dim // 32  # w2 scale e8m0
+        + tokens * model_dim * 2                    # out bf16
+    )
+    tbps = float("nan") if us <= 0 else bytes_moved / 1e12 / (us / 1e6)
+
+    kb_tag = f", k_batch={k_batch}" if k_batch > 1 else ""
+    print(
+        f"FlyDSL MoE stage2 [a16w4{kb_tag}] bf16xfp4 | "
+        f"{model_dim}x{inter_dim}, E={experts}, K={topk}, M_eff={tokens * topk} | "
+        f"{us:.1f} us, {tflops:.2f} TFLOPS, {tbps:.3f} TB/s"
+    )
+
+    if not skip_ref:
+        # Correctness run into a clean buffer (perf run may leave partial atomics).
+        _launch(out_kernel)
+        torch.cuda.synchronize()
+
+        ref = torch_moe_gemm2(
+            a2_q=a2_bf16.view(tokens, topk, inter_dim),
+            w2_q=w2_fp32,
+            scale_a2=None,
+            scale_w2=None,
+            topk_ids=topk_ids,
+            topk_weights=topk_weights,
+            model_dim=model_dim,
+            doweight_stage2=True,
+        )
+        ref = ref.to(dtype)
+
+        verify_output(out_kernel, ref, atol=atol, rtol=rtol)
 
 
 if __name__ == "__main__":
@@ -2301,6 +2335,20 @@ if __name__ == "__main__":
         help="Group size for W4A16 groupwise scale (-1 = per-row, 32 = group_size=32).",
     )
 
+    # A16W4 stage2 benchmark
+    parser.add_argument(
+        "--a16w4",
+        action="store_true",
+        default=False,
+        help="Run A16W4 stage2 benchmark (BF16 activations x MXFP4 weights). Requires gfx950+.",
+    )
+    parser.add_argument(
+        "--k_batch",
+        type=int,
+        default=1,
+        help="A16W4 stage2 split-K factor (grid Z). Use >1 for low token counts (default: 1).",
+    )
+
     args = parser.parse_args()
 
     model_dim, inter_dim = args.dim
@@ -2351,14 +2399,34 @@ if __name__ == "__main__":
             test_graph=bool(args.test_graph),
         )
 
-    # Run 2-stage (gemm1 -> quantize -> gemm2) aiter-style test/benchmark.
-    # Expand "all" to all supported dtypes.
-    in_dtypes = args.in_dtype.split(",")
-    if "all" in in_dtypes:
-        in_dtypes = ["fp8", "fp16", "bf16", "int8", "int4", "int4_bf16", "fp4", "a8w4"]
-    for dt in in_dtypes:
-        if dt in ("fp4", "a8w4") and "gfx95" not in ARCH:
-            print(f"Skipping {dt}: requires gfx950+, got {ARCH}")
-            continue
-        for use_reduce in reduce_flags:
-            run_one(dt, use_reduce)
+    if args.a16w4:
+        if "gfx95" not in ARCH:
+            print(f"Skipping --a16w4: requires gfx950+, got {ARCH}")
+        else:
+            test_moe_gemm2_a16w4(
+                tokens=int(args.tokenNum),
+                model_dim=int(model_dim),
+                inter_dim=int(inter_dim),
+                experts=int(args.expert),
+                topk=int(args.topk),
+                tile_m=int(args.tile_m),
+                tile_n=int(args.tile_n) * 2,  # stage2 tile_n spans model_dim
+                tile_k=int(args.tile_k),
+                k_batch=int(args.k_batch),
+                seed=int(args.seed),
+                num_iters=int(args.num_iters),
+                num_warmup=int(args.num_warmup),
+                skip_ref=bool(args.skip_ref),
+            )
+    else:
+        # Run 2-stage (gemm1 -> quantize -> gemm2) aiter-style test/benchmark.
+        # Expand "all" to all supported dtypes.
+        in_dtypes = args.in_dtype.split(",")
+        if "all" in in_dtypes:
+            in_dtypes = ["fp8", "fp16", "bf16", "int8", "int4", "int4_bf16", "fp4", "a8w4"]
+        for dt in in_dtypes:
+            if dt in ("fp4", "a8w4") and "gfx95" not in ARCH:
+                print(f"Skipping {dt}: requires gfx950+, got {ARCH}")
+                continue
+            for use_reduce in reduce_flags:
+                run_one(dt, use_reduce)
