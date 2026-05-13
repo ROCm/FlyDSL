@@ -11,6 +11,7 @@ from .._mlir import ir
 from .._mlir.dialects import arith, gpu
 from ..expr.typing import Constexpr
 from .ast_rewriter import ASTRewriter
+from .jit_argument import is_type_param_annotation
 from .mlir_utils import convert_to_mlir_attr
 from .protocol import construct_from_ir_values, extract_to_ir_values, get_ir_types
 
@@ -97,6 +98,18 @@ def create_gpu_func(
         loc=loc,
         ip=ip,
     )
+
+
+def _attach_attrs(op, unit_attrs: Optional[List[str]], value_attrs: Optional[Dict[str, Any]]) -> None:
+    if unit_attrs:
+        unit = ir.UnitAttr.get()
+        for name in unit_attrs:
+            op.attributes[name] = unit
+    if value_attrs:
+        for name, value in value_attrs.items():
+            if value is None:
+                continue
+            op.attributes[name] = convert_to_mlir_attr(value)
 
 
 # =============================================================================
@@ -312,11 +325,13 @@ class KernelLauncher:
         kernel_args: Tuple,
         call_location: Optional[ir.Location] = None,
         known_block_size: Optional[List[int]] = None,
+        smem_bytes: Optional[int] = None,
     ):
         self._kernel_name = kernel_name
         self._kernel_args = kernel_args
         self._call_location = call_location
         self._known_block_size = known_block_size
+        self._smem_bytes = smem_bytes
 
     def _check_block_vs_known(self, block_dims: Tuple) -> None:
         """Raise when statically-known *block* dims are invalid for AMDGPU."""
@@ -349,20 +364,42 @@ class KernelLauncher:
         *,
         grid: DimType = (1, 1, 1),
         block: DimType = (1, 1, 1),
-        smem: Union[int, ir.Value] = 0,
+        smem: Optional[Union[int, ir.Value]] = None,
         stream: Optional[ir.Value] = None,
         cluster: Optional[DimType] = None,
+        unit_attrs: Optional[List[str]] = None,
+        value_attrs: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Emit gpu.launch_func operation with the given configuration.
 
         Args:
             grid: Grid dimensions (x, y, z). Can be int, ir.Value, tuple, or list.
             block: Block dimensions (x, y, z). Can be int, ir.Value, tuple, or list.
-            smem: Dynamic shared memory size in bytes. Can be int or ir.Value.
+            smem: Dynamic shared memory size in bytes. ``None`` (default)
+                auto-infers from ``SharedAllocator.allocated_bytes`` when one
+                was used inside the kernel body. Explicit values are allowed
+                when they are >= the auto-inferred size.
             stream: CUDA/HIP stream as ir.Value. None means default stream.
             cluster: Cluster dimensions (x, y, z) for workgroup clustering.
                      None means no clustering. Enables MCAST and cluster barriers.
+            unit_attrs: Unit attributes to attach to gpu.launch_func.
+            value_attrs: Value attributes to attach to gpu.launch_func.
         """
+        if smem is None:
+            smem = self._smem_bytes if self._smem_bytes is not None else 0
+        elif self._smem_bytes is not None:
+            smem_int = None
+            try:
+                smem_int = int(_unwrap_to_raw(smem))
+            except (TypeError, ValueError):
+                pass
+            if smem_int is not None and smem_int < self._smem_bytes:
+                raise ValueError(
+                    f"launch smem={smem_int} is less than the "
+                    f"{self._smem_bytes} bytes allocated by SharedAllocator "
+                    f"in kernel '{self._kernel_name}'"
+                )
+
         launch_loc = create_caller_location(depth=2)
 
         kernel_operands = []
@@ -421,13 +458,14 @@ class KernelLauncher:
             if cluster_size is not None:
                 launch_kwargs["cluster_size"] = cluster_size
 
-            gpu.LaunchFuncOp(
+            launch_op = gpu.LaunchFuncOp(
                 ["kernels", self._kernel_name],
                 (grid_x, grid_y, grid_z),
                 (block_x, block_y, block_z),
                 kernel_operands,
                 **launch_kwargs,
             )
+            _attach_attrs(launch_op, unit_attrs, value_attrs)
 
 
 # =============================================================================
@@ -442,6 +480,8 @@ class KernelFunction:
     configuring and launching the kernel.
     """
 
+    _current: Optional["KernelFunction"] = None
+
     def __init__(self, func: Callable, some_args=None, name: Optional[str] = None, known_block_size=None):
         self._func = ASTRewriter.transform(func)
         self._some_args = some_args
@@ -449,6 +489,7 @@ class KernelFunction:
         self._known_block_size = _validate_known_block_size(known_block_size)
         self._kernel_name: Optional[str] = None
         self._location_tracker = FuncLocationTracker(func)
+        self._shared_allocator = None
 
         full_sig = inspect.signature(self._func)
         params = list(full_sig.parameters.values())
@@ -458,6 +499,18 @@ class KernelFunction:
             self._sig = full_sig.replace(parameters=params[1:])
         else:
             self._sig = full_sig
+
+    @classmethod
+    def get_current(cls) -> Optional["KernelFunction"]:
+        return cls._current
+
+    def register_shared_allocator(self, alloc) -> None:
+        if self._shared_allocator is not None:
+            raise RuntimeError(
+                "Only one SharedAllocator is allowed per kernel; "
+                f"kernel '{self._kernel_name or self._func.__name__}' already has one"
+            )
+        self._shared_allocator = alloc
 
     def __get__(self, obj, objtype=None):
         if obj is None:
@@ -479,6 +532,8 @@ class KernelFunction:
             annotation = param.annotation
             if annotation is not inspect.Parameter.empty and Constexpr.is_constexpr_annotation(annotation):
                 constexpr_values[param_name] = value
+            elif annotation is not inspect.Parameter.empty and is_type_param_annotation(annotation):
+                constexpr_values[param_name] = value
             else:
                 param_names.append(param_name)
                 param_values.append(value)
@@ -497,34 +552,45 @@ class KernelFunction:
 
         kernel_loc = self._location_tracker.get_func_location()
 
-        with ir.InsertionPoint(ctx.gpu_module_body):
-            func_type = ir.FunctionType.get(kernel_arg_types, [])
-            with kernel_loc:
-                gpu_func = create_gpu_func(
-                    self._kernel_name,
-                    ir.TypeAttr.get(func_type),
-                    known_block_size=self._known_block_size,
-                )
-            gpu_func.regions[0].blocks.append(*kernel_arg_types)
-            entry_block = gpu_func.regions[0].blocks[0]
+        self._shared_allocator = None
+        KernelFunction._current = self
+        try:
+            with ir.InsertionPoint(ctx.gpu_module_body):
+                func_type = ir.FunctionType.get(kernel_arg_types, [])
+                with kernel_loc:
+                    gpu_func = create_gpu_func(
+                        self._kernel_name,
+                        ir.TypeAttr.get(func_type),
+                        known_block_size=self._known_block_size,
+                    )
+                gpu_func.regions[0].blocks.append(*kernel_arg_types)
+                entry_block = gpu_func.regions[0].blocks[0]
 
-            with ir.InsertionPoint(entry_block), kernel_loc:
-                block_args = list(entry_block.arguments)
-                dsl_args: Dict[str, Any] = {}
-                idx = 0
-                for param_name, value in zip(param_names, param_values):
-                    n = len(get_ir_types(value))
-                    dsl_args[param_name] = construct_from_ir_values(type(value), value, list(block_args[idx : idx + n]))
-                    idx += n
+                with ir.InsertionPoint(entry_block), kernel_loc:
+                    block_args = list(entry_block.arguments)
+                    dsl_args: Dict[str, Any] = {}
+                    idx = 0
+                    for param_name, value in zip(param_names, param_values):
+                        n = len(get_ir_types(value))
+                        dsl_args[param_name] = construct_from_ir_values(
+                            type(value), value, list(block_args[idx : idx + n])
+                        )
+                        idx += n
 
-                dsl_args.update(constexpr_values)
-                if bound_self is not None:
-                    self._func(bound_self, **dsl_args)
-                else:
-                    self._func(**dsl_args)
-                gpu.ReturnOp([])
+                    dsl_args.update(constexpr_values)
+                    if bound_self is not None:
+                        self._func(bound_self, **dsl_args)
+                    else:
+                        self._func(**dsl_args)
+                    gpu.ReturnOp([])
+        finally:
+            KernelFunction._current = None
 
-        return tuple(param_values), gpu_func
+        smem_bytes = None
+        if self._shared_allocator is not None:
+            smem_bytes = self._shared_allocator.allocated_bytes
+
+        return tuple(param_values), gpu_func, smem_bytes
 
     def __call__(
         self,
@@ -545,19 +611,11 @@ class KernelFunction:
                 raise TypeError(f"{self._func.__name__}() missing 'self' argument")
             bound_self, args = args[0], args[1:]
 
-        kernel_args, gpu_func_op = self._emit_kernel(ctx, args, kwargs, bound_self=bound_self)
+        kernel_args, gpu_func_op, smem_bytes = self._emit_kernel(ctx, args, kwargs, bound_self=bound_self)
 
-        if unit_attrs:
-            unit = ir.UnitAttr.get()
-            for name in unit_attrs:
-                gpu_func_op.attributes[name] = unit
-        if value_attrs:
-            for name, value in value_attrs.items():
-                if value is None:
-                    continue
-                gpu_func_op.attributes[name] = convert_to_mlir_attr(value)
+        _attach_attrs(gpu_func_op, unit_attrs, value_attrs)
 
-        return KernelLauncher(self._kernel_name, kernel_args, call_loc, self._known_block_size)
+        return KernelLauncher(self._kernel_name, kernel_args, call_loc, self._known_block_size, smem_bytes)
 
 
 # =============================================================================

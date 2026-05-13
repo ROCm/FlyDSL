@@ -35,6 +35,7 @@ from .kernel_function import (
     create_gpu_module,
     get_gpu_module_body,
 )
+from .link_utils import _append_link_lib_options_to_attach_targets, _format_link_lib_options
 from .protocol import construct_from_ir_values, get_ir_types
 
 EXTRA_SOURCE_DIRS: List[str] = []
@@ -575,27 +576,6 @@ def _pipeline_fragments_for_mode(backend) -> PipelineConfig:
     )
 
 
-def _format_link_lib_options(link_libs: list) -> str:
-    """Format external bitcode paths for rocdl-attach-target.
-
-    The MLIR pass-pipeline option parser treats whitespace, commas, and braces
-    as structural syntax.  Until FlyDSL grows proper MLIR option escaping here,
-    reject such paths loudly instead of producing a malformed pipeline.
-    """
-    opts = []
-    for lib in link_libs:
-        path = os.fspath(lib)
-        bad_chars = sorted({ch for ch in path if ch.isspace() or ch in ",{}\"'"})
-        if not path or bad_chars:
-            chars = "empty path" if not path else f"unsupported character(s) {bad_chars!r}"
-            raise ValueError(
-                f"Cannot pass external bitcode path {path!r} to rocdl-attach-target: {chars}. "
-                "Use a path without whitespace, commas, braces, or quotes, or add MLIR pass-option escaping."
-            )
-        opts.append(f"l={path}")
-    return " ".join(opts)
-
-
 def _run_pipeline(module: ir.Module, fragments: list, *, verifier: bool, print_after_all: bool) -> None:
     """Parse and run a comma-joined pass pipeline on *module*."""
     pipeline = f"builtin.module({','.join(fragments)})"
@@ -634,21 +614,9 @@ class MlirCompiler:
 
         if link_libs:
             link_opt = _format_link_lib_options(link_libs)
-            new_fragments = []
-            found_rocdl = False
-            for f in fragments:
-                if "rocdl-attach-target" in f:
-                    if f.endswith("}"):
-                        base = f[:-1].rstrip()
-                    else:
-                        base = f.rstrip()
-                    new_fragments.append(f"{base} {link_opt}" + "}")
-                    found_rocdl = True
-                else:
-                    new_fragments.append(f)
-            if not found_rocdl:
-                raise RuntimeError("link_libs specified but no 'rocdl-attach-target' fragment found in pipeline")
-            fragments = new_fragments
+            fragments, found_attach_target = _append_link_lib_options_to_attach_targets(fragments, link_opt)
+            if not found_attach_target:
+                raise RuntimeError("link_libs specified but no attach-target fragment found in pipeline")
 
         from .llvm_options import llvm_options as _llvm_options
 
@@ -1358,9 +1326,9 @@ class JitFunction:
                         self._extern_linkage_keys.add(cache_key)
                         # Switch to explicit Python-side module loading so
                         # post_load_processors can receive hipModule_t handles.
-                        # Also clear targets set at construction: rocdl-attach-target
-                        # is the sole source when link_libs is used; duplicating
-                        # targets causes hipErrorNoBinaryForGpu.
+                        # Also clear targets set at construction: the backend attach-target
+                        # pass is the sole source when link_libs is used; duplicating
+                        # targets can make the runtime pick an object without extern libs.
                         gpu_module.offloadingHandler = ir.Attribute.parse("#fly.explicit_module")
                         if "targets" in gpu_module.operation.attributes:
                             del gpu_module.operation.attributes["targets"]

@@ -19,10 +19,11 @@ Usage::
 from .._mlir import ir
 from .._mlir.dialects import gpu, rocdl, scf
 from .._mlir.ir import Attribute
-from .typing import Tuple3D
 from . import arith as _arith_ext
 from . import rocdl as _rocdl_ext
-from .typing import T
+from .primitive import get_dyn_shared
+from .struct import Arena
+from .typing import T, Tuple3D
 
 thread_id = gpu.thread_id
 block_id = gpu.block_id
@@ -51,11 +52,6 @@ def smem_space(int=False):
 
 
 lds_space = smem_space
-
-
-class SharedAllocator:
-    """Placeholder for shared memory allocation (see ``flydsl.utils.smem_allocator``)."""
-    pass
 
 
 # =========================================================================
@@ -146,7 +142,7 @@ def compute_mcast_masks(local_x, local_y, cluster_m: _int, cluster_n: _int):
     # A mask: pattern has bits at strides of cluster_m, shifted by local_x
     a_pattern_val = 0
     for ly in range(cluster_n):
-        a_pattern_val |= (1 << (ly * cluster_m))
+        a_pattern_val |= 1 << (ly * cluster_m)
     a_pattern = _arith_ext.constant(a_pattern_val, type=T.i32)
     a_mask = _arith_ext.shli(a_pattern, local_x_i32)
 
@@ -156,6 +152,23 @@ def compute_mcast_masks(local_x, local_y, cluster_m: _int, cluster_n: _int):
     b_mask = _arith_ext.shli(b_pattern, col_base)
 
     return a_mask, b_mask
+
+
+class SharedAllocator(Arena):
+    def __init__(self, base_alignment: int = Arena.DEFAULT_BASE_ALIGNMENT):
+        super().__init__(base_alignment=base_alignment)
+
+        from ..compiler.kernel_function import KernelFunction
+
+        kf = KernelFunction.get_current()
+        if kf is None:
+            raise RuntimeError("SharedAllocator can only be created inside a @kernel function")
+        kf.register_shared_allocator(self)
+        self._base = get_dyn_shared()
+
+    @property
+    def base_ptr(self):
+        return self._base
 
 
 __all__ = [
@@ -168,7 +181,6 @@ __all__ = [
     "barrier",
     "smem_space",
     "lds_space",
-    "SharedAllocator",
     "is_wave_leader",
     "cluster_signal_once_per_wg",
     "cluster_wait",
@@ -177,4 +189,5 @@ __all__ = [
     "compute_mcast_masks",
     "CLUSTER_BARRIER_ID",
     "CLUSTER_WAIT_ALL",
+    "SharedAllocator",
 ]
