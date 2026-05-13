@@ -12,19 +12,20 @@ Global IO, scale loads, and bf16 stores go through the layout API
 the chained Vec(4, f32) accumulator stays on AGPR. The XOR swizzle and
 the 8-buffer LDS pipeline ping-pong are kept as direct arithmetic to
 preserve the original kernel's interleaved-cluster scheduling.
+
+LDS storage uses 8 named ``fx.get_dyn_shared`` bases carved into one
+dyn-shared region; the ``fly-attach-lds-alias-scope`` MLIR pass
+attaches per-symbol alias scopes so AMDGPU's SI Wait Counter pass
+treats cross-buffer accesses as no-alias.
 """
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl._mlir.dialects import arith as _arith_dialect
 from flydsl._mlir.dialects import fly as _fly_dialect
 from flydsl._mlir.dialects import llvm as _llvm
-from flydsl._mlir.dialects import memref as _memref_dialect
 from flydsl._mlir.dialects.fly_rocdl import TargetAddressSpace as _TgtAS
-from flydsl.compiler.kernel_function import CompilationContext
-from flydsl.expr import arith, const_expr, range_constexpr
+from flydsl.expr import arith, const_expr, range_constexpr, rocdl
 from flydsl.expr.typing import Vector as Vec
-from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 
 
 def _divmod(a, b):
@@ -77,26 +78,26 @@ def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int
 
     _use_interleaved_block = BLOCK_M == 256 and BLOCK_N == 256
 
-    A_lds_cur0_alloc = SmemAllocator(None, "gfx950", "A_lds_cur_0")
-    A_lds_cur1_alloc = SmemAllocator(None, "gfx950", "A_lds_cur_1")
-    A_lds_next0_alloc = SmemAllocator(None, "gfx950", "A_lds_next_0")
-    A_lds_next1_alloc = SmemAllocator(None, "gfx950", "A_lds_next_1")
-    B_lds_cur0_alloc = SmemAllocator(None, "gfx950", "B_lds_cur_0")
-    B_lds_cur1_alloc = SmemAllocator(None, "gfx950", "B_lds_cur_1")
-    B_lds_next0_alloc = SmemAllocator(None, "gfx950", "B_lds_next_0")
-    B_lds_next1_alloc = SmemAllocator(None, "gfx950", "B_lds_next_1")
-
     a_lds_size = LDS_BLOCK_M * BLOCK_K
     b_lds_size = LDS_BLOCK_N * BLOCK_K
 
-    A_lds_cur0_alloc.ptr = a_lds_size
-    A_lds_cur1_alloc.ptr = a_lds_size
-    A_lds_next0_alloc.ptr = a_lds_size
-    A_lds_next1_alloc.ptr = a_lds_size
-    B_lds_cur0_alloc.ptr = b_lds_size
-    B_lds_cur1_alloc.ptr = b_lds_size
-    B_lds_next0_alloc.ptr = b_lds_size
-    B_lds_next1_alloc.ptr = b_lds_size
+    # 8 disjoint sub-buffers carved out of a single dyn-shared LDS region:
+    #   A_lds_cur_{0,1}, A_lds_next_{0,1}, B_lds_cur_{0,1}, B_lds_next_{0,1}.
+    # ``fx.get_dyn_shared(sym_name=...)`` emits one external [0 x i8]
+    # addrspace(3) global per name; ``fly-attach-lds-alias-scope``
+    # gives each global its own alias scope so the AMDGPU SI Wait
+    # Counter pass treats cross-name accesses as no-alias.
+    _LDS_SUBBUFS = [
+        ("A_lds_cur_0", 0 * a_lds_size),
+        ("A_lds_cur_1", 1 * a_lds_size),
+        ("A_lds_next_0", 2 * a_lds_size),
+        ("A_lds_next_1", 3 * a_lds_size),
+        ("B_lds_cur_0", 4 * a_lds_size + 0 * b_lds_size),
+        ("B_lds_cur_1", 4 * a_lds_size + 1 * b_lds_size),
+        ("B_lds_next_0", 4 * a_lds_size + 2 * b_lds_size),
+        ("B_lds_next_1", 4 * a_lds_size + 3 * b_lds_size),
+    ]
+    _TOTAL_LDS_BYTES = 4 * a_lds_size + 4 * b_lds_size
 
     @flyc.kernel
     def kernel_gemm(
@@ -109,20 +110,25 @@ def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int
         MfmaAccum_t = Vec.make_type(4, fx.Float32)
         RT_C_i = Vec.filled(4, 0.0, fx.Float32)
         F8_IR_t = fx.Float8E4M3FN.ir_type
-        Vec16_t = Vec.make_type(16, fx.Float8E4M3FN)
-
-        a_cur0 = SmemPtr(A_lds_cur0_alloc.get_base(), 0, F8_IR_t, shape=(a_lds_size,)).get()
-        a_cur1 = SmemPtr(A_lds_cur1_alloc.get_base(), 0, F8_IR_t, shape=(a_lds_size,)).get()
-        a_next0 = SmemPtr(A_lds_next0_alloc.get_base(), 0, F8_IR_t, shape=(a_lds_size,)).get()
-        a_next1 = SmemPtr(A_lds_next1_alloc.get_base(), 0, F8_IR_t, shape=(a_lds_size,)).get()
-
-        b_cur0 = SmemPtr(B_lds_cur0_alloc.get_base(), 0, F8_IR_t, shape=(b_lds_size,)).get()
-        b_cur1 = SmemPtr(B_lds_cur1_alloc.get_base(), 0, F8_IR_t, shape=(b_lds_size,)).get()
-        b_next0 = SmemPtr(B_lds_next0_alloc.get_base(), 0, F8_IR_t, shape=(b_lds_size,)).get()
-        b_next1 = SmemPtr(B_lds_next1_alloc.get_base(), 0, F8_IR_t, shape=(b_lds_size,)).get()
 
         _AS_SHARED = 2
-        _shared_ptr_ty = fx.PointerType.get(F8_IR_t, _AS_SHARED, 512)
+        _shared_f8_ptr_ty = fx.PointerType.get(F8_IR_t, _AS_SHARED, 512)
+        _shared_i32_ptr_ty = fx.PointerType.get(fx.T.i32(), _AS_SHARED, 512)
+
+        # One ptrtoint per named base; per-access offsets are added in i32
+        # before ``fx.inttoptr``. ``fly-attach-lds-alias-scope`` traces
+        # each access back to its base symbol and tags loads / stores /
+        # buffer_load_lds with the corresponding alias scope.
+        _lds_int = {
+            name: fx.ptrtoint(fx.get_dyn_shared(sym_name=name))
+            for name, _ in _LDS_SUBBUFS
+        }
+        _lds_off = dict(_LDS_SUBBUFS)
+
+        a_cur0, a_cur1 = "A_lds_cur_0", "A_lds_cur_1"
+        a_next0, a_next1 = "A_lds_next_0", "A_lds_next_1"
+        b_cur0, b_cur1 = "B_lds_cur_0", "B_lds_cur_1"
+        b_next0, b_next1 = "B_lds_next_0", "B_lds_next_1"
 
         lane_id = fx.thread_idx.x % 64
         wave_id = fx.thread_idx.x // 64
@@ -196,35 +202,36 @@ def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int
         # state carries the runtime ``soffset`` set to ``k_offset``.
         g2lds_atom = fx.make_copy_atom(fx.rocdl.BufferCopyLDS128b(), 128)
 
-        # LDS dst pointers for ``buffer_load_lds`` go through
-        # ``extract_aligned_pointer_as_index + add + inttoptr`` to break
-        # LLVM's alias chain on the LDS sub-buffer symbols; otherwise the
-        # AMDGPU backend inserts defensive ``s_waitcnt vmcnt(N)`` between
-        # G->LDS writes and the subsequent ``ds_read``.
-        def _lds_dst_at(lds_dst_mem, byte_offset_runtime):
-            base_idx = _memref_dialect.extract_aligned_pointer_as_index(lds_dst_mem)
-            offset_idx = base_idx + fx.Index(byte_offset_runtime)
-            offset_i64 = _arith_dialect.index_cast(fx.T.i64(), offset_idx)
-            lds_ptr = fx.inttoptr(_shared_ptr_ty, offset_i64)
-            return fx.make_view(lds_ptr, fx.make_layout(1, 1))
+        def _lds_dst_at(name, byte_offset_runtime):
+            off = _lds_int[name] + fx.Int32(_lds_off[name] + byte_offset_runtime)
+            ptr = fx.inttoptr(_shared_f8_ptr_ty, off)
+            return fx.make_view(ptr, fx.make_layout(1, 1))
 
-        def _load_lds(gl_src_div, lds_dst_mem, k_offset, gl_offsets, n_tiles):
+        def _load_lds(gl_src_div, name, k_offset, gl_offsets, n_tiles):
             assert len(gl_offsets) >= n_tiles
             for step in range_constexpr(n_tiles):
                 src = fx.slice(gl_src_div, (None, fx.Int32(gl_offsets[step])))
-                dst = _lds_dst_at(lds_dst_mem, wave_id * 1024 + step * 4096)
+                dst = _lds_dst_at(name, wave_id * 1024 + step * 4096)
                 fx.copy(g2lds_atom, src, dst, soffset=fx.Int32(k_offset))
 
-        def _load_one_lds(gl_src_div, lds_dst_mem, k_offset, gl_offsets, tile_idx):
+        def _load_one_lds(gl_src_div, name, k_offset, gl_offsets, tile_idx):
             assert len(gl_offsets) > tile_idx
             src = fx.slice(gl_src_div, (None, fx.Int32(gl_offsets[tile_idx])))
-            dst = _lds_dst_at(lds_dst_mem, wave_id * 1024 + tile_idx * 4096)
+            dst = _lds_dst_at(name, wave_id * 1024 + tile_idx * 4096)
             fx.copy(g2lds_atom, src, dst, soffset=fx.Int32(k_offset))
 
         def _pack_i32x4_i32x8(lo, hi):
             return lo.shuffle(hi, list(range(8)))
 
-        def _load_rt(lds_src, wave_idx, n_tiles):
+        # 16 fp8 == 4 i32; load via i32-typed ptr to sidestep the missing
+        # LLVM vector type for vector<16xf8>.
+        def _vec_load_lds_i32x4(name, fp8_elem_offset):
+            off = _lds_int[name] + fx.Int32(_lds_off[name] + fp8_elem_offset)
+            ptr = fx.inttoptr(_shared_i32_ptr_ty, off)
+            view = fx.make_view(ptr, fx.make_layout(4, 1))
+            return Vec(fx.memref_load_vec(view))
+
+        def _load_rt(name, wave_idx, n_tiles):
             frag = []
             for i in range_constexpr(n_tiles):
                 row = wave_idx * (n_tiles * 16) + i * 16 + lane_id % 16
@@ -232,14 +239,12 @@ def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int
                 for step in range_constexpr(2):
                     col = (lane_id // 16) * 16 + step * 64
                     r, c = _swizzle_128(row, col)
-                    v = Vec.load(Vec16_t, lds_src, [fx.Index(r * BLOCK_K + c)])
-                    halves.append(v.bitcast(fx.Int32))
+                    halves.append(_vec_load_lds_i32x4(name, r * BLOCK_K + c))
                 frag.append(_pack_i32x4_i32x8(halves[0], halves[1]))
             return frag
 
-        def _load_one_rt(lds_src, lds_swz, row, k):
-            v = Vec.load(Vec16_t, lds_src, [fx.Index(lds_swz[row][k])])
-            return v.bitcast(fx.Int32)
+        def _load_one_rt(name, lds_swz, row, k):
+            return _vec_load_lds_i32x4(name, lds_swz[row][k])
 
         def _c_idx(i, j):
             return i * N_TILES_B + j
@@ -525,26 +530,6 @@ def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int
         B_scale: fx.Tensor,
         stream: fx.Stream,
     ):
-        from flydsl._mlir import ir
-
-        A_lds_cur0_alloc.finalized = False
-        A_lds_cur1_alloc.finalized = False
-        A_lds_next0_alloc.finalized = False
-        A_lds_next1_alloc.finalized = False
-        B_lds_cur0_alloc.finalized = False
-        B_lds_cur1_alloc.finalized = False
-        B_lds_next0_alloc.finalized = False
-        B_lds_next1_alloc.finalized = False
-        ctx = CompilationContext.get_current()
-        with ir.InsertionPoint(ctx.gpu_module_body):
-            A_lds_cur0_alloc.finalize()
-            A_lds_cur1_alloc.finalize()
-            A_lds_next0_alloc.finalize()
-            A_lds_next1_alloc.finalize()
-            B_lds_cur0_alloc.finalize()
-            B_lds_cur1_alloc.finalize()
-            B_lds_next0_alloc.finalize()
-            B_lds_next1_alloc.finalize()
         grid_x = (M * N) // (BLOCK_M * BLOCK_N)
         kernel_gemm(
             A,
@@ -553,6 +538,11 @@ def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int
             A_scale,
             B_scale,
             value_attrs={"rocdl.waves_per_eu": 1, "rocdl.flat_work_group_size": "256,256"},
-        ).launch(grid=(grid_x, 1, 1), block=(256, 1, 1), stream=stream)
+        ).launch(
+            grid=(grid_x, 1, 1),
+            block=(256, 1, 1),
+            smem=_TOTAL_LDS_BYTES,
+            stream=stream,
+        )
 
     return launch_gemm
