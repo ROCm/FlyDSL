@@ -141,3 +141,87 @@ gpu.module @nontracked_op {
     llvm.return %v : vector<4xi32>
   }
 }
+
+// -----
+
+// -----------------------------------------------------------------------------
+// Pointer flowing through a block argument (LLVM phi) loses provenance: the
+// entry to ^bb1 doesn't know which addressof produced %p, so the load must
+// stay untagged regardless of which predecessor branched in.
+// -----------------------------------------------------------------------------
+
+// CHECK-LABEL: gpu.module @phi_block_arg
+gpu.module @phi_block_arg {
+  llvm.mlir.global external @phi_a() {addr_space = 3 : i32, alignment = 1024 : i64, dso_local} : !llvm.array<0 x i8>
+  llvm.mlir.global external @phi_b() {addr_space = 3 : i32, alignment = 1024 : i64, dso_local} : !llvm.array<0 x i8>
+
+  // CHECK-LABEL: llvm.func @load_via_phi
+  llvm.func @load_via_phi(%cond: i1) -> vector<4xi32> {
+    %a = llvm.mlir.addressof @phi_a : !llvm.ptr<3>
+    %b = llvm.mlir.addressof @phi_b : !llvm.ptr<3>
+    llvm.cond_br %cond, ^bb1(%a : !llvm.ptr<3>), ^bb1(%b : !llvm.ptr<3>)
+  ^bb1(%p: !llvm.ptr<3>):
+    // CHECK: llvm.load
+    // CHECK-NOT: alias_scopes
+    %v = llvm.load %p : !llvm.ptr<3> -> vector<4xi32>
+    llvm.return %v : vector<4xi32>
+  }
+}
+
+// -----
+
+// -----------------------------------------------------------------------------
+// Deep arithmetic chain through gep + add + inttoptr still resolves to the
+// originating global. Two named globals so the pass actually runs (single
+// global short-circuits).
+// -----------------------------------------------------------------------------
+
+// CHECK-LABEL: gpu.module @deep_chain
+gpu.module @deep_chain {
+  llvm.mlir.global external @deep_a() {addr_space = 3 : i32, alignment = 1024 : i64, dso_local} : !llvm.array<0 x i8>
+  llvm.mlir.global external @deep_b() {addr_space = 3 : i32, alignment = 1024 : i64, dso_local} : !llvm.array<0 x i8>
+
+  // CHECK-LABEL: llvm.func @load_deep
+  llvm.func @load_deep(%c0: i32, %c1: i32) -> vector<4xi32> {
+    %a = llvm.mlir.addressof @deep_a : !llvm.ptr<3>
+    %a_gep = llvm.getelementptr %a[1] : (!llvm.ptr<3>) -> !llvm.ptr<3>, i8
+    %a_int = llvm.ptrtoint %a_gep : !llvm.ptr<3> to i32
+    %a_off1 = llvm.add %a_int, %c0 : i32
+    %a_off2 = llvm.add %a_off1, %c1 : i32
+    %a_p = llvm.inttoptr %a_off2 : i32 to !llvm.ptr<3>
+    // CHECK: llvm.load %{{.+}} {alias_scopes = [#{{.*}}], noalias_scopes = [#{{.*}}]} : !llvm.ptr<3> -> vector<4xi32>
+    %v = llvm.load %a_p : !llvm.ptr<3> -> vector<4xi32>
+    llvm.return %v : vector<4xi32>
+  }
+}
+
+// -----
+
+// -----------------------------------------------------------------------------
+// Mixed kernel: dyn-shared (gets tagged) and static [N x i8] (skipped)
+// coexist. Only the dyn-shared loads carry alias scopes.
+// -----------------------------------------------------------------------------
+
+// CHECK-LABEL: gpu.module @mixed_dyn_static
+gpu.module @mixed_dyn_static {
+  llvm.mlir.global external @mix_dyn_a() {addr_space = 3 : i32, alignment = 1024 : i64, dso_local} : !llvm.array<0 x i8>
+  llvm.mlir.global external @mix_dyn_b() {addr_space = 3 : i32, alignment = 1024 : i64, dso_local} : !llvm.array<0 x i8>
+  llvm.mlir.global external @mix_static() {addr_space = 3 : i32, alignment = 1024 : i64, dso_local} : !llvm.array<4096 x i8>
+
+  // CHECK-LABEL: llvm.func @load_mixed
+  llvm.func @load_mixed(%off: i32) -> vector<4xi32> {
+    %da = llvm.mlir.addressof @mix_dyn_a : !llvm.ptr<3>
+    %da_i = llvm.ptrtoint %da : !llvm.ptr<3> to i32
+    %da_o = llvm.add %da_i, %off : i32
+    %da_p = llvm.inttoptr %da_o : i32 to !llvm.ptr<3>
+    // CHECK: llvm.load %{{.+}} {alias_scopes = [#{{.*}}], noalias_scopes = [#{{.*}}]} : !llvm.ptr<3> -> vector<4xi32>
+    %v_da = llvm.load %da_p : !llvm.ptr<3> -> vector<4xi32>
+
+    %s = llvm.mlir.addressof @mix_static : !llvm.ptr<3>
+    // CHECK: llvm.load %{{.+}} : !llvm.ptr<3> -> vector<4xi32>
+    %v_s = llvm.load %s : !llvm.ptr<3> -> vector<4xi32>
+
+    %sum = llvm.add %v_da, %v_s : vector<4xi32>
+    llvm.return %sum : vector<4xi32>
+  }
+}
