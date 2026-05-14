@@ -159,8 +159,13 @@ def _pack_elems(dtype_str: str) -> int:
 
 
 def _u(v):
-    """Tag ArithValue as unsigned for //, %, <, <=, >, >=, >> ops."""
-    return v.with_signedness(False)
+    """Cast scalar integer values to Uint32 for unsigned arithmetic semantics."""
+    return fx.Uint32(v)
+
+
+def _u64(v):
+    """Zero-extend scalar integer values to Uint64 for byte-address math."""
+    return fx.Uint64(fx.Uint32(v))
 
 
 def _raw(v):
@@ -210,17 +215,17 @@ def _signal_start_sync(*, lane_i32, rank_i32, bid_i32, self_sg_i64, sgs_i64, ngp
     i32, i64 = T.i32, T.i64
 
     # Flag table is uint32 per block; compute byte address in i64.
-    flag_addr = self_sg_i64 + _c64(_SG_FLAG_OFF_B) + bid_i32.extui(i64) * _c64(4)
+    flag_addr = self_sg_i64 + _c64(_SG_FLAG_OFF_B) + _u64(bid_i32) * _c64(4)
     flag_rsrc = _make_rsrc(flag_addr)
     flag = _load_i32_uncached(flag_rsrc) + 1
 
     # One block owns 8 slots in start/end tables (max world size).
     block_slot_base = bid_i32 * 8
     lane_slot_idx = block_slot_base + lane_i32
-    start_wait_addr = self_sg_i64 + _c64(_SG_START_OFF_B) + lane_slot_idx.extui(i64) * _c64(4)
+    start_wait_addr = self_sg_i64 + _c64(_SG_START_OFF_B) + _u64(lane_slot_idx) * _c64(4)
     wait_rsrc = _make_rsrc(start_wait_addr)
     rank_slot_idx = block_slot_base + rank_i32
-    start_rank_off = _c64(_SG_START_OFF_B) + rank_slot_idx.extui(i64) * _c64(4)
+    start_rank_off = _c64(_SG_START_OFF_B) + _u64(rank_slot_idx) * _c64(4)
 
     # Only active lanes (lane < ngpus) participate in peer signaling.
     is_active_lane = _u(lane_i32) < ngpus
@@ -255,17 +260,17 @@ def _signal_end_sync(*, lane_i32, rank_i32, bid_i32, self_sg_i64, sgs_i64, ngpus
     i32, i64 = T.i32, T.i64
 
     # Flag table is uint32 per block; compute byte address in i64.
-    flag_addr = self_sg_i64 + _c64(_SG_FLAG_OFF_B) + bid_i32.extui(i64) * _c64(4)
+    flag_addr = self_sg_i64 + _c64(_SG_FLAG_OFF_B) + _u64(bid_i32) * _c64(4)
     flag_rsrc = _make_rsrc(flag_addr)
     flag = _load_i32_uncached(flag_rsrc) + 1
 
     # One block owns 8 slots in start/end tables (max world size).
     block_slot_base = bid_i32 * 8
     lane_slot_idx = block_slot_base + lane_i32
-    end_wait_addr = self_sg_i64 + _c64(_SG_END_OFF_B) + lane_slot_idx.extui(i64) * _c64(4)
+    end_wait_addr = self_sg_i64 + _c64(_SG_END_OFF_B) + _u64(lane_slot_idx) * _c64(4)
     wait_rsrc = _make_rsrc(end_wait_addr)
     rank_slot_idx = block_slot_base + rank_i32
-    end_rank_off = _c64(_SG_END_OFF_B) + rank_slot_idx.extui(i64) * _c64(4)
+    end_rank_off = _c64(_SG_END_OFF_B) + _u64(rank_slot_idx) * _c64(4)
 
     # Only active lanes (lane < ngpus) participate in peer signaling.
     is_active_lane = _u(lane_i32) < ngpus
