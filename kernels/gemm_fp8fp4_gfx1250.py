@@ -296,26 +296,27 @@ def compile_mxscale_gemm(
 
     COMPUTE_SCHEDULE_ROW_MAJOR_STREAMING = "row_major_streaming"
     COMPUTE_SCHEDULE_FP4_COL_BAND = "fp4_col_band"
+    COMPUTE_SCHEDULE_FP8_QUADRANT = "fp8_quadrant"
     COMPUTE_SCHEDULE_B_STREAMING = "b_streaming"
 
     def _pick_compute_schedule_kind():
         if b_streaming:
             return COMPUTE_SCHEDULE_B_STREAMING
-        # The FP4 col-band (quadrant) schedule reduces VGPR bank conflicts by
-        # splitting B loads into left/right halves and processing four quadrants
-        # (top-left, bottom-left, top-right, bottom-right).  This distributes
-        # accumulator writes across different VGPR bank groups and overlaps
-        # B-right loading with quadrant-1 WMMA compute.
-        if not is_fp4:
+        if wmma_m_rep % 2 != 0 or wmma_n_rep % 2 != 0 or n_accs < 8:
             return COMPUTE_SCHEDULE_ROW_MAJOR_STREAMING
-        if wmma_m_rep % 2 != 0 or wmma_n_rep % 2 != 0:
-            return COMPUTE_SCHEDULE_ROW_MAJOR_STREAMING
-        if n_accs < 8:
-            return COMPUTE_SCHEDULE_ROW_MAJOR_STREAMING
-        return COMPUTE_SCHEDULE_FP4_COL_BAND
+        # Quadrant schedules split B into left/right halves and compute
+        # top-left, bottom-left, top-right, bottom-right. FP4 additionally
+        # changes accumulator layout for bank friendliness; FP8 keeps row-major
+        # accumulators and uses the split to increase LDS-load-to-WMMA distance.
+        if is_fp4:
+            return COMPUTE_SCHEDULE_FP4_COL_BAND
+        if data_format == "fp8":
+            return COMPUTE_SCHEDULE_FP8_QUADRANT
+        return COMPUTE_SCHEDULE_ROW_MAJOR_STREAMING
 
     compute_schedule_kind = _pick_compute_schedule_kind()
     use_fp4_bank_friendly_schedule = compute_schedule_kind == COMPUTE_SCHEDULE_FP4_COL_BAND
+    use_fp8_quadrant_schedule = compute_schedule_kind == COMPUTE_SCHEDULE_FP8_QUADRANT
     use_b_streaming_schedule = compute_schedule_kind == COMPUTE_SCHEDULE_B_STREAMING
 
     if use_b_streaming_schedule:
@@ -342,6 +343,12 @@ def compile_mxscale_gemm(
         for _wm in range(_bank_half_wm, wmma_m_rep):
             for _wn in range(_bank_half_wn, wmma_n_rep):
                 _bank_group_to_row_major.append(_wm * wmma_n_rep + _wn)
+
+    if use_fp8_quadrant_schedule:
+        _fp8_half_wm = wmma_m_rep // 2
+        _fp8_half_wn = wmma_n_rep // 2
+        _fp8_group_size = _fp8_half_wm * _fp8_half_wn
+        _fp8_b_scale_loads = (b_scale_load_rep + 3) // 4
 
     @flyc.kernel(known_block_size=[block_threads, 1, 1])
     def kernel_mxscale_gemm(
@@ -1010,6 +1017,117 @@ def compile_mxscale_gemm(
 
             return current_accs
 
+        def compute_tile_fp8_quadrant(
+            accs_in,
+            lds_a,
+            lds_b,
+            lds_as,
+            lds_bs,
+            emit_filler=None,
+            mid_compute_callback=None,
+        ):
+            current_accs = list(accs_in)
+            a_buf, a_bases = _precompute_a_lane_bases(lds_a)
+            b_buf, b_bases = _precompute_b_lane_bases(lds_b)
+            as_buf, as_bases = _precompute_scale_lane_bases(lds_as, warp_m_base, wmma_m_rep, interleaved_scale_cols_a)
+            bs_buf, bs_bases = _precompute_scale_lane_bases(
+                lds_bs, warp_n_base, b_scale_load_rep, interleaved_scale_cols_b
+            )
+            _b_half_loads = _fp8_half_wn * _b_frag_loads_per_wn
+            _b_left_bundle_loads = _b_half_loads + _fp8_b_scale_loads
+
+            def _load_a_group(wm_base, wm_count, ks):
+                return [load_a_frag(a_buf, a_bases[wm_base + wm_local], ks) for wm_local in range_constexpr(wm_count)]
+
+            def _load_b_half(wn_base, ks):
+                return [
+                    load_b_frag(b_buf, b_bases, wn_base + wn_local, ks) for wn_local in range_constexpr(_fp8_half_wn)
+                ]
+
+            def _load_a_scales(ks):
+                a_scales = load_scale_b128(as_buf, as_bases[0], wmma_m_rep, ks)
+                if const_expr(use_scale_opsel):
+                    return a_scales[::2]
+                return a_scales
+
+            def _load_b_scales(ks):
+                b_scales = load_scale_b128(bs_buf, bs_bases[0], b_scale_load_rep, ks)
+                if const_expr(use_scale_opsel):
+                    return b_scales[::2]
+                return b_scales
+
+            def _load_b_left_bundle(ks):
+                return _load_b_half(0, ks), _load_b_scales(ks)
+
+            def _emit_group(wm_base, wn_base, a_frags, b_frags, a_scales, b_scales, emit_filler_now=False):
+                if const_expr(emit_filler_now and emit_filler is not None):
+                    rocdl.sched_barrier(0)
+                    emit_filler()
+                for wm_local in range_constexpr(_fp8_half_wm):
+                    global_wm = wm_base + wm_local
+                    for wn_local in range_constexpr(_fp8_half_wn):
+                        global_wn = wn_base + wn_local
+                        _emit_wmma(
+                            current_accs,
+                            global_wm,
+                            global_wn,
+                            a_frags[wm_local],
+                            b_frags[wn_local],
+                            a_scales,
+                            b_scales,
+                        )
+
+            b_left_frags, b_scales = _load_b_left_bundle(0)
+
+            for ks in range_constexpr(k_wmma_steps):
+                is_last_ks = ks == k_wmma_steps - 1
+                a_scales = _load_a_scales(ks)
+
+                a_top_frags = _load_a_group(0, _fp8_half_wm, ks)
+                a_bottom_frags = _load_a_group(_fp8_half_wm, _fp8_half_wm, ks)
+
+                # Keep bottom A outstanding while the first quadrant consumes top A.
+                rocdl.s_wait_dscnt(_fp8_half_wm * DS_LOADS_PER_A_FRAG)
+
+                _emit_group(0, 0, a_top_frags, b_left_frags, a_scales, b_scales)
+
+                if const_expr(ks == 0 and mid_compute_callback is not None):
+                    rocdl.sched_barrier(0)
+                    mid_compute_callback()
+
+                b_right_frags = _load_b_half(_fp8_half_wn, ks)
+
+                # Keep the newly issued right-half B loads outstanding while
+                # bottom A becomes ready for the second quadrant.
+                rocdl.s_wait_dscnt(_b_half_loads)
+
+                _emit_group(_fp8_half_wm, 0, a_bottom_frags, b_left_frags, a_scales, b_scales)
+
+                if const_expr(not is_last_ks):
+                    next_left_frags, next_b_scales = _load_b_left_bundle(ks + 1)
+                    # Current right-half B must be ready before Q2/Q3, while
+                    # the next ks left-half bundle stays in flight.
+                    rocdl.s_wait_dscnt(_b_left_bundle_loads)
+                else:
+                    rocdl.s_wait_dscnt(0)
+
+                _emit_group(0, _fp8_half_wn, a_top_frags, b_right_frags, a_scales, b_scales)
+                _emit_group(
+                    _fp8_half_wm,
+                    _fp8_half_wn,
+                    a_bottom_frags,
+                    b_right_frags,
+                    a_scales,
+                    b_scales,
+                    emit_filler_now=is_last_ks,
+                )
+
+                if const_expr(not is_last_ks):
+                    b_left_frags = next_left_frags
+                    b_scales = next_b_scales
+
+            return current_accs
+
         def compute_tile_b_streaming(
             accs_in, lds_a, lds_b, lds_as, lds_bs, emit_filler=None, mid_compute_callback=None
         ):
@@ -1100,6 +1218,27 @@ def compile_mxscale_gemm(
                 rocdl.sched_mfma(_group_wmma)
             rocdl.sched_barrier(0)
 
+        def hot_loop_scheduler_fp8_quadrant():
+            _a_all_loads = wmma_m_rep * DS_LOADS_PER_A_FRAG
+            _a_scale_loads = (wmma_m_rep + 3) // 4
+            _b_half_loads = _fp8_half_wn * _b_frag_loads_per_wn
+            _b_left_bundle_loads = _b_half_loads + _fp8_b_scale_loads
+            _group_wmma = _fp8_group_size
+
+            for _ks in range_constexpr(k_wmma_steps):
+                if const_expr(_ks == 0):
+                    rocdl.sched_dsrd(_b_left_bundle_loads + _a_scale_loads + _a_all_loads)
+                else:
+                    rocdl.sched_dsrd(_a_scale_loads + _a_all_loads)
+                rocdl.sched_mfma(_group_wmma)
+                rocdl.sched_dsrd(_b_half_loads)
+                rocdl.sched_mfma(_group_wmma)
+                if const_expr(_ks < k_wmma_steps - 1):
+                    rocdl.sched_dsrd(_b_left_bundle_loads)
+                rocdl.sched_mfma(_group_wmma)
+                rocdl.sched_mfma(_group_wmma)
+            rocdl.sched_barrier(0)
+
         def compute_tile_scheduled(accs_in, lds_a, lds_b, lds_as, lds_bs, emit_filler=None, mid_compute_callback=None):
             if const_expr(compute_schedule_kind == COMPUTE_SCHEDULE_B_STREAMING):
                 return compute_tile_b_streaming(
@@ -1113,6 +1252,16 @@ def compile_mxscale_gemm(
                 )
             if const_expr(compute_schedule_kind == COMPUTE_SCHEDULE_FP4_COL_BAND):
                 return compute_tile_fp4_bank_friendly(
+                    accs_in,
+                    lds_a,
+                    lds_b,
+                    lds_as,
+                    lds_bs,
+                    emit_filler=emit_filler,
+                    mid_compute_callback=mid_compute_callback,
+                )
+            if const_expr(compute_schedule_kind == COMPUTE_SCHEDULE_FP8_QUADRANT):
+                return compute_tile_fp8_quadrant(
                     accs_in,
                     lds_a,
                     lds_b,
@@ -1158,6 +1307,8 @@ def compile_mxscale_gemm(
                 hot_loop_scheduler_b_streaming()
             elif const_expr(compute_schedule_kind == COMPUTE_SCHEDULE_FP4_COL_BAND):
                 hot_loop_scheduler_fp4_bank_friendly()
+            elif const_expr(compute_schedule_kind == COMPUTE_SCHEDULE_FP8_QUADRANT):
+                hot_loop_scheduler_fp8_quadrant()
             else:
                 hot_loop_scheduler()
 
