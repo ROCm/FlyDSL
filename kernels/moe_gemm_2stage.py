@@ -111,6 +111,7 @@ def compile_moe_gemm1(
     scale_is_bf16: bool = False,
     k_batch: int = 1,
     use_async_copy: bool = False,
+    waves_per_eu: int = 2,
 ):
     """Compile stage1 kernel (`moe_gemm1`) and return the compiled executable.
 
@@ -1064,39 +1065,133 @@ def compile_moe_gemm1(
                 # ping/pong are now physically separate LDS buffers (lds_x_ping / lds_x_pong),
                 # each its own memref starting at offset 0; selection is by which memref we pass.
     
-                # Optional scheduler hints (copied from tuned GEMM); can be disabled via env.
+                # IGLP scheduler ported from preshuffle_gemm.py (gfx942 + gfx950).
+                # Tuned for int8smooth (is_int8=True, default load_b_tile branch on gfx942;
+                # _use_int8_k64 K64 path on gfx950). gemm1 has gate+up sub-gemms sharing
+                # each ds_read, so MFMA group counts are doubled (_num_gemms = 2).
+                _is_gfx942 = not _is_gfx950
+                _num_gemms = 2  # gate + up
+                int4_bf16_single_field = is_int4_bf16 and not is_int4_bf16_groupwise
+                _b_loads_per_call = k_unroll * num_acc_n * (1 if int4_bf16_single_field else 2)
+                num_b_loads = _num_gemms * _b_loads_per_call  # gate + up VMEM ops in flight
+                num_a_loads = num_x_loads
+                num_a_async_loads = num_x_loads if use_async_copy else 0
+                num_a_lds_load = k_unroll * m_repeat  # ds_read ops per compute_tile
+                _dsrd_preload = 2
+                _dvmem_preload = 4
                 rocdl.sched_barrier(0)
-    
+
                 def hot_loop_scheduler():
-                    rocdl.sched_barrier(0)
-                    return
-                    mfma_group = num_acc_n * 2
-                    # K64 micro-step: 2x K32 MFMA per gemm.
-                    mfma_total = (k_unroll * 2) * m_repeat * mfma_group
-                    mfma_per_iter = 2 * mfma_group
-                    sche_iters = 0 if mfma_per_iter == 0 else (mfma_total // mfma_per_iter)
-    
-                    rocdl.sched_dsrd(2)
-                    rocdl.sched_mfma(2)
-                    rocdl.sched_dsrd(1)
-                    rocdl.sched_mfma(1)
-                    rocdl.sched_dsrd(1)
-                    rocdl.sched_mfma(1)
-    
-                    # DS-write hints near the end: match total X LDS-store micro-ops per thread.
-                    # With async-copy there are no register->LDS stores; skip dswr emission.
-                    if const_expr(not use_async_copy):
-                        dswr_tail = num_x_loads
+                    def _build_scheduler(numer: int, denom: int):
+                        if const_expr(denom <= 0):
+                            return []
+                        if const_expr(numer <= 0):
+                            return [0] * denom
+                        out = []
+                        prev = 0
+                        for i in range_constexpr(denom):
+                            cur = ((i + 1) * numer + (denom - 1)) // denom
+                            out.append(cur - prev)
+                            prev = cur
+                        return out
+
+                    if const_expr(_is_gfx942):
+                        # gfx942: K32 sub-MFMAs, 2 per ku per (mi,ni) per gemm.
+                        mfma_group = num_acc_n * _num_gemms
+                        mfma_total = (k_unroll * 2) * m_repeat * mfma_group
+                        mfma_per_iter = 2 * mfma_group
+                        sche_iters = 0 if mfma_per_iter == 0 else (mfma_total // mfma_per_iter)
+                        rocdl.sched_dsrd(2)
+                        rocdl.sched_mfma(1)
+                        if const_expr(tile_m == 16):
+                            rocdl.sched_vmem(1)
+                        rocdl.sched_mfma(1)
+                        if const_expr(tile_m == 16):
+                            rocdl.sched_vmem(1)
+                        if const_expr(num_acc_n < 4):
+                            rocdl.sched_dsrd(1)
+                            rocdl.sched_mfma(1)
+                            if const_expr(tile_m == 16):
+                                rocdl.sched_vmem(1)
+                            rocdl.sched_dsrd(1)
+                            rocdl.sched_mfma(1)
+                            if const_expr(tile_m == 16):
+                                rocdl.sched_vmem(1)
+                            rocdl.sched_mfma(1)
+                        dswr_tail = num_a_loads
+                        dstr_advance = 2
                         if const_expr(dswr_tail > sche_iters):
                             dswr_tail = sche_iters
-                        dswr_start = sche_iters - dswr_tail
-                    for sche_i in range_constexpr(sche_iters):
-                        rocdl.sched_vmem(1)
-                        rocdl.sched_mfma(mfma_group)
-                        rocdl.sched_dsrd(1)
-                        rocdl.sched_mfma(mfma_group)
-                        if const_expr(not use_async_copy and sche_i >= dswr_start - 1):
-                            rocdl.sched_dswr(1)
+                        dswr_start = max(sche_iters - dswr_tail - dstr_advance, 0)
+                        for sche_i in range_constexpr(sche_iters):
+                            rocdl.sched_vmem(1)
+                            rocdl.sched_mfma(mfma_group)
+                            rocdl.sched_dsrd(1)
+                            rocdl.sched_mfma(mfma_group)
+                            if const_expr((not use_async_copy) and sche_i >= dswr_start - 1):
+                                rocdl.sched_dswr(1)
+                    else:
+                        # gfx950: dense MFMA (one per ku per (mi,ni) per gemm for K64 int8 / K32
+                        # f16/bf16). Schedule LDS reads + GMEM loads evenly across the MFMA stream.
+                        mfma_group = num_acc_n * _num_gemms
+                        if const_expr(_use_mfma_k32):
+                            element_k_per_mfma = 32
+                        elif const_expr(_use_int8_k64):
+                            element_k_per_mfma = 64
+                        else:
+                            element_k_per_mfma = 32
+                        num_mfma_per_tile_k = tile_k // element_k_per_mfma
+                        mfma_total = num_mfma_per_tile_k * m_repeat * mfma_group
+                        num_ds_load = num_a_lds_load
+                        dswr_tail = num_a_loads
+                        dstr_advance = 2
+                        if const_expr(dswr_tail > mfma_total):
+                            dswr_tail = mfma_total
+                        num_gmem_loads = num_b_loads + num_a_async_loads
+                        dsrd_preload_eff = min(int(_dsrd_preload), num_ds_load)
+                        dvmem_preload_eff = min(int(_dvmem_preload), num_gmem_loads)
+                        vmem_remaining = num_gmem_loads - dvmem_preload_eff
+                        dsrd_remaining = num_ds_load - dsrd_preload_eff
+                        if const_expr(vmem_remaining > 0 and vmem_remaining < mfma_total):
+                            vmem_schedule = (_build_scheduler(vmem_remaining, vmem_remaining)
+                                             + [0] * (mfma_total - vmem_remaining))
+                        else:
+                            vmem_schedule = _build_scheduler(vmem_remaining, mfma_total)
+                        dsrd_schedule = _build_scheduler(dsrd_remaining, mfma_total)
+                        dswr_start = max(mfma_total - dswr_tail - dstr_advance, 0)
+                        last_dsrd_mfma_idx = -1
+                        for sched_idx in range_constexpr(mfma_total):
+                            if const_expr(dsrd_schedule[sched_idx]):
+                                last_dsrd_mfma_idx = sched_idx
+                        dswr_start = max(dswr_start, last_dsrd_mfma_idx + 1)
+                        idx_ds_read = dsrd_preload_eff
+                        idx_gmem_load = dvmem_preload_eff
+                        idx_ds_write = 0
+                        if const_expr(dvmem_preload_eff):
+                            rocdl.sched_vmem(dvmem_preload_eff)
+                        if const_expr(dsrd_preload_eff):
+                            rocdl.sched_dsrd(dsrd_preload_eff)
+                        for mfma_idx in range_constexpr(mfma_total):
+                            rocdl.sched_mfma(1)
+                            n_dsrd = dsrd_schedule[mfma_idx]
+                            if const_expr(n_dsrd and (idx_ds_read < num_ds_load)):
+                                if const_expr(idx_ds_read + n_dsrd > num_ds_load):
+                                    n_dsrd = num_ds_load - idx_ds_read
+                                if const_expr(n_dsrd):
+                                    rocdl.sched_dsrd(n_dsrd)
+                                    idx_ds_read += n_dsrd
+                            n_vmem = vmem_schedule[mfma_idx]
+                            if const_expr(n_vmem and (idx_gmem_load < num_gmem_loads)):
+                                if const_expr(idx_gmem_load + n_vmem > num_gmem_loads):
+                                    n_vmem = num_gmem_loads - idx_gmem_load
+                                if const_expr(n_vmem):
+                                    rocdl.sched_vmem(n_vmem)
+                                    idx_gmem_load += n_vmem
+                            if const_expr((not use_async_copy) and (idx_ds_write < dswr_tail) and (mfma_idx >= dswr_start)):
+                                rocdl.sched_dswr(1)
+                                idx_ds_write += 1
+                        if const_expr((not use_async_copy) and (idx_ds_write < num_a_loads)):
+                            rocdl.sched_dswr(num_a_loads - idx_ds_write)
                     rocdl.sched_barrier(0)
 
                 # Async-copy DMA helpers (gmem -> LDS direct via raw_ptr_buffer_load_lds).
@@ -1123,7 +1218,21 @@ def compile_moe_gemm1(
                             base_k * arith.constant(int(elem_bytes), index=True)
                         ) / arith.index(4)
 
-                        lds_ptr_i64 = None
+                        wave_offset = rocdl.readfirstlane(
+                            fx.Int64.ir_type,
+                            fx.Int64(wave_id * fx.Index(_wave_size * _dma_bytes)),
+                        )
+                        # GEP from a provenance-preserving LDS base so LLVM AA can
+                        # disambiguate this buffer_load_lds write from ds_read traffic
+                        # on the *other* LDS buffer; without provenance, AA assumes
+                        # may-alias and inserts expcnt(0) before each ds_read.
+                        lds_ptr_base = buffer_ops.extract_workgroup_aligned_ptr(
+                            lds_buf, address_space=3
+                        )
+                        lds_ptr = buffer_ops.get_element_ptr(
+                            lds_ptr_base, wave_offset
+                        )
+
                         for i in range_constexpr(_num_dma_loads):
                             row_local_i = x_row_local[i]
                             col_local_i32_i = x_col_local_i32[i]
@@ -1134,23 +1243,11 @@ def compile_moe_gemm1(
                             global_byte_idx = row_k_dw * c4_idx + col_local_sw
                             global_offset = arith.index_cast(T.i32, global_byte_idx)
 
-                            if const_expr(i == 0):
-                                lds_addr = (
-                                    memref.extract_aligned_pointer_as_index(lds_buf)
-                                    + wave_id * arith.constant(
-                                        _wave_size * _dma_bytes, index=True
-                                    )
+                            if const_expr(i > 0):
+                                lds_ptr = buffer_ops.get_element_ptr(
+                                    lds_ptr,
+                                    static_byte_offset=total_threads * _dma_bytes,
                                 )
-                                lds_ptr_i64 = rocdl.readfirstlane(
-                                    T.i64, arith.index_cast(T.i64, lds_addr)
-                                )
-                            else:
-                                lds_ptr_i64 = lds_ptr_i64 + arith.constant(
-                                    total_threads * _dma_bytes, type=T.i64
-                                )
-
-                            lds_ptr_type = ir.Type.parse("!llvm.ptr<3>")
-                            lds_ptr = llvm.inttoptr(lds_ptr_type, lds_ptr_i64)
 
                             rocdl.raw_ptr_buffer_load_lds(
                                 x_rsrc,
@@ -1284,7 +1381,7 @@ def compile_moe_gemm1(
                         store_x_tile_to_lds(x_regs_ping, lds_x_ping, x_load_bytes)
                     hot_loop_scheduler()
                     if const_expr(use_async_copy):
-                        rocdl.s_waitcnt(0)
+                        rocdl.s_waitcnt(8)
                     gpu.barrier()
 
                     _a0pf_ping = lds_load_packs_k64(row_a_lds, col_offset_base_bytes, lds_x_ping)
@@ -1303,7 +1400,7 @@ def compile_moe_gemm1(
                         store_x_tile_to_lds(x_regs_pong, lds_x_pong, x_load_bytes)
                     hot_loop_scheduler()
                     if const_expr(use_async_copy):
-                        rocdl.s_waitcnt(0)
+                        rocdl.s_waitcnt(8)
                     gpu.barrier()
 
                     _a0pf_new = lds_load_packs_k64(row_a_lds, col_offset_base_bytes, lds_x_pong)
@@ -1811,6 +1908,7 @@ def compile_moe_gemm1(
         gx = inter_in // fx.Index(tile_n)
         gy = size_expert_ids_in
 
+        _v_attrs1 = {"rocdl.waves_per_eu": int(waves_per_eu)} if int(waves_per_eu) > 0 else {}
         moe_gemm1(
             arg_out,
             arg_x,
@@ -1825,6 +1923,7 @@ def compile_moe_gemm1(
             i32_inter_in,
             i32_k_in,
             i32_size_expert_ids_in,
+            value_attrs=_v_attrs1,
         ).launch(
             grid=(gx, gy, k_batch),
             block=(256, 1, 1),
@@ -1852,6 +1951,7 @@ def compile_moe_gemm2(
     accumulate: bool = True,
     scale_is_bf16: bool = False,
     use_async_copy: bool = False,
+    waves_per_eu: int = 2,
 ):
     """Compile stage2 kernel (`moe_gemm2`) and return the compiled executable.
 
@@ -2755,89 +2855,141 @@ def compile_moe_gemm2(
     
                 rocdl.sched_barrier(0)
     
-                # def hot_loop_scheduler():
-                #     mfma_group = num_acc_n
-                #     # K64 micro-step: 2x K32 MFMA per accumulator update.
-                #     mfma_total = (k_unroll * 2) * m_repeat * mfma_group
-                #     mfma_per_iter = 2 * mfma_group
-                #     sche_iters = 0 if mfma_per_iter == 0 else (mfma_total // mfma_per_iter)
-                #     rocdl.sched_dsrd(2)
-                #     rocdl.sched_mfma(1)
-                #     rocdl.sched_mfma(1)
-                #     if num_acc_n < 4:
-                #         rocdl.sched_dsrd(1)
-                #         rocdl.sched_mfma(1)
-                #         rocdl.sched_dsrd(1)
-                #         rocdl.sched_mfma(1)
-                #         rocdl.sched_vmem(1)
-                #         rocdl.sched_mfma(1)
-                #         rocdl.sched_vmem(1)
-                #         rocdl.sched_mfma(2)
-                #         rocdl.sched_dsrd(1)
-                #         rocdl.sched_mfma(2)
-                #         rocdl.sched_vmem(1)
-    
-                #     dswr_tail = num_x_loads
-                #     if dswr_tail > sche_iters:
-                #         dswr_tail = sche_iters
-                #     dswr_start = sche_iters - dswr_tail
-                #     for sche_i in range_constexpr(sche_iters):
-                #         rocdl.sched_mfma(mfma_group // 2)
-                #         rocdl.sched_dsrd(1)
-                #         rocdl.sched_mfma(mfma_group // 2)
-                #         rocdl.sched_vmem(1)
-                #         rocdl.sched_mfma(mfma_group)
-                #         if sche_i >= dswr_start - 1:
-                #             rocdl.sched_dswr(1)
-                #     rocdl.sched_barrier(0)
-    
+                # IGLP scheduler ported from preshuffle_gemm.py (gfx942 + gfx950).
+                # Tuned for int8smooth (is_int8=True). gemm2 has a single gemm per stage,
+                # so MFMA group counts are NOT doubled (_num_gemms = 1).
+                _is_gfx942 = not _is_gfx950
+                _num_gemms = 1
+                int4_bf16_single_field = is_int4_bf16 and not is_int4_bf16_groupwise
+                _b_loads_per_call = k_unroll * num_acc_n * (1 if int4_bf16_single_field else 2)
+                num_b_loads = _num_gemms * _b_loads_per_call
+                num_a_loads = num_x_loads
+                num_a_async_loads = num_x_loads if use_async_copy else 0
+                num_a_lds_load = k_unroll * m_repeat
+                _dsrd_preload = 2
+                _dvmem_preload = 2
+                rocdl.sched_barrier(0)
+
                 def hot_loop_scheduler():
+                    # IMPORTANT: emit a sched_barrier(0) inside the body so each
+                    # call site (3x in the K ping-pong loop) fences the LLVM
+                    # instruction scheduler from reordering across pong/ping/epilog
+                    # boundaries.  Removing this lets LLVM unroll the K runtime
+                    # loop into 8 disjoint blocks (~256 mfma each) and balloons
+                    # VGPR pressure from 120 -> 178 (+48%), regressing stage2 by
+                    # ~25% on int8smooth-async (744us -> 940us at 7168x2048,E48,K8).
                     rocdl.sched_barrier(0)
-                    return
-                    # - MFMA group size per "slot": num_acc_n
-                    # - Total MFMA per tile: (2*K32 per K64) * k_unroll * m_repeat * num_acc_n
-                    # - We emit (mfma_group + dsrd + mfma_group) per scheduler iteration.
-                    mfma_group = num_acc_n
-                    mfma_total = (k_unroll * 2) * m_repeat * mfma_group
-                    mfma_per_iter = 2 * mfma_group
-                    sche_iters = 0 if mfma_per_iter == 0 else (mfma_total // mfma_per_iter)
-    
-                    rocdl.sched_dsrd(2)
-                    rocdl.sched_mfma(1)
-                    if const_expr(tile_m == 16):
-                        rocdl.sched_vmem(1)
-                    rocdl.sched_mfma(1)
-                    if const_expr(tile_m == 16):
-                        rocdl.sched_vmem(1)
-                    if const_expr(num_acc_n < 4):
-                        rocdl.sched_dsrd(1)
+                    return 0
+                    def _build_scheduler(numer: int, denom: int):
+                        if const_expr(denom <= 0):
+                            return []
+                        if const_expr(numer <= 0):
+                            return [0] * denom
+                        out = []
+                        prev = 0
+                        for i in range_constexpr(denom):
+                            cur = ((i + 1) * numer + (denom - 1)) // denom
+                            out.append(cur - prev)
+                            prev = cur
+                        return out
+
+                    if const_expr(_is_gfx942):
+                        # gfx942: K32 sub-MFMAs, 2 per ku per (mi,ni).
+                        mfma_group = num_acc_n * _num_gemms
+                        mfma_total = (k_unroll * 2) * m_repeat * mfma_group
+                        mfma_per_iter = 2 * mfma_group
+                        sche_iters = 0 if mfma_per_iter == 0 else (mfma_total // mfma_per_iter)
+                        rocdl.sched_dsrd(2)
                         rocdl.sched_mfma(1)
                         if const_expr(tile_m == 16):
                             rocdl.sched_vmem(1)
-                        rocdl.sched_dsrd(1)
                         rocdl.sched_mfma(1)
                         if const_expr(tile_m == 16):
                             rocdl.sched_vmem(1)
-                        rocdl.sched_mfma(1)
-    
-                    # DS-write hints near the end: match total A LDS-store micro-ops per thread.
-                    # With async-copy there are no register->LDS stores; skip dswr emission.
-                    if const_expr(not use_async_copy):
-                        dswr_tail = num_x_loads
+                        if const_expr(num_acc_n < 4):
+                            rocdl.sched_dsrd(1)
+                            rocdl.sched_mfma(1)
+                            if const_expr(tile_m == 16):
+                                rocdl.sched_vmem(1)
+                            rocdl.sched_dsrd(1)
+                            rocdl.sched_mfma(1)
+                            if const_expr(tile_m == 16):
+                                rocdl.sched_vmem(1)
+                            rocdl.sched_mfma(1)
+                        dswr_tail = num_a_loads
+                        dstr_advance = 2
                         if const_expr(dswr_tail > sche_iters):
                             dswr_tail = sche_iters
-                        dswr_start = sche_iters - dswr_tail
-
-                    for sche_i in range_constexpr(sche_iters):
-                        rocdl.sched_vmem(1)
-                        rocdl.sched_mfma(mfma_group)
-                        rocdl.sched_dsrd(1)
-                        rocdl.sched_mfma(mfma_group)
-                        if const_expr(not use_async_copy and sche_i >= dswr_start - 1):
-                            rocdl.sched_dswr(1)
-
+                        dswr_start = max(sche_iters - dswr_tail - dstr_advance, 0)
+                        for sche_i in range_constexpr(sche_iters):
+                            rocdl.sched_vmem(1)
+                            rocdl.sched_mfma(mfma_group)
+                            rocdl.sched_dsrd(1)
+                            rocdl.sched_mfma(mfma_group)
+                            if const_expr((not use_async_copy) and sche_i >= dswr_start - 1):
+                                rocdl.sched_dswr(1)
+                    else:
+                        # gfx950: dense MFMA (K64 int8 / K32 f16/bf16).
+                        mfma_group = num_acc_n * _num_gemms
+                        if const_expr(_use_mfma_k32):
+                            element_k_per_mfma = 32
+                        elif const_expr(_use_int8_k64):
+                            element_k_per_mfma = 64
+                        else:
+                            element_k_per_mfma = 32
+                        num_mfma_per_tile_k = tile_k // element_k_per_mfma
+                        mfma_total = num_mfma_per_tile_k * m_repeat * mfma_group
+                        num_ds_load = num_a_lds_load
+                        dswr_tail = num_a_loads
+                        dstr_advance = 2
+                        if const_expr(dswr_tail > mfma_total):
+                            dswr_tail = mfma_total
+                        num_gmem_loads = num_b_loads + num_a_async_loads
+                        dsrd_preload_eff = min(int(_dsrd_preload), num_ds_load)
+                        dvmem_preload_eff = min(int(_dvmem_preload), num_gmem_loads)
+                        vmem_remaining = num_gmem_loads - dvmem_preload_eff
+                        dsrd_remaining = num_ds_load - dsrd_preload_eff
+                        if const_expr(vmem_remaining > 0 and vmem_remaining < mfma_total):
+                            vmem_schedule = (_build_scheduler(vmem_remaining, vmem_remaining)
+                                             + [0] * (mfma_total - vmem_remaining))
+                        else:
+                            vmem_schedule = _build_scheduler(vmem_remaining, mfma_total)
+                        dsrd_schedule = _build_scheduler(dsrd_remaining, mfma_total)
+                        dswr_start = max(mfma_total - dswr_tail - dstr_advance, 0)
+                        last_dsrd_mfma_idx = -1
+                        for sched_idx in range_constexpr(mfma_total):
+                            if const_expr(dsrd_schedule[sched_idx]):
+                                last_dsrd_mfma_idx = sched_idx
+                        dswr_start = max(dswr_start, last_dsrd_mfma_idx + 1)
+                        idx_ds_read = dsrd_preload_eff
+                        idx_gmem_load = dvmem_preload_eff
+                        idx_ds_write = 0
+                        if const_expr(dvmem_preload_eff):
+                            rocdl.sched_vmem(dvmem_preload_eff)
+                        if const_expr(dsrd_preload_eff):
+                            rocdl.sched_dsrd(dsrd_preload_eff)
+                        for mfma_idx in range_constexpr(mfma_total):
+                            rocdl.sched_mfma(1)
+                            n_dsrd = dsrd_schedule[mfma_idx]
+                            if const_expr(n_dsrd and (idx_ds_read < num_ds_load)):
+                                if const_expr(idx_ds_read + n_dsrd > num_ds_load):
+                                    n_dsrd = num_ds_load - idx_ds_read
+                                if const_expr(n_dsrd):
+                                    rocdl.sched_dsrd(n_dsrd)
+                                    idx_ds_read += n_dsrd
+                            n_vmem = vmem_schedule[mfma_idx]
+                            if const_expr(n_vmem and (idx_gmem_load < num_gmem_loads)):
+                                if const_expr(idx_gmem_load + n_vmem > num_gmem_loads):
+                                    n_vmem = num_gmem_loads - idx_gmem_load
+                                if const_expr(n_vmem):
+                                    rocdl.sched_vmem(n_vmem)
+                                    idx_gmem_load += n_vmem
+                            if const_expr((not use_async_copy) and (idx_ds_write < dswr_tail) and (mfma_idx >= dswr_start)):
+                                rocdl.sched_dswr(1)
+                                idx_ds_write += 1
+                        if const_expr((not use_async_copy) and (idx_ds_write < num_a_loads)):
+                            rocdl.sched_dswr(num_a_loads - idx_ds_write)
                     rocdl.sched_barrier(0)
-
                 # Async-copy DMA helpers (gmem -> LDS direct via raw_ptr_buffer_load_lds).
                 # Mirrors mixed_moe_gemm_2stage.py; only enabled when use_async_copy is True.
                 # Each ping/pong buffer is its own memref starting at offset 0; helper takes
@@ -2862,7 +3014,21 @@ def compile_moe_gemm2(
                             base_k * arith.constant(int(elem_bytes), index=True)
                         ) / arith.index(4)
 
-                        lds_ptr_i64 = None
+                        wave_offset = rocdl.readfirstlane(
+                            fx.Int64.ir_type,
+                            fx.Int64(wave_id * fx.Index(_wave_size * _dma_bytes)),
+                        )
+                        # GEP from a provenance-preserving LDS base so LLVM AA can
+                        # disambiguate this buffer_load_lds write from ds_read traffic
+                        # on the *other* LDS buffer; without provenance, AA assumes
+                        # may-alias and inserts expcnt(0) before each ds_read.
+                        lds_ptr_base = buffer_ops.extract_workgroup_aligned_ptr(
+                            lds_buf, address_space=3
+                        )
+                        lds_ptr = buffer_ops.get_element_ptr(
+                            lds_ptr_base, wave_offset
+                        )
+
                         for i in range_constexpr(_num_dma_loads):
                             row_local_i = x_row_local[i]
                             col_local_i32_i = x_col_local_i32[i]
@@ -2873,23 +3039,11 @@ def compile_moe_gemm2(
                             global_byte_idx = row_k_dw * c4_idx + col_local_sw
                             global_offset = arith.index_cast(T.i32, global_byte_idx)
 
-                            if const_expr(i == 0):
-                                lds_addr = (
-                                    memref.extract_aligned_pointer_as_index(lds_buf)
-                                    + wave_id * arith.constant(
-                                        _wave_size * _dma_bytes, index=True
-                                    )
+                            if const_expr(i > 0):
+                                lds_ptr = buffer_ops.get_element_ptr(
+                                    lds_ptr,
+                                    static_byte_offset=total_threads * _dma_bytes,
                                 )
-                                lds_ptr_i64 = rocdl.readfirstlane(
-                                    T.i64, arith.index_cast(T.i64, lds_addr)
-                                )
-                            else:
-                                lds_ptr_i64 = lds_ptr_i64 + arith.constant(
-                                    total_threads * _dma_bytes, type=T.i64
-                                )
-
-                            lds_ptr_type = ir.Type.parse("!llvm.ptr<3>")
-                            lds_ptr = llvm.inttoptr(lds_ptr_type, lds_ptr_i64)
 
                             rocdl.raw_ptr_buffer_load_lds(
                                 x_rsrc,
@@ -2916,7 +3070,7 @@ def compile_moe_gemm2(
                 if const_expr(use_async_copy):
                     rocdl.s_waitcnt(0)
                 gpu.barrier()
-    
+
                 acc = [acc_init] * (num_acc_n * m_repeat)
 
                 # Cross-tile A0 LDS prefetch (default-on): prefetch the first A-pack (K64) for the
@@ -3370,6 +3524,7 @@ def compile_moe_gemm2(
         gx = n_in // fx.Index(tile_n)
         gy = size_expert_ids_in
 
+        _v_attrs2 = {"rocdl.waves_per_eu": int(waves_per_eu)} if int(waves_per_eu) > 0 else {}
         moe_gemm2(
             arg_out,
             arg_x,
@@ -3384,6 +3539,7 @@ def compile_moe_gemm2(
             i32_n_in,
             i32_k_in,
             i32_size_expert_ids_in,
+            value_attrs=_v_attrs2,
         ).launch(
             grid=(gx, gy, 1),
             block=(256, 1, 1),
@@ -3738,6 +3894,7 @@ def compile_moe_gemm2_ex(
     valid_mask = None,
     zero_intermediate: bool = True,
     scale_is_bf16: bool = False,
+    waves_per_eu: int = 2,
 ):
     """Compile MoE GEMM2 kernel with optional reduction.
 
@@ -3775,6 +3932,7 @@ def compile_moe_gemm2_ex(
             use_cshuffle_epilog=use_cshuffle_epilog,
             accumulate=False,
             scale_is_bf16=scale_is_bf16,
+            waves_per_eu=waves_per_eu,
         )
         # Compile reduction kernel with masking support
         out_s = str(out_dtype).strip().lower()
@@ -3815,4 +3973,5 @@ def compile_moe_gemm2_ex(
             out_dtype=out_dtype,
             use_cshuffle_epilog=use_cshuffle_epilog,
             accumulate=True,
+            waves_per_eu=waves_per_eu,
         )

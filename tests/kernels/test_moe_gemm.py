@@ -337,6 +337,7 @@ def run_moe_stage1(
     even_dispatch: bool = False,
     out_dtype: str = "f16",
     k_batch: int = 1,
+    waves_per_eu: int = 2,
 ):
     assert model_dim % 64 == 0
     assert model_dim % tile_k == 0
@@ -629,6 +630,7 @@ def run_moe_stage1(
             out_dtype=out_dtype,
             k_batch=k_batch,
             use_async_copy=os.environ.get("FLYDSL_MOE_USE_ASYNC_COPY", "0") in ("1", "true", "True", "YES", "yes"),
+            waves_per_eu=int(waves_per_eu),
         )
 
         def _s1_args(o, x, w, sx, sw, st, eids, sw_sorted):
@@ -870,6 +872,7 @@ def run_moe_stage2(
     scale_w2_groups_in: Optional[torch.Tensor] = None,
     scale_dtype: str = "f32",
     even_dispatch: bool = False,
+    waves_per_eu: int = 2,
 ):
     """MoE stage2 (gemm2): out2[t] = sum_{slot} ( out1[t,slot] @ W2[expert]^T ) with optional routed weight."""
 
@@ -904,7 +907,7 @@ def run_moe_stage2(
     # Default compile function.
     if compile_fn is None:
         if use_reduce:
-            compile_fn = _make_reduce_mode_compile_fn(use_flydsl_reduce=True, use_valid_mask=bool(use_valid_mask), scale_dtype=scale_dtype)
+            compile_fn = _make_reduce_mode_compile_fn(use_flydsl_reduce=True, use_valid_mask=bool(use_valid_mask), scale_dtype=scale_dtype, waves_per_eu=int(waves_per_eu))
         else:
             compile_fn = compile_moe_gemm2
 
@@ -1260,6 +1263,7 @@ def run_moe_stage2(
             doweight_stage2=bool(doweight_stage2),
             scale_is_bf16=(scale_dtype == "bf16"),
             use_async_copy=os.environ.get("FLYDSL_MOE_USE_ASYNC_COPY", "0") in ("1", "true", "True", "YES", "yes"),
+            waves_per_eu=int(waves_per_eu),
         )
     is_reduce_exe = (getattr(exe, "mode", None) == MoeGemm2Mode.REDUCE) or bool(use_reduce)
 
@@ -1561,6 +1565,8 @@ def test_moe_gemm_2stage(
     skip_ref: bool = False,
     w_fp4_kernel: bool = False,
     tile_m2: Optional[int] = None,
+    waves_per_eu1: int = 2,
+    waves_per_eu2: int = 2,
 ):
     """Single 2-stage test: gemm1 -> quantize -> gemm2, with routing built once.
 
@@ -1666,6 +1672,7 @@ def test_moe_gemm_2stage(
         skip_ref=bool(skip_ref),
         w_fp4_kernel=w_fp4_kernel,
         test_graph=test_graph,
+        waves_per_eu=int(waves_per_eu1),
     )
 
     if in_dtype in ("fp4", "a8w4"):
@@ -1734,6 +1741,7 @@ def test_moe_gemm_2stage(
         use_reduce=bool(use_reduce),
         use_valid_mask=use_valid_mask,
         test_graph=test_graph,
+        waves_per_eu=int(waves_per_eu2),
     )
 
 
@@ -1790,13 +1798,14 @@ def _per_1x32_mxfp8_quant(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
 
 
 # Test Helpers for MoE GEMM2 Mode Comparison
-def _make_reduce_mode_compile_fn(use_flydsl_reduce: bool = True, use_valid_mask: bool = False, scale_dtype: str = "f32"):
+def _make_reduce_mode_compile_fn(use_flydsl_reduce: bool = True, use_valid_mask: bool = False, scale_dtype: str = "f32", waves_per_eu: int = 2):
     """Create a compile function that forces reduce mode.
-    
+
     Args:
         use_flydsl_reduce: If True, use FlyDSL reduce kernel.
                           If False, use torch.sum (for baseline comparison).
     """
+    _wpe_outer = int(waves_per_eu)
     def _compile(
         *,
         model_dim: int,
@@ -1812,6 +1821,7 @@ def _make_reduce_mode_compile_fn(use_flydsl_reduce: bool = True, use_valid_mask:
         out_dtype: str = "f16",
         scale_is_bf16: bool = False,
         use_async_copy: bool = False,
+        waves_per_eu: int = _wpe_outer,
     ):
         if use_flydsl_reduce:
             return compile_moe_gemm2_ex(
@@ -1830,6 +1840,7 @@ def _make_reduce_mode_compile_fn(use_flydsl_reduce: bool = True, use_valid_mask:
                 mode=MoeGemm2Mode.REDUCE,
                 zero_intermediate=False, # test non-zeroed performance
                 scale_is_bf16=(scale_dtype == "bf16"),
+                waves_per_eu=int(waves_per_eu),
             )
         else:
             gemm2_exe = compile_moe_gemm2(
@@ -1847,6 +1858,7 @@ def _make_reduce_mode_compile_fn(use_flydsl_reduce: bool = True, use_valid_mask:
                 accumulate=False,
                 scale_is_bf16=(scale_dtype == "bf16"),
                 use_async_copy=use_async_copy,
+                waves_per_eu=int(waves_per_eu),
             )
             return _TorchReduceWrapper(gemm2_exe, topk, model_dim)
     return _compile
@@ -2184,7 +2196,31 @@ if __name__ == "__main__":
         help="Group size for W4A16 groupwise scale (-1 = per-row, 32 = group_size=32).",
     )
 
+    # waves_per_eu occupancy hint (rocdl.waves_per_eu attr on the launched kernel).
+    # 0 disables the hint (allocator chooses freely). Defaults match the kernel default of 2.
+    parser.add_argument(
+        "--waves_per_eu1",
+        type=int,
+        default=2,
+        help="Stage1 rocdl.waves_per_eu hint (0 = no hint).",
+    )
+    parser.add_argument(
+        "--waves_per_eu2",
+        type=int,
+        default=2,
+        help="Stage2 rocdl.waves_per_eu hint (0 = no hint).",
+    )
+    parser.add_argument(
+        "--waves_per_eu",
+        type=int,
+        default=None,
+        help="Convenience: set both --waves_per_eu1 and --waves_per_eu2 to this value.",
+    )
+
     args = parser.parse_args()
+    if args.waves_per_eu is not None:
+        args.waves_per_eu1 = int(args.waves_per_eu)
+        args.waves_per_eu2 = int(args.waves_per_eu)
 
     model_dim, inter_dim = args.dim
 
@@ -2234,6 +2270,8 @@ if __name__ == "__main__":
             use_valid_mask=bool(args.use_valid_mask),
             test_graph=bool(args.test_graph),
             tile_m2=tile_m2_arg,
+            waves_per_eu1=int(args.waves_per_eu1),
+            waves_per_eu2=int(args.waves_per_eu2),
         )
 
     # Run 2-stage (gemm1 -> quantize -> gemm2) aiter-style test/benchmark.

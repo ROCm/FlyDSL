@@ -55,6 +55,7 @@ mkdir -p dumps
 TOKENS=(4096)
 # DIMS=("3584,1024" "5120,1536" "7168,2048")
 DIMS=("7168,2048")
+# DIMS=("3584,1024")
 EXPERTS=48    # 384 total / ep=8
 TOPK=8
 
@@ -127,15 +128,17 @@ run_moe_stage2_a8w4smooth(**kwargs)
                 --tile_m 128 \
                 --tile_n 128 \
                 --tile_k 128 \
-                --tile_m2 64 \
+                --tile_m2 128 \
                 --tile_n2 128 \
-                --tile_k2 128 \
+                --tile_k2 256 \
                 --gemm2_mode atomic \
                 --moe_sort_mode torch \
                 --compare_aiter_ck false \
                 --skip_ref false \
                 --num_iters "$NUM_ITERS" \
                 --num_warmup "$NUM_WARMUP" \
+                --waves_per_eu1 2 \
+                --waves_per_eu2 0 \
                 2>&1 # | grep -E "TFLOPS|TB/s|stage[12]|Error|SKIP|skip" || true
         fi
         echo "---"

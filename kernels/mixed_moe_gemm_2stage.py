@@ -1602,7 +1602,7 @@ def compile_mixed_moe_gemm1(
                         rocdl.sched_barrier(0)
 
                         # MFMAs on prev data
-                        rocdl.s_setprio(1)
+                        # rocdl.s_setprio(1)
                         for _m_j in range_constexpr(len(_pp_mfma[_p])):
                             _k_idx, _ni_idx, _ikxdl, _inxdl, _ku128 = _pp_mfma[_p][_m_j]
                             _ni_packed_idx = _ni_idx // pack_N
@@ -1635,7 +1635,7 @@ def compile_mixed_moe_gemm1(
                                 _ikxdl,
                                 _inxdl,
                             )
-                        rocdl.s_setprio(0)
+                        # rocdl.s_setprio(0)
                         rocdl.sched_barrier(0)
 
                     # ---- Assemble loaded data for next half-iteration ----
