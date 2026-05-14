@@ -87,14 +87,14 @@ def make_rmem_tensor(shape_or_layout, dtype, *, loc=None, ip=None):
     """Creates a tensor in register memory with the specified layout/shape and data type.
 
     If shape_or_layout is a shape, it is converted to a layout with column-major ordering.
-    Boolean are canonically stored as Int8.
+    Booleans are canonically stored as Int8.
 
     Examples:
-        tensor = make_rmem_tensor(8, cutlass.Float32)
+        tensor = make_rmem_tensor(8, fx.Float32)
         tensor = make_rmem_tensor(make_layout(4, 1), fx.Float16)
     """
     if not issubclass(dtype, Numeric):
-        raise TypeError(f"value_type must be a Numeric type, but got {type(dtype)}")
+        raise TypeError(f"dtype must be a Numeric type, but got {type(dtype)}")
     elem_ty = dtype.ir_type if dtype is not Boolean else Int8.ir_type
 
     if not isinstance(shape_or_layout, Layout):
