@@ -1,6 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
+"""8-wave FP8 matmul with row-wise scaling for AMD CDNA4.
+
+Algorithm derived from HipKittens FP8_8wave
+(https://github.com/HazyResearch/HipKittens/blob/7782744ba1fd259a377a99e2ea8f71384cc80e55/kernels/gemm/fp8fp32/FP8_8wave/8_wave.cu#L1)
+"""
+
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir.dialects import arith as arith_dialect
