@@ -341,7 +341,7 @@ def _make_composite_class(
     def __init__(self, *args, **kwargs):
         if policy == CompositeKind.Sum:
             raise TypeError(
-                f"Union schema {_display_name(type(self))} has no value form; use Storage[...] or allocator.allocate()."
+                f"Union {_display_name(type(self))} has no value form; use Storage[...] or allocator.allocate()."
             )
         base_cls = getattr(type(self), "__dsl_base_type__", type(self))
         values = _field_values_from_args(base_cls, args, kwargs)
@@ -431,11 +431,42 @@ def _make_composite_class(
 
     @classmethod
     def __peek_from_ptr__(cls, ptr: Pointer):
-        raise NotImplementedError(f"{_display_name(cls)} does not support __peek_from_ptr__ yet")
+        if policy != CompositeKind.Product:
+            raise NotImplementedError(f"Union {_display_name(cls)} does not support __peek_from_ptr__")
+        _, _, offsets = _storage_layout(cls)
+        values = {}
+        for name, eff_type in _effective_field_defs(cls):
+            if _is_constexpr_type(eff_type):
+                values[name] = _construct_field_from_ir(eff_type, [])
+                continue
+            if name not in offsets:
+                raise TypeError(
+                    f"Cannot peek field '{name}' in schema {_display_name(cls)} because it has no storage offset."
+                )
+            values[name] = peek_from_ptr(eff_type, add_offset(ptr, offsets[name]))
+        return cls(**values)
 
     @classmethod
     def __poke_into_ptr__(cls, ptr: Pointer, value):
-        raise NotImplementedError(f"{_display_name(cls)} does not support __poke_into_ptr__ yet")
+        if policy != CompositeKind.Product:
+            raise NotImplementedError(f"Union {_display_name(cls)} does not support __poke_into_ptr__")
+        if not isinstance(value, cls):
+            raise TypeError(
+                f"{_display_name(cls)}.__poke_into_ptr__ expects {_display_name(cls)} value, "
+                f"got {type(value).__name__}."
+            )
+
+        _, _, offsets = _storage_layout(cls)
+        value_field_types = dict(_effective_field_defs(type(value))) if is_struct_type(type(value)) else {}
+        for field in fields:
+            eff_type = value_field_types.get(field.name, field.type_spec)
+            if _is_constexpr_type(eff_type):
+                continue
+            if field.name not in offsets:
+                raise TypeError(
+                    f"Cannot poke field '{field.name}' in schema {_display_name(cls)} because it has no storage offset."
+                )
+            poke_into_ptr(eff_type, add_offset(ptr, offsets[field.name]), getattr(value, field.name))
 
     def __cache_signature__(self):
         parts = [type(self)]
@@ -558,7 +589,7 @@ class Align:
             return peek_from_ptr(inner, ptr)
 
         def _aligned_poke_into_ptr(ptr, value, inner=dtype):
-            return poke_into_ptr(inner, ptr, value)
+            poke_into_ptr(inner, ptr, value)
 
         inner_key = _type_cache_key(dtype)
 
@@ -613,7 +644,7 @@ class Storage:
 
             def poke(self, value):
                 dsl_type = type(self)._target_type
-                return poke_into_ptr(dsl_type, object.__getattribute__(self, "_ptr"), value)
+                poke_into_ptr(dsl_type, object.__getattribute__(self, "_ptr"), value)
 
             def __getattr__(self, name):
                 dsl_type = type(self)._target_type
