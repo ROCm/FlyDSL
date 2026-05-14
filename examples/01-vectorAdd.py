@@ -72,12 +72,7 @@ def run_eager():
     tA = flyc.from_dlpack(A).mark_layout_dynamic(leading_dim=0, divisibility=4)
     vectorAdd(tA, B, C, n, n + 1, stream=torch.cuda.Stream())
     torch.cuda.synchronize()
-
-    diff = (C - (A + B)).abs()
-    tol = 1e-3 + 1e-3 * (A + B).abs()
-    max_violation = (diff - tol).max().item()
-    is_closed = max_violation <= 0
-
+    is_closed = torch.allclose(C, A + B)
     print(f"[Eager] Result correct: {is_closed}")
     if not is_closed:
         print("tA:", A[:32])
@@ -113,18 +108,12 @@ def run_graph_capture():
     graph.replay()
     torch.cuda.synchronize()
 
-    diff = (C - (A + B)).abs()
-    tol = 1e-3 + 1e-3 * (A + B).abs()
-    max_violation = (diff - tol).max().item()
-    is_closed = max_violation <= 0
-
-    print(f"[Graph Capture] Result correct: {is_closed}")
-    if not is_closed:
-        print("tA:", A[:32])
-        print("tB:", B[:32])
-        print("tC:", C[:32])
-    print("Hello, Fly!")
-    return is_closed
+    ok = torch.allclose(C, A + B)
+    print(f"[Graph Capture] Result correct: {ok}")
+    if not ok:
+        print(f"  Expected: {(A + B)[:16]}")
+        print(f"  Got:      {C[:16]}")
+    return ok
 
 
 if __name__ == "__main__":
