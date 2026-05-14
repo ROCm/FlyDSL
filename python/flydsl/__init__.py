@@ -3,9 +3,4 @@
 
 __version__ = "0.1.7"
 
-# FFM simulator compatibility shim (no-op outside simulator sessions).
-from ._compat import _maybe_preload_system_comgr  # noqa: E402
-
-_maybe_preload_system_comgr()
-
 from .autotune import autotune, Config
