@@ -181,7 +181,14 @@ jobs:
       - name: Run benchmarks
         id: benchmarks
         run: |
-          docker exec flydsl_test bash -c "export PYTHONPATH=/tmp/aiter:\${PYTHONPATH:-} && export AITER_REPO=/tmp/aiter && cd /flydsl-test && BENCH_LOG_DIR=/tmp/flydsl_bench_current bash scripts/run_benchmark.sh --output_csv /tmp/bench_current.csv"
+          docker exec flydsl_test bash <<'BASH'
+          set -e -o pipefail
+          export PYTHONPATH=/tmp/aiter:${PYTHONPATH:-}
+          export AITER_REPO=/tmp/aiter
+          cd /flydsl-test
+          BENCH_LOG_DIR=/tmp/flydsl_bench_current bash scripts/run_benchmark.sh 2>&1 | tee /tmp/bench_current.out
+          python3 scripts/benchmark_output_to_csv.py /tmp/bench_current.out /tmp/bench_current.csv
+          BASH
 
       - name: Run benchmark baselines
         id: bench-baselines
@@ -205,6 +212,7 @@ jobs:
             fi
             worktree="/tmp/flydsl-bench-main-${idx}"
             csv="/tmp/bench_candidate_${idx}.csv"
+            output="/tmp/bench_candidate_${idx}.out"
             log_dir="/tmp/flydsl_bench_${label}"
             echo "Trying benchmark baseline ${label} (${commit})"
 
@@ -214,7 +222,6 @@ jobs:
               continue
             fi
 
-            cp /flydsl-test/scripts/run_benchmark.sh "${worktree}/scripts/run_benchmark.sh"
             (
               set -e -o pipefail
               cd "${worktree}"
@@ -222,7 +229,8 @@ jobs:
               python3 -m pip install -e . --use-pep517 2>&1 | tail -5
               export PYTHONPATH=/tmp/aiter:${PYTHONPATH:-}
               export AITER_REPO=/tmp/aiter
-              BENCH_LOG_DIR="${log_dir}" bash scripts/run_benchmark.sh --output_csv "${csv}"
+              BENCH_LOG_DIR="${log_dir}" bash scripts/run_benchmark.sh 2>&1 | tee "${output}"
+              python3 /flydsl-test/scripts/benchmark_output_to_csv.py "${output}" "${csv}"
             )
             status=$?
             if [ "${status}" -eq 0 ] && [ -s "${csv}" ]; then

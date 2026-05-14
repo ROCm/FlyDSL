@@ -116,6 +116,16 @@ def main() -> int:
     if skipped_new:
         print(f"\nSkipped {skipped_new} new current-only benchmark row(s).")
 
+    skipped_missing = 0
+    for key in sorted(set(baseline) - set(current)):
+        base = baseline[key]
+        if base.metric_value is None:
+            continue
+        skipped_missing += 1
+        print(f"  {_format_key(key)}  {args.current_label}=missing row  [SKIP]")
+    if skipped_missing:
+        print(f"\nSkipped {skipped_missing} baseline-only benchmark row(s).")
+
     if compared == 0:
         print("No comparable benchmark rows found.")
 
