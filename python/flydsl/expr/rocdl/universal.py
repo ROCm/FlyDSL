@@ -106,7 +106,7 @@ def make_buffer_tensor(tensor: Tensor, max_size: bool = True) -> Tensor:
         if elem_bits % 8 == 0:
             num_records_bytes = Int64(get_scalar(cosize(layout)) * (elem_bits // 8))
         else:
-            num_records_bytes = Int64(get_scalar(cosize(layout)) * elem_bits // 8)
+            num_records_bytes = Int64((get_scalar(cosize(layout)) * elem_bits + 7) // 8)
 
     from ..buffer_ops import _get_buffer_flags
 

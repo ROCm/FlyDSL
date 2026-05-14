@@ -1077,6 +1077,10 @@ def recast_iter(result_type, src, loc=None, ip=None):
     if isinstance(result_type, type):
         if issubclass(result_type, Numeric):
             result_type = result_type.ir_type
+        else:
+            raise TypeError(
+                f"result_type must be a Numeric subclass or a fly Pointer, got unsupported class {result_type!r}"
+            )
         result_type = PointerType.get(result_type, src.memspace, src.alignment)
     return fly.recast_iter(result_type, src, loc=loc, ip=ip)
 
