@@ -15,9 +15,9 @@ Usage Examples:
     python tests/kernels/test_quant.py --multi-test "2048x8192,4096x8192,8192x8192"
 """
 
-import sys
-import os
 import argparse
+import os
+import sys
 
 import numpy as np
 import pytest
@@ -41,23 +41,23 @@ if torch is None or not torch.cuda.is_available():
     pytest.skip("CUDA/ROCm not available. Skipping GPU benchmarks.", allow_module_level=True)
 
 try:
-    import aiter
     from aiter.ops.quant import per_token_quant_hip
+
     HAS_AITER = True
 except Exception:
     HAS_AITER = False
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
+from flydsl._mlir import ir
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, gpu, range_constexpr
-from flydsl.expr.typing import T, Int32
-from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
-from flydsl.runtime.device import get_rocm_arch
-from flydsl._mlir import ir
 from flydsl.expr.arith import ArithValue
-from flydsl.expr.vector import Vector, full, ReductionOp
 from flydsl.expr.numeric import Float16, Float32, Int8
+from flydsl.expr.typing import Int32, T
+from flydsl.expr.vector import ReductionOp, Vector, full
+from flydsl.runtime.device import get_rocm_arch
+from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from tests.test_common import run_perftest
 
 BLOCK_THREADS = 256
@@ -66,7 +66,6 @@ VEC_WIDTH = 8
 
 
 class KernelCompilationCache:
-
     def __init__(self):
         self.cache = {}
 
@@ -162,32 +161,20 @@ def build_quant_module(N):
         copy_atom_in_base = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), 16)
         copy_atom_in = copy_atom_in_base.set_value("soffset", bid_row_offset)
 
-        vec_reg_ty_f16 = fx.MemRefType.get(
-            T.f16, fx.LayoutType.get(VEC_WIDTH, 1), fx.AddressSpace.Register
-        )
-        vec_reg_lay = fx.make_layout(VEC_WIDTH, 1)
-
         # Copy atom for i8 output: 8 x i8 = 64b, with soffset for row
         copy_atom_out_base = fx.make_copy_atom(fx.rocdl.BufferCopy64b(), 8)
         copy_atom_out = copy_atom_out_base.set_value("soffset", bid_row_offset)
         out_row = fx.slice(Out_buf, (0, None))
         out_div = fx.logical_divide(out_row, fx.make_layout(VEC_WIDTH, 1))
-        i8_vec_reg_ty = fx.MemRefType.get(
-            T.i8, fx.LayoutType.get(VEC_WIDTH, 1), fx.AddressSpace.Register
-        )
 
         # Copy atom for f32 scales: scalar store with soffset for bid
         copy_atom_f32_base = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), 32)
         copy_atom_f32 = copy_atom_f32_base.set_value("soffset", bid)
         scales_div = fx.logical_divide(Scales_buf, fx.make_layout(1, 1))
         scales_base = fx.slice(scales_div, (None, fx.Int32(0)))
-        f32_reg_ty = fx.MemRefType.get(
-            T.f32, fx.LayoutType.get(1, 1), fx.AddressSpace.Register
-        )
-        f32_reg_lay = fx.make_layout(1, 1)
 
         def _load_vec_f16(div_tensor, idx):
-            r = fx.memref_alloca(vec_reg_ty_f16, vec_reg_lay)
+            r = fx.make_rmem_tensor(VEC_WIDTH, Float16)
             fx.copy_atom_call(copy_atom_in, fx.slice(div_tensor, (None, idx)), r)
             return Vector(fx.memref_load_vec(r), VEC_WIDTH, Float16)
 
@@ -226,7 +213,7 @@ def build_quant_module(N):
 
         # thread 0 stores Scales[bid]
         if arith.cmpi(arith.CmpIPredicate.eq, tid, Int32(0)):
-            r_sc = fx.memref_alloca(f32_reg_ty, f32_reg_lay)
+            r_sc = fx.make_rmem_tensor(1, Float32)
             ts_sc = full(1, Float32(final_scale), Float32)
             fx.memref_store_vec(ts_sc, r_sc)
             fx.copy_atom_call(copy_atom_f32, r_sc, scales_base)
@@ -246,11 +233,11 @@ def build_quant_module(N):
                 col_end = ArithValue(tid) * VEC_WIDTH + (tile_i * tile_cols + VEC_WIDTH)
                 is_valid = col_end <= N
                 if is_valid:
-                    r_out = fx.memref_alloca(i8_vec_reg_ty, vec_reg_lay)
+                    r_out = fx.make_rmem_tensor(VEC_WIDTH, Int8)
                     fx.memref_store_vec(vec_i8, r_out)
                     fx.copy_atom_call(copy_atom_out, r_out, fx.slice(out_div, (None, idx_out)))
             else:
-                r_out = fx.memref_alloca(i8_vec_reg_ty, vec_reg_lay)
+                r_out = fx.make_rmem_tensor(VEC_WIDTH, Int8)
                 fx.memref_store_vec(vec_i8, r_out)
                 fx.copy_atom_call(copy_atom_out, r_out, fx.slice(out_div, (None, idx_out)))
 
@@ -276,11 +263,11 @@ def build_quant_module(N):
         )
 
     config = {
-        'N': N,
-        'BLOCK_THREADS': BLOCK_THREADS,
-        'VEC_WIDTH': VEC_WIDTH,
-        'ELEMS_PER_BLOCK_ITER': tile_cols,
-        'ITERS': num_tiles,
+        "N": N,
+        "BLOCK_THREADS": BLOCK_THREADS,
+        "VEC_WIDTH": VEC_WIDTH,
+        "ELEMS_PER_BLOCK_ITER": tile_cols,
+        "ITERS": num_tiles,
     }
 
     return launch_quant, config
@@ -320,12 +307,12 @@ def benchmark_per_token_quant(M=4096, N=8192, launch_fn=None, config=None):
     total_elements = M * N
     total_bytes_rw = (M * N * 2) + (M * N * 1) + (M * 4)
 
-    print(f"Configuration:")
+    print("Configuration:")
     print(f"  - Shape: [{M}, {N}]")
     print(f"  - Block Size: {config['BLOCK_THREADS']}")
-    print(f"  - Total Elements: {total_elements/1e6:.2f}M")
+    print(f"  - Total Elements: {total_elements / 1e6:.2f}M")
     print(f"  - Loops per Block: {config['ITERS']}")
-    print(f"  - Est. Memory Traffic: {total_bytes_rw/1e9:.2f} GB per call")
+    print(f"  - Est. Memory Traffic: {total_bytes_rw / 1e9:.2f} GB per call")
 
     np.random.seed(42)
     input_data_fp16 = np.random.uniform(-5.0, 5.0, size=(M, N)).astype(np.float16)
@@ -363,11 +350,9 @@ def benchmark_per_token_quant(M=4096, N=8192, launch_fn=None, config=None):
     scales_host = scales_torch.cpu().numpy()
 
     scale_diff = np.max(np.abs(scales_host - per_token_scale))
-    output_diff = np.max(
-        np.abs(output_host.astype(np.float32) - output_ref.astype(np.float32))
-    )
+    output_diff = np.max(np.abs(output_host.astype(np.float32) - output_ref.astype(np.float32)))
 
-    print(f"\nFlyDSL Kernel Results:")
+    print("\nFlyDSL Kernel Results:")
     print(f"  Max Scale Diff:  {scale_diff:.2e}")
     print(f"  Max Output Diff: {output_diff:.2e}")
     print(f"\nBandwidth: {bandwidth_gbs:.2f} GB/s")
@@ -403,11 +388,9 @@ def benchmark_per_token_quant(M=4096, N=8192, launch_fn=None, config=None):
             scale_ref_torch = scale_torch_ref.squeeze().cpu().numpy()
 
             scale_diff_ref = np.max(np.abs(scale_ref_torch - per_token_scale))
-            output_diff_ref = np.max(
-                np.abs(output_ref_torch.astype(np.float32) - output_ref.astype(np.float32))
-            )
+            output_diff_ref = np.max(np.abs(output_ref_torch.astype(np.float32) - output_ref.astype(np.float32)))
 
-            print(f"\n  Reference Correctness Check:")
+            print("\n  Reference Correctness Check:")
             print(f"  Max Scale Diff:  {scale_diff_ref:.2e}")
             print(f"  Max Output Diff: {output_diff_ref:.2e}")
 
@@ -415,14 +398,10 @@ def benchmark_per_token_quant(M=4096, N=8192, launch_fn=None, config=None):
             aiter_time = aiter_results["avg_ms"]
             speedup = aiter_time / flydsl_time
 
-            print(f"\n" + "=" * 80)
-            print(f"Performance Comparison:")
-            print(
-                f"  FlyDSL:   {flydsl_time:7.3f} ms  ({results['bandwidth_gbs']:8.2f} GB/s)"
-            )
-            print(
-                f"  Reference:  {aiter_time:7.3f} ms  ({aiter_results['bandwidth_gbs']:8.2f} GB/s)"
-            )
+            print("\n" + "=" * 80)
+            print("Performance Comparison:")
+            print(f"  FlyDSL:   {flydsl_time:7.3f} ms  ({results['bandwidth_gbs']:8.2f} GB/s)")
+            print(f"  Reference:  {aiter_time:7.3f} ms  ({aiter_results['bandwidth_gbs']:8.2f} GB/s)")
             print(f"  Speedup:    {speedup:7.2f}x")
             print("=" * 80)
         except Exception as e:
@@ -440,39 +419,36 @@ def test_benchmark_per_token_quant():
     print("ROCm GPU Benchmark - Per-Token Quantization")
     print(f"GPU: {get_rocm_arch()}")
     print("=" * 80)
-    assert (
-        benchmark_per_token_quant()
-    ), "Per-token quantization benchmark failed correctness check"
+    assert benchmark_per_token_quant(), "Per-token quantization benchmark failed correctness check"
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Benchmark Per-Token Quantization")
+    parser.add_argument("-m", "--tokens", type=int, default=4096, help="Number of tokens (M)")
+    parser.add_argument("-n", "--hidden", type=int, default=8192, help="Hidden dimension (N)")
     parser.add_argument(
-        "-m", "--tokens", type=int, default=4096, help="Number of tokens (M)"
-    )
-    parser.add_argument(
-        "-n", "--hidden", type=int, default=8192, help="Hidden dimension (N)"
-    )
-    parser.add_argument(
-        "--multi-test", type=str, default=None,
-        help="Run multiple tests with different sizes. Format: 'MxN,MxN,...' (e.g., '2048x4096,4096x8192')"
+        "--multi-test",
+        type=str,
+        default=None,
+        help="Run multiple tests with different sizes. Format: 'MxN,MxN,...' (e.g., '2048x4096,4096x8192')",
     )
     args = parser.parse_args()
 
     if args.multi_test:
         test_configs = []
-        for size_str in args.multi_test.split(','):
-            m_str, n_str = size_str.strip().split('x')
+        for size_str in args.multi_test.split(","):
+            m_str, n_str = size_str.strip().split("x")
             test_configs.append((int(m_str), int(n_str)))
 
-        print(f"\n{'='*80}")
-        print(f"Per-Token Quantization Multi-Size Benchmark")
+        print(f"\n{'=' * 80}")
+        print("Per-Token Quantization Multi-Size Benchmark")
         print(f"Test Configurations: {len(test_configs)}")
         for i, (m, n) in enumerate(test_configs, 1):
             print(f"  {i}. M={m}, N={n}")
-        print(f"{'='*80}")
+        print(f"{'=' * 80}")
 
         from collections import defaultdict
+
         tests_by_n = defaultdict(list)
         for m, n in test_configs:
             tests_by_n[n].append((m, n))
@@ -490,14 +466,11 @@ if __name__ == "__main__":
         for n_val in unique_ns:
             n_tests = tests_by_n[n_val]
 
-            print(f"\n{'='*80}")
+            print(f"\n{'=' * 80}")
             print(f"Processing N={n_val} group ({len(n_tests)} test(s))")
-            print(f"{'='*80}")
+            print(f"{'=' * 80}")
 
-            launch_fn, config, was_cached = cache.get_or_compile(
-                n_val,
-                lambda: compile_kernel_for_n(n_val)
-            )
+            launch_fn, config, was_cached = cache.get_or_compile(n_val, lambda: compile_kernel_for_n(n_val))
 
             if was_cached:
                 print("Using cached launcher")
@@ -505,37 +478,39 @@ if __name__ == "__main__":
                 print("Compiled")
 
             for M, N in n_tests:
-                print(f"\n{'='*80}")
-                print(f"Test {len(results)+1}/{len(test_configs)}: M={M}, N={N}")
-                print(f"{'='*80}")
+                print(f"\n{'=' * 80}")
+                print(f"Test {len(results) + 1}/{len(test_configs)}: M={M}, N={N}")
+                print(f"{'=' * 80}")
 
                 success = benchmark_per_token_quant(M=M, N=N, launch_fn=launch_fn, config=config)
 
-                results.append({
-                    'M': M,
-                    'N': N,
-                    'success': success,
-                })
+                results.append(
+                    {
+                        "M": M,
+                        "N": N,
+                        "success": success,
+                    }
+                )
 
                 if not success:
                     print(f"Failed for M={M}, N={N}")
 
-        print(f"\n{'='*80}")
-        print(f"Summary of All Tests")
-        print(f"{'='*80}")
+        print(f"\n{'=' * 80}")
+        print("Summary of All Tests")
+        print(f"{'=' * 80}")
         print(f"{'M':>6} {'N':>6} {'Status':>8}")
-        print(f"{'-'*80}")
+        print(f"{'-' * 80}")
         for r in results:
-            status = "Pass" if r['success'] else "Fail"
+            status = "Pass" if r["success"] else "Fail"
             print(f"{r['M']:6} {r['N']:6} {status:>8}")
 
-        all_passed = all(r['success'] for r in results)
-        print(f"\n{'='*80}")
+        all_passed = all(r["success"] for r in results)
+        print(f"\n{'=' * 80}")
         if all_passed:
             print("All tests passed!")
         else:
             print("Some tests failed")
-        print(f"{'='*80}\n")
+        print(f"{'=' * 80}\n")
 
         sys.exit(0 if all_passed else 1)
     else:

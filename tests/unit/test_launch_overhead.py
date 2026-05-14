@@ -13,9 +13,9 @@ Usage:
 """
 
 import time
-import torch
 
 import pytest
+import torch
 
 pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
 
@@ -71,9 +71,7 @@ def vecAdd(
 ):
     tile_elems = block_dim * vec_width
     grid_x = (n + tile_elems - 1) // tile_elems
-    vecAddKernel(A, B, C, block_dim, vec_width).launch(
-        grid=(grid_x, 1, 1), block=(block_dim, 1, 1), stream=stream
-    )
+    vecAddKernel(A, B, C, block_dim, vec_width).launch(grid=(grid_x, 1, 1), block=(block_dim, 1, 1), stream=stream)
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -84,8 +82,7 @@ try:
     import triton.language as tl
 
     @triton.jit
-    def triton_vec_add_kernel(a_ptr, b_ptr, c_ptr, n,
-                              BLOCK: tl.constexpr = 1024):
+    def triton_vec_add_kernel(a_ptr, b_ptr, c_ptr, n, BLOCK: tl.constexpr = 1024):
         pid = tl.program_id(0)
         offsets = pid * BLOCK + tl.arange(0, BLOCK)
         mask = offsets < n

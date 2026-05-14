@@ -8,6 +8,7 @@ Validates end-to-end that:
   - torch.nn.Parameter (Tensor subclass) is accepted as kernel input
   - Stream value is preserved through JIT compilation and kernel launch
 """
+
 import pytest
 
 pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
@@ -22,7 +23,6 @@ if torch is None or not torch.cuda.is_available():
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 
-
 # ──────────────────────────────────────────────────────────────
 # Minimal vecadd kernel for testing
 # ──────────────────────────────────────────────────────────────
@@ -34,8 +34,11 @@ TILE_ELEMS = BLOCK_DIM * VEC_WIDTH
 
 @flyc.kernel
 def _vecadd_kernel(
-    A: fx.Tensor, B: fx.Tensor, C: fx.Tensor,
-    block_dim: fx.Constexpr[int], vec_width: fx.Constexpr[int],
+    A: fx.Tensor,
+    B: fx.Tensor,
+    C: fx.Tensor,
+    block_dim: fx.Constexpr[int],
+    vec_width: fx.Constexpr[int],
 ):
     bid = fx.block_idx.x
     tid = fx.thread_idx.x
@@ -58,22 +61,23 @@ def _vecadd_kernel(
 
     fx.copy_atom_call(atom, fx.slice(tA, (None, tid)), rA)
     fx.copy_atom_call(atom, fx.slice(tB, (None, tid)), rB)
-    fx.memref_store_vec(
-        fx.arith.addf(fx.memref_load_vec(rA), fx.memref_load_vec(rB)), rC)
+    fx.memref_store_vec(fx.arith.addf(fx.memref_load_vec(rA), fx.memref_load_vec(rB)), rC)
     fx.copy_atom_call(atom, rC, fx.slice(tC, (None, tid)))
 
 
 @flyc.jit
 def _vecadd(
-    A: fx.Tensor, B: fx.Tensor, C: fx.Tensor,
+    A: fx.Tensor,
+    B: fx.Tensor,
+    C: fx.Tensor,
     n: fx.Int32,
-    block_dim: fx.Constexpr[int], vec_width: fx.Constexpr[int],
+    block_dim: fx.Constexpr[int],
+    vec_width: fx.Constexpr[int],
     stream: fx.Stream = fx.Stream(None),
 ):
     tile = block_dim * vec_width
     grid_x = (n + tile - 1) // tile
-    _vecadd_kernel(A, B, C, block_dim, vec_width).launch(
-        grid=(grid_x, 1, 1), block=(block_dim, 1, 1), stream=stream)
+    _vecadd_kernel(A, B, C, block_dim, vec_width).launch(grid=(grid_x, 1, 1), block=(block_dim, 1, 1), stream=stream)
 
 
 # ──────────────────────────────────────────────────────────────
@@ -94,6 +98,7 @@ def abc_tensors():
 # ──────────────────────────────────────────────────────────────
 # Stream tests
 # ──────────────────────────────────────────────────────────────
+
 
 class TestKernelStream:
     """Kernel launch with different stream passing styles."""
@@ -143,6 +148,7 @@ class TestKernelStream:
 # ──────────────────────────────────────────────────────────────
 # torch.nn.Parameter tests
 # ──────────────────────────────────────────────────────────────
+
 
 class TestKernelParameter:
     """Kernel launch with torch.nn.Parameter inputs."""
