@@ -9,15 +9,18 @@ Algorithm derived from HipKittens FP8_8wave
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl._mlir.dialects import arith as arith_dialect
-from flydsl._mlir.dialects import fly as fly_dialect
-from flydsl._mlir.dialects import llvm as _llvm
-from flydsl._mlir.dialects import memref as memref_dialect
-from flydsl._mlir.dialects.fly_rocdl import TargetAddressSpace
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import range_constexpr, rocdl
-from flydsl.expr.typing import Vector as Vec
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
+from kernels.fp8_gemm_utils import (
+    G2SLoader,
+    Mfma16x16x128,
+    S2RLoader,
+    StoreC,
+    make_fp8_buffer_tensor,
+    swizzle_128,
+    wait_barrier,
+)
 
 
 def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int = 256):
@@ -72,11 +75,7 @@ def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int
         A_scale: fx.Tensor,
         B_scale: fx.Tensor,
     ):
-        MfmaAccum_t = Vec.make_type(4, fx.Float32)
-        RT_C_i = Vec.filled(4, 0.0, fx.Float32)
         F8_IR_t = fx.Float8E4M3FN.ir_type
-        Vec16_t = Vec.make_type(16, fx.Float8E4M3FN)
-        SharedPtr_t = fx.PointerType.get(F8_IR_t, 2, 512)
 
         a_cur0 = SmemPtr(A_lds_cur0_alloc.get_base(), 0, F8_IR_t, shape=(a_lds_size,)).get()
         a_cur1 = SmemPtr(A_lds_cur1_alloc.get_base(), 0, F8_IR_t, shape=(a_lds_size,)).get()
@@ -92,8 +91,6 @@ def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int
         wave_id = fx.thread_idx.x // 64
         wave_m = wave_id // 4
         wave_n = wave_id % 4
-        wave_n_offset = wave_n * (N_TILES_B * 16)
-        wave_m_offset = wave_m * (N_TILES_A * 16)
         block_m = fx.block_idx.x // N_BLOCKS
         block_n = fx.block_idx.x % N_BLOCKS
 
@@ -102,203 +99,89 @@ def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int
         B0_gl_offset = (block_n * BLOCK_N) * K
         B1_gl_offset = (block_n * BLOCK_N + LDS_BLOCK_N) * K
 
-        def _make_fp8_buf_tensor(arg_i8):
-            t_i8 = fx.rocdl.make_buffer_tensor(arg_i8, max_size=False)
-            iter_i8 = fx.get_iter(t_i8)
-            f8_buf_ptr_ty = fx.PointerType.get(
-                elem_ty=F8_IR_t,
-                address_space=TargetAddressSpace.BufferDesc,
-                alignment=fx.PointerType(iter_i8.type).alignment,
-            )
-            iter_f8 = fx.recast_iter(f8_buf_ptr_ty, iter_i8)
-            return fx.Tensor(fx.make_view(iter_f8, fx.get_layout(t_i8)))
-
-        gA = _make_fp8_buf_tensor(A)
-        gB = _make_fp8_buf_tensor(B_T)
-        gC = fx.rocdl.make_buffer_tensor(C, max_size=False)
-        gSA = fx.rocdl.make_buffer_tensor(A_scale, max_size=False)
-        gSB = fx.rocdl.make_buffer_tensor(B_scale, max_size=False)
-        A_rsrc = fx.logical_divide(gA, fx.make_layout(1, 1))
-        B_rsrc = fx.logical_divide(gB, fx.make_layout(1, 1))
-        c_div = fx.logical_divide(gC, fx.make_layout(1, 1))
-        sa_div = fx.logical_divide(gSA, fx.make_layout(1, 1))
-        sb_div = fx.logical_divide(gSB, fx.make_layout(1, 1))
-
-        def _swizzle_128(row, col):
-            offset = row * 128 + col
-            swizzle = ((offset % (16 * 128)) >> 8) << 4
-            swizzled_offset = offset ^ swizzle
-            return swizzled_offset // 128, swizzled_offset % 128
+        gA = make_fp8_buffer_tensor(A, F8_IR_t)
+        gB = make_fp8_buffer_tensor(B_T, F8_IR_t)
+        a_div = fx.logical_divide(gA, fx.make_layout(1, 1))
+        b_div = fx.logical_divide(gB, fx.make_layout(1, 1))
 
         def _compute_global_swizzle():
             offsets = []
             wave_offset = (wave_id // 2) * 16 * K
             row = ((wave_id % 2) * 64 + lane_id) // 8
             col = (lane_id % 8) * 16
-            swz_row, swz_col = _swizzle_128(row, col)
+            swz_row, swz_col = swizzle_128(row, col)
             for round in range_constexpr(N_LDS_ROUNDS):
                 offsets.append(wave_offset + (round * 64 + swz_row) * K + swz_col)
             return offsets
 
-        g2lds_atom = fx.make_copy_atom(fx.rocdl.BufferCopyLDS128b(), 128)
-
-        def _load_lds(gl_src_div, lds_dst, k_offset, gl_offsets, n_steps):
-            def _lds_dst_at():
-                base_idx = memref_dialect.extract_aligned_pointer_as_index(lds_dst)
-                offset_idx = base_idx + fx.Index(wave_id * 1024 + step * 8192)
-                offset_i64 = arith_dialect.index_cast(fx.T.i64(), offset_idx)
-                lds_ptr = fx.inttoptr(SharedPtr_t, offset_i64)
-                return fx.make_view(lds_ptr, fx.make_layout(1, 1))
-
-            for step in range_constexpr(n_steps):
-                src = fx.slice(gl_src_div, (None, fx.Int32(gl_offsets[step])))
-                dst = _lds_dst_at()
-                fx.copy(g2lds_atom, src, dst, soffset=fx.Int32(k_offset))
-
-        def _pack_i32x4_i32x8(lo, hi):
-            # Pack two i32x4 as one i32x8
-            return lo.shuffle(hi, list(range(8)))
-
-        def _load_a_rt(lds_src, wave_offset):
-            frag = []
-            for i in range_constexpr(N_TILES_A):
-                halves = []
-                for k_i in range_constexpr(2):
-                    row = lane_id % 16
-                    col = (lane_id // 16) * 16 + k_i * 64
-                    row_swz, col_swz = _swizzle_128(row, col)
-                    v = Vec.load(Vec16_t, lds_src, [fx.Index(row_swz * 128 + col_swz + wave_offset + i * 2048)])
-                    halves.append(v.bitcast(fx.Int32))
-                frag.append(_pack_i32x4_i32x8(halves[0], halves[1]))
-            return frag
-
-        def _load_b_rt(lds_src, wave_offset):
-            frag = []
-            for i in range_constexpr(N_TILES_B):
-                halves = []
-                for k_i in range_constexpr(2):
-                    row = lane_id % 16
-                    col = (lane_id // 16) * 16 + k_i * 64
-                    row_swz, col_swz = _swizzle_128(row, col)
-                    v = Vec.load(Vec16_t, lds_src, [fx.Index(row_swz * 128 + col_swz + wave_offset + i * 2048)])
-                    halves.append(v.bitcast(fx.Int32))
-                frag.append(_pack_i32x4_i32x8(halves[0], halves[1]))
-            return frag
-
-        scale_atom_4 = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), fx.Float32)
-        scale_atom_1 = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Float32)
-        out_atom_1 = fx.make_copy_atom(fx.rocdl.BufferCopy16b(), fx.BFloat16)
-        reg_f32_4_ty = fx.MemRefType.get(fx.T.f32(), fx.LayoutType.get(4, 1), 3)
-        reg_f32_1_ty = fx.MemRefType.get(fx.T.f32(), fx.LayoutType.get(1, 1), 3)
-        reg_bf16_1_ty = fx.MemRefType.get(fx.T.bf16(), fx.LayoutType.get(1, 1), 3)
-
-        def _store_C_scaled(c_frag, base_row, base_col):
-            def _load_scale_vec4(row):
-                r = fx.memref_alloca(reg_f32_4_ty, fx.make_layout(4, 1))
-                fx.copy(scale_atom_4, fx.slice(sa_div, (None, fx.Int32(row))), r)
-                return Vec(fx.memref_load_vec(r))
-
-            def _load_scale_scalar(col):
-                r = fx.memref_alloca(reg_f32_1_ty, fx.make_layout(1, 1))
-                fx.copy(scale_atom_1, fx.slice(sb_div, (None, fx.Int32(col))), r)
-                return Vec(fx.memref_load_vec(r))[0]
-
-            def _store_bf16(value_bf16, c_index):
-                r = fx.memref_alloca(reg_bf16_1_ty, fx.make_layout(1, 1))
-                fx.memref_store_vec(Vec.filled(1, value_bf16, fx.BFloat16), r)
-                fx.copy(out_atom_1, r, fx.slice(c_div, (None, fx.Int32(c_index))))
-
-            a_scales = [_load_scale_vec4(base_row + i * 16 + (lane_id // 16) * 4) for i in range_constexpr(N_TILES_A)]
-            b_scales = [_load_scale_scalar(base_col + i * 16 + lane_id % 16) for i in range_constexpr(N_TILES_B)]
-            for ti in range_constexpr(N_TILES_A):
-                row = base_row + ti * 16 + (lane_id // 16) * 4
-                for tj in range_constexpr(N_TILES_B):
-                    col = base_col + tj * 16 + lane_id % 16
-                    vec_f32 = Vec(c_frag[_c_idx(ti, tj)])
-                    for i in range_constexpr(4):
-                        scaled = (vec_f32[i] * (a_scales[ti][i] * b_scales[tj])).to(fx.BFloat16)
-                        _store_bf16(scaled, (row + i) * N + col)
-
-        def _c_idx(i, j):
-            return i * N_TILES_B + j
-
-        mma_atom = fx.make_mma_atom(fx.rocdl.cdna4.MFMA_Scale(16, 16, 128, fx.Float8E4M3FN))
-
-        def _mfma_ABt_all(a, b, c):
-            for i in range_constexpr(N_TILES_A):
-                for j in range_constexpr(N_TILES_B):
-                    c[_c_idx(i, j)] = fly_dialect.mma_atom_call_ssa(
-                        [MfmaAccum_t], mma_atom, a[i], b[j], c[_c_idx(i, j)]
-                    )
-            return c
-
-        def _wait_barrier(count):
-            _llvm.inline_asm(
-                res=None,
-                operands_=[],
-                asm_string=f"s_waitcnt vmcnt({count})\ns_barrier",
-                constraints="",
-                has_side_effects=True,
-            )
-
-        # 2x2 config of 4x2 (instead of 4x4 in 4wave) 16x16 sub-tiles
-        c00_frag = [RT_C_i] * N_ACCUMS
-        c01_frag = [RT_C_i] * N_ACCUMS
-        c10_frag = [RT_C_i] * N_ACCUMS
-        c11_frag = [RT_C_i] * N_ACCUMS
 
         global_offsets = _compute_global_swizzle()
 
-        _load_lds(B_rsrc, b_cur0, B0_gl_offset + 0 * BLOCK_K, global_offsets, N_LDS_STEPS_B)
-        _load_lds(A_rsrc, a_cur0, A0_gl_offset + 0 * BLOCK_K, global_offsets, N_LDS_STEPS_A)
-        _load_lds(B_rsrc, b_cur1, B1_gl_offset + 0 * BLOCK_K, global_offsets, N_LDS_STEPS_B)
-        _load_lds(A_rsrc, a_cur1, A1_gl_offset + 0 * BLOCK_K, global_offsets, N_LDS_STEPS_A)
+        mfma = Mfma16x16x128(N_TILES_A, N_TILES_B)
+
+        a_g2s = G2SLoader(a_div, global_offsets, N_LDS_STEPS_A, F8_IR_t, wave_id)
+        b_g2s = G2SLoader(b_div, global_offsets, N_LDS_STEPS_B, F8_IR_t, wave_id)
+        a_s2r = S2RLoader(lane_id, wave_m, N_TILES_A)
+        b_s2r = S2RLoader(lane_id, wave_n, N_TILES_B)
+        store_c = StoreC(A_scale, B_scale, C, N, lane_id, mfma.idx, N_TILES_A, N_TILES_B)
+
+        # 2x2 config of 4x2 (instead of 4x4 in 4wave) 16x16 sub-tiles
+        c00_frag = [mfma.zero_value] * N_ACCUMS
+        c01_frag = [mfma.zero_value] * N_ACCUMS
+        c10_frag = [mfma.zero_value] * N_ACCUMS
+        c11_frag = [mfma.zero_value] * N_ACCUMS
+
+
+        b_g2s.load(b_cur0, B0_gl_offset + 0 * BLOCK_K)
+        a_g2s.load(a_cur0, A0_gl_offset + 0 * BLOCK_K)
+        b_g2s.load(b_cur1, B1_gl_offset + 0 * BLOCK_K)
+        a_g2s.load(a_cur1, A1_gl_offset + 0 * BLOCK_K)
 
         if wave_m == 1:
             rocdl.s_barrier()
 
-        _wait_barrier(N_LDS_STEPS_A + N_LDS_STEPS_B)
+        wait_barrier(N_LDS_STEPS_A + N_LDS_STEPS_B)
 
-        _load_lds(B_rsrc, b_next0, B0_gl_offset + 1 * BLOCK_K, global_offsets, N_LDS_STEPS_B)
-        _load_lds(A_rsrc, a_next0, A0_gl_offset + 1 * BLOCK_K, global_offsets, N_LDS_STEPS_A)
-        _load_lds(B_rsrc, b_next1, B1_gl_offset + 1 * BLOCK_K, global_offsets, N_LDS_STEPS_B)
+        b_g2s.load(b_next0, B0_gl_offset + 1 * BLOCK_K)
+        a_g2s.load(a_next0, A0_gl_offset + 1 * BLOCK_K)
+        b_g2s.load(b_next1, B1_gl_offset + 1 * BLOCK_K)
 
-        _wait_barrier(N_LDS_STEPS_A + 2 * N_LDS_STEPS_B)
+        wait_barrier(N_LDS_STEPS_A + 2 * N_LDS_STEPS_B)
 
         for k in range_constexpr(K_ITERS - 2):
-            b0_frag = _load_b_rt(b_cur0, wave_n_offset * BLOCK_K)
-            a0_frag = _load_a_rt(a_cur0, wave_m_offset * BLOCK_K)
-            _load_lds(A_rsrc, a_next1, A1_gl_offset + (k + 1) * BLOCK_K, global_offsets, N_LDS_STEPS_A)
+            b0_frag = b_s2r.load(b_cur0)
+            a0_frag = a_s2r.load(a_cur0)
+            a_g2s.load(a_next1, A1_gl_offset + (k + 1) * BLOCK_K)
             rocdl.s_barrier()
 
             rocdl.s_setprio(1)
-            c00_frag = _mfma_ABt_all(a0_frag, b0_frag, c00_frag)
+            c00_frag = mfma.call(a0_frag, b0_frag, c00_frag)
             rocdl.s_setprio(0)
             rocdl.s_barrier()
 
-            b1_frag = _load_b_rt(b_cur1, wave_n_offset * BLOCK_K)
-            _load_lds(B_rsrc, b_cur0, B0_gl_offset + (k + 2) * BLOCK_K, global_offsets, N_LDS_STEPS_B)
+            b1_frag = b_s2r.load(b_cur1)
+            b_g2s.load(b_cur0, B0_gl_offset + (k + 2) * BLOCK_K)
             rocdl.s_barrier()
 
             rocdl.s_setprio(1)
-            c01_frag = _mfma_ABt_all(a0_frag, b1_frag, c01_frag)
+            c01_frag = mfma.call(a0_frag, b1_frag, c01_frag)
             rocdl.s_setprio(0)
             rocdl.s_barrier()
 
-            a1_frag = _load_a_rt(a_cur1, wave_m_offset * BLOCK_K)
-            _load_lds(A_rsrc, a_cur0, A0_gl_offset + (k + 2) * BLOCK_K, global_offsets, N_LDS_STEPS_A)
+            a1_frag = a_s2r.load(a_cur1)
+            a_g2s.load(a_cur0, A0_gl_offset + (k + 2) * BLOCK_K)
             rocdl.s_barrier()
 
             rocdl.s_setprio(1)
-            c10_frag = _mfma_ABt_all(a1_frag, b0_frag, c10_frag)
+            c10_frag = mfma.call(a1_frag, b0_frag, c10_frag)
             rocdl.s_setprio(0)
             rocdl.s_barrier()
 
-            _load_lds(B_rsrc, b_cur1, B1_gl_offset + (k + 2) * BLOCK_K, global_offsets, N_LDS_STEPS_B)
-            _wait_barrier(2 * N_LDS_STEPS_A + N_LDS_STEPS_B)
+            b_g2s.load(b_cur1, B1_gl_offset + (k + 2) * BLOCK_K)
+            wait_barrier(2 * N_LDS_STEPS_A + N_LDS_STEPS_B)
 
             rocdl.s_setprio(1)
-            c11_frag = _mfma_ABt_all(a1_frag, b1_frag, c11_frag)
+            c11_frag = mfma.call(a1_frag, b1_frag, c11_frag)
             rocdl.s_setprio(0)
             rocdl.s_barrier()
 
@@ -310,36 +193,36 @@ def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int
 
         # Step k = K_ITERS - 2
         k = K_ITERS - 2
-        b0_frag = _load_b_rt(b_cur0, wave_n_offset * BLOCK_K)
-        a0_frag = _load_a_rt(a_cur0, wave_m_offset * BLOCK_K)
+        b0_frag = b_s2r.load(b_cur0)
+        a0_frag = a_s2r.load(a_cur0)
         rocdl.s_barrier()
 
         rocdl.s_setprio(1)
-        c00_frag = _mfma_ABt_all(a0_frag, b0_frag, c00_frag)
+        c00_frag = mfma.call(a0_frag, b0_frag, c00_frag)
         rocdl.s_setprio(0)
         rocdl.s_barrier()
 
-        b1_frag = _load_b_rt(b_cur1, wave_n_offset * BLOCK_K)
+        b1_frag = b_s2r.load(b_cur1)
         rocdl.s_barrier()
 
         rocdl.s_setprio(1)
-        c01_frag = _mfma_ABt_all(a0_frag, b1_frag, c01_frag)
+        c01_frag = mfma.call(a0_frag, b1_frag, c01_frag)
         rocdl.s_setprio(0)
         rocdl.s_barrier()
 
-        a1_frag = _load_a_rt(a_cur1, wave_m_offset * BLOCK_K)
+        a1_frag = a_s2r.load(a_cur1)
         rocdl.s_barrier()
 
         rocdl.s_setprio(1)
-        c10_frag = _mfma_ABt_all(a1_frag, b0_frag, c10_frag)
+        c10_frag = mfma.call(a1_frag, b0_frag, c10_frag)
         rocdl.s_setprio(0)
         rocdl.s_barrier()
 
-        b0_frag = _load_b_rt(b_next0, wave_n_offset * BLOCK_K)
+        b0_frag = b_s2r.load(b_next0)
         rocdl.s_barrier()
 
         rocdl.s_setprio(1)
-        c11_frag = _mfma_ABt_all(a1_frag, b1_frag, c11_frag)
+        c11_frag = mfma.call(a1_frag, b1_frag, c11_frag)
         rocdl.s_setprio(0)
         rocdl.s_barrier()
         # Swap cur and next
@@ -350,39 +233,41 @@ def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int
 
         # Step k = K_ITERS - 1
         k = K_ITERS - 1
-        a0_frag = _load_a_rt(a_cur0, wave_m_offset * BLOCK_K)
-        _wait_barrier(0)
+        a0_frag = a_s2r.load(a_cur0)
+        wait_barrier(0)
 
         rocdl.s_setprio(1)
-        c00_frag = _mfma_ABt_all(a0_frag, b0_frag, c00_frag)
+        c00_frag = mfma.call(a0_frag, b0_frag, c00_frag)
         rocdl.s_setprio(0)
         rocdl.s_barrier()
 
-        b1_frag = _load_b_rt(b_cur1, wave_n_offset * BLOCK_K)
+        b1_frag = b_s2r.load(b_cur1)
         rocdl.s_barrier()
 
         rocdl.s_setprio(1)
-        c01_frag = _mfma_ABt_all(a0_frag, b1_frag, c01_frag)
+        c01_frag = mfma.call(a0_frag, b1_frag, c01_frag)
         rocdl.s_setprio(0)
         rocdl.s_barrier()
 
-        a1_frag = _load_a_rt(a_cur1, wave_m_offset * BLOCK_K)
+        a1_frag = a_s2r.load(a_cur1)
         rocdl.s_barrier()
 
         rocdl.s_setprio(1)
-        c10_frag = _mfma_ABt_all(a1_frag, b0_frag, c10_frag)
-        c11_frag = _mfma_ABt_all(a1_frag, b1_frag, c11_frag)
+        c10_frag = mfma.call(a1_frag, b0_frag, c10_frag)
+        c11_frag = mfma.call(a1_frag, b1_frag, c11_frag)
         rocdl.s_setprio(0)
         rocdl.s_barrier()
 
         # Scale and store back to gmem
+        wave_n_offset = wave_n * (N_TILES_B * 16)
+        wave_m_offset = wave_m * (N_TILES_A * 16)
         base_row = block_m * BLOCK_M + wave_m_offset
         base_col = block_n * BLOCK_N + wave_n_offset
 
-        _store_C_scaled(c00_frag, base_row + 0, base_col + 0)
-        _store_C_scaled(c01_frag, base_row + 0, base_col + LDS_BLOCK_N)
-        _store_C_scaled(c10_frag, base_row + LDS_BLOCK_M, base_col + 0)
-        _store_C_scaled(c11_frag, base_row + LDS_BLOCK_M, base_col + LDS_BLOCK_N)
+        store_c.store(c00_frag, base_row + 0, base_col + 0)
+        store_c.store(c01_frag, base_row + 0, base_col + LDS_BLOCK_N)
+        store_c.store(c10_frag, base_row + LDS_BLOCK_M, base_col + 0)
+        store_c.store(c11_frag, base_row + LDS_BLOCK_M, base_col + LDS_BLOCK_N)
 
     @flyc.jit
     def launch_gemm(
