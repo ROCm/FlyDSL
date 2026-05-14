@@ -46,7 +46,7 @@ def gemm_kernel(
         fx.static(fx.SwizzleType.get(3, 3, 3)),
         fx.make_ordered_layout((BLOCK_M, BLOCK_K, STAGES_A), (1, 0, 2)),
     )
-    sA = fx.make_view(fx.recast_iter(fx.Float16, fx.get_dyn_shared()), composed_layout_A)  # (BM, BK, STAGES_A)
+    sA = fx.make_view(fx.get_dyn_shared(fx.Float16), composed_layout_A)  # (BM, BK, STAGES_A)
 
     thr_gA_k = thr_copy_g2s_A.partition_S(gA_k)  # (VA, VM, VK, k)
     thr_sA = thr_copy_g2s_A.partition_D(sA)  # (VA, VM, VN, STAGES_A)
