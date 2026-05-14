@@ -1944,13 +1944,14 @@ def test_moe_gemm_w4a16_groupwise_scale(scale_dtype):
 @pytest.mark.parametrize(
     "tokens, model_dim, inter_dim, experts, topk, tile_m, tile_n, tile_k",
     [
-        pytest.param(8192, 7168, 256, 128, 8, 64, 256, 128, id="DS-TP8-prefill-S", marks=pytest.mark.large_shape),
-        pytest.param(16384, 7168, 256, 256, 8, 64, 256, 128, id="DS-TP8-prefill-M", marks=pytest.mark.large_shape),
-        pytest.param(32768, 7168, 256, 256, 8, 64, 256, 128, id="DS-TP8-prefill-L", marks=pytest.mark.large_shape),
+        # tile_k=256 (not 128): a8w4 / MXFP4 stage2 requires tile_k >= 256 on gfx950+.
+        pytest.param(8192, 7168, 256, 128, 8, 64, 256, 256, id="DS-TP8-prefill-S", marks=pytest.mark.large_shape),
+        pytest.param(16384, 7168, 256, 256, 8, 64, 256, 256, id="DS-TP8-prefill-M", marks=pytest.mark.large_shape),
+        pytest.param(32768, 7168, 256, 256, 8, 64, 256, 256, id="DS-TP8-prefill-L", marks=pytest.mark.large_shape),
         pytest.param(1, 7168, 256, 256, 8, 16, 256, 128, id="DS-TP8-decode-bs1"),
         pytest.param(8, 7168, 256, 256, 8, 32, 256, 128, id="DS-TP8-decode-bs8"),
-        pytest.param(1666, 5120, 1536, 64, 6, 64, 256, 128, id="EP-K6-prefill", marks=pytest.mark.large_shape),
-        pytest.param(32768, 5120, 1536, 64, 6, 64, 256, 128, id="EP-K6-prefill-L", marks=pytest.mark.large_shape),
+        pytest.param(1666, 5120, 1536, 64, 6, 64, 256, 256, id="EP-K6-prefill", marks=pytest.mark.large_shape),
+        pytest.param(32768, 5120, 1536, 64, 6, 64, 256, 256, id="EP-K6-prefill-L", marks=pytest.mark.large_shape),
         pytest.param(1, 5120, 1536, 16, 6, 16, 128, 256, id="EP-K6-decode-bs1"),
         pytest.param(8, 5120, 1536, 16, 6, 64, 128, 128, id="EP-K6-decode-bs8"),
         # FP4-compatible shapes (inter_dim >= 256, tile_k >= 256)
