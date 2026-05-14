@@ -209,6 +209,7 @@ def _run_mxscale_gemm_test(
     expert_sched_mode=True,
     split_k=1,
     b_streaming=False,
+    scale_load_path="tdm",
     return_launch_fn=False,
 ):
     """Unified test body for FP4 and FP8."""
@@ -247,11 +248,12 @@ def _run_mxscale_gemm_test(
     fmt_name = "A8W4" if is_a8w4 else ("MXFP4" if is_fp4 else "MXFP8")
     mcast_str = f", cluster=({cluster_m},{cluster_n})" if cluster_m > 1 or cluster_n > 1 else ""
     tdm_str = ", tdm_store" if use_tdm_store else ", buffer_store"
+    scale_load_str = "" if scale_load_path == "tdm" else f", scale_load={scale_load_path}"
     pad_str = _format_kernel_pad(M, N, K, padded_shape)
     print(
         f"\nRunning {fmt_name} GEMM: M={M}, N={N}, K={K}{pad_str}, "
         f"tiles=({tile_m},{tile_n},{tile_k}), bufs={num_buffers}"
-        f"{mcast_str}{tdm_str}, preshuffle, out={out_dtype}"
+        f"{mcast_str}{tdm_str}{scale_load_str}, preshuffle, out={out_dtype}"
     )
 
     # Generate data
@@ -322,6 +324,7 @@ def _run_mxscale_gemm_test(
         use_scale_opsel=use_scale_opsel,
         expert_sched_mode=expert_sched_mode,
         b_streaming=b_streaming,
+        scale_load_path=scale_load_path,
     )
 
     # Pre-bind via flyc.compile so the launch goes through the CompiledFunction
@@ -507,8 +510,21 @@ def test_mxfp4_metadata_and_spill_regression(out_dtype):
 @pytest.mark.parametrize("use_tdm_store", [True, False])
 @pytest.mark.parametrize("use_scale_opsel", [True, False])
 @pytest.mark.parametrize("out_dtype", ["f32", "bf16"])
+@pytest.mark.parametrize("scale_load_path", ["tdm", "buffer_lds_stage"])
 def test_mxfp8_gemm(
-    M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, use_tdm_store, out_dtype, use_scale_opsel
+    M,
+    N,
+    K,
+    tile_m,
+    tile_n,
+    tile_k,
+    m_warp,
+    n_warp,
+    num_buffers,
+    use_tdm_store,
+    out_dtype,
+    use_scale_opsel,
+    scale_load_path,
 ):
     _run_mxscale_gemm_test(
         "fp8",
@@ -525,6 +541,7 @@ def test_mxfp8_gemm(
         out_dtype,
         l2_prefetch_distance=2,
         use_scale_opsel=use_scale_opsel,
+        scale_load_path=scale_load_path,
     )
 
 
@@ -640,6 +657,52 @@ def test_b_streaming_with_wave_spec_tdm(data_format, M, N, K, tile_m, tile_n, ti
         l2_prefetch_distance=2,
         b_streaming=True,
         wave_specialized_tdm=True,
+    )
+
+
+@pytest.mark.parametrize("scale_load_path", ["tdm", "buffer_lds_stage", "buffer_lds_stage_ab_split"])
+@pytest.mark.parametrize("num_buffers", [2, 3])
+@pytest.mark.parametrize("use_tdm_store", [True, False])
+@pytest.mark.parametrize("use_scale_opsel", [False, True])
+def test_mxfp8_wave_spec_scale_load_paths(scale_load_path, num_buffers, use_tdm_store, use_scale_opsel):
+    _run_mxscale_gemm_test(
+        "fp8",
+        128,
+        256,
+        384,
+        128,
+        256,
+        128,
+        2,
+        2,
+        num_buffers=num_buffers,
+        use_tdm_store=use_tdm_store,
+        out_dtype="bf16",
+        l2_prefetch_distance=2,
+        wave_specialized_tdm=True,
+        use_scale_opsel=use_scale_opsel,
+        scale_load_path=scale_load_path,
+    )
+
+
+def test_mxfp8_ab_split_scale_load_allows_extra_waves():
+    _run_mxscale_gemm_test(
+        "fp8",
+        128,
+        256,
+        384,
+        128,
+        256,
+        128,
+        2,
+        4,
+        num_buffers=3,
+        use_tdm_store=True,
+        out_dtype="bf16",
+        l2_prefetch_distance=2,
+        wave_specialized_tdm=True,
+        use_scale_opsel=True,
+        scale_load_path="buffer_lds_stage_ab_split",
     )
 
 
@@ -987,7 +1050,8 @@ def _run_benchmark(args):
     print(f"  Tile: ({tile_m}, {tile_n}, {tile_k}), warps=({args.m_warp}x{args.n_warp})")
     print(
         f"  Buffers={args.num_buffers}, out={args.out_dtype}, "
-        f"opsel={args.use_scale_opsel}, inst_prefetch={args.inst_prefetch}"
+        f"opsel={args.use_scale_opsel}, inst_prefetch={args.inst_prefetch}, "
+        f"scale_load={args.scale_load_path}"
     )
     if args.split_k > 1:
         print(f"  Split-K={args.split_k} (atomic accumulate, buffer-store epilogue)")
@@ -1057,6 +1121,7 @@ def _run_benchmark(args):
         expert_sched_mode=args.expert_sched_mode,
         atomic_barrier_enable=args.atomic_barrier_enable,
         b_streaming=args.b_streaming,
+        scale_load_path=args.scale_load_path,
     )
 
     c_flat = c_gpu.view(-1)
@@ -1187,9 +1252,9 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-format", type=str, default="fp4", choices=["fp4", "fp8", "a8w4"])
-    parser.add_argument("-M", type=int, default=8192)
-    parser.add_argument("-N", type=int, default=8192)
-    parser.add_argument("-K", type=int, default=8192)
+    parser.add_argument("-M", type=int, default=1024)
+    parser.add_argument("-N", type=int, default=1024)
+    parser.add_argument("-K", type=int, default=2048)
     parser.add_argument("--tile-m", type=int, default=128)
     parser.add_argument("--tile-n", type=int, default=256)
     parser.add_argument("--tile-k", type=int, default=256)
@@ -1206,6 +1271,12 @@ if __name__ == "__main__":
     parser.add_argument("--wave-spec-tdm", action="store_true", default=False)
     parser.add_argument("--waves-per-eu", type=int, default=None)
     parser.add_argument("--use-scale-opsel", action="store_true", default=False)
+    parser.add_argument(
+        "--scale-load-path",
+        type=str,
+        default="tdm",
+        choices=["tdm", "buffer_lds_stage", "buffer_lds_stage_ab_split"],
+    )
     parser.add_argument("--disable-expert-sched-mode", dest="expert_sched_mode", action="store_false", default=True)
     parser.add_argument("--b-streaming", action="store_true", default=False)
     parser.add_argument(
@@ -1259,4 +1330,5 @@ if __name__ == "__main__":
             waves_per_eu=args.waves_per_eu,
             expert_sched_mode=args.expert_sched_mode,
             b_streaming=args.b_streaming,
+            scale_load_path=args.scale_load_path,
         )
