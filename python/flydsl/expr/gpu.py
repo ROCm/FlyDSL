@@ -16,13 +16,11 @@ Usage::
     fx.gpu.barrier()
 """
 
-from .._mlir import ir
-from .._mlir.dialects import gpu, scf
+from .._mlir.dialects import gpu
 from .._mlir.ir import Attribute
-from . import arith as _arith_ext
 from .primitive import get_dyn_shared
 from .struct import Arena
-from .typing import T, Tuple3D
+from .typing import Tuple3D
 
 thread_id = gpu.thread_id
 block_id = gpu.block_id
@@ -53,47 +51,29 @@ def smem_space(int=False):
 lds_space = smem_space
 
 
-# =========================================================================
-# Cluster operations (gfx1250 workgroup clustering)
-# =========================================================================
-
 CLUSTER_BARRIER_ID = -3
-# For cluster sync, wait on the cluster user barrier itself.
 CLUSTER_WAIT_ALL = CLUSTER_BARRIER_ID
 
 
-def _require_rocdl():
-    from .._mlir.dialects import rocdl
-    from . import rocdl as _rocdl_ext
+def _rocdl_cluster():
+    from .rocdl import cluster
 
-    return rocdl, _rocdl_ext
+    return cluster
 
 
 def is_wave_leader():
     """Return true for wave-0 inside the workgroup."""
-    _, _rocdl_ext = _require_rocdl()
-    return _arith_ext.cmpi(
-        _arith_ext.CmpIPredicate.eq,
-        _rocdl_ext.wave_id(),
-        _arith_ext.constant(0, type=T.i32),
-    )
+    return _rocdl_cluster().is_wave_leader()
 
 
 def cluster_signal_once_per_wg():
     """Signal cluster barrier from exactly one wave per workgroup."""
-    rocdl, _ = _require_rocdl()
-    if_op = scf.IfOp(is_wave_leader(), [], has_else=False, loc=ir.Location.unknown())
-    if len(if_op.regions[0].blocks) == 0:
-        if_op.regions[0].blocks.append(*[])
-    with ir.InsertionPoint(if_op.regions[0].blocks[0]):
-        rocdl.s_barrier_signal(CLUSTER_BARRIER_ID)
-        scf.YieldOp([])
+    return _rocdl_cluster().cluster_signal_once_per_wg()
 
 
 def cluster_wait():
     """Wait on the cluster user barrier."""
-    rocdl, _ = _require_rocdl()
-    rocdl.s_barrier_wait(CLUSTER_WAIT_ALL)
+    return _rocdl_cluster().cluster_wait()
 
 
 def cluster_barrier():
@@ -104,9 +84,7 @@ def cluster_barrier():
       2) signal cluster barrier once per workgroup (wave-0 only)
       3) wait for all workgroups in the cluster
     """
-    gpu.barrier()
-    cluster_signal_once_per_wg()
-    cluster_wait()
+    return _rocdl_cluster().cluster_barrier()
 
 
 def compute_cluster_position():
@@ -115,10 +93,7 @@ def compute_cluster_position():
     Returns:
         (local_x, local_y) as MLIR index values — position within the cluster.
     """
-    _, _rocdl_ext = _require_rocdl()
-    local_x = _arith_ext.index_cast(T.index, _rocdl_ext.cluster_workgroup_id_x())
-    local_y = _arith_ext.index_cast(T.index, _rocdl_ext.cluster_workgroup_id_y())
-    return local_x, local_y
+    return _rocdl_cluster().compute_cluster_position()
 
 
 def compute_mcast_masks(local_x, local_y, cluster_m: _int, cluster_n: _int):
@@ -145,23 +120,7 @@ def compute_mcast_masks(local_x, local_y, cluster_m: _int, cluster_n: _int):
     Returns:
         (a_mask, b_mask) as MLIR i32 values for TDM workgroup_mask.
     """
-    local_x_i32 = _arith_ext.index_cast(T.i32, local_x)
-    local_y_i32 = _arith_ext.index_cast(T.i32, local_y)
-    cluster_m_i32 = _arith_ext.constant(cluster_m, type=T.i32)
-
-    # A mask: pattern has bits at strides of cluster_m, shifted by local_x
-    a_pattern_val = 0
-    for ly in range(cluster_n):
-        a_pattern_val |= 1 << (ly * cluster_m)
-    a_pattern = _arith_ext.constant(a_pattern_val, type=T.i32)
-    a_mask = _arith_ext.shli(a_pattern, local_x_i32)
-
-    # B mask: cluster_m contiguous low bits, shifted by local_y * cluster_m
-    b_pattern = _arith_ext.constant((1 << cluster_m) - 1, type=T.i32)
-    col_base = _arith_ext.muli(local_y_i32, cluster_m_i32)
-    b_mask = _arith_ext.shli(b_pattern, col_base)
-
-    return a_mask, b_mask
+    return _rocdl_cluster().compute_mcast_masks(local_x, local_y, cluster_m, cluster_n)
 
 
 class SharedAllocator(Arena):

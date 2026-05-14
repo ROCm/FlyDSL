@@ -82,10 +82,13 @@ assert "rocdl" not in expr.__dict__
 assert "tdm_ops" not in expr.__dict__
 
 from flydsl.expr import buffer_ops, rocdl, tdm_ops
+from flydsl.expr.rocdl import cluster
 
 assert buffer_ops.__name__ == "flydsl.expr.buffer_ops"
 assert rocdl.__name__ == "flydsl.expr.rocdl"
 assert tdm_ops.__name__ == "flydsl.expr.rocdl.tdm_ops"
+assert cluster.__name__ == "flydsl.expr.rocdl.cluster"
+assert cluster.CLUSTER_BARRIER_ID == -3
 assert expr.buffer_ops is buffer_ops
 assert expr.rocdl is rocdl
 assert expr.tdm_ops is tdm_ops
