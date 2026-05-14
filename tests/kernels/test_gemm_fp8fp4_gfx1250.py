@@ -15,11 +15,8 @@ if _REPO_ROOT not in sys.path:
 if _PYFLIR_SRC not in sys.path:
     sys.path.insert(0, _PYFLIR_SRC)
 
-# workaround for simulator
 import pytest  # noqa: E402
 import torch  # noqa: E402
-
-import flydsl  # noqa: E402,F401 -- preload system comgr before torch/HIP loads LLVM
 
 pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
 
