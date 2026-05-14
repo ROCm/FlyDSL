@@ -179,10 +179,10 @@ def compile_mxscale_gemm(
     b_scale_load_rep = warp_tile_n // WMMA_M if is_fp4 else wmma_n_rep
 
     _b_frag_loads_per_wn = 2 if is_a8w4 else 4
-    _bs_ds_loads = wmma_n_rep * _b_frag_loads_per_wn + (b_scale_load_rep + 3) // 4 + (wmma_m_rep + 3) // 4
-    # Mirror count for B-streaming path: A frags + both scales pre-loaded per K-substep.
     _a_frag_loads_per_wm = 2 if is_fp4 else 4
-    _as_ds_loads = wmma_m_rep * _a_frag_loads_per_wm + (wmma_m_rep + 3) // 4 + (b_scale_load_rep + 3) // 4
+    _scale_ds_loads = (wmma_m_rep + 3) // 4 + (b_scale_load_rep + 3) // 4
+    _bs_ds_loads = wmma_n_rep * _b_frag_loads_per_wn + _scale_ds_loads
+    _as_ds_loads = wmma_m_rep * _a_frag_loads_per_wm + _scale_ds_loads
 
     lds_a_stride_bytes = packed_tile_k_a + LDS_PAD_A_BYTES
 
@@ -299,9 +299,6 @@ def compile_mxscale_gemm(
     COMPUTE_SCHEDULE_B_STREAMING = "b_streaming"
 
     def _pick_compute_schedule_kind():
-        # B-streaming opt-in: hold A frags, stream B frags. Targets small-M
-        # FP4 / FP8 shapes where wmma_m_rep < wmma_n_rep, trading B prefetch
-        # locality for reduced VGPR pressure on the larger B frags.
         if b_streaming:
             return COMPUTE_SCHEDULE_B_STREAMING
         # The FP4 col-band (quadrant) schedule reduces VGPR bank conflicts by
@@ -323,10 +320,7 @@ def compile_mxscale_gemm(
 
     if use_b_streaming_schedule:
         print(
-            f"[b_streaming] enabled: data_format={data_format}, "
-            f"tile=({tile_m},{tile_n},{tile_k}), warps=({m_warp}x{n_warp}), "
-            f"wmma_m_rep={wmma_m_rep}, wmma_n_rep={wmma_n_rep}, "
-            f"a_frag_dw={8 if is_fp4 else 16}, b_frag_dw={8 if is_a8w4 else 16}",
+            f"[b_streaming] {data_format} tile=({tile_m},{tile_n},{tile_k}) " f"M_r={wmma_m_rep} N_r={wmma_n_rep}",
             flush=True,
         )
 
@@ -639,55 +633,32 @@ def compile_mxscale_gemm(
                 results.append(vecs[i // 4][i % 4])
             return results
 
-        def _load_b_and_scales(b_buf, b_bases, bs_buf, bs_bases, as_buf, as_bases, ks):
-            """Load B frags + all scales for one K-subtile."""
-            b_frags = [load_b_frag(b_buf, b_bases, wn, ks) for wn in range_constexpr(wmma_n_rep)]
-            b_scales_all = load_scale_b128(bs_buf, bs_bases[0], b_scale_load_rep, ks)
-            a_scales_all = load_scale_b128(as_buf, as_bases[0], wmma_m_rep, ks)
-            if const_expr(is_fp4):
-                # FP4 32x16: scaleAType=0 fixed (no op_sel on BScale)
-                b_scales = b_scales_all
-                if const_expr(use_scale_opsel):
-                    a_scales = a_scales_all[::2]
-                else:
-                    a_scales = a_scales_all
+        def _scales_for_emit(as_buf, as_bases, bs_buf, bs_bases, ks):
+            """Load both scale tensors and apply op_sel downsampling per format.
+
+            FP4 BScale has no op_sel (scaleAType=0 fixed); only AScale halves.
+            FP8/A8W4 16x16 supports op_sel on both.
+            """
+            a_all = load_scale_b128(as_buf, as_bases[0], wmma_m_rep, ks)
+            b_all = load_scale_b128(bs_buf, bs_bases[0], b_scale_load_rep, ks)
+            if const_expr(use_scale_opsel):
+                a = a_all[::2]
+                b = b_all if const_expr(is_fp4) else b_all[::2]
             else:
-                # FP8/A8W4 16x16: both scales support op_sel
-                if const_expr(use_scale_opsel):
-                    b_scales = b_scales_all[::2]
-                    a_scales = a_scales_all[::2]
-                else:
-                    b_scales = b_scales_all
-                    a_scales = a_scales_all
+                a, b = a_all, b_all
+            return a, b
+
+        def _load_b_and_scales(b_buf, b_bases, bs_buf, bs_bases, as_buf, as_bases, ks):
+            b_frags = [load_b_frag(b_buf, b_bases, wn, ks) for wn in range_constexpr(wmma_n_rep)]
+            a_scales, b_scales = _scales_for_emit(as_buf, as_bases, bs_buf, bs_bases, ks)
             return b_frags, b_scales, a_scales
 
         def _load_a_and_scales(a_buf, a_bases, as_buf, as_bases, bs_buf, bs_bases, ks):
-            """Mirror of _load_b_and_scales for B-streaming path.
-
-            Pre-loads all wmma_m_rep A frags + both scales for one K-substep.
-            Returns (a_frags, a_scales, b_scales).
-            """
             a_frags = [load_a_frag(a_buf, a_bases[wm], ks) for wm in range_constexpr(wmma_m_rep)]
-            a_scales_all = load_scale_b128(as_buf, as_bases[0], wmma_m_rep, ks)
-            b_scales_all = load_scale_b128(bs_buf, bs_bases[0], b_scale_load_rep, ks)
-            if const_expr(is_fp4):
-                # FP4 32x16: scaleAType=0 fixed (no op_sel on BScale)
-                b_scales = b_scales_all
-                if const_expr(use_scale_opsel):
-                    a_scales = a_scales_all[::2]
-                else:
-                    a_scales = a_scales_all
-            else:
-                # FP8/A8W4 16x16: both scales support op_sel
-                if const_expr(use_scale_opsel):
-                    b_scales = b_scales_all[::2]
-                    a_scales = a_scales_all[::2]
-                else:
-                    b_scales = b_scales_all
-                    a_scales = a_scales_all
+            a_scales, b_scales = _scales_for_emit(as_buf, as_bases, bs_buf, bs_bases, ks)
             return a_frags, a_scales, b_scales
 
-        def _emit_wmma(accs, wm, wn, a_frag, b_frags, a_scales, b_scales):
+        def _emit_wmma(accs, wm, wn, a_frag, b_frag, a_scales, b_scales):
             """Emit one WMMA instruction (format-specific)."""
             idx = wm * wmma_n_rep + wn
             if const_expr(use_scale_opsel):
@@ -701,7 +672,7 @@ def compile_mxscale_gemm(
                 # 32x16 WMMA with A/B swap: SRC0=B, SRC1=A
                 accs[idx] = rocdl.wmma_scale_f32_32x16x128_f4(
                     T.vec(16, T.f32),
-                    b_frags[wn],
+                    b_frag,
                     a_frag,
                     accs[idx],
                     b_scales[wn * 2],
@@ -719,7 +690,7 @@ def compile_mxscale_gemm(
                     b_opsel = 0
                 accs[idx] = rocdl.wmma_scale_f32_16x16x128_f8f6f4(
                     T.vec(8, T.f32),
-                    b_frags[wn],
+                    b_frag,
                     a_frag,
                     accs[idx],
                     b_scales[b_scale_idx],
@@ -761,7 +732,7 @@ def compile_mxscale_gemm(
                         emit_filler()
                     for wn_raw in range_constexpr(wmma_n_rep):
                         wn = (wmma_n_rep - 1 - wn_raw) if (wm % 2 == 1) else wn_raw
-                        _emit_wmma(accs, wm, wn, a_frags[frag_i], b_frags, a_scales, b_scales)
+                        _emit_wmma(accs, wm, wn, a_frags[frag_i], b_frags[wn], a_scales, b_scales)
 
             a_frags_front = [load_a_frag(a_buf, a_bases[wm], ks) for wm in range_constexpr(_front_wm)]
 
@@ -794,47 +765,6 @@ def compile_mxscale_gemm(
                 return accs, next_result
             return accs
 
-        def _emit_wmma_one_b(accs, wm, wn, a_frag, b_frag, a_scales, b_scales):
-            """B-stream emit: single b_frag for current wn. Mirrors _emit_wmma."""
-            idx = wm * wmma_n_rep + wn
-            if const_expr(use_scale_opsel):
-                a_scale_idx = wm // 2
-                a_opsel = wm % 2
-            else:
-                a_scale_idx = wm
-                a_opsel = 0
-
-            if const_expr(is_fp4):
-                accs[idx] = rocdl.wmma_scale_f32_32x16x128_f4(
-                    T.vec(16, T.f32),
-                    b_frag,
-                    a_frag,
-                    accs[idx],
-                    b_scales[wn * 2],
-                    a_scales[a_scale_idx],
-                    scaleAType=0,
-                    scaleBType=a_opsel,
-                )
-            else:
-                if const_expr(use_scale_opsel):
-                    b_scale_idx = wn // 2
-                    b_opsel = wn % 2
-                else:
-                    b_scale_idx = wn
-                    b_opsel = 0
-                accs[idx] = rocdl.wmma_scale_f32_16x16x128_f8f6f4(
-                    T.vec(8, T.f32),
-                    b_frag,
-                    a_frag,
-                    accs[idx],
-                    b_scales[b_scale_idx],
-                    a_scales[a_scale_idx],
-                    fmtA=4 if is_a8w4 else 0,
-                    fmtB=0,
-                    scaleAType=b_opsel,
-                    scaleBType=a_opsel,
-                )
-
         def _b_streaming_compute(
             accs,
             b_buf,
@@ -844,17 +774,10 @@ def compile_mxscale_gemm(
             b_scales,
             ks,
             emit_filler=None,
-            next_as_info=None,
+            next_info=None,
             mid_compute_callback=None,
         ):
-            """Half-based B-streaming with zigzag wm ordering.
-
-            Mirror of _a_streaming_compute. Pre-loaded A frags are held;
-            B frags are streamed in front/back wn chunks. When *next_as_info*
-            is provided, the next K-subtile's A+scale loads are issued
-            BEFORE the s_wait_dscnt so they overlap with the current WMMA
-            execution (partial drain pattern).
-            """
+            """B-streaming counterpart to _a_streaming_compute (A held, B streamed)."""
             next_result = None
             _front_wn = (wmma_n_rep + 1) // 2
             _back_wn = wmma_n_rep - _front_wn
@@ -862,21 +785,18 @@ def compile_mxscale_gemm(
             def _emit_cols(start_wn, b_frags_chunk):
                 for frag_i in range_constexpr(len(b_frags_chunk)):
                     wn = start_wn + frag_i
-                    is_last = wn == wmma_n_rep - 1
-                    if const_expr(is_last and emit_filler is not None):
+                    if const_expr(wn == wmma_n_rep - 1 and emit_filler is not None):
                         rocdl.sched_barrier(0)
                         emit_filler()
                     for wm_raw in range_constexpr(wmma_m_rep):
                         wm = (wmma_m_rep - 1 - wm_raw) if (wn % 2 == 1) else wm_raw
-                        _emit_wmma_one_b(accs, wm, wn, a_frags[wm], b_frags_chunk[frag_i], a_scales, b_scales)
+                        _emit_wmma(accs, wm, wn, a_frags[wm], b_frags_chunk[frag_i], a_scales, b_scales)
 
             b_frags_front = [load_b_frag(b_buf, b_bases, wn, ks) for wn in range_constexpr(_front_wn)]
-
-            _use_partial_drain = next_as_info is not None and _front_wn * wmma_m_rep >= 4
+            _use_partial_drain = next_info is not None and _front_wn * wmma_m_rep >= 4
 
             if const_expr(_use_partial_drain):
-                na_buf, na_bases, nas_buf, nas_bases, nbs_buf, nbs_bases, n_ks = next_as_info
-                next_result = _load_a_and_scales(na_buf, na_bases, nas_buf, nas_bases, nbs_buf, nbs_bases, n_ks)
+                next_result = _load_a_and_scales(*next_info)
                 rocdl.s_wait_dscnt(_as_ds_loads)
             else:
                 rocdl.s_wait_dscnt(0)
@@ -889,16 +809,13 @@ def compile_mxscale_gemm(
 
             if const_expr(_back_wn > 0):
                 b_frags_back = [load_b_frag(b_buf, b_bases, _front_wn + h, ks) for h in range_constexpr(_back_wn)]
-                _back_drain = _as_ds_loads if _use_partial_drain else 0
-                rocdl.s_wait_dscnt(_back_drain)
+                rocdl.s_wait_dscnt(_as_ds_loads if _use_partial_drain else 0)
                 _emit_cols(_front_wn, b_frags_back)
 
             if const_expr(_use_partial_drain):
                 return accs, next_result
-            if const_expr(next_as_info is not None):
-                na_buf, na_bases, nas_buf, nas_bases, nbs_buf, nbs_bases, n_ks = next_as_info
-                next_result = _load_a_and_scales(na_buf, na_bases, nas_buf, nas_bases, nbs_buf, nbs_bases, n_ks)
-                return accs, next_result
+            if const_expr(next_info is not None):
+                return accs, _load_a_and_scales(*next_info)
             return accs
 
         # ── Compute on one LDS buffer ──
@@ -1096,12 +1013,7 @@ def compile_mxscale_gemm(
         def compute_tile_b_streaming(
             accs_in, lds_a, lds_b, lds_as, lds_bs, emit_filler=None, mid_compute_callback=None
         ):
-            """B-streaming compute path: hold A frags, stream B frags.
-
-            Mirrors compute_tile() with A/B roles swapped. Targets shapes
-            where wmma_m_rep < wmma_n_rep (small-M / tall-N) so that the
-            held side has fewer reps and B-frag VGPR pressure is reduced.
-            """
+            """compute_tile counterpart with A held and B streamed."""
             current_accs = list(accs_in)
             a_buf, a_bases = _precompute_a_lane_bases(lds_a)
             b_buf, b_bases = _precompute_b_lane_bases(lds_b)
@@ -1109,12 +1021,11 @@ def compile_mxscale_gemm(
             bs_buf, bs_bases = _precompute_scale_lane_bases(
                 lds_bs, warp_n_base, b_scale_load_rep, interleaved_scale_cols_b
             )
+            load_args = (a_buf, a_bases, as_buf, as_bases, bs_buf, bs_bases)
 
             if const_expr(k_wmma_steps == 1):
-                a_frags, a_scales, b_scales = _load_a_and_scales(
-                    a_buf, a_bases, as_buf, as_bases, bs_buf, bs_bases, 0
-                )
-                current_accs = _b_streaming_compute(
+                a_frags, a_scales, b_scales = _load_a_and_scales(*load_args, 0)
+                return _b_streaming_compute(
                     current_accs,
                     b_buf,
                     b_bases,
@@ -1125,27 +1036,30 @@ def compile_mxscale_gemm(
                     emit_filler=emit_filler,
                     mid_compute_callback=mid_compute_callback,
                 )
-            else:
-                prev_a, prev_as, prev_bs = _load_a_and_scales(
-                    a_buf, a_bases, as_buf, as_bases, bs_buf, bs_bases, 0
+
+            prev_a, prev_as, prev_bs = _load_a_and_scales(*load_args, 0)
+            for ks in range_constexpr(k_wmma_steps - 1):
+                current_accs, (prev_a, prev_as, prev_bs) = _b_streaming_compute(
+                    current_accs,
+                    b_buf,
+                    b_bases,
+                    prev_a,
+                    prev_as,
+                    prev_bs,
+                    ks,
+                    next_info=load_args + (ks + 1,),
+                    mid_compute_callback=mid_compute_callback if ks == 0 else None,
                 )
-                for ks in range_constexpr(k_wmma_steps - 1):
-                    _mid_cb = mid_compute_callback if ks == 0 else None
-                    current_accs, (prev_a, prev_as, prev_bs) = _b_streaming_compute(
-                        current_accs,
-                        b_buf,
-                        b_bases,
-                        prev_a,
-                        prev_as,
-                        prev_bs,
-                        ks,
-                        next_as_info=(a_buf, a_bases, as_buf, as_bases, bs_buf, bs_bases, ks + 1),
-                        mid_compute_callback=_mid_cb,
-                    )
-                current_accs = _b_streaming_compute(
-                    current_accs, b_buf, b_bases, prev_a, prev_as, prev_bs, k_wmma_steps - 1, emit_filler=emit_filler
-                )
-            return current_accs
+            return _b_streaming_compute(
+                current_accs,
+                b_buf,
+                b_bases,
+                prev_a,
+                prev_as,
+                prev_bs,
+                k_wmma_steps - 1,
+                emit_filler=emit_filler,
+            )
 
         def hot_loop_scheduler():
             _half_wm = wmma_m_rep // 2
@@ -1218,33 +1132,23 @@ def compile_mxscale_gemm(
             )
 
         def hot_loop_scheduler_b_streaming():
-            """Explicit instruction schedule for B-streaming compute_tile.
-
-            Mirrors hot_loop_scheduler() with A/B roles swapped:
-              - Held: A frags + both scales (loaded once per ks, prefetched
-                across ks via partial drain).
-              - Streamed: B frags in front/back wn chunks.
-            """
+            """hot_loop_scheduler counterpart for B-streaming."""
             _front_wn = (wmma_n_rep + 1) // 2
             _back_wn = wmma_n_rep - _front_wn
-            _front_wmma = _front_wn * wmma_m_rep
-            _back_wmma = _back_wn * wmma_m_rep
-            _b_loads_per_frag = 2 if is_a8w4 else 4
             _a_loads_total = wmma_m_rep * DS_LOADS_PER_A_FRAG
-            _scale_loads = (wmma_m_rep + 3) // 4 + (b_scale_load_rep + 3) // 4
-            _front_b_loads = _front_wn * _b_loads_per_frag
-            _back_b_loads = _back_wn * _b_loads_per_frag
-            _next_ks_loads = _a_loads_total + _scale_loads
+            _front_b_loads = _front_wn * _b_frag_loads_per_wn
+            _back_b_loads = _back_wn * _b_frag_loads_per_wn
+            _next_ks_loads = _a_loads_total + _scale_ds_loads
 
             for _ks in range_constexpr(k_wmma_steps):
                 if const_expr(_ks == 0):
-                    rocdl.sched_dsrd(_a_loads_total + _scale_loads + _front_b_loads)
+                    rocdl.sched_dsrd(_next_ks_loads + _front_b_loads)
                 else:
                     rocdl.sched_dsrd(_front_b_loads)
-                rocdl.sched_mfma(_front_wmma)
+                rocdl.sched_mfma(_front_wn * wmma_m_rep)
                 if const_expr(_back_wn > 0):
                     rocdl.sched_dsrd(_back_b_loads)
-                    rocdl.sched_mfma(_back_wmma)
+                    rocdl.sched_mfma(_back_wn * wmma_m_rep)
                 if const_expr(_ks < k_wmma_steps - 1):
                     rocdl.sched_dsrd(_next_ks_loads)
             rocdl.sched_barrier(0)
