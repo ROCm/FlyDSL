@@ -382,7 +382,7 @@ def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int
             B_lds_cur1_alloc.finalize()
             B_lds_next0_alloc.finalize()
             B_lds_next1_alloc.finalize()
-        grid_x = (M * N) // (BLOCK_M * BLOCK_N)
+        grid_x = ((M + BLOCK_M - 1) // BLOCK_M) * (N // BLOCK_N)
         kernel_gemm(
             A,
             B_T,
