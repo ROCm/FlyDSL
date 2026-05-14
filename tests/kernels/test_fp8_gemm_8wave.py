@@ -13,10 +13,10 @@ _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from flydsl.runtime.device import get_rocm_arch
-from kernels.fp8_gemm_8wave import compile_fp8_gemm
-from tests.test_common import run_perftest, verify_output
-from tests.utils import pertoken_quant
+from flydsl.runtime.device import get_rocm_arch  # noqa: E402
+from kernels.fp8_gemm_8wave import compile_fp8_gemm  # noqa: E402
+from tests.test_common import run_perftest, verify_output  # noqa: E402
+from tests.utils import pertoken_quant  # noqa: E402
 
 FP8_DTYPE = torch.float8_e4m3fn
 OUT_DTYPE = torch.bfloat16
