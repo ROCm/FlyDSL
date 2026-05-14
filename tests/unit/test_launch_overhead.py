@@ -17,13 +17,14 @@ import time
 import pytest
 import torch
 
+import flydsl.compiler as flyc
+import flydsl.expr as fx
+
 pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
 
 # ─────────────────────────────────────────────────────────────────
 # 1. FlyDSL vec_add
 # ─────────────────────────────────────────────────────────────────
-import flydsl.compiler as flyc
-import flydsl.expr as fx
 
 
 @flyc.kernel

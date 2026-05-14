@@ -425,7 +425,7 @@ def compile_preshuffle_gemm_v2(
         i32_n: fx.Int32,
         stream: fx.Stream,
     ):
-        ctx = CompilationContext.get_current()
+        CompilationContext.get_current()
 
         # MMA atom — layout_elem carries the dtype (Float16/BFloat16/Float8E4M3FN/etc)
         if const_expr(use_mfma_k32):

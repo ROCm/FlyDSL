@@ -22,31 +22,6 @@ import sys
 import numpy as np
 import pytest
 
-pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
-
-_RUN_QUANT = os.environ.get("FLYDSL_RUN_QUANT", "").strip().lower() in ("1", "true", "yes", "on")
-if not _RUN_QUANT:
-    _reason = "Per-token quant benchmark temporarily disabled (set FLYDSL_RUN_QUANT=1 to enable)."
-    if __name__ == "__main__":
-        print(_reason)
-        raise SystemExit(0)
-    pytest.skip(_reason, allow_module_level=True)
-
-try:
-    import torch
-except Exception:
-    torch = None
-
-if torch is None or not torch.cuda.is_available():
-    pytest.skip("CUDA/ROCm not available. Skipping GPU benchmarks.", allow_module_level=True)
-
-try:
-    from aiter.ops.quant import per_token_quant_hip
-
-    HAS_AITER = True
-except Exception:
-    HAS_AITER = False
-
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
@@ -59,6 +34,31 @@ from flydsl.expr.vector import ReductionOp, Vector, full
 from flydsl.runtime.device import get_rocm_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from tests.test_common import run_perftest
+
+try:
+    import torch
+except Exception:
+    torch = None
+
+pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
+
+_RUN_QUANT = os.environ.get("FLYDSL_RUN_QUANT", "").strip().lower() in ("1", "true", "yes", "on")
+if not _RUN_QUANT:
+    _reason = "Per-token quant benchmark temporarily disabled (set FLYDSL_RUN_QUANT=1 to enable)."
+    if __name__ == "__main__":
+        print(_reason)
+        raise SystemExit(0)
+    pytest.skip(_reason, allow_module_level=True)
+
+if torch is None or not torch.cuda.is_available():
+    pytest.skip("CUDA/ROCm not available. Skipping GPU benchmarks.", allow_module_level=True)
+
+try:
+    from aiter.ops.quant import per_token_quant_hip
+
+    HAS_AITER = True
+except Exception:
+    HAS_AITER = False
 
 BLOCK_THREADS = 256
 WARP_SIZE = 64

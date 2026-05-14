@@ -7,17 +7,18 @@
 
 import pytest
 
-pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
+import flydsl.compiler as flyc
+import flydsl.expr as fx
 
 try:
     import torch
 except ImportError:
     torch = None
+
+pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
+
 if torch is None or not torch.cuda.is_available():
     pytest.skip("CUDA/ROCm not available", allow_module_level=True)
-
-import flydsl.compiler as flyc
-import flydsl.expr as fx
 
 
 @flyc.kernel

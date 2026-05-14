@@ -9,19 +9,20 @@ import sys
 
 import pytest
 
-pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
+import flydsl.compiler as flyc
+import flydsl.expr as fx
+from flydsl.runtime.device import get_rocm_arch
+from tests.test_common import checkAllclose, run_perftest
 
 try:
     import torch
 except ImportError:
     torch = None
+
+pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
+
 if torch is None or not torch.cuda.is_available():
     pytest.skip("CUDA/ROCm not available. Skipping GPU benchmarks.", allow_module_level=True)
-
-import flydsl.compiler as flyc
-import flydsl.expr as fx
-from flydsl.runtime.device import get_rocm_arch
-from tests.test_common import checkAllclose, run_perftest
 
 
 @flyc.kernel
