@@ -752,6 +752,23 @@ def _make_pa_phase_helpers(
                 [sm_vmax_wr_off],
             )
 
+    def _token_vec_i32(kv_tok_base, td: int):
+        kv_tok_td_base = kv_tok_base + arith.constant(td * MFMA_N, type=T.i32)
+        return fx.Vector.from_elements(
+            [kv_tok_td_base + arith.constant(i, type=T.i32) for i in range_constexpr(4)],
+            dtype=fx.Int32,
+        )
+
+    def _apply_token_mask_vec(logit_vec, td: int, kv_tok_base, causal_bound, seq_start, false_value):
+        tok_vec = _token_vec_i32(kv_tok_base, td)
+        if const_expr(apply_causal_mask and seq_start is not None):
+            in_range = (tok_vec < causal_bound) & (tok_vec >= seq_start)
+        elif const_expr(apply_causal_mask):
+            in_range = tok_vec < causal_bound
+        else:
+            in_range = tok_vec >= seq_start
+        return arith.select(in_range, logit_vec, vector.broadcast(T.f32x4, arith.unwrap(false_value)))
+
     def _qk_and_intra_softmax(
         k_ops,
         partition_start,
@@ -803,19 +820,11 @@ def _make_pa_phase_helpers(
         )
         qk_max = neg_inf
         for td in range_constexpr(TLOOP):
-            for i in range_constexpr(4):
-                s = vector.extract(d_out[td], static_position=[i], dynamic_position=[])
-                if const_expr(kv_tok_base is not None):
-                    kv_tok = kv_tok_base + arith.constant(td * MFMA_N + i, type=T.i32)
-                    if const_expr(apply_causal_mask and apply_range_mask):
-                        in_range = (kv_tok < causal_bound) & (kv_tok >= seq_start)
-                        s = arith.select(in_range, s, neg_inf)
-                    elif const_expr(apply_causal_mask):
-                        s = arith.select(kv_tok < causal_bound, s, neg_inf)
-                    elif const_expr(apply_range_mask):
-                        s = arith.select(kv_tok >= seq_start, s, neg_inf)
-                    d_out[td] = vector.insert(s, d_out[td], static_position=[i], dynamic_position=[])
-                qk_max = qk_max.maximumf(s)
+            logits_vec = d_out[td]
+            if const_expr(kv_tok_base is not None):
+                logits_vec = _apply_token_mask_vec(logits_vec, td, kv_tok_base, causal_bound, seq_start, neg_inf)
+                d_out[td] = logits_vec
+            qk_max = qk_max.maximumf(fx.Vector(logits_vec).reduce("max"))
         for sh in [32, 16]:
             qk_max = qk_max.maximumf(qk_max.shuffle_xor(arith.constant(sh, type=T.i32), c_w))
         vector.store(
@@ -829,12 +838,10 @@ def _make_pa_phase_helpers(
             arith.select(qk_max > neg_inf, qk_max, zero_f) if const_expr(kv_tok_base is not None) else qk_max
         )
         for td in range_constexpr(TLOOP):
-            for i in range_constexpr(4):
-                s = vector.extract(d_out[td], static_position=[i], dynamic_position=[])
-                diff = s - safe_qk_max
-                p = _exp2_f32_fast(diff * fx.Float32(LOG2E).ir_value())
-                exp_sum = exp_sum + p
-                d_out[td] = vector.insert(p, d_out[td], static_position=[i], dynamic_position=[])
+            diff_vec = fx.Vector(d_out[td]) - vector.broadcast(T.f32x4, arith.unwrap(safe_qk_max))
+            p_vec = _exp2_f32_fast(diff_vec * vector.broadcast(T.f32x4, arith.unwrap(fx.Float32(LOG2E))))
+            exp_sum = exp_sum + fx.Vector(p_vec).reduce("add")
+            d_out[td] = p_vec
         for sh in [32, 16]:
             exp_sum = exp_sum + exp_sum.shuffle_xor(arith.constant(sh, type=T.i32), c_w)
         vector.store(
@@ -1013,19 +1020,11 @@ def _make_pa_phase_helpers(
         )
         qk_max = neg_inf
         for td in range_constexpr(TLOOP):
-            for i in range_constexpr(4):
-                s = vector.extract(d_out[td], static_position=[i], dynamic_position=[])
-                if const_expr(kv_tok_base is not None):
-                    kv_tok = kv_tok_base + arith.constant(td * MFMA_N + i, type=T.i32)
-                    if const_expr(apply_causal_mask and apply_range_mask):
-                        in_range = (kv_tok < causal_bound) & (kv_tok >= seq_start)
-                        s = arith.select(in_range, s, neg_inf)
-                    elif const_expr(apply_causal_mask):
-                        s = arith.select(kv_tok < causal_bound, s, neg_inf)
-                    elif const_expr(apply_range_mask):
-                        s = arith.select(kv_tok >= seq_start, s, neg_inf)
-                    d_out[td] = vector.insert(s, d_out[td], static_position=[i], dynamic_position=[])
-                qk_max = qk_max.maximumf(s)
+            logits_vec = d_out[td]
+            if const_expr(kv_tok_base is not None):
+                logits_vec = _apply_token_mask_vec(logits_vec, td, kv_tok_base, causal_bound, seq_start, neg_inf)
+                d_out[td] = logits_vec
+            qk_max = qk_max.maximumf(fx.Vector(logits_vec).reduce("max"))
         for sh in [32, 16]:
             qk_max = qk_max.maximumf(qk_max.shuffle_xor(arith.constant(sh, type=T.i32), c_w))
         vector.store(
@@ -1039,12 +1038,10 @@ def _make_pa_phase_helpers(
             arith.select(qk_max > neg_inf, qk_max, zero_f) if const_expr(kv_tok_base is not None) else qk_max
         )
         for td in range_constexpr(TLOOP):
-            for i in range_constexpr(4):
-                s = vector.extract(d_out[td], static_position=[i], dynamic_position=[])
-                diff = s - safe_qk_max
-                p = _exp2_f32_fast(diff * fx.Float32(LOG2E).ir_value())
-                exp_sum = exp_sum + p
-                d_out[td] = vector.insert(p, d_out[td], static_position=[i], dynamic_position=[])
+            diff_vec = fx.Vector(d_out[td]) - vector.broadcast(T.f32x4, arith.unwrap(safe_qk_max))
+            p_vec = _exp2_f32_fast(diff_vec * vector.broadcast(T.f32x4, arith.unwrap(fx.Float32(LOG2E))))
+            exp_sum = exp_sum + fx.Vector(p_vec).reduce("add")
+            d_out[td] = p_vec
         for sh in [32, 16]:
             exp_sum = exp_sum + exp_sum.shuffle_xor(arith.constant(sh, type=T.i32), c_w)
         vector.store(
