@@ -17,10 +17,9 @@ Usage::
 """
 
 from .._mlir import ir
-from .._mlir.dialects import gpu, rocdl, scf
+from .._mlir.dialects import gpu, scf
 from .._mlir.ir import Attribute
 from . import arith as _arith_ext
-from . import rocdl as _rocdl_ext
 from .primitive import get_dyn_shared
 from .struct import Arena
 from .typing import T, Tuple3D
@@ -63,8 +62,16 @@ CLUSTER_BARRIER_ID = -3
 CLUSTER_WAIT_ALL = CLUSTER_BARRIER_ID
 
 
+def _require_rocdl():
+    from .._mlir.dialects import rocdl
+    from . import rocdl as _rocdl_ext
+
+    return rocdl, _rocdl_ext
+
+
 def is_wave_leader():
     """Return true for wave-0 inside the workgroup."""
+    _, _rocdl_ext = _require_rocdl()
     return _arith_ext.cmpi(
         _arith_ext.CmpIPredicate.eq,
         _rocdl_ext.wave_id(),
@@ -74,6 +81,7 @@ def is_wave_leader():
 
 def cluster_signal_once_per_wg():
     """Signal cluster barrier from exactly one wave per workgroup."""
+    rocdl, _ = _require_rocdl()
     if_op = scf.IfOp(is_wave_leader(), [], has_else=False, loc=ir.Location.unknown())
     if len(if_op.regions[0].blocks) == 0:
         if_op.regions[0].blocks.append(*[])
@@ -84,6 +92,7 @@ def cluster_signal_once_per_wg():
 
 def cluster_wait():
     """Wait on the cluster user barrier."""
+    rocdl, _ = _require_rocdl()
     rocdl.s_barrier_wait(CLUSTER_WAIT_ALL)
 
 
@@ -106,6 +115,7 @@ def compute_cluster_position():
     Returns:
         (local_x, local_y) as MLIR index values — position within the cluster.
     """
+    _, _rocdl_ext = _require_rocdl()
     local_x = _arith_ext.index_cast(T.index, _rocdl_ext.cluster_workgroup_id_x())
     local_y = _arith_ext.index_cast(T.index, _rocdl_ext.cluster_workgroup_id_y())
     return local_x, local_y
