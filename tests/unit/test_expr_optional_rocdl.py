@@ -53,10 +53,12 @@ assert expr.Int32 is not None
 assert expr.thread_idx is not None
 assert expr.block_idx is not None
 assert expr.gpu.barrier is not None
+assert "cluster_barrier" not in expr.gpu.__dict__
 assert expr.math is not None
 assert "buffer_ops" not in expr.__dict__
 assert "rocdl" not in expr.__dict__
 assert "tdm_ops" not in expr.__dict__
+assert "cluster_barrier" not in expr.gpu.__dict__
 
 
 def _assert_rocdl_import_error(alias, exc):

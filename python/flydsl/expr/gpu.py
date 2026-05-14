@@ -51,78 +51,6 @@ def smem_space(int=False):
 lds_space = smem_space
 
 
-CLUSTER_BARRIER_ID = -3
-CLUSTER_WAIT_ALL = CLUSTER_BARRIER_ID
-
-
-def _rocdl_cluster():
-    from .rocdl import cluster
-
-    return cluster
-
-
-def is_wave_leader():
-    """Return true for wave-0 inside the workgroup."""
-    return _rocdl_cluster().is_wave_leader()
-
-
-def cluster_signal_once_per_wg():
-    """Signal cluster barrier from exactly one wave per workgroup."""
-    return _rocdl_cluster().cluster_signal_once_per_wg()
-
-
-def cluster_wait():
-    """Wait on the cluster user barrier."""
-    return _rocdl_cluster().cluster_wait()
-
-
-def cluster_barrier():
-    """Workgroup + cluster barrier with one-wave signal semantics.
-
-    This is the safe default for kernels using cluster multicast:
-      1) synchronize waves inside each workgroup
-      2) signal cluster barrier once per workgroup (wave-0 only)
-      3) wait for all workgroups in the cluster
-    """
-    return _rocdl_cluster().cluster_barrier()
-
-
-def compute_cluster_position():
-    """Compute a workgroup's (row, col) position within its cluster.
-
-    Returns:
-        (local_x, local_y) as MLIR index values — position within the cluster.
-    """
-    return _rocdl_cluster().compute_cluster_position()
-
-
-def compute_mcast_masks(local_x, local_y, cluster_m: _int, cluster_n: _int):
-    """Compute MCAST workgroup_mask values for A and B matrices.
-
-    Hardware flat WG index within a cluster uses X-inner ordering
-    (MI400 Shader Programming, TTMP6 layout, section 3.5.5.1):
-
-        flat_wg_id = wg_x + wg_y * nwg_x = local_x + local_y * cluster_m
-
-    where cluster_dims = (cluster_m, cluster_n, 1), so nwg_x = cluster_m.
-
-    A mask: WGs sharing the same M-tile row (same local_x, varying local_y).
-        Bits: {local_x + ly * cluster_m : ly in 0..cluster_n-1}
-    B mask: WGs sharing the same N-tile column (same local_y, varying local_x).
-        Bits: {lx + local_y * cluster_m : lx in 0..cluster_m-1}
-
-    Args:
-        local_x: WG row within cluster (MLIR index, 0..cluster_m-1).
-        local_y: WG column within cluster (MLIR index, 0..cluster_n-1).
-        cluster_m: Cluster rows (Python int).
-        cluster_n: Cluster columns (Python int).
-
-    Returns:
-        (a_mask, b_mask) as MLIR i32 values for TDM workgroup_mask.
-    """
-    return _rocdl_cluster().compute_mcast_masks(local_x, local_y, cluster_m, cluster_n)
-
-
 class SharedAllocator(Arena):
     def __init__(self, base_alignment: int = Arena.DEFAULT_BASE_ALIGNMENT):
         super().__init__(base_alignment=base_alignment)
@@ -150,13 +78,5 @@ __all__ = [
     "barrier",
     "smem_space",
     "lds_space",
-    "is_wave_leader",
-    "cluster_signal_once_per_wg",
-    "cluster_wait",
-    "cluster_barrier",
-    "compute_cluster_position",
-    "compute_mcast_masks",
-    "CLUSTER_BARRIER_ID",
-    "CLUSTER_WAIT_ALL",
     "SharedAllocator",
 ]
