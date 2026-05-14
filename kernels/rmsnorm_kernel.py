@@ -17,10 +17,10 @@ import flydsl.expr as fx
 from flydsl._mlir.ir import InsertionPoint
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, const_expr, gpu, range_constexpr
-from flydsl.expr.arith import ArithValue
 from flydsl.expr import math as fmath
-from flydsl.expr.numeric import Numeric, Float32, Uint32
-from flydsl.expr.typing import T, Int32
+from flydsl.expr.arith import ArithValue
+from flydsl.expr.numeric import Float32, Numeric, Uint32
+from flydsl.expr.typing import Int32, T
 from flydsl.expr.vector import ReductionOp, full
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
@@ -61,7 +61,6 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
         tid = fx.thread_idx.x
 
         elem_dtype = dtype_to_elem_type(dtype_str)
-        elem_type = elem_dtype.ir_type
         fm_fast = arith.FastMathFlags.fast
         eps_c = EPS
         n_float = float(N)
@@ -135,18 +134,14 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
             gamma_div = fx.logical_divide(Gamma_buf, fx.make_layout(VEC_WIDTH, 1))
 
             copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), elem_bits)
-            vec_reg_ty = fx.MemRefType.get(
-                elem_type, fx.LayoutType.get(VEC_WIDTH, 1), fx.AddressSpace.Register
-            )
-            vec_reg_lay = fx.make_layout(VEC_WIDTH, 1)
 
             def _load_vec(div_tensor, idx):
-                r = fx.memref_alloca(vec_reg_ty, vec_reg_lay)
+                r = fx.make_rmem_tensor(VEC_WIDTH, elem_dtype)
                 fx.copy_atom_call(copy_atom, fx.slice(div_tensor, (None, idx)), r)
                 return fx.memref_load_vec(r)
 
             def _store_vec(val, div_tensor, idx):
-                r = fx.memref_alloca(vec_reg_ty, vec_reg_lay)
+                r = fx.make_rmem_tensor(VEC_WIDTH, elem_dtype)
                 fx.memref_store_vec(val, r)
                 fx.copy_atom_call(copy_atom, r, fx.slice(div_tensor, (None, idx)))
 
@@ -219,8 +214,6 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
                 fx.rocdl.BufferCopy16b() if elem_bits <= 16 else fx.rocdl.BufferCopy32b(),
                 elem_bits,
             )
-            scalar_reg_ty = fx.MemRefType.get(elem_type, fx.LayoutType.get(1, 1), fx.AddressSpace.Register)
-            scalar_reg_lay = fx.make_layout(1, 1)
 
             row_div = fx.logical_divide(row_in, fx.make_layout(1, 1))
             gamma_div = fx.logical_divide(Gamma_buf, fx.make_layout(1, 1))
@@ -228,12 +221,12 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
 
             def _load_scalar(divided_tensor, index):
                 view = fx.slice(divided_tensor, (None, index))
-                r = fx.memref_alloca(scalar_reg_ty, scalar_reg_lay)
+                r = fx.make_rmem_tensor(1, elem_dtype)
                 fx.copy_atom_call(copy_atom_s, view, r)
                 return fx.memref_load_vec(r)[0]
 
             def _store_scalar(divided_tensor, index, val):
-                r = fx.memref_alloca(scalar_reg_ty, scalar_reg_lay)
+                r = fx.make_rmem_tensor(1, elem_dtype)
                 ts = full(1, elem_dtype(val), elem_dtype)
                 fx.memref_store_vec(ts, r)
                 view = fx.slice(divided_tensor, (None, index))
@@ -343,9 +336,7 @@ def _build_rmsnorm_quant_module(
         tid = fx.thread_idx.x
 
         elem_dtype = dtype_to_elem_type(dtype_str)
-        elem_type = elem_dtype.ir_type
-        quant_elem_type = _quant_dtype_to_elem_type(quant_dtype_str)
-        quant_dtype = Numeric.from_ir_type(quant_elem_type)
+        quant_dtype = Numeric.from_ir_type(_quant_dtype_to_elem_type(quant_dtype_str))
         compute_type = T.f32
 
         fm_fast = arith.FastMathFlags.fast
@@ -365,11 +356,9 @@ def _build_rmsnorm_quant_module(
         YScale_buf = fx.rocdl.make_buffer_tensor(YScale)
         yscale_div = fx.logical_divide(YScale_buf, fx.make_layout(1, 1))
         scale_copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), 32)
-        scale_reg_ty = fx.MemRefType.get(T.f32, fx.LayoutType.get(1, 1), fx.AddressSpace.Register)
-        scale_reg_lay = fx.make_layout(1, 1)
 
         def _store_yscale(index, val):
-            r = fx.memref_alloca(scale_reg_ty, scale_reg_lay)
+            r = fx.make_rmem_tensor(1, Float32)
             ts = full(1, Float32(val), Float32)
             fx.memref_store_vec(ts, r)
             fx.copy_atom_call(scale_copy_atom, r, fx.slice(yscale_div, (None, index)))
@@ -485,23 +474,15 @@ def _build_rmsnorm_quant_module(
                 xscale_div = fx.logical_divide(XScale_buf, fx.make_layout(VEC_WIDTH, 1))
 
             copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), elem_bits)
-            vec_reg_ty = fx.MemRefType.get(
-                elem_type, fx.LayoutType.get(VEC_WIDTH, 1), fx.AddressSpace.Register
-            )
-            vec_reg_lay = fx.make_layout(VEC_WIDTH, 1)
             copy_atom_q = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), 8)
-            vec_reg_ty_q = fx.MemRefType.get(
-                quant_elem_type, fx.LayoutType.get(quant_half_width, 1), fx.AddressSpace.Register
-            )
-            vec_reg_lay_q = fx.make_layout(quant_half_width, 1)
 
             def _load_vec(div_tensor, idx):
-                r = fx.memref_alloca(vec_reg_ty, vec_reg_lay)
+                r = fx.make_rmem_tensor(VEC_WIDTH, elem_dtype)
                 fx.copy_atom_call(copy_atom, fx.slice(div_tensor, (None, idx)), r)
                 return fx.memref_load_vec(r)
 
             def _store_q_vec(val, div_tensor, idx):
-                r = fx.memref_alloca(vec_reg_ty_q, vec_reg_lay_q)
+                r = fx.make_rmem_tensor(quant_half_width, quant_dtype)
                 fx.memref_store_vec(val, r)
                 fx.copy_atom_call(copy_atom_q, r, fx.slice(div_tensor, (None, idx)))
 
@@ -574,12 +555,6 @@ def _build_rmsnorm_quant_module(
                 elem_bits,
             )
             copy_atom_qs = fx.make_copy_atom(fx.rocdl.BufferCopy(8), 8)
-            scalar_reg_ty = fx.MemRefType.get(elem_type, fx.LayoutType.get(1, 1), fx.AddressSpace.Register)
-            scalar_reg_lay = fx.make_layout(1, 1)
-            scalar_reg_ty_q = fx.MemRefType.get(
-                quant_elem_type, fx.LayoutType.get(1, 1), fx.AddressSpace.Register
-            )
-            scalar_reg_lay_q = fx.make_layout(1, 1)
 
             row_in = fx.slice(Input_buf, (bid, None))
             row_out = fx.slice(Output_buf, (bid, None))
@@ -591,12 +566,12 @@ def _build_rmsnorm_quant_module(
 
             def _load_scalar(divided_tensor, index):
                 view = fx.slice(divided_tensor, (None, index))
-                r = fx.memref_alloca(scalar_reg_ty, scalar_reg_lay)
+                r = fx.make_rmem_tensor(1, elem_dtype)
                 fx.copy_atom_call(copy_atom_s, view, r)
                 return fx.memref_load_vec(r)[0].ir_value()
 
             def _store_quant_scalar(divided_tensor, index, val):
-                r = fx.memref_alloca(scalar_reg_ty_q, scalar_reg_lay_q)
+                r = fx.make_rmem_tensor(1, quant_dtype)
                 ts = full(1, quant_dtype(val), quant_dtype)
                 fx.memref_store_vec(ts, r)
                 view = fx.slice(divided_tensor, (None, index))
@@ -668,6 +643,7 @@ def _build_rmsnorm_quant_module(
                     _store_quant_scalar(out_div, idx, q_i8)
 
     if is_smooth:
+
         @flyc.jit
         def launch_rmsnorm_smoothquant(
             Input: fx.Tensor,

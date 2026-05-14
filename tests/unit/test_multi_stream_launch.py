@@ -48,12 +48,10 @@ def _add_kernel(
     tB = fx.logical_divide(tB, fx.make_layout(vec_width, 1))
     tC = fx.logical_divide(tC, fx.make_layout(vec_width, 1))
     copy_bits = vec_width * 32
-    reg_ty = fx.MemRefType.get(
-        fx.T.f32(), fx.LayoutType.get(vec_width, 1), fx.AddressSpace.Register)
     atom = fx.make_copy_atom(fx.UniversalCopy(copy_bits), fx.Float32)
-    rA = fx.memref_alloca(reg_ty, fx.make_layout(vec_width, 1))
-    rB = fx.memref_alloca(reg_ty, fx.make_layout(vec_width, 1))
-    rC = fx.memref_alloca(reg_ty, fx.make_layout(vec_width, 1))
+    rA = fx.make_rmem_tensor(vec_width, fx.Float32)
+    rB = fx.make_rmem_tensor(vec_width, fx.Float32)
+    rC = fx.make_rmem_tensor(vec_width, fx.Float32)
     fx.copy_atom_call(atom, fx.slice(tA, (None, tid)), rA)
     fx.copy_atom_call(atom, fx.slice(tB, (None, tid)), rB)
     fx.memref_store_vec(

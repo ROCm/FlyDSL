@@ -510,13 +510,10 @@ class TestMathOpsGPU:
             tC = fx.logical_divide(tC, fx.make_layout(vec_width, 1))
 
             copy_bits = vec_width * 32
-            RMemRefTy = fx.MemRefType.get(
-                fx.T.f32(), fx.LayoutType.get(vec_width, 1), fx.AddressSpace.Register
-            )
             copyAtom = fx.make_copy_atom(fx.UniversalCopy(copy_bits), fx.Float32)
 
-            rA = fx.memref_alloca(RMemRefTy, fx.make_layout(vec_width, 1))
-            rC = fx.memref_alloca(RMemRefTy, fx.make_layout(vec_width, 1))
+            rA = fx.make_rmem_tensor(vec_width, fx.Float32)
+            rC = fx.make_rmem_tensor(vec_width, fx.Float32)
 
             fx.copy_atom_call(copyAtom, fx.slice(tA, (None, tid)), rA)
 
@@ -593,13 +590,10 @@ class TestMathOpsGPU:
             tC = fx.logical_divide(tC, fx.make_layout(vec_width, 1))
 
             copy_bits = vec_width * 32
-            RMemRefTy = fx.MemRefType.get(
-                fx.T.f32(), fx.LayoutType.get(vec_width, 1), fx.AddressSpace.Register
-            )
             copyAtom = fx.make_copy_atom(fx.UniversalCopy(copy_bits), fx.Float32)
 
-            rA = fx.memref_alloca(RMemRefTy, fx.make_layout(vec_width, 1))
-            rC = fx.memref_alloca(RMemRefTy, fx.make_layout(vec_width, 1))
+            rA = fx.make_rmem_tensor(vec_width, fx.Float32)
+            rC = fx.make_rmem_tensor(vec_width, fx.Float32)
 
             fx.copy_atom_call(copyAtom, fx.slice(tA, (None, tid)), rA)
 

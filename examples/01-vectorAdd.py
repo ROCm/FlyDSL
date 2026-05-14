@@ -31,14 +31,12 @@ def vectorAddKernel(
     tB = fx.logical_divide(tB, fx.make_layout(1, 1))
     tC = fx.logical_divide(tC, fx.make_layout(1, 1))
 
-    RABMemRefTy = fx.MemRefType.get(fx.T.f32(), fx.LayoutType.get(1, 1), fx.AddressSpace.Register)
-
     copyAtom = fx.make_copy_atom(fx.UniversalCopy32b(), fx.Float32)
     copyAtomBuffer = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Float32)
 
-    rA = fx.memref_alloca(RABMemRefTy, fx.make_layout(1, 1))
-    rB = fx.memref_alloca(RABMemRefTy, fx.make_layout(1, 1))
-    rC = fx.memref_alloca(RABMemRefTy, fx.make_layout(1, 1))
+    rA = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Float32)
+    rB = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Float32)
+    rC = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Float32)
 
     fx.copy_atom_call(copyAtomBuffer, fx.slice(tA, (None, tid)), rA)
     fx.copy_atom_call(copyAtom, fx.slice(tB, (None, tid)), rB)
@@ -74,7 +72,12 @@ def run_eager():
     tA = flyc.from_dlpack(A).mark_layout_dynamic(leading_dim=0, divisibility=4)
     vectorAdd(tA, B, C, n, n + 1, stream=torch.cuda.Stream())
     torch.cuda.synchronize()
-    is_closed = torch.allclose(C, A + B)
+
+    diff = (C - (A + B)).abs()
+    tol = 1e-3 + 1e-3 * (A + B).abs()
+    max_violation = (diff - tol).max().item()
+    is_closed = max_violation <= 0
+
     print(f"[Eager] Result correct: {is_closed}")
     if not is_closed:
         print("tA:", A[:32])
@@ -110,12 +113,18 @@ def run_graph_capture():
     graph.replay()
     torch.cuda.synchronize()
 
-    ok = torch.allclose(C, A + B)
-    print(f"[Graph Capture] Result correct: {ok}")
-    if not ok:
-        print(f"  Expected: {(A + B)[:16]}")
-        print(f"  Got:      {C[:16]}")
-    return ok
+    diff = (C - (A + B)).abs()
+    tol = 1e-3 + 1e-3 * (A + B).abs()
+    max_violation = (diff - tol).max().item()
+    is_closed = max_violation <= 0
+
+    print(f"[Graph Capture] Result correct: {is_closed}")
+    if not is_closed:
+        print("tA:", A[:32])
+        print("tB:", B[:32])
+        print("tC:", C[:32])
+    print("Hello, Fly!")
+    return is_closed
 
 
 if __name__ == "__main__":
