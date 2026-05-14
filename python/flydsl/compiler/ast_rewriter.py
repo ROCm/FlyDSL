@@ -439,8 +439,7 @@ class ReplaceIfWithDispatch(Transformer):
         values = tuple(values or ())
         if len(names) != len(values):
             raise ValueError(
-                f"{names_label} and {values_label} must have the same length, "
-                f"got {len(names)} and {len(values)}"
+                f"{names_label} and {values_label} must have the same length, " f"got {len(names)} and {len(values)}"
             )
         return names, values
 
@@ -513,9 +512,7 @@ class ReplaceIfWithDispatch(Transformer):
         sig = inspect.signature(fn)
         params = list(sig.parameters.values())
         pos_params = [
-            p
-            for p in params
-            if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+            p for p in params if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
         ]
         has_varargs = any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in params)
         if has_varargs or len(pos_params) >= len(state_values) + 1:
@@ -560,10 +557,7 @@ class ReplaceIfWithDispatch(Transformer):
         if not isinstance(cond_i1, ir.Value):
             raise TypeError(f"dynamic if condition must lower to ir.Value, got {type(cond_i1).__name__}")
 
-        none_vars = [
-            name for name, value in zip(result_names, result_values)
-            if _unwrap_value(value) is None
-        ]
+        none_vars = [name for name, value in zip(result_names, result_values) if _unwrap_value(value) is None]
         if none_vars:
             raise TypeError(
                 f"Variable(s) {none_vars} initialized as None before a dynamic "
@@ -634,9 +628,7 @@ class ReplaceIfWithDispatch(Transformer):
                     )
             scf.YieldOp(else_raw)
 
-        wrapped = ReplaceIfWithDispatch._pack_dispatch_results(
-            list(if_op.results), result_values
-        )
+        wrapped = ReplaceIfWithDispatch._pack_dispatch_results(list(if_op.results), result_values)
         if len(result_names) == 1:
             final_values = [wrapped]
         else:
@@ -648,122 +640,14 @@ class ReplaceIfWithDispatch(Transformer):
         return {
             "const_expr": const_expr,
             "scf_if_dispatch": cls.scf_if_dispatch,
+            "scf_ifexp_dispatch": cls.scf_ifexp_dispatch,
             "scf_if_collect_results": cls._collect_result_dict,
         }
-
-    _REWRITE_HELPER_NAMES = {
-        "const_expr",
-        "type",
-        "bool",
-        "isinstance",
-        "hasattr",
-    }
-
-    @staticmethod
-    def _could_be_dynamic(test_node):
-        """Check if an if-condition AST could produce an MLIR Value at runtime.
-
-        Layer-by-layer recursive check:
-        1) classify current node if possible,
-        2) otherwise recurse into direct children,
-        3) unresolved nodes default to static (no forced rewrite).
-        """
-        def _is_literal_expr(node):
-            if isinstance(node, ast.Constant):
-                return True
-            if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
-                return all(_is_literal_expr(e) for e in node.elts)
-            if isinstance(node, ast.Dict):
-                return all(
-                    (k is None or _is_literal_expr(k)) and _is_literal_expr(v)
-                    for k, v in zip(node.keys, node.values)
-                )
-            return False
-
-        def _try_static_value(node):
-            if not _is_literal_expr(node):
-                return False, None
-            if isinstance(node, ast.Constant):
-                return True, node.value
-            try:
-                return True, ast.literal_eval(node)
-            except Exception as e:
-                log().error(
-                    "[FlyDSL ast_rewriter] literal_eval failed: "
-                    f"node={ast.dump(node, include_attributes=False)}, err={e!r}"
-                )
-                return False, None
-
-        def _eval_static_compare_pair(lhs, op, rhs):
-            op_text_map = {
-                ast.Eq: "==",
-                ast.NotEq: "!=",
-                ast.Lt: "<",
-                ast.LtE: "<=",
-                ast.Gt: ">",
-                ast.GtE: ">=",
-                ast.Is: "is",
-                ast.IsNot: "is not",
-                ast.In: "in",
-                ast.NotIn: "not in",
-            }
-            try:
-                op_text = op_text_map.get(type(op))
-                if op_text is None:
-                    return None
-                return eval(
-                    f"lhs_val {op_text} rhs_val",
-                    {"__builtins__": {}},
-                    {"lhs_val": lhs, "rhs_val": rhs},
-                )
-            except Exception as e:
-                log().error(
-                    "[FlyDSL ast_rewriter] static compare eval failed: "
-                    f"op={type(op).__name__}, lhs={lhs!r}, rhs={rhs!r}, err={e!r}"
-                )
-                return None
-
-        def _visit(node):
-            if _is_literal_expr(node):
-                return False
-            if isinstance(node, ast.Compare):
-                compare_parts = [node.left, *node.comparators]
-                for i, op in enumerate(node.ops):
-                    lhs_node = compare_parts[i]
-                    rhs_node = compare_parts[i + 1]
-                    lhs_ok, lhs_val = _try_static_value(lhs_node)
-                    rhs_ok, rhs_val = _try_static_value(rhs_node)
-                    if lhs_ok and rhs_ok:
-                        pair_result = _eval_static_compare_pair(lhs_val, op, rhs_val)
-                        if pair_result is False:
-                            return False
-                return any(_visit(part) for part in compare_parts)
-            if isinstance(node, ast.Call):
-                func = node.func
-                if not (isinstance(func, ast.Name) and func.id in ReplaceIfWithDispatch._REWRITE_HELPER_NAMES):
-                    return True
-            if isinstance(node, ast.Name):
-                return True
-
-            for child in ast.iter_child_nodes(node):
-                if _visit(child):
-                    return True
-
-            # If this expression cannot be proven dynamic from itself or children,
-            # keep it static to avoid over-rewriting unrelated Python control flow.
-            return False
-
-        return _visit(test_node)
 
     def visit_If(self, node: ast.If) -> List[ast.AST]:
         active_symbols_before_if = self.symbol_scopes.snapshot_symbol_scopes()
         if _is_constexpr(node.test):
             node.test = _unwrap_constexpr(node.test)
-            node.body = self._visit_stmt_block(node.body)
-            if node.orelse:
-                node.orelse = self._visit_stmt_block(node.orelse)
-            return node
-        if not self._could_be_dynamic(node.test):
             node.body = self._visit_stmt_block(node.body)
             if node.orelse:
                 node.orelse = self._visit_stmt_block(node.orelse)
@@ -781,7 +665,9 @@ class ReplaceIfWithDispatch(Transformer):
             then_name = f"__then_{uid}"
             result_names = _collect_assigned_vars(node.body, active_symbols_before_if, node.orelse)
 
-            fn_args = [ast.arg(arg="__ret_names", annotation=None)] + [ast.arg(arg=v, annotation=None) for v in result_names]
+            fn_args = [ast.arg(arg="__ret_names", annotation=None)] + [
+                ast.arg(arg=v, annotation=None) for v in result_names
+            ]
 
             def _state_return_node():
                 return ast.Return(
@@ -834,7 +720,8 @@ class ReplaceIfWithDispatch(Transformer):
                     name=else_name,
                     args=ast.arguments(
                         posonlyargs=[],
-                        args=[ast.arg(arg="__ret_names", annotation=None)] + [ast.arg(arg=v, annotation=None) for v in result_names],
+                        args=[ast.arg(arg="__ret_names", annotation=None)]
+                        + [ast.arg(arg=v, annotation=None) for v in result_names],
                         kwonlyargs=[],
                         kw_defaults=[],
                         defaults=[],
@@ -855,7 +742,8 @@ class ReplaceIfWithDispatch(Transformer):
                     name=else_name,
                     args=ast.arguments(
                         posonlyargs=[],
-                        args=[ast.arg(arg="__ret_names", annotation=None)] + [ast.arg(arg=v, annotation=None) for v in result_names],
+                        args=[ast.arg(arg="__ret_names", annotation=None)]
+                        + [ast.arg(arg=v, annotation=None) for v in result_names],
                         kwonlyargs=[],
                         kw_defaults=[],
                         defaults=[],
@@ -892,6 +780,71 @@ class ReplaceIfWithDispatch(Transformer):
 
             return result
 
+    def visit_IfExp(self, node: ast.IfExp):
+        node = self.generic_visit(node)
+        empty_args = ast.arguments(
+            posonlyargs=[],
+            args=[],
+            kwonlyargs=[],
+            kw_defaults=[],
+            defaults=[],
+        )
+        return ast.copy_location(
+            ast.Call(
+                func=ast.Name("scf_ifexp_dispatch", ctx=ast.Load()),
+                args=[
+                    node.test,
+                    ast.Lambda(args=empty_args, body=node.body),
+                    ast.Lambda(args=empty_args, body=node.orelse),
+                ],
+                keywords=[],
+            ),
+            node,
+        )
+
+    @staticmethod
+    def scf_ifexp_dispatch(cond, then_fn, else_fn):
+        if not ReplaceIfWithDispatch._is_dynamic(cond):
+            return then_fn() if cond else else_fn()
+
+        cond_i1 = ReplaceIfWithDispatch._to_i1(cond)
+        if not isinstance(cond_i1, ir.Value):
+            raise TypeError(f"dynamic ifexp condition must lower to ir.Value, got {type(cond_i1).__name__}")
+
+        sandbox = scf.ExecuteRegionOp(result=[])
+        sandbox.region.blocks.append()
+        with ir.InsertionPoint(sandbox.region.blocks[0]):
+            probe_then = then_fn()
+            probe_then_raw = _unwrap_value(probe_then)
+            probe_else = else_fn()
+            probe_else_raw = _unwrap_value(probe_else)
+            if not isinstance(probe_then_raw, ir.Value):
+                raise TypeError(
+                    f"dynamic ifexp then-branch must produce an MLIR Value, " f"got {type(probe_then_raw).__name__}"
+                )
+            if not isinstance(probe_else_raw, ir.Value):
+                raise TypeError(
+                    f"dynamic ifexp else-branch must produce an MLIR Value, " f"got {type(probe_else_raw).__name__}"
+                )
+            if probe_then_raw.type != probe_else_raw.type:
+                raise TypeError(
+                    f"dynamic ifexp type mismatch: "
+                    f"then-branch produces {probe_then_raw.type}, "
+                    f"else-branch produces {probe_else_raw.type}"
+                )
+            yield_type = probe_then_raw.type
+
+        op = scf.IfOp(cond_i1, [yield_type], has_else=True, loc=ir.Location.unknown())
+        with ir.InsertionPoint(op.regions[0].blocks[0]):
+            scf.YieldOp([_unwrap_value(then_fn())])
+        if len(op.regions[1].blocks) == 0:
+            op.regions[1].blocks.append()
+        with ir.InsertionPoint(op.regions[1].blocks[0]):
+            scf.YieldOp([_unwrap_value(else_fn())])
+
+        sandbox.operation.erase()
+        return _wrap_like(op.results[0], probe_then)
+
 
 @ASTRewriter.register
 class InsertEmptyYieldForSCFFor(Transformer):
@@ -910,10 +863,7 @@ class InsertEmptyYieldForSCFFor(Transformer):
             return raw
         if isinstance(val, int) and not isinstance(val, bool):
             return arith.ConstantOp(ir.IndexType.get(), val).result
-        raise TypeError(
-            f"_to_index expected ir.Value, object with ir_value(), or int; got {type(val).__name__}"
-        )
-
+        raise TypeError(f"_to_index expected ir.Value, object with ir_value(), or int; got {type(val).__name__}")
 
     @staticmethod
     def scf_range(start, stop=None, step=None, *, init=None):
@@ -958,10 +908,7 @@ class InsertEmptyYieldForSCFFor(Transformer):
         result_values = tuple(result_values)
         result_map = {name: value for name, value in zip(result_names, result_values)}
 
-        none_vars = [
-            name for name, value in zip(result_names, result_values)
-            if _unwrap_value(value) is None
-        ]
+        none_vars = [name for name, value in zip(result_names, result_values) if _unwrap_value(value) is None]
         if none_vars:
             raise TypeError(
                 f"Variable(s) {none_vars} initialized as None before a dynamic "
@@ -993,31 +940,23 @@ class InsertEmptyYieldForSCFFor(Transformer):
 
         with ir.InsertionPoint(for_op.body):
             iv = for_op.induction_variable
-            inner_args = [
-                _wrap_like(a, ex)
-                for a, ex in zip(for_op.inner_iter_args, result_values)
-            ]
+            inner_args = [_wrap_like(a, ex) for a, ex in zip(for_op.inner_iter_args, result_values)]
 
             body_result = body_fn(iv, result_names, *inner_args)
 
             body_values = ReplaceIfWithDispatch._normalize_branch_result(
                 body_result, result_names, result_map, "for-body"
             )
-            body_raw = ReplaceIfWithDispatch._unwrap_mlir_values(
-                body_values, result_names, "for-body"
-            )
+            body_raw = ReplaceIfWithDispatch._unwrap_mlir_values(body_values, result_names, "for-body")
             result_types = [v.type for v in state_raw]
             for name, expect_ty, got in zip(result_names, result_types, body_raw):
                 if got.type != expect_ty:
                     raise TypeError(
-                        f"for-loop variable '{name}' type mismatch: "
-                        f"expected {expect_ty}, got {got.type}"
+                        f"for-loop variable '{name}' type mismatch: " f"expected {expect_ty}, got {got.type}"
                     )
             scf.YieldOp(body_raw)
 
-        wrapped = ReplaceIfWithDispatch._pack_dispatch_results(
-            list(for_op.results), result_values
-        )
+        wrapped = ReplaceIfWithDispatch._pack_dispatch_results(list(for_op.results), result_values)
         if len(result_names) == 1:
             final_values = [wrapped]
         else:
@@ -1241,9 +1180,9 @@ class InsertEmptyYieldForSCFFor(Transformer):
             new_yield = ast.Expr(ast.Yield(value=None))
             if node.body and not self._is_yield(node.body[-1]):
                 last_statement = node.body[-1]
-                assert last_statement.end_lineno is not None, (
-                    f"last_statement {ast.unparse(last_statement)} must have end_lineno"
-                )
+                assert (
+                    last_statement.end_lineno is not None
+                ), f"last_statement {ast.unparse(last_statement)} must have end_lineno"
                 new_yield = ast.fix_missing_locations(_set_lineno(new_yield, last_statement.end_lineno))
                 node.body.append(new_yield)
             node = ast.fix_missing_locations(node)

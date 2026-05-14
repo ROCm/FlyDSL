@@ -5,7 +5,7 @@ import ctypes
 import enum
 import operator
 from inspect import isclass
-from typing import Generic, Type, TypeVar, overload
+from typing import Any, List, Type, overload
 
 from flydsl.runtime.device import get_rocm_arch
 
@@ -321,11 +321,107 @@ def is_target_address_space(address_space, expected) -> bool:
     return str(actual) == str(exp)
 
 
-ValueT = TypeVar("ValueT")
+class Constexpr:
+    _annotation_cache: dict = {}
+    _value_cache: dict = {}
 
+    value_type: type | None = None
+    value: Any = None
+    is_specialized: bool = False
 
-class Constexpr(Generic[ValueT]):
-    pass
+    def __class_getitem__(cls, param):
+        if cls is not Constexpr:
+            raise TypeError(f"{cls.__name__} cannot be re-parametrized")
+        if not isinstance(param, type):
+            raise TypeError(
+                f"Constexpr[...] expects a type (e.g. Constexpr[int]), "
+                f"got value {param!r}; constexpr values are provided at call site"
+            )
+        cached = Constexpr._annotation_cache.get(param)
+        if cached is not None:
+            return cached
+        result = type(
+            f"Constexpr[{getattr(param, '__name__', repr(param))}]",
+            (Constexpr,),
+            {
+                "__origin__": Constexpr,
+                "__args__": (param,),
+                "value_type": param,
+                "value": None,
+                "is_specialized": False,
+            },
+        )
+        Constexpr._annotation_cache[param] = result
+        return result
+
+    @classmethod
+    def _specialize(cls, value):
+        cache_key = (type(value), value)
+        try:
+            cached = Constexpr._value_cache.get(cache_key)
+            if cached is not None:
+                return cached
+        except TypeError:
+            cached = None
+        result = type(
+            f"Constexpr[{value!r}]",
+            (Constexpr,),
+            {
+                "__origin__": Constexpr,
+                "__args__": (type(value),),
+                "value_type": type(value),
+                "value": value,
+                "is_specialized": True,
+            },
+        )
+        try:
+            Constexpr._value_cache[cache_key] = result
+        except TypeError:
+            # cache_key is not hashable
+            pass
+        return result
+
+    @classmethod
+    def __construct_from_ir_values__(cls, values):
+        if values:
+            raise ValueError(f"{cls.__name__} expects 0 ir.Values, got {len(values)}")
+        if not cls.is_specialized:
+            raise TypeError(
+                f"{cls.__name__} must be value-specialized (e.g. Constexpr[42]) "
+                f"before reconstruction; the surrounding schema did not bind a value."
+            )
+        return cls.value
+
+    @classmethod
+    def __extract_to_ir_values__(cls):
+        return []
+
+    @classmethod
+    def __get_ir_types__(cls):
+        return []
+
+    @classmethod
+    def __get_c_pointers__(cls):
+        return []
+
+    @classmethod
+    def __coerce__(cls, value):
+        inner = cls.value_type
+        if inner is not None and not isinstance(value, inner):
+            raise TypeError(f"expects {getattr(inner, '__name__', repr(inner))}, got {type(value).__name__}")
+        return value
+
+    @classmethod
+    def __specialize_for_value__(cls, value):
+        if cls.is_specialized:
+            return cls
+        return Constexpr._specialize(value)
+
+    @staticmethod
+    def is_constexpr_annotation(annotation) -> bool:
+        if annotation is Constexpr:
+            return True
+        return isinstance(annotation, type) and issubclass(annotation, Constexpr)
 
 
 class BuiltinDslType(ir.Value):
@@ -340,10 +436,10 @@ class BuiltinDslType(ir.Value):
         return f"{type(self).__name__}<{super().__str__()}>"
 
     @classmethod
-    def __fly_construct__(cls, values):
+    def __construct_from_ir_values__(cls, values):
         return cls(values[0])
 
-    def __fly_values__(self):
+    def __extract_to_ir_values__(self):
         return [self]
 
 
@@ -614,6 +710,10 @@ class Pointer(BuiltinDslType):
     def alignment(self):
         return self.type.alignment
 
+    @traced_op
+    def view(self, layout, loc=None, ip=None):
+        return make_view(self, layout, loc=loc, ip=ip)
+
 
 @ir.register_value_caster(MemRefType.static_typeid, replace=True)
 @ir.register_value_caster(CoordTensorType.static_typeid, replace=True)
@@ -872,10 +972,10 @@ class Stream:
         self.value = value
         self._stream_storage = None
 
-    def __fly_types__(self):
+    def __get_ir_types__(self):
         return [gpu.AsyncTokenType.get()]
 
-    def __fly_ptrs__(self):
+    def __get_c_pointers__(self):
         if isinstance(self.value, int):
             self._stream_storage = ctypes.c_void_p(self.value)
         elif self.value is None:
@@ -898,10 +998,10 @@ class Stream:
         return ctypes.c_void_p, cls._extract_stream_value
 
     @classmethod
-    def __fly_construct__(cls, values):
+    def __construct_from_ir_values__(cls, values):
         return Stream(values[0])
 
-    def __fly_values__(self):
+    def __extract_to_ir_values__(self):
         return [self.value]
 
 
@@ -1128,15 +1228,12 @@ class Vector(ArithValue):
 
     __hash__ = ArithValue.__hash__
 
-    def __fly_values__(self):
+    def __extract_to_ir_values__(self):
         return [self]
 
     @classmethod
-    def __fly_construct__(cls, values):
+    def __construct_from_ir_values__(cls, values):
         return cls(values[0])
-
-    def __fly_construct_from_values__(self, values):
-        return Vector(values[0], self.shape, self.dtype)
 
     def to(self, dtype: Type[Numeric], *, loc=None, ip=None) -> "Vector":
         if dtype is ir.Value:
@@ -1496,3 +1593,97 @@ def ones_like(a: Vector, dtype=None, *, loc=None, ip=None) -> Vector:
 
 def zeros_like(a: Vector, dtype=None, *, loc=None, ip=None) -> Vector:
     return Vector.zeros_like(a, dtype, loc=loc, ip=ip)
+
+
+class Array:
+    _cache: dict[tuple, type] = {}
+
+    class _Base:
+        dtype = None
+        size = None
+        align = None
+
+        def __init__(self, ptr_value):
+            self._ptr_value = ptr_value
+
+        def __repr__(self):
+            cls = type(self)
+            name = getattr(cls.dtype, "__name__", repr(cls.dtype))
+            suffix = f", {cls.align}" if cls.align != max(1, cls.dtype.width // 8) else ""
+            return f"Array[{name}, {cls.size}{suffix}]({self._ptr_value})"
+
+        @property
+        def ptr(self):
+            return self._ptr_value
+
+        @classmethod
+        def __construct_from_ir_values__(cls, values):
+            if len(values) != 1:
+                raise ValueError(f"{cls.__name__} expects 1 ir.Value, got {len(values)}")
+            return cls(values[0])
+
+        def __extract_to_ir_values__(self) -> List[ir.Value]:
+            return [self._ptr_value]
+
+        @classmethod
+        def __cache_signature__(cls):
+            return ("array", cls.dtype, cls.size, cls.align)
+
+        @classmethod
+        def __dsl_size_of__(cls) -> int:
+            total_bytes = max(1, cls.dtype.width * cls.size // 8)
+            return total_bytes
+
+        @classmethod
+        def __dsl_align_of__(cls) -> int:
+            return cls.align
+
+        @classmethod
+        def __peek_from_ptr__(cls, ptr):
+            typed_ptr = recast_iter(cls.dtype, ptr)
+            return cls(typed_ptr)
+
+        @classmethod
+        def __poke_into_ptr__(cls, ptr, value):
+            raise NotImplementedError(f"{cls.__name__} does not support __poke_into_ptr__ yet")
+
+        def view(self, layout, *, loc=None, ip=None):
+            return make_view(self._ptr_value, layout, loc=loc, ip=ip)
+
+    def __class_getitem__(cls, params):
+        if not isinstance(params, tuple):
+            params = (params,)
+        if len(params) == 2:
+            dtype, size = params
+            align = None
+        elif len(params) == 3:
+            dtype, size, align = params
+        else:
+            raise TypeError("Array expects Array[dtype, size] or Array[dtype, size, align]")
+
+        if not (isinstance(dtype, type) and issubclass(dtype, Numeric)):
+            raise TypeError(f"Array dtype must be a Numeric subclass, got {dtype!r}")
+        if not isinstance(size, int) or size <= 0:
+            raise TypeError(f"Array size must be a positive integer, got {size!r}")
+
+        elem_byte_size = max(1, dtype.width // 8)
+        if align is None:
+            align = elem_byte_size
+        else:
+            if not isinstance(align, int) or align <= 0:
+                raise TypeError(f"Array align must be a positive integer, got {align!r}")
+
+        cache_key = (dtype, size, align)
+        cached = cls._cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        name = getattr(dtype, "__name__", repr(dtype))
+        suffix = f", {align}" if align != elem_byte_size else ""
+        array_type = type(
+            f"Array[{name}, {size}{suffix}]",
+            (cls._Base,),
+            {"dtype": dtype, "size": size, "align": align},
+        )
+        cls._cache[cache_key] = array_type
+        return array_type

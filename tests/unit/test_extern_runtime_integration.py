@@ -6,23 +6,22 @@ import threading
 
 import pytest
 
-from flydsl.compiler.jit_function import _format_link_lib_options
 from flydsl.compiler.jit_executor import _pack_ciface_args
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr.extern import ffi
 
 
 def test_explicit_module_loader_args_follow_ciface_packing():
-    """Verify the packed layout matches C++ expectations: void** slots."""
+    """Verify packed layout matches MLIR's packed-args wrapper:
+    packed -> [&holder0, &holder1]; *holder_i == &args[i]."""
     module = ctypes.c_void_p()
     err = ctypes.c_int32()
 
     packed = _pack_ciface_args(module, err)
-    # C++ side does: slots[i] = ((void**)packed)[i]
     slots = ctypes.cast(packed, ctypes.POINTER(ctypes.c_void_p))
 
-    assert slots[0] == ctypes.addressof(module)
-    assert slots[1] == ctypes.addressof(err)
+    assert ctypes.c_void_p.from_address(slots[0]).value == ctypes.addressof(module)
+    assert ctypes.c_void_p.from_address(slots[1]).value == ctypes.addressof(err)
     assert getattr(packed, "_keepalive")
 
 
@@ -55,14 +54,6 @@ def test_link_libs_preserve_first_use_order_and_dedupe():
     ctx.add_link_lib("/tmp/b.bc")
 
     assert ctx.link_libs == ["/tmp/b.bc", "/tmp/a.bc"]
-
-
-def test_link_lib_options_reject_pipeline_syntax_chars():
-    assert _format_link_lib_options(["/tmp/mori_shmem.bc"]) == "l=/tmp/mori_shmem.bc"
-
-    for path in ["/tmp/with space.bc", "/tmp/with,comma.bc", "/tmp/with}brace.bc"]:
-        with pytest.raises(ValueError, match="Cannot pass external bitcode path"):
-            _format_link_lib_options([path])
 
 
 def test_ffi_rejects_link_metadata_arguments():

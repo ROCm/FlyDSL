@@ -8,9 +8,8 @@ Inline Compare — AST rewriter generates scf.IfOp correctly for
 ``if tid < threshold: buffer_ops.buffer_store(arith.constant(1), rsrc, tid)``.
 
 The compare ``tid < threshold`` is between two MLIR runtime values
-(threadIdx.x and a kernel argument), so _could_be_dynamic returns True
-and visit_If rewrites it into scf_if_dispatch → scf.IfOp with no
-live-out (no results, no yield).
+(threadIdx.x and a kernel argument), so visit_If rewrites it into
+scf_if_dispatch → scf.IfOp with no live-out (no results, no yield).
 """
 
 import pytest
@@ -112,9 +111,7 @@ def test_inline_compare_buffer_store_with_liveout(monkeypatch):
         tA = fx.logical_divide(tA, fx.make_layout(vec_width, 1))
         tC = fx.logical_divide(tC, fx.make_layout(vec_width, 1))
 
-        reg_ty = fx.MemRefType.get(
-            fx.T.f32(), fx.LayoutType.get(vec_width, 1), fx.AddressSpace.Register
-        )
+        reg_ty = fx.MemRefType.get(fx.T.f32(), fx.LayoutType.get(vec_width, 1), fx.AddressSpace.Register)
         copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), fx.Float32)
 
         rA = fx.memref_alloca(reg_ty, fx.make_layout(vec_width, 1))
@@ -205,9 +202,7 @@ def test_inline_compare_buffer_store_with_liveout_flag(monkeypatch):
         tA = fx.logical_divide(tA, fx.make_layout(vec_width, 1))
         tC = fx.logical_divide(tC, fx.make_layout(vec_width, 1))
 
-        reg_ty = fx.MemRefType.get(
-            fx.T.f32(), fx.LayoutType.get(vec_width, 1), fx.AddressSpace.Register
-        )
+        reg_ty = fx.MemRefType.get(fx.T.f32(), fx.LayoutType.get(vec_width, 1), fx.AddressSpace.Register)
         copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), fx.Float32)
 
         rA = fx.memref_alloca(reg_ty, fx.make_layout(vec_width, 1))

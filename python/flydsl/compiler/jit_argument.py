@@ -3,7 +3,6 @@
 
 import ctypes
 import inspect
-from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple, Type, get_origin
 
 import torch
@@ -11,7 +10,6 @@ import torch
 from .._mlir._mlir_libs._mlirDialectsFly import DLTensorAdaptor
 from ..expr.typing import Boolean, Constexpr, Float32, Int32, Stream, Tensor
 from .protocol import DslType, JitArgument
-
 
 _FLOAT8_DTYPES = tuple(
     dt
@@ -72,14 +70,7 @@ class JitArgumentRegistry:
         return cls.jit_arg2dsl_type[jit_arg_type]
 
 
-def _is_constexpr_annotation(annotation) -> bool:
-    """Check if annotation is Constexpr or Constexpr[T]."""
-    if annotation is Constexpr:
-        return True
-    return get_origin(annotation) is Constexpr
-
-
-def _is_type_param_annotation(annotation) -> bool:
+def is_type_param_annotation(annotation) -> bool:
     """Check if annotation is Type, Type[T]."""
     origin = get_origin(annotation)
     return annotation is Type or origin is Type or origin is type
@@ -97,16 +88,16 @@ def convert_to_jit_arguments(
         param = sig.parameters[param_name]
         annotation = param.annotation
 
-        if annotation is not inspect.Parameter.empty and _is_constexpr_annotation(annotation):
+        if annotation is not inspect.Parameter.empty and Constexpr.is_constexpr_annotation(annotation):
             constexpr_values[param_name] = value
             continue
 
-        if annotation is not inspect.Parameter.empty and _is_type_param_annotation(annotation):
+        if annotation is not inspect.Parameter.empty and is_type_param_annotation(annotation):
             constexpr_values[param_name] = value
             continue
 
-        is_jit_arg = hasattr(value, '__fly_types__') and hasattr(value, '__fly_ptrs__')
-        is_dsl_type = hasattr(value, '__fly_construct__') and hasattr(value, '__fly_values__')
+        is_jit_arg = hasattr(value, "__get_ir_types__") and hasattr(value, "__get_c_pointers__")
+        is_dsl_type = hasattr(value, "__construct_from_ir_values__") and hasattr(value, "__extract_to_ir_values__")
         if is_jit_arg and is_dsl_type:
             jit_arg = value
             dsl_type = type(value)
@@ -124,7 +115,9 @@ def convert_to_jit_arguments(
             else:
                 jit_arg_constructor, dsl_type = JitArgumentRegistry.get(type(value))
                 if jit_arg_constructor is None:
-                    raise TypeError(f"No JitArgument registered for type {type(value).__name__} (parameter '{param_name}')")
+                    raise TypeError(
+                        f"No JitArgument registered for type {type(value).__name__} (parameter '{param_name}')"
+                    )
                 try:
                     jit_arg = jit_arg_constructor(value)
                 except Exception as e:
@@ -177,7 +170,7 @@ class TensorAdaptor:
         For bare-pointer calling convention, only the data pointer changes
         between calls with the same shape/dtype/strides.
         """
-        if not hasattr(arg, 'data_ptr'):
+        if not hasattr(arg, "data_ptr"):
             return None
         return ctypes.c_void_p, cls._extract_data_ptr
 
@@ -189,11 +182,11 @@ class TensorAdaptor:
         return wrapper
 
     @requires_memref_desc
-    def __fly_types__(self):
+    def __get_ir_types__(self):
         return [self.tensor_adaptor.get_memref_type()]
 
     @requires_memref_desc
-    def __fly_ptrs__(self):
+    def __get_c_pointers__(self):
         return self.tensor_adaptor.get_c_pointers()
 
     @staticmethod

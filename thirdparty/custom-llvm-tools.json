@@ -1,0 +1,6 @@
+{
+  "_comment": "Configuration for the external LLVM tools tarball built by CI. 'llvm_ref' is the LLVM branch/tag/SHA to build. 'archive_name' is the tarball prefix; the final filename is {archive_name}-{commit_id_12char}-manylinux_2_28-x86_64.tar.gz.",
+  "llvm_ref": "c8cf6da4367c010c7cbbb7789a9c4349e7407619",
+  "llvm_remote": "https://github.com/ROCm/llvm-project.git",
+  "archive_name": "mlir-opt-bin-mha-opt"
+}

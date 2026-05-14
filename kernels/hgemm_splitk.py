@@ -1,30 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-import time
-import torch
-import argparse
 import functools
-import numpy as np
-import torch.nn.functional as F
-from torch.profiler import profile, ProfilerActivity
-from dataclasses import dataclass
 from abc import ABC, abstractmethod
 from typing import Optional
 
-import flydsl
+import torch
+
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.expr.typing import T
-from flydsl.expr import range_constexpr, const_expr, arith, vector, gpu, rocdl, buffer_ops
 from flydsl._mlir import ir
-from flydsl.runtime.device import get_rocm_arch
-from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr, SMEM_CAPACITY_MAP
+from flydsl._mlir.dialects import fly, llvm, memref, scf
 from flydsl.compiler.kernel_function import CompilationContext
-from flydsl._mlir.dialects import llvm, fly, memref, scf
-from flydsl.compiler.protocol import fly_values
+from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, rocdl, vector
+from flydsl.expr.typing import T
+from flydsl.runtime.device import get_rocm_arch
+from flydsl.utils.smem_allocator import SMEM_CAPACITY_MAP, SmemAllocator, SmemPtr
+from kernels.tensor_shim import GTensor, STensor, _run_compiled, get_dtype_in_kernel
 
-from kernels.tensor_shim import get_dtype_in_kernel, GTensor, STensor, _to_raw, _run_compiled
 fm_fast = arith.FastMathFlags.fast
 
 
@@ -275,7 +268,7 @@ def compile_hgemm_kernel(
         c_frags = [acc_init] * C_FRAGS_LEN
 
         def get_llvm_ptr(ptr, offset, dtype_bytes):
-            base_ptr = fly.extract_aligned_pointer_as_index(_ptr_type, fly_values(ptr)[0])
+            base_ptr = fly.extract_aligned_pointer_as_index(_ptr_type, ptr)
             base_ptr = llvm.PtrToIntOp(_i64_type, base_ptr).result
             byte_offset = arith.index_cast(T.i64, fx.Index(offset) * fx.Index(dtype_bytes))
             llvm_ptr = llvm.AddOp(base_ptr, byte_offset, llvm.IntegerOverflowFlags(0)).result
@@ -735,7 +728,7 @@ def compile_hgemm_kernel(
         # write back to global
         if const_expr(IS_SPLIT_K):
             split_k_barrier()
-            out_raw = fly_values(C)[0]
+            out_raw = C
             out_base_ptr = fly.extract_aligned_pointer_as_index(_ptr_type, out_raw)
             out_base_int = llvm.PtrToIntOp(_i64_type, out_base_ptr).result
             for i in range_constexpr(LDG_REG_C_COUNT):

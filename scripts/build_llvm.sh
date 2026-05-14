@@ -79,8 +79,8 @@ NANOBIND_DIR=$(python3 -c "import nanobind; import os; print(os.path.dirname(nan
 cmake -G "$GENERATOR" \
     -S "$LLVM_SRC_DIR/llvm" \
     -B "$LLVM_BUILD_DIR" \
-    -DLLVM_ENABLE_PROJECTS="mlir;clang" \
-    -DLLVM_TARGETS_TO_BUILD="X86;NVPTX;AMDGPU" \
+    -DLLVM_ENABLE_PROJECTS="mlir;clang;lld" \
+    -DLLVM_TARGETS_TO_BUILD="${LLVM_TARGETS_TO_BUILD:-X86;NVPTX;AMDGPU}" \
     -DLLVM_ENABLE_RUNTIMES="compiler-rt" \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_CXX_STANDARD=17 \
@@ -94,6 +94,7 @@ cmake -G "$GENERATOR" \
     -DLLVM_BUILD_LLVM_DYLIB=OFF \
     -DLLVM_LINK_LLVM_DYLIB=OFF \
     -DMLIR_INCLUDE_TESTS=OFF \
+    -DHIP_PLATFORM=amd \
     -DCMAKE_INSTALL_RPATH="\$ORIGIN"
 
 # 4. Build
