@@ -103,7 +103,10 @@ def make_buffer_tensor(tensor: Tensor, max_size: bool = True) -> Tensor:
         num_records_bytes = Int64(MAX_BUFFER_SIZE)
     else:
         elem_bits = elem_ty.width
-        num_records_bytes = Int64(get_scalar(cosize(layout)) * elem_bits // 8)
+        if elem_bits % 8 == 0:
+            num_records_bytes = Int64(get_scalar(cosize(layout)) * (elem_bits // 8))
+        else:
+            num_records_bytes = Int64(get_scalar(cosize(layout)) * elem_bits // 8)
 
     from ..buffer_ops import _get_buffer_flags
 
