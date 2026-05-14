@@ -132,7 +132,7 @@ def make_layout_tv(thr_layout, val_layout, loc=None, ip=None):
 
 
 def make_tiled_copy_tv(atom, thr_layout, val_layout):
-    (tiler_mn, layout_tv) = make_layout_tv(thr_layout, val_layout)
+    tiler_mn, layout_tv = make_layout_tv(thr_layout, val_layout)
     return make_tiled_copy(atom, layout_tv, tiler_mn)
 
 

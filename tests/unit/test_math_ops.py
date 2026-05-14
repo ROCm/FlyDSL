@@ -614,9 +614,9 @@ class TestMathOpsGPU:
         _torch.cuda.synchronize()
 
         c_ref = _torch.floor(_torch.sqrt(_torch.exp(_torch.abs(a_host)))).cuda()
-        assert _torch.allclose(c_dev, c_ref, atol=1e-5, rtol=1e-4), (
-            f"fly_math chain GPU mismatch: max_diff={(_torch.abs(c_dev - c_ref)).max().item():.6e}"
-        )
+        assert _torch.allclose(
+            c_dev, c_ref, atol=1e-5, rtol=1e-4
+        ), f"fly_math chain GPU mismatch: max_diff={(_torch.abs(c_dev - c_ref)).max().item():.6e}"
 
     def test_math_trig_chain_gpu(self):
         """Chain: C = cos(sin(A))  — exercises trig math ops on GPU."""
@@ -694,9 +694,9 @@ class TestMathOpsGPU:
         _torch.cuda.synchronize()
 
         c_ref = _torch.cos(_torch.sin(a_host)).cuda()
-        assert _torch.allclose(c_dev, c_ref, atol=1e-4, rtol=1e-3), (
-            f"trig chain GPU mismatch: max_diff={(_torch.abs(c_dev - c_ref)).max().item():.6e}"
-        )
+        assert _torch.allclose(
+            c_dev, c_ref, atol=1e-4, rtol=1e-3
+        ), f"trig chain GPU mismatch: max_diff={(_torch.abs(c_dev - c_ref)).max().item():.6e}"
 
 
 # ---------------------------------------------------------------------------
