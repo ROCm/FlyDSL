@@ -26,7 +26,6 @@ fi
 
 BENCH_LOG_DIR="${BENCH_LOG_DIR:-/tmp/flydsl_bench}"
 mkdir -p "${BENCH_LOG_DIR}"
-BENCH_OUTPUT_CSV="${BENCH_OUTPUT_CSV:-}"
 
 # Auto-select GPU with the most free VRAM (skip if HIP_VISIBLE_DEVICES is already set).
 if [ -z "${HIP_VISIBLE_DEVICES:-}" ] && command -v python3 >/dev/null 2>&1; then
@@ -162,7 +161,6 @@ Usage:
   bash scripts/run_benchmark.sh softmax          # run only softmax
   bash scripts/run_benchmark.sh layernorm moe      # run only selected benchmarks
   bash scripts/run_benchmark.sh --only softmax,moe
-  bash scripts/run_benchmark.sh --output_csv /tmp/bench.csv
   bash scripts/run_benchmark.sh --list
 
 Supported ops:
@@ -213,21 +211,6 @@ _fmt_table_header() {
 _emit_row() {
   op="$1"; shape="$2"; dtype="$3"; tbps="$4"; tflops="$5"
   printf "%-22.22s %-34.34s %-10.10s %10s %10s\n" "${op}" "${shape}" "${dtype}" "${tbps}" "${tflops}"
-  if [ -n "${BENCH_OUTPUT_CSV:-}" ]; then
-    status="ok"
-    if [ "${tbps}" = "skip" ] || [ "${tflops}" = "skip" ]; then
-      status="skip"
-    elif [ "${tbps}" = "-" ] && [ "${tflops}" = "-" ]; then
-      status="missing"
-    fi
-    python3 - "${BENCH_OUTPUT_CSV}" "${op}" "${shape}" "${dtype}" "${tbps}" "${tflops}" "${status}" <<'PY'
-import csv
-import sys
-
-with open(sys.argv[1], "a", newline="") as f:
-    csv.writer(f).writerow(sys.argv[2:])
-PY
-  fi
 }
 
 _normalize_op() {
@@ -323,16 +306,6 @@ if [ "$#" -gt 0 ]; then
           _add_selected_op "$op"
         done
         ;;
-      --output_csv|--output-csv)
-        flag="$1"
-        shift
-        [ "$#" -gt 0 ] || _die "${flag} requires a CSV path"
-        BENCH_OUTPUT_CSV="$1"
-        ;;
-      --output_csv=*|--output-csv=*)
-        BENCH_OUTPUT_CSV="${1#*=}"
-        [ -n "${BENCH_OUTPUT_CSV}" ] || _die "$1 requires a CSV path"
-        ;;
       --*)
         _die "unknown flag '$1'"
         ;;
@@ -346,11 +319,6 @@ if [ "$#" -gt 0 ]; then
     # shellcheck disable=SC2086 # want word-splitting for ops list
     _enable_only_ops ${SELECTED_OPS}
   fi
-fi
-
-if [ -n "${BENCH_OUTPUT_CSV}" ]; then
-  mkdir -p "$(dirname "${BENCH_OUTPUT_CSV}")"
-  printf "op,shape,dtype,tbps,tflops,status\n" >"${BENCH_OUTPUT_CSV}"
 fi
 
 _py_parse_and_emit() {
