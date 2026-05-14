@@ -399,7 +399,16 @@ def compile_fp8_gemm(
             return c
 
         def _interleaved_cluster(
-            lds_dst, gl_src, k_offset, gl_offsets, wave_idx, lds_src, n_tiles_lds, a, b, c,
+            lds_dst,
+            gl_src,
+            k_offset,
+            gl_offsets,
+            wave_idx,
+            lds_src,
+            n_tiles_lds,
+            a,
+            b,
+            c,
             lds_src_preshuffled=False,
         ):
             # 64x64 output via 4x4 MFMAs, with per-tile G→LDS and LDS→reg
@@ -459,7 +468,17 @@ def compile_fp8_gemm(
             return c, rt_dst
 
         def _compute_cluster(
-            lds_dst, gl_src, k_offset, gl_offsets, wave_idx, lds_src, n_tiles_lds, n_tiles_rt, a, b, c,
+            lds_dst,
+            gl_src,
+            k_offset,
+            gl_offsets,
+            wave_idx,
+            lds_src,
+            n_tiles_lds,
+            n_tiles_rt,
+            a,
+            b,
+            c,
             lds_src_preshuffled=False,
         ):
             _load_lds(gl_src, lds_dst, k_offset, gl_offsets, n_tiles_lds)
@@ -468,17 +487,46 @@ def compile_fp8_gemm(
             return c, rt_dst
 
         def _compute_block(
-            lds_dst, gl_src, k_offset, gl_offsets, wave_idx, lds_src, n_tiles_lds, n_tiles_rt, a, b, c,
+            lds_dst,
+            gl_src,
+            k_offset,
+            gl_offsets,
+            wave_idx,
+            lds_src,
+            n_tiles_lds,
+            n_tiles_rt,
+            a,
+            b,
+            c,
             lds_src_preshuffled=False,
         ):
             if const_expr(_use_interleaved_block):
                 return _interleaved_cluster(
-                    lds_dst, gl_src, k_offset, gl_offsets, wave_idx, lds_src, n_tiles_lds, a, b, c,
+                    lds_dst,
+                    gl_src,
+                    k_offset,
+                    gl_offsets,
+                    wave_idx,
+                    lds_src,
+                    n_tiles_lds,
+                    a,
+                    b,
+                    c,
                     lds_src_preshuffled=lds_src_preshuffled,
                 )
             else:
                 return _compute_cluster(
-                    lds_dst, gl_src, k_offset, gl_offsets, wave_idx, lds_src, n_tiles_lds, n_tiles_rt, a, b, c,
+                    lds_dst,
+                    gl_src,
+                    k_offset,
+                    gl_offsets,
+                    wave_idx,
+                    lds_src,
+                    n_tiles_lds,
+                    n_tiles_rt,
+                    a,
+                    b,
+                    c,
                     lds_src_preshuffled=lds_src_preshuffled,
                 )
 
