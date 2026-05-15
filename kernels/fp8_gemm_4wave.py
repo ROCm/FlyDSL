@@ -27,18 +27,13 @@ from kernels.fp8_gemm_utils import (
     Mfma16x16x128,
     S2RLoader,
     StoreC,
+    compute_global_swizzle,
     make_fp8_buffer_tensor,
     pack_i32x4_i32x8,
     swizzle_128,
     wait_barrier,
 )
 
-
-def preshuffle_b(b_t):
-    """Permute row-major ``B_T`` ``(N, K)`` for ``b_preshuffled=True``."""
-    n, k = b_t.shape[-2:]
-    assert n % 16 == 0 and k % 64 == 0, f"need N%16==0 and K%64==0, got N={n} K={k}"
-    return b_t.reshape(n // 16, 16, k // 64, 4, 16).permute(0, 2, 3, 1, 4).contiguous()
 
 
 def _divmod(a, b):
@@ -73,7 +68,7 @@ def _xcd_swizzle(num_pid_m, num_pid_n):
     return (pid_m, pid_n)
 
 
-def compile_fp8_gemm(
+def compile_fp8_gemm_4w(
     *,
     M: int,
     N: int,
@@ -97,6 +92,8 @@ def compile_fp8_gemm(
     N_TILES_B = BLOCK_N // 4 // 16
     N_ACCUMS = N_TILES_A * N_TILES_B
     assert N_ACCUMS > 0
+
+    N_LDS_ROUNDS = max(N_TILES_A, N_TILES_B)
 
     _use_interleaved_block = BLOCK_M == 256 and BLOCK_N == 256
 
@@ -163,25 +160,6 @@ def compile_fp8_gemm(
         ga_div = fx.logical_divide(gA, fx.make_layout(1, 1))
         gb_div = fx.logical_divide(gB, fx.make_layout(1, 1))
 
-        def _compute_global_swizzle(preshuffled):
-            offsets = []
-            for round in range_constexpr(max(N_TILES_A, N_TILES_B)):
-                if const_expr(preshuffled):
-                    row = lane_id % 8 + wave_id * 8 + round * 32
-                    col = (lane_id // 8) * 16
-                    offsets.append(
-                        (row // 16) * (K * 16)
-                        + (row % 16) * 16
-                        + (col // 64) * 1024
-                        + ((col % 64) // 16) * 256
-                        + (col % 16)
-                    )
-                else:
-                    row = lane_id // 8 + wave_id * 8 + round * 32
-                    col = (lane_id % 8) * 16
-                    r, c = swizzle_128(row, col)
-                    offsets.append(r * K + c)
-            return offsets
 
         def _compute_lds_swizzle(s2r, preshuffled=False):
             lds_swz = []
@@ -323,8 +301,8 @@ def compile_fp8_gemm(
         c10_frag = [mfma.zero_value] * N_ACCUMS
         c11_frag = [mfma.zero_value] * N_ACCUMS
 
-        gl_off_a = _compute_global_swizzle(preshuffled=False)
-        gl_off_b = _compute_global_swizzle(b_preshuffled)
+        gl_off_a = compute_global_swizzle(lane_id, wave_id, K, N_LDS_ROUNDS, preshuffled=False)
+        gl_off_b = compute_global_swizzle(lane_id, wave_id, K, N_LDS_ROUNDS, preshuffled=b_preshuffled)
 
         a_g2s = G2SLoader(ga_div, gl_off_a, N_TILES_A, F8_IR_t, wave_id)
         b_g2s = G2SLoader(gb_div, gl_off_b, N_TILES_B, F8_IR_t, wave_id)

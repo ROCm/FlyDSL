@@ -7,8 +7,15 @@ from flydsl._mlir.dialects import fly as fly_dialect
 from flydsl._mlir.dialects import llvm as _llvm
 from flydsl._mlir.dialects import memref as memref_dialect
 from flydsl._mlir.dialects.fly_rocdl import TargetAddressSpace
-from flydsl.expr import range_constexpr, const_expr
+from flydsl.expr import const_expr, range_constexpr
 from flydsl.expr.typing import Vector as Vec
+
+
+def preshuffle_b(b_t):
+    """Permute row-major ``B_T`` ``(N, K)`` for ``b_preshuffled=True``."""
+    n, k = b_t.shape[-2:]
+    assert n % 16 == 0 and k % 64 == 0, f"need N%16==0 and K%64==0, got N={n} K={k}"
+    return b_t.reshape(n // 16, 16, k // 64, 4, 16).permute(0, 2, 3, 1, 4).contiguous()
 
 
 def make_fp8_buffer_tensor(arg_i8, fp8_ir_t):
@@ -28,6 +35,28 @@ def swizzle_128(row, col):
     swizzle = ((offset % (16 * 128)) >> 8) << 4
     swizzled_offset = offset ^ swizzle
     return swizzled_offset // 128, swizzled_offset % 128
+
+
+def compute_global_swizzle(lane_id, wave_id, K, n_rounds, preshuffled):
+    offsets = []
+    n_waves = fx.block_dim.x // 64
+    for round in range_constexpr(n_rounds):
+        if const_expr(preshuffled):
+            row = lane_id % 8 + wave_id * 8 + round * (n_waves * 8)
+            col = (lane_id // 8) * 16
+            offsets.append(
+                (row // 16) * (K * 16)
+                + (row % 16) * 16
+                + (col // 64) * 1024
+                + ((col % 64) // 16) * 256
+                + (col % 16)
+            )
+        else:
+            row = lane_id // 8 + wave_id * 8 + round * (n_waves * 8)
+            col = (lane_id % 8) * 16
+            r, c = swizzle_128(row, col)
+            offsets.append(r * K + c)
+    return offsets
 
 
 class G2SLoader:
@@ -79,7 +108,6 @@ class S2RLoader:
             for step in range_constexpr(2):
                 col = (self.lane_id // 16) * 16 + step * 64
                 if const_expr(preshuffled):
-                    # TODO: validate for 8 wave
                     offset = (row // 8) * 1024 + (row % 8) * 16 + (col // 16) * 128
                 else:
                     row_swz, col_swz = swizzle_128(row, col)

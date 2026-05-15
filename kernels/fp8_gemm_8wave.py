@@ -17,13 +17,13 @@ from kernels.fp8_gemm_utils import (
     Mfma16x16x128,
     S2RLoader,
     StoreC,
+    compute_global_swizzle,
     make_fp8_buffer_tensor,
-    swizzle_128,
     wait_barrier,
 )
 
 
-def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int = 256):
+def compile_fp8_gemm_8w(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int = 256, b_preshuffled: bool = False):
     BLOCK_K = 128
 
     assert M >= 1
@@ -96,6 +96,7 @@ def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int
 
         A0_gl_offset = (block_m * BLOCK_M) * K
         A1_gl_offset = (block_m * BLOCK_M + LDS_BLOCK_M) * K
+        B_K_STEP = (2 * 1024) if b_preshuffled else BLOCK_K
         B0_gl_offset = (block_n * BLOCK_N) * K
         B1_gl_offset = (block_n * BLOCK_N + LDS_BLOCK_N) * K
 
@@ -104,26 +105,16 @@ def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int
         a_div = fx.logical_divide(gA, fx.make_layout(1, 1))
         b_div = fx.logical_divide(gB, fx.make_layout(1, 1))
 
-        def _compute_global_swizzle():
-            offsets = []
-            wave_offset = (wave_id // 2) * 16 * K
-            row = ((wave_id % 2) * 64 + lane_id) // 8
-            col = (lane_id % 8) * 16
-            swz_row, swz_col = swizzle_128(row, col)
-            for round in range_constexpr(N_LDS_ROUNDS):
-                offsets.append(wave_offset + (round * 64 + swz_row) * K + swz_col)
-            return offsets
-
-
-        global_offsets = _compute_global_swizzle()
+        gl_off_a = compute_global_swizzle(lane_id, wave_id, K, N_LDS_ROUNDS, preshuffled=False)
+        gl_off_b = compute_global_swizzle(lane_id, wave_id, K, N_LDS_ROUNDS, preshuffled=b_preshuffled)
 
         mfma = Mfma16x16x128(N_TILES_A, N_TILES_B)
 
-        a_g2s = G2SLoader(a_div, global_offsets, N_LDS_STEPS_A, F8_IR_t, wave_id)
-        b_g2s = G2SLoader(b_div, global_offsets, N_LDS_STEPS_B, F8_IR_t, wave_id)
-        a_s2r = S2RLoader(lane_id, wave_m, N_TILES_A)
-        b_s2r = S2RLoader(lane_id, wave_n, N_TILES_B)
-        store_c = StoreC(A_scale, B_scale, C, N, lane_id, mfma.idx, N_TILES_A, N_TILES_B)
+        a_g2s = G2SLoader(a_div, gl_off_a, N_LDS_STEPS_A, F8_IR_t, wave_id)
+        b_g2s = G2SLoader(b_div, gl_off_b, N_LDS_STEPS_B, F8_IR_t, wave_id)
+        a_s2r = S2RLoader(wave_m, N_TILES_A)
+        b_s2r = S2RLoader(wave_n, N_TILES_B)
+        store_c = StoreC(A_scale, B_scale, C, N, mfma.idx, N_TILES_A, N_TILES_B)
 
         # 2x2 config of 4x2 (instead of 4x4 in 4wave) 16x16 sub-tiles
         c00_frag = [mfma.zero_value] * N_ACCUMS
@@ -132,9 +123,9 @@ def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int
         c11_frag = [mfma.zero_value] * N_ACCUMS
 
 
-        b_g2s.load(b_cur0, B0_gl_offset + 0 * BLOCK_K)
+        b_g2s.load(b_cur0, B0_gl_offset + 0 * B_K_STEP)
         a_g2s.load(a_cur0, A0_gl_offset + 0 * BLOCK_K)
-        b_g2s.load(b_cur1, B1_gl_offset + 0 * BLOCK_K)
+        b_g2s.load(b_cur1, B1_gl_offset + 0 * B_K_STEP)
         a_g2s.load(a_cur1, A1_gl_offset + 0 * BLOCK_K)
 
         if wave_m == 1:
@@ -142,14 +133,14 @@ def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int
 
         wait_barrier(N_LDS_STEPS_A + N_LDS_STEPS_B)
 
-        b_g2s.load(b_next0, B0_gl_offset + 1 * BLOCK_K)
+        b_g2s.load(b_next0, B0_gl_offset + 1 * B_K_STEP)
         a_g2s.load(a_next0, A0_gl_offset + 1 * BLOCK_K)
-        b_g2s.load(b_next1, B1_gl_offset + 1 * BLOCK_K)
+        b_g2s.load(b_next1, B1_gl_offset + 1 * B_K_STEP)
 
         wait_barrier(N_LDS_STEPS_A + 2 * N_LDS_STEPS_B)
 
         for k in range_constexpr(K_ITERS - 2):
-            b0_frag = b_s2r.load(b_cur0)
+            b0_frag = b_s2r.load(b_cur0, preshuffled=b_preshuffled)
             a0_frag = a_s2r.load(a_cur0)
             a_g2s.load(a_next1, A1_gl_offset + (k + 1) * BLOCK_K)
             rocdl.s_barrier()
@@ -159,8 +150,8 @@ def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int
             rocdl.s_setprio(0)
             rocdl.s_barrier()
 
-            b1_frag = b_s2r.load(b_cur1)
-            b_g2s.load(b_cur0, B0_gl_offset + (k + 2) * BLOCK_K)
+            b1_frag = b_s2r.load(b_cur1, preshuffled=b_preshuffled)
+            b_g2s.load(b_cur0, B0_gl_offset + (k + 2) * B_K_STEP)
             rocdl.s_barrier()
 
             rocdl.s_setprio(1)
@@ -177,7 +168,7 @@ def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int
             rocdl.s_setprio(0)
             rocdl.s_barrier()
 
-            b_g2s.load(b_cur1, B1_gl_offset + (k + 2) * BLOCK_K)
+            b_g2s.load(b_cur1, B1_gl_offset + (k + 2) * B_K_STEP)
             wait_barrier(2 * N_LDS_STEPS_A + N_LDS_STEPS_B)
 
             rocdl.s_setprio(1)
@@ -193,7 +184,7 @@ def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int
 
         # Step k = K_ITERS - 2
         k = K_ITERS - 2
-        b0_frag = b_s2r.load(b_cur0)
+        b0_frag = b_s2r.load(b_cur0, preshuffled=b_preshuffled)
         a0_frag = a_s2r.load(a_cur0)
         rocdl.s_barrier()
 
@@ -202,7 +193,7 @@ def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int
         rocdl.s_setprio(0)
         rocdl.s_barrier()
 
-        b1_frag = b_s2r.load(b_cur1)
+        b1_frag = b_s2r.load(b_cur1, preshuffled=b_preshuffled)
         rocdl.s_barrier()
 
         rocdl.s_setprio(1)
@@ -218,7 +209,7 @@ def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int
         rocdl.s_setprio(0)
         rocdl.s_barrier()
 
-        b0_frag = b_s2r.load(b_next0)
+        b0_frag = b_s2r.load(b_next0, preshuffled=b_preshuffled)
         rocdl.s_barrier()
 
         rocdl.s_setprio(1)
@@ -241,7 +232,7 @@ def compile_fp8_gemm(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int
         rocdl.s_setprio(0)
         rocdl.s_barrier()
 
-        b1_frag = b_s2r.load(b_cur1)
+        b1_frag = b_s2r.load(b_cur1, preshuffled=b_preshuffled)
         rocdl.s_barrier()
 
         rocdl.s_setprio(1)
