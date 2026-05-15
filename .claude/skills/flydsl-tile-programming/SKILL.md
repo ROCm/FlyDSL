@@ -87,14 +87,9 @@ def elementwise_kernel(
 
     # === Step 4: Allocate register and set up copy atom ===
     copy_bits = VEC_WIDTH * 32
-    MemTy = fx.MemRefType.get(
-        fx.T.f32(),
-        fx.LayoutType.get(VEC_WIDTH, 1),
-        fx.AddressSpace.Register
-    )
     copy_atom = fx.make_copy_atom(fx.UniversalCopy(copy_bits), fx.Float32)
-    rA = fx.memref_alloca(MemTy, fx.make_layout(VEC_WIDTH, 1))
-    rOut = fx.memref_alloca(MemTy, fx.make_layout(VEC_WIDTH, 1))
+    rA = fx.make_rmem_tensor(VEC_WIDTH, fx.Float32)
+    rOut = fx.make_rmem_tensor(VEC_WIDTH, fx.Float32)
 
     # === Step 5: Load -> Compute -> Store ===
     fx.copy_atom_call(copy_atom, fx.slice(tA, (None, tid)), rA)

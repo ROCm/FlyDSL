@@ -8,20 +8,21 @@ Validates end-to-end that:
   - torch.nn.Parameter (Tensor subclass) is accepted as kernel input
   - Stream value is preserved through JIT compilation and kernel launch
 """
+
 import pytest
 
-pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
+import flydsl.compiler as flyc
+import flydsl.expr as fx
 
 try:
     import torch
 except ImportError:
     torch = None
+
+pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
+
 if torch is None or not torch.cuda.is_available():
     pytest.skip("CUDA/ROCm not available", allow_module_level=True)
-
-import flydsl.compiler as flyc
-import flydsl.expr as fx
-
 
 # ──────────────────────────────────────────────────────────────
 # Minimal vecadd kernel for testing
@@ -34,8 +35,11 @@ TILE_ELEMS = BLOCK_DIM * VEC_WIDTH
 
 @flyc.kernel
 def _vecadd_kernel(
-    A: fx.Tensor, B: fx.Tensor, C: fx.Tensor,
-    block_dim: fx.Constexpr[int], vec_width: fx.Constexpr[int],
+    A: fx.Tensor,
+    B: fx.Tensor,
+    C: fx.Tensor,
+    block_dim: fx.Constexpr[int],
+    vec_width: fx.Constexpr[int],
 ):
     bid = fx.block_idx.x
     tid = fx.thread_idx.x
@@ -50,32 +54,31 @@ def _vecadd_kernel(
     tC = fx.logical_divide(tC, fx.make_layout(vec_width, 1))
 
     copy_bits = vec_width * 32
-    reg_ty = fx.MemRefType.get(
-        fx.T.f32(), fx.LayoutType.get(vec_width, 1), fx.AddressSpace.Register)
     atom = fx.make_copy_atom(fx.UniversalCopy(copy_bits), fx.Float32)
 
-    rA = fx.memref_alloca(reg_ty, fx.make_layout(vec_width, 1))
-    rB = fx.memref_alloca(reg_ty, fx.make_layout(vec_width, 1))
-    rC = fx.memref_alloca(reg_ty, fx.make_layout(vec_width, 1))
+    rA = fx.make_rmem_tensor(vec_width, fx.Float32)
+    rB = fx.make_rmem_tensor(vec_width, fx.Float32)
+    rC = fx.make_rmem_tensor(vec_width, fx.Float32)
 
     fx.copy_atom_call(atom, fx.slice(tA, (None, tid)), rA)
     fx.copy_atom_call(atom, fx.slice(tB, (None, tid)), rB)
-    fx.memref_store_vec(
-        fx.arith.addf(fx.memref_load_vec(rA), fx.memref_load_vec(rB)), rC)
+    fx.memref_store_vec(fx.arith.addf(fx.memref_load_vec(rA), fx.memref_load_vec(rB)), rC)
     fx.copy_atom_call(atom, rC, fx.slice(tC, (None, tid)))
 
 
 @flyc.jit
 def _vecadd(
-    A: fx.Tensor, B: fx.Tensor, C: fx.Tensor,
+    A: fx.Tensor,
+    B: fx.Tensor,
+    C: fx.Tensor,
     n: fx.Int32,
-    block_dim: fx.Constexpr[int], vec_width: fx.Constexpr[int],
+    block_dim: fx.Constexpr[int],
+    vec_width: fx.Constexpr[int],
     stream: fx.Stream = fx.Stream(None),
 ):
     tile = block_dim * vec_width
     grid_x = (n + tile - 1) // tile
-    _vecadd_kernel(A, B, C, block_dim, vec_width).launch(
-        grid=(grid_x, 1, 1), block=(block_dim, 1, 1), stream=stream)
+    _vecadd_kernel(A, B, C, block_dim, vec_width).launch(grid=(grid_x, 1, 1), block=(block_dim, 1, 1), stream=stream)
 
 
 # ──────────────────────────────────────────────────────────────
@@ -96,6 +99,7 @@ def abc_tensors():
 # ──────────────────────────────────────────────────────────────
 # Stream tests
 # ──────────────────────────────────────────────────────────────
+
 
 class TestKernelStream:
     """Kernel launch with different stream passing styles."""
@@ -145,6 +149,7 @@ class TestKernelStream:
 # ──────────────────────────────────────────────────────────────
 # torch.nn.Parameter tests
 # ──────────────────────────────────────────────────────────────
+
 
 class TestKernelParameter:
     """Kernel launch with torch.nn.Parameter inputs."""

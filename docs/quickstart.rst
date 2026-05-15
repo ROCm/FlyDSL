@@ -42,12 +42,10 @@ with ``@flyc.kernel``, use layout algebra to partition data, then launch with
        tC = fx.logical_divide(tC, fx.make_layout(1, 1))
 
        # Allocate register fragments, load, compute, store
-       RABTy = fx.MemRefType.get(fx.T.f32(), fx.LayoutType.get(1, 1),
-                                 fx.AddressSpace.Register)
        copyAtom = fx.make_copy_atom(fx.UniversalCopy32b(), fx.Float32)
-       rA = fx.memref_alloca(RABTy, fx.make_layout(1, 1))
-       rB = fx.memref_alloca(RABTy, fx.make_layout(1, 1))
-       rC = fx.memref_alloca(RABTy, fx.make_layout(1, 1))
+       rA = fx.make_rmem_tensor(1, fx.Float32)
+       rB = fx.make_rmem_tensor(1, fx.Float32)
+       rC = fx.make_rmem_tensor(1, fx.Float32)
 
        fx.copy_atom_call(copyAtom, fx.slice(tA, (None, tid)), rA)
        fx.copy_atom_call(copyAtom, fx.slice(tB, (None, tid)), rB)
