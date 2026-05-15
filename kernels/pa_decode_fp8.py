@@ -636,6 +636,7 @@ def _make_pa_phase_helpers(
     c_w,
     neg_inf,
     zero_f,
+    cache_scale_vecs=False,
 ):
     apply_causal_mask = needs_mask or query_length > 1
     pv_prob_i64_indices = []
@@ -711,6 +712,20 @@ def _make_pa_phase_helpers(
 
         if const_expr(per_token_kv):
             gpu.barrier()
+            if const_expr(cache_scale_vecs):
+                k_scale_vecs = []
+                v_scale_vecs = []
+                for td in range_constexpr(TLOOP):
+                    scale_row_base = kv_tok_thread_base + fx.Int32(td * MFMA_N)
+                    k_scale_vecs.append(vector.load_op(T.f32x4, scale_lds_f32, [fx.Index(scale_row_base)]))
+                    v_scale_vecs.append(
+                        vector.load_op(
+                            T.f32x4,
+                            scale_lds_f32,
+                            [fx.Index(fx.Int32(LDS_SCALE_V_OFFSET) + scale_row_base)],
+                        )
+                    )
+                return v_results, k_scale_vecs, v_scale_vecs
 
         return v_results
 
@@ -723,12 +738,22 @@ def _make_pa_phase_helpers(
     def _load_v_scale_vec(td: int):
         return vector.load_op(T.f32x4, scale_lds_f32, [fx.Index(fx.Int32(LDS_SCALE_V_OFFSET) + _scale_row_base(td))])
 
-    def _store_vmax_warp(partition_start, *, seq_end=None):
+    def _get_k_scale_vec(td: int, k_scale_vecs=None):
+        if const_expr(cache_scale_vecs):
+            return k_scale_vecs[td]
+        return _load_k_scale_vec(td)
+
+    def _get_v_scale_vec(td: int, v_scale_vecs=None):
+        if const_expr(cache_scale_vecs):
+            return v_scale_vecs[td]
+        return _load_v_scale_vec(td)
+
+    def _store_vmax_warp(partition_start, *, seq_end=None, v_scale_vecs=None):
         if const_expr(per_token_kv):
             kv_tok_base = partition_start + kv_tok_thread_base if const_expr(seq_end is not None) else None
             v_max_warp = zero_f
             for td in range_constexpr(TLOOP):
-                vs = _load_v_scale_vec(td)
+                vs = _get_v_scale_vec(td, v_scale_vecs)
                 for i in range_constexpr(4):
                     if const_expr(kv_tok_base is not None):
                         kv_tok = kv_tok_base + arith.constant(td * MFMA_N + i, type=T.i32)
@@ -776,13 +801,20 @@ def _make_pa_phase_helpers(
         precomputed_vmax=False,
     ):
         if const_expr(preloaded_v_and_scales is not None):
-            v_results = preloaded_v_and_scales
+            if const_expr(cache_scale_vecs and per_token_kv):
+                v_results, k_scale_vecs, v_scale_vecs = preloaded_v_and_scales
+            else:
+                v_results = preloaded_v_and_scales
         else:
-            v_results = _load_v_and_scales(
+            loaded_v_and_scales = _load_v_and_scales(
                 v_block_base_dw,
                 tile_token_offset_i32,
                 phys_block=phys_block,
             )
+            if const_expr(cache_scale_vecs and per_token_kv):
+                v_results, k_scale_vecs, v_scale_vecs = loaded_v_and_scales
+            else:
+                v_results = loaded_v_and_scales
 
         query_scale_vec = None
         if const_expr(per_token_q):
@@ -793,7 +825,10 @@ def _make_pa_phase_helpers(
             for k_step in range_constexpr(QKHELOOP * 2):
                 acc = rocdl.mfma_f32_16x16x32_fp8_fp8(T.f32x4, [k_ops[td][k_step], q_frags[k_step], acc, 0, 0, 0])
             if const_expr(per_token_kv):
-                k_scale_vec = _load_k_scale_vec(td)
+                if const_expr(cache_scale_vecs and per_token_kv):
+                    k_scale_vec = _get_k_scale_vec(td, k_scale_vecs)
+                else:
+                    k_scale_vec = _get_k_scale_vec(td)
                 scale_vec = (
                     k_scale_vec * query_scale_vec
                     if const_expr(per_token_q)
@@ -845,7 +880,10 @@ def _make_pa_phase_helpers(
         if const_expr(per_token_kv and not precomputed_vmax):
             v_max_warp = zero_f
             for td in range_constexpr(TLOOP):
-                vs = _load_v_scale_vec(td)
+                if const_expr(cache_scale_vecs and per_token_kv):
+                    vs = _get_v_scale_vec(td, v_scale_vecs)
+                else:
+                    vs = _get_v_scale_vec(td)
                 for i in range_constexpr(4):
                     if const_expr(kv_tok_base is not None):
                         kv_tok = kv_tok_base + arith.constant(td * MFMA_N + i, type=T.i32)
@@ -866,9 +904,11 @@ def _make_pa_phase_helpers(
                 softmax_lds_f32,
                 [sm_vmax_wr_off],
             )
+        if const_expr(cache_scale_vecs and per_token_kv):
+            return d_out, v_results, v_scale_vecs
         return d_out, v_results
 
-    def _cross_warp_softmax_and_prob_pack(d_out, rmax, rsum, o0, o1):
+    def _cross_warp_softmax_and_prob_pack(d_out, rmax, rsum, o0, o1, v_scale_vecs=None):
         partition_max = neg_inf
         partition_sum = zero_f
         warp_rescale_factors = []
@@ -935,7 +975,9 @@ def _make_pa_phase_helpers(
             prob_scale = my_warp_rescale
             v_correction = v_max_scaled * part_to_new
             for td in range_constexpr(TLOOP):
-                d_out[td] = d_out[td] * (_load_v_scale_vec(td) * vector.broadcast(T.f32x4, prob_scale * norm_factor))
+                d_out[td] = d_out[td] * (
+                    _get_v_scale_vec(td, v_scale_vecs) * vector.broadcast(T.f32x4, prob_scale * norm_factor)
+                )
         else:
             prob_scale = my_warp_rescale * part_to_new
             v_correction = v_scale_val
@@ -1416,6 +1458,7 @@ def compile_pa_decode_ps(
                 c_w=c_w,
                 neg_inf=NEG_INF,
                 zero_f=ZERO_F,
+                cache_scale_vecs=True,
             )
 
             # ════════════════════════════════════════════════════════
@@ -1461,20 +1504,36 @@ def compile_pa_decode_ps(
                     phys_block=phys_block,
                     preloaded_scale_scalars=scale_scalars,
                 )
-                d_out, v_ops = _qk_and_intra_softmax(
-                    k_ops,
-                    partition_start,
-                    v_base,
-                    tile_token_offset_i32,
-                    q_frags,
-                    causal_bound,
-                    query_scale_lane=query_scale_lane,
-                    phys_block=phys_block,
-                    preloaded_v_and_scales=preloaded_v_and_scales,
-                )
+                if const_expr(per_token_kv):
+                    d_out, v_ops, v_scales = _qk_and_intra_softmax(
+                        k_ops,
+                        partition_start,
+                        v_base,
+                        tile_token_offset_i32,
+                        q_frags,
+                        causal_bound,
+                        query_scale_lane=query_scale_lane,
+                        phys_block=phys_block,
+                        preloaded_v_and_scales=preloaded_v_and_scales,
+                    )
+                else:
+                    d_out, v_ops = _qk_and_intra_softmax(
+                        k_ops,
+                        partition_start,
+                        v_base,
+                        tile_token_offset_i32,
+                        q_frags,
+                        causal_bound,
+                        query_scale_lane=query_scale_lane,
+                        phys_block=phys_block,
+                        preloaded_v_and_scales=preloaded_v_and_scales,
+                    )
+                    v_scales = None
 
                 gpu.barrier()
-                rmax, rsum, o0, o1, v_correction = _cross_warp_softmax_and_prob_pack(d_out, rmax, rsum, o0, o1)
+                rmax, rsum, o0, o1, v_correction = _cross_warp_softmax_and_prob_pack(
+                    d_out, rmax, rsum, o0, o1, v_scales
+                )
                 if const_expr(next_k_base is not None):
                     next_scale_scalars = _load_kv_scale_scalars(tile_token_offset_i32, next_phys_block)
                     k_next_flat = _load_k_flat(
