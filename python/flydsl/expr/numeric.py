@@ -112,7 +112,7 @@ class NumericMeta(type):
         if signed is not None:
             new_attrs["__get_c_pointers__"] = _get_c_pointers
 
-            def _reusable_slot_spec(cls, arg):
+            def _reusable_slot_spec(cls, arg=None):
                 ctype = getattr(cls, "_reusable_ctype", None)
                 if ctype is None:
                     return None
@@ -133,6 +133,8 @@ class NumericMeta(type):
             ctype = getattr(ctypes, f"{prefix}{width}", None)
             if ctype is not None:
                 new_cls._reusable_ctype = ctype
+                tag_prefix = "i" if signed else "u"
+                new_cls._aot_type_tag = f"{tag_prefix}{width}"
         return new_cls
 
     def __str__(cls):

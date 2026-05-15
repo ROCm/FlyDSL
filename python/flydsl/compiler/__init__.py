@@ -2,6 +2,7 @@
 # Copyright (c) 2025 FlyDSL Project Contributors
 
 from .backends import BaseBackend, GPUTarget, compile_backend_name, get_backend, register_backend
+from .export import load_module
 from .jit_argument import JitArgumentRegistry, from_dlpack
 from .jit_function import CompiledFunction, compile, jit
 from .kernel_function import kernel
@@ -17,5 +18,6 @@ __all__ = [
     "jit",
     "JitArgumentRegistry",
     "kernel",
+    "load_module",
     "register_backend",
 ]
