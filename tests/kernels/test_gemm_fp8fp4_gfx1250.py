@@ -15,13 +15,12 @@ if _REPO_ROOT not in sys.path:
 if _PYFLIR_SRC not in sys.path:
     sys.path.insert(0, _PYFLIR_SRC)
 
-# workaround for simulator
 import pytest  # noqa: E402
 import torch  # noqa: E402
 
-import flydsl  # noqa: E402,F401 -- preload system comgr before torch/HIP loads LLVM
-
 pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
+
+import flydsl.compiler as flyc  # noqa: E402,I001
 
 from flydsl.runtime.device import get_rocm_arch  # noqa: E402
 from kernels.gemm_fp8fp4_gfx1250 import compile_mxscale_gemm  # noqa: E402
@@ -209,6 +208,8 @@ def _run_mxscale_gemm_test(
     waves_per_eu=None,
     expert_sched_mode=True,
     split_k=1,
+    b_streaming=False,
+    scale_load_path="tdm",
     return_launch_fn=False,
 ):
     """Unified test body for FP4 and FP8."""
@@ -247,11 +248,12 @@ def _run_mxscale_gemm_test(
     fmt_name = "A8W4" if is_a8w4 else ("MXFP4" if is_fp4 else "MXFP8")
     mcast_str = f", cluster=({cluster_m},{cluster_n})" if cluster_m > 1 or cluster_n > 1 else ""
     tdm_str = ", tdm_store" if use_tdm_store else ", buffer_store"
+    scale_load_str = "" if scale_load_path == "tdm" else f", scale_load={scale_load_path}"
     pad_str = _format_kernel_pad(M, N, K, padded_shape)
     print(
         f"\nRunning {fmt_name} GEMM: M={M}, N={N}, K={K}{pad_str}, "
         f"tiles=({tile_m},{tile_n},{tile_k}), bufs={num_buffers}"
-        f"{mcast_str}{tdm_str}, preshuffle, out={out_dtype}"
+        f"{mcast_str}{tdm_str}{scale_load_str}, preshuffle, out={out_dtype}"
     )
 
     # Generate data
@@ -321,13 +323,30 @@ def _run_mxscale_gemm_test(
         split_k=split_k,
         use_scale_opsel=use_scale_opsel,
         expert_sched_mode=expert_sched_mode,
+        b_streaming=b_streaming,
+        scale_load_path=scale_load_path,
     )
-    launch_fn(
-        c_gpu.contiguous().view(-1),
-        a_gpu.contiguous().view(-1),
-        b_gpu.contiguous().view(-1),
-        as_gpu.contiguous().view(-1),
-        bs_gpu.contiguous().view(-1),
+
+    # Pre-bind via flyc.compile so the launch goes through the CompiledFunction
+    # ctypes fast path (matches test_blockscale_preshuffle_gemm.py and any
+    # production caller that bench-times this kernel). The slow JitFunction
+    # path adds ~17us of inspect.Signature.bind + _make_cache_key per call,
+    # which would mask genuine kernel timing differences in the bench path.
+    # flyc.compile() launches the kernel once internally to trigger
+    # compilation, so no separate eager call is needed for correctness.
+    c_flat = c_gpu.contiguous().view(-1)
+    a_flat = a_gpu.contiguous().view(-1)
+    b_flat = b_gpu.contiguous().view(-1)
+    as_flat = as_gpu.contiguous().view(-1)
+    bs_flat = bs_gpu.contiguous().view(-1)
+
+    flyc.compile(
+        launch_fn,
+        c_flat,
+        a_flat,
+        b_flat,
+        as_flat,
+        bs_flat,
         padded_m,
         padded_n,
         torch.cuda.current_stream(),
@@ -491,8 +510,21 @@ def test_mxfp4_metadata_and_spill_regression(out_dtype):
 @pytest.mark.parametrize("use_tdm_store", [True, False])
 @pytest.mark.parametrize("use_scale_opsel", [True, False])
 @pytest.mark.parametrize("out_dtype", ["f32", "bf16"])
+@pytest.mark.parametrize("scale_load_path", ["tdm", "buffer_lds_stage"])
 def test_mxfp8_gemm(
-    M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, use_tdm_store, out_dtype, use_scale_opsel
+    M,
+    N,
+    K,
+    tile_m,
+    tile_n,
+    tile_k,
+    m_warp,
+    n_warp,
+    num_buffers,
+    use_tdm_store,
+    out_dtype,
+    use_scale_opsel,
+    scale_load_path,
 ):
     _run_mxscale_gemm_test(
         "fp8",
@@ -509,6 +541,7 @@ def test_mxfp8_gemm(
         out_dtype,
         l2_prefetch_distance=2,
         use_scale_opsel=use_scale_opsel,
+        scale_load_path=scale_load_path,
     )
 
 
@@ -573,6 +606,151 @@ def test_a8w4_gemm_irregular_m_tile16(M, N, K, use_tdm_store):
 
 
 @pytest.mark.parametrize(
+    "data_format, M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp",
+    [
+        ("fp4", 128, 512, 7168, 128, 128, 256, 2, 2),
+        ("fp8", 128, 256, 256, 128, 256, 128, 2, 4),
+        ("a8w4", 128, 256, 256, 128, 256, 128, 2, 4),
+    ],
+)
+def test_b_streaming_correctness(data_format, M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp):
+    _run_mxscale_gemm_test(
+        data_format,
+        M,
+        N,
+        K,
+        tile_m,
+        tile_n,
+        tile_k,
+        m_warp,
+        n_warp,
+        num_buffers=2,
+        use_tdm_store=True,
+        out_dtype="bf16",
+        l2_prefetch_distance=2,
+        b_streaming=True,
+    )
+
+
+@pytest.mark.parametrize(
+    "data_format, M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp",
+    [
+        ("fp4", 128, 256, 512, 128, 128, 256, 2, 2),
+        ("fp8", 128, 256, 256, 128, 256, 128, 2, 2),
+        ("a8w4", 128, 256, 256, 128, 256, 128, 2, 2),
+    ],
+)
+def test_b_streaming_with_wave_spec_tdm(data_format, M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp):
+    _run_mxscale_gemm_test(
+        data_format,
+        M,
+        N,
+        K,
+        tile_m,
+        tile_n,
+        tile_k,
+        m_warp,
+        n_warp,
+        num_buffers=2,
+        use_tdm_store=True,
+        out_dtype="bf16",
+        l2_prefetch_distance=2,
+        b_streaming=True,
+        wave_specialized_tdm=True,
+    )
+
+
+@pytest.mark.parametrize("scale_load_path", ["tdm", "buffer_lds_stage", "buffer_lds_stage_ab_split"])
+@pytest.mark.parametrize("num_buffers", [2, 3])
+@pytest.mark.parametrize("use_tdm_store", [True, False])
+@pytest.mark.parametrize("use_scale_opsel", [False, True])
+def test_mxfp8_wave_spec_scale_load_paths(scale_load_path, num_buffers, use_tdm_store, use_scale_opsel):
+    _run_mxscale_gemm_test(
+        "fp8",
+        128,
+        256,
+        384,
+        128,
+        256,
+        128,
+        2,
+        2,
+        num_buffers=num_buffers,
+        use_tdm_store=use_tdm_store,
+        out_dtype="bf16",
+        l2_prefetch_distance=2,
+        wave_specialized_tdm=True,
+        use_scale_opsel=use_scale_opsel,
+        scale_load_path=scale_load_path,
+    )
+
+
+def test_mxfp8_ab_split_scale_load_allows_extra_waves():
+    _run_mxscale_gemm_test(
+        "fp8",
+        128,
+        256,
+        384,
+        128,
+        256,
+        128,
+        2,
+        4,
+        num_buffers=3,
+        use_tdm_store=True,
+        out_dtype="bf16",
+        l2_prefetch_distance=2,
+        wave_specialized_tdm=True,
+        use_scale_opsel=True,
+        scale_load_path="buffer_lds_stage_ab_split",
+    )
+
+
+@pytest.mark.parametrize(
+    "data_format, M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, cluster_m, cluster_n",
+    [
+        ("fp4", 256, 512, 256, 128, 256, 128, 2, 2, 2, 2),
+        ("fp8", 256, 512, 256, 128, 256, 128, 2, 2, 2, 2),
+    ],
+)
+def test_b_streaming_with_cluster_mcast(
+    data_format,
+    M,
+    N,
+    K,
+    tile_m,
+    tile_n,
+    tile_k,
+    m_warp,
+    n_warp,
+    cluster_m,
+    cluster_n,
+):
+    if str(get_rocm_arch()) != "gfx1250":
+        pytest.skip("requires gfx1250")
+    if "FFMLITE_TOPOLOGY" in os.environ or "AM_TOPOLOGY" in os.environ:
+        pytest.skip("cluster multicast not supported on simulator")
+    _run_mxscale_gemm_test(
+        data_format,
+        M,
+        N,
+        K,
+        tile_m,
+        tile_n,
+        tile_k,
+        m_warp,
+        n_warp,
+        num_buffers=2,
+        use_tdm_store=True,
+        out_dtype="bf16",
+        l2_prefetch_distance=2,
+        b_streaming=True,
+        cluster_m=cluster_m,
+        cluster_n=cluster_n,
+    )
+
+
+@pytest.mark.parametrize(
     "M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, cluster_m, cluster_n",
     [
         (256, 256, 256, 128, 128, 128, 2, 2, 2, 2),
@@ -608,6 +786,179 @@ def test_mxfp4_gemm_mcast(
         cluster_m=cluster_m,
         cluster_n=cluster_n,
     )
+
+
+@pytest.mark.parametrize(
+    "data_format, M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp",
+    [
+        ("fp8", 128, 256, 256, 128, 256, 128, 2, 2),
+        ("fp4", 128, 256, 256, 128, 256, 128, 2, 2),
+    ],
+    ids=["fp8-128x256x256", "fp4-128x256x256"],
+)
+def test_mxscale_gemm_cudagraph(data_format, M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp):
+    """Verify that the gfx1250 MX-scale GEMM kernel works inside a hipGraph.
+
+    Captures one launch, replays once, and checks the replay output is
+    bit-equivalent to an eager launch with the same inputs. Catches kernel
+    regressions that would break graph capture / replay (accidental host
+    syncs, allocator allocations on the kernel path, stream-event API misuse).
+    """
+    arch = str(get_rocm_arch())
+    if arch != "gfx1250":
+        pytest.skip(f"WMMA_SCALE requires gfx1250, got {arch}")
+
+    is_fp4 = data_format == "fp4"
+
+    # Build inputs (mirrors _run_mxscale_gemm_test, but no padding needed
+    # because we pick a clean shape).
+    torch.manual_seed(0)
+    if is_fp4:
+        a = fp4_utils.random_fp4_packed(M, K)
+        b = fp4_utils.random_fp4_packed(N, K)
+    else:
+        a = random_fp8_data(M, K)
+        b = random_fp8_data(N, K)
+    a_scale = fp4_utils.random_e8m0(M, K // SCALE_BLOCK)
+    b_scale = fp4_utils.random_e8m0(N, K // SCALE_BLOCK)
+
+    skt = tile_k // SCALE_BLOCK
+    warp_tile_m = tile_m // m_warp
+    warp_tile_n = tile_n // n_warp
+    a_scale_ps = preshuffle_e8m0_scale(a_scale, warp_tile_m, scale_k_per_tile=skt)
+    b_scale_ps = preshuffle_e8m0_scale(b_scale, warp_tile_n, scale_k_per_tile=skt)
+    pack_b = 2 if is_fp4 else 1
+    b_ps = fp4_utils.preshuffle_b_16x16(b, N, K // pack_b)
+
+    a_gpu = a.cuda()
+    b_gpu = b_ps.cuda()
+    as_gpu = a_scale_ps.cuda()
+    bs_gpu = b_scale_ps.cuda()
+    c_gpu = torch.zeros(M, N, dtype=torch.bfloat16, device="cuda")
+
+    launch_fn = compile_mxscale_gemm(
+        data_format=data_format,
+        M=M,
+        N=N,
+        K=K,
+        tile_m=tile_m,
+        tile_n=tile_n,
+        tile_k=tile_k,
+        m_warp=m_warp,
+        n_warp=n_warp,
+        num_buffers=2,
+        use_tdm_store=True,
+        out_dtype="bf16",
+        wave_specialized_tdm=False,
+        split_k=1,
+    )
+
+    c_flat = c_gpu.contiguous().view(-1)
+    a_flat = a_gpu.contiguous().view(-1)
+    b_flat = b_gpu.contiguous().view(-1)
+    as_flat = as_gpu.contiguous().view(-1)
+    bs_flat = bs_gpu.contiguous().view(-1)
+    compiled_exe = flyc.compile(
+        launch_fn,
+        c_flat,
+        a_flat,
+        b_flat,
+        as_flat,
+        bs_flat,
+        M,
+        N,
+        torch.cuda.current_stream(),
+    )
+
+    # Resolve stream lazily inside the launch closure so graph capture sees
+    # the active capture stream rather than a stream bound before capture.
+    def launch():
+        compiled_exe(c_flat, a_flat, b_flat, as_flat, bs_flat, M, N, torch.cuda.current_stream())
+
+    # ── Eager run (reference) ──
+    c_gpu.zero_()
+    launch()
+    torch.cuda.synchronize()
+    eager_result = c_gpu.clone()
+    assert eager_result.abs().max().item() > 0, "Eager run produced all zeros — kernel did not execute properly."
+
+    # ── hipGraph capture ──
+    g = torch.cuda.CUDAGraph()
+    s = torch.cuda.Stream()
+    s.wait_stream(torch.cuda.current_stream())
+    # Warmup on the capture stream so allocator state is stable
+    with torch.cuda.stream(s):
+        launch()
+    torch.cuda.current_stream().wait_stream(s)
+    torch.cuda.synchronize()
+
+    c_gpu.zero_()
+    with torch.cuda.graph(g, stream=s):
+        launch()
+    torch.cuda.synchronize()
+
+    # ── Replay ──
+    c_gpu.zero_()
+    g.replay()
+    torch.cuda.synchronize()
+    graph_result = c_gpu.clone()
+
+    # ── Verify ──
+    assert graph_result.abs().max().item() > 0, "hipGraph replay produced all zeros — kernel was NOT captured."
+    # Same inputs + same kernel + same stream-order = bit-exact equality
+    assert torch.equal(eager_result, graph_result), (
+        f"Eager vs hipGraph result mismatch: max abs diff = "
+        f"{(eager_result.float() - graph_result.float()).abs().max().item():.6f}"
+    )
+
+
+def _bench_kernel_us_cudagraph(run_fn, warmup=10, iters=100, prep_fn=None):
+    """Per-launch timer that strips host launch overhead via hipGraph.
+
+    How it works:
+      - Capture a single kernel launch into a hipGraph
+      - Replay it N times in one stream submission burst
+      - Per-launch time = total_burst_time / N
+
+    NB: stream-ordered execution guarantees the N replays serialise — each
+    g.replay() is one submission to the stream and the next one cannot
+    start until the previous one finishes.
+
+    NB: no L2 flush between replays. The whole point of the graph is to
+    measure the kernel in a hot, back-to-back launch scenario (which is
+    what production serving looks like). For cold-cache numbers use the
+    regular _bench_kernel_us with flush_l2=True.
+    """
+    capture_stream = torch.cuda.Stream()
+    capture_stream.wait_stream(torch.cuda.current_stream())
+
+    # Warmup on the capture stream so the allocator / JIT cache is settled.
+    with torch.cuda.stream(capture_stream):
+        for _ in range(warmup):
+            if prep_fn is not None:
+                prep_fn()
+            run_fn()
+    torch.cuda.current_stream().wait_stream(capture_stream)
+    torch.cuda.synchronize()
+
+    # Capture exactly one kernel launch into the graph.
+    g = torch.cuda.CUDAGraph()
+    if prep_fn is not None:
+        prep_fn()
+    with torch.cuda.graph(g, stream=capture_stream):
+        run_fn()
+    torch.cuda.synchronize()
+
+    # Time iters replays as one batch.
+    start_ev = torch.cuda.Event(enable_timing=True)
+    end_ev = torch.cuda.Event(enable_timing=True)
+    start_ev.record()
+    for _ in range(iters):
+        g.replay()
+    end_ev.record()
+    torch.cuda.synchronize()
+    total_us = start_ev.elapsed_time(end_ev) * 1e3
+    return total_us / iters
 
 
 def _bench_kernel_us(run_fn, warmup=10, iters=50, flush_l2=True, prep_fn=None):
@@ -699,7 +1050,8 @@ def _run_benchmark(args):
     print(f"  Tile: ({tile_m}, {tile_n}, {tile_k}), warps=({args.m_warp}x{args.n_warp})")
     print(
         f"  Buffers={args.num_buffers}, out={args.out_dtype}, "
-        f"opsel={args.use_scale_opsel}, inst_prefetch={args.inst_prefetch}"
+        f"opsel={args.use_scale_opsel}, inst_prefetch={args.inst_prefetch}, "
+        f"scale_load={args.scale_load_path}"
     )
     if args.split_k > 1:
         print(f"  Split-K={args.split_k} (atomic accumulate, buffer-store epilogue)")
@@ -768,20 +1120,40 @@ def _run_benchmark(args):
         use_scale_opsel=args.use_scale_opsel,
         expert_sched_mode=args.expert_sched_mode,
         atomic_barrier_enable=args.atomic_barrier_enable,
+        b_streaming=args.b_streaming,
+        scale_load_path=args.scale_load_path,
     )
 
-    stream = torch.cuda.current_stream()
     c_flat = c_gpu.view(-1)
     a_flat = a_gpu.view(-1)
     b_flat = b_gpu.view(-1)
     as_flat = as_gpu.view(-1)
     bs_flat = bs_gpu.view(-1)
 
+    # Pre-bind via flyc.compile so the bench loop calls go through the
+    # CompiledFunction ctypes fast path. The slow JitFunction path adds
+    # ~17us of inspect.Signature.bind + _make_cache_key per call, which
+    # would dominate per-launch latency for short kernels.
+    compiled_exe = flyc.compile(
+        launch_fn,
+        c_flat,
+        a_flat,
+        b_flat,
+        as_flat,
+        bs_flat,
+        padded_m,
+        padded_n,
+        torch.cuda.current_stream(),
+    )
+
     def prep_kernel():
         c_gpu.zero_()
 
+    # Resolve the stream lazily inside the closure so the graph-bench path
+    # captures on the active capture stream rather than the stream bound
+    # before capture. Same value on the eager path.
     def run_kernel():
-        launch_fn(
+        compiled_exe(
             c_flat,
             a_flat,
             b_flat,
@@ -789,7 +1161,7 @@ def _run_benchmark(args):
             bs_flat,
             padded_m,
             padded_n,
-            stream,
+            torch.cuda.current_stream(),
         )
 
     prep_kernel()
@@ -798,10 +1170,20 @@ def _run_benchmark(args):
     compile_ms = (time.perf_counter() - t0) * 1e3
     print(f"      Compile + first launch: {compile_ms:.0f} ms")
 
-    print(f"[2/3] Warming up ({args.warmup} iters) + benchmarking ({args.iters} iters)...")
-    us = _bench_kernel_us(
-        run_kernel, warmup=args.warmup, iters=args.iters, flush_l2=not args.no_flush_l2, prep_fn=prep_kernel
-    )
+    use_graph = getattr(args, "use_graph", False)
+    if use_graph:
+        print(f"[2/3] Warming up ({args.warmup} iters) + bench via hipGraph " f"({args.iters} replays)...")
+        # Graph mode prep: don't zero c_gpu inside the captured kernel
+        # (zero would be baked into the graph and runs every replay, but
+        # that's also fine — it would add a trivial memset per replay).
+        # We omit prep_fn here because the c_gpu state across replays
+        # doesn't matter for timing.
+        us = _bench_kernel_us_cudagraph(run_kernel, warmup=args.warmup, iters=args.iters)
+    else:
+        print(f"[2/3] Warming up ({args.warmup} iters) + benchmarking " f"({args.iters} iters)...")
+        us = _bench_kernel_us(
+            run_kernel, warmup=args.warmup, iters=args.iters, flush_l2=not args.no_flush_l2, prep_fn=prep_kernel
+        )
 
     logical_flops = 2.0 * M * N * K
     kernel_flops = 2.0 * padded_m * padded_n * padded_k
@@ -870,9 +1252,9 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-format", type=str, default="fp4", choices=["fp4", "fp8", "a8w4"])
-    parser.add_argument("-M", type=int, default=8192)
-    parser.add_argument("-N", type=int, default=8192)
-    parser.add_argument("-K", type=int, default=8192)
+    parser.add_argument("-M", type=int, default=1024)
+    parser.add_argument("-N", type=int, default=1024)
+    parser.add_argument("-K", type=int, default=2048)
     parser.add_argument("--tile-m", type=int, default=128)
     parser.add_argument("--tile-n", type=int, default=256)
     parser.add_argument("--tile-k", type=int, default=256)
@@ -889,7 +1271,14 @@ if __name__ == "__main__":
     parser.add_argument("--wave-spec-tdm", action="store_true", default=False)
     parser.add_argument("--waves-per-eu", type=int, default=None)
     parser.add_argument("--use-scale-opsel", action="store_true", default=False)
+    parser.add_argument(
+        "--scale-load-path",
+        type=str,
+        default="tdm",
+        choices=["tdm", "buffer_lds_stage", "buffer_lds_stage_ab_split"],
+    )
     parser.add_argument("--disable-expert-sched-mode", dest="expert_sched_mode", action="store_false", default=True)
+    parser.add_argument("--b-streaming", action="store_true", default=False)
     parser.add_argument(
         "--atomic-barrier-enable",
         action="store_true",
@@ -903,6 +1292,15 @@ if __name__ == "__main__":
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--iters", type=int, default=20)
     parser.add_argument("--no-flush-l2", action="store_true", default=False)
+    parser.add_argument(
+        "--use-graph",
+        action="store_true",
+        default=False,
+        help="Time via hipGraph capture+replay to strip "
+        "host launch overhead from per-launch latency. "
+        "Implicitly disables L2 flush (graph replays "
+        "are back-to-back, hot-cache).",
+    )
     args = parser.parse_args()
 
     if args.benchmark:
@@ -931,4 +1329,6 @@ if __name__ == "__main__":
             inst_prefetch=args.inst_prefetch,
             waves_per_eu=args.waves_per_eu,
             expert_sched_mode=args.expert_sched_mode,
+            b_streaming=args.b_streaming,
+            scale_load_path=args.scale_load_path,
         )
