@@ -1602,67 +1602,46 @@ def compile_mxscale_gemm(
         pred_const = fx.Int32(1)
         if const_expr(wave_specialized_tdm):
             active_pred_const = arith.select(tdm_wave_id < fx.Int32(4), fx.Int32(1), fx.Int32(0))
+
+            def _select4(values):
+                return _select_wave_tdm_value(values[0], values[1], values[2], values[3])
+
+            def _desc_lanes(descs, lane):
+                return [_dg0_lane(desc, lane) for desc in descs]
+
+            def _select_active_tdm(stage_lds_addrs, descs, advs):
+                active_stages = [
+                    _select_wave_tdm_value(
+                        stage_lds_addrs[0][i],
+                        stage_lds_addrs[1][i],
+                        stage_lds_addrs[2][i],
+                        stage_lds_addrs[3][i],
+                    )
+                    for i in range_constexpr(num_buffers)
+                ]
+                return (
+                    active_stages,
+                    _select4(_desc_lanes(descs, 2)),
+                    _select4(_desc_lanes(descs, 3)),
+                    _select4([desc.dgroup1 for desc in descs]),
+                    _select4(advs),
+                )
+
         else:
             active_pred_const = pred_const
 
         if const_expr(wave_specialized_tdm and not use_scale_buffer_load):
-            active_stage_lds_addr = [
-                _select_wave_tdm_value(
-                    stages_a_lds_addr[i],
-                    stages_b_lds_addr[i],
-                    stages_as_lds_addr[i],
-                    stages_bs_lds_addr[i],
-                )
-                for i in range_constexpr(num_buffers)
-            ]
-            active_addr_lo = _select_wave_tdm_value(
-                _dg0_lane(desc_a_init, 2),
-                _dg0_lane(desc_b_init, 2),
-                _dg0_lane(desc_as_init, 2),
-                _dg0_lane(desc_bs_init, 2),
+            active_stage_lds_addr, active_addr_lo, active_addr_hi, active_dgroup1, active_adv_i32 = _select_active_tdm(
+                (stages_a_lds_addr, stages_b_lds_addr, stages_as_lds_addr, stages_bs_lds_addr),
+                (desc_a_init, desc_b_init, desc_as_init, desc_bs_init),
+                (adv_a_i32, adv_b_i32, adv_as_i32, adv_bs_i32),
             )
-            active_addr_hi = _select_wave_tdm_value(
-                _dg0_lane(desc_a_init, 3),
-                _dg0_lane(desc_b_init, 3),
-                _dg0_lane(desc_as_init, 3),
-                _dg0_lane(desc_bs_init, 3),
-            )
-            active_dgroup1 = _select_wave_tdm_value(
-                desc_a_init.dgroup1,
-                desc_b_init.dgroup1,
-                desc_as_init.dgroup1,
-                desc_bs_init.dgroup1,
-            )
-            active_adv_i32 = _select_wave_tdm_value(adv_a_i32, adv_b_i32, adv_as_i32, adv_bs_i32)
         elif const_expr(use_ab_split_scale_buffer_load):
-            active_stage_lds_addr = [
-                _select_wave_tdm_value(
-                    stages_a0_lds_addr[i],
-                    stages_b0_lds_addr[i],
-                    stages_a1_lds_addr[i],
-                    stages_b1_lds_addr[i],
-                )
-                for i in range_constexpr(num_buffers)
-            ]
-            active_addr_lo = _select_wave_tdm_value(
-                _dg0_lane(desc_a0_init, 2),
-                _dg0_lane(desc_b0_init, 2),
-                _dg0_lane(desc_a1_init, 2),
-                _dg0_lane(desc_b1_init, 2),
+            active_stage_lds_addr, active_addr_lo, active_addr_hi, active_dgroup1, active_adv_i32 = _select_active_tdm(
+                (stages_a0_lds_addr, stages_b0_lds_addr, stages_a1_lds_addr, stages_b1_lds_addr),
+                (desc_a0_init, desc_b0_init, desc_a1_init, desc_b1_init),
+                (adv_a_i32, adv_b_i32, adv_a_i32, adv_b_i32),
             )
-            active_addr_hi = _select_wave_tdm_value(
-                _dg0_lane(desc_a0_init, 3),
-                _dg0_lane(desc_b0_init, 3),
-                _dg0_lane(desc_a1_init, 3),
-                _dg0_lane(desc_b1_init, 3),
-            )
-            active_dgroup1 = _select_wave_tdm_value(
-                desc_a0_init.dgroup1,
-                desc_b0_init.dgroup1,
-                desc_a1_init.dgroup1,
-                desc_b1_init.dgroup1,
-            )
-            active_adv_i32 = _select_wave_tdm_value(adv_a_i32, adv_b_i32, adv_a_i32, adv_b_i32)
         else:
             addr_lo_a = _dg0_lane(desc_a_init, 2)
             addr_hi_a = _dg0_lane(desc_a_init, 3)
@@ -1759,18 +1738,30 @@ def compile_mxscale_gemm(
                 wave_specialized=wave_specialized_tdm,
             )
 
+        if const_expr(wave_specialized_tdm and (not use_scale_buffer_load or use_ab_split_scale_buffer_load)):
+
+            def _issue_active_tdm(load_stage, addr_box, scale_k_box=None, k_prefetch=None):
+                dg0 = _pack_dg0(active_pred_const, active_stage_lds_addr[load_stage], addr_box[0], active_addr_hi)
+                tdm_ops.tensor_load_2d(tdm_ops.TDMDescriptor2D(dg0, active_dgroup1))
+                addr_box[0] = addr_box[0] + active_adv_i32
+                if scale_k_box is not None:
+                    _issue_scale_buffer_loads(load_stage, scale_k_box[0])
+                    scale_k_box[0] = scale_k_box[0] + arith.index(tile_k)
+                if k_prefetch is not None:
+                    _l2_prefetch(k_prefetch)
+
         # Prologue
         if const_expr(wave_specialized_tdm and not use_scale_buffer_load):
             for i in range_constexpr(pre_loaded):
-                dg0 = _pack_dg0(active_pred_const, active_stage_lds_addr[i], active_addr_lo, active_addr_hi)
-                tdm_ops.tensor_load_2d(tdm_ops.TDMDescriptor2D(dg0, active_dgroup1))
-                active_addr_lo = active_addr_lo + active_adv_i32
+                addr_box = [active_addr_lo]
+                _issue_active_tdm(i, addr_box)
+                active_addr_lo = addr_box[0]
         elif const_expr(use_ab_split_scale_buffer_load):
             for i in range_constexpr(pre_loaded):
-                dg0 = _pack_dg0(active_pred_const, active_stage_lds_addr[i], active_addr_lo, active_addr_hi)
-                tdm_ops.tensor_load_2d(tdm_ops.TDMDescriptor2D(dg0, active_dgroup1))
-                active_addr_lo = active_addr_lo + active_adv_i32
-                _issue_scale_buffer_loads(i, split_k_base + arith.index(i * tile_k))
+                addr_box = [active_addr_lo]
+                scale_k_box = [split_k_base + arith.index(i * tile_k)]
+                _issue_active_tdm(i, addr_box, scale_k_box=scale_k_box)
+                active_addr_lo = addr_box[0]
         else:
             for i in range_constexpr(pre_loaded):
                 dg0_a = _pack_dg0(pred_const, stages_a_lds_addr[i], addr_lo_a, addr_hi_a)
@@ -1832,10 +1823,7 @@ def compile_mxscale_gemm(
                                 + arith.index(buf_idx * tile_k)
                             ),
                         ):
-                            dg0 = _pack_dg0(active_pred_const, active_stage_lds_addr[_ls], _ab[0], active_addr_hi)
-                            tdm_ops.tensor_load_2d(tdm_ops.TDMDescriptor2D(dg0, active_dgroup1))
-                            _ab[0] = _ab[0] + active_adv_i32
-                            _l2_prefetch(_k_off)
+                            _issue_active_tdm(_ls, _ab, k_prefetch=_k_off)
 
                         rocdl.sched_barrier(0)
                         accs_in = compute_tile_scheduled(
@@ -1880,12 +1868,7 @@ def compile_mxscale_gemm(
                                 + arith.index(buf_idx * tile_k)
                             ),
                         ):
-                            dg0 = _pack_dg0(active_pred_const, active_stage_lds_addr[_ls], _ab[0], active_addr_hi)
-                            tdm_ops.tensor_load_2d(tdm_ops.TDMDescriptor2D(dg0, active_dgroup1))
-                            _ab[0] = _ab[0] + active_adv_i32
-                            _issue_scale_buffer_loads(_ls, _scale_k[0])
-                            _scale_k[0] = _scale_k[0] + arith.index(tile_k)
-                            _l2_prefetch(_k_off)
+                            _issue_active_tdm(_ls, _ab, scale_k_box=_scale_k, k_prefetch=_k_off)
 
                         rocdl.sched_barrier(0)
                         accs_in = compute_tile_scheduled(
@@ -2071,11 +2054,7 @@ def compile_mxscale_gemm(
                         _tail_scale_k = [scale_next_k_base]
 
                         def _tail_mid_split_scale_dma(_ls=_load_stage, _ab=_tail_addr_box, _scale_k=_tail_scale_k):
-                            dg0 = _pack_dg0(active_pred_const, active_stage_lds_addr[_ls], _ab[0], active_addr_hi)
-                            tdm_ops.tensor_load_2d(tdm_ops.TDMDescriptor2D(dg0, active_dgroup1))
-                            _ab[0] = _ab[0] + active_adv_i32
-                            _issue_scale_buffer_loads(_ls, _scale_k[0])
-                            _scale_k[0] = _scale_k[0] + arith.index(tile_k)
+                            _issue_active_tdm(_ls, _ab, scale_k_box=_scale_k)
 
                         _tail_mid_cb = _tail_mid_split_scale_dma
                     elif const_expr(use_scale_buffer_load):
@@ -2094,9 +2073,7 @@ def compile_mxscale_gemm(
                         _tail_addr_box = [active_addr_lo]
 
                         def _tail_mid_ws(_ls=_load_stage, _ab=_tail_addr_box):
-                            dg0 = _pack_dg0(active_pred_const, active_stage_lds_addr[_ls], _ab[0], active_addr_hi)
-                            tdm_ops.tensor_load_2d(tdm_ops.TDMDescriptor2D(dg0, active_dgroup1))
-                            _ab[0] = _ab[0] + active_adv_i32
+                            _issue_active_tdm(_ls, _ab)
 
                         _tail_mid_cb = _tail_mid_ws
                     else:
