@@ -807,6 +807,8 @@ def test_mxscale_gemm_cudagraph(data_format, M, N, K, tile_m, tile_n, tile_k, m_
     arch = str(get_rocm_arch())
     if arch != "gfx1250":
         pytest.skip(f"WMMA_SCALE requires gfx1250, got {arch}")
+    if "FFMLITE_TOPOLOGY" in os.environ or "AM_TOPOLOGY" in os.environ:
+        pytest.skip("hipGraph capture/replay not supported on simulator")
 
     is_fp4 = data_format == "fp4"
 
@@ -1172,7 +1174,7 @@ def _run_benchmark(args):
 
     use_graph = getattr(args, "use_graph", False)
     if use_graph:
-        print(f"[2/3] Warming up ({args.warmup} iters) + bench via hipGraph " f"({args.iters} replays)...")
+        print(f"[2/3] Warming up ({args.warmup} iters) + bench via hipGraph ({args.iters} replays)...")
         # Graph mode prep: don't zero c_gpu inside the captured kernel
         # (zero would be baked into the graph and runs every replay, but
         # that's also fine — it would add a trivial memset per replay).
@@ -1180,7 +1182,7 @@ def _run_benchmark(args):
         # doesn't matter for timing.
         us = _bench_kernel_us_cudagraph(run_kernel, warmup=args.warmup, iters=args.iters)
     else:
-        print(f"[2/3] Warming up ({args.warmup} iters) + benchmarking " f"({args.iters} iters)...")
+        print(f"[2/3] Warming up ({args.warmup} iters) + benchmarking ({args.iters} iters)...")
         us = _bench_kernel_us(
             run_kernel, warmup=args.warmup, iters=args.iters, flush_l2=not args.no_flush_l2, prep_fn=prep_kernel
         )

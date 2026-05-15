@@ -12,6 +12,7 @@ import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, buffer_ops, const_expr, gpu, idx2crd, range_constexpr, rocdl, tdm_ops
+from flydsl.expr.rocdl import cluster
 from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr, check_smem_capacity
@@ -38,7 +39,7 @@ LDS_PAD_A_BYTES = 16
 LDS_PAD_D_BYTES = 16
 
 
-@functools.lru_cache(maxsize=64)
+@functools.lru_cache(maxsize=256)
 def compile_mxscale_gemm(
     *,
     data_format: str = "fp4",
@@ -344,13 +345,6 @@ def compile_mxscale_gemm(
     compute_schedule_kind = _pick_compute_schedule_kind()
     use_fp4_bank_friendly_schedule = compute_schedule_kind == COMPUTE_SCHEDULE_FP4_COL_BAND
     use_fp8_quadrant_schedule = compute_schedule_kind == COMPUTE_SCHEDULE_FP8_QUADRANT
-    use_b_streaming_schedule = compute_schedule_kind == COMPUTE_SCHEDULE_B_STREAMING
-
-    if use_b_streaming_schedule:
-        print(
-            f"[b_streaming] {data_format} tile=({tile_m},{tile_n},{tile_k}) " f"M_r={wmma_m_rep} N_r={wmma_n_rep}",
-            flush=True,
-        )
 
     if use_fp4_bank_friendly_schedule:
         _bank_half_wm = wmma_m_rep // 2
@@ -404,8 +398,8 @@ def compile_mxscale_gemm(
         split_k_base = bz * arith.index(split_k_chunk)
 
         if const_expr(use_cluster):
-            local_x, local_y = gpu.compute_cluster_position()
-            a_mcast_mask, b_mcast_mask = gpu.compute_mcast_masks(local_x, local_y, cluster_m, cluster_n)
+            local_x, local_y = cluster.compute_cluster_position()
+            a_mcast_mask, b_mcast_mask = cluster.compute_mcast_masks(local_x, local_y, cluster_m, cluster_n)
         else:
             a_mcast_mask = 0
             b_mcast_mask = 0
@@ -2012,7 +2006,7 @@ def compile_mxscale_gemm(
         if const_expr(loop_iters > 0):
             _pipeline_fence(outstanding=0)
         elif const_expr(use_cluster):
-            gpu.cluster_barrier()
+            cluster.cluster_barrier()
         epi_addrs_box = [None]
         _tail_had_load = False
         for _load_stage, _compute_stage, _outstanding in tail_plan:
