@@ -262,11 +262,6 @@ def build_flash_attn_opus_module(
         elem_dtype = dtype_to_elem_type(dtype_str)
         elem_type = elem_dtype.ir_type
         compute_type = fx.Float32.ir_type
-        q_ptr = _extract_aligned_pointer(Q)
-        k_ptr = _extract_aligned_pointer(K)
-        v_ptr = _extract_aligned_pointer(V)
-        o_ptr = _extract_aligned_pointer(O)
-
         fm_fast = fx.arith.FastMathFlags.fast
         v4f16_type = Vec.make_type(4, elem_dtype)
         v8f16_type = Vec.make_type(8, elem_dtype)
@@ -402,13 +397,6 @@ def build_flash_attn_opus_module(
         def global_idx_q(token_idx, col):
             token = batch_idx * seq_len_v + token_idx
             return token * STRIDE_TOKEN_Q + q_head_idx * HEAD_DIM + col
-
-        def _load_global_half_vec(ptr, base_idx, vec_elems):
-            gep = buffer_ops.get_element_ptr(ptr, fx.Int64(base_idx), elem_type=elem_type)
-            return _pointer_load(Vec.make_type(vec_elems, elem_dtype), gep)
-
-        def load_global_mfma_pack(rsrc, base_idx):
-            return _load_global_half_vec(rsrc, base_idx, MFMA_LANE_K)
 
         def _make_raw_buffer_rsrc(tensor):
             base_ptr = _extract_aligned_pointer(tensor)
@@ -560,6 +548,7 @@ def build_flash_attn_opus_module(
             return fx.Index(SMEM_K_TILE_ELEMS) + buf_id * fx.Index(OPUS_KV_PER_BUFFER)
 
         # ── DMA loaders (buffer_load_dwordx4_lds, gfx950) ──
+        q_rsrc = buffer_ops.create_buffer_resource(Q, max_size=True)
         k_rsrc = buffer_ops.create_buffer_resource(K, max_size=True)
         v_rsrc = buffer_ops.create_buffer_resource(V, max_size=True)
         o_rsrc = _make_raw_buffer_rsrc(O)
@@ -670,15 +659,18 @@ def build_flash_attn_opus_module(
         q_row_i32 = fx.Int32(q_row)
         q_in_bounds = q_row < seq_len_v
         q_row_safe = fx.Index(ArithValue(q_in_bounds).select(q_row, fx.Index(0)))
-        c_zero_mfma_pack = Vec.filled(MFMA_LANE_K, 0.0, elem_dtype).ir_value()
         q_b_packs = []
         for ks in range_constexpr(K_STEPS_QK):
             q_col = fx.Index(ks * K_STEP_QK) + lane_div_32 * MFMA_LANE_K
             g_idx = global_idx_q(q_row_safe, q_col)
-            raw = load_global_mfma_pack(q_ptr, g_idx)
-            raw_safe = ArithValue(q_in_bounds).select(raw, c_zero_mfma_pack)
+            raw = buffer_ops.buffer_load(
+                q_rsrc,
+                fx.Int32(g_idx),
+                vec_width=MFMA_LANE_K,
+                dtype=elem_dtype,
+            )
             # bf16x8 → f32x8 → multiply by c_sm_scale_log2e → bf16x8
-            pack_f32 = Vec(raw_safe).extf(v8f32_type)
+            pack_f32 = Vec(raw).extf(v8f32_type)
             scaled_elems = []
             for k in range_constexpr(MFMA_LANE_K):
                 scaled_elems.append(
