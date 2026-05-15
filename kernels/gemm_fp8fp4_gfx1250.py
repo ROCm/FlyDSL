@@ -1157,11 +1157,6 @@ def compile_mxscale_gemm(
                 rocdl.s_wait_dscnt(_fp8_half_wm * DS_LOADS_PER_A_FRAG)
 
                 _emit_group(0, 0, a_top_frags, b_left_frags, a_scales, b_scales)
-
-                if const_expr(ks == 0 and mid_compute_callback is not None):
-                    rocdl.sched_barrier(0)
-                    mid_compute_callback()
-
                 b_right_frags = _load_b_half(_fp8_half_wn, ks)
 
                 # Keep the newly issued right-half B loads outstanding while
@@ -1169,6 +1164,10 @@ def compile_mxscale_gemm(
                 rocdl.s_wait_dscnt(_b_half_loads)
 
                 _emit_group(_fp8_half_wm, 0, a_bottom_frags, b_left_frags, a_scales, b_scales)
+
+                if const_expr(ks == 0 and mid_compute_callback is not None):
+                    rocdl.sched_barrier(0)
+                    mid_compute_callback()
 
                 if const_expr(not is_last_ks):
                     next_left_frags, next_b_scales = _load_b_left_bundle(ks + 1)
