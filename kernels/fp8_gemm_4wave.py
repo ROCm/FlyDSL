@@ -35,7 +35,6 @@ from kernels.fp8_gemm_utils import (
 )
 
 
-
 def _divmod(a, b):
     return (a // b, a % b)
 
@@ -159,7 +158,6 @@ def compile_fp8_gemm_4w(
         gB = make_fp8_buffer_tensor(B_T, F8_IR_t)
         ga_div = fx.logical_divide(gA, fx.make_layout(1, 1))
         gb_div = fx.logical_divide(gB, fx.make_layout(1, 1))
-
 
         def _compute_lds_swizzle(s2r, preshuffled=False):
             lds_swz = []

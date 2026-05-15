@@ -109,10 +109,7 @@ def _bench_fp8_gemm(
             BLOCK_N=tile_n,
             b_preshuffled=b_preshuffled,
         )
-        print(
-            f"\n[fp8_gemm_8wave] M={M} N={N} K={K} "
-            f"BLOCK_M={tile_m} BLOCK_N={tile_n} preshuffle_b={b_preshuffled}"
-        )
+        print(f"\n[fp8_gemm_8wave] M={M} N={N} K={K} BLOCK_M={tile_m} BLOCK_N={tile_n} preshuffle_b={b_preshuffled}")
     else:
         launch_fn = compile_fp8_gemm_4w(
             M=M,
@@ -211,6 +208,7 @@ def test_fp8_gemm_4wave(M, N, K, tile_m, tile_n, preshuffle_b):
         tile_n=tile_n,
         b_preshuffled=preshuffle_b,
     )
+
 
 @pytest.mark.parametrize(
     "M, N, K, tile_m, tile_n",

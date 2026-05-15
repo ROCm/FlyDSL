@@ -45,11 +45,7 @@ def compute_global_swizzle(lane_id, wave_id, K, n_rounds, preshuffled):
             row = lane_id % 8 + wave_id * 8 + round * (n_waves * 8)
             col = (lane_id // 8) * 16
             offsets.append(
-                (row // 16) * (K * 16)
-                + (row % 16) * 16
-                + (col // 64) * 1024
-                + ((col % 64) // 16) * 256
-                + (col % 16)
+                (row // 16) * (K * 16) + (row % 16) * 16 + (col // 64) * 1024 + ((col % 64) // 16) * 256 + (col % 16)
             )
         else:
             row = lane_id // 8 + wave_id * 8 + round * (n_waves * 8)
@@ -159,8 +155,12 @@ class StoreC:
         fx.copy(self.out_atom_1, r, fx.slice(self.c_div, (None, fx.Int32(c_index))))
 
     def store(self, c_frag, base_row, base_col):
-        a_scales = [self._load_scale_vec4(base_row + i * 16 + (self.lane_id // 16) * 4) for i in range_constexpr(self.n_tiles_a)]
-        b_scales = [self._load_scale_scalar(base_col + i * 16 + self.lane_id % 16) for i in range_constexpr(self.n_tiles_b)]
+        a_scales = [
+            self._load_scale_vec4(base_row + i * 16 + (self.lane_id // 16) * 4) for i in range_constexpr(self.n_tiles_a)
+        ]
+        b_scales = [
+            self._load_scale_scalar(base_col + i * 16 + self.lane_id % 16) for i in range_constexpr(self.n_tiles_b)
+        ]
         for ti in range_constexpr(self.n_tiles_a):
             row = base_row + ti * 16 + (self.lane_id // 16) * 4
             for tj in range_constexpr(self.n_tiles_b):
