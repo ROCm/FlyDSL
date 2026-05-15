@@ -7,7 +7,7 @@ from flydsl._mlir.dialects import fly as fly_dialect
 from flydsl._mlir.dialects import llvm as _llvm
 from flydsl._mlir.dialects import memref as memref_dialect
 from flydsl._mlir.dialects.fly_rocdl import TargetAddressSpace
-from flydsl.expr import range_constexpr
+from flydsl.expr import range_constexpr, const_expr
 from flydsl.expr.typing import Vector as Vec
 
 
@@ -65,21 +65,26 @@ def pack_i32x4_i32x8(lo, hi):
 
 
 class S2RLoader:
-    def __init__(self, lane_id, wave_idx, n_tiles):
+    def __init__(self, wave_idx, n_tiles):
         self.vec16_t = Vec.make_type(16, fx.Float8E4M3FN)
-        self.lane_id = lane_id
+        self.lane_id = fx.thread_idx.x % 64
         self.wave_idx = wave_idx
         self.n_tiles = n_tiles
 
-    def load(self, lds_src):
+    def load(self, lds_src, preshuffled=False):
         frag = []
         for i in range_constexpr(self.n_tiles):
             halves = []
             row = self.wave_idx * (self.n_tiles * 16) + i * 16 + self.lane_id % 16
             for step in range_constexpr(2):
                 col = (self.lane_id // 16) * 16 + step * 64
-                row_swz, col_swz = swizzle_128(row, col)
-                v = Vec.load(self.vec16_t, lds_src, [fx.Index(row_swz * 128 + col_swz)])
+                if const_expr(preshuffled):
+                    # TODO: validate for 8 wave
+                    offset = (row // 8) * 1024 + (row % 8) * 16 + (col // 16) * 128
+                else:
+                    row_swz, col_swz = swizzle_128(row, col)
+                    offset = row_swz * 128 + col_swz
+                v = Vec.load(self.vec16_t, lds_src, [fx.Index(offset)])
                 halves.append(v.bitcast(fx.Int32))
             frag.append(pack_i32x4_i32x8(halves[0], halves[1]))
         return frag
@@ -90,9 +95,9 @@ class S2RLoader:
 
 
 class StoreC:
-    def __init__(self, A_scale, B_scale, C, c_stride, lane_id, c_idx_fn, n_tiles_a, n_tiles_b):
+    def __init__(self, A_scale, B_scale, C, c_stride, c_idx_fn, n_tiles_a, n_tiles_b):
         self.c_stride = c_stride
-        self.lane_id = lane_id
+        self.lane_id = fx.thread_idx.x % 64
         self.c_idx_fn = c_idx_fn
         self.n_tiles_a = n_tiles_a
         self.n_tiles_b = n_tiles_b

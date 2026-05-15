@@ -1,34 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2025 FlyDSL Project Contributors
+# Copyright (c) 2026 FlyDSL Project Contributors
 
-"""Derived tiled operations for GPU kernel partitioning.
 
-This module provides high-level abstractions for tiled copy and MMA (Matrix
-Multiply-Accumulate) operations. These classes partition tensors across
-threads and values according to the Fly dialect's layout algebra, enabling
-efficient MFMA-based GEMM and data movement patterns.
-
-Typical usage::
-
-    import flydsl.expr as fx
-
-    copy_atom = fx.make_copy_atom(fx.UniversalCopy(128), fx.Float16)
-    mma_atom = fx.make_mma_atom(fx.MFMA(16, 16, 16, fx.Float32), fx.Float16)
-
-    tiled_mma = fx.make_tiled_mma(mma_atom, ...)
-    thr_mma = tiled_mma.get_slice(fx.thread_idx.x)
-    tAr = thr_mma.partition_A(sA)
-"""
-
+from .._mlir.dialects import fly
 from .._mlir.dialects._fly_enum_gen import MmaOperand
 from .meta import traced_op
+from .numeric import Boolean, Numeric
 from .primitive import *
-from .typing import Tensor, TiledCopy, TiledMma
+from .typing import Int8, Layout, Tensor, TiledCopy, TiledMma
 
 __all__ = [
     # Tiled Operation
     "ThrCopy",
     "ThrMma",
+    "make_rmem_tensor",
     "make_layout_tv",
     "make_tiled_copy_tv",
     "make_tiled_copy",
@@ -98,6 +83,29 @@ class ThrMma(TiledMma):
         return tiled_mma_partition(MmaOperand.C, self.tiled_mma, c, self._thr_idx_int, loc=loc, ip=ip)
 
 
+def make_rmem_tensor(shape_or_layout, dtype, *, loc=None, ip=None):
+    """Creates a tensor in register memory with the specified layout/shape and data type.
+
+    If shape_or_layout is a shape, it is converted to a layout with column-major ordering.
+    Booleans are canonically stored as Int8.
+
+    Examples:
+        tensor = make_rmem_tensor(8, fx.Float32)
+        tensor = make_rmem_tensor(make_layout(4, 1), fx.Float16)
+    """
+    if not issubclass(dtype, Numeric):
+        raise TypeError(f"dtype must be a Numeric type, but got {type(dtype)}")
+    elem_ty = dtype.ir_type if dtype is not Boolean else Int8.ir_type
+
+    if not isinstance(shape_or_layout, Layout):
+        layout = make_ordered_layout(shape_or_layout, 0, loc=loc, ip=ip)
+    else:
+        layout = shape_or_layout
+
+    tensorTy = fly.MemRefType.get(elem_ty, layout.type, fly.AddressSpace.Register)
+    return memref_alloca(tensorTy, layout=layout, loc=loc, ip=ip)
+
+
 def make_layout_tv(thr_layout, val_layout, loc=None, ip=None):
     """Build a thread-value (TV) layout from separate thread and value layouts.
 
@@ -124,7 +132,7 @@ def make_layout_tv(thr_layout, val_layout, loc=None, ip=None):
 
 
 def make_tiled_copy_tv(atom, thr_layout, val_layout):
-    (tiler_mn, layout_tv) = make_layout_tv(thr_layout, val_layout)
+    tiler_mn, layout_tv = make_layout_tv(thr_layout, val_layout)
     return make_tiled_copy(atom, layout_tv, tiler_mn)
 
 

@@ -111,11 +111,10 @@ def test_inline_compare_buffer_store_with_liveout(monkeypatch):
         tA = fx.logical_divide(tA, fx.make_layout(vec_width, 1))
         tC = fx.logical_divide(tC, fx.make_layout(vec_width, 1))
 
-        reg_ty = fx.MemRefType.get(fx.T.f32(), fx.LayoutType.get(vec_width, 1), fx.AddressSpace.Register)
         copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), fx.Float32)
 
-        rA = fx.memref_alloca(reg_ty, fx.make_layout(vec_width, 1))
-        rC = fx.memref_alloca(reg_ty, fx.make_layout(vec_width, 1))
+        rA = fx.make_rmem_tensor(vec_width, fx.Float32)
+        rC = fx.make_rmem_tensor(vec_width, fx.Float32)
 
         fx.copy_atom_call(copy_atom, fx.slice(tA, (None, tid)), rA)
         vA = fx.memref_load_vec(rA)
@@ -202,11 +201,10 @@ def test_inline_compare_buffer_store_with_liveout_flag(monkeypatch):
         tA = fx.logical_divide(tA, fx.make_layout(vec_width, 1))
         tC = fx.logical_divide(tC, fx.make_layout(vec_width, 1))
 
-        reg_ty = fx.MemRefType.get(fx.T.f32(), fx.LayoutType.get(vec_width, 1), fx.AddressSpace.Register)
         copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), fx.Float32)
 
-        rA = fx.memref_alloca(reg_ty, fx.make_layout(vec_width, 1))
-        rC = fx.memref_alloca(reg_ty, fx.make_layout(vec_width, 1))
+        rA = fx.make_rmem_tensor(vec_width, fx.Float32)
+        rC = fx.make_rmem_tensor(vec_width, fx.Float32)
 
         fx.copy_atom_call(copy_atom, fx.slice(tA, (None, tid)), rA)
         vA = fx.memref_load_vec(rA)

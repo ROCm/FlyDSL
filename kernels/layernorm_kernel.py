@@ -63,7 +63,6 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
         tid = fx.thread_idx.x
 
         elem_dtype = dtype_to_elem_type(dtype_str)
-        elem_type = elem_dtype.ir_type
         fm_fast = arith.FastMathFlags.fast
         eps_c = EPS
 
@@ -153,18 +152,14 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
             beta_div = fx.logical_divide(Beta_buf, fx.make_layout(VEC_WIDTH, 1))
 
             copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), elem_bits)
-            vec_reg_ty = fx.MemRefType.get(
-                elem_type, fx.LayoutType.get(VEC_WIDTH, 1), fx.AddressSpace.Register
-            )
-            vec_reg_lay = fx.make_layout(VEC_WIDTH, 1)
 
             def _load_vec(div_tensor, idx):
-                r = fx.memref_alloca(vec_reg_ty, vec_reg_lay)
+                r = fx.make_rmem_tensor(VEC_WIDTH, elem_dtype)
                 fx.copy_atom_call(copy_atom, fx.slice(div_tensor, (None, idx)), r)
                 return fx.memref_load_vec(r)
 
             def _store_vec(val, div_tensor, idx):
-                r = fx.memref_alloca(vec_reg_ty, vec_reg_lay)
+                r = fx.make_rmem_tensor(VEC_WIDTH, elem_dtype)
                 fx.memref_store_vec(val, r)
                 fx.copy_atom_call(copy_atom, r, fx.slice(div_tensor, (None, idx)))
 
@@ -250,10 +245,6 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                 fx.rocdl.BufferCopy16b() if elem_bits <= 16 else fx.rocdl.BufferCopy32b(),
                 elem_bits,
             )
-            scalar_reg_ty = fx.MemRefType.get(
-                elem_type, fx.LayoutType.get(1, 1), fx.AddressSpace.Register
-            )
-            scalar_reg_lay = fx.make_layout(1, 1)
 
             row_div = fx.logical_divide(row_in, fx.make_layout(1, 1))
             gamma_div = fx.logical_divide(Gamma_buf, fx.make_layout(1, 1))
@@ -262,12 +253,12 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
 
             def _load_scalar(divided_tensor, index):
                 view = fx.slice(divided_tensor, (None, index))
-                r = fx.memref_alloca(scalar_reg_ty, scalar_reg_lay)
+                r = fx.make_rmem_tensor(1, elem_dtype)
                 fx.copy_atom_call(copy_atom_s, view, r)
                 return fx.memref_load_vec(r)[0]
 
             def _store_scalar(divided_tensor, index, val):
-                r = fx.memref_alloca(scalar_reg_ty, scalar_reg_lay)
+                r = fx.make_rmem_tensor(1, elem_dtype)
                 ts = full(1, elem_dtype(val), elem_dtype)
                 fx.memref_store_vec(ts, r)
                 view = fx.slice(divided_tensor, (None, index))
@@ -279,11 +270,7 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                 is_valid = idx < N
                 idx_safe = is_valid.select(idx, 0)
                 x_e = _load_scalar(row_div, idx_safe)
-                x = (
-                    x_e
-                    if dtype_str == "f32"
-                    else x_e.to(fx.Float32)
-                )
+                x = x_e if dtype_str == "f32" else x_e.to(fx.Float32)
                 x2 = x * x
                 x_safe = is_valid.select(x, c_zero_f)
                 x2_safe = is_valid.select(x2, c_zero_f)
@@ -300,21 +287,9 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                     x_e = _load_scalar(row_div, idx)
                     g_e = _load_scalar(gamma_div, idx)
                     b_e = _load_scalar(beta_div, idx)
-                    x = (
-                        x_e
-                        if dtype_str == "f32"
-                        else x_e.to(fx.Float32)
-                    )
-                    g = (
-                        g_e
-                        if dtype_str == "f32"
-                        else g_e.to(fx.Float32)
-                    )
-                    b = (
-                        b_e
-                        if dtype_str == "f32"
-                        else b_e.to(fx.Float32)
-                    )
+                    x = x_e if dtype_str == "f32" else x_e.to(fx.Float32)
+                    g = g_e if dtype_str == "f32" else g_e.to(fx.Float32)
+                    b = b_e if dtype_str == "f32" else b_e.to(fx.Float32)
                     diff = x - mean
                     norm = diff * rstd
                     scaled = norm * g

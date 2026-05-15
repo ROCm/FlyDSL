@@ -18,7 +18,7 @@ Prefer FlyDSL internal types and high-level helpers in kernel code:
 - Arithmetic and comparisons: Python operators on `ArithValue` / `Numeric`
 - Runtime select: `cond.select(a, b)` or `arith.select(...)` only when a helper boundary requires it
 - Vectors: `Vector` (`Vec`) indexing, `Vec.from_elements`, `Vec.filled`, `.bitcast(...)`, `.to(...)`, `.store(...)`
-- Register memory: `fx.memref_alloca`, `fx.memref_load_vec`, `fx.memref_store_vec`
+- Register memory: `fx.make_rmem_tensor`, `fx.memref_load_vec`, `fx.memref_store_vec`
 - Runtime loops with carried state: `range(start, stop, step, init=[...])` using `fx.Index(...)` bounds
 - Compile-time loops: `range_constexpr(...)`
 

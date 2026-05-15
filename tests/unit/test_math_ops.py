@@ -13,6 +13,7 @@ Verifies that:
 """
 
 import sys
+
 import pytest
 
 from flydsl._mlir import ir
@@ -21,10 +22,10 @@ from flydsl._mlir.dialects import math as _raw_math
 from flydsl.expr import math as fly_math
 from flydsl.expr.numeric import Boolean, Float32, Int32
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _build_module(build_fn, arg_types=None):
     """Build an MLIR module with a function that calls build_fn(args...).
@@ -58,16 +59,51 @@ def _build_module(build_fn, arg_types=None):
 # ---------------------------------------------------------------------------
 
 _WRAPPED_NAMES = [
-    "exp", "exp2", "expm1", "log", "log2", "log10", "log1p",
-    "sqrt", "rsqrt", "cbrt",
-    "sin", "cos", "tan", "asin", "acos", "atan",
-    "sinh", "cosh", "tanh", "asinh", "acosh", "atanh",
-    "erf", "erfc", "absf",
-    "floor", "ceil", "round", "roundeven", "trunc",
-    "absi", "ctlz", "cttz", "ctpop",
-    "powf", "fpowi", "ipowi", "atan2", "copysign",
-    "fma", "clampf",
-    "isnan", "isinf", "isfinite", "isnormal",
+    "exp",
+    "exp2",
+    "expm1",
+    "log",
+    "log2",
+    "log10",
+    "log1p",
+    "sqrt",
+    "rsqrt",
+    "cbrt",
+    "sin",
+    "cos",
+    "tan",
+    "asin",
+    "acos",
+    "atan",
+    "sinh",
+    "cosh",
+    "tanh",
+    "asinh",
+    "acosh",
+    "atanh",
+    "erf",
+    "erfc",
+    "absf",
+    "floor",
+    "ceil",
+    "round",
+    "roundeven",
+    "trunc",
+    "absi",
+    "ctlz",
+    "cttz",
+    "ctpop",
+    "powf",
+    "fpowi",
+    "ipowi",
+    "atan2",
+    "copysign",
+    "fma",
+    "clampf",
+    "isnan",
+    "isinf",
+    "isfinite",
+    "isnormal",
     "sincos",
 ]
 
@@ -87,36 +123,36 @@ def test_wrapper_overrides_raw(name):
 # ---------------------------------------------------------------------------
 
 _UNARY_FLOAT_OPS = [
-    ("exp",      "math.exp"),
-    ("exp2",     "math.exp2"),
-    ("expm1",    "math.expm1"),
-    ("log",      "math.log"),
-    ("log2",     "math.log2"),
-    ("log10",    "math.log10"),
-    ("log1p",    "math.log1p"),
-    ("sqrt",     "math.sqrt"),
-    ("rsqrt",    "math.rsqrt"),
-    ("cbrt",     "math.cbrt"),
-    ("sin",      "math.sin"),
-    ("cos",      "math.cos"),
-    ("tan",      "math.tan"),
-    ("asin",     "math.asin"),
-    ("acos",     "math.acos"),
-    ("atan",     "math.atan"),
-    ("sinh",     "math.sinh"),
-    ("cosh",     "math.cosh"),
-    ("tanh",     "math.tanh"),
-    ("asinh",    "math.asinh"),
-    ("acosh",    "math.acosh"),
-    ("atanh",    "math.atanh"),
-    ("erf",      "math.erf"),
-    ("erfc",     "math.erfc"),
-    ("absf",     "math.absf"),
-    ("floor",    "math.floor"),
-    ("ceil",     "math.ceil"),
-    ("round",    "math.round"),
+    ("exp", "math.exp"),
+    ("exp2", "math.exp2"),
+    ("expm1", "math.expm1"),
+    ("log", "math.log"),
+    ("log2", "math.log2"),
+    ("log10", "math.log10"),
+    ("log1p", "math.log1p"),
+    ("sqrt", "math.sqrt"),
+    ("rsqrt", "math.rsqrt"),
+    ("cbrt", "math.cbrt"),
+    ("sin", "math.sin"),
+    ("cos", "math.cos"),
+    ("tan", "math.tan"),
+    ("asin", "math.asin"),
+    ("acos", "math.acos"),
+    ("atan", "math.atan"),
+    ("sinh", "math.sinh"),
+    ("cosh", "math.cosh"),
+    ("tanh", "math.tanh"),
+    ("asinh", "math.asinh"),
+    ("acosh", "math.acosh"),
+    ("atanh", "math.atanh"),
+    ("erf", "math.erf"),
+    ("erfc", "math.erfc"),
+    ("absf", "math.absf"),
+    ("floor", "math.floor"),
+    ("ceil", "math.ceil"),
+    ("round", "math.round"),
     ("roundeven", "math.roundeven"),
-    ("trunc",    "math.trunc"),
+    ("trunc", "math.trunc"),
 ]
 
 
@@ -137,9 +173,9 @@ def test_unary_float_op(fn_name, expected_op):
 # ---------------------------------------------------------------------------
 
 _UNARY_INT_OPS = [
-    ("absi",  "math.absi"),
-    ("ctlz",  "math.ctlz"),
-    ("cttz",  "math.cttz"),
+    ("absi", "math.absi"),
+    ("ctlz", "math.ctlz"),
+    ("cttz", "math.cttz"),
     ("ctpop", "math.ctpop"),
 ]
 
@@ -159,6 +195,7 @@ def test_unary_int_op(fn_name, expected_op):
 # ---------------------------------------------------------------------------
 # 4. Binary ops
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.l0_backend_agnostic
 def test_powf():
@@ -212,6 +249,7 @@ def test_copysign():
 # 5. Ternary ops
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.l0_backend_agnostic
 def test_fma():
     def build(x):
@@ -237,10 +275,10 @@ def test_clampf():
 # ---------------------------------------------------------------------------
 
 _PREDICATE_OPS = [
-    ("isnan",     "math.isnan"),
-    ("isinf",     "math.isinf"),
-    ("isfinite",  "math.isfinite"),
-    ("isnormal",  "math.isnormal"),
+    ("isnan", "math.isnan"),
+    ("isinf", "math.isinf"),
+    ("isfinite", "math.isfinite"),
+    ("isnormal", "math.isnormal"),
 ]
 
 
@@ -260,9 +298,11 @@ def test_predicate_op(fn_name, expected_op):
 # 6b. Multi-result ops
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.l0_backend_agnostic
 def test_sincos():
     """sincos returns two results (sin, cos)."""
+
     def build(x):
         results = fly_math.sincos(x)
         assert len(results) == 2
@@ -275,9 +315,11 @@ def test_sincos():
 # 7. DSL Numeric type auto-unwrap (Float32, Int32)
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.l0_backend_agnostic
 def test_numeric_float32_unwrap():
     """fly_math should accept Float32 DSL type, not just raw ir.Value."""
+
     def build(x_raw):
         x = Float32(x_raw)
         fly_math.exp(x)
@@ -293,6 +335,7 @@ def test_numeric_float32_unwrap():
 @pytest.mark.l0_backend_agnostic
 def test_numeric_int32_unwrap():
     """fly_math should accept Int32 DSL type for integer ops."""
+
     def build(xi_raw):
         xi = Int32(xi_raw)
         fly_math.absi(xi)
@@ -306,6 +349,7 @@ def test_numeric_int32_unwrap():
 @pytest.mark.l0_backend_agnostic
 def test_numeric_mixed_unwrap():
     """fpowi accepts Float32 base and Int32 exponent."""
+
     def build(x_raw, xi_raw):
         x = Float32(x_raw)
         xi = Int32(xi_raw)
@@ -322,9 +366,11 @@ def test_numeric_mixed_unwrap():
 # 8. fastmath attribute propagation
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.l0_backend_agnostic
 def test_fastmath_propagates():
     """fastmath= kwarg should appear in the generated op attributes."""
+
     def build(x):
         fly_math.exp(x, fastmath="fast")
         fly_math.sqrt(x, fastmath="fast")
@@ -337,16 +383,16 @@ def test_fastmath_propagates():
 # 9. Vector type support
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.l0_backend_agnostic
 def test_vector_type_ops():
     """fly_math should work on vector<4xf32> inputs."""
+
     def build(x):
         vtype = ir.VectorType.get([4], ir.F32Type.get())
         splat = arith.ConstantOp(
             vtype,
-            ir.DenseElementsAttr.get_splat(
-                vtype, ir.FloatAttr.get(ir.F32Type.get(), 1.0)
-            ),
+            ir.DenseElementsAttr.get_splat(vtype, ir.FloatAttr.get(ir.F32Type.get(), 1.0)),
         ).result
         fly_math.exp(splat)
         fly_math.sqrt(splat)
@@ -367,6 +413,7 @@ def test_vector_type_ops():
 @pytest.mark.l0_backend_agnostic
 def test_float32_class_invariance():
     """Unary float ops: Float32 in → Float32 out."""
+
     def build(x_raw):
         x = Float32(x_raw)
         y = fly_math.exp(x)
@@ -382,6 +429,7 @@ def test_float32_class_invariance():
 @pytest.mark.l0_backend_agnostic
 def test_int32_class_invariance():
     """Unary int ops: Int32 in → Int32 out."""
+
     def build(xi_raw):
         xi = Int32(xi_raw)
         y = fly_math.absi(xi)
@@ -395,6 +443,7 @@ def test_int32_class_invariance():
 @pytest.mark.l0_backend_agnostic
 def test_predicate_returns_boolean():
     """Predicate ops on Float32 → Boolean."""
+
     def build(x_raw):
         x = Float32(x_raw)
         y = fly_math.isnan(x)
@@ -408,6 +457,7 @@ def test_predicate_returns_boolean():
 @pytest.mark.l0_backend_agnostic
 def test_binary_class_invariance():
     """Binary float ops: Float32 in → Float32 out."""
+
     def build(x_raw):
         x = Float32(x_raw)
         y = fly_math.powf(x, x)
@@ -421,6 +471,7 @@ def test_binary_class_invariance():
 @pytest.mark.l0_backend_agnostic
 def test_ternary_class_invariance():
     """Ternary float ops: Float32 in → Float32 out."""
+
     def build(x_raw):
         x = Float32(x_raw)
         y = fly_math.fma(x, x, x)
@@ -432,6 +483,7 @@ def test_ternary_class_invariance():
 @pytest.mark.l0_backend_agnostic
 def test_sincos_class_invariance():
     """sincos(Float32) → tuple of Float32."""
+
     def build(x_raw):
         x = Float32(x_raw)
         results = fly_math.sincos(x)
@@ -446,6 +498,7 @@ def test_sincos_class_invariance():
 @pytest.mark.l0_backend_agnostic
 def test_raw_value_passthrough():
     """Raw ir.Value input should NOT be wrapped in Numeric."""
+
     def build(x_raw):
         y = fly_math.exp(x_raw)
         assert not isinstance(y, Float32), f"raw input should not produce Float32, got {type(y).__name__}"
@@ -459,6 +512,7 @@ def test_raw_value_passthrough():
 
 try:
     import torch as _torch
+
     _HAS_GPU = _torch.cuda.is_available()
 except ImportError:
     _torch = None
@@ -510,13 +564,10 @@ class TestMathOpsGPU:
             tC = fx.logical_divide(tC, fx.make_layout(vec_width, 1))
 
             copy_bits = vec_width * 32
-            RMemRefTy = fx.MemRefType.get(
-                fx.T.f32(), fx.LayoutType.get(vec_width, 1), fx.AddressSpace.Register
-            )
             copyAtom = fx.make_copy_atom(fx.UniversalCopy(copy_bits), fx.Float32)
 
-            rA = fx.memref_alloca(RMemRefTy, fx.make_layout(vec_width, 1))
-            rC = fx.memref_alloca(RMemRefTy, fx.make_layout(vec_width, 1))
+            rA = fx.make_rmem_tensor(vec_width, fx.Float32)
+            rC = fx.make_rmem_tensor(vec_width, fx.Float32)
 
             fx.copy_atom_call(copyAtom, fx.slice(tA, (None, tid)), rA)
 
@@ -532,7 +583,9 @@ class TestMathOpsGPU:
 
         @flyc.jit
         def launch(
-            A: fx.Tensor, C, n: fx.Int32,
+            A: fx.Tensor,
+            C,
+            n: fx.Int32,
             const_n: fx.Constexpr[int],
             block_dim: fx.Constexpr[int],
             vec_width: fx.Constexpr[int],
@@ -541,7 +594,9 @@ class TestMathOpsGPU:
             tile = block_dim * vec_width
             grid_x = (n + tile - 1) // tile
             math_chain_kernel(A, C, block_dim, vec_width).launch(
-                grid=(grid_x, 1, 1), block=(block_dim, 1, 1), stream=stream,
+                grid=(grid_x, 1, 1),
+                block=(block_dim, 1, 1),
+                stream=stream,
             )
 
         # Use small input range to keep exp() in a reasonable range
@@ -550,7 +605,8 @@ class TestMathOpsGPU:
         c_dev = _torch.empty_like(a_dev)
 
         tA = flyc.from_dlpack(a_dev).mark_layout_dynamic(
-            leading_dim=0, divisibility=VEC_WIDTH,
+            leading_dim=0,
+            divisibility=VEC_WIDTH,
         )
 
         stream = _torch.cuda.Stream()
@@ -558,10 +614,9 @@ class TestMathOpsGPU:
         _torch.cuda.synchronize()
 
         c_ref = _torch.floor(_torch.sqrt(_torch.exp(_torch.abs(a_host)))).cuda()
-        assert _torch.allclose(c_dev, c_ref, atol=1e-5, rtol=1e-4), (
-            f"fly_math chain GPU mismatch: "
-            f"max_diff={(_torch.abs(c_dev - c_ref)).max().item():.6e}"
-        )
+        assert _torch.allclose(
+            c_dev, c_ref, atol=1e-5, rtol=1e-4
+        ), f"fly_math chain GPU mismatch: max_diff={(_torch.abs(c_dev - c_ref)).max().item():.6e}"
 
     def test_math_trig_chain_gpu(self):
         """Chain: C = cos(sin(A))  — exercises trig math ops on GPU."""
@@ -593,13 +648,10 @@ class TestMathOpsGPU:
             tC = fx.logical_divide(tC, fx.make_layout(vec_width, 1))
 
             copy_bits = vec_width * 32
-            RMemRefTy = fx.MemRefType.get(
-                fx.T.f32(), fx.LayoutType.get(vec_width, 1), fx.AddressSpace.Register
-            )
             copyAtom = fx.make_copy_atom(fx.UniversalCopy(copy_bits), fx.Float32)
 
-            rA = fx.memref_alloca(RMemRefTy, fx.make_layout(vec_width, 1))
-            rC = fx.memref_alloca(RMemRefTy, fx.make_layout(vec_width, 1))
+            rA = fx.make_rmem_tensor(vec_width, fx.Float32)
+            rC = fx.make_rmem_tensor(vec_width, fx.Float32)
 
             fx.copy_atom_call(copyAtom, fx.slice(tA, (None, tid)), rA)
 
@@ -612,7 +664,9 @@ class TestMathOpsGPU:
 
         @flyc.jit
         def launch(
-            A: fx.Tensor, C, n: fx.Int32,
+            A: fx.Tensor,
+            C,
+            n: fx.Int32,
             const_n: fx.Constexpr[int],
             block_dim: fx.Constexpr[int],
             vec_width: fx.Constexpr[int],
@@ -621,7 +675,9 @@ class TestMathOpsGPU:
             tile = block_dim * vec_width
             grid_x = (n + tile - 1) // tile
             trig_kernel(A, C, block_dim, vec_width).launch(
-                grid=(grid_x, 1, 1), block=(block_dim, 1, 1), stream=stream,
+                grid=(grid_x, 1, 1),
+                block=(block_dim, 1, 1),
+                stream=stream,
             )
 
         a_host = _torch.empty(N, dtype=_torch.float32).uniform_(-3.14, 3.14)
@@ -629,7 +685,8 @@ class TestMathOpsGPU:
         c_dev = _torch.empty_like(a_dev)
 
         tA = flyc.from_dlpack(a_dev).mark_layout_dynamic(
-            leading_dim=0, divisibility=VEC_WIDTH,
+            leading_dim=0,
+            divisibility=VEC_WIDTH,
         )
 
         stream = _torch.cuda.Stream()
@@ -637,10 +694,9 @@ class TestMathOpsGPU:
         _torch.cuda.synchronize()
 
         c_ref = _torch.cos(_torch.sin(a_host)).cuda()
-        assert _torch.allclose(c_dev, c_ref, atol=1e-4, rtol=1e-3), (
-            f"trig chain GPU mismatch: "
-            f"max_diff={(_torch.abs(c_dev - c_ref)).max().item():.6e}"
-        )
+        assert _torch.allclose(
+            c_dev, c_ref, atol=1e-4, rtol=1e-3
+        ), f"trig chain GPU mismatch: max_diff={(_torch.abs(c_dev - c_ref)).max().item():.6e}"
 
 
 # ---------------------------------------------------------------------------

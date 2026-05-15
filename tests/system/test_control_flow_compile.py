@@ -3,10 +3,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-import flydsl.compiler as flyc
-import flydsl.expr as fx
 import pytest
 import torch
+
+import flydsl.compiler as flyc
+import flydsl.expr as fx
 
 
 def test_control_flow_kernel_snippet_compiles_without_error(monkeypatch):
@@ -38,9 +39,7 @@ def test_control_flow_kernel_snippet_compiles_without_error(monkeypatch):
     ):
         tile_elems = block_dim * vec_width
         grid_x = (n + tile_elems - 1) // tile_elems
-        vecAbsKernel(A, C, block_dim, vec_width).launch(
-            grid=(grid_x, 1, 1), block=(block_dim, 1, 1), stream=stream
-        )
+        vecAbsKernel(A, C, block_dim, vec_width).launch(grid=(grid_x, 1, 1), block=(block_dim, 1, 1), stream=stream)
 
     monkeypatch.setenv("FLYDSL_COMPILE_ONLY", "1")
     threads = 64
@@ -86,14 +85,11 @@ def test_control_flow_dynamic_if_end_to_end_numeric(monkeypatch):
         tB = fx.logical_divide(tB, fx.make_layout(vec_width, 1))
         tC = fx.logical_divide(tC, fx.make_layout(vec_width, 1))
 
-        reg_ty = fx.MemRefType.get(
-            fx.T.f32(), fx.LayoutType.get(vec_width, 1), fx.AddressSpace.Register
-        )
         copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), fx.Float32)
 
-        rA = fx.memref_alloca(reg_ty, fx.make_layout(vec_width, 1))
-        rB = fx.memref_alloca(reg_ty, fx.make_layout(vec_width, 1))
-        rC = fx.memref_alloca(reg_ty, fx.make_layout(vec_width, 1))
+        rA = fx.make_rmem_tensor(vec_width, fx.Float32)
+        rB = fx.make_rmem_tensor(vec_width, fx.Float32)
+        rC = fx.make_rmem_tensor(vec_width, fx.Float32)
 
         fx.copy_atom_call(copy_atom, fx.slice(tA, (None, tid)), rA)
         fx.copy_atom_call(copy_atom, fx.slice(tB, (None, tid)), rB)
