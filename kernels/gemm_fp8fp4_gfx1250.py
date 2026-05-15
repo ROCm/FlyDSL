@@ -105,9 +105,8 @@ def compile_mxscale_gemm(
         if cluster_m * cluster_n > 16:
             raise ValueError(f"cluster_m * cluster_n must be <= 16, got {cluster_m}*{cluster_n}")
     effective_waves_per_eu = waves_per_eu
-    # TDM tensor_wait fences the local WG's received multicast data; making
-    # every pipeline reuse fence cluster-wide only over-synchronizes the hot loop.
-    use_cluster_pipeline_sync = False
+    if use_cluster and effective_waves_per_eu is None:
+        effective_waves_per_eu = 2
 
     num_warps = m_warp * n_warp
     block_threads = num_warps * WAVE_SIZE
@@ -1724,11 +1723,11 @@ def compile_mxscale_gemm(
 
         def _pipeline_fence(outstanding=0):
             _wait_scale_buffer_loads()
-            pipeline_fence(outstanding=outstanding, use_cluster=use_cluster_pipeline_sync)
+            pipeline_fence(outstanding=outstanding, use_cluster=use_cluster)
 
         def _pipeline_fence_signal(outstanding=0):
             _wait_scale_buffer_loads()
-            pipeline_fence_signal(outstanding=outstanding, use_cluster=use_cluster_pipeline_sync)
+            pipeline_fence_signal(outstanding=outstanding, use_cluster=use_cluster)
 
         def _issue_ab_tdm(load_stage, addr_a, addr_b):
             dg0_a = _pack_dg0(pred_const, stages_a_lds_addr[load_stage], addr_a, addr_hi_a)
@@ -1811,7 +1810,7 @@ def compile_mxscale_gemm(
                         load_stage = (buf_idx + num_buffers - 1) % num_buffers
 
                         _pipeline_fence_signal(outstanding=_fence_outstanding)
-                        pipeline_fence_wait(use_cluster=use_cluster_pipeline_sync)
+                        pipeline_fence_wait(use_cluster=use_cluster)
 
                         addr_box = [cur_addr_lo]
 
@@ -1854,7 +1853,7 @@ def compile_mxscale_gemm(
                         load_stage = (buf_idx + num_buffers - 1) % num_buffers
 
                         _pipeline_fence_signal(outstanding=_fence_outstanding)
-                        pipeline_fence_wait(use_cluster=use_cluster_pipeline_sync)
+                        pipeline_fence_wait(use_cluster=use_cluster)
 
                         addr_box = [cur_addr_lo]
                         scale_k_box = [cur_scale_k]
@@ -1902,7 +1901,7 @@ def compile_mxscale_gemm(
                         load_stage = (buf_idx + num_buffers - 1) % num_buffers
 
                         _pipeline_fence_signal(outstanding=_fence_outstanding)
-                        pipeline_fence_wait(use_cluster=use_cluster_pipeline_sync)
+                        pipeline_fence_wait(use_cluster=use_cluster)
 
                         addr_boxes = [[cur_lo_a], [cur_lo_b]]
                         scale_k_box = [cur_scale_k]
@@ -1958,7 +1957,7 @@ def compile_mxscale_gemm(
                         load_stage = (buf_idx + num_buffers - 1) % num_buffers
 
                         _pipeline_fence_signal(outstanding=_fence_outstanding)
-                        pipeline_fence_wait(use_cluster=use_cluster_pipeline_sync)
+                        pipeline_fence_wait(use_cluster=use_cluster)
 
                         addr_boxes = [[cur_lo_a], [cur_lo_b], [cur_lo_as], [cur_lo_bs]]
 
@@ -2014,7 +2013,7 @@ def compile_mxscale_gemm(
         # Tail — same acc_mixed pattern: fence at top, TDM mid-compute.
         if const_expr(loop_iters > 0):
             _pipeline_fence(outstanding=0)
-        elif const_expr(use_cluster_pipeline_sync):
+        elif const_expr(use_cluster):
             gpu.cluster_barrier()
         epi_addrs_box = [None]
         _tail_had_load = False
@@ -2045,7 +2044,7 @@ def compile_mxscale_gemm(
                     )
             else:
                 _pipeline_fence_signal(outstanding=_outstanding)
-                pipeline_fence_wait(use_cluster=use_cluster_pipeline_sync)
+                pipeline_fence_wait(use_cluster=use_cluster)
 
                 _tail_mid_cb = None
                 if const_expr(_load_stage is not None):
