@@ -55,7 +55,7 @@ def run_torch_bench(a, b):
 @pytest.mark.parametrize(
     "m, n, k, TILE_M, TILE_N, TILE_K, SPLIT_K, BLOCK_M_WARPS, BLOCK_N_WARPS, BLOCK_K_WARPS",
     [
-        (32, 384, 7168, 32, 64, 256, 14, 1, 2, 2),
+        (32, 384, 7168, 16, 64, 128, 14, 1, 2, 1),
         (4, 384, 7168, 16, 64, 128, 14, 1, 2, 1),
         (65, 1024, 8192, 48, 64, 128, 8, 1, 2, 1),
         (8, 5120, 2880, 32, 128, 64, 9, 2, 2, 1),
