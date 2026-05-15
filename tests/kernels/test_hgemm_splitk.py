@@ -53,15 +53,15 @@ def run_torch_bench(a, b):
 
 @pytest.mark.parametrize("dtype", ["fp16", "bf16"])
 @pytest.mark.parametrize(
-    "m, n, k, TILE_M, TILE_N, TILE_K, SPLIT_K, BLOCK_M_WARPS, BLOCK_N_WARPS",
+    "m, n, k, TILE_M, TILE_N, TILE_K, SPLIT_K, BLOCK_M_WARPS, BLOCK_N_WARPS, BLOCK_K_WARPS",
     [
-        (32, 384, 7168, 16, 64, 128, 14, 1, 2),
-        (4, 384, 7168, 16, 64, 128, 14, 1, 2),
-        (65, 1024, 8192, 48, 64, 128, 8, 1, 2),
-        (8, 5120, 2880, 32, 128, 64, 9, 2, 2),
-        (4096, 4096, 4096, 128, 128, 64, 1, 2, 2),
-        (8192, 8192, 8192, 128, 128, 64, 1, 2, 2),
-        (32, 2880, 2048, 32, 64, 128, 4, 1, 2),
+        (32, 384, 7168, 16, 64, 128, 14, 1, 2, 1),
+        (4, 384, 7168, 16, 64, 128, 14, 1, 2, 1),
+        (65, 1024, 8192, 48, 64, 128, 8, 1, 2, 1),
+        (8, 5120, 2880, 32, 128, 64, 9, 2, 2, 1),
+        (4096, 4096, 4096, 128, 128, 64, 1, 2, 2, 1),
+        (8192, 8192, 8192, 128, 128, 64, 1, 2, 2, 1),
+        (32, 2880, 2048, 32, 64, 128, 4, 1, 2, 1),
     ]
 )
 @pytest.mark.parametrize("test_graph", [
@@ -71,7 +71,7 @@ def run_torch_bench(a, b):
 def test_mfma_flyc_splitk_hgemm(
     dtype,
     m, n, k,
-    TILE_M, TILE_N, TILE_K, SPLIT_K, BLOCK_M_WARPS, BLOCK_N_WARPS,
+    TILE_M, TILE_N, TILE_K, SPLIT_K, BLOCK_M_WARPS, BLOCK_N_WARPS, BLOCK_K_WARPS,
     *,
     test_graph,
     bench_iters: int = DEFAULT_BENCH_ITERS,
@@ -119,6 +119,7 @@ def test_mfma_flyc_splitk_hgemm(
         'SPLIT_K': SPLIT_K,
         'BLOCK_M_WARPS': BLOCK_M_WARPS,
         'BLOCK_N_WARPS': BLOCK_N_WARPS,
+        'BLOCK_K_WARPS': BLOCK_K_WARPS,
     }
 
     hgemm_splitk_(c_out, a_q, b_q, None, kwargs, torch.cuda.current_stream())
@@ -162,6 +163,7 @@ if __name__ == "__main__":
     parser.add_argument("--SPLIT_K", type=int, default=1)
     parser.add_argument("--BLOCK_M_WARPS", type=int, default=2)
     parser.add_argument("--BLOCK_N_WARPS", type=int, default=2)
+    parser.add_argument("--BLOCK_K_WARPS", type=int, default=1)
     parser.add_argument("--num_warmup", type=int, default=DEFAULT_BENCH_WARMUP)
     parser.add_argument("--num_iters", type=int, default=DEFAULT_BENCH_ITERS)
     parser.add_argument("--test_graph", "-tg", action="store_true", default=False)
@@ -172,7 +174,9 @@ if __name__ == "__main__":
             args.dtype,
             m=args.m, n=args.n, k=args.k,
             TILE_M=args.TILE_M, TILE_N=args.TILE_N, TILE_K=args.TILE_K, SPLIT_K=args.SPLIT_K,
-            BLOCK_M_WARPS=args.BLOCK_M_WARPS, BLOCK_N_WARPS=args.BLOCK_N_WARPS,
+            BLOCK_M_WARPS=args.BLOCK_M_WARPS,
+            BLOCK_N_WARPS=args.BLOCK_N_WARPS,
+            BLOCK_K_WARPS=args.BLOCK_K_WARPS,
             test_graph=bool(args.test_graph),
             bench_iters=args.num_iters,
             bench_warmup=args.num_warmup,
