@@ -212,7 +212,7 @@ def _dsl_if_only(func):
 @_dsl_if_only
 def _signal_start_sync(*, lane_i32, rank_i32, bid_i32, self_sg_i64, sgs_i64, ngpus: int):
     """Start-sync: write start flag to all peers, wait for all to arrive."""
-    i32, i64 = T.i32, T.i64
+    i32 = T.i32
 
     # Flag table is uint32 per block; compute byte address in i64.
     flag_addr = self_sg_i64 + _c64(_SG_FLAG_OFF_B) + _u64(bid_i32) * _c64(4)
@@ -257,7 +257,7 @@ def _signal_start_sync(*, lane_i32, rank_i32, bid_i32, self_sg_i64, sgs_i64, ngp
 def _signal_end_sync(*, lane_i32, rank_i32, bid_i32, self_sg_i64, sgs_i64, ngpus: int):
     """End-sync: write end flag to all peers, wait for all to finish."""
 
-    i32, i64 = T.i32, T.i64
+    i32 = T.i32
 
     # Flag table is uint32 per block; compute byte address in i64.
     flag_addr = self_sg_i64 + _c64(_SG_FLAG_OFF_B) + _u64(bid_i32) * _c64(4)
