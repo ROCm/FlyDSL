@@ -186,6 +186,8 @@ def _load_k_flat(
     k_tok_thread_base,
     c_tok_stride_dw,
     k_he_off_dw,
+    *,
+    sched_vmem_after_load=True,
 ):
     k_flat = []
     tile_tok_base = tile_token_offset_i32 + k_tok_thread_base
@@ -196,7 +198,8 @@ def _load_k_flat(
         for qkhe in range_constexpr(QKHELOOP):
             ka_dw = k_block_base_dw_i64 + fx.Int64(kbo_dw + k_he_off_dw[qkhe])
             k2 = _global_load_i64x2(k_global_ptr, ka_dw * fx.Int64(4))
-            rocdl.sched_barrier(rocdl.mask_vmem_rd)
+            if const_expr(sched_vmem_after_load):
+                rocdl.sched_barrier(rocdl.mask_vmem_rd)
             k2_words = fx.Vector(k2)
             k_flat.append(k2_words[0])
             k_flat.append(k2_words[1])
@@ -637,6 +640,8 @@ def _make_pa_phase_helpers(
     neg_inf,
     zero_f,
     cache_scale_vecs=False,
+    sched_vmem_after_load=True,
+    preload_pv_operands=False,
 ):
     apply_causal_mask = needs_mask or query_length > 1
     pv_prob_i64_indices = []
@@ -689,7 +694,10 @@ def _make_pa_phase_helpers(
                 scale_lds_f32,
                 [fx.Index(fx.Int32(LDS_SCALE_V_OFFSET) + scale_stage_token)],
             )
-            rocdl.sched_barrier(rocdl.mask_vmem_rd)
+            if const_expr(sched_vmem_after_load):
+                rocdl.sched_barrier(rocdl.mask_vmem_rd)
+            else:
+                rocdl.sched_barrier(0)
 
         v_results = []
         for vt in range_constexpr(VTLOOP):
@@ -706,7 +714,8 @@ def _make_pa_phase_helpers(
                     va_dw_delta = vhead_elem_dw[vhe] + (v_token_in_block >> fx.Int32(2))
                 va_byte = (v_block_base_dw + fx.Int64(va_dw_delta)) * fx.Int64(4)
                 v_i64x2 = _global_load_i64x2(v_global_ptr, va_byte)
-                rocdl.sched_barrier(rocdl.mask_vmem_rd)
+                if const_expr(sched_vmem_after_load):
+                    rocdl.sched_barrier(rocdl.mask_vmem_rd)
                 vhe_data.append(v_i64x2)
             v_results.append(vhe_data)
 
@@ -1001,36 +1010,76 @@ def _make_pa_phase_helpers(
         v_correction = fx.Float32(v_correction).ir_value()
         fm_contract = arith.FastMathFlags.contract
         v_correction_vec = vector.broadcast(T.f32x4, v_correction)
-        for vhe in range_constexpr(VHELOOP):
-            tmp_out = arith.constant_vector(0.0, T.f32x4)
+        if const_expr(preload_pv_operands):
+            v_i64s = []
+            for vhe in range_constexpr(VHELOOP):
+                for vt in range_constexpr(VTLOOP):
+                    v_i64x2 = fx.Vector(v_ops[vt][vhe])
+                    for j in range_constexpr(2):
+                        v_i64s.append(v_i64x2[j])
+            p_i64s = []
             for vt in range_constexpr(VTLOOP):
-                v_i64x2 = fx.Vector(v_ops[vt][vhe])
                 for j in range_constexpr(2):
                     p_i64_idx = pv_prob_i64_indices[vt * 2 + j]
-                    p_i64 = fx.Vector.load(T.vec(1, T.i64), logits_lds_i64, [p_i64_idx])[0]
-                    tmp_out = rocdl.mfma_f32_16x16x32_fp8_fp8(
-                        T.f32x4,
-                        [
-                            v_i64x2[j],
-                            p_i64,
-                            tmp_out,
-                            0,
-                            0,
-                            0,
-                        ],
+                    p_i64s.append(fx.Vector.load(T.vec(1, T.i64), logits_lds_i64, [p_i64_idx])[0])
+            for vhe in range_constexpr(VHELOOP):
+                tmp_out = arith.constant_vector(0.0, T.f32x4)
+                for vt in range_constexpr(VTLOOP):
+                    for j in range_constexpr(2):
+                        tmp_out = rocdl.mfma_f32_16x16x32_fp8_fp8(
+                            T.f32x4,
+                            [
+                                v_i64s[vhe * VTLOOP * 2 + vt * 2 + j],
+                                p_i64s[vt * 2 + j],
+                                tmp_out,
+                                0,
+                                0,
+                                0,
+                            ],
+                        )
+                if const_expr(vhe == 0):
+                    o0 = arith.addf(
+                        arith.mulf(tmp_out, v_correction_vec, fastmath=fm_contract),
+                        o0,
+                        fastmath=fm_contract,
                     )
-            if const_expr(vhe == 0):
-                o0 = arith.addf(
-                    arith.mulf(tmp_out, v_correction_vec, fastmath=fm_contract),
-                    o0,
-                    fastmath=fm_contract,
-                )
-            else:
-                o1 = arith.addf(
-                    arith.mulf(tmp_out, v_correction_vec, fastmath=fm_contract),
-                    o1,
-                    fastmath=fm_contract,
-                )
+                else:
+                    o1 = arith.addf(
+                        arith.mulf(tmp_out, v_correction_vec, fastmath=fm_contract),
+                        o1,
+                        fastmath=fm_contract,
+                    )
+        else:
+            for vhe in range_constexpr(VHELOOP):
+                tmp_out = arith.constant_vector(0.0, T.f32x4)
+                for vt in range_constexpr(VTLOOP):
+                    v_i64x2 = fx.Vector(v_ops[vt][vhe])
+                    for j in range_constexpr(2):
+                        p_i64_idx = pv_prob_i64_indices[vt * 2 + j]
+                        p_i64 = fx.Vector.load(T.vec(1, T.i64), logits_lds_i64, [p_i64_idx])[0]
+                        tmp_out = rocdl.mfma_f32_16x16x32_fp8_fp8(
+                            T.f32x4,
+                            [
+                                v_i64x2[j],
+                                p_i64,
+                                tmp_out,
+                                0,
+                                0,
+                                0,
+                            ],
+                        )
+                if const_expr(vhe == 0):
+                    o0 = arith.addf(
+                        arith.mulf(tmp_out, v_correction_vec, fastmath=fm_contract),
+                        o0,
+                        fastmath=fm_contract,
+                    )
+                else:
+                    o1 = arith.addf(
+                        arith.mulf(tmp_out, v_correction_vec, fastmath=fm_contract),
+                        o1,
+                        fastmath=fm_contract,
+                    )
         return o0, o1
 
     def _finalize_block_split_group(
@@ -1231,6 +1280,7 @@ def compile_pa_decode_ps(
     query_packed_fp8 = query_input_dtype == "packed_fp8"
     query_load_is_bf16 = query_input_dtype == "bf16"
     query_scale_in_kernel = not query_packed_fp8
+    cache_scale_vecs = True
     if const_expr(query_packed_fp8):
         raise ValueError("`compile_pa_decode_ps` only supports bf16/f16 queries with kernel-internal query scale.")
     if softmax_scale is None:
@@ -1289,18 +1339,18 @@ def compile_pa_decode_ps(
         # ── Thread decomposition ──
         lane16id = tid & arith.constant(15, type=T.i32)
         rowid = (tid >> arith.constant(4, type=T.i32)) & arith.constant(3, type=T.i32)
-        warp_id = rocdl.readfirstlane(T.i32, tid >> arith.constant(6, type=T.i32))
+        warp_id = tid >> arith.constant(6, type=T.i32)
 
         # ── Buffer resources ──
         q_rsrc = buffer_ops.create_buffer_resource(query_ptr, max_size=True)
         k_global_ptr = _extract_global_ptr(key_cache_ptr)
         v_global_ptr = _extract_global_ptr(value_cache_ptr)
-        cl_global_ptr = _extract_global_ptr(context_lengths_ptr)
-        kpi_global_ptr = _extract_global_ptr(kv_page_indices_ptr)
         po_rsrc = buffer_ops.create_buffer_resource(partial_out_ptr, max_size=True)
         pl_rsrc = buffer_ops.create_buffer_resource(partial_lse_ptr, max_size=True)
+        cl_rsrc = buffer_ops.create_buffer_resource(context_lengths_ptr, max_size=True)
         wi_rsrc = buffer_ops.create_buffer_resource(work_indptr_ptr, max_size=True)
         winfo_rsrc = buffer_ops.create_buffer_resource(work_info_ptr, max_size=True)
+        kpi_rsrc = buffer_ops.create_buffer_resource(kv_page_indices_ptr, max_size=True)
         kvindptr_rsrc = buffer_ops.create_buffer_resource(kv_indptr_ptr, max_size=True)
         ks_rsrc = buffer_ops.create_buffer_resource(key_scale_ptr, max_size=True)
         vs_rsrc = buffer_ops.create_buffer_resource(value_scale_ptr, max_size=True)
@@ -1404,9 +1454,9 @@ def compile_pa_decode_ps(
             kv_h = _udiv_const(q_head_start, query_group_size)
 
             # Context length for this sequence
-            context_len = _global_load_i32(cl_global_ptr, batch_idx)
+            context_len = buffer_ops.buffer_load(cl_rsrc, batch_idx, vec_width=1, dtype=T.i32)
             # ── Prologue: load first block's tile 0 K data ──
-            first_phys_block = _global_load_i32(kpi_global_ptr, kv_start)
+            first_phys_block = buffer_ops.buffer_load(kpi_rsrc, kv_start, vec_width=1, dtype=T.i32)
             # Head offsets for K and V cache
             _k_head_off = kv_h * c_kh
             _v_head_off = kv_h * c_vh
@@ -1458,7 +1508,9 @@ def compile_pa_decode_ps(
                 c_w=c_w,
                 neg_inf=NEG_INF,
                 zero_f=ZERO_F,
-                cache_scale_vecs=True,
+                cache_scale_vecs=cache_scale_vecs,
+                sched_vmem_after_load=False,
+                preload_pv_operands=True,
             )
 
             # ════════════════════════════════════════════════════════
@@ -1470,7 +1522,7 @@ def compile_pa_decode_ps(
 
             def _pack_state(rmax, rsum, o0, o1, k_flat, scale_scalars=None):
                 state = [rmax, rsum, o0, o1] + k_flat
-                if const_expr(per_token_kv):
+                if const_expr(cache_scale_vecs and per_token_kv):
                     state += list(scale_scalars)
                 return [_unwrap(v) for v in state]
 
@@ -1543,6 +1595,7 @@ def compile_pa_decode_ps(
                         _k_tok_thread_base,
                         _c_tok_stride_dw,
                         _k_he_off_dw,
+                        sched_vmem_after_load=False,
                     )
                 else:
                     k_next_flat = None
@@ -1638,6 +1691,7 @@ def compile_pa_decode_ps(
                     _k_tok_thread_base,
                     _c_tok_stride_dw,
                     _k_he_off_dw,
+                    sched_vmem_after_load=False,
                 )
 
                 init_state = _pack_state(
@@ -1653,10 +1707,12 @@ def compile_pa_decode_ps(
                     running_max, running_sum, out0, out1, k_flat, scale_scalars = _unpack_state(state)
                     block_idx = arith.index_cast(T.i32, ib)
 
-                    phys_block = _global_load_i32(kpi_global_ptr, kv_start + block_idx)
+                    phys_block = buffer_ops.buffer_load(kpi_rsrc, kv_start + block_idx, vec_width=1, dtype=T.i32)
                     next_idx_raw = block_idx + c_one
                     next_idx_clamped = arith.select(next_idx_raw < num_blocks_in_work, next_idx_raw, last_block_idx_val)
-                    next_phys_block = _global_load_i32(kpi_global_ptr, kv_start + next_idx_clamped)
+                    next_phys_block = buffer_ops.buffer_load(
+                        kpi_rsrc, kv_start + next_idx_clamped, vec_width=1, dtype=T.i32
+                    )
                     next_k_base = _compute_block_base_dw_i64(next_phys_block, c_kb, _k_head_off)
 
                     k_ops = _unflatten_k(k_flat)
