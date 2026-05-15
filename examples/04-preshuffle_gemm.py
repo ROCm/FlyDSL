@@ -2,7 +2,6 @@ import torch
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from tests.test_common import run_perftest
 from tests.utils import shuffle_weight
 
 BLOCK_M = 128
@@ -24,9 +23,9 @@ def gemm_kernel(
     tid = fx.thread_idx.x
     bid_x, bid_y, _ = fx.block_idx
 
-    A = fx.rocdl.make_buffer_tensor(A)
-    B = fx.rocdl.make_buffer_tensor(B)
-    C = fx.rocdl.make_buffer_tensor(C)
+    A = fx.rocdl.make_buffer_tensor(A, max_size=False)
+    B = fx.rocdl.make_buffer_tensor(B, max_size=False)
+    C = fx.rocdl.make_buffer_tensor(C, max_size=False)
 
     gA_k = fx.flat_divide(A, (BLOCK_M, BLOCK_K))[None, None, bid_x, None]  # (BM, BK, k)
     gB_k = fx.flat_divide(B, (BLOCK_N, BLOCK_K))[None, None, bid_y, None]  # (BN, BK, k)
@@ -43,14 +42,11 @@ def gemm_kernel(
     thr_copy_g2r_B = fx.make_tiled_copy_B(buffer_copy_128b, tiled_mma).get_slice(tid)
     thr_copy_r2g_C = fx.make_tiled_copy_C(buffer_copy_16b, tiled_mma).get_slice(tid)
 
-    smem_ptr = fx.get_dyn_shared()
-    smem_ptr_f16 = fx.recast_iter(fx.PointerType.get(fx.Float16.ir_type, fx.AddressSpace.Shared, 512), smem_ptr)
-
     composed_layout_A = fx.make_composed_layout(
         fx.static(fx.SwizzleType.get(3, 3, 3)),
         fx.make_ordered_layout((BLOCK_M, BLOCK_K, STAGES_A), (1, 0, 2)),
     )
-    sA = fx.make_view(smem_ptr_f16, composed_layout_A)  # (BM, BK, STAGES_A)
+    sA = fx.make_view(fx.get_dyn_shared(fx.Float16), composed_layout_A)  # (BM, BK, STAGES_A)
 
     thr_gA_k = thr_copy_g2s_A.partition_S(gA_k)  # (VA, VM, VK, k)
     thr_sA = thr_copy_g2s_A.partition_D(sA)  # (VA, VM, VN, STAGES_A)
@@ -194,17 +190,10 @@ C = torch.zeros(M, N, dtype=torch.float16).cuda()
 
 preshuffle_B = shuffle_weight(B, layout=(16, 16))
 
-preshuffle_gemm(A, preshuffle_B, C, stream=torch.cuda.current_stream())
+tA = flyc.from_dlpack(A).mark_layout_dynamic(leading_dim=1, divisibility=16)
+tC = flyc.from_dlpack(C).mark_layout_dynamic(leading_dim=1, divisibility=16)
 
-_, us = run_perftest(
-    lambda c, a, b: preshuffle_gemm(a, b, c, stream=torch.cuda.current_stream()),
-    C,
-    A,
-    preshuffle_B,
-)
-flops = 2 * M * N * K
-tflops = flops / (us / 1e6) / 1e12
-print(f"[flyc] Throughput: {us:.1f} us, {tflops:.2f} TFLOPS")
+preshuffle_gemm(tA, preshuffle_B, tC, stream=torch.cuda.current_stream())
 
 torch.cuda.synchronize()
 expected = (A @ B.T).to(torch.float32)
