@@ -105,8 +105,6 @@ def compile_mxscale_gemm(
         if cluster_m * cluster_n > 16:
             raise ValueError(f"cluster_m * cluster_n must be <= 16, got {cluster_m}*{cluster_n}")
     effective_waves_per_eu = waves_per_eu
-    if use_cluster and effective_waves_per_eu is None:
-        effective_waves_per_eu = 2
 
     num_warps = m_warp * n_warp
     block_threads = num_warps * WAVE_SIZE
