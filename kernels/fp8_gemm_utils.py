@@ -7,7 +7,7 @@ from flydsl._mlir.dialects import fly as fly_dialect
 from flydsl._mlir.dialects import llvm as _llvm
 from flydsl._mlir.dialects import memref as memref_dialect
 from flydsl._mlir.dialects.fly_rocdl import TargetAddressSpace
-from flydsl.expr import const_expr, range_constexpr
+from flydsl.expr import arith, const_expr, range_constexpr
 from flydsl.expr.typing import Vector as Vec
 
 
@@ -119,8 +119,9 @@ class S2RLoader:
 
 
 class StoreC:
-    def __init__(self, A_scale, B_scale, C, c_stride, c_idx_fn, n_tiles_a, n_tiles_b):
-        self.c_stride = c_stride
+    def __init__(self, A_scale, B_scale, C, c_rows, c_cols, c_idx_fn, n_tiles_a, n_tiles_b):
+        self.c_rows = c_rows
+        self.c_cols = c_cols
         self.lane_id = fx.thread_idx.x % 64
         self.c_idx_fn = c_idx_fn
         self.n_tiles_a = n_tiles_a
@@ -135,24 +136,21 @@ class StoreC:
         self.scale_atom_4 = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), fx.Float32)
         self.scale_atom_1 = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Float32)
         self.out_atom_1 = fx.make_copy_atom(fx.rocdl.BufferCopy16b(), fx.BFloat16)
-        self.reg_f32_4_ty = fx.MemRefType.get(fx.T.f32(), fx.LayoutType.get(4, 1), 3)
-        self.reg_f32_1_ty = fx.MemRefType.get(fx.T.f32(), fx.LayoutType.get(1, 1), 3)
-        self.reg_bf16_1_ty = fx.MemRefType.get(fx.T.bf16(), fx.LayoutType.get(1, 1), 3)
+        self.reg_f32_4 = fx.make_rmem_tensor(fx.make_layout(4, 1), fx.Float32)
+        self.reg_f32_1 = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Float32)
+        self.reg_bf16_1 = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.BFloat16)
 
     def _load_scale_vec4(self, row):
-        r = fx.memref_alloca(self.reg_f32_4_ty, fx.make_layout(4, 1))
-        fx.copy(self.scale_atom_4, fx.slice(self.sa_div, (None, fx.Int32(row))), r)
-        return Vec(fx.memref_load_vec(r))
+        fx.copy(self.scale_atom_4, fx.slice(self.sa_div, (None, fx.Int32(row))), self.reg_f32_4)
+        return Vec(fx.memref_load_vec(self.reg_f32_4))
 
     def _load_scale_scalar(self, col):
-        r = fx.memref_alloca(self.reg_f32_1_ty, fx.make_layout(1, 1))
-        fx.copy(self.scale_atom_1, fx.slice(self.sb_div, (None, fx.Int32(col))), r)
-        return Vec(fx.memref_load_vec(r))[0]
+        fx.copy(self.scale_atom_1, fx.slice(self.sb_div, (None, fx.Int32(col))), self.reg_f32_1)
+        return Vec(fx.memref_load_vec(self.reg_f32_1))[0]
 
     def _store_bf16(self, value_bf16, c_index):
-        r = fx.memref_alloca(self.reg_bf16_1_ty, fx.make_layout(1, 1))
-        fx.memref_store_vec(Vec.filled(1, value_bf16, fx.BFloat16), r)
-        fx.copy(self.out_atom_1, r, fx.slice(self.c_div, (None, fx.Int32(c_index))))
+        fx.memref_store_vec(Vec.filled(1, value_bf16, fx.BFloat16), self.reg_bf16_1)
+        fx.copy(self.out_atom_1, self.reg_bf16_1, fx.slice(self.c_div, (None, fx.Int32(c_index))))
 
     def store(self, c_frag, base_row, base_col):
         a_scales = [
@@ -165,10 +163,13 @@ class StoreC:
             row = base_row + ti * 16 + (self.lane_id // 16) * 4
             for tj in range_constexpr(self.n_tiles_b):
                 col = base_col + tj * 16 + self.lane_id % 16
+                col_valid = col < self.c_cols
+                oob = fx.Int32(self.c_rows * self.c_cols)
                 vec_f32 = Vec(c_frag[self.c_idx_fn(ti, tj)])
                 for i in range_constexpr(4):
                     scaled = (vec_f32[i] * (a_scales[ti][i] * b_scales[tj])).to(fx.BFloat16)
-                    self._store_bf16(scaled, (row + i) * self.c_stride + col)
+                    c_index = (row + i) * self.c_cols + col
+                    self._store_bf16(scaled, arith.select(col_valid, c_index, oob))
 
 
 def wait_barrier(count):

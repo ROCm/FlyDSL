@@ -263,7 +263,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--preshuffle_b",
         action="store_true",
-        default=True,
+        default=False,
         help="Use preshuffled B layout.",
     )
     parser.add_argument(

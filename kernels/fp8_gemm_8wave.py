@@ -26,11 +26,11 @@ from kernels.fp8_gemm_utils import (
 def compile_fp8_gemm_8w(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int = 256, b_preshuffled: bool = False):
     BLOCK_K = 128
 
-    assert M >= 1
+    assert M >= 1 and N >= 1
     assert BLOCK_M >= 128 and BLOCK_N >= 256 and BLOCK_M % 128 == 0 and BLOCK_N % 256 == 0
-    assert N % BLOCK_N == 0 and K % BLOCK_K == 0
+    assert K % BLOCK_K == 0
 
-    N_BLOCKS = N // BLOCK_N
+    N_BLOCKS = (N + BLOCK_N - 1) // BLOCK_N
     K_ITERS = K // BLOCK_K
 
     N_TILES_A = BLOCK_M // 64
@@ -114,7 +114,7 @@ def compile_fp8_gemm_8w(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: 
         b_g2s = G2SLoader(b_div, gl_off_b, N_LDS_STEPS_B, F8_IR_t, wave_id)
         a_s2r = S2RLoader(wave_m, N_TILES_A)
         b_s2r = S2RLoader(wave_n, N_TILES_B)
-        store_c = StoreC(A_scale, B_scale, C, N, mfma.idx, N_TILES_A, N_TILES_B)
+        store_c = StoreC(A_scale, B_scale, C, M, N, mfma.idx, N_TILES_A, N_TILES_B)
 
         # 2x2 config of 4x2 (instead of 4x4 in 4wave) 16x16 sub-tiles
         c00_frag = [mfma.zero_value] * N_ACCUMS
@@ -288,7 +288,7 @@ def compile_fp8_gemm_8w(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: 
             B_lds_cur1_alloc.finalize()
             B_lds_next0_alloc.finalize()
             B_lds_next1_alloc.finalize()
-        grid_x = ((M + BLOCK_M - 1) // BLOCK_M) * (N // BLOCK_N)
+        grid_x = ((M + BLOCK_M - 1) // BLOCK_M) * N_BLOCKS
         kernel_gemm(
             A,
             B_T,

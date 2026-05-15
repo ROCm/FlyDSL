@@ -81,10 +81,12 @@ def compile_fp8_gemm_4w(
     BLOCK_K = 128
     LDS_BLOCK_M = BLOCK_M // 2
     LDS_BLOCK_N = BLOCK_N // 2
-    assert BLOCK_M >= 64 and BLOCK_N >= 64
-    assert N % BLOCK_N == 0 and M % BLOCK_M == 0 and K % BLOCK_K == 0
 
-    N_BLOCKS = N // BLOCK_N
+    assert M >= 1 and N >= 1
+    assert BLOCK_M >= 64 and BLOCK_M % 64 == 0 and BLOCK_N >= 64 and BLOCK_N % 64 == 0
+    assert K % BLOCK_K == 0
+
+    N_BLOCKS = (N + BLOCK_N - 1) // BLOCK_N
     K_ITERS = K // BLOCK_K
     # Number of 16-row 16x128 tiles per wave per A/B partition.
     N_TILES_A = BLOCK_M // 4 // 16
@@ -141,7 +143,7 @@ def compile_fp8_gemm_4w(
         wave_id = fx.thread_idx.x // 64
 
         if const_expr(use_xcd_remap):
-            tile_i, tile_j = _xcd_swizzle(M // BLOCK_M, N // BLOCK_N)
+            tile_i, tile_j = _xcd_swizzle((M + BLOCK_M - 1) // BLOCK_M, N_BLOCKS)
         else:
             tile_i, tile_j = _divmod(fx.block_idx.x, N_BLOCKS)
 
@@ -306,7 +308,7 @@ def compile_fp8_gemm_4w(
         b_g2s = G2SLoader(gb_div, gl_off_b, N_TILES_B, F8_IR_t, wave_id)
         a_s2r = S2RLoader(wave_i, N_TILES_A)
         b_s2r = S2RLoader(wave_j, N_TILES_B)
-        store_c = StoreC(A_scale, B_scale, C, N, mfma.idx, N_TILES_A, N_TILES_B)
+        store_c = StoreC(A_scale, B_scale, C, M, N, mfma.idx, N_TILES_A, N_TILES_B)
 
         # Prologue: 8-buffer LDS pipeline pre-fill.
         a_g2s.load(a_cur0, A0_gl_offset + 0 * A_K_STEP)
@@ -445,7 +447,7 @@ def compile_fp8_gemm_4w(
             B_lds_cur1_alloc.finalize()
             B_lds_next0_alloc.finalize()
             B_lds_next1_alloc.finalize()
-        grid_x = ((M + BLOCK_M - 1) // BLOCK_M) * (N // BLOCK_N)
+        grid_x = ((M + BLOCK_M - 1) // BLOCK_M) * N_BLOCKS
         kernel_gemm(
             A,
             B_T,
