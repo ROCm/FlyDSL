@@ -3,9 +3,9 @@
 
 """Shared utilities for FlyDSL kernel testing."""
 
-import torch
 import functools
-from typing import Optional
+
+import torch
 
 
 # Simple dtypes namespace used by pertoken_quant

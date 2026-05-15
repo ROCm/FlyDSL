@@ -63,14 +63,10 @@ def register_device_runtime(
     global _runtime_cls_override, _instance
     if _instance is not None and not force:
         raise RuntimeError(
-            "Cannot register a device runtime after get_device_runtime() "
-            "has been called (unless force=True)."
+            "Cannot register a device runtime after get_device_runtime() " "has been called (unless force=True)."
         )
     if _runtime_cls_override is not None and not force:
-        raise ValueError(
-            "A custom device runtime class is already registered "
-            "(use force=True to replace)."
-        )
+        raise ValueError("A custom device runtime class is already registered " "(use force=True to replace).")
     _runtime_cls_override = cls
     if kind is not None:
         _builtin_runtimes[kind.strip().lower()] = cls
@@ -95,9 +91,7 @@ def _resolve_runtime_class() -> Type[DeviceRuntime]:
     cls = _builtin_runtimes.get(kind)
     if cls is None:
         known = ", ".join(sorted(_builtin_runtimes)) or "(none)"
-        raise ValueError(
-            f"Unknown FLYDSL_RUNTIME_KIND={kind!r}. Built-in kinds: {known}"
-        )
+        raise ValueError(f"Unknown FLYDSL_RUNTIME_KIND={kind!r}. Built-in kinds: {known}")
     return cls
 
 

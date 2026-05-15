@@ -6,7 +6,6 @@
 from contextlib import contextmanager
 from typing import Dict, Union
 
-
 _fly_module = None
 
 
@@ -14,6 +13,7 @@ def _get_fly_module():
     global _fly_module
     if _fly_module is None:
         from .._mlir._mlir_libs import _mlirDialectsFly
+
         _fly_module = _mlirDialectsFly
     return _fly_module
 
@@ -36,8 +36,7 @@ def llvm_options(opts: Dict[str, Union[bool, int, str]]):
                 saved.append(("str", name, old))
             else:
                 raise TypeError(
-                    f"Unsupported type {type(value).__name__} for LLVM option '{name}'; "
-                    "use bool, int, or str"
+                    f"Unsupported type {type(value).__name__} for LLVM option '{name}'; " "use bool, int, or str"
                 )
         yield
     finally:

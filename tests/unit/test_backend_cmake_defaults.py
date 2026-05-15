@@ -3,9 +3,9 @@
 
 """CMake backend default and dependency guardrails."""
 
-from pathlib import Path
 import shutil
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -58,12 +58,8 @@ def test_future_backend_descriptor_is_opt_in(tmp_path):
     )
     (cmake_dir / "FlyDSLBackends.cmake").write_text(text)
 
-    (backend_dir / "rocdl.cmake").write_text(
-        'set(GUARDRAIL_SELECTED_ROCDL ON CACHE BOOL "" FORCE)\n'
-    )
-    (backend_dir / "dummy.cmake").write_text(
-        'set(GUARDRAIL_SELECTED_DUMMY ON CACHE BOOL "" FORCE)\n'
-    )
+    (backend_dir / "rocdl.cmake").write_text('set(GUARDRAIL_SELECTED_ROCDL ON CACHE BOOL "" FORCE)\n')
+    (backend_dir / "dummy.cmake").write_text('set(GUARDRAIL_SELECTED_DUMMY ON CACHE BOOL "" FORCE)\n')
     (tmp_path / "CMakeLists.txt").write_text(
         "\n".join(
             [

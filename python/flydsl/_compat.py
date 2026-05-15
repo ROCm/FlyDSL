@@ -32,9 +32,7 @@ def _maybe_preload_system_comgr() -> None:
     if not in_ffm_session:
         return
 
-    system_comgr = os.environ.get(
-        "FLYDSL_COMGR_PRELOAD_PATH", "/opt/rocm/lib/libamd_comgr.so.3"
-    )
+    system_comgr = os.environ.get("FLYDSL_COMGR_PRELOAD_PATH", "/opt/rocm/lib/libamd_comgr.so.3")
     sim_comgr = os.path.join(model_path, "rocm", "libamd_comgr.so.3")
     if not (os.path.exists(system_comgr) and os.path.exists(sim_comgr)):
         return

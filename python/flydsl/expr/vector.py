@@ -25,6 +25,7 @@ from .typing import ReductionOp, Vector, empty_like, full, full_like, ones_like,
 # Prefer using Vector methods or _mlir.dialects.vector directly.
 # ═══════════════════════════════════════════════════════════════════════
 
+
 @traced_op
 def from_elements(*args, loc=None, ip=None, **kwargs):
     """Construct a vector from scalar elements, auto-unwrapping ArithValue wrappers."""
