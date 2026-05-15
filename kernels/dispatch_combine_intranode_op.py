@@ -37,6 +37,10 @@ class FlyDSLDispatchCombineConfig:
     enable_std_moe: bool = False
     use_external_inp_buf: bool = True
     quant_type: str = "none"
+    # D-flag C-1: 启用 per-token flag 跨卡同步。开启后 dispatch / combine kernel
+    # 在 const_expr 路径上启用 reset / spin-wait，并由 fused gemm2 epilogue
+    # 跨卡 atomic_add 远端 flag；关闭则整段 DCE，行为等同 baseline。
+    use_token_flag_sync: bool = False
 
     @property
     def is_fp4(self):
@@ -101,10 +105,14 @@ class FlyDSLDispatchCombineIntraNodeOp:
         self._p2p_comb_inp     = torch.zeros(npes, dtype=torch.int64, device=self._dev)
         self._p2p_comb_inp_wts = torch.zeros(npes, dtype=torch.int64, device=self._dev)
         self._p2p_xdb_mem      = torch.zeros(npes, dtype=torch.int64, device=self._dev)
+        # D-flag C-1：per-token flag 的 P2P base 表。fused gemm2 epilogue
+        # 用 dest_pe -> base 查表 + flag offset 跨卡 atomic_add_global_at。
+        self._p2p_comb_flag    = torch.zeros(npes, dtype=torch.int64, device=self._dev)
         for pe in range(npes):
             self._p2p_comb_inp[pe]     = ms.shmem_ptr_p2p(self.shmem_comb_inp_tok.data_ptr(), r, pe)
             self._p2p_comb_inp_wts[pe] = ms.shmem_ptr_p2p(self.shmem_comb_inp_wts.data_ptr(), r, pe)
             self._p2p_xdb_mem[pe]      = ms.shmem_ptr_p2p(self.shmem_xdev_bar_mem.data_ptr(), r, pe)
+            self._p2p_comb_flag[pe]    = ms.shmem_ptr_p2p(self.shmem_comb_token_flag.data_ptr(), r, pe)
 
         _disp_wpb = config.warp_num_per_block
         self._disp_fn = make_dispatch_jit(
@@ -119,6 +127,7 @@ class FlyDSLDispatchCombineIntraNodeOp:
             scale_dim=config.scale_dim,
             scale_type_size=config.scale_type_size,
             enable_std_moe=config.enable_std_moe,
+            use_token_flag_sync=config.use_token_flag_sync,
         )
 
         _use_fp8_cast = (config.quant_type == "fp8_direct_cast" and config.data_type == torch.bfloat16)
@@ -143,6 +152,7 @@ class FlyDSLDispatchCombineIntraNodeOp:
             enable_std_moe=config.enable_std_moe,
             use_p2p_read=not config.use_external_inp_buf,
             inp_data_type=_comb_inp_dt,
+            use_token_flag_sync=config.use_token_flag_sync,
         )
         self._use_fp8_cast = _use_fp8_cast
 
@@ -177,6 +187,10 @@ class FlyDSLDispatchCombineIntraNodeOp:
         self._fx_p2p_comb_inp = fx.Int64(self._p2p_comb_inp.data_ptr())
         self._fx_p2p_comb_inp_wts = fx.Int64(self._p2p_comb_inp_wts.data_ptr())
         self._fx_p2p_xdb_mem  = fx.Int64(self._p2p_xdb_mem.data_ptr())
+        # D-flag C-1 fx wrappers
+        self._fx_comb_flag    = fx.Int64(self.shmem_comb_token_flag.data_ptr())
+        self._fx_p2p_comb_flag = fx.Int64(self._p2p_comb_flag.data_ptr())
+        self._fx_local_counter = fx.Int64(self.device_local_counter.data_ptr())
         self._fx_comb_inp_wts = fx.Int64(self.shmem_comb_inp_wts.data_ptr())
         self._fx_comb_out_wts = fx.Int64(self.shmem_comb_out_wts.data_ptr())
         self._fx_packed_recv_count = fx.Int64(self.packed_recv_count.data_ptr())
@@ -192,6 +206,9 @@ class FlyDSLDispatchCombineIntraNodeOp:
         # combine 只跑 Stage 2 (CrossDeviceBarrier) + Stage 3 (本地 weighted-accum)。
         self._comb_no_s1_fn = None
         self._comb_no_s1_compiled = None
+        # D-flag C-1: dispatch() 调用时填入 raw input weights data_ptr，供
+        # combine_no_stage1 在 use_token_flag_sync 路径下直接本地读取。
+        self._raw_input_wts_ptr = 0
 
     def _alloc_buffers(self):
         cfg  = self.cfg
@@ -221,6 +238,14 @@ class FlyDSLDispatchCombineIntraNodeOp:
         self.shmem_comb_out_wts  = mori_shmem_create_tensor((mt * k,),     torch.float32)
         self.shmem_xdev_bar_mem  = mori_shmem_create_tensor((npes,),        torch.int64)
 
+        # D-flag C-1 per-token flag buffer：fused gemm2 epilogue 完成 (token, j)
+        # partial sum 后，本卡 cross-N-tile reduce 完成态下由代表 thread 跨卡
+        # atomic_add(remote_flag[token_id], 1)。combine kernel stage 3 入口
+        # per-warp spin-wait `flag[tok_id] >= topk`。长度按 mr 上限分配（实际
+        # bs <= mr，dispatch kernel 入口仅 reset 前 mr 个）。fallback 路径
+        # (use_token_flag_sync=False) 不用此 buffer，分配 ~4KB 开销可忽略。
+        self.shmem_comb_token_flag = mori_shmem_create_tensor((mr,), torch.int32)
+
         # mori_shmem_create_tensor 走 shmem_malloc，分配的是未初始化的 raw memory。
         # 对 fused MoE-GEMM2 + EP-Combine 路径，GEMM2 需要在 epilogue 用
         # shmem_tok_id_to_src 解码 dest_pe / dest_lid，越界 garbage 会触发 LDS
@@ -236,6 +261,9 @@ class FlyDSLDispatchCombineIntraNodeOp:
         self.shmem_comb_inp_tok.zero_()
         self.shmem_comb_inp_wts.zero_()
         self.shmem_xdev_bar_mem.zero_()
+        # flag buffer 入口先 zero_ 一次。运行期 use_token_flag_sync=True 时
+        # 由 dispatch kernel 入口 grid-stride memset 重置（每 chain 一次）。
+        self.shmem_comb_token_flag.zero_()
 
         # Local device buffers
         self.dest_pe_ctr  = torch.zeros(npes, dtype=torch.int32, device=self._dev)
@@ -245,6 +273,16 @@ class FlyDSLDispatchCombineIntraNodeOp:
         sentinel = cfg.world_size * mr
         self.dest_tok_map = torch.full(
             (mt * k,), sentinel, dtype=torch.int32, device=self._dev)
+
+        # D-flag C-1 device-local counter（仅本卡可见，无需 symmetric）：
+        # GEMM2 epilogue 用 atomicrmw add (device-scope) 在 (m_tile, j) 维度
+        # 累计 N-tile 完成数。当 old == num_n_tiles - 1（最后一个 N-tile
+        # 完成）时，由代表 thread 发起跨卡 system-scope atomic_add
+        # remote_flag[token_id] += 1，并 atomicrmw xchg 把 counter 复位为 0
+        # 供下一 chain 复用。长度 mr * topk = npes * max_tok_per_rank * k
+        # 覆盖 worst-case routing。fallback 路径不用。
+        self.device_local_counter = torch.zeros(
+            mr * k, dtype=torch.int32, device=self._dev)
 
         # StdMoE buffers
         if cfg.enable_std_moe:
@@ -280,6 +318,12 @@ class FlyDSLDispatchCombineIntraNodeOp:
         wts_c = weights if weights.is_contiguous() else weights.contiguous()
         idx_c = indices if (indices.dtype == torch.int32 and indices.is_contiguous()) \
             else indices.to(torch.int32).contiguous()
+        # D-flag C-1: 缓存 raw input weights pointer 给 combine_no_stage1 用。
+        # me 的 raw input weights layout = [max_tok_per_rank, topk] f32，索引
+        # (src_tok, lane)，正好是 stage 3b weight 累加需要的源（baseline 绕了
+        # scatter + P2P read 一圈得到的也是同一个值，只不过是 topk 个副本求和
+        # = 8 × weights[src_tok, lane]）。直接本地读，无 P2P 无跨卡 sync。
+        self._raw_input_wts_ptr = wts_c.data_ptr()
 
         sc_ptr = scales.data_ptr() if scales is not None else 0
         prx_ptr = packed_recv_x.data_ptr() if packed_recv_x is not None else 0
@@ -319,6 +363,7 @@ class FlyDSLDispatchCombineIntraNodeOp:
                 self._fx_p2p_out_scales,
                 fx.Int64(prx_ptr),
                 *_std_args,
+                self._fx_comb_flag,
                 cur_tok,
                 stream,
             )
@@ -348,6 +393,7 @@ class FlyDSLDispatchCombineIntraNodeOp:
                 self._fx_p2p_out_scales,
                 prx_ptr,
                 *_std_args,
+                self._fx_comb_flag,
                 cur_tok,
                 stream,
             )
@@ -426,6 +472,7 @@ class FlyDSLDispatchCombineIntraNodeOp:
                 self._fx_comb_out_wts,
                 self._fx_p2p_comb_inp_wts,
                 *_std_args_comb,
+                self._fx_comb_flag,
                 _cur_tok,
                 stream,
             )
@@ -450,6 +497,7 @@ class FlyDSLDispatchCombineIntraNodeOp:
                 prx_ptr,
                 self._fx_disp_tok_map,
                 self._fx_disp_out_wts,
+                self._fx_comb_flag,
                 _cur_tok,
                 stream,
             )
@@ -513,7 +561,19 @@ class FlyDSLDispatchCombineIntraNodeOp:
             inp_c = input if input.is_contiguous() else input.contiguous()
         _cur_tok = cur_tok if cur_tok is not None else cfg.max_num_inp_token_per_rank
 
-        wts_ptr = self.shmem_disp_out_wts.data_ptr() if weights is None else weights.data_ptr()
+        # D-flag C-1: use_token_flag_sync 时，combine stage 3b 不再走 P2P read
+        # disp_out_wts/comb_inp_wts，而是直接读本地 raw input weights
+        # ([max_tok_per_rank, topk] f32 layout，索引 = (src_tok, lane))。
+        # caller 传 raw_input_wts_ptr 作为 wts_ptr，kernel stage 3b 在
+        # use_token_flag_sync 路径下用 addr_wts_buf + (wt_tok*topk+lane)*4
+        # offset。这样 stage 1 weight scatter / stage 2 barrier 全部裁掉。
+        if cfg.use_token_flag_sync and weights is None:
+            assert self._raw_input_wts_ptr != 0, (
+                "use_token_flag_sync requires dispatch() to be called first "
+                "so _raw_input_wts_ptr is populated.")
+            wts_ptr = self._raw_input_wts_ptr
+        else:
+            wts_ptr = self.shmem_disp_out_wts.data_ptr() if weights is None else weights.data_ptr()
 
         _prx_ref = None
         if self._use_fp8_cast and packed_recv_x is not None:
@@ -559,6 +619,7 @@ class FlyDSLDispatchCombineIntraNodeOp:
                 skip_stage1=True,
                 inp_data_type=_comb_inp_dt,
                 skip_stage1_keep_wts=bool(enable_weights),
+                use_token_flag_sync=cfg.use_token_flag_sync,
             )
 
         if enable_weights not in self._comb_no_s1_compiled:
@@ -581,6 +642,7 @@ class FlyDSLDispatchCombineIntraNodeOp:
                 fx.Int64(prx_ptr),
                 self._fx_disp_tok_map,
                 self._fx_disp_out_wts,
+                self._fx_comb_flag,
                 _cur_tok,
                 stream,
             )
@@ -607,6 +669,7 @@ class FlyDSLDispatchCombineIntraNodeOp:
                 prx_ptr,
                 self._fx_disp_tok_map,
                 self._fx_disp_out_wts,
+                self._fx_comb_flag,
                 _cur_tok,
                 stream,
             )

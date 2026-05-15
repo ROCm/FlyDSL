@@ -192,8 +192,8 @@ def _build_dispatch_inputs(rank, world_size, dev, args, cfg):
 
     idx = torch.zeros(cur_tok, k, dtype=torch.int32, device=dev)
     routing = getattr(args, "routing", "random")
-    if routing == "uniform":
-        # 确定性均匀路由（生产 balanced EP 等价）：
+    if routing == "atomic1_8pe":
+        # 确定性均匀路由（生产 balanced EP 等价；atomic_per_pe=1, num_pe=k=8）：
         #   idx[t, j] = dest_pe * epr + local_eid
         #   dest_pe   = (rank + t + j) % world_size          ← 每 token 的 k 个
         #                                                       expert 散到 k 个不同
@@ -205,6 +205,8 @@ def _build_dispatch_inputs(rank, world_size, dev, args, cfg):
         #   cur_tok*k / (ws*epr)。在 cur_tok=32/ws=8/epr=32/k=8 默认值下 = 1.0，
         #   完美均衡。同 token 的 k 个 expert 必定跨 k 个不同 PE → dispatch dedup
         #   不会触发 (dup_ballot == 0 always)，每条 (T, j_global) 都进 sorted_token_ids。
+        # 命名: atomic1_8pe = 每张 dest_pe 上同一 (t, *) output row 仅 1 次
+        #       atomic_fadd（atomic_per_pe=1），token 散到 8 个不同 PE。
         for t in range(cur_tok):
             for j in range(k):
                 dest_pe   = (rank + t + j) % world_size
@@ -212,7 +214,7 @@ def _build_dispatch_inputs(rank, world_size, dev, args, cfg):
                 idx[t, j] = dest_pe * epr + local_eid
         return inp, wts, idx
 
-    if routing == "consec_same_pe":
+    if routing == "atomic8_1pe":
         # 场景 2：单 token 的 k 个 expert 全压到同 1 个 dest_pe，构造
         # GEMM2 atomic-contention worst case (atomic k=8 同 (t, *) row)，
         # 同时保证卡间 / 卡内均衡：
@@ -224,9 +226,12 @@ def _build_dispatch_inputs(rank, world_size, dev, args, cfg):
         #     **真正卡内均衡** (每 local_eid 命中 cur_tok*npes*k/(npes*epr)
         #     = cur_tok*k/epr 次)。
         # local_eid[j] = (eid_base + j) % epr → 每 token 连续 k 个 expert。
+        # 命名: atomic8_1pe = token 的 k=8 个 expert 全落同 1 个 dest_pe，
+        #       该 PE 上同一 (t, *) output row 被 atomic_per_pe=k=8 次
+        #       atomic_fadd 命中（atomic-k worst case）。
         if epr % k != 0:
             raise ValueError(
-                f"routing=consec_same_pe requires epr ({epr}) divisible by k ({k}) "
+                f"routing=atomic8_1pe requires epr ({epr}) divisible by k ({k}) "
                 "to keep per-expert load balanced; got mismatch."
             )
         for t in range(cur_tok):
@@ -241,8 +246,8 @@ def _build_dispatch_inputs(rank, world_size, dev, args, cfg):
     if routing == "atomic2_4pe":
         # 场景 3：每 token 的 k 个 expert 分布到 *4 个不同* PE 上，每 PE 上
         # 落 atomic_per_pe = k/4 个命中 (k=8 → atomic_per_pe=2)，即 GEMM2 同
-        # 一 output row 上仅 2 次 atomic_fadd 竞争 — 介于 uniform (atomic=1)
-        # 和 consec_same_pe (atomic=k=8 worst case) 之间的中等 contention 场景。
+        # 一 output row 上仅 2 次 atomic_fadd 竞争 — 介于 atomic1_8pe (atomic=1)
+        # 和 atomic8_1pe (atomic=k=8 worst case) 之间的中等 contention 场景。
         #
         # 卡间 / 卡内均衡构造：
         #   - 全局 token 顺序 g = rank * cur_tok + t  ∈ [0, world_size * cur_tok)
@@ -1251,7 +1256,7 @@ def _compare_two(name_a, ta, name_b, tb, *, rank, atol_abs=2e-2, atol_rel=5e-2,
     #       k-ULP 累加预算（bf16: 2^-7, atol_ulp_k=8 → 容忍 6.25% 的 round 累加）
     #   (4) max(|a|,|b|) <= near_zero_floor → near-zero 噪声地带，sign-flip 视
     #       为 atomic_fadd 顺序与 fp32 single-accum 顺序的真实非结合性差异
-    #       （在 consec_same_pe / atomic-k stress 场景下不可避免）
+    #       （在 atomic8_1pe / atomic-k stress 场景下不可避免）
     if ta.dtype == torch.bfloat16:
         _mantissa_bits = 7
     elif ta.dtype == torch.float16:
@@ -1658,13 +1663,63 @@ def _run_verify(disp_op, fused_op,
         print("=" * 78)
 
 
-# ─── 各模式入口（仅 profile+cudagraph 实现）─────────────────────────────────
+# ─── 各模式入口（profile+cudagraph + bench+eager 实现）──────────────────────
 def _not_impl(name: str):
     raise NotImplementedError(
         f"mode '{name}' not yet implemented in this acceptance script. "
-        "Only `--mode profile --cudagraph` is wired in this skeleton; "
-        "extend after the fused kernel is built."
+        "Only `--mode profile --cudagraph` and `--mode bench --no-cudagraph` "
+        "are wired."
     )
+
+
+def _run_bench_eager(chain_fn, op_tag: str,
+                     rank: int, world_size: int, dev: torch.device,
+                     warmup: int, iters: int):
+    """Eager (no-cudagraph, no torch.profiler) bench loop.
+
+    rocprofv3-friendly：每次调用都走真实的 hipLaunchKernel 路径，让
+    rocprofv3 / ATT trace 能看到 chain 里所有内部 kernel name。
+    用 torch.cuda.Event 量端到端时间；all-reduce min/max/avg 跨卡聚合。
+    """
+    ms.shmem_barrier_all()
+    if rank == 0:
+        print(f"\n[bench+eager] {op_tag} warmup×{warmup} iters×{iters} "
+              f"(no cudagraph / no torch.profiler — rocprofv3-friendly)")
+    for _ in range(warmup):
+        chain_fn()
+    torch.cuda.synchronize()
+    ms.shmem_barrier_all()
+
+    starts = [torch.cuda.Event(enable_timing=True) for _ in range(iters)]
+    ends = [torch.cuda.Event(enable_timing=True) for _ in range(iters)]
+    for i in range(iters):
+        starts[i].record()
+        chain_fn()
+        ends[i].record()
+    torch.cuda.synchronize()
+    ms.shmem_barrier_all()
+
+    times_ms = [s.elapsed_time(e) for s, e in zip(starts, ends)]
+    local_avg = sum(times_ms) / len(times_ms)
+    local_min = min(times_ms)
+    local_max = max(times_ms)
+
+    t = torch.tensor([local_avg, local_min, local_max],
+                     dtype=torch.float64, device=dev)
+    t_max = t.clone()
+    t_min = t.clone()
+    dist.all_reduce(t_max, op=dist.ReduceOp.MAX)
+    dist.all_reduce(t_min, op=dist.ReduceOp.MIN)
+    if rank == 0:
+        print(f"[bench+eager] {op_tag} per-iter (us):  "
+              f"avg={local_avg*1000:.1f}  min={local_min*1000:.1f}  "
+              f"max={local_max*1000:.1f}  (local rank 0)")
+        print(f"[bench+eager] {op_tag} all-rank avg us: "
+              f"min={t_min[0].item()*1000:.1f}  "
+              f"max={t_max[0].item()*1000:.1f}")
+    return {"avg_us": local_avg * 1000,
+            "min_us": local_min * 1000,
+            "max_us": local_max * 1000}
 
 
 def run_acceptance(rank, world_size, args):
@@ -1689,6 +1744,7 @@ def run_acceptance(rank, world_size, args):
         scale_dim=args.scale_dim,
         scale_type_size=args.scale_type_size,
         quant_type=args.quant_type,
+        use_token_flag_sync=args.token_flag_sync,
     )
     args.max_num_inp_token_per_rank = cur_tok  # 给 _build_gemm2_static_inputs 使用
 
@@ -1747,6 +1803,7 @@ def run_acceptance(rank, world_size, args):
             a_dtype=args.gemm2_a_dtype, b_dtype=args.gemm2_b_dtype,
             force_mode=args.fuse_mode,
             xcd_swizzle=args.xcd_swizzle,
+            use_token_flag_sync=args.token_flag_sync,
         )
 
     ms.shmem_barrier_all()
@@ -1879,7 +1936,42 @@ def run_acceptance(rank, world_size, args):
         )
         return
     if args.mode == "bench":
-        _not_impl("bench" + ("+cudagraph" if args.cudagraph else "+eager"))
+        if args.cudagraph:
+            _not_impl("bench+cudagraph")
+        # eager bench：rocprofv3 / ATT trace 友好（不走 cudagraph，不包 torch.profiler）。
+        # chain 是否带 dispatch 由 --chain-include-dispatch 控制；对 fused 路径不带
+        # dispatch 时 combine_no_stage1 也会跑空，参考 _fused_chain doc。
+        chain_disp_inputs = (
+            (inp, wts, scales, idx) if args.chain_include_dispatch else None
+        )
+        bench_results = {}
+        if test_baseline:
+            def _bl():
+                return _baseline_chain(
+                    disp_op, gemm2_launch, gemm2_in, combine_idx,
+                    dispatch_inputs=chain_disp_inputs,
+                )
+            bench_results["baseline"] = _run_bench_eager(
+                _bl, "baseline", rank, world_size, dev,
+                warmup=args.warmup, iters=args.iters,
+            )
+        if test_fused:
+            def _fu():
+                return _fused_chain(
+                    disp_op, fused_op, gemm2_in, combine_idx,
+                    dispatch_total_recv,
+                    dispatch_inputs=chain_disp_inputs,
+                )
+            bench_results["fused"] = _run_bench_eager(
+                _fu, "fused", rank, world_size, dev,
+                warmup=args.warmup, iters=args.iters,
+            )
+        if rank == 0 and "baseline" in bench_results and "fused" in bench_results:
+            b = bench_results["baseline"]["avg_us"]
+            f = bench_results["fused"]["avg_us"]
+            print(f"\n[bench+eager] speedup baseline/fused = {b/f:.3f}x  "
+                  f"(baseline {b:.1f} us → fused {f:.1f} us)")
+        return
     if args.mode == "profile" and not args.cudagraph:
         _not_impl("profile+eager")
 
@@ -1971,14 +2063,16 @@ def _parse_args():
                         "默认 = bs * topk（均衡路由：每张卡 bs*topk*ep/ep 条 assignment）。"
                         "上限 = max_recv * topk = bs * topk * ep（worst-case 全部落本卡）。")
     p.add_argument("--routing",
-                   choices=["random", "uniform", "consec_same_pe", "atomic2_4pe"],
+                   choices=["random", "atomic1_8pe", "atomic8_1pe", "atomic2_4pe"],
                    default="random",
-                   help="dispatch 输入 idx 的构造方式："
+                   help="dispatch 输入 idx 的构造方式 (atomicN_Mpe 命名约定: 同 token 的 "
+                        "k 个 expert 分布到 M 个不同 PE 上，每 PE 落 N=atomic_per_pe=k/M "
+                        "个命中 → GEMM2 同一 output row 被 N 次 atomic_fadd 竞争)："
                         "random=每 token 在 k 个 PE 随机 expert（默认，保持历史行为）；"
-                        "uniform=确定性循环填充，同 token 的 k 个 expert 跨 k 个 PE，"
-                        "atomic contention=1，dispatch dedup 不触发，对应 production "
-                        "balanced EP routing（精度 verify 推荐用此模式）；"
-                        "consec_same_pe=同 token 的 k 个 expert 是连续 k 个 local_eid，"
+                        "atomic1_8pe=确定性循环填充，同 token 的 k 个 expert 跨 k 个 PE，"
+                        "atomic_per_pe=1，dispatch dedup 不触发，对应 production balanced "
+                        "EP routing（精度 verify 推荐用此模式）；"
+                        "atomic8_1pe=同 token 的 k 个 expert 是连续 k 个 local_eid，"
                         "全压同 1 个 dest_pe (atomic-k 累加 worst case)，卡间/卡内均衡。"
                         "require epr%%k==0 (32/8=4 ✓)；"
                         "atomic2_4pe=同 token 的 k 个 expert 分布在 *4 个* 不同 PE 上，"
@@ -2070,6 +2164,16 @@ def _parse_args():
     p.add_argument("--scale-type-size", type=int, default=0)
     p.add_argument("--quant-type", type=str, default="none",
                    choices=["none", "fp8_direct_cast"])
+    # D-flag C-1: per-token flag 同步开关。打开后 dispatch / combine kernel
+    # 启用 reset + spin-wait，fused gemm2 epilogue 增加跨卡 atomic_add；关闭
+    # 时整段 const_expr DCE，行为与 baseline 完全一致。仅在 --bench-op fused
+    # / both（fused 路径）下有可观察效果。
+    p.add_argument("--token-flag-sync", dest="token_flag_sync",
+                   action="store_true", default=False,
+                   help="启用 D-flag C-1 per-token flag 跨卡同步路径")
+    p.add_argument("--no-token-flag-sync", dest="token_flag_sync",
+                   action="store_false",
+                   help="禁用 D-flag C-1 路径（默认行为）")
     return p.parse_args()
 
 

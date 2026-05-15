@@ -2727,6 +2727,15 @@ def compile_mixed_moe_gemm2(
     # addr_p2p_comb_inp_wts），且强制 accumulate=False、doweight_stage2=False、
     # enable_bias=False、topk=1、use_cshuffle_epilog=True、out_dtype∈{bf16,f16}。
     fused_p2p_scatter: tuple | None = None,
+    # D-flag C-1: 启用 per-token flag 跨卡 atomic 同步。仅在
+    # fused_p2p_scatter is not None 时生效。启用后 launcher signature 在 fused
+    # 4 个 addr 后再追加 2 个 i64：
+    #   addr_local_counter    (本卡 i32[mr*topk], device-scope cross-CTA reduce)
+    #   addr_p2p_comb_flag    (i64[npes], 远端 shmem_comb_token_flag P2P 表)
+    # store_pair 末尾发起 device-scope atomic_add；最后一个 N-tile 完成的代表
+    # thread 发 system-scope atomic_add 到远端 flag，同时 consume-on-read xchg
+    # 把本卡 counter reset 为 0 复用。OFF 时整段 DCE，与原 fused 路径完全等价。
+    use_token_flag_sync: bool = False,
 ):
     """Compile stage2 kernel (`moe_gemm2`) and return the compiled executable.
 
@@ -2972,6 +2981,31 @@ def compile_mixed_moe_gemm2(
         _fp2p_log2_max_tok = _fp2p_mask_max_tok = None
         _fp2p_token_nbytes = 0
 
+    # D-flag C-1: 编译期开关。仅 fused_p2p_scatter 模式下生效；用户在 baseline
+    # 路径误传 True 时安静地降级到 False（baseline 不走 epilogue P2P scatter，
+    # token flag 无意义）。下游 _tfs_enabled 用于 const_expr DCE。
+    _tfs_enabled = bool(_fp2p_enabled and use_token_flag_sync)
+    if _tfs_enabled:
+        # local counter: per (target_token_id ∈ [0, mr), j ∈ [0, topk)) 一个 i32
+        # device-global slot，cross-CTA atomic_add 累计 N-tile 完成数。
+        # 远端 flag: per target_token_id 一个 i32，system-scope atomic_add，
+        # 由 combine kernel stage 3 spin。
+        _tfs_max_recv = int(_fp2p_npes) * int(_fp2p_max_tok)
+        _tfs_topk = int(_fp2p_k)
+        # 计算 num_n_tiles：每个 m-tile 的 N 维需要被覆盖 ceil(model_dim / tile_n)
+        # 次。fused 路径强制 use_cshuffle_epilog=True 且 model_dim_pad=0
+        # 在 PR1 MVP 下（无 pad 假设），num_n_tiles 是 compile-time 常量。
+        _tfs_num_n_tiles = (int(model_dim) + int(tile_n) - 1) // int(tile_n)
+        if _tfs_num_n_tiles <= 0:
+            raise ValueError(
+                "use_token_flag_sync requires model_dim / tile_n >= 1, "
+                f"got model_dim={model_dim}, tile_n={tile_n}"
+            )
+    else:
+        _tfs_max_recv = 0
+        _tfs_topk = 0
+        _tfs_num_n_tiles = 0
+
     epilog_tag = "cshuffle"
     # IMPORTANT: include tiling in the module name to avoid accidentally reusing a compiled
     # binary for a different (tile_m, tile_n, tile_k) configuration.
@@ -2997,10 +3031,11 @@ def compile_mixed_moe_gemm2(
             f"{'_wts' if _fp2p_enable_wts else ''}"
             f"{'_fp8' if _fp2p_fp8_cast else ''}"
         )
+    _tfs_modtag = "_tfsync" if _tfs_enabled else ""
     module_name = (
         f"mfma_moe2_a{a_dtype}_w{b_dtype}_{out_s}_{epilog_tag}"
         f"_t{tile_m}x{tile_n}x{tile_k}"
-        f"_vscale_fix3{_pm_tag}{_sbm_tag}{_xcd_tag}{_fp2p_modtag}"
+        f"_vscale_fix3{_pm_tag}{_sbm_tag}{_xcd_tag}{_fp2p_modtag}{_tfs_modtag}"
     ).replace("-", "_")
     # -- LDS sizing (pure Python; no MLIR Context needed) ---------------------
     # Ping-pong A2 tiles via separate allocators (like stage1).
@@ -3038,11 +3073,17 @@ def compile_mixed_moe_gemm2(
             allocator_pong.ptr = _lds_p2p_wts_bases_offset + int(_fp2p_npes) * 8
         else:
             _lds_p2p_wts_bases_offset = 0
+        if _tfs_enabled:
+            _lds_p2p_flag_bases_offset = allocator_pong._align(allocator_pong.ptr, 8)
+            allocator_pong.ptr = _lds_p2p_flag_bases_offset + int(_fp2p_npes) * 8
+        else:
+            _lds_p2p_flag_bases_offset = 0
         _lds_addr_tis_offset = allocator_pong._align(allocator_pong.ptr, 4)
         allocator_pong.ptr = _lds_addr_tis_offset + int(tile_m) * 4
     else:
         _lds_p2p_tok_bases_offset = 0
         _lds_p2p_wts_bases_offset = 0
+        _lds_p2p_flag_bases_offset = 0
         _lds_addr_tis_offset = 0
 
     lds_ping_offset = allocator_ping._align(allocator_ping.ptr, 16)
@@ -3068,6 +3109,10 @@ def compile_mixed_moe_gemm2(
             addr_p2p_comb_inp: fx.Int64,        # i64[npes]       remote shmem_comb_inp_tok bases
             addr_wts_buf: fx.Int64,             # f32[max_recv*k] dispatch-output weights
             addr_p2p_comb_inp_wts: fx.Int64,    # i64[npes]       remote shmem_comb_inp_wts bases
+            # D-flag C-1 2 个地址参数。_tfs_enabled OFF 时传 fx.Int64(0) 占位，
+            # 由 const_expr 在 store_pair 后的 after_row_stores 路径 DCE。
+            addr_local_counter: fx.Int64,        # i32[mr*topk] device-local counter
+            addr_p2p_comb_flag: fx.Int64,        # i64[npes]    remote shmem_comb_token_flag bases
             i32_tokens_in: fx.Int32,
             i32_n_in: fx.Int32,
             i32_k_in: fx.Int32,
@@ -3201,7 +3246,12 @@ def compile_mixed_moe_gemm2(
                     shape=(int(_fp2p_npes),),
                 )
                 lds_p2p_tok_bases_ptr.get()
-                if _fp2p_enable_wts:
+                # NOTE: 必须使用 const_expr 包住 if 条件——`if _fp2p_enable_wts:`
+                # 这种纯 Python bool 条件会被 ASTRewriter 当作 dynamic 分支，
+                # 转换为内部 `__then_N` 函数，则其中 `lds_p2p_*_bases_ptr = ...`
+                # 的赋值只活在内部函数局部，外层作用域的变量不会被绑定，
+                # 后续 const_expr 路径访问时报 UnboundLocalError。
+                if const_expr(_fp2p_enable_wts):
                     lds_p2p_wts_bases_ptr = SmemPtr(
                         base_ptr_pong,
                         _lds_p2p_wts_bases_offset,
@@ -3211,6 +3261,16 @@ def compile_mixed_moe_gemm2(
                     lds_p2p_wts_bases_ptr.get()
                 else:
                     lds_p2p_wts_bases_ptr = None
+                if const_expr(_tfs_enabled):
+                    lds_p2p_flag_bases_ptr = SmemPtr(
+                        base_ptr_pong,
+                        _lds_p2p_flag_bases_offset,
+                        T.i64,
+                        shape=(int(_fp2p_npes),),
+                    )
+                    lds_p2p_flag_bases_ptr.get()
+                else:
+                    lds_p2p_flag_bases_ptr = None
                 lds_addr_tis = SmemPtr(
                     base_ptr_pong,
                     _lds_addr_tis_offset,
@@ -3220,6 +3280,7 @@ def compile_mixed_moe_gemm2(
             else:
                 lds_p2p_tok_bases_ptr = None
                 lds_p2p_wts_bases_ptr = None
+                lds_p2p_flag_bases_ptr = None
                 lds_addr_tis = None
 
             # Buffer resources.
@@ -3304,6 +3365,18 @@ def compile_mixed_moe_gemm2(
                             _r_p2p_wts, _tx_i32_w, vec_width=1, dtype=T.i64
                         )
                         lds_p2p_wts_bases_ptr.store(_vw, [tx])
+                        scf.YieldOp([])
+                if const_expr(_tfs_enabled):
+                    _r_p2p_flag = buffer_ops.create_buffer_resource_from_addr(
+                        addr_p2p_comb_flag
+                    )
+                    _if_load_flag_p2p = scf.IfOp(_is_p2p_lane)
+                    with ir.InsertionPoint(_if_load_flag_p2p.then_block):
+                        _tx_i32_f = arith.index_cast(T.i32, tx)
+                        _vf = buffer_ops.buffer_load(
+                            _r_p2p_flag, _tx_i32_f, vec_width=1, dtype=T.i64
+                        )
+                        lds_p2p_flag_bases_ptr.store(_vf, [tx])
                         scf.YieldOp([])
                 gpu.barrier()
 
@@ -4568,6 +4641,12 @@ def compile_mixed_moe_gemm2(
                             alignment=_e_vec * out_elem_bytes,
                         )
 
+                # D-flag C-1: `after_row_stores` 仅在 fp2p+token_flag_sync 路径上
+                # 由后续 if 分支赋值。这里给出 Python 作用域级别的默认值，避免
+                # `_fp2p_enabled=False`（非 P2P 路径）时 Python 把 after_row_stores
+                # 当 local var 但又未赋值，导致 UnboundLocalError。
+                after_row_stores = None
+
                 # ── Fused-P2P epilogue, 方案 B (per-(src_tok, s) slot) ──────
                 # 用 P2P `buffer_store(SLC)` 写远端 shmem_comb_inp_tok 的
                 # 独立 slot：
@@ -4628,15 +4707,19 @@ def compile_mixed_moe_gemm2(
                                 pe_base_i64
                             )
                         )
+                        # D-flag C-1: 把 dest_pe / dest_lid / row_i32 透出供
+                        # after_row_stores 用；OFF 时这些字段被下游 _unused
+                        # 解构忽略。
                         return (
-                            (fused2, slot_off_bytes_i32, rsrc_dst),
+                            (fused2, slot_off_bytes_i32, rsrc_dst,
+                             dest_pe, dest_lid, row_i32),
                             row_valid,
                         )
 
                     def store_pair(
                         *, row_local, row, row_ctx, col_pair0, col_g0, frag
                     ):
-                        _, slot_off_bytes_i32, rsrc_dst = row_ctx
+                        _, slot_off_bytes_i32, rsrc_dst, *_tfs_unused = row_ctx
                         col_i32 = arith.index_cast(T.i32, col_g0)
                         # cache_modifier=2 (SLC): bypass L1 减少本地 cache 污
                         # 染，跨 xGMI 写远端 HBM 走 L2 + fabric。LLVM 在 kernel
@@ -4754,6 +4837,124 @@ def compile_mixed_moe_gemm2(
                                 cache_modifier=2,
                             )
 
+                    # D-flag C-1 after-row callback：在 row 的全部 n_reps_shuffle
+                    # 列 SLC store 后，由 n_lane==0 thread 执行：
+                    #   1. s_waitcnt vmcnt(0)：等本卡所有 SLC store 离开 pipeline
+                    #   2. atomicrmw add (device-scope) local_counter[row_i32]
+                    #   3. 若 old == num_n_tiles - 1（=最后一个 N-tile 完成）：
+                    #      a. atomic_add_global_at_system(remote_flag[dest_lid], 1)
+                    #      b. atomic_xchg_global_at_device(local_counter[row_i32], 0)
+                    if const_expr(_tfs_enabled):
+                        from .dispatch_combine_intranode_kernel import (
+                            atomic_add_global_at as _tfs_atomic_add,
+                            atomic_add_global_at_system as _tfs_atomic_add_sys,
+                            atomic_xchg_global_at_device as _tfs_atomic_xchg,
+                        )
+                        from flydsl._mlir import ir as _tfs_ir
+                        from flydsl._mlir.dialects import scf as _tfs_scf_d
+                        from flydsl._mlir.dialects import llvm as _tfs_llvm_d
+                        from flydsl._mlir.ir import (
+                            IntegerType as _tfs_IntTy,
+                            IntegerAttr as _tfs_IntAttr,
+                        )
+
+                        _c_tfs_num_n_tiles_i32 = arith.constant(int(_tfs_num_n_tiles))
+                        _c_tfs_topk_i32 = arith.constant(int(_tfs_topk))
+                        _c_tfs_zero_i32 = arith.constant(0)
+                        _c_tfs_one_i32 = arith.constant(1)
+
+                        def _tfs_byte_addr_local_counter(row_i32):
+                            # counter_addr = addr_local_counter + row_i32 * 4
+                            _i64 = _tfs_IntTy.get_signless(64)
+                            _i32 = _tfs_IntTy.get_signless(32)
+                            _nuw = _tfs_ir.Attribute.parse(
+                                "#llvm.overflow<none>")
+                            row_i64 = _tfs_llvm_d.ZExtOp(
+                                _i64,
+                                row_i32.ir_value() if hasattr(row_i32, "ir_value")
+                                else row_i32,
+                            ).res
+                            four_i64 = _tfs_llvm_d.ConstantOp(
+                                _i64, _tfs_IntAttr.get(_i64, 4)).result
+                            byte_off = _tfs_llvm_d.MulOp(
+                                row_i64, four_i64, _nuw).result
+                            base = (
+                                addr_local_counter.ir_value()
+                                if hasattr(addr_local_counter, "ir_value")
+                                else addr_local_counter
+                            )
+                            return _tfs_llvm_d.AddOp(base, byte_off, _nuw).result
+
+                        def _tfs_byte_addr_remote_flag(pe_base_i64, dest_lid_i32):
+                            _i64 = _tfs_IntTy.get_signless(64)
+                            _i32 = _tfs_IntTy.get_signless(32)
+                            _nuw = _tfs_ir.Attribute.parse(
+                                "#llvm.overflow<none>")
+                            lid_i64 = _tfs_llvm_d.ZExtOp(
+                                _i64,
+                                dest_lid_i32.ir_value() if hasattr(
+                                    dest_lid_i32, "ir_value")
+                                else dest_lid_i32,
+                            ).res
+                            four_i64 = _tfs_llvm_d.ConstantOp(
+                                _i64, _tfs_IntAttr.get(_i64, 4)).result
+                            byte_off = _tfs_llvm_d.MulOp(
+                                lid_i64, four_i64, _nuw).result
+                            base = (
+                                pe_base_i64.ir_value()
+                                if hasattr(pe_base_i64, "ir_value")
+                                else pe_base_i64
+                            )
+                            return _tfs_llvm_d.AddOp(base, byte_off, _nuw).result
+
+                        def after_row_stores(*, row_local, row, row_ctx, n_lane):
+                            _, _, _, dest_pe, dest_lid, row_i32 = row_ctx
+                            # 只让每行的 n_lane==0 thread 做 atomic。其余 lane
+                            # 在 same row 也跑到此处，但 atomic 操作 gate 在
+                            # if 内部。
+                            _zero_idx = arith.constant(0, index=True)
+                            _is_lead = arith.cmpi(
+                                CmpIPredicate.eq, n_lane, _zero_idx)
+                            _if_lead = _tfs_scf_d.IfOp(
+                                _is_lead.ir_value() if hasattr(_is_lead, "ir_value")
+                                else _is_lead
+                            )
+                            with _tfs_ir.InsertionPoint(_if_lead.then_block):
+                                # vmcnt(0)：等本卡 SLC store 离开 pipeline。
+                                rocdl.s_waitcnt(0)
+                                # device-scope cross-CTA atomic add
+                                _counter_addr = _tfs_byte_addr_local_counter(row_i32)
+                                _old = _tfs_atomic_add(
+                                    _counter_addr, _c_tfs_one_i32)
+                                _last_eq = arith.cmpi(
+                                    CmpIPredicate.eq,
+                                    _old,
+                                    arith.constant(int(_tfs_num_n_tiles) - 1),
+                                )
+                                _if_last = _tfs_scf_d.IfOp(
+                                    _last_eq.ir_value() if hasattr(_last_eq, "ir_value")
+                                    else _last_eq
+                                )
+                                with _tfs_ir.InsertionPoint(_if_last.then_block):
+                                    # 跨卡 system-scope atomic add 远端 flag。
+                                    dest_pe_idx = arith.index_cast(
+                                        ir.IndexType.get(), dest_pe
+                                    )
+                                    pe_flag_base_i64 = lds_p2p_flag_bases_ptr.load(
+                                        [dest_pe_idx]
+                                    )
+                                    _remote_addr = _tfs_byte_addr_remote_flag(
+                                        pe_flag_base_i64, dest_lid)
+                                    _tfs_atomic_add_sys(
+                                        _remote_addr, _c_tfs_one_i32)
+                                    # consume-on-read reset 本卡 counter
+                                    _tfs_atomic_xchg(
+                                        _counter_addr, _c_tfs_zero_i32)
+                                    _tfs_scf_d.YieldOp([])
+                                _tfs_scf_d.YieldOp([])
+                    else:
+                        after_row_stores = None
+
                 _e_vec = 2 if accumulate else min(tile_n // 32, 8)
                 c_shuffle_epilog(
                     arith=arith,
@@ -4779,6 +4980,7 @@ def compile_mixed_moe_gemm2(
                     write_row_to_lds=write_row_to_lds,
                     precompute_row=precompute_row,
                     store_pair=store_pair,
+                    after_row_stores=after_row_stores,
                 )
 
             _all_valid = arith.andi(blk_valid, arith.andi(exp_valid, tile_has_tokens))
@@ -4841,8 +5043,9 @@ def compile_mixed_moe_gemm2(
 
     def _emit_launch_body(
         tensors,                # 10-tuple: arg_out..arg_bias
-        addrs,                  # 4-tuple: addr_tis / addr_p2p_comb_inp /
-                                #          addr_wts_buf / addr_p2p_comb_inp_wts
+        addrs,                  # 6-tuple: addr_tis / addr_p2p_comb_inp /
+                                #          addr_wts_buf / addr_p2p_comb_inp_wts /
+                                #          addr_local_counter / addr_p2p_comb_flag
                                 #          baseline 路径全部传 fx.Int64(0)
         i32_tokens_in, i32_n_in, i32_k_in, i32_size_expert_ids_in,
         stream,
@@ -4894,6 +5097,8 @@ def compile_mixed_moe_gemm2(
             addr_p2p_comb_inp: fx.Int64,
             addr_wts_buf: fx.Int64,
             addr_p2p_comb_inp_wts: fx.Int64,
+            addr_local_counter: fx.Int64,
+            addr_p2p_comb_flag: fx.Int64,
             i32_tokens_in: fx.Int32,
             i32_n_in: fx.Int32,
             i32_k_in: fx.Int32,
@@ -4905,7 +5110,8 @@ def compile_mixed_moe_gemm2(
                 (arg_out, arg_x, arg_w, arg_scale_x, arg_scale_w,
                  arg_sorted_token_ids, arg_expert_ids, arg_sorted_weights,
                  arg_num_valid_ids, arg_bias),
-                (addr_tis, addr_p2p_comb_inp, addr_wts_buf, addr_p2p_comb_inp_wts),
+                (addr_tis, addr_p2p_comb_inp, addr_wts_buf, addr_p2p_comb_inp_wts,
+                 addr_local_counter, addr_p2p_comb_flag),
                 i32_tokens_in, i32_n_in, i32_k_in, i32_size_expert_ids_in, stream,
             )
 
@@ -4930,14 +5136,16 @@ def compile_mixed_moe_gemm2(
         stream: fx.Stream,
     ):
         _ = _cache_tag
-        # baseline 路径 4 个 fused-only 地址传 fx.Int64(0) 占位；kernel body
-        # 的 _fp2p_enabled (Python compile-time 常量) 会 DCE 对应分支，运行时零开销。
+        # baseline 路径 6 个 fused-only 地址传 fx.Int64(0) 占位；kernel body
+        # 的 _fp2p_enabled / _tfs_enabled (Python compile-time 常量) 会 DCE
+        # 对应分支，运行时零开销。
         _zero_i64 = fx.Int64(0)
         _emit_launch_body(
             (arg_out, arg_x, arg_w, arg_scale_x, arg_scale_w,
              arg_sorted_token_ids, arg_expert_ids, arg_sorted_weights,
              arg_num_valid_ids, arg_bias),
-            (_zero_i64, _zero_i64, _zero_i64, _zero_i64),
+            (_zero_i64, _zero_i64, _zero_i64, _zero_i64,
+             _zero_i64, _zero_i64),
             i32_tokens_in, i32_n_in, i32_k_in, i32_size_expert_ids_in, stream,
         )
 

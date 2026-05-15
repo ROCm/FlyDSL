@@ -103,6 +103,35 @@ def atomic_add_global_at(addr_i64, val):
         _llvm_d.AtomicOrdering.monotonic).res
 
 
+def atomic_add_global_at_system(addr_i64, val):
+    """System-scope (cross-card visible) atomic fetch-and-add (monotonic).
+
+    Same as ``atomic_add_global_at`` but with ``syncscope="one-as"`` so the
+    increment is visible across PCIe/xGMI on gfx950. Used by D-flag C-1 fused
+    gemm2 epilogue to bump the remote per-token flag on combine kernel's home
+    rank. Returns old value (caller usually discards).
+    """
+    ptr = _to_ptr_global(addr_i64)
+    return _llvm_d.AtomicRMWOp(
+        _llvm_d.AtomicBinOp.add, ptr, _lv_unwrap(val),
+        _llvm_d.AtomicOrdering.monotonic, syncscope="one-as").res
+
+
+def atomic_xchg_global_at_device(addr_i64, val):
+    """Device-scope atomic exchange (monotonic). Returns old value.
+
+    Used by D-flag C-1 consume-on-read reset of the per-(m_tile, j) local
+    counter: when the last N-tile finishes, the representative thread does
+    one cross-card system atomic, then atomically resets the local counter
+    to 0 so the next chain iteration starts fresh without a separate
+    dispatch-time grid-stride memset.
+    """
+    ptr = _to_ptr_global(addr_i64)
+    return _llvm_d.AtomicRMWOp(
+        _llvm_d.AtomicBinOp.xchg, ptr, _lv_unwrap(val),
+        _llvm_d.AtomicOrdering.monotonic).res
+
+
 def _to_idx(v):
     """ArithValue / Python int → index type."""
     if isinstance(v, int):
@@ -136,6 +165,7 @@ def make_dispatch_kernel(
     scale_type_size: int = 0,
     enable_std_moe: bool = False,
     data_type=None,
+    use_token_flag_sync: bool = False,
 ):
     """创建 dispatch intranode @flyc.kernel。"""
     max_recv = npes * max_tok_per_rank
@@ -181,6 +211,12 @@ def make_dispatch_kernel(
         addr_packed_recv_src_info: fx.Int64,  # source info (i32[experts_per_rank * max_tok_per_expert])
         addr_disp_tok_map:         fx.Int64,  # slot mapping (i64[max_recv * top_k])
         addr_disp_grid_bar:        fx.Int64,  # grid barrier (i32[1])
+        # D-flag C-1 per-token flag base (i32[max_recv])。仅当
+        # use_token_flag_sync=True 时被使用：dispatch kernel 入口 grid-stride
+        # memset reset；fused gemm2 epilogue 跨卡 atomic_add；combine stage 3
+        # 入口 per-warp spin-wait。const_expr 开关 OFF 时整段 reset 代码 DCE，
+        # 此 arg 是 dummy ptr（实际仍透传地址，0 launch overhead）。
+        addr_comb_flag:            fx.Int64,
         cur_tok:       fx.Int32,  # 动态：本轮实际 token 数
     ):
         tid    = fx.thread_idx.x
@@ -190,6 +226,22 @@ def make_dispatch_kernel(
         gw_id  = bid * warp_num_per_block + warp
         gw_num = block_num * warp_num_per_block
         limit  = cur_tok * experts_per_token
+
+        # D-flag C-1: 入口 grid-stride memset reset comb flag。必须早于
+        # Phase 2 send recv-signal（line 320 之前），保证 gemm2 启动 atomic
+        # 之前所有 PE 的本地 flag 都已清零。const_expr OFF 时整段 DCE。
+        if const_expr(use_token_flag_sync):
+            mr_const = npes * max_tok_per_rank
+            gtid = bid * (warp_num_per_block * 64) + tid
+            gthrd_num = block_num * warp_num_per_block * 64
+            _r_comb_flag_reset = create_buffer_resource_from_addr(
+                _lv_unwrap(addr_comb_flag))
+            for i in range(_to_idx(gtid), _to_idx(mr_const), _to_idx(gthrd_num)):
+                buffer_store(_lv_unwrap(arith.constant(0)),
+                             _r_comb_flag_reset, _to_i32(i))
+            # 不在此处加 barrier：reset 是 per-token write 不会被同卡其他 thread
+            # 看到 stale 值；跨卡可见性由 Phase 2/3 的 atomic + mori_shmem wait
+            # 串联保证（store_i32_system 已是 monotonic system-scope）。
         _r_idx     = create_buffer_resource_from_addr(_lv_unwrap(addr_idx))
         _r_wts     = create_buffer_resource_from_addr(_lv_unwrap(addr_wts))
         _r_tok_map = create_buffer_resource_from_addr(_lv_unwrap(addr_tok_map))
@@ -454,6 +506,7 @@ def make_combine_kernel(
     skip_stage1: bool = False,
     skip_stage1_keep_wts: bool = False,
     inp_data_type=None,
+    use_token_flag_sync: bool = False,
 ):
     """创建 combine intranode @flyc.kernel。
 
@@ -865,6 +918,10 @@ def make_combine_kernel(
         addr_packed_recv_x:  fx.Int64,  # expert-major token buffer (post-expert)
         addr_disp_tok_map:   fx.Int64,  # dispTokToEpSlotMap (i64[max_recv * top_k])
         addr_disp_out_wts:   fx.Int64,  # dispatch output weights (f32[max_recv * top_k])
+        # D-flag C-1 per-token flag base (i32[max_recv])。DG3 时在
+        # use_token_flag_sync=True 路径上 stage 3 入口 per-warp
+        # spin-wait flag[tok_id] >= topk。DG1 阶段仅 plumbing，kernel 内不用。
+        addr_comb_flag:      fx.Int64,
         cur_rank_num_token:  fx.Int32,  # 本 PE 的输出 token 数（Stage 3 用）
     ):
         tid    = fx.thread_idx.x
@@ -922,11 +979,14 @@ def make_combine_kernel(
         n_chunks = nbytes // 16
 
         if const_expr(skip_stage1):
-            if const_expr(skip_stage1_keep_wts and enable_weights):
-                # Weight-only Stage 1: same as default path but only writes
-                # the small weight slot (no per-token hidden bytes).  Used by
-                # fused_gemm2_combine to keep weight scatter off the heavy
-                # token-write fabric.
+            if const_expr(skip_stage1_keep_wts and enable_weights
+                          and not use_token_flag_sync):
+                # baseline Plan B path: cross-PE weight scatter from local
+                # disp_out_wts to remote comb_inp_wts (off heavy token fabric).
+                # D-flag C-1 (use_token_flag_sync): 整段裁掉 —— stage 3b 改
+                # 走本地 raw input weights 直读（caller 传 raw_input_wts_ptr
+                # 作为 addr_wts_buf），无需 scatter 与 P2P，也不依赖 stage 2
+                # cross-card barrier。
                 for tok_i in range(_to_idx(gw_id), _to_idx(total_recv_val), _to_idx(gw_num)):
                     tok_i = _to_i32(tok_i)
                     dest_enc = buffer_load(_r_tis, tok_i, vec_width=1, dtype=T.i32())
@@ -1149,27 +1209,42 @@ def make_combine_kernel(
                         buffer_store(_lv_unwrap(_wv), _rsrc_wt_d, lane)
 
         # Stage 2: CrossDeviceBarrier
-        fx.barrier()
-        if arith.cmpi(arith.CmpIPredicate.eq, tid, arith.constant(0)):
-            atomic_add_global_at(addr_comb_bar, arith.constant(1))
+        # D-flag C-1: use_token_flag_sync && skip_stage1 时跳过 stage 2
+        # cross-device barrier。
+        # - token: fused gemm2 epilogue 已做 per-token system-scope atomic_add；
+        #   stage 3 入口 per-warp spin (int32_wait_until_greater_than) 等
+        #   flag[tok_id] >= topk
+        # - weight: 直接 P2P read 远端 src PE 的 sorted_weights
+        #   (shmem_disp_out_wts)，dispatch 完成后该 buffer 已稳定，无需跨卡同步
+        # 比 grid-wide barrier 节省 ~7-10us。
+        if const_expr(not (use_token_flag_sync and skip_stage1)):
+            fx.barrier()
+            if arith.cmpi(arith.CmpIPredicate.eq, tid, arith.constant(0)):
+                atomic_add_global_at(addr_comb_bar, arith.constant(1))
 
-        if arith.cmpi(arith.CmpIPredicate.ult, gwtid, arith.constant(npes)):
-            mori_shmem.int32_wait_until_equals(addr_comb_bar, block_num)
-            buffer_store(_lv_unwrap(arith.constant(0)), _r_comb_bar, arith.constant(0))
-            xdb_remote = buffer_load(_r_p2p_xdb, gwtid, vec_width=1, dtype=T.i64()) + \
-                arith.zext_i64(arith.constant(rank)) * 8
-            store_i64_global_system(xdb_remote, cur_flag)
+            if arith.cmpi(arith.CmpIPredicate.ult, gwtid, arith.constant(npes)):
+                mori_shmem.int32_wait_until_equals(addr_comb_bar, block_num)
+                buffer_store(_lv_unwrap(arith.constant(0)), _r_comb_bar, arith.constant(0))
+                xdb_remote = buffer_load(_r_p2p_xdb, gwtid, vec_width=1, dtype=T.i64()) + \
+                    arith.zext_i64(arith.constant(rank)) * 8
+                store_i64_global_system(xdb_remote, cur_flag)
 
-        if arith.cmpi(arith.CmpIPredicate.eq, gwtid, arith.constant(0)):
-            atomic_add_global_at(addr_xdb_flag, arith.constant(1, type=T.i64()))
+            if arith.cmpi(arith.CmpIPredicate.eq, gwtid, arith.constant(0)):
+                atomic_add_global_at(addr_xdb_flag, arith.constant(1, type=T.i64()))
 
-        if arith.cmpi(arith.CmpIPredicate.ult, tid, arith.constant(npes)):
-            peer_slot = addr_xdb_mem + arith.zext_i64(tid) * 8
-            mori_shmem.uint64_wait_until_equals(peer_slot, cur_flag)
+            if arith.cmpi(arith.CmpIPredicate.ult, tid, arith.constant(npes)):
+                peer_slot = addr_xdb_mem + arith.zext_i64(tid) * 8
+                mori_shmem.uint64_wait_until_equals(peer_slot, cur_flag)
 
-        fx.barrier()
-        if arith.cmpi(arith.CmpIPredicate.eq, tid, arith.constant(0)):
-            buffer_store(_lv_unwrap(arith.constant(0)), _r_trecv, arith.constant(0))
+            fx.barrier()
+            if arith.cmpi(arith.CmpIPredicate.eq, tid, arith.constant(0)):
+                buffer_store(_lv_unwrap(arith.constant(0)), _r_trecv, arith.constant(0))
+        else:
+            # token-flag-sync 路径：xdev barrier 整段跳过。total_recv 仍需在
+            # 入口 reset 为 0（cudagraph replay 兼容），但 reset 不影响 spin
+            # （spin 仅等 flag，循环上界用 cur_rank_num_token）。
+            if arith.cmpi(arith.CmpIPredicate.eq, tid, arith.constant(0)):
+                buffer_store(_lv_unwrap(arith.constant(0)), _r_trecv, arith.constant(0))
 
         # Stage 3: 本地读 + WarpAccum
         from flydsl._mlir.dialects import scf as _scf_d
@@ -1189,6 +1264,19 @@ def make_combine_kernel(
             tok_id  = arith.divui(si, wpt)
             part_id = arith.remui(si, wpt)
             h_off   = part_id * hpw
+
+            # D-flag C-1: per-warp spin-wait flag[tok_id] >= topk。
+            # 仅 lane 0 调 mori_shmem.int32_wait_until_greater_than；warp lockstep
+            # 保证其余 lane 在条件分支汇合处等齐。padding token (tok_id 越界)
+            # 跳过 spin（buffer 中其位置 flag 永远 0）。
+            # 注：每个 warp 在 wpt > 1 时会对同一 tok_id spin 多次，但 spin 一旦
+            # 满足后 buffer_load 直接返回（无 atomic 也无 fence），开销可忽略。
+            if const_expr(use_token_flag_sync and skip_stage1):
+                if arith.cmpi(arith.CmpIPredicate.ult, tok_id, cur_rank_num_token):
+                    if arith.cmpi(arith.CmpIPredicate.eq, lane, arith.constant(0)):
+                        _flag_addr = addr_comb_flag + arith.zext_i64(tok_id) * 4
+                        mori_shmem.int32_wait_until_greater_than(
+                            _flag_addr, arith.constant(experts_per_token - 1))
 
             _expert_rsrc = []
             _expert_vld  = []
@@ -1368,7 +1456,41 @@ def make_combine_kernel(
                 _if_wt_outer = scf.IfOp(_lv_unwrap(_wt_outer_cond))
                 with ir.InsertionPoint(_if_wt_outer.then_block):
                     wt_acc = arith.constant(0.0, type=T.f32())
-                    for _wj in range_constexpr(experts_per_token):
+                    # D-flag C-1: use_token_flag_sync 时直接从本地 raw input
+                    # weights ([max_tok, topk]) 读 me.weights[wt_tok, lane]。
+                    # 仍然保留 _wj 循环 + _wvld 检测，处理 dispatch dedup
+                    # （路由让多个 j 落同 dest_pe 时，部分 _wj 是 sentinel）。
+                    # 与 baseline 在 dup 路由下的累加次数一致；非 dup 路由下
+                    # 累加 topk 次 = topk × me.weights[wt_tok, lane]。
+                    if const_expr(use_token_flag_sync and skip_stage1):
+                        # D-flag C-1 fast-path: 不走 P2P read，直接本地读 raw
+                        # input weights ([max_tok_per_rank, topk] f32 layout)。
+                        # 仍解码 dest_tok_map 拿 _wvld 做 dup 检查（与 baseline
+                        # 数学正确路径一致：dup _wj 贡献 0，非 dup 累加本地
+                        # me.weights[src_tok, lane]）。本地直读省 P2P + scatter
+                        # + barrier，依然保留 routing dedup 语义。
+                        _rsrc_inp_wts_local = create_buffer_resource_from_addr(
+                            _lv_unwrap(addr_wts_buf))
+                        _wv_local = buffer_load(_rsrc_inp_wts_local,
+                            wt_tok * experts_per_token + lane,
+                            vec_width=1, dtype=T.f32())
+                        for _wj in range_constexpr(experts_per_token):
+                            if const_expr(_wj < 4):
+                                _wenc = _llvm_d.ExtractElementOp(
+                                    _wtm_vec0, arith.constant(_wj)).res
+                            else:
+                                _wenc = _llvm_d.ExtractElementOp(
+                                    _wtm_vec1, arith.constant(_wj - 4)).res
+                            if const_expr(_log2_max_recv is not None):
+                                _wpe_t = _wenc >> arith.constant(_log2_max_recv)
+                            else:
+                                _wpe_t = arith.divui(_wenc, max_recv)
+                            _wvld_t = arith.cmpi(arith.CmpIPredicate.ult,
+                                _wpe_t, arith.constant(npes))
+                            wt_acc = wt_acc + arith.select(_wvld_t, _wv_local,
+                                arith.constant(0.0, type=T.f32()))
+                    else:
+                      for _wj in range_constexpr(experts_per_token):
                         if const_expr(_wj < 4):
                             _wenc = _llvm_d.ExtractElementOp(
                                 _wtm_vec0, arith.constant(_wj)).res
@@ -1394,11 +1516,15 @@ def make_combine_kernel(
                             _wt_rsrc = create_buffer_resource_from_addr(
                                 _lv_unwrap(addr_comb_inp_wts + _wt_src_off))
                         _wv = buffer_load(_wt_rsrc, lane, vec_width=1, dtype=T.f32())
-                        if const_expr(npes >= experts_per_token):
-                            wt_acc = wt_acc + _wv
-                        else:
-                            wt_acc = wt_acc + arith.select(_wvld, _wv,
-                                arith.constant(0.0, type=T.f32()))
+                        # 永远 dup-aware: 历史代码在 `npes >= experts_per_token`
+                        # 时跳过 _wvld 检查（假设 routing 无 dup），但对
+                        # atomic8_1pe / atomic2_4pe 等 dup-heavy routing
+                        # 这个假设不成立 —— sentinel _wj 仍会被 fallback
+                        # 钳到 (rank, offset=0) 读到 me.comb_inp_wts[0+lane]
+                        # 的无关 weight 值并错误累加。统一走 select(_wvld, _wv, 0)
+                        # 保证 dup _wj 贡献为 0，与数学正确性一致。
+                        wt_acc = wt_acc + arith.select(_wvld, _wv,
+                            arith.constant(0.0, type=T.f32()))
                     _wt_out_off = wt_tok * experts_per_token + lane
                     buffer_store(_lv_unwrap(wt_acc), _rsrc_out_wts, _wt_out_off)
                     scf.YieldOp([])
@@ -1411,7 +1537,8 @@ def make_dispatch_jit(*, rank, npes, experts_per_rank, experts_per_token,
                       hidden_dim, max_tok_per_rank, block_num,
                       warp_num_per_block, data_type,
                       scale_dim=0, scale_type_size=0,
-                      enable_std_moe=False):
+                      enable_std_moe=False,
+                      use_token_flag_sync=False):
     hidden_elem_size = torch.tensor([], dtype=data_type).element_size()
     kernel = make_dispatch_kernel(
         rank=rank, npes=npes,
@@ -1426,11 +1553,13 @@ def make_dispatch_jit(*, rank, npes, experts_per_rank, experts_per_token,
         scale_type_size=scale_type_size,
         enable_std_moe=enable_std_moe,
         data_type=data_type,
+        use_token_flag_sync=use_token_flag_sync,
     )
 
     # JIT cache key 所需闭包变量
     _rank_id, _npes_id, _block_num = rank, npes, block_num
     _wpb, _max_tok, _en_smoe = warp_num_per_block, max_tok_per_rank, enable_std_moe
+    _tfs = use_token_flag_sync
 
     @flyc.jit
     def dispatch_launch(
@@ -1447,10 +1576,11 @@ def make_dispatch_jit(*, rank, npes, experts_per_rank, experts_per_token,
         addr_packed_recv_x: fx.Int64, addr_packed_recv_count: fx.Int64,
         addr_packed_recv_src_info: fx.Int64, addr_disp_tok_map: fx.Int64,
         addr_disp_grid_bar: fx.Int64,
+        addr_comb_flag: fx.Int64,
         cur_tok: fx.Int32,
         stream: Stream = Stream(None),
     ):
-        _ = (_rank_id, _npes_id, _block_num, _wpb, _max_tok, _en_smoe)
+        _ = (_rank_id, _npes_id, _block_num, _wpb, _max_tok, _en_smoe, _tfs)
         kernel(addr_inp_tok, addr_idx, addr_wts,
                addr_out_tok, addr_out_wts, addr_out_idx,
                addr_tok_off, addr_recv_num, addr_dest_ctr,
@@ -1463,6 +1593,7 @@ def make_dispatch_jit(*, rank, npes, experts_per_rank, experts_per_token,
                addr_packed_recv_x, addr_packed_recv_count,
                addr_packed_recv_src_info, addr_disp_tok_map,
                addr_disp_grid_bar,
+               addr_comb_flag,
                cur_tok).launch(
             grid=(block_num, 1, 1),
             block=(warp_num_per_block * 64, 1, 1),
@@ -1478,7 +1609,8 @@ def make_combine_jit(*, rank, npes, experts_per_rank=0, experts_per_token,
                      enable_weights=False, enable_std_moe=False,
                      use_p2p_read=False, skip_stage1=False,
                      skip_stage1_keep_wts=False,
-                     inp_data_type=None):
+                     inp_data_type=None,
+                     use_token_flag_sync=False):
     hidden_elem_size = torch.tensor([], dtype=data_type).element_size()
     kernel = make_combine_kernel(
         rank=rank, npes=npes,
@@ -1496,6 +1628,7 @@ def make_combine_jit(*, rank, npes, experts_per_rank=0, experts_per_token,
         skip_stage1=skip_stage1,
         skip_stage1_keep_wts=skip_stage1_keep_wts,
         inp_data_type=inp_data_type,
+        use_token_flag_sync=use_token_flag_sync,
     )
 
     # JIT cache key 所需闭包变量
@@ -1505,6 +1638,7 @@ def make_combine_jit(*, rank, npes, experts_per_rank=0, experts_per_token,
     _skip_s1 = skip_stage1
     _skip_s1_kw = skip_stage1_keep_wts
     _inp_dt = str(inp_data_type) if inp_data_type is not None else "none"
+    _tfs = use_token_flag_sync
     _allocator = kernel._allocator
 
     @flyc.jit
@@ -1520,11 +1654,12 @@ def make_combine_jit(*, rank, npes, experts_per_rank=0, experts_per_token,
         addr_p2p_comb_inp_wts: fx.Int64,
         addr_packed_recv_x: fx.Int64, addr_disp_tok_map: fx.Int64,
         addr_disp_out_wts: fx.Int64,
+        addr_comb_flag: fx.Int64,
         cur_rank_num_token: fx.Int32,
         stream: Stream = Stream(None),
     ):
         _ = (_rank_id, _npes_id, _block_num, _wpb, _max_tok,
-             _en_wts, _en_smoe, _p2p_rd, _skip_s1, _skip_s1_kw, _inp_dt)
+             _en_wts, _en_smoe, _p2p_rd, _skip_s1, _skip_s1_kw, _inp_dt, _tfs)
         from flydsl.compiler.kernel_function import CompilationContext
         from flydsl._mlir import ir
         _allocator.finalized = False
@@ -1540,6 +1675,7 @@ def make_combine_jit(*, rank, npes, experts_per_rank=0, experts_per_token,
                addr_comb_out_wts, addr_p2p_comb_inp_wts,
                addr_packed_recv_x, addr_disp_tok_map,
                addr_disp_out_wts,
+               addr_comb_flag,
                cur_rank_num_token).launch(
             grid=(block_num, 1, 1),
             block=(warp_num_per_block * 64, 1, 1),

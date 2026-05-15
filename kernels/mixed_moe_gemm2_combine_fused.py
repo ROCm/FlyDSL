@@ -40,6 +40,7 @@ def compile_fused_moe_gemm2_combine(
     model_dim_pad: int = 0,
     inter_dim_pad: int = 0,
     xcd_swizzle: int = 0,
+    use_token_flag_sync: bool = False,
 ):
     """编译融合 GEMM2+combine kernel，返回 host launcher。"""
     if mode == "full":
@@ -115,6 +116,7 @@ def compile_fused_moe_gemm2_combine(
         use_cshuffle_epilog=True,
         xcd_swizzle=xcd_swizzle,
         fused_p2p_scatter=fused_cfg,
+        use_token_flag_sync=use_token_flag_sync,
     )
 
 
