@@ -74,6 +74,8 @@ _mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_mod)
 compile_gemm_a8w8_blockscale = _mod.compile_gemm_a8w8_blockscale
 
+from kernels.util.shuffle import preshuffle_fp8_weights_gfx1250
+
 _warmup_spec = importlib.util.spec_from_file_location(
     "warmup_read_kernel",
     os.path.join(_FLYDSL_ROOT, "kernels/warmup_read_kernel.py"),
@@ -170,6 +172,9 @@ def main():
 
     print("Running warmup kernel (warms L2/TLB for GEMM inputs)...")
     _run_warmup([x, w, x_scale, w_scale], stream=stream)
+
+    # Preshuffle W into cycle-major LDS layout (gfx1250 WMMA 16x16x128 FP8).
+    w = preshuffle_fp8_weights_gfx1250(w)
 
     launch_fn(y, x, w, x_scale, w_scale, M, N_padded, stream=stream)
     torch.cuda.synchronize()

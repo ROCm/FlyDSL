@@ -288,9 +288,11 @@ def compile_gemm_a8w8_blockscale(
     effective_waves_per_eu = waves_per_eu
 
     lds_a_stride_bytes = tile_k + LDS_PAD_A_BYTES
-    lds_b_stride_bytes = tile_k + LDS_PAD_B_BYTES
+    # B is now preshuffled (cycle-major). Each stripe (= 16 N values) holds
+    # tile_k cycles of 16 bytes = tile_k * 16 contiguous bytes, no padding.
+    lds_b_stride_bytes = tile_k * 16  # per-stripe size in LDS bytes
     lds_a_data_bytes = tile_m * lds_a_stride_bytes
-    lds_b_data_bytes = tile_n * lds_b_stride_bytes
+    lds_b_data_bytes = (tile_n // 16) * lds_b_stride_bytes
 
     # X-scale LDS (TDM-staged): tile_m rows × scales_per_tile × 4B per stage.
     USES_X_SCALE_TDM = variant in (
@@ -472,16 +474,22 @@ def compile_gemm_a8w8_blockscale(
             )
 
         def _make_desc_w(lds_mem, k_base):
+            # W is preshuffled to (N // 16, K * 16) cycle-major layout.
+            # Each row in HBM = one 16-N stripe; byte offset within row =
+            # k_element_index * 16 (since each (n_inner, K_inner) cycle cell
+            # is 16 bytes). Per K-tile per workgroup, read (tile_n//16)
+            # stripes of (tile_k * 16) bytes each = tile_n * tile_k bytes
+            # total, no padding.
             return tdm_ops.make_tensor_descriptor_2d(
                 global_ptr=arg_w,
                 lds_memref=lds_mem,
-                global_offset=(blk_n, k_base),
-                tensor_shape=(tile_n, tile_k),
-                strides=(K, 1),
-                tile_shape=(tile_n, tile_k),
+                global_offset=(blk_n // arith.index(16), k_base * arith.index(16)),
+                tensor_shape=(tile_n // 16, tile_k * 16),
+                strides=(K * 16, 1),
+                tile_shape=(tile_n // 16, tile_k * 16),
                 elem_bytes=1,
-                pad_interval=tile_k,
-                pad_amount=LDS_PAD_B_BYTES,
+                pad_interval=tile_k * 16,
+                pad_amount=0,
                 num_warps=num_warps,
             )
 
@@ -844,9 +852,15 @@ def compile_gemm_a8w8_blockscale(
         # lane_kgrp selects K-half: kgrp=0 → bytes [0..63], kgrp=1 → [64..127].
         k_half_byte_offset = lane_kgrp * arith.index(64)
 
+        # For preshuffled B (cycle-major), lane group selects which cycle
+        # within each WMMA's 8-cycle window: kgrp=0 reads cycles 0,2,4,6;
+        # kgrp=1 reads cycles 1,3,5,7. One cycle = 256 LDS bytes.
+        b_k_half_byte_offset = lane_kgrp * arith.index(256)
+
         def _compute_lane_bases(warp_base, stride_bytes, num_reps, rep_stride_elems):
             """Compute per-lane LDS byte offsets for loading `num_reps` WMMA
-            frags along M or N. Returns a list of base offsets indexed by rep."""
+            frags along M or N. Returns a list of base offsets indexed by rep.
+            (Used for A — M-major LDS layout.)"""
             row_base_bytes = (warp_base + lane16) * arith.index(stride_bytes)
             bases = []
             for rep in range_constexpr(num_reps):
@@ -858,15 +872,46 @@ def compile_gemm_a8w8_blockscale(
                 bases.append(base)
             return bases
 
-        def _load_frag(lds_memref, lane_base, ks):
+        def _compute_b_lane_bases_preshuffled(warp_base, num_reps):
+            """Compute per-lane LDS byte offsets for B in cycle-major
+            preshuffled layout. Each rep = one WMMA tile along N, which
+            corresponds to one 16-N stripe in LDS (size lds_b_stride_bytes
+            = tile_k * 16). Within a stripe, lane reads at:
+                stripe_offset + b_k_half_byte_offset + lane16 * 16
+            where lane16 * 16 = byte offset within the cycle (16 bytes per
+            N value per cycle).
+            """
+            bases = []
+            for rep in range_constexpr(num_reps):
+                # warp_base is the starting N-element index; each rep advances by WMMA_N=16
+                stripe_offset = (
+                    warp_base + arith.index(rep * WMMA_N)
+                ) / arith.index(WMMA_N) * arith.index(lds_b_stride_bytes)
+                base = (
+                    stripe_offset
+                    + b_k_half_byte_offset
+                    + lane16 * arith.index(16)
+                )
+                bases.append(base)
+            return bases
+
+        def _load_frag(lds_memref, lane_base, ks, cycle_stride_bytes=16, ks_stride_bytes=WMMA_K):
             """Load one WMMA frag (16 × b128) from LDS into a vector<16xi32>
-            per lane, starting at byte offset (lane_base + ks * WMMA_K)."""
-            k_sub_off = arith.index(ks * WMMA_K)
+            per lane, starting at byte offset (lane_base + ks * ks_stride_bytes).
+
+            cycle_stride_bytes:
+              - 16  for M-major A (default; consecutive b128s are adjacent)
+              - 512 for cycle-major preshuffled B (b128s are one cycle pair apart)
+            ks_stride_bytes:
+              - WMMA_K (=128) for M-major A
+              - 2048 for cycle-major preshuffled B (one WMMA = 8 cycles = 2048 B)
+            """
+            k_sub_off = arith.index(ks * ks_stride_bytes)
             off = lane_base + k_sub_off
             v0 = lds_load_b128(lds_memref, off)
-            v1 = lds_load_b128(lds_memref, off + arith.index(16))
-            v2 = lds_load_b128(lds_memref, off + arith.index(32))
-            v3 = lds_load_b128(lds_memref, off + arith.index(48))
+            v1 = lds_load_b128(lds_memref, off + arith.index(cycle_stride_bytes))
+            v2 = lds_load_b128(lds_memref, off + arith.index(cycle_stride_bytes * 2))
+            v3 = lds_load_b128(lds_memref, off + arith.index(cycle_stride_bytes * 3))
             v01 = vector.shuffle(v0, v1, list(range(8)))
             v23 = vector.shuffle(v2, v3, list(range(8)))
             return vector.shuffle(v01, v23, list(range(16)))
@@ -874,8 +919,8 @@ def compile_gemm_a8w8_blockscale(
         a_lane_bases = _compute_lane_bases(
             warp_m_base, lds_a_stride_bytes, wmma_m_rep, WMMA_M
         )
-        b_lane_bases = _compute_lane_bases(
-            warp_n_base, lds_b_stride_bytes, wmma_n_rep, WMMA_N
+        b_lane_bases = _compute_b_lane_bases_preshuffled(
+            warp_n_base, wmma_n_rep
         )
 
         def load_operand_frags(buffer_idx):
@@ -905,7 +950,7 @@ def compile_gemm_a8w8_blockscale(
                     )
                 for wn in range_constexpr(wmma_n_rep):
                     b_frags.append(
-                        _load_frag(big_b_mem, b_lane_bases[wn] + slot_off_b, ks)
+                        _load_frag(big_b_mem, b_lane_bases[wn] + slot_off_b, ks, cycle_stride_bytes=512, ks_stride_bytes=2048)
                     )
             return a_frags, b_frags
 
@@ -938,7 +983,7 @@ def compile_gemm_a8w8_blockscale(
                     )
                 for wn in range_constexpr(wmma_n_rep):
                     b_frags.append(
-                        _load_frag(big_b_mem, b_lane_bases[wn] + slot_off_b, ks)
+                        _load_frag(big_b_mem, b_lane_bases[wn] + slot_off_b, ks, cycle_stride_bytes=512, ks_stride_bytes=2048)
                     )
                 # Drop the X-scale ds_read into the gap right after K-step 0's
                 # 8 frag ds_loads. sched_barrier pins it so the LLVM scheduler
@@ -1242,7 +1287,7 @@ def compile_gemm_a8w8_blockscale(
             for ks in range_constexpr(k_wmma_steps):
                 for wn in range_constexpr(wmma_n_rep):
                     b_frags.append(
-                        _load_frag(big_b_mem, b_lane_bases[wn] + slot_off_b, ks)
+                        _load_frag(big_b_mem, b_lane_bases[wn] + slot_off_b, ks, cycle_stride_bytes=512, ks_stride_bytes=2048)
                     )
             return a_frags, b_frags
 
@@ -2821,6 +2866,10 @@ def gemm_a8w8_blockscale(
         loop_carried_load_percent=loop_carried_load_percent,
         kernarg_preload=kernarg_preload,
     )
+
+    # Preshuffle W into cycle-major LDS layout (gfx1250 WMMA 16x16x128 FP8).
+    from kernels.util.shuffle import preshuffle_fp8_weights_gfx1250
+    w = preshuffle_fp8_weights_gfx1250(w)
 
     stream = torch.cuda.current_stream(device=x.device).cuda_stream
     launcher(y_buf, x, w, x_scale, w_scale, M, N_stride, stream=stream)
