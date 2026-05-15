@@ -1342,9 +1342,7 @@ class CanonicalizeWhile(Transformer):
             uid = CanonicalizeWhile._counter
             CanonicalizeWhile._counter += 1
 
-            result_names = _collect_assigned_vars(
-                node.body, active_symbols_before_while, test_expr=node.test
-            )
+            result_names = _collect_assigned_vars(node.body, active_symbols_before_while, test_expr=node.test)
 
             fn_args = [ast.arg(arg="__ret_names", annotation=None)] + [
                 ast.arg(arg=v, annotation=None) for v in result_names

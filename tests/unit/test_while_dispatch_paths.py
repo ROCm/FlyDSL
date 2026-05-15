@@ -33,7 +33,8 @@ def test_scf_while_dispatch_single_result():
                     return {"offset": offset // two}
 
                 result = CanonicalizeWhile.scf_while_dispatch(
-                    before_fn, after_fn,
+                    before_fn,
+                    after_fn,
                     result_names=("offset",),
                     result_values=(offset,),
                 )
@@ -67,7 +68,8 @@ def test_scf_while_dispatch_multi_results():
                     return {"acc": acc + offset, "offset": offset // two}
 
                 result = CanonicalizeWhile.scf_while_dispatch(
-                    before_fn, after_fn,
+                    before_fn,
+                    after_fn,
                     result_names=("acc", "offset"),
                     result_values=(acc, offset),
                 )
@@ -100,7 +102,8 @@ def test_scf_while_dispatch_no_result():
                     pass
 
                 CanonicalizeWhile.scf_while_dispatch(
-                    before_fn, after_fn,
+                    before_fn,
+                    after_fn,
                     result_names=(),
                     result_values=(),
                 )
@@ -132,7 +135,8 @@ def test_scf_while_dispatch_static_condition():
 
                 acc = Int32(arith.ConstantOp(i32, 0).result)
                 result = CanonicalizeWhile.scf_while_dispatch(
-                    before_fn, after_fn,
+                    before_fn,
+                    after_fn,
                     result_names=("acc",),
                     result_values=(acc,),
                 )
@@ -162,7 +166,8 @@ def test_scf_while_dispatch_none_var_raises_error():
 
                 with pytest.raises(TypeError, match="None"):
                     CanonicalizeWhile.scf_while_dispatch(
-                        before_fn, after_fn,
+                        before_fn,
+                        after_fn,
                         result_names=("x",),
                         result_values=(None,),
                     )
