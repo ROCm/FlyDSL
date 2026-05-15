@@ -268,6 +268,157 @@ def build_flash_attn_opus_module(
         v16f32_type = Vec.make_type(16, fx.Float32)
         mfma_pack_type = v8f16_type
 
+        _MFMA_MASK = 0x008
+        _VALU_MASK = 0x002
+        _EXP_MASK = 0x400
+
+        seq_len_v = fx.Index(seq_len)
+
+        base_ptr = allocator.get_base()
+        lds_kv = SmemPtr(
+            base_ptr,
+            lds_kv_offset,
+            elem_type,
+            shape=(LDS_KV_TOTAL_SIZE,),
+        ).get()
+        lds_kv_base_idx = buffer_ops.extract_base_index(lds_kv, address_space=3)
+
+        h_idx = fx.Index(gpu.block_idx.x)
+        q_block_idx = fx.Index(gpu.block_idx.y)
+        batch_idx = fx.Index(gpu.block_idx.z)
+        tid = fx.Index(gpu.thread_idx.x)
+
+        wave_id = tid // WARP_SIZE
+        lane = tid % WARP_SIZE
+        lane_mod_32 = lane % 32
+        lane_div_32 = lane // 32
+
+        _tid_i32 = arith.index_cast(T.i32, _raw(tid))
+        _wave_id_uni_i32 = rocdl.readfirstlane(
+            T.i32,
+            arith.divsi(_tid_i32, arith.constant(WARP_SIZE, type=T.i32)),
+        )
+        _stagger_i32 = arith.divsi(
+            _wave_id_uni_i32, arith.constant(4, type=T.i32)
+        )
+        stagger_is_one_i1 = arith.cmpi(
+            arith.CmpIPredicate.ne, _stagger_i32, arith.constant(0, type=T.i32)
+        )
+        stagger_is_zero_i1 = arith.cmpi(
+            arith.CmpIPredicate.eq, _stagger_i32, arith.constant(0, type=T.i32)
+        )
+
+        tr_k_group = (lane % 16) // 4
+        tr_col_sub = lane % 4
+        tr_col_half = (lane % 32) // 16
+
+        wave_q_offset = wave_id * ROWS_PER_WAVE
+        q_block_size = BLOCK_M
+        q_start = q_block_idx * q_block_size
+
+        h_kv_idx = h_idx % NUM_HEADS_KV
+        group_id = h_idx // NUM_HEADS_KV
+        q_head_idx = h_kv_idx * GQA_GROUP_SIZE + group_id
+        kv_head_idx = h_kv_idx
+
+        q_rsrc = buffer_ops.create_buffer_resource(Q, max_size=True)
+        k_rsrc = buffer_ops.create_buffer_resource(K, max_size=True)
+        v_rsrc = buffer_ops.create_buffer_resource(V, max_size=True)
+        o_base_ptr = _extract_aligned_pointer(O)
+        o_base_i64 = llvm.PtrToIntOp(T.i64, o_base_ptr).result
+        o_base_lo = ArithValue(o_base_i64).trunci(T.i32)
+        o_base_hi = ArithValue(ArithValue(o_base_i64).shrui(fx.Int64(32))).trunci(T.i32)
+        o_rsrc = Vec.from_elements(
+            [
+                o_base_lo,
+                o_base_hi,
+                buffer_ops._create_i32_constant(0xFFFFFFFF),
+                buffer_ops._create_i32_constant(buffer_ops._get_buffer_flags()),
+            ],
+            fx.Int32,
+        ).ir_value()
+
+        DMA_BYTES = 16
+        NUM_DMA_K = SMEM_D_RPT
+        NUM_DMA_V = SMEM_D_RPT
+
+        _dma_size = fx.Int32(DMA_BYTES)
+        _dma_off = fx.Int32(0)
+        _dma_aux = fx.Int32(0)
+
+        lane_in_warp = tid % fx.Index(WARP_SIZE)
+        n_in_warp = lane_in_warp // fx.Index(VEC_KV)
+        d_bucket = lane_in_warp % fx.Index(VEC_KV)
+
+        c_neg_inf = fx.Float32(float("-inf"))
+        c_zero_f = fx.Float32(0.0)
+        c_one_f = fx.Float32(1.0)
+        c_sm_scale_log2e = fx.Float32(SM_SCALE * _LOG2E)
+        c_eight_f = fx.Float32(OPUS_RESCALE_THRESHOLD)
+        c_zero_v16f32 = Vec.filled(16, 0.0, fx.Float32)
+        width_i32 = fx.Int32(WARP_SIZE)
+        shuf_32_i32 = fx.Int32(32)
+        c4_i32 = fx.Int32(4)
+        lane_i32 = fx.Int32(lane)
+        v8f32_type = Vec.make_type(MFMA_LANE_K, fx.Float32)
+
+        q_row = q_start + wave_q_offset + lane_mod_32
+        q_row_i32 = fx.Int32(q_row)
+        q_in_bounds = q_row < seq_len_v
+        q_row_safe = fx.Index(ArithValue(q_in_bounds).select(q_row, fx.Index(0)))
+        q_b_packs = []
+        for ks in range_constexpr(K_STEPS_QK):
+            q_col = fx.Index(ks * K_STEP_QK) + lane_div_32 * MFMA_LANE_K
+            q_token = batch_idx * seq_len_v + q_row_safe
+            g_idx = q_token * STRIDE_TOKEN_Q + q_head_idx * HEAD_DIM + q_col
+            raw = buffer_ops.buffer_load(
+                q_rsrc,
+                fx.Int32(g_idx),
+                vec_width=MFMA_LANE_K,
+                dtype=elem_dtype,
+            )
+
+            pack_f32 = Vec(raw).extf(v8f32_type)
+            scaled_elems = []
+            for k in range_constexpr(MFMA_LANE_K):
+                scaled_elems.append(
+                    arith.mulf(_raw(Vec(pack_f32)[k]), _raw(c_sm_scale_log2e), fastmath=fm_fast)
+                )
+            pack_scaled_f32 = Vec.from_elements(scaled_elems, fx.Float32)
+            pack_scaled_bf16 = pack_scaled_f32.truncf(v8f16_type)
+            q_b_packs.append(pack_scaled_bf16.ir_value())
+
+        kv_tile_size = fx.Index(BLOCK_N)
+        num_kv_tiles = (seq_len_v + kv_tile_size - fx.Index(1)) // kv_tile_size
+        if const_expr(CAUSAL):
+            q_block_end = q_start + fx.Index(BLOCK_M)
+            causal_num_tiles = (q_block_end + kv_tile_size - fx.Index(1)) // kv_tile_size
+            max_num_tiles = fx.Index(
+                ArithValue(causal_num_tiles < num_kv_tiles).select(
+                    causal_num_tiles, num_kv_tiles
+                )
+            )
+        else:
+            max_num_tiles = num_kv_tiles
+
+        urk_base_per_lane = (
+            (lane_mod_32 % fx.Index(8)) * fx.Index(SMEM_K_LINE_STRIDE)
+            + (lane_mod_32 // fx.Index(8)) * fx.Index(D_128B_SIZE)
+            + lane_div_32 * fx.Index(VEC_KV)
+        )
+
+        urv_base_per_lane = (
+            lane_div_32 * fx.Index(OPUS_URV_GRPK)
+            + ((lane % fx.Index(16)) // fx.Index(4)) * fx.Index(OPUS_URV_LANE_HI)
+            + ((lane // fx.Index(16)) % fx.Index(2)) * fx.Index(OPUS_URV_GRP_N)
+            + (lane % fx.Index(4)) * fx.Index(OPUS_URV_LANE_LO)
+        )
+
+        _NEG_INF_F32_BITS = 0xFF800000
+
+        _LGKMCNT_0_ONLY = 0xC07F
+
+
         def _mfma(mfma_fn, a, b, c):
             return mfma_fn(v16f32_type, [a, b, c])
 
@@ -285,13 +436,6 @@ def build_flash_attn_opus_module(
 
         def mfma_acc(a, b, c):
             return _mfma(rocdl.mfma_f32_32x32x16_bf16, a, b, c)
-
-        # ── P3: sched_group_barrier discipline (matches C++ template lines 14-30) ──
-        # __builtin_amdgcn_sched_group_barrier(mask, count, group_id)
-        # masks (LLVM AMDGPU convention):
-        _MFMA_MASK = 0x008
-        _VALU_MASK = 0x002
-        _EXP_MASK = 0x400
 
         def _sched_barrier_pairs(pairs, valu_cnt, group):
             """Emit `pairs` × {1 MFMA + valu_cnt VALU} sched_group_barrier groups.
@@ -313,86 +457,10 @@ def build_flash_attn_opus_module(
                 rocdl.sched_group_barrier(_MFMA_MASK, 1, group)
                 rocdl.sched_group_barrier(_EXP_MASK, exp_cnt, group)
 
-        seq_len_v = fx.Index(seq_len)
-
-        # LDS view
-        base_ptr = allocator.get_base()
-        lds_kv = SmemPtr(
-            base_ptr,
-            lds_kv_offset,
-            elem_type,
-            shape=(LDS_KV_TOTAL_SIZE,),
-        ).get()
-        lds_kv_base_idx = buffer_ops.extract_base_index(lds_kv, address_space=3)
-
-        # ── 3D grid block indices (OPUS layout) ──
-        h_idx = fx.Index(gpu.block_idx.x)
-        q_block_idx = fx.Index(gpu.block_idx.y)
-        batch_idx = fx.Index(gpu.block_idx.z)
-        tid = fx.Index(gpu.thread_idx.x)
-
-        wave_id = tid // WARP_SIZE
-        lane = tid % WARP_SIZE
-        lane_mod_32 = lane % 32
-        lane_div_32 = lane // 32
-
-        # P5 stagger: warps 0-3 → stagger=0, warps 4-7 → stagger=1.
-        # Matches C++ template gqa_d128_kernel_template.hpp lines 306-308:
-        #     const int warp_id = __builtin_amdgcn_readfirstlane(thread_id_x() / WARP_SIZE);
-        #     const int stagger = warp_id / 4;
-        # readfirstlane forces the value into an SGPR so the resulting
-        # conditional `if (stagger ...) { s_barrier }` is a SCALAR
-        # (wave-uniform) branch — that is essential for the conditional
-        # s_barrier to be skipped per-wave rather than masked per-lane.
-        #
-        # The V LDS reads have been hoisted out of Clusters 3/7/11/13 into
-        # the immediately preceding cluster (2/6/10/12) so V[*] is held in
-        # registers BEFORE the cluster boundary barrier. This mirrors the
-        # C++ template's `tr_load V into v_v` before the s_barrier and is
-        # what makes the asymmetric stagger barrier safe: even when warps
-        # 4-7 are one phase behind warps 0-3, the lagging group has already
-        # captured V into VGPRs in its own preceding cluster, so a peer
-        # wave overwriting `s_v[buf]` via a subsequent async_load is
-        # harmless.
-        _tid_i32 = arith.index_cast(T.i32, _raw(tid))
-        _wave_id_uni_i32 = rocdl.readfirstlane(
-            T.i32,
-            arith.divsi(_tid_i32, arith.constant(WARP_SIZE, type=T.i32)),
-        )
-        _stagger_i32 = arith.divsi(
-            _wave_id_uni_i32, arith.constant(4, type=T.i32)
-        )
-        stagger_is_one_i1 = arith.cmpi(
-            arith.CmpIPredicate.ne, _stagger_i32, arith.constant(0, type=T.i32)
-        )
-        stagger_is_zero_i1 = arith.cmpi(
-            arith.CmpIPredicate.eq, _stagger_i32, arith.constant(0, type=T.i32)
-        )
-
-        # HW transpose decomp for ds_read_tr16_b64 (gfx950)
-        tr_k_group = (lane % 16) // 4
-        tr_col_sub = lane % 4
-        tr_col_half = (lane % 32) // 16
-
-        # ds_read_tr_v4f16 helper.  Keep OPUS layout offsets as ISA
-        # immediates instead of materializing every base+offset in a VGPR.
         def ds_read_tr_v4f16_imm(lds_base_elem_idx, imm_bytes):
             byte_offset = lds_base_elem_idx * 2 + lds_kv_offset
             addr_i32 = fx.Int32(byte_offset)
             return _ds_read_tr16_b64_imm(v4f16_type, addr_i32, imm_bytes)
-
-        # ── Wave / tile bookkeeping ──
-        wave_q_offset = wave_id * ROWS_PER_WAVE
-        q_block_size = BLOCK_M
-        q_start = q_block_idx * q_block_size
-
-        # GQA mapping mirrors OPUS lines 310-312:
-        # h = (h_idx % H_KV) * group_size + (h_idx / H_KV)
-        # h_kv = h / group_size = h_idx % H_KV
-        h_kv_idx = h_idx % NUM_HEADS_KV
-        group_id = h_idx // NUM_HEADS_KV
-        q_head_idx = h_kv_idx * GQA_GROUP_SIZE + group_id
-        kv_head_idx = h_kv_idx
 
         def global_idx_q(token_idx, col):
             token = batch_idx * seq_len_v + token_idx
@@ -419,11 +487,6 @@ def build_flash_attn_opus_module(
         def _bitcast_f32(value):
             return fx.Float32(ArithValue(value).bitcast(fx.Float32.ir_type))
 
-        # ── P4: opus::attn_mask_vec2_imm inline asm (matches C++ lines 233-249) ──
-        # We split the C++ 4-op block into two 2-op pairs because MLIR's
-        # llvm.inline_asm with struct return + multiple "=s" outputs has
-        # proven brittle. The resulting ISA is the same {cmp_lt + cndmask}
-        # pattern that OPUS depends on.
         def _attn_mask_imm_single(rel_i32, neg_inf_i32, thr, x_ref_i32):
             """Single asm: x_new = (rel < thr) ? neg_inf : x_ref.
 
@@ -453,11 +516,6 @@ def build_flash_attn_opus_module(
             new_y = _attn_mask_imm_single(rel_i32, neg_inf_i32, thr_y, y_ref_i32)
             return new_x, new_y
 
-        # ── P4: register anchor (matches C++ `asm volatile("" : "+v"(v) ::)`) ──
-        # Forces the scheduler to treat `value` as both used and defined at this
-        # point, preventing it from being reordered across the anchor. We use a
-        # tied "=v,0" constraint so the input and output occupy the same VGPR(s);
-        # has_side_effects=True keeps the asm anchored through DCE.
         def _anchor_vec(value):
             val_ir = _llvm_value(value)
             return llvm.inline_asm(
@@ -534,7 +592,6 @@ def build_flash_attn_opus_module(
                 pairs.append(_pack_bf16_pair(f32_vals[j * 2], f32_vals[j * 2 + 1], _c16, _cmask))
             return Vec.from_elements(pairs, fx.Int32).bitcast(elem_dtype).ir_value()
 
-        # OPUS interleaved buffer layout: K0=0, V0=8320, K1=17024, V1=25344 (bf16 elements).
         def k_buf_base(buf_id):
             if const_expr(isinstance(buf_id, int)):
                 return fx.Index(OPUS_K_BUF_BASE[buf_id])
@@ -546,35 +603,6 @@ def build_flash_attn_opus_module(
                 return fx.Index(OPUS_V_BUF_BASE[buf_id])
             # runtime buf_id (rare): V0=SMEM_K_TILE_ELEMS, V1=SMEM_K_TILE_ELEMS+OPUS_KV_PER_BUFFER
             return fx.Index(SMEM_K_TILE_ELEMS) + buf_id * fx.Index(OPUS_KV_PER_BUFFER)
-
-        # ── DMA loaders (buffer_load_dwordx4_lds, gfx950) ──
-        q_rsrc = buffer_ops.create_buffer_resource(Q, max_size=True)
-        k_rsrc = buffer_ops.create_buffer_resource(K, max_size=True)
-        v_rsrc = buffer_ops.create_buffer_resource(V, max_size=True)
-        o_rsrc = _make_raw_buffer_rsrc(O)
-        # DMA constants. NUM_DMA_K = # of DMA instructions per WARP per K tile.
-        # Per OPUS u_gk: each warp loads 8 N rows × 128 D = 1024 bf16 (= 2048 B) per tile,
-        # split across smem_d_rpt = 2 DMA invocations (one per d_rpt array). Each DMA writes
-        # 64 lanes × 16 B = 1024 B contiguously to one d_rpt slab in LDS.
-        DMA_BYTES = 16
-        NUM_DMA_K = SMEM_D_RPT                                          # 2 — # of DMA calls per warp per K tile
-        NUM_DMA_V = SMEM_D_RPT                                          # 2 — same for V
-
-        _dma_size = fx.Int32(DMA_BYTES)
-        _dma_off = fx.Int32(0)
-        _dma_aux = fx.Int32(0)
-
-        # ── OPUS u_gk + u_sk DMA loader ──
-        # Per OPUS C++ template gqa_d128_kernel_template.hpp §4-5:
-        #   u_gk: lane l in warp w reads global K[N = (l/8)*8 + w, D = (l%8)*8 + d*64 + 0..7]
-        #   u_sk: lane l in warp w writes LDS[w*SMEM_K_LINE_STRIDE + l*VEC_KV + 0..7]
-        #          (within d_rpt array; d_rpt=1 array starts at SMEM_N_RPT*SMEM_K_LINE_STRIDE
-        #          bf16 elements past d_rpt=0 array).
-        # Per-warp LDS slab is contiguous (520 bf16 per d_rpt), unlike FlyDSL's
-        # batch-major layout. NUM_DMA_K=2 (one DMA per d_rpt).
-        lane_in_warp = tid % fx.Index(WARP_SIZE)
-        n_in_warp = lane_in_warp // fx.Index(VEC_KV)
-        d_bucket = lane_in_warp % fx.Index(VEC_KV)
 
         def coop_dma_k(tile_start, buf_id):
             k_lds_byte_base = lds_kv_base_idx + k_buf_base(buf_id) * fx.Index(BF16_BYTES)
@@ -605,10 +633,6 @@ def build_flash_attn_opus_module(
                     k_rsrc, lds_ptr, _dma_size, voffset, soffset, _dma_off, _dma_aux
                 )
 
-        # ── OPUS u_gv + u_sv DMA loader ──
-        # Mirrors coop_dma_k but with V_LINE_STRIDE = 544 (smem_padding_64B = 32 bf16).
-        # Per-lane (warp_id, lane_in_warp) → V[N = (lane_in_warp/8)*8 + warp_id,
-        # D = (lane_in_warp%8)*8 + d*64 + 0..7] for d_rpt=d.
         def coop_dma_v(tile_start, buf_id):
             v_lds_byte_base = lds_kv_base_idx + v_buf_base(buf_id) * fx.Index(BF16_BYTES)
             for d in range_constexpr(NUM_DMA_V):
@@ -638,122 +662,23 @@ def build_flash_attn_opus_module(
                     v_rsrc, lds_ptr, _dma_size, voffset, soffset, _dma_off, _dma_aux
                 )
 
-        # ── Constants ──
-        c_neg_inf = fx.Float32(float("-inf"))
-        c_zero_f = fx.Float32(0.0)
-        c_one_f = fx.Float32(1.0)
-        c_sm_scale_log2e = fx.Float32(SM_SCALE * _LOG2E)
-        c_eight_f = fx.Float32(OPUS_RESCALE_THRESHOLD)
-        c_zero_v16f32 = Vec.filled(16, 0.0, fx.Float32)
-        width_i32 = fx.Int32(WARP_SIZE)
-        shuf_32_i32 = fx.Int32(32)
-        c4_i32 = fx.Int32(4)
-        lane_i32 = fx.Int32(lane)
-        v8f32_type = Vec.make_type(MFMA_LANE_K, fx.Float32)
-
-        # ── Q preload (B-operand for MFMA, register-resident) ──
-        # P2: pre-multiply Q by temperature_scale = (1/sqrt(D)) * log2(e)
-        # so that softmax can operate directly in log2 space without per-FMA
-        # multiplications. Matches OPUS C++ lines 404-406 (kernel template).
-        q_row = q_start + wave_q_offset + lane_mod_32
-        q_row_i32 = fx.Int32(q_row)
-        q_in_bounds = q_row < seq_len_v
-        q_row_safe = fx.Index(ArithValue(q_in_bounds).select(q_row, fx.Index(0)))
-        q_b_packs = []
-        for ks in range_constexpr(K_STEPS_QK):
-            q_col = fx.Index(ks * K_STEP_QK) + lane_div_32 * MFMA_LANE_K
-            g_idx = global_idx_q(q_row_safe, q_col)
-            raw = buffer_ops.buffer_load(
-                q_rsrc,
-                fx.Int32(g_idx),
-                vec_width=MFMA_LANE_K,
-                dtype=elem_dtype,
-            )
-            # bf16x8 → f32x8 → multiply by c_sm_scale_log2e → bf16x8
-            pack_f32 = Vec(raw).extf(v8f32_type)
-            scaled_elems = []
-            for k in range_constexpr(MFMA_LANE_K):
-                scaled_elems.append(
-                    _fmul(Vec(pack_f32)[k], c_sm_scale_log2e)
-                )
-            pack_scaled_f32 = Vec.from_elements(scaled_elems, fx.Float32)
-            pack_scaled_bf16 = pack_scaled_f32.truncf(v8f16_type)
-            q_b_packs.append(pack_scaled_bf16.ir_value())
-
-        # Use shuffle_xor by 32 for the cross-half reduction (== permlane32_swap+max in OPUS).
         def reduction_peer(v_f32):
             return fx.Float32(v_f32).shuffle_xor(shuf_32_i32, width_i32)
 
-        # ──────────────────────────────────────────────────────────────────────
-        # P1: Restructure to match opus_attn/gqa_d128_kernel_template.hpp
-        # exactly at the cluster level. Each labelled section maps to the
-        # corresponding C++ source range.
-        # ──────────────────────────────────────────────────────────────────────
-
-        # ── Compute max_num_tiles (matches C++ lines 383-390) ──
-        kv_tile_size = fx.Index(BLOCK_N)
-        num_kv_tiles = (seq_len_v + kv_tile_size - fx.Index(1)) // kv_tile_size
-        if const_expr(CAUSAL):
-            q_block_end = q_start + fx.Index(BLOCK_M)
-            causal_num_tiles = (q_block_end + kv_tile_size - fx.Index(1)) // kv_tile_size
-            max_num_tiles = fx.Index(
-                ArithValue(causal_num_tiles < num_kv_tiles).select(
-                    causal_num_tiles, num_kv_tiles
-                )
-            )
-        else:
-            max_num_tiles = num_kv_tiles
-
-        # ── OPUS u_rk: K LDS → register packs (8 lo + 8 hi) ──
-        # Per-lane base offset (bf16):
-        #     base = (lane%32%8)*SMEM_K_LINE_STRIDE
-        #          + (lane%32/8)*D_128B_SIZE
-        #          + (lane/32)*VEC_KV
-        # For ks in 0..7:
-        #     ks_offset = (ks/4)*OPUS_URK_KSTEP_OUTER + (ks%4)*OPUS_URK_KSTEP_INNER
-        # n_strip=0 (v_s_lo) reads at base + ks_offset; n_strip=1 (v_s_hi) adds 256.
-        # The resulting MFMA-A m_a = lane%32 corresponds to rows 0..31 for v_s_lo
-        # and rows 32..63 for v_s_hi, matching OPUS's u_rk operand layout.
-        urk_base_per_lane = (
-            (lane_mod_32 % fx.Index(8)) * fx.Index(SMEM_K_LINE_STRIDE)
-            + (lane_mod_32 // fx.Index(8)) * fx.Index(D_128B_SIZE)
-            + lane_div_32 * fx.Index(VEC_KV)
-        )
-
-        def _read_k_packs_for_buf(buf_id):
+        def _read_k_packs_for_buf(buf_id, urk_base):
             """Read all 16 K MFMA packs from LDS buffer `buf_id` (OPUS u_rk)."""
             k_base = k_buf_base(buf_id)
             k_lo = [None] * K_STEPS_QK
             k_hi = [None] * K_STEPS_QK
             for ks in range_constexpr(K_STEPS_QK):
                 ks_offset = (ks // 4) * OPUS_URK_KSTEP_OUTER + (ks % 4) * OPUS_URK_KSTEP_INNER
-                idx_lo = k_base + urk_base_per_lane + fx.Index(ks_offset)
+                idx_lo = k_base + urk_base + fx.Index(ks_offset)
                 idx_hi = idx_lo + fx.Index(OPUS_URK_N_STRIP_STRIDE)
                 k_lo[ks] = Vec.load(mfma_pack_type, lds_kv, [idx_lo])
                 k_hi[ks] = Vec.load(mfma_pack_type, lds_kv, [idx_hi])
             return k_lo, k_hi
 
-        # ── OPUS u_rv: V LDS → register packs (4 D-chunks) per step_k ──
-        # Per-lane base offset (bf16):
-        #     base = (lane/32) * OPUS_URV_GRPK            # grp_k axis 2
-        #          + ((lane%16)/4) * OPUS_URV_LANE_HI     # lane_hi axis 3
-        #          + ((lane/16)%2) * OPUS_URV_GRP_N       # grp_n axis 6
-        #          + (lane%4) * OPUS_URV_LANE_LO          # lane_lo axis 7
-        # Per step_k=K_idx in 0..3 (axis 4, stride OPUS_URV_STEP_K_STRIDE = 128):
-        #   - D-chunk (dc) maps to (i_0, i_1) ∈ axes 0, 1:
-        #       dc=0: (i_0=0, i_1=0), dc=1: (i_0=0, i_1=1),
-        #       dc=2: (i_0=1, i_1=0), dc=3: (i_0=1, i_1=1)
-        #   - Per dc, 2 ds_read_tr16_b64 calls cover axis 5 = 0, 1 (stride D_128B_SIZE=64).
-        #     The 4-bf16 result of each call is shuffled into one bf16x8 pack matching
-        #     MFMA-A pack_a = 8.
-        urv_base_per_lane = (
-            lane_div_32 * fx.Index(OPUS_URV_GRPK)
-            + ((lane % fx.Index(16)) // fx.Index(4)) * fx.Index(OPUS_URV_LANE_HI)
-            + ((lane // fx.Index(16)) % fx.Index(2)) * fx.Index(OPUS_URV_GRP_N)
-            + (lane % fx.Index(4)) * fx.Index(OPUS_URV_LANE_LO)
-        )
-
-        def _read_v_packs_for_buf(buf_id):
+        def _read_v_packs_for_buf(buf_id, urv_base):
             """Read all V packs from LDS buffer `buf_id` in OPUS issue order.
 
             Returns packs indexed as [k_substep][dc], but emits the ds_read_tr16_b64
@@ -761,7 +686,7 @@ def build_flash_attn_opus_module(
             issue order.
             """
             v_base = v_buf_base(buf_id)
-            lds_base = v_base + urv_base_per_lane
+            lds_base = v_base + urv_base
             packs = [[None] * D_CHUNKS for _ in range(4)]
             for dc in range_constexpr(D_CHUNKS):
                 i_0 = dc // 2     # axes 0 selection: 0 → D < 64, 1 → D >= 64 (d_rpt)
@@ -781,7 +706,6 @@ def build_flash_attn_opus_module(
                     ).ir_value()
             return packs
 
-        # ── Helper: GEMM0 (S = Q @ K^T) – 16 MFMAs ──
         def _gemm0(k_lo, k_hi):
             v_s_lo = c_zero_v16f32
             v_s_hi = c_zero_v16f32
@@ -789,10 +713,6 @@ def build_flash_attn_opus_module(
                 v_s_lo = mfma_acc(k_lo[ks], q_b_packs[ks], v_s_lo)
                 v_s_hi = mfma_acc(k_hi[ks], q_b_packs[ks], v_s_hi)
             return v_s_lo, v_s_hi
-
-        # ── Helper: causal mask in-place on extracted s_lo[16] / s_hi[16] ──
-        # P4: -inf as i32 bitpattern for the cndmask source.
-        _NEG_INF_F32_BITS = 0xFF800000
 
         def _causal_mask_inplace(s_lo, s_hi, tile_idx):
             """Apply causal mask using OPUS inline-asm attn_mask_vec2_imm (OPUS u_rk path).
@@ -856,7 +776,6 @@ def build_flash_attn_opus_module(
                 s_hi[idx_x] = _raw(_bitcast_f32(new_x_hi))
                 s_hi[idx_y] = _raw(_bitcast_f32(new_y_hi))
 
-        # ── Helper: wave-wide row_max over a 32-element extended vector ──
         def _wave_row_max(s_lo, s_hi):
             m = c_neg_inf
             for r in range_constexpr(16):
@@ -864,12 +783,6 @@ def build_flash_attn_opus_module(
                 m = _fmax(m, s_hi[r])
             return _fmax(m, reduction_peer(m))
 
-        # ── Helper: sub_row + first-half exp2 (matches C++ attn_sub_row + exp2_slice<0,16>) ──
-        # P2: Q has been pre-multiplied by sm_scale*log2e in the prologue, so s_lo, s_hi
-        # and m_row are already in log2 space. The FMA collapses to a plain subtract.
-        # Returns:
-        #   lo_partial[16] = exp2(s_lo - m_row)
-        #   hi_partial[16] = s_hi - m_row              (NOT yet exp'd)
         def _sub_row_first_half_exp(s_lo, s_hi, m_row):
             lo_partial = []
             hi_partial = []
@@ -881,11 +794,6 @@ def build_flash_attn_opus_module(
                 hi_partial.append(diff_hi)
             return lo_partial, hi_partial
 
-        # ── Helper: finish second-half exp + sum + cast → P bf16 packs ──
-        # Matches C++ cluster 1 / cluster 5 body:
-        #   attn_exp2_slice<T, s_half_len, s_half_len>(v_s[?]);
-        #   l_row += attn_sum<T>(v_s[?]);
-        #   v_p = cast<bf16>(v_s[?]);
         def _finish_softmax_cast_p(lo_partial_list, hi_partial_vec):
             hi_full = []
             for r in range_constexpr(16):
@@ -909,14 +817,10 @@ def build_flash_attn_opus_module(
                 p_hi_packs.append(bf16_trunc_pack_v8(hi_slice))
             return p_lo_packs, p_hi_packs, tile_sum
 
-        # ── Helper: scale o_accs by a scalar f32 (broadcast 16-wide vec mul) ──
         def _scale_o(o_accs, scale_scalar):
             scale_vec = Vec.from_elements([scale_scalar], fx.Float32).broadcast_to(16)
             for dc in range_constexpr(D_CHUNKS):
                 o_accs[dc] = _fmul(Vec(o_accs[dc]), scale_vec)
-
-        # s_waitcnt encoding helpers
-        _LGKMCNT_0_ONLY = 0xC07F   # vmcnt=63, expcnt=7, lgkmcnt=0, vmcnt_hi=3
 
         def _waitcnt_lgkm_0_vm_n(n):
             """Combined: lgkmcnt(0) + vmcnt(n)."""
@@ -928,91 +832,49 @@ def build_flash_attn_opus_module(
             )
             rocdl.s_waitcnt(val)
 
-        # Causal-mask q_start_pos (C++ line 394). Each warp computes its first Q row
-        # position so that causal_mask_tile can decide whether to apply.
-        # For P1 we apply causal mask unconditionally inside the const_expr branch;
-        # the runtime gate is deferred to later phases.
-
-        # ─────────────────────── PROLOGUE (C++ lines 397-436) ───────────────────────
-
-        # [P1] async_load K[0] → s_k[0]   (C++ line 398)
         coop_dma_k(fx.Index(0), 0)
 
-        # [P2] s_waitcnt(0); sched_barrier(0); s_barrier   (C++ lines 399-401)
         rocdl.s_waitcnt(0)
         rocdl.sched_barrier(0)
         gpu.barrier()
 
-        # [P3] Q is already preloaded above (q_b_packs).
-        # P2 (in-flight Q scaling): Q packs were pre-multiplied by
-        # (sm_scale * log2e) during the load loop above, matching the C++
-        # template (gqa_d128_kernel_template.hpp lines 404-406). The softmax
-        # path now operates directly in log2 space (no per-FMA scale).
-
-        # [P4] async_load K[1] → s_k[1], V[0] → s_v[0]   (C++ lines 408-409)
         coop_dma_k(fx.Index(BLOCK_N), 1)
         coop_dma_v(fx.Index(0), 0)
 
-        # [P5] v_k = load(s_k[0], u_rk)   (C++ line 410)
-        k_pl_pro, k_ph_pro = _read_k_packs_for_buf(0)
+        k_pl_pro, k_ph_pro = _read_k_packs_for_buf(0, urk_base_per_lane)
 
-        # [P6] sched_barrier; s_waitcnt_lgkmcnt(0); s_waitcnt_vmcnt(v_buffer_load_insts)
-        #     (C++ lines 411-413)
         rocdl.sched_barrier(0)
         rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
-        _waitcnt_vm_n(NUM_DMA_V)   # vmcnt(2)
+        _waitcnt_vm_n(NUM_DMA_V)
 
-        # [P7] stagger barrier — extra s_barrier for warps 4-7 only.
-        #       Mirrors C++ lines 415-418:
-        #           if (stagger) {
-        #               __builtin_amdgcn_sched_barrier(0);
-        #               __builtin_amdgcn_s_barrier();
-        #           }
-        # The asymmetric (per-wave-group) version is gated by
-        # OPUS_ENABLE_STAGGER (default ON). The path is correctness-safe
-        # thanks to V LDS reads being hoisted one cluster earlier (see
-        # Clusters 2/6/10/12). With the flag OFF we fall back to an
-        # unconditional `gpu.barrier()` so both wave groups stay in
-        # lockstep.
         if const_expr(OPUS_ENABLE_STAGGER):
             _stagger_extra_barrier_if_one()
         else:
             rocdl.sched_barrier(0)
             gpu.barrier()
 
-        # [P8] v_s[0] = mma0(v_q, v_k)   (C++ line 420)
         v_s_0_lo_raw, v_s_0_hi_raw = _gemm0(k_pl_pro, k_ph_pro)
         rocdl.sched_barrier(0)
 
-        # [P9] Causal mask for tile 0 (C++ lines 422-427)
         s_lo_pro = [Vec(v_s_0_lo_raw)[r] for r in range_constexpr(16)]
         s_hi_pro = [Vec(v_s_0_hi_raw)[r] for r in range_constexpr(16)]
         if const_expr(CAUSAL):
             _causal_mask_inplace(s_lo_pro, s_hi_pro, fx.Index(0))
 
-        # [P10] m_row = attn_row_max<T>(v_s[0])   (C++ line 428)
         m_row_pro = _wave_row_max(s_lo_pro, s_hi_pro)
 
-        # [P11] attn_sub_row(v_s[0], m_row); first-half exp2(v_s[0])  (C++ lines 429-431)
         lo_pro, hi_pro = _sub_row_first_half_exp(s_lo_pro, s_hi_pro, m_row_pro)
         v_s_0_lo_init = Vec.from_elements(lo_pro, fx.Float32).ir_value()
         v_s_0_hi_init = Vec.from_elements(hi_pro, fx.Float32).ir_value()
-        # P4 anchor #1: matches C++ line 430 `asm volatile("" : "+v"(v_s[0]) ::);`
+
         v_s_0_lo_init, v_s_0_hi_init = _anchor_pair(v_s_0_lo_init, v_s_0_hi_init)
 
-        # [P12] sched_barrier(0); s_barrier; sched_barrier(0)   (C++ lines 432-434)
         rocdl.sched_barrier(0)
         gpu.barrier()
         rocdl.sched_barrier(0)
 
-        # [P13] async_load K[2] → s_k[0]   (C++ line 436)
         coop_dma_k(fx.Index(2 * BLOCK_N), 0)
 
-        # ─────────────────── MAIN LOOP (C++ lines 439-560) ──────────────────────────
-        # for j = 3; j < max_num_tiles - 1; j += 2
-        # Each iter processes 2 KV tiles in 8 clusters.
-        #
-        # Loop state: [m_row, l_row, o_accs[0..3], v_s_0_lo_partial, v_s_0_hi_partial]
         l_row_init = c_zero_f
         init_args = [m_row_pro, l_row_init]
         for _ in range_constexpr(D_CHUNKS):
@@ -1033,76 +895,55 @@ def build_flash_attn_opus_module(
             v_s_0_lo_partial = loop_args[2 + D_CHUNKS]
             v_s_0_hi_partial = loop_args[3 + D_CHUNKS]
 
-            j_idx = j  # fx.Index value in {3, 5, 7, ...}
+            j_idx = j
 
-            # ─── Cluster 0 (C++ lines 441-447) ───
-            # V[j-2] async + K[j-2] ds_read + wait + barrier
             coop_dma_v((j_idx - fx.Index(2)) * fx.Index(BLOCK_N), 1)
-            k_pl_a, k_ph_a = _read_k_packs_for_buf(1)
+            k_pl_a, k_ph_a = _read_k_packs_for_buf(1, urk_base_per_lane)
             rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
             _waitcnt_vm_n(NUM_DMA_K + NUM_DMA_V)
             rocdl.sched_barrier(0)
             gpu.barrier()
             rocdl.sched_barrier(0)
 
-            # ─── Cluster 1 (C++ lines 449-459) ───
-            # v_s[1] = mma0(v_q, K[j-2]); finish exp v_s[0]; sum; cast v_p = P[j-3]
             v_s_1_lo_raw, v_s_1_hi_raw = _gemm0(k_pl_a, k_ph_a)
             v_p_lo_a, v_p_hi_a, tile_sum_a = _finish_softmax_cast_p(
                 [Vec(v_s_0_lo_partial)[r] for r in range_constexpr(16)],
                 v_s_0_hi_partial,
             )
             l_row = _fadd(l_row, tile_sum_a)
-            # P4 anchor #2: matches C++ line 454 `asm volatile("" : "+v"(v_p) ::);`
+
             v_p_lo_a = _anchor_packs(v_p_lo_a)
             v_p_hi_a = _anchor_packs(v_p_hi_a)
-            # P3 schedule hints (C++ lines 455-456): tell scheduler about
-            # the 16-MFMA mma0 + interleaved softmax pipeline.
+
             _sched_barrier_exp_pairs(6, 3, 1)
             _sched_barrier_pairs(10, 5, 1)
             rocdl.sched_barrier(0)
             gpu.barrier()
             rocdl.sched_barrier(0)
 
-            # ─── Cluster 2 (C++ lines 461-468) ───
-            # K[j] async + tr_load V[j-3] (4 substeps) from s_v[0] into registers + wait.
-            # Mirrors C++ kernel line 466 `v_v = tr_load<...>(s_v[0], u_rv);` which
-            # happens BEFORE the cluster-2 s_barrier. Hoisting the V reads out of
-            # Cluster 3 is required for the P5 stagger path to be correct: with
-            # the phase-shifted execution, warps 4-7 would otherwise read
-            # `s_v[0]` AFTER warps 0-3 have already issued the Cluster-4
-            # async_load that overwrites it. With the reads here, V[j-3] is
-            # held in VGPRs across the barrier, so the next async_load into
-            # `s_v[0]` is harmless.
             coop_dma_k(j_idx * fx.Index(BLOCK_N), 1)
-            v_packs_a = _read_v_packs_for_buf(0)
+            v_packs_a = _read_v_packs_for_buf(0, urv_base_per_lane)
             rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
             _waitcnt_vm_n(NUM_DMA_K + NUM_DMA_V)
             rocdl.sched_barrier(0)
             gpu.barrier()
             rocdl.sched_barrier(0)
 
-            # ─── Cluster 3 (C++ lines 470-496) ───
-            # GEMM2 P[j-3] @ V[j-3] via step_k(0..3) + lazy rescale + softmax v_s[1] head
             if const_expr(OPUS_SETPRIO):
                 rocdl.s_setprio(1)
 
-            # step_k(0): 4 MFMAs (one per D-chunk), KV cols 0-15 of V[j-3] (from s_v[0])
             v_pk = v_packs_a[0]
             p_pk = v_p_lo_a[0]
             for dc in range_constexpr(D_CHUNKS):
                 o_accs[dc] = mfma_acc(v_pk[dc], p_pk, o_accs[dc])
 
-            # row_max + lazy rescale on v_s[1] (= S[j-2])
             s_lo_a = [Vec(v_s_1_lo_raw)[r] for r in range_constexpr(16)]
             s_hi_a = [Vec(v_s_1_hi_raw)[r] for r in range_constexpr(16)]
-            # NOTE: main loop's v_s[1] (S[j-2]) is "deep below diagonal" — no causal mask needed.
+
             m_tile_max_a = _wave_row_max(s_lo_a, s_hi_a)
-            # P3 schedule hint (C++ line 474): 4 MFMA + VALU pairs around
-            # the lazy-rescale row_max computation, between step_k(0) and
-            # the subsequent step_k(1..3).
+
             _sched_barrier_pairs(4, 5, 2)
-            # P2: m_row and m_tile_max_a are already log2-scaled (Q was pre-scaled).
+
             m_diff_a = _fsub(m_tile_max_a, m_row)
             if const_expr(OPUS_LAZY_RESCALE):
                 below_a = ArithValue(fx.Float32(m_diff_a) <= c_eight_f)
@@ -1121,7 +962,6 @@ def build_flash_attn_opus_module(
             l_row = _fmul(l_row, corr_a)
             m_row = m_new_a
 
-            # step_k(1..3): 12 more MFMAs (V packs were pre-loaded in Cluster 2)
             for kss in range_constexpr(3):
                 actual = kss + 1
                 v_pk = v_packs_a[actual]
@@ -1132,16 +972,14 @@ def build_flash_attn_opus_module(
                 for dc in range_constexpr(D_CHUNKS):
                     o_accs[dc] = mfma_acc(v_pk[dc], p_pk, o_accs[dc])
 
-            # sub_row + first-half exp on v_s[1]
             lo_part_a, hi_part_a = _sub_row_first_half_exp(s_lo_a, s_hi_a, m_new_a)
             v_s_1_lo_partial = Vec.from_elements(lo_part_a, fx.Float32).ir_value()
             v_s_1_hi_partial = Vec.from_elements(hi_part_a, fx.Float32).ir_value()
-            # P4 anchor #3: matches C++ line 489 `asm volatile("" : "+v"(v_s[1]) ::);`
+
             v_s_1_lo_partial, v_s_1_hi_partial = _anchor_pair(
                 v_s_1_lo_partial, v_s_1_hi_partial
             )
 
-            # P3 schedule hints (C++ lines 491-492): finish GEMM2 + softmax head.
             _sched_barrier_pairs(6, 5, 2)
             _sched_barrier_exp_pairs(6, 3, 2)
             if const_expr(OPUS_SETPRIO):
@@ -1150,44 +988,32 @@ def build_flash_attn_opus_module(
             gpu.barrier()
             rocdl.sched_barrier(0)
 
-            # ─── Cluster 4 (C++ lines 498-505) ───
-            # V[j-1] async + K[j-1] ds_read + wait
             coop_dma_v((j_idx - fx.Index(1)) * fx.Index(BLOCK_N), 0)
-            k_pl_b, k_ph_b = _read_k_packs_for_buf(0)
+            k_pl_b, k_ph_b = _read_k_packs_for_buf(0, urk_base_per_lane)
             rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
             _waitcnt_vm_n(NUM_DMA_K + NUM_DMA_V)
             rocdl.sched_barrier(0)
             gpu.barrier()
             rocdl.sched_barrier(0)
 
-            # ─── Cluster 5 (C++ lines 507-517) ───
-            # v_s[0] = mma0(v_q, K[j-1]); finish exp v_s[1]; sum; cast v_p = P[j-2]
             v_s_0_lo_raw_b, v_s_0_hi_raw_b = _gemm0(k_pl_b, k_ph_b)
             v_p_lo_b, v_p_hi_b, tile_sum_b = _finish_softmax_cast_p(
                 [Vec(v_s_1_lo_partial)[r] for r in range_constexpr(16)],
                 v_s_1_hi_partial,
             )
             l_row = _fadd(l_row, tile_sum_b)
-            # P4 anchor #4: matches C++ line 512 `asm volatile("" : "+v"(v_p) ::);`
+
             v_p_lo_b = _anchor_packs(v_p_lo_b)
             v_p_hi_b = _anchor_packs(v_p_hi_b)
-            # P3 schedule hints (C++ lines 513-514).
+
             _sched_barrier_exp_pairs(6, 3, 3)
             _sched_barrier_pairs(10, 5, 3)
             rocdl.sched_barrier(0)
             gpu.barrier()
             rocdl.sched_barrier(0)
 
-            # ─── Cluster 6 (C++ lines 519-532) ───
-            # K[j+1] async + tr_load V[j-2] (4 substeps) from s_v[1] into registers
-            # + causal mask on v_s[0] = S[j-1] + wait.
-            # Hoisted V reads mirror C++ line 522 `v_v = tr_load<...>(s_v[1], u_rv);`
-            # before the cluster-6 s_barrier. Required for P5 stagger correctness:
-            # without the hoist warps 4-7 would read `s_v[1]` after warps 0-3
-            # have already issued the next iteration's Cluster-0 async_load
-            # into the same buffer.
             coop_dma_k((j_idx + fx.Index(1)) * fx.Index(BLOCK_N), 0)
-            v_packs_b = _read_v_packs_for_buf(1)
+            v_packs_b = _read_v_packs_for_buf(1, urv_base_per_lane)
             s_lo_b = [Vec(v_s_0_lo_raw_b)[r] for r in range_constexpr(16)]
             s_hi_b = [Vec(v_s_0_hi_raw_b)[r] for r in range_constexpr(16)]
             if const_expr(CAUSAL):
@@ -1198,22 +1024,18 @@ def build_flash_attn_opus_module(
             gpu.barrier()
             rocdl.sched_barrier(0)
 
-            # ─── Cluster 7 (C++ lines 534-560) ───
-            # GEMM2 P[j-2] @ V[j-2] via step_k(0..3) + lazy rescale + softmax v_s[0] head
             if const_expr(OPUS_SETPRIO):
                 rocdl.s_setprio(1)
 
-            # step_k(0): V packs were pre-loaded in Cluster 6
             v_pk = v_packs_b[0]
             p_pk = v_p_lo_b[0]
             for dc in range_constexpr(D_CHUNKS):
                 o_accs[dc] = mfma_acc(v_pk[dc], p_pk, o_accs[dc])
 
-            # row_max + lazy rescale on v_s[0] (= S[j-1], already masked)
             m_tile_max_b = _wave_row_max(s_lo_b, s_hi_b)
-            # P3 schedule hint (C++ line 538).
+
             _sched_barrier_pairs(4, 5, 4)
-            # P2: m_row and m_tile_max_b are already log2-scaled (Q was pre-scaled).
+
             m_diff_b = _fsub(m_tile_max_b, m_row)
             if const_expr(OPUS_LAZY_RESCALE):
                 below_b = ArithValue(fx.Float32(m_diff_b) <= c_eight_f)
@@ -1232,7 +1054,6 @@ def build_flash_attn_opus_module(
             l_row = _fmul(l_row, corr_b)
             m_row = m_new_b
 
-            # step_k(1..3): V packs were pre-loaded in Cluster 6
             for kss in range_constexpr(3):
                 actual = kss + 1
                 v_pk = v_packs_b[actual]
@@ -1243,16 +1064,14 @@ def build_flash_attn_opus_module(
                 for dc in range_constexpr(D_CHUNKS):
                     o_accs[dc] = mfma_acc(v_pk[dc], p_pk, o_accs[dc])
 
-            # sub_row + first-half exp on v_s[0]
             lo_part_b, hi_part_b = _sub_row_first_half_exp(s_lo_b, s_hi_b, m_new_b)
             v_s_0_lo_yield = Vec.from_elements(lo_part_b, fx.Float32).ir_value()
             v_s_0_hi_yield = Vec.from_elements(hi_part_b, fx.Float32).ir_value()
-            # P4 anchor #5: matches C++ line 553 `asm volatile("" : "+v"(v_s[0]) ::);`
+
             v_s_0_lo_yield, v_s_0_hi_yield = _anchor_pair(
                 v_s_0_lo_yield, v_s_0_hi_yield
             )
 
-            # P3 schedule hints (C++ lines 555-556).
             _sched_barrier_pairs(6, 5, 4)
             _sched_barrier_exp_pairs(6, 3, 4)
             if const_expr(OPUS_SETPRIO):
@@ -1264,9 +1083,6 @@ def build_flash_attn_opus_module(
             yield_args = [m_row, l_row] + o_accs + [v_s_0_lo_yield, v_s_0_hi_yield]
             loop_results = yield yield_args
 
-        # ─────────────────── EPILOGUE (C++ lines 564-742) ───────────────────────────
-        # Drains the last 3 KV tiles + completes the partial tile carried from the loop.
-        # 13 clusters total.
         m_row = loop_results[0]
         l_row = loop_results[1]
         o_accs = [loop_results[2 + i] for i in range_constexpr(D_CHUNKS)]
@@ -1277,43 +1093,32 @@ def build_flash_attn_opus_module(
         max_m2 = max_num_tiles - fx.Index(2)
         max_m1 = max_num_tiles - fx.Index(1)
 
-        # ─── Cluster 0 (epi, C++ lines 565-571) ───
-        # V[max-3] async + K[max-3] ds_read + wait
         coop_dma_v(max_m3 * fx.Index(BLOCK_N), 1)
-        k_pl_e0, k_ph_e0 = _read_k_packs_for_buf(1)
+        k_pl_e0, k_ph_e0 = _read_k_packs_for_buf(1, urk_base_per_lane)
         rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
         _waitcnt_vm_n(NUM_DMA_K + NUM_DMA_V)
         rocdl.sched_barrier(0)
         gpu.barrier()
         rocdl.sched_barrier(0)
 
-        # ─── Cluster 1 (epi, C++ lines 573-583) ───
-        # v_s[1] = mma0(v_q, K[max-3]); finish exp v_s[0]; sum; cast v_p = P[max-4]
         v_s_1_lo_e, v_s_1_hi_e = _gemm0(k_pl_e0, k_ph_e0)
         v_p_lo_e1, v_p_hi_e1, tile_sum_e1 = _finish_softmax_cast_p(
             [Vec(v_s_0_lo_partial)[r] for r in range_constexpr(16)],
             v_s_0_hi_partial,
         )
         l_row = _fadd(l_row, tile_sum_e1)
-        # P4 anchor #6: matches C++ line 578 `asm volatile("" : "+v"(v_p) ::);`
+
         v_p_lo_e1 = _anchor_packs(v_p_lo_e1)
         v_p_hi_e1 = _anchor_packs(v_p_hi_e1)
-        # P3 schedule hints (C++ lines 579-580).
+
         _sched_barrier_exp_pairs(6, 3, 5)
         _sched_barrier_pairs(10, 5, 5)
         rocdl.sched_barrier(0)
         gpu.barrier()
         rocdl.sched_barrier(0)
 
-        # ─── Cluster 2 (epi, C++ lines 585-598) ───
-        # K[max-1] async + tr_load V[max-4] (4 substeps) from s_v[0] into registers
-        # + causal mask on v_s[1] (= S[max-3]) + wait.
-        # Hoisted V reads mirror C++ epilogue line 588 `v_v = tr_load<...>(s_v[0], u_rv);`
-        # before the cluster-2 s_barrier. Required for P5 stagger correctness:
-        # the symmetric epilogue Cluster-4 async_load overwrites `s_v[0]`,
-        # so V[max-4] must be held in registers across the cluster boundary.
         coop_dma_k(max_m1 * fx.Index(BLOCK_N), 1)
-        v_packs_e3 = _read_v_packs_for_buf(0)
+        v_packs_e3 = _read_v_packs_for_buf(0, urv_base_per_lane)
         s_lo_e1 = [Vec(v_s_1_lo_e)[r] for r in range_constexpr(16)]
         s_hi_e1 = [Vec(v_s_1_hi_e)[r] for r in range_constexpr(16)]
         if const_expr(CAUSAL):
@@ -1324,13 +1129,9 @@ def build_flash_attn_opus_module(
         gpu.barrier()
         rocdl.sched_barrier(0)
 
-        # ─── Cluster 3 (epi, C++ lines 600-618) ───
-        # FULL GEMM2 (no lazy) + softmax start v_s[1] + scale o
         if const_expr(OPUS_SETPRIO):
             rocdl.s_setprio(1)
 
-        # mma1 (full 16 MFMAs): GEMM2 with v_p = P[max-4] and V[max-4] (from s_v[0])
-        # V packs were pre-loaded in Cluster 2 (epi).
         for kss in range_constexpr(4):
             v_pk = v_packs_e3[kss]
             if const_expr(kss < 2):
@@ -1340,8 +1141,6 @@ def build_flash_attn_opus_module(
             for dc in range_constexpr(D_CHUNKS):
                 o_accs[dc] = mfma_acc(v_pk[dc], p_pk, o_accs[dc])
 
-        # row_max + rescale_m + sub_row + first-half exp on v_s[1]
-        # P2: m_row and m_tile_max_e3 are already log2-scaled (Q pre-scaled).
         m_tile_max_e3 = _wave_row_max(s_lo_e1, s_hi_e1)
         row_max_e3 = _fmax(m_row, m_tile_max_e3)
         rescale_e3 = rocdl.exp2(T.f32, _raw(_fsub(m_row, row_max_e3)))
@@ -1349,12 +1148,11 @@ def build_flash_attn_opus_module(
         lo_e3, hi_e3 = _sub_row_first_half_exp(s_lo_e1, s_hi_e1, row_max_e3)
         v_s_1_lo_e_partial = Vec.from_elements(lo_e3, fx.Float32).ir_value()
         v_s_1_hi_e_partial = Vec.from_elements(hi_e3, fx.Float32).ir_value()
-        # P4 anchor #7: matches C++ line 607 `asm volatile("" : "+v"(v_s[1]) ::);`
+
         v_s_1_lo_e_partial, v_s_1_hi_e_partial = _anchor_pair(
             v_s_1_lo_e_partial, v_s_1_hi_e_partial
         )
 
-        # P3 schedule hints (C++ lines 609-610).
         _sched_barrier_pairs(10, 5, 6)
         _sched_barrier_exp_pairs(6, 3, 6)
         rocdl.sched_barrier(0)
@@ -1366,18 +1164,14 @@ def build_flash_attn_opus_module(
         gpu.barrier()
         rocdl.sched_barrier(0)
 
-        # ─── Cluster 4 (epi, C++ lines 620-627) ───
-        # V[max-2] async + K[max-2] ds_read + wait
         coop_dma_v(max_m2 * fx.Index(BLOCK_N), 0)
-        k_pl_e4, k_ph_e4 = _read_k_packs_for_buf(0)
+        k_pl_e4, k_ph_e4 = _read_k_packs_for_buf(0, urk_base_per_lane)
         rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
         _waitcnt_vm_n(NUM_DMA_K + NUM_DMA_V)
         rocdl.sched_barrier(0)
         gpu.barrier()
         rocdl.sched_barrier(0)
 
-        # ─── Cluster 5 (epi, C++ lines 629-640) ───
-        # v_s[0] = mma0(v_q, K[max-2]); l_row *= rescale_e3; finish exp v_s[1]; sum; cast P[max-3]
         v_s_0_lo_e5, v_s_0_hi_e5 = _gemm0(k_pl_e4, k_ph_e4)
         l_row = _fmul(l_row, rescale_e3)
         v_p_lo_e5, v_p_hi_e5, tile_sum_e5 = _finish_softmax_cast_p(
@@ -1385,24 +1179,17 @@ def build_flash_attn_opus_module(
             v_s_1_hi_e_partial,
         )
         l_row = _fadd(l_row, tile_sum_e5)
-        # P4 anchor #8: matches C++ line 635 `asm volatile("" : "+v"(v_p) ::);`
+
         v_p_lo_e5 = _anchor_packs(v_p_lo_e5)
         v_p_hi_e5 = _anchor_packs(v_p_hi_e5)
-        # P3 schedule hints (C++ lines 636-637).
+
         _sched_barrier_exp_pairs(6, 3, 7)
         _sched_barrier_pairs(10, 5, 7)
         rocdl.sched_barrier(0)
         gpu.barrier()
         rocdl.sched_barrier(0)
 
-        # ─── Cluster 6 (epi, C++ lines 642-654) ───
-        # tr_load V[max-3] (4 substeps) from s_v[1] into registers + causal mask
-        # on v_s[0] (= S[max-2]) + wait (lgkm(0), vmcnt(v_buffer_load_insts)).
-        # Hoisted V reads mirror C++ epilogue line 645 `v_v = tr_load<...>(s_v[1], u_rv);`
-        # before the cluster-6 s_barrier. Required for P5 stagger correctness:
-        # epilogue Cluster-8 async_load overwrites `s_v[1]`, so V[max-3] must
-        # be held in registers across the cluster boundary.
-        v_packs_e7 = _read_v_packs_for_buf(1)
+        v_packs_e7 = _read_v_packs_for_buf(1, urv_base_per_lane)
         s_lo_e5 = [Vec(v_s_0_lo_e5)[r] for r in range_constexpr(16)]
         s_hi_e5 = [Vec(v_s_0_hi_e5)[r] for r in range_constexpr(16)]
         if const_expr(CAUSAL):
@@ -1413,13 +1200,9 @@ def build_flash_attn_opus_module(
         gpu.barrier()
         rocdl.sched_barrier(0)
 
-        # ─── Cluster 7 (epi, C++ lines 656-673) ───
-        # FULL GEMM2 (no lazy) + softmax start v_s[0] + scale o
         if const_expr(OPUS_SETPRIO):
             rocdl.s_setprio(1)
 
-        # mma1 (full 16 MFMAs): GEMM2 with v_p = P[max-3] and V[max-3] (from s_v[1])
-        # V packs were pre-loaded in Cluster 6 (epi).
         for kss in range_constexpr(4):
             v_pk = v_packs_e7[kss]
             if const_expr(kss < 2):
@@ -1429,7 +1212,6 @@ def build_flash_attn_opus_module(
             for dc in range_constexpr(D_CHUNKS):
                 o_accs[dc] = mfma_acc(v_pk[dc], p_pk, o_accs[dc])
 
-        # P2: m_row and m_tile_max_e7 are already log2-scaled.
         m_tile_max_e7 = _wave_row_max(s_lo_e5, s_hi_e5)
         row_max_e7 = _fmax(m_row, m_tile_max_e7)
         rescale_e7 = rocdl.exp2(T.f32, _raw(_fsub(m_row, row_max_e7)))
@@ -1438,7 +1220,6 @@ def build_flash_attn_opus_module(
         v_s_0_lo_e_partial = Vec.from_elements(lo_e7, fx.Float32).ir_value()
         v_s_0_hi_e_partial = Vec.from_elements(hi_e7, fx.Float32).ir_value()
 
-        # P3 schedule hints (C++ lines 665-666).
         _sched_barrier_pairs(10, 5, 8)
         _sched_barrier_exp_pairs(6, 3, 8)
         rocdl.sched_barrier(0)
@@ -1450,18 +1231,14 @@ def build_flash_attn_opus_module(
         gpu.barrier()
         rocdl.sched_barrier(0)
 
-        # ─── Cluster 8 (epi, C++ lines 675-682) ───
-        # V[max-1] async + K[max-1] ds_read + wait (lgkm(0), vmcnt(v_buffer_load_insts))
         coop_dma_v(max_m1 * fx.Index(BLOCK_N), 1)
-        k_pl_e8, k_ph_e8 = _read_k_packs_for_buf(1)
+        k_pl_e8, k_ph_e8 = _read_k_packs_for_buf(1, urk_base_per_lane)
         rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
         _waitcnt_vm_n(NUM_DMA_V)
         rocdl.sched_barrier(0)
         gpu.barrier()
         rocdl.sched_barrier(0)
 
-        # ─── Cluster 9 (epi, C++ lines 684-695) ───
-        # v_s[1] = mma0(v_q, K[max-1]); l_row *= rescale_e7; finish exp v_s[0]; sum; cast P[max-2]
         v_s_1_lo_e9, v_s_1_hi_e9 = _gemm0(k_pl_e8, k_ph_e8)
         l_row = _fmul(l_row, rescale_e7)
         v_p_lo_e9, v_p_hi_e9, tile_sum_e9 = _finish_softmax_cast_p(
@@ -1469,23 +1246,14 @@ def build_flash_attn_opus_module(
             v_s_0_hi_e_partial,
         )
         l_row = _fadd(l_row, tile_sum_e9)
-        # P3 schedule hints (C++ lines 691-692).
+
         _sched_barrier_exp_pairs(6, 3, 9)
         _sched_barrier_pairs(10, 5, 9)
         rocdl.sched_barrier(0)
         gpu.barrier()
         rocdl.sched_barrier(0)
 
-        # ─── Cluster 10 (epi, C++ lines 697-709) ───
-        # tr_load V[max-2] (4 substeps) from s_v[0] into registers + causal mask
-        # on v_s[1] (= S[max-1]) + wait vmcnt(0).
-        # Hoisted V reads mirror C++ epilogue line 700 `v_v = tr_load<...>(s_v[0], u_rv);`
-        # before the cluster-10 s_barrier. While no further async_load
-        # overwrites s_v[0] in this epilogue, hoisting here keeps the V-read
-        # placement uniformly one cluster before consumption — matching the
-        # C++ kernel exactly and removing all V LDS reads from the MFMA
-        # window for cleaner scheduling under stagger.
-        v_packs_e11 = _read_v_packs_for_buf(0)
+        v_packs_e11 = _read_v_packs_for_buf(0, urv_base_per_lane)
         s_lo_e9 = [Vec(v_s_1_lo_e9)[r] for r in range_constexpr(16)]
         s_hi_e9 = [Vec(v_s_1_hi_e9)[r] for r in range_constexpr(16)]
         if const_expr(CAUSAL):
@@ -1496,10 +1264,6 @@ def build_flash_attn_opus_module(
         gpu.barrier()
         rocdl.sched_barrier(0)
 
-        # ─── Cluster 11 (epi, C++ lines 711-732) ───
-        # FULL GEMM2 (P[max-2] @ V[max-2]) + row_max + sub_row + FULL exp v_s[1] + cast P[max-1] + scale o
-        # mma1: GEMM2 with v_p = P[max-2] and V[max-2] (from s_v[0])
-        # V packs were pre-loaded in Cluster 10 (epi).
         for kss in range_constexpr(4):
             v_pk = v_packs_e11[kss]
             if const_expr(kss < 2):
@@ -1509,20 +1273,17 @@ def build_flash_attn_opus_module(
             for dc in range_constexpr(D_CHUNKS):
                 o_accs[dc] = mfma_acc(v_pk[dc], p_pk, o_accs[dc])
 
-        # P2: m_row and m_tile_max_e11 are already log2-scaled.
         m_tile_max_e11 = _wave_row_max(s_lo_e9, s_hi_e9)
         row_max_e11 = _fmax(m_row, m_tile_max_e11)
         rescale_e11 = rocdl.exp2(T.f32, _raw(_fsub(m_row, row_max_e11)))
         m_row = row_max_e11
 
-        # sub_row + first-half exp v_s[1]
         lo_e11, hi_e11 = _sub_row_first_half_exp(s_lo_e9, s_hi_e9, row_max_e11)
-        # P3 schedule hints (C++ lines 719-720).
+
         _sched_barrier_pairs(10, 5, 10)
         _sched_barrier_exp_pairs(6, 3, 10)
         rocdl.sched_barrier(0)
 
-        # Second-half exp v_s[1] (FULL exp now); l_row *= rescale_e11; sum; cast P[max-1]
         hi_e11_full = []
         for r in range_constexpr(16):
             hi_e11_full.append(rocdl.exp2(T.f32, _raw(hi_e11[r])))
@@ -1550,20 +1311,12 @@ def build_flash_attn_opus_module(
         gpu.barrier()
         rocdl.sched_barrier(0)
 
-        # ─── Cluster 12 (epi, C++ lines 735-739) ───
-        # tr_load V[max-1] (4 substeps) from s_v[1] into registers + s_waitcnt_lgkmcnt(0)
-        # + barrier. Hoisted V reads mirror C++ epilogue line 736
-        # `v_v = tr_load<...>(s_v[1], u_rv);` before the cluster-12 s_barrier.
-        # Keeps V-read placement uniformly one cluster before consumption.
-        v_packs_e13 = _read_v_packs_for_buf(1)
+        v_packs_e13 = _read_v_packs_for_buf(1, urv_base_per_lane)
         rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
         rocdl.sched_barrier(0)
         gpu.barrier()
         rocdl.sched_barrier(0)
 
-        # ─── Cluster 13 (epi, C++ line 742) ───
-        # FINAL mma1: GEMM2 with v_p = P[max-1] and V[max-1] (from s_v[1])
-        # V packs were pre-loaded in Cluster 12 (epi).
         for kss in range_constexpr(4):
             v_pk = v_packs_e13[kss]
             if const_expr(kss < 2):
@@ -1573,21 +1326,9 @@ def build_flash_attn_opus_module(
             for dc in range_constexpr(D_CHUNKS):
                 o_accs[dc] = mfma_acc(v_pk[dc], p_pk, o_accs[dc])
 
-        # ─── Normalize O and store to gmem (C++ lines 744-754) ───
-        # l_inv = (l_row > 0) ? 1/l_row : 0
         inv_l = rocdl.rcp(T.f32, _raw(l_row))
         inv_l_vec = Vec.from_elements([inv_l], fx.Float32).broadcast_to(16)
 
-        # P5 stagger closeout — extra s_barrier for warps 0-3 only,
-        # mirrors C++ lines 748-750:
-        #     if (!stagger) {
-        #         __builtin_amdgcn_s_barrier();
-        #     }
-        # Same gating as the prologue half: with OPUS_ENABLE_STAGGER ON
-        # (default) warps 0-3 hit one extra barrier here so that across
-        # the whole kernel both groups observe the same total barrier
-        # count. With the flag OFF we fall back to an unconditional
-        # barrier on every wave.
         if const_expr(OPUS_ENABLE_STAGGER):
             _stagger_extra_barrier_if_zero()
         else:
