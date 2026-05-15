@@ -181,7 +181,7 @@ jobs:
       - name: Run benchmarks
         id: benchmarks
         run: |
-          docker exec flydsl_test bash <<'BASH'
+          docker exec -i flydsl_test bash <<'BASH'
           set -e -o pipefail
           export PYTHONPATH=/tmp/aiter:${PYTHONPATH:-}
           export AITER_REPO=/tmp/aiter
@@ -195,7 +195,7 @@ jobs:
         timeout-minutes: 180
         continue-on-error: true
         run: |
-          docker exec flydsl_test bash <<'BASH'
+          docker exec -i flydsl_test bash <<'BASH'
           set -u
           cd /flydsl-test
           rm -rf /tmp/flydsl-bench-main-*
