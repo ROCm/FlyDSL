@@ -35,7 +35,7 @@ USE_TDM_STORE = False
 # Experimental: forwards to AMDGPU LLVM `amdgpu-loop-carried-load-percent`
 # function attribute via passthrough. Set to 0 to try less-conservative
 # scheduling of loop-carried VGPRs. None disables (no attribute set).
-LOOP_CARRIED_LOAD_PERCENT = 100
+LOOP_CARRIED_LOAD_PERCENT = 0
 # Kernarg preload: marks each kernel arg as `inreg` so the AMDGPU backend
 # preloads them into user SGPRs at dispatch (no s_load + s_wait_kmcnt at
 # wave entry). Saves ~1786 cycles of prologue stall on the gfx1250 sim.
@@ -73,6 +73,37 @@ _spec = importlib.util.spec_from_file_location(
 _mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_mod)
 compile_gemm_a8w8_blockscale = _mod.compile_gemm_a8w8_blockscale
+
+_warmup_spec = importlib.util.spec_from_file_location(
+    "warmup_read_kernel",
+    os.path.join(_FLYDSL_ROOT, "kernels/warmup_read_kernel.py"),
+)
+_warmup_mod = importlib.util.module_from_spec(_warmup_spec)
+_warmup_spec.loader.exec_module(_warmup_mod)
+warmup_read = _warmup_mod.warmup_read
+
+
+def _as_f32_1d(t: torch.Tensor) -> torch.Tensor:
+    """Return a 1-D float32 view over `t`'s storage (no copy). Total
+    bytes must be a multiple of 4."""
+    n_bytes = t.numel() * t.element_size()
+    assert n_bytes % 4 == 0, f"tensor not 4-byte aligned: {n_bytes} bytes"
+    n_f32 = n_bytes // 4
+    return torch.empty(0, dtype=torch.float32, device=t.device).set_(
+        t.untyped_storage(), 0, (n_f32,), (1,)
+    )
+
+
+def _run_warmup(inputs, stream):
+    """Touch every 4-byte word of each input tensor so the L2 / TLB are
+    warm before the real GEMM launches. The scratch store keeps the
+    loads alive through DCE."""
+    max_n = max(_as_f32_1d(t).numel() for t in inputs)
+    scratch = torch.empty(max_n, dtype=torch.float32, device=inputs[0].device)
+    for t in inputs:
+        flat = _as_f32_1d(t)
+        n = flat.numel()
+        warmup_read(flat, scratch, n, n, stream=stream)
 
 
 def main():
@@ -136,6 +167,10 @@ def main():
 
     print("Launching kernel...")
     stream = torch.cuda.current_stream().cuda_stream
+
+    print("Running warmup kernel (warms L2/TLB for GEMM inputs)...")
+    _run_warmup([x, w, x_scale, w_scale], stream=stream)
+
     launch_fn(y, x, w, x_scale, w_scale, M, N_padded, stream=stream)
     torch.cuda.synchronize()
 

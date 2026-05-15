@@ -467,7 +467,8 @@ _EXPERIMENTAL_TDM_SHAPES = [s for s in get_tdm_store_shapes() if _experimental_s
 
 @pytest.mark.parametrize("M, N, K", _EXPERIMENTAL_BASIC_SHAPES)
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
-def test_gemm_a8w8_blockscale_experimental_basic(M, N, K, dtype):
+@pytest.mark.parametrize("variant", ["experimental", "experimental_unroll2", "manual"])
+def test_gemm_a8w8_blockscale_experimental_basic(variant, M, N, K, dtype):
     """Experimental variant: bulk W-scale load + per-tile v_readlane."""
     _check_gfx1250()
     _check_shape_compat(M, N, K)
@@ -477,7 +478,7 @@ def test_gemm_a8w8_blockscale_experimental_basic(M, N, K, dtype):
     ref = _reference_output(x, w, x_scale, w_scale, dtype=dtype)
 
     out = gemm_a8w8_blockscale(
-        x, w, x_scale, w_scale, dtype=dtype, variant="experimental",
+        x, w, x_scale, w_scale, dtype=dtype, variant=variant,
     )
 
     assert verify_output(
@@ -489,7 +490,8 @@ def test_gemm_a8w8_blockscale_experimental_basic(M, N, K, dtype):
 
 @pytest.mark.parametrize("M, N, K", [(128, 256, 256), (256, 512, 512)])
 @pytest.mark.parametrize("num_buffers", [2, 3, 4])
-def test_gemm_a8w8_blockscale_experimental_num_buffers(M, N, K, num_buffers):
+@pytest.mark.parametrize("variant", ["experimental", "experimental_unroll2", "manual"])
+def test_gemm_a8w8_blockscale_experimental_num_buffers(variant, M, N, K, num_buffers):
     """Experimental variant: pipeline depth sweep (2/3/4 buffers)."""
     _check_gfx1250()
     _check_shape_compat(M, N, K, num_buffers=num_buffers)
@@ -502,7 +504,7 @@ def test_gemm_a8w8_blockscale_experimental_num_buffers(M, N, K, num_buffers):
         x, w, x_scale, w_scale,
         dtype=torch.bfloat16,
         num_buffers=num_buffers,
-        variant="experimental",
+        variant=variant,
     )
 
     assert verify_output(
@@ -514,7 +516,8 @@ def test_gemm_a8w8_blockscale_experimental_num_buffers(M, N, K, num_buffers):
 
 @pytest.mark.parametrize("M, N, K", _EXPERIMENTAL_TDM_SHAPES)
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
-def test_gemm_a8w8_blockscale_experimental_tdm_store(M, N, K, dtype):
+@pytest.mark.parametrize("variant", ["experimental", "experimental_unroll2", "manual"])
+def test_gemm_a8w8_blockscale_experimental_tdm_store(variant, M, N, K, dtype):
     """Experimental variant + TDM-store epilogue path."""
     _check_gfx1250()
     _check_shape_compat(M, N, K)
@@ -526,7 +529,7 @@ def test_gemm_a8w8_blockscale_experimental_tdm_store(M, N, K, dtype):
     out = gemm_a8w8_blockscale(
         x, w, x_scale, w_scale,
         dtype=dtype,
-        variant="experimental",
+        variant=variant,
         use_tdm_store=True,
     )
 
@@ -545,7 +548,8 @@ def test_gemm_a8w8_blockscale_experimental_tdm_store(M, N, K, dtype):
         (1024, 1024, 1024),
     ],
 )
-def test_gemm_a8w8_blockscale_experimental_scales_per_tile(M, N, K):
+@pytest.mark.parametrize("variant", ["experimental", "experimental_unroll2", "manual"])
+def test_gemm_a8w8_blockscale_experimental_scales_per_tile(variant, M, N, K):
     """Experimental variant with tile_k=256, scale_block_k=128 → 2 scale chunks/tile.
     Verifies the readlane lookup keys on K-block index, not K-tile index."""
     _check_gfx1250()
@@ -559,7 +563,7 @@ def test_gemm_a8w8_blockscale_experimental_scales_per_tile(M, N, K):
         x, w, x_scale, w_scale,
         dtype=torch.bfloat16,
         tile_k=256,
-        variant="experimental",
+        variant=variant,
     )
 
     assert verify_output(
@@ -581,7 +585,8 @@ def test_gemm_a8w8_blockscale_experimental_scales_per_tile(M, N, K):
         (128, 256, 12288),
     ],
 )
-def test_gemm_a8w8_blockscale_experimental_multi_chunk(M, N, K):
+@pytest.mark.parametrize("variant", ["experimental", "experimental_unroll2", "manual"])
+def test_gemm_a8w8_blockscale_experimental_multi_chunk(variant, M, N, K):
     """Experimental variant with scale_k > 32 — exercises the cur/prefetch
     chunk chain, including chunk-boundary advancement in the main loop."""
     _check_gfx1250()
@@ -594,7 +599,7 @@ def test_gemm_a8w8_blockscale_experimental_multi_chunk(M, N, K):
     out = gemm_a8w8_blockscale(
         x, w, x_scale, w_scale,
         dtype=torch.bfloat16,
-        variant="experimental",
+        variant=variant,
     )
 
     assert verify_output(
