@@ -207,13 +207,13 @@ if __name__ == "__main__":
         "--num_iters",
         type=int,
         default=100,
-        help="Use 100+ for stable steady-state perf measurement.",
+        help="Benchmark iterations.",
     )
     parser.add_argument(
         "--num_warmups",
         type=int,
         default=10,
-        help=">=10 needed to reach steady state on the large BLOCK=256 shapes.",
+        help="Warmup iterations.",
     )
     parser.add_argument(
         "--vs_torch",
@@ -225,7 +225,7 @@ if __name__ == "__main__":
         "--preshuffle_b",
         action="store_true",
         default=False,
-        help="Preshuffle B into K-major slabs (each K atom = N*128 byte contig).",
+        help="Use preshuffled B layout.",
     )
     args = parser.parse_args()
 

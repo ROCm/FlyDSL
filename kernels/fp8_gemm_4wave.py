@@ -13,12 +13,8 @@ the chained Vec(4, f32) accumulator stays on AGPR. The XOR swizzle and
 the 8-buffer LDS pipeline ping-pong are kept as direct arithmetic to
 preserve the original kernel's interleaved-cluster scheduling.
 
-Optional preshuffle for B. ``compile_fp8_gemm(..., b_preshuffled=True)``
-consumes B in the same on-disk layout as
-``preshuffle_gemm_v2``/``shuffle_weight((16, 16))`` so a single
-offline-shuffled weight tensor can feed either kernel. The host
-helper :func:`preshuffle_b` performs the permute. LDS layout, MFMA
-fragment shape, and wave assignment are unchanged.
+Optional B preshuffle uses the same on-disk layout as
+``preshuffle_gemm_v2`` / ``shuffle_weight((16, 16))``.
 """
 
 import flydsl.compiler as flyc
@@ -35,18 +31,7 @@ from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 
 
 def preshuffle_b(b_t):
-    """Permute row-major ``B_T`` ``(N, K)`` into the layout consumed when
-    ``compile_fp8_gemm(..., b_preshuffled=True)``.
-
-    On-disk format matches ``preshuffle_gemm.shuffle_weight((16, 16))``
-    / ``preshuffle_gemm_v2``: N-major outermost
-    ``((nlane=16, n_outer=N/16), (kpack=16, klane=4, k0=K/64))``
-    with strides ``((16, K*16), (1, 256, 1024))``. Each 64-K-col block
-    of 16 N rows = 1 KB is contiguous; one MFMA_Scale_128 K-tile = 2
-    consecutive k0 blocks = 2 KB.
-
-    Equivalent to ``b.reshape(N/16, 16, K/64, 4, 16).permute(0, 2, 3, 1, 4)``.
-    """
+    """Permute row-major ``B_T`` ``(N, K)`` for ``b_preshuffled=True``."""
     n, k = b_t.shape[-2:]
     assert n % 16 == 0 and k % 64 == 0, f"need N%16==0 and K%64==0, got N={n} K={k}"
     return b_t.reshape(n // 16, 16, k // 64, 4, 16).permute(0, 2, 3, 1, 4).contiguous()
@@ -171,11 +156,6 @@ def compile_fp8_gemm(
         A0_gl_offset = (tile_i * BLOCK_M) * K
         A1_gl_offset = (tile_i * BLOCK_M + LDS_BLOCK_M) * K
         A_K_STEP = BLOCK_K
-        # N-major preshuffle matches preshuffle_gemm_v2 on-disk format:
-        # ``((nlane=16, n_outer=N/16), (kpack=16, klane=4, k0=K/64))``
-        # with strides ``((16, K*16), (1, 256, 1024))``. Tile base is
-        # unchanged (``(tile_j*BLOCK_N // 16) * K*16 = tile_j*BLOCK_N*K``);
-        # one K-tile of 128 K-cols = 2 k0 entries forward = 2 KB.
         B0_gl_offset = (tile_j * BLOCK_N) * K
         B1_gl_offset = (tile_j * BLOCK_N + LDS_BLOCK_N) * K
         B_K_STEP = (2 * 1024) if b_preshuffled else BLOCK_K
@@ -213,21 +193,6 @@ def compile_fp8_gemm(
             return swizzled // BLOCK_K, swizzled % BLOCK_K
 
         def _compute_global_swizzle(preshuffled):
-            # Two thread→tile mappings:
-            #   * Non-preshuffled (row-major B / A): ``lane//8 → row``,
-            #     ``lane%8 → col_chunk``. 8 lanes share a row at adjacent
-            #     16-byte col chunks → contiguous 128 B per lane-group in DRAM.
-            #     LDS write at ``lane*16`` produces row-major-within-wave LDS.
-            #     XOR swizzle reduces ds_read bank conflicts.
-            #   * Preshuffled (preshuffle_gemm_v2 N-major layout for B,
-            #     ``((nlane=16, n_outer=N/16), (kpack=16, klane=4, k0=K/64))``
-            #     with strides ``((16, K*16), (1, 256, 1024))``): swap to
-            #     ``lane%8 → row``, ``lane//8 → col_chunk``. 8 lanes now span
-            #     NLANE=0..7 at the same (n_outer, klane, k0) → 128 B
-            #     contiguous in DRAM. LDS write at ``lane*16`` produces
-            #     col-major-within-wave LDS where each 128-byte LDS row gets
-            #     exactly 8 lanes (32 banks fully utilised) → no bank conflict
-            #     without any additional swizzle.
             offsets = []
             for round in range_constexpr(max(N_TILES_A, N_TILES_B)):
                 if const_expr(preshuffled):
@@ -248,14 +213,6 @@ def compile_fp8_gemm(
             return offsets
 
         def _compute_lds_swizzle(wave_idx, n_tiles, preshuffled=False):
-            # LDS read byte for (R, C) within one sub-buffer:
-            #   * Non-preshuffled: ``byte = R*BLOCK_K + C_swizzled`` (XOR
-            #     swizzle on col by R-bits to avoid bank conflicts).
-            #   * Preshuffled: ``byte = (R//8)*1024 + (R%8)*16 + (C//16)*128``.
-            #     col-major-within-wave-portion; ``C`` is always a multiple of
-            #     16 here (``C = (lane//16)*16 + step*64``) so ``C%16 == 0``
-            #     drops out. 8 lanes per 128-byte LDS row utilise all 32 banks,
-            #     producing the MI350-optimal 2-way ds_read_b128 bank pattern.
             lds_swz = []
             for row_offset in range_constexpr(n_tiles):
                 row = wave_idx * (n_tiles * 16) + row_offset * 16 + lane_id % 16
@@ -310,7 +267,6 @@ def compile_fp8_gemm(
                 for step in range_constexpr(2):
                     col = (lane_id // 16) * 16 + step * 64
                     if const_expr(preshuffled):
-                        # C%16 == 0 by construction; drop it.
                         byte = (row // 8) * 1024 + (row % 8) * 16 + (col // 16) * 128
                     else:
                         r, c = _swizzle_128(row, col)
@@ -411,8 +367,6 @@ def compile_fp8_gemm(
             c,
             lds_src_preshuffled=False,
         ):
-            # 64x64 output via 4x4 MFMAs, with per-tile G→LDS and LDS→reg
-            # loads interleaved between MFMAs to hide latency.
             rt_dst = []
 
             c = _mfma_ABt_one(a, b, c, 0, 0)
