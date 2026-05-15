@@ -572,7 +572,6 @@ def build_flash_attn_opus_module(
         NUM_DMA_V = SMEM_D_RPT                                          # 2 — same for V
 
         _dma_size = fx.Int32(DMA_BYTES)
-        _dma_soff = fx.Int32(0)
         _dma_off = fx.Int32(0)
         _dma_aux = fx.Int32(0)
 
@@ -600,17 +599,21 @@ def build_flash_attn_opus_module(
                 lds_lane0 = rocdl.readfirstlane(fx.Int64.ir_type, lds_i64)
                 lds_ptr = buffer_ops.create_llvm_ptr(lds_lane0, address_space=3)
 
-                global_n = n_in_warp * fx.Index(NUM_WAVES) + wave_id
+                n_in_tile = n_in_warp * fx.Index(NUM_WAVES) + wave_id
                 global_d = d_bucket * fx.Index(VEC_KV) + fx.Index(d * D_128B_SIZE)
-                global_row = batch_idx * seq_len_v + tile_start + global_n
-                global_byte = (
-                    global_row * fx.Index(STRIDE_TOKEN_KV * BF16_BYTES)
+                uniform_byte = (
+                    (batch_idx * seq_len_v + tile_start)
+                    * fx.Index(STRIDE_TOKEN_KV * BF16_BYTES)
                     + kv_head_idx * fx.Index(HEAD_DIM * BF16_BYTES)
+                )
+                lane_byte = (
+                    n_in_tile * fx.Index(STRIDE_TOKEN_KV * BF16_BYTES)
                     + global_d * fx.Index(BF16_BYTES)
                 )
-                voffset = fx.Int32(global_byte)
+                voffset = fx.Int32(lane_byte)
+                soffset = fx.Int32(uniform_byte)
                 rocdl.raw_ptr_buffer_load_lds(
-                    k_rsrc, lds_ptr, _dma_size, voffset, _dma_soff, _dma_off, _dma_aux
+                    k_rsrc, lds_ptr, _dma_size, voffset, soffset, _dma_off, _dma_aux
                 )
 
         # ── OPUS u_gv + u_sv DMA loader ──
@@ -629,17 +632,21 @@ def build_flash_attn_opus_module(
                 lds_lane0 = rocdl.readfirstlane(fx.Int64.ir_type, lds_i64)
                 lds_ptr = buffer_ops.create_llvm_ptr(lds_lane0, address_space=3)
 
-                global_n = n_in_warp * fx.Index(NUM_WAVES) + wave_id
+                n_in_tile = n_in_warp * fx.Index(NUM_WAVES) + wave_id
                 global_d = d_bucket * fx.Index(VEC_KV) + fx.Index(d * D_128B_SIZE)
-                global_row = batch_idx * seq_len_v + tile_start + global_n
-                global_byte = (
-                    global_row * fx.Index(STRIDE_TOKEN_KV * BF16_BYTES)
+                uniform_byte = (
+                    (batch_idx * seq_len_v + tile_start)
+                    * fx.Index(STRIDE_TOKEN_KV * BF16_BYTES)
                     + kv_head_idx * fx.Index(HEAD_DIM * BF16_BYTES)
+                )
+                lane_byte = (
+                    n_in_tile * fx.Index(STRIDE_TOKEN_KV * BF16_BYTES)
                     + global_d * fx.Index(BF16_BYTES)
                 )
-                voffset = fx.Int32(global_byte)
+                voffset = fx.Int32(lane_byte)
+                soffset = fx.Int32(uniform_byte)
                 rocdl.raw_ptr_buffer_load_lds(
-                    v_rsrc, lds_ptr, _dma_size, voffset, _dma_soff, _dma_off, _dma_aux
+                    v_rsrc, lds_ptr, _dma_size, voffset, soffset, _dma_off, _dma_aux
                 )
 
         # ── Constants ──
@@ -876,7 +883,7 @@ def build_flash_attn_opus_module(
             hi_partial = []
             for r in range_constexpr(16):
                 diff_lo = _fsub(s_lo[r], m_row)
-                lo_partial.append(ArithValue(diff_lo).exp2(fastmath=fm_fast))
+                lo_partial.append(rocdl.exp2(T.f32, _raw(diff_lo)))
             for r in range_constexpr(16):
                 diff_hi = _fsub(s_hi[r], m_row)
                 hi_partial.append(diff_hi)
@@ -891,7 +898,7 @@ def build_flash_attn_opus_module(
             hi_full = []
             for r in range_constexpr(16):
                 hi_full.append(
-                    ArithValue(Vec(hi_partial_vec)[r]).exp2(fastmath=fm_fast)
+                    rocdl.exp2(T.f32, _raw(Vec(hi_partial_vec)[r]))
                 )
             local_sum = c_zero_f
             for r in range_constexpr(16):
@@ -1526,7 +1533,7 @@ def build_flash_attn_opus_module(
         # Second-half exp v_s[1] (FULL exp now); l_row *= rescale_e11; sum; cast P[max-1]
         hi_e11_full = []
         for r in range_constexpr(16):
-            hi_e11_full.append(ArithValue(hi_e11[r]).exp2(fastmath=fm_fast))
+            hi_e11_full.append(rocdl.exp2(T.f32, _raw(hi_e11[r])))
         l_row = _fmul(l_row, rescale_e11)
         local_sum_e11 = c_zero_f
         for r in range_constexpr(16):
