@@ -72,6 +72,10 @@ FLASH_ATTN_FUNC_SHAPES="${FLASH_ATTN_FUNC_SHAPES:-'
 1,4096,64,128,bf16,true
 1,8192,64,128,bf16,true
 '}"
+# MLA decode shapes: "batch,ctx_len" (DeepSeek MLA, fp8 Q/KV, nh=128).
+MLA_DECODE_SHAPES="${MLA_DECODE_SHAPES:-'
+32,8192
+'}"
 
 # Preshuffle GEMM shapes: "dtype,M,N,K,tile_m,tile_n,tile_k"
 GEMM_SHAPES='
@@ -171,7 +175,7 @@ Usage:
   bash scripts/run_benchmark.sh --list
 
 Supported ops:
-  softmax | layernorm | rmsnorm | flash_attn | gemm | moe
+  softmax | layernorm | rmsnorm | flash_attn | mla | gemm | moe
 USAGE
 }
 
@@ -241,16 +245,18 @@ _normalize_op() {
   case "${op}" in
     layernorm) echo "layernorm" ;;
     flash|flash_attn|flash-attn|flash_attn_func|fmha) echo "flash_attn" ;;
+    mla|mla_decode|mla-decode) echo "mla" ;;
     *) echo "${op}" ;;
   esac
 }
 
-# Default: run softmax, norms, FlashAttention, GEMM, and MoE unless user selected a subset.
-# Use positional args or --only to enable others: softmax, layernorm, rmsnorm, flash_attn, gemm, moe
+# Default: run softmax, norms, attention, GEMM, and MoE unless user selected a subset.
+# Use positional args or --only to enable others: softmax, layernorm, rmsnorm, flash_attn, mla, gemm, moe
 RUN_SOFTMAX=1
 RUN_LAYERNORM=1
 RUN_RMSNORM=1
 RUN_FLASH_ATTN=1
+RUN_MLA=1
 RUN_PRESHUFFLE_GEMM=1
 RUN_MOE=1
 
@@ -259,6 +265,7 @@ _enable_only_ops() {
   RUN_LAYERNORM=0
   RUN_RMSNORM=0
   RUN_FLASH_ATTN=0
+  RUN_MLA=0
   RUN_PRESHUFFLE_GEMM=0
   RUN_MOE=0
   for op in "$@"; do
@@ -268,6 +275,7 @@ _enable_only_ops() {
       layernorm) RUN_LAYERNORM=1 ;;
       rmsnorm) RUN_RMSNORM=1 ;;
       flash_attn) RUN_FLASH_ATTN=1 ;;
+      mla) RUN_MLA=1 ;;
       gemm) RUN_PRESHUFFLE_GEMM=1 ;;
       moe) RUN_MOE=1 ;;
       "" ) ;;
@@ -305,6 +313,7 @@ if [ "$#" -gt 0 ]; then
         echo "layernorm"
         echo "rmsnorm"
         echo "flash_attn"
+        echo "mla"
         echo "gemm"
         echo "moe"
         exit 0
@@ -408,6 +417,15 @@ if tflops is None:
         pass
     if m:
         tflops = float(m.group(2))
+
+# MLA decode: "TFLOPS=...  TB/s=..."
+if tbps is None or tflops is None:
+    m = None
+    for m in re.finditer(r"TFLOPS=([0-9.]+)\s+TB/s=([0-9.]+)", txt):
+        pass
+    if m:
+        tflops = float(m.group(1))
+        tbps = float(m.group(2))
 
 # Softmax/Norm-style: "Kernel avg time: X ms" + "Bandwidth: Y GB/s"
 if tbps is None:
@@ -591,6 +609,37 @@ if [ "${RUN_FLASH_ATTN}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
     fi
     shape_tag="B${batch}S${seq_len}H${heads}D${head_dim}_${causal_tag}"
     row="$(_py_parse_and_emit flash_attn "${shape_tag}" "${dtype}" "${log}")"
+    set -- $row
+    _emit_row "$1" "$2" "$3" "$4" "$5"
+  done
+fi
+
+# MLA decode (gfx942 path; gfx950 AITER metadata uses folded nh=16 layout)
+if [ "${RUN_MLA}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
+  for shape in $MLA_DECODE_SHAPES; do
+    [ -z "$shape" ] && continue
+    oldIFS=$IFS
+    IFS=,
+    # shellcheck disable=SC2086 # intentional word-splitting on IFS=,
+    set -- $shape
+    IFS=$oldIFS
+    batch=$1; ctx_len=$2
+    shape_tag="B${batch}C${ctx_len}"
+    if [ "${GPU_ARCH}" = "gfx950" ]; then
+      _emit_row "mla" "${shape_tag}" "fp8" "skip" "skip"
+      continue
+    fi
+    log="${BENCH_LOG_DIR}/mla_decode_B${batch}_C${ctx_len}.log"
+    if python3 tests/kernels/test_mla_decode.py \
+      --batch "$batch" \
+      --ctx_len "$ctx_len" >"${log}" 2>&1; then
+      SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+    else
+      FAIL_COUNT=$((FAIL_COUNT + 1))
+      echo "mla failed. Log: ${log}" >&2
+      _show_fail_log "${log}" "mla"
+    fi
+    row="$(_py_parse_and_emit mla "${shape_tag}" "fp8" "${log}")"
     set -- $row
     _emit_row "$1" "$2" "$3" "$4" "$5"
   done
