@@ -17,9 +17,9 @@ pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
 if not torch.cuda.is_available():
     pytest.skip("CUDA/ROCm not available", allow_module_level=True)
 
-import flydsl.compiler as flyc
-import flydsl.expr as fx
-from flydsl.expr import buffer_ops, const_expr
+import flydsl.compiler as flyc  # noqa: E402
+import flydsl.expr as fx  # noqa: E402
+from flydsl.expr import buffer_ops, const_expr  # noqa: E402
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
