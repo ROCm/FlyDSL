@@ -531,6 +531,53 @@ def build_flash_attn_opus_module(
             token = batch_idx * seq_len_v + token_idx
             return token * stride_q_n_v + q_head_idx * HEAD_DIM + col
 
+        def load_q_packs(q_row_in_block):
+            q_raw_packs = []
+            for ks in range_constexpr(K_STEPS_QK):
+                q_col = fx.Index(ks * K_STEP_QK) + lane_div_32 * MFMA_LANE_K
+                g_idx = q_row_in_block * stride_q_n_v + q_col
+                q_raw_packs.append(
+                    buffer_ops.buffer_load(
+                        q_rsrc,
+                        fx.Int32(g_idx),
+                        vec_width=MFMA_LANE_K,
+                        dtype=elem_dtype,
+                    )
+                )
+            return q_raw_packs
+
+        def cast_q_packs_to_f32(q_raw_packs):
+            q_f32_packs = []
+            for ks in range_constexpr(K_STEPS_QK):
+                q_f32_packs.append(Vec(q_raw_packs[ks]).extf(v8f32_type))
+            return q_f32_packs
+
+        def scale_q_f32_packs(q_f32_packs):
+            q_scaled_f32_packs = []
+            for ks in range_constexpr(K_STEPS_QK):
+                q_pack_f32 = Vec(q_f32_packs[ks])
+                scaled_elems = []
+                for k in range_constexpr(MFMA_LANE_K):
+                    scaled_elems.append(
+                        arith.mulf(
+                            _raw(q_pack_f32[k]),
+                            _raw(c_sm_scale_log2e),
+                            fastmath=fm_fast,
+                        )
+                    )
+                q_scaled_f32_packs.append(
+                    Vec.from_elements(scaled_elems, fx.Float32).ir_value()
+                )
+            return q_scaled_f32_packs
+
+        def cast_q_packs_to_bf16(q_scaled_f32_packs):
+            q_bf16_packs = []
+            for ks in range_constexpr(K_STEPS_QK):
+                q_bf16_packs.append(
+                    Vec(q_scaled_f32_packs[ks]).truncf(v8f16_type).ir_value()
+                )
+            return q_bf16_packs
+
         def _make_raw_buffer_rsrc(tensor):
             base_ptr = _extract_aligned_pointer(tensor)
             base_i64 = llvm.PtrToIntOp(T.i64, base_ptr).result
@@ -904,26 +951,10 @@ def build_flash_attn_opus_module(
         q_row = q_start + q_row_in_block
         q_row_i32 = fx.Int32(q_row)
         q_in_bounds = q_row < seq_len_v
-        q_b_packs = []
-        for ks in range_constexpr(K_STEPS_QK):
-            q_col = fx.Index(ks * K_STEP_QK) + lane_div_32 * MFMA_LANE_K
-            g_idx = q_row_in_block * stride_q_n_v + q_col
-            raw = buffer_ops.buffer_load(
-                q_rsrc,
-                fx.Int32(g_idx),
-                vec_width=MFMA_LANE_K,
-                dtype=elem_dtype,
-            )
-
-            pack_f32 = Vec(raw).extf(v8f32_type)
-            scaled_elems = []
-            for k in range_constexpr(MFMA_LANE_K):
-                scaled_elems.append(
-                    arith.mulf(_raw(Vec(pack_f32)[k]), _raw(c_sm_scale_log2e), fastmath=fm_fast)
-                )
-            pack_scaled_f32 = Vec.from_elements(scaled_elems, fx.Float32)
-            pack_scaled_bf16 = pack_scaled_f32.truncf(v8f16_type)
-            q_b_packs.append(pack_scaled_bf16.ir_value())
+        q_raw_packs = load_q_packs(q_row_in_block)
+        q_f32_packs = cast_q_packs_to_f32(q_raw_packs)
+        q_scaled_f32_packs = scale_q_f32_packs(q_f32_packs)
+        q_b_packs = cast_q_packs_to_bf16(q_scaled_f32_packs)
 
         #     async_load<T::VEC_KV>(g_k, s_k[1].ptr, u_gk, u_sk, kv_tile(1));
         async_load_k(fx.Index(BLOCK_N), 1)
