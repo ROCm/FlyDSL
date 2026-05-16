@@ -38,9 +38,10 @@ KV cache layouts:
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.expr import arith, buffer_ops, const_expr, range_constexpr, vector
+from flydsl.expr import arith, buffer_ops, const_expr, range_constexpr
 from flydsl.expr.arith import ArithValue
-from flydsl.expr.typing import T, Vector as Vec
+from flydsl.expr.typing import T
+from flydsl.expr.typing import Vector as Vec
 from kernels.kernels_common import get_warp_size
 
 # WARP_SIZE is 32 on RDNA (wave32: gfx10xx/gfx11xx/gfx12xx) and 64 on CDNA (wave64: gfx9xx).
@@ -68,9 +69,7 @@ def build_fused_rope_cache_module(
     if rotary_dim != head_dim:
         raise NotImplementedError("Partial rotation not yet supported")
     if dtype_str not in ("bf16", "f16"):
-        raise ValueError(
-            f"dtype_str must be 'bf16' or 'f16', got {dtype_str!r}"
-        )
+        raise ValueError(f"dtype_str must be 'bf16' or 'f16', got {dtype_str!r}")
     half_dim = rotary_dim // 2
 
     # VEC_WIDTH: elements per thread. Use ceil division so vecs_per_head never
@@ -128,27 +127,23 @@ def build_fused_rope_cache_module(
 
         # --- Layout API setup ---
         copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy(copy_bits), elem_bits)
-        vec_reg_ty = fx.MemRefType.get(
-            elem_type, fx.LayoutType.get(VEC_WIDTH, 1), fx.AddressSpace.Register
-        )
-        # Single layout used for both register alloca and logical_divide (same shape).
-        vec_reg_lay = fx.make_layout(VEC_WIDTH, 1)
-        vec_div_lay = vec_reg_lay
+        # Single layout used for register fragments and logical_divide (same shape).
+        vec_lay = fx.make_layout(VEC_WIDTH, 1)
+        vec_div_lay = vec_lay
 
         # f32 scalar copy atom for KScale/VScale loads (1 x f32 = 32 bits).
         f32_copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), 32)
-        f32_reg_ty = fx.MemRefType.get(T.f32, fx.LayoutType.get(1, 1), fx.AddressSpace.Register)
-        f32_reg_lay = fx.make_layout(1, 1)
+        f32_lay = fx.make_layout(1, 1)
 
         # Helper: load a VEC_WIDTH vector from a divided 1D tensor at given index
         def load_vec(div_tensor, idx, atom=None):
-            r = fx.memref_alloca(vec_reg_ty, vec_reg_lay)
+            r = fx.make_rmem_tensor(vec_lay, elem_dtype)
             fx.copy_atom_call(atom or copy_atom, fx.slice(div_tensor, (None, idx)), r)
             return fx.memref_load_vec(r)
 
         # Helper: store a VEC_WIDTH vector to a divided 1D tensor at given index
         def store_vec(val, div_tensor, idx, atom=None):
-            r = fx.memref_alloca(vec_reg_ty, vec_reg_lay)
+            r = fx.make_rmem_tensor(vec_lay, elem_dtype)
             fx.memref_store_vec(val, r)
             fx.copy_atom_call(atom or copy_atom, r, fx.slice(div_tensor, (None, idx)))
 
@@ -276,10 +271,10 @@ def build_fused_rope_cache_module(
                         # --- fp8 KV cache path (raw buffer_ops for fp8 intrinsics) ---
                         ks_buf = fx.rocdl.make_buffer_tensor(KScale)
                         vs_buf = fx.rocdl.make_buffer_tensor(VScale)
-                        ks_div = fx.logical_divide(ks_buf, f32_reg_lay)
-                        vs_div = fx.logical_divide(vs_buf, f32_reg_lay)
-                        r_ks = fx.memref_alloca(f32_reg_ty, f32_reg_lay)
-                        r_vs = fx.memref_alloca(f32_reg_ty, f32_reg_lay)
+                        ks_div = fx.logical_divide(ks_buf, f32_lay)
+                        vs_div = fx.logical_divide(vs_buf, f32_lay)
+                        r_ks = fx.make_rmem_tensor(f32_lay, fx.Float32)
+                        r_vs = fx.make_rmem_tensor(f32_lay, fx.Float32)
                         fx.copy_atom_call(f32_copy_atom, fx.slice(ks_div, (None, 0)), r_ks)
                         fx.copy_atom_call(f32_copy_atom, fx.slice(vs_div, (None, 0)), r_vs)
                         k_scale_val = fx.memref_load_vec(r_ks)[0]
@@ -304,13 +299,12 @@ def build_fused_rope_cache_module(
                         vc_fp8_rsrc = buffer_ops.create_buffer_resource(ValueCache, max_size=True)
 
                         if const_expr(VEC_WIDTH >= 4):
+
                             def pack_fp8(vals):
                                 i32s = []
                                 for i in range_constexpr(VEC_WIDTH // 4):
                                     lo = fx.rocdl.cvt_pk_fp8_f32(T.i32, vals[i * 4], vals[i * 4 + 1], 0, False)
-                                    wd = fx.rocdl.cvt_pk_fp8_f32(
-                                        T.i32, vals[i * 4 + 2], vals[i * 4 + 3], lo, True
-                                    )
+                                    wd = fx.rocdl.cvt_pk_fp8_f32(T.i32, vals[i * 4 + 2], vals[i * 4 + 3], lo, True)
                                     i32s.append(wd)
                                 return i32s
 
@@ -460,8 +454,19 @@ def build_fused_rope_cache_module(
         stream: fx.Stream = fx.Stream(None),
     ):
         launcher = fused_qk_rope_reshape_and_cache(
-            Q, K, V, Positions, CosCache, SinCache, SlotMapping,
-            KeyCache, ValueCache, Q_out, K_out, KScale, VScale,
+            Q,
+            K,
+            V,
+            Positions,
+            CosCache,
+            SinCache,
+            SlotMapping,
+            KeyCache,
+            ValueCache,
+            Q_out,
+            K_out,
+            KScale,
+            VScale,
         )
         launcher.launch(
             grid=(max_heads, num_tokens, 1),

@@ -14,9 +14,9 @@ Usage:
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import sys
-import importlib.util
 
 import pytest
 
@@ -27,21 +27,20 @@ _FLYDSL_PY = os.path.join(_HERE, "../../python")
 if importlib.util.find_spec("flydsl._mlir") is None and os.path.isdir(_FLYDSL_PY) and _FLYDSL_PY not in sys.path:
     sys.path.insert(0, _FLYDSL_PY)
 
-import torch
-import torch.distributed as dist
+import mori.shmem as ms  # noqa: E402
+import torch  # noqa: E402
+import torch.distributed as dist  # noqa: E402
+from mori.ir.flydsl.runtime import get_bitcode_path  # noqa: E402
 
-import flydsl.compiler as flyc
-import flydsl.expr as fx
-from flydsl.expr import arith
-from flydsl.expr.extern import ffi
-from flydsl.compiler.extern_link import link_extern
-
-import mori.shmem as ms
-from mori.ir.flydsl.runtime import get_bitcode_path
-
-from flydsl._mlir import ir as _ir
-from flydsl._mlir.dialects import llvm as _llvm_d
-from flydsl._mlir.ir import IntegerAttr as _IntAttr, IntegerType as _IntTy
+import flydsl.compiler as flyc  # noqa: E402
+import flydsl.expr as fx  # noqa: E402
+from flydsl._mlir import ir as _ir  # noqa: E402
+from flydsl._mlir.dialects import llvm as _llvm_d  # noqa: E402
+from flydsl._mlir.ir import IntegerAttr as _IntAttr  # noqa: E402
+from flydsl._mlir.ir import IntegerType as _IntTy  # noqa: E402
+from flydsl.compiler.extern_link import link_extern  # noqa: E402
+from flydsl.expr import arith  # noqa: E402
+from flydsl.expr.extern import ffi  # noqa: E402
 
 
 def _mori_shmem_module_init(hip_module: int) -> None:
@@ -286,7 +285,10 @@ def _count_physical_gpus() -> int:
     try:
         r = _sp.run(
             [sys.executable, "-c", "import torch; print(torch.cuda.device_count())"],
-            capture_output=True, text=True, timeout=30, env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=env,
         )
         return int(r.stdout.strip()) if r.returncode == 0 else 0
     except Exception:
@@ -315,9 +317,7 @@ def test_flydsl_shmem_two_pe():
         f"stdout (last 4000 chars):\n{result.stdout[-4000:]}\n"
         f"stderr (last 4000 chars):\n{result.stderr[-4000:]}"
     )
-    assert "All tests PASSED" in result.stdout, (
-        f"expected success banner in stdout, got:\n{result.stdout[-4000:]}"
-    )
+    assert "All tests PASSED" in result.stdout, f"expected success banner in stdout, got:\n{result.stdout[-4000:]}"
 
 
 if __name__ == "__main__":

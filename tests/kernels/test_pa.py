@@ -19,8 +19,7 @@ import triton
 
 try:
     import aiter
-    from aiter import dtypes
-    from aiter import per_tensor_quant, pertoken_quant
+    from aiter import dtypes, per_tensor_quant, pertoken_quant
     from aiter.ops.triton.gluon.pa_decode_gluon import get_recommended_splits
     from aiter.test_common import checkAllclose
 except Exception as exc:
@@ -41,8 +40,12 @@ except ImportError:
 
 try:
     from kernels.pa_decode_fp8 import (
-        get_sw_ps_max_context_partition_num,
         get_pa_metadata as flydsl_get_pa_metadata,
+    )
+    from kernels.pa_decode_fp8 import (
+        get_sw_ps_max_context_partition_num,
+    )
+    from kernels.pa_decode_fp8 import (
         pa_decode_ps_launch as flydsl_ps_launch,
     )
 

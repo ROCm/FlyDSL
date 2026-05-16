@@ -10,13 +10,18 @@ Ported from legacy dialect to Fly dialect API.
 
 import pytest
 
-from flydsl._mlir.passmanager import PassManager
-from flydsl._mlir.ir import (
-    Context, Location, Module, InsertionPoint,
-    FunctionType, IntegerType, IndexType, BlockArgument,
-)
+from flydsl._mlir.dialects import arith, fly, func
 from flydsl._mlir.dialects.fly import IntTupleType
-from flydsl._mlir.dialects import fly, arith, func
+from flydsl._mlir.ir import (
+    Context,
+    FunctionType,
+    IndexType,
+    InsertionPoint,
+    IntegerType,
+    Location,
+    Module,
+)
+from flydsl._mlir.passmanager import PassManager
 
 pytestmark = [pytest.mark.l1b_target_dialect, pytest.mark.rocm_lower]
 
@@ -87,6 +92,7 @@ def test_layout_dynamic_types():
                 with InsertionPoint(entry):
                     dim0, dim1, stride0, stride1 = entry.arguments
                     import flydsl.expr as fx
+
                     shape = fx.make_shape(dim0, dim1)
                     stride = fx.make_stride(stride0, stride1)
                     layout = fx.make_layout(shape, stride)
@@ -141,6 +147,7 @@ def test_mixed_static_dynamic():
                     c8 = arith.ConstantOp(i32, 8).result
                     c16 = arith.ConstantOp(i32, 16).result
                     import flydsl.expr as fx
+
                     shape = fx.make_shape(runtime_extent, c8)
                     stride = fx.make_stride(c16, runtime_stride)
                     layout = fx.make_layout(shape, stride)

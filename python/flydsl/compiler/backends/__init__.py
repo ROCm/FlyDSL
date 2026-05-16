@@ -55,13 +55,9 @@ def _make_backend(name: str, arch: str) -> BaseBackend:
     """
     if name not in _registry:
         if name in _import_errors:
-            raise ImportError(
-                f"Compile backend '{name}' failed to import"
-            ) from _import_errors[name]
+            raise ImportError(f"Compile backend '{name}' failed to import") from _import_errors[name]
         available = ", ".join(sorted(_registry)) or "(none)"
-        raise ValueError(
-            f"Unknown compile backend '{name}'. Registered backends: {available}"
-        )
+        raise ValueError(f"Unknown compile backend '{name}'. Registered backends: {available}")
     backend_cls = _registry[name]
     target = backend_cls.make_target(arch)
     return backend_cls(target)
@@ -86,13 +82,9 @@ def get_backend(name: Optional[str] = None, *, arch: str = "") -> BaseBackend:
         backend_cls = _registry.get(name)
         if backend_cls is None:
             if name in _import_errors:
-                raise ImportError(
-                    f"Compile backend '{name}' failed to import"
-                ) from _import_errors[name]
+                raise ImportError(f"Compile backend '{name}' failed to import") from _import_errors[name]
             available = ", ".join(sorted(_registry)) or "(none)"
-            raise ValueError(
-                f"Unknown compile backend '{name}'. Registered backends: {available}"
-            )
+            raise ValueError(f"Unknown compile backend '{name}'. Registered backends: {available}")
         arch = backend_cls.detect_target().arch
     return _make_backend(name, arch)
 

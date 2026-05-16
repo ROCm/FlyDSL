@@ -27,11 +27,12 @@ import argparse
 import os
 import sys
 import time
+
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from kernels.preshuffle_gemm import compile_preshuffle_gemm_a8
+from kernels.preshuffle_gemm import compile_preshuffle_gemm_a8  # noqa: E402
 
 
 def precompile_to_cache(launch_fn, M: int, N: int, K: int, in_dtype: str):
@@ -51,7 +52,9 @@ def precompile_to_cache(launch_fn, M: int, N: int, K: int, in_dtype: str):
             torch.zeros(b_elems, dtype=torch.int8 if is_low_prec else a_dtype),
             torch.zeros(M, dtype=torch.float32) if is_low_prec else torch.empty(0, dtype=torch.float32),
             torch.zeros(N, dtype=torch.float32) if is_low_prec else torch.empty(0, dtype=torch.float32),
-            M, N, 0,
+            M,
+            N,
+            0,
         )
     finally:
         if prev is None:
@@ -69,8 +72,9 @@ def run_and_verify(
 ):
     """Launch the compiled kernel with random data to verify it runs."""
     import torch
-    from tests.utils import pertoken_quant, shuffle_weight
+
     from flydsl.runtime.device import get_rocm_arch
+    from tests.utils import pertoken_quant, shuffle_weight
 
     ARCH = get_rocm_arch()
     DTYPE_FP8 = torch.float8_e4m3fn if "gfx95" in ARCH else torch.float8_e4m3fnuz
@@ -122,14 +126,10 @@ def run_and_verify(
         return t.view(torch.int8) if "float8" in str(t.dtype) else t
 
     sa_flat = (
-        torch.empty((0,), device=device, dtype=torch.float32)
-        if scale_a is None
-        else scale_a.contiguous().view(-1)
+        torch.empty((0,), device=device, dtype=torch.float32) if scale_a is None else scale_a.contiguous().view(-1)
     )
     sb_flat = (
-        torch.empty((0,), device=device, dtype=torch.float32)
-        if scale_b is None
-        else scale_b.contiguous().view(-1)
+        torch.empty((0,), device=device, dtype=torch.float32) if scale_b is None else scale_b.contiguous().view(-1)
     )
 
     stream = torch.cuda.current_stream()
@@ -217,11 +217,7 @@ def compile_one_config(
 
     Returns a dict with timing info.
     """
-    shape_str = (
-        f"M={M} N={N} K={K} "
-        f"tile=({tile_m},{tile_n},{tile_k}) "
-        f"dtype={in_dtype}"
-    )
+    shape_str = f"M={M} N={N} K={K} " f"tile=({tile_m},{tile_n},{tile_k}) " f"dtype={in_dtype}"
     result = {"shape": shape_str, "compile_time": None}
 
     t0 = time.time()
@@ -257,8 +253,12 @@ def test_bad_tile_error():
         shape_str = f"M={M} N={N} K={K} tile=({tile_m},{tile_n},{tile_k})"
         try:
             compile_preshuffle_gemm_a8(
-                M=M, N=N, K=K,
-                tile_m=tile_m, tile_n=tile_n, tile_k=tile_k,
+                M=M,
+                N=N,
+                K=K,
+                tile_m=tile_m,
+                tile_n=tile_n,
+                tile_k=tile_k,
                 in_dtype="fp8",
             )
             raise AssertionError(f"No error raised for bad tile: {shape_str}")
@@ -316,9 +316,7 @@ def main():
     print("=" * 72)
     print("FlyDSL Preshuffle GEMM AOT Pre-compilation")
     print("=" * 72)
-    print(
-        f"  Preset:       {args.preset} ({len(configs)} shapes x {len(dtypes)} dtypes = {total_jobs} jobs)"
-    )
+    print(f"  Preset:       {args.preset} ({len(configs)} shapes x {len(dtypes)} dtypes = {total_jobs} jobs)")
     print(f"  in_dtype:     {dtypes}")
     print(f"  lds_stage:    {args.lds_stage}")
     print(f"  Cache dir:    {cache_dir}")
@@ -394,8 +392,12 @@ import pytest  # noqa: E402
 )
 def test_aot_compile(M, N, K, tile_m, tile_n, tile_k, in_dtype):
     r = compile_one_config(
-        M=M, N=N, K=K,
-        tile_m=tile_m, tile_n=tile_n, tile_k=tile_k,
+        M=M,
+        N=N,
+        K=K,
+        tile_m=tile_m,
+        tile_n=tile_n,
+        tile_k=tile_k,
         in_dtype=in_dtype,
         run_kernel=True,
     )

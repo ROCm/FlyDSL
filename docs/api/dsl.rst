@@ -75,7 +75,7 @@ Coordinate Mapping
 Memory Operations
 ~~~~~~~~~~~~~~~~~~
 
-- **fx.memref_alloca(type, layout)** -- allocate register-file memory
+- **fx.make_rmem_tensor(shape_or_layout, dtype)** -- allocate register-file memory
 - **fx.memref_load(memref, indices)** -- scalar load from memref
 - **fx.memref_store(value, memref, indices)** -- scalar store to memref
 - **fx.memref_load_vec(memref)** -- load entire register as a vector

@@ -21,7 +21,6 @@ import torch
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.expr import arith
 
 pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
 
@@ -65,9 +64,7 @@ def test_if_liveout_silent_bug():
         stream: fx.Stream = fx.Stream(None),
     ):
         grid_x = (n + block_dim - 1) // block_dim
-        bugKernel(Out, threshold, block_dim).launch(
-            grid=(grid_x, 1, 1), block=(block_dim, 1, 1), stream=stream
-        )
+        bugKernel(Out, threshold, block_dim).launch(grid=(grid_x, 1, 1), block=(block_dim, 1, 1), stream=stream)
 
     size = BLOCK
     threshold = BLOCK // 2  # 32

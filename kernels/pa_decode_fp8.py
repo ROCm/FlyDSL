@@ -13,18 +13,21 @@ Requires: aiter's get_pa_metadata_v1 (module_pa_metadata.so)
 """
 
 from __future__ import annotations
+
+import functools
 import math
+
 import torch
+
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-import functools
-from flydsl.expr import arith, vector, gpu, rocdl, buffer_ops, range_constexpr, const_expr
-from flydsl.expr.typing import T, Int32
-from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
-from flydsl.runtime.device import get_rocm_arch as get_hip_arch
-from flydsl.utils.env import runtime as flydsl_runtime_env
 from flydsl._mlir import ir
 from flydsl.compiler.kernel_function import CompilationContext
+from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, rocdl, vector
+from flydsl.expr.typing import Int32, T
+from flydsl.runtime.device import get_rocm_arch as get_hip_arch
+from flydsl.utils.env import runtime as flydsl_runtime_env
+from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 
 # ── Kernel geometry constants ────────────────────────────────────────
 QUERY_GROUP_SIZE = 16
@@ -1180,7 +1183,6 @@ def compile_pa_decode_ps(
 
         # ── Buffer resources ──
         q_rsrc = buffer_ops.create_buffer_resource(query_ptr, max_size=True)
-        k_rsrc = buffer_ops.create_buffer_resource(key_cache_ptr, max_size=True)
         v_rsrc = buffer_ops.create_buffer_resource(value_cache_ptr, max_size=True)
         po_rsrc = buffer_ops.create_buffer_resource(partial_out_ptr, max_size=True)
         pl_rsrc = buffer_ops.create_buffer_resource(partial_lse_ptr, max_size=True)
@@ -2492,7 +2494,6 @@ def compile_pa_decode_sw(
         warp_id = tid >> fx.Int32(6)
 
         q_rsrc = buffer_ops.create_buffer_resource(query_ptr, max_size=True)
-        k_rsrc = buffer_ops.create_buffer_resource(key_cache_ptr, max_size=True)
         v_rsrc = buffer_ops.create_buffer_resource(value_cache_ptr, max_size=True)
         es_rsrc = buffer_ops.create_buffer_resource(exp_sums_ptr, max_size=True)
         ml_rsrc = buffer_ops.create_buffer_resource(max_logits_ptr, max_size=True)

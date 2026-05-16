@@ -168,9 +168,7 @@ def run_external_binary_codegen(
             )
         except subprocess.TimeoutExpired as exc:
             raise ExternalLLVMError(
-                f"External LLVM codegen timed out after 600s.\n"
-                f"command: {' '.join(cmd)}\n"
-                f"work_dir: {work_dir}"
+                f"External LLVM codegen timed out after 600s.\n" f"command: {' '.join(cmd)}\n" f"work_dir: {work_dir}"
             ) from exc
         except subprocess.CalledProcessError as exc:
             raise ExternalLLVMError(
@@ -190,17 +188,19 @@ def run_external_binary_codegen(
     wrapper = ir.Module.create(loc=ir.Location.unknown(module.context))
     wrapper.operation.attributes["gpu.container_module"] = ir.UnitAttr.get(module.context)
     ir.InsertionPoint.at_block_begin(wrapper.body).insert(gpu_module_op.operation.clone())
-    input_path.write_text(
-        wrapper.operation.get_asm(enable_debug_info=env.debug.enable_debug_info), encoding="utf-8"
-    )
+    input_path.write_text(wrapper.operation.get_asm(enable_debug_info=env.debug.enable_debug_info), encoding="utf-8")
 
     try:
         run_mlir_opt(pass_pipeline=pipeline, input_path=input_path, output_path=external_output_path)
         if not external_output_path.is_file():
             raise ExternalLLVMError(f"External LLVM did not create output file: {external_output_path}")
-        external_binary_module = ir.Module.parse(external_output_path.read_text(encoding="utf-8"), context=module.context)
+        external_binary_module = ir.Module.parse(
+            external_output_path.read_text(encoding="utf-8"), context=module.context
+        )
         _replace_gpu_module_with_binary_op(module, external_binary_module)
-        output_path.write_text(module.operation.get_asm(enable_debug_info=env.debug.enable_debug_info), encoding="utf-8")
+        output_path.write_text(
+            module.operation.get_asm(enable_debug_info=env.debug.enable_debug_info), encoding="utf-8"
+        )
     finally:
         if tmp_dir_obj is not None:
             tmp_dir_obj.cleanup()
