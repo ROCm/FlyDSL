@@ -57,6 +57,9 @@ NHEAD_KV = 1
 PAGE_SIZE = 1
 
 MLA_DECODE_BENCH_CONFIGS = [
+    # Cover gfx950 BLOCK_N=64 single-tile paths before the larger multi-tile cases.
+    (1, 63),
+    (1, 64),
     (1, 128),
     (4, 2048),
     (33, 2333),
