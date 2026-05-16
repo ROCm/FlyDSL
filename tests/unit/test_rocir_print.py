@@ -5,6 +5,8 @@
 
 """Test fx.printf: IR generation, GPU lowering, CPU lowering."""
 
+import pytest
+
 import flydsl.expr as fx
 from flydsl._mlir.dialects import arith, func, gpu
 from flydsl._mlir.ir import (
@@ -17,8 +19,7 @@ from flydsl._mlir.ir import (
     Module,
 )
 from flydsl._mlir.passmanager import PassManager
-from flydsl.compiler.kernel_function import create_gpu_module, get_gpu_module_body, create_gpu_func
-import pytest
+from flydsl.compiler.kernel_function import create_gpu_func, create_gpu_module, get_gpu_module_body
 
 pytestmark = [pytest.mark.l1a_compile_no_target_dialect]
 

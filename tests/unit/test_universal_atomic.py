@@ -7,17 +7,18 @@
 
 import pytest
 
-pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
+import flydsl.compiler as flyc
+import flydsl.expr as fx
 
 try:
     import torch
 except ImportError:
     torch = None
+
+pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
+
 if torch is None or not torch.cuda.is_available():
     pytest.skip("CUDA/ROCm not available", allow_module_level=True)
-
-import flydsl.compiler as flyc
-import flydsl.expr as fx
 
 
 @flyc.kernel
@@ -33,11 +34,10 @@ def reduce_add_kernel(
     tA = fx.slice(tA, (None, bid))
     tA = fx.logical_divide(tA, fx.make_layout(1, 1))
 
-    RegTy = fx.MemRefType.get(fx.T.f32(), fx.LayoutType.get(1, 1), fx.AddressSpace.Register)
     loadAtom = fx.make_copy_atom(fx.UniversalCopy32b(), fx.Float32)
     atomicAtom = fx.make_copy_atom(fx.UniversalAtomic(fx.AtomicOp.Add, fx.Float32), fx.Float32)
 
-    rA = fx.memref_alloca(RegTy, fx.make_layout(1, 1))
+    rA = fx.make_rmem_tensor(1, fx.Float32)
     fx.copy_atom_call(loadAtom, fx.slice(tA, (None, tid)), rA)
 
     tOut = fx.logical_divide(Out, fx.make_layout(1, 1))
@@ -94,11 +94,10 @@ def reduce_max_kernel(
     tA = fx.slice(tA, (None, bid))
     tA = fx.logical_divide(tA, fx.make_layout(1, 1))
 
-    RegTy = fx.MemRefType.get(fx.T.f32(), fx.LayoutType.get(1, 1), fx.AddressSpace.Register)
     loadAtom = fx.make_copy_atom(fx.UniversalCopy32b(), fx.Float32)
     atomicAtom = fx.make_copy_atom(fx.UniversalAtomic(fx.AtomicOp.Max, fx.Float32), fx.Float32)
 
-    rA = fx.memref_alloca(RegTy, fx.make_layout(1, 1))
+    rA = fx.make_rmem_tensor(1, fx.Float32)
     fx.copy_atom_call(loadAtom, fx.slice(tA, (None, tid)), rA)
 
     tOut = fx.logical_divide(Out, fx.make_layout(1, 1))

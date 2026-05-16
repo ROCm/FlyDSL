@@ -301,7 +301,7 @@ sliced = fx.slice(layout, coord)
 
 ```python
 # Allocate on-chip memory with layout
-alloca = fx.memref_alloca(memref_type, layout)
+alloca = fx.make_rmem_tensor(layout, fx.Float32)
 
 # Load / store through layout
 val = fx.memref_load(memref, indices)

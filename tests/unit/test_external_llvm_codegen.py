@@ -91,7 +91,7 @@ def test_run_external_binary_codegen_embeds_external_bin(tmp_path, monkeypatch):
     with ir.Context() as ctx, ir.Location.unknown(ctx):
         ctx.load_all_available_dialects()
         module = ir.Module.parse(
-            '''module attributes {gpu.container_module} {
+            """module attributes {gpu.container_module} {
   gpu.module @kernels [#rocdl.target<chip = "gfx942">] {
     llvm.func @kernel() attributes {gpu.kernel, rocdl.kernel} {
       llvm.return
@@ -101,7 +101,7 @@ def test_run_external_binary_codegen_embeds_external_bin(tmp_path, monkeypatch):
     llvm.return
   }
 }
-''',
+""",
             context=ctx,
         )
 
@@ -125,7 +125,7 @@ def test_run_external_binary_codegen_embeds_external_bin(tmp_path, monkeypatch):
     assert (tmp_path / "external-work" / "test_stage_output.mlir").is_file()
 
 
-_MODULE_WITH_HOST = '''\
+_MODULE_WITH_HOST = """\
 module attributes {gpu.container_module} {
   gpu.module @kernels [#rocdl.target<chip = "gfx942">] {
     llvm.func @kernel() attributes {gpu.kernel, rocdl.kernel} {
@@ -136,7 +136,7 @@ module attributes {gpu.container_module} {
     llvm.return
   }
 }
-'''
+"""
 
 
 def test_llvm_options_forwarded_to_external_mlir_opt(tmp_path, monkeypatch):

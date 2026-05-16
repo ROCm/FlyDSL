@@ -12,17 +12,17 @@ to an output tensor, then verifies the value matches the expected result.
 import pytest
 import torch
 
+import flydsl.compiler as flyc
+import flydsl.expr as fx
+from flydsl.expr import buffer_ops
+
 pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
 
 if not torch.cuda.is_available():
     pytest.skip("CUDA/ROCm not available", allow_module_level=True)
 
-import flydsl.compiler as flyc
-import flydsl.expr as fx
-from flydsl.expr import buffer_ops
-
-
 # ── Helpers ──────────────────────────────────────────────────────────────────
+
 
 def _make_out_tensor(n=1, dtype=torch.int32):
     t = torch.zeros(n, device="cuda", dtype=dtype)
@@ -162,11 +162,8 @@ def _k_per_thread_acc(Out: fx.Tensor, n: fx.Int32, block_dim: fx.Constexpr[int])
 
 
 @flyc.jit
-def _j_per_thread_acc(Out: fx.Tensor, n: fx.Int32, block_dim: fx.Constexpr[int],
-                      stream: fx.Stream = fx.Stream(None)):
-    _k_per_thread_acc(Out, n, block_dim).launch(
-        grid=(1, 1, 1), block=(block_dim, 1, 1), stream=stream.value
-    )
+def _j_per_thread_acc(Out: fx.Tensor, n: fx.Int32, block_dim: fx.Constexpr[int], stream: fx.Stream = fx.Stream(None)):
+    _k_per_thread_acc(Out, n, block_dim).launch(grid=(1, 1, 1), block=(block_dim, 1, 1), stream=stream.value)
 
 
 def test_per_thread_acc_result():

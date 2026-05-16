@@ -1,14 +1,15 @@
 # SPDX-License-Identifier: MIT
 # Copyright (C) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
 import torch
-from torch import Tensor
 import triton
 import triton.language as tl
+from torch import Tensor
 
 _8bit_fallback = torch.uint8
 fp8_e8m0 = getattr(torch, "float8_e8m0fnu", _8bit_fallback)
 fp4x2 = getattr(torch, "float4_e2m1fn_x2", _8bit_fallback)
 fp32 = torch.float32
+
 
 def f32_to_mxfp4(x):
     FP4_EBITS, FP4_MBITS = 2, 1
@@ -53,9 +54,7 @@ def f32_to_e8m0(x):
     u32 = x.view(torch.int32)
     exponent = ((u32 >> 23) & 0xFF).view(torch.uint32).to(torch.uint8)
     nan_case = exponent == 0xFF
-    round_case = ((u32 & 0x400000) > 0) & (
-        ((u32 & 0x200000) > 0) | ((u32 & 0x1FFFFF) > 0) | (exponent > 0)
-    )
+    round_case = ((u32 & 0x400000) > 0) & (((u32 & 0x200000) > 0) | ((u32 & 0x1FFFFF) > 0) | (exponent > 0))
     exponent[round_case] += 1
     exponent[nan_case] = 0xFF
     return exponent.view(fp8_e8m0)
@@ -72,15 +71,13 @@ def e8m0_to_f32(scale_e8m0_biased):
     return scale_f32
 
 
-def random_e8m0(rows: int, cols: int, *, low_exp=127, high_exp=132,
-                device="cpu") -> torch.Tensor:
+def random_e8m0(rows: int, cols: int, *, low_exp=127, high_exp=132, device="cpu") -> torch.Tensor:
     """Generate random E8M0 scale bytes [rows, cols] uint8."""
-    return torch.randint(low_exp, high_exp + 1, (rows, cols),
-                         dtype=torch.uint8, device=device)
+    return torch.randint(low_exp, high_exp + 1, (rows, cols), dtype=torch.uint8, device=device)
 
 
 def random_fp4_packed(rows: int, cols: int, *, device="cpu") -> torch.Tensor:
-    """Generate random packed FP4 data [rows, cols//2] uint8. """
+    """Generate random packed FP4 data [rows, cols//2] uint8."""
     assert cols % 2 == 0
     unpacked = torch.randint(0, 16, (rows, cols), dtype=torch.uint8, device=device)
     return pack_uint4(unpacked)
@@ -106,10 +103,10 @@ def fp8_e4m3_to_f32(x):
     # Normal path
     f_normal = (1.0 + mant.float() / 8.0) * torch.pow(2.0, (exp.float() - 7.0))
     # Denormal path
-    f_denorm = (mant.float() / 8.0) * (2.0 ** -6)
+    f_denorm = (mant.float() / 8.0) * (2.0**-6)
 
     result = torch.where(is_denorm, f_denorm, f_normal)
-    result = torch.where(is_nan, torch.tensor(float('nan')), result)
+    result = torch.where(is_nan, torch.tensor(float("nan")), result)
     result = torch.where(sign == 1, -result, result)
     return result
 
@@ -209,9 +206,7 @@ def _f32_to_floatx_unpacked(x: Tensor, ebits: int, mbits: int) -> Tensor:
     denorm_mask_int = denorm_exp << MBITS_F32
 
     # reinterpret int32 as float32
-    denorm_mask_float = torch.tensor(denorm_mask_int, dtype=torch.int32).view(
-        torch.float32
-    )
+    denorm_mask_float = torch.tensor(denorm_mask_int, dtype=torch.int32).view(torch.float32)
 
     # save the sign
     # Note that we have torch.uint32, but some ops like cpu bit shifts
@@ -371,12 +366,8 @@ def _dynamic_mxfp4_quant_kernel_asm_layout(
     out_tensor = evens | (odds << 4)
 
     out_offs_m = pid_m * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    out_offs_n = pid_n * MXFP4_QUANT_BLOCK_SIZE // 2 + tl.arange(
-        0, MXFP4_QUANT_BLOCK_SIZE // 2
-    )
-    out_offs = (
-        out_offs_m[:, None] * stride_x_fp4_m + out_offs_n[None, :] * stride_x_fp4_n
-    )
+    out_offs_n = pid_n * MXFP4_QUANT_BLOCK_SIZE // 2 + tl.arange(0, MXFP4_QUANT_BLOCK_SIZE // 2)
+    out_offs = out_offs_m[:, None] * stride_x_fp4_m + out_offs_n[None, :] * stride_x_fp4_n
     out_mask = (out_offs_m < M)[:, None] & (out_offs_n < (N // 2))[None, :]
     tl.store(x_fp4_ptr + out_offs, out_tensor, mask=out_mask)
 
@@ -508,9 +499,7 @@ def _moe_mxfp4_sort_kernel(
         sorted_ids_offs_m = pid_m * BLOCK_SIZE_M + m + tl.arange(0, BLOCK_SIZE_M)
         sorted_ids_offs = sorted_ids_offs_m
         sorted_ids_mask = sorted_ids_offs_m < num_valid_ids
-        sorted_ids = tl.load(
-            sorted_ids_ptr + sorted_ids_offs, mask=sorted_ids_mask, other=token_num
-        )
+        sorted_ids = tl.load(sorted_ids_ptr + sorted_ids_offs, mask=sorted_ids_mask, other=token_num)
         topk_ids = sorted_ids >> 24
         sorted_ids = sorted_ids & 0xFFFFFF
 
@@ -524,9 +513,7 @@ def _moe_mxfp4_sort_kernel(
             blockscale_e8m0_offs_m[:, None] * stride_blockscale_e8m0_m
             + blockscale_e8m0_offs_n[None, :] * stride_blockscale_e8m0_n
         )
-        blockscale_e8m0_mask = (sorted_ids < token_num)[:, None] & (
-            blockscale_e8m0_offs_n < N_i
-        )[None, :]
+        blockscale_e8m0_mask = (sorted_ids < token_num)[:, None] & (blockscale_e8m0_offs_n < N_i)[None, :]
         blockscale_e8m0_sub = tl.load(
             blockscale_e8m0_ptr + blockscale_e8m0_offs,
             mask=blockscale_e8m0_mask,
@@ -635,18 +622,12 @@ def shuffle_weight_w4(src: torch.Tensor, NLane: int, gate_up: bool, moe_gemm: bo
         N0 = N // NLane
         K0 = K_pk // (KLane * KPack)
         if gate_up:
-            src_reshaped = src.view(
-                experts_cnt, 2, N0, NLane, K0, KLane, KPack
-            )  # [E,2, N0, NLane ,K0, KLane, KPack]
-            src_reshaped = src_reshaped.permute(
-                0, 2, 1, 4, 5, 3, 6
-            ).contiguous()  # [E, N0, 2, K0, KLane, NLane, KPack]
+            src_reshaped = src.view(experts_cnt, 2, N0, NLane, K0, KLane, KPack)  # [E,2, N0, NLane ,K0, KLane, KPack]
+            src_reshaped = src_reshaped.permute(0, 2, 1, 4, 5, 3, 6).contiguous()  # [E, N0, 2, K0, KLane, NLane, KPack]
             interleaved = src_reshaped.view(*src.shape)
         else:
             src_reshaped = src.view(experts_cnt, N0, NLane, K0, KLane, KPack)
-            interleaved = (
-                src_reshaped.permute(0, 1, 3, 4, 2, 5).contiguous().view(*src.shape)
-            )
+            interleaved = src_reshaped.permute(0, 1, 3, 4, 2, 5).contiguous().view(*src.shape)
         # print("interleaved shape:", interleaved.shape)
         return interleaved.contiguous().view(src_type)
     else:
@@ -656,16 +637,12 @@ def shuffle_weight_w4(src: torch.Tensor, NLane: int, gate_up: bool, moe_gemm: bo
         N0 = N // NLane
         K0 = K_pk // (KLane * KPack)
         src_reshaped = src.view(N0, NLane, K0, KLane, KPack)
-        interleaved = (
-            src_reshaped.permute(0, 2, 3, 1, 4).contiguous().view(*src.shape)
-        )
+        interleaved = src_reshaped.permute(0, 2, 3, 1, 4).contiguous().view(*src.shape)
         # print("interleaved shape:", interleaved.shape)
         return interleaved.contiguous().view(src_type)
 
 
-def shuffle_scale_w4(
-    src: torch.Tensor, experts_cnt: int, gate_up: bool
-) -> torch.Tensor:
+def shuffle_scale_w4(src: torch.Tensor, experts_cnt: int, gate_up: bool) -> torch.Tensor:
     n_experts, k_ = src.shape
     n_ = n_experts // experts_cnt
     # MXFP4 constants
@@ -698,7 +675,6 @@ def shuffle_scale_w4(
 def per_1x32_f4_quant(x, scale=None, quant_dtype=fp4x2, shuffle=False):
     assert quant_dtype == fp4x2
     block_size = 32
-    F8E8M0_EXP_BIAS = 127
     F4E2M1_MAX = 6.0
     MAX_POW2 = int(torch.log2(torch.tensor(F4E2M1_MAX, dtype=torch.float32)).item())
     # dtypeMax = F4E2M1_MAX

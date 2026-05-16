@@ -88,14 +88,10 @@ in_div = fx.logical_divide(row_in, fx.make_layout(VEC_WIDTH, 1))
 
 # Copy atom: 8 x f16 = 128 bits
 copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), 16)
-vec_reg_ty = fx.MemRefType.get(
-    T.f16, fx.LayoutType.get(VEC_WIDTH, 1), fx.AddressSpace.Register
-)
-vec_reg_lay = fx.make_layout(VEC_WIDTH, 1)
 
 # Load
 idx = tid + tile_i * BLOCK_THREADS
-r = fx.memref_alloca(vec_reg_ty, vec_reg_lay)
+r = fx.make_rmem_tensor(VEC_WIDTH, fx.Float16)
 fx.copy_atom_call(copy_atom, fx.slice(in_div, (None, idx)), r)
 vec_f16 = Vec(fx.memref_load_vec(r))
 ```
@@ -146,12 +142,10 @@ Scalar loads (vec_width=1) also work through the layout API:
 ```python
 buf = fx.rocdl.make_buffer_tensor(tensor, max_size=True)
 copy_atom_s = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), 32)  # f32 scalar
-scalar_reg_ty = fx.MemRefType.get(T.f32, fx.LayoutType.get(1, 1), fx.AddressSpace.Register)
-scalar_reg_lay = fx.make_layout(1, 1)
 div = fx.logical_divide(buf, fx.make_layout(1, 1))
 
 def load_scalar(index):
-    r = fx.memref_alloca(scalar_reg_ty, scalar_reg_lay)
+    r = fx.make_rmem_tensor(1, fx.Float32)
     fx.copy_atom_call(copy_atom_s, fx.slice(div, (None, fx.Int32(index))), r)
     return Vec(fx.memref_load_vec(r))[0]  # extract scalar from vector<1xf32>
 ```
@@ -159,7 +153,7 @@ def load_scalar(index):
 Scalar stores work the same way (reverse src/dst):
 ```python
 def store_scalar(index, val):
-    r = fx.memref_alloca(scalar_reg_ty, scalar_reg_lay)
+    r = fx.make_rmem_tensor(1, fx.Float32)
     fx.memref_store_vec(Vec.filled(1, val, Float32), r)
     fx.copy_atom_call(copy_atom_s, r, fx.slice(div, (None, fx.Int32(index))))
 ```

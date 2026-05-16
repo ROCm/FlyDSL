@@ -13,13 +13,13 @@ Usage:
     python tests/kernels/test_mla_decode.py -b 32 -c 8192
 """
 
-import sys
-import os
 import argparse
 import logging
+import os
+import sys
 
-import torch
 import pytest
+import torch
 
 sys.path.insert(0, "build-fly/python_packages")
 sys.path.insert(1, ".")
@@ -29,17 +29,16 @@ logging.basicConfig(level=logging.INFO, format="%(message)s")
 pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
 
 aiter = pytest.importorskip("aiter", reason="aiter is not installed, skipping MLA tests")
-from aiter import dtypes
-from aiter.ops.attention import (
+from aiter import dtypes  # noqa: E402
+from aiter.ops.attention import (  # noqa: E402
     get_mla_metadata_info_v1,
     get_mla_metadata_v1,
     mla_reduce_v1,
 )
 
-from flydsl.runtime.device import get_rocm_arch
-
-from tests.test_common import run_perftest, checkAllclose
-from kernels.mla_fwd_decode import flydsl_mla_fwd_decode
+from flydsl.runtime.device import get_rocm_arch  # noqa: E402
+from kernels.mla_fwd_decode import flydsl_mla_fwd_decode  # noqa: E402
+from tests.test_common import checkAllclose, run_perftest  # noqa: E402
 
 torch.set_default_device("cuda")
 
@@ -67,6 +66,7 @@ MLA_DECODE_BENCH_CONFIGS = [
 
 # ── Pure-PyTorch reference ──────────────────────────────────────
 
+
 def ref_masked_attention(query, key, value, scale, dtype, q_scale=None, kv_scale=None):
     """Single-sequence MLA attention (no causal mask needed for decode_qlen=1)."""
     s = scale
@@ -79,16 +79,15 @@ def ref_masked_attention(query, key, value, scale, dtype, q_scale=None, kv_scale
     lse = attn_weights.logsumexp(dim=-1)
     m = attn_weights.max(-1).values
     attn_weights_exp = torch.exp(attn_weights - m.unsqueeze(-1))
-    l = attn_weights_exp.sum(-1)
+    weights_sum = attn_weights_exp.sum(-1)
     out = torch.einsum("hqk,khd->qhd", attn_weights_exp.float(), value.float())
-    out = out / l.transpose(0, 1).unsqueeze(-1)
+    out = out / weights_sum.transpose(0, 1).unsqueeze(-1)
     if kv_scale is not None:
         out *= kv_scale
     return out.to(dtype), lse
 
 
-def torch_mla_extend(q, kvc_cache, qo_indptr, kv_indptr, kv_indices,
-                     kv_last_page_lens, sm_scale, dtype):
+def torch_mla_extend(q, kvc_cache, qo_indptr, kv_indptr, kv_indices, kv_last_page_lens, sm_scale, dtype):
     """Pure-PyTorch paged MLA attention reference."""
     is_fp8_q = q.dtype in (torch.float8_e4m3fn, torch.float8_e4m3fnuz)
     is_fp8_kvc = kvc_cache.dtype in (torch.float8_e4m3fn, torch.float8_e4m3fnuz)
@@ -124,6 +123,7 @@ def torch_mla_extend(q, kvc_cache, qo_indptr, kv_indptr, kv_indices,
 
 # ── Test driver ─────────────────────────────────────────────────
 
+
 def run_single(batch_size, ctx_len, decode_qlen=1, max_split_per_batch=32):
     nhead = NHEAD
     nhead_kv = NHEAD_KV
@@ -136,8 +136,7 @@ def run_single(batch_size, ctx_len, decode_qlen=1, max_split_per_batch=32):
 
     # ── Sequence metadata ──
     seq_lens_kv = torch.full((batch_size,), ctx_len, dtype=torch.int)
-    kv_block_nums = torch.full((batch_size,), (ctx_len + page_size - 1) // page_size,
-                               dtype=torch.int)
+    kv_block_nums = torch.full((batch_size,), (ctx_len + page_size - 1) // page_size, dtype=torch.int)
     kv_last_page_lens = torch.ones(batch_size, dtype=torch.int)
     if ctx_len % page_size != 0:
         kv_last_page_lens.fill_(ctx_len % page_size)
@@ -154,28 +153,30 @@ def run_single(batch_size, ctx_len, decode_qlen=1, max_split_per_batch=32):
     max_seqlen_qo = decode_qlen
 
     # ── KV buffer and Q ──
-    kv_buffer = torch.randn((num_page, page_size, nhead_kv, QK_HEAD_DIM),
-                            dtype=torch.bfloat16)
+    kv_buffer = torch.randn((num_page, page_size, nhead_kv, QK_HEAD_DIM), dtype=torch.bfloat16)
     kv_buffer_fp8 = kv_buffer.to(fp8)
 
     q = torch.randn((total_q, nhead, QK_HEAD_DIM), dtype=torch.bfloat16)
     q_fp8 = q.to(fp8)
 
-    sm_scale = 1.0 / (QK_HEAD_DIM ** 0.5)
+    sm_scale = 1.0 / (QK_HEAD_DIM**0.5)
 
     # ── PyTorch reference (using fp8 data, cast to float internally) ──
     out_ref, lse_ref = torch_mla_extend(
-        q_fp8, kv_buffer_fp8.view(num_page, page_size, nhead_kv, QK_HEAD_DIM),
-        qo_indptr, kv_indptr, kv_indices, kv_last_page_lens,
-        sm_scale, out_dtype,
+        q_fp8,
+        kv_buffer_fp8.view(num_page, page_size, nhead_kv, QK_HEAD_DIM),
+        qo_indptr,
+        kv_indptr,
+        kv_indices,
+        kv_last_page_lens,
+        sm_scale,
+        out_dtype,
     )
 
     # ── Limit splits for large nhead ──
     gpu = torch.cuda.current_device()
     cu_num = torch.cuda.get_device_properties(gpu).multi_processor_count
-    max_split_per_batch = min(
-        (cu_num + batch_size - 1) // batch_size, max_split_per_batch
-    )
+    max_split_per_batch = min((cu_num + batch_size - 1) // batch_size, max_split_per_batch)
 
     # ── Metadata via aiter ──
     (
@@ -186,8 +187,13 @@ def run_single(batch_size, ctx_len, decode_qlen=1, max_split_per_batch=32):
         (reduce_final_map_size, reduce_final_map_type),
         (reduce_partial_map_size, reduce_partial_map_type),
     ) = get_mla_metadata_info_v1(
-        batch_size, max_seqlen_qo, nhead, fp8, fp8,
-        is_sparse=False, fast_mode=True,
+        batch_size,
+        max_seqlen_qo,
+        nhead,
+        fp8,
+        fp8,
+        is_sparse=False,
+        fast_mode=True,
         num_kv_splits=max_split_per_batch,
         intra_batch_mode=False,
     )
@@ -200,10 +206,18 @@ def run_single(batch_size, ctx_len, decode_qlen=1, max_split_per_batch=32):
     reduce_partial_map = torch.empty(reduce_partial_map_size, dtype=reduce_partial_map_type, device="cuda")
 
     get_mla_metadata_v1(
-        qo_indptr, kv_indptr, kv_last_page_lens,
-        nhead // nhead_kv, nhead_kv, False,
-        work_meta_data, work_info_set, work_indptr,
-        reduce_indptr, reduce_final_map, reduce_partial_map,
+        qo_indptr,
+        kv_indptr,
+        kv_last_page_lens,
+        nhead // nhead_kv,
+        nhead_kv,
+        False,
+        work_meta_data,
+        work_info_set,
+        work_indptr,
+        reduce_indptr,
+        reduce_final_map,
+        reduce_partial_map,
         kv_granularity=max(page_size, 16),
         max_seqlen_qo=int(max_seqlen_qo),
         uni_seqlen_qo=decode_qlen,
@@ -219,11 +233,13 @@ def run_single(batch_size, ctx_len, decode_qlen=1, max_split_per_batch=32):
 
     logits = torch.empty(
         (reduce_partial_map.size(0) * max_seqlen_qo, 1, nhead, V_HEAD_DIM),
-        dtype=torch.float32, device="cuda",
+        dtype=torch.float32,
+        device="cuda",
     )
     attn_lse = torch.empty(
         (reduce_partial_map.size(0) * max_seqlen_qo, 1, nhead, 1),
-        dtype=torch.float32, device="cuda",
+        dtype=torch.float32,
+        device="cuda",
     )
 
     # ── Launch FlyDSL kernel ──
@@ -242,9 +258,14 @@ def run_single(batch_size, ctx_len, decode_qlen=1, max_split_per_batch=32):
 
     def launch_reduce():
         mla_reduce_v1(
-            logits, attn_lse,
-            reduce_indptr, reduce_final_map, reduce_partial_map,
-            max_seqlen_qo, out_asm, None,
+            logits,
+            attn_lse,
+            reduce_indptr,
+            reduce_final_map,
+            reduce_partial_map,
+            max_seqlen_qo,
+            out_asm,
+            None,
         )
 
     _, us = run_perftest(launch_decode, num_iters=10, num_warmup=3)
@@ -254,7 +275,8 @@ def run_single(batch_size, ctx_len, decode_qlen=1, max_split_per_batch=32):
     # ── Verify ──
     total_kv = seq_lens_kv.sum().item()
     err = checkAllclose(
-        out_ref, out_asm,
+        out_ref,
+        out_asm,
         msg=f"[b={batch_size} c={ctx_len}] golden vs flydsl decode-only: {us:>8.2f} us ... ",
     )
 
@@ -270,14 +292,14 @@ def run_single(batch_size, ctx_len, decode_qlen=1, max_split_per_batch=32):
     )
 
     logger.info(
-        f"  cos_diff={cos_diff:.2e}  TFLOPS={flops / us / 1e6:.2f}  "
-        f"TB/s={bw / us / 1e6:.2f}  err_ratio={err:.2%}"
+        f"  cos_diff={cos_diff:.2e}  TFLOPS={flops / us / 1e6:.2f}  " f"TB/s={bw / us / 1e6:.2f}  err_ratio={err:.2%}"
     )
     assert cos_diff < 3e-2, f"cos_diff={cos_diff} exceeds threshold"
     return err, us
 
 
 # ── pytest ──────────────────────────────────────────────────────
+
 
 # On gfx950, AITER folds nh=128 + fp8/fp8 to a nh=16 work-info layout
 # instead of generating the native nh=128 layout. This FlyDSL kernel only
@@ -296,6 +318,7 @@ def test_mla_decode(batch_size, ctx_len):
 
 
 # ── CLI (local benchmarking) ────────────────────────────────────
+
 
 def main():
     parser = argparse.ArgumentParser(description="FlyDSL MLA decode test")

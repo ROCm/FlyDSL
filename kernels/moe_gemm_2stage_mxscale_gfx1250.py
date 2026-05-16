@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
+# fmt: off
+# ruff: noqa: E702,F841,I001
 
 
 """gfx1250 MoE 2-stage mxscale kernels (fp4/fp8/a8w4).
@@ -93,6 +95,7 @@ def _compile_stage1_mxscale_kernel_impl(
     from flydsl._mlir.dialects import memref, scf
     from flydsl.compiler.kernel_function import CompilationContext
     from flydsl.expr import arith, buffer_ops, const_expr, gpu, idx2crd, range_constexpr, rocdl, tdm_ops, vector
+    from flydsl.expr.rocdl import cluster
     from flydsl.expr.typing import T
     from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr, get_op_result_or_value
 
@@ -400,8 +403,8 @@ def _compile_stage1_mxscale_kernel_impl(
         blk_n = bx * arith.index(int(tile_n))
 
         if const_expr(use_cluster):
-            _local_x, _local_y = gpu.compute_cluster_position()
-            _a_mcast_mask, b_mcast_mask = gpu.compute_mcast_masks(
+            _local_x, _local_y = cluster.compute_cluster_position()
+            _a_mcast_mask, b_mcast_mask = cluster.compute_mcast_masks(
                 _local_x, _local_y, int(cluster_m), int(cluster_n))
         else:
             b_mcast_mask = 0
@@ -1882,7 +1885,7 @@ def _compile_stage1_mxscale_kernel_impl(
                 if const_expr(loop_iters > 0):
                     pipeline_fence(outstanding=0, use_cluster=use_cluster)
                 elif const_expr(use_cluster):
-                    gpu.cluster_barrier()
+                    cluster.cluster_barrier()
 
                 # ── tail ──
                 _tail_li = 0
@@ -2317,6 +2320,7 @@ def _compile_stage2_mxscale_kernel_impl(
     from flydsl._mlir.dialects import memref, scf
     from flydsl.compiler.kernel_function import CompilationContext
     from flydsl.expr import arith, buffer_ops, const_expr, gpu, idx2crd, range_constexpr, rocdl, tdm_ops, vector
+    from flydsl.expr.rocdl import cluster
     from flydsl.expr.typing import T
     from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr, get_op_result_or_value
 
@@ -2565,8 +2569,8 @@ def _compile_stage2_mxscale_kernel_impl(
         blk_n = bx * arith.index(int(tile_n))
 
         if const_expr(use_cluster):
-            _local_x, _local_y = gpu.compute_cluster_position()
-            _a_mcast_mask, b_mcast_mask = gpu.compute_mcast_masks(
+            _local_x, _local_y = cluster.compute_cluster_position()
+            _a_mcast_mask, b_mcast_mask = cluster.compute_mcast_masks(
                 _local_x, _local_y, int(cluster_m), int(cluster_n))
         else:
             b_mcast_mask = 0
@@ -3734,7 +3738,7 @@ def _compile_stage2_mxscale_kernel_impl(
                 if const_expr(loop_iters > 0):
                     pipeline_fence(outstanding=0, use_cluster=use_cluster)
                 elif const_expr(use_cluster):
-                    gpu.cluster_barrier()
+                    cluster.cluster_barrier()
 
                 # ── tail ──
                 _tail_li = 0
