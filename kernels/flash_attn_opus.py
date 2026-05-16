@@ -671,7 +671,7 @@ def build_flash_attn_opus_module(
             # runtime buf_id (rare): V0=SMEM_K_TILE_ELEMS, V1=SMEM_K_TILE_ELEMS+OPUS_KV_PER_BUFFER
             return fx.Index(SMEM_K_TILE_ELEMS) + buf_id * fx.Index(OPUS_KV_PER_BUFFER)
 
-        def coop_dma_k(tile_start, buf_id):
+        def async_load_k(tile_start, buf_id):
             k_lds_byte_base = lds_kv_base_idx + k_buf_base(buf_id) * fx.Index(BF16_BYTES)
             for d in range_constexpr(NUM_DMA_K):
                 lds_addr = (
@@ -700,7 +700,7 @@ def build_flash_attn_opus_module(
                     k_rsrc, lds_ptr, _dma_size, voffset, soffset, _dma_off, _dma_aux
                 )
 
-        def coop_dma_v(tile_start, buf_id):
+        def async_load_v(tile_start, buf_id):
             v_lds_byte_base = lds_kv_base_idx + v_buf_base(buf_id) * fx.Index(BF16_BYTES)
             for d in range_constexpr(NUM_DMA_V):
                 lds_addr = (
@@ -732,7 +732,7 @@ def build_flash_attn_opus_module(
         def reduction_peer(v_f32):
             return fx.Float32(v_f32).shuffle_xor(shuf_32_i32, width_i32)
 
-        def _read_k_packs_for_buf(buf_id, urk_base):
+        def async_load_k_from_lds_to_vgpr(buf_id, urk_base):
             """Read all 16 K MFMA packs from LDS buffer `buf_id` (OPUS u_rk)."""
             k_base = k_buf_base(buf_id)
             k_lo = [None] * K_STEPS_QK
@@ -843,14 +843,14 @@ def build_flash_attn_opus_module(
                 s_hi[idx_x] = _raw(_bitcast_f32(new_x_hi))
                 s_hi[idx_y] = _raw(_bitcast_f32(new_y_hi))
 
-        def _wave_row_max(s_lo, s_hi):
+        def attn_row_max(s_lo, s_hi):
             m = c_neg_inf
             for r in range_constexpr(16):
                 m = _fmax(m, s_lo[r])
                 m = _fmax(m, s_hi[r])
             return _fmax(m, reduction_peer(m))
 
-        def _sub_row_first_half_exp(s_lo, s_hi, m_row):
+        def attn_sub_row_first_half_exp2_slice(s_lo, s_hi, m_row):
             lo_partial = []
             hi_partial = []
             for r in range_constexpr(16):
@@ -901,28 +901,28 @@ def build_flash_attn_opus_module(
 
         #     // Prologue
         #     async_load<T::VEC_KV>(g_k, s_k[0].ptr, u_gk, u_sk, kv_tile(0));
-        #     __builtin_amdgcn_s_waitcnt(0);
-        #     __builtin_amdgcn_sched_barrier(0);
-        #     __builtin_amdgcn_s_barrier();
-        coop_dma_k(fx.Index(0), 0)
+        async_load_k(fx.Index(0), 0)
 
+        #     __builtin_amdgcn_s_waitcnt(0);
         rocdl.s_waitcnt(0)
+        #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
+        #     __builtin_amdgcn_s_barrier();
         gpu.barrier()
 
         #     async_load<T::VEC_KV>(g_k, s_k[1].ptr, u_gk, u_sk, kv_tile(1));
+        async_load_k(fx.Index(BLOCK_N), 1)
         #     async_load<T::VEC_KV>(g_v, s_v[0].ptr, u_gv, u_sv, kv_tile(0));
+        async_load_v(fx.Index(0), 0)
+
         #     v_k = load<T::VEC_KV>(s_k[0], u_rk);
+        k_pl_pro, k_ph_pro = async_load_k_from_lds_to_vgpr(0, urk_base_per_lane)
+
         #     __builtin_amdgcn_sched_barrier(0);
-        #     s_waitcnt_lgkmcnt(0_I);
-        #     s_waitcnt_vmcnt(number<T::v_buffer_load_insts>{});
-        coop_dma_k(fx.Index(BLOCK_N), 1)
-        coop_dma_v(fx.Index(0), 0)
-
-        k_pl_pro, k_ph_pro = _read_k_packs_for_buf(0, urk_base_per_lane)
-
         rocdl.sched_barrier(0)
+        #     s_waitcnt_lgkmcnt(0_I);
         rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
+        #     s_waitcnt_vmcnt(number<T::v_buffer_load_insts>{});
         _waitcnt_vm_n(NUM_DMA_V)
 
         #     if (stagger) {
@@ -936,43 +936,42 @@ def build_flash_attn_opus_module(
             gpu.barrier()
 
         #     v_s[0] = mma0(v_q, v_k);
+        v_s_0_lo_raw, v_s_0_hi_raw = _gemm0(k_pl_pro, k_ph_pro)
         #     __builtin_amdgcn_sched_barrier(0);
+        rocdl.sched_barrier(0)
+
         #     if constexpr (T::CAUSAL) {
         #         const int kv_end_pos = T::KV_TILE_SIZE;
         #         if (q_start_pos < kv_end_pos) {
         #             attn_mask_causal_tile<T>(v_s[0], q_start_pos, 0, neg_inf_v, lane_id);
         #         }
         #     }
-        #     m_row = attn_row_max<T>(v_s[0]);
-        #     attn_sub_row<T>(v_s[0], m_row);
-        #     asm volatile("" : "+v"(v_s[0]) ::);
-        #     attn_exp2_slice<T, 0, s_half_len>(v_s[0]);
-        v_s_0_lo_raw, v_s_0_hi_raw = _gemm0(k_pl_pro, k_ph_pro)
-        rocdl.sched_barrier(0)
-
         s_lo_pro = [Vec(v_s_0_lo_raw)[r] for r in range_constexpr(16)]
         s_hi_pro = [Vec(v_s_0_hi_raw)[r] for r in range_constexpr(16)]
         if const_expr(CAUSAL):
             _causal_mask_inplace(s_lo_pro, s_hi_pro, fx.Index(0))
 
-        m_row_pro = _wave_row_max(s_lo_pro, s_hi_pro)
+        #     m_row = attn_row_max<T>(v_s[0]);
+        m_row_pro = attn_row_max(s_lo_pro, s_hi_pro)
 
-        lo_pro, hi_pro = _sub_row_first_half_exp(s_lo_pro, s_hi_pro, m_row_pro)
+        #     attn_sub_row<T>(v_s[0], m_row);
+        #     attn_exp2_slice<T, 0, s_half_len>(v_s[0]);
+        lo_pro, hi_pro = attn_sub_row_first_half_exp2_slice(s_lo_pro, s_hi_pro, m_row_pro)
         v_s_0_lo_init = Vec.from_elements(lo_pro, fx.Float32).ir_value()
         v_s_0_hi_init = Vec.from_elements(hi_pro, fx.Float32).ir_value()
 
+        #     asm volatile("" : "+v"(v_s[0]) ::);
         v_s_0_lo_init, v_s_0_hi_init = _anchor_pair(v_s_0_lo_init, v_s_0_hi_init)
 
         #     __builtin_amdgcn_sched_barrier(0);
-        #     __builtin_amdgcn_s_barrier();
-        #     __builtin_amdgcn_sched_barrier(0);
-        #
-        #     async_load<T::VEC_KV>(g_k, s_k[0].ptr, u_gk, u_sk, kv_tile(2));
         rocdl.sched_barrier(0)
+        #     __builtin_amdgcn_s_barrier();
         gpu.barrier()
+        #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
 
-        coop_dma_k(fx.Index(2 * BLOCK_N), 0)
+        #     async_load<T::VEC_KV>(g_k, s_k[0].ptr, u_gk, u_sk, kv_tile(2));
+        async_load_k(fx.Index(2 * BLOCK_N), 0)
 
         l_row_init = c_zero_f
         init_args = [m_row_pro, l_row_init]
@@ -1000,32 +999,27 @@ def build_flash_attn_opus_module(
 
             #         // Cluster 0:
             #         async_load<T::VEC_KV>(g_v, s_v[1].ptr, u_gv, u_sv, kv_tile(j - 2));
+            async_load_v((j_idx - fx.Index(2)) * fx.Index(BLOCK_N), 1)
             #         v_k = load<T::VEC_KV>(s_k[1], u_rk);
+            k_pl_a, k_ph_a = async_load_k_from_lds_to_vgpr(1, urk_base_per_lane)
             #         s_waitcnt_lgkmcnt(0_I);
-            #         s_waitcnt_vmcnt(number<T::k_buffer_load_insts + T::v_buffer_load_insts>{});
-            #         __builtin_amdgcn_sched_barrier(0);
-            #         __builtin_amdgcn_s_barrier();
-            #         __builtin_amdgcn_sched_barrier(0);
-            coop_dma_v((j_idx - fx.Index(2)) * fx.Index(BLOCK_N), 1)
-            k_pl_a, k_ph_a = _read_k_packs_for_buf(1, urk_base_per_lane)
             rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
+            #         s_waitcnt_vmcnt(number<T::k_buffer_load_insts + T::v_buffer_load_insts>{});
             _waitcnt_vm_n(NUM_DMA_K + NUM_DMA_V)
+            #         __builtin_amdgcn_sched_barrier(0);
             rocdl.sched_barrier(0)
+            #         __builtin_amdgcn_s_barrier();
             gpu.barrier()
+            #         __builtin_amdgcn_sched_barrier(0);
             rocdl.sched_barrier(0)
 
             #         // Cluster 1:
             #         v_s[1] = mma0(v_q, v_k);
+            v_s_1_lo_raw, v_s_1_hi_raw = _gemm0(k_pl_a, k_ph_a)
             #         attn_exp2_slice<T, s_half_len, s_half_len>(v_s[0]);
             #         l_row += attn_sum<T>(v_s[0]);
             #         v_p = opus::cast<D_ATTN>(v_s[0]);
             #         asm volatile("" : "+v"(v_p) ::);
-            #         sched_barrier_exp_pairs<6, 3, 1>();
-            #         sched_barrier_pairs<10, 5, 1>();
-            #         __builtin_amdgcn_sched_barrier(0);
-            #         __builtin_amdgcn_s_barrier();
-            #         __builtin_amdgcn_sched_barrier(0);
-            v_s_1_lo_raw, v_s_1_hi_raw = _gemm0(k_pl_a, k_ph_a)
             v_p_lo_a, v_p_hi_a, tile_sum_a = _finish_softmax_cast_p(
                 [Vec(v_s_0_lo_partial)[r] for r in range_constexpr(16)],
                 v_s_0_hi_partial,
@@ -1035,33 +1029,53 @@ def build_flash_attn_opus_module(
             v_p_lo_a = _anchor_packs(v_p_lo_a)
             v_p_hi_a = _anchor_packs(v_p_hi_a)
 
+            #         sched_barrier_exp_pairs<6, 3, 1>();
             _sched_barrier_exp_pairs(6, 3, 1)
+            #         sched_barrier_pairs<10, 5, 1>();
             _sched_barrier_pairs(10, 5, 1)
+            #         __builtin_amdgcn_sched_barrier(0);
             rocdl.sched_barrier(0)
+            #         __builtin_amdgcn_s_barrier();
             gpu.barrier()
+            #         __builtin_amdgcn_sched_barrier(0);
             rocdl.sched_barrier(0)
 
             #         // Cluster 2:
             #         async_load<T::VEC_KV>(g_k, s_k[1].ptr, u_gk, u_sk, kv_tile(j));
+            async_load_k(j_idx * fx.Index(BLOCK_N), 1)
             #         v_v = tr_load<T::VEC_TR_V>(s_v[0], u_rv);
-            #         s_waitcnt_lgkmcnt(0_I);
-            #         s_waitcnt_vmcnt(number<T::k_buffer_load_insts + T::v_buffer_load_insts>{});
-            #         __builtin_amdgcn_sched_barrier(0);
-            #         __builtin_amdgcn_s_barrier();
-            #         __builtin_amdgcn_sched_barrier(0);
-            coop_dma_k(j_idx * fx.Index(BLOCK_N), 1)
             v_packs_a = _read_v_packs_for_buf(0, urv_base_per_lane)
+            #         s_waitcnt_lgkmcnt(0_I);
             rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
+            #         s_waitcnt_vmcnt(number<T::k_buffer_load_insts + T::v_buffer_load_insts>{});
             _waitcnt_vm_n(NUM_DMA_K + NUM_DMA_V)
+            #         __builtin_amdgcn_sched_barrier(0);
             rocdl.sched_barrier(0)
+            #         __builtin_amdgcn_s_barrier();
             gpu.barrier()
+            #         __builtin_amdgcn_sched_barrier(0);
             rocdl.sched_barrier(0)
 
             #         // Cluster 3:
             #         __builtin_amdgcn_s_setprio(1);
+            if const_expr(OPUS_SETPRIO):
+                rocdl.s_setprio(1)
+
             #         v_o = mma1.step_k(0_I, v_p, v_v, v_o);
+            v_pk = v_packs_a[0]
+            p_pk = v_p_lo_a[0]
+            for dc in range_constexpr(D_CHUNKS):
+                o_accs[dc] = mfma_acc(v_pk[dc], p_pk, o_accs[dc])
+
+            s_lo_a = [Vec(v_s_1_lo_raw)[r] for r in range_constexpr(16)]
+            s_hi_a = [Vec(v_s_1_hi_raw)[r] for r in range_constexpr(16)]
+
             #         D_ACC row_max = attn_row_max<T>(v_s[1]);
+            m_tile_max_a = attn_row_max(s_lo_a, s_hi_a)
+
             #         sched_barrier_pairs<4, 5, 2>();
+            _sched_barrier_pairs(4, 5, 2)
+
             #         bool below_thresh = ((row_max - m_row) <= RESCALE_THRESHOLD);
             #         bool all_below = (__builtin_amdgcn_ballot_w64(below_thresh) == __builtin_amdgcn_read_exec());
             #         if (__builtin_expect(all_below, 1)) {
@@ -1072,21 +1086,6 @@ def build_flash_attn_opus_module(
             #             l_row *= rescale_m;
             #             m_row = row_max;
             #         }
-            if const_expr(OPUS_SETPRIO):
-                rocdl.s_setprio(1)
-
-            v_pk = v_packs_a[0]
-            p_pk = v_p_lo_a[0]
-            for dc in range_constexpr(D_CHUNKS):
-                o_accs[dc] = mfma_acc(v_pk[dc], p_pk, o_accs[dc])
-
-            s_lo_a = [Vec(v_s_1_lo_raw)[r] for r in range_constexpr(16)]
-            s_hi_a = [Vec(v_s_1_hi_raw)[r] for r in range_constexpr(16)]
-
-            m_tile_max_a = _wave_row_max(s_lo_a, s_hi_a)
-
-            _sched_barrier_pairs(4, 5, 2)
-
             m_diff_a = _fsub(m_tile_max_a, m_row)
             if const_expr(OPUS_LAZY_RESCALE):
                 below_a = ArithValue(fx.Float32(m_diff_a) <= c_eight_f)
@@ -1108,15 +1107,6 @@ def build_flash_attn_opus_module(
             #         v_o = mma1.step_k(1_I, v_p, v_v, v_o);
             #         v_o = mma1.step_k(2_I, v_p, v_v, v_o);
             #         v_o = mma1.step_k(3_I, v_p, v_v, v_o);
-            #         attn_sub_row<T>(v_s[1], row_max);
-            #         asm volatile("" : "+v"(v_s[1]) ::);
-            #         attn_exp2_slice<T, 0, s_half_len>(v_s[1]);
-            #         sched_barrier_pairs<6, 5, 2>();
-            #         sched_barrier_exp_pairs<6, 3, 2>();
-            #         __builtin_amdgcn_s_setprio(0);
-            #         __builtin_amdgcn_sched_barrier(0);
-            #         __builtin_amdgcn_s_barrier();
-            #         __builtin_amdgcn_sched_barrier(0);
             for kss in range_constexpr(3):
                 actual = kss + 1
                 v_pk = v_packs_a[actual]
@@ -1127,7 +1117,10 @@ def build_flash_attn_opus_module(
                 for dc in range_constexpr(D_CHUNKS):
                     o_accs[dc] = mfma_acc(v_pk[dc], p_pk, o_accs[dc])
 
-            lo_part_a, hi_part_a = _sub_row_first_half_exp(s_lo_a, s_hi_a, m_new_a)
+            #         attn_sub_row<T>(v_s[1], row_max);
+            #         asm volatile("" : "+v"(v_s[1]) ::);
+            #         attn_exp2_slice<T, 0, s_half_len>(v_s[1]);
+            lo_part_a, hi_part_a = attn_sub_row_first_half_exp2_slice(s_lo_a, s_hi_a, m_new_a)
             v_s_1_lo_partial = Vec.from_elements(lo_part_a, fx.Float32).ir_value()
             v_s_1_hi_partial = Vec.from_elements(hi_part_a, fx.Float32).ir_value()
 
@@ -1135,42 +1128,43 @@ def build_flash_attn_opus_module(
                 v_s_1_lo_partial, v_s_1_hi_partial
             )
 
+            #         sched_barrier_pairs<6, 5, 2>();
             _sched_barrier_pairs(6, 5, 2)
+            #         sched_barrier_exp_pairs<6, 3, 2>();
             _sched_barrier_exp_pairs(6, 3, 2)
+            #         __builtin_amdgcn_s_setprio(0);
             if const_expr(OPUS_SETPRIO):
                 rocdl.s_setprio(0)
+            #         __builtin_amdgcn_sched_barrier(0);
             rocdl.sched_barrier(0)
+            #         __builtin_amdgcn_s_barrier();
             gpu.barrier()
+            #         __builtin_amdgcn_sched_barrier(0);
             rocdl.sched_barrier(0)
 
             #         // Cluster 4:
             #         async_load<T::VEC_KV>(g_v, s_v[0].ptr, u_gv, u_sv, kv_tile(j - 1));
+            async_load_v((j_idx - fx.Index(1)) * fx.Index(BLOCK_N), 0)
             #         v_k = load<T::VEC_KV>(s_k[0], u_rk);
+            k_pl_b, k_ph_b = async_load_k_from_lds_to_vgpr(0, urk_base_per_lane)
             #         s_waitcnt_lgkmcnt(0_I);
-            #         s_waitcnt_vmcnt(number<T::k_buffer_load_insts + T::v_buffer_load_insts>{});
-            #         __builtin_amdgcn_sched_barrier(0);
-            #         __builtin_amdgcn_s_barrier();
-            #         __builtin_amdgcn_sched_barrier(0);
-            coop_dma_v((j_idx - fx.Index(1)) * fx.Index(BLOCK_N), 0)
-            k_pl_b, k_ph_b = _read_k_packs_for_buf(0, urk_base_per_lane)
             rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
+            #         s_waitcnt_vmcnt(number<T::k_buffer_load_insts + T::v_buffer_load_insts>{});
             _waitcnt_vm_n(NUM_DMA_K + NUM_DMA_V)
+            #         __builtin_amdgcn_sched_barrier(0);
             rocdl.sched_barrier(0)
+            #         __builtin_amdgcn_s_barrier();
             gpu.barrier()
+            #         __builtin_amdgcn_sched_barrier(0);
             rocdl.sched_barrier(0)
 
             #         // Cluster 5:
             #         v_s[0] = mma0(v_q, v_k);
+            v_s_0_lo_raw_b, v_s_0_hi_raw_b = _gemm0(k_pl_b, k_ph_b)
             #         attn_exp2_slice<T, s_half_len, s_half_len>(v_s[1]);
             #         l_row += attn_sum<T>(v_s[1]);
             #         v_p = opus::cast<D_ATTN>(v_s[1]);
             #         asm volatile("" : "+v"(v_p) ::);
-            #         sched_barrier_exp_pairs<6, 3, 3>();
-            #         sched_barrier_pairs<10, 5, 3>();
-            #         __builtin_amdgcn_sched_barrier(0);
-            #         __builtin_amdgcn_s_barrier();
-            #         __builtin_amdgcn_sched_barrier(0);
-            v_s_0_lo_raw_b, v_s_0_hi_raw_b = _gemm0(k_pl_b, k_ph_b)
             v_p_lo_b, v_p_hi_b, tile_sum_b = _finish_softmax_cast_p(
                 [Vec(v_s_1_lo_partial)[r] for r in range_constexpr(16)],
                 v_s_1_hi_partial,
@@ -1180,43 +1174,60 @@ def build_flash_attn_opus_module(
             v_p_lo_b = _anchor_packs(v_p_lo_b)
             v_p_hi_b = _anchor_packs(v_p_hi_b)
 
+            #         sched_barrier_exp_pairs<6, 3, 3>();
             _sched_barrier_exp_pairs(6, 3, 3)
+            #         sched_barrier_pairs<10, 5, 3>();
             _sched_barrier_pairs(10, 5, 3)
+            #         __builtin_amdgcn_sched_barrier(0);
             rocdl.sched_barrier(0)
+            #         __builtin_amdgcn_s_barrier();
             gpu.barrier()
+            #         __builtin_amdgcn_sched_barrier(0);
             rocdl.sched_barrier(0)
 
             #         // Cluster 6:
             #         async_load<T::VEC_KV>(g_k, s_k[0].ptr, u_gk, u_sk, kv_tile(j + 1));
+            async_load_k((j_idx + fx.Index(1)) * fx.Index(BLOCK_N), 0)
             #         v_v = tr_load<T::VEC_TR_V>(s_v[1], u_rv);
+            v_packs_b = _read_v_packs_for_buf(1, urv_base_per_lane)
             #         if constexpr (T::CAUSAL) {
             #             const int kv_end_pos = j * T::KV_TILE_SIZE;
             #             if (q_start_pos < kv_end_pos) {
             #                 attn_mask_causal_tile<T>(v_s[0], q_start_pos, j - 1, neg_inf_v, lane_id);
             #             }
             #         }
-            #         s_waitcnt_lgkmcnt(0_I);
-            #         s_waitcnt_vmcnt(number<T::k_buffer_load_insts + T::v_buffer_load_insts>{});
-            #         __builtin_amdgcn_sched_barrier(0);
-            #         __builtin_amdgcn_s_barrier();
-            #         __builtin_amdgcn_sched_barrier(0);
-            coop_dma_k((j_idx + fx.Index(1)) * fx.Index(BLOCK_N), 0)
-            v_packs_b = _read_v_packs_for_buf(1, urv_base_per_lane)
             s_lo_b = [Vec(v_s_0_lo_raw_b)[r] for r in range_constexpr(16)]
             s_hi_b = [Vec(v_s_0_hi_raw_b)[r] for r in range_constexpr(16)]
             if const_expr(CAUSAL):
                 _causal_mask_inplace(s_lo_b, s_hi_b, j_idx - fx.Index(1))
+            #         s_waitcnt_lgkmcnt(0_I);
             rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
+            #         s_waitcnt_vmcnt(number<T::k_buffer_load_insts + T::v_buffer_load_insts>{});
             _waitcnt_vm_n(NUM_DMA_K + NUM_DMA_V)
+            #         __builtin_amdgcn_sched_barrier(0);
             rocdl.sched_barrier(0)
+            #         __builtin_amdgcn_s_barrier();
             gpu.barrier()
+            #         __builtin_amdgcn_sched_barrier(0);
             rocdl.sched_barrier(0)
 
             #         // Cluster 7:
             #         __builtin_amdgcn_s_setprio(1);
+            if const_expr(OPUS_SETPRIO):
+                rocdl.s_setprio(1)
+
             #         v_o = mma1.step_k(0_I, v_p, v_v, v_o);
+            v_pk = v_packs_b[0]
+            p_pk = v_p_lo_b[0]
+            for dc in range_constexpr(D_CHUNKS):
+                o_accs[dc] = mfma_acc(v_pk[dc], p_pk, o_accs[dc])
+
             #         row_max = attn_row_max<T>(v_s[0]);
+            m_tile_max_b = attn_row_max(s_lo_b, s_hi_b)
+
             #         sched_barrier_pairs<4, 5, 4>();
+            _sched_barrier_pairs(4, 5, 4)
+
             #         below_thresh = ((row_max - m_row) <= RESCALE_THRESHOLD);
             #         all_below = (__builtin_amdgcn_ballot_w64(below_thresh) == __builtin_amdgcn_read_exec());
             #         if (__builtin_expect(all_below, 1)) {
@@ -1227,30 +1238,6 @@ def build_flash_attn_opus_module(
             #             l_row *= rescale_m;
             #             m_row = row_max;
             #         }
-            #         v_o = mma1.step_k(1_I, v_p, v_v, v_o);
-            #         v_o = mma1.step_k(2_I, v_p, v_v, v_o);
-            #         v_o = mma1.step_k(3_I, v_p, v_v, v_o);
-            #         attn_sub_row<T>(v_s[0], row_max);
-            #         asm volatile("" : "+v"(v_s[0]) ::);
-            #         attn_exp2_slice<T, 0, s_half_len>(v_s[0]);
-            #         sched_barrier_pairs<6, 5, 4>();
-            #         sched_barrier_exp_pairs<6, 3, 4>();
-            #         __builtin_amdgcn_s_setprio(0);
-            #         __builtin_amdgcn_sched_barrier(0);
-            #         __builtin_amdgcn_s_barrier();
-            #         __builtin_amdgcn_sched_barrier(0);
-            if const_expr(OPUS_SETPRIO):
-                rocdl.s_setprio(1)
-
-            v_pk = v_packs_b[0]
-            p_pk = v_p_lo_b[0]
-            for dc in range_constexpr(D_CHUNKS):
-                o_accs[dc] = mfma_acc(v_pk[dc], p_pk, o_accs[dc])
-
-            m_tile_max_b = _wave_row_max(s_lo_b, s_hi_b)
-
-            _sched_barrier_pairs(4, 5, 4)
-
             m_diff_b = _fsub(m_tile_max_b, m_row)
             if const_expr(OPUS_LAZY_RESCALE):
                 below_b = ArithValue(fx.Float32(m_diff_b) <= c_eight_f)
@@ -1269,6 +1256,9 @@ def build_flash_attn_opus_module(
             l_row = _fmul(l_row, corr_b)
             m_row = m_new_b
 
+            #         v_o = mma1.step_k(1_I, v_p, v_v, v_o);
+            #         v_o = mma1.step_k(2_I, v_p, v_v, v_o);
+            #         v_o = mma1.step_k(3_I, v_p, v_v, v_o);
             for kss in range_constexpr(3):
                 actual = kss + 1
                 v_pk = v_packs_b[actual]
@@ -1279,7 +1269,10 @@ def build_flash_attn_opus_module(
                 for dc in range_constexpr(D_CHUNKS):
                     o_accs[dc] = mfma_acc(v_pk[dc], p_pk, o_accs[dc])
 
-            lo_part_b, hi_part_b = _sub_row_first_half_exp(s_lo_b, s_hi_b, m_new_b)
+            #         attn_sub_row<T>(v_s[0], row_max);
+            #         asm volatile("" : "+v"(v_s[0]) ::);
+            #         attn_exp2_slice<T, 0, s_half_len>(v_s[0]);
+            lo_part_b, hi_part_b = attn_sub_row_first_half_exp2_slice(s_lo_b, s_hi_b, m_new_b)
             v_s_0_lo_yield = Vec.from_elements(lo_part_b, fx.Float32).ir_value()
             v_s_0_hi_yield = Vec.from_elements(hi_part_b, fx.Float32).ir_value()
 
@@ -1287,12 +1280,18 @@ def build_flash_attn_opus_module(
                 v_s_0_lo_yield, v_s_0_hi_yield
             )
 
+            #         sched_barrier_pairs<6, 5, 4>();
             _sched_barrier_pairs(6, 5, 4)
+            #         sched_barrier_exp_pairs<6, 3, 4>();
             _sched_barrier_exp_pairs(6, 3, 4)
+            #         __builtin_amdgcn_s_setprio(0);
             if const_expr(OPUS_SETPRIO):
                 rocdl.s_setprio(0)
+            #         __builtin_amdgcn_sched_barrier(0);
             rocdl.sched_barrier(0)
+            #         __builtin_amdgcn_s_barrier();
             gpu.barrier()
+            #         __builtin_amdgcn_sched_barrier(0);
             rocdl.sched_barrier(0)
 
             yield_args = [m_row, l_row] + o_accs + [v_s_0_lo_yield, v_s_0_hi_yield]
@@ -1311,95 +1310,79 @@ def build_flash_attn_opus_module(
 
         #     // Cluster 0:
         #     async_load<T::VEC_KV>(g_v, s_v[1].ptr, u_gv, u_sv, kv_tile(max_num_tiles - 3));
+        async_load_v(max_m3 * fx.Index(BLOCK_N), 1)
         #     v_k = load<T::VEC_KV>(s_k[1], u_rk);
+        k_pl_e0, k_ph_e0 = async_load_k_from_lds_to_vgpr(1, urk_base_per_lane)
         #     s_waitcnt_lgkmcnt(0_I);
-        #     s_waitcnt_vmcnt(number<T::k_buffer_load_insts + T::v_buffer_load_insts>{});
-        #     __builtin_amdgcn_sched_barrier(0);
-        #     __builtin_amdgcn_s_barrier();
-        #     __builtin_amdgcn_sched_barrier(0);
-        coop_dma_v(max_m3 * fx.Index(BLOCK_N), 1)
-        k_pl_e0, k_ph_e0 = _read_k_packs_for_buf(1, urk_base_per_lane)
         rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
+        #     s_waitcnt_vmcnt(number<T::k_buffer_load_insts + T::v_buffer_load_insts>{});
         _waitcnt_vm_n(NUM_DMA_K + NUM_DMA_V)
+        #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
+        #     __builtin_amdgcn_s_barrier();
         gpu.barrier()
+        #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
 
         #     // Cluster 1:
         #     v_s[1] = mma0(v_q, v_k);
+        v_s_1_lo_e, v_s_1_hi_e = _gemm0(k_pl_e0, k_ph_e0)
         #     attn_exp2_slice<T, s_half_len, s_half_len>(v_s[0]);
-        #     l_row += attn_sum<T>(v_s[0]);
         #     v_p = opus::cast<D_ATTN>(v_s[0]);
         #     asm volatile("" : "+v"(v_p) ::);
-        #     sched_barrier_exp_pairs<6, 3, 5>();
-        #     sched_barrier_pairs<10, 5, 5>();
-        #     __builtin_amdgcn_sched_barrier(0);
-        #     __builtin_amdgcn_s_barrier();
-        #     __builtin_amdgcn_sched_barrier(0);
-        v_s_1_lo_e, v_s_1_hi_e = _gemm0(k_pl_e0, k_ph_e0)
         v_p_lo_e1, v_p_hi_e1, tile_sum_e1 = _finish_softmax_cast_p(
             [Vec(v_s_0_lo_partial)[r] for r in range_constexpr(16)],
             v_s_0_hi_partial,
         )
+        #     l_row += attn_sum<T>(v_s[0]);
         l_row = _fadd(l_row, tile_sum_e1)
 
         v_p_lo_e1 = _anchor_packs(v_p_lo_e1)
         v_p_hi_e1 = _anchor_packs(v_p_hi_e1)
 
+        #     sched_barrier_exp_pairs<6, 3, 5>();
         _sched_barrier_exp_pairs(6, 3, 5)
+        #     sched_barrier_pairs<10, 5, 5>();
         _sched_barrier_pairs(10, 5, 5)
+        #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
+        #     __builtin_amdgcn_s_barrier();
         gpu.barrier()
+        #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
 
         #     // Cluster 2:
         #     async_load<T::VEC_KV>(g_k, s_k[1].ptr, u_gk, u_sk, kv_tile(max_num_tiles - 1));
+        async_load_k(max_m1 * fx.Index(BLOCK_N), 1)
         #     v_v = tr_load<T::VEC_TR_V>(s_v[0], u_rv);
+        v_packs_e3 = _read_v_packs_for_buf(0, urv_base_per_lane)
         #     if constexpr (T::CAUSAL) {
         #         const int kv_end_pos = (max_num_tiles - 2) * T::KV_TILE_SIZE;
         #         if (q_start_pos < kv_end_pos) {
         #             attn_mask_causal_tile<T>(v_s[1], q_start_pos, max_num_tiles - 3, neg_inf_v, lane_id);
         #         }
         #     }
-        #     s_waitcnt_lgkmcnt(0_I);
-        #     s_waitcnt_vmcnt(number<T::k_buffer_load_insts + T::v_buffer_load_insts>{});
-        #     __builtin_amdgcn_sched_barrier(0);
-        #     __builtin_amdgcn_s_barrier();
-        #     __builtin_amdgcn_sched_barrier(0);
-        coop_dma_k(max_m1 * fx.Index(BLOCK_N), 1)
-        v_packs_e3 = _read_v_packs_for_buf(0, urv_base_per_lane)
         s_lo_e1 = [Vec(v_s_1_lo_e)[r] for r in range_constexpr(16)]
         s_hi_e1 = [Vec(v_s_1_hi_e)[r] for r in range_constexpr(16)]
         if const_expr(CAUSAL):
             _causal_mask_inplace(s_lo_e1, s_hi_e1, max_m3)
+        #     s_waitcnt_lgkmcnt(0_I);
         rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
+        #     s_waitcnt_vmcnt(number<T::k_buffer_load_insts + T::v_buffer_load_insts>{});
         _waitcnt_vm_n(NUM_DMA_K + NUM_DMA_V)
+        #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
+        #     __builtin_amdgcn_s_barrier();
         gpu.barrier()
+        #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
 
         #     // Cluster 3:
         #     __builtin_amdgcn_s_setprio(1);
-        #     v_o = mma1(v_p, v_v, v_o);
-        #     D_ACC row_max = max(m_row, attn_row_max<T>(v_s[1]));
-        #     rescale_m = __builtin_amdgcn_exp2f(m_row - row_max);
-        #     m_row = row_max;
-        #     attn_sub_row<T>(v_s[1], row_max);
-        #     asm volatile("" : "+v"(v_s[1]) ::);
-        #     attn_exp2_slice<T, 0, s_half_len>(v_s[1]);
-        #     sched_barrier_pairs<10, 5, 6>();
-        #     sched_barrier_exp_pairs<6, 3, 6>();
-        #     __builtin_amdgcn_sched_barrier(0);
-        #     scale_output_tile<T>(v_o, rescale_m);
-        #     auto* v_o_pin = reinterpret_cast<vector_t<fp32_t, 16>*>(&v_o);
-        #     asm volatile("" : "+v"(v_o_pin[0]), "+v"(v_o_pin[1]), "+v"(v_o_pin[2]), "+v"(v_o_pin[3]) ::);
-        #     __builtin_amdgcn_s_setprio(0);
-        #     __builtin_amdgcn_sched_barrier(0);
-        #     __builtin_amdgcn_s_barrier();
-        #     __builtin_amdgcn_sched_barrier(0);
         if const_expr(OPUS_SETPRIO):
             rocdl.s_setprio(1)
 
+        #     v_o = mma1(v_p, v_v, v_o);
         for kss in range_constexpr(4):
             v_pk = v_packs_e3[kss]
             if const_expr(kss < 2):
@@ -1409,11 +1392,17 @@ def build_flash_attn_opus_module(
             for dc in range_constexpr(D_CHUNKS):
                 o_accs[dc] = mfma_acc(v_pk[dc], p_pk, o_accs[dc])
 
-        m_tile_max_e3 = _wave_row_max(s_lo_e1, s_hi_e1)
+        #     D_ACC row_max = max(m_row, attn_row_max<T>(v_s[1]));
+        m_tile_max_e3 = attn_row_max(s_lo_e1, s_hi_e1)
         row_max_e3 = _fmax(m_row, m_tile_max_e3)
+        #     rescale_m = __builtin_amdgcn_exp2f(m_row - row_max);
         rescale_e3 = rocdl.exp2(T.f32, _raw(_fsub(m_row, row_max_e3)))
+        #     m_row = row_max;
         m_row = row_max_e3
-        lo_e3, hi_e3 = _sub_row_first_half_exp(s_lo_e1, s_hi_e1, row_max_e3)
+        #     attn_sub_row<T>(v_s[1], row_max);
+        #     asm volatile("" : "+v"(v_s[1]) ::);
+        #     attn_exp2_slice<T, 0, s_half_len>(v_s[1]);
+        lo_e3, hi_e3 = attn_sub_row_first_half_exp2_slice(s_lo_e1, s_hi_e1, row_max_e3)
         v_s_1_lo_e_partial = Vec.from_elements(lo_e3, fx.Float32).ir_value()
         v_s_1_hi_e_partial = Vec.from_elements(hi_e3, fx.Float32).ir_value()
 
@@ -1421,107 +1410,102 @@ def build_flash_attn_opus_module(
             v_s_1_lo_e_partial, v_s_1_hi_e_partial
         )
 
+        #     sched_barrier_pairs<10, 5, 6>();
         _sched_barrier_pairs(10, 5, 6)
+        #     sched_barrier_exp_pairs<6, 3, 6>();
         _sched_barrier_exp_pairs(6, 3, 6)
+        #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
+        #     scale_output_tile<T>(v_o, rescale_m);
+        #     auto* v_o_pin = reinterpret_cast<vector_t<fp32_t, 16>*>(&v_o);
+        #     asm volatile("" : "+v"(v_o_pin[0]), "+v"(v_o_pin[1]), "+v"(v_o_pin[2]), "+v"(v_o_pin[3]) ::);
         _scale_o(o_accs, rescale_e3)
 
+        #     __builtin_amdgcn_s_setprio(0);
         if const_expr(OPUS_SETPRIO):
             rocdl.s_setprio(0)
+        #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
+        #     __builtin_amdgcn_s_barrier();
         gpu.barrier()
+        #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
 
         #     // Cluster 4:
         #     async_load<T::VEC_KV>(g_v, s_v[0].ptr, u_gv, u_sv, kv_tile(max_num_tiles - 2));
+        async_load_v(max_m2 * fx.Index(BLOCK_N), 0)
         #     v_k = load<T::VEC_KV>(s_k[0], u_rk);
+        k_pl_e4, k_ph_e4 = async_load_k_from_lds_to_vgpr(0, urk_base_per_lane)
         #     s_waitcnt_lgkmcnt(0_I);
-        #     s_waitcnt_vmcnt(number<T::k_buffer_load_insts + T::v_buffer_load_insts>{});
-        #     __builtin_amdgcn_sched_barrier(0);
-        #     __builtin_amdgcn_s_barrier();
-        #     __builtin_amdgcn_sched_barrier(0);
-        coop_dma_v(max_m2 * fx.Index(BLOCK_N), 0)
-        k_pl_e4, k_ph_e4 = _read_k_packs_for_buf(0, urk_base_per_lane)
         rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
+        #     s_waitcnt_vmcnt(number<T::k_buffer_load_insts + T::v_buffer_load_insts>{});
         _waitcnt_vm_n(NUM_DMA_K + NUM_DMA_V)
+        #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
+        #     __builtin_amdgcn_s_barrier();
         gpu.barrier()
+        #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
 
         #     // Cluster 5:
         #     v_s[0] = mma0(v_q, v_k);
+        v_s_0_lo_e5, v_s_0_hi_e5 = _gemm0(k_pl_e4, k_ph_e4)
         #     l_row *= rescale_m;
+        l_row = _fmul(l_row, rescale_e3)
         #     attn_exp2_slice<T, s_half_len, s_half_len>(v_s[1]);
-        #     l_row += attn_sum<T>(v_s[1]);
         #     v_p = opus::cast<D_ATTN>(v_s[1]);
         #     asm volatile("" : "+v"(v_p) ::);
-        #     sched_barrier_exp_pairs<6, 3, 7>();
-        #     sched_barrier_pairs<10, 5, 7>();
-        #     __builtin_amdgcn_sched_barrier(0);
-        #     __builtin_amdgcn_s_barrier();
-        #     __builtin_amdgcn_sched_barrier(0);
-        v_s_0_lo_e5, v_s_0_hi_e5 = _gemm0(k_pl_e4, k_ph_e4)
-        l_row = _fmul(l_row, rescale_e3)
         v_p_lo_e5, v_p_hi_e5, tile_sum_e5 = _finish_softmax_cast_p(
             [Vec(v_s_1_lo_e_partial)[r] for r in range_constexpr(16)],
             v_s_1_hi_e_partial,
         )
+        #     l_row += attn_sum<T>(v_s[1]);
         l_row = _fadd(l_row, tile_sum_e5)
 
         v_p_lo_e5 = _anchor_packs(v_p_lo_e5)
         v_p_hi_e5 = _anchor_packs(v_p_hi_e5)
 
+        #     sched_barrier_exp_pairs<6, 3, 7>();
         _sched_barrier_exp_pairs(6, 3, 7)
+        #     sched_barrier_pairs<10, 5, 7>();
         _sched_barrier_pairs(10, 5, 7)
+        #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
+        #     __builtin_amdgcn_s_barrier();
         gpu.barrier()
+        #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
 
         #     // Cluster 6:
         #     v_v = tr_load<T::VEC_TR_V>(s_v[1], u_rv);
+        v_packs_e7 = _read_v_packs_for_buf(1, urv_base_per_lane)
         #     if constexpr (T::CAUSAL) {
         #         const int kv_end_pos = (max_num_tiles - 1) * T::KV_TILE_SIZE;
         #         if (q_start_pos < kv_end_pos) {
         #             attn_mask_causal_tile<T>(v_s[0], q_start_pos, max_num_tiles - 2, neg_inf_v, lane_id);
         #         }
         #     }
-        #     s_waitcnt_lgkmcnt(0_I);
-        #     s_waitcnt_vmcnt(number<T::v_buffer_load_insts>{});
-        #     __builtin_amdgcn_sched_barrier(0);
-        #     __builtin_amdgcn_s_barrier();
-        #     __builtin_amdgcn_sched_barrier(0);
-        v_packs_e7 = _read_v_packs_for_buf(1, urv_base_per_lane)
         s_lo_e5 = [Vec(v_s_0_lo_e5)[r] for r in range_constexpr(16)]
         s_hi_e5 = [Vec(v_s_0_hi_e5)[r] for r in range_constexpr(16)]
         if const_expr(CAUSAL):
             _causal_mask_inplace(s_lo_e5, s_hi_e5, max_m2)
+        #     s_waitcnt_lgkmcnt(0_I);
         rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
+        #     s_waitcnt_vmcnt(number<T::v_buffer_load_insts>{});
         _waitcnt_vm_n(NUM_DMA_V)
+        #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
+        #     __builtin_amdgcn_s_barrier();
         gpu.barrier()
+        #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
 
         #     // Cluster 7:
         #     __builtin_amdgcn_s_setprio(1);
-        #     v_o = mma1(v_p, v_v, v_o);
-        #     row_max = max(m_row, attn_row_max<T>(v_s[0]));
-        #     rescale_m = __builtin_amdgcn_exp2f(m_row - row_max);
-        #     m_row = row_max;
-        #     attn_sub_row<T>(v_s[0], row_max);
-        #     asm volatile("" : "+v"(v_s[0]) ::);
-        #     attn_exp2_slice<T, 0, s_half_len>(v_s[0]);
-        #     sched_barrier_pairs<10, 5, 8>();
-        #     sched_barrier_exp_pairs<6, 3, 8>();
-        #     __builtin_amdgcn_sched_barrier(0);
-        #     scale_output_tile<T>(v_o, rescale_m);
-        #     asm volatile("" : "+v"(v_o_pin[0]), "+v"(v_o_pin[1]), "+v"(v_o_pin[2]), "+v"(v_o_pin[3]) ::);
-        #     __builtin_amdgcn_s_setprio(0);
-        #     __builtin_amdgcn_sched_barrier(0);
-        #     __builtin_amdgcn_s_barrier();
-        #     __builtin_amdgcn_sched_barrier(0);
         if const_expr(OPUS_SETPRIO):
             rocdl.s_setprio(1)
 
+        #     v_o = mma1(v_p, v_v, v_o);
         for kss in range_constexpr(4):
             v_pk = v_packs_e7[kss]
             if const_expr(kss < 2):
@@ -1531,102 +1515,108 @@ def build_flash_attn_opus_module(
             for dc in range_constexpr(D_CHUNKS):
                 o_accs[dc] = mfma_acc(v_pk[dc], p_pk, o_accs[dc])
 
-        m_tile_max_e7 = _wave_row_max(s_lo_e5, s_hi_e5)
+        #     row_max = max(m_row, attn_row_max<T>(v_s[0]));
+        m_tile_max_e7 = attn_row_max(s_lo_e5, s_hi_e5)
         row_max_e7 = _fmax(m_row, m_tile_max_e7)
+        #     rescale_m = __builtin_amdgcn_exp2f(m_row - row_max);
         rescale_e7 = rocdl.exp2(T.f32, _raw(_fsub(m_row, row_max_e7)))
+        #     m_row = row_max;
         m_row = row_max_e7
-        lo_e7, hi_e7 = _sub_row_first_half_exp(s_lo_e5, s_hi_e5, row_max_e7)
+        #     attn_sub_row<T>(v_s[0], row_max);
+        #     asm volatile("" : "+v"(v_s[0]) ::);
+        #     attn_exp2_slice<T, 0, s_half_len>(v_s[0]);
+        lo_e7, hi_e7 = attn_sub_row_first_half_exp2_slice(s_lo_e5, s_hi_e5, row_max_e7)
         v_s_0_lo_e_partial = Vec.from_elements(lo_e7, fx.Float32).ir_value()
         v_s_0_hi_e_partial = Vec.from_elements(hi_e7, fx.Float32).ir_value()
 
+        #     sched_barrier_pairs<10, 5, 8>();
         _sched_barrier_pairs(10, 5, 8)
+        #     sched_barrier_exp_pairs<6, 3, 8>();
         _sched_barrier_exp_pairs(6, 3, 8)
+        #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
+        #     scale_output_tile<T>(v_o, rescale_m);
+        #     asm volatile("" : "+v"(v_o_pin[0]), "+v"(v_o_pin[1]), "+v"(v_o_pin[2]), "+v"(v_o_pin[3]) ::);
         _scale_o(o_accs, rescale_e7)
 
+        #     __builtin_amdgcn_s_setprio(0);
         if const_expr(OPUS_SETPRIO):
             rocdl.s_setprio(0)
+        #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
+        #     __builtin_amdgcn_s_barrier();
         gpu.barrier()
+        #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
 
         #     // Cluster 8:
         #     async_load<T::VEC_KV>(g_v, s_v[1].ptr, u_gv, u_sv, kv_tile(max_num_tiles - 1));
+        async_load_v(max_m1 * fx.Index(BLOCK_N), 1)
         #     v_k = load<T::VEC_KV>(s_k[1], u_rk);
+        k_pl_e8, k_ph_e8 = async_load_k_from_lds_to_vgpr(1, urk_base_per_lane)
         #     s_waitcnt_lgkmcnt(0_I);
-        #     s_waitcnt_vmcnt(number<T::v_buffer_load_insts>{});
-        #     __builtin_amdgcn_sched_barrier(0);
-        #     __builtin_amdgcn_s_barrier();
-        #     __builtin_amdgcn_sched_barrier(0);
-        coop_dma_v(max_m1 * fx.Index(BLOCK_N), 1)
-        k_pl_e8, k_ph_e8 = _read_k_packs_for_buf(1, urk_base_per_lane)
         rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
+        #     s_waitcnt_vmcnt(number<T::v_buffer_load_insts>{});
         _waitcnt_vm_n(NUM_DMA_V)
+        #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
+        #     __builtin_amdgcn_s_barrier();
         gpu.barrier()
+        #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
 
         #     // Cluster 9:
         #     v_s[1] = mma0(v_q, v_k);
+        v_s_1_lo_e9, v_s_1_hi_e9 = _gemm0(k_pl_e8, k_ph_e8)
         #     l_row *= rescale_m;
+        l_row = _fmul(l_row, rescale_e7)
         #     attn_exp2_slice<T, s_half_len, s_half_len>(v_s[0]);
-        #     l_row += attn_sum<T>(v_s[0]);
         #     v_p = opus::cast<D_ATTN>(v_s[0]);
         #     asm volatile("" : "+v"(v_p) ::);
-        #     sched_barrier_exp_pairs<6, 3, 9>();
-        #     sched_barrier_pairs<10, 5, 9>();
-        #     __builtin_amdgcn_sched_barrier(0);
-        #     __builtin_amdgcn_s_barrier();
-        #     __builtin_amdgcn_sched_barrier(0);
-        v_s_1_lo_e9, v_s_1_hi_e9 = _gemm0(k_pl_e8, k_ph_e8)
-        l_row = _fmul(l_row, rescale_e7)
         v_p_lo_e9, v_p_hi_e9, tile_sum_e9 = _finish_softmax_cast_p(
             [Vec(v_s_0_lo_e_partial)[r] for r in range_constexpr(16)],
             v_s_0_hi_e_partial,
         )
+        #     l_row += attn_sum<T>(v_s[0]);
         l_row = _fadd(l_row, tile_sum_e9)
 
+        #     sched_barrier_exp_pairs<6, 3, 9>();
         _sched_barrier_exp_pairs(6, 3, 9)
+        #     sched_barrier_pairs<10, 5, 9>();
         _sched_barrier_pairs(10, 5, 9)
+        #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
+        #     __builtin_amdgcn_s_barrier();
         gpu.barrier()
+        #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
 
         #     // Cluster 10:
         #     v_v = tr_load<T::VEC_TR_V>(s_v[0], u_rv);
+        v_packs_e11 = _read_v_packs_for_buf(0, urv_base_per_lane)
         #     if constexpr (T::CAUSAL) {
         #         const int kv_end_pos = max_num_tiles * T::KV_TILE_SIZE;
         #         if (q_start_pos < kv_end_pos) {
         #             attn_mask_causal_tile<T>(v_s[1], q_start_pos, max_num_tiles - 1, neg_inf_v, lane_id);
         #         }
         #     }
-        #     s_waitcnt_lgkmcnt(0_I);
-        #     s_waitcnt_vmcnt(0_I);
-        #     __builtin_amdgcn_sched_barrier(0);
-        #     __builtin_amdgcn_s_barrier();
-        #     __builtin_amdgcn_sched_barrier(0);
-        v_packs_e11 = _read_v_packs_for_buf(0, urv_base_per_lane)
         s_lo_e9 = [Vec(v_s_1_lo_e9)[r] for r in range_constexpr(16)]
         s_hi_e9 = [Vec(v_s_1_hi_e9)[r] for r in range_constexpr(16)]
         if const_expr(CAUSAL):
             _causal_mask_inplace(s_lo_e9, s_hi_e9, max_m1)
+        #     s_waitcnt_lgkmcnt(0_I);
         rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
+        #     s_waitcnt_vmcnt(0_I);
         _waitcnt_vm_n(0)
+        #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
+        #     __builtin_amdgcn_s_barrier();
         gpu.barrier()
+        #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
 
         #     // Cluster 11:
         #     v_o = mma1(v_p, v_v, v_o);
-        #     row_max = max(m_row, attn_row_max<T>(v_s[1]));
-        #     rescale_m = __builtin_amdgcn_exp2f(m_row - row_max);
-        #     m_row = row_max;
-        #     attn_sub_row<T>(v_s[1], row_max);
-        #     asm volatile("" : "+v"(v_s[1]) ::);
-        #     attn_exp2_slice<T, 0, s_half_len>(v_s[1]);
-        #     sched_barrier_pairs<10, 5, 10>();
-        #     sched_barrier_exp_pairs<6, 3, 10>();
-        #     __builtin_amdgcn_sched_barrier(0);
         for kss in range_constexpr(4):
             v_pk = v_packs_e11[kss]
             if const_expr(kss < 2):
@@ -1636,30 +1626,31 @@ def build_flash_attn_opus_module(
             for dc in range_constexpr(D_CHUNKS):
                 o_accs[dc] = mfma_acc(v_pk[dc], p_pk, o_accs[dc])
 
-        m_tile_max_e11 = _wave_row_max(s_lo_e9, s_hi_e9)
+        #     row_max = max(m_row, attn_row_max<T>(v_s[1]));
+        m_tile_max_e11 = attn_row_max(s_lo_e9, s_hi_e9)
         row_max_e11 = _fmax(m_row, m_tile_max_e11)
+        #     rescale_m = __builtin_amdgcn_exp2f(m_row - row_max);
         rescale_e11 = rocdl.exp2(T.f32, _raw(_fsub(m_row, row_max_e11)))
+        #     m_row = row_max;
         m_row = row_max_e11
 
-        lo_e11, hi_e11 = _sub_row_first_half_exp(s_lo_e9, s_hi_e9, row_max_e11)
+        #     attn_sub_row<T>(v_s[1], row_max);
+        #     asm volatile("" : "+v"(v_s[1]) ::);
+        #     attn_exp2_slice<T, 0, s_half_len>(v_s[1]);
+        lo_e11, hi_e11 = attn_sub_row_first_half_exp2_slice(s_lo_e9, s_hi_e9, row_max_e11)
 
+        #     sched_barrier_pairs<10, 5, 10>();
         _sched_barrier_pairs(10, 5, 10)
+        #     sched_barrier_exp_pairs<6, 3, 10>();
         _sched_barrier_exp_pairs(6, 3, 10)
+        #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
 
         #     attn_exp2_slice<T, s_half_len, s_half_len>(v_s[1]);
-        #     l_row *= rescale_m;
-        #     l_row += attn_sum<T>(v_s[1]);
-        #     v_p = opus::cast<D_ATTN>(v_s[1]);
-        #     asm volatile("" : "+v"(v_p) ::);
-        #     __builtin_amdgcn_sched_barrier(0);
-        #     scale_output_tile<T>(v_o, rescale_m);
-        #     asm volatile("" : "+v"(v_o_pin[0]), "+v"(v_o_pin[1]), "+v"(v_o_pin[2]), "+v"(v_o_pin[3]) ::);
-        #     __builtin_amdgcn_s_barrier();
-        #     __builtin_amdgcn_sched_barrier(0);
         hi_e11_full = []
         for r in range_constexpr(16):
             hi_e11_full.append(rocdl.exp2(T.f32, _raw(hi_e11[r])))
+        #     l_row *= rescale_m;
         l_row = _fmul(l_row, rescale_e11)
         local_sum_e11 = c_zero_f
         for r in range_constexpr(16):
@@ -1668,8 +1659,11 @@ def build_flash_attn_opus_module(
             local_sum_e11 = _fadd(local_sum_e11, hi_e11_full[r])
         peer_sum_e11 = reduction_peer(local_sum_e11)
         tile_sum_e11 = _fadd(local_sum_e11, peer_sum_e11)
+        #     l_row += attn_sum<T>(v_s[1]);
         l_row = _fadd(l_row, tile_sum_e11)
 
+        #     v_p = opus::cast<D_ATTN>(v_s[1]);
+        #     asm volatile("" : "+v"(v_p) ::);
         v_p_lo_e11 = []
         v_p_hi_e11 = []
         for pks in range_constexpr(PV_K_STEPS):
@@ -1679,21 +1673,26 @@ def build_flash_attn_opus_module(
             hi_slice = hi_e11_full[p_base:p_base + 8]
             v_p_hi_e11.append(bf16_trunc_pack_v8(hi_slice))
 
+        #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
+        #     scale_output_tile<T>(v_o, rescale_m);
+        #     asm volatile("" : "+v"(v_o_pin[0]), "+v"(v_o_pin[1]), "+v"(v_o_pin[2]), "+v"(v_o_pin[3]) ::);
         _scale_o(o_accs, rescale_e11)
+        #     __builtin_amdgcn_s_barrier();
         gpu.barrier()
+        #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
 
         #     // Cluster 12:
         #     v_v = tr_load<T::VEC_TR_V>(s_v[1], u_rv);
-        #     s_waitcnt_lgkmcnt(0_I);
-        #     __builtin_amdgcn_sched_barrier(0);
-        #     __builtin_amdgcn_s_barrier();
-        #     __builtin_amdgcn_sched_barrier(0);
         v_packs_e13 = _read_v_packs_for_buf(1, urv_base_per_lane)
+        #     s_waitcnt_lgkmcnt(0_I);
         rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
+        #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
+        #     __builtin_amdgcn_s_barrier();
         gpu.barrier()
+        #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
 
         #     // Cluster 13:
