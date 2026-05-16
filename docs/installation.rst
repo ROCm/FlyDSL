@@ -6,13 +6,37 @@ Prerequisites
 
 - **Python**: 3.10 or later
 - **ROCm**: Required for GPU execution tests and benchmarks (IR-only tests do not need a GPU)
-- **Build tools**: ``cmake`` (≥3.20), a C++17 compiler, and optionally ``ninja``
-- **Python deps**: ``nanobind``, ``numpy``, ``pybind11`` (installed automatically)
 - **Supported GPUs**: AMD MI300X/MI308X (gfx942), AMD MI350 (gfx950)
 - **Supported OS**: Linux with ROCm 6.x or 7.x
 
+Install from PyPI
+-----------------
+
+For most users, install the published package directly:
+
+.. code-block:: bash
+
+   pip install flydsl
+
+Verify that Python can import FlyDSL:
+
+.. code-block:: bash
+
+   python -c "import flydsl; print('FlyDSL installed')"
+
+Build from source
+-----------------
+
+Build from source only if you are developing FlyDSL itself or need a custom
+MLIR/LLVM build.
+
+Additional prerequisites for source builds:
+
+- **Build tools**: ``cmake`` (>=3.20), a C++17 compiler, and optionally ``ninja``
+- **Python deps**: ``nanobind``, ``numpy``, ``pybind11`` (installed automatically)
+
 Step 1: Build LLVM/MLIR
--------------------------
+~~~~~~~~~~~~~~~~~~~~~~~
 
 If you already have an MLIR build with Python bindings enabled, point to it:
 
@@ -28,7 +52,7 @@ Otherwise, use the helper script which clones the ROCm llvm-project and builds M
    export MLIR_PATH=/path/to/llvm-project/build-flydsl/mlir_install
 
 Step 2: Build FlyDSL
----------------------
+~~~~~~~~~~~~~~~~~~~~
 
 Build the Fly C++ dialect, compiler passes, and embedded Python bindings:
 
@@ -51,7 +75,7 @@ After a successful build you will have:
   - ``_mlir/`` -- embedded MLIR Python bindings (no external ``mlir`` wheel required)
 
 Step 3: Install FlyDSL
------------------------
+~~~~~~~~~~~~~~~~~~~~~~
 
 For development (editable install):
 
@@ -82,8 +106,8 @@ To build a distributable wheel:
    python setup.py bdist_wheel
    ls dist/
 
-Step 4: Verify Installation
-----------------------------
+Verify Installation
+-------------------
 
 Run the test suite to verify everything works:
 
@@ -107,9 +131,10 @@ Troubleshooting
       cmake --build build-fly --target fly-opt -j$(nproc)
 
 **Python import issues (No module named flydsl)**
-   Ensure you are using the embedded package::
+   Install the published package, or use the source checkout after building::
 
-      export PYTHONPATH=$(pwd)/build-fly/python_packages:$(pwd):$PYTHONPATH
+      pip install flydsl
+      pip install -e .
 
 **MLIR .so load errors**
    Add the MLIR build lib dir to the loader path::
