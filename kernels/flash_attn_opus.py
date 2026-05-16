@@ -115,7 +115,7 @@ def build_flash_attn_opus_module(
 ):
     """Build an OPUS-style flash_attn launcher for D=128 bf16 on gfx950.
 
-    Launcher signature: ``launcher(Q, K, V, O, batch_size, seq_len, *, stream=None)``
+    Launcher signature: ``launcher(Q, K, V, O, batch_size, seq_len, stride_kv_n=None, stride_q_n=None, head_dim_runtime=None, *, stream=None)``
     """
     gpu_arch = get_hip_arch()
 
@@ -153,13 +153,12 @@ def build_flash_attn_opus_module(
     PV_K_STEPS = K_SUB_N // PV_K_STEP    # 2
     MFMA_LANE_K = 8
 
-    SM_SCALE = 1.0 / host_math.sqrt(head_dim)
     NUM_HEADS_Q = num_heads
     NUM_HEADS_KV = num_kv_heads
     GQA_GROUP_SIZE = NUM_HEADS_Q // NUM_HEADS_KV
     CAUSAL = causal
-    STRIDE_TOKEN_Q = NUM_HEADS_Q * HEAD_DIM
-    STRIDE_TOKEN_KV = NUM_HEADS_KV * HEAD_DIM
+    DEFAULT_STRIDE_Q_N = NUM_HEADS_Q * HEAD_DIM
+    DEFAULT_STRIDE_KV_N = NUM_HEADS_KV * HEAD_DIM
 
     # ── OPUS LDS trait constants (matches gqa_d128_kernel_template.hpp §4-5) ──
     # K/V LDS layout: interleaved double-buffer K0, V0, K1, V1.
@@ -258,6 +257,9 @@ def build_flash_attn_opus_module(
         V: fx.Tensor,
         O: fx.Tensor,
         seq_len: fx.Int32,
+        stride_q_n: fx.Int32,
+        stride_kv_n: fx.Int32,
+        head_dim_runtime: fx.Int32,
     ):
         #     using T = opus::remove_cvref_t<Traits>;
         #     using D_ATTN = typename T::D_ATTN;
@@ -277,6 +279,9 @@ def build_flash_attn_opus_module(
         _EXP_MASK = 0x400
 
         seq_len_v = fx.Index(seq_len)
+        stride_q_n_v = fx.Index(stride_q_n)
+        stride_kv_n_v = fx.Index(stride_kv_n)
+        stride_kv_n_bytes = stride_kv_n_v * fx.Index(BF16_BYTES)
 
         #     // Shared memory for K and V tiles
         #     __shared__ char smem_buf[T::smem_size_bytes()];
@@ -321,6 +326,7 @@ def build_flash_attn_opus_module(
         _stagger_i32 = arith.divsi(
             _wave_id_uni_i32, arith.constant(4, type=T.i32)
         )
+        wave_id_uni = fx.Index(arith.index_cast(T.index, _wave_id_uni_i32))
         stagger_is_one_i1 = arith.cmpi(
             arith.CmpIPredicate.ne, _stagger_i32, arith.constant(0, type=T.i32)
         )
@@ -355,9 +361,23 @@ def build_flash_attn_opus_module(
         #     auto g_k = make_gmem(reinterpret_cast<const D_ATTN*>(kargs.ptr_k) + kv_gmem_offset);
         #     auto g_v = make_gmem(reinterpret_cast<const D_ATTN*>(kargs.ptr_v) + kv_gmem_offset);
         #     auto g_o = make_gmem(reinterpret_cast<D_ATTN*>(kargs.ptr_o) + qo_gmem_offset);
-        q_rsrc = buffer_ops.create_buffer_resource(Q, max_size=True)
-        k_rsrc = buffer_ops.create_buffer_resource(K, max_size=True)
-        v_rsrc = buffer_ops.create_buffer_resource(V, max_size=True)
+        q_gmem_byte_offset = (
+            (batch_idx * seq_len_v + q_start) * stride_q_n_v
+            + q_head_idx * fx.Index(HEAD_DIM)
+        ) * fx.Index(BF16_BYTES)
+        kv_gmem_byte_offset = (
+            batch_idx * seq_len_v * stride_kv_n_v
+            + kv_head_idx * fx.Index(HEAD_DIM)
+        ) * fx.Index(BF16_BYTES)
+        q_rsrc = buffer_ops.create_buffer_resource(
+            Q, max_size=True, base_byte_offset=q_gmem_byte_offset
+        )
+        k_rsrc = buffer_ops.create_buffer_resource(
+            K, max_size=True, base_byte_offset=kv_gmem_byte_offset
+        )
+        v_rsrc = buffer_ops.create_buffer_resource(
+            V, max_size=True, base_byte_offset=kv_gmem_byte_offset
+        )
         o_base_ptr = _extract_aligned_pointer(O)
         o_base_i64 = llvm.PtrToIntOp(T.i64, o_base_ptr).result
         o_base_lo = ArithValue(o_base_i64).trunci(T.i32)
@@ -395,7 +415,15 @@ def build_flash_attn_opus_module(
         c_neg_inf = fx.Float32(float("-inf"))
         c_zero_f = fx.Float32(0.0)
         c_one_f = fx.Float32(1.0)
-        c_sm_scale_log2e = fx.Float32(SM_SCALE * _LOG2E)
+        head_dim_f32 = fx.Float32(fx.Int32(head_dim_runtime))
+        c_log2e_f = fx.Float32(_LOG2E)
+        c_sm_scale_log2e = fx.Float32(
+            arith.mulf(
+                _raw(fmath.rsqrt(head_dim_f32, fastmath=fm_fast)),
+                _raw(c_log2e_f),
+                fastmath=fm_fast,
+            )
+        )
         c_eight_f = fx.Float32(OPUS_RESCALE_THRESHOLD)
         c_zero_v16f32 = Vec.filled(16, 0.0, fx.Float32)
         width_i32 = fx.Int32(WARP_SIZE)
@@ -403,36 +431,6 @@ def build_flash_attn_opus_module(
         c4_i32 = fx.Int32(4)
         lane_i32 = fx.Int32(lane)
         v8f32_type = Vec.make_type(MFMA_LANE_K, fx.Float32)
-
-        #     v_q = load<T::VEC_Q>(g_q, u_q);
-        #     auto v_q_f32 = opus::cast<float>(v_q);
-        #     static_for<q_len>([&](auto i) { v_q_f32[i.value] *= temperature_scale; });
-        #     v_q = opus::cast<D_ATTN>(v_q_f32);
-        q_row = q_start + wave_q_offset + lane_mod_32
-        q_row_i32 = fx.Int32(q_row)
-        q_in_bounds = q_row < seq_len_v
-        q_row_safe = fx.Index(ArithValue(q_in_bounds).select(q_row, fx.Index(0)))
-        q_b_packs = []
-        for ks in range_constexpr(K_STEPS_QK):
-            q_col = fx.Index(ks * K_STEP_QK) + lane_div_32 * MFMA_LANE_K
-            q_token = batch_idx * seq_len_v + q_row_safe
-            g_idx = q_token * STRIDE_TOKEN_Q + q_head_idx * HEAD_DIM + q_col
-            raw = buffer_ops.buffer_load(
-                q_rsrc,
-                fx.Int32(g_idx),
-                vec_width=MFMA_LANE_K,
-                dtype=elem_dtype,
-            )
-
-            pack_f32 = Vec(raw).extf(v8f32_type)
-            scaled_elems = []
-            for k in range_constexpr(MFMA_LANE_K):
-                scaled_elems.append(
-                    arith.mulf(_raw(Vec(pack_f32)[k]), _raw(c_sm_scale_log2e), fastmath=fm_fast)
-                )
-            pack_scaled_f32 = Vec.from_elements(scaled_elems, fx.Float32)
-            pack_scaled_bf16 = pack_scaled_f32.truncf(v8f16_type)
-            q_b_packs.append(pack_scaled_bf16.ir_value())
 
         #     // Tile traversal helpers
         #     const int kv_tile_stride = T::KV_TILE_SIZE * kargs.stride_kv_n;
@@ -531,7 +529,7 @@ def build_flash_attn_opus_module(
 
         def global_idx_q(token_idx, col):
             token = batch_idx * seq_len_v + token_idx
-            return token * STRIDE_TOKEN_Q + q_head_idx * HEAD_DIM + col
+            return token * stride_q_n_v + q_head_idx * HEAD_DIM + col
 
         def _make_raw_buffer_rsrc(tensor):
             base_ptr = _extract_aligned_pointer(tensor)
@@ -676,22 +674,16 @@ def build_flash_attn_opus_module(
             for d in range_constexpr(NUM_DMA_K):
                 lds_addr = (
                     k_lds_byte_base
-                    + wave_id * fx.Index(SMEM_K_LINE_STRIDE * BF16_BYTES)
+                    + wave_id_uni * fx.Index(SMEM_K_LINE_STRIDE * BF16_BYTES)
                     + fx.Index(d * SMEM_N_RPT * SMEM_K_LINE_STRIDE * BF16_BYTES)
                 )
-                lds_i64 = fx.Int64(lds_addr)
-                lds_lane0 = rocdl.readfirstlane(fx.Int64.ir_type, lds_i64)
-                lds_ptr = buffer_ops.create_llvm_ptr(lds_lane0, address_space=3)
+                lds_ptr = buffer_ops.create_llvm_ptr(lds_addr, address_space=3)
 
                 n_in_tile = n_in_warp * fx.Index(NUM_WAVES) + wave_id
                 global_d = d_bucket * fx.Index(VEC_KV) + fx.Index(d * D_128B_SIZE)
-                uniform_byte = (
-                    (batch_idx * seq_len_v + tile_start)
-                    * fx.Index(STRIDE_TOKEN_KV * BF16_BYTES)
-                    + kv_head_idx * fx.Index(HEAD_DIM * BF16_BYTES)
-                )
+                uniform_byte = tile_start * stride_kv_n_bytes
                 lane_byte = (
-                    n_in_tile * fx.Index(STRIDE_TOKEN_KV * BF16_BYTES)
+                    n_in_tile * stride_kv_n_bytes
                     + global_d * fx.Index(BF16_BYTES)
                 )
                 voffset = fx.Int32(lane_byte)
@@ -705,22 +697,16 @@ def build_flash_attn_opus_module(
             for d in range_constexpr(NUM_DMA_V):
                 lds_addr = (
                     v_lds_byte_base
-                    + wave_id * fx.Index(SMEM_V_LINE_STRIDE * BF16_BYTES)
+                    + wave_id_uni * fx.Index(SMEM_V_LINE_STRIDE * BF16_BYTES)
                     + fx.Index(d * SMEM_N_RPT * SMEM_V_LINE_STRIDE * BF16_BYTES)
                 )
-                lds_i64 = fx.Int64(lds_addr)
-                lds_lane0 = rocdl.readfirstlane(fx.Int64.ir_type, lds_i64)
-                lds_ptr = buffer_ops.create_llvm_ptr(lds_lane0, address_space=3)
+                lds_ptr = buffer_ops.create_llvm_ptr(lds_addr, address_space=3)
 
                 n_in_tile = n_in_warp * fx.Index(NUM_WAVES) + wave_id
                 global_d = d_bucket * fx.Index(VEC_KV) + fx.Index(d * D_128B_SIZE)
-                uniform_byte = (
-                    (batch_idx * seq_len_v + tile_start)
-                    * fx.Index(STRIDE_TOKEN_KV * BF16_BYTES)
-                    + kv_head_idx * fx.Index(HEAD_DIM * BF16_BYTES)
-                )
+                uniform_byte = tile_start * stride_kv_n_bytes
                 lane_byte = (
-                    n_in_tile * fx.Index(STRIDE_TOKEN_KV * BF16_BYTES)
+                    n_in_tile * stride_kv_n_bytes
                     + global_d * fx.Index(BF16_BYTES)
                 )
                 voffset = fx.Int32(lane_byte)
@@ -909,6 +895,35 @@ def build_flash_attn_opus_module(
         rocdl.sched_barrier(0)
         #     __builtin_amdgcn_s_barrier();
         gpu.barrier()
+
+        #     v_q = load<T::VEC_Q>(g_q, u_q);
+        #     auto v_q_f32 = opus::cast<float>(v_q);
+        #     static_for<q_len>([&](auto i) { v_q_f32[i.value] *= temperature_scale; });
+        #     v_q = opus::cast<D_ATTN>(v_q_f32);
+        q_row_in_block = wave_q_offset + lane_mod_32
+        q_row = q_start + q_row_in_block
+        q_row_i32 = fx.Int32(q_row)
+        q_in_bounds = q_row < seq_len_v
+        q_b_packs = []
+        for ks in range_constexpr(K_STEPS_QK):
+            q_col = fx.Index(ks * K_STEP_QK) + lane_div_32 * MFMA_LANE_K
+            g_idx = q_row_in_block * stride_q_n_v + q_col
+            raw = buffer_ops.buffer_load(
+                q_rsrc,
+                fx.Int32(g_idx),
+                vec_width=MFMA_LANE_K,
+                dtype=elem_dtype,
+            )
+
+            pack_f32 = Vec(raw).extf(v8f32_type)
+            scaled_elems = []
+            for k in range_constexpr(MFMA_LANE_K):
+                scaled_elems.append(
+                    arith.mulf(_raw(Vec(pack_f32)[k]), _raw(c_sm_scale_log2e), fastmath=fm_fast)
+                )
+            pack_scaled_f32 = Vec.from_elements(scaled_elems, fx.Float32)
+            pack_scaled_bf16 = pack_scaled_f32.truncf(v8f16_type)
+            q_b_packs.append(pack_scaled_bf16.ir_value())
 
         #     async_load<T::VEC_KV>(g_k, s_k[1].ptr, u_gk, u_sk, kv_tile(1));
         async_load_k(fx.Index(BLOCK_N), 1)
@@ -1757,6 +1772,9 @@ def build_flash_attn_opus_module(
         O: fx.Tensor,
         batch_size: fx.Int32,
         seq_len: fx.Int32,
+        stride_q_n: fx.Int32,
+        stride_kv_n: fx.Int32,
+        head_dim_runtime: fx.Int32,
         stream: fx.Stream = fx.Stream(None),
     ):
         allocator.finalized = False
@@ -1778,7 +1796,7 @@ def build_flash_attn_opus_module(
             else None
         )
         flash_attn_opus_kernel(
-            Q, K, V, O, seq_len,
+            Q, K, V, O, seq_len, stride_q_n, stride_kv_n, head_dim_runtime,
             value_attrs={
                 "rocdl.waves_per_eu": waves_per_eu,
                 "rocdl.flat_work_group_size": f"{BLOCK_SIZE},{BLOCK_SIZE}",
@@ -1799,14 +1817,41 @@ def build_flash_attn_opus_module(
         },
     }
 
-    def _launch(*args, **kwargs):
+    def _launch(
+        Q, K, V, O, batch_size, seq_len, stride_kv_n=None, stride_q_n=None,
+        head_dim_runtime=None, *, stream=None
+    ):
+        if stride_kv_n is None:
+            stride_kv_n = DEFAULT_STRIDE_KV_N
+        if stride_q_n is None:
+            stride_q_n = DEFAULT_STRIDE_Q_N
+        if head_dim_runtime is None:
+            head_dim_runtime = HEAD_DIM
         with CompilationContext.compile_hints(_opus_compile_hints):
-            return launch_flash_attn_opus(*args, **kwargs)
+            if stream is None:
+                return launch_flash_attn_opus(
+                    Q, K, V, O, batch_size, seq_len,
+                    stride_q_n, stride_kv_n, head_dim_runtime
+                )
+            return launch_flash_attn_opus(
+                Q, K, V, O, batch_size, seq_len,
+                stride_q_n, stride_kv_n, head_dim_runtime, stream=stream
+            )
 
-    def _compile(Q, K, V, O, batch_size, seq_len, stream=None):
+    def _compile(
+        Q, K, V, O, batch_size, seq_len, stride_kv_n=None, stride_q_n=None,
+        head_dim_runtime=None, *, stream=None
+    ):
+        if stride_kv_n is None:
+            stride_kv_n = DEFAULT_STRIDE_KV_N
+        if stride_q_n is None:
+            stride_q_n = DEFAULT_STRIDE_Q_N
+        if head_dim_runtime is None:
+            head_dim_runtime = HEAD_DIM
         with CompilationContext.compile_hints(_opus_compile_hints):
             return flyc.compile(
                 launch_flash_attn_opus, Q, K, V, O, batch_size, seq_len,
+                stride_q_n, stride_kv_n, head_dim_runtime,
                 fx.Stream(stream))
 
     _launch.compile = _compile
