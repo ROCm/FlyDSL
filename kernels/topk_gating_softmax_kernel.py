@@ -12,22 +12,18 @@ Fuses softmax + top-K selection + optional renormalization for MoE gating:
 Outputs: topk_weights (f32), topk_indices (i32), token_expert_indices (i32).
 """
 
+import math
+
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.compiler.kernel_function import CompilationContext
-
-from flydsl.expr import arith, vector, range_constexpr
-from flydsl.expr.arith import ArithValue
-from flydsl.expr.typing import T, Int32
-
-from flydsl.utils.smem_allocator import SmemAllocator
-from flydsl.runtime.device import get_rocm_arch as get_hip_arch
-
 from flydsl._mlir import ir
-
-import math
+from flydsl.compiler.kernel_function import CompilationContext
+from flydsl.expr import arith, range_constexpr, vector
+from flydsl.expr.arith import ArithValue
+from flydsl.expr.typing import Int32, T
+from flydsl.runtime.device import get_rocm_arch as get_hip_arch
+from flydsl.utils.smem_allocator import SmemAllocator
 from kernels.kernels_common import dtype_to_elem_type, get_warp_size
-
 
 KERNEL_NAME = "topk_gating_softmax_kernel"
 
@@ -96,15 +92,15 @@ def build_topk_gating_softmax_module(
         raise ValueError(f"topk={topk} > num_experts={num_experts}")
 
     if elem_bits <= 16 and VPT % 8 == 0:
-        ATOM_BITS = 128                     # 8 bf16/f16 per atom call
+        ATOM_BITS = 128  # 8 bf16/f16 per atom call
     elif elem_bits <= 16 and VPT % 4 == 0:
-        ATOM_BITS = 64                      # 4 bf16/f16 per atom call
+        ATOM_BITS = 64  # 4 bf16/f16 per atom call
     elif elem_bits <= 16 and VPT % 2 == 0:
-        ATOM_BITS = 32                      # 2 bf16/f16 per atom call
+        ATOM_BITS = 32  # 2 bf16/f16 per atom call
     elif elem_bits == 32 and VPT % 2 == 0:
-        ATOM_BITS = 64                      # 2 f32 per atom call
+        ATOM_BITS = 64  # 2 f32 per atom call
     else:
-        ATOM_BITS = elem_bits               # 1 element per atom call
+        ATOM_BITS = elem_bits  # 1 element per atom call
     ELEMS_PER_ATOM = ATOM_BITS // elem_bits
     ATOMS_PER_THREAD = VPT // ELEMS_PER_ATOM
 
@@ -122,9 +118,8 @@ def build_topk_gating_softmax_module(
         bid = fx.block_idx.x
         tid = fx.thread_idx.x
 
-        elem_type = dtype_to_elem_type(dtype_str).ir_type
+        elem_dtype = dtype_to_elem_type(dtype_str)
         compute_type = T.f32
-        register_addr_space = int(fx.AddressSpace.Register)
 
         fm_fast = arith.FastMathFlags.fast
 
@@ -140,12 +135,12 @@ def build_topk_gating_softmax_module(
         c_tpb = fx.Int32(TOKENS_PER_BLOCK)
         c_vpt = fx.Int32(VPT)
 
-        warp_id = tid // c_warp                          # 0..WARPS_PER_BLOCK-1
-        lane = tid % c_warp                              # 0..WARP_SIZE-1
-        token_in_warp = lane // c_tpt                    # 0..TOKENS_PER_WARP-1
-        expert_lane = lane % c_tpt                       # 0..THREADS_PER_TOKEN-1
-        local_token = warp_id * c_tpw + token_in_warp    # 0..TOKENS_PER_BLOCK-1
-        global_token = bid * c_tpb + local_token         # token row
+        warp_id = tid // c_warp  # 0..WARPS_PER_BLOCK-1
+        lane = tid % c_warp  # 0..WARP_SIZE-1
+        token_in_warp = lane // c_tpt  # 0..TOKENS_PER_WARP-1
+        expert_lane = lane % c_tpt  # 0..THREADS_PER_TOKEN-1
+        local_token = warp_id * c_tpw + token_in_warp  # 0..TOKENS_PER_BLOCK-1
+        global_token = bid * c_tpb + local_token  # token row
 
         in_range = global_token < i32_num_tokens
 
@@ -199,40 +194,28 @@ def build_topk_gating_softmax_module(
 
         # Per-element scalar tiling for the K-wide output rows. The gating
         # row is divided into ELEMS_PER_ATOM-wide chunks for input loads.
-        gating_div = fx.logical_divide(
-            row_gating, fx.make_layout(ELEMS_PER_ATOM, 1)
-        )
+        gating_div = fx.logical_divide(row_gating, fx.make_layout(ELEMS_PER_ATOM, 1))
         weights_div = fx.logical_divide(row_weights, fx.make_layout(1, 1))
         indices_div = fx.logical_divide(row_indices, fx.make_layout(1, 1))
         tei_div = fx.logical_divide(row_tei, fx.make_layout(1, 1))
 
         # ── Input load: ATOM_BITS-wide buffer copy (ELEMS_PER_ATOM elems) ─
         copy_atom_in = fx.make_copy_atom(fx.rocdl.BufferCopy(ATOM_BITS), elem_bits)
-        atom_reg_ty_in = fx.MemRefType.get(
-            elem_type,
-            fx.LayoutType.get(ELEMS_PER_ATOM, 1),
-            register_addr_space,
-        )
-        atom_reg_lay_in = fx.make_layout(ELEMS_PER_ATOM, 1)
 
         # Output copy atoms: f32 path is reused for i32 indices via bitcast
         # (callers pass torch.float32 views over int32 storage; see comment
         # near `_store_scalar_i32` below).
         copy_atom_f32 = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), 32)
-        scalar_reg_ty_f32 = fx.MemRefType.get(
-            T.f32, fx.LayoutType.get(1, 1), register_addr_space
-        )
-        scalar_reg_lay = fx.make_layout(1, 1)
 
         def _load_atom_in(divided, atom_index):
             """Load ELEMS_PER_ATOM contiguous elements starting at atom_index."""
             view = fx.slice(divided, (None, atom_index))
-            r = fx.memref_alloca(atom_reg_ty_in, atom_reg_lay_in)
+            r = fx.make_rmem_tensor(ELEMS_PER_ATOM, elem_dtype)
             fx.copy_atom_call(copy_atom_in, view, r)
             return fx.memref_load_vec(r)
 
         def _store_scalar_f32(divided, index, val):
-            r = fx.memref_alloca(scalar_reg_ty_f32, scalar_reg_lay)
+            r = fx.make_rmem_tensor(1, fx.Float32)
             v = fx.Vector.from_elements([val], fx.Float32)
             fx.memref_store_vec(v, r)
             view = fx.slice(divided, (None, index))
@@ -244,7 +227,7 @@ def build_topk_gating_softmax_module(
             # store via the f32 copy atom (avoids signed-vs-signless legalize
             # failures when going through si32).
             val_f32 = ArithValue(val).bitcast(T.f32)
-            r = fx.memref_alloca(scalar_reg_ty_f32, scalar_reg_lay)
+            r = fx.make_rmem_tensor(1, fx.Float32)
             v = fx.Vector.from_elements([val_f32], fx.Float32)
             fx.memref_store_vec(v, r)
             view = fx.slice(divided, (None, index))
@@ -304,8 +287,8 @@ def build_topk_gating_softmax_module(
         # ==================================================================
         # Stash both the winning weight and index per iteration so Pass 5
         # can write them without recomputing.
-        selected_weights = []   # one f32 per k iter (replicated across the group)
-        selected_indices = []   # one i32 per k iter (replicated across the group)
+        selected_weights = []  # one f32 per k iter (replicated across the group)
+        selected_indices = []  # one i32 per k iter (replicated across the group)
         selected_sum = c_zero_f
 
         for k_idx in range_constexpr(topk):
@@ -320,9 +303,7 @@ def build_topk_gating_softmax_module(
                 thread_best_idx = is_better.select(ci, thread_best_idx)
 
             # Sub-warp argmax → all THREADS_PER_TOKEN lanes hold the winner.
-            global_best_val, global_best_idx = group_reduce_argmax(
-                thread_best_val, thread_best_idx
-            )
+            global_best_val, global_best_idx = group_reduce_argmax(thread_best_val, thread_best_idx)
 
             selected_weights.append(global_best_val)
             selected_indices.append(global_best_idx)

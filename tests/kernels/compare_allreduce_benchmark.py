@@ -8,7 +8,9 @@ Exit code 1 if any case regresses more than BOTH thresholds:
     - relative increase > MAX_REGRESSION_PCT  (default 15%)
     - absolute increase > MIN_ABS_REGRESSION_US (default 10 us)
 """
+
 import sys
+
 import pandas as pd
 
 MAX_REGRESSION_PCT = 15.0
@@ -32,12 +34,8 @@ def main():
     pr_agg_indexed = pr_agg.set_index(["shape", "dtype"])
     main_agg_indexed = main_agg.set_index(["shape", "dtype"])
 
-    pr_broken = pr_agg_indexed[
-        (pr_agg_indexed["avg_time_us"] <= 0) | pr_agg_indexed["avg_time_us"].isna()
-    ]
-    main_ok = main_agg_indexed[
-        (main_agg_indexed["avg_time_us"] > 0) & main_agg_indexed["avg_time_us"].notna()
-    ]
+    pr_broken = pr_agg_indexed[(pr_agg_indexed["avg_time_us"] <= 0) | pr_agg_indexed["avg_time_us"].isna()]
+    main_ok = main_agg_indexed[(main_agg_indexed["avg_time_us"] > 0) & main_agg_indexed["avg_time_us"].notna()]
     newly_broken = pr_broken.index.intersection(main_ok.index)
 
     # Performance comparison for cases that both sides ran successfully
@@ -57,10 +55,7 @@ def main():
 
         print("=== Allreduce Benchmark: PR vs main ===")
         for (shape, dtype), row in merged.iterrows():
-            regressed = (
-                row["delta_pct"] > MAX_REGRESSION_PCT
-                and row["delta_us"] > MIN_ABS_REGRESSION_US
-            )
+            regressed = row["delta_pct"] > MAX_REGRESSION_PCT and row["delta_us"] > MIN_ABS_REGRESSION_US
             tag = "REGRESSION" if regressed else "OK"
             if regressed:
                 fail_count += 1

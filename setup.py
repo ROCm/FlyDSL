@@ -4,8 +4,8 @@
 from __future__ import annotations
 
 import os
-import subprocess
 import shutil
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -71,9 +71,7 @@ if _build_dir_env:
         try:
             BUILD_DIR_REL = _build_dir_path.relative_to(REPO_ROOT)
         except ValueError:
-            raise RuntimeError(
-                f"FLY_BUILD_DIR ({_build_dir_path}) is outside REPO_ROOT ({REPO_ROOT})."
-            )
+            raise RuntimeError(f"FLY_BUILD_DIR ({_build_dir_path}) is outside REPO_ROOT ({REPO_ROOT}).")
     else:
         BUILD_DIR_REL = _build_dir_path
 else:
@@ -92,7 +90,10 @@ def _git_short_hash() -> str:
     try:
         r = subprocess.run(
             ["git", "rev-parse", "--short", "HEAD"],
-            capture_output=True, text=True, timeout=5, cwd=str(REPO_ROOT),
+            capture_output=True,
+            text=True,
+            timeout=5,
+            cwd=str(REPO_ROOT),
         )
         if r.returncode == 0:
             return r.stdout.strip()
@@ -106,7 +107,10 @@ def _git_rev_count() -> str:
     try:
         r = subprocess.run(
             ["git", "rev-list", "--count", "HEAD"],
-            capture_output=True, text=True, timeout=5, cwd=str(REPO_ROOT),
+            capture_output=True,
+            text=True,
+            timeout=5,
+            cwd=str(REPO_ROOT),
         )
         if r.returncode == 0:
             return r.stdout.strip()
@@ -163,7 +167,6 @@ def _read_version() -> str:
     return f"{base_version}.dev{commit_count}"
 
 
-
 def _load_requirements() -> list[str]:
     req = REPO_ROOT / "requirements.txt"
     if not req.exists():
@@ -192,10 +195,7 @@ def _assert_embedded_mlir_exists() -> None:
             env.setdefault("FLY_BUILD_DIR", str(BUILD_DIR_REL))
             subprocess.run(["bash", "scripts/build.sh"], cwd=str(REPO_ROOT), check=True, env=env)
         except Exception as e:
-            raise RuntimeError(
-                "Failed to build via `scripts/build.sh`.\n"
-                f"Original error: {e}\n"
-            ) from e
+            raise RuntimeError("Failed to build via `scripts/build.sh`.\n" f"Original error: {e}\n") from e
 
     if not EMBEDDED__MLIR.exists():
         raise RuntimeError(
@@ -212,6 +212,7 @@ def _assert_embedded_mlir_exists() -> None:
 _assert_embedded_mlir_exists()
 
 IS_WHEEL_BUILD = any(a in {"bdist_wheel", "sdist"} for a in os.sys.argv[1:])
+
 
 def _strip_embedded_shared_libs() -> None:
     """Strip debug symbols from embedded shared libraries to reduce wheel size."""
@@ -337,6 +338,7 @@ def _auditwheel_repair_in_place(wheel_path: Path, dist_dir: Path) -> None:
 
     shutil.rmtree(wheelhouse, ignore_errors=True)
 
+
 def _ensure_python_embedded_mlir_package() -> None:
     """Make `flydsl._mlir` importable for editable installs.
 
@@ -388,8 +390,7 @@ else:
     # Wheel/sdist builds: pure Python from source, _mlir from build output.
     py_packages = find_packages(where=str(PY_SRC_REL), exclude=["_mlir*"])
     embedded_mlir_pkgs = [
-        f"flydsl.{p}" for p in
-        find_namespace_packages(where=str(EMBEDDED_MLIR_ROOT_REL), include=["_mlir*"])
+        f"flydsl.{p}" for p in find_namespace_packages(where=str(EMBEDDED_MLIR_ROOT_REL), include=["_mlir*"])
     ]
     all_packages = sorted(set(py_packages + embedded_mlir_pkgs))
     package_dir = {
@@ -403,7 +404,9 @@ setup(
     name="flydsl",
     version=_version,
     description="FlyDSL - ROCm Domain Specific Language for layout algebra (Python + embedded MLIR runtime)",
-    long_description=(REPO_ROOT / "README.md").read_text(encoding="utf-8") if (REPO_ROOT / "README.md").exists() else "",
+    long_description=(
+        (REPO_ROOT / "README.md").read_text(encoding="utf-8") if (REPO_ROOT / "README.md").exists() else ""
+    ),
     long_description_content_type="text/markdown",
     license="Apache-2.0",
     python_requires=">=3.8",
@@ -428,5 +431,3 @@ setup(
     cmdclass=({"bdist_wheel": bdist_wheel} if bdist_wheel is not None else {}),
     distclass=BinaryDistribution,
 )
-
-

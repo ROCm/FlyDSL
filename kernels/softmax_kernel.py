@@ -56,7 +56,6 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
         tid = fx.thread_idx.x
 
         elem_dtype = dtype_to_elem_type(dtype_str)
-        elem_type = elem_dtype.ir_type
         fm_fast = arith.FastMathFlags.fast
 
         base_ptr = allocator.get_base()
@@ -123,18 +122,14 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
             c_div = fx.logical_divide(row_c, fx.make_layout(VEC_WIDTH, 1))
 
             copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), elem_bits)
-            vec_reg_ty = fx.MemRefType.get(
-                elem_type, fx.LayoutType.get(VEC_WIDTH, 1), fx.AddressSpace.Register
-            )
-            vec_reg_lay = fx.make_layout(VEC_WIDTH, 1)
 
             def _load_vec(div_tensor, idx):
-                r = fx.memref_alloca(vec_reg_ty, vec_reg_lay)
+                r = fx.make_rmem_tensor(VEC_WIDTH, elem_dtype)
                 fx.copy_atom_call(copy_atom, fx.slice(div_tensor, (None, idx)), r)
                 return fx.memref_load_vec(r)
 
             def _store_vec(val, div_tensor, idx):
-                r = fx.memref_alloca(vec_reg_ty, vec_reg_lay)
+                r = fx.make_rmem_tensor(VEC_WIDTH, elem_dtype)
                 fx.memref_store_vec(val, r)
                 fx.copy_atom_call(copy_atom, r, fx.slice(div_tensor, (None, idx)))
 
@@ -189,20 +184,18 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
                 fx.rocdl.BufferCopy16b() if elem_bits <= 16 else fx.rocdl.BufferCopy32b(),
                 elem_bits,
             )
-            scalar_reg_ty = fx.MemRefType.get(elem_type, fx.LayoutType.get(1, 1), fx.AddressSpace.Register)
-            scalar_reg_lay = fx.make_layout(1, 1)
 
             a_div = fx.logical_divide(row_a, fx.make_layout(1, 1))
             c_div = fx.logical_divide(row_c, fx.make_layout(1, 1))
 
             def _load_scalar(divided, index):
                 view = fx.slice(divided, (None, index))
-                r = fx.memref_alloca(scalar_reg_ty, scalar_reg_lay)
+                r = fx.make_rmem_tensor(1, elem_dtype)
                 fx.copy_atom_call(copy_atom_s, view, r)
                 return fx.memref_load_vec(r)[0]
 
             def _store_scalar(divided, index, val):
-                r = fx.memref_alloca(scalar_reg_ty, scalar_reg_lay)
+                r = fx.make_rmem_tensor(1, elem_dtype)
                 ts = full(1, elem_dtype(val), elem_dtype)
                 fx.memref_store_vec(ts, r)
                 view = fx.slice(divided, (None, index))

@@ -7,8 +7,8 @@ import ast
 
 import pytest
 
-from flydsl._mlir.ir import Context, FunctionType, InsertionPoint, IntegerType, Location, Module
 from flydsl._mlir.dialects import arith, func
+from flydsl._mlir.ir import Context, FunctionType, InsertionPoint, IntegerType, Location, Module
 from flydsl.compiler.ast_rewriter import ASTRewriter, ReplaceIfWithDispatch, _collect_assigned_vars
 from flydsl.expr.numeric import Int32
 

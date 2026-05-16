@@ -44,7 +44,8 @@ from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, buffer_ops, const_expr, range_constexpr, rocdl, vector
 from flydsl.expr import math as fx_math
 from flydsl.expr.arith import ArithValue
-from flydsl.expr.typing import T, Vector as Vec
+from flydsl.expr.typing import T
+from flydsl.expr.typing import Vector as Vec
 from kernels.kernels_common import get_warp_size
 
 BLOCK_THREADS = 256
@@ -109,9 +110,7 @@ def build_silu_and_mul_fq_module(
     """
     assert inter_dim % 32 == 0, f"inter_dim={inter_dim} must be divisible by 32"
     if quant_mode not in ("fp4", "fp8", "none"):
-        raise ValueError(
-            f"quant_mode must be one of ('fp4','fp8','none'), got {quant_mode!r}"
-        )
+        raise ValueError(f"quant_mode must be one of ('fp4','fp8','none'), got {quant_mode!r}")
     _need_fp4 = quant_mode == "fp4"
     _need_fp8 = quant_mode == "fp8"
     _need_quant = _need_fp4 or _need_fp8
@@ -152,15 +151,12 @@ def build_silu_and_mul_fq_module(
         # ── Layout API: buffer-backed tensor for structured input ────
         X_buf = fx.rocdl.make_buffer_tensor(x)
         copy_atom_vec = fx.make_copy_atom(
-            fx.rocdl.BufferCopy(VEC * 16), 16  # bf16 = 16 bits
+            fx.rocdl.BufferCopy(VEC * 16),
+            16,  # bf16 = 16 bits
         )
-        vec_reg_ty = fx.MemRefType.get(
-            T.bf16, fx.LayoutType.get(VEC, 1), fx.AddressSpace.Register
-        )
-        vec_reg_lay = fx.make_layout(VEC, 1)
 
         def load_vec(div_tensor, idx):
-            r = fx.memref_alloca(vec_reg_ty, vec_reg_lay)
+            r = fx.make_rmem_tensor(VEC, fx.BFloat16)
             fx.copy_atom_call(copy_atom_vec, fx.slice(div_tensor, (None, idx)), r)
             return fx.memref_load_vec(r)
 
@@ -178,15 +174,16 @@ def build_silu_and_mul_fq_module(
         slot_id = fused_tid_val >> 24
         is_valid = (bid_i32 < num_valid) & (token_id < ArithValue(token_num)) & (slot_id < topk)
 
-        layout_scale = _make_scale_tiled_layout(
-            ArithValue(arith.constant(scale_cols, type=T.i32))
-        )
+        layout_scale = _make_scale_tiled_layout(ArithValue(arith.constant(scale_cols, type=T.i32)))
 
         def _store_scale(scale_rsrc, layout_scale, bid_i32, col0, val_i8):
             if (col0 & 31) == 0:
                 s_off = _scale_byte_offset(layout_scale, bid_i32, col0 >> 5)
                 buffer_ops.buffer_store(
-                    val_i8, scale_rsrc, s_off, offset_is_bytes=True,
+                    val_i8,
+                    scale_rsrc,
+                    s_off,
+                    offset_is_bytes=True,
                 )
 
         def _f32_to_e2m1(qx_f32):
@@ -209,9 +206,7 @@ def build_silu_and_mul_fq_module(
         COLS_PER_ITER = BLOCK_THREADS * VEC
         c0_f32 = arith.constant(0.0, type=T.f32)
 
-        for iter_idx in range_constexpr(
-            (inter_dim + COLS_PER_ITER - 1) // COLS_PER_ITER
-        ):
+        for iter_idx in range_constexpr((inter_dim + COLS_PER_ITER - 1) // COLS_PER_ITER):
             col0 = thread_id * VEC + iter_idx * COLS_PER_ITER
 
             if col0 < inter_dim:
@@ -260,9 +255,7 @@ def build_silu_and_mul_fq_module(
                             local_max = local_max.maximumf(fx_math.absf(act_vals[vi]))
 
                         for sh_dist in SHUFFLE_DISTS:
-                            local_max = local_max.maximumf(
-                                local_max.shuffle_xor(sh_dist, WARP_SIZE)
-                            )
+                            local_max = local_max.maximumf(local_max.shuffle_xor(sh_dist, WARP_SIZE))
 
                         # ── Compute e8m0 bias + quant_scale (fp4: h=2, fp8: h=8) ──
                         exp_field = ((local_max.bitcast(T.i32) + 0x200000) & 0xFF800000) >> 23
@@ -270,9 +263,7 @@ def build_silu_and_mul_fq_module(
                             exp_field - arith.constant(_fp_headroom, type=T.i32),
                             arith.constant(0, type=T.i32),
                         )
-                        quant_scale = (
-                            (arith.constant(254, type=T.i32) - e8m0_biased) << 23
-                        ).bitcast(T.f32)
+                        quant_scale = ((arith.constant(254, type=T.i32) - e8m0_biased) << 23).bitcast(T.f32)
 
                         if const_expr(_need_fp4):
                             fp4_vals = []
@@ -286,13 +277,12 @@ def build_silu_and_mul_fq_module(
 
                             fp4_byte_off = in_row * fp4_row_bytes + (col0 >> 1)
                             _pack_type = {1: T.i8, 2: T.i16}.get(_fp4_pack_bytes, T.i32)
-                            packed = (
-                                arith.trunci(_pack_type, packed_i32)
-                                if _fp4_pack_bytes < 4
-                                else packed_i32
-                            )
+                            packed = arith.trunci(_pack_type, packed_i32) if _fp4_pack_bytes < 4 else packed_i32
                             buffer_ops.buffer_store(
-                                packed, out_rsrc, fp4_byte_off, offset_is_bytes=True,
+                                packed,
+                                out_rsrc,
+                                fp4_byte_off,
+                                offset_is_bytes=True,
                             )
                         else:
                             # MXFP8 (e4m3fn) output, row stride = inter_dim bytes.
@@ -351,8 +341,7 @@ def build_silu_and_mul_fq_module(
                                         offset_is_bytes=True,
                                     )
 
-                        _store_scale(scale_rsrc, layout_scale, bid_i32, col0,
-                                     arith.trunci(T.i8, e8m0_biased))
+                        _store_scale(scale_rsrc, layout_scale, bid_i32, col0, arith.trunci(T.i8, e8m0_biased))
                     else:
                         # quant_mode == "none": write bf16 out directly.
                         # out row stride = inter_dim * 2 bytes.
@@ -382,8 +371,7 @@ def build_silu_and_mul_fq_module(
                     # when a scale tile exists (fp4/fp8); quant_mode="none"
                     # has no scale buffer to maintain.
                     if const_expr(_need_quant):
-                        _store_scale(scale_rsrc, layout_scale, bid_i32, col0,
-                                     arith.constant(0, type=T.i8))
+                        _store_scale(scale_rsrc, layout_scale, bid_i32, col0, arith.constant(0, type=T.i8))
 
     @flyc.jit
     def launch_silu_and_mul_fq(
@@ -401,9 +389,7 @@ def build_silu_and_mul_fq_module(
             pass
 
         idx_rows = ArithValue(num_sorted_rows).index_cast(T.index)
-        launcher = silu_and_mul_fq_kernel(
-            x, out_buf, out_scale_sorted, sorted_ids, num_valid_ids, token_num
-        )
+        launcher = silu_and_mul_fq_kernel(x, out_buf, out_scale_sorted, sorted_ids, num_valid_ids, token_num)
         launcher.launch(
             grid=(idx_rows, 1, 1),
             block=(BLOCK_THREADS, 1, 1),

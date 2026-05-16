@@ -8,15 +8,16 @@ Uses scf.for tile loop with ping-pong double buffer (2-stage B).
 Includes hot_loop_scheduler from the old pipeline for instruction scheduling.
 """
 
+from typing import Optional
+
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.expr import vector, gpu, rocdl, range_constexpr, const_expr
-from flydsl.expr.typing import T, Float16, Float32, BFloat16, Float8E4M3FNUZ, Float8E4M3FN, Int8, Vector as Vec
 from flydsl.compiler.kernel_function import CompilationContext
+from flydsl.expr import const_expr, gpu, range_constexpr, rocdl, vector
+from flydsl.expr.typing import BFloat16, Float8E4M3FN, Float8E4M3FNUZ, Float16, Float32, T
+from flydsl.expr.typing import Vector as Vec
 from flydsl.runtime.device import get_rocm_arch
-from flydsl._mlir import ir
 from kernels.preshuffle_gemm import _get_preload
-from typing import Optional
 
 
 def compile_preshuffle_gemm_v2(
@@ -137,14 +138,16 @@ def compile_preshuffle_gemm_v2(
             fx.get_dyn_shared(),
         )
         if const_expr(is_fp8):
-            sA = fx.make_view(smem_ptr,
-                fx.make_ordered_layout((tile_m, tile_k, 2), (1, 0, 2)))
+            sA = fx.make_view(smem_ptr, fx.make_ordered_layout((tile_m, tile_k, 2), (1, 0, 2)))
         else:
             swz = fx.SwizzleType.get(3, 3, 3)
-            sA = fx.make_view(smem_ptr, fx.make_composed_layout(
-                fx.static(swz),
-                fx.make_ordered_layout((tile_m, tile_k, 2), (1, 0, 2)),
-            ))
+            sA = fx.make_view(
+                smem_ptr,
+                fx.make_composed_layout(
+                    fx.static(swz),
+                    fx.make_ordered_layout((tile_m, tile_k, 2), (1, 0, 2)),
+                ),
+            )
 
         # Partitions
         pA_g = thr_g2s.partition_S(tA)
@@ -243,8 +246,9 @@ def compile_preshuffle_gemm_v2(
                 vmem_remaining = num_gmem_loads - dvmem_preload_eff
                 dsrd_remaining = num_ds_load - dsrd_preload_eff
                 if const_expr(vmem_remaining > 0 and vmem_remaining < mfma_total):
-                    vmem_schedule = (build_scheduler(vmem_remaining, vmem_remaining)
-                                     + [0] * (mfma_total - vmem_remaining))
+                    vmem_schedule = build_scheduler(vmem_remaining, vmem_remaining) + [0] * (
+                        mfma_total - vmem_remaining
+                    )
                 else:
                     vmem_schedule = build_scheduler(vmem_remaining, mfma_total)
                 dsrd_schedule = build_scheduler(dsrd_remaining, mfma_total)
@@ -295,19 +299,14 @@ def compile_preshuffle_gemm_v2(
             # 2. Load next B tile (before compute — matches v1 pipeline order,
             #    all vmem available for scheduler interleaving with MFMAs)
             if const_expr(read_next and next_k_val is not None):
-                fx.copy(mma_copy, pB_g[None, None, None, next_k_val],
-                        frag_B_retile_stages[write_stage])
+                fx.copy(mma_copy, pB_g[None, None, None, next_k_val], frag_B_retile_stages[write_stage])
             # 3. Compute: A from LDS + MFMA with current B
             for ki in range_constexpr(k_iters):
-                fx.copy(mma_uni, pA_s2r[None, None, ki, read_stage],
-                        frag_A_retile[None, None, ki])
+                fx.copy(mma_uni, pA_s2r[None, None, ki, read_stage], frag_A_retile[None, None, ki])
                 # K=128 or K=32 (1 atom): frag K dim is flat k_iters → coord = ki
                 # K=16 gfx942 (2 atoms): frag K dim is (atoms, k_iters) → coord = (None, ki)
                 k_coord = ki if (use_mfma_scale_128 or use_mfma_k32) else (None, ki)
-                fx.gemm(tiled_mma, frag_C,
-                        frag_A[None, None, k_coord],
-                        cur_frag_B[None, None, k_coord],
-                        frag_C)
+                fx.gemm(tiled_mma, frag_C, frag_A[None, None, k_coord], cur_frag_B[None, None, k_coord], frag_C)
             # 4. Write A tile to LDS + barrier
             fx.copy(uni_copy_g2s, frag_copy_A, pA_s[None, None, None, write_stage])
             if const_expr(enable_scheduler):
@@ -337,8 +336,7 @@ def compile_preshuffle_gemm_v2(
             #   fp8: acc only (B alloca has uniform i64 types → SROA promotes it)
             acc_init = frag_C.load()
             if const_expr(is_fp8):
-                for iv, state in range(loop_start, loop_end, loop_step,
-                                       init=[acc_init]):
+                for iv, state in range(loop_start, loop_end, loop_step, init=[acc_init]):
                     frag_C.store(state[0])
                     k_base = fx.Int32(iv * 2)
                     pipeline_stage(read_stage=0, next_k_val=k_base + fx.Int32(1))
@@ -347,8 +345,7 @@ def compile_preshuffle_gemm_v2(
                 frag_C.store(results)
             else:
                 b0_init = frag_B_stages[0].load()
-                for iv, state in range(loop_start, loop_end, loop_step,
-                                       init=[acc_init, b0_init]):
+                for iv, state in range(loop_start, loop_end, loop_step, init=[acc_init, b0_init]):
                     frag_C.store(state[0])
                     frag_B_stages[0].store(state[1])
                     k_base = fx.Int32(iv * 2)
@@ -377,23 +374,24 @@ def compile_preshuffle_gemm_v2(
             scale_a_buf = fx.rocdl.make_buffer_tensor(arg_scale_a, max_size=True)
             scale_b_buf = fx.rocdl.make_buffer_tensor(arg_scale_b, max_size=True)
             scale_copy = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), 32)
-            scale_reg_ty = fx.MemRefType.get(T.f32, fx.LayoutType.get(1, 1), fx.AddressSpace.Register)
             scale_reg_lay = fx.make_layout(1, 1)
             scale_a_div = fx.logical_divide(scale_a_buf, fx.make_layout(1, 1))
             scale_b_div = fx.logical_divide(scale_b_buf, fx.make_layout(1, 1))
 
             def load_scale(div_tensor, index):
-                r = fx.memref_alloca(scale_reg_ty, scale_reg_lay)
+                r = fx.make_rmem_tensor(scale_reg_lay, fx.Float32)
                 fx.copy_atom_call(scale_copy, fx.slice(div_tensor, (None, fx.Int32(index))), r)
                 return Vec(fx.memref_load_vec(r))[0]
 
             # Load per-column scales: 1 scalar per N-block
-            s_b_vals = [load_scale(scale_b_div, by_n + n_tile_base + ni * 16 + lane_mod_16)
-                        for ni in range_constexpr(num_acc_n)]
+            s_b_vals = [
+                load_scale(scale_b_div, by_n + n_tile_base + ni * 16 + lane_mod_16) for ni in range_constexpr(num_acc_n)
+            ]
             # Load per-row scales: 1 scalar per row per thread
-            s_a_vals = [[load_scale(scale_a_div, bx_m + mi * 16 + lane_div_16 * 4 + ii)
-                         for ii in range_constexpr(4)]
-                        for mi in range_constexpr(m_repeat)]
+            s_a_vals = [
+                [load_scale(scale_a_div, bx_m + mi * 16 + lane_div_16 * 4 + ii) for ii in range_constexpr(4)]
+                for mi in range_constexpr(m_repeat)
+            ]
 
             # Build scaled accumulator inline
             acc_vec = Vec(frag_C.load())
@@ -407,8 +405,7 @@ def compile_preshuffle_gemm_v2(
                         scaled_val = (val * s_a) * s_b_vals[ni]
                         scaled_elems.append(scaled_val.to(out_elem_cls))
 
-            out_vec = vector.from_elements(
-                T.vec(acc_size, out_elem_cls.ir_type), scaled_elems)
+            out_vec = vector.from_elements(T.vec(acc_size, out_elem_cls.ir_type), scaled_elems)
             frag_C_out.store(out_vec)
             fx.copy(buf_copy_out, frag_C_retile, pC_g)
         else:
@@ -428,7 +425,7 @@ def compile_preshuffle_gemm_v2(
         i32_n: fx.Int32,
         stream: fx.Stream,
     ):
-        ctx = CompilationContext.get_current()
+        CompilationContext.get_current()
 
         # MMA atom — layout_elem carries the dtype (Float16/BFloat16/Float8E4M3FN/etc)
         if const_expr(use_mfma_k32):
@@ -445,7 +442,8 @@ def compile_preshuffle_gemm_v2(
             k_perm = fx.make_layout((8, 4, 2), (1, 16, 8))
 
         tiled_mma = fx.make_tiled_mma(
-            mma_atom, fx.make_layout((1, 4, 1), (0, 1, 0)),
+            mma_atom,
+            fx.make_layout((1, 4, 1), (0, 1, 0)),
             fx.make_tile(None, None, k_perm),
         )
 
@@ -472,20 +470,27 @@ def compile_preshuffle_gemm_v2(
         s_klane = 16 * s_nlane
         s_k0 = 4 * s_klane
         s_n0 = k0 * s_k0
-        preshuffle_B = fx.Tensor(fx.make_view(
-            fx.get_iter(arg_b),
-            fx.make_layout(((16, n0), (kp_elems, 4, k0)),
-                           ((s_nlane, s_n0), (1, s_klane, s_k0))),
-        ))
+        preshuffle_B = fx.Tensor(
+            fx.make_view(
+                fx.get_iter(arg_b),
+                fx.make_layout(((16, n0), (kp_elems, 4, k0)), ((s_nlane, s_n0), (1, s_klane, s_k0))),
+            )
+        )
 
         # Reshape A and C to 2D
         M_max = 65536
-        arg_a_2d = fx.Tensor(fx.make_view(
-            fx.get_iter(arg_a), fx.make_layout((M_max, K), (K, 1)),
-        ))
-        arg_c_2d = fx.Tensor(fx.make_view(
-            fx.get_iter(arg_c), fx.make_layout((M_max, N), (N, 1)),
-        ))
+        arg_a_2d = fx.Tensor(
+            fx.make_view(
+                fx.get_iter(arg_a),
+                fx.make_layout((M_max, K), (K, 1)),
+            )
+        )
+        arg_c_2d = fx.Tensor(
+            fx.make_view(
+                fx.get_iter(arg_c),
+                fx.make_layout((M_max, N), (N, 1)),
+            )
+        )
 
         gx = (i32_m + (tile_m - 1)) // tile_m
         gy = i32_n // tile_n

@@ -74,9 +74,7 @@ VT_ELEMS_PER_BLK: int = VT_ROWS_PER_THR * VT_COLS_PER_THR  # 32
 VT_BLKS_PER_ROW: int = V_HEAD_DIM // VT_COLS_PER_THR  # 64
 VT_BLKS_PER_ROW_PAD: int = VT_BLKS_PER_ROW + 2  # 66
 VT_NUM_SUB_BLKS: int = 8
-SZ_LDS_VT: int = VT_NUM_SUB_BLKS * (
-    (BLOCK_N // VT_NUM_SUB_BLKS) * V_HEAD_DIM + 16 * 4
-)  # 8 * (4*512 + 64) = 16896
+SZ_LDS_VT: int = VT_NUM_SUB_BLKS * ((BLOCK_N // VT_NUM_SUB_BLKS) * V_HEAD_DIM + 16 * 4)  # 8 * (4*512 + 64) = 16896
 
 # ---------------------------------------------------------------------------
 # QManagerV3 LDS layout constants (per-warp staging for VRAM->LDS->GPR)
@@ -120,9 +118,7 @@ P_LDS_KV_0: int = P_LDS_Q + SZ_LDS_Q  # 25600
 P_LDS_KV_1: int = P_LDS_KV_0 + SZ_LDS_KV  # 44608
 TOTAL_LDS_BYTES: int = P_LDS_KV_1 + SZ_LDS_KV  # 63616
 
-assert (
-    max(SZ_LDS_O16, SZ_LDS_O32) <= SZ_LDS_KV
-), "Output LDS must fit in one KV buffer region"
+assert max(SZ_LDS_O16, SZ_LDS_O32) <= SZ_LDS_KV, "Output LDS must fit in one KV buffer region"
 
 # ---------------------------------------------------------------------------
 # MFMA tile constants
@@ -372,9 +368,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
     lane_idx = tid % WARP_SIZE
 
     # ---- Work range ----
-    work_range = buffer_ops.buffer_load(
-        work_indptr_rsrc, worker_idx, vec_width=2, dtype=T.i32
-    )
+    work_range = buffer_ops.buffer_load(work_indptr_rsrc, worker_idx, vec_width=2, dtype=T.i32)
     work_range_vec = Vec(work_range)
     work_start_i32 = rocdl.readfirstlane(T.i32, work_range_vec[0])
     work_end_i32 = rocdl.readfirstlane(T.i32, work_range_vec[1])
@@ -384,9 +378,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
     # ---- KvManagerV2 thread-to-data mapping ----
     # Each warp takes 4 rows: warp w -> rows {w*2, w*2+1, w*2+16, w*2+17}
     # lane mapping: (lane/32)*16 + (lane/16)%2 + warp*2
-    kv_ld_row_base = (
-        lane_idx / 32 * 16 + (lane_idx / 16) % 2 + warp_idx * 2
-    )
+    kv_ld_row_base = lane_idx / 32 * 16 + (lane_idx / 16) % 2 + warp_idx * 2
     kv_ld_col_base = _i32((lane_idx % 16) * 4)
 
     # ---- Helper: resolve KV page index -> physical row ----
@@ -400,19 +392,13 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
         if const_expr(check_boundary):
             phys_row = fx.Int32(-1)
             if row_idx < _idx(kv_tile_end_i32):
-                phys_row = buffer_ops.buffer_load(
-                    kv_page_indices_rsrc, row_idx, vec_width=1, dtype=T.i32
-                )
+                phys_row = buffer_ops.buffer_load(kv_page_indices_rsrc, row_idx, vec_width=1, dtype=T.i32)
             return _raw(phys_row)
         else:
-            return buffer_ops.buffer_load(
-                kv_page_indices_rsrc, row_idx, vec_width=1, dtype=T.i32
-            )
+            return buffer_ops.buffer_load(kv_page_indices_rsrc, row_idx, vec_width=1, dtype=T.i32)
 
     # ---- Helper: async_load_k_tile (VRAM->LDS via buffer_load_dword_lds) ----
-    def _async_load_k_tile(
-        p_lds_kv_warp, row_i32, col_base_i32, block_idx_const, check_boundary=False
-    ):
+    def _async_load_k_tile(p_lds_kv_warp, row_i32, col_base_i32, block_idx_const, check_boundary=False):
         """Load one 32x64 block of KV data from VRAM to LDS.
 
         block_idx_const: Python int [0..8], which 64-col block.
@@ -426,7 +412,9 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
         def _emit_vram_to_lds():
             voff = _i32(ArithValue(row_i32) * QK_HEAD_DIM + col_base_i32)
             rocdl.buffer_load_to_lds(
-                kv_rsrc, _lds_ptr_from_i32(lds_base_i32), voff,
+                kv_rsrc,
+                _lds_ptr_from_i32(lds_base_i32),
+                voff,
                 offset=block_idx_const * KV_NUM_COLS,
             )
 
@@ -434,11 +422,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
             is_oob = ArithValue(row_i32) == -1
             if is_oob:
                 # Write zero via ds_write_b32 at lane's position
-                lds_addr = _i32(
-                    ArithValue(lds_base_i32)
-                    + block_idx_const * KV_NUM_COLS
-                    + _i32(lane_idx) * 4
-                )
+                lds_addr = _i32(ArithValue(lds_base_i32) + block_idx_const * KV_NUM_COLS + _i32(lane_idx) * 4)
                 lds_ptr = _lds_ptr_from_i32(lds_addr)
                 _ptr_store(c_zero_i32, lds_ptr, alignment=4)
             else:
@@ -446,9 +430,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
         else:
             _emit_vram_to_lds()
 
-    def _async_load_kv_all(
-        p_lds_kv_warp, row_i32, col_base_i32, check_boundary=False
-    ):
+    def _async_load_kv_all(p_lds_kv_warp, row_i32, col_base_i32, check_boundary=False):
         """Load all 9 blocks of a KV tile."""
         for blk in range_constexpr(KV_NUM_BLOCKS):
             _async_load_k_tile(
@@ -486,11 +468,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
             voff = _i32(ArithValue(row_i32) * QK_HEAD_DIM + col_base_i32)
             col_off_imm = block_idx_const * KV_NUM_COLS
             lds_base_sgpr = _uniform_i32(lds_base_i32)
-            asm_str = (
-                "s_mov_b32 m0, $0\n"
-                "s_nop 0\n"
-                f"buffer_load_dword $1, $2, 0 offen offset:{col_off_imm} lds"
-            )
+            asm_str = "s_mov_b32 m0, $0\n" "s_nop 0\n" f"buffer_load_dword $1, $2, 0 offen offset:{col_off_imm} lds"
             _inline_asm_void([lds_base_sgpr, voff, _raw(kv_rsrc)], asm_str, "s,v,s")
 
         if const_expr(check_boundary is False):
@@ -504,11 +482,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
 
             if is_oob:
                 # OOB: write zero to LDS via inline asm ds_write_b32
-                lds_zero_addr = _i32(
-                    ArithValue(lds_base_i32)
-                    + block_idx_const * KV_NUM_COLS
-                    + _i32(lane_idx) * 4
-                )
+                lds_zero_addr = _i32(ArithValue(lds_base_i32) + block_idx_const * KV_NUM_COLS + _i32(lane_idx) * 4)
                 _inline_asm_void([lds_zero_addr, _raw(c_zero_i32)], "ds_write_b32 $0, $1", "v,v")
             else:
                 _emit_normal_load()
@@ -521,9 +495,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
     k_row_phy = (k_row_in_mfma / 2) * 4 + k_row_in_mfma % 2
     k_col_in_lane = (lane_idx / MFMA_M) * MFMA_ELEM_PER_THR
     k_lds_lane_offset = (
-        (k_row_phy / 4) * KV_SUB_BYTES
-        + (k_row_phy % 4) * KV_BYTES_PER_ROW
-        + (k_col_in_lane % KV_NUM_COLS)
+        (k_row_phy / 4) * KV_SUB_BYTES + (k_row_phy % 4) * KV_BYTES_PER_ROW + (k_col_in_lane % KV_NUM_COLS)
     )
 
     # ---- Helper: load K sub-tile from LDS (16x32 for MFMA) ----
@@ -569,11 +541,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
         """
         row = (warp_idx_val % 2) * 16 + (lane_idx_val / 16) * 4
         row_mod16 = row % 16
-        row_phy = (
-            (row_mod16 / 2) * 4
-            + 2 * (row / 16)
-            + row % 2
-        )
+        row_phy = (row_mod16 / 2) * 4 + 2 * (row / 16) + row % 2
         col = (lane_idx_val % 16) * 8 + (warp_idx_val / 2) * 128
 
         lds_v_offset = (
@@ -679,9 +647,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
 
         # ds_read_b32 x 2 with immediate offsets (volatile prevents ds_read2 merge)
         v0 = _lds_load_volatile(vt_base_i32, T.i32, byte_offset=fixed_block_offset)
-        v1 = _lds_load_volatile(
-            vt_base_i32, T.i32, byte_offset=fixed_block_offset + offset_tl_bl
-        )
+        v1 = _lds_load_volatile(vt_base_i32, T.i32, byte_offset=fixed_block_offset + offset_tl_bl)
         return v0, v1
 
     # ---- Helper: warp reduce (butterfly XOR) ----
@@ -715,11 +681,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
           q_nope_regs: list of 16 v2i64 (16 sub-tiles x 32 cols each)
           q_rope_regs: list of 2 v2i64 (2 sub-tiles x 32 cols each)
         """
-        p_lds_q_warp = (
-            lds_base_idx
-            + P_LDS_Q
-            + warp_idx * SZ_LDS_Q_PER_WARP
-        )
+        p_lds_q_warp = lds_base_idx + P_LDS_Q + warp_idx * SZ_LDS_Q_PER_WARP
 
         # VRAM addressing: row = lane/4, col = (lane%4)*16
         # s_offset = warp * 16 * QK_HEAD_DIM * sizeof(fp8)
@@ -736,22 +698,14 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
         # v_offset_st = (row_st/2)*Q_BYTES_PER_2ROWS + ((row_st%2)*64 + col_st)
         row_st = lane_idx / 4
         col_st = (lane_idx % 4) * 16
-        lds_st_offset = (
-            (row_st / 2) * Q_BYTES_PER_2ROWS
-            + (row_st % 2) * Q_ELEM_PER_ROW
-            + col_st
-        )
+        lds_st_offset = (row_st / 2) * Q_BYTES_PER_2ROWS + (row_st % 2) * Q_ELEM_PER_ROW + col_st
 
         # LDS read layout (MFMA-compatible):
         # row_ld = lane%16, col_ld = (lane/16)*8
         # v_offset_ld = (row_ld/2)*Q_BYTES_PER_2ROWS + ((row_ld%2)*64 + col_ld)
         row_ld = lane_idx % 16
         col_ld = (lane_idx / 16) * 8
-        lds_ld_offset = (
-            (row_ld / 2) * Q_BYTES_PER_2ROWS
-            + (row_ld % 2) * Q_ELEM_PER_ROW
-            + col_ld
-        )
+        lds_ld_offset = (row_ld / 2) * Q_BYTES_PER_2ROWS + (row_ld % 2) * Q_ELEM_PER_ROW + col_ld
 
         q_regs = []  # Will hold 18 v2i64 = 16 nope + 2 rope
 
@@ -986,12 +940,8 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
             q_1 = q_nope[tile_1]
 
             if const_expr(nope_pair == 0):
-                p_comp[0] = _mfma_fp8(
-                    T.f32x4, [k0_lo, q_0, c_zero_v4f32, 0, 0, 0]
-                )
-                p_comp[1] = _mfma_fp8(
-                    T.f32x4, [k0_hi, q_0, c_zero_v4f32, 0, 0, 0]
-                )
+                p_comp[0] = _mfma_fp8(T.f32x4, [k0_lo, q_0, c_zero_v4f32, 0, 0, 0])
+                p_comp[1] = _mfma_fp8(T.f32x4, [k0_hi, q_0, c_zero_v4f32, 0, 0, 0])
                 rocdl.s_setprio(15)
             else:
                 p_comp[0] = _mfma_fp8(T.f32x4, [k0_lo, q_0, p_comp[0], 0, 0, 0])
@@ -1092,9 +1042,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
             rocdl.s_waitcnt(_encode_waitcnt(lgkmcnt=4))
 
             # MFMA pair A
-            oaccu[iter_a * 2] = _mfma_fp8(
-                T.f32x4, [_pack_i32x2(vta0_lo, vta0_hi), p_pack, oaccu[iter_a * 2], 0, 0, 0]
-            )
+            oaccu[iter_a * 2] = _mfma_fp8(T.f32x4, [_pack_i32x2(vta0_lo, vta0_hi), p_pack, oaccu[iter_a * 2], 0, 0, 0])
             oaccu[iter_a * 2 + 1] = _mfma_fp8(
                 T.f32x4, [_pack_i32x2(vta1_lo, vta1_hi), p_pack, oaccu[iter_a * 2 + 1], 0, 0, 0]
             )
@@ -1102,9 +1050,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
             rocdl.s_waitcnt(_encode_waitcnt(lgkmcnt=0))
 
             # MFMA pair B
-            oaccu[iter_b * 2] = _mfma_fp8(
-                T.f32x4, [_pack_i32x2(vtb0_lo, vtb0_hi), p_pack, oaccu[iter_b * 2], 0, 0, 0]
-            )
+            oaccu[iter_b * 2] = _mfma_fp8(T.f32x4, [_pack_i32x2(vtb0_lo, vtb0_hi), p_pack, oaccu[iter_b * 2], 0, 0, 0])
             oaccu[iter_b * 2 + 1] = _mfma_fp8(
                 T.f32x4, [_pack_i32x2(vtb1_lo, vtb1_hi), p_pack, oaccu[iter_b * 2 + 1], 0, 0, 0]
             )
@@ -1155,24 +1101,14 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
         o16_row_st = lane_idx % 16
         o16_col_st = (lane_idx / 16) * 4
         o16_st_offset = _raw(
-            (
-                (o16_row_st / 2) * O16_ELEM_PER_PAD_2ROWS
-                + (o16_row_st % 2) * O16_NUM_COLS
-                + o16_col_st
-            )
-            * 2
+            ((o16_row_st / 2) * O16_ELEM_PER_PAD_2ROWS + (o16_row_st % 2) * O16_NUM_COLS + o16_col_st) * 2
         )
 
         # Coalesced layout: row_ld = lane/4, col_ld = (lane%4)*8
         o16_row_ld = lane_idx / 4
         o16_col_ld = (lane_idx % 4) * 8
         o16_rd_offset = _raw(
-            (
-                (o16_row_ld / 2) * O16_ELEM_PER_PAD_2ROWS
-                + (o16_row_ld % 2) * O16_NUM_COLS
-                + o16_col_ld
-            )
-            * 2
+            ((o16_row_ld / 2) * O16_ELEM_PER_PAD_2ROWS + (o16_row_ld % 2) * O16_NUM_COLS + o16_col_ld) * 2
         )
 
         # Per-warp LDS base
@@ -1213,16 +1149,12 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
         # MFMA layout: row_st = lane%16, col_st = (lane/16)*4
         o32_row_st = lane_idx % 16
         o32_col_st = (lane_idx / 16) * 4
-        o32_st_offset = (
-            (o32_row_st * O32_ELEM_PER_PAD_ROW + o32_col_st) * 4
-        )
+        o32_st_offset = (o32_row_st * O32_ELEM_PER_PAD_ROW + o32_col_st) * 4
 
         # Coalesced layout: row_ld = lane/8, col_ld = (lane%8)*4
         o32_row_ld = lane_idx / 8
         o32_col_ld = (lane_idx % 8) * 4
-        o32_rd_offset = (
-            (o32_row_ld * O32_ELEM_PER_PAD_ROW + o32_col_ld) * 4
-        )
+        o32_rd_offset = (o32_row_ld * O32_ELEM_PER_PAD_ROW + o32_col_ld) * 4
 
         # Per-warp LDS base
         lds_warp = ArithValue(p_lds_o) + warp_idx * O32_LDS_PER_WARP
@@ -1253,11 +1185,15 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
         row_vram_0 = ArithValue(row_base_i32) + o32_row_ld
         col_vram = ArithValue(o32_col_ld) + col_offset_i32
         vram_off_0 = _raw((row_vram_0 * V_HEAD_DIM + col_vram) * 4)
-        buffer_ops.buffer_store(_raw(Vec(data_0).bitcast(fx.Int32)), split_output_rsrc, vram_off_0, offset_is_bytes=True)
+        buffer_ops.buffer_store(
+            _raw(Vec(data_0).bitcast(fx.Int32)), split_output_rsrc, vram_off_0, offset_is_bytes=True
+        )
 
         row_vram_1 = row_vram_0 + 8
         vram_off_1 = _raw((row_vram_1 * V_HEAD_DIM + col_vram) * 4)
-        buffer_ops.buffer_store(_raw(Vec(data_1).bitcast(fx.Int32)), split_output_rsrc, vram_off_1, offset_is_bytes=True)
+        buffer_ops.buffer_store(
+            _raw(Vec(data_1).bitcast(fx.Int32)), split_output_rsrc, vram_off_1, offset_is_bytes=True
+        )
 
     def _gemm2_last_with_store(
         p_pack,
@@ -1308,22 +1244,14 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
             rocdl.s_waitcnt(_encode_waitcnt(lgkmcnt=4))
 
             # MFMA pair A
-            acc_a0 = _mfma_fp8(
-                T.f32x4, [_pack_i32x2(vta0_lo, vta0_hi), p_pack, oaccu_in[iter_a * 2], 0, 0, 0]
-            )
-            acc_a1 = _mfma_fp8(
-                T.f32x4, [_pack_i32x2(vta1_lo, vta1_hi), p_pack, oaccu_in[iter_a * 2 + 1], 0, 0, 0]
-            )
+            acc_a0 = _mfma_fp8(T.f32x4, [_pack_i32x2(vta0_lo, vta0_hi), p_pack, oaccu_in[iter_a * 2], 0, 0, 0])
+            acc_a1 = _mfma_fp8(T.f32x4, [_pack_i32x2(vta1_lo, vta1_hi), p_pack, oaccu_in[iter_a * 2 + 1], 0, 0, 0])
             rocdl.sched_barrier(0)
             rocdl.s_waitcnt(_encode_waitcnt(lgkmcnt=0))
 
             # MFMA pair B
-            acc_b0 = _mfma_fp8(
-                T.f32x4, [_pack_i32x2(vtb0_lo, vtb0_hi), p_pack, oaccu_in[iter_b * 2], 0, 0, 0]
-            )
-            acc_b1 = _mfma_fp8(
-                T.f32x4, [_pack_i32x2(vtb1_lo, vtb1_hi), p_pack, oaccu_in[iter_b * 2 + 1], 0, 0, 0]
-            )
+            acc_b0 = _mfma_fp8(T.f32x4, [_pack_i32x2(vtb0_lo, vtb0_hi), p_pack, oaccu_in[iter_b * 2], 0, 0, 0])
+            acc_b1 = _mfma_fp8(T.f32x4, [_pack_i32x2(vtb1_lo, vtb1_hi), p_pack, oaccu_in[iter_b * 2 + 1], 0, 0, 0])
             rocdl.sched_barrier(0)
 
             # Normalize by reci_sum
@@ -1553,10 +1481,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
             if ArithValue(lane_idx) < 16:
                 log2_sum = fmath.log2(rse, fastmath=fm_fast)
                 lse = fmath.fma(log2_sum, c_inv_log2e, rm, fastmath=fm_fast)
-                row_idx = _raw(
-                    ArithValue(lane_idx) + warp_idx * 16
-                    + _idx(pqo_loc_i32) * NUM_QO_HEADS
-                )
+                row_idx = _raw(ArithValue(lane_idx) + warp_idx * 16 + _idx(pqo_loc_i32) * NUM_QO_HEADS)
                 buffer_ops.buffer_store(lse, split_lse_rsrc, row_idx)
 
         # LDS base for output reshape (reuse KV buffer 0 region)
@@ -1755,9 +1680,7 @@ def launch_mla_fwd_decode_m16x8_fp8_fp8(
     stream: fx.Stream = fx.Stream(None),
 ):
     """JIT host function: configures grid/block and launches the kernel."""
-    assert TOTAL_LDS_BYTES <= lds_size, (
-        f"Kernel requires {TOTAL_LDS_BYTES} bytes LDS but CU budget is {lds_size}"
-    )
+    assert TOTAL_LDS_BYTES <= lds_size, f"Kernel requires {TOTAL_LDS_BYTES} bytes LDS but CU budget is {lds_size}"
     kn_mla_fwd_decode_m16x8_fp8_fp8(
         query,
         kv_buffer,

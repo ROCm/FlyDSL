@@ -31,14 +31,12 @@ def vectorAddKernel(
     tB = fx.logical_divide(tB, fx.make_layout(1, 1))
     tC = fx.logical_divide(tC, fx.make_layout(1, 1))
 
-    RABMemRefTy = fx.MemRefType.get(fx.T.f32(), fx.LayoutType.get(1, 1), fx.AddressSpace.Register)
-
     copyAtom = fx.make_copy_atom(fx.UniversalCopy32b(), fx.Float32)
     copyAtomBuffer = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Float32)
 
-    rA = fx.memref_alloca(RABMemRefTy, fx.make_layout(1, 1))
-    rB = fx.memref_alloca(RABMemRefTy, fx.make_layout(1, 1))
-    rC = fx.memref_alloca(RABMemRefTy, fx.make_layout(1, 1))
+    rA = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Float32)
+    rB = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Float32)
+    rC = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Float32)
 
     fx.copy_atom_call(copyAtomBuffer, fx.slice(tA, (None, tid)), rA)
     fx.copy_atom_call(copyAtom, fx.slice(tB, (None, tid)), rB)

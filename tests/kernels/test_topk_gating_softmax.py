@@ -18,6 +18,16 @@ import os
 
 import pytest
 
+from kernels.topk_gating_softmax_kernel import (
+    build_topk_gating_softmax_module,
+)
+from tests.kernels.benchmark_common import (
+    PerfRow,
+    bench_gpu_us_torch,
+    print_perf_table,
+)
+from tests.test_common import run_perftest
+
 pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
 
 try:
@@ -30,18 +40,6 @@ if torch is None or not torch.cuda.is_available():
 DTYPE_FP32 = torch.float32
 DTYPE_FP16 = torch.float16
 DTYPE_BF16 = torch.bfloat16
-
-from tests.test_common import run_perftest
-from tests.kernels.benchmark_common import (
-    PerfRow,
-    bench_gpu_us_torch,
-    print_perf_table,
-)
-
-from kernels.topk_gating_softmax_kernel import (
-    build_topk_gating_softmax_module,
-    KERNEL_NAME,
-)
 
 WARMUP_ITERS = 10
 BENCH_ITERS = 100
@@ -68,14 +66,13 @@ def run_test(num_tokens, num_experts, topk, dtype_str, renormalize=True):
     except Exception as e:
         print(f"Compilation Failed: {e}")
         import traceback
+
         traceback.print_exc()
         return False, None
 
     torch.manual_seed(42)
     torch_dtype = _torch_dtype(dtype_str)
-    gating_fp32 = (
-        torch.rand((num_tokens, num_experts), device="cuda", dtype=DTYPE_FP32) * 4.0
-    ) - 2.0
+    gating_fp32 = (torch.rand((num_tokens, num_experts), device="cuda", dtype=DTYPE_FP32) * 4.0) - 2.0
     # Quantize to the kernel's input dtype FIRST so the reference sees the
     # exact bytes the kernel sees. Otherwise the K-th expert can flip at
     # bf16/f16 precision boundaries (both vLLM and FlyDSL pick a different
@@ -97,15 +94,9 @@ def run_test(num_tokens, num_experts, topk, dtype_str, renormalize=True):
         ref_tei[:, k] = k * num_tokens + torch.arange(num_tokens, device="cuda", dtype=torch.int32)
 
     # --- Device tensors ---
-    topk_weights_dev = torch.empty(
-        (num_tokens, topk), device="cuda", dtype=DTYPE_FP32
-    )
-    topk_indices_dev = torch.empty(
-        (num_tokens, topk), device="cuda", dtype=torch.int32
-    )
-    token_expert_indices_dev = torch.empty(
-        (num_tokens, topk), device="cuda", dtype=torch.int32
-    )
+    topk_weights_dev = torch.empty((num_tokens, topk), device="cuda", dtype=DTYPE_FP32)
+    topk_indices_dev = torch.empty((num_tokens, topk), device="cuda", dtype=torch.int32)
+    token_expert_indices_dev = torch.empty((num_tokens, topk), device="cuda", dtype=torch.int32)
 
     stream = torch.cuda.current_stream()
 
@@ -130,9 +121,7 @@ def run_test(num_tokens, num_experts, topk, dtype_str, renormalize=True):
     torch.cuda.synchronize()
     flydsl_gpu_us = None
     if os.environ.get("ROCDSL_COMPARE_AITER", "0") == "1":
-        flydsl_gpu_us = bench_gpu_us_torch(
-            kernel_launch, warmup=WARMUP_ITERS, iters=BENCH_ITERS
-        )
+        flydsl_gpu_us = bench_gpu_us_torch(kernel_launch, warmup=WARMUP_ITERS, iters=BENCH_ITERS)
 
     avg_ms = avg_us / 1000.0
     print(f"Kernel avg time: {avg_ms:.4f} ms (warmup={WARMUP_ITERS}, iters={BENCH_ITERS})")
@@ -160,8 +149,8 @@ def run_test(num_tokens, num_experts, topk, dtype_str, renormalize=True):
     # near the typical softmax magnitude is ~1e-3; f32 is much tighter.
     prob_tol = 1e-3 if dtype_str in ("bf16", "f16") else 1e-6
 
-    indices_match = 0   # strict set equality with torch.topk (informational)
-    indices_valid = 0   # every selected expert is at-or-above the K-th threshold
+    indices_match = 0  # strict set equality with torch.topk (informational)
+    indices_valid = 0  # every selected expert is at-or-above the K-th threshold
     for row in range(num_tokens):
         got_list = got_indices[row].tolist()
         if set(got_list) == set(exp_indices[row].tolist()):
@@ -176,10 +165,7 @@ def run_test(num_tokens, num_experts, topk, dtype_str, renormalize=True):
         f"  Indices match torch.topk: {indices_match}/{num_tokens} rows "
         f"({indices_pct:.1f}%; ties at the K-th boundary may diverge)"
     )
-    print(
-        f"  Indices valid (>= K-th prob): {indices_valid}/{num_tokens} rows "
-        f"({valid_pct:.1f}%)"
-    )
+    print(f"  Indices valid (>= K-th prob): {indices_valid}/{num_tokens} rows " f"({valid_pct:.1f}%)")
     if valid_pct < 100.0:
         print("  FAILED: kernel selected experts below the top-K threshold")
         passed = False
@@ -250,9 +236,7 @@ def test_all():
 
     failures = 0
     for num_tokens, num_experts, topk, dtype_str in configs:
-        ok, flydsl_gpu_us = run_test(
-            num_tokens, num_experts, topk, dtype_str, renormalize=True
-        )
+        ok, flydsl_gpu_us = run_test(num_tokens, num_experts, topk, dtype_str, renormalize=True)
         if not ok:
             failures += 1
 

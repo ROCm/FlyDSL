@@ -3,9 +3,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""FP8 4-wave GEMM correctness + perf harness.
+"""FP8 row-scale GEMM correctness + perf harness.
 
-Kernel implementation: ``kernels/fp8_gemm_4wave.py``.
+Kernel implementations:
+- 4 Wave variant --> ``kernels/fp8_gemm_4wave.py``.
+- 8 Wave variant --> ``kernels/fp8_gemm_8wave.py``.
 """
 
 import os
@@ -23,7 +25,9 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 from flydsl.runtime.device import get_rocm_arch  # noqa: E402
-from kernels.fp8_gemm_4wave import compile_fp8_gemm  # noqa: E402
+from kernels.fp8_gemm_4wave import compile_fp8_gemm_4w  # noqa: E402
+from kernels.fp8_gemm_8wave import compile_fp8_gemm_8w  # noqa: E402
+from kernels.fp8_gemm_utils import preshuffle_b  # noqa: E402
 from tests.test_common import run_perftest, verify_output  # noqa: E402
 from tests.utils import pertoken_quant  # noqa: E402
 
@@ -61,21 +65,23 @@ def _bench_torch_scaled_mm(M, N, K, a_q, b_q, scale_a, scale_b, c_ref, num_warmu
     return us, ok
 
 
-def _bench_fp8_gemm_4wave(
+def _bench_fp8_gemm(
     M: int,
     N: int,
     K: int,
     *,
+    use_8w: bool,
     tile_m: int,
     tile_n: int,
     disable_xcd_remap: bool = False,
     num_warmups: int = 2,
     num_iters: int = 10,
     vs_torch: bool = False,
+    b_preshuffled: bool = False,
 ):
     """Run + verify a single (M, N, K, tile) configuration. Returns TFLOPS."""
     if "gfx95" not in ARCH:
-        pytest.skip("FP8 4-wave GEMM requires CDNA4 (gfx95*)")
+        pytest.skip("FP8 row-scale GEMMs requires CDNA4 (gfx95*)")
 
     device = torch.device("cuda")
     a_fp32 = torch.rand(M, K, device=device, dtype=torch.float32)
@@ -92,17 +98,33 @@ def _bench_fp8_gemm_4wave(
 
     c_ref = _run_torch(a_q, b_q, scale_a, scale_b)
 
-    launch_fn = compile_fp8_gemm(
-        M=M,
-        N=N,
-        K=K,
-        BLOCK_M=tile_m,
-        BLOCK_N=tile_n,
-        use_xcd_remap=not disable_xcd_remap,
-    )
-    print(
-        f"\n[fp8_gemm_4wave] M={M} N={N} K={K} " f"BLOCK_M={tile_m} BLOCK_N={tile_n} xcd_remap={not disable_xcd_remap}"
-    )
+    b_kernel = preshuffle_b(b_q) if b_preshuffled else b_q
+
+    if use_8w:
+        launch_fn = compile_fp8_gemm_8w(
+            M=M,
+            N=N,
+            K=K,
+            BLOCK_M=tile_m,
+            BLOCK_N=tile_n,
+            b_preshuffled=b_preshuffled,
+        )
+        print(f"\n[fp8_gemm_8wave] M={M} N={N} K={K} BLOCK_M={tile_m} BLOCK_N={tile_n} preshuffle_b={b_preshuffled}")
+    else:
+        launch_fn = compile_fp8_gemm_4w(
+            M=M,
+            N=N,
+            K=K,
+            BLOCK_M=tile_m,
+            BLOCK_N=tile_n,
+            use_xcd_remap=not disable_xcd_remap,
+            b_preshuffled=b_preshuffled,
+        )
+        print(
+            f"\n[fp8_gemm_4wave] M={M} N={N} K={K} "
+            f"BLOCK_M={tile_m} BLOCK_N={tile_n} xcd_remap={not disable_xcd_remap} "
+            f"preshuffle_b={b_preshuffled}"
+        )
 
     def _args(c, a, b, sa, sb):
         return (
@@ -114,7 +136,7 @@ def _bench_fp8_gemm_4wave(
             torch.cuda.current_stream(),
         )
 
-    compiled = flyc.compile(launch_fn, *_args(c_out_raw, a_q, b_q, scale_a, scale_b))
+    compiled = flyc.compile(launch_fn, *_args(c_out_raw, a_q, b_kernel, scale_a, scale_b))
 
     def _launch(c, a, b, sa, sb):
         compiled(*_args(c, a, b, sa, sb))
@@ -124,7 +146,7 @@ def _bench_fp8_gemm_4wave(
         _launch,
         c_out_raw,
         a_q,
-        b_q,
+        b_kernel,
         scale_a,
         scale_b,
         num_iters=num_iters,
@@ -175,43 +197,98 @@ def _bench_fp8_gemm_4wave(
         pytest.param(9728, 8192, 8320, 256, 256, marks=pytest.mark.large_shape, id="9728x8192x8320"),
     ],
 )
-def test_fp8_gemm_4wave(M, N, K, tile_m, tile_n):
-    _bench_fp8_gemm_4wave(M=M, N=N, K=K, tile_m=tile_m, tile_n=tile_n)
+@pytest.mark.parametrize("preshuffle_b", [False, True], ids=["rowmajor", "preshuffle_b"])
+def test_fp8_gemm_4wave(M, N, K, tile_m, tile_n, preshuffle_b):
+    _bench_fp8_gemm(
+        M=M,
+        N=N,
+        K=K,
+        use_8w=False,
+        tile_m=tile_m,
+        tile_n=tile_n,
+        b_preshuffled=preshuffle_b,
+    )
+
+
+@pytest.mark.parametrize(
+    "M, N, K, tile_m, tile_n",
+    [
+        pytest.param(512, 2112, 7168, 128, 256, id="512x2112x7168"),
+        pytest.param(5120, 5120, 8320, 256, 256, id="5120x5120x8320"),
+        pytest.param(8192, 8192, 8192, 256, 256, marks=pytest.mark.large_shape, id="8192x8192x8192"),
+        pytest.param(9728, 8192, 8320, 256, 256, marks=pytest.mark.large_shape, id="9728x8192x8320"),
+    ],
+)
+@pytest.mark.parametrize("preshuffle_b", [False, True], ids=["rowmajor", "preshuffle_b"])
+def test_fp8_gemm_8wave(M, N, K, tile_m, tile_n, preshuffle_b):
+    _bench_fp8_gemm(
+        M=M,
+        N=N,
+        K=K,
+        use_8w=True,
+        tile_m=tile_m,
+        tile_n=tile_n,
+        b_preshuffled=preshuffle_b,
+    )
 
 
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="FP8 4-wave GEMM benchmark")
+    parser = argparse.ArgumentParser(description="FP8 row-scale GEMM benchmark")
     parser.add_argument("-M", type=int, default=8192)
     parser.add_argument("-N", type=int, default=8192)
     parser.add_argument("-K", type=int, default=8192)
     parser.add_argument("--tile_m", type=int, default=256)
     parser.add_argument("--tile_n", type=int, default=256)
     parser.add_argument("--disable_xcd_remap", action="store_true", default=False)
-    parser.add_argument("--num_iters", type=int, default=10)
-    parser.add_argument("--num_warmups", type=int, default=2)
+    parser.add_argument(
+        "--num_iters",
+        type=int,
+        default=100,
+        help="Benchmark iterations.",
+    )
+    parser.add_argument(
+        "--num_warmups",
+        type=int,
+        default=10,
+        help="Warmup iterations.",
+    )
     parser.add_argument(
         "--vs_torch",
         action="store_true",
         default=False,
         help="Also run torch._scaled_mm with the same input + harness for perf comparison.",
     )
+    parser.add_argument(
+        "--preshuffle_b",
+        action="store_true",
+        default=False,
+        help="Use preshuffled B layout.",
+    )
+    parser.add_argument(
+        "--wave_8",
+        action="store_true",
+        default=False,
+        help="Use 8-Wave Ping-Pong variant.",
+    )
     args = parser.parse_args()
 
     torch.set_default_device("cuda")
 
     try:
-        _bench_fp8_gemm_4wave(
+        _bench_fp8_gemm(
             M=args.M,
             N=args.N,
             K=args.K,
+            use_8w=args.wave_8,
             tile_m=args.tile_m,
             tile_n=args.tile_n,
             disable_xcd_remap=args.disable_xcd_remap,
             num_warmups=args.num_warmups,
             num_iters=args.num_iters,
             vs_torch=args.vs_torch,
+            b_preshuffled=args.preshuffle_b,
         )
     except pytest.skip.Exception as e:
         print(f"Skipped: {e}")
