@@ -68,14 +68,16 @@ RMSNORM_SHAPES='
 32768,8192,bf16
 '
 # FlashAttention shapes: "batch,seq_len,num_heads,head_dim,dtype,causal"
-FLASH_ATTN_FUNC_SHAPES="${FLASH_ATTN_FUNC_SHAPES:-'
+DEFAULT_FLASH_ATTN_FUNC_SHAPES='
 1,4096,64,128,bf16,true
 1,8192,64,128,bf16,true
-'}"
+'
+FLASH_ATTN_FUNC_SHAPES="${FLASH_ATTN_FUNC_SHAPES:-${DEFAULT_FLASH_ATTN_FUNC_SHAPES}}"
 # MLA decode shapes: "batch,ctx_len" (DeepSeek MLA, fp8 Q/KV, nh=128).
-MLA_DECODE_SHAPES="${MLA_DECODE_SHAPES:-'
+DEFAULT_MLA_DECODE_SHAPES='
 32,8192
-'}"
+'
+MLA_DECODE_SHAPES="${MLA_DECODE_SHAPES:-${DEFAULT_MLA_DECODE_SHAPES}}"
 
 # Preshuffle GEMM shapes: "dtype,M,N,K,tile_m,tile_n,tile_k"
 GEMM_SHAPES='
