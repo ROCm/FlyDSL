@@ -67,6 +67,11 @@ LAYERNORM_SHAPES='
 RMSNORM_SHAPES='
 32768,8192,bf16
 '
+# FlashAttention shapes: "batch,seq_len,num_heads,head_dim,dtype,causal"
+FLASH_ATTN_FUNC_SHAPES="${FLASH_ATTN_FUNC_SHAPES:-'
+1,4096,64,128,bf16,true
+1,8192,64,128,bf16,true
+'}"
 
 # Preshuffle GEMM shapes: "dtype,M,N,K,tile_m,tile_n,tile_k"
 GEMM_SHAPES='
@@ -160,13 +165,13 @@ _usage() {
 Usage:
   bash scripts/run_benchmark.sh                  # run all benchmarks (default)
   bash scripts/run_benchmark.sh softmax          # run only softmax
-  bash scripts/run_benchmark.sh layernorm moe      # run only selected benchmarks
+  bash scripts/run_benchmark.sh layernorm moe    # run only selected benchmarks
   bash scripts/run_benchmark.sh --only softmax,moe
   bash scripts/run_benchmark.sh --output_csv /tmp/bench.csv
   bash scripts/run_benchmark.sh --list
 
 Supported ops:
-  softmax | layernorm | rmsnorm | gemm | moe
+  softmax | layernorm | rmsnorm | flash_attn | gemm | moe
 USAGE
 }
 
@@ -235,15 +240,17 @@ _normalize_op() {
   op="${1:-}"
   case "${op}" in
     layernorm) echo "layernorm" ;;
+    flash|flash_attn|flash-attn|flash_attn_func|fmha) echo "flash_attn" ;;
     *) echo "${op}" ;;
   esac
 }
 
-# Default: run softmax, norms, and GEMM unless user selected a subset.
-# Use positional args or --only to enable others: softmax, layernorm, rmsnorm, gemm, moe
+# Default: run softmax, norms, FlashAttention, GEMM, and MoE unless user selected a subset.
+# Use positional args or --only to enable others: softmax, layernorm, rmsnorm, flash_attn, gemm, moe
 RUN_SOFTMAX=1
 RUN_LAYERNORM=1
 RUN_RMSNORM=1
+RUN_FLASH_ATTN=1
 RUN_PRESHUFFLE_GEMM=1
 RUN_MOE=1
 
@@ -251,6 +258,7 @@ _enable_only_ops() {
   RUN_SOFTMAX=0
   RUN_LAYERNORM=0
   RUN_RMSNORM=0
+  RUN_FLASH_ATTN=0
   RUN_PRESHUFFLE_GEMM=0
   RUN_MOE=0
   for op in "$@"; do
@@ -259,6 +267,7 @@ _enable_only_ops() {
       softmax) RUN_SOFTMAX=1 ;;
       layernorm) RUN_LAYERNORM=1 ;;
       rmsnorm) RUN_RMSNORM=1 ;;
+      flash_attn) RUN_FLASH_ATTN=1 ;;
       gemm) RUN_PRESHUFFLE_GEMM=1 ;;
       moe) RUN_MOE=1 ;;
       "" ) ;;
@@ -295,6 +304,7 @@ if [ "$#" -gt 0 ]; then
         echo "softmax"
         echo "layernorm"
         echo "rmsnorm"
+        echo "flash_attn"
         echo "gemm"
         echo "moe"
         exit 0
@@ -390,6 +400,14 @@ if tbps is None or tflops is None:
     if m:
         tflops = float(m.group(1))
         tbps = float(m.group(2))
+
+# FlashAttention table: "| PASS | maxerr mincos | time_us tflops".
+if tflops is None:
+    m = None
+    for m in re.finditer(r"\|\s+(?:PASS|FAIL|--)\s+\|\s+[0-9.eE+-]+\s+[0-9.]+\s+\|\s+([0-9.]+)\s+([0-9.]+)", txt):
+        pass
+    if m:
+        tflops = float(m.group(2))
 
 # Softmax/Norm-style: "Kernel avg time: X ms" + "Bandwidth: Y GB/s"
 if tbps is None:
@@ -529,6 +547,50 @@ if [ "${RUN_RMSNORM}" -eq 1 ]; then
       _show_fail_log "${log}" "rmsnorm"
     fi
     row="$(_py_parse_and_emit rmsnorm "${M}x${N}" "${dtype}" "${log}")"
+    set -- $row
+    _emit_row "$1" "$2" "$3" "$4" "$5"
+  done
+fi
+
+# FlashAttention / FMHA (CDNA only)
+if [ "${RUN_FLASH_ATTN}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
+  export FLYDSL_FLASH_ATTN_FUNC_ENABLE_DMA="${FLYDSL_FLASH_ATTN_FUNC_ENABLE_DMA:-1}"
+  export FLYDSL_FLASH_ATTN_FUNC_ENABLE_LDS_VEC16="${FLYDSL_FLASH_ATTN_FUNC_ENABLE_LDS_VEC16:-1}"
+
+  for shape in $FLASH_ATTN_FUNC_SHAPES; do
+    [ -z "$shape" ] && continue
+    oldIFS=$IFS
+    IFS=,
+    # shellcheck disable=SC2086 # intentional word-splitting on IFS=,
+    set -- $shape
+    IFS=$oldIFS
+    batch=$1; seq_len=$2; heads=$3; head_dim=$4; dtype=$5; causal=$6
+    causal_flag="--causal"
+    causal_tag="causal"
+    case "${causal}" in
+      0|false|False|FALSE|no|NO|noncausal|non-causal)
+        causal_flag="--no-causal"
+        causal_tag="nocausal"
+        ;;
+    esac
+    log="${BENCH_LOG_DIR}/flash_attn_B${batch}_S${seq_len}_H${heads}_D${head_dim}_${dtype}_${causal_tag}.log"
+    if python3 tests/kernels/test_flash_attn_func.py \
+      --batch "$batch" \
+      --seq_len "$seq_len" \
+      --num_heads "$heads" \
+      --head_dim "$head_dim" \
+      --dtype "$dtype" \
+      "${causal_flag}" \
+      --warmup 10 \
+      --iters 100 >"${log}" 2>&1; then
+      SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+    else
+      FAIL_COUNT=$((FAIL_COUNT + 1))
+      echo "flash_attn failed. Log: ${log}" >&2
+      _show_fail_log "${log}" "flash_attn"
+    fi
+    shape_tag="B${batch}S${seq_len}H${heads}D${head_dim}_${causal_tag}"
+    row="$(_py_parse_and_emit flash_attn "${shape_tag}" "${dtype}" "${log}")"
     set -- $row
     _emit_row "$1" "$2" "$3" "$4" "$5"
   done

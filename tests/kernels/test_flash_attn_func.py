@@ -7,11 +7,16 @@ Tests flash_attn_func against PyTorch SDPA.
 import argparse
 import csv
 import hashlib
+import json
 import logging
 import math
 import os
 import random
+import shutil
+import subprocess
 import sys
+import tarfile
+import urllib.request
 from pathlib import Path
 
 # Configure logging to show INFO level messages (required for kernel name display)
@@ -71,6 +76,98 @@ DEFAULT_CONFIGS = [
     (1, 8192, 8, 128),
     (32, 8192, 8, 128),
 ]
+
+
+def _maybe_configure_custom_llvm_tools() -> None:
+    """Prefer the custom mlir-opt build used for peak FlashAttention perf."""
+    if os.getenv("FLYDSL_FLASH_ATTN_FUNC_USE_CUSTOM_LLVM", "1").lower() in ("0", "false", "no", "off"):
+        return
+    if os.getenv("FLYDSL_COMPILE_LLVM_DIR"):
+        return
+
+    candidates = []
+    for env_name in ("FLYDSL_FLASH_ATTN_FUNC_LLVM_DIR", "FLYDSL_CUSTOM_LLVM_TOOLS_DIR"):
+        raw = os.getenv(env_name)
+        if raw:
+            candidates.append(Path(raw).expanduser())
+
+    archive_name = None
+    extract_dir = None
+    config_path = _repo / "thirdparty" / "custom-llvm-tools.json"
+    if config_path.is_file():
+        try:
+            cfg = json.loads(config_path.read_text())
+            archive_prefix = cfg.get("archive_name", "flydsl-mlir-tools")
+            llvm_ref = cfg.get("llvm_ref", "")
+            if len(llvm_ref) >= 12:
+                archive_stem = f"{archive_prefix}-{llvm_ref[:12]}-manylinux_2_28-x86_64"
+                archive_name = f"{archive_stem}.tar.gz"
+                extract_dir = _repo / "build-fly" / "custom-llvm-tools" / archive_stem
+                candidates.extend(
+                    [
+                        extract_dir,
+                        _repo / ".cache" / "custom-llvm-tools" / archive_stem,
+                    ]
+                )
+        except Exception as exc:
+            print(f"[flash_attn_func] failed to read custom LLVM tool config: {exc}")
+
+    candidates.extend(
+        [
+            _repo / "build-fly" / "custom-llvm-tools",
+            _repo / ".cache" / "custom-llvm-tools",
+        ]
+    )
+
+    for path in candidates:
+        if (path / "bin" / "mlir-opt").is_file():
+            os.environ["FLYDSL_COMPILE_LLVM_DIR"] = str(path)
+            print(f"[flash_attn_func] using custom LLVM tools: {path}")
+            return
+
+    if archive_name and extract_dir:
+        root_dir = extract_dir.parent
+        archive_path = root_dir / archive_name
+        root_dir.mkdir(parents=True, exist_ok=True)
+
+        if not archive_path.is_file():
+            s3_uri = f"s3://framework-whls-devreleases/llvm-tools/gfx942-gfx950/{archive_name}"
+            https_uri = f"https://framework-whls-devreleases.s3.amazonaws.com/llvm-tools/gfx942-gfx950/{archive_name}"
+            print(f"[flash_attn_func] fetching custom LLVM tools: {archive_name}")
+            if shutil.which("aws"):
+                try:
+                    subprocess.run(["aws", "s3", "cp", s3_uri, str(archive_path)], check=True)
+                except Exception as exc:
+                    print(f"[flash_attn_func] aws download failed: {exc}")
+            if not archive_path.is_file():
+                try:
+                    urllib.request.urlretrieve(https_uri, archive_path)
+                except Exception as exc:
+                    archive_path.unlink(missing_ok=True)
+                    print(f"[flash_attn_func] https download failed: {exc}")
+
+        if archive_path.is_file():
+            try:
+                if extract_dir.exists():
+                    shutil.rmtree(extract_dir)
+                extract_dir.mkdir(parents=True, exist_ok=True)
+                with tarfile.open(archive_path, "r:gz") as tar:
+                    tar.extractall(extract_dir)
+            except Exception as exc:
+                print(f"[flash_attn_func] failed to extract custom LLVM tools: {exc}")
+
+        if (extract_dir / "bin" / "mlir-opt").is_file():
+            os.environ["FLYDSL_COMPILE_LLVM_DIR"] = str(extract_dir)
+            print(f"[flash_attn_func] using custom LLVM tools: {extract_dir}")
+            return
+
+    print(
+        "[flash_attn_func] custom LLVM tools not found; using bundled codegen. "
+        "Set FLYDSL_COMPILE_LLVM_DIR or FLYDSL_FLASH_ATTN_FUNC_USE_CUSTOM_LLVM=0 to silence this."
+    )
+
+
+_maybe_configure_custom_llvm_tools()
 
 
 def setup_seed(seed: int) -> None:
