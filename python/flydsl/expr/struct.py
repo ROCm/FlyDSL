@@ -432,7 +432,7 @@ def _make_composite_class(
     @classmethod
     def __peek_from_ptr__(cls, ptr: Pointer):
         if policy != CompositeKind.Product:
-            raise NotImplementedError(f"Union {_display_name(cls)} does not support __peek_from_ptr__")
+            raise NotImplementedError(f"{_display_name(cls)} does not support __peek_from_ptr__")
         _, _, offsets = _storage_layout(cls)
         values = {}
         for name, eff_type in _effective_field_defs(cls):
@@ -449,7 +449,7 @@ def _make_composite_class(
     @classmethod
     def __poke_into_ptr__(cls, ptr: Pointer, value):
         if policy != CompositeKind.Product:
-            raise NotImplementedError(f"Union {_display_name(cls)} does not support __poke_into_ptr__")
+            raise NotImplementedError(f"{_display_name(cls)} does not support __poke_into_ptr__")
         if not isinstance(value, cls):
             raise TypeError(
                 f"{_display_name(cls)}.__poke_into_ptr__ expects {_display_name(cls)} value, "

@@ -115,4 +115,5 @@ def peek_from_ptr(dsl_type, ptr: ir.Value):
 def poke_into_ptr(dsl_type, ptr: ir.Value, value) -> None:
     if hasattr(dsl_type, "__poke_into_ptr__"):
         dsl_type.__poke_into_ptr__(ptr, value)
+        return
     raise TypeError(f"type {dsl_type} does not implement the Storable protocol")
