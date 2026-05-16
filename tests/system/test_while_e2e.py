@@ -19,7 +19,7 @@ if not torch.cuda.is_available():
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.expr import buffer_ops
+from flydsl.expr import buffer_ops, const_expr
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 

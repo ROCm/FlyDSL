@@ -7,9 +7,9 @@
 
 import pytest
 
-from flydsl._mlir.ir import Context, FunctionType, InsertionPoint, IntegerType, Location, Module
 from flydsl._mlir.dialects import arith, func
-from flydsl.compiler.ast_rewriter import CanonicalizeWhile, ReplaceIfWithDispatch
+from flydsl._mlir.ir import Context, FunctionType, InsertionPoint, IntegerType, Location, Module
+from flydsl.compiler.ast_rewriter import CanonicalizeWhile
 from flydsl.expr.numeric import Int32
 
 
@@ -87,7 +87,6 @@ def test_scf_while_dispatch_no_result():
     """Side-effect only while loop: no result_names, no yield values."""
     with Context(), Location.unknown():
         module = Module.create()
-        i32 = IntegerType.get_signless(32)
         i1 = IntegerType.get_signless(1)
         with InsertionPoint(module.body):
             f = func.FuncOp("test_no_result", FunctionType.get([i1], []))
