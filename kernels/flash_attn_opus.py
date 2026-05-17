@@ -643,34 +643,28 @@ def build_flash_attn_opus_module(
         def _bitcast_f32(value):
             return fx.Float32(ArithValue(value).bitcast(fx.Float32.ir_type))
 
-        def _attn_mask_imm_single(rel_i32, neg_inf_i32, thr, x_ref_i32):
-            """Single asm: x_new = (rel < thr) ? neg_inf : x_ref.
-
-            asm:
-              v_cmp_lt_i32_e64 sgpr_mask, rel, thr
-              v_cndmask_b32_e64 vdst, x_ref, neg_inf, sgpr_mask
-            """
+        def _attn_mask_vec2_imm(rel_i32, neg_inf_i32, thr_x, thr_y, x_ref_i32, y_ref_i32):
+            """OPUS-style pair mask asm: 2 compares followed by 2 cndmasks."""
             asm_str = (
-                f"v_cmp_lt_i32_e64 $1, $2, {int(thr)}\n\t"
-                "v_cndmask_b32_e64 $0, $3, $4, $1"
+                f"v_cmp_lt_i32_e64 $0, $6, {int(thr_x)}\n\t"
+                f"v_cmp_lt_i32_e64 $1, $6, {int(thr_y)}\n\t"
+                "v_cndmask_b32_e64 $2, $4, $7, $0\n\t"
+                "v_cndmask_b32_e64 $3, $5, $7, $1"
             )
-            # $0 = new_x (=v), $1 = mask (=s, early-clobber), $2 = rel, $3 = x_ref, $4 = neg_inf
-            constraints = "=v,=&s,v,v,v"
-            ret_struct_ty = ir.Type.parse("!llvm.struct<(i32, i64)>")
+            ret_struct_ty = ir.Type.parse("!llvm.struct<(i64, i64, i32, i32)>")
             ret = llvm.inline_asm(
                 ret_struct_ty,
-                [_llvm_value(rel_i32), _llvm_value(x_ref_i32),
-                 _llvm_value(neg_inf_i32)],
+                [
+                    _llvm_value(x_ref_i32),
+                    _llvm_value(y_ref_i32),
+                    _llvm_value(rel_i32),
+                    _llvm_value(neg_inf_i32),
+                ],
                 asm_str,
-                constraints,
-                has_side_effects=False,
+                "=s,=s,=v,=v,2,3,v,v,~{vcc}",
+                has_side_effects=True,
             )
-            return llvm.extractvalue(T.i32, ret, [0])
-
-        def _attn_mask_vec2_imm(rel_i32, neg_inf_i32, thr_x, thr_y, x_ref_i32, y_ref_i32):
-            new_x = _attn_mask_imm_single(rel_i32, neg_inf_i32, thr_x, x_ref_i32)
-            new_y = _attn_mask_imm_single(rel_i32, neg_inf_i32, thr_y, y_ref_i32)
-            return new_x, new_y
+            return llvm.extractvalue(T.i32, ret, [2]), llvm.extractvalue(T.i32, ret, [3])
 
         def _anchor_vec(value):
             val_ir = _llvm_value(value)
@@ -935,6 +929,11 @@ def build_flash_attn_opus_module(
                 s_lo[idx_x] = _raw(_bitcast_f32(new_x_lo))
                 s_lo[idx_y] = _raw(_bitcast_f32(new_y_lo))
 
+            for p in range_constexpr(len(pair_thresholds)):
+                thr_x, thr_y = pair_thresholds[p]
+                idx_x = p * 2
+                idx_y = p * 2 + 1
+
                 # s_hi pair (n_strip = 1, rel shifted by 4)
                 x_hi_bits = _raw(_bitcast_i32(s_hi[idx_x]))
                 y_hi_bits = _raw(_bitcast_i32(s_hi[idx_y]))
@@ -944,6 +943,31 @@ def build_flash_attn_opus_module(
                 )
                 s_hi[idx_x] = _raw(_bitcast_f32(new_x_hi))
                 s_hi[idx_y] = _raw(_bitcast_f32(new_y_hi))
+
+        def _causal_mask_prologue_if_needed(s_lo, s_hi):
+            """Match OPUS prologue `if (q_start_pos < T::KV_TILE_SIZE)` guard."""
+            acc_values = [_raw(v) for v in (s_lo + s_hi)]
+            result_types = [v.type for v in acc_values]
+            mask_needed = arith.cmpi(
+                arith.CmpIPredicate.slt,
+                q_start_pos_i32,
+                arith.constant(BLOCK_N, type=T.i32),
+            )
+            if_op = scf.IfOp(mask_needed, result_types, has_else=True, loc=ir.Location.unknown())
+
+            with ir.InsertionPoint(if_op.regions[0].blocks[0]):
+                then_lo = list(s_lo)
+                then_hi = list(s_hi)
+                _causal_mask_inplace(then_lo, then_hi, fx.Index(0))
+                scf.YieldOp([_raw(v) for v in (then_lo + then_hi)])
+
+            if len(if_op.regions[1].blocks) == 0:
+                if_op.regions[1].blocks.append(*[])
+            with ir.InsertionPoint(if_op.regions[1].blocks[0]):
+                scf.YieldOp(acc_values)
+
+            results = list(if_op.results)
+            return results[:16], results[16:]
 
         def attn_row_max(s_lo, s_hi):
             m = c_neg_inf
@@ -1017,6 +1041,7 @@ def build_flash_attn_opus_module(
         #     static_for<q_len>([&](auto i) { v_q_f32[i.value] *= temperature_scale; });
         #     v_q = opus::cast<D_ATTN>(v_q_f32);
         q_row_in_block = wave_q_offset + lane_mod_32
+        q_start_pos_i32 = fx.Int32(q_start + wave_id_uni * fx.Index(ROWS_PER_WAVE))
         q_row = q_start + q_row_in_block
         q_row_i32 = fx.Int32(q_row)
         q_in_bounds = q_row < seq_len_v
@@ -1062,7 +1087,7 @@ def build_flash_attn_opus_module(
         s_lo_pro = [Vec(v_s_0_lo_raw)[r] for r in range_constexpr(16)]
         s_hi_pro = [Vec(v_s_0_hi_raw)[r] for r in range_constexpr(16)]
         if const_expr(CAUSAL):
-            _causal_mask_inplace(s_lo_pro, s_hi_pro, fx.Index(0))
+            s_lo_pro, s_hi_pro = _causal_mask_prologue_if_needed(s_lo_pro, s_hi_pro)
 
         #     m_row = attn_row_max<T>(v_s[0]);
         m_row_pro = attn_row_max(s_lo_pro, s_hi_pro)
