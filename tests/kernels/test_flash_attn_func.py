@@ -82,6 +82,12 @@ def _maybe_configure_custom_llvm_tools() -> None:
     if os.getenv("FLYDSL_FLASH_ATTN_FUNC_USE_CUSTOM_LLVM", "1").lower() in ("0", "false", "no", "off"):
         return
     if os.getenv("FLYDSL_COMPILE_LLVM_DIR"):
+        llvm_dir = Path(os.environ["FLYDSL_COMPILE_LLVM_DIR"]).expanduser()
+        if not (llvm_dir / "bin" / "mlir-opt").is_file():
+            raise RuntimeError(
+                f"FLYDSL_COMPILE_LLVM_DIR={llvm_dir} does not contain bin/mlir-opt. "
+                "Set FLYDSL_FLASH_ATTN_FUNC_USE_CUSTOM_LLVM=0 to use bundled LLVM."
+            )
         return
 
     candidates = []
@@ -136,7 +142,10 @@ def _maybe_configure_custom_llvm_tools() -> None:
                 urllib.request.urlretrieve(https_uri, archive_path)
             except Exception as exc:
                 archive_path.unlink(missing_ok=True)
-                print(f"[flash_attn_func] https download failed: {exc}")
+                raise RuntimeError(
+                    f"failed to download custom LLVM tools from {https_uri}: {exc}. "
+                    "Set FLYDSL_FLASH_ATTN_FUNC_USE_CUSTOM_LLVM=0 to use bundled LLVM."
+                ) from exc
 
         if archive_path.is_file():
             try:
@@ -146,16 +155,20 @@ def _maybe_configure_custom_llvm_tools() -> None:
                 with tarfile.open(archive_path, "r:gz") as tar:
                     tar.extractall(extract_dir)
             except Exception as exc:
-                print(f"[flash_attn_func] failed to extract custom LLVM tools: {exc}")
+                raise RuntimeError(
+                    f"failed to extract custom LLVM tools from {archive_path}: {exc}. "
+                    "Set FLYDSL_FLASH_ATTN_FUNC_USE_CUSTOM_LLVM=0 to use bundled LLVM."
+                ) from exc
 
         if (extract_dir / "bin" / "mlir-opt").is_file():
             os.environ["FLYDSL_COMPILE_LLVM_DIR"] = str(extract_dir)
             print(f"[flash_attn_func] using custom LLVM tools: {extract_dir}")
             return
 
-    print(
-        "[flash_attn_func] custom LLVM tools not found; using bundled codegen. "
-        "Set FLYDSL_COMPILE_LLVM_DIR or FLYDSL_FLASH_ATTN_FUNC_USE_CUSTOM_LLVM=0 to silence this."
+    raise RuntimeError(
+        "custom LLVM tools not found or missing bin/mlir-opt. "
+        "Set FLYDSL_COMPILE_LLVM_DIR to an LLVM tools directory, "
+        "or set FLYDSL_FLASH_ATTN_FUNC_USE_CUSTOM_LLVM=0 to use bundled LLVM."
     )
 
 
