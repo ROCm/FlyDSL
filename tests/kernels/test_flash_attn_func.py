@@ -16,6 +16,7 @@ import shutil
 import sys
 import tarfile
 import urllib.request
+from contextlib import contextmanager
 from pathlib import Path
 
 # Configure logging to show INFO level messages (required for kernel name display)
@@ -172,7 +173,17 @@ def _maybe_configure_custom_llvm_tools() -> None:
     )
 
 
-_maybe_configure_custom_llvm_tools()
+@contextmanager
+def _custom_llvm_tools_env():
+    prev_llvm_dir = os.environ.get("FLYDSL_COMPILE_LLVM_DIR")
+    _maybe_configure_custom_llvm_tools()
+    try:
+        yield
+    finally:
+        if prev_llvm_dir is None:
+            os.environ.pop("FLYDSL_COMPILE_LLVM_DIR", None)
+        else:
+            os.environ["FLYDSL_COMPILE_LLVM_DIR"] = prev_llvm_dir
 
 
 def setup_seed(seed: int) -> None:
@@ -306,14 +317,15 @@ def run_config(
         return results
 
     try:
-        exe = build_flash_attn_func_module(
-            num_heads=num_heads,
-            head_dim=head_dim,
-            causal=causal,
-            dtype_str=dtype_str,
-            waves_per_eu=FLASH_ATTN_FUNC_KERNEL_CONFIG["waves_per_eu"],
-            daz=FLASH_ATTN_FUNC_KERNEL_CONFIG.get("daz", False),
-        )
+        with _custom_llvm_tools_env():
+            exe = build_flash_attn_func_module(
+                num_heads=num_heads,
+                head_dim=head_dim,
+                causal=causal,
+                dtype_str=dtype_str,
+                waves_per_eu=FLASH_ATTN_FUNC_KERNEL_CONFIG["waves_per_eu"],
+                daz=FLASH_ATTN_FUNC_KERNEL_CONFIG.get("daz", False),
+            )
     except Exception as e:
         results["err"] = f"build: {e}"
         import traceback
