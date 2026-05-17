@@ -269,6 +269,7 @@ def build_flash_attn_opus_module(
         elem_type = elem_dtype.ir_type
         compute_type = fx.Float32.ir_type
         fm_fast = fx.arith.FastMathFlags.fast
+        v4i32_type = Vec.make_type(4, fx.Int32)
         v4f16_type = Vec.make_type(4, elem_dtype)
         v8f16_type = Vec.make_type(8, elem_dtype)
         v16f32_type = Vec.make_type(16, fx.Float32)
@@ -541,19 +542,25 @@ def build_flash_attn_opus_module(
                 + [lhs_vec.numel + i for i in range(rhs_vec.numel)],
             )
 
+        def _raw_buffer_load_bytes(result_type, rsrc, byte_offset_i32):
+            zero = buffer_ops._create_i32_constant(0)
+            aux = buffer_ops._create_i32_constant(0)
+            return buffer_ops.rocdl.RawPtrBufferLoadOp(
+                result_type,
+                rsrc,
+                _raw(byte_offset_i32),
+                zero,
+                aux,
+            ).result
+
         def load_q_all(q_row_in_block):
             q_raw_packs = []
             for ks in range_constexpr(K_STEPS_QK):
                 q_col = fx.Index(ks * K_STEP_QK) + lane_div_32 * MFMA_LANE_K
                 g_idx = q_row_in_block * stride_q_n_v + q_col
-                q_raw_packs.append(
-                    buffer_ops.buffer_load(
-                        q_rsrc,
-                        fx.Int32(g_idx),
-                        vec_width=MFMA_LANE_K,
-                        dtype=elem_dtype,
-                    )
-                )
+                q_byte_offset = fx.Int32(g_idx) << fx.Int32(1)
+                q_i32_pack = _raw_buffer_load_bytes(v4i32_type, q_rsrc, q_byte_offset)
+                q_raw_packs.append(Vec(q_i32_pack, (4,), fx.Int32).bitcast(elem_dtype).ir_value())
             q_16_packs = []
             for pair in range_constexpr(K_STEPS_QK // 2):
                 q_16_packs.append(
@@ -570,12 +577,22 @@ def build_flash_attn_opus_module(
             return Vec(q_all, (K_STEPS_QK * MFMA_LANE_K,), elem_dtype)
 
         def scale_q_all(q_all_bf16):
-            q_all_f32 = Vec(q_all_bf16).extf(v64f32_type)
+            fm_fast_attr = ir.Attribute.parse("#llvm.fastmath<fast>")
+            q_all_f32_op = llvm.FPExtOp(v64f32_type, _raw(q_all_bf16))
+            q_all_f32_op.operation.attributes["fastmathFlags"] = fm_fast_attr
+            q_all_f32 = q_all_f32_op.result
             scale_vec = Vec.from_elements([c_sm_scale_log2e], fx.Float32).broadcast_to(
                 K_STEPS_QK * MFMA_LANE_K
             )
-            q_all_scaled_f32 = Vec(q_all_f32) * scale_vec
-            return Vec(q_all_scaled_f32).truncf(v64bf16_type)
+            q_all_scaled_f32 = arith.mulf(
+                _raw(scale_vec),
+                _raw(q_all_f32),
+                fastmath=fm_fast,
+            )
+            q_all_scaled_bf16_op = llvm.FPTruncOp(v64bf16_type, q_all_scaled_f32)
+            q_all_scaled_bf16_op.operation.attributes["fastmathFlags"] = fm_fast_attr
+            q_all_scaled_bf16 = q_all_scaled_bf16_op.result
+            return Vec(q_all_scaled_bf16, (K_STEPS_QK * MFMA_LANE_K,), elem_dtype)
 
         def get_q_pack(q_all_scaled_bf16, ks):
             q_vec = Vec(q_all_scaled_bf16)
