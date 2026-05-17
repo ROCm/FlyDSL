@@ -8,9 +8,9 @@ This test file provides:
 """
 
 import os
+import socket
 import sys
 from pathlib import Path
-import socket
 
 # Prefer embedded MLIR/flydsl to avoid mixing multiple runtimes.
 _repo = Path(__file__).resolve().parents[2]
@@ -24,7 +24,7 @@ if _src_py.exists():
     sys.path.insert(0, str(_src_py))
 sys.path.insert(0, str(_repo))
 
-import pytest
+import pytest  # noqa: E402
 
 try:
     import torch
@@ -35,21 +35,22 @@ except ImportError:
 if torch is None or not torch.cuda.is_available():
     pytest.skip("CUDA/ROCm not available. Skipping GPU tests.", allow_module_level=True)
 
-import torch.profiler as tpf
-import pandas as pd
-import numpy as np
-from multiprocessing import freeze_support, set_start_method
+from multiprocessing import freeze_support, set_start_method  # noqa: E402
+
+import numpy as np  # noqa: E402
+import pandas as pd  # noqa: E402
+import torch.profiler as tpf  # noqa: E402
 
 DTYPE_FP32 = torch.float32
 DTYPE_FP16 = torch.float16
 DTYPE_BF16 = torch.bfloat16
 
-from kernels.custom_all_reduce import init_custom_ar, meta_size
-
+from kernels.custom_all_reduce import init_custom_ar, meta_size  # noqa: E402
 
 # ============================================================================
 # Performance profiling utilities (copied from aiter/aiter/test_common.py)
 # ============================================================================
+
 
 def post_process_data(df, num_iters, warm_iter=1):
     """Remove abnormal data from profiling results."""
@@ -73,9 +74,7 @@ def post_process_data(df, num_iters, warm_iter=1):
             m = len(sub_list)
 
             valid_n = int(n / m) * m
-            pattern_match = all(
-                name_list[i] == sub_list[i % m] for i in range(int(n / m) * m)
-            )
+            pattern_match = all(name_list[i] == sub_list[i % m] for i in range(int(n / m) * m))
             if pattern_match:
                 kernels_num = m
                 act_iters = valid_n / m
@@ -101,8 +100,7 @@ def post_process_data(df, num_iters, warm_iter=1):
         lower = Q1 - k * IQR
         upper = Q3 + k * IQR
         out_range_idx = sum_df.index[
-            (sum_df["self_device_time_total"] < lower)
-            | (sum_df["self_device_time_total"] > upper)
+            (sum_df["self_device_time_total"] < lower) | (sum_df["self_device_time_total"] > upper)
         ].tolist()
     out_range_num = len(out_range_idx)
 
@@ -137,9 +135,7 @@ def get_trace_perf(prof, num_iters):
     df = pd.DataFrame(df, columns=cols)
     # Remove abnormal data
     dropped_num = warm_iter
-    dropped_indexs, dropped_num = post_process_data(
-        df, num_iters + warm_iter, warm_iter
-    )
+    dropped_indexs, dropped_num = post_process_data(df, num_iters + warm_iter, warm_iter)
     df = df.drop(dropped_indexs)
     iter_init = 0  # warm_iter dropped
     df["cnt"] = 1
@@ -149,9 +145,7 @@ def get_trace_perf(prof, num_iters):
         kernel_num_per_iter = iter_init
         if str(d["device_type"].iat[0]).split(".")[-1] != "CUDA":
             kernel_num_per_iter = 1
-        r = d.iloc[kernel_num_per_iter:][
-            ["cnt", "self_cpu_time_total", "self_device_time_total"]
-        ].sum()
+        r = d.iloc[kernel_num_per_iter:][["cnt", "self_cpu_time_total", "self_device_time_total"]].sum()
         if not r.empty:
             device_type = str(d["device_type"].iat[0]).split(".")[-1]
             r["name"] = name
@@ -163,9 +157,7 @@ def get_trace_perf(prof, num_iters):
             else:
                 r["host_time_sum"] = r["self_device_time_total"]
                 r["device_time_sum"] = 0
-            r["device_time_avg"] = (
-                r["device_time_sum"] / r["cnt"] if r["cnt"] > 0 else 0
-            )
+            r["device_time_avg"] = r["device_time_sum"] / r["cnt"] if r["cnt"] > 0 else 0
         rets.append(r)
     df = pd.DataFrame(rets)
     cols = [
@@ -228,6 +220,7 @@ def _normalize_dtype_arg(dtype_arg: str) -> str:
 # Distributed worker function for multi-GPU testing
 # ============================================================================
 
+
 def _dist_worker(
     rank: int,
     world_size: int,
@@ -243,7 +236,7 @@ def _dist_worker(
     result_dict: dict,
 ):
     """Worker function for distributed allreduce testing.
-    
+
     Args:
         rank: Process rank
         world_size: Number of processes/GPUs
@@ -258,6 +251,7 @@ def _dist_worker(
         result_dict: Shared dictionary to collect results from all ranks
     """
     import warnings
+
     warnings.filterwarnings("ignore")
     _devnull_fd = os.open(os.devnull, os.O_WRONLY)
     os.dup2(_devnull_fd, 1)
@@ -405,10 +399,18 @@ def _dist_worker(
                 if rank == 0:
                     print("[test_allreduce] WARN: fa has no capture(); skipping cudagraph.", flush=True)
                 result_dict[rank] = {
-                    "rank": rank, "shape": shape, "dtype": dtype_str, "world_size": world_size,
-                    "mode": "cudagraph", "max_error": float("nan"), "avg_time_us": 0.0,
-                    "device_time_sum_us": 0.0, "kernel_name": "skip", "num_iters": num_iters,
-                    "num_warmup": num_warmup, "error": "no capture()",
+                    "rank": rank,
+                    "shape": shape,
+                    "dtype": dtype_str,
+                    "world_size": world_size,
+                    "mode": "cudagraph",
+                    "max_error": float("nan"),
+                    "avg_time_us": 0.0,
+                    "device_time_sum_us": 0.0,
+                    "kernel_name": "skip",
+                    "num_iters": num_iters,
+                    "num_warmup": num_warmup,
+                    "error": "no capture()",
                 }
             else:
                 # Use a separate stream for graph capture (matches aiter's graph_capture pattern)
@@ -431,10 +433,18 @@ def _dist_worker(
                     if rank == 0:
                         print(f"[rank={rank}] WARN: cudagraph capture failed: {cap_e}", flush=True)
                     result_dict[rank] = {
-                        "rank": rank, "shape": shape, "dtype": dtype_str, "world_size": world_size,
-                        "mode": "cudagraph", "max_error": float("nan"), "avg_time_us": 0.0,
-                        "device_time_sum_us": 0.0, "kernel_name": "skip", "num_iters": num_iters,
-                        "num_warmup": num_warmup, "error": str(cap_e),
+                        "rank": rank,
+                        "shape": shape,
+                        "dtype": dtype_str,
+                        "world_size": world_size,
+                        "mode": "cudagraph",
+                        "max_error": float("nan"),
+                        "avg_time_us": 0.0,
+                        "device_time_sum_us": 0.0,
+                        "kernel_name": "skip",
+                        "num_iters": num_iters,
+                        "num_warmup": num_warmup,
+                        "error": str(cap_e),
                     }
                 else:
                     torch.manual_seed(42 + rank)
@@ -495,10 +505,17 @@ def _dist_worker(
                     avg_time_us = (total_ms_wo_first * 1000.0) / (num_iters - 1)
                     device_time_sum = total_ms_wo_first * 1000.0
                     result_dict[rank] = {
-                        "rank": rank, "shape": shape, "dtype": dtype_str, "world_size": world_size,
-                        "mode": "cudagraph", "max_error": max_err, "avg_time_us": avg_time_us,
-                        "device_time_sum_us": device_time_sum, "kernel_name": "cudagraph_replay",
-                        "num_iters": num_iters, "num_warmup": num_warmup,
+                        "rank": rank,
+                        "shape": shape,
+                        "dtype": dtype_str,
+                        "world_size": world_size,
+                        "mode": "cudagraph",
+                        "max_error": max_err,
+                        "avg_time_us": avg_time_us,
+                        "device_time_sum_us": device_time_sum,
+                        "kernel_name": "cudagraph_replay",
+                        "num_iters": num_iters,
+                        "num_warmup": num_warmup,
                     }
         else:
             raise ValueError(f"unsupported mode={mode!r}")
@@ -506,6 +523,7 @@ def _dist_worker(
     except Exception as e:
         print(f"[rank={rank}] Error: {e}", flush=True)
         import traceback
+
         traceback.print_exc()
         result = {
             "rank": rank,
@@ -513,7 +531,7 @@ def _dist_worker(
             "dtype": dtype_str,
             "world_size": world_size,
             "mode": mode,
-            "max_error": float('inf'),
+            "max_error": float("inf"),
             "avg_time_us": 0.0,
             "device_time_sum_us": 0.0,
             "kernel_name": "error",
@@ -531,6 +549,7 @@ def _dist_worker(
 # Main test function
 # ============================================================================
 
+
 def run_all_tests(
     world_size: int = 8,
     num_iters: int = 101,
@@ -543,7 +562,7 @@ def run_all_tests(
     output_csv: str = None,
 ):
     """Run all accuracy and performance tests, collect results and save to CSV.
-    
+
     Args:
         world_size: Number of GPUs/processes
         num_iters: Number of profiling iterations
@@ -556,35 +575,35 @@ def run_all_tests(
     ng = torch.cuda.device_count()
     if ng < world_size:
         raise RuntimeError(f"need >= {world_size} GPUs, got {ng}")
-    
+
     # Test configurations
     # Format: (shape_tuple, dtype_str)
     # Shape numel must be multiple of pack size: f16/bf16 -> 8 elems, f32 -> 4 elems
     if configs is None:
         default_configs = [
-            ((128, 8192), "fp16"),    # 1048576 elements, bf16
+            ((128, 8192), "fp16"),  # 1048576 elements, bf16
         ]
     else:
         default_configs = configs
-    
+
     all_results = []
-    
+
     print("=" * 80)
     print("Starting FlyDSL AllReduce Multi-GPU Tests")
     print("=" * 80)
     print(f"World size: {world_size}")
-    print(f"Backend: aiter")
+    print("Backend: aiter")
     print(f"Allreduce impl: {allreduce_impl}")
     print(f"Mode: {mode}")
     print(f"Profile iterations: {num_iters}, Warmup: {num_warmup}")
     print(f"Skip check: {skip_check}")
     print("=" * 80)
-    
+
     for shape, dtype_str in default_configs:
         # Normalize dtype string
         dtype_str = _normalize_dtype_arg(dtype_str)
         print(f"\nTesting: shape={shape}, dtype={dtype_str}")
-        
+
         # Verify pack alignment
         numel = 1
         for d in shape:
@@ -593,54 +612,63 @@ def run_all_tests(
             pack = 8
         else:
             pack = 4
-        
+
         if numel % pack != 0:
             print(f"  WARNING: shape numel={numel} is not multiple of {pack} for dtype {dtype_str}, skipping")
             continue
-        
+
         try:
             # Create shared dictionary for results
             manager = mp.Manager()
             result_dict = manager.dict()
-            
+
             # Get free port
             port = _free_port()
-            
+
             # Spawn processes
             mp.spawn(
                 _dist_worker,
-                args=(world_size, shape, dtype_str, port, num_iters, num_warmup, skip_check, allreduce_impl, mode, save_trace, result_dict),
+                args=(
+                    world_size,
+                    shape,
+                    dtype_str,
+                    port,
+                    num_iters,
+                    num_warmup,
+                    skip_check,
+                    allreduce_impl,
+                    mode,
+                    save_trace,
+                    result_dict,
+                ),
                 nprocs=world_size,
                 join=True,
             )
-            
+
             # Collect results from all ranks
             rank_results = [result_dict[i] for i in range(world_size) if i in result_dict]
-            
+
             # Sort by rank
             rank_results.sort(key=lambda x: x["rank"])
-            
+
             if rank_results:
                 print(f"  ✓ Test completed for all {len(rank_results)} ranks")
-                
+
                 # Calculate aggregate statistics
                 max_errors = [r["max_error"] for r in rank_results]
                 avg_times = [r["avg_time_us"] for r in rank_results]
-                
+
                 max_error = max(max_errors)
                 mean_avg_time = np.mean(avg_times)
                 max_avg_time = max(avg_times)
                 min_avg_time = min(avg_times)
-                
+
                 print(f"    Max error: {max_error:.3e}")
                 print(f"    Avg time: mean={mean_avg_time:.3f} us/iter, min={min_avg_time:.3f}, max={max_avg_time:.3f}")
-                
+
                 # Add aggregate row
                 rank0 = rank_results[0] if rank_results else {}
-                has_failure = any(
-                    r.get("error") or r.get("kernel_name") in ("skip", "error")
-                    for r in rank_results
-                )
+                has_failure = any(r.get("error") or r.get("kernel_name") in ("skip", "error") for r in rank_results)
                 aggregate_result = {
                     "rank": "aggregate",
                     "shape": str(shape),
@@ -658,17 +686,18 @@ def run_all_tests(
                     "acc_res": "failed" if has_failure else "pass",
                 }
                 all_results.append(aggregate_result)
-                
+
                 # Add individual rank results
                 for r in rank_results:
                     r["shape"] = str(r["shape"])  # Convert tuple to string for CSV
                     all_results.append(r)
-            
+
         except Exception as e:
             print(f"    ✗ Test failed: {e}")
             import traceback
+
             traceback.print_exc()
-    
+
     # Convert to DataFrame and save to CSV
     if all_results:
         df = pd.DataFrame(all_results)
@@ -683,10 +712,7 @@ def run_all_tests(
             print(aggregate_df.to_string(index=False))
         print("=" * 80)
 
-        failed = [
-            r for r in all_results
-            if r.get("rank") == "aggregate" and r.get("acc_res") == "failed"
-        ]
+        failed = [r for r in all_results if r.get("rank") == "aggregate" and r.get("acc_res") == "failed"]
         if failed:
             print("\n✗ FAILED cases:")
             for r in failed:
@@ -703,6 +729,7 @@ def run_all_tests(
 # Pytest test functions for 8-GPU allreduce CI testing
 # ============================================================================
 
+
 def _count_physical_gpus() -> int:
     """Return number of physically available GPUs via a fresh subprocess.
 
@@ -710,11 +737,15 @@ def _count_physical_gpus() -> int:
     PyTorch's internal device-count cache in the parent pytest process.
     """
     import subprocess as _sp
+
     env = {k: v for k, v in os.environ.items() if k != "HIP_VISIBLE_DEVICES"}
     try:
         r = _sp.run(
             [sys.executable, "-c", "import torch; print(torch.cuda.device_count())"],
-            capture_output=True, text=True, timeout=30, env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=env,
         )
         return int(r.stdout.strip()) if r.returncode == 0 else 0
     except Exception:
@@ -725,24 +756,24 @@ def _count_physical_gpus() -> int:
 _8GPU_PARAMS = [
     # (shape,          dtype_str,  mode)
     # --- small shapes (edge-case coverage, aligned with aiter) ---
-    ((2,    7168), "bf16", "cudagraph"),    # 14 K elements · BF16 · cudagraph (aiter shape)
-    ((16,   4096), "fp16", "eager"),        # 64 K elements · FP16 · eager
+    ((2, 7168), "bf16", "cudagraph"),  # 14 K elements · BF16 · cudagraph (aiter shape)
+    ((16, 4096), "fp16", "eager"),  # 64 K elements · FP16 · eager
     # --- medium shapes ---
-    ((128,  8192), "bf16", "cudagraph"),    # 1 M elements  · BF16 · cudagraph
-    ((96,   4096), "fp16", "eager"),        # 384 K elements · FP16 · eager
+    ((128, 8192), "bf16", "cudagraph"),  # 1 M elements  · BF16 · cudagraph
+    ((96, 4096), "fp16", "eager"),  # 384 K elements · FP16 · eager
     # --- eager + cudagraph cross-dtype ---
-    ((512,  8192), "bf16", "eager"),        # 4 M elements  · BF16 · eager
-    ((1024, 8192), "fp16", "cudagraph"),    # 8 M elements  · FP16 · cudagraph
+    ((512, 8192), "bf16", "eager"),  # 4 M elements  · BF16 · eager
+    ((1024, 8192), "fp16", "cudagraph"),  # 8 M elements  · FP16 · cudagraph
     # --- fp32 coverage ---
-    ((64,   4096), "fp32", "eager"),        # 256 K elements · FP32 · eager
+    ((64, 4096), "fp32", "eager"),  # 256 K elements · FP32 · eager
 ]
 
 # 4-GPU test configurations (fp32 + smaller world_size coverage).
 _4GPU_PARAMS = [
     # (shape,          dtype_str,  mode)
-    ((64,   4096), "fp32", "eager"),        # 256 K elements · FP32 · eager
-    ((128,  8192), "fp16", "eager"),        # 1 M elements   · FP16 · eager
-    ((64,   8192), "bf16", "cudagraph"),    # 512 K elements · BF16 · cudagraph
+    ((64, 4096), "fp32", "eager"),  # 256 K elements · FP32 · eager
+    ((128, 8192), "fp16", "eager"),  # 1 M elements   · FP16 · eager
+    ((64, 8192), "bf16", "cudagraph"),  # 512 K elements · BF16 · cudagraph
 ]
 
 
@@ -752,16 +783,15 @@ _4GPU_PARAMS = [
 #   large  (1024×8192) → write-mode kernel
 _BENCHMARK_PARAMS = [
     # (shape,           dtype_str, mode)
-    ((2,    7168),  "fp16", "cudagraph"),
-    ((32,   8192),  "fp32", "cudagraph"),
-    ((128,  8192),  "fp16", "cudagraph"),
-    ((1024, 7168),  "bf16", "cudagraph"),
-    ((4096, 8192),  "bf16", "cudagraph")
+    ((2, 7168), "fp16", "cudagraph"),
+    ((32, 8192), "fp32", "cudagraph"),
+    ((128, 8192), "fp16", "cudagraph"),
+    ((1024, 7168), "bf16", "cudagraph"),
+    ((4096, 8192), "bf16", "cudagraph"),
 ]
 
 
-def _run_subprocess(*, world_size, shape, dtype_str, mode, iters=10, warmup=2,
-                    output_csv=None, timeout=600):
+def _run_subprocess(*, world_size, shape, dtype_str, mode, iters=10, warmup=2, output_csv=None, timeout=600):
     """Launch the allreduce harness in a subprocess and assert success."""
     import subprocess as _sp
 
@@ -769,13 +799,20 @@ def _run_subprocess(*, world_size, shape, dtype_str, mode, iters=10, warmup=2,
     shape_str = ",".join(str(d) for d in shape) + f",{dtype_str}"
 
     cmd = [
-        sys.executable, __file__,
-        "--world_size",     str(world_size),
-        "--iters",          str(iters),
-        "--warmup",         str(warmup),
-        "--shapes",         shape_str,
-        "--mode",           mode,
-        "--allreduce_impl", "flydsl",
+        sys.executable,
+        __file__,
+        "--world_size",
+        str(world_size),
+        "--iters",
+        str(iters),
+        "--warmup",
+        str(warmup),
+        "--shapes",
+        shape_str,
+        "--mode",
+        mode,
+        "--allreduce_impl",
+        "flydsl",
     ]
     if output_csv:
         cmd += ["--output_csv", output_csv]
@@ -802,8 +839,14 @@ def _run_subprocess_benchmark(*, world_size, shape, dtype_str, mode):
     shape_tag = "x".join(str(d) for d in shape)
     csv_path = f"/tmp/allreduce_bench_{shape_tag}_{dtype_str}_{mode}.csv"
     result = _run_subprocess(
-        world_size=world_size, shape=shape, dtype_str=dtype_str, mode=mode,
-        iters=51, warmup=5, output_csv=csv_path, timeout=900,
+        world_size=world_size,
+        shape=shape,
+        dtype_str=dtype_str,
+        mode=mode,
+        iters=51,
+        warmup=5,
+        output_csv=csv_path,
+        timeout=900,
     )
     if result.stdout:
         for line in result.stdout.splitlines():
@@ -818,8 +861,7 @@ def _param_id(shape, dtype_str, mode):
 
 
 @pytest.mark.multi_gpu
-@pytest.mark.parametrize("shape,dtype_str,mode", _8GPU_PARAMS,
-                         ids=[_param_id(*p) for p in _8GPU_PARAMS])
+@pytest.mark.parametrize("shape,dtype_str,mode", _8GPU_PARAMS, ids=[_param_id(*p) for p in _8GPU_PARAMS])
 def test_allreduce_8gpu_accuracy(shape, dtype_str, mode):
     """8-GPU allreduce accuracy test.
 
@@ -837,8 +879,7 @@ def test_allreduce_8gpu_accuracy(shape, dtype_str, mode):
 
 @pytest.mark.multi_gpu
 @pytest.mark.benchmark
-@pytest.mark.parametrize("shape,dtype_str,mode", _BENCHMARK_PARAMS,
-                         ids=[_param_id(*p) for p in _BENCHMARK_PARAMS])
+@pytest.mark.parametrize("shape,dtype_str,mode", _BENCHMARK_PARAMS, ids=[_param_id(*p) for p in _BENCHMARK_PARAMS])
 def test_allreduce_8gpu_benchmark(shape, dtype_str, mode):
     """8-GPU allreduce benchmark test.
 
@@ -853,8 +894,7 @@ def test_allreduce_8gpu_benchmark(shape, dtype_str, mode):
 
 
 @pytest.mark.multi_gpu
-@pytest.mark.parametrize("shape,dtype_str,mode", _4GPU_PARAMS,
-                         ids=[_param_id(*p) for p in _4GPU_PARAMS])
+@pytest.mark.parametrize("shape,dtype_str,mode", _4GPU_PARAMS, ids=[_param_id(*p) for p in _4GPU_PARAMS])
 def test_allreduce_4gpu_accuracy(shape, dtype_str, mode):
     """4-GPU allreduce accuracy test (covers fp32 and world_size=4)."""
     phys_ng = _count_physical_gpus()
@@ -867,9 +907,9 @@ if __name__ == "__main__":
     freeze_support()
     # Align with AIter harness: use spawn to avoid fork+CUDA issues.
     set_start_method("spawn", force=True)
-    
+
     import argparse
-    
+
     parser = argparse.ArgumentParser(description="FlyDSL allreduce multi-GPU test runner")
     parser.add_argument(
         "--world_size",
@@ -926,7 +966,7 @@ if __name__ == "__main__":
         help="Path to save CSV results (default: flydsl_allreduce_perf.csv)",
     )
     args = parser.parse_args()
-    
+
     # Parse shapes if provided
     configs = None
     if args.shapes:
@@ -945,7 +985,7 @@ if __name__ == "__main__":
                 configs.append((shape_tuple, dtype))
         if not configs:
             configs = None
-    
+
     run_all_tests(
         world_size=args.world_size,
         num_iters=args.iters,

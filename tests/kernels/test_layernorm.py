@@ -15,14 +15,18 @@ LayerNorm(x) = (x - mean) / sqrt(var + eps) * gamma + beta
 
 import os
 
-from tests.test_common import run_perftest
+import pytest
+
+from kernels.layernorm_kernel import (
+    build_layernorm_module,
+)
 from tests.kernels.benchmark_common import (
     PerfRow,
     bench_gpu_us_torch,
     maybe_enable_aiter,
     print_perf_table,
 )
-import pytest
+from tests.test_common import run_perftest
 
 pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
 
@@ -38,14 +42,10 @@ DTYPE_FP16 = torch.float16
 DTYPE_BF16 = torch.bfloat16
 
 EPS: float = 1e-5
-from kernels.layernorm_kernel import (
-    build_layernorm_module,
-    KERNEL_NAME as LAYERNORM_KERNEL_NAME,
-    BLOCK_THREADS,
-)
 
 WARMUP_ITERS = 10
 BENCH_ITERS = 100
+
 
 def run_test(M: int, N: int, dtype: str = "f32"):
     print(f"\nTesting LayerNorm (M={M}, N={N}, dtype={dtype})")
@@ -110,7 +110,9 @@ def run_test(M: int, N: int, dtype: str = "f32"):
     kernel_launch()
     torch.cuda.synchronize()
 
-    _, avg_us = run_perftest(lambda: (kernel_launch(), torch.cuda.synchronize()), num_iters=BENCH_ITERS, num_warmup=WARMUP_ITERS)
+    _, avg_us = run_perftest(
+        lambda: (kernel_launch(), torch.cuda.synchronize()), num_iters=BENCH_ITERS, num_warmup=WARMUP_ITERS
+    )
     torch.cuda.synchronize()
     flydsl_gpu_us = None
     if os.environ.get("ROCDSL_COMPARE_AITER", "0") == "1":
@@ -143,10 +145,11 @@ def run_test(M: int, N: int, dtype: str = "f32"):
 
     return ok, flydsl_gpu_us
 
+
 def test_all():
-    print("="*80)
+    print("=" * 80)
     print("Running LayerNorm Tests")
-    print("="*80)
+    print("=" * 80)
 
     shapes_env = os.environ.get("ROCDSL_LAYERNORM_SHAPES", "").strip()
     if shapes_env:
@@ -179,11 +182,17 @@ def test_all():
 
         if do_compare:
             import torch
+
             aiter_us = None
             if maybe_enable_aiter():
                 try:
                     from aiter.ops.triton.norm import layer_norm as aiter_layer_norm
-                    x = torch.randn((M, N), device="cuda", dtype=DTYPE_BF16 if dtype == "bf16" else (DTYPE_FP16 if dtype == "f16" else DTYPE_FP32))
+
+                    x = torch.randn(
+                        (M, N),
+                        device="cuda",
+                        dtype=DTYPE_BF16 if dtype == "bf16" else (DTYPE_FP16 if dtype == "f16" else DTYPE_FP32),
+                    )
                     w = torch.rand((N,), device="cuda", dtype=x.dtype)
                     b = torch.rand((N,), device="cuda", dtype=x.dtype)
 
@@ -195,20 +204,24 @@ def test_all():
                 except Exception as e:
                     print(f"[Perf] AIter layernorm skipped: {type(e).__name__}: {e!r}")
 
-            perf_rows.append(PerfRow(op="layernorm", shape=f"{M}x{N}", dtype=dtype, flydsl_gpu_us=flydsl_gpu_us, aiter_gpu_us=aiter_us))
+            perf_rows.append(
+                PerfRow(
+                    op="layernorm", shape=f"{M}x{N}", dtype=dtype, flydsl_gpu_us=flydsl_gpu_us, aiter_gpu_us=aiter_us
+                )
+            )
 
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     if failures == 0:
         print("ALL TESTS PASSED")
     else:
         print(f"{failures} TESTS FAILED")
-    print("="*80)
+    print("=" * 80)
     if do_compare and perf_rows:
         print_perf_table(perf_rows)
     # Ensure a non-zero exit code on failure for shell wrappers.
     if failures != 0:
         raise SystemExit(1)
 
+
 if __name__ == "__main__":
     test_all()
-

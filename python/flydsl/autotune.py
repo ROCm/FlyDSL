@@ -3,10 +3,11 @@
 
 """FlyDSL autotuner - benchmark multiple kernel configs, pick the fastest."""
 
-import hashlib, json, os, time, inspect, threading
+import inspect
+import json
+import os
 from pathlib import Path
-from typing import List, Optional, Dict, Callable, Any, Tuple
-from functools import wraps
+from typing import Callable, Dict, List
 
 try:
     import torch
@@ -17,8 +18,7 @@ except ImportError:
 class Config:
     """A single tuning configuration."""
 
-    def __init__(self, *, num_warps=None, waves_per_eu=None, maxnreg=None,
-                 pre_hook=None, **kwargs):
+    def __init__(self, *, num_warps=None, waves_per_eu=None, maxnreg=None, pre_hook=None, **kwargs):
         self.kwargs = kwargs
         self.num_warps = num_warps
         self.waves_per_eu = waves_per_eu
@@ -29,15 +29,19 @@ class Config:
         """All kwargs to inject into @jit call."""
         d = dict(self.kwargs)
         if self.num_warps is not None:
-            d['num_warps'] = self.num_warps
+            d["num_warps"] = self.num_warps
         return d
 
     def compiler_opts(self):
         """Compiler-level options (not user kwargs)."""
-        return {k: v for k, v in [
-            ('waves_per_eu', self.waves_per_eu),
-            ('maxnreg', self.maxnreg),
-        ] if v is not None}
+        return {
+            k: v
+            for k, v in [
+                ("waves_per_eu", self.waves_per_eu),
+                ("maxnreg", self.maxnreg),
+            ]
+            if v is not None
+        }
 
     def __repr__(self):
         parts = [f"{k}={v}" for k, v in self.kwargs.items()]
@@ -51,7 +55,7 @@ class Config:
 
     def to_dict(self):
         d = dict(self.kwargs)
-        for k in ('num_warps', 'waves_per_eu', 'maxnreg'):
+        for k in ("num_warps", "waves_per_eu", "maxnreg"):
             v = getattr(self, k)
             if v is not None:
                 d[k] = v
@@ -61,9 +65,9 @@ class Config:
     def from_dict(cls, d):
         d = dict(d)
         return cls(
-            num_warps=d.pop('num_warps', None),
-            waves_per_eu=d.pop('waves_per_eu', None),
-            maxnreg=d.pop('maxnreg', None),
+            num_warps=d.pop("num_warps", None),
+            waves_per_eu=d.pop("waves_per_eu", None),
+            maxnreg=d.pop("maxnreg", None),
             **d,
         )
 
@@ -91,10 +95,20 @@ def do_bench(fn, warmup=5, rep=25, quantiles=None):
 class Autotuner:
     """Wraps a @jit function, benchmarks configs, caches best."""
 
-    def __init__(self, fn, configs, key, warmup, rep,
-                 prune_configs_by=None, reset_to_zero=None,
-                 pre_hook=None, post_hook=None, do_bench_fn=None):
-        self.fn = fn                     # JitFunction instance
+    def __init__(
+        self,
+        fn,
+        configs,
+        key,
+        warmup,
+        rep,
+        prune_configs_by=None,
+        reset_to_zero=None,
+        pre_hook=None,
+        post_hook=None,
+        do_bench_fn=None,
+    ):
+        self.fn = fn  # JitFunction instance
         self.configs = configs
         self.key = key or []
         self.warmup = warmup
@@ -107,18 +121,17 @@ class Autotuner:
         self.cache: Dict[tuple, Config] = {}
 
         # Infer arg names from the underlying function
-        if hasattr(fn, 'func'):
+        if hasattr(fn, "func"):
             self.arg_names = list(inspect.signature(fn.func).parameters.keys())
         else:
             self.arg_names = list(inspect.signature(fn).parameters.keys())
 
         # Disk cache
-        fn_name = getattr(fn, '__name__', None) or getattr(fn, 'func', None)
+        fn_name = getattr(fn, "__name__", None) or getattr(fn, "func", None)
         if fn_name is not None and not isinstance(fn_name, str):
-            fn_name = getattr(fn_name, '__name__', 'unknown')
-        fn_name = fn_name or 'unknown'
-        cache_dir = Path(os.environ.get('FLYDSL_AUTOTUNE_CACHE_DIR',
-                                         os.path.expanduser('~/.flydsl/autotune')))
+            fn_name = getattr(fn_name, "__name__", "unknown")
+        fn_name = fn_name or "unknown"
+        cache_dir = Path(os.environ.get("FLYDSL_AUTOTUNE_CACHE_DIR", os.path.expanduser("~/.flydsl/autotune")))
         self._cache_file = cache_dir / f"{fn_name}.json"
 
         self._load_disk_cache()
@@ -131,9 +144,9 @@ class Autotuner:
         key_vals = []
         for k in self.key:
             v = sig_args.get(k)
-            if hasattr(v, 'shape'):
+            if hasattr(v, "shape"):
                 key_vals.append(tuple(v.shape))
-            elif hasattr(v, 'dtype'):
+            elif hasattr(v, "dtype"):
                 key_vals.append(str(v.dtype))
             else:
                 key_vals.append(v)
@@ -141,7 +154,7 @@ class Autotuner:
         # Also include dtypes of tensor args for type specialization
         dtype_parts = []
         for name, val in sig_args.items():
-            if hasattr(val, 'dtype'):
+            if hasattr(val, "dtype"):
                 dtype_parts.append(f"{name}:{val.dtype}")
         key_vals.append(tuple(dtype_parts))
 
@@ -155,7 +168,7 @@ class Autotuner:
         sig_args.update(kwargs)
         for name in self.reset_to_zero:
             t = sig_args.get(name)
-            if t is not None and hasattr(t, 'zero_'):
+            if t is not None and hasattr(t, "zero_"):
                 t.zero_()
 
     def _prune(self, configs, args, kwargs):
@@ -186,6 +199,7 @@ class Autotuner:
     def _run_with_hints(self, compiler_opts, args, kwargs):
         """Run the kernel function with optional compiler hints."""
         from .compiler.kernel_function import CompilationContext
+
         if compiler_opts:
             with CompilationContext.compile_hints(compiler_opts):
                 self.fn(*args, **kwargs)
@@ -245,12 +259,17 @@ class Autotuner:
         self._cache_file.write_text(json.dumps(data, indent=2))
 
 
-def autotune(configs: List[Config], key: List[str] = None,
-             warmup: int = 5, rep: int = 25,
-             prune_configs_by: Callable = None,
-             reset_to_zero: List[str] = None,
-             pre_hook: Callable = None, post_hook: Callable = None,
-             do_bench: Callable = None):
+def autotune(
+    configs: List[Config],
+    key: List[str] = None,
+    warmup: int = 5,
+    rep: int = 25,
+    prune_configs_by: Callable = None,
+    reset_to_zero: List[str] = None,
+    pre_hook: Callable = None,
+    post_hook: Callable = None,
+    do_bench: Callable = None,
+):
     """Autotune decorator for @jit functions.
 
     Usage:
@@ -259,10 +278,19 @@ def autotune(configs: List[Config], key: List[str] = None,
         def myKernel(..., BLOCK: fx.Constexpr[int], ...):
             ...
     """
+
     def decorator(fn):
-        return Autotuner(fn, configs, key, warmup, rep,
-                         prune_configs_by=prune_configs_by,
-                         reset_to_zero=reset_to_zero,
-                         pre_hook=pre_hook, post_hook=post_hook,
-                         do_bench_fn=do_bench)
+        return Autotuner(
+            fn,
+            configs,
+            key,
+            warmup,
+            rep,
+            prune_configs_by=prune_configs_by,
+            reset_to_zero=reset_to_zero,
+            pre_hook=pre_hook,
+            post_hook=post_hook,
+            do_bench_fn=do_bench,
+        )
+
     return decorator

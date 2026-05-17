@@ -70,15 +70,17 @@ def WMMA(m, n, k, elem_type, elem_type_b=None, elem_type_acc=None):
     """
     from .._mlir import ir
 
-    if isinstance(elem_type, type) and hasattr(elem_type, 'ir_type'):
+    if isinstance(elem_type, type) and hasattr(elem_type, "ir_type"):
         ty = elem_type.ir_type
     elif isinstance(elem_type, ir.Type):
         ty = elem_type
     else:
         raise TypeError(f"WMMA: unsupported elem_type {elem_type}")
 
-    ty_b = ty if elem_type_b is None else (elem_type_b.ir_type if hasattr(elem_type_b, 'ir_type') else elem_type_b)
-    ty_acc = ty if elem_type_acc is None else (elem_type_acc.ir_type if hasattr(elem_type_acc, 'ir_type') else elem_type_acc)
+    ty_b = ty if elem_type_b is None else (elem_type_b.ir_type if hasattr(elem_type_b, "ir_type") else elem_type_b)
+    ty_acc = (
+        ty if elem_type_acc is None else (elem_type_acc.ir_type if hasattr(elem_type_acc, "ir_type") else elem_type_acc)
+    )
     return MmaOpGFX1250_WMMAType.get(m, n, k, ty, ty_b, ty_acc)
 
 
@@ -117,12 +119,8 @@ def make_buffer_tensor(memref, alignment=4, loc=None, ip=None):
 
 
 # Keep references to ODS-generated builders so we can wrap them without losing access.
-_ods_wmma_scale_f32_16x16x128_f8f6f4 = (
-    globals().get("wmma_scale_f32_16x16x128_f8f6f4", None)
-)
-_ods_wmma_scale_f32_32x16x128_f4 = (
-    globals().get("wmma_scale_f32_32x16x128_f4", None)
-)
+_ods_wmma_scale_f32_16x16x128_f8f6f4 = globals().get("wmma_scale_f32_16x16x128_f8f6f4", None)
+_ods_wmma_scale_f32_32x16x128_f4 = globals().get("wmma_scale_f32_32x16x128_f4", None)
 _ods_wave_id = wave_id  # ODS: wave_id(res, ...) -> i32
 _ods_cluster_workgroup_id_x = cluster_workgroup_id_x
 _ods_cluster_workgroup_id_y = cluster_workgroup_id_y
@@ -365,12 +363,27 @@ def wmma_i32_16x16x32_iu4(result_type, operands, *, loc=None, ip=None):
 
 # --- WMMA Scale variants (gfx1250 mxfp4) ---
 
-def wmma_scale_f32_16x16x128_f8f6f4(result_type, a, b, c, scaleA, scaleB,
-                                      *, fmtA=4, fmtB=4, modC=0,
-                                      scaleAType=0, fmtScaleA=0,
-                                      scaleBType=0, fmtScaleB=0,
-                                      reuseA=False, reuseB=False,
-                                      loc=None, ip=None):
+
+def wmma_scale_f32_16x16x128_f8f6f4(
+    result_type,
+    a,
+    b,
+    c,
+    scaleA,
+    scaleB,
+    *,
+    fmtA=4,
+    fmtB=4,
+    modC=0,
+    scaleAType=0,
+    fmtScaleA=0,
+    scaleBType=0,
+    fmtScaleB=0,
+    reuseA=False,
+    reuseB=False,
+    loc=None,
+    ip=None,
+):
     """V_WMMA_SCALE_F32_16X16X128_F8F6F4 for gfx1250 (wave32).
 
     Operand types (wave32):
@@ -392,21 +405,44 @@ def wmma_scale_f32_16x16x128_f8f6f4(result_type, a, b, c, scaleA, scaleB,
     sA = _unwrap_wmma_operand(scaleA, loc=loc)
     sB = _unwrap_wmma_operand(scaleB, loc=loc)
     return _ods_wmma_scale_f32_16x16x128_f8f6f4(
-        result_type, a_v, b_v, c_v, sA, sB,
-        fmtA=fmtA, fmtB=fmtB, modC=modC,
-        scaleAType=scaleAType, fmtScaleA=fmtScaleA,
-        scaleBType=scaleBType, fmtScaleB=fmtScaleB,
-        reuseA=reuseA, reuseB=reuseB,
-        loc=loc, ip=ip,
+        result_type,
+        a_v,
+        b_v,
+        c_v,
+        sA,
+        sB,
+        fmtA=fmtA,
+        fmtB=fmtB,
+        modC=modC,
+        scaleAType=scaleAType,
+        fmtScaleA=fmtScaleA,
+        scaleBType=scaleBType,
+        fmtScaleB=fmtScaleB,
+        reuseA=reuseA,
+        reuseB=reuseB,
+        loc=loc,
+        ip=ip,
     ).result
 
 
-def wmma_scale_f32_32x16x128_f4(result_type, a, b, c, scaleA, scaleB,
-                                  *, modC=0,
-                                  scaleAType=0, fmtScaleA=0,
-                                  scaleBType=0, fmtScaleB=0,
-                                  reuseA=False, reuseB=False,
-                                  loc=None, ip=None):
+def wmma_scale_f32_32x16x128_f4(
+    result_type,
+    a,
+    b,
+    c,
+    scaleA,
+    scaleB,
+    *,
+    modC=0,
+    scaleAType=0,
+    fmtScaleA=0,
+    scaleBType=0,
+    fmtScaleB=0,
+    reuseA=False,
+    reuseB=False,
+    loc=None,
+    ip=None,
+):
     """V_WMMA_SCALE_F32_32X16X128_F4 for gfx1250 (wave32).
 
     Operand types (wave32):
@@ -429,12 +465,21 @@ def wmma_scale_f32_32x16x128_f4(result_type, a, b, c, scaleA, scaleB,
     sA = _unwrap_wmma_operand(scaleA, loc=loc)
     sB = _unwrap_wmma_operand(scaleB, loc=loc)
     return _ods_wmma_scale_f32_32x16x128_f4(
-        result_type, a_v, b_v, c_v, sA, sB,
+        result_type,
+        a_v,
+        b_v,
+        c_v,
+        sA,
+        sB,
         modC=modC,
-        scaleAType=scaleAType, fmtScaleA=fmtScaleA,
-        scaleBType=scaleBType, fmtScaleB=fmtScaleB,
-        reuseA=reuseA, reuseB=reuseB,
-        loc=loc, ip=ip,
+        scaleAType=scaleAType,
+        fmtScaleA=fmtScaleA,
+        scaleBType=scaleBType,
+        fmtScaleB=fmtScaleB,
+        reuseA=reuseA,
+        reuseB=reuseB,
+        loc=loc,
+        ip=ip,
     ).result
 
 
@@ -449,27 +494,31 @@ def wave_id():
         i32 value (SGPR) with the wave ID within the workgroup.
     """
     from .._mlir import ir
+
     i32 = ir.IntegerType.get_signless(32)
     return _ods_wave_id(i32)
 
 
 def cluster_workgroup_id_x():
-    """Get workgroup position within cluster along X (SGPR, gfx1250). """
+    """Get workgroup position within cluster along X (SGPR, gfx1250)."""
     from .._mlir import ir
+
     i32 = ir.IntegerType.get_signless(32)
     return _ods_cluster_workgroup_id_x(i32)
 
 
 def cluster_workgroup_id_y():
-    """Get workgroup position within cluster along Y (SGPR, gfx1250). """
+    """Get workgroup position within cluster along Y (SGPR, gfx1250)."""
     from .._mlir import ir
+
     i32 = ir.IntegerType.get_signless(32)
     return _ods_cluster_workgroup_id_y(i32)
 
 
 def cluster_workgroup_id_z():
-    """Get workgroup position within cluster along Z (SGPR, gfx1250). """
+    """Get workgroup position within cluster along Z (SGPR, gfx1250)."""
     from .._mlir import ir
+
     i32 = ir.IntegerType.get_signless(32)
     return _ods_cluster_workgroup_id_z(i32)
 
@@ -497,12 +546,11 @@ def cluster_load_async_to_lds(global_ptr, lds_ptr, size_bytes, offset=0, cpol=0,
     }
     fn = _dispatch.get(size_bytes)
     if fn is None:
-        raise ValueError(
-            f"cluster_load_async_to_lds: size_bytes must be 1, 4, 8, or 16, "
-            f"got {size_bytes}")
+        raise ValueError(f"cluster_load_async_to_lds: size_bytes must be 1, 4, 8, or 16, " f"got {size_bytes}")
     if mask is None:
         from .._mlir import ir
         from . import arith as _arith
+
         mask = _arith.unwrap(_arith.constant(0, type=ir.IntegerType.get_signless(32)))
     fn(global_ptr, lds_ptr, offset, cpol, mask)
 
@@ -547,7 +595,11 @@ def lds_transpose_load(result_type, lds_memref, elem_offset, elem_bytes):
     from .._mlir import ir as _ir
     from .._mlir.dialects import (
         llvm as _llvm,
+    )
+    from .._mlir.dialects import (
         memref as _memref,
+    )
+    from .._mlir.dialects import (
         rocdl as _rocdl,
     )
     from . import arith as _arith
@@ -623,8 +675,8 @@ __all__ = [
     "wmma_f32_16x16x16_bf8_fp8",
     "wmma_f32_16x16x16_bf8_bf8",
     "wmma_i32_16x16x32_iu4",
-    "wmma_scale_f32_16x16x128_f8f6f4",   # gfx1250 WMMA_SCALE 16x16x128 (FP4/FP6/FP8)
-    "wmma_scale_f32_32x16x128_f4",        # gfx1250 WMMA_SCALE 32x16x128 (FP4 only)
+    "wmma_scale_f32_16x16x128_f8f6f4",  # gfx1250 WMMA_SCALE 16x16x128 (FP4/FP6/FP8)
+    "wmma_scale_f32_32x16x128_f4",  # gfx1250 WMMA_SCALE 32x16x128 (FP4 only)
     # Matrix operations - SMFMAC (Sparse Matrix FMA)
     "smfmac_f32_32x32x16_f16",
     "smfmac_f32_32x32x16_bf16",
@@ -683,20 +735,20 @@ __all__ = [
     "WMMA",
     # Convenience wrappers
     "make_buffer_tensor",
-    "lds_transpose_load",       # memref-level wrapper for gfx1250 ds_load_tr16_b128
+    "lds_transpose_load",  # memref-level wrapper for gfx1250 ds_load_tr16_b128
     # gfx1250 TDM - descriptor-driven tile copy (preferred over per-lane)
-    "tensor_load_to_lds",       # 4-group, up to 5D tensor
-    "tensor_load_to_lds_d2",    # 2-group, up to 2D tensor
-    "tensor_store_from_lds",    # 4-group store
-    "tensor_store_from_lds_d2", # 2-group store
+    "tensor_load_to_lds",  # 4-group, up to 5D tensor
+    "tensor_load_to_lds_d2",  # 2-group, up to 2D tensor
+    "tensor_store_from_lds",  # 4-group store
+    "tensor_store_from_lds_d2",  # 2-group store
     "s_wait_tensorcnt",
     # gfx1250 L2 prefetch
-    "global_prefetch",          # per-lane 1-byte prefetch hint
+    "global_prefetch",  # per-lane 1-byte prefetch hint
     # Cluster (gfx1250 workgroup clustering)
     "cluster_workgroup_id_x",
     "cluster_workgroup_id_y",
     "cluster_workgroup_id_z",
-    "cluster_load_async_to_lds",   # per-lane MCAST load (Global → LDS)
+    "cluster_load_async_to_lds",  # per-lane MCAST load (Global → LDS)
 ]
 
 
