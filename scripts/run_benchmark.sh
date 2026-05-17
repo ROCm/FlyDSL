@@ -69,8 +69,9 @@ RMSNORM_SHAPES='
 '
 # FlashAttention shapes: "batch,seq_len,num_heads,head_dim,dtype,causal"
 DEFAULT_FLASH_ATTN_FUNC_SHAPES='
-1,4096,64,128,bf16,true
-1,8192,64,128,bf16,true
+32,8192,8,128,bf16,true
+16,8192,16,128,bf16,true
+4,8192,64,128,bf16,true
 '
 FLASH_ATTN_FUNC_SHAPES="${FLASH_ATTN_FUNC_SHAPES:-${DEFAULT_FLASH_ATTN_FUNC_SHAPES}}"
 # MLA decode shapes: "batch,ctx_len" (DeepSeek MLA, fp8 Q/KV, nh=128).
@@ -616,7 +617,7 @@ if [ "${RUN_FLASH_ATTN}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
   done
 fi
 
-# MLA decode (gfx942 path; gfx950 AITER metadata uses folded nh=16 layout)
+# MLA decode
 if [ "${RUN_MLA}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
   for shape in $MLA_DECODE_SHAPES; do
     [ -z "$shape" ] && continue
@@ -627,10 +628,6 @@ if [ "${RUN_MLA}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
     IFS=$oldIFS
     batch=$1; ctx_len=$2
     shape_tag="B${batch}C${ctx_len}"
-    if [ "${GPU_ARCH}" = "gfx950" ]; then
-      _emit_row "mla" "${shape_tag}" "fp8" "skip" "skip"
-      continue
-    fi
     log="${BENCH_LOG_DIR}/mla_decode_B${batch}_C${ctx_len}.log"
     if python3 tests/kernels/test_mla_decode.py \
       --batch "$batch" \

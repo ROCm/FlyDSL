@@ -13,7 +13,6 @@ import math
 import os
 import random
 import shutil
-import subprocess
 import sys
 import tarfile
 import urllib.request
@@ -131,20 +130,13 @@ def _maybe_configure_custom_llvm_tools() -> None:
         root_dir.mkdir(parents=True, exist_ok=True)
 
         if not archive_path.is_file():
-            s3_uri = f"s3://framework-whls-devreleases/llvm-tools/gfx942-gfx950/{archive_name}"
-            https_uri = f"https://framework-whls-devreleases.s3.amazonaws.com/llvm-tools/gfx942-gfx950/{archive_name}"
+            https_uri = f"https://rocm.frameworks-devreleases.amd.com/llvm-tools/gfx942-gfx950/{archive_name}"
             print(f"[flash_attn_func] fetching custom LLVM tools: {archive_name}")
-            if shutil.which("aws"):
-                try:
-                    subprocess.run(["aws", "s3", "cp", s3_uri, str(archive_path)], check=True)
-                except Exception as exc:
-                    print(f"[flash_attn_func] aws download failed: {exc}")
-            if not archive_path.is_file():
-                try:
-                    urllib.request.urlretrieve(https_uri, archive_path)
-                except Exception as exc:
-                    archive_path.unlink(missing_ok=True)
-                    print(f"[flash_attn_func] https download failed: {exc}")
+            try:
+                urllib.request.urlretrieve(https_uri, archive_path)
+            except Exception as exc:
+                archive_path.unlink(missing_ok=True)
+                print(f"[flash_attn_func] https download failed: {exc}")
 
         if archive_path.is_file():
             try:
