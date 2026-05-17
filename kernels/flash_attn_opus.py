@@ -437,6 +437,7 @@ def build_flash_attn_opus_module(
         #     D_ACC l_row = 0.0f;
         #     D_ACC rescale_m = 1.0f;
         c_neg_inf = fx.Float32(float("-inf"))
+        # c_neg_inf = fx.Float32(float(-1e30))
         c_zero_f = fx.Float32(0.0)
         c_one_f = fx.Float32(1.0)
         head_dim_f32 = fx.Float32(fx.Int32(head_dim_runtime))
@@ -677,7 +678,20 @@ def build_flash_attn_opus_module(
             )
 
         def _anchor_pair(lo, hi):
-            return _anchor_vec(lo), _anchor_vec(hi)
+            lo_ir = _llvm_value(lo)
+            hi_ir = _llvm_value(hi)
+            ret_ty = ir.Type.parse("!llvm.struct<(vector<16xf32>, vector<16xf32>)>")
+            ret = llvm.inline_asm(
+                ret_ty,
+                [lo_ir, hi_ir],
+                "",
+                "=v,=v,0,1",
+                has_side_effects=True,
+            )
+            return (
+                llvm.extractvalue(lo_ir.type, ret, [0]),
+                llvm.extractvalue(hi_ir.type, ret, [1]),
+            )
 
         def _anchor_packs(packs):
             return [_anchor_vec(p) for p in packs]
@@ -809,8 +823,13 @@ def build_flash_attn_opus_module(
                     noalias_scopes=lds_noalias_scopes(scope_name),
                 )
 
-        def reduction_peer(v_f32):
-            return fx.Float32(v_f32).shuffle_xor(shuf_32_i32, width_i32)
+        def reduction_pair(v_f32):
+            v_i32 = _raw(_bitcast_i32(v_f32))
+            pair_ty = ir.Type.parse("!llvm.struct<(i32, i32)>")
+            swapped = rocdl.permlane32_swap(pair_ty, v_i32, v_i32, False, True)
+            lhs_i32 = llvm.extractvalue(T.i32, swapped, [0])
+            rhs_i32 = llvm.extractvalue(T.i32, swapped, [1])
+            return _raw(_bitcast_f32(lhs_i32)), _raw(_bitcast_f32(rhs_i32))
 
         def async_load_k_from_lds_to_vgpr(buf_id, urk_base):
             """Read all 16 K MFMA packs from LDS buffer `buf_id` (OPUS u_rk)."""
@@ -973,8 +992,25 @@ def build_flash_attn_opus_module(
             m = c_neg_inf
             for r in range_constexpr(16):
                 m = _fmax(m, s_lo[r])
+            for r in range_constexpr(16):
                 m = _fmax(m, s_hi[r])
-            return _fmax(m, reduction_peer(m))
+            lhs, rhs = reduction_pair(m)
+            return _fmax(lhs, rhs)
+
+        def attn_sub_row(s_lo, s_hi, m_row):
+            lo_sub = []
+            hi_sub = []
+            for r in range_constexpr(16):
+                lo_sub.append(_fsub(s_lo[r], m_row))
+            for r in range_constexpr(16):
+                hi_sub.append(_fsub(s_hi[r], m_row))
+            return lo_sub, hi_sub
+
+        def attn_exp2_first_half_slice(s_lo, s_hi):
+            lo_partial = []
+            for r in range_constexpr(16):
+                lo_partial.append(rocdl.exp2(T.f32, _raw(s_lo[r])))
+            return lo_partial, list(s_hi)
 
         def attn_sub_row_first_half_exp2_slice(s_lo, s_hi, m_row):
             lo_partial = []
@@ -998,8 +1034,8 @@ def build_flash_attn_opus_module(
                 local_sum = _fadd(local_sum, lo_partial_list[r])
             for r in range_constexpr(16):
                 local_sum = _fadd(local_sum, hi_full[r])
-            peer_sum = reduction_peer(local_sum)
-            tile_sum = _fadd(local_sum, peer_sum)
+            lhs_sum, rhs_sum = reduction_pair(local_sum)
+            tile_sum = _fadd(lhs_sum, rhs_sum)
             p_lo_packs = []
             p_hi_packs = []
             for pks in range_constexpr(PV_K_STEPS):
@@ -1093,13 +1129,18 @@ def build_flash_attn_opus_module(
         m_row_pro = attn_row_max(s_lo_pro, s_hi_pro)
 
         #     attn_sub_row<T>(v_s[0], m_row);
-        #     attn_exp2_slice<T, 0, s_half_len>(v_s[0]);
-        lo_pro, hi_pro = attn_sub_row_first_half_exp2_slice(s_lo_pro, s_hi_pro, m_row_pro)
-        v_s_0_lo_init = Vec.from_elements(lo_pro, fx.Float32).ir_value()
-        v_s_0_hi_init = Vec.from_elements(hi_pro, fx.Float32).ir_value()
-
+        s_lo_pro, s_hi_pro = attn_sub_row(s_lo_pro, s_hi_pro, m_row_pro)
+        v_s_0_lo_init = Vec.from_elements(s_lo_pro, fx.Float32).ir_value()
+        v_s_0_hi_init = Vec.from_elements(s_hi_pro, fx.Float32).ir_value()
         #     asm volatile("" : "+v"(v_s[0]) ::);
         v_s_0_lo_init, v_s_0_hi_init = _anchor_pair(v_s_0_lo_init, v_s_0_hi_init)
+
+        #     attn_exp2_slice<T, 0, s_half_len>(v_s[0]);
+        s_lo_pro = [Vec(v_s_0_lo_init)[r] for r in range_constexpr(16)]
+        s_hi_pro = [Vec(v_s_0_hi_init)[r] for r in range_constexpr(16)]
+        lo_pro, hi_pro = attn_exp2_first_half_slice(s_lo_pro, s_hi_pro)
+        v_s_0_lo_init = Vec.from_elements(lo_pro, fx.Float32).ir_value()
+        v_s_0_hi_init = Vec.from_elements(hi_pro, fx.Float32).ir_value()
 
         #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
@@ -1795,8 +1836,8 @@ def build_flash_attn_opus_module(
             local_sum_e11 = _fadd(local_sum_e11, lo_e11[r])
         for r in range_constexpr(16):
             local_sum_e11 = _fadd(local_sum_e11, hi_e11_full[r])
-        peer_sum_e11 = reduction_peer(local_sum_e11)
-        tile_sum_e11 = _fadd(local_sum_e11, peer_sum_e11)
+        lhs_sum_e11, rhs_sum_e11 = reduction_pair(local_sum_e11)
+        tile_sum_e11 = _fadd(lhs_sum_e11, rhs_sum_e11)
         #     l_row += attn_sum<T>(v_s[1]);
         l_row = _fadd(l_row, tile_sum_e11)
 
