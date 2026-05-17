@@ -501,14 +501,14 @@ def raw_ptr_buffer_load_lds(rsrc, lds_ptr, size, voffset, soffset, offset, aux, 
     )
 
 
-def buffer_load_to_lds(rsrc, lds_ptr, voffset, size_bytes=4, soffset=0, offset=0):
+def buffer_load_to_lds(rsrc, lds_ptr, voffset, size_bytes=4, soffset=0, offset=0, **kw):
     """Load ``size_bytes`` from a buffer resource into LDS.
 
     Simplified wrapper around :func:`raw_ptr_buffer_load_lds` with
     sensible defaults (``soffset=0``, ``offset=0``, ``aux=0``).
     Python int arguments are auto-materialised as i32 constants.
     """
-    return raw_ptr_buffer_load_lds(rsrc, lds_ptr, size_bytes, voffset, soffset, offset, 0)
+    return raw_ptr_buffer_load_lds(rsrc, lds_ptr, size_bytes, voffset, soffset, offset, 0, **kw)
 
 
 def ds_bpermute(res, index, src, **kw):

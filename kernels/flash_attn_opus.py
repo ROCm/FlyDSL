@@ -54,6 +54,7 @@ _VMCNT_LO_MASK = 0xF
 _LGKMCNT_EXPCNT_BASE = 0x3F70
 _VMCNT_HI_SHIFT = 14
 _VMCNT_HI_MASK = 0x3
+_LDS_ALIAS_DOMAIN = '#llvm.alias_scope_domain<id = "flydsl.opus.lds">'
 
 
 def _llvm_value(value):
@@ -102,6 +103,14 @@ def _waitcnt_vm_n(n):
         | (((n >> 4) & _VMCNT_HI_MASK) << _VMCNT_HI_SHIFT)
     )
     rocdl.s_waitcnt(val)
+
+
+def _lds_alias_scope_array(names):
+    attrs = [
+        f'#llvm.alias_scope<id = "{name}", domain = {_LDS_ALIAS_DOMAIN}>'
+        for name in names
+    ]
+    return ir.Attribute.parse(f"[{', '.join(attrs)}]")
 
 
 def build_flash_attn_opus_module(
@@ -302,6 +311,20 @@ def build_flash_attn_opus_module(
             shape=(LDS_KV_TOTAL_SIZE,),
         ).get()
         lds_kv_base_idx = buffer_ops.extract_base_index(lds_kv, address_space=3)
+        lds_kv_base_ptr = buffer_ops.create_llvm_ptr(lds_kv_base_idx, address_space=3)
+
+        lds_scope_names = ("lds_k0", "lds_k1", "lds_v0", "lds_v1")
+
+        def lds_scope(kind, buf_id):
+            return f"lds_{kind}{buf_id}"
+
+        def lds_alias_scopes(name):
+            return _lds_alias_scope_array([name])
+
+        def lds_noalias_scopes(name):
+            return _lds_alias_scope_array(
+                [scope_name for scope_name in lds_scope_names if scope_name != name]
+            )
 
         #     const int workgroup_x = block_id_x();
         #     const int q_block_idx = block_id_y();
@@ -747,8 +770,17 @@ def build_flash_attn_opus_module(
                 )
                 voffset = fx.Int32(lane_byte)
                 soffset = fx.Int32(uniform_byte)
+                scope_name = lds_scope("k", buf_id)
                 rocdl.raw_ptr_buffer_load_lds(
-                    k_rsrc, lds_ptr, _dma_size, voffset, soffset, _dma_off, _dma_aux
+                    k_rsrc,
+                    lds_ptr,
+                    _dma_size,
+                    voffset,
+                    soffset,
+                    _dma_off,
+                    _dma_aux,
+                    alias_scopes=lds_alias_scopes(scope_name),
+                    noalias_scopes=lds_noalias_scopes(scope_name),
                 )
 
         def async_load_v(tile_start, buf_id):
@@ -770,8 +802,17 @@ def build_flash_attn_opus_module(
                 )
                 voffset = fx.Int32(lane_byte)
                 soffset = fx.Int32(uniform_byte)
+                scope_name = lds_scope("v", buf_id)
                 rocdl.raw_ptr_buffer_load_lds(
-                    v_rsrc, lds_ptr, _dma_size, voffset, soffset, _dma_off, _dma_aux
+                    v_rsrc,
+                    lds_ptr,
+                    _dma_size,
+                    voffset,
+                    soffset,
+                    _dma_off,
+                    _dma_aux,
+                    alias_scopes=lds_alias_scopes(scope_name),
+                    noalias_scopes=lds_noalias_scopes(scope_name),
                 )
 
         def reduction_peer(v_f32):
@@ -782,12 +823,27 @@ def build_flash_attn_opus_module(
             k_base = k_buf_base(buf_id)
             k_lo = [None] * K_STEPS_QK
             k_hi = [None] * K_STEPS_QK
+
+            def load_k_pack_aligned(elem_idx):
+                scope_name = lds_scope("k", buf_id)
+                byte_offset = elem_idx * fx.Index(BF16_BYTES)
+                ptr = buffer_ops.get_element_ptr(
+                    lds_kv_base_ptr, byte_offset=byte_offset, elem_type=T.i8
+                )
+                return llvm.LoadOp(
+                    mfma_pack_type,
+                    ptr,
+                    alignment=16,
+                    alias_scopes=lds_alias_scopes(scope_name),
+                    noalias_scopes=lds_noalias_scopes(scope_name),
+                ).result
+
             for ks in range_constexpr(K_STEPS_QK):
                 ks_offset = (ks // 4) * OPUS_URK_KSTEP_OUTER + (ks % 4) * OPUS_URK_KSTEP_INNER
                 idx_lo = k_base + urk_base + fx.Index(ks_offset)
                 idx_hi = idx_lo + fx.Index(OPUS_URK_N_STRIP_STRIDE)
-                k_lo[ks] = Vec.load(mfma_pack_type, lds_kv, [idx_lo])
-                k_hi[ks] = Vec.load(mfma_pack_type, lds_kv, [idx_hi])
+                k_lo[ks] = load_k_pack_aligned(idx_lo)
+                k_hi[ks] = load_k_pack_aligned(idx_hi)
             return k_lo, k_hi
 
         def _read_v_packs_for_buf(buf_id, urv_base):

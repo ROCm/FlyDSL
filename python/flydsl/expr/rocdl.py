@@ -738,7 +738,7 @@ def raw_ptr_buffer_load_lds(rsrc, lds_ptr, size, voffset, soffset, offset, aux, 
     )
 
 
-def buffer_load_to_lds(rsrc, lds_ptr, voffset, size_bytes=4, soffset=0, offset=0):
+def buffer_load_to_lds(rsrc, lds_ptr, voffset, size_bytes=4, soffset=0, offset=0, **kw):
     """Load ``size_bytes`` from a buffer resource into LDS (``buffer_load_dword lds``).
 
     Simplified wrapper around :func:`raw_ptr_buffer_load_lds` with sensible
@@ -762,4 +762,4 @@ def buffer_load_to_lds(rsrc, lds_ptr, voffset, size_bytes=4, soffset=0, offset=0
 
     from .._mlir.dialects.rocdl import raw_ptr_buffer_load_lds as _op
 
-    return _op(_to_ir(rsrc), _to_ir(lds_ptr), _size, _to_ir(voffset), _soff, _off, _aux)
+    return _op(_to_ir(rsrc), _to_ir(lds_ptr), _size, _to_ir(voffset), _soff, _off, _aux, **kw)
