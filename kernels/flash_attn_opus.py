@@ -734,17 +734,12 @@ def build_flash_attn_opus_module(
                 has_side_effects=True,
             )
 
-        def _pack_bf16_pair(lo, hi, shift, mask):
-            lo_i32 = _bitcast_i32(lo)
-            hi_i32 = _bitcast_i32(hi)
-            return (hi_i32 & mask) | lo_i32.shrui(shift)
-
         def bf16_trunc_pack_v8(f32_vals):
-            _c16 = fx.Int32(16)
-            _cmask = fx.Int32(0xFFFF0000)
             pairs = []
             for j in range_constexpr(4):
-                pairs.append(_pack_bf16_pair(f32_vals[j * 2], f32_vals[j * 2 + 1], _c16, _cmask))
+                pairs.append(
+                    rocdl.cvt_pk_bf16_f32(f32_vals[j * 2], f32_vals[j * 2 + 1])
+                )
             return Vec.from_elements(pairs, fx.Int32).bitcast(elem_dtype).ir_value()
 
         def k_buf_base(buf_id):
@@ -1023,19 +1018,24 @@ def build_flash_attn_opus_module(
                 hi_partial.append(diff_hi)
             return lo_partial, hi_partial
 
-        def _finish_softmax_cast_p(lo_partial_list, hi_partial_vec):
+        def attn_exp2_second_half_slice(hi_partial_vec):
             hi_full = []
             for r in range_constexpr(16):
                 hi_full.append(
                     rocdl.exp2(T.f32, _raw(Vec(hi_partial_vec)[r]))
                 )
+            return hi_full
+
+        def attn_sum_parts(lo_partial_list, hi_full):
             local_sum = c_zero_f
             for r in range_constexpr(16):
                 local_sum = _fadd(local_sum, lo_partial_list[r])
             for r in range_constexpr(16):
                 local_sum = _fadd(local_sum, hi_full[r])
             lhs_sum, rhs_sum = reduction_pair(local_sum)
-            tile_sum = _fadd(lhs_sum, rhs_sum)
+            return _fadd(lhs_sum, rhs_sum)
+
+        def cast_p_parts(lo_partial_list, hi_full):
             p_lo_packs = []
             p_hi_packs = []
             for pks in range_constexpr(PV_K_STEPS):
@@ -1044,7 +1044,7 @@ def build_flash_attn_opus_module(
                 p_lo_packs.append(bf16_trunc_pack_v8(lo_slice))
                 hi_slice = hi_full[p_base:p_base + 8]
                 p_hi_packs.append(bf16_trunc_pack_v8(hi_slice))
-            return p_lo_packs, p_hi_packs, tile_sum
+            return p_lo_packs, p_hi_packs
 
         def _scale_o(o_accs, scale_scalar):
             scale_vec = Vec.from_elements([scale_scalar], fx.Float32).broadcast_to(16)
@@ -1199,12 +1199,12 @@ def build_flash_attn_opus_module(
             #         l_row += attn_sum<T>(v_s[0]);
             #         v_p = opus::cast<D_ATTN>(v_s[0]);
             #         asm volatile("" : "+v"(v_p) ::);
-            v_p_lo_a, v_p_hi_a, tile_sum_a = _finish_softmax_cast_p(
-                [Vec(v_s_0_lo_partial)[r] for r in range_constexpr(16)],
-                v_s_0_hi_partial,
-            )
+            v_s_0_hi_full = attn_exp2_second_half_slice(v_s_0_hi_partial)
+            v_s_0_lo_list = [Vec(v_s_0_lo_partial)[r] for r in range_constexpr(16)]
+            tile_sum_a = attn_sum_parts(v_s_0_lo_list, v_s_0_hi_full)
             l_row = _fadd(l_row, tile_sum_a)
 
+            v_p_lo_a, v_p_hi_a = cast_p_parts(v_s_0_lo_list, v_s_0_hi_full)
             v_p_lo_a = _anchor_packs(v_p_lo_a)
             v_p_hi_a = _anchor_packs(v_p_hi_a)
 
@@ -1348,12 +1348,12 @@ def build_flash_attn_opus_module(
             #         l_row += attn_sum<T>(v_s[1]);
             #         v_p = opus::cast<D_ATTN>(v_s[1]);
             #         asm volatile("" : "+v"(v_p) ::);
-            v_p_lo_b, v_p_hi_b, tile_sum_b = _finish_softmax_cast_p(
-                [Vec(v_s_1_lo_partial)[r] for r in range_constexpr(16)],
-                v_s_1_hi_partial,
-            )
+            v_s_1_hi_full = attn_exp2_second_half_slice(v_s_1_hi_partial)
+            v_s_1_lo_list = [Vec(v_s_1_lo_partial)[r] for r in range_constexpr(16)]
+            tile_sum_b = attn_sum_parts(v_s_1_lo_list, v_s_1_hi_full)
             l_row = _fadd(l_row, tile_sum_b)
 
+            v_p_lo_b, v_p_hi_b = cast_p_parts(v_s_1_lo_list, v_s_1_hi_full)
             v_p_lo_b = _anchor_packs(v_p_lo_b)
             v_p_hi_b = _anchor_packs(v_p_hi_b)
 
@@ -1522,13 +1522,13 @@ def build_flash_attn_opus_module(
         #     attn_exp2_slice<T, s_half_len, s_half_len>(v_s[0]);
         #     v_p = opus::cast<D_ATTN>(v_s[0]);
         #     asm volatile("" : "+v"(v_p) ::);
-        v_p_lo_e1, v_p_hi_e1, tile_sum_e1 = _finish_softmax_cast_p(
-            [Vec(v_s_0_lo_partial)[r] for r in range_constexpr(16)],
-            v_s_0_hi_partial,
-        )
+        v_s_0_hi_full_e1 = attn_exp2_second_half_slice(v_s_0_hi_partial)
+        v_s_0_lo_list_e1 = [Vec(v_s_0_lo_partial)[r] for r in range_constexpr(16)]
+        tile_sum_e1 = attn_sum_parts(v_s_0_lo_list_e1, v_s_0_hi_full_e1)
         #     l_row += attn_sum<T>(v_s[0]);
         l_row = _fadd(l_row, tile_sum_e1)
 
+        v_p_lo_e1, v_p_hi_e1 = cast_p_parts(v_s_0_lo_list_e1, v_s_0_hi_full_e1)
         v_p_lo_e1 = _anchor_packs(v_p_lo_e1)
         v_p_hi_e1 = _anchor_packs(v_p_hi_e1)
 
@@ -1656,13 +1656,13 @@ def build_flash_attn_opus_module(
         #     attn_exp2_slice<T, s_half_len, s_half_len>(v_s[1]);
         #     v_p = opus::cast<D_ATTN>(v_s[1]);
         #     asm volatile("" : "+v"(v_p) ::);
-        v_p_lo_e5, v_p_hi_e5, tile_sum_e5 = _finish_softmax_cast_p(
-            [Vec(v_s_1_lo_e_partial)[r] for r in range_constexpr(16)],
-            v_s_1_hi_e_partial,
-        )
+        v_s_1_hi_full_e5 = attn_exp2_second_half_slice(v_s_1_hi_e_partial)
+        v_s_1_lo_list_e5 = [Vec(v_s_1_lo_e_partial)[r] for r in range_constexpr(16)]
+        tile_sum_e5 = attn_sum_parts(v_s_1_lo_list_e5, v_s_1_hi_full_e5)
         #     l_row += attn_sum<T>(v_s[1]);
         l_row = _fadd(l_row, tile_sum_e5)
 
+        v_p_lo_e5, v_p_hi_e5 = cast_p_parts(v_s_1_lo_list_e5, v_s_1_hi_full_e5)
         v_p_lo_e5 = _anchor_packs(v_p_lo_e5)
         v_p_hi_e5 = _anchor_packs(v_p_hi_e5)
 
@@ -1787,12 +1787,15 @@ def build_flash_attn_opus_module(
         #     attn_exp2_slice<T, s_half_len, s_half_len>(v_s[0]);
         #     v_p = opus::cast<D_ATTN>(v_s[0]);
         #     asm volatile("" : "+v"(v_p) ::);
-        v_p_lo_e9, v_p_hi_e9, tile_sum_e9 = _finish_softmax_cast_p(
-            [Vec(v_s_0_lo_e_partial)[r] for r in range_constexpr(16)],
-            v_s_0_hi_e_partial,
-        )
+        v_s_0_hi_full_e9 = attn_exp2_second_half_slice(v_s_0_hi_e_partial)
+        v_s_0_lo_list_e9 = [Vec(v_s_0_lo_e_partial)[r] for r in range_constexpr(16)]
+        tile_sum_e9 = attn_sum_parts(v_s_0_lo_list_e9, v_s_0_hi_full_e9)
         #     l_row += attn_sum<T>(v_s[0]);
         l_row = _fadd(l_row, tile_sum_e9)
+
+        v_p_lo_e9, v_p_hi_e9 = cast_p_parts(v_s_0_lo_list_e9, v_s_0_hi_full_e9)
+        v_p_lo_e9 = _anchor_packs(v_p_lo_e9)
+        v_p_hi_e9 = _anchor_packs(v_p_hi_e9)
 
         #     sched_barrier_exp_pairs<6, 3, 9>();
         _sched_barrier_exp_pairs(6, 3, 9)
@@ -1879,26 +1882,15 @@ def build_flash_attn_opus_module(
             hi_e11_full.append(rocdl.exp2(T.f32, _raw(hi_e11[r])))
         #     l_row *= rescale_m;
         l_row = _fmul(l_row, rescale_e11)
-        local_sum_e11 = c_zero_f
-        for r in range_constexpr(16):
-            local_sum_e11 = _fadd(local_sum_e11, lo_e11[r])
-        for r in range_constexpr(16):
-            local_sum_e11 = _fadd(local_sum_e11, hi_e11_full[r])
-        lhs_sum_e11, rhs_sum_e11 = reduction_pair(local_sum_e11)
-        tile_sum_e11 = _fadd(lhs_sum_e11, rhs_sum_e11)
+        tile_sum_e11 = attn_sum_parts(lo_e11, hi_e11_full)
         #     l_row += attn_sum<T>(v_s[1]);
         l_row = _fadd(l_row, tile_sum_e11)
 
         #     v_p = opus::cast<D_ATTN>(v_s[1]);
         #     asm volatile("" : "+v"(v_p) ::);
-        v_p_lo_e11 = []
-        v_p_hi_e11 = []
-        for pks in range_constexpr(PV_K_STEPS):
-            p_base = pks * 8
-            lo_slice = [lo_e11[p_base + s] for s in range_constexpr(8)]
-            v_p_lo_e11.append(bf16_trunc_pack_v8(lo_slice))
-            hi_slice = hi_e11_full[p_base:p_base + 8]
-            v_p_hi_e11.append(bf16_trunc_pack_v8(hi_slice))
+        v_p_lo_e11, v_p_hi_e11 = cast_p_parts(lo_e11, hi_e11_full)
+        v_p_lo_e11 = _anchor_packs(v_p_lo_e11)
+        v_p_hi_e11 = _anchor_packs(v_p_hi_e11)
 
         #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)

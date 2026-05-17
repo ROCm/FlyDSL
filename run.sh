@@ -45,6 +45,7 @@ function run_flydsl_op {
     export FLYDSL_DUMP_DIR=./flydsl_dump
 
     export FLYDSL_ENABLE_OPUS_PATH=1
+    # python tests/kernels/test_flash_opus_attn.py --causal --dtype bf16 --batch 16 --num_heads 64 --num_kv_heads 64 --seq_len 8192 --head_dim 128 --iters 100
 
 
     # python tests/kernels/test_moe_stage1_simple.py --size M
@@ -65,6 +66,8 @@ function run_flydsl_op {
 
 
     python tests/kernels/test_flash_opus_attn.py --causal --dtype bf16 --batch 16 --num_heads 64 --num_kv_heads 64 --seq_len 8192 --head_dim 128 --iters 100
+    # python tests/kernels/test_flash_opus_attn.py --causal --dtype bf16 --batch 16 --num_heads 64 --num_kv_heads 64 --seq_len 512 --head_dim 128 --iters 100
+    # python tests/kernels/test_flash_opus_attn.py --causal --dtype bf16 --batch 16 --num_heads 64 --num_kv_heads 8 --seq_len 8192 --head_dim 128 --iters 100
 
     # python tests/kernels/test_flash_opus_attn.py --warmup 5 --iters 100 --compare
     # python tests/kernels/test_flash_opus_attn.py --dtype bf16 --batch 16 --num_heads 64 --num_kv_heads 64 --seq_len 8192 --head_dim 128 --iters 100 --compare
