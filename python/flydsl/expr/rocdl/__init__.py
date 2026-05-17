@@ -31,6 +31,8 @@ _ods_cluster_load_async_to_lds_b64 = cluster_load_async_to_lds_b64
 _ods_cluster_load_async_to_lds_b128 = cluster_load_async_to_lds_b128
 _ods_s_wait_asynccnt = s_wait_asynccnt
 _ods_readfirstlane = readfirstlane
+_ods_ballot = ballot
+_ods_readlane = readlane
 _ods_mfma_f32_32x32x8f16 = globals().get("mfma_f32_32x32x8f16", None)
 _ods_mfma_f32_32x32x8bf16_1k = globals().get("mfma_f32_32x32x8bf16_1k", None)
 _ods_mfma_f32_32x32x16_f16 = globals().get("mfma_f32_32x32x16_f16", None)
@@ -521,29 +523,21 @@ def readfirstlane(res, src, **kw):
     return _ods_readfirstlane(res=res, src=_to_ir(src), **kw)
 
 
+def ballot(res, pred, **kw):
+    """Wrap ROCDL ``ballot``: coerce ``pred`` to ``i1`` if needed.
 
-def ballot_i64(cond, *, loc=None):
-    """Warp ballot returning 64-bit lane mask, with auto i1 coercion."""
+    ``res`` selects the lane-mask width (``i32`` on wave32, ``i64`` on wave64).
+    """
     from ..._mlir.ir import IntegerType
-    from ..._mlir.dialects import llvm as _llvm, rocdl as _rocdl
+    from ..._mlir.dialects import llvm as _llvm
 
-    pred = _to_ir(cond)
+    pred_v = _to_ir(pred)
     i1 = IntegerType.get_signless(1)
-    if pred.type != i1:
-        pred = _llvm.TruncOp(i1, pred).result
-    i64 = IntegerType.get_signless(64)
-    return _rocdl.BallotOp(i64, pred, loc=loc).result
+    if pred_v.type != i1:
+        pred_v = _llvm.TruncOp(i1, pred_v).result
+    return _ods_ballot(res=res, pred=pred_v, **kw)
 
 
-def readlane(val, lane, *, loc=None):
-    """Read a value from a specific warp lane, accepting Python int for *lane*."""
-    from ..._mlir.ir import IntegerType, IntegerAttr
-    from ..._mlir.dialects import rocdl as _rocdl, arith as _arith
-
-    src = _to_ir(val)
-    i32 = IntegerType.get_signless(32)
-    if isinstance(lane, int):
-        lane_v = _arith.ConstantOp(i32, IntegerAttr.get(i32, lane)).result
-    else:
-        lane_v = _to_ir(lane)
-    return _rocdl.ReadlaneOp(i32, src, lane_v, loc=loc).result
+def readlane(res, src, lane, **kw):
+    """Wrap ROCDL ``readlane`` with ``_to_ir`` coercion (Python ``int`` ok for ``lane``)."""
+    return _ods_readlane(res=res, src0=_to_ir(src), src1=_to_ir(lane), **kw)
