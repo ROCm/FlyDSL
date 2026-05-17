@@ -15,22 +15,11 @@ do not yet have a high-level wrapper.
 
 from __future__ import annotations
 
-import flydsl.compiler as flyc
-import flydsl.expr as fx
+import mori.ir.flydsl as mori_shmem
 import torch
 
-import mori.ir.flydsl as mori_shmem
-
-from flydsl.expr import T, arith, const_expr, range_constexpr
-from flydsl.expr.buffer_ops import (
-    buffer_load,
-    buffer_store,
-    create_buffer_resource_from_addr,
-)
-from flydsl.expr.rocdl import ballot, readlane
-from flydsl.expr.typing import Stream
-from flydsl.expr import vector
-from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
+import flydsl.compiler as flyc
+import flydsl.expr as fx
 
 # Low-level MLIR escape hatches: system-scope atomics, pointer casts, and
 # raw LLVM ops used inside the SIMD micro-kernel helpers
@@ -38,7 +27,17 @@ from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from flydsl._mlir import ir
 from flydsl._mlir import ir as _ir
 from flydsl._mlir.dialects import llvm as _llvm_d
-from flydsl._mlir.ir import IntegerAttr as _IntAttr, IntegerType as _IntTy
+from flydsl._mlir.ir import IntegerAttr as _IntAttr
+from flydsl._mlir.ir import IntegerType as _IntTy
+from flydsl.expr import T, arith, const_expr, range_constexpr, vector
+from flydsl.expr.buffer_ops import (
+    buffer_load,
+    buffer_store,
+    create_buffer_resource_from_addr,
+)
+from flydsl.expr.rocdl import ballot, readlane
+from flydsl.expr.typing import Stream
+from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 
 
 def _lv_unwrap(v):
@@ -104,35 +103,28 @@ def _vec_to_i32_bitcast(vec_val):
 
 def _to_ptr_global(v):
     """Cast an i64 address to ``!llvm.ptr<1>`` (global address space)."""
-    return _llvm_d.IntToPtrOp(
-        _llvm_d.PointerType.get(address_space=1), _lv_unwrap(v)).result
+    return _llvm_d.IntToPtrOp(_llvm_d.PointerType.get(address_space=1), _lv_unwrap(v)).result
 
 
 def store_i32_system(addr_i64, offset, val):
     """System-scope monotonic i32 store at ``addr_i64 + offset*4`` bytes."""
     base = _lv_unwrap(addr_i64)
-    off  = _lv_unwrap(offset)
+    off = _lv_unwrap(offset)
     val_ = _lv_unwrap(val)
     _i64 = _IntTy.get_signless(64)
     _i32 = _IntTy.get_signless(32)
     _nuw = _ir.Attribute.parse("#llvm.overflow<none>")
     off64 = _llvm_d.ZExtOp(_i64, off).res if off.type == _i32 else off
-    byte_off = _llvm_d.MulOp(
-        off64, _llvm_d.ConstantOp(_i64, _IntAttr.get(_i64, 4)).result, _nuw).result
+    byte_off = _llvm_d.MulOp(off64, _llvm_d.ConstantOp(_i64, _IntAttr.get(_i64, 4)).result, _nuw).result
     addr = _llvm_d.AddOp(base, byte_off, _nuw).result
-    gptr = _llvm_d.IntToPtrOp(
-        _llvm_d.PointerType.get(address_space=1), addr).result
-    _llvm_d.StoreOp(val_, gptr, alignment=4,
-                    ordering=_llvm_d.AtomicOrdering.monotonic,
-                    syncscope="one-as")
+    gptr = _llvm_d.IntToPtrOp(_llvm_d.PointerType.get(address_space=1), addr).result
+    _llvm_d.StoreOp(val_, gptr, alignment=4, ordering=_llvm_d.AtomicOrdering.monotonic, syncscope="one-as")
 
 
 def store_i64_global_system(addr_i64, val):
     """System-scope monotonic i64 store to ``addr_i64``."""
     gptr = _to_ptr_global(addr_i64)
-    _llvm_d.StoreOp(_lv_unwrap(val), gptr, alignment=8,
-                    ordering=_llvm_d.AtomicOrdering.monotonic,
-                    syncscope="one-as")
+    _llvm_d.StoreOp(_lv_unwrap(val), gptr, alignment=8, ordering=_llvm_d.AtomicOrdering.monotonic, syncscope="one-as")
 
 
 def load_i64_global(addr_i64):
@@ -145,9 +137,7 @@ def load_i64_global(addr_i64):
 def atomic_add_global_at(addr_i64, val):
     """Monotonic global ``atomic fetch-and-add``; returns the old value."""
     ptr = _to_ptr_global(addr_i64)
-    return _llvm_d.AtomicRMWOp(
-        _llvm_d.AtomicBinOp.add, ptr, _lv_unwrap(val),
-        _llvm_d.AtomicOrdering.monotonic).res
+    return _llvm_d.AtomicRMWOp(_llvm_d.AtomicBinOp.add, ptr, _lv_unwrap(val), _llvm_d.AtomicOrdering.monotonic).res
 
 
 # NOTE: explicit ``index``/``i32`` casts that used to wrap every for-loop bound
@@ -190,70 +180,70 @@ def make_dispatch_kernel(
          (per-expert packing for the std-MoE expert path).
     """
     max_recv = npes * max_tok_per_rank
-    _is_fp4 = (data_type == torch.float4_e2m1fn_x2)
+    _is_fp4 = data_type == torch.float4_e2m1fn_x2
     if _is_fp4:
-        n_i32  = hidden_dim // 8   # 8 fp4 values per i32 (4 bytes)
-        nbytes = hidden_dim // 2   # 2 fp4 values per byte
+        n_i32 = hidden_dim // 8  # 8 fp4 values per i32 (4 bytes)
+        nbytes = hidden_dim // 2  # 2 fp4 values per byte
     else:
-        n_i32  = (hidden_dim * hidden_elem_size) // 4
+        n_i32 = (hidden_dim * hidden_elem_size) // 4
         nbytes = hidden_dim * hidden_elem_size
-    scale_bytes    = scale_dim * scale_type_size
-    scale_n_i32    = (scale_bytes + 3) // 4 if scale_bytes > 0 else 0
-    enable_scales  = scale_bytes > 0
+    scale_bytes = scale_dim * scale_type_size
+    scale_n_i32 = (scale_bytes + 3) // 4 if scale_bytes > 0 else 0
+    enable_scales = scale_bytes > 0
     max_tokens_per_expert = npes * max_tok_per_rank  # per-expert bucket capacity
 
     @flyc.kernel
     def ep_dispatch_intranode(
-        addr_inp_tok:  fx.Int64,  # [cur_tok, hidden_dim]  bf16
-        addr_idx:      fx.Int64,  # [cur_tok, k]           i32  (token_indices)
-        addr_wts:      fx.Int64,  # [cur_tok, k]           f32  (weights_buf)
-        addr_out_tok:  fx.Int64,  # shmem_out_tok
-        addr_out_wts:  fx.Int64,  # shmem_out_wts
-        addr_out_idx:  fx.Int64,  # shmem_out_idx
-        addr_tok_off:  fx.Int64,  # shmem_tok_off (i32[1])
+        addr_inp_tok: fx.Int64,  # [cur_tok, hidden_dim]  bf16
+        addr_idx: fx.Int64,  # [cur_tok, k]           i32  (token_indices)
+        addr_wts: fx.Int64,  # [cur_tok, k]           f32  (weights_buf)
+        addr_out_tok: fx.Int64,  # shmem_out_tok
+        addr_out_wts: fx.Int64,  # shmem_out_wts
+        addr_out_idx: fx.Int64,  # shmem_out_idx
+        addr_tok_off: fx.Int64,  # shmem_tok_off (i32[1])
         addr_recv_num: fx.Int64,  # recv_tok_num  (i32[npes])
         addr_dest_ctr: fx.Int64,  # dest_pe_ctr   (i32[npes])
         addr_disp_bar: fx.Int64,  # dispatch_bar  (i32[1])
-        addr_tok_map:  fx.Int64,  # dest_tok_map  (i32[cur_tok*k])
-        addr_tis:      fx.Int64,  # tok_id_to_src (i32[max_recv])
+        addr_tok_map: fx.Int64,  # dest_tok_map  (i32[cur_tok*k])
+        addr_tis: fx.Int64,  # tok_id_to_src (i32[max_recv])
         addr_total_rv: fx.Int64,  # total_recv    (i32[1])
         # Pre-resolved P2P address arrays (i64[npes]): the remote-side base
         # of each symmetric shmem buffer on every peer PE.
-        addr_p2p_tok_off:  fx.Int64,
-        addr_p2p_tis:      fx.Int64,
-        addr_p2p_out_wts:  fx.Int64,
-        addr_p2p_out_idx:  fx.Int64,
-        addr_p2p_out_tok:  fx.Int64,
+        addr_p2p_tok_off: fx.Int64,
+        addr_p2p_tis: fx.Int64,
+        addr_p2p_out_wts: fx.Int64,
+        addr_p2p_out_idx: fx.Int64,
+        addr_p2p_out_tok: fx.Int64,
         addr_p2p_recv_num: fx.Int64,
-        addr_scales:       fx.Int64,  # input scales buffer
+        addr_scales: fx.Int64,  # input scales buffer
         addr_p2p_out_scales: fx.Int64,  # i64[npes] P2P addresses of scales buffer
         # ── StdMoE ConvertDispatchOutput parameters ──
-        addr_packed_recv_x:        fx.Int64,  # expert-major token buffer
-        addr_packed_recv_count:    fx.Int64,  # per-expert token count (i32[experts_per_rank])
+        addr_packed_recv_x: fx.Int64,  # expert-major token buffer
+        addr_packed_recv_count: fx.Int64,  # per-expert token count (i32[experts_per_rank])
         addr_packed_recv_src_info: fx.Int64,  # source info (i32[experts_per_rank * max_tok_per_expert])
-        addr_disp_tok_map:         fx.Int64,  # slot mapping (i64[max_recv * top_k])
-        addr_disp_grid_bar:        fx.Int64,  # grid barrier (i32[1])
-        cur_tok:       fx.Int32,  # runtime token count for the current batch
+        addr_disp_tok_map: fx.Int64,  # slot mapping (i64[max_recv * top_k])
+        addr_disp_grid_bar: fx.Int64,  # grid barrier (i32[1])
+        cur_tok: fx.Int32,  # runtime token count for the current batch
     ):
-        tid    = fx.thread_idx.x       # thread id within the block
-        bid    = fx.block_idx.x        # block id within the grid
-        lane   = tid & 63              # lane id within the warp (0..63)
-        warp   = tid >> 6              # warp id within the block
-        global_warp_id  = bid * warp_num_per_block + warp   # warp id across the grid
-        global_warp_num = block_num * warp_num_per_block    # total warps in the grid
-        work_limit = cur_tok * experts_per_token            # total (token, k-slot) pairs
-        _r_idx     = create_buffer_resource_from_addr(addr_idx)
-        _r_wts     = create_buffer_resource_from_addr(addr_wts)
+        tid = fx.thread_idx.x  # thread id within the block
+        bid = fx.block_idx.x  # block id within the grid
+        lane = tid & 63  # lane id within the warp (0..63)
+        warp = tid >> 6  # warp id within the block
+        global_warp_id = bid * warp_num_per_block + warp  # warp id across the grid
+        global_warp_num = block_num * warp_num_per_block  # total warps in the grid
+        work_limit = cur_tok * experts_per_token  # total (token, k-slot) pairs
+        _r_idx = create_buffer_resource_from_addr(addr_idx)
+        _r_wts = create_buffer_resource_from_addr(addr_wts)
         _r_tok_map = create_buffer_resource_from_addr(addr_tok_map)
         _r_tok_off = create_buffer_resource_from_addr(addr_tok_off)
         _r_dest_ctr = create_buffer_resource_from_addr(addr_dest_ctr)
         _r_disp_bar = create_buffer_resource_from_addr(addr_disp_bar)
         _r_total_rv = create_buffer_resource_from_addr(addr_total_rv)
-        _r_p2p_tok_off  = create_buffer_resource_from_addr(addr_p2p_tok_off)
-        _r_p2p_tis      = create_buffer_resource_from_addr(addr_p2p_tis)
-        _r_p2p_out_wts  = create_buffer_resource_from_addr(addr_p2p_out_wts)
-        _r_p2p_out_idx  = create_buffer_resource_from_addr(addr_p2p_out_idx)
-        _r_p2p_out_tok  = create_buffer_resource_from_addr(addr_p2p_out_tok)
+        _r_p2p_tok_off = create_buffer_resource_from_addr(addr_p2p_tok_off)
+        _r_p2p_tis = create_buffer_resource_from_addr(addr_p2p_tis)
+        _r_p2p_out_wts = create_buffer_resource_from_addr(addr_p2p_out_wts)
+        _r_p2p_out_idx = create_buffer_resource_from_addr(addr_p2p_out_idx)
+        _r_p2p_out_tok = create_buffer_resource_from_addr(addr_p2p_out_tok)
         _r_p2p_recv_num = create_buffer_resource_from_addr(addr_p2p_recv_num)
 
         # Phase 1: P2P-scatter tokens to their destination PEs.
@@ -261,41 +251,35 @@ def make_dispatch_kernel(
         # all grid-wide warps. ``k_slot`` is the per-token expert slot index
         # (i.e. which of the top-k experts this work-item handles).
         for work_idx in range(global_warp_id, work_limit, global_warp_num):
-            src_tok  = (work_idx // experts_per_token)
-            k_slot   = (work_idx % experts_per_token)
+            src_tok = work_idx // experts_per_token
+            k_slot = work_idx % experts_per_token
             # Issue the two idx loads in parallel; divui is deferred so the
             # loads do not block on the integer divide.
-            dest_expert  = buffer_load(_r_idx, work_idx, vec_width=1, dtype=T.i32())
-            safe_lane    = arith.select(lane < k_slot, lane, 0)
-            lane_expert  = buffer_load(_r_idx, src_tok * experts_per_token + safe_lane, vec_width=1, dtype=T.i32())
-            dest_pe      = (dest_expert // experts_per_rank)
-            lane_dest_pe = (lane_expert // experts_per_rank)
+            dest_expert = buffer_load(_r_idx, work_idx, vec_width=1, dtype=T.i32())
+            safe_lane = arith.select(lane < k_slot, lane, 0)
+            lane_expert = buffer_load(_r_idx, src_tok * experts_per_token + safe_lane, vec_width=1, dtype=T.i32())
+            dest_pe = dest_expert // experts_per_rank
+            lane_dest_pe = lane_expert // experts_per_rank
             # Per-lane "is this lane a duplicate destPE assignment for some
             # k_slot earlier than the current one?" (sentinel 64 = no).
-            dup_per_lane = arith.select(
-                lane_dest_pe == dest_pe,
-                arith.select(lane < k_slot, lane, 64),
-                64)
-            dup_ballot   = ballot(T.i64(), dup_per_lane < 64)
-            is_dup       = dup_ballot != 0
+            dup_per_lane = arith.select(lane_dest_pe == dest_pe, arith.select(lane < k_slot, lane, 64), 64)
+            dup_ballot = ballot(T.i64(), dup_per_lane < 64)
+            is_dup = dup_ballot != 0
 
             # Atomically allocate dest_tok_id on lane 0, then readlane-broadcast.
             dest_tok_lane0 = arith.constant(0)
             if lane == 0:
                 if dup_ballot == 0:
                     dest_tok_lane0 = atomic_add_global_at(
-                        buffer_load(_r_p2p_tok_off, dest_pe, vec_width=1, dtype=T.i64()),
-                        arith.constant(1))
+                        buffer_load(_r_p2p_tok_off, dest_pe, vec_width=1, dtype=T.i64()), arith.constant(1)
+                    )
             dest_tok_id = readlane(T.i32(), dest_tok_lane0, 0)
 
             # Per-(token, k_slot) entry stored into dest_tok_map: encoded
             # global slot id, or sentinel ``npes * max_recv`` for dup-slots
             # which the combine kernel will treat as "no source".
             sentinel_val = npes * max_recv
-            tok_map_entry = arith.select(
-                is_dup,
-                sentinel_val,
-                dest_pe * max_recv + dest_tok_id)
+            tok_map_entry = arith.select(is_dup, sentinel_val, dest_pe * max_recv + dest_tok_id)
             if lane == 0:
                 buffer_store(tok_map_entry, _r_tok_map, work_idx)
 
@@ -305,7 +289,8 @@ def make_dispatch_kernel(
                     # can later route the token back during combine.
                     src_tok_enc = rank * max_tok_per_rank + src_tok
                     _r_tis_remote = create_buffer_resource_from_addr(
-                        buffer_load(_r_p2p_tis, dest_pe, vec_width=1, dtype=T.i64()))
+                        buffer_load(_r_p2p_tis, dest_pe, vec_width=1, dtype=T.i64())
+                    )
                     buffer_store(src_tok_enc, _r_tis_remote, dest_tok_id)
                     dest_ctr_addr = addr_dest_ctr + _to_i64(dest_pe) * 4
                     atomic_add_global_at(dest_ctr_addr, arith.constant(1))
@@ -314,15 +299,17 @@ def make_dispatch_kernel(
             # PE's symmetric weights / idx buffers, parallel over k_slot.
             if lane < experts_per_token:
                 if dup_ballot == 0:
-                    wt_src_off    = src_tok * experts_per_token + lane
-                    wt_val        = buffer_load(_r_wts, wt_src_off, vec_width=1, dtype=T.f32())
-                    idx_val       = buffer_load(_r_idx, wt_src_off, vec_width=1, dtype=T.i32())
-                    dest_slot     = dest_tok_id * experts_per_token + lane
+                    wt_src_off = src_tok * experts_per_token + lane
+                    wt_val = buffer_load(_r_wts, wt_src_off, vec_width=1, dtype=T.f32())
+                    idx_val = buffer_load(_r_idx, wt_src_off, vec_width=1, dtype=T.i32())
+                    dest_slot = dest_tok_id * experts_per_token + lane
                     _r_wts_remote = create_buffer_resource_from_addr(
-                        buffer_load(_r_p2p_out_wts, dest_pe, vec_width=1, dtype=T.i64()))
+                        buffer_load(_r_p2p_out_wts, dest_pe, vec_width=1, dtype=T.i64())
+                    )
                     buffer_store(arith.bitcast(T.i32(), wt_val), _r_wts_remote, dest_slot)
                     _r_idx_remote = create_buffer_resource_from_addr(
-                        buffer_load(_r_p2p_out_idx, dest_pe, vec_width=1, dtype=T.i64()))
+                        buffer_load(_r_p2p_out_idx, dest_pe, vec_width=1, dtype=T.i64())
+                    )
                     buffer_store(idx_val, _r_idx_remote, dest_slot)
 
             if const_expr(enable_scales):
@@ -330,12 +317,16 @@ def make_dispatch_kernel(
                     if dup_ballot == 0:
                         _r_scales = create_buffer_resource_from_addr(addr_scales)
                         sc_src_off = src_tok * scale_n_i32 + lane
-                        sc_val     = buffer_load(_r_scales, sc_src_off, vec_width=1, dtype=T.i32())
+                        sc_val = buffer_load(_r_scales, sc_src_off, vec_width=1, dtype=T.i32())
                         sc_dst_off = dest_tok_id * scale_n_i32 + lane
                         _r_sc_remote = create_buffer_resource_from_addr(
                             buffer_load(
                                 create_buffer_resource_from_addr(_lv_unwrap(addr_p2p_out_scales)),
-                                dest_pe, vec_width=1, dtype=T.i64()))
+                                dest_pe,
+                                vec_width=1,
+                                dtype=T.i64(),
+                            )
+                        )
                         buffer_store(sc_val, _r_sc_remote, sc_dst_off)
 
             # Token-embedding scatter: when ``is_dup`` the copy_end equals
@@ -345,13 +336,14 @@ def make_dispatch_kernel(
             #                     owns 4 consecutive i32 = 16 bytes).
             # ``chunk_i32_off``  - sliding i32 offset within the token's
             #                     hidden-dim chunk being copied this step.
-            remote_tok_addr = buffer_load(_r_p2p_out_tok, dest_pe, vec_width=1, dtype=T.i64()) + \
-                _to_i64(dest_tok_id) * nbytes
-            local_tok_addr  = addr_inp_tok + _to_i64(src_tok) * nbytes
-            rsrc_src        = create_buffer_resource_from_addr(local_tok_addr)
-            rsrc_dst        = create_buffer_resource_from_addr(remote_tok_addr)
-            lane_i32_off    = lane * 4
-            safe_end_i32    = (n_i32 // 512) * 512   # largest multiple of 512 that fits
+            remote_tok_addr = (
+                buffer_load(_r_p2p_out_tok, dest_pe, vec_width=1, dtype=T.i64()) + _to_i64(dest_tok_id) * nbytes
+            )
+            local_tok_addr = addr_inp_tok + _to_i64(src_tok) * nbytes
+            rsrc_src = create_buffer_resource_from_addr(local_tok_addr)
+            rsrc_dst = create_buffer_resource_from_addr(remote_tok_addr)
+            lane_i32_off = lane * 4
+            safe_end_i32 = (n_i32 // 512) * 512  # largest multiple of 512 that fits
             if const_expr(n_i32 >= 512 and safe_end_i32 > 0):
                 copy_end_main = arith.select(is_dup, lane_i32_off, safe_end_i32)
                 for chunk_i32_off in range(lane_i32_off, copy_end_main, 512):
@@ -384,8 +376,9 @@ def make_dispatch_kernel(
                 buffer_store(arith.constant(0), _r_disp_bar, 0)
                 # +1 because 0 is the "unset" sentinel that consumers wait on.
                 signal_value = buffer_load(_r_dest_ctr, dest_pe, vec_width=1, dtype=T.i32()) + 1
-                recv_num_remote_addr = buffer_load(
-                    _r_p2p_recv_num, dest_pe, vec_width=1, dtype=T.i64()) + recv_num_local_byte_off
+                recv_num_remote_addr = (
+                    buffer_load(_r_p2p_recv_num, dest_pe, vec_width=1, dtype=T.i64()) + recv_num_local_byte_off
+                )
                 mori_shmem.int32_wait_until_equals(recv_num_remote_addr, 0)
                 store_i32_system(recv_num_remote_addr, arith.constant(0), signal_value)
 
@@ -393,8 +386,8 @@ def make_dispatch_kernel(
         for src_pe in range(lane, npes, 64):
             if global_warp_id == 0:
                 recv_num_src_addr = addr_recv_num + _to_i64(src_pe) * 4
-                signal_value      = mori_shmem.int32_wait_until_greater_than(recv_num_src_addr, 0)
-                peer_recv_count   = signal_value - 1   # undo the +1 sentinel offset
+                signal_value = mori_shmem.int32_wait_until_greater_than(recv_num_src_addr, 0)
+                peer_recv_count = signal_value - 1  # undo the +1 sentinel offset
                 store_i32_system(recv_num_src_addr, arith.constant(0), arith.constant(0))
                 atomic_add_global_at(addr_total_rv, peer_recv_count)
                 buffer_store(arith.constant(0), _r_dest_ctr, src_pe)
@@ -417,23 +410,22 @@ def make_dispatch_kernel(
             fx.barrier()
 
             _r_out_idx_local = create_buffer_resource_from_addr(addr_out_idx)
-            _r_tis_local     = create_buffer_resource_from_addr(addr_tis)
+            _r_tis_local = create_buffer_resource_from_addr(addr_tis)
             _r_out_tok_local = create_buffer_resource_from_addr(addr_out_tok)
-            total_recv      = buffer_load(_r_total_rv, 0, vec_width=1, dtype=T.i32())
+            total_recv = buffer_load(_r_total_rv, 0, vec_width=1, dtype=T.i32())
             smoe_work_limit = total_recv * experts_per_token
 
             for smoe_idx in range(global_warp_id, smoe_work_limit, global_warp_num):
-                smoe_tok_id = (smoe_idx // experts_per_token)
+                smoe_tok_id = smoe_idx // experts_per_token
 
-                expert_id       = buffer_load(_r_out_idx_local, smoe_idx, vec_width=1, dtype=T.i32())
+                expert_id = buffer_load(_r_out_idx_local, smoe_idx, vec_width=1, dtype=T.i32())
                 local_expert_id = expert_id - rank * experts_per_rank
                 # MUST be unsigned ``ult``: when ``expert_id`` is NOT this
                 # rank's expert, ``local_expert_id`` is negative; the
                 # signed-overload form ``local_expert_id < experts_per_rank``
                 # lowers to ``arith.cmpi slt`` and would mis-classify negative
                 # values as local (-> illegal global access in WarpCopy).
-                is_local        = arith.cmpi(arith.CmpIPredicate.ult, local_expert_id,
-                                             arith.constant(experts_per_rank))
+                is_local = arith.cmpi(arith.CmpIPredicate.ult, local_expert_id, arith.constant(experts_per_rank))
 
                 # Atomically allocate the per-expert packing slot on lane 0.
                 packed_slot_lane0 = arith.constant(0)
@@ -446,26 +438,24 @@ def make_dispatch_kernel(
                 safe_local_expert = arith.select(is_local, local_expert_id, 0)
                 # Linear slot in the flat ``packed_recv_x[experts_per_rank, max_tokens_per_expert]`` buffer.
                 packed_linear_idx = safe_local_expert * max_tokens_per_expert + packed_slot
-                slot_val_i64 = arith.select(is_local,
-                    _to_i64(packed_linear_idx),
-                    -1)   # false_value materialized as i64 from true_value's type; -1 = not a local expert
+                slot_val_i64 = arith.select(
+                    is_local, _to_i64(packed_linear_idx), -1
+                )  # false_value materialized as i64 from true_value's type; -1 = not a local expert
                 if lane == 0:
                     slot_map_addr = addr_disp_tok_map + _to_i64(smoe_idx) * 8
                     store_i64_global_system(slot_map_addr, slot_val_i64)
 
                 if lane == 0:
                     if is_local:
-                        src_pos_enc = buffer_load(_r_tis_local, smoe_tok_id,
-                                                  vec_width=1, dtype=T.i32())
-                        store_i32_system(addr_packed_recv_src_info,
-                                         packed_linear_idx, src_pos_enc)
+                        src_pos_enc = buffer_load(_r_tis_local, smoe_tok_id, vec_width=1, dtype=T.i32())
+                        store_i32_system(addr_packed_recv_src_info, packed_linear_idx, src_pos_enc)
 
                 # WarpCopy token data from shmem_out_tok into the packed
                 # per-expert buffer at slot ``packed_linear_idx``.
                 src_tok_base = addr_out_tok + _to_i64(smoe_tok_id) * nbytes
                 dst_tok_base = addr_packed_recv_x + _to_i64(packed_linear_idx) * nbytes
-                rsrc_src     = create_buffer_resource_from_addr(src_tok_base)
-                rsrc_dst     = create_buffer_resource_from_addr(dst_tok_base)
+                rsrc_src = create_buffer_resource_from_addr(src_tok_base)
+                rsrc_dst = create_buffer_resource_from_addr(dst_tok_base)
                 lane_i32_off = lane * 4
                 safe_end_i32 = (n_i32 // 512) * 512
                 if n_i32 >= 512 and safe_end_i32 > 0:
@@ -535,15 +525,14 @@ def make_combine_kernel(
         bf16 -> fp8 cast inline (``UseFp8DirectCast``-equivalent), and
         Stage 3 widens addressing strides for bf16 output writes.
     """
-    max_recv   = npes * max_tok_per_rank
-    _is_fp4 = (data_type == torch.float4_e2m1fn_x2)
+    max_recv = npes * max_tok_per_rank
+    _is_fp4 = data_type == torch.float4_e2m1fn_x2
     if _is_fp4:
-        n_i32  = hidden_dim // 8
+        n_i32 = hidden_dim // 8
         nbytes = hidden_dim // 2
     else:
-        n_i32  = (hidden_dim * hidden_elem_size) // 4
+        n_i32 = (hidden_dim * hidden_elem_size) // 4
         nbytes = hidden_dim * hidden_elem_size
-    tok_stride = n_i32 * 4
 
     # Mixed-dtype combine: external dtype (kernel input AND output) differs
     # from the on-wire/staging dtype used for P2P transport.  Currently only
@@ -557,7 +546,8 @@ def make_combine_kernel(
     # ``inp_data_type`` is the legacy parameter name; conceptually it now
     # represents the external (input/output-shared) dtype.
     _xfer_bf16_to_fp8 = (
-        inp_data_type is not None and inp_data_type != data_type
+        inp_data_type is not None
+        and inp_data_type != data_type
         and inp_data_type == torch.bfloat16
         and data_type == torch.float8_e4m3fn
     )
@@ -565,28 +555,29 @@ def make_combine_kernel(
         raise NotImplementedError(
             f"combine_kernel mixed-dtype only supports "
             f"inp_data_type=bfloat16 + data_type=float8_e4m3fn, "
-            f"got inp_data_type={inp_data_type}, data_type={data_type}")
+            f"got inp_data_type={inp_data_type}, data_type={data_type}"
+        )
     if _xfer_bf16_to_fp8 and enable_std_moe:
         raise NotImplementedError(
             "combine_kernel mixed-dtype path does not yet support "
             "enable_std_moe=True (the std-MoE Stage 1 / Stage 3 use "
             "_weighted_accum_experts which has not been retrofitted for "
-            "asymmetric I/O dtypes)")
+            "asymmetric I/O dtypes)"
+        )
 
     if _xfer_bf16_to_fp8:
         # bf16 input stride for Stage 1 source addressing only.  The transport
         # (P2P-scattered staging) uses ``nbytes`` (= fp8 stride) as before.
         # Stage 3 output addressing also uses bf16 stride (= 2 × fp8 stride).
         inp_nbytes = hidden_dim * 2
-        inp_n_i32  = (hidden_dim * 2) // 4
         # bf16-stride i32 count per token for Stage 3 output offsets.
-        out_n_i32  = (hidden_dim * 2) // 4
+        out_n_i32 = (hidden_dim * 2) // 4
     else:
         inp_nbytes = nbytes
-        inp_n_i32  = n_i32
-        out_n_i32  = n_i32
+        out_n_i32 = n_i32
     if _is_fp4:
         from flydsl._mlir.dialects import rocdl as _rocdl_d
+
         _v2f32_fp4 = T.VectorType.get([2], T.f32())
         _v8f32_fp4 = T.VectorType.get([8], T.f32())
 
@@ -594,9 +585,7 @@ def make_combine_kernel(
             # ROCDL fp4 lane unpack: i32 (8 packed fp4) -> 4 × vector<2xf32>.
             scale_one = arith.constant(1.0, type=T.f32())
             pairs = [
-                _rocdl_d.cvt_scalef32_pk_f32_fp4(
-                    res=_v2f32_fp4, src=i32_val, scale=scale_one,
-                    src_sel_index=sel)
+                _rocdl_d.cvt_scalef32_pk_f32_fp4(res=_v2f32_fp4, src=i32_val, scale=scale_one, src_sel_index=sel)
                 for sel in range(4)
             ]
             # Stitch 4 × v2f32 -> v8f32 via two-stage shuffle.
@@ -613,35 +602,42 @@ def make_combine_kernel(
                 f_a = vector.extract(accum_val, static_position=[sel * 2])
                 f_b = vector.extract(accum_val, static_position=[sel * 2 + 1])
                 old = _rocdl_d.cvt_scalef32_pk_fp4_f32(
-                    res=_i32_ty, old_vdst=old, src0=f_a, src1=f_b,
-                    scale=scale_one, dst_sel_index=sel)
+                    res=_i32_ty, old_vdst=old, src0=f_a, src1=f_b, scale=scale_one, dst_sel_index=sel
+                )
             return old
 
         def _zero_accum():
             return arith.constant_vector(0.0, _v8f32_fp4)
 
     elif hidden_elem_size == 2:  # bf16
+
         def _to_accum(i32_val):
-            return _i32_to_vec_bitcast(T.VectorType.get([2], T.bf16()), i32_val).extf(
-                T.VectorType.get([2], T.f32()))
+            return _i32_to_vec_bitcast(T.VectorType.get([2], T.bf16()), i32_val).extf(T.VectorType.get([2], T.f32()))
+
         def _from_accum(accum_val):
-            return _vec_to_i32_bitcast(accum_val.truncf(
-                T.VectorType.get([2], T.bf16())))
+            return _vec_to_i32_bitcast(accum_val.truncf(T.VectorType.get([2], T.bf16())))
+
         def _zero_accum():
             return arith.constant_vector(0.0, T.VectorType.get([2], T.f32()))
+
     elif hidden_elem_size == 4:  # f32
+
         def _to_accum(i32_val):
             return arith.bitcast(T.f32(), i32_val)
+
         def _from_accum(accum_val):
             return arith.bitcast(T.i32(), accum_val)
+
         def _zero_accum():
             return arith.constant(0.0, type=T.f32())
+
     elif hidden_elem_size == 1:  # fp8
         from flydsl._mlir.dialects import rocdl as _rocdl_d
-        _is_ocp  = (data_type == torch.float8_e4m3fn)
-        _is_fnuz = (data_type == torch.float8_e4m3fnuz)
+
+        _is_ocp = data_type == torch.float8_e4m3fn
+        _is_fnuz = data_type == torch.float8_e4m3fnuz
         _cvt_pk_f32 = _rocdl_d.cvt_pk_f32_fp8
-        _cvt_pk_f8  = _rocdl_d.cvt_pk_fp8_f32
+        _cvt_pk_f8 = _rocdl_d.cvt_pk_fp8_f32
         _v2f32_fp8 = T.VectorType.get([2], T.f32())
         _v4f32_fp8 = T.VectorType.get([4], T.f32())
 
@@ -665,20 +661,19 @@ def make_combine_kernel(
                 # via buffer_store(..., vec_width=2, dtype=T.i32()) at an i32
                 # offset doubled relative to fp8 mode (2 i32 = 4 bf16 = 8 B).
                 _v4bf16 = T.VectorType.get([4], T.bf16())
-                _v2i32  = T.VectorType.get([2], _i32_ty)
+                _v2i32 = T.VectorType.get([2], _i32_ty)
                 return vector.bitcast(_v2i32, accum_val.truncf(_v4bf16))
             f0 = vector.extract(accum_val, static_position=[0])
             f1 = vector.extract(accum_val, static_position=[1])
             f2 = vector.extract(accum_val, static_position=[2])
             f3 = vector.extract(accum_val, static_position=[3])
             zero = arith.constant(0, type=_i32_ty)
-            lo = _cvt_pk_f8(res=_i32_ty, src_a=f0, src_b=f1,
-                            old=zero, word_sel=False)
-            return _cvt_pk_f8(res=_i32_ty, src_a=f2, src_b=f3,
-                              old=lo, word_sel=True)
+            lo = _cvt_pk_f8(res=_i32_ty, src_a=f0, src_b=f1, old=zero, word_sel=False)
+            return _cvt_pk_f8(res=_i32_ty, src_a=f2, src_b=f3, old=lo, word_sel=True)
 
         def _zero_accum():
             return arith.constant_vector(0.0, _v4f32_fp8)
+
     else:
         raise ValueError(f"Unsupported hidden_elem_size={hidden_elem_size}")
 
@@ -701,7 +696,7 @@ def make_combine_kernel(
             acc = _zero_accum()
             for k_slot in range(len(vals)):
                 widened = _to_accum(vals[k_slot])
-                zero    = _zero_accum()
+                zero = _zero_accum()
                 vld_raw = _lv_unwrap(vlds[k_slot])
                 acc = acc + arith.select(vld_raw, widened, zero)
         return _from_accum(acc)
@@ -718,6 +713,7 @@ def make_combine_kernel(
 
         if _is_fp4:  # fp4 → v8f32 accum
             from flydsl._mlir.dialects import rocdl as _rocdl_fp4
+
             _v2f32 = T.VectorType.get([2], T.f32())
             _v8f32 = T.VectorType.get([8], T.f32())
             scale_one = arith.constant(1.0, type=_f32ty)
@@ -725,66 +721,62 @@ def make_combine_kernel(
             for j in range(len(vals)):
                 # ROCDL fp4 lane unpack: i32 (8 packed fp4) -> 4 × vector<2xf32>.
                 pairs = [
-                    _rocdl_fp4.cvt_scalef32_pk_f32_fp4(
-                        res=_v2f32, src=vals[j], scale=scale_one,
-                        src_sel_index=sel)
+                    _rocdl_fp4.cvt_scalef32_pk_f32_fp4(res=_v2f32, src=vals[j], scale=scale_one, src_sel_index=sel)
                     for sel in range(4)
                 ]
                 # Stitch 4 × v2f32 -> v8f32 via two-stage shuffle.
                 lo4 = vector.shuffle(pairs[0], pairs[1], [0, 1, 2, 3])
                 hi4 = vector.shuffle(pairs[2], pairs[3], [0, 1, 2, 3])
                 vec = vector.shuffle(lo4, hi4, [0, 1, 2, 3, 4, 5, 6, 7])
-                w = vec * wts[j]   # auto-broadcast scalar to v8f32
+                w = vec * wts[j]  # auto-broadcast scalar to v8f32
                 if all_vld:
                     acc = acc + w
                 else:
-                    acc = acc + arith.select(
-                        vlds[j], w, arith.constant_vector(0.0, _v8f32))
+                    acc = acc + arith.select(vlds[j], w, arith.constant_vector(0.0, _v8f32))
             # Re-pack v8f32 -> i32 via 4 × cvt_scalef32_pk_fp4_f32.
             old = arith.constant(0, type=_i32ty)
             for sel in range(4):
                 f_a = vector.extract(acc, static_position=[sel * 2])
                 f_b = vector.extract(acc, static_position=[sel * 2 + 1])
                 old = _rocdl_fp4.cvt_scalef32_pk_fp4_f32(
-                    res=_i32ty, old_vdst=old, src0=f_a, src1=f_b,
-                    scale=scale_one, dst_sel_index=sel)
+                    res=_i32ty, old_vdst=old, src0=f_a, src1=f_b, scale=scale_one, dst_sel_index=sel
+                )
             return old
 
         elif hidden_elem_size == 2:  # bf16 → v2f32 accum
             _v2bf16 = T.VectorType.get([2], T.bf16())
-            _v2f32  = T.VectorType.get([2], T.f32())
+            _v2f32 = T.VectorType.get([2], T.f32())
             acc = arith.constant_vector(0.0, _v2f32)
             for j in range(len(vals)):
                 # i32 → vector<2xbf16> via from_elements + vector.bitcast
                 # → vector<2xf32> via arith.extf, then broadcast wt and fma.
                 vb = _i32_to_vec_bitcast(_v2bf16, vals[j])
                 vf = vb.extf(_v2f32)
-                w  = vf * wts[j]   # wts[j] scalar f32, auto-broadcast to v2f32
+                w = vf * wts[j]  # wts[j] scalar f32, auto-broadcast to v2f32
                 if all_vld:
                     acc = acc + w
                 else:
-                    acc = acc + arith.select(
-                        vlds[j], w, arith.constant_vector(0.0, _v2f32))
+                    acc = acc + arith.select(vlds[j], w, arith.constant_vector(0.0, _v2f32))
             return _vec_to_i32_bitcast(acc.truncf(_v2bf16))
 
         elif hidden_elem_size == 4:  # f32 → f32 accum
             acc = arith.constant(0.0, type=_f32ty)
             for j in range(len(vals)):
                 vf = arith.bitcast(_f32ty, vals[j])
-                w  = vf * wts[j]
+                w = vf * wts[j]
                 if all_vld:
                     acc = acc + w
                 else:
-                    acc = acc + arith.select(
-                        vlds[j], w, arith.constant(0.0, type=_f32ty))
+                    acc = acc + arith.select(vlds[j], w, arith.constant(0.0, type=_f32ty))
             return arith.bitcast(_i32ty, acc)
 
         elif hidden_elem_size == 1:  # fp8 → v4f32 accum
             from flydsl._mlir.dialects import rocdl as _rocdl
+
             _pk_f32 = _rocdl.cvt_pk_f32_fp8
-            _pk_f8  = _rocdl.cvt_pk_fp8_f32
-            _v2f32  = T.VectorType.get([2], T.f32())
-            _v4f32  = T.VectorType.get([4], T.f32())
+            _pk_f8 = _rocdl.cvt_pk_fp8_f32
+            _v2f32 = T.VectorType.get([2], T.f32())
+            _v4f32 = T.VectorType.get([4], T.f32())
             acc = arith.constant_vector(0.0, _v4f32)
             for j in range(len(vals)):
                 # ROCDL fp8 lane unpack: i32 (4 packed fp8) -> 2 × vector<2xf32>.
@@ -795,12 +787,11 @@ def make_combine_kernel(
                 vec = vector.shuffle(lo, hi, [0, 1, 2, 3])
                 if _is_fnuz:
                     vec = vec * 0.5
-                w = vec * wts[j]   # wts[j] scalar f32, auto-broadcast to v4f32
+                w = vec * wts[j]  # wts[j] scalar f32, auto-broadcast to v4f32
                 if all_vld:
                     acc = acc + w
                 else:
-                    acc = acc + arith.select(
-                        vlds[j], w, arith.constant_vector(0.0, _v4f32))
+                    acc = acc + arith.select(vlds[j], w, arith.constant_vector(0.0, _v4f32))
             if _is_fnuz:
                 acc = acc * 2.0
             f0 = vector.extract(acc, static_position=[0])
@@ -816,13 +807,14 @@ def make_combine_kernel(
         if v > 0 and (v & (v - 1)) == 0:
             return v.bit_length() - 1
         return None
+
     # Pow2 fast-paths: when ``max_tok_per_rank`` / ``max_recv`` are powers
     # of two, decode ``dest_pe / dest_lid`` and ``dest_pe / dtok`` via
     # shift + mask instead of integer divide / mod.
-    _log2_max_tok  = _log2_if_pow2(max_tok_per_rank)
+    _log2_max_tok = _log2_if_pow2(max_tok_per_rank)
     _log2_max_recv = _log2_if_pow2(max_recv)
-    _mask_max_tok  = max_tok_per_rank - 1 if _log2_max_tok  is not None else None
-    _mask_max_recv = max_recv         - 1 if _log2_max_recv is not None else None
+    _mask_max_tok = max_tok_per_rank - 1 if _log2_max_tok is not None else None
+    _mask_max_recv = max_recv - 1 if _log2_max_recv is not None else None
 
     # Dispatch deduplicates same-PE assignments at runtime: when more than
     # one of a token's k experts fall on the same dest_pe, the duplicate
@@ -833,7 +825,7 @@ def make_combine_kernel(
     _use_compaction = True
 
     weight_bytes = experts_per_token * 4 if enable_weights else 0
-    wt_n_i32     = experts_per_token if enable_weights else 0
+    wt_n_i32 = experts_per_token if enable_weights else 0
 
     # LDS layout for the P2P-base tables (i64[npes] for tokens, optionally
     # i64[npes] for weights). ``SmemAllocator.finalize()`` is called from the
@@ -848,37 +840,36 @@ def make_combine_kernel(
         p2p_wt_base_size = npes * 8
         allocator.ptr = p2p_wt_base_offset + p2p_wt_base_size
 
-
     @flyc.kernel
     def ep_combine_intranode(
-        addr_inp_tok:  fx.Int64,   # inp_tok base (post-expert token buffer)
-        addr_comb_inp: fx.Int64,   # shmem_comb_inp base (symmetric)
-        addr_comb_out: fx.Int64,   # shmem_comb_out base (symmetric)
-        addr_xdb_mem:  fx.Int64,   # xdev_bar_mem  (u64[npes])
-        addr_xdb_flag: fx.Int64,   # xdev_bar_flag (u64[1])
-        addr_tok_map:  fx.Int64,   # dest_tok_map  (i32[cur_tok*k])
-        addr_comb_bar: fx.Int64,   # combine_bar   (i32[1])
-        addr_trecv:    fx.Int64,   # total_recv_ptr (i32[1])
-        addr_tis:      fx.Int64,   # tok_id_to_src (i32[max_recv], symmetric)
+        addr_inp_tok: fx.Int64,  # inp_tok base (post-expert token buffer)
+        addr_comb_inp: fx.Int64,  # shmem_comb_inp base (symmetric)
+        addr_comb_out: fx.Int64,  # shmem_comb_out base (symmetric)
+        addr_xdb_mem: fx.Int64,  # xdev_bar_mem  (u64[npes])
+        addr_xdb_flag: fx.Int64,  # xdev_bar_flag (u64[1])
+        addr_tok_map: fx.Int64,  # dest_tok_map  (i32[cur_tok*k])
+        addr_comb_bar: fx.Int64,  # combine_bar   (i32[1])
+        addr_trecv: fx.Int64,  # total_recv_ptr (i32[1])
+        addr_tis: fx.Int64,  # tok_id_to_src (i32[max_recv], symmetric)
         addr_p2p_comb_inp: fx.Int64,  # i64[npes] pre-resolved P2P addresses
-        addr_p2p_xdb_mem:  fx.Int64,  # i64[npes] pre-resolved P2P addresses
-        addr_wts_buf:  fx.Int64,      # combine input weights f32[max_recv*k]
+        addr_p2p_xdb_mem: fx.Int64,  # i64[npes] pre-resolved P2P addresses
+        addr_wts_buf: fx.Int64,  # combine input weights f32[max_recv*k]
         addr_comb_inp_wts: fx.Int64,  # shmem weight P2P buffer (symmetric)
         addr_comb_out_wts: fx.Int64,  # combine output weights f32[max_tok*k]
         addr_p2p_comb_inp_wts: fx.Int64,  # i64[npes] weight P2P addresses
         # ── StdMoE ConvertCombineInput parameters ──
-        addr_packed_recv_x:  fx.Int64,  # expert-major token buffer (post-expert)
-        addr_disp_tok_map:   fx.Int64,  # dispTokToEpSlotMap (i64[max_recv * top_k])
-        addr_disp_out_wts:   fx.Int64,  # dispatch output weights (f32[max_recv * top_k])
-        cur_rank_num_token:  fx.Int32,  # this PE's output token count (used by Stage 3)
+        addr_packed_recv_x: fx.Int64,  # expert-major token buffer (post-expert)
+        addr_disp_tok_map: fx.Int64,  # dispTokToEpSlotMap (i64[max_recv * top_k])
+        addr_disp_out_wts: fx.Int64,  # dispatch output weights (f32[max_recv * top_k])
+        cur_rank_num_token: fx.Int32,  # this PE's output token count (used by Stage 3)
     ):
-        tid    = fx.thread_idx.x
-        bid    = fx.block_idx.x
-        lane   = tid & 63
-        warp   = tid >> 6
-        global_warp_id  = bid * warp_num_per_block + warp     # warp id across the grid
-        global_warp_num = block_num * warp_num_per_block      # total warps in the grid
-        grid_thread_id  = bid * (warp_num_per_block * 64) + tid   # grid-wide thread id (used by Stage 2 only)
+        tid = fx.thread_idx.x
+        bid = fx.block_idx.x
+        lane = tid & 63
+        warp = tid >> 6
+        global_warp_id = bid * warp_num_per_block + warp  # warp id across the grid
+        global_warp_num = block_num * warp_num_per_block  # total warps in the grid
+        grid_thread_id = bid * (warp_num_per_block * 64) + tid  # grid-wide thread id (used by Stage 2 only)
 
         # Predicated buffer_load: returns 0 (i32) when vld_flag is false.
         # Defined as a nested function so the AST rewriter lowers the Python
@@ -890,12 +881,12 @@ def make_combine_kernel(
                 result = buffer_load(rsrc, offset, **kwargs)
             return result
 
-        _r_trecv     = create_buffer_resource_from_addr(addr_trecv)
-        _r_xdb_flag  = create_buffer_resource_from_addr(addr_xdb_flag)
-        _r_tis       = create_buffer_resource_from_addr(addr_tis)
-        _r_comb_bar  = create_buffer_resource_from_addr(addr_comb_bar)
-        _r_p2p_comb  = create_buffer_resource_from_addr(addr_p2p_comb_inp)
-        _r_p2p_xdb   = create_buffer_resource_from_addr(addr_p2p_xdb_mem)
+        _r_trecv = create_buffer_resource_from_addr(addr_trecv)
+        _r_xdb_flag = create_buffer_resource_from_addr(addr_xdb_flag)
+        _r_tis = create_buffer_resource_from_addr(addr_tis)
+        _r_comb_bar = create_buffer_resource_from_addr(addr_comb_bar)
+        _r_p2p_comb = create_buffer_resource_from_addr(addr_p2p_comb_inp)
+        _r_p2p_xdb = create_buffer_resource_from_addr(addr_p2p_xdb_mem)
         _rsrc_tok_map = create_buffer_resource_from_addr(addr_tok_map)
 
         total_recv = buffer_load(_r_trecv, 0, vec_width=1, dtype=T.i32())
@@ -916,8 +907,7 @@ def make_combine_kernel(
         # variable (which then fails because SmemPtr is not an MLIR Value).
         # All ``_lds_p2p_*`` and downstream ``SmemPtr.{get,load,store}``
         # call sites follow the same convention.
-        _lds_p2p_bases = SmemPtr(base_ptr, p2p_base_offset, T.i64(),
-                                 shape=(npes,))
+        _lds_p2p_bases = SmemPtr(base_ptr, p2p_base_offset, T.i64(), shape=(npes,))
         SmemPtr.get(_lds_p2p_bases)
 
         if lane < npes:
@@ -926,8 +916,7 @@ def make_combine_kernel(
 
         if const_expr(enable_weights):
             _r_p2p_comb_wt = create_buffer_resource_from_addr(addr_p2p_comb_inp_wts)
-            _lds_p2p_wt_bases = SmemPtr(base_ptr, p2p_wt_base_offset, T.i64(),
-                                        shape=(npes,))
+            _lds_p2p_wt_bases = SmemPtr(base_ptr, p2p_wt_base_offset, T.i64(), shape=(npes,))
             SmemPtr.get(_lds_p2p_wt_bases)
             if lane < npes:
                 p2p_wt_base_addr = buffer_load(_r_p2p_comb_wt, lane, vec_width=1, dtype=T.i64())
@@ -943,7 +932,7 @@ def make_combine_kernel(
         # Common per-token decoding from ``shmem_tok_id_to_src[recv_tok_id]``:
         #   dest_pe  - which peer this token must be combined to
         #   dest_lid - the per-PE local id ``[0, max_tok_per_rank)``
-        n_chunks = nbytes // 16   # 16-byte (4-i32) vector chunks per token
+        n_chunks = nbytes // 16  # 16-byte (4-i32) vector chunks per token
 
         if const_expr(skip_stage1):
             if const_expr(enable_weights):
@@ -954,18 +943,17 @@ def make_combine_kernel(
                 for recv_tok_id in range(global_warp_id, total_recv, global_warp_num):
                     dest_tok_enc = buffer_load(_r_tis, recv_tok_id, vec_width=1, dtype=T.i32())
                     if const_expr(_log2_max_tok is not None):
-                        dest_pe  = dest_tok_enc >> _log2_max_tok
+                        dest_pe = dest_tok_enc >> _log2_max_tok
                         dest_lid = dest_tok_enc & _mask_max_tok
                     else:
-                        dest_pe  = (dest_tok_enc // max_tok_per_rank)
-                        dest_lid = (dest_tok_enc % max_tok_per_rank)
-                    wt_pe_base  = SmemPtr.load(_lds_p2p_wt_bases, [dest_pe])
-                    wt_dest_off = _to_i64(
-                        rank * max_tok_per_rank + dest_lid) * weight_bytes
+                        dest_pe = dest_tok_enc // max_tok_per_rank
+                        dest_lid = dest_tok_enc % max_tok_per_rank
+                    wt_pe_base = SmemPtr.load(_lds_p2p_wt_bases, [dest_pe])
+                    wt_dest_off = _to_i64(rank * max_tok_per_rank + dest_lid) * weight_bytes
                     wt_dest_addr = _lv_unwrap(wt_pe_base) + wt_dest_off
-                    wt_src_addr  = _lv_unwrap(addr_wts_buf) + _to_i64(recv_tok_id) * weight_bytes
-                    rsrc_wt_src  = create_buffer_resource_from_addr(wt_src_addr)
-                    rsrc_wt_dst  = create_buffer_resource_from_addr(wt_dest_addr)
+                    wt_src_addr = _lv_unwrap(addr_wts_buf) + _to_i64(recv_tok_id) * weight_bytes
+                    rsrc_wt_src = create_buffer_resource_from_addr(wt_src_addr)
+                    rsrc_wt_dst = create_buffer_resource_from_addr(wt_dest_addr)
                     if lane < wt_n_i32:
                         wt_val = buffer_load(rsrc_wt_src, lane, vec_width=1, dtype=T.i32())
                         buffer_store(wt_val, rsrc_wt_dst, lane)
@@ -978,61 +966,57 @@ def make_combine_kernel(
             # the destination PE's ``shmem_comb_inp``.
             _rsrc_dtm = create_buffer_resource_from_addr(addr_disp_tok_map)
             _rsrc_dow = create_buffer_resource_from_addr(addr_disp_out_wts)
-            smoe_all_vld = False   # k-slots may be sentinel (-1) for non-local experts
+            smoe_all_vld = False  # k-slots may be sentinel (-1) for non-local experts
 
             for recv_tok_id in range(global_warp_id, total_recv, global_warp_num):
                 dest_tok_enc = buffer_load(_r_tis, recv_tok_id, vec_width=1, dtype=T.i32())
                 if const_expr(_log2_max_tok is not None):
-                    dest_pe  = dest_tok_enc >> _log2_max_tok
+                    dest_pe = dest_tok_enc >> _log2_max_tok
                     dest_lid = dest_tok_enc & _mask_max_tok
                 else:
-                    dest_pe  = (dest_tok_enc // max_tok_per_rank)
-                    dest_lid = (dest_tok_enc % max_tok_per_rank)
+                    dest_pe = dest_tok_enc // max_tok_per_rank
+                    dest_lid = dest_tok_enc % max_tok_per_rank
 
                 if const_expr(use_p2p_read):
                     # P2P-read mode: write locally; peers will pull from us in Stage 3.
                     dest_byte_off = _to_i64(recv_tok_id) * nbytes
                     dest_tok_addr = _lv_unwrap(addr_comb_inp) + dest_byte_off
                 else:
-                    peer_base     = SmemPtr.load(_lds_p2p_bases, [dest_pe])
+                    peer_base = SmemPtr.load(_lds_p2p_bases, [dest_pe])
                     dest_byte_off = _to_i64(rank * max_tok_per_rank + dest_lid) * nbytes
                     dest_tok_addr = _lv_unwrap(peer_base) + dest_byte_off
                 rsrc_dst = create_buffer_resource_from_addr(dest_tok_addr)
 
                 # Collect resources/valid-flags/weights for each k-expert slot.
                 expert_rsrcs = []
-                expert_vlds  = []
-                expert_wts   = []
+                expert_vlds = []
+                expert_wts = []
                 for k_slot in range_constexpr(experts_per_token):
                     slot_addr = addr_disp_tok_map + _to_i64(recv_tok_id * experts_per_token + k_slot) * 8
-                    slot_val  = load_i64_global(slot_addr)
-                    slot_vld  = slot_val != -1
+                    slot_val = load_i64_global(slot_addr)
+                    slot_vld = slot_val != -1
                     safe_slot = arith.select(slot_vld, slot_val, 0)
                     expert_tok_addr = addr_packed_recv_x + safe_slot * nbytes
                     expert_rsrcs.append(create_buffer_resource_from_addr(expert_tok_addr))
                     expert_vlds.append(slot_vld)
-                    wt_k = buffer_load(_rsrc_dow, recv_tok_id * experts_per_token + k_slot,
-                                       vec_width=1, dtype=T.f32())
+                    wt_k = buffer_load(_rsrc_dow, recv_tok_id * experts_per_token + k_slot, vec_width=1, dtype=T.f32())
                     expert_wts.append(wt_k)
 
                 # Weighted reduce across the k experts, then scatter.
                 for elem_off in range(lane, n_i32, 64):
                     expert_vals = []
                     for k_slot in range_constexpr(experts_per_token):
-                        expert_vals.append(buffer_load(expert_rsrcs[k_slot], elem_off,
-                                                       vec_width=1, dtype=T.i32()))
-                    accum = _weighted_accum_experts(expert_vals, expert_wts,
-                                                    expert_vlds, smoe_all_vld)
+                        expert_vals.append(buffer_load(expert_rsrcs[k_slot], elem_off, vec_width=1, dtype=T.i32()))
+                    accum = _weighted_accum_experts(expert_vals, expert_wts, expert_vlds, smoe_all_vld)
                     buffer_store(accum, rsrc_dst, elem_off)
 
                 if const_expr(enable_weights):
                     if const_expr(use_p2p_read):
-                        wt_dest_off  = _to_i64(recv_tok_id) * weight_bytes
+                        wt_dest_off = _to_i64(recv_tok_id) * weight_bytes
                         wt_dest_addr = _lv_unwrap(addr_comb_inp_wts) + wt_dest_off
                     else:
-                        wt_pe_base   = SmemPtr.load(_lds_p2p_wt_bases, [dest_pe])
-                        wt_dest_off  = _to_i64(
-                            rank * max_tok_per_rank + dest_lid) * weight_bytes
+                        wt_pe_base = SmemPtr.load(_lds_p2p_wt_bases, [dest_pe])
+                        wt_dest_off = _to_i64(rank * max_tok_per_rank + dest_lid) * weight_bytes
                         wt_dest_addr = _lv_unwrap(wt_pe_base) + wt_dest_off
                     wt_src_addr = _lv_unwrap(addr_wts_buf) + _to_i64(recv_tok_id) * weight_bytes
                     rsrc_wt_src = create_buffer_resource_from_addr(wt_src_addr)
@@ -1051,7 +1035,7 @@ def make_combine_kernel(
                 # In mixed-mode (bf16 input → fp8 staging), the source uses
                 # bf16 stride (inp_nbytes) while the dest uses fp8 stride
                 # (nbytes); in same-dtype mode the two strides are identical.
-                src_tok_addr = addr_inp_tok  + _to_i64(recv_tok_id) * inp_nbytes
+                src_tok_addr = addr_inp_tok + _to_i64(recv_tok_id) * inp_nbytes
                 dst_tok_addr = addr_comb_inp + _to_i64(recv_tok_id) * nbytes
                 rsrc_src = create_buffer_resource_from_addr(src_tok_addr)
                 rsrc_dst = create_buffer_resource_from_addr(dst_tok_addr)
@@ -1060,22 +1044,20 @@ def make_combine_kernel(
                     # elems) → ExtF v4f32 → cvt_pk_fp8_f32 ×2 → store 1
                     # fp8 i32 (4 fp8 elems) at staging offset ``elem_off``.
                     from flydsl._mlir.dialects import rocdl as _rocdl_s1a
+
                     _v4bf16_a = T.VectorType.get([4], T.bf16())
-                    _v4f32_a  = T.VectorType.get([4], T.f32())
-                    _i32t_a   = T.i32()
+                    _v4f32_a = T.VectorType.get([4], T.f32())
+                    _i32t_a = T.i32()
                     for elem_off in range(lane, n_i32, 64):
-                        bf_pair = buffer_load(rsrc_src, elem_off * 2,
-                                              vec_width=2, dtype=T.i32())
+                        bf_pair = buffer_load(rsrc_src, elem_off * 2, vec_width=2, dtype=T.i32())
                         v4f = vector.bitcast(_v4bf16_a, bf_pair).extf(_v4f32_a)
                         f0 = vector.extract(v4f, static_position=[0])
                         f1 = vector.extract(v4f, static_position=[1])
                         f2 = vector.extract(v4f, static_position=[2])
                         f3 = vector.extract(v4f, static_position=[3])
                         zi = arith.constant(0, type=_i32t_a)
-                        lo = _rocdl_s1a.cvt_pk_fp8_f32(res=_i32t_a, src_a=f0, src_b=f1,
-                                                       old=zi, word_sel=False)
-                        fp8_i32 = _rocdl_s1a.cvt_pk_fp8_f32(res=_i32t_a, src_a=f2, src_b=f3,
-                                                            old=lo, word_sel=True)
+                        lo = _rocdl_s1a.cvt_pk_fp8_f32(res=_i32t_a, src_a=f0, src_b=f1, old=zi, word_sel=False)
+                        fp8_i32 = _rocdl_s1a.cvt_pk_fp8_f32(res=_i32t_a, src_a=f2, src_b=f3, old=lo, word_sel=True)
                         buffer_store(fp8_i32, rsrc_dst, elem_off)
                 else:
                     # Same-dtype path: 4-i32 vector copy. ``chunk_idx`` is
@@ -1083,9 +1065,9 @@ def make_combine_kernel(
                     # copying; ``chunk_i32_off`` translates it to i32 elems.
                     if const_expr(dual_end_aligned >= 128):
                         for chunk_idx in range(lane, dual_end_aligned, 128):
-                            chunk_i32_off      = chunk_idx * 4
-                            chunk_i32_off_alt  = (chunk_idx + 64) * 4
-                            vec_a = buffer_load(rsrc_src, chunk_i32_off,     vec_width=4, dtype=T.i32())
+                            chunk_i32_off = chunk_idx * 4
+                            chunk_i32_off_alt = (chunk_idx + 64) * 4
+                            vec_a = buffer_load(rsrc_src, chunk_i32_off, vec_width=4, dtype=T.i32())
                             vec_b = buffer_load(rsrc_src, chunk_i32_off_alt, vec_width=4, dtype=T.i32())
                             buffer_store(vec_a, rsrc_dst, chunk_i32_off)
                             buffer_store(vec_b, rsrc_dst, chunk_i32_off_alt)
@@ -1097,7 +1079,7 @@ def make_combine_kernel(
 
             if const_expr(enable_weights):
                 for recv_tok_id in range(global_warp_id, total_recv, global_warp_num):
-                    wt_src_addr = _lv_unwrap(addr_wts_buf)      + _to_i64(recv_tok_id) * weight_bytes
+                    wt_src_addr = _lv_unwrap(addr_wts_buf) + _to_i64(recv_tok_id) * weight_bytes
                     wt_dst_addr = _lv_unwrap(addr_comb_inp_wts) + _to_i64(recv_tok_id) * weight_bytes
                     rsrc_wt_src = create_buffer_resource_from_addr(wt_src_addr)
                     rsrc_wt_dst = create_buffer_resource_from_addr(wt_dst_addr)
@@ -1112,17 +1094,17 @@ def make_combine_kernel(
             for recv_tok_id in range(global_warp_id, total_recv, global_warp_num):
                 dest_tok_enc = buffer_load(_r_tis, recv_tok_id, vec_width=1, dtype=T.i32())
                 if const_expr(_log2_max_tok is not None):
-                    dest_pe  = dest_tok_enc >> _log2_max_tok
+                    dest_pe = dest_tok_enc >> _log2_max_tok
                     dest_lid = dest_tok_enc & _mask_max_tok
                 else:
-                    dest_pe  = (dest_tok_enc // max_tok_per_rank)
-                    dest_lid = (dest_tok_enc % max_tok_per_rank)
+                    dest_pe = dest_tok_enc // max_tok_per_rank
+                    dest_lid = dest_tok_enc % max_tok_per_rank
                 peer_base = SmemPtr.load(_lds_p2p_bases, [dest_pe])
                 # Dest stride uses ``nbytes`` (staging dtype, fp8 in mixed mode).
-                dest_off       = _to_i64(rank * max_tok_per_rank + dest_lid) * nbytes
-                dest_tok_addr  = _lv_unwrap(peer_base) + dest_off
+                dest_off = _to_i64(rank * max_tok_per_rank + dest_lid) * nbytes
+                dest_tok_addr = _lv_unwrap(peer_base) + dest_off
                 # Src stride uses ``inp_nbytes`` (input dtype, bf16 in mixed mode).
-                src_tok_addr   = addr_inp_tok + _to_i64(recv_tok_id) * inp_nbytes
+                src_tok_addr = addr_inp_tok + _to_i64(recv_tok_id) * inp_nbytes
                 rsrc_src = create_buffer_resource_from_addr(src_tok_addr)
                 rsrc_dst = create_buffer_resource_from_addr(dest_tok_addr)
                 if const_expr(_xfer_bf16_to_fp8):
@@ -1130,29 +1112,27 @@ def make_combine_kernel(
                     # ExtF v4f32 → cvt_pk_fp8_f32 ×2 → store 1 fp8 i32 (=4
                     # fp8 elems). Loop unit is 1 fp8-i32 per lane per step.
                     from flydsl._mlir.dialects import rocdl as _rocdl_s1b
+
                     _v4bf16_b = T.VectorType.get([4], T.bf16())
-                    _v4f32_b  = T.VectorType.get([4], T.f32())
-                    _i32t_b   = T.i32()
+                    _v4f32_b = T.VectorType.get([4], T.f32())
+                    _i32t_b = T.i32()
                     for elem_off in range(lane, n_i32, 64):
-                        bf_pair = buffer_load(rsrc_src, elem_off * 2,
-                                              vec_width=2, dtype=T.i32())
+                        bf_pair = buffer_load(rsrc_src, elem_off * 2, vec_width=2, dtype=T.i32())
                         v4f = vector.bitcast(_v4bf16_b, bf_pair).extf(_v4f32_b)
                         f0 = vector.extract(v4f, static_position=[0])
                         f1 = vector.extract(v4f, static_position=[1])
                         f2 = vector.extract(v4f, static_position=[2])
                         f3 = vector.extract(v4f, static_position=[3])
                         zi = arith.constant(0, type=_i32t_b)
-                        lo = _rocdl_s1b.cvt_pk_fp8_f32(res=_i32t_b, src_a=f0, src_b=f1,
-                                                       old=zi, word_sel=False)
-                        fp8_i32 = _rocdl_s1b.cvt_pk_fp8_f32(res=_i32t_b, src_a=f2, src_b=f3,
-                                                            old=lo, word_sel=True)
+                        lo = _rocdl_s1b.cvt_pk_fp8_f32(res=_i32t_b, src_a=f0, src_b=f1, old=zi, word_sel=False)
+                        fp8_i32 = _rocdl_s1b.cvt_pk_fp8_f32(res=_i32t_b, src_a=f2, src_b=f3, old=lo, word_sel=True)
                         buffer_store(fp8_i32, rsrc_dst, elem_off)
                 else:
                     if const_expr(dual_end_aligned >= 128):
                         for chunk_idx in range(lane, dual_end_aligned, 128):
-                            chunk_i32_off     = chunk_idx * 4
+                            chunk_i32_off = chunk_idx * 4
                             chunk_i32_off_alt = (chunk_idx + 64) * 4
-                            vec_a = buffer_load(rsrc_src, chunk_i32_off,     vec_width=4, dtype=T.i32())
+                            vec_a = buffer_load(rsrc_src, chunk_i32_off, vec_width=4, dtype=T.i32())
                             vec_b = buffer_load(rsrc_src, chunk_i32_off_alt, vec_width=4, dtype=T.i32())
                             buffer_store(vec_a, rsrc_dst, chunk_i32_off)
                             buffer_store(vec_b, rsrc_dst, chunk_i32_off_alt)
@@ -1163,13 +1143,12 @@ def make_combine_kernel(
                             buffer_store(vec_a, rsrc_dst, chunk_i32_off)
 
                 if const_expr(enable_weights):
-                    wt_pe_base   = SmemPtr.load(_lds_p2p_wt_bases, [dest_pe])
-                    wt_dest_off  = _to_i64(
-                        rank * max_tok_per_rank + dest_lid) * weight_bytes
+                    wt_pe_base = SmemPtr.load(_lds_p2p_wt_bases, [dest_pe])
+                    wt_dest_off = _to_i64(rank * max_tok_per_rank + dest_lid) * weight_bytes
                     wt_dest_addr = _lv_unwrap(wt_pe_base) + wt_dest_off
-                    wt_src_addr  = _lv_unwrap(addr_wts_buf) + _to_i64(recv_tok_id) * weight_bytes
-                    rsrc_wt_src  = create_buffer_resource_from_addr(wt_src_addr)
-                    rsrc_wt_dst  = create_buffer_resource_from_addr(wt_dest_addr)
+                    wt_src_addr = _lv_unwrap(addr_wts_buf) + _to_i64(recv_tok_id) * weight_bytes
+                    rsrc_wt_src = create_buffer_resource_from_addr(wt_src_addr)
+                    rsrc_wt_dst = create_buffer_resource_from_addr(wt_dest_addr)
                     if lane < wt_n_i32:
                         wt_val = buffer_load(rsrc_wt_src, lane, vec_width=1, dtype=T.i32())
                         buffer_store(wt_val, rsrc_wt_dst, lane)
@@ -1185,8 +1164,10 @@ def make_combine_kernel(
         if grid_thread_id < npes:
             mori_shmem.int32_wait_until_equals(addr_comb_bar, block_num)
             buffer_store(arith.constant(0), _r_comb_bar, 0)
-            xdb_remote_addr = buffer_load(_r_p2p_xdb, grid_thread_id, vec_width=1, dtype=T.i64()) + \
-                arith.constant(rank, type=T.i64()) * 8
+            xdb_remote_addr = (
+                buffer_load(_r_p2p_xdb, grid_thread_id, vec_width=1, dtype=T.i64())
+                + arith.constant(rank, type=T.i64()) * 8
+            )
             store_i64_global_system(xdb_remote_addr, xdb_cur_flag)
 
         if grid_thread_id == 0:
@@ -1207,25 +1188,24 @@ def make_combine_kernel(
         # per-expert partials from ``shmem_comb_inp``, accumulates them in
         # high-precision (f32) and writes back the merged token to
         # ``shmem_comb_out``.
-        SLC_CACHE = 2   # buffer_load/store ``cache_modifier=SLC`` (system-coherent)
-        rsrc_out  = create_buffer_resource_from_addr(addr_comb_out)
+        SLC_CACHE = 2  # buffer_load/store ``cache_modifier=SLC`` (system-coherent)
+        rsrc_out = create_buffer_resource_from_addr(addr_comb_out)
 
         n_elems = n_i32
         # When ``cur_rank_num_token == 0`` the division below would divide by
         # zero; clamp the denominator to 1 (loop won't execute anyway).
-        safe_token_count = arith.select(
-            cur_rank_num_token == 0, 1, cur_rank_num_token)
-        warps_per_tok   = (global_warp_num + safe_token_count - 1) // safe_token_count
-        hdim_per_warp   = (n_elems + warps_per_tok - 1) // warps_per_tok
-        s3_total_work   = cur_rank_num_token * warps_per_tok
+        safe_token_count = arith.select(cur_rank_num_token == 0, 1, cur_rank_num_token)
+        warps_per_tok = (global_warp_num + safe_token_count - 1) // safe_token_count
+        hdim_per_warp = (n_elems + warps_per_tok - 1) // warps_per_tok
+        s3_total_work = cur_rank_num_token * warps_per_tok
 
         for s3_work_idx in range(global_warp_id, s3_total_work, global_warp_num):
-            tok_id      = (s3_work_idx // warps_per_tok)
-            part_id     = (s3_work_idx %  warps_per_tok)
-            hdim_off    = part_id * hdim_per_warp
+            tok_id = s3_work_idx // warps_per_tok
+            part_id = s3_work_idx % warps_per_tok
+            hdim_off = part_id * hdim_per_warp
 
             expert_rsrcs = []
-            expert_vlds  = []
+            expert_vlds = []
 
             if const_expr(skip_stage1):
                 # Fused-upstream Stage 3: when ``skip_stage1`` is set the
@@ -1236,8 +1216,8 @@ def make_combine_kernel(
                 # [0, k). Unrouted (tok_id, k_slot) slots are zero-initialized
                 # by the caller and therefore contribute zero to the sum.
                 for k_slot in range_constexpr(experts_per_token):
-                    slot_idx        = tok_id * experts_per_token + k_slot
-                    expert_tok_off  = _to_i64(slot_idx) * nbytes
+                    slot_idx = tok_id * experts_per_token + k_slot
+                    expert_tok_off = _to_i64(slot_idx) * nbytes
                     expert_tok_addr = _lv_unwrap(addr_comb_inp + expert_tok_off)
                     expert_rsrcs.append(create_buffer_resource_from_addr(expert_tok_addr))
                     expert_vlds.append(arith.constant(1, type=T.bool()))
@@ -1249,8 +1229,8 @@ def make_combine_kernel(
                 # scattered each (src_pe, src_lid) contribution into that
                 # slot. Two 4-i32 loads cover the 8 k-slots in one round.
                 tm_base_off = tok_id * experts_per_token
-                tm_vec_lo   = buffer_load(_rsrc_tok_map, tm_base_off,     vec_width=4, dtype=T.i32())
-                tm_vec_hi   = buffer_load(_rsrc_tok_map, tm_base_off + 4, vec_width=4, dtype=T.i32())
+                tm_vec_lo = buffer_load(_rsrc_tok_map, tm_base_off, vec_width=4, dtype=T.i32())
+                tm_vec_hi = buffer_load(_rsrc_tok_map, tm_base_off + 4, vec_width=4, dtype=T.i32())
 
                 for k_slot in range_constexpr(experts_per_token):
                     if const_expr(k_slot < 4):
@@ -1260,22 +1240,22 @@ def make_combine_kernel(
                     if const_expr(_log2_max_recv is not None):
                         dest_pe_k = enc_k >> _log2_max_recv
                     else:
-                        dest_pe_k = (enc_k // max_recv)
-                    vld_k   = dest_pe_k < npes                          # sentinel = npes
+                        dest_pe_k = enc_k // max_recv
+                    vld_k = dest_pe_k < npes  # sentinel = npes
                     safe_pe = arith.select(vld_k, dest_pe_k, rank)
                     if const_expr(use_p2p_read):
-                        dtok_global    = (enc_k % max_recv)
-                        safe_dtok      = arith.select(vld_k, dtok_global, 0)
-                        peer_base      = SmemPtr.load(_lds_p2p_bases, [safe_pe])
+                        dtok_global = enc_k % max_recv
+                        safe_dtok = arith.select(vld_k, dtok_global, 0)
+                        peer_base = SmemPtr.load(_lds_p2p_bases, [safe_pe])
                         expert_tok_off = _to_i64(safe_dtok) * nbytes
                         expert_tok_addr = _lv_unwrap(peer_base) + expert_tok_off
                     else:
-                        expert_tok_off  = _to_i64(safe_pe * max_tok_per_rank + tok_id) * nbytes
+                        expert_tok_off = _to_i64(safe_pe * max_tok_per_rank + tok_id) * nbytes
                         expert_tok_addr = _lv_unwrap(addr_comb_inp + expert_tok_off)
                     expert_rsrcs.append(create_buffer_resource_from_addr(expert_tok_addr))
                     expert_vlds.append(vld_k)
 
-                all_vld     = (npes >= experts_per_token)   # without compaction, every k_slot must be valid
+                all_vld = npes >= experts_per_token  # without compaction, every k_slot must be valid
                 eff_all_vld = all_vld or _use_compaction
 
             # Two paths optimised for the per-warp partition size:
@@ -1283,10 +1263,9 @@ def make_combine_kernel(
             #     quad unrolled loads, each step covers 256/512/... bytes.
             #   - narrow path (hdim_per_warp <= 895): plain step=64 loop.
             if 895 < hdim_per_warp:
-                rem_hdim_128   = n_elems - hdim_off
+                rem_hdim_128 = n_elems - hdim_off
                 # Effective end of THIS warp's partition, clamped to n_elems.
-                eff_end_128    = arith.select(
-                    rem_hdim_128 < hdim_per_warp, rem_hdim_128, hdim_per_warp)
+                eff_end_128 = arith.select(rem_hdim_128 < hdim_per_warp, rem_hdim_128, hdim_per_warp)
 
                 if const_expr(n_i32 % 256 == 0 and warp_num_per_block < 16):
                     if (hdim_per_warp % 256) < 1:
@@ -1297,11 +1276,45 @@ def make_combine_kernel(
                             vals_a, vals_b, vals_c, vals_d = [], [], [], []
                             for k_slot in range_constexpr(experts_per_token):
                                 rsrc_k = expert_rsrcs[k_slot]
-                                vld_k  = expert_vlds[k_slot]
-                                vals_a.append(_maybe_load(rsrc_k, ec_abs, vld_k, vec_width=1, dtype=T.i32(), cache_modifier=SLC_CACHE))
-                                vals_b.append(_maybe_load(rsrc_k, ec_abs, vld_k, vec_width=1, dtype=T.i32(), cache_modifier=SLC_CACHE, soffset_bytes=256))
-                                vals_c.append(_maybe_load(rsrc_k, ec_abs, vld_k, vec_width=1, dtype=T.i32(), cache_modifier=SLC_CACHE, soffset_bytes=512))
-                                vals_d.append(_maybe_load(rsrc_k, ec_abs, vld_k, vec_width=1, dtype=T.i32(), cache_modifier=SLC_CACHE, soffset_bytes=768))
+                                vld_k = expert_vlds[k_slot]
+                                vals_a.append(
+                                    _maybe_load(
+                                        rsrc_k, ec_abs, vld_k, vec_width=1, dtype=T.i32(), cache_modifier=SLC_CACHE
+                                    )
+                                )
+                                vals_b.append(
+                                    _maybe_load(
+                                        rsrc_k,
+                                        ec_abs,
+                                        vld_k,
+                                        vec_width=1,
+                                        dtype=T.i32(),
+                                        cache_modifier=SLC_CACHE,
+                                        soffset_bytes=256,
+                                    )
+                                )
+                                vals_c.append(
+                                    _maybe_load(
+                                        rsrc_k,
+                                        ec_abs,
+                                        vld_k,
+                                        vec_width=1,
+                                        dtype=T.i32(),
+                                        cache_modifier=SLC_CACHE,
+                                        soffset_bytes=512,
+                                    )
+                                )
+                                vals_d.append(
+                                    _maybe_load(
+                                        rsrc_k,
+                                        ec_abs,
+                                        vld_k,
+                                        vec_width=1,
+                                        dtype=T.i32(),
+                                        cache_modifier=SLC_CACHE,
+                                        soffset_bytes=768,
+                                    )
+                                )
                             acc_a = _accum_experts(vals_a, expert_vlds, eff_all_vld)
                             acc_b = _accum_experts(vals_b, expert_vlds, eff_all_vld)
                             acc_c = _accum_experts(vals_c, expert_vlds, eff_all_vld)
@@ -1329,9 +1342,23 @@ def make_combine_kernel(
                             vals_a, vals_b = [], []
                             for k_slot in range_constexpr(experts_per_token):
                                 rsrc_k = expert_rsrcs[k_slot]
-                                vld_k  = expert_vlds[k_slot]
-                                vals_a.append(_maybe_load(rsrc_k, ec_abs, vld_k, vec_width=1, dtype=T.i32(), cache_modifier=SLC_CACHE))
-                                vals_b.append(_maybe_load(rsrc_k, ec_abs, vld_k, vec_width=1, dtype=T.i32(), cache_modifier=SLC_CACHE, soffset_bytes=256))
+                                vld_k = expert_vlds[k_slot]
+                                vals_a.append(
+                                    _maybe_load(
+                                        rsrc_k, ec_abs, vld_k, vec_width=1, dtype=T.i32(), cache_modifier=SLC_CACHE
+                                    )
+                                )
+                                vals_b.append(
+                                    _maybe_load(
+                                        rsrc_k,
+                                        ec_abs,
+                                        vld_k,
+                                        vec_width=1,
+                                        dtype=T.i32(),
+                                        cache_modifier=SLC_CACHE,
+                                        soffset_bytes=256,
+                                    )
+                                )
                             acc_a = _accum_experts(vals_a, expert_vlds, eff_all_vld)
                             acc_b = _accum_experts(vals_b, expert_vlds, eff_all_vld)
                             if const_expr(_xfer_bf16_to_fp8):
@@ -1346,7 +1373,16 @@ def make_combine_kernel(
                             ec_abs = hdim_off + ec
                             vals_tail = []
                             for k_slot in range_constexpr(experts_per_token):
-                                vals_tail.append(_maybe_load(expert_rsrcs[k_slot], ec_abs, expert_vlds[k_slot], vec_width=1, dtype=T.i32(), cache_modifier=SLC_CACHE))
+                                vals_tail.append(
+                                    _maybe_load(
+                                        expert_rsrcs[k_slot],
+                                        ec_abs,
+                                        expert_vlds[k_slot],
+                                        vec_width=1,
+                                        dtype=T.i32(),
+                                        cache_modifier=SLC_CACHE,
+                                    )
+                                )
                             acc_tail = _accum_experts(vals_tail, expert_vlds, eff_all_vld)
                             if const_expr(_xfer_bf16_to_fp8):
                                 out_off = tok_id * out_n_i32 + ec_abs * 2
@@ -1357,13 +1393,21 @@ def make_combine_kernel(
             else:
                 # Narrow path: a single step=64 main loop.
                 rem_hdim_64 = n_elems - hdim_off
-                eff_end_64  = arith.select(
-                    rem_hdim_64 < hdim_per_warp, rem_hdim_64, hdim_per_warp)
+                eff_end_64 = arith.select(rem_hdim_64 < hdim_per_warp, rem_hdim_64, hdim_per_warp)
                 for ec in range(lane, eff_end_64, 64):
                     ec_abs = hdim_off + ec
                     vals_main = []
                     for k_slot in range_constexpr(experts_per_token):
-                        vals_main.append(_maybe_load(expert_rsrcs[k_slot], ec_abs, expert_vlds[k_slot], vec_width=1, dtype=T.i32(), cache_modifier=SLC_CACHE))
+                        vals_main.append(
+                            _maybe_load(
+                                expert_rsrcs[k_slot],
+                                ec_abs,
+                                expert_vlds[k_slot],
+                                vec_width=1,
+                                dtype=T.i32(),
+                                cache_modifier=SLC_CACHE,
+                            )
+                        )
                     acc = _accum_experts(vals_main, expert_vlds, eff_all_vld)
                     if const_expr(_xfer_bf16_to_fp8):
                         out_off = tok_id * out_n_i32 + ec_abs * 2
@@ -1380,8 +1424,8 @@ def make_combine_kernel(
         if const_expr(enable_weights):
             rsrc_out_wts = create_buffer_resource_from_addr(addr_comb_out_wts)
             for wt_tok_id in range(global_warp_id, cur_rank_num_token, global_warp_num):
-                wt_tm_off    = wt_tok_id * experts_per_token
-                wt_tm_vec_lo = buffer_load(_rsrc_tok_map, wt_tm_off,     vec_width=4, dtype=T.i32())
+                wt_tm_off = wt_tok_id * experts_per_token
+                wt_tm_vec_lo = buffer_load(_rsrc_tok_map, wt_tm_off, vec_width=4, dtype=T.i32())
                 wt_tm_vec_hi = buffer_load(_rsrc_tok_map, wt_tm_off + 4, vec_width=4, dtype=T.i32())
 
                 if lane < experts_per_token:
@@ -1394,21 +1438,18 @@ def make_combine_kernel(
                         if const_expr(_log2_max_recv is not None):
                             wt_pe = wt_enc >> _log2_max_recv
                         else:
-                            wt_pe = (wt_enc // max_recv)
-                        wt_vld     = wt_pe < npes
+                            wt_pe = wt_enc // max_recv
+                        wt_vld = wt_pe < npes
                         wt_safe_pe = arith.select(wt_vld, wt_pe, rank)
                         if const_expr(use_p2p_read):
-                            wt_dtok      = (wt_enc % max_recv)
+                            wt_dtok = wt_enc % max_recv
                             wt_safe_dtok = arith.select(wt_vld, wt_dtok, 0)
-                            wt_pe_base   = SmemPtr.load(_lds_p2p_wt_bases, [wt_safe_pe])
-                            wt_src_off   = _to_i64(wt_safe_dtok) * weight_bytes
-                            wt_rsrc      = create_buffer_resource_from_addr(
-                                wt_pe_base + wt_src_off)
+                            wt_pe_base = SmemPtr.load(_lds_p2p_wt_bases, [wt_safe_pe])
+                            wt_src_off = _to_i64(wt_safe_dtok) * weight_bytes
+                            wt_rsrc = create_buffer_resource_from_addr(wt_pe_base + wt_src_off)
                         else:
-                            wt_src_off = _to_i64(
-                                wt_safe_pe * max_tok_per_rank + wt_tok_id) * weight_bytes
-                            wt_rsrc    = create_buffer_resource_from_addr(
-                                addr_comb_inp_wts + wt_src_off)
+                            wt_src_off = _to_i64(wt_safe_pe * max_tok_per_rank + wt_tok_id) * weight_bytes
+                            wt_rsrc = create_buffer_resource_from_addr(addr_comb_inp_wts + wt_src_off)
                         wt_val = buffer_load(wt_rsrc, lane, vec_width=1, dtype=T.f32())
                         if const_expr(npes >= experts_per_token):
                             wt_acc = wt_acc + wt_val
@@ -1421,14 +1462,25 @@ def make_combine_kernel(
     return ep_combine_intranode
 
 
-def make_dispatch_jit(*, rank, npes, experts_per_rank, experts_per_token,
-                      hidden_dim, max_tok_per_rank, block_num,
-                      warp_num_per_block, data_type,
-                      scale_dim=0, scale_type_size=0,
-                      enable_std_moe=False):
+def make_dispatch_jit(
+    *,
+    rank,
+    npes,
+    experts_per_rank,
+    experts_per_token,
+    hidden_dim,
+    max_tok_per_rank,
+    block_num,
+    warp_num_per_block,
+    data_type,
+    scale_dim=0,
+    scale_type_size=0,
+    enable_std_moe=False,
+):
     hidden_elem_size = torch.tensor([], dtype=data_type).element_size()
     kernel = make_dispatch_kernel(
-        rank=rank, npes=npes,
+        rank=rank,
+        npes=npes,
         experts_per_rank=experts_per_rank,
         experts_per_token=experts_per_token,
         hidden_dim=hidden_dim,
@@ -1447,42 +1499,70 @@ def make_dispatch_jit(*, rank, npes, experts_per_rank, experts_per_token,
     # configs produce distinct cached entries.
     _key_rank, _key_npes, _key_block_num = rank, npes, block_num
     _key_warp_per_block = warp_num_per_block
-    _key_max_tok        = max_tok_per_rank
-    _key_std_moe        = enable_std_moe
+    _key_max_tok = max_tok_per_rank
+    _key_std_moe = enable_std_moe
 
     @flyc.jit
     def dispatch_launch(
-        addr_inp_tok: fx.Int64, addr_idx: fx.Int64, addr_wts: fx.Int64,
-        addr_out_tok: fx.Int64, addr_out_wts: fx.Int64, addr_out_idx: fx.Int64,
-        addr_tok_off: fx.Int64, addr_recv_num: fx.Int64,
-        addr_dest_ctr: fx.Int64, addr_disp_bar: fx.Int64,
-        addr_tok_map: fx.Int64, addr_tis: fx.Int64,
+        addr_inp_tok: fx.Int64,
+        addr_idx: fx.Int64,
+        addr_wts: fx.Int64,
+        addr_out_tok: fx.Int64,
+        addr_out_wts: fx.Int64,
+        addr_out_idx: fx.Int64,
+        addr_tok_off: fx.Int64,
+        addr_recv_num: fx.Int64,
+        addr_dest_ctr: fx.Int64,
+        addr_disp_bar: fx.Int64,
+        addr_tok_map: fx.Int64,
+        addr_tis: fx.Int64,
         addr_total_rv: fx.Int64,
-        addr_p2p_tok_off: fx.Int64, addr_p2p_tis: fx.Int64,
-        addr_p2p_out_wts: fx.Int64, addr_p2p_out_idx: fx.Int64,
-        addr_p2p_out_tok: fx.Int64, addr_p2p_recv_num: fx.Int64,
-        addr_scales: fx.Int64, addr_p2p_out_scales: fx.Int64,
-        addr_packed_recv_x: fx.Int64, addr_packed_recv_count: fx.Int64,
-        addr_packed_recv_src_info: fx.Int64, addr_disp_tok_map: fx.Int64,
+        addr_p2p_tok_off: fx.Int64,
+        addr_p2p_tis: fx.Int64,
+        addr_p2p_out_wts: fx.Int64,
+        addr_p2p_out_idx: fx.Int64,
+        addr_p2p_out_tok: fx.Int64,
+        addr_p2p_recv_num: fx.Int64,
+        addr_scales: fx.Int64,
+        addr_p2p_out_scales: fx.Int64,
+        addr_packed_recv_x: fx.Int64,
+        addr_packed_recv_count: fx.Int64,
+        addr_packed_recv_src_info: fx.Int64,
+        addr_disp_tok_map: fx.Int64,
         addr_disp_grid_bar: fx.Int64,
         cur_tok: fx.Int32,
         stream: Stream = Stream(None),
     ):
-        _ = (_key_rank, _key_npes, _key_block_num, _key_warp_per_block,
-             _key_max_tok, _key_std_moe)
-        kernel(addr_inp_tok, addr_idx, addr_wts,
-               addr_out_tok, addr_out_wts, addr_out_idx,
-               addr_tok_off, addr_recv_num, addr_dest_ctr,
-               addr_disp_bar, addr_tok_map, addr_tis,
-               addr_total_rv,
-               addr_p2p_tok_off, addr_p2p_tis,
-               addr_p2p_out_wts, addr_p2p_out_idx,
-               addr_p2p_out_tok, addr_p2p_recv_num,
-               addr_scales, addr_p2p_out_scales,
-               addr_packed_recv_x, addr_packed_recv_count,
-               addr_packed_recv_src_info, addr_disp_tok_map,
-               addr_disp_grid_bar,
-               cur_tok).launch(
+        _ = (_key_rank, _key_npes, _key_block_num, _key_warp_per_block, _key_max_tok, _key_std_moe)
+        kernel(
+            addr_inp_tok,
+            addr_idx,
+            addr_wts,
+            addr_out_tok,
+            addr_out_wts,
+            addr_out_idx,
+            addr_tok_off,
+            addr_recv_num,
+            addr_dest_ctr,
+            addr_disp_bar,
+            addr_tok_map,
+            addr_tis,
+            addr_total_rv,
+            addr_p2p_tok_off,
+            addr_p2p_tis,
+            addr_p2p_out_wts,
+            addr_p2p_out_idx,
+            addr_p2p_out_tok,
+            addr_p2p_recv_num,
+            addr_scales,
+            addr_p2p_out_scales,
+            addr_packed_recv_x,
+            addr_packed_recv_count,
+            addr_packed_recv_src_info,
+            addr_disp_tok_map,
+            addr_disp_grid_bar,
+            cur_tok,
+        ).launch(
             grid=(block_num, 1, 1),
             block=(warp_num_per_block * 64, 1, 1),
             stream=stream,
@@ -1491,15 +1571,27 @@ def make_dispatch_jit(*, rank, npes, experts_per_rank, experts_per_token,
     return dispatch_launch
 
 
-def make_combine_jit(*, rank, npes, experts_per_rank=0, experts_per_token,
-                     hidden_dim, max_tok_per_rank, block_num,
-                     warp_num_per_block, data_type,
-                     enable_weights=False, enable_std_moe=False,
-                     use_p2p_read=False, skip_stage1=False,
-                     inp_data_type=None):
+def make_combine_jit(
+    *,
+    rank,
+    npes,
+    experts_per_rank=0,
+    experts_per_token,
+    hidden_dim,
+    max_tok_per_rank,
+    block_num,
+    warp_num_per_block,
+    data_type,
+    enable_weights=False,
+    enable_std_moe=False,
+    use_p2p_read=False,
+    skip_stage1=False,
+    inp_data_type=None,
+):
     hidden_elem_size = torch.tensor([], dtype=data_type).element_size()
     kernel = make_combine_kernel(
-        rank=rank, npes=npes,
+        rank=rank,
+        npes=npes,
         experts_per_rank=experts_per_rank,
         experts_per_token=experts_per_token,
         hidden_dim=hidden_dim,
@@ -1520,49 +1612,77 @@ def make_combine_jit(*, rank, npes, experts_per_rank=0, experts_per_token,
     # configs produce distinct cached entries.
     _key_rank, _key_npes, _key_block_num = rank, npes, block_num
     _key_warp_per_block = warp_num_per_block
-    _key_max_tok        = max_tok_per_rank
-    _key_weights        = enable_weights
-    _key_std_moe        = enable_std_moe
-    _key_p2p_read       = use_p2p_read
-    _key_skip_s1        = skip_stage1
-    _key_inp_dtype      = str(inp_data_type) if inp_data_type is not None else "none"
+    _key_max_tok = max_tok_per_rank
+    _key_weights = enable_weights
+    _key_std_moe = enable_std_moe
+    _key_p2p_read = use_p2p_read
+    _key_skip_s1 = skip_stage1
+    _key_inp_dtype = str(inp_data_type) if inp_data_type is not None else "none"
     _allocator = kernel._allocator
 
     @flyc.jit
     def combine_launch(
-        addr_inp_tok: fx.Int64, addr_comb_inp: fx.Int64,
-        addr_comb_out: fx.Int64, addr_xdb_mem: fx.Int64,
-        addr_xdb_flag: fx.Int64, addr_tok_map: fx.Int64,
-        addr_comb_bar: fx.Int64, addr_trecv: fx.Int64,
+        addr_inp_tok: fx.Int64,
+        addr_comb_inp: fx.Int64,
+        addr_comb_out: fx.Int64,
+        addr_xdb_mem: fx.Int64,
+        addr_xdb_flag: fx.Int64,
+        addr_tok_map: fx.Int64,
+        addr_comb_bar: fx.Int64,
+        addr_trecv: fx.Int64,
         addr_tis: fx.Int64,
-        addr_p2p_comb_inp: fx.Int64, addr_p2p_xdb_mem: fx.Int64,
+        addr_p2p_comb_inp: fx.Int64,
+        addr_p2p_xdb_mem: fx.Int64,
         addr_wts_buf: fx.Int64,
-        addr_comb_inp_wts: fx.Int64, addr_comb_out_wts: fx.Int64,
+        addr_comb_inp_wts: fx.Int64,
+        addr_comb_out_wts: fx.Int64,
         addr_p2p_comb_inp_wts: fx.Int64,
-        addr_packed_recv_x: fx.Int64, addr_disp_tok_map: fx.Int64,
+        addr_packed_recv_x: fx.Int64,
+        addr_disp_tok_map: fx.Int64,
         addr_disp_out_wts: fx.Int64,
         cur_rank_num_token: fx.Int32,
         stream: Stream = Stream(None),
     ):
-        _ = (_key_rank, _key_npes, _key_block_num, _key_warp_per_block,
-             _key_max_tok, _key_weights, _key_std_moe, _key_p2p_read,
-             _key_skip_s1, _key_inp_dtype)
+        _ = (
+            _key_rank,
+            _key_npes,
+            _key_block_num,
+            _key_warp_per_block,
+            _key_max_tok,
+            _key_weights,
+            _key_std_moe,
+            _key_p2p_read,
+            _key_skip_s1,
+            _key_inp_dtype,
+        )
         from flydsl.compiler.kernel_function import CompilationContext
-        from flydsl._mlir import ir
+
         _allocator.finalized = False
         ctx = CompilationContext.get_current()
         with ir.InsertionPoint(ctx.gpu_module_body):
             _allocator.finalize()
 
-        kernel(addr_inp_tok, addr_comb_inp, addr_comb_out,
-               addr_xdb_mem, addr_xdb_flag, addr_tok_map,
-               addr_comb_bar, addr_trecv, addr_tis,
-               addr_p2p_comb_inp, addr_p2p_xdb_mem,
-               addr_wts_buf, addr_comb_inp_wts,
-               addr_comb_out_wts, addr_p2p_comb_inp_wts,
-               addr_packed_recv_x, addr_disp_tok_map,
-               addr_disp_out_wts,
-               cur_rank_num_token).launch(
+        kernel(
+            addr_inp_tok,
+            addr_comb_inp,
+            addr_comb_out,
+            addr_xdb_mem,
+            addr_xdb_flag,
+            addr_tok_map,
+            addr_comb_bar,
+            addr_trecv,
+            addr_tis,
+            addr_p2p_comb_inp,
+            addr_p2p_xdb_mem,
+            addr_wts_buf,
+            addr_comb_inp_wts,
+            addr_comb_out_wts,
+            addr_p2p_comb_inp_wts,
+            addr_packed_recv_x,
+            addr_disp_tok_map,
+            addr_disp_out_wts,
+            cur_rank_num_token,
+        ).launch(
             grid=(block_num, 1, 1),
             block=(warp_num_per_block * 64, 1, 1),
             stream=stream,
