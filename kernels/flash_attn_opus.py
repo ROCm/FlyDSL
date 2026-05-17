@@ -1070,7 +1070,7 @@ def build_flash_attn_opus_module(
         #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
         #     __builtin_amdgcn_s_barrier();
-        gpu.barrier()
+        rocdl.s_barrier()
 
         #     v_q = load<T::VEC_Q>(g_q, u_q);
         #     auto v_q_f32 = opus::cast<float>(v_q);
@@ -1107,7 +1107,7 @@ def build_flash_attn_opus_module(
             _stagger_extra_barrier_if_one()
         else:
             rocdl.sched_barrier(0)
-            gpu.barrier()
+            rocdl.s_barrier()
 
         #     v_s[0] = mma0(v_q, v_k);
         v_s_0_lo_raw, v_s_0_hi_raw = _gemm0(k_pl_pro, k_ph_pro)
@@ -1145,7 +1145,7 @@ def build_flash_attn_opus_module(
         #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
         #     __builtin_amdgcn_s_barrier();
-        gpu.barrier()
+        rocdl.s_barrier()
         #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
 
@@ -1188,7 +1188,7 @@ def build_flash_attn_opus_module(
             #         __builtin_amdgcn_sched_barrier(0);
             rocdl.sched_barrier(0)
             #         __builtin_amdgcn_s_barrier();
-            gpu.barrier()
+            rocdl.s_barrier()
             #         __builtin_amdgcn_sched_barrier(0);
             rocdl.sched_barrier(0)
 
@@ -1215,7 +1215,7 @@ def build_flash_attn_opus_module(
             #         __builtin_amdgcn_sched_barrier(0);
             rocdl.sched_barrier(0)
             #         __builtin_amdgcn_s_barrier();
-            gpu.barrier()
+            rocdl.s_barrier()
             #         __builtin_amdgcn_sched_barrier(0);
             rocdl.sched_barrier(0)
 
@@ -1231,7 +1231,7 @@ def build_flash_attn_opus_module(
             #         __builtin_amdgcn_sched_barrier(0);
             rocdl.sched_barrier(0)
             #         __builtin_amdgcn_s_barrier();
-            gpu.barrier()
+            rocdl.s_barrier()
             #         __builtin_amdgcn_sched_barrier(0);
             rocdl.sched_barrier(0)
 
@@ -1317,7 +1317,7 @@ def build_flash_attn_opus_module(
             #         __builtin_amdgcn_sched_barrier(0);
             rocdl.sched_barrier(0)
             #         __builtin_amdgcn_s_barrier();
-            gpu.barrier()
+            rocdl.s_barrier()
             #         __builtin_amdgcn_sched_barrier(0);
             rocdl.sched_barrier(0)
 
@@ -1333,7 +1333,7 @@ def build_flash_attn_opus_module(
             #         __builtin_amdgcn_sched_barrier(0);
             rocdl.sched_barrier(0)
             #         __builtin_amdgcn_s_barrier();
-            gpu.barrier()
+            rocdl.s_barrier()
             #         __builtin_amdgcn_sched_barrier(0);
             rocdl.sched_barrier(0)
 
@@ -1360,7 +1360,7 @@ def build_flash_attn_opus_module(
             #         __builtin_amdgcn_sched_barrier(0);
             rocdl.sched_barrier(0)
             #         __builtin_amdgcn_s_barrier();
-            gpu.barrier()
+            rocdl.s_barrier()
             #         __builtin_amdgcn_sched_barrier(0);
             rocdl.sched_barrier(0)
 
@@ -1386,7 +1386,7 @@ def build_flash_attn_opus_module(
             #         __builtin_amdgcn_sched_barrier(0);
             rocdl.sched_barrier(0)
             #         __builtin_amdgcn_s_barrier();
-            gpu.barrier()
+            rocdl.s_barrier()
             #         __builtin_amdgcn_sched_barrier(0);
             rocdl.sched_barrier(0)
 
@@ -1469,7 +1469,7 @@ def build_flash_attn_opus_module(
             #         __builtin_amdgcn_sched_barrier(0);
             rocdl.sched_barrier(0)
             #         __builtin_amdgcn_s_barrier();
-            gpu.barrier()
+            rocdl.s_barrier()
             #         __builtin_amdgcn_sched_barrier(0);
             rocdl.sched_barrier(0)
 
@@ -1499,7 +1499,7 @@ def build_flash_attn_opus_module(
         #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
         #     __builtin_amdgcn_s_barrier();
-        gpu.barrier()
+        rocdl.s_barrier()
         #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
 
@@ -1526,7 +1526,7 @@ def build_flash_attn_opus_module(
         #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
         #     __builtin_amdgcn_s_barrier();
-        gpu.barrier()
+        rocdl.s_barrier()
         #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
 
@@ -1552,7 +1552,7 @@ def build_flash_attn_opus_module(
         #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
         #     __builtin_amdgcn_s_barrier();
-        gpu.barrier()
+        rocdl.s_barrier()
         #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
 
@@ -1606,7 +1606,7 @@ def build_flash_attn_opus_module(
         #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
         #     __builtin_amdgcn_s_barrier();
-        gpu.barrier()
+        rocdl.s_barrier()
         #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
 
@@ -1622,7 +1622,7 @@ def build_flash_attn_opus_module(
         #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
         #     __builtin_amdgcn_s_barrier();
-        gpu.barrier()
+        rocdl.s_barrier()
         #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
 
@@ -1651,7 +1651,7 @@ def build_flash_attn_opus_module(
         #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
         #     __builtin_amdgcn_s_barrier();
-        gpu.barrier()
+        rocdl.s_barrier()
         #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
 
@@ -1675,7 +1675,7 @@ def build_flash_attn_opus_module(
         #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
         #     __builtin_amdgcn_s_barrier();
-        gpu.barrier()
+        rocdl.s_barrier()
         #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
 
@@ -1724,7 +1724,7 @@ def build_flash_attn_opus_module(
         #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
         #     __builtin_amdgcn_s_barrier();
-        gpu.barrier()
+        rocdl.s_barrier()
         #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
 
@@ -1740,7 +1740,7 @@ def build_flash_attn_opus_module(
         #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
         #     __builtin_amdgcn_s_barrier();
-        gpu.barrier()
+        rocdl.s_barrier()
         #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
 
@@ -1766,7 +1766,7 @@ def build_flash_attn_opus_module(
         #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
         #     __builtin_amdgcn_s_barrier();
-        gpu.barrier()
+        rocdl.s_barrier()
         #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
 
@@ -1790,7 +1790,7 @@ def build_flash_attn_opus_module(
         #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
         #     __builtin_amdgcn_s_barrier();
-        gpu.barrier()
+        rocdl.s_barrier()
         #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
 
@@ -1858,7 +1858,7 @@ def build_flash_attn_opus_module(
         #     asm volatile("" : "+v"(v_o_pin[0]), "+v"(v_o_pin[1]), "+v"(v_o_pin[2]), "+v"(v_o_pin[3]) ::);
         _scale_o(o_accs, rescale_e11)
         #     __builtin_amdgcn_s_barrier();
-        gpu.barrier()
+        rocdl.s_barrier()
         #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
 
@@ -1870,7 +1870,7 @@ def build_flash_attn_opus_module(
         #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
         #     __builtin_amdgcn_s_barrier();
-        gpu.barrier()
+        rocdl.s_barrier()
         #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
 
@@ -1897,7 +1897,7 @@ def build_flash_attn_opus_module(
         if const_expr(OPUS_ENABLE_STAGGER):
             _stagger_extra_barrier_if_zero()
         else:
-            gpu.barrier()
+            rocdl.s_barrier()
 
         #     auto u_o = make_layout_o<T>(warp_id, lane_id, kargs.stride_q_n);
         #     auto v_o_bf16 = opus::cast<D_ATTN>(v_o);
