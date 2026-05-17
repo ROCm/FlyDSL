@@ -430,7 +430,8 @@ def build_flash_attn_opus_module(
         shuf_32_i32 = fx.Int32(32)
         c4_i32 = fx.Int32(4)
         lane_i32 = fx.Int32(lane)
-        v8f32_type = Vec.make_type(MFMA_LANE_K, fx.Float32)
+        v64bf16_type = Vec.make_type(K_STEPS_QK * MFMA_LANE_K, elem_dtype)
+        v64f32_type = Vec.make_type(K_STEPS_QK * MFMA_LANE_K, fx.Float32)
 
         #     // Tile traversal helpers
         #     const int kv_tile_stride = T::KV_TILE_SIZE * kargs.stride_kv_n;
@@ -531,7 +532,16 @@ def build_flash_attn_opus_module(
             token = batch_idx * seq_len_v + token_idx
             return token * stride_q_n_v + q_head_idx * HEAD_DIM + col
 
-        def load_q_packs(q_row_in_block):
+        def _concat_vectors(lhs, rhs):
+            lhs_vec = Vec(lhs)
+            rhs_vec = Vec(rhs)
+            return lhs_vec.shuffle(
+                rhs_vec,
+                list(range(lhs_vec.numel))
+                + [lhs_vec.numel + i for i in range(rhs_vec.numel)],
+            )
+
+        def load_q_all(q_row_in_block):
             q_raw_packs = []
             for ks in range_constexpr(K_STEPS_QK):
                 q_col = fx.Index(ks * K_STEP_QK) + lane_div_32 * MFMA_LANE_K
@@ -544,39 +554,33 @@ def build_flash_attn_opus_module(
                         dtype=elem_dtype,
                     )
                 )
-            return q_raw_packs
-
-        def cast_q_packs_to_f32(q_raw_packs):
-            q_f32_packs = []
-            for ks in range_constexpr(K_STEPS_QK):
-                q_f32_packs.append(Vec(q_raw_packs[ks]).extf(v8f32_type))
-            return q_f32_packs
-
-        def scale_q_f32_packs(q_f32_packs):
-            q_scaled_f32_packs = []
-            for ks in range_constexpr(K_STEPS_QK):
-                q_pack_f32 = Vec(q_f32_packs[ks])
-                scaled_elems = []
-                for k in range_constexpr(MFMA_LANE_K):
-                    scaled_elems.append(
-                        arith.mulf(
-                            _raw(q_pack_f32[k]),
-                            _raw(c_sm_scale_log2e),
-                            fastmath=fm_fast,
-                        )
-                    )
-                q_scaled_f32_packs.append(
-                    Vec.from_elements(scaled_elems, fx.Float32).ir_value()
+            q_16_packs = []
+            for pair in range_constexpr(K_STEPS_QK // 2):
+                q_16_packs.append(
+                    _concat_vectors(q_raw_packs[pair * 2], q_raw_packs[pair * 2 + 1])
                 )
-            return q_scaled_f32_packs
 
-        def cast_q_packs_to_bf16(q_scaled_f32_packs):
-            q_bf16_packs = []
-            for ks in range_constexpr(K_STEPS_QK):
-                q_bf16_packs.append(
-                    Vec(q_scaled_f32_packs[ks]).truncf(v8f16_type).ir_value()
+            q_32_packs = []
+            for pair in range_constexpr(K_STEPS_QK // 4):
+                q_32_packs.append(
+                    _concat_vectors(q_16_packs[pair * 2], q_16_packs[pair * 2 + 1])
                 )
-            return q_bf16_packs
+
+            q_all = _concat_vectors(q_32_packs[0], q_32_packs[1])
+            return Vec(q_all, (K_STEPS_QK * MFMA_LANE_K,), elem_dtype)
+
+        def scale_q_all(q_all_bf16):
+            q_all_f32 = Vec(q_all_bf16).extf(v64f32_type)
+            scale_vec = Vec.from_elements([c_sm_scale_log2e], fx.Float32).broadcast_to(
+                K_STEPS_QK * MFMA_LANE_K
+            )
+            q_all_scaled_f32 = Vec(q_all_f32) * scale_vec
+            return Vec(q_all_scaled_f32).truncf(v64bf16_type)
+
+        def get_q_pack(q_all_scaled_bf16, ks):
+            q_vec = Vec(q_all_scaled_bf16)
+            base = ks * MFMA_LANE_K
+            return q_vec.shuffle(q_vec, [base + i for i in range(MFMA_LANE_K)]).ir_value()
 
         def _make_raw_buffer_rsrc(tensor):
             base_ptr = _extract_aligned_pointer(tensor)
@@ -651,24 +655,15 @@ def build_flash_attn_opus_module(
             The body runs on warps 4-7 only, advancing their s_barrier ordinal
             by one relative to warps 0-3 → starts the dual-group phase shift.
 
-            Implemented via inline assembly with the stagger value forced into
-            an SGPR via the `s` constraint, so the conditional branch is a
-            scalar `s_cbranch_scc*` (per-wave) rather than a per-lane VGPR
-            predicate. This mirrors how the C++ builtin compiles.
+            Emit real CFG + ROCDL barrier ops instead of opaque inline asm, so
+            LLVM sees the `llvm.amdgcn.s.barrier` intrinsic and keeps the
+            conditional barrier as a scheduling boundary.
             """
-            rocdl.sched_barrier(0)
-            llvm.inline_asm(
-                ir.Type.parse("!llvm.void"),
-                [_stagger_i32],
-                (
-                    "s_cmp_eq_u32 $0, 0\n\t"
-                    "s_cbranch_scc1 1f\n\t"
-                    "s_barrier\n\t"
-                    "1:"
-                ),
-                "s",
-                has_side_effects=True,
-            )
+            if_op = scf.IfOp(stagger_is_one_i1, [], has_else=False, loc=ir.Location.unknown())
+            with ir.InsertionPoint(if_op.regions[0].blocks[0]):
+                rocdl.sched_barrier(0)
+                rocdl.s_barrier()
+                scf.YieldOp([])
 
         def _stagger_extra_barrier_if_zero():
             """Emit `s_barrier;` only when stagger == 0.
@@ -810,8 +805,9 @@ def build_flash_attn_opus_module(
             v_s_lo = c_zero_v16f32
             v_s_hi = c_zero_v16f32
             for ks in range_constexpr(K_STEPS_QK):
-                v_s_lo = mfma_acc(k_lo[ks], q_b_packs[ks], v_s_lo)
-                v_s_hi = mfma_acc(k_hi[ks], q_b_packs[ks], v_s_hi)
+                q_pack = get_q_pack(q_all_scaled_bf16, ks)
+                v_s_lo = mfma_acc(k_lo[ks], q_pack, v_s_lo)
+                v_s_hi = mfma_acc(k_hi[ks], q_pack, v_s_hi)
             return v_s_lo, v_s_hi
 
         def _causal_mask_inplace(s_lo, s_hi, tile_idx):
@@ -951,10 +947,8 @@ def build_flash_attn_opus_module(
         q_row = q_start + q_row_in_block
         q_row_i32 = fx.Int32(q_row)
         q_in_bounds = q_row < seq_len_v
-        q_raw_packs = load_q_packs(q_row_in_block)
-        q_f32_packs = cast_q_packs_to_f32(q_raw_packs)
-        q_scaled_f32_packs = scale_q_f32_packs(q_f32_packs)
-        q_b_packs = cast_q_packs_to_bf16(q_scaled_f32_packs)
+        q_all_bf16 = load_q_all(q_row_in_block)
+        q_all_scaled_bf16 = scale_q_all(q_all_bf16)
 
         #     async_load<T::VEC_KV>(g_k, s_k[1].ptr, u_gk, u_sk, kv_tile(1));
         async_load_k(fx.Index(BLOCK_N), 1)
