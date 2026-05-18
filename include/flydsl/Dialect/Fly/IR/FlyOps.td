@@ -358,6 +358,7 @@ def Fly_AtomSetValueOp : Fly_Op<"atom.set_value", [Pure, DeclareOpInterfaceMetho
 }
 
 def Fly_CopyAtomCall : Fly_Op<"copy_atom_call"> {
+  let hasVerifier = 1;
   let arguments = (ins Fly_CopyAtom:$copyAtom, Fly_MemRef:$src, Fly_MemRef:$dst, Optional<Fly_MemRef>:$pred);
 }
 def Fly_MmaAtomCall : Fly_Op<"mma_atom_call"> {
@@ -365,6 +366,7 @@ def Fly_MmaAtomCall : Fly_Op<"mma_atom_call"> {
 }
 
 def Fly_CopyAtomCallSSA : Fly_Op<"copy_atom_call_ssa", [AttrSizedOperandSegments]> {
+  let hasVerifier = 1;
   let arguments = (ins Fly_CopyAtom:$copyAtom, AnyType:$src,
                        Optional<AnyType>:$dst, Optional<AnyType>:$pred);
   let results = (outs Variadic<AnyType>:$results);
