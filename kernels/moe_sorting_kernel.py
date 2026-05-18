@@ -752,7 +752,7 @@ def compile_moe_sorting_prefill(
       K3: P1 count       — one block per expert, count non-zero mesh cells
       K4: P23 prefix-sum + scatter — prefix-sum on counts, scatter tokens,
           fill sorted_expert_ids, zero moe_buf
-      P0_v2: Fused clear+scatter+count — replaces K1+K2+K3 for small T (<=512)
+      P0_v2: Fused clear+scatter+count — replaces K1+K2+K3 for T <= 2048
 
     Workspace layout (i32 elements):
       [0 .. ws_mesh_i32)                : uint8 expert mesh (E rows x mesh_stride bytes, packed into i32)
@@ -966,7 +966,7 @@ def compile_moe_sorting_prefill(
         launcher = p1_count_kernel(workspace, expert_mask_tensor, i32_mesh_stride, i32_mesh_size)
         launcher.launch(grid=(E, 1, 1), block=(K3_BLOCK, 1, 1), stream=stream)
 
-    # --- P0_v2: Fused clear+scatter+count kernel (for small T) ---------------
+    # --- P0_v2: Fused clear+scatter+count kernel (for T <= 2048) --------------
     # Replaces K1+K2+K3 with a single kernel launch.
     # Grid: E blocks (one per expert), Block: 512 threads (matching CK P0_v2).
     # Phase 1: clear this expert's mesh row
@@ -1217,6 +1217,18 @@ def compile_moe_sorting_prefill(
             _if_init_cs = scf.IfOp(is_t0_init.ir_value())
             with _if_then(_if_init_cs):
                 _lds_store_raw(cumsum_mr, c_zero, ArithValue(c_zero).index_cast(T.index))
+
+            # EP: load this thread's own mask value BEFORE the chunked loop.
+            # The chunked loop overwrites p23_mask_val in later chunks, so we
+            # need a stable copy for the mask prefix sum computed after the loop.
+            my_mask_val = c_one
+            if has_mask:
+                tid_has_expert = tid < c_E
+                my_mask_val = buffer_ops.buffer_load(
+                    mask_rsrc, tid_has_expert.select(tid, c_zero), vec_width=1, dtype=T.i32
+                )
+                my_mask_val = tid_has_expert.select(my_mask_val, c_zero)
+
             for _chunk in range_constexpr(0, E, K4_BLOCK):
                 expert_idx = fx.Int32(_chunk) + tid
                 tid_valid_expert = expert_idx < c_E
@@ -1225,13 +1237,12 @@ def compile_moe_sorting_prefill(
                 raw_cnt = tid_valid_expert.select(raw_cnt, c_zero)
                 blocks = (raw_cnt + c_unit - c_one) // c_unit
                 padded = (raw_cnt == c_zero).select(c_zero, blocks * c_unit)
-                p23_mask_val = c_one
                 if has_mask:
-                    p23_mask_val = buffer_ops.buffer_load(
+                    chunk_mask = buffer_ops.buffer_load(
                         mask_rsrc, tid_valid_expert.select(expert_idx, c_zero), vec_width=1, dtype=T.i32
                     )
-                    p23_mask_val = tid_valid_expert.select(p23_mask_val, c_zero)
-                    padded = (p23_mask_val == c_zero).select(c_zero, padded)
+                    chunk_mask = tid_valid_expert.select(chunk_mask, c_zero)
+                    padded = (chunk_mask == c_zero).select(c_zero, padded)
                 _lds_store_raw(cumsum_mr, padded, ArithValue(expert_idx + c_one).index_cast(T.index))
             gpu.barrier()
 
@@ -1281,7 +1292,8 @@ def compile_moe_sorting_prefill(
             local_idx_p23 = tid
             if has_mask:
                 # EP: Compute mask cumsum for local expert index (register-only DPP scan).
-                p23_mv = _dpp_intra_wave_prefix_sum(p23_mask_val, lane, WARP_SIZE)
+                # Uses my_mask_val (loaded before the chunked loop) to avoid overwrite.
+                p23_mv = _dpp_intra_wave_prefix_sum(my_mask_val, lane, WARP_SIZE)
 
                 # Cross-wave via scratch_mr
                 is_last_lane_pm = lane == fx.Int32(WARP_SIZE - 1)
@@ -1294,7 +1306,7 @@ def compile_moe_sorting_prefill(
                     wtp = _lds_load_raw(scatter_mr, ArithValue(fx.Int32(_w)).index_cast(T.index))
                     cross_pm = (wave > fx.Int32(_w)).select(cross_pm + wtp, cross_pm)
                 p23_mask_inclusive = p23_mv + cross_pm
-                local_idx_p23 = p23_mask_inclusive - p23_mask_val
+                local_idx_p23 = p23_mask_inclusive - my_mask_val
             else:
                 local_idx_p23 = tid
 
@@ -1316,8 +1328,24 @@ def compile_moe_sorting_prefill(
                 is_t0_extra3 = tid == c_zero
                 _if_t0_e3 = scf.IfOp(is_t0_extra3.ir_value())
                 with _if_then(_if_t0_e3):
-                    for _e3 in range_constexpr(K4_BLOCK, E):
-                        _lds_store_raw(cumsum_mr, fx.Int32(_e3), ArithValue(fx.Int32(_e3)).index_cast(T.index))
+                    if has_mask:
+                        # EP: serially extend mask prefix sum for experts >= K4_BLOCK
+                        prev_local = _lds_load_raw(cumsum_mr, ArithValue(fx.Int32(K4_BLOCK - 1)).index_cast(T.index))
+                        prev_mask = buffer_ops.buffer_load(
+                            mask_rsrc, fx.Int32(K4_BLOCK - 1), vec_width=1, dtype=T.i32
+                        )
+                        prev_local = prev_local + prev_mask
+                        for _e3 in range_constexpr(K4_BLOCK, E):
+                            e3_mask = buffer_ops.buffer_load(mask_rsrc, fx.Int32(_e3), vec_width=1, dtype=T.i32)
+                            _lds_store_raw(
+                                cumsum_mr, prev_local, ArithValue(fx.Int32(_e3)).index_cast(T.index)
+                            )
+                            prev_local = prev_local + e3_mask
+                    else:
+                        for _e3 in range_constexpr(K4_BLOCK, E):
+                            _lds_store_raw(
+                                cumsum_mr, fx.Int32(_e3), ArithValue(fx.Int32(_e3)).index_cast(T.index)
+                            )
             gpu.barrier()
             my_local_idx = _lds_load_raw(cumsum_mr, ArithValue(my_expert).index_cast(T.index))
 
