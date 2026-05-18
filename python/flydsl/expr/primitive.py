@@ -999,8 +999,17 @@ def make_ptr(result_type, args, loc=None, ip=None):
 
 
 @traced_op
-def get_dyn_shared(loc=None, ip=None):
-    return fly.get_dyn_shared(loc=loc, ip=ip)
+def get_dyn_shared(dtype=None, loc=None, ip=None):
+    """Return a pointer to the start of the kernel's dynamic shared-memory buffer.
+
+    Examples:
+        smem_base = get_dyn_shared()
+        sA = make_view(recast_iter(fx.Float32, smem_base), sA_layout)
+    """
+    raw_ptr = fly.get_dyn_shared(loc=loc, ip=ip)
+    if dtype is None:
+        return raw_ptr
+    return recast_iter(dtype, raw_ptr)
 
 
 @traced_op
@@ -1058,6 +1067,21 @@ def ptr_store(value, ptr, loc=None, ip=None):
 
 @traced_op
 def recast_iter(result_type, src, loc=None, ip=None):
+    """Reinterpret a pointer / iterator as another element type (like `reinterpret_cast`).
+
+    Examples:
+        smem_f32 = recast_iter(fx.Float32, get_dyn_shared())
+    """
+    from .numeric import Numeric
+
+    if isinstance(result_type, type):
+        if issubclass(result_type, Numeric):
+            result_type = result_type.ir_type
+        else:
+            raise TypeError(
+                f"result_type must be a Numeric subclass or a fly Pointer, got unsupported class {result_type!r}"
+            )
+        result_type = PointerType.get(result_type, src.memspace, src.alignment)
     return fly.recast_iter(result_type, src, loc=loc, ip=ip)
 
 

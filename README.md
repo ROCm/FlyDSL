@@ -17,7 +17,7 @@ layout IR with explicit algebra and coordinate mapping, plus a composable loweri
   - Core abstractions: `!fly.int_tuple`, `!fly.layout`, `!fly.coord_tensor`, `!fly.memref`
   - Algebra ops: composition/product/divide/partition + coordinate mapping ops
 - **Embedded MLIR Python runtime** (`_mlir`)
-  - No external `mlir` python wheel is required: MLIR python bindings are built and staged into `build-fly/python_packages/flydsl/_mlir`
+  - No external `mlir` python wheel is required: MLIR python bindings are included with the FlyDSL package/build artifacts
 
 ### Repository layout
 
@@ -53,58 +53,54 @@ FlyDSL/
 
 ### Prerequisites
 
-- **ROCm**: required for GPU execution (tested on ROCm 6.x, 7.x)
-- **Build tools**: `cmake` (≥3.20), C++17 compiler, optionally `ninja`
 - **Python**: Python 3.10+ with `pip`
-- **Python deps**: `nanobind`, `numpy`, `pybind11` (installed by `build_llvm.sh`)
+- **ROCm**: required for GPU execution, tests, and benchmarks (tested on ROCm 6.x, 7.x)
 
-### Step 1: Build LLVM/MLIR
+### Install FlyDSL
 
-If you already have an MLIR build with Python bindings enabled, skip this step.
+For most users, install the published package directly:
+
+```bash
+pip install flydsl
+```
+
+### Verify the install
+
+```bash
+python -c "import flydsl; print('FlyDSL installed')"
+```
+
+### Build from source
+
+Build from source only if you are developing FlyDSL itself or need a custom MLIR/LLVM build.
+
+Prerequisites for source builds:
+
+- **Build tools**: `cmake` (>=3.20), C++17 compiler, optionally `ninja`
+- **Python deps**: `nanobind`, `numpy`, `pybind11` (installed by the build scripts)
 
 ```bash
 # Clone ROCm LLVM and build MLIR (takes ~30min with -j64)
 bash scripts/build_llvm.sh -j64
+
+# Build FlyDSL C++ dialects, compiler passes, and Python bindings
+bash scripts/build.sh -j64
+
+# Install in development mode
+pip install -e .
 ```
 
-Or point to an existing build:
+If you already have an MLIR build with Python bindings enabled, point to it instead:
+
 ```bash
 export MLIR_PATH=/path/to/llvm-project/build-flydsl/mlir_install
-```
-
-### Step 2: Build FlyDSL
-
-```bash
-bash scripts/build.sh -j64
-```
-
-`build.sh` auto-detects `MLIR_PATH` from common locations. Override with:
-```bash
-MLIR_PATH=/path/to/mlir_install bash scripts/build.sh -j64
+MLIR_PATH=$MLIR_PATH bash scripts/build.sh -j64
+pip install -e .
 ```
 
 > **Note**: If `MLIR_PATH` is set in your environment pointing to a wrong LLVM build, `unset MLIR_PATH` first.
 
-After a successful build, you will have:
-- `build-fly/python_packages/flydsl/` — the complete Python package with embedded MLIR bindings
-
-### Step 3: Install (development mode)
-
-```bash
-pip install -e .
-# or equivalently:
-python setup.py develop
-```
-
-This creates an editable install — changes to `python/flydsl/` are immediately reflected.
-
-**Without installing**, you can also set paths manually:
-```bash
-export PYTHONPATH=$(pwd)/build-fly/python_packages:$(pwd):$PYTHONPATH
-export LD_LIBRARY_PATH=$(pwd)/build-fly/python_packages/flydsl/_mlir/_mlir_libs:$LD_LIBRARY_PATH
-```
-
-### Step 4: Run tests
+### Run tests
 
 ```bash
 # Run GEMM correctness tests (fast, ~15s)
@@ -119,11 +115,14 @@ bash scripts/run_benchmark.sh
 ### Quick reference
 
 ```bash
-# Full build from scratch:
+# Install from PyPI:
+pip install flydsl
+
+# Full source build from scratch:
 bash scripts/build_llvm.sh -j64   # one-time: build LLVM/MLIR
 bash scripts/build.sh -j64        # build FlyDSL
-pip install -e .                   # install in dev mode
-bash scripts/run_tests.sh          # verify
+pip install -e .                  # install in dev mode
+bash scripts/run_tests.sh         # verify
 
 # Rebuild after code changes (C++ only):
 bash scripts/build.sh -j64
@@ -138,7 +137,7 @@ bash scripts/build.sh -j64
   - `unset MLIR_PATH` and let `build.sh` auto-detect, or set it to the correct path.
 
 - **`No module named flydsl`**
-  - Run `pip install -e .` or set `PYTHONPATH` as shown above.
+  - Run `pip install flydsl`. For source checkouts, run `pip install -e .` after building.
 
 - **MLIR `.so` load errors**
   - Add MLIR build lib dir to the loader path:
@@ -307,12 +306,10 @@ def vectorAddKernel(
     tC = fx.logical_divide(tC, fx.make_layout(1, 1))
 
     # Load to registers, compute, store via copy atoms
-    RABTy = fx.MemRefType.get(fx.T.f32(), fx.LayoutType.get(1, 1),
-                              fx.AddressSpace.Register)
     copyAtom = fx.make_copy_atom(fx.UniversalCopy32b(), fx.Float32)
-    rA = fx.memref_alloca(RABTy, fx.make_layout(1, 1))
-    rB = fx.memref_alloca(RABTy, fx.make_layout(1, 1))
-    rC = fx.memref_alloca(RABTy, fx.make_layout(1, 1))
+    rA = fx.make_rmem_tensor(1, fx.Float32)
+    rB = fx.make_rmem_tensor(1, fx.Float32)
+    rC = fx.make_rmem_tensor(1, fx.Float32)
 
     fx.copy_atom_call(copyAtom, fx.slice(tA, (None, tid)), rA)
     fx.copy_atom_call(copyAtom, fx.slice(tB, (None, tid)), rB)

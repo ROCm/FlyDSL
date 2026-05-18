@@ -9,6 +9,7 @@
 #include "mlir/Pass/Pass.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Support/FileUtilities.h"
+#include "mlir/Target/LLVMIR/Dialect/All.h"
 #include "mlir/Tools/mlir-opt/MlirOptMain.h"
 
 #include "mlir-c/IR.h"
@@ -37,6 +38,7 @@ int main(int argc, char **argv) {
   mlir::DialectRegistry registry;
   mlir::registerAllDialects(registry);
   mlir::registerAllExtensions(registry);
+  mlir::registerAllGPUToLLVMIRTranslations(registry);
   registry.insert<mlir::fly::FlyDialect>();
   FOR_EACH_BACKEND(REGISTER_BACKEND_DIALECTS, FLYDSL_BACKENDS_TUPLE)
 

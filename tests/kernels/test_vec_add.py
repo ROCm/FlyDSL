@@ -6,23 +6,23 @@
 """Vector Addition Benchmark - GPU kernel with flydsl API"""
 
 import sys
-import os
-import numpy as np
+
 import pytest
-
-pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
-
-try:
-    import torch
-except ImportError:
-    torch = None
-if torch is None or not torch.cuda.is_available():
-    pytest.skip("CUDA/ROCm not available. Skipping GPU benchmarks.", allow_module_level=True)
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.runtime.device import get_rocm_arch
 from tests.test_common import checkAllclose, run_perftest
+
+try:
+    import torch
+except ImportError:
+    torch = None
+
+pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
+
+if torch is None or not torch.cuda.is_available():
+    pytest.skip("CUDA/ROCm not available. Skipping GPU benchmarks.", allow_module_level=True)
 
 
 @flyc.kernel
@@ -55,14 +55,11 @@ def vecAddKernel(
     tB = fx.logical_divide(tB, fx.make_layout(vec_width, 1))
     tC = fx.logical_divide(tC, fx.make_layout(vec_width, 1))
 
-    RABMemRefTy = fx.MemRefType.get(
-        fx.T.f32(), fx.LayoutType.get(vec_width, 1), fx.AddressSpace.Register
-    )
     copyAtom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), fx.Float32)
 
-    rA = fx.memref_alloca(RABMemRefTy, fx.make_layout(vec_width, 1))
-    rB = fx.memref_alloca(RABMemRefTy, fx.make_layout(vec_width, 1))
-    rC = fx.memref_alloca(RABMemRefTy, fx.make_layout(vec_width, 1))
+    rA = fx.make_rmem_tensor(vec_width, fx.Float32)
+    rB = fx.make_rmem_tensor(vec_width, fx.Float32)
+    rC = fx.make_rmem_tensor(vec_width, fx.Float32)
 
     fx.copy_atom_call(copyAtom, fx.slice(tA, (None, tid)), rA)
     fx.copy_atom_call(copyAtom, fx.slice(tB, (None, tid)), rB)
@@ -86,9 +83,7 @@ def vecAdd(
 ):
     tile_elems = block_dim * vec_width
     grid_x = (n + tile_elems - 1) // tile_elems
-    vecAddKernel(A, B, C, block_dim, vec_width).launch(
-        grid=(grid_x, 1, 1), block=(block_dim, 1, 1), stream=stream
-    )
+    vecAddKernel(A, B, C, block_dim, vec_width).launch(grid=(grid_x, 1, 1), block=(block_dim, 1, 1), stream=stream)
 
 
 def benchmark_pytorch_add(size: int):
@@ -197,9 +192,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Vector Addition Benchmark")
     parser.add_argument("--benchmark", action="store_true", help="Run performance benchmark")
-    parser.add_argument(
-        "--vec-width", type=int, default=4, help="Vector width (default: 4)"
-    )
+    parser.add_argument("--vec-width", type=int, default=4, help="Vector width (default: 4)")
     args = parser.parse_args()
 
     print("\n" + "=" * 80)

@@ -13,8 +13,12 @@ Requires: aiter's get_pa_metadata_v1 (module_pa_metadata.so)
 """
 
 from __future__ import annotations
+
+import functools
 import math
+
 import torch
+
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 import functools

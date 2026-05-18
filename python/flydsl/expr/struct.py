@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2025 FlyDSL Project Contributors
+# Copyright (c) 2026 FlyDSL Project Contributors
 
 from __future__ import annotations
 
@@ -29,6 +29,7 @@ __all__ = [
     "Array",
     "Align",
     "Storage",
+    "Arena",
 ]
 
 
@@ -63,7 +64,13 @@ def _display_name(schema: type) -> str:
     return getattr(schema, "__dsl_display_name__", getattr(schema, "__name__", repr(schema)))
 
 
-_RESERVED_FIELD_NAMES = frozenset({"peek", "poke", "replace"})
+_RESERVED_FIELD_NAMES = frozenset(
+    {
+        "replace",  # used by Struct
+        "peek",  # used by Storage
+        "poke",  # used by Storage
+    }
+)
 
 
 def _validate_field_name(name: str, context: str):
@@ -334,7 +341,7 @@ def _make_composite_class(
     def __init__(self, *args, **kwargs):
         if policy == CompositeKind.Sum:
             raise TypeError(
-                f"Union schema {_display_name(type(self))} has no value form; use Storage[...] or allocator.allocate()."
+                f"Union {_display_name(type(self))} has no value form; use Storage[...] or allocator.allocate()."
             )
         base_cls = getattr(type(self), "__dsl_base_type__", type(self))
         values = _field_values_from_args(base_cls, args, kwargs)
@@ -424,11 +431,42 @@ def _make_composite_class(
 
     @classmethod
     def __peek_from_ptr__(cls, ptr: Pointer):
-        raise NotImplementedError(f"{_display_name(cls)} does not support __peek_from_ptr__ yet")
+        if policy != CompositeKind.Product:
+            raise NotImplementedError(f"{_display_name(cls)} does not support __peek_from_ptr__")
+        _, _, offsets = _storage_layout(cls)
+        values = {}
+        for name, eff_type in _effective_field_defs(cls):
+            if _is_constexpr_type(eff_type):
+                values[name] = _construct_field_from_ir(eff_type, [])
+                continue
+            if name not in offsets:
+                raise TypeError(
+                    f"Cannot peek field '{name}' in schema {_display_name(cls)} because it has no storage offset."
+                )
+            values[name] = peek_from_ptr(eff_type, add_offset(ptr, offsets[name]))
+        return cls(**values)
 
     @classmethod
     def __poke_into_ptr__(cls, ptr: Pointer, value):
-        raise NotImplementedError(f"{_display_name(cls)} does not support __poke_into_ptr__ yet")
+        if policy != CompositeKind.Product:
+            raise NotImplementedError(f"{_display_name(cls)} does not support __poke_into_ptr__")
+        if not isinstance(value, cls):
+            raise TypeError(
+                f"{_display_name(cls)}.__poke_into_ptr__ expects {_display_name(cls)} value, "
+                f"got {type(value).__name__}."
+            )
+
+        _, _, offsets = _storage_layout(cls)
+        value_field_types = dict(_effective_field_defs(type(value))) if is_struct_type(type(value)) else {}
+        for field in fields:
+            eff_type = value_field_types.get(field.name, field.type_spec)
+            if _is_constexpr_type(eff_type):
+                continue
+            if field.name not in offsets:
+                raise TypeError(
+                    f"Cannot poke field '{field.name}' in schema {_display_name(cls)} because it has no storage offset."
+                )
+            poke_into_ptr(eff_type, add_offset(ptr, offsets[field.name]), getattr(value, field.name))
 
     def __cache_signature__(self):
         parts = [type(self)]
@@ -551,7 +589,7 @@ class Align:
             return peek_from_ptr(inner, ptr)
 
         def _aligned_poke_into_ptr(ptr, value, inner=dtype):
-            return poke_into_ptr(inner, ptr, value)
+            poke_into_ptr(inner, ptr, value)
 
         inner_key = _type_cache_key(dtype)
 
@@ -578,6 +616,7 @@ class Storage:
     """Typed memory view: ``Storage[T]`` wraps an ``i8`` pointer for Storable ``T``.
 
     - ``._ptr`` — underlying i8* pointer
+    - ``._target_type`` — the Storable type `T`
     - ``.peek()`` — calls ``T.__peek_from_ptr__(ptr)``
     - ``.poke(value)`` — calls ``T.__poke_into_ptr__(ptr, value)``
     - For composite T: attribute access (``storage.field_name``) returns ``Storage[FieldType]``
@@ -605,7 +644,7 @@ class Storage:
 
             def poke(self, value):
                 dsl_type = type(self)._target_type
-                return poke_into_ptr(dsl_type, object.__getattribute__(self, "_ptr"), value)
+                poke_into_ptr(dsl_type, object.__getattribute__(self, "_ptr"), value)
 
             def __getattr__(self, name):
                 dsl_type = type(self)._target_type
@@ -636,3 +675,48 @@ class Storage:
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
+
+
+class Arena:
+    DEFAULT_BASE_ALIGNMENT = 16
+
+    def __init__(self, base_alignment: int = DEFAULT_BASE_ALIGNMENT):
+        self._offset = 0
+        self._base_alignment = base_alignment
+
+    @property
+    def base_ptr(self):
+        raise NotImplementedError
+
+    @property
+    def allocated_bytes(self) -> int:
+        return self._offset
+
+    def _bump(self, nbytes: int, align: int) -> int:
+        offset = _align_up(self._offset, align)
+        self._offset = offset + nbytes
+        return offset
+
+    def allocate(self, storable_or_int, alignment=None):
+        """Allocate a Storable type or raw bytes, returning ``Storage[T]``.
+
+        - ``allocate(StorableType)`` — allocate by storable layout, return ``Storage[StorableType]``
+        - ``allocate(N: int)`` — allocate N raw bytes, return ``Storage[Array[UInt8, N]]``
+        """
+        if isinstance(storable_or_int, int):
+            from .numeric import Uint8
+
+            nbytes = storable_or_int
+            if nbytes <= 0:
+                raise ValueError(f"allocate size must be > 0, got {nbytes}")
+            align = alignment if alignment is not None else self._base_alignment
+            offset = self._bump(nbytes, align)
+            base = add_offset(self.base_ptr, offset)
+            return Storage[Array[Uint8, nbytes]](base)
+        else:
+            storable = storable_or_int
+            nbytes = dsl_size_of(storable)
+            align = dsl_align_of(storable) if alignment is None else max(dsl_align_of(storable), alignment)
+            offset = self._bump(nbytes, align)
+            base = add_offset(self.base_ptr, offset)
+            return Storage[storable](base)

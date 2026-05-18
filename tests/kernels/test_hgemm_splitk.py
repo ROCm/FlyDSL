@@ -3,14 +3,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
+import logging
 import os
 import sys
-import logging
-import flydsl.compiler as flyc
 
-import torch
-import torch.nn.functional as F
 import pytest
+import torch
 
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 _PYFLYDSL_SRC = os.path.join(_REPO_ROOT, "flydsl", "src")
@@ -19,9 +17,9 @@ if _REPO_ROOT not in sys.path:
 if _PYFLYDSL_SRC not in sys.path:
     sys.path.insert(0, _PYFLYDSL_SRC)
 
-from kernels.hgemm_splitk import hgemm_splitk_
-from tests.test_common import run_perftest, verify_output
-from flydsl.runtime.device import get_rocm_arch
+from flydsl.runtime.device import get_rocm_arch  # noqa: E402
+from kernels.hgemm_splitk import hgemm_splitk_  # noqa: E402
+from tests.test_common import run_perftest, verify_output  # noqa: E402
 
 logging.basicConfig(level=logging.INFO)
 ARCH = str(get_rocm_arch())
@@ -30,7 +28,7 @@ if not torch.cuda.is_available():
     pytest.skip("CUDA/ROCm not available. Skipping GPU tests.", allow_module_level=True)
 
 try:
-    import aiter
+
     HAS_AITER = True
 except Exception:
     HAS_AITER = False
@@ -62,29 +60,37 @@ def run_torch_bench(a, b):
         (4096, 4096, 4096, 128, 128, 64, 1, 2, 2),
         (8192, 8192, 8192, 128, 128, 64, 1, 2, 2),
         (32, 2880, 2048, 32, 64, 128, 4, 1, 2),
-    ]
+    ],
 )
-@pytest.mark.parametrize("test_graph", [
-    pytest.param(False, id="eager"),
-    pytest.param(True, id="graph"),
-])
+@pytest.mark.parametrize(
+    "test_graph",
+    [
+        pytest.param(False, id="eager"),
+        pytest.param(True, id="graph"),
+    ],
+)
 def test_mfma_flyc_splitk_hgemm(
     dtype,
-    m, n, k,
-    TILE_M, TILE_N, TILE_K, SPLIT_K, BLOCK_M_WARPS, BLOCK_N_WARPS,
+    m,
+    n,
+    k,
+    TILE_M,
+    TILE_N,
+    TILE_K,
+    SPLIT_K,
+    BLOCK_M_WARPS,
+    BLOCK_N_WARPS,
     *,
     test_graph,
     bench_iters: int = DEFAULT_BENCH_ITERS,
     bench_warmup: int = DEFAULT_BENCH_WARMUP,
 ):
     global ARCH
-    if not (ARCH in ["gfx950", "gfx942"]):
+    if ARCH not in ["gfx950", "gfx942"]:
         pytest.skip(f"Skip hgemm test: ARCH={ARCH}")
-    
+
     print("=" * 80)
-    print(
-        f"[flyc] MFMA {dtype.upper()} SplitK-HGEMM Test"
-    )
+    print(f"[flyc] MFMA {dtype.upper()} SplitK-HGEMM Test")
     print("=" * 80)
 
     bench_iters = max(2, int(bench_iters))
@@ -113,12 +119,12 @@ def test_mfma_flyc_splitk_hgemm(
     c_out = torch.rand(m, n, device=device, dtype=torch_dtype)
 
     kwargs = {
-        'TILE_M': TILE_M,
-        'TILE_N': TILE_N,
-        'TILE_K': TILE_K,
-        'SPLIT_K': SPLIT_K,
-        'BLOCK_M_WARPS': BLOCK_M_WARPS,
-        'BLOCK_N_WARPS': BLOCK_N_WARPS,
+        "TILE_M": TILE_M,
+        "TILE_N": TILE_N,
+        "TILE_K": TILE_K,
+        "SPLIT_K": SPLIT_K,
+        "BLOCK_M_WARPS": BLOCK_M_WARPS,
+        "BLOCK_N_WARPS": BLOCK_N_WARPS,
     }
 
     hgemm_splitk_(c_out, a_q, b_q, None, kwargs, torch.cuda.current_stream())
@@ -145,7 +151,9 @@ def test_mfma_flyc_splitk_hgemm(
     tflops = flops / (us / 1e6) / 1e12
     tbps = bytes_moved / 1e12 / (us / 1e6)
     speedup = ref_us / us
-    print(f"[flyc] Throughput: {us:.1f} us, {tflops:.2f} TFLOPS, BW: {tbps:.3f} TB/s, Torch(us): {ref_us:.1f}, Speedup: {speedup:.3f}")
+    print(
+        f"[flyc] Throughput: {us:.1f} us, {tflops:.2f} TFLOPS, BW: {tbps:.3f} TB/s, Torch(us): {ref_us:.1f}, Speedup: {speedup:.3f}"
+    )
 
 
 if __name__ == "__main__":
@@ -170,9 +178,15 @@ if __name__ == "__main__":
     try:
         test_mfma_flyc_splitk_hgemm(
             args.dtype,
-            m=args.m, n=args.n, k=args.k,
-            TILE_M=args.TILE_M, TILE_N=args.TILE_N, TILE_K=args.TILE_K, SPLIT_K=args.SPLIT_K,
-            BLOCK_M_WARPS=args.BLOCK_M_WARPS, BLOCK_N_WARPS=args.BLOCK_N_WARPS,
+            m=args.m,
+            n=args.n,
+            k=args.k,
+            TILE_M=args.TILE_M,
+            TILE_N=args.TILE_N,
+            TILE_K=args.TILE_K,
+            SPLIT_K=args.SPLIT_K,
+            BLOCK_M_WARPS=args.BLOCK_M_WARPS,
+            BLOCK_N_WARPS=args.BLOCK_N_WARPS,
             test_graph=bool(args.test_graph),
             bench_iters=args.num_iters,
             bench_warmup=args.num_warmup,

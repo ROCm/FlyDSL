@@ -1612,6 +1612,10 @@ class Array:
             suffix = f", {cls.align}" if cls.align != max(1, cls.dtype.width // 8) else ""
             return f"Array[{name}, {cls.size}{suffix}]({self._ptr_value})"
 
+        @property
+        def ptr(self):
+            return self._ptr_value
+
         @classmethod
         def __construct_from_ir_values__(cls, values):
             if len(values) != 1:

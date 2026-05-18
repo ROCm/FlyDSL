@@ -45,13 +45,9 @@ _VALID_B_DTYPES = frozenset(("fp8", "fp16", "int8", "int4", "fp4"))
 def validate_moe_dtypes(a_dtype: str, b_dtype: str) -> None:
     """Validate a_dtype/b_dtype strings for mixed MoE kernels."""
     if a_dtype not in _VALID_A_DTYPES:
-        raise ValueError(
-            f"a_dtype must be one of {tuple(sorted(_VALID_A_DTYPES))}, got {a_dtype!r}"
-        )
+        raise ValueError(f"a_dtype must be one of {tuple(sorted(_VALID_A_DTYPES))}, got {a_dtype!r}")
     if b_dtype not in _VALID_B_DTYPES:
-        raise ValueError(
-            f"b_dtype must be one of {tuple(sorted(_VALID_B_DTYPES))}, got {b_dtype!r}"
-        )
+        raise ValueError(f"b_dtype must be one of {tuple(sorted(_VALID_B_DTYPES))}, got {b_dtype!r}")
 
 
 def dtype_to_elem_type(dtype_str: str):
@@ -91,7 +87,5 @@ def stream_ptr_to_async_token(stream_ptr_value, loc=None, ip=None):
     stream_llvm_ptr = _create_llvm_ptr(stream_ptr_value)
 
     async_token_type = _gpu.AsyncTokenType.get()
-    cast_op = builtin.UnrealizedConversionCastOp(
-        [async_token_type], [stream_llvm_ptr], loc=loc, ip=ip
-    )
+    cast_op = builtin.UnrealizedConversionCastOp([async_token_type], [stream_llvm_ptr], loc=loc, ip=ip)
     return cast_op.results[0]

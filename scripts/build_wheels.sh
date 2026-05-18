@@ -7,9 +7,9 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${REPO_ROOT}"
 
 # Python versions to build wheels for. Aligned with TheRock's supported set
-# (https://github.com/ROCm/TheRock RELEASES.md): 3.10, 3.11, 3.12, 3.13.
-# Override via env: PYTHON_VERSIONS="3.10 3.13" bash scripts/build_wheels.sh
-DEFAULT_PYTHON_VERSIONS="3.10 3.11 3.12 3.13"
+# (https://github.com/ROCm/TheRock RELEASES.md): 3.10, 3.11, 3.12, 3.13, 3.14.
+# Override via env: PYTHON_VERSIONS="3.10 3.14" bash scripts/build_wheels.sh
+DEFAULT_PYTHON_VERSIONS="3.10 3.11 3.12 3.13 3.14"
 IFS=' ' read -r -a PYTHON_VERSIONS <<< "${PYTHON_VERSIONS:-${DEFAULT_PYTHON_VERSIONS}}"
 
 usage() {
@@ -22,7 +22,7 @@ Usage:
   bash scripts/build_wheels.sh [--skip-build] [--install-deps]
 
 Override versions:
-  PYTHON_VERSIONS="3.10 3.13" bash scripts/build_wheels.sh
+  PYTHON_VERSIONS="3.10 3.14" bash scripts/build_wheels.sh
 
 Required env:
   MLIR_PATH    path to llvm-project build (defaults to ./llvm-project/mlir_install)
@@ -31,7 +31,7 @@ Other knobs:
   FLY_REBUILD=1|auto|0   (default: 1)
   EXPECTED_GLIBC=2.35    (default: 2.35, set ALLOW_ANY_GLIBC=1 to skip check)
   PYTHON_VERSIONS="..."  whitespace-separated list, default "${DEFAULT_PYTHON_VERSIONS}"
-  PY<MAJ><MIN>_BIN       per-version python binary override (e.g. PY313_BIN=/opt/py313/bin/python3.13)
+  PY<MAJ><MIN>_BIN       per-version python binary override (e.g. PY314_BIN=/opt/py314/bin/python3.14)
   FLYDSL_PACKAGE_VERSION_OVERRIDE=...  exact package version for release automation
   FLY_REBUILD=1|auto|0                 (default: 1)
 EOF
@@ -55,8 +55,8 @@ ALLOW_ANY_GLIBC="${ALLOW_ANY_GLIBC:-0}"
 
 VENV_ROOT="${VENV_ROOT:-${REPO_ROOT}/.venvs/release}"
 
-# Resolve the python binary for a version like "3.13".
-# Honors PY<MAJ><MIN>_BIN env override (e.g. PY313_BIN), else falls back to
+# Resolve the python binary for a version like "3.14".
+# Honors PY<MAJ><MIN>_BIN env override (e.g. PY314_BIN), else falls back to
 # `python<ver>` on PATH.
 py_bin_for_version() {
   local ver="$1"
@@ -65,7 +65,7 @@ py_bin_for_version() {
   echo "${val}"
 }
 
-# Convert "3.13" -> "cp313".
+# Convert "3.14" -> "cp314".
 py_tag_for_version() {
   local ver="$1"
   echo "cp${ver//./}"
