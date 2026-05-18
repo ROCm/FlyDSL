@@ -271,7 +271,8 @@ def run_test(T, E, topk, unit_size=UNIT_SIZE, max_tokens=None):
     from kernels.moe_sorting_kernel import _compute_sub_tokens
 
     sub_tokens = _compute_sub_tokens(E)
-    path = "decode" if T <= sub_tokens else "prefill"
+    DECODE_MAX_T = 16
+    path = "decode" if T <= min(sub_tokens, DECODE_MAX_T) else "prefill"
 
     if max_tokens is None and path == "decode":
         max_tokens = max(T, 8)
@@ -574,6 +575,7 @@ EP_CONFIGS = [
     (8, 257, 9, 0.5),  # DeepSeek-R1 decode + EP
     (1024, 257, 9, 0.5),  # DeepSeek-R1 prefill + EP
     (8, 513, 9, 0.5),  # Qwen3.5 decode + EP
+    (1024, 513, 9, 0.5),  # Qwen3.5 prefill + EP (E > K4_BLOCK)
 ]
 
 
