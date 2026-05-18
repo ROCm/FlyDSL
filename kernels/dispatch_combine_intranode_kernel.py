@@ -283,7 +283,6 @@ def make_dispatch_kernel(
             if lane == 0:
                 buffer_store(tok_map_entry, _r_tok_map, work_idx)
 
-            if lane == 0:
                 if dup_ballot == 0:
                     # Publish the (src_pe, src_lid) origin so the dest PE
                     # can later route the token back during combine.

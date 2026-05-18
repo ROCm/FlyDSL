@@ -2,20 +2,25 @@
 # Copyright (c) 2025 FlyDSL Project Contributors
 
 """
-FlyDSL 和 mori ref 的 dispatch/combine kernel 性能测试。
+Performance harness for FlyDSL and mori-ref dispatch/combine kernels.
 
-两个正交维度可自由组合：
-  --mode       测量方式：profile（torch.profiler 采集）| bench（CUDA Event 计时）
-  --cudagraph  执行方式：不带此标志 = eager 模式 | 带 = CUDAGraph capture+replay
+Two orthogonal axes can be freely combined:
+  --mode       measurement: ``profile`` (torch.profiler) | ``bench``
+               (CUDA event timing) | ``verify`` (correctness check)
+  --cudagraph  execution:   absent = eager mode | present =
+               CUDAGraph capture+replay
 
-四种组合：
-  1. profile + eager    : torch.profiler 采集 eager 执行的 kernel + E2E + CPU 时间
-  2. bench   + eager    : CUDA Event 计时 eager dispatch/combine（无 profiler 开销）
-  3. profile + cudagraph: torch.profiler 采集 CUDAGraph replay 中的 kernel 时间
-  4. bench   + cudagraph: CUDA Event 计时 CUDAGraph replay（零 Python launch 开销）
+Four combinations:
+  1. profile + eager    : torch.profiler over eager kernels + E2E +
+                          CPU timing
+  2. bench   + eager    : CUDA event timing of eager dispatch/combine
+                          (no profiler overhead)
+  3. profile + cudagraph: torch.profiler over CUDAGraph replay kernels
+  4. bench   + cudagraph: CUDA event timing of CUDAGraph replay
+                          (zero Python launch overhead)
 
-启动方式（支持 torchrun 或直接 python）：
-  # profile + eager（默认）
+Launching (works under torchrun or plain python):
+  # profile + eager (default)
   python tests/kernels/test_profiler_dispatch_combine.py --max-tokens 512
 
   # bench + eager
@@ -27,7 +32,7 @@ FlyDSL 和 mori ref 的 dispatch/combine kernel 性能测试。
   # profile + cudagraph
   python tests/kernels/test_profiler_dispatch_combine.py --mode profile --cudagraph
 
-  # 只测 FlyDSL
+  # FlyDSL only
   python tests/kernels/test_profiler_dispatch_combine.py --bench-op flydsl
 """
 
@@ -44,7 +49,7 @@ from torch.profiler import ProfilerActivity, profile, record_function
 
 os.environ.setdefault("MORI_SHMEM_HEAP_SIZE", "16G")
 
-# ── dtype 映射 ──
+# dtype mapping
 DTYPE_MAP = {
     "bf16": torch.bfloat16,
     "f32": torch.float32,
@@ -66,6 +71,20 @@ for _p in [_ROOT, "/home/yashao/FlyDSL/python", "/home/yashao/mori/python"]:
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+# Module-level skip when mori is unavailable AND we are being imported by
+# pytest collection.  This file is a torchrun standalone script, but pytest
+# still picks it up because the name matches ``test_*.py`` -- single-GPU CI
+# runners don't install mori, so unconditional ``import mori`` would crash
+# pytest collection.  We only trigger ``pytest.importorskip`` when pytest
+# is the orchestrator (``"pytest" in sys.modules``), so direct
+# ``python``/``torchrun`` invocations still surface a normal ImportError
+# if mori is missing (instead of an opaque pytest Skipped exception).
+if "pytest" in sys.modules:
+    sys.modules["pytest"].importorskip(
+        "mori",
+        reason="dispatch/combine intranode test requires mori shmem (8-GPU multi-gpu CI only)",
+    )
+
 import mori.shmem as ms  # noqa: E402
 
 from kernels.dispatch_combine_intranode_op import (  # noqa: E402
@@ -74,7 +93,7 @@ from kernels.dispatch_combine_intranode_op import (  # noqa: E402
 )
 
 
-# ─── 分布式初始化 ─────────────────────────────────────────────────────────────
+# --- Distributed init ---
 def setup_distributed(rank, world_size, master_port=29600):
     if "LOCAL_RANK" not in os.environ:
         os.environ.update(
@@ -145,9 +164,10 @@ def build_mori_ref(rank, world_size, cfg, block_num: int = None, warp_per_block:
 
 
 def _save_profile_json(prof, out_path: str, rank: int, op_tag: str, meta: dict):
-    """将 profiler 结果序列化为 JSON 文件。
+    """Serialize profiler results to a JSON file.
 
-    JSON 结构：
+    JSON layout::
+
       {
         "meta": {op_tag, rank, max_tokens, hidden_dim, k, world_size, ...},
         "kernel_stats": [ {name, calls, cuda_time_avg_us, cpu_time_avg_us}, ... ]
@@ -165,7 +185,6 @@ def _save_profile_json(prof, out_path: str, rank: int, op_tag: str, meta: dict):
                 "cpu_time_total_us": round(evt.cpu_time * evt.count, 2),
             }
         )
-    # 按 GPU time 降序
     rows.sort(key=lambda r: r["cuda_time_total_us"], reverse=True)
 
     payload = {
@@ -190,15 +209,17 @@ def _allreduce_stats(
     quant_type: str = "none",
     use_p2p_read: bool = False,
 ) -> dict:
-    """从本卡 profiler 提取关键指标，跨卡 all_reduce 后返回 avg/min/max 字典。
+    """Pull per-rank profiler metrics, all-reduce them across ranks, and
+    return an avg/min/max dict.
 
-    采集 6 项指标（顺序固定，打包成 float64 tensor 做 all_reduce）：
-      0: dispatch GPU kernel time (μs/call)
-      1: combine  GPU kernel time (μs/call)
-      2: dispatch record_function CUDA time (μs/call)
-      3: combine  record_function CUDA time (μs/call)
-      4: dispatch record_function CPU  time (μs/call)
-      5: combine  record_function CPU  time (μs/call)
+    Six metrics, packed into a float64 tensor in this fixed order for
+    the all-reduce:
+      0: dispatch GPU kernel time (us/call)
+      1: combine  GPU kernel time (us/call)
+      2: dispatch record_function CUDA time (us/call)
+      3: combine  record_function CUDA time (us/call)
+      4: dispatch record_function CPU  time (us/call)
+      5: combine  record_function CPU  time (us/call)
     """
     msuf = MORI_KERNEL_SUFFIX.get(dtype_key, "bf16")
     _cast_suf = "_fp8cast" if (quant_type == "fp8_direct_cast" and not use_p2p_read) else ""
@@ -255,24 +276,24 @@ def _allreduce_stats(
 
 
 def _print_aggregated(stats: dict, op_tag: str, world_size: int, meta: dict):
-    """rank 0 打印全卡聚合统计。"""
+    """Print the cross-rank aggregated stats on rank 0."""
     sep = "=" * 72
     print(f"\n{sep}")
     print(
         f"  {op_tag.upper()}  EP={world_size}  bs={meta['max_tokens']}  "
         f"h={meta['hidden_dim']}  k={meta['k']}  ({meta['iters']} iters)"
     )
-    print(f"  所有 {world_size} 张卡的 avg / min / max（μs/call）")
+    print(f"  avg / min / max across all {world_size} ranks (us/call)")
     print(sep)
-    hdr = f"  {'指标':<36}  {'avg':>8}  {'min':>8}  {'max':>8}"
+    hdr = f"  {'metric':<36}  {'avg':>8}  {'min':>8}  {'max':>8}"
     print(hdr)
     print(f"  {'-'*60}")
 
     rows = [
         ("[Device] dispatch kernel GPU time", "dispatch_gpu"),
         ("[Device] combine  kernel GPU time", "combine_gpu"),
-        ("[E2E]    dispatch CUDA time (含sync)", "dispatch_cuda_e2e"),
-        ("[E2E]    combine  CUDA time (含sync)", "combine_cuda_e2e"),
+        ("[E2E]    dispatch CUDA time (w/sync)", "dispatch_cuda_e2e"),
+        ("[E2E]    combine  CUDA time (w/sync)", "combine_cuda_e2e"),
         ("[Host]   dispatch CPU  time", "dispatch_cpu_e2e"),
         ("[Host]   combine  CPU  time", "combine_cpu_e2e"),
     ]
@@ -292,9 +313,10 @@ def _allreduce_cudagraph_stats_from_key_averages(
     quant_type: str = "none",
     use_p2p_read: bool = False,
 ) -> dict:
-    """从 key_averages() 提取指标（仅含 active 阶段数据），跨卡 all_reduce。
+    """Pull metrics from ``prof.key_averages()`` (active phase only) and
+    all-reduce them across ranks.
 
-    采集 4 项：
+    Four metrics:
       0: dispatch kernel GPU time
       1: combine  kernel GPU time
       2: cudagraph_replay CUDA E2E time
@@ -356,9 +378,12 @@ def _cudagraph_stats_from_trace(
     quant_type: str = "none",
     use_p2p_read: bool = False,
 ) -> dict:
-    """从 chrome trace JSON 手动统计 kernel 性能，跳过前 skip_first 次 active 调用。
+    """Compute kernel stats by parsing the chrome trace JSON, dropping
+    the first ``skip_first`` active iterations.
 
-    流程：解析 trace → 按时间排序取最后 active_iters 个事件 → 丢弃前 skip_first 个 → 跨卡聚合。
+    Pipeline: parse trace -> sort by ts and keep the last
+    ``active_iters`` events -> drop the first ``skip_first`` ->
+    all-reduce across ranks.
     """
     with open(trace_path) as f:
         tr = json.load(f)
@@ -392,8 +417,8 @@ def _cudagraph_stats_from_trace(
     valid_n = len(d_valid)
     if rank == 0:
         print(
-            f"[trace-stats] {op_tag}: trace 中 dispatch={len(d_all)} combine={len(c_all)} 个事件，"
-            f"取最后 {active_iters} 个 active，跳过前 {skip_first}，有效 {valid_n} 个"
+            f"[trace-stats] {op_tag}: trace has dispatch={len(d_all)} combine={len(c_all)} events; "
+            f"keeping last {active_iters} active, skipping first {skip_first}, {valid_n} valid"
         )
 
     d_avg = sum(d_valid) / valid_n if valid_n else 0.0
@@ -414,7 +439,7 @@ def _cudagraph_stats_from_trace(
 
 
 def _print_cudagraph_aggregated(stats: dict, op_tag: str, world_size: int, meta: dict, active_iters: int = None):
-    """rank 0 打印 cudagraph profiler 全卡聚合统计。"""
+    """Print the cudagraph+profiler aggregated stats on rank 0."""
     n = active_iters if active_iters is not None else meta["iters"]
     sep = "=" * 72
     print(f"\n{sep}")
@@ -422,16 +447,16 @@ def _print_cudagraph_aggregated(stats: dict, op_tag: str, world_size: int, meta:
         f"  {op_tag.upper()} [CUDAGraph+Profiler]  EP={world_size}  bs={meta['max_tokens']}  "
         f"h={meta['hidden_dim']}  k={meta['k']}  ({n} iters)"
     )
-    print(f"  所有 {world_size} 张卡的 avg / min / max（μs/call）")
+    print(f"  avg / min / max across all {world_size} ranks (us/call)")
     print(sep)
-    hdr = f"  {'指标':<36}  {'avg':>8}  {'min':>8}  {'max':>8}"
+    hdr = f"  {'metric':<36}  {'avg':>8}  {'min':>8}  {'max':>8}"
     print(hdr)
     print(f"  {'-'*60}")
 
     rows = [
         ("[Device] dispatch kernel GPU time", "dispatch_gpu"),
         ("[Device] combine  kernel GPU time", "combine_gpu"),
-        ("[E2E]   replay CUDA time (含sync)", "replay_cuda_e2e"),
+        ("[E2E]   replay CUDA time (w/sync)", "replay_cuda_e2e"),
         ("[Host]  replay CPU  time", "replay_cpu_e2e"),
     ]
     for label, key in rows:
@@ -441,10 +466,11 @@ def _print_cudagraph_aggregated(stats: dict, op_tag: str, world_size: int, meta:
 
 
 def _make_profiler(active_iters: int = None, prof_warmup: int = 10):
-    """创建 profiler。
+    """Build a torch.profiler.
 
-    使用 schedule 让前 (1 + prof_warmup) 步不做/轻量追踪，
-    减少 ROCTracer 在多 GPU P2P shmem 场景下的累积压力。
+    The schedule keeps the first (1 + prof_warmup) steps in wait/warmup
+    so ROCTracer doesn't accumulate state under heavy multi-GPU P2P
+    shmem traffic.
     """
     kwargs = dict(
         activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
@@ -461,7 +487,7 @@ def _make_profiler(active_iters: int = None, prof_warmup: int = 10):
     return profile(**kwargs)
 
 
-# ─── bench 模式：不用 profiler，用 CUDA Event 计时 ────────────────────────────
+# --- bench mode: profiler-free CUDA-event timing ---
 def bench_op(
     op,
     op_tag: str,
@@ -479,12 +505,13 @@ def bench_op(
     scales=None,
     packed_recv_x=None,
 ):
-    """无 profiler 的纯计时模式，输出 dispatch / combine 的 GPU 耗时（avg/min/max）。"""
+    """Profiler-free CUDA-event timing of dispatch/combine; reports GPU
+    time avg/min/max."""
     _dkw = dict(packed_recv_x=packed_recv_x) if packed_recv_x is not None else {}
     _ckw = dict(packed_recv_x=packed_recv_x) if packed_recv_x is not None else {}
     ms.shmem_barrier_all()
     if rank == 0:
-        print(f"\n[bench] {op_tag} 预热 {warmup} 轮...")
+        print(f"\n[bench] {op_tag} warmup {warmup} iters...")
     for _ in range(warmup):
         op.reset()
         ret = op.dispatch(inp, wts, scales, idx, **_dkw)
@@ -493,7 +520,7 @@ def bench_op(
     dist.barrier()
 
     if rank == 0:
-        print(f"[bench] {op_tag} 计时 {iters} 轮...")
+        print(f"[bench] {op_tag} timing {iters} iters...")
 
     d_events = [(torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)) for _ in range(iters)]
     c_events = [(torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)) for _ in range(iters)]
@@ -516,7 +543,7 @@ def bench_op(
     d_list = [d_events[i][0].elapsed_time(d_events[i][1]) * 1000 for i in range(iters)]
     c_list = [c_events[i][0].elapsed_time(c_events[i][1]) * 1000 for i in range(iters)]
 
-    # 全卡聚合 avg / min / max
+    # Aggregate avg / min / max across ranks.
     local = torch.tensor(
         [
             sum(d_list) / len(d_list),
@@ -548,22 +575,23 @@ def bench_op(
             f"{op_tag.upper()}  EP={meta['world_size']}  bs={meta['max_tokens']}  "
             f"h={meta['hidden_dim']}  k={meta['k']}  ({iters} iters)"
         )
-        print(f"\n{sep}\n  {tag}\n  所有 {world_size} 张卡的 avg / min / max（μs/call）\n{sep}")
-        print(f"  {'指标':<36}  {'avg':>8}  {'min':>8}  {'max':>8}")
+        print(f"\n{sep}\n  {tag}\n  avg / min / max across all {world_size} ranks (us/call)\n{sep}")
+        print(f"  {'metric':<36}  {'avg':>8}  {'min':>8}  {'max':>8}")
         print(f"  {'-'*58}")
         print(f"  {'[E2E]  dispatch CUDA time':<36}  {avg_d:>8.1f}  {mn_d:>8.1f}  {mx_d:>8.1f}")
         print(f"  {'[E2E]  combine  CUDA time':<36}  {avg_c:>8.1f}  {mn_c:>8.1f}  {mx_c:>8.1f}")
         print()
 
 
-# ─── cudagraph 模式：CUDA Graph capture + replay 计时 ─────────────────────────
+# --- cudagraph mode: CUDA Graph capture + replay timing ---
 def _cudagraph_capture_flydsl(op, inp, wts, idx, wc_buf, capture_stream, scales=None, packed_recv_x=None):
-    """FlyDSL：录制 dispatch+combine 到 CUDA Graph。
+    """Capture FlyDSL dispatch+combine into a CUDA Graph.
 
-    dispatch/combine 均返回全尺寸 tensor（无 .item()、无动态切片）。
-    需要先 eager 调用一次触发 flyc.compile() JIT 编译（编译过程使用
-    default stream，不能在 capture 期间执行），之后 capture 中仅录制
-    已编译的 kernel launch。
+    Both dispatch and combine return full-sized tensors (no ``.item()``,
+    no dynamic slicing).  We must first run them eagerly once to trigger
+    the ``flyc.compile()`` JIT (which uses the default stream and can't
+    run during capture); the capture then records only the already-
+    compiled kernel launches.
     """
     _dkw = dict(packed_recv_x=packed_recv_x) if packed_recv_x is not None else {}
     _ckw = dict(packed_recv_x=packed_recv_x) if packed_recv_x is not None else {}
@@ -580,11 +608,12 @@ def _cudagraph_capture_flydsl(op, inp, wts, idx, wc_buf, capture_stream, scales=
 
 
 def _cudagraph_capture_mori(op, inp, wts, idx, wc_buf, capture_stream, scales=None, packed_recv_x=None):
-    """Mori 专用：直接在 graph capture 中录制 dispatch+combine。
+    """Capture mori dispatch+combine into a CUDA Graph.
 
-    Mori 的 dispatch 在 capture 模式下返回真实 tensor，combine kernel
-    从 HBM 读取 totalRecvTokenNum，无需 pre-capture eager call。
-    参考 mori/tests/python/ops/bench_dispatch_combine.py stress_graph 写法。
+    Mori's dispatch returns a real tensor under capture and the combine
+    kernel reads ``totalRecvTokenNum`` from HBM, so no pre-capture eager
+    call is needed.  Pattern follows mori's ``stress_graph`` in
+    ``mori/tests/python/ops/bench_dispatch_combine.py``.
     """
     ms.shmem_barrier_all()
     g = torch.cuda.CUDAGraph()
@@ -611,7 +640,7 @@ def cudagraph_op(
     scales=None,
     packed_recv_x=None,
 ):
-    """CUDA Graph 模式：capture dispatch+combine kernel，replay 计时。"""
+    """CUDA Graph mode: capture dispatch+combine, then time replays."""
     capture_stream = torch.cuda.Stream()
     if op_tag == "flydsl":
         g, cs = _cudagraph_capture_flydsl(
@@ -625,15 +654,15 @@ def cudagraph_op(
     if rank == 0:
         print(f"\n[cudagraph] {op_tag} capture done")
 
-    # replay warmup（HIP graph 冷启动 + GPU 缓存预热）
+    # Replay warmup (HIP graph cold start + GPU cache warmup).
     replay_warmup = 10
     if rank == 0:
-        print(f"[cudagraph] replay warmup {replay_warmup} 轮 + 计时 {iters} 轮（no-reset）...")
+        print(f"[cudagraph] replay warmup {replay_warmup} + timing {iters} iters (no-reset)...")
     for _ in range(replay_warmup):
         g.replay()
     torch.cuda.synchronize()
 
-    # 计时：预分配 event pairs，循环结束后统一 sync
+    # Timing: pre-allocate event pairs, sync once after the loop.
     events = [(torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)) for _ in range(iters)]
 
     for i in range(iters):
@@ -644,7 +673,7 @@ def cudagraph_op(
     torch.cuda.synchronize()
     gpu_times = [events[i][0].elapsed_time(events[i][1]) * 1000 for i in range(iters)]
 
-    # per-replay 诊断
+    # Per-replay diagnostics.
     per_replay_t = torch.tensor(gpu_times, dtype=torch.float64, device=dev)
     all_per_replay = [torch.zeros_like(per_replay_t) for _ in range(world_size)]
     dist.all_gather(all_per_replay, per_replay_t)
@@ -675,8 +704,8 @@ def cudagraph_op(
             f"bs={meta['max_tokens']}  h={meta['hidden_dim']}  k={meta['k']}  "
             f"({iters} replays)"
         )
-        print(f"\n{sep}\n  {tag}\n  所有 {world_size} 张卡的 avg / min / max（μs/call）\n{sep}")
-        print(f"  {'指标':<36}  {'avg':>8}  {'min':>8}  {'max':>8}")
+        print(f"\n{sep}\n  {tag}\n  avg / min / max across all {world_size} ranks (us/call)\n{sep}")
+        print(f"  {'metric':<36}  {'avg':>8}  {'min':>8}  {'max':>8}")
         print(f"  {'-'*58}")
         print(f"  {'[GPU]  dispatch+combine (event)':<36}  {avg_g:>8.1f}  {mn_g:>8.1f}  {mx_g:>8.1f}")
 
@@ -694,7 +723,7 @@ def cudagraph_op(
         print()
 
 
-# ─── 单算子 profiler 采集 ──────────────────────────────────────────────────────
+# --- Per-op profiler capture ---
 def profile_op(
     op,
     op_tag: str,
@@ -715,16 +744,18 @@ def profile_op(
     quant_type: str = "none",
     use_p2p_read: bool = False,
 ):
-    """对单个算子（FlyDSL 或 mori）独立 profiling，保存 JSON 并打印全卡聚合统计。
+    """Profile a single op (FlyDSL or mori) standalone; save the JSON and
+    print cross-rank aggregated stats.
 
-    使用 schedule(wait=1, warmup=10, active=iters) 让 ROCTracer 在前 11 步
-    不做/轻量追踪，减少与多 GPU P2P shmem 操作的冲突。
+    Uses ``schedule(wait=1, warmup=10, active=iters)`` so ROCTracer
+    skips / light-traces the first 11 steps and avoids races with
+    multi-GPU P2P shmem.
     """
     ms.shmem_barrier_all()
     prof_warmup = 10
     total_steps = iters + 1 + prof_warmup  # wait=1 + warmup=prof_warmup + active=iters
     if rank == 0:
-        print(f"\n[profiler] {op_tag} 开始采集（{iters} 轮 active + {1 + prof_warmup} 轮 ramp-up）...")
+        print(f"\n[profiler] {op_tag} capturing ({iters} active + {1 + prof_warmup} ramp-up)...")
 
     _dkw = dict(packed_recv_x=packed_recv_x) if packed_recv_x is not None else {}
     _ckw = dict(packed_recv_x=packed_recv_x) if packed_recv_x is not None else {}
@@ -746,13 +777,13 @@ def profile_op(
 
             prof.step()
 
-    # 保存 JSON：每张卡各自保存，文件名含 op_tag 和 rank
+    # Save JSON: one file per rank, named by op_tag and rank.
     out_path = os.path.join(out_dir, f"{op_tag}_rank{rank}.json")
     _save_profile_json(prof, out_path, rank, op_tag, meta)
     if rank == 0:
-        print(f"[profiler] {op_tag} trace → {out_path}")
+        print(f"[profiler] {op_tag} trace -> {out_path}")
 
-    # 跨卡聚合统计（all_reduce），rank 0 打印
+    # Cross-rank aggregation via all_reduce; rank 0 prints.
     agg_stats = _allreduce_stats(
         prof, op_tag, rank, world_size, dev, dtype_key=dtype_key, quant_type=quant_type, use_p2p_read=use_p2p_read
     )
@@ -761,7 +792,7 @@ def profile_op(
     return prof
 
 
-# ─── profile + cudagraph 模式 ─────────────────────────────────────────────────
+# --- profile + cudagraph mode ---
 def profile_cudagraph_op(
     op,
     op_tag: str,
@@ -783,9 +814,11 @@ def profile_cudagraph_op(
     quant_type: str = "none",
     use_p2p_read: bool = False,
 ):
-    """torch.profiler 采集 CUDAGraph replay，保存 JSON 并打印全卡聚合统计。
+    """Profile CUDAGraph replays with torch.profiler; save JSON and
+    print cross-rank aggregated stats.
 
-    流程：eager warmup → graph capture → replay warmup → profiler 包裹的 replay。
+    Pipeline: eager warmup -> graph capture -> replay warmup ->
+    profiled replay loop.
     """
     ms.shmem_barrier_all()
 
@@ -802,7 +835,7 @@ def profile_cudagraph_op(
     if rank == 0:
         print(f"\n[profile+cudagraph] {op_tag} capture done")
 
-    # replay warmup（HIP graph 冷启动 + GPU 缓存预热）
+    # Replay warmup (HIP graph cold start + GPU cache warmup).
     replay_warmup = 10
     for _ in range(replay_warmup):
         g.replay()
@@ -817,7 +850,7 @@ def profile_cudagraph_op(
         print(
             f"[profile+cudagraph] {op_tag} scheduled profiler: "
             f"warmup={prof_warmup}, active={active_iters}, "
-            f"丢弃前 {skip_first} 次，有效 {valid_iters} 次（no-reset）..."
+            f"dropping first {skip_first}, {valid_iters} valid (no-reset)..."
         )
 
     with _make_profiler(active_iters=active_iters, prof_warmup=prof_warmup) as prof:
@@ -830,7 +863,7 @@ def profile_cudagraph_op(
     _save_profile_json(prof, out_path, rank, op_tag, meta)
     trace_path = out_path.replace(".json", "_trace.json")
     if rank == 0:
-        print(f"[profile+cudagraph] {op_tag} trace → {trace_path}")
+        print(f"[profile+cudagraph] {op_tag} trace -> {trace_path}")
 
     agg_stats = _cudagraph_stats_from_trace(
         trace_path,
@@ -849,7 +882,7 @@ def profile_cudagraph_op(
     return prof
 
 
-# ─── verify 模式：正确性验证 ─────────────────────────────────────────────────
+# --- verify mode: correctness check ---
 VERIFY_TOL = {
     "f32": {"atol": 1e-5, "rtol": 1e-4},
     "bf16": {"atol": 1e-2, "rtol": 1e-2},
@@ -988,7 +1021,7 @@ def verify_op(op_fly, op_mori, inp, wts, idx, k, rank, world_size, dev, dtype_ke
         print(f"  VERIFY  dtype={dtype_key}  EP={world_size}  bs={inp.shape[0]}  " f"h={cfg.hidden_dim}  k={k}")
         print(f"{'='*65}")
 
-    # ── Dispatch ──
+    # -- Dispatch --
     op_fly.reset()
     op_mori.reset()
     ms.shmem_barrier_all()
@@ -1001,11 +1034,11 @@ def verify_op(op_fly, op_mori, inp, wts, idx, k, rank, world_size, dev, dtype_ke
     tr_m = ret_m[4].clone()
     dist.barrier()
     if rank == 0:
-        print("\n  ── Dispatch 对比（仅 total_recv，token 排列因原子序不同） ──")
+        print("\n  -- Dispatch comparison (total_recv only; token order varies by atomic race) --")
 
     all_pass &= _check_exact("total_recv", tr_f, tr_m, rank)
 
-    # ── Combine ──
+    # -- Combine --
     ms.shmem_barrier_all()
     cout_f = op_fly.combine(ret_f[0], None, ret_f[3])
     cout_m = op_mori.combine(ret_m[0], None, ret_m[3])
@@ -1013,7 +1046,7 @@ def verify_op(op_fly, op_mori, inp, wts, idx, k, rank, world_size, dev, dtype_ke
     dist.barrier()
 
     if rank == 0:
-        print("\n  ── Combine 输出对比 ──")
+        print("\n  -- Combine output comparison --")
 
     mt = cfg.max_num_inp_token_per_rank
     cast_to = (
@@ -1052,7 +1085,7 @@ def verify_op(op_fly, op_mori, inp, wts, idx, k, rank, world_size, dev, dtype_ke
     return all_pass
 
 
-# ─── 主逻辑 ───────────────────────────────────────────────────────────────────
+# --- Main entry ---
 def run_profiler(rank, world_size, args):
     dev = torch.device("cuda", rank)
     k = args.k
@@ -1099,16 +1132,16 @@ def run_profiler(rank, world_size, args):
         quant_type=cfg.quant_type,
     )
 
-    # 输出目录：/tmp/ep{ws}_bs{cur_tok}/
+    # Output dir layout: <output_dir>/ep{ws}_bs{cur_tok}/
     out_dir = os.path.join(args.output_dir, f"ep{world_size}_bs{cur_tok}")
     os.makedirs(out_dir, exist_ok=True)
 
-    # ── 构建算子 ───────────────────────────────────────────────────────────────
+    # Build ops.
     if rank == 0:
         print(f"\n{'='*65}")
         print(f"[profiler] EP={world_size}, bs={cur_tok}, h={cfg.hidden_dim}, k={k}")
         print(f"{'='*65}")
-        print("[profiler] 构建 FlyDSL...")
+        print("[profiler] building FlyDSL...")
     op_fly = FlyDSLDispatchCombineIntraNodeOp(cfg)
 
     op_ref = None
@@ -1118,17 +1151,17 @@ def run_profiler(rank, world_size, args):
         bn_str = mori_bn if mori_bn else cfg.block_num
         wpb_str = mori_wpb if mori_wpb else cfg.warp_num_per_block
         if rank == 0:
-            print(f"[profiler] 构建 mori ref (block_num={bn_str}, warp_per_block={wpb_str})...")
+            print(f"[profiler] building mori ref (block_num={bn_str}, warp_per_block={wpb_str})...")
         try:
             op_ref = build_mori_ref(rank, world_size, cfg, block_num=mori_bn, warp_per_block=mori_wpb)
         except Exception as e:
             if rank == 0:
-                print(f"[warn] mori ref 不可用: {e}")
+                print(f"[warn] mori ref unavailable: {e}")
     elif cfg.enable_std_moe and rank == 0:
-        print("[info] StdMoE 模式：跳过 mori ref，使用自洽验证")
+        print("[info] StdMoE mode: skipping mori ref, using self-check")
     ms.shmem_barrier_all()
 
-    # ── 准备输入（固定 seed，FlyDSL 和 mori 使用完全相同的输入）────────────────
+    # Prepare inputs (fixed seed so FlyDSL and mori see identical data).
     torch.manual_seed(42 + rank)
     if cfg.data_type == torch.float4_e2m1fn_x2:
         inp = torch.randint(0, 256, (cur_tok, cfg.hidden_dim // 2), dtype=torch.uint8, device=dev).view(
@@ -1153,11 +1186,12 @@ def run_profiler(rank, world_size, args):
         for t in range(cur_tok):
             idx[t] = torch.randperm(n_exp, device=dev)[:k]
 
-    # 预分配 combine 权重 buffer（FlyDSL 和 mori 共用，避免计时窗口内额外 GPU 核）
+    # Pre-allocate the combine weight buffer (shared by FlyDSL and mori
+    # so no extra GPU kernel sneaks into the timing window).
     max_recv = world_size * cur_tok
     wc_buf = torch.full((max_recv, k), 1.0 / k, dtype=torch.float32, device=dev)
 
-    # ── 构造 scales / packed_recv_x（所有模式共用）─────────────────────────
+    # Build scales / packed_recv_x (shared across modes).
     packed_recv_x = None
     if cfg.enable_std_moe:
         _prx_nbytes = cfg.num_experts_per_rank * cfg.max_recv * cfg.token_bytes
@@ -1173,12 +1207,13 @@ def run_profiler(rank, world_size, args):
         scales = torch.randn(cur_tok, _sc_bytes // 4, dtype=torch.float32, device=dev).contiguous()
         scales = scales.view(torch.uint8).view(cur_tok, _sc_bytes)
 
-    # profile+eager 模式需要外部预热；其他 3 种组合由各自函数内部处理
+    # profile+eager needs an external warmup; the other three combos
+    # warm up inside their own functions.
     do_warmup = args.mode == "profile" and not args.cudagraph
 
     if do_warmup:
         if rank == 0:
-            print(f"[setup] 预热 FlyDSL {args.warmup} 轮...")
+            print(f"[setup] warming up FlyDSL for {args.warmup} iters...")
         for _ in range(args.warmup):
             op_fly.reset()
             ret = op_fly.dispatch(inp, wts, scales, idx, packed_recv_x=packed_recv_x)
@@ -1187,7 +1222,7 @@ def run_profiler(rank, world_size, args):
 
         if op_ref is not None:
             if rank == 0:
-                print(f"[setup] 预热 mori ref {args.warmup} 轮...")
+                print(f"[setup] warming up mori ref for {args.warmup} iters...")
             for _ in range(args.warmup):
                 op_ref.reset()
                 ret_r = op_ref.dispatch(inp, wts, None, idx)
@@ -1196,7 +1231,7 @@ def run_profiler(rank, world_size, args):
 
     ms.shmem_barrier_all()
 
-    # ── 根据 mode × cudagraph 分发执行 ─────────────────────────────────────
+    # Dispatch by mode x cudagraph.
     test_flydsl = args.bench_op in ("flydsl", "both")
     test_mori = args.bench_op in ("mori", "both") and op_ref is not None
 
@@ -1297,7 +1332,7 @@ def run_profiler(rank, world_size, args):
                 use_p2p_read=_p2p,
             )
         if rank == 0:
-            print(f"\n[profiler] 全部结果已保存到: {out_dir}/")
+            print(f"\n[profiler] all results saved to: {out_dir}/")
 
     elif args.mode == "profile" and args.cudagraph:
         _p2p = not args.use_external_inp_buf
@@ -1345,10 +1380,10 @@ def run_profiler(rank, world_size, args):
                 use_p2p_read=_p2p,
             )
         if rank == 0:
-            print(f"\n[profiler] 全部结果已保存到: {out_dir}/")
+            print(f"\n[profiler] all results saved to: {out_dir}/")
 
 
-# ─── Worker / 命令行入口 ──────────────────────────────────────────────────────
+# --- Worker / CLI entry ---
 def _worker(rank, world_size, args, master_port):
     setup_distributed(rank, world_size, master_port)
     try:
@@ -1363,7 +1398,7 @@ def _worker(rank, world_size, args, master_port):
 
 
 def _parse_args():
-    p = argparse.ArgumentParser(description="torch.profiler 分析 dispatch/combine")
+    p = argparse.ArgumentParser(description="torch.profiler analysis of dispatch/combine")
     p.add_argument("--world-size", type=int, default=8)
     p.add_argument("--max-tokens", type=int, default=512)
     p.add_argument("--hidden-dim", type=int, default=7168)
@@ -1372,49 +1407,64 @@ def _parse_args():
     p.add_argument("--block-num", type=int, default=80)
     p.add_argument("--warp-per-block", type=int, default=4)
     p.add_argument(
-        "--mori-block-num", type=int, default=0, help="mori 专用 block_num（0=与FlyDSL相同，mori默认最优=80）"
+        "--mori-block-num",
+        type=int,
+        default=0,
+        help="mori-only block_num (0 = same as FlyDSL; mori's tuned default is 80)",
     )
     p.add_argument(
-        "--mori-warp-per-block", type=int, default=0, help="mori 专用 warp_per_block（0=与FlyDSL相同，mori默认最优=8）"
+        "--mori-warp-per-block",
+        type=int,
+        default=0,
+        help="mori-only warp_per_block (0 = same as FlyDSL; mori's tuned default is 8)",
     )
     p.add_argument("--chip", type=str, default="gfx950")
-    p.add_argument("--dtype", type=str, default="bf16", choices=list(DTYPE_MAP.keys()), help="数据类型（默认 bf16）")
-    p.add_argument("--warmup", type=int, default=5, help="预热轮次（不进 profiler，确保 JIT 编译完成）")
-    p.add_argument("--iters", type=int, default=5, help="profiler 采集轮次")
+    p.add_argument(
+        "--dtype", type=str, default="bf16", choices=list(DTYPE_MAP.keys()), help="data type (default: bf16)"
+    )
+    p.add_argument(
+        "--warmup",
+        type=int,
+        default=5,
+        help="warmup iters outside the profiler (ensures JIT compilation completes)",
+    )
+    p.add_argument("--iters", type=int, default=5, help="profiler active iters")
     p.add_argument(
         "--output-dir",
         type=str,
         default="dispatch_profile",
-        help="JSON 输出根目录（相对当前目录），子目录按 ep{ws}_bs{tok} 命名",
+        help="JSON output root (relative to cwd); per-shape subdir is named ep{ws}_bs{tok}",
     )
     p.add_argument("--port", type=int, default=29800)
     p.add_argument("--no-compare", dest="compare", action="store_false")
-    # ── 模式选择 ──────────────────────────────────────────────────────────────
+    # Mode selection
     p.add_argument(
         "--mode",
         choices=["profile", "bench", "verify"],
         default="profile",
-        help="测量方式：profile=torch.profiler 采集（默认）; bench=CUDA Event 计时; verify=正确性验证",
+        help="measurement: profile=torch.profiler (default); bench=CUDA event timing; verify=correctness check",
     )
-    p.add_argument("--cudagraph", action="store_true", help="使用 CUDAGraph capture+replay 执行（默认 eager）")
-    p.add_argument("--bench-op", choices=["flydsl", "mori", "both"], default="both", help="测哪个算子（默认 both）")
-    # ── 功能开关 ──────────────────────────────────────────────────────────────
+    p.add_argument("--cudagraph", action="store_true", help="use CUDAGraph capture+replay (default: eager)")
+    p.add_argument(
+        "--bench-op", choices=["flydsl", "mori", "both"], default="both", help="which op to measure (default: both)"
+    )
+    # Feature switches
     p.add_argument(
         "--no-external-inp-buf",
         dest="use_external_inp_buf",
         action="store_false",
         default=True,
-        help="使用 P2P Read combine 变体（默认使用 external inp buf）",
+        help="use the P2P-read combine variant (default: external inp buf)",
     )
-    p.add_argument("--enable-std-moe", action="store_true", default=False, help="启用 Standard MoE Adapt 模式")
-    p.add_argument("--scale-dim", type=int, default=0, help="Scale 张量维度（0=不使用 scale）")
-    p.add_argument("--scale-type-size", type=int, default=0, help="Scale 类型大小（字节，0=不使用 scale）")
+    p.add_argument("--enable-std-moe", action="store_true", default=False, help="enable Standard MoE adapt mode")
+    p.add_argument("--scale-dim", type=int, default=0, help="scale tensor dim (0 = disable scales)")
+    p.add_argument("--scale-type-size", type=int, default=0, help="scale element size in bytes (0 = disable scales)")
     p.add_argument(
         "--quant-type",
         type=str,
         default="none",
         choices=["none", "fp8_direct_cast"],
-        help="量化类型（none=默认，fp8_direct_cast=FP8直接转换combine）",
+        help="quantization type (none = default; fp8_direct_cast = inline fp8 cast in combine)",
     )
     p.set_defaults(compare=True)
     return p.parse_args()
@@ -1429,7 +1479,7 @@ def main():
     else:
         ws = min(args.world_size, torch.cuda.device_count())
         if ws < args.world_size:
-            print(f"[warn] 可用 GPU={torch.cuda.device_count()}, " f"world_size 调整: {args.world_size} → {ws}")
+            print(f"[warn] available GPUs={torch.cuda.device_count()}, world_size adjusted: {args.world_size} -> {ws}")
         torch.multiprocessing.spawn(
             _worker,
             args=(ws, args, args.port),

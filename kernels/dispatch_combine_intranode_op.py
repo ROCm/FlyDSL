@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""FlyDSL DispatchCombine IntraNode 算子包装器。"""
+"""Python wrapper for the FlyDSL intra-node DispatchCombine op."""
 
 from __future__ import annotations
 
@@ -106,7 +106,6 @@ class FlyDSLDispatchCombineIntraNodeOp:
             self._p2p_comb_inp_wts[pe] = ms.shmem_ptr_p2p(self.shmem_comb_inp_wts.data_ptr(), r, pe)
             self._p2p_xdb_mem[pe] = ms.shmem_ptr_p2p(self.shmem_xdev_bar_mem.data_ptr(), r, pe)
 
-        _disp_wpb = config.warp_num_per_block
         self._disp_fn = make_dispatch_jit(
             rank=r,
             npes=config.world_size,
@@ -115,7 +114,7 @@ class FlyDSLDispatchCombineIntraNodeOp:
             hidden_dim=config.hidden_dim,
             max_tok_per_rank=config.max_num_inp_token_per_rank,
             block_num=config.block_num,
-            warp_num_per_block=_disp_wpb,
+            warp_num_per_block=config.warp_num_per_block,
             data_type=config.data_type,
             scale_dim=config.scale_dim,
             scale_type_size=config.scale_type_size,
@@ -139,7 +138,7 @@ class FlyDSLDispatchCombineIntraNodeOp:
             hidden_dim=config.hidden_dim,
             max_tok_per_rank=config.max_num_inp_token_per_rank,
             block_num=config.block_num,
-            warp_num_per_block=_disp_wpb,
+            warp_num_per_block=config.warp_num_per_block,
             data_type=_comb_dtype,
             enable_weights=True,
             enable_std_moe=config.enable_std_moe,
@@ -148,7 +147,9 @@ class FlyDSLDispatchCombineIntraNodeOp:
         )
         self._use_fp8_cast = _use_fp8_cast
 
-        # barrier flag 初始值必须为 1, 否则首次 wait_until_equals(slot, 0) 立即满足
+        # The cross-device barrier flag must start at 1; otherwise the very
+        # first wait_until_equals(slot, 0) would be satisfied immediately by
+        # the zero-initialized memory and skip the actual synchronization.
         self._xdev_flag = torch.ones(1, dtype=torch.int64, device=self._dev)
 
         self._fx_out_tok = fx.Int64(self.shmem_disp_out_tok.data_ptr())
@@ -161,11 +162,11 @@ class FlyDSLDispatchCombineIntraNodeOp:
         self._fx_tok_map = fx.Int64(self.dest_tok_map.data_ptr())
         self._fx_tis = fx.Int64(self.shmem_tok_id_to_src.data_ptr())
         self._fx_total_rv = fx.Int64(self.total_recv.data_ptr())
-        # combine 固定地址
         self._fx_comb_inp = fx.Int64(self.shmem_comb_inp_tok.data_ptr())
         self._fx_comb_out = fx.Int64(self.shmem_comb_out_tok.data_ptr())
         self._fx_xdb_mem = fx.Int64(self.shmem_xdev_bar_mem.data_ptr())
         self._fx_xdev_flag = fx.Int64(self._xdev_flag.data_ptr())
+
         self._fx_comb_bar = fx.Int64(self.comb_bar.data_ptr())
         self._fx_trecv = fx.Int64(self.total_recv.data_ptr())
         self._fx_p2p_tok_off = fx.Int64(self._p2p_tok_off.data_ptr())
@@ -189,9 +190,11 @@ class FlyDSLDispatchCombineIntraNodeOp:
 
         self._disp_compiled = None
         self._comb_compiled = None
-        # combine kernel 的 skip_stage1 变体：给 fused_gemm2_combine 算子使用，
-        # 此时 fused kernel 已经把 token / 权重 P2P 写入 shmem_comb_inp[_wts]，
-        # combine 只跑 Stage 2 (CrossDeviceBarrier) + Stage 3 (本地 weighted-accum)。
+        # Lazy-compiled skip_stage1 combine variant used by the fused
+        # GEMM2-combine path: the upstream fused kernel has already P2P-
+        # scattered tokens / weights into shmem_comb_inp[_wts], so the
+        # combine kernel only runs Stage 2 (CrossDeviceBarrier) + Stage 3
+        # (local weighted-accum).
         self._comb_no_s1_fn = None
         self._comb_no_s1_compiled = None
 
@@ -221,17 +224,21 @@ class FlyDSLDispatchCombineIntraNodeOp:
         self.shmem_comb_out_wts = mori_shmem_create_tensor((mt * k,), torch.float32)
         self.shmem_xdev_bar_mem = mori_shmem_create_tensor((npes,), torch.int64)
 
-        # mori_shmem_create_tensor 走 shmem_malloc，分配的是未初始化的 raw memory。
-        # 对 fused MoE-GEMM2 + EP-Combine 路径，GEMM2 需要在 epilogue 用
-        # shmem_tok_id_to_src 解码 dest_pe / dest_lid，越界 garbage 会触发 LDS
-        # OOB → 写到任意全局地址 → 破坏 control state。这里把所有 combine 路径
-        # 直接读写的 symmetric buffer 显式清零，保证：
-        #   - shmem_tok_id_to_src[t] 对未被 dispatch 写入的 t 解码为 (pe=0, lid=0)，
-        #     P2P scatter 退化成"安全无副作用"（多写同一槽位）
-        #   - shmem_xdev_bar_mem 起始 0，CrossDeviceBarrier 第一次 wait 不会读到
-        #     残留值（依赖 cur_flag 单调递增）
-        #   - shmem_comb_inp_{tok,wts} 起始 0，combine_no_stage1 在 stage 3 累加
-        #     时不会读到 garbage
+        # mori_shmem_create_tensor goes through shmem_malloc, which returns
+        # uninitialized raw memory.  In the fused MoE-GEMM2 + EP-Combine
+        # path the GEMM2 epilogue decodes (dest_pe, dest_lid) from
+        # shmem_tok_id_to_src; out-of-bounds garbage there would trigger
+        # LDS OOB and corrupt arbitrary global state, so every symmetric
+        # buffer that combine touches directly is zeroed up-front to
+        # guarantee:
+        #   - shmem_tok_id_to_src[t] for slots never written by dispatch
+        #     decodes to (pe=0, lid=0), making the P2P scatter degenerate
+        #     into a harmless duplicate write into a single slot;
+        #   - shmem_xdev_bar_mem starts at 0 so the first
+        #     CrossDeviceBarrier wait never observes stale data (the
+        #     protocol relies on cur_flag monotonic increase);
+        #   - shmem_comb_inp_{tok,wts} start at 0 so combine_no_stage1's
+        #     Stage 3 accumulation never folds garbage into the result.
         self.shmem_tok_id_to_src.zero_()
         self.shmem_comb_inp_tok.zero_()
         self.shmem_comb_inp_wts.zero_()
@@ -483,29 +490,35 @@ class FlyDSLDispatchCombineIntraNodeOp:
     def combine_no_stage1(
         self, input, weights, indices, packed_recv_x=None, cur_tok=None, call_reset=False, enable_weights: bool = True
     ):
-        """combine 的 stage1-skipped 变体。
+        """Skip-Stage1 variant of ``combine``.
 
-        语义：跳过 P2P scatter（外部 fused kernel 已把数据写入 shmem_comb_inp[_wts]），
-              只执行 Stage 2 (CrossDeviceBarrier) + Stage 3 (本地 weighted-accum)。
+        Semantics: bypass the P2P scatter (the upstream fused kernel has
+        already populated shmem_comb_inp[_wts]) and only run Stage 2
+        (CrossDeviceBarrier) + Stage 3 (local weighted-accum).
 
         Parameters
         ----------
         enable_weights
-            ``True`` (默认) 兼容当前 fused-with-weight 链路：在 combine
-            kernel 内保留 Stage 1 的 weight scatter + Stage 3b 的 weight
-            accumulate。weight scatter 显式留在 combine kernel 内（而不是
-            放在上游 fused GEMM2 的 epilogue 里），因为 16B 小写若与上游
-            token P2P 并发会被 ROCm IPC fabric 静默丢，必须放在静态 fabric
-            上由 combine kernel 完成。
-            ``False`` 给 weight-free fused 路径（fused MoE 上游已经把
-            weight 处理掉了，combine 端不需要 out_wts）：完全 DCE 掉
-            weight scatter + Stage 3b，省 ~3-5 μs。
-            两种变体走不同的 JIT 缓存，互不污染。
+            ``True`` (default) keeps the Stage 1 weight scatter and the
+            Stage 3b weight accumulate inside the combine kernel.  The
+            weight scatter is intentionally kept here (instead of being
+            folded into the upstream fused GEMM2 epilogue) because the
+            16B narrow stores are silently dropped by the ROCm IPC
+            fabric when they race with the upstream token P2P, so they
+            must be issued by the combine kernel on the static fabric.
+            ``False`` is for weight-free fused paths (the upstream fused
+            MoE has already collapsed the weights, so the combine side
+            does not need ``out_wts``): both the weight scatter and
+            Stage 3b are completely DCE'd, saving ~3-5 us.  The two
+            variants use distinct JIT caches.
 
-        约定：调用前 fused kernel 必须保证：
-              - shmem_comb_inp_tok 已写入本 PE 应接收的所有 token（按 max_tok_per_rank 槽位）
-              - shmem_comb_inp_wts 已写入对应权重（仅 enable_weights=True 时需要）
-              - total_recv 已被 dispatch 设置完毕（Stage 3 用于读 cur_rank_num_token）
+        Contract: before invocation the fused kernel must guarantee:
+              - shmem_comb_inp_tok already contains every token this PE
+                will consume (laid out in max_tok_per_rank slots);
+              - shmem_comb_inp_wts already contains the matching weights
+                (only when enable_weights=True);
+              - total_recv has already been set by dispatch (Stage 3
+                reads it as cur_rank_num_token).
         """
         cfg = self.cfg
         stream = torch.cuda.current_stream()
@@ -534,8 +547,7 @@ class FlyDSLDispatchCombineIntraNodeOp:
         else:
             prx_ptr = packed_recv_x.data_ptr() if packed_recv_x is not None else 0
 
-        # JIT 缓存按 enable_weights 区分（两份编译产物）。
-        # 历史 self._comb_no_s1_fn / _compiled 升级为 dict[bool, fn]。
+        # Two JIT'd variants are cached, keyed by enable_weights.
         if not isinstance(self._comb_no_s1_fn, dict):
             self._comb_no_s1_fn = {}
             self._comb_no_s1_compiled = {}
@@ -545,18 +557,16 @@ class FlyDSLDispatchCombineIntraNodeOp:
 
             _use_fp8_cast = self._use_fp8_cast
             _comb_dtype = torch.float8_e4m3fn if _use_fp8_cast else cfg.data_type
-            # Mixed-dtype contract for fp8_direct_cast: external dtype = bf16,
-            # transport dtype = fp8.  Stage 3 _from_accum will cast f32 → bf16
-            # inline so kernel writes bf16 directly to shmem_comb_out_tok and
-            # the wrapper does NOT need a post .to(bf16) cast.
+            # Same fp8_direct_cast mixed-dtype contract as in ``combine``
+            # above: external dtype = bf16, transport dtype = fp8; Stage 3
+            # _from_accum casts f32 -> bf16 inline so the kernel writes
+            # bf16 straight to shmem_comb_out_tok.
             _comb_inp_dt = torch.bfloat16 if _use_fp8_cast else None
-            # enable_weights=False 路径（fused MoE 不需要 out_wts）：
-            # weight scatter + Stage 3b weight accumulate 都在 const_expr
-            # 处被 DCE 掉，省 ~3-5μs。
-            # enable_weights=True 路径（兼容 fused-with-weight）：
-            # combine kernel 在 skip_stage1=True 下默认仍跑 weight scatter，
-            # 因为同 fabric 上与 token P2P 并发的 16B 小写会被静默丢，必须
-            # 放在静态 fabric 上由 combine kernel 完成。
+            # See the ``enable_weights`` doc above for the rationale of
+            # the two variants: ``False`` lets const_expr DCE the weight
+            # scatter + Stage 3b (~3-5 us); ``True`` keeps the weight
+            # scatter inside combine to dodge the IPC-fabric race against
+            # the upstream token P2P.
             self._comb_no_s1_fn[enable_weights] = make_combine_jit(
                 rank=cfg.rank,
                 npes=cfg.world_size,

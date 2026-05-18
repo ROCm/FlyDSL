@@ -424,6 +424,24 @@ jobs:
               -m multi_gpu -v --no-header --tb=short
           "
 
+      - name: Run multi-GPU dispatch/combine verify (8-GPU only)
+        timeout-minutes: 10
+        run: |
+          docker exec flydsl_test bash -c "
+            cd /flydsl-test &&
+            torchrun --nproc-per-node=8 --master-port=29503 \
+              tests/kernels/test_profiler_dispatch_combine.py --mode verify
+          "
+
+      - name: Run multi-GPU dispatch/combine verify --enable-std-moe (8-GPU only)
+        timeout-minutes: 10
+        run: |
+          docker exec flydsl_test bash -c "
+            cd /flydsl-test &&
+            torchrun --nproc-per-node=8 --master-port=29504 \
+              tests/kernels/test_profiler_dispatch_combine.py --mode verify --enable-std-moe
+          "
+
       - name: Run multi-GPU allreduce tests
         timeout-minutes: 30
         run: |
