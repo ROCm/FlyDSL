@@ -56,27 +56,29 @@ def test_while_simple_countdown():
     assert out.item() == 15  # 5+4+3+2+1
 
 
-# ── Case 2: while with no yield (side-effect only) ──────────────────────────
+# ── Case 2: while with store inside loop (side-effect only) ─────────────────
 
 
 @flyc.kernel
-def _k_while_no_yield(Out: fx.Tensor, n: fx.Int32):
+def _k_while_store_in_loop(Out: fx.Tensor, n: fx.Int32):
     rsrc = buffer_ops.create_buffer_resource(Out)
-    val = fx.Int32(42)
-    buffer_ops.buffer_store(val, rsrc, fx.Int32(0))
+    offset = n
+    while offset > fx.Int32(0):
+        buffer_ops.buffer_store(offset, rsrc, fx.Int32(0))
+        offset = offset - fx.Int32(1)
 
 
 @flyc.jit
-def _j_while_no_yield(Out: fx.Tensor, n: fx.Int32, stream: fx.Stream = fx.Stream(None)):
-    _k_while_no_yield(Out, n).launch(grid=(1, 1, 1), block=(1, 1, 1), stream=stream.value)
+def _j_while_store_in_loop(Out: fx.Tensor, n: fx.Int32, stream: fx.Stream = fx.Stream(None)):
+    _k_while_store_in_loop(Out, n).launch(grid=(1, 1, 1), block=(1, 1, 1), stream=stream.value)
 
 
-def test_while_no_yield():
-    """Kernel without dynamic while — baseline sanity check."""
+def test_while_store_in_loop():
+    """Each iteration overwrites Out[0] with offset; last write is 1."""
     out, t_out = _make_out_tensor()
-    _j_while_no_yield(t_out, fx.Int32(0))
+    _j_while_store_in_loop(t_out, fx.Int32(5))
     torch.cuda.synchronize()
-    assert out.item() == 42
+    assert out.item() == 1
 
 
 # ── Case 3: while with nested dynamic if ────────────────────────────────────
