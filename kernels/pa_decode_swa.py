@@ -59,6 +59,7 @@ _N_V = VHELOOP * VTLOOP * 2  # 16
 # Tiles per block (1024 tokens / 256 tokens per tile = 4, matches SP3 kNumBlockTiles)
 TILES_PER_BLOCK = KV_BLOCK_SIZE // KV_COMPUTE_BLOCK  # 4
 
+
 def _cdiv(numer: int, denom: int) -> int:
     return (numer + denom - 1) // denom
 
@@ -212,8 +213,7 @@ def _build_pa_thread_invariants(
     if const_expr(per_token_kv):
         sm_vmax_wr_off = fx.Index(fx.Int32(2 * NUM_WARPS * MFMA_N) + sm_lane_wave_base + warp_id)
         sm_vmax_rd_offs = [
-            fx.Index(fx.Int32(2 * NUM_WARPS * MFMA_N) + sm_lane_wave_base + fx.Int32(w))
-            for w in range(NUM_WARPS)
+            fx.Index(fx.Int32(2 * NUM_WARPS * MFMA_N) + sm_lane_wave_base + fx.Int32(w)) for w in range(NUM_WARPS)
         ]
 
     return (
@@ -334,7 +334,7 @@ def _finish_q_fragments(
     abs_mask = fx.Vector.filled(4, 0x7FFFFFFF, fx.Int32)
     c_zero_f = fx.Float32(0.0)
     c_one_f = fx.Float32(1.0)
-    c_fp8_max = fx.Float32(FP8_MAX)
+    fx.Float32(FP8_MAX)
     q_f32_chunks = []
     local_max = c_zero_f
     for q_src in q_chunks:
@@ -383,12 +383,7 @@ def _finish_q_fragments(
         for qkr in range_constexpr(2):
             # See layout comment above. Byte offset:
             #   lane16id * HEAD_SIZE + qkhe*64 + rowid*16 + qkr*8
-            lds_rd_byte = (
-                lane16id * c_head_size
-                + fx.Int32(qkhe << 6)
-                + (rowid << fx.Int32(4))
-                + fx.Int32(qkr << 3)
-            )
+            lds_rd_byte = lane16id * c_head_size + fx.Int32(qkhe << 6) + (rowid << fx.Int32(4)) + fx.Int32(qkr << 3)
             lds_rd_base = lds_rd_byte >> fx.Int32(3)
             q_v1 = fx.Vector.load(T.vec(1, T.i64), logits_lds_i64, [fx.Index(lds_rd_base)])
             q_frags.append(q_v1[0])
@@ -567,8 +562,7 @@ def _make_pa_phase_helpers(
                 if const_expr(trans_v):
                     vt_group = v_token_in_block >> fx.Int32(4)
                     va_dw_delta = (
-                        vt_group * arith.constant(HEAD_SIZE * FP8_ELEMS_16B // 4, type=T.i32)
-                        + vhead_elem_dw[vhe]
+                        vt_group * arith.constant(HEAD_SIZE * FP8_ELEMS_16B // 4, type=T.i32) + vhead_elem_dw[vhe]
                     )
                 else:
                     va_dw_delta = vhead_elem_dw[vhe] + (v_token_in_block >> fx.Int32(2))
@@ -687,9 +681,7 @@ def _make_pa_phase_helpers(
         )
 
         exp_sum = zero_f
-        safe_qk_max = (
-            arith.select(qk_max > neg_inf, qk_max, zero_f) if const_expr(kv_tok_base is not None) else qk_max
-        )
+        safe_qk_max = arith.select(qk_max > neg_inf, qk_max, zero_f) if const_expr(kv_tok_base is not None) else qk_max
         for td in range_constexpr(TLOOP):
             diff_vec = fx.Vector(d_out[td]) - vector.broadcast(T.f32x4, arith.unwrap(safe_qk_max))
             p_vec = _exp2_f32_fast(diff_vec * vector.broadcast(T.f32x4, arith.unwrap(fx.Float32(LOG2E))))
@@ -773,9 +765,7 @@ def _make_pa_phase_helpers(
             prob_scale = my_warp_rescale
             v_correction = v_max_scaled * part_to_new
             for td in range_constexpr(TLOOP):
-                d_out[td] = d_out[td] * (
-                    _get_v_scale_vec(td) * vector.broadcast(T.f32x4, prob_scale * norm_factor)
-                )
+                d_out[td] = d_out[td] * (_get_v_scale_vec(td) * vector.broadcast(T.f32x4, prob_scale * norm_factor))
         else:
             prob_scale = my_warp_rescale * part_to_new
             v_correction = v_scale_val
@@ -1299,7 +1289,7 @@ def compile_pa_decode_sw(
         out_rsrc = buffer_ops.create_buffer_resource(out_ptr, max_size=True)
         ks_rsrc = buffer_ops.create_buffer_resource(key_scale_ptr, max_size=True)
         vs_rsrc = buffer_ops.create_buffer_resource(value_scale_ptr, max_size=True)
-        
+
         q_scale_val = 1.0
         if const_expr(per_token_kv):
             k_scale_val = 1.0
@@ -1445,7 +1435,6 @@ def compile_pa_decode_sw(
         def _f32_bits_as_i32(value):
             return fx.Float32(value).ir_value().bitcast(fx.Int32.ir_type)
 
-
         def _store_partition_results(eqgs_lane, running_sum, running_max, outelems_norm):
             for vhe in range_constexpr(VHELOOP):
                 hs_base = fx.Int32(vhe * NUM_WARPS * MFMA_N) + warp_id * fx.Int32(MFMA_N) + rowid * 4
@@ -1539,6 +1528,7 @@ def compile_pa_decode_sw(
                     tile_kv_seq_start,
                     tile_context_len,
                 )
+
             mtp_prefetches = _prefetch_sw_mtp_group_queries(
                 q_rsrc,
                 batch_idx,

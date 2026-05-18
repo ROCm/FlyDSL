@@ -262,8 +262,7 @@ def _build_pa_thread_invariants(
     if const_expr(per_token_kv):
         sm_vmax_wr_off = fx.Index(fx.Int32(2 * NUM_WARPS * MFMA_N) + sm_lane_wave_base + warp_id)
         sm_vmax_rd_offs = [
-            fx.Index(fx.Int32(2 * NUM_WARPS * MFMA_N) + sm_lane_wave_base + fx.Int32(w))
-            for w in range(NUM_WARPS)
+            fx.Index(fx.Int32(2 * NUM_WARPS * MFMA_N) + sm_lane_wave_base + fx.Int32(w)) for w in range(NUM_WARPS)
         ]
 
     return (
@@ -419,7 +418,7 @@ def _finish_q_fragments(
     abs_mask = fx.Vector.filled(4, 0x7FFFFFFF, fx.Int32)
     c_zero_f = fx.Float32(0.0)
     c_one_f = fx.Float32(1.0)
-    c_fp8_max = fx.Float32(FP8_MAX)
+    fx.Float32(FP8_MAX)
     q_f32_chunks = []
     local_max = c_zero_f
     for q_src in q_chunks:
@@ -464,9 +463,7 @@ def _finish_q_fragments(
         for qkr in range_constexpr(2):
             # See layout comment above. Byte offset:
             #   lane16id * HEAD_SIZE + qkhe*64 + rowid*16 + qkr*8
-            lds_rd_byte = (
-                (lane16id << fx.Int32(7)) + fx.Int32(qkhe << 6) + (rowid << fx.Int32(4)) + fx.Int32(qkr << 3)
-            )
+            lds_rd_byte = (lane16id << fx.Int32(7)) + fx.Int32(qkhe << 6) + (rowid << fx.Int32(4)) + fx.Int32(qkr << 3)
             lds_rd_base = lds_rd_byte >> fx.Int32(3)
             q_v1 = fx.Vector.load(T.vec(1, T.i64), logits_lds_i64, [fx.Index(lds_rd_base)])
             q_frags.append(q_v1[0])
@@ -495,9 +492,10 @@ def _prefetch_mtp_group_query(
         query_group_size=query_group_size,
     )
     q_row = batch_idx * arith.constant(query_length, type=T.i32) + qi_for_q
-    q_base = q_row * stride_q_seq + (
-        kv_h * arith.constant(query_group_size, type=T.i32) + local_qhead_idx_for_q
-    ) * stride_q_head
+    q_base = (
+        q_row * stride_q_seq
+        + (kv_h * arith.constant(query_group_size, type=T.i32) + local_qhead_idx_for_q) * stride_q_head
+    )
     q_chunks = _prefetch_q_chunks(
         q_rsrc,
         q_base,
@@ -712,8 +710,7 @@ def _make_pa_phase_helpers(
                 if const_expr(trans_v):
                     vt_group = v_token_in_block >> fx.Int32(4)
                     va_dw_delta = (
-                        vt_group * arith.constant(HEAD_SIZE * FP8_ELEMS_16B // 4, type=T.i32)
-                        + vhead_elem_dw[vhe]
+                        vt_group * arith.constant(HEAD_SIZE * FP8_ELEMS_16B // 4, type=T.i32) + vhead_elem_dw[vhe]
                     )
                 else:
                     va_dw_delta = vhead_elem_dw[vhe] + (v_token_in_block >> fx.Int32(2))
@@ -875,9 +872,7 @@ def _make_pa_phase_helpers(
         )
 
         exp_sum = zero_f
-        safe_qk_max = (
-            arith.select(qk_max > neg_inf, qk_max, zero_f) if const_expr(kv_tok_base is not None) else qk_max
-        )
+        safe_qk_max = arith.select(qk_max > neg_inf, qk_max, zero_f) if const_expr(kv_tok_base is not None) else qk_max
         for td in range_constexpr(TLOOP):
             diff_vec = fx.Vector(d_out[td]) - vector.broadcast(T.f32x4, arith.unwrap(safe_qk_max))
             p_vec = _exp2_f32_fast(diff_vec * vector.broadcast(T.f32x4, arith.unwrap(fx.Float32(LOG2E))))
@@ -1120,9 +1115,7 @@ def _make_pa_phase_helpers(
         )
 
         exp_sum = zero_f
-        safe_qk_max = (
-            arith.select(qk_max > neg_inf, qk_max, zero_f) if const_expr(kv_tok_base is not None) else qk_max
-        )
+        safe_qk_max = arith.select(qk_max > neg_inf, qk_max, zero_f) if const_expr(kv_tok_base is not None) else qk_max
         for td in range_constexpr(TLOOP):
             diff_vec = fx.Vector(d_out[td]) - vector.broadcast(T.f32x4, arith.unwrap(safe_qk_max))
             p_vec = _exp2_f32_fast(diff_vec * vector.broadcast(T.f32x4, arith.unwrap(fx.Float32(LOG2E))))
@@ -1998,6 +1991,7 @@ def _prepare_scale_tensor(
         )
 
     return torch.tensor([float(scale or 1.0)], device=device, dtype=torch.float32)
+
 
 def _get_query_input_dtype(query: torch.Tensor) -> str:
     if query.dtype in _PACKED_FP8_QUERY_DTYPES:
