@@ -522,10 +522,7 @@ class TestStaticAllocatorUnion:
             assert storage.small._target_type is Array[Float16, 8]
             assert storage.large._target_type is Array[Float32, 32]
             # Crucial: both variants wrap the SAME underlying SSA value.
-            assert (
-                object.__getattribute__(storage.small, "_ptr")
-                is object.__getattribute__(storage.large, "_ptr")
-            )
+            assert object.__getattribute__(storage.small, "_ptr") is object.__getattribute__(storage.large, "_ptr")
 
         module = _in_module_returning(build)
         make_ptrs = _collect_make_ptrs(module)
@@ -567,9 +564,8 @@ class TestStaticAllocatorNested:
                 alloc = SharedAllocator(static=True)
                 storage = alloc.allocate(Outer)
             # Union variants share one `make_ptr`; the head is its own leaf.
-            assert (
-                object.__getattribute__(storage.scratch.f16, "_ptr")
-                is object.__getattribute__(storage.scratch.f32, "_ptr")
+            assert object.__getattribute__(storage.scratch.f16, "_ptr") is object.__getattribute__(
+                storage.scratch.f32, "_ptr"
             )
 
         module = _in_module_returning(build)

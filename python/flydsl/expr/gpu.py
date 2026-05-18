@@ -16,27 +16,22 @@ Usage::
     fx.gpu.barrier()
 """
 
+from .._mlir import ir
 from .._mlir.dialects import gpu
-from .._mlir.ir import Attribute
-from .primitive import get_dyn_shared
-from .struct import Arena
-from .typing import Tuple3D
+from .._mlir.dialects._fly_enum_gen import AddressSpace
 from ..compiler.protocol import dsl_align_of, dsl_size_of
 from .numeric import Uint8
-from .struct import Storage
-from .typing import Array
-from .._mlir import ir
-from .._mlir.dialects._fly_enum_gen import AddressSpace
-from .numeric import Uint8
-from .primitive import make_ptr
-from .typing import PointerType
+from .primitive import get_dyn_shared, make_ptr
 from .struct import (
+    Arena,
     CompositeKind,
+    Storage,
     _effective_field_defs,
     _is_constexpr_type,
     is_composite_type,
     is_struct_type,
 )
+from .typing import Array, PointerType, Tuple3D
 
 thread_id = gpu.thread_id
 block_id = gpu.block_id
@@ -61,7 +56,7 @@ def smem_space(int=False):
     a = gpu.AddressSpace.Workgroup
     if int:
         return _int(a)
-    return Attribute.parse(f"#gpu.address_space<{a}>")
+    return ir.Attribute.parse(f"#gpu.address_space<{a}>")
 
 
 lds_space = smem_space
