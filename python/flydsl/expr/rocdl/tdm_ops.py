@@ -24,13 +24,19 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Optional, Sequence, Tuple, Union
+from typing import Sequence, Tuple, Union
 
 from ..._mlir import ir
 from ..._mlir.dialects import (
     arith as std_arith,
+)
+from ..._mlir.dialects import (
     llvm as llvm_dialect,
+)
+from ..._mlir.dialects import (
     memref as memref_dialect,
+)
+from ..._mlir.dialects import (
     rocdl,
 )
 from .. import arith, vector
@@ -66,6 +72,7 @@ __all__ = [
 # Pure-Python helpers (compile-time, no IR emission)
 # ---------------------------------------------------------------------------
 
+
 def compute_padding_encoding(
     pad_interval_elems: int,
     pad_amount_elems: int,
@@ -92,9 +99,7 @@ def compute_padding_encoding(
     amount_dw = pad_amount_elems * elem_bits // dword_bits
     if interval_dw <= 0 or amount_dw <= 0:
         return (0, 0)
-    assert interval_dw & (interval_dw - 1) == 0, (
-        f"padIntervalInDwords must be power-of-2, got {interval_dw}"
-    )
+    assert interval_dw & (interval_dw - 1) == 0, f"padIntervalInDwords must be power-of-2, got {interval_dw}"
     encoded_interval = int(math.log2(interval_dw)) - 1
     encoded_amount = amount_dw - 1
     return (encoded_interval, encoded_amount)
@@ -126,10 +131,7 @@ def compute_warp_distribution(
             remaining //= 2
     if remaining > 1:
         warps[-1] *= remaining
-    block_per_warp = [
-        (block_shape[i] + warps[i] - 1) // warps[i]
-        for i in range(ndims)
-    ]
+    block_per_warp = [(block_shape[i] + warps[i] - 1) // warps[i] for i in range(ndims)]
     return warps, block_per_warp
 
 
@@ -137,9 +139,11 @@ def compute_warp_distribution(
 # Descriptor data class
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class TDMDescriptor2D:
     """Holds constructed GROUP0 and GROUP1 vectors for tensor_load_to_lds_d2."""
+
     dgroup0: object  # vector<4xi32> MLIR Value
     dgroup1: object  # vector<8xi32> MLIR Value
 
@@ -154,6 +158,7 @@ class TDMGatherDescriptor:
     - 32-bit index mode: up to 8 row indices (4 per group)
     - 16-bit index mode: up to 16 row indices (8 per group)
     """
+
     dgroup0: object  # vector<4xi32> MLIR Value
     dgroup1: object  # vector<8xi32> MLIR Value
     dgroup2: object  # vector<4xi32> MLIR Value — row indices [0..3] or [0..7]
@@ -163,6 +168,7 @@ class TDMGatherDescriptor:
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
 
 def _unwrap(value):
     """Unwrap ArithValue wrappers to get raw ir.Value."""
@@ -190,6 +196,7 @@ def _i32_const(v: int) -> ir.Value:
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
 
 def make_tensor_descriptor_2d(
     global_ptr,
@@ -266,7 +273,8 @@ def make_tensor_descriptor_2d(
 
     # -- Warp distribution --
     warps_per_dim, block_per_warp = compute_warp_distribution(
-        [outer_tile, inner_tile], num_warps,
+        [outer_tile, inner_tile],
+        num_warps,
     )
     bpw_outer, bpw_inner = block_per_warp
     warps_dim0 = warps_per_dim[0]
@@ -275,6 +283,7 @@ def make_tensor_descriptor_2d(
         # Auto-acquire SGPR wave_id via hardware register (TTMP8[29:25]).
         # This keeps the entire descriptor address chain in SALU,
         from .. import rocdl as _rocdl_ext
+
         _wid_i32 = _rocdl_ext.wave_id()
         wave_id = arith.index_cast(T.index, _wid_i32)
         warp_coord_outer = wave_id % arith.index(warps_dim0)
@@ -291,10 +300,9 @@ def make_tensor_descriptor_2d(
     a_raw = global_ptr.__extract_to_ir_values__()[0]
     glb_ptr = _fly_d.extract_aligned_pointer_as_index(glb_ptr_type, a_raw)
     glb_base_i64 = _ArithValue(llvm_dialect.ptrtoint(i64, glb_ptr))
-    glb_elem_off = (
-        (outer_off + warp_off_outer) * arith.index(outer_stride)
-        + (inner_off + warp_off_inner) * arith.index(inner_stride)
-    )
+    glb_elem_off = (outer_off + warp_off_outer) * arith.index(outer_stride) + (
+        inner_off + warp_off_inner
+    ) * arith.index(inner_stride)
     glb_byte_off = glb_elem_off * arith.index(elem_bytes)
     glb_byte_off_i64 = arith.index_cast(T.i64, glb_byte_off)
     glb_addr_i64 = glb_base_i64 + glb_byte_off_i64
@@ -306,9 +314,7 @@ def make_tensor_descriptor_2d(
         lds_inner_stride = inner_tile + pad_amount  # padded row width
     else:
         lds_inner_stride = inner_tile
-    lds_warp_elem_off = (
-        warp_off_outer * arith.index(lds_inner_stride) + warp_off_inner
-    )
+    lds_warp_elem_off = warp_off_outer * arith.index(lds_inner_stride) + warp_off_inner
     lds_warp_byte_off = lds_warp_elem_off * arith.index(elem_bytes)
     lds_total_off = lds_base_idx + lds_warp_byte_off
     if lds_byte_offset is not None:
@@ -323,20 +329,17 @@ def make_tensor_descriptor_2d(
     i32 = ir.IntegerType.get_signless(32)
     g0_s2 = _ArithValue(std_arith.TruncIOp(i32, _raw(glb_addr_i64)).result)
     hi_raw = _ArithValue(_raw(glb_addr_i64)).shrui(arith.constant(32, type=T.i64))
-    g0_s3 = (
-        _ArithValue(std_arith.TruncIOp(i32, _raw(hi_raw)).result)
-        | arith.constant(1 << 31, type=T.i32)  # type field = 2 in [31:30]
-    )
-    dgroup0 = vector.from_elements(
-        T.vec(4, T.i32), [g0_s0, g0_s1, g0_s2, g0_s3]
-    )
+    g0_s3 = _ArithValue(std_arith.TruncIOp(i32, _raw(hi_raw)).result) | arith.constant(
+        1 << 31, type=T.i32
+    )  # type field = 2 in [31:30]
+    dgroup0 = vector.from_elements(T.vec(4, T.i32), [g0_s0, g0_s1, g0_s2, g0_s3])
 
     # ================================================================
     # GROUP1 (vector<8xi32>): config + tensor dims + strides + tile
     # ================================================================
     # Descriptor dim ordering: dim0=innermost, dim1=outermost
-    tdim0 = bpw_inner    # innermost extent per warp
-    tdim1 = bpw_outer    # outermost extent per warp
+    tdim0 = bpw_inner  # innermost extent per warp
+    tdim1 = bpw_outer  # outermost extent per warp
     tile_d0 = bpw_inner  # block dim0 per warp
     tile_d1 = bpw_outer  # block dim1 per warp
 
@@ -357,9 +360,7 @@ def make_tensor_descriptor_2d(
     # Padding encoding
     if pad_interval > 0 and pad_amount > 0:
         elem_bits = elem_bytes * 8
-        enc_interval, enc_amount = compute_padding_encoding(
-            pad_interval, pad_amount, elem_bits
-        )
+        enc_interval, enc_amount = compute_padding_encoding(pad_interval, pad_amount, elem_bits)
         pad_enable = 1
     else:
         enc_interval, enc_amount = 0, 0
@@ -368,13 +369,13 @@ def make_tensor_descriptor_2d(
     # sgpr0: config bitfields
     _abe = 1 if atomic_barrier_enable else 0
     g1_s0_upper = (
-        (data_size_code << 16)      # data_size [17:16]
-        | (_abe << 18)                # atomic_barrier_enable
-        | (0 << 19)                   # iterate_enable
-        | (pad_enable << 20)          # pad_enable
-        | (0 << 21)                   # early_timeout
-        | (enc_interval << 22)        # pad_interval [24:22]
-        | (enc_amount << 25)          # pad_amount [31:25]
+        (data_size_code << 16)  # data_size [17:16]
+        | (_abe << 18)  # atomic_barrier_enable
+        | (0 << 19)  # iterate_enable
+        | (pad_enable << 20)  # pad_enable
+        | (0 << 21)  # early_timeout
+        | (enc_interval << 22)  # pad_interval [24:22]
+        | (enc_amount << 25)  # pad_amount [31:25]
     )
 
     if isinstance(workgroup_mask, int):
@@ -475,12 +476,12 @@ def make_tensor_gather_descriptor(
     assert index_size in (16, 32), f"index_size must be 16 or 32, got {index_size}"
     max_indices = 8 if index_size == 32 else 16
     num_indices = len(row_indices)
-    assert 0 < num_indices <= max_indices, (
-        f"row_indices length {num_indices} exceeds max {max_indices} for {index_size}-bit mode"
-    )
-    assert row_width * elem_bytes % 4 == 0, (
-        f"row_width * elem_bytes must be multiple of 4, got {row_width * elem_bytes}"
-    )
+    assert (
+        0 < num_indices <= max_indices
+    ), f"row_indices length {num_indices} exceeds max {max_indices} for {index_size}-bit mode"
+    assert (
+        row_width * elem_bytes % 4 == 0
+    ), f"row_width * elem_bytes must be multiple of 4, got {row_width * elem_bytes}"
 
     dgroup0 = make_tensor_gather_dgroup0(
         global_ptr=global_ptr,
@@ -497,9 +498,7 @@ def make_tensor_gather_descriptor(
 
     if pad_interval > 0 and pad_amount > 0:
         elem_bits = elem_bytes * 8
-        enc_interval, enc_amount = compute_padding_encoding(
-            pad_interval, pad_amount, elem_bits
-        )
+        enc_interval, enc_amount = compute_padding_encoding(pad_interval, pad_amount, elem_bits)
         pad_enable = 1
     else:
         enc_interval, enc_amount = 0, 0
@@ -509,21 +508,16 @@ def make_tensor_gather_descriptor(
         g1_s0_val = (
             (workgroup_mask & 0xFFFF)
             | (data_size_code << 16)
-            | (0 << 18)               # atomic_barrier_enable
-            | (0 << 19)               # iterate_enable (ignored in gather)
+            | (0 << 18)  # atomic_barrier_enable
+            | (0 << 19)  # iterate_enable (ignored in gather)
             | (pad_enable << 20)
-            | (0 << 21)               # early_timeout
+            | (0 << 21)  # early_timeout
             | (enc_interval << 22)
             | (enc_amount << 25)
         )
         g1_s0 = arith.constant(g1_s0_val, type=T.i32)
     else:
-        upper = (
-            (data_size_code << 16)
-            | (pad_enable << 20)
-            | (enc_interval << 22)
-            | (enc_amount << 25)
-        )
+        upper = (data_size_code << 16) | (pad_enable << 20) | (enc_interval << 22) | (enc_amount << 25)
         g1_s0 = arith.ori(
             arith.constant(upper, type=T.i32),
             arith.andi(workgroup_mask, arith.constant(0xFFFF, type=T.i32)),
@@ -601,8 +595,7 @@ def make_tensor_gather_descriptor(
             lo = row_indices[lo_idx] if lo_idx < num_indices else zero
             hi = row_indices[hi_idx] if hi_idx < num_indices else zero
             lo_masked = arith.andi(lo, arith.constant(0xFFFF, type=T.i32))
-            hi_shifted = arith.shli(arith.andi(hi, arith.constant(0xFFFF, type=T.i32)),
-                                     arith.constant(16, type=T.i32))
+            hi_shifted = arith.shli(arith.andi(hi, arith.constant(0xFFFF, type=T.i32)), arith.constant(16, type=T.i32))
             g2_vals.append(arith.ori(lo_masked, hi_shifted))
         # Group 3: indices [8..15] packed into 4 x i32
         g3_vals = []
@@ -612,18 +605,18 @@ def make_tensor_gather_descriptor(
             lo = row_indices[lo_idx] if lo_idx < num_indices else zero
             hi = row_indices[hi_idx] if hi_idx < num_indices else zero
             lo_masked = arith.andi(lo, arith.constant(0xFFFF, type=T.i32))
-            hi_shifted = arith.shli(arith.andi(hi, arith.constant(0xFFFF, type=T.i32)),
-                                     arith.constant(16, type=T.i32))
+            hi_shifted = arith.shli(arith.andi(hi, arith.constant(0xFFFF, type=T.i32)), arith.constant(16, type=T.i32))
             g3_vals.append(arith.ori(lo_masked, hi_shifted))
 
     dgroup2 = vector.from_elements(T.vec(4, T.i32), g2_vals)
     dgroup3 = vector.from_elements(T.vec(4, T.i32), g3_vals)
 
     return TDMGatherDescriptor(
-        dgroup0=dgroup0, dgroup1=dgroup1,
-        dgroup2=dgroup2, dgroup3=dgroup3,
+        dgroup0=dgroup0,
+        dgroup1=dgroup1,
+        dgroup2=dgroup2,
+        dgroup3=dgroup3,
     )
-
 
 
 def make_tensor_gather_dgroup0(
@@ -660,24 +653,16 @@ def make_tensor_gather_dgroup0(
     lds_addr_i32 = arith.index_cast(T.i32, lds_total_off)
 
     gather_index_bit = 1 if index_size == 32 else 0
-    g0_pred = (
-        1
-        | (gather_index_bit << 30)
-        | (1 << 31)
-    )
+    g0_pred = 1 | (gather_index_bit << 30) | (1 << 31)
     g0_s0 = arith.constant(g0_pred, type=T.i32)
     g0_s1 = lds_addr_i32
 
     i32 = ir.IntegerType.get_signless(32)
     g0_s2 = _ArithValue(std_arith.TruncIOp(i32, _raw(glb_base_i64)).result)
     hi_raw = _ArithValue(_raw(glb_base_i64)).shrui(arith.constant(32, type=T.i64))
-    g0_s3 = (
-        _ArithValue(std_arith.TruncIOp(i32, _raw(hi_raw)).result)
-        | arith.constant(1 << 31, type=T.i32)
-    )
-    return vector.from_elements(
-        T.vec(4, T.i32), [g0_s0, g0_s1, g0_s2, g0_s3]
-    )
+    g0_s3 = _ArithValue(std_arith.TruncIOp(i32, _raw(hi_raw)).result) | arith.constant(1 << 31, type=T.i32)
+    return vector.from_elements(T.vec(4, T.i32), [g0_s0, g0_s1, g0_s2, g0_s3])
+
 
 def tensor_load_gather(
     desc: TDMGatherDescriptor,
@@ -694,9 +679,12 @@ def tensor_load_gather(
     """
     dg4 = _raw(_zero_dgroup_v8i32())
     rocdl.tensor_load_to_lds(
-        _raw(desc.dgroup0), _raw(desc.dgroup1),
-        _raw(desc.dgroup2), _raw(desc.dgroup3),
-        dg4, cache_policy,
+        _raw(desc.dgroup0),
+        _raw(desc.dgroup1),
+        _raw(desc.dgroup2),
+        _raw(desc.dgroup3),
+        dg4,
+        cache_policy,
     )
 
 
@@ -715,9 +703,12 @@ def tensor_store_gather(
     """
     dg4 = _raw(_zero_dgroup_v8i32())
     rocdl.tensor_store_from_lds(
-        _raw(desc.dgroup0), _raw(desc.dgroup1),
-        _raw(desc.dgroup2), _raw(desc.dgroup3),
-        dg4, cache_policy,
+        _raw(desc.dgroup0),
+        _raw(desc.dgroup1),
+        _raw(desc.dgroup2),
+        _raw(desc.dgroup3),
+        dg4,
+        cache_policy,
     )
 
 
@@ -731,6 +722,7 @@ def tensor_store_gather(
 # the loop and patching only lane 2 inside the loop, we cut the per-iteration
 # work to a single vector.insert plus the addr_lo SGPR add.
 # ---------------------------------------------------------------------------
+
 
 def _replace_dgroup0_addr_lo(dgroup0, new_addr_lo):
     """Return a new vector<4xi32> with lane 2 replaced by ``new_addr_lo``."""
@@ -890,16 +882,9 @@ def add_addr_with_carry(base_addr_lo, base_addr_hi, delta_i32):
     # (e.g. produced by ``vector.extract``); wrap before relying on operator
     # overloads.
     base_hi = _ArithValue(base_addr_hi)
-    addr_hi_only = _ArithValue(
-        base_hi & arith.constant(_TDM_ADDR_HI_MASK, type=T.i32)
-    )
-    flag_bits = _ArithValue(
-        base_hi & arith.constant(_TDM_ADDR_HI_FLAG_MASK, type=T.i32)
-    )
-    new_hi_addr = _ArithValue(
-        (addr_hi_only + carry_i32)
-        & arith.constant(_TDM_ADDR_HI_MASK, type=T.i32)
-    )
+    addr_hi_only = _ArithValue(base_hi & arith.constant(_TDM_ADDR_HI_MASK, type=T.i32))
+    flag_bits = _ArithValue(base_hi & arith.constant(_TDM_ADDR_HI_FLAG_MASK, type=T.i32))
+    new_hi_addr = _ArithValue((addr_hi_only + carry_i32) & arith.constant(_TDM_ADDR_HI_MASK, type=T.i32))
     new_addr_hi = new_hi_addr | flag_bits
 
     return new_addr_lo, new_addr_hi
@@ -936,9 +921,7 @@ def update_tensor_descriptor_2d_addr_lo_hi(
     them).
     """
     return TDMDescriptor2D(
-        dgroup0=_replace_dgroup0_addr_lo_hi(
-            desc.dgroup0, new_addr_lo, new_addr_hi
-        ),
+        dgroup0=_replace_dgroup0_addr_lo_hi(desc.dgroup0, new_addr_lo, new_addr_hi),
         dgroup1=desc.dgroup1,
     )
 
@@ -950,9 +933,7 @@ def update_tensor_gather_descriptor_addr_lo_hi(
 ) -> TDMGatherDescriptor:
     """Gather analogue of :func:`update_tensor_descriptor_2d_addr_lo_hi`."""
     return TDMGatherDescriptor(
-        dgroup0=_replace_dgroup0_addr_lo_hi(
-            desc.dgroup0, new_addr_lo, new_addr_hi
-        ),
+        dgroup0=_replace_dgroup0_addr_lo_hi(desc.dgroup0, new_addr_lo, new_addr_hi),
         dgroup1=desc.dgroup1,
         dgroup2=desc.dgroup2,
         dgroup3=desc.dgroup3,
@@ -1033,9 +1014,7 @@ def tensor_load_2d(
     dg2 = _raw(_zero_dgroup_v4i32())
     dg3 = _raw(_zero_dgroup_v4i32())
     dg4 = _raw(_zero_dgroup_v8i32())
-    rocdl.tensor_load_to_lds(
-        _raw(desc.dgroup0), _raw(desc.dgroup1), dg2, dg3, dg4, cache_policy
-    )
+    rocdl.tensor_load_to_lds(_raw(desc.dgroup0), _raw(desc.dgroup1), dg2, dg3, dg4, cache_policy)
 
 
 def tensor_store_2d(
@@ -1054,9 +1033,7 @@ def tensor_store_2d(
     dg2 = _raw(_zero_dgroup_v4i32())
     dg3 = _raw(_zero_dgroup_v4i32())
     dg4 = _raw(_zero_dgroup_v8i32())
-    rocdl.tensor_store_from_lds(
-        _raw(desc.dgroup0), _raw(desc.dgroup1), dg2, dg3, dg4, cache_policy
-    )
+    rocdl.tensor_store_from_lds(_raw(desc.dgroup0), _raw(desc.dgroup1), dg2, dg3, dg4, cache_policy)
 
 
 def tensor_wait(count: int = 0) -> None:
@@ -1075,8 +1052,9 @@ def tensor_wait(count: int = 0) -> None:
 # ---------------------------------------------------------------------------
 
 # Scope constants for global_prefetch
-PREFETCH_SCOPE_SE = 8       # SE scope = L2 cache
+PREFETCH_SCOPE_SE = 8  # SE scope = L2 cache
 PREFETCH_SCOPE_DEVICE = 16  # Device scope
+
 
 def l2_prefetch_tile(
     global_ptr,
@@ -1112,6 +1090,8 @@ def l2_prefetch_tile(
     """
     from ..._mlir.dialects import (
         fly as _fly_d,
+    )
+    from ..._mlir.dialects import (
         llvm as llvm_dialect,
     )
 
@@ -1133,10 +1113,7 @@ def l2_prefetch_tile(
     # For simplicity, each thread prefetches row[tid % outer_size], col=0.
     tile_row = thread_id % arith.index(outer_size)
 
-    elem_off = (
-        (outer_off + tile_row) * arith.index(outer_stride)
-        + inner_off * arith.index(inner_stride)
-    )
+    elem_off = (outer_off + tile_row) * arith.index(outer_stride) + inner_off * arith.index(inner_stride)
     byte_off = elem_off * arith.index(elem_bytes)
     byte_off_i64 = arith.index_cast(T.i64, byte_off)
     addr_i64 = glb_base_i64 + byte_off_i64

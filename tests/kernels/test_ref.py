@@ -4,7 +4,6 @@
 import torch
 import torch.nn.functional as F
 
-
 # Scale-kind "enum" used by the ref helpers below.  Each kind determines
 # how we dequantize (x, scale) to fp32 and how to recover the logical K
 # dimension from x.shape[-1].
@@ -69,9 +68,7 @@ def _dequant_mxfp8_per_1x32(x_fp8: torch.Tensor, scale_e8m0: torch.Tensor) -> to
         raise ValueError(f"MX-FP8 logical K must be divisible by 32, got {logical_k}")
 
     x_f32 = x_fp8.reshape(-1, logical_k).to(torch.float32)
-    scales_f32 = fp4_utils.e8m0_to_f32(
-        scale_e8m0.view(torch.uint8).reshape(-1, logical_k // 32)
-    )
+    scales_f32 = fp4_utils.e8m0_to_f32(scale_e8m0.view(torch.uint8).reshape(-1, logical_k // 32))
     x_f32 = x_f32 * scales_f32.repeat_interleave(32, dim=1)
     return x_f32.view(*x_fp8.shape[:-1], logical_k)
 
@@ -121,8 +118,7 @@ def torch_moe_gemm1(
         tokens = int(x_q.shape[0])
     elif x_q.dim() == 3:
         tokens, topk_x, _ = x_q.shape
-        assert int(topk_x) == int(topk), \
-            f"x_q topk mismatch: x_q.shape={tuple(x_q.shape)}, topk={topk}"
+        assert int(topk_x) == int(topk), f"x_q topk mismatch: x_q.shape={tuple(x_q.shape)}, topk={topk}"
     else:
         raise ValueError(f"Unsupported x_q shape: {tuple(x_q.shape)}")
     model_dim = _logical_k(x_q, x_kind)

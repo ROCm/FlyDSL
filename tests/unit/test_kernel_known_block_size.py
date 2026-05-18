@@ -4,22 +4,23 @@ import re
 
 import pytest
 
+import flydsl.compiler as flyc
+import flydsl.expr as fx
+
 pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
 
 try:
     import torch
 except ImportError:
     torch = None
+
 if torch is None or not torch.cuda.is_available():
     pytest.skip("CUDA/ROCm not available", allow_module_level=True)
-
-import flydsl.compiler as flyc
-import flydsl.expr as fx
-
 
 # ---------------------------------------------------------------------------
 # Kernels with various known_block_size values
 # ---------------------------------------------------------------------------
+
 
 @flyc.kernel(known_block_size=[512, 1, 1])
 def _kn_bs512(x: fx.Tensor):
@@ -55,6 +56,7 @@ def _kn_no_block_size(x: fx.Tensor):
 # JIT launchers
 # ---------------------------------------------------------------------------
 
+
 @flyc.jit
 def _launch_bs512(x: fx.Tensor, stream: fx.Stream = fx.Stream(None)):
     _kn_bs512(x).launch(grid=(1, 1, 1), block=(512, 1, 1), stream=stream)
@@ -89,6 +91,7 @@ def _launch_no_block_size(x: fx.Tensor, stream: fx.Stream = fx.Stream(None)):
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _get_source_ir(launch_fn, x):
     """Call the JIT function once, then return the source IR string."""
     launch_fn(x, stream=torch.cuda.current_stream())
@@ -109,6 +112,7 @@ def _get_compiled_ir(launch_fn, x):
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
 
 class TestKnownBlockSize:
     """Verify that known_block_size is emitted in IR and affects metadata."""
@@ -131,9 +135,7 @@ class TestKnownBlockSize:
     def test_source_ir_contains_known_block_size(self, launch_fn, expected):
         source_ir = _get_source_ir(launch_fn, self.x)
         attr_str = f"known_block_size = array<i32: {expected[0]}, {expected[1]}, {expected[2]}>"
-        assert attr_str in source_ir, (
-            f"expected '{attr_str}' in source IR, got:\n{source_ir}"
-        )
+        assert attr_str in source_ir, f"expected '{attr_str}' in source IR, got:\n{source_ir}"
 
     @pytest.mark.parametrize(
         "launch_fn, expected",
@@ -151,21 +153,17 @@ class TestKnownBlockSize:
         total_threads = expected[0] * expected[1] * expected[2]
         # The compiled IR should report max_flat_workgroup_size >= total_threads
         match = re.search(r"max_flat_workgroup_size\s*=\s*(\d+)", compiled_ir)
-        assert match is not None, (
-            f"max_flat_workgroup_size not found in compiled IR:\n{compiled_ir}"
-        )
+        assert match is not None, f"max_flat_workgroup_size not found in compiled IR:\n{compiled_ir}"
         max_wg = int(match.group(1))
-        assert max_wg >= total_threads, (
-            f"max_flat_workgroup_size={max_wg} < total_threads={total_threads}"
-        )
+        assert max_wg >= total_threads, f"max_flat_workgroup_size={max_wg} < total_threads={total_threads}"
 
     def test_no_known_block_size_omitted_from_ir(self):
         source_ir = _get_source_ir(_launch_no_block_size, self.x)
         # Check for the attribute syntax, not just the substring (which may
         # appear in kernel names like "_kn_no_block_size_0").
-        assert "known_block_size = array<i32:" not in source_ir, (
-            f"known_block_size attribute should not appear when not specified:\n{source_ir}"
-        )
+        assert (
+            "known_block_size = array<i32:" not in source_ir
+        ), f"known_block_size attribute should not appear when not specified:\n{source_ir}"
 
     @pytest.mark.parametrize(
         "launch_fn, block_size",
@@ -188,42 +186,49 @@ class TestKnownBlockSizeValidation:
 
     def test_wrong_length_2(self):
         with pytest.raises(ValueError, match="exactly 3 elements"):
+
             @flyc.kernel(known_block_size=[256, 1])
             def _bad(x: fx.Tensor):
                 pass
 
     def test_wrong_length_4(self):
         with pytest.raises(ValueError, match="exactly 3 elements"):
+
             @flyc.kernel(known_block_size=[64, 1, 1, 1])
             def _bad(x: fx.Tensor):
                 pass
 
     def test_not_a_sequence(self):
         with pytest.raises(TypeError, match="sequence of 3 positive integers"):
+
             @flyc.kernel(known_block_size=512)
             def _bad(x: fx.Tensor):
                 pass
 
     def test_non_int_element(self):
         with pytest.raises(TypeError, match="must be an int"):
+
             @flyc.kernel(known_block_size=[64.0, 1, 1])
             def _bad(x: fx.Tensor):
                 pass
 
     def test_zero_element(self):
         with pytest.raises(ValueError, match="must be positive"):
+
             @flyc.kernel(known_block_size=[0, 1, 1])
             def _bad(x: fx.Tensor):
                 pass
 
     def test_negative_element(self):
         with pytest.raises(ValueError, match="must be positive"):
+
             @flyc.kernel(known_block_size=[64, -1, 1])
             def _bad(x: fx.Tensor):
                 pass
 
     def test_none_is_accepted(self):
         """None means 'omit attribute' — should not raise."""
+
         @flyc.kernel(known_block_size=None)
         def _ok(x: fx.Tensor):
             pass

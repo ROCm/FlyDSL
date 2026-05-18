@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: MIT
 # Copyright (C) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
 # from https://github.com/ROCm/aiter/blob/main/aiter/test_common.py
-import torch
-import torch.profiler as tpf
-import os
 import copy
-import time
+import logging
+import os
+
 import numpy as np
 import pandas as pd
-import logging
+import torch
+import torch.profiler as tpf
 
 logger = logging.getLogger("flydsl")
 
@@ -21,9 +21,7 @@ pd.set_option("display.max_rows", 200)
 # pd.set_option("display.expand_frame_repr", False)
 
 
-def perftest(
-    num_iters=20, num_warmup=3, testGraph=False, num_rotate_args=0, needTrace=False
-):
+def perftest(num_iters=20, num_warmup=3, testGraph=False, num_rotate_args=0, needTrace=False):
     def decorator(func):
         def wrapper(*args, **kwargs):
             # ROCm torch.profiler (ROCTracer) is not always stable when invoked repeatedly
@@ -33,9 +31,7 @@ def perftest(
             num = num_rotate_args
             if num < 1:
                 gpu_id = torch.cuda.current_device()
-                iter_used_memory, inputSize, _, _ = device_memory_profiling(
-                    func, *args, **kwargs
-                )
+                iter_used_memory, inputSize, _, _ = device_memory_profiling(func, *args, **kwargs)
 
                 properties = torch.cuda.get_device_properties(gpu_id)
                 free_memory = torch.cuda.mem_get_info(gpu_id)[0]
@@ -47,9 +43,7 @@ def perftest(
                 num = int((cache_size + inputSize - 1) // inputSize)
             num = min(num, num_iters)
 
-            rotate_args = [
-                (copy.deepcopy(args), copy.deepcopy(kwargs)) for _ in range(num - 1)
-            ] + [(args, kwargs)]
+            rotate_args = [(copy.deepcopy(args), copy.deepcopy(kwargs)) for _ in range(num - 1)] + [(args, kwargs)]
             run_iters(num_warmup, func, *args, **kwargs)
             torch.cuda.synchronize()
 
@@ -113,36 +107,19 @@ def benchmark():
 
 def device_memory_profiling(func, *args, **kwargs):
     gpu_id = torch.cuda.current_device()
-    inputSize = (
-        sum(
-            [
-                el.nbytes
-                for el in args
-                if isinstance(el, torch.Tensor) and el.device.index == gpu_id
-            ]
-        )
-        + 1
-    )
+    inputSize = sum([el.nbytes for el in args if isinstance(el, torch.Tensor) and el.device.index == gpu_id]) + 1
     torch.cuda.reset_peak_memory_stats(gpu_id)
-    cuda_memory_before = (
-        torch.cuda.mem_get_info(gpu_id)[1] - torch.cuda.mem_get_info(gpu_id)[0]
-    )
+    cuda_memory_before = torch.cuda.mem_get_info(gpu_id)[1] - torch.cuda.mem_get_info(gpu_id)[0]
     torch_memory_before = torch.cuda.memory_reserved(gpu_id)
-    torch_peak_before = torch.cuda.memory_stats(gpu_id).get(
-        "allocated_bytes.all.peak", 0
-    )
+    torch_peak_before = torch.cuda.memory_stats(gpu_id).get("allocated_bytes.all.peak", 0)
     non_torch_memory_before = cuda_memory_before - torch_memory_before
 
-    data = func(*args, **kwargs)
+    _data = func(*args, **kwargs)
 
     torch.cuda.reset_peak_memory_stats(gpu_id)
-    cuda_memory_after = (
-        torch.cuda.mem_get_info(gpu_id)[1] - torch.cuda.mem_get_info(gpu_id)[0]
-    )
+    cuda_memory_after = torch.cuda.mem_get_info(gpu_id)[1] - torch.cuda.mem_get_info(gpu_id)[0]
     torch_memory_after = torch.cuda.memory_reserved(gpu_id)
-    torch_peak_after = torch.cuda.memory_stats(gpu_id).get(
-        "allocated_bytes.all.peak", 0
-    )
+    torch_peak_after = torch.cuda.memory_stats(gpu_id).get("allocated_bytes.all.peak", 0)
     non_torch_memory_after = cuda_memory_after - torch_memory_after
 
     torch_peak_increase = torch_peak_after - torch_peak_before
@@ -208,9 +185,7 @@ def log_args(func, *args, **kwargs):
             viewNum = 5
             if len(el) > viewNum:
                 el = list(el[:viewNum]) + ["..."]
-            return f'\n{" "*(len(prefix)+31)}'.join(
-                ["("] + [f" {getTensorInfo(e)}" for e in el] + [")"]
-            )
+            return f'\n{" "*(len(prefix)+31)}'.join(["("] + [f" {getTensorInfo(e)}" for e in el] + [")"])
         return el
 
     info = [f"{el:<28} = {getTensorInfo(callargs[el])}" for el in callargs]
@@ -243,9 +218,7 @@ def post_process_data(df, num_iters, warm_iter=1):
             m = len(sub_list)
 
             valid_n = int(n / m) * m
-            pattern_match = all(
-                name_list[i] == sub_list[i % m] for i in range(int(n / m) * m)
-            )
+            pattern_match = all(name_list[i] == sub_list[i % m] for i in range(int(n / m) * m))
             if pattern_match:
                 kernels_num = m
                 act_iters = valid_n / m
@@ -271,8 +244,7 @@ def post_process_data(df, num_iters, warm_iter=1):
         lower = Q1 - k * IQR
         upper = Q3 + k * IQR
         out_range_idx = sum_df.index[
-            (sum_df["self_device_time_total"] < lower)
-            | (sum_df["self_device_time_total"] > upper)
+            (sum_df["self_device_time_total"] < lower) | (sum_df["self_device_time_total"] > upper)
         ].tolist()
     out_range_num = len(out_range_idx)
 
@@ -306,9 +278,7 @@ def get_trace_perf(prof, num_iters):
     df = pd.DataFrame(df, columns=cols)
     ###remove abnormal data
     dropped_num = warm_iter
-    dropped_indexs, dropped_num = post_process_data(
-        df, num_iters + warm_iter, warm_iter
-    )
+    dropped_indexs, dropped_num = post_process_data(df, num_iters + warm_iter, warm_iter)
     df = df.drop(dropped_indexs)
     iter_init = 0  # warm_iter dropped
     df["cnt"] = 1
@@ -318,9 +288,7 @@ def get_trace_perf(prof, num_iters):
         kernel_num_per_iter = iter_init
         if str(d["device_type"].iat[0]).split(".")[-1] != "CUDA":
             kernel_num_per_iter = 1
-        r = d.iloc[kernel_num_per_iter:][
-            ["cnt", "self_cpu_time_total", "self_device_time_total"]
-        ].sum()
+        r = d.iloc[kernel_num_per_iter:][["cnt", "self_cpu_time_total", "self_device_time_total"]].sum()
         if not r.empty:
             device_type = str(d["device_type"].iat[0]).split(".")[-1]
             r["name"] = name
@@ -368,9 +336,7 @@ def get_trace_perf(prof, num_iters):
     return df.at[avg_name, "device_time_sum"]
 
 
-def checkAllclose(
-    a, b, rtol=1e-2, atol=1e-2, tol_err_ratio=0.05, msg="", printNum=8, printLog=True
-):
+def checkAllclose(a, b, rtol=1e-2, atol=1e-2, tol_err_ratio=0.05, msg="", printNum=8, printLog=True):
     isClose = torch.isclose(a, b, rtol=rtol, atol=atol)
 
     if isClose.all():
@@ -388,7 +354,7 @@ def checkAllclose(
             a_msked = a[mask]
             b_msked = b[mask]
             delta = (a_msked - b_msked).abs()
-        except RuntimeError as e:
+        except RuntimeError:
             mask = ~isClose.to("cpu")
             num = mask.sum()
             printNum = min(printNum, num)
@@ -399,34 +365,30 @@ def checkAllclose(
             b_msked = b[mask]
             delta = (a_msked - b_msked).abs()
         if percent > tol_err_ratio:
-            logger.info(
-                f"""{msg}[checkAllclose {atol=} {rtol=} \033[31mfailed!\033[0m]
+            logger.info(f"""{msg}[checkAllclose {atol=} {rtol=} \033[31mfailed!\033[0m]
     a    : {a.shape}
            {a_msked[:printNum]}
     b    : {b.shape}
            {b_msked[:printNum]}
     delta:
-           {delta[:printNum]}"""
-            )
+           {delta[:printNum]}""")
         else:
             logger.info(
                 f"""{msg}[checkAllclose {atol=} {rtol=} \033[33mwarning!\033[0m] a and b results are not all close"""
             )
-        logger.info(
-            f"-->max abs delta:{delta.max()}, delta details: {percent:.1%} ({num} of {a.numel()}) elements"
-        )
+        logger.info(f"-->max abs delta:{delta.max()}, delta details: {percent:.1%} ({num} of {a.numel()}) elements")
         return percent
 
 
-def verify_output(c_out, c_ref, atol=1e-2, rtol=1e-2, msg='', logits_diff_threshold=2e-3):
+def verify_output(c_out, c_ref, atol=1e-2, rtol=1e-2, msg="", logits_diff_threshold=2e-3):
     if checkAllclose(c_out, c_ref, rtol=rtol, atol=atol) < 0.05:
         return True
-    
+
     # Calculate various error metrics
     abs_diff = (c_out - c_ref).abs()
     max_diff = abs_diff.max().item()
     mean_diff = abs_diff.mean().item()
-    
+
     def calc_diff(x: torch.Tensor, y: torch.Tensor):
         x, y = x.double(), y.double()
         denominator = (x * x + y * y).sum()
@@ -435,7 +397,7 @@ def verify_output(c_out, c_ref, atol=1e-2, rtol=1e-2, msg='', logits_diff_thresh
         numerator = 2 * (x * y).sum()
         sim = numerator / denominator
         diff = (1 - sim).item()
-        return diff if not torch.isnan(torch.tensor(diff)) else 1.0 # NaN means mismatch
+        return diff if not torch.isnan(torch.tensor(diff)) else 1.0  # NaN means mismatch
 
     logits_diff = calc_diff(c_out, c_ref)
     print(f"Logits Diff: {logits_diff:.6f}, Max Diff: {max_diff:.6f}, Mean Diff: {mean_diff:.6f}")

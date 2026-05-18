@@ -245,12 +245,7 @@ def compile_fp8_gemm(
                 k0 = k_tile_idx * reg_k + rk
                 for rn in range_constexpr(wave_reg_n):
                     n0 = n0_base + rn
-                    byte_off = (
-                        n0 * B_STRIDE_N0
-                        + k0 * B_STRIDE_K0
-                        + klane * B_STRIDE_KLANE
-                        + lane16 * B_STRIDE_NLANE
-                    )
+                    byte_off = n0 * B_STRIDE_N0 + k0 * B_STRIDE_K0 + klane * B_STRIDE_KLANE + lane16 * B_STRIDE_NLANE
                     dword_off = byte_off // 4
                     b_raw = buffer_ops.buffer_load(b_rsrc, dword_off, vec_width=2, dtype=fx.Int32)
                     rk_vecs.append(b_raw)

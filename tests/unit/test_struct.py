@@ -6,6 +6,7 @@
 """Unit tests for unified struct / union / Array / Storage types."""
 
 import ctypes
+import importlib
 
 import pytest
 
@@ -386,6 +387,140 @@ def test_storage_schema_field_access_with_array():
 
     S = Storage[SharedStorage]
     assert S._target_type is SharedStorage
+
+
+def test_struct_peek_composes_field_peeks(monkeypatch):
+    struct_module = importlib.import_module("flydsl.expr.struct")
+    monkeypatch.setattr(struct_module, "add_offset", lambda ptr, offset: (ptr, offset))
+
+    class Word:
+        width = 4
+
+        def __init__(self, value):
+            self.value = value
+
+        def __eq__(self, other):
+            return type(self) is type(other) and self.value == other.value
+
+        @classmethod
+        def __dsl_size_of__(cls):
+            return cls.width
+
+        @classmethod
+        def __dsl_align_of__(cls):
+            return cls.width
+
+        @classmethod
+        def __peek_from_ptr__(cls, ptr):
+            return cls(("peek", ptr))
+
+        @classmethod
+        def __poke_into_ptr__(cls, ptr, value):
+            raise AssertionError("poke should not run during peek")
+
+    class Wide(Word):
+        width = 8
+
+    @fx.struct
+    class Pair:
+        a: Word
+        b: Wide
+
+    result = Storage[Pair]("base").peek()
+
+    assert result.a == Word(("peek", ("base", 0)))
+    assert result.b == Wide(("peek", ("base", 8)))
+
+
+def test_struct_poke_composes_field_pokes_recursively(monkeypatch):
+    struct_module = importlib.import_module("flydsl.expr.struct")
+    monkeypatch.setattr(struct_module, "add_offset", lambda ptr, offset: (ptr, offset))
+
+    class Word:
+        poked = []
+
+        def __init__(self, value):
+            self.value = value
+
+        @classmethod
+        def __dsl_size_of__(cls):
+            return 4
+
+        @classmethod
+        def __dsl_align_of__(cls):
+            return 4
+
+        @classmethod
+        def __peek_from_ptr__(cls, ptr):
+            return cls(ptr)
+
+        @classmethod
+        def __poke_into_ptr__(cls, ptr, value):
+            cls.poked.append((ptr, value.value))
+
+    @fx.struct
+    class Inner:
+        x: Word
+        y: Word
+
+    @fx.struct
+    class Outer:
+        head: Word
+        inner: Inner
+        tail: Word
+
+    value = Outer(head=Word(1), inner=Inner(x=Word(2), y=Word(3)), tail=Word(4))
+    Storage[Outer]("base").poke(value)
+
+    assert Word.poked == [
+        (("base", 0), 1),
+        ((("base", 4), 0), 2),
+        ((("base", 4), 4), 3),
+        (("base", 12), 4),
+    ]
+
+
+def test_struct_peek_and_poke_handle_constexpr_fields(monkeypatch):
+    struct_module = importlib.import_module("flydsl.expr.struct")
+    monkeypatch.setattr(struct_module, "add_offset", lambda ptr, offset: (ptr, offset))
+
+    class Word:
+        poked = []
+
+        def __init__(self, value):
+            self.value = value
+
+        def __eq__(self, other):
+            return type(self) is type(other) and self.value == other.value
+
+        @classmethod
+        def __dsl_size_of__(cls):
+            return 4
+
+        @classmethod
+        def __dsl_align_of__(cls):
+            return 4
+
+        @classmethod
+        def __peek_from_ptr__(cls, ptr):
+            return cls(("peek", ptr))
+
+        @classmethod
+        def __poke_into_ptr__(cls, ptr, value):
+            cls.poked.append((ptr, value.value))
+
+    @fx.struct
+    class Params:
+        n: fx.Constexpr[int]
+        value: Word
+
+    value = Params(n=32, value=Word(7))
+    peeked = Storage[type(value)]("base").peek()
+    Storage[Params]("base").poke(value)
+
+    assert peeked.n == 32
+    assert peeked.value == Word(("peek", ("base", 0)))
+    assert Word.poked == [(("base", 0), 7)]
 
 
 # ---------------------------------------------------------------------------

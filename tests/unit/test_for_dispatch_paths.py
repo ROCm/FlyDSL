@@ -7,9 +7,9 @@
 
 import pytest
 
-from flydsl._mlir.ir import Context, FunctionType, IndexType, InsertionPoint, IntegerType, Location, Module
 from flydsl._mlir.dialects import arith, func
-from flydsl.compiler.ast_rewriter import InsertEmptyYieldForSCFFor, ReplaceIfWithDispatch
+from flydsl._mlir.ir import Context, FunctionType, InsertionPoint, IntegerType, Location, Module
+from flydsl.compiler.ast_rewriter import InsertEmptyYieldForSCFFor
 from flydsl.expr.numeric import Int32
 
 
@@ -29,7 +29,9 @@ def test_scf_for_dispatch_single_iter_arg():
                     return {"acc": acc + one}
 
                 result = InsertEmptyYieldForSCFFor.scf_for_dispatch(
-                    0, 4, 1,
+                    0,
+                    4,
+                    1,
                     body_fn,
                     result_names=("acc",),
                     result_values=(acc,),
@@ -60,7 +62,9 @@ def test_scf_for_dispatch_multi_iter_args():
                     return {"a": a + one, "b": b - one}
 
                 result = InsertEmptyYieldForSCFFor.scf_for_dispatch(
-                    0, 3, 1,
+                    0,
+                    3,
+                    1,
                     body_fn,
                     result_names=("a", "b"),
                     result_values=(a, b),
@@ -88,7 +92,9 @@ def test_scf_for_dispatch_no_iter_args():
                     pass
 
                 InsertEmptyYieldForSCFFor.scf_for_dispatch(
-                    0, 4, 1,
+                    0,
+                    4,
+                    1,
                     body_fn,
                     result_names=(),
                     result_values=(),
@@ -116,7 +122,9 @@ def test_scf_for_dispatch_none_value_raises_error():
 
                 with pytest.raises(TypeError, match="None"):
                     InsertEmptyYieldForSCFFor.scf_for_dispatch(
-                        0, 4, 1,
+                        0,
+                        4,
+                        1,
                         body_fn,
                         result_names=("x",),
                         result_values=(None,),
@@ -140,7 +148,9 @@ def test_scf_for_dispatch_type_mismatch_raises_error():
 
                 with pytest.raises(TypeError, match="type mismatch"):
                     InsertEmptyYieldForSCFFor.scf_for_dispatch(
-                        0, 4, 1,
+                        0,
+                        4,
+                        1,
                         body_fn,
                         result_names=("x",),
                         result_values=(x,),
@@ -162,7 +172,9 @@ def test_scf_for_dispatch_range_with_step():
                     return {"acc": acc + Int32(arith.ConstantOp(i32, 1).result)}
 
                 result = InsertEmptyYieldForSCFFor.scf_for_dispatch(
-                    0, 8, 2,
+                    0,
+                    8,
+                    2,
                     body_fn,
                     result_names=("acc",),
                     result_values=(acc,),
@@ -177,7 +189,6 @@ def test_scf_for_dispatch_range_with_step():
 
 def test_ast_rewrite_for_generates_dispatch_call():
     """AST rewrite of for loop: verify scf_for_dispatch call is injected."""
-    import ast, textwrap
     from flydsl.compiler.ast_rewriter import ASTRewriter
 
     def sample(n):
