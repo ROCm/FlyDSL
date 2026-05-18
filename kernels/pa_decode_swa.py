@@ -912,7 +912,7 @@ def compile_pa_decode_sw_reduce(
         c_wave_mask = fx.Int32(WARP_SIZE - 1)
         c_red_slots = fx.Int32(red_slots)
         lane = tid & c_wave_mask
-        wave = fx.Int32(rocdl.readfirstlane(T.i32, tid >> fx.Int32(6)))
+        wave = fx.Int32(tid >> fx.Int32(6))
 
         def _wave_reduce_max_full(val):
             red = val
@@ -1286,7 +1286,7 @@ def compile_pa_decode_sw(
         context_len = _global_load_i32(cl_global_ptr, batch_idx)
         lane16id = tid & 15
         rowid = (tid >> 4) & 3
-        warp_id = fx.Int32(rocdl.readfirstlane(T.i32, tid >> fx.Int32(6)))
+        warp_id = fx.Int32(tid >> fx.Int32(6))
 
         q_rsrc = buffer_ops.create_buffer_resource(query_ptr, max_size=True)
         k_global_ptr = _extract_global_ptr(key_cache_ptr)
@@ -1498,7 +1498,7 @@ def compile_pa_decode_sw(
             _store_partition_results(eqgs_lane, ZERO_F, NEG_INF, zero_output)
 
         def _run_valid_partition():
-            def _load_tile(tile_partition_idx_value, tile_valid):
+            def _get_tile_metadata(tile_partition_idx_value, tile_valid):
                 if const_expr(tile_valid):
                     safe_tile_partition_idx = tile_partition_idx_value
                     tile_context_len = context_len
@@ -1510,9 +1510,11 @@ def compile_pa_decode_sw(
                 tile_token_offset_local = tile_block_split_idx * c_cps
                 tile_kv_seq_start = tile_seq_partition_idx * c_bs + tile_token_offset_local
                 tile_bt_off = batch_idx * stride_bt_seq + tile_seq_partition_idx
-                tile_phys_block = rocdl.readfirstlane(T.i32, _global_load_i32(bt_global_ptr, tile_bt_off))
+                tile_phys_block = _global_load_i32(bt_global_ptr, tile_bt_off)
+                return tile_token_offset_local, tile_kv_seq_start, tile_context_len, tile_phys_block
 
-                tile_scale_scalars = _load_kv_scale_scalars(tile_token_offset_local, tile_phys_block)
+            def _load_tile(tile_metadata, tile_scale_scalars):
+                tile_token_offset_local, tile_kv_seq_start, tile_context_len, tile_phys_block = tile_metadata
                 tile_k_base = _compute_block_base_dw_i64(tile_phys_block, stride_k_block, _k_head_off)
 
                 tile_k_flat = _load_k_flat(
@@ -1551,6 +1553,15 @@ def compile_pa_decode_sw(
                 query_group_size=query_group_size,
                 query_load_is_bf16=query_load_is_bf16,
             )
+            if const_expr(fuse_partitions):
+                tile_valid = fx.Int32(0) < visible_tile_count
+                prefetched_tile_metadata = _get_tile_metadata(tail_start_tile, tile_valid)
+            else:
+                prefetched_tile_metadata = _get_tile_metadata(tile_partition_idx_raw, True)
+            prefetched_tile_scale_scalars = _load_kv_scale_scalars(
+                prefetched_tile_metadata[0],
+                prefetched_tile_metadata[3],
+            )
             qi_val, qhi_pos, q_frags, query_scale_lane = _finish_sw_mtp_subgroup_q_fragments(
                 logits_lds_i32,
                 logits_lds_i64,
@@ -1565,13 +1576,12 @@ def compile_pa_decode_sw(
                 running_max = NEG_INF
                 running_sum = ZERO_F
                 outs = [arith.constant_vector(0.0, T.f32x4) for _ in range_constexpr(VHELOOP)]
-                tile_valid = fx.Int32(0) < visible_tile_count
                 (
                     tile_k_ops,
                     tile_v_and_scales,
                     tile_kv_seq_start,
                     tile_context_len,
-                ) = _load_tile(tail_start_tile, tile_valid)
+                ) = _load_tile(prefetched_tile_metadata, prefetched_tile_scale_scalars)
                 causal_bound = tile_context_len + fx.Int32(1 - query_length) + qi_val
                 seq_start = tile_context_len - fx.Int32(query_length + sliding_window) + qi_val
                 running_max, running_sum, outs = _process_block_split(
@@ -1593,7 +1603,7 @@ def compile_pa_decode_sw(
                     preloaded_v_and_scales,
                     tile_kv_seq_start,
                     _,
-                ) = _load_tile(tile_partition_idx_raw, True)
+                ) = _load_tile(prefetched_tile_metadata, prefetched_tile_scale_scalars)
                 causal_bound = context_len + fx.Int32(1 - query_length) + qi_val
                 seq_start = context_len - fx.Int32(query_length + sliding_window) + qi_val
                 outs = [arith.constant_vector(0.0, T.f32x4) for _ in range_constexpr(VHELOOP)]
