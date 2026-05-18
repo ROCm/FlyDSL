@@ -16,6 +16,7 @@ from tests.test_common import run_perftest, verify_output
 
 logging.basicConfig(level=logging.INFO)
 ARCH = str(get_rocm_arch())
+IS_GFX950 = ARCH == "gfx950"
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 _PYFLYDSL_SRC = os.path.join(_REPO_ROOT, "flydsl", "src")
 if _REPO_ROOT not in sys.path:
@@ -44,10 +45,16 @@ def run_torch_bench(a, b):
     return c
 
 
-@pytest.mark.parametrize("dtype", ["fp16", "bf16"])
-@pytest.mark.parametrize(
-    "m, n, k, TILE_M, TILE_N, TILE_K, SPLIT_K, BLOCK_M_WARPS, BLOCK_N_WARPS, BLOCK_K_WARPS",
+params = (
     [
+        (32, 384, 7168, 32, 64, 256, 14, 1, 2, 2),
+        (32, 7168, 2048, 16, 64, 256, 2, 1, 2, 1),
+        (32, 384, 16384, 32, 64, 256, 16, 1, 2, 2),
+        (8, 5120, 2880, 32, 128, 64, 9, 1, 4, 1),
+        (32, 2880, 2048, 32, 64, 256, 4, 1, 2, 2),
+    ]
+    if IS_GFX950
+    else [
         (32, 384, 7168, 16, 64, 128, 14, 1, 2, 1),
         (4, 384, 7168, 16, 64, 128, 14, 1, 2, 1),
         (65, 1024, 8192, 48, 64, 128, 8, 1, 2, 1),
@@ -55,7 +62,14 @@ def run_torch_bench(a, b):
         (4096, 4096, 4096, 128, 128, 64, 1, 2, 2, 1),
         (8192, 8192, 8192, 128, 128, 64, 1, 2, 2, 1),
         (32, 2880, 2048, 32, 64, 128, 4, 1, 2, 1),
-    ],
+    ]
+)
+
+
+@pytest.mark.parametrize("dtype", ["fp16", "bf16"])
+@pytest.mark.parametrize(
+    "m, n, k, TILE_M, TILE_N, TILE_K, SPLIT_K, BLOCK_M_WARPS, BLOCK_N_WARPS, BLOCK_K_WARPS",
+    params,
 )
 @pytest.mark.parametrize(
     "test_graph",
