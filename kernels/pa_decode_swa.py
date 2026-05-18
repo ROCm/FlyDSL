@@ -508,6 +508,7 @@ def _make_pa_phase_helpers(
     c_w,
     neg_inf,
     zero_f,
+    global_window_limit=None,
 ):
     apply_causal_mask = needs_mask or query_length > 1
     pv_prob_i64_indices = []
@@ -625,12 +626,23 @@ def _make_pa_phase_helpers(
 
     def _apply_token_mask_vec(logit_vec, td: int, kv_tok_base, causal_bound, seq_start, false_value):
         tok_vec = _token_vec_i32(kv_tok_base, td)
-        if const_expr(apply_causal_mask and seq_start is not None):
-            in_range = (tok_vec < causal_bound) & (tok_vec >= seq_start)
+        apply_window_mask = seq_start is not None
+        apply_global_window = global_window_limit is not None
+        if const_expr(apply_window_mask and apply_global_window):
+            visible_range = (tok_vec >= seq_start) | (tok_vec < global_window_limit)
+        elif const_expr(apply_window_mask):
+            visible_range = tok_vec >= seq_start
+        elif const_expr(apply_global_window):
+            visible_range = tok_vec < global_window_limit
+        else:
+            visible_range = None
+
+        if const_expr(apply_causal_mask and (apply_window_mask or apply_global_window)):
+            in_range = (tok_vec < causal_bound) & visible_range
         elif const_expr(apply_causal_mask):
             in_range = tok_vec < causal_bound
         else:
-            in_range = tok_vec >= seq_start
+            in_range = visible_range
         return arith.select(in_range, logit_vec, vector.broadcast(T.f32x4, arith.unwrap(false_value)))
 
     def _qk_and_intra_softmax(
@@ -667,7 +679,7 @@ def _make_pa_phase_helpers(
                 else:
                     d_out.append(acc * vector.broadcast(T.f32x4, scale))
 
-        apply_range_mask = seq_start is not None
+        apply_range_mask = seq_start is not None or global_window_limit is not None
         kv_tok_base = (
             partition_start + kv_tok_thread_base if const_expr(apply_causal_mask or apply_range_mask) else None
         )
@@ -838,11 +850,27 @@ def get_sw_max_context_partition_num(
     sliding_window: int,
     context_partition_size: int = KV_COMPUTE_BLOCK,
     query_length: int = 1,
+    global_window: int = 0,
 ) -> int:
     if sliding_window <= 0:
         return 0
     window_token_count = sliding_window + query_length
-    return _cdiv(window_token_count - 1, context_partition_size) + 1
+    tail_tiles = _cdiv(window_token_count - 1, context_partition_size) + 1
+    return tail_tiles + _cdiv(global_window, context_partition_size)
+
+
+def get_sw_ps_max_context_partition_num(
+    sliding_window: int,
+    global_window: int = 0,
+    context_partition_size: int = KV_COMPUTE_BLOCK,
+    query_length: int = 1,
+) -> int:
+    return get_sw_max_context_partition_num(
+        sliding_window,
+        context_partition_size,
+        query_length,
+        global_window=global_window,
+    )
 
 
 @functools.lru_cache(maxsize=256)
@@ -1200,6 +1228,7 @@ def compile_pa_decode_sw_reduce(
 @functools.lru_cache(maxsize=256)
 def compile_pa_decode_sw(
     sliding_window: int,  # required > 0 -- baked as compile-time constant
+    global_window: int = 0,
     softmax_scale=None,
     trans_v=False,
     query_group_size=QUERY_GROUP_SIZE,
@@ -1212,10 +1241,12 @@ def compile_pa_decode_sw(
 
     Grid = (batch_size, num_kv_heads * mtp_groups, max_context_partition_num).
     Each GPU block processes one 256-token partition selected from the visible KV
-    region: the sliding tail window.
-    sliding_window is a compile-time constant.
+    region: the sliding tail window plus an optional global prefix.
+    sliding_window and global_window are compile-time constants.
     """
     assert sliding_window > 0, "compile_pa_decode_sw requires sliding_window > 0"
+    if const_expr(global_window > 0 and fuse_partitions):
+        raise ValueError("`compile_pa_decode_sw` does not support fused partitions with `global_window > 0`.")
     arch = get_hip_arch()
     if query_input_dtype not in ("bf16", "f16"):
         raise ValueError("`compile_pa_decode_sw` only supports bf16/f16 query inputs.")
@@ -1228,6 +1259,7 @@ def compile_pa_decode_sw(
         sliding_window,
         KV_COMPUTE_BLOCK,
         query_length,
+        global_window=global_window,
     )
     _mtp_groups = _get_sw_mtp_group_count(query_length, query_group_size)
 
@@ -1324,6 +1356,10 @@ def compile_pa_decode_sw(
         ZERO_F = fx.Float32(0.0)
         c_cps = fx.Int32(KV_COMPUTE_BLOCK)
         c_bs = fx.Int32(_bs)
+        global_window_limit = fx.Int32(global_window) if const_expr(global_window > 0) else None
+        global_prefix_tile_count = (
+            fx.Int32(_cdiv(global_window, KV_COMPUTE_BLOCK)) if const_expr(global_window > 0) else None
+        )
 
         local_qhead_idx = warp_id * 4 + rowid
         (
@@ -1350,7 +1386,7 @@ def compile_pa_decode_sw(
         )
 
         # ── Context length and partition mapping ──
-        # Visible tiles cover the union of all per-query sliding windows.
+        # Visible tiles cover the union of the global prefix and all per-query sliding windows.
 
         _c_sw = fx.Int32(sliding_window)
         _c_query_len = fx.Int32(query_length)
@@ -1358,8 +1394,26 @@ def compile_pa_decode_sw(
         seq_start_global = context_len - _c_query_len - _c_sw
         seq_start_global = arith.select(seq_start_global > 0, seq_start_global, 0)
         tail_start_tile = seq_start_global >> fx.Int32(8)
-        visible_tile_count = num_tiles_for_seq - tail_start_tile
-        tile_partition_idx_raw = tail_start_tile + partition_idx
+        if const_expr(global_window > 0):
+            prefix_tile_count = arith.select(
+                global_prefix_tile_count < num_tiles_for_seq,
+                global_prefix_tile_count,
+                num_tiles_for_seq,
+            )
+            merged_ranges = tail_start_tile <= prefix_tile_count
+            split_visible_tile_count = prefix_tile_count + (num_tiles_for_seq - tail_start_tile)
+            visible_tile_count = arith.select(merged_ranges, num_tiles_for_seq, split_visible_tile_count)
+            in_prefix_region = partition_idx < prefix_tile_count
+            split_tail_tile_idx = tail_start_tile + (partition_idx - prefix_tile_count)
+            split_tile_partition_idx = arith.select(
+                in_prefix_region,
+                partition_idx,
+                split_tail_tile_idx,
+            )
+            tile_partition_idx_raw = arith.select(merged_ranges, partition_idx, split_tile_partition_idx)
+        else:
+            visible_tile_count = num_tiles_for_seq - tail_start_tile
+            tile_partition_idx_raw = tail_start_tile + partition_idx
 
         _is_valid = partition_idx < visible_tile_count
 
@@ -1412,6 +1466,7 @@ def compile_pa_decode_sw(
             c_w=c_w,
             neg_inf=NEG_INF,
             zero_f=ZERO_F,
+            global_window_limit=global_window_limit,
         )
 
         def _process_block_split(
@@ -1710,3 +1765,228 @@ def compile_pa_decode_sw(
         "kernel": pa_decode_sw_kernel,
         "allocator": allocator,
     }
+
+
+def get_pa_metadata(*args, **kwargs):
+    from kernels.pa_decode_fp8 import get_pa_metadata as _get_pa_metadata
+
+    return _get_pa_metadata(*args, **kwargs)
+
+
+def pa_decode_ps_launch(
+    output,
+    query,
+    key_cache,
+    value_cache,
+    context_lengths,
+    kv_page_indices,
+    kv_indptr,
+    softmax_scale,
+    key_scale=None,
+    value_scale=None,
+    *,
+    sliding_window: int = 0,
+    global_window: int = 0,
+    metadata: dict = None,
+    block_tables=None,
+    max_context_partition_num: int = 0,
+    exp_sums=None,
+    max_logits=None,
+    temporary_output=None,
+    stream=None,
+) -> str:
+    from kernels import pa_decode_fp8 as _base
+
+    if global_window <= 0:
+        return _base.pa_decode_ps_launch(
+            output,
+            query,
+            key_cache,
+            value_cache,
+            context_lengths,
+            kv_page_indices,
+            kv_indptr,
+            softmax_scale,
+            key_scale=key_scale,
+            value_scale=value_scale,
+            sliding_window=sliding_window,
+            metadata=metadata,
+            block_tables=block_tables,
+            max_context_partition_num=max_context_partition_num,
+            exp_sums=exp_sums,
+            max_logits=max_logits,
+            temporary_output=temporary_output,
+            stream=stream,
+        )
+    if sliding_window <= 0:
+        raise ValueError("`global_window` is only supported together with `sliding_window > 0`.")
+
+    num_query_heads = query.shape[1]
+    num_kv_heads = key_cache.shape[1]
+    trans_v = len(value_cache.shape) == 5
+    query_input_dtype = _base._get_query_input_dtype(query)
+    dev = query.device
+    is_graph_capturing = _base._is_current_stream_capturing()
+    if is_graph_capturing and not _base.flydsl_runtime_env.enable_cache:
+        raise ValueError(
+            "CUDA graph capture for `pa_decode_ps_launch` requires "
+            "`FLYDSL_RUNTIME_ENABLE_CACHE=1` so compiled launch artifacts stay alive."
+        )
+
+    key_scale = _base._prepare_scale_tensor(
+        "key_scale",
+        key_scale,
+        device=dev,
+        is_graph_capturing=is_graph_capturing,
+    )
+    value_scale = _base._prepare_scale_tensor(
+        "value_scale",
+        value_scale,
+        device=dev,
+        is_graph_capturing=is_graph_capturing,
+    )
+    if query_input_dtype == "packed_fp8":
+        raise ValueError(
+            "`pa_decode_ps_launch` no longer accepts host query_scale and only supports "
+            "bf16/f16 query inputs with kernel-internal query scale computation."
+        )
+
+    per_token_kv = key_scale.ndim > 1
+    query_length = query.shape[0] // context_lengths.shape[0]
+    query_group_size = num_query_heads // num_kv_heads
+    batch_size = context_lengths.shape[0]
+    head_size = query.shape[-1]
+    eqgs = query_length * query_group_size
+    if max_context_partition_num == 0:
+        max_context_partition_num = get_sw_max_context_partition_num(
+            sliding_window,
+            KV_COMPUTE_BLOCK,
+            query_length,
+            global_window=global_window,
+        )
+
+    if is_graph_capturing and (exp_sums is None or max_logits is None or temporary_output is None):
+        raise ValueError(
+            "CUDA graph capture requires preallocated `exp_sums`, `max_logits`, "
+            "and `temporary_output` for the sliding-window path."
+        )
+
+    import torch
+
+    if exp_sums is None:
+        exp_sums = torch.zeros(
+            batch_size,
+            num_kv_heads,
+            max_context_partition_num,
+            eqgs,
+            device=dev,
+            dtype=torch.float32,
+        )
+    if max_logits is None:
+        max_logits = torch.full(
+            (batch_size, num_kv_heads, max_context_partition_num, eqgs),
+            float("-inf"),
+            device=dev,
+            dtype=torch.float32,
+        )
+    if temporary_output is None:
+        temporary_output = torch.zeros(
+            batch_size,
+            num_kv_heads,
+            max_context_partition_num,
+            eqgs,
+            head_size,
+            device=dev,
+            dtype=torch.bfloat16,
+        )
+
+    if per_token_kv:
+        stride_ks_block = key_scale.stride(0)
+        stride_ks_head = key_scale.stride(1)
+    else:
+        stride_ks_block = 0
+        stride_ks_head = 0
+
+    s = stream or torch.cuda.current_stream()
+    sw_mtp_groups = _get_sw_mtp_group_count(query_length, query_group_size)
+    sw_grid_y = num_kv_heads * sw_mtp_groups
+    output_5d = output.reshape(batch_size, query_length, num_kv_heads, query_group_size, head_size)
+
+    compiled_sw = compile_pa_decode_sw(
+        sliding_window=sliding_window,
+        global_window=global_window,
+        softmax_scale=softmax_scale,
+        trans_v=trans_v,
+        query_group_size=query_group_size,
+        per_token_kv=per_token_kv,
+        query_length=query_length,
+        query_input_dtype=query_input_dtype,
+        fuse_partitions=False,
+    )
+
+    compiled_sw["launch"](
+        exp_sums,
+        max_logits,
+        temporary_output,
+        output_5d,
+        query,
+        key_cache,
+        value_cache,
+        block_tables,
+        context_lengths,
+        key_scale,
+        value_scale,
+        query.stride(0),
+        query.stride(1),
+        key_cache.stride(0),
+        key_cache.stride(1),
+        value_cache.stride(0),
+        value_cache.stride(1),
+        exp_sums.stride(0),
+        exp_sums.stride(1),
+        exp_sums.stride(2),
+        temporary_output.stride(0),
+        temporary_output.stride(1),
+        temporary_output.stride(2),
+        temporary_output.stride(3),
+        output_5d.stride(0),
+        output_5d.stride(1),
+        output_5d.stride(2),
+        output_5d.stride(3),
+        block_tables.stride(0),
+        stride_ks_block,
+        stride_ks_head,
+        batch_size,
+        sw_grid_y,
+        max_context_partition_num,
+        s,
+    )
+
+    compiled_sw_reduce = compile_pa_decode_sw_reduce(
+        max_context_partition_num=max_context_partition_num,
+        query_seq_len=query_length,
+        query_group_size=query_group_size,
+        head_size=head_size,
+        output_dtype_str=_base._get_output_dtype_str(output),
+    )
+    compiled_sw_reduce["launch"](
+        output_5d,
+        exp_sums,
+        max_logits,
+        temporary_output,
+        output_5d.stride(0),
+        output_5d.stride(1),
+        output_5d.stride(2),
+        output_5d.stride(3),
+        exp_sums.stride(0),
+        exp_sums.stride(1),
+        exp_sums.stride(2),
+        temporary_output.stride(0),
+        temporary_output.stride(1),
+        temporary_output.stride(2),
+        temporary_output.stride(3),
+        batch_size,
+        num_kv_heads,
+        s,
+    )
+    return "ps_sw_global_partitioned"
