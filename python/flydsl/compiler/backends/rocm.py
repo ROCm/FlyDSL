@@ -39,6 +39,9 @@ class RocmBackend(BaseBackend):
         maxnreg = compile_hints.get("maxnreg")
 
         bin_cli_opts = []
+        import os as _os
+        if _os.environ.get("FLYDSL_LLC_EXTRA_OPTS"):
+            bin_cli_opts.extend(_os.environ["FLYDSL_LLC_EXTRA_OPTS"].split())
         if env.debug.enable_debug_info:
             bin_cli_opts.append("-g")
         if waves_per_eu:

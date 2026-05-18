@@ -453,6 +453,32 @@ def _to_ir(v):
     return v
 
 
+def exp2(res, arg, **kw):
+    """v_exp_f32 — base-2 exponential (2^x)."""
+    from ..._mlir.dialects.rocdl import exp2 as _op
+
+    return _op(res=res, arg=_to_ir(arg), **kw)
+
+
+def permlanex16(res, old, src0, src1, src2, fi, bound_control, **kw):
+    """v_permlanex16_b32 — exchange lanes 0-15 with lanes 16-31."""
+    from ..._mlir.dialects.rocdl import permlanex16 as _op
+
+    return _op(
+        res=res, old=_to_ir(old), src0=_to_ir(src0),
+        src1=_to_ir(src1), src2=_to_ir(src2),
+        fi=fi, bound_control=bound_control, **kw,
+    )
+
+
+def fmax3(a, b, c):
+    """max(a, b, c) via two llvm.maxnum — LLVM DAG combines to v_max3_num_f32."""
+    from ..._mlir.dialects import llvm as _llvm
+
+    m = _llvm.intr_maxnum(_to_ir(a), _to_ir(b))
+    return _llvm.intr_maxnum(m, _to_ir(c))
+
+
 def raw_ptr_buffer_atomic_fadd(vdata, rsrc, offset, soffset, aux, **kw):
     from ..._mlir.dialects.rocdl import raw_ptr_buffer_atomic_fadd as _op
 
