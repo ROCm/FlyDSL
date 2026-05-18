@@ -1331,21 +1331,15 @@ def compile_moe_sorting_prefill(
                     if has_mask:
                         # EP: serially extend mask prefix sum for experts >= K4_BLOCK
                         prev_local = _lds_load_raw(cumsum_mr, ArithValue(fx.Int32(K4_BLOCK - 1)).index_cast(T.index))
-                        prev_mask = buffer_ops.buffer_load(
-                            mask_rsrc, fx.Int32(K4_BLOCK - 1), vec_width=1, dtype=T.i32
-                        )
+                        prev_mask = buffer_ops.buffer_load(mask_rsrc, fx.Int32(K4_BLOCK - 1), vec_width=1, dtype=T.i32)
                         prev_local = prev_local + prev_mask
                         for _e3 in range_constexpr(K4_BLOCK, E):
                             e3_mask = buffer_ops.buffer_load(mask_rsrc, fx.Int32(_e3), vec_width=1, dtype=T.i32)
-                            _lds_store_raw(
-                                cumsum_mr, prev_local, ArithValue(fx.Int32(_e3)).index_cast(T.index)
-                            )
+                            _lds_store_raw(cumsum_mr, prev_local, ArithValue(fx.Int32(_e3)).index_cast(T.index))
                             prev_local = prev_local + e3_mask
                     else:
                         for _e3 in range_constexpr(K4_BLOCK, E):
-                            _lds_store_raw(
-                                cumsum_mr, fx.Int32(_e3), ArithValue(fx.Int32(_e3)).index_cast(T.index)
-                            )
+                            _lds_store_raw(cumsum_mr, fx.Int32(_e3), ArithValue(fx.Int32(_e3)).index_cast(T.index))
             gpu.barrier()
             my_local_idx = _lds_load_raw(cumsum_mr, ArithValue(my_expert).index_cast(T.index))
 
