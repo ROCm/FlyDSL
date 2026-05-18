@@ -165,11 +165,11 @@ class SharedAllocator(Arena):
             address_space=AddressSpace.Shared,
             alignment=align,
         )
-        i32 = ir.IntegerType.get_signless(32)
+        i64 = ir.IntegerType.get_signless(64)
         dict_attrs = ir.DictAttr.get(
             {
-                "allocBytes": ir.IntegerAttr.get(i32, nbytes),
-                "allocAlign": ir.IntegerAttr.get(i32, align),
+                "allocBytes": ir.IntegerAttr.get(i64, nbytes),
+                "allocAlign": ir.IntegerAttr.get(i64, align),
             }
         )
         return make_ptr(ptr_ty, [], dict_attrs=dict_attrs)

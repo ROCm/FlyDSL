@@ -429,13 +429,9 @@ def _alloc_bytes_of(make_ptr_op) -> int:
     return ir.IntegerAttr(dict_attr["allocBytes"]).value
 
 
-def _shared_alloc_address_spaces(module) -> list[int]:
-    """Address spaces of every `fly.make_ptr` result in *module*."""
-    spaces = []
-    for op in _collect_make_ptrs(module):
-        ptr_ty = op.results[0].type
-        spaces.append(int(str(ptr_ty.address_space) == "#fly<address_space shared>"))
-    return spaces
+def _shared_alloc_address_spaces(module) -> list[str]:
+    """Address-space attribute of every `fly.make_ptr` result in *module*."""
+    return [str(op.results[0].type.address_space) for op in _collect_make_ptrs(module)]
 
 
 class TestStaticAllocatorLeaf:
@@ -471,6 +467,8 @@ class TestStaticAllocatorLeaf:
         # Per-field byte sizes line up with dsl_size_of(leaf_type).
         sizes = sorted(_alloc_bytes_of(op) for op in make_ptrs)
         assert sizes == sorted([Int32.__dsl_size_of__(), Float32.__dsl_size_of__(), 16])
+        # Every emitted leaf pointer lives in the shared address space.
+        assert _shared_alloc_address_spaces(module) == ["#fly<address_space shared>"] * 3
 
     def test_static_has_no_base_ptr(self):
         def build():
