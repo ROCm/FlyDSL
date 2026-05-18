@@ -14,6 +14,7 @@ Usage:
 """
 
 import argparse
+import os
 import sys
 
 import pytest
@@ -38,6 +39,7 @@ from kernels.moe_sorting_kernel import (  # noqa: E402
 )
 
 WARMUP_ITERS = 3
+RUN_BENCH = os.environ.get("MOE_SORTING_BENCH", "0") == "1"
 
 
 def _call_flydsl(topk_ids, topk_weights, E, model_dim=4096, topk=None, unit_size=UNIT_SIZE, expert_mask=None):
@@ -77,11 +79,13 @@ def moe_sorting_reference(topk_ids, topk_weights, num_experts, unit_size=UNIT_SI
     sorted_expert_ids = torch.full((max_num_m_blocks,), -1, dtype=torch.int32, device=device)
     num_valid_ids = torch.zeros(2, dtype=torch.int32, device=device)
 
+    enabled = expert_mask.cpu().tolist() if expert_mask is not None else None
+
     ids_cursor = 0
     expert_ids_cursor = 0
     skip_expert_num = 0
     for eid in range(num_experts):
-        if expert_mask is not None and expert_mask[eid].item() == 0:
+        if enabled is not None and not enabled[eid]:
             skip_expert_num += 1
             continue
         token_id, topk_pos = torch.where(topk_ids == eid)
@@ -121,8 +125,15 @@ def generate_topk_ids(T, E, topk, device="cuda"):
     return topk_ids, topk_weights
 
 
-def check_sorted_ids(ref_ids, gpu_ids, num_padded, topk, M, label="sorted_ids"):
-    """Compare sorted_ids up to num_padded, ignoring padding sentinels."""
+def check_sorted_ids(
+    ref_ids, gpu_ids, num_padded, topk, M, label="sorted_ids", topk_ids=None, gpu_eids=None, unit_size=UNIT_SIZE
+):
+    """Compare sorted_ids up to num_padded, ignoring padding sentinels.
+
+    When topk_ids and gpu_eids are provided, falls back to per-expert-block
+    validation: verifies each non-sentinel packed ID in a block maps to the
+    expert declared by sorted_expert_ids (catches cross-expert permutations).
+    """
     sentinel = (topk << 24) | M
     ref_slice = ref_ids[:num_padded]
     gpu_slice = gpu_ids[:num_padded]
@@ -137,32 +148,65 @@ def check_sorted_ids(ref_ids, gpu_ids, num_padded, topk, M, label="sorted_ids"):
     ref_valid = ref_slice[mask]
     gpu_valid = gpu_slice[mask]
 
-    # Per-expert block comparison: within each expert's padded block, the set of
-    # packed IDs must match (order within block may differ between implementations)
     if torch.equal(ref_valid, gpu_valid):
         print(f"  [{label}] exact match ({n_valid} valid entries)")
         return True
 
-    # Fallback: set-equality check per expert block
     mismatch = (ref_valid != gpu_valid).sum().item()
-    print(f"  [{label}] WARNING: {mismatch}/{n_valid} entries differ (checking set equality)")
+    print(f"  [{label}] WARNING: {mismatch}/{n_valid} entries differ (checking per-expert blocks)")
 
+    # Per-expert-block validation: verify each packed ID is in the correct expert block
+    if topk_ids is not None and gpu_eids is not None:
+        n_blocks = num_padded // unit_size
+        topk_ids_cpu = topk_ids.cpu()
+        gpu_slice_cpu = gpu_slice.cpu()
+        gpu_eids_cpu = gpu_eids.cpu()
+        ref_slice_cpu = ref_slice.cpu()
+        bad_blocks = []
+        for blk in range(n_blocks):
+            start = blk * unit_size
+            end = start + unit_size
+            expert_id = gpu_eids_cpu[blk].item()
+            if expert_id < 0:
+                continue
+            blk_gpu = set()
+            blk_ref = set()
+            for i in range(start, end):
+                g = gpu_slice_cpu[i].item()
+                r = ref_slice_cpu[i].item()
+                if g != sentinel:
+                    tok = g & 0xFFFFFF
+                    topk_pos = g >> 24
+                    if tok < M and topk_pos < topk:
+                        assigned_expert = topk_ids_cpu[tok, topk_pos].item()
+                        if assigned_expert != expert_id:
+                            bad_blocks.append((blk, expert_id, tok, topk_pos, assigned_expert))
+                    blk_gpu.add(g)
+                if r != sentinel:
+                    blk_ref.add(r)
+            if blk_gpu != blk_ref and not bad_blocks:
+                bad_blocks.append((blk, expert_id, -1, -1, -1))
+        if not bad_blocks:
+            print(f"  [{label}] per-expert-block validated ({n_blocks} blocks) — OK")
+            return True
+        print(f"  [{label}] FAIL: {len(bad_blocks)} block(s) have cross-expert errors")
+        for blk, eid, tok, tpos, actual in bad_blocks[:5]:
+            if tok >= 0:
+                print(f"    block {blk}: expert_id={eid}, token {tok} topk_pos {tpos} -> expert {actual}")
+            else:
+                print(f"    block {blk}: expert_id={eid}, set mismatch")
+        return False
+
+    # Fallback: global set equality (no topk_ids/gpu_eids provided)
     ref_set = set(ref_valid.cpu().tolist())
     gpu_set = set(gpu_valid.cpu().tolist())
     if ref_set == gpu_set:
         print(f"  [{label}] set-equal (order differs) — OK")
         return True
 
-    # Per-expert-block validation: for EP/atomic-scatter, within-expert ordering may differ.
-    # Check that each expert's block contains the same set of packed IDs.
-    missing_from_gpu = ref_set - gpu_set
-    extra_in_gpu = gpu_set - ref_set
-    if not missing_from_gpu and not extra_in_gpu:
-        print(f"  [{label}] multiset-equal — OK")
-        return True
-
-    print(f"  [{label}] MISMATCH (missing={len(missing_from_gpu)}, extra={len(extra_in_gpu)})")
-    # Print first few diffs
+    missing = ref_set - gpu_set
+    extra = gpu_set - ref_set
+    print(f"  [{label}] MISMATCH (missing={len(missing)}, extra={len(extra)})")
     diff_mask = ref_valid != gpu_valid
     diff_indices = diff_mask.nonzero(as_tuple=True)[0][:10]
     for idx in diff_indices:
@@ -317,8 +361,10 @@ def run_test(T, E, topk, unit_size=UNIT_SIZE, max_tokens=None):
 
     num_padded = ref_nvalid[0].item()
 
-    # 2. sorted_ids
-    passed &= check_sorted_ids(ref_ids, gpu_ids, num_padded, topk, T)
+    # 2. sorted_ids (per-expert-block validation)
+    passed &= check_sorted_ids(
+        ref_ids, gpu_ids, num_padded, topk, T, topk_ids=topk_ids, gpu_eids=gpu_eids, unit_size=unit_size
+    )
 
     # 3. sorted_weights
     passed &= check_sorted_weights(ref_w, gpu_w, ref_ids, topk, T, gpu_ids=gpu_ids, num_padded=num_padded)
@@ -331,15 +377,13 @@ def run_test(T, E, topk, unit_size=UNIT_SIZE, max_tokens=None):
     print(f"  [moe_buf_zeroed] {'OK' if moe_buf_zero else 'FAIL'}")
     passed &= moe_buf_zero
 
-    # --- Benchmark ---
+    # --- Benchmark (opt-in via MOE_SORTING_BENCH=1) ---
     gpu_time_us = None
-    if passed:
-        # Warmup
+    if passed and RUN_BENCH:
         for _ in range(WARMUP_ITERS):
             _call_flydsl(topk_ids, topk_weights, E, model_dim=4096, topk=topk, unit_size=unit_size)
         torch.cuda.synchronize()
 
-        # Timed runs
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
         start.record()
@@ -548,7 +592,9 @@ def run_test_ep(T, E, topk, mask_ratio=0.5, unit_size=UNIT_SIZE):
     passed &= nv_ok
 
     num_padded = ref_nvalid[0].item()
-    passed &= check_sorted_ids(ref_ids, gpu_ids, num_padded, topk, T)
+    passed &= check_sorted_ids(
+        ref_ids, gpu_ids, num_padded, topk, T, topk_ids=topk_ids, gpu_eids=gpu_eids, unit_size=unit_size
+    )
     passed &= check_sorted_weights(ref_w, gpu_w, ref_ids, topk, T, gpu_ids=gpu_ids, num_padded=num_padded)
     passed &= check_expert_ids(ref_eids, gpu_eids)
 

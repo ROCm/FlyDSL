@@ -1243,7 +1243,11 @@ def compile_moe_sorting_prefill(
                     )
                     chunk_mask = tid_valid_expert.select(chunk_mask, c_zero)
                     padded = (chunk_mask == c_zero).select(c_zero, padded)
-                _lds_store_raw(cumsum_mr, padded, ArithValue(expert_idx + c_one).index_cast(T.index))
+                raw_store_idx = expert_idx + c_one
+                oob = raw_store_idx >= fx.Int32(k4_smem_cols)
+                safe_store_idx = oob.select(c_zero, raw_store_idx)
+                safe_store_val = oob.select(c_zero, padded)
+                _lds_store_raw(cumsum_mr, safe_store_val, ArithValue(safe_store_idx).index_cast(T.index))
             gpu.barrier()
 
             # Step 2: Prefix sum over cumsum LDS. When E <= K4_BLOCK (256),
@@ -1890,8 +1894,8 @@ def launch_moe_sorting_prefill_path(
 ):
     """Low-level launcher for prefill path via HBM workspace.
 
-    For small T (<=512): fused P0_v2 (clear+scatter+count) + K4.
-    For large T: 4 separate kernels K1+K2+K3+K4.
+    For small T (<=2048): fused P0_v2 (clear+scatter+count) + K4.
+    For large T (>2048): 4 separate kernels K1+K2+K3+K4.
 
     Uses AOT-compiled dispatch after the first call for each sub-kernel
     to bypass JIT overhead.
