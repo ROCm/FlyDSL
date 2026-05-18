@@ -407,7 +407,7 @@ def compile_moe_sorting_decode(
                 ps_safe_ix = ArithValue(ps_valid.select(ps_eid + c_one_i32, c_zero_i32)).index_cast(T.index)
                 ps_val = ps_valid.select(_lds_load(cumsum_mr, ps_safe_ix), c_zero_i32)
                 _lds_store(cumdup_mr, ps_val, ps_safe_ix)
-            _lds_store(cumdup_mr, is_t0.select(c_zero_i32, _lds_load(cumdup_mr, c_zero_i32)), c_zero_i32)
+            _lds_store(cumdup_mr, c_zero_i32, c_zero_i32)
             gpu.barrier()
 
             # DPP prefix sum — all NUM_WAVES waves active
@@ -447,7 +447,7 @@ def compile_moe_sorting_decode(
                 gpu.barrier()
 
             # cumdup[0] = 0
-            _lds_store(cumdup_mr, is_t0.select(c_zero_i32, _lds_load(cumdup_mr, c_zero_i32)), c_zero_i32)
+            _lds_store(cumdup_mr, c_zero_i32, c_zero_i32)
             gpu.barrier()
 
             # Write num_valid_ids from cumdup[E]
@@ -478,7 +478,7 @@ def compile_moe_sorting_decode(
                     ml_val = ml_valid.select(ml_mask, c_zero_i32)
                     ml_ix = ArithValue(ml_valid.select(ml_eid + c_one_i32, c_zero_i32)).index_cast(T.index)
                     _lds_store(cumdup_mr, ml_val, ml_ix)
-                _lds_store(cumdup_mr, is_t0.select(c_zero_i32, _lds_load(cumdup_mr, c_zero_i32)), c_zero_i32)
+                _lds_store(cumdup_mr, c_zero_i32, c_zero_i32)
                 gpu.barrier()
 
                 # All-wave DPP prefix sum over mask values in cumdup
@@ -516,7 +516,7 @@ def compile_moe_sorting_decode(
                             prev_m = new_m
                     gpu.barrier()
 
-                _lds_store(cumdup_mr, is_t0.select(c_zero_i32, _lds_load(cumdup_mr, c_zero_i32)), c_zero_i32)
+                _lds_store(cumdup_mr, c_zero_i32, c_zero_i32)
                 gpu.barrier()
             else:
                 # No mask: cumdup[eid] = eid (identity mapping)
