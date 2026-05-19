@@ -70,8 +70,7 @@ def _ds_read_tr16_b64_imm(result_type, addr_i32, imm_offset=0):
     raw = llvm.inline_asm(
         raw_type,
         [_llvm_value(addr_i32)],
-        f"ds_read_b64_tr_b16 $0, $1 offset:{imm}\n"
-        "s_waitcnt lgkmcnt(0)",
+        f"ds_read_b64_tr_b16 $0, $1 offset:{imm}\n",
         "=v,v,~{memory}",
         has_side_effects=True,
     )
@@ -539,7 +538,7 @@ def build_flash_attn_opus_module(
             Matches gqa_d128_kernel_template.hpp's
             `sched_barrier_pairs<Pairs, VALU_CNT, Group>()` (lines 18-23).
             """
-            for _ in range(pairs):
+            for _ in range_constexpr(pairs):
                 rocdl.sched_group_barrier(_MFMA_MASK, 1, group)
                 rocdl.sched_group_barrier(_VALU_MASK, valu_cnt, group)
 
@@ -549,7 +548,7 @@ def build_flash_attn_opus_module(
             Matches gqa_d128_kernel_template.hpp's
             `sched_barrier_exp_pairs<Pairs, EXP_CNT, Group>()` (lines 25-30).
             """
-            for _ in range(pairs):
+            for _ in range_constexpr(pairs):
                 rocdl.sched_group_barrier(_MFMA_MASK, 1, group)
                 rocdl.sched_group_barrier(_EXP_MASK, exp_cnt, group)
 
@@ -1383,10 +1382,9 @@ def build_flash_attn_opus_module(
             for dc in range_constexpr(D_CHUNKS):
                 o_accs[dc] = mfma_acc(v_pk[dc], p_pk, o_accs[dc])
 
+            #         D_ACC row_max = attn_row_max<T>(v_s[1]);
             s_lo_a = [Vec(v_s_1_lo_raw)[r] for r in range_constexpr(16)]
             s_hi_a = [Vec(v_s_1_hi_raw)[r] for r in range_constexpr(16)]
-
-            #         D_ACC row_max = attn_row_max<T>(v_s[1]);
             m_tile_max_a = attn_row_max(s_lo_a, s_hi_a)
 
             #         sched_barrier_pairs<4, 5, 2>();
@@ -1420,7 +1418,14 @@ def build_flash_attn_opus_module(
             #         asm volatile("" : "+v"(v_s[1]) ::);
             #         attn_exp2_slice<T, 0, s_half_len>(v_s[1]);
             o_accs, v_s_1_lo_partial, v_s_1_hi_partial = _cluster_tail_interleaved(
-                o_accs, v_packs_a, v_p_lo_a, v_p_hi_a, s_lo_a, s_hi_a, m_row, 2
+                o_accs,
+                v_packs_a,
+                v_p_lo_a,
+                v_p_hi_a,
+                s_lo_a,
+                s_hi_a,
+                m_row,
+                2,
             )
 
             #         sched_barrier_pairs<6, 5, 2>();
@@ -1459,7 +1464,9 @@ def build_flash_attn_opus_module(
             #         v_p = opus::cast<D_ATTN>(v_s[1]);
             #         asm volatile("" : "+v"(v_p) ::);
             v_s_1_hi_full = attn_exp2_second_half_slice(v_s_1_hi_partial)
-            v_s_1_lo_list = [Vec(v_s_1_lo_partial)[r] for r in range_constexpr(16)]
+            v_s_1_lo_list = [
+                Vec(v_s_1_lo_partial)[r] for r in range_constexpr(16)
+            ]
             tile_sum_b = attn_sum_parts(v_s_1_lo_list, v_s_1_hi_full)
             l_row = _fadd(l_row, tile_sum_b)
 
