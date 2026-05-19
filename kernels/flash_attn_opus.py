@@ -105,6 +105,12 @@ def _waitcnt_vm_n(n):
     rocdl.s_waitcnt(val)
 
 
+def _read_exec_i64():
+    """Read the current wave exec mask, matching Clang's builtin lowering."""
+    true_i1 = fx.Boolean(True).ir_value()
+    return rocdl.ballot(T.i64, true_i1)
+
+
 def _lds_alias_scope_array(names):
     attrs = [
         f'#llvm.alias_scope<id = "{name}", domain = {_LDS_ALIAS_DOMAIN}>'
@@ -439,7 +445,6 @@ def build_flash_attn_opus_module(
         c_neg_inf = fx.Float32(float("-inf"))
         # c_neg_inf = fx.Float32(float(-1e30))
         c_zero_f = fx.Float32(0.0)
-        c_one_f = fx.Float32(1.0)
         head_dim_f32 = fx.Float32(fx.Int32(head_dim_runtime))
         c_log2e_f = fx.Float32(_LOG2E)
         c_sm_scale_log2e = fx.Float32(
@@ -1064,6 +1069,39 @@ def build_flash_attn_opus_module(
             for dc in range_constexpr(D_CHUNKS):
                 o_accs[dc] = _fmul(Vec(o_accs[dc]), scale_vec)
 
+        def _lazy_rescale_o(o_accs, m_row, l_row, m_tile_max):
+            """OPUS lazy rescale: branch around exp2/O scaling when all lanes pass."""
+            m_diff = _fsub(m_tile_max, m_row)
+            below = ArithValue(fx.Float32(m_diff) <= c_eight_f)
+            ballot = rocdl.ballot(T.i64, _raw(below))
+            all_below = arith.cmpi(
+                arith.CmpIPredicate.eq,
+                _raw(ballot),
+                _read_exec_i64(),
+            )
+
+            current_values = [_raw(acc) for acc in o_accs] + [_raw(m_row), _raw(l_row)]
+            result_types = [value.type for value in current_values]
+            if_op = scf.IfOp(all_below, result_types, has_else=True, loc=ir.Location.unknown())
+
+            with ir.InsertionPoint(if_op.regions[0].blocks[0]):
+                scf.YieldOp(current_values)
+
+            if len(if_op.regions[1].blocks) == 0:
+                if_op.regions[1].blocks.append(*[])
+            with ir.InsertionPoint(if_op.regions[1].blocks[0]):
+                corr = rocdl.exp2(T.f32, _raw(_fsub(m_row, m_tile_max)))
+                scaled_accs = list(o_accs)
+                _scale_o(scaled_accs, corr)
+                scaled_l_row = _fmul(l_row, corr)
+                scf.YieldOp(
+                    [_raw(acc) for acc in scaled_accs]
+                    + [_raw(m_tile_max), _raw(scaled_l_row)]
+                )
+
+            results = list(if_op.results)
+            return results[:D_CHUNKS], results[D_CHUNKS], results[D_CHUNKS + 1]
+
         def _waitcnt_lgkm_0_vm_n(n):
             """Combined: lgkmcnt(0) + vmcnt(n)."""
             val = (
@@ -1277,23 +1315,16 @@ def build_flash_attn_opus_module(
             #             l_row *= rescale_m;
             #             m_row = row_max;
             #         }
-            m_diff_a = _fsub(m_tile_max_a, m_row)
             if const_expr(OPUS_LAZY_RESCALE):
-                below_a = ArithValue(fx.Float32(m_diff_a) <= c_eight_f)
-                ballot_a = rocdl.ballot(T.i64, _raw(below_a))
-                all_below_a = fx.Int64(ballot_a) == fx.Int64(-1)
-                ab_a = ArithValue(all_below_a)
-                m_new_a = ab_a.select(m_row, _fmax(m_row, m_tile_max_a))
-                corr_a = rocdl.exp2(T.f32, _raw(_fsub(m_row, m_new_a)))
-                eff_corr_a = ab_a.select(c_one_f, corr_a)
+                o_accs, m_row, l_row = _lazy_rescale_o(o_accs, m_row, l_row, m_tile_max_a)
             else:
                 m_new_a = _fmax(m_row, m_tile_max_a)
                 corr_a = rocdl.exp2(T.f32, _raw(_fsub(m_row, m_new_a)))
                 eff_corr_a = corr_a
 
-            _scale_o(o_accs, eff_corr_a)
-            l_row = _fmul(l_row, corr_a)
-            m_row = m_new_a
+                _scale_o(o_accs, eff_corr_a)
+                l_row = _fmul(l_row, corr_a)
+                m_row = m_new_a
 
             #         v_o = mma1.step_k(1_I, v_p, v_v, v_o);
             #         v_o = mma1.step_k(2_I, v_p, v_v, v_o);
@@ -1311,7 +1342,7 @@ def build_flash_attn_opus_module(
             #         attn_sub_row<T>(v_s[1], row_max);
             #         asm volatile("" : "+v"(v_s[1]) ::);
             #         attn_exp2_slice<T, 0, s_half_len>(v_s[1]);
-            s_lo_a, s_hi_a = attn_sub_row(s_lo_a, s_hi_a, m_new_a)
+            s_lo_a, s_hi_a = attn_sub_row(s_lo_a, s_hi_a, m_row)
             v_s_1_lo_partial = Vec.from_elements(s_lo_a, fx.Float32).ir_value()
             v_s_1_hi_partial = Vec.from_elements(s_hi_a, fx.Float32).ir_value()
             v_s_1_lo_partial, v_s_1_hi_partial = _anchor_pair(
@@ -1437,23 +1468,16 @@ def build_flash_attn_opus_module(
             #             l_row *= rescale_m;
             #             m_row = row_max;
             #         }
-            m_diff_b = _fsub(m_tile_max_b, m_row)
             if const_expr(OPUS_LAZY_RESCALE):
-                below_b = ArithValue(fx.Float32(m_diff_b) <= c_eight_f)
-                ballot_b = rocdl.ballot(T.i64, _raw(below_b))
-                all_below_b = fx.Int64(ballot_b) == fx.Int64(-1)
-                ab_b = ArithValue(all_below_b)
-                m_new_b = ab_b.select(m_row, _fmax(m_row, m_tile_max_b))
-                corr_b = rocdl.exp2(T.f32, _raw(_fsub(m_row, m_new_b)))
-                eff_corr_b = ab_b.select(c_one_f, corr_b)
+                o_accs, m_row, l_row = _lazy_rescale_o(o_accs, m_row, l_row, m_tile_max_b)
             else:
                 m_new_b = _fmax(m_row, m_tile_max_b)
                 corr_b = rocdl.exp2(T.f32, _raw(_fsub(m_row, m_new_b)))
                 eff_corr_b = corr_b
 
-            _scale_o(o_accs, eff_corr_b)
-            l_row = _fmul(l_row, corr_b)
-            m_row = m_new_b
+                _scale_o(o_accs, eff_corr_b)
+                l_row = _fmul(l_row, corr_b)
+                m_row = m_new_b
 
             #         v_o = mma1.step_k(1_I, v_p, v_v, v_o);
             #         v_o = mma1.step_k(2_I, v_p, v_v, v_o);
@@ -1471,7 +1495,7 @@ def build_flash_attn_opus_module(
             #         attn_sub_row<T>(v_s[0], row_max);
             #         asm volatile("" : "+v"(v_s[0]) ::);
             #         attn_exp2_slice<T, 0, s_half_len>(v_s[0]);
-            s_lo_b, s_hi_b = attn_sub_row(s_lo_b, s_hi_b, m_new_b)
+            s_lo_b, s_hi_b = attn_sub_row(s_lo_b, s_hi_b, m_row)
             v_s_0_lo_yield = Vec.from_elements(s_lo_b, fx.Float32).ir_value()
             v_s_0_hi_yield = Vec.from_elements(s_hi_b, fx.Float32).ir_value()
             v_s_0_lo_yield, v_s_0_hi_yield = _anchor_pair(

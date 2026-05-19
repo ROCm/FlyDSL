@@ -43,8 +43,8 @@ function run_flydsl_op {
     # export FLYDSL_RUNTIME_ENABLE_CACHE=1
     export FLYDSL_DUMP_IR=1
     export FLYDSL_DUMP_DIR=./flydsl_dump
-
     export FLYDSL_ENABLE_OPUS_PATH=1
+
     # python tests/kernels/test_flash_opus_attn.py --causal --dtype bf16 --batch 16 --num_heads 64 --num_kv_heads 64 --seq_len 8192 --head_dim 128 --iters 100
 
 
