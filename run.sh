@@ -70,8 +70,8 @@ function run_flydsl_op {
     # python tests/kernels/test_flash_opus_attn.py --causal --dtype bf16 --batch 16 --num_heads 64 --num_kv_heads 8 --seq_len 8192 --head_dim 128 --iters 100
 
     # python tests/kernels/test_flash_opus_attn.py --warmup 5 --iters 100 --compare
-    # python tests/kernels/test_flash_opus_attn.py --dtype bf16 --batch 16 --num_heads 64 --num_kv_heads 64 --seq_len 8192 --head_dim 128 --iters 100 --compare
-    # python tests/kernels/test_flash_opus_attn.py --dtype bf16 --batch 16 --num_heads 64 --num_kv_heads 8 --seq_len 8192 --head_dim 128 --iters 100 --compare
+    # python tests/kernels/test_flash_opus_attn.py --causal --dtype bf16 --batch 16 --num_heads 64 --num_kv_heads 64 --seq_len 8192 --head_dim 128 --iters 100 --compare
+    # python tests/kernels/test_flash_opus_attn.py --causal --dtype bf16 --batch 16 --num_heads 64 --num_kv_heads 8 --seq_len 8192 --head_dim 128 --iters 100 --compare
     # python tests/kernels/test_flash_opus_attn.py --causal --dtype bf16 --batch 16 --num_heads 64 --num_kv_heads 64 --seq_len 8192 --head_dim 128 --iters 100 --compare
 
 

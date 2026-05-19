@@ -899,7 +899,7 @@ def build_flash_attn_opus_module(
                     ).ir_value()
             return packs
 
-        def _gemm0(k_lo, k_hi):
+        def mma0(k_lo, k_hi):
             v_s_lo = c_zero_v16f32
             v_s_hi = c_zero_v16f32
             for ks in range_constexpr(K_STEPS_QK):
@@ -1009,7 +1009,7 @@ def build_flash_attn_opus_module(
             lhs, rhs = reduction_pair(m)
             return _fmax(lhs, rhs)
 
-        def attn_sub_row(s_lo, s_hi, m_row):
+        def _attn_sub_row_pair(s_lo, s_hi, m_row):
             lo_sub = []
             hi_sub = []
             for r in range_constexpr(16):
@@ -1024,92 +1024,40 @@ def build_flash_attn_opus_module(
                 lo_partial.append(rocdl.exp2(T.f32, _raw(s_lo[r])))
             return lo_partial, list(s_hi)
 
-        def _pv_step_k_slice(o_accs, v_packs, v_p_lo, v_p_hi, actual, dc_start, dc_count):
-            v_pk = v_packs[actual]
-            if const_expr(actual < 2):
-                p_pk = v_p_lo[actual]
+        def mma1_step_k(step, v_p, v_v, v_o):
+            v_p_lo, v_p_hi = v_p
+            v_pk = v_v[step]
+            if const_expr(step < 2):
+                p_pk = v_p_lo[step]
             else:
-                p_pk = v_p_hi[actual - 2]
-            for rel in range_constexpr(dc_count):
-                dc = dc_start + rel
-                o_accs[dc] = mfma_acc(v_pk[dc], p_pk, o_accs[dc])
-            return o_accs
+                p_pk = v_p_hi[step - 2]
+            for dc in range_constexpr(D_CHUNKS):
+                v_o[dc] = mfma_acc(v_pk[dc], p_pk, v_o[dc])
+            return v_o
 
-        def _sub_row_flat_slice(lo_sub, hi_sub, s_lo, s_hi, m_row, start, count):
-            for rel in range_constexpr(count):
-                flat = start + rel
-                if const_expr(flat < 16):
-                    lo_sub[flat] = _fsub(s_lo[flat], m_row)
-                else:
-                    hi_idx = flat - 16
-                    hi_sub[hi_idx] = _fsub(s_hi[hi_idx], m_row)
+        def attn_sub_row(v_s, row_max):
+            s_lo, s_hi = v_s
+            return _attn_sub_row_pair(s_lo, s_hi, row_max)
 
-        def _exp2_lo_slice(lo_partial, s_lo, start, count):
-            for rel in range_constexpr(count):
-                idx = start + rel
-                lo_partial[idx] = rocdl.exp2(T.f32, _raw(s_lo[idx]))
+        def _anchor_v_s(v_s):
+            s_lo, s_hi = v_s
+            lo_vec = Vec.from_elements(s_lo, fx.Float32).ir_value()
+            hi_vec = Vec.from_elements(s_hi, fx.Float32).ir_value()
+            return _anchor_pair(lo_vec, hi_vec)
 
-        def _sched_barrier_pair(group):
-            rocdl.sched_group_barrier(_MFMA_MASK, 1, group)
-            rocdl.sched_group_barrier(_VALU_MASK, 5, group)
+        def anchor_v_s_1(v_s):
+            return _anchor_v_s(v_s)
 
-        def _sched_barrier_exp_pair(group):
-            rocdl.sched_group_barrier(_MFMA_MASK, 1, group)
-            rocdl.sched_group_barrier(_EXP_MASK, 3, group)
+        def anchor_v_s_0(v_s):
+            return _anchor_v_s(v_s)
 
-        def _cluster_tail_interleaved(o_accs, v_packs, v_p_lo, v_p_hi, s_lo, s_hi, m_row, group):
-            lo_sub = [None] * 16
-            hi_sub = [None] * 16
-
-            _pv_step_k_slice(o_accs, v_packs, v_p_lo, v_p_hi, 1, 0, 2)
-            _sub_row_flat_slice(lo_sub, hi_sub, s_lo, s_hi, m_row, 0, 5)
-            _sched_barrier_pair(group)
-
-            _pv_step_k_slice(o_accs, v_packs, v_p_lo, v_p_hi, 1, 2, 2)
-            _sub_row_flat_slice(lo_sub, hi_sub, s_lo, s_hi, m_row, 5, 5)
-            _sched_barrier_pair(group)
-
-            _pv_step_k_slice(o_accs, v_packs, v_p_lo, v_p_hi, 2, 0, 2)
-            _sub_row_flat_slice(lo_sub, hi_sub, s_lo, s_hi, m_row, 10, 5)
-            _sched_barrier_pair(group)
-
-            _pv_step_k_slice(o_accs, v_packs, v_p_lo, v_p_hi, 2, 2, 2)
-            _sub_row_flat_slice(lo_sub, hi_sub, s_lo, s_hi, m_row, 15, 5)
-            _sched_barrier_pair(group)
-
-            _pv_step_k_slice(o_accs, v_packs, v_p_lo, v_p_hi, 3, 0, 2)
-            _sub_row_flat_slice(lo_sub, hi_sub, s_lo, s_hi, m_row, 20, 5)
-            _sched_barrier_pair(group)
-
-            _pv_step_k_slice(o_accs, v_packs, v_p_lo, v_p_hi, 3, 2, 2)
-            _sub_row_flat_slice(lo_sub, hi_sub, s_lo, s_hi, m_row, 25, 5)
-            _sched_barrier_pair(group)
-
-            _sub_row_flat_slice(lo_sub, hi_sub, s_lo, s_hi, m_row, 30, 2)
-
-            lo_vec = Vec.from_elements(lo_sub, fx.Float32).ir_value()
-            hi_vec = Vec.from_elements(hi_sub, fx.Float32).ir_value()
-            lo_vec, hi_vec = _anchor_pair(lo_vec, hi_vec)
-            s_lo = [Vec(lo_vec)[r] for r in range_constexpr(16)]
-            s_hi = [Vec(hi_vec)[r] for r in range_constexpr(16)]
-
-            lo_partial = [None] * 16
-            _exp2_lo_slice(lo_partial, s_lo, 0, 3)
-            _sched_barrier_exp_pair(group)
-            _exp2_lo_slice(lo_partial, s_lo, 3, 3)
-            _sched_barrier_exp_pair(group)
-            _exp2_lo_slice(lo_partial, s_lo, 6, 3)
-            _sched_barrier_exp_pair(group)
-            _exp2_lo_slice(lo_partial, s_lo, 9, 3)
-            _sched_barrier_exp_pair(group)
-            _exp2_lo_slice(lo_partial, s_lo, 12, 3)
-            _sched_barrier_exp_pair(group)
-            _exp2_lo_slice(lo_partial, s_lo, 15, 1)
-            _sched_barrier_exp_pair(group)
-
-            lo_partial_vec = Vec.from_elements(lo_partial, fx.Float32).ir_value()
-            hi_partial_vec = Vec.from_elements(s_hi, fx.Float32).ir_value()
-            return o_accs, lo_partial_vec, hi_partial_vec
+        def attn_exp2_slice(v_s, start, length):
+            s_lo_vec, s_hi_vec = v_s
+            s_lo = [Vec(s_lo_vec)[r] for r in range_constexpr(16)]
+            lo_partial = []
+            for r in range_constexpr(16):
+                lo_partial.append(rocdl.exp2(T.f32, _raw(s_lo[r])))
+            return Vec.from_elements(lo_partial, fx.Float32).ir_value(), s_hi_vec
 
         def attn_sub_row_first_half_exp2_slice(s_lo, s_hi, m_row):
             lo_partial = []
@@ -1247,7 +1195,7 @@ def build_flash_attn_opus_module(
             rocdl.s_barrier()
 
         #     v_s[0] = mma0(v_q, v_k);
-        v_s_0_lo_raw, v_s_0_hi_raw = _gemm0(k_pl_pro, k_ph_pro)
+        v_s_0_lo_raw, v_s_0_hi_raw = mma0(k_pl_pro, k_ph_pro)
         #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
 
@@ -1266,7 +1214,7 @@ def build_flash_attn_opus_module(
         m_row_pro = attn_row_max(s_lo_pro, s_hi_pro)
 
         #     attn_sub_row<T>(v_s[0], m_row);
-        s_lo_pro, s_hi_pro = attn_sub_row(s_lo_pro, s_hi_pro, m_row_pro)
+        s_lo_pro, s_hi_pro = _attn_sub_row_pair(s_lo_pro, s_hi_pro, m_row_pro)
         v_s_0_lo_init = Vec.from_elements(s_lo_pro, fx.Float32).ir_value()
         v_s_0_hi_init = Vec.from_elements(s_hi_pro, fx.Float32).ir_value()
         #     asm volatile("" : "+v"(v_s[0]) ::);
@@ -1331,7 +1279,7 @@ def build_flash_attn_opus_module(
 
             #         // Cluster 1:
             #         v_s[1] = mma0(v_q, v_k);
-            v_s_1_lo_raw, v_s_1_hi_raw = _gemm0(k_pl_a, k_ph_a)
+            v_s_1_lo_raw, v_s_1_hi_raw = mma0(k_pl_a, k_ph_a)
             #         attn_exp2_slice<T, s_half_len, s_half_len>(v_s[0]);
             #         l_row += attn_sum<T>(v_s[0]);
             #         v_p = opus::cast<D_ATTN>(v_s[0]);
@@ -1377,10 +1325,11 @@ def build_flash_attn_opus_module(
                 rocdl.s_setprio(1)
 
             #         v_o = mma1.step_k(0_I, v_p, v_v, v_o);
-            v_pk = v_packs_a[0]
-            p_pk = v_p_lo_a[0]
-            for dc in range_constexpr(D_CHUNKS):
-                o_accs[dc] = mfma_acc(v_pk[dc], p_pk, o_accs[dc])
+            v_p = (v_p_lo_a, v_p_hi_a)
+            v_v = v_packs_a
+            v_o = o_accs
+            v_o = mma1_step_k(0, v_p, v_v, v_o)
+            o_accs = v_o
 
             #         D_ACC row_max = attn_row_max<T>(v_s[1]);
             s_lo_a = [Vec(v_s_1_lo_raw)[r] for r in range_constexpr(16)]
@@ -1406,7 +1355,6 @@ def build_flash_attn_opus_module(
                 m_new_a = _fmax(m_row, m_tile_max_a)
                 corr_a = rocdl.exp2(T.f32, _raw(_fsub(m_row, m_new_a)))
                 eff_corr_a = corr_a
-
                 _scale_o(o_accs, eff_corr_a)
                 l_row = _fmul(l_row, corr_a)
                 m_row = m_new_a
@@ -1417,19 +1365,23 @@ def build_flash_attn_opus_module(
             #         attn_sub_row<T>(v_s[1], row_max);
             #         asm volatile("" : "+v"(v_s[1]) ::);
             #         attn_exp2_slice<T, 0, s_half_len>(v_s[1]);
-            o_accs, v_s_1_lo_partial, v_s_1_hi_partial = _cluster_tail_interleaved(
-                o_accs,
-                v_packs_a,
-                v_p_lo_a,
-                v_p_hi_a,
-                s_lo_a,
-                s_hi_a,
-                m_row,
-                2,
-            )
+            v_p = (v_p_lo_a, v_p_hi_a)
+            v_v = v_packs_a
+            v_o = o_accs
+            v_s_1 = (s_lo_a, s_hi_a)
+            v_o = mma1_step_k(1, v_p, v_v, v_o)
+            v_o = mma1_step_k(2, v_p, v_v, v_o)
+            v_o = mma1_step_k(3, v_p, v_v, v_o)
+            v_s_1 = attn_sub_row(v_s_1, m_row)
+            v_s_1 = anchor_v_s_1(v_s_1)
+            v_s_1 = attn_exp2_slice(v_s_1, 0, 16)
+            o_accs = v_o
+            v_s_1_lo_partial, v_s_1_hi_partial = v_s_1
 
             #         sched_barrier_pairs<6, 5, 2>();
+            _sched_barrier_pairs(6, 5, 2)
             #         sched_barrier_exp_pairs<6, 3, 2>();
+            _sched_barrier_exp_pairs(6, 3, 2)
             #         __builtin_amdgcn_s_setprio(0);
             if const_expr(OPUS_SETPRIO):
                 rocdl.s_setprio(0)
@@ -1458,7 +1410,7 @@ def build_flash_attn_opus_module(
 
             #         // Cluster 5:
             #         v_s[0] = mma0(v_q, v_k);
-            v_s_0_lo_raw_b, v_s_0_hi_raw_b = _gemm0(k_pl_b, k_ph_b)
+            v_s_0_lo_raw_b, v_s_0_hi_raw_b = mma0(k_pl_b, k_ph_b)
             #         attn_exp2_slice<T, s_half_len, s_half_len>(v_s[1]);
             #         l_row += attn_sum<T>(v_s[1]);
             #         v_p = opus::cast<D_ATTN>(v_s[1]);
@@ -1521,10 +1473,11 @@ def build_flash_attn_opus_module(
                 rocdl.s_setprio(1)
 
             #         v_o = mma1.step_k(0_I, v_p, v_v, v_o);
-            v_pk = v_packs_b[0]
-            p_pk = v_p_lo_b[0]
-            for dc in range_constexpr(D_CHUNKS):
-                o_accs[dc] = mfma_acc(v_pk[dc], p_pk, o_accs[dc])
+            v_p = (v_p_lo_b, v_p_hi_b)
+            v_v = v_packs_b
+            v_o = o_accs
+            v_o = mma1_step_k(0, v_p, v_v, v_o)
+            o_accs = v_o
 
             #         row_max = attn_row_max<T>(v_s[0]);
             m_tile_max_b = attn_row_max(s_lo_b, s_hi_b)
@@ -1559,12 +1512,23 @@ def build_flash_attn_opus_module(
             #         attn_sub_row<T>(v_s[0], row_max);
             #         asm volatile("" : "+v"(v_s[0]) ::);
             #         attn_exp2_slice<T, 0, s_half_len>(v_s[0]);
-            o_accs, v_s_0_lo_yield, v_s_0_hi_yield = _cluster_tail_interleaved(
-                o_accs, v_packs_b, v_p_lo_b, v_p_hi_b, s_lo_b, s_hi_b, m_row, 4
-            )
+            v_p = (v_p_lo_b, v_p_hi_b)
+            v_v = v_packs_b
+            v_o = o_accs
+            v_s_0 = (s_lo_b, s_hi_b)
+            v_o = mma1_step_k(1, v_p, v_v, v_o)
+            v_o = mma1_step_k(2, v_p, v_v, v_o)
+            v_o = mma1_step_k(3, v_p, v_v, v_o)
+            v_s_0 = attn_sub_row(v_s_0, m_row)
+            v_s_0 = anchor_v_s_0(v_s_0)
+            v_s_0 = attn_exp2_slice(v_s_0, 0, 16)
+            o_accs = v_o
+            v_s_0_lo_yield, v_s_0_hi_yield = v_s_0
 
             #         sched_barrier_pairs<6, 5, 4>();
+            _sched_barrier_pairs(6, 5, 4)
             #         sched_barrier_exp_pairs<6, 3, 4>();
+            _sched_barrier_exp_pairs(6, 3, 4)
             #         __builtin_amdgcn_s_setprio(0);
             if const_expr(OPUS_SETPRIO):
                 rocdl.s_setprio(0)
@@ -1607,7 +1571,7 @@ def build_flash_attn_opus_module(
 
         #     // Cluster 1:
         #     v_s[1] = mma0(v_q, v_k);
-        v_s_1_lo_e, v_s_1_hi_e = _gemm0(k_pl_e0, k_ph_e0)
+        v_s_1_lo_e, v_s_1_hi_e = mma0(k_pl_e0, k_ph_e0)
         #     attn_exp2_slice<T, s_half_len, s_half_len>(v_s[0]);
         #     v_p = opus::cast<D_ATTN>(v_s[0]);
         #     asm volatile("" : "+v"(v_p) ::);
@@ -1687,7 +1651,7 @@ def build_flash_attn_opus_module(
         #     attn_sub_row<T>(v_s[1], row_max);
         #     asm volatile("" : "+v"(v_s[1]) ::);
         #     attn_exp2_slice<T, 0, s_half_len>(v_s[1]);
-        s_lo_e1, s_hi_e1 = attn_sub_row(s_lo_e1, s_hi_e1, row_max_e3)
+        s_lo_e1, s_hi_e1 = _attn_sub_row_pair(s_lo_e1, s_hi_e1, row_max_e3)
         v_s_1_lo_e_partial = Vec.from_elements(s_lo_e1, fx.Float32).ir_value()
         v_s_1_hi_e_partial = Vec.from_elements(s_hi_e1, fx.Float32).ir_value()
         v_s_1_lo_e_partial, v_s_1_hi_e_partial = _anchor_pair(
@@ -1738,7 +1702,7 @@ def build_flash_attn_opus_module(
 
         #     // Cluster 5:
         #     v_s[0] = mma0(v_q, v_k);
-        v_s_0_lo_e5, v_s_0_hi_e5 = _gemm0(k_pl_e4, k_ph_e4)
+        v_s_0_lo_e5, v_s_0_hi_e5 = mma0(k_pl_e4, k_ph_e4)
         #     l_row *= rescale_m;
         l_row = _fmul(l_row, rescale_e3)
         #     attn_exp2_slice<T, s_half_len, s_half_len>(v_s[1]);
@@ -1818,7 +1782,7 @@ def build_flash_attn_opus_module(
         #     attn_sub_row<T>(v_s[0], row_max);
         #     asm volatile("" : "+v"(v_s[0]) ::);
         #     attn_exp2_slice<T, 0, s_half_len>(v_s[0]);
-        s_lo_e5, s_hi_e5 = attn_sub_row(s_lo_e5, s_hi_e5, row_max_e7)
+        s_lo_e5, s_hi_e5 = _attn_sub_row_pair(s_lo_e5, s_hi_e5, row_max_e7)
         v_s_0_lo_e_partial = Vec.from_elements(s_lo_e5, fx.Float32).ir_value()
         v_s_0_hi_e_partial = Vec.from_elements(s_hi_e5, fx.Float32).ir_value()
         v_s_0_lo_e_partial, v_s_0_hi_e_partial = _anchor_pair(
@@ -1868,7 +1832,7 @@ def build_flash_attn_opus_module(
 
         #     // Cluster 9:
         #     v_s[1] = mma0(v_q, v_k);
-        v_s_1_lo_e9, v_s_1_hi_e9 = _gemm0(k_pl_e8, k_ph_e8)
+        v_s_1_lo_e9, v_s_1_hi_e9 = mma0(k_pl_e8, k_ph_e8)
         #     l_row *= rescale_m;
         l_row = _fmul(l_row, rescale_e7)
         #     attn_exp2_slice<T, s_half_len, s_half_len>(v_s[0]);
@@ -1945,7 +1909,7 @@ def build_flash_attn_opus_module(
         #     attn_sub_row<T>(v_s[1], row_max);
         #     asm volatile("" : "+v"(v_s[1]) ::);
         #     attn_exp2_slice<T, 0, s_half_len>(v_s[1]);
-        s_lo_e9, s_hi_e9 = attn_sub_row(s_lo_e9, s_hi_e9, row_max_e11)
+        s_lo_e9, s_hi_e9 = _attn_sub_row_pair(s_lo_e9, s_hi_e9, row_max_e11)
         v_s_1_lo_e11 = Vec.from_elements(s_lo_e9, fx.Float32).ir_value()
         v_s_1_hi_e11 = Vec.from_elements(s_hi_e9, fx.Float32).ir_value()
         v_s_1_lo_e11, v_s_1_hi_e11 = _anchor_pair(
