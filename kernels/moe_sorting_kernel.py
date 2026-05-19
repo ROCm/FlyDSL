@@ -1327,8 +1327,10 @@ def compile_moe_sorting_prefill(
             # Step 3: Write sorted_expert_ids for THIS expert (using local_idx_p23 for EP)
             # Store local_idx to LDS cumsum[tid], barrier, read cumsum[my_expert]
             _lds_store_raw(cumsum_mr, local_idx_p23, ArithValue(tid).index_cast(T.index))
-            # For E > K4_BLOCK: thread 0 writes local_idx for extra experts
+            # For E > K4_BLOCK: thread 0 extends local_idx using cumsum[K4_BLOCK-1].
+            # Barrier ensures all threads have written before thread 0 reads.
             if E > K4_BLOCK:
+                gpu.barrier()
                 is_t0_extra3 = tid == c_zero
                 _if_t0_e3 = scf.IfOp(is_t0_extra3.ir_value())
                 with _if_then(_if_t0_e3):
