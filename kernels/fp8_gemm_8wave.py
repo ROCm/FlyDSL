@@ -9,9 +9,7 @@ Algorithm derived from HipKittens FP8_8wave
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import range_constexpr, rocdl
-from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from kernels.fp8_gemm_utils import (
     G2SLoader,
     Mfma16x16x128,
@@ -45,27 +43,20 @@ def compile_fp8_gemm_8w(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: 
     N_LDS_STEPS_B = LDS_BLOCK_N // 64
     N_LDS_ROUNDS = max(N_LDS_STEPS_A, N_LDS_STEPS_B)
 
-    A_lds_cur0_alloc = SmemAllocator(None, "gfx950", "A_lds_cur_0")
-    A_lds_cur1_alloc = SmemAllocator(None, "gfx950", "A_lds_cur_1")
-    A_lds_next0_alloc = SmemAllocator(None, "gfx950", "A_lds_next_0")
-    A_lds_next1_alloc = SmemAllocator(None, "gfx950", "A_lds_next_1")
-    B_lds_cur0_alloc = SmemAllocator(None, "gfx950", "B_lds_cur_0")
-    B_lds_cur1_alloc = SmemAllocator(None, "gfx950", "B_lds_cur_1")
-    B_lds_next0_alloc = SmemAllocator(None, "gfx950", "B_lds_next_0")
-    B_lds_next1_alloc = SmemAllocator(None, "gfx950", "B_lds_next_1")
-
     # half size
     a_lds_size = LDS_BLOCK_M * BLOCK_K
     b_lds_size = LDS_BLOCK_N * BLOCK_K
 
-    A_lds_cur0_alloc.ptr = a_lds_size
-    A_lds_cur1_alloc.ptr = a_lds_size
-    A_lds_next0_alloc.ptr = a_lds_size
-    A_lds_next1_alloc.ptr = a_lds_size
-    B_lds_cur0_alloc.ptr = b_lds_size
-    B_lds_cur1_alloc.ptr = b_lds_size
-    B_lds_next0_alloc.ptr = b_lds_size
-    B_lds_next1_alloc.ptr = b_lds_size
+    @fx.struct
+    class SharedStorage:
+        A_lds_cur_0: fx.Array[fx.Float8E4M3FN, a_lds_size, 16]
+        A_lds_cur_1: fx.Array[fx.Float8E4M3FN, a_lds_size, 16]
+        A_lds_next_0: fx.Array[fx.Float8E4M3FN, a_lds_size, 16]
+        A_lds_next_1: fx.Array[fx.Float8E4M3FN, a_lds_size, 16]
+        B_lds_cur_0: fx.Array[fx.Float8E4M3FN, b_lds_size, 16]
+        B_lds_cur_1: fx.Array[fx.Float8E4M3FN, b_lds_size, 16]
+        B_lds_next_0: fx.Array[fx.Float8E4M3FN, b_lds_size, 16]
+        B_lds_next_1: fx.Array[fx.Float8E4M3FN, b_lds_size, 16]
 
     @flyc.kernel(known_block_size=[512, 1, 1])
     def kernel_gemm(
@@ -77,15 +68,15 @@ def compile_fp8_gemm_8w(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: 
     ):
         F8_IR_t = fx.Float8E4M3FN.ir_type
 
-        a_cur0 = SmemPtr(A_lds_cur0_alloc.get_base(), 0, F8_IR_t, shape=(a_lds_size,)).get()
-        a_cur1 = SmemPtr(A_lds_cur1_alloc.get_base(), 0, F8_IR_t, shape=(a_lds_size,)).get()
-        a_next0 = SmemPtr(A_lds_next0_alloc.get_base(), 0, F8_IR_t, shape=(a_lds_size,)).get()
-        a_next1 = SmemPtr(A_lds_next1_alloc.get_base(), 0, F8_IR_t, shape=(a_lds_size,)).get()
-
-        b_cur0 = SmemPtr(B_lds_cur0_alloc.get_base(), 0, F8_IR_t, shape=(b_lds_size,)).get()
-        b_cur1 = SmemPtr(B_lds_cur1_alloc.get_base(), 0, F8_IR_t, shape=(b_lds_size,)).get()
-        b_next0 = SmemPtr(B_lds_next0_alloc.get_base(), 0, F8_IR_t, shape=(b_lds_size,)).get()
-        b_next1 = SmemPtr(B_lds_next1_alloc.get_base(), 0, F8_IR_t, shape=(b_lds_size,)).get()
+        lds = fx.SharedAllocator().allocate(SharedStorage).peek()
+        a_cur0 = lds.A_lds_cur_0
+        a_cur1 = lds.A_lds_cur_1
+        a_next0 = lds.A_lds_next_0
+        a_next1 = lds.A_lds_next_1
+        b_cur0 = lds.B_lds_cur_0
+        b_cur1 = lds.B_lds_cur_1
+        b_next0 = lds.B_lds_next_0
+        b_next1 = lds.B_lds_next_1
 
         lane_id = fx.thread_idx.x % 64
         wave_id = fx.thread_idx.x // 64
@@ -268,26 +259,6 @@ def compile_fp8_gemm_8w(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: 
         B_scale: fx.Tensor,
         stream: fx.Stream,
     ):
-        from flydsl._mlir import ir
-
-        A_lds_cur0_alloc.finalized = False
-        A_lds_cur1_alloc.finalized = False
-        A_lds_next0_alloc.finalized = False
-        A_lds_next1_alloc.finalized = False
-        B_lds_cur0_alloc.finalized = False
-        B_lds_cur1_alloc.finalized = False
-        B_lds_next0_alloc.finalized = False
-        B_lds_next1_alloc.finalized = False
-        ctx = CompilationContext.get_current()
-        with ir.InsertionPoint(ctx.gpu_module_body):
-            A_lds_cur0_alloc.finalize()
-            A_lds_cur1_alloc.finalize()
-            A_lds_next0_alloc.finalize()
-            A_lds_next1_alloc.finalize()
-            B_lds_cur0_alloc.finalize()
-            B_lds_cur1_alloc.finalize()
-            B_lds_next0_alloc.finalize()
-            B_lds_next1_alloc.finalize()
         grid_x = ((M + BLOCK_M - 1) // BLOCK_M) * N_BLOCKS
         kernel_gemm(
             A,

@@ -16,13 +16,9 @@ import math
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl._mlir import ir
-from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, range_constexpr, vector
 from flydsl.expr.arith import ArithValue
 from flydsl.expr.typing import Int32, T
-from flydsl.runtime.device import get_rocm_arch as get_hip_arch
-from flydsl.utils.smem_allocator import SmemAllocator
 from kernels.kernels_common import dtype_to_elem_type, get_warp_size
 
 KERNEL_NAME = "topk_gating_softmax_kernel"
@@ -73,8 +69,6 @@ def build_topk_gating_softmax_module(
         A @flyc.jit launcher function with signature
         ``(gating, weights, indices, tei, num_tokens, *, stream)``.
     """
-    arch = get_hip_arch()
-
     elem_bits = 32 if dtype_str == "f32" else 16
 
     VPT, THREADS_PER_TOKEN = _pick_layout(num_experts)
@@ -105,7 +99,6 @@ def build_topk_gating_softmax_module(
     ATOMS_PER_THREAD = VPT // ELEMS_PER_ATOM
 
     # No shared memory used — every reduction stays inside a sub-warp lane group.
-    allocator = SmemAllocator(None, arch=arch)
 
     @flyc.kernel
     def topk_gating_softmax_kernel(
@@ -349,11 +342,6 @@ def build_topk_gating_softmax_module(
         num_tokens_in: fx.Int32,
         stream: fx.Stream = fx.Stream(None),
     ):
-        allocator.finalized = False
-        ctx = CompilationContext.get_current()
-        with ir.InsertionPoint(ctx.gpu_module_body):
-            allocator.finalize()
-
         # grid_x = ceil(num_tokens / TOKENS_PER_BLOCK).
         # We use the (n - 1) // tpb + 1 form (valid for n >= 1) since the
         # additive (n + tpb - 1) form was producing the wrong grid count

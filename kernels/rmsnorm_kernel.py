@@ -14,14 +14,11 @@ import math
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl._mlir.ir import InsertionPoint
-from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, const_expr, gpu, range_constexpr
 from flydsl.expr import math as fmath
 from flydsl.expr.typing import Vector as Vec
 from flydsl.expr.vector import ReductionOp, full
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
-from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from kernels.kernels_common import dtype_to_elem_type, get_warp_size
 
 KERNEL_NAME = "rmsnorm"
@@ -33,14 +30,13 @@ WARP_SIZE = get_warp_size()
 VEC_WIDTH = 8
 
 
-def _make_reduction_allocator(arch: str, red_slots: int):
-    allocator = SmemAllocator(None, arch=arch)
-    f32_bytes = 4
-    red_offset = allocator._align(allocator.ptr, 16)
-    allocator.ptr = red_offset + red_slots * f32_bytes
-    red2_offset = allocator._align(allocator.ptr, 16)
-    allocator.ptr = red2_offset + red_slots * f32_bytes
-    return allocator, red_offset, red2_offset
+def _make_reduction_storage(red_slots: int):
+    @fx.struct
+    class SharedStorage:
+        s_red: fx.Array[fx.Float32, red_slots, 16]
+        s_red2: fx.Array[fx.Float32, red_slots, 16]
+
+    return SharedStorage
 
 
 def _load_scalar(copy_atom, elem_dtype, divided_tensor, index):
@@ -114,7 +110,7 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
     RED_SLOTS = max(1, (BLOCK_THREADS + WARP_SIZE - 1) // WARP_SIZE)
     elem_bits = 32 if dtype_str == "f32" else 16
 
-    allocator, red_offset, red2_offset = _make_reduction_allocator(arch, RED_SLOTS)
+    SharedStorage = _make_reduction_storage(RED_SLOTS)
 
     @flyc.kernel
     def rmsnorm_kernel(
@@ -131,11 +127,9 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
         eps_c = EPS
         n_float = float(N)
 
-        base_ptr = allocator.get_base()
-        s_red = SmemPtr(base_ptr, red_offset, fx.Float32.ir_type, shape=(RED_SLOTS,))
-        s_red2 = SmemPtr(base_ptr, red2_offset, fx.Float32.ir_type, shape=(RED_SLOTS,))
-        s_red.get()
-        s_red2.get()
+        lds = fx.SharedAllocator().allocate(SharedStorage).peek()
+        s_red = lds.s_red.view(fx.make_layout(RED_SLOTS, 1))
+        s_red2 = lds.s_red2.view(fx.make_layout(RED_SLOTS, 1))
 
         def wave_reduce_add(x):
             w = x
@@ -161,26 +155,26 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
             w1 = wave_reduce_add(val1)
 
             if lane == 0:
-                SmemPtr.store(s_red, w0, [wave])
-                SmemPtr.store(s_red2, w1, [wave])
+                fx.memref_store(w0, s_red, wave)
+                fx.memref_store(w1, s_red2, wave)
             gpu.barrier()
 
             if wave == 0:
                 in_range = lane < RED_SLOTS
                 lane_safe = in_range.select(lane, 0)
-                v0 = SmemPtr.load(s_red, [lane_safe])
-                v1 = SmemPtr.load(s_red2, [lane_safe])
+                v0 = fx.memref_load(s_red, lane_safe)
+                v1 = fx.memref_load(s_red2, lane_safe)
                 ww0 = in_range.select(v0, 0.0)
                 ww1 = in_range.select(v1, 0.0)
                 ww0 = wave_reduce_add(ww0)
                 ww1 = wave_reduce_add(ww1)
 
                 if lane == 0:
-                    SmemPtr.store(s_red, ww0, [0])
-                    SmemPtr.store(s_red2, ww1, [0])
+                    fx.memref_store(ww0, s_red, 0)
+                    fx.memref_store(ww1, s_red2, 0)
             gpu.barrier()
 
-            return SmemPtr.load(s_red, [0]), SmemPtr.load(s_red2, [0])
+            return fx.memref_load(s_red, 0), fx.memref_load(s_red2, 0)
 
         # ==================================================================
         # Fast path: N is a multiple of tile_cols
@@ -293,11 +287,6 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
         m_in: fx.Int32,
         stream: fx.Stream = fx.Stream(None),
     ):
-        allocator.finalized = False
-        ctx = CompilationContext.get_current()
-        with InsertionPoint(ctx.gpu_module_body):
-            allocator.finalize()
-
         launcher = rmsnorm_kernel(Input, Gamma, Gamma, Output)
         launcher.launch(
             grid=(m_in, 1, 1),
@@ -413,7 +402,7 @@ def build_fused_add_rmsnorm_module(M: int, N: int, dtype_str: str):
     RED_SLOTS = max(1, (BLOCK_THREADS + WARP_SIZE - 1) // WARP_SIZE)
     elem_bits = 32 if dtype_str == "f32" else 16
 
-    allocator, red_offset, red2_offset = _make_reduction_allocator(arch, RED_SLOTS)
+    SharedStorage = _make_reduction_storage(RED_SLOTS)
 
     @flyc.kernel
     def fused_add_rmsnorm_kernel(
@@ -431,11 +420,9 @@ def build_fused_add_rmsnorm_module(M: int, N: int, dtype_str: str):
         eps_c = EPS
         n_float = float(N)
 
-        base_ptr = allocator.get_base()
-        s_red = SmemPtr(base_ptr, red_offset, fx.Float32.ir_type, shape=(RED_SLOTS,))
-        s_red2 = SmemPtr(base_ptr, red2_offset, fx.Float32.ir_type, shape=(RED_SLOTS,))
-        s_red.get()
-        s_red2.get()
+        lds = fx.SharedAllocator().allocate(SharedStorage).peek()
+        s_red = lds.s_red.view(fx.make_layout(RED_SLOTS, 1))
+        s_red2 = lds.s_red2.view(fx.make_layout(RED_SLOTS, 1))
 
         def wave_reduce_add(x):
             w = x
@@ -461,26 +448,26 @@ def build_fused_add_rmsnorm_module(M: int, N: int, dtype_str: str):
             w1 = wave_reduce_add(val1)
 
             if lane == 0:
-                SmemPtr.store(s_red, w0, [wave])
-                SmemPtr.store(s_red2, w1, [wave])
+                fx.memref_store(w0, s_red, wave)
+                fx.memref_store(w1, s_red2, wave)
             gpu.barrier()
 
             if wave == 0:
                 in_range = lane < RED_SLOTS
                 lane_safe = in_range.select(lane, 0)
-                v0 = SmemPtr.load(s_red, [lane_safe])
-                v1 = SmemPtr.load(s_red2, [lane_safe])
+                v0 = fx.memref_load(s_red, lane_safe)
+                v1 = fx.memref_load(s_red2, lane_safe)
                 ww0 = in_range.select(v0, 0.0)
                 ww1 = in_range.select(v1, 0.0)
                 ww0 = wave_reduce_add(ww0)
                 ww1 = wave_reduce_add(ww1)
 
                 if lane == 0:
-                    SmemPtr.store(s_red, ww0, [0])
-                    SmemPtr.store(s_red2, ww1, [0])
+                    fx.memref_store(ww0, s_red, 0)
+                    fx.memref_store(ww1, s_red2, 0)
             gpu.barrier()
 
-            return SmemPtr.load(s_red, [0]), SmemPtr.load(s_red2, [0])
+            return fx.memref_load(s_red, 0), fx.memref_load(s_red2, 0)
 
         # ==================================================================
         # Fast path: N is a multiple of tile_cols
@@ -611,11 +598,6 @@ def build_fused_add_rmsnorm_module(M: int, N: int, dtype_str: str):
         m_in: fx.Int32,
         stream: fx.Stream = fx.Stream(None),
     ):
-        allocator.finalized = False
-        ctx = CompilationContext.get_current()
-        with InsertionPoint(ctx.gpu_module_body):
-            allocator.finalize()
-
         launcher = fused_add_rmsnorm_kernel(Input, ResidualIn, Gamma, Output, ResidualOut)
         launcher.launch(
             grid=(m_in, 1, 1),
@@ -653,7 +635,7 @@ def _build_rmsnorm_quant_module(
     elem_bits = 32 if dtype_str == "f32" else 16
     quant_dtype_max = _quant_dtype_max(quant_dtype_str)
 
-    allocator, red_offset, red2_offset = _make_reduction_allocator(arch, RED_SLOTS)
+    SharedStorage = _make_reduction_storage(RED_SLOTS)
 
     @flyc.kernel
     def rmsnorm_quant_kernel(
@@ -677,11 +659,9 @@ def _build_rmsnorm_quant_module(
         c_neg_inf = fx.Float32(float("-inf"))
         c_dtype_max = fx.Float32(quant_dtype_max)
 
-        base_ptr = allocator.get_base()
-        s_red = SmemPtr(base_ptr, red_offset, fx.Float32.ir_type, shape=(RED_SLOTS,))
-        s_red2 = SmemPtr(base_ptr, red2_offset, fx.Float32.ir_type, shape=(RED_SLOTS,))
-        s_red.get()
-        s_red2.get()
+        lds = fx.SharedAllocator().allocate(SharedStorage).peek()
+        s_red = lds.s_red.view(fx.make_layout(RED_SLOTS, 1))
+        s_red2 = lds.s_red2.view(fx.make_layout(RED_SLOTS, 1))
 
         YScale_buf = fx.rocdl.make_buffer_tensor(YScale)
         yscale_div = fx.logical_divide(YScale_buf, fx.make_layout(1, 1))
@@ -719,26 +699,26 @@ def _build_rmsnorm_quant_module(
             w1 = wave_reduce_add(val1)
 
             if lane == 0:
-                SmemPtr.store(s_red, w0, [wave])
-                SmemPtr.store(s_red2, w1, [wave])
+                fx.memref_store(w0, s_red, wave)
+                fx.memref_store(w1, s_red2, wave)
             gpu.barrier()
 
             if wave == 0:
                 in_range = lane < RED_SLOTS
                 lane_safe = in_range.select(lane, 0)
-                v0 = SmemPtr.load(s_red, [lane_safe])
-                v1 = SmemPtr.load(s_red2, [lane_safe])
+                v0 = fx.memref_load(s_red, lane_safe)
+                v1 = fx.memref_load(s_red2, lane_safe)
                 ww0 = in_range.select(v0, c_zero_f)
                 ww1 = in_range.select(v1, c_zero_f)
                 ww0 = wave_reduce_add(ww0)
                 ww1 = wave_reduce_add(ww1)
 
                 if lane == 0:
-                    SmemPtr.store(s_red, ww0, [0])
-                    SmemPtr.store(s_red2, ww1, [0])
+                    fx.memref_store(ww0, s_red, 0)
+                    fx.memref_store(ww1, s_red2, 0)
             gpu.barrier()
 
-            return SmemPtr.load(s_red, [0]), SmemPtr.load(s_red2, [0])
+            return fx.memref_load(s_red, 0), fx.memref_load(s_red2, 0)
 
         def block_reduce_max(val):
             if const_expr(RED_SLOTS == 1):
@@ -749,20 +729,20 @@ def _build_rmsnorm_quant_module(
 
             w = wave_reduce_max(val)
             if lane == 0:
-                SmemPtr.store(s_red, w, [wave])
+                fx.memref_store(w, s_red, wave)
             gpu.barrier()
 
             if wave == 0:
                 in_range = lane < RED_SLOTS
                 lane_safe = in_range.select(lane, 0)
-                v = SmemPtr.load(s_red, [lane_safe])
+                v = fx.memref_load(s_red, lane_safe)
                 ww = in_range.select(v, c_neg_inf)
                 ww = wave_reduce_max(ww)
                 if lane == 0:
-                    SmemPtr.store(s_red, ww, [0])
+                    fx.memref_store(ww, s_red, 0)
             gpu.barrier()
 
-            return SmemPtr.load(s_red, [0])
+            return fx.memref_load(s_red, 0)
 
         # ==================================================================
         # Fast path: N is a multiple of tile_cols
@@ -954,11 +934,6 @@ def _build_rmsnorm_quant_module(
             m_in: fx.Int32,
             stream: fx.Stream = fx.Stream(None),
         ):
-            allocator.finalized = False
-            ctx = CompilationContext.get_current()
-            with InsertionPoint(ctx.gpu_module_body):
-                allocator.finalize()
-
             launcher = rmsnorm_quant_kernel(Input, Gamma, XScale, YScale, Output)
             launcher.launch(
                 grid=(m_in, 1, 1),
@@ -979,11 +954,6 @@ def _build_rmsnorm_quant_module(
             m_in: fx.Int32,
             stream: fx.Stream = fx.Stream(None),
         ):
-            allocator.finalized = False
-            ctx = CompilationContext.get_current()
-            with InsertionPoint(ctx.gpu_module_body):
-                allocator.finalize()
-
             launcher = rmsnorm_quant_kernel(Input, Gamma, Gamma, YScale, Output)
             launcher.launch(
                 grid=(m_in, 1, 1),
@@ -1040,7 +1010,7 @@ def _build_fused_add_rmsnorm_quant_module(
     elem_bits = 32 if dtype_str == "f32" else 16
     quant_dtype_max = _quant_dtype_max(quant_dtype_str)
 
-    allocator, red_offset, red2_offset = _make_reduction_allocator(arch, RED_SLOTS)
+    SharedStorage = _make_reduction_storage(RED_SLOTS)
 
     @flyc.kernel
     def fused_add_rmsnorm_quant_kernel(
@@ -1066,11 +1036,9 @@ def _build_fused_add_rmsnorm_quant_module(
         c_neg_inf = fx.Float32(float("-inf"))
         c_dtype_max = fx.Float32(quant_dtype_max)
 
-        base_ptr = allocator.get_base()
-        s_red = SmemPtr(base_ptr, red_offset, fx.Float32.ir_type, shape=(RED_SLOTS,))
-        s_red2 = SmemPtr(base_ptr, red2_offset, fx.Float32.ir_type, shape=(RED_SLOTS,))
-        s_red.get()
-        s_red2.get()
+        lds = fx.SharedAllocator().allocate(SharedStorage).peek()
+        s_red = lds.s_red.view(fx.make_layout(RED_SLOTS, 1))
+        s_red2 = lds.s_red2.view(fx.make_layout(RED_SLOTS, 1))
 
         YScale_buf = fx.rocdl.make_buffer_tensor(YScale)
         yscale_div = fx.logical_divide(YScale_buf, fx.make_layout(1, 1))
@@ -1108,26 +1076,26 @@ def _build_fused_add_rmsnorm_quant_module(
             w1 = wave_reduce_add(val1)
 
             if lane == 0:
-                SmemPtr.store(s_red, w0, [wave])
-                SmemPtr.store(s_red2, w1, [wave])
+                fx.memref_store(w0, s_red, wave)
+                fx.memref_store(w1, s_red2, wave)
             gpu.barrier()
 
             if wave == 0:
                 in_range = lane < RED_SLOTS
                 lane_safe = in_range.select(lane, 0)
-                v0 = SmemPtr.load(s_red, [lane_safe])
-                v1 = SmemPtr.load(s_red2, [lane_safe])
+                v0 = fx.memref_load(s_red, lane_safe)
+                v1 = fx.memref_load(s_red2, lane_safe)
                 ww0 = in_range.select(v0, c_zero_f)
                 ww1 = in_range.select(v1, c_zero_f)
                 ww0 = wave_reduce_add(ww0)
                 ww1 = wave_reduce_add(ww1)
 
                 if lane == 0:
-                    SmemPtr.store(s_red, ww0, [0])
-                    SmemPtr.store(s_red2, ww1, [0])
+                    fx.memref_store(ww0, s_red, 0)
+                    fx.memref_store(ww1, s_red2, 0)
             gpu.barrier()
 
-            return SmemPtr.load(s_red, [0]), SmemPtr.load(s_red2, [0])
+            return fx.memref_load(s_red, 0), fx.memref_load(s_red2, 0)
 
         def block_reduce_max(val):
             if const_expr(RED_SLOTS == 1):
@@ -1138,20 +1106,20 @@ def _build_fused_add_rmsnorm_quant_module(
 
             w = wave_reduce_max(val)
             if lane == 0:
-                SmemPtr.store(s_red, w, [wave])
+                fx.memref_store(w, s_red, wave)
             gpu.barrier()
 
             if wave == 0:
                 in_range = lane < RED_SLOTS
                 lane_safe = in_range.select(lane, 0)
-                v = SmemPtr.load(s_red, [lane_safe])
+                v = fx.memref_load(s_red, lane_safe)
                 ww = in_range.select(v, c_neg_inf)
                 ww = wave_reduce_max(ww)
                 if lane == 0:
-                    SmemPtr.store(s_red, ww, [0])
+                    fx.memref_store(ww, s_red, 0)
             gpu.barrier()
 
-            return SmemPtr.load(s_red, [0])
+            return fx.memref_load(s_red, 0)
 
         # ==================================================================
         # Fast path: N is a multiple of tile_cols
@@ -1366,11 +1334,6 @@ def _build_fused_add_rmsnorm_quant_module(
             m_in: fx.Int32,
             stream: fx.Stream = fx.Stream(None),
         ):
-            allocator.finalized = False
-            ctx = CompilationContext.get_current()
-            with InsertionPoint(ctx.gpu_module_body):
-                allocator.finalize()
-
             launcher = fused_add_rmsnorm_quant_kernel(Input, ResidualIn, Gamma, XScale, YScale, Output, ResidualOut)
             launcher.launch(
                 grid=(m_in, 1, 1),
@@ -1393,11 +1356,6 @@ def _build_fused_add_rmsnorm_quant_module(
             m_in: fx.Int32,
             stream: fx.Stream = fx.Stream(None),
         ):
-            allocator.finalized = False
-            ctx = CompilationContext.get_current()
-            with InsertionPoint(ctx.gpu_module_body):
-                allocator.finalize()
-
             launcher = fused_add_rmsnorm_quant_kernel(Input, ResidualIn, Gamma, Gamma, YScale, Output, ResidualOut)
             launcher.launch(
                 grid=(m_in, 1, 1),
