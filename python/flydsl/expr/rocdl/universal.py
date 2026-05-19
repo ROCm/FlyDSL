@@ -2,7 +2,10 @@
 # Copyright (c) 2025 FlyDSL Project Contributors
 
 from ..._mlir import ir
-from ..._mlir._mlir_libs._mlirDialectsFlyROCDL import MmaOpGFX1250_WMMAType
+from ..._mlir._mlir_libs._mlirDialectsFlyROCDL import (
+    MmaOpGFX11_WMMAType,
+    MmaOpGFX1250_WMMAType,
+)
 from ..._mlir.dialects.fly import AtomicOp, PointerType
 from ..._mlir.dialects.fly_rocdl import (
     CopyOpCDNA3BufferAtomicType,
@@ -89,6 +92,14 @@ def WMMA(m, n, k, elem_ty_ab, elem_ty_acc=None):
         ty_acc = ir.F32Type.get()
     else:
         ty_acc = elem_ty_acc.ir_type if hasattr(elem_ty_acc, "ir_type") else elem_ty_acc
+
+    # Arch-aware dispatch: RDNA3 / RDNA3.5 (gfx11xx, including gfx1150/51/52)
+    # use the legacy v16-operand WMMA ABI; gfx1250 uses the new v8-operand ABI.
+    from ...runtime.device import get_rocm_arch
+
+    arch = (get_rocm_arch() or "").lower()
+    if arch.startswith("gfx11") or arch.startswith("gfx10"):
+        return MmaOpGFX11_WMMAType.get(m, n, k, ty_ab, ty_ab, ty_acc)
     return MmaOpGFX1250_WMMAType.get(m, n, k, ty_ab, ty_ab, ty_acc)
 
 
