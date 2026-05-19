@@ -667,16 +667,6 @@ def build_flash_attn_opus_module(
             )
             return llvm.extractvalue(T.i32, ret, [2]), llvm.extractvalue(T.i32, ret, [3])
 
-        def _anchor_vec(value):
-            val_ir = _llvm_value(value)
-            return llvm.inline_asm(
-                val_ir.type,
-                [val_ir],
-                "",
-                "=v,0",
-                has_side_effects=True,
-            )
-
         def _anchor_pair(lo, hi):
             lo_ir = _llvm_value(lo)
             hi_ir = _llvm_value(hi)
@@ -693,8 +683,31 @@ def build_flash_attn_opus_module(
                 llvm.extractvalue(hi_ir.type, ret, [1]),
             )
 
-        def _anchor_packs(packs):
-            return [_anchor_vec(p) for p in packs]
+        def _anchor_p_parts(lo_packs, hi_packs):
+            p_lo_all = _concat_vectors(lo_packs[0], lo_packs[1])
+            p_hi_all = _concat_vectors(hi_packs[0], hi_packs[1])
+            p_all = _concat_vectors(p_lo_all, p_hi_all)
+            p_all_ir = _llvm_value(p_all)
+            p_all_anchored = llvm.inline_asm(
+                p_all_ir.type,
+                [p_all_ir],
+                "",
+                "=v,0",
+                has_side_effects=True,
+            )
+            p_vec = Vec(p_all_anchored, (PV_K_STEPS * 2 * 8,), elem_dtype)
+            anchored_lo = []
+            anchored_hi = []
+            for pks in range_constexpr(PV_K_STEPS):
+                lo_base = pks * 8
+                hi_base = PV_K_STEPS * 8 + pks * 8
+                anchored_lo.append(
+                    p_vec.shuffle(p_vec, [lo_base + i for i in range(8)]).ir_value()
+                )
+                anchored_hi.append(
+                    p_vec.shuffle(p_vec, [hi_base + i for i in range(8)]).ir_value()
+                )
+            return anchored_lo, anchored_hi
 
         def _stagger_extra_barrier_if_one():
             """Emit `sched_barrier(0); s_barrier;` only when stagger == 1.
@@ -1205,8 +1218,7 @@ def build_flash_attn_opus_module(
             l_row = _fadd(l_row, tile_sum_a)
 
             v_p_lo_a, v_p_hi_a = cast_p_parts(v_s_0_lo_list, v_s_0_hi_full)
-            v_p_lo_a = _anchor_packs(v_p_lo_a)
-            v_p_hi_a = _anchor_packs(v_p_hi_a)
+            v_p_lo_a, v_p_hi_a = _anchor_p_parts(v_p_lo_a, v_p_hi_a)
 
             #         sched_barrier_exp_pairs<6, 3, 1>();
             _sched_barrier_exp_pairs(6, 3, 1)
@@ -1354,8 +1366,7 @@ def build_flash_attn_opus_module(
             l_row = _fadd(l_row, tile_sum_b)
 
             v_p_lo_b, v_p_hi_b = cast_p_parts(v_s_1_lo_list, v_s_1_hi_full)
-            v_p_lo_b = _anchor_packs(v_p_lo_b)
-            v_p_hi_b = _anchor_packs(v_p_hi_b)
+            v_p_lo_b, v_p_hi_b = _anchor_p_parts(v_p_lo_b, v_p_hi_b)
 
             #         sched_barrier_exp_pairs<6, 3, 3>();
             _sched_barrier_exp_pairs(6, 3, 3)
@@ -1529,8 +1540,7 @@ def build_flash_attn_opus_module(
         l_row = _fadd(l_row, tile_sum_e1)
 
         v_p_lo_e1, v_p_hi_e1 = cast_p_parts(v_s_0_lo_list_e1, v_s_0_hi_full_e1)
-        v_p_lo_e1 = _anchor_packs(v_p_lo_e1)
-        v_p_hi_e1 = _anchor_packs(v_p_hi_e1)
+        v_p_lo_e1, v_p_hi_e1 = _anchor_p_parts(v_p_lo_e1, v_p_hi_e1)
 
         #     sched_barrier_exp_pairs<6, 3, 5>();
         _sched_barrier_exp_pairs(6, 3, 5)
@@ -1663,8 +1673,7 @@ def build_flash_attn_opus_module(
         l_row = _fadd(l_row, tile_sum_e5)
 
         v_p_lo_e5, v_p_hi_e5 = cast_p_parts(v_s_1_lo_list_e5, v_s_1_hi_full_e5)
-        v_p_lo_e5 = _anchor_packs(v_p_lo_e5)
-        v_p_hi_e5 = _anchor_packs(v_p_hi_e5)
+        v_p_lo_e5, v_p_hi_e5 = _anchor_p_parts(v_p_lo_e5, v_p_hi_e5)
 
         #     sched_barrier_exp_pairs<6, 3, 7>();
         _sched_barrier_exp_pairs(6, 3, 7)
@@ -1794,8 +1803,7 @@ def build_flash_attn_opus_module(
         l_row = _fadd(l_row, tile_sum_e9)
 
         v_p_lo_e9, v_p_hi_e9 = cast_p_parts(v_s_0_lo_list_e9, v_s_0_hi_full_e9)
-        v_p_lo_e9 = _anchor_packs(v_p_lo_e9)
-        v_p_hi_e9 = _anchor_packs(v_p_hi_e9)
+        v_p_lo_e9, v_p_hi_e9 = _anchor_p_parts(v_p_lo_e9, v_p_hi_e9)
 
         #     sched_barrier_exp_pairs<6, 3, 9>();
         _sched_barrier_exp_pairs(6, 3, 9)
@@ -1889,8 +1897,7 @@ def build_flash_attn_opus_module(
         #     v_p = opus::cast<D_ATTN>(v_s[1]);
         #     asm volatile("" : "+v"(v_p) ::);
         v_p_lo_e11, v_p_hi_e11 = cast_p_parts(lo_e11, hi_e11_full)
-        v_p_lo_e11 = _anchor_packs(v_p_lo_e11)
-        v_p_hi_e11 = _anchor_packs(v_p_hi_e11)
+        v_p_lo_e11, v_p_hi_e11 = _anchor_p_parts(v_p_lo_e11, v_p_hi_e11)
 
         #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
