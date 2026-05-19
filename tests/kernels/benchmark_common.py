@@ -13,9 +13,8 @@ from __future__ import annotations
 
 import os
 import sys
-
 from dataclasses import dataclass
-from typing import Any, Callable, List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 # Make repo-root / src-layout packages importable when running as a module:
 #   python -m tests.kernels.benchmark_common
@@ -176,6 +175,7 @@ def _bench_flydsl_torch(*, op: str, M: int, N: int, dtype: str, warmup: int, ite
     style used by other tests (flydsl.compile + torch timing).
     """
     import torch
+
     import flydsl
 
     if not torch.cuda.is_available():
@@ -232,7 +232,12 @@ def _bench_flydsl_torch(*, op: str, M: int, N: int, dtype: str, warmup: int, ite
         )
 
     if op == "wmma_fp8_gemm":
-        from kernels.rdna_fp8_preshuffle_gemm import compile_fp8_gemm, preshuffle_b_fp8, fp8_quantize_per_token, fp8_quantize_per_channel
+        from kernels.rdna_fp8_preshuffle_gemm import (
+            compile_fp8_gemm,
+            fp8_quantize_per_channel,
+            fp8_quantize_per_token,
+            preshuffle_b_fp8,
+        )
 
         K = N  # square by default
         torch.manual_seed(42)
@@ -270,7 +275,7 @@ def _bench_aiter(*, op: str, impl: str, M: int, N: int, dtype: str, warmup: int,
     impl = (impl or "triton").lower()
 
     try:
-        import aiter
+        pass
     except Exception:
         return None
 
@@ -374,15 +379,15 @@ def run_wmma_sweep(
             print(f"ERROR: fp8_gemm {shape} FAILED: {e}")
             fail_count += 1
         try:
-            from kernels.rdna_fp8_preshuffle_gemm import fp8_quantize_per_token, fp8_quantize_per_channel
+            from kernels.rdna_fp8_preshuffle_gemm import fp8_quantize_per_channel, fp8_quantize_per_token
 
             A_f32 = torch.randn(M, K, device="cuda") * 0.1
             B_f32 = torch.randn(K, N, device="cuda") * 0.1
             A_fp8, sa = fp8_quantize_per_token(A_f32)
             B_fp8, sb = fp8_quantize_per_channel(B_f32)
             B_col = B_fp8.T.contiguous().T
-            sa_t = sa.to(device="cuda", dtype=torch.float32).unsqueeze(1).contiguous()   # (M, 1)
-            sb_t = sb.to(device="cuda", dtype=torch.float32).unsqueeze(0).contiguous()   # (1, N)
+            sa_t = sa.to(device="cuda", dtype=torch.float32).unsqueeze(1).contiguous()  # (M, 1)
+            sb_t = sb.to(device="cuda", dtype=torch.float32).unsqueeze(0).contiguous()  # (1, N)
             torch_us = bench_gpu_us_torch(
                 lambda: torch._scaled_mm(A_fp8, B_col, scale_a=sa_t, scale_b=sb_t, out_dtype=torch.bfloat16),
                 warmup=warmup,
@@ -405,18 +410,18 @@ BENCH_ITERS = 20
 
 BENCH_MODEL_CONFIGS = [
     # name,      model_dim, inter_dim, experts, topk
-    ("DeepSeek-TP", 7168,    256,   257,  9),
-    ("DeepSeek-EP", 7168,   2048,    32,  8),
-    ("GPToss",      2880,   2880,   128,  4),
+    ("DeepSeek-TP", 7168, 256, 257, 9),
+    ("DeepSeek-EP", 7168, 2048, 32, 8),
+    ("GPToss", 2880, 2880, 128, 4),
 ]
 
 BENCH_DTYPE_TARGET_TILES = {
     # dtype: (tile_m, target_n, target_k, wmma_k)
-    "fp4":  (16, 256, 512, 128),
-    "fp8":  (16, 256, 512, 128),
+    "fp4": (16, 256, 512, 128),
+    "fp8": (16, 256, 512, 128),
     "a8w4": (16, 256, 512, 128),
-    "fp16": (32,  64,  64,  32),
-    "bf16": (32,  64,  64,  32),
+    "fp16": (32, 64, 64, 32),
+    "bf16": (32, 64, 64, 32),
 }
 
 BENCH_DEFAULT_TOKEN_SWEEP = [1, 4, 8, 32, 64, 128, 256]
@@ -430,8 +435,8 @@ def bench_kernel_us(run_fn, warmup=10, iters=50, flush_l2=True, prep_fn=None):
     flush_buf = None
     if flush_l2:
         l2_bytes = getattr(
-            torch.cuda.get_device_properties(torch.cuda.current_device()),
-            "L2_cache_size", 4 * 1024 * 1024)
+            torch.cuda.get_device_properties(torch.cuda.current_device()), "L2_cache_size", 4 * 1024 * 1024
+        )
         alloc_bytes = max(l2_bytes * 2, 8 * 1024 * 1024)
         flush_buf = torch.empty(alloc_bytes, dtype=torch.uint8, device="cuda")
 
@@ -526,6 +531,7 @@ def bench_dtype_bpe(in_dtype):
 
 def bench_bytes_moved_stage1(tokens, topk, model_dim, inter_dim, experts, in_dtype):
     import math
+
     a_bpe, w_bpe, w_scale_bpg = bench_dtype_bpe(in_dtype)
     aE = min(tokens * topk, experts)
     b = 0
@@ -538,6 +544,7 @@ def bench_bytes_moved_stage1(tokens, topk, model_dim, inter_dim, experts, in_dty
 
 def bench_bytes_moved_stage2(tokens, topk, model_dim, inter_dim, experts, in_dtype):
     import math
+
     a_bpe, w_bpe, w_scale_bpg = bench_dtype_bpe(in_dtype)
     aE = min(tokens * topk, experts)
     b = 0
@@ -555,14 +562,14 @@ def bench_print_banner(text):
 
 
 def bench_print_stage_header():
-    print(f"{'Tokens':>7} {'M_eff':>7} {'Latency(us)':>12} {'TFLOPS':>9} "
-          f"{'BW(TB/s)':>10} {'Util%':>7} {'Status':>8}")
+    print(
+        f"{'Tokens':>7} {'M_eff':>7} {'Latency(us)':>12} {'TFLOPS':>9} " f"{'BW(TB/s)':>10} {'Util%':>7} {'Status':>8}"
+    )
     print("-" * 110)
 
 
 def bench_print_stage_row(tokens, m_eff, us, tflops, tbps, util_pct, status):
-    print(f"{tokens:>7} {m_eff:>7} {us:>10.1f}   {tflops:>8.2f} "
-          f"{tbps:>9.3f}  {util_pct:>6.1f}% {status:>8}")
+    print(f"{tokens:>7} {m_eff:>7} {us:>10.1f}   {tflops:>8.2f} " f"{tbps:>9.3f}  {util_pct:>6.1f}% {status:>8}")
 
 
 # ── MOE bench sweep system ─────────────────────────────────────────────────
@@ -577,28 +584,50 @@ def add_moe_bench_args(parser) -> None:
     Call this from the test script's ``if __name__ == '__main__':`` block so
     the user can ``python test_xxx.py --bench ...``.
     """
-    import argparse  # noqa: F811 – local import to avoid top-level dep
 
     bench_group = parser.add_argument_group(
         "benchmark sweep",
         "Options for --bench mode (sweep model configs × dtypes × token counts)",
     )
-    bench_group.add_argument("--bench", action="store_true", default=False,
-                             help="Run benchmark sweep mode instead of normal test mode.")
-    bench_group.add_argument("--bench-dtype", type=str, default=None,
-                             help="Comma-separated dtypes for bench (default: all keys in BENCH_DTYPE_TARGET_TILES).")
-    bench_group.add_argument("--bench-tokens", type=str, default=None,
-                             help="Comma-separated token counts for bench (default: 1,4,8,32,64,128,256).")
-    bench_group.add_argument("--bench-config", type=str, default=None,
-                             help="Config name filter for bench (DeepSeek-TP, DeepSeek-EP, GPToss).")
-    bench_group.add_argument("--bench-no-ref", action="store_true", default=False,
-                             help="Skip correctness reference check in bench mode (pure perf).")
-    bench_group.add_argument("--bench-warmup", type=int, default=BENCH_WARMUP,
-                             help=f"Warmup iterations for bench (default: {BENCH_WARMUP}).")
-    bench_group.add_argument("--bench-iters", type=int, default=BENCH_ITERS,
-                             help=f"Measurement iterations for bench (default: {BENCH_ITERS}).")
-    bench_group.add_argument("--bench-peak-tflops", type=float, default=0,
-                             help="Peak TFLOPS for utilization calculation in bench mode.")
+    bench_group.add_argument(
+        "--bench", action="store_true", default=False, help="Run benchmark sweep mode instead of normal test mode."
+    )
+    bench_group.add_argument(
+        "--bench-dtype",
+        type=str,
+        default=None,
+        help="Comma-separated dtypes for bench (default: all keys in BENCH_DTYPE_TARGET_TILES).",
+    )
+    bench_group.add_argument(
+        "--bench-tokens",
+        type=str,
+        default=None,
+        help="Comma-separated token counts for bench (default: 1,4,8,32,64,128,256).",
+    )
+    bench_group.add_argument(
+        "--bench-config",
+        type=str,
+        default=None,
+        help="Config name filter for bench (DeepSeek-TP, DeepSeek-EP, GPToss).",
+    )
+    bench_group.add_argument(
+        "--bench-no-ref",
+        action="store_true",
+        default=False,
+        help="Skip correctness reference check in bench mode (pure perf).",
+    )
+    bench_group.add_argument(
+        "--bench-warmup", type=int, default=BENCH_WARMUP, help=f"Warmup iterations for bench (default: {BENCH_WARMUP})."
+    )
+    bench_group.add_argument(
+        "--bench-iters",
+        type=int,
+        default=BENCH_ITERS,
+        help=f"Measurement iterations for bench (default: {BENCH_ITERS}).",
+    )
+    bench_group.add_argument(
+        "--bench-peak-tflops", type=float, default=0, help="Peak TFLOPS for utilization calculation in bench mode."
+    )
 
 
 def moe_bench_config(
@@ -640,7 +669,7 @@ def moe_bench_config(
     tiles = bench_resolve_tiles(in_dtype, model_dim, inter_dim)
     if tiles is None:
         bench_print_banner(f"{name}  |  {in_dtype}  |  dim={model_dim}  inter={inter_dim}")
-        print(f"  SKIP: no valid tile for this shape (WMMA_K alignment)")
+        print("  SKIP: no valid tile for this shape (WMMA_K alignment)")
         return
     tile_m, tile_n1, tile_k1, tile_n2, tile_k2 = tiles
 
@@ -665,14 +694,27 @@ def moe_bench_config(
         x, w1, w2, ids, wts, routing = setup_data_fn(tok, model_dim, inter_dim, experts, topk, tile_m)
         try:
             out1, us1 = stage1_fn(
-                tokens=tok, model_dim=model_dim, inter_dim=inter_dim,
-                experts=experts, topk=topk, in_dtype=in_dtype,
-                tile_m=tile_m, tile_n=tile_n1, tile_k=tile_k1,
-                doweight_stage1=False, seed=0,
-                num_iters=iters, num_warmup=warmup,
-                x_fp32_in=x, w1_fp32_in=w1, w2_fp32_in=w2,
-                topk_ids_in=ids, topk_weights_in=wts, routing_in=routing,
-                return_outputs=True, skip_ref=(not check_ref),
+                tokens=tok,
+                model_dim=model_dim,
+                inter_dim=inter_dim,
+                experts=experts,
+                topk=topk,
+                in_dtype=in_dtype,
+                tile_m=tile_m,
+                tile_n=tile_n1,
+                tile_k=tile_k1,
+                doweight_stage1=False,
+                seed=0,
+                num_iters=iters,
+                num_warmup=warmup,
+                x_fp32_in=x,
+                w1_fp32_in=w1,
+                w2_fp32_in=w2,
+                topk_ids_in=ids,
+                topk_weights_in=wts,
+                routing_in=routing,
+                return_outputs=True,
+                skip_ref=(not check_ref),
                 use_tdm_store=bool(use_tdm_store),
                 inst_prefetch=bool(inst_prefetch),
                 wave_specialized_tdm=bool(wave_specialized_tdm),
@@ -704,15 +746,30 @@ def moe_bench_config(
         a2_q, a2_scale = prepare_a2_fn(out1, tok, topk, inter_dim, in_dtype)
         try:
             _, us2 = stage2_fn(
-                tokens=tok, model_dim=model_dim, inter_dim=inter_dim,
-                experts=experts, topk=topk, in_dtype=in_dtype, out_dtype="f16",
-                tile_m=tile_m, tile_n=tile_n2, tile_k=tile_k2,
-                doweight_stage1=False, seed=0,
-                num_iters=iters, num_warmup=warmup,
-                x_fp32_in=x, w1_fp32_in=w1, w2_fp32_in=w2,
-                topk_ids_in=ids, topk_weights_in=wts, routing_in=routing,
-                a2_fp8_in=a2_q, a2_scale_in=a2_scale,
-                return_outputs=True, skip_ref=(not check_ref),
+                tokens=tok,
+                model_dim=model_dim,
+                inter_dim=inter_dim,
+                experts=experts,
+                topk=topk,
+                in_dtype=in_dtype,
+                out_dtype="f16",
+                tile_m=tile_m,
+                tile_n=tile_n2,
+                tile_k=tile_k2,
+                doweight_stage1=False,
+                seed=0,
+                num_iters=iters,
+                num_warmup=warmup,
+                x_fp32_in=x,
+                w1_fp32_in=w1,
+                w2_fp32_in=w2,
+                topk_ids_in=ids,
+                topk_weights_in=wts,
+                routing_in=routing,
+                a2_fp8_in=a2_q,
+                a2_scale_in=a2_scale,
+                return_outputs=True,
+                skip_ref=(not check_ref),
                 use_reduce=False,
                 use_tdm_store=bool(use_tdm_store),
                 inst_prefetch=bool(inst_prefetch),
@@ -742,15 +799,30 @@ def moe_bench_config(
         a2_q, a2_scale = prepare_a2_fn(out1, tok, topk, inter_dim, in_dtype)
         try:
             _, us2r = stage2_fn(
-                tokens=tok, model_dim=model_dim, inter_dim=inter_dim,
-                experts=experts, topk=topk, in_dtype=in_dtype, out_dtype="f16",
-                tile_m=tile_m, tile_n=tile_n2, tile_k=tile_k2,
-                doweight_stage1=False, seed=0,
-                num_iters=iters, num_warmup=warmup,
-                x_fp32_in=x, w1_fp32_in=w1, w2_fp32_in=w2,
-                topk_ids_in=ids, topk_weights_in=wts, routing_in=routing,
-                a2_fp8_in=a2_q, a2_scale_in=a2_scale,
-                return_outputs=True, skip_ref=(not check_ref),
+                tokens=tok,
+                model_dim=model_dim,
+                inter_dim=inter_dim,
+                experts=experts,
+                topk=topk,
+                in_dtype=in_dtype,
+                out_dtype="f16",
+                tile_m=tile_m,
+                tile_n=tile_n2,
+                tile_k=tile_k2,
+                doweight_stage1=False,
+                seed=0,
+                num_iters=iters,
+                num_warmup=warmup,
+                x_fp32_in=x,
+                w1_fp32_in=w1,
+                w2_fp32_in=w2,
+                topk_ids_in=ids,
+                topk_weights_in=wts,
+                routing_in=routing,
+                a2_fp8_in=a2_q,
+                a2_scale_in=a2_scale,
+                return_outputs=True,
+                skip_ref=(not check_ref),
                 use_reduce=True,
                 use_tdm_store=bool(use_tdm_store),
                 inst_prefetch=bool(inst_prefetch),
@@ -793,6 +865,7 @@ def moe_bench_main(
         Kernel-specific callables (see ``moe_bench_config`` for signatures).
     """
     import time
+
     import torch
 
     os.environ["FLYDSL_RUNTIME_ENABLE_CACHE"] = "1"
@@ -801,11 +874,7 @@ def moe_bench_main(
     iters = args.bench_iters
 
     dtypes = args.bench_dtype.split(",") if args.bench_dtype else list(BENCH_DTYPE_TARGET_TILES.keys())
-    token_list = (
-        [int(t) for t in args.bench_tokens.split(",")]
-        if args.bench_tokens
-        else BENCH_DEFAULT_TOKEN_SWEEP
-    )
+    token_list = [int(t) for t in args.bench_tokens.split(",")] if args.bench_tokens else BENCH_DEFAULT_TOKEN_SWEEP
     check_ref = not args.bench_no_ref
 
     print("=" * 110)
@@ -830,20 +899,30 @@ def moe_bench_main(
                 continue
             try:
                 moe_bench_config(
-                    cfg_name, mdim, idim, exp, topk,
-                    dt, token_list, check_ref, args.bench_peak_tflops,
+                    cfg_name,
+                    mdim,
+                    idim,
+                    exp,
+                    topk,
+                    dt,
+                    token_list,
+                    check_ref,
+                    args.bench_peak_tflops,
                     stage1_fn=stage1_fn,
                     stage2_fn=stage2_fn,
                     setup_data_fn=setup_data_fn,
                     prepare_a2_fn=prepare_a2_fn,
-                    warmup=warmup, iters=iters,
+                    warmup=warmup,
+                    iters=iters,
                     use_tdm_store=bool(args.use_tdm_store),
                     inst_prefetch=bool(args.inst_prefetch),
                     wave_specialized_tdm=bool(args.wave_specialized_tdm),
                 )
             except Exception as e:
                 print(f"\n  [ERROR] {cfg_name}/{dt}: {e}")
-                import traceback; traceback.print_exc()
+                import traceback
+
+                traceback.print_exc()
 
     elapsed = time.time() - t_start
     bench_print_banner(f"Done in {elapsed:.1f}s")

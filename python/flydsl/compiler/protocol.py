@@ -31,7 +31,7 @@ class Storable(Protocol):
     @classmethod
     def __peek_from_ptr__(cls, ptr: ir.Value): ...
     @classmethod
-    def __poke_into_ptr__(cls, ptr: ir.Value, value): ...
+    def __poke_into_ptr__(cls, ptr: ir.Value, value) -> None: ...
 
 
 def get_ir_types(obj) -> List[ir.Type]:
@@ -112,7 +112,8 @@ def peek_from_ptr(dsl_type, ptr: ir.Value):
     raise TypeError(f"type {dsl_type} does not implement the Storable protocol")
 
 
-def poke_into_ptr(dsl_type, ptr: ir.Value, value):
+def poke_into_ptr(dsl_type, ptr: ir.Value, value) -> None:
     if hasattr(dsl_type, "__poke_into_ptr__"):
-        return dsl_type.__poke_into_ptr__(ptr, value)
+        dsl_type.__poke_into_ptr__(ptr, value)
+        return
     raise TypeError(f"type {dsl_type} does not implement the Storable protocol")

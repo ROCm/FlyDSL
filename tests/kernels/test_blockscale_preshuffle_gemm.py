@@ -5,18 +5,18 @@
 
 """Blockscale Preshuffle GEMM Test (FP8 A8W8, per-block scales)."""
 
+import logging
 import os
 import sys
-import logging
-import flydsl.compiler as flyc
 
+import pytest
 import torch
 import torch.nn.functional as F
-import pytest
+
+import flydsl.compiler as flyc
 
 pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
 
-from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 _PYTHON_CANDIDATES = [
@@ -27,10 +27,10 @@ for _p in reversed(_PYTHON_CANDIDATES):
     if os.path.isdir(_p) and _p not in sys.path:
         sys.path.insert(0, _p)
 
-from kernels.blockscale_preshuffle_gemm import compile_blockscale_preshuffle_gemm
-from tests.test_common import run_perftest, verify_output
-from tests.utils import shuffle_weight
-from flydsl.runtime.device import get_rocm_arch
+from flydsl.runtime.device import get_rocm_arch  # noqa: E402
+from kernels.blockscale_preshuffle_gemm import compile_blockscale_preshuffle_gemm  # noqa: E402
+from tests.test_common import run_perftest, verify_output  # noqa: E402
+from tests.utils import shuffle_weight  # noqa: E402
 
 logging.basicConfig(level=logging.INFO)
 
@@ -44,26 +44,36 @@ BLOCK_SHAPE = (128, 128)  # (block_n, block_k)
 
 try:
     import aiter
-    from aiter import dtypes as aiter_dtypes
     from aiter.ops.shuffle import shuffle_weight as aiter_shuffle_weight
 
     HAS_AITER = True
 except Exception:
     HAS_AITER = False
 
+
 def select_tile_config(M: int, N: int, K: int, scale_block_k: int = 128):
     """Auto-select tile config for blockscale GEMM benchmarks."""
     candidates = [
-        (16, 64, 256), (16, 128, 256),
-        (32, 64, 128), (32, 64, 256), (32, 128, 128), (32, 128, 256),
-        (64, 64, 128), (64, 64, 256), (64, 128, 128), (64, 128, 256), (64, 256, 128),
+        (16, 64, 256),
+        (16, 128, 256),
+        (32, 64, 128),
+        (32, 64, 256),
+        (32, 128, 128),
+        (32, 128, 256),
+        (64, 64, 128),
+        (64, 64, 256),
+        (64, 128, 128),
+        (64, 128, 256),
+        (64, 256, 128),
     ]
+
     def _valid(tm, tn, tk):
-        return (N % tn == 0 and K % tk == 0 and tk % scale_block_k == 0
-                and tm * tk // 256 >= 16)
+        return N % tn == 0 and K % tk == 0 and tk % scale_block_k == 0 and tm * tk // 256 >= 16
+
     valid = [(tm, tn, tk) for tm, tn, tk in candidates if _valid(tm, tn, tk)]
     if not valid:
         return (64, 128, 128)
+
     def _score(tm, tn, tk):
         s = 0
         total_blocks = ((M + tm - 1) // tm) * (N // tn)
@@ -82,11 +92,11 @@ def select_tile_config(M: int, N: int, K: int, scale_block_k: int = 128):
             s += 8 if tn == 128 else (4 if tn == 64 else (4 if tn == 256 else 0))
         s += 6 if tk == 128 else 3
         return s
+
     return max(valid, key=lambda t: _score(*t))
 
 
-def run_torch_blockscale(x, weight, x_scale, w_scale, block_shape=BLOCK_SHAPE,
-                         dtype=torch.bfloat16):
+def run_torch_blockscale(x, weight, x_scale, w_scale, block_shape=BLOCK_SHAPE, dtype=torch.bfloat16):
     """Torch reference for blockscale GEMM."""
     block_shape_n, block_shape_k = block_shape
     m, k = x.shape
@@ -109,6 +119,7 @@ def run_torch_blockscale(x, weight, x_scale, w_scale, block_shape=BLOCK_SHAPE,
 
     out = F.linear(x_f32.to(torch.float32), weight_f32.to(torch.float32))
     return out.to(dtype)
+
 
 @pytest.mark.parametrize(
     "M, N, K",
@@ -145,12 +156,19 @@ def run_torch_blockscale(x, weight, x_scale, w_scale, block_shape=BLOCK_SHAPE,
     ],
 )
 @pytest.mark.parametrize("out_dtype", ["bf16", "fp16"])
-@pytest.mark.parametrize("test_graph", [
-    pytest.param(False, id="eager"),
-    pytest.param(True, id="graph"),
-])
+@pytest.mark.parametrize(
+    "test_graph",
+    [
+        pytest.param(False, id="eager"),
+        pytest.param(True, id="graph"),
+    ],
+)
 def test_blockscale_preshuffle_gemm(
-    M, N, K, out_dtype, test_graph,
+    M,
+    N,
+    K,
+    out_dtype,
+    test_graph,
     *,
     bench_iters=20,
     bench_warmup=3,
@@ -173,13 +191,17 @@ def test_blockscale_preshuffle_gemm(
     print("=" * 80)
 
     exe = compile_blockscale_preshuffle_gemm(
-        M=M, N=N, K=K,
-        tile_m=tile_m, tile_n=tile_n, tile_k=tile_k,
+        M=M,
+        N=N,
+        K=K,
+        tile_m=tile_m,
+        tile_n=tile_n,
+        tile_k=tile_k,
         scale_block_k=block_shape_k,
         out_dtype=out_dtype,
         use_async_copy=bool(use_async_copy),
     )
-    print(f"  Compiled OK")
+    print("  Compiled OK")
 
     device = torch.device("cuda")
 
@@ -199,8 +221,7 @@ def test_blockscale_preshuffle_gemm(
 
     c_out = torch.zeros((M, N), dtype=torch_out_dtype, device=device)
 
-    compiled_exe = flyc.compile(exe, c_out, x, b_shuffled, x_scale_t, w_scale_flat,
-                               M, N, torch.cuda.current_stream())
+    compiled_exe = flyc.compile(exe, c_out, x, b_shuffled, x_scale_t, w_scale_flat, M, N, torch.cuda.current_stream())
 
     def launch_kernel(c, a, b, sa, sb):
         compiled_exe(c, a, b, sa, sb, M, N, torch.cuda.current_stream())
@@ -209,7 +230,11 @@ def test_blockscale_preshuffle_gemm(
     bench_warmup = int(bench_warmup)
     _, us = run_perftest(
         launch_kernel,
-        c_out, x, b_shuffled, x_scale_t, w_scale_flat,
+        c_out,
+        x,
+        b_shuffled,
+        x_scale_t,
+        w_scale_flat,
         num_iters=bench_iters,
         num_warmup=bench_warmup,
         testGraph=test_graph,
@@ -224,34 +249,33 @@ def test_blockscale_preshuffle_gemm(
     bytes_moved = (M * K * elem_bytes) + (N * K * elem_bytes) + (M * N * 2) + (M * scale_k + scale_n * scale_k) * 4
     tflops = flops / (us / 1e6) / 1e12
     tbps = bytes_moved / 1e12 / (us / 1e6)
-    print(
-        f"  Throughput: {us:.1f} us, {tflops:.2f} TFLOPS, BW: {tbps:.3f} TB/s"
-    )
+    print(f"  Throughput: {us:.1f} us, {tflops:.2f} TFLOPS, BW: {tbps:.3f} TB/s")
 
     if HAS_AITER:
         try:
+
             def launch_aiter(a, b, sa, sb):
-                return aiter.gemm_a8w8_blockscale_bpreshuffle(
-                    a, b, sa, sb, torch_out_dtype
-                )
+                return aiter.gemm_a8w8_blockscale_bpreshuffle(a, b, sa, sb, torch_out_dtype)
 
             x_scale_t_2d = x_scale.transpose(0, 1).contiguous().view(*x_scale.shape)
             b_aiter = aiter_shuffle_weight(weight, layout=(16, 16))
             c_aiter, us_aiter = run_perftest(
-                launch_aiter, x, b_aiter, x_scale_t_2d, w_scale,
+                launch_aiter,
+                x,
+                b_aiter,
+                x_scale_t_2d,
+                w_scale,
             )
             c_aiter_f32 = c_aiter.to(torch.float32)
             verify_output(c_aiter_f32, c_ref, rtol=1e-2, atol=0.01)
             tflops_aiter = flops / (us_aiter / 1e6) / 1e12
-            print(
-                f"  Aiter: {us_aiter:.1f} us, {tflops_aiter:.2f} TFLOPS, "
-                f"speedup: {us_aiter/us:.2f}x"
-            )
+            print(f"  Aiter: {us_aiter:.1f} us, {tflops_aiter:.2f} TFLOPS, " f"speedup: {us_aiter/us:.2f}x")
         except (Exception, SystemExit) as e:
             msg = str(e).splitlines()[0] if str(e) else repr(e)
             print(f"  Aiter comparison skipped: {msg}")
 
     assert passed, "Kernel output verification failed"
+
 
 if __name__ == "__main__":
     import argparse
@@ -279,7 +303,9 @@ if __name__ == "__main__":
         tile_m, tile_n, tile_k = args.tile_m, args.tile_n, args.tile_k
     print(f"Using tile config: {tile_m}x{tile_n}x{tile_k}")
     test_blockscale_preshuffle_gemm(
-        M=args.M, N=args.N, K=args.K,
+        M=args.M,
+        N=args.N,
+        K=args.K,
         out_dtype=args.out_dtype,
         test_graph=False,
         bench_iters=args.num_iters,

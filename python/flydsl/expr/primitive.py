@@ -994,8 +994,11 @@ def gemm(mma_atom, d, a, b, c, *, traversal_order=None, traversal_layout=None, l
 
 
 @traced_op
-def make_ptr(result_type, args, loc=None, ip=None):
-    return fly.make_ptr(result_type, args, loc=loc, ip=ip)
+def make_ptr(result_type, args, *, dict_attrs=None, loc=None, ip=None):
+    result = fly.make_ptr(result_type, args, loc=loc, ip=ip)
+    if dict_attrs is not None:
+        result.owner.attributes["dictAttrs"] = dict_attrs
+    return result
 
 
 @traced_op

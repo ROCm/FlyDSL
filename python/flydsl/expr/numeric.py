@@ -90,7 +90,7 @@ class NumericMeta(type):
 
             typed_ptr = recast_iter(cls, ptr)
             coerced = value.to(cls) if isinstance(value, Numeric) else cls(value)
-            return ptr_store(coerced.ir_value(), typed_ptr)
+            ptr_store(coerced.ir_value(), typed_ptr)
 
         def _not_storable(cls):
             raise TypeError(f"sub-byte type {cls.__name__} (width={cls.width}) is not Storable")

@@ -15,8 +15,8 @@ Usage:
 from functools import wraps
 
 from .._mlir import ir
-from .._mlir.dialects.math import *  # noqa: F401,F403
 from .._mlir.dialects import math as _mlir_math
+from .._mlir.dialects.math import *  # noqa: F401,F403
 from .meta import _caller_location, _flatten_args
 from .numeric import Numeric
 from .utils.arith import _to_raw
@@ -55,6 +55,7 @@ def _traced_math_op(fn):
 # ---------------------------------------------------------------------------
 # Unary float ops
 # ---------------------------------------------------------------------------
+
 
 @_traced_math_op
 def absf(x, *, fastmath=None, **kw):
@@ -210,6 +211,7 @@ def erfc(x, *, fastmath=None, **kw):
 # Multi-result unary float ops
 # ---------------------------------------------------------------------------
 
+
 @_traced_math_op
 def sincos(x, *, fastmath=None, **kw):
     """Simultaneous sin and cos.  Returns ``(sin(x), cos(x))``."""
@@ -219,6 +221,7 @@ def sincos(x, *, fastmath=None, **kw):
 # ---------------------------------------------------------------------------
 # Unary integer ops
 # ---------------------------------------------------------------------------
+
 
 @_traced_math_op
 def absi(x, **kw):
@@ -243,6 +246,7 @@ def ctpop(x, **kw):
 # ---------------------------------------------------------------------------
 # Binary ops
 # ---------------------------------------------------------------------------
+
 
 @_traced_math_op
 def powf(base, exp, *, fastmath=None, **kw):
@@ -273,6 +277,7 @@ def copysign(mag, sign, *, fastmath=None, **kw):
 # Ternary ops
 # ---------------------------------------------------------------------------
 
+
 @_traced_math_op
 def fma(a, b, c, *, fastmath=None, **kw):
     return _mlir_math.fma(_to_raw(a), _to_raw(b), _to_raw(c), fastmath=fastmath, **kw)
@@ -286,6 +291,7 @@ def clampf(x, lo, hi, *, fastmath=None, **kw):
 # ---------------------------------------------------------------------------
 # Predicates (return i1)
 # ---------------------------------------------------------------------------
+
 
 @_traced_math_op
 def isnan(x, *, fastmath=None, **kw):

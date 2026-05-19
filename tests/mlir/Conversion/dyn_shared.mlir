@@ -13,7 +13,7 @@
 // === Basic lowering ===
 
 // CHECK: gpu.module @basic_module
-// CHECK: llvm.mlir.global external @[[SYM0:__dynamic_shared__.*]]() {addr_space = 3 : i32, alignment = 1024 : i64, dso_local} : !llvm.array<0 x i8>
+// CHECK: llvm.mlir.global external @[[SYM0:__dynamic_shared_.*]]() {addr_space = 3 : i32, alignment = 1024 : i64, dso_local} : !llvm.array<0 x i8>
 // CHECK-LABEL: gpu.func @test_basic
 gpu.module @basic_module {
   gpu.func @test_basic() kernel {
@@ -30,7 +30,7 @@ gpu.module @basic_module {
 // === Multiple get_dyn_shared in same kernel reuse the same global ===
 
 // CHECK: gpu.module @reuse_module
-// CHECK: llvm.mlir.global external @[[SYM1:__dynamic_shared__.*]]()
+// CHECK: llvm.mlir.global external @[[SYM1:__dynamic_shared_.*]]()
 // CHECK-LABEL: gpu.func @test_reuse_global
 gpu.module @reuse_module {
   gpu.func @test_reuse_global() kernel {
@@ -49,7 +49,7 @@ gpu.module @reuse_module {
 // === get_dyn_shared + add_offset + ptr.load ===
 
 // CHECK: gpu.module @load_module
-// CHECK: llvm.mlir.global external @[[SYM2:__dynamic_shared__.*]]()
+// CHECK: llvm.mlir.global external @[[SYM2:__dynamic_shared_.*]]()
 // CHECK-LABEL: gpu.func @test_load_from_dyn_shared
 gpu.module @load_module {
   gpu.func @test_load_from_dyn_shared(%offset: i32) kernel {
@@ -69,7 +69,7 @@ gpu.module @load_module {
 // === get_dyn_shared + add_offset + ptr.store ===
 
 // CHECK: gpu.module @store_module
-// CHECK: llvm.mlir.global external @[[SYM3:__dynamic_shared__.*]]()
+// CHECK: llvm.mlir.global external @[[SYM3:__dynamic_shared_.*]]()
 // CHECK-LABEL: gpu.func @test_store_to_dyn_shared
 gpu.module @store_module {
   gpu.func @test_store_to_dyn_shared(%offset: i32, %val: i8) kernel {
@@ -89,8 +89,8 @@ gpu.module @store_module {
 // === Multiple kernels in same gpu.module share the global ===
 
 // CHECK: gpu.module @multi_kernel_module
-// CHECK: llvm.mlir.global external @[[SYM4:__dynamic_shared__.*]]()
-// CHECK-NOT: llvm.mlir.global external @__dynamic_shared__
+// CHECK: llvm.mlir.global external @[[SYM4:__dynamic_shared_.*]]()
+// CHECK-NOT: llvm.mlir.global external @__dynamic_shared_
 // CHECK-LABEL: gpu.func @kernel_a
 gpu.module @multi_kernel_module {
   gpu.func @kernel_a() kernel {

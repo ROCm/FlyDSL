@@ -6,12 +6,12 @@ Kernel implementations:
   kernels/rdna_fp8_preshuffle_gemm.py — FP8 GEMM with B preshuffle
 """
 
+import logging
 import os
 import sys
-import logging
 
-import torch
 import pytest
+import torch
 
 pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
 
@@ -19,15 +19,15 @@ _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from kernels.rdna_f16_gemm import create_wmma_gemm_module
-from kernels.rdna_fp8_preshuffle_gemm import (
+from flydsl.runtime.device import get_rocm_arch  # noqa: E402
+from kernels.rdna_f16_gemm import create_wmma_gemm_module  # noqa: E402
+from kernels.rdna_fp8_preshuffle_gemm import (  # noqa: E402
     compile_fp8_gemm,
-    preshuffle_b_fp8,
-    fp8_quantize_per_token,
     fp8_quantize_per_channel,
+    fp8_quantize_per_token,
+    preshuffle_b_fp8,
 )
-from tests.test_common import verify_output, run_perftest
-from flydsl.runtime.device import get_rocm_arch
+from tests.test_common import run_perftest, verify_output  # noqa: E402
 
 logging.basicConfig(level=logging.INFO)
 

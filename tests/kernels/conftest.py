@@ -9,12 +9,14 @@ Configuration lives in tests/arch_compat.py (single source of truth).
 """
 
 import pytest
+
 from tests.arch_compat import CDNA_ONLY_TESTS
 
 
 def _get_gpu_arch():
     try:
         from flydsl.runtime.device import get_rocm_arch
+
         return str(get_rocm_arch())
     except Exception:
         return ""
@@ -30,9 +32,7 @@ def pytest_collection_modifyitems(config, items):
     if is_cdna:
         return
 
-    skip_marker = pytest.mark.skip(
-        reason=f"Test requires CDNA (gfx9xx) GPU, current arch: {arch}"
-    )
+    skip_marker = pytest.mark.skip(reason=f"Test requires CDNA (gfx9xx) GPU, current arch: {arch}")
     for item in items:
         filename = item.fspath.basename
         if filename in CDNA_ONLY_TESTS:
