@@ -8,18 +8,27 @@ set -euo pipefail
 
 BASE_SHA="${BASE_SHA:-}"
 HEAD_SHA="${HEAD_SHA:-${GITHUB_SHA:-HEAD}}"
+CLANG_FORMAT="${CLANG_FORMAT:-clang-format}"
 
 resolve_base_sha() {
-  if [ -n "${BASE_SHA}" ] && git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
-    printf '%s\n' "${BASE_SHA}"
-    return
+  if [ -n "${BASE_SHA}" ]; then
+    if ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+      git fetch --no-tags --depth=1 origin "${BASE_SHA}" || true
+    fi
+    if git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+      printf '%s\n' "${BASE_SHA}"
+      return
+    fi
   fi
 
   if [ -n "${GITHUB_BASE_REF:-}" ]; then
-    git fetch --no-tags --depth=1 origin "${GITHUB_BASE_REF}" || true
+    git fetch --no-tags origin "${GITHUB_BASE_REF}" || true
     if git rev-parse "origin/${GITHUB_BASE_REF}" >/dev/null 2>&1; then
-      git merge-base "${HEAD_SHA}" "origin/${GITHUB_BASE_REF}"
-      return
+      local base
+      if base="$(git merge-base "${HEAD_SHA}" "origin/${GITHUB_BASE_REF}" 2>/dev/null)"; then
+        printf '%s\n' "${base}"
+        return
+      fi
     fi
   fi
 
@@ -38,12 +47,13 @@ if [ -z "${BASE}" ]; then
   exit 1
 fi
 
-if ! command -v clang-format >/dev/null 2>&1; then
-  echo "clang-format is required for C++ style checks." >&2
+if ! command -v "${CLANG_FORMAT}" >/dev/null 2>&1; then
+  echo "${CLANG_FORMAT} is required for C++ style checks." >&2
   exit 1
 fi
 
 echo "Checking C++ style for changes between ${BASE} and ${HEAD_SHA}."
+echo "Using $(${CLANG_FORMAT} --version)."
 
 mapfile -t CPP_FILES < <(
   git diff --name-only --diff-filter=ACMR "${BASE}" "${HEAD_SHA}" -- \
@@ -76,4 +86,4 @@ fi
 printf 'Changed C++ files:\n'
 printf '  %s\n' "${CPP_FILES[@]}"
 
-clang-format --dry-run --Werror "${CPP_FILES[@]}"
+"${CLANG_FORMAT}" --dry-run --Werror "${CPP_FILES[@]}"
