@@ -4,17 +4,19 @@
 """FlyDSL sliding-window paged attention decode kernel."""
 
 from __future__ import annotations
+
+import functools
+
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-import functools
-from flydsl._mlir.dialects import llvm
-from flydsl.expr import arith, vector, gpu, rocdl, buffer_ops, range_constexpr, const_expr
-from flydsl.expr import math as fly_math
-from flydsl.expr.typing import T, Int32
-from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
-from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl._mlir import ir
+from flydsl._mlir.dialects import llvm
 from flydsl.compiler.kernel_function import CompilationContext
+from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, rocdl, vector
+from flydsl.expr import math as fly_math
+from flydsl.expr.typing import Int32, T
+from flydsl.runtime.device import get_rocm_arch as get_hip_arch
+from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 
 # ── Kernel geometry constants ────────────────────────────────────────
 QUERY_GROUP_SIZE = 16
@@ -504,7 +506,8 @@ def _make_pa_phase_helpers(
     neg_inf,
     zero_f,
 ):
-    apply_causal_mask = needs_mask or query_length > 1
+    # Sliding-window decode always needs an upper-bound mask: even for a
+    # single query, the tail block can contain tokens beyond context_len.
     pv_prob_i64_indices = []
     for vt in range_constexpr(VTLOOP):
         for j in range_constexpr(2):
@@ -583,18 +586,12 @@ def _make_pa_phase_helpers(
     def _load_v_scale_vec(td: int):
         return vector.load_op(T.f32x4, scale_lds_f32, [fx.Index(fx.Int32(LDS_SCALE_V_OFFSET) + _scale_row_base(td))])
 
-    def _get_k_scale_vec(td: int):
-        return _load_k_scale_vec(td)
-
-    def _get_v_scale_vec(td: int):
-        return _load_v_scale_vec(td)
-
     def _store_vmax_warp(partition_start, *, seq_end=None):
         if const_expr(per_token_kv):
             kv_tok_base = partition_start + kv_tok_thread_base if const_expr(seq_end is not None) else None
             v_max_warp = zero_f
             for td in range_constexpr(TLOOP):
-                vs = _get_v_scale_vec(td)
+                vs = _load_v_scale_vec(td)
                 for i in range_constexpr(4):
                     if const_expr(kv_tok_base is not None):
                         kv_tok = kv_tok_base + arith.constant(td * MFMA_N + i, type=T.i32)
@@ -619,9 +616,9 @@ def _make_pa_phase_helpers(
 
     def _apply_token_mask_vec(logit_vec, td: int, kv_tok_base, causal_bound, seq_start, false_value):
         tok_vec = _token_vec_i32(kv_tok_base, td)
-        if const_expr(apply_causal_mask and seq_start is not None):
+        if const_expr(needs_mask and seq_start is not None):
             in_range = (tok_vec < causal_bound) & (tok_vec >= seq_start)
-        elif const_expr(apply_causal_mask):
+        elif const_expr(needs_mask):
             in_range = tok_vec < causal_bound
         else:
             in_range = tok_vec >= seq_start
@@ -634,10 +631,8 @@ def _make_pa_phase_helpers(
         causal_bound,
         query_scale_lane=None,
         *,
-        preloaded_v_and_scales=None,
         seq_start=None,
     ):
-        v_results = preloaded_v_and_scales
 
         query_scale_vec = None
         if const_expr(per_token_q):
@@ -648,7 +643,7 @@ def _make_pa_phase_helpers(
             for k_step in range_constexpr(QKHELOOP * 2):
                 acc = rocdl.mfma_f32_16x16x32_fp8_fp8(T.f32x4, [k_ops[td][k_step], q_frags[k_step], acc, 0, 0, 0])
             if const_expr(per_token_kv):
-                k_scale_vec = _get_k_scale_vec(td)
+                k_scale_vec = _load_k_scale_vec(td)
                 scale_vec = (
                     k_scale_vec * query_scale_vec
                     if const_expr(per_token_q)
@@ -662,9 +657,7 @@ def _make_pa_phase_helpers(
                     d_out.append(acc * vector.broadcast(T.f32x4, scale))
 
         apply_range_mask = seq_start is not None
-        kv_tok_base = (
-            partition_start + kv_tok_thread_base if const_expr(apply_causal_mask or apply_range_mask) else None
-        )
+        kv_tok_base = partition_start + kv_tok_thread_base if const_expr(needs_mask or apply_range_mask) else None
         qk_max = neg_inf
         for td in range_constexpr(TLOOP):
             logits_vec = d_out[td]
@@ -695,7 +688,7 @@ def _make_pa_phase_helpers(
             [sm_sum_off],
         )
 
-        return d_out, v_results
+        return d_out
 
     def _cross_warp_softmax_and_prob_pack(d_out, rmax, rsum, outs):
         partition_max = neg_inf
@@ -749,7 +742,7 @@ def _make_pa_phase_helpers(
         )
         rsum = arith.addf(accum_sum, partition_sum_scaled, fastmath=arith.FastMathFlags.contract)
         rmax = new_rmax
-        accum_scale_vec = vector.broadcast(T.f32x4, accum_scale)
+        accum_scale_vec = vector.broadcast(T.f32x4, arith.unwrap(accum_scale))
         for vhe in range_constexpr(VHELOOP):
             outs[vhe] = outs[vhe] * accum_scale_vec
 
@@ -765,12 +758,14 @@ def _make_pa_phase_helpers(
             prob_scale = my_warp_rescale
             v_correction = v_max_scaled * part_to_new
             for td in range_constexpr(TLOOP):
-                d_out[td] = d_out[td] * (_get_v_scale_vec(td) * vector.broadcast(T.f32x4, prob_scale * norm_factor))
+                d_out[td] = d_out[td] * (
+                    _load_v_scale_vec(td) * vector.broadcast(T.f32x4, arith.unwrap(prob_scale * norm_factor))
+                )
         else:
             prob_scale = my_warp_rescale * part_to_new
             v_correction = v_scale_val
             for td in range_constexpr(TLOOP):
-                d_out[td] = d_out[td] * vector.broadcast(T.f32x4, prob_scale)
+                d_out[td] = d_out[td] * vector.broadcast(T.f32x4, arith.unwrap(prob_scale))
 
         for td in range_constexpr(TLOOP):
             p0 = vector.extract(d_out[td], static_position=[0], dynamic_position=[])
@@ -1417,13 +1412,13 @@ def compile_pa_decode_sw(
             partition_start,
         ):
             """Process one 256-token tile inside the selected physical block."""
-            d_out_0, v0_ops = _qk_and_intra_softmax(
+            v0_ops = preloaded_v_and_scales
+            d_out_0 = _qk_and_intra_softmax(
                 k_ops,
                 partition_start,
                 q_frags,
                 causal_bound,
                 query_scale_lane=query_scale_lane,
-                preloaded_v_and_scales=preloaded_v_and_scales,
                 seq_start=seq_start,
             )
             gpu.barrier()

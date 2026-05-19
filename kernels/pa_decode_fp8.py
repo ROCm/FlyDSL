@@ -21,16 +21,15 @@ import torch
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-import functools
+from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm
-from flydsl.expr import arith, vector, gpu, rocdl, buffer_ops, range_constexpr, const_expr
+from flydsl.compiler.kernel_function import CompilationContext
+from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, rocdl, vector
 from flydsl.expr import math as fly_math
-from flydsl.expr.typing import T, Int32
-from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
+from flydsl.expr.typing import Int32, T
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.env import runtime as flydsl_runtime_env
-from flydsl._mlir import ir
-from flydsl.compiler.kernel_function import CompilationContext
+from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from kernels.pa_decode_swa import compile_pa_decode_sw, compile_pa_decode_sw_reduce
 
 # ── Kernel geometry constants ────────────────────────────────────────
