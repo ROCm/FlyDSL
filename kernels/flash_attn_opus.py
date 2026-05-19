@@ -1025,6 +1025,93 @@ def build_flash_attn_opus_module(
                 lo_partial.append(rocdl.exp2(T.f32, _raw(s_lo[r])))
             return lo_partial, list(s_hi)
 
+        def _pv_step_k_slice(o_accs, v_packs, v_p_lo, v_p_hi, actual, dc_start, dc_count):
+            v_pk = v_packs[actual]
+            if const_expr(actual < 2):
+                p_pk = v_p_lo[actual]
+            else:
+                p_pk = v_p_hi[actual - 2]
+            for rel in range_constexpr(dc_count):
+                dc = dc_start + rel
+                o_accs[dc] = mfma_acc(v_pk[dc], p_pk, o_accs[dc])
+            return o_accs
+
+        def _sub_row_flat_slice(lo_sub, hi_sub, s_lo, s_hi, m_row, start, count):
+            for rel in range_constexpr(count):
+                flat = start + rel
+                if const_expr(flat < 16):
+                    lo_sub[flat] = _fsub(s_lo[flat], m_row)
+                else:
+                    hi_idx = flat - 16
+                    hi_sub[hi_idx] = _fsub(s_hi[hi_idx], m_row)
+
+        def _exp2_lo_slice(lo_partial, s_lo, start, count):
+            for rel in range_constexpr(count):
+                idx = start + rel
+                lo_partial[idx] = rocdl.exp2(T.f32, _raw(s_lo[idx]))
+
+        def _sched_barrier_pair(group):
+            rocdl.sched_group_barrier(_MFMA_MASK, 1, group)
+            rocdl.sched_group_barrier(_VALU_MASK, 5, group)
+
+        def _sched_barrier_exp_pair(group):
+            rocdl.sched_group_barrier(_MFMA_MASK, 1, group)
+            rocdl.sched_group_barrier(_EXP_MASK, 3, group)
+
+        def _cluster_tail_interleaved(o_accs, v_packs, v_p_lo, v_p_hi, s_lo, s_hi, m_row, group):
+            lo_sub = [None] * 16
+            hi_sub = [None] * 16
+
+            _pv_step_k_slice(o_accs, v_packs, v_p_lo, v_p_hi, 1, 0, 2)
+            _sub_row_flat_slice(lo_sub, hi_sub, s_lo, s_hi, m_row, 0, 5)
+            _sched_barrier_pair(group)
+
+            _pv_step_k_slice(o_accs, v_packs, v_p_lo, v_p_hi, 1, 2, 2)
+            _sub_row_flat_slice(lo_sub, hi_sub, s_lo, s_hi, m_row, 5, 5)
+            _sched_barrier_pair(group)
+
+            _pv_step_k_slice(o_accs, v_packs, v_p_lo, v_p_hi, 2, 0, 2)
+            _sub_row_flat_slice(lo_sub, hi_sub, s_lo, s_hi, m_row, 10, 5)
+            _sched_barrier_pair(group)
+
+            _pv_step_k_slice(o_accs, v_packs, v_p_lo, v_p_hi, 2, 2, 2)
+            _sub_row_flat_slice(lo_sub, hi_sub, s_lo, s_hi, m_row, 15, 5)
+            _sched_barrier_pair(group)
+
+            _pv_step_k_slice(o_accs, v_packs, v_p_lo, v_p_hi, 3, 0, 2)
+            _sub_row_flat_slice(lo_sub, hi_sub, s_lo, s_hi, m_row, 20, 5)
+            _sched_barrier_pair(group)
+
+            _pv_step_k_slice(o_accs, v_packs, v_p_lo, v_p_hi, 3, 2, 2)
+            _sub_row_flat_slice(lo_sub, hi_sub, s_lo, s_hi, m_row, 25, 5)
+            _sched_barrier_pair(group)
+
+            _sub_row_flat_slice(lo_sub, hi_sub, s_lo, s_hi, m_row, 30, 2)
+
+            lo_vec = Vec.from_elements(lo_sub, fx.Float32).ir_value()
+            hi_vec = Vec.from_elements(hi_sub, fx.Float32).ir_value()
+            lo_vec, hi_vec = _anchor_pair(lo_vec, hi_vec)
+            s_lo = [Vec(lo_vec)[r] for r in range_constexpr(16)]
+            s_hi = [Vec(hi_vec)[r] for r in range_constexpr(16)]
+
+            lo_partial = [None] * 16
+            _exp2_lo_slice(lo_partial, s_lo, 0, 3)
+            _sched_barrier_exp_pair(group)
+            _exp2_lo_slice(lo_partial, s_lo, 3, 3)
+            _sched_barrier_exp_pair(group)
+            _exp2_lo_slice(lo_partial, s_lo, 6, 3)
+            _sched_barrier_exp_pair(group)
+            _exp2_lo_slice(lo_partial, s_lo, 9, 3)
+            _sched_barrier_exp_pair(group)
+            _exp2_lo_slice(lo_partial, s_lo, 12, 3)
+            _sched_barrier_exp_pair(group)
+            _exp2_lo_slice(lo_partial, s_lo, 15, 1)
+            _sched_barrier_exp_pair(group)
+
+            lo_partial_vec = Vec.from_elements(lo_partial, fx.Float32).ir_value()
+            hi_partial_vec = Vec.from_elements(s_hi, fx.Float32).ir_value()
+            return o_accs, lo_partial_vec, hi_partial_vec
+
         def attn_sub_row_first_half_exp2_slice(s_lo, s_hi, m_row):
             lo_partial = []
             hi_partial = []
@@ -1329,35 +1416,15 @@ def build_flash_attn_opus_module(
             #         v_o = mma1.step_k(1_I, v_p, v_v, v_o);
             #         v_o = mma1.step_k(2_I, v_p, v_v, v_o);
             #         v_o = mma1.step_k(3_I, v_p, v_v, v_o);
-            for kss in range_constexpr(3):
-                actual = kss + 1
-                v_pk = v_packs_a[actual]
-                if const_expr(actual < 2):
-                    p_pk = v_p_lo_a[actual]
-                else:
-                    p_pk = v_p_hi_a[actual - 2]
-                for dc in range_constexpr(D_CHUNKS):
-                    o_accs[dc] = mfma_acc(v_pk[dc], p_pk, o_accs[dc])
-
             #         attn_sub_row<T>(v_s[1], row_max);
             #         asm volatile("" : "+v"(v_s[1]) ::);
             #         attn_exp2_slice<T, 0, s_half_len>(v_s[1]);
-            s_lo_a, s_hi_a = attn_sub_row(s_lo_a, s_hi_a, m_row)
-            v_s_1_lo_partial = Vec.from_elements(s_lo_a, fx.Float32).ir_value()
-            v_s_1_hi_partial = Vec.from_elements(s_hi_a, fx.Float32).ir_value()
-            v_s_1_lo_partial, v_s_1_hi_partial = _anchor_pair(
-                v_s_1_lo_partial, v_s_1_hi_partial
+            o_accs, v_s_1_lo_partial, v_s_1_hi_partial = _cluster_tail_interleaved(
+                o_accs, v_packs_a, v_p_lo_a, v_p_hi_a, s_lo_a, s_hi_a, m_row, 2
             )
-            s_lo_a = [Vec(v_s_1_lo_partial)[r] for r in range_constexpr(16)]
-            s_hi_a = [Vec(v_s_1_hi_partial)[r] for r in range_constexpr(16)]
-            lo_part_a, hi_part_a = attn_exp2_first_half_slice(s_lo_a, s_hi_a)
-            v_s_1_lo_partial = Vec.from_elements(lo_part_a, fx.Float32).ir_value()
-            v_s_1_hi_partial = Vec.from_elements(hi_part_a, fx.Float32).ir_value()
 
             #         sched_barrier_pairs<6, 5, 2>();
-            _sched_barrier_pairs(6, 5, 2)
             #         sched_barrier_exp_pairs<6, 3, 2>();
-            _sched_barrier_exp_pairs(6, 3, 2)
             #         __builtin_amdgcn_s_setprio(0);
             if const_expr(OPUS_SETPRIO):
                 rocdl.s_setprio(0)
@@ -1482,35 +1549,15 @@ def build_flash_attn_opus_module(
             #         v_o = mma1.step_k(1_I, v_p, v_v, v_o);
             #         v_o = mma1.step_k(2_I, v_p, v_v, v_o);
             #         v_o = mma1.step_k(3_I, v_p, v_v, v_o);
-            for kss in range_constexpr(3):
-                actual = kss + 1
-                v_pk = v_packs_b[actual]
-                if const_expr(actual < 2):
-                    p_pk = v_p_lo_b[actual]
-                else:
-                    p_pk = v_p_hi_b[actual - 2]
-                for dc in range_constexpr(D_CHUNKS):
-                    o_accs[dc] = mfma_acc(v_pk[dc], p_pk, o_accs[dc])
-
             #         attn_sub_row<T>(v_s[0], row_max);
             #         asm volatile("" : "+v"(v_s[0]) ::);
             #         attn_exp2_slice<T, 0, s_half_len>(v_s[0]);
-            s_lo_b, s_hi_b = attn_sub_row(s_lo_b, s_hi_b, m_row)
-            v_s_0_lo_yield = Vec.from_elements(s_lo_b, fx.Float32).ir_value()
-            v_s_0_hi_yield = Vec.from_elements(s_hi_b, fx.Float32).ir_value()
-            v_s_0_lo_yield, v_s_0_hi_yield = _anchor_pair(
-                v_s_0_lo_yield, v_s_0_hi_yield
+            o_accs, v_s_0_lo_yield, v_s_0_hi_yield = _cluster_tail_interleaved(
+                o_accs, v_packs_b, v_p_lo_b, v_p_hi_b, s_lo_b, s_hi_b, m_row, 4
             )
-            s_lo_b = [Vec(v_s_0_lo_yield)[r] for r in range_constexpr(16)]
-            s_hi_b = [Vec(v_s_0_hi_yield)[r] for r in range_constexpr(16)]
-            lo_part_b, hi_part_b = attn_exp2_first_half_slice(s_lo_b, s_hi_b)
-            v_s_0_lo_yield = Vec.from_elements(lo_part_b, fx.Float32).ir_value()
-            v_s_0_hi_yield = Vec.from_elements(hi_part_b, fx.Float32).ir_value()
 
             #         sched_barrier_pairs<6, 5, 4>();
-            _sched_barrier_pairs(6, 5, 4)
             #         sched_barrier_exp_pairs<6, 3, 4>();
-            _sched_barrier_exp_pairs(6, 3, 4)
             #         __builtin_amdgcn_s_setprio(0);
             if const_expr(OPUS_SETPRIO):
                 rocdl.s_setprio(0)
