@@ -3,10 +3,10 @@
 
 """FlyDSL Paged Attention Decode with Persistent Scheduling — FP8.
 
-Extends pa_decode_sw_fp8.py with persistent scheduling (PS) mode:
+Persistent scheduling (PS) mode:
 - Grid = (num_SM, 1, 4) so each CTA handles one 256-token sub-tile of a 1024-token KV page
 - Outer work loop iterates over pre-computed worklist from get_pa_metadata_v1
-- Inner KV loop iterates pages from kv_page_indices instead of block_tables
+- Inner KV loop iterates pages from kv_page_indices
 - Supports split-reduce for load balancing across CUs
 
 Requires: aiter's get_pa_metadata_v1 (module_pa_metadata.so)
@@ -78,12 +78,6 @@ _N_V = VHELOOP * VTLOOP * 2  # 16
 # Tiles per block (1024 tokens / 256 tokens per tile = 4, matches SP3 kNumBlockTiles)
 TILES_PER_BLOCK = KV_BLOCK_SIZE // KV_COMPUTE_BLOCK  # 4
 
-# Sliding-window decode follows the same 16-wide MTP path for all qgs values.
-# For qgs=6, mtp=4, the 24 logical query/head pairs are handled as two
-# independent 16-wide passes instead of a fused two-subgroup pass.
-SW_MTP_EXEC_GROUP_SIZE = MFMA_N
-SW_LOGICAL_MTP_GROUP_SIZE = MFMA_N
-
 _PACKED_FP8_QUERY_DTYPES = tuple(
     dtype
     for dtype in (
@@ -97,23 +91,6 @@ _PACKED_FP8_QUERY_DTYPES = tuple(
 
 def _cdiv(numer: int, denom: int) -> int:
     return (numer + denom - 1) // denom
-
-
-def _get_sw_mtp_group_count(query_length: int, query_group_size: int) -> int:
-    return _cdiv(query_length * query_group_size, SW_LOGICAL_MTP_GROUP_SIZE)
-
-
-def _get_sw_mtp_subgroup_count(
-    query_length: int,
-    query_group_size: int,
-    mtp_group_idx: int,
-) -> int:
-    remaining_pairs = query_length * query_group_size - mtp_group_idx * SW_LOGICAL_MTP_GROUP_SIZE
-    return 1 if const_expr(remaining_pairs > 0) else 0
-
-
-def _get_sw_mtp_pair_offset(mtp_group_idx: int, mtp_subgroup_idx: int = 0) -> int:
-    return mtp_group_idx * SW_LOGICAL_MTP_GROUP_SIZE + mtp_subgroup_idx * SW_MTP_EXEC_GROUP_SIZE
 
 
 def _pow2_shift(value: int) -> int:
@@ -163,12 +140,6 @@ def _extract_global_ptr(tensor):
 def _global_load_i64x2(global_ptr, byte_offset_i64):
     ptr = buffer_ops.get_element_ptr(global_ptr, byte_offset=fx.Int64(byte_offset_i64), elem_type=T.i8)
     return llvm.LoadOp(T.i64x2, ptr, alignment=16).result
-
-
-def _global_load_i32(global_ptr, elem_offset_i32):
-    byte_offset_i64 = fx.Int64(elem_offset_i32) * fx.Int64(4)
-    ptr = buffer_ops.get_element_ptr(global_ptr, byte_offset=byte_offset_i64, elem_type=T.i8)
-    return llvm.LoadOp(T.i32, ptr, alignment=4).result
 
 
 def _rcp_f32(value):
@@ -296,64 +267,24 @@ def _compute_mtp_group_state(
     c_pair_max = fx.Int32(query_length * query_group_size - 1)
     c_ql_m1 = fx.Int32(query_length - 1)
 
-    if const_expr((query_length * query_group_size) % SW_LOGICAL_MTP_GROUP_SIZE == 0):
+    if const_expr((query_length * query_group_size) % MFMA_N == 0):
         lane_pair = lane_pair_raw
     else:
         lane_pair = arith.select(lane_pair_raw < c_total_pairs, lane_pair_raw, c_pair_max)
     qi_raw = _udiv_const(lane_pair, query_group_size)
-    if const_expr((query_length * query_group_size) % SW_LOGICAL_MTP_GROUP_SIZE == 0):
+    if const_expr((query_length * query_group_size) % MFMA_N == 0):
         qi_val = qi_raw
     else:
         qi_val = arith.select(qi_raw < c_ql_m1, qi_raw, c_ql_m1)
     qhi_pos = _urem_const(lane_pair, query_group_size)
 
     lqh_pair_raw = local_qhead_idx + fx.Int32(g_off)
-    if const_expr((query_length * query_group_size) % SW_LOGICAL_MTP_GROUP_SIZE == 0):
+    if const_expr((query_length * query_group_size) % MFMA_N == 0):
         lqh_pair = lqh_pair_raw
     else:
         lqh_pair = arith.select(lqh_pair_raw < c_total_pairs, lqh_pair_raw, c_pair_max)
     lqi_raw = _udiv_const(lqh_pair, query_group_size)
-    if const_expr((query_length * query_group_size) % SW_LOGICAL_MTP_GROUP_SIZE == 0):
-        qi_for_q = lqi_raw
-    else:
-        qi_for_q = arith.select(lqi_raw < c_ql_m1, lqi_raw, c_ql_m1)
-    local_qhead_idx_for_q = _urem_const(lqh_pair, query_group_size)
-    return qi_val, qhi_pos, qi_for_q, local_qhead_idx_for_q
-
-
-def _compute_sw_mtp_group_state(
-    lane16id,
-    local_qhead_idx,
-    *,
-    mtp_group_idx,
-    mtp_subgroup_idx=0,
-    query_length,
-    query_group_size,
-):
-    g_off = _get_sw_mtp_pair_offset(mtp_group_idx, mtp_subgroup_idx)
-    lane_pair_raw = lane16id + fx.Int32(g_off)
-    c_total_pairs = fx.Int32(query_length * query_group_size)
-    c_pair_max = fx.Int32(query_length * query_group_size - 1)
-    c_ql_m1 = fx.Int32(query_length - 1)
-
-    if const_expr((query_length * query_group_size) % SW_LOGICAL_MTP_GROUP_SIZE == 0):
-        lane_pair = lane_pair_raw
-    else:
-        lane_pair = arith.select(lane_pair_raw < c_total_pairs, lane_pair_raw, c_pair_max)
-    qi_raw = _udiv_const(lane_pair, query_group_size)
-    if const_expr((query_length * query_group_size) % SW_LOGICAL_MTP_GROUP_SIZE == 0):
-        qi_val = qi_raw
-    else:
-        qi_val = arith.select(qi_raw < c_ql_m1, qi_raw, c_ql_m1)
-    qhi_pos = _urem_const(lane_pair, query_group_size)
-
-    lqh_pair_raw = local_qhead_idx + fx.Int32(g_off)
-    if const_expr((query_length * query_group_size) % SW_LOGICAL_MTP_GROUP_SIZE == 0):
-        lqh_pair = lqh_pair_raw
-    else:
-        lqh_pair = arith.select(lqh_pair_raw < c_total_pairs, lqh_pair_raw, c_pair_max)
-    lqi_raw = _udiv_const(lqh_pair, query_group_size)
-    if const_expr((query_length * query_group_size) % SW_LOGICAL_MTP_GROUP_SIZE == 0):
+    if const_expr((query_length * query_group_size) % MFMA_N == 0):
         qi_for_q = lqi_raw
     else:
         qi_for_q = arith.select(lqi_raw < c_ql_m1, lqi_raw, c_ql_m1)
@@ -514,71 +445,6 @@ def _finish_mtp_group_q_fragments(
     local_qhead_idx,
 ):
     qi_val, qhi_pos, q_chunks = mtp_prefetch
-    q_frags, query_scale_lane = _finish_q_fragments(
-        logits_lds_i32,
-        logits_lds_i64,
-        softmax_lds_f32,
-        q_chunks,
-        lane16id,
-        rowid,
-        local_qhead_idx,
-    )
-    return qi_val, qhi_pos, q_frags, query_scale_lane
-
-
-def _prefetch_sw_mtp_group_queries(
-    q_rsrc,
-    batch_idx,
-    kv_h,
-    stride_q_seq,
-    stride_q_head,
-    lane16id,
-    local_qhead_idx,
-    *,
-    mtp_group_idx,
-    mtp_subgroup_count,
-    query_length,
-    query_group_size,
-    query_load_is_bf16,
-):
-    mtp_prefetches = []
-    c_query_length = arith.constant(query_length, type=T.i32)
-    c_query_group_size = arith.constant(query_group_size, type=T.i32)
-    for mtp_subgroup_idx in range_constexpr(mtp_subgroup_count):
-        qi_val, qhi_pos, qi_for_q, local_qhead_idx_for_q = _compute_sw_mtp_group_state(
-            lane16id,
-            local_qhead_idx,
-            mtp_group_idx=mtp_group_idx,
-            mtp_subgroup_idx=mtp_subgroup_idx,
-            query_length=query_length,
-            query_group_size=query_group_size,
-        )
-        q_row = batch_idx * c_query_length + qi_for_q
-        q_base = q_row * stride_q_seq + (kv_h * c_query_group_size + local_qhead_idx_for_q) * stride_q_head
-        q_chunks = _prefetch_q_chunks(
-            q_rsrc,
-            q_base,
-            lane16id,
-            query_load_is_bf16=query_load_is_bf16,
-        )
-        mtp_prefetches.append((qi_val, qhi_pos, q_chunks))
-    return mtp_prefetches
-
-
-def _finish_sw_mtp_subgroup_q_fragments(
-    logits_lds_i32,
-    logits_lds_i64,
-    softmax_lds_f32,
-    mtp_prefetches,
-    lane16id,
-    rowid,
-    local_qhead_idx,
-    *,
-    mtp_subgroup_idx,
-):
-    if const_expr(mtp_subgroup_idx > 0):
-        gpu.barrier()
-    qi_val, qhi_pos, q_chunks = mtp_prefetches[mtp_subgroup_idx]
     q_frags, query_scale_lane = _finish_q_fragments(
         logits_lds_i32,
         logits_lds_i64,
@@ -1270,8 +1136,8 @@ def compile_pa_decode_ps(
 ):
     """Compile a PS-mode PA decode kernel.
 
-    Unlike compile_pa_decode_sw, this does NOT bake in num_seqs/num_kv_heads/num_partitions
-    because PS mode uses dynamic work distribution. Grid = (num_sm, 1, 4).
+    This does NOT bake in num_seqs/num_kv_heads/num_partitions because PS mode
+    uses dynamic work distribution. Grid = (num_sm, 1, 4).
     """
     arch = get_hip_arch()
     query_packed_fp8 = query_input_dtype == "packed_fp8"
