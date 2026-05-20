@@ -25,16 +25,14 @@ from kernels.fp8_gemm_utils import (
     Mfma16x16x128,
     S2RLoader,
     StoreC,
+    ceildiv,
     compute_global_swizzle,
+    divmod,
     make_fp8_buffer_tensor,
     pack_i32x4_i32x8,
     swizzle_128,
     wait_barrier,
 )
-
-
-def _divmod(a, b):
-    return (a // b, a % b)
 
 
 def _min(a, b):
@@ -51,24 +49,25 @@ def _xcd_swizzle(num_pid_m, num_pid_n):
 
     num_wg = num_pid_m * num_pid_n
 
-    if num_wg <= SWIZZLE_THRESHOLD or num_wg % NUM_XCDS != 0:
-        return _divmod(wgid, num_pid_n)
+    # Simple path: no XCD remapping.
+    simple_m, simple_n = divmod(wgid, num_pid_n)
 
-    intra_xcd, xcd = _divmod(wgid, NUM_XCDS)
-    wgid = xcd * (num_wg // NUM_XCDS) + intra_xcd
+    # XCD-remapped path.
+    intra_xcd, xcd = divmod(wgid, NUM_XCDS)
+    wgid_remap = xcd * (num_wg // NUM_XCDS) + intra_xcd
     num_wgid_in_group = WGM * num_pid_n
-    group_id, intra_group = _divmod(wgid, num_wgid_in_group)
+    group_id, intra_group = divmod(wgid_remap, num_wgid_in_group)
     first_pid_m = group_id * WGM
     group_size_m = _min(num_pid_m - first_pid_m, WGM)
-    pid_n, intra_group_m = _divmod(intra_group, group_size_m)
+    pid_n, intra_group_m = divmod(intra_group, group_size_m)
     pid_m = first_pid_m + intra_group_m
-    return (pid_m, pid_n)
+
+    use_simple = (num_wg <= SWIZZLE_THRESHOLD) | (num_wg % NUM_XCDS != 0)
+    return (arith.select(use_simple, simple_m, pid_m), arith.select(use_simple, simple_n, pid_n))
 
 
 def compile_fp8_gemm_4w(
     *,
-    M: int,
-    N: int,
     K: int,
     BLOCK_M: int = 256,
     BLOCK_N: int = 256,
@@ -80,11 +79,9 @@ def compile_fp8_gemm_4w(
     LDS_BLOCK_M = BLOCK_M // 2
     LDS_BLOCK_N = BLOCK_N // 2
 
-    assert M >= 1 and N >= 1
     assert BLOCK_M >= 64 and BLOCK_M % 64 == 0 and BLOCK_N >= 64 and BLOCK_N % 64 == 0
     assert K % BLOCK_K == 0
 
-    N_BLOCKS = (N + BLOCK_N - 1) // BLOCK_N
     K_ITERS = K // BLOCK_K
     # Number of 16-row 16x128 tiles per wave per A/B partition.
     N_TILES_A = BLOCK_M // 4 // 16
@@ -117,6 +114,8 @@ def compile_fp8_gemm_4w(
         C: fx.Tensor,
         A_scale: fx.Tensor,
         B_scale: fx.Tensor,
+        c_m: fx.Int32,
+        c_n: fx.Int32
     ):
         F8_IR_t = fx.Float8E4M3FN.ir_type
 
@@ -133,10 +132,11 @@ def compile_fp8_gemm_4w(
         lane_id = fx.thread_idx.x % 64
         wave_id = fx.thread_idx.x // 64
 
+        n_blocks = ceildiv(c_n, BLOCK_N)
         if const_expr(use_xcd_remap):
-            tile_i, tile_j = _xcd_swizzle((M + BLOCK_M - 1) // BLOCK_M, N_BLOCKS)
+            tile_i, tile_j = _xcd_swizzle(ceildiv(c_m, BLOCK_M), n_blocks)
         else:
-            tile_i, tile_j = _divmod(fx.block_idx.x, N_BLOCKS)
+            tile_i, tile_j = divmod(fx.block_idx.x, n_blocks)
 
         wave_i = wave_id // 2
         wave_j = wave_id % 2
@@ -147,9 +147,8 @@ def compile_fp8_gemm_4w(
         B1_gl_offset = (tile_j * BLOCK_N + LDS_BLOCK_N) * K
         B_K_STEP = (2 * 1024) if b_preshuffled else BLOCK_K
 
-        # FP8 = 1 byte/elem; exact descriptor size from compile-time shape.
-        gA = make_fp8_buffer_tensor(A, F8_IR_t, num_records_bytes=M * K)
-        gB = make_fp8_buffer_tensor(B_T, F8_IR_t, num_records_bytes=N * K)
+        gA = make_fp8_buffer_tensor(A, F8_IR_t)
+        gB = make_fp8_buffer_tensor(B_T, F8_IR_t)
         ga_div = fx.logical_divide(gA, fx.make_layout(1, 1))
         gb_div = fx.logical_divide(gB, fx.make_layout(1, 1))
 
@@ -300,7 +299,7 @@ def compile_fp8_gemm_4w(
         b_g2s = G2SLoader(gb_div, gl_off_b, N_TILES_B, F8_IR_t, wave_id)
         a_s2r = S2RLoader(wave_i, N_TILES_A)
         b_s2r = S2RLoader(wave_j, N_TILES_B)
-        store_c = StoreC(A_scale, B_scale, C, M, N, mfma.idx, N_TILES_A, N_TILES_B)
+        store_c = StoreC(A_scale, B_scale, C, c_m, c_n, mfma.idx, N_TILES_A, N_TILES_B)
 
         # Prologue: 8-buffer LDS pipeline pre-fill.
         a_g2s.load(a_cur0, A0_gl_offset + 0 * A_K_STEP)
@@ -417,15 +416,19 @@ def compile_fp8_gemm_4w(
         C: fx.Tensor,
         A_scale: fx.Tensor,
         B_scale: fx.Tensor,
+        c_m: fx.Int32,
+        c_n: fx.Int32,
         stream: fx.Stream,
     ):
-        grid_x = ((M + BLOCK_M - 1) // BLOCK_M) * N_BLOCKS
+        grid_x = ceildiv(c_m, BLOCK_M) * ceildiv(c_n, BLOCK_N)
         kernel_gemm(
             A,
             B_T,
             C,
             A_scale,
             B_scale,
+            c_m,
+            c_n,
             value_attrs={"rocdl.waves_per_eu": 1, "rocdl.flat_work_group_size": "256,256"},
         ).launch(grid=(grid_x, 1, 1), block=(256, 1, 1), stream=stream)
 

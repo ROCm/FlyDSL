@@ -15,20 +15,26 @@ from kernels.fp8_gemm_utils import (
     Mfma16x16x128,
     S2RLoader,
     StoreC,
+    ceildiv,
     compute_global_swizzle,
+    divmod,
     make_fp8_buffer_tensor,
     wait_barrier,
 )
 
 
-def compile_fp8_gemm_8w(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: int = 256, b_preshuffled: bool = False):
+def compile_fp8_gemm_8w(
+    *,
+    K: int,
+    BLOCK_M: int = 256,
+    BLOCK_N: int = 256,
+    b_preshuffled: bool = False
+):
     BLOCK_K = 128
 
-    assert M >= 1 and N >= 1
     assert BLOCK_M >= 128 and BLOCK_N >= 256 and BLOCK_M % 128 == 0 and BLOCK_N % 256 == 0
     assert K % BLOCK_K == 0
 
-    N_BLOCKS = (N + BLOCK_N - 1) // BLOCK_N
     K_ITERS = K // BLOCK_K
 
     N_TILES_A = BLOCK_M // 64
@@ -65,8 +71,12 @@ def compile_fp8_gemm_8w(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: 
         C: fx.Tensor,
         A_scale: fx.Tensor,
         B_scale: fx.Tensor,
+        c_m: fx.Int32,
+        c_n: fx.Int32,
     ):
         F8_IR_t = fx.Float8E4M3FN.ir_type
+
+        n_blocks = ceildiv(c_n, BLOCK_N)
 
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
         a_cur0 = lds.A_lds_cur_0
@@ -82,8 +92,7 @@ def compile_fp8_gemm_8w(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: 
         wave_id = fx.thread_idx.x // 64
         wave_m = wave_id // 4
         wave_n = wave_id % 4
-        block_m = fx.block_idx.x // N_BLOCKS
-        block_n = fx.block_idx.x % N_BLOCKS
+        block_m, block_n = divmod(fx.block_idx.x, n_blocks)
 
         A0_gl_offset = (block_m * BLOCK_M) * K
         A1_gl_offset = (block_m * BLOCK_M + LDS_BLOCK_M) * K
@@ -91,9 +100,8 @@ def compile_fp8_gemm_8w(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: 
         B0_gl_offset = (block_n * BLOCK_N) * K
         B1_gl_offset = (block_n * BLOCK_N + LDS_BLOCK_N) * K
 
-        # FP8 = 1 byte/elem; exact descriptor size from compile-time shape.
-        gA = make_fp8_buffer_tensor(A, F8_IR_t, num_records_bytes=M * K)
-        gB = make_fp8_buffer_tensor(B_T, F8_IR_t, num_records_bytes=N * K)
+        gA = make_fp8_buffer_tensor(A, F8_IR_t)
+        gB = make_fp8_buffer_tensor(B_T, F8_IR_t)
         a_div = fx.logical_divide(gA, fx.make_layout(1, 1))
         b_div = fx.logical_divide(gB, fx.make_layout(1, 1))
 
@@ -106,7 +114,7 @@ def compile_fp8_gemm_8w(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: 
         b_g2s = G2SLoader(b_div, gl_off_b, N_LDS_STEPS_B, F8_IR_t, wave_id)
         a_s2r = S2RLoader(wave_m, N_TILES_A)
         b_s2r = S2RLoader(wave_n, N_TILES_B)
-        store_c = StoreC(A_scale, B_scale, C, M, N, mfma.idx, N_TILES_A, N_TILES_B)
+        store_c = StoreC(A_scale, B_scale, C, c_m, c_n, mfma.idx, N_TILES_A, N_TILES_B)
 
         # 2x2 config of 4x2 (instead of 4x4 in 4wave) 16x16 sub-tiles
         c00_frag = [mfma.zero_value] * N_ACCUMS
@@ -258,15 +266,19 @@ def compile_fp8_gemm_8w(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: 
         C: fx.Tensor,
         A_scale: fx.Tensor,
         B_scale: fx.Tensor,
+        c_m: fx.Int32,
+        c_n: fx.Int32,
         stream: fx.Stream,
     ):
-        grid_x = ((M + BLOCK_M - 1) // BLOCK_M) * N_BLOCKS
+        grid_x = ceildiv(c_m, BLOCK_M) * ceildiv(c_n, BLOCK_N)
         kernel_gemm(
             A,
             B_T,
             C,
             A_scale,
             B_scale,
+            c_m,
+            c_n,
             value_attrs={"rocdl.waves_per_eu": 2, "rocdl.flat_work_group_size": "512,512"},
         ).launch(grid=(grid_x, 1, 1), block=(512, 1, 1), stream=stream)
 

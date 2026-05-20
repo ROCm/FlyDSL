@@ -16,8 +16,20 @@ def preshuffle_b(b_t):
     return b_t.reshape(n // 16, 16, k // 64, 4, 16).permute(0, 2, 3, 1, 4).contiguous()
 
 
-def make_fp8_buffer_tensor(arg_i8, fp8_ir_t, num_records_bytes):
-    t_i8 = fx.rocdl.make_buffer_tensor(arg_i8, max_size=False, num_records_bytes=num_records_bytes)
+def ceildiv(a: int, b: int) -> int:
+    return (a + b - 1) // b
+
+
+def divmod(a: int, b: int) -> tuple[int, int]:
+    return (a // b, a % b)
+
+
+def make_fp8_buffer_tensor(arg_i8, fp8_ir_t):
+    # max_size=False with no num_records_bytes: cosize(layout) becomes a
+    # runtime expression because TensorAdaptor defaults to layout-dynamic
+    # memref (post #554), so the descriptor adapts to the actual tensor
+    # extent and no longer bakes the first-call's shape into IR.
+    t_i8 = fx.rocdl.make_buffer_tensor(arg_i8, max_size=False)
     iter_i8 = fx.get_iter(t_i8)
     f8_buf_ptr_ty = fx.PointerType.get(
         elem_ty=fp8_ir_t,

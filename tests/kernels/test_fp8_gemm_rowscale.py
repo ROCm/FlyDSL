@@ -102,8 +102,6 @@ def _bench_fp8_gemm(
 
     if use_8w:
         launch_fn = compile_fp8_gemm_8w(
-            M=M,
-            N=N,
             K=K,
             BLOCK_M=tile_m,
             BLOCK_N=tile_n,
@@ -112,8 +110,6 @@ def _bench_fp8_gemm(
         print(f"\n[fp8_gemm_8wave] M={M} N={N} K={K} BLOCK_M={tile_m} BLOCK_N={tile_n} preshuffle_b={b_preshuffled}")
     else:
         launch_fn = compile_fp8_gemm_4w(
-            M=M,
-            N=N,
             K=K,
             BLOCK_M=tile_m,
             BLOCK_N=tile_n,
@@ -133,6 +129,8 @@ def _bench_fp8_gemm(
             c.contiguous().view(-1),
             sa.contiguous().view(-1),
             sb.contiguous().view(-1),
+            M,
+            N,
             torch.cuda.current_stream(),
         )
 
