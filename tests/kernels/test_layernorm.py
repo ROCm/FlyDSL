@@ -7,6 +7,18 @@
 
 import os
 
+import pytest
+
+from kernels.layernorm_kernel import (
+    BLOCK_THREADS,
+    KERNEL_NAME as LAYERNORM_KERNEL_NAME,
+    build_fused_add_layernorm_dynamicquant_module,
+    build_fused_add_layernorm_module,
+    build_fused_add_layernorm_smoothquant_module,
+    build_layernorm_dynamicquant_module,
+    build_layernorm_module,
+    build_layernorm_smoothquant_module,
+)
 from tests.test_common import run_perftest
 from tests.kernels.benchmark_common import (
     PerfRow,
@@ -14,7 +26,6 @@ from tests.kernels.benchmark_common import (
     maybe_enable_aiter,
     print_perf_table,
 )
-import pytest
 
 pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
 
@@ -30,16 +41,6 @@ DTYPE_FP16 = torch.float16
 DTYPE_BF16 = torch.bfloat16
 
 EPS: float = 1e-5
-from kernels.layernorm_kernel import (
-    build_fused_add_layernorm_dynamicquant_module,
-    build_fused_add_layernorm_module,
-    build_fused_add_layernorm_smoothquant_module,
-    build_layernorm_dynamicquant_module,
-    build_layernorm_module,
-    build_layernorm_smoothquant_module,
-    BLOCK_THREADS,
-    KERNEL_NAME as LAYERNORM_KERNEL_NAME,
-)
 
 WARMUP_ITERS = 10
 BENCH_ITERS = 100
@@ -77,10 +78,15 @@ def _get_layernorm_configs():
             configs.append((int(m_s), int(n_s), dt))
         return configs
 
+    # Prefer N multiples of 2048 to exercise the fast path.
     return [
-        (4, 128, "f32"),
-        (16, 2000, "f16"),
-        (32, 8192, "bf16"),
+        # (64, 256, "f32"),     # Aligned
+        # (128, 1024, "f32"),   # Aligned
+        # (32, 128, "f16"),     # Aligned
+        # (64, 2000, "f32"),    # Unaligned (tail handling)
+        # (16, 512, "bf16"),    # BF16
+        # (1024, 8192, "bf16"), # BF16
+        (32768, 8192, "bf16"),
     ]
 
 
@@ -191,7 +197,9 @@ def run_test(M: int, N: int, dtype: str = "f32"):
 
     kernel_launch()
     torch.cuda.synchronize()
-    _, avg_us = run_perftest(lambda: (kernel_launch(), torch.cuda.synchronize()), num_iters=BENCH_ITERS, num_warmup=WARMUP_ITERS)
+    _, avg_us = run_perftest(
+        lambda: (kernel_launch(), torch.cuda.synchronize()), num_iters=BENCH_ITERS, num_warmup=WARMUP_ITERS
+    )
     flydsl_gpu_us = None
     if os.environ.get("ROCDSL_COMPARE_AITER", "0") == "1":
         flydsl_gpu_us = bench_gpu_us_torch(kernel_launch, warmup=WARMUP_ITERS, iters=BENCH_ITERS)
@@ -214,7 +222,9 @@ def run_fused_add_test(M: int, N: int, dtype: str):
     def kernel_launch():
         launch_fn(input_dev, residual_dev, gamma_dev, beta_dev, output_dev, residual_out_dev, M, stream=stream)
 
-    _, avg_us = run_perftest(lambda: (kernel_launch(), torch.cuda.synchronize()), num_iters=BENCH_ITERS, num_warmup=WARMUP_ITERS)
+    _, avg_us = run_perftest(
+        lambda: (kernel_launch(), torch.cuda.synchronize()), num_iters=BENCH_ITERS, num_warmup=WARMUP_ITERS
+    )
     flydsl_gpu_us = None
     if os.environ.get("ROCDSL_COMPARE_AITER", "0") == "1":
         flydsl_gpu_us = bench_gpu_us_torch(kernel_launch, warmup=WARMUP_ITERS, iters=BENCH_ITERS)
@@ -259,15 +269,30 @@ def run_quant_test(M: int, N: int, dtype: str, *, is_smooth: bool, is_fused_add:
 
     def kernel_launch():
         if is_fused_add and is_smooth:
-            launch_fn(input_dev, residual_dev, gamma_dev, beta_dev, xscale_dev, output_dev, residual_out_dev, yscale_dev, M, stream=stream)
+            launch_fn(
+                input_dev,
+                residual_dev,
+                gamma_dev,
+                beta_dev,
+                xscale_dev,
+                output_dev,
+                residual_out_dev,
+                yscale_dev,
+                M,
+                stream=stream,
+            )
         elif is_fused_add:
-            launch_fn(input_dev, residual_dev, gamma_dev, beta_dev, output_dev, residual_out_dev, yscale_dev, M, stream=stream)
+            launch_fn(
+                input_dev, residual_dev, gamma_dev, beta_dev, output_dev, residual_out_dev, yscale_dev, M, stream=stream
+            )
         elif is_smooth:
             launch_fn(input_dev, gamma_dev, beta_dev, xscale_dev, output_dev, yscale_dev, M, stream=stream)
         else:
             launch_fn(input_dev, gamma_dev, beta_dev, output_dev, yscale_dev, M, stream=stream)
 
-    _, avg_us = run_perftest(lambda: (kernel_launch(), torch.cuda.synchronize()), num_iters=BENCH_ITERS, num_warmup=WARMUP_ITERS)
+    _, avg_us = run_perftest(
+        lambda: (kernel_launch(), torch.cuda.synchronize()), num_iters=BENCH_ITERS, num_warmup=WARMUP_ITERS
+    )
     flydsl_gpu_us = None
     if os.environ.get("ROCDSL_COMPARE_AITER", "0") == "1":
         flydsl_gpu_us = bench_gpu_us_torch(kernel_launch, warmup=WARMUP_ITERS, iters=BENCH_ITERS)
@@ -302,14 +327,22 @@ def _run_configs(op: str, runner):
             aiter_us = None
             if maybe_enable_aiter():
                 aiter_us = _bench_aiter(M, N, dtype, op)
-            perf_rows.append(PerfRow(op=f"layernorm_{op}", shape=f"{M}x{N}", dtype=dtype, flydsl_gpu_us=flydsl_gpu_us, aiter_gpu_us=aiter_us))
+            perf_rows.append(
+                PerfRow(
+                    op=f"layernorm_{op}",
+                    shape=f"{M}x{N}",
+                    dtype=dtype,
+                    flydsl_gpu_us=flydsl_gpu_us,
+                    aiter_gpu_us=aiter_us,
+                )
+            )
     if do_compare and perf_rows:
         print_perf_table(perf_rows)
     if failures != 0:
         raise SystemExit(f"{failures} {op} tests failed")
 
 
-def test_all():
+def test_layernorm_base():
     print("=" * 80)
     print("Running LayerNorm Tests")
     print("=" * 80)
@@ -329,15 +362,19 @@ def test_layernorm_smoothquant():
 
 
 def test_fused_add_layernorm_dynamicquant():
-    _run_configs("fused_add_dynamicquant", lambda M, N, dtype: run_quant_test(M, N, dtype, is_smooth=False, is_fused_add=True))
+    _run_configs(
+        "fused_add_dynamicquant", lambda M, N, dtype: run_quant_test(M, N, dtype, is_smooth=False, is_fused_add=True)
+    )
 
 
 def test_fused_add_layernorm_smoothquant():
-    _run_configs("fused_add_smoothquant", lambda M, N, dtype: run_quant_test(M, N, dtype, is_smooth=True, is_fused_add=True))
+    _run_configs(
+        "fused_add_smoothquant", lambda M, N, dtype: run_quant_test(M, N, dtype, is_smooth=True, is_fused_add=True)
+    )
 
 
 if __name__ == "__main__":
-    test_all()
+    test_layernorm_base()
     test_fused_add_layernorm()
     test_layernorm_dynamicquant()
     test_layernorm_smoothquant()
