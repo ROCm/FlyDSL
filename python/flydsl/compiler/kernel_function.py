@@ -586,9 +586,11 @@ class KernelFunction:
         finally:
             KernelFunction._current = None
 
-        smem_bytes = None
-        if self._shared_allocator is not None:
+        # The static memory size is handled by compiler.
+        if self._shared_allocator is not None and not self._shared_allocator.is_static:
             smem_bytes = self._shared_allocator.allocated_bytes
+        else:
+            smem_bytes = None
 
         return tuple(param_values), gpu_func, smem_bytes
 
