@@ -86,10 +86,9 @@ struct PyMmaOpGFX11_WMMAType : PyConcreteType<PyMmaOpGFX11_WMMAType> {
         "get",
         [](int32_t m, int32_t n, int32_t k, PyType &elemTyA, PyType &elemTyB, PyType &elemTyAcc,
            DefaultingPyMlirContext context) {
-          return PyMmaOpGFX11_WMMAType(
-              context->getRef(),
-              wrap(MmaOpGFX11_WMMAType::get(m, n, k, unwrap(elemTyA), unwrap(elemTyB),
-                                            unwrap(elemTyAcc))));
+          return PyMmaOpGFX11_WMMAType(context->getRef(), wrap(MmaOpGFX11_WMMAType::get(
+                                                              m, n, k, unwrap(elemTyA),
+                                                              unwrap(elemTyB), unwrap(elemTyAcc))));
         },
         "m"_a, "n"_a, "k"_a, "elem_ty_a"_a, "elem_ty_b"_a, "elem_ty_acc"_a, nb::kw_only(),
         "context"_a = nb::none(),

@@ -48,8 +48,7 @@ LayoutAttr getThrValLayoutAB(MLIRContext *ctx, int32_t K, Type /*elemTy*/) {
   auto getContext = [&]() { return ctx; };
   // shape  = (thr=(16, 2), val=K)
   // stride = (thr=(1, 0),  val=16)   ; stride 0 on lane/16 axis = broadcast
-  return FxLayout(FxShape(FxThr(16, 2), FxVal(K)),
-                  FxStride(FxThr(1, 0), FxVal(16)));
+  return FxLayout(FxShape(FxThr(16, 2), FxVal(K)), FxStride(FxThr(1, 0), FxVal(16)));
 }
 
 // C/D matrix register layout for GFX11 WMMA (wave32) with 32-bit accumulator.
@@ -77,8 +76,7 @@ LayoutAttr getThrValLayoutAB(MLIRContext *ctx, int32_t K, Type /*elemTy*/) {
 //       = (l%16)*16 + (l/16)*1 + v*2
 LayoutAttr getThrValLayoutCD_F32(MLIRContext *ctx) {
   auto getContext = [&]() { return ctx; };
-  return FxLayout(FxShape(FxThr(16, 2), FxVal(8)),
-                  FxStride(FxThr(16, 1), FxVal(2)));
+  return FxLayout(FxShape(FxThr(16, 2), FxVal(8)), FxStride(FxThr(16, 1), FxVal(2)));
 }
 
 } // namespace gfx11
@@ -99,13 +97,10 @@ Type MmaOpGFX11_WMMAType::getValTypeB() const { return getElemTyB(); }
 Type MmaOpGFX11_WMMAType::getValTypeC() const { return getElemTyAcc(); }
 Type MmaOpGFX11_WMMAType::getValTypeD() const { return getElemTyAcc(); }
 
-Attribute MmaOpGFX11_WMMAType::getThrLayout() const {
-  return FxLayout(FxC(32), FxC(1));
-}
+Attribute MmaOpGFX11_WMMAType::getThrLayout() const { return FxLayout(FxC(32), FxC(1)); }
 
 Attribute MmaOpGFX11_WMMAType::getShapeMNK() const {
-  return IntTupleAttr::get(
-      ArrayAttr::get(getContext(), {FxC(getM()), FxC(getN()), FxC(getK())}));
+  return IntTupleAttr::get(ArrayAttr::get(getContext(), {FxC(getM()), FxC(getN()), FxC(getK())}));
 }
 
 Attribute MmaOpGFX11_WMMAType::getThrValLayoutA() const {
@@ -120,12 +115,11 @@ Attribute MmaOpGFX11_WMMAType::getThrValLayoutC() const {
   return gfx11::getThrValLayoutCD_F32(getContext());
 }
 
-LogicalResult MmaOpGFX11_WMMAType::verify(
-    function_ref<InFlightDiagnostic()> emitError, int32_t m, int32_t n,
-    int32_t k, Type elemTyA, Type elemTyB, Type elemTyAcc) {
+LogicalResult MmaOpGFX11_WMMAType::verify(function_ref<InFlightDiagnostic()> emitError, int32_t m,
+                                          int32_t n, int32_t k, Type elemTyA, Type elemTyB,
+                                          Type elemTyAcc) {
   if (m != 16 || n != 16 || k != 16) {
-    return emitError() << "GFX11 WMMA requires M=N=K=16, got " << m << "x" << n
-                       << "x" << k;
+    return emitError() << "GFX11 WMMA requires M=N=K=16, got " << m << "x" << n << "x" << k;
   }
 
   bool valid = false;
@@ -147,9 +141,8 @@ LogicalResult MmaOpGFX11_WMMAType::verify(
     valid = true;
 
   if (!valid) {
-    return emitError() << "unsupported GFX11 WMMA configuration: " << m << "x"
-                       << n << "x" << k << " with A=" << elemTyA
-                       << ", B=" << elemTyB << ", Acc=" << elemTyAcc;
+    return emitError() << "unsupported GFX11 WMMA configuration: " << m << "x" << n << "x" << k
+                       << " with A=" << elemTyA << ", B=" << elemTyB << ", Acc=" << elemTyAcc;
   }
   return success();
 }
@@ -190,9 +183,8 @@ static Type getWmmaAccRawType(MLIRContext * /*ctx*/, Type elemTyAcc) {
 // Build a `rocdl.wmma.*` intrinsic via OperationState. This handles the
 // heterogeneous operand layouts (some variants interleave SSA values with
 // named attributes, e.g. the IU variant has signA/signB/clamp attrs).
-static Value buildWmmaOp(OpBuilder &builder, Location loc, StringRef opName,
-                         Type resultTy, ValueRange operands,
-                         ArrayRef<NamedAttribute> attrs) {
+static Value buildWmmaOp(OpBuilder &builder, Location loc, StringRef opName, Type resultTy,
+                         ValueRange operands, ArrayRef<NamedAttribute> attrs) {
   OperationState state(loc, opName);
   state.addTypes(resultTy);
   state.addOperands(operands);
@@ -201,10 +193,12 @@ static Value buildWmmaOp(OpBuilder &builder, Location loc, StringRef opName,
   return op->getResult(0);
 }
 
-FailureOr<Value> MmaOpGFX11_WMMAType::emitAtomCallSSA(
-    OpBuilder &builder, Location loc, Type /*resultTy*/, Type /*mmaAtomTyArg*/,
-    Type /*dTyArg*/, Type /*aTyArg*/, Type /*bTyArg*/, Type /*cTyArg*/,
-    Value /*atomVal*/, Value /*d*/, Value a, Value b, Value c) const {
+FailureOr<Value> MmaOpGFX11_WMMAType::emitAtomCallSSA(OpBuilder &builder, Location loc,
+                                                      Type /*resultTy*/, Type /*mmaAtomTyArg*/,
+                                                      Type /*dTyArg*/, Type /*aTyArg*/,
+                                                      Type /*bTyArg*/, Type /*cTyArg*/,
+                                                      Value /*atomVal*/, Value /*d*/, Value a,
+                                                      Value b, Value c) const {
   int32_t m = getM();
   int32_t n = getN();
   int32_t k = getK();
@@ -240,15 +234,13 @@ FailureOr<Value> MmaOpGFX11_WMMAType::emitAtomCallSSA(
   } else if (elemTyA.isBF16() && elemTyB.isBF16() && elemTyAcc.isF32()) {
     opName = ROCDL::wmma_f32_16x16x16_bf16::getOperationName();
     operands = {a, b, c};
-  } else if (elemTyA.isInteger(8) && elemTyB.isInteger(8) &&
-             elemTyAcc.isInteger(32)) {
+  } else if (elemTyA.isInteger(8) && elemTyB.isInteger(8) && elemTyAcc.isInteger(32)) {
     opName = ROCDL::wmma_i32_16x16x16_iu8::getOperationName();
     operands = {a, b, c};
     attrs.push_back({builder.getStringAttr("signA"), falseAttr});
     attrs.push_back({builder.getStringAttr("signB"), falseAttr});
     attrs.push_back({builder.getStringAttr("clamp"), falseAttr});
-  } else if (elemTyA.isInteger(4) && elemTyB.isInteger(4) &&
-             elemTyAcc.isInteger(32)) {
+  } else if (elemTyA.isInteger(4) && elemTyB.isInteger(4) && elemTyAcc.isInteger(32)) {
     opName = ROCDL::wmma_i32_16x16x16_iu4::getOperationName();
     operands = {a, b, c};
     attrs.push_back({builder.getStringAttr("signA"), falseAttr});
@@ -261,10 +253,10 @@ FailureOr<Value> MmaOpGFX11_WMMAType::emitAtomCallSSA(
   return buildWmmaOp(builder, loc, opName, rawAccTy, operands, attrs);
 }
 
-LogicalResult MmaOpGFX11_WMMAType::emitAtomCall(
-    OpBuilder &builder, Location loc, Type mmaAtomTy, Type /*dMemTy*/,
-    Type /*aMemTy*/, Type /*bMemTy*/, Type /*cMemTy*/, Value atomVal,
-    Value dPtr, Value aPtr, Value bPtr, Value cPtr) const {
+LogicalResult MmaOpGFX11_WMMAType::emitAtomCall(OpBuilder &builder, Location loc, Type mmaAtomTy,
+                                                Type /*dMemTy*/, Type /*aMemTy*/, Type /*bMemTy*/,
+                                                Type /*cMemTy*/, Value atomVal, Value dPtr,
+                                                Value aPtr, Value bPtr, Value cPtr) const {
   Type elemTyA = getElemTyA();
   Type elemTyB = getElemTyB();
   Type elemTyAcc = getElemTyAcc();
@@ -285,8 +277,8 @@ LogicalResult MmaOpGFX11_WMMAType::emitAtomCall(
   Value b = LLVM::LoadOp::create(builder, loc, abTyB, bPtr);
   Value c = LLVM::LoadOp::create(builder, loc, accTy, cPtr);
 
-  auto res = emitAtomCallSSA(builder, loc, Type{}, mmaAtomTy, accTy, abTyA,
-                              abTyB, accTy, atomVal, Value{}, a, b, c);
+  auto res = emitAtomCallSSA(builder, loc, Type{}, mmaAtomTy, accTy, abTyA, abTyB, accTy, atomVal,
+                             Value{}, a, b, c);
   if (failed(res))
     return failure();
   LLVM::StoreOp::create(builder, loc, *res, dPtr);
