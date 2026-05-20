@@ -5,18 +5,12 @@
 #include "mlir/Dialect/Func/Transforms/FuncConversions.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
-#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/SCF/Transforms/Patterns.h"
-#include "mlir/IR/BuiltinOps.h"
-#include "mlir/IR/PatternMatch.h"
-#include "mlir/IR/SymbolTable.h"
-#include "mlir/Interfaces/FunctionInterfaces.h"
+#include "mlir/IR/MLIRContext.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
 
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
-#include "flydsl/Dialect/Fly/Transforms/Passes.h"
-#include "flydsl/Dialect/Fly/Utils/IntTupleUtils.h"
 
 #include <functional>
 
@@ -627,11 +621,3 @@ public:
 };
 
 } // namespace
-
-namespace impl {
-
-std::unique_ptr<::mlir::Pass> createRewriteFuncSignaturePass() {
-  return std::make_unique<RewriteFuncSignaturePass>();
-}
-
-} // namespace impl
