@@ -17,6 +17,7 @@ from flydsl.expr import math as fly_math
 from flydsl.expr.typing import Int32, T
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
+from kernels import dpp_utils
 
 # ── Kernel geometry constants ────────────────────────────────────────
 QUERY_GROUP_SIZE = 16
@@ -349,7 +350,7 @@ def _finish_q_fragments(
         local_max = local_max.maximumf(chunk_max)
 
     for sh in [8, 4, 2, 1]:
-        local_max = local_max.maximumf(rocdl.dpp_xor_f32(local_max, sh))
+        local_max = local_max.maximumf(dpp_utils.dpp_xor_f32(local_max, sh))
     query_scale_lane = fx.Float32(
         arith.select(
             local_max > c_zero_f,
