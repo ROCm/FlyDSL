@@ -95,7 +95,7 @@ def FlyROCDL_MmaOpGFX1250_WMMA : FlyROCDL_MmaOp<"MmaOpGFX1250_WMMA", "gfx1250.wm
 // gfx1103, gfx1150, gfx1151, gfx1152)
 //===----------------------------------------------------------------------===//
 
-def FlyROCDL_MmaOpGFX11_WMMA : FlyROCL_MmaOp<"MmaOpGFX11_WMMA", "gfx11.wmma", []> {
+def FlyROCDL_MmaOpGFX11_WMMA : FlyROCDL_MmaOp<"MmaOpGFX11_WMMA", "gfx11.wmma", []> {
   let parameters = (ins
     "int32_t":$m,
     "int32_t":$n,
