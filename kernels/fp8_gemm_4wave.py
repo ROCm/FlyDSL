@@ -109,13 +109,7 @@ def compile_fp8_gemm_4w(
 
     @flyc.kernel
     def kernel_gemm(
-        A: fx.Tensor,
-        B_T: fx.Tensor,
-        C: fx.Tensor,
-        A_scale: fx.Tensor,
-        B_scale: fx.Tensor,
-        c_m: fx.Int32,
-        c_n: fx.Int32
+        A: fx.Tensor, B_T: fx.Tensor, C: fx.Tensor, A_scale: fx.Tensor, B_scale: fx.Tensor, c_m: fx.Int32, c_n: fx.Int32
     ):
         F8_IR_t = fx.Float8E4M3FN.ir_type
 

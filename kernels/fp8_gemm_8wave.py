@@ -23,13 +23,7 @@ from kernels.fp8_gemm_utils import (
 )
 
 
-def compile_fp8_gemm_8w(
-    *,
-    K: int,
-    BLOCK_M: int = 256,
-    BLOCK_N: int = 256,
-    b_preshuffled: bool = False
-):
+def compile_fp8_gemm_8w(*, K: int, BLOCK_M: int = 256, BLOCK_N: int = 256, b_preshuffled: bool = False):
     BLOCK_K = 128
 
     assert BLOCK_M >= 128 and BLOCK_N >= 256 and BLOCK_M % 128 == 0 and BLOCK_N % 256 == 0
