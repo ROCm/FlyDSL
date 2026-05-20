@@ -320,13 +320,13 @@ def build_flash_attn_opus_module(
 
         lds_scope_names = ("lds_k0", "lds_k1", "lds_v0", "lds_v1")
 
-        def lds_scope(kind, buf_id):
+        def _lds_scope(kind, buf_id):
             return f"lds_{kind}{buf_id}"
 
-        def lds_alias_scopes(name):
+        def _lds_alias_scopes(name):
             return _lds_alias_scope_array([name])
 
-        def lds_noalias_scopes(name):
+        def _lds_noalias_scopes(name):
             return _lds_alias_scope_array(
                 [scope_name for scope_name in lds_scope_names if scope_name != name]
             )
@@ -529,7 +529,7 @@ def build_flash_attn_opus_module(
         def _fmax(a, b):
             return arith.MaxNumFOp(_raw(a), _raw(b), fastmath=fm_fast).result
 
-        def mfma_acc(a, b, c):
+        def _mfma_acc(a, b, c):
             return _mfma(rocdl.mfma_f32_32x32x16_bf16, a, b, c)
 
         def _sched_barrier_pairs(pairs, valu_cnt, group):
@@ -552,12 +552,12 @@ def build_flash_attn_opus_module(
                 rocdl.sched_group_barrier(_MFMA_MASK, 1, group)
                 rocdl.sched_group_barrier(_EXP_MASK, exp_cnt, group)
 
-        def ds_read_tr_v4f16_imm(lds_base_elem_idx, imm_bytes):
+        def _ds_read_tr_v4f16_imm(lds_base_elem_idx, imm_bytes):
             byte_offset = lds_base_elem_idx * 2 + lds_kv_offset
             addr_i32 = fx.Int32(byte_offset)
             return _ds_read_tr16_b64_imm(v4f16_type, addr_i32, imm_bytes)
 
-        def global_idx_q(token_idx, col):
+        def _global_idx_q(token_idx, col):
             token = batch_idx * seq_len_v + token_idx
             return token * stride_q_n_v + q_head_idx * HEAD_DIM + col
 
@@ -581,7 +581,7 @@ def build_flash_attn_opus_module(
                 aux,
             ).result
 
-        def load_q_all(q_row_in_block):
+        def _load_q_all(q_row_in_block):
             q_raw_packs = []
             for ks in range_constexpr(K_STEPS_QK):
                 q_col = fx.Index(ks * K_STEP_QK) + lane_div_32 * MFMA_LANE_K
@@ -604,7 +604,7 @@ def build_flash_attn_opus_module(
             q_all = _concat_vectors(q_32_packs[0], q_32_packs[1])
             return Vec(q_all, (K_STEPS_QK * MFMA_LANE_K,), elem_dtype)
 
-        def scale_q_all(q_all_bf16):
+        def _scale_q_all(q_all_bf16):
             fm_fast_attr = ir.Attribute.parse("#llvm.fastmath<fast>")
             q_all_f32_op = llvm.FPExtOp(v64f32_type, _raw(q_all_bf16))
             q_all_f32_op.operation.attributes["fastmathFlags"] = fm_fast_attr
@@ -622,7 +622,7 @@ def build_flash_attn_opus_module(
             q_all_scaled_bf16 = q_all_scaled_bf16_op.result
             return Vec(q_all_scaled_bf16, (K_STEPS_QK * MFMA_LANE_K,), elem_dtype)
 
-        def get_q_pack(q_all_scaled_bf16, ks):
+        def _get_q_pack(q_all_scaled_bf16, ks):
             q_vec = Vec(q_all_scaled_bf16)
             base = ks * MFMA_LANE_K
             return q_vec.shuffle(q_vec, [base + i for i in range(MFMA_LANE_K)]).ir_value()
@@ -671,7 +671,8 @@ def build_flash_attn_opus_module(
             )
             return llvm.extractvalue(T.i32, ret, [2]), llvm.extractvalue(T.i32, ret, [3])
 
-        def _anchor_pair(lo, hi):
+        def _anchor_pair(v_s):
+            lo, hi = v_s
             lo_ir = _llvm_value(lo)
             hi_ir = _llvm_value(hi)
             ret_ty = ir.Type.parse("!llvm.struct<(vector<16xf32>, vector<16xf32>)>")
@@ -687,9 +688,10 @@ def build_flash_attn_opus_module(
                 llvm.extractvalue(hi_ir.type, ret, [1]),
             )
 
-        def _anchor_p_parts(lo_packs, hi_packs):
-            p_lo_all = _concat_vectors(lo_packs[0], lo_packs[1])
-            p_hi_all = _concat_vectors(hi_packs[0], hi_packs[1])
+        def _anchor_v_p(v_p):
+            p_lo, p_hi = v_p
+            p_lo_all = _concat_vectors(p_lo[0], p_lo[1])
+            p_hi_all = _concat_vectors(p_hi[0], p_hi[1])
             p_all = _concat_vectors(p_lo_all, p_hi_all)
             p_all_ir = _llvm_value(p_all)
             p_all_anchored = llvm.inline_asm(
@@ -751,7 +753,7 @@ def build_flash_attn_opus_module(
                 has_side_effects=True,
             )
 
-        def bf16_trunc_pack_v8(f32_vals):
+        def _bf16_trunc_pack_v8(f32_vals):
             pairs = []
             for j in range_constexpr(4):
                 pairs.append(
@@ -759,20 +761,20 @@ def build_flash_attn_opus_module(
                 )
             return Vec.from_elements(pairs, fx.Int32).bitcast(elem_dtype).ir_value()
 
-        def k_buf_base(buf_id):
+        def _k_buf_base(buf_id):
             if const_expr(isinstance(buf_id, int)):
                 return fx.Index(OPUS_K_BUF_BASE[buf_id])
             # runtime buf_id (rare): K0=0, K1=OPUS_KV_PER_BUFFER
             return buf_id * fx.Index(OPUS_KV_PER_BUFFER)
 
-        def v_buf_base(buf_id):
+        def _v_buf_base(buf_id):
             if const_expr(isinstance(buf_id, int)):
                 return fx.Index(OPUS_V_BUF_BASE[buf_id])
             # runtime buf_id (rare): V0=SMEM_K_TILE_ELEMS, V1=SMEM_K_TILE_ELEMS+OPUS_KV_PER_BUFFER
             return fx.Index(SMEM_K_TILE_ELEMS) + buf_id * fx.Index(OPUS_KV_PER_BUFFER)
 
-        def async_load_k(tile_start, buf_id):
-            k_lds_byte_base = lds_kv_base_idx + k_buf_base(buf_id) * fx.Index(BF16_BYTES)
+        def _async_load_k(tile_start, buf_id):
+            k_lds_byte_base = lds_kv_base_idx + _k_buf_base(buf_id) * fx.Index(BF16_BYTES)
             for d in range_constexpr(NUM_DMA_K):
                 lds_addr = (
                     k_lds_byte_base
@@ -790,7 +792,7 @@ def build_flash_attn_opus_module(
                 )
                 voffset = fx.Int32(lane_byte)
                 soffset = fx.Int32(uniform_byte)
-                scope_name = lds_scope("k", buf_id)
+                scope_name = _lds_scope("k", buf_id)
                 rocdl.raw_ptr_buffer_load_lds(
                     k_rsrc,
                     lds_ptr,
@@ -799,12 +801,12 @@ def build_flash_attn_opus_module(
                     soffset,
                     _dma_off,
                     _dma_aux,
-                    alias_scopes=lds_alias_scopes(scope_name),
-                    noalias_scopes=lds_noalias_scopes(scope_name),
+                    alias_scopes=_lds_alias_scopes(scope_name),
+                    noalias_scopes=_lds_noalias_scopes(scope_name),
                 )
 
-        def async_load_v(tile_start, buf_id):
-            v_lds_byte_base = lds_kv_base_idx + v_buf_base(buf_id) * fx.Index(BF16_BYTES)
+        def _async_load_v(tile_start, buf_id):
+            v_lds_byte_base = lds_kv_base_idx + _v_buf_base(buf_id) * fx.Index(BF16_BYTES)
             for d in range_constexpr(NUM_DMA_V):
                 lds_addr = (
                     v_lds_byte_base
@@ -822,7 +824,7 @@ def build_flash_attn_opus_module(
                 )
                 voffset = fx.Int32(lane_byte)
                 soffset = fx.Int32(uniform_byte)
-                scope_name = lds_scope("v", buf_id)
+                scope_name = _lds_scope("v", buf_id)
                 rocdl.raw_ptr_buffer_load_lds(
                     v_rsrc,
                     lds_ptr,
@@ -831,11 +833,11 @@ def build_flash_attn_opus_module(
                     soffset,
                     _dma_off,
                     _dma_aux,
-                    alias_scopes=lds_alias_scopes(scope_name),
-                    noalias_scopes=lds_noalias_scopes(scope_name),
+                    alias_scopes=_lds_alias_scopes(scope_name),
+                    noalias_scopes=_lds_noalias_scopes(scope_name),
                 )
 
-        def reduction_pair(v_f32):
+        def _reduction_pair(v_f32):
             v_i32 = _raw(_bitcast_i32(v_f32))
             pair_ty = ir.Type.parse("!llvm.struct<(i32, i32)>")
             swapped = rocdl.permlane32_swap(pair_ty, v_i32, v_i32, False, True)
@@ -843,14 +845,14 @@ def build_flash_attn_opus_module(
             rhs_i32 = llvm.extractvalue(T.i32, swapped, [1])
             return _raw(_bitcast_f32(lhs_i32)), _raw(_bitcast_f32(rhs_i32))
 
-        def async_load_k_from_lds_to_vgpr(buf_id, urk_base):
+        def _async_load_k_from_lds_to_vgpr(buf_id, urk_base):
             """Read all 16 K MFMA packs from LDS buffer `buf_id` (OPUS u_rk)."""
-            k_base = k_buf_base(buf_id)
+            k_base = _k_buf_base(buf_id)
             k_lo = [None] * K_STEPS_QK
             k_hi = [None] * K_STEPS_QK
 
-            def load_k_pack_aligned(elem_idx):
-                scope_name = lds_scope("k", buf_id)
+            def _load_k_pack_aligned(elem_idx):
+                scope_name = _lds_scope("k", buf_id)
                 byte_offset = elem_idx * fx.Index(BF16_BYTES)
                 ptr = buffer_ops.get_element_ptr(
                     lds_kv_base_ptr, byte_offset=byte_offset, elem_type=T.i8
@@ -859,17 +861,17 @@ def build_flash_attn_opus_module(
                     mfma_pack_type,
                     ptr,
                     alignment=16,
-                    alias_scopes=lds_alias_scopes(scope_name),
-                    noalias_scopes=lds_noalias_scopes(scope_name),
+                    alias_scopes=_lds_alias_scopes(scope_name),
+                    noalias_scopes=_lds_noalias_scopes(scope_name),
                 ).result
 
             for ks in range_constexpr(K_STEPS_QK):
                 ks_offset = (ks // 4) * OPUS_URK_KSTEP_OUTER + (ks % 4) * OPUS_URK_KSTEP_INNER
                 idx_lo = k_base + urk_base + fx.Index(ks_offset)
                 idx_hi = idx_lo + fx.Index(OPUS_URK_N_STRIP_STRIDE)
-                k_lo[ks] = load_k_pack_aligned(idx_lo)
-                k_hi[ks] = load_k_pack_aligned(idx_hi)
-            return k_lo, k_hi
+                k_lo[ks] = _load_k_pack_aligned(idx_lo)
+                k_hi[ks] = _load_k_pack_aligned(idx_hi)
+            return (k_lo, k_hi)
 
         def _read_v_packs_for_buf(buf_id, urv_base):
             """Read all V packs from LDS buffer `buf_id` in OPUS issue order.
@@ -878,7 +880,7 @@ def build_flash_attn_opus_module(
             sequence as dc outer / k_substep inner to mirror OPUS's tr_load layout
             issue order.
             """
-            v_base = v_buf_base(buf_id)
+            v_base = _v_buf_base(buf_id)
             lds_base = v_base + urv_base
             packs = [[None] * D_CHUNKS for _ in range(4)]
             for dc in range_constexpr(D_CHUNKS):
@@ -889,8 +891,8 @@ def build_flash_attn_opus_module(
                     step_k_off = k_substep * OPUS_URV_STEP_K_STRIDE
                     imm_lo = (step_k_off + dc_off) * BF16_BYTES
                     # axis 5 = 0 and axis 5 = 1 reads (in-register K stride 64 bf16)
-                    a = ds_read_tr_v4f16_imm(lds_base, imm_lo)
-                    b = ds_read_tr_v4f16_imm(
+                    a = _ds_read_tr_v4f16_imm(lds_base, imm_lo)
+                    b = _ds_read_tr_v4f16_imm(
                         lds_base,
                         imm_lo + OPUS_URV_I5_STRIDE * BF16_BYTES,
                     )
@@ -899,16 +901,17 @@ def build_flash_attn_opus_module(
                     ).ir_value()
             return packs
 
-        def mma0(k_lo, k_hi):
+        def _mma0(v_k):
+            k_lo, k_hi = v_k
             v_s_lo = c_zero_v16f32
             v_s_hi = c_zero_v16f32
             for ks in range_constexpr(K_STEPS_QK):
-                q_pack = get_q_pack(q_all_scaled_bf16, ks)
-                v_s_lo = mfma_acc(k_lo[ks], q_pack, v_s_lo)
-                v_s_hi = mfma_acc(k_hi[ks], q_pack, v_s_hi)
-            return v_s_lo, v_s_hi
+                q_pack = _get_q_pack(q_all_scaled_bf16, ks)
+                v_s_lo = _mfma_acc(k_lo[ks], q_pack, v_s_lo)
+                v_s_hi = _mfma_acc(k_hi[ks], q_pack, v_s_hi)
+            return (v_s_lo, v_s_hi)
 
-        def _causal_mask_inplace(s_lo, s_hi, tile_idx):
+        def _causal_mask_inplace(v_s, tile_idx):
             """Apply causal mask using OPUS inline-asm attn_mask_vec2_imm (OPUS u_rk path).
 
             This mirrors C++ attn_mask_causal_tile:
@@ -925,6 +928,7 @@ def build_flash_attn_opus_module(
               rel_hi = rel_lo - 32
               thr(r) = (r//4)*8 + (r%4)
             """
+            s_lo, s_hi = v_s
             kv_tile_start = tile_idx * fx.Index(BLOCK_N)
             kv_start_i32 = fx.Int32(kv_tile_start)
             lane_off_i32 = fx.Int32(lane_div_32) * fx.Int32(4)
@@ -975,8 +979,25 @@ def build_flash_attn_opus_module(
                 s_hi[idx_x] = _raw(_bitcast_f32(new_x_hi))
                 s_hi[idx_y] = _raw(_bitcast_f32(new_y_hi))
 
-        def _causal_mask_prologue_if_needed(s_lo, s_hi, tile_idx=fx.Index(0), kv_end_pos=fx.Index(BLOCK_N)):
+        def _v_s_vec_to_lists(v_s):
+            s_lo, s_hi = v_s
+            return (
+                [Vec(s_lo)[r] for r in range_constexpr(16)],
+                [Vec(s_hi)[r] for r in range_constexpr(16)],
+            )
+
+        def _v_pair_to_vec32(v):
+            return _concat_vectors(v[0], v[1]).ir_value()
+
+        def _v_vec32_to_pair(v):
+            v_vec = Vec(v, (32,), fx.Float32)
+            v_lo = v_vec.shuffle(v_vec, [i for i in range(16)]).ir_value()
+            v_hi = v_vec.shuffle(v_vec, [16 + i for i in range(16)]).ir_value()
+            return v_lo, v_hi
+
+        def _causal_mask_prologue_if_needed(v_s, tile_idx=fx.Index(0), kv_end_pos=fx.Index(BLOCK_N)):
             """Return masked score vectors when OPUS's causal guard is active."""
+            s_lo, s_hi = _v_s_vec_to_lists(v_s)
             acc_values = [_raw(v) for v in (s_lo + s_hi)]
             result_types = [v.type for v in acc_values]
             mask_needed = arith.cmpi(
@@ -989,7 +1010,7 @@ def build_flash_attn_opus_module(
             with ir.InsertionPoint(if_op.regions[0].blocks[0]):
                 then_lo = list(s_lo)
                 then_hi = list(s_hi)
-                _causal_mask_inplace(then_lo, then_hi, tile_idx)
+                _causal_mask_inplace((then_lo, then_hi), tile_idx)
                 scf.YieldOp([_raw(v) for v in (then_lo + then_hi)])
 
             if len(if_op.regions[1].blocks) == 0:
@@ -1000,31 +1021,17 @@ def build_flash_attn_opus_module(
             results = list(if_op.results)
             return results[:16], results[16:]
 
-        def attn_row_max(s_lo, s_hi):
+        def _attn_row_max(v_s):
+            s_lo, s_hi = v_s
             m = c_neg_inf
             for r in range_constexpr(16):
                 m = _fmax(m, s_lo[r])
             for r in range_constexpr(16):
                 m = _fmax(m, s_hi[r])
-            lhs, rhs = reduction_pair(m)
+            lhs, rhs = _reduction_pair(m)
             return _fmax(lhs, rhs)
 
-        def _attn_sub_row_pair(s_lo, s_hi, m_row):
-            lo_sub = []
-            hi_sub = []
-            for r in range_constexpr(16):
-                lo_sub.append(_fsub(s_lo[r], m_row))
-            for r in range_constexpr(16):
-                hi_sub.append(_fsub(s_hi[r], m_row))
-            return lo_sub, hi_sub
-
-        def attn_exp2_first_half_slice(s_lo, s_hi):
-            lo_partial = []
-            for r in range_constexpr(16):
-                lo_partial.append(rocdl.exp2(T.f32, _raw(s_lo[r])))
-            return lo_partial, list(s_hi)
-
-        def mma1_step_k(step, v_p, v_v, v_o):
+        def _mma1_step_k(step, v_p, v_v, v_o):
             v_p_lo, v_p_hi = v_p
             v_pk = v_v[step]
             if const_expr(step < 2):
@@ -1032,78 +1039,72 @@ def build_flash_attn_opus_module(
             else:
                 p_pk = v_p_hi[step - 2]
             for dc in range_constexpr(D_CHUNKS):
-                v_o[dc] = mfma_acc(v_pk[dc], p_pk, v_o[dc])
+                v_o[dc] = _mfma_acc(v_pk[dc], p_pk, v_o[dc])
             return v_o
 
-        def attn_sub_row(v_s, row_max):
+        def _mma1(v_p, v_v, v_o):
+            for step in range_constexpr(4):
+                v_o = _mma1_step_k(step, v_p, v_v, v_o)
+            return v_o
+
+        def _attn_sub_row(v_s, row_max):
             s_lo, s_hi = v_s
-            return _attn_sub_row_pair(s_lo, s_hi, row_max)
+            lo_sub = []
+            hi_sub = []
+            for r in range_constexpr(16):
+                lo_sub.append(_fsub(s_lo[r], row_max))
+            for r in range_constexpr(16):
+                hi_sub.append(_fsub(s_hi[r], row_max))
+            return lo_sub, hi_sub
 
         def _anchor_v_s(v_s):
             s_lo, s_hi = v_s
             lo_vec = Vec.from_elements(s_lo, fx.Float32).ir_value()
             hi_vec = Vec.from_elements(s_hi, fx.Float32).ir_value()
-            return _anchor_pair(lo_vec, hi_vec)
+            return _anchor_pair((lo_vec, hi_vec))
 
-        def anchor_v_s_1(v_s):
-            return _anchor_v_s(v_s)
+        def _attn_exp2_slice(v_s, start, length):
+            if const_expr(start == 0):
+                s_lo = [Vec(v_s[0])[r] for r in range_constexpr(16)]
+                lo_partial = []
+                for r in range_constexpr(16):
+                    lo_partial.append(rocdl.exp2(T.f32, _raw(s_lo[r])))
+                return Vec.from_elements(lo_partial, fx.Float32).ir_value(), v_s[1]
 
-        def anchor_v_s_0(v_s):
-            return _anchor_v_s(v_s)
-
-        def attn_exp2_slice(v_s, start, length):
-            s_lo_vec, s_hi_vec = v_s
-            s_lo = [Vec(s_lo_vec)[r] for r in range_constexpr(16)]
-            lo_partial = []
-            for r in range_constexpr(16):
-                lo_partial.append(rocdl.exp2(T.f32, _raw(s_lo[r])))
-            return Vec.from_elements(lo_partial, fx.Float32).ir_value(), s_hi_vec
-
-        def attn_sub_row_first_half_exp2_slice(s_lo, s_hi, m_row):
-            lo_partial = []
-            hi_partial = []
-            for r in range_constexpr(16):
-                diff_lo = _fsub(s_lo[r], m_row)
-                lo_partial.append(rocdl.exp2(T.f32, _raw(diff_lo)))
-            for r in range_constexpr(16):
-                diff_hi = _fsub(s_hi[r], m_row)
-                hi_partial.append(diff_hi)
-            return lo_partial, hi_partial
-
-        def attn_exp2_second_half_slice(hi_partial_vec):
+            lo_partial = [Vec(v_s[0])[r] for r in range_constexpr(16)]
             hi_full = []
             for r in range_constexpr(16):
-                hi_full.append(
-                    rocdl.exp2(T.f32, _raw(Vec(hi_partial_vec)[r]))
-                )
-            return hi_full
+                hi_full.append(rocdl.exp2(T.f32, _raw(Vec(v_s[1])[r])))
+            return lo_partial, hi_full
 
-        def attn_sum_parts(lo_partial_list, hi_full):
+        def _attn_sum(v_p):
+            lo_partial_list, hi_full = v_p
             local_sum = c_zero_f
             for r in range_constexpr(16):
                 local_sum = _fadd(local_sum, lo_partial_list[r])
             for r in range_constexpr(16):
                 local_sum = _fadd(local_sum, hi_full[r])
-            lhs_sum, rhs_sum = reduction_pair(local_sum)
+            lhs_sum, rhs_sum = _reduction_pair(local_sum)
             return _fadd(lhs_sum, rhs_sum)
 
-        def cast_p_parts(lo_partial_list, hi_full):
+        def _cast_p(v_p):
+            lo_partial_list, hi_full = v_p
             p_lo_packs = []
             p_hi_packs = []
             for pks in range_constexpr(PV_K_STEPS):
                 p_base = pks * 8
                 lo_slice = [lo_partial_list[p_base + s] for s in range_constexpr(8)]
-                p_lo_packs.append(bf16_trunc_pack_v8(lo_slice))
+                p_lo_packs.append(_bf16_trunc_pack_v8(lo_slice))
                 hi_slice = hi_full[p_base:p_base + 8]
-                p_hi_packs.append(bf16_trunc_pack_v8(hi_slice))
+                p_hi_packs.append(_bf16_trunc_pack_v8(hi_slice))
             return p_lo_packs, p_hi_packs
 
-        def _scale_o(o_accs, scale_scalar):
+        def _scale_o(v_o, scale_scalar):
             scale_vec = Vec.from_elements([scale_scalar], fx.Float32).broadcast_to(16)
             for dc in range_constexpr(D_CHUNKS):
-                o_accs[dc] = _fmul(Vec(o_accs[dc]), scale_vec)
+                v_o[dc] = _fmul(Vec(v_o[dc]), scale_vec)
 
-        def _lazy_rescale_o(o_accs, m_row, l_row, m_tile_max):
+        def _lazy_rescale_o(v_o, m_row, l_row, m_tile_max):
             """OPUS lazy rescale: branch around exp2/O scaling when all lanes pass."""
             m_diff = _fsub(m_tile_max, m_row)
             below = ArithValue(fx.Float32(m_diff) <= c_eight_f)
@@ -1114,7 +1115,7 @@ def build_flash_attn_opus_module(
                 _read_exec_i64(),
             )
 
-            current_values = [_raw(acc) for acc in o_accs] + [_raw(m_row), _raw(l_row)]
+            current_values = [_raw(acc) for acc in v_o] + [_raw(m_row), _raw(l_row)]
             result_types = [value.type for value in current_values]
             if_op = scf.IfOp(all_below, result_types, has_else=True, loc=ir.Location.unknown())
 
@@ -1125,7 +1126,7 @@ def build_flash_attn_opus_module(
                 if_op.regions[1].blocks.append(*[])
             with ir.InsertionPoint(if_op.regions[1].blocks[0]):
                 corr = rocdl.exp2(T.f32, _raw(_fsub(m_row, m_tile_max)))
-                scaled_accs = list(o_accs)
+                scaled_accs = list(v_o)
                 _scale_o(scaled_accs, corr)
                 scaled_l_row = _fmul(l_row, corr)
                 scf.YieldOp(
@@ -1148,8 +1149,7 @@ def build_flash_attn_opus_module(
 
         #     // Prologue
         #     async_load<T::VEC_KV>(g_k, s_k[0].ptr, u_gk, u_sk, kv_tile(0));
-        async_load_k(fx.Index(0), 0)
-
+        _async_load_k(fx.Index(0), 0)
         #     __builtin_amdgcn_s_waitcnt(0);
         rocdl.s_waitcnt(0)
         #     __builtin_amdgcn_sched_barrier(0);
@@ -1166,16 +1166,15 @@ def build_flash_attn_opus_module(
         q_row = q_start + q_row_in_block
         q_row_i32 = fx.Int32(q_row)
         q_in_bounds = q_row < seq_len_v
-        q_all_bf16 = load_q_all(q_row_in_block)
-        q_all_scaled_bf16 = scale_q_all(q_all_bf16)
+        q_all_bf16 = _load_q_all(q_row_in_block)
+        q_all_scaled_bf16 = _scale_q_all(q_all_bf16)
 
         #     async_load<T::VEC_KV>(g_k, s_k[1].ptr, u_gk, u_sk, kv_tile(1));
-        async_load_k(fx.Index(BLOCK_N), 1)
+        _async_load_k(fx.Index(BLOCK_N), 1)
         #     async_load<T::VEC_KV>(g_v, s_v[0].ptr, u_gv, u_sv, kv_tile(0));
-        async_load_v(fx.Index(0), 0)
-
+        _async_load_v(fx.Index(0), 0)
         #     v_k = load<T::VEC_KV>(s_k[0], u_rk);
-        k_pl_pro, k_ph_pro = async_load_k_from_lds_to_vgpr(0, urk_base_per_lane)
+        v_k = _async_load_k_from_lds_to_vgpr(0, urk_base_per_lane)
 
         #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
@@ -1195,7 +1194,7 @@ def build_flash_attn_opus_module(
             rocdl.s_barrier()
 
         #     v_s[0] = mma0(v_q, v_k);
-        v_s_0_lo_raw, v_s_0_hi_raw = mma0(k_pl_pro, k_ph_pro)
+        v_s_0 = _mma0(v_k)
         #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
 
@@ -1205,27 +1204,19 @@ def build_flash_attn_opus_module(
         #             attn_mask_causal_tile<T>(v_s[0], q_start_pos, 0, neg_inf_v, lane_id);
         #         }
         #     }
-        s_lo_pro = [Vec(v_s_0_lo_raw)[r] for r in range_constexpr(16)]
-        s_hi_pro = [Vec(v_s_0_hi_raw)[r] for r in range_constexpr(16)]
         if const_expr(CAUSAL):
-            s_lo_pro, s_hi_pro = _causal_mask_prologue_if_needed(s_lo_pro, s_hi_pro)
+            v_s_0 = _causal_mask_prologue_if_needed(v_s_0)
+        else:
+            v_s_0 = _v_s_vec_to_lists(v_s_0)
 
         #     m_row = attn_row_max<T>(v_s[0]);
-        m_row_pro = attn_row_max(s_lo_pro, s_hi_pro)
-
+        m_row_pro = _attn_row_max(v_s_0)
         #     attn_sub_row<T>(v_s[0], m_row);
-        s_lo_pro, s_hi_pro = _attn_sub_row_pair(s_lo_pro, s_hi_pro, m_row_pro)
-        v_s_0_lo_init = Vec.from_elements(s_lo_pro, fx.Float32).ir_value()
-        v_s_0_hi_init = Vec.from_elements(s_hi_pro, fx.Float32).ir_value()
+        v_s_0 = _attn_sub_row(v_s_0, m_row_pro)
         #     asm volatile("" : "+v"(v_s[0]) ::);
-        v_s_0_lo_init, v_s_0_hi_init = _anchor_pair(v_s_0_lo_init, v_s_0_hi_init)
-
+        v_s_0 = _anchor_v_s(v_s_0)
         #     attn_exp2_slice<T, 0, s_half_len>(v_s[0]);
-        s_lo_pro = [Vec(v_s_0_lo_init)[r] for r in range_constexpr(16)]
-        s_hi_pro = [Vec(v_s_0_hi_init)[r] for r in range_constexpr(16)]
-        lo_pro, hi_pro = attn_exp2_first_half_slice(s_lo_pro, s_hi_pro)
-        v_s_0_lo_init = Vec.from_elements(lo_pro, fx.Float32).ir_value()
-        v_s_0_hi_init = Vec.from_elements(hi_pro, fx.Float32).ir_value()
+        v_p_0 = _attn_exp2_slice(v_s_0, 0, 16)
 
         #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
@@ -1235,14 +1226,13 @@ def build_flash_attn_opus_module(
         rocdl.sched_barrier(0)
 
         #     async_load<T::VEC_KV>(g_k, s_k[0].ptr, u_gk, u_sk, kv_tile(2));
-        async_load_k(fx.Index(2 * BLOCK_N), 0)
+        _async_load_k(fx.Index(2 * BLOCK_N), 0)
 
         l_row_init = c_zero_f
         init_args = [m_row_pro, l_row_init]
         for _ in range_constexpr(D_CHUNKS):
             init_args.append(c_zero_v16f32)
-        init_args.append(v_s_0_lo_init)
-        init_args.append(v_s_0_hi_init)
+        init_args.append(_v_pair_to_vec32(v_p_0))
 
         #     // Main loop
         #     for (int j = 3; j < max_num_tiles - 1; j += 2) {
@@ -1255,17 +1245,15 @@ def build_flash_attn_opus_module(
         ):
             m_row = loop_args[0]
             l_row = loop_args[1]
-            o_accs = [loop_args[2 + i] for i in range_constexpr(D_CHUNKS)]
-            v_s_0_lo_partial = loop_args[2 + D_CHUNKS]
-            v_s_0_hi_partial = loop_args[3 + D_CHUNKS]
-
+            v_o = [loop_args[2 + i] for i in range_constexpr(D_CHUNKS)]
+            v_p_0 = _v_vec32_to_pair(loop_args[2 + D_CHUNKS])
             j_idx = j
 
             #         // Cluster 0:
             #         async_load<T::VEC_KV>(g_v, s_v[1].ptr, u_gv, u_sv, kv_tile(j - 2));
-            async_load_v((j_idx - fx.Index(2)) * fx.Index(BLOCK_N), 1)
+            _async_load_v((j_idx - fx.Index(2)) * fx.Index(BLOCK_N), 1)
             #         v_k = load<T::VEC_KV>(s_k[1], u_rk);
-            k_pl_a, k_ph_a = async_load_k_from_lds_to_vgpr(1, urk_base_per_lane)
+            v_k = _async_load_k_from_lds_to_vgpr(1, urk_base_per_lane)
             #         s_waitcnt_lgkmcnt(0_I);
             rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
             #         s_waitcnt_vmcnt(number<T::k_buffer_load_insts + T::v_buffer_load_insts>{});
@@ -1279,19 +1267,16 @@ def build_flash_attn_opus_module(
 
             #         // Cluster 1:
             #         v_s[1] = mma0(v_q, v_k);
-            v_s_1_lo_raw, v_s_1_hi_raw = mma0(k_pl_a, k_ph_a)
+            v_s_1 = _mma0(v_k)
             #         attn_exp2_slice<T, s_half_len, s_half_len>(v_s[0]);
+            v_p_0 = _attn_exp2_slice(v_p_0, 16, 16)
             #         l_row += attn_sum<T>(v_s[0]);
-            #         v_p = opus::cast<D_ATTN>(v_s[0]);
-            #         asm volatile("" : "+v"(v_p) ::);
-            v_s_0_hi_full = attn_exp2_second_half_slice(v_s_0_hi_partial)
-            v_s_0_lo_list = [Vec(v_s_0_lo_partial)[r] for r in range_constexpr(16)]
-            tile_sum_a = attn_sum_parts(v_s_0_lo_list, v_s_0_hi_full)
+            tile_sum_a = _attn_sum(v_p_0)
             l_row = _fadd(l_row, tile_sum_a)
-
-            v_p_lo_a, v_p_hi_a = cast_p_parts(v_s_0_lo_list, v_s_0_hi_full)
-            v_p_lo_a, v_p_hi_a = _anchor_p_parts(v_p_lo_a, v_p_hi_a)
-
+            #         v_p = opus::cast<D_ATTN>(v_s[0]);
+            v_p_0 = _cast_p(v_p_0)
+            #         asm volatile("" : "+v"(v_p) ::);
+            v_p_0 = _anchor_v_p(v_p_0)
             #         sched_barrier_exp_pairs<6, 3, 1>();
             _sched_barrier_exp_pairs(6, 3, 1)
             #         sched_barrier_pairs<10, 5, 1>();
@@ -1305,9 +1290,9 @@ def build_flash_attn_opus_module(
 
             #         // Cluster 2:
             #         async_load<T::VEC_KV>(g_k, s_k[1].ptr, u_gk, u_sk, kv_tile(j));
-            async_load_k(j_idx * fx.Index(BLOCK_N), 1)
+            _async_load_k(j_idx * fx.Index(BLOCK_N), 1)
             #         v_v = tr_load<T::VEC_TR_V>(s_v[0], u_rv);
-            v_packs_a = _read_v_packs_for_buf(0, urv_base_per_lane)
+            v_v = _read_v_packs_for_buf(0, urv_base_per_lane)
             #         s_waitcnt_lgkmcnt(0_I);
             rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
             #         s_waitcnt_vmcnt(number<T::k_buffer_load_insts + T::v_buffer_load_insts>{});
@@ -1323,18 +1308,11 @@ def build_flash_attn_opus_module(
             #         __builtin_amdgcn_s_setprio(1);
             if const_expr(OPUS_SETPRIO):
                 rocdl.s_setprio(1)
-
             #         v_o = mma1.step_k(0_I, v_p, v_v, v_o);
-            v_p = (v_p_lo_a, v_p_hi_a)
-            v_v = v_packs_a
-            v_o = o_accs
-            v_o = mma1_step_k(0, v_p, v_v, v_o)
-            o_accs = v_o
-
+            v_o = _mma1_step_k(0, v_p_0, v_v, v_o)
             #         D_ACC row_max = attn_row_max<T>(v_s[1]);
-            s_lo_a = [Vec(v_s_1_lo_raw)[r] for r in range_constexpr(16)]
-            s_hi_a = [Vec(v_s_1_hi_raw)[r] for r in range_constexpr(16)]
-            m_tile_max_a = attn_row_max(s_lo_a, s_hi_a)
+            v_s_1 = _v_s_vec_to_lists(v_s_1)
+            m_tile_max_a = _attn_row_max(v_s_1)
 
             #         sched_barrier_pairs<4, 5, 2>();
             _sched_barrier_pairs(4, 5, 2)
@@ -1350,33 +1328,27 @@ def build_flash_attn_opus_module(
             #             m_row = row_max;
             #         }
             if const_expr(OPUS_LAZY_RESCALE):
-                o_accs, m_row, l_row = _lazy_rescale_o(o_accs, m_row, l_row, m_tile_max_a)
+                v_o, m_row, l_row = _lazy_rescale_o(v_o, m_row, l_row, m_tile_max_a)
             else:
                 m_new_a = _fmax(m_row, m_tile_max_a)
                 corr_a = rocdl.exp2(T.f32, _raw(_fsub(m_row, m_new_a)))
                 eff_corr_a = corr_a
-                _scale_o(o_accs, eff_corr_a)
+                _scale_o(v_o, eff_corr_a)
                 l_row = _fmul(l_row, corr_a)
                 m_row = m_new_a
 
             #         v_o = mma1.step_k(1_I, v_p, v_v, v_o);
             #         v_o = mma1.step_k(2_I, v_p, v_v, v_o);
             #         v_o = mma1.step_k(3_I, v_p, v_v, v_o);
+            v_o = _mma1_step_k(1, v_p_0, v_v, v_o)
+            v_o = _mma1_step_k(2, v_p_0, v_v, v_o)
+            v_o = _mma1_step_k(3, v_p_0, v_v, v_o)
             #         attn_sub_row<T>(v_s[1], row_max);
+            v_s_1 = _attn_sub_row(v_s_1, m_row)
             #         asm volatile("" : "+v"(v_s[1]) ::);
+            v_s_1 = _anchor_v_s(v_s_1)
             #         attn_exp2_slice<T, 0, s_half_len>(v_s[1]);
-            v_p = (v_p_lo_a, v_p_hi_a)
-            v_v = v_packs_a
-            v_o = o_accs
-            v_s_1 = (s_lo_a, s_hi_a)
-            v_o = mma1_step_k(1, v_p, v_v, v_o)
-            v_o = mma1_step_k(2, v_p, v_v, v_o)
-            v_o = mma1_step_k(3, v_p, v_v, v_o)
-            v_s_1 = attn_sub_row(v_s_1, m_row)
-            v_s_1 = anchor_v_s_1(v_s_1)
-            v_s_1 = attn_exp2_slice(v_s_1, 0, 16)
-            o_accs = v_o
-            v_s_1_lo_partial, v_s_1_hi_partial = v_s_1
+            v_p_1 = _attn_exp2_slice(v_s_1, 0, 16)
 
             #         sched_barrier_pairs<6, 5, 2>();
             _sched_barrier_pairs(6, 5, 2)
@@ -1394,9 +1366,9 @@ def build_flash_attn_opus_module(
 
             #         // Cluster 4:
             #         async_load<T::VEC_KV>(g_v, s_v[0].ptr, u_gv, u_sv, kv_tile(j - 1));
-            async_load_v((j_idx - fx.Index(1)) * fx.Index(BLOCK_N), 0)
+            _async_load_v((j_idx - fx.Index(1)) * fx.Index(BLOCK_N), 0)
             #         v_k = load<T::VEC_KV>(s_k[0], u_rk);
-            k_pl_b, k_ph_b = async_load_k_from_lds_to_vgpr(0, urk_base_per_lane)
+            v_k = _async_load_k_from_lds_to_vgpr(0, urk_base_per_lane)
             #         s_waitcnt_lgkmcnt(0_I);
             rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
             #         s_waitcnt_vmcnt(number<T::k_buffer_load_insts + T::v_buffer_load_insts>{});
@@ -1410,20 +1382,16 @@ def build_flash_attn_opus_module(
 
             #         // Cluster 5:
             #         v_s[0] = mma0(v_q, v_k);
-            v_s_0_lo_raw_b, v_s_0_hi_raw_b = mma0(k_pl_b, k_ph_b)
+            v_s_0 = _mma0(v_k)
             #         attn_exp2_slice<T, s_half_len, s_half_len>(v_s[1]);
+            v_p_1 = _attn_exp2_slice(v_p_1, 16, 16)
             #         l_row += attn_sum<T>(v_s[1]);
-            #         v_p = opus::cast<D_ATTN>(v_s[1]);
-            #         asm volatile("" : "+v"(v_p) ::);
-            v_s_1_hi_full = attn_exp2_second_half_slice(v_s_1_hi_partial)
-            v_s_1_lo_list = [
-                Vec(v_s_1_lo_partial)[r] for r in range_constexpr(16)
-            ]
-            tile_sum_b = attn_sum_parts(v_s_1_lo_list, v_s_1_hi_full)
+            tile_sum_b = _attn_sum(v_p_1)
             l_row = _fadd(l_row, tile_sum_b)
-
-            v_p_lo_b, v_p_hi_b = cast_p_parts(v_s_1_lo_list, v_s_1_hi_full)
-            v_p_lo_b, v_p_hi_b = _anchor_p_parts(v_p_lo_b, v_p_hi_b)
+            #         v_p = opus::cast<D_ATTN>(v_s[1]);
+            v_p_1 = _cast_p(v_p_1)
+            #         asm volatile("" : "+v"(v_p) ::);
+            v_p_1 = _anchor_v_p(v_p_1)
 
             #         sched_barrier_exp_pairs<6, 3, 3>();
             _sched_barrier_exp_pairs(6, 3, 3)
@@ -1438,7 +1406,7 @@ def build_flash_attn_opus_module(
 
             #         // Cluster 6:
             #         async_load<T::VEC_KV>(g_k, s_k[0].ptr, u_gk, u_sk, kv_tile(j + 1));
-            async_load_k((j_idx + fx.Index(1)) * fx.Index(BLOCK_N), 0)
+            _async_load_k((j_idx + fx.Index(1)) * fx.Index(BLOCK_N), 0)
             #         v_v = tr_load<T::VEC_TR_V>(s_v[1], u_rv);
             v_packs_b = _read_v_packs_for_buf(1, urv_base_per_lane)
             #         if constexpr (T::CAUSAL) {
@@ -1447,15 +1415,14 @@ def build_flash_attn_opus_module(
             #                 attn_mask_causal_tile<T>(v_s[0], q_start_pos, j - 1, neg_inf_v, lane_id);
             #             }
             #         }
-            s_lo_b = [Vec(v_s_0_lo_raw_b)[r] for r in range_constexpr(16)]
-            s_hi_b = [Vec(v_s_0_hi_raw_b)[r] for r in range_constexpr(16)]
             if const_expr(CAUSAL):
-                s_lo_b, s_hi_b = _causal_mask_prologue_if_needed(
-                    s_lo_b,
-                    s_hi_b,
+                v_s_0 = _causal_mask_prologue_if_needed(
+                    v_s_0,
                     j_idx - fx.Index(1),
                     j_idx * fx.Index(BLOCK_N),
                 )
+            else:
+                v_s_0 = _v_s_vec_to_lists(v_s_0)
             #         s_waitcnt_lgkmcnt(0_I);
             rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
             #         s_waitcnt_vmcnt(number<T::k_buffer_load_insts + T::v_buffer_load_insts>{});
@@ -1471,17 +1438,11 @@ def build_flash_attn_opus_module(
             #         __builtin_amdgcn_s_setprio(1);
             if const_expr(OPUS_SETPRIO):
                 rocdl.s_setprio(1)
-
             #         v_o = mma1.step_k(0_I, v_p, v_v, v_o);
-            v_p = (v_p_lo_b, v_p_hi_b)
             v_v = v_packs_b
-            v_o = o_accs
-            v_o = mma1_step_k(0, v_p, v_v, v_o)
-            o_accs = v_o
-
+            v_o = _mma1_step_k(0, v_p_1, v_v, v_o)
             #         row_max = attn_row_max<T>(v_s[0]);
-            m_tile_max_b = attn_row_max(s_lo_b, s_hi_b)
-
+            m_tile_max_b = _attn_row_max(v_s_0)
             #         sched_barrier_pairs<4, 5, 4>();
             _sched_barrier_pairs(4, 5, 4)
 
@@ -1496,35 +1457,28 @@ def build_flash_attn_opus_module(
             #             m_row = row_max;
             #         }
             if const_expr(OPUS_LAZY_RESCALE):
-                o_accs, m_row, l_row = _lazy_rescale_o(o_accs, m_row, l_row, m_tile_max_b)
+                v_o, m_row, l_row = _lazy_rescale_o(v_o, m_row, l_row, m_tile_max_b)
             else:
                 m_new_b = _fmax(m_row, m_tile_max_b)
                 corr_b = rocdl.exp2(T.f32, _raw(_fsub(m_row, m_new_b)))
                 eff_corr_b = corr_b
-
-                _scale_o(o_accs, eff_corr_b)
+                _scale_o(v_o, eff_corr_b)
                 l_row = _fmul(l_row, corr_b)
                 m_row = m_new_b
 
             #         v_o = mma1.step_k(1_I, v_p, v_v, v_o);
             #         v_o = mma1.step_k(2_I, v_p, v_v, v_o);
             #         v_o = mma1.step_k(3_I, v_p, v_v, v_o);
-            #         attn_sub_row<T>(v_s[0], row_max);
-            #         asm volatile("" : "+v"(v_s[0]) ::);
-            #         attn_exp2_slice<T, 0, s_half_len>(v_s[0]);
-            v_p = (v_p_lo_b, v_p_hi_b)
             v_v = v_packs_b
-            v_o = o_accs
-            v_s_0 = (s_lo_b, s_hi_b)
-            v_o = mma1_step_k(1, v_p, v_v, v_o)
-            v_o = mma1_step_k(2, v_p, v_v, v_o)
-            v_o = mma1_step_k(3, v_p, v_v, v_o)
-            v_s_0 = attn_sub_row(v_s_0, m_row)
-            v_s_0 = anchor_v_s_0(v_s_0)
-            v_s_0 = attn_exp2_slice(v_s_0, 0, 16)
-            o_accs = v_o
-            v_s_0_lo_yield, v_s_0_hi_yield = v_s_0
-
+            v_o = _mma1_step_k(1, v_p_1, v_v, v_o)
+            v_o = _mma1_step_k(2, v_p_1, v_v, v_o)
+            v_o = _mma1_step_k(3, v_p_1, v_v, v_o)
+            #         attn_sub_row<T>(v_s[0], row_max);
+            v_s_0 = _attn_sub_row(v_s_0, m_row)
+            #         asm volatile("" : "+v"(v_s[0]) ::);
+            v_s_0 = _anchor_v_s(v_s_0)
+            #         attn_exp2_slice<T, 0, s_half_len>(v_s[0]);
+            v_p_0 = _attn_exp2_slice(v_s_0, 0, 16)
             #         sched_barrier_pairs<6, 5, 4>();
             _sched_barrier_pairs(6, 5, 4)
             #         sched_barrier_exp_pairs<6, 3, 4>();
@@ -1539,15 +1493,14 @@ def build_flash_attn_opus_module(
             #         __builtin_amdgcn_sched_barrier(0);
             rocdl.sched_barrier(0)
 
-            yield_args = [m_row, l_row] + o_accs + [v_s_0_lo_yield, v_s_0_hi_yield]
+            yield_args = [m_row, l_row] + v_o + [_v_pair_to_vec32(v_p_0)]
             loop_results = yield yield_args
 
         #     // Epilogue
         m_row = loop_results[0]
         l_row = loop_results[1]
-        o_accs = [loop_results[2 + i] for i in range_constexpr(D_CHUNKS)]
-        v_s_0_lo_partial = loop_results[2 + D_CHUNKS]
-        v_s_0_hi_partial = loop_results[3 + D_CHUNKS]
+        v_o = [loop_results[2 + i] for i in range_constexpr(D_CHUNKS)]
+        v_p_0 = _v_vec32_to_pair(loop_results[2 + D_CHUNKS])
 
         max_m3 = max_num_tiles - fx.Index(3)
         max_m2 = max_num_tiles - fx.Index(2)
@@ -1555,9 +1508,9 @@ def build_flash_attn_opus_module(
 
         #     // Cluster 0:
         #     async_load<T::VEC_KV>(g_v, s_v[1].ptr, u_gv, u_sv, kv_tile(max_num_tiles - 3));
-        async_load_v(max_m3 * fx.Index(BLOCK_N), 1)
+        _async_load_v(max_m3 * fx.Index(BLOCK_N), 1)
         #     v_k = load<T::VEC_KV>(s_k[1], u_rk);
-        k_pl_e0, k_ph_e0 = async_load_k_from_lds_to_vgpr(1, urk_base_per_lane)
+        v_k = _async_load_k_from_lds_to_vgpr(1, urk_base_per_lane)
         #     s_waitcnt_lgkmcnt(0_I);
         rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
         #     s_waitcnt_vmcnt(number<T::k_buffer_load_insts + T::v_buffer_load_insts>{});
@@ -1571,19 +1524,16 @@ def build_flash_attn_opus_module(
 
         #     // Cluster 1:
         #     v_s[1] = mma0(v_q, v_k);
-        v_s_1_lo_e, v_s_1_hi_e = mma0(k_pl_e0, k_ph_e0)
+        v_s_1 = _mma0(v_k)
         #     attn_exp2_slice<T, s_half_len, s_half_len>(v_s[0]);
-        #     v_p = opus::cast<D_ATTN>(v_s[0]);
-        #     asm volatile("" : "+v"(v_p) ::);
-        v_s_0_hi_full_e1 = attn_exp2_second_half_slice(v_s_0_hi_partial)
-        v_s_0_lo_list_e1 = [Vec(v_s_0_lo_partial)[r] for r in range_constexpr(16)]
-        tile_sum_e1 = attn_sum_parts(v_s_0_lo_list_e1, v_s_0_hi_full_e1)
+        v_p_0 = _attn_exp2_slice(v_p_0, 16, 16)
         #     l_row += attn_sum<T>(v_s[0]);
+        tile_sum_e1 = _attn_sum(v_p_0)
         l_row = _fadd(l_row, tile_sum_e1)
-
-        v_p_lo_e1, v_p_hi_e1 = cast_p_parts(v_s_0_lo_list_e1, v_s_0_hi_full_e1)
-        v_p_lo_e1, v_p_hi_e1 = _anchor_p_parts(v_p_lo_e1, v_p_hi_e1)
-
+        #     v_p = opus::cast<D_ATTN>(v_s[0]);
+        v_p_0 = _cast_p(v_p_0)
+        #     asm volatile("" : "+v"(v_p) ::);
+        v_p_0 = _anchor_v_p(v_p_0)
         #     sched_barrier_exp_pairs<6, 3, 5>();
         _sched_barrier_exp_pairs(6, 3, 5)
         #     sched_barrier_pairs<10, 5, 5>();
@@ -1597,7 +1547,7 @@ def build_flash_attn_opus_module(
 
         #     // Cluster 2:
         #     async_load<T::VEC_KV>(g_k, s_k[1].ptr, u_gk, u_sk, kv_tile(max_num_tiles - 1));
-        async_load_k(max_m1 * fx.Index(BLOCK_N), 1)
+        _async_load_k(max_m1 * fx.Index(BLOCK_N), 1)
         #     v_v = tr_load<T::VEC_TR_V>(s_v[0], u_rv);
         v_packs_e3 = _read_v_packs_for_buf(0, urv_base_per_lane)
         #     if constexpr (T::CAUSAL) {
@@ -1606,15 +1556,14 @@ def build_flash_attn_opus_module(
         #             attn_mask_causal_tile<T>(v_s[1], q_start_pos, max_num_tiles - 3, neg_inf_v, lane_id);
         #         }
         #     }
-        s_lo_e1 = [Vec(v_s_1_lo_e)[r] for r in range_constexpr(16)]
-        s_hi_e1 = [Vec(v_s_1_hi_e)[r] for r in range_constexpr(16)]
         if const_expr(CAUSAL):
-            s_lo_e1, s_hi_e1 = _causal_mask_prologue_if_needed(
-                s_lo_e1,
-                s_hi_e1,
+            v_s_1 = _causal_mask_prologue_if_needed(
+                v_s_1,
                 max_m3,
                 max_m2 * fx.Index(BLOCK_N),
             )
+        else:
+            v_s_1 = _v_s_vec_to_lists(v_s_1)
         #     s_waitcnt_lgkmcnt(0_I);
         rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
         #     s_waitcnt_vmcnt(number<T::k_buffer_load_insts + T::v_buffer_load_insts>{});
@@ -1630,39 +1579,21 @@ def build_flash_attn_opus_module(
         #     __builtin_amdgcn_s_setprio(1);
         if const_expr(OPUS_SETPRIO):
             rocdl.s_setprio(1)
-
         #     v_o = mma1(v_p, v_v, v_o);
-        for kss in range_constexpr(4):
-            v_pk = v_packs_e3[kss]
-            if const_expr(kss < 2):
-                p_pk = v_p_lo_e1[kss]
-            else:
-                p_pk = v_p_hi_e1[kss - 2]
-            for dc in range_constexpr(D_CHUNKS):
-                o_accs[dc] = mfma_acc(v_pk[dc], p_pk, o_accs[dc])
-
+        v_o = _mma1(v_p_0, v_packs_e3, v_o)
         #     D_ACC row_max = max(m_row, attn_row_max<T>(v_s[1]));
-        m_tile_max_e3 = attn_row_max(s_lo_e1, s_hi_e1)
+        m_tile_max_e3 = _attn_row_max(v_s_1)
         row_max_e3 = _fmax(m_row, m_tile_max_e3)
         #     rescale_m = __builtin_amdgcn_exp2f(m_row - row_max);
         rescale_e3 = rocdl.exp2(T.f32, _raw(_fsub(m_row, row_max_e3)))
         #     m_row = row_max;
         m_row = row_max_e3
         #     attn_sub_row<T>(v_s[1], row_max);
+        v_s_1 = _attn_sub_row(v_s_1, row_max_e3)
         #     asm volatile("" : "+v"(v_s[1]) ::);
+        v_s_1 = _anchor_v_s(v_s_1)
         #     attn_exp2_slice<T, 0, s_half_len>(v_s[1]);
-        s_lo_e1, s_hi_e1 = _attn_sub_row_pair(s_lo_e1, s_hi_e1, row_max_e3)
-        v_s_1_lo_e_partial = Vec.from_elements(s_lo_e1, fx.Float32).ir_value()
-        v_s_1_hi_e_partial = Vec.from_elements(s_hi_e1, fx.Float32).ir_value()
-        v_s_1_lo_e_partial, v_s_1_hi_e_partial = _anchor_pair(
-            v_s_1_lo_e_partial, v_s_1_hi_e_partial
-        )
-        s_lo_e1 = [Vec(v_s_1_lo_e_partial)[r] for r in range_constexpr(16)]
-        s_hi_e1 = [Vec(v_s_1_hi_e_partial)[r] for r in range_constexpr(16)]
-        lo_e3, hi_e3 = attn_exp2_first_half_slice(s_lo_e1, s_hi_e1)
-        v_s_1_lo_e_partial = Vec.from_elements(lo_e3, fx.Float32).ir_value()
-        v_s_1_hi_e_partial = Vec.from_elements(hi_e3, fx.Float32).ir_value()
-
+        v_p_1 = _attn_exp2_slice(v_s_1, 0, 16)
         #     sched_barrier_pairs<10, 5, 6>();
         _sched_barrier_pairs(10, 5, 6)
         #     sched_barrier_exp_pairs<6, 3, 6>();
@@ -1672,7 +1603,7 @@ def build_flash_attn_opus_module(
         #     scale_output_tile<T>(v_o, rescale_m);
         #     auto* v_o_pin = reinterpret_cast<vector_t<fp32_t, 16>*>(&v_o);
         #     asm volatile("" : "+v"(v_o_pin[0]), "+v"(v_o_pin[1]), "+v"(v_o_pin[2]), "+v"(v_o_pin[3]) ::);
-        _scale_o(o_accs, rescale_e3)
+        _scale_o(v_o, rescale_e3)
 
         #     __builtin_amdgcn_s_setprio(0);
         if const_expr(OPUS_SETPRIO):
@@ -1686,9 +1617,9 @@ def build_flash_attn_opus_module(
 
         #     // Cluster 4:
         #     async_load<T::VEC_KV>(g_v, s_v[0].ptr, u_gv, u_sv, kv_tile(max_num_tiles - 2));
-        async_load_v(max_m2 * fx.Index(BLOCK_N), 0)
+        _async_load_v(max_m2 * fx.Index(BLOCK_N), 0)
         #     v_k = load<T::VEC_KV>(s_k[0], u_rk);
-        k_pl_e4, k_ph_e4 = async_load_k_from_lds_to_vgpr(0, urk_base_per_lane)
+        v_k = _async_load_k_from_lds_to_vgpr(0, urk_base_per_lane)
         #     s_waitcnt_lgkmcnt(0_I);
         rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
         #     s_waitcnt_vmcnt(number<T::k_buffer_load_insts + T::v_buffer_load_insts>{});
@@ -1702,21 +1633,18 @@ def build_flash_attn_opus_module(
 
         #     // Cluster 5:
         #     v_s[0] = mma0(v_q, v_k);
-        v_s_0_lo_e5, v_s_0_hi_e5 = mma0(k_pl_e4, k_ph_e4)
+        v_s_0 = _mma0(v_k)
         #     l_row *= rescale_m;
         l_row = _fmul(l_row, rescale_e3)
         #     attn_exp2_slice<T, s_half_len, s_half_len>(v_s[1]);
-        #     v_p = opus::cast<D_ATTN>(v_s[1]);
-        #     asm volatile("" : "+v"(v_p) ::);
-        v_s_1_hi_full_e5 = attn_exp2_second_half_slice(v_s_1_hi_e_partial)
-        v_s_1_lo_list_e5 = [Vec(v_s_1_lo_e_partial)[r] for r in range_constexpr(16)]
-        tile_sum_e5 = attn_sum_parts(v_s_1_lo_list_e5, v_s_1_hi_full_e5)
+        v_p_1 = _attn_exp2_slice(v_p_1, 16, 16)
         #     l_row += attn_sum<T>(v_s[1]);
+        tile_sum_e5 = _attn_sum(v_p_1)
         l_row = _fadd(l_row, tile_sum_e5)
-
-        v_p_lo_e5, v_p_hi_e5 = cast_p_parts(v_s_1_lo_list_e5, v_s_1_hi_full_e5)
-        v_p_lo_e5, v_p_hi_e5 = _anchor_p_parts(v_p_lo_e5, v_p_hi_e5)
-
+        #     v_p = opus::cast<D_ATTN>(v_s[1]);
+        v_p_1 = _cast_p(v_p_1)
+        #     asm volatile("" : "+v"(v_p) ::);
+        v_p_1 = _anchor_v_p(v_p_1)
         #     sched_barrier_exp_pairs<6, 3, 7>();
         _sched_barrier_exp_pairs(6, 3, 7)
         #     sched_barrier_pairs<10, 5, 7>();
@@ -1737,15 +1665,14 @@ def build_flash_attn_opus_module(
         #             attn_mask_causal_tile<T>(v_s[0], q_start_pos, max_num_tiles - 2, neg_inf_v, lane_id);
         #         }
         #     }
-        s_lo_e5 = [Vec(v_s_0_lo_e5)[r] for r in range_constexpr(16)]
-        s_hi_e5 = [Vec(v_s_0_hi_e5)[r] for r in range_constexpr(16)]
         if const_expr(CAUSAL):
-            s_lo_e5, s_hi_e5 = _causal_mask_prologue_if_needed(
-                s_lo_e5,
-                s_hi_e5,
+            v_s_0 = _causal_mask_prologue_if_needed(
+                v_s_0,
                 max_m2,
                 max_m1 * fx.Index(BLOCK_N),
             )
+        else:
+            v_s_0 = _v_s_vec_to_lists(v_s_0)
         #     s_waitcnt_lgkmcnt(0_I);
         rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
         #     s_waitcnt_vmcnt(number<T::v_buffer_load_insts>{});
@@ -1761,39 +1688,21 @@ def build_flash_attn_opus_module(
         #     __builtin_amdgcn_s_setprio(1);
         if const_expr(OPUS_SETPRIO):
             rocdl.s_setprio(1)
-
         #     v_o = mma1(v_p, v_v, v_o);
-        for kss in range_constexpr(4):
-            v_pk = v_packs_e7[kss]
-            if const_expr(kss < 2):
-                p_pk = v_p_lo_e5[kss]
-            else:
-                p_pk = v_p_hi_e5[kss - 2]
-            for dc in range_constexpr(D_CHUNKS):
-                o_accs[dc] = mfma_acc(v_pk[dc], p_pk, o_accs[dc])
-
+        v_o = _mma1(v_p_1, v_packs_e7, v_o)
         #     row_max = max(m_row, attn_row_max<T>(v_s[0]));
-        m_tile_max_e7 = attn_row_max(s_lo_e5, s_hi_e5)
+        m_tile_max_e7 = _attn_row_max(v_s_0)
         row_max_e7 = _fmax(m_row, m_tile_max_e7)
         #     rescale_m = __builtin_amdgcn_exp2f(m_row - row_max);
         rescale_e7 = rocdl.exp2(T.f32, _raw(_fsub(m_row, row_max_e7)))
         #     m_row = row_max;
         m_row = row_max_e7
         #     attn_sub_row<T>(v_s[0], row_max);
+        v_s_0 = _attn_sub_row(v_s_0, row_max_e7)
         #     asm volatile("" : "+v"(v_s[0]) ::);
+        v_s_0 = _anchor_v_s(v_s_0)
         #     attn_exp2_slice<T, 0, s_half_len>(v_s[0]);
-        s_lo_e5, s_hi_e5 = _attn_sub_row_pair(s_lo_e5, s_hi_e5, row_max_e7)
-        v_s_0_lo_e_partial = Vec.from_elements(s_lo_e5, fx.Float32).ir_value()
-        v_s_0_hi_e_partial = Vec.from_elements(s_hi_e5, fx.Float32).ir_value()
-        v_s_0_lo_e_partial, v_s_0_hi_e_partial = _anchor_pair(
-            v_s_0_lo_e_partial, v_s_0_hi_e_partial
-        )
-        s_lo_e5 = [Vec(v_s_0_lo_e_partial)[r] for r in range_constexpr(16)]
-        s_hi_e5 = [Vec(v_s_0_hi_e_partial)[r] for r in range_constexpr(16)]
-        lo_e7, hi_e7 = attn_exp2_first_half_slice(s_lo_e5, s_hi_e5)
-        v_s_0_lo_e_partial = Vec.from_elements(lo_e7, fx.Float32).ir_value()
-        v_s_0_hi_e_partial = Vec.from_elements(hi_e7, fx.Float32).ir_value()
-
+        v_p_0 = _attn_exp2_slice(v_s_0, 0, 16)
         #     sched_barrier_pairs<10, 5, 8>();
         _sched_barrier_pairs(10, 5, 8)
         #     sched_barrier_exp_pairs<6, 3, 8>();
@@ -1802,8 +1711,7 @@ def build_flash_attn_opus_module(
         rocdl.sched_barrier(0)
         #     scale_output_tile<T>(v_o, rescale_m);
         #     asm volatile("" : "+v"(v_o_pin[0]), "+v"(v_o_pin[1]), "+v"(v_o_pin[2]), "+v"(v_o_pin[3]) ::);
-        _scale_o(o_accs, rescale_e7)
-
+        _scale_o(v_o, rescale_e7)
         #     __builtin_amdgcn_s_setprio(0);
         if const_expr(OPUS_SETPRIO):
             rocdl.s_setprio(0)
@@ -1816,9 +1724,9 @@ def build_flash_attn_opus_module(
 
         #     // Cluster 8:
         #     async_load<T::VEC_KV>(g_v, s_v[1].ptr, u_gv, u_sv, kv_tile(max_num_tiles - 1));
-        async_load_v(max_m1 * fx.Index(BLOCK_N), 1)
+        _async_load_v(max_m1 * fx.Index(BLOCK_N), 1)
         #     v_k = load<T::VEC_KV>(s_k[1], u_rk);
-        k_pl_e8, k_ph_e8 = async_load_k_from_lds_to_vgpr(1, urk_base_per_lane)
+        v_k = _async_load_k_from_lds_to_vgpr(1, urk_base_per_lane)
         #     s_waitcnt_lgkmcnt(0_I);
         rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
         #     s_waitcnt_vmcnt(number<T::v_buffer_load_insts>{});
@@ -1832,21 +1740,18 @@ def build_flash_attn_opus_module(
 
         #     // Cluster 9:
         #     v_s[1] = mma0(v_q, v_k);
-        v_s_1_lo_e9, v_s_1_hi_e9 = mma0(k_pl_e8, k_ph_e8)
+        v_s_1 = _mma0(v_k)
         #     l_row *= rescale_m;
         l_row = _fmul(l_row, rescale_e7)
         #     attn_exp2_slice<T, s_half_len, s_half_len>(v_s[0]);
-        #     v_p = opus::cast<D_ATTN>(v_s[0]);
-        #     asm volatile("" : "+v"(v_p) ::);
-        v_s_0_hi_full_e9 = attn_exp2_second_half_slice(v_s_0_hi_e_partial)
-        v_s_0_lo_list_e9 = [Vec(v_s_0_lo_e_partial)[r] for r in range_constexpr(16)]
-        tile_sum_e9 = attn_sum_parts(v_s_0_lo_list_e9, v_s_0_hi_full_e9)
+        v_p_0 = _attn_exp2_slice(v_p_0, 16, 16)
+        tile_sum_e9 = _attn_sum(v_p_0)
         #     l_row += attn_sum<T>(v_s[0]);
         l_row = _fadd(l_row, tile_sum_e9)
-
-        v_p_lo_e9, v_p_hi_e9 = cast_p_parts(v_s_0_lo_list_e9, v_s_0_hi_full_e9)
-        v_p_lo_e9, v_p_hi_e9 = _anchor_p_parts(v_p_lo_e9, v_p_hi_e9)
-
+        #     v_p = opus::cast<D_ATTN>(v_s[0]);
+        v_p_0 = _cast_p(v_p_0)
+        #     asm volatile("" : "+v"(v_p) ::);
+        v_p_0 = _anchor_v_p(v_p_0)
         #     sched_barrier_exp_pairs<6, 3, 9>();
         _sched_barrier_exp_pairs(6, 3, 9)
         #     sched_barrier_pairs<10, 5, 9>();
@@ -1867,15 +1772,14 @@ def build_flash_attn_opus_module(
         #             attn_mask_causal_tile<T>(v_s[1], q_start_pos, max_num_tiles - 1, neg_inf_v, lane_id);
         #         }
         #     }
-        s_lo_e9 = [Vec(v_s_1_lo_e9)[r] for r in range_constexpr(16)]
-        s_hi_e9 = [Vec(v_s_1_hi_e9)[r] for r in range_constexpr(16)]
         if const_expr(CAUSAL):
-            s_lo_e9, s_hi_e9 = _causal_mask_prologue_if_needed(
-                s_lo_e9,
-                s_hi_e9,
+            v_s_1 = _causal_mask_prologue_if_needed(
+                v_s_1,
                 max_m1,
                 max_num_tiles * fx.Index(BLOCK_N),
             )
+        else:
+            v_s_1 = _v_s_vec_to_lists(v_s_1)
         #     s_waitcnt_lgkmcnt(0_I);
         rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
         #     s_waitcnt_vmcnt(0_I);
@@ -1889,63 +1793,42 @@ def build_flash_attn_opus_module(
 
         #     // Cluster 11:
         #     v_o = mma1(v_p, v_v, v_o);
-        for kss in range_constexpr(4):
-            v_pk = v_packs_e11[kss]
-            if const_expr(kss < 2):
-                p_pk = v_p_lo_e9[kss]
-            else:
-                p_pk = v_p_hi_e9[kss - 2]
-            for dc in range_constexpr(D_CHUNKS):
-                o_accs[dc] = mfma_acc(v_pk[dc], p_pk, o_accs[dc])
-
+        v_o = _mma1(v_p_0, v_packs_e11, v_o)
         #     row_max = max(m_row, attn_row_max<T>(v_s[1]));
-        m_tile_max_e11 = attn_row_max(s_lo_e9, s_hi_e9)
+        m_tile_max_e11 = _attn_row_max(v_s_1)
         row_max_e11 = _fmax(m_row, m_tile_max_e11)
         #     rescale_m = __builtin_amdgcn_exp2f(m_row - row_max);
         rescale_e11 = rocdl.exp2(T.f32, _raw(_fsub(m_row, row_max_e11)))
         #     m_row = row_max;
         m_row = row_max_e11
-
         #     attn_sub_row<T>(v_s[1], row_max);
+        v_s_1 = _attn_sub_row(v_s_1, row_max_e11)
         #     asm volatile("" : "+v"(v_s[1]) ::);
+        v_s_1 = _anchor_v_s(v_s_1)
         #     attn_exp2_slice<T, 0, s_half_len>(v_s[1]);
-        s_lo_e9, s_hi_e9 = _attn_sub_row_pair(s_lo_e9, s_hi_e9, row_max_e11)
-        v_s_1_lo_e11 = Vec.from_elements(s_lo_e9, fx.Float32).ir_value()
-        v_s_1_hi_e11 = Vec.from_elements(s_hi_e9, fx.Float32).ir_value()
-        v_s_1_lo_e11, v_s_1_hi_e11 = _anchor_pair(
-            v_s_1_lo_e11, v_s_1_hi_e11
-        )
-        s_lo_e9 = [Vec(v_s_1_lo_e11)[r] for r in range_constexpr(16)]
-        s_hi_e9 = [Vec(v_s_1_hi_e11)[r] for r in range_constexpr(16)]
-        lo_e11, hi_e11 = attn_exp2_first_half_slice(s_lo_e9, s_hi_e9)
-
+        v_p_1 = _attn_exp2_slice(v_s_1, 0, 16)
         #     sched_barrier_pairs<10, 5, 10>();
         _sched_barrier_pairs(10, 5, 10)
         #     sched_barrier_exp_pairs<6, 3, 10>();
         _sched_barrier_exp_pairs(6, 3, 10)
         #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
-
         #     attn_exp2_slice<T, s_half_len, s_half_len>(v_s[1]);
-        hi_e11_full = []
-        for r in range_constexpr(16):
-            hi_e11_full.append(rocdl.exp2(T.f32, _raw(hi_e11[r])))
+        v_p_1 = _attn_exp2_slice(v_p_1, 16, 16)
         #     l_row *= rescale_m;
         l_row = _fmul(l_row, rescale_e11)
-        tile_sum_e11 = attn_sum_parts(lo_e11, hi_e11_full)
+        tile_sum_e11 = _attn_sum(v_p_1)
         #     l_row += attn_sum<T>(v_s[1]);
         l_row = _fadd(l_row, tile_sum_e11)
-
         #     v_p = opus::cast<D_ATTN>(v_s[1]);
+        v_p_1 = _cast_p(v_p_1)
         #     asm volatile("" : "+v"(v_p) ::);
-        v_p_lo_e11, v_p_hi_e11 = cast_p_parts(lo_e11, hi_e11_full)
-        v_p_lo_e11, v_p_hi_e11 = _anchor_p_parts(v_p_lo_e11, v_p_hi_e11)
-
+        v_p_1 = _anchor_v_p(v_p_1)
         #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
         #     scale_output_tile<T>(v_o, rescale_m);
         #     asm volatile("" : "+v"(v_o_pin[0]), "+v"(v_o_pin[1]), "+v"(v_o_pin[2]), "+v"(v_o_pin[3]) ::);
-        _scale_o(o_accs, rescale_e11)
+        _scale_o(v_o, rescale_e11)
         #     __builtin_amdgcn_s_barrier();
         rocdl.s_barrier()
         #     __builtin_amdgcn_sched_barrier(0);
@@ -1965,15 +1848,7 @@ def build_flash_attn_opus_module(
 
         #     // Cluster 13:
         #     v_o = mma1(v_p, v_v, v_o);
-        for kss in range_constexpr(4):
-            v_pk = v_packs_e13[kss]
-            if const_expr(kss < 2):
-                p_pk = v_p_lo_e11[kss]
-            else:
-                p_pk = v_p_hi_e11[kss - 2]
-            for dc in range_constexpr(D_CHUNKS):
-                o_accs[dc] = mfma_acc(v_pk[dc], p_pk, o_accs[dc])
-
+        v_o = _mma1(v_p_1, v_packs_e13, v_o)
         #     // ──── Normalize O and store to gmem ────
         #     D_ACC l_inv = (l_row > D_ACC(0.0f)) ? (D_ACC(1.0f) / l_row) : D_ACC(0.0f);
         #     static_for<o_len>([&](auto i) { v_o[i.value] *= l_inv; });
@@ -1993,7 +1868,7 @@ def build_flash_attn_opus_module(
         #     store<T::VEC_O>(g_o, v_o_bf16, u_o);
         if q_in_bounds:
             for dc in range_constexpr(D_CHUNKS):
-                o_norm_vec = Vec(o_accs[dc]) * inv_l_vec
+                o_norm_vec = Vec(v_o[dc]) * inv_l_vec
                 for store_group in range_constexpr(4):
                     r_base = store_group * 4
                     lo = rocdl.cvt_pk_bf16_f32(
@@ -2007,7 +1882,7 @@ def build_flash_attn_opus_module(
                     o_pack = Vec.from_elements([lo, hi], fx.Int32).ir_value()
                     d_row_rel = lane_div_32 * 4 + store_group * 8
                     d_col = fx.Index(dc * D_CHUNK) + d_row_rel
-                    o_global = global_idx_q(q_row, d_col)
+                    o_global = _global_idx_q(q_row, d_col)
                     o_byte_offset = fx.Int32(o_global * fx.Index(BF16_BYTES))
                     rocdl.raw_buffer_store(
                         o_pack,
