@@ -28,9 +28,7 @@ cl::Option *findOption(const std::string &name) {
 /// vs. a value-required option (int / string / enum).
 /// LLVM is built without RTTI, so dynamic_cast is unavailable; we use the
 /// ValueExpected flag as a proxy for the underlying C++ type.
-bool isBoolOption(cl::Option *opt) {
-  return opt->getValueExpectedFlag() != cl::ValueRequired;
-}
+bool isBoolOption(cl::Option *opt) { return opt->getValueExpectedFlag() != cl::ValueRequired; }
 
 } // namespace
 
@@ -40,8 +38,8 @@ bool isBoolOption(cl::Option *opt) {
 
 extern "C" {
 
-__attribute__((visibility("default")))
-int flydslSetLLVMOptionBool(const char *name, bool value, bool *oldValue) {
+__attribute__((visibility("default"))) int flydslSetLLVMOptionBool(const char *name, bool value,
+                                                                   bool *oldValue) {
   cl::Option *opt = findOption(name);
   if (!opt)
     return 1;
@@ -54,8 +52,8 @@ int flydslSetLLVMOptionBool(const char *name, bool value, bool *oldValue) {
   return 0;
 }
 
-__attribute__((visibility("default")))
-int flydslSetLLVMOptionInt(const char *name, int value, int *oldValue) {
+__attribute__((visibility("default"))) int flydslSetLLVMOptionInt(const char *name, int value,
+                                                                  int *oldValue) {
   cl::Option *opt = findOption(name);
   if (!opt)
     return 1;
@@ -68,9 +66,8 @@ int flydslSetLLVMOptionInt(const char *name, int value, int *oldValue) {
   return 0;
 }
 
-__attribute__((visibility("default")))
-int flydslSetLLVMOptionStr(const char *name, const char *value,
-                           char **oldValue) {
+__attribute__((visibility("default"))) int
+flydslSetLLVMOptionStr(const char *name, const char *value, char **oldValue) {
   cl::Option *opt = findOption(name);
   if (!opt)
     return 1;
@@ -86,7 +83,6 @@ int flydslSetLLVMOptionStr(const char *name, const char *value,
   return 0;
 }
 
-__attribute__((visibility("default")))
-void flydslFreeLLVMOptionStr(char *str) { std::free(str); }
+__attribute__((visibility("default"))) void flydslFreeLLVMOptionStr(char *str) { std::free(str); }
 
 } // extern "C"

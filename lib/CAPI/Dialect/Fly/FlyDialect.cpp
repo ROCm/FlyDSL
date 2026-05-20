@@ -13,8 +13,6 @@ MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(Fly, fly, mlir::fly::FlyDialect)
 
 void mlirRegisterFlyPasses(void) { mlir::fly::registerFlyPasses(); }
 
-void mlirRegisterFlyExplicitModuleOffloadingLLVMTranslation(
-    MlirContext context) {
-  mlir::fly::registerExplicitModuleOffloadingLLVMTranslation(
-      *unwrap(context));
+void mlirRegisterFlyExplicitModuleOffloadingLLVMTranslation(MlirContext context) {
+  mlir::fly::registerExplicitModuleOffloadingLLVMTranslation(*unwrap(context));
 }
