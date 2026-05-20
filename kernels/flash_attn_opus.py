@@ -1165,7 +1165,6 @@ def build_flash_attn_opus_module(
         q_start_pos_i32 = fx.Int32(q_start + wave_id_uni * fx.Index(ROWS_PER_WAVE))
         q_row = q_start + q_row_in_block
         q_row_i32 = fx.Int32(q_row)
-        q_in_bounds = q_row < seq_len_v
         q_all_bf16 = _load_q_all(q_row_in_block)
         q_all_scaled_bf16 = _scale_q_all(q_all_bf16)
 
@@ -1852,8 +1851,9 @@ def build_flash_attn_opus_module(
         #     // ──── Normalize O and store to gmem ────
         #     D_ACC l_inv = (l_row > D_ACC(0.0f)) ? (D_ACC(1.0f) / l_row) : D_ACC(0.0f);
         #     static_for<o_len>([&](auto i) { v_o[i.value] *= l_inv; });
-        inv_l = rocdl.rcp(T.f32, _raw(l_row))
-        inv_l_vec = Vec.from_elements([inv_l], fx.Float32).broadcast_to(16)
+        inv_l_rcp = rocdl.rcp(T.f32, _raw(l_row))
+        inv_l = ArithValue(fx.Float32(l_row) > c_zero_f).select(inv_l_rcp, c_zero_f)
+        _scale_o(v_o, inv_l)
 
         #     if (!stagger) {
         #         __builtin_amdgcn_s_barrier();
@@ -1866,18 +1866,18 @@ def build_flash_attn_opus_module(
         #     auto u_o = make_layout_o<T>(warp_id, lane_id, kargs.stride_q_n);
         #     auto v_o_bf16 = opus::cast<D_ATTN>(v_o);
         #     store<T::VEC_O>(g_o, v_o_bf16, u_o);
+        q_in_bounds = q_row < seq_len_v
         if q_in_bounds:
             for dc in range_constexpr(D_CHUNKS):
-                o_norm_vec = Vec(v_o[dc]) * inv_l_vec
                 for store_group in range_constexpr(4):
                     r_base = store_group * 4
                     lo = rocdl.cvt_pk_bf16_f32(
-                        Vec(o_norm_vec)[r_base],
-                        Vec(o_norm_vec)[r_base + 1],
+                        Vec(v_o[dc])[r_base],
+                        Vec(v_o[dc])[r_base + 1],
                     )
                     hi = rocdl.cvt_pk_bf16_f32(
-                        Vec(o_norm_vec)[r_base + 2],
-                        Vec(o_norm_vec)[r_base + 3],
+                        Vec(v_o[dc])[r_base + 2],
+                        Vec(v_o[dc])[r_base + 3],
                     )
                     o_pack = Vec.from_elements([lo, hi], fx.Int32).ir_value()
                     d_row_rel = lane_div_32 * 4 + store_group * 8
