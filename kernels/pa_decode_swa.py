@@ -1228,7 +1228,7 @@ def compile_pa_decode_sw(
     scale_off = allocator.ptr
     allocator.ptr += LDS_SCALE_TOTAL
 
-    @flyc.kernel
+    @flyc.kernel(known_block_size=(BLOCK_THREADS, 1, 1))
     def pa_decode_sw_kernel(
         exp_sums_ptr: fx.Tensor,  # [batch, kv_heads, max_parts, eqgs] f32
         max_logits_ptr: fx.Tensor,  # [batch, kv_heads, max_parts, eqgs] f32

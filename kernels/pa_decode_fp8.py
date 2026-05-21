@@ -143,6 +143,12 @@ def _global_load_i64x2(global_ptr, byte_offset_i64):
     return llvm.LoadOp(T.i64x2, ptr, alignment=16).result
 
 
+def _global_load_i32(global_ptr, elem_offset_i32):
+    byte_offset_i64 = fx.Int64(elem_offset_i32) * fx.Int64(4)
+    ptr = buffer_ops.get_element_ptr(global_ptr, byte_offset=byte_offset_i64, elem_type=T.i8)
+    return llvm.LoadOp(T.i32, ptr, alignment=4).result
+
+
 def _rcp_f32(value):
     return rocdl.rcp(T.f32, value)
 
@@ -1167,8 +1173,8 @@ def compile_pa_decode_ps(
     allocator.ptr += LDS_SCALE_TOTAL
 
     # ── @flyc.kernel ─────────────────────────────────────────────────
-    @flyc.kernel
-    def pa_decode_ps_kernel(
+    @flyc.kernel(known_block_size=(BLOCK_THREADS, 1, 1))
+    def pa_decode_metadata_kenrel(
         out_ptr: fx.Tensor,  # output [batch, num_q_heads, head_size]
         partial_out_ptr: fx.Tensor,  # partial output [num_partials, 1, nhead, head_dim] fp32
         partial_lse_ptr: fx.Tensor,  # partial LSE [num_partials, 1, nhead, 1] fp32
@@ -1380,94 +1386,13 @@ def compile_pa_decode_ps(
             # ════════════════════════════════════════════════════════
             # Inner KV loop — one CTA processes one 256-token sub-tile
             # across all 1024-token physical blocks in the work item.
+            # Below: MTP groups loop is nested INSIDE the KV loop so that
+            # K and V are loaded once per physical block and reused across
+            # all MTP groups.  Q is hoisted out of the KV loop (loaded once
+            # per work item, kept in registers).
             # ════════════════════════════════════════════════════════
             def _unwrap(v):
                 return v.ir_value() if hasattr(v, "ir_value") else v
-
-            def _pack_state(rmax, rsum, o0, o1, k_flat, scale_scalars=None):
-                state = [rmax, rsum, o0, o1] + k_flat
-                if const_expr(cache_scale_vecs and per_token_kv):
-                    state += list(scale_scalars)
-                return [_unwrap(v) for v in state]
-
-            def _unpack_state(state):
-                k_flat = list(state[4 : 4 + _N_K])
-                if const_expr(per_token_kv):
-                    scale_scalars = tuple(state[4 + _N_K : 6 + _N_K])
-                else:
-                    scale_scalars = None
-                return state[0], state[1], state[2], state[3], k_flat, scale_scalars
-
-            def _process_block_split(
-                phys_block,
-                block_idx_in_work,
-                rmax,
-                rsum,
-                o0,
-                o1,
-                tile_token_offset_i32,
-                k_ops,
-                scale_scalars,
-                next_phys_block=None,
-                next_k_base=None,
-            ):
-                """Process one 256-token block split inside a 1024-token KV page."""
-                partition_start = kv_start_abs_tok + block_idx_in_work * c_bs + tile_token_offset_i32
-                v_base = _compute_block_base_dw_i64(phys_block, c_vb, _v_head_off)
-                preloaded_v_and_scales = _load_v_and_scales(
-                    v_base,
-                    tile_token_offset_i32,
-                    phys_block=phys_block,
-                    preloaded_scale_scalars=scale_scalars,
-                )
-                if const_expr(per_token_kv):
-                    d_out, v_ops, v_scales = _qk_and_intra_softmax(
-                        k_ops,
-                        partition_start,
-                        v_base,
-                        tile_token_offset_i32,
-                        q_frags,
-                        causal_bound,
-                        query_scale_lane=query_scale_lane,
-                        phys_block=phys_block,
-                        preloaded_v_and_scales=preloaded_v_and_scales,
-                    )
-                else:
-                    d_out, v_ops = _qk_and_intra_softmax(
-                        k_ops,
-                        partition_start,
-                        v_base,
-                        tile_token_offset_i32,
-                        q_frags,
-                        causal_bound,
-                        query_scale_lane=query_scale_lane,
-                        phys_block=phys_block,
-                        preloaded_v_and_scales=preloaded_v_and_scales,
-                    )
-                    v_scales = None
-
-                gpu.barrier()
-                rmax, rsum, o0, o1, v_correction = _cross_warp_softmax_and_prob_pack(
-                    d_out, rmax, rsum, o0, o1, v_scales
-                )
-                if const_expr(next_k_base is not None):
-                    next_scale_scalars = _load_kv_scale_scalars(tile_token_offset_i32, next_phys_block)
-                    k_next_flat = _load_k_flat(
-                        k_global_ptr,
-                        next_k_base,
-                        tile_token_offset_i32,
-                        _k_tok_thread_base,
-                        _c_tok_stride_dw,
-                        _k_he_off_dw,
-                        sched_vmem_after_load=False,
-                    )
-                else:
-                    k_next_flat = None
-                    next_scale_scalars = None
-
-                gpu.barrier()
-                o0, o1 = _pv_mfma(v_ops, o0, o1, v_correction)
-                return rmax, rsum, o0, o1, k_next_flat, next_scale_scalars
 
             # Metadata remaps every work tile into a partial slot shared across q-head ranges.
             # grid_z then expands each slot into 4 block-split partials.
@@ -1489,33 +1414,34 @@ def compile_pa_decode_ps(
             _loop_stop_g = fx.Index(arith.unwrap(num_blocks_in_work))
             _loop_step_g = arith.index(1)
 
-            # ── MTP groups: Python compile-time loop — one MLIR KV-loop per group ──
-            # Use range_constexpr so AST rewriter keeps this as a plain Python loop
             _mtp_groups = math.ceil(query_length * query_group_size / 16)
-            next_mtp_prefetch = None
+
+            # ── Pre-load Q for every MTP group ONCE per work item.  Each
+            # group's q_frags / qi / qhi / qscale stay in registers across
+            # the entire KV loop, so we pay the Q-load cost (global → LDS →
+            # registers) exactly once per work-item regardless of how many
+            # blocks the work item spans.
+            q_frags_per_mtp = []
+            qi_per_mtp = []
+            qhi_per_mtp = []
+            qscale_per_mtp = []
             for _mtp_g in range_constexpr(_mtp_groups):
-                # Between passes: barrier ensures prev pass's LDS prob-reads are done
                 if const_expr(_mtp_g > 0):
                     gpu.barrier()
-
-                if const_expr(_mtp_g == 0):
-                    mtp_prefetch = _prefetch_mtp_group_query(
-                        q_rsrc,
-                        batch_idx,
-                        kv_h,
-                        stride_q_seq,
-                        stride_q_head,
-                        lane16id,
-                        local_qhead_idx,
-                        mtp_group_idx=_mtp_g,
-                        query_length=query_length,
-                        query_group_size=query_group_size,
-                        query_load_is_bf16=query_load_is_bf16,
-                    )
-                else:
-                    mtp_prefetch = next_mtp_prefetch
-
-                qi_val, qhi_pos, q_frags, query_scale_lane = _finish_mtp_group_q_fragments(
+                mtp_prefetch = _prefetch_mtp_group_query(
+                    q_rsrc,
+                    batch_idx,
+                    kv_h,
+                    stride_q_seq,
+                    stride_q_head,
+                    lane16id,
+                    local_qhead_idx,
+                    mtp_group_idx=_mtp_g,
+                    query_length=query_length,
+                    query_group_size=query_group_size,
+                    query_load_is_bf16=query_load_is_bf16,
+                )
+                _qi, _qhi, _qfrags, _qscale = _finish_mtp_group_q_fragments(
                     logits_lds_i32,
                     logits_lds_i64,
                     softmax_lds_f32,
@@ -1524,33 +1450,148 @@ def compile_pa_decode_ps(
                     rowid,
                     local_qhead_idx,
                 )
+                qi_per_mtp.append(_qi)
+                qhi_per_mtp.append(_qhi)
+                q_frags_per_mtp.append(_qfrags)
+                qscale_per_mtp.append(_qscale)
+            gpu.barrier()
 
-                if const_expr(_mtp_g + 1 < _mtp_groups):
-                    next_mtp_prefetch = _prefetch_mtp_group_query(
-                        q_rsrc,
-                        batch_idx,
-                        kv_h,
-                        stride_q_seq,
-                        stride_q_head,
-                        lane16id,
-                        local_qhead_idx,
-                        mtp_group_idx=_mtp_g + 1,
-                        query_length=query_length,
-                        query_group_size=query_group_size,
-                        query_load_is_bf16=query_load_is_bf16,
+            # MTP causal bound per group (depends only on qi, computed once).
+            causal_bound_per_mtp = [
+                context_len + arith.constant(1 - query_length, type=T.i32) + qi_per_mtp[_mtp_g]
+                for _mtp_g in range(_mtp_groups)
+            ]
+
+            # ── K init: load first block's 256-token tile (loop-carried) ──
+            first_k_base = _compute_block_base_dw_i64(first_phys_block, c_kb, _k_head_off)
+            scale_scalars0 = _load_kv_scale_scalars(tile_token_offset, first_phys_block)
+            k_flat0 = _load_k_flat(
+                k_global_ptr,
+                first_k_base,
+                tile_token_offset,
+                _k_tok_thread_base,
+                _c_tok_stride_dw,
+                _k_he_off_dw,
+                sched_vmem_after_load=False,
+            )
+
+            # Multi-MTP state packing: 4*N (rmax, rsum, o0, o1) per MTP group,
+            # + _N_K K values, + 2 scale scalars (per_token_kv only).
+            def _pack_states_kv(states, k_flat, scale_scalars=None):
+                flat = []
+                for st in states:
+                    rmax, rsum, o0, o1 = st
+                    flat.extend([_unwrap(rmax), _unwrap(rsum), _unwrap(o0), _unwrap(o1)])
+                flat.extend(_unwrap(v) for v in k_flat)
+                if const_expr(cache_scale_vecs and per_token_kv):
+                    flat.extend(_unwrap(v) for v in scale_scalars)
+                return flat
+
+            def _unpack_states_kv(flat):
+                base = 4 * _mtp_groups
+                states = [tuple(flat[4 * i + j] for j in range(4)) for i in range(_mtp_groups)]
+                k_flat = list(flat[base : base + _N_K])
+                if const_expr(cache_scale_vecs and per_token_kv):
+                    scale_scalars = tuple(flat[base + _N_K : base + _N_K + 2])
+                else:
+                    scale_scalars = None
+                return states, k_flat, scale_scalars
+
+            init_states = [
+                (
+                    NEG_INF,
+                    ZERO_F,
+                    arith.constant_vector(0.0, T.f32x4),
+                    arith.constant_vector(0.0, T.f32x4),
+                )
+                for _ in range(_mtp_groups)
+            ]
+
+            # ════════════════════════════════════════════════════════
+            # KV outer loop — iterate over physical blocks in this work
+            # item.  MTP processing happens INSIDE the loop body so that
+            # K and V are loaded once per block and reused across all
+            # MTP groups.
+            # ════════════════════════════════════════════════════════
+            for ib, state in range(
+                _loop_start_g, _loop_stop_g, _loop_step_g,
+                init=_pack_states_kv(init_states, k_flat0, scale_scalars0),
+            ):
+                cur_states, k_flat, scale_scalars = _unpack_states_kv(state)
+                block_idx = arith.index_cast(T.i32, ib)
+
+                phys_block = buffer_ops.buffer_load(
+                    kpi_rsrc, kv_start + block_idx, vec_width=1, dtype=T.i32
+                )
+                next_idx_raw = block_idx + c_one
+                next_idx_clamped = arith.select(
+                    next_idx_raw < num_blocks_in_work, next_idx_raw, last_block_idx_val
+                )
+                next_phys_block = buffer_ops.buffer_load(
+                    kpi_rsrc, kv_start + next_idx_clamped, vec_width=1, dtype=T.i32
+                )
+                next_k_base = _compute_block_base_dw_i64(next_phys_block, c_kb, _k_head_off)
+
+                k_ops = _unflatten_k(k_flat)
+                partition_start = (
+                    kv_start_abs_tok + block_idx * c_bs + tile_token_offset
+                )
+                v_base = _compute_block_base_dw_i64(phys_block, c_vb, _v_head_off)
+
+                # Load V (and per-token scales if applicable) ONCE per KV
+                # iteration; reused across all MTP groups below.
+                preloaded_v_and_scales = _load_v_and_scales(
+                    v_base,
+                    tile_token_offset,
+                    phys_block=phys_block,
+                    preloaded_scale_scalars=scale_scalars,
+                )
+
+                new_states = []
+                for _mtp_g in range_constexpr(_mtp_groups):
+                    if const_expr(_mtp_g > 0):
+                        gpu.barrier()
+                    rmax, rsum, o0, o1 = cur_states[_mtp_g]
+
+                    if const_expr(cache_scale_vecs and per_token_kv):
+                        d_out, v_ops, v_scales = _qk_and_intra_softmax(
+                            k_ops,
+                            partition_start,
+                            v_base,
+                            tile_token_offset,
+                            q_frags_per_mtp[_mtp_g],
+                            causal_bound_per_mtp[_mtp_g],
+                            query_scale_lane=qscale_per_mtp[_mtp_g],
+                            phys_block=phys_block,
+                            preloaded_v_and_scales=preloaded_v_and_scales,
+                        )
+                    else:
+                        d_out, v_ops = _qk_and_intra_softmax(
+                            k_ops,
+                            partition_start,
+                            v_base,
+                            tile_token_offset,
+                            q_frags_per_mtp[_mtp_g],
+                            causal_bound_per_mtp[_mtp_g],
+                            query_scale_lane=qscale_per_mtp[_mtp_g],
+                            phys_block=phys_block,
+                            preloaded_v_and_scales=preloaded_v_and_scales,
+                        )
+                        v_scales = None
+
+                    gpu.barrier()
+                    rmax, rsum, o0, o1, v_correction = _cross_warp_softmax_and_prob_pack(
+                        d_out, rmax, rsum, o0, o1, v_scales
                     )
+                    gpu.barrier()
+                    o0, o1 = _pv_mfma(v_ops, o0, o1, v_correction)
+                    new_states.append((rmax, rsum, o0, o1))
 
-                gpu.barrier()
-
-                # MTP causal bound for this lane's qi_val token
-                causal_bound = context_len + arith.constant(1 - query_length, type=T.i32) + qi_val
-
-                # ── K init: load this CTA's 256-token block split for the first block ──
-                first_k_base = _compute_block_base_dw_i64(first_phys_block, c_kb, _k_head_off)
-                scale_scalars = _load_kv_scale_scalars(tile_token_offset, first_phys_block)
-                k_flat = _load_k_flat(
+                # Prefetch next K (once per KV iter, after all MTP groups)
+                next_scale_scalars = _load_kv_scale_scalars(tile_token_offset, next_phys_block)
+                k_next_flat = _load_k_flat(
                     k_global_ptr,
-                    first_k_base,
+                    next_k_base,
                     tile_token_offset,
                     _k_tok_thread_base,
                     _c_tok_stride_dw,
@@ -1558,56 +1599,20 @@ def compile_pa_decode_ps(
                     sched_vmem_after_load=False,
                 )
 
-                init_state = _pack_state(
-                    NEG_INF,
-                    ZERO_F,
-                    arith.constant_vector(0.0, T.f32x4),
-                    arith.constant_vector(0.0, T.f32x4),
-                    k_flat,
-                    scale_scalars,
-                )
+                results = yield _pack_states_kv(new_states, k_next_flat, next_scale_scalars)
 
-                for ib, state in range(_loop_start_g, _loop_stop_g, _loop_step_g, init=init_state):
-                    running_max, running_sum, out0, out1, k_flat, scale_scalars = _unpack_state(state)
-                    block_idx = arith.index_cast(T.i32, ib)
-
-                    phys_block = buffer_ops.buffer_load(kpi_rsrc, kv_start + block_idx, vec_width=1, dtype=T.i32)
-                    next_idx_raw = block_idx + c_one
-                    next_idx_clamped = arith.select(next_idx_raw < num_blocks_in_work, next_idx_raw, last_block_idx_val)
-                    next_phys_block = buffer_ops.buffer_load(
-                        kpi_rsrc, kv_start + next_idx_clamped, vec_width=1, dtype=T.i32
-                    )
-                    next_k_base = _compute_block_base_dw_i64(next_phys_block, c_kb, _k_head_off)
-
-                    k_ops = _unflatten_k(k_flat)
-
-                    running_max, running_sum, out0, out1, k_next_flat, next_scale_scalars = _process_block_split(
-                        phys_block,
-                        block_idx,
-                        running_max,
-                        running_sum,
-                        out0,
-                        out1,
-                        tile_token_offset,
-                        k_ops,
-                        scale_scalars,
-                        next_phys_block=next_phys_block,
-                        next_k_base=next_k_base,
-                    )
-
-                    results = yield _pack_state(
-                        running_max,
-                        running_sum,
-                        out0,
-                        out1,
-                        k_next_flat,
-                        next_scale_scalars,
-                    )
-
-                running_max, running_sum, out0, out1, _, _ = _unpack_state(results)
-
-                # ── Normalize output ──
+            # ── Normalize + store one slot per MTP group ──
+            final_states, _, _ = _unpack_states_kv(results)
+            from flydsl._mlir.dialects import math as _mlir_math
+            for _mtp_g in range_constexpr(_mtp_groups):
+                rmax_raw, rsum_raw, o0_raw, o1_raw = final_states[_mtp_g]
+                running_max = fx.Float32(rmax_raw)
+                running_sum = fx.Float32(rsum_raw)
+                out0 = fx.Vector(o0_raw)
+                out1 = fx.Vector(o1_raw)
                 outelems_norm = _normalize_pa_output(running_sum, out0, out1, ZERO_F)
+                qi_val_mg = qi_per_mtp[_mtp_g]
+                qhi_pos_mg = qhi_per_mtp[_mtp_g]
 
                 for vhe in range_constexpr(VHELOOP):
                     hs_base = (
@@ -1615,26 +1620,21 @@ def compile_pa_decode_ps(
                         + warp_id * arith.constant(MFMA_N, type=T.i32)
                         + rowid * arith.constant(4, type=T.i32)
                     )
-                    # qhi_pos: mtp_g-based head position within kv_head group
-                    qhead = kv_h * arith.constant(query_group_size, type=T.i32) + qhi_pos
-                    _po_row = _po_row_base + qi_val
+                    qhead = kv_h * arith.constant(query_group_size, type=T.i32) + qhi_pos_mg
+                    _po_row = _po_row_base + qi_val_mg
                     po_off = _po_row * stride_po_ql + qhead * arith.constant(HEAD_SIZE, type=T.i32) + hs_base
-
-                    # pa_reduce_v1 expects normalized partial output from every block split.
                     buffer_ops.buffer_store(
                         outelems_norm[vhe], po_rsrc, po_off * arith.constant(4, type=T.i32), offset_is_bytes=True
                     )
 
-                # ── LSE ──
+                # LSE
                 safe_sum_lse = arith.select(running_sum > ZERO_F, running_sum, arith.constant(1.0, type=T.f32))
-                from flydsl._mlir.dialects import math as _mlir_math
-
                 log_sum = _mlir_math.log(safe_sum_lse, fastmath=arith.FastMathFlags.fast)
                 lse_val = running_max + log_sum
-                qhead_lse = kv_h * arith.constant(query_group_size, type=T.i32) + qhi_pos
-                _po_row_lse = _po_row_base + qi_val
+                qhead_lse = kv_h * arith.constant(query_group_size, type=T.i32) + qhi_pos_mg
+                _po_row_lse = _po_row_base + qi_val_mg
                 pl_off = _po_row_lse * stride_pl_ql + qhead_lse
-                lse_as_i32 = arith.bitcast(T.i32, lse_val)
+                lse_as_i32 = arith.bitcast(T.i32, arith.unwrap(lse_val))
                 buffer_ops.buffer_store(
                     lse_as_i32, pl_rsrc, pl_off * arith.constant(4, type=T.i32), offset_is_bytes=True
                 )
@@ -1676,7 +1676,7 @@ def compile_pa_decode_ps(
         ctx = CompilationContext.get_current()
         with ir.InsertionPoint(ctx.gpu_module_body):
             allocator.finalize()
-        pa_decode_ps_kernel(
+        pa_decode_metadata_kenrel(
             out,
             po,
             pl,
@@ -1711,7 +1711,7 @@ def compile_pa_decode_ps(
 
     return {
         "launch": launch_pa_decode_ps,
-        "kernel": pa_decode_ps_kernel,
+        "kernel": pa_decode_metadata_kenrel,
         "allocator": allocator,
     }
 
@@ -1892,6 +1892,626 @@ def get_sw_ps_max_context_partition_num(
         return 0
     window_token_count = sliding_window + query_length
     return _cdiv(window_token_count - 1, context_partition_size) + 1
+
+
+def get_recommended_splits(
+    num_sequences: int,
+    num_kv_heads: int,
+    split_kv_blocks: int = 1,
+) -> int:
+    """Recommend ``max_context_partition_num`` for the small-block PS path.
+
+    Mirrors ``get_recommended_splits`` in
+    ``aiter/ops/triton/gluon/pa_decode_gluon.py`` so FlyDSL callers do not need
+    to depend on aiter for the host-side split count.
+    """
+    props = torch.cuda.get_device_properties(torch.device("cuda"))
+    # Reference uses occupancy = 2 (see `get_occupancy()` in the Gluon module).
+    occupancy = 2
+    num_sm = props.multi_processor_count * occupancy
+    denom = max(1, num_sequences * num_kv_heads * split_kv_blocks)
+    n = _cdiv(num_sm, denom) * split_kv_blocks
+    return max(4, min(n, 8))
+
+
+# =====================================================================
+# compile_pa_decode_ps_small_block — partition kernel for block_size 16/64
+# =====================================================================
+#
+# Mirrors `paged_attention_decode_ps`
+# (aiter/ops/triton/gluon/pa_decode_gluon.py:2167) for the
+# `KV_BLOCK_SIZE < CONTEXT_PARTITION_SIZE` case.  Grid is partition-based:
+#   (batch, num_kv_heads, max_context_partition_num)
+# Each CTA owns one 256-token context partition spanning
+# `256 // block_size` physical KV blocks and writes its partial
+# (exp_sum, max_logit, attention_output) into intermediate tensors that
+# are reduced by `compile_pa_decode_sw_reduce`.
+#
+# Supports per-tensor KV quant only (per_token_kv path is NotImplementedError).
+#
+# Known limitation: launching multiple instances of this kernel back-to-back
+# in the same Python process with *different* compile-cache keys (e.g. two
+# different `query_length` values) currently crashes the GPU after the first
+# launch.  Single-process workflows that compile only one specialisation work
+# correctly; the test harness should isolate runs (e.g. spawn a fresh process
+# per (block_size, query_length) tuple) until the underlying multi-compile
+# clash is resolved.
+_PA_DECODE_PS_SMALL_BLOCK_SIZES = (16, 64)
+
+
+def _pa_small_block_load_k_flat(
+    k_global_ptr,
+    bt_rsrc,
+    batch_idx_i32,
+    kv_h_i32,
+    stride_k_block_i32,
+    stride_k_head_i32,
+    stride_bt_seq_i32,
+    partition_block_base_i32,
+    warp_id_i32,
+    lane16id_i32,
+    rowid_i32,
+    *,
+    block_size: int,
+):
+    """Load K data for one warp's 64-token slice of a 256-token partition.
+
+    Returns ``k_flat`` (a list of ``TLOOP * QKHELOOP * 2`` i64 scalars) compatible
+    with ``_unflatten_k`` and downstream MFMA invocations.
+    """
+    c_he_stride_dw = fx.Int32(block_size * FP8_ELEMS_16B // 4)
+    c_tok_stride_dw = fx.Int32(FP8_ELEMS_16B // 4)
+    k_he_off_dw = [
+        rowid_i32 * c_he_stride_dw + fx.Int32(qkhe * 4) * c_he_stride_dw
+        for qkhe in range(QKHELOOP)
+    ]
+    k_head_off = kv_h_i32 * stride_k_head_i32
+
+    k_flat = []
+    if block_size == 64:
+        # Each warp owns exactly one physical block (64 tokens).
+        bt_off = batch_idx_i32 * stride_bt_seq_i32 + partition_block_base_i32 + warp_id_i32
+        phys_block = buffer_ops.buffer_load(bt_rsrc, bt_off, vec_width=1, dtype=T.i32)
+        k_block_base_dw = _compute_block_base_dw_i64(phys_block, stride_k_block_i32, k_head_off)
+        for td in range_constexpr(TLOOP):
+            within_block_token = fx.Int32(td * MFMA_N) + lane16id_i32
+            kbo_dw = within_block_token * c_tok_stride_dw
+            for qkhe in range_constexpr(QKHELOOP):
+                ka_dw = k_block_base_dw + fx.Int64(kbo_dw + k_he_off_dw[qkhe])
+                k2 = _global_load_i64x2(k_global_ptr, ka_dw * fx.Int64(4))
+                k2_words = fx.Vector(k2)
+                k_flat.append(k2_words[0])
+                k_flat.append(k2_words[1])
+    else:
+        # block_size == 16: each warp spans 4 blocks (one MFMA tile per block).
+        within_block_token = lane16id_i32
+        kbo_dw = within_block_token * c_tok_stride_dw
+        for td in range_constexpr(TLOOP):
+            bt_off = (
+                batch_idx_i32 * stride_bt_seq_i32
+                + partition_block_base_i32
+                + warp_id_i32 * fx.Int32(TLOOP)
+                + fx.Int32(td)
+            )
+            phys_block = buffer_ops.buffer_load(bt_rsrc, bt_off, vec_width=1, dtype=T.i32)
+            k_block_base_dw = _compute_block_base_dw_i64(phys_block, stride_k_block_i32, k_head_off)
+            for qkhe in range_constexpr(QKHELOOP):
+                ka_dw = k_block_base_dw + fx.Int64(kbo_dw + k_he_off_dw[qkhe])
+                k2 = _global_load_i64x2(k_global_ptr, ka_dw * fx.Int64(4))
+                k2_words = fx.Vector(k2)
+                k_flat.append(k2_words[0])
+                k_flat.append(k2_words[1])
+    return k_flat
+
+
+def _pa_small_block_load_v_trans(
+    v_global_ptr,
+    bt_rsrc,
+    batch_idx_i32,
+    kv_h_i32,
+    stride_v_block_i32,
+    stride_v_head_i32,
+    stride_bt_seq_i32,
+    partition_block_base_i32,
+    warp_id_i32,
+    lane16id_i32,
+    rowid_i32,
+    *,
+    block_size: int,
+):
+    """Load V tiles for one CTA's 256-token partition (``trans_v=True``).
+
+    Returns ``v_results[vt][vhe]`` (i64x2) indexed exactly as the reference
+    ``_load_v_and_scales`` so it can be passed as ``preloaded_v_and_scales``.
+    """
+    v_head_off = kv_h_i32 * stride_v_head_i32
+    vhead_elems = [
+        fx.Int32(vhe * NUM_WARPS * MFMA_N) + warp_id_i32 * fx.Int32(MFMA_N) + lane16id_i32
+        for vhe in range(VHELOOP)
+    ]
+    vhead_elem_dw = [vhead_elems[vhe] * fx.Int32(FP8_ELEMS_16B // 4) for vhe in range(VHELOOP)]
+    c_subblock_dw = fx.Int32(HEAD_SIZE * FP8_ELEMS_16B // 4)
+
+    v_results = []
+    for vt in range_constexpr(VTLOOP):
+        if block_size == 64:
+            # vt selects the physical block (4 blocks per partition); rowid
+            # selects the 16-token sub-block within that physical block.
+            bt_off = (
+                batch_idx_i32 * stride_bt_seq_i32
+                + partition_block_base_i32
+                + fx.Int32(vt)
+            )
+            phys_block = buffer_ops.buffer_load(bt_rsrc, bt_off, vec_width=1, dtype=T.i32)
+            sub_block_idx = rowid_i32
+        else:
+            # block_size == 16: (vt * 4 + rowid) selects the block; only one
+            # 16-token sub-block per physical block, so sub_block_idx == 0.
+            bt_off = (
+                batch_idx_i32 * stride_bt_seq_i32
+                + partition_block_base_i32
+                + fx.Int32(vt * 4)
+                + rowid_i32
+            )
+            phys_block = buffer_ops.buffer_load(bt_rsrc, bt_off, vec_width=1, dtype=T.i32)
+            sub_block_idx = fx.Int32(0)
+        v_block_base_dw = _compute_block_base_dw_i64(phys_block, stride_v_block_i32, v_head_off)
+        vhe_data = []
+        for vhe in range_constexpr(VHELOOP):
+            va_dw_delta = sub_block_idx * c_subblock_dw + vhead_elem_dw[vhe]
+            va_byte = (v_block_base_dw + fx.Int64(va_dw_delta)) * fx.Int64(4)
+            v_i64x2 = _global_load_i64x2(v_global_ptr, va_byte)
+            vhe_data.append(v_i64x2)
+        v_results.append(vhe_data)
+    return v_results
+
+
+@functools.lru_cache(maxsize=256)
+def compile_pa_decode_ps_small_block(
+    *,
+    block_size: int,
+    max_context_partition_num: int,
+    softmax_scale: float = None,
+    trans_v: bool = True,
+    query_group_size: int = QUERY_GROUP_SIZE,
+    per_token_kv: bool = False,
+    query_length: int = 1,
+    query_input_dtype: str = "bf16",
+):
+    """Compile the small-block partition kernel.  See module-level comment."""
+    if block_size not in _PA_DECODE_PS_SMALL_BLOCK_SIZES:
+        raise ValueError(
+            f"compile_pa_decode_ps_small_block: unsupported block_size={block_size}; "
+            f"expected one of {_PA_DECODE_PS_SMALL_BLOCK_SIZES}."
+        )
+    if query_input_dtype not in ("bf16", "f16"):
+        raise ValueError(
+            "compile_pa_decode_ps_small_block currently expects bf16/f16 query inputs."
+        )
+    if not trans_v:
+        raise NotImplementedError(
+            "compile_pa_decode_ps_small_block: trans_v=False not yet supported."
+        )
+    if per_token_kv:
+        raise NotImplementedError(
+            "compile_pa_decode_ps_small_block: per_token_kv=True not yet supported; "
+            "use per-tensor quantization for now."
+        )
+
+    arch = get_hip_arch()
+    query_load_is_bf16 = query_input_dtype == "bf16"
+    if softmax_scale is None:
+        softmax_scale = 1.0 / (HEAD_SIZE**0.5)
+    _softmax_scale = float(softmax_scale)
+    _block_size = block_size
+    _blocks_per_partition = KV_COMPUTE_BLOCK // _block_size
+
+    _mtp_groups = max(1, math.ceil(query_length * query_group_size / 16))
+
+    # LDS allocation — same layout as compile_pa_decode_sw, minus the per-token
+    # scale staging area since per_token_kv is not yet supported here.
+    LDS_SOFTMAX_TOTAL = LDS_SOFTMAX_BYTES
+    # Unique global symbol per compile to avoid module-level symbol clashes
+    # when multiple compiled artifacts are loaded into the same GPU context.
+    _smem_sym_name = (
+        f"pa_ps_smallblk_smem_bs{block_size}_ql{query_length}"
+        f"_qgs{query_group_size}_tv{int(trans_v)}_qd{query_input_dtype}"
+        f"_ptkv{int(per_token_kv)}"
+    )
+    allocator = SmemAllocator(None, arch=arch, global_sym_name=_smem_sym_name)
+    logits_off = 0
+    allocator.ptr = LDS_LOGITS_BYTES
+    softmax_off = LDS_LOGITS_BYTES
+    allocator.ptr += LDS_SOFTMAX_TOTAL
+
+    @flyc.kernel(known_block_size=(BLOCK_THREADS, 1, 1))
+    def pa_decode_ps_kernel(
+        exp_sums_ptr: fx.Tensor,
+        max_logits_ptr: fx.Tensor,
+        tmp_out_ptr: fx.Tensor,
+        query_ptr: fx.Tensor,
+        key_cache_ptr: fx.Tensor,
+        value_cache_ptr: fx.Tensor,
+        block_tables_ptr: fx.Tensor,
+        context_lengths_ptr: fx.Tensor,
+        key_scale_ptr: fx.Tensor,
+        value_scale_ptr: fx.Tensor,
+        stride_q_seq: Int32,
+        stride_q_head: Int32,
+        stride_k_block: Int32,
+        stride_k_head: Int32,
+        stride_v_block: Int32,
+        stride_v_head: Int32,
+        stride_es_seq: Int32,
+        stride_es_head: Int32,
+        stride_es_part: Int32,
+        stride_to_seq: Int32,
+        stride_to_head: Int32,
+        stride_to_part: Int32,
+        stride_to_group: Int32,
+        stride_bt_seq: Int32,
+    ):
+        tid = fx.Int32(gpu.thread_id("x"))
+        batch_idx = fx.Int32(gpu.block_id("x"))
+        kv_h = fx.Int32(gpu.block_id("y"))
+        partition_idx = fx.Int32(gpu.block_id("z"))
+
+        cl_global_ptr = _extract_global_ptr(context_lengths_ptr)
+        context_len = _global_load_i32(cl_global_ptr, batch_idx)
+
+        lane16id = tid & fx.Int32(15)
+        rowid = (tid >> fx.Int32(4)) & fx.Int32(3)
+        warp_id = tid >> fx.Int32(6)
+
+        q_rsrc = buffer_ops.create_buffer_resource(query_ptr, max_size=True)
+        k_global_ptr = _extract_global_ptr(key_cache_ptr)
+        v_global_ptr = _extract_global_ptr(value_cache_ptr)
+        bt_rsrc = buffer_ops.create_buffer_resource(block_tables_ptr, max_size=False)
+        es_rsrc = buffer_ops.create_buffer_resource(exp_sums_ptr, max_size=True)
+        ml_rsrc = buffer_ops.create_buffer_resource(max_logits_ptr, max_size=True)
+        to_rsrc = buffer_ops.create_buffer_resource(tmp_out_ptr, max_size=True)
+        ks_rsrc = buffer_ops.create_buffer_resource(key_scale_ptr, max_size=True)
+        vs_rsrc = buffer_ops.create_buffer_resource(value_scale_ptr, max_size=True)
+
+        q_scale_val = arith.constant(1.0, type=T.f32)
+        k_scale_val = buffer_ops.buffer_load(ks_rsrc, arith.constant(0, type=T.i32), vec_width=1)
+        v_scale_val = buffer_ops.buffer_load(vs_rsrc, arith.constant(0, type=T.i32), vec_width=1)
+
+        smem_base = allocator.get_base()
+        logits_lds_i32 = SmemPtr(smem_base, logits_off, T.i32, shape=(LDS_LOGITS_BYTES // 4,)).get()
+        softmax_lds_f32 = SmemPtr(smem_base, softmax_off, T.f32, shape=(LDS_SOFTMAX_TOTAL // 4,)).get()
+        logits_lds_i64 = SmemPtr(smem_base, logits_off, T.i64, shape=(LDS_LOGITS_BYTES // 8,)).get()
+        scale_lds_f32 = None
+
+        _softmax_scale_const = arith.constant(_softmax_scale, type=T.f32)
+        _softmax_q_scale = _softmax_scale_const * q_scale_val
+        _scale = _softmax_q_scale * k_scale_val
+        c_w = arith.constant(WARP_SIZE, type=T.i32)
+        NEG_INF = arith.constant(float("-inf"), type=T.f32)
+        ZERO_F = arith.constant(0.0, type=T.f32)
+        c_cps = arith.constant(KV_COMPUTE_BLOCK, type=T.i32)
+        c_query_group_size = arith.constant(query_group_size, type=T.i32)
+
+        local_qhead_idx = warp_id * arith.constant(4, type=T.i32) + rowid
+
+        (
+            _k_tok_thread_base_unused,
+            _c_tok_stride_dw_unused,
+            _k_he_off_dw_unused,
+            _v_tok_thread_off,
+            _vhead_elem_dw,
+            _kv_tok_thread_base,
+            _prob_wr_thread_base,
+            _pv_prob_read_base,
+            _sm_max_off,
+            _sm_sum_off,
+            _sm_rd_max_offs,
+            _sm_rd_sum_offs,
+            _sm_vmax_wr_off,
+            _sm_vmax_rd_offs,
+        ) = _build_pa_thread_invariants(
+            warp_id,
+            lane16id,
+            rowid,
+            trans_v=trans_v,
+            per_token_kv=per_token_kv,
+        )
+
+        (
+            _load_kv_scale_scalars_unused,
+            _load_v_and_scales_unused,
+            _store_vmax_warp_unused,
+            _qk_and_intra_softmax,
+            _cross_warp_softmax_and_prob_pack,
+            _pv_mfma,
+            _finalize_block_split_group_unused,
+        ) = _make_pa_phase_helpers(
+            trans_v=trans_v,
+            per_token_q=True,
+            per_token_kv=per_token_kv,
+            needs_mask=True,
+            query_length=query_length,
+            kv_h=kv_h,
+            v_global_ptr=v_global_ptr,
+            ks_rsrc=ks_rsrc,
+            vs_rsrc=vs_rsrc,
+            logits_lds_i32=logits_lds_i32,
+            logits_lds_i64=logits_lds_i64,
+            softmax_lds_f32=softmax_lds_f32,
+            scale_lds_f32=scale_lds_f32,
+            stride_ks_block=arith.constant(0, type=T.i32),
+            stride_ks_head=arith.constant(0, type=T.i32),
+            softmax_scale_base=_softmax_scale_const,
+            softmax_q_scale=_softmax_q_scale,
+            k_scale_val=k_scale_val,
+            scale=_scale,
+            v_scale_val=v_scale_val,
+            warp_id=warp_id,
+            lane16id=lane16id,
+            rowid=rowid,
+            k_tok_thread_base=_k_tok_thread_base_unused,
+            v_tok_thread_off=_v_tok_thread_off,
+            vhead_elem_dw=_vhead_elem_dw,
+            kv_tok_thread_base=_kv_tok_thread_base,
+            prob_wr_thread_base=_prob_wr_thread_base,
+            pv_prob_read_base=_pv_prob_read_base,
+            sm_max_off=_sm_max_off,
+            sm_sum_off=_sm_sum_off,
+            sm_rd_max_offs=_sm_rd_max_offs,
+            sm_rd_sum_offs=_sm_rd_sum_offs,
+            sm_vmax_wr_off=_sm_vmax_wr_off,
+            sm_vmax_rd_offs=_sm_vmax_rd_offs,
+            c_w=c_w,
+            neg_inf=NEG_INF,
+            zero_f=ZERO_F,
+        )
+
+        def _store_partition_results(eqgs_lane, running_sum, running_max, out0_norm, out1_norm):
+            outs_norm = [out0_norm, out1_norm]
+            for vhe in range_constexpr(VHELOOP):
+                hs_base = (
+                    fx.Int32(vhe * NUM_WARPS * MFMA_N)
+                    + warp_id * fx.Int32(MFMA_N)
+                    + rowid * fx.Int32(4)
+                )
+                to_off = (
+                    batch_idx * stride_to_seq
+                    + kv_h * stride_to_head
+                    + partition_idx * stride_to_part
+                    + eqgs_lane * stride_to_group
+                    + hs_base
+                )
+                out_i32 = fx.Vector(outs_norm[vhe]).to(fx.BFloat16).bitcast(fx.Int32)
+                buffer_ops.buffer_store(out_i32, to_rsrc, to_off * 2, offset_is_bytes=True)
+            es_off = (
+                batch_idx * stride_es_seq
+                + kv_h * stride_es_head
+                + partition_idx * stride_es_part
+                + eqgs_lane
+            )
+            es_i32 = fx.Float32(running_sum).ir_value().bitcast(fx.Int32.ir_type)
+            ml_i32 = fx.Float32(running_max).ir_value().bitcast(fx.Int32.ir_type)
+            buffer_ops.buffer_store(es_i32, es_rsrc, es_off * 4, offset_is_bytes=True)
+            buffer_ops.buffer_store(ml_i32, ml_rsrc, es_off * 4, offset_is_bytes=True)
+
+        # Slot covers one or more contiguous 256-token sub-partitions.  The
+        # inner scf.for loop walks those sub-partitions with online-softmax
+        # loop-carried state, mirroring the Gluon `for sequence_partition_idx`
+        # loop in `paged_attention_decode_ps`.
+        c_max_parts = arith.constant(max_context_partition_num, type=T.i32)
+        num_total_partitions = (context_len + c_cps - fx.Int32(1)) >> fx.Int32(8)
+        page_size_partitions = (
+            num_total_partitions + c_max_parts - fx.Int32(1)
+        ) // c_max_parts
+        local_partition_start = partition_idx * page_size_partitions
+        local_partition_end_raw = (partition_idx + fx.Int32(1)) * page_size_partitions
+        local_partition_end = arith.select(
+            local_partition_end_raw < num_total_partitions,
+            local_partition_end_raw,
+            num_total_partitions,
+        )
+
+        def _unwrap(v):
+            return v.ir_value() if hasattr(v, "ir_value") else v
+
+        # Pack/unpack loop state.  State is `_mtp_groups` accumulators, each a
+        # 4-tuple (rmax, rsum, o0, o1).  Flattened to a single list for scf.for
+        # iter_args; reshaped on entry/exit each iteration.
+        def _pack_states(states):
+            flat = []
+            for st in states:
+                rmax, rsum, o0, o1 = st
+                flat.extend([_unwrap(rmax), _unwrap(rsum), _unwrap(o0), _unwrap(o1)])
+            return flat
+
+        def _unpack_states(flat):
+            return [tuple(flat[4 * i + j] for j in range(4)) for i in range(_mtp_groups)]
+
+        init_states = [
+            (NEG_INF, ZERO_F,
+             arith.constant_vector(0.0, T.f32x4),
+             arith.constant_vector(0.0, T.f32x4))
+            for _ in range(_mtp_groups)
+        ]
+
+        loop_start = fx.Index(arith.unwrap(local_partition_start))
+        loop_end = fx.Index(arith.unwrap(local_partition_end))
+        loop_step = arith.index(1)
+
+        # Pre-load Q for every MTP group ONCE before the KV loop.  Each group's
+        # q_frags / qi / qhi / qscale are kept in registers across the entire
+        # KV loop, so we pay the Q-load cost (global → LDS → registers) exactly
+        # once per CTA regardless of how many sub-partitions the slot covers.
+        q_frags_per_mtp = []
+        qi_per_mtp = []
+        qhi_per_mtp = []
+        qscale_per_mtp = []
+        for _mtp_g in range_constexpr(_mtp_groups):
+            if const_expr(_mtp_g > 0):
+                gpu.barrier()
+            mtp_prefetch = _prefetch_mtp_group_query(
+                q_rsrc, batch_idx, kv_h,
+                stride_q_seq, stride_q_head,
+                lane16id, local_qhead_idx,
+                mtp_group_idx=_mtp_g,
+                query_length=query_length,
+                query_group_size=query_group_size,
+                query_load_is_bf16=query_load_is_bf16,
+            )
+            qi_val, qhi_pos, q_frags, query_scale_lane = _finish_mtp_group_q_fragments(
+                logits_lds_i32, logits_lds_i64, softmax_lds_f32,
+                mtp_prefetch, lane16id, rowid, local_qhead_idx,
+            )
+            q_frags_per_mtp.append(q_frags)
+            qi_per_mtp.append(qi_val)
+            qhi_per_mtp.append(qhi_pos)
+            qscale_per_mtp.append(query_scale_lane)
+        gpu.barrier()
+
+        # Note: no runtime `if _is_valid:` wrapping this loop.  See earlier
+        # commit log — the `ReplaceIfWithDispatch` rewriter copies the if-body
+        # into a synthetic Python function, and since the body contains
+        # `ast.Yield` from this scf.for, that function becomes a generator
+        # (returns a generator object without executing) — leaving the scf.if
+        # then-region empty.  Running the loop unconditionally is the correct
+        # workaround; empty slots iterate 0 times and yield the init state
+        # (NEG_INF, 0, 0, 0), which is the right empty-slot semantics.
+        for sub_part_ib, state in range(
+            loop_start, loop_end, loop_step, init=_pack_states(init_states)
+        ):
+            cur_states = _unpack_states(state)
+            sub_part_i32 = arith.index_cast(T.i32, sub_part_ib)
+            sub_block_base = sub_part_i32 * fx.Int32(_blocks_per_partition)
+            sub_token_start = sub_part_i32 * c_cps
+
+            # Load K/V for this sub-partition ONCE; shared across MTP groups.
+            k_flat = _pa_small_block_load_k_flat(
+                k_global_ptr, bt_rsrc, batch_idx, kv_h,
+                stride_k_block, stride_k_head, stride_bt_seq,
+                sub_block_base, warp_id, lane16id, rowid,
+                block_size=_block_size,
+            )
+            v_results = _pa_small_block_load_v_trans(
+                v_global_ptr, bt_rsrc, batch_idx, kv_h,
+                stride_v_block, stride_v_head, stride_bt_seq,
+                sub_block_base, warp_id, lane16id, rowid,
+                block_size=_block_size,
+            )
+            k_ops = _unflatten_k(k_flat)
+
+            new_states = []
+            for _mtp_g in range_constexpr(_mtp_groups):
+                if const_expr(_mtp_g > 0):
+                    gpu.barrier()
+                rmax, rsum, o0, o1 = cur_states[_mtp_g]
+                causal_bound = (
+                    context_len
+                    + arith.constant(1 - query_length, type=T.i32)
+                    + qi_per_mtp[_mtp_g]
+                )
+                d_out, _v_ops_ret = _qk_and_intra_softmax(
+                    k_ops, sub_token_start,
+                    fx.Int64(0), arith.constant(0, type=T.i32),
+                    q_frags_per_mtp[_mtp_g], causal_bound,
+                    query_scale_lane=qscale_per_mtp[_mtp_g],
+                    phys_block=arith.constant(0, type=T.i32),
+                    preloaded_v_and_scales=v_results,
+                )
+                gpu.barrier()
+                rmax, rsum, o0, o1, v_correction = _cross_warp_softmax_and_prob_pack(
+                    d_out, rmax, rsum, o0, o1
+                )
+                gpu.barrier()
+                o0, o1 = _pv_mfma(v_results, o0, o1, v_correction)
+                new_states.append((rmax, rsum, o0, o1))
+
+            results = yield _pack_states(new_states)
+
+        # Normalize and store one output slot per MTP group.
+        final_states = _unpack_states(results)
+        for _mtp_g in range_constexpr(_mtp_groups):
+            rmax_raw, rsum_raw, o0_raw, o1_raw = final_states[_mtp_g]
+            running_max = fx.Float32(rmax_raw)
+            running_sum = fx.Float32(rsum_raw)
+            out0 = fx.Vector(o0_raw)
+            out1 = fx.Vector(o1_raw)
+            outs_norm = _normalize_pa_output(running_sum, out0, out1, ZERO_F)
+            eqgs_lane = qi_per_mtp[_mtp_g] * c_query_group_size + qhi_per_mtp[_mtp_g]
+            _store_partition_results(
+                eqgs_lane, running_sum, running_max, outs_norm[0], outs_norm[1]
+            )
+
+    @flyc.jit
+    def launch_pa_decode_ps_small_block(
+        exp_sums: fx.Tensor,
+        max_logits: fx.Tensor,
+        tmp_out: fx.Tensor,
+        query: fx.Tensor,
+        key_cache: fx.Tensor,
+        value_cache: fx.Tensor,
+        block_tables: fx.Tensor,
+        context_lengths: fx.Tensor,
+        key_scale: fx.Tensor,
+        value_scale: fx.Tensor,
+        s_q_seq: Int32,
+        s_q_head: Int32,
+        s_k_block: Int32,
+        s_k_head: Int32,
+        s_v_block: Int32,
+        s_v_head: Int32,
+        s_es_seq: Int32,
+        s_es_head: Int32,
+        s_es_part: Int32,
+        s_to_seq: Int32,
+        s_to_head: Int32,
+        s_to_part: Int32,
+        s_to_group: Int32,
+        s_bt_seq: Int32,
+        gx: Int32,
+        gy: Int32,
+        gz: Int32,
+        stream: fx.Stream = fx.Stream(None),
+    ):
+        allocator.finalized = False
+        ctx = CompilationContext.get_current()
+        with ir.InsertionPoint(ctx.gpu_module_body):
+            allocator.finalize()
+        pa_decode_ps_kernel(
+            exp_sums,
+            max_logits,
+            tmp_out,
+            query,
+            key_cache,
+            value_cache,
+            block_tables,
+            context_lengths,
+            key_scale,
+            value_scale,
+            s_q_seq,
+            s_q_head,
+            s_k_block,
+            s_k_head,
+            s_v_block,
+            s_v_head,
+            s_es_seq,
+            s_es_head,
+            s_es_part,
+            s_to_seq,
+            s_to_head,
+            s_to_part,
+            s_to_group,
+            s_bt_seq,
+            value_attrs=_mfma_agpr_value_attrs(),
+        ).launch(grid=(gx, gy, gz), block=(BLOCK_THREADS, 1, 1), stream=stream)
+
+    launch_pa_decode_ps_small_block.compile_hints["llvm_options"] = PA_MFMA_AGPR_LLVM_OPTIONS
+
+    return {
+        "launch": launch_pa_decode_ps_small_block,
+        "kernel": pa_decode_ps_kernel,
+        "allocator": allocator,
+        "mtp_groups": _mtp_groups,
+    }
 
 
 def pa_decode_ps_launch(
@@ -2098,6 +2718,131 @@ def pa_decode_ps_launch(
             s,
         )
         return "ps_sw_partitioned"
+
+    # ---- small-block (block_size 16/64) partition path -----------------
+    # Key cache shape is [num_blocks, num_kv_heads, head_size // 16, block_size, 16].
+    block_size = key_cache.shape[-2]
+    if block_size in _PA_DECODE_PS_SMALL_BLOCK_SIZES:
+        if block_tables is None:
+            raise ValueError(
+                f"pa_decode_ps_launch: block_size={block_size} requires `block_tables` "
+                "(per-sequence physical block index table)."
+            )
+        batch_size = context_lengths.shape[0]
+        head_size = query.shape[-1]
+        eqgs = query_length * query_group_size
+        context_partition_size = KV_COMPUTE_BLOCK
+        blocks_per_partition = context_partition_size // block_size
+        if max_context_partition_num == 0:
+            max_context_partition_num = get_recommended_splits(
+                batch_size,
+                num_kv_heads,
+                split_kv_blocks=blocks_per_partition,
+            )
+        if is_graph_capturing and (
+            exp_sums is None or max_logits is None or temporary_output is None
+        ):
+            raise ValueError(
+                "CUDA graph capture requires preallocated `exp_sums`, `max_logits`, "
+                "and `temporary_output` for the small-block PS path."
+            )
+        if exp_sums is None:
+            exp_sums = torch.zeros(
+                batch_size,
+                num_kv_heads,
+                max_context_partition_num,
+                eqgs,
+                device=dev,
+                dtype=torch.float32,
+            )
+        if max_logits is None:
+            max_logits = torch.full(
+                (batch_size, num_kv_heads, max_context_partition_num, eqgs),
+                float("-inf"),
+                device=dev,
+                dtype=torch.float32,
+            )
+        if temporary_output is None:
+            temporary_output = torch.zeros(
+                batch_size,
+                num_kv_heads,
+                max_context_partition_num,
+                eqgs,
+                head_size,
+                device=dev,
+                dtype=torch.bfloat16,
+            )
+        compiled_small = compile_pa_decode_ps_small_block(
+            block_size=block_size,
+            max_context_partition_num=max_context_partition_num,
+            softmax_scale=softmax_scale,
+            trans_v=trans_v,
+            query_group_size=query_group_size,
+            per_token_kv=per_token_kv,
+            query_length=query_length,
+            query_input_dtype=query_input_dtype,
+        )
+        output_5d = output.reshape(
+            batch_size, query_length, num_kv_heads, query_group_size, head_size
+        )
+        compiled_small["launch"](
+            exp_sums,
+            max_logits,
+            temporary_output,
+            query,
+            key_cache,
+            value_cache,
+            block_tables,
+            context_lengths,
+            key_scale,
+            value_scale,
+            query.stride(0),
+            query.stride(1),
+            key_cache.stride(0),
+            key_cache.stride(1),
+            value_cache.stride(0),
+            value_cache.stride(1),
+            exp_sums.stride(0),
+            exp_sums.stride(1),
+            exp_sums.stride(2),
+            temporary_output.stride(0),
+            temporary_output.stride(1),
+            temporary_output.stride(2),
+            temporary_output.stride(3),
+            block_tables.stride(0),
+            batch_size,
+            num_kv_heads,
+            max_context_partition_num,
+            s,
+        )
+        compiled_sw_reduce = compile_pa_decode_sw_reduce(
+            max_context_partition_num=max_context_partition_num,
+            query_seq_len=query_length,
+            query_group_size=query_group_size,
+            head_size=head_size,
+            output_dtype_str=_get_output_dtype_str(output),
+        )
+        compiled_sw_reduce["launch"](
+            output_5d,
+            exp_sums,
+            max_logits,
+            temporary_output,
+            output_5d.stride(0),
+            output_5d.stride(1),
+            output_5d.stride(2),
+            output_5d.stride(3),
+            exp_sums.stride(0),
+            exp_sums.stride(1),
+            exp_sums.stride(2),
+            temporary_output.stride(0),
+            temporary_output.stride(1),
+            temporary_output.stride(2),
+            temporary_output.stride(3),
+            batch_size,
+            num_kv_heads,
+            s,
+        )
+        return "ps_small_block"
 
     work_indptr = metadata["work_indptr"]
     work_info_flat = metadata["work_info_flat"]
