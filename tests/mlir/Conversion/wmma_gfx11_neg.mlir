@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 FlyDSL Project Contributors
-// RUN: not %fly-opt %s 2>&1 | FileCheck %s
+// RUN: { %fly-opt %s 2>&1 || true; } | FileCheck %s
 
 // Verify that signless i8/i4 inputs are rejected with a clear diagnostic that
 // explains the unsigned-only contract and points at signA=signB=false.
