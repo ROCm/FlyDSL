@@ -310,15 +310,15 @@ def run_test(T, E, topk, unit_size=UNIT_SIZE, max_tokens=None):
 
     Returns (passed: bool, gpu_time_us: float or None).
     """
-    # Let moe_sorting_flydsl auto-select decode/prefill path.
-    # max_tokens is only needed for explicit decode-path override.
+    # Let moe_sorting_flydsl auto-select oneshot/multiphase path.
+    # max_tokens is only needed for explicit oneshot-path override.
     from kernels.moe_sorting_kernel import BLOCK_SIZE, _compute_sub_tokens
 
     sub_tokens = _compute_sub_tokens(E)
-    DECODE_MAX_T = min(sub_tokens, max(16, BLOCK_SIZE // max(topk, E // 8)))
-    path = "decode" if T <= min(sub_tokens, DECODE_MAX_T) else "prefill"
+    ONESHOT_MAX_T = min(sub_tokens, max(16, BLOCK_SIZE // max(topk, E // 8)))
+    path = "oneshot" if T <= min(sub_tokens, ONESHOT_MAX_T) else "multiphase"
 
-    if max_tokens is None and path == "decode":
+    if max_tokens is None and path == "oneshot":
         max_tokens = max(T, 8)
         max_tokens = ((max_tokens + 7) // 8) * 8
 
@@ -425,7 +425,7 @@ def run_test_vs_aiter(T, E, topk, unit_size=UNIT_SIZE, max_tokens=None):
         block_size=unit_size,
     )
 
-    # FlyDSL (auto-dispatches decode/prefill)
+    # FlyDSL (auto-dispatches oneshot/multiphase)
     fly_ids, fly_w, fly_eids, fly_nvalid, _ = _call_flydsl(
         topk_ids,
         topk_weights,
@@ -453,8 +453,8 @@ def run_test_vs_aiter(T, E, topk, unit_size=UNIT_SIZE, max_tokens=None):
 # ---------------------------------------------------------------------------
 # Pytest entry points
 # ---------------------------------------------------------------------------
-DECODE_CONFIGS = [
-    # (T, E, topk) — decode path (small T)
+ONESHOT_CONFIGS = [
+    # (T, E, topk) — oneshot path (small T)
     (1, 256, 8),
     (1, 32, 5),
     (4, 256, 8),
@@ -466,13 +466,13 @@ DECODE_CONFIGS = [
     (1, 8, 2),
     (7, 32, 5),  # odd T, topk not power of 2
     (31, 64, 6),  # prime T, topk not power of 2
-    # Production E > 256 (DECODE_BLOCK=512) — core coverage
+    # Production E > 256 (ONESHOT_BLOCK=512) — core coverage
     (1, 257, 9),  # DeepSeek-R1 (256 routed + 1 shared)
     (16, 257, 9),
     (16, 513, 9),  # Qwen3.5 (512 routed + 1 shared)
 ]
 
-DECODE_CONFIGS_FULL = DECODE_CONFIGS + [
+ONESHOT_CONFIGS_FULL = ONESHOT_CONFIGS + [
     # Extended production coverage (large_shape — CI skips by default)
     (8, 257, 9),
     (1, 385, 7),  # DeepSeek-V4 (384 routed + 1 shared)
@@ -484,8 +484,8 @@ DECODE_CONFIGS_FULL = DECODE_CONFIGS + [
 ]
 
 
-PREFILL_CONFIGS = [
-    # (T, E, topk) — prefill path (large T, HBM workspace)
+MULTIPHASE_CONFIGS = [
+    # (T, E, topk) — multiphase path (large T, HBM workspace)
     (128, 256, 8),
     (512, 256, 8),
     (1024, 256, 8),
@@ -495,7 +495,7 @@ PREFILL_CONFIGS = [
     (1024, 513, 9),  # Qwen3.5
 ]
 
-PREFILL_CONFIGS_FULL = PREFILL_CONFIGS + [
+MULTIPHASE_CONFIGS_FULL = MULTIPHASE_CONFIGS + [
     # Extended (large_shape — CI skips by default)
     (4096, 256, 8),
     (8192, 256, 8),
@@ -507,30 +507,30 @@ PREFILL_CONFIGS_FULL = PREFILL_CONFIGS + [
 ]
 
 
-@pytest.mark.parametrize("T,E,topk", DECODE_CONFIGS)
-def test_moe_sorting_decode(T, E, topk):
+@pytest.mark.parametrize("T,E,topk", ONESHOT_CONFIGS)
+def test_moe_sorting_oneshot(T, E, topk):
     passed, _ = run_test(T, E, topk)
     assert passed, f"MoE sorting failed for T={T}, E={E}, topk={topk}"
 
 
 @pytest.mark.large_shape
-@pytest.mark.parametrize("T,E,topk", [c for c in DECODE_CONFIGS_FULL if c not in DECODE_CONFIGS])
-def test_moe_sorting_decode_full(T, E, topk):
+@pytest.mark.parametrize("T,E,topk", [c for c in ONESHOT_CONFIGS_FULL if c not in ONESHOT_CONFIGS])
+def test_moe_sorting_oneshot_full(T, E, topk):
     passed, _ = run_test(T, E, topk)
     assert passed, f"MoE sorting failed for T={T}, E={E}, topk={topk}"
 
 
-@pytest.mark.parametrize("T,E,topk", PREFILL_CONFIGS)
-def test_moe_sorting_prefill(T, E, topk):
+@pytest.mark.parametrize("T,E,topk", MULTIPHASE_CONFIGS)
+def test_moe_sorting_multiphase(T, E, topk):
     passed, _ = run_test(T, E, topk)
-    assert passed, f"MoE sorting (prefill) failed for T={T}, E={E}, topk={topk}"
+    assert passed, f"MoE sorting (multiphase) failed for T={T}, E={E}, topk={topk}"
 
 
 @pytest.mark.large_shape
-@pytest.mark.parametrize("T,E,topk", [c for c in PREFILL_CONFIGS_FULL if c not in PREFILL_CONFIGS])
-def test_moe_sorting_prefill_full(T, E, topk):
+@pytest.mark.parametrize("T,E,topk", [c for c in MULTIPHASE_CONFIGS_FULL if c not in MULTIPHASE_CONFIGS])
+def test_moe_sorting_multiphase_full(T, E, topk):
     passed, _ = run_test(T, E, topk)
-    assert passed, f"MoE sorting (prefill) failed for T={T}, E={E}, topk={topk}"
+    assert passed, f"MoE sorting (multiphase) failed for T={T}, E={E}, topk={topk}"
 
 
 def run_test_ep(T, E, topk, mask_ratio=0.5, unit_size=UNIT_SIZE):
@@ -538,11 +538,11 @@ def run_test_ep(T, E, topk, mask_ratio=0.5, unit_size=UNIT_SIZE):
     from kernels.moe_sorting_kernel import BLOCK_SIZE, _compute_sub_tokens
 
     sub_tokens = _compute_sub_tokens(E)
-    DECODE_MAX_T = min(sub_tokens, max(16, BLOCK_SIZE // max(topk, E // 8)))
-    if T <= min(sub_tokens, DECODE_MAX_T):
-        path = "decode"
+    ONESHOT_MAX_T = min(sub_tokens, max(16, BLOCK_SIZE // max(topk, E // 8)))
+    if T <= min(sub_tokens, ONESHOT_MAX_T):
+        path = "oneshot"
     else:
-        path = "prefill"
+        path = "multiphase"
 
     print(f"\n{'='*60}")
     print(f"EP Test: T={T}, E={E}, topk={topk}, mask_ratio={mask_ratio}, path={path}")
@@ -609,19 +609,19 @@ def run_test_ep(T, E, topk, mask_ratio=0.5, unit_size=UNIT_SIZE):
 
 EP_CONFIGS = [
     # (T, E, topk, mask_ratio)
-    (4, 256, 8, 0.5),  # decode path
-    (8, 256, 8, 0.3),  # decode path, sparse
-    (64, 256, 8, 0.5),  # prefill path
-    (128, 256, 8, 0.7),  # prefill path
-    (2048, 256, 8, 0.5),  # prefill path
+    (4, 256, 8, 0.5),  # oneshot path
+    (8, 256, 8, 0.3),  # oneshot path, sparse
+    (64, 256, 8, 0.5),  # multiphase path
+    (128, 256, 8, 0.7),  # multiphase path
+    (2048, 256, 8, 0.5),  # multiphase path
     (4, 256, 8, 1.0),  # all enabled (should match non-EP)
-    (64, 256, 8, 1.0),  # all enabled, prefill
+    (64, 256, 8, 1.0),  # all enabled, multiphase
     (4, 256, 8, 0.0),  # all masked (empty output)
     # Production E>256 with EP
-    (8, 257, 9, 0.5),  # DeepSeek-R1 decode + EP
-    (1024, 257, 9, 0.5),  # DeepSeek-R1 prefill + EP
-    (8, 513, 9, 0.5),  # Qwen3.5 decode + EP
-    (1024, 513, 9, 0.5),  # Qwen3.5 prefill + EP (E > K4_BLOCK)
+    (8, 257, 9, 0.5),  # DeepSeek-R1 oneshot + EP
+    (1024, 257, 9, 0.5),  # DeepSeek-R1 multiphase + EP
+    (8, 513, 9, 0.5),  # Qwen3.5 oneshot + EP
+    (1024, 513, 9, 0.5),  # Qwen3.5 multiphase + EP (E > K4_BLOCK)
 ]
 
 
@@ -738,7 +738,7 @@ def run_bench_comparison(token_sweep=None):
     print(f"  MoE Sorting Benchmark: FlyDSL vs CK (E={E}, topk={topk}, unit_size={UNIT_SIZE})")
     print(f"  Device: {torch.cuda.get_device_name(0)}")
     props = torch.cuda.get_device_properties(0)
-    print(f"  CUs: {props.multi_processor_count}, decode threshold: T<={sub_tokens}")
+    print(f"  CUs: {props.multi_processor_count}, oneshot threshold: T<={sub_tokens}")
     print(f"  Modes: eager (with L2 flush, median of {BENCH_MEASURE}), graph ({BENCH_MEASURE} replays)")
     print(f"{'=' * 110}")
     print(
@@ -752,7 +752,7 @@ def run_bench_comparison(token_sweep=None):
         topk_ids = torch.stack([torch.randperm(E, device="cuda")[:topk] for _ in range(T)]).to(torch.int32)
         topk_weights = torch.rand(T, topk, dtype=torch.float32, device="cuda")
 
-        path = "decode" if T <= sub_tokens else "prefill"
+        path = "oneshot" if T <= sub_tokens else "multiphase"
 
         # Pre-allocate outputs to avoid per-call torch.empty overhead
         max_num_tokens_padded = T * topk + E * UNIT_SIZE - topk
@@ -839,7 +839,7 @@ def main():
         topk = args.topk or 8
         configs = [(args.T, E, topk)]
     elif args.all:
-        configs = DECODE_CONFIGS + PREFILL_CONFIGS
+        configs = ONESHOT_CONFIGS + MULTIPHASE_CONFIGS
     else:
         configs = [
             (1, 256, 8),

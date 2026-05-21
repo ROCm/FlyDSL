@@ -9,12 +9,10 @@ for efficient batched expert GEMM execution.
 
 Algorithm: counting sort in LDS (histogram → prefix-sum → scatter).
 
-Three paths (selected by T and DECODE_MAX_T = min(sub_tokens, BLOCK_SIZE // max(topk, E//8))):
-  - T <= DECODE_MAX_T: single kernel, all phases in LDS.
-  - DECODE_MAX_T < T <= 2048: 2 kernels (fused P0v2 + P23) via HBM workspace.
-  - Prefill/4 kernels (T > 2048): 4 kernels via HBM workspace (ClearWS → P0 scatter → P1 count → P23).
-    - DECODE_MAX_T = 16 for large models(Qwen3-MoE, MiMo-V2-Flash .. DeepSeekR1 V4) on current LDS sizes.
-    - DECODE_MAX_T is larger fro small model like 128 for Mixtral-8x7B, 32 for GPT-OSS and MiniMax-M2
+Three paths (selected by T vs ONESHOT_MAX_T = min(sub_tokens, max(16, BLOCK_SIZE // max(topk, E//8)))):
+  - Oneshot (T <= ONESHOT_MAX_T): single kernel, all phases in LDS.
+  - Multiphase/2k (ONESHOT_MAX_T < T <= 2048): 2 kernels (fused P0v2 + P23) via HBM workspace.
+  - Multiphase/4k (T > 2048): 4 kernels (ClearWS → P0 scatter → P1 count → P23) via HBM workspace.
 
 Packed token ID format: (topk_position << 24) | token_id
   - Upper 8 bits: topk slot (0..topk-1)
@@ -44,7 +42,7 @@ BLOCK_SIZE = 256
 UNIT_SIZE = 32  # GEMM tile-M, aka block_size in CK
 WARP_SIZE = get_warp_size()
 
-# DPP constants for prefix sum (used by decode and prefill)
+# DPP constants for prefix sum (used by oneshot and multiphase)
 DPP_ROW_SHR_1 = 0x111
 DPP_ROW_SHR_2 = 0x112
 DPP_ROW_SHR_4 = 0x114
@@ -161,7 +159,7 @@ def _fill_sentinel_slots(sorted_ids_rsrc, sorted_w_rsrc, start, count, sentinel,
 
 
 # ---------------------------------------------------------------------------
-# LDS helpers for prefill kernels (module-level, used inside @flyc.kernel)
+# LDS helpers for multiphase kernels (module-level, used inside @flyc.kernel)
 # ---------------------------------------------------------------------------
 def _lds_load_raw(raw_mr, idx):
     """Load i32 from LDS raw memref. idx can be i32 or index."""
@@ -188,16 +186,16 @@ def _lds_store_raw(raw_mr, val, idx):
 # returns a CompiledFunction whose __call__ skips inspect.Signature.bind,
 # _make_cache_key, and dict lookup, reducing dispatch from ~70 us to ~5 us.
 # ---------------------------------------------------------------------------
-_decode_cf_cache = {}  # (num_experts, topk, max_tokens, unit_size, has_mask, device) -> CompiledFunction
-_prefill_cf_cache = {}  # (num_experts, topk, unit_size, kernel_name, *constexpr_vals) -> CompiledFunction
+_oneshot_cf_cache = {}  # (num_experts, topk, max_tokens, unit_size, has_mask, device) -> CompiledFunction
+_multiphase_cf_cache = {}  # (num_experts, topk, unit_size, kernel_name, *constexpr_vals) -> CompiledFunction
 _dummy_mask_cache = {}  # device -> torch.Tensor(1, dtype=i32, value=1)
 
 
 # ---------------------------------------------------------------------------
-# FlyDSL GPU kernel — decode path (single kernel, SubTokenOneShot)
+# FlyDSL GPU kernel — oneshot path (single kernel, all phases in LDS)
 # ---------------------------------------------------------------------------
 @functools.lru_cache(maxsize=256)
-def _compile_moe_sorting_decode(
+def _compile_moe_sorting_oneshot(
     *,
     num_experts: int,
     topk: int,
@@ -205,7 +203,7 @@ def _compile_moe_sorting_decode(
     unit_size: int = UNIT_SIZE,
     has_mask: bool = False,
 ):
-    """Compile the decode-path MoE sorting kernel.
+    """Compile the oneshot MoE sorting kernel (single kernel, all phases in LDS).
 
     Parameters
     ----------
@@ -221,9 +219,9 @@ def _compile_moe_sorting_decode(
     arch = get_hip_arch()
     E = num_experts
     # CDNA (warp64): 512 threads = 8 waves, affordable cross-wave reduction.
-    max_decode_block = 512 if WARP_SIZE == 64 else 256
-    DECODE_BLOCK = 256 if E <= 256 else min(512, max_decode_block)
-    NUM_WAVES = DECODE_BLOCK // WARP_SIZE
+    max_oneshot_block = 512 if WARP_SIZE == 64 else 256
+    ONESHOT_BLOCK = 256 if E <= 256 else min(512, max_oneshot_block)
+    NUM_WAVES = ONESHOT_BLOCK // WARP_SIZE
     smem_cols = E + 1
 
     # LDS sizing: sub_tokens rows for the token×expert histogram
@@ -266,8 +264,8 @@ def _compile_moe_sorting_decode(
     scratch_offset = allocator._align(allocator.ptr, 16)
     allocator.ptr = scratch_offset + NUM_WAVES * 4
 
-    @flyc.kernel(known_block_size=[DECODE_BLOCK, 1, 1])
-    def moe_sorting_decode_kernel(
+    @flyc.kernel(known_block_size=[ONESHOT_BLOCK, 1, 1])
+    def moe_sorting_oneshot_kernel(
         topk_ids_tensor: fx.Tensor,
         topk_weights_tensor: fx.Tensor,
         sorted_token_ids: fx.Tensor,
@@ -314,9 +312,9 @@ def _compile_moe_sorting_decode(
 
         # =================== MOE_BUF ZEROING (blocks > 0 only) ===============
         if bid != c_zero_i32:
-            zero_gid_v4 = (bid - c_one_i32) * fx.Int32(DECODE_BLOCK) + tid
+            zero_gid_v4 = (bid - c_one_i32) * fx.Int32(ONESHOT_BLOCK) + tid
             num_zero_blocks = gpu.grid_dim.x - c_one_i32
-            zero_stride_v4 = num_zero_blocks * fx.Int32(DECODE_BLOCK)
+            zero_stride_v4 = num_zero_blocks * fx.Int32(ONESHOT_BLOCK)
             _zero_moe_buf_grid_stride(
                 moe_buf_rsrc, zero_gid_v4, zero_stride_v4, i32_moe_buf_elems >> fx.Int32(2), c_oob_idx
             )
@@ -325,7 +323,7 @@ def _compile_moe_sorting_decode(
         if bid == c_zero_i32:
             # ========================= PHASE 1: Histogram =========================
             # Clear mesh region — unconditional store to safe index when out of bounds
-            for i_clear in range_constexpr(0, sub_tokens * smem_cols, DECODE_BLOCK):
+            for i_clear in range_constexpr(0, sub_tokens * smem_cols, ONESHOT_BLOCK):
                 idx = fx.Int32(i_clear) + tid
                 is_valid = idx < fx.Int32(sub_tokens * smem_cols)
                 safe_idx = is_valid.select(idx, c_zero_i32)
@@ -336,7 +334,7 @@ def _compile_moe_sorting_decode(
 
             # Fill mesh: for each (token, topk_slot), write topk_slot+1 to mesh[token, expert_id]
             total_assignments = tokens * c_topk
-            for i_assign in range_constexpr(0, max_tokens * topk, DECODE_BLOCK):
+            for i_assign in range_constexpr(0, max_tokens * topk, ONESHOT_BLOCK):
                 flat_idx = fx.Int32(i_assign) + tid
                 is_valid = flat_idx < total_assignments
                 safe_flat = is_valid.select(flat_idx, c_zero_i32)
@@ -371,7 +369,7 @@ def _compile_moe_sorting_decode(
             _lds_store_raw(cumsum_mr, c_zero_i32, c_zero_i32)
             gpu.barrier()
 
-            for i_e in range_constexpr(0, E, DECODE_BLOCK // 8):
+            for i_e in range_constexpr(0, E, ONESHOT_BLOCK // 8):
                 eid_local = fx.Int32(i_e) + lane_group_id
                 eid_valid = eid_local < c_E
 
@@ -412,7 +410,7 @@ def _compile_moe_sorting_decode(
 
             # Phase 2b: Prefix sum over expert counts.
             # Step 1: Each thread converts its expert's raw count → padded block size.
-            for i_cvt in range_constexpr(0, E, DECODE_BLOCK):
+            for i_cvt in range_constexpr(0, E, ONESHOT_BLOCK):
                 cvt_eid = fx.Int32(i_cvt) + tid
                 cvt_valid = cvt_eid < c_E
                 # Safe index: valid → cumsum[eid+1], invalid → cumsum[0] (write 0, harmless)
@@ -429,7 +427,7 @@ def _compile_moe_sorting_decode(
                 # EP: zero padded count for masked experts in a separate pass.
                 # Loading from mask buffer inside the padded-count loop above interfered
                 # with expert 0 (MLIR codegen issue). Separate pass avoids this.
-                for i_ep in range_constexpr(0, E, DECODE_BLOCK):
+                for i_ep in range_constexpr(0, E, ONESHOT_BLOCK):
                     ep_eid = fx.Int32(i_ep) + tid
                     ep_valid = ep_eid < c_E
                     ep_safe_eid = ep_valid.select(ep_eid, c_zero_i32)
@@ -444,8 +442,8 @@ def _compile_moe_sorting_decode(
             # Step 2: All-wave parallel prefix sum (cumsum → cumdup).
             scratch_mr = SmemPtr(base_ptr, scratch_offset, T.i32, shape=(NUM_WAVES,)).get()
 
-            # All threads read cumsum[tid+1] (in chunks for E > DECODE_BLOCK)
-            for _ps_chunk in range_constexpr(0, E, DECODE_BLOCK):
+            # All threads read cumsum[tid+1] (in chunks for E > ONESHOT_BLOCK)
+            for _ps_chunk in range_constexpr(0, E, ONESHOT_BLOCK):
                 ps_eid = fx.Int32(_ps_chunk) + tid
                 ps_valid = ps_eid < c_E
                 ps_safe_ix = ArithValue(ps_valid.select(ps_eid + c_one_i32, c_zero_i32)).index_cast(T.index)
@@ -465,10 +463,10 @@ def _compile_moe_sorting_decode(
             )
             gpu.barrier()
 
-            # For E > DECODE_BLOCK: thread 0 serially extends
-            if E > DECODE_BLOCK:
+            # For E > ONESHOT_BLOCK: thread 0 serially extends
+            if E > ONESHOT_BLOCK:
                 if is_t0:
-                    _extend_prefix_sum_serial(cumdup_mr, DECODE_BLOCK, E, _lds_load_raw, _lds_store_raw)
+                    _extend_prefix_sum_serial(cumdup_mr, ONESHOT_BLOCK, E, _lds_load_raw, _lds_store_raw)
                 gpu.barrier()
 
             # cumdup[0] = 0
@@ -483,7 +481,7 @@ def _compile_moe_sorting_decode(
             gpu.barrier()
 
             # Copy cumdup → cumsum (all threads, one expert per thread)
-            for i_cp in range_constexpr(0, E + 1, DECODE_BLOCK):
+            for i_cp in range_constexpr(0, E + 1, ONESHOT_BLOCK):
                 cp_idx = fx.Int32(i_cp) + tid
                 cp_valid = cp_idx <= c_E
                 safe_cp_idx = cp_valid.select(cp_idx, c_zero_i32)
@@ -495,7 +493,7 @@ def _compile_moe_sorting_decode(
             if has_mask:
                 # EP: Compute mask cumsum in cumdup for local expert index mapping.
                 # cumdup[eid] = exclusive prefix sum of mask[0..eid-1] = local expert index.
-                for i_ml in range_constexpr(0, E, DECODE_BLOCK):
+                for i_ml in range_constexpr(0, E, ONESHOT_BLOCK):
                     ml_eid = fx.Int32(i_ml) + tid
                     ml_valid = ml_eid < c_E
                     safe_ml_eid = ml_valid.select(ml_eid, c_zero_i32)
@@ -517,16 +515,16 @@ def _compile_moe_sorting_decode(
                 )
                 gpu.barrier()
 
-                if E > DECODE_BLOCK:
+                if E > ONESHOT_BLOCK:
                     if is_t0:
-                        _extend_prefix_sum_serial(cumdup_mr, DECODE_BLOCK, E, _lds_load_raw, _lds_store_raw)
+                        _extend_prefix_sum_serial(cumdup_mr, ONESHOT_BLOCK, E, _lds_load_raw, _lds_store_raw)
                     gpu.barrier()
 
                 _lds_store_raw(cumdup_mr, c_zero_i32, c_zero_i32)
                 gpu.barrier()
             else:
                 # No mask: cumdup[eid] = eid (identity mapping)
-                for i_ml in range_constexpr(0, E, DECODE_BLOCK):
+                for i_ml in range_constexpr(0, E, ONESHOT_BLOCK):
                     ml_eid = fx.Int32(i_ml) + tid
                     ml_valid = ml_eid < c_E
                     safe_ml_eid = ml_valid.select(ml_eid, c_zero_i32)
@@ -536,7 +534,7 @@ def _compile_moe_sorting_decode(
 
             # Write sorted_expert_ids — predicated stores to buffer (safe: buffer_store ignores OOB)
             # EP: use cumdup[eid] as local expert index instead of global eid
-            for i_eid in range_constexpr(0, E, DECODE_BLOCK):
+            for i_eid in range_constexpr(0, E, ONESHOT_BLOCK):
                 eid_wr = fx.Int32(i_eid) + tid
                 eid_wr_valid = eid_wr < c_E
                 safe_eid_wr = eid_wr_valid.select(eid_wr, c_zero_i32)
@@ -572,14 +570,14 @@ def _compile_moe_sorting_decode(
                 c_zero_i32,
                 total_padded_pre,
                 c_sentinel | tokens,
-                DECODE_BLOCK,
+                ONESHOT_BLOCK,
                 tid,
                 c_oob_idx,
             )
             gpu.barrier()
 
             # ====================== PHASE 3: Scatter ==============================
-            for i_e2 in range_constexpr(0, E, DECODE_BLOCK // 8):
+            for i_e2 in range_constexpr(0, E, ONESHOT_BLOCK // 8):
                 eid_sc = fx.Int32(i_e2) + lane_group_id
                 eid_sc_valid = eid_sc < c_E
                 # Invalid lane groups map to cumsum[E] (the total count) instead of
@@ -665,7 +663,7 @@ def _compile_moe_sorting_decode(
             # Padding already filled by PRE-FILL phase above (before scatter).
 
     @flyc.jit
-    def launch_moe_sorting_decode(
+    def launch_moe_sorting_oneshot(
         topk_ids_tensor: fx.Tensor,
         topk_weights_tensor: fx.Tensor,
         sorted_token_ids: fx.Tensor,
@@ -684,7 +682,7 @@ def _compile_moe_sorting_decode(
         with ir.InsertionPoint(ctx.gpu_module_body):
             allocator.finalize()
 
-        launcher = moe_sorting_decode_kernel(
+        launcher = moe_sorting_oneshot_kernel(
             topk_ids_tensor,
             topk_weights_tensor,
             sorted_token_ids,
@@ -698,25 +696,25 @@ def _compile_moe_sorting_decode(
         )
         launcher.launch(
             grid=(n_grid_blocks, 1, 1),
-            block=(DECODE_BLOCK, 1, 1),
+            block=(ONESHOT_BLOCK, 1, 1),
             stream=stream,
         )
 
-    return launch_moe_sorting_decode
+    return launch_moe_sorting_oneshot
 
 
 # ---------------------------------------------------------------------------
-# FlyDSL GPU kernels — prefill path (4 kernels, large T via HBM workspace)
+# FlyDSL GPU kernels — multiphase path (2 or 4 kernels, large T via HBM workspace)
 # ---------------------------------------------------------------------------
 @functools.lru_cache(maxsize=256)
-def _compile_moe_sorting_prefill(
+def _compile_moe_sorting_multiphase(
     *,
     num_experts: int,
     topk: int,
     unit_size: int = UNIT_SIZE,
     has_mask: bool = False,
 ):
-    """Compile the prefill-path MoE sorting kernels.
+    """Compile the multiphase MoE sorting kernels (2 or 4 kernels via HBM workspace).
 
     For token counts exceeding LDS capacity, uses HBM workspace:
       K1: ClearWorkspace — zero the workspace buffer
@@ -1561,10 +1559,10 @@ def _compile_moe_sorting_prefill(
 # ---------------------------------------------------------------------------
 @functools.lru_cache(maxsize=64)
 def _compute_sub_tokens(num_experts, arch=None):
-    """Compute the LDS-capacity threshold (sub_tokens) for decode vs prefill decision.
+    """Compute the LDS-capacity threshold (sub_tokens) for oneshot vs multiphase decision.
 
-    Returns the max T that fits in LDS for the decode (single-kernel) path.
-    Same formula as _compile_moe_sorting_decode.
+    Returns the max T that fits in LDS for the oneshot (single-kernel) path.
+    Same formula as _compile_moe_sorting_oneshot.
     """
     if arch is None:
         arch = get_hip_arch()
@@ -1582,17 +1580,17 @@ def _compute_sub_tokens(num_experts, arch=None):
     sub_unroll = 8
     cumsum_bufs = 2
     if r < (cumsum_bufs + sub_unroll):
-        return 0  # LDS too small — always use prefill
+        return 0  # LDS too small — always use multiphase
     r_for_sub = ((r - cumsum_bufs) // sub_unroll) * sub_unroll
     return r_for_sub
 
 
 def moe_sorting_get_workspace_size(M, num_experts, topk, unit_size=UNIT_SIZE):
-    """Return workspace size (in i32 elements) needed for the prefill path.
-    Returns 0 if the decode path will be used."""
+    """Return workspace size (in i32 elements) needed for the multiphase path.
+    Returns 0 if the oneshot path will be used."""
     sub_tokens = _compute_sub_tokens(num_experts)
-    DECODE_MAX_T = min(sub_tokens, max(16, BLOCK_SIZE // max(topk, num_experts // 8)))
-    if M <= min(sub_tokens, DECODE_MAX_T):
+    ONESHOT_MAX_T = min(sub_tokens, max(16, BLOCK_SIZE // max(topk, num_experts // 8)))
+    if M <= min(sub_tokens, ONESHOT_MAX_T):
         return 0
     mesh_stride = ((M + unit_size - 1) // unit_size) * unit_size
     ws_mesh_bytes = num_experts * mesh_stride
@@ -1601,18 +1599,18 @@ def moe_sorting_get_workspace_size(M, num_experts, topk, unit_size=UNIT_SIZE):
 
 
 def compile_moe_sorting(*, num_experts, topk, max_tokens=128, unit_size=UNIT_SIZE, has_mask=False):
-    """Compile MoE sorting kernels for all paths (decode + prefill).
+    """Compile MoE sorting kernels for all paths (oneshot + multiphase).
 
-    Returns (launch_decode, launch_p0v2_p23, launch_4k_fused) covering all T ranges.
-    Decode compilation depends on max_tokens (LDS sizing); prefill is independent.
+    Returns (launch_oneshot, launch_p0v2_p23, launch_4k_fused) covering all T ranges.
+    Oneshot compilation depends on max_tokens (LDS sizing); multiphase is independent.
     """
-    launch_decode = _compile_moe_sorting_decode(
+    launch_oneshot = _compile_moe_sorting_oneshot(
         num_experts=num_experts, topk=topk, max_tokens=max_tokens, unit_size=unit_size, has_mask=has_mask
     )
-    _, _, _, _, _, launch_p0v2_p23, launch_4k_fused = _compile_moe_sorting_prefill(
+    _, _, _, _, _, launch_p0v2_p23, launch_4k_fused = _compile_moe_sorting_multiphase(
         num_experts=num_experts, topk=topk, unit_size=unit_size, has_mask=has_mask
     )
-    return launch_decode, launch_p0v2_p23, launch_4k_fused
+    return launch_oneshot, launch_p0v2_p23, launch_4k_fused
 
 
 def _launch_cached(cache, key, launch_fn, args, stream):
@@ -1641,7 +1639,7 @@ def moe_sorting_flydsl(
     num_local_tokens=None,
     workspace=None,
 ):
-    """MoE sorting using FlyDSL kernel (decode + prefill paths).
+    """MoE sorting using FlyDSL kernel (oneshot + multiphase paths).
 
     API matches aiter.moe_sorting_fwd for drop-in replacement:
         moe_sorting_flydsl(topk_ids, topk_weights,
@@ -1679,22 +1677,22 @@ def moe_sorting_flydsl(
     else:
         mask_tensor = expert_mask
 
-    DECODE_MAX_T = min(sub_tokens, max(16, BLOCK_SIZE // max(topk, num_experts // 8)))
+    ONESHOT_MAX_T = min(sub_tokens, max(16, BLOCK_SIZE // max(topk, num_experts // 8)))
 
     target_occupancy = 2
     num_cu = torch.cuda.get_device_properties(device).multi_processor_count
 
-    if M <= min(sub_tokens, DECODE_MAX_T):
+    if M <= min(sub_tokens, ONESHOT_MAX_T):
         max_tokens = max(M, 8)
         max_tokens = ((max_tokens + 7) // 8) * 8
 
         n_zero_blocks = min((moe_buf_elems + BLOCK_SIZE - 1) // BLOCK_SIZE, num_cu * target_occupancy)
         n_grid_blocks = 1 + n_zero_blocks
 
-        launch_decode, _, _ = compile_moe_sorting(
+        launch_oneshot, _, _ = compile_moe_sorting(
             num_experts=num_experts, topk=topk, max_tokens=max_tokens, unit_size=unit_size, has_mask=has_mask
         )
-        decode_args = (
+        oneshot_args = (
             topk_ids,
             topk_weights,
             sorted_ids,
@@ -1708,7 +1706,7 @@ def moe_sorting_flydsl(
             n_grid_blocks,
         )
         cache_key = (num_experts, topk, max_tokens, unit_size, has_mask, device.index)
-        _launch_cached(_decode_cf_cache, cache_key, launch_decode, decode_args, torch.cuda.current_stream())
+        _launch_cached(_oneshot_cf_cache, cache_key, launch_oneshot, oneshot_args, torch.cuda.current_stream())
     else:
         mesh_stride = ((M + unit_size - 1) // unit_size) * unit_size
         ws_mesh_bytes = num_experts * mesh_stride
@@ -1742,7 +1740,7 @@ def moe_sorting_flydsl(
                 moe_buf_elems,
                 k4_grid,
             )
-            _launch_cached(_prefill_cf_cache, base_key + ("p0v2_p23",), launch_p0v2_p23, p0v2_args, stream)
+            _launch_cached(_multiphase_cf_cache, base_key + ("p0v2_p23",), launch_p0v2_p23, p0v2_args, stream)
         else:
             k1_grid = (ws_total + 1023) // 1024
             k2_grid = num_cu * target_occupancy
@@ -1769,6 +1767,6 @@ def moe_sorting_flydsl(
                 k2_grid,
                 k4_grid,
             )
-            _launch_cached(_prefill_cf_cache, base_key + ("4k_fused",), launch_4k_fused, k4_args, stream)
+            _launch_cached(_multiphase_cf_cache, base_key + ("4k_fused",), launch_4k_fused, k4_args, stream)
 
     return sorted_ids, sorted_weights, sorted_expert_ids, num_valid_ids, moe_buf
