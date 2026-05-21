@@ -1240,19 +1240,6 @@ class CanonicalizeWhile(Transformer):
         )
         result_map = {name: value for name, value in zip(result_names, result_values)}
 
-        cond = ReplaceIfWithDispatch._call_branch(before_fn, result_names, result_values)
-        if not ReplaceIfWithDispatch._is_dynamic(cond):
-            while cond:
-                body_result = ReplaceIfWithDispatch._call_branch(after_fn, result_names, result_values)
-                if result_names:
-                    partial = ReplaceIfWithDispatch._normalize_branch_result(
-                        body_result, result_names, result_map, "while-body"
-                    )
-                    result_values = tuple(partial)
-                    result_map = dict(zip(result_names, result_values))
-                cond = ReplaceIfWithDispatch._call_branch(before_fn, result_names, result_values)
-            return ReplaceIfWithDispatch._pack_named_values(result_names, result_values)
-
         none_vars = [name for name, value in zip(result_names, result_values) if _unwrap_value(value) is None]
         if none_vars:
             raise TypeError(
