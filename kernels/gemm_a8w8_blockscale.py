@@ -555,9 +555,9 @@ def compile_gemm_a8w8_blockscale(
         slot_stride_a_i32 = arith.constant(lds_a_data_bytes, type=T.i32)
         slot_stride_b_i32 = arith.constant(lds_b_data_bytes, type=T.i32)
 
-        # K-axis innermost (stride=1, elem=1B): per-tile lo32 advance = tile_k.
+        # Per-K-tile lo32 advance: X=tile_k bytes, W=tile_k*16 (cycle-major, 16 B per K cell).
         adv_x_i32 = arith.constant(tile_k, type=T.i32)
-        adv_w_i32 = arith.constant(tile_k, type=T.i32)
+        adv_w_i32 = arith.constant(tile_k * 16, type=T.i32)
         pred_const = arith.constant(1, type=T.i32)
 
         def _buf_idx_to_i32(buf_idx):
