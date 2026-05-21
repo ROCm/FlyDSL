@@ -247,6 +247,16 @@ def _check_profile(match_func, lhs, rhs):
         raise ValueError(f"profile mismatch: {match_func.__name__}({lhs.type}, {rhs.type}) is False")
 
 
+def _wrap_numeric_type(value):
+    from .numeric import Numeric
+
+    if not isinstance(value, ir.Value):
+        return value
+    if isinstance(value, Numeric):
+        return value
+    return Numeric.from_ir_type(value.type)(value)
+
+
 # ===----------------------------------------------------------------------=== #
 # Compile-time utility
 # ===----------------------------------------------------------------------=== #
@@ -478,13 +488,54 @@ def make_fragment_like(tensor, dtype=None, loc=None, ip=None):
 
 @traced_op
 def get_scalar(int_tuple, loc=None, ip=None):
-    return fly.get_scalar(int_tuple, loc=loc, ip=ip)
+    """Unwrap a rank-1, single-element tuple back to a plain scalar value.
+
+    Fails if the input has more than one leaf - use this only when you know
+    the tuple is a trivial wrapper.
+
+    Examples:
+        get_scalar(make_coord(tid)) -> Int32(tid)
+        get_scalar(make_int_tuple(5)) -> 5
+    """
+    if not _is_int_tuple_value(int_tuple):
+        return int_tuple
+    if int_tuple.is_leaf and int_tuple.is_static:
+        return int_tuple.get_static_leaf_int
+    return _wrap_numeric_type(fly.get_scalar(int_tuple, loc=loc, ip=ip))
 
 
 @traced_op
 def get_leaves(input, dynamic_only=False, loc=None, ip=None):
-    res_lists = fly.GetLeavesOp(input, dynamicOnly=dynamic_only, loc=loc, ip=ip)
-    return tuple(res_lists.results)
+    """Flatten an IntTuple into a flat sequence of leaf values.
+
+    Set *dynamic_only=True* to keep only runtime values and drop static
+    constants - handy when you need the inputs that were passed at call time.
+
+    Examples:
+        get_leaves(make_coord(tid, 0)) -> (Int32(tid), 0)
+        get_leaves(make_coord(tid, 0), dynamic_only=True) -> (Int32(tid),) # 0 is static, dropped
+    """
+    if dynamic_only:
+        res_lists = fly.GetLeavesOp(input, dynamicOnly=True, loc=loc, ip=ip)
+        return tuple(_wrap_numeric_type(r) for r in res_lists.results)
+
+    def _walk_int_tuple_leaves(ty):
+        if ty.is_leaf:
+            yield ty
+            return
+        for i in range(ty.rank):
+            yield from _walk_int_tuple_leaves(ty.at(i))
+
+    ty = IntTupleType(input.type)
+    res_lists = fly.GetLeavesOp(input, dynamicOnly=True, loc=loc, ip=ip)
+    dyn_iter = iter(res_lists.results)
+    out = []
+    for leaf_ty in _walk_int_tuple_leaves(ty):
+        if leaf_ty.is_static:
+            out.append(leaf_ty.get_static_leaf_int)
+        else:
+            out.append(_wrap_numeric_type(next(dyn_iter)))
+    return tuple(out)
 
 
 @traced_op
@@ -1041,11 +1092,17 @@ def ptrtoint(ptr, loc=None, ip=None):
 
     if is_generic_address_space(ptr.address_space, AddressSpace.Register):
         raise ValueError("ptrtoint is not supported for register address space")
-    return fly.ptrtoint(ptr, loc=loc, ip=ip)
+    return _wrap_numeric_type(fly.ptrtoint(ptr, loc=loc, ip=ip))
 
 
 @traced_op
 def add_offset(ptr, offset, loc=None, ip=None):
+    """Shift *ptr* by *offset* elements
+
+    Examples:
+        ptr2 = add_offset(ptr, 16)            # move forward 16 elements
+        ptr2 = add_offset(ptr, tile_id * BM)  # runtime offset
+    """
     if not _is_int_tuple_value(offset):
         offset = make_int_tuple(offset, loc=loc, ip=ip)
     return fly.add_offset(ptr, offset, loc=loc, ip=ip)
@@ -1058,13 +1115,27 @@ def apply_swizzle(ptr, swizzle, loc=None, ip=None):
 
 @traced_op
 def ptr_load(ptr, result_type=None, loc=None, ip=None):
+    """Load one value (scalar or vector) from *ptr*; dtype defaults to ptr's element type.
+
+    Examples:
+        v = ptr_load(ptr)
+    """
     if result_type is None:
         result_type = ptr.element_type
-    return fly.ptr_load(result_type.ir_type, ptr, loc=loc, ip=ip)
+    if not isinstance(result_type, ir.Type):
+        result_type = result_type.ir_type
+    return _wrap_numeric_type(fly.ptr_load(result_type, ptr, loc=loc, ip=ip))
 
 
 @traced_op
 def ptr_store(value, ptr, loc=None, ip=None):
+    """Store *value* into *ptr*. Types must match the pointer's element type.
+
+    Examples:
+        ptr_store(val, ptr)
+    """
+    if not isinstance(value, ir.Value):
+        value = ptr.element_type(value).ir_value()
     return fly.ptr_store(value, ptr, loc=loc, ip=ip)
 
 
@@ -1095,7 +1166,9 @@ def memref_alloca(memref_type, layout, loc=None, ip=None):
 
 @traced_op
 def memref_load_vec(memref, loc=None, ip=None):
-    return fly.memref_load_vec(memref, loc=loc, ip=ip)
+    from .typing import Vector
+
+    return Vector(fly.memref_load_vec(memref, loc=loc, ip=ip), memref.shape.to_py_value(), memref.dtype)
 
 
 @traced_op
@@ -1106,26 +1179,24 @@ def memref_store_vec(vector, memref, loc=None, ip=None):
 @traced_op
 def memref_load(memref, indices, loc=None, ip=None):
     if isinstance(indices, ir.Value):
-        if str(indices.type).startswith("!fly.int_tuple"):
-            return fly.memref_load(memref, indices, loc=loc, ip=ip)
         if str(indices.type) == "index":
             indices = _arith.IndexCastOp(T.i32(), indices)
-        indices = make_int_tuple(indices, loc=loc, ip=ip)
-        return fly.memref_load(memref, indices, loc=loc, ip=ip)
+        if not _is_int_tuple_value(indices):
+            indices = make_int_tuple(indices, loc=loc, ip=ip)
+        return _wrap_numeric_type(fly.memref_load(memref, indices, loc=loc, ip=ip))
 
     indices = make_int_tuple(indices, loc=loc, ip=ip)
     _check_profile(is_profile_weakly_congruent, indices, memref)
-    return fly.memref_load(memref, indices, loc=loc, ip=ip)
+    return _wrap_numeric_type(fly.memref_load(memref, indices, loc=loc, ip=ip))
 
 
 @traced_op
 def memref_store(value, memref, indices, loc=None, ip=None):
     if isinstance(indices, ir.Value):
-        if str(indices.type).startswith("!fly.int_tuple"):
-            return fly.memref_store(value, memref, indices, loc=loc, ip=ip)
         if str(indices.type) == "index":
             indices = _arith.IndexCastOp(T.i32(), indices)
-        indices = make_int_tuple(indices, loc=loc, ip=ip)
+        if not _is_int_tuple_value(indices):
+            indices = make_int_tuple(indices, loc=loc, ip=ip)
         return fly.memref_store(value, memref, indices, loc=loc, ip=ip)
 
     indices = make_int_tuple(indices, loc=loc, ip=ip)

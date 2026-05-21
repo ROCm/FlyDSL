@@ -156,9 +156,8 @@ def crd2idx(crd, layout):
                     cv = raw
             crd_i32.append(cv)
         coord_val = fx.make_coord(*crd_i32)
-        result = fx.crd2idx(coord_val, layout)
-        scalar = fx.get_scalar(result)
-        if isinstance(scalar, ir.Value) and not isinstance(scalar.type, ir.IndexType):
+        scalar = fx.get_scalar(fx.crd2idx(coord_val, layout)).ir_value()
+        if not isinstance(scalar.type, ir.IndexType):
             scalar = arith.index_cast(T.index, scalar)
         return _wrap(scalar)
 

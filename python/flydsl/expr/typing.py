@@ -582,11 +582,8 @@ class IntTuple(BuiltinDslType):
         if self.is_leaf:
             if self.is_static:
                 return self.get_static_leaf_int
-            val = next(leaf_iter)
-            width = ir.IntegerType(val.type).width
-            wrapper = Int64 if width == 64 else Int32
-            return wrapper(val)
-        return tuple(IntTuple(get_(self, i))._rebuild_py_value(leaf_iter) for i in range(self.rank))
+            return next(leaf_iter)
+        return tuple(get_(self, i)._rebuild_py_value(leaf_iter) for i in range(self.rank))
 
     @traced_op
     def to_py_value(self, loc=None, ip=None):
@@ -917,7 +914,7 @@ class Tensor(BuiltinDslType):
 
     @traced_op
     def load(self, loc=None, ip=None):
-        return Vector(memref_load_vec(self, loc=loc, ip=ip), self.shape.to_py_value(), self.dtype)
+        return memref_load_vec(self, loc=loc, ip=ip)
 
     @traced_op
     def store(self, vector, loc=None, ip=None):

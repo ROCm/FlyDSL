@@ -20,12 +20,11 @@ from flydsl.expr.typing import T
 
 
 def crd2idx(crd, layout):
-    """crd2idx returning an index-type scalar (unwraps fly.int_tuple)."""
-    result = fx.crd2idx(crd, layout)
-    scalar = fx.get_scalar(result)
-    if isinstance(scalar, ir.Value) and not isinstance(scalar.type, ir.IndexType):
-        scalar = _arith.IndexCastOp(T.index, scalar).result
-    return scalar
+    """crd2idx returning an index-typed ir.Value (unwraps fly.int_tuple)."""
+    scalar = fx.get_scalar(fx.crd2idx(crd, layout)).ir_value()
+    if isinstance(scalar.type, ir.IndexType):
+        return scalar
+    return _arith.IndexCastOp(T.index, scalar).result
 
 
 def swizzle_xor16(row, col, k_blocks16):

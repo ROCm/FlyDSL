@@ -23,17 +23,21 @@ from .utils.arith import _to_raw
 
 
 def _traced_math_op(fn):
-    """Like @traced_op, but re-wraps results to preserve Numeric class hierarchy.
+    """Like @traced_op, but re-wraps results to preserve DslType closure.
 
-    If the first positional arg is a Numeric (Float32, Int32, …), the MLIR
-    result is wrapped back into the appropriate Numeric subclass via
-    ``Numeric.from_ir_type``.  Raw ir.Value inputs pass through unchanged.
+    If the first positional arg is a ``Numeric`` (Float32, Int32, …) or a
+    ``Vector``, the MLIR result is wrapped back into the matching DSL type so
+    callers stay at the DSL level instead of dropping to raw ir.Value / ArithValue.
+    Raw ir.Value inputs pass through unchanged.
     """
 
     @wraps(fn)
     def wrapper(*args, **kwargs):
+        from .typing import Vector
+
         first = args[0] if args else None
-        do_rewrap = isinstance(first, Numeric)
+        is_vector = isinstance(first, Vector)
+        is_numeric = isinstance(first, Numeric)
 
         loc = kwargs.pop("loc", None)
         if loc is None:
@@ -42,12 +46,19 @@ def _traced_math_op(fn):
         with loc:
             result = fn(*args, **kwargs)
 
-        if not do_rewrap:
+        if not (is_vector or is_numeric):
             return result
+
+        def _wrap_arith_type(value):
+            if is_vector:
+                elem_dtype = Numeric.from_ir_type(ir.VectorType(value.type).element_type)
+                return Vector(value, first.shape, elem_dtype)
+            return Numeric.from_ir_type(value.type)(value)
+
         if isinstance(result, ir.Value):
-            return Numeric.from_ir_type(result.type)(result)
+            return _wrap_arith_type(result)
         # Multi-result (e.g. sincos)
-        return tuple(Numeric.from_ir_type(r.type)(r) for r in result)
+        return tuple(_wrap_arith_type(r) for r in result)
 
     return wrapper
 
