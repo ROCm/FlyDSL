@@ -102,27 +102,54 @@ Present the kernel list and let the user pick, or auto-select the FlyDSL/target 
 Create the input.yaml with the target `kernel_include_regex`:
 
 ```yaml
+GlobalParameters:
+  KeepBuildTmp: True
+  AsmDebug: True
 jobs:
-   -
-       kernel_include_regex: <KERNEL_PATTERN>
-       kernel_iteration_range: "[1, [2-4]]"
-       output_file: out
-       output_directory: /tmp/kernel_trace_output
-       output_format: [csv]
-       truncate_kernels: true
-       sys_trace: true
-       advanced_thread_trace: true
-       att_target_cu: 1
-       att_shader_engine_mask: "0xf"
-       att_simd_select: "0xf"
-       att_buffer_size: "0x6000000"
+    -
+        kernel_include_regex: "<KERNEL_PATTERN>"
+        kernel_exclude_regex:
+        kernel_iteration_range: "[11, [12-12]]"
+        output_file: out
+        output_directory: <OUTPUT_DIR>
+        output_format: [json, csv, otf2, pftrace]
+        truncate_kernels: true
+        sys_trace: false # enable for pftrace and otf2
+        advanced_thread_trace: true # enable for att and ui folder
+        att_target_cu: 1
+        att_shader_engine_mask: "0xf" # collect one CU from 4 SEs
+        att_simd_select: "0xf" # collect 4 SIMDs on single CU
+        att_buffer_size: "0x6000000"
+pmc:
+  - SQ_LDS_BANK_CONFLICT
+  - LDSBankConflict
+  - LdsBankConflict
 ```
 
 Key configuration:
-- `kernel_include_regex`: Exact name or regex from Step 2
-- `kernel_iteration_range`: `"[1, [2-4]]"` skips warmup (iteration 0), traces iterations 2-4
-- `att_target_cu: 1`: Single CU for manageable output
-- `att_buffer_size: "0x6000000"`: 96MB per SE (increase to `0xC000000` if truncated)
+- `GlobalParameters.KeepBuildTmp` / `AsmDebug`: keep build tmp and emit assembler
+  debug info so ATT can map ISA back to source.
+- `kernel_include_regex`: exact name or regex from Step 2 (quote it).
+- `kernel_exclude_regex`: leave empty unless you need to filter out a sibling
+  kernel that matches the include pattern.
+- `kernel_iteration_range: "[11, [12-12]]"`: skip warmup (iterations 0-10) and
+  trace a single steady-state iteration (12). Adjust the warmup count to match
+  the benchmark harness. The CSV/JSON metrics cover iteration 11 onward; ATT
+  trace is captured only on the iteration listed in the inner range.
+- `output_format: [json, csv, otf2, pftrace]`: JSON/CSV feed
+  `hotspot_analyzer.py`; OTF2 + pftrace give Perfetto-style timelines (requires
+  `sys_trace: true`).
+- `sys_trace`: enable only when you want pftrace/otf2 system timelines; ATT
+  itself does not need it.
+- `advanced_thread_trace: true`: produces the `ui_output_agent_*` ATT folder.
+- `att_target_cu: 1`: trace one CU to keep `att_buffer_size` manageable.
+- `att_shader_engine_mask: "0xf"`: one CU on each of 4 SEs.
+- `att_simd_select: "0xf"`: all 4 SIMDs on the selected CU.
+- `att_buffer_size: "0x6000000"`: 96 MB per SE; bump to `0xC000000` if the
+  trace truncates.
+- `pmc`: optional perf counters collected alongside ATT. The bank-conflict
+  counters above are useful when diagnosing LDS pressure; drop the block if you
+  only need raw ATT.
 
 ---
 

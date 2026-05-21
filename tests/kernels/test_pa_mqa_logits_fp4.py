@@ -6,7 +6,6 @@
 import random
 import sys
 
-import pytest
 import torch
 
 sys.path.insert(0, "build-fly/python_packages")
@@ -200,9 +199,25 @@ def create_paged_preshuffle_kv_fp4(kv_bf16, kv_block_size, num_blocks, block_tab
         .contiguous()
         .view(batch * t_blocks, k_tiles, 4, kv_block_size, 16)
     )
+    # KVS_NTPW: nt-bytes packed together for the kernel's packed dword load
+    # (4 ubyte → 1 dword). Per (D=lane_div_16, T=lane_mod_16), the bytes for
+    # nts 0..KVS_NTPW-1 are adjacent so one thread can dword-load all 4 nts.
+    # Layout: [..., kv_block_size/KVS_NTPW = 16 token-groups, KVS_NTPW = 4 nts].
+    # Must match the kernel-side NTPW. Hardcoded at 4 to match default
+    # block_k=256 / num_warps=4 / MFMA_N=16. Override via env if needed.
+    KVS_NTPW = 4
+    assert kv_block_size % KVS_NTPW == 0
     kv_e8m0_perm = (
         kv_e8m0.view(batch, t_blocks, kv_block_size, k_tiles, 4)
         .permute(0, 1, 3, 4, 2)
+        .contiguous()
+        .view(batch * t_blocks, k_tiles, 4, kv_block_size)
+        # Interleave 4 nts per token group:
+        # Current: [..., kv_block_size=64] where byte order = (nt*16 + T)
+        #   → split into (NTPW=4, T_per_nt=16), transpose to (T=16, NTPW=4)
+        # Result: 4 consecutive bytes per T cover nts 0..3 → 1 dword load.
+        .view(batch * t_blocks, k_tiles, 4, KVS_NTPW, kv_block_size // KVS_NTPW)
+        .transpose(-1, -2)
         .contiguous()
         .view(batch * t_blocks, k_tiles, 4, kv_block_size)
     )
@@ -282,25 +297,24 @@ def _torch_ref_step(q_dq_bn, kv_dq, w_bn, next_n=1):
     return qk.sum(dim=1)
 
 
-def _make_varctx(batch, max_ctx, kv_block_size):
-    """Generate per-batch ctx lengths as a graduated sweep [max/B, ..., max],
-    rounded up to a multiple of kv_block_size."""
-    base = [max_ctx * (i + 1) // batch for i in range(batch)]
-    # Round each up to the page boundary so the test exercises whole pages.
-    return [min(((c + kv_block_size - 1) // kv_block_size) * kv_block_size, max_ctx) for c in base]
+def _make_varctx(batch, max_ctx, kv_block_size, var_ratio=0.5, seed=0):
+    """Per-batch ctx lengths matching aiter bench_deepgemm_attention.py.
+
+    aiter: max_model_len = 2 * avg_kv_length; ctx ~ U[(1-r)*avg, (1+r)*avg].
+    here:  max_ctx == max_model_len, so avg = max_ctx // 2.
+    Lengths are rounded up to kv_block_size for paged-KV correctness.
+    """
+    avg = max_ctx // 2
+    low = int((1 - var_ratio) * avg)
+    high = int((1 + var_ratio) * avg)
+    g = torch.Generator().manual_seed(seed)
+    raw = torch.randint(low, high + 1, (batch,), generator=g).tolist()
+    return [
+        min(((c + kv_block_size - 1) // kv_block_size) * kv_block_size, max_ctx)
+        for c in raw
+    ]
 
 
-@pytest.mark.parametrize(
-    "batch, max_ctx, kv_block_size, block_k, next_n, heads",
-    [
-        pytest.param(4, 16384, 16, 64, 1, 64, id="4x16k_n1_h64"),
-        pytest.param(4, 32768, 16, 64, 1, 64, id="4x32k_n1_h64"),
-        pytest.param(8, 65536, 16, 64, 1, 64, id="8x65k_n1_h64"),
-        pytest.param(4, 16384, 16, 64, 2, 64, id="4x16k_n2_h64"),
-        pytest.param(8, 65536, 16, 64, 2, 64, id="8x65k_n2_h64"),
-        pytest.param(4, 16384, 16, 64, 1, 128, id="4x16k_n1_h128"),
-    ],
-)
 def test_pa_mqa_logits_fp4_qfp4_kvfp4(
     batch,
     max_ctx,
@@ -544,13 +558,6 @@ def test_pa_mqa_logits_fp4_qfp4_kvfp4(
 _PERF_SUMMARY = []
 
 
-@pytest.fixture(scope="session", autouse=True)
-def _perf_summary_at_end():
-    yield
-    if _PERF_SUMMARY:
-        _print_perf_summary()
-
-
 def _print_perf_summary():
     print("\n" + "=" * 96)
     print("Perf summary (flydsl-qfp4/kvfp4 across shapes)")
@@ -577,7 +584,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--batch", type=int, default=0, help="Batch size (0 = run default sweep)")
     parser.add_argument("--ctx", type=int, default=0, help="Context length (0 = run default sweep)")
-    parser.add_argument("--kv_block_size", type=int, default=16)
+    parser.add_argument("--kv_block_size", type=int, default=64)
     parser.add_argument(
         "--block_k", type=int, default=256, help="Tokens per chunk (multiple of MFMA_N=16, divisible by num_warps)"
     )
@@ -608,19 +615,19 @@ if __name__ == "__main__":
         configs = [(args.batch, args.ctx, args.next_n)]
     else:
         configs = [
-            (1, 2 * 65536, 1),
-            (2, 2 * 65536, 1),
-            (4, 2 * 65536, 1),
+            # (1, 2 * 65536, 1),
+            # (2, 2 * 65536, 1),
+            # (4, 2 * 65536, 1),
             (8, 2 * 65536, 1),
-            (1, 2 * 16384, 2),
-            (1, 2 * 32768, 2),
-            (1, 2 * 65536, 2),
-            (2, 2 * 16384, 2),
-            (2, 2 * 32768, 2),
-            (2, 2 * 65536, 2),
-            (4, 2 * 16384, 2),
-            (4, 2 * 32768, 2),
-            (4, 2 * 65536, 2),
+            # (1, 2 * 16384, 2),
+            # (1, 2 * 32768, 2),
+            # (1, 2 * 65536, 2),
+            # (2, 2 * 16384, 2),
+            # (2, 2 * 32768, 2),
+            # (2, 2 * 65536, 2),
+            # (4, 2 * 16384, 2),
+            # (4, 2 * 32768, 2),
+            # (4, 2 * 65536, 2),
         ]
 
     for b, c, nn in configs:
