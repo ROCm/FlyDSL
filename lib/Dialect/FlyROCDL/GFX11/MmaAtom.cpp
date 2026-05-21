@@ -132,15 +132,36 @@ LogicalResult MmaOpGFX11_WMMAType::verify(function_ref<InFlightDiagnostic()> emi
   if (elemTyA.isBF16() && elemTyB.isBF16() && elemTyAcc.isF32())
     valid = true;
 
-  // iu8 inputs, i32 accumulator.
-  if (elemTyA.isInteger(8) && elemTyB.isInteger(8) && elemTyAcc.isInteger(32))
-    valid = true;
+  // Integer inputs: REQUIRE explicit unsigned signedness (ui8/ui4).
+  //
+  // The atom contract is unsigned-only because emitAtomCallSSA invokes the
+  // ROCDL iu8/iu4 intrinsics with signA=signB=false (unsigned interpretation
+  // of the packed operands).
+  auto isUI = [](Type t, unsigned width) {
+    auto it = dyn_cast<IntegerType>(t);
+    return it && it.getWidth() == width && it.isUnsigned();
+  };
 
-  // iu4 inputs, i32 accumulator.
-  if (elemTyA.isInteger(4) && elemTyB.isInteger(4) && elemTyAcc.isInteger(32))
+  if (isUI(elemTyA, 8) && isUI(elemTyB, 8) && elemTyAcc.isInteger(32))
+    valid = true;
+  if (isUI(elemTyA, 4) && isUI(elemTyB, 4) && elemTyAcc.isInteger(32))
     valid = true;
 
   if (!valid) {
+    // Steer the caller to ui8/ui4 explicitly.
+    auto looksLikeInt = [](Type t, unsigned w) {
+      auto it = dyn_cast<IntegerType>(t);
+      return it && it.getWidth() == w;
+    };
+    if ((looksLikeInt(elemTyA, 8) || looksLikeInt(elemTyA, 4)) && elemTyAcc.isInteger(32)) {
+      return emitError() << "GFX11 WMMA integer inputs must be unsigned "
+                            "(ui8/ui4); got A="
+                         << elemTyA << ", B=" << elemTyB
+                         << ". The lowered ROCDL iu8/iu4 intrinsic is invoked "
+                            "with signA=signB=false, so signless/signed "
+                            "operands would silently get unsigned semantics. "
+                            "Signed-integer WMMA is not yet implemented.";
+    }
     return emitError() << "unsupported GFX11 WMMA configuration: " << m << "x" << n << "x" << k
                        << " with A=" << elemTyA << ", B=" << elemTyB << ", Acc=" << elemTyAcc;
   }
@@ -235,12 +256,16 @@ FailureOr<Value> MmaOpGFX11_WMMAType::emitAtomCallSSA(OpBuilder &builder, Locati
     opName = ROCDL::wmma_f32_16x16x16_bf16::getOperationName();
     operands = {a, b, c};
   } else if (elemTyA.isInteger(8) && elemTyB.isInteger(8) && elemTyAcc.isInteger(32)) {
+    // Unsigned-only by contract (see verify()). signA=signB=false matches the
+    // ui8 element type enforced there. clamp=false preserves wraparound on the
+    // i32 accumulator.
     opName = ROCDL::wmma_i32_16x16x16_iu8::getOperationName();
     operands = {a, b, c};
     attrs.push_back({builder.getStringAttr("signA"), falseAttr});
     attrs.push_back({builder.getStringAttr("signB"), falseAttr});
     attrs.push_back({builder.getStringAttr("clamp"), falseAttr});
   } else if (elemTyA.isInteger(4) && elemTyB.isInteger(4) && elemTyAcc.isInteger(32)) {
+    // Same unsigned-only contract as iu8; see verify().
     opName = ROCDL::wmma_i32_16x16x16_iu4::getOperationName();
     operands = {a, b, c};
     attrs.push_back({builder.getStringAttr("signA"), falseAttr});

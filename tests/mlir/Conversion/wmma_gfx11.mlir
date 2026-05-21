@@ -66,3 +66,21 @@ func.func @test_gfx11_wmma_atom_call_ssa_f16(
   %res = fly.mma_atom_call_ssa(%atom, %a, %b, %c) : (!fly.mma_atom<!fly_rocdl.gfx11.wmma<16x16x16, (f16, f16) -> f32>>, vector<16xf16>, vector<16xf16>, vector<8xf32>) -> vector<8xf32>
   return %res : vector<8xf32>
 }
+
+// Unsigned integer (ui8) inputs must lower to rocdl.wmma.i32.16x16x16.iu8 with
+// signA=false, signB=false, clamp=false — matching the unsigned-only contract
+// documented in verify(). The A/B operands (vector<16xui8>) are bitcast to the
+// packed representation (vector<4xi32>) expected by the intrinsic.
+//
+// CHECK-LABEL: @test_gfx11_wmma_atom_call_ssa_iu8
+func.func @test_gfx11_wmma_atom_call_ssa_iu8(
+    %a: vector<16xui8>,
+    %b: vector<16xui8>,
+    %c: vector<8xi32>) -> vector<8xi32> {
+  %atom = fly.make_mma_atom : !fly.mma_atom<!fly_rocdl.gfx11.wmma<16x16x16, (ui8, ui8) -> i32>>
+  // CHECK: llvm.bitcast {{.*}} : vector<16xui8> to vector<4xi32>
+  // CHECK: llvm.bitcast {{.*}} : vector<16xui8> to vector<4xi32>
+  // CHECK: rocdl.wmma.i32.16x16x16.iu8
+  %res = fly.mma_atom_call_ssa(%atom, %a, %b, %c) : (!fly.mma_atom<!fly_rocdl.gfx11.wmma<16x16x16, (ui8, ui8) -> i32>>, vector<16xui8>, vector<16xui8>, vector<8xi32>) -> vector<8xi32>
+  return %res : vector<8xi32>
+}
