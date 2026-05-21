@@ -812,6 +812,7 @@ def compile_moe_sorting_prefill(
                 + h2.select(c_one, c_zero)
                 + h3.select(c_one, c_zero)
             )
+            my_pre_scan = my_cnt
             my_cnt, my_cnt_inclusive = _allwave_inclusive_prefix_sum(
                 my_cnt, lane, wave, scatter_mr, K4_NUM_WAVES, WARP_SIZE
             )
@@ -820,13 +821,7 @@ def compile_moe_sorting_prefill(
             for _w in range_constexpr(K4_NUM_WAVES):
                 batch_total = batch_total + _lds_load_raw(scatter_mr, fx.Int32(_w))
             gpu.barrier()
-            my_thread_count = (
-                h0.select(c_one, c_zero)
-                + h1.select(c_one, c_zero)
-                + h2.select(c_one, c_zero)
-                + h3.select(c_one, c_zero)
-            )
-            my_exclusive = my_cnt - my_thread_count + wave_offset
+            my_exclusive = my_cnt - my_pre_scan + wave_offset
             scatter_base = position + my_exclusive
             pid_0 = (h0.select(x0 - c_one, c_zero) << fx.Int32(24)) | base_col
             pid_1 = (h1.select(x1 - c_one, c_zero) << fx.Int32(24)) | (base_col + c_one)
@@ -1737,7 +1732,7 @@ def moe_sorting_flydsl(
             _launch_cached(_prefill_cf_cache, base_key + ("p0v2_p23",), launch_p0v2_p23, p0v2_args, stream)
         else:
             k1_grid = (ws_total + 1023) // 1024
-            k2_grid = min(num_cu * target_occupancy, (M * topk + 255) // 256)
+            k2_grid = num_cu * target_occupancy
             k2_total = M * topk
             k2_stride = k2_grid * 256
             k2_niters = (k2_total + k2_stride - 1) // k2_stride
