@@ -2,17 +2,17 @@
 # Copyright (c) 2025 FlyDSL Project Contributors
 
 from ..._mlir import ir
-from ..._mlir._mlir_libs._mlirDialectsFlyROCDL import (MmaOpGFX11_WMMAType,
-                                                       MmaOpGFX1250_WMMAType)
+from ..._mlir._mlir_libs._mlirDialectsFlyROCDL import MmaOpGFX11_WMMAType, MmaOpGFX1250_WMMAType
 from ..._mlir.dialects.fly import AtomicOp, PointerType
-from ..._mlir.dialects.fly_rocdl import (CopyOpCDNA3BufferAtomicType,
-                                         CopyOpCDNA3BufferCopyLDSType,
-                                         CopyOpCDNA3BufferCopyType,
-                                         MmaOpCDNA3_MFMAType,
-                                         TargetAddressSpace)
+from ..._mlir.dialects.fly_rocdl import (
+    CopyOpCDNA3BufferAtomicType,
+    CopyOpCDNA3BufferCopyLDSType,
+    CopyOpCDNA3BufferCopyType,
+    MmaOpCDNA3_MFMAType,
+    TargetAddressSpace,
+)
 from ..._mlir.extras import types as T
-from ..primitive import (cosize, get_iter, get_layout, get_scalar, make_ptr,
-                         make_view)
+from ..primitive import cosize, get_iter, get_layout, get_scalar, make_ptr, make_view
 from ..typing import Int16, Int32, Int64, Tensor
 
 
@@ -94,8 +94,7 @@ def WMMA(m, n, k, elem_ty_ab, elem_ty_acc=None):
     if arch.startswith("gfx12"):
         return MmaOpGFX1250_WMMAType.get(m, n, k, ty_ab, ty_ab, ty_acc)
     raise ValueError(
-        f"WMMA is not available on target arch {arch!r}; "
-        "supported: gfx11xx (RDNA3 / RDNA3.5) and gfx12xx (RDNA4). "
+        f"WMMA is not available on target arch {arch!r}; " "supported: gfx11xx (RDNA3 / RDNA3.5) and gfx12xx (RDNA4). "
     )
 
 
