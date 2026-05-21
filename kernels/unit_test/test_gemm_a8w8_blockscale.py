@@ -36,6 +36,7 @@ import torch
 
 from flydsl.runtime.device import get_rocm_arch
 from kernels.gemm_a8w8_blockscale import gemm_a8w8_blockscale
+from kernels.util.shuffle import preshuffle_fp8_weights_gfx1250
 from tests.test_common import verify_output
 
 
@@ -188,6 +189,7 @@ def test_gemm_a8w8_blockscale_basic(M, N, K, dtype):
 
     x, w, x_scale, w_scale = _generate_inputs(M, N, K)
     ref = _reference_output(x, w, x_scale, w_scale, dtype=dtype)
+    w = preshuffle_fp8_weights_gfx1250(w)
 
     out = gemm_a8w8_blockscale(x, w, x_scale, w_scale, dtype=dtype)
 
@@ -210,6 +212,7 @@ def test_gemm_a8w8_blockscale_num_buffers(M, N, K, num_buffers):
 
     x, w, x_scale, w_scale = _generate_inputs(M, N, K)
     ref = _reference_output(x, w, x_scale, w_scale, dtype=torch.bfloat16)
+    w = preshuffle_fp8_weights_gfx1250(w)
 
     out = gemm_a8w8_blockscale(
         x, w, x_scale, w_scale,
@@ -234,6 +237,7 @@ def test_gemm_a8w8_blockscale_dtype(M, N, K, dtype):
 
     x, w, x_scale, w_scale = _generate_inputs(M, N, K)
     ref = _reference_output(x, w, x_scale, w_scale, dtype=dtype)
+    w = preshuffle_fp8_weights_gfx1250(w)
 
     out = gemm_a8w8_blockscale(x, w, x_scale, w_scale, dtype=dtype)
 
@@ -257,6 +261,7 @@ def test_gemm_a8w8_blockscale_preallocated_output(M, N, K):
     x, w, x_scale, w_scale = _generate_inputs(M, N, K)
     y = torch.empty((M, N), dtype=torch.bfloat16, device="cuda")
     ref = _reference_output(x, w, x_scale, w_scale, dtype=torch.bfloat16)
+    w = preshuffle_fp8_weights_gfx1250(w)
 
     out = gemm_a8w8_blockscale(x, w, x_scale, w_scale, dtype=torch.bfloat16, y=y)
 
@@ -288,6 +293,7 @@ def test_gemm_a8w8_blockscale_scales_per_tile(M, N, K):
 
     x, w, x_scale, w_scale = _generate_inputs(M, N, K)
     ref = _reference_output(x, w, x_scale, w_scale, dtype=torch.bfloat16)
+    w = preshuffle_fp8_weights_gfx1250(w)
 
     out = gemm_a8w8_blockscale(
         x, w, x_scale, w_scale,
@@ -311,6 +317,7 @@ def test_gemm_a8w8_blockscale_large(M, N, K):
 
     x, w, x_scale, w_scale = _generate_inputs(M, N, K)
     ref = _reference_output(x, w, x_scale, w_scale, dtype=torch.bfloat16)
+    w = preshuffle_fp8_weights_gfx1250(w)
 
     out = gemm_a8w8_blockscale(x, w, x_scale, w_scale, dtype=torch.bfloat16)
 
@@ -357,6 +364,7 @@ def test_gemm_a8w8_blockscale_tdm_store_basic(M, N, K, dtype):
 
     x, w, x_scale, w_scale = _generate_inputs(M, N, K)
     ref = _reference_output(x, w, x_scale, w_scale, dtype=dtype)
+    w = preshuffle_fp8_weights_gfx1250(w)
 
     out = gemm_a8w8_blockscale(
         x, w, x_scale, w_scale, dtype=dtype, use_tdm_store=True,
@@ -379,6 +387,7 @@ def test_gemm_a8w8_blockscale_tdm_store_dtype(M, N, K, dtype):
 
     x, w, x_scale, w_scale = _generate_inputs(M, N, K)
     ref = _reference_output(x, w, x_scale, w_scale, dtype=dtype)
+    w = preshuffle_fp8_weights_gfx1250(w)
 
     out = gemm_a8w8_blockscale(
         x, w, x_scale, w_scale, dtype=dtype, use_tdm_store=True,
@@ -404,6 +413,7 @@ def test_gemm_a8w8_blockscale_tdm_store_num_buffers(M, N, K, num_buffers):
 
     x, w, x_scale, w_scale = _generate_inputs(M, N, K)
     ref = _reference_output(x, w, x_scale, w_scale, dtype=torch.bfloat16)
+    w = preshuffle_fp8_weights_gfx1250(w)
 
     out = gemm_a8w8_blockscale(
         x, w, x_scale, w_scale,
@@ -429,6 +439,7 @@ def test_gemm_a8w8_blockscale_tdm_store_preallocated_output(M, N, K):
     x, w, x_scale, w_scale = _generate_inputs(M, N, K)
     y = torch.empty((M, N), dtype=torch.bfloat16, device="cuda")
     ref = _reference_output(x, w, x_scale, w_scale, dtype=torch.bfloat16)
+    w = preshuffle_fp8_weights_gfx1250(w)
 
     out = gemm_a8w8_blockscale(
         x, w, x_scale, w_scale, dtype=torch.bfloat16, y=y, use_tdm_store=True,
@@ -467,7 +478,7 @@ _EXPERIMENTAL_TDM_SHAPES = [s for s in get_tdm_store_shapes() if _experimental_s
 
 @pytest.mark.parametrize("M, N, K", _EXPERIMENTAL_BASIC_SHAPES)
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
-@pytest.mark.parametrize("variant", ["experimental", "experimental_unroll2", "manual"])
+@pytest.mark.parametrize("variant", ["manual"])
 def test_gemm_a8w8_blockscale_experimental_basic(variant, M, N, K, dtype):
     """Experimental variant: bulk W-scale load + per-tile v_readlane."""
     _check_gfx1250()
@@ -476,6 +487,7 @@ def test_gemm_a8w8_blockscale_experimental_basic(variant, M, N, K, dtype):
 
     x, w, x_scale, w_scale = _generate_inputs(M, N, K)
     ref = _reference_output(x, w, x_scale, w_scale, dtype=dtype)
+    w = preshuffle_fp8_weights_gfx1250(w)
 
     out = gemm_a8w8_blockscale(
         x, w, x_scale, w_scale, dtype=dtype, variant=variant,
@@ -490,7 +502,7 @@ def test_gemm_a8w8_blockscale_experimental_basic(variant, M, N, K, dtype):
 
 @pytest.mark.parametrize("M, N, K", [(128, 256, 256), (256, 512, 512)])
 @pytest.mark.parametrize("num_buffers", [2, 3, 4])
-@pytest.mark.parametrize("variant", ["experimental", "experimental_unroll2", "manual"])
+@pytest.mark.parametrize("variant", ["manual"])
 def test_gemm_a8w8_blockscale_experimental_num_buffers(variant, M, N, K, num_buffers):
     """Experimental variant: pipeline depth sweep (2/3/4 buffers)."""
     _check_gfx1250()
@@ -499,6 +511,7 @@ def test_gemm_a8w8_blockscale_experimental_num_buffers(variant, M, N, K, num_buf
 
     x, w, x_scale, w_scale = _generate_inputs(M, N, K)
     ref = _reference_output(x, w, x_scale, w_scale, dtype=torch.bfloat16)
+    w = preshuffle_fp8_weights_gfx1250(w)
 
     out = gemm_a8w8_blockscale(
         x, w, x_scale, w_scale,
@@ -516,7 +529,7 @@ def test_gemm_a8w8_blockscale_experimental_num_buffers(variant, M, N, K, num_buf
 
 @pytest.mark.parametrize("M, N, K", _EXPERIMENTAL_TDM_SHAPES)
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
-@pytest.mark.parametrize("variant", ["experimental", "experimental_unroll2", "manual"])
+@pytest.mark.parametrize("variant", ["manual"])
 def test_gemm_a8w8_blockscale_experimental_tdm_store(variant, M, N, K, dtype):
     """Experimental variant + TDM-store epilogue path."""
     _check_gfx1250()
@@ -525,6 +538,7 @@ def test_gemm_a8w8_blockscale_experimental_tdm_store(variant, M, N, K, dtype):
 
     x, w, x_scale, w_scale = _generate_inputs(M, N, K)
     ref = _reference_output(x, w, x_scale, w_scale, dtype=dtype)
+    w = preshuffle_fp8_weights_gfx1250(w)
 
     out = gemm_a8w8_blockscale(
         x, w, x_scale, w_scale,
@@ -548,7 +562,7 @@ def test_gemm_a8w8_blockscale_experimental_tdm_store(variant, M, N, K, dtype):
         (1024, 1024, 1024),
     ],
 )
-@pytest.mark.parametrize("variant", ["experimental", "experimental_unroll2", "manual"])
+@pytest.mark.parametrize("variant", ["manual"])
 def test_gemm_a8w8_blockscale_experimental_scales_per_tile(variant, M, N, K):
     """Experimental variant with tile_k=256, scale_block_k=128 → 2 scale chunks/tile.
     Verifies the readlane lookup keys on K-block index, not K-tile index."""
@@ -558,6 +572,7 @@ def test_gemm_a8w8_blockscale_experimental_scales_per_tile(variant, M, N, K):
 
     x, w, x_scale, w_scale = _generate_inputs(M, N, K)
     ref = _reference_output(x, w, x_scale, w_scale, dtype=torch.bfloat16)
+    w = preshuffle_fp8_weights_gfx1250(w)
 
     out = gemm_a8w8_blockscale(
         x, w, x_scale, w_scale,
@@ -585,7 +600,7 @@ def test_gemm_a8w8_blockscale_experimental_scales_per_tile(variant, M, N, K):
         (128, 256, 12288),
     ],
 )
-@pytest.mark.parametrize("variant", ["experimental", "experimental_unroll2", "manual"])
+@pytest.mark.parametrize("variant", ["manual"])
 def test_gemm_a8w8_blockscale_experimental_multi_chunk(variant, M, N, K):
     """Experimental variant with scale_k > 32 — exercises the cur/prefetch
     chunk chain, including chunk-boundary advancement in the main loop."""
@@ -595,6 +610,7 @@ def test_gemm_a8w8_blockscale_experimental_multi_chunk(variant, M, N, K):
 
     x, w, x_scale, w_scale = _generate_inputs(M, N, K)
     ref = _reference_output(x, w, x_scale, w_scale, dtype=torch.bfloat16)
+    w = preshuffle_fp8_weights_gfx1250(w)
 
     out = gemm_a8w8_blockscale(
         x, w, x_scale, w_scale,
@@ -626,7 +642,7 @@ if __name__ == "__main__":
     parser.add_argument("--tdm-store", action="store_true",
                         help="Use the LDS-staged TDM-store epilogue.")
     parser.add_argument("--variant", type=str, default="reg_preload",
-                        choices=["reg_preload", "no_op_preload", "experimental"])
+                        choices=["reg_preload", "manual"])
     args = parser.parse_args()
 
     dtype_map = {
@@ -641,6 +657,7 @@ if __name__ == "__main__":
 
     x, w, x_scale, w_scale = _generate_inputs(args.M, args.N, args.K)
     ref = _reference_output(x, w, x_scale, w_scale, dtype=dtype)
+    w = preshuffle_fp8_weights_gfx1250(w)
     out = gemm_a8w8_blockscale(
         x, w, x_scale, w_scale,
         dtype=dtype,

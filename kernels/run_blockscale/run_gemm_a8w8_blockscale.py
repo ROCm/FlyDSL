@@ -10,8 +10,8 @@ Edit the CONFIG block below — no CLI args. Run with:
 # ═══════════════════════════════════════════════════════════════════════════
 
 # Problem shape
-M = 32 #896
-N = 1024
+M = 1024 #896
+N = 2048
 K = 2880
 
 # Scale granularity (must match how the scales were quantized)
@@ -19,9 +19,9 @@ SCALE_BLOCK_K = 128
 SCALE_BLOCK_N = 128
 
 # Tile dims (tile_k must equal SCALE_BLOCK_K for Phase 1)
-TILE_M = 32 #224
-TILE_N = 32
-TILE_K = 512
+TILE_M = 256 #224
+TILE_N = 256
+TILE_K = 128
 
 # Warp grid
 M_WARP = 2
@@ -40,10 +40,8 @@ LOOP_CARRIED_LOAD_PERCENT = 0
 # preloads them into user SGPRs at dispatch (no s_load + s_wait_kmcnt at
 # wave entry). Saves ~1786 cycles of prologue stall on the gfx1250 sim.
 KERNARG_PRELOAD = True
-# Kernel variant: "reg_preload" / "no_op_preload" / "experimental"
-#   experimental = reg_preload + bulk W-scale load (1 buffer_load_b32 at
-#   kernel entry covering all K-tiles + per-tile v_readlane).
-VARIANT = "reg_preload"
+# Kernel variant: "reg_preload" (primary) or "manual".
+VARIANT = "manual"
 
 # Output dtype ("bf16" / "fp16" / "f32")
 OUT_DTYPE = "bf16"
@@ -170,11 +168,11 @@ def main():
     print("Launching kernel...")
     stream = torch.cuda.current_stream().cuda_stream
 
-    print("Running warmup kernel (warms L2/TLB for GEMM inputs)...")
-    _run_warmup([x, w, x_scale, w_scale], stream=stream)
-
-    # Preshuffle W into cycle-major LDS layout (gfx1250 WMMA 16x16x128 FP8).
+    # Preshuffle W before warmup so warmup and timed launch read the same bytes.
     w = preshuffle_fp8_weights_gfx1250(w)
+
+    print("Running warmup launch (same kernel + configs as timed launch)...")
+    launch_fn(y, x, w, x_scale, w_scale, M, N_padded, stream=stream)
 
     launch_fn(y, x, w, x_scale, w_scale, M, N_padded, stream=stream)
     torch.cuda.synchronize()

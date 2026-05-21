@@ -85,7 +85,7 @@ FLYDSL_DEBUG_DUMP_ASM=1 \
 PYTHONPATH="$FLYDSL_ROOT" \
 "$TRITON_GFX1250_MODEL_PATH/tools/roccap/bin/roccap" capture \
   --loglevel error \
-  --disp "kernel_gemm_a8w8_blockscale/0" \
+  --disp "kernel_gemm_a8w8_blockscale/1" \
   --file gemm_a8w8_blockscale.cap \
   python3 "$LAUNCHER" 2>&1 | tee "$CAPTURE_LOG"
 set -e
@@ -239,9 +239,12 @@ fi
 # --- 6) SP3 disassembly + amtool ---
 echo ""
 echo "=== Collecting SP3 disassembly trace ==="
+# Clean stale roc-dump files so we don't pick up an older one below.
+rm -f roc-dump-*-isa-data.bin
+
 "$TRITON_GFX1250_MODEL_PATH/tools/roccap/bin/roccap" extract --sp3 0- "./$CAP_FILE"
 
-ISA_BIN=$(ls roc-dump-*-isa-data.bin 2>/dev/null | head -n1)
+ISA_BIN=$(ls -t roc-dump-*-isa-data.bin 2>/dev/null | head -n1)
 if [[ -z "$ISA_BIN" ]]; then
   echo "Error: no roc-dump-*-isa-data.bin file found after extract"
   exit 1
