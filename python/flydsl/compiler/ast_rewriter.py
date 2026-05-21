@@ -288,9 +288,6 @@ class Transformer(ast.NodeTransformer):
         return new_stmts
 
     def visit_FunctionDef(self, node: ast.FunctionDef):
-        if getattr(node, _ASTREWRITE_MARKER, False):
-            return node
-
         with self.symbol_scopes.function_scope():
             for arg in node.args.posonlyargs:
                 self.symbol_scopes.record_symbol(arg.arg)
@@ -298,8 +295,14 @@ class Transformer(ast.NodeTransformer):
                 self.symbol_scopes.record_symbol(arg.arg)
             for arg in node.args.kwonlyargs:
                 self.symbol_scopes.record_symbol(arg.arg)
-            node = self.generic_visit(node)
-
+            # Synthesized wrappers (``__then_*``/``__else_*`` from
+            # ``ReplaceIfWithDispatch``) must not re-dispatch at the
+            # FunctionDef level, but their body may still contain nested
+            # control-flow that downstream passes need to lower.
+            if getattr(node, _ASTREWRITE_MARKER, False):
+                node.body = self._visit_stmt_block(node.body)
+            else:
+                node = self.generic_visit(node)
         return node
 
     def visit_Assign(self, node: ast.Assign):

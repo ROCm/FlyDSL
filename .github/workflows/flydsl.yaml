@@ -424,22 +424,26 @@ jobs:
               -m multi_gpu -v --no-header --tb=short
           "
 
-      - name: Run multi-GPU dispatch/combine verify (8-GPU only)
-        timeout-minutes: 10
+      # Single entry-point that sweeps the full curated CI_CASES table
+      # (10 cases distilled from mori's gfx950 tuning configs plus
+      # StdMoE).  Each case is gated by (1) --mode verify for accuracy
+      # and, when applicable, (2) --mode profile --cudagraph for perf
+      # trace.  The script spawns a fresh distributed process per
+      # (case, phase) so symmetric shmem heap state from one case can't
+      # poison the next.  Known-fail / arch-gated cases (P2P-read
+      # combine, fp4 on non-gfx950, StdMoE cudagraph) are flagged inside
+      # the script and downgraded to warnings instead of failing the
+      # sweep.  Replaces the previous two single-case verify steps.
+      - name: Run multi-GPU dispatch/combine CI sweep (8-GPU, accuracy + cudagraph perf)
+        timeout-minutes: 30
         run: |
           docker exec flydsl_test bash -c "
             cd /flydsl-test &&
-            torchrun --nproc-per-node=8 --master-port=29503 \
-              tests/kernels/test_profiler_dispatch_combine.py --mode verify
-          "
-
-      - name: Run multi-GPU dispatch/combine verify --enable-std-moe (8-GPU only)
-        timeout-minutes: 10
-        run: |
-          docker exec flydsl_test bash -c "
-            cd /flydsl-test &&
-            torchrun --nproc-per-node=8 --master-port=29504 \
-              tests/kernels/test_profiler_dispatch_combine.py --mode verify --enable-std-moe
+            python tests/kernels/test_profiler_dispatch_combine.py \
+              --ci-sweep \
+              --world-size 8 \
+              --port 29503 \
+              --output-dir /tmp/flydsl_ci_sweep
           "
 
       - name: Run multi-GPU allreduce tests

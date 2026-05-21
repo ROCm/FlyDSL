@@ -473,6 +473,51 @@ def cvt_pk_fp8_f32(res, src_a, src_b, old, word_sel, **kw):
     return _op(res=res, src_a=_to_ir(src_a), src_b=_to_ir(src_b), old=_to_ir(old), word_sel=word_sel, **kw)
 
 
+def cvt_pk_f32_fp8(res, src, word_sel, **kw):
+    """ROCDL ``cvt_pk_f32_fp8``: unpack one i32 (4 packed fp8) into ``vector<2xf32>``.
+
+    ``word_sel=False`` decodes the low half (fp8 elems 0,1); ``word_sel=True`` the
+    high half (fp8 elems 2,3). A full v4f32 unpack requires both halves stitched
+    via a shuffle.
+    """
+    from ..._mlir.dialects.rocdl import cvt_pk_f32_fp8 as _op
+
+    return _op(res=res, src=_to_ir(src), word_sel=word_sel, **kw)
+
+
+def cvt_scalef32_pk_f32_fp4(res, src, scale, src_sel_index, **kw):
+    """ROCDL ``cvt_scalef32_pk_f32_fp4``: unpack 2 fp4 (from one i32 holding 8 packed
+    fp4 elems) into ``vector<2xf32>``, multiplied by ``scale``.
+
+    ``src_sel_index`` (Python int in ``[0,3]``) selects which fp4 pair within the
+    i32 lane is decoded. A full v8f32 unpack requires 4 calls (sel=0..3) plus
+    two-stage shuffle to stitch.
+    """
+    from ..._mlir.dialects.rocdl import cvt_scalef32_pk_f32_fp4 as _op
+
+    return _op(res=res, src=_to_ir(src), scale=_to_ir(scale), src_sel_index=src_sel_index, **kw)
+
+
+def cvt_scalef32_pk_fp4_f32(res, old_vdst, src0, src1, scale, dst_sel_index, **kw):
+    """ROCDL ``cvt_scalef32_pk_fp4_f32``: pack 2 fp32 into 2 fp4 and write them into
+    slot ``dst_sel_index`` of the i32 lane ``old_vdst`` (other slots preserved).
+
+    A full v8f32→i32 repack requires 4 calls (dst_sel=0..3) chaining ``old_vdst``
+    so each call accumulates a different pair into the running i32 value.
+    """
+    from ..._mlir.dialects.rocdl import cvt_scalef32_pk_fp4_f32 as _op
+
+    return _op(
+        res=res,
+        old_vdst=_to_ir(old_vdst),
+        src0=_to_ir(src0),
+        src1=_to_ir(src1),
+        scale=_to_ir(scale),
+        dst_sel_index=dst_sel_index,
+        **kw,
+    )
+
+
 def rcp(res, arg, **kw):
     from ..._mlir.dialects.rocdl import rcp as _op
 
