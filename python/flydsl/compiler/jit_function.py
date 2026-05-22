@@ -646,21 +646,50 @@ def _build_call_state(sig, args_tuple, func_exe):
         if spec is None:
             return None
 
-        ctype, extract = spec
-
-        try:
-            extract(arg)
-        except (AttributeError, TypeError):
-            return None
-
-        slot_specs.append((i, ctype, extract))
+        if isinstance(spec, tuple) and len(spec) == 9 and spec[0] == "tensor_memref":
+            (
+                _,
+                dtype,
+                address_space,
+                rank,
+                dynamic_shape_dims,
+                dynamic_stride_dims,
+                use_32bit_stride,
+                layout_size,
+                extract,
+            ) = spec
+            try:
+                extract(arg)
+            except (AttributeError, TypeError):
+                return None
+            slot_specs.append(
+                (
+                    "tensor_memref",
+                    i,
+                    dtype,
+                    address_space,
+                    rank,
+                    dynamic_shape_dims,
+                    dynamic_stride_dims,
+                    use_32bit_stride,
+                    layout_size,
+                    extract,
+                )
+            )
+        else:
+            ctype, extract = spec
+            try:
+                extract(arg)
+            except (AttributeError, TypeError):
+                return None
+            slot_specs.append(("scalar", i, ctype, extract))
 
     # Auto-stream: append a zero-valued slot for the default (NULL) stream.
     # When no user-declared stream parameter exists, the compiled kernel
     # still expects a stream pointer as the last argument.  A NULL pointer
     # (value 0) selects the HIP default stream.
     if not has_user_stream:
-        slot_specs.append((-1, ctypes.c_void_p, None))
+        slot_specs.append(("scalar", -1, ctypes.c_void_p, None))
 
     return CallState(slot_specs, func_exe)
 
@@ -681,21 +710,68 @@ class CallState:
 
     def __init__(self, slot_specs, func_exe):
         self._func_exe = func_exe
-        self._spec = slot_specs  # list of (arg_idx, ctype, extract_fn)
+        self._spec = slot_specs
         self._tls = threading.local()
 
     def _init_buffers(self):
-        n_ptrs = len(self._spec)
+        n_ptrs = 0
+        for spec in self._spec:
+            if spec[0] == "tensor_memref":
+                n_ptrs += 2 if spec[8] > 0 else 1
+            else:
+                n_ptrs += 1
         packed = (ctypes.c_void_p * n_ptrs)()
         storages = []
         updaters = []
+        packed_idx = 0
 
-        for packed_idx, (arg_idx, ctype, extract) in enumerate(self._spec):
-            s = ctype(0)
-            packed[packed_idx] = ctypes.addressof(s)
-            storages.append(s)
+        for spec in self._spec:
+            if spec[0] == "tensor_memref":
+                (
+                    _,
+                    arg_idx,
+                    dtype,
+                    address_space,
+                    rank,
+                    dynamic_shape_dims,
+                    dynamic_stride_dims,
+                    use_32bit_stride,
+                    layout_size,
+                    extract,
+                ) = spec
+                data_storage = ctypes.c_void_p(0)
+                packed[packed_idx] = ctypes.addressof(data_storage)
+                storages.append(data_storage)
+                layout_storage = None
+                if layout_size > 0:
+                    layout_storage = ctypes.create_string_buffer(layout_size)
+                    packed[packed_idx + 1] = ctypes.addressof(layout_storage)
+                    storages.append(layout_storage)
+                updaters.append(
+                    (
+                        "tensor_memref",
+                        arg_idx,
+                        data_storage,
+                        layout_storage,
+                        dtype,
+                        address_space,
+                        rank,
+                        dynamic_shape_dims,
+                        dynamic_stride_dims,
+                        use_32bit_stride,
+                        extract,
+                    )
+                )
+                packed_idx += 2 if layout_size > 0 else 1
+                continue
+
+            _, arg_idx, ctype, extract = spec
+            storage = ctype(0)
+            packed[packed_idx] = ctypes.addressof(storage)
+            storages.append(storage)
             if extract is not None:
-                updaters.append((arg_idx, s, extract))
+                updaters.append(("scalar", arg_idx, storage, extract))
+            packed_idx += 1
 
         self._tls.packed = packed
         self._tls.updaters = updaters
@@ -705,7 +781,46 @@ class CallState:
         if not hasattr(self._tls, "packed"):
             self._init_buffers()
 
-        for arg_idx, storage, extract in self._tls.updaters:
+        for updater in self._tls.updaters:
+            if updater[0] == "tensor_memref":
+                (
+                    _,
+                    arg_idx,
+                    data_storage,
+                    layout_storage,
+                    dtype,
+                    address_space,
+                    rank,
+                    dynamic_shape_dims,
+                    dynamic_stride_dims,
+                    use_32bit_stride,
+                    extract,
+                ) = updater
+                arg = args_tuple[arg_idx]
+                data_ptr, shape, strides = extract(arg)
+                from .jit_argument import TensorAdaptor
+
+                actual_dtype, actual_address_space, _, _, _, _, _, _ = TensorAdaptor._tensor_metadata(arg)
+                if actual_dtype != dtype:
+                    raise RuntimeError("CallState tensor dtype changed between calls")
+                if actual_address_space != address_space:
+                    raise RuntimeError("CallState tensor address space changed between calls")
+                if len(shape) != rank or len(strides) != rank:
+                    raise RuntimeError("CallState tensor rank changed between calls")
+                data_storage.value = data_ptr
+                if layout_storage is not None:
+                    offset = 0
+                    for dim in dynamic_shape_dims:
+                        ctypes.c_int32.from_buffer(layout_storage, offset).value = int(shape[dim])
+                        offset += 4
+                    stride_ctype = ctypes.c_int32 if use_32bit_stride else ctypes.c_int64
+                    stride_size = ctypes.sizeof(stride_ctype)
+                    for dim in dynamic_stride_dims:
+                        stride_ctype.from_buffer(layout_storage, offset).value = int(strides[dim])
+                        offset += stride_size
+                continue
+
+            _, arg_idx, storage, extract = updater
             storage.value = extract(args_tuple[arg_idx])
 
         return self._func_exe(self._tls.packed)

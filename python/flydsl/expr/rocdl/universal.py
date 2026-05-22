@@ -4,7 +4,6 @@
 from ..._mlir import ir
 from ..._mlir._mlir_libs._mlirDialectsFlyROCDL import MmaOpGFX1250_WMMAType
 from ..._mlir.dialects import arith, fly
-from ..._mlir.dialects._fly_enum_gen import AddressSpace
 from ..._mlir.dialects.fly import AtomicOp, PointerType
 from ..._mlir.dialects.fly_rocdl import (
     CopyOpCDNA3BufferAtomicType,
@@ -20,7 +19,7 @@ from ..primitive import (
     make_ptr,
     make_view,
 )
-from ..typing import Tensor
+from ..typing import Int64, Tensor
 
 
 def BufferCopy(bit_size):
@@ -108,23 +107,30 @@ def make_buffer_tensor(tensor: Tensor, max_size: bool = True) -> Tensor:
     elem_bits = _elem_bit_width(elem_ty)
     elem_bytes = elem_bits // 8 if elem_bits > 0 else 1
 
+    def _constant_i64(value: int):
+        return arith.ConstantOp(T.i64(), ir.IntegerAttr.get(T.i64(), int(value))).result
+
     if max_size:
         # Always use max buffer size to handle dynamic tensor shapes safely.
         # The JIT cache may reuse a compiled kernel for tensors of different
         # leading dimensions; a static num_records from the traced shape would
         # silently truncate larger tensors.  This matches the behavior of
         # buffer_ops.create_buffer_resource(max_size=True).
-        num_records_bytes = MAX_BUFFER_SIZE
+        num_records_val = _constant_i64(MAX_BUFFER_SIZE)
     elif layout.is_static:
         cosize = fly.cosize(layout)
         num_records_bytes = cosize.get_static_leaf_int * elem_bytes
         if num_records_bytes > MAX_BUFFER_SIZE:
             num_records_bytes = MAX_BUFFER_SIZE
+        num_records_val = _constant_i64(num_records_bytes)
     else:
-        num_records_bytes = MAX_BUFFER_SIZE
+        cosize = fly.cosize(layout).to_py_value()
+        num_records = Int64(cosize) * Int64(elem_bytes)
+        max_records = Int64(MAX_BUFFER_SIZE)
+        num_records = (num_records > max_records).select(max_records, num_records)
+        num_records_val = num_records.ir_value()
 
     stride_val = arith.ConstantOp(T.i16(), ir.IntegerAttr.get(T.i16(), 0)).result
-    num_records_val = arith.ConstantOp(T.i64(), ir.IntegerAttr.get(T.i64(), num_records_bytes)).result
     from ..buffer_ops import _get_buffer_flags
 
     flags_val_int = _get_buffer_flags()

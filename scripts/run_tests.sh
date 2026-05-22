@@ -37,8 +37,18 @@ if [[ ":${LD_LIBRARY_PATH:-}:" != *":${MLIR_LIBS_DIR}:"* ]]; then
 fi
 
 pytest_args=(-v --no-header --tb=short)
+marker_expr=""
 if [ "${RUN_TESTS_FULL:-0}" != "1" ]; then
-    pytest_args+=(-m "not large_shape")
+    marker_expr="not large_shape"
+fi
+if [ "${RUN_TESTS_MULTI_GPU:-0}" != "1" ]; then
+    marker_expr="${marker_expr:+${marker_expr} and }not multi_gpu"
+fi
+if [ "${RUN_TESTS_BENCHMARK:-0}" != "1" ]; then
+    marker_expr="${marker_expr:+${marker_expr} and }not benchmark"
+fi
+if [ -n "${marker_expr}" ]; then
+    pytest_args+=(-m "${marker_expr}")
 fi
 
 # ---------------------------------------------------------------------------
