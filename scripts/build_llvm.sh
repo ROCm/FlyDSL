@@ -37,17 +37,17 @@ else
     pushd "$LLVM_SRC_DIR"
 fi
 
-if [[ "$LLVM_REF" =~ ^[0-9a-fA-F]{40}$ ]]; then
-    if ! git cat-file -e "${LLVM_REF}^{commit}" 2>/dev/null; then
-        echo "Fetching commit ${LLVM_REF} ..."
-        git fetch --depth 1 origin "${LLVM_REF}"
-    fi
-    git checkout "${LLVM_REF}"
-else
-    echo "Fetching ref ${LLVM_REF} ..."
-    git fetch --depth 1 origin "${LLVM_REF}"
-    git checkout FETCH_HEAD
-fi
+# if [[ "$LLVM_REF" =~ ^[0-9a-fA-F]{40}$ ]]; then
+#     if ! git cat-file -e "${LLVM_REF}^{commit}" 2>/dev/null; then
+#         echo "Fetching commit ${LLVM_REF} ..."
+#         git fetch --depth 1 origin "${LLVM_REF}"
+#     fi
+#     git checkout "${LLVM_REF}"
+# else
+#     echo "Fetching ref ${LLVM_REF} ..."
+#     git fetch --depth 1 origin "${LLVM_REF}"
+#     git checkout FETCH_HEAD
+# fi
 LLVM_COMMIT_RESOLVED=$(git rev-parse HEAD)
 popd
 echo "LLVM Commit:    $LLVM_COMMIT_RESOLVED"
@@ -121,13 +121,13 @@ if [[ "${LLVM_PACKAGE_INSTALL}" == "1" ]]; then
     exit 1
   fi
 
-  echo "Creating tarball..."
-  # The install tree may still have files whose mtimes change (e.g. Python bytecode caches),
-  # which can cause GNU tar to exit(1) with "file changed as we read it". Treat those as
-  # non-fatal for packaging.
-  tar --warning=no-file-changed --warning=no-file-removed --ignore-failed-read \
-      -C "$(dirname "${LLVM_INSTALL_DIR}")" \
-      -czf "${LLVM_INSTALL_TGZ}" "$(basename "${LLVM_INSTALL_DIR}")"
+  # echo "Creating tarball..."
+  # # The install tree may still have files whose mtimes change (e.g. Python bytecode caches),
+  # # which can cause GNU tar to exit(1) with "file changed as we read it". Treat those as
+  # # non-fatal for packaging.
+  # tar --warning=no-file-changed --warning=no-file-removed --ignore-failed-read \
+  #     -C "$(dirname "${LLVM_INSTALL_DIR}")" \
+  #     -czf "${LLVM_INSTALL_TGZ}" "$(basename "${LLVM_INSTALL_DIR}")"
 fi
 
 echo "=============================================="
