@@ -341,7 +341,7 @@ def _make_composite_class(
     def __init__(self, *args, **kwargs):
         if policy == CompositeKind.Sum:
             raise TypeError(
-                f"Union schema {_display_name(type(self))} has no value form; use Storage[...] or allocator.allocate()."
+                f"Union {_display_name(type(self))} has no value form; use Storage[...] or allocator.allocate()."
             )
         base_cls = getattr(type(self), "__dsl_base_type__", type(self))
         values = _field_values_from_args(base_cls, args, kwargs)
@@ -431,11 +431,42 @@ def _make_composite_class(
 
     @classmethod
     def __peek_from_ptr__(cls, ptr: Pointer):
-        raise NotImplementedError(f"{_display_name(cls)} does not support __peek_from_ptr__ yet")
+        if policy != CompositeKind.Product:
+            raise NotImplementedError(f"{_display_name(cls)} does not support __peek_from_ptr__")
+        _, _, offsets = _storage_layout(cls)
+        values = {}
+        for name, eff_type in _effective_field_defs(cls):
+            if _is_constexpr_type(eff_type):
+                values[name] = _construct_field_from_ir(eff_type, [])
+                continue
+            if name not in offsets:
+                raise TypeError(
+                    f"Cannot peek field '{name}' in schema {_display_name(cls)} because it has no storage offset."
+                )
+            values[name] = peek_from_ptr(eff_type, add_offset(ptr, offsets[name]))
+        return cls(**values)
 
     @classmethod
     def __poke_into_ptr__(cls, ptr: Pointer, value):
-        raise NotImplementedError(f"{_display_name(cls)} does not support __poke_into_ptr__ yet")
+        if policy != CompositeKind.Product:
+            raise NotImplementedError(f"{_display_name(cls)} does not support __poke_into_ptr__")
+        if not isinstance(value, cls):
+            raise TypeError(
+                f"{_display_name(cls)}.__poke_into_ptr__ expects {_display_name(cls)} value, "
+                f"got {type(value).__name__}."
+            )
+
+        _, _, offsets = _storage_layout(cls)
+        value_field_types = dict(_effective_field_defs(type(value))) if is_struct_type(type(value)) else {}
+        for field in fields:
+            eff_type = value_field_types.get(field.name, field.type_spec)
+            if _is_constexpr_type(eff_type):
+                continue
+            if field.name not in offsets:
+                raise TypeError(
+                    f"Cannot poke field '{field.name}' in schema {_display_name(cls)} because it has no storage offset."
+                )
+            poke_into_ptr(eff_type, add_offset(ptr, offsets[field.name]), getattr(value, field.name))
 
     def __cache_signature__(self):
         parts = [type(self)]
@@ -558,7 +589,7 @@ class Align:
             return peek_from_ptr(inner, ptr)
 
         def _aligned_poke_into_ptr(ptr, value, inner=dtype):
-            return poke_into_ptr(inner, ptr, value)
+            poke_into_ptr(inner, ptr, value)
 
         inner_key = _type_cache_key(dtype)
 
@@ -604,18 +635,52 @@ class Storage:
         class _StorageImpl(Storage):
             _target_type = target_type
 
-            def __init__(self, ptr):
+            def __init__(self, ptr, prebuilt=None):
                 object.__setattr__(self, "_ptr", ptr)
+                object.__setattr__(self, "_prebuilt", prebuilt or {})
 
             def peek(self):
                 dsl_type = type(self)._target_type
-                return peek_from_ptr(dsl_type, object.__getattribute__(self, "_ptr"))
+                prebuilt = object.__getattribute__(self, "_prebuilt")
+                if prebuilt and is_struct_type(dsl_type):
+                    values = {}
+                    for name, eff_type in _effective_field_defs(dsl_type):
+                        if _is_constexpr_type(eff_type):
+                            values[name] = _construct_field_from_ir(eff_type, [])
+                            continue
+                        if name in prebuilt:
+                            values[name] = prebuilt[name].peek()
+                    return dsl_type(**values)
+                ptr = object.__getattribute__(self, "_ptr")
+                if ptr is None:
+                    raise RuntimeError(
+                        f"Storage[{target_name}].peek() requires a backing pointer; this Storage "
+                        "has neither a base pointer nor a prebuilt sub-allocation tree."
+                    )
+                return peek_from_ptr(dsl_type, ptr)
 
             def poke(self, value):
                 dsl_type = type(self)._target_type
-                return poke_into_ptr(dsl_type, object.__getattribute__(self, "_ptr"), value)
+                prebuilt = object.__getattribute__(self, "_prebuilt")
+                if prebuilt and is_struct_type(dsl_type):
+                    for name, eff_type in _effective_field_defs(dsl_type):
+                        if _is_constexpr_type(eff_type):
+                            continue
+                        if name in prebuilt:
+                            prebuilt[name].poke(getattr(value, name))
+                    return
+                ptr = object.__getattribute__(self, "_ptr")
+                if ptr is None:
+                    raise RuntimeError(
+                        f"Storage[{target_name}].poke() requires a backing pointer; this Storage "
+                        "has neither a base pointer nor a prebuilt sub-allocation tree."
+                    )
+                return poke_into_ptr(dsl_type, ptr, value)
 
             def __getattr__(self, name):
+                prebuilt = object.__getattribute__(self, "_prebuilt")
+                if name in prebuilt:
+                    return prebuilt[name]
                 dsl_type = type(self)._target_type
                 if is_composite_type(dsl_type):
                     try:
@@ -630,8 +695,14 @@ class Storage:
                         raise AttributeError(
                             f"Storage[{target_name}] field '{field_def.name}' is compile-time only and has no storage"
                         ) from None
+                    ptr = object.__getattribute__(self, "_ptr")
+                    if ptr is None:
+                        raise AttributeError(
+                            f"Storage[{target_name}] has no backing pointer and no prebuilt entry for '{name}'."
+                        ) from None
                     offset = offsets[field_def.name]
-                    return Storage[field_def.type_spec](add_offset(object.__getattribute__(self, "_ptr"), offset))
+                    sub_ptr = add_offset(ptr, offset)
+                    return Storage[field_def.type_spec](sub_ptr)
                 raise AttributeError(f"Storage[{target_name}] has no attribute '{name}'")
 
             def __repr__(self):
@@ -647,6 +718,13 @@ class Storage:
 
 
 class Arena:
+    """Bump-pointer allocator over a single base pointer (address-space agnostic).
+
+    The default ``allocate(T)`` path bumps one contiguous region per call and
+    returns ``Storage[T]`` wrapping ``add_offset(base_ptr, off)``.
+    Arena does not opt into any backend-specific symbol-splitting mechanism.
+    """
+
     DEFAULT_BASE_ALIGNMENT = 16
 
     def __init__(self, base_alignment: int = DEFAULT_BASE_ALIGNMENT):

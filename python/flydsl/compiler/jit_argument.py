@@ -73,7 +73,7 @@ class JitArgumentRegistry:
 def is_type_param_annotation(annotation) -> bool:
     """Check if annotation is Type, Type[T]."""
     origin = get_origin(annotation)
-    return annotation is Type or origin is Type or origin is type
+    return annotation is Type or annotation is type or origin is Type or origin is type
 
 
 def convert_to_jit_arguments(

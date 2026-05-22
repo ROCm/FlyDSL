@@ -2784,7 +2784,7 @@ public:
     assert(totalSize.isStatic() && totalSize.isLeaf());
 
     auto ptrAttrs = rewriter.getDictionaryAttr({rewriter.getNamedAttr(
-        "allocaSize", rewriter.getI64IntegerAttr(totalSize.getLeafAsInt().getValue()))});
+        "allocSize", rewriter.getI64IntegerAttr(totalSize.getLeafAsInt().getValue()))});
     Value flyPtr =
         MakePtrOp::create(rewriter, loc, memrefTy.getPointerType(), ValueRange{}, ptrAttrs);
 

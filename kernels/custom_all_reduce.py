@@ -8,6 +8,7 @@ protocol for multi-GPU communication on ROCm.
 """
 
 from contextlib import contextmanager
+
 import torch
 
 _KMAXBLOCKS = 80
@@ -25,7 +26,9 @@ def _is_weak_contiguous(t) -> bool:
         if t.is_contiguous():
             return True
         storage = t.untyped_storage()
-        return int(storage.nbytes()) - int(t.storage_offset()) * int(t.element_size()) == int(t.numel()) * int(t.element_size())
+        return int(storage.nbytes()) - int(t.storage_offset()) * int(t.element_size()) == int(t.numel()) * int(
+            t.element_size()
+        )
     except Exception:
         return False
 
@@ -33,7 +36,9 @@ def _is_weak_contiguous(t) -> bool:
 _FLYDSL_AITER_GLOO_GROUP = None
 
 
-def init_custom_ar(meta, rank_data, handles, offsets, rank: int, full_nvlink: bool, out=None, max_size: int = _DEFAULT_MAX_SIZE):
+def init_custom_ar(
+    meta, rank_data, handles, offsets, rank: int, full_nvlink: bool, out=None, max_size: int = _DEFAULT_MAX_SIZE
+):
     """Initialize allreduce backend.
 
     Backend controlled by env var FLYDSL_AITER_IMPL:
@@ -41,6 +46,7 @@ def init_custom_ar(meta, rank_data, handles, offsets, rank: int, full_nvlink: bo
     - "aiter": use aiter kernel (requires aiter package)
     """
     import os
+
     import torch.distributed as dist
 
     _ = meta
@@ -131,6 +137,7 @@ class FlyDSLAllreduce:
         if not arch:
             try:
                 import subprocess
+
                 r = subprocess.run(["rocminfo"], capture_output=True, text=True, timeout=10)
                 for line in r.stdout.splitlines():
                     if "Name:" in line and "gfx" in line.lower():
@@ -141,12 +148,12 @@ class FlyDSLAllreduce:
         cls._gpu_arch = arch
         return arch
 
-
     @classmethod
     def _load_hip(cls):
         if cls._hip is not None:
             return cls._hip
         import ctypes
+
         for name in ("libamdhip64.so", "libamdhip64.so.6", "libamdhip64.so.5"):
             try:
                 cls._hip = ctypes.CDLL(name)
@@ -158,6 +165,7 @@ class FlyDSLAllreduce:
 
         class hipIpcMemHandle_t(ctypes.Structure):
             _fields_ = [("reserved", ctypes.c_byte * cls._HIP_IPC_HANDLE_BYTES)]
+
         cls._hipIpcMemHandle_t = hipIpcMemHandle_t
 
         cls._hip.hipIpcGetMemHandle.restype = ctypes.c_int
@@ -191,6 +199,7 @@ class FlyDSLAllreduce:
     @classmethod
     def _get_mem_handle_bytes(cls, base_ptr: int) -> bytes:
         import ctypes
+
         hip = cls._load_hip()
         h = cls._hipIpcMemHandle_t()
         err = hip.hipIpcGetMemHandle(ctypes.byref(h), ctypes.c_void_p(int(base_ptr)))
@@ -200,19 +209,23 @@ class FlyDSLAllreduce:
     @classmethod
     def _open_mem_handle(cls, handle_bytes: bytes) -> int:
         import ctypes
+
         if len(handle_bytes) != cls._HIP_IPC_HANDLE_BYTES:
             raise ValueError(f"Expected {cls._HIP_IPC_HANDLE_BYTES}B handle")
         hip = cls._load_hip()
         h = cls._hipIpcMemHandle_t()
         ctypes.memmove(ctypes.byref(h), bytes(handle_bytes), cls._HIP_IPC_HANDLE_BYTES)
         out_ptr = ctypes.c_void_p()
-        err = hip.hipIpcOpenMemHandle(ctypes.byref(out_ptr), h, ctypes.c_uint(int(cls._HIP_IPC_MEM_LAZY_ENABLE_PEER_ACCESS)))
+        err = hip.hipIpcOpenMemHandle(
+            ctypes.byref(out_ptr), h, ctypes.c_uint(int(cls._HIP_IPC_MEM_LAZY_ENABLE_PEER_ACCESS))
+        )
         cls._hip_check(err, what="hipIpcOpenMemHandle")
         return int(out_ptr.value)
 
     @classmethod
     def _close_mem_handle(cls, base_ptr: int) -> None:
         import ctypes
+
         hip = cls._load_hip()
         err = hip.hipIpcCloseMemHandle(ctypes.c_void_p(int(base_ptr)))
         cls._hip_check(err, what="hipIpcCloseMemHandle")
@@ -224,10 +237,12 @@ class FlyDSLAllreduce:
         Returns the raw device pointer as int.
         """
         import ctypes
+
         hip = cls._load_hip()
         buf = ctypes.c_void_p()
-        err = hip.hipExtMallocWithFlags(ctypes.byref(buf), ctypes.c_size_t(size),
-                                        ctypes.c_uint(cls._HIP_DEVICE_MALLOC_UNCACHED))
+        err = hip.hipExtMallocWithFlags(
+            ctypes.byref(buf), ctypes.c_size_t(size), ctypes.c_uint(cls._HIP_DEVICE_MALLOC_UNCACHED)
+        )
         cls._hip_check(err, what="hipExtMallocWithFlags")
         err = hip.hipMemset(buf, 0, ctypes.c_size_t(size))
         cls._hip_check(err, what="hipMemset")
@@ -236,6 +251,7 @@ class FlyDSLAllreduce:
     @classmethod
     def _free_device_mem(cls, ptr: int) -> None:
         import ctypes
+
         hip = cls._load_hip()
         err = hip.hipFree(ctypes.c_void_p(ptr))
         cls._hip_check(err, what="hipFree")
@@ -243,6 +259,7 @@ class FlyDSLAllreduce:
     @staticmethod
     def _gather_object_list_via_broadcast(group, shard_data):
         import torch.distributed as dist
+
         world_size = dist.get_world_size(group=group)
         rank = dist.get_rank(group=group)
         all_data = [[None] for _ in range(world_size)]
@@ -254,6 +271,7 @@ class FlyDSLAllreduce:
 
     def __init__(self, *, group, device, max_size: int, world_size: int, rank: int, full_nvlink: bool):
         import os
+
         import torch.distributed as dist
 
         self.group = group
@@ -345,7 +363,9 @@ class FlyDSLAllreduce:
         for i in range(self.world_size, 8):
             self._output_buffer_ptrs[i] = self._output_buffer_ptrs[0]
 
-        self._gpu_output_buffer_ptrs_array = torch.tensor(self._output_buffer_ptrs[:8], dtype=torch.int64, device=self.device)
+        self._gpu_output_buffer_ptrs_array = torch.tensor(
+            self._output_buffer_ptrs[:8], dtype=torch.int64, device=self.device
+        )
         self._gpu_tmp_ptrs_nonrotated_array = torch.tensor(self._tmp_ptrs[:8], dtype=torch.int64, device=self.device)
 
         self._IS_CAPTURING = False
@@ -358,7 +378,9 @@ class FlyDSLAllreduce:
         # This prevents UAF when multiple CUDAGraphs are captured on the same
         # instance: old graphs remain valid even after re-capture.
         self._graph_ipc_reg_list: list = []
-        self._gpu_graph_out_ptrs_array = torch.tensor(self._output_buffer_ptrs[:8], dtype=torch.int64, device=self.device)
+        self._gpu_graph_out_ptrs_array = torch.tensor(
+            self._output_buffer_ptrs[:8], dtype=torch.int64, device=self.device
+        )
         # unreg_list: entries captured during graph recording, pending IPC registration.
         # Format: [(tensor, per_call_ptrs, rotated), ...]
         #   rotated=True  → inp, rotate by rank before writing ptrs
@@ -376,14 +398,21 @@ class FlyDSLAllreduce:
         self._threads = 512
         self._grid_x_cache = {}
 
-        self._reuse_out_default = str(os.environ.get("FLYDSL_AITER_REUSE_OUT", "0")).strip().lower() in {"1", "true", "yes", "y"}
+        self._reuse_out_default = str(os.environ.get("FLYDSL_AITER_REUSE_OUT", "0")).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "y",
+        }
         self._cached_out = None
 
     def close(self):
         """Release IPC memory handles for peer GPU buffers."""
-        for bases in [getattr(self, '_meta_bases', []),
-                      getattr(self, '_input_buffer_bases', []),
-                      getattr(self, '_output_buffer_bases', [])]:
+        for bases in [
+            getattr(self, "_meta_bases", []),
+            getattr(self, "_input_buffer_bases", []),
+            getattr(self, "_output_buffer_bases", []),
+        ]:
             for b in bases:
                 if b is not None:
                     self._close_mem_handle(int(b))
@@ -396,7 +425,7 @@ class FlyDSLAllreduce:
                     pass
         # eager write-mode out-ptrs cache
         if self._out_ptrs_cache:
-            for b in self._out_ptrs_cache.get('bases', []):
+            for b in self._out_ptrs_cache.get("bases", []):
                 try:
                     self._close_mem_handle(int(b))
                 except Exception:
@@ -406,7 +435,7 @@ class FlyDSLAllreduce:
         self._input_buffer_bases = []
         self._output_buffer_bases = []
         self._graph_ipc_reg_list = []
-        if getattr(self, '_meta_ptr', None):
+        if getattr(self, "_meta_ptr", None):
             try:
                 self._free_device_mem(self._meta_ptr)
             except Exception:
@@ -435,10 +464,11 @@ class FlyDSLAllreduce:
     def _get_alloc_base_ptr(cls, dev_ptr: int) -> int:
         """Get the hipMalloc allocation base for a device pointer."""
         import ctypes
+
         hip = cls._load_hip()
         base = ctypes.c_void_p()
         _RANGE_START_ADDR = 11
-        if not hasattr(hip, '_pga_setup'):
+        if not hasattr(hip, "_pga_setup"):
             hip.hipPointerGetAttribute.restype = ctypes.c_int
             hip.hipPointerGetAttribute.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p]
             hip._pga_setup = True
@@ -551,9 +581,7 @@ class FlyDSLAllreduce:
             my_handle_list.append((handle, off))
 
         # 2. ONE collective — each rank sends its full list, receives all others'
-        all_ranks_handles = self._gather_object_list_via_broadcast(
-            self.group, my_handle_list
-        )
+        all_ranks_handles = self._gather_object_list_via_broadcast(self.group, my_handle_list)
 
         # 3. For each entry, build pointer array and update in-place.
         #    rotated=True  → inp: rotate by rank  (read from peer GPU inputs)
@@ -578,13 +606,10 @@ class FlyDSLAllreduce:
                 final = [ptrs[(rk + i) % ws] for i in range(8)]
             else:
                 final = ptrs[:8]
-            per_call_ptrs.copy_(
-                torch.tensor(final, dtype=torch.int64, device=self.device)
-            )
+            per_call_ptrs.copy_(torch.tensor(final, dtype=torch.int64, device=self.device))
 
         # unreg_list fully processed → clear so next capture starts clean.
         self._graph_ipc_unreg_list = []
-
 
     def __del__(self):
         try:
@@ -610,36 +635,41 @@ class FlyDSLAllreduce:
         from flydsl.utils import log
 
         if self.world_size not in self._SUPPORTED_WORLD_SIZES:
-            log().error("custom allreduce unsupported: world_size=%d, "
-                        "expected one of %s", self.world_size,
-                        sorted(self._SUPPORTED_WORLD_SIZES))
+            log().error(
+                "custom allreduce unsupported: world_size=%d, " "expected one of %s",
+                self.world_size,
+                sorted(self._SUPPORTED_WORLD_SIZES),
+            )
             return False
 
         inp_size = int(inp.numel()) * int(inp.element_size())
         if inp_size % 16 != 0:
-            log().error("custom allreduce unsupported: inp_size=%d "
-                        "is not a multiple of 16", inp_size)
+            log().error("custom allreduce unsupported: inp_size=%d " "is not a multiple of 16", inp_size)
             return False
 
         if inp.dtype not in self._SUPPORTED_DTYPES:
-            log().error("custom allreduce unsupported: dtype=%s, "
-                        "expected one of {%s}", inp.dtype,
-                        ", ".join(str(d) for d in sorted(self._SUPPORTED_DTYPES, key=str)))
+            log().error(
+                "custom allreduce unsupported: dtype=%s, " "expected one of {%s}",
+                inp.dtype,
+                ", ".join(str(d) for d in sorted(self._SUPPORTED_DTYPES, key=str)),
+            )
             return False
 
         if inp_size > self.max_size // 2:
-            log().error("custom allreduce unsupported: inp_size=%d "
-                        "exceeds max_size/2=%d", inp_size, self.max_size // 2)
+            log().error(
+                "custom allreduce unsupported: inp_size=%d " "exceeds max_size/2=%d", inp_size, self.max_size // 2
+            )
             return False
 
         if open_fp8_quant:
-            log().error("custom allreduce unsupported: fp8 quantisation "
-                        "is not supported")
+            log().error("custom allreduce unsupported: fp8 quantisation " "is not supported")
             return False
 
         if self.world_size > 2 and not self.full_nvlink:
-            log().error("custom allreduce unsupported: fully_connected=false "
-                        "is not supported for world_size=%d", self.world_size)
+            log().error(
+                "custom allreduce unsupported: fully_connected=false " "is not supported for world_size=%d",
+                self.world_size,
+            )
             return False
 
         return True
@@ -691,7 +721,7 @@ class FlyDSLAllreduce:
         stream_ptr: int | None = None,
     ):
         """Launch allreduce kernel (auto-selects 1-stage or 2-stage by data size)."""
-        from flydsl.expr.typing import Int32, Int64, Stream
+        from flydsl.expr.typing import Int32, Int64
 
         # Auto-select stage by data size:
         #   world_size == 2              → always 1-stage
@@ -782,7 +812,13 @@ class FlyDSLAllreduce:
             return None
 
         if out is None:
-            if self._reuse_out_default and (self._cached_out is not None) and self._cached_out.shape == inp.shape and self._cached_out.dtype == inp.dtype and self._cached_out.device == inp.device:
+            if (
+                self._reuse_out_default
+                and (self._cached_out is not None)
+                and self._cached_out.shape == inp.shape
+                and self._cached_out.dtype == inp.dtype
+                and self._cached_out.device == inp.device
+            ):
                 out = self._cached_out
             else:
                 out = torch.empty_like(inp)
@@ -809,11 +845,7 @@ class FlyDSLAllreduce:
                 raise ValueError(f"input bytes {bytes_n} exceed max_size/2={self.max_size // 2}")
 
         # Write-mode only on CDNA3 (gfx942), ws=8, large tensors
-        use_write_mode = (
-            bytes_n > 512 * 4096 * 2
-            and self.world_size == 8
-            and "gfx942" in self._get_gpu_arch()
-        )
+        use_write_mode = bytes_n > 512 * 4096 * 2 and self.world_size == 8 and "gfx942" in self._get_gpu_arch()
 
         if self._IS_CAPTURING:
             if torch.cuda.is_current_stream_capturing():
@@ -824,7 +856,8 @@ class FlyDSLAllreduce:
                 if use_write_mode:
                     self._graph_use_write_mode = True
                     self._run_kernel(
-                        N, dtype_str,
+                        N,
+                        dtype_str,
                         gpu_out_ptrs_array=self._get_or_create_graph_ptrs(out, False),
                         inp_ptr=int(inp.data_ptr()),
                         use_write_mode=True,
@@ -833,7 +866,8 @@ class FlyDSLAllreduce:
                 else:
                     self._graph_use_write_mode = False
                     self._run_kernel(
-                        N, dtype_str,
+                        N,
+                        dtype_str,
                         gpu_in_ptrs_array=self._get_or_create_graph_ptrs(inp, True),
                         out_ptr=int(out.data_ptr()),
                         use_write_mode=False,
@@ -842,6 +876,7 @@ class FlyDSLAllreduce:
                 return out
             else:
                 from flydsl.utils import log
+
                 log().warning(
                     "custom_all_reduce called with _IS_CAPTURING=True but "
                     "stream is not recording. Returning zeros — this is not "
@@ -852,7 +887,8 @@ class FlyDSLAllreduce:
 
         if use_write_mode:
             self._run_kernel(
-                N, dtype_str,
+                N,
+                dtype_str,
                 gpu_out_ptrs_array=self._gpu_output_buffer_ptrs_array,
                 inp_ptr=int(inp.data_ptr()),
                 use_write_mode=True,
@@ -862,7 +898,8 @@ class FlyDSLAllreduce:
         else:
             self.input_buffer[:bytes_n].copy_(inp.view(torch.uint8))
             self._run_kernel(
-                N, dtype_str,
+                N,
+                dtype_str,
                 gpu_in_ptrs_array=self._gpu_input_buffer_ptrs_array,
                 out_ptr=int(out.data_ptr()),
                 use_write_mode=False,
@@ -873,6 +910,7 @@ class FlyDSLAllreduce:
     def all_reduce_reg(self, inp, out, open_fp8_quant: bool = False):
         if isinstance(inp, (list, tuple)):
             import functools
+
             result = functools.reduce(torch.add, inp)
             out.copy_(result)
             return out
@@ -886,5 +924,6 @@ class FlyDSLAllreduce:
             out.copy_(inp)
         else:
             import torch.distributed as dist
+
             dist.all_gather_into_tensor(out, inp, group=self.group)
         return out

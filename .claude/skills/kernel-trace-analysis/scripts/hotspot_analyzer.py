@@ -34,16 +34,25 @@ class Instruction:
     def stall_type(self):
         asm = self.asm.lower()
         if "s_waitcnt" in asm:
-            if "vmcnt" in asm:   return "VMEM-wait"
-            if "lgkmcnt" in asm: return "LDS/SMEM-wait"
-            if "expcnt" in asm:  return "EXP-wait"
+            if "vmcnt" in asm:
+                return "VMEM-wait"
+            if "lgkmcnt" in asm:
+                return "LDS/SMEM-wait"
+            if "expcnt" in asm:
+                return "EXP-wait"
             return "waitcnt"
-        if "s_barrier" in asm or "s_wait_idle" in asm: return "barrier"
-        if "buffer_load" in asm or "global_load" in asm or "flat_load" in asm: return "VMEM-load"
-        if "buffer_store" in asm or "global_store" in asm: return "VMEM-store"
-        if "ds_read" in asm or "ds_write" in asm: return "LDS"
-        if "s_load" in asm or "s_store" in asm: return "SMEM"
-        if "v_mfma" in asm or "v_fma" in asm: return "MFMA/FMA"
+        if "s_barrier" in asm or "s_wait_idle" in asm:
+            return "barrier"
+        if "buffer_load" in asm or "global_load" in asm or "flat_load" in asm:
+            return "VMEM-load"
+        if "buffer_store" in asm or "global_store" in asm:
+            return "VMEM-store"
+        if "ds_read" in asm or "ds_write" in asm:
+            return "LDS"
+        if "s_load" in asm or "s_store" in asm:
+            return "SMEM"
+        if "v_mfma" in asm or "v_fma" in asm:
+            return "MFMA/FMA"
         return "other"
 
 
@@ -75,6 +84,7 @@ def load_source_map(dispatch_dir):
         tree = json.load(f)
 
     path_map = {}
+
     def _walk(node, prefix):
         for key, val in node.items():
             segment = "" if key == "/" else key
@@ -83,6 +93,7 @@ def load_source_map(dispatch_dir):
                 _walk(val, path)
             else:
                 path_map[path] = val
+
     _walk(tree, "")
 
     source_cache = {}
@@ -117,16 +128,18 @@ def load_instructions(dispatch_dir):
     for row in data["code"]:
         if not isinstance(row[2], int) or row[2] == 0:
             continue
-        instructions.append(Instruction(
-            asm=row[0],
-            pc_index=row[2],
-            source_loc=row[3] if row[3] else "<unknown>",
-            pc_addr=row[5],
-            exec_count=row[6] if isinstance(row[6], int) else 0,
-            total_cycles=row[7] if isinstance(row[7], int) else 0,
-            stall_cycles=row[8] if isinstance(row[8], int) else 0,
-            issue_cycles=row[9] if isinstance(row[9], int) else 0,
-        ))
+        instructions.append(
+            Instruction(
+                asm=row[0],
+                pc_index=row[2],
+                source_loc=row[3] if row[3] else "<unknown>",
+                pc_addr=row[5],
+                exec_count=row[6] if isinstance(row[6], int) else 0,
+                total_cycles=row[7] if isinstance(row[7], int) else 0,
+                stall_cycles=row[8] if isinstance(row[8], int) else 0,
+                issue_cycles=row[9] if isinstance(row[9], int) else 0,
+            )
+        )
     return instructions
 
 
@@ -146,14 +159,19 @@ def aggregate_by_source(instructions):
 
 BAR_WIDTH = 30
 
+
 def stall_bar(pct):
     filled = int(pct / 100 * BAR_WIDTH)
     return f"[{'█' * filled}{'░' * (BAR_WIDTH - filled)}] {pct:5.1f}%"
 
+
 def fmt_cycles(n):
-    if n >= 1_000_000: return f"{n/1_000_000:.2f}M"
-    if n >= 1_000:     return f"{n/1_000:.1f}K"
+    if n >= 1_000_000:
+        return f"{n/1_000_000:.2f}M"
+    if n >= 1_000:
+        return f"{n/1_000:.1f}K"
     return str(n)
+
 
 def print_header(title):
     print(f"\n{'═' * 90}\n  {title}\n{'═' * 90}")
@@ -181,27 +199,32 @@ def print_source_hotspots(hotspots, topk, total_stall):
             break
         pct = 100.0 * hs.total_stall_cycles / total_stall if total_stall else 0
         src_short = hs.source_loc[-48:] if len(hs.source_loc) > 48 else hs.source_loc
-        print(f"  {rank:>3}  {fmt_cycles(hs.total_stall_cycles):>8}  {pct:>6.2f}%  "
-              f"{stall_bar(hs.stall_pct):<38}  {hs.dominant_stall_type:<12}  {src_short}")
+        print(
+            f"  {rank:>3}  {fmt_cycles(hs.total_stall_cycles):>8}  {pct:>6.2f}%  "
+            f"{stall_bar(hs.stall_pct):<38}  {hs.dominant_stall_type:<12}  {src_short}"
+        )
 
 
 def print_asm_hotspots(instructions, topk, total_stall):
     print_header(f"Top-{topk} Hotspot Instructions  (by stall cycles)")
     print(f"  {'#':>3}  {'Stall':>8}  {'%Total':>7}  {'Type':<12}  {'ASM':<48}  Source")
     print(f"  {'-'*3}  {'-'*8}  {'-'*7}  {'-'*12}  {'-'*48}  {'-'*30}")
-    ranked = sorted([i for i in instructions if i.stall_cycles > 0],
-                    key=lambda x: x.stall_cycles, reverse=True)[:topk]
+    ranked = sorted([i for i in instructions if i.stall_cycles > 0], key=lambda x: x.stall_cycles, reverse=True)[:topk]
     for rank, inst in enumerate(ranked, 1):
         pct = 100.0 * inst.stall_cycles / total_stall if total_stall else 0
         asm_short = inst.asm[:47] + "…" if len(inst.asm) > 48 else inst.asm
         src_short = inst.source_loc[-38:] if len(inst.source_loc) > 38 else inst.source_loc
-        print(f"  {rank:>3}  {fmt_cycles(inst.stall_cycles):>8}  {pct:>6.2f}%  "
-              f"{inst.stall_type:<12}  {asm_short:<48}  {src_short}")
+        print(
+            f"  {rank:>3}  {fmt_cycles(inst.stall_cycles):>8}  {pct:>6.2f}%  "
+            f"{inst.stall_type:<12}  {asm_short:<48}  {src_short}"
+        )
 
 
 def print_source_detail(hotspot, source_cache, context=3):
-    print(f"\n    ── {hotspot.source_loc}  "
-          f"(stall={fmt_cycles(hotspot.total_stall_cycles)}, {hotspot.stall_pct:.0f}% stall rate)")
+    print(
+        f"\n    ── {hotspot.source_loc}  "
+        f"(stall={fmt_cycles(hotspot.total_stall_cycles)}, {hotspot.stall_pct:.0f}% stall rate)"
+    )
     snippet = get_source_snippet(source_cache, hotspot.source_loc, context=context)
     if snippet:
         print("    Source:")
@@ -227,23 +250,20 @@ def detect_arch_and_reg_pressure(instructions):
     asms = [inst.asm for inst in instructions]
 
     # Detect architecture from gfx950-specific instructions
-    is_gfx950 = any(
-        "v_mfma_scale_f32" in a or "v_mfma_f32_16x16x128" in a or "v_mfma_f32_32x32x64" in a
-        for a in asms
-    )
+    is_gfx950 = any("v_mfma_scale_f32" in a or "v_mfma_f32_16x16x128" in a or "v_mfma_f32_32x32x64" in a for a in asms)
     arch = "gfx950 (CDNA4)" if is_gfx950 else "gfx942 (CDNA3)"
 
     # Scan for max VGPR/AccVGPR indices
     max_vgpr = 0
     max_agpr = 0
     for a in asms:
-        for m in re.finditer(r'\bv(\d+)\b', a):
+        for m in re.finditer(r"\bv(\d+)\b", a):
             max_vgpr = max(max_vgpr, int(m.group(1)))
-        for m in re.finditer(r'\bv\[(\d+)', a):
+        for m in re.finditer(r"\bv\[(\d+)", a):
             max_vgpr = max(max_vgpr, int(m.group(1)))
-        for m in re.finditer(r'\ba(\d+)\b', a):
+        for m in re.finditer(r"\ba(\d+)\b", a):
             max_agpr = max(max_agpr, int(m.group(1)))
-        for m in re.finditer(r'\ba\[(\d+)', a):
+        for m in re.finditer(r"\ba\[(\d+)", a):
             max_agpr = max(max_agpr, int(m.group(1)))
 
     arch_vgpr_count = max_vgpr + 1
@@ -300,7 +320,7 @@ def print_reg_pressure(reg_info):
     if reg_info["accum_vgpr"] > 0:
         print(f"  accum_vgpr:     ~{reg_info['accum_vgpr']} (alloc {reg_info['accum_vgpr_alloc']})")
     else:
-        print(f"  accum_vgpr:     0 (not used)")
+        print("  accum_vgpr:     0 (not used)")
 
     if reg_info["is_gfx950"]:
         total = reg_info["arch_vgpr_alloc"] + reg_info["accum_vgpr_alloc"]
@@ -316,9 +336,11 @@ def print_reg_pressure(reg_info):
         else:
             print(f"  -> {reg_info['next_occ']} waves requires max(arch,accum) <= {reg_info['target_for_next_occ']}")
 
-    print(f"\n  Instruction mix:")
-    print(f"    MFMA: {reg_info['mfma_count']},  buffer_load: {reg_info['buffer_load']},"
-          f"  buffer_store: {reg_info['buffer_store']}")
+    print("\n  Instruction mix:")
+    print(
+        f"    MFMA: {reg_info['mfma_count']},  buffer_load: {reg_info['buffer_load']},"
+        f"  buffer_store: {reg_info['buffer_store']}"
+    )
     print(f"    ds_read: {reg_info['ds_read']},  ds_write: {reg_info['ds_write']}")
 
 
@@ -327,10 +349,10 @@ def main():
     parser.add_argument("dispatch_dir", help="Path to ATT dispatch output directory")
     parser.add_argument("--topk", type=int, default=15)
     parser.add_argument("--mode", choices=["asm", "src", "both"], default="both")
-    parser.add_argument("--detail", action="store_true",
-                        help="Show source snippet + instruction breakdown under each source hotspot")
-    parser.add_argument("--context", type=int, default=3,
-                        help="Source lines of context around hotspot (default: 3)")
+    parser.add_argument(
+        "--detail", action="store_true", help="Show source snippet + instruction breakdown under each source hotspot"
+    )
+    parser.add_argument("--context", type=int, default=3, help="Source lines of context around hotspot (default: 3)")
     args = parser.parse_args()
 
     if not os.path.isdir(args.dispatch_dir):
@@ -342,8 +364,8 @@ def main():
     source_hotspots = aggregate_by_source(instructions)
     source_cache = load_source_map(args.dispatch_dir)
 
-    total_stall  = sum(i.stall_cycles  for i in instructions)
-    total_cycles = sum(i.total_cycles  for i in instructions)
+    total_stall = sum(i.stall_cycles for i in instructions)
+    total_cycles = sum(i.total_cycles for i in instructions)
 
     print(f"\n  Kernel:        {os.path.basename(args.dispatch_dir)}")
     print(f"  Instructions:  {len(instructions):,}")
@@ -358,7 +380,7 @@ def main():
     if args.mode in ("src", "both"):
         print_source_hotspots(source_hotspots, args.topk, total_stall)
         if args.detail:
-            for hs in source_hotspots[:min(5, args.topk)]:
+            for hs in source_hotspots[: min(5, args.topk)]:
                 if hs.total_stall_cycles > 0:
                     print_source_detail(hs, source_cache, context=args.context)
 

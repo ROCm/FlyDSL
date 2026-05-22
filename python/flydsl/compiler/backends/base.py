@@ -31,9 +31,7 @@ class BaseBackend(metaclass=ABCMeta):
     """
 
     def __init__(self, target: GPUTarget) -> None:
-        assert self.supports_target(target), (
-            f"{type(self).__name__} does not support target {target}"
-        )
+        assert self.supports_target(target), f"{type(self).__name__} does not support target {target}"
         self.target = target
 
     # -- target helpers --------------------------------------------------

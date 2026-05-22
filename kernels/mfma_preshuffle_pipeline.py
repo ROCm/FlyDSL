@@ -9,12 +9,14 @@ Key primitives:
 """
 
 from __future__ import annotations
+
 from dataclasses import dataclass
+
+import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl._mlir.dialects.arith import CmpIPredicate
-from flydsl.expr.typing import T
 from flydsl.expr import arith as _arith
-import flydsl.expr as fx
+from flydsl.expr.typing import T
 
 
 def crd2idx(crd, layout):
@@ -130,9 +132,7 @@ def make_preshuffle_scale_layout(
     c_mn1 = (c_mn // c16) // fx.Index(mn_pack)
     c_k1 = (c_k_scale // c4) // fx.Index(k_pack)
     if elem_bytes != mn_pack * k_pack:
-        raise ValueError(
-            f"elem_bytes of scale must be {mn_pack} * {k_pack}, got {elem_bytes!r}"
-        )
+        raise ValueError(f"elem_bytes of scale must be {mn_pack} * {k_pack}, got {elem_bytes!r}")
 
     stride_klane = c16
     stride_k0 = c4 * stride_klane
@@ -221,9 +221,7 @@ def make_preshuffle_b_layout(
     stride_nlane_i32 = arith.index_cast(T.i32, stride_nlane)
 
     stride_b = (stride_n0_i32, stride_k0_i32, stride_klane_i32, stride_nlane_i32, 1)
-    layout_b = fx.make_layout(
-        (n0_i32, c_k0_i32, klane_dim, 16, kpack_elems_static), stride_b
-    )
+    layout_b = fx.make_layout((n0_i32, c_k0_i32, klane_dim, 16, kpack_elems_static), stride_b)
     return PreshuffleBLayout(layout_b=layout_b, kpack_bytes=kpack_bytes)
 
 
@@ -361,8 +359,8 @@ def _int4_to_bf16x4_i64_gfx950(packed32, nibble_offsets, arith, vector, scale_va
     omitted and must be applied later (e.g. in the epilogue).  This saves VALU
     in the hot loop and uses v_cvt_pk_bf16_f32 for proper f32→bf16 conversion.
     """
-    from flydsl.expr import rocdl
     from flydsl._mlir.dialects._arith_ops_gen import MulFOp as _MulFOp
+    from flydsl.expr import rocdl
 
     _uw = _arith._to_raw
     _av = _arith.ArithValue
@@ -757,6 +755,7 @@ __all__ = [
 # Groupwise scale load helper (shared by W4A16 and W4A8 groupwise paths)
 # ---------------------------------------------------------------------------
 
+
 def _load_groupwise_scale(
     buffer_ops,
     arith,
@@ -793,7 +792,7 @@ def _load_groupwise_scale(
     if scale_dtype == T.bf16:
         # (E, G//2, N, 2) layout: dword at [e, pair, n] holds bf16 scales
         # for groups 2*pair and 2*pair+1.
-        pair_idx = group_idx >> fx.Index(1)       # group_idx // 2
+        pair_idx = group_idx >> fx.Index(1)  # group_idx // 2
         # Dword index: same flat formula but with G//2 groups
         num_pairs = num_groups // 2
         c_npm1 = fx.Index(num_pairs - 1)
@@ -830,6 +829,7 @@ def extract_bf16_scale(arith, scale_raw_i32, ku: int):
 # W4A16 groupwise load / unpack helpers
 # ---------------------------------------------------------------------------
 
+
 def load_b_raw_w4a16_groupwise(
     buffer_ops,
     arith,
@@ -860,19 +860,32 @@ def load_b_raw_w4a16_groupwise(
     Returns ``(packed32, scale_val)``.
     """
     packed32 = load_b_raw_w4a16(
-        buffer_ops, arith, vector,
-        arg_b=arg_b, b_rsrc=b_rsrc, layout_b=layout_b,
-        base_k=base_k, ku=ku,
-        n_blk=n_blk, n_intra=n_intra,
-        lane_div_16=lane_div_16, elem_type=elem_type,
+        buffer_ops,
+        arith,
+        vector,
+        arg_b=arg_b,
+        b_rsrc=b_rsrc,
+        layout_b=layout_b,
+        base_k=base_k,
+        ku=ku,
+        n_blk=n_blk,
+        n_intra=n_intra,
+        lane_div_16=lane_div_16,
+        elem_type=elem_type,
         kpack_bytes=kpack_bytes,
     )
     k_pos = base_k + fx.Index(ku * 32)
     scale_val = _load_groupwise_scale(
-        buffer_ops, arith,
-        scale_rsrc=scale_rsrc, expert_offset=expert_offset,
-        n_blk=n_blk, n_intra=n_intra, k_pos=k_pos,
-        num_groups=num_groups, group_size=group_size, n_per_expert=n_per_expert,
+        buffer_ops,
+        arith,
+        scale_rsrc=scale_rsrc,
+        expert_offset=expert_offset,
+        n_blk=n_blk,
+        n_intra=n_intra,
+        k_pos=k_pos,
+        num_groups=num_groups,
+        group_size=group_size,
+        n_per_expert=n_per_expert,
         scale_dtype=scale_dtype,
     )
     return (packed32, scale_val)

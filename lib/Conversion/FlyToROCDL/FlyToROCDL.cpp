@@ -58,6 +58,34 @@ unsigned mapAttrToLLVMAddressSpace(Attribute attr) {
   return 0; // default to generic address space
 }
 
+// Create a freshly named LDS global of `[nbytes x i8]` in `addrSpace`, inserted
+// at the start of `moduleOp`. The symbol name is `prefix` followed by a counter
+// chosen to avoid collisions with existing globals in the module. Shared by
+// the static-LDS `make_ptr` and dynamic-LDS `get_dyn_shared` lowerings.
+static LLVM::GlobalOp createLDSGlobal(ConversionPatternRewriter &rewriter,
+                                      gpu::GPUModuleOp moduleOp, Location loc, StringRef prefix,
+                                      int64_t nbytes, int64_t align, unsigned addrSpace) {
+  llvm::StringSet<> existingNames;
+  for (auto globalOp : moduleOp.getBody()->getOps<LLVM::GlobalOp>())
+    existingNames.insert(globalOp.getSymName());
+
+  unsigned counter = 0;
+  SmallString<128> symName = SymbolTable::generateSymbolName<128>(
+      prefix, [&](StringRef candidate) { return existingNames.contains(candidate); }, counter);
+
+  OpBuilder::InsertionGuard guard(rewriter);
+  rewriter.setInsertionPointToStart(moduleOp.getBody());
+
+  auto arrayTy = LLVM::LLVMArrayType::get(IntegerType::get(rewriter.getContext(), 8), nbytes);
+  auto globalOp = LLVM::GlobalOp::create(rewriter, loc, arrayTy,
+                                         /*isConstant=*/false, LLVM::Linkage::External, symName,
+                                         /*value=*/Attribute(),
+                                         /*alignment=*/align, addrSpace);
+  // LDS (addrspace 3) symbols are per-workgroup hardware and can never resolve across DSO.
+  globalOp.setDsoLocal(true);
+  return globalOp;
+}
+
 class MakePtrOpLowering : public OpConversionPattern<MakePtrOp> {
 public:
   MakePtrOpLowering(const TypeConverter &typeConverter, MLIRContext *context)
@@ -76,7 +104,7 @@ public:
       auto dictAttrs = op.getDictAttrs();
       if (!dictAttrs)
         return rewriter.notifyMatchFailure(op, "register make_ptr requires dictAttrs");
-      auto allocSize = dictAttrs->getAs<IntegerAttr>("allocaSize");
+      auto allocSize = dictAttrs->getAs<IntegerAttr>("allocSize");
       if (!allocSize)
         return rewriter.notifyMatchFailure(op, "register make_ptr requires allocSize in ptrAttrs");
       unsigned llvmAS = mapToLLVMAddressSpace(AddressSpace::Register);
@@ -85,6 +113,28 @@ public:
       Type elemTy = projectToLLVMCompatibleElemTy(flyPtrTy.getElemTy());
       Value ptr = LLVM::AllocaOp::create(rewriter, loc, llvmPtrTy, elemTy, nElems, 0);
       rewriter.replaceOp(op, ptr);
+      return success();
+    } else if (isGenericAddressSpace<AddressSpace::Shared>(addrSpaceAttr)) {
+      // Static LDS sub-allocation. Each op lowers to a freshly named
+      // `@__shared_alloc_<n>` LDS global.
+      auto dictAttrs = op.getDictAttrs();
+      if (!dictAttrs)
+        return rewriter.notifyMatchFailure(
+            op, "shared make_ptr requires dictAttrs={allocBytes, allocAlign}");
+      auto allocBytesAttr = dictAttrs->getAs<IntegerAttr>("allocBytes");
+      auto allocAlignAttr = dictAttrs->getAs<IntegerAttr>("allocAlign");
+      if (!allocBytesAttr || !allocAlignAttr)
+        return rewriter.notifyMatchFailure(
+            op, "shared make_ptr requires allocBytes, allocAlign in dictAttrs");
+
+      auto moduleOp = op->getParentOfType<gpu::GPUModuleOp>();
+      if (!moduleOp)
+        return op->emitError("shared make_ptr must be inside a gpu.module");
+
+      LLVM::GlobalOp global =
+          createLDSGlobal(rewriter, moduleOp, loc, "__shared_alloc", allocBytesAttr.getInt(),
+                          allocAlignAttr.getInt(), /*addrSpace=*/3);
+      rewriter.replaceOpWithNewOp<LLVM::AddressOfOp>(op, global);
       return success();
     } else if (isTargetAddressSpace<BufferDescAddressAttr>(addrSpaceAttr)) {
       auto args = adaptor.getArgs();
@@ -123,7 +173,23 @@ public:
     if (!moduleOp)
       return op->emitError("get_dyn_shared must be inside a gpu.module");
 
-    LLVM::GlobalOp sharedGlobal = getOrCreateDynSharedGlobal(rewriter, moduleOp, loc, addrSpace);
+    // Dynamic shared memory has a single logical region per kernel; reuse an
+    // existing `[0 x i8]` global if one is already present so multiple
+    // `get_dyn_shared` ops resolve to the same base symbol.
+    LLVM::GlobalOp sharedGlobal;
+    for (auto globalOp : moduleOp.getBody()->getOps<LLVM::GlobalOp>()) {
+      if (auto arrayType = dyn_cast<LLVM::LLVMArrayType>(globalOp.getType())) {
+        if (globalOp.getAddrSpace() == addrSpace && arrayType.getNumElements() == 0 &&
+            globalOp.getAlignment().value_or(0) == 1024) {
+          sharedGlobal = globalOp;
+          break;
+        }
+      }
+    }
+    if (!sharedGlobal) {
+      sharedGlobal = createLDSGlobal(rewriter, moduleOp, loc, "__dynamic_shared",
+                                     /*nbytes=*/0, /*align=*/1024, addrSpace);
+    }
 
     OpBuilder::InsertionGuard guard(rewriter);
     rewriter.setInsertionPoint(op);
@@ -137,38 +203,6 @@ public:
 
     rewriter.replaceOp(op, sharedPtr);
     return success();
-  }
-
-private:
-  static LLVM::GlobalOp getOrCreateDynSharedGlobal(ConversionPatternRewriter &rewriter,
-                                                   gpu::GPUModuleOp moduleOp, Location loc,
-                                                   unsigned addrSpace) {
-    llvm::StringSet<> existingNames;
-    for (auto globalOp : moduleOp.getBody()->getOps<LLVM::GlobalOp>()) {
-      existingNames.insert(globalOp.getSymName());
-      if (auto arrayType = dyn_cast<LLVM::LLVMArrayType>(globalOp.getType())) {
-        if (globalOp.getAddrSpace() == addrSpace && arrayType.getNumElements() == 0 &&
-            globalOp.getAlignment().value_or(0) == 1024)
-          return globalOp;
-      }
-    }
-
-    unsigned counter = 0;
-    SmallString<128> symName = SymbolTable::generateSymbolName<128>(
-        "__dynamic_shared_", [&](StringRef candidate) { return existingNames.contains(candidate); },
-        counter);
-
-    OpBuilder::InsertionGuard guard(rewriter);
-    rewriter.setInsertionPointToStart(moduleOp.getBody());
-
-    auto zeroArrayTy = LLVM::LLVMArrayType::get(IntegerType::get(rewriter.getContext(), 8), 0);
-
-    auto globalOp = LLVM::GlobalOp::create(rewriter, loc, zeroArrayTy,
-                                           /*isConstant=*/false, LLVM::Linkage::External, symName,
-                                           /*value=*/Attribute(),
-                                           /*alignment=*/1024, addrSpace);
-    globalOp.setDsoLocal(true);
-    return globalOp;
   }
 };
 

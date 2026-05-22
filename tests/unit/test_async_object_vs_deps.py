@@ -6,6 +6,7 @@
 MLIR IR-level tests that document how the upstream gpu-to-llvm pass handles
 different async patterns. These tests use fly-opt directly (no GPU required).
 """
+
 import os
 import subprocess
 import textwrap
@@ -24,6 +25,7 @@ def _find_fly_opt():
     if os.path.isfile(candidate):
         return candidate
     import shutil
+
     return shutil.which("fly-opt") or candidate
 
 
@@ -68,9 +70,9 @@ class TestUpstreamGpuToLLVM:
         assert result.returncode == 0, f"Pass failed unexpectedly:\n{result.stderr}"
         out = result.stdout
         assert "mgpuStreamCreate" not in out
-        assert "gpu.launch_func  @kb::@k" in out or "gpu.launch_func @kb::@k" in out, (
-            f"Expected asyncObject to be dropped.\nOutput:\n{out}"
-        )
+        assert (
+            "gpu.launch_func  @kb::@k" in out or "gpu.launch_func @kb::@k" in out
+        ), f"Expected asyncObject to be dropped.\nOutput:\n{out}"
 
     def test_async_deps_require_gpu_async_token_type(self):
         """asyncDependencies MUST be !gpu.async.token, not !llvm.ptr."""

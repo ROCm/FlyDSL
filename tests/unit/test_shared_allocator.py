@@ -10,6 +10,7 @@ from contextlib import contextmanager
 import pytest
 
 import flydsl.expr as fx
+from flydsl._mlir import ir
 from flydsl._mlir.dialects import func
 from flydsl._mlir.ir import Context, FunctionType, InsertionPoint, Location, Module
 from flydsl.compiler.kernel_function import KernelFunction
@@ -31,6 +32,21 @@ def _in_module(build_fn):
                     result = build_fn()
                     func.ReturnOp([])
             return result
+
+
+def _in_module_returning(build_fn):
+    """Like ``_in_module``, but return the constructed ``Module`` itself
+    (for tests that need to inspect the emitted IR)."""
+    with Context() as ctx:
+        ctx.allow_unregistered_dialects = True
+        with Location.unknown(ctx):
+            module = Module.create()
+            with InsertionPoint(module.body):
+                f = func.FuncOp("test", FunctionType.get([], []))
+                with InsertionPoint(f.add_entry_block()):
+                    build_fn()
+                    func.ReturnOp([])
+            return module
 
 
 @contextmanager
@@ -117,7 +133,7 @@ class TestSharedAllocatorRequiresKernel:
     def test_base_ptr_is_shared(self):
         def build():
             with _kernel_context():
-                alloc = SharedAllocator()
+                alloc = SharedAllocator(static=False)
                 assert alloc.base_ptr.address_space == fx.AddressSpace.Shared
 
         _in_module(build)
@@ -384,3 +400,173 @@ class TestKernelFunctionRegistration:
                     SharedAllocator()
 
         _in_module(build)
+
+
+# =====================================================================
+# Static-mode SharedAllocator: per-leaf `fly.make_ptr`
+# =====================================================================
+
+
+def _collect_make_ptrs(module):
+    """Return the list of `fly.make_ptr` ops in *module* (top-down)."""
+    out = []
+
+    def _visit(op):
+        if op.operation.name == "fly.make_ptr":
+            out.append(op)
+        for region in op.operation.regions:
+            for block in region.blocks:
+                for child in block.operations:
+                    _visit(child)
+
+    for top in module.body.operations:
+        _visit(top)
+    return out
+
+
+def _alloc_bytes_of(make_ptr_op) -> int:
+    dict_attr = make_ptr_op.attributes["dictAttrs"]
+    return ir.IntegerAttr(dict_attr["allocBytes"]).value
+
+
+def _shared_alloc_address_spaces(module) -> list[str]:
+    """Address-space attribute of every `fly.make_ptr` result in *module*."""
+    return [str(op.results[0].type.address_space) for op in _collect_make_ptrs(module)]
+
+
+class TestStaticAllocatorLeaf:
+    def test_struct_emits_one_make_ptr_per_field(self):
+        def build():
+            @fx.struct
+            class S:
+                x: Int32
+                y: Float32
+                z: Array[Float16, 8]
+
+            with _kernel_context():
+                alloc = SharedAllocator(static=True)
+                storage = alloc.allocate(S)
+
+            # `allocated_bytes` still tracks the logical struct size, so the
+            # public bump accounting is unchanged across modes.
+            assert alloc.allocated_bytes == S.__dsl_size_of__()
+            assert alloc.is_static is True
+
+            assert isinstance(storage, Storage)
+            assert storage._target_type is S
+            # Each leaf field is pre-built as its own Storage[leaf_type].
+            assert isinstance(storage.x, Storage)
+            assert isinstance(storage.y, Storage)
+            assert isinstance(storage.z, Storage)
+            assert storage.z._target_type is Array[Float16, 8]
+
+        module = _in_module_returning(build)
+        # 3 leaf fields → 3 `fly.make_ptr` ops, one LDS global per op.
+        make_ptrs = _collect_make_ptrs(module)
+        assert len(make_ptrs) == 3
+        # Per-field byte sizes line up with dsl_size_of(leaf_type).
+        sizes = sorted(_alloc_bytes_of(op) for op in make_ptrs)
+        assert sizes == sorted([Int32.__dsl_size_of__(), Float32.__dsl_size_of__(), 16])
+        # Every emitted leaf pointer lives in the shared address space.
+        assert _shared_alloc_address_spaces(module) == ["#fly<address_space shared>"] * 3
+
+    def test_static_has_no_base_ptr(self):
+        def build():
+            with _kernel_context():
+                alloc = SharedAllocator(static=True)
+                with pytest.raises(RuntimeError, match="static=True"):
+                    _ = alloc.base_ptr
+
+        _in_module(build)
+
+    def test_raw_bytes_emits_single_make_ptr(self):
+        def build():
+            with _kernel_context():
+                alloc = SharedAllocator(static=True)
+                storage = alloc.allocate(64)
+            assert isinstance(storage, Storage)
+            assert storage._target_type is Array[Uint8, 64]
+            assert alloc.allocated_bytes == 64
+
+        module = _in_module_returning(build)
+        make_ptrs = _collect_make_ptrs(module)
+        assert len(make_ptrs) == 1
+        assert _alloc_bytes_of(make_ptrs[0]) == 64
+
+
+class TestStaticAllocatorUnion:
+    def test_union_variants_share_single_make_ptr(self):
+        """All variants of a union must alias the same LDS region.
+
+        In static mode the allocator emits **one** ``fly.make_ptr`` for the
+        whole union (sized to the widest variant) and wraps each variant as
+        a re-typed view over the same SSA value. Because both/all variants
+        share that single SSA value, lowering to a single
+        ``@__shared_alloc_<n>`` global preserves MustAlias semantics between
+        variants without any per-variant tagging.
+        """
+
+        def build():
+            @fx.union
+            class U:
+                small: Array[Float16, 8]  # 16 bytes
+                large: Array[Float32, 32]  # 128 bytes
+
+            with _kernel_context():
+                alloc = SharedAllocator(static=True)
+                storage = alloc.allocate(U)
+                assert alloc.allocated_bytes == 128
+            # Both variants are accessible and resolve to a Storage[variant].
+            assert storage.small._target_type is Array[Float16, 8]
+            assert storage.large._target_type is Array[Float32, 32]
+            # Crucial: both variants wrap the SAME underlying SSA value.
+            assert object.__getattribute__(storage.small, "_ptr") is object.__getattribute__(storage.large, "_ptr")
+
+        module = _in_module_returning(build)
+        make_ptrs = _collect_make_ptrs(module)
+        assert len(make_ptrs) == 1
+        # The single ptr is sized to the widest variant (128 bytes here).
+        assert _alloc_bytes_of(make_ptrs[0]) == 128
+
+
+class TestStaticAllocatorNested:
+    def test_nested_struct_emits_one_make_ptr_per_leaf(self):
+        def build():
+            @fx.struct
+            class Inner:
+                a: Array[Float16, 32]
+                b: Int32
+
+            @fx.struct
+            class Outer:
+                inner: Inner
+                tail: Float32
+
+            with _kernel_context():
+                alloc = SharedAllocator(static=True)
+                _ = alloc.allocate(Outer)
+
+        module = _in_module_returning(build)
+        # 2 inner leaves + 1 outer leaf = 3 `fly.make_ptr` ops.
+        make_ptrs = _collect_make_ptrs(module)
+        assert len(make_ptrs) == 3
+
+    def test_outer_struct_with_inline_union(self):
+        def build():
+            @fx.struct
+            class Outer:
+                head: Int32
+                scratch: fx.Union["f16" : Array[Float16, 32], "f32" : Array[Float32, 32]]  # noqa: F821
+
+            with _kernel_context():
+                alloc = SharedAllocator(static=True)
+                storage = alloc.allocate(Outer)
+            # Union variants share one `make_ptr`; the head is its own leaf.
+            assert object.__getattribute__(storage.scratch.f16, "_ptr") is object.__getattribute__(
+                storage.scratch.f32, "_ptr"
+            )
+
+        module = _in_module_returning(build)
+        make_ptrs = _collect_make_ptrs(module)
+        # head leaf + 1 union leaf = 2 make_ptr ops total.
+        assert len(make_ptrs) == 2
