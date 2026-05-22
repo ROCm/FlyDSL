@@ -45,6 +45,10 @@ DEFAULT_SEED = 123
 FLASH_ATTN_FUNC_KERNEL_CONFIG = {
     "waves_per_eu": int(os.getenv("FLYDSL_WAVES_PER_EU", "2")),
     "daz": True,
+    "opus_lazy_rescale": os.getenv("FLYDSL_OPUS_LAZY_RESCALE", "1") == "1",
+    "opus_setprio": os.getenv("FLYDSL_OPUS_SETPRIO", "1") == "1",
+    "opus_debug_lazy_counts": os.getenv("FLYDSL_OPUS_DEBUG_LAZY_COUNTS", "0") == "1",
+    "opus_enable_stagger": os.getenv("FLYDSL_OPUS_STAGGER", "1") == "1",
 }
 
 # (batch, seq_len, num_heads, num_kv_heads, head_dim)
@@ -235,6 +239,12 @@ def run_config(
             waves_per_eu=FLASH_ATTN_FUNC_KERNEL_CONFIG["waves_per_eu"],
             daz=FLASH_ATTN_FUNC_KERNEL_CONFIG.get("daz", False),
             num_kv_heads=num_kv_heads,
+            opus_lazy_rescale=FLASH_ATTN_FUNC_KERNEL_CONFIG["opus_lazy_rescale"],
+            opus_setprio=FLASH_ATTN_FUNC_KERNEL_CONFIG["opus_setprio"],
+            opus_debug_lazy_counts=FLASH_ATTN_FUNC_KERNEL_CONFIG[
+                "opus_debug_lazy_counts"
+            ],
+            opus_enable_stagger=FLASH_ATTN_FUNC_KERNEL_CONFIG["opus_enable_stagger"],
         )
     except Exception as e:
         results["err"] = f"build: {e}"
@@ -249,14 +259,32 @@ def run_config(
     q_4d = torch.empty(B, S, H, D, dtype=dtype, device=device).uniform_(*UNIFORM_RANGE)
     k_4d = torch.empty(B, S, H_KV, D, dtype=dtype, device=device).uniform_(*UNIFORM_RANGE)
     v_4d = torch.empty(B, S, H_KV, D, dtype=dtype, device=device).uniform_(*UNIFORM_RANGE)
+    trigger_lazy_else = os.getenv("FLYDSL_OPUS_TRIGGER_LAZY_ELSE", "0") == "1"
+    debug_lazy_counts = FLASH_ATTN_FUNC_KERNEL_CONFIG["opus_debug_lazy_counts"]
+    if trigger_lazy_else:
+        q_4d.fill_(1.0)
+        k_4d.zero_()
+        if S >= 128:
+            k_4d[:, 64:128, :, :].fill_(80.0)
+        print(
+            "[OPUS_LAZY_ELSE_DEBUG] constructed Q=1, K tile0=0, "
+            "K tile1=80 to force row_max - m_row > 8",
+            flush=True,
+        )
 
     q_flat = q_4d.contiguous().view(-1)
     k_flat = k_4d.contiguous().view(-1)
     v_flat = v_4d.contiguous().view(-1)
     o_flat = torch.zeros_like(q_flat)
+    debug_counts = (
+        torch.zeros(2, dtype=torch.float32, device=device) if debug_lazy_counts else None
+    )
 
     try:
-        exe(q_flat, k_flat, v_flat, o_flat, B, S)
+        if debug_lazy_counts:
+            exe(q_flat, k_flat, v_flat, o_flat, B, S, debug_counts=debug_counts)
+        else:
+            exe(q_flat, k_flat, v_flat, o_flat, B, S)
         torch.cuda.synchronize()
     except Exception as e:
         results["err"] = f"exec: {e}"
@@ -264,6 +292,19 @@ def run_config(
 
         traceback.print_exc()
         return results
+
+    if debug_lazy_counts:
+        counts = debug_counts.detach().cpu().tolist()
+        all_below_true_count = int(counts[0])
+        all_below_false_count = int(counts[1])
+        results["all_below_true_count"] = all_below_true_count
+        results["all_below_false_count"] = all_below_false_count
+        print(
+            "[OPUS_LAZY_COUNTS] "
+            f"all_below_true_count = {all_below_true_count}, "
+            f"all_below_false_count = {all_below_false_count}",
+            flush=True,
+        )
 
     ref_4d = pytorch_ref_attention(q_4d.float(), k_4d.float(), v_4d.float(), causal=causal).to(dtype)
     ref_flat = ref_4d.contiguous().view(-1)
@@ -298,7 +339,10 @@ def run_config(
 
     try:
         def kernel_fn():
-            exe(q_flat, k_flat, v_flat, o_flat, B, S)
+            if debug_lazy_counts:
+                exe(q_flat, k_flat, v_flat, o_flat, B, S, debug_counts=debug_counts)
+            else:
+                exe(q_flat, k_flat, v_flat, o_flat, B, S)
 
         _, us = run_perftest(kernel_fn, num_iters=iters, num_warmup=warmup)
         s_eff = S / 2.0 if causal else float(S)

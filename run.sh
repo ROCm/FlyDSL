@@ -44,6 +44,11 @@ function run_flydsl_op {
     export FLYDSL_DUMP_IR=1
     export FLYDSL_DUMP_DIR=./flydsl_dump
     export FLYDSL_ENABLE_OPUS_PATH=1
+    # export FLYDSL_OPUS_SETPRIO=0
+    # export FLYDSL_OPUS_STAGGER=0
+    # export FLYDSL_OPUS_LAZY_RESCALE=0
+    # export FLYDSL_OPUS_TRIGGER_LAZY_ELSE=1
+    # export FLYDSL_OPUS_DEBUG_LAZY_COUNTS=1
 
     # python tests/kernels/test_flash_opus_attn.py --causal --dtype bf16 --batch 16 --num_heads 64 --num_kv_heads 64 --seq_len 8192 --head_dim 128 --iters 100
 

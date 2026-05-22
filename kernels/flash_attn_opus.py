@@ -31,8 +31,6 @@ Layout (LDS, MFMA, Q/K/V/O addressing) matches existing
 """
 
 import math as host_math
-import os
-
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
@@ -126,6 +124,10 @@ def build_flash_attn_opus_module(
     num_kv_heads=None,
     waves_per_eu=2,
     daz=True,
+    opus_lazy_rescale=True,
+    opus_setprio=True,
+    opus_debug_lazy_counts=False,
+    opus_enable_stagger=True,
 ):
     """Build an OPUS-style flash_attn launcher for D=128 bf16 on gfx950.
 
@@ -246,23 +248,11 @@ def build_flash_attn_opus_module(
     # OPUS lazy-rescale threshold (line 374)
     OPUS_RESCALE_THRESHOLD = 8.0
 
-    # Enable / disable individual OPUS optimizations via env vars (debug).
-    OPUS_LAZY_RESCALE = os.getenv("FLYDSL_OPUS_LAZY_RESCALE", "1") == "1"
-    OPUS_SETPRIO = os.getenv("FLYDSL_OPUS_SETPRIO", "1") == "1"
-    # P5 stagger (`if (warp_id/4) s_barrier;` in prologue + reverse in
-    # pre-store) is now functionally CORRECT in this port because all 6 V
-    # LDS read sites have been hoisted into the cluster immediately
-    # preceding their consumer (Clusters 2/6/10/12), mirroring the C++
-    # template. With V already in VGPRs before each cluster boundary
-    # barrier, the dual-group phase shift cannot race against the next
-    # async_load that overwrites the V LDS buffer.
-    #
-    # Default ON: the P1-P6 OPUS path requires this flag set to truly
-    # mirror gqa_d128_kernel_template.hpp end-to-end. Setting
-    # `FLYDSL_OPUS_STAGGER=0` falls back to a symmetric (lockstep)
-    # barrier — useful for A/B testing only.
-    OPUS_ENABLE_STAGGER = os.getenv("FLYDSL_OPUS_STAGGER", "1") == "1"
-    OPUS_YIELD_NOP = os.getenv("FLYDSL_OPUS_YIELD_NOP", "1") == "1"
+    # Enable / disable individual OPUS optimizations via builder parameters.
+    OPUS_LAZY_RESCALE = bool(opus_lazy_rescale)
+    OPUS_SETPRIO = bool(opus_setprio)
+    OPUS_DEBUG_LAZY_COUNTS = bool(opus_debug_lazy_counts)
+    OPUS_ENABLE_STAGGER = bool(opus_enable_stagger)
 
     @flyc.kernel(known_block_size=[BLOCK_SIZE, 1, 1])
     def flash_attn_opus_kernel(
@@ -270,6 +260,7 @@ def build_flash_attn_opus_module(
         K: fx.Tensor,
         V: fx.Tensor,
         O: fx.Tensor,
+        DebugCounts: fx.Tensor,
         seq_len: fx.Int32,
         stride_q_n: fx.Int32,
         stride_kv_n: fx.Int32,
@@ -461,6 +452,8 @@ def build_flash_attn_opus_module(
         lane_i32 = fx.Int32(lane)
         v64bf16_type = Vec.make_type(K_STEPS_QK * MFMA_LANE_K, elem_dtype)
         v64f32_type = Vec.make_type(K_STEPS_QK * MFMA_LANE_K, fx.Float32)
+        v32bf16_type = Vec.make_type(PV_K_STEPS * 2 * 8, elem_dtype)
+        v32f32_type = Vec.make_type(PV_K_STEPS * 2 * 8, fx.Float32)
 
         #     // Tile traversal helpers
         #     const int kv_tile_stride = T::KV_TILE_SIZE * kargs.stride_kv_n;
@@ -642,6 +635,10 @@ def build_flash_attn_opus_module(
                 fx.Int32,
             ).ir_value()
 
+        debug_counts_rsrc = (
+            _make_raw_buffer_rsrc(DebugCounts) if OPUS_DEBUG_LAZY_COUNTS else None
+        )
+
         def _bitcast_i32(value):
             return fx.Int32(ArithValue(value).bitcast(fx.Int32.ir_type))
 
@@ -714,6 +711,44 @@ def build_flash_attn_opus_module(
                     p_vec.shuffle(p_vec, [hi_base + i for i in range(8)]).ir_value()
                 )
             return anchored_lo, anchored_hi
+
+        def _v_p_to_vec32(v_p):
+            p_lo, p_hi = v_p
+            p_lo_all = _concat_vectors(p_lo[0], p_lo[1])
+            p_hi_all = _concat_vectors(p_hi[0], p_hi[1])
+            return _concat_vectors(p_lo_all, p_hi_all).ir_value()
+
+        def _v_vec32_to_p(v_p_all):
+            p_vec = Vec(v_p_all, (PV_K_STEPS * 2 * 8,), elem_dtype)
+            p_lo = []
+            p_hi = []
+            for pks in range_constexpr(PV_K_STEPS):
+                lo_base = pks * 8
+                hi_base = PV_K_STEPS * 8 + pks * 8
+                p_lo.append(
+                    p_vec.shuffle(p_vec, [lo_base + i for i in range(8)]).ir_value()
+                )
+                p_hi.append(
+                    p_vec.shuffle(p_vec, [hi_base + i for i in range(8)]).ir_value()
+                )
+            return p_lo, p_hi
+
+        def _scale_v_p(v_p, scale_scalar):
+            fm_fast_attr = ir.Attribute.parse("#llvm.fastmath<fast>")
+            p_all = _v_p_to_vec32(v_p)
+            p_all_f32_op = llvm.FPExtOp(v32f32_type, _raw(p_all))
+            p_all_f32_op.operation.attributes["fastmathFlags"] = fm_fast_attr
+            scale_vec = Vec.from_elements([scale_scalar], fx.Float32).broadcast_to(
+                PV_K_STEPS * 2 * 8
+            )
+            p_scaled_f32 = arith.mulf(
+                _raw(scale_vec),
+                _raw(p_all_f32_op.result),
+                fastmath=fm_fast,
+            )
+            p_scaled_bf16_op = llvm.FPTruncOp(v32bf16_type, p_scaled_f32)
+            p_scaled_bf16_op.operation.attributes["fastmathFlags"] = fm_fast_attr
+            return _v_vec32_to_p(p_scaled_bf16_op.result)
 
         def _stagger_extra_barrier_if_one():
             """Emit `sched_barrier(0); s_barrier;` only when stagger == 1.
@@ -1104,8 +1139,53 @@ def build_flash_attn_opus_module(
             for dc in range_constexpr(D_CHUNKS):
                 v_o[dc] = _fmul(Vec(v_o[dc]), scale_vec)
 
-        def _lazy_rescale_o(v_o, m_row, l_row, m_tile_max):
-            """OPUS lazy rescale: branch around exp2/O scaling when all lanes pass."""
+        def _debug_atomic_inc_lazy_count(byte_offset):
+            rocdl.raw_buffer_atomic_fadd(
+                _llvm_value(fx.Float32(1.0)),
+                debug_counts_rsrc,
+                _llvm_value(fx.Int32(byte_offset)),
+                _llvm_value(fx.Int32(0)),
+                _llvm_value(fx.Int32(0)),
+            )
+
+        def _debug_count_lazy_branch(all_below):
+            if const_expr(not OPUS_DEBUG_LAZY_COUNTS):
+                return
+            lane_i32 = arith.index_cast(T.i32, _raw(lane))
+            lane_is_zero = arith.cmpi(
+                arith.CmpIPredicate.eq,
+                lane_i32,
+                arith.constant(0, type=T.i32),
+            )
+            lane_if = scf.IfOp(
+                lane_is_zero,
+                [],
+                has_else=False,
+                loc=ir.Location.unknown(),
+            )
+            with ir.InsertionPoint(lane_if.regions[0].blocks[0]):
+                branch_if = scf.IfOp(
+                    all_below,
+                    [],
+                    has_else=True,
+                    loc=ir.Location.unknown(),
+                )
+                with ir.InsertionPoint(branch_if.regions[0].blocks[0]):
+                    _debug_atomic_inc_lazy_count(0)
+                    scf.YieldOp([])
+                if len(branch_if.regions[1].blocks) == 0:
+                    branch_if.regions[1].blocks.append(*[])
+                with ir.InsertionPoint(branch_if.regions[1].blocks[0]):
+                    _debug_atomic_inc_lazy_count(4)
+                    scf.YieldOp([])
+                scf.YieldOp([])
+
+        def _lazy_rescale_o(v_o, m_row, l_row, m_tile_max, v_p):
+            """OPUS lazy rescale before the remaining MMA1 steps.
+
+            Cold path also scales v_p so the later step_k(1..3) contributions
+            are accumulated in the new row-max basis.
+            """
             m_diff = _fsub(m_tile_max, m_row)
             below = ArithValue(fx.Float32(m_diff) <= c_eight_f)
             ballot = rocdl.ballot(T.i64, _raw(below))
@@ -1114,8 +1194,13 @@ def build_flash_attn_opus_module(
                 _raw(ballot),
                 _read_exec_i64(),
             )
+            # all_below = fx.Boolean(False).ir_value()
+            _debug_count_lazy_branch(all_below)
 
-            current_values = [_raw(acc) for acc in v_o] + [_raw(m_row), _raw(l_row)]
+            current_values = (
+                [_raw(acc) for acc in v_o]
+                + [_raw(m_row), _raw(l_row), _raw(_v_p_to_vec32(v_p))]
+            )
             result_types = [value.type for value in current_values]
             if_op = scf.IfOp(all_below, result_types, has_else=True, loc=ir.Location.unknown())
 
@@ -1128,14 +1213,20 @@ def build_flash_attn_opus_module(
                 corr = rocdl.exp2(T.f32, _raw(_fsub(m_row, m_tile_max)))
                 scaled_accs = list(v_o)
                 _scale_o(scaled_accs, corr)
+                scaled_v_p = _scale_v_p(v_p, corr)
                 scaled_l_row = _fmul(l_row, corr)
                 scf.YieldOp(
                     [_raw(acc) for acc in scaled_accs]
-                    + [_raw(m_tile_max), _raw(scaled_l_row)]
+                    + [_raw(m_tile_max), _raw(scaled_l_row), _raw(_v_p_to_vec32(scaled_v_p))]
                 )
 
             results = list(if_op.results)
-            return results[:D_CHUNKS], results[D_CHUNKS], results[D_CHUNKS + 1]
+            return (
+                results[:D_CHUNKS],
+                results[D_CHUNKS],
+                results[D_CHUNKS + 1],
+                _v_vec32_to_p(results[D_CHUNKS + 2]),
+            )
 
         def _waitcnt_lgkm_0_vm_n(n):
             """Combined: lgkmcnt(0) + vmcnt(n)."""
@@ -1327,15 +1418,16 @@ def build_flash_attn_opus_module(
             #             m_row = row_max;
             #         }
             if const_expr(OPUS_LAZY_RESCALE):
-                v_o, m_row, l_row = _lazy_rescale_o(v_o, m_row, l_row, m_tile_max_a)
+                v_o, m_row, l_row, v_p_0 = _lazy_rescale_o(
+                    v_o, m_row, l_row, m_tile_max_a, v_p_0
+                )
             else:
                 m_new_a = _fmax(m_row, m_tile_max_a)
                 corr_a = rocdl.exp2(T.f32, _raw(_fsub(m_row, m_new_a)))
-                eff_corr_a = corr_a
-                _scale_o(v_o, eff_corr_a)
+                _scale_o(v_o, corr_a)
+                v_p_0 = _scale_v_p(v_p_0, corr_a)
                 l_row = _fmul(l_row, corr_a)
                 m_row = m_new_a
-
             #         v_o = mma1.step_k(1_I, v_p, v_v, v_o);
             #         v_o = mma1.step_k(2_I, v_p, v_v, v_o);
             #         v_o = mma1.step_k(3_I, v_p, v_v, v_o);
@@ -1456,15 +1548,16 @@ def build_flash_attn_opus_module(
             #             m_row = row_max;
             #         }
             if const_expr(OPUS_LAZY_RESCALE):
-                v_o, m_row, l_row = _lazy_rescale_o(v_o, m_row, l_row, m_tile_max_b)
+                v_o, m_row, l_row, v_p_1 = _lazy_rescale_o(
+                    v_o, m_row, l_row, m_tile_max_b, v_p_1
+                )
             else:
                 m_new_b = _fmax(m_row, m_tile_max_b)
                 corr_b = rocdl.exp2(T.f32, _raw(_fsub(m_row, m_new_b)))
-                eff_corr_b = corr_b
-                _scale_o(v_o, eff_corr_b)
+                _scale_o(v_o, corr_b)
+                v_p_1 = _scale_v_p(v_p_1, corr_b)
                 l_row = _fmul(l_row, corr_b)
                 m_row = m_new_b
-
             #         v_o = mma1.step_k(1_I, v_p, v_v, v_o);
             #         v_o = mma1.step_k(2_I, v_p, v_v, v_o);
             #         v_o = mma1.step_k(3_I, v_p, v_v, v_o);
@@ -1898,6 +1991,7 @@ def build_flash_attn_opus_module(
         K: fx.Tensor,
         V: fx.Tensor,
         O: fx.Tensor,
+        DebugCounts: fx.Tensor,
         batch_size: fx.Int32,
         seq_len: fx.Int32,
         stride_q_n: fx.Int32,
@@ -1924,7 +2018,7 @@ def build_flash_attn_opus_module(
             else None
         )
         flash_attn_opus_kernel(
-            Q, K, V, O, seq_len, stride_q_n, stride_kv_n, head_dim_runtime,
+            Q, K, V, O, DebugCounts, seq_len, stride_q_n, stride_kv_n, head_dim_runtime,
             value_attrs={
                 "rocdl.waves_per_eu": waves_per_eu,
                 "rocdl.flat_work_group_size": f"{BLOCK_SIZE},{BLOCK_SIZE}",
@@ -1947,7 +2041,7 @@ def build_flash_attn_opus_module(
 
     def _launch(
         Q, K, V, O, batch_size, seq_len, stride_kv_n=None, stride_q_n=None,
-        head_dim_runtime=None, *, stream=None
+        head_dim_runtime=None, debug_counts=None, *, stream=None
     ):
         if stride_kv_n is None:
             stride_kv_n = DEFAULT_STRIDE_KV_N
@@ -1955,20 +2049,22 @@ def build_flash_attn_opus_module(
             stride_q_n = DEFAULT_STRIDE_Q_N
         if head_dim_runtime is None:
             head_dim_runtime = HEAD_DIM
+        if debug_counts is None:
+            debug_counts = O
         with CompilationContext.compile_hints(_opus_compile_hints):
             if stream is None:
                 return launch_flash_attn_opus(
-                    Q, K, V, O, batch_size, seq_len,
+                    Q, K, V, O, debug_counts, batch_size, seq_len,
                     stride_q_n, stride_kv_n, head_dim_runtime
                 )
             return launch_flash_attn_opus(
-                Q, K, V, O, batch_size, seq_len,
+                Q, K, V, O, debug_counts, batch_size, seq_len,
                 stride_q_n, stride_kv_n, head_dim_runtime, stream=stream
             )
 
     def _compile(
         Q, K, V, O, batch_size, seq_len, stride_kv_n=None, stride_q_n=None,
-        head_dim_runtime=None, *, stream=None
+        head_dim_runtime=None, debug_counts=None, *, stream=None
     ):
         if stride_kv_n is None:
             stride_kv_n = DEFAULT_STRIDE_KV_N
@@ -1976,9 +2072,11 @@ def build_flash_attn_opus_module(
             stride_q_n = DEFAULT_STRIDE_Q_N
         if head_dim_runtime is None:
             head_dim_runtime = HEAD_DIM
+        if debug_counts is None:
+            debug_counts = O
         with CompilationContext.compile_hints(_opus_compile_hints):
             return flyc.compile(
-                launch_flash_attn_opus, Q, K, V, O, batch_size, seq_len,
+                launch_flash_attn_opus, Q, K, V, O, debug_counts, batch_size, seq_len,
                 stride_q_n, stride_kv_n, head_dim_runtime,
                 fx.Stream(stream))
 

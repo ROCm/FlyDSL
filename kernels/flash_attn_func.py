@@ -91,6 +91,10 @@ def build_flash_attn_func_module_primary(
     daz=True,
     path_tag="auto",
     num_kv_heads=None,
+    opus_lazy_rescale=True,
+    opus_setprio=True,
+    opus_debug_lazy_counts=False,
+    opus_enable_stagger=True,
 ):
     """Build the flash_attn_func launcher using the post-refactor FlyDSL API.
 
@@ -137,6 +141,10 @@ def build_flash_attn_func_module_primary(
                 num_kv_heads=num_kv_heads,
                 waves_per_eu=waves_per_eu,
                 daz=daz,
+                opus_lazy_rescale=opus_lazy_rescale,
+                opus_setprio=opus_setprio,
+                opus_debug_lazy_counts=opus_debug_lazy_counts,
+                opus_enable_stagger=opus_enable_stagger,
             )
         except Exception as _opus_err:
             import sys
@@ -172,12 +180,20 @@ def build_flash_attn_func_module_primary(
             num_heads, head_dim, causal, dtype_str, sm_scale, waves_per_eu,
             flat_work_group_size=256, block_m=128,
             unsafe_fp_math=unsafe_fp_math, fast_fp_math=fast_fp_math,
-            daz=daz, path_tag=path_tag, num_kv_heads=num_kv_heads)
+            daz=daz, path_tag=path_tag, num_kv_heads=num_kv_heads,
+            opus_lazy_rescale=opus_lazy_rescale,
+            opus_setprio=opus_setprio,
+            opus_debug_lazy_counts=opus_debug_lazy_counts,
+            opus_enable_stagger=opus_enable_stagger)
         _launcher_m256 = build_flash_attn_func_module_primary(
             num_heads, head_dim, causal, dtype_str, sm_scale, waves_per_eu,
             flat_work_group_size=512, block_m=256,
             unsafe_fp_math=unsafe_fp_math, fast_fp_math=fast_fp_math,
-            daz=daz, path_tag=path_tag, num_kv_heads=num_kv_heads)
+            daz=daz, path_tag=path_tag, num_kv_heads=num_kv_heads,
+            opus_lazy_rescale=opus_lazy_rescale,
+            opus_setprio=opus_setprio,
+            opus_debug_lazy_counts=opus_debug_lazy_counts,
+            opus_enable_stagger=opus_enable_stagger)
         _BS_THRESHOLD = 4096 * num_heads
 
         def _auto_launch(*args, **kwargs):
