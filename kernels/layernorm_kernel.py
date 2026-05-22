@@ -61,9 +61,9 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
         fm_fast = arith.FastMathFlags.fast
         eps_c = EPS
 
-        lds = fx.SharedAllocator().allocate(SharedStorage)
-        s_sum = lds.s_sum.peek().view(fx.make_layout(RED_SLOTS, 1))
-        s_sumsq = lds.s_sumsq.peek().view(fx.make_layout(RED_SLOTS, 1))
+        lds = fx.SharedAllocator().allocate(SharedStorage).peek()
+        s_sum = lds.s_sum.view(fx.make_layout(RED_SLOTS, 1))
+        s_sumsq = lds.s_sumsq.view(fx.make_layout(RED_SLOTS, 1))
 
         # ── helpers: wave / block reduction ───────────────────────────────
         def wave_reduce_add(x):
@@ -353,9 +353,9 @@ def build_fused_add_layernorm_module(M: int, N: int, dtype_str: str):
         fm_fast = arith.FastMathFlags.fast
         eps_c = EPS
 
-        lds = fx.SharedAllocator().allocate(SharedStorage)
-        s_sum = lds.s_sum.peek().view(fx.make_layout(RED_SLOTS, 1))
-        s_sumsq = lds.s_sumsq.peek().view(fx.make_layout(RED_SLOTS, 1))
+        lds = fx.SharedAllocator().allocate(SharedStorage).peek()
+        s_sum = lds.s_sum.view(fx.make_layout(RED_SLOTS, 1))
+        s_sumsq = lds.s_sumsq.view(fx.make_layout(RED_SLOTS, 1))
 
         def wave_reduce_add(x):
             w = x
@@ -546,9 +546,9 @@ def _build_layernorm_quant_module(
         c_neg_inf = fx.Float32(float("-inf"))
         c_dtype_max = fx.Float32(quant_dtype_max)
 
-        lds = fx.SharedAllocator().allocate(SharedStorage)
-        s_sum = lds.s_sum.peek().view(fx.make_layout(RED_SLOTS, 1))
-        s_sumsq = lds.s_sumsq.peek().view(fx.make_layout(RED_SLOTS, 1))
+        lds = fx.SharedAllocator().allocate(SharedStorage).peek()
+        s_sum = lds.s_sum.view(fx.make_layout(RED_SLOTS, 1))
+        s_sumsq = lds.s_sumsq.view(fx.make_layout(RED_SLOTS, 1))
 
         YScale_buf = fx.rocdl.make_buffer_tensor(YScale)
         yscale_div = fx.logical_divide(YScale_buf, fx.make_layout(1, 1))
