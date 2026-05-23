@@ -158,6 +158,10 @@ class TensorAdaptor:
         self._orig_dtype = tensor.dtype
         self._orig_shape = tensor.shape
         self._orig_strides = tensor.stride()
+        # Dims listed here contribute their concrete (shape, stride) values
+        # to the JIT cache key; other dims are excluded so a single compiled
+        # kernel can serve calls with different runtime sizes.
+        self._cached_dims: frozenset = frozenset()
 
     @staticmethod
     def _extract_data_ptr(arg):
@@ -191,15 +195,47 @@ class TensorAdaptor:
 
     @staticmethod
     def raw_cache_signature(tensor: torch.Tensor):
-        """Lightweight cache sig from a raw tensor, no DLPack overhead."""
-        return (tensor.dtype,)
+        """Lightweight cache sig from a raw tensor, no DLPack overhead.
+
+        Matches ``__cache_signature__`` for a default-constructed TensorAdaptor
+        (no ``mark_static`` calls).
+        """
+        return (tensor.dtype, None, False, tensor.dim())
 
     def __cache_signature__(self):
-        return (
+        base = (
             self._orig_dtype,
             self.assumed_align,
             self.use_32bit_stride,
+            len(self._orig_shape),
         )
+        if not self._cached_dims:
+            return base
+        # Pack only the marked dims as sorted (dim, shape, stride) triples.
+        extras = tuple((d, int(self._orig_shape[d]), int(self._orig_strides[d])) for d in sorted(self._cached_dims))
+        return base + (extras,)
+
+    def mark_static(self, dims: Optional[List[int]] = None):
+        """Include the listed dims' shape/stride values in the JIT cache key.
+
+        ``dims=None`` marks every dim.  Call this when the compiled kernel
+        bakes concrete shape values into the generated IR (for example
+        ``num_records`` on a buffer resource derived from the static layout
+        cosize), so that calls with different shapes do not reuse a stale
+        compiled artifact.  Repeated calls accumulate.
+
+        Returns ``self`` for chaining.
+        """
+        rank = len(self._orig_shape)
+        target = range(rank) if dims is None else dims
+        new_dims = set(self._cached_dims)
+        for d in target:
+            d = int(d)
+            if not 0 <= d < rank:
+                raise IndexError(f"dim {d} out of range for rank {rank}")
+            new_dims.add(d)
+        self._cached_dims = frozenset(new_dims)
+        return self
 
     def mark_layout_dynamic(self, leading_dim: Optional[int] = None, divisibility: int = 1):
         if leading_dim is None:
