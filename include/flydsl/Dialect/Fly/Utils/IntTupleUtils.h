@@ -7,6 +7,7 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/IR/Attributes.h"
 #include "mlir/IR/BuiltinAttributes.h"
+#include "mlir/IR/PatternMatch.h"
 
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
 #include "flydsl/Dialect/Fly/Utils/IntUtils.h"

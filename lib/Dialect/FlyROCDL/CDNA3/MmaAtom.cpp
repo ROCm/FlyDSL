@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2025 FlyDSL Project Contributors
 
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
 #include "mlir/IR/BuiltinTypes.h"
@@ -159,8 +160,8 @@ FailureOr<Value> MmaOpCDNA3_MFMAType::emitAtomCallSSA(OpBuilder &builder, Locati
 
 #define DISPATCH_MFMA_SSA(M_, K_, PRED, OP)                                                        \
   if (m == M_ && n == M_ && k == K_ && (PRED)) {                                                   \
-    auto zeroAttr = builder.getI32IntegerAttr(0);                                                  \
-    return ROCDL::OP::create(builder, loc, accTy, a, b, c, zeroAttr, zeroAttr, zeroAttr)           \
+    Value zero = arith::ConstantIntOp::create(builder, loc, 0, 32);                                \
+    return ROCDL::OP::create(builder, loc, accTy, ValueRange{a, b, c, zero, zero, zero})           \
         .getResult();                                                                              \
   }
 

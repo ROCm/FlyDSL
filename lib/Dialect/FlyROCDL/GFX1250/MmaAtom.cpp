@@ -1,5 +1,6 @@
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
 #include "flydsl/Dialect/FlyROCDL/IR/Dialect.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
 #include "mlir/IR/BuiltinTypes.h"
@@ -209,27 +210,28 @@ static int64_t getWmmaAccVecSize(int32_t m, int32_t k, Type elemTyA, Type elemTy
   return 0;
 }
 
-enum class WmmaVariant { ModsAllReuse, ModsC, ModsABClamp };
+enum class WmmaVariant { ModsC, ModsABClamp };
 
 template <typename WmmaOp, WmmaVariant Variant>
 static FailureOr<Value> emitWmmaSSA(OpBuilder &builder, Location loc, VectorType accTy, Value a,
                                     Value b, Value c) {
   Value res;
-  if constexpr (Variant == WmmaVariant::ModsAllReuse) {
+  if constexpr (Variant == WmmaVariant::ModsC) {
+    Value modC = arith::ConstantIntOp::create(builder, loc, 0, 16);
+    Value reuseA = arith::ConstantIntOp::create(builder, loc, 0, 1);
+    Value reuseB = arith::ConstantIntOp::create(builder, loc, 0, 1);
     res = WmmaOp::create(builder, loc, accTy,
-                         /*signA=*/false, a, /*signB=*/false, b,
-                         /*modC=*/(uint16_t)0, c)
-              .getResult();
-  } else if constexpr (Variant == WmmaVariant::ModsC) {
-    res = WmmaOp::create(builder, loc, accTy, a, b,
-                         /*modC=*/(uint16_t)0, c,
-                         /*reuseA=*/false, /*reuseB=*/false)
+                         ValueRange{a, b, modC, c, reuseA, reuseB})
               .getResult();
   } else {
     static_assert(Variant == WmmaVariant::ModsABClamp);
+    Value signA = arith::ConstantIntOp::create(builder, loc, 0, 1);
+    Value signB = arith::ConstantIntOp::create(builder, loc, 0, 1);
+    Value reuseA = arith::ConstantIntOp::create(builder, loc, 0, 1);
+    Value reuseB = arith::ConstantIntOp::create(builder, loc, 0, 1);
+    Value clamp = arith::ConstantIntOp::create(builder, loc, 0, 1);
     res = WmmaOp::create(builder, loc, accTy,
-                         /*signA=*/false, a, /*signB=*/false, b, c,
-                         /*reuseA=*/false, /*reuseB=*/false, /*clamp=*/false)
+                         ValueRange{signA, a, signB, b, c, reuseA, reuseB, clamp})
               .getResult();
   }
   return res;
@@ -282,16 +284,16 @@ FailureOr<Value> MmaOpGFX1250_WMMAType::emitAtomCallSSA(OpBuilder &builder, Loca
                     wmma_##ACC_PREFIX##_16x16x##K_##_bf8_bf8, ModsC)
 
   DISPATCH_WMMA_SSA(16, 4, elemTyA.isF32() && elemTyB.isF32() && elemTyAcc.isF32(),
-                    wmma_f32_16x16x4_f32, ModsAllReuse)
+                    wmma_f32_16x16x4_f32, ModsC)
 
   DISPATCH_WMMA_SSA(16, 32, elemTyA.isF16() && elemTyB.isF16() && elemTyAcc.isF32(),
-                    wmma_f32_16x16x32_f16, ModsAllReuse)
+                    wmma_f32_16x16x32_f16, ModsC)
   DISPATCH_WMMA_SSA(16, 32, elemTyA.isBF16() && elemTyB.isBF16() && elemTyAcc.isF32(),
-                    wmma_f32_16x16x32_bf16, ModsAllReuse)
+                    wmma_f32_16x16x32_bf16, ModsC)
   DISPATCH_WMMA_SSA(16, 32, elemTyA.isF16() && elemTyB.isF16() && elemTyAcc.isF16(),
-                    wmma_f16_16x16x32_f16, ModsAllReuse)
+                    wmma_f16_16x16x32_f16, ModsC)
   DISPATCH_WMMA_SSA(16, 32, elemTyA.isBF16() && elemTyB.isBF16() && elemTyAcc.isBF16(),
-                    wmma_bf16_16x16x32_bf16, ModsAllReuse)
+                    wmma_bf16_16x16x32_bf16, ModsC)
 
   DISPATCH_WMMA_SSA_FP8(64, elemTyAcc.isF32(), f32)
   DISPATCH_WMMA_SSA_FP8(64, elemTyAcc.isF16(), f16)

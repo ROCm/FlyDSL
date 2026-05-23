@@ -191,7 +191,7 @@ Type applyOffsetOnTensorLike(LayoutBuilder<LayoutAttr> &builder, Type tensorLike
   llvm::LogicalResult OP::inferReturnTypes(                                                        \
       mlir::MLIRContext *context, std::optional<::mlir::Location> location,                        \
       mlir::ValueRange operands, mlir::DictionaryAttr attributes,                                  \
-      mlir::OpaqueProperties properties, mlir::RegionRange regions,                                \
+      mlir::PropertyRef properties, mlir::RegionRange regions,                                     \
       llvm::SmallVectorImpl<mlir::Type> &inferredReturnTypes)
 
 //===----------------------------------------------------------------------===//
