@@ -167,7 +167,7 @@ def compile_moe_gemm1(
     is_int4_bf16_groupwise = is_int4_bf16 and use_groupwise_scale
     num_groups = model_dim // group_size if use_groupwise_scale else 1
     _scale_is_bf16 = scale_is_bf16 and use_groupwise_scale
-    experts * (2 * inter_dim) * num_groups
+    sw_nbytes = experts * (2 * inter_dim) * num_groups * (2 if _scale_is_bf16 else 4) if needs_scale_w else 0
     # For groupwise scale, weight scale is applied per-group in the K loop,
     # so epilogue can skip weight scale multiplication (uses 1.0 for sw).
 
@@ -213,7 +213,11 @@ def compile_moe_gemm1(
 
     ir.ShapedType.get_dynamic_size()
     # W is packed int4 for W4A8/W4A16/W4A_FP8: 2 values per byte.
-    (experts * (2 * inter_dim) * model_dim) // 2 if w_is_int4 else (experts * (2 * inter_dim) * model_dim)
+    w_nbytes = (
+        (experts * (2 * inter_dim) * model_dim) // 2
+        if w_is_int4
+        else (experts * (2 * inter_dim) * model_dim * elem_bytes)
+    )
 
     total_threads = 256
     bytes_x_per_tile = int(tile_m) * int(tile_k) * int(elem_bytes)
@@ -400,7 +404,7 @@ def compile_moe_gemm1(
                 x_nbytes_idx = x_rows * k_in * arith.index(int(elem_bytes))
                 x_rsrc = buffer_ops.create_buffer_resource(arg_x, max_size=False, num_records_bytes=x_nbytes_idx)
 
-                w_rsrc = buffer_ops.create_buffer_resource(arg_w, max_size=False)
+                w_rsrc = buffer_ops.create_buffer_resource(arg_w, max_size=False, num_records_bytes=w_nbytes)
 
                 # OUT: normal=[tokens, topk, inter] f16/bf16, split-K=[tokens*topk, 2*inter] f32
                 out_elem_bytes = 4 if _is_splitk else 2
@@ -422,10 +426,17 @@ def compile_moe_gemm1(
                 # scale_w: fp16/bf16 (non-int4) path ignores; int4_bf16 needs dequant scale.
                 sw_rsrc = -1
                 if const_expr(needs_scale_w):
-                    sw_rsrc = buffer_ops.create_buffer_resource(arg_scale_w, max_size=False)
+                    sw_rsrc = buffer_ops.create_buffer_resource(
+                        arg_scale_w, max_size=False, num_records_bytes=sw_nbytes
+                    )
 
-                sorted_rsrc = buffer_ops.create_buffer_resource(arg_sorted_token_ids, max_size=False)
-                sorted_w_rsrc = buffer_ops.create_buffer_resource(arg_sorted_weights, max_size=False)
+                sorted_nbytes_idx = size_expert_ids_in * fx.Index(tile_m) * fx.Index(4)
+                sorted_rsrc = buffer_ops.create_buffer_resource(
+                    arg_sorted_token_ids, max_size=False, num_records_bytes=sorted_nbytes_idx
+                )
+                sorted_w_rsrc = buffer_ops.create_buffer_resource(
+                    arg_sorted_weights, max_size=False, num_records_bytes=sorted_nbytes_idx
+                )
 
                 # expert ids: [blocks] i32 -> bytes = size_expert_ids_in*4
                 expert_rsrc = buffer_ops.create_buffer_resource(
@@ -1738,7 +1749,7 @@ def compile_moe_gemm2(
     # Stage2 K dimension is inter_dim (weight shape: [E, model_dim, inter_dim])
     num_groups = inter_dim // group_size if use_groupwise_scale else 1
     _scale_is_bf16 = scale_is_bf16 and use_groupwise_scale
-    experts * model_dim * num_groups
+    sw_nbytes = experts * model_dim * num_groups * (2 if _scale_is_bf16 else 4) if needs_scale_w else 0
 
     _is_gfx950 = "gfx95" in get_hip_arch()
     use_gfx950_cvt = is_int4_bf16 and _is_gfx950
@@ -1767,7 +1778,7 @@ def compile_moe_gemm2(
 
     ir.ShapedType.get_dynamic_size()
     # W is packed int4 for W4A8/W4A16/W4A_FP8: 2 values per byte.
-    (experts * model_dim * inter_dim) // 2 if w_is_int4 else (experts * model_dim * inter_dim)
+    w_nbytes = (experts * model_dim * inter_dim) // 2 if w_is_int4 else (experts * model_dim * inter_dim * elem_bytes)
 
     total_threads = 256
     tile_k_bytes = int(tile_k) * int(elem_bytes)
@@ -1958,7 +1969,7 @@ def compile_moe_gemm2(
             x_nbytes_idx = (tokens_in * c_topk) * k_in * arith.index(int(elem_bytes))
             x_rsrc = buffer_ops.create_buffer_resource(arg_x, max_size=False, num_records_bytes=x_nbytes_idx)
 
-            w_rsrc = buffer_ops.create_buffer_resource(arg_w, max_size=False)
+            w_rsrc = buffer_ops.create_buffer_resource(arg_w, max_size=False, num_records_bytes=w_nbytes)
 
             # OUT: [tokens, model_dim] -> clamp to descriptor max (i32 bytes) to avoid overflow on huge tokens.
             out_elem_bytes = 4 if out_is_f32 else 2
@@ -1978,7 +1989,7 @@ def compile_moe_gemm2(
             sw_rsrc = -1
             if const_expr(needs_scale_w):
                 # scale_w: [experts*model_dim] f32 (static shape in practice)
-                sw_rsrc = buffer_ops.create_buffer_resource(arg_scale_w, max_size=False)
+                sw_rsrc = buffer_ops.create_buffer_resource(arg_scale_w, max_size=False, num_records_bytes=sw_nbytes)
 
             # sorted_token_ids / sorted_weights: [blocks*tile_m] (CK-style padded length)
             sorted_nbytes_idx = size_expert_ids_in * fx.Index(tile_m) * fx.Index(4)
