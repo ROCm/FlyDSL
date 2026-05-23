@@ -94,6 +94,7 @@ def compile_mxscale_gemm(
         raise ValueError(f"scale_load_path must be one of {scale_load_paths}, got {scale_load_path!r}")
     use_scale_buffer_load = scale_load_path != "tdm"
     use_ab_split_scale_buffer_load = scale_load_path == "buffer_lds_stage_ab_split"
+    effective_expert_sched_mode = bool(expert_sched_mode) and not use_scale_buffer_load
 
     if num_buffers not in (2, 3, 4):
         raise ValueError(f"num_buffers must be 2, 3, or 4, got {num_buffers}")
@@ -300,6 +301,17 @@ def compile_mxscale_gemm(
         TDM_LOADS_PER_STEP = 1
     else:
         TDM_LOADS_PER_STEP = 2 if use_scale_buffer_load else 4
+    if use_scale_buffer_load:
+        _scale_async_batch_bytes = block_threads * _scale_dma_bytes
+        _scale_async_ops_per_stage = (
+            (tile_m * scale_k_per_tile + _scale_async_batch_bytes - 1) // _scale_async_batch_bytes
+            + (tile_n * scale_k_per_tile + _scale_async_batch_bytes - 1) // _scale_async_batch_bytes
+        )
+        # Wait only for the scale stage that is about to be consumed; keep
+        # later buffered scale async copies in flight.
+        _scale_async_future_wait_count = _scale_async_ops_per_stage * max(num_buffers - 2, 0)
+    else:
+        _scale_async_future_wait_count = 0
     tail_plan = [(ls, cs, o * TDM_LOADS_PER_STEP // 2 if o > 0 else o) for ls, cs, o in _base_tail_plan]
 
     # Pre-compute epilogue sub-tile layout (unified for FP4 vec16 and FP8 vec8)
@@ -1715,16 +1727,18 @@ def compile_mxscale_gemm(
                     tile_n * scale_k_per_tile,
                 )
 
-        def _wait_scale_buffer_loads():
+        def _wait_scale_all():
             if const_expr(use_scale_buffer_load):
                 rocdl.s_wait_asynccnt(0)
 
+        def _wait_scale_for_compute_stage():
+            if const_expr(use_scale_buffer_load):
+                rocdl.s_wait_asynccnt(_scale_async_future_wait_count)
+
         def _pipeline_fence(outstanding=0):
-            _wait_scale_buffer_loads()
             pipeline_fence(outstanding=outstanding, use_cluster=use_cluster)
 
         def _pipeline_fence_signal(outstanding=0):
-            _wait_scale_buffer_loads()
             pipeline_fence_signal(outstanding=outstanding, use_cluster=use_cluster)
 
         def _issue_ab_tdm(load_stage, addr_a, addr_b):
@@ -1790,6 +1804,7 @@ def compile_mxscale_gemm(
         if const_expr(use_scale_buffer_load):
             scale_next_k_base = split_k_base + arith.index(pre_loaded * tile_k)
 
+        _wait_scale_for_compute_stage()
         _pipeline_fence(outstanding=TDM_LOADS_PER_STEP * (num_buffers - 2))
 
         # Main loop — acc_mixed style: fence at top, TDM_load mid-compute.
@@ -1850,6 +1865,7 @@ def compile_mxscale_gemm(
                     for buf_idx in range_constexpr(num_buffers):
                         load_stage = (buf_idx + num_buffers - 1) % num_buffers
 
+                        _wait_scale_for_compute_stage()
                         _pipeline_fence_signal(outstanding=_fence_outstanding)
                         pipeline_fence_wait(use_cluster=use_cluster)
 
@@ -1898,6 +1914,7 @@ def compile_mxscale_gemm(
                     for buf_idx in range_constexpr(num_buffers):
                         load_stage = (buf_idx + num_buffers - 1) % num_buffers
 
+                        _wait_scale_for_compute_stage()
                         _pipeline_fence_signal(outstanding=_fence_outstanding)
                         pipeline_fence_wait(use_cluster=use_cluster)
 
@@ -2009,6 +2026,7 @@ def compile_mxscale_gemm(
                 addr_lo_bs = results[n_accs + 3]
 
         # Tail — same acc_mixed pattern: fence at top, TDM mid-compute.
+        _wait_scale_all()
         if const_expr(loop_iters > 0):
             _pipeline_fence(outstanding=0)
         elif const_expr(use_cluster):
@@ -2018,6 +2036,7 @@ def compile_mxscale_gemm(
         for _load_stage, _compute_stage, _outstanding in tail_plan:
             if const_expr(_outstanding == -1):
                 if const_expr(_tail_had_load):
+                    _wait_scale_all()
                     _pipeline_fence(outstanding=0)
                 if const_expr(use_tdm_store):
                     accs = compute_tile_scheduled(
@@ -2041,6 +2060,7 @@ def compile_mxscale_gemm(
                         emit_filler=_emit_epi_addrs,
                     )
             else:
+                _wait_scale_all()
                 _pipeline_fence_signal(outstanding=_outstanding)
                 pipeline_fence_wait(use_cluster=use_cluster)
 
@@ -2210,7 +2230,7 @@ def compile_mxscale_gemm(
             cluster=cluster_arg,
         )
 
-    if expert_sched_mode:
+    if effective_expert_sched_mode:
         launch_mxscale_gemm.compile_hints["llvm_options"] = {
             "amdgpu-expert-scheduling-mode": True,
         }
