@@ -101,27 +101,19 @@ flash_attn_opus_kernel_0:
 	s_mov_b32 s7, s11
 	s_mov_b32 m0, s31
 	s_nop 0
-; OPUS prologue: prime LDS with the first K tile, then synchronize before Q load.
-; PY:
+; Prologue: prime LDS with the first K tile, then synchronize before Q load.
 ;   _async_load_k(fx.Index(0), 0)
 ;   rocdl.s_waitcnt(0)
 ;   rocdl.sched_barrier(0)
 ;   rocdl.s_barrier()
-; NOTE:
 ;   buffer_load_dwordx4 ... lds writes directly into LDS through m0-selected offsets.
-;   The paired loads below establish the first K data consumed by the initial QK MMA.
-; SCHED HINT:
-;   The source `rocdl.sched_barrier(0)` between `s_waitcnt(0)` and
-;   `s_barrier()` lowers to a compiler-only `SCHED_BARRIER 0` boundary. The
-;   final ISA keeps the real `s_waitcnt ...` and `s_barrier` below; the removed
-;   pseudo prevents later Q/K/V work from being scheduled above this wave sync.
 	buffer_load_dwordx4 v215, s[4:7], 0 offen lds
 	v_add_u32_e32 v216, 0x80, v215
 	s_mov_b32 m0, s33
 	s_nop 0
 	buffer_load_dwordx4 v216, s[4:7], 0 offen lds
-; OPUS prologue: Q row and Q global address setup.
-; PY (flash_attn_opus.py L1255-L1258):
+
+; Prologue: Q row and Q global address setup.
 ;   q_row_in_block = wave_q_offset + lane_mod_32
 ;   q_start_pos_i32 = fx.Int32(q_start + wave_id_uni * fx.Index(ROWS_PER_WAVE))
 ;   q_row = q_start + q_row_in_block
@@ -165,8 +157,8 @@ flash_attn_opus_kernel_0:
 	v_and_or_b32 v58, v0, 31, v1
 	v_mad_i64_i32 v[210:211], s[12:13], v58, s17, 0
 	v_add_lshl_u32 v1, v210, v11, 1
-; OPUS prologue: load the 128-wide Q row tile from global memory.
-; PY:
+
+; Prologue: load the 128-wide Q row tile from global memory.
 ;   q_all_bf16 = _load_q_all(q_row_in_block)
 ; NOTE:
 ;   The eight buffer_load_dwordx4 instructions are the `range_constexpr(K_STEPS_QK)`
@@ -182,8 +174,8 @@ flash_attn_opus_kernel_0:
 	buffer_load_dwordx4 v[42:45], v1, s[8:11], 0 offen offset:160
 	buffer_load_dwordx4 v[38:41], v1, s[8:11], 0 offen offset:192
 	buffer_load_dwordx4 v[34:37], v1, s[8:11], 0 offen offset:224
-; OPUS prologue: prefetch initial K/V tiles to LDS.
-; PY (flash_attn_opus.py L1262-L1265):
+
+; Prologue: prefetch initial K/V tiles to LDS.
 ;   _async_load_k(fx.Index(BLOCK_N), 1)
 ;   _async_load_v(fx.Index(0), 0)
 ; NOTE:
@@ -200,8 +192,8 @@ flash_attn_opus_kernel_0:
 	s_mov_b32 m0, s21
 	s_nop 0
 	buffer_load_dwordx4 v216, s[36:39], 0 offen lds
-; OPUS prologue: read K tile from LDS into VGPRs.
-; PY (flash_attn_opus.py L1266-L1267):
+
+; Prologue: read K tile from LDS into VGPRs.
 ;   v_k = _async_load_k_from_lds_to_vgpr(0, urk_base_per_lane)
 ; NOTE:
 ;   The ds_read_b128 sequence materializes the K fragments used by the first
@@ -223,29 +215,27 @@ flash_attn_opus_kernel_0:
 	ds_read_b128 v[82:85], v211 offset:8416
 	ds_read_b128 v[86:89], v211 offset:8896
 	ds_read_b128 v[78:81], v211 offset:8928
-; OPUS prologue: scheduling fence and waits before first QK use.
-; PY (flash_attn_opus.py L1269-L1274):
-;   rocdl.sched_barrier(0)
-;   rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
-;   _waitcnt_vm_n(NUM_DMA_V)
-; NOTE:
-;   The sched_barrier(0) is a compiler-only hard scheduling boundary and does
-;   not survive as ISA. The visible waitcnt waits for the LDS K reads and keeps
-;   only the expected number of outstanding V buffer loads before the branch.
+
+; Prologue: scheduling fence and waits before first QK use.
+; rocdl.sched_barrier(0)
+; rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
+; _waitcnt_vm_n(NUM_DMA_V)
 	s_waitcnt vmcnt(2) lgkmcnt(0)
-; OPUS prologue: optional stagger barrier for wave-group phase shift.
-; PY (flash_attn_opus.py L1280-L1281):
+; Prologue: optional stagger barrier for wave-group phase shift.
 ;   if const_expr(OPUS_ENABLE_STAGGER):
 ;       _stagger_extra_barrier_if_one()
-; NOTE:
-;   `_stagger_extra_barrier_if_one()` emits `sched_barrier(0); s_barrier()`
-;   only for stagger==1. The sched_barrier is compiler-only; the real CFG is
-;   the conditional branch around the visible `s_barrier`.
 	s_cbranch_scc1 .LBB0_2
+; The body runs on warps 4-7 only, advancing their s_barrier ordinal
+; by one relative to warps 0-3 → starts the dual-group phase shift.
+; if_op = scf.IfOp(stagger_is_one_i1, [], has_else=False, loc=ir.Location.unknown())
+; with ir.InsertionPoint(if_op.regions[0].blocks[0]):
+; 	rocdl.sched_barrier(0)
+; 	rocdl.s_barrier()
+; 	scf.YieldOp([])
 	s_barrier
+
 .LBB0_2:
-; OPUS prologue: scale first Q packs for MFMA operands.
-; PY (flash_attn_opus.py L1260, `_scale_q_all`):
+; Prologue: scale first Q packs for MFMA operands.
 ;   q_all_scaled_bf16 = _scale_q_all(q_all_bf16)
 ; NOTE:
 ;   Computes `rsqrt(head_dim_runtime) * log2(e)`, expands packed bf16 Q lanes
@@ -285,8 +275,8 @@ flash_attn_opus_kernel_0:
 	v_cvt_pk_bf16_f32 v131, v8, v9
 	v_cvt_pk_bf16_f32 v130, v6, v7
 	s_nop 1
-; OPUS prologue: first QK score tile plus interleaved Q scaling.
-; PY (flash_attn_opus.py L1286-L1289 and L1260):
+
+; Prologue: first QK score tile plus interleaved Q scaling.
 ;   v_s_0 = _mma0(v_k)
 ;   rocdl.sched_barrier(0)
 ;   q_all_scaled_bf16 = _scale_q_all(q_all_bf16)
@@ -442,18 +432,29 @@ flash_attn_opus_kernel_0:
 	v_mov_b32_e32 v213, s27
 	v_or_b32_e32 v212, s26, v58
 	v_mfma_f32_32x32x16_bf16 v[2:17], v[78:81], v[158:161], v[2:17]
-	s_cmp_gt_i32 s16, 63
-	v_lshlrev_b32_e32 v1, 2, v214
-	s_cbranch_scc1 .LBB0_4
-; OPUS prologue causal mask for the first score tile.
-; PY (flash_attn_opus.py L1291-L1300):
-;   if const_expr(CAUSAL):
-;   v_s_0 = _causal_mask_prologue_if_needed(v_s_0)
-;   else:
-;   v_s_0 = _v_s_vec_to_lists(v_s_0)
+
+; Prologue causal mask for the first score tile.
+; v_s_0 = _causal_mask_prologue_if_needed(v_s_0)
 ; NOTE:
 ;   The v_cmp/v_cndmask pairs replace invalid score lanes with -inf before row max and exp.
 ;   The branch skips this mask when the whole tile is known to be before the causal boundary.
+; s_lo, s_hi = _v_s_vec_to_lists(v_s)
+; acc_values = [_raw(v) for v in (s_lo + s_hi)]
+; result_types = [v.type for v in acc_values]
+; mask_needed = arith.cmpi(
+; 	arith.CmpIPredicate.slt,
+; 	q_start_pos_i32,
+; 	_raw(fx.Int32(kv_end_pos)),
+; )
+; if_op = scf.IfOp(mask_needed, result_types, has_else=True, loc=ir.Location.unknown())
+	s_cmp_gt_i32 s16, 63
+	v_lshlrev_b32_e32 v1, 2, v214
+	s_cbranch_scc1 .LBB0_4
+; with ir.InsertionPoint(if_op.regions[0].blocks[0]):
+; 	then_lo = list(s_lo)
+; 	then_hi = list(s_hi)
+; 	_causal_mask_inplace((then_lo, then_hi), tile_idx)
+; 	scf.YieldOp([_raw(v) for v in (then_lo + then_hi)])
 	v_sub_u32_e32 v34, v212, v1
 	v_subrev_u32_e32 v35, 32, v34
 	v_mov_b32_e32 v36, 0xff800000
@@ -568,6 +569,7 @@ flash_attn_opus_kernel_0:
 	v_cndmask_b32_e64 v16, v16, v36, s[6:7]
 	v_cndmask_b32_e64 v17, v17, v36, s[8:9]
 	;;#ASMEND
+
 .LBB0_4:
 ;   m_row_pro = _attn_row_max(v_s_0)
 	s_add_u32 s6, s22, 63
@@ -643,8 +645,8 @@ flash_attn_opus_kernel_0:
 	;;#ASMSTART
 	;;#ASMEND
 	s_nop 0
-; OPUS prologue softmax first half.
-; PY (flash_attn_opus.py L1302-L1316):
+
+; Prologue softmax first half.
 ;   v_p_0 = _attn_exp2_slice(v_s_0, 0, 16)
 ; NOTE:
 ;   v_max/v_permlane reductions produce the per-row maximum.
@@ -676,24 +678,54 @@ flash_attn_opus_kernel_0:
 ;   rocdl.s_barrier()
 ;   rocdl.sched_barrier(0)
 	s_barrier
+
+;   _async_load_k(fx.Index(2 * BLOCK_N), 0)
 	s_mov_b32 m0, s31
 	s_lshl_b32 s27, s18, 8
 	s_mov_b32 s6, s2
 	s_mov_b32 s7, s3
-; OPUS prologue to steady-state handoff.
-; PY (flash_attn_opus.py L1318-L1325):
-;   _async_load_k(fx.Index(2 * BLOCK_N), 0)
-; NOTE:
-;   The branch at .LBB0_16 is the short path for small tile counts; otherwise control enters the pipelined loop.
 	buffer_load_dwordx4 v215, s[4:7], s27 offen lds
 	s_mov_b32 m0, s33
 	s_nop 0
 	buffer_load_dwordx4 v216, s[4:7], s27 offen lds
-;   l_row_init = c_zero_f
-;   init_args = [m_row_pro, l_row_init]
-;   for _ in range_constexpr(D_CHUNKS):
-;   init_args.append(c_zero_v16f32)
-;   init_args.append(_v_pair_to_vec32(v_p_0))
+
+; Prologue → main loop preheader, PART 1: zero-trip-count guard.
+; PY (flash_attn_opus.py L1326-L1333):
+;   for j, loop_args in range(
+;       fx.Index(3),                              # start = 3
+;       max_num_tiles - fx.Index(1),              # bound (computed here)
+;       fx.Index(2),                              # step = 2
+;       init=init_args,
+;   ):
+; NOTE:
+;   This is LLVM-generated guard code for the FlyDSL `range(...)` loop.
+;   It tests whether the loop body executes at least once (i.e., 3 < bound).
+;   No single Python source line corresponds to this; it is the structural
+;   lowering of the for-loop's pre-entry zero-iteration test.
+;
+;   s8/s9 hold `max_num_tiles` (loaded from kernel arguments earlier).
+;     s_mov_b64 s[6:7], -1               ; flag := -1 (default: loop WILL iter)
+;     s_add_u32/addc_u32  s[10:11], s[8:9], -1   ; bound = max_num_tiles - 1
+;                                                ; (used by loop back-edge at ASM 1073
+;                                                ; and by epilogue addressing)
+;     v_cmp_gt_u64_e64 s[12:13], s[8:9], 4       ; cond = (max_num_tiles > 4)
+;                                                ;   ⟺ (3 < max_num_tiles - 1)
+;                                                ;   ⟺ "loop body runs at least once"
+;     s_and_b64 vcc, exec, s[12:13]              ; gate cond by exec
+;     v_lshlrev_b32_e32 v219, 1, v2              ; v219 = v2 << 1
+;                                                ;   v2 = wave/lane-derived base;
+;                                                ;   v219 will be reused below to
+;                                                ;   build per-lane LDS read addrs
+;                                                ;   (v217, v221) for both paths.
+;     s_cbranch_vccnz .LBB0_6            ; if loop will iter → take fast fall-through
+;     ; --- else: zero-iter path, fall through to here ---
+;     v_add_u32_e32 v217, 0x4100, v219   ; v217 := v219 + 0x4100
+;                                        ; pre-init per-lane LDS Q-buffer addr
+;                                        ; (epilogue needs v217 for its ds_read; the
+;                                        ; loop path will overwrite this at ASM 870)
+;     s_mov_b64 s[6:7], 0                ; flag := 0 (loop will NOT iter; later
+;                                        ; tested at ASM 832 to branch to epilogue)
+;     s_branch .LBB0_7                   ; jump to merge block
 	s_mov_b64 s[6:7], -1
 	s_add_u32 s10, s8, -1
 	s_addc_u32 s11, s9, -1
@@ -706,43 +738,33 @@ flash_attn_opus_kernel_0:
 	s_branch .LBB0_7
 .LBB0_6:
 .LBB0_7:
-; OPUS prologue -> steady-state loop state setup.
-; PY (flash_attn_opus.py L1321-L1340):
-;   l_row_init = c_zero_f
-;   init_args = [m_row_pro, l_row_init]
-;   for _ in range_constexpr(D_CHUNKS):
-;       init_args.append(c_zero_v16f32)
-;   init_args.append(_v_pair_to_vec32(v_p_0))
-;   loop_results = init_args
-;   for j, loop_args in range(
-;       fx.Index(3),
-;       max_num_tiles - fx.Index(1),
-;       fx.Index(2),
-;       init=init_args,
-;   ):
-;       m_row = loop_args[0]
-;       l_row = loop_args[1]
-;       v_o = [loop_args[2 + i] for i in range_constexpr(D_CHUNKS)]
-;       v_p_0 = _v_vec32_to_pair(loop_args[2 + D_CHUNKS])
-;       j_idx = j
+; Prologue → main loop preheader, PART 2: merge of zero-iter guard.
 ; NOTE:
-;   This block is not a math kernel body. It establishes the online-softmax
-;   carry state after the prologue score tile has produced `m_row_pro` and
-;   `v_p_0`.
-;   - The long `v_mov_b32 ... 0` runs initialize `l_row` and all fp32 O
-;     accumulators (`v_o`) to zero, matching `l_row_init` and
-;     `c_zero_v16f32` in `init_args`.
-;   - `s_cbranch_vccnz .LBB0_16` is the empty-loop path: when the Python
-;     `range(3, max_num_tiles - 1, 2, init=init_args)` has no iterations,
-;     control skips the steady-state loop and enters the epilogue with
-;     `loop_results = init_args`.
-;   - `s[12:13] = 3` initializes the loop induction variable `j`.
-;   - `s26 = 0xc0` materializes `j * BLOCK_N = 3 * 64 = 192` for later
-;     causal-mask and KV tile address calculations.
-;   - `s36 = 0x41000000` is the lazy-rescale threshold constant `8.0f`.
-;   - `v222 = 0xff800000` is the `-inf` bit pattern used by causal masking.
-;   - `v217`, `v221`, `s35`, `s18`, and `s37` seed LDS / K / V addressing
-;     state that is consumed after the branch to `.LBB0_10`.
+;   .LBB0_6 is the "loop will iter" branch target — it has no body and
+;   immediately falls through to .LBB0_7. .LBB0_7 is the merge block of the
+;   if/else above. Both paths converge here.
+;   From here, code is COMMON to both the zero-iter and the will-iter paths;
+;   the flag s[6:7] is used at ASM 832 to dispatch to either the epilogue
+;   (zero-iter) or the loop body (will-iter).
+
+; Prologue → main loop preheader, PART 3: zero-init of loop-carry regs.
+; PY (flash_attn_opus.py L1319-L1323):
+;   l_row_init = c_zero_f                        # = 0.0
+;   init_args = [m_row_pro, l_row_init]
+;   for _ in range_constexpr(D_CHUNKS):          # D_CHUNKS = 4
+;       init_args.append(c_zero_v16f32)          # 16 zeros each → 64 acc regs total
+;   init_args.append(_v_pair_to_vec32(v_p_0))
+; NOTE:
+;   s28 is a per-XCC LDS base (computed in prologue); s19/s17 are the LDS
+;   K-tile base offsets for buf-0 (s19 = s28 + 0x8500) and buf-1
+;   (s17 = s28 + 0xa700). These will be loaded into m0 register before
+;   `buffer_load_dwordx4 ... lds` in Cluster 0 staging (ASM 1080-1087 area).
+;   v17 is set to 0 first, then broadcast to v2..v65 (64 regs = 4 D_CHUNKS
+;   × 16 vec elements each) — this materializes `init_args[2:2+D_CHUNKS] =
+;   [c_zero_v16f32] * 4`. v218 := 0 corresponds to `l_row_init = c_zero_f`.
+;   The `s_andn2_b64 vcc, exec, s[6:7]` computes vcc = exec & ~s[6:7]:
+;     • s[6:7]=-1 (loop iter)  → vcc = 0       → don't branch at ASM 832
+;     • s[6:7]= 0 (loop skip)  → vcc = exec≠0  → branch to .LBB0_16 at ASM 832
 	s_add_i32 s19, s28, 0x8500
 	s_add_i32 s17, s28, 0xa700
 	v_mov_b32_e32 v17, 0
@@ -811,7 +833,54 @@ flash_attn_opus_kernel_0:
 	v_mov_b32_e32 v20, v17
 	v_mov_b32_e32 v19, v17
 	v_mov_b32_e32 v18, v17
+
+; Prologue → main loop preheader, PART 4: dispatch on zero-iter flag.
+; NOTE:
+;   If s[6:7]=0 (zero-trip-count path) → branch to .LBB0_16 (epilogue).
+;   In that case v_o accumulators (v2..v65) are all zero from PART 3, l_row
+;   (v218) is zero, m_row (v220) is `m_row_pro` from prologue softmax max,
+;   v_p_0 was computed in prologue `_attn_exp2_slice(v_s_0, 0, 16)`.
+;   The epilogue then uses these `init_args` directly without ever running
+;   the main loop body — this is the FlyDSL `range(...)`-with-init semantic
+;   when the iteration range is empty (PY L1326-L1333).
 	s_cbranch_vccnz .LBB0_16
+
+; Prologue → main loop preheader, PART 5: loop-only preheader setup.
+; PY (flash_attn_opus.py L1326-L1333, L1338, L1190, L1294):
+;   for j, loop_args in range(fx.Index(3), max_num_tiles - fx.Index(1),
+;                             fx.Index(2), init=init_args):
+;       ...
+;       j_idx = j                                # alias for clarity in body
+; NOTE:
+;   These instructions only run when the loop will iterate at least once
+;   (fall-through from ASM 832 `s_cbranch_vccnz`). They prepare:
+;   • Per-lane LDS read addresses for K/V buffers:
+;       v217 = v219 + 0x4100   (K buf-0 LDS base, used by ASM 1274+ ds_read)
+;       v221 = v219 + 0xc600   (K buf-1 LDS base, used by ASM 1820+ ds_read)
+;   • Scale factors:
+;       s35 = s18 << 9         (V LDS row stride: 9 = log2(BLOCK_N*4 bytes))
+;       s18 = s18 * 0x180      (V VMEM/global stride: 0x180 = 3*128 bytes)
+;   • Per-lane offset chain (v0):
+;       v0 = ((v0 >> 1) & 0xe0) + (v0 & 31)     # lane → (row, col) decode
+;       v0 = s26 + v2 + v0 - v1 + 0xffffff60    # subtract base and align
+;     This v0 will be the per-lane VMEM offset for `buffer_load_dwordx4` in
+;     each iteration's Cluster 0 (`_async_load_v((j_idx - 2) * BLOCK_N, 1)`).
+;   • Loop induction state:
+;       s[12:13] = 3           # j = 3 (loop start, PY L1329 `fx.Index(3)`)
+;       s37 = 0                # rolling LDS K-tile DMA base (snapshot used by
+;                              # ASM 1081 `s_add_i32 s38, s34, s37` in Cluster 0)
+;       s26 = 0xc0 = 192       # j_idx-derived KV byte offset initial value
+;       v218 = 0               # l_row (= c_zero_f, re-init for loop-carry SSA)
+;       v2 = 0                 # zero source for v_o re-init below
+;   • Scalar constants used INSIDE the loop body (loop-invariant):
+;       s36 = 0x41000000 = 8.0f         # PY L447 `c_eight_f = OPUS_RESCALE_THRESHOLD`
+;                                       # used by `_lazy_rescale_o` at PY L1190
+;                                       # `below = (m_diff <= c_eight_f)`.
+;                                       # Compare at ASM 2190: `v_cmp_ge_f32 vcc, s36, v99`.
+;       v222 = 0xff800000 = -inf (f32)  # PY L435 `c_neg_inf` / `neg_inf_v`
+;                                       # used by `_causal_mask_*` (PY L1294)
+;                                       # to write NEG_INF into masked-out lanes.
+;       s6/s7 = s2/s3                   # global buffer descriptor copy
 	v_add_u32_e32 v217, 0x4100, v219
 	v_add_u32_e32 v221, 0xc600, v219
 	s_lshl_b32 s35, s18, 9
@@ -831,6 +900,22 @@ flash_attn_opus_kernel_0:
 	s_mov_b32 s7, s3
 	s_mov_b32 s36, 0x41000000
 	v_mov_b32_e32 v222, 0xff800000
+
+; OPUS prologue → main loop preheader, PART 6: PHI-elimination zero-init.
+; PY (flash_attn_opus.py L1321-L1322): the same `init_args.append(c_zero_v16f32)`.
+; NOTE:
+;   This block is structurally REQUIRED by LLVM's PHI-elimination, not by data
+;   flow. Two distinct phi nodes (epilogue's v_o phi and loop-body's v_o phi)
+;   both consume the same SSA constant zero from PART 3, but PHI-elimination
+;   processes each phi independently and inserts copies in every predecessor:
+;     • PART 3 = copies for epilogue phi's "skip_loop" predecessor.
+;     • PART 6 = copies for loop-body phi's "preheader_loop" predecessor.
+;   Machine Copy Propagation is intra-block and cannot see across the
+;   s_cbranch_vccnz at ASM 832, so it cannot prove the PART 3 zeros are still
+;   live here and remove these copies. Only v2's re-init at PART 5 line 881 is
+;   data-flow necessary (PART 5 clobbered v2 as an address-arithmetic scratch);
+;   the 63 copies below (v3..v17, v50..v65, v34..v49, v18..v33) are LLVM
+;   codegen redundancy with negligible runtime cost (one-time, ~63 cycles).
 	v_mov_b32_e32 v3, v2
 	v_mov_b32_e32 v4, v2
 	v_mov_b32_e32 v5, v2
@@ -894,36 +979,29 @@ flash_attn_opus_kernel_0:
 	v_mov_b32_e32 v31, v2
 	v_mov_b32_e32 v32, v2
 	v_mov_b32_e32 v33, v2
-	s_branch .LBB0_10
-.LBB0_9:
-; OPUS steady-state loop tail/backedge landing.
-; PY (flash_attn_opus.py L1644-L1672):
-;   v_v = v_packs_b
-;   v_o = _mma1_step_k(1, v_p_1, v_v, v_o)
-;   v_o = _mma1_step_k(2, v_p_1, v_v, v_o)
-;   v_o = _mma1_step_k(3, v_p_1, v_v, v_o)
-;   v_s_0 = _attn_sub_row(v_s_0, m_row)
-;   v_s_0 = _anchor_v_s(v_s_0)
-;   v_p_0 = _attn_exp2_slice(v_s_0, 0, 16)
-;   _sched_barrier_pairs(6, 5, 4)
-;   _sched_barrier_exp_pairs(6, 3, 4)
-;   if const_expr(OPUS_SETPRIO):
-;   rocdl.s_setprio(0)
-;   rocdl.sched_barrier(0)
-;   rocdl.s_barrier()
-;   rocdl.sched_barrier(0)
-;   yield_args = [m_row, l_row] + v_o + [_v_pair_to_vec32(v_p_0)]
-;   loop_results = yield yield_args
+
+; Prologue → main loop preheader, PART 7: enter loop body.
+; PY (flash_attn_opus.py L1326-L1333, L1338):
+;   for j, loop_args in range(...): j_idx = j; ...  # body starts here
 ; NOTE:
-;   This label is reached after lazy-rescale fast/slow paths merge.
-;   The following MFMA/exp block completes the previous loop cluster before advancing j_idx by two tiles.
-; SCHED HINT:
-;   This backedge block is the group-4 completion window from the previous
-;   iteration: source `_sched_barrier_pairs(6, 5, 4)` and
-;   `_sched_barrier_exp_pairs(6, 3, 4)` selected the MFMA + VALU/EXP candidates
-;   above their markers. The later `s_setprio 0; s_barrier` pair is protected
-;   by the source `sched_barrier(0)` boundaries before the loop re-enters
-;   Cluster 0/1 staging.
+;   Unconditional jump SKIPS over .LBB0_9 (the Cluster 7 lazy-rescale merge
+;   block at ASM 973, which is positioned BEFORE .LBB0_10 for fall-through
+;   layout — see prior annotation on .LBB0_9). The first iteration enters
+;   directly at .LBB0_10 (loop body, ASM 1074, Cluster 0/1 staging for tile A).
+;   Subsequent iterations reach .LBB0_10 by falling through from the back-edge
+;   at ASM 1073 (`s_cbranch_vccz .LBB0_16; fall through`).
+	s_branch .LBB0_10
+
+.LBB0_9:
+; Cluster 7:
+; v_o = _mma1_step_k(1, v_p_1, v_v, v_o)
+; v_o = _mma1_step_k(2, v_p_1, v_v, v_o)
+; v_o = _mma1_step_k(3, v_p_1, v_v, v_o)
+; v_s_0 = _attn_sub_row(v_s_0, m_row)
+; v_s_0 = _anchor_v_s(v_s_0)
+; v_p_0 = _attn_exp2_slice(v_s_0, 0, 16)
+; _sched_barrier_pairs(6, 5, 4)
+; _sched_barrier_exp_pairs(6, 3, 4)
 	v_mfma_f32_32x32x16_bf16 v[2:17], v[118:121], v[102:105], v[2:17]
 	v_cndmask_b32_e32 v220, v98, v220, vcc
 	v_sub_f32_e32 v129, v81, v220
@@ -988,8 +1066,60 @@ flash_attn_opus_kernel_0:
 	v_exp_f32_e32 v114, v128
 	v_mfma_f32_32x32x16_bf16 v[18:33], v[174:177], v[110:113], v[18:33]
 	v_exp_f32_e32 v115, v129
+
+; Cluster 7:
+; if const_expr(OPUS_SETPRIO):
+; 	rocdl.s_setprio(0)
 	s_setprio 0
+; rocdl.sched_barrier(0)
+; rocdl.s_barrier()
+; rocdl.sched_barrier(0)
 	s_barrier
+
+; OPUS main loop back-edge / loop control (NOT inside any loop-body cluster).
+; PY (flash_attn_opus.py L1326-L1333, L1338, L1668-L1669):
+;   for j, loop_args in range(
+;       fx.Index(3),                          # start = 3
+;       max_num_tiles - fx.Index(1),          # bound = max_num_tiles - 1
+;       fx.Index(2),                          # step = 2
+;       init=init_args,
+;   ):
+;       ...                                   # body lowered to .LBB0_10 ... s_barrier above
+;       j_idx = j                             # PY L1338 (alias)
+;       ...
+;       yield_args = [m_row, l_row] + v_o + [_v_pair_to_vec32(v_p_0)]
+;       loop_results = yield yield_args       # PY L1669 — implicit back-edge fires here
+; NOTE:
+;   These 8 instructions are the LLVM-generated loop control / back-edge,
+;   NOT a translation of any Python statement inside the loop body. They run
+;   exactly ONCE per iteration, between the body's terminating `s_barrier`
+;   (above) and either the next iteration's .LBB0_10 (fall-through) or the
+;   epilogue .LBB0_16 (taken branch). The back-edge converges control from
+;   both lazy-rescale merge points: it is reached only via .LBB0_9 fall-through
+;   (Cluster 7's second lazy rescale → MMA1/softmax → s_barrier → here), so
+;   j += 2 is incremented exactly once per Python-level loop iteration.
+;
+;     s_add_u32  s12, s12, 2     ; PY L1331 step: s[12:13] (= j) += 2
+;     s_addc_u32 s13, s13, 0     ;   64-bit carry for j
+;     s_addk_i32 s26, 0x80       ; j_idx-derived KV byte offset += 128 (= 2 * BLOCK_N
+;                                ;   in some packed unit; tracks the loop-rolling K/V
+;                                ;   tile base pointer used by Cluster 0 staging)
+;     v_add_u32_e32 v0, 0xffffff80, v0   ; per-lane mirror of s26: v0 -= 128
+;                                ;   (compensates for the absolute base advancing by
+;                                ;   the same amount so per-lane VMEM offsets stay
+;                                ;   referenced to the new tile base)
+;     v_mov_b64_e32 v[82:83], s[10:11]   ; load loop bound to a VGPR pair so the
+;                                ;   v_cmp_lt_i64 can use it as a vector source
+;                                ;   (s[10:11] = max_num_tiles - 1, set in PART 1)
+;     v_cmp_lt_i64_e32 vcc, s[12:13], v[82:83]  ; vcc = (j < max_num_tiles - 1)
+;     s_mov_b32 s37, s38         ; snapshot the LDS K-tile DMA base used by this
+;                                ;   iteration's Cluster 0 (`s_add_i32 s38, s34, s37`
+;                                ;   at .LBB0_10 below). The "rolling base pointer"
+;                                ;   for double-buffered LDS K loads.
+;     s_cbranch_vccz .LBB0_16    ; if vccz (= !vcc → j NOT less than bound → loop
+;                                ;   done), jump to epilogue .LBB0_16. Otherwise
+;                                ;   fall through to .LBB0_10 (next iteration's
+;                                ;   Cluster 0/1 staging for tile A).
 	s_add_u32 s12, s12, 2
 	s_addc_u32 s13, s13, 0
 	s_addk_i32 s26, 0x80
@@ -998,11 +1128,10 @@ flash_attn_opus_kernel_0:
 	v_cmp_lt_i64_e32 vcc, s[12:13], v[82:83]
 	s_mov_b32 s37, s38
 	s_cbranch_vccz .LBB0_16
+
 .LBB0_10:
-; OPUS main loop, Cluster 0/1 staging for the next pair of KV tiles.
-; NOTE:
-;   buffer_load_dwordx4 ... lds starts global-to-LDS DMA for the future tile.
-;   ds_read_b128 pulls the current K tile from LDS to VGPRs before the QK MFMA chain.
+; Main loop
+; Cluster 0:
 ;   _async_load_v((j_idx - fx.Index(2)) * fx.Index(BLOCK_N), 1)
 	s_mov_b32 m0, s19
 	s_add_i32 s38, s34, s37
@@ -1034,7 +1163,9 @@ flash_attn_opus_kernel_0:
 ;   rocdl.sched_barrier(0)
 	s_waitcnt vmcnt(4) lgkmcnt(0)
 	s_barrier
-; OPUS main loop, Cluster 5 softmax for the older score tile while computing the new score tile.
+
+; Main loop
+; Cluster 1:
 ; PY (flash_attn_opus.py L1358-L1379):
 ;   v_s_1 = _mma0(v_k)
 ;   v_p_0 = _attn_exp2_slice(v_p_0, 16, 16)
@@ -1044,20 +1175,6 @@ flash_attn_opus_kernel_0:
 ;   v_p_0 = _anchor_v_p(v_p_0)
 ;   _sched_barrier_exp_pairs(6, 3, 1)
 ;   _sched_barrier_pairs(10, 5, 1)
-;   rocdl.sched_barrier(0)
-;   rocdl.s_barrier()
-;   rocdl.sched_barrier(0)
-; NOTE:
-;   The v_exp_f32 stream belongs to the previous score tile's second half.
-;   The v_add reduction updates l_row while QK MFMA produces the next tile's v_s.
-; SCHED HINT:
-;   Source Cluster 1 ended with `_sched_barrier_exp_pairs(6, 3, 1)` followed by
-;   `_sched_barrier_pairs(10, 5, 1)` and then `sched_barrier(0); s_barrier;
-;   sched_barrier(0)`. The group barriers selected the already-emitted MFMA,
-;   EXP, and VALU candidates above their markers. In final ISA this appears as
-;   interleaved MFMA + `v_exp_f32` / add-reduction windows; the surrounding
-;   `SCHED_BARRIER 0` pseudos are gone, but the next `s_barrier` is kept as the
-;   phase boundary before the following LDS/VMEM staging.
 	v_mfma_f32_32x32x16_bf16 v[82:97], v[98:101], v[130:133], 0
 	v_exp_f32_e32 v122, v66
 	v_exp_f32_e32 v123, v67
@@ -1178,18 +1295,15 @@ flash_attn_opus_kernel_0:
 ; v_p_0 = _anchor_v_p(v_p_0)
 	;;#ASMSTART
 	;;#ASMEND
-	s_barrier
-; OPUS main loop, Cluster 2 next-tile K prefetch and V LDS staging.
-; PY (flash_attn_opus.py L1381-L1395):
-;   _async_load_k(j_idx * fx.Index(BLOCK_N), 1)
-;   v_v = _read_v_packs_for_buf(0, urv_base_per_lane)
-;   rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
-;   _waitcnt_vm_n(NUM_DMA_K + NUM_DMA_V)
 ;   rocdl.sched_barrier(0)
 ;   rocdl.s_barrier()
 ;   rocdl.sched_barrier(0)
-; NOTE:
-;   Inserted from plan: previously-unmapped Python cluster now annotated for ASM correspondence.
+	s_barrier
+
+; Main loop
+; Cluster 2:
+; PY (flash_attn_opus.py L1381-L1395):
+;   _async_load_k(j_idx * fx.Index(BLOCK_N), 1)
 	s_add_i32 s38, s18, s37
 	s_mov_b32 m0, s30
 	s_nop 0
@@ -1197,6 +1311,7 @@ flash_attn_opus_kernel_0:
 	s_mov_b32 m0, s29
 	s_nop 0
 	buffer_load_dwordx4 v216, s[4:7], s38 offen lds
+;   v_v = _read_v_packs_for_buf(0, urv_base_per_lane)
 	;;#ASMSTART
 	ds_read_b64_tr_b16 v[194:195], v217 offset:0
 
@@ -1325,12 +1440,18 @@ flash_attn_opus_kernel_0:
 	ds_read_b64_tr_b16 v[128:129], v217 offset:9664
 
 	;;#ASMEND
+;   rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
+;   _waitcnt_vm_n(NUM_DMA_K + NUM_DMA_V)
+;   rocdl.sched_barrier(0)
+;   rocdl.s_barrier()
+;   rocdl.sched_barrier(0)
 	s_waitcnt vmcnt(4) lgkmcnt(0)
 	s_barrier
+
+; Cluster 3:
 ; if const_expr(OPUS_SETPRIO):
 ; 	rocdl.s_setprio(1)
 	s_setprio 1
-
 ; v_o = _mma1_step_k(0, v_p_0, v_v, v_o)
 ; #         D_ACC row_max = attn_row_max<T>(v_s[1]);
 ; v_s_1 = _v_s_vec_to_lists(v_s_1)
@@ -1471,7 +1592,6 @@ flash_attn_opus_kernel_0:
 	v_mul_f32_e32 v218, v68, v218
 .LBB0_12:
 ; OPUS lazy rescale fast-path merge.
-; PY (flash_attn_opus.py L1462-L1473):
 ;   v_o = _mma1_step_k(1, v_p_0, v_v, v_o)
 ;   v_o = _mma1_step_k(2, v_p_0, v_v, v_o)
 ;   v_o = _mma1_step_k(3, v_p_0, v_v, v_o)
@@ -1480,16 +1600,6 @@ flash_attn_opus_kernel_0:
 ;   v_p_1 = _attn_exp2_slice(v_s_1, 0, 16)
 ; _sched_barrier_pairs(6, 5, 2)
 ; _sched_barrier_exp_pairs(6, 3, 2)
-; NOTE:
-;   v_cndmask selects old m_row on the fast path or new row_max from the slow path.
-;   Remaining P*V MFMA steps overlap with score subtraction and exp2 for the next P tile.
-; SCHED HINT:
-;   Source `_sched_barrier_pairs(6, 5, 2)` covers the MFMA + score-subtraction
-;   window below, then `_sched_barrier_exp_pairs(6, 3, 2)` covers the
-;   MFMA + `v_exp_f32` window. Because `sched.group.barrier` scans upward, both
-;   hints describe the instructions immediately above their source markers; in
-;   this final block they materialize as 6 MFMA groups interleaved first with
-;   VALU `v_sub_f32`, then with TRANS `v_exp_f32`.
 	s_nop 0
 	v_mfma_f32_32x32x16_bf16 v[2:17], v[190:193], v[70:73], v[2:17]
 	v_cndmask_b32_e32 v220, v66, v220, vcc
@@ -1565,7 +1675,6 @@ flash_attn_opus_kernel_0:
 	s_barrier
 
 ; Cluster 4:
-; PY (flash_attn_opus.py L1541-L1555):
 ; NOTE:
 ;   Priority is dropped before the barrier so the other wave group can catch up.
 ;   The second ping-pong half repeats the same QK/softmax/P*V pattern with swapped LDS buffers.
@@ -1734,7 +1843,7 @@ flash_attn_opus_kernel_0:
 	s_barrier
 
 ; Cluster 6:
-; OPUS main loop, K[j+1] prefetch + V LDS + causal mask.
+; Main loop
 ;   _async_load_k((j_idx + fx.Index(1)) * fx.Index(BLOCK_N), 0)
 	s_mov_b32 m0, s31
 	s_add_i32 s37, s35, s37
@@ -1872,14 +1981,53 @@ flash_attn_opus_kernel_0:
 	ds_read_b64_tr_b16 v[176:177], v221 offset:9664
 
 	;;#ASMEND
-; if const_expr(CAUSAL):
-; 	v_s_0 = _causal_mask_prologue_if_needed(
-; 		v_s_0,
-; 		j_idx - fx.Index(1),
-; 		j_idx * fx.Index(BLOCK_N),
-; 	)
-; else:
-; 	v_s_0 = _v_s_vec_to_lists(v_s_0)
+; PY:
+;   if const_expr(CAUSAL):
+;       v_s_0 = _causal_mask_prologue_if_needed(
+;           v_s_0,
+;           j_idx - fx.Index(1),         # tile_idx = j - 1
+;           j_idx * fx.Index(BLOCK_N),   # kv_end_pos = j * 64
+;       )
+; CAUSAL DESIGN INVARIANT (why loop body has only ONE mask call for 2 tiles/iter):
+;   Each loop iter processes 2 KV tiles: v_s_1 (= tile j_idx - 2, Cluster 1)
+;   and v_s_0 (= tile j_idx - 1, Cluster 5). Only v_s_0 has a mask call here;
+;   v_s_1 has NO mask call anywhere in the loop body. This is correct because:
+;
+;   1. Under causal, max_num_tiles is clipped (PY L460-L479):
+;        max_num_tiles = ceil(q_block_end / BLOCK_N) = 4(q_block_idx + 1)
+;      so each workgroup has EXACTLY 4 boundary tiles {4k, 4k+1, 4k+2, 4k+3}
+;      where k = q_block_idx. Tiles T < 4k are fully unmasked; tiles T >= 4(k+1)
+;      are never reached (clipped away).
+;
+;   2. The 4 boundary tiles are partitioned across the kernel:
+;        • Epilogue masks tiles 4k+1, 4k+2, 4k+3 (PY L1732, L1841, L1948).
+;        • LAST loop iter (j = max_num_tiles - 3 = 4k+1) masks tile 4k as
+;          its v_s_0 (tile j_idx - 1 = 4k) → this code path.
+;        • Tile 0 (only a boundary for workgroup 0) is handled by prologue
+;          (PY L1298); for workgroup 0 the loop body is empty (PART 1 guard).
+;
+;   3. v_s_1 = tile (j_idx - 2) is ALWAYS structurally < 4k:
+;        • For iter j < max_num_tiles - 3: j_idx - 2 < 4k - 1 < 4k.
+;        • For the LAST iter j = 4k+1: j_idx - 2 = 4k - 1 < 4k.
+;      So v_s_1 is never a boundary tile — no mask call is needed for it.
+;
+;   4. v_s_0 = tile (j_idx - 1) only triggers a REAL mask in the LAST iter
+;      (j = 4k+1, tile j-1 = 4k). For earlier iters, the SCF if-op's runtime
+;      check `q_start_pos < kv_end_pos` (PY L1038-L1042) fails for all waves
+;      in the workgroup (q_start_pos >= k*256 >= 4k*64 > (j-1)*64), and the
+;      s_cbranch_scc1 below takes the no-op .LBB0_14 ELSE branch.
+;
+;   So `_causal_mask_prologue_if_needed` here is DEFENSIVE: structurally a
+;   no-op for all but the last iter of the loop.
+;
+;   ASM that follows is the THEN branch of `_causal_mask_prologue_if_needed`'s
+;   SCF if-op (the actual mask application via `_causal_mask_inplace`,
+;   PY L949-L1018). The 16 ;;#ASMSTART/;;#ASMEND inline-asm blocks below are
+;   8 vec2_imm pairs for s_hi (each pair masks 2 of 16 hi-half elements with
+;   (thr_x, thr_y) ∈ {(0,1),(2,3),(8,9),(10,11),(16,17),(18,19),(24,25),
+;   (26,27)}). The 8 pairs for s_lo are emitted earlier in the same THEN
+;   branch (above this point). v222 holds 0xff800000 = -inf, set in PART 5
+;   of the preheader.
 	s_cbranch_scc1 .LBB0_14
 	v_add_u32_e32 v225, 32, v0
 	;;#ASMSTART
@@ -2118,11 +2266,11 @@ flash_attn_opus_kernel_0:
 	s_cmp_eq_u64 vcc, exec
 	s_cselect_b64 vcc, -1, 0
 	s_cbranch_vccnz .LBB0_9
+; _lazy_rescale_o else-branch: scale old O accumulators by corr.
 ; corr = rocdl.exp2(T.f32, _raw(_fsub(m_row, m_tile_max)))
 	v_sub_f32_e32 v99, v220, v98
 	v_exp_f32_e32 v100, v99
 	s_nop 0
-; _lazy_rescale_o else-branch: scale old O accumulators by corr.
 ;   scaled_accs = list(v_o)
 ;   _scale_o(scaled_accs, corr)
 	v_pk_mul_f32 v[16:17], v[100:101], v[16:17] op_sel_hi:[0,1]
@@ -2214,6 +2362,7 @@ flash_attn_opus_kernel_0:
 ; scaled_l_row = _fmul(l_row, corr)
 	v_mul_f32_e32 v218, v100, v218
 	s_branch .LBB0_9
+
 .LBB0_16:
 ; OPUS epilogue entry.
 ; PY (flash_attn_opus.py L1675-L1698):
