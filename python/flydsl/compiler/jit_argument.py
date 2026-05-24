@@ -161,17 +161,25 @@ class TensorAdaptor:
         # Marked-static dims contribute their (shape, stride) to the cache key.
         self._cached_dims: frozenset = frozenset()
         # Default to layout-dynamic memref so one compile serves all sizes.
-        # Skipped for tensors without an unambiguous leading stride-1 dim.
+        # Skipped (falls back to static memref) for tensors without an
+        # unambiguous leading stride-1 dim -- 0-rank, all-non-unit-stride
+        # slices, multi-stride-1 broadcasts -- where C++ markLayoutDynamic
+        # throws RuntimeError or no stride-1 dim is found.
         try:
             self.tensor_adaptor.mark_layout_dynamic(-1, 1)
             self._dyn_leading_dim = next(i for i, s in enumerate(self._orig_strides) if int(s) == 1)
             self._is_layout_dynamic = True
-        except Exception:
+        except (RuntimeError, StopIteration):
             self._dyn_leading_dim = -1
             self._is_layout_dynamic = False
 
     @staticmethod
     def _extract_data_ptr(arg):
+        # arg may be a raw torch.Tensor or a TensorAdaptor wrapping one;
+        # both can hit the same fast-path CallState because they share
+        # raw_cache_signature / __cache_signature__ when defaults match.
+        if hasattr(arg, "_tensor_keepalive"):
+            return arg._tensor_keepalive.data_ptr()
         return arg.data_ptr()
 
     @classmethod
