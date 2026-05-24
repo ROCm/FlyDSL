@@ -107,19 +107,10 @@ def make_buffer_tensor(
     """Wrap ``tensor`` in a buffer-resource view for hardware OOB-checked
     loads / stores.
 
-    Args:
-        tensor: Source tensor with a layout.
-        max_size: If ``True`` (default) use ``0xFFFFFFFF`` as the descriptor
-            size -- safe coarse OOB checking that survives any cache reuse.
-        num_records_bytes: Explicit byte count for the descriptor.  Prefer
-            this when the exact size is known at compile time (e.g.
-            ``M * N * elem_bytes`` from constexpr extents) -- the
-            descriptor folds to a constant in IR and avoids the runtime
-            ``cosize`` multiplication.  When omitted with
-            ``max_size=False``, ``num_records`` is derived at runtime from
-            ``cosize(layout) * elem_bytes``; since TensorAdaptor defaults
-            to a layout-dynamic memref, this is a runtime expression that
-            adapts to the actual tensor extent (no silent OOB).
+    ``max_size=True`` (default) sets the descriptor to ``0xFFFFFFFF``.
+    Pass ``num_records_bytes`` when the byte count is a compile-time
+    constant (folds to a constant in IR).  Otherwise with ``max_size=False``
+    it is derived at runtime from ``cosize(layout) * elem_bytes``.
     """
     elem_ty = tensor.element_type
 
@@ -130,13 +121,8 @@ def make_buffer_tensor(
         if not hasattr(num_records_bytes, "ir_value"):
             num_records_bytes = Int64(num_records_bytes)
     elif max_size:
-        MAX_BUFFER_SIZE = 0xFFFFFFFF
-        num_records_bytes = Int64(MAX_BUFFER_SIZE)
+        num_records_bytes = Int64(0xFFFFFFFF)
     else:
-        # ``max_size=False`` + no explicit byte count: derive from
-        # ``cosize(layout) * elem_bytes``.  TensorAdaptor defaults to
-        # layout-dynamic memref so ``cosize`` is a runtime expression that
-        # adapts to the actual tensor extent.
         elem_bits = elem_ty.width
         if elem_bits % 8 == 0:
             num_records_bytes = Int64(get_scalar(cosize(layout)) * (elem_bits // 8))

@@ -158,22 +158,12 @@ class TensorAdaptor:
         self._orig_dtype = tensor.dtype
         self._orig_shape = tensor.shape
         self._orig_strides = tensor.stride()
-        # Dims listed here contribute their concrete (shape, stride) values
-        # to the JIT cache key; other dims are excluded so a single compiled
-        # kernel can serve calls with different runtime sizes.
+        # Marked-static dims contribute their (shape, stride) to the cache key.
         self._cached_dims: frozenset = frozenset()
-        # Default = layout-dynamic memref so the IR is shape-independent and
-        # a single compiled kernel serves calls with different sizes.  The
-        # fast-path CallState packs an extra layout-buffer slot containing
-        # the runtime shape / non-leading stride values; see
-        # ``_reusable_slot_spec``.  Silently skipped if the tensor lacks an
-        # unambiguous leading stride-1 dim (e.g. 0-rank, broadcast strides);
-        # those tensors stay static and behave as before.
+        # Default to layout-dynamic memref so one compile serves all sizes.
+        # Skipped for tensors without an unambiguous leading stride-1 dim.
         try:
             self.tensor_adaptor.mark_layout_dynamic(-1, 1)
-            # Cache resolved leading dim + stride/shape rank so the fast
-            # path can pack the layout buffer without re-querying the C++
-            # adaptor on every call.
             self._dyn_leading_dim = next(i for i, s in enumerate(self._orig_strides) if int(s) == 1)
             self._is_layout_dynamic = True
         except Exception:
@@ -186,43 +176,32 @@ class TensorAdaptor:
 
     @classmethod
     def _reusable_slot_spec(cls, arg):
-        """Reusable slot for tensor arguments.
+        """Reusable slot(s) for a tensor argument.
 
-        Returns either:
-        * a single ``(ctype, extract)`` tuple for static-memref tensors --
-          only the data pointer changes between calls; OR
-        * a list ``[(ctype, extract), (ctype_buf, pack_buf), ...]`` for
-          dynamic-memref tensors -- the kernel ABI carries an extra layout
-          buffer with the runtime shape / non-leading stride values; the
-          fast path packs them into a fixed-size byte buffer per call
-          (no DLPack export).
-
-        ``extract`` for a scalar slot returns the value to assign to
-        ``storage.value``; ``extract`` for a buffer slot writes into
-        ``storage`` in place (memmove'd into the packed pointer's target).
+        Returns ``(ctype, extract)`` for static memref (data ptr only), or a
+        list of such tuples for dynamic memref (data ptr + a layout-buffer
+        slot carrying the runtime shape / non-leading stride values).
+        Buffer slots use the in-place protocol: ``extract(arg, storage)``
+        writes into ``storage`` via ``struct.pack_into``.
         """
         if not hasattr(arg, "data_ptr"):
             return None
 
-        # Build / reuse a TensorAdaptor to inspect the memref dynamism.
         adaptor = arg if isinstance(arg, cls) else cls(arg)
         if not getattr(adaptor, "_is_layout_dynamic", False):
-            # Static memref: single slot, existing path.
             return ctypes.c_void_p, cls._extract_data_ptr
 
         # Dynamic memref: pre-compute the layout-buffer packing plan.
+        # Layout matches C++ buildMemRefDesc: shape i32's then non-leading
+        # stride i32/i64's, little-endian packed.
         rank = len(adaptor._orig_shape)
         leading = adaptor._dyn_leading_dim
         use_32bit_stride = bool(adaptor.use_32bit_stride)
         stride_dim_indices = tuple(d for d in range(rank) if d != leading)
-        shape_size = rank * 4  # i32 per dim
+        shape_size = rank * 4
         stride_elem = 4 if use_32bit_stride else 8
-        stride_size = len(stride_dim_indices) * stride_elem
-        buf_size = shape_size + stride_size
-        buf_ctype = ctypes.c_byte * buf_size
+        buf_ctype = ctypes.c_byte * (shape_size + len(stride_dim_indices) * stride_elem)
 
-        # Pre-built struct.Struct codecs for the shape and stride sections;
-        # both are little-endian packed (matches C++ buildMemRefDesc).
         import struct as _struct
 
         shape_codec = _struct.Struct("<" + "i" * rank) if rank else None
@@ -239,8 +218,6 @@ class TensorAdaptor:
             _stride_dims=stride_dim_indices,
             _shape_size=shape_size,
         ):
-            # ``t`` is the raw arg passed by the caller (torch.Tensor or
-            # TensorAdaptor wrapping one).
             tens = t._tensor_keepalive if isinstance(t, cls) else t
             mv = memoryview(storage).cast("b")
             if _shape_codec is not None:

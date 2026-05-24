@@ -939,29 +939,23 @@ def _build_call_state(sig, args_tuple, func_exe):
         if spec is None:
             return None
 
-        # A spec may be either a single ``(ctype, extract)`` tuple (one slot
-        # per arg, scalar value protocol) or a list of such tuples for ABIs
-        # that need multiple slots per arg (e.g. dynamic-memref tensors
-        # whose calling convention carries a separate layout-buffer struct).
+        # A spec is either (ctype, extract) or a list of such tuples for
+        # multi-slot ABIs (e.g. dynamic-memref tensors with a layout buffer).
         slot_list = spec if isinstance(spec, list) else [spec]
 
         for ctype, extract in slot_list:
-            # Validate the extract callable is invokable with this arg.
-            # Buffer-slot extracts take ``(arg, storage)`` and mutate in
-            # place; scalar extracts take ``(arg)`` and return a value.
+            # Scalar slots: extract(arg) -> value.  Buffer slots:
+            # extract(arg, storage) writes in place.
             try:
                 if hasattr(ctype, "value"):
-                    extract(arg)  # scalar protocol, returns assigned value
+                    extract(arg)
                 else:
-                    extract(arg, ctype())  # buffer protocol, writes in place
+                    extract(arg, ctype())
             except (AttributeError, TypeError):
                 return None
             slot_specs.append((i, ctype, extract))
 
-    # Auto-stream: append a zero-valued slot for the default (NULL) stream.
-    # When no user-declared stream parameter exists, the compiled kernel
-    # still expects a stream pointer as the last argument.  A NULL pointer
-    # (value 0) selects the HIP default stream.
+    # Auto-stream: NULL ptr selects HIP default stream when no user stream arg.
     if not has_user_stream:
         slot_specs.append((-1, ctypes.c_void_p, None))
 
@@ -994,8 +988,7 @@ class CallState:
         updaters = []
 
         for packed_idx, (arg_idx, ctype, extract) in enumerate(self._spec):
-            # ``ctype(0)`` works for scalar ctypes (c_void_p, c_int, ...) but
-            # not for arrays; arrays need the zero-arg constructor.
+            # ctype(0) works for scalar ctypes; array ctypes need zero-arg ctor.
             try:
                 s = ctype(0)
             except TypeError:
@@ -1003,8 +996,6 @@ class CallState:
             packed[packed_idx] = ctypes.addressof(s)
             storages.append(s)
             if extract is not None:
-                # Scalar slots use the value-return protocol; buffer slots
-                # (array ctypes) use the in-place mutation protocol.
                 is_scalar = hasattr(s, "value")
                 updaters.append((arg_idx, s, extract, is_scalar))
 
