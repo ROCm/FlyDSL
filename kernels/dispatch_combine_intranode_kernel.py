@@ -27,6 +27,7 @@ from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from flydsl.expr import T
 
 from flydsl.expr.rocdl import ballot_i64, readlane
+from flydsl.expr import rocdl as _rocdl
 from flydsl.expr.vector import bitcast_i32_to_v2bf16, bitcast_v2bf16_to_i32
 from flydsl.expr.buffer_ops import (
     create_buffer_resource_from_addr,
@@ -227,21 +228,25 @@ def make_dispatch_kernel(
         gw_num = block_num * warp_num_per_block
         limit  = cur_tok * experts_per_token
 
-        # D-flag C-1: 入口 grid-stride memset reset comb flag。必须早于
-        # Phase 2 send recv-signal（line 320 之前），保证 gemm2 启动 atomic
-        # 之前所有 PE 的本地 flag 都已清零。const_expr OFF 时整段 DCE。
+        # D-flag C-1: 入口 grid-stride memset reset shmem_comb_token_flag。
+        # 必须早于 Phase 2 send recv-signal，保证远端 fused gemm2 启动
+        # atomic 之前本卡 flag 清零。const_expr OFF 时整段 DCE。
+        #
+        # 用 system-scope store + release fence 保证 reset commit
+        # happens-before Phase 2 的 cross-card atomic ops，避免与
+        # 远端 fused gemm2 epilogue 的 system-scope atomic_add 产生
+        # 跨 scope ordering race。
         if const_expr(use_token_flag_sync):
             mr_const = npes * max_tok_per_rank
             gtid = bid * (warp_num_per_block * 64) + tid
             gthrd_num = block_num * warp_num_per_block * 64
-            _r_comb_flag_reset = create_buffer_resource_from_addr(
-                _lv_unwrap(addr_comb_flag))
             for i in range(_to_idx(gtid), _to_idx(mr_const), _to_idx(gthrd_num)):
-                buffer_store(_lv_unwrap(arith.constant(0)),
-                             _r_comb_flag_reset, _to_i32(i))
-            # 不在此处加 barrier：reset 是 per-token write 不会被同卡其他 thread
-            # 看到 stale 值；跨卡可见性由 Phase 2/3 的 atomic + mori_shmem wait
-            # 串联保证（store_i32_system 已是 monotonic system-scope）。
+                store_i32_system(addr_comb_flag, _to_i32(i),
+                                 arith.constant(0))
+            fx.barrier()
+            _rocdl.s_waitcnt(0)
+            _llvm_d.FenceOp(
+                _llvm_d.AtomicOrdering.release, syncscope="one-as")
         _r_idx     = create_buffer_resource_from_addr(_lv_unwrap(addr_idx))
         _r_wts     = create_buffer_resource_from_addr(_lv_unwrap(addr_wts))
         _r_tok_map = create_buffer_resource_from_addr(_lv_unwrap(addr_tok_map))

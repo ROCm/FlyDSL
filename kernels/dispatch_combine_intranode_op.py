@@ -275,14 +275,24 @@ class FlyDSLDispatchCombineIntraNodeOp:
             (mt * k,), sentinel, dtype=torch.int32, device=self._dev)
 
         # D-flag C-1 device-local counter（仅本卡可见，无需 symmetric）：
-        # GEMM2 epilogue 用 atomicrmw add (device-scope) 在 (m_tile, j) 维度
-        # 累计 N-tile 完成数。当 old == num_n_tiles - 1（最后一个 N-tile
-        # 完成）时，由代表 thread 发起跨卡 system-scope atomic_add
-        # remote_flag[token_id] += 1，并 atomicrmw xchg 把 counter 复位为 0
-        # 供下一 chain 复用。长度 mr * topk = npes * max_tok_per_rank * k
-        # 覆盖 worst-case routing。fallback 路径不用。
+        # GEMM2 epilogue 用 atomicrmw add (device-scope) 在 row_i32（即
+        # sorted_token_ids 的全局 row 索引）维度累计 N-tile 完成数。
+        # 当 old == num_n_tiles - 1 时由代表 thread 跨卡 system-scope
+        # atomic_add(remote_flag[dest_lid], 1)，并 atomicrmw xchg 把 counter
+        # 复位 0 供下一 chain 复用。fallback 路径不用。
+        #
+        # **size 必须覆盖 row_i32 上界 ≤ num_valid_ids**。aiter sorting 下
+        # num_valid_ids 上界 = max_padded = mr*k + npes*epr*tile_m - k
+        # （tile_m 是 GEMM2 编译时 m-tile，最大常用 128）。早期版本误用
+        # mr*k=npes*mt*k 作为 size，在 BS≤8 + aiter sorting 下 row_i32 可
+        # 达 epr*tile_m=1024 (epr=32,tile_m=32) >> mr*k=256，触发 OOB
+        # atomic ++ → 跨卡 ++ 永不触发 → combine spin 永远等不到 → hang。
+        # 这里按 tile_m_max=128 取保守上界，多 ~16KB/rank 开销可忽略。
+        epr = cfg.num_experts_per_rank
+        tile_m_max = 128
+        local_counter_size = mr * k + npes * epr * tile_m_max
         self.device_local_counter = torch.zeros(
-            mr * k, dtype=torch.int32, device=self._dev)
+            local_counter_size, dtype=torch.int32, device=self._dev)
 
         # StdMoE buffers
         if cfg.enable_std_moe:
