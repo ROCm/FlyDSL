@@ -10,9 +10,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from .._mlir import ir
 from .._mlir.dialects import arith, gpu
 from ..expr.typing import Constexpr
-from ._annotations import resolve_signature
 from .ast_rewriter import ASTRewriter
-from .jit_argument import is_type_param_annotation
+from .jit_argument import is_type_param_annotation, resolve_signature
 from .mlir_utils import convert_to_mlir_attr
 from .protocol import construct_from_ir_values, extract_to_ir_values, get_ir_types
 

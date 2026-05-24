@@ -3,6 +3,7 @@
 
 import ctypes
 import inspect
+import warnings
 from typing import Callable, Dict, List, Optional, Tuple, Type, get_origin
 
 import torch
@@ -10,6 +11,21 @@ import torch
 from .._mlir._mlir_libs._mlirDialectsFly import DLTensorAdaptor
 from ..expr.typing import Boolean, Constexpr, Float32, Int32, Stream, Tensor
 from .protocol import DslType, JitArgument
+
+_RESOLVE_SIG_WARNED = set()
+
+
+def resolve_signature(func):
+    """``inspect.signature`` with PEP 563 string annotations resolved; warn once on NameError fallback."""
+    try:
+        return inspect.signature(func, eval_str=True)
+    except NameError as exc:
+        key = getattr(func, "__qualname__", repr(func))
+        if key not in _RESOLVE_SIG_WARNED:
+            _RESOLVE_SIG_WARNED.add(key)
+            warnings.warn(f"FlyDSL: unresolved annotation in {key!r} ({exc}); cache key may degrade.", stacklevel=2)
+        return inspect.signature(func)
+
 
 _FLOAT8_DTYPES = tuple(
     dt

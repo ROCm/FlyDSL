@@ -24,10 +24,9 @@ from .._mlir.dialects import func
 from .._mlir.passmanager import PassManager
 from ..expr.typing import Constexpr, Stream
 from ..utils import env, log
-from ._annotations import resolve_signature
 from .ast_rewriter import ASTRewriter
 from .backends import compile_backend_name, get_backend
-from .jit_argument import convert_to_jit_arguments, is_type_param_annotation
+from .jit_argument import convert_to_jit_arguments, is_type_param_annotation, resolve_signature
 from .jit_executor import CompiledArtifact
 from .kernel_function import (
     CompilationContext,
