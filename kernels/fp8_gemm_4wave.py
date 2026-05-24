@@ -147,8 +147,9 @@ def compile_fp8_gemm_4w(
         B1_gl_offset = (tile_j * BLOCK_N + LDS_BLOCK_N) * K
         B_K_STEP = (2 * 1024) if b_preshuffled else BLOCK_K
 
-        gA = make_fp8_buffer_tensor(A, F8_IR_t)
-        gB = make_fp8_buffer_tensor(B_T, F8_IR_t)
+        # FP8 = 1 byte/elem; exact descriptor size from compile-time shape.
+        gA = make_fp8_buffer_tensor(A, F8_IR_t, num_records_bytes=M * K)
+        gB = make_fp8_buffer_tensor(B_T, F8_IR_t, num_records_bytes=N * K)
         ga_div = fx.logical_divide(gA, fx.make_layout(1, 1))
         gb_div = fx.logical_divide(gB, fx.make_layout(1, 1))
 

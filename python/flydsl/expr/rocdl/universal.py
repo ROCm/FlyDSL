@@ -98,21 +98,56 @@ def WMMA(m, n, k, elem_ty_ab, elem_ty_acc=None):
     )
 
 
-def make_buffer_tensor(tensor: Tensor, max_size: bool = True) -> Tensor:
+def make_buffer_tensor(
+    tensor: Tensor,
+    max_size: bool = True,
+    *,
+    num_records_bytes=None,
+) -> Tensor:
+    """Wrap ``tensor`` in a buffer-resource view for hardware OOB-checked
+    loads / stores.
+
+    Args:
+        tensor: Source tensor with a layout.
+        max_size: If ``True`` (default) use ``0xFFFFFFFF`` as the descriptor
+            size -- safe coarse OOB checking that survives any cache reuse.
+        num_records_bytes: Explicit byte count for the descriptor.  Required
+            when ``max_size=False``.  Should be computed from runtime tensor
+            extents (e.g. ``M * N * elem_bytes`` where ``M``/``N`` are
+            runtime ``fx.Int32``) so the cached kernel stays valid across
+            shapes.
+
+    Why ``num_records_bytes`` is required when ``max_size=False``:
+        Auto-deriving from ``cosize(layout) * elem_bytes`` bakes the static
+        layout's shape values into IR.  The JIT cache key does not include
+        shape by default, so the same compiled artifact is reused for calls
+        with different shapes -- and the first shape's ``num_records`` then
+        silently truncates OOB reads / writes on the others.  This is the
+        PR #551 fp8gemm regression mode; the guard makes the unsafe pattern
+        impossible at compile time.
+    """
     elem_ty = tensor.element_type
 
     ptr = get_iter(tensor)
     layout = get_layout(tensor)
 
-    if max_size:
+    if num_records_bytes is not None:
+        if not hasattr(num_records_bytes, "ir_value"):
+            num_records_bytes = Int64(num_records_bytes)
+    elif max_size:
         MAX_BUFFER_SIZE = 0xFFFFFFFF
         num_records_bytes = Int64(MAX_BUFFER_SIZE)
     else:
-        elem_bits = elem_ty.width
-        if elem_bits % 8 == 0:
-            num_records_bytes = Int64(get_scalar(cosize(layout)) * (elem_bits // 8))
-        else:
-            num_records_bytes = Int64((get_scalar(cosize(layout)) * elem_bits + 7) // 8)
+        raise ValueError(
+            "make_buffer_tensor(..., max_size=False) without "
+            "num_records_bytes auto-derives num_records from cosize(layout), "
+            "baking the static shape into IR.  The JIT cache key does not "
+            "include shape by default, so a kernel compiled for shape A is "
+            "reused for shape B with A's num_records baked in -- silently "
+            "truncating OOB reads / writes.  Pass num_records_bytes "
+            "explicitly (computed from runtime tensor extents) or use "
+            "max_size=True for the safe coarse OOB path."
+        )
 
     from ..buffer_ops import _get_buffer_flags
 

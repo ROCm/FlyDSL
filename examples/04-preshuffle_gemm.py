@@ -23,9 +23,12 @@ def gemm_kernel(
     tid = fx.thread_idx.x
     bid_x, bid_y, _ = fx.block_idx
 
-    A = fx.rocdl.make_buffer_tensor(A, max_size=False)
-    B = fx.rocdl.make_buffer_tensor(B, max_size=False)
-    C = fx.rocdl.make_buffer_tensor(C, max_size=False)
+    # Exact descriptor sizes from compile-time shape (f16 = 2 bytes/elem);
+    # ``num_records_bytes`` is required with ``max_size=False`` to avoid
+    # silent OOB on JIT-cache reuse across shapes.
+    A = fx.rocdl.make_buffer_tensor(A, max_size=False, num_records_bytes=M * K * 2)
+    B = fx.rocdl.make_buffer_tensor(B, max_size=False, num_records_bytes=N * K * 2)
+    C = fx.rocdl.make_buffer_tensor(C, max_size=False, num_records_bytes=M * N * 2)
 
     gA_k = fx.flat_divide(A, (BLOCK_M, BLOCK_K))[None, None, bid_x, None]  # (BM, BK, k)
     gB_k = fx.flat_divide(B, (BLOCK_N, BLOCK_K))[None, None, bid_y, None]  # (BN, BK, k)

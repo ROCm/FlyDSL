@@ -91,8 +91,9 @@ def compile_fp8_gemm_8w(*, M: int, N: int, K: int, BLOCK_M: int = 256, BLOCK_N: 
         B0_gl_offset = (block_n * BLOCK_N) * K
         B1_gl_offset = (block_n * BLOCK_N + LDS_BLOCK_N) * K
 
-        gA = make_fp8_buffer_tensor(A, F8_IR_t)
-        gB = make_fp8_buffer_tensor(B_T, F8_IR_t)
+        # FP8 = 1 byte/elem; exact descriptor size from compile-time shape.
+        gA = make_fp8_buffer_tensor(A, F8_IR_t, num_records_bytes=M * K)
+        gB = make_fp8_buffer_tensor(B_T, F8_IR_t, num_records_bytes=N * K)
         a_div = fx.logical_divide(gA, fx.make_layout(1, 1))
         b_div = fx.logical_divide(gB, fx.make_layout(1, 1))
 
