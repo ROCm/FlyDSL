@@ -56,7 +56,6 @@ class FlyDSLDispatchCombineConfig:
     data_type: torch.dtype = torch.bfloat16
     warp_num_per_block: int = 16
     block_num: int = 80
-    chip: str = "gfx950"
     scale_dim: int = 0
     scale_type_size: int = 0
     enable_std_moe: bool = False

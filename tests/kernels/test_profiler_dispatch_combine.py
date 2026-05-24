@@ -32,8 +32,8 @@ Launching (works under torchrun or plain python):
   # profile + cudagraph
   python tests/kernels/test_profiler_dispatch_combine.py --mode profile --cudagraph
 
-  # FlyDSL only
-  python tests/kernels/test_profiler_dispatch_combine.py --bench-op flydsl
+  # FlyDSL + mori head-to-head perf comparison
+  python tests/kernels/test_profiler_dispatch_combine.py --compare-mori
 """
 
 from __future__ import annotations
@@ -121,9 +121,9 @@ CI_CASES = [
         # correct (Stage 1 fills shmem_comb_inp_tok and Stage 3 writes
         # ``k*inp`` into shmem_comb_out_tok); the previous "zero output"
         # symptom was actually mori's P2P-read reference returning all
-        # zeros.  ``verify_op`` now self-checks ``fly == k*inp`` instead
-        # of comparing against the broken mori ref, so this case can
-        # participate in the full sweep (accuracy + profile).
+        # zeros.  Accuracy is now validated by the FlyDSL self-check
+        # (``fly == k*inp``) so this case can participate in the full
+        # sweep (accuracy + profile).
     },
     {
         "name": "bf16_std_moe",
@@ -435,6 +435,29 @@ def _allreduce_stats(
     return {k: {"avg": avg[i].item(), "min": mn[i].item(), "max": mx[i].item()} for i, k in enumerate(keys)}
 
 
+def _algo_bw_GBs(total_recv: int, token_bytes_per_tok: int, duration_us: float) -> float:
+    """Per-rank single-direction bandwidth in decimal GB/s.
+
+    Mirrors mori ``bench_dispatch_combine.py`` L403-404:
+
+        bytes  = total_recv * token_bytes_per_tok
+        bw_GBs = bytes / 1000**3 / (duration_us / 1e6)
+
+    ``token_bytes_per_tok`` is ``cfg.token_bytes`` which equals
+    ``hidden_dim * element_size`` for non-fp4 dtypes and
+    ``hidden_dim // 2`` for fp4 (one packed byte per pair of fp4
+    lanes), so the formula matches mori's ``hidden_dim * element_size``
+    product for bf16/f32 and remains the natural per-token byte count
+    for packed fp4.
+
+    Returns 0.0 for degenerate inputs (no recv tokens / zero duration)
+    so the column stays printable.
+    """
+    if duration_us <= 0 or total_recv <= 0 or token_bytes_per_tok <= 0:
+        return 0.0
+    return total_recv * token_bytes_per_tok / (1000.0 ** 3) / (duration_us / 1e6)
+
+
 def _print_aggregated(stats: dict, op_tag: str, world_size: int, meta: dict):
     """Print the cross-rank aggregated stats on rank 0."""
     sep = "=" * 72
@@ -445,21 +468,30 @@ def _print_aggregated(stats: dict, op_tag: str, world_size: int, meta: dict):
     )
     print(f"  avg / min / max across all {world_size} ranks (us/call)")
     print(sep)
-    hdr = f"  {'metric':<36}  {'avg':>8}  {'min':>8}  {'max':>8}"
+    hdr = f"  {'metric':<36}  {'avg':>8}  {'min':>8}  {'max':>8}  {'bw GB/s':>9}"
     print(hdr)
-    print(f"  {'-'*60}")
+    print(f"  {'-'*70}")
 
+    _tr = int(meta.get("total_recv", 0))
+    _tb = int(meta.get("token_bytes_per_tok", 0))
+    # CPU-time rows leave the bw column blank: host timing doesn't
+    # measure GPU-side data transfer.
     rows = [
-        ("[Device] dispatch kernel GPU time", "dispatch_gpu"),
-        ("[Device] combine  kernel GPU time", "combine_gpu"),
-        ("[E2E]    dispatch CUDA time (w/sync)", "dispatch_cuda_e2e"),
-        ("[E2E]    combine  CUDA time (w/sync)", "combine_cuda_e2e"),
-        ("[Host]   dispatch CPU  time", "dispatch_cpu_e2e"),
-        ("[Host]   combine  CPU  time", "combine_cpu_e2e"),
+        ("[Device] dispatch kernel GPU time",    "dispatch_gpu",      True),
+        ("[Device] combine  kernel GPU time",    "combine_gpu",       True),
+        ("[E2E]    dispatch CUDA time (w/sync)", "dispatch_cuda_e2e", True),
+        ("[E2E]    combine  CUDA time (w/sync)", "combine_cuda_e2e",  True),
+        ("[Host]   dispatch CPU  time",          "dispatch_cpu_e2e",  False),
+        ("[Host]   combine  CPU  time",          "combine_cpu_e2e",   False),
     ]
-    for label, key in rows:
+    for label, key, show_bw in rows:
         v = stats[key]
-        print(f"  {label:<36}  {v['avg']:>8.1f}  {v['min']:>8.1f}  {v['max']:>8.1f}")
+        if show_bw:
+            bw = _algo_bw_GBs(_tr, _tb, v["avg"])
+            bw_str = f"  {bw:>9.1f}"
+        else:
+            bw_str = f"  {'-':>9}"
+        print(f"  {label:<36}  {v['avg']:>8.1f}  {v['min']:>8.1f}  {v['max']:>8.1f}{bw_str}")
     print()
 
 
@@ -609,19 +641,28 @@ def _print_cudagraph_aggregated(stats: dict, op_tag: str, world_size: int, meta:
     )
     print(f"  avg / min / max across all {world_size} ranks (us/call)")
     print(sep)
-    hdr = f"  {'metric':<36}  {'avg':>8}  {'min':>8}  {'max':>8}"
+    hdr = f"  {'metric':<36}  {'avg':>8}  {'min':>8}  {'max':>8}  {'bw GB/s':>9}"
     print(hdr)
-    print(f"  {'-'*60}")
+    print(f"  {'-'*70}")
 
+    _tr = int(meta.get("total_recv", 0))
+    _tb = int(meta.get("token_bytes_per_tok", 0))
+    # dispatch/combine rows use single-phase bytes; replay covers both
+    # so it gets 2x bytes; CPU row gets no bw.
     rows = [
-        ("[Device] dispatch kernel GPU time", "dispatch_gpu"),
-        ("[Device] combine  kernel GPU time", "combine_gpu"),
-        ("[E2E]   replay CUDA time (w/sync)", "replay_cuda_e2e"),
-        ("[Host]  replay CPU  time", "replay_cpu_e2e"),
+        ("[Device] dispatch kernel GPU time", "dispatch_gpu",    _tb),
+        ("[Device] combine  kernel GPU time", "combine_gpu",     _tb),
+        ("[E2E]   replay CUDA time (w/sync)", "replay_cuda_e2e", _tb * 2),
+        ("[Host]  replay CPU  time",          "replay_cpu_e2e",  0),
     ]
-    for label, key in rows:
+    for label, key, bytes_per_tok in rows:
         v = stats[key]
-        print(f"  {label:<36}  {v['avg']:>8.1f}  {v['min']:>8.1f}  {v['max']:>8.1f}")
+        if bytes_per_tok > 0:
+            bw = _algo_bw_GBs(_tr, bytes_per_tok, v["avg"])
+            bw_str = f"  {bw:>9.1f}"
+        else:
+            bw_str = f"  {'-':>9}"
+        print(f"  {label:<36}  {v['avg']:>8.1f}  {v['min']:>8.1f}  {v['max']:>8.1f}{bw_str}")
     print()
 
 
@@ -729,17 +770,25 @@ def bench_op(
     mn_c = mn[3].item()
     mx_c = mx[5].item()
 
+    # Bandwidth (mori IntraNode formula) — uses per-rank total_recv
+    # captured once in run_profiler; avg_d/avg_c are the cross-rank
+    # algorithm-bandwidth latencies, so the column shows the algo bw.
+    _tr = int(meta.get("total_recv", 0))
+    _tb = int(meta.get("token_bytes_per_tok", 0))
+    bw_d = _algo_bw_GBs(_tr, _tb, avg_d)
+    bw_c = _algo_bw_GBs(_tr, _tb, avg_c)
+
     if rank == 0:
-        sep = "=" * 68
+        sep = "=" * 78
         tag = (
             f"{op_tag.upper()}  EP={meta['world_size']}  bs={meta['max_tokens']}  "
             f"h={meta['hidden_dim']}  k={meta['k']}  ({iters} iters)"
         )
         print(f"\n{sep}\n  {tag}\n  avg / min / max across all {world_size} ranks (us/call)\n{sep}")
-        print(f"  {'metric':<36}  {'avg':>8}  {'min':>8}  {'max':>8}")
-        print(f"  {'-'*58}")
-        print(f"  {'[E2E]  dispatch CUDA time':<36}  {avg_d:>8.1f}  {mn_d:>8.1f}  {mx_d:>8.1f}")
-        print(f"  {'[E2E]  combine  CUDA time':<36}  {avg_c:>8.1f}  {mn_c:>8.1f}  {mx_c:>8.1f}")
+        print(f"  {'metric':<36}  {'avg':>8}  {'min':>8}  {'max':>8}  {'bw GB/s':>9}")
+        print(f"  {'-'*68}")
+        print(f"  {'[E2E]  dispatch CUDA time':<36}  {avg_d:>8.1f}  {mn_d:>8.1f}  {mx_d:>8.1f}  {bw_d:>9.1f}")
+        print(f"  {'[E2E]  combine  CUDA time':<36}  {avg_c:>8.1f}  {mn_c:>8.1f}  {mx_c:>8.1f}  {bw_c:>9.1f}")
         print()
 
 
@@ -857,17 +906,23 @@ def cudagraph_op(
     mn_g = mn[0].item()
     mx_g = mx[2].item()
 
+    # Combined dispatch+combine bytes: count one set per phase, divide
+    # by the single replay duration that already covers both kernels.
+    _tr = int(meta.get("total_recv", 0))
+    _tb = int(meta.get("token_bytes_per_tok", 0))
+    bw_g = _algo_bw_GBs(_tr, _tb * 2, avg_g)
+
     if rank == 0:
-        sep = "=" * 68
+        sep = "=" * 78
         tag = (
             f"{op_tag.upper()} [CUDAGraph]  EP={meta['world_size']}  "
             f"bs={meta['max_tokens']}  h={meta['hidden_dim']}  k={meta['k']}  "
             f"({iters} replays)"
         )
         print(f"\n{sep}\n  {tag}\n  avg / min / max across all {world_size} ranks (us/call)\n{sep}")
-        print(f"  {'metric':<36}  {'avg':>8}  {'min':>8}  {'max':>8}")
-        print(f"  {'-'*58}")
-        print(f"  {'[GPU]  dispatch+combine (event)':<36}  {avg_g:>8.1f}  {mn_g:>8.1f}  {mx_g:>8.1f}")
+        print(f"  {'metric':<36}  {'avg':>8}  {'min':>8}  {'max':>8}  {'bw GB/s':>9}")
+        print(f"  {'-'*68}")
+        print(f"  {'[GPU]  dispatch+combine (event)':<36}  {avg_g:>8.1f}  {mn_g:>8.1f}  {mx_g:>8.1f}  {bw_g:>9.1f}")
 
         print(f"\n  Per-replay GPU time (μs) — all {world_size} ranks:")
         hdr = f"  {'replay':>6}" + "".join(f"  {'R'+str(r):>8}" for r in range(world_size)) + f"  {'max':>8}"
@@ -1091,13 +1146,12 @@ def _global_reduce_all_pass(all_pass: bool, rank: int) -> bool:
     return bool(t.item())
 
 
-def _decode_tok_id_to_src(tis: torch.Tensor, total_recv: int, max_tok_per_rank: int):
+def _decode_tok_id_to_src(tis, total_recv, max_tok_per_rank):
     """Decode ``tok_id_to_src[:total_recv]`` -> (src_pe, src_lid) tensors.
 
     The kernel encodes each recv slot as ``src_pe * max_tok_per_rank + src_lid``
-    (see line 296 of dispatch_combine_intranode_kernel.py). The first
-    ``total_recv`` entries are the valid recv slots; tail entries are
-    leftover noise we must ignore.
+    (see dispatch_combine_intranode_kernel.py).  Only the first
+    ``total_recv`` entries are valid; tail entries carry leftover bytes.
     """
     enc = tis[:total_recv].to(torch.int64)
     src_pe = enc // max_tok_per_rank
@@ -1105,7 +1159,7 @@ def _decode_tok_id_to_src(tis: torch.Tensor, total_recv: int, max_tok_per_rank: 
     return src_pe, src_lid
 
 
-def _allgather_rows(local_t: torch.Tensor, world_size: int) -> torch.Tensor:
+def _allgather_rows(local_t, world_size):
     """All-gather ``local_t`` (shape [N, ...]) along a new leading PE axis.
 
     Returns ``[world_size, N, ...]`` so callers can index ``[src_pe, src_lid]``
@@ -1119,20 +1173,21 @@ def _allgather_rows(local_t: torch.Tensor, world_size: int) -> torch.Tensor:
 
 
 def _verify_dispatch_self_consistency(ret_f, op_fly, inp, wts, idx, scales, cfg, world_size, rank):
-    """Semantic check of the dispatched outputs against the all-gathered inputs.
+    """Byte-level semantic check of dispatch outputs (mori parity, no mori dep).
 
-    Cross-impl raw-tensor compare for dispatch is fragile because the recv
-    row ordering depends on an atomic race. Instead, we verify the
-    "invariant" that every recv row truly originates from the right
-    sender according to ``shmem_tok_id_to_src``:
+    Recv-row ordering is governed by an atomic race, so a cross-impl
+    raw-tensor compare is fragile.  We instead verify the *invariant*
+    that every recv row truly originates from the sender row that the
+    kernel claims via ``shmem_tok_id_to_src``:
 
-      out_tok[i]     == sender_input[src_pe, src_lid]
-      out_idx[i]     == sender_indices[src_pe, src_lid]
-      out_wts[i]     == sender_weights[src_pe, src_lid]
-      out_scales[i]  == sender_scales[src_pe, src_lid]   (when configured)
+      out_tok[i]    == sender_input  [src_pe, src_lid]
+      out_idx[i]    == sender_indices[src_pe, src_lid]
+      out_wts[i]    == sender_weights[src_pe, src_lid]
+      out_scales[i] == sender_scales [src_pe, src_lid]   (when configured)
 
-    This covers ``out_idx/out_wts/out_scales`` end-to-end (problem 6) and
-    is invariant under row-reordering races.
+    This is the FlyDSL-internal equivalent of mori's dispatch byte
+    verify in bench_dispatch_combine.py and covers all four output
+    fields end-to-end without referencing any mori implementation.
     """
     all_pass = True
     total_recv = int(ret_f[4].item())
@@ -1144,9 +1199,8 @@ def _verify_dispatch_self_consistency(ret_f, op_fly, inp, wts, idx, scales, cfg,
         return all_pass
 
     if rank == 0:
-        print("\n  -- Dispatch self-consistency (rows resolved via tok_id_to_src) --")
+        print("\n  -- Dispatch byte verify (rows resolved via tok_id_to_src) --")
 
-    # All-gather sender-side tensors so we can index by (src_pe, src_lid).
     g_inp = _allgather_rows(inp, world_size)
     g_wts = _allgather_rows(wts, world_size)
     g_idx = _allgather_rows(idx.to(torch.int32), world_size)
@@ -1158,32 +1212,26 @@ def _verify_dispatch_self_consistency(ret_f, op_fly, inp, wts, idx, scales, cfg,
     expected_idx = g_idx[src_pe, src_lid]
     expected_wts = g_wts[src_pe, src_lid]
 
-    # out_tok comparison: dispatch never reformats the token bytes, so
-    # the recv row must equal the sender's input row byte-for-byte (or
-    # tolerance-equal for floats). We compare in byte view for the
-    # narrow types so we don't lose information.
     f_tok = ret_f[0][:total_recv]
     if cfg.data_type == torch.float4_e2m1fn_x2:
         all_pass &= _check_exact(
-            "dispatch out_tok == g_inp (fp4 bytes)", f_tok.view(torch.uint8), expected_tok.view(torch.uint8), rank
+            "dispatch out_tok == g_inp (fp4 bytes)",
+            f_tok.view(torch.uint8), expected_tok.view(torch.uint8), rank,
         )
     elif cfg.data_type in (torch.float8_e4m3fn, torch.float8_e4m3fnuz):
         all_pass &= _check_exact(
-            "dispatch out_tok == g_inp (fp8 bytes)", f_tok.view(torch.uint8), expected_tok.view(torch.uint8), rank
+            "dispatch out_tok == g_inp (fp8 bytes)",
+            f_tok.view(torch.uint8), expected_tok.view(torch.uint8), rank,
         )
     else:
         all_pass &= _check_exact("dispatch out_tok == g_inp", f_tok, expected_tok, rank)
 
-    # out_idx must match exactly (i32).
     f_idx = ret_f[3][:total_recv]
     all_pass &= _check_exact("dispatch out_idx == g_idx", f_idx, expected_idx, rank)
 
-    # out_wts: produced in f32 on both sides, equality is exact even at
-    # the f32 level.
     f_wts = ret_f[1][:total_recv]
     all_pass &= _check_exact("dispatch out_wts == g_wts", f_wts, expected_wts, rank)
 
-    # out_scales (problem 3): only when configured.
     if g_sc is not None and ret_f[2] is not None and cfg.scale_bytes > 0:
         expected_sc = g_sc[src_pe, src_lid]
         f_sc = ret_f[2][:total_recv].contiguous().view(torch.uint8)
@@ -1194,10 +1242,19 @@ def _verify_dispatch_self_consistency(ret_f, op_fly, inp, wts, idx, scales, cfg,
 
 
 def verify_self(op_fly, inp, wts, idx, k, rank, world_size, dev, dtype_key, cfg):
-    """FlyDSL self-check when mori is unavailable.
+    """FlyDSL self-verify with mori-equivalent strength (no mori dependency).
 
-    dispatch → combine → verify output ≈ weighted sum of input.
-    With uniform weights (1/k) and k distinct PEs, combine output should ≈ input.
+    Four invariants are checked, mirroring mori's bench_dispatch_combine.py:
+
+      1. dispatch byte verify       : out_tok / out_wts / out_idx / out_scales
+         each match the all-gathered sender row resolved via
+         ``shmem_tok_id_to_src``.
+      2. recv-slot dedup            : ``unique(src_token_pos).numel() == total_recv``.
+      3. combine token round-trip   : ``out_tok[:mt] ≈ k * inp`` (or the
+         std-MoE weighted variant when configured).
+      4. combine weight round-trip  : ``out_wts[:mt] ≈ wts * k``  (skipped
+         under std-MoE since the weighted-sum kernel folds wts into the
+         token path; the token-side equation still gates correctness).
     """
     tol = VERIFY_TOL.get(dtype_key, VERIFY_TOL["bf16"])
     if cfg.quant_type == "fp8_direct_cast":
@@ -1207,7 +1264,7 @@ def verify_self(op_fly, inp, wts, idx, k, rank, world_size, dev, dtype_key, cfg)
     if rank == 0:
         print(f"\n{'='*65}")
         print(
-            f"  VERIFY (self-check, mori unavailable)  dtype={dtype_key}  "
+            f"  VERIFY (self-check)  dtype={dtype_key}  "
             f"EP={world_size}  bs={inp.shape[0]}  h={cfg.hidden_dim}  k={k}"
         )
         print(f"{'='*65}")
@@ -1236,9 +1293,30 @@ def verify_self(op_fly, inp, wts, idx, k, rank, world_size, dev, dtype_key, cfg)
     torch.cuda.synchronize()
     dist.barrier()
 
+    total_recv = int(ret_f[4].item())
     if rank == 0:
-        tr = ret_f[4].item()
-        print(f"\n  total_recv = {tr}")
+        print(f"\n  total_recv = {total_recv}")
+
+    # === (1) dispatch byte verify (mori-parity, no mori dep) ===
+    all_pass &= _verify_dispatch_self_consistency(
+        ret_f, op_fly, inp, wts, idx, scales, cfg, world_size, rank,
+    )
+
+    # === (2) recv-slot dedup ===
+    # No two recv slots may share the same (src_pe, src_lid); a
+    # collision would mean two distinct senders claimed the same
+    # token origin, which would corrupt the round-trip combine
+    # equations below.
+    if total_recv > 0:
+        mt_dd = cfg.max_num_inp_token_per_rank
+        sp_dd, sl_dd = _decode_tok_id_to_src(op_fly.shmem_tok_id_to_src, total_recv, mt_dd)
+        src_pos = sp_dd * mt_dd + sl_dd
+        n_unique = int(torch.unique(src_pos).numel())
+        ok_uniq = n_unique == total_recv
+        if rank == 0:
+            status = "PASS" if ok_uniq else "FAIL"
+            print(f"  [{status}] recv-slot dedup  unique={n_unique}  total_recv={total_recv}")
+        all_pass &= ok_uniq
 
     cout_f = op_fly.combine(ret_f[0], None, ret_f[3], packed_recv_x=packed_recv_x)
     torch.cuda.synchronize()
@@ -1303,166 +1381,27 @@ def verify_self(op_fly, inp, wts, idx, k, rank, world_size, dev, dtype_key, cfg)
                 print(f"  [INFO] Self-check exception (NaN={has_nan}, Inf={has_inf}): {e}")
                 all_pass &= not has_nan and not has_inf
 
+    # === (4) combine output weight round-trip (mori parity) ===
+    # combine accumulates the full ``wts[src][:]`` vector from each
+    # of the k contributing PEs, so output weight ≈ wts * k under
+    # distinct-PE idx (run_profiler guarantees k unique PEs for
+    # k<=world_size).  Skipped under std-MoE since the weighted-sum
+    # kernel folds wts into the token path -- the token-side check
+    # above already gates std-MoE correctness.
+    if not cfg.enable_std_moe and cout_f[1] is not None and rank == 0:
+        try:
+            f_out_wts = cout_f[1][: cfg.max_num_inp_token_per_rank].float()
+            expected_wts_out = (wts.float() * k)
+            all_pass &= _check_close(
+                "combine out_wts ≈ k * wts",
+                f_out_wts, expected_wts_out,
+                atol=1e-4, rtol=1e-4, rank=rank,
+            )
+        except Exception as e:
+            print(f"  [INFO] combine-wts check exception: {e}")
+
     # Cross-rank AND reduction (problem 2): a failure on any rank must
     # fail the whole job, otherwise rank 0 alone could falsely PASS.
-    all_pass = _global_reduce_all_pass(all_pass, rank)
-
-    if rank == 0:
-        result = "ALL PASS" if all_pass else "SOME FAILED"
-        print(f"\n  >>> {result} (global across {world_size} ranks) <<<\n")
-    return all_pass
-
-
-def verify_op(op_fly, op_mori, inp, wts, idx, k, rank, world_size, dev, dtype_key, cfg, args, scales=None):
-    """Run FlyDSL and mori dispatch+combine, compare outputs.
-
-    Dispatch output row ordering is non-deterministic (atomic fetch-and-add),
-    so we cannot compare ``out_tok/out_wts/out_idx/out_scales`` directly. To
-    still cover those outputs (problem 6), this routine:
-
-      1. asks FlyDSL to publish ``shmem_tok_id_to_src``, which encodes the
-         source ``(src_pe, src_lid)`` of every recv slot;
-      2. sorts both FlyDSL and mori recv-side tensors by that key to obtain
-         a canonical, race-free row ordering;
-      3. then compares the row-aligned views element-wise.
-
-    ``scales`` (problem 3) is also passed through dispatch when configured so
-    the scales path is actually exercised end-to-end.
-    """
-    tol = VERIFY_TOL.get(dtype_key, VERIFY_TOL["bf16"])
-    all_pass = True
-
-    if rank == 0:
-        scales_tag = "on" if (scales is not None and cfg.scale_bytes > 0) else "off"
-        print(f"\n{'='*65}")
-        print(
-            f"  VERIFY  dtype={dtype_key}  EP={world_size}  bs={inp.shape[0]}  "
-            f"h={cfg.hidden_dim}  k={k}  scales={scales_tag}"
-        )
-        print(f"{'='*65}")
-
-    # -- Dispatch --
-    op_fly.reset()
-    op_mori.reset()
-    ms.shmem_barrier_all()
-
-    disp_scales = scales if cfg.scale_bytes > 0 else None
-    ret_f = op_fly.dispatch(inp, wts, disp_scales, idx)
-    ret_m = op_mori.dispatch(inp, wts, disp_scales, idx)
-    torch.cuda.synchronize()
-
-    tr_f = ret_f[4].clone()
-    tr_m = ret_m[4].clone()
-    dist.barrier()
-    if rank == 0:
-        print("\n  -- Dispatch comparison --")
-
-    all_pass &= _check_exact("total_recv", tr_f, tr_m, rank)
-
-    # Dispatch row ordering is non-deterministic (atomic race), so we don't
-    # compare ``out_tok/out_idx/out_wts/out_scales`` row-by-row against
-    # mori.  Instead we run a self-consistency check on the FlyDSL side
-    # that resolves every recv row back to its sender via
-    # ``shmem_tok_id_to_src`` and compares against the all-gathered
-    # sender-side input/idx/wts/scales (problem 6).  This semantically
-    # covers all dispatch outputs without depending on the race ordering.
-    all_pass &= _verify_dispatch_self_consistency(
-        ret_f, op_fly, inp, wts, idx, scales if cfg.scale_bytes > 0 else None, cfg, world_size, rank
-    )
-
-    # -- Combine --
-    ms.shmem_barrier_all()
-    cout_f = op_fly.combine(ret_f[0], None, ret_f[3])
-    cout_m = op_mori.combine(ret_m[0], None, ret_m[3])
-    torch.cuda.synchronize()
-    dist.barrier()
-
-    if rank == 0:
-        print("\n  -- Combine output comparison --")
-
-    mt = cfg.max_num_inp_token_per_rank
-    cast_to = (
-        torch.float32 if cfg.data_type in (torch.float8_e4m3fn, torch.float8_e4m3fnuz, torch.float4_e2m1fn_x2) else None
-    )
-
-    f_tok = cout_f[0][:mt] if cout_f[0] is not None else None
-    m_tok = cout_m[0][:mt] if cout_m[0] is not None else None
-
-    # Diagnostic: compare both outputs with expected k*input (skip for packed types)
-    if rank == 0 and f_tok is not None and m_tok is not None:
-        try:
-            expected = (inp.float() * k).to(cfg.data_type)
-            f_vs_exp = (f_tok.float() - expected.float()).abs().max().item()
-            m_vs_exp = (m_tok.float() - expected.float()).abs().max().item()
-            f_vs_m = (f_tok.float() - m_tok.float()).abs().max().item()
-            print(f"  [DIAG] fly vs k*inp: {f_vs_exp:.4f}  mori vs k*inp: {m_vs_exp:.4f}  fly vs mori: {f_vs_m:.4f}")
-        except Exception:
-            pass
-
-    if f_tok is not None and m_tok is not None:
-        # In P2P-read mode (``use_external_inp_buf=False``) the mori
-        # reference combine kernel produces all-zero output on the
-        # versions shipped in this container (verified via direct
-        # shmem dumps: FlyDSL writes ``k*inp`` into shmem_comb_out_tok
-        # while mori's symmetric output buffer stays zero).  The
-        # FlyDSL P2P-read path is itself correct, so instead of
-        # comparing against the broken mori ref we fall back to the
-        # fly-side self-check ``fly == k*inp`` -- same semantics as
-        # the StdMoE path which also bypasses mori.
-        if not cfg.use_external_inp_buf:
-            try:
-                # ``fp8_direct_cast`` runs Stage 1 with an inline
-                # bf16->fp8 cast and Stage 3 reduces in f32 from the
-                # fp8 staging copy, so the per-element output reflects
-                # one bf16<->fp8 round-trip's quantization error.  The
-                # self-check expected value must model that quant or
-                # the FP8 atol budget (~step size at the input
-                # magnitude) trips the comparison even on correct
-                # kernels.
-                if cfg.quant_type == "fp8_direct_cast":
-                    _inp_q = inp.to(torch.float8_e4m3fn).to(torch.bfloat16)
-                    expected = (_inp_q.float() * k).to(cfg.data_type)
-                    p2p_atol = max(tol["atol"], 4.0)
-                    p2p_rtol = max(tol["rtol"], 0.125)
-                    label = (
-                        "out_tok[:mt] (fly vs k*RTN(inp), P2P-read + fp8_direct_cast)"
-                    )
-                else:
-                    expected = (inp.float() * k).to(cfg.data_type)
-                    p2p_atol = tol["atol"]
-                    p2p_rtol = tol["rtol"]
-                    label = "out_tok[:mt] (fly vs k*inp, P2P-read self-check)"
-                all_pass &= _check_close(
-                    label,
-                    f_tok,
-                    expected,
-                    p2p_atol,
-                    p2p_rtol,
-                    rank,
-                    cast_to=cast_to,
-                )
-                if rank == 0:
-                    _diff_fm = (f_tok.float() - m_tok.float()).abs().max().item()
-                    print(
-                        f"  [INFO] mori P2P-read output |fly-mori|.max={_diff_fm:.4f} "
-                        "(mori reference is known-broken for P2P-read, ignored)"
-                    )
-            except Exception as _e:
-                if rank == 0:
-                    print(f"  [WARN] P2P-read self-check skipped: {_e}")
-        else:
-            all_pass &= _check_close("out_tok[:mt]", f_tok, m_tok, tol["atol"], tol["rtol"], rank, cast_to=cast_to)
-    elif rank == 0:
-        print(f"  [SKIP] out_tok: fly={f_tok is not None}, mori={m_tok is not None}")
-
-    f_wts = cout_f[1] if (len(cout_f) > 1 and cout_f[1] is not None) else None
-    m_wts = cout_m[1] if (len(cout_m) > 1 and cout_m[1] is not None) else None
-    if f_wts is not None and m_wts is not None:
-        all_pass &= _check_close("out_wts[:mt]", f_wts[:mt], m_wts[:mt], 1e-4, 1e-3, rank)
-    elif rank == 0:
-        print(f"  [SKIP] out_wts: fly={f_wts is not None}, mori={m_wts is not None}")
-
-    # Cross-rank global AND so a failure on any rank fails the whole job.
     all_pass = _global_reduce_all_pass(all_pass, rank)
 
     if rank == 0:
@@ -1489,7 +1428,6 @@ def run_profiler(rank, world_size, args):
         data_type=_dtype,
         warp_num_per_block=args.warp_per_block,
         block_num=args.block_num,
-        chip=args.chip,
         use_external_inp_buf=args.use_external_inp_buf,
         enable_std_moe=args.enable_std_moe,
         scale_dim=args.scale_dim,
@@ -1531,7 +1469,7 @@ def run_profiler(rank, world_size, args):
     op_fly = FlyDSLDispatchCombineIntraNodeOp(cfg)
 
     op_ref = None
-    if args.compare and not cfg.enable_std_moe:
+    if args.compare_mori and not cfg.enable_std_moe:
         mori_bn = args.mori_block_num if args.mori_block_num > 0 else None
         mori_wpb = args.mori_warp_per_block if args.mori_warp_per_block > 0 else None
         bn_str = mori_bn if mori_bn else cfg.block_num
@@ -1561,14 +1499,20 @@ def run_profiler(rank, world_size, args):
     wts = wts / wts.sum(-1, keepdim=True)
     epr = args.num_experts_per_rank
     idx = torch.zeros(cur_tok, k, dtype=torch.int32, device=dev)
-    if args.mode == "verify" and k <= world_size:
-        # Ensure each token's k experts go to k DISTINCT PEs.
-        # FlyDSL dispatch deduplicates same-PE assignments, mori does not.
+    if k <= world_size:
+        # Every run now embeds a FlyDSL self-check at startup.  That
+        # self-check (and mori's IntraNode bench too) assumes each
+        # token's k experts land on k DISTINCT PEs: FlyDSL dispatch
+        # deduplicates same-PE assignments while mori does not, so a
+        # collision would let the self-check disagree with ``k*inp``.
         for t in range(cur_tok):
             pes = torch.randperm(world_size, device=dev)[:k]
             for j in range(k):
                 idx[t, j] = pes[j] * epr + torch.randint(0, epr, (1,), device=dev)
     else:
+        # k > world_size: distinct PEs are impossible, fall back to
+        # plain random expert ids.  Used only for stress configs that
+        # intentionally exercise the dedup path.
         for t in range(cur_tok):
             idx[t] = torch.randperm(n_exp, device=dev)[:k]
 
@@ -1592,6 +1536,49 @@ def run_profiler(rank, world_size, args):
         _sc_bytes = cfg.scale_dim * cfg.scale_type_size
         scales = torch.randn(cur_tok, _sc_bytes // 4, dtype=torch.float32, device=dev).contiguous()
         scales = scales.view(torch.uint8).view(cur_tok, _sc_bytes)
+
+    # ------------------------------------------------------------------
+    # Capture per-rank ``total_recv`` so every timing helper can stamp
+    # a GB/s column on its table (mirrors mori
+    # ``bench_dispatch_combine.py`` L236 which also runs one eager
+    # dispatch to learn this number).  total_recv depends only on
+    # ``idx`` (fixed for the entire run), so one read suffices.
+    # ------------------------------------------------------------------
+    # mori shmem ops (and FlyDSL's dispatch which builds on them) are
+    # inherently collective: every rank must enter dispatch together
+    # or peers may read uninitialised symmetric heap pages, surfacing
+    # as HIP "illegal memory access".  Bracket the probe with explicit
+    # barriers, same pattern verify_self uses.
+    # ------------------------------------------------------------------
+    # Capture per-rank ``total_recv`` so every timing helper can stamp
+    # a GB/s column on its table (mirrors mori ``bench_dispatch_combine.py``
+    # L236 which also runs one eager round-trip to learn this).  We do
+    # a *paired* dispatch + combine here -- a lone dispatch leaves the
+    # shmem heap half-written by peers, which surfaces as a HIP illegal
+    # memory access on the next kernel launch.  total_recv depends only
+    # on ``idx`` (fixed for the whole run) so a single read suffices.
+    # ------------------------------------------------------------------
+    # NOTE: combine() zeroes ``self.total_recv`` as part of its
+    # teardown for the next round, so we MUST read ``ret[4]`` *after
+    # dispatch + sync* but *before* combine.  combine still runs so the
+    # shmem heap is fully drained (a lone dispatch leaves peer-written
+    # output / index buffers half-filled, which surfaced as a HIP
+    # "illegal memory access" on the next kernel launch).
+    op_fly.reset()
+    _ret_for_tr = op_fly.dispatch(inp, wts, scales, idx, packed_recv_x=packed_recv_x)
+    torch.cuda.synchronize()
+    total_recv_per_rank = int(_ret_for_tr[4].item())
+    op_fly.combine(_ret_for_tr[0], None, _ret_for_tr[3], packed_recv_x=packed_recv_x)
+    torch.cuda.synchronize()
+    op_fly.reset()
+    ms.shmem_barrier_all()
+    meta["total_recv"] = total_recv_per_rank
+    meta["token_bytes_per_tok"] = cfg.token_bytes
+    if rank == 0:
+        print(
+            f"[setup] per-rank total_recv = {total_recv_per_rank} tokens; "
+            f"token bytes = {cfg.token_bytes}"
+        )
 
     # profile+eager needs an external warmup; the other three combos
     # warm up inside their own functions.
@@ -1617,45 +1604,37 @@ def run_profiler(rank, world_size, args):
 
     ms.shmem_barrier_all()
 
-    # Dispatch by mode x cudagraph.
-    test_flydsl = args.bench_op in ("flydsl", "both")
-    test_mori = args.bench_op in ("mori", "both") and op_ref is not None
-
-    if args.mode == "verify":
-        ok = None
-        if op_ref is not None:
-            try:
-                ok = verify_op(
-                    op_fly, op_ref, inp, wts, idx, k, rank, world_size, dev, args.dtype, cfg, args, scales=scales
-                )
-            except RuntimeError as e:
-                # mori only JIT-compiles a subset of dtype-specialised
-                # kernels (e.g. fp8_ocp / fp4 dispatch symbols may be
-                # missing in this container).  The error surfaces at the
-                # first kernel launch as ``HIP error 500:
-                # hipModuleGetFunction(<sym>)``.  Treat that as "mori ref
-                # unavailable" and fall back to the FlyDSL self-check
-                # instead of failing the whole verify gate.
-                msg = str(e)
-                if "hipModuleGetFunction" in msg or "HIP error 500" in msg:
-                    if rank == 0:
-                        print(f"\n[warn] mori kernel symbol missing at runtime: {e}")
-                        print("[info] falling back to self-check (mori ref skipped)")
-                    op_fly.reset()
-                    try:
-                        op_ref.reset()
-                    except Exception:
-                        pass
-                    ms.shmem_barrier_all()
-                    ok = None  # trigger self-check below
-                else:
-                    raise
-        if ok is None:
-            ok = verify_self(op_fly, inp, wts, idx, k, rank, world_size, dev, args.dtype, cfg)
-        # Propagate result so the worker can translate it to a non-zero
-        # exit code; otherwise CI silently "passes" on a failure
-        # (problem 1).
+    # ------------------------------------------------------------------
+    # Embedded accuracy gate.
+    #
+    # Every bench / profile run starts with a FlyDSL self-check so the
+    # timing numbers we report never come from a silently-broken kernel.
+    # Accuracy is independent of --compare-mori, which only governs
+    # whether the timing phase also runs a mori reference for perf
+    # comparison.
+    # ------------------------------------------------------------------
+    ok = verify_self(op_fly, inp, wts, idx, k, rank, world_size, dev, args.dtype, cfg)
+    if not ok:
+        if rank == 0:
+            print("[run_profiler] embedded verify FAILED -- skipping timing")
         return ok
+    # verify_self leaves op_fly resynchronised via its own internal
+    # resets; one more collective barrier so every rank enters the
+    # timing loop together.
+    op_fly.reset()
+    if op_ref is not None:
+        try:
+            op_ref.reset()
+        except Exception:
+            pass
+    ms.shmem_barrier_all()
+
+    # Timing target selection. FlyDSL is always benched; mori is added
+    # iff the user passed --compare-mori AND a mori reference op was
+    # successfully built (e.g. mori kernels for the requested dtype are
+    # available in the container).
+    test_flydsl = True
+    test_mori = args.compare_mori and op_ref is not None
 
     if args.mode == "bench" and not args.cudagraph:
         if test_flydsl:
@@ -1806,11 +1785,19 @@ def _apply_ci_case(args, case, *, phase, output_dir):
             continue
         setattr(args, fk, fv)
     if phase == "verify":
-        args.mode = "verify"
+        # The "verify" phase now reuses bench mode with a minimal
+        # workload; bench/profile both embed an accuracy gate at
+        # startup, so a 1-iter bench run is the cheapest way to
+        # exercise the embedded verify on its own. Accuracy still
+        # decides whether the profile phase runs.
+        args.mode = "bench"
         args.cudagraph = False
         args.warmup = 1
         args.iters = 1
-        args.compare = True  # run_profiler still routes StdMoE to self-check
+        # Accuracy is always FlyDSL self-check (the embedded verify
+        # inside run_profiler).  --compare-mori only affects the
+        # timing phase: it builds a mori ref op and times it for
+        # head-to-head comparison.
     elif phase == "profile":
         args.mode = "profile"
         args.cudagraph = True
@@ -1820,9 +1807,10 @@ def _apply_ci_case(args, case, *, phase, output_dir):
         # generous default so every case yields a usable measurement.
         args.warmup = max(getattr(args, "warmup", 0), 5)
         args.iters = max(getattr(args, "iters", 0), 10)
-        # mori ref kernels for fp8_ocp / fp4 dispatch may be missing in the
-        # container; only bench flydsl on those paths.
-        args.bench_op = "flydsl" if case["dtype"] in ("fp8_ocp", "fp4") else "both"
+        # Profile defaults to FlyDSL-only timing. Passing --compare-mori
+        # on the sweep command line builds a mori ref AND times it for
+        # head-to-head comparison; mori kernels missing for fp8_ocp /
+        # fp4 naturally fall back to FlyDSL-only inside build_mori_ref.
         args.output_dir = os.path.join(output_dir, f"ci_sweep/{case['name']}")
     else:
         raise ValueError(f"unknown sweep phase: {phase!r}")
@@ -1893,7 +1881,6 @@ def _parse_args():
         default=0,
         help="mori-only warp_per_block (0 = same as FlyDSL; mori's tuned default is 8)",
     )
-    p.add_argument("--chip", type=str, default="gfx950")
     p.add_argument(
         "--dtype", type=str, default="bf16", choices=list(DTYPE_MAP.keys()), help="data type (default: bf16)"
     )
@@ -1911,18 +1898,34 @@ def _parse_args():
         help="JSON output root (relative to cwd); per-shape subdir is named ep{ws}_bs{tok}",
     )
     p.add_argument("--port", type=int, default=29800)
-    p.add_argument("--no-compare", dest="compare", action="store_false")
-    # Mode selection
+    p.add_argument(
+        "--compare-mori",
+        action="store_true",
+        default=False,
+        help=(
+            "build a mori reference op AND time it alongside FlyDSL "
+            "during bench / profile so the two implementations can be "
+            "compared head-to-head (two latency / bw tables printed). "
+            "Accuracy is unaffected -- the embedded verify step always "
+            "runs the FlyDSL self-check regardless of this flag. "
+            "Default off: FlyDSL-only timing, no mori ref constructed."
+        ),
+    )
+    # Mode selection. Accuracy is always checked in-line at the start
+    # of the run via the FlyDSL self-check; timing only runs once that
+    # embedded verify passes.  --compare-mori does NOT change accuracy
+    # behaviour, only adds a mori reference to the timing tables.
     p.add_argument(
         "--mode",
-        choices=["profile", "bench", "verify"],
+        choices=["profile", "bench"],
         default="profile",
-        help="measurement: profile=torch.profiler (default); bench=CUDA event timing; verify=correctness check",
+        help=(
+            "timing measurement: profile=torch.profiler (default); "
+            "bench=CUDA event timing. Both modes embed an accuracy "
+            "check at the start of every run."
+        ),
     )
     p.add_argument("--cudagraph", action="store_true", help="use CUDAGraph capture+replay (default: eager)")
-    p.add_argument(
-        "--bench-op", choices=["flydsl", "mori", "both"], default="both", help="which op to measure (default: both)"
-    )
     # Feature switches
     p.add_argument(
         "--no-external-inp-buf",
@@ -1951,7 +1954,6 @@ def _parse_args():
         choices=["none", "fp8_direct_cast"],
         help="quantization type (none = default; fp8_direct_cast = inline fp8 cast in combine)",
     )
-    p.set_defaults(compare=True)
     return p.parse_args()
 
 
