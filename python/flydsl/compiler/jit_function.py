@@ -1036,7 +1036,13 @@ class JitFunction:
         """Initialize signature + param metadata on first call (not at decoration time)."""
         if self._sig is not None:
             return
-        full_sig = inspect.signature(self.func)
+        try:
+            # `from __future__ import annotations` stores annotations as strings.
+            # Resolve them here so runtime DSL types such as fx.Int32/fx.Stream are
+            # still recognized and their values do not participate in cache keys.
+            full_sig = inspect.signature(self.func, eval_str=True)
+        except (AttributeError, NameError, TypeError, ValueError):
+            full_sig = inspect.signature(self.func)
         params = list(full_sig.parameters.values())
 
         self._has_self_param = bool(params) and params[0].name == "self"
