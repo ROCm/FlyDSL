@@ -23,8 +23,8 @@ from .._mlir import ir
 from .._mlir.dialects import func
 from .._mlir.passmanager import PassManager
 from ..expr.typing import Constexpr, Stream
-from ._annotations import resolve_signature
 from ..utils import env, log
+from ._annotations import resolve_signature
 from .ast_rewriter import ASTRewriter
 from .backends import compile_backend_name, get_backend
 from .jit_argument import convert_to_jit_arguments, is_type_param_annotation
