@@ -1395,9 +1395,9 @@ def compile_mxscale_gemm(
                 b0 = load_b_pair(0, ks)
                 a0 = load_a_pair(0, ks)
                 b1 = load_b_pair(1, ks)
+                b2 = load_b_pair(2, ks)
 
                 a1_box = [None]
-                b2_box = [None]
                 b3_box = [None]
                 a2_box = [None]
                 a3_box = [None]
@@ -1405,23 +1405,20 @@ def compile_mxscale_gemm(
                 def _prefetch_a1():
                     a1_box[0] = load_a_pair(1, ks)
 
-                rocdl.s_wait_dscnt(_fp8_pair_b_loads)
+                rocdl.s_wait_dscnt(_two_pair_loads + 3)
                 emit_panel_2x2(0, 0, a0, b0, scale_pair, prefetch_after_first_row=_prefetch_a1)
 
                 if const_expr(ks == 0 and mid_compute_callback is not None):
                     rocdl.sched_barrier(0)
                     mid_compute_callback()
 
-                def _prefetch_b2():
-                    b2_box[0] = load_b_pair(2, ks)
-
-                rocdl.s_wait_dscnt(_pair_loads)
-                emit_panel_2x2(0, 1, a0, b1, scale_pair, prefetch_after_first_row=_prefetch_b2)
+                rocdl.s_wait_dscnt(_pair_loads + _fp8_pair_b_loads)
+                emit_panel_2x2(0, 1, a0, b1, scale_pair)
 
                 def _prefetch_b3():
                     b3_box[0] = load_b_pair(3, ks)
 
-                rocdl.s_wait_dscnt(_fp8_pair_b_loads)
+                rocdl.s_wait_dscnt(_fp8_pair_b_loads + 2)
                 emit_panel_2x2(1, 0, a1_box[0], b0, scale_pair, prefetch_after_first_row=_prefetch_b3)
 
                 def _prefetch_a2_a3():
@@ -1430,14 +1427,12 @@ def compile_mxscale_gemm(
 
                 emit_panel_2x2(1, 1, a1_box[0], b1, scale_pair, prefetch_after_first_row=_prefetch_a2_a3)
 
-                rocdl.s_wait_dscnt(_three_pair_loads)
-                emit_panel_2x2(0, 2, a0, b2_box[0], scale_pair)
-                rocdl.s_wait_dscnt(_two_pair_loads)
+                emit_panel_2x2(0, 2, a0, b2, scale_pair)
+                rocdl.s_wait_dscnt(_pair_loads)
                 emit_panel_2x2(0, 3, a0, b3_box[0], scale_pair)
-                emit_panel_2x2(1, 2, a1_box[0], b2_box[0], scale_pair)
+                emit_panel_2x2(1, 2, a1_box[0], b2, scale_pair)
                 emit_panel_2x2(1, 3, a1_box[0], b3_box[0], scale_pair)
 
-                rocdl.s_wait_dscnt(_fp8_pair_a_loads)
                 emit_panel_2x2(2, 0, a2_box[0], b0, scale_pair)
                 emit_panel_2x2(2, 1, a2_box[0], b1, scale_pair)
 
@@ -1453,9 +1448,9 @@ def compile_mxscale_gemm(
                     rocdl.sched_barrier(0)
                     emit_filler()
 
-                emit_panel_2x2(2, 2, a2_box[0], b2_box[0], scale_pair)
+                emit_panel_2x2(2, 2, a2_box[0], b2, scale_pair)
                 emit_panel_2x2(2, 3, a2_box[0], b3_box[0], scale_pair)
-                emit_panel_2x2(3, 2, a3_box[0], b2_box[0], scale_pair)
+                emit_panel_2x2(3, 2, a3_box[0], b2, scale_pair)
                 emit_panel_2x2(3, 3, a3_box[0], b3_box[0], scale_pair)
 
             return current_accs
@@ -1588,12 +1583,12 @@ def compile_mxscale_gemm(
                 else:
                     rocdl.sched_mfma(_fp8_pair_wm * _fp8_pair_wn)
 
-            _initial_loads = _fp8_scale_loads + _fp8_pair_b_loads + _fp8_pair_a_loads + _fp8_pair_b_loads
+            _initial_loads = _fp8_scale_loads + _fp8_pair_b_loads * 3 + _fp8_pair_a_loads
 
             for _ks in range_constexpr(k_wmma_steps):
                 rocdl.sched_dsrd(_initial_loads)
                 _sched_panel_2x2(_fp8_pair_a_loads)
-                _sched_panel_2x2(_fp8_pair_b_loads)
+                _sched_panel_2x2()
                 _sched_panel_2x2(_fp8_pair_b_loads)
                 _sched_panel_2x2(_fp8_pair_a_loads * 2)
                 _sched_panel_2x2()
