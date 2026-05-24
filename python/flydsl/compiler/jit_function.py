@@ -939,14 +939,24 @@ def _build_call_state(sig, args_tuple, func_exe):
         if spec is None:
             return None
 
-        ctype, extract = spec
+        # A spec may be either a single ``(ctype, extract)`` tuple (one slot
+        # per arg, scalar value protocol) or a list of such tuples for ABIs
+        # that need multiple slots per arg (e.g. dynamic-memref tensors
+        # whose calling convention carries a separate layout-buffer struct).
+        slot_list = spec if isinstance(spec, list) else [spec]
 
-        try:
-            extract(arg)
-        except (AttributeError, TypeError):
-            return None
-
-        slot_specs.append((i, ctype, extract))
+        for ctype, extract in slot_list:
+            # Validate the extract callable is invokable with this arg.
+            # Buffer-slot extracts take ``(arg, storage)`` and mutate in
+            # place; scalar extracts take ``(arg)`` and return a value.
+            try:
+                if hasattr(ctype, "value"):
+                    extract(arg)  # scalar protocol, returns assigned value
+                else:
+                    extract(arg, ctype())  # buffer protocol, writes in place
+            except (AttributeError, TypeError):
+                return None
+            slot_specs.append((i, ctype, extract))
 
     # Auto-stream: append a zero-valued slot for the default (NULL) stream.
     # When no user-declared stream parameter exists, the compiled kernel
@@ -984,11 +994,19 @@ class CallState:
         updaters = []
 
         for packed_idx, (arg_idx, ctype, extract) in enumerate(self._spec):
-            s = ctype(0)
+            # ``ctype(0)`` works for scalar ctypes (c_void_p, c_int, ...) but
+            # not for arrays; arrays need the zero-arg constructor.
+            try:
+                s = ctype(0)
+            except TypeError:
+                s = ctype()
             packed[packed_idx] = ctypes.addressof(s)
             storages.append(s)
             if extract is not None:
-                updaters.append((arg_idx, s, extract))
+                # Scalar slots use the value-return protocol; buffer slots
+                # (array ctypes) use the in-place mutation protocol.
+                is_scalar = hasattr(s, "value")
+                updaters.append((arg_idx, s, extract, is_scalar))
 
         self._tls.packed = packed
         self._tls.updaters = updaters
@@ -998,8 +1016,11 @@ class CallState:
         if not hasattr(self._tls, "packed"):
             self._init_buffers()
 
-        for arg_idx, storage, extract in self._tls.updaters:
-            storage.value = extract(args_tuple[arg_idx])
+        for arg_idx, storage, extract, is_scalar in self._tls.updaters:
+            if is_scalar:
+                storage.value = extract(args_tuple[arg_idx])
+            else:
+                extract(args_tuple[arg_idx], storage)
 
         return self._func_exe(self._tls.packed)
 
