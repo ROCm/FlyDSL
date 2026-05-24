@@ -9,7 +9,11 @@ BLOCK_N = 128
 BLOCK_K = 64
 STAGES_A = 2
 
-M, N, K = 4096, 4096, 4096
+# N and K stay compile-time: layout B's preshuffle factors depend on them and
+# the K-loop is unrolled at trace time.  M is the runtime ``fx.Int32`` extent,
+# so a single compiled kernel serves calls with different M values without
+# silent OOB on ``num_records`` baked from cosize.
+N, K = 4096, 4096
 
 
 @flyc.kernel
@@ -17,15 +21,15 @@ def gemm_kernel(
     A: fx.Tensor,
     B: fx.Tensor,
     C: fx.Tensor,
+    M: fx.Int32,
     tiled_mma: fx.TiledMma,
     tiled_copy_g2s_A: fx.TiledCopy,
 ):
     tid = fx.thread_idx.x
     bid_x, bid_y, _ = fx.block_idx
 
-    # Exact descriptor sizes from compile-time shape (f16 = 2 bytes/elem);
-    # ``num_records_bytes`` is required with ``max_size=False`` to avoid
-    # silent OOB on JIT-cache reuse across shapes.
+    # f16 = 2 bytes/elem.  ``M`` is runtime so the descriptor adapts to the
+    # actual tensor extent; N and K are compile-time constants.
     A = fx.rocdl.make_buffer_tensor(A, max_size=False, num_records_bytes=M * K * 2)
     B = fx.rocdl.make_buffer_tensor(B, max_size=False, num_records_bytes=N * K * 2)
     C = fx.rocdl.make_buffer_tensor(C, max_size=False, num_records_bytes=M * N * 2)
@@ -162,6 +166,7 @@ def preshuffle_gemm(
     A: fx.Tensor,
     B: fx.Tensor,
     C: fx.Tensor,
+    M: fx.Int32,
     stream: fx.Stream = fx.Stream(None),
 ):
     preshuffle_layout_B = fx.make_layout(((16, N // 16), (8, 4, K // 32)), ((8, 16 * K), (1, 8 * 16, 8 * 16 * 4)))
@@ -182,21 +187,25 @@ def preshuffle_gemm(
         fx.make_tile(None, None, fx.make_layout((4, 4, 2), (1, 8, 4))),
     )
 
-    gemm_kernel(A, preshuffle_B, C, tiled_mma, tiled_copy_g2s_A).launch(
+    gemm_kernel(A, preshuffle_B, C, M, tiled_mma, tiled_copy_g2s_A).launch(
         grid=(M // BLOCK_M, N // BLOCK_N, 1), block=(256, 1, 1), smem=32768, stream=stream
     )
 
 
-A = torch.randn(M, K, dtype=torch.float16).cuda()
+# M is now a runtime ``fx.Int32`` -- the same compiled kernel handles any
+# M that is a multiple of BLOCK_M.  Try different values and the JIT cache
+# hits a single entry.
+M_RUNTIME = 4096
+A = torch.randn(M_RUNTIME, K, dtype=torch.float16).cuda()
 B = torch.randn(N, K, dtype=torch.float16).cuda()
-C = torch.zeros(M, N, dtype=torch.float16).cuda()
+C = torch.zeros(M_RUNTIME, N, dtype=torch.float16).cuda()
 
 preshuffle_B = shuffle_weight(B, layout=(16, 16))
 
 tA = flyc.from_dlpack(A).mark_layout_dynamic(leading_dim=1, divisibility=16)
 tC = flyc.from_dlpack(C).mark_layout_dynamic(leading_dim=1, divisibility=16)
 
-preshuffle_gemm(tA, preshuffle_B, tC, stream=torch.cuda.current_stream())
+preshuffle_gemm(tA, preshuffle_B, tC, M_RUNTIME, stream=torch.cuda.current_stream())
 
 torch.cuda.synchronize()
 expected = (A @ B.T).to(torch.float32)

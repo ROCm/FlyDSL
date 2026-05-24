@@ -132,7 +132,15 @@ def make_buffer_tensor(
     layout = get_layout(tensor)
 
     if num_records_bytes is not None:
-        if not hasattr(num_records_bytes, "ir_value"):
+        # Always materialise as Int64: the ROCDL ``make.buffer.rsrc`` op
+        # requires an i64 num_records operand, and runtime expressions like
+        # ``fx.Int32(M) * N * elem_bytes`` produce i32 which would otherwise
+        # overflow for buffers > 2GB / fail verification.
+        if isinstance(num_records_bytes, int):
+            num_records_bytes = Int64(num_records_bytes)
+        elif hasattr(num_records_bytes, "to") and not isinstance(num_records_bytes, Int64):
+            num_records_bytes = num_records_bytes.to(Int64)
+        elif not hasattr(num_records_bytes, "ir_value"):
             num_records_bytes = Int64(num_records_bytes)
     elif max_size:
         MAX_BUFFER_SIZE = 0xFFFFFFFF
