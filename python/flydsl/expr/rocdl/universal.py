@@ -111,20 +111,26 @@ def make_buffer_tensor(
         tensor: Source tensor with a layout.
         max_size: If ``True`` (default) use ``0xFFFFFFFF`` as the descriptor
             size -- safe coarse OOB checking that survives any cache reuse.
-        num_records_bytes: Explicit byte count for the descriptor.  Required
-            when ``max_size=False``.  Should be computed from runtime tensor
-            extents (e.g. ``M * N * elem_bytes`` where ``M``/``N`` are
-            runtime ``fx.Int32``) so the cached kernel stays valid across
-            shapes.
+        num_records_bytes: Explicit byte count for the descriptor.  Optional
+            when ``max_size=False``: if omitted, ``num_records`` is derived
+            from ``cosize(layout) * elem_bytes`` -- which is *safe* only
+            when the layout has dynamic shape (cosize is then a runtime
+            expression that adapts to the actual tensor extent).
 
-    Why ``num_records_bytes`` is required when ``max_size=False``:
-        Auto-deriving from ``cosize(layout) * elem_bytes`` bakes the static
-        layout's shape values into IR.  The JIT cache key does not include
-        shape by default, so the same compiled artifact is reused for calls
-        with different shapes -- and the first shape's ``num_records`` then
-        silently truncates OOB reads / writes on the others.  This is the
-        PR #551 fp8gemm regression mode; the guard makes the unsafe pattern
-        impossible at compile time.
+    When ``max_size=False``:
+        - **dynamic-shape layout** (e.g. caller used ``mark_layout_dynamic``):
+          ``num_records_bytes`` may be omitted; ``cosize(layout)`` becomes a
+          runtime expression that adapts to the actual tensor extent.
+        - **static-shape layout** (default for tensors not opted into dynamic
+          layout): ``num_records_bytes`` is **required**.  Auto-deriving
+          would compute ``cosize(layout) * elem_bytes`` as a compile-time
+          constant and bake the first call's shape into IR.  The JIT cache
+          key does not include shape by default, so the cached kernel is
+          then reused for calls with different shapes and silently
+          truncates OOB reads / writes -- the PR #551 fp8gemm regression
+          mode.  Pass ``num_records_bytes`` computed from runtime tensor
+          extents, or use ``mark_layout_dynamic`` on the caller side, or
+          use ``max_size=True`` for the safe coarse path.
     """
     elem_ty = tensor.element_type
 
@@ -146,16 +152,33 @@ def make_buffer_tensor(
         MAX_BUFFER_SIZE = 0xFFFFFFFF
         num_records_bytes = Int64(MAX_BUFFER_SIZE)
     else:
-        raise ValueError(
-            "make_buffer_tensor(..., max_size=False) without "
-            "num_records_bytes auto-derives num_records from cosize(layout), "
-            "baking the static shape into IR.  The JIT cache key does not "
-            "include shape by default, so a kernel compiled for shape A is "
-            "reused for shape B with A's num_records baked in -- silently "
-            "truncating OOB reads / writes.  Pass num_records_bytes "
-            "explicitly (computed from runtime tensor extents) or use "
-            "max_size=True for the safe coarse OOB path."
-        )
+        # ``max_size=False`` + no explicit ``num_records_bytes``: fall back to
+        # the historical cosize-based auto-derive, but only when the layout
+        # has dynamic shape so ``cosize`` is a runtime expression that
+        # adapts to the actual tensor extent.  Static-shape layouts would
+        # bake the first call's shape into IR and silently OOB on cache
+        # reuse, so reject them with an actionable error.
+        from ..._mlir.dialects.fly import LayoutType
+
+        if not LayoutType(layout.type).is_static_shape:
+            elem_bits = elem_ty.width
+            if elem_bits % 8 == 0:
+                num_records_bytes = Int64(get_scalar(cosize(layout)) * (elem_bits // 8))
+            else:
+                num_records_bytes = Int64((get_scalar(cosize(layout)) * elem_bits + 7) // 8)
+        else:
+            raise ValueError(
+                "make_buffer_tensor(..., max_size=False) without "
+                "num_records_bytes auto-derives num_records from "
+                "cosize(layout), baking the static layout's shape into IR.  "
+                "The JIT cache key does not include shape by default, so a "
+                "kernel compiled for shape A is reused for shape B with A's "
+                "num_records baked in -- silently truncating OOB reads / "
+                "writes.  Either pass num_records_bytes computed from "
+                "runtime tensor extents, call mark_layout_dynamic on the "
+                "tensor adaptor so cosize becomes a runtime expression, or "
+                "use max_size=True for the safe coarse OOB path."
+            )
 
     from ..buffer_ops import _get_buffer_flags
 
