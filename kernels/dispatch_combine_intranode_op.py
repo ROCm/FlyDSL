@@ -836,22 +836,47 @@ class FlyDSLDispatchCombineIntraNodeOp:
             self.reset()
         return out_tok, out_wts
 
+    # Class-level gate for the reserved ``combine_no_stage1`` entry point.
+    # Default ``False``: the intranode dispatch/combine baseline does NOT
+    # expose this API to end users — the contract (pre-populated
+    # ``shmem_comb_inp_tok``, caller-supplied ``cur_tok``, upstream IPC
+    # ordering vs. the weight P2P) is only met by the fused
+    # GEMM2+combine production path on the ``yanbo/fused_gemm2_combine``
+    # branch.  That branch flips this flag after staging its end-to-end
+    # validation.  Anyone toggling this in isolation must read the full
+    # contract in ``combine_no_stage1.__doc__`` and own correctness.
+    _ENABLE_COMBINE_NO_STAGE1 = False
+
     def combine_no_stage1(
         self, input, weights, indices, packed_recv_x=None, cur_tok=None, call_reset=False, enable_weights: bool = True
     ):
-        # Stage-1 is bypassed: the kernel does not actually read ``input``,
-        # so any contiguous dtype works (the upstream fused GEMM2 epilogue
-        # has already populated ``shmem_comb_inp_tok``).  We still check
-        # shape/device but relax the strict dtype contract.
-        self._check_combine_inputs(input, weights, indices, packed_recv_x, strict_input_dtype=False)
-        """Skip-Stage1 variant of ``combine``.
+        """Skip-Stage1 variant of ``combine`` (reserved API, not yet exposed).
 
         Semantics: bypass the P2P scatter (the upstream fused kernel has
         already populated shmem_comb_inp[_wts]) and only run Stage 2
         (CrossDeviceBarrier) + Stage 3 (local weighted-accum).
 
+        Status
+        ------
+        Reserved for the fused GEMM2+combine path.  The standalone
+        intranode wrapper does not currently expose this entry point;
+        invoking it raises ``NotImplementedError`` unless the class-level
+        flag ``_ENABLE_COMBINE_NO_STAGE1`` is explicitly set to ``True``
+        (intended for the fused-path integration on the
+        ``yanbo/fused_gemm2_combine`` branch).
+
         Parameters
         ----------
+        cur_tok
+            **Caller-supplied actual token count** consumed by Stage 3.
+            Stage 3 iterates ``range(global_warp_id, cur_rank_num_token,
+            global_warp_num)`` where ``cur_rank_num_token`` is this
+            argument (NOT ``self.total_recv``).  When ``None`` it falls
+            back to ``cfg.max_num_inp_token_per_rank``, which over-
+            iterates harmlessly only when the unrouted slots are
+            zero-initialized (see ``shmem_comb_inp_tok.zero_()`` in
+            ``_alloc_buffers``).  The fused path MUST pass the real
+            count to avoid wasted Stage 3 iterations.
         enable_weights
             ``True`` (default) keeps the Stage 1 weight scatter and the
             Stage 3b weight accumulate inside the combine kernel.  The
@@ -871,9 +896,27 @@ class FlyDSLDispatchCombineIntraNodeOp:
                 will consume (laid out in max_tok_per_rank slots);
               - shmem_comb_inp_wts already contains the matching weights
                 (only when enable_weights=True);
-              - total_recv has already been set by dispatch (Stage 3
-                reads it as cur_rank_num_token).
+              - ``cur_tok`` matches the actual number of received tokens
+                consumed by Stage 3 (NOT read from ``self.total_recv``).
         """
+        if not type(self)._ENABLE_COMBINE_NO_STAGE1:
+            raise NotImplementedError(
+                "FlyDSLDispatchCombineIntraNodeOp.combine_no_stage1 is a "
+                "reserved API for the fused GEMM2+combine production path "
+                "(see yanbo/fused_gemm2_combine branch).  The standalone "
+                "intranode dispatch/combine wrapper does not yet validate "
+                "this entry point — invoke combine(...) instead.  To enable "
+                "from the fused branch, set "
+                "FlyDSLDispatchCombineIntraNodeOp._ENABLE_COMBINE_NO_STAGE1 "
+                "= True after auditing the upstream IPC-ordering contract "
+                "documented in combine_no_stage1.__doc__."
+            )
+
+        # Stage-1 is bypassed: the kernel does not actually read ``input``,
+        # so any contiguous dtype works (the upstream fused GEMM2 epilogue
+        # has already populated ``shmem_comb_inp_tok``).  We still check
+        # shape/device but relax the strict dtype contract.
+        self._check_combine_inputs(input, weights, indices, packed_recv_x, strict_input_dtype=False)
         cfg = self.cfg
         stream = torch.cuda.current_stream()
 
