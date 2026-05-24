@@ -65,6 +65,7 @@ def compile_mxscale_gemm(
     atomic_barrier_enable: bool = False,
     b_streaming: bool = False,
     scale_load_path: str = "tdm",
+    fp8_schedule: str = "auto",
 ):
     """Compile an MXFP4 or MXFP8 GEMM kernel with TDM async copy.
 
@@ -92,6 +93,13 @@ def compile_mxscale_gemm(
     scale_load_paths = ("tdm", "buffer_lds_stage", "buffer_lds_stage_ab_split")
     if scale_load_path not in scale_load_paths:
         raise ValueError(f"scale_load_path must be one of {scale_load_paths}, got {scale_load_path!r}")
+    fp8_schedule_modes = ("auto", "quadrant", "deep-pipeline")
+    if fp8_schedule not in fp8_schedule_modes:
+        raise ValueError(f"fp8_schedule must be one of {fp8_schedule_modes}, got {fp8_schedule!r}")
+    if fp8_schedule != "auto" and data_format != "fp8":
+        raise ValueError(f"fp8_schedule={fp8_schedule!r} is only valid for data_format='fp8'")
+    if fp8_schedule != "auto" and b_streaming:
+        raise ValueError("fp8_schedule cannot be combined with b_streaming=True")
     use_scale_buffer_load = scale_load_path != "tdm"
     use_ab_split_scale_buffer_load = scale_load_path == "buffer_lds_stage_ab_split"
     effective_expert_sched_mode = bool(expert_sched_mode) and not use_scale_buffer_load
@@ -336,7 +344,28 @@ def compile_mxscale_gemm(
     COMPUTE_SCHEDULE_ROW_MAJOR_STREAMING = "row_major_streaming"
     COMPUTE_SCHEDULE_FP4_COL_BAND = "fp4_col_band"
     COMPUTE_SCHEDULE_FP8_QUADRANT = "fp8_quadrant"
+    COMPUTE_SCHEDULE_FP8_DEEP_PIPELINE = "fp8_deep_pipeline"
     COMPUTE_SCHEDULE_B_STREAMING = "b_streaming"
+
+    fp8_deep_pipeline_eligible = (
+        data_format == "fp8"
+        and tile_m == 256
+        and tile_n == 256
+        and tile_k == 128
+        and m_warp == 2
+        and n_warp == 2
+        and num_buffers == 4
+        and wave_specialized_tdm
+        and scale_load_path == "tdm"
+        and out_dtype == "bf16"
+        and not use_scale_opsel
+    )
+    if fp8_schedule == "deep-pipeline" and not fp8_deep_pipeline_eligible:
+        raise ValueError(
+            "fp8_schedule='deep-pipeline' requires fp8 256x256x128, "
+            "m_warp=n_warp=2, num_buffers=4, wave_specialized_tdm=True, "
+            "scale_load_path='tdm', out_dtype='bf16', and use_scale_opsel=False"
+        )
 
     def _pick_compute_schedule_kind():
         if b_streaming:
@@ -350,13 +379,23 @@ def compile_mxscale_gemm(
         if is_fp4:
             return COMPUTE_SCHEDULE_FP4_COL_BAND
         if data_format == "fp8":
+            if fp8_schedule == "deep-pipeline" or (fp8_schedule == "auto" and fp8_deep_pipeline_eligible):
+                return COMPUTE_SCHEDULE_FP8_DEEP_PIPELINE
             return COMPUTE_SCHEDULE_FP8_QUADRANT
         return COMPUTE_SCHEDULE_ROW_MAJOR_STREAMING
 
     compute_schedule_kind = _pick_compute_schedule_kind()
     use_fp4_bank_friendly_schedule = compute_schedule_kind == COMPUTE_SCHEDULE_FP4_COL_BAND
     use_fp8_quadrant_schedule = compute_schedule_kind == COMPUTE_SCHEDULE_FP8_QUADRANT
+    use_fp8_deep_pipeline_schedule = compute_schedule_kind == COMPUTE_SCHEDULE_FP8_DEEP_PIPELINE
     use_b_streaming_schedule = compute_schedule_kind == COMPUTE_SCHEDULE_B_STREAMING
+    use_ws_tdm_split_signal_overlap = (
+        wave_specialized_tdm
+        and not use_scale_buffer_load
+        and (use_fp8_quadrant_schedule or use_fp8_deep_pipeline_schedule)
+        and num_buffers == 4
+        and use_cluster
+    )
 
     if use_b_streaming_schedule:
         print(
@@ -383,11 +422,19 @@ def compile_mxscale_gemm(
             for _wn in range(_bank_half_wn, wmma_n_rep):
                 _bank_group_to_row_major.append(_wm * wmma_n_rep + _wn)
 
-    if use_fp8_quadrant_schedule:
+    if use_fp8_quadrant_schedule or use_fp8_deep_pipeline_schedule:
         _fp8_half_wm = wmma_m_rep // 2
         _fp8_half_wn = wmma_n_rep // 2
         _fp8_group_size = _fp8_half_wm * _fp8_half_wn
         _fp8_b_scale_loads = (b_scale_load_rep + 3) // 4
+    if use_fp8_deep_pipeline_schedule:
+        _fp8_pair_wm = 2
+        _fp8_pair_wn = 2
+        _fp8_wm_pairs = wmma_m_rep // _fp8_pair_wm
+        _fp8_wn_pairs = wmma_n_rep // _fp8_pair_wn
+        _fp8_pair_a_loads = _fp8_pair_wm * DS_LOADS_PER_A_FRAG
+        _fp8_pair_b_loads = _fp8_pair_wn * _b_frag_loads_per_wn
+        _fp8_scale_loads = (wmma_m_rep + 3) // 4 + (b_scale_load_rep + 3) // 4
 
     @flyc.kernel(known_block_size=[block_threads, 1, 1])
     def kernel_mxscale_gemm(
@@ -1102,6 +1149,7 @@ def compile_mxscale_gemm(
             lds_bs,
             emit_filler=None,
             mid_compute_callback=None,
+            late_compute_callback=None,
         ):
             current_accs = list(accs_in)
             a_buf, a_bases = _precompute_a_lane_bases(lds_a)
@@ -1136,11 +1184,22 @@ def compile_mxscale_gemm(
             def _load_b_left_bundle(ks):
                 return _load_b_half(0, ks), _load_b_scales(ks)
 
-            def _emit_group(wm_base, wn_base, a_frags, b_frags, a_scales, b_scales, emit_filler_now=False):
+            def _emit_group_rows(
+                wm_base,
+                wn_base,
+                a_frags,
+                b_frags,
+                a_scales,
+                b_scales,
+                row_start,
+                row_count,
+                emit_filler_now=False,
+            ):
                 if const_expr(emit_filler_now and emit_filler is not None):
                     rocdl.sched_barrier(0)
                     emit_filler()
-                for wm_local in range_constexpr(_fp8_half_wm):
+                for row_offset in range_constexpr(row_count):
+                    wm_local = row_start + row_offset
                     global_wm = wm_base + wm_local
                     for wn_local in range_constexpr(_fp8_half_wn):
                         global_wn = wn_base + wn_local
@@ -1154,24 +1213,67 @@ def compile_mxscale_gemm(
                             b_scales,
                         )
 
+            def _emit_group(wm_base, wn_base, a_frags, b_frags, a_scales, b_scales, emit_filler_now=False):
+                _emit_group_rows(
+                    wm_base,
+                    wn_base,
+                    a_frags,
+                    b_frags,
+                    a_scales,
+                    b_scales,
+                    0,
+                    _fp8_half_wm,
+                    emit_filler_now=emit_filler_now,
+                )
+
+            def _emit_group_col(wm_base, wn_base, a_frags, b_frags, a_scales, b_scales, wn_local):
+                global_wn = wn_base + wn_local
+                for wm_local in range_constexpr(_fp8_half_wm):
+                    global_wm = wm_base + wm_local
+                    _emit_wmma(
+                        current_accs,
+                        global_wm,
+                        global_wn,
+                        a_frags[wm_local],
+                        b_frags[wn_local],
+                        a_scales,
+                        b_scales,
+                    )
+
             b_left_frags, b_scales = _load_b_left_bundle(0)
+            _first_top_row_keep = max((_fp8_half_wm - 1) * DS_LOADS_PER_A_FRAG - _fp8_b_scale_loads, 0)
+            _bottom_left_keep = max(_b_half_loads - DS_LOADS_PER_A_FRAG, 0)
 
             for ks in range_constexpr(k_wmma_steps):
                 is_last_ks = ks == k_wmma_steps - 1
                 a_scales = _load_a_scales(ks)
 
                 a_top_frags = _load_a_group(0, _fp8_half_wm, ks)
+
+                # Consume the first top-left row before issuing bottom-A.
+                # The barriers only constrain LLVM scheduling; they are not
+                # hardware synchronization points.
+                rocdl.s_wait_dscnt(_first_top_row_keep)
+                rocdl.sched_barrier(0)
+                _emit_group_rows(0, 0, a_top_frags, b_left_frags, a_scales, b_scales, 0, 1)
+                rocdl.sched_barrier(0)
+
                 a_bottom_frags = _load_a_group(_fp8_half_wm, _fp8_half_wm, ks)
-
-                # Keep bottom A outstanding while the first quadrant consumes top A.
-                rocdl.s_wait_dscnt(_fp8_half_wm * DS_LOADS_PER_A_FRAG)
-
-                _emit_group(0, 0, a_top_frags, b_left_frags, a_scales, b_scales)
+                if const_expr(_fp8_half_wm > 1):
+                    _emit_group_rows(
+                        0,
+                        0,
+                        a_top_frags,
+                        b_left_frags,
+                        a_scales,
+                        b_scales,
+                        1,
+                        _fp8_half_wm - 1,
+                    )
                 b_right_frags = _load_b_half(_fp8_half_wn, ks)
 
-                # Keep the newly issued right-half B loads outstanding while
-                # bottom A becomes ready for the second quadrant.
-                rocdl.s_wait_dscnt(_b_half_loads)
+                # Drain bottom-A while keeping most right-half B in flight.
+                rocdl.s_wait_dscnt(_bottom_left_keep)
 
                 _emit_group(_fp8_half_wm, 0, a_bottom_frags, b_left_frags, a_scales, b_scales)
 
@@ -1181,26 +1283,180 @@ def compile_mxscale_gemm(
 
                 if const_expr(not is_last_ks):
                     next_left_frags, next_b_scales = _load_b_left_bundle(ks + 1)
-                    # Current right-half B must be ready before Q2/Q3, while
-                    # the next ks left-half bundle stays in flight.
-                    rocdl.s_wait_dscnt(_b_left_bundle_loads)
-                else:
-                    rocdl.s_wait_dscnt(0)
 
-                _emit_group(0, _fp8_half_wn, a_top_frags, b_right_frags, a_scales, b_scales)
-                _emit_group(
-                    _fp8_half_wm,
-                    _fp8_half_wn,
-                    a_bottom_frags,
-                    b_right_frags,
-                    a_scales,
-                    b_scales,
-                    emit_filler_now=is_last_ks,
-                )
+                for wn_local in range_constexpr(_fp8_half_wn):
+                    if const_expr(not is_last_ks):
+                        _right_keep = _b_left_bundle_loads + (_fp8_half_wn - wn_local - 1) * _b_frag_loads_per_wn
+                    else:
+                        _right_keep = (_fp8_half_wn - wn_local - 1) * _b_frag_loads_per_wn
+                    rocdl.s_wait_dscnt(_right_keep)
+                    _emit_group_col(0, _fp8_half_wn, a_top_frags, b_right_frags, a_scales, b_scales, wn_local)
+
+                if const_expr(is_last_ks and late_compute_callback is not None):
+                    rocdl.sched_barrier(0)
+                    late_compute_callback()
+
+                if const_expr(is_last_ks and emit_filler is not None):
+                    rocdl.sched_barrier(0)
+                    emit_filler()
+
+                for wn_local in range_constexpr(_fp8_half_wn):
+                    _emit_group_col(
+                        _fp8_half_wm,
+                        _fp8_half_wn,
+                        a_bottom_frags,
+                        b_right_frags,
+                        a_scales,
+                        b_scales,
+                        wn_local,
+                    )
 
                 if const_expr(not is_last_ks):
                     b_left_frags = next_left_frags
                     b_scales = next_b_scales
+
+            return current_accs
+
+        def compute_tile_fp8_deep_pipeline(
+            accs_in,
+            lds_a,
+            lds_b,
+            lds_as,
+            lds_bs,
+            emit_filler=None,
+            mid_compute_callback=None,
+            late_compute_callback=None,
+        ):
+            current_accs = list(accs_in)
+            a_buf, a_bases = _precompute_a_lane_bases(lds_a)
+            b_buf, b_bases = _precompute_b_lane_bases(lds_b)
+            as_buf, as_bases = _precompute_scale_lane_bases(lds_as, warp_m_base, wmma_m_rep, interleaved_scale_cols_a)
+            bs_buf, bs_bases = _precompute_scale_lane_bases(
+                lds_bs, warp_n_base, b_scale_load_rep, interleaved_scale_cols_b
+            )
+
+            def load_a_pair(wm_pair, ks):
+                wm_base = wm_pair * _fp8_pair_wm
+                return [
+                    load_a_frag(a_buf, a_bases[wm_base + wm_local], ks)
+                    for wm_local in range_constexpr(_fp8_pair_wm)
+                ]
+
+            def load_b_pair(wn_pair, ks):
+                wn_base = wn_pair * _fp8_pair_wn
+                return [
+                    load_b_frag(b_buf, b_bases, wn_base + wn_local, ks)
+                    for wn_local in range_constexpr(_fp8_pair_wn)
+                ]
+
+            def _load_a_scales(ks):
+                return load_scale_b128(as_buf, as_bases[0], wmma_m_rep, ks)
+
+            def _load_b_scales(ks):
+                return load_scale_b128(bs_buf, bs_bases[0], b_scale_load_rep, ks)
+
+            def emit_panel_2x2(wm_pair, wn_pair, a_pair, b_pair, scale_pair, prefetch_after_first_row=None):
+                a_scales, b_scales = scale_pair
+                wm_base = wm_pair * _fp8_pair_wm
+                wn_base = wn_pair * _fp8_pair_wn
+                for wn_local in range_constexpr(_fp8_pair_wn):
+                    _emit_wmma(
+                        current_accs,
+                        wm_base,
+                        wn_base + wn_local,
+                        a_pair[0],
+                        b_pair[wn_local],
+                        a_scales,
+                        b_scales,
+                    )
+                if const_expr(prefetch_after_first_row is not None):
+                    prefetch_after_first_row()
+                for wn_local in range_constexpr(_fp8_pair_wn):
+                    _emit_wmma(
+                        current_accs,
+                        wm_base + 1,
+                        wn_base + wn_local,
+                        a_pair[1],
+                        b_pair[wn_local],
+                        a_scales,
+                        b_scales,
+                    )
+
+            _pair_loads = _fp8_pair_a_loads
+            _two_pair_loads = _fp8_pair_a_loads + _fp8_pair_b_loads
+            _three_pair_loads = _fp8_pair_b_loads + _fp8_pair_a_loads * 2
+
+            for ks in range_constexpr(k_wmma_steps):
+                is_last_ks = ks == k_wmma_steps - 1
+                a_scales = _load_a_scales(ks)
+                b_scales = _load_b_scales(ks)
+                scale_pair = (a_scales, b_scales)
+
+                b0 = load_b_pair(0, ks)
+                a0 = load_a_pair(0, ks)
+                b1 = load_b_pair(1, ks)
+
+                a1_box = [None]
+                b2_box = [None]
+                b3_box = [None]
+                a2_box = [None]
+                a3_box = [None]
+
+                def _prefetch_a1():
+                    a1_box[0] = load_a_pair(1, ks)
+
+                rocdl.s_wait_dscnt(_fp8_pair_b_loads)
+                emit_panel_2x2(0, 0, a0, b0, scale_pair, prefetch_after_first_row=_prefetch_a1)
+
+                if const_expr(ks == 0 and mid_compute_callback is not None):
+                    rocdl.sched_barrier(0)
+                    mid_compute_callback()
+
+                def _prefetch_b2():
+                    b2_box[0] = load_b_pair(2, ks)
+
+                rocdl.s_wait_dscnt(_pair_loads)
+                emit_panel_2x2(0, 1, a0, b1, scale_pair, prefetch_after_first_row=_prefetch_b2)
+
+                def _prefetch_b3():
+                    b3_box[0] = load_b_pair(3, ks)
+
+                rocdl.s_wait_dscnt(_fp8_pair_b_loads)
+                emit_panel_2x2(1, 0, a1_box[0], b0, scale_pair, prefetch_after_first_row=_prefetch_b3)
+
+                def _prefetch_a2_a3():
+                    a2_box[0] = load_a_pair(2, ks)
+                    a3_box[0] = load_a_pair(3, ks)
+
+                emit_panel_2x2(1, 1, a1_box[0], b1, scale_pair, prefetch_after_first_row=_prefetch_a2_a3)
+
+                rocdl.s_wait_dscnt(_three_pair_loads)
+                emit_panel_2x2(0, 2, a0, b2_box[0], scale_pair)
+                rocdl.s_wait_dscnt(_two_pair_loads)
+                emit_panel_2x2(0, 3, a0, b3_box[0], scale_pair)
+                emit_panel_2x2(1, 2, a1_box[0], b2_box[0], scale_pair)
+                emit_panel_2x2(1, 3, a1_box[0], b3_box[0], scale_pair)
+
+                rocdl.s_wait_dscnt(_fp8_pair_a_loads)
+                emit_panel_2x2(2, 0, a2_box[0], b0, scale_pair)
+                emit_panel_2x2(2, 1, a2_box[0], b1, scale_pair)
+
+                rocdl.s_wait_dscnt(0)
+                emit_panel_2x2(3, 0, a3_box[0], b0, scale_pair)
+                emit_panel_2x2(3, 1, a3_box[0], b1, scale_pair)
+
+                if const_expr(is_last_ks and late_compute_callback is not None):
+                    rocdl.sched_barrier(0)
+                    late_compute_callback()
+
+                if const_expr(is_last_ks and emit_filler is not None):
+                    rocdl.sched_barrier(0)
+                    emit_filler()
+
+                emit_panel_2x2(2, 2, a2_box[0], b2_box[0], scale_pair)
+                emit_panel_2x2(2, 3, a2_box[0], b3_box[0], scale_pair)
+                emit_panel_2x2(3, 2, a3_box[0], b2_box[0], scale_pair)
+                emit_panel_2x2(3, 3, a3_box[0], b3_box[0], scale_pair)
 
             return current_accs
 
@@ -1295,27 +1551,75 @@ def compile_mxscale_gemm(
             rocdl.sched_barrier(0)
 
         def hot_loop_scheduler_fp8_quadrant():
-            _a_all_loads = wmma_m_rep * DS_LOADS_PER_A_FRAG
             _a_scale_loads = (wmma_m_rep + 3) // 4
+            _a_top_loads = _fp8_half_wm * DS_LOADS_PER_A_FRAG
+            _a_bottom_loads = _a_top_loads
             _b_half_loads = _fp8_half_wn * _b_frag_loads_per_wn
             _b_left_bundle_loads = _b_half_loads + _fp8_b_scale_loads
             _group_wmma = _fp8_group_size
+            _first_row_wmma = _fp8_half_wn
+            _remaining_top_left_wmma = (_fp8_half_wm - 1) * _fp8_half_wn
 
             for _ks in range_constexpr(k_wmma_steps):
                 if const_expr(_ks == 0):
-                    rocdl.sched_dsrd(_b_left_bundle_loads + _a_scale_loads + _a_all_loads)
+                    rocdl.sched_dsrd(_b_left_bundle_loads + _a_scale_loads + _a_top_loads)
                 else:
-                    rocdl.sched_dsrd(_a_scale_loads + _a_all_loads)
-                rocdl.sched_mfma(_group_wmma)
+                    rocdl.sched_dsrd(_a_scale_loads + _a_top_loads)
+                rocdl.sched_mfma(_first_row_wmma)
+                rocdl.sched_dsrd(_a_bottom_loads)
+                if const_expr(_remaining_top_left_wmma > 0):
+                    rocdl.sched_mfma(_remaining_top_left_wmma)
                 rocdl.sched_dsrd(_b_half_loads)
                 rocdl.sched_mfma(_group_wmma)
                 if const_expr(_ks < k_wmma_steps - 1):
                     rocdl.sched_dsrd(_b_left_bundle_loads)
-                rocdl.sched_mfma(_group_wmma)
-                rocdl.sched_mfma(_group_wmma)
+                for _wn_local in range_constexpr(_fp8_half_wn):
+                    rocdl.sched_mfma(_fp8_half_wm)
+                for _wn_local in range_constexpr(_fp8_half_wn):
+                    rocdl.sched_mfma(_fp8_half_wm)
             rocdl.sched_barrier(0)
 
-        def compute_tile_scheduled(accs_in, lds_a, lds_b, lds_as, lds_bs, emit_filler=None, mid_compute_callback=None):
+        def hot_loop_scheduler_fp8_deep_pipeline():
+            def _sched_panel_2x2(prefetch_loads=0):
+                if const_expr(prefetch_loads > 0):
+                    rocdl.sched_mfma(_fp8_pair_wn)
+                    rocdl.sched_dsrd(prefetch_loads)
+                    rocdl.sched_mfma(_fp8_pair_wn)
+                else:
+                    rocdl.sched_mfma(_fp8_pair_wm * _fp8_pair_wn)
+
+            _initial_loads = _fp8_scale_loads + _fp8_pair_b_loads + _fp8_pair_a_loads + _fp8_pair_b_loads
+
+            for _ks in range_constexpr(k_wmma_steps):
+                rocdl.sched_dsrd(_initial_loads)
+                _sched_panel_2x2(_fp8_pair_a_loads)
+                _sched_panel_2x2(_fp8_pair_b_loads)
+                _sched_panel_2x2(_fp8_pair_b_loads)
+                _sched_panel_2x2(_fp8_pair_a_loads * 2)
+                _sched_panel_2x2()
+                _sched_panel_2x2()
+                _sched_panel_2x2()
+                _sched_panel_2x2()
+                _sched_panel_2x2()
+                _sched_panel_2x2()
+                _sched_panel_2x2()
+                _sched_panel_2x2()
+                _sched_panel_2x2()
+                _sched_panel_2x2()
+                _sched_panel_2x2()
+                _sched_panel_2x2()
+            rocdl.sched_barrier(0)
+
+        def compute_tile_scheduled(
+            accs_in,
+            lds_a,
+            lds_b,
+            lds_as,
+            lds_bs,
+            emit_filler=None,
+            mid_compute_callback=None,
+            late_compute_callback=None,
+        ):
             if const_expr(compute_schedule_kind == COMPUTE_SCHEDULE_B_STREAMING):
                 return compute_tile_b_streaming(
                     accs_in,
@@ -1345,6 +1649,18 @@ def compile_mxscale_gemm(
                     lds_bs,
                     emit_filler=emit_filler,
                     mid_compute_callback=mid_compute_callback,
+                    late_compute_callback=late_compute_callback,
+                )
+            if const_expr(compute_schedule_kind == COMPUTE_SCHEDULE_FP8_DEEP_PIPELINE):
+                return compute_tile_fp8_deep_pipeline(
+                    accs_in,
+                    lds_a,
+                    lds_b,
+                    lds_as,
+                    lds_bs,
+                    emit_filler=emit_filler,
+                    mid_compute_callback=mid_compute_callback,
+                    late_compute_callback=late_compute_callback,
                 )
             return compute_tile(
                 accs_in,
@@ -1383,6 +1699,8 @@ def compile_mxscale_gemm(
                 hot_loop_scheduler_b_streaming()
             elif const_expr(compute_schedule_kind == COMPUTE_SCHEDULE_FP4_COL_BAND):
                 hot_loop_scheduler_fp4_bank_friendly()
+            elif const_expr(compute_schedule_kind == COMPUTE_SCHEDULE_FP8_DEEP_PIPELINE):
+                hot_loop_scheduler_fp8_deep_pipeline()
             elif const_expr(compute_schedule_kind == COMPUTE_SCHEDULE_FP8_QUADRANT):
                 hot_loop_scheduler_fp8_quadrant()
             else:
@@ -1811,6 +2129,9 @@ def compile_mxscale_gemm(
         # This overlaps TDM DMA with the remaining WMMA instructions,
         _fence_outstanding = TDM_LOADS_PER_STEP * (num_buffers - 2)
 
+        if const_expr(loop_iters > 0 and use_ws_tdm_split_signal_overlap):
+            _pipeline_fence_signal(outstanding=_fence_outstanding)
+
         if const_expr(loop_iters > 0):
             if const_expr(wave_specialized_tdm and not use_scale_buffer_load):
                 init_args = list(accs) + [active_addr_lo]
@@ -1822,7 +2143,8 @@ def compile_mxscale_gemm(
                     for buf_idx in range_constexpr(num_buffers):
                         load_stage = (buf_idx + num_buffers - 1) % num_buffers
 
-                        _pipeline_fence_signal(outstanding=_fence_outstanding)
+                        if const_expr(not use_ws_tdm_split_signal_overlap):
+                            _pipeline_fence_signal(outstanding=_fence_outstanding)
                         pipeline_fence_wait(use_cluster=use_cluster)
 
                         addr_box = [cur_addr_lo]
@@ -1838,6 +2160,14 @@ def compile_mxscale_gemm(
                         ):
                             _issue_active_tdm(_ls, _ab, k_prefetch=_k_off)
 
+                        _late_tdm_ws_fence_signal = None
+                        if const_expr(use_ws_tdm_split_signal_overlap):
+
+                            def _late_tdm_ws_split_signal():
+                                _pipeline_fence_signal(outstanding=_fence_outstanding)
+
+                            _late_tdm_ws_fence_signal = _late_tdm_ws_split_signal
+
                         rocdl.sched_barrier(0)
                         accs_in = compute_tile_scheduled(
                             accs_in,
@@ -1846,6 +2176,7 @@ def compile_mxscale_gemm(
                             stages_as_idx[buf_idx],
                             stages_bs_idx[buf_idx],
                             mid_compute_callback=_mid_tdm_ws,
+                            late_compute_callback=_late_tdm_ws_fence_signal,
                         )
                         cur_addr_lo = addr_box[0]
                         hot_loop_scheduler_scheduled()
@@ -2026,6 +2357,8 @@ def compile_mxscale_gemm(
                 addr_lo_bs = results[n_accs + 3]
 
         # Tail — same acc_mixed pattern: fence at top, TDM mid-compute.
+        if const_expr(loop_iters > 0 and use_ws_tdm_split_signal_overlap):
+            pipeline_fence_wait(use_cluster=use_cluster)
         _wait_scale_all()
         if const_expr(loop_iters > 0):
             _pipeline_fence(outstanding=0)
@@ -2187,6 +2520,7 @@ def compile_mxscale_gemm(
         atomic_barrier_enable,
         b_streaming,
         scale_load_path,
+        fp8_schedule,
     )
 
     @flyc.jit
