@@ -10,6 +10,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from .._mlir import ir
 from .._mlir.dialects import arith, gpu
 from ..expr.typing import Constexpr
+from ._annotations import resolve_signature
 from .ast_rewriter import ASTRewriter
 from .jit_argument import is_type_param_annotation
 from .mlir_utils import convert_to_mlir_attr
@@ -491,7 +492,7 @@ class KernelFunction:
         self._location_tracker = FuncLocationTracker(func)
         self._shared_allocator = None
 
-        full_sig = inspect.signature(self._func)
+        full_sig = resolve_signature(self._func)
         params = list(full_sig.parameters.values())
 
         self._has_self_param = bool(params) and params[0].name == "self"
