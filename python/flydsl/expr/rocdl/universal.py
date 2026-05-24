@@ -118,7 +118,12 @@ def make_buffer_tensor(
     layout = get_layout(tensor)
 
     if num_records_bytes is not None:
-        if not hasattr(num_records_bytes, "ir_value"):
+        # Coerce to i64: ROCDL make.buffer.rsrc requires an i64 num_records
+        # operand.  Int64(...) handles Python int, other fx Integer types
+        # (e.g. fx.Int32(M) * N), and raw ir.Value with i32/index/float types
+        # -- emitting the appropriate extension / cast.  Idempotent when the
+        # input is already Int64.
+        if not isinstance(num_records_bytes, Int64):
             num_records_bytes = Int64(num_records_bytes)
     elif max_size:
         num_records_bytes = Int64(0xFFFFFFFF)
