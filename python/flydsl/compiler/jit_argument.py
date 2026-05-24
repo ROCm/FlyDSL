@@ -290,8 +290,21 @@ class TensorAdaptor:
         return self
 
     def mark_layout_dynamic(self, leading_dim: Optional[int] = None, divisibility: int = 1):
+        # TODO: C++ markLayoutDynamic accumulates dynamic flags across calls
+        # without resetting -- a 2nd call with a *different* leading_dim
+        # leaves the previous call's stride[leading] dynamic, and the
+        # Python-cached ``_dyn_leading_dim`` (used by ``_reusable_slot_spec``
+        # to lay out the layout buffer) diverges from the C++ ABI.
+        # Temporary guard: forbid 2nd call with a different leading_dim.
+        # Fix path: make C++ reset all dynamic flags before re-marking.
         if leading_dim is None:
             leading_dim = -1
+        if getattr(self, "_is_layout_dynamic", False) and leading_dim not in (-1, self._dyn_leading_dim):
+            raise NotImplementedError(
+                f"mark_layout_dynamic(leading_dim={leading_dim}) conflicts with "
+                f"auto-detected leading_dim={self._dyn_leading_dim} from __init__.  "
+                "Re-binding leading_dim is not supported yet (see TODO in jit_argument.py)."
+            )
         self.tensor_adaptor.mark_layout_dynamic(leading_dim, divisibility)
         return self
 
