@@ -902,8 +902,7 @@ def _make_pa_phase_helpers(
         causal_bound,
         rmax,
         rsum,
-        o0,
-        o1,
+        outs,
         *,
         seq_start=None,
     ):
@@ -968,7 +967,7 @@ def _make_pa_phase_helpers(
             )
 
         gpu.barrier()
-        rmax, rsum, outs, v_correction = _cross_warp_softmax_and_prob_pack(d_out, rmax, rsum, [o0, o1], None)
+        rmax, rsum, outs, v_correction = _cross_warp_softmax_and_prob_pack(d_out, rmax, rsum, outs, None)
         gpu.barrier()
         outs = _pv_mfma(v_ops, outs, v_correction)
         return rmax, rsum, outs
@@ -1415,21 +1414,25 @@ def compile_pa_decode_metadata(
                 sched_vmem_after_load=False,
             )
 
-            # Multi-MTP state packing: 4*N (rmax, rsum, o0, o1) per MTP group,
+            # Multi-MTP state packing: (rmax, rsum, outs...) per MTP group,
             # + _N_K K values, + 2 scale scalars (per_token_kv only).
+            state_width = 2 + VHELOOP
+
             def _pack_states_kv(states, k_flat, scale_scalars=None):
                 flat = []
                 for st in states:
-                    rmax, rsum, o0, o1 = st
-                    flat.extend([_unwrap(rmax), _unwrap(rsum), _unwrap(o0), _unwrap(o1)])
+                    rmax, rsum = st[0], st[1]
+                    outs = [st[2 + vhe] for vhe in range_constexpr(VHELOOP)]
+                    flat.extend([_unwrap(rmax), _unwrap(rsum)])
+                    flat.extend(_unwrap(out) for out in outs)
                 flat.extend(_unwrap(v) for v in k_flat)
                 if const_expr(cache_scale_vecs and per_token_kv):
                     flat.extend(_unwrap(v) for v in scale_scalars)
                 return flat
 
             def _unpack_states_kv(flat):
-                base = 4 * _mtp_groups
-                states = [tuple(flat[4 * i + j] for j in range(4)) for i in range(_mtp_groups)]
+                base = state_width * _mtp_groups
+                states = [tuple(flat[state_width * i + j] for j in range(state_width)) for i in range(_mtp_groups)]
                 k_flat = list(flat[base : base + _N_K])
                 if const_expr(cache_scale_vecs and per_token_kv):
                     scale_scalars = tuple(flat[base + _N_K : base + _N_K + 2])
@@ -1438,11 +1441,9 @@ def compile_pa_decode_metadata(
                 return states, k_flat, scale_scalars
 
             init_states = [
-                (
-                    NEG_INF,
-                    ZERO_F,
-                    arith.constant_vector(0.0, T.f32x4),
-                    arith.constant_vector(0.0, T.f32x4),
+                tuple(
+                    [NEG_INF, ZERO_F]
+                    + [arith.constant_vector(0.0, T.f32x4) for _ in range_constexpr(VHELOOP)]
                 )
                 for _ in range(_mtp_groups)
             ]
@@ -1498,7 +1499,9 @@ def compile_pa_decode_metadata(
                 for _mtp_g in range_constexpr(_mtp_groups):
                     if const_expr(_mtp_g > 0):
                         gpu.barrier()
-                    rmax, rsum, o0, o1 = cur_states[_mtp_g]
+                    state = cur_states[_mtp_g]
+                    rmax, rsum = state[0], state[1]
+                    outs = [state[2 + vhe] for vhe in range_constexpr(VHELOOP)]
 
                     if const_expr(cache_scale_vecs and per_token_kv):
                         d_out, v_scales = _qk_and_intra_softmax(
@@ -1521,13 +1524,11 @@ def compile_pa_decode_metadata(
 
                     gpu.barrier()
                     rmax, rsum, outs, v_correction = _cross_warp_softmax_and_prob_pack(
-                        d_out, rmax, rsum, [o0, o1], v_scales
+                        d_out, rmax, rsum, outs, v_scales
                     )
-                    o0, o1 = outs[0], outs[1]
                     gpu.barrier()
-                    outs = _pv_mfma(v_ops, [o0, o1], v_correction)
-                    o0, o1 = outs[0], outs[1]
-                    new_states.append((rmax, rsum, o0, o1))
+                    outs = _pv_mfma(v_ops, outs, v_correction)
+                    new_states.append(tuple([rmax, rsum] + outs))
 
                 # Prefetch next K (once per KV iter, after all MTP groups)
                 next_scale_scalars = _load_kv_scale_scalars(tile_token_offset, next_phys_block)
@@ -1547,10 +1548,11 @@ def compile_pa_decode_metadata(
             final_states, _, _ = _unpack_states_kv(results)
             from flydsl._mlir.dialects import math as _mlir_math
             for _mtp_g in range_constexpr(_mtp_groups):
-                rmax_raw, rsum_raw, o0_raw, o1_raw = final_states[_mtp_g]
+                final_state = final_states[_mtp_g]
+                rmax_raw, rsum_raw = final_state[0], final_state[1]
+                outs_raw = [final_state[2 + vhe] for vhe in range_constexpr(VHELOOP)]
                 running_max = fx.Float32(rmax_raw)
                 running_sum = fx.Float32(rsum_raw)
-                outs_raw = [o0_raw, o1_raw]
                 outs = [fx.Vector(out_raw) for out_raw in outs_raw]
                 outelems_norm = _normalize_pa_output(running_sum, outs, ZERO_F)
                 qi_val_mg = qi_per_mtp[_mtp_g]
