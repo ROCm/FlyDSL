@@ -1,7 +1,29 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""Python wrapper for the FlyDSL intra-node DispatchCombine op."""
+"""Python wrapper for the FlyDSL intra-node DispatchCombine op.
+
+Mori-parity surface (intranode):
+  * Symmetric I/O contract: ``combine()`` writes back tokens in the
+    same dtype as the dispatch input (``cfg.data_type``).  The only
+    stride divergence is ``quant_type='fp8_direct_cast'``, where the
+    caller-facing input/output dtype stays bf16 but the wire / staging
+    dtype switches to fp8 (UseFp8DirectCast equivalent in mori).
+  * ``max_total_recv_tokens`` (config) caps the total receive slot
+    count across all peers (mori's ``maxTotalRecvTokens``-equivalent);
+    symmetric shmem token / metadata buffers shrink linearly with the
+    cap.  Default ``0`` keeps the worst-case ``world_size *
+    max_num_inp_token_per_rank`` allocation.  Per-rank slot count is
+    ``ceil(cap / world_size)``, clamped to ``max_num_inp_token_per_rank``
+    -- matching mori ``MaxNumTokensToRecvPerRank``.
+  * ``max_token_type_size`` (config) explicitly fixes the per-token
+    element-size upper bound used for shmem allocation, mirroring
+    mori's identically-named knob.  Default ``0`` derives the bound
+    from ``data_type``.  Useful when callers want to keep a single op
+    instance alive across dtype changes (e.g. swap bf16 / fp32 weights
+    in-place between dispatch invocations) without re-allocating
+    symmetric shmem.
+"""
 
 from __future__ import annotations
 
@@ -45,6 +67,18 @@ _MAX_INTRANODE_NPES = 8
 _TOK_BYTES_ALIGN = 16
 
 
+def _dtype_elem_size(dt):
+    """Return ``torch.dtype.element_size()`` working uniformly for fp4x2.
+
+    ``torch.float4_e2m1fn_x2`` stores two fp4 elements per byte, so
+    ``element_size()`` returns 1 even though the conceptual element is
+    half a byte.  The wrapper code computes ``hidden_dim // 2`` for the
+    fp4 row stride elsewhere; this helper only exposes the raw storage
+    size and callers are responsible for the fp4 special-case.
+    """
+    return torch.tensor([], dtype=dt).element_size()
+
+
 @dataclass
 class FlyDSLDispatchCombineConfig:
     rank: int
@@ -61,6 +95,25 @@ class FlyDSLDispatchCombineConfig:
     enable_std_moe: bool = False
     use_external_inp_buf: bool = True
     quant_type: str = "none"
+    # Optional cap on the total receive token count across all peers
+    # (mori ``maxTotalRecvTokens``-equivalent).  ``0`` disables the cap
+    # and falls back to the worst-case ``world_size *
+    # max_num_inp_token_per_rank`` allocation.  When set, symmetric shmem
+    # token / metadata buffers shrink linearly: per-rank slot count
+    # becomes ``ceil(cap / world_size)`` (clamped to
+    # ``max_num_inp_token_per_rank``), matching mori's
+    # ``MaxNumTokensToRecvPerRank``.  Caller must guarantee actual
+    # routing stays within the cap; FlyDSL's dispatch kernel folds
+    # over-cap tokens into the dup-sentinel codepath (no illegal-memory
+    # access), but the over-cap tokens are silently dropped.
+    max_total_recv_tokens: int = 0
+    # Optional explicit upper bound (in bytes) on the token element type.
+    # ``0`` (default) derives the bound from ``data_type``.  When set,
+    # all token-buffer allocations use this value so callers can keep
+    # the op alive across dtype changes (e.g. swap bf16 / fp32 weights
+    # between dispatch invocations) without re-allocating symmetric
+    # shmem (mirrors mori's ``max_token_type_size`` knob).
+    max_token_type_size: int = 0
 
     @property
     def is_fp4(self):
@@ -68,7 +121,7 @@ class FlyDSLDispatchCombineConfig:
 
     @property
     def elem_size(self):
-        return torch.tensor([], dtype=self.data_type).element_size()
+        return _dtype_elem_size(self.data_type)
 
     @property
     def token_bytes(self):
@@ -88,7 +141,60 @@ class FlyDSLDispatchCombineConfig:
 
     @property
     def max_recv(self):
+        """Worst-case receive count == ``world_size * max_num_inp_token_per_rank``.
+
+        Independent of ``max_total_recv_tokens``: this is the upper bound
+        the kernel reasons about (sentinel encoding, sender-side
+        ``atomic_add`` slot allocation).  Buffer allocation may use a
+        tighter ``effective_max_recv`` when the cap is enabled.
+        """
         return self.world_size * self.max_num_inp_token_per_rank
+
+    @property
+    def effective_max_recv_per_rank(self):
+        """Per-sender receive-slot share on each dest PE.
+
+        Mori parity: matches mori ``MaxNumTokensToRecvPerRank()`` --
+        ``max_total_recv_tokens == 0`` reverts to ``max_num_inp_token_per_rank``
+        (per-sender worst case: a single sender PE could send all its
+        input tokens to one dest PE), otherwise the cap is split evenly
+        across ranks via ceil-division and clamped to the per-sender
+        worst case.
+
+        ``cap == 0`` returns ``M`` (== ``max_num_inp_token_per_rank``),
+        so ``effective_max_recv == ws * M`` -- byte-identical to the
+        pre-mori-parity FlyDSL default.
+        """
+        if self.max_total_recv_tokens <= 0:
+            return self.max_num_inp_token_per_rank
+        per_rank = (self.max_total_recv_tokens + self.world_size - 1) // self.world_size
+        return min(per_rank, self.max_num_inp_token_per_rank)
+
+    @property
+    def effective_max_recv(self):
+        """Total receive-buffer slot count on each dest PE.
+
+        Mori parity: matches mori intranode ``MaxNumTokensToRecv()`` --
+        ``world_size * MaxNumTokensToRecvPerRank()``.  This is the
+        ``max_recv`` kernel parameter (dispatch sentinel encoding and
+        Stage 3 addressing).  ``cap == 0`` returns ``world_size * M``
+        (== legacy worst-case allocation).
+        """
+        return self.world_size * self.effective_max_recv_per_rank
+
+    @property
+    def max_token_bytes(self):
+        """Upper bound for a single token row (drives shmem allocation).
+
+        Mori parity: ``max_token_type_size > 0`` reserves shmem for a
+        dtype larger than ``data_type``, allowing cross-invocation
+        dtype switching without re-alloc (mirrors mori
+        ``EpDispatchCombineConfig::maxTokenTypeSize``).  Default ``0``
+        derives from ``token_bytes`` / ``data_type``.
+        """
+        if self.max_token_type_size > 0:
+            return self.hidden_dim * self.max_token_type_size
+        return self.token_bytes
 
     @property
     def scale_bytes(self):
@@ -135,6 +241,11 @@ class FlyDSLDispatchCombineIntraNodeOp:
             self._p2p_comb_inp_wts[pe] = ms.shmem_ptr_p2p(self.shmem_comb_inp_wts.data_ptr(), r, pe)
             self._p2p_xdb_mem[pe] = ms.shmem_ptr_p2p(self.shmem_xdev_bar_mem.data_ptr(), r, pe)
 
+        # Resolve effective max_recv once: both dispatch (sentinel
+        # encoding) and combine (sentinel decoding, Stage 3 addressing)
+        # must agree on this value.
+        self._effective_max_recv = config.effective_max_recv
+
         self._disp_fn = make_dispatch_jit(
             rank=r,
             npes=config.world_size,
@@ -148,6 +259,7 @@ class FlyDSLDispatchCombineIntraNodeOp:
             scale_dim=config.scale_dim,
             scale_type_size=config.scale_type_size,
             enable_std_moe=config.enable_std_moe,
+            max_recv=self._effective_max_recv,
         )
 
         # Mixed-dtype Stage 1 (mori UseFp8DirectCast equivalent): when
@@ -160,6 +272,11 @@ class FlyDSLDispatchCombineIntraNodeOp:
         # (i.e. ``data_type=cfg.data_type``); only the on-wire transport
         # dtype switches to fp8 inside the kernel.
         _use_fp8_cast = config.quant_type == "fp8_direct_cast" and config.data_type == torch.bfloat16
+        self._use_fp8_cast = _use_fp8_cast
+
+        # Combine JIT launcher: symmetric I/O (Stage 3 writes back
+        # ``cfg.data_type``).  ``fp8_direct_cast`` is handled inside the
+        # kernel via the wire-fp8 path; caller dtype stays bf16.
         self._comb_fn = make_combine_jit(
             rank=r,
             npes=config.world_size,
@@ -172,9 +289,9 @@ class FlyDSLDispatchCombineIntraNodeOp:
             enable_weights=True,
             enable_std_moe=config.enable_std_moe,
             use_p2p_read=not config.use_external_inp_buf,
-            fp8_direct_cast=_use_fp8_cast,
+            fp8_direct_cast=self._use_fp8_cast,
+            max_recv=self._effective_max_recv,
         )
-        self._use_fp8_cast = _use_fp8_cast
 
         # The cross-device barrier flag must start at 1; otherwise the very
         # first wait_until_equals(slot, 0) would be satisfied immediately by
@@ -217,6 +334,8 @@ class FlyDSLDispatchCombineIntraNodeOp:
         self._fx_disp_out_wts = fx.Int64(self.shmem_disp_out_wts.data_ptr())
 
         self._disp_compiled = None
+        # Combine compile artifact: lazily populated on first ``combine()``
+        # call (single dtype, no cache needed -- symmetric I/O contract).
         self._comb_compiled = None
         # Lazy-compiled skip_stage1 combine variant used by the fused
         # GEMM2-combine path: the upstream fused kernel has already P2P-
@@ -231,17 +350,44 @@ class FlyDSLDispatchCombineIntraNodeOp:
         npes = cfg.world_size
         k = cfg.num_experts_per_token
         mt = cfg.max_num_inp_token_per_rank
-        mr = cfg.max_recv  # npes * mt
+        # Two distinct recv-slot caps coexist (matching mori):
+        #
+        # * ``mr`` (= ``effective_max_recv``) -- dispatch-side per-PE
+        #   receive cap.  Shrinks with ``max_total_recv_tokens`` because
+        #   the dispatch kernel atomically allocates dest_tok_id in
+        #   ``[0, mr)`` and folds overflow into a sentinel (the recv
+        #   buffer is sized to exactly ``mr`` slots).
+        #
+        # * ``mr_worst`` (= ``max_recv`` = ``ws * M``) -- combine-input
+        #   buffer cap.  CANNOT shrink with the user-supplied cap
+        #   because Stage 1 of combine P2P-scatters tokens to a slot
+        #   indexed by ``(rank * M + dest_lid)`` (i.e. rank-major,
+        #   src_lid-minor layout, also mori's intranode layout).  The
+        #   worst-case index is ``(ws - 1) * M + (M - 1) = ws*M - 1``,
+        #   so the buffer must hold ``ws * M`` slots regardless of cap.
+        #
+        # Both reduce to ``ws * M`` when the cap is disabled, so the
+        # default (cap == 0) allocation is byte-identical to the
+        # pre-mori-parity layout.
+        mr = cfg.effective_max_recv
+        mr_worst = cfg.max_recv
 
-        tb = cfg.token_bytes
-        tok_i16_mr = (mr * tb + 1) // 2
-        tok_i16_mt = (mt * tb + 1) // 2
+        # Use ``max_token_bytes`` (defaults to ``token_bytes`` for the
+        # configured dtype, optionally overridden by ``max_token_type_size``
+        # so the op can survive a dtype switch without re-alloc).
+        tb_max = cfg.max_token_bytes
+        tok_i16_mr = (mr * tb_max + 1) // 2
+        tok_i16_mr_worst = (mr_worst * tb_max + 1) // 2
+        tok_i16_mt = (mt * tb_max + 1) // 2
 
         # Symmetric shmem buffers. All buffers below are P2P-accessed by
         # peer PEs inside dispatch/combine kernels, except
-        # shmem_comb_out_{tok,wts} which are local-only writes today —
+        # shmem_comb_out_{tok,wts} which are local-only writes today --
         # they stay on the shmem heap to match mori's allocation layout
         # and to leave room for future fused ops that P2P-fetch them.
+        #
+        # Dispatch-side buffers (indexed by dest_tok_id in [0, mr)) use
+        # the shrinkable ``mr`` cap.
         self.shmem_disp_out_tok = mori_shmem_create_tensor((tok_i16_mr,), torch.int16)
         self.shmem_disp_out_wts = mori_shmem_create_tensor((mr * k,), torch.float32)
         self.shmem_disp_out_idx = mori_shmem_create_tensor((mr * k,), torch.int32)
@@ -250,9 +396,11 @@ class FlyDSLDispatchCombineIntraNodeOp:
         self.shmem_tok_off = mori_shmem_create_tensor((1,), torch.int32)
         self.shmem_recv_tok_num = mori_shmem_create_tensor((npes,), torch.int32)
         self.shmem_tok_id_to_src = mori_shmem_create_tensor((mr,), torch.int32)
-        self.shmem_comb_inp_tok = mori_shmem_create_tensor((tok_i16_mr,), torch.int16)
+        # Combine-input buffers (indexed by ``rank * M + dest_lid``) use
+        # the worst-case ``mr_worst`` cap.
+        self.shmem_comb_inp_tok = mori_shmem_create_tensor((tok_i16_mr_worst,), torch.int16)
+        self.shmem_comb_inp_wts = mori_shmem_create_tensor((mr_worst * k,), torch.float32)
         self.shmem_comb_out_tok = mori_shmem_create_tensor((tok_i16_mt,), torch.int16)
-        self.shmem_comb_inp_wts = mori_shmem_create_tensor((mr * k,), torch.float32)
         self.shmem_comb_out_wts = mori_shmem_create_tensor((mt * k,), torch.float32)
         self.shmem_xdev_bar_mem = mori_shmem_create_tensor((npes,), torch.int64)
 
@@ -287,7 +435,10 @@ class FlyDSLDispatchCombineIntraNodeOp:
         # StdMoE buffers
         if cfg.enable_std_moe:
             epr = cfg.num_experts_per_rank
-            max_tok_per_expert = mr  # world_size * max_num_inp_token_per_rank
+            # max_tok_per_expert is an expert-side capacity unrelated to
+            # ``max_total_recv_tokens`` (mori treats the two as
+            # independent dims), so keep the worst-case bound here.
+            max_tok_per_expert = cfg.max_recv  # world_size * max_num_inp_token_per_rank
             self.packed_recv_count = torch.zeros(epr, dtype=torch.int32, device=self._dev)
             self.packed_recv_src_info = torch.zeros(epr * max_tok_per_expert, dtype=torch.int32, device=self._dev)
             self.disp_tok_to_ep_slot_map = torch.full((mr * k,), -1, dtype=torch.int64, device=self._dev)
@@ -378,12 +529,52 @@ class FlyDSLDispatchCombineIntraNodeOp:
             )
 
         # Token-row byte alignment: kernel streams 16B (v4i32) per lane.
+        # Symmetric I/O contract: Stage 3 writes back ``data_type``, so a
+        # single stride check on ``token_bytes`` suffices.
         if cfg.token_bytes % _TOK_BYTES_ALIGN != 0:
             raise ValueError(
                 f"token row bytes ({cfg.token_bytes}) must be a multiple of "
                 f"{_TOK_BYTES_ALIGN} for v4i32 vector loads; check hidden_dim "
                 f"({cfg.hidden_dim}) and data_type ({cfg.data_type})"
             )
+
+        # max_total_recv_tokens cap sanity (mori parity).  The cap is a
+        # **total** receive budget across all peers; per-rank slot count
+        # is derived via ``ceil(cap / world_size)``.  0 disables the cap
+        # and falls back to the worst-case allocation.  Positive values
+        # must give every rank at least one slot (cap >= world_size) and
+        # cannot exceed the worst case (cap <= world_size *
+        # max_num_inp_token_per_rank).
+        if cfg.max_total_recv_tokens < 0:
+            raise ValueError(
+                f"max_total_recv_tokens must be non-negative, got {cfg.max_total_recv_tokens}"
+            )
+        if cfg.max_total_recv_tokens > 0:
+            lo = cfg.world_size
+            hi = cfg.world_size * cfg.max_num_inp_token_per_rank
+            if not (lo <= cfg.max_total_recv_tokens <= hi):
+                raise ValueError(
+                    f"max_total_recv_tokens={cfg.max_total_recv_tokens} must be in "
+                    f"[{lo}, {hi}] (== [world_size, "
+                    f"world_size * max_num_inp_token_per_rank])"
+                )
+
+        # max_token_type_size sanity: 0 disables the override, otherwise
+        # it must be large enough to host the dispatch token element size.
+        # Mori parity: this is the upper bound used to pre-allocate shmem
+        # so the op can survive a dtype switch without re-alloc.
+        if cfg.max_token_type_size < 0:
+            raise ValueError(
+                f"max_token_type_size must be non-negative, got {cfg.max_token_type_size}"
+            )
+        if cfg.max_token_type_size > 0:
+            inp_es = 1 if cfg.is_fp4 else cfg.elem_size
+            if cfg.max_token_type_size < inp_es:
+                raise ValueError(
+                    f"max_token_type_size={cfg.max_token_type_size} is smaller than the "
+                    f"dispatch element size ({inp_es} bytes from data_type="
+                    f"{cfg.data_type})"
+                )
 
         # Scales consistency.
         if cfg.scale_dim < 0 or cfg.scale_type_size < 0:
@@ -705,7 +896,13 @@ class FlyDSLDispatchCombineIntraNodeOp:
                 stream,
             )
 
-        mr = cfg.max_recv
+        # ``effective_max_recv`` is the buffer-allocation size (see
+        # ``_alloc_buffers``); when ``max_total_recv_tokens`` is set the
+        # symmetric buffer is tighter than the worst-case
+        # ``cfg.max_recv``, so the view here must match the allocation
+        # (otherwise a ``.view(mr, hidden)`` reshape with the worst-
+        # case mr would assert).
+        mr = cfg.effective_max_recv
         k = cfg.num_experts_per_token
 
         out_tok = (
@@ -772,6 +969,8 @@ class FlyDSLDispatchCombineIntraNodeOp:
             self._fx_disp_out_wts,
         )
 
+        # Symmetric I/O: Stage 3 writes back ``cfg.data_type``, matching
+        # mori's combine contract.  Single JIT launcher / compile entry.
         if self._comb_compiled is None:
             args = (
                 fx.Int64(inp_c.data_ptr()),
@@ -821,14 +1020,13 @@ class FlyDSLDispatchCombineIntraNodeOp:
         mt = cfg.max_num_inp_token_per_rank
         k = cfg.num_experts_per_token
 
-        # fp8_direct_cast contract: external dtype is bf16 on both ends; the
-        # combine kernel itself writes bf16 to ``shmem_comb_out_tok`` (Stage 3
-        # _from_accum casts v4f32 → v4bf16 inline), so we view the buffer as
-        # bf16 directly with no extra PyTorch-level cast on the critical path.
+        # Symmetric I/O: Stage 3 writes back ``cfg.data_type``.
+        out_token_bytes = cfg.token_bytes
+        out_view_dim = cfg.token_view_dim
         out_tok = (
-            self.shmem_comb_out_tok.view(torch.int8)[: mt * cfg.token_bytes]
+            self.shmem_comb_out_tok.view(torch.int8)[: mt * out_token_bytes]
             .view(cfg.data_type)
-            .view(mt, cfg.token_view_dim)
+            .view(mt, out_view_dim)
         )
         out_wts = self.shmem_comb_out_wts.view(mt, k)
 
@@ -952,11 +1150,11 @@ class FlyDSLDispatchCombineIntraNodeOp:
         if enable_weights not in self._comb_no_s1_fn:
             from .dispatch_combine_intranode_kernel import make_combine_jit
 
-            # Same fp8_direct_cast mixed-dtype contract as in ``combine``
-            # above: external dtype is the configured ``cfg.data_type``
-            # (bf16 under fp8_direct_cast), transport dtype switches to
-            # fp8 inside the kernel; Stage 3 ``_from_accum`` casts
-            # f32 → bf16 inline so the kernel writes bf16 straight to
+            # Same fp8_direct_cast wire-fp8 contract as in ``combine``
+            # above: caller dtype is the configured ``cfg.data_type``
+            # (bf16 under fp8_direct_cast), wire dtype switches to fp8
+            # inside the kernel; Stage 3 ``_from_accum`` casts f32 -> bf16
+            # inline so the kernel writes bf16 straight to
             # ``shmem_comb_out_tok``.
             #
             # See the ``enable_weights`` doc above for the rationale of

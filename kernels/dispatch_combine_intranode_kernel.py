@@ -37,6 +37,19 @@ from flydsl.expr.buffer_ops import (
     buffer_store,
     create_buffer_resource_from_addr,
 )
+
+# JIT cache schema version.  Bump this string whenever the dispatch /
+# combine kernel changes its closure-capture set, argument layout, or
+# any compile-time-emitted code path that the generic FlyDSL closure-
+# scalar hash cannot detect on its own.  Every JIT launcher below
+# captures this as ``_key_schema_version`` so stale on-disk caches
+# under ``~/.flydsl/cache/dispatch_launch_*`` / ``combine_launch_*``
+# (left over from a prior commit with a different closure shape) are
+# forcibly invalidated — without this guard, an old hsaco can load
+# successfully into HIP but reference symbols / signatures that no
+# longer match, producing ``hipErrorInvalidHandle`` /
+# ``hipModuleUnload failed`` on the kernel's first launch.
+_DISPATCH_COMBINE_JIT_SCHEMA_VERSION = "v4-mori-parity-2026-05"
 from flydsl.expr.rocdl import (
     ballot,
     cvt_pk_f32_fp8,
@@ -192,6 +205,7 @@ def make_dispatch_kernel(
     scale_type_size: int = 0,
     enable_std_moe: bool = False,
     data_type=None,
+    max_recv: int = None,
 ):
     """Build the intranode dispatch ``@flyc.kernel``.
 
@@ -206,8 +220,15 @@ def make_dispatch_kernel(
          dual signal from each peer so it can finalize ``total_recv``,
       4. when ``enable_std_moe`` is set, performs ConvertDispatchOutput
          (per-expert packing for the std-MoE expert path).
+
+    ``max_recv`` is the cap on per-rank received slots; it drives sentinel
+    encoding (``npes * max_recv``) and must match the value passed to
+    ``make_combine_kernel`` (the combine side decodes the sentinel via
+    ``dest_pe = enc // max_recv``).  ``None`` reverts to ``npes *
+    max_tok_per_rank`` for backward compatibility.
     """
-    max_recv = npes * max_tok_per_rank
+    if max_recv is None:
+        max_recv = npes * max_tok_per_rank
     _is_fp4 = data_type == torch.float4_e2m1fn_x2
     if _is_fp4:
         n_i32 = hidden_dim // 8  # 8 fp4 values per i32 (4 bytes)
@@ -303,15 +324,43 @@ def make_dispatch_kernel(
                     )
             dest_tok_id = readlane(T.i32(), dest_tok_lane0, 0)
 
+            # Recv-cap overflow guard (mori parity for
+            # ``max_total_recv_tokens``).  ``atomic_add`` is monotonic and
+            # the per-dest receive buffer is sized to ``max_recv`` slots,
+            # so once a slot id reaches ``max_recv`` every subsequent
+            # publisher must drop its slot to avoid a hipErrorIllegalAddress
+            # on the destination shmem buffers (``shmem_disp_out_tok``,
+            # ``shmem_disp_out_wts``, ``shmem_disp_out_idx``,
+            # ``shmem_tok_id_to_src``, ``shmem_out_scales``).  Overflow is
+            # folded into the existing duplicate-destPE drop path: the
+            # tok_map entry encodes the ``npes * max_recv`` sentinel
+            # (combine treats the slot as "no source" and skips it), and
+            # all P2P writes that index off ``dest_tok_id`` are
+            # suppressed via a single combined ``do_publish`` SSA gate
+            # (kept flat instead of nested-if to avoid extra control
+            # flow lowering during JIT).
+            #
+            # Note ``dest_ctr[dest_pe]`` is only incremented on the
+            # publishing branch, so Phase 2/3's per-peer signal value
+            # reflects *publishable* slot count (≤ max_recv).
+            overflow = dest_tok_id >= max_recv
+            is_dup_or_overflow = arith.select(is_dup, is_dup, overflow)
+            no_dup = dup_ballot == 0
+            in_cap = dest_tok_id < max_recv
+            do_publish = arith.select(no_dup, in_cap, no_dup)  # no_dup AND in_cap
+
             # Per-(token, k_slot) entry stored into dest_tok_map: encoded
-            # global slot id, or sentinel ``npes * max_recv`` for dup-slots
-            # which the combine kernel will treat as "no source".
+            # global slot id, or sentinel ``npes * max_recv`` for
+            # duplicate / overflow slots which the combine kernel will
+            # treat as "no source".
             sentinel_val = npes * max_recv
-            tok_map_entry = arith.select(is_dup, sentinel_val, dest_pe * max_recv + dest_tok_id)
+            tok_map_entry = arith.select(
+                is_dup_or_overflow, sentinel_val, dest_pe * max_recv + dest_tok_id
+            )
             if lane == 0:
                 buffer_store(tok_map_entry, _r_tok_map, work_idx)
 
-                if dup_ballot == 0:
+                if do_publish:
                     # Publish the (src_pe, src_lid) origin so the dest PE
                     # can later route the token back during combine.
                     src_tok_enc = rank * max_tok_per_rank + src_tok
@@ -325,7 +374,7 @@ def make_dispatch_kernel(
             # Each lane writes one (weight, expert_idx) entry to the dest
             # PE's symmetric weights / idx buffers, parallel over k_slot.
             if lane < experts_per_token:
-                if dup_ballot == 0:
+                if do_publish:
                     wt_src_off = src_tok * experts_per_token + lane
                     wt_val = buffer_load(_r_wts, wt_src_off, vec_width=1, dtype=T.f32())
                     idx_val = buffer_load(_r_idx, wt_src_off, vec_width=1, dtype=T.i32())
@@ -341,7 +390,7 @@ def make_dispatch_kernel(
 
             if const_expr(enable_scales):
                 if lane < scale_n_i32:
-                    if dup_ballot == 0:
+                    if do_publish:
                         _r_scales = create_buffer_resource_from_addr(addr_inp_scales)
                         sc_src_off = src_tok * scale_n_i32 + lane
                         sc_val = buffer_load(_r_scales, sc_src_off, vec_width=1, dtype=T.i32())
@@ -356,8 +405,10 @@ def make_dispatch_kernel(
                         )
                         buffer_store(sc_val, _r_sc_remote, sc_dst_off)
 
-            # Token-embedding scatter: when ``is_dup`` the copy_end equals
-            # ``lane_i32_off`` and the loop trips zero iterations.
+            # Token-embedding scatter: when the slot is a duplicate
+            # destPE assignment OR a recv-cap overflow, the copy_end
+            # equals ``lane_i32_off`` and the loop trips zero iterations,
+            # turning the scatter into a no-op for dropped slots.
             #
             # ``lane_i32_off``   - this lane's starting i32 offset (each lane
             #                     owns 4 consecutive i32 = 16 bytes).
@@ -372,19 +423,19 @@ def make_dispatch_kernel(
             lane_i32_off = lane * 4
             safe_end_i32 = (n_i32 // 512) * 512  # largest multiple of 512 that fits
             if const_expr(n_i32 >= 512 and safe_end_i32 > 0):
-                copy_end_main = arith.select(is_dup, lane_i32_off, safe_end_i32)
+                copy_end_main = arith.select(is_dup_or_overflow, lane_i32_off, safe_end_i32)
                 for chunk_i32_off in range(lane_i32_off, copy_end_main, 512):
                     vec_a = buffer_load(rsrc_src, chunk_i32_off, vec_width=4, dtype=T.i32())
                     vec_b = buffer_load(rsrc_src, chunk_i32_off + 256, vec_width=4, dtype=T.i32())
                     buffer_store(vec_a, rsrc_dst, chunk_i32_off)
                     buffer_store(vec_b, rsrc_dst, chunk_i32_off + 256)
             if const_expr(safe_end_i32 < n_i32):
-                copy_end_tail = arith.select(is_dup, lane_i32_off, n_i32)
+                copy_end_tail = arith.select(is_dup_or_overflow, lane_i32_off, n_i32)
                 for chunk_i32_off in range(lane_i32_off + safe_end_i32, copy_end_tail, 256):
                     vec_a = buffer_load(rsrc_src, chunk_i32_off, vec_width=4, dtype=T.i32())
                     buffer_store(vec_a, rsrc_dst, chunk_i32_off)
             elif const_expr(n_i32 < 512):
-                copy_end_small = arith.select(is_dup, lane_i32_off, n_i32)
+                copy_end_small = arith.select(is_dup_or_overflow, lane_i32_off, n_i32)
                 for chunk_i32_off in range(lane_i32_off, copy_end_small, 256):
                     vec_a = buffer_load(rsrc_src, chunk_i32_off, vec_width=4, dtype=T.i32())
                     buffer_store(vec_a, rsrc_dst, chunk_i32_off)
@@ -547,6 +598,7 @@ def make_combine_kernel(
     use_p2p_read: bool = False,
     skip_stage1: bool = False,
     fp8_direct_cast: bool = False,
+    max_recv: int = None,
 ):
     """Build the intranode combine ``@flyc.kernel``.
 
@@ -562,16 +614,20 @@ def make_combine_kernel(
 
     Parameters:
       data_type:
-        Caller-facing (external) input/output dtype.  Same dtype is used
-        for both ``addr_inp_tok`` (Stage 1 source) and
-        ``addr_out_shmem_tok`` (Stage 3 destination).  ``hidden_elem_size``
-        must already correspond to the **transport** dtype (see below).
+        Caller-facing (external) dtype seen at both ``addr_inp_tok``
+        (Stage 1 source) and ``addr_out_shmem_tok`` (Stage 3 destination).
+        Stage 3 always writes back in the same dtype as Stage 1 reads,
+        matching mori's symmetric I/O contract -- the only stride
+        divergence is the ``fp8_direct_cast`` mixed-mode below, where
+        external dtype stays bf16 while wire dtype is fp8.
+        ``hidden_elem_size`` must already correspond to the **transport**
+        dtype (see ``fp8_direct_cast``).
       fp8_direct_cast:
-        When ``True`` Stage 1 fuses an inline bf16→fp8 cast
+        When ``True`` Stage 1 fuses an inline bf16->fp8 cast
         (``UseFp8DirectCast``-equivalent in mori): external dtype stays
         bf16 (``data_type==bfloat16``) but the on-wire / staging dtype
         becomes OCP fp8 (``float8_e4m3fn``).  Stage 3 reduces in f32 and
-        casts f32→bf16 inline so the kernel still writes bf16 to the
+        casts f32->bf16 inline so the kernel still writes bf16 to the
         external output buffer.  ``False`` keeps transport == external
         dtype (no inline cast).
       skip_stage1:
@@ -583,6 +639,13 @@ def make_combine_kernel(
         ROCm IPC fabric with the heavy token writes from the upstream stage
         and get silently dropped under contention — the combine kernel
         therefore owns weight scatter on a quiet fabric.
+      max_recv:
+        Receive-side slot count used for sentinel encoding and Stage 3
+        addressing.  ``None`` (default) reverts to ``npes *
+        max_tok_per_rank`` (worst-case allocation, matches the legacy
+        behaviour).  Tighter caps are passed by the op layer when
+        ``cfg.max_total_recv_tokens`` is set, letting symmetric shmem
+        token/metadata buffers shrink linearly.
     """
     # Derive the transport (on-wire / staging) dtype from the new
     # ``fp8_direct_cast`` flag.  ``data_type`` is the external dtype the
@@ -596,7 +659,8 @@ def make_combine_kernel(
     _xfer_bf16_to_fp8 = fp8_direct_cast
     _transport_dtype = torch.float8_e4m3fn if _xfer_bf16_to_fp8 else data_type
 
-    max_recv = npes * max_tok_per_rank
+    if max_recv is None:
+        max_recv = npes * max_tok_per_rank
     _is_fp4 = _transport_dtype == torch.float4_e2m1fn_x2
     if _is_fp4:
         n_i32 = hidden_dim // 8
@@ -605,12 +669,14 @@ def make_combine_kernel(
         n_i32 = (hidden_dim * hidden_elem_size) // 4
         nbytes = hidden_dim * hidden_elem_size
 
+    # Stage 1 / Stage 3 strides diverge only for ``fp8_direct_cast``
+    # (mori UseFp8DirectCast equivalent): external dtype stays bf16 while
+    # wire / staging dtype is fp8, so Stage 1 source reads use bf16
+    # stride and Stage 3 output writes use bf16 stride too.  All other
+    # quant modes keep transport == external dtype and Stage 1/3 share
+    # ``n_i32`` / ``nbytes``.
     if _xfer_bf16_to_fp8:
-        # bf16 input stride for Stage 1 source addressing only.  The transport
-        # (P2P-scattered staging) uses ``nbytes`` (= fp8 stride) as before.
-        # Stage 3 output addressing also uses bf16 stride (= 2 × fp8 stride).
         inp_nbytes = hidden_dim * 2
-        # bf16-stride i32 count per token for Stage 3 output offsets.
         out_n_i32 = (hidden_dim * 2) // 4
     else:
         inp_nbytes = nbytes
@@ -631,7 +697,7 @@ def make_combine_kernel(
             return vector.shuffle(lo4, hi4, [0, 1, 2, 3, 4, 5, 6, 7])
 
         def _from_accum(accum_val):
-            # Re-pack v8f32 -> i32 via 4 × cvt_scalef32_pk_fp4_f32.
+            # Re-pack v8f32 -> i32 via 4 x cvt_scalef32_pk_fp4_f32.
             _i32_ty = _IntTy.get_signless(32)
             scale_one = arith.constant(1.0, type=T.f32())
             old = arith.constant(0, type=_i32_ty)
@@ -692,10 +758,12 @@ def make_combine_kernel(
             if _is_fnuz:
                 accum_val = accum_val * 2.0
             if const_expr(_xfer_bf16_to_fp8):
-                # Mixed-dtype path: write bf16 output (8 bytes per lane).
-                # v4f32 -> v4bf16 (truncf) -> v2i32 (bitcast).  Caller stores
-                # via buffer_store(..., vec_width=2, dtype=T.i32()) at an i32
-                # offset doubled relative to fp8 mode (2 i32 = 4 bf16 = 8 B).
+                # fp8_direct_cast: wire dtype is fp8 but external dtype
+                # is bf16, so Stage 3 writes bf16 (8 bytes per lane).
+                # v4f32 -> v4bf16 (truncf) -> v2i32 (bitcast).  Caller
+                # stores via buffer_store(..., vec_width=2, dtype=T.i32())
+                # at an i32 offset doubled relative to plain fp8 mode
+                # (2 i32 = 4 bf16 = 8 B).
                 _v4bf16 = T.VectorType.get([4], T.bf16())
                 _v2i32 = T.VectorType.get([2], _i32_ty)
                 return vector.bitcast(_v2i32, accum_val.truncf(_v4bf16))
@@ -1292,9 +1360,16 @@ def make_combine_kernel(
                             acc_c = _accum_experts(vals_c, expert_vlds, eff_all_vld)
                             acc_d = _accum_experts(vals_d, expert_vlds, eff_all_vld)
                             if const_expr(_xfer_bf16_to_fp8):
-                                # bf16 output: data is v2i32 (8 B / lane); the
-                                # i32 offset doubles per token and the 4 sub-
-                                # stores use 256->512 byte spacing.
+                                # fp8_direct_cast wide-output path:
+                                # per-lane store width doubles relative
+                                # to input (v2i32 = 8 B instead of v1i32 =
+                                # 4 B) because Stage 3 writes bf16 on a
+                                # buffer addressed in fp8 strides.
+                                # Token-base offset uses ``out_n_i32`` and
+                                # ``ec_abs`` doubles; the 4-wide unroll
+                                # spaces stores by 512 B (vs 256 B on the
+                                # symmetric path) because each store is
+                                # twice the bytes.
                                 out_off = tok_id * out_n_i32 + ec_abs * 2
                                 buffer_store(acc_a, rsrc_out, out_off, cache_modifier=SLC_CACHE)
                                 buffer_store(acc_b, rsrc_out, out_off, cache_modifier=SLC_CACHE, soffset_bytes=512)
@@ -1448,7 +1523,14 @@ def make_dispatch_jit(
     scale_dim=0,
     scale_type_size=0,
     enable_std_moe=False,
+    max_recv=None,
 ):
+    """Build the dispatch JIT launcher.
+
+    ``max_recv`` parameterises the per-rank receive-slot cap used for
+    sentinel encoding (see ``make_dispatch_kernel``).  Must equal the
+    value passed to ``make_combine_jit`` for matching encode/decode.
+    """
     hidden_elem_size = torch.tensor([], dtype=data_type).element_size()
     kernel = make_dispatch_kernel(
         rank=rank,
@@ -1464,6 +1546,7 @@ def make_dispatch_jit(
         scale_type_size=scale_type_size,
         enable_std_moe=enable_std_moe,
         data_type=data_type,
+        max_recv=max_recv,
     )
 
     # Closure variables that participate in the JIT cache key. The launcher
@@ -1473,6 +1556,8 @@ def make_dispatch_jit(
     _key_warp_per_block = warp_num_per_block
     _key_max_tok = max_tok_per_rank
     _key_std_moe = enable_std_moe
+    _key_max_recv = max_recv if max_recv is not None else npes * max_tok_per_rank
+    _key_schema_version = _DISPATCH_COMBINE_JIT_SCHEMA_VERSION
 
     @flyc.jit
     def dispatch_launch(
@@ -1504,7 +1589,16 @@ def make_dispatch_jit(
         inp_cur_tok: fx.Int32,
         stream: Stream = Stream(None),
     ):
-        _ = (_key_rank, _key_npes, _key_block_num, _key_warp_per_block, _key_max_tok, _key_std_moe)
+        _ = (
+            _key_rank,
+            _key_npes,
+            _key_block_num,
+            _key_warp_per_block,
+            _key_max_tok,
+            _key_std_moe,
+            _key_max_recv,
+            _key_schema_version,
+        )
         kernel(
             addr_inp_tok,
             addr_inp_idx,
@@ -1556,12 +1650,22 @@ def make_combine_jit(
     use_p2p_read=False,
     skip_stage1=False,
     fp8_direct_cast: bool = False,
+    max_recv=None,
 ):
     """Build the JIT launcher for ``make_combine_kernel``.
 
-    ``data_type`` is the caller-facing (external) input/output dtype.
+    ``data_type`` is the caller-facing (external) dtype seen on both
+    input and output buffers (symmetric I/O contract, matching mori).
+    The only stride divergence is ``fp8_direct_cast=True`` below, where
+    external dtype is bf16 but wire / staging dtype is fp8 (still a
+    symmetric caller contract).
+
+    ``max_recv`` parameterises per-rank receive-slot capacity (mori
+    ``max_num_tokens_to_recv``-equivalent).  Must match the value passed
+    to ``make_dispatch_jit``.
+
     Set ``fp8_direct_cast=True`` to enable the bf16-external / fp8-transport
-    mixed-dtype path (requires ``data_type==bfloat16``).
+    path (requires ``data_type==bfloat16``).
     """
     # Transport dtype drives the kernel's byte-stride math (Stage 1 P2P
     # writes, Stage 3 reduce/repack), so ``hidden_elem_size`` must come
@@ -1583,6 +1687,7 @@ def make_combine_jit(
         use_p2p_read=use_p2p_read,
         skip_stage1=skip_stage1,
         fp8_direct_cast=fp8_direct_cast,
+        max_recv=max_recv,
     )
 
     # Closure variables that participate in the JIT cache key. The launcher
@@ -1596,6 +1701,9 @@ def make_combine_jit(
     _key_p2p_read = use_p2p_read
     _key_skip_s1 = skip_stage1
     _key_fp8_direct_cast = bool(fp8_direct_cast)
+    _key_max_recv = max_recv if max_recv is not None else npes * max_tok_per_rank
+    _key_data_type = data_type
+    _key_schema_version = _DISPATCH_COMBINE_JIT_SCHEMA_VERSION
     _allocator = kernel._allocator
 
     @flyc.jit
@@ -1632,6 +1740,9 @@ def make_combine_jit(
             _key_p2p_read,
             _key_skip_s1,
             _key_fp8_direct_cast,
+            _key_max_recv,
+            _key_data_type,
+            _key_schema_version,
         )
         from flydsl.compiler.kernel_function import CompilationContext
 
