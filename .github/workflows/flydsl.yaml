@@ -425,8 +425,11 @@ jobs:
           "
 
       # Single entry-point that sweeps the full curated CI_CASES table
-      # (10 cases distilled from mori's gfx950 tuning configs plus
-      # StdMoE).  Each case is gated by (1) --mode verify for accuracy
+      # (12 cases distilled from mori's gfx950 tuning configs plus
+      # StdMoE plus two mori-parity recv-cap paths: a baseline at
+      # cap=ws*M and a half-cap stress at cap=ws*M/2 that exercises
+      # FlyDSL's overflow guard while mori would assert).  Each case
+      # is gated by (1) --mode verify for accuracy
       # and, when applicable, (2) --mode profile --cudagraph for perf
       # trace.  The script spawns a fresh distributed process per
       # (case, phase) so symmetric shmem heap state from one case can't
