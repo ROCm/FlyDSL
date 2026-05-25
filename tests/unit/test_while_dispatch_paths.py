@@ -25,12 +25,10 @@ def test_scf_while_dispatch_single_result():
                 offset = Int32(entry.arguments[0])
 
                 def before_fn(names, offset):
-                    zero = Int32(arith.ConstantOp(i32, 0).result)
-                    return offset > zero
+                    return offset > Int32(arith.ConstantOp(i32, 0).result)
 
                 def after_fn(names, offset):
-                    two = Int32(arith.ConstantOp(i32, 2).result)
-                    return {"offset": offset // two}
+                    return {"offset": offset // Int32(arith.ConstantOp(i32, 2).result)}
 
                 result = CanonicalizeWhile.scf_while_dispatch(
                     before_fn,
@@ -60,12 +58,10 @@ def test_scf_while_dispatch_multi_results():
                 offset = Int32(entry.arguments[0])
 
                 def before_fn(names, acc, offset):
-                    zero = Int32(arith.ConstantOp(i32, 0).result)
-                    return offset > zero
+                    return offset > Int32(arith.ConstantOp(i32, 0).result)
 
                 def after_fn(names, acc, offset):
-                    two = Int32(arith.ConstantOp(i32, 2).result)
-                    return {"acc": acc + offset, "offset": offset // two}
+                    return {"acc": acc + offset, "offset": offset // Int32(arith.ConstantOp(i32, 2).result)}
 
                 result = CanonicalizeWhile.scf_while_dispatch(
                     before_fn,
@@ -129,8 +125,8 @@ def test_scf_while_dispatch_simple_condition():
                     return n > Int32(arith.ConstantOp(i32, 0).result)
 
                 def after_fn(names, acc, n):
-                    one = Int32(arith.ConstantOp(i32, 1).result)
-                    return {"acc": acc + one, "n": n - one}
+                    return {"acc": acc + Int32(arith.ConstantOp(i32, 1).result),
+                            "n": n - Int32(arith.ConstantOp(i32, 1).result)}
 
                 result = CanonicalizeWhile.scf_while_dispatch(
                     before_fn,
