@@ -37,6 +37,16 @@ from flydsl.expr.buffer_ops import (
     buffer_store,
     create_buffer_resource_from_addr,
 )
+from flydsl.expr.rocdl import (
+    ballot,
+    cvt_pk_f32_fp8,
+    cvt_pk_fp8_f32,
+    cvt_scalef32_pk_f32_fp4,
+    cvt_scalef32_pk_fp4_f32,
+    readlane,
+)
+from flydsl.expr.typing import Stream
+from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr, check_smem_capacity
 
 # JIT cache schema version.  Bump this string whenever the dispatch /
 # combine kernel changes its closure-capture set, argument layout, or
@@ -49,18 +59,27 @@ from flydsl.expr.buffer_ops import (
 # successfully into HIP but reference symbols / signatures that no
 # longer match, producing ``hipErrorInvalidHandle`` /
 # ``hipModuleUnload failed`` on the kernel's first launch.
-_DISPATCH_COMBINE_JIT_SCHEMA_VERSION = "v4-mori-parity-2026-05"
-from flydsl.expr.rocdl import (
-    ballot,
-    cvt_pk_f32_fp8,
-    cvt_pk_fp8_f32,
-    cvt_scalef32_pk_f32_fp4,
-    cvt_scalef32_pk_fp4_f32,
-    readlane,
-)
-from flydsl.expr.typing import Stream
-from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr, check_smem_capacity
+_DISPATCH_COMBINE_JIT_SCHEMA_VERSION = "v5-mori-parity-2026-05"
 
+# Stage 3 / Stage 3b tunables.  Collected here so the per-warp partition
+# heuristic and cache-modifier choices are visible in one place; tune
+# them with caution (each constant has a measured perf impact on
+# DG5 / MI355X bf16 dispatch+combine sweeps -- see bench/dg5_full_matrix
+# RESULTS.md for the regression matrix).
+#
+# ``_S3_WIDE_PATH_THRESHOLD_I32`` -- ``hdim_per_warp`` (in i32 lanes) at
+# which Stage 3 switches from the plain ``step=64`` accumulator loop to
+# the unrolled ``step=128/256`` wide loop.  Empirically 895 i32 ==
+# 3580 bytes per warp partition is the break-even point between the
+# extra register pressure of the wide path and the ILP gains it
+# unlocks; below this the narrow path wins because the partition
+# already fits in a single 64-dword cycle.
+_S3_WIDE_PATH_THRESHOLD_I32 = 895
+# ``_SLC_CACHE`` is the AMDGPU ``cache_modifier`` selector for buffer
+# load/store ops; SLC == "system-coherent L1, bypass" which avoids
+# polluting L1 with one-shot Stage 3 accumulator reads (mori path
+# uses the equivalent via ``__builtin_amdgcn_global_load_lds`` flags).
+_SLC_CACHE = 2
 
 _GPU_ARCH_CACHE: str | None = None
 
@@ -148,7 +167,15 @@ def _to_ptr_global(v):
 
 
 def store_i32_system(addr_i64, offset, val):
-    """System-scope monotonic i32 store at ``addr_i64 + offset*4`` bytes."""
+    """System-scope **release** i32 store at ``addr_i64 + offset*4`` bytes.
+
+    ``release`` (vs the prior ``monotonic``) enforces a happens-before
+    edge with the matching consumer that ends its
+    ``ShmemTypeWaitUntilEquals`` loop on this flag and then issues an
+    acquire fence (see :func:`fence_system_acquire` and mori
+    ``intranode.hpp:63`` ``__threadfence_system`` + relaxed-system load
+    pattern this mirrors).
+    """
     base = arith.unwrap(addr_i64)
     off = arith.unwrap(offset)
     val_ = arith.unwrap(val)
@@ -159,13 +186,41 @@ def store_i32_system(addr_i64, offset, val):
     byte_off = _llvm_d.MulOp(off64, _llvm_d.ConstantOp(_i64, _IntAttr.get(_i64, 4)).result, _nuw).result
     addr = _llvm_d.AddOp(base, byte_off, _nuw).result
     gptr = _llvm_d.IntToPtrOp(_llvm_d.PointerType.get(address_space=1), addr).result
-    _llvm_d.StoreOp(val_, gptr, alignment=4, ordering=_llvm_d.AtomicOrdering.monotonic, syncscope="one-as")
+    _llvm_d.StoreOp(val_, gptr, alignment=4, ordering=_llvm_d.AtomicOrdering.release, syncscope="one-as")
 
 
 def store_i64_global_system(addr_i64, val):
-    """System-scope monotonic i64 store to ``addr_i64``."""
+    """System-scope **release** i64 store to ``addr_i64``.
+
+    See :func:`store_i32_system` for the release/acquire pairing
+    rationale.  Used to publish the CrossDeviceBarrier flag to every
+    peer's symmetric slot; the consumer side ends a relaxed-load spin
+    loop on this flag and must issue :func:`fence_system_acquire`
+    before reading any data that this publish guards.
+    """
     gptr = _to_ptr_global(addr_i64)
-    _llvm_d.StoreOp(arith.unwrap(val), gptr, alignment=8, ordering=_llvm_d.AtomicOrdering.monotonic, syncscope="one-as")
+    _llvm_d.StoreOp(arith.unwrap(val), gptr, alignment=8, ordering=_llvm_d.AtomicOrdering.release, syncscope="one-as")
+
+
+def fence_system_acquire():
+    """System-scope **acquire** fence (``llvm.fence syncscope("one-as") acquire``).
+
+    Pairs with :func:`store_i32_system` / :func:`store_i64_global_system`
+    (both system-scope release stores) to enforce a happens-before edge
+    when the consumer end of a cross-device handshake exits a
+    ``mori_shmem.*_wait_until_equals(...)`` loop.
+
+    Rationale: ``mori_shmem.*_wait_until_equals`` is implemented as a
+    relaxed-system load spin (mori ``shmem_device_api.hpp:1134-1137``),
+    so by itself it gives no happens-before edge on the data the flag
+    guards.  mori solves this with explicit ``__threadfence_system()``
+    on both ends (``intranode.hpp:63,186``).  FlyDSL pairs a system-
+    scope release store on the publish side with this acquire fence on
+    the consumer side, which is the strictly equivalent C++ release/
+    acquire pattern and is what compilers translate
+    ``atomic_thread_fence(memory_order_acquire)`` to on ROCm.
+    """
+    _llvm_d.FenceOp(_llvm_d.AtomicOrdering.acquire, syncscope="one-as")
 
 
 def load_i64_global(addr_i64):
@@ -354,9 +409,7 @@ def make_dispatch_kernel(
             # duplicate / overflow slots which the combine kernel will
             # treat as "no source".
             sentinel_val = npes * max_recv
-            tok_map_entry = arith.select(
-                is_dup_or_overflow, sentinel_val, dest_pe * max_recv + dest_tok_id
-            )
+            tok_map_entry = arith.select(is_dup_or_overflow, sentinel_val, dest_pe * max_recv + dest_tok_id)
             if lane == 0:
                 buffer_store(tok_map_entry, _r_tok_map, work_idx)
 
@@ -451,6 +504,11 @@ def make_dispatch_kernel(
         for dest_pe in range(lane, npes, 64):
             if global_warp_id == 0:
                 mori_shmem.int32_wait_until_equals(addr_disp_bar, block_num)
+                # Acquire fence pairs with the release atomic_add by every
+                # block that increments ``addr_disp_bar``; ensures Phase-1
+                # P2P writes (done before the same block's ``atomic_add``)
+                # are visible to this notifier warp.
+                fence_system_acquire()
                 buffer_store(arith.constant(0), _r_disp_bar, 0)
                 # +1 because 0 is the "unset" sentinel that consumers wait on.
                 signal_value = buffer_load(_r_dest_ctr, dest_pe, vec_width=1, dtype=T.i32()) + 1
@@ -511,6 +569,11 @@ def make_dispatch_kernel(
                 # target = (epoch + 1) * block_num.
                 _target = (_ticket // _bn_i64 + _one_i64) * _bn_i64
                 mori_shmem.int64_wait_until_equals(addr_disp_grid_bar, _target)
+                # Acquire fence pairs with the per-block release atomic_add
+                # tickets on ``addr_disp_grid_bar``; before reading the
+                # ticket-protected ``total_recv`` / ``shmem_tok_id_to_src``
+                # / ``shmem_idx`` populated by every other block.
+                fence_system_acquire()
             fx.barrier()
 
             _r_out_idx_local = create_buffer_resource_from_addr(addr_shmem_idx)
@@ -1084,9 +1147,11 @@ def make_combine_kernel(
                 rsrc_src = create_buffer_resource_from_addr(src_tok_addr)
                 rsrc_dst = create_buffer_resource_from_addr(dst_tok_addr)
                 if const_expr(_xfer_bf16_to_fp8):
-                    # Mixed-dtype Stage 1: load bf16 (2 i32 / lane = 4 bf16
-                    # elems) → ExtF v4f32 → cvt_pk_fp8_f32 ×2 → store 1
-                    # fp8 i32 (4 fp8 elems) at staging offset ``elem_off``.
+                    # Wire-fp8 (fp8_direct_cast) Stage 1: load bf16 (2 i32
+                    # / lane = 4 bf16 elems) → ExtF v4f32 → cvt_pk_fp8_f32
+                    # ×2 → store 1 fp8 i32 (4 fp8 elems) at staging offset
+                    # ``elem_off``.  External I/O stays bf16; only the on-
+                    # wire format is fp8 (mori UseFp8DirectCast parity).
                     _v4bf16_a = T.VectorType.get([4], T.bf16())
                     _v4f32_a = T.VectorType.get([4], T.f32())
                     _i32t_a = T.i32()
@@ -1145,14 +1210,16 @@ def make_combine_kernel(
                 # Dest stride uses ``nbytes`` (staging dtype, fp8 in mixed mode).
                 dest_off = _to_i64(rank * max_tok_per_rank + dest_lid) * nbytes
                 dest_tok_addr = arith.unwrap(peer_base) + dest_off
-                # Src stride uses ``inp_nbytes`` (input dtype, bf16 in mixed mode).
+                # Src stride uses ``inp_nbytes`` (input dtype is bf16 under
+                # the fp8_direct_cast wire-fp8 path).
                 src_tok_addr = addr_inp_tok + _to_i64(recv_tok_id) * inp_nbytes
                 rsrc_src = create_buffer_resource_from_addr(src_tok_addr)
                 rsrc_dst = create_buffer_resource_from_addr(dest_tok_addr)
                 if const_expr(_xfer_bf16_to_fp8):
-                    # Mixed-dtype Stage 1: load 2 bf16 i32 (=4 bf16 elems) →
-                    # ExtF v4f32 → cvt_pk_fp8_f32 ×2 → store 1 fp8 i32 (=4
-                    # fp8 elems). Loop unit is 1 fp8-i32 per lane per step.
+                    # Wire-fp8 Stage 1 (P2P-read variant): load 2 bf16 i32
+                    # (=4 bf16 elems) → ExtF v4f32 → cvt_pk_fp8_f32 ×2 →
+                    # store 1 fp8 i32 (=4 fp8 elems).  Loop unit is 1 fp8
+                    # dword per lane per step.
                     _v4bf16_b = T.VectorType.get([4], T.bf16())
                     _v4f32_b = T.VectorType.get([4], T.f32())
                     _i32t_b = T.i32()
@@ -1203,6 +1270,11 @@ def make_combine_kernel(
 
         if grid_thread_id < npes:
             mori_shmem.int32_wait_until_equals(addr_comb_bar, block_num)
+            # Acquire fence pairs with the per-block release atomic_add
+            # on ``addr_comb_bar``; ensures Stage 1 P2P writes finished
+            # by every block are visible to this notifier warp before we
+            # publish ``xdb_cur_flag`` to every peer.
+            fence_system_acquire()
             buffer_store(arith.constant(0), _r_comb_bar, 0)
             xdb_remote_addr = (
                 buffer_load(_r_p2p_xdb, grid_thread_id, vec_width=1, dtype=T.i64())
@@ -1216,6 +1288,16 @@ def make_combine_kernel(
         if tid < npes:
             xdb_peer_slot = addr_shmem_xdb_mem + _to_i64(tid) * 8
             mori_shmem.uint64_wait_until_equals(xdb_peer_slot, xdb_cur_flag)
+            # Pair with the release stores that publish ``xdev_bar_mem``
+            # on every peer (``store_i64_global_system`` above): the
+            # ``wait_until_equals`` exits the spin loop but its internal
+            # relaxed-system load does NOT issue any cache invalidate or
+            # fence on its own, so subsequent Stage 3 reads of peer-side
+            # ``shmem_comb_inp`` would be allowed by the memory model to
+            # observe data that lives in a stale L2 line.  mori solves
+            # this with a paired ``__threadfence_system()``; we use the
+            # equivalent release-store + acquire-fence pattern.
+            fence_system_acquire()
 
         fx.barrier()
         if tid == 0:
@@ -1228,7 +1310,10 @@ def make_combine_kernel(
         # per-expert partials from ``shmem_comb_inp``, accumulates them in
         # high-precision (f32) and writes back the merged token to
         # ``shmem_comb_out``.
-        SLC_CACHE = 2  # buffer_load/store ``cache_modifier=SLC`` (system-coherent)
+        # Local alias for the module-level cache modifier so the IR-emitting
+        # body below stays terse; see ``_SLC_CACHE`` docstring at the top
+        # of this module for the rationale.
+        SLC_CACHE = _SLC_CACHE
         rsrc_out = create_buffer_resource_from_addr(addr_out_shmem_tok)
 
         n_elems = n_i32
@@ -1267,16 +1352,20 @@ def make_combine_kernel(
                 # ``dest_tok_map[tok_id, 0..k)`` and read the per-(peer_pe,
                 # dest_lid) slot of ``shmem_comb_inp``. Stage 1 has P2P-
                 # scattered each (src_pe, src_lid) contribution into that
-                # slot. Two 4-i32 loads cover the 8 k-slots in one round.
+                # slot.
+                #
+                # Per-slot scalar load (mori ``intranode.hpp:413`` parity):
+                # one i32 load per k_slot, compile-time unrolled.  This
+                # supports the full ``num_experts_per_token`` range allowed
+                # by ``_check_config`` (1..64); the earlier two-vec4 path
+                # was hard-capped at k <= 8 because ``vector.extract`` on
+                # a vec4 with ``static_position >= 4`` is OOB.  ROCm's
+                # buffer-load coalescer typically fuses contiguous dword
+                # loads back into a wider load when k is a power-of-two,
+                # so this is also perf-neutral for k <= 8 in practice.
                 tm_base_off = tok_id * experts_per_token
-                tm_vec_lo = buffer_load(_rsrc_tok_map, tm_base_off, vec_width=4, dtype=T.i32())
-                tm_vec_hi = buffer_load(_rsrc_tok_map, tm_base_off + 4, vec_width=4, dtype=T.i32())
-
                 for k_slot in range_constexpr(experts_per_token):
-                    if const_expr(k_slot < 4):
-                        enc_k = vector.extract(tm_vec_lo, static_position=[k_slot])
-                    else:
-                        enc_k = vector.extract(tm_vec_hi, static_position=[k_slot - 4])
+                    enc_k = buffer_load(_rsrc_tok_map, tm_base_off + k_slot, vec_width=1, dtype=T.i32())
                     if const_expr(_log2_max_recv is not None):
                         dest_pe_k = enc_k >> _log2_max_recv
                     else:
@@ -1299,10 +1388,13 @@ def make_combine_kernel(
                 eff_all_vld = all_vld or _use_compaction
 
             # Two paths optimised for the per-warp partition size:
-            #   - wide path  (hdim_per_warp > 895): step=128 dual or step=256
-            #     quad unrolled loads, each step covers 256/512/... bytes.
-            #   - narrow path (hdim_per_warp <= 895): plain step=64 loop.
-            if 895 < hdim_per_warp:
+            #   - wide path  (hdim_per_warp > _S3_WIDE_PATH_THRESHOLD_I32):
+            #     step=128 dual or step=256 quad unrolled loads, each step
+            #     covers 256/512/... bytes.
+            #   - narrow path (hdim_per_warp <= _S3_WIDE_PATH_THRESHOLD_I32):
+            #     plain step=64 loop.
+            # See module-level ``_S3_WIDE_PATH_THRESHOLD_I32`` doc.
+            if _S3_WIDE_PATH_THRESHOLD_I32 < hdim_per_warp:
                 rem_hdim_128 = n_elems - hdim_off
                 # Effective end of THIS warp's partition, clamped to n_elems.
                 eff_end_128 = arith.select(rem_hdim_128 < hdim_per_warp, rem_hdim_128, hdim_per_warp)
@@ -1471,17 +1563,14 @@ def make_combine_kernel(
         if const_expr(enable_weights):
             rsrc_out_wts = create_buffer_resource_from_addr(addr_out_shmem_wts)
             for wt_tok_id in range(global_warp_id, cur_rank_num_token, global_warp_num):
+                # Per-slot scalar load (matches Stage 3 above): supports the
+                # full ``num_experts_per_token`` range [1, 64].
                 wt_tm_off = wt_tok_id * experts_per_token
-                wt_tm_vec_lo = buffer_load(_rsrc_tok_map, wt_tm_off, vec_width=4, dtype=T.i32())
-                wt_tm_vec_hi = buffer_load(_rsrc_tok_map, wt_tm_off + 4, vec_width=4, dtype=T.i32())
 
                 if lane < experts_per_token:
                     wt_acc = arith.constant(0.0, type=T.f32())
                     for k_slot in range_constexpr(experts_per_token):
-                        if const_expr(k_slot < 4):
-                            wt_enc = vector.extract(wt_tm_vec_lo, static_position=[k_slot])
-                        else:
-                            wt_enc = vector.extract(wt_tm_vec_hi, static_position=[k_slot - 4])
+                        wt_enc = buffer_load(_rsrc_tok_map, wt_tm_off + k_slot, vec_width=1, dtype=T.i32())
                         if const_expr(_log2_max_recv is not None):
                             wt_pe = wt_enc >> _log2_max_recv
                         else:
@@ -1552,11 +1641,27 @@ def make_dispatch_jit(
     # Closure variables that participate in the JIT cache key. The launcher
     # closes over them so that two ``@flyc.jit`` invocations with different
     # configs produce distinct cached entries.
+    #
+    # The list must mirror every input to ``make_dispatch_kernel`` that
+    # affects the emitted IR; missing one yields a stale-cache hit
+    # (different config silently reuses the wrong hsaco).  Keep this in
+    # sync with the corresponding combine list below.
     _key_rank, _key_npes, _key_block_num = rank, npes, block_num
     _key_warp_per_block = warp_num_per_block
     _key_max_tok = max_tok_per_rank
     _key_std_moe = enable_std_moe
     _key_max_recv = max_recv if max_recv is not None else npes * max_tok_per_rank
+    # Symmetric I/O surface: dtype, hidden_dim, k, experts_per_rank and
+    # the scale path all alter codegen and must key the cache.  Previously
+    # these were collected only via the generic closure-scalar hash,
+    # which silently failed for ``torch.dtype`` on older jit_function.py;
+    # explicit keys remove that dependency.
+    _key_data_type = str(data_type)
+    _key_hidden_dim = hidden_dim
+    _key_experts_per_token = experts_per_token
+    _key_experts_per_rank = experts_per_rank
+    _key_scale_dim = scale_dim
+    _key_scale_type_size = scale_type_size
     _key_schema_version = _DISPATCH_COMBINE_JIT_SCHEMA_VERSION
 
     @flyc.jit
@@ -1597,6 +1702,12 @@ def make_dispatch_jit(
             _key_max_tok,
             _key_std_moe,
             _key_max_recv,
+            _key_data_type,
+            _key_hidden_dim,
+            _key_experts_per_token,
+            _key_experts_per_rank,
+            _key_scale_dim,
+            _key_scale_type_size,
             _key_schema_version,
         )
         kernel(
