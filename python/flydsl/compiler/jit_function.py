@@ -26,7 +26,7 @@ from ..expr.typing import Constexpr, Stream
 from ..utils import env, log
 from .ast_rewriter import ASTRewriter
 from .backends import compile_backend_name, get_backend
-from .jit_argument import convert_to_jit_arguments, is_type_param_annotation
+from .jit_argument import convert_to_jit_arguments, is_type_param_annotation, resolve_signature
 from .jit_executor import CompiledArtifact
 from .kernel_function import (
     CompilationContext,
@@ -939,19 +939,23 @@ def _build_call_state(sig, args_tuple, func_exe):
         if spec is None:
             return None
 
-        ctype, extract = spec
+        # A spec is either (ctype, extract) or a list of such tuples for
+        # multi-slot ABIs (e.g. dynamic-memref tensors with a layout buffer).
+        slot_list = spec if isinstance(spec, list) else [spec]
 
-        try:
-            extract(arg)
-        except (AttributeError, TypeError):
-            return None
+        for ctype, extract in slot_list:
+            # Scalar slots: extract(arg) -> value.  Buffer slots:
+            # extract(arg, storage) writes in place.
+            try:
+                if hasattr(ctype, "value"):
+                    extract(arg)
+                else:
+                    extract(arg, ctype())
+            except (AttributeError, TypeError):
+                return None
+            slot_specs.append((i, ctype, extract))
 
-        slot_specs.append((i, ctype, extract))
-
-    # Auto-stream: append a zero-valued slot for the default (NULL) stream.
-    # When no user-declared stream parameter exists, the compiled kernel
-    # still expects a stream pointer as the last argument.  A NULL pointer
-    # (value 0) selects the HIP default stream.
+    # Auto-stream: NULL ptr selects HIP default stream when no user stream arg.
     if not has_user_stream:
         slot_specs.append((-1, ctypes.c_void_p, None))
 
@@ -984,11 +988,16 @@ class CallState:
         updaters = []
 
         for packed_idx, (arg_idx, ctype, extract) in enumerate(self._spec):
-            s = ctype(0)
+            # ctype(0) works for scalar ctypes; array ctypes need zero-arg ctor.
+            try:
+                s = ctype(0)
+            except TypeError:
+                s = ctype()
             packed[packed_idx] = ctypes.addressof(s)
             storages.append(s)
             if extract is not None:
-                updaters.append((arg_idx, s, extract))
+                is_scalar = hasattr(s, "value")
+                updaters.append((arg_idx, s, extract, is_scalar))
 
         self._tls.packed = packed
         self._tls.updaters = updaters
@@ -998,8 +1007,11 @@ class CallState:
         if not hasattr(self._tls, "packed"):
             self._init_buffers()
 
-        for arg_idx, storage, extract in self._tls.updaters:
-            storage.value = extract(args_tuple[arg_idx])
+        for arg_idx, storage, extract, is_scalar in self._tls.updaters:
+            if is_scalar:
+                storage.value = extract(args_tuple[arg_idx])
+            else:
+                extract(args_tuple[arg_idx], storage)
 
         return self._func_exe(self._tls.packed)
 
@@ -1036,7 +1048,7 @@ class JitFunction:
         """Initialize signature + param metadata on first call (not at decoration time)."""
         if self._sig is not None:
             return
-        full_sig = inspect.signature(self.func)
+        full_sig = resolve_signature(self.func)
         params = list(full_sig.parameters.values())
 
         self._has_self_param = bool(params) and params[0].name == "self"

@@ -16,7 +16,19 @@ def preshuffle_b(b_t):
     return b_t.reshape(n // 16, 16, k // 64, 4, 16).permute(0, 2, 3, 1, 4).contiguous()
 
 
+def ceildiv(a: int, b: int) -> int:
+    return (a + b - 1) // b
+
+
+def divmod(a: int, b: int) -> tuple[int, int]:
+    return (a // b, a % b)
+
+
 def make_fp8_buffer_tensor(arg_i8, fp8_ir_t):
+    # max_size=False with no num_records_bytes: cosize(layout) becomes a
+    # runtime expression because TensorAdaptor defaults to layout-dynamic
+    # memref (post #554), so the descriptor adapts to the actual tensor
+    # extent and no longer bakes the first-call's shape into IR.
     t_i8 = fx.rocdl.make_buffer_tensor(arg_i8, max_size=False)
     iter_i8 = fx.get_iter(t_i8)
     f8_buf_ptr_ty = fx.PointerType.get(
@@ -130,9 +142,15 @@ class StoreC:
         self.c_idx_fn = c_idx_fn
         self.n_tiles_a = n_tiles_a
         self.n_tiles_b = n_tiles_b
-        gC = fx.rocdl.make_buffer_tensor(C, max_size=False)
-        gSA = fx.rocdl.make_buffer_tensor(A_scale, max_size=False)
-        gSB = fx.rocdl.make_buffer_tensor(B_scale, max_size=False)
+        # Exact byte counts from compile-time shape (BF16 C output, FP32 scales).
+        # ``num_records_bytes`` is required when ``max_size=False`` -- see
+        # ``make_buffer_tensor`` docstring for the silent-OOB rationale.
+        c_nbytes = c_rows * c_cols * 2  # BFloat16 = 2 bytes
+        sa_nbytes = c_rows * 4  # Float32 row-wise scale
+        sb_nbytes = c_cols * 4  # Float32 col-wise scale
+        gC = fx.rocdl.make_buffer_tensor(C, max_size=False, num_records_bytes=c_nbytes)
+        gSA = fx.rocdl.make_buffer_tensor(A_scale, max_size=False, num_records_bytes=sa_nbytes)
+        gSB = fx.rocdl.make_buffer_tensor(B_scale, max_size=False, num_records_bytes=sb_nbytes)
         self.c_div = fx.logical_divide(gC, fx.make_layout(1, 1))
         self.sa_div = fx.logical_divide(gSA, fx.make_layout(1, 1))
         self.sb_div = fx.logical_divide(gSB, fx.make_layout(1, 1))

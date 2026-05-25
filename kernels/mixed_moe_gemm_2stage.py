@@ -573,7 +573,13 @@ def compile_mixed_moe_gemm1(
             x_nbytes_i32 = arith.index_cast(T.i32, x_nbytes_idx)
             x_rsrc = buffer_ops.create_buffer_resource(arg_x, max_size=False, num_records_bytes=x_nbytes_i32)
 
-            w_rsrc = buffer_ops.create_buffer_resource(arg_w, max_size=False)
+            # W: [experts, 2*inter_dim, model_dim]; fp4 packs 2 elements per byte.
+            w_nbytes_s1 = (
+                (experts * (2 * inter_dim) * model_dim) // 2
+                if is_f4_b
+                else (experts * (2 * inter_dim) * model_dim * b_elem_bytes)
+            )
+            w_rsrc = buffer_ops.create_buffer_resource(arg_w, max_size=False, num_records_bytes=w_nbytes_s1)
 
             # Out: [tokens*topk, inter_dim]
             numids_rsrc = buffer_ops.create_buffer_resource(
@@ -621,14 +627,30 @@ def compile_mixed_moe_gemm1(
             expert_rsrc = buffer_ops.create_buffer_resource(
                 arg_expert_ids, max_size=False, num_records_bytes=eid_nbytes_i32
             )
-            bias_rsrc = buffer_ops.create_buffer_resource(arg_bias, max_size=False) if enable_bias else None
+            # bias: [experts, 2*inter_dim] f32 -> bytes = experts * 2*inter_dim * 4
+            bias_nbytes_s1 = experts * (2 * inter_dim) * 4
+            bias_rsrc = (
+                buffer_ops.create_buffer_resource(arg_bias, max_size=False, num_records_bytes=bias_nbytes_s1)
+                if enable_bias
+                else None
+            )
 
             # Sorted-scale buffer resource for fused mxfp4 quantization
             _sorted_scale_cols = inter_dim // 32
             _sorted_scale_cols_i32 = arith.constant(_sorted_scale_cols, type=T.i32)
             sorted_scale_rsrc = None
             if const_expr(_need_sort):
-                sorted_scale_rsrc = buffer_ops.create_buffer_resource(arg_out_scale_sorted, max_size=False)
+                _sort_rows_idx = size_expert_ids_in * arith.constant(sort_block_m, index=True)
+                _sort_padded_rows = (
+                    (_sort_rows_idx + arith.constant(255, index=True))
+                    / arith.constant(256, index=True)
+                    * arith.constant(256, index=True)
+                )
+                _sort_padded_cols = arith.constant(((_sorted_scale_cols + 7) // 8) * 8, index=True)
+                _sort_scale_nbytes = arith.index_cast(T.i32, _sort_padded_rows * _sort_padded_cols)
+                sorted_scale_rsrc = buffer_ops.create_buffer_resource(
+                    arg_out_scale_sorted, max_size=False, num_records_bytes=_sort_scale_nbytes
+                )
 
             # ---- persist_m loop (same pattern as stage2) ----
             _PERSIST_M = persist_m
@@ -2746,7 +2768,11 @@ def compile_mixed_moe_gemm2(
             x_nbytes_i32 = arith.index_cast(T.i32, x_nbytes_idx)
             x_rsrc = buffer_ops.create_buffer_resource(arg_x, max_size=False, num_records_bytes=x_nbytes_i32)
 
-            w_rsrc = buffer_ops.create_buffer_resource(arg_w, max_size=False)
+            # W: [experts, model_dim, inter_dim]; fp4 packs 2 elements per byte.
+            w_nbytes_s2 = (
+                (experts * model_dim * inter_dim) // 2 if is_f4_b else (experts * model_dim * inter_dim * b_elem_bytes)
+            )
+            w_rsrc = buffer_ops.create_buffer_resource(arg_w, max_size=False, num_records_bytes=w_nbytes_s2)
 
             # OUT: [tokens, model_dim] -> clamp to descriptor max (i32 bytes) to avoid overflow on huge tokens.
             out_elem_bytes = 4 if out_is_f32 else 2
@@ -2824,7 +2850,13 @@ def compile_mixed_moe_gemm2(
             expert_rsrc = buffer_ops.create_buffer_resource(
                 arg_expert_ids, max_size=False, num_records_bytes=eid_nbytes_i32
             )
-            bias_rsrc = buffer_ops.create_buffer_resource(arg_bias, max_size=False) if enable_bias else None
+            # bias: [experts, model_dim] f32 -> bytes = experts * model_dim * 4
+            bias_nbytes_s2 = experts * model_dim * 4
+            bias_rsrc = (
+                buffer_ops.create_buffer_resource(arg_bias, max_size=False, num_records_bytes=bias_nbytes_s2)
+                if enable_bias
+                else None
+            )
 
             # ---- persist loop ----
             _c0_p = arith.constant(0, index=True)
