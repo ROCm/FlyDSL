@@ -514,6 +514,7 @@ def _make_pa_phase_helpers(
     zero_f,
     cache_scale_vecs=False,
     sched_vmem_after_load=True,
+    defer_exp_to_cross_warp=True,
 ):
     apply_causal_mask = needs_mask or query_length > 1
     pv_prob_i64_indices = []
@@ -724,20 +725,24 @@ def _make_pa_phase_helpers(
             [sm_max_off],
         )
 
-        exp_sum = zero_f
-        safe_qk_max = arith.select(qk_max > neg_inf, qk_max, zero_f) if const_expr(kv_tok_base is not None) else qk_max
-        for td in range_constexpr(TLOOP):
-            diff_vec = fx.Vector(d_out[td]) - vector.broadcast(T.f32x4, arith.unwrap(safe_qk_max))
-            p_vec = _exp2_f32_fast(diff_vec * vector.broadcast(T.f32x4, arith.unwrap(fx.Float32(LOG2E))))
-            exp_sum = exp_sum + fx.Vector(p_vec).reduce("add")
-            d_out[td] = p_vec
-        for sh in [32, 16]:
-            exp_sum = exp_sum + exp_sum.shuffle_xor(arith.constant(sh, type=T.i32), c_w)
-        vector.store(
-            fx.Vector.from_elements([exp_sum], dtype=fx.Float32),
-            softmax_lds_f32,
-            [sm_sum_off],
-        )
+        if const_expr(not defer_exp_to_cross_warp):
+            # Legacy path: compute exp + sum here using warp-local qk_max
+            exp_sum = zero_f
+            safe_qk_max = arith.select(qk_max > neg_inf, qk_max, zero_f) if const_expr(kv_tok_base is not None) else qk_max
+            for td in range_constexpr(TLOOP):
+                diff_vec = fx.Vector(d_out[td]) - vector.broadcast(T.f32x4, arith.unwrap(safe_qk_max))
+                p_vec = _exp2_f32_fast(diff_vec * vector.broadcast(T.f32x4, arith.unwrap(fx.Float32(LOG2E))))
+                exp_sum = exp_sum + fx.Vector(p_vec).reduce("add")
+                d_out[td] = p_vec
+            for sh in [32, 16]:
+                exp_sum = exp_sum + exp_sum.shuffle_xor(arith.constant(sh, type=T.i32), c_w)
+            vector.store(
+                fx.Vector.from_elements([exp_sum], dtype=fx.Float32),
+                softmax_lds_f32,
+                [sm_sum_off],
+            )
+        # Fix E path (defer_exp_to_cross_warp=True): d_out kept as raw scores,
+        # exp + exp_sum computed in _cross_warp_softmax_and_prob_pack.
 
         if const_expr(cache_scale_vecs and per_token_kv):
             return d_out, v_scale_vecs
@@ -746,31 +751,58 @@ def _make_pa_phase_helpers(
     def _cross_warp_softmax_and_prob_pack(d_out, rmax, rsum, outs, v_scale_vecs):
         partition_max = neg_inf
         partition_sum = zero_f
-        warp_rescale_factors = []
         max_vec = fx.Vector(vector.load_op(T.f32x4, softmax_lds_f32, [sm_rd_max_offs[0]]))
-        sum_vec = fx.Vector(vector.load_op(T.f32x4, softmax_lds_f32, [sm_rd_sum_offs[0]]))
         for w in range_constexpr(NUM_WARPS):
-            w_max = max_vec[w]
-            partition_max = partition_max.maximumf(w_max)
-            warp_rescale_factors.append(w_max)
+            partition_max = partition_max.maximumf(max_vec[w])
 
-        for w in range_constexpr(NUM_WARPS):
-            diff_w = warp_rescale_factors[w] - partition_max
-            if const_expr(needs_mask):
-                diff_w = arith.select(partition_max > neg_inf, diff_w, zero_f)
-            wf = _exp2_f32_fast(diff_w * fx.Float32(LOG2E).ir_value())
-            w_sum = sum_vec[w]
-            wf_sum = arith.mulf(arith.unwrap(w_sum), arith.unwrap(wf), fastmath=arith.FastMathFlags.contract)
-            partition_sum = arith.addf(arith.unwrap(partition_sum), wf_sum, fastmath=arith.FastMathFlags.contract)
-            warp_rescale_factors[w] = wf
-
-        my_warp_rescale = warp_rescale_factors[0]
-        for w in range_constexpr(1, NUM_WARPS):
-            my_warp_rescale = arith.select(
-                warp_id == arith.constant(w, type=T.i32),
-                warp_rescale_factors[w],
-                my_warp_rescale,
+        if const_expr(defer_exp_to_cross_warp):
+            # Fix E: compute exp now (with partition_max), then cross-warp sum
+            safe_partition_max = (
+                arith.select(partition_max > neg_inf, partition_max, zero_f)
+                if const_expr(needs_mask)
+                else partition_max
             )
+            local_exp_sum = zero_f
+            for td in range_constexpr(TLOOP):
+                diff_vec = fx.Vector(d_out[td]) - vector.broadcast(T.f32x4, arith.unwrap(safe_partition_max))
+                p_vec = _exp2_f32_fast(diff_vec * vector.broadcast(T.f32x4, arith.unwrap(fx.Float32(LOG2E))))
+                local_exp_sum = local_exp_sum + fx.Vector(p_vec).reduce("add")
+                d_out[td] = p_vec
+            for sh in [32, 16]:
+                local_exp_sum = local_exp_sum + local_exp_sum.shuffle_xor(arith.constant(sh, type=T.i32), c_w)
+            vector.store(
+                fx.Vector.from_elements([local_exp_sum], dtype=fx.Float32),
+                softmax_lds_f32,
+                [sm_sum_off],
+            )
+            gpu.barrier()
+            sum_vec = fx.Vector(vector.load_op(T.f32x4, softmax_lds_f32, [sm_rd_sum_offs[0]]))
+            for w in range_constexpr(NUM_WARPS):
+                partition_sum = arith.addf(
+                    arith.unwrap(partition_sum), arith.unwrap(sum_vec[w]), fastmath=arith.FastMathFlags.contract
+                )
+            # In Fix E path, d_out is already exp(scores - partition_max), so
+            # my_warp_rescale collapses to 1.0.
+            my_warp_rescale = arith.constant(1.0, type=T.f32)
+        else:
+            # Legacy path: d_out is exp(scores - warp_max). Need per-warp rescale.
+            sum_vec = fx.Vector(vector.load_op(T.f32x4, softmax_lds_f32, [sm_rd_sum_offs[0]]))
+            warp_rescale_factors = []
+            for w in range_constexpr(NUM_WARPS):
+                diff_w = max_vec[w] - partition_max
+                if const_expr(needs_mask):
+                    diff_w = arith.select(partition_max > neg_inf, diff_w, zero_f)
+                wf = _exp2_f32_fast(diff_w * fx.Float32(LOG2E).ir_value())
+                wf_sum = arith.mulf(arith.unwrap(sum_vec[w]), arith.unwrap(wf), fastmath=arith.FastMathFlags.contract)
+                partition_sum = arith.addf(arith.unwrap(partition_sum), wf_sum, fastmath=arith.FastMathFlags.contract)
+                warp_rescale_factors.append(wf)
+            my_warp_rescale = warp_rescale_factors[0]
+            for w in range_constexpr(1, NUM_WARPS):
+                my_warp_rescale = arith.select(
+                    warp_id == arith.constant(w, type=T.i32),
+                    warp_rescale_factors[w],
+                    my_warp_rescale,
+                )
 
         new_rmax = rmax.maximumf(partition_max)
         if const_expr(needs_mask):
@@ -809,15 +841,15 @@ def _make_pa_phase_helpers(
             v_max_scaled = v_max_global * fx.Float32(1.0 / FP8_MAX).ir_value()
             v_max_safe_scaled = v_max_scaled + fx.Float32(1e-8 / FP8_MAX).ir_value()
             norm_factor = _rcp_f32(v_max_safe_scaled)
-            prob_scale = my_warp_rescale
             v_correction = v_max_scaled * part_to_new
+            prob_scale_factor = my_warp_rescale * norm_factor  # Fix E: my_warp_rescale=1 → just norm_factor
             for td in range_constexpr(TLOOP):
                 d_out[td] = d_out[td] * (
-                    _get_v_scale_vec(td, v_scale_vecs) * vector.broadcast(T.f32x4, arith.unwrap(prob_scale * norm_factor))
+                    _get_v_scale_vec(td, v_scale_vecs) * vector.broadcast(T.f32x4, arith.unwrap(prob_scale_factor))
                 )
         else:
-            prob_scale = my_warp_rescale * part_to_new
             v_correction = v_scale_val
+            prob_scale = my_warp_rescale * part_to_new  # Fix E: my_warp_rescale=1 → part_to_new
             for td in range_constexpr(TLOOP):
                 d_out[td] = d_out[td] * vector.broadcast(T.f32x4, arith.unwrap(prob_scale))
 
@@ -2152,6 +2184,7 @@ def compile_pa_decode_ps(
             c_w=c_w,
             neg_inf=NEG_INF,
             zero_f=ZERO_F,
+            defer_exp_to_cross_warp=False,  # small-block path: legacy is faster
         )
 
         def _store_partition_results(eqgs_lane, running_sum, running_max, outs_norm):
@@ -2529,11 +2562,7 @@ def pa_decode_ps_launch(
 
     dev = query.device
     is_graph_capturing = _is_current_stream_capturing()
-    if is_graph_capturing and not flydsl_runtime_env.enable_cache:
-        raise ValueError(
-            "CUDA graph capture for `pa_decode_ps_launch` requires "
-            "`FLYDSL_RUNTIME_ENABLE_CACHE=1` so compiled launch artifacts stay alive."
-        )
+
     key_scale = _prepare_scale_tensor(
         "key_scale",
         key_scale,
