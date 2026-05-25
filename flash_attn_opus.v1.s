@@ -1132,7 +1132,14 @@ flash_attn_opus_kernel_0:
 .LBB0_10:
 ; Main loop
 ; Cluster 0:
-;   _async_load_v((j_idx - fx.Index(2)) * fx.Index(BLOCK_N), 1)
+; _async_load_v((j_idx - fx.Index(2)) * fx.Index(BLOCK_N), 1)
+; v_k = _async_load_k_from_lds_to_vgpr(1, urk_base_per_lane)
+; rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
+; _waitcnt_vm_n(NUM_DMA_K + NUM_DMA_V)
+; rocdl.sched_barrier(0)
+; rocdl.s_barrier()
+; rocdl.sched_barrier(0)
+; _async_load_v((j_idx - fx.Index(2)) * fx.Index(BLOCK_N), 1)
 	s_mov_b32 m0, s19
 	s_add_i32 s38, s34, s37
 	buffer_load_dwordx4 v215, s[0:3], s38 offen lds
@@ -1166,16 +1173,19 @@ flash_attn_opus_kernel_0:
 
 ; Main loop
 ; Cluster 1:
-; PY (flash_attn_opus.py L1358-L1379):
-;   v_s_1 = _mma0(v_k)
-;   v_p_0 = _attn_exp2_slice(v_p_0, 16, 16)
-;   tile_sum_a = _attn_sum(v_p_0)
-;   l_row = _fadd(l_row, tile_sum_a)
-;   v_p_0 = _cast_p(v_p_0)
-;   v_p_0 = _anchor_v_p(v_p_0)
-;   _sched_barrier_exp_pairs(6, 3, 1)
-;   _sched_barrier_pairs(10, 5, 1)
+; v_s_1 = _mma0(v_k)
+; v_p_0 = _attn_exp2_slice(v_p_0, 16, 16)
+; tile_sum_a = _attn_sum(v_p_0)
+; l_row = _fadd(l_row, tile_sum_a)
+; v_p_0 = _cast_p(v_p_0)
+; v_p_0 = _anchor_v_p(v_p_0)
+; _sched_barrier_exp_pairs(6, 3, 1)
+; _sched_barrier_pairs(10, 5, 1)
+; rocdl.sched_barrier(0)
+; rocdl.s_barrier()
+; rocdl.sched_barrier(0)
 	v_mfma_f32_32x32x16_bf16 v[82:97], v[98:101], v[130:133], 0
+; v_p_0 = _attn_exp2_slice(v_p_0, 16, 16)
 	v_exp_f32_e32 v122, v66
 	v_exp_f32_e32 v123, v67
 	v_exp_f32_e32 v124, v68
@@ -1198,6 +1208,7 @@ flash_attn_opus_kernel_0:
 	v_mfma_f32_32x32x16_bf16 v[98:113], v[190:193], v[138:141], v[98:113]
 	v_exp_f32_e32 v81, v81
 	v_mfma_f32_32x32x16_bf16 v[82:97], v[186:189], v[142:145], v[82:97]
+; tile_sum_a = _attn_sum(v_p_0)
 	v_add_f32_e32 v66, v183, v184
 	v_add_f32_e32 v66, v66, v182
 	v_add_f32_e32 v66, v66, v180
@@ -1240,6 +1251,7 @@ flash_attn_opus_kernel_0:
 	v_permlane32_swap_b32_e64 v66, v67 bound_ctrl:1
 	v_add_f32_e32 v67, v218, v67
 	v_add_f32_e32 v218, v67, v66
+; v_p_0 = _cast_p(v_p_0)
 	;;#ASMSTART
 	v_cvt_pk_bf16_f32 v66, v183, v184
 	;;#ASMEND
@@ -1295,15 +1307,21 @@ flash_attn_opus_kernel_0:
 ; v_p_0 = _anchor_v_p(v_p_0)
 	;;#ASMSTART
 	;;#ASMEND
-;   rocdl.sched_barrier(0)
-;   rocdl.s_barrier()
-;   rocdl.sched_barrier(0)
+; rocdl.sched_barrier(0)
+; rocdl.s_barrier()
+; rocdl.sched_barrier(0)
 	s_barrier
 
 ; Main loop
 ; Cluster 2:
-; PY (flash_attn_opus.py L1381-L1395):
-;   _async_load_k(j_idx * fx.Index(BLOCK_N), 1)
+; _async_load_k(j_idx * fx.Index(BLOCK_N), 1)
+; v_v = _read_v_packs_for_buf(0, urv_base_per_lane)
+; rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
+; _waitcnt_vm_n(NUM_DMA_K + NUM_DMA_V)
+; rocdl.sched_barrier(0)
+; rocdl.s_barrier()
+; rocdl.sched_barrier(0)
+; _async_load_k(j_idx * fx.Index(BLOCK_N), 1)
 	s_add_i32 s38, s18, s37
 	s_mov_b32 m0, s30
 	s_nop 0
@@ -1453,11 +1471,28 @@ flash_attn_opus_kernel_0:
 ; 	rocdl.s_setprio(1)
 	s_setprio 1
 ; v_o = _mma1_step_k(0, v_p_0, v_v, v_o)
-; #         D_ACC row_max = attn_row_max<T>(v_s[1]);
 ; v_s_1 = _v_s_vec_to_lists(v_s_1)
 ; m_tile_max_a = _attn_row_max(v_s_1)
 ; _sched_barrier_pairs(4, 5, 2)
+; if const_expr(OPUS_LAZY_RESCALE):
+; 	v_o, m_row, l_row, v_p_0 = _lazy_rescale_o(
+; 		v_o, m_row, l_row, m_tile_max_a, v_p_0
+; 	)
+; v_o = _mma1_step_k(1, v_p_0, v_v, v_o)
+; v_o = _mma1_step_k(2, v_p_0, v_v, v_o)
+; v_o = _mma1_step_k(3, v_p_0, v_v, v_o)
+; v_s_1 = _attn_sub_row(v_s_1, m_row)
+; v_s_1 = _anchor_v_s(v_s_1)
+; v_p_1 = _attn_exp2_slice(v_s_1, 0, 16)
+; _sched_barrier_pairs(6, 5, 2)
+; _sched_barrier_exp_pairs(6, 3, 2)
+; if const_expr(OPUS_SETPRIO):
+; 	rocdl.s_setprio(0)
+; rocdl.sched_barrier(0)
+; rocdl.s_barrier()
+; rocdl.sched_barrier(0)
 	v_mfma_f32_32x32x16_bf16 v[2:17], v[194:197], v[66:69], v[2:17]
+; m_tile_max_a = _attn_row_max(v_s_1)
 	v_max_f32_e32 v194, v82, v83
 	v_max3_f32 v194, v194, v84, v85
 	v_max3_f32 v194, v194, v86, v87
@@ -1481,7 +1516,9 @@ flash_attn_opus_kernel_0:
 	s_nop 1
 	v_permlane32_swap_b32_e64 v66, v67 bound_ctrl:1
 	v_max_f32_e32 v66, v66, v67
-
+; v_o, m_row, l_row, v_p_0 = _lazy_rescale_o(
+; 	v_o, m_row, l_row, m_tile_max_a, v_p_0
+; )
 ; m_diff = _fsub(m_tile_max, m_row)
 	v_sub_f32_e32 v67, v66, v220
 ; below = ArithValue(fx.Float32(m_diff) <= c_eight_f)
@@ -1590,14 +1627,14 @@ flash_attn_opus_kernel_0:
 	v_cvt_pk_bf16_f32 v70, v206, v207
 ; scaled_l_row = _fmul(l_row, corr)
 	v_mul_f32_e32 v218, v68, v218
+
 .LBB0_12:
-; OPUS lazy rescale fast-path merge.
-;   v_o = _mma1_step_k(1, v_p_0, v_v, v_o)
-;   v_o = _mma1_step_k(2, v_p_0, v_v, v_o)
-;   v_o = _mma1_step_k(3, v_p_0, v_v, v_o)
-;   v_s_1 = _attn_sub_row(v_s_1, m_row)
-;   v_s_1 = _anchor_v_s(v_s_1)
-;   v_p_1 = _attn_exp2_slice(v_s_1, 0, 16)
+; v_o = _mma1_step_k(1, v_p_0, v_v, v_o)
+; v_o = _mma1_step_k(2, v_p_0, v_v, v_o)
+; v_o = _mma1_step_k(3, v_p_0, v_v, v_o)
+; v_s_1 = _attn_sub_row(v_s_1, m_row)
+; v_s_1 = _anchor_v_s(v_s_1)
+; v_p_1 = _attn_exp2_slice(v_s_1, 0, 16)
 ; _sched_barrier_pairs(6, 5, 2)
 ; _sched_barrier_exp_pairs(6, 3, 2)
 	s_nop 0
@@ -1645,6 +1682,7 @@ flash_attn_opus_kernel_0:
 	;;#ASMSTART
 	;;#ASMEND
 	s_nop 0
+;   v_p_1 = _attn_exp2_slice(v_s_1, 0, 16)
 	v_exp_f32_e32 v166, v82
 	v_exp_f32_e32 v167, v83
 	v_exp_f32_e32 v168, v84
@@ -1675,17 +1713,21 @@ flash_attn_opus_kernel_0:
 	s_barrier
 
 ; Cluster 4:
-; NOTE:
-;   Priority is dropped before the barrier so the other wave group can catch up.
-;   The second ping-pong half repeats the same QK/softmax/P*V pattern with swapped LDS buffers.
-;   _async_load_v((j_idx - fx.Index(1)) * fx.Index(BLOCK_N), 0)
+; _async_load_v((j_idx - fx.Index(1)) * fx.Index(BLOCK_N), 0)
+; v_k = _async_load_k_from_lds_to_vgpr(0, urk_base_per_lane)
+; rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
+; _waitcnt_vm_n(NUM_DMA_K + NUM_DMA_V)
+; rocdl.sched_barrier(0)
+; rocdl.s_barrier()
+; rocdl.sched_barrier(0)
+; _async_load_v((j_idx - fx.Index(1)) * fx.Index(BLOCK_N), 0)
 	s_mov_b32 m0, s28
 	s_add_i32 s38, s27, s37
 	buffer_load_dwordx4 v215, s[0:3], s38 offen lds
 	s_mov_b32 m0, s21
 	s_nop 0
 	buffer_load_dwordx4 v216, s[0:3], s38 offen lds
-;   v_k = _async_load_k_from_lds_to_vgpr(0, urk_base_per_lane)
+; v_k = _async_load_k_from_lds_to_vgpr(0, urk_base_per_lane)
 	ds_read_b128 v[82:85], v211
 	ds_read_b128 v[170:173], v211 offset:32
 	ds_read_b128 v[174:177], v211 offset:512
@@ -1702,11 +1744,10 @@ flash_attn_opus_kernel_0:
 	ds_read_b128 v[232:235], v211 offset:8416
 	ds_read_b128 v[236:239], v211 offset:8896
 	ds_read_b128 v[240:243], v211 offset:8928
-;   rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
-;   _waitcnt_vm_n(NUM_DMA_K + NUM_DMA_V)
-;   rocdl.sched_barrier(0)
-;   rocdl.s_barrier()
-;   rocdl.sched_barrier(0)
+; _waitcnt_vm_n(NUM_DMA_K + NUM_DMA_V)
+; rocdl.sched_barrier(0)
+; rocdl.s_barrier()
+; rocdl.sched_barrier(0)
 	s_waitcnt vmcnt(4) lgkmcnt(0)
 	s_barrier
 
@@ -1719,6 +1760,9 @@ flash_attn_opus_kernel_0:
 ; v_p_1 = _anchor_v_p(v_p_1)
 ; _sched_barrier_exp_pairs(6, 3, 3)
 ; _sched_barrier_pairs(10, 5, 3)
+; rocdl.sched_barrier(0)
+; rocdl.s_barrier()
+; rocdl.sched_barrier(0)
 	v_mfma_f32_32x32x16_bf16 v[66:81], v[82:85], v[130:133], 0
 	v_exp_f32_e32 v124, v98
 	v_exp_f32_e32 v125, v99
@@ -1844,7 +1888,20 @@ flash_attn_opus_kernel_0:
 
 ; Cluster 6:
 ; Main loop
-;   _async_load_k((j_idx + fx.Index(1)) * fx.Index(BLOCK_N), 0)
+; _async_load_k((j_idx + fx.Index(1)) * fx.Index(BLOCK_N), 0)
+; v_packs_b = _read_v_packs_for_buf(1, urv_base_per_lane)
+; if const_expr(CAUSAL):
+; 	v_s_0 = _causal_mask_prologue_if_needed(
+; 		v_s_0,
+; 		j_idx - fx.Index(1),
+; 		j_idx * fx.Index(BLOCK_N),
+; 	)
+; rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
+; _waitcnt_vm_n(NUM_DMA_K + NUM_DMA_V)
+; rocdl.sched_barrier(0)
+; rocdl.s_barrier()
+; rocdl.sched_barrier(0)
+; _async_load_k((j_idx + fx.Index(1)) * fx.Index(BLOCK_N), 0)
 	s_mov_b32 m0, s31
 	s_add_i32 s37, s35, s37
 	buffer_load_dwordx4 v215, s[4:7], s37 offen lds
@@ -2228,7 +2285,25 @@ flash_attn_opus_kernel_0:
 ; v_o = _mma1_step_k(0, v_p_1, v_v, v_o)
 ; m_tile_max_b = _attn_row_max(v_s_0)
 ; _sched_barrier_pairs(4, 5, 4)
+; if const_expr(OPUS_LAZY_RESCALE):
+; 	v_o, m_row, l_row, v_p_1 = _lazy_rescale_o(
+; 		v_o, m_row, l_row, m_tile_max_b, v_p_1
+; 	)
+; v_o = _mma1_step_k(1, v_p_1, v_v, v_o)
+; v_o = _mma1_step_k(2, v_p_1, v_v, v_o)
+; v_o = _mma1_step_k(3, v_p_1, v_v, v_o)
+; v_s_0 = _attn_sub_row(v_s_0, m_row)
+; v_s_0 = _anchor_v_s(v_s_0)
+; v_p_0 = _attn_exp2_slice(v_s_0, 0, 16)
+; _sched_barrier_pairs(6, 5, 4)
+; _sched_barrier_exp_pairs(6, 3, 4)
+; if const_expr(OPUS_SETPRIO):
+; 	rocdl.s_setprio(0)
+; rocdl.sched_barrier(0)
+; rocdl.s_barrier()
+; rocdl.sched_barrier(0)
 	v_mfma_f32_32x32x16_bf16 v[2:17], v[206:209], v[98:101], v[2:17]
+; m_tile_max_b = _attn_row_max(v_s_0)
 	v_max_f32_e32 v206, v66, v67
 	v_max3_f32 v206, v206, v68, v69
 	v_max3_f32 v206, v206, v70, v71
@@ -2252,7 +2327,9 @@ flash_attn_opus_kernel_0:
 	s_nop 1
 	v_permlane32_swap_b32_e64 v98, v99 bound_ctrl:1
 	v_max_f32_e32 v98, v98, v99
-
+; v_o, m_row, l_row, v_p_1 = _lazy_rescale_o(
+; 	v_o, m_row, l_row, m_tile_max_b, v_p_1
+; )
 ; m_diff = _fsub(m_tile_max, m_row)
 	v_sub_f32_e32 v99, v98, v220
 ; below = ArithValue(fx.Float32(m_diff) <= c_eight_f)

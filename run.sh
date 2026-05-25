@@ -70,12 +70,14 @@ function run_flydsl_op {
     # python tests/test_triton_flash_attn.py --compare --warmup 5 --iters 100
 
 
-    python tests/kernels/test_flash_opus_attn.py --causal --dtype bf16 --batch 16 --num_heads 64 --num_kv_heads 64 --seq_len 8192 --head_dim 128 --iters 100
+    # python tests/kernels/test_flash_opus_attn.py --causal --dtype bf16 --batch 16 --num_heads 64 --num_kv_heads 64 --seq_len 8192 --head_dim 128 --iters 100
+    python tests/kernels/test_flash_opus_attn.py --causal --dtype bf16 --batch 2 --num_heads 64 --num_kv_heads 64 --seq_len 1024 --head_dim 128 --iters 100
     # python tests/kernels/test_flash_opus_attn.py --causal --dtype bf16 --batch 16 --num_heads 64 --num_kv_heads 64 --seq_len 512 --head_dim 128 --iters 100
     # python tests/kernels/test_flash_opus_attn.py --causal --dtype bf16 --batch 16 --num_heads 64 --num_kv_heads 8 --seq_len 8192 --head_dim 128 --iters 100
 
     # python tests/kernels/test_flash_opus_attn.py --warmup 5 --iters 100 --compare
     # python tests/kernels/test_flash_opus_attn.py --causal --dtype bf16 --batch 16 --num_heads 64 --num_kv_heads 64 --seq_len 8192 --head_dim 128 --iters 100 --compare
+    python tests/kernels/test_flash_opus_attn.py --causal --dtype bf16 --batch 2 --num_heads 64 --num_kv_heads 64 --seq_len 1024 --head_dim 128 --iters 100 --compare
     # python tests/kernels/test_flash_opus_attn.py --causal --dtype bf16 --batch 16 --num_heads 64 --num_kv_heads 8 --seq_len 8192 --head_dim 128 --iters 100 --compare
     # python tests/kernels/test_flash_opus_attn.py --causal --dtype bf16 --batch 16 --num_heads 64 --num_kv_heads 64 --seq_len 8192 --head_dim 128 --iters 100 --compare
 
