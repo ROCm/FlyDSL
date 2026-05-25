@@ -35,7 +35,6 @@ Harm
 
 import pytest
 
-
 # ── Part 1: Pure Python demonstration ──────────────────────────────────────────
 
 
