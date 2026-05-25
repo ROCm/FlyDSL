@@ -204,20 +204,21 @@ class ASTRewriter:
         # __closure__, so direct f.__code__ assignment raises ValueError.
         # Rebuild the function with a matching (smaller) closure.
         if f.__closure__ and new_f_code_o.co_freevars != f.__code__.co_freevars:
-            old_cells = {name: cell for name, cell
-                         in zip(f.__code__.co_freevars, f.__closure__)}
+            old_cells = {name: cell for name, cell in zip(f.__code__.co_freevars, f.__closure__)}
             new_closure = []
             for var in new_f_code_o.co_freevars:
                 if var in old_cells:
                     new_closure.append(old_cells[var])
                 else:
                     raise RuntimeError(
-                        f"AST rewriter produced free variable {var!r} that "
-                        f"is not in the original closure"
+                        f"AST rewriter produced free variable {var!r} that " f"is not in the original closure"
                     )
             new_f = types.FunctionType(
-                new_f_code_o, f.__globals__, f.__name__,
-                f.__defaults__, tuple(new_closure),
+                new_f_code_o,
+                f.__globals__,
+                f.__name__,
+                f.__defaults__,
+                tuple(new_closure),
             )
             new_f.__kwdefaults__ = f.__kwdefaults__
             return new_f
