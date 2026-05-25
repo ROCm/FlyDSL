@@ -35,76 +35,140 @@ Harm
 
 import pytest
 
-# ── Part 1: Pure Python demonstration ──────────────────────────────────────────
 
-
-def test_locals_does_not_see_closure_variables():
-    """locals() returns only local variables, not closure (free) variables."""
-    outer_var = 42
-
-    def inner():
-        return locals().get("outer_var", None)
-
-    assert inner() is None
-
-
-def test_locals_sees_local_copy_of_closure():
-    """After assigning to a local, locals() finds it."""
-    outer_var = 42
-
-    def inner():
-        local_copy = outer_var  # noqa: F841
-        return locals().get("local_copy", None)
-
-    assert inner() == 42
-
-
-# ── Part 2: AST rewriter masking UnboundLocalError ────────────────────────────
+# ── Simulate the dispatch pattern used by the AST rewriter ────────────────────
 #
-# In normal Python, assigning to a closure variable without `nonlocal`
-# triggers UnboundLocalError:
+# User writes:
+#     while cond:
+#         body
 #
-#     def outer():
-#         n = 5
-#         def inner():
-#             while n > 0:     # UnboundLocalError: n is local (due to assignment below)
-#                 n = n - 1
+# AST rewriter produces (simplified):
+#     def before_fn(result_names, *vars): return cond
+#     def after_fn(result_names, *vars):  body; return {name: val, ...}
+#     result = scf_while_dispatch(before_fn, after_fn,
+#                                 result_names=(...),
+#                                 result_values=(locals().get("var1"), ...))
 #
-# But the AST rewriter moves `n = n - 1` into `__while_after_N`, so Python
-# no longer treats `n` as local in `inner`.  Instead, `n` becomes a free
-# variable, and `locals().get("n", None)` returns None.
+# The problem: locals().get("x") returns None when x is a closure variable.
 
 
-def test_python_unbound_local_error():
-    """Normal Python: assigning to closure variable → UnboundLocalError."""
+def _simulate_dispatch(before_fn, after_fn, init_values):
+    """Minimal Python simulation of scf_while_dispatch loop semantics."""
+    state = list(init_values)
+    while before_fn(*state):
+        result = after_fn(*state)
+        state = list(result.values())
+    return state
 
-    def outer():
+
+def test_local_var_correct_result():
+    """Local variable: locals().get finds it, dispatch produces correct result.
+
+    Equivalent user code:
+        acc = 0
         n = 5
-
-        def inner():
-            while n > 0:
-                n = n - 1  # noqa: F841 — makes `n` local, but never assigned before read
-
-        return inner
-
-    with pytest.raises(UnboundLocalError):
-        outer()()
-
-
-def test_ast_rewrite_masks_unbound_error():
-    """When assignment moves to a nested function, the error becomes None.
-
-    This simulates what the AST rewriter does: the `n = n - 1` moves into
-    __while_after_0, so the outer function no longer has a local `n`.
-    ``locals().get("n", None)`` returns None instead of raising.
+        while n > 0:
+            acc = acc + n
+            n = n - 1
+        # acc == 15
     """
-    n_outer = 5
 
     def kernel_body():
-        def __while_after_0(n):
-            return n - 1
+        acc = 0
+        n = 5
 
-        initial_n = locals().get("n_outer", None)
-        return initial_n
+        def before_fn(acc, n):
+            return n > 0
 
-    assert kernel_body() is None
+        def after_fn(acc, n):
+            return {"acc": acc + n, "n": n - 1}
+
+        init_acc = locals().get("acc", None)
+        init_n = locals().get("n", None)
+        return _simulate_dispatch(before_fn, after_fn, [init_acc, init_n])
+
+    acc, n = kernel_body()
+    assert acc == 15
+    assert n == 0
+
+
+def test_closure_var_wrong_result():
+    """Closure variable: locals().get returns None, dispatch gets wrong initial value.
+
+    Equivalent user code (inside a factory function):
+        def make_kernel(start_n):
+            def kernel():
+                acc = 0
+                while start_n > 0:       # start_n from closure
+                    acc = acc + start_n
+                    start_n = start_n - 1 # assignment → AST rewriter moves it
+                return acc                # expected: 15
+
+    Without AST rewriting, Python raises UnboundLocalError.
+    With AST rewriting, the assignment moves into after_fn, so start_n
+    is no longer local — locals().get returns None.
+    """
+    start_n = 5
+
+    def kernel_body():
+        acc = 0
+
+        def before_fn(acc, start_n):
+            return start_n > 0
+
+        def after_fn(acc, start_n):
+            return {"acc": acc + start_n, "n": start_n - 1}
+
+        init_acc = locals().get("acc", None)
+        init_start_n = locals().get("start_n", None)
+
+        return init_acc, init_start_n
+
+    init_acc, init_start_n = kernel_body()
+
+    assert init_acc == 0       # acc is local → found
+    assert init_start_n is None  # start_n is closure → NOT found, returns None
+
+    # If we tried to dispatch with None:
+    #   _simulate_dispatch(before_fn, after_fn, [0, None])
+    # → TypeError: '>' not supported between instances of 'NoneType' and 'int'
+    # In MLIR context, this would be passing None to scf.WhileOp → crash or wrong IR.
+
+
+def test_normal_python_raises_unbound():
+    """Normal Python (no AST rewriting): writing to closure var → UnboundLocalError.
+
+    This is the error Python WOULD give. AST rewriting masks it by moving
+    the assignment into a nested function, turning the error into a silent None.
+    """
+    start_n = 5
+
+    def kernel_body():
+        acc = 0
+        while start_n > 0:
+            acc = acc + start_n
+            start_n = start_n - 1  # noqa: F841
+        return acc
+
+    with pytest.raises(UnboundLocalError):
+        kernel_body()
+
+
+def test_dispatch_with_none_crashes():
+    """Dispatching with None initial value crashes — this is the real harm.
+
+    If scf_while_dispatch's none_vars guard were missing, None would reach
+    the MLIR WhileOp construction, causing either:
+    - TypeError from _unwrap_value(None)
+    - Cryptic MLIR verification failure
+    - Silent generation of invalid IR
+    """
+
+    def before_fn(acc, n):
+        return n > 0
+
+    def after_fn(acc, n):
+        return {"acc": acc + n, "n": n - 1}
+
+    with pytest.raises(TypeError):
+        _simulate_dispatch(before_fn, after_fn, [0, None])
