@@ -117,14 +117,25 @@ def _collect_assigned_vars(body_stmts, active_symbols, orelse_stmts=None, test_e
     return write_args + invoked_args
 
 
+def _check_local_var(name, local_vars):
+    if name not in local_vars:
+        raise NameError(
+            f"Variable '{name}' is assigned inside a control flow body (while/if/for) "
+            f"but is not a local variable in the current scope. "
+            f"It may be a closure variable captured from an outer function. "
+            f"Fix: pass it as a function parameter or assign it to a local variable "
+            f"before the control flow statement."
+        )
+    return local_vars[name]
+
+
 def _state_value_expr(name):
     return ast.Call(
-        func=ast.Attribute(
-            value=ast.Call(func=ast.Name(id="locals", ctx=ast.Load()), args=[], keywords=[]),
-            attr="get",
-            ctx=ast.Load(),
-        ),
-        args=[ast.Constant(value=name), ast.Constant(value=None)],
+        func=ast.Name(id="__check_local_var", ctx=ast.Load()),
+        args=[
+            ast.Constant(value=name),
+            ast.Call(func=ast.Name(id="locals", ctx=ast.Load()), args=[], keywords=[]),
+        ],
         keywords=[],
     )
 
@@ -641,6 +652,7 @@ class ReplaceIfWithDispatch(Transformer):
     def rewrite_globals(cls):
         return {
             "const_expr": const_expr,
+            "__check_local_var": _check_local_var,
             "scf_if_dispatch": cls.scf_if_dispatch,
             "scf_ifexp_dispatch": cls.scf_ifexp_dispatch,
             "scf_if_collect_results": cls._collect_result_dict,
