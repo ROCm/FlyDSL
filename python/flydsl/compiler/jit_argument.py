@@ -155,6 +155,7 @@ class TensorAdaptor:
         tensor: torch.Tensor,
         assumed_align: Optional[int] = None,
         use_32bit_stride: bool = False,
+        dynamic_layout: bool = True,
     ):
         # Forward-only interop: DLPack export from torch rejects tensors that
         # still participate in autograd, so detach before crossing into FlyDSL.
@@ -176,27 +177,39 @@ class TensorAdaptor:
         self._orig_strides = tensor.stride()
         # Marked-static dims contribute their (shape, stride) to the cache key.
         self._cached_dims: frozenset = frozenset()
-        # Default to layout-dynamic memref so one compile serves all sizes.
-        # Skipped (falls back to static memref) for tensors without an
-        # unambiguous leading stride-1 dim -- 0-rank, all-non-unit-stride
-        # slices, multi-stride-1 broadcasts -- where C++ markLayoutDynamic
-        # throws RuntimeError or no stride-1 dim is found.
-        try:
-            self.tensor_adaptor.mark_layout_dynamic(-1, 1)
-            self._dyn_leading_dim = next(i for i, s in enumerate(self._orig_strides) if int(s) == 1)
-            self._is_layout_dynamic = True
-        except (RuntimeError, StopIteration):
-            self._dyn_leading_dim = -1
-            self._is_layout_dynamic = False
+        self._dyn_leading_dim = -1
+        self._dynamic_divisibility = 1
+        self._cache_dynamic_shape = bool(dynamic_layout)
+        self._is_layout_dynamic = False
+
+        if dynamic_layout:
+            try:
+                self._mark_layout_dynamic(leading_dim=-1, divisibility=1)
+            except RuntimeError:
+                # Keep the original fully-static layout when the leading
+                # stride-1 dim cannot be inferred unambiguously.
+                pass
 
     @staticmethod
     def _extract_data_ptr(arg):
-        # arg may be a raw torch.Tensor or a TensorAdaptor wrapping one;
-        # both can hit the same fast-path CallState because they share
-        # raw_cache_signature / __cache_signature__ when defaults match.
         if hasattr(arg, "_tensor_keepalive"):
             return arg._tensor_keepalive.data_ptr()
         return arg.data_ptr()
+
+    @staticmethod
+    def _auto_leading_dim(strides) -> Optional[int]:
+        leading_dims = [i for i, stride in enumerate(strides) if int(stride) == 1]
+        return leading_dims[0] if len(leading_dims) == 1 else None
+
+    @staticmethod
+    def _dynamic_cache_signature(tensor: torch.Tensor, assumed_align: Optional[int], use_32bit_stride: bool):
+        leading_dim = TensorAdaptor._auto_leading_dim(tensor.stride())
+        base = (tensor.dtype, assumed_align, use_32bit_stride)
+        shape_sig = tuple(int(d) for d in tensor.shape)
+        stride_sig = tuple(int(s) for s in tensor.stride())
+        if leading_dim is None:
+            return base + ("static", shape_sig, stride_sig)
+        return base + ("dynamic", tensor.dim(), leading_dim, 1, shape_sig, stride_sig)
 
     @classmethod
     def _reusable_slot_spec(cls, arg):
@@ -208,7 +221,7 @@ class TensorAdaptor:
         Buffer slots use the in-place protocol: ``extract(arg, storage)``
         writes into ``storage`` via ``struct.pack_into``.
         """
-        if not hasattr(arg, "data_ptr"):
+        if not hasattr(arg, "data_ptr") and not isinstance(arg, cls):
             return None
 
         adaptor = arg if isinstance(arg, cls) else cls(arg)
@@ -273,23 +286,36 @@ class TensorAdaptor:
     def raw_cache_signature(tensor: torch.Tensor):
         """Lightweight cache sig from a raw tensor, no DLPack overhead.
 
-        Matches ``__cache_signature__`` for a default-constructed TensorAdaptor
-        (no ``mark_static`` calls).
+        Raw tensors are auto-adapted to dynamic memrefs, but helper code may
+        still bake shape-derived layout facts while tracing. Keep shape/stride
+        in the key unless the caller explicitly opts into a reusable dynamic
+        TensorAdaptor via from_dlpack(...).mark_layout_dynamic(...).
         """
-        return (tensor.dtype, None, False, tensor.dim())
+        return TensorAdaptor._dynamic_cache_signature(tensor, None, False)
 
     def __cache_signature__(self):
-        base = (
-            self._orig_dtype,
-            self.assumed_align,
-            self.use_32bit_stride,
-            len(self._orig_shape),
+        base = (self._orig_dtype, self.assumed_align, self.use_32bit_stride)
+        if self._is_layout_dynamic:
+            dyn_base = base + (
+                "dynamic",
+                len(self._orig_shape),
+                self._dyn_leading_dim,
+                self._dynamic_divisibility,
+            )
+            if self._cache_dynamic_shape:
+                dyn_base += (
+                    tuple(int(d) for d in self._orig_shape),
+                    tuple(int(s) for s in self._orig_strides),
+                )
+            if not self._cached_dims:
+                return dyn_base
+            extras = tuple((d, int(self._orig_shape[d]), int(self._orig_strides[d])) for d in sorted(self._cached_dims))
+            return dyn_base + (extras,)
+        return base + (
+            "static",
+            tuple(int(d) for d in self._orig_shape),
+            tuple(int(s) for s in self._orig_strides),
         )
-        if not self._cached_dims:
-            return base
-        # Pack only the marked dims as sorted (dim, shape, stride) triples.
-        extras = tuple((d, int(self._orig_shape[d]), int(self._orig_strides[d])) for d in sorted(self._cached_dims))
-        return base + (extras,)
 
     def mark_static(self, dims: Optional[List[int]] = None):
         """Include the listed dims' shape/stride values in the JIT cache key.
@@ -313,6 +339,16 @@ class TensorAdaptor:
         self._cached_dims = frozenset(new_dims)
         return self
 
+    def _mark_layout_dynamic(self, leading_dim: int, divisibility: int):
+        self.tensor_adaptor.mark_layout_dynamic(leading_dim, divisibility)
+        resolved_leading_dim = self._auto_leading_dim(self._orig_strides) if leading_dim == -1 else int(leading_dim)
+        if resolved_leading_dim is None:
+            raise RuntimeError("Cannot determine leading dimension")
+        self._dyn_leading_dim = resolved_leading_dim
+        self._dynamic_divisibility = int(divisibility)
+        self._is_layout_dynamic = True
+        return self
+
     def mark_layout_dynamic(self, leading_dim: Optional[int] = None, divisibility: int = 1):
         # TODO: C++ markLayoutDynamic accumulates dynamic flags across calls
         # without resetting -- a 2nd call with a *different* leading_dim
@@ -323,20 +359,19 @@ class TensorAdaptor:
         # Fix path: make C++ reset all dynamic flags before re-marking.
         if leading_dim is None:
             leading_dim = -1
-        if getattr(self, "_is_layout_dynamic", False) and leading_dim not in (-1, self._dyn_leading_dim):
+        if self._is_layout_dynamic and leading_dim not in (-1, self._dyn_leading_dim):
             raise NotImplementedError(
                 f"mark_layout_dynamic(leading_dim={leading_dim}) conflicts with "
                 f"auto-detected leading_dim={self._dyn_leading_dim} from __init__.  "
                 "Re-binding leading_dim is not supported yet (see TODO in jit_argument.py)."
             )
-        self.tensor_adaptor.mark_layout_dynamic(leading_dim, divisibility)
-        return self
+        return self._mark_layout_dynamic(leading_dim, divisibility)
 
 
 def from_dlpack(
     tensor: torch.Tensor, *, assumed_align: Optional[int] = None, use_32bit_stride: bool = False
 ) -> TensorAdaptor:
-    return TensorAdaptor(tensor, assumed_align, use_32bit_stride)
+    return TensorAdaptor(tensor, assumed_align, use_32bit_stride, dynamic_layout=False)
 
 
 JitArgumentRegistry.register(bool)(Boolean)
