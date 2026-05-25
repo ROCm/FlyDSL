@@ -11,7 +11,7 @@ from .._mlir import ir
 from .._mlir.dialects import arith, gpu
 from ..expr.typing import Constexpr
 from .ast_rewriter import ASTRewriter
-from .jit_argument import is_type_param_annotation
+from .jit_argument import is_type_param_annotation, resolve_signature
 from .mlir_utils import convert_to_mlir_attr
 from .protocol import construct_from_ir_values, extract_to_ir_values, get_ir_types
 
@@ -491,7 +491,7 @@ class KernelFunction:
         self._location_tracker = FuncLocationTracker(func)
         self._shared_allocator = None
 
-        full_sig = inspect.signature(self._func)
+        full_sig = resolve_signature(self._func)
         params = list(full_sig.parameters.values())
 
         self._has_self_param = bool(params) and params[0].name == "self"
@@ -586,9 +586,11 @@ class KernelFunction:
         finally:
             KernelFunction._current = None
 
-        smem_bytes = None
-        if self._shared_allocator is not None:
+        # The static memory size is handled by compiler.
+        if self._shared_allocator is not None and not self._shared_allocator.is_static:
             smem_bytes = self._shared_allocator.allocated_bytes
+        else:
+            smem_bytes = None
 
         return tuple(param_values), gpu_func, smem_bytes
 

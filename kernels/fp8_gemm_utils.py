@@ -2,10 +2,8 @@
 # Copyright (c) 2025 FlyDSL Project Contributors
 
 import flydsl.expr as fx
-from flydsl._mlir.dialects import arith as arith_dialect
 from flydsl._mlir.dialects import fly as fly_dialect
 from flydsl._mlir.dialects import llvm as _llvm
-from flydsl._mlir.dialects import memref as memref_dialect
 from flydsl._mlir.dialects.fly_rocdl import TargetAddressSpace
 from flydsl.expr import arith, const_expr, range_constexpr
 from flydsl.expr.typing import Vector as Vec
@@ -18,7 +16,19 @@ def preshuffle_b(b_t):
     return b_t.reshape(n // 16, 16, k // 64, 4, 16).permute(0, 2, 3, 1, 4).contiguous()
 
 
+def ceildiv(a: int, b: int) -> int:
+    return (a + b - 1) // b
+
+
+def divmod(a: int, b: int) -> tuple[int, int]:
+    return (a // b, a % b)
+
+
 def make_fp8_buffer_tensor(arg_i8, fp8_ir_t):
+    # max_size=False with no num_records_bytes: cosize(layout) becomes a
+    # runtime expression because TensorAdaptor defaults to layout-dynamic
+    # memref (post #554), so the descriptor adapts to the actual tensor
+    # extent and no longer bakes the first-call's shape into IR.
     t_i8 = fx.rocdl.make_buffer_tensor(arg_i8, max_size=False)
     iter_i8 = fx.get_iter(t_i8)
     f8_buf_ptr_ty = fx.PointerType.get(
@@ -66,10 +76,10 @@ class G2SLoader:
         self.n_waves = fx.block_dim.x // 64
 
     def _lds_dst_at(self, lds_dst, step):
-        base_idx = memref_dialect.extract_aligned_pointer_as_index(lds_dst)
-        offset_idx = base_idx + fx.Index(self.wave_id * 1024 + step * (self.n_waves * 1024))
-        offset_i64 = arith_dialect.index_cast(fx.T.i64(), offset_idx)
-        lds_ptr = fx.inttoptr(self.LdsPtr_t, offset_i64)
+        step_off = self.wave_id * 1024 + step * (self.n_waves * 1024)
+        base_i32 = fx.Int32(fx.ptrtoint(lds_dst.ptr))
+        sum_i32 = base_i32 + fx.Int32(step_off)
+        lds_ptr = fx.inttoptr(self.LdsPtr_t, sum_i32)
         return fx.make_view(lds_ptr, fx.make_layout(1, 1))
 
     def load(self, lds_dst, k_offset):
@@ -91,10 +101,16 @@ def pack_i32x4_i32x8(lo, hi):
 
 class S2RLoader:
     def __init__(self, wave_idx, n_tiles):
-        self.vec16_t = Vec.make_type(16, fx.Float8E4M3FN)
         self.lane_id = fx.thread_idx.x % 64
         self.wave_idx = wave_idx
         self.n_tiles = n_tiles
+
+    def _vec_load_16xf8(self, lds_src, offset):
+        off_tup = fx.make_int_tuple(offset)
+        ptr_off = fx.add_offset(lds_src.ptr, off_tup)
+        i8_iter = fx.recast_iter(fx.Uint8, ptr_off)
+        view = fx.make_view(i8_iter, fx.make_layout(16, 1))
+        return view.load()
 
     def load(self, lds_src, preshuffled=False):
         frag = []
@@ -108,13 +124,13 @@ class S2RLoader:
                 else:
                     row_swz, col_swz = swizzle_128(row, col)
                     offset = row_swz * 128 + col_swz
-                v = Vec.load(self.vec16_t, lds_src, [fx.Index(offset)])
+                v = self._vec_load_16xf8(lds_src, offset)
                 halves.append(v.bitcast(fx.Int32))
             frag.append(pack_i32x4_i32x8(halves[0], halves[1]))
         return frag
 
     def load_one(self, lds_src, lds_offset):
-        v = Vec.load(self.vec16_t, lds_src, [fx.Index(lds_offset)])
+        v = self._vec_load_16xf8(lds_src, lds_offset)
         return v.bitcast(fx.Int32)
 
 
@@ -126,9 +142,15 @@ class StoreC:
         self.c_idx_fn = c_idx_fn
         self.n_tiles_a = n_tiles_a
         self.n_tiles_b = n_tiles_b
-        gC = fx.rocdl.make_buffer_tensor(C, max_size=False)
-        gSA = fx.rocdl.make_buffer_tensor(A_scale, max_size=False)
-        gSB = fx.rocdl.make_buffer_tensor(B_scale, max_size=False)
+        # Exact byte counts from compile-time shape (BF16 C output, FP32 scales).
+        # ``num_records_bytes`` is required when ``max_size=False`` -- see
+        # ``make_buffer_tensor`` docstring for the silent-OOB rationale.
+        c_nbytes = c_rows * c_cols * 2  # BFloat16 = 2 bytes
+        sa_nbytes = c_rows * 4  # Float32 row-wise scale
+        sb_nbytes = c_cols * 4  # Float32 col-wise scale
+        gC = fx.rocdl.make_buffer_tensor(C, max_size=False, num_records_bytes=c_nbytes)
+        gSA = fx.rocdl.make_buffer_tensor(A_scale, max_size=False, num_records_bytes=sa_nbytes)
+        gSB = fx.rocdl.make_buffer_tensor(B_scale, max_size=False, num_records_bytes=sb_nbytes)
         self.c_div = fx.logical_divide(gC, fx.make_layout(1, 1))
         self.sa_div = fx.logical_divide(gSA, fx.make_layout(1, 1))
         self.sb_div = fx.logical_divide(gSB, fx.make_layout(1, 1))

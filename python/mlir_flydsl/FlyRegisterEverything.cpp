@@ -10,13 +10,12 @@
 
 // Forward-declare per-backend CAPI registration functions.
 // FLYDSL_BACKENDS_TUPLE is set by CMake (e.g. (rocdl)).
-#define DECLARE_BACKEND(name)                                                  \
-  extern "C" void flydsl_register_##name##_dialects(MlirDialectRegistry);      \
+#define DECLARE_BACKEND(name)                                                                      \
+  extern "C" void flydsl_register_##name##_dialects(MlirDialectRegistry);                          \
   extern "C" void flydsl_register_##name##_passes(void);
 FOR_EACH_BACKEND(DECLARE_BACKEND, FLYDSL_BACKENDS_TUPLE)
 
-#define REGISTER_BACKEND_DIALECTS(name)                                        \
-  flydsl_register_##name##_dialects(registry);
+#define REGISTER_BACKEND_DIALECTS(name) flydsl_register_##name##_dialects(registry);
 #define REGISTER_BACKEND_PASSES(name) flydsl_register_##name##_passes();
 
 NB_MODULE(_mlirRegisterEverything, m) {

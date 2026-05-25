@@ -7,6 +7,7 @@ add_mlir_dialect_library(MLIRFlyROCDLDialect
   CDNA4/MmaAtom.cpp
   CDNA4/CopyAtom.cpp
   GFX1250/MmaAtom.cpp
+  GFX11/MmaAtom.cpp
 
   DEPENDS
   MLIRFlyROCDLIncGen

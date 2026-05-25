@@ -17,13 +17,9 @@ import math
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl._mlir.ir import InsertionPoint
-from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, const_expr, gpu, range_constexpr
 from flydsl.expr import math as fmath
 from flydsl.expr.vector import ReductionOp, full
-from flydsl.runtime.device import get_rocm_arch as get_hip_arch
-from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from kernels.kernels_common import dtype_to_elem_type, get_warp_size
 
 KERNEL_NAME = "softmax_kernel"
@@ -34,16 +30,13 @@ VEC_WIDTH = 8
 
 
 def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
-    arch = get_hip_arch()
-
     tile_cols = BLOCK_THREADS * VEC_WIDTH
     RED_SLOTS = max(1, (BLOCK_THREADS + WARP_SIZE - 1) // WARP_SIZE)
     elem_bits = 32 if dtype_str == "f32" else 16
 
-    allocator = SmemAllocator(None, arch=arch)
-    f32_bytes = 4
-    red_offset = allocator._align(allocator.ptr, 16)
-    allocator.ptr = red_offset + RED_SLOTS * f32_bytes
+    @fx.struct
+    class SharedStorage:
+        s_red: fx.Array[fx.Float32, RED_SLOTS, 16]
 
     @flyc.kernel
     def softmax_kernel(
@@ -58,9 +51,8 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
         elem_dtype = dtype_to_elem_type(dtype_str)
         fm_fast = arith.FastMathFlags.fast
 
-        base_ptr = allocator.get_base()
-        s_red = SmemPtr(base_ptr, red_offset, fx.Float32.ir_type, shape=(RED_SLOTS,))
-        s_red.get()
+        lds = fx.SharedAllocator().allocate(SharedStorage).peek()
+        s_red = lds.s_red.view(fx.make_layout(RED_SLOTS, 1))
 
         c_zero_f = fx.Float32(0.0)
         c_neg_inf = fx.Float32(float("-inf"))
@@ -89,22 +81,22 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
             w = wave_reduce(val, mode)
 
             if lane == 0:
-                SmemPtr.store(s_red_buffer, w, [wave])
+                fx.memref_store(w, s_red_buffer, wave)
             gpu.barrier()
 
             if wave == 0:
                 in_range = lane < RED_SLOTS
                 lane_safe = in_range.select(lane, 0)
-                v = SmemPtr.load(s_red_buffer, [lane_safe])
+                v = fx.memref_load(s_red_buffer, lane_safe)
                 z = neutral
                 ww = in_range.select(v, z)
                 ww = wave_reduce(ww, mode)
 
                 if lane == 0:
-                    SmemPtr.store(s_red_buffer, ww, [0])
+                    fx.memref_store(ww, s_red_buffer, 0)
             gpu.barrier()
 
-            return SmemPtr.load(s_red_buffer, [0])
+            return fx.memref_load(s_red_buffer, 0)
 
         # ==================================================================
         # Fast path: N is a multiple of tile_cols
@@ -253,11 +245,6 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
         m_in: fx.Int32,
         stream: fx.Stream = fx.Stream(None),
     ):
-        allocator.finalized = False
-        ctx = CompilationContext.get_current()
-        with InsertionPoint(ctx.gpu_module_body):
-            allocator.finalize()
-
         launcher = softmax_kernel(A, C, C, C)
         launcher.launch(
             grid=(m_in, 1, 1),

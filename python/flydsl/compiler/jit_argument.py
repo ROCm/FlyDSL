@@ -3,6 +3,7 @@
 
 import ctypes
 import inspect
+import warnings
 from typing import Callable, Dict, List, Optional, Tuple, Type, get_origin
 
 import torch
@@ -10,6 +11,21 @@ import torch
 from .._mlir._mlir_libs._mlirDialectsFly import DLTensorAdaptor
 from ..expr.typing import Boolean, Constexpr, Float32, Int32, Stream, Tensor
 from .protocol import DslType, JitArgument
+
+_RESOLVE_SIG_WARNED = set()
+
+
+def resolve_signature(func):
+    """``inspect.signature`` with PEP 563 string annotations resolved; warn once on NameError fallback."""
+    try:
+        return inspect.signature(func, eval_str=True)
+    except NameError as exc:
+        key = getattr(func, "__qualname__", repr(func))
+        if key not in _RESOLVE_SIG_WARNED:
+            _RESOLVE_SIG_WARNED.add(key)
+            warnings.warn(f"FlyDSL: unresolved annotation in {key!r} ({exc}); cache key may degrade.", stacklevel=2)
+        return inspect.signature(func)
+
 
 _FLOAT8_DTYPES = tuple(
     dt
@@ -158,21 +174,85 @@ class TensorAdaptor:
         self._orig_dtype = tensor.dtype
         self._orig_shape = tensor.shape
         self._orig_strides = tensor.stride()
+        # Marked-static dims contribute their (shape, stride) to the cache key.
+        self._cached_dims: frozenset = frozenset()
+        # Default to layout-dynamic memref so one compile serves all sizes.
+        # Skipped (falls back to static memref) for tensors without an
+        # unambiguous leading stride-1 dim -- 0-rank, all-non-unit-stride
+        # slices, multi-stride-1 broadcasts -- where C++ markLayoutDynamic
+        # throws RuntimeError or no stride-1 dim is found.
+        try:
+            self.tensor_adaptor.mark_layout_dynamic(-1, 1)
+            self._dyn_leading_dim = next(i for i, s in enumerate(self._orig_strides) if int(s) == 1)
+            self._is_layout_dynamic = True
+        except (RuntimeError, StopIteration):
+            self._dyn_leading_dim = -1
+            self._is_layout_dynamic = False
 
     @staticmethod
     def _extract_data_ptr(arg):
+        # arg may be a raw torch.Tensor or a TensorAdaptor wrapping one;
+        # both can hit the same fast-path CallState because they share
+        # raw_cache_signature / __cache_signature__ when defaults match.
+        if hasattr(arg, "_tensor_keepalive"):
+            return arg._tensor_keepalive.data_ptr()
         return arg.data_ptr()
 
     @classmethod
     def _reusable_slot_spec(cls, arg):
-        """Reusable slot for tensor arguments.
+        """Reusable slot(s) for a tensor argument.
 
-        For bare-pointer calling convention, only the data pointer changes
-        between calls with the same shape/dtype/strides.
+        Returns ``(ctype, extract)`` for static memref (data ptr only), or a
+        list of such tuples for dynamic memref (data ptr + a layout-buffer
+        slot carrying the runtime shape / non-leading stride values).
+        Buffer slots use the in-place protocol: ``extract(arg, storage)``
+        writes into ``storage`` via ``struct.pack_into``.
         """
         if not hasattr(arg, "data_ptr"):
             return None
-        return ctypes.c_void_p, cls._extract_data_ptr
+
+        adaptor = arg if isinstance(arg, cls) else cls(arg)
+        if not getattr(adaptor, "_is_layout_dynamic", False):
+            return ctypes.c_void_p, cls._extract_data_ptr
+
+        # Dynamic memref: pre-compute the layout-buffer packing plan.
+        # Layout matches C++ buildMemRefDesc: shape i32's then non-leading
+        # stride i32/i64's, little-endian packed.
+        rank = len(adaptor._orig_shape)
+        leading = adaptor._dyn_leading_dim
+        use_32bit_stride = bool(adaptor.use_32bit_stride)
+        stride_dim_indices = tuple(d for d in range(rank) if d != leading)
+        shape_size = rank * 4
+        stride_elem = 4 if use_32bit_stride else 8
+        buf_ctype = ctypes.c_byte * (shape_size + len(stride_dim_indices) * stride_elem)
+
+        import struct as _struct
+
+        shape_codec = _struct.Struct("<" + "i" * rank) if rank else None
+        if stride_dim_indices:
+            stride_codec = _struct.Struct("<" + ("i" if use_32bit_stride else "q") * len(stride_dim_indices))
+        else:
+            stride_codec = None
+
+        def pack_layout_buffer(
+            t,
+            storage,
+            _shape_codec=shape_codec,
+            _stride_codec=stride_codec,
+            _stride_dims=stride_dim_indices,
+            _shape_size=shape_size,
+        ):
+            tens = t._tensor_keepalive if isinstance(t, cls) else t
+            mv = memoryview(storage).cast("b")
+            if _shape_codec is not None:
+                _shape_codec.pack_into(mv, 0, *tens.shape)
+            if _stride_codec is not None:
+                _stride_codec.pack_into(mv, _shape_size, *(tens.stride(d) for d in _stride_dims))
+
+        return [
+            (ctypes.c_void_p, cls._extract_data_ptr),
+            (buf_ctype, pack_layout_buffer),
+        ]
 
     def requires_memref_desc(func):
         def wrapper(self, *args, **kwargs):
@@ -191,19 +271,64 @@ class TensorAdaptor:
 
     @staticmethod
     def raw_cache_signature(tensor: torch.Tensor):
-        """Lightweight cache sig from a raw tensor, no DLPack overhead."""
-        return (tensor.dtype,)
+        """Lightweight cache sig from a raw tensor, no DLPack overhead.
+
+        Matches ``__cache_signature__`` for a default-constructed TensorAdaptor
+        (no ``mark_static`` calls).
+        """
+        return (tensor.dtype, None, False, tensor.dim())
 
     def __cache_signature__(self):
-        return (
+        base = (
             self._orig_dtype,
             self.assumed_align,
             self.use_32bit_stride,
+            len(self._orig_shape),
         )
+        if not self._cached_dims:
+            return base
+        # Pack only the marked dims as sorted (dim, shape, stride) triples.
+        extras = tuple((d, int(self._orig_shape[d]), int(self._orig_strides[d])) for d in sorted(self._cached_dims))
+        return base + (extras,)
+
+    def mark_static(self, dims: Optional[List[int]] = None):
+        """Include the listed dims' shape/stride values in the JIT cache key.
+
+        ``dims=None`` marks every dim.  Call this when the compiled kernel
+        bakes concrete shape values into the generated IR (for example
+        ``num_records`` on a buffer resource derived from the static layout
+        cosize), so that calls with different shapes do not reuse a stale
+        compiled artifact.  Repeated calls accumulate.
+
+        Returns ``self`` for chaining.
+        """
+        rank = len(self._orig_shape)
+        target = range(rank) if dims is None else dims
+        new_dims = set(self._cached_dims)
+        for d in target:
+            d = int(d)
+            if not 0 <= d < rank:
+                raise IndexError(f"dim {d} out of range for rank {rank}")
+            new_dims.add(d)
+        self._cached_dims = frozenset(new_dims)
+        return self
 
     def mark_layout_dynamic(self, leading_dim: Optional[int] = None, divisibility: int = 1):
+        # TODO: C++ markLayoutDynamic accumulates dynamic flags across calls
+        # without resetting -- a 2nd call with a *different* leading_dim
+        # leaves the previous call's stride[leading] dynamic, and the
+        # Python-cached ``_dyn_leading_dim`` (used by ``_reusable_slot_spec``
+        # to lay out the layout buffer) diverges from the C++ ABI.
+        # Temporary guard: forbid 2nd call with a different leading_dim.
+        # Fix path: make C++ reset all dynamic flags before re-marking.
         if leading_dim is None:
             leading_dim = -1
+        if getattr(self, "_is_layout_dynamic", False) and leading_dim not in (-1, self._dyn_leading_dim):
+            raise NotImplementedError(
+                f"mark_layout_dynamic(leading_dim={leading_dim}) conflicts with "
+                f"auto-detected leading_dim={self._dyn_leading_dim} from __init__.  "
+                "Re-binding leading_dim is not supported yet (see TODO in jit_argument.py)."
+            )
         self.tensor_adaptor.mark_layout_dynamic(leading_dim, divisibility)
         return self
 
