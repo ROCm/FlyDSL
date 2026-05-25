@@ -681,7 +681,6 @@ def _make_pa_phase_helpers(
         phys_block,
         preloaded_scales=None,
         seq_start=None,
-        precomputed_vmax=False,
     ):
         if const_expr(preloaded_scales is not None):
             if const_expr(cache_scale_vecs and per_token_kv):
@@ -756,33 +755,6 @@ def _make_pa_phase_helpers(
             [sm_sum_off],
         )
 
-        if const_expr(per_token_kv and not precomputed_vmax):
-            v_max_warp = zero_f
-            for td in range_constexpr(TLOOP):
-                if const_expr(cache_scale_vecs and per_token_kv):
-                    vs = _get_v_scale_vec(td, v_scale_vecs)
-                else:
-                    vs = _get_v_scale_vec(td)
-                for i in range_constexpr(4):
-                    if const_expr(kv_tok_base is not None):
-                        kv_tok = kv_tok_base + arith.constant(td * MFMA_N + i, type=T.i32)
-                        vs_i = vector.extract(vs, static_position=[i], dynamic_position=[])
-                        if const_expr(apply_causal_mask and apply_range_mask):
-                            in_range = (kv_tok < causal_bound) & (kv_tok >= seq_start)
-                            vs_i = arith.select(in_range, vs_i, zero_f)
-                        elif const_expr(apply_causal_mask):
-                            vs_i = arith.select(kv_tok < causal_bound, vs_i, zero_f)
-                        elif const_expr(apply_range_mask):
-                            vs_i = arith.select(kv_tok >= seq_start, vs_i, zero_f)
-                        vs = vector.insert(vs_i, vs, static_position=[i], dynamic_position=[])
-                v_max_warp = v_max_warp.maximumf(fx.Vector(vs).reduce("max"))
-            for sh in [32, 16]:
-                v_max_warp = v_max_warp.maximumf(v_max_warp.shuffle_xor(arith.constant(sh, type=T.i32), c_w))
-            vector.store(
-                fx.Vector.from_elements([v_max_warp], dtype=fx.Float32),
-                softmax_lds_f32,
-                [sm_vmax_wr_off],
-            )
         if const_expr(cache_scale_vecs and per_token_kv):
             return d_out, v_scale_vecs
         return d_out
@@ -792,11 +764,12 @@ def _make_pa_phase_helpers(
         partition_sum = zero_f
         warp_rescale_factors = []
         max_vec = fx.Vector(vector.load_op(T.f32x4, softmax_lds_f32, [sm_rd_max_offs[0]]))
+        sum_vec = fx.Vector(vector.load_op(T.f32x4, softmax_lds_f32, [sm_rd_sum_offs[0]]))
         for w in range_constexpr(NUM_WARPS):
             w_max = max_vec[w]
             partition_max = partition_max.maximumf(w_max)
             warp_rescale_factors.append(w_max)
-        sum_vec = fx.Vector(vector.load_op(T.f32x4, softmax_lds_f32, [sm_rd_sum_offs[0]]))
+        
         for w in range_constexpr(NUM_WARPS):
             diff_w = warp_rescale_factors[w] - partition_max
             if const_expr(needs_mask):
@@ -880,77 +853,31 @@ def _make_pa_phase_helpers(
         v_correction = fx.Float32(v_correction).ir_value()
         fm_contract = arith.FastMathFlags.contract
         v_correction_vec = vector.broadcast(T.f32x4, v_correction)
-        if const_expr(preload_pv_operands):
-            v_i64s = []
-            for vhe in range_constexpr(VHELOOP):
-                for vt in range_constexpr(VTLOOP):
-                    v_i64x2 = fx.Vector(v_ops[vt][vhe])
-                    for j in range_constexpr(2):
-                        v_i64s.append(v_i64x2[j])
-            p_i64s = []
+        outs = [o0, o1]
+        for vhe in range_constexpr(VHELOOP):
+            tmp_out = arith.constant_vector(0.0, T.f32x4)
             for vt in range_constexpr(VTLOOP):
+                v_i64x2 = fx.Vector(v_ops[vt][vhe])
                 for j in range_constexpr(2):
                     p_i64_idx = pv_prob_i64_indices[vt * 2 + j]
-                    p_i64s.append(fx.Vector.load(T.vec(1, T.i64), logits_lds_i64, [p_i64_idx])[0])
-            for vhe in range_constexpr(VHELOOP):
-                tmp_out = arith.constant_vector(0.0, T.f32x4)
-                for vt in range_constexpr(VTLOOP):
-                    for j in range_constexpr(2):
-                        tmp_out = rocdl.mfma_f32_16x16x32_fp8_fp8(
-                            T.f32x4,
-                            [
-                                v_i64s[vhe * VTLOOP * 2 + vt * 2 + j],
-                                p_i64s[vt * 2 + j],
-                                tmp_out,
-                                0,
-                                0,
-                                0,
-                            ],
-                        )
-                if const_expr(vhe == 0):
-                    o0 = arith.addf(
-                        arith.mulf(tmp_out, v_correction_vec, fastmath=fm_contract),
-                        o0,
-                        fastmath=fm_contract,
+                    p_i64 = fx.Vector.load(T.vec(1, T.i64), logits_lds_i64, [p_i64_idx])[0]
+                    tmp_out = rocdl.mfma_f32_16x16x32_fp8_fp8(
+                        T.f32x4,
+                        [
+                            v_i64x2[j],
+                            p_i64,
+                            tmp_out,
+                            0,
+                            0,
+                            0,
+                        ],
                     )
-                else:
-                    o1 = arith.addf(
-                        arith.mulf(tmp_out, v_correction_vec, fastmath=fm_contract),
-                        o1,
-                        fastmath=fm_contract,
-                    )
-        else:
-            for vhe in range_constexpr(VHELOOP):
-                tmp_out = arith.constant_vector(0.0, T.f32x4)
-                for vt in range_constexpr(VTLOOP):
-                    v_i64x2 = fx.Vector(v_ops[vt][vhe])
-                    for j in range_constexpr(2):
-                        p_i64_idx = pv_prob_i64_indices[vt * 2 + j]
-                        p_i64 = fx.Vector.load(T.vec(1, T.i64), logits_lds_i64, [p_i64_idx])[0]
-                        tmp_out = rocdl.mfma_f32_16x16x32_fp8_fp8(
-                            T.f32x4,
-                            [
-                                v_i64x2[j],
-                                p_i64,
-                                tmp_out,
-                                0,
-                                0,
-                                0,
-                            ],
-                        )
-                if const_expr(vhe == 0):
-                    o0 = arith.addf(
-                        arith.mulf(tmp_out, v_correction_vec, fastmath=fm_contract),
-                        o0,
-                        fastmath=fm_contract,
-                    )
-                else:
-                    o1 = arith.addf(
-                        arith.mulf(tmp_out, v_correction_vec, fastmath=fm_contract),
-                        o1,
-                        fastmath=fm_contract,
-                    )
-        return o0, o1
+            outs[vhe] = arith.addf(
+                arith.mulf(tmp_out, v_correction_vec, fastmath=fm_contract),
+                outs[vhe],
+                fastmath=fm_contract,
+            )
+        return outs[0], outs[1]
 
     def _finalize_block_split_group(
         d_out,
@@ -1708,10 +1635,10 @@ def compile_pa_decode_metadata(
             s_ks_head,
             s_po_ql,
             s_pl_ql,
-            value_attrs=_mfma_agpr_value_attrs(),
+            # value_attrs=_mfma_agpr_value_attrs(),
         ).launch(grid=(num_sm, 1, TILES_PER_BLOCK), block=(BLOCK_THREADS, 1, 1), stream=stream)
 
-    launch_pa_decode_ps.compile_hints["llvm_options"] = PA_MFMA_AGPR_LLVM_OPTIONS
+    # launch_pa_decode_ps.compile_hints["llvm_options"] = PA_MFMA_AGPR_LLVM_OPTIONS
 
     return {
         "launch": launch_pa_decode_ps,
@@ -2463,12 +2390,9 @@ def compile_pa_decode_ps(
             )
             next_block_base = next_safe_part * fx.Int32(_blocks_per_partition)
             
-
             new_states = []
             k_next_flat = None
             for _mtp_g in range_constexpr(_mtp_groups):
-                # if const_expr(_mtp_g > 0):
-                #     gpu.barrier()
                 rmax, rsum, o0, o1 = cur_states[_mtp_g]
                 causal_bound = (
                     context_len
@@ -2483,13 +2407,15 @@ def compile_pa_decode_ps(
                     phys_block=arith.constant(0, type=T.i32),
                     # preloaded_v_and_scales=v_results,
                 )
-
-                gpu.barrier()
                 if const_expr(_mtp_g == _mtp_groups - 1):
                     next_phys_blocks, next_phys_block_vec = _pa_small_block_stage_phys_blocks(next_block_base)
+
+                gpu.barrier()
+
                 rmax, rsum, o0, o1, v_correction = _cross_warp_softmax_and_prob_pack(
                     d_out, rmax, rsum, o0, o1
                 )
+                
                 # Issue the next sub-partition's K prefetch on the LAST MTP
                 # iter, after cross_warp_softmax_and_prob_pack but BEFORE
                 # _pv_mfma — same hoist as in pa_decode_metadata_kenrel's
@@ -2584,10 +2510,7 @@ def compile_pa_decode_ps(
             s_to_part,
             s_to_group,
             s_bt_seq,
-            value_attrs=_mfma_agpr_value_attrs(),
         ).launch(grid=(gx, gy, gz), block=(BLOCK_THREADS, 1, 1), stream=stream)
-
-    launch_pa_decode_ps_small_block.compile_hints["llvm_options"] = PA_MFMA_AGPR_LLVM_OPTIONS
 
     return {
         "launch": launch_pa_decode_ps_small_block,
