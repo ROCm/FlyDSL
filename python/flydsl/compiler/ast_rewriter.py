@@ -1319,6 +1319,9 @@ class CanonicalizeWhile(Transformer):
             node = super().visit_While(node)
             return node
 
+        if node.orelse:
+            raise NotImplementedError("while...else is not supported in dynamic while loops (scf.while)")
+
         active_symbols_before_while = self.symbol_scopes.snapshot_symbol_scopes()
 
         with self.symbol_scopes.control_flow_scope():
