@@ -1585,7 +1585,7 @@ def compile_pa_decode_metadata(
 
     # ── @flyc.jit launch wrapper ─────────────────────────────────────
     @flyc.jit
-    def launch_pa_decode_ps(
+    def launch_pa_decode_metadata(
         out,
         po,
         pl,
@@ -1651,10 +1651,10 @@ def compile_pa_decode_metadata(
             # value_attrs=_mfma_agpr_value_attrs(),
         ).launch(grid=(num_sm, 1, TILES_PER_BLOCK), block=(BLOCK_THREADS, 1, 1), stream=stream)
 
-    # launch_pa_decode_ps.compile_hints["llvm_options"] = PA_MFMA_AGPR_LLVM_OPTIONS
+    # launch_pa_decode_metadata.compile_hints["llvm_options"] = PA_MFMA_AGPR_LLVM_OPTIONS
 
     return {
-        "launch": launch_pa_decode_ps,
+        "launch": launch_pa_decode_metadata,
         "kernel": pa_decode_metadata_kenrel,
         "allocator": allocator,
     }
