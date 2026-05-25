@@ -113,37 +113,37 @@ def test_scf_while_dispatch_no_result():
         assert "scf.while" in ir_text
 
 
-def test_scf_while_dispatch_static_condition():
-    """Python bool condition → plain while loop, no scf.while."""
+def test_scf_while_dispatch_simple_condition():
+    """Simple condition with only a return in before_fn generates scf.while."""
     with Context(), Location.unknown():
         module = Module.create()
         i32 = IntegerType.get_signless(32)
         with InsertionPoint(module.body):
-            f = func.FuncOp("test_static", FunctionType.get([], [i32]))
+            f = func.FuncOp("test_simple_cond", FunctionType.get([i32], [i32]))
             entry = f.add_entry_block()
             with InsertionPoint(entry):
-                counter = [3]
-
-                def before_fn(names, acc):
-                    counter[0] -= 1
-                    return counter[0] >= 0
-
-                def after_fn(names, acc):
-                    one = Int32(arith.ConstantOp(i32, 1).result)
-                    return {"acc": acc + one}
-
+                n = Int32(entry.arguments[0])
                 acc = Int32(arith.ConstantOp(i32, 0).result)
+
+                def before_fn(names, acc, n):
+                    return n > Int32(arith.ConstantOp(i32, 0).result)
+
+                def after_fn(names, acc, n):
+                    one = Int32(arith.ConstantOp(i32, 1).result)
+                    return {"acc": acc + one, "n": n - one}
+
                 result = CanonicalizeWhile.scf_while_dispatch(
                     before_fn,
                     after_fn,
-                    result_names=("acc",),
-                    result_values=(acc,),
+                    result_names=("acc", "n"),
+                    result_values=(acc, n),
                 )
-                func.ReturnOp([result.ir_value()])
+                func.ReturnOp([result[0].ir_value()])
 
         assert module.operation.verify()
         ir_text = str(module)
-        assert "scf.while" not in ir_text
+        assert "scf.while" in ir_text
+        assert "scf.condition" in ir_text
 
 
 def test_scf_while_dispatch_none_var_raises_error():
