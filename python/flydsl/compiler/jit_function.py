@@ -234,7 +234,11 @@ def _use_external_binary_codegen() -> bool:
 
 def _get_underlying_func(obj):
     if isinstance(obj, KernelFunction):
-        return obj._func
+        # Prefer the pre-AST-rewrite func: its closure / co_names still
+        # reference helper callables, which is what the cache-key dependency
+        # collector needs to walk to detect helper source changes.  Fallback
+        # to `_func` for older KernelFunction instances without the field.
+        return getattr(obj, "_original_func", obj._func)
     if isinstance(obj, JitFunction):
         return obj.func
     if isinstance(obj, types.MethodType):
