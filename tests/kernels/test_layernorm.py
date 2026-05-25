@@ -18,12 +18,12 @@ import os
 import pytest
 
 from kernels.layernorm_kernel import (
-    build_layernorm_module,
-    build_fused_add_layernorm_module,
-    build_layernorm_dynamicquant_module,
-    build_layernorm_smoothquant_module,
     build_fused_add_layernorm_dynamicquant_module,
+    build_fused_add_layernorm_module,
     build_fused_add_layernorm_smoothquant_module,
+    build_layernorm_dynamicquant_module,
+    build_layernorm_module,
+    build_layernorm_smoothquant_module,
 )
 from tests.kernels.benchmark_common import (
     PerfRow,
@@ -429,7 +429,9 @@ def run_dynamicquant_test(M: int, N: int, dtype: str = "f32"):
     try:
         launch_fn = build_layernorm_dynamicquant_module(M, N, dtype)
     except Exception as e:
-        print(f"[FAIL] Compile failed for dynamicquant layernorm (M={M}, N={N}, dtype={dtype}): {type(e).__name__}: {e}")
+        print(
+            f"[FAIL] Compile failed for dynamicquant layernorm (M={M}, N={N}, dtype={dtype}): {type(e).__name__}: {e}"
+        )
         return False, None
 
     torch.manual_seed(42)
@@ -886,7 +888,9 @@ def run_fused_add_dynamicquant_test(M: int, N: int, dtype: str = "f32"):
     stream = torch.cuda.current_stream()
 
     def kernel_launch():
-        launch_fn(input_dev, residual_dev, gamma_dev, beta_dev, output_dev, residual_out_dev, yscale_dev, M, stream=stream)
+        launch_fn(
+            input_dev, residual_dev, gamma_dev, beta_dev, output_dev, residual_out_dev, yscale_dev, M, stream=stream
+        )
 
     kernel_launch()
     torch.cuda.synchronize()
@@ -1239,7 +1243,9 @@ def test_fused_add_layernorm_smoothquant():
                     yscale = torch.empty((M, 1), device="cuda", dtype=DTYPE_FP32)
 
                     def run_aiter():
-                        layernorm2d_fwd_with_add_smoothquant(q_out, x, residual, residual_out, xscale, yscale, w, b, EPS)
+                        layernorm2d_fwd_with_add_smoothquant(
+                            q_out, x, residual, residual_out, xscale, yscale, w, b, EPS
+                        )
 
                     aiter_us = bench_gpu_us_torch(run_aiter, warmup=WARMUP_ITERS, iters=BENCH_ITERS)
                     print(f"[Perf] AIter fused_add layernorm smoothquant gpu: {aiter_us:.1f} us")
