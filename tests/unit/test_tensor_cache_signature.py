@@ -5,8 +5,8 @@
 
 """Tests for TensorAdaptor cache signature and the ``mark_static`` API.
 
-Default cache key is lightweight (dtype + align + 32-bit-stride flag + rank)
-so a single compiled kernel serves calls with different shapes.  When the
+Default cache key is lightweight (dtype + align + 32-bit-stride flag + rank +
+layout ABI tag) so a single compiled kernel serves calls with different shapes.  When the
 kernel's compiled IR depends on concrete shape values, the affected dims must
 be marked with ``mark_static`` so they participate in the cache key.
 """

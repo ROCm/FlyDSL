@@ -219,7 +219,7 @@ public:
     size_t shapeDyncCount = 0;
     size_t strideDyncCount = 0;
     for (int i = 0; i < ndim_; ++i) {
-      shapeLeaves[i] = shape_[i].getIntAttr(ctx, true);
+      shapeLeaves[i] = shape_[i].getIntAttr(ctx, false);
       strideLeaves[i] = stride_[i].getIntAttr(ctx, use32BitStride_);
 
       if (shape_[i].isDynamic)
@@ -254,7 +254,7 @@ public:
         static_cast<void *>(static_cast<char *>(tensor_->data) + tensor_->byte_offset);
 
     size_t strideElemSize = use32BitStride_ ? sizeof(int32_t) : sizeof(int64_t);
-    size_t layoutSize = shapeDyncCount * sizeof(int32_t) + strideDyncCount * strideElemSize;
+    size_t layoutSize = shapeDyncCount * sizeof(int64_t) + strideDyncCount * strideElemSize;
 
     if (layoutSize > 0) {
       memrefDesc_.layoutBuffer.resize(layoutSize);
@@ -262,9 +262,9 @@ public:
 
       for (int i = 0; i < ndim_; ++i) {
         if (shape_[i].isDynamic) {
-          int32_t val = static_cast<int32_t>(shape_[i].dimSize);
-          std::memcpy(ptr, &val, sizeof(int32_t));
-          ptr += sizeof(int32_t);
+          int64_t val = shape_[i].dimSize;
+          std::memcpy(ptr, &val, sizeof(int64_t));
+          ptr += sizeof(int64_t);
         }
       }
       for (int i = 0; i < ndim_; ++i) {

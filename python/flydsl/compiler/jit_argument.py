@@ -150,6 +150,8 @@ def convert_to_jit_arguments(
 
 @JitArgumentRegistry.register(torch.Tensor, dsl_type=Tensor)
 class TensorAdaptor:
+    _DYNAMIC_LAYOUT_ABI = "dynamic_layout_shape_i64"
+
     def __init__(
         self,
         tensor: torch.Tensor,
@@ -216,19 +218,19 @@ class TensorAdaptor:
             return ctypes.c_void_p, cls._extract_data_ptr
 
         # Dynamic memref: pre-compute the layout-buffer packing plan.
-        # Layout matches C++ buildMemRefDesc: shape i32's then non-leading
+        # Layout matches C++ buildMemRefDesc: shape i64's then non-leading
         # stride i32/i64's, little-endian packed.
         rank = len(adaptor._orig_shape)
         leading = adaptor._dyn_leading_dim
         use_32bit_stride = bool(adaptor.use_32bit_stride)
         stride_dim_indices = tuple(d for d in range(rank) if d != leading)
-        shape_size = rank * 4
+        shape_size = rank * 8
         stride_elem = 4 if use_32bit_stride else 8
         buf_ctype = ctypes.c_byte * (shape_size + len(stride_dim_indices) * stride_elem)
 
         import struct as _struct
 
-        shape_codec = _struct.Struct("<" + "i" * rank) if rank else None
+        shape_codec = _struct.Struct("<" + "q" * rank) if rank else None
         if stride_dim_indices:
             stride_codec = _struct.Struct("<" + ("i" if use_32bit_stride else "q") * len(stride_dim_indices))
         else:
@@ -276,7 +278,7 @@ class TensorAdaptor:
         Matches ``__cache_signature__`` for a default-constructed TensorAdaptor
         (no ``mark_static`` calls).
         """
-        return (tensor.dtype, None, False, tensor.dim())
+        return (tensor.dtype, None, False, tensor.dim(), TensorAdaptor._DYNAMIC_LAYOUT_ABI)
 
     def __cache_signature__(self):
         base = (
@@ -284,6 +286,7 @@ class TensorAdaptor:
             self.assumed_align,
             self.use_32bit_stride,
             len(self._orig_shape),
+            self._DYNAMIC_LAYOUT_ABI,
         )
         if not self._cached_dims:
             return base
