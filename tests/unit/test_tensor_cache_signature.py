@@ -32,6 +32,7 @@ class _FakeLargeTensor:
         strides = (1,)
         return strides if dim is None else strides[dim]
 
+
 # -----------------------------------------------------------------------------
 # Default cache behavior: shape NOT in key, kernels reused across shapes
 # -----------------------------------------------------------------------------
