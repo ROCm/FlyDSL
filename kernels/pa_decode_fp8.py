@@ -153,8 +153,37 @@ def _rcp_f32(value):
     return rocdl.rcp(T.f32, value)
 
 
+def _exp2_amdgcn_scalar(scalar_value):
+    """Direct ``llvm.amdgcn.exp2.f32`` intrinsic call on one f32 scalar.
+
+    The default ``fly_math.exp2`` lowering routes through ``__ocml_exp2_f32``,
+    which (for full IEEE range/subnormal correctness) expands at codegen time
+    into ``v_exp_f32 + v_ldexp_f32`` per element.  The amdgcn intrinsic compiles
+    to a single ``v_exp_f32``, matching what Gluon emits for its softmax.
+    Skipping ldexp is safe here because softmax inputs are pre-clamped via
+    `safe_qk_max`/`safe_partition_max` so the operand is in the fast-range.
+    """
+    from flydsl._mlir.ir import F32Type
+    raw = arith.unwrap(scalar_value) if hasattr(scalar_value, "ir_value") or hasattr(scalar_value, "type") else scalar_value
+    f32_ty = F32Type.get()
+    return llvm.call_intrinsic(f32_ty, "llvm.amdgcn.exp2.f32", [raw], [], [])
+
+
 def _exp2_f32_fast(value):
-    return fly_math.exp2(value, fastmath=arith.FastMathFlags.fast)
+    """Compute 2^value (elementwise for vectors), using the amdgcn intrinsic
+    to avoid the ``v_exp_f32 + v_ldexp_f32`` pair OCML lowering produces."""
+    from flydsl._mlir.dialects import vector as _vector_dialect
+    from flydsl._mlir.ir import VectorType
+    raw = arith.unwrap(value) if hasattr(value, "ir_value") or hasattr(value, "type") else value
+    ty = raw.type
+    if isinstance(ty, VectorType):
+        n = ty.shape[0]
+        elems = []
+        for i in range(n):
+            scalar = _vector_dialect.extract(raw, static_position=[i], dynamic_position=[])
+            elems.append(_exp2_amdgcn_scalar(scalar))
+        return _vector_dialect.from_elements(ty, elems)
+    return _exp2_amdgcn_scalar(raw)
 
 
 def _mfma_agpr_value_attrs():
