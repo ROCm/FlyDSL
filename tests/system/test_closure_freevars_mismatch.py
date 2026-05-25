@@ -36,7 +36,7 @@ def test_closure_const_expr_freevars_mismatch():
 
         return kernel
 
-    kernel = make_kernel(32)
+    make_kernel(32)
 
 
 def test_closure_multiple_const_expr_eliminated():
@@ -55,7 +55,7 @@ def test_closure_multiple_const_expr_eliminated():
 
         return kernel
 
-    kernel = make_kernel(64)
+    make_kernel(64)
 
 
 def test_non_closure_kernel_no_issue():
