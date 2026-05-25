@@ -1137,7 +1137,7 @@ class JitFunction:
             ann = param.annotation if param else inspect.Parameter.empty
 
             if ann is not inspect.Parameter.empty and Constexpr.is_constexpr_annotation(ann):
-                key_parts.append((name, type(arg), arg))
+                key_parts.append((name, "Constexpr", Constexpr.cache_signature(arg)))
                 continue
 
             if ann is not inspect.Parameter.empty and is_type_param_annotation(ann):
