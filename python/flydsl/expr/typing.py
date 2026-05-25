@@ -808,6 +808,36 @@ class Pointer(BuiltinDslType):
         return self.type.alignment
 
     @traced_op
+    def load(self, loc=None, ip=None):
+        return ptr_load(self, loc=loc, ip=ip)
+
+    @traced_op
+    def store(self, value, loc=None, ip=None):
+        if isinstance(value, (bool, int, float)):
+            value = self.element_type(value)
+        return ptr_store(value, self, loc=loc, ip=ip)
+
+    @traced_op
+    def __getitem__(self, offset, loc=None, ip=None):
+        return (self + offset).load(loc=loc, ip=ip)
+
+    @traced_op
+    def __setitem__(self, offset, value, loc=None, ip=None):
+        (self + offset).store(value, loc=loc, ip=ip)
+
+    @traced_op
+    def __add__(self, offset, loc=None, ip=None):
+        return add_offset(self, offset, loc=loc, ip=ip)
+
+    __radd__ = __add__
+
+    @traced_op
+    def __sub__(self, offset, loc=None, ip=None):
+        if isinstance(offset, ir.Value) and not isinstance(offset, ArithValue):
+            offset = ArithValue(offset, loc=loc, ip=ip)
+        return add_offset(self, -offset, loc=loc, ip=ip)
+
+    @traced_op
     def view(self, layout, loc=None, ip=None):
         return make_view(self, layout, loc=loc, ip=ip)
 
@@ -1743,6 +1773,14 @@ class Array:
         @classmethod
         def __poke_into_ptr__(cls, ptr, value):
             raise NotImplementedError(f"{cls.__name__} does not support __poke_into_ptr__ yet")
+
+        @traced_op
+        def __getitem__(self, offset, loc=None, ip=None):
+            return self.ptr.__getitem__(offset, loc=loc, ip=ip)
+
+        @traced_op
+        def __setitem__(self, offset, value, loc=None, ip=None):
+            self.ptr.__setitem__(offset, value, loc=loc, ip=ip)
 
         def view(self, layout, *, loc=None, ip=None):
             return make_view(self._ptr_value, layout, loc=loc, ip=ip)
