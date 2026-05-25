@@ -425,10 +425,12 @@ jobs:
           "
 
       # Single entry-point that sweeps the full curated CI_CASES table
-      # (12 cases distilled from mori's gfx950 tuning configs plus
-      # StdMoE plus two mori-parity recv-cap paths: a baseline at
-      # cap=ws*M and a half-cap stress at cap=ws*M/2 that exercises
-      # FlyDSL's overflow guard while mori would assert).  Each case
+      # (14 cases distilled from mori's gfx950 tuning configs plus
+      # StdMoE plus four mori-parity recv-cap paths: a baseline at
+      # cap=ws*M, a half-cap stress at cap=ws*M/2, a minimum cap of
+      # cap=ws (per-rank 1 slot), and a forced single-PE hot-spot
+      # routing case that drives the dispatch overflow guard under
+      # deterministic worst-case routing).  Each case
       # is gated by (1) --mode verify for accuracy
       # and, when applicable, (2) --mode profile --cudagraph for perf
       # trace.  The script spawns a fresh distributed process per
