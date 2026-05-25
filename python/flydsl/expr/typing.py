@@ -4,8 +4,10 @@
 import ctypes
 import enum
 import operator
+import types
+from collections.abc import Callable as AbcCallable
 from inspect import isclass
-from typing import Any, List, Type, overload
+from typing import Any, Callable, List, Type, get_origin, overload
 
 from flydsl.runtime.device import get_rocm_arch
 
@@ -268,6 +270,7 @@ __all__ = [
     "Layout",
     "Swizzle",
     "ComposedLayout",
+    "Pointer",
     "Tensor",
     "CopyAtom",
     "Tile",
@@ -329,19 +332,105 @@ class Constexpr:
     value: Any = None
     is_specialized: bool = False
 
+    @staticmethod
+    def _type_name(param) -> str:
+        if Constexpr._is_callable_annotation(param):
+            return "Callable"
+        return getattr(param, "__name__", repr(param))
+
+    @staticmethod
+    def _is_callable_annotation(param) -> bool:
+        if param is Callable or param is AbcCallable:
+            return True
+        return get_origin(param) is AbcCallable
+
+    @staticmethod
+    def _is_tuple_annotation(param) -> bool:
+        return param is tuple or get_origin(param) is tuple
+
+    @staticmethod
+    def _is_supported_annotation(param) -> bool:
+        return param in (int, bool, float) or Constexpr._is_tuple_annotation(param)
+
+    @staticmethod
+    def _scalar_cache_signature(value):
+        if type(value) is bool:
+            return (bool, value)
+        if type(value) is int:
+            return (int, value)
+        if type(value) is float:
+            return (float, value)
+        return None
+
+    @staticmethod
+    def _tuple_cache_signature(value):
+        return ("tuple", tuple(Constexpr._value_cache_signature(item) for item in value))
+
+    @staticmethod
+    def _lambda_cache_signature(value):
+        if not isinstance(value, types.FunctionType) or value.__name__ != "<lambda>":
+            return None
+        if value.__code__.co_freevars or value.__closure__:
+            raise TypeError("Constexpr lambda values must not capture free variables")
+        global_refs = [name for name in value.__code__.co_names if name in value.__globals__]
+        if global_refs:
+            raise TypeError(f"Constexpr lambda values must not reference globals: {global_refs}")
+        defaults = value.__defaults__ or ()
+        kwdefaults = value.__kwdefaults__ or {}
+        if kwdefaults:
+            raise TypeError("Constexpr lambda values must not use keyword-only defaults")
+        return (
+            "lambda",
+            value.__code__.co_argcount,
+            value.__code__.co_posonlyargcount,
+            value.__code__.co_kwonlyargcount,
+            value.__code__.co_nlocals,
+            value.__code__.co_stacksize,
+            value.__code__.co_flags,
+            value.__code__.co_code,
+            tuple(Constexpr._lambda_const_cache_signature(item) for item in value.__code__.co_consts),
+            value.__code__.co_names,
+            value.__code__.co_varnames,
+            tuple(Constexpr._value_cache_signature(item) for item in defaults),
+        )
+
+    @staticmethod
+    def _lambda_const_cache_signature(value):
+        if value is None:
+            return (type(None), None)
+        return Constexpr._value_cache_signature(value)
+
+    @staticmethod
+    def _value_cache_signature(value):
+        scalar_sig = Constexpr._scalar_cache_signature(value)
+        if scalar_sig is not None:
+            return scalar_sig
+        if isinstance(value, tuple):
+            return Constexpr._tuple_cache_signature(value)
+        lambda_sig = Constexpr._lambda_cache_signature(value)
+        if lambda_sig is not None:
+            return lambda_sig
+        raise TypeError(
+            "Constexpr values support only int, bool, float, tuples of those scalar values, "
+            "and lambdas without free variables"
+        )
+
+    @staticmethod
+    def cache_signature(value):
+        return Constexpr._value_cache_signature(value)
+
     def __class_getitem__(cls, param):
         if cls is not Constexpr:
             raise TypeError(f"{cls.__name__} cannot be re-parametrized")
-        if not isinstance(param, type):
+        if not Constexpr._is_supported_annotation(param) and not Constexpr._is_callable_annotation(param):
             raise TypeError(
-                f"Constexpr[...] expects a type (e.g. Constexpr[int]), "
-                f"got value {param!r}; constexpr values are provided at call site"
+                "Constexpr[...] supports only int, bool, float, tuple, or Callable annotations; " f"got {param!r}"
             )
         cached = Constexpr._annotation_cache.get(param)
         if cached is not None:
             return cached
         result = type(
-            f"Constexpr[{getattr(param, '__name__', repr(param))}]",
+            f"Constexpr[{Constexpr._type_name(param)}]",
             (Constexpr,),
             {
                 "__origin__": Constexpr,
@@ -356,13 +445,10 @@ class Constexpr:
 
     @classmethod
     def _specialize(cls, value):
-        cache_key = (type(value), value)
-        try:
-            cached = Constexpr._value_cache.get(cache_key)
-            if cached is not None:
-                return cached
-        except TypeError:
-            cached = None
+        cache_key = Constexpr.cache_signature(value)
+        cached = Constexpr._value_cache.get(cache_key)
+        if cached is not None:
+            return cached
         result = type(
             f"Constexpr[{value!r}]",
             (Constexpr,),
@@ -374,11 +460,7 @@ class Constexpr:
                 "is_specialized": True,
             },
         )
-        try:
-            Constexpr._value_cache[cache_key] = result
-        except TypeError:
-            # cache_key is not hashable
-            pass
+        Constexpr._value_cache[cache_key] = result
         return result
 
     @classmethod
@@ -407,8 +489,23 @@ class Constexpr:
     @classmethod
     def __coerce__(cls, value):
         inner = cls.value_type
-        if inner is not None and not isinstance(value, inner):
-            raise TypeError(f"expects {getattr(inner, '__name__', repr(inner))}, got {type(value).__name__}")
+        if inner is not None:
+            if Constexpr._is_callable_annotation(inner):
+                lambda_sig = Constexpr._lambda_cache_signature(value)
+                if lambda_sig is None:
+                    raise TypeError(f"expects lambda without free variables, got {type(value).__name__}")
+            elif Constexpr._is_tuple_annotation(inner):
+                if not isinstance(value, tuple):
+                    raise TypeError(f"expects tuple, got {type(value).__name__}")
+                Constexpr.cache_signature(value)
+            elif inner in (int, bool, float):
+                if type(value) is not inner:
+                    raise TypeError(f"expects {inner.__name__}, got {type(value).__name__}")
+                Constexpr.cache_signature(value)
+            elif not isinstance(value, inner):
+                raise TypeError(f"expects {getattr(inner, '__name__', repr(inner))}, got {type(value).__name__}")
+            else:
+                Constexpr.cache_signature(value)
         return value
 
     @classmethod

@@ -1,7 +1,8 @@
-from __future__ import annotations
-
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
+
+from __future__ import annotations
+
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.compiler.jit_argument import JitArgumentRegistry
