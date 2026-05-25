@@ -1234,7 +1234,7 @@ def compile_pa_decode_metadata(
             (
                 _load_kv_scale_scalars,
                 _load_v_and_scales,
-                _store_vmax_warp_unused,
+                _store_vmax_warp,
                 _qk_and_intra_softmax,
                 _cross_warp_softmax_and_prob_pack,
                 _pv_mfma,
@@ -1479,6 +1479,13 @@ def compile_pa_decode_metadata(
                             query_scale_lane=qscale_per_mtp[_mtp_g],
                         )
                         v_scales = None
+
+                    # Bugfix: per_token_kv path needs v_max staged to LDS so
+                    # _cross_warp_softmax_and_prob_pack can read it for
+                    # norm_factor.  Without this write the read sees stale/
+                    # uninitialized LDS and produces NaN.
+                    if const_expr(per_token_kv):
+                        _store_vmax_warp(partition_start, seq_end=context_len, v_scale_vecs=v_scales)
 
                     gpu.barrier()
                     rmax, rsum, outs, v_correction = _cross_warp_softmax_and_prob_pack(
