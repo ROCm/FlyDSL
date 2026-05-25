@@ -464,14 +464,12 @@ def _finish_mtp_group_q_fragments(
     return qi_val, qhi_pos, q_frags, query_scale_lane
 
 
-def _normalize_pa_output(running_sum, out0, out1, zero_f):
+def _normalize_pa_output(running_sum, outs, zero_f):
     one_f = fx.Float32(1.0).ir_value()
     safe_sum = arith.select(running_sum > zero_f, running_sum, one_f)
     inv_sum = _rcp_f32(safe_sum)
-    return [
-        out0 * vector.broadcast(T.f32x4, inv_sum),
-        out1 * vector.broadcast(T.f32x4, inv_sum),
-    ]
+    inv_sum_vec = vector.broadcast(T.f32x4, inv_sum)
+    return [out * inv_sum_vec for out in outs]
 
 
 def _make_pa_phase_helpers(
@@ -516,7 +514,6 @@ def _make_pa_phase_helpers(
     zero_f,
     cache_scale_vecs=False,
     sched_vmem_after_load=True,
-    preload_pv_operands=False,
 ):
     apply_causal_mask = needs_mask or query_length > 1
     pv_prob_i64_indices = []
@@ -672,29 +669,16 @@ def _make_pa_phase_helpers(
     def _qk_and_intra_softmax(
         k_ops,
         partition_start,
-        v_block_base_dw,
-        tile_token_offset_i32,
         q_frags,
         causal_bound,
         query_scale_lane=None,
         *,
-        phys_block,
         preloaded_scales=None,
         seq_start=None,
     ):
         if const_expr(preloaded_scales is not None):
             if const_expr(cache_scale_vecs and per_token_kv):
                 k_scale_vecs, v_scale_vecs = preloaded_scales
-        # else:
-        #     loaded_v_and_scales = _load_v_and_scales(
-        #         v_block_base_dw,
-        #         tile_token_offset_i32,
-        #         phys_block=phys_block,
-        #     )
-        #     if const_expr(cache_scale_vecs and per_token_kv):
-        #         v_results, k_scale_vecs, v_scale_vecs = loaded_v_and_scales
-        #     else:
-        #         v_results = loaded_v_and_scales
 
         query_scale_vec = None
         if const_expr(per_token_q):
@@ -759,7 +743,7 @@ def _make_pa_phase_helpers(
             return d_out, v_scale_vecs
         return d_out
 
-    def _cross_warp_softmax_and_prob_pack(d_out, rmax, rsum, o0, o1, v_scale_vecs=None):
+    def _cross_warp_softmax_and_prob_pack(d_out, rmax, rsum, outs, v_scale_vecs):
         partition_max = neg_inf
         partition_sum = zero_f
         warp_rescale_factors = []
@@ -769,7 +753,7 @@ def _make_pa_phase_helpers(
             w_max = max_vec[w]
             partition_max = partition_max.maximumf(w_max)
             warp_rescale_factors.append(w_max)
-        
+
         for w in range_constexpr(NUM_WARPS):
             diff_w = warp_rescale_factors[w] - partition_max
             if const_expr(needs_mask):
@@ -812,8 +796,9 @@ def _make_pa_phase_helpers(
         )
         rsum = arith.addf(accum_sum, partition_sum_scaled, fastmath=arith.FastMathFlags.contract)
         rmax = new_rmax
-        o0 = o0 * vector.broadcast(T.f32x4, accum_scale)
-        o1 = o1 * vector.broadcast(T.f32x4, accum_scale)
+        accum_scale_vec = vector.broadcast(T.f32x4, arith.unwrap(accum_scale))
+        for vhe in range_constexpr(VHELOOP):
+            outs[vhe] = outs[vhe] * accum_scale_vec
 
         if const_expr(per_token_kv):
             v_max_global = zero_f
@@ -828,13 +813,13 @@ def _make_pa_phase_helpers(
             v_correction = v_max_scaled * part_to_new
             for td in range_constexpr(TLOOP):
                 d_out[td] = d_out[td] * (
-                    _get_v_scale_vec(td, v_scale_vecs) * vector.broadcast(T.f32x4, prob_scale * norm_factor)
+                    _get_v_scale_vec(td, v_scale_vecs) * vector.broadcast(T.f32x4, arith.unwrap(prob_scale * norm_factor))
                 )
         else:
             prob_scale = my_warp_rescale * part_to_new
             v_correction = v_scale_val
             for td in range_constexpr(TLOOP):
-                d_out[td] = d_out[td] * vector.broadcast(T.f32x4, prob_scale)
+                d_out[td] = d_out[td] * vector.broadcast(T.f32x4, arith.unwrap(prob_scale))
 
         for td in range_constexpr(TLOOP):
             p0 = vector.extract(d_out[td], static_position=[0], dynamic_position=[])
@@ -847,13 +832,12 @@ def _make_pa_phase_helpers(
             i32_off = byte_base >> fx.Int32(2)
             pk_vec = vector.from_elements(T.vec(1, T.i32), [pk])
             vector.store(pk_vec, logits_lds_i32, [fx.Index(i32_off)])
-        return rmax, rsum, o0, o1, v_correction
+        return rmax, rsum, outs, v_correction
 
-    def _pv_mfma(v_ops, o0, o1, v_correction):
+    def _pv_mfma(v_ops, outs, v_correction):
         v_correction = fx.Float32(v_correction).ir_value()
         fm_contract = arith.FastMathFlags.contract
         v_correction_vec = vector.broadcast(T.f32x4, v_correction)
-        outs = [o0, o1]
         for vhe in range_constexpr(VHELOOP):
             tmp_out = arith.constant_vector(0.0, T.f32x4)
             for vt in range_constexpr(VTLOOP):
@@ -877,7 +861,7 @@ def _make_pa_phase_helpers(
                 outs[vhe],
                 fastmath=fm_contract,
             )
-        return outs[0], outs[1]
+        return outs
 
     def _finalize_block_split_group(
         d_out,
@@ -952,10 +936,10 @@ def _make_pa_phase_helpers(
             )
 
         gpu.barrier()
-        rmax, rsum, o0, o1, v_correction = _cross_warp_softmax_and_prob_pack(d_out, rmax, rsum, o0, o1)
+        rmax, rsum, outs, v_correction = _cross_warp_softmax_and_prob_pack(d_out, rmax, rsum, [o0, o1], None)
         gpu.barrier()
-        o0, o1 = _pv_mfma(v_ops, o0, o1, v_correction)
-        return rmax, rsum, o0, o1
+        outs = _pv_mfma(v_ops, outs, v_correction)
+        return rmax, rsum, outs
 
     return (
         _load_kv_scale_scalars,
@@ -1305,7 +1289,6 @@ def compile_pa_decode_metadata(
                 zero_f=ZERO_F,
                 cache_scale_vecs=cache_scale_vecs,
                 sched_vmem_after_load=False,
-                preload_pv_operands=True,
             )
 
             # ════════════════════════════════════════════════════════
@@ -1489,33 +1472,29 @@ def compile_pa_decode_metadata(
                         d_out, v_scales = _qk_and_intra_softmax(
                             k_ops,
                             partition_start,
-                            v_base,
-                            tile_token_offset,
                             q_frags_per_mtp[_mtp_g],
                             causal_bound_per_mtp[_mtp_g],
                             query_scale_lane=qscale_per_mtp[_mtp_g],
-                            phys_block=phys_block,
                             preloaded_scales=(k_scale_vecs, v_scale_vecs),
                         )
                     else:
                         d_out = _qk_and_intra_softmax(
                             k_ops,
                             partition_start,
-                            v_base,
-                            tile_token_offset,
                             q_frags_per_mtp[_mtp_g],
                             causal_bound_per_mtp[_mtp_g],
                             query_scale_lane=qscale_per_mtp[_mtp_g],
-                            phys_block=phys_block,
                         )
                         v_scales = None
 
                     gpu.barrier()
-                    rmax, rsum, o0, o1, v_correction = _cross_warp_softmax_and_prob_pack(
-                        d_out, rmax, rsum, o0, o1, v_scales
+                    rmax, rsum, outs, v_correction = _cross_warp_softmax_and_prob_pack(
+                        d_out, rmax, rsum, [o0, o1], v_scales
                     )
+                    o0, o1 = outs[0], outs[1]
                     gpu.barrier()
-                    o0, o1 = _pv_mfma(v_ops, o0, o1, v_correction)
+                    outs = _pv_mfma(v_ops, [o0, o1], v_correction)
+                    o0, o1 = outs[0], outs[1]
                     new_states.append((rmax, rsum, o0, o1))
 
                 # Prefetch next K (once per KV iter, after all MTP groups)
@@ -1539,9 +1518,9 @@ def compile_pa_decode_metadata(
                 rmax_raw, rsum_raw, o0_raw, o1_raw = final_states[_mtp_g]
                 running_max = fx.Float32(rmax_raw)
                 running_sum = fx.Float32(rsum_raw)
-                out0 = fx.Vector(o0_raw)
-                out1 = fx.Vector(o1_raw)
-                outelems_norm = _normalize_pa_output(running_sum, out0, out1, ZERO_F)
+                outs_raw = [o0_raw, o1_raw]
+                outs = [fx.Vector(out_raw) for out_raw in outs_raw]
+                outelems_norm = _normalize_pa_output(running_sum, outs, ZERO_F)
                 qi_val_mg = qi_per_mtp[_mtp_g]
                 qhi_pos_mg = qhi_per_mtp[_mtp_g]
 
@@ -1895,9 +1874,9 @@ def _pa_small_block_load_k_flat(
     k_head_off = kv_h_i32 * stride_k_head_i32
 
     k_flat = []
-    if block_size == 64:
+    if const_expr(block_size == 64):
         # Each warp owns exactly one physical block (64 tokens).
-        phys_block = phys_blocks[0]
+        phys_block = phys_blocks
         k_block_base_dw = _compute_block_base_dw_i64(phys_block, stride_k_block_i32, k_head_off)
         for td in range_constexpr(TLOOP):
             within_block_token = fx.Int32(td * MFMA_N) + lane16id_i32
@@ -1952,15 +1931,14 @@ def _pa_small_block_load_v_trans(
 
     v_results = []
     for vt in range_constexpr(VTLOOP):
-        if block_size == 64:
+        phys_block = v_phys_blocks[vt]
+        if const_expr(block_size == 64):
             # vt selects the physical block (4 blocks per partition); rowid
             # selects the 16-token sub-block within that physical block.
-            phys_block = v_phys_blocks[vt]
             sub_block_idx = rowid_i32
         else:
             # block_size == 16: (vt * 4 + rowid) selects the block; only one
             # 16-token sub-block per physical block, so sub_block_idx == 0.
-            phys_block = v_phys_blocks[vt]
             sub_block_idx = fx.Int32(0)
         v_block_base_dw = _compute_block_base_dw_i64(phys_block, stride_v_block_i32, v_head_off)
         vhe_data = []
@@ -2176,8 +2154,7 @@ def compile_pa_decode_ps(
             zero_f=ZERO_F,
         )
 
-        def _store_partition_results(eqgs_lane, running_sum, running_max, out0_norm, out1_norm):
-            outs_norm = [out0_norm, out1_norm]
+        def _store_partition_results(eqgs_lane, running_sum, running_max, outs_norm):
             for vhe in range_constexpr(VHELOOP):
                 hs_base = (
                     fx.Int32(vhe * NUM_WARPS * MFMA_N)
@@ -2225,27 +2202,32 @@ def compile_pa_decode_ps(
             return v.ir_value() if hasattr(v, "ir_value") else v
 
         # Pack/unpack loop state.  State is `_mtp_groups` accumulators, each a
-        # 4-tuple (rmax, rsum, o0, o1), plus the current sub-partition's K
+        # tuple of (rmax, rsum, outs...), plus the current sub-partition's K
         # tiles (k_flat: _N_K i64 values, loop-carried so the body can use
         # them while we prefetch the NEXT iteration's K).
+        state_width = 2 + VHELOOP
+
         def _pack_states(states, k_flat):
             flat = []
             for st in states:
-                rmax, rsum, o0, o1 = st
-                flat.extend([_unwrap(rmax), _unwrap(rsum), _unwrap(o0), _unwrap(o1)])
+                rmax, rsum = st[0], st[1]
+                outs = [st[2 + vhe] for vhe in range_constexpr(VHELOOP)]
+                flat.extend([_unwrap(rmax), _unwrap(rsum)])
+                flat.extend(_unwrap(out) for out in outs)
             flat.extend(_unwrap(v) for v in k_flat)
             return flat
 
         def _unpack_states(flat):
-            base = 4 * _mtp_groups
-            states = [tuple(flat[4 * i + j] for j in range(4)) for i in range(_mtp_groups)]
+            base = state_width * _mtp_groups
+            states = [tuple(flat[state_width * i + j] for j in range_constexpr(state_width)) for i in range_constexpr(_mtp_groups)]
             k_flat = list(flat[base : base + _N_K])
             return states, k_flat
 
         init_states = [
-            (NEG_INF, ZERO_F,
-             arith.constant_vector(0.0, T.f32x4),
-             arith.constant_vector(0.0, T.f32x4))
+            tuple(
+                [NEG_INF, ZERO_F]
+                + [arith.constant_vector(0.0, T.f32x4) for _ in range_constexpr(VHELOOP)]
+            )
             for _ in range(_mtp_groups)
         ]
 
@@ -2255,26 +2237,17 @@ def compile_pa_decode_ps(
         last_partition_idx = local_partition_end - fx.Int32(1)
 
         def _pa_small_block_stage_phys_blocks(partition_block_base):
-            phys_blocks = []
             if const_expr(block_size == 64):
                 bt_global_off = batch_idx * stride_bt_seq + partition_block_base + warp_id
-                phys_block = buffer_ops.buffer_load(bt_rsrc, bt_global_off, vec_width=1, dtype=T.i32)
-                phys_block_vec = fx.Vector.from_elements([phys_block], dtype=fx.Int32)
-                for _td in range_constexpr(TLOOP):
-                    phys_blocks.append(phys_block)
-                return phys_blocks, phys_block_vec
+                phys_blocks = buffer_ops.buffer_load(bt_rsrc, bt_global_off, vec_width=1, dtype=T.i32)
             else:
                 bt_global_off = (
                     batch_idx * stride_bt_seq
                     + partition_block_base
                     + warp_id * fx.Int32(TLOOP)
                 )
-                phys_block_vec = fx.Vector(
-                    buffer_ops.buffer_load(bt_rsrc, bt_global_off, vec_width=TLOOP, dtype=T.i32)
-                )
-                for td in range_constexpr(TLOOP):
-                    phys_blocks.append(phys_block_vec[td])
-                return phys_blocks, phys_block_vec
+                phys_blocks = buffer_ops.buffer_load(bt_rsrc, bt_global_off, vec_width=TLOOP, dtype=T.i32)
+            return phys_blocks
 
         def _pa_small_block_store_phys_blocks_to_lds(phys_block_vec):
             if lane16id == fx.Int32(0):
@@ -2292,19 +2265,21 @@ def compile_pa_decode_ps(
 
         def _pa_small_block_load_v_phys_blocks_from_lds():
             v_phys_blocks = []
-            for vt in range_constexpr(VTLOOP):
-                if const_expr(block_size == 64):
-                    bt_lds_off = fx.Int32(vt)
-                else:
+            if const_expr(block_size == 64):
+                phys_block_vec = fx.Vector.load(T.vec(VTLOOP, T.i32), bt_lds_i32, [fx.Index(0)])
+                for vt in range_constexpr(VTLOOP):
+                    v_phys_blocks.append(phys_block_vec[vt])
+            else:
+                for vt in range_constexpr(VTLOOP):
                     bt_lds_off = fx.Int32(vt * TLOOP) + rowid
-                phys_block = fx.Vector.load(T.vec(1, T.i32), bt_lds_i32, [fx.Index(bt_lds_off)])[0]
-                v_phys_blocks.append(phys_block)
+                    phys_block = fx.Vector.load(T.vec(1, T.i32), bt_lds_i32, [fx.Index(bt_lds_off)])[0]
+                    v_phys_blocks.append(phys_block)
             return v_phys_blocks
 
         # Pre-load the FIRST sub-partition's block-table entries before Q setup
         # so the dependent K prefetch below does not also pay the table latency.
         first_block_base = local_partition_start * fx.Int32(_blocks_per_partition)
-        first_phys_blocks, first_phys_block_vec = _pa_small_block_stage_phys_blocks(first_block_base)
+        first_phys_blocks = _pa_small_block_stage_phys_blocks(first_block_base)
 
         # Pre-load Q for every MTP group ONCE before the KV loop.  Each group's
         # q_frags / qi / qhi / qscale are kept in registers across the entire
@@ -2316,8 +2291,6 @@ def compile_pa_decode_ps(
         qhi_per_mtp = []
         qscale_per_mtp = []
         for _mtp_g in range_constexpr(_mtp_groups):
-            # if const_expr(_mtp_g > 0):
-            #     gpu.barrier()
             mtp_prefetch = _prefetch_mtp_group_query(
                 q_rsrc, batch_idx, kv_h,
                 stride_q_seq, stride_q_head,
@@ -2336,7 +2309,7 @@ def compile_pa_decode_ps(
             qhi_per_mtp.append(qhi_pos)
             qscale_per_mtp.append(query_scale_lane)
 
-        _pa_small_block_store_phys_blocks_to_lds(first_phys_block_vec)
+        _pa_small_block_store_phys_blocks_to_lds(first_phys_blocks)
         # Pre-load the FIRST sub-partition's K so the loop body can issue the
         # next sub-partition's K prefetch in parallel with the current K's QK
         # MFMA.  For empty slots (loop_start == loop_end), this k_flat0 is
@@ -2393,27 +2366,28 @@ def compile_pa_decode_ps(
             new_states = []
             k_next_flat = None
             for _mtp_g in range_constexpr(_mtp_groups):
-                rmax, rsum, o0, o1 = cur_states[_mtp_g]
+                state = cur_states[_mtp_g]
+                rmax, rsum = state[0], state[1]
+                outs = [state[2 + vhe] for vhe in range_constexpr(VHELOOP)]
                 causal_bound = (
                     context_len
                     + arith.constant(1 - query_length, type=T.i32)
                     + qi_per_mtp[_mtp_g]
                 )
                 d_out = _qk_and_intra_softmax(
-                    k_ops, sub_token_start,
-                    fx.Int64(0), arith.constant(0, type=T.i32),
-                    q_frags_per_mtp[_mtp_g], causal_bound,
+                    k_ops,
+                    sub_token_start,
+                    q_frags_per_mtp[_mtp_g],
+                    causal_bound,
                     query_scale_lane=qscale_per_mtp[_mtp_g],
-                    phys_block=arith.constant(0, type=T.i32),
-                    # preloaded_v_and_scales=v_results,
                 )
                 if const_expr(_mtp_g == _mtp_groups - 1):
-                    next_phys_blocks, next_phys_block_vec = _pa_small_block_stage_phys_blocks(next_block_base)
+                    next_phys_blocks = _pa_small_block_stage_phys_blocks(next_block_base)
 
                 gpu.barrier()
 
-                rmax, rsum, o0, o1, v_correction = _cross_warp_softmax_and_prob_pack(
-                    d_out, rmax, rsum, o0, o1
+                rmax, rsum, outs, v_correction = _cross_warp_softmax_and_prob_pack(
+                    d_out, rmax, rsum, outs, None
                 )
                 
                 # Issue the next sub-partition's K prefetch on the LAST MTP
@@ -2422,7 +2396,7 @@ def compile_pa_decode_ps(
                 # _process_block_split.  This lets the K VMEM load latency
                 # overlap with the upcoming PV MFMA compute.
                 if const_expr(_mtp_g == _mtp_groups - 1):
-                    _pa_small_block_store_phys_blocks_to_lds(next_phys_block_vec)
+                    _pa_small_block_store_phys_blocks_to_lds(next_phys_blocks)
                     k_next_flat = _pa_small_block_load_k_flat(
                         k_global_ptr, kv_h,
                         stride_k_block, stride_k_head, lane16id, rowid,
@@ -2431,23 +2405,24 @@ def compile_pa_decode_ps(
                     )
                 gpu.barrier()
 
-                o0, o1 = _pv_mfma(v_results, o0, o1, v_correction)
-                new_states.append((rmax, rsum, o0, o1))
+                outs = _pv_mfma(v_results, outs, v_correction)
+                new_states.append(tuple([rmax, rsum] + outs))
 
             results = yield _pack_states(new_states, k_next_flat)
 
         # Normalize and store one output slot per MTP group.
         final_states, _final_k_flat = _unpack_states(results)
         for _mtp_g in range_constexpr(_mtp_groups):
-            rmax_raw, rsum_raw, o0_raw, o1_raw = final_states[_mtp_g]
+            final_state = final_states[_mtp_g]
+            rmax_raw, rsum_raw = final_state[0], final_state[1]
+            outs_raw = [final_state[2 + vhe] for vhe in range_constexpr(VHELOOP)]
             running_max = fx.Float32(rmax_raw)
             running_sum = fx.Float32(rsum_raw)
-            out0 = fx.Vector(o0_raw)
-            out1 = fx.Vector(o1_raw)
-            outs_norm = _normalize_pa_output(running_sum, out0, out1, ZERO_F)
+            outs = [fx.Vector(out_raw) for out_raw in outs_raw]
+            outs_norm = _normalize_pa_output(running_sum, outs, ZERO_F)
             eqgs_lane = qi_per_mtp[_mtp_g] * c_query_group_size + qhi_per_mtp[_mtp_g]
             _store_partition_results(
-                eqgs_lane, running_sum, running_max, outs_norm[0], outs_norm[1]
+                eqgs_lane, running_sum, running_max, outs_norm
             )
 
     @flyc.jit
