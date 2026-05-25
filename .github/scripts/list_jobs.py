@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 import argparse
 import json
+import re
 from pathlib import Path
 
 import yaml
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(
-        description="Parse workflow files and output job matrix for GitHub Actions."
-    )
+    parser = argparse.ArgumentParser(description="Parse workflow files and output job matrix for GitHub Actions.")
     parser.add_argument(
         "--workflow-dir",
         default=".github/workflows",
@@ -28,11 +27,9 @@ def parse_args():
     parser.add_argument(
         "--exclude-jobs",
         default="",
-        help="Comma-separated job names to skip.",
+        help="Comma-separated job IDs or display names to skip.",
     )
-    parser.add_argument(
-        "--out-matrix", required=True, help="Output path for matrix JSON."
-    )
+    parser.add_argument("--out-matrix", required=True, help="Output path for matrix JSON.")
     parser.add_argument(
         "--out-workflow-map",
         required=True,
@@ -50,6 +47,20 @@ def discover_workflows(workflow_dir: Path):
         [path.name for path in workflow_dir.glob("*.yml") if path.is_file()]
         + [path.name for path in workflow_dir.glob("*.yaml") if path.is_file()]
     )
+
+
+def resolve_display_name(job_id: str, job_def):
+    raw_name = job_def.get("name") if isinstance(job_def, dict) else None
+    if not isinstance(raw_name, str):
+        return job_id
+    if "${{" not in raw_name:
+        return raw_name
+
+    display_name = re.sub(r"\$\{\{.*?\}\}", "", raw_name)
+    display_name = re.sub(r"\s*\(\s*\)\s*$", "", display_name)
+    display_name = re.sub(r"\s*/\s*$", "", display_name)
+    display_name = " ".join(display_name.split())
+    return display_name or job_id
 
 
 def main():
@@ -77,16 +88,14 @@ def main():
             content = yaml.safe_load(file_obj) or {}
 
         jobs_dict = content.get("jobs") or {}
-        job_ids = [job_id for job_id in jobs_dict.keys() if job_id not in excluded_jobs]
 
         display_names = []
-        for job_id in job_ids:
+        for job_id in jobs_dict.keys():
             job_def = jobs_dict.get(job_id) or {}
-            raw_name = job_def.get("name") if isinstance(job_def, dict) else None
-            if isinstance(raw_name, str) and "${{" not in raw_name:
-                display_name = raw_name
-            else:
-                display_name = job_id
+            display_name = resolve_display_name(job_id, job_def)
+            if job_id in excluded_jobs or display_name in excluded_jobs:
+                continue
+
             display_names.append(display_name)
             matrix.append(
                 {
@@ -98,12 +107,8 @@ def main():
 
         workflow_map[workflow_file] = display_names
 
-    Path(args.out_matrix).write_text(
-        json.dumps(matrix, ensure_ascii=False), encoding="utf-8"
-    )
-    Path(args.out_workflow_map).write_text(
-        json.dumps(workflow_map, ensure_ascii=False), encoding="utf-8"
-    )
+    Path(args.out_matrix).write_text(json.dumps(matrix, ensure_ascii=False), encoding="utf-8")
+    Path(args.out_workflow_map).write_text(json.dumps(workflow_map, ensure_ascii=False), encoding="utf-8")
 
     print(f"Discovered workflows: {len(workflow_map)}")
     print(f"Total jobs in matrix: {len(matrix)}")

@@ -26,7 +26,7 @@ on:
         default: ""
         type: string
       exclude_jobs:
-        description: "Comma-separated job names to exclude"
+        description: "Comma-separated job IDs or display names to exclude"
         required: false
         default: "check-signal"
         type: string

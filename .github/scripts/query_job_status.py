@@ -29,21 +29,15 @@ GENERIC_LABELS = {
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(
-        description="Query GitHub Actions jobs and print status summary."
-    )
-    parser.add_argument(
-        "--repo", required=True, help="GitHub repository in owner/repo format."
-    )
+    parser = argparse.ArgumentParser(description="Query GitHub Actions jobs and print status summary.")
+    parser.add_argument("--repo", required=True, help="GitHub repository in owner/repo format.")
     parser.add_argument(
         "--workflows",
         required=True,
         help="Comma-separated workflow file names.",
     )
     parser.add_argument("--job", default="", help="Optional exact job name filter.")
-    parser.add_argument(
-        "--hours", type=int, default=24, help="Lookback window in hours."
-    )
+    parser.add_argument("--hours", type=int, default=24, help="Lookback window in hours.")
     parser.add_argument(
         "--runner-report",
         action="store_true",
@@ -145,9 +139,7 @@ def normalize_labels(raw_labels: Any):
     return [str(label).strip() for label in raw_labels if str(label).strip()]
 
 
-def list_recent_runs(
-    owner: str, repo: str, workflows: list[str], token: str, lookback: datetime
-):
+def list_recent_runs(owner: str, repo: str, workflows: list[str], token: str, lookback: datetime):
     workflow_set = set(workflows)
     page = 1
     while True:
@@ -167,9 +159,7 @@ def list_recent_runs(
                 stop = True
                 continue
             workflow_path = run.get("path", "")
-            workflow_file = (
-                workflow_file_from_path(workflow_path) if workflow_path else ""
-            )
+            workflow_file = workflow_file_from_path(workflow_path) if workflow_path else ""
             if workflow_file in workflow_set:
                 run["workflow_file"] = workflow_file
                 yield run
@@ -251,11 +241,7 @@ def parse_row_created_at(row: dict[str, Any]):
     if not created_at:
         return None
     if isinstance(created_at, datetime):
-        return (
-            created_at
-            if created_at.tzinfo is not None
-            else created_at.replace(tzinfo=timezone.utc)
-        )
+        return created_at if created_at.tzinfo is not None else created_at.replace(tzinfo=timezone.utc)
     if not isinstance(created_at, str):
         return None
     try:
@@ -321,9 +307,7 @@ def percentile(values: list[float], percent: int):
     if lower_index == upper_index:
         return ordered[lower_index]
     fraction = position - lower_index
-    return (
-        ordered[lower_index] + (ordered[upper_index] - ordered[lower_index]) * fraction
-    )
+    return ordered[lower_index] + (ordered[upper_index] - ordered[lower_index]) * fraction
 
 
 def format_duration_seconds(seconds: float | None):
@@ -340,10 +324,7 @@ def format_duration_seconds(seconds: float | None):
 def get_custom_runner_labels(row: dict[str, Any]):
     labels = normalize_labels(row.get("labels", []) or [])
     return [
-        label
-        for label in labels
-        if label.lower() not in GENERIC_LABELS
-        and not label.lower().startswith("ubuntu-")
+        label for label in labels if label.lower() not in GENERIC_LABELS and not label.lower().startswith("ubuntu-")
     ]
 
 
@@ -352,12 +333,7 @@ def select_primary_runner_label(labels: list[str]):
         return ""
 
     preferred = [
-        label
-        for label in labels
-        if any(
-            token in label.lower()
-            for token in ("mi", "gpu", "runner", "aiter", "linux-")
-        )
+        label for label in labels if any(token in label.lower() for token in ("mi", "gpu", "runner", "aiter", "linux-"))
     ]
     candidates = preferred or labels
     return sorted(candidates, key=lambda value: (-len(value), value.lower()))[0]
@@ -397,9 +373,7 @@ def load_runner_inventory(config_path: Path):
     try:
         import yaml
     except ImportError as exc:
-        raise RuntimeError(
-            "PyYAML is required to load runner-config.yml for runner reports."
-        ) from exc
+        raise RuntimeError("PyYAML is required to load runner-config.yml for runner reports.") from exc
 
     payload = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     runners = payload.get("runners", {})
@@ -421,9 +395,7 @@ def load_runner_inventory(config_path: Path):
     return inventory
 
 
-def runner_label_sort_key_with_inventory(
-    label: str, runner_inventory: dict[str, dict[str, str]]
-):
+def runner_label_sort_key_with_inventory(label: str, runner_inventory: dict[str, dict[str, str]]):
     metadata = runner_inventory.get(label, {})
     lowered = label.lower()
     family_source = str(metadata.get("gpu_arch") or label).lower()
@@ -459,7 +431,6 @@ def analyze_concurrency(job_rows: list[dict[str, Any]], report_time: datetime):
         durations: list[float] = []
 
         for row in label_rows:
-            created = parse_time(row.get("created_at", ""))
             started = parse_time(row.get("started_at", ""))
             completed = parse_time(row.get("completed_at", ""))
 
@@ -488,7 +459,7 @@ def analyze_concurrency(job_rows: list[dict[str, Any]], report_time: datetime):
             }
             continue
 
-        events.sort(key=lambda item: (item[0], item[1]))
+        events.sort(key=lambda item: (item[0], -item[1]))
         concurrent = 0
         peak = 0
         time_weighted_sum = 0.0
@@ -507,9 +478,7 @@ def analyze_concurrency(job_rows: list[dict[str, Any]], report_time: datetime):
 
         results[label] = {
             "peak": peak,
-            "avg_concurrent": (
-                round(time_weighted_sum / total_time, 1) if total_time > 0 else 0.0
-            ),
+            "avg_concurrent": (round(time_weighted_sum / total_time, 1) if total_time > 0 else 0.0),
             "total_jobs": len(label_rows),
             "avg_queue_seconds": average(queue_times),
             "p50_queue_seconds": percentile(queue_times, 50),
@@ -609,18 +578,14 @@ def build_runner_report_rows(job_rows: list[dict[str, Any]], report_time: dateti
                 format_duration_seconds(average(stat["duration_samples"])),
             ]
         )
-        distribution_sections.append(
-            (label, build_queue_distribution(stat["queue_samples"]))
-        )
+        distribution_sections.append((label, build_queue_distribution(stat["queue_samples"])))
 
     return summary_rows, distribution_sections
 
 
 def build_job_report_rows(job_rows: list[dict[str, Any]], report_time: datetime):
     rows = []
-    for row in sorted(
-        job_rows, key=lambda item: item.get("created_at", ""), reverse=True
-    ):
+    for row in sorted(job_rows, key=lambda item: item.get("created_at", ""), reverse=True):
         rows.append(
             [
                 row.get("workflow", "-"),
@@ -633,9 +598,7 @@ def build_job_report_rows(job_rows: list[dict[str, Any]], report_time: datetime)
                 format_time(row.get("created_at", "")),
                 format_time(row.get("started_at", "")),
                 calculate_queue_time(row, report_time),
-                calculate_duration(
-                    row.get("started_at", ""), row.get("completed_at", "")
-                ),
+                calculate_duration(row.get("started_at", ""), row.get("completed_at", "")),
                 row.get("branch", "-"),
                 row.get("html_url") or row.get("run_url", "-"),
             ]
@@ -661,15 +624,11 @@ def main():
 
     all_rows: list[dict[str, Any]] = []
     if args.snapshot_in:
-        snapshot_payload = json.loads(
-            Path(args.snapshot_in).read_text(encoding="utf-8")
-        )
+        snapshot_payload = json.loads(Path(args.snapshot_in).read_text(encoding="utf-8"))
         snapshot_generated_at = snapshot_payload.get("generated_at")
         if isinstance(snapshot_generated_at, str):
             try:
-                parsed_report_time = datetime.fromisoformat(
-                    snapshot_generated_at.replace("Z", "+00:00")
-                )
+                parsed_report_time = datetime.fromisoformat(snapshot_generated_at.replace("Z", "+00:00"))
                 report_time = (
                     parsed_report_time
                     if parsed_report_time.tzinfo is not None
@@ -716,9 +675,7 @@ def main():
             "generated_at": report_time.isoformat(),
             "rows": [row_to_dict(row) for row in all_rows],
         }
-        Path(args.snapshot_out).write_text(
-            json.dumps(snapshot_payload, ensure_ascii=False), encoding="utf-8"
-        )
+        Path(args.snapshot_out).write_text(json.dumps(snapshot_payload, ensure_ascii=False), encoding="utf-8")
 
     workflow_set = set(workflows)
     job_rows = [
@@ -735,8 +692,7 @@ def main():
         if rate_limited and rate_limit_reset_epoch:
             reset_time = datetime.fromtimestamp(rate_limit_reset_epoch, timezone.utc)
             print(
-                f"[warn] Rate limit resets at {reset_time.isoformat()} (UTC). "
-                "Re-run after reset for complete data."
+                f"[warn] Rate limit resets at {reset_time.isoformat()} (UTC). " "Re-run after reset for complete data."
             )
         return
 
@@ -744,9 +700,7 @@ def main():
 
     if args.runner_report:
         concurrency = analyze_concurrency(job_rows, report_time)
-        runner_inventory = load_runner_inventory(
-            Path(__file__).resolve().parents[1] / "runner-config.yml"
-        )
+        runner_inventory = load_runner_inventory(Path(__file__).resolve().parents[1] / "runner-config.yml")
         print("## Concurrency by Runner Label")
         if concurrency:
             print(
@@ -766,9 +720,7 @@ def main():
                         ]
                         for label, values in sorted(
                             concurrency.items(),
-                            key=lambda item: runner_label_sort_key_with_inventory(
-                                item[0], runner_inventory
-                            ),
+                            key=lambda item: runner_label_sort_key_with_inventory(item[0], runner_inventory),
                         )
                     ],
                     headers=[
@@ -787,9 +739,7 @@ def main():
                 )
             )
         else:
-            print(
-                "No matching self-hosted runner labels found in the selected time window."
-            )
+            print("No matching self-hosted runner labels found in the selected time window.")
     else:
         print("### Job Status Report")
         print(
@@ -817,10 +767,7 @@ def main():
     if rate_limited and rate_limit_reset_epoch:
         reset_time = datetime.fromtimestamp(rate_limit_reset_epoch, timezone.utc)
         print("")
-        print(
-            f"> NOTE: Partial data due to GitHub API rate limit. "
-            f"Reset at {reset_time.isoformat()} (UTC)."
-        )
+        print(f"> NOTE: Partial data due to GitHub API rate limit. " f"Reset at {reset_time.isoformat()} (UTC).")
 
 
 if __name__ == "__main__":
