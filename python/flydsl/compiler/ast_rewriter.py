@@ -1251,18 +1251,15 @@ class CanonicalizeWhile(Transformer):
                 f"const_expr() if it is a compile-time constant."
             )
 
-        if not result_names:
-            state_raw = []
-        else:
-            state_raw = []
-            for name, value in zip(result_names, result_values):
-                raw = _unwrap_value(value)
-                if not isinstance(raw, ir.Value):
-                    raise TypeError(
-                        f"while-loop variable '{name}' is {type(raw).__name__}, not an MLIR Value; "
-                        "only MLIR-backed values can be loop-carried in dynamic while loops."
-                    )
-                state_raw.append(raw)
+        state_raw = []
+        for name, value in zip(result_names, result_values):
+            raw = _unwrap_value(value)
+            if not isinstance(raw, ir.Value):
+                raise TypeError(
+                    f"while-loop variable '{name}' is {type(raw).__name__}, not an MLIR Value; "
+                    "only MLIR-backed values can be loop-carried in dynamic while loops."
+                )
+            state_raw.append(raw)
 
         result_types = [v.type for v in state_raw]
         while_op = scf.WhileOp(result_types, state_raw, loc=ir.Location.unknown())
