@@ -628,6 +628,8 @@ def _build_rmsnorm_quant_module(
     is_smooth: bool,
     quant_dtype_str: str = "i8",
 ):
+    arch = get_hip_arch()
+
     tile_cols = BLOCK_THREADS * VEC_WIDTH
     RED_SLOTS = max(1, (BLOCK_THREADS + WARP_SIZE - 1) // WARP_SIZE)
     elem_bits = 32 if dtype_str == "f32" else 16
