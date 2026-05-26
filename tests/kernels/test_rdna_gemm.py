@@ -20,7 +20,8 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 from flydsl.runtime.device import get_rocm_arch  # noqa: E402
-from kernels.rdna_f16_gemm import create_wmma_gemm_module  # noqa: E402
+from kernels.rdna3_f16_gemm import create_wmma_gemm_module as _create_wmma_gemm_module_gfx11  # noqa: E402
+from kernels.rdna_f16_gemm import create_wmma_gemm_module as _create_wmma_gemm_module_gfx12  # noqa: E402
 from kernels.rdna_fp8_preshuffle_gemm import (  # noqa: E402
     compile_fp8_gemm,
     fp8_quantize_per_channel,
@@ -42,6 +43,24 @@ def _requires_rdna4():
         pytest.skip(f"RDNA4 GEMM requires gfx120x, got {ARCH}")
 
 
+def _requires_rdna_wmma():
+    """gfx11* (RDNA3/RDNA3.5) or gfx12* (RDNA4) — anything with f16/bf16 WMMA."""
+    if not (ARCH.startswith("gfx11") or ARCH.startswith("gfx12")):
+        pytest.skip(f"RDNA WMMA GEMM requires gfx11* or gfx12*, got {ARCH}")
+
+
+def create_wmma_gemm_module(*args, **kwargs):
+    """Pick the kernel variant matching the current arch.
+
+    gfx11 uses the legacy v16-operand WMMA ABI; gfx12 uses v8 — different
+    enough that the LDS-load and accumulator-store math differ. The two
+    kernels share the same call signature.
+    """
+    if ARCH.startswith("gfx11"):
+        return _create_wmma_gemm_module_gfx11(*args, **kwargs)
+    return _create_wmma_gemm_module_gfx12(*args, **kwargs)
+
+
 # ── BF16/F16 GEMM ────────────────────────────────────────────────────────────
 
 
@@ -57,7 +76,7 @@ def _requires_rdna4():
 @pytest.mark.parametrize("dtype", ["bf16", "f16"])
 def test_f16_gemm_correctness(M, N, K, dtype):
     """Test BF16/F16 GEMM correctness for various shapes and dtypes."""
-    _requires_rdna4()
+    _requires_rdna_wmma()
 
     torch_dtype = torch.bfloat16 if dtype == "bf16" else torch.float16
     torch.manual_seed(42)
@@ -84,7 +103,7 @@ def test_f16_gemm_correctness(M, N, K, dtype):
 )
 def test_f16_gemm_f32_output(M, N, K):
     """Test BF16 GEMM with f32 output accumulation."""
-    _requires_rdna4()
+    _requires_rdna_wmma()
 
     torch.manual_seed(42)
     launch_fn, _, _, _ = create_wmma_gemm_module(M, N, K, in_dtype="bf16", out_dtype="f32")
@@ -109,7 +128,7 @@ def test_f16_gemm_f32_output(M, N, K):
 )
 def test_f16_gemm_benchmark(M, N, K):
     """Benchmark BF16 GEMM throughput."""
-    _requires_rdna4()
+    _requires_rdna_wmma()
 
     torch.manual_seed(42)
     launch_fn, _, _, _ = create_wmma_gemm_module(M, N, K, in_dtype="bf16", out_dtype="bf16")
