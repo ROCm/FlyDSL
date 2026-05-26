@@ -120,6 +120,16 @@ def test_mark_static_out_of_range_raises():
         t.mark_static(dims=[-1])
 
 
+def test_mark_layout_dynamic_rejects_ambiguous_leading_dim():
+    """Shape (1, 1) has strides (1, 1) — two stride-1 dims. The C++ adaptor
+    rejects this via ``markLayoutDynamic`` and the Python wrapper surfaces it
+    as a RuntimeError instead of silently picking a leading dim.
+    """
+    t = flyc.from_dlpack(torch.empty((1, 1), dtype=torch.float32))
+    with pytest.raises(RuntimeError):
+        t.mark_layout_dynamic()
+
+
 def test_mark_static_dynamic_vs_marked_differ():
     """A layout-dynamic tensor (shape elided) and the same tensor with mark_static() pinning all dims produce different keys."""
     dyn = flyc.from_dlpack(torch.empty((4, 8))).mark_layout_dynamic()

@@ -215,10 +215,11 @@ class TensorAdaptor:
 
     @staticmethod
     def _dynamic_cache_signature(tensor: torch.Tensor, assumed_align: Optional[int], use_32bit_stride: bool):
-        leading_dim = TensorAdaptor._auto_leading_dim(tensor.stride())
+        strides = tensor.stride()
+        leading_dim = TensorAdaptor._auto_leading_dim(strides)
         base = (tensor.dtype, assumed_align, use_32bit_stride)
         shape_sig = tuple(int(d) for d in tensor.shape)
-        stride_sig = tuple(int(s) for s in tensor.stride())
+        stride_sig = tuple(int(s) for s in strides)
         if leading_dim is None:
             return base + ("static", shape_sig, stride_sig)
         return base + ("dynamic", tensor.dim(), leading_dim, 1, shape_sig, stride_sig)
@@ -296,12 +297,15 @@ class TensorAdaptor:
 
     @staticmethod
     def raw_cache_signature(tensor: torch.Tensor):
-        """Lightweight cache sig from a raw tensor, no DLPack overhead.
+        """Cache sig for a raw torch.Tensor, computed without going through DLPack.
 
-        Raw tensors are auto-adapted to dynamic memrefs, but helper code may
-        still bake shape-derived layout facts while tracing. Keep shape/stride
-        in the key unless the caller explicitly opts into a reusable dynamic
-        TensorAdaptor via from_dlpack(...).mark_layout_dynamic(...).
+        Returns the same tuple as ``TensorAdaptor(tensor).__cache_signature__()``
+        (auto-adapted, ``dynamic_layout=True`` path), so the JIT cache fast
+        path and the slow path land in the same slot. Shape/stride are
+        materialised into the key conservatively, because helper code may
+        bake shape-derived layout facts while tracing. Callers that want
+        cross-shape kernel reuse should explicitly opt in via
+        ``from_dlpack(...).mark_layout_dynamic(...)``.
         """
         return TensorAdaptor._dynamic_cache_signature(tensor, None, False)
 
