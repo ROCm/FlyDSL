@@ -296,7 +296,17 @@ def make_dispatch_kernel(
     enable_scales = scale_bytes > 0
     max_tokens_per_expert = npes * max_tok_per_rank  # per-expert bucket capacity
 
-    @flyc.kernel
+    # ``known_block_size`` declares the launch block dimensions to the
+    # AMDGPU backend so it can derive ``max_flat_workgroup_size``: without
+    # it FlyDSL falls back to the 256-thread default and rejects any
+    # launch with ``warp_num_per_block > 4`` (block size = warps * 64).
+    # The wrapper exposes ``warp_num_per_block`` up to 16 (1024 threads,
+    # the AMDGPU hardware ceiling), and the dispatch sweep tunes across
+    # ``{4, 8, 16}``, so the kernel must declare the actual block size
+    # for every JIT instance.  ``warp_num_per_block`` is closed over from
+    # the outer factory call, so the decorator literal is constant per
+    # JIT entry.
+    @flyc.kernel(known_block_size=[warp_num_per_block * 64, 1, 1])
     def ep_dispatch_intranode(
         addr_inp_tok: fx.Int64,  # [inp_cur_tok, hidden_dim]  bf16
         addr_inp_idx: fx.Int64,  # [inp_cur_tok, k]           i32  (token_indices)
@@ -788,15 +798,31 @@ def make_combine_kernel(
             return arith.constant_vector(0.0, T.VectorType.get([2], T.f32()))
 
     elif hidden_elem_size == 4:  # f32
+        # NOTE: ``arith.bitcast(T.f32(), i32_val)`` does NOT work
+        # directly here -- the auto-generated ``arith.BitcastOp`` MLIR
+        # binding requires operand[0] to be a raw ``mlir.ir.Value`` and
+        # ``i32_val`` arriving from ``_maybe_load`` is wrapped in a
+        # FlyDSL ``fx.Int32`` (``Numeric``) shell.  The bf16 / fp4 / fp8
+        # paths above all route through ``vector.*`` builders which
+        # auto-unwrap, so they never hit this; the f32 path is the only
+        # one that touches scalar ``arith.bitcast`` and was silently
+        # broken (L2's ``L2_f32_bs128_*`` cases failed JIT compile with
+        # ``Operand 0 of operation "arith.bitcast" must be a Value``).
+        # Fix: explicitly extract the raw mlir Value via ``ir_value()``
+        # before invoking the dialect builder, then re-wrap the result
+        # in a FlyDSL ``fx.Float32`` / ``fx.Int32`` so downstream
+        # ``acc + _to_accum(..)`` and ``arith.select(...)`` keep working.
 
         def _to_accum(i32_val):
-            return arith.bitcast(T.f32(), i32_val)
+            raw = i32_val.ir_value()
+            return fx.Float32(arith.bitcast(T.f32(), raw))
 
         def _from_accum(accum_val):
-            return arith.bitcast(T.i32(), accum_val)
+            raw = accum_val.ir_value()
+            return fx.Int32(arith.bitcast(T.i32(), raw))
 
         def _zero_accum():
-            return arith.constant(0.0, type=T.f32())
+            return fx.Float32(arith.constant(0.0, type=T.f32()))
 
     elif hidden_elem_size == 1:  # fp8
         # OCP vs FNUZ is a transport-dtype distinction (FNUZ needs an
@@ -947,7 +973,11 @@ def make_combine_kernel(
     # arena sizes.
     check_smem_capacity(allocator.ptr, gpu_arch)
 
-    @flyc.kernel
+    # See ``ep_dispatch_intranode`` above for the rationale: the
+    # combine kernel launches with the same ``warp_num_per_block * 64``
+    # block size and must declare it so the AMDGPU backend lifts the
+    # 256-thread cap.
+    @flyc.kernel(known_block_size=[warp_num_per_block * 64, 1, 1])
     def ep_combine_intranode(
         addr_inp_tok: fx.Int64,  # inp_tok base (post-expert token buffer)
         addr_shmem_tok: fx.Int64,  # shmem_comb_inp base (symmetric)
@@ -1529,6 +1559,43 @@ def make_combine_kernel(
                             else:
                                 out_off = tok_id * n_i32 + ec_abs
                                 buffer_store(acc_tail, rsrc_out, out_off, cache_modifier=SLC_CACHE)
+                else:
+                    # wpb >= 16 (or n_i32 % 256 != 0) wide-path fallback:
+                    # the quad/dual-unroll branches above are gated on
+                    # ``warp_num_per_block < 16`` because they pre-issue 2 or 4
+                    # ``buffer_store`` ops per accumulator pass and the LDS
+                    # spill / register pressure pushes occupancy off the
+                    # cliff at 1024 threads/block (wpb=16).  Without an
+                    # else here, Stage 3 silently emits nothing for every
+                    # ``hdim_per_warp > _S3_WIDE_PATH_THRESHOLD_I32`` token
+                    # at wpb=16 and ``out_tok`` stays zero -- ``verify_self``
+                    # caught this on the L1 ``anchor_bf16_*_wpb16`` cases
+                    # (max_diff ≈ 44.75 == max(|0 - k*inp|) on randn input).
+                    # The fallback below is a step=64 main loop covering
+                    # the warp's full ``[0, eff_end_128)`` partition; same
+                    # semantics as the narrow path, just keyed on
+                    # ``eff_end_128`` so we don't recompute the clamp.
+                    for ec in range(lane, eff_end_128, 64):
+                        ec_abs = hdim_off + ec
+                        vals_main = []
+                        for k_slot in range_constexpr(experts_per_token):
+                            vals_main.append(
+                                _maybe_load(
+                                    expert_rsrcs[k_slot],
+                                    ec_abs,
+                                    expert_vlds[k_slot],
+                                    vec_width=1,
+                                    dtype=T.i32(),
+                                    cache_modifier=SLC_CACHE,
+                                )
+                            )
+                        acc = _accum_experts(vals_main, expert_vlds, eff_all_vld)
+                        if const_expr(_xfer_bf16_to_fp8):
+                            out_off = tok_id * out_n_i32 + ec_abs * 2
+                            buffer_store(acc, rsrc_out, out_off, cache_modifier=SLC_CACHE)
+                        else:
+                            out_off = tok_id * n_i32 + ec_abs
+                            buffer_store(acc, rsrc_out, out_off, cache_modifier=SLC_CACHE)
             else:
                 # Narrow path: a single step=64 main loop.
                 rem_hdim_64 = n_elems - hdim_off
