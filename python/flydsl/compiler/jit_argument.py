@@ -345,7 +345,6 @@ class TensorAdaptor:
         return self
 
 
-@JitArgumentRegistry.register(ctypes.c_void_p, dsl_type=Pointer)
 class PointerAdaptor:
     def __init__(
         self,
@@ -396,3 +395,5 @@ JitArgumentRegistry.register(bool)(Boolean)
 JitArgumentRegistry.register(int)(Int32)
 JitArgumentRegistry.register(float)(Float32)
 JitArgumentRegistry.register(torch.cuda.Stream)(Stream)
+
+JitArgumentRegistry.register_jit_arg(PointerAdaptor, Pointer)
