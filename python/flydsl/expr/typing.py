@@ -64,7 +64,12 @@ def default_f8_type() -> ir.Type:
     """Select E4M3 f8 type compatible with the current GPU arch.
 
     - gfx95* (MI350): FP8 E4M3FN (OCP)
+    - gfx12*: FP8 E4M3FN (OCP)
     - gfx94* (MI300): FP8 E4M3FNUZ
+
+    Raises ``RuntimeError`` on gfx11* (RDNA3/RDNA3.5): these chips have no
+    native FP8 instructions, so FP8 compute would surface as a late LLVM
+    "cannot select" error. Fail early with a clear message instead.
     """
     arch = ""
     try:
@@ -73,6 +78,11 @@ def default_f8_type() -> ir.Type:
         arch = ""
     if "gfx95" in arch or "gfx12" in arch:
         return Float8E4M3FN.ir_type
+    if arch.startswith("gfx11"):
+        raise RuntimeError(
+            f"default_f8_type(): no native FP8 support on {arch}; "
+            "FP8 instructions are available on gfx94*, gfx95*, and gfx12*."
+        )
     return Float8E4M3FNUZ.ir_type
 
 
