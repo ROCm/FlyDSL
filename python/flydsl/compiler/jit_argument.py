@@ -216,9 +216,7 @@ class TensorAdaptor:
         """
         candidates = [idx for idx, val in enumerate(strides) if int(val) == 1]
         if not candidates:
-            raise RuntimeError(
-                "tensor has no axis with stride == 1; layout-dynamic memref requires one"
-            )
+            raise RuntimeError("tensor has no axis with stride == 1; layout-dynamic memref requires one")
         return candidates[0]
 
     @staticmethod
@@ -329,11 +327,7 @@ class TensorAdaptor:
         # the backend sees can disagree with the framework view for tensors
         # with zero-size or unit-size axes (DLPack often coerces such strides
         # to 1), so we resolve on the framework strides here.
-        resolved = (
-            self._pick_unit_stride_axis(self._orig_strides)
-            if leading_dim == -1
-            else int(leading_dim)
-        )
+        resolved = self._pick_unit_stride_axis(self._orig_strides) if leading_dim == -1 else int(leading_dim)
         self.tensor_adaptor.mark_layout_dynamic(resolved, divisibility)
         self._dyn_leading_dim = resolved
         self._dynamic_divisibility = int(divisibility)
