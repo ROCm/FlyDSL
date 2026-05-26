@@ -1367,8 +1367,10 @@ def _verify_dispatch_self_consistency(ret_f, op_fly, inp, wts, idx, scales, cfg,
     skip_compare = total_recv == 0
     if rank == 0:
         if skip_compare:
-            print("\n  [SKIP] dispatch byte verify: total_recv == 0 on rank 0 "
-                  "(peer ranks still gather this rank's input rows)")
+            print(
+                "\n  [SKIP] dispatch byte verify: total_recv == 0 on rank 0 "
+                "(peer ranks still gather this rank's input rows)"
+            )
         else:
             print("\n  -- Dispatch byte verify (rows resolved via tok_id_to_src) --")
 
