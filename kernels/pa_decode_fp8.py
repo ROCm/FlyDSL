@@ -1815,28 +1815,27 @@ def _get_output_dtype_str(output: torch.Tensor) -> str:
     )
 
 
-def get_sw_ps_max_context_partition_num(
-    sliding_window: int,
-    context_partition_size: int = KV_COMPUTE_BLOCK,
-    query_length: int = 1,
-) -> int:
-    if sliding_window <= 0:
-        return 0
-    window_token_count = sliding_window + query_length
-    return _cdiv(window_token_count - 1, context_partition_size) + 1
-
-
 def get_recommended_splits(
     num_sequences: int,
     num_kv_heads: int,
     split_kv_blocks: int = 1,
+    *,
+    sliding_window: int = 0,
+    context_partition_size: int = KV_COMPUTE_BLOCK,
+    query_length: int = 1,
 ) -> int:
-    """Recommend ``max_context_partition_num`` for the small-block PS path.
+    """Recommend ``max_context_partition_num`` for PS partitioned paths.
 
-    Mirrors ``get_recommended_splits`` in
+    For sliding-window PS, this includes the old
+    ``get_sw_ps_max_context_partition_num`` token-window calculation. For
+    non-sliding PS, this mirrors ``get_recommended_splits`` in
     ``aiter/ops/triton/gluon/pa_decode_gluon.py`` so FlyDSL callers do not need
     to depend on aiter for the host-side split count.
     """
+    if sliding_window > 0:
+        window_token_count = sliding_window + query_length
+        return _cdiv(window_token_count - 1, context_partition_size) + 1
+
     props = torch.cuda.get_device_properties(torch.device("cuda"))
     # Reference uses occupancy = 2 (see `get_occupancy()` in the Gluon module).
     occupancy = 2
@@ -2728,10 +2727,12 @@ def pa_decode_ps_launch(
         eqgs = query_length * query_group_size
         context_partition_size = KV_COMPUTE_BLOCK
         if max_context_partition_num == 0:
-            max_context_partition_num = get_sw_ps_max_context_partition_num(
-                sliding_window,
-                context_partition_size,
-                query_length,
+            max_context_partition_num = get_recommended_splits(
+                batch_size,
+                num_kv_heads,
+                sliding_window=sliding_window,
+                context_partition_size=context_partition_size,
+                query_length=query_length,
             )
         if is_graph_capturing and (exp_sums is None or max_logits is None or temporary_output is None):
             raise ValueError(
@@ -2924,7 +2925,10 @@ def pa_decode_ps_launch(
         # All strides in fp32 elements (4 fp8 bytes = 1 fp32).
         if k_scale_per_token:
             _H4 = int(head_size) // 4
-            _scale_rows = int(block_size) * 4 // int(head_size)
+            # ceil(block_size*4 / head_size) so block_size*4 bytes always fit
+            # in scale_rows*head_dim bytes (padded with zeros when needed,
+            # e.g. block_size=16 with head_size=128 → scale_rows=1).
+            _scale_rows = (int(block_size) * 4 + int(head_size) - 1) // int(head_size)
             _s_ks_block_arg = _scale_rows * int(num_kv_heads) * _H4
             _s_ks_scale_row_arg = int(num_kv_heads) * _H4
             _s_ks_head_arg = _H4
