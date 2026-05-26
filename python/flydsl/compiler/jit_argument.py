@@ -196,10 +196,20 @@ class TensorAdaptor:
         if dynamic_layout:
             try:
                 self._mark_layout_dynamic(leading_dim=-1, divisibility=1)
-            except RuntimeError:
-                # Keep the original fully-static layout when the leading
-                # stride-1 dim cannot be inferred unambiguously.
-                pass
+            except RuntimeError as e:
+                # No silent fallback to static: a silent fallback would pin
+                # shape/stride into the JIT cache key for tensors the user
+                # expected to share one compile, causing surprise per-shape
+                # recompiles. Surface the C++ error and tell the caller how
+                # to resolve it explicitly.
+                raise RuntimeError(
+                    f"TensorAdaptor cannot auto-mark layout-dynamic for tensor "
+                    f"shape={tuple(tensor.shape)} strides={tuple(tensor.stride())}: {e}. "
+                    "Resolve explicitly: use flyc.from_dlpack(t) for a static memref "
+                    "(shape pinned in the cache key), or "
+                    "flyc.from_dlpack(t).mark_layout_dynamic(leading_dim=N) "
+                    "to pick the leading stride-1 dim manually."
+                ) from e
 
     @staticmethod
     def _extract_data_ptr(arg):
@@ -208,20 +218,33 @@ class TensorAdaptor:
         return arg.data_ptr()
 
     @staticmethod
-    def _auto_leading_dim(strides) -> Optional[int]:
+    def _auto_leading_dim(shape, strides) -> Optional[int]:
+        """Pick the leading stride-1 dim, preferring the meaningful one.
+
+        Returns ``None`` only when no dim has stride 1 (truly cannot be
+        layout-dynamic). When several dims qualify -- common with unsqueezed
+        size-1 axes (e.g. shape ``(B, 1, N, 1)`` strides ``(N, N, 1, 1)``) or
+        size-0 dims whose stride PyTorch / DLPack may normalise to 1 -- pick
+        the candidate with the largest size, since that's the real innermost
+        contiguous axis; ties break rightmost (C-contiguous convention).
+        """
         leading_dims = [i for i, stride in enumerate(strides) if int(stride) == 1]
-        return leading_dims[0] if len(leading_dims) == 1 else None
+        if not leading_dims:
+            return None
+        if len(leading_dims) == 1:
+            return leading_dims[0]
+        return max(leading_dims, key=lambda i: (int(shape[i]), i))
 
     @staticmethod
     def _dynamic_cache_signature(tensor: torch.Tensor, assumed_align: Optional[int], use_32bit_stride: bool):
         strides = tensor.stride()
-        leading_dim = TensorAdaptor._auto_leading_dim(strides)
+        leading_dim = TensorAdaptor._auto_leading_dim(tensor.shape, strides)
         base = (tensor.dtype, assumed_align, use_32bit_stride)
-        shape_sig = tuple(int(d) for d in tensor.shape)
-        stride_sig = tuple(int(s) for s in strides)
         if leading_dim is None:
+            shape_sig = tuple(int(d) for d in tensor.shape)
+            stride_sig = tuple(int(s) for s in strides)
             return base + ("static", shape_sig, stride_sig)
-        return base + ("dynamic", tensor.dim(), leading_dim, 1)  # EXPERIMENT: drop shape/stride
+        return base + ("dynamic", tensor.dim(), leading_dim, 1)
 
     @classmethod
     def _reusable_slot_spec(cls, arg):
@@ -350,10 +373,21 @@ class TensorAdaptor:
         return self
 
     def _mark_layout_dynamic(self, leading_dim: int, divisibility: int):
-        self.tensor_adaptor.mark_layout_dynamic(leading_dim, divisibility)
-        resolved_leading_dim = self._auto_leading_dim(self._orig_strides) if leading_dim == -1 else int(leading_dim)
-        if resolved_leading_dim is None:
-            raise RuntimeError("Cannot determine leading dimension")
+        # Resolve leading_dim from Python's stride view first, *then* pass it
+        # explicitly to C++.  Calling C++ with -1 has subtly different semantics:
+        # DLPack normalises strides for size-0 / size-1 dims (typically to 1),
+        # so a tensor like ``torch.empty(0, 8)`` (PyTorch strides (8, 1)) shows
+        # up to C++ as strides (1, 1) and triggers "Multiple dimensions have
+        # stride 1".  Resolving on the PyTorch view and passing the explicit
+        # index bypasses that auto-detect: C++ just verifies stride==1 at the
+        # picked dim.
+        if leading_dim == -1:
+            resolved_leading_dim = self._auto_leading_dim(self._orig_shape, self._orig_strides)
+            if resolved_leading_dim is None:
+                raise RuntimeError("Cannot determine leading dimension")
+        else:
+            resolved_leading_dim = int(leading_dim)
+        self.tensor_adaptor.mark_layout_dynamic(resolved_leading_dim, divisibility)
         self._dyn_leading_dim = resolved_leading_dim
         self._dynamic_divisibility = int(divisibility)
         self._is_layout_dynamic = True

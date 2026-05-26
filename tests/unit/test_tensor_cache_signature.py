@@ -120,14 +120,43 @@ def test_mark_static_out_of_range_raises():
         t.mark_static(dims=[-1])
 
 
-def test_mark_layout_dynamic_rejects_ambiguous_leading_dim():
-    """Shape (1, 1) has strides (1, 1) — two stride-1 dims. The C++ adaptor
-    rejects this via ``markLayoutDynamic`` and the Python wrapper surfaces it
-    as a RuntimeError instead of silently picking a leading dim.
+def test_auto_leading_dim_prefers_largest_size_dim():
+    """With multiple stride-1 candidates (e.g. unsqueezed size-1 dims), pick
+    the one with the largest size -- that's the real innermost contiguous
+    axis. Common case: shape (B, 1, N, 1) strides (N, N, 1, 1) → dim 2 wins.
     """
-    t = flyc.from_dlpack(torch.empty((1, 1), dtype=torch.float32))
-    with pytest.raises(RuntimeError):
-        t.mark_layout_dynamic()
+    t = torch.empty((4, 1, 8, 1), dtype=torch.float32)
+    # PyTorch's empty fills strides; expand_as / unsqueeze are equivalent here.
+    # _auto_leading_dim looks only at shape + strides.
+    leading = TensorAdaptor._auto_leading_dim(t.shape, t.stride())
+    # dims 2 and 3 both have stride 1; dim 2 has size 8, dim 3 has size 1 → pick 2
+    assert leading == 2
+
+
+def test_auto_adapt_handles_size_one_degeneracies():
+    """Tensors with multiple stride-1 dims (size-1 unsqueeze, size-0 dims
+    whose stride PyTorch / DLPack normalises to 1) must NOT fall back to
+    static silently — pick a sensible leading dim and stay layout-dynamic.
+    """
+    # (1, 1) is fully degenerate; both candidates tie → rightmost wins.
+    assert TensorAdaptor(torch.empty((1, 1)))._dyn_leading_dim == 1
+    # (0, 8) is the production case (size-0 leading dim) -- DLPack may
+    # normalise stride[0] to 1, but Python's view picks dim 1 (size 8).
+    assert TensorAdaptor(torch.empty((0, 8)))._dyn_leading_dim == 1
+
+
+def test_auto_adapt_raises_when_no_stride_one_dim():
+    """No dim has stride 1 at all (e.g. strided slice) -- can't be made
+    layout-dynamic. Surface a RuntimeError pointing at the explicit
+    resolutions instead of silently falling back to static (which would
+    pin shape into the cache key and cause surprise per-shape recompiles).
+    """
+    base = torch.empty((4, 8), dtype=torch.float32)
+    sliced = base[:, ::2]  # shape (4, 4) strides (8, 2) -- no stride-1 dim
+    with pytest.raises(RuntimeError, match="auto-mark layout-dynamic"):
+        TensorAdaptor(sliced)
+    # Explicit escape hatches still work:
+    flyc.from_dlpack(sliced)  # static memref, shape in key — no error
 
 
 def test_mark_static_dynamic_vs_marked_differ():
