@@ -1880,7 +1880,15 @@ def make_combine_jit(
     _key_skip_s1 = skip_stage1
     _key_fp8_direct_cast = bool(fp8_direct_cast)
     _key_max_recv = max_recv if max_recv is not None else npes * max_tok_per_rank
-    _key_data_type = data_type
+    # ``str(torch.dtype)`` instead of the raw ``torch.dtype`` because
+    # ``_collect_closure_scalar_vals`` in flydsl.compiler.jit_function only
+    # whitelists ``(int, float, bool, str, type(None), tuple)`` for cache-key
+    # materialization; passing a raw ``torch.dtype`` here makes it silently
+    # drop out of the key, so e.g. a bf16 and an fp8 combine launcher would
+    # share the same on-disk artifact and the second variant trips
+    # ``hipErrorInvalidHandle`` at module load.  Mirrors the dispatch
+    # launcher above (line 1726).
+    _key_data_type = str(data_type)
     _key_schema_version = _DISPATCH_COMBINE_JIT_SCHEMA_VERSION
     _allocator = kernel._allocator
 

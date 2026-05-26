@@ -479,44 +479,6 @@ def _collect_class_member_dependency_sources(
     return sources
 
 
-def _is_stable_hashable_atom(val) -> bool:
-    """Return ``True`` for non-callable values whose ``repr`` is stable
-    across processes and whose identity affects generated code.
-
-    Currently recognised: ``torch.dtype`` instances (e.g.
-    ``torch.bfloat16`` / ``torch.float8_e4m3fn`` / ``torch.float4_e2m1fn_x2``).
-    These are exposed by kernel factories via closure (e.g.
-    ``_key_data_type``) to keep distinct dtype variants in separate cache
-    entries, but they are not in the ``(int, float, bool, str, type(None),
-    tuple)`` scalar whitelist used by :func:`_collect_closure_scalar_vals`,
-    so they would otherwise be dropped from the JIT cache key and cause
-    cache collisions across distinct compiled artifacts.
-    """
-    try:
-        import torch as _torch  # local import: keep flydsl torch-optional
-    except ImportError:
-        _torch = None
-    if _torch is not None and isinstance(val, _torch.dtype):
-        return True
-    return False
-
-
-def _stable_atom_repr(val) -> str:
-    """Stable ``repr`` for atoms recognised by :func:`_is_stable_hashable_atom`.
-
-    For ``torch.dtype`` we use ``str(val)`` (e.g. ``"torch.bfloat16"``)
-    because the default ``repr(torch.bfloat16)`` and ``str(torch.bfloat16)``
-    are identical and stable across processes / interpreter restarts.
-    """
-    try:
-        import torch as _torch
-    except ImportError:
-        _torch = None
-    if _torch is not None and isinstance(val, _torch.dtype):
-        return str(val)
-    return repr(val)
-
-
 def _collect_closure_scalar_vals(func, visited_ids: Optional[Set[int]] = None) -> List[str]:
     """Recursively collect scalar closure values from func and all callable deps in its closure.
 
@@ -541,17 +503,6 @@ def _collect_closure_scalar_vals(func, visited_ids: Optional[Set[int]] = None) -
             continue
         if isinstance(val, (int, float, bool, str, type(None), tuple)):
             vals.append(f"{name}={val!r}")
-        elif _is_stable_hashable_atom(val):
-            # Externally-defined atoms whose value affects compile-time
-            # code generation but whose ``repr`` is stable across
-            # processes: torch.dtype, numpy dtypes, etc.  Without this
-            # branch a closure variable like ``_key_data_type =
-            # torch.bfloat16`` is silently dropped from the cache key
-            # because torch.dtype is not in the scalar whitelist above,
-            # producing cache-collisions across distinct kernels
-            # (different dtype variants share the same disk entry ->
-            # arbitrary HIP module-load failures on the second variant).
-            vals.append(f"{name}={_stable_atom_repr(val)}")
         else:
             # Recurse into callable deps (KernelFunction, JitFunction, plain functions)
             underlying = _get_underlying_func(val)
