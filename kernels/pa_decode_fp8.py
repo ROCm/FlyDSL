@@ -25,8 +25,10 @@ from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, rocdl, vector
+from flydsl.expr import math as fly_math
 from flydsl.expr.typing import Int32, T
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
+from flydsl.utils.env import runtime as flydsl_runtime_env
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from kernels import dpp_utils
 from kernels.pa_decode_swa import compile_pa_decode_sw, compile_pa_decode_sw_reduce
@@ -536,7 +538,17 @@ def _make_pa_phase_helpers(
     neg_inf,
     zero_f,
     cache_scale_vecs=False,
+    p_scale_lane=None,
+    p_scale_inv_lane=None,
+    k_scale_per_token=False,
 ):
+    _has_p_scale = p_scale_lane is not None
+    # k_scale_per_token: K scale is staged to scale_lds_f32 by the caller
+    # (used by pa_decode_ps_kernel small-block path when per_token_kv=False
+    # but K is per-token-quantized).  Routes K-scale loading through
+    # `_load_k_scale_vec` (same as per_token_kv) without enabling the rest
+    # of the per_token_kv machinery (V scale, vmax LDS staging, etc).
+    _k_scale_per_token_eff = k_scale_per_token or per_token_kv
     apply_causal_mask = needs_mask or query_length > 1
     pv_prob_i64_indices = []
     for vt in range_constexpr(VTLOOP):
@@ -701,7 +713,7 @@ def _make_pa_phase_helpers(
             acc = arith.constant_vector(0.0, T.f32x4)
             for k_step in range_constexpr(QKHELOOP * 2):
                 acc = rocdl.mfma_f32_16x16x32_fp8_fp8(T.f32x4, [k_ops[td][k_step], q_frags[k_step], acc, 0, 0, 0])
-            if const_expr(per_token_kv):
+            if const_expr(_k_scale_per_token_eff):
                 if const_expr(cache_scale_vecs and per_token_kv):
                     k_scale_vec = _get_k_scale_vec(td, k_scale_vecs)
                 else:
@@ -799,12 +811,31 @@ def _make_pa_phase_helpers(
             v_max_safe_scaled = v_max_scaled + fx.Float32(1e-8 / FP8_MAX).ir_value()
             norm_factor = _rcp_f32(v_max_safe_scaled)
             v_correction = v_max_scaled
+            if const_expr(_has_p_scale):
+                v_correction = arith.mulf(
+                    arith.unwrap(v_correction), arith.unwrap(p_scale_inv_lane),
+                    fastmath=arith.FastMathFlags.contract,
+                )
+                _vec_norm_p = arith.mulf(
+                    arith.unwrap(norm_factor), arith.unwrap(p_scale_lane),
+                    fastmath=arith.FastMathFlags.contract,
+                )
+            else:
+                _vec_norm_p = arith.unwrap(norm_factor)
             for td in range_constexpr(TLOOP):
                 d_out[td] = d_out[td] * (
-                    _get_v_scale_vec(td, v_scale_vecs) * vector.broadcast(T.f32x4, arith.unwrap(norm_factor))
+                    _get_v_scale_vec(td, v_scale_vecs) * vector.broadcast(T.f32x4, _vec_norm_p)
                 )
         else:
             v_correction = v_scale_val
+            if const_expr(_has_p_scale):
+                v_correction = arith.mulf(
+                    arith.unwrap(v_correction), arith.unwrap(p_scale_inv_lane),
+                    fastmath=arith.FastMathFlags.contract,
+                )
+                _ps_bcast = vector.broadcast(T.f32x4, arith.unwrap(p_scale_lane))
+                for td in range_constexpr(TLOOP):
+                    d_out[td] = d_out[td] * _ps_bcast
 
         for td in range_constexpr(TLOOP):
             p0 = vector.extract(d_out[td], static_position=[0], dynamic_position=[])
@@ -1953,6 +1984,9 @@ def compile_pa_decode_ps(
     per_token_kv: bool = False,
     query_length: int = 1,
     query_input_dtype: str = "bf16",
+    has_p_scale: bool = False,
+    v_scale_per_head: bool = False,
+    k_scale_per_token: bool = False,
 ):
     """Compile the small-block partition kernel.  See module-level comment."""
     if block_size not in _PA_DECODE_PS_SMALL_BLOCK_SIZES:
@@ -1992,7 +2026,7 @@ def compile_pa_decode_ps(
     _smem_sym_name = (
         f"pa_ps_smallblk_smem_bs{block_size}_ql{query_length}"
         f"_qgs{query_group_size}_tv{int(trans_v)}_qd{query_input_dtype}"
-        f"_ptkv{int(per_token_kv)}"
+        f"_ptkv{int(per_token_kv)}_kpt{int(k_scale_per_token)}"
     )
     allocator = SmemAllocator(None, arch=arch, global_sym_name=_smem_sym_name)
     logits_off = 0
@@ -2001,6 +2035,13 @@ def compile_pa_decode_ps(
     allocator.ptr += LDS_SOFTMAX_TOTAL
     bt_off = softmax_off + LDS_SOFTMAX_TOTAL
     allocator.ptr += NUM_WARPS * TLOOP * 4
+    # K-per-token scale staging LDS: KV_COMPUTE_BLOCK (=256) fp32 = 1024 bytes
+    # per partition.  Allocated only when k_scale_per_token is enabled.
+    if k_scale_per_token:
+        scale_off_ps = bt_off + NUM_WARPS * TLOOP * 4
+        allocator.ptr += KV_COMPUTE_BLOCK * 4
+    else:
+        scale_off_ps = 0
 
     @flyc.kernel(known_block_size=(BLOCK_THREADS, 1, 1))
     def pa_decode_ps_kernel(
@@ -2028,6 +2069,18 @@ def compile_pa_decode_ps(
         stride_to_part: Int32,
         stride_to_group: Int32,
         stride_bt_seq: Int32,
+        p_scale_ptr: fx.Tensor,
+        p_scale_inv_ptr: fx.Tensor,
+        # K-scale strides for the packed layout
+        # `[num_blocks, scale_rows, num_kv_heads, head_dim]` fp8 (viewed as fp32).
+        # All values are in fp32 elements (4 fp8 bytes = 1 fp32).
+        #   stride_ks_block      = scale_rows * num_kv_heads * (head_dim/4) = num_kv_heads*block_size
+        #   stride_ks_scale_row  = num_kv_heads * (head_dim/4)
+        #   stride_ks_head       = head_dim / 4
+        # All 0 for per-tensor or non-per-token paths.
+        stride_ks_block_param: Int32,
+        stride_ks_scale_row_param: Int32,
+        stride_ks_head_param: Int32,
     ):
         tid = fx.Int32(gpu.thread_id("x"))
         batch_idx = fx.Int32(gpu.block_id("x"))
@@ -2053,14 +2106,25 @@ def compile_pa_decode_ps(
 
         q_scale_val = arith.constant(1.0, type=T.f32)
         k_scale_val = buffer_ops.buffer_load(ks_rsrc, arith.constant(0, type=T.i32), vec_width=1)
-        v_scale_val = buffer_ops.buffer_load(vs_rsrc, arith.constant(0, type=T.i32), vec_width=1)
+        # V scale: per-tensor (offset 0) by default; per-kv-head (offset kv_h)
+        # when `v_scale_per_head=True` — matches the test's VS layout
+        # `(num_kv_heads,)` fp32 from quant_paged_cache_perhead.
+        if const_expr(v_scale_per_head):
+            v_scale_val = buffer_ops.buffer_load(vs_rsrc, kv_h, vec_width=1)
+        else:
+            v_scale_val = buffer_ops.buffer_load(vs_rsrc, arith.constant(0, type=T.i32), vec_width=1)
 
         smem_base = allocator.get_base()
         logits_lds_i32 = SmemPtr(smem_base, logits_off, T.i32, shape=(LDS_LOGITS_BYTES // 4,)).get()
         softmax_lds_f32 = SmemPtr(smem_base, softmax_off, T.f32, shape=(LDS_SOFTMAX_TOTAL // 4,)).get()
         logits_lds_i64 = SmemPtr(smem_base, logits_off, T.i64, shape=(LDS_LOGITS_BYTES // 8,)).get()
         bt_lds_i32 = SmemPtr(smem_base, bt_off, T.i32, shape=(NUM_WARPS * TLOOP,)).get()
-        scale_lds_f32 = None
+        if const_expr(k_scale_per_token):
+            scale_lds_f32 = SmemPtr(
+                smem_base, scale_off_ps, T.f32, shape=(KV_COMPUTE_BLOCK,)
+            ).get()
+        else:
+            scale_lds_f32 = None
 
         _softmax_scale_const = arith.constant(_softmax_scale, type=T.f32)
         _softmax_q_scale = _softmax_scale_const * q_scale_val
@@ -2072,6 +2136,20 @@ def compile_pa_decode_ps(
         c_query_group_size = arith.constant(query_group_size, type=T.i32)
 
         local_qhead_idx = warp_id * arith.constant(4, type=T.i32) + rowid
+
+        if const_expr(has_p_scale):
+            _ps_rsrc = buffer_ops.create_buffer_resource(p_scale_ptr, max_size=True)
+            _psi_rsrc = buffer_ops.create_buffer_resource(p_scale_inv_ptr, max_size=True)
+            # local_qhead_idx may span [0, 16) when query_length * query_group_size > query_group_size;
+            # the actual q-head within a kv-group is `local_qhead_idx % query_group_size`.
+            # Global q-head index = kv_h * query_group_size + within-group.
+            _qh_in_group = _urem_const(local_qhead_idx, query_group_size)
+            _q_head_global = kv_h * c_query_group_size + _qh_in_group
+            _p_scale_lane = buffer_ops.buffer_load(_ps_rsrc, _q_head_global, vec_width=1)
+            _p_scale_inv_lane = buffer_ops.buffer_load(_psi_rsrc, _q_head_global, vec_width=1)
+        else:
+            _p_scale_lane = None
+            _p_scale_inv_lane = None
 
         (
             _k_tok_thread_base_unused,
@@ -2143,6 +2221,9 @@ def compile_pa_decode_ps(
             c_w=c_w,
             neg_inf=NEG_INF,
             zero_f=ZERO_F,
+            p_scale_lane=_p_scale_lane,
+            p_scale_inv_lane=_p_scale_inv_lane,
+            k_scale_per_token=k_scale_per_token,
         )
 
         def _store_partition_results(eqgs_lane, running_sum, running_max, outs_norm):
@@ -2244,9 +2325,14 @@ def compile_pa_decode_ps(
             if lane16id == fx.Int32(0):
                 if rowid == fx.Int32(0):
                     if const_expr(block_size == 64):
-                        phys_block_vec.store(
-                            bt_lds_i32,
-                            [fx.Index(warp_id)],
+                        # block_size=64: `_stage_phys_blocks` returned vec_width=1
+                        # → scalar i32, not a Vector.  Wrap in a 1-element
+                        # Vector so we can use the LDS `.store(...)` API.
+                        # Each warp writes 1 i32 to bt_lds_i32[warp_id];
+                        # `_load_v_phys_blocks_from_lds` reads back the 4-elem
+                        # vec starting at offset 0.
+                        fx.Vector.from_elements([phys_block_vec], dtype=fx.Int32).store(
+                            bt_lds_i32, [fx.Index(warp_id)],
                         )
                     else:
                         phys_block_vec.store(
@@ -2269,7 +2355,18 @@ def compile_pa_decode_ps(
 
         # Pre-load the FIRST sub-partition's block-table entries before Q setup
         # so the dependent K prefetch below does not also pay the table latency.
-        first_block_base = local_partition_start * fx.Int32(_blocks_per_partition)
+        # Empty-slot guard: when num_total_partitions < max_context_partition_num,
+        # CTAs with partition_idx >= num_total_partitions get
+        # local_partition_start >= num_total_partitions and the inner loop runs
+        # 0 iters.  But the prologue still issues block-table + K reads using
+        # local_partition_start; clamp to 0 so all reads stay in-bounds (the
+        # results are unused since the loop never executes).
+        _safe_partition_start = arith.select(
+            local_partition_start < num_total_partitions,
+            local_partition_start,
+            arith.constant(0, type=T.i32),
+        )
+        first_block_base = _safe_partition_start * fx.Int32(_blocks_per_partition)
         first_phys_blocks = _pa_small_block_stage_phys_blocks(first_block_base)
 
         # Pre-load Q for every MTP group ONCE before the KV loop.  Each group's
@@ -2343,6 +2440,48 @@ def compile_pa_decode_ps(
                 warp_id, lane16id, rowid, v_phys_blocks,
                 block_size=_block_size,
             )
+
+            # ── Per-token K scale staging ─────────────────────────────────
+            # When k_scale_per_token=True, KS is the packed layout
+            # `[num_blocks, scale_rows, num_kv_heads, head_dim]` fp8, viewed
+            # as fp32 (4 fp8 bytes = 1 fp32).  For a token `t` in a block:
+            #     scale_row = t // (head_dim/4)
+            #     d_in_row  = t %  (head_dim/4)
+            # fp32 offset =
+            #     phys*stride_ks_block + scale_row*stride_ks_scale_row
+            #     + kv_h*stride_ks_head + d_in_row
+            # Each of the 256 threads in the workgroup loads ONE K scale
+            # and stages to scale_lds_f32[warp*64 + rowid*16 + lane16id];
+            # _get_k_scale_vec then reads vec<4, f32> per (rowid, td).
+            if const_expr(k_scale_per_token):
+                _H4 = HEAD_SIZE // 4  # fp32 elements per scale_row per kv_head
+                _stage_tok = warp_id * fx.Int32(WARP_SIZE) + rowid * fx.Int32(MFMA_N) + lane16id
+                if const_expr(_block_size == 64):
+                    _my_phys = fx.Vector.load(
+                        T.vec(1, T.i32), bt_lds_i32, [fx.Index(warp_id)]
+                    )[0]
+                    _my_tok_in_block = rowid * fx.Int32(MFMA_N) + lane16id
+                else:
+                    _my_phys = fx.Vector.load(
+                        T.vec(1, T.i32), bt_lds_i32,
+                        [fx.Index(warp_id * fx.Int32(TLOOP) + rowid)],
+                    )[0]
+                    _my_tok_in_block = lane16id
+                _scale_row_idx = _my_tok_in_block // fx.Int32(_H4)
+                _d_in_row = _my_tok_in_block - _scale_row_idx * fx.Int32(_H4)
+                _ks_off = (
+                    _my_phys * stride_ks_block_param
+                    + _scale_row_idx * stride_ks_scale_row_param
+                    + kv_h * stride_ks_head_param
+                    + _d_in_row
+                )
+                _k_scale_scalar = buffer_ops.buffer_load(
+                    ks_rsrc, _ks_off, vec_width=1, dtype=fx.Float32
+                )
+                fx.Vector.from_elements([_k_scale_scalar], dtype=fx.Float32).store(
+                    scale_lds_f32, [fx.Index(_stage_tok)],
+                )
+                gpu.barrier()
 
             # Compute the NEXT sub-partition's K base address (clamped to the
             # last valid index so the prefetch on the final loop iteration
@@ -2442,6 +2581,11 @@ def compile_pa_decode_ps(
         s_to_part: Int32,
         s_to_group: Int32,
         s_bt_seq: Int32,
+        p_scale: fx.Tensor,
+        p_scale_inv: fx.Tensor,
+        s_ks_block: Int32,
+        s_ks_scale_row: Int32,
+        s_ks_head: Int32,
         gx: Int32,
         gy: Int32,
         gz: Int32,
@@ -2476,6 +2620,11 @@ def compile_pa_decode_ps(
             s_to_part,
             s_to_group,
             s_bt_seq,
+            p_scale,
+            p_scale_inv,
+            s_ks_block,
+            s_ks_scale_row,
+            s_ks_head,
         ).launch(grid=(gx, gy, gz), block=(BLOCK_THREADS, 1, 1), stream=stream)
 
     return {
@@ -2505,6 +2654,10 @@ def pa_decode_ps_launch(
     exp_sums: torch.Tensor = None,
     max_logits: torch.Tensor = None,
     temporary_output: torch.Tensor = None,
+    p_scale: torch.Tensor = None,
+    p_scale_inv: torch.Tensor = None,
+    v_scale_per_head: bool = False,
+    k_scale_per_token: bool = False,
     stream=None,
 ) -> str:
     """Launch PA decode with persistent scheduling.
@@ -2540,7 +2693,11 @@ def pa_decode_ps_launch(
         )
 
     # Detect per-token vs per-tensor quantization from scale tensor dimensionality
-    per_token_kv = key_scale.ndim > 1  # per-tensor: shape [1]; per-token: shape [blocks, heads, block_size, 1]
+    # k_scale_per_token routes K scale through the small-block kernel's per-token
+    # LDS-staging path WITHOUT enabling the legacy per_token_kv mode (which
+    # forces both K and V into per-token and is only supported by the metadata
+    # kernel).  When k_scale_per_token=True, per_token_kv is forced False.
+    per_token_kv = (not k_scale_per_token) and key_scale.ndim > 1
 
     if metadata is None:
         if is_graph_capturing:
@@ -2740,6 +2897,15 @@ def pa_decode_ps_launch(
                 device=dev,
                 dtype=torch.bfloat16,
             )
+        _has_p_scale = p_scale is not None and p_scale_inv is not None
+        if (p_scale is None) != (p_scale_inv is None):
+            raise ValueError("p_scale and p_scale_inv must both be set or both be None.")
+        if not _has_p_scale:
+            _p_scale_arg = torch.empty(num_query_heads, dtype=torch.float32, device=dev)
+            _p_scale_inv_arg = torch.empty(num_query_heads, dtype=torch.float32, device=dev)
+        else:
+            _p_scale_arg = p_scale.contiguous().to(torch.float32)
+            _p_scale_inv_arg = p_scale_inv.contiguous().to(torch.float32)
         compiled_small = compile_pa_decode_ps(
             block_size=block_size,
             max_context_partition_num=max_context_partition_num,
@@ -2749,7 +2915,23 @@ def pa_decode_ps_launch(
             per_token_kv=per_token_kv,
             query_length=query_length,
             query_input_dtype=query_input_dtype,
+            has_p_scale=_has_p_scale,
+            v_scale_per_head=v_scale_per_head,
+            k_scale_per_token=k_scale_per_token,
         )
+        # K-scale strides for per-token mode: expect key_scale packed layout
+        # `[num_blocks, scale_rows, num_kv_heads, head_dim]` fp8 viewed as fp32.
+        # All strides in fp32 elements (4 fp8 bytes = 1 fp32).
+        if k_scale_per_token:
+            _H4 = int(head_size) // 4
+            _scale_rows = int(block_size) * 4 // int(head_size)
+            _s_ks_block_arg = _scale_rows * int(num_kv_heads) * _H4
+            _s_ks_scale_row_arg = int(num_kv_heads) * _H4
+            _s_ks_head_arg = _H4
+        else:
+            _s_ks_block_arg = 0
+            _s_ks_scale_row_arg = 0
+            _s_ks_head_arg = 0
         output_5d = output.reshape(
             batch_size, query_length, num_kv_heads, query_group_size, head_size
         )
@@ -2778,6 +2960,11 @@ def pa_decode_ps_launch(
             temporary_output.stride(2),
             temporary_output.stride(3),
             block_tables.stride(0),
+            _p_scale_arg,
+            _p_scale_inv_arg,
+            _s_ks_block_arg,
+            _s_ks_scale_row_arg,
+            _s_ks_head_arg,
             batch_size,
             num_kv_heads,
             max_context_partition_num,
