@@ -9,7 +9,19 @@ from typing import Callable, Dict, List, Optional, Tuple, Type, get_origin
 import torch
 
 from .._mlir._mlir_libs._mlirDialectsFly import DLTensorAdaptor
-from ..expr.typing import Boolean, Constexpr, Float32, Int32, Stream, Tensor
+from ..expr.numeric import Numeric
+from ..expr.typing import (
+    AddressSpace,
+    Boolean,
+    Constexpr,
+    Float32,
+    Int32,
+    Pointer,
+    PointerType,
+    Stream,
+    Tensor,
+    address_space_from_attr,
+)
 from .protocol import DslType, JitArgument
 
 _RESOLVE_SIG_WARNED = set()
@@ -368,13 +380,55 @@ class TensorAdaptor:
         return self._mark_layout_dynamic(leading_dim, divisibility)
 
 
+class PointerAdaptor:
+    def __init__(
+        self,
+        element_type: Type[Numeric],
+        pointer: ctypes.c_void_p | int | None,
+        address_space=AddressSpace.Global,
+        alignment: Optional[int] = None,
+    ):
+        address_space = address_space_from_attr(address_space)
+        self.pointer = pointer if isinstance(pointer, ctypes.c_void_p) else ctypes.c_void_p(pointer)
+        self.address_space = address_space
+        self.element_type = element_type
+        self.alignment = alignment
+
+    def __get_ir_types__(self):
+        ir_type = self.element_type
+        if isinstance(ir_type, type) and issubclass(ir_type, Numeric):
+            ir_type = self.element_type.ir_type
+        return [PointerType.get(ir_type, self.address_space, self.alignment)]
+
+    def __get_c_pointers__(self):
+        return [ctypes.cast(ctypes.pointer(self.pointer), ctypes.c_void_p)]
+
+    def __cache_signature__(self):
+        return ("PointerAdaptor", self.element_type, str(self.address_space), self.alignment)
+
+
 def from_dlpack(
-    tensor: torch.Tensor, *, assumed_align: Optional[int] = None, use_32bit_stride: bool = False
+    tensor: torch.Tensor,
+    *,
+    assumed_align: Optional[int] = None,
+    use_32bit_stride: bool = False,
 ) -> TensorAdaptor:
     return TensorAdaptor(tensor, assumed_align, use_32bit_stride, dynamic_layout=False)
+
+
+def from_c_void_p(
+    element_type: Type[Numeric],
+    pointer: ctypes.c_void_p | int | None,
+    *,
+    address_space=AddressSpace.Global,
+    assumed_align: Optional[int] = None,
+) -> PointerAdaptor:
+    return PointerAdaptor(element_type, pointer, address_space, assumed_align)
 
 
 JitArgumentRegistry.register(bool)(Boolean)
 JitArgumentRegistry.register(int)(Int32)
 JitArgumentRegistry.register(float)(Float32)
 JitArgumentRegistry.register(torch.cuda.Stream)(Stream)
+
+JitArgumentRegistry.register_jit_arg(PointerAdaptor, Pointer)
