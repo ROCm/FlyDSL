@@ -540,15 +540,18 @@ def cleanup():
         dist.destroy_process_group()
 
 
-# Only dtypes for which mori's JIT-compiled kernel symbols are guaranteed
-# to exist in this container.  fp8_ocp / fp4_e2m1fn_x2 are part of mori's
-# tuning configs but the current docker build does NOT ship their
-# ``EpDispatchIntraNodeKernel_<dtype>`` symbols; trying to launch them
-# raises ``HIP error 500: hipModuleGetFunction(...)`` and *poisons the
-# CUDA context* (subsequent FlyDSL kernels then fail with "named symbol
-# not found").  Gate them at build time and fall back to self-check
-# instead.
-_MORI_SUPPORTED_DTYPES = {torch.bfloat16, torch.float32}
+# Dtypes for which mori's precompiled hsaco actually ships the
+# ``EpDispatchIntraNodeKernel_<sfx>`` / ``EpCombineIntraNodeKernel_<sfx>_(no)p2p``
+# kernel symbols (verified against ``~/.mori/jit/.../ep_intranode.hsaco``).
+# Both fp8_ocp and fp4_e2m1fn_x2 are now present, so we keep them in the
+# allowlist; if a future container drops a symbol the worker will raise
+# at JIT lookup and ``build_mori_ref`` will catch and fall back gracefully.
+_MORI_SUPPORTED_DTYPES = {
+    torch.bfloat16,
+    torch.float32,
+    torch.float8_e4m3fn,
+    torch.float4_e2m1fn_x2,
+}
 
 
 def build_mori_ref(rank, world_size, cfg, block_num: int = None, warp_per_block: int = None):
