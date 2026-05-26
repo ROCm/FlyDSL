@@ -187,8 +187,6 @@ class TensorAdaptor:
         self._orig_dtype = tensor.dtype
         self._orig_shape = tensor.shape
         self._orig_strides = tensor.stride()
-        # Marked-static dims contribute their (shape, stride) to the cache key.
-        self._cached_dims: frozenset = frozenset()
         self._dyn_leading_dim = -1
         self._dynamic_divisibility = 1
         self._is_layout_dynamic = False
@@ -307,43 +305,17 @@ class TensorAdaptor:
     def __cache_signature__(self):
         base = (self._orig_dtype, self.assumed_align, self.use_32bit_stride)
         if self._is_layout_dynamic:
-            dyn_base = base + (
+            return base + (
                 "dynamic",
                 len(self._orig_shape),
                 self._dyn_leading_dim,
                 self._dynamic_divisibility,
             )
-            if not self._cached_dims:
-                return dyn_base
-            extras = tuple((d, int(self._orig_shape[d]), int(self._orig_strides[d])) for d in sorted(self._cached_dims))
-            return dyn_base + (extras,)
         return base + (
             "static",
             tuple(int(d) for d in self._orig_shape),
             tuple(int(s) for s in self._orig_strides),
         )
-
-    def mark_static(self, dims: Optional[List[int]] = None):
-        """Include the listed dims' shape/stride values in the JIT cache key.
-
-        ``dims=None`` marks every dim.  Call this when the compiled kernel
-        bakes concrete shape values into the generated IR (for example
-        ``num_records`` on a buffer resource derived from the static layout
-        cosize), so that calls with different shapes do not reuse a stale
-        compiled artifact.  Repeated calls accumulate.
-
-        Returns ``self`` for chaining.
-        """
-        rank = len(self._orig_shape)
-        target = range(rank) if dims is None else dims
-        new_dims = set(self._cached_dims)
-        for d in target:
-            d = int(d)
-            if not 0 <= d < rank:
-                raise IndexError(f"dim {d} out of range for rank {rank}")
-            new_dims.add(d)
-        self._cached_dims = frozenset(new_dims)
-        return self
 
     def _mark_layout_dynamic(self, leading_dim: int, divisibility: int):
         # Resolve on framework strides and pass an explicit index; DLPack may
