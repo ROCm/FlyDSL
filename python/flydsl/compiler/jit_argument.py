@@ -191,7 +191,6 @@ class TensorAdaptor:
         self._cached_dims: frozenset = frozenset()
         self._dyn_leading_dim = -1
         self._dynamic_divisibility = 1
-        self._cache_dynamic_shape = bool(dynamic_layout)
         self._is_layout_dynamic = False
 
         if dynamic_layout:
@@ -222,7 +221,7 @@ class TensorAdaptor:
         stride_sig = tuple(int(s) for s in strides)
         if leading_dim is None:
             return base + ("static", shape_sig, stride_sig)
-        return base + ("dynamic", tensor.dim(), leading_dim, 1, shape_sig, stride_sig)
+        return base + ("dynamic", tensor.dim(), leading_dim, 1)  # EXPERIMENT: drop shape/stride
 
     @classmethod
     def _reusable_slot_spec(cls, arg):
@@ -318,11 +317,6 @@ class TensorAdaptor:
                 self._dyn_leading_dim,
                 self._dynamic_divisibility,
             )
-            if self._cache_dynamic_shape:
-                dyn_base += (
-                    tuple(int(d) for d in self._orig_shape),
-                    tuple(int(s) for s in self._orig_strides),
-                )
             if not self._cached_dims:
                 return dyn_base
             extras = tuple((d, int(self._orig_shape[d]), int(self._orig_strides[d])) for d in sorted(self._cached_dims))

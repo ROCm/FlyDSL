@@ -204,9 +204,15 @@ def _inline_asm_void(operands, asm_string, constraints):
     llvm.inline_asm(None, operands, asm_string, constraints, has_side_effects=True)
 
 
+_LDS_PTR_TYPE = None
+
+
 def _inttoptr_lds(byte_addr):
     """Convert an integer byte address to !llvm.ptr<3> (LDS pointer)."""
-    return llvm.inttoptr(ir.Type.parse("!llvm.ptr<3>"), _raw(fx.Int64(byte_addr)))
+    global _LDS_PTR_TYPE
+    if _LDS_PTR_TYPE is None:
+        _LDS_PTR_TYPE = ir.Type.parse("!llvm.ptr<3>")
+    return llvm.inttoptr(_LDS_PTR_TYPE, _raw(fx.Int64(byte_addr)))
 
 
 _gep = buffer_ops.get_element_ptr

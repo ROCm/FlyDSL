@@ -14,10 +14,10 @@ switches the memref to layout-dynamic and elides shape/stride from the key
 
 Raw ``torch.Tensor`` arguments go through the auto-adapt path
 (``TensorAdaptor(t)`` with ``dynamic_layout=True``).  They get a
-layout-dynamic memref, but conservatively keep shape/stride in the key so
-helper code that bakes shape facts while tracing stays correct.
-``mark_static`` further pins specific dims into the cache key on top of
-either layout.
+layout-dynamic memref and the cache key elides shape/stride: one compile
+serves all shapes, mirroring the long-standing behaviour.  Kernels that
+bake concrete shape values at trace time must opt into shape-pinning via
+``mark_static(dims=[...])``.
 """
 
 import pytest
@@ -64,11 +64,11 @@ def test_raw_cache_signature_matches_auto_adapted_tensor():
     assert raw_sig == auto_sig
 
 
-def test_raw_cache_signature_pins_shape():
-    """Raw tensors keep shape/stride in the key (conservative default for shape-baking helpers); shapes differ ⇒ keys differ."""
+def test_raw_cache_signature_shares_across_shapes():
+    """Raw tensors hit the layout-dynamic memref path; the cache key elides shape/stride so one compile serves all shapes."""
     a = torch.empty((100,), dtype=torch.float32)
     b = torch.empty((999,), dtype=torch.float32)
-    assert TensorAdaptor.raw_cache_signature(a) != TensorAdaptor.raw_cache_signature(b)
+    assert TensorAdaptor.raw_cache_signature(a) == TensorAdaptor.raw_cache_signature(b)
 
 
 def test_raw_cache_signature_differs_by_rank():
