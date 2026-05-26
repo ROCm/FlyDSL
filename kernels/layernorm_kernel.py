@@ -15,13 +15,10 @@ import math
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl._mlir.ir import InsertionPoint
-from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, const_expr, gpu, range_constexpr
 from flydsl.expr import math as fmath
 from flydsl.expr.vector import ReductionOp, full
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
-from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from kernels.kernels_common import dtype_to_elem_type, get_warp_size
 
 KERNEL_NAME = "layernorm"
@@ -44,12 +41,10 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
     elem_bits = 32 if dtype_str == "f32" else 16
 
     # ── Shared-memory allocation for block reductions ─────────────────────
-    allocator = SmemAllocator(None, arch=arch)
-    f32_bytes = 4
-    sum_offset = allocator._align(allocator.ptr, 16)
-    allocator.ptr = sum_offset + RED_SLOTS * f32_bytes
-    sumsq_offset = allocator._align(allocator.ptr, 16)
-    allocator.ptr = sumsq_offset + RED_SLOTS * f32_bytes
+    @fx.struct
+    class SharedStorage:
+        s_sum: fx.Array[fx.Float32, RED_SLOTS, 16]
+        s_sumsq: fx.Array[fx.Float32, RED_SLOTS, 16]
 
     # ── GPU kernel ────────────────────────────────────────────────────────
     @flyc.kernel
@@ -66,11 +61,9 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
         fm_fast = arith.FastMathFlags.fast
         eps_c = EPS
 
-        base_ptr = allocator.get_base()
-        s_sum = SmemPtr(base_ptr, sum_offset, fx.Float32.ir_type, shape=(RED_SLOTS,))
-        s_sumsq = SmemPtr(base_ptr, sumsq_offset, fx.Float32.ir_type, shape=(RED_SLOTS,))
-        s_sum.get()
-        s_sumsq.get()
+        lds = fx.SharedAllocator().allocate(SharedStorage).peek()
+        s_sum = lds.s_sum.view(fx.make_layout(RED_SLOTS, 1))
+        s_sumsq = lds.s_sumsq.view(fx.make_layout(RED_SLOTS, 1))
 
         # ── helpers: wave / block reduction ───────────────────────────────
         def wave_reduce_add(x):
@@ -92,26 +85,26 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
             w1 = wave_reduce_add(val1)
 
             if lane == 0:
-                SmemPtr.store(s_sum, w0, [wave])
-                SmemPtr.store(s_sumsq, w1, [wave])
+                fx.memref_store(w0, s_sum, wave)
+                fx.memref_store(w1, s_sumsq, wave)
             gpu.barrier()
 
             if wave == 0:
                 in_range = lane < RED_SLOTS
                 lane_safe = in_range.select(lane, 0)
-                v0 = SmemPtr.load(s_sum, [lane_safe])
-                v1 = SmemPtr.load(s_sumsq, [lane_safe])
+                v0 = fx.memref_load(s_sum, lane_safe)
+                v1 = fx.memref_load(s_sumsq, lane_safe)
                 ww0 = in_range.select(v0, 0.0)
                 ww1 = in_range.select(v1, 0.0)
                 ww0 = wave_reduce_add(ww0)
                 ww1 = wave_reduce_add(ww1)
 
                 if lane == 0:
-                    SmemPtr.store(s_sum, ww0, [0])
-                    SmemPtr.store(s_sumsq, ww1, [0])
+                    fx.memref_store(ww0, s_sum, 0)
+                    fx.memref_store(ww1, s_sumsq, 0)
             gpu.barrier()
 
-            return SmemPtr.load(s_sum, [0]), SmemPtr.load(s_sumsq, [0])
+            return fx.memref_load(s_sum, 0), fx.memref_load(s_sumsq, 0)
 
         def compute_mean_rstd(sum_val, sumsq_val):
             inv_n = 1.0 / float(N)
@@ -313,11 +306,6 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
         m_in: fx.Int32,
         stream: fx.Stream = fx.Stream(None),
     ):
-        allocator.finalized = False
-        ctx = CompilationContext.get_current()
-        with InsertionPoint(ctx.gpu_module_body):
-            allocator.finalize()
-
         launcher = layernorm_kernel(Input, Gamma, Beta, Output)
         launcher.launch(
             grid=(m_in, 1, 1),

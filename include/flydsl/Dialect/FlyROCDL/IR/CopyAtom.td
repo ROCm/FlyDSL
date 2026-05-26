@@ -6,14 +6,14 @@
 
 include "flydsl/Dialect/FlyROCDL/IR/Dialect.td"
 
-def FlyROCDL_CopyOpBufferCopy : FlyROCL_StatefulCopyOp<"CopyOpCDNA3BufferCopy", "cdna3.buffer_copy",[]> {
+def FlyROCDL_CopyOpBufferCopy : FlyROCDL_StatefulCopyOp<"CopyOpCDNA3BufferCopy", "cdna3.buffer_copy",[]> {
   let parameters = (ins
     "int32_t":$bitSize
   );
   let assemblyFormat = "`<` $bitSize `>`";
 }
 
-def FlyROCDL_CopyOpBufferCopyLDS : FlyROCL_StatefulCopyOp<"CopyOpCDNA3BufferCopyLDS", "cdna3.buffer_copy_lds",[]> {
+def FlyROCDL_CopyOpBufferCopyLDS : FlyROCDL_StatefulCopyOp<"CopyOpCDNA3BufferCopyLDS", "cdna3.buffer_copy_lds",[]> {
   let parameters = (ins
     "int32_t":$bitSize
   );
@@ -21,7 +21,7 @@ def FlyROCDL_CopyOpBufferCopyLDS : FlyROCL_StatefulCopyOp<"CopyOpCDNA3BufferCopy
   let genVerifyDecl = 1;
 }
 
-def FlyROCDL_CopyOpBufferAtomic : FlyROCL_StatefulCopyOp<"CopyOpCDNA3BufferAtomic", "cdna3.buffer_atomic",[]> {
+def FlyROCDL_CopyOpBufferAtomic : FlyROCDL_StatefulCopyOp<"CopyOpCDNA3BufferAtomic", "cdna3.buffer_atomic",[]> {
   let parameters = (ins
     "::mlir::fly::AtomicOpAttr":$atomicOp,
     "Type":$valType
@@ -35,7 +35,7 @@ def FlyROCDL_CopyOpBufferAtomic : FlyROCL_StatefulCopyOp<"CopyOpCDNA3BufferAtomi
   ];
 }
 
-def FlyROCDL_CopyOpLdsReadTranspose : FlyROCL_CopyOp<"CopyOpCDNA4LdsReadTranspose", "cdna4.lds_read_trans",[]> {
+def FlyROCDL_CopyOpLdsReadTranspose : FlyROCDL_CopyOp<"CopyOpCDNA4LdsReadTranspose", "cdna4.lds_read_trans",[]> {
   let parameters = (ins
     "int32_t":$transGranularity, "int32_t":$bitSize
   );

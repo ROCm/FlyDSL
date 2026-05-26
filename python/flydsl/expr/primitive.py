@@ -1046,7 +1046,7 @@ def ptrtoint(ptr, loc=None, ip=None):
 
 @traced_op
 def add_offset(ptr, offset, loc=None, ip=None):
-    if not isinstance(offset, ir.Value):
+    if not _is_int_tuple_value(offset):
         offset = make_int_tuple(offset, loc=loc, ip=ip)
     return fly.add_offset(ptr, offset, loc=loc, ip=ip)
 
