@@ -436,7 +436,12 @@ def _flydsl_pscale_test_case(
     diff = (output_flydsl.float() - naive_out.float()).abs()
     max_diff = float(diff.max())
     rel = max_diff / (naive_out.float().abs().max().item() + 1e-8)
-    ok = max_diff < 0.05 or rel < 0.05
+    try:
+        torch.testing.assert_close(output_flydsl, naive_out, atol=0.05, rtol=0.05)
+        ok = True
+    except AssertionError as exc:
+        ok = False
+        raise exc
     status = "PASS" if ok else "FAIL"
     print(
         f"  [{status}] mode={p_scale_mode:<16}  "
@@ -621,20 +626,19 @@ def _flydsl_pscale_bench(
 
 def run_flydsl_pscale_perf():
     """Run a sweep of perf configs covering small/large batch and context."""
+    _kv_lens = [1024, 16384, 32768, 65536, 131072]
+    _seq_counts = [2, 4, 8, 16, 32, 64, 128, 256]
+    _base = dict(num_seq_q=2, block_size=16, num_head_kv=1, num_head_q=8, head_dim=128)
     configs = [
-        # dict(num_batch=1,   num_seq_q=1, context_length=1024,  block_size=16, num_head_kv=2, num_head_q=8,  head_dim=128),
-        # dict(num_batch=16,  num_seq_q=1, context_length=1024,  block_size=16, num_head_kv=2, num_head_q=8,  head_dim=128),
-        # dict(num_batch=16,  num_seq_q=1, context_length=4096,  block_size=16, num_head_kv=2, num_head_q=8,  head_dim=128),
-        # dict(num_batch=16,  num_seq_q=1, context_length=8192,  block_size=16, num_head_kv=2, num_head_q=8,  head_dim=128),
-        # dict(num_batch=64,  num_seq_q=1, context_length=1024,  block_size=16, num_head_kv=2, num_head_q=8,  head_dim=128),
-        # dict(num_batch=64,  num_seq_q=1, context_length=8192,  block_size=16, num_head_kv=2, num_head_q=8,  head_dim=128),
-        # dict(num_batch=128, num_seq_q=1, context_length=4096,  block_size=16, num_head_kv=4, num_head_q=32, head_dim=128),
-        dict(num_batch=256, num_seq_q=2, context_length=131072,  block_size=16, num_head_kv=1, num_head_q=8, head_dim=128),
+        dict(num_batch=ns, context_length=kv, **_base)
+        for kv in _kv_lens
+        for ns in _seq_counts
     ]
-    print("\n=== FlyDSL pa_decode_ps_kernel performance (p_scale_mode=all_2) ===")
+    p_scale_mode="none"
+    print(f"\n=== FlyDSL pa_decode_ps_kernel performance (p_scale_mode={p_scale_mode}) ===")
     results = []
     for cfg in configs:
-        r = _flydsl_pscale_bench(**cfg, p_scale_mode="none")
+        r = _flydsl_pscale_bench(**cfg, p_scale_mode=p_scale_mode)
         results.append((cfg, r))
     return results
 
