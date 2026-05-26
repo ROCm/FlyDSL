@@ -11,10 +11,11 @@ Sweep matrix (mori-parity, mixed dispatch / combine dtype):
   - ``warp_per_block``    in {4, 8, 16}
 
 11 * 2 * 2 * 3 * 3 = 396 cases.  Each case is timed in ``--mode bench
---warmup 5 --iters 5`` (eager, NOT cudagraph: that mode merges
-dispatch + combine into a single ``[GPU] dispatch+combine (event)``
-table and we want them broken out separately); bandwidth uses mori's
-algo-BW formula reported by ``bench_op`` on rank 0.  Failed cases are recorded
+--warmup 5 --iters 5 --compare-mori`` (eager, NOT cudagraph: cudagraph
+merges dispatch + combine into a single ``[GPU] dispatch+combine
+(event)`` table and we want them broken out separately; ``--compare-mori``
+adds a mori head-to-head section in the output).  Bandwidth uses mori's
+algo-BW formula reported by ``bench_op`` on rank 0 for both impls.  Failed cases are recorded
 with ``failed=True`` (no fly_disp_us / fly_comb_us numbers) so the
 markdown still has the case listed.
 
@@ -96,6 +97,7 @@ def _build_cmd(args: argparse.Namespace, case: dict[str, Any]) -> list[str]:
         TEST_SCRIPT,
         "--mode",
         "bench",
+        "--compare-mori",
         "--warmup",
         str(args.warmup),
         "--iters",
@@ -159,6 +161,33 @@ def _section_key(case: dict[str, Any]) -> tuple[str, bool]:
     return (case["dispatch_dtype"], not case["use_external_inp_buf"])
 
 
+def _fmt_us(rec: dict[str, Any], section: str, which: str) -> str:
+    sect = rec.get(section, {})
+    if not sect or which not in sect:
+        return "n/a"
+    return f"{sect[which]['avg_us']:.1f}"
+
+
+def _fmt_bw(rec: dict[str, Any], section: str, which: str) -> str:
+    sect = rec.get(section, {})
+    if not sect or which not in sect:
+        return "n/a"
+    return f"{sect[which]['bw_gbps']:.1f}"
+
+
+def _speedup(rec: dict[str, Any], which: str) -> str:
+    """``mori_us / fly_us`` -- >1 means FlyDSL is faster than mori."""
+    fly = rec.get("flydsl", {}).get(which, {})
+    mori = rec.get("mori", {}).get(which, {})
+    if not fly or not mori:
+        return "n/a"
+    fly_us = fly.get("avg_us", 0.0)
+    mori_us = mori.get("avg_us", 0.0)
+    if fly_us <= 0.0:
+        return "n/a"
+    return f"{mori_us / fly_us:.2f}x"
+
+
 def _write_markdown(md_path: str, results: list[dict[str, Any]]) -> None:
     sections: dict[tuple[str, bool], list[dict[str, Any]]] = {}
     for rec in results:
@@ -167,6 +196,7 @@ def _write_markdown(md_path: str, results: list[dict[str, Any]]) -> None:
     n_total = len(results)
     n_failed = sum(1 for r in results if r.get("failed"))
     n_ok = n_total - n_failed
+    n_with_mori = sum(1 for r in results if not r.get("failed") and r.get("mori", {}).get("dispatch") is not None)
 
     with open(md_path, "w") as fh:
         fh.write("# Dispatch / Combine mixed-dtype perf sweep (mori-parity)\n\n")
@@ -174,17 +204,21 @@ def _write_markdown(md_path: str, results: list[dict[str, Any]]) -> None:
             "Per the launch-time dtype JIT cache (mori-parity), this sweep "
             "exercises every ``(max_tokens, dispatch_dtype, p2p_read, "
             "block_num, warp_per_block)`` combination with ``combine_dtype = "
-            "bf16`` and ``quant_type = none``.  Times are in microseconds, "
-            "averaged across all 8 ranks; bandwidth is per-rank algo-BW "
-            "(mori formula) in GB/s.\n\n"
+            "bf16`` and ``quant_type = none``, head-to-head FlyDSL vs mori. "
+            "Times are in microseconds, averaged across all 8 ranks; "
+            "bandwidth is per-rank algo-BW (mori formula) in GB/s.  "
+            "``fly_d_x`` / ``fly_c_x`` columns are ``mori_us / fly_us`` -- "
+            "values > 1.00x mean FlyDSL is faster.\n\n"
         )
         fh.write("Test configuration\n\n")
         fh.write("- world_size = 8 (EP=8)\n")
         fh.write("- k = 8\n")
         fh.write("- num_experts_per_rank = 32\n")
         fh.write("- max_token_type_size = auto (max of dispatch/combine elem size)\n")
-        fh.write("- launch: ``--mode bench --warmup 5 --iters 5`` (eager)\n\n")
-        fh.write(f"Total cases: {n_total}; OK: {n_ok}; Failed: {n_failed}\n\n")
+        fh.write("- launch: ``--mode bench --warmup 5 --iters 5 --compare-mori`` (eager)\n\n")
+        fh.write(
+            f"Total cases: {n_total}; OK: {n_ok}; Failed: {n_failed}; " f"with mori head-to-head: {n_with_mori}\n\n"
+        )
 
         for d_dtype, p2p_read in sorted(sections.keys()):
             tag = f"{d_dtype} dispatch -> bf16 combine, P2P-read = {p2p_read}"
@@ -198,31 +232,44 @@ def _write_markdown(md_path: str, results: list[dict[str, Any]]) -> None:
             )
             fh.write(f"## {tag}\n\n")
             fh.write(
-                "| max_tokens | block_num | warp_per_block | dispatch us "
-                "| combine us | dispatch GB/s | combine GB/s | total_recv | status |\n"
+                "| max_tokens | block_num | warp_per_block "
+                "| fly_d_us | mori_d_us | fly_d_x "
+                "| fly_c_us | mori_c_us | fly_c_x "
+                "| fly_d_GB/s | mori_d_GB/s | fly_c_GB/s | mori_c_GB/s "
+                "| total_recv | status |\n"
             )
             fh.write(
-                "|-----------:|----------:|---------------:|-----------:"
-                "|-----------:|--------------:|-------------:|-----------:|:------|\n"
+                "|-----------:|----------:|---------------:"
+                "|---------:|----------:|--------:"
+                "|---------:|----------:|--------:"
+                "|-----------:|------------:|-----------:|------------:"
+                "|-----------:|:------|\n"
             )
             for r in recs:
                 c = r["case"]
                 if r.get("failed"):
                     fh.write(
                         f"| {c['max_tokens']} | {c['block_num']} | "
-                        f"{c['warp_per_block']} | -- | -- | -- | -- | -- | "
+                        f"{c['warp_per_block']} | -- | -- | -- | -- | -- | -- "
+                        f"| -- | -- | -- | -- | -- | "
                         f"FAIL ({r.get('reason', 'unknown')}) |\n"
                     )
                     continue
-                fly = r.get("flydsl", {})
-                d = fly.get("dispatch", {})
-                cb = fly.get("combine", {})
                 tr = r.get("total_recv", 0)
                 fh.write(
                     f"| {c['max_tokens']} | {c['block_num']} | "
-                    f"{c['warp_per_block']} | {d.get('avg_us', 0):.1f} | "
-                    f"{cb.get('avg_us', 0):.1f} | {d.get('bw_gbps', 0):.1f} | "
-                    f"{cb.get('bw_gbps', 0):.1f} | {tr} | OK |\n"
+                    f"{c['warp_per_block']} "
+                    f"| {_fmt_us(r, 'flydsl', 'dispatch')} "
+                    f"| {_fmt_us(r, 'mori', 'dispatch')} "
+                    f"| {_speedup(r, 'dispatch')} "
+                    f"| {_fmt_us(r, 'flydsl', 'combine')} "
+                    f"| {_fmt_us(r, 'mori', 'combine')} "
+                    f"| {_speedup(r, 'combine')} "
+                    f"| {_fmt_bw(r, 'flydsl', 'dispatch')} "
+                    f"| {_fmt_bw(r, 'mori', 'dispatch')} "
+                    f"| {_fmt_bw(r, 'flydsl', 'combine')} "
+                    f"| {_fmt_bw(r, 'mori', 'combine')} "
+                    f"| {tr} | OK |\n"
                 )
             fh.write("\n")
 
