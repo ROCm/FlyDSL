@@ -2752,14 +2752,6 @@ def pa_decode_ps_launch(
     # forces both K and V into per-token and is only supported by the metadata
     # kernel).  When k_scale_per_token=True, per_token_kv is forced False.
     per_token_kv = (not k_scale_per_token) and key_scale.ndim > 1
-    block_size = key_cache.shape[-2]
-    if metadata is None and block_size == 1024:
-        if is_graph_capturing:
-            raise ValueError(
-                "CUDA graph capture requires precomputed `metadata`; "
-                "call `get_pa_metadata()` before capture and pass it via `metadata=`."
-            )
-        metadata = get_pa_metadata(query, key_cache, context_lengths, kv_indptr, num_query_heads, num_kv_heads)
 
     query_length = query.shape[0] // context_lengths.shape[0]
     query_group_size = num_query_heads // num_kv_heads
@@ -3057,6 +3049,14 @@ def pa_decode_ps_launch(
             s,
         )
         return "ps_small_block"
+
+    if metadata is None:
+        if is_graph_capturing:
+            raise ValueError(
+                "CUDA graph capture requires precomputed `metadata`; "
+                "call `get_pa_metadata()` before capture and pass it via `metadata=`."
+            )
+        metadata = get_pa_metadata(query, key_cache, context_lengths, kv_indptr, num_query_heads, num_kv_heads)
 
     work_indptr = metadata["work_indptr"]
     work_info_flat = metadata["work_info_flat"]
