@@ -109,9 +109,7 @@ def test_constexpr_annotation_survives_freevar_rebuild():
 
         @flyc.jit
         def launch(Out: fx.Tensor, n: fx.Int32, stream: fx.Stream = fx.Stream(None)):
-            kernel(Out, n, BLOCK_SIZE=64).launch(
-                grid=(1, 1, 1), block=(1, 1, 1), stream=stream.value
-            )
+            kernel(Out, n, BLOCK_SIZE=64).launch(grid=(1, 1, 1), block=(1, 1, 1), stream=stream.value)
 
         return launch
 
