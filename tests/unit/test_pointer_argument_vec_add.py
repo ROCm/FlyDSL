@@ -30,9 +30,7 @@ def pointer_vec_add_kernel(
 ):
     idx = fx.block_idx.x * fx.block_dim.x + fx.thread_idx.x
     if idx < n:
-        a_val = fx.ptr_load(A + idx)
-        b_val = fx.ptr_load(B + idx)
-        fx.ptr_store(a_val + b_val, C + idx)
+        C[idx] = A[idx] + B[idx]
 
 
 @flyc.jit
