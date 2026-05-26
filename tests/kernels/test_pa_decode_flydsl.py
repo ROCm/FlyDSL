@@ -324,7 +324,7 @@ def _flydsl_pscale_test_case(
     _ROOT = "/FlyDSL"
     if _ROOT not in _s.path:
         _s.path.insert(0, _ROOT)
-    from kernels.pa_decode_fp8 import get_pa_metadata, get_recommended_splits, pa_decode_ps_launch
+    from kernels.pa_decode_fp8 import get_recommended_splits, pa_decode_ps_launch
 
     device = torch.device("cuda:0")
     torch.set_default_device(device)
@@ -381,15 +381,6 @@ def _flydsl_pscale_test_case(
         block_size,
         device,
     )
-    metadata = get_pa_metadata(
-        flydsl_inp["query_bf16"],
-        flydsl_inp["key_cache_fp8"],
-        flydsl_inp["context_lengths"],
-        kv_indptr,
-        num_head_q,
-        num_head_kv,
-    )
-
     eqgs = num_seq_q * (num_head_q // num_head_kv)
     # max_context_partition_num for small-block PS path
     context_partition_size = 256
@@ -420,7 +411,7 @@ def _flydsl_pscale_test_case(
         key_scale=flydsl_inp["key_scale"],
         value_scale=flydsl_inp["value_scale"],
         sliding_window=0,
-        metadata=metadata,
+        metadata=None,
         block_tables=flydsl_inp["block_tables"],
         max_context_partition_num=max_part,
         exp_sums=exp_sums,
@@ -508,7 +499,7 @@ def _flydsl_pscale_bench(
     for one config under the requested p_scale mode.  Returns a dict with
     timings in microseconds.
     """
-    from kernels.pa_decode_fp8 import get_pa_metadata, get_recommended_splits, pa_decode_ps_launch
+    from kernels.pa_decode_fp8 import get_recommended_splits, pa_decode_ps_launch
 
     device = torch.device("cuda:0")
     torch.set_default_device(device)
@@ -531,10 +522,7 @@ def _flydsl_pscale_bench(
     kv_page_indices, kv_indptr = _build_ps_page(
         flydsl_inp["block_tables_list"], flydsl_inp["context_lengths"], block_size, device,
     )
-    metadata = get_pa_metadata(
-        flydsl_inp["query_bf16"], flydsl_inp["key_cache_fp8"],
-        flydsl_inp["context_lengths"], kv_indptr, num_head_q, num_head_kv,
-    )
+
 
     eqgs = num_seq_q * (num_head_q // num_head_kv)
     context_partition_size = 256
@@ -556,7 +544,7 @@ def _flydsl_pscale_bench(
             flydsl_inp["query_bf16"], flydsl_inp["key_cache_fp8"], flydsl_inp["value_cache_trans"],
             flydsl_inp["context_lengths"], kv_page_indices, kv_indptr, softmax_scale,
             key_scale=flydsl_inp["key_scale"], value_scale=flydsl_inp["value_scale"],
-            sliding_window=0, metadata=metadata,
+            sliding_window=0, metadata=None,
             block_tables=flydsl_inp["block_tables"], max_context_partition_num=max_part,
             exp_sums=exp_sums, max_logits=max_logits, temporary_output=tmp_out,
             p_scale=p_scale, p_scale_inv=p_scale_inv,
