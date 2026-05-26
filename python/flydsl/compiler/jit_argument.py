@@ -218,27 +218,25 @@ class TensorAdaptor:
         return arg.data_ptr()
 
     @staticmethod
-    def _auto_leading_dim(shape, strides) -> Optional[int]:
-        """Pick the leading stride-1 dim, preferring the meaningful one.
+    def _resolve_unit_stride_axis(strides) -> Optional[int]:
+        """Index of the first axis whose stride equals one, or ``None``.
 
-        Returns ``None`` only when no dim has stride 1 (truly cannot be
-        layout-dynamic). When several dims qualify -- common with unsqueezed
-        size-1 axes (e.g. shape ``(B, 1, N, 1)`` strides ``(N, N, 1, 1)``) or
-        size-0 dims whose stride PyTorch / DLPack may normalise to 1 -- pick
-        the candidate with the largest size, since that's the real innermost
-        contiguous axis; ties break rightmost (C-contiguous convention).
+        Used to decide which axis can stay statically stride-1 in a
+        layout-dynamic memref. Several axes may qualify when the tensor
+        has degenerate (size-0 or size-1) axes whose stride PyTorch /
+        DLPack happens to set to one; we just take the earliest match.
         """
-        leading_dims = [i for i, stride in enumerate(strides) if int(stride) == 1]
-        if not leading_dims:
-            return None
-        if len(leading_dims) == 1:
-            return leading_dims[0]
-        return max(leading_dims, key=lambda i: (int(shape[i]), i))
+        i = 0
+        for s in strides:
+            if int(s) == 1:
+                return i
+            i += 1
+        return None
 
     @staticmethod
     def _dynamic_cache_signature(tensor: torch.Tensor, assumed_align: Optional[int], use_32bit_stride: bool):
         strides = tensor.stride()
-        leading_dim = TensorAdaptor._auto_leading_dim(tensor.shape, strides)
+        leading_dim = TensorAdaptor._resolve_unit_stride_axis(strides)
         base = (tensor.dtype, assumed_align, use_32bit_stride)
         if leading_dim is None:
             shape_sig = tuple(int(d) for d in tensor.shape)
@@ -373,18 +371,18 @@ class TensorAdaptor:
         return self
 
     def _mark_layout_dynamic(self, leading_dim: int, divisibility: int):
-        # Resolve leading_dim from Python's stride view first, *then* pass it
-        # explicitly to C++.  Calling C++ with -1 has subtly different semantics:
-        # DLPack normalises strides for size-0 / size-1 dims (typically to 1),
-        # so a tensor like ``torch.empty(0, 8)`` (PyTorch strides (8, 1)) shows
-        # up to C++ as strides (1, 1) and triggers "Multiple dimensions have
-        # stride 1".  Resolving on the PyTorch view and passing the explicit
-        # index bypasses that auto-detect: C++ just verifies stride==1 at the
-        # picked dim.
+        # We always pass a concrete dim index down to C++, never -1.  Reason:
+        # the framework view of strides (what we get from ``tensor.stride()``)
+        # and the DLPack view that C++ sees can diverge for tensors with
+        # zero-size or unit-size axes -- DLPack tends to flatten the "doesn't
+        # matter" stride values toward 1, which makes C++'s own search for
+        # the unit-stride axis ambiguous.  Resolving on the framework view
+        # avoids that; the C++ side then only validates that
+        # ``stride[leading_dim] == 1`` at the explicitly chosen index.
         if leading_dim == -1:
-            resolved_leading_dim = self._auto_leading_dim(self._orig_shape, self._orig_strides)
+            resolved_leading_dim = self._resolve_unit_stride_axis(self._orig_strides)
             if resolved_leading_dim is None:
-                raise RuntimeError("Cannot determine leading dimension")
+                raise RuntimeError("No axis has stride 1; cannot mark layout-dynamic")
         else:
             resolved_leading_dim = int(leading_dim)
         self.tensor_adaptor.mark_layout_dynamic(resolved_leading_dim, divisibility)
