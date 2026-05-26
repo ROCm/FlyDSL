@@ -39,13 +39,16 @@ def get_ir_types(obj) -> List[ir.Type]:
         return [obj.type]
     if hasattr(obj, "__get_ir_types__"):
         return obj.__get_ir_types__()
-    if hasattr(obj, "__extract_to_ir_values__"):
-        return [v.type for v in obj.__extract_to_ir_values__()]
     if isinstance(obj, SimpleNamespace):
         return list(chain.from_iterable(get_ir_types(v) for v in vars(obj).values()))
     if isinstance(obj, (tuple, list)):
         return list(chain.from_iterable(get_ir_types(x) for x in obj))
-    raise TypeError(f"Cannot derive IR types from {obj}")
+    # derive IR types from extract_to_ir_values if possible
+    try:
+        ir_values = extract_to_ir_values(obj)
+        return [v.type for v in ir_values]
+    except TypeError:
+        raise TypeError(f"Cannot derive IR types from {obj}")
 
 
 def get_c_pointers(obj) -> List[ctypes.c_void_p]:
