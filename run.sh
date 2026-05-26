@@ -71,16 +71,19 @@ function run_flydsl_op {
 
 
     # python tests/kernels/test_flash_opus_attn.py --causal --dtype bf16 --batch 16 --num_heads 64 --num_kv_heads 64 --seq_len 8192 --head_dim 128 --iters 100
-    python tests/kernels/test_flash_opus_attn.py --causal --dtype bf16 --batch 2 --num_heads 64 --num_kv_heads 64 --seq_len 1024 --head_dim 128 --iters 100
+    # python tests/kernels/test_flash_opus_attn.py --causal --dtype bf16 --batch 2 --num_heads 64 --num_kv_heads 64 --seq_len 1024 --head_dim 128 --iters 100
     # python tests/kernels/test_flash_opus_attn.py --causal --dtype bf16 --batch 16 --num_heads 64 --num_kv_heads 64 --seq_len 512 --head_dim 128 --iters 100
     # python tests/kernels/test_flash_opus_attn.py --causal --dtype bf16 --batch 16 --num_heads 64 --num_kv_heads 8 --seq_len 8192 --head_dim 128 --iters 100
 
     # python tests/kernels/test_flash_opus_attn.py --warmup 5 --iters 100 --compare
     # python tests/kernels/test_flash_opus_attn.py --causal --dtype bf16 --batch 16 --num_heads 64 --num_kv_heads 64 --seq_len 8192 --head_dim 128 --iters 100 --compare
-    python tests/kernels/test_flash_opus_attn.py --causal --dtype bf16 --batch 2 --num_heads 64 --num_kv_heads 64 --seq_len 1024 --head_dim 128 --iters 100 --compare
+    # python tests/kernels/test_flash_opus_attn.py --causal --dtype bf16 --batch 2 --num_heads 64 --num_kv_heads 64 --seq_len 1024 --head_dim 128 --iters 100 --compare
     # python tests/kernels/test_flash_opus_attn.py --causal --dtype bf16 --batch 16 --num_heads 64 --num_kv_heads 8 --seq_len 8192 --head_dim 128 --iters 100 --compare
     # python tests/kernels/test_flash_opus_attn.py --causal --dtype bf16 --batch 16 --num_heads 64 --num_kv_heads 64 --seq_len 8192 --head_dim 128 --iters 100 --compare
 
+    python3 scripts/trace_segment_cycles.py seg_asm/cpp_attn/main_loop_cluster0_7.json | tee trace_info.cpp.log
+    python3 scripts/trace_segment_cycles.py seg_asm/fyd_attn/main_loop_cluster0_7.json | tee trace_info.log
+    # python3 scripts/trace_segment_cycles.py seg_asm/main_loop_cluster0_7_compare.json | tee trace.diff.log
 
 
     # export OPUS_INCLUDE_DIR=/shared/amdgpu/home/zhiming_ding_qle/yanguahe/code/wk_sp1/aiter/csrc/include

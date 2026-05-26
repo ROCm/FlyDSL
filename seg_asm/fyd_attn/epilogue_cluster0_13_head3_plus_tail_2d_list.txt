@@ -1,0 +1,99 @@
+[
+  [
+    "s_mov_b32 m0, s19",
+    "s_lshl_b64 s[12:13], s[8:9], 6",
+    "s_add_u32 s13, s12, 0xffffff40"
+  ],
+  [
+    "v_mfma_f32_32x32x16_bf16 v[82:97], v[98:101], v[130:133], 0",
+    "v_exp_f32_e32 v0, v66",
+    "v_exp_f32_e32 v122, v67"
+  ],
+  [
+    "s_mov_b32 m0, s30",
+    "s_lshl_b64 s[10:11], s[10:11], 6",
+    "s_mul_i32 s9, s10, s24"
+  ],
+  [
+    "s_setprio 1",
+    "v_mfma_f32_32x32x16_bf16 v[2:17], v[194:197], v[66:69], v[2:17]",
+    "v_max_f32_e32 v0, v82, v83"
+  ],
+  [
+    "s_mov_b32 m0, s28",
+    "s_mul_i32 s5, s4, s24",
+    "buffer_load_dwordx4 v215, s[0:3], s5 offen lds"
+  ],
+  [
+    "v_mfma_f32_32x32x16_bf16 v[66:81], v[82:85], v[130:133], 0",
+    "v_exp_f32_e32 v124, v98",
+    "v_exp_f32_e32 v125, v99"
+  ],
+  [
+    "v_add_u32_e32 v219, 0xc600, v219",
+    "ds_read_b64_tr_b16 v[194:195], v219 offset:0",
+    "ds_read_b64_tr_b16 v[196:197], v219 offset:128"
+  ],
+  [
+    "s_setprio 1",
+    "v_mfma_f32_32x32x16_bf16 v[2:17], v[194:197], v[98:101], v[2:17]",
+    "v_max_f32_e32 v194, v66, v67"
+  ],
+  [
+    "s_mov_b32 m0, s19",
+    "s_nop 0",
+    "buffer_load_dwordx4 v215, s[0:3], s9 offen lds"
+  ],
+  [
+    "v_mfma_f32_32x32x16_bf16 v[66:81], v[82:85], v[130:133], 0",
+    "v_exp_f32_e32 v106, v114",
+    "v_exp_f32_e32 v107, v115"
+  ],
+  [
+    "ds_read_b64_tr_b16 v[122:123], v217 offset:0",
+    "ds_read_b64_tr_b16 v[124:125], v217 offset:128",
+    "ds_read_b64_tr_b16 v[114:115], v217 offset:256"
+  ],
+  [
+    "v_mfma_f32_32x32x16_bf16 v[2:17], v[122:125], v[98:101], v[2:17]",
+    "v_max_f32_e32 v122, v66, v67",
+    "v_max3_f32 v122, v122, v68, v69"
+  ],
+  [
+    "ds_read_b64_tr_b16 v[86:87], v219 offset:0",
+    "ds_read_b64_tr_b16 v[88:89], v219 offset:128",
+    "ds_read_b64_tr_b16 v[90:91], v219 offset:256"
+  ],
+  [
+    "v_mfma_f32_32x32x16_bf16 v[2:17], v[86:89], v[66:69], v[2:17]",
+    "v_mfma_f32_32x32x16_bf16 v[50:65], v[102:105], v[66:69], v[50:65]",
+    "v_mfma_f32_32x32x16_bf16 v[34:49], v[118:121], v[66:69], v[34:49]"
+  ],
+  [
+    "v_pk_mul_f32 v[4:5], v[4:5], v[0:1] op_sel_hi:[1,0]",
+    "v_pk_mul_f32 v[2:3], v[2:3], v[0:1] op_sel_hi:[1,0]",
+    "s_nop 0"
+  ],
+  [
+    "v_cvt_pk_bf16_f32 v0, v30, v31",
+    "v_cvt_pk_bf16_f32 v1, v32, v33",
+    "buffer_store_dwordx2 v[0:1], v4, s[0:3], 0 offen offset:240"
+  ]
+]
+[
+  { "key": "desc", "value": "Epilogue Cluster 0" },
+  { "key": "desc", "value": "Epilogue Cluster 1" },
+  { "key": "desc", "value": "Epilogue Cluster 2" },
+  { "key": "desc", "value": "Epilogue Cluster 3" },
+  { "key": "desc", "value": "Epilogue Cluster 4" },
+  { "key": "desc", "value": "Epilogue Cluster 5" },
+  { "key": "desc", "value": "Epilogue Cluster 6" },
+  { "key": "desc", "value": "Epilogue Cluster 7" },
+  { "key": "desc", "value": "Epilogue Cluster 8" },
+  { "key": "desc", "value": "Epilogue Cluster 9" },
+  { "key": "desc", "value": "Epilogue Cluster 10" },
+  { "key": "desc", "value": "Epilogue Cluster 11" },
+  { "key": "desc", "value": "Epilogue Cluster 12" },
+  { "key": "desc", "value": "Epilogue Cluster 13" },
+  { "key": "desc", "value": "Epilogue final output stores" }
+]

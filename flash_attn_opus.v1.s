@@ -1066,8 +1066,6 @@ flash_attn_opus_kernel_0:
 	v_exp_f32_e32 v114, v128
 	v_mfma_f32_32x32x16_bf16 v[18:33], v[174:177], v[110:113], v[18:33]
 	v_exp_f32_e32 v115, v129
-
-; Cluster 7:
 ; if const_expr(OPUS_SETPRIO):
 ; 	rocdl.s_setprio(0)
 	s_setprio 0
@@ -2441,25 +2439,36 @@ flash_attn_opus_kernel_0:
 	s_branch .LBB0_9
 
 .LBB0_16:
-; OPUS epilogue entry.
-; PY (flash_attn_opus.py L1675-L1698):
-;   m_row = loop_results[0]
-;   l_row = loop_results[1]
-;   v_o = [loop_results[2 + i] for i in range_constexpr(D_CHUNKS)]
-;   v_p_0 = _v_vec32_to_pair(loop_results[2 + D_CHUNKS])
-;   max_m3 = max_num_tiles - fx.Index(3)
-;   max_m2 = max_num_tiles - fx.Index(2)
-;   max_m1 = max_num_tiles - fx.Index(1)
-;   _async_load_v(max_m3 * fx.Index(BLOCK_N), 1)
-;   v_k = _async_load_k_from_lds_to_vgpr(1, urk_base_per_lane)
-;   rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
-;   _waitcnt_vm_n(NUM_DMA_K + NUM_DMA_V)
-;   rocdl.sched_barrier(0)
-;   rocdl.s_barrier()
-;   rocdl.sched_barrier(0)
+; Epilogue
+; Cluster 0:
+; m_row = loop_results[0]
+; l_row = loop_results[1]
+; v_o = [loop_results[2 + i] for i in range_constexpr(D_CHUNKS)]
+; v_p_0 = _v_vec32_to_pair(loop_results[2 + D_CHUNKS])
+; max_m3 = max_num_tiles - fx.Index(3)
+; max_m2 = max_num_tiles - fx.Index(2)
+; max_m1 = max_num_tiles - fx.Index(1)
+; _async_load_v(max_m3 * fx.Index(BLOCK_N), 1)
+; v_k = _async_load_k_from_lds_to_vgpr(1, urk_base_per_lane)
+; rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
+; _waitcnt_vm_n(NUM_DMA_K + NUM_DMA_V)
+; rocdl.sched_barrier(0)
+; rocdl.s_barrier()
+; rocdl.sched_barrier(0)
 ; NOTE:
-;   Control reaches this label after the steady-state loop exits. The tail code drains the final K/V tiles
-;   and switches from lazy rescale back to exact online-softmax rescale for final correctness.
+;   Control reaches `.LBB0_16` either from the loop back-edge at ASM 1130
+;   (`s_cbranch_vccz .LBB0_16` when j >= max_num_tiles - 1) or from the
+;   zero-trip-count guard at ASM 846 (when max_num_tiles <= 4). In the
+;   zero-trip case loop_results[*] are the initial values from PART 3 of
+;   the preheader (v218=0, v220=m_row_pro, v2..v65=0); in the normal case
+;   they are the SSA yields from the last loop iteration.
+;   `s_mov_b32 m0, s19` selects the LDS write-base for the V[max_m3]
+;   async prefetch (V buf-1 LDS base set in prologue at ASM 768).
+;   Two `buffer_load_dwordx4 v215/v216, s[0:3], s6 offen lds` issue the
+;   async global-to-LDS V[max_m3] load. The 16 `ds_read_b128 v[X:X+3],
+;   v211 offset:Y` read K from LDS buf-1 (offsets 34048..34656) and V from
+;   LDS buf-0 (offsets 42368..42976) into the v_k registers used by
+;   Cluster 1's MMA0.
 	s_mov_b32 m0, s19
 	s_lshl_b64 s[12:13], s[8:9], 6
 	s_add_u32 s13, s12, 0xffffff40
@@ -2486,27 +2495,33 @@ flash_attn_opus_kernel_0:
 	ds_read_b128 v[238:241], v211 offset:42976
 	s_waitcnt vmcnt(4) lgkmcnt(0)
 	s_barrier
-; OPUS epilogue Cluster 1.
-; PY (flash_attn_opus.py L1700-L1721):
-;   v_s_1 = _mma0(v_k)
-;   v_p_0 = _attn_exp2_slice(v_p_0, 16, 16)
-;   tile_sum_e1 = _attn_sum(v_p_0)
-;   l_row = _fadd(l_row, tile_sum_e1)
-;   v_p_0 = _cast_p(v_p_0)
-;   v_p_0 = _anchor_v_p(v_p_0)
-;   _sched_barrier_exp_pairs(6, 3, 5)
-;   _sched_barrier_pairs(10, 5, 5)
-;   rocdl.sched_barrier(0)
-;   rocdl.s_barrier()
-;   rocdl.sched_barrier(0)
+; Cluster 1:
+; v_s_1 = _mma0(v_k)
+; v_p_0 = _attn_exp2_slice(v_p_0, 16, 16)
+; tile_sum_e1 = _attn_sum(v_p_0)
+; l_row = _fadd(l_row, tile_sum_e1)
+; v_p_0 = _cast_p(v_p_0)
+; v_p_0 = _anchor_v_p(v_p_0)
+; _sched_barrier_exp_pairs(6, 3, 5)
+; _sched_barrier_pairs(10, 5, 5)
+; rocdl.sched_barrier(0)
+; rocdl.s_barrier()
+; rocdl.sched_barrier(0)
 ; NOTE:
-;   The old P tile contributes to l_row while a new tail QK score tile is produced by MFMA.
-; SCHED HINT:
-;   Epilogue Cluster 1 mirrors the main-loop group-5 hints:
-;   `_sched_barrier_exp_pairs(6, 3, 5)` and
-;   `_sched_barrier_pairs(10, 5, 5)`. Because these markers are consumed by the
-;   scheduler, the verification target in ISA is the MFMA/EXP and MFMA/VALU
-;   interleave below, not literal `SCHED_GROUP_BARRIER` instructions.
+;   First epilogue cluster after the steady-state loop exits. Reuses the
+;   v_p_0 yielded from the loop's last iteration to (a) finish the second
+;   half of its `_attn_exp2_slice(v_p_0, 16, 16)` via 16 `v_exp_f32_e32`
+;   instructions interleaved with the MMA0 chain, (b) reduce the
+;   32-element local sum via the `v_add_f32_e32 v66, v183, v184` chain
+;   ending at `v_add_f32_e32 v221, v66, v81`, (c) cross-lane swap via
+;   `v_permlane32_swap_b32_e64 v221, v222 bound_ctrl:1` so v221/v222 hold
+;   the two halves of the warp-level tile_sum_e1, and (d) cast P back to
+;   bf16 via the 16 `v_cvt_pk_bf16_f32 v[66..81], ...` block (wrapped in
+;   `;;#ASMSTART/;;#ASMEND` to keep MachineCSE from merging them).
+;   The l_row update is deferred: v221/v222 are kept live in their own
+;   VGPRs and folded into v218 only by the final reduction chain at
+;   ASM ~4274-4275 (`v_add_f32_e32 v66, v218, v222`,
+;   `v_add_f32_e32 v66, v66, v221`).
 	v_mfma_f32_32x32x16_bf16 v[82:97], v[98:101], v[130:133], 0
 	v_exp_f32_e32 v0, v66
 	v_exp_f32_e32 v122, v67
@@ -2625,25 +2640,36 @@ flash_attn_opus_kernel_0:
 	;;#ASMSTART
 	;;#ASMEND
 	s_barrier
-; OPUS epilogue Cluster 2 K[max_m1] prefetch + V LDS + causal mask.
-; PY (flash_attn_opus.py L1723-L1751):
-;   _async_load_k(max_m1 * fx.Index(BLOCK_N), 1)
-;   v_packs_e3 = _read_v_packs_for_buf(0, urv_base_per_lane)
-;   if const_expr(CAUSAL):
-;   v_s_1 = _causal_mask_prologue_if_needed(
-;   v_s_1,
-;   max_m3,
-;   max_m2 * fx.Index(BLOCK_N),
-;   )
-;   else:
-;   v_s_1 = _v_s_vec_to_lists(v_s_1)
-;   rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
-;   _waitcnt_vm_n(NUM_DMA_K + NUM_DMA_V)
-;   rocdl.sched_barrier(0)
-;   rocdl.s_barrier()
-;   rocdl.sched_barrier(0)
+; Cluster 2:
+; _async_load_k(max_m1 * fx.Index(BLOCK_N), 1)
+; v_packs_e3 = _read_v_packs_for_buf(0, urv_base_per_lane)
+; if const_expr(CAUSAL):
+; 	v_s_1 = _causal_mask_prologue_if_needed(
+; 		v_s_1,
+; 		max_m3,
+; 		max_m2 * fx.Index(BLOCK_N),
+; 	)
+; else:
+; 	v_s_1 = _v_s_vec_to_lists(v_s_1)
+; rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
+; _waitcnt_vm_n(NUM_DMA_K + NUM_DMA_V)
+; rocdl.sched_barrier(0)
+; rocdl.s_barrier()
+; rocdl.sched_barrier(0)
 ; NOTE:
-;   Inserted from plan: previously-unmapped Python cluster now annotated for ASM correspondence.
+;   `s_mov_b32 m0, s30` selects the LDS write-base for the K[max_m1] async
+;   prefetch (K buf-1 LDS base, set in prologue at ASM 137). Two
+;   `buffer_load_dwordx4 v215/v216, s[4:7], s9 offen lds` issue the async
+;   global-to-LDS K[max_num_tiles-1] load.
+;   The 32 `ds_read_b64_tr_b16 v[X:X+1], v217 offset:Y` block (offsets
+;   0..960 + 8704..9664) reads the transposed V[max_m3] tile from LDS
+;   buf-0 into v_packs_e3 (used by Cluster 3's MMA1).
+;   The trailing `s_add_u32 s4, s12, 0xffffff80` + `s_cmp_ge_i32 s16, s4`
+;   compute `q_start_pos >= max_m2 * BLOCK_N`; the next
+;   `;;#ASMSTART/.../;;#ASMEND` inline-asm block performs
+;   `attn_mask_causal_tile(v_s_1)` (a chain of `v_cmp_lt_i32 + v_cndmask`
+;   writes NEG_INF=`0xff800000` into v224 then onto v82..v97/v98..v113);
+;   `s_cbranch_scc1 .LBB0_18` skips the mask body when out of range.
 	s_mov_b32 m0, s30
 	s_lshl_b64 s[10:11], s[10:11], 6
 	s_mul_i32 s9, s10, s24
@@ -2909,37 +2935,60 @@ flash_attn_opus_kernel_0:
 	v_mov_b32_e32 v101, v99
 	v_mov_b32_e32 v99, v0
 .LBB0_18:
-; OPUS epilogue Cluster 3.
-; PY (flash_attn_opus.py L1753-L1791):
-;   if const_expr(OPUS_SETPRIO):
-;   rocdl.s_setprio(1)
-;   v_o = _mma1(v_p_0, v_packs_e3, v_o)
-;   m_tile_max_e3 = _attn_row_max(v_s_1)
-;   row_max_e3 = _fmax(m_row, m_tile_max_e3)
-;   rescale_e3 = rocdl.exp2(T.f32, _raw(_fsub(m_row, row_max_e3)))
-;   m_row = row_max_e3
-;   v_s_1 = _attn_sub_row(v_s_1, row_max_e3)
-;   v_s_1 = _anchor_v_s(v_s_1)
-;   v_p_1 = _attn_exp2_slice(v_s_1, 0, 16)
-;   _sched_barrier_pairs(10, 5, 6)
-;   _sched_barrier_exp_pairs(6, 3, 6)
-;   rocdl.sched_barrier(0)
-;   _scale_o(v_o, rescale_e3)
-;   if const_expr(OPUS_SETPRIO):
-;   rocdl.s_setprio(0)
-;   rocdl.sched_barrier(0)
-;   rocdl.s_barrier()
-;   rocdl.sched_barrier(0)
+; Cluster 2 causal-mask skip target.
+; if const_expr(CAUSAL):
+; 	v_s_1 = _causal_mask_prologue_if_needed(
+; 		v_s_1,
+; 		max_m3,
+; 		max_m2 * fx.Index(BLOCK_N),
+; 	)
 ; NOTE:
-;   This tail path eagerly rescales O because there is no following loop body to defer it safely.
-; SCHED HINT:
-;   Tail Cluster 3 corresponds to source `_sched_barrier_pairs(10, 5, 6)` and
-;   `_sched_barrier_exp_pairs(6, 3, 6)`. The group barriers are still
-;   compiler-only and upward-looking; in final ISA they show up as an eager
-;   rescale region where MFMA, row-max/subtraction VALU, and `v_exp_f32` are
-;   interleaved before the subsequent scheduling fence and scale-O block.
+;   `.LBB0_18` is reached when `q_start_pos >= max_m2 * BLOCK_N` (i.e. this
+;   wave is past the causal boundary for the second-to-last KV tile in the
+;   epilogue), so the mask body is skipped. Both paths converge here.
+;   The next `s_waitcnt vmcnt(4) lgkmcnt(0)` + `s_barrier` is Cluster 2's
+;   closing synchronization fence (PY L1746 `rocdl.s_barrier()`) — it
+;   waits for the K[max_m1] async load and the LDS V reads to finish
+;   before Cluster 3 begins.
 	s_waitcnt vmcnt(4) lgkmcnt(0)
 	s_barrier
+; Cluster 3:
+; if const_expr(OPUS_SETPRIO):
+; 	rocdl.s_setprio(1)
+; v_o = _mma1(v_p_0, v_packs_e3, v_o)
+; m_tile_max_e3 = _attn_row_max(v_s_1)
+; row_max_e3 = _fmax(m_row, m_tile_max_e3)
+; rescale_e3 = rocdl.exp2(T.f32, _raw(_fsub(m_row, row_max_e3)))
+; m_row = row_max_e3
+; v_s_1 = _attn_sub_row(v_s_1, row_max_e3)
+; v_s_1 = _anchor_v_s(v_s_1)
+; v_p_1 = _attn_exp2_slice(v_s_1, 0, 16)
+; _sched_barrier_pairs(10, 5, 6)
+; _sched_barrier_exp_pairs(6, 3, 6)
+; rocdl.sched_barrier(0)
+; _scale_o(v_o, rescale_e3)
+; if const_expr(OPUS_SETPRIO):
+; 	rocdl.s_setprio(0)
+; rocdl.sched_barrier(0)
+; rocdl.s_barrier()
+; rocdl.sched_barrier(0)
+; NOTE:
+;   `s_setprio 1` raises priority of the dual-group time-multiplexing
+;   handoff so the slowest wave reaches the barrier first.
+;   MMA1 chain (16 `v_mfma_f32_32x32x16_bf16 v[X:Y], v[A:B], v[66:69]/...`)
+;   accumulates `v_p_0 * v_packs_e3` into v_o (banks v[2:17], v[50:65],
+;   v[34:49], v[18:33]). Interleaved with: (a) `_attn_row_max(v_s_1)` —
+;   the `v_max_f32_e32 v0, v82, v83` + 15× `v_max3_f32 v0, v0, ...`
+;   reduction + `v_permlane32_swap_b32_e64 v0, v66 bound_ctrl:1` +
+;   `v_max3_f32 v225, v220, v0, v66` (final fmax with m_row); (b)
+;   `v_sub_f32_e32 v97, v97, v225` and following — the 32 sub_row
+;   subtractions; (c) `v_exp_f32_e32 v0, v82` and following — the first
+;   half of `_attn_exp2_slice(v_s_1, 0, 16)` (16 v_exp).
+;   `s_setprio 0` + `s_barrier` close the cluster. The
+;   `_scale_o(v_o, rescale_e3)` step is HOISTED out of this cluster by
+;   LLVM and emitted at ASM ~3343-3377 (right before Cluster 7's MMA1),
+;   so the v_o accumulators are scaled exactly at the point they would
+;   otherwise be re-read.
 	s_setprio 1
 	v_mfma_f32_32x32x16_bf16 v[2:17], v[194:197], v[66:69], v[2:17]
 	v_max_f32_e32 v0, v82, v83
@@ -3030,17 +3079,22 @@ flash_attn_opus_kernel_0:
 	v_exp_f32_e32 v123, v97
 	s_setprio 0
 	s_barrier
-; OPUS epilogue Cluster 4 V[max_m2] prefetch + K LDS read.
-; PY (flash_attn_opus.py L1793-L1807):
-;   _async_load_v(max_m2 * fx.Index(BLOCK_N), 0)
-;   v_k = _async_load_k_from_lds_to_vgpr(0, urk_base_per_lane)
-;   rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
-;   _waitcnt_vm_n(NUM_DMA_K + NUM_DMA_V)
-;   rocdl.sched_barrier(0)
-;   rocdl.s_barrier()
-;   rocdl.sched_barrier(0)
+; Cluster 4:
+; _async_load_v(max_m2 * fx.Index(BLOCK_N), 0)
+; v_k = _async_load_k_from_lds_to_vgpr(0, urk_base_per_lane)
+; rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
+; _waitcnt_vm_n(NUM_DMA_K + NUM_DMA_V)
+; rocdl.sched_barrier(0)
+; rocdl.s_barrier()
+; rocdl.sched_barrier(0)
 ; NOTE:
-;   Inserted from plan: previously-unmapped Python cluster now annotated for ASM correspondence.
+;   `s_mov_b32 m0, s28` selects the LDS write-base for the V[max_m2] async
+;   prefetch (V buf-0 LDS base set in prologue at ASM 139). The two
+;   `buffer_load_dwordx4 v215/v216, s[0:3], s5 offen lds` issue the async
+;   global-to-LDS V load. The 16 `ds_read_b128 v[82:85]/.../v[242:245],
+;   v211 offset:Y` read K from LDS buf-0 (offsets 0..608) and the
+;   accompanying V slices (offsets 8320..8928) into v_k for Cluster 5's
+;   MMA0.
 	s_mov_b32 m0, s28
 	s_mul_i32 s5, s4, s24
 	buffer_load_dwordx4 v215, s[0:3], s5 offen lds
@@ -3065,22 +3119,32 @@ flash_attn_opus_kernel_0:
 	ds_read_b128 v[242:245], v211 offset:8928
 	s_waitcnt vmcnt(4) lgkmcnt(0)
 	s_barrier
-; OPUS epilogue Cluster 5 QK MMA + softmax (with l_row *= rescale).
-; PY (flash_attn_opus.py L1809-L1832):
-;   v_s_0 = _mma0(v_k)
-;   l_row = _fmul(l_row, rescale_e3)
-;   v_p_1 = _attn_exp2_slice(v_p_1, 16, 16)
-;   tile_sum_e5 = _attn_sum(v_p_1)
-;   l_row = _fadd(l_row, tile_sum_e5)
-;   v_p_1 = _cast_p(v_p_1)
-;   v_p_1 = _anchor_v_p(v_p_1)
-;   _sched_barrier_exp_pairs(6, 3, 7)
-;   _sched_barrier_pairs(10, 5, 7)
-;   rocdl.sched_barrier(0)
-;   rocdl.s_barrier()
-;   rocdl.sched_barrier(0)
+; Cluster 5:
+; v_s_0 = _mma0(v_k)
+; l_row = _fmul(l_row, rescale_e3)
+; v_p_1 = _attn_exp2_slice(v_p_1, 16, 16)
+; tile_sum_e5 = _attn_sum(v_p_1)
+; l_row = _fadd(l_row, tile_sum_e5)
+; v_p_1 = _cast_p(v_p_1)
+; v_p_1 = _anchor_v_p(v_p_1)
+; _sched_barrier_exp_pairs(6, 3, 7)
+; _sched_barrier_pairs(10, 5, 7)
+; rocdl.sched_barrier(0)
+; rocdl.s_barrier()
+; rocdl.sched_barrier(0)
 ; NOTE:
-;   Inserted from plan: previously-unmapped Python cluster now annotated for ASM correspondence.
+;   16 MMA0 instructions on alternating bank pairs `v[66:81]` /
+;   `v[82:97]`, interleaved with 16 `v_exp_f32_e32` (second half of v_p_1's
+;   exp2_slice covering elements 16..31) and 32 `v_add_f32_e32 v98, ...`
+;   accumulations (`_attn_sum(v_p_1)` running sum). The final
+;   `v_add_f32_e32 v223, v98, v113` + `v_mov_b32_e32 v224, v223` +
+;   `v_permlane32_swap_b32_e64 v223, v224 bound_ctrl:1` produces the two
+;   warp-level tile_sum_e5 halves kept in v223/v224.
+;   The `l_row = _fmul(l_row, rescale_e3)` and the `l_row += tile_sum_e5`
+;   ops are NOT emitted here — LLVM defers them, expressing them at the
+;   normalize-O reduction (ASM ~4276 `v_fmac_f32_e32 v223, v0, v66`).
+;   The 16 `v_cvt_pk_bf16_f32 v[98..113], ...` block then casts v_p_1
+;   back to bf16 in place.
 	v_mfma_f32_32x32x16_bf16 v[66:81], v[82:85], v[130:133], 0
 	v_exp_f32_e32 v124, v98
 	v_exp_f32_e32 v125, v99
@@ -3199,24 +3263,36 @@ flash_attn_opus_kernel_0:
 	;;#ASMSTART
 	;;#ASMEND
 	s_barrier
-; OPUS epilogue Cluster 6 V LDS read + causal mask + sync.
-; PY (flash_attn_opus.py L1834-L1860):
-;   v_packs_e7 = _read_v_packs_for_buf(1, urv_base_per_lane)
-;   if const_expr(CAUSAL):
-;   v_s_0 = _causal_mask_prologue_if_needed(
-;   v_s_0,
-;   max_m2,
-;   max_m1 * fx.Index(BLOCK_N),
-;   )
-;   else:
-;   v_s_0 = _v_s_vec_to_lists(v_s_0)
-;   rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
-;   _waitcnt_vm_n(NUM_DMA_V)
-;   rocdl.sched_barrier(0)
-;   rocdl.s_barrier()
-;   rocdl.sched_barrier(0)
+; Cluster 6:
+; v_packs_e7 = _read_v_packs_for_buf(1, urv_base_per_lane)
+; if const_expr(CAUSAL):
+; 	v_s_0 = _causal_mask_prologue_if_needed(
+; 		v_s_0,
+; 		max_m2,
+; 		max_m1 * fx.Index(BLOCK_N),
+; 	)
+; else:
+; 	v_s_0 = _v_s_vec_to_lists(v_s_0)
+; rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
+; _waitcnt_vm_n(NUM_DMA_V)
+; rocdl.sched_barrier(0)
+; rocdl.s_barrier()
+; rocdl.sched_barrier(0)
 ; NOTE:
-;   Inserted from plan: previously-unmapped Python cluster now annotated for ASM correspondence.
+;   `v_add_u32_e32 v219, 0xc600, v219` rebases the v219 lane offset by
+;   0xc600 to point at LDS buf-1 V slots (v219 was set up in the prologue
+;   preheader at ASM 734, then advanced per-iteration via
+;   `v_add_u32_e32 v0, 0xffffff80, v0` at ASM 1126; here we reuse it to
+;   index V buf-1 instead of buf-0).
+;   The 32 `ds_read_b64_tr_b16 v[X:X+1], v219 offset:Y` block reads the
+;   transposed V[max_m1] tile from LDS buf-1 into v_packs_e7 (used by
+;   Cluster 7's MMA1).
+;   The trailing `s_add_u32 ...` + `s_cmp_ge_i32 s16, ...` compute
+;   `q_start_pos >= max_m1 * BLOCK_N`; the `;;#ASMSTART/.../;;#ASMEND`
+;   inline-asm block writes NEG_INF into out-of-range lanes via
+;   `v_cmp_lt_i32 + v_cndmask` chains; `s_cbranch_scc1 .LBB0_20` skips
+;   the mask body when this wave is past the causal boundary. Both paths
+;   converge at .LBB0_20 below.
 	v_add_u32_e32 v219, 0xc600, v219
 	;;#ASMSTART
 	ds_read_b64_tr_b16 v[194:195], v219 offset:0
@@ -3473,35 +3549,6 @@ flash_attn_opus_kernel_0:
 	v_mov_b32_e32 v85, v83
 	v_mov_b32_e32 v83, v0
 .LBB0_20:
-; OPUS epilogue Cluster 7/9 rescale merge.
-; PY (flash_attn_opus.py L1862-L1898):
-;   if const_expr(OPUS_SETPRIO):
-;   rocdl.s_setprio(1)
-;   v_o = _mma1(v_p_1, v_packs_e7, v_o)
-;   m_tile_max_e7 = _attn_row_max(v_s_0)
-;   row_max_e7 = _fmax(m_row, m_tile_max_e7)
-;   rescale_e7 = rocdl.exp2(T.f32, _raw(_fsub(m_row, row_max_e7)))
-;   m_row = row_max_e7
-;   v_s_0 = _attn_sub_row(v_s_0, row_max_e7)
-;   v_s_0 = _anchor_v_s(v_s_0)
-;   v_p_0 = _attn_exp2_slice(v_s_0, 0, 16)
-;   _sched_barrier_pairs(10, 5, 8)
-;   _sched_barrier_exp_pairs(6, 3, 8)
-;   rocdl.sched_barrier(0)
-;   _scale_o(v_o, rescale_e7)
-;   if const_expr(OPUS_SETPRIO):
-;   rocdl.s_setprio(0)
-;   rocdl.sched_barrier(0)
-;   rocdl.s_barrier()
-;   rocdl.sched_barrier(0)
-; NOTE:
-;   Label .LBB0_20 is a tail mask/rescale merge point, not a source-level loop header.
-; SCHED HINT:
-;   This tail merge follows the same source idiom as Cluster 7/9:
-;   schedule MFMA/VALU/EXP groups above their markers, then close the region
-;   with `sched_barrier(0)` around the real `s_barrier`. The visible ISA keeps
-;   O rescale VALU before the next `s_barrier`, then restarts with a clean
-;   `s_setprio 1` + MFMA/row-max window.
 	v_sub_f32_e32 v0, v220, v225
 	v_exp_f32_e32 v0, v0
 	s_nop 0
@@ -3539,6 +3586,39 @@ flash_attn_opus_kernel_0:
 	v_pk_mul_f32 v[18:19], v[0:1], v[18:19] op_sel_hi:[0,1]
 	s_waitcnt vmcnt(2) lgkmcnt(0)
 	s_barrier
+; Cluster 7:
+; if const_expr(OPUS_SETPRIO):
+; 	rocdl.s_setprio(1)
+; v_o = _mma1(v_p_1, v_packs_e7, v_o)
+; m_tile_max_e7 = _attn_row_max(v_s_0)
+; row_max_e7 = _fmax(m_row, m_tile_max_e7)
+; rescale_e7 = rocdl.exp2(T.f32, _raw(_fsub(m_row, row_max_e7)))
+; m_row = row_max_e7
+; v_s_0 = _attn_sub_row(v_s_0, row_max_e7)
+; v_s_0 = _anchor_v_s(v_s_0)
+; v_p_0 = _attn_exp2_slice(v_s_0, 0, 16)
+; _sched_barrier_pairs(10, 5, 8)
+; _sched_barrier_exp_pairs(6, 3, 8)
+; rocdl.sched_barrier(0)
+; _scale_o(v_o, rescale_e7)
+; if const_expr(OPUS_SETPRIO):
+; 	rocdl.s_setprio(0)
+; rocdl.sched_barrier(0)
+; rocdl.s_barrier()
+; rocdl.sched_barrier(0)
+; NOTE:
+;   Mirrors Cluster 3 with v_p_1/v_packs_e7/v_s_0 sources. MMA1 chain
+;   (16 `v_mfma_f32_32x32x16_bf16 v[X:Y], v[A:B], v[98:101]/...`)
+;   accumulates `v_p_1 * v_packs_e7` into v_o, interleaved with: (a)
+;   `_attn_row_max(v_s_0)` reduction (`v_max_f32_e32 v194` + 15
+;   `v_max3_f32` + `v_permlane32_swap` + `v_max3_f32 v194, v225, ...`
+;   giving row_max_e7 = fmax(m_row=v225, m_tile_max_e7)); (b)
+;   `v_sub_f32_e32 v81, v81, v194` and following — 32 sub_row
+;   subtractions; (c) `v_exp_f32_e32 v98, v66` and following — first half
+;   of v_p_0's exp2_slice (16 v_exp).
+;   `s_setprio 0` + `s_barrier` close. As with Cluster 3,
+;   `_scale_o(v_o, rescale_e7)` is HOISTED out and emitted at ASM
+;   ~3859-3893 (right before Cluster 11's MMA1).
 	s_setprio 1
 	v_mfma_f32_32x32x16_bf16 v[2:17], v[194:197], v[98:101], v[2:17]
 	v_max_f32_e32 v194, v66, v67
@@ -3629,17 +3709,22 @@ flash_attn_opus_kernel_0:
 	v_exp_f32_e32 v110, v81
 	s_setprio 0
 	s_barrier
-; OPUS epilogue Cluster 8 V[max_m1] prefetch + K LDS read.
-; PY (flash_attn_opus.py L1900-L1914):
-;   _async_load_v(max_m1 * fx.Index(BLOCK_N), 1)
-;   v_k = _async_load_k_from_lds_to_vgpr(1, urk_base_per_lane)
-;   rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
-;   _waitcnt_vm_n(NUM_DMA_V)
-;   rocdl.sched_barrier(0)
-;   rocdl.s_barrier()
-;   rocdl.sched_barrier(0)
+; Cluster 8:
+; _async_load_v(max_m1 * fx.Index(BLOCK_N), 1)
+; v_k = _async_load_k_from_lds_to_vgpr(1, urk_base_per_lane)
+; rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
+; _waitcnt_vm_n(NUM_DMA_V)
+; rocdl.sched_barrier(0)
+; rocdl.s_barrier()
+; rocdl.sched_barrier(0)
 ; NOTE:
-;   Inserted from plan: previously-unmapped Python cluster now annotated for ASM correspondence.
+;   `s_mov_b32 m0, s19` selects LDS write-base for the V[max_m1] async
+;   prefetch (V buf-1 LDS base). Two `buffer_load_dwordx4 v215/v216,
+;   s[0:3], s9 offen lds` issue the async load (s9 reuses the K[max_m1]
+;   global offset already computed for Cluster 2). The 16 `ds_read_b128
+;   v[82:85]/.../v[246:249], v211 offset:Y` read K from LDS buf-1
+;   (offsets 34048..34656) and V slices (42368..42976) into v_k for
+;   Cluster 9's MMA0.
 	s_mov_b32 m0, s19
 	s_nop 0
 	buffer_load_dwordx4 v215, s[0:3], s9 offen lds
@@ -3664,22 +3749,31 @@ flash_attn_opus_kernel_0:
 	ds_read_b128 v[246:249], v211 offset:42976
 	s_waitcnt vmcnt(2) lgkmcnt(0)
 	s_barrier
-; OPUS epilogue Cluster 9 QK MMA + softmax (with l_row *= rescale).
-; PY (flash_attn_opus.py L1916-L1939):
-;   v_s_1 = _mma0(v_k)
-;   l_row = _fmul(l_row, rescale_e7)
-;   v_p_0 = _attn_exp2_slice(v_p_0, 16, 16)
-;   tile_sum_e9 = _attn_sum(v_p_0)
-;   l_row = _fadd(l_row, tile_sum_e9)
-;   v_p_0 = _cast_p(v_p_0)
-;   v_p_0 = _anchor_v_p(v_p_0)
-;   _sched_barrier_exp_pairs(6, 3, 9)
-;   _sched_barrier_pairs(10, 5, 9)
-;   rocdl.sched_barrier(0)
-;   rocdl.s_barrier()
-;   rocdl.sched_barrier(0)
+; Cluster 9:
+; v_s_1 = _mma0(v_k)
+; l_row = _fmul(l_row, rescale_e7)
+; v_p_0 = _attn_exp2_slice(v_p_0, 16, 16)
+; tile_sum_e9 = _attn_sum(v_p_0)
+; l_row = _fadd(l_row, tile_sum_e9)
+; v_p_0 = _cast_p(v_p_0)
+; v_p_0 = _anchor_v_p(v_p_0)
+; _sched_barrier_exp_pairs(6, 3, 9)
+; _sched_barrier_pairs(10, 5, 9)
+; rocdl.sched_barrier(0)
+; rocdl.s_barrier()
+; rocdl.sched_barrier(0)
 ; NOTE:
-;   Inserted from plan: previously-unmapped Python cluster now annotated for ASM correspondence.
+;   Same shape as Cluster 5 but for the second-to-last tile. 16 MMA0 on
+;   `v[66:81]` / `v[82:97]` ping-pong, interleaved with 16 v_exp (second
+;   half of v_p_0 exp2_slice) and 32 v_add (tile_sum_e9 chain). The final
+;   `v_add_f32_e32 v179, v98, v113` + `v_mov_b32_e32 v180, v179` +
+;   `v_permlane32_swap_b32_e64 v179, v180 bound_ctrl:1` produces the two
+;   warp-level tile_sum_e9 halves kept in v179/v180.
+;   As before, `l_row = _fmul(l_row, rescale_e7)` and
+;   `l_row += tile_sum_e9` are deferred to the normalize-O reduction
+;   (ASM ~4278 `v_fmac_f32_e32 v179, v178, v0`).
+;   The 16 `v_cvt_pk_bf16_f32 v[98..113], ...` block then casts v_p_0
+;   back to bf16 in place.
 	v_mfma_f32_32x32x16_bf16 v[66:81], v[82:85], v[130:133], 0
 	v_exp_f32_e32 v106, v114
 	v_exp_f32_e32 v107, v115
@@ -3798,24 +3892,31 @@ flash_attn_opus_kernel_0:
 	;;#ASMSTART
 	;;#ASMEND
 	s_barrier
-; OPUS epilogue Cluster 10 V LDS read + causal mask + sync.
-; PY (flash_attn_opus.py L1941-L1967):
-;   v_packs_e11 = _read_v_packs_for_buf(0, urv_base_per_lane)
-;   if const_expr(CAUSAL):
-;   v_s_1 = _causal_mask_prologue_if_needed(
-;   v_s_1,
-;   max_m1,
-;   max_num_tiles * fx.Index(BLOCK_N),
-;   )
-;   else:
-;   v_s_1 = _v_s_vec_to_lists(v_s_1)
-;   rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
-;   _waitcnt_vm_n(0)
-;   rocdl.sched_barrier(0)
-;   rocdl.s_barrier()
-;   rocdl.sched_barrier(0)
+; Cluster 10:
+; v_packs_e11 = _read_v_packs_for_buf(0, urv_base_per_lane)
+; if const_expr(CAUSAL):
+; 	v_s_1 = _causal_mask_prologue_if_needed(
+; 		v_s_1,
+; 		max_m1,
+; 		max_num_tiles * fx.Index(BLOCK_N),
+; 	)
+; else:
+; 	v_s_1 = _v_s_vec_to_lists(v_s_1)
+; rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
+; _waitcnt_vm_n(0)
+; rocdl.sched_barrier(0)
+; rocdl.s_barrier()
+; rocdl.sched_barrier(0)
 ; NOTE:
-;   Inserted from plan: previously-unmapped Python cluster now annotated for ASM correspondence.
+;   The 32 `ds_read_b64_tr_b16 v[X:X+1], v217 offset:Y` block reads the
+;   transposed V[max_num_tiles-1] tile from LDS buf-0 into v_packs_e11
+;   (used by Cluster 11's MMA1).
+;   The trailing `s_cmp_ge_i32 s16, s4` + `;;#ASMSTART/.../;;#ASMEND`
+;   inline-asm block computes the causal-boundary test
+;   `q_start_pos >= max_num_tiles * BLOCK_N` and conditionally writes
+;   NEG_INF=`0xff800000` into out-of-range lanes via `v_cmp_lt_i32` +
+;   `v_cndmask` chains; `s_cbranch_scc1 .LBB0_22` skips the mask body
+;   when out of range. Both paths converge at .LBB0_22 below.
 	;;#ASMSTART
 	ds_read_b64_tr_b16 v[122:123], v217 offset:0
 
@@ -4063,38 +4164,31 @@ flash_attn_opus_kernel_0:
 	v_cndmask_b32_e64 v97, v97, v182, s[2:3]
 	;;#ASMEND
 .LBB0_22:
-; OPUS epilogue Cluster 11.
-; PY (flash_attn_opus.py L1969-L2010):
-;   v_o = _mma1(v_p_0, v_packs_e11, v_o)
-;   m_tile_max_e11 = _attn_row_max(v_s_1)
-;   row_max_e11 = _fmax(m_row, m_tile_max_e11)
-;   rescale_e11 = rocdl.exp2(T.f32, _raw(_fsub(m_row, row_max_e11)))
-;   m_row = row_max_e11
-;   v_s_1 = _attn_sub_row(v_s_1, row_max_e11)
-;   v_s_1 = _anchor_v_s(v_s_1)
-;   v_p_1 = _attn_exp2_slice(v_s_1, 0, 16)
-;   _sched_barrier_pairs(10, 5, 10)
-;   _sched_barrier_exp_pairs(6, 3, 10)
-;   rocdl.sched_barrier(0)
-;   v_p_1 = _attn_exp2_slice(v_p_1, 16, 16)
-;   l_row = _fmul(l_row, rescale_e11)
-;   tile_sum_e11 = _attn_sum(v_p_1)
-;   l_row = _fadd(l_row, tile_sum_e11)
-;   v_p_1 = _cast_p(v_p_1)
-;   v_p_1 = _anchor_v_p(v_p_1)
-;   rocdl.sched_barrier(0)
-;   _scale_o(v_o, rescale_e11)
-;   rocdl.s_barrier()
-;   rocdl.sched_barrier(0)
+; Cluster 10 causal-mask skip target.
+; if const_expr(CAUSAL):
+; 	v_s_1 = _causal_mask_prologue_if_needed(
+; 		v_s_1,
+; 		max_m1,
+; 		max_num_tiles * fx.Index(BLOCK_N),
+; 	)
 ; NOTE:
-;   This is the last full score/softmax update before the final V read and output normalization.
-; SCHED HINT:
-;   Tail Cluster 11 is the final full MFMA/softmax scheduling window. Its source
-;   `sched_barrier_pairs` / `sched_barrier_exp_pairs` markers again constrain
-;   only previously emitted candidates, producing the MFMA + row-max/sub and
-;   MFMA + exp pattern below. After this tail window, the remaining hard
-;   `sched_barrier(0); s_barrier; sched_barrier(0)` boundary prevents the final
-;   V-read / normalization phase from being hoisted backward.
+;   `.LBB0_22` is reached when `q_start_pos >= max_num_tiles * BLOCK_N`
+;   (this wave is past the causal boundary for the final KV tile). Both
+;   the masked and skipped paths converge here.
+; SCHED HINT (Cluster 7 hoisted rescale + scale_o):
+;   The next ~37 instructions (from `v_sub_f32_e32 v178, v225, v194` up
+;   to the closing `s_waitcnt vmcnt(0) lgkmcnt(0)` + `s_barrier`) are NOT
+;   Cluster 10 code — they are Cluster 7's deferred
+;   `rescale_e7 = exp2(m_row_prev - row_max_e7)` (the `v_sub_f32_e32 v178,
+;   v225, v194` → `v_exp_f32_e32 v178, v178` pair) followed by
+;   `_scale_o(v_o, rescale_e7)` (32 `v_pk_mul_f32 v[X:Y], v[178:179],
+;   v[X:Y] op_sel_hi:[0,1]`). LLVM hoisted them out of Cluster 7 (PY
+;   L1886-L1893) and emitted them here so v_o is freshly scaled exactly
+;   when Cluster 11's MMA1 reads it next.
+;   The closing `s_barrier` is Cluster 6's source-level `rocdl.s_barrier()`
+;   (PY L1855), retained as the synchronization fence that separates
+;   Cluster 6/10 (read v_packs + mask + Cluster 7 hoisted scale_o) from
+;   Cluster 11 (mma1 + softmax + cast P + scale_o).
 	v_sub_f32_e32 v178, v225, v194
 	v_exp_f32_e32 v178, v178
 	s_nop 0
@@ -4132,6 +4226,58 @@ flash_attn_opus_kernel_0:
 	v_pk_mul_f32 v[18:19], v[178:179], v[18:19] op_sel_hi:[0,1]
 	s_waitcnt vmcnt(0) lgkmcnt(0)
 	s_barrier
+; Cluster 11:
+; v_o = _mma1(v_p_0, v_packs_e11, v_o)
+; m_tile_max_e11 = _attn_row_max(v_s_1)
+; row_max_e11 = _fmax(m_row, m_tile_max_e11)
+; rescale_e11 = rocdl.exp2(T.f32, _raw(_fsub(m_row, row_max_e11)))
+; m_row = row_max_e11
+; v_s_1 = _attn_sub_row(v_s_1, row_max_e11)
+; v_s_1 = _anchor_v_s(v_s_1)
+; v_p_1 = _attn_exp2_slice(v_s_1, 0, 16)
+; _sched_barrier_pairs(10, 5, 10)
+; _sched_barrier_exp_pairs(6, 3, 10)
+; rocdl.sched_barrier(0)
+; v_p_1 = _attn_exp2_slice(v_p_1, 16, 16)
+; l_row = _fmul(l_row, rescale_e11)
+; tile_sum_e11 = _attn_sum(v_p_1)
+; l_row = _fadd(l_row, tile_sum_e11)
+; v_p_1 = _cast_p(v_p_1)
+; v_p_1 = _anchor_v_p(v_p_1)
+; rocdl.sched_barrier(0)
+; _scale_o(v_o, rescale_e11)
+; rocdl.s_barrier()
+; rocdl.sched_barrier(0)
+; NOTE:
+;   The last full per-tile online-softmax update. Unlike Clusters 3 and 7,
+;   Cluster 11 does NOT use `s_setprio` — the dual-group phase-shift only
+;   matters when the next-iteration K/V prefetch must overlap with VALU;
+;   here both wave-groups will fall through to the final V read + drain.
+;   The cluster combines both halves of the exp2_slice and a full
+;   `_attn_sum` in one stretch:
+;     • `v_mfma_f32_32x32x16_bf16 v[2:17], v[122:125], v[98:101], v[2:17]`
+;       and 15 more MMA1 — `v_o = _mma1(v_p_0, v_packs_e11, v_o)`.
+;     • `v_max_f32_e32 v122, v66, v67` + 15 `v_max3_f32` +
+;       `v_permlane32_swap` + `v_max3_f32 v98, v194, v98, v99` —
+;       `_attn_row_max(v_s_1)` then `_fmax(m_row, ...)`.
+;     • `v_sub_f32_e32 v99, v194, v98` — `m_row_prev - row_max_e11` for
+;       rescale_e11; the subsequent `v_exp_f32_e32 v84, v99` computes
+;       rescale_e11 itself (held in v84).
+;     • `v_sub_f32_e32 v129..v66, vX, v98` — 32 sub_row.
+;     • `v_exp_f32_e32 v85..v100, vX` + `v_exp_f32_e32 v101..v81, vX` —
+;       the full v_p_1 exp2 (both halves merged: 16 from
+;       `_attn_exp2_slice(v_s_1, 0, 16)` and 16 from
+;       `_attn_exp2_slice(v_p_1, 16, 16)`).
+;     • `v_add_f32_e32 v66, v85, v86` + 31 more — `_attn_sum(v_p_1)`.
+;     • `v_add_f32_e32 v82, v66, v81` + `v_permlane32_swap_b32_e64 v83,
+;       v82 bound_ctrl:1` — warp-level tile_sum_e11 reduction; v82/v83
+;       are kept live and folded into l_row at ASM ~4282
+;       (`v_fmac_f32_e32 v82, v84, v0`).
+;     • 16 `v_cvt_pk_bf16_f32 v[66..81], ...` — `_cast_p(v_p_1)`.
+;     • 32 `v_pk_mul_f32 v[X:Y], v[84:85], v[X:Y] op_sel_hi:[0,1]` —
+;       `_scale_o(v_o, rescale_e11)` (rescale_e11 in v84/v85).
+;     • Final `s_barrier` (PY L2005) — synchronizes both wave-groups
+;       before the last V read in Cluster 12.
 	v_mfma_f32_32x32x16_bf16 v[2:17], v[122:125], v[98:101], v[2:17]
 	v_max_f32_e32 v122, v66, v67
 	v_max3_f32 v122, v122, v68, v69
@@ -4355,15 +4501,20 @@ flash_attn_opus_kernel_0:
 	v_pk_mul_f32 v[20:21], v[84:85], v[20:21] op_sel_hi:[0,1]
 	v_pk_mul_f32 v[18:19], v[84:85], v[18:19] op_sel_hi:[0,1]
 	s_barrier
-; OPUS epilogue Cluster 12 V LDS read for final tile + sync.
-; PY (flash_attn_opus.py L2012-L2022):
-;   v_packs_e13 = _read_v_packs_for_buf(1, urv_base_per_lane)
-;   rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
-;   rocdl.sched_barrier(0)
-;   rocdl.s_barrier()
-;   rocdl.sched_barrier(0)
+; Cluster 12:
+; v_packs_e13 = _read_v_packs_for_buf(1, urv_base_per_lane)
+; rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
+; rocdl.sched_barrier(0)
+; rocdl.s_barrier()
+; rocdl.sched_barrier(0)
 ; NOTE:
-;   Inserted from plan: previously-unmapped Python cluster now annotated for ASM correspondence.
+;   Final V tile read. Thirty-two `ds_read_b64_tr_b16 v[X:X+1], v219
+;   offset:Y` (offsets 0..960 + 8704..9664) materialize the transposed
+;   V[max_num_tiles-1] tile into v_packs_e13 (used by Cluster 13's
+;   final MMA1). No async_load_k / async_load_v — the kernel has now
+;   exhausted all KV tiles. The closing `s_waitcnt lgkmcnt(0)` +
+;   `s_barrier` (PY L2017) waits for the V LDS reads to finish and
+;   synchronizes wave-groups before the final MMA1 chain.
 	;;#ASMSTART
 	ds_read_b64_tr_b16 v[86:87], v219 offset:0
 
@@ -4494,16 +4645,15 @@ flash_attn_opus_kernel_0:
 	;;#ASMEND
 	s_waitcnt lgkmcnt(0)
 	s_barrier
-; OPUS epilogue Cluster 13 final P*V MMA.
-; PY (flash_attn_opus.py L2024-L2026):
-;   v_o = _mma1(v_p_1, v_packs_e13, v_o)
+; Cluster 13:
+; v_o = _mma1(v_p_1, v_packs_e13, v_o)
 ; NOTE:
-;   These final sixteen MFMA instructions drain the last V tile into the fp32 output accumulators.
-; SCHED HINT:
-;   The final P*V MMA region is separated from normalization/stores by the last
-;   source scheduling boundary. The conditional inline `s_barrier` remains as
-;   real ISA, while surrounding `SCHED_BARRIER 0` pseudos ensured the final V
-;   drain cannot be crossed by denominator reduction or output-store code.
+;   Final P*V MMA chain: sixteen `v_mfma_f32_32x32x16_bf16` instructions
+;   drain v_packs_e13 (V tile read in Cluster 12) into the four D_CHUNKS
+;   fp32 accumulator banks `v[2:17]`, `v[50:65]`, `v[34:49]`, `v[18:33]`.
+;   No softmax / no rescale — the normalize phase (l_row reduction +
+;   rcp + scale_o(v_o, inv_l) + stores) follows immediately after the
+;   stagger barrier below.
 	v_mfma_f32_32x32x16_bf16 v[2:17], v[86:89], v[66:69], v[2:17]
 	v_mfma_f32_32x32x16_bf16 v[50:65], v[102:105], v[66:69], v[50:65]
 	v_mfma_f32_32x32x16_bf16 v[34:49], v[118:121], v[66:69], v[34:49]
@@ -4519,6 +4669,19 @@ flash_attn_opus_kernel_0:
 	v_mfma_f32_32x32x16_bf16 v[2:17], v[98:101], v[78:81], v[2:17]
 	v_mfma_f32_32x32x16_bf16 v[50:65], v[114:117], v[78:81], v[50:65]
 	v_mfma_f32_32x32x16_bf16 v[34:49], v[130:133], v[78:81], v[34:49]
+; Stagger barrier (end of Cluster 13 → entry to normalize/store).
+; if const_expr(OPUS_ENABLE_STAGGER):
+; 	_stagger_extra_barrier_if_zero()
+; else:
+; 	rocdl.s_barrier()
+; NOTE:
+;   Inline-asm block: `s_cmp_eq_u32 s25, 0; s_cbranch_scc0 1f; s_barrier;
+;   1:`. Warps 0-3 (`stagger_id == 0`) execute the inline `s_barrier` and
+;   thereby consume the extra barrier that mirror-paired with warps 4-7's
+;   prologue `_stagger_extra_barrier_if_one` (.LBB0_2 path at ASM 235).
+;   Together with that prologue partner, this keeps both wave-groups
+;   exactly one s_barrier ordinal apart through the kernel and re-aligns
+;   them here before the final O normalization and store phase.
 	;;#ASMSTART
 	s_cmp_eq_u32 s25, 0
 	s_cbranch_scc0 1f
@@ -4529,6 +4692,39 @@ flash_attn_opus_kernel_0:
 	v_mfma_f32_32x32x16_bf16 v[18:33], v[146:149], v[78:81], v[18:33]
 	s_and_saveexec_b64 s[0:1], vcc
 	s_cbranch_execz .LBB0_24
+; Epilogue normalize O.
+; inv_l_rcp = rocdl.rcp(T.f32, _raw(l_row))
+; inv_l = ArithValue(fx.Float32(l_row) > c_zero_f).select(inv_l_rcp, c_zero_f)
+; _scale_o(v_o, inv_l)
+; if const_expr(OPUS_ENABLE_STAGGER):
+; 	_stagger_extra_barrier_if_zero()    # already emitted above
+; else:
+; 	rocdl.s_barrier()                   # already emitted above
+; NOTE:
+;   The `v_add_f32_e32` / `v_fmac_f32_e32` chain folds the per-cluster
+;   partial l_row contributions into the final denominator in v0:
+;     • v218         = main-loop l_row (set up at ASM 898; updated by the
+;                      loop body's tile_sum_a chain).
+;     • v222, v221   = Cluster 1 tile_sum_e1 halves (lhs / rhs of the
+;                      `v_permlane32_swap` at ASM 2532).
+;     • v223, v224   = Cluster 5 tile_sum_e5 halves; v0 = `rescale_e?`
+;                      threading them into v223 via `v_fmac_f32_e32
+;                      v223, v0, v66`.
+;     • v179, v180   = Cluster 9 tile_sum_e9 halves; same pattern
+;                      with `v_fmac_f32_e32 v179, v178, v0` (v178 is
+;                      Cluster 11's rescale_e11 carrier).
+;     • v82, v83/v84 = Cluster 11 tile_sum_e11 halves; finished by
+;                      `v_fmac_f32_e32 v82, v84, v0`.
+;   The carried fmacs implement the deferred
+;   `l_row = (l_row * rescale_eX) + tile_sum_eX` updates that were
+;   omitted from Clusters 5/9/11.
+;   `v_rcp_f32_e32 v66, v0` computes `1.0 / l_row`.
+;   `v_cmp_lt_f32_e32 vcc, 0, v0` + `v_cndmask_b32_e32 v0, 0, v66, vcc`
+;   implements the `(l_row > 0) ? 1/l_row : 0` guard from the
+;   `ArithValue(...).select(inv_l_rcp, c_zero_f)` source expression.
+;   The thirty-two `v_pk_mul_f32 v[X:Y], v[X:Y], v[0:1] op_sel_hi:[1,0]`
+;   below are `_scale_o(v_o, inv_l)` — D_CHUNKS=4 chunks × 8
+;   packed-pair multiplies each.
 	v_add_f32_e32 v66, v218, v222
 	v_add_f32_e32 v66, v66, v221
 	v_fmac_f32_e32 v223, v0, v66
@@ -4539,18 +4735,6 @@ flash_attn_opus_kernel_0:
 	s_mov_b32 s2, -1
 	v_fmac_f32_e32 v82, v84, v0
 	v_add_f32_e32 v0, v82, v83
-; OPUS normalize O.
-; PY (flash_attn_opus.py L2028-L2040):
-;   inv_l_rcp = rocdl.rcp(T.f32, _raw(l_row))
-;   inv_l = ArithValue(fx.Float32(l_row) > c_zero_f).select(inv_l_rcp, c_zero_f)
-;   _scale_o(v_o, inv_l)
-;   if const_expr(OPUS_ENABLE_STAGGER):
-;   _stagger_extra_barrier_if_zero()
-;   else:
-;   rocdl.s_barrier()
-; NOTE:
-;   The preceding fmac chain folds the online-softmax l_row pieces into one denominator.
-;   s_and_saveexec_b64 above disabled out-of-bounds q rows before normalization and stores.
 	v_rcp_f32_e32 v66, v0
 	s_mov_b32 s0, s14
 	s_mov_b32 s1, s15
@@ -4590,6 +4774,37 @@ flash_attn_opus_kernel_0:
 	v_pk_mul_f32 v[4:5], v[4:5], v[0:1] op_sel_hi:[1,0]
 	v_pk_mul_f32 v[2:3], v[2:3], v[0:1] op_sel_hi:[1,0]
 	s_nop 0
+; Epilogue final output stores.
+; q_in_bounds = q_row < seq_len_v
+; if q_in_bounds:
+; 	for dc in range_constexpr(D_CHUNKS):
+; 		for store_group in range_constexpr(4):
+; 			r_base = store_group * 4
+; 			lo = rocdl.cvt_pk_bf16_f32(Vec(v_o[dc])[r_base],
+; 			                            Vec(v_o[dc])[r_base + 1])
+; 			hi = rocdl.cvt_pk_bf16_f32(Vec(v_o[dc])[r_base + 2],
+; 			                            Vec(v_o[dc])[r_base + 3])
+; 			o_pack = Vec.from_elements([lo, hi], fx.Int32).ir_value()
+; 			d_row_rel = lane_div_32 * 4 + store_group * 8
+; 			d_col = fx.Index(dc * D_CHUNK) + d_row_rel
+; 			o_global = _global_idx_q(q_row, d_col)
+; 			o_byte_offset = fx.Int32(o_global * fx.Index(BF16_BYTES))
+; 			rocdl.raw_buffer_store(o_pack, o_rsrc,
+; 				_llvm_value(o_byte_offset), _llvm_value(fx.Int32(0)),
+; 				_llvm_value(fx.Int32(0)))
+; NOTE:
+;   The `q_in_bounds` guard was actually emitted earlier as
+;   `v_cmp_gt_u64_e32 vcc, s[22:23], v[212:213]` + `s_and_saveexec_b64
+;   s[0:1], vcc` + `s_cbranch_execz .LBB0_24` (ASM ~4270-4273); lanes
+;   beyond seq_len skip the stores by exec-masking.
+;   For each of the four D_CHUNKS, four `store_group`s emit:
+;     • `v_cvt_pk_bf16_f32 v0, vX, vY` — pack two fp32 lanes into bf16.
+;     • `v_cvt_pk_bf16_f32 v1, vZ, vW` — pack the next two.
+;     • `buffer_store_dwordx2 v[0:1], v4, s[0:3], 0 offen offset:Y` —
+;       write the 8-byte bf16 pack to O at offset Y = 0, 16, 32, ..., 240.
+;   Address `v4 = v210 + v1 + s20` was constructed once at
+;   `v_add_lshl_u32 v4, v0, v1, 1` (just below) and reused for all 32
+;   stores covering this lane's 128-wide head dimension.
 	;;#ASMSTART
 	v_cvt_pk_bf16_f32 v2, v2, v3
 	;;#ASMEND
@@ -4598,36 +4813,6 @@ flash_attn_opus_kernel_0:
 	;;#ASMEND
 	v_add_u32_e32 v0, s20, v210
 	v_add_lshl_u32 v4, v0, v1, 1
-; OPUS final output stores.
-; PY (flash_attn_opus.py L2042-L2069):
-;   q_in_bounds = q_row < seq_len_v
-;   if q_in_bounds:
-;   for dc in range_constexpr(D_CHUNKS):
-;   for store_group in range_constexpr(4):
-;   r_base = store_group * 4
-;   lo = rocdl.cvt_pk_bf16_f32(
-;   Vec(v_o[dc])[r_base],
-;   Vec(v_o[dc])[r_base + 1],
-;   )
-;   hi = rocdl.cvt_pk_bf16_f32(
-;   Vec(v_o[dc])[r_base + 2],
-;   Vec(v_o[dc])[r_base + 3],
-;   )
-;   o_pack = Vec.from_elements([lo, hi], fx.Int32).ir_value()
-;   d_row_rel = lane_div_32 * 4 + store_group * 8
-;   d_col = fx.Index(dc * D_CHUNK) + d_row_rel
-;   o_global = _global_idx_q(q_row, d_col)
-;   o_byte_offset = fx.Int32(o_global * fx.Index(BF16_BYTES))
-;   rocdl.raw_buffer_store(
-;   o_pack,
-;   o_rsrc,
-;   _llvm_value(o_byte_offset),
-;   _llvm_value(fx.Int32(0)),
-;   _llvm_value(fx.Int32(0)),
-;   )
-; NOTE:
-;   Each buffer_store_dwordx2 writes four bf16 output values.
-;   Offsets 0..240 cover the 128-wide output head dimension for this lane's store layout.
 	buffer_store_dwordx2 v[2:3], v4, s[0:3], 0 offen
 	;;#ASMSTART
 	v_cvt_pk_bf16_f32 v0, v6, v7
