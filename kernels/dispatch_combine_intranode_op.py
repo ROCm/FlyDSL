@@ -24,6 +24,7 @@ Buffer-sizing design note (intentional drift from mori):
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any, Dict, Tuple
 
 import mori.shmem as ms
 import torch
@@ -68,6 +69,29 @@ def _dtype_elem_size(dt):
     callers handle the fp4 ``hidden_dim // 2`` row-stride elsewhere.
     """
     return torch.tensor([], dtype=dt).element_size()
+
+
+def _is_fp4_dtype(dt):
+    return dt == torch.float4_e2m1fn_x2
+
+
+def _token_bytes_for(dt, hidden_dim):
+    """Per-row payload bytes for a given dtype + hidden_dim.
+
+    Mirrors ``FlyDSLDispatchCombineConfig.token_bytes`` but parametrised
+    on a launch-time dtype so dispatch / combine can use independent
+    dtypes (mori parity).
+    """
+    if _is_fp4_dtype(dt):
+        return hidden_dim // 2
+    return hidden_dim * _dtype_elem_size(dt)
+
+
+def _token_view_dim_for(dt, hidden_dim):
+    """Per-row torch view trailing dim for a given dtype + hidden_dim
+    (fp4 is packed 2-elements-per-byte, so the storage view exposes
+    ``hidden_dim // 2`` columns)."""
+    return hidden_dim // 2 if _is_fp4_dtype(dt) else hidden_dim
 
 
 @dataclass
@@ -205,44 +229,17 @@ class FlyDSLDispatchCombineIntraNodeOp:
         # Dispatch (encode) and combine (decode, Stage 3) must agree on this.
         self._effective_max_recv = config.effective_max_recv
 
-        self._disp_fn = make_dispatch_jit(
-            rank=r,
-            npes=config.world_size,
-            experts_per_rank=config.num_experts_per_rank,
-            experts_per_token=config.num_experts_per_token,
-            hidden_dim=config.hidden_dim,
-            max_tok_per_rank=config.max_num_inp_token_per_rank,
-            block_num=config.block_num,
-            warp_num_per_block=config.warp_num_per_block,
-            data_type=config.data_type,
-            scale_dim=config.scale_dim,
-            scale_type_size=config.scale_type_size,
-            enable_std_moe=config.enable_std_moe,
-            max_recv=self._effective_max_recv,
-        )
-
-        # fp8_direct_cast wire-fp8 path (mori UseFp8DirectCast parity):
-        # caller stays bf16; kernel does the bf16 -> fp8 cast inline in
-        # Stage 1 before the P2P scatter, avoiding a ~12us PyTorch
-        # elementwise cast on the cudagraph critical path.
-        _use_fp8_cast = config.quant_type == "fp8_direct_cast" and config.data_type == torch.bfloat16
-        self._use_fp8_cast = _use_fp8_cast
-
-        self._comb_fn = make_combine_jit(
-            rank=r,
-            npes=config.world_size,
-            experts_per_token=config.num_experts_per_token,
-            hidden_dim=config.hidden_dim,
-            max_tok_per_rank=config.max_num_inp_token_per_rank,
-            block_num=config.block_num,
-            warp_num_per_block=config.warp_num_per_block,
-            data_type=config.data_type,
-            enable_weights=True,
-            enable_std_moe=config.enable_std_moe,
-            use_p2p_read=not config.use_external_inp_buf,
-            fp8_direct_cast=self._use_fp8_cast,
-            max_recv=self._effective_max_recv,
-        )
+        # Launch-time JIT caches (mori parity): each ``op.dispatch(input)``
+        # / ``op.combine(input)`` selects the kernel specialization by
+        # ``input.dtype`` and lazy-compiles a fresh entry on cache miss.
+        # ``_disp_jit_cache`` keyed by dispatch input dtype; combine cache
+        # keyed by ``(combine_dtype, use_p2p_read, enable_weights,
+        # fp8_direct_cast)`` because all four switches change the
+        # generated kernel.
+        self._disp_jit_cache: Dict[torch.dtype, Any] = {}
+        self._disp_compiled_cache: Dict[torch.dtype, Any] = {}
+        self._comb_jit_cache: Dict[Tuple[torch.dtype, bool, bool, bool], Any] = {}
+        self._comb_compiled_cache: Dict[Tuple[torch.dtype, bool, bool, bool], Any] = {}
 
         # Must start at 1: a zero-init flag would satisfy the first
         # ``wait_until_equals(slot, 0)`` immediately and skip the sync.
@@ -283,13 +280,13 @@ class FlyDSLDispatchCombineIntraNodeOp:
         self._fx_disp_grid_bar = fx.Int64(self.disp_grid_bar.data_ptr())
         self._fx_disp_out_wts = fx.Int64(self.shmem_disp_out_wts.data_ptr())
 
-        self._disp_compiled = None
-        self._comb_compiled = None
         # Lazy skip_stage1 variant for the fused GEMM2+combine path
         # (Stage 2 + Stage 3 only, Stage 1 P2P scatter pre-staged
-        # upstream).  Two cache entries keyed by ``enable_weights``.
-        self._comb_no_s1_fn = None
-        self._comb_no_s1_compiled = None
+        # upstream).  Cache entries keyed by ``(input.dtype,
+        # enable_weights)`` so a runtime dtype switch (e.g. fp4 dispatch
+        # + bf16 combine) does not silently reuse a stale specialization.
+        self._comb_no_s1_fn: Dict[Tuple[torch.dtype, bool], Any] = {}
+        self._comb_no_s1_compiled: Dict[Tuple[torch.dtype, bool], Any] = {}
 
     def _alloc_buffers(self):
         cfg = self.cfg
@@ -553,14 +550,28 @@ class FlyDSLDispatchCombineIntraNodeOp:
                 f"input rows={cur_tok} exceeds cfg.max_num_inp_token_per_rank="
                 f"{cfg.max_num_inp_token_per_rank} (would OOB-write into shmem)"
             )
-        expected_hdim = cfg.hidden_dim // 2 if cfg.is_fp4 else cfg.hidden_dim
+        # Mori-parity launch-time dtype: ``input.dtype`` is no longer
+        # tied to ``cfg.data_type`` (which is now a buffer-capacity hint
+        # + back-compat default); accept any supported token dtype that
+        # fits the per-row shmem allocation budget.
+        if input.dtype not in _SUPPORTED_TOK_DTYPES:
+            raise ValueError(f"input.dtype={input.dtype} not in supported set {_SUPPORTED_TOK_DTYPES}")
+        expected_hdim = _token_view_dim_for(input.dtype, cfg.hidden_dim)
         if input.shape[1] != expected_hdim:
             raise ValueError(
                 f"input.shape[1]={input.shape[1]} != expected {expected_hdim} "
-                f"(hidden_dim={cfg.hidden_dim}, is_fp4={cfg.is_fp4})"
+                f"(hidden_dim={cfg.hidden_dim}, dtype={input.dtype})"
             )
-        if input.dtype != cfg.data_type:
-            raise ValueError(f"input.dtype={input.dtype} != cfg.data_type={cfg.data_type}")
+        # Per-row payload must fit ``max_token_bytes`` (shmem allocation
+        # bound).  Bump ``cfg.max_token_type_size`` to lift this when
+        # mixing dtypes (e.g. fp4 dispatch + bf16 combine in one op).
+        inp_token_bytes = _token_bytes_for(input.dtype, cfg.hidden_dim)
+        if inp_token_bytes > cfg.max_token_bytes:
+            raise ValueError(
+                f"dispatch input.dtype={input.dtype} needs {inp_token_bytes}B/token "
+                f"but shmem buffers are sized for {cfg.max_token_bytes}B/token; "
+                f"set cfg.max_token_type_size to cover the largest dtype the op handles."
+            )
 
         # weights: (cur_tok, k) f32.
         if weights.dim() != 2:
@@ -624,25 +635,32 @@ class FlyDSLDispatchCombineIntraNodeOp:
         # hidden_dim must still match the configured one.
         if input.dim() != 2:
             raise ValueError(f"combine input must be 2-D, got shape {tuple(input.shape)}")
-        expected_hdim = cfg.hidden_dim // 2 if cfg.is_fp4 else cfg.hidden_dim
+        if strict_input_dtype and input.dtype not in _SUPPORTED_TOK_DTYPES:
+            raise ValueError(f"combine input.dtype={input.dtype} not in supported set {_SUPPORTED_TOK_DTYPES}")
+        # Mori-parity launch-time dtype: combine accepts any supported
+        # token dtype; the row-stride is derived from ``input.dtype``
+        # (fp4 packs 2 elements per byte and exposes ``hidden_dim // 2``
+        # storage columns).
+        view_dtype = (
+            input.dtype
+            if strict_input_dtype
+            else (input.dtype if input.dtype in _SUPPORTED_TOK_DTYPES else cfg.data_type)
+        )
+        expected_hdim = _token_view_dim_for(view_dtype, cfg.hidden_dim)
         if input.shape[1] != expected_hdim:
             raise ValueError(
                 f"combine input.shape[1]={input.shape[1]} != expected "
-                f"{expected_hdim} (hidden_dim={cfg.hidden_dim}, is_fp4={cfg.is_fp4})"
+                f"{expected_hdim} (hidden_dim={cfg.hidden_dim}, dtype={view_dtype})"
             )
         if input.shape[0] > cfg.max_recv:
             raise ValueError(f"combine input rows={input.shape[0]} exceeds max_recv={cfg.max_recv}")
         if strict_input_dtype:
-            # External dtype contract: caller feeds bf16 under fp8_direct_cast,
-            # otherwise the configured token dtype.
-            expected_inp_dt = (
-                torch.bfloat16
-                if (cfg.quant_type == "fp8_direct_cast" and cfg.data_type == torch.bfloat16)
-                else cfg.data_type
-            )
-            if input.dtype != expected_inp_dt:
+            inp_token_bytes = _token_bytes_for(input.dtype, cfg.hidden_dim)
+            if inp_token_bytes > cfg.max_token_bytes:
                 raise ValueError(
-                    f"combine input.dtype={input.dtype} != expected {expected_inp_dt} " f"(quant_type={cfg.quant_type})"
+                    f"combine input.dtype={input.dtype} needs {inp_token_bytes}B/token "
+                    f"but shmem buffers are sized for {cfg.max_token_bytes}B/token; "
+                    f"set cfg.max_token_type_size to cover the largest dtype the op handles."
                 )
 
         if weights is not None:
@@ -670,9 +688,35 @@ class FlyDSLDispatchCombineIntraNodeOp:
             if not cfg.enable_std_moe:
                 raise ValueError("packed_recv_x is only consumed when cfg.enable_std_moe=True")
 
+    def _get_dispatch_jit(self, d_dtype):
+        """Lazy-jit a dispatch kernel specialized to ``d_dtype`` (mori
+        parity).  Cache miss compiles a fresh entry; subsequent calls
+        with the same dtype reuse it.  The flyc.compile second-stage
+        cache is also keyed by dtype to keep cudagraphs from different
+        dtypes from clobbering each other."""
+        if d_dtype not in self._disp_jit_cache:
+            cfg = self.cfg
+            self._disp_jit_cache[d_dtype] = make_dispatch_jit(
+                rank=cfg.rank,
+                npes=cfg.world_size,
+                experts_per_rank=cfg.num_experts_per_rank,
+                experts_per_token=cfg.num_experts_per_token,
+                hidden_dim=cfg.hidden_dim,
+                max_tok_per_rank=cfg.max_num_inp_token_per_rank,
+                block_num=cfg.block_num,
+                warp_num_per_block=cfg.warp_num_per_block,
+                data_type=d_dtype,
+                scale_dim=cfg.scale_dim,
+                scale_type_size=cfg.scale_type_size,
+                enable_std_moe=cfg.enable_std_moe,
+                max_recv=self._effective_max_recv,
+            )
+        return self._disp_jit_cache[d_dtype]
+
     def dispatch(self, input, weights, scales, indices, packed_recv_x=None):
         self._check_dispatch_inputs(input, weights, scales, indices, packed_recv_x)
         cfg = self.cfg
+        d_dtype = input.dtype
         inp_cur_tok = input.shape[0]
         # Stash for ``combine()``'s default ``cur_tok`` (mori
         # ``args.curRankNumToken``: dispatch input count, NOT the
@@ -717,7 +761,9 @@ class FlyDSLDispatchCombineIntraNodeOp:
             self._fx_disp_grid_bar,
         )
 
-        if self._disp_compiled is None:
+        disp_fn = self._get_dispatch_jit(d_dtype)
+        disp_compiled = self._disp_compiled_cache.get(d_dtype)
+        if disp_compiled is None:
             args = (
                 fx.Int64(inp_c.data_ptr()),
                 fx.Int64(idx_c.data_ptr()),
@@ -740,9 +786,10 @@ class FlyDSLDispatchCombineIntraNodeOp:
                 inp_cur_tok,
                 stream,
             )
-            self._disp_compiled = flyc.compile(self._disp_fn, *args)
+            disp_compiled = flyc.compile(disp_fn, *args)
+            self._disp_compiled_cache[d_dtype] = disp_compiled
         else:
-            self._disp_compiled(
+            disp_compiled(
                 inp_c.data_ptr(),
                 idx_c.data_ptr(),
                 wts_c.data_ptr(),
@@ -766,15 +813,14 @@ class FlyDSLDispatchCombineIntraNodeOp:
             )
 
         # Match the allocation size in ``_alloc_buffers`` (tighter
-        # than ``max_recv`` when the cap is set).
+        # than ``max_recv`` when the cap is set).  Output view uses
+        # launch-time dtype (mori parity), not ``cfg.data_type``.
         mr = cfg.effective_max_recv
         k = cfg.num_experts_per_token
 
-        out_tok = (
-            self.shmem_disp_out_tok.view(torch.int8)[: mr * cfg.token_bytes]
-            .view(cfg.data_type)
-            .view(mr, cfg.token_view_dim)
-        )
+        out_token_bytes = _token_bytes_for(d_dtype, cfg.hidden_dim)
+        out_view_dim = _token_view_dim_for(d_dtype, cfg.hidden_dim)
+        out_tok = self.shmem_disp_out_tok.view(torch.int8)[: mr * out_token_bytes].view(d_dtype).view(mr, out_view_dim)
         out_wts = self.shmem_disp_out_wts.view(mr, k)
         out_idx = self.shmem_disp_out_idx.view(mr, k)
         out_scales = None
@@ -790,6 +836,45 @@ class FlyDSLDispatchCombineIntraNodeOp:
             )
         return result
 
+    def _get_combine_jit(self, c_dtype, is_p2p_read, enable_weights_flag, fp8_dc):
+        """Lazy-jit a combine kernel specialized to the launch-time
+        ``(c_dtype, is_p2p_read, enable_weights, fp8_direct_cast)`` tuple
+        (mori parity).  P2P-read mode hard-wires ``skip_stage1=True`` --
+        the caller is contractually responsible for staging into
+        ``shmem_comb_inp_tok`` upstream, so the kernel must NOT
+        double-write that buffer."""
+        key = (c_dtype, bool(is_p2p_read), bool(enable_weights_flag), bool(fp8_dc))
+        if key not in self._comb_jit_cache:
+            cfg = self.cfg
+            self._comb_jit_cache[key] = make_combine_jit(
+                rank=cfg.rank,
+                npes=cfg.world_size,
+                experts_per_token=cfg.num_experts_per_token,
+                hidden_dim=cfg.hidden_dim,
+                max_tok_per_rank=cfg.max_num_inp_token_per_rank,
+                block_num=cfg.block_num,
+                warp_num_per_block=cfg.warp_num_per_block,
+                data_type=c_dtype,
+                enable_weights=bool(enable_weights_flag),
+                enable_std_moe=cfg.enable_std_moe,
+                use_p2p_read=bool(is_p2p_read),
+                # Mori-parity P2P-read: caller has pre-staged token bytes
+                # into ``shmem_comb_inp_tok`` via
+                # :meth:`get_registered_combine_input_buffer` (contract
+                # enforced above).  ``skip_stage1=True`` removes the
+                # kernel-side Stage 1 token copy; the kernel still copies
+                # ``shmem_inp_wts -> shmem_comb_inp_wts`` because mori
+                # keeps that block (``intranode.hpp:297-306``) and Stage
+                # 3b reads weights via P2P-read by ``recv_tok_id``.  The
+                # Stage 3 fused-upstream layout is gated on
+                # ``not use_p2p_read`` in the kernel, so this combination
+                # keeps mori's regular ``(dest_pe, dest_lid)`` decode.
+                skip_stage1=bool(is_p2p_read),
+                fp8_direct_cast=bool(fp8_dc),
+                max_recv=self._effective_max_recv,
+            )
+        return self._comb_jit_cache[key], key
+
     def combine(
         self,
         input,
@@ -800,15 +885,60 @@ class FlyDSLDispatchCombineIntraNodeOp:
     ):
         """Intranode combine entry point.
 
-        Launch geometry (``block_num`` / ``warp_num_per_block``) and the
-        P2P-read vs zero-copy mode (``use_external_inp_buf``) are taken
-        from ``self.cfg`` and frozen at op construction; rebuild the op
-        (``EpDispatchCombineOp(new_cfg)``) to switch.  This matches
-        mori's ``EpDispatchCombineHandle::launchSettings`` contract.
+        Launch-time dtype (mori parity): ``input.dtype`` selects the
+        kernel specialization on each call; the op maintains a JIT
+        cache keyed by ``(input.dtype, use_p2p_read, enable_weights,
+        fp8_direct_cast)``.
+
+        P2P-read mode (``cfg.use_external_inp_buf=False``) requires the
+        caller to write data into the buffer returned by
+        ``get_registered_combine_input_buffer(combine_dtype)`` BEFORE
+        calling ``combine()`` -- the kernel runs ``skip_stage1=True``
+        and the local staging copy is removed entirely (mori parity).
+        Passing a non-shmem tensor in this mode raises ``ValueError``.
+
+        Launch geometry (``block_num`` / ``warp_num_per_block``) and
+        the P2P-read switch itself remain frozen by ``self.cfg``; rebuild
+        the op (``EpDispatchCombineOp(new_cfg)``) to change them.
         """
         self._check_combine_inputs(input, weights, indices, packed_recv_x)
         cfg = self.cfg
         stream = torch.cuda.current_stream()
+
+        c_dtype = input.dtype
+        is_p2p_read = not cfg.use_external_inp_buf
+        # ``enable_weights`` mirrors the historical default at op
+        # construction; combine_no_stage1 is the only entry point that
+        # exposes weight-free combines today.
+        enable_weights_flag = True
+        # fp8_direct_cast is now a launch-time decision: caller may pass
+        # bf16 even when the op was configured with quant_type='none', so
+        # the gate fires only when both the config knob asks for it AND
+        # the launch dtype is bf16 (mori UseFp8DirectCast parity).
+        fp8_dc = cfg.quant_type == "fp8_direct_cast" and c_dtype == torch.bfloat16
+        if is_p2p_read and fp8_dc:
+            # In P2P-read mode Stage 1 is removed; there is no in-kernel
+            # cast site for the bf16->fp8 conversion that fp8_direct_cast
+            # relies on, so the two switches are mutually exclusive.
+            raise ValueError(
+                "fp8_direct_cast is incompatible with use_external_inp_buf=False "
+                "(P2P-read mode skips Stage 1, where the bf16->fp8 cast lives)."
+            )
+        if is_p2p_read and input.data_ptr() != self.shmem_comb_inp_tok.data_ptr():
+            # Mori-parity caller contract: in P2P-read mode the kernel
+            # peer-reads ``shmem_comb_inp_tok``; the caller MUST write
+            # data into the buffer returned by
+            # ``get_registered_combine_input_buffer(combine_dtype)``
+            # before calling ``combine``.  Any other tensor pointer is
+            # a silent correctness bug (peers would read stale shmem).
+            raise ValueError(
+                "P2P-read mode (use_external_inp_buf=False) requires the caller to "
+                "write data into the buffer returned by "
+                "op.get_registered_combine_input_buffer(combine_dtype) and pass "
+                "that view as the combine input.  Got input.data_ptr()="
+                f"{input.data_ptr():#x} but shmem_comb_inp_tok.data_ptr()="
+                f"{self.shmem_comb_inp_tok.data_ptr():#x}."
+            )
 
         inp_c = input if input.is_contiguous() else input.contiguous()
 
@@ -837,7 +967,7 @@ class FlyDSLDispatchCombineIntraNodeOp:
         wts_ptr = self.shmem_disp_out_wts.data_ptr() if weights is None else weights.data_ptr()
 
         _prx_ref = None
-        if self._use_fp8_cast and packed_recv_x is not None:
+        if fp8_dc and packed_recv_x is not None:
             # std-MoE expert-major buffer is bf16 upstream but Stage 1
             # reads it in fp8 dtype; cast here (independent from the
             # main combine input path).
@@ -852,7 +982,9 @@ class FlyDSLDispatchCombineIntraNodeOp:
             self._fx_disp_out_wts,
         )
 
-        if self._comb_compiled is None:
+        comb_fn, comb_key = self._get_combine_jit(c_dtype, is_p2p_read, enable_weights_flag, fp8_dc)
+        comb_compiled = self._comb_compiled_cache.get(comb_key)
+        if comb_compiled is None:
             args = (
                 fx.Int64(inp_c.data_ptr()),
                 self._fx_comb_inp,
@@ -873,9 +1005,10 @@ class FlyDSLDispatchCombineIntraNodeOp:
                 _cur_tok,
                 stream,
             )
-            self._comb_compiled = flyc.compile(self._comb_fn, *args)
+            comb_compiled = flyc.compile(comb_fn, *args)
+            self._comb_compiled_cache[comb_key] = comb_compiled
         else:
-            self._comb_compiled(
+            comb_compiled(
                 inp_c.data_ptr(),
                 self._fx_comb_inp,
                 self._fx_comb_out,
@@ -901,11 +1034,9 @@ class FlyDSLDispatchCombineIntraNodeOp:
         mt = cfg.max_num_inp_token_per_rank
         k = cfg.num_experts_per_token
 
-        out_tok = (
-            self.shmem_comb_out_tok.view(torch.int8)[: mt * cfg.token_bytes]
-            .view(cfg.data_type)
-            .view(mt, cfg.token_view_dim)
-        )
+        out_token_bytes = _token_bytes_for(c_dtype, cfg.hidden_dim)
+        out_view_dim = _token_view_dim_for(c_dtype, cfg.hidden_dim)
+        out_tok = self.shmem_comb_out_tok.view(torch.int8)[: mt * out_token_bytes].view(c_dtype).view(mt, out_view_dim)
         out_wts = self.shmem_comb_out_wts.view(mt, k)
 
         return out_tok, out_wts
@@ -959,14 +1090,22 @@ class FlyDSLDispatchCombineIntraNodeOp:
         cfg = self.cfg
         stream = torch.cuda.current_stream()
 
+        # Launch-time fp8_direct_cast gate (mori parity): only fires
+        # when the config asked for it AND the caller-passed dtype is
+        # bf16 (the dtype combination the wire-fp8 path was built for).
+        fp8_dc = cfg.quant_type == "fp8_direct_cast" and input.dtype == torch.bfloat16
         # ``input`` is unread under skip_stage1; the Python-level fp8
         # cast would still sit on the cudagraph critical path (~12us
         # for nothing), so the fused caller is expected to have
         # CV-casted in the GEMM2 epilogue already.
-        if self._use_fp8_cast and input.dtype != torch.float8_e4m3fn:
+        if fp8_dc and input.dtype != torch.float8_e4m3fn:
             inp_c = input.to(torch.float8_e4m3fn).contiguous()
         else:
             inp_c = input if input.is_contiguous() else input.contiguous()
+        # Combine kernel is parametrised on ``data_type`` (fp4/fp8/bf16/...);
+        # under fp8_direct_cast the wire dtype is fp8 even when the
+        # caller passes bf16, otherwise it tracks the input dtype.
+        c_dtype = torch.float8_e4m3fn if fp8_dc else input.dtype
 
         # ``input`` is a placeholder under skip_stage1, so we can't
         # infer cur_tok from its shape.  Preference: explicit arg >
@@ -991,20 +1130,21 @@ class FlyDSLDispatchCombineIntraNodeOp:
         wts_ptr = self.shmem_disp_out_wts.data_ptr() if weights is None else weights.data_ptr()
 
         _prx_ref = None
-        if self._use_fp8_cast and packed_recv_x is not None:
+        if fp8_dc and packed_recv_x is not None:
             _prx_ref = packed_recv_x.view(torch.bfloat16).to(torch.float8_e4m3fn).contiguous()
             prx_ptr = _prx_ref.data_ptr()
         else:
             prx_ptr = packed_recv_x.data_ptr() if packed_recv_x is not None else 0
 
-        if not isinstance(self._comb_no_s1_fn, dict):
-            self._comb_no_s1_fn = {}
-            self._comb_no_s1_compiled = {}
+        # Cache key (mori parity): a runtime dtype switch (e.g. fp4 ->
+        # bf16) must select a fresh specialization rather than reuse
+        # the first-seen kernel.
+        no_s1_key = (c_dtype, bool(enable_weights))
 
-        if enable_weights not in self._comb_no_s1_fn:
+        if no_s1_key not in self._comb_no_s1_fn:
             from .dispatch_combine_intranode_kernel import make_combine_jit
 
-            self._comb_no_s1_fn[enable_weights] = make_combine_jit(
+            self._comb_no_s1_fn[no_s1_key] = make_combine_jit(
                 rank=cfg.rank,
                 npes=cfg.world_size,
                 experts_per_token=cfg.num_experts_per_token,
@@ -1012,19 +1152,19 @@ class FlyDSLDispatchCombineIntraNodeOp:
                 max_tok_per_rank=cfg.max_num_inp_token_per_rank,
                 block_num=cfg.block_num,
                 warp_num_per_block=cfg.warp_num_per_block,
-                data_type=cfg.data_type,
+                data_type=c_dtype,
                 enable_weights=bool(enable_weights),
                 enable_std_moe=cfg.enable_std_moe,
                 use_p2p_read=not cfg.use_external_inp_buf,
                 skip_stage1=True,
-                fp8_direct_cast=self._use_fp8_cast,
+                fp8_direct_cast=bool(fp8_dc),
                 # Must match dispatch's encoding stride so the
                 # tok_map sentinel + (peer_pe, dest_lid) decode line up
                 # when the cap shrinks the recv buffer.
                 max_recv=self._effective_max_recv,
             )
 
-        if enable_weights not in self._comb_no_s1_compiled:
+        if no_s1_key not in self._comb_no_s1_compiled:
             args = (
                 fx.Int64(inp_c.data_ptr()),
                 self._fx_comb_inp,
@@ -1047,9 +1187,9 @@ class FlyDSLDispatchCombineIntraNodeOp:
                 _cur_tok,
                 stream,
             )
-            self._comb_no_s1_compiled[enable_weights] = flyc.compile(self._comb_no_s1_fn[enable_weights], *args)
+            self._comb_no_s1_compiled[no_s1_key] = flyc.compile(self._comb_no_s1_fn[no_s1_key], *args)
         else:
-            self._comb_no_s1_compiled[enable_weights](
+            self._comb_no_s1_compiled[no_s1_key](
                 inp_c.data_ptr(),
                 self._fx_comb_inp,
                 self._fx_comb_out,
@@ -1075,11 +1215,9 @@ class FlyDSLDispatchCombineIntraNodeOp:
         mt = cfg.max_num_inp_token_per_rank
         k = cfg.num_experts_per_token
 
-        out_tok = (
-            self.shmem_comb_out_tok.view(torch.int8)[: mt * cfg.token_bytes]
-            .view(cfg.data_type)
-            .view(mt, cfg.token_view_dim)
-        )
+        out_token_bytes = _token_bytes_for(c_dtype, cfg.hidden_dim)
+        out_view_dim = _token_view_dim_for(c_dtype, cfg.hidden_dim)
+        out_tok = self.shmem_comb_out_tok.view(torch.int8)[: mt * out_token_bytes].view(c_dtype).view(mt, out_view_dim)
         out_wts = self.shmem_comb_out_wts.view(mt, k)
 
         return out_tok, out_wts
@@ -1089,7 +1227,30 @@ class FlyDSLDispatchCombineIntraNodeOp:
         n = int(self.total_recv[0].item())
         return self.shmem_tok_id_to_src[:n].clone()
 
-    def get_registered_combine_input_buffer(self, dtype, hidden_dim=-1):
-        h = hidden_dim if hidden_dim > 0 else self.cfg.token_view_dim
-        dt = dtype if dtype is not None else self.cfg.data_type
+    def get_registered_combine_input_buffer(self, dtype=None, hidden_dim=-1):
+        """Return the shmem ``comb_inp_tok`` buffer viewed as ``dtype``
+        (mori parity).  ``dtype=None`` falls back to ``cfg.data_type``;
+        ``hidden_dim<=0`` derives the trailing dim from the dtype
+        (fp4 packs 2 elements per byte and exposes ``hidden_dim // 2``).
+
+        In P2P-read mode (``cfg.use_external_inp_buf=False``) the caller
+        MUST write its combine input into this view before invoking
+        ``op.combine(...)``; the kernel skips Stage 1 entirely and peers
+        P2P-read this buffer directly.
+        """
+        cfg = self.cfg
+        dt = dtype if dtype is not None else cfg.data_type
+        if dt not in _SUPPORTED_TOK_DTYPES:
+            raise ValueError(
+                f"get_registered_combine_input_buffer: dtype={dt} not in " f"supported set {_SUPPORTED_TOK_DTYPES}"
+            )
+        # Capacity guard: dtype must fit the per-row shmem allocation.
+        row_bytes = _token_bytes_for(dt, cfg.hidden_dim)
+        if row_bytes > cfg.max_token_bytes:
+            raise ValueError(
+                f"get_registered_combine_input_buffer: dtype={dt} needs "
+                f"{row_bytes}B/token but the buffer is sized for "
+                f"{cfg.max_token_bytes}B/token; bump cfg.max_token_type_size."
+            )
+        h = hidden_dim if hidden_dim > 0 else _token_view_dim_for(dt, cfg.hidden_dim)
         return self.shmem_comb_inp_tok.view(torch.int8).view(dt).view(-1, h)
