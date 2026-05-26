@@ -217,7 +217,16 @@ def _bench_flydsl_torch(*, op: str, M: int, N: int, dtype: str, warmup: int, ite
         return bench_gpu_us_torch(lambda: exe(x, gamma, y, M), warmup=warmup, iters=iters)
 
     if op == "wmma_gemm":
-        from kernels.rdna_f16_gemm import create_wmma_gemm_module
+        # gfx11 uses the legacy v16-operand WMMA ABI; gfx12 uses v8 — the
+        # two kernels share the same call signature but the LDS layout and
+        # accumulator-store math differ. Pick the variant for the current
+        # arch.
+        from flydsl.runtime.device import get_rocm_arch as _get_arch
+
+        if str(_get_arch() or "").startswith("gfx11"):
+            from kernels.rdna3_f16_gemm import create_wmma_gemm_module
+        else:
+            from kernels.rdna_f16_gemm import create_wmma_gemm_module
 
         K = N  # square by default; caller can override via config
         torch_dtype = torch.bfloat16 if dtype == "bf16" else torch.float16
@@ -333,15 +342,22 @@ def run_wmma_sweep(
     warmup: int = 10,
     iters: int = 50,
 ) -> List[PerfRow]:
-    """Benchmark WMMA GEMM kernels (RDNA4 only) vs torch."""
+    """Benchmark WMMA GEMM kernels (gfx11* / gfx12*) vs torch.
+
+    f16/bf16 WMMA dispatches by arch (rdna3_f16_gemm on gfx11*,
+    rdna_f16_gemm on gfx12*). FP8 WMMA is gfx12-only — the FP8 sweep
+    is skipped on gfx11*.
+    """
     import torch
 
     rows: List[PerfRow] = []
 
     from flydsl.runtime.device import get_rocm_arch
 
-    arch = get_rocm_arch()
-    if not arch.startswith("gfx120"):
+    arch = str(get_rocm_arch() or "")
+    is_gfx11 = arch.startswith("gfx11")
+    is_gfx12 = arch.startswith("gfx12")
+    if not (is_gfx11 or is_gfx12):
         return rows
 
     fail_count = 0
@@ -366,6 +382,10 @@ def run_wmma_sweep(
         except Exception:
             pass  # torch reference failure is non-fatal
         rows.append(PerfRow(op="wmma_gemm", shape=shape, dtype=dt, flydsl_gpu_us=flydsl_us, aiter_gpu_us=torch_us))
+
+    if is_gfx11:
+        # FP8 WMMA requires gfx12* — skip on gfx11.
+        return rows
 
     # wmma_fp8_gemm (A raw, B preshuffled)
     for M, N, dt in _default_fp8_configs():
