@@ -1073,27 +1073,45 @@ def make_combine_kernel(
 
         if const_expr(skip_stage1):
             if const_expr(enable_weights):
-                # Weight-only Stage 1: same as default path but only writes
-                # the small weight slot (no per-token hidden bytes).  Used by
-                # fused_gemm2_combine to keep weight scatter off the heavy
-                # token-write fabric.
-                for recv_tok_id in range(global_warp_id, total_recv, global_warp_num):
-                    dest_tok_enc = buffer_load(_r_tis, recv_tok_id, vec_width=1, dtype=T.i32())
-                    if const_expr(_log2_max_tok is not None):
-                        dest_pe = dest_tok_enc >> _log2_max_tok
-                        dest_lid = dest_tok_enc & _mask_max_tok
-                    else:
-                        dest_pe = dest_tok_enc // max_tok_per_rank
-                        dest_lid = dest_tok_enc % max_tok_per_rank
-                    wt_pe_base = SmemPtr.load(_lds_p2p_wt_bases, [dest_pe])
-                    wt_dest_off = _to_i64(rank * max_tok_per_rank + dest_lid) * weight_bytes
-                    wt_dest_addr = arith.unwrap(wt_pe_base) + wt_dest_off
-                    wt_src_addr = arith.unwrap(addr_inp_wts) + _to_i64(recv_tok_id) * weight_bytes
-                    rsrc_wt_src = create_buffer_resource_from_addr(wt_src_addr)
-                    rsrc_wt_dst = create_buffer_resource_from_addr(wt_dest_addr)
-                    if lane < wt_n_i32:
-                        wt_val = buffer_load(rsrc_wt_src, lane, vec_width=1, dtype=T.i32())
-                        buffer_store(wt_val, rsrc_wt_dst, lane)
+                if const_expr(use_p2p_read):
+                    # Mori-parity P2P-read skip-Stage1 path
+                    # (intranode.hpp:297-306): caller pre-staged hidden
+                    # tokens into local ``shmem_comb_inp_tok``; Stage 1
+                    # token copy is removed entirely, but the weight
+                    # copy is kept so Stage 3b can read weights from the
+                    # local ``shmem_comb_inp_wts[recv_tok_id]`` layout
+                    # (Stage 3b's P2P-read uses ``wt_dtok = recv_tok_id``
+                    # to address the source buffer).
+                    for recv_tok_id in range(global_warp_id, total_recv, global_warp_num):
+                        wt_src_addr = arith.unwrap(addr_inp_wts) + _to_i64(recv_tok_id) * weight_bytes
+                        wt_dst_addr = arith.unwrap(addr_shmem_wts) + _to_i64(recv_tok_id) * weight_bytes
+                        rsrc_wt_src = create_buffer_resource_from_addr(wt_src_addr)
+                        rsrc_wt_dst = create_buffer_resource_from_addr(wt_dst_addr)
+                        if lane < wt_n_i32:
+                            wt_val = buffer_load(rsrc_wt_src, lane, vec_width=1, dtype=T.i32())
+                            buffer_store(wt_val, rsrc_wt_dst, lane)
+                else:
+                    # Weight-only Stage 1: same as default path but only writes
+                    # the small weight slot (no per-token hidden bytes).  Used by
+                    # fused_gemm2_combine to keep weight scatter off the heavy
+                    # token-write fabric.
+                    for recv_tok_id in range(global_warp_id, total_recv, global_warp_num):
+                        dest_tok_enc = buffer_load(_r_tis, recv_tok_id, vec_width=1, dtype=T.i32())
+                        if const_expr(_log2_max_tok is not None):
+                            dest_pe = dest_tok_enc >> _log2_max_tok
+                            dest_lid = dest_tok_enc & _mask_max_tok
+                        else:
+                            dest_pe = dest_tok_enc // max_tok_per_rank
+                            dest_lid = dest_tok_enc % max_tok_per_rank
+                        wt_pe_base = SmemPtr.load(_lds_p2p_wt_bases, [dest_pe])
+                        wt_dest_off = _to_i64(rank * max_tok_per_rank + dest_lid) * weight_bytes
+                        wt_dest_addr = arith.unwrap(wt_pe_base) + wt_dest_off
+                        wt_src_addr = arith.unwrap(addr_inp_wts) + _to_i64(recv_tok_id) * weight_bytes
+                        rsrc_wt_src = create_buffer_resource_from_addr(wt_src_addr)
+                        rsrc_wt_dst = create_buffer_resource_from_addr(wt_dest_addr)
+                        if lane < wt_n_i32:
+                            wt_val = buffer_load(rsrc_wt_src, lane, vec_width=1, dtype=T.i32())
+                            buffer_store(wt_val, rsrc_wt_dst, lane)
             else:
                 pass
         elif const_expr(enable_std_moe):
@@ -1362,14 +1380,21 @@ def make_combine_kernel(
             expert_rsrcs = []
             expert_vlds = []
 
-            if const_expr(skip_stage1):
-                # Fused-upstream Stage 3: when ``skip_stage1`` is set the
-                # caller has plain-stored a per-(tok_id, k_slot) partial into
-                # ``shmem_comb_inp[(tok_id*k + k_slot) * token_bytes]``. Each
-                # k_slot is unique; there is no tok_map to decode -- the
-                # accumulator simply reads ``shmem_comb_inp`` for k_slot in
-                # [0, k). Unrouted (tok_id, k_slot) slots are zero-initialized
-                # by the caller and therefore contribute zero to the sum.
+            if const_expr(skip_stage1 and not use_p2p_read):
+                # Fused-upstream Stage 3: when ``skip_stage1`` is set on
+                # the non-P2P-read path the caller has plain-stored a
+                # per-(tok_id, k_slot) partial into
+                # ``shmem_comb_inp[(tok_id*k + k_slot) * token_bytes]``.
+                # Each k_slot is unique; there is no tok_map to decode --
+                # the accumulator simply reads ``shmem_comb_inp`` for
+                # k_slot in [0, k). Unrouted (tok_id, k_slot) slots are
+                # zero-initialized by the caller and therefore contribute
+                # zero to the sum.  When ``use_p2p_read`` is set this
+                # branch is bypassed: mori-parity P2P-read skip-Stage1
+                # mode keeps the regular ``(dest_pe, dest_lid)`` Stage 3
+                # decode (peer-side ``shmem_comb_inp_tok`` is addressed
+                # by ``destLocalTokId * hiddenDim``, see
+                # ``mori/intranode.hpp:418-425``).
                 for k_slot in range_constexpr(experts_per_token):
                     slot_idx = tok_id * experts_per_token + k_slot
                     expert_tok_off = _to_i64(slot_idx) * nbytes

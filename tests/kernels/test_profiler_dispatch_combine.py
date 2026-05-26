@@ -66,6 +66,104 @@ MORI_KERNEL_SUFFIX = {
     "fp4": "fp4",
 }
 
+
+# -----------------------------------------------------------------------------
+# Mori-parity launch-time dtype helpers
+# -----------------------------------------------------------------------------
+def _resolve_combine_dtype(args, dispatch_dtype):
+    """Resolve the launch-time combine dtype.  Empty / missing
+    ``--combine-dtype`` reverts to the dispatch dtype (mori parity:
+    same caller dtype throughout).  Used by the perf sweep to mix
+    ``fp4`` / ``fp8_ocp`` dispatch with ``bf16`` combine in the same
+    op."""
+    cstr = getattr(args, "combine_dtype", "") or ""
+    if not cstr:
+        return dispatch_dtype
+    return DTYPE_MAP[cstr]
+
+
+_FP4_LUT_F32_CACHE: dict = {}
+
+
+def _fp4_to_f32(t):
+    """Unpack ``float4_e2m1fn_x2`` to ``float32``.
+
+    Mirrors ``utils.fp4_utils.mxfp4_to_f32`` but caches the 16-entry LUT
+    on each device so the repeated cast does NOT allocate fresh tensors
+    under CUDA graph capture (``torch.tensor(...)`` inside a captured
+    region raises "operation not permitted when stream is capturing").
+    """
+    x = t.view(torch.uint8) if t.dtype == torch.float4_e2m1fn_x2 else t
+    x = x.repeat_interleave(2, dim=-1)
+    x[..., ::2] = x[..., ::2] & 0xF
+    x[..., 1::2] = x[..., 1::2] >> 4
+    dev = x.device
+    lut = _FP4_LUT_F32_CACHE.get(dev)
+    if lut is None:
+        # mxfp4 e2m1 nibble decode table; entries 0..7 are positive,
+        # 8..15 are the sign-bit-set negatives.  Identical to
+        # ``utils.fp4_utils.mxfp4_to_f32``'s in-line list.
+        _vals = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0]
+        lut = torch.tensor(_vals, dtype=torch.float32, device=dev)
+        _FP4_LUT_F32_CACHE[dev] = lut
+    return lut[x.long()]
+
+
+def _cast_dispatch_to_combine(t, combine_dtype):
+    """Cast a dispatch-out tensor to ``combine_dtype``.
+
+    fp4 dispatch outputs are stored in ``float4_e2m1fn_x2`` packed format
+    (2 fp4 elements per byte, last-dim halved); PyTorch has no native
+    cast kernel today, so we route through the project-local
+    ``_fp4_to_f32`` unpacker (cudagraph-safe, see :func:`_fp4_to_f32`)
+    which expands the last dim by 2 and decodes each nibble via a
+    pre-cached 16-entry LUT.  Same-dtype is a no-op (returns the input
+    unchanged so we keep zero-copy on the matched path)."""
+    if t.dtype == combine_dtype:
+        return t
+    if t.dtype == torch.float4_e2m1fn_x2:
+        return _fp4_to_f32(t).to(combine_dtype)
+    return t.to(combine_dtype)
+
+
+def _op_use_external_inp_buf(op):
+    """Return the op's ``use_external_inp_buf`` flag, agnostic to mori
+    (``self.config``) vs FlyDSL (``self.cfg``) attribute naming."""
+    cfg = getattr(op, "cfg", None) or getattr(op, "config", None)
+    return getattr(cfg, "use_external_inp_buf", True)
+
+
+def _run_combine(op, ret, combine_dtype, **kwargs):
+    """Mori-parity combine launcher.
+
+    Centralises the P2P-read caller contract so every test-side combine
+    invocation goes through the same staging path:
+
+      - ``use_external_inp_buf=True``  -> just dtype-cast ``ret[0]`` and
+        let the kernel do its own Stage 1 staging copy.
+      - ``use_external_inp_buf=False`` (P2P-read) -> caller MUST write
+        the combine input into the buffer returned by
+        ``op.get_registered_combine_input_buffer(combine_dtype)`` before
+        invoking ``combine``; the kernel runs ``skip_stage1=True`` and
+        peers P2P-read that buffer on Stage 3.
+    """
+    src = _cast_dispatch_to_combine(ret[0], combine_dtype)
+    if not _op_use_external_inp_buf(op):
+        # Mori-parity P2P-read caller contract: caller MUST pre-stage
+        # token bytes into the symmetric ``shmem_comb_inp_tok`` buffer
+        # returned by :meth:`get_registered_combine_input_buffer`. The
+        # kernel-side Stage 1 token copy is compile-time eliminated and
+        # peer PEs read this buffer directly via P2P during Stage 3.
+        cb = op.get_registered_combine_input_buffer(combine_dtype)
+        n = src.shape[0]
+        if n > 0:
+            cb[:n].copy_(src)
+        inp_for_kernel = cb
+    else:
+        inp_for_kernel = src
+    return op.combine(inp_for_kernel, None, ret[3], **kwargs)
+
+
 # ============================================================================
 # CI sweep cases
 # ----------------------------------------------------------------------------
@@ -160,9 +258,16 @@ CI_CASES = [
         "quant_type": "fp8_direct_cast",
         "use_external_inp_buf": False,
         "enable_std_moe": False,
-        # See bf16_zerocopy_p2pread above: FlyDSL P2P-read is correct,
-        # only the mori ref was broken; verify now uses the fly-side
-        # self-check.
+        # After the mori-parity P2P-read refactor (skip_stage1=True
+        # whenever use_external_inp_buf=False), fp8_direct_cast and
+        # P2P-read are mutually exclusive: the bf16->fp8 cast site
+        # lives inside Stage 1, which is removed in the P2P-read
+        # path.  combine() now raises ValueError on this combination
+        # to surface the misconfiguration up front.  Keep the case
+        # so the sweep still exercises that gate; mark it
+        # ``known_failure`` so the verify failure is downgraded to
+        # ``xfail`` and does not red-flag the whole sweep.
+        "known_failure": "fp8_direct_cast + P2P-read are mutually exclusive after mori-parity refactor",
     },
     {
         "name": "fp8_ocp_dispatch",
@@ -297,6 +402,53 @@ CI_CASES = [
         "routing": "forced_hot_spot",
         "skip_profile": True,
         "skip_ci": True,
+    },
+    # ---- Mixed-dtype coverage (mori-parity launch-time dtype) ----
+    # Each op now JIT-compiles a kernel specialized to ``input.dtype``
+    # at every dispatch / combine call (mori parity), so a single op
+    # can route fp4 / fp8_ocp inputs through dispatch and have combine
+    # write back bf16.  These cases exercise that decoupled-dtype path
+    # in both buffer modes (P2P-read and external-inp-buf).
+    #
+    # ``max_token_type_size`` is auto-derived inside ``run_profiler``
+    # when ``--combine-dtype != --dtype`` (max of the dispatch and
+    # combine element sizes), so we don't set it here.
+    {
+        "name": "mixed_fp8_ocp_dispatch_bf16_combine_p2pread",
+        "dtype": "fp8_ocp",
+        "combine_dtype": "bf16",
+        "max_tokens": 128,
+        "hidden_dim": 7168,
+        "quant_type": "none",
+        "use_external_inp_buf": False,
+        "enable_std_moe": False,
+        # Mori intranode kernel symbols for fp8_ocp are not shipped in
+        # this container, so the verify path falls back to the FlyDSL
+        # self-check (NaN/Inf liveness).  Functionality of P2P-read +
+        # mixed dtype is the gate here; cross-impl byte parity is
+        # tracked separately via the bf16-only cases.
+    },
+    {
+        "name": "mixed_fp4_dispatch_bf16_combine_p2pread",
+        "dtype": "fp4",
+        "combine_dtype": "bf16",
+        "max_tokens": 128,
+        "hidden_dim": 3584,
+        "quant_type": "none",
+        "use_external_inp_buf": False,
+        "enable_std_moe": False,
+        # fp4 dispatch emits ``v_cvt_scalef32_pk_f32_fp4`` (gfx950+).
+        "requires_arch": ("gfx950",),
+    },
+    {
+        "name": "mixed_fp8_ocp_dispatch_bf16_combine_external_inp_buf",
+        "dtype": "fp8_ocp",
+        "combine_dtype": "bf16",
+        "max_tokens": 128,
+        "hidden_dim": 7168,
+        "quant_type": "none",
+        "use_external_inp_buf": True,
+        "enable_std_moe": False,
     },
 ]
 
@@ -850,18 +1002,23 @@ def bench_op(
     meta: dict,
     scales=None,
     packed_recv_x=None,
+    combine_dtype=None,
 ):
     """Profiler-free CUDA-event timing of dispatch/combine; reports GPU
-    time avg/min/max."""
+    time avg/min/max.  ``combine_dtype`` (mori parity) defaults to the
+    dispatch input dtype; pass a different dtype to exercise mixed-dtype
+    dispatch + combine (e.g. fp4 dispatch + bf16 combine)."""
     _dkw = dict(packed_recv_x=packed_recv_x) if packed_recv_x is not None else {}
     _ckw = dict(packed_recv_x=packed_recv_x) if packed_recv_x is not None else {}
+    if combine_dtype is None:
+        combine_dtype = inp.dtype
     ms.shmem_barrier_all()
     if rank == 0:
         print(f"\n[bench] {op_tag} warmup {warmup} iters...")
     for _ in range(warmup):
         _safe_op_reset(op)
         ret = op.dispatch(inp, wts, scales, idx, **_dkw)
-        op.combine(ret[0], None, ret[3], **_ckw)
+        _run_combine(op, ret, combine_dtype, **_ckw)
     torch.cuda.synchronize()
     dist.barrier()
 
@@ -882,7 +1039,7 @@ def bench_op(
         dist.barrier()
 
         c_events[i][0].record()
-        op.combine(ret[0], None, ret[3], **_ckw)
+        _run_combine(op, ret, combine_dtype, **_ckw)
         c_events[i][1].record()
 
     torch.cuda.synchronize()
@@ -938,7 +1095,9 @@ def bench_op(
 
 
 # --- cudagraph mode: CUDA Graph capture + replay timing ---
-def _cudagraph_capture_flydsl(op, inp, wts, idx, wc_buf, capture_stream, scales=None, packed_recv_x=None):
+def _cudagraph_capture_flydsl(
+    op, inp, wts, idx, wc_buf, capture_stream, scales=None, packed_recv_x=None, combine_dtype=None
+):
     """Capture FlyDSL dispatch+combine into a CUDA Graph.
 
     Both dispatch and combine return full-sized tensors (no ``.item()``,
@@ -946,22 +1105,29 @@ def _cudagraph_capture_flydsl(op, inp, wts, idx, wc_buf, capture_stream, scales=
     the ``flyc.compile()`` JIT (which uses the default stream and can't
     run during capture); the capture then records only the already-
     compiled kernel launches.
+
+    ``combine_dtype`` (mori parity) defaults to ``inp.dtype``; pass a
+    different dtype for mixed-dtype dispatch + combine sweeps.
     """
     _dkw = dict(packed_recv_x=packed_recv_x) if packed_recv_x is not None else {}
     _ckw = dict(packed_recv_x=packed_recv_x) if packed_recv_x is not None else {}
+    if combine_dtype is None:
+        combine_dtype = inp.dtype
     ms.shmem_barrier_all()
     ret = op.dispatch(inp, wts, scales, idx, **_dkw)
-    op.combine(ret[0], None, ret[3], **_ckw)
+    _run_combine(op, ret, combine_dtype, **_ckw)
 
     ms.shmem_barrier_all()
     g = torch.cuda.CUDAGraph()
     with torch.cuda.graph(g, stream=capture_stream):
         ret = op.dispatch(inp, wts, scales, idx, **_dkw)
-        op.combine(ret[0], None, ret[3], **_ckw)
+        _run_combine(op, ret, combine_dtype, **_ckw)
     return g, capture_stream
 
 
-def _cudagraph_capture_mori(op, inp, wts, idx, wc_buf, capture_stream, scales=None, packed_recv_x=None):
+def _cudagraph_capture_mori(
+    op, inp, wts, idx, wc_buf, capture_stream, scales=None, packed_recv_x=None, combine_dtype=None
+):
     """Capture mori dispatch+combine into a CUDA Graph.
 
     Mori's dispatch returns a real tensor under capture and the combine
@@ -969,11 +1135,13 @@ def _cudagraph_capture_mori(op, inp, wts, idx, wc_buf, capture_stream, scales=No
     call is needed.  Pattern follows mori's ``stress_graph`` in
     ``mori/tests/python/ops/bench_dispatch_combine.py``.
     """
+    if combine_dtype is None:
+        combine_dtype = inp.dtype
     ms.shmem_barrier_all()
     g = torch.cuda.CUDAGraph()
     with torch.cuda.graph(g, stream=capture_stream):
         ret = op.dispatch(inp, wts, None, idx)
-        op.combine(ret[0], None, ret[3])
+        _run_combine(op, ret, combine_dtype)
     return g, capture_stream
 
 
@@ -993,16 +1161,35 @@ def cudagraph_op(
     meta: dict,
     scales=None,
     packed_recv_x=None,
+    combine_dtype=None,
 ):
     """CUDA Graph mode: capture dispatch+combine, then time replays."""
+    if combine_dtype is None:
+        combine_dtype = inp.dtype
     capture_stream = torch.cuda.Stream()
     if op_tag == "flydsl":
         g, cs = _cudagraph_capture_flydsl(
-            op, inp, wts, idx, wc_buf, capture_stream, scales=scales, packed_recv_x=packed_recv_x
+            op,
+            inp,
+            wts,
+            idx,
+            wc_buf,
+            capture_stream,
+            scales=scales,
+            packed_recv_x=packed_recv_x,
+            combine_dtype=combine_dtype,
         )
     else:
         g, cs = _cudagraph_capture_mori(
-            op, inp, wts, idx, wc_buf, capture_stream, scales=scales, packed_recv_x=packed_recv_x
+            op,
+            inp,
+            wts,
+            idx,
+            wc_buf,
+            capture_stream,
+            scales=scales,
+            packed_recv_x=packed_recv_x,
+            combine_dtype=combine_dtype,
         )
 
     if rank == 0:
@@ -1103,6 +1290,7 @@ def profile_op(
     dtype_key: str = "bf16",
     quant_type: str = "none",
     use_p2p_read: bool = False,
+    combine_dtype=None,
 ):
     """Profile a single op (FlyDSL or mori) standalone; save the JSON and
     print cross-rank aggregated stats.
@@ -1119,6 +1307,8 @@ def profile_op(
 
     _dkw = dict(packed_recv_x=packed_recv_x) if packed_recv_x is not None else {}
     _ckw = dict(packed_recv_x=packed_recv_x) if packed_recv_x is not None else {}
+    if combine_dtype is None:
+        combine_dtype = inp.dtype
     with _make_profiler(active_iters=iters, prof_warmup=prof_warmup) as prof:
         for step in range(total_steps):
             # with record_function(f"{op_tag}::reset"):
@@ -1131,7 +1321,7 @@ def profile_op(
             dist.barrier()
 
             with record_function(f"{op_tag}::combine"):
-                op.combine(ret[0], None, ret[3], **_ckw)
+                _run_combine(op, ret, combine_dtype, **_ckw)
 
             # dist.barrier()
 
@@ -1173,6 +1363,7 @@ def profile_cudagraph_op(
     dtype_key: str = "bf16",
     quant_type: str = "none",
     use_p2p_read: bool = False,
+    combine_dtype=None,
 ):
     """Profile CUDAGraph replays with torch.profiler; save JSON and
     print cross-rank aggregated stats.
@@ -1180,16 +1371,34 @@ def profile_cudagraph_op(
     Pipeline: eager warmup -> graph capture -> replay warmup ->
     profiled replay loop.
     """
+    if combine_dtype is None:
+        combine_dtype = inp.dtype
     ms.shmem_barrier_all()
 
     capture_stream = torch.cuda.Stream()
     if op_tag == "flydsl":
         g, cs = _cudagraph_capture_flydsl(
-            op, inp, wts, idx, wc_buf, capture_stream, scales=scales, packed_recv_x=packed_recv_x
+            op,
+            inp,
+            wts,
+            idx,
+            wc_buf,
+            capture_stream,
+            scales=scales,
+            packed_recv_x=packed_recv_x,
+            combine_dtype=combine_dtype,
         )
     else:
         g, cs = _cudagraph_capture_mori(
-            op, inp, wts, idx, wc_buf, capture_stream, scales=scales, packed_recv_x=packed_recv_x
+            op,
+            inp,
+            wts,
+            idx,
+            wc_buf,
+            capture_stream,
+            scales=scales,
+            packed_recv_x=packed_recv_x,
+            combine_dtype=combine_dtype,
         )
 
     if rank == 0:
@@ -1427,7 +1636,7 @@ def _verify_dispatch_self_consistency(ret_f, op_fly, inp, wts, idx, scales, cfg,
     return all_pass
 
 
-def verify_self(op_fly, inp, wts, idx, k, rank, world_size, dev, dtype_key, cfg, op_mori=None):
+def verify_self(op_fly, inp, wts, idx, k, rank, world_size, dev, dtype_key, cfg, op_mori=None, combine_dtype=None):
     """FlyDSL verify, mori-byte parity when available.
 
     Four invariants are checked, mirroring mori's bench_dispatch_combine.py:
@@ -1459,11 +1668,14 @@ def verify_self(op_fly, inp, wts, idx, k, rank, world_size, dev, dtype_key, cfg,
     semantic that the original ``verify_op`` provided before 977df719.
     """
     all_pass = True
+    if combine_dtype is None:
+        combine_dtype = inp.dtype
 
     if rank == 0:
+        _cd_lbl = "" if combine_dtype == inp.dtype else f"  combine_dtype={combine_dtype}"
         print(f"\n{'='*65}")
         print(
-            f"  VERIFY (self-check)  dtype={dtype_key}  "
+            f"  VERIFY (self-check)  dtype={dtype_key}{_cd_lbl}  "
             f"EP={world_size}  bs={inp.shape[0]}  h={cfg.hidden_dim}  k={k}"
         )
         print(f"{'='*65}")
@@ -1524,7 +1736,7 @@ def verify_self(op_fly, inp, wts, idx, k, rank, world_size, dev, dtype_key, cfg,
             print(f"  [{status}] recv-slot dedup  unique={n_unique}  total_recv={total_recv}")
         all_pass &= ok_uniq
 
-    cout_f = op_fly.combine(ret_f[0], None, ret_f[3], packed_recv_x=packed_recv_x)
+    cout_f = _run_combine(op_fly, ret_f, combine_dtype, packed_recv_x=packed_recv_x)
     torch.cuda.synchronize()
     dist.barrier()
 
@@ -1545,7 +1757,7 @@ def verify_self(op_fly, inp, wts, idx, k, rank, world_size, dev, dtype_key, cfg,
             mret = op_mori.dispatch(inp, wts, scales, idx)
             torch.cuda.synchronize()
             dist.barrier()
-            mout = op_mori.combine(mret[0], None, mret[3])
+            mout = _run_combine(op_mori, mret, combine_dtype)
             torch.cuda.synchronize()
             dist.barrier()
             mori_tok = mout[0][:mt] if mout[0] is not None else None
@@ -1570,8 +1782,8 @@ def verify_self(op_fly, inp, wts, idx, k, rank, world_size, dev, dtype_key, cfg,
 
     if rank == 0:
         print(f"\n  ── Self-check: combine output vs {'inp' if scale_factor == 1 else 'k*input'} ──")
-        if cfg.data_type == torch.float4_e2m1fn_x2:
-            if k == 1 and not cfg.enable_std_moe:
+        if combine_dtype == torch.float4_e2m1fn_x2:
+            if k == 1 and not cfg.enable_std_moe and inp.dtype == combine_dtype:
                 ok = torch.equal(f_tok.view(torch.uint8), inp.view(torch.uint8))
                 status = "PASS" if ok else "FAIL"
                 print(f"  [{status}] out_tok vs inp (byte-level, k=1)")
@@ -1607,7 +1819,7 @@ def verify_self(op_fly, inp, wts, idx, k, rank, world_size, dev, dtype_key, cfg,
                 )
                 all_pass &= ok_nz and ok_no_sat
         else:
-            cast_to = torch.float32 if cfg.data_type in (torch.float8_e4m3fn, torch.float8_e4m3fnuz) else None
+            cast_to = torch.float32 if combine_dtype in (torch.float8_e4m3fn, torch.float8_e4m3fnuz) else None
             # recv-cap shrink path: when FlyDSL is given a non-trivial
             # ``max_total_recv_tokens`` (< worst-case ws*M), mori's
             # equivalent cap is a hard device-side assert -- random
@@ -1654,13 +1866,17 @@ def verify_self(op_fly, inp, wts, idx, k, rank, world_size, dev, dtype_key, cfg,
                 # ``fly==k*inp`` invariant as the authoritative gate.  In
                 # every other (non-P2P-read) configuration mori byte
                 # equality is still hard-required.
+                # ``inp.float()`` would HSAIL-crash for fp4 inp; route
+                # through the project-local fp4 unpacker (see the
+                # mori-unavailable branch below).
+                inp_for_diag = _cast_dispatch_to_combine(inp, torch.float32)
                 try:
-                    diff_to_kinp = (f_tok.float() - inp.float() * scale_factor).abs().max().item()
+                    diff_to_kinp = (f_tok.float() - inp_for_diag * scale_factor).abs().max().item()
                 except Exception:
                     diff_to_kinp = float("inf")
                 p2p_read_mode = (not cfg.use_external_inp_buf) and cfg.quant_type == "none"
 
-                if cfg.data_type in (torch.float8_e4m3fn, torch.float8_e4m3fnuz):
+                if combine_dtype in (torch.float8_e4m3fn, torch.float8_e4m3fnuz):
                     ok_b = torch.equal(f_tok.view(torch.uint8), mori_tok.view(torch.uint8))
                     status = "PASS" if ok_b else "FAIL"
                     print(f"  [{status}] out_tok vs mori (fp8 bytes)")
@@ -1695,9 +1911,16 @@ def verify_self(op_fly, inp, wts, idx, k, rank, world_size, dev, dtype_key, cfg,
             else:
                 # Mori unavailable: fall back to sanity-only gate.
                 # NaN/Inf is hard failure; the ``k*inp`` magnitude check
-                # is purely diagnostic.
+                # is purely diagnostic.  ``inp.float()`` is unsafe when
+                # ``inp.dtype`` is ``float4_e2m1fn_x2``: PyTorch's CUDA
+                # path schedules ``direct_copy_kernel`` for it which
+                # raises an HSAIL hardware exception (poisoning the HIP
+                # context).  Route through ``_cast_dispatch_to_combine``
+                # so fp4 -> f32 unpacks via the project-local LUT
+                # instead.
+                inp_for_diag = _cast_dispatch_to_combine(inp, torch.float32)
                 try:
-                    diag = (f_tok.float() - inp.float() * scale_factor).abs().max().item()
+                    diag = (f_tok.float() - inp_for_diag * scale_factor).abs().max().item()
                     print(
                         f"  [DIAG] {check_label}                 |fly - k*inp|.max={diag:.4f}  "
                         "(no mori oracle; treated as informational)"
@@ -1782,6 +2005,20 @@ def run_profiler(rank, world_size, args):
     n_exp = world_size * args.num_experts_per_rank
 
     _dtype = DTYPE_MAP.get(args.dtype, torch.bfloat16)
+    _comb_dtype = _resolve_combine_dtype(args, _dtype)
+
+    # Mori-parity buffer-capacity hint for mixed dtypes: when dispatch
+    # and combine use different dtypes, ``cfg.max_token_type_size`` must
+    # cover whichever dtype writes the largest per-element record (else
+    # the shmem ``comb_inp_tok`` view-cast would OOB the per-row budget).
+    _user_mtt = getattr(args, "max_token_type_size", 0)
+    if _comb_dtype != _dtype:
+        _disp_es = 1 if _dtype == torch.float4_e2m1fn_x2 else torch.tensor([], dtype=_dtype).element_size()
+        _comb_es = 1 if _comb_dtype == torch.float4_e2m1fn_x2 else torch.tensor([], dtype=_comb_dtype).element_size()
+        _auto_mtt = max(_disp_es, _comb_es)
+        if _user_mtt <= 0 or _user_mtt < _auto_mtt:
+            _user_mtt = _auto_mtt
+
     cfg = FlyDSLDispatchCombineConfig(
         rank=rank,
         world_size=world_size,
@@ -1798,7 +2035,7 @@ def run_profiler(rank, world_size, args):
         scale_type_size=args.scale_type_size,
         quant_type=args.quant_type,
         max_total_recv_tokens=getattr(args, "max_total_recv_tokens", 0),
-        max_token_type_size=getattr(args, "max_token_type_size", 0),
+        max_token_type_size=_user_mtt,
     )
 
     mori_bn = args.mori_block_num if args.mori_block_num > 0 else cfg.block_num
@@ -1988,11 +2225,12 @@ def run_profiler(rank, world_size, args):
     _ret_for_tr = op_fly.dispatch(inp, wts, scales, idx, packed_recv_x=packed_recv_x)
     torch.cuda.synchronize()
     total_recv_per_rank = int(_ret_for_tr[4].item())
-    op_fly.combine(_ret_for_tr[0], None, _ret_for_tr[3], packed_recv_x=packed_recv_x)
+    _run_combine(op_fly, _ret_for_tr, _comb_dtype, packed_recv_x=packed_recv_x)
     torch.cuda.synchronize()
     ms.shmem_barrier_all()
     meta["total_recv"] = total_recv_per_rank
     meta["token_bytes_per_tok"] = cfg.token_bytes
+    meta["combine_dtype"] = str(_comb_dtype)
     if rank == 0:
         print(f"[setup] per-rank total_recv = {total_recv_per_rank} tokens; " f"token bytes = {cfg.token_bytes}")
 
@@ -2006,7 +2244,7 @@ def run_profiler(rank, world_size, args):
         for _ in range(args.warmup):
             ms.shmem_barrier_all()
             ret = op_fly.dispatch(inp, wts, scales, idx, packed_recv_x=packed_recv_x)
-            op_fly.combine(ret[0], None, ret[3], packed_recv_x=packed_recv_x)
+            _run_combine(op_fly, ret, _comb_dtype, packed_recv_x=packed_recv_x)
             torch.cuda.synchronize()
 
         if op_ref is not None:
@@ -2015,7 +2253,7 @@ def run_profiler(rank, world_size, args):
             for _ in range(args.warmup):
                 op_ref.reset()
                 ret_r = op_ref.dispatch(inp, wts, None, idx)
-                op_ref.combine(ret_r[0], None, ret_r[3])
+                _run_combine(op_ref, ret_r, _comb_dtype)
                 torch.cuda.synchronize()
 
     ms.shmem_barrier_all()
@@ -2029,7 +2267,9 @@ def run_profiler(rank, world_size, args):
     # whether the timing phase also runs a mori reference for perf
     # comparison.
     # ------------------------------------------------------------------
-    ok = verify_self(op_fly, inp, wts, idx, k, rank, world_size, dev, args.dtype, cfg, op_mori=op_ref)
+    ok = verify_self(
+        op_fly, inp, wts, idx, k, rank, world_size, dev, args.dtype, cfg, op_mori=op_ref, combine_dtype=_comb_dtype
+    )
     if not ok:
         if rank == 0:
             print("[run_profiler] embedded verify FAILED -- skipping timing")
@@ -2070,10 +2310,26 @@ def run_profiler(rank, world_size, args):
                 meta,
                 scales=scales,
                 packed_recv_x=packed_recv_x,
+                combine_dtype=_comb_dtype,
             )
         if test_mori:
             ms.shmem_barrier_all()
-            bench_op(op_ref, "mori", inp, wts, idx, wc_buf, k, rank, world_size, dev, args.warmup, args.iters, meta)
+            bench_op(
+                op_ref,
+                "mori",
+                inp,
+                wts,
+                idx,
+                wc_buf,
+                k,
+                rank,
+                world_size,
+                dev,
+                args.warmup,
+                args.iters,
+                meta,
+                combine_dtype=_comb_dtype,
+            )
 
     elif args.mode == "bench" and args.cudagraph:
         if test_flydsl:
@@ -2093,10 +2349,26 @@ def run_profiler(rank, world_size, args):
                 meta,
                 scales=scales,
                 packed_recv_x=packed_recv_x,
+                combine_dtype=_comb_dtype,
             )
         if test_mori:
             ms.shmem_barrier_all()
-            cudagraph_op(op_ref, "mori", inp, wts, idx, wc_buf, k, rank, world_size, dev, args.warmup, args.iters, meta)
+            cudagraph_op(
+                op_ref,
+                "mori",
+                inp,
+                wts,
+                idx,
+                wc_buf,
+                k,
+                rank,
+                world_size,
+                dev,
+                args.warmup,
+                args.iters,
+                meta,
+                combine_dtype=_comb_dtype,
+            )
 
     elif args.mode == "profile" and not args.cudagraph:
         _p2p = not args.use_external_inp_buf
@@ -2120,6 +2392,7 @@ def run_profiler(rank, world_size, args):
                 dtype_key=args.dtype,
                 quant_type=args.quant_type,
                 use_p2p_read=_p2p,
+                combine_dtype=_comb_dtype,
             )
         if test_mori:
             ms.shmem_barrier_all()
@@ -2140,6 +2413,7 @@ def run_profiler(rank, world_size, args):
                 dtype_key=args.dtype,
                 quant_type=args.quant_type,
                 use_p2p_read=_p2p,
+                combine_dtype=_comb_dtype,
             )
         if rank == 0:
             print(f"\n[profiler] all results saved to: {out_dir}/")
@@ -2167,6 +2441,7 @@ def run_profiler(rank, world_size, args):
                 dtype_key=args.dtype,
                 quant_type=args.quant_type,
                 use_p2p_read=_p2p,
+                combine_dtype=_comb_dtype,
             )
         if test_mori:
             ms.shmem_barrier_all()
@@ -2188,6 +2463,7 @@ def run_profiler(rank, world_size, args):
                 dtype_key=args.dtype,
                 quant_type=args.quant_type,
                 use_p2p_read=_p2p,
+                combine_dtype=_comb_dtype,
             )
         if rank == 0:
             print(f"\n[profiler] all results saved to: {out_dir}/")
@@ -2307,6 +2583,20 @@ def _parse_args():
     )
     p.add_argument(
         "--dtype", type=str, default="bf16", choices=list(DTYPE_MAP.keys()), help="data type (default: bf16)"
+    )
+    p.add_argument(
+        "--combine-dtype",
+        type=str,
+        default="",
+        choices=["", *DTYPE_MAP.keys()],
+        help=(
+            "combine launch-time dtype (mori parity).  Empty (default) "
+            "reuses --dtype on both dispatch and combine; setting it to "
+            "a different dtype (e.g. --dtype fp8_ocp --combine-dtype bf16) "
+            "exercises the mixed-dtype path: fp4 / fp8_ocp dispatch + "
+            "bf16 combine, with caller-side staging into the registered "
+            "combine input buffer when use_external_inp_buf=False."
+        ),
     )
     p.add_argument(
         "--warmup",
