@@ -4,6 +4,7 @@
 import ast
 import contextlib
 import difflib
+import functools
 import inspect
 import types
 from textwrap import dedent
@@ -221,6 +222,7 @@ class ASTRewriter:
                 tuple(new_closure),
             )
             new_f.__kwdefaults__ = f.__kwdefaults__
+            functools.update_wrapper(new_f, f)
             return new_f
 
         f.__code__ = new_f_code_o
