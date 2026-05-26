@@ -5,10 +5,19 @@
 
 """Tests for TensorAdaptor cache signature and the ``mark_static`` API.
 
-Default cache key is lightweight (dtype + align + 32-bit-stride flag + rank)
-so a single compiled kernel serves calls with different shapes.  When the
-kernel's compiled IR depends on concrete shape values, the affected dims must
-be marked with ``mark_static`` so they participate in the cache key.
+``flyc.from_dlpack(t)`` returns a *static-layout* TensorAdaptor: every dim's
+shape and stride participates in the JIT cache key, so distinct shapes get
+distinct compiled kernels (safe default for shape-baked IR).  To share one
+compiled kernel across shapes, chain ``.mark_layout_dynamic()`` -- that
+switches the memref to layout-dynamic and elides shape/stride from the key
+(only the leading stride-1 dim and divisibility stay).
+
+Raw ``torch.Tensor`` arguments go through the auto-adapt path
+(``TensorAdaptor(t)`` with ``dynamic_layout=True``).  They get a
+layout-dynamic memref, but conservatively keep shape/stride in the key so
+helper code that bakes shape facts while tracing stays correct.
+``mark_static`` further pins specific dims into the cache key on top of
+either layout.
 """
 
 import pytest
@@ -22,10 +31,17 @@ from flydsl.compiler.jit_argument import TensorAdaptor
 # -----------------------------------------------------------------------------
 
 
-def test_default_cache_signature_shares_key_across_shapes():
+def test_dynamic_layout_cache_signature_shares_key_across_shapes():
+    a = flyc.from_dlpack(torch.empty((4, 8), dtype=torch.float32)).mark_layout_dynamic()
+    b = flyc.from_dlpack(torch.empty((100, 200), dtype=torch.float32)).mark_layout_dynamic()
+    assert a.__cache_signature__() == b.__cache_signature__()
+
+
+def test_default_static_cache_signature_differs_by_shape():
+    """``from_dlpack`` defaults to static layout: shape participates in the key."""
     a = flyc.from_dlpack(torch.empty((4, 8), dtype=torch.float32))
     b = flyc.from_dlpack(torch.empty((100, 200), dtype=torch.float32))
-    assert a.__cache_signature__() == b.__cache_signature__()
+    assert a.__cache_signature__() != b.__cache_signature__()
 
 
 def test_default_cache_signature_differs_by_dtype():
@@ -40,18 +56,19 @@ def test_default_cache_signature_differs_by_rank():
     assert a.__cache_signature__() != b.__cache_signature__()
 
 
-def test_raw_cache_signature_matches_default_dlpack():
-    """raw_cache_signature (lightweight path) and default __cache_signature__ agree."""
+def test_raw_cache_signature_matches_auto_adapted_tensor():
+    """Lightweight raw_cache_signature matches the full __cache_signature__ of an auto-adapted (dynamic_layout=True) TensorAdaptor, so fast/slow paths share the same cache slot."""
     t = torch.empty((4, 8), dtype=torch.float32)
     raw_sig = TensorAdaptor.raw_cache_signature(t)
-    dlpack_sig = flyc.from_dlpack(t).__cache_signature__()
-    assert raw_sig == dlpack_sig
+    auto_sig = TensorAdaptor(t).__cache_signature__()
+    assert raw_sig == auto_sig
 
 
-def test_raw_cache_signature_shares_across_shapes():
+def test_raw_cache_signature_pins_shape():
+    """Raw tensors keep shape/stride in the key (conservative default for shape-baking helpers); shapes differ ⇒ keys differ."""
     a = torch.empty((100,), dtype=torch.float32)
     b = torch.empty((999,), dtype=torch.float32)
-    assert TensorAdaptor.raw_cache_signature(a) == TensorAdaptor.raw_cache_signature(b)
+    assert TensorAdaptor.raw_cache_signature(a) != TensorAdaptor.raw_cache_signature(b)
 
 
 def test_raw_cache_signature_differs_by_rank():
@@ -74,10 +91,10 @@ def test_mark_static_all_dims_includes_shape_in_key():
 
 
 def test_mark_static_per_dim_only_marked_dim_in_key():
-    """mark_static(dims=[1]) → dim 1 in key, dim 0 still 'dynamic'."""
-    s0 = flyc.from_dlpack(torch.empty((4, 8))).mark_static(dims=[1])
-    s1 = flyc.from_dlpack(torch.empty((100, 8))).mark_static(dims=[1])  # diff dim 0
-    s2 = flyc.from_dlpack(torch.empty((4, 16))).mark_static(dims=[1])  # diff dim 1
+    """On a layout-dynamic adaptor, mark_static(dims=[1]) → dim 1 in key, dim 0 stays elided."""
+    s0 = flyc.from_dlpack(torch.empty((4, 8))).mark_layout_dynamic().mark_static(dims=[1])
+    s1 = flyc.from_dlpack(torch.empty((100, 8))).mark_layout_dynamic().mark_static(dims=[1])  # diff dim 0
+    s2 = flyc.from_dlpack(torch.empty((4, 16))).mark_layout_dynamic().mark_static(dims=[1])  # diff dim 1
     assert s0.__cache_signature__() == s1.__cache_signature__(), "dim 0 not in key"
     assert s0.__cache_signature__() != s2.__cache_signature__(), "dim 1 in key"
 
@@ -103,8 +120,8 @@ def test_mark_static_out_of_range_raises():
         t.mark_static(dims=[-1])
 
 
-def test_mark_static_default_vs_dynamic_differ_when_only_one_marked():
-    """A marked tensor and a default tensor with the same shape produce different keys."""
-    default = flyc.from_dlpack(torch.empty((4, 8)))
-    marked = flyc.from_dlpack(torch.empty((4, 8))).mark_static()
-    assert default.__cache_signature__() != marked.__cache_signature__()
+def test_mark_static_dynamic_vs_marked_differ():
+    """A layout-dynamic tensor (shape elided) and the same tensor with mark_static() pinning all dims produce different keys."""
+    dyn = flyc.from_dlpack(torch.empty((4, 8))).mark_layout_dynamic()
+    marked = flyc.from_dlpack(torch.empty((4, 8))).mark_layout_dynamic().mark_static()
+    assert dyn.__cache_signature__() != marked.__cache_signature__()
