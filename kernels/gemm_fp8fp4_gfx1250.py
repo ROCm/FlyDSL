@@ -1435,15 +1435,14 @@ def compile_mxscale_gemm(
                 emit_panel_2x2(1, 3, a1_box[0], b3_box[0], scale_pair)
 
                 emit_panel_2x2(2, 0, a2_box[0], b0, scale_pair)
+                if const_expr(is_last_ks and late_compute_callback is not None):
+                    rocdl.sched_barrier(0)
+                    late_compute_callback()
                 emit_panel_2x2(2, 1, a2_box[0], b1, scale_pair)
 
                 rocdl.s_wait_dscnt(0)
                 emit_panel_2x2(3, 0, a3_box[0], b0, scale_pair)
                 emit_panel_2x2(3, 1, a3_box[0], b1, scale_pair)
-
-                if const_expr(is_last_ks and late_compute_callback is not None):
-                    rocdl.sched_barrier(0)
-                    late_compute_callback()
 
                 if const_expr(is_last_ks and emit_filler is not None):
                     rocdl.sched_barrier(0)
