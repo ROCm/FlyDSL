@@ -25,10 +25,8 @@ from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, rocdl, vector
-from flydsl.expr import math as fly_math
 from flydsl.expr.typing import Int32, T
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
-from flydsl.utils.env import runtime as flydsl_runtime_env
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from kernels import dpp_utils
 from kernels.pa_decode_swa import compile_pa_decode_sw, compile_pa_decode_sw_reduce
@@ -675,15 +673,12 @@ def _make_pa_phase_helpers(
             dtype=fx.Int32,
         )
 
-    def _apply_token_mask_vec(logit_vec, td: int, kv_tok_base, causal_bound, seq_start, false_value):
+    def _apply_token_mask_vec(logit_vec, td: int, kv_tok_base, causal_bound, false_value):
         tok_vec = _token_vec_i32(kv_tok_base, td)
-        if const_expr(apply_causal_mask and seq_start is not None):
-            in_range = (tok_vec < causal_bound) & (tok_vec >= seq_start)
-        elif const_expr(apply_causal_mask):
+        if const_expr(apply_causal_mask):
             in_range = tok_vec < causal_bound
-        else:
-            in_range = tok_vec >= seq_start
-        return arith.select(in_range, logit_vec, vector.broadcast(T.f32x4, arith.unwrap(false_value)))
+            return arith.select(in_range, logit_vec, vector.broadcast(T.f32x4, arith.unwrap(false_value)))
+        return logit_vec
 
     def _qk_and_intra_softmax(
         k_ops,
@@ -693,7 +688,6 @@ def _make_pa_phase_helpers(
         query_scale_lane=None,
         *,
         preloaded_scales=None,
-        seq_start=None,
     ):
         if const_expr(preloaded_scales is not None):
             if const_expr(cache_scale_vecs and per_token_kv):
@@ -724,15 +718,14 @@ def _make_pa_phase_helpers(
                 else:
                     d_out.append(acc * vector.broadcast(T.f32x4, scale))
 
-        apply_range_mask = seq_start is not None
         kv_tok_base = (
-            partition_start + kv_tok_thread_base if const_expr(apply_causal_mask or apply_range_mask) else None
+            partition_start + kv_tok_thread_base if const_expr(apply_causal_mask) else None
         )
         qk_max = neg_inf
         for td in range_constexpr(TLOOP):
             logits_vec = d_out[td]
             if const_expr(kv_tok_base is not None):
-                logits_vec = _apply_token_mask_vec(logits_vec, td, kv_tok_base, causal_bound, seq_start, neg_inf)
+                logits_vec = _apply_token_mask_vec(logits_vec, td, kv_tok_base, causal_bound, neg_inf)
                 d_out[td] = logits_vec
             qk_max = qk_max.maximumf(fx.Vector(logits_vec).reduce("max"))
         for sh in [32, 16]:
@@ -773,13 +766,6 @@ def _make_pa_phase_helpers(
             softmax_lds_f32,
             [sm_sum_off],
         )
-        gpu.barrier()
-        sum_vec = fx.Vector(vector.load_op(T.f32x4, softmax_lds_f32, [sm_rd_sum_offs[0]]))
-        for w in range_constexpr(NUM_WARPS):
-            partition_sum = arith.addf(
-                arith.unwrap(partition_sum), arith.unwrap(sum_vec[w]), fastmath=arith.FastMathFlags.contract
-            )
-
         if const_expr(needs_mask):
             accum_scale = arith.select(
                 rmax > neg_inf,
@@ -788,6 +774,13 @@ def _make_pa_phase_helpers(
             )
         else:
             accum_scale = _exp2_f32_fast((rmax - new_rmax) * fx.Float32(LOG2E).ir_value())
+            
+        gpu.barrier()
+        sum_vec = fx.Vector(vector.load_op(T.f32x4, softmax_lds_f32, [sm_rd_sum_offs[0]]))
+        for w in range_constexpr(NUM_WARPS):
+            partition_sum = arith.addf(
+                arith.unwrap(partition_sum), arith.unwrap(sum_vec[w]), fastmath=arith.FastMathFlags.contract
+            )
 
         accum_sum = arith.mulf(arith.unwrap(accum_scale), arith.unwrap(rsum), fastmath=arith.FastMathFlags.contract)
         rsum = arith.addf(accum_sum, arith.unwrap(partition_sum), fastmath=arith.FastMathFlags.contract)
@@ -875,7 +868,7 @@ def _make_pa_phase_helpers(
         for td in range_constexpr(TLOOP):
             logits_vec = d_out[td]
             if const_expr(kv_tok_base is not None):
-                logits_vec = _apply_token_mask_vec(logits_vec, td, kv_tok_base, causal_bound, seq_start, neg_inf)
+                logits_vec = _apply_token_mask_vec(logits_vec, td, kv_tok_base, causal_bound, neg_inf)
                 d_out[td] = logits_vec
             qk_max = qk_max.maximumf(fx.Vector(logits_vec).reduce("max"))
         for sh in [32, 16]:
