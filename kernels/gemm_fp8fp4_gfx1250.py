@@ -1383,6 +1383,21 @@ def compile_mxscale_gemm(
                         b_scales,
                     )
 
+            def emit_panel_2x2_row(wm_pair, wn_pair, row_local, a_pair, b_pair, scale_pair):
+                a_scales, b_scales = scale_pair
+                wm_base = wm_pair * _fp8_pair_wm
+                wn_base = wn_pair * _fp8_pair_wn
+                for wn_local in range_constexpr(_fp8_pair_wn):
+                    _emit_wmma(
+                        current_accs,
+                        wm_base + row_local,
+                        wn_base + wn_local,
+                        a_pair[row_local],
+                        b_pair[wn_local],
+                        a_scales,
+                        b_scales,
+                    )
+
             _pair_loads = _fp8_pair_a_loads
             _two_pair_loads = _fp8_pair_a_loads + _fp8_pair_b_loads
             _three_pair_loads = _fp8_pair_b_loads + _fp8_pair_a_loads * 2
@@ -1429,9 +1444,10 @@ def compile_mxscale_gemm(
                 emit_panel_2x2(1, 1, a1_box[0], b1, scale_pair, prefetch_after_first_row=_prefetch_a2_a3)
 
                 emit_panel_2x2(0, 2, a0, b2, scale_pair)
+                emit_panel_2x2_row(1, 2, 0, a1_box[0], b2, scale_pair)
                 rocdl.s_wait_dscnt(_pair_loads)
                 emit_panel_2x2(0, 3, a0, b3_box[0], scale_pair)
-                emit_panel_2x2(1, 2, a1_box[0], b2, scale_pair)
+                emit_panel_2x2_row(1, 2, 1, a1_box[0], b2, scale_pair)
                 emit_panel_2x2(1, 3, a1_box[0], b3_box[0], scale_pair)
 
                 emit_panel_2x2(2, 0, a2_box[0], b0, scale_pair)
