@@ -202,6 +202,21 @@ class TensorAdaptor:
             self._is_layout_dynamic = False
 
     @staticmethod
+    def _static_layout_cache_signature(shape, strides):
+        return (
+            "static_layout",
+            tuple(int(d) for d in shape),
+            tuple(int(s) for s in strides),
+        )
+
+    @staticmethod
+    def _can_share_default_cache_across_shapes(strides):
+        # TensorAdaptor.__init__ uses mark_layout_dynamic(-1, 1). It can only
+        # produce a shape-agnostic memref type when there is one unambiguous
+        # stride-1 dimension. Static-layout fallbacks bake shape/stride into IR.
+        return sum(1 for stride in strides if int(stride) == 1) == 1
+
+    @staticmethod
     def _extract_data_ptr(arg):
         # arg may be a raw torch.Tensor or a TensorAdaptor wrapping one;
         # both can hit the same fast-path CallState because they share
@@ -288,7 +303,10 @@ class TensorAdaptor:
         Matches ``__cache_signature__`` for a default-constructed TensorAdaptor
         (no ``mark_static`` calls).
         """
-        return (tensor.dtype, None, False, tensor.dim())
+        base = (tensor.dtype, None, False, tensor.dim())
+        if TensorAdaptor._can_share_default_cache_across_shapes(tensor.stride()):
+            return base
+        return base + (TensorAdaptor._static_layout_cache_signature(tensor.shape, tensor.stride()),)
 
     def __cache_signature__(self):
         base = (
@@ -297,6 +315,8 @@ class TensorAdaptor:
             self.use_32bit_stride,
             len(self._orig_shape),
         )
+        if not self._is_layout_dynamic:
+            return base + (self._static_layout_cache_signature(self._orig_shape, self._orig_strides),)
         if not self._cached_dims:
             return base
         # Pack only the marked dims as sorted (dim, shape, stride) triples.

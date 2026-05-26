@@ -6,9 +6,11 @@
 """Tests for TensorAdaptor cache signature and the ``mark_static`` API.
 
 Default cache key is lightweight (dtype + align + 32-bit-stride flag + rank)
-so a single compiled kernel serves calls with different shapes.  When the
-kernel's compiled IR depends on concrete shape values, the affected dims must
-be marked with ``mark_static`` so they participate in the cache key.
+when the tensor can use a layout-dynamic memref, so a single compiled kernel
+serves calls with different shapes. Static-layout memrefs include shape/stride
+in the key because those values are baked into the compiled IR. When a
+layout-dynamic kernel still depends on concrete shape values, the affected dims
+must be marked with ``mark_static`` so they participate in the cache key.
 """
 
 import pytest
@@ -18,7 +20,7 @@ import flydsl.compiler as flyc
 from flydsl.compiler.jit_argument import TensorAdaptor
 
 # -----------------------------------------------------------------------------
-# Default cache behavior: shape NOT in key, kernels reused across shapes
+# Default cache behavior: layout-dynamic tensors share across shapes
 # -----------------------------------------------------------------------------
 
 
@@ -48,10 +50,29 @@ def test_raw_cache_signature_matches_default_dlpack():
     assert raw_sig == dlpack_sig
 
 
+def test_raw_cache_signature_matches_default_dlpack_for_static_layout():
+    t = torch.empty((512, 1), dtype=torch.float32)
+    raw_sig = TensorAdaptor.raw_cache_signature(t)
+    dlpack_sig = flyc.from_dlpack(t).__cache_signature__()
+    assert raw_sig == dlpack_sig
+
+
 def test_raw_cache_signature_shares_across_shapes():
     a = torch.empty((100,), dtype=torch.float32)
     b = torch.empty((999,), dtype=torch.float32)
     assert TensorAdaptor.raw_cache_signature(a) == TensorAdaptor.raw_cache_signature(b)
+
+
+def test_default_cache_signature_differs_for_static_layout_shapes():
+    a = flyc.from_dlpack(torch.empty((512, 1), dtype=torch.float32))
+    b = flyc.from_dlpack(torch.empty((4096, 1), dtype=torch.float32))
+    assert a.__cache_signature__() != b.__cache_signature__()
+
+
+def test_raw_cache_signature_differs_for_static_layout_shapes():
+    a = torch.empty((512, 1), dtype=torch.float32)
+    b = torch.empty((4096, 1), dtype=torch.float32)
+    assert TensorAdaptor.raw_cache_signature(a) != TensorAdaptor.raw_cache_signature(b)
 
 
 def test_raw_cache_signature_differs_by_rank():
