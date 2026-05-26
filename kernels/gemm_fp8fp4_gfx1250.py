@@ -452,7 +452,7 @@ def compile_mxscale_gemm(
 
         if const_expr(inst_prefetch):
             if rocdl.wave_id() == fx.Int32(0):
-                rocdl.s_prefetch_inst_burst(num_pages=10)
+                rocdl.s_prefetch_inst_burst(num_pages=4)
 
         tx = gpu.thread_id("x")
         bx = gpu.block_id("x")
