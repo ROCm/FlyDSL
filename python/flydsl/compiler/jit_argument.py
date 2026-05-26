@@ -197,18 +197,10 @@ class TensorAdaptor:
             try:
                 self._mark_layout_dynamic(leading_dim=-1, divisibility=1)
             except RuntimeError as e:
-                # No silent fallback to static: a silent fallback would pin
-                # shape/stride into the JIT cache key for tensors the user
-                # expected to share one compile, causing surprise per-shape
-                # recompiles. Surface the C++ error and tell the caller how
-                # to resolve it explicitly.
                 raise RuntimeError(
-                    f"TensorAdaptor cannot auto-mark layout-dynamic for tensor "
+                    f"cannot auto-mark layout-dynamic for tensor "
                     f"shape={tuple(tensor.shape)} strides={tuple(tensor.stride())}: {e}. "
-                    "Resolve explicitly: use flyc.from_dlpack(t) for a static memref "
-                    "(shape pinned in the cache key), or "
-                    "flyc.from_dlpack(t).mark_layout_dynamic(leading_dim=N) "
-                    "to pick the leading stride-1 dim manually."
+                    "Use flyc.from_dlpack(t) to wrap as a static memref instead."
                 ) from e
 
     @staticmethod
@@ -219,30 +211,15 @@ class TensorAdaptor:
 
     @staticmethod
     def _resolve_unit_stride_axis(strides) -> Optional[int]:
-        """Index of the first axis whose stride equals one, or ``None``.
-
-        Used to decide which axis can stay statically stride-1 in a
-        layout-dynamic memref. Several axes may qualify when the tensor
-        has degenerate (size-0 or size-1) axes whose stride PyTorch /
-        DLPack happens to set to one; we just take the earliest match.
-        """
-        i = 0
-        for s in strides:
-            if int(s) == 1:
-                return i
-            i += 1
-        return None
+        """Earliest axis with stride 1, or None if no axis qualifies."""
+        return next((i for i, s in enumerate(strides) if int(s) == 1), None)
 
     @staticmethod
     def _dynamic_cache_signature(tensor: torch.Tensor, assumed_align: Optional[int], use_32bit_stride: bool):
-        strides = tensor.stride()
-        leading_dim = TensorAdaptor._resolve_unit_stride_axis(strides)
-        base = (tensor.dtype, assumed_align, use_32bit_stride)
+        leading_dim = TensorAdaptor._resolve_unit_stride_axis(tensor.stride())
         if leading_dim is None:
-            shape_sig = tuple(int(d) for d in tensor.shape)
-            stride_sig = tuple(int(s) for s in strides)
-            return base + ("static", shape_sig, stride_sig)
-        return base + ("dynamic", tensor.dim(), leading_dim, 1)
+            raise RuntimeError("No axis has stride 1; cannot mark layout-dynamic")
+        return (tensor.dtype, assumed_align, use_32bit_stride, "dynamic", tensor.dim(), leading_dim, 1)
 
     @classmethod
     def _reusable_slot_spec(cls, arg):
@@ -317,15 +294,13 @@ class TensorAdaptor:
 
     @staticmethod
     def raw_cache_signature(tensor: torch.Tensor):
-        """Cache sig for a raw torch.Tensor, computed without going through DLPack.
+        """Cache sig for a raw torch.Tensor without going through DLPack.
 
-        Returns the same tuple as ``TensorAdaptor(tensor).__cache_signature__()``
-        (auto-adapted, ``dynamic_layout=True`` path), so the JIT cache fast
-        path and the slow path land in the same slot. Shape/stride are
-        materialised into the key conservatively, because helper code may
-        bake shape-derived layout facts while tracing. Callers that want
-        cross-shape kernel reuse should explicitly opt in via
-        ``from_dlpack(...).mark_layout_dynamic(...)``.
+        Matches ``TensorAdaptor(tensor).__cache_signature__()`` on the
+        auto-adapt path so fast and slow paths share the same cache slot:
+        dtype/rank/leading-axis only, no shape/stride values. Raises
+        ``RuntimeError`` for tensors that cannot be layout-dynamic (no
+        unit-stride axis); use ``flyc.from_dlpack(t)`` for those.
         """
         return TensorAdaptor._dynamic_cache_signature(tensor, None, False)
 
@@ -371,14 +346,8 @@ class TensorAdaptor:
         return self
 
     def _mark_layout_dynamic(self, leading_dim: int, divisibility: int):
-        # We always pass a concrete dim index down to C++, never -1.  Reason:
-        # the framework view of strides (what we get from ``tensor.stride()``)
-        # and the DLPack view that C++ sees can diverge for tensors with
-        # zero-size or unit-size axes -- DLPack tends to flatten the "doesn't
-        # matter" stride values toward 1, which makes C++'s own search for
-        # the unit-stride axis ambiguous.  Resolving on the framework view
-        # avoids that; the C++ side then only validates that
-        # ``stride[leading_dim] == 1`` at the explicitly chosen index.
+        # Resolve on framework strides and pass an explicit index; DLPack may
+        # normalise zero/unit-size axis strides to 1 and break C++'s -1 scan.
         if leading_dim == -1:
             resolved_leading_dim = self._resolve_unit_stride_axis(self._orig_strides)
             if resolved_leading_dim is None:
