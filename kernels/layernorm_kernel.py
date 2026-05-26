@@ -453,12 +453,13 @@ def build_fused_add_layernorm_module(M: int, N: int, dtype_str: str):
             r_e = _load_scalar(residual_in_div, idx_safe)
             x = x_e if dtype_str == "f32" else x_e.to(fx.Float32)
             residual = r_e if dtype_str == "f32" else r_e.to(fx.Float32)
-            added = x + residual
+            added_e = (x + residual) if dtype_str == "f32" else (x + residual).to(elem_dtype)
+            added = added_e if dtype_str == "f32" else added_e.to(fx.Float32)
             added_safe = is_valid.select(added, c_zero_f)
             thread_sum = thread_sum + added_safe
             thread_sumsq = thread_sumsq + is_valid.select(added * added, c_zero_f)
             if idx < N:
-                _store_scalar(residual_out_div, idx, added)
+                _store_scalar(residual_out_div, idx, added_e)
 
         sum_val, sumsq_val = block_reduce_add2(thread_sum, thread_sumsq)
         mean, rstd = compute_mean_rstd(sum_val, sumsq_val)
@@ -466,15 +467,13 @@ def build_fused_add_layernorm_module(M: int, N: int, dtype_str: str):
         for base_idx_int in range_constexpr(0, N, BLOCK_THREADS):
             idx = tid + base_idx_int
             if idx < N:
-                x_e = _load_scalar(in_div, idx)
-                r_e = _load_scalar(residual_in_div, idx)
+                added_e = _load_scalar(residual_out_div, idx)
                 g_e = _load_scalar(gamma_div, idx)
                 b_e = _load_scalar(beta_div, idx)
-                x = x_e if dtype_str == "f32" else x_e.to(fx.Float32)
-                residual = r_e if dtype_str == "f32" else r_e.to(fx.Float32)
+                added = added_e if dtype_str == "f32" else added_e.to(fx.Float32)
                 g = g_e if dtype_str == "f32" else g_e.to(fx.Float32)
                 b = b_e if dtype_str == "f32" else b_e.to(fx.Float32)
-                y = ((x + residual) - mean) * rstd
+                y = (added - mean) * rstd
                 y = y * g + b
                 if const_expr(dtype_str == "f32"):
                     y_e = y
@@ -686,14 +685,15 @@ def _build_layernorm_quant_module(
             neg_val = c_zero_f - val
             return is_neg.select(neg_val, val)
 
-        def _load_input_value(index):
+        def _load_base_input_value(index):
             x_e = _load_scalar(in_div, index)
-            x = x_e if dtype_str == "f32" else x_e.to(fx.Float32)
+            return x_e if dtype_str == "f32" else x_e.to(fx.Float32)
+
+        def _load_norm_input_value(index):
             if const_expr(is_fused_add):
-                r_e = _load_scalar(residual_in_div, index)
-                residual = r_e if dtype_str == "f32" else r_e.to(fx.Float32)
-                return x + residual
-            return x
+                added_e = _load_scalar(residual_out_div, index)
+                return added_e if dtype_str == "f32" else added_e.to(fx.Float32)
+            return _load_base_input_value(index)
 
         thread_sum = c_zero_f
         thread_sumsq = c_zero_f
@@ -702,13 +702,19 @@ def _build_layernorm_quant_module(
             idx = tid + base_idx_int
             is_valid = idx < N
             idx_safe = is_valid.select(idx, 0)
-            x = _load_input_value(idx_safe)
+            if const_expr(is_fused_add):
+                x = _load_base_input_value(idx_safe)
+                r_e = _load_scalar(residual_in_div, idx_safe)
+                residual = r_e if dtype_str == "f32" else r_e.to(fx.Float32)
+                added_e = (x + residual) if dtype_str == "f32" else (x + residual).to(elem_dtype)
+                if idx < N:
+                    _store_elem_scalar(residual_out_div, idx, added_e)
+                x = added_e if dtype_str == "f32" else added_e.to(fx.Float32)
+            else:
+                x = _load_norm_input_value(idx_safe)
             x2 = x * x
             thread_sum = thread_sum + is_valid.select(x, c_zero_f)
             thread_sumsq = thread_sumsq + is_valid.select(x2, c_zero_f)
-            if const_expr(is_fused_add):
-                if idx < N:
-                    _store_elem_scalar(residual_out_div, idx, x)
 
         sum_val, sumsq_val = block_reduce_add2(thread_sum, thread_sumsq)
         mean = sum_val / n_float
@@ -721,7 +727,7 @@ def _build_layernorm_quant_module(
             idx = tid + base_idx_int
             is_valid = idx < N
             idx_safe = is_valid.select(idx, 0)
-            x = _load_input_value(idx_safe)
+            x = _load_norm_input_value(idx_safe)
             g_e = _load_scalar(gamma_div, idx_safe)
             b_e = _load_scalar(beta_div, idx_safe)
             g = g_e if dtype_str == "f32" else g_e.to(fx.Float32)
@@ -747,7 +753,7 @@ def _build_layernorm_quant_module(
         for base_idx_int in range_constexpr(0, N, BLOCK_THREADS):
             idx = tid + base_idx_int
             if idx < N:
-                x = _load_input_value(idx)
+                x = _load_norm_input_value(idx)
                 g_e = _load_scalar(gamma_div, idx)
                 b_e = _load_scalar(beta_div, idx)
                 g = g_e if dtype_str == "f32" else g_e.to(fx.Float32)

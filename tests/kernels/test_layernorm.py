@@ -124,9 +124,11 @@ def run_test(M: int, N: int, dtype: str = "f32"):
     if os.environ.get("ROCDSL_COMPARE_AITER", "0") == "1":
         flydsl_gpu_us = bench_gpu_us_torch(kernel_launch, warmup=WARMUP_ITERS, iters=BENCH_ITERS)
     avg_ms = avg_us / 1000.0
+
     elem_bytes = 4 if dtype == "f32" else 2
     total_bytes = (2 * M * N + 2 * N) * elem_bytes  # read input + write output + (gamma+beta)
     bandwidth_gbs = total_bytes / (avg_us / 1e6) / 1e9
+
     print(f"Kernel avg time: {avg_ms:.4f} ms via run_perftest (warmup={WARMUP_ITERS}, iters={BENCH_ITERS})")
     print(f"Bandwidth: {bandwidth_gbs:.2f} GB/s")
     if flydsl_gpu_us is not None:
@@ -251,8 +253,6 @@ def run_fused_add_test(M: int, N: int, dtype: str = "f32"):
         beta_dev = beta_t.contiguous()
         output_dev = torch.empty((M, N), device="cuda", dtype=DTYPE_FP32)
         residual_out_dev = torch.empty((M, N), device="cuda", dtype=DTYPE_FP32)
-        input_ref = input_dev.to(DTYPE_FP32)
-        residual_ref = residual_dev.to(DTYPE_FP32)
         gamma_ref = gamma_dev.to(DTYPE_FP32)
         beta_ref = beta_dev.to(DTYPE_FP32)
         atol = 1e-4
@@ -263,8 +263,6 @@ def run_fused_add_test(M: int, N: int, dtype: str = "f32"):
         beta_dev = beta_t.to(DTYPE_FP16).contiguous()
         output_dev = torch.empty((M, N), device="cuda", dtype=DTYPE_FP16)
         residual_out_dev = torch.empty((M, N), device="cuda", dtype=DTYPE_FP16)
-        input_ref = input_dev.to(DTYPE_FP32)
-        residual_ref = residual_dev.to(DTYPE_FP32)
         gamma_ref = gamma_dev.to(DTYPE_FP32)
         beta_ref = beta_dev.to(DTYPE_FP32)
         atol = 1e-2
@@ -275,15 +273,13 @@ def run_fused_add_test(M: int, N: int, dtype: str = "f32"):
         beta_dev = beta_t.to(DTYPE_BF16).contiguous()
         output_dev = torch.empty((M, N), device="cuda", dtype=DTYPE_BF16)
         residual_out_dev = torch.empty((M, N), device="cuda", dtype=DTYPE_BF16)
-        input_ref = input_dev.to(DTYPE_FP32)
-        residual_ref = residual_dev.to(DTYPE_FP32)
         gamma_ref = gamma_dev.to(DTYPE_FP32)
         beta_ref = beta_dev.to(DTYPE_FP32)
         atol = 2e-2
     else:
         raise ValueError(f"unsupported dtype: {dtype}")
 
-    residual_expected = input_ref + residual_ref
+    residual_expected = (input_dev + residual_dev).to(DTYPE_FP32)
     x = residual_expected
     gamma = gamma_ref
     beta = beta_ref
@@ -309,9 +305,11 @@ def run_fused_add_test(M: int, N: int, dtype: str = "f32"):
     if os.environ.get("ROCDSL_COMPARE_AITER", "0") == "1":
         flydsl_gpu_us = bench_gpu_us_torch(kernel_launch, warmup=WARMUP_ITERS, iters=BENCH_ITERS)
     avg_ms = avg_us / 1000.0
+
     elem_bytes = 4 if dtype == "f32" else 2
     total_bytes = (4 * M * N + 2 * N) * elem_bytes
     bandwidth_gbs = total_bytes / (avg_us / 1e6) / 1e9
+
     print(f"Kernel avg time: {avg_ms:.4f} ms via run_perftest (warmup={WARMUP_ITERS}, iters={BENCH_ITERS})")
     print(f"Bandwidth: {bandwidth_gbs:.2f} GB/s")
     if flydsl_gpu_us is not None:
@@ -493,9 +491,11 @@ def run_dynamicquant_test(M: int, N: int, dtype: str = "f32"):
     if os.environ.get("ROCDSL_COMPARE_AITER", "0") == "1":
         flydsl_gpu_us = bench_gpu_us_torch(kernel_launch, warmup=WARMUP_ITERS, iters=BENCH_ITERS)
     avg_ms = avg_us / 1000.0
+
     elem_bytes = 4 if dtype == "f32" else 2
     total_bytes = (M * N + 2 * N) * elem_bytes + M * N + M * 4
     bandwidth_gbs = total_bytes / (avg_us / 1e6) / 1e9
+
     print(f"Kernel avg time: {avg_ms:.4f} ms via run_perftest (warmup={WARMUP_ITERS}, iters={BENCH_ITERS})")
     print(f"Bandwidth: {bandwidth_gbs:.2f} GB/s")
     if flydsl_gpu_us is not None:
@@ -692,9 +692,11 @@ def run_smoothquant_test(M: int, N: int, dtype: str = "f32"):
     if os.environ.get("ROCDSL_COMPARE_AITER", "0") == "1":
         flydsl_gpu_us = bench_gpu_us_torch(kernel_launch, warmup=WARMUP_ITERS, iters=BENCH_ITERS)
     avg_ms = avg_us / 1000.0
+
     elem_bytes = 4 if dtype == "f32" else 2
     total_bytes = (M * N + 3 * N) * elem_bytes + M * N + M * 4
     bandwidth_gbs = total_bytes / (avg_us / 1e6) / 1e9
+
     print(f"Kernel avg time: {avg_ms:.4f} ms via run_perftest (warmup={WARMUP_ITERS}, iters={BENCH_ITERS})")
     print(f"Bandwidth: {bandwidth_gbs:.2f} GB/s")
     if flydsl_gpu_us is not None:
@@ -840,8 +842,6 @@ def run_fused_add_dynamicquant_test(M: int, N: int, dtype: str = "f32"):
         gamma_dev = gamma_t.contiguous()
         beta_dev = beta_t.contiguous()
         residual_out_dev = torch.empty((M, N), device="cuda", dtype=DTYPE_FP32)
-        input_ref = input_dev.to(DTYPE_FP32)
-        residual_ref = residual_dev.to(DTYPE_FP32)
         gamma_ref = gamma_dev.to(DTYPE_FP32)
         beta_ref = beta_dev.to(DTYPE_FP32)
         residual_atol = 1e-4
@@ -851,8 +851,6 @@ def run_fused_add_dynamicquant_test(M: int, N: int, dtype: str = "f32"):
         gamma_dev = gamma_t.to(DTYPE_FP16).contiguous()
         beta_dev = beta_t.to(DTYPE_FP16).contiguous()
         residual_out_dev = torch.empty((M, N), device="cuda", dtype=DTYPE_FP16)
-        input_ref = input_dev.to(DTYPE_FP32)
-        residual_ref = residual_dev.to(DTYPE_FP32)
         gamma_ref = gamma_dev.to(DTYPE_FP32)
         beta_ref = beta_dev.to(DTYPE_FP32)
         residual_atol = 1e-2
@@ -862,8 +860,6 @@ def run_fused_add_dynamicquant_test(M: int, N: int, dtype: str = "f32"):
         gamma_dev = gamma_t.to(DTYPE_BF16).contiguous()
         beta_dev = beta_t.to(DTYPE_BF16).contiguous()
         residual_out_dev = torch.empty((M, N), device="cuda", dtype=DTYPE_BF16)
-        input_ref = input_dev.to(DTYPE_FP32)
-        residual_ref = residual_dev.to(DTYPE_FP32)
         gamma_ref = gamma_dev.to(DTYPE_FP32)
         beta_ref = beta_dev.to(DTYPE_FP32)
         residual_atol = 2e-2
@@ -873,7 +869,7 @@ def run_fused_add_dynamicquant_test(M: int, N: int, dtype: str = "f32"):
     output_dev = torch.empty((M, N), device="cuda", dtype=DTYPE_INT8)
     yscale_dev = torch.empty((M,), device="cuda", dtype=DTYPE_FP32)
 
-    residual_expected = input_ref + residual_ref
+    residual_expected = (input_dev + residual_dev).to(DTYPE_FP32)
     x = residual_expected
     gamma = gamma_ref
     beta = beta_ref
@@ -903,9 +899,11 @@ def run_fused_add_dynamicquant_test(M: int, N: int, dtype: str = "f32"):
     if os.environ.get("ROCDSL_COMPARE_AITER", "0") == "1":
         flydsl_gpu_us = bench_gpu_us_torch(kernel_launch, warmup=WARMUP_ITERS, iters=BENCH_ITERS)
     avg_ms = avg_us / 1000.0
+
     elem_bytes = 4 if dtype == "f32" else 2
     total_bytes = (3 * M * N + 2 * N) * elem_bytes + M * N + M * 4
     bandwidth_gbs = total_bytes / (avg_us / 1e6) / 1e9
+
     print(f"Kernel avg time: {avg_ms:.4f} ms via run_perftest (warmup={WARMUP_ITERS}, iters={BENCH_ITERS})")
     print(f"Bandwidth: {bandwidth_gbs:.2f} GB/s")
     if flydsl_gpu_us is not None:
@@ -1061,8 +1059,6 @@ def run_fused_add_smoothquant_test(M: int, N: int, dtype: str = "f32"):
         beta_dev = beta_t.contiguous()
         xscale_dev = xscale_t.contiguous()
         residual_out_dev = torch.empty((M, N), device="cuda", dtype=DTYPE_FP32)
-        input_ref = input_dev.to(DTYPE_FP32)
-        residual_ref = residual_dev.to(DTYPE_FP32)
         gamma_ref = gamma_dev.to(DTYPE_FP32)
         beta_ref = beta_dev.to(DTYPE_FP32)
         xscale_ref = xscale_dev.to(DTYPE_FP32)
@@ -1074,8 +1070,6 @@ def run_fused_add_smoothquant_test(M: int, N: int, dtype: str = "f32"):
         beta_dev = beta_t.to(DTYPE_FP16).contiguous()
         xscale_dev = xscale_t.to(DTYPE_FP16).contiguous()
         residual_out_dev = torch.empty((M, N), device="cuda", dtype=DTYPE_FP16)
-        input_ref = input_dev.to(DTYPE_FP32)
-        residual_ref = residual_dev.to(DTYPE_FP32)
         gamma_ref = gamma_dev.to(DTYPE_FP32)
         beta_ref = beta_dev.to(DTYPE_FP32)
         xscale_ref = xscale_dev.to(DTYPE_FP32)
@@ -1087,8 +1081,6 @@ def run_fused_add_smoothquant_test(M: int, N: int, dtype: str = "f32"):
         beta_dev = beta_t.to(DTYPE_BF16).contiguous()
         xscale_dev = xscale_t.to(DTYPE_BF16).contiguous()
         residual_out_dev = torch.empty((M, N), device="cuda", dtype=DTYPE_BF16)
-        input_ref = input_dev.to(DTYPE_FP32)
-        residual_ref = residual_dev.to(DTYPE_FP32)
         gamma_ref = gamma_dev.to(DTYPE_FP32)
         beta_ref = beta_dev.to(DTYPE_FP32)
         xscale_ref = xscale_dev.to(DTYPE_FP32)
@@ -1099,7 +1091,7 @@ def run_fused_add_smoothquant_test(M: int, N: int, dtype: str = "f32"):
     output_dev = torch.empty((M, N), device="cuda", dtype=DTYPE_INT8)
     yscale_dev = torch.empty((M,), device="cuda", dtype=DTYPE_FP32)
 
-    residual_expected = input_ref + residual_ref
+    residual_expected = (input_dev + residual_dev).to(DTYPE_FP32)
     x = residual_expected
     gamma = gamma_ref
     beta = beta_ref
@@ -1139,9 +1131,11 @@ def run_fused_add_smoothquant_test(M: int, N: int, dtype: str = "f32"):
     if os.environ.get("ROCDSL_COMPARE_AITER", "0") == "1":
         flydsl_gpu_us = bench_gpu_us_torch(kernel_launch, warmup=WARMUP_ITERS, iters=BENCH_ITERS)
     avg_ms = avg_us / 1000.0
+
     elem_bytes = 4 if dtype == "f32" else 2
     total_bytes = (3 * M * N + 3 * N) * elem_bytes + M * N + M * 4
     bandwidth_gbs = total_bytes / (avg_us / 1e6) / 1e9
+
     print(f"Kernel avg time: {avg_ms:.4f} ms via run_perftest (warmup={WARMUP_ITERS}, iters={BENCH_ITERS})")
     print(f"Bandwidth: {bandwidth_gbs:.2f} GB/s")
     if flydsl_gpu_us is not None:
