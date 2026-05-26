@@ -1352,13 +1352,25 @@ def _verify_dispatch_self_consistency(ret_f, op_fly, inp, wts, idx, scales, cfg,
     total_recv = int(ret_f[4].item())
     mt = cfg.max_num_inp_token_per_rank
 
-    if total_recv == 0:
-        if rank == 0:
-            print("  [SKIP] dispatch self-consistency: total_recv == 0 on rank 0")
-        return all_pass
-
+    # IMPORTANT: do NOT early-return on ``total_recv == 0``.  The
+    # ``_allgather_rows`` calls below are collective operations and must
+    # be reached by every rank in lock-step; an early return on a single
+    # rank desynchronizes the NCCL group and the surviving ranks' next
+    # ``dist.all_gather`` blocks until the watchdog timeout (30 min) --
+    # this is exactly the symptom L2's ``L2_bf16_bs1_random`` case
+    # surfaced (rank 0 had ``total_recv = 0`` while peers had
+    # ``total_recv > 0``).  We still skip the byte-compare body when
+    # ``total_recv == 0`` because there's nothing to slice, but the
+    # all_gather of the per-rank input rows happens unconditionally so
+    # peer ranks can still resolve their ``g_inp[src_pe, src_lid]``
+    # references back to this rank's input row.
+    skip_compare = total_recv == 0
     if rank == 0:
-        print("\n  -- Dispatch byte verify (rows resolved via tok_id_to_src) --")
+        if skip_compare:
+            print("\n  [SKIP] dispatch byte verify: total_recv == 0 on rank 0 "
+                  "(peer ranks still gather this rank's input rows)")
+        else:
+            print("\n  -- Dispatch byte verify (rows resolved via tok_id_to_src) --")
 
     # fp4 has no element-wise ``index_cuda`` kernel; we must view-as-uint8
     # before all-gather + index.  fp8 supports indexing but we still byte
@@ -1370,6 +1382,9 @@ def _verify_dispatch_self_consistency(ret_f, op_fly, inp, wts, idx, scales, cfg,
     g_wts = _allgather_rows(wts, world_size)
     g_idx = _allgather_rows(idx.to(torch.int32), world_size)
     g_sc = _allgather_rows(scales, world_size) if scales is not None else None
+
+    if skip_compare:
+        return all_pass
 
     src_pe, src_lid = _decode_tok_id_to_src(op_fly.shmem_tok_id_to_src, total_recv, mt)
 
@@ -1877,6 +1892,31 @@ def run_profiler(rank, world_size, args):
             # k distinct experts all on PE 0 => expert id = 0 * epr + j.
             for j in range(k):
                 idx[t, j] = j
+    elif routing_mode == "soft_hot_pe":
+        # "Soft" hot-spot variant of ``forced_hot_spot``: every token has
+        # exactly ONE of its k experts pinned to PE 0 (a random local
+        # expert there) and the remaining ``k-1`` experts uniformly
+        # spread over the other ``world_size - 1`` PEs (each on a
+        # distinct PE).  The PE-0 atomic_add load drops from
+        # ``cur_tok * k`` (forced_hot_spot's all-on-PE-0 pattern, which
+        # livelocks ROCm IPC fabric on the single ``shmem_tok_off[0]``
+        # slot) to ``cur_tok``, while PE 0 still sees ~k× the average
+        # token rate of the other PEs -- a realistic MoE hot-expert
+        # imbalance pattern.  Used as the L1 perf-matrix imbalance
+        # routing because ``forced_hot_spot`` is gated by ``skip_ci``.
+        if not (k - 1 <= world_size - 1):
+            raise ValueError(
+                f"soft_hot_pe routing requires k-1 ({k - 1}) <= "
+                f"world_size-1 ({world_size - 1}) so the non-PE-0 "
+                f"experts can stay on distinct PEs"
+            )
+        for t in range(cur_tok):
+            # Slot 0 -> PE 0, random local expert.
+            idx[t, 0] = 0 * epr + torch.randint(0, epr, (1,), device=dev)
+            # Slots 1..k-1 -> distinct PEs from {1..world_size-1}.
+            other_pes = torch.randperm(world_size - 1, device=dev)[: k - 1] + 1
+            for j in range(k - 1):
+                idx[t, j + 1] = other_pes[j] * epr + torch.randint(0, epr, (1,), device=dev)
     elif k <= world_size:
         # Every run now embeds a FlyDSL self-check at startup.  That
         # self-check (and mori's IntraNode bench too) assumes each
@@ -2159,14 +2199,22 @@ def _apply_ci_case(args, case, *, phase, output_dir):
             continue
         setattr(args, fk, fv)
     if phase == "verify":
-        # The "verify" phase now reuses bench mode with a minimal
-        # workload; bench/profile both embed an accuracy gate at
-        # startup, so a 1-iter bench run is the cheapest way to
-        # exercise the embedded verify on its own. Accuracy still
-        # decides whether the profile phase runs.
-        args.mode = "bench"
-        args.cudagraph = False
-        args.warmup = 1
+        # The "verify" phase reuses the same execution path as the
+        # perf phase (``profile + cudagraph``) so the entire test
+        # plan only ever touches one timing/launch codepath -- this
+        # matches the merge-test plan that explicitly disables
+        # ``--mode bench``.  ``run_profiler`` always runs the embedded
+        # ``verify_self`` accuracy gate before timing (see the
+        # ``embedded verify`` call site), so a minimal-iter profile
+        # launch is sufficient to exercise the accuracy invariants
+        # without paying the full perf-iters overhead.  ``warmup=0``
+        # because the cudagraph capture itself plus the embedded
+        # verify already trigger JIT compilation; an explicit warmup
+        # phase would just cost extra time without changing the
+        # accuracy result.
+        args.mode = "profile"
+        args.cudagraph = True
+        args.warmup = 0
         args.iters = 1
         # Accuracy is always FlyDSL self-check (the embedded verify
         # inside run_profiler).  --compare-mori only affects the
@@ -2319,19 +2367,47 @@ def _parse_args():
             "--mode profile --cudagraph (perf). Used by .github/workflows/flydsl.yaml."
         ),
     )
+    p.add_argument(
+        "--cases-file",
+        type=str,
+        default="",
+        help=(
+            "OPTIONAL JSON file with a list of case dicts that replaces "
+            "the in-tree CI_CASES table; each dict has the same shape as "
+            "a CI_CASES entry (``name`` plus argparse fields, optional "
+            "``skip_profile`` / ``skip_ci`` / ``requires_arch`` metadata). "
+            "Used by bench/dispatch_combine_merge/run_full.sh to drive "
+            "the L1 main matrix without polluting the workflow CI sweep."
+        ),
+    )
+    p.add_argument(
+        "--skip-verify-spawn",
+        action="store_true",
+        default=False,
+        help=(
+            "Skip the standalone verify spawn in --ci-sweep and rely on "
+            "the embedded verify_self that runs at the top of every "
+            "profile spawn. Halves spawn count when 99%+ of cases pass "
+            "(L1 main matrix); a verify failure still surfaces because "
+            "run_profiler returns False before timing on a failed gate."
+        ),
+    )
     p.add_argument("--scale-dim", type=int, default=0, help="scale tensor dim (0 = disable scales)")
     p.add_argument("--scale-type-size", type=int, default=0, help="scale element size in bytes (0 = disable scales)")
     p.add_argument(
         "--routing",
         type=str,
         default="random",
-        choices=["random", "forced_hot_spot"],
+        choices=["random", "forced_hot_spot", "soft_hot_pe"],
         help=(
             "indices generation policy: 'random' (default) routes each "
             "token to k distinct PEs uniformly; 'forced_hot_spot' routes "
-            "every token's k experts onto PE 0's local experts only, "
-            "exercising the dispatch overflow / sentinel path under "
-            "deterministic worst-case routing."
+            "every token's k experts onto PE 0's local experts only "
+            "(deterministic worst-case, IPC-livelocks on ROCm so gated "
+            "via skip_ci); 'soft_hot_pe' pins ONE of the k experts per "
+            "token to PE 0 and spreads the rest over distinct other "
+            "PEs, giving a realistic ~k× hot-spot imbalance without "
+            "the slot-0 atomic-add livelock."
         ),
     )
     p.add_argument(
@@ -2385,6 +2461,27 @@ def _spawn_one(ws, args, master_port):
         return False
 
 
+def _load_cases_file(path: str) -> list:
+    """Load a JSON list of case dicts from ``path``.
+
+    Each dict must at minimum have a ``name`` field (used for
+    output-dir naming and the summary table); the remaining keys must
+    correspond to argparse names (``--max-tokens`` -> ``max_tokens``)
+    plus optional sweep metadata (``skip_profile``, ``skip_ci``,
+    ``requires_arch``, ``known_failure``).  Used by
+    bench/dispatch_combine_merge/run_full.sh to feed the L1 main
+    matrix without polluting the in-tree CI_CASES table.
+    """
+    with open(path) as f:
+        cases = json.load(f)
+    if not isinstance(cases, list):
+        raise ValueError(f"cases-file {path!r} must contain a JSON list of case dicts, got {type(cases)}")
+    for i, c in enumerate(cases):
+        if not isinstance(c, dict) or "name" not in c:
+            raise ValueError(f"cases-file {path!r} entry [{i}] missing 'name' field: {c!r}")
+    return cases
+
+
 def _run_ci_sweep_main(ws, args):
     """Orchestrate CI sweep: one ``spawn`` per (case, phase).
 
@@ -2392,6 +2489,14 @@ def _run_ci_sweep_main(ws, args):
     contexts and a fresh mori symmetric shmem heap, so cross-case
     resource contention (which previously hung the sweep) cannot occur.
     Accuracy failures stop only that case's perf phase, not the sweep.
+
+    With ``--cases-file <path>`` the in-tree :data:`CI_CASES` is
+    replaced by the JSON-loaded case list; with
+    ``--skip-verify-spawn`` the standalone verify spawn is collapsed
+    into the profile spawn (the embedded ``verify_self`` inside
+    :func:`run_profiler` still gates timing, so a verify failure still
+    surfaces -- this just halves spawn count on the L1 main matrix
+    where 99%+ of cases pass).
     """
     base_output_dir = args.output_dir
     base_port = args.port
@@ -2399,18 +2504,39 @@ def _run_ci_sweep_main(ws, args):
     overall_ok = True
     cur_arch = _current_gpu_arch_prefix()
 
+    cases = CI_CASES
+    cases_source = "CI_CASES (in-tree)"
+    if getattr(args, "cases_file", ""):
+        cases = _load_cases_file(args.cases_file)
+        cases_source = f"cases-file {args.cases_file!r}"
+
+    skip_verify_spawn = bool(getattr(args, "skip_verify_spawn", False))
+
     print(f"\n{'#'*70}")
-    print(f"# CI sweep: {len(CI_CASES)} cases  (world_size={ws}, arch={cur_arch or 'unknown'})")
+    print(f"# CI sweep: {len(cases)} cases  (world_size={ws}, arch={cur_arch or 'unknown'})")
+    print(f"# source: {cases_source}")
+    print(f"# skip-verify-spawn: {skip_verify_spawn}  (verify_self still runs inside profile spawn)")
     print(f"# base output dir: {base_output_dir}")
     print(f"{'#'*70}")
 
-    for idx, case in enumerate(CI_CASES):
+    for idx, case in enumerate(cases):
         print(f"\n{'='*70}")
-        print(f"# [case {idx + 1}/{len(CI_CASES)}] {case['name']}")
+        print(f"# [case {idx + 1}/{len(cases)}] {case['name']}")
         for fk, fv in case.items():
             if fk != "name":
                 print(f"#   {fk:>22} = {fv}")
         print(f"{'='*70}")
+
+        # Per-case world_size override: L2 accuracy edge cases run on
+        # ws=2/4 to exercise the small-EP topology.  ``mp.spawn``'s
+        # ``nprocs`` is driven by this value, so it must come from the
+        # case dict (not the global --world-size) when present.  Cap to
+        # the number of CUDA devices (consistent with main()'s default
+        # ws derivation).
+        case_ws = int(case.get("world_size", ws))
+        case_ws = min(case_ws, torch.cuda.device_count())
+        if case_ws != ws:
+            print(f"# [case {case['name']}] using world_size={case_ws} (override)")
 
         # -- skip_ci gate --
         if case.get("skip_ci", False):
@@ -2428,13 +2554,24 @@ def _run_ci_sweep_main(ws, args):
             continue
 
         # -- accuracy gate --
-        v_args = type(args)(**vars(args))
-        v_args._ci_case = case
-        v_args._ci_phase = "verify"
-        v_args._ci_base_output_dir = base_output_dir
-        verify_port = base_port + 100 + idx * 2
-        print(f"\n[case {case['name']}] >> verify (port={verify_port})")
-        verify_ok = _spawn_one(ws, v_args, verify_port)
+        # The embedded verify_self runs at the top of every profile
+        # spawn (gates timing on accuracy, returns False on FAIL),
+        # so --skip-verify-spawn collapses verify+profile into a
+        # single spawn.  When that flag is on we skip this dedicated
+        # verify spawn and let the profile spawn double as the
+        # accuracy gate.
+        if skip_verify_spawn:
+            verify_ok = True  # tentative; will be overwritten by profile spawn outcome
+            verify_label_tag = "(via embedded verify_self in profile spawn)"
+        else:
+            v_args = type(args)(**vars(args))
+            v_args._ci_case = case
+            v_args._ci_phase = "verify"
+            v_args._ci_base_output_dir = base_output_dir
+            verify_port = base_port + 100 + idx * 2
+            print(f"\n[case {case['name']}] >> verify (port={verify_port})")
+            verify_ok = _spawn_one(case_ws, v_args, verify_port)
+            verify_label_tag = ""
 
         profile_ok = True
         profile_label = None
@@ -2449,8 +2586,14 @@ def _run_ci_sweep_main(ws, args):
             p_args._ci_base_output_dir = base_output_dir
             profile_port = base_port + 101 + idx * 2
             print(f"\n[case {case['name']}] >> profile + cudagraph (port={profile_port})")
-            profile_ok = _spawn_one(ws, p_args, profile_port)
+            profile_ok = _spawn_one(case_ws, p_args, profile_port)
             profile_label = "ok" if profile_ok else "warn"
+            # When the standalone verify spawn was skipped, the
+            # profile spawn outcome IS the accuracy outcome (the
+            # embedded verify_self ran at the top of run_profiler and
+            # would have returned False before any timing started).
+            if skip_verify_spawn:
+                verify_ok = profile_ok
 
         if profile_label and profile_label.startswith("skipped"):
             print(f"\n[case {case['name']}] !! {profile_label}")
@@ -2465,6 +2608,8 @@ def _run_ci_sweep_main(ws, args):
         known_fail_tag = case.get("known_failure")
         if verify_ok:
             verify_label = "PASS"
+            if skip_verify_spawn:
+                verify_label = f"PASS {verify_label_tag}"
         elif known_fail_tag:
             verify_label = f"xfail ({known_fail_tag})"
         else:
@@ -2482,7 +2627,7 @@ def _run_ci_sweep_main(ws, args):
         print(f"# {name:<35} {vlabel:<42} {plabel:<42}")
     print(f"{'#'*70}")
     result = "ALL PASS" if overall_ok else "SOME FAILED"
-    print(f"# >>> {result} (accuracy across {len(CI_CASES)} cases) <<<\n")
+    print(f"# >>> {result} (accuracy across {len(cases)} cases) <<<\n")
     return overall_ok
 
 
