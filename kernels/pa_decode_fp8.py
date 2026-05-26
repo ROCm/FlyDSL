@@ -2244,9 +2244,14 @@ def compile_pa_decode_ps(
             if lane16id == fx.Int32(0):
                 if rowid == fx.Int32(0):
                     if const_expr(block_size == 64):
-                        phys_block_vec.store(
-                            bt_lds_i32,
-                            [fx.Index(warp_id)],
+                        # block_size=64: `_stage_phys_blocks` returns vec_width=1
+                        # → scalar i32 (ArithValue), which has no `.store`.
+                        # Wrap in a 1-element Vector so the LDS store API works.
+                        # Each warp writes 1 i32 to bt_lds_i32[warp_id];
+                        # `_load_v_phys_blocks_from_lds` reads back the
+                        # 4-elem vec starting at offset 0.
+                        fx.Vector.from_elements([phys_block_vec], dtype=fx.Int32).store(
+                            bt_lds_i32, [fx.Index(warp_id)],
                         )
                     else:
                         phys_block_vec.store(
@@ -2269,7 +2274,21 @@ def compile_pa_decode_ps(
 
         # Pre-load the FIRST sub-partition's block-table entries before Q setup
         # so the dependent K prefetch below does not also pay the table latency.
-        first_block_base = local_partition_start * fx.Int32(_blocks_per_partition)
+        # Empty-slot guard: when num_total_partitions < max_context_partition_num,
+        # CTAs with partition_idx >= num_total_partitions get
+        # local_partition_start >= num_total_partitions and the inner loop runs
+        # 0 iters.  But the prologue still issues block-table + K reads using
+        # local_partition_start; clamp to 0 so all reads stay in-bounds (the
+        # results are unused since the loop never executes).  Without this,
+        # small batch + small context (e.g. batch=4, ctx=1024, block_size=16)
+        # segfaulted because the prologue's phys_block / K loads used an
+        # out-of-range partition base.
+        _safe_partition_start = arith.select(
+            local_partition_start < num_total_partitions,
+            local_partition_start,
+            arith.constant(0, type=T.i32),
+        )
+        first_block_base = _safe_partition_start * fx.Int32(_blocks_per_partition)
         first_phys_blocks = _pa_small_block_stage_phys_blocks(first_block_base)
 
         # Pre-load Q for every MTP group ONCE before the KV loop.  Each group's
