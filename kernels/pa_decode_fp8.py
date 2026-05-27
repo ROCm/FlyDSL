@@ -1262,8 +1262,11 @@ def compile_pa_decode_metadata(
 
             # Context length for this sequence
             context_len = buffer_ops.buffer_load(cl_rsrc, batch_idx, vec_width=1, dtype=T.i32)
-            # ── Prologue: load first block's tile 0 K data ──
-            first_phys_block = buffer_ops.buffer_load(kpi_rsrc, kv_start, vec_width=1, dtype=T.i32)
+            # ── Prologue: load LAST block's tile 0 K data ──
+            # KV blocks are iterated in reverse order (kv_end-1 → kv_start) so the
+            # online-softmax running max grows monotonically and the alpha
+            # rescale on prior O_old happens at most once near the loop tail.
+            first_phys_block = buffer_ops.buffer_load(kpi_rsrc, kv_end - c_one, vec_width=1, dtype=T.i32)
             # Head offsets for K and V cache
             _k_head_off = kv_h * c_kh
             _v_head_off = kv_h * c_vh
@@ -1454,14 +1457,17 @@ def compile_pa_decode_metadata(
                 init=_pack_states_kv(init_states, k_flat0, scale_scalars0),
             ):
                 cur_states, k_flat, scale_scalars = _unpack_states_kv(state)
-                block_idx = arith.index_cast(T.i32, ib)
+                # Reverse iteration: scf.for walks ib forward (0..N-1) but we
+                # remap to block_idx = N-1..0 so the sink-prone block 0 is
+                # processed last.
+                block_idx = last_block_idx_val - arith.index_cast(T.i32, ib)
 
                 phys_block = buffer_ops.buffer_load(
                     kpi_rsrc, kv_start + block_idx, vec_width=1, dtype=T.i32
                 )
-                next_idx_raw = block_idx + c_one
+                next_idx_raw = block_idx - c_one
                 next_idx_clamped = arith.select(
-                    next_idx_raw < num_blocks_in_work, next_idx_raw, last_block_idx_val
+                    next_idx_raw >= c_zero_i32, next_idx_raw, c_zero_i32
                 )
                 next_phys_block = buffer_ops.buffer_load(
                     kpi_rsrc, kv_start + next_idx_clamped, vec_width=1, dtype=T.i32
@@ -2323,17 +2329,70 @@ def compile_pa_decode_ps(
         loop_step = arith.index(1)
         last_partition_idx = local_partition_end - fx.Int32(1)
 
-        def _pa_small_block_stage_phys_blocks(partition_block_base):
-            if const_expr(block_size == 64):
-                bt_global_off = batch_idx * stride_bt_seq + partition_block_base + warp_id
-                phys_blocks = buffer_ops.buffer_load(bt_rsrc, bt_global_off, vec_width=1, dtype=T.i32)
+        def _ptr8_to_v4i32(ptr8_val):
+            """Convert a `ptr addrspace(8)` buffer descriptor to `<4 x i32>`
+            via ptrtoint(i128) + bitcast.  Both forms are 128-bit type-puns
+            of the same SGPR-resident descriptor — the LLVM backend emits
+            zero instructions for this conversion (descriptor stays in
+            SGPRs)."""
+            from flydsl._mlir import ir as _ir
+            from flydsl._mlir.dialects import llvm as _llvm
+            i128_ty = _ir.IntegerType.get_signless(128)
+            v4i32_ty = _ir.VectorType.get([4], _ir.IntegerType.get_signless(32))
+            i128_val = _llvm.ptrtoint(i128_ty, ptr8_val)
+            return _llvm.bitcast(v4i32_ty, i128_val)
+
+        bt_rsrc_v4 = _ptr8_to_v4i32(bt_rsrc)
+
+        def _s_buffer_load(soffset_bytes_i32, vec_width: int):
+            """Scalar buffer load — emits s_buffer_load_dword[x4] via the LLVM
+            intrinsic, returning an SGPR value.  Requires `soffset_bytes_i32`
+            to be wave-uniform; the result is shared across all 64 lanes.
+
+            Saves the vmcnt(0) drain + readfirstlane that the VMEM
+            buffer_load path imposes (result lands in SGPR directly, frees
+            VMEM queue slots for V/K loads)."""
+            from flydsl._mlir.dialects import llvm as _llvm
+            from flydsl._mlir import ir as _ir
+            from flydsl.expr.rocdl import _to_ir as _rocdl_to_ir
+
+            i32_ty = _ir.IntegerType.get_signless(32)
+            if const_expr(vec_width == 1):
+                result_type = i32_ty
+                suffix = "i32"
+            elif const_expr(vec_width == 4):
+                result_type = _ir.VectorType.get([4], i32_ty)
+                suffix = "v4i32"
             else:
-                bt_global_off = (
+                raise ValueError(f"_s_buffer_load: unsupported vec_width={vec_width}")
+            cache_policy = arith.constant(0, type=T.i32)
+            return _llvm.call_intrinsic(
+                result_type,
+                f"llvm.amdgcn.s.buffer.load.{suffix}",
+                [
+                    _rocdl_to_ir(bt_rsrc_v4),
+                    _rocdl_to_ir(soffset_bytes_i32),
+                    _rocdl_to_ir(cache_policy),
+                ],
+                [], [],
+            )
+
+        def _pa_small_block_stage_phys_blocks(partition_block_base):
+            # bt offset is wave-uniform (batch_idx and warp_id are constant
+            # per wave, partition_block_base is workgroup-uniform).  Use
+            # s_buffer_load to route through SMEM cache and land the result
+            # in SGPRs directly — eliminates the vmcnt(0) drain (was 25% of
+            # all kernel stalls) and the downstream readfirstlane.
+            if const_expr(block_size == 64):
+                bt_elem_off = batch_idx * stride_bt_seq + partition_block_base + warp_id
+                phys_blocks = _s_buffer_load(bt_elem_off * fx.Int32(4), vec_width=1)
+            else:
+                bt_elem_off = (
                     batch_idx * stride_bt_seq
                     + partition_block_base
                     + warp_id * fx.Int32(TLOOP)
                 )
-                phys_blocks = buffer_ops.buffer_load(bt_rsrc, bt_global_off, vec_width=TLOOP, dtype=T.i32)
+                phys_blocks = _s_buffer_load(bt_elem_off * fx.Int32(4), vec_width=TLOOP)
             return phys_blocks
 
         def _pa_small_block_store_phys_blocks_to_lds(phys_block_vec):
@@ -2368,20 +2427,21 @@ def compile_pa_decode_ps(
                     v_phys_blocks.append(phys_block)
             return v_phys_blocks
 
-        # Pre-load the FIRST sub-partition's block-table entries before Q setup
-        # so the dependent K prefetch below does not also pay the table latency.
+        # Pre-load the FIRST (== reverse-order start = last partition) sub-
+        # partition's block-table entries before Q setup so the dependent K
+        # prefetch below does not also pay the table latency.
         # Empty-slot guard: when num_total_partitions < max_context_partition_num,
         # CTAs with partition_idx >= num_total_partitions get
         # local_partition_start >= num_total_partitions and the inner loop runs
         # 0 iters.  But the prologue still issues block-table + K reads using
-        # local_partition_start; clamp to 0 so all reads stay in-bounds (the
+        # `last_partition_idx`; clamp to 0 so all reads stay in-bounds (the
         # results are unused since the loop never executes).
-        _safe_partition_start = arith.select(
+        _safe_init_partition = arith.select(
             local_partition_start < num_total_partitions,
-            local_partition_start,
+            last_partition_idx,
             arith.constant(0, type=T.i32),
         )
-        first_block_base = _safe_partition_start * fx.Int32(_blocks_per_partition)
+        first_block_base = _safe_init_partition * fx.Int32(_blocks_per_partition)
         first_phys_blocks = _pa_small_block_stage_phys_blocks(first_block_base)
 
         # Pre-load Q for every MTP group ONCE before the KV loop.  Each group's
@@ -2444,17 +2504,7 @@ def compile_pa_decode_ps(
                 my_tok = rowid * fx.Int32(MFMA_N) + lane16id
             else:
                 # block_size==16: extract next_phys_blocks_[rowid] via 3 selects.
-                p0 = vector.extract(arith.unwrap(next_phys_blocks_), static_position=[0], dynamic_position=[])
-                p1 = vector.extract(arith.unwrap(next_phys_blocks_), static_position=[1], dynamic_position=[])
-                p2 = vector.extract(arith.unwrap(next_phys_blocks_), static_position=[2], dynamic_position=[])
-                p3 = vector.extract(arith.unwrap(next_phys_blocks_), static_position=[3], dynamic_position=[])
-                my_phys = arith.select(
-                    rowid == fx.Int32(0), p0,
-                    arith.select(
-                        rowid == fx.Int32(1), p1,
-                        arith.select(rowid == fx.Int32(2), p2, p3),
-                    ),
-                )
+                my_phys = vector.extract(arith.unwrap(next_phys_blocks_), static_position=[], dynamic_position=[fx.Index(rowid)])
                 my_tok = lane16id
             return _ks_buffer_load_for(my_phys, my_tok)
 
@@ -2500,7 +2550,12 @@ def compile_pa_decode_ps(
         ):
             cur_states, k_flat, k_scale_cur = _unpack_states(state)
             v_phys_blocks = _pa_small_block_load_v_phys_blocks_from_lds()
-            sub_part_i32 = arith.index_cast(T.i32, sub_part_ib)
+            # Reverse iteration: scf.for walks sub_part_ib forward over
+            # [local_partition_start, local_partition_end); remap to walk
+            # sub_part_i32 from last_partition_idx down to local_partition_start
+            # so the sink-prone partition 0 is processed last.
+            _sub_raw_i32 = arith.index_cast(T.i32, sub_part_ib)
+            sub_part_i32 = last_partition_idx - (_sub_raw_i32 - local_partition_start)
             sub_token_start = sub_part_i32 * c_cps
 
             # V is loaded fresh per iter (no prefetch — V's load latency is
@@ -2529,13 +2584,14 @@ def compile_pa_decode_ps(
             if const_expr(k_scale_per_token):
                 _stage_k_scale_to_lds(k_scale_cur)
 
-            # Compute the NEXT sub-partition's K base address (clamped to the
-            # last valid index so the prefetch on the final loop iteration
-            # doesn't walk past the block_table — k_next_flat is yielded out
-            # but never consumed since the loop terminates).
-            next_part_i32 = sub_part_i32 + fx.Int32(1)
+            # Compute the NEXT sub-partition's K base address (clamped to
+            # local_partition_start so the prefetch on the final loop
+            # iteration doesn't walk before the block_table window —
+            # k_next_flat is yielded out but never consumed since the loop
+            # terminates).  Reverse iteration: next == sub_part_i32 - 1.
+            next_part_i32 = sub_part_i32 - fx.Int32(1)
             next_safe_part = arith.select(
-                next_part_i32 < local_partition_end, next_part_i32, last_partition_idx
+                next_part_i32 >= local_partition_start, next_part_i32, local_partition_start
             )
             next_block_base = next_safe_part * fx.Int32(_blocks_per_partition)
 
@@ -2551,6 +2607,7 @@ def compile_pa_decode_ps(
                     + arith.constant(1 - query_length, type=T.i32)
                     + qi_per_mtp[_mtp_g]
                 )
+
                 d_out = _qk_and_intra_softmax(
                     k_ops,
                     sub_token_start,
@@ -2558,6 +2615,7 @@ def compile_pa_decode_ps(
                     causal_bound,
                     query_scale_lane=qscale_per_mtp[_mtp_g],
                 )
+
                 if const_expr(_mtp_g == _mtp_groups - 1):
                     next_phys_blocks = _pa_small_block_stage_phys_blocks(next_block_base)
                     # ── Cross-iter K-scale prefetch ──
