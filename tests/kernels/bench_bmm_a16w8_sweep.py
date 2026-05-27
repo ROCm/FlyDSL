@@ -60,9 +60,14 @@ TILE_K, TILE_N = 128, 128
 
 # A. M sweep — roofline crossing. Best decode/prefill config each regime.
 #
-# NOTE: tile_m=128 with gx >= 4 (M > 256) causes MEMORY_APERTURE_VIOLATION on silicon
-# (confirmed 2026-05-27). Precision tests only cover M <= 256 for tile_m=128.
-# Using tile_m=64 for M >= 512 until the tile_m=128 / large-grid bug is root-caused.
+# Root cause of earlier M=512 crash (MEMORY_APERTURE_VIOLATION, 2026-05-27):
+#   i32 overflow in addr_lo_b TDM advancement. adv_b_i32 = 131072 bytes/step;
+#   32 K-tile steps = 4 MB total advance.  When B_ptr low-32 bits are near
+#   0xFC000000 (common for 64 MB A before 64 MB B), addr_lo_b wraps to ~0,
+#   making the hardware fetch from an unmapped address.
+#   Fixed by carry propagation: addr_lo_b overflow now increments addr_hi_b.
+#   tile_m=64 is kept for M=512/1024 (more occupancy-friendly for large M);
+#   tile_m=128 variants can be validated separately if needed.
 M_SWEEP = [
     # label               M    tm   mw nw nb  cl  e8m0  nosc  wpe
     ("M=1   dec",          1,  64,  2, 4,  3,  1, True, False, None),
@@ -71,7 +76,6 @@ M_SWEEP = [
     ("M=64  dec",         64,  64,  2, 4,  3,  1, True, False, None),
     ("M=128 dec",        128,  64,  2, 4,  3,  1, True, False, None),
     ("M=256 pre",        256, 128,  2, 4,  2,  1, True, False, None),
-    # tile_m=64 below: tile_m=128 crashes for M>256 (gx>=4, untested kernel path)
     ("M=512 pre tm64",   512,  64,  2, 4,  3,  1, True, False, None),
     ("M=1024 pre tm64", 1024,  64,  2, 4,  3,  1, True, False, None),
 ]
@@ -106,8 +110,8 @@ SCALE_MODE_SWEEP = [
 ]
 
 # E. Prefill tile/warp sweep at M=256 (nb=2 because tile_m=128 needs it)
-# M=256 is safe for tile_m=128 (gx=2, tested). Do NOT increase M here until
-# the tile_m=128 large-grid bug (M>256 → crash) is fixed.
+# M=256 is safe for tile_m=128 (gx=2, tested). addr_lo_b i32 overflow fix
+# (2026-05-27) should also make larger M safe; validate on silicon before extending.
 PREFILL_SWEEP = [
     ("pre tm64 mw2n4",   256,  64,  2, 4,  3,  1, True, False, None),
     ("pre tm128 mw2n4",  256, 128,  2, 4,  2,  1, True, False, None),  # ← current
