@@ -1,18 +1,17 @@
-# SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2025 FlyDSL Project Contributors
-
 """Preshuffle GEMM kernel using the @flyc.kernel API."""
 
+import functools
 from typing import Optional
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import buffer_ops, const_expr, gpu, math, range_constexpr, rocdl
+from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
-from kernels.mfma_epilogues import mfma_epilog
-from kernels.mfma_preshuffle_pipeline import (
+from .mfma_epilogues import mfma_epilog
+from .mfma_preshuffle_pipeline import (
     _buffer_load_vec,
     buffer_copy_gmem16_dwordx4,
     load_b_pack_k32,
@@ -111,6 +110,7 @@ def _get_preload(tile_m, tile_n, tile_k):
     return _TILE_PRELOAD_TABLE.get((int(tile_m), int(tile_n), int(tile_k)), _TILE_PRELOAD_DEFAULT)
 
 
+@functools.lru_cache(maxsize=1024)
 def compile_preshuffle_gemm_a8(
     *,
     M: int = 0,
@@ -133,7 +133,7 @@ def compile_preshuffle_gemm_a8(
     """Compile the preshuffle GEMM kernel using the @flyc.kernel API.
 
     Returns a JitFunction that auto-compiles and executes when called.
-    Signature:  launch_fn(arg_c, arg_a, arg_b, arg_scale_a, arg_scale_b, M, N, stream)
+    Signature:  launch_fn(arg_c, arg_a, arg_b, arg_bias, arg_scale_a, arg_scale_b, M, N, stream)
 
     Compile-time constants: K, tile_m/n/k, in_dtype, out_dtype (determine loop structure).
     Runtime parameters: M, N (passed as i32 kernel args).
@@ -168,6 +168,23 @@ def compile_preshuffle_gemm_a8(
     elem_bytes = 1 if (in_dtype in ("fp8", "int8", "int4", "fp4")) else 2
     a_elem_vec_pack = 2 if is_fp4 else 1
     b_elem_vec_pack = 2 if is_fp4 else 1
+
+    KERNEL_NAME = (
+        f"preshuffle_gemm_{in_dtype}_{out_dtype}"
+        f"_t{tile_m}x{tile_n}x{tile_k}"
+        f"_lds{lds_stage}"
+        f"_pl{dsrd_preload}x{dvmem_preload}"
+    )
+    if use_cshuffle_epilog:
+        KERNEL_NAME += "_csh"
+    if use_async_copy:
+        KERNEL_NAME += "_async"
+    if waves_per_eu is not None:
+        KERNEL_NAME += f"_wpe{waves_per_eu}"
+    if epilogue != "none":
+        KERNEL_NAME += f"_ep_{epilogue}"
+    if xcd_swizzle > 0:
+        KERNEL_NAME += f"_xcd{xcd_swizzle}"
 
     tile_k_bytes = int(tile_k) * int(elem_bytes)
 
@@ -312,12 +329,12 @@ def compile_preshuffle_gemm_a8(
 
     @flyc.kernel
     def kernel_gemm(
-        arg_c: fx.Tensor,
-        arg_a: fx.Tensor,
-        arg_b: fx.Tensor,
-        arg_scale_a: fx.Tensor,
-        arg_scale_b: fx.Tensor,
-        arg_bias: fx.Tensor,
+        arg_c: fx.Pointer,
+        arg_a: fx.Pointer,
+        arg_b: fx.Pointer,
+        arg_scale_a: fx.Pointer,
+        arg_scale_b: fx.Pointer,
+        arg_bias: fx.Pointer,
         i32_m: fx.Int32,
         i32_n: fx.Int32,
     ):
@@ -375,14 +392,24 @@ def compile_preshuffle_gemm_a8(
             lds_a_ping_ptr = SmemPtr(base_ptr_ping, lds_ping_offset, _elem_type(), shape=(tile_m * tile_k,))
 
             if const_expr(use_cshuffle_epilog):
-                lds_out_ptr = SmemPtr(base_ptr_pong, lds_pong_offset, _out_elem(), shape=(tile_m * tile_n,))
+                lds_out_ptr = SmemPtr(
+                    base_ptr_pong,
+                    lds_pong_offset,
+                    _out_elem(),
+                    shape=(tile_m * tile_n,),
+                )
             else:
                 lds_out_ptr = SmemPtr(base_ptr_pong, lds_pong_offset, _out_elem(), shape=(1,))
         else:
             lds_a_pong_ptr = SmemPtr(base_ptr_pong, lds_alloc_offset, _elem_type(), shape=(lds_total_elems,))
             lds_a_ping_ptr = lds_a_pong_ptr
             if const_expr(use_cshuffle_epilog):
-                lds_out_ptr = SmemPtr(base_ptr_pong, lds_alloc_offset, _out_elem(), shape=(tile_m * tile_n,))
+                lds_out_ptr = SmemPtr(
+                    base_ptr_pong,
+                    lds_alloc_offset,
+                    _out_elem(),
+                    shape=(tile_m * tile_n,),
+                )
             else:
                 lds_out_ptr = SmemPtr(base_ptr_pong, lds_alloc_offset, _out_elem(), shape=(1,))
 
@@ -393,8 +420,16 @@ def compile_preshuffle_gemm_a8(
         # ---- Buffer resources (runtime byte sizes for OOB protection) ----
         _a_nrec = fx.Int64(c_m * (K * elem_bytes // a_elem_vec_pack))
         _c_nrec = fx.Int64(c_m * c_n * 2)
-        a_rsrc = buffer_ops.create_buffer_resource(arg_a, max_size=False, num_records_bytes=_a_nrec)
-        c_rsrc = buffer_ops.create_buffer_resource(arg_c, max_size=False, num_records_bytes=_c_nrec)
+
+        def _ptr_buffer_resource(ptr, num_records_bytes=None):
+            addr = fx.ptrtoint(ptr)
+            addr_i64 = fx.arith.index_cast(T.i64, addr)
+            if num_records_bytes is None:
+                return buffer_ops.create_buffer_resource_from_addr(addr_i64)
+            return buffer_ops.create_buffer_resource_from_addr(addr_i64, num_records_bytes=num_records_bytes)
+
+        a_rsrc = _ptr_buffer_resource(arg_a, _a_nrec)
+        c_rsrc = _ptr_buffer_resource(arg_c, _c_nrec)
         _needs_per_token_scale = not is_f16_or_bf16 and not is_fp4
         scale_a_rsrc = None
         if const_expr(not is_f16_or_bf16):
@@ -404,9 +439,7 @@ def compile_preshuffle_gemm_a8(
                 _scale_a_nrec = fx.Int64(_scale_a_rows * _scale_a_stride_elems * fx.Index(4))
             else:
                 _scale_a_nrec = fx.Int64(c_m * fx.Index(4))
-            scale_a_rsrc = buffer_ops.create_buffer_resource(
-                arg_scale_a, max_size=False, num_records_bytes=_scale_a_nrec
-            )
+            scale_a_rsrc = _ptr_buffer_resource(arg_scale_a, _scale_a_nrec)
 
         # ---- Bias buffer resource (for fused epilogue) ----
         # Use max_size=True so the buffer descriptor's size is taken from the
@@ -414,9 +447,9 @@ def compile_preshuffle_gemm_a8(
         # size (was c_n * 2, which broke if out_dtype became fp32 etc.).
         bias_rsrc = None
         if const_expr(_has_bias):
-            bias_rsrc = buffer_ops.create_buffer_resource(arg_bias, max_size=True)
-        b_rsrc = buffer_ops.create_buffer_resource(arg_b, max_size=True)
-        scale_b_rsrc = None if (is_f16_or_bf16) else buffer_ops.create_buffer_resource(arg_scale_b, max_size=True)
+            bias_rsrc = _ptr_buffer_resource(arg_bias)
+        b_rsrc = _ptr_buffer_resource(arg_b)
+        scale_b_rsrc = None if (is_f16_or_bf16) else _ptr_buffer_resource(arg_scale_b)
 
         bx_m = bx * tile_m
         by_n = by * tile_n
@@ -815,7 +848,14 @@ def compile_preshuffle_gemm_a8(
 
         # ── Compute tile (MFMA) ───────────────────────────────────────────
         def compute_tile(
-            accs_in, b_tile_in, lds_buffer, *, is_last_tile=False, a0_prefetch=None, fp4_scales=None, fp4_scale_half=0
+            accs_in,
+            b_tile_in,
+            lds_buffer,
+            *,
+            is_last_tile=False,
+            a0_prefetch=None,
+            fp4_scales=None,
+            fp4_scale_half=0,
         ):
             scales_pf = {}
             if const_expr(is_last_tile and (not is_f16_or_bf16)):
@@ -939,7 +979,17 @@ def compile_preshuffle_gemm_a8(
                                 acc_idx = mi * num_acc_n + ni
                                 current_accs_list[acc_idx] = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
                                     mfma_res_ty,
-                                    [a128, b128, current_accs_list[acc_idx], 0, 0, 0, 0x7F7F7F7F, 0, 0x7F7F7F7F],
+                                    [
+                                        a128,
+                                        b128,
+                                        current_accs_list[acc_idx],
+                                        0,
+                                        0,
+                                        0,
+                                        0x7F7F7F7F,
+                                        0,
+                                        0x7F7F7F7F,
+                                    ],
                                 )
                 return current_accs_list, scales_pf
 
@@ -1008,7 +1058,17 @@ def compile_preshuffle_gemm_a8(
                     raise RuntimeError("use_cshuffle_epilog=True but lds_out is not allocated.")
                 gpu.barrier()
 
-                def write_row_to_lds(*, mi, ii, row_in_tile, row, row_base_lds, col_base_local, num_acc_n, lds_out):
+                def write_row_to_lds(
+                    *,
+                    mi,
+                    ii,
+                    row_in_tile,
+                    row,
+                    row_base_lds,
+                    col_base_local,
+                    num_acc_n,
+                    lds_out,
+                ):
                     s_a = fx.Float32(1.0)
                     if const_expr(_needs_per_token_scale):
                         s_a_vec4 = s_a_vecs[mi]
@@ -1400,7 +1460,10 @@ def compile_preshuffle_gemm_a8(
                 next_k1 = k_iv + tile_k
                 if const_expr(use_async_copy):
                     prefetch_a_to_lds(
-                        next_k1, lds_a_ping, a_elem_vec_pack_v=a_elem_vec_pack, dma_a_tile_to_lds_fn=dma_a_tile_to_lds
+                        next_k1,
+                        lds_a_ping,
+                        a_elem_vec_pack_v=a_elem_vec_pack,
+                        dma_a_tile_to_lds_fn=dma_a_tile_to_lds,
                     )
                 else:
                     a_tile_ping = prefetch_a_tile(next_k1)
@@ -1430,7 +1493,10 @@ def compile_preshuffle_gemm_a8(
                 rocdl.sched_barrier(0)
                 if const_expr(use_async_copy):
                     prefetch_a_to_lds(
-                        next_k2, lds_a_pong, a_elem_vec_pack_v=a_elem_vec_pack, dma_a_tile_to_lds_fn=dma_a_tile_to_lds
+                        next_k2,
+                        lds_a_pong,
+                        a_elem_vec_pack_v=a_elem_vec_pack,
+                        dma_a_tile_to_lds_fn=dma_a_tile_to_lds,
                     )
                 else:
                     a_tile_pong = prefetch_a_tile(next_k2)
@@ -1466,14 +1532,21 @@ def compile_preshuffle_gemm_a8(
             next_k1 = k_iv + tile_k
             if const_expr(use_async_copy):
                 prefetch_a_to_lds(
-                    next_k1, lds_a_ping, a_elem_vec_pack_v=a_elem_vec_pack, dma_a_tile_to_lds_fn=dma_a_tile_to_lds
+                    next_k1,
+                    lds_a_ping,
+                    a_elem_vec_pack_v=a_elem_vec_pack,
+                    dma_a_tile_to_lds_fn=dma_a_tile_to_lds,
                 )
             else:
                 a_tile = prefetch_a_tile(next_k1)
             _sc_ping = load_fp4_scale_chunk(k_iv + fx.Index(tile_k)) if is_fp4 else None
             b_tile_ping = prefetch_b_tile(next_k1)
             accs_in, _ = compute_tile(
-                accs_in, b_tile_pong_in, lds_a_pong, a0_prefetch=a0pf_in, fp4_scales=fp4_scales_pong_in
+                accs_in,
+                b_tile_pong_in,
+                lds_a_pong,
+                a0_prefetch=a0pf_in,
+                fp4_scales=fp4_scales_pong_in,
             )
             if const_expr(not use_async_copy):
                 store_a_tile_to_lds(a_tile, lds_a_ping)
@@ -1490,14 +1563,21 @@ def compile_preshuffle_gemm_a8(
             next_k2 = k_iv + (tile_k * 2)
             if const_expr(use_async_copy):
                 prefetch_a_to_lds(
-                    next_k2, lds_a_pong, a_elem_vec_pack_v=a_elem_vec_pack, dma_a_tile_to_lds_fn=dma_a_tile_to_lds
+                    next_k2,
+                    lds_a_pong,
+                    a_elem_vec_pack_v=a_elem_vec_pack,
+                    dma_a_tile_to_lds_fn=dma_a_tile_to_lds,
                 )
             else:
                 a_tile = prefetch_a_tile(next_k2)
             _sc_pong = load_fp4_scale_chunk(k_iv + (tile_k * 2)) if is_fp4 else None
             b_tile_pong_new = prefetch_b_tile(next_k2)
             accs_in, _ = compute_tile(
-                accs_in, b_tile_ping, lds_a_ping, a0_prefetch=a0_prefetch_ping, fp4_scales=_sc_ping
+                accs_in,
+                b_tile_ping,
+                lds_a_ping,
+                a0_prefetch=a0_prefetch_ping,
+                fp4_scales=_sc_ping,
             )
             if const_expr(not use_async_copy):
                 store_a_tile_to_lds(a_tile, lds_a_pong)
@@ -1521,14 +1601,23 @@ def compile_preshuffle_gemm_a8(
 
         if const_expr(lds_stage == 2):
 
-            def prefetch_a0_pack(lds_buffer, *, lds_load_packs_k64_fn, row_a_lds_v, col_offset_base_bytes_v):
+            def prefetch_a0_pack(
+                lds_buffer,
+                *,
+                lds_load_packs_k64_fn,
+                row_a_lds_v,
+                col_offset_base_bytes_v,
+            ):
                 return lds_load_packs_k64_fn(row_a_lds_v, col_offset_base_bytes_v, lds_buffer)
 
             k0 = fx.Index(0)
             b_tile0 = prefetch_b_tile(k0)
             if const_expr(use_async_copy):
                 prefetch_a_to_lds(
-                    k0, lds_a_pong, a_elem_vec_pack_v=a_elem_vec_pack, dma_a_tile_to_lds_fn=dma_a_tile_to_lds
+                    k0,
+                    lds_a_pong,
+                    a_elem_vec_pack_v=a_elem_vec_pack,
+                    dma_a_tile_to_lds_fn=dma_a_tile_to_lds,
                 )
             else:
                 store_a_tile_to_lds(prefetch_a_tile(k0), lds_a_pong)
@@ -1831,12 +1920,21 @@ def compile_preshuffle_gemm_a8(
                 b_tile_ping = prefetch_b_tile(last_k)
                 if const_expr(use_async_copy):
                     prefetch_a_to_lds(
-                        last_k, lds_a_ping, a_elem_vec_pack_v=a_elem_vec_pack, dma_a_tile_to_lds_fn=dma_a_tile_to_lds
+                        last_k,
+                        lds_a_ping,
+                        a_elem_vec_pack_v=a_elem_vec_pack,
+                        dma_a_tile_to_lds_fn=dma_a_tile_to_lds,
                     )
                 else:
                     a_regs_ping = prefetch_a_tile(last_k)
                 _sc_last = load_fp4_scale_chunk(last_k) if is_fp4 else None
-                accs, _ = compute_tile(accs, b_tile_pong_ep, lds_a_pong, a0_prefetch=a0pf, fp4_scales=fp4_scales_ep)
+                accs, _ = compute_tile(
+                    accs,
+                    b_tile_pong_ep,
+                    lds_a_pong,
+                    a0_prefetch=a0pf,
+                    fp4_scales=fp4_scales_ep,
+                )
                 if const_expr(not use_async_copy):
                     store_a_tile_to_lds(a_regs_ping, lds_a_ping)
                 hot_loop_scheduler()
@@ -1885,19 +1983,23 @@ def compile_preshuffle_gemm_a8(
             bt_final = _unflatten_b_tile(list(results[n_accs:]))
             _last_fp4_sc = load_fp4_scales(fx.Index((K - tile_k) // tile_k * _fp4_scale_k_stride)) if is_fp4 else None
             final_accs, scales = compute_tile(
-                accs_final, bt_final, lds_a_pong, is_last_tile=not is_fp4, fp4_scales=_last_fp4_sc
+                accs_final,
+                bt_final,
+                lds_a_pong,
+                is_last_tile=not is_fp4,
+                fp4_scales=_last_fp4_sc,
             )
             store_output(final_accs, scales)
 
     # ── Host launcher ──────────────────────────────────────────────────────
     @flyc.jit
     def launch_gemm(
-        arg_c: fx.Tensor,
-        arg_a: fx.Tensor,
-        arg_b: fx.Tensor,
-        arg_scale_a: fx.Tensor,
-        arg_scale_b: fx.Tensor,
-        arg_bias: fx.Tensor,
+        arg_c: fx.Pointer,
+        arg_a: fx.Pointer,
+        arg_b: fx.Pointer,
+        arg_scale_a: fx.Pointer,
+        arg_scale_b: fx.Pointer,
+        arg_bias: fx.Pointer,
         i32_m: fx.Int32,
         i32_n: fx.Int32,
         stream: fx.Stream,
@@ -1914,17 +2016,15 @@ def compile_preshuffle_gemm_a8(
         gx = (i32_m + (tile_m - 1)) // tile_m
         gy = i32_n // tile_n
 
-        kernel_gemm(
-            arg_c,
-            arg_a,
-            arg_b,
-            arg_scale_a,
-            arg_scale_b,
-            arg_bias,
-            i32_m,
-            i32_n,
-            value_attrs={"rocdl.waves_per_eu": waves_per_eu},
-        ).launch(
+        kernel_gemm._func.__name__ = KERNEL_NAME
+        launcher = kernel_gemm(arg_c, arg_a, arg_b, arg_scale_a, arg_scale_b, arg_bias, i32_m, i32_n)
+        if const_expr(waves_per_eu is not None):
+            _wpe = int(waves_per_eu)
+            if const_expr(_wpe >= 1):
+                for op in ctx.gpu_module_body.operations:
+                    if const_expr(hasattr(op, "attributes") and op.OPERATION_NAME == "gpu.func"):
+                        op.attributes["rocdl.waves_per_eu"] = ir.IntegerAttr.get(fx.Int32.ir_type, _wpe)
+        launcher.launch(
             grid=(gx, gy, 1),
             block=(256, 1, 1),
             stream=stream,
