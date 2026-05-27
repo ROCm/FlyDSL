@@ -59,6 +59,10 @@ TILE_K, TILE_N = 128, 128
 #   tile_m=128: stage≈53KB, nb=3→159KB (over limit); nb=2→106KB (fits)
 
 # A. M sweep — roofline crossing. Best decode/prefill config each regime.
+#
+# NOTE: tile_m=128 with gx >= 4 (M > 256) causes MEMORY_APERTURE_VIOLATION on silicon
+# (confirmed 2026-05-27). Precision tests only cover M <= 256 for tile_m=128.
+# Using tile_m=64 for M >= 512 until the tile_m=128 / large-grid bug is root-caused.
 M_SWEEP = [
     # label               M    tm   mw nw nb  cl  e8m0  nosc  wpe
     ("M=1   dec",          1,  64,  2, 4,  3,  1, True, False, None),
@@ -67,8 +71,9 @@ M_SWEEP = [
     ("M=64  dec",         64,  64,  2, 4,  3,  1, True, False, None),
     ("M=128 dec",        128,  64,  2, 4,  3,  1, True, False, None),
     ("M=256 pre",        256, 128,  2, 4,  2,  1, True, False, None),
-    ("M=512 pre",        512, 128,  2, 4,  2,  1, True, False, None),
-    ("M=1024 pre",      1024, 128,  2, 4,  2,  1, True, False, None),
+    # tile_m=64 below: tile_m=128 crashes for M>256 (gx>=4, untested kernel path)
+    ("M=512 pre tm64",   512,  64,  2, 4,  3,  1, True, False, None),
+    ("M=1024 pre tm64", 1024,  64,  2, 4,  3,  1, True, False, None),
 ]
 
 # B. tile_m sweep at M=64 — how tile size affects decode throughput
@@ -101,6 +106,8 @@ SCALE_MODE_SWEEP = [
 ]
 
 # E. Prefill tile/warp sweep at M=256 (nb=2 because tile_m=128 needs it)
+# M=256 is safe for tile_m=128 (gx=2, tested). Do NOT increase M here until
+# the tile_m=128 large-grid bug (M>256 → crash) is fixed.
 PREFILL_SWEEP = [
     ("pre tm64 mw2n4",   256,  64,  2, 4,  3,  1, True, False, None),
     ("pre tm128 mw2n4",  256, 128,  2, 4,  2,  1, True, False, None),  # ← current
