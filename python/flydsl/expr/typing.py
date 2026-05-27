@@ -364,7 +364,7 @@ class Constexpr:
 
     @staticmethod
     def _tuple_cache_signature(value):
-        return ("tuple", tuple(Constexpr._value_cache_signature(item) for item in value))
+        return ("tuple", tuple(Constexpr.value_signature(item) for item in value))
 
     @staticmethod
     def _lambda_cache_signature(value):
@@ -391,17 +391,17 @@ class Constexpr:
             tuple(Constexpr._lambda_const_cache_signature(item) for item in value.__code__.co_consts),
             value.__code__.co_names,
             value.__code__.co_varnames,
-            tuple(Constexpr._value_cache_signature(item) for item in defaults),
+            tuple(Constexpr.value_signature(item) for item in defaults),
         )
 
     @staticmethod
     def _lambda_const_cache_signature(value):
         if value is None:
             return (type(None), None)
-        return Constexpr._value_cache_signature(value)
+        return Constexpr.value_signature(value)
 
     @staticmethod
-    def _value_cache_signature(value):
+    def value_signature(value):
         scalar_sig = Constexpr._scalar_cache_signature(value)
         if scalar_sig is not None:
             return scalar_sig
@@ -441,7 +441,7 @@ class Constexpr:
 
     @classmethod
     def _specialize(cls, value):
-        cache_key = Constexpr.__cache_signature__(value)
+        cache_key = Constexpr.value_signature(value)
         cached = Constexpr._value_cache.get(cache_key)
         if cached is not None:
             return cached
@@ -478,12 +478,6 @@ class Constexpr:
     def __get_ir_types__(cls):
         return []
 
-    @staticmethod
-    def __cache_signature__(value):
-        # Interface name aligns with the JitArgument protocol; signature stays static-with-value
-        # because Constexpr's "instance" is a raw python object, not a wrapper.
-        return Constexpr._value_cache_signature(value)
-
     @classmethod
     def __get_c_pointers__(cls):
         return []
@@ -499,15 +493,15 @@ class Constexpr:
             elif Constexpr._is_tuple_annotation(inner):
                 if not isinstance(value, tuple):
                     raise TypeError(f"expects tuple, got {type(value).__name__}")
-                Constexpr.__cache_signature__(value)
+                Constexpr.value_signature(value)
             elif inner in (int, bool, float):
                 if type(value) is not inner:
                     raise TypeError(f"expects {inner.__name__}, got {type(value).__name__}")
-                Constexpr.__cache_signature__(value)
+                Constexpr.value_signature(value)
             elif not isinstance(value, inner):
                 raise TypeError(f"expects {getattr(inner, '__name__', repr(inner))}, got {type(value).__name__}")
             else:
-                Constexpr.__cache_signature__(value)
+                Constexpr.value_signature(value)
         return value
 
     @classmethod

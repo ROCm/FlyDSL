@@ -1092,11 +1092,16 @@ class JitFunction:
         self.cache_manager = JitCacheManager(cache_dir)
         self.cache_manager.load_all()
 
-    def _make_cache_key(self, bound_args):
-        """Build a tuple cache key from bound arguments.
+    def _resolve_and_make_cache_key(self, bound_args):
+        """Resolve raw call values into JitArgument instances *in place* and
+        build the tuple cache key from them.
+
+        Side effect: entries in ``bound_args`` whose annotation is neither
+        ``Constexpr[T]`` nor ``Type[T]`` are replaced with their resolved
+        ``JitArgument`` instance (e.g. ``int`` → ``Int32``,
 
         * Annotation-driven (``Constexpr[T]`` / ``Type[T]``): value or type
-          baked directly into the key.
+          baked directly into the key, ``bound_args`` left untouched.
         * JitArgument-driven: the call value is (or is wrapped into) a
           ``JitArgument`` and its ``cache_signature()`` is appended.
         """
@@ -1113,7 +1118,7 @@ class JitFunction:
 
             if ann is not inspect.Parameter.empty:
                 if Constexpr.is_constexpr_annotation(ann):
-                    key_parts.append((name, Constexpr.__cache_signature__(arg)))
+                    key_parts.append((name, Constexpr.value_signature(arg)))
                     continue
                 if is_type_param_annotation(ann):
                     key_parts.append((name, arg))
@@ -1160,7 +1165,7 @@ class JitFunction:
         bound = sig.bind(*args, **kwargs)
         bound.apply_defaults()
 
-        cache_key = self._make_cache_key(bound.arguments)
+        cache_key = self._resolve_and_make_cache_key(bound.arguments)
         if bound_self is not None:
             cache_key = (("_self_type_", type(bound_self)),) + cache_key
 
@@ -1409,7 +1414,7 @@ class CompiledFunction:
     1. Update pre-allocated ctypes storage (data_ptr / scalar extraction)
     2. Invoke the JIT'd C function pointer
 
-    No ``inspect.Signature.bind``, no ``_make_cache_key``, no cache lookup.
+    No ``inspect.Signature.bind``, no ``_resolve_and_make_cache_key``, no cache lookup.
     Accepts **positional arguments only** (same count and order as the
     original ``@flyc.jit`` function).
     """
@@ -1452,7 +1457,7 @@ def _compile_impl(func, *args) -> CompiledFunction:
     sig = jf._sig  # guaranteed initialized after __call__
     bound = sig.bind(*args)
     bound.apply_defaults()
-    cache_key = jf._make_cache_key(bound.arguments)
+    cache_key = jf._resolve_and_make_cache_key(bound.arguments)
     args_tuple = tuple(bound.arguments.values())
 
     # Look up the CompiledArtifact.  We must hold a direct reference to it
