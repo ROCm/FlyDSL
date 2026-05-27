@@ -379,6 +379,18 @@ class PointerAdaptor:
     def __cache_signature__(self):
         return ("PointerAdaptor", self.element_type, str(self.address_space), self.alignment)
 
+    @staticmethod
+    def _extract_pointer(arg):
+        if isinstance(arg, PointerAdaptor):
+            return arg.pointer.value
+        if isinstance(arg, ctypes.c_void_p):
+            return arg.value
+        return int(arg)
+
+    @classmethod
+    def _reusable_slot_spec(cls, arg):
+        return ctypes.c_void_p, cls._extract_pointer
+
 
 def from_dlpack(
     tensor: torch.Tensor,
