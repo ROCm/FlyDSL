@@ -43,17 +43,39 @@ On first call, ``@flyc.jit`` runs the following pipeline:
 1. **AST Rewriting**: The Python source is parsed and rewritten to emit MLIR ops.
 2. **MLIR Module Construction**: Kernel body is traced into ``gpu``, ``arith``,
    ``scf``, ``memref``, and ``fly`` dialect ops.
-3. **Fly Pass Pipeline**: The module is lowered through a series of MLIR passes:
+3. **Fly Pass Pipeline**: The module is lowered through three pass stages,
+   defined in ``RocmBackend._pipeline_parts()``
+   (``python/flydsl/compiler/backends/rocm.py``). See
+   :doc:`../architecture_guide` §3 for the per-pass table.
 
-   - ``gpu-kernel-outlining``
-   - ``fly-canonicalize``
-   - ``fly-layout-lowering``
-   - ``convert-fly-to-rocdl``
-   - ``canonicalize`` + ``cse``
-   - ``gpu.module(convert-gpu-to-rocdl{...})``
-   - ``rocdl-attach-target{chip=gfxNNN}``
-   - ``gpu-to-llvm``, ``convert-arith/func-to-llvm``
-   - ``gpu-module-to-binary{format=fatbin}``
+   A. ``pre_binary_fragments`` (Fly → ROCDL):
+
+      - ``fly-rewrite-func-signature``
+      - ``fly-canonicalize``
+      - ``fly-layout-lowering``
+      - ``fly-int-swizzle-simplify``
+      - ``canonicalize``
+      - ``fly-convert-atom-call-to-ssa-form``
+      - ``fly-promote-regmem-to-vectorssa``
+      - ``convert-fly-to-rocdl``
+      - ``canonicalize``
+      - ``gpu.module(convert-scf-to-cf, cse, convert-gpu-to-rocdl{chipset=gfxNNN ...}, fly-rocdl-cluster-attr)``
+
+   B. ``binary_prep_fragments`` (→ LLVM):
+
+      - ``rocdl-attach-target{chip=gfxNNN ...}``
+      - ``convert-scf-to-cf``
+      - ``convert-cf-to-llvm``
+      - ``gpu-to-llvm{use-bare-pointers-...=true}``
+      - ``convert-vector-to-llvm``
+      - ``convert-arith-to-llvm``
+      - ``convert-func-to-llvm``
+      - ``reconcile-unrealized-casts``
+      - ``ensure-debug-info-scope-on-llvm-func`` (optional, gated by ``FLYDSL_DEBUG_ENABLE_DEBUG_INFO``)
+
+   C. ``binary_fragment``:
+
+      - ``gpu-module-to-binary{format=fatbin opts="..."}``
 
 4. **Cached Artifact**: The compiled binary is cached to disk
    (``~/.flydsl/cache/``) keyed by the compiler toolchain hash and kernel
