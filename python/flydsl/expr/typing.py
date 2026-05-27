@@ -415,10 +415,6 @@ class Constexpr:
             "and lambdas without free variables"
         )
 
-    @staticmethod
-    def cache_signature(value):
-        return Constexpr._value_cache_signature(value)
-
     def __class_getitem__(cls, param):
         if cls is not Constexpr:
             raise TypeError(f"{cls.__name__} cannot be re-parametrized")
@@ -445,7 +441,7 @@ class Constexpr:
 
     @classmethod
     def _specialize(cls, value):
-        cache_key = Constexpr.cache_signature(value)
+        cache_key = Constexpr.__cache_signature__(value)
         cached = Constexpr._value_cache.get(cache_key)
         if cached is not None:
             return cached
@@ -482,6 +478,12 @@ class Constexpr:
     def __get_ir_types__(cls):
         return []
 
+    @staticmethod
+    def __cache_signature__(value):
+        # Interface name aligns with the JitArgument protocol; signature stays static-with-value
+        # because Constexpr's "instance" is a raw python object, not a wrapper.
+        return Constexpr._value_cache_signature(value)
+
     @classmethod
     def __get_c_pointers__(cls):
         return []
@@ -497,15 +499,15 @@ class Constexpr:
             elif Constexpr._is_tuple_annotation(inner):
                 if not isinstance(value, tuple):
                     raise TypeError(f"expects tuple, got {type(value).__name__}")
-                Constexpr.cache_signature(value)
+                Constexpr.__cache_signature__(value)
             elif inner in (int, bool, float):
                 if type(value) is not inner:
                     raise TypeError(f"expects {inner.__name__}, got {type(value).__name__}")
-                Constexpr.cache_signature(value)
+                Constexpr.__cache_signature__(value)
             elif not isinstance(value, inner):
                 raise TypeError(f"expects {getattr(inner, '__name__', repr(inner))}, got {type(value).__name__}")
             else:
-                Constexpr.cache_signature(value)
+                Constexpr.__cache_signature__(value)
         return value
 
     @classmethod
@@ -1110,6 +1112,9 @@ class Stream:
         else:
             self._stream_storage = ctypes.c_void_p(self.value.cuda_stream)
         return [ctypes.cast(ctypes.pointer(self._stream_storage), ctypes.c_void_p)]
+
+    def __cache_signature__(self):
+        return (type(self),)
 
     @staticmethod
     def _extract_stream_value(arg):
@@ -1751,10 +1756,6 @@ class Array:
 
         def __extract_to_ir_values__(self) -> List[ir.Value]:
             return [self._ptr_value]
-
-        @classmethod
-        def __cache_signature__(cls):
-            return ("array", cls.dtype, cls.size, cls.align)
 
         @classmethod
         def __dsl_size_of__(cls) -> int:

@@ -36,7 +36,12 @@ from .kernel_function import (
     get_gpu_module_body,
 )
 from .link_utils import _append_link_lib_options_to_attach_targets, _format_link_lib_options
-from .protocol import construct_from_ir_values, get_ir_types
+from .protocol import (
+    JitArgument,
+    cache_signature,
+    construct_from_ir_values,
+    get_ir_types,
+)
 
 EXTRA_SOURCE_DIRS: List[str] = []
 
@@ -1087,75 +1092,49 @@ class JitFunction:
         self.cache_manager = JitCacheManager(cache_dir)
         self.cache_manager.load_all()
 
-    @staticmethod
-    def _arg_cache_sig(arg, *, runtime=False):
-        """Cache signature for a single argument value.
-
-        When runtime=True the parameter's annotation indicates a runtime
-        type (has __get_c_pointers__, e.g. Int32, Stream) — value is passed to
-        the kernel at launch time and does NOT affect compiled code, so
-        only the Python type is recorded.
-
-        Dispatch order:
-        1. __cache_signature__ — types that explicitly declare their cache
-           identity (e.g. TensorAdaptor includes assumed_align).
-        2. Python scalars — value in key when not runtime; type only when
-           runtime (annotated as Int32/Stream/etc.).
-        3. Registry raw_cache_signature — lightweight sig from raw arg
-           without full JitArgument construction overhead.
-        4. Everything else — type only.
-        """
-        if hasattr(arg, "__cache_signature__"):
-            return arg.__cache_signature__()
-        elif isinstance(arg, (int, float, bool, str)):
-            if runtime:
-                return type(arg)
-            return (type(arg), arg)
-        else:
-            from .jit_argument import JitArgumentRegistry
-
-            constructor, _ = JitArgumentRegistry.get(type(arg))
-            if constructor is not None and hasattr(constructor, "raw_cache_signature"):
-                return constructor.raw_cache_signature(arg)
-            return type(arg)
-
     def _make_cache_key(self, bound_args):
         """Build a tuple cache key from bound arguments.
 
-        For parameters annotated with a runtime type (one that implements
-        __get_c_pointers__, e.g. Int32, Stream), the value is excluded from the
-        key — only the Python type matters.  This prevents unnecessary
-        recompilation when only runtime values change.
+        * Annotation-driven (``Constexpr[T]`` / ``Type[T]``): value or type
+          baked directly into the key.
+        * JitArgument-driven: the call value is (or is wrapped into) a
+          ``JitArgument`` and its ``cache_signature()`` is appended.
         """
+        from .jit_argument import JitArgumentRegistry
 
         sig = self._sig
         key_parts = [("_target_", self._target)]
         if self.compile_hints:
             key_parts.append(("_hints_", tuple(sorted((k, str(v)) for k, v in self.compile_hints.items()))))
+
         for name, arg in bound_args.items():
             param = sig.parameters.get(name)
             ann = param.annotation if param else inspect.Parameter.empty
 
-            if ann is not inspect.Parameter.empty and Constexpr.is_constexpr_annotation(ann):
-                key_parts.append((name, "Constexpr", Constexpr.cache_signature(arg)))
-                continue
+            if ann is not inspect.Parameter.empty:
+                if Constexpr.is_constexpr_annotation(ann):
+                    key_parts.append((name, Constexpr.__cache_signature__(arg)))
+                    continue
+                if is_type_param_annotation(ann):
+                    key_parts.append((name, arg))
+                    continue
 
-            if ann is not inspect.Parameter.empty and is_type_param_annotation(ann):
-                key_parts.append((name, "Type", arg))
-                continue
-
-            # The stream selects the launch queue and does not affect generated code.
-            # Normalize equivalent host representations (raw pointer, Stream object)
-            # so CPU AOT artifacts can be reused by GPU runtime calls.
-            if ann is Stream:
-                key_parts.append((name, Stream))
-                continue
-
-            is_runtime = ann is not inspect.Parameter.empty and hasattr(ann, "__get_c_pointers__")
-            if isinstance(arg, tuple):
-                key_parts.append((name, tuple(self._arg_cache_sig(a) for a in arg)))
+            if isinstance(arg, JitArgument):
+                jit_arg = arg
+            elif isinstance(ann, type) and issubclass(ann, JitArgument):
+                jit_arg = ann(arg)
             else:
-                key_parts.append((name, self._arg_cache_sig(arg, runtime=is_runtime)))
+                ctor, _ = JitArgumentRegistry.get(type(arg))
+                if ctor is None:
+                    raise TypeError(
+                        f"{name}: {type(arg).__name__} is neither a JitArgument nor has a registered "
+                        f"constructor; cannot derive cache signature."
+                    )
+                jit_arg = ctor(arg)
+
+            bound_args[name] = jit_arg
+            key_parts.append((name, cache_signature(jit_arg)))
+
         return tuple(key_parts)
 
     @staticmethod

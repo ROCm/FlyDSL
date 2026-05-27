@@ -124,8 +124,8 @@ def convert_to_jit_arguments(
             constexpr_values[param_name] = value
             continue
 
-        is_jit_arg = hasattr(value, "__get_ir_types__") and hasattr(value, "__get_c_pointers__")
-        is_dsl_type = hasattr(value, "__construct_from_ir_values__") and hasattr(value, "__extract_to_ir_values__")
+        is_jit_arg = isinstance(value, JitArgument)
+        is_dsl_type = isinstance(value, DslType)
         if is_jit_arg and is_dsl_type:
             jit_arg = value
             dsl_type = type(value)
@@ -172,6 +172,13 @@ class TensorAdaptor:
         # Forward-only interop: DLPack export from torch rejects tensors that
         # still participate in autograd, so detach before crossing into FlyDSL.
         dlpack_tensor = tensor.detach() if tensor.requires_grad else tensor
+
+        # torch < 2.12 cannot export fp8 dtypes through DLPack (raises "float8 types are not supported by dlpack").
+        # Reinterpret as uint8 for transport; the original dtype is preserved in ``_orig_dtype``
+        # below and re-prepended to the cache signature so e4m3 / e5m2 / etc. don't collide.
+        #
+        # TODO: Drop both this view and ``_orig_dtype`` once the minimum torch version reaches 2.12 — DLPack 1.0 (PR
+        # pytorch/pytorch#145000) wires every fp8 code through DLConvertor.
         if _FLOAT8_DTYPES and dlpack_tensor.dtype in _FLOAT8_DTYPES:
             dlpack_tensor = dlpack_tensor.view(torch.uint8)
         self._tensor_keepalive = dlpack_tensor
@@ -188,7 +195,6 @@ class TensorAdaptor:
         self._orig_shape = tensor.shape
         self._orig_strides = tensor.stride()
         self._dyn_leading_dim = -1
-        self._dynamic_divisibility = 1
         self._is_layout_dynamic = False
 
         if dynamic_layout:
@@ -218,11 +224,6 @@ class TensorAdaptor:
         if not candidates:
             raise RuntimeError("tensor has no axis with stride == 1; layout-dynamic memref requires one")
         return candidates[0]
-
-    @staticmethod
-    def _dynamic_cache_signature(tensor: torch.Tensor, assumed_align: Optional[int], use_32bit_stride: bool):
-        leading_dim = TensorAdaptor._pick_unit_stride_axis(tensor.stride())
-        return (tensor.dtype, assumed_align, use_32bit_stride, "dynamic", tensor.dim(), leading_dim, 1)
 
     @classmethod
     def _reusable_slot_spec(cls, arg):
@@ -295,32 +296,8 @@ class TensorAdaptor:
     def __get_c_pointers__(self):
         return self.tensor_adaptor.get_c_pointers()
 
-    @staticmethod
-    def raw_cache_signature(tensor: torch.Tensor):
-        """Cache sig for a raw torch.Tensor without going through DLPack.
-
-        Matches ``TensorAdaptor(tensor).__cache_signature__()`` on the
-        auto-adapt path so fast and slow paths share the same cache slot:
-        dtype/rank/leading-axis only, no shape/stride values. Raises
-        ``RuntimeError`` for tensors that cannot be layout-dynamic (no
-        unit-stride axis); use ``flyc.from_dlpack(t)`` for those.
-        """
-        return TensorAdaptor._dynamic_cache_signature(tensor, None, False)
-
     def __cache_signature__(self):
-        base = (self._orig_dtype, self.assumed_align, self.use_32bit_stride)
-        if self._is_layout_dynamic:
-            return base + (
-                "dynamic",
-                len(self._orig_shape),
-                self._dyn_leading_dim,
-                self._dynamic_divisibility,
-            )
-        return base + (
-            "static",
-            tuple(int(d) for d in self._orig_shape),
-            tuple(int(s) for s in self._orig_strides),
-        )
+        return (type(self), self._orig_dtype) + self.tensor_adaptor.get_cache_signature()
 
     def _mark_layout_dynamic(self, leading_dim: int, divisibility: int):
         # Always pass a concrete axis index down. The DLPack stride view that
@@ -330,7 +307,6 @@ class TensorAdaptor:
         resolved = self._pick_unit_stride_axis(self._orig_strides) if leading_dim == -1 else int(leading_dim)
         self.tensor_adaptor.mark_layout_dynamic(resolved, divisibility)
         self._dyn_leading_dim = resolved
-        self._dynamic_divisibility = int(divisibility)
         self._is_layout_dynamic = True
         return self
 
@@ -365,7 +341,18 @@ class PointerAdaptor:
         self.pointer = pointer if isinstance(pointer, ctypes.c_void_p) else ctypes.c_void_p(pointer)
         self.address_space = address_space
         self.element_type = element_type
+        if alignment is None:
+            alignment = self._trivial_alignment_bytes(element_type)
         self.alignment = alignment
+
+    @staticmethod
+    def _trivial_alignment_bytes(element_type) -> int:
+        # Matches AlignAttr::getTrivialAlignment
+        if isinstance(element_type, type) and issubclass(element_type, Numeric):
+            width = element_type.width
+        else:
+            width = element_type.getIntOrFloatBitWidth()
+        return (width + 7) // 8
 
     def __get_ir_types__(self):
         ir_type = self.element_type
@@ -377,7 +364,7 @@ class PointerAdaptor:
         return [ctypes.cast(ctypes.pointer(self.pointer), ctypes.c_void_p)]
 
     def __cache_signature__(self):
-        return ("PointerAdaptor", self.element_type, str(self.address_space), self.alignment)
+        return (type(self), self.element_type, str(self.address_space), self.alignment)
 
 
 def from_dlpack(
