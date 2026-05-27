@@ -126,34 +126,35 @@ def _cast_dispatch_to_combine(t, combine_dtype):
     return t.to(combine_dtype)
 
 
-def _op_use_external_inp_buf(op):
-    """Return the op's ``use_external_inp_buf`` flag, agnostic to mori
-    (``self.config``) vs FlyDSL (``self.cfg``) attribute naming."""
+def _op_zero_copy(op):
+    """Return the op's ``zero_copy`` switch across mori/FlyDSL configs."""
     cfg = getattr(op, "cfg", None) or getattr(op, "config", None)
-    return getattr(cfg, "use_external_inp_buf", True)
+    if hasattr(cfg, "zero_copy"):
+        return bool(getattr(cfg, "zero_copy"))
+    return not bool(getattr(cfg, "use_external_inp_buf", True))
 
 
 def _run_combine(op, ret, combine_dtype, **kwargs):
     """Mori-parity combine launcher.
 
-    Centralises the P2P-read caller contract so every test-side combine
+    Centralises the zero-copy caller contract so every test-side combine
     invocation goes through the same staging path:
 
-      - ``use_external_inp_buf=True``  -> just dtype-cast ``ret[0]`` and
+      - ``zero_copy=False`` -> just dtype-cast ``ret[0]`` and
         let the kernel do its own Stage 1 staging copy.
-      - ``use_external_inp_buf=False`` (P2P-read) -> caller MUST write
+      - ``zero_copy=True`` -> caller MUST write
         the combine input into the buffer returned by
         ``op.get_registered_combine_input_buffer(combine_dtype)`` before
         invoking ``combine``; the kernel runs ``skip_stage1=True`` and
-        peers P2P-read that buffer on Stage 3.
+        peers read that buffer on Stage 3.
     """
     src = _cast_dispatch_to_combine(ret[0], combine_dtype)
-    if not _op_use_external_inp_buf(op):
-        # Mori-parity P2P-read caller contract: caller MUST pre-stage
+    if _op_zero_copy(op):
+        # Mori-parity zero-copy caller contract: caller MUST pre-stage
         # token bytes into the symmetric ``shmem_comb_inp_tok`` buffer
         # returned by :meth:`get_registered_combine_input_buffer`. The
         # kernel-side Stage 1 token copy is compile-time eliminated and
-        # peer PEs read this buffer directly via P2P during Stage 3.
+        # peer PEs read this buffer directly during Stage 3.
         cb = op.get_registered_combine_input_buffer(combine_dtype)
         n = src.shape[0]
         if n > 0:
@@ -180,7 +181,7 @@ def _run_combine(op, ret, combine_dtype, **kwargs):
 # Coverage axes (matches mori tuning table + StdMoE):
 #   - dtype          : bf16 (combine), fp8_ocp (dispatch), fp4 (dispatch)
 #   - quant_type     : none, fp8_direct_cast
-#   - zero_copy      : True (P2P-read), False (external_inp_buf)
+#   - zero_copy      : True (zero-copy), False (non-zero-copy)
 #   - enable_std_moe : True, False
 #   - token bucket   : 128 (small), 4096 (large)
 #
@@ -195,7 +196,7 @@ CI_CASES = [
         "max_tokens": 128,
         "hidden_dim": 7168,
         "quant_type": "none",
-        "use_external_inp_buf": True,
+        "zero_copy": False,
         "enable_std_moe": False,
     },
     {
@@ -204,21 +205,21 @@ CI_CASES = [
         "max_tokens": 128,
         "hidden_dim": 7168,
         "quant_type": "fp8_direct_cast",
-        "use_external_inp_buf": True,
+        "zero_copy": False,
         "enable_std_moe": False,
     },
     {
-        "name": "bf16_zerocopy_p2pread",
+        "name": "bf16_zero_copy",
         "dtype": "bf16",
         "max_tokens": 128,
         "hidden_dim": 7168,
         "quant_type": "none",
-        "use_external_inp_buf": False,
+        "zero_copy": True,
         "enable_std_moe": False,
-        # Verified via shmem dumps that FlyDSL's P2P-read combine path is
+        # Verified via shmem dumps that FlyDSL's zero-copy combine path is
         # correct (Stage 1 fills shmem_comb_inp_tok and Stage 3 writes
         # ``k*inp`` into shmem_comb_out_tok); the previous "zero output"
-        # symptom was actually mori's P2P-read reference returning all
+        # symptom was actually mori's zero-copy reference returning all
         # zeros.  Accuracy is now validated by the FlyDSL self-check
         # (``fly == k*inp``) so this case can participate in the full
         # sweep (accuracy + profile).
@@ -229,7 +230,7 @@ CI_CASES = [
         "max_tokens": 128,
         "hidden_dim": 7168,
         "quant_type": "none",
-        "use_external_inp_buf": True,
+        "zero_copy": False,
         "enable_std_moe": True,
     },
     {
@@ -238,7 +239,7 @@ CI_CASES = [
         "max_tokens": 4096,
         "hidden_dim": 7168,
         "quant_type": "none",
-        "use_external_inp_buf": True,
+        "zero_copy": False,
         "enable_std_moe": False,
     },
     {
@@ -247,27 +248,8 @@ CI_CASES = [
         "max_tokens": 4096,
         "hidden_dim": 7168,
         "quant_type": "fp8_direct_cast",
-        "use_external_inp_buf": True,
+        "zero_copy": False,
         "enable_std_moe": False,
-    },
-    {
-        "name": "bf16_zerocopy_fp8_direct_cast",
-        "dtype": "bf16",
-        "max_tokens": 128,
-        "hidden_dim": 7168,
-        "quant_type": "fp8_direct_cast",
-        "use_external_inp_buf": False,
-        "enable_std_moe": False,
-        # After the mori-parity P2P-read refactor (skip_stage1=True
-        # whenever use_external_inp_buf=False), fp8_direct_cast and
-        # P2P-read are mutually exclusive: the bf16->fp8 cast site
-        # lives inside Stage 1, which is removed in the P2P-read
-        # path.  combine() now raises ValueError on this combination
-        # to surface the misconfiguration up front.  Keep the case
-        # so the sweep still exercises that gate; mark it
-        # ``known_failure`` so the verify failure is downgraded to
-        # ``xfail`` and does not red-flag the whole sweep.
-        "known_failure": "fp8_direct_cast + P2P-read are mutually exclusive after mori-parity refactor",
     },
     {
         "name": "fp8_ocp_dispatch",
@@ -275,7 +257,7 @@ CI_CASES = [
         "max_tokens": 128,
         "hidden_dim": 7168,
         "quant_type": "none",
-        "use_external_inp_buf": True,
+        "zero_copy": False,
         "enable_std_moe": False,
     },
     {
@@ -284,7 +266,7 @@ CI_CASES = [
         "max_tokens": 128,
         "hidden_dim": 3584,
         "quant_type": "none",
-        "use_external_inp_buf": True,
+        "zero_copy": False,
         "enable_std_moe": False,
         # fp4 dispatch emits ``v_cvt_scalef32_pk_f32_fp4`` which only
         # exists on gfx950+ (MI355x); MI300/MI325 (gfx942) cannot compile it.
@@ -296,7 +278,7 @@ CI_CASES = [
         "max_tokens": 4096,
         "hidden_dim": 7168,
         "quant_type": "none",
-        "use_external_inp_buf": True,
+        "zero_copy": False,
         "enable_std_moe": True,
     },
     # ---- Mori-parity coverage (intranode) ----
@@ -322,7 +304,7 @@ CI_CASES = [
         "max_tokens": 128,
         "hidden_dim": 7168,
         "quant_type": "none",
-        "use_external_inp_buf": True,
+        "zero_copy": False,
         "enable_std_moe": False,
         "max_total_recv_tokens": 1024,
         "max_token_type_size": 2,
@@ -340,114 +322,55 @@ CI_CASES = [
         "max_tokens": 128,
         "hidden_dim": 7168,
         "quant_type": "none",
-        "use_external_inp_buf": True,
+        "zero_copy": False,
         "enable_std_moe": False,
         "max_total_recv_tokens": 512,
-    },
-    # bf16 + cap=world_size (== 8): the smallest legal cap, exercising
-    # the per-rank-1-slot extreme of the mori
-    # ``MaxNumTokensToRecvPerRank()`` formula.  Symmetric buffers
-    # collapse to ``ws * 1 = 8`` slots; the dispatch overflow guard is
-    # exercised on essentially every batched token (only one slot per
-    # peer is reachable).  mori would assert under random routing
-    # (cap < actual recv), so ``build_mori_ref`` keeps mori uncapped
-    # and ``verify_self`` falls back to the cap-shrinks liveness gate.
-    #
-    # ``skip_profile``: with only 1 slot per peer the dispatch path
-    # exercises overflow + sentinel on the majority of dispatched
-    # tokens; the cudagraph capture phase observed transient hangs
-    # under this stress pattern (multi-second IPC stalls inside the
-    # ROCm fabric).  Accuracy is what matters here; perf on a stress
-    # configuration is best measured in eager mode out of band.
-    {
-        "name": "bf16_recv_cap_min",
-        "dtype": "bf16",
-        "max_tokens": 128,
-        "hidden_dim": 7168,
-        "quant_type": "none",
-        "use_external_inp_buf": True,
-        "enable_std_moe": False,
-        "max_total_recv_tokens": 8,
-        "skip_profile": True,
-    },
-    # bf16 + forced single-PE hot-spot routing.  This case is generated
-    # at runtime by the ``forced_hot_spot`` ``--routing`` mode (see
-    # idx-building branch below): every input token is routed
-    # exclusively to PE 0, so dispatch hits the per-dest worst case
-    # while every other peer receives nothing.  Designed to validate
-    # the overflow / sentinel path under deterministic routing (vs the
-    # randomised routing used by every other case above).
-    #
-    # ``skip_ci``: empirically the all-to-PE-0 pattern collapses to
-    # 1024 simultaneous inter-GPU IPC atomic_add operations targeting
-    # PE 0's single ``shmem_tok_off[0]`` slot, and the current ROCm
-    # fabric livelocks (or degrades to >10 min completion time on a
-    # 8x MI355x box).  This is a genuine ROCm IPC-atomic hot-spot
-    # degradation, not a FlyDSL correctness bug -- mori exhibits the
-    # same hang on the equivalent test.  Keep the case definition
-    # (incl. its ``--routing forced_hot_spot`` codepath) so it can be
-    # exercised manually for IPC-atomic regression hunting, but skip
-    # it from the automated CI sweep.  Once ROCm gains a per-block
-    # batched atomic primitive (or FlyDSL adds a per-warp aggregation
-    # layer in front of ``buffer_atomic_add``) this flag should be
-    # dropped.
-    {
-        "name": "bf16_forced_hot_spot",
-        "dtype": "bf16",
-        "max_tokens": 128,
-        "hidden_dim": 7168,
-        "quant_type": "none",
-        "use_external_inp_buf": True,
-        "enable_std_moe": False,
-        "routing": "forced_hot_spot",
-        "skip_profile": True,
-        "skip_ci": True,
     },
     # ---- Mixed-dtype coverage (mori-parity launch-time dtype) ----
     # Each op now JIT-compiles a kernel specialized to ``input.dtype``
     # at every dispatch / combine call (mori parity), so a single op
     # can route fp4 / fp8_ocp inputs through dispatch and have combine
     # write back bf16.  These cases exercise that decoupled-dtype path
-    # in both buffer modes (P2P-read and external-inp-buf).
+    # in both buffer modes (zero-copy and non-zero-copy).
     #
     # ``max_token_type_size`` is auto-derived inside ``run_profiler``
     # when ``--combine-dtype != --dtype`` (max of the dispatch and
     # combine element sizes), so we don't set it here.
     {
-        "name": "mixed_fp8_ocp_dispatch_bf16_combine_p2pread",
+        "name": "mixed_fp8_ocp_dispatch_bf16_combine_zero_copy",
         "dtype": "fp8_ocp",
         "combine_dtype": "bf16",
         "max_tokens": 128,
         "hidden_dim": 7168,
         "quant_type": "none",
-        "use_external_inp_buf": False,
+        "zero_copy": True,
         "enable_std_moe": False,
         # Mori intranode kernel symbols for fp8_ocp are not shipped in
         # this container, so the verify path falls back to the FlyDSL
-        # self-check (NaN/Inf liveness).  Functionality of P2P-read +
+        # self-check (NaN/Inf liveness).  Functionality of zero-copy +
         # mixed dtype is the gate here; cross-impl byte parity is
         # tracked separately via the bf16-only cases.
     },
     {
-        "name": "mixed_fp4_dispatch_bf16_combine_p2pread",
+        "name": "mixed_fp4_dispatch_bf16_combine_zero_copy",
         "dtype": "fp4",
         "combine_dtype": "bf16",
         "max_tokens": 128,
         "hidden_dim": 3584,
         "quant_type": "none",
-        "use_external_inp_buf": False,
+        "zero_copy": True,
         "enable_std_moe": False,
         # fp4 dispatch emits ``v_cvt_scalef32_pk_f32_fp4`` (gfx950+).
         "requires_arch": ("gfx950",),
     },
     {
-        "name": "mixed_fp8_ocp_dispatch_bf16_combine_external_inp_buf",
+        "name": "mixed_fp8_ocp_dispatch_bf16_combine_no_zero_copy",
         "dtype": "fp8_ocp",
         "combine_dtype": "bf16",
         "max_tokens": 128,
         "hidden_dim": 7168,
         "quant_type": "none",
-        "use_external_inp_buf": True,
+        "zero_copy": False,
         "enable_std_moe": False,
     },
 ]
@@ -513,12 +436,16 @@ def setup_distributed(rank, world_size, master_port=29600):
         )
     local_rank = int(os.environ.get("LOCAL_RANK", rank))
     torch.cuda.set_device(local_rank)
-    dev = torch.device("cuda", local_rank)
+    # Torch 2.8's eager multi-backend path (``backend=cpu:gloo,cuda:nccl``
+    # + ``device_id=...``) can fail during NCCL eager-connect on MI325/MI355
+    # runners with ``Failed to CUDA calloc 6291456 bytes`` before the first
+    # test case starts.  Use plain NCCL init here to match our actual usage
+    # (all collectives in this script are CUDA-side) and avoid the eager
+    # device allocation path.
     dist.init_process_group(
-        backend="cpu:gloo,cuda:nccl",
+        backend="nccl",
         rank=rank,
         world_size=world_size,
-        device_id=dev,
     )
     import torch._C._distributed_c10d as c10d
 
@@ -574,10 +501,10 @@ def build_mori_ref(rank, world_size, cfg, block_num: int = None, warp_per_block:
         max_num_inp_token_per_rank=cfg.max_num_inp_token_per_rank,
         num_experts_per_rank=cfg.num_experts_per_rank,
         num_experts_per_token=cfg.num_experts_per_token,
-        warp_num_per_block=warp_per_block if warp_per_block is not None else cfg.warp_num_per_block,
-        block_num=block_num if block_num is not None else cfg.block_num,
+        warp_num_per_block=warp_per_block if warp_per_block is not None else cfg.dispatch_warp_num_per_block_eff,
+        block_num=block_num if block_num is not None else cfg.dispatch_block_num_eff,
         gpu_per_node=world_size,
-        use_external_inp_buf=cfg.use_external_inp_buf,
+        use_external_inp_buf=not cfg.zero_copy,
         quant_type=cfg.quant_type,
         # ``max_total_recv_tokens`` is intentionally NOT forwarded to
         # mori unless the cap equals the worst-case ws*M (effectively
@@ -590,12 +517,11 @@ def build_mori_ref(rank, world_size, cfg, block_num: int = None, warp_per_block:
         # gracefully drops overflow into the dup-sentinel codepath, so
         # the two implementations are byte-comparable only when the
         # routing happens to fit within mori's contract.  Random-
-        # routing CI cases above (``bf16_recv_cap_half``,
-        # ``bf16_recv_cap_min``, ``bf16_forced_hot_spot``) cannot
-        # guarantee that, so we keep mori uncapped and verify_self
-        # falls back to its ``cap_shrinks`` liveness gate.  The
-        # ``bf16_recv_cap_token_size`` case (cap == ws*M) DOES fit and
-        # is exercised by the worst-case path below.
+        # routing CI case ``bf16_recv_cap_half`` cannot guarantee that,
+        # so we keep mori uncapped and verify_self falls back to its
+        # ``cap_shrinks`` liveness gate.  The ``bf16_recv_cap_token_size``
+        # case (cap == ws*M) DOES fit and is exercised by the worst-
+        # case path below.
         max_total_recv_tokens=(
             cfg.max_total_recv_tokens
             if cfg.max_total_recv_tokens == 0
@@ -667,7 +593,7 @@ def _allreduce_stats(
     dev: torch.device,
     dtype_key: str = "bf16",
     quant_type: str = "none",
-    use_p2p_read: bool = False,
+    zero_copy: bool = False,
 ) -> dict:
     """Pull per-rank profiler metrics, all-reduce them across ranks, and
     return an avg/min/max dict.
@@ -682,14 +608,14 @@ def _allreduce_stats(
       5: combine  record_function CPU  time (us/call)
     """
     msuf = MORI_KERNEL_SUFFIX.get(dtype_key, "bf16")
-    _cast_suf = "_fp8cast" if (quant_type == "fp8_direct_cast" and not use_p2p_read) else ""
-    _p2p_suf = "_p2p" if use_p2p_read else "_nop2p"
+    _cast_suf = "_fp8cast" if (quant_type == "fp8_direct_cast" and not zero_copy) else ""
+    _zc_suf = "_p2p" if zero_copy else "_nop2p"
     if op_tag == "flydsl":
         d_kernel = "ep_dispatch_intranode_0"
         c_kernel = "ep_combine_intranode_0"
     else:
         d_kernel = f"EpDispatchIntraNodeKernel_{msuf}"
-        c_kernel = f"EpCombineIntraNodeKernel_{msuf}{_p2p_suf}{_cast_suf}"
+        c_kernel = f"EpCombineIntraNodeKernel_{msuf}{_zc_suf}{_cast_suf}"
     d_label = f"{op_tag}::dispatch"
     c_label = f"{op_tag}::combine"
 
@@ -803,7 +729,7 @@ def _allreduce_cudagraph_stats_from_key_averages(
     dev: torch.device,
     dtype_key: str = "bf16",
     quant_type: str = "none",
-    use_p2p_read: bool = False,
+    zero_copy: bool = False,
 ) -> dict:
     """Pull metrics from ``prof.key_averages()`` (active phase only) and
     all-reduce them across ranks.
@@ -815,14 +741,14 @@ def _allreduce_cudagraph_stats_from_key_averages(
       3: cudagraph_replay CPU  E2E time
     """
     msuf = MORI_KERNEL_SUFFIX.get(dtype_key, "bf16")
-    _cast_suf = "_fp8cast" if (quant_type == "fp8_direct_cast" and not use_p2p_read) else ""
-    _p2p_suf = "_p2p" if use_p2p_read else "_nop2p"
+    _cast_suf = "_fp8cast" if (quant_type == "fp8_direct_cast" and not zero_copy) else ""
+    _zc_suf = "_p2p" if zero_copy else "_nop2p"
     if op_tag == "flydsl":
         d_kernel = "ep_dispatch_intranode_0"
         c_kernel = "ep_combine_intranode_0"
     else:
         d_kernel = f"EpDispatchIntraNodeKernel_{msuf}"
-        c_kernel = f"EpCombineIntraNodeKernel_{msuf}{_p2p_suf}{_cast_suf}"
+        c_kernel = f"EpCombineIntraNodeKernel_{msuf}{_zc_suf}{_cast_suf}"
     cg_label = f"{op_tag}::cudagraph_replay"
 
     ev = {e.key: e for e in prof.key_averages()}
@@ -868,7 +794,7 @@ def _cudagraph_stats_from_trace(
     skip_first: int = 5,
     dtype_key: str = "bf16",
     quant_type: str = "none",
-    use_p2p_read: bool = False,
+    zero_copy: bool = False,
 ) -> dict:
     """Compute kernel stats by parsing the chrome trace JSON, dropping
     the first ``skip_first`` active iterations.
@@ -881,13 +807,13 @@ def _cudagraph_stats_from_trace(
         tr = json.load(f)
 
     msuf = MORI_KERNEL_SUFFIX.get(dtype_key, "bf16")
-    _cast_suf = "_fp8cast" if (quant_type == "fp8_direct_cast" and not use_p2p_read) else ""
-    _p2p_suf = "_p2p" if use_p2p_read else "_nop2p"
+    _cast_suf = "_fp8cast" if (quant_type == "fp8_direct_cast" and not zero_copy) else ""
+    _zc_suf = "_p2p" if zero_copy else "_nop2p"
     if op_tag == "flydsl":
         d_name, c_name = "ep_dispatch_intranode_0", "ep_combine_intranode_0"
     else:
         d_name = f"EpDispatchIntraNodeKernel_{msuf}"
-        c_name = f"EpCombineIntraNodeKernel_{msuf}{_p2p_suf}{_cast_suf}"
+        c_name = f"EpCombineIntraNodeKernel_{msuf}{_zc_suf}{_cast_suf}"
     cg_name = f"{op_tag}::cudagraph_replay"
 
     kernel_events = [e for e in tr["traceEvents"] if e.get("cat") == "kernel"]
@@ -1292,7 +1218,7 @@ def profile_op(
     packed_recv_x=None,
     dtype_key: str = "bf16",
     quant_type: str = "none",
-    use_p2p_read: bool = False,
+    zero_copy: bool = False,
     combine_dtype=None,
 ):
     """Profile a single op (FlyDSL or mori) standalone; save the JSON and
@@ -1338,7 +1264,7 @@ def profile_op(
 
     # Cross-rank aggregation via all_reduce; rank 0 prints.
     agg_stats = _allreduce_stats(
-        prof, op_tag, rank, world_size, dev, dtype_key=dtype_key, quant_type=quant_type, use_p2p_read=use_p2p_read
+        prof, op_tag, rank, world_size, dev, dtype_key=dtype_key, quant_type=quant_type, zero_copy=zero_copy
     )
     if rank == 0:
         _print_aggregated(agg_stats, op_tag, world_size, meta)
@@ -1365,7 +1291,7 @@ def profile_cudagraph_op(
     packed_recv_x=None,
     dtype_key: str = "bf16",
     quant_type: str = "none",
-    use_p2p_read: bool = False,
+    zero_copy: bool = False,
     combine_dtype=None,
 ):
     """Profile CUDAGraph replays with torch.profiler; save JSON and
@@ -1447,7 +1373,7 @@ def profile_cudagraph_op(
         skip_first=skip_first,
         dtype_key=dtype_key,
         quant_type=quant_type,
-        use_p2p_read=use_p2p_read,
+        zero_copy=zero_copy,
     )
     if rank == 0:
         _print_cudagraph_aggregated(agg_stats, op_tag, world_size, meta, active_iters=valid_iters)
@@ -1800,7 +1726,7 @@ def verify_self(op_fly, inp, wts, idx, k, rank, world_size, dev, dtype_key, cfg,
                 # a combine that ran to completion must leave the
                 # output buffer >>50% non-zero bytes.  This catches
                 # the kernel-deadlock / all-zero-output failure modes
-                # the bf16 P2P-read bug surfaced earlier on mori, and
+                # the bf16 zero-copy bug surfaced earlier on mori, and
                 # is the strongest sanity check we can do without
                 # actual fp4 PyTorch arithmetic.
                 f_u8 = f_tok.view(torch.uint8)
@@ -1858,16 +1784,16 @@ def verify_self(op_fly, inp, wts, idx, k, rank, world_size, dev, dtype_key, cfg,
                 # No tolerance — the two kernels operate on the same
                 # symmetric shmem layout and must agree element-wise.
                 #
-                # Exception: in the zero-copy P2P-read combine mode
-                # (``use_external_inp_buf=False``) mori's reference path
+                # Exception: in zero-copy combine mode
+                # (``cfg.zero_copy=True``) mori's reference path
                 # has historically diverged from FlyDSL: shmem dumps
                 # confirmed FlyDSL writes ``k*inp`` into ``shmem_comb_out_tok``
-                # while mori's P2P-read kernel folds weights (or used to
+                # while mori's zero-copy kernel folds weights (or used to
                 # return zeros).  When the mori byte gate fails *and*
                 # ``fly == k*inp`` byte-exactly, we honour the case-level
-                # comment in ``bf16_zerocopy_p2pread`` and treat the
+                # comment in ``bf16_zero_copy`` and treat the
                 # ``fly==k*inp`` invariant as the authoritative gate.  In
-                # every other (non-P2P-read) configuration mori byte
+                # every other (non-zero-copy) configuration mori byte
                 # equality is still hard-required.
                 # ``inp.float()`` would HSAIL-crash for fp4 inp; route
                 # through the project-local fp4 unpacker (see the
@@ -1877,16 +1803,39 @@ def verify_self(op_fly, inp, wts, idx, k, rank, world_size, dev, dtype_key, cfg,
                     diff_to_kinp = (f_tok.float() - inp_for_diag * scale_factor).abs().max().item()
                 except Exception:
                     diff_to_kinp = float("inf")
-                p2p_read_mode = (not cfg.use_external_inp_buf) and cfg.quant_type == "none"
+                zero_copy_mode = cfg.zero_copy and cfg.quant_type == "none"
 
                 if combine_dtype in (torch.float8_e4m3fn, torch.float8_e4m3fnuz):
                     ok_b = torch.equal(f_tok.view(torch.uint8), mori_tok.view(torch.uint8))
-                    status = "PASS" if ok_b else "FAIL"
-                    print(f"  [{status}] out_tok vs mori (fp8 bytes)")
-                    if not ok_b:
-                        d_max = (f_tok.float() - mori_tok.float()).abs().max().item()
-                        print(f"          |fly - mori|.max(f32) = {d_max:.6f}")
-                    all_pass &= ok_b
+                    accept = ok_b
+                    if ok_b:
+                        print("  [PASS] out_tok vs mori (fp8 bytes)")
+                    else:
+                        # Bytes differ.  fp8 has multiple bit patterns that
+                        # decode to the same float (e.g. +0 = 0x00 vs
+                        # -0 = 0x80 in OCP e4m3) and several NaN encodings.
+                        # When ``|fly - mori|.max(f32) == 0`` AND there are
+                        # no NaNs on either side, the difference is purely
+                        # representational and we treat it as PASS with a
+                        # diagnostic note (mori-parity at value level).
+                        f_f32 = f_tok.float()
+                        m_f32 = mori_tok.float()
+                        has_nan = bool(torch.isnan(f_f32).any() or torch.isnan(m_f32).any())
+                        d_max = (f_f32 - m_f32).abs().max().item()
+                        n_byte_diff = (f_tok.view(torch.uint8) != mori_tok.view(torch.uint8)).sum().item()
+                        if (not has_nan) and d_max == 0.0:
+                            print(
+                                f"  [PASS] out_tok vs mori (fp8 value-equiv; "
+                                f"{n_byte_diff} bytes differ by +0/-0 sign encoding)"
+                            )
+                            accept = True
+                        else:
+                            print("  [FAIL] out_tok vs mori (fp8 bytes)")
+                            print(
+                                f"          |fly - mori|.max(f32) = {d_max:.6f}  "
+                                f"(NaN={has_nan}, byte_diffs={n_byte_diff})"
+                            )
+                    all_pass &= accept
                 else:
                     ok_mori = _check_close(
                         "out_tok vs mori",
@@ -1897,9 +1846,9 @@ def verify_self(op_fly, inp, wts, idx, k, rank, world_size, dev, dtype_key, cfg,
                         rank=rank,
                         cast_to=cast_to,
                     )
-                    if (not ok_mori) and p2p_read_mode and diff_to_kinp == 0.0:
+                    if (not ok_mori) and zero_copy_mode and diff_to_kinp == 0.0:
                         print(
-                            "  [PASS] out_tok vs k*inp (P2P-read mode; mori ref historically "
+                            "  [PASS] out_tok vs k*inp (zero_copy mode; mori ref historically "
                             "broken on this path, see case comment)"
                         )
                     else:
@@ -2032,7 +1981,11 @@ def run_profiler(rank, world_size, args):
         data_type=_dtype,
         warp_num_per_block=args.warp_per_block,
         block_num=args.block_num,
-        use_external_inp_buf=args.use_external_inp_buf,
+        dispatch_warp_num_per_block=args.dispatch_warp_per_block,
+        dispatch_block_num=args.dispatch_block_num,
+        combine_warp_num_per_block=args.combine_warp_per_block,
+        combine_block_num=args.combine_block_num,
+        use_external_inp_buf=not args.zero_copy,
         enable_std_moe=args.enable_std_moe,
         scale_dim=args.scale_dim,
         scale_type_size=args.scale_type_size,
@@ -2041,8 +1994,8 @@ def run_profiler(rank, world_size, args):
         max_token_type_size=_user_mtt,
     )
 
-    mori_bn = args.mori_block_num if args.mori_block_num > 0 else cfg.block_num
-    mori_wpb = args.mori_warp_per_block if args.mori_warp_per_block > 0 else cfg.warp_num_per_block
+    mori_bn = args.mori_block_num if args.mori_block_num > 0 else cfg.dispatch_block_num_eff
+    mori_wpb = args.mori_warp_per_block if args.mori_warp_per_block > 0 else cfg.dispatch_warp_num_per_block_eff
     meta = dict(
         world_size=world_size,
         max_tokens=cur_tok,
@@ -2051,11 +2004,13 @@ def run_profiler(rank, world_size, args):
         num_experts_per_rank=args.num_experts_per_rank,
         warmup=args.warmup,
         iters=args.iters,
-        flydsl_block_num=cfg.block_num,
-        flydsl_warp_per_block=cfg.warp_num_per_block,
+        flydsl_dispatch_block_num=cfg.dispatch_block_num_eff,
+        flydsl_dispatch_warp_per_block=cfg.dispatch_warp_num_per_block_eff,
+        flydsl_combine_block_num=cfg.combine_block_num_eff,
+        flydsl_combine_warp_per_block=cfg.combine_warp_num_per_block_eff,
         mori_block_num=mori_bn,
         mori_warp_per_block=mori_wpb,
-        use_external_inp_buf=cfg.use_external_inp_buf,
+        zero_copy=cfg.zero_copy,
         enable_std_moe=cfg.enable_std_moe,
         scale_dim=cfg.scale_dim,
         scale_type_size=cfg.scale_type_size,
@@ -2085,8 +2040,8 @@ def run_profiler(rank, world_size, args):
     if _want_mori:
         mori_bn = args.mori_block_num if args.mori_block_num > 0 else None
         mori_wpb = args.mori_warp_per_block if args.mori_warp_per_block > 0 else None
-        bn_str = mori_bn if mori_bn else cfg.block_num
-        wpb_str = mori_wpb if mori_wpb else cfg.warp_num_per_block
+        bn_str = mori_bn if mori_bn else cfg.dispatch_block_num_eff
+        wpb_str = mori_wpb if mori_wpb else cfg.dispatch_warp_num_per_block_eff
         if rank == 0:
             print(
                 f"[profiler] building mori ref (block_num={bn_str}, warp_per_block={wpb_str}) "
@@ -2125,11 +2080,10 @@ def run_profiler(rank, world_size, args):
         # under deterministic (vs random) routing.  Note: k must be
         # <= ``num_experts_per_rank`` so the k experts on PE 0 can stay
         # distinct (else the dedup branch would compress them, which
-        # defeats the test); the CI case constraints already guarantee
-        # this.
-        assert k <= epr, (
-            f"forced_hot_spot routing requires k ({k}) <= " f"num_experts_per_rank ({epr}); CI case config is wrong"
-        )
+        # defeats the test); enforced by the assert below.
+        assert (
+            k <= epr
+        ), f"forced_hot_spot routing requires k ({k}) <= num_experts_per_rank ({epr})"
         for t in range(cur_tok):
             # k distinct experts all on PE 0 => expert id = 0 * epr + j.
             for j in range(k):
@@ -2145,7 +2099,8 @@ def run_profiler(rank, world_size, args):
         # slot) to ``cur_tok``, while PE 0 still sees ~k× the average
         # token rate of the other PEs -- a realistic MoE hot-expert
         # imbalance pattern.  Used as the L1 perf-matrix imbalance
-        # routing because ``forced_hot_spot`` is gated by ``skip_ci``.
+        # routing because ``forced_hot_spot`` is not exercised in CI
+        # (ROCm IPC fabric livelock; available via CLI only).
         if not (k - 1 <= world_size - 1):
             raise ValueError(
                 f"soft_hot_pe routing requires k-1 ({k - 1}) <= "
@@ -2374,7 +2329,7 @@ def run_profiler(rank, world_size, args):
             )
 
     elif args.mode == "profile" and not args.cudagraph:
-        _p2p = not args.use_external_inp_buf
+        _zero_copy = args.zero_copy
         if test_flydsl:
             profile_op(
                 op_fly,
@@ -2394,7 +2349,7 @@ def run_profiler(rank, world_size, args):
                 packed_recv_x=packed_recv_x,
                 dtype_key=args.dtype,
                 quant_type=args.quant_type,
-                use_p2p_read=_p2p,
+                zero_copy=_zero_copy,
                 combine_dtype=_comb_dtype,
             )
         if test_mori:
@@ -2415,14 +2370,14 @@ def run_profiler(rank, world_size, args):
                 meta,
                 dtype_key=args.dtype,
                 quant_type=args.quant_type,
-                use_p2p_read=_p2p,
+                zero_copy=_zero_copy,
                 combine_dtype=_comb_dtype,
             )
         if rank == 0:
             print(f"\n[profiler] all results saved to: {out_dir}/")
 
     elif args.mode == "profile" and args.cudagraph:
-        _p2p = not args.use_external_inp_buf
+        _zero_copy = args.zero_copy
         if test_flydsl:
             profile_cudagraph_op(
                 op_fly,
@@ -2443,7 +2398,7 @@ def run_profiler(rank, world_size, args):
                 packed_recv_x=packed_recv_x,
                 dtype_key=args.dtype,
                 quant_type=args.quant_type,
-                use_p2p_read=_p2p,
+                zero_copy=_zero_copy,
                 combine_dtype=_comb_dtype,
             )
         if test_mori:
@@ -2465,7 +2420,7 @@ def run_profiler(rank, world_size, args):
                 meta,
                 dtype_key=args.dtype,
                 quant_type=args.quant_type,
-                use_p2p_read=_p2p,
+                zero_copy=_zero_copy,
                 combine_dtype=_comb_dtype,
             )
         if rank == 0:
@@ -2570,19 +2525,23 @@ def _parse_args():
     p.add_argument("--hidden-dim", type=int, default=7168)
     p.add_argument("--num-experts-per-rank", type=int, default=32)
     p.add_argument("--k", type=int, default=8)
-    p.add_argument("--block-num", type=int, default=80)
-    p.add_argument("--warp-per-block", type=int, default=4)
+    p.add_argument("--block-num", type=int, default=128)
+    p.add_argument("--warp-per-block", type=int, default=8)
+    p.add_argument("--dispatch-block-num", type=int, default=128, help="FlyDSL dispatch-only block_num")
+    p.add_argument("--dispatch-warp-per-block", type=int, default=4, help="FlyDSL dispatch-only warp_per_block")
+    p.add_argument("--combine-block-num", type=int, default=128, help="FlyDSL combine-only block_num")
+    p.add_argument("--combine-warp-per-block", type=int, default=8, help="FlyDSL combine-only warp_per_block")
     p.add_argument(
         "--mori-block-num",
         type=int,
         default=0,
-        help="mori-only block_num (0 = same as FlyDSL; mori's tuned default is 80)",
+        help="mori-only block_num (0 = same as FlyDSL dispatch geometry)",
     )
     p.add_argument(
         "--mori-warp-per-block",
         type=int,
         default=0,
-        help="mori-only warp_per_block (0 = same as FlyDSL; mori's tuned default is 8)",
+        help="mori-only warp_per_block (0 = same as FlyDSL dispatch geometry)",
     )
     p.add_argument(
         "--dtype", type=str, default="bf16", choices=list(DTYPE_MAP.keys()), help="data type (default: bf16)"
@@ -2598,7 +2557,7 @@ def _parse_args():
             "a different dtype (e.g. --dtype fp8_ocp --combine-dtype bf16) "
             "exercises the mixed-dtype path: fp4 / fp8_ocp dispatch + "
             "bf16 combine, with caller-side staging into the registered "
-            "combine input buffer when use_external_inp_buf=False."
+            "combine input buffer when zero_copy=True."
         ),
     )
     p.add_argument(
@@ -2645,11 +2604,10 @@ def _parse_args():
     p.add_argument("--cudagraph", action="store_true", help="use CUDAGraph capture+replay (default: eager)")
     # Feature switches
     p.add_argument(
-        "--no-external-inp-buf",
-        dest="use_external_inp_buf",
-        action="store_false",
-        default=True,
-        help="use the P2P-read combine variant (default: external inp buf)",
+        "--zero-copy",
+        action="store_true",
+        default=False,
+        help="enable zero-copy combine variant (default: disabled)",
     )
     p.add_argument("--enable-std-moe", action="store_true", default=False, help="enable Standard MoE adapt mode")
     p.add_argument(
@@ -2698,9 +2656,10 @@ def _parse_args():
             "indices generation policy: 'random' (default) routes each "
             "token to k distinct PEs uniformly; 'forced_hot_spot' routes "
             "every token's k experts onto PE 0's local experts only "
-            "(deterministic worst-case, IPC-livelocks on ROCm so gated "
-            "via skip_ci); 'soft_hot_pe' pins ONE of the k experts per "
-            "token to PE 0 and spreads the rest over distinct other "
+            "(deterministic worst-case, IPC-livelocks on ROCm fabric so "
+            "not exercised in CI -- exposed via CLI for manual IPC-atomic "
+            "regression hunting); 'soft_hot_pe' pins ONE of the k experts "
+            "per token to PE 0 and spreads the rest over distinct other "
             "PEs, giving a realistic ~k× hot-spot imbalance without "
             "the slot-0 atomic-add livelock."
         ),

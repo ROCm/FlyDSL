@@ -1,36 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""FlyDSL intranode dispatch / combine kernels for expert-parallel MoE.
-
-This module exposes :func:`make_dispatch_jit` and :func:`make_combine_jit`,
-which generate ``@flyc.jit`` launchers wrapping the two intranode kernels
-(``ep_dispatch_intranode`` / ``ep_combine_intranode``). The kernels are
-implemented mostly with FlyDSL high-level syntax (operator overloading,
-``if``/``for`` lowered to ``scf.if``/``scf.for`` by the AST rewriter,
-``buffer_load``/``buffer_store`` for global access); a few low-level MLIR
-helpers below provide system-scope atomics and pointer-cast intrinsics that
-do not yet have a high-level wrapper.
-"""
+"""FlyDSL intranode dispatch/combine kernels for EP MoE."""
 
 from __future__ import annotations
-
-import os
 
 import mori.ir.flydsl as mori_shmem
 import torch
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-
-# Low-level MLIR escape hatches: system-scope atomics, pointer casts, and
-# raw LLVM ops used inside the SIMD micro-kernel helpers
-# (``_accum_experts`` / ``_weighted_accum_experts``).
 from flydsl._mlir import ir
-from flydsl._mlir import ir as _ir
 from flydsl._mlir.dialects import llvm as _llvm_d
-from flydsl._mlir.ir import IntegerAttr as _IntAttr
-from flydsl._mlir.ir import IntegerType as _IntTy
 from flydsl.expr import T, arith, const_expr, range_constexpr, vector
 from flydsl.expr.buffer_ops import (
     buffer_load,
@@ -46,81 +27,17 @@ from flydsl.expr.rocdl import (
     readlane,
 )
 from flydsl.expr.typing import Stream
+from flydsl.runtime.device import get_rocm_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr, check_smem_capacity
 
-# JIT cache schema version.  Bump this string whenever the dispatch /
-# combine kernel changes its closure-capture set, argument layout, or
-# any compile-time-emitted code path that the generic FlyDSL closure-
-# scalar hash cannot detect on its own.  Every JIT launcher below
-# captures this as ``_key_schema_version`` so stale on-disk caches
-# under ``~/.flydsl/cache/dispatch_launch_*`` / ``combine_launch_*``
-# (left over from a prior commit with a different closure shape) are
-# forcibly invalidated — without this guard, an old hsaco can load
-# successfully into HIP but reference symbols / signatures that no
-# longer match, producing ``hipErrorInvalidHandle`` /
-# ``hipModuleUnload failed`` on the kernel's first launch.
+# JIT cache schema version; bump when generated kernel shape changes.
 _DISPATCH_COMBINE_JIT_SCHEMA_VERSION = "v5-mori-parity-2026-05"
 
-# Stage 3 / Stage 3b tunables.  Collected here so the per-warp partition
-# heuristic and cache-modifier choices are visible in one place; tune
-# them with caution (each constant has a measured perf impact on
-# DG5 / MI355X bf16 dispatch+combine sweeps -- see bench/dg5_full_matrix
-# RESULTS.md for the regression matrix).
-#
-# ``_S3_WIDE_PATH_THRESHOLD_I32`` -- ``hdim_per_warp`` (in i32 lanes) at
-# which Stage 3 switches from the plain ``step=64`` accumulator loop to
-# the unrolled ``step=128/256`` wide loop.  Empirically 895 i32 ==
-# 3580 bytes per warp partition is the break-even point between the
-# extra register pressure of the wide path and the ILP gains it
-# unlocks; below this the narrow path wins because the partition
-# already fits in a single 64-dword cycle.
+# Stage-3 tuning knobs.
+# Switch from narrow step=64 to wide step=128/256 above this threshold.
 _S3_WIDE_PATH_THRESHOLD_I32 = 895
-# ``_SLC_CACHE`` is the AMDGPU ``cache_modifier`` selector for buffer
-# load/store ops; SLC == "system-coherent L1, bypass" which avoids
-# polluting L1 with one-shot Stage 3 accumulator reads (mori path
-# uses the equivalent via ``__builtin_amdgcn_global_load_lds`` flags).
+# AMDGPU cache modifier used by Stage-3 buffer loads/stores.
 _SLC_CACHE = 2
-
-_GPU_ARCH_CACHE: str | None = None
-
-
-def _detect_gpu_arch() -> str:
-    """Return the running GPU's gfx arch (e.g. ``gfx942``).
-
-    Cached after first lookup.  Uses ``torch.cuda.get_device_properties``
-    (a pure HIP runtime call) rather than spawning the
-    ``rocm_agent_enumerator`` binary used by
-    ``flydsl.runtime.device.get_rocm_arch``: spawning a subprocess from
-    a multi-GPU worker that already holds the ROCm runtime can
-    deadlock at fork-time (the subprocess inherits HIP context state
-    and races the parent's collective init).  ``gcnArchName`` is
-    populated by the HIP runtime without forking, so it stays safe
-    inside a torch.multiprocessing worker.
-    """
-    global _GPU_ARCH_CACHE
-    if _GPU_ARCH_CACHE is not None:
-        return _GPU_ARCH_CACHE
-    env = os.environ.get("FLYDSL_GPU_ARCH") or os.environ.get("HSA_OVERRIDE_GFX_VERSION")
-    if env and env.startswith("gfx"):
-        _GPU_ARCH_CACHE = env
-        return _GPU_ARCH_CACHE
-    arch = "gfx942"  # safe default if torch fails for any reason
-    try:
-        if torch.cuda.is_available():
-            # IMPORTANT: query the *current* device (set per-rank by
-            # the caller), never GPU 0 -- on multi-GPU workers a
-            # cross-device property query can race the other rank's
-            # CUDA context init and deadlock.
-            dev = torch.cuda.current_device()
-            name = getattr(torch.cuda.get_device_properties(dev), "gcnArchName", "") or ""
-            # ``gcnArchName`` looks like ``"gfx942:sramecc+:xnack-"``.
-            head = name.split(":", 1)[0]
-            if head.startswith("gfx"):
-                arch = head
-    except Exception:
-        pass
-    _GPU_ARCH_CACHE = arch
-    return _GPU_ARCH_CACHE
 
 
 def _to_i64(v):
@@ -167,66 +84,35 @@ def _to_ptr_global(v):
 
 
 def store_i32_system(addr_i64, offset, val):
-    """System-scope **release** i32 store at ``addr_i64 + offset*4`` bytes.
-
-    ``release`` (vs the prior ``monotonic``) enforces a happens-before
-    edge with the matching consumer that ends its
-    ``ShmemTypeWaitUntilEquals`` loop on this flag and then issues an
-    acquire fence (see :func:`fence_system_acquire` and mori
-    ``intranode.hpp:63`` ``__threadfence_system`` + relaxed-system load
-    pattern this mirrors).
-    """
+    """System-scope release i32 store at ``addr_i64 + offset*4``."""
     base = arith.unwrap(addr_i64)
     off = arith.unwrap(offset)
     val_ = arith.unwrap(val)
-    _i64 = _IntTy.get_signless(64)
-    _i32 = _IntTy.get_signless(32)
-    _nuw = _ir.Attribute.parse("#llvm.overflow<none>")
+    _i64 = ir.IntegerType.get_signless(64)
+    _i32 = ir.IntegerType.get_signless(32)
+    _nuw = ir.Attribute.parse("#llvm.overflow<none>")
     off64 = _llvm_d.ZExtOp(_i64, off).res if off.type == _i32 else off
-    byte_off = _llvm_d.MulOp(off64, _llvm_d.ConstantOp(_i64, _IntAttr.get(_i64, 4)).result, _nuw).result
+    byte_off = _llvm_d.MulOp(off64, _llvm_d.ConstantOp(_i64, ir.IntegerAttr.get(_i64, 4)).result, _nuw).result
     addr = _llvm_d.AddOp(base, byte_off, _nuw).result
     gptr = _llvm_d.IntToPtrOp(_llvm_d.PointerType.get(address_space=1), addr).result
     _llvm_d.StoreOp(val_, gptr, alignment=4, ordering=_llvm_d.AtomicOrdering.release, syncscope="one-as")
 
 
 def store_i64_global_system(addr_i64, val):
-    """System-scope **release** i64 store to ``addr_i64``.
-
-    See :func:`store_i32_system` for the release/acquire pairing
-    rationale.  Used to publish the CrossDeviceBarrier flag to every
-    peer's symmetric slot; the consumer side ends a relaxed-load spin
-    loop on this flag and must issue :func:`fence_system_acquire`
-    before reading any data that this publish guards.
-    """
+    """System-scope release i64 store to ``addr_i64``."""
     gptr = _to_ptr_global(addr_i64)
     _llvm_d.StoreOp(arith.unwrap(val), gptr, alignment=8, ordering=_llvm_d.AtomicOrdering.release, syncscope="one-as")
 
 
 def fence_system_acquire():
-    """System-scope **acquire** fence (``llvm.fence syncscope("one-as") acquire``).
-
-    Pairs with :func:`store_i32_system` / :func:`store_i64_global_system`
-    (both system-scope release stores) to enforce a happens-before edge
-    when the consumer end of a cross-device handshake exits a
-    ``mori_shmem.*_wait_until_equals(...)`` loop.
-
-    Rationale: ``mori_shmem.*_wait_until_equals`` is implemented as a
-    relaxed-system load spin (mori ``shmem_device_api.hpp:1134-1137``),
-    so by itself it gives no happens-before edge on the data the flag
-    guards.  mori solves this with explicit ``__threadfence_system()``
-    on both ends (``intranode.hpp:63,186``).  FlyDSL pairs a system-
-    scope release store on the publish side with this acquire fence on
-    the consumer side, which is the strictly equivalent C++ release/
-    acquire pattern and is what compilers translate
-    ``atomic_thread_fence(memory_order_acquire)`` to on ROCm.
-    """
+    """System-scope acquire fence."""
     _llvm_d.FenceOp(_llvm_d.AtomicOrdering.acquire, syncscope="one-as")
 
 
 def load_i64_global(addr_i64):
     """Relaxed global i64 load from ``addr_i64``."""
     ptr = _to_ptr_global(addr_i64)
-    _i64 = _IntTy.get_signless(64)
+    _i64 = ir.IntegerType.get_signless(64)
     return _llvm_d.LoadOp(_i64, ptr, alignment=8).result
 
 
@@ -236,13 +122,7 @@ def atomic_add_global_at(addr_i64, val):
     return _llvm_d.AtomicRMWOp(_llvm_d.AtomicBinOp.add, ptr, arith.unwrap(val), _llvm_d.AtomicOrdering.monotonic).res
 
 
-# NOTE: explicit ``index``/``i32`` casts that used to wrap every for-loop bound
-# and induction-variable in this file have been removed. FlyDSL's
-# ``scf_for_dispatch`` accepts i32/Python-int bounds directly and yields an
-# i32 IV; ``SmemPtr.{load,store}`` runs each index through
-# ``get_index_value`` which materializes/casts to ``index`` on demand. So
-# ``arith.index_cast(T.index(), x)`` / ``arith.index_cast(T.i32(), iv)``
-# everywhere was a no-op IR-wise and pure boilerplate.
+# Keep loop bounds/IVs as i32 or Python-int; no manual index-cast boilerplate.
 
 
 def make_dispatch_kernel(
@@ -262,25 +142,10 @@ def make_dispatch_kernel(
     data_type=None,
     max_recv: int = None,
 ):
-    """Build the intranode dispatch ``@flyc.kernel``.
+    """Build intranode dispatch ``@flyc.kernel``.
 
-    Schedules ``cur_tok * experts_per_token`` work items across all
-    ``block_num * warp_num_per_block`` warps. Each warp:
-
-      1. resolves the (dest_pe, dest_tok) slot via atomic counters on the
-         remote rank's ``shmem_tok_off``,
-      2. P2P-writes token embedding, weights and indices into the
-         destination's symmetric shmem buffers,
-      3. publishes a "send done" signal to every peer and waits for the
-         dual signal from each peer so it can finalize ``total_recv``,
-      4. when ``enable_std_moe`` is set, performs ConvertDispatchOutput
-         (per-expert packing for the std-MoE expert path).
-
-    ``max_recv`` is the cap on per-rank received slots; it drives sentinel
-    encoding (``npes * max_recv``) and must match the value passed to
-    ``make_combine_kernel`` (the combine side decodes the sentinel via
-    ``dest_pe = enc // max_recv``).  ``None`` reverts to ``npes *
-    max_tok_per_rank`` for backward compatibility.
+    ``max_recv`` caps per-rank receive slots and must match combine-side
+    decode semantics. ``None`` falls back to ``npes * max_tok_per_rank``.
     """
     if max_recv is None:
         max_recv = npes * max_tok_per_rank
@@ -296,16 +161,7 @@ def make_dispatch_kernel(
     enable_scales = scale_bytes > 0
     max_tokens_per_expert = npes * max_tok_per_rank  # per-expert bucket capacity
 
-    # ``known_block_size`` declares the launch block dimensions to the
-    # AMDGPU backend so it can derive ``max_flat_workgroup_size``: without
-    # it FlyDSL falls back to the 256-thread default and rejects any
-    # launch with ``warp_num_per_block > 4`` (block size = warps * 64).
-    # The wrapper exposes ``warp_num_per_block`` up to 16 (1024 threads,
-    # the AMDGPU hardware ceiling), and the dispatch sweep tunes across
-    # ``{4, 8, 16}``, so the kernel must declare the actual block size
-    # for every JIT instance.  ``warp_num_per_block`` is closed over from
-    # the outer factory call, so the decorator literal is constant per
-    # JIT entry.
+    # Force real launch block size into IR metadata.
     @flyc.kernel(known_block_size=[warp_num_per_block * 64, 1, 1])
     def ep_dispatch_intranode(
         addr_inp_tok: fx.Int64,  # [inp_cur_tok, hidden_dim]  bf16
@@ -668,7 +524,7 @@ def make_combine_kernel(
     data_type=None,
     enable_weights: bool = False,
     enable_std_moe: bool = False,
-    use_p2p_read: bool = False,
+    zero_copy: bool = False,
     skip_stage1: bool = False,
     fp8_direct_cast: bool = False,
     max_recv: int = None,
@@ -771,7 +627,7 @@ def make_combine_kernel(
 
         def _from_accum(accum_val):
             # Re-pack v8f32 -> i32 via 4 x cvt_scalef32_pk_fp4_f32.
-            _i32_ty = _IntTy.get_signless(32)
+            _i32_ty = ir.IntegerType.get_signless(32)
             scale_one = arith.constant(1.0, type=T.f32())
             old = arith.constant(0, type=_i32_ty)
             for sel in range(4):
@@ -843,7 +699,7 @@ def make_combine_kernel(
             return vec
 
         def _from_accum(accum_val):
-            _i32_ty = _IntTy.get_signless(32)
+            _i32_ty = ir.IntegerType.get_signless(32)
             if _is_fnuz:
                 accum_val = accum_val * 2.0
             if const_expr(_xfer_bf16_to_fp8):
@@ -956,7 +812,7 @@ def make_combine_kernel(
     # combine kernel ships on both gfx942 (MI300/MI325) and gfx950
     # (MI355x), and the LDS budget differs (64 KiB vs 160 KiB) so the
     # capacity check below must see the *actual* device limit.
-    gpu_arch = _detect_gpu_arch()
+    gpu_arch = get_rocm_arch()
     allocator = SmemAllocator(None, arch=gpu_arch)
     p2p_base_offset = allocator._align(allocator.ptr, 8)
     p2p_base_size = npes * 8
@@ -1073,14 +929,14 @@ def make_combine_kernel(
 
         if const_expr(skip_stage1):
             if const_expr(enable_weights):
-                if const_expr(use_p2p_read):
-                    # Mori-parity P2P-read skip-Stage1 path
+                if const_expr(zero_copy):
+                    # Mori-parity zero-copy skip-Stage1 path
                     # (intranode.hpp:297-306): caller pre-staged hidden
                     # tokens into local ``shmem_comb_inp_tok``; Stage 1
                     # token copy is removed entirely, but the weight
                     # copy is kept so Stage 3b can read weights from the
                     # local ``shmem_comb_inp_wts[recv_tok_id]`` layout
-                    # (Stage 3b's P2P-read uses ``wt_dtok = recv_tok_id``
+                    # (Stage 3b's zero-copy path uses ``wt_dtok = recv_tok_id``
                     # to address the source buffer).
                     for recv_tok_id in range(global_warp_id, total_recv, global_warp_num):
                         wt_src_addr = arith.unwrap(addr_inp_wts) + _to_i64(recv_tok_id) * weight_bytes
@@ -1132,8 +988,8 @@ def make_combine_kernel(
                     dest_pe = dest_tok_enc // max_tok_per_rank
                     dest_lid = dest_tok_enc % max_tok_per_rank
 
-                if const_expr(use_p2p_read):
-                    # P2P-read mode: write locally; peers will pull from us in Stage 3.
+                if const_expr(zero_copy):
+                    # Zero-copy mode: write locally; peers will pull from us in Stage 3.
                     dest_byte_off = _to_i64(recv_tok_id) * nbytes
                     dest_tok_addr = arith.unwrap(addr_shmem_tok) + dest_byte_off
                 else:
@@ -1166,7 +1022,7 @@ def make_combine_kernel(
                     buffer_store(accum, rsrc_dst, elem_off)
 
                 if const_expr(enable_weights):
-                    if const_expr(use_p2p_read):
+                    if const_expr(zero_copy):
                         wt_dest_off = _to_i64(recv_tok_id) * weight_bytes
                         wt_dest_addr = arith.unwrap(addr_shmem_wts) + wt_dest_off
                     else:
@@ -1180,8 +1036,8 @@ def make_combine_kernel(
                         wt_val = buffer_load(rsrc_wt_src, lane, vec_width=1, dtype=T.i32())
                         buffer_store(wt_val, rsrc_wt_dst, lane)
 
-        elif const_expr(use_p2p_read):
-            # Stage 1 P2P-read mode: every rank writes its post-expert
+        elif const_expr(zero_copy):
+            # Stage 1 zero-copy mode: every rank writes its post-expert
             # tokens into its OWN ``shmem_comb_inp`` slot indexed by
             # ``recv_tok_id`` (no remote write). Peers will read these
             # buffers cross-device during Stage 3.
@@ -1264,7 +1120,7 @@ def make_combine_kernel(
                 rsrc_src = create_buffer_resource_from_addr(src_tok_addr)
                 rsrc_dst = create_buffer_resource_from_addr(dest_tok_addr)
                 if const_expr(_xfer_bf16_to_fp8):
-                    # Wire-fp8 Stage 1 (P2P-read variant): load 2 bf16 i32
+                    # Wire-fp8 Stage 1 (zero-copy variant): load 2 bf16 i32
                     # (=4 bf16 elems) → ExtF v4f32 → cvt_pk_fp8_f32 ×2 →
                     # store 1 fp8 i32 (=4 fp8 elems).  Loop unit is 1 fp8
                     # dword per lane per step.
@@ -1380,17 +1236,17 @@ def make_combine_kernel(
             expert_rsrcs = []
             expert_vlds = []
 
-            if const_expr(skip_stage1 and not use_p2p_read):
+            if const_expr(skip_stage1 and not zero_copy):
                 # Fused-upstream Stage 3: when ``skip_stage1`` is set on
-                # the non-P2P-read path the caller has plain-stored a
+                # the non-zero-copy path the caller has plain-stored a
                 # per-(tok_id, k_slot) partial into
                 # ``shmem_comb_inp[(tok_id*k + k_slot) * token_bytes]``.
                 # Each k_slot is unique; there is no tok_map to decode --
                 # the accumulator simply reads ``shmem_comb_inp`` for
                 # k_slot in [0, k). Unrouted (tok_id, k_slot) slots are
                 # zero-initialized by the caller and therefore contribute
-                # zero to the sum.  When ``use_p2p_read`` is set this
-                # branch is bypassed: mori-parity P2P-read skip-Stage1
+                # zero to the sum.  When ``zero_copy`` is set this
+                # branch is bypassed: mori-parity zero-copy skip-Stage1
                 # mode keeps the regular ``(dest_pe, dest_lid)`` Stage 3
                 # decode (peer-side ``shmem_comb_inp_tok`` is addressed
                 # by ``destLocalTokId * hiddenDim``, see
@@ -1427,7 +1283,7 @@ def make_combine_kernel(
                         dest_pe_k = enc_k // max_recv
                     vld_k = dest_pe_k < npes  # sentinel = npes
                     safe_pe = arith.select(vld_k, dest_pe_k, rank)
-                    if const_expr(use_p2p_read):
+                    if const_expr(zero_copy):
                         dtok_global = enc_k % max_recv
                         safe_dtok = arith.select(vld_k, dtok_global, 0)
                         peer_base = SmemPtr.load(_lds_p2p_bases, [safe_pe])
@@ -1650,7 +1506,7 @@ def make_combine_kernel(
         # Stage 3b: Weight accumulation.
         # Each warp handles one output token; lanes 0..k-1 each pull the
         # weight value from one k-expert slot's contribution in
-        # ``shmem_comb_inp_wts`` (or peer-side via P2P-read), then they
+        # ``shmem_comb_inp_wts`` (or peer-side via zero-copy), then they
         # f32-sum across the k slots and write into ``shmem_comb_out_wts``.
         if const_expr(enable_weights):
             rsrc_out_wts = create_buffer_resource_from_addr(addr_out_shmem_wts)
@@ -1669,7 +1525,7 @@ def make_combine_kernel(
                             wt_pe = wt_enc // max_recv
                         wt_vld = wt_pe < npes
                         wt_safe_pe = arith.select(wt_vld, wt_pe, rank)
-                        if const_expr(use_p2p_read):
+                        if const_expr(zero_copy):
                             wt_dtok = wt_enc % max_recv
                             wt_safe_dtok = arith.select(wt_vld, wt_dtok, 0)
                             wt_pe_base = SmemPtr.load(_lds_p2p_wt_bases, [wt_safe_pe])
@@ -1850,7 +1706,7 @@ def make_combine_jit(
     data_type,
     enable_weights=False,
     enable_std_moe=False,
-    use_p2p_read=False,
+    zero_copy=False,
     skip_stage1=False,
     fp8_direct_cast: bool = False,
     max_recv=None,
@@ -1887,7 +1743,7 @@ def make_combine_jit(
         data_type=data_type,
         enable_weights=enable_weights,
         enable_std_moe=enable_std_moe,
-        use_p2p_read=use_p2p_read,
+        zero_copy=zero_copy,
         skip_stage1=skip_stage1,
         fp8_direct_cast=fp8_direct_cast,
         max_recv=max_recv,
@@ -1901,7 +1757,7 @@ def make_combine_jit(
     _key_max_tok = max_tok_per_rank
     _key_weights = enable_weights
     _key_std_moe = enable_std_moe
-    _key_p2p_read = use_p2p_read
+    _key_zero_copy = zero_copy
     _key_skip_s1 = skip_stage1
     _key_fp8_direct_cast = bool(fp8_direct_cast)
     _key_max_recv = max_recv if max_recv is not None else npes * max_tok_per_rank
@@ -1948,7 +1804,7 @@ def make_combine_jit(
             _key_max_tok,
             _key_weights,
             _key_std_moe,
-            _key_p2p_read,
+            _key_zero_copy,
             _key_skip_s1,
             _key_fp8_direct_cast,
             _key_max_recv,

@@ -32,6 +32,7 @@ from mori.shmem import mori_shmem_create_tensor
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
+from flydsl.runtime.device import get_rocm_arch
 
 from .dispatch_combine_intranode_kernel import (
     make_combine_jit,
@@ -62,6 +63,11 @@ _MAX_INTRANODE_NPES = 8
 # through ``buffer_load(vec_width=4, dtype=i32)`` (16-byte chunks).
 # This sets the alignment contract on ``token_bytes``.
 _TOK_BYTES_ALIGN = 16
+
+_DEFAULT_DISPATCH_BLOCK_NUM = 128
+_DEFAULT_DISPATCH_WARP_NUM = 4
+_DEFAULT_COMBINE_BLOCK_NUM = 128
+_DEFAULT_COMBINE_WARP_NUM = 8
 
 
 def _dtype_elem_size(dt):
@@ -103,8 +109,16 @@ class FlyDSLDispatchCombineConfig:
     num_experts_per_rank: int
     num_experts_per_token: int
     data_type: torch.dtype = torch.bfloat16
-    warp_num_per_block: int = 16
-    block_num: int = 80
+    # Legacy shared geometry knobs (kept for compatibility with callers
+    # still passing these fields). They are not used by launch selection
+    # now that dispatch/combine each has dedicated defaults.
+    warp_num_per_block: int = _DEFAULT_COMBINE_WARP_NUM
+    block_num: int = _DEFAULT_COMBINE_BLOCK_NUM
+    # Per-phase launch geometry defaults (no shared fallback).
+    dispatch_warp_num_per_block: int = _DEFAULT_DISPATCH_WARP_NUM
+    dispatch_block_num: int = _DEFAULT_DISPATCH_BLOCK_NUM
+    combine_warp_num_per_block: int = _DEFAULT_COMBINE_WARP_NUM
+    combine_block_num: int = _DEFAULT_COMBINE_BLOCK_NUM
     scale_dim: int = 0
     scale_type_size: int = 0
     enable_std_moe: bool = False
@@ -144,6 +158,31 @@ class FlyDSLDispatchCombineConfig:
     @property
     def block_dim(self):
         return self.warp_num_per_block * 64
+
+    @property
+    def zero_copy(self) -> bool:
+        """Zero-copy combine mode switch.
+
+        ``True`` means combine reads/writes through the registered shared
+        staging buffer.
+        """
+        return not self.use_external_inp_buf
+
+    @property
+    def dispatch_warp_num_per_block_eff(self):
+        return self.dispatch_warp_num_per_block
+
+    @property
+    def dispatch_block_num_eff(self):
+        return self.dispatch_block_num
+
+    @property
+    def combine_warp_num_per_block_eff(self):
+        return self.combine_warp_num_per_block
+
+    @property
+    def combine_block_num_eff(self):
+        return self.combine_block_num
 
     @property
     def max_recv(self):
@@ -233,7 +272,7 @@ class FlyDSLDispatchCombineIntraNodeOp:
         # / ``op.combine(input)`` selects the kernel specialization by
         # ``input.dtype`` and lazy-compiles a fresh entry on cache miss.
         # ``_disp_jit_cache`` keyed by dispatch input dtype; combine cache
-        # keyed by ``(combine_dtype, use_p2p_read, enable_weights,
+        # keyed by ``(combine_dtype, zero_copy, enable_weights,
         # fp8_direct_cast)`` because all four switches change the
         # generated kernel.
         self._disp_jit_cache: Dict[torch.dtype, Any] = {}
@@ -481,6 +520,14 @@ class FlyDSLDispatchCombineIntraNodeOp:
             raise ValueError(f"warp_num_per_block must be positive, got {cfg.warp_num_per_block}")
         if cfg.block_num <= 0:
             raise ValueError(f"block_num must be positive, got {cfg.block_num}")
+        if cfg.dispatch_warp_num_per_block <= 0:
+            raise ValueError(f"dispatch_warp_num_per_block must be positive, got {cfg.dispatch_warp_num_per_block}")
+        if cfg.dispatch_block_num <= 0:
+            raise ValueError(f"dispatch_block_num must be positive, got {cfg.dispatch_block_num}")
+        if cfg.combine_warp_num_per_block <= 0:
+            raise ValueError(f"combine_warp_num_per_block must be positive, got {cfg.combine_warp_num_per_block}")
+        if cfg.combine_block_num <= 0:
+            raise ValueError(f"combine_block_num must be positive, got {cfg.combine_block_num}")
 
         # expert_id = dest_pe * num_experts_per_rank + local_expert_id
         # must fit i32 to avoid overflow in the ``divui`` decoding.
@@ -499,8 +546,6 @@ class FlyDSLDispatchCombineIntraNodeOp:
         """Reject configs whose combine-kernel LDS overflows the GPU."""
         from flydsl.utils.smem_allocator import SMEM_CAPACITY_MAP
 
-        from .dispatch_combine_intranode_kernel import _detect_gpu_arch
-
         cfg = self.cfg
 
         # Mirror ``make_combine_jit``'s layout: two 8B-aligned
@@ -514,7 +559,7 @@ class FlyDSLDispatchCombineIntraNodeOp:
         ptr = _align(ptr, 8) + cfg.world_size * 8
         lds_bytes = max(_align(ptr, 128), 128)
 
-        arch = _detect_gpu_arch()
+        arch = get_rocm_arch()
         limit = SMEM_CAPACITY_MAP.get(arch)
         if limit is not None and lds_bytes > limit:
             raise RuntimeError(
@@ -703,8 +748,8 @@ class FlyDSLDispatchCombineIntraNodeOp:
                 experts_per_token=cfg.num_experts_per_token,
                 hidden_dim=cfg.hidden_dim,
                 max_tok_per_rank=cfg.max_num_inp_token_per_rank,
-                block_num=cfg.block_num,
-                warp_num_per_block=cfg.warp_num_per_block,
+                block_num=cfg.dispatch_block_num_eff,
+                warp_num_per_block=cfg.dispatch_warp_num_per_block_eff,
                 data_type=d_dtype,
                 scale_dim=cfg.scale_dim,
                 scale_type_size=cfg.scale_type_size,
@@ -836,14 +881,14 @@ class FlyDSLDispatchCombineIntraNodeOp:
             )
         return result
 
-    def _get_combine_jit(self, c_dtype, is_p2p_read, enable_weights_flag, fp8_dc):
+    def _get_combine_jit(self, c_dtype, zero_copy, enable_weights_flag, fp8_dc):
         """Lazy-jit a combine kernel specialized to the launch-time
-        ``(c_dtype, is_p2p_read, enable_weights, fp8_direct_cast)`` tuple
-        (mori parity).  P2P-read mode hard-wires ``skip_stage1=True`` --
+        ``(c_dtype, zero_copy, enable_weights, fp8_direct_cast)`` tuple
+        (mori parity).  Zero-copy mode hard-wires ``skip_stage1=True`` --
         the caller is contractually responsible for staging into
         ``shmem_comb_inp_tok`` upstream, so the kernel must NOT
         double-write that buffer."""
-        key = (c_dtype, bool(is_p2p_read), bool(enable_weights_flag), bool(fp8_dc))
+        key = (c_dtype, bool(zero_copy), bool(enable_weights_flag), bool(fp8_dc))
         if key not in self._comb_jit_cache:
             cfg = self.cfg
             self._comb_jit_cache[key] = make_combine_jit(
@@ -852,24 +897,24 @@ class FlyDSLDispatchCombineIntraNodeOp:
                 experts_per_token=cfg.num_experts_per_token,
                 hidden_dim=cfg.hidden_dim,
                 max_tok_per_rank=cfg.max_num_inp_token_per_rank,
-                block_num=cfg.block_num,
-                warp_num_per_block=cfg.warp_num_per_block,
+                block_num=cfg.combine_block_num_eff,
+                warp_num_per_block=cfg.combine_warp_num_per_block_eff,
                 data_type=c_dtype,
                 enable_weights=bool(enable_weights_flag),
                 enable_std_moe=cfg.enable_std_moe,
-                use_p2p_read=bool(is_p2p_read),
-                # Mori-parity P2P-read: caller has pre-staged token bytes
+                zero_copy=bool(zero_copy),
+                # Mori-parity zero-copy: caller has pre-staged token bytes
                 # into ``shmem_comb_inp_tok`` via
                 # :meth:`get_registered_combine_input_buffer` (contract
                 # enforced above).  ``skip_stage1=True`` removes the
                 # kernel-side Stage 1 token copy; the kernel still copies
                 # ``shmem_inp_wts -> shmem_comb_inp_wts`` because mori
                 # keeps that block (``intranode.hpp:297-306``) and Stage
-                # 3b reads weights via P2P-read by ``recv_tok_id``.  The
+                # 3b reads weights via zero-copy by ``recv_tok_id``.  The
                 # Stage 3 fused-upstream layout is gated on
-                # ``not use_p2p_read`` in the kernel, so this combination
+                # ``not zero_copy`` in the kernel, so this combination
                 # keeps mori's regular ``(dest_pe, dest_lid)`` decode.
-                skip_stage1=bool(is_p2p_read),
+                skip_stage1=bool(zero_copy),
                 fp8_direct_cast=bool(fp8_dc),
                 max_recv=self._effective_max_recv,
             )
@@ -887,26 +932,29 @@ class FlyDSLDispatchCombineIntraNodeOp:
 
         Launch-time dtype (mori parity): ``input.dtype`` selects the
         kernel specialization on each call; the op maintains a JIT
-        cache keyed by ``(input.dtype, use_p2p_read, enable_weights,
+        cache keyed by ``(input.dtype, zero_copy, enable_weights,
         fp8_direct_cast)``.
 
-        P2P-read mode (``cfg.use_external_inp_buf=False``) requires the
+        Zero-copy mode (``cfg.zero_copy=True``) requires the
         caller to write data into the buffer returned by
         ``get_registered_combine_input_buffer(combine_dtype)`` BEFORE
         calling ``combine()`` -- the kernel runs ``skip_stage1=True``
         and the local staging copy is removed entirely (mori parity).
         Passing a non-shmem tensor in this mode raises ``ValueError``.
 
-        Launch geometry (``block_num`` / ``warp_num_per_block``) and
-        the P2P-read switch itself remain frozen by ``self.cfg``; rebuild
-        the op (``EpDispatchCombineOp(new_cfg)``) to change them.
+        Launch geometry and the zero-copy switch remain frozen by
+        ``self.cfg``; rebuild the op (``EpDispatchCombineOp(new_cfg)``)
+        to change them. Geometry can be split per phase via
+        ``dispatch_block_num``/``dispatch_warp_num_per_block`` and
+        ``combine_block_num``/``combine_warp_num_per_block`` (all
+        optional, defaulting to legacy shared values).
         """
         self._check_combine_inputs(input, weights, indices, packed_recv_x)
         cfg = self.cfg
         stream = torch.cuda.current_stream()
 
         c_dtype = input.dtype
-        is_p2p_read = not cfg.use_external_inp_buf
+        zero_copy = cfg.zero_copy
         # ``enable_weights`` mirrors the historical default at op
         # construction; combine_no_stage1 is the only entry point that
         # exposes weight-free combines today.
@@ -916,23 +964,23 @@ class FlyDSLDispatchCombineIntraNodeOp:
         # the gate fires only when both the config knob asks for it AND
         # the launch dtype is bf16 (mori UseFp8DirectCast parity).
         fp8_dc = cfg.quant_type == "fp8_direct_cast" and c_dtype == torch.bfloat16
-        if is_p2p_read and fp8_dc:
-            # In P2P-read mode Stage 1 is removed; there is no in-kernel
+        if zero_copy and fp8_dc:
+            # In zero-copy mode Stage 1 is removed; there is no in-kernel
             # cast site for the bf16->fp8 conversion that fp8_direct_cast
             # relies on, so the two switches are mutually exclusive.
             raise ValueError(
-                "fp8_direct_cast is incompatible with use_external_inp_buf=False "
-                "(P2P-read mode skips Stage 1, where the bf16->fp8 cast lives)."
+                "fp8_direct_cast is incompatible with zero_copy=True "
+                "(zero_copy mode skips Stage 1, where the bf16->fp8 cast lives)."
             )
-        if is_p2p_read and input.data_ptr() != self.shmem_comb_inp_tok.data_ptr():
-            # Mori-parity caller contract: in P2P-read mode the kernel
+        if zero_copy and input.data_ptr() != self.shmem_comb_inp_tok.data_ptr():
+            # Mori-parity caller contract: in zero-copy mode the kernel
             # peer-reads ``shmem_comb_inp_tok``; the caller MUST write
             # data into the buffer returned by
             # ``get_registered_combine_input_buffer(combine_dtype)``
             # before calling ``combine``.  Any other tensor pointer is
             # a silent correctness bug (peers would read stale shmem).
             raise ValueError(
-                "P2P-read mode (use_external_inp_buf=False) requires the caller to "
+                "zero_copy mode requires the caller to "
                 "write data into the buffer returned by "
                 "op.get_registered_combine_input_buffer(combine_dtype) and pass "
                 "that view as the combine input.  Got input.data_ptr()="
@@ -982,7 +1030,7 @@ class FlyDSLDispatchCombineIntraNodeOp:
             self._fx_disp_out_wts,
         )
 
-        comb_fn, comb_key = self._get_combine_jit(c_dtype, is_p2p_read, enable_weights_flag, fp8_dc)
+        comb_fn, comb_key = self._get_combine_jit(c_dtype, zero_copy, enable_weights_flag, fp8_dc)
         comb_compiled = self._comb_compiled_cache.get(comb_key)
         if comb_compiled is None:
             args = (
@@ -1150,12 +1198,12 @@ class FlyDSLDispatchCombineIntraNodeOp:
                 experts_per_token=cfg.num_experts_per_token,
                 hidden_dim=cfg.hidden_dim,
                 max_tok_per_rank=cfg.max_num_inp_token_per_rank,
-                block_num=cfg.block_num,
-                warp_num_per_block=cfg.warp_num_per_block,
+                block_num=cfg.combine_block_num_eff,
+                warp_num_per_block=cfg.combine_warp_num_per_block_eff,
                 data_type=c_dtype,
                 enable_weights=bool(enable_weights),
                 enable_std_moe=cfg.enable_std_moe,
-                use_p2p_read=not cfg.use_external_inp_buf,
+                zero_copy=cfg.zero_copy,
                 skip_stage1=True,
                 fp8_direct_cast=bool(fp8_dc),
                 # Must match dispatch's encoding stride so the
@@ -1233,10 +1281,10 @@ class FlyDSLDispatchCombineIntraNodeOp:
         ``hidden_dim<=0`` derives the trailing dim from the dtype
         (fp4 packs 2 elements per byte and exposes ``hidden_dim // 2``).
 
-        In P2P-read mode (``cfg.use_external_inp_buf=False``) the caller
+        In zero-copy mode (``cfg.zero_copy=True``) the caller
         MUST write its combine input into this view before invoking
         ``op.combine(...)``; the kernel skips Stage 1 entirely and peers
-        P2P-read this buffer directly.
+        read this buffer directly.
         """
         cfg = self.cfg
         dt = dtype if dtype is not None else cfg.data_type
