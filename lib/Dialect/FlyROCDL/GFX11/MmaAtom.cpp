@@ -135,8 +135,8 @@ LogicalResult MmaOpGFX11_WMMAType::verify(function_ref<InFlightDiagnostic()> emi
     auto it = dyn_cast<IntegerType>(t);
     return it && it.getWidth() == width;
   };
-  const bool isI8x8  = isInt(elemTyA, 8) && isInt(elemTyB, 8) && elemTyAcc.isInteger(32);
-  const bool isI4x4  = isInt(elemTyA, 4) && isInt(elemTyB, 4) && elemTyAcc.isInteger(32);
+  const bool isI8x8 = isInt(elemTyA, 8) && isInt(elemTyB, 8) && elemTyAcc.isInteger(32);
+  const bool isI4x4 = isInt(elemTyA, 4) && isInt(elemTyB, 4) && elemTyAcc.isInteger(32);
   const bool isInt8or4 = isI8x8 || isI4x4;
 
   if (!isFp && !isInt8or4) {
@@ -149,7 +149,8 @@ LogicalResult MmaOpGFX11_WMMAType::verify(function_ref<InFlightDiagnostic()> emi
   if (isFp && (signA || signB || clamp)) {
     return emitError() << "GFX11 WMMA fp16/bf16 path does not accept signA/signB/clamp "
                           "(the ROCDL fp WMMA intrinsics have no such operands); "
-                          "got signA=" << signA << ", signB=" << signB << ", clamp=" << clamp;
+                          "got signA="
+                       << signA << ", signB=" << signB << ", clamp=" << clamp;
   }
 
   return success();

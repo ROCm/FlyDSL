@@ -99,18 +99,13 @@ def WMMA(m, n, k, elem_ty_ab, elem_ty_acc=None, *, sign_a=False, sign_b=False, c
 
     arch = (get_rocm_arch() or "").lower()
     if arch.startswith("gfx11"):
-        return MmaOpGFX11_WMMAType.get(
-            m, n, k, ty_ab, ty_ab, ty_acc, sign_a=sign_a, sign_b=sign_b, clamp=clamp
-        )
+        return MmaOpGFX11_WMMAType.get(m, n, k, ty_ab, ty_ab, ty_acc, sign_a=sign_a, sign_b=sign_b, clamp=clamp)
     if arch.startswith("gfx12"):
         if sign_a or sign_b or clamp:
-            raise ValueError(
-                "sign_a/sign_b/clamp are not supported on the gfx12 (RDNA4) WMMA path yet"
-            )
+            raise ValueError("sign_a/sign_b/clamp are not supported on the gfx12 (RDNA4) WMMA path yet")
         return MmaOpGFX1250_WMMAType.get(m, n, k, ty_ab, ty_ab, ty_acc)
     raise ValueError(
-        f"WMMA is not available on target arch {arch!r}; "
-        "supported: gfx11xx (RDNA3 / RDNA3.5) and gfx12xx (RDNA4). "
+        f"WMMA is not available on target arch {arch!r}; " "supported: gfx11xx (RDNA3 / RDNA3.5) and gfx12xx (RDNA4). "
     )
 
 
