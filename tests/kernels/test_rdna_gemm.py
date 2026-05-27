@@ -44,9 +44,9 @@ def _requires_rdna4():
 
 
 def _requires_rdna_wmma():
-    """gfx11* (RDNA3/RDNA3.5) or gfx12* (RDNA4) — anything with f16/bf16 WMMA."""
-    if not (ARCH.startswith("gfx11") or ARCH.startswith("gfx12")):
-        pytest.skip(f"RDNA WMMA GEMM requires gfx11* or gfx12*, got {ARCH}")
+    """gfx11* (RDNA3/RDNA3.5) or gfx120* (RDNA4) — anything with f16/bf16 WMMA."""
+    if not (ARCH.startswith("gfx11") or ARCH.startswith("gfx120")):
+        pytest.skip(f"RDNA WMMA GEMM requires gfx11* or gfx120*, got {ARCH}")
 
 
 def create_wmma_gemm_module(*args, **kwargs):

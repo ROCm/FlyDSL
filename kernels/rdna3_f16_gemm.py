@@ -55,7 +55,7 @@ def create_wmma_gemm_module(
     if not gpu_arch.startswith("gfx11"):
         raise RuntimeError(
             f"rdna3_f16_gemm requires gfx11* (RDNA3 / RDNA3.5); current arch is {gpu_arch!r}. "
-            "Use rdna_f16_gemm.create_wmma_gemm_module on gfx12* (RDNA4)."
+            "Use rdna_f16_gemm.create_wmma_gemm_module on gfx120* (RDNA4)."
         )
 
     BLOCK_M = WMMA_M * reg_m * waves_m  # 128
