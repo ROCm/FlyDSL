@@ -728,6 +728,7 @@ def _allreduce_cudagraph_stats_from_key_averages(
     world_size: int,
     dev: torch.device,
     dtype_key: str = "bf16",
+    combine_dtype_key: str | None = None,
     quant_type: str = "none",
     zero_copy: bool = False,
 ) -> dict:
@@ -739,16 +740,22 @@ def _allreduce_cudagraph_stats_from_key_averages(
       1: combine  kernel GPU time
       2: cudagraph_replay CUDA E2E time
       3: cudagraph_replay CPU  E2E time
+
+    Mori-parity mixed-dtype: ``dtype_key`` -> dispatch kernel suffix,
+    ``combine_dtype_key`` -> combine kernel suffix (default = dtype_key).
     """
-    msuf = MORI_KERNEL_SUFFIX.get(dtype_key, "bf16")
+    if combine_dtype_key is None:
+        combine_dtype_key = dtype_key
+    msuf_d = MORI_KERNEL_SUFFIX.get(dtype_key, "bf16")
+    msuf_c = MORI_KERNEL_SUFFIX.get(combine_dtype_key, "bf16")
     _cast_suf = "_fp8cast" if (quant_type == "fp8_direct_cast" and not zero_copy) else ""
     _zc_suf = "_p2p" if zero_copy else "_nop2p"
     if op_tag == "flydsl":
         d_kernel = "ep_dispatch_intranode_0"
         c_kernel = "ep_combine_intranode_0"
     else:
-        d_kernel = f"EpDispatchIntraNodeKernel_{msuf}"
-        c_kernel = f"EpCombineIntraNodeKernel_{msuf}{_zc_suf}{_cast_suf}"
+        d_kernel = f"EpDispatchIntraNodeKernel_{msuf_d}"
+        c_kernel = f"EpCombineIntraNodeKernel_{msuf_c}{_zc_suf}{_cast_suf}"
     cg_label = f"{op_tag}::cudagraph_replay"
 
     ev = {e.key: e for e in prof.key_averages()}
@@ -793,6 +800,7 @@ def _cudagraph_stats_from_trace(
     active_iters: int,
     skip_first: int = 5,
     dtype_key: str = "bf16",
+    combine_dtype_key: str | None = None,
     quant_type: str = "none",
     zero_copy: bool = False,
 ) -> dict:
@@ -802,18 +810,26 @@ def _cudagraph_stats_from_trace(
     Pipeline: parse trace -> sort by ts and keep the last
     ``active_iters`` events -> drop the first ``skip_first`` ->
     all-reduce across ranks.
+
+    Mori-parity mixed-dtype: ``dtype_key`` names the **dispatch** kernel
+    suffix while ``combine_dtype_key`` names the **combine** kernel
+    suffix.  When ``combine_dtype_key`` is ``None`` we fall back to
+    ``dtype_key`` (same-dtype dispatch + combine).
     """
     with open(trace_path) as f:
         tr = json.load(f)
 
-    msuf = MORI_KERNEL_SUFFIX.get(dtype_key, "bf16")
+    if combine_dtype_key is None:
+        combine_dtype_key = dtype_key
+    msuf_d = MORI_KERNEL_SUFFIX.get(dtype_key, "bf16")
+    msuf_c = MORI_KERNEL_SUFFIX.get(combine_dtype_key, "bf16")
     _cast_suf = "_fp8cast" if (quant_type == "fp8_direct_cast" and not zero_copy) else ""
     _zc_suf = "_p2p" if zero_copy else "_nop2p"
     if op_tag == "flydsl":
         d_name, c_name = "ep_dispatch_intranode_0", "ep_combine_intranode_0"
     else:
-        d_name = f"EpDispatchIntraNodeKernel_{msuf}"
-        c_name = f"EpCombineIntraNodeKernel_{msuf}{_zc_suf}{_cast_suf}"
+        d_name = f"EpDispatchIntraNodeKernel_{msuf_d}"
+        c_name = f"EpCombineIntraNodeKernel_{msuf_c}{_zc_suf}{_cast_suf}"
     cg_name = f"{op_tag}::cudagraph_replay"
 
     kernel_events = [e for e in tr["traceEvents"] if e.get("cat") == "kernel"]
@@ -1363,6 +1379,12 @@ def profile_cudagraph_op(
     if rank == 0:
         print(f"[profile+cudagraph] {op_tag} trace -> {trace_path}")
 
+    _combine_dtype_key = None
+    if combine_dtype is not None and combine_dtype != inp.dtype:
+        for _k, _v in DTYPE_MAP.items():
+            if _v == combine_dtype:
+                _combine_dtype_key = _k
+                break
     agg_stats = _cudagraph_stats_from_trace(
         trace_path,
         op_tag,
@@ -1372,6 +1394,7 @@ def profile_cudagraph_op(
         active_iters=active_iters,
         skip_first=skip_first,
         dtype_key=dtype_key,
+        combine_dtype_key=_combine_dtype_key,
         quant_type=quant_type,
         zero_copy=zero_copy,
     )
@@ -2081,9 +2104,7 @@ def run_profiler(rank, world_size, args):
         # <= ``num_experts_per_rank`` so the k experts on PE 0 can stay
         # distinct (else the dedup branch would compress them, which
         # defeats the test); enforced by the assert below.
-        assert (
-            k <= epr
-        ), f"forced_hot_spot routing requires k ({k}) <= num_experts_per_rank ({epr})"
+        assert k <= epr, f"forced_hot_spot routing requires k ({k}) <= num_experts_per_rank ({epr})"
         for t in range(cur_tok):
             # k distinct experts all on PE 0 => expert id = 0 * epr + j.
             for j in range(k):
