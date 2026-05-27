@@ -754,7 +754,10 @@ def compile_bmm_a16w8_gfx1250(
                 tdm_ops.TDMDescriptor2D(dg0_b, dgroup1_b),
                 wave_specialized=False)
             addr_lo_a = arith.addi(addr_lo_a, adv_a_i32)
+            old_lo_b = addr_lo_b
             addr_lo_b = arith.addi(addr_lo_b, adv_b_i32)
+            carry = arith.cmpi(arith.CmpIPredicate.ult, addr_lo_b, old_lo_b)
+            addr_hi_b = arith.addi(addr_hi_b, arith.extui(T.i32, carry))
 
         pipeline_fence(outstanding=2 * (num_buffers - 2), use_cluster=use_cluster)
 
