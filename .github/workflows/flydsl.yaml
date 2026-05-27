@@ -482,7 +482,7 @@ jobs:
       # (case, phase) so symmetric shmem heap state from one case can't
       # poison the next.  Arch-gated cases (fp4 on non-gfx950, StdMoE
       # cudagraph) are flagged inside the script and downgraded to
-      # warnings instead of failing the sweep.  The P2P-read combine
+      # warnings instead of failing the sweep.  The zero-copy combine
       # path is now validated by the FlyDSL self-check (k*inp round-
       # trip) and participates in the full sweep.
       - name: Run multi-GPU dispatch/combine CI sweep (8-GPU, accuracy + cudagraph perf)
