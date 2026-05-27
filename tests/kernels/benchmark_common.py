@@ -356,7 +356,7 @@ def run_wmma_sweep(
 
     arch = str(get_rocm_arch() or "")
     is_gfx11 = arch.startswith("gfx11")
-    is_gfx12 = arch.startswith("gfx12")
+    is_gfx12 = arch.startswith("gfx120")
     if not (is_gfx11 or is_gfx12):
         return rows
 
