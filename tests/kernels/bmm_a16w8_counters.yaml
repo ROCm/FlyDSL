@@ -1,119 +1,56 @@
-# rocprofv3 counter config for bmm_a16w8_gfx1250 profiling.
+# rocprofv3 v1.1.0 counter config for bmm_a16w8_gfx1250 profiling.
 #
-# Usage (single config, e.g. dec_e8m0):
+# Usage (single config):
 #   cd ~/flydsl
 #   rocprofv3 -i tests/kernels/bmm_a16w8_counters.yaml \
-#       --output-dir /tmp/bmm_profile_dec_e8m0 \
+#       -d /tmp/bmm_profile/dec_e8m0 \
+#       -f csv \
 #       -- python tests/kernels/profile_bmm_a16w8.py dec_e8m0
 #
 # Usage (all configs via shell script):
 #   bash tests/kernels/run_bmm_a16w8_profile.sh
 #
-# dispatch_index: captures only dispatches 10..14 per config run.
+# kernel_iteration_range: capture dispatches 10..14 per config run.
 #   N_WARMUP=10 (indices 0..9) warms L2 but is NOT profiled.
-#   N_PROFILE=5 (indices 10..14) is profiled. Match with profile_bmm_a16w8.py.
+#   N_PROFILE=5 (indices 10..14) is profiled. Must match profile_bmm_a16w8.py.
 #
 # Counter grouping: rocprofv3 automatically replays the kernel multiple times
 # when the requested counters exceed one hardware pass (~16 counters/pass).
-# Each replay adds 1–2 kernel executions; total overhead ≈ 2–3× with 30 counters.
+# We split into 2 passes manually for clarity and to avoid auto-split surprises.
 #
 # Analysis cheat-sheet (using these counters):
 #   WGP_util = SQG_BUSY_CYCLES / GRBM_GUI_ACTIVE
 #   issue_stall_rate = SQ_INST_ISSUE_ALL_STALL / GRBM_GUI_ACTIVE
 #   VMEM_stall_frac = SQ_INST_ISSUE_TEX_STALL / SQ_INST_ISSUE_ALL_STALL
 #   LDS_stall_frac  = SQ_INST_ISSUE_LDS_STALL / SQ_INST_ISSUE_ALL_STALL
-#   wave_VMEM_wait  = SQ_WAIT_CNT_LOAD / SQ_LEVEL_WAVE   # avg cycles/wave
-#   wave_LDS_wait   = SQ_WAIT_CNT_DS   / SQ_LEVEL_WAVE
-#   XDL_FLOP_BF16   = SQ_VALU_WMMA_FLOP_BF16             # total BF16 FLOPs
-#   XDL_util = XDL_FLOP_BF16 / (4200e12 FLOPS/s × GUI_ACTIVE/GPU_clk)
+#   XDL_util = SQ_VALU_WMMA_FLOP_BF16 / (4200e12 FLOPS/s × GUI_ACTIVE/GPU_clk)
+#   HBM_rd_BW = GC_EA_SE_SARB_DRAM_RD_SIZE_REQ × 8SE × 32B / kernel_time
+#   HBM_credit_stall = GL2C_EA_REQ_VC4_STALL / GL2C_CYCLE  (>0.4 = D-bound)
+#   GL2_sat = GL2C_LATENCY_FIFO_FULL / GL2C_CYCLE           (>0.3 = C/D-bound)
+#   GL1_sat = GL1XC_STALL_BUFFER_FULL / GL1C_CYCLE          (>0.3 = GL1-bound)
 #
-#   HBM_rd_BW = GC_EA_SE_SARB_DRAM_RD_SIZE_REQ × #SE × 32B / time
-#   HBM_wr_BW = GC_EA_SE_SARB_DRAM_WR_SIZE_REQ × #SE × 32B / time
-#     gfx1250: #SE = 4 per XCD × 2 XCDs = 8 SE total (verify with rocminfo)
-#   HBM_credit_stall = GL2C_EA_REQ_VC4_STALL / GL2C_CYCLE  (>0.5 = D-bound)
-#
-#   LDS_load_BW  = TX_VCA_LDS_LOAD_BANDWIDTH_BYTES / time
-#   LDS_store_BW = TX_VCA_LDS_STORE_BANDWIDTH_BYTES / time
-#
-#   GL2_sat = GL2C_LATENCY_FIFO_FULL / GL2C_CYCLE          (>0.3 = C/D-bound)
-#   GL1_sat = GL1XC_STALL_BUFFER_FULL / GL1C_CYCLE         (>0.3 = GL1-bound)
-#   GL0_push = TX_VMW_GL1_VMW_BACK_PRESSURE                (high = GL1 bottleneck)
-#   GL2_push = GLARBC_STALL_GL2_GL1 / GLARBC_BUSY          (high = GL2 bottleneck)
-#
-# Interpreting results for memory-bound BMM (expected regime M <= 128):
-#   - VMEM_stall_frac > 0.5 + HBM_credit_stall > 0.4 → D-bound (HBM saturated)
-#   - VMEM_stall_frac > 0.5 + GL2_sat < 0.2          → C-bound (GL2 miss rate high)
-#   - wave_LDS_wait / wave_VMEM_wait > 0.3            → LDS lgkmcnt stall (pipeline issue)
-#   - WGP_util < 0.7 + issue_stall_rate > 0.3         → A-bound (issue starved)
-#
-# XDL counter bug note (DEGFXMI400-13195):
-#   SQ_INST_CYCLES_VALU_WMMA is broken when DISABLE_VALU_ARB_STALL=1 (always on in production).
+# XDL counter bug (DEGFXMI400-13195):
+#   SQ_INST_CYCLES_VALU_WMMA is BROKEN with DISABLE_VALU_ARB_STALL=1.
 #   Use SQ_VALU_WMMA_FLOP_BF16 + roofline instead.
 
-rocprofv3:
-  output_format:
-    - csv
+jobs:
 
-  kernel_include_regex: "kernel_bmm_a16w8_gfx1250"
-
-  # Skip warmup dispatches (indices 0..9); profile indices 10..14.
-  # Adjust if N_WARMUP changes in profile_bmm_a16w8.py.
-  dispatch_index: "[10-14]"
-
-  counters:
-
-    # ---- Global cycle denominator ----------------------------------------
-    - GRBM_GUI_ACTIVE            # total active cycles (common denominator)
-
-    # ---- WGP / Shader (A-bound diagnosis) ---------------------------------
-    - SQG_BUSY_CYCLES            # WGP active cycles (util = SQG_BUSY / GUI_ACTIVE)
-    - SQ_LEVEL_WAVE              # instantaneous wave count (occupancy numerator)
-    - SQ_INST_ISSUE_ALL_STALL    # total issue stall (frontend saturated?)
-    - SQ_INST_ISSUE_TEX_STALL    # VMEM stall sub-component
-    - SQ_INST_ISSUE_LDS_STALL    # LDS stall sub-component
-    - SQ_INST_ISSUE_VALU_STALL   # VALU pipe full (compute-bound indicator)
-
-    # ---- Wave lifetime (E-bound / stall analysis) -------------------------
-    - SQ_WAIT_ANY                # total wave cycles in any wait
-    - SQ_WAIT_CNT_LOAD           # wave cycles waiting on VMEM loads (vmcnt)
-    - SQ_WAIT_CNT_DS             # wave cycles waiting on LDS (lgkmcnt)
-    - SQ_WAIT_BARRIER            # wave cycles at barrier (sync-bound)
-    - SQ_WAIT_DEPCTR             # dep-counter wait (S_DELAY_ALU chains)
-
-    # ---- XDL / WMMA compute (A-bound, SoL via FLOPs) ---------------------
-    # Note: SQ_INST_CYCLES_VALU_WMMA is BROKEN with DISABLE_VALU_ARB_STALL=1.
-    # Use FLOPs counter instead.
-    - SQ_VALU_WMMA_FLOP_BF16     # BF16 WMMA FLOPs (XDL utilization proxy)
-
-    # ---- LDS bandwidth (bank conflict / pipeline balance) -----------------
-    - TX_VCA_LDS_LOAD_BANDWIDTH_BYTES   # LDS load bytes (should be high in inner loop)
-    - TX_VCA_LDS_STORE_BANDWIDTH_BYTES  # LDS store bytes (TDM fill)
-
-    # ---- GL0 → GL1 pressure (C-bound: GL1 is the bottleneck) -------------
-    - TX_VMW_GL1_VMW_BACK_PRESSURE      # GL0 stalled by GL1 (high → GL1 saturated)
-
-    # ---- GL1 (C-bound: GL1 self-saturation) --------------------------------
-    - GL1XC_STALL_BUFFER_FULL    # GL1 buffer full (high → GL1 is bottleneck)
-    - GL1C_BUSY                  # GL1 busy cycles (util = GL1C_BUSY / GL1C_CYCLE)
-    - GL1C_CYCLE                 # GL1 free-running cycles
-
-    # ---- GLARB (C-bound: GL2 pushing back on GLARB) ----------------------
-    - GLARBC_STALL_GL2_GL1       # GL2 stalling GLARB (high → GL2 is bottleneck)
-    - GLARBC_BUSY                # GLARB busy cycles
-
-    # ---- GL2 (C/D-bound: cache layer saturation) --------------------------
-    - GL2C_BUSY                  # GL2 per-channel busy cycles
-    - GL2C_CYCLE                 # GL2 per-channel free-running cycles
-    - GL2C_LATENCY_FIFO_FULL     # GL2 latency FIFO full (GL2 saturated)
-    - GL2C_TAG_STALL             # GL2 tag pipe stall
-
-    # ---- GL2 → HBM (D-bound: HBM credit / bandwidth) ---------------------
-    - GL2C_EA_REQ_VC4_STALL      # HBM VC4 credit stall (high → HBM MC saturated)
-    - GL2C_EA_REQ_VC6_STALL      # XGMI VC6 stall (cross-die traffic, should be ~0)
-
-    # ---- EA → HBM actual bandwidth ----------------------------------------
-    # BW = req × #SE × 32B / kernel_time
-    # gfx1250: 8 SE total (4 per XCD × 2 XCDs); verify with rocminfo / GPU spec.
-    - GC_EA_SE_SARB_DRAM_RD_SIZE_REQ   # HBM read requests per SE (each = 32B)
-    - GC_EA_SE_SARB_DRAM_WR_SIZE_REQ   # HBM write requests per SE
-    - GC_EA_SE_STALL_DRAM              # EA stalled by DRAM (corroborates VC4 stall)
+  # Pass 1: Compute/wave/LDS counters (15 counters)
+  - pmc_groups:
+      - [GRBM_GUI_ACTIVE, SQG_BUSY_CYCLES, SQ_LEVEL_WAVE,
+         SQ_INST_ISSUE_ALL_STALL, SQ_INST_ISSUE_TEX_STALL,
+         SQ_INST_ISSUE_LDS_STALL, SQ_INST_ISSUE_VALU_STALL,
+         SQ_WAIT_ANY, SQ_WAIT_CNT_LOAD, SQ_WAIT_CNT_DS,
+         SQ_WAIT_BARRIER, SQ_WAIT_DEPCTR,
+         SQ_VALU_WMMA_FLOP_BF16,
+         TX_VCA_LDS_LOAD_BANDWIDTH_BYTES, TX_VCA_LDS_STORE_BANDWIDTH_BYTES]
+      # Pass 2: Cache/HBM counters (14 counters)
+      - [TX_VMW_GL1_VMW_BACK_PRESSURE,
+         GL1XC_STALL_BUFFER_FULL, GL1C_BUSY, GL1C_CYCLE,
+         GLARBC_STALL_GL2_GL1, GLARBC_BUSY,
+         GL2C_BUSY, GL2C_CYCLE, GL2C_LATENCY_FIFO_FULL, GL2C_TAG_STALL,
+         GL2C_EA_REQ_VC4_STALL, GL2C_EA_REQ_VC6_STALL,
+         GC_EA_SE_SARB_DRAM_RD_SIZE_REQ, GC_EA_SE_SARB_DRAM_WR_SIZE_REQ,
+         GC_EA_SE_STALL_DRAM]
+    kernel_include_regex: "kernel_bmm_a16w8_gfx1250"
+    kernel_iteration_range: "10-14"
