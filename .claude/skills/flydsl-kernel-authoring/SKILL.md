@@ -26,7 +26,7 @@ FlyDSL is a Python DSL and MLIR-based compiler for writing high-performance GPU 
 ```
 Python (@flyc.kernel/@flyc.jit)
   -> AST Rewriting (for/if -> scf.for/scf.if)
-  -> MLIR Tracing (generates Fly dialect + gpu/arith/scf/memref ops)
+  -> MLIR Tracing (generates Fly dialect + gpu/arith/scf/memref/vector ops)
   -> MlirCompiler.compile() (Fly -> ROCDL -> LLVM -> HSACO binary)
   -> JITCFunction (ExecutionEngine wrapper)
 ```

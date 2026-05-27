@@ -41,8 +41,8 @@ Compilation Flow
 On first call, ``@flyc.jit`` runs the following pipeline:
 
 1. **AST Rewriting**: The Python source is parsed and rewritten to emit MLIR ops.
-2. **MLIR Module Construction**: Kernel body is traced into ``gpu``, ``arith``,
-   ``scf``, ``memref``, and ``fly`` dialect ops.
+2. **MLIR Module Construction**: Kernel body is traced into ``fly``, ``gpu``,
+   ``arith``, ``scf``, ``memref``, and ``vector`` dialect ops.
 3. **Fly Pass Pipeline**: The module is lowered through three pass stages,
    defined in ``RocmBackend._pipeline_parts()``
    (``python/flydsl/compiler/backends/rocm.py``). See

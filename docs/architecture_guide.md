@@ -189,8 +189,9 @@ The pipeline is built by `RocmBackend._pipeline_parts()` in
 `python/flydsl/compiler/backends/rocm.py`. The orchestrator
 `_pipeline_fragments_for_mode()` in `jit_function.py` decides whether to run
 the pipeline as a single combined pass list (`pipeline_fragments()`) or split
-it for external LLVM codegen (`external_binary_pipeline_fragments()`); the
-split point is after Stage A.
+it for external LLVM codegen (`external_binary_pipeline_fragments()`). External
+mode runs Stages A and B with the bundled MLIR runtime, then invokes the
+external LLVM toolchain only for Stage C (`gpu-module-to-binary`).
 
 **Stage A — `pre_binary_fragments`** (Fly dialect → ROCDL lowering)
 
@@ -219,7 +220,10 @@ split point is after Stage A.
 | 16 | `convert-arith-to-llvm` | Arith → LLVM. |
 | 17 | `convert-func-to-llvm` | Func → LLVM. |
 | 18 | `reconcile-unrealized-casts` | Final cast cleanup. |
-| 18a | `ensure-debug-info-scope-on-llvm-func{emission-kind=LineTablesOnly}` | Inserted only when `FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1`. |
+
+When `FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1`, Stage B appends
+`ensure-debug-info-scope-on-llvm-func{emission-kind=LineTablesOnly}` after
+`reconcile-unrealized-casts` and before Stage C.
 
 **Stage C — `binary_fragment`**
 
@@ -371,7 +375,7 @@ Transforms Python control flow to MLIR ops at the AST level:
 | `FLYDSL_DEBUG_AST_DIFF` | `false` | Print AST diff during rewrite. |
 | `FLYDSL_DEBUG_PRINT_ORIGIN_IR` | `false` | Print origin IR before compilation. |
 | `FLYDSL_DEBUG_PRINT_AFTER_ALL` | `false` | Print IR after each MLIR pass. |
-| `FLYDSL_DEBUG_ENABLE_DEBUG_INFO` | `true` | Generate debug info in compiled code. |
+| `FLYDSL_DEBUG_ENABLE_DEBUG_INFO` | `false` | Generate debug info in compiled code. |
 | `FLYDSL_DEBUG_ENABLE_VERIFIER` | `true` | Verify IR module. |
 | `FLYDSL_DEBUG_LOG_LEVEL` | `WARNING` | Logging level (DEBUG, INFO, WARNING, ERROR). |
 
@@ -412,32 +416,36 @@ Enable with `FLYDSL_DUMP_IR=1`:
 FLYDSL_DUMP_IR=1 FLYDSL_DUMP_DIR=./dumps python test_my_kernel.py
 ```
 
-Produces numbered `.mlir` files (exact pass count tracks `RocmBackend._pipeline_parts()`):
+Produces numbered dump files (exact pass count tracks `RocmBackend._pipeline_parts()`):
 ```
 dumps/my_func_name/
-├── 00_original.mlir
-├── 01_fly-rewrite-func-signature.mlir
-├── 02_fly-canonicalize.mlir
-├── 03_fly-layout-lowering.mlir
-├── 04_fly-int-swizzle-simplify.mlir
+├── 00_origin.mlir
+├── 01_fly_rewrite_func_signature.mlir
+├── 02_fly_canonicalize.mlir
+├── 03_fly_layout_lowering.mlir
+├── 04_fly_int_swizzle_simplify.mlir
 ├── 05_canonicalize.mlir
-├── 06_fly-convert-atom-call-to-ssa-form.mlir
-├── 07_fly-promote-regmem-to-vectorssa.mlir
-├── 08_convert-fly-to-rocdl.mlir
+├── 06_fly_convert_atom_call_to_ssa_form.mlir
+├── 07_fly_promote_regmem_to_vectorssa.mlir
+├── 08_convert_fly_to_rocdl.mlir
 ├── 09_canonicalize.mlir
-├── 10_gpu-module.mlir                # contains convert-scf-to-cf, cse,
-│                                     # convert-gpu-to-rocdl, fly-rocdl-cluster-attr
-├── 11_rocdl-attach-target.mlir
-├── 12_convert-scf-to-cf.mlir
-├── 13_convert-cf-to-llvm.mlir
-├── 14_gpu-to-llvm.mlir
-├── 15_convert-vector-to-llvm.mlir
-├── 16_convert-arith-to-llvm.mlir
-├── 17_convert-func-to-llvm.mlir
-├── 18_reconcile-unrealized-casts.mlir
-├── 19_gpu-module-to-binary.mlir
-└── final_isa.s                       # AMD ISA assembly (best-effort)
+├── 10_convert_scf_to_cf_cse_convert_gpu_to_rocdl.mlir
+│                                      # also runs fly-rocdl-cluster-attr
+├── 11_rocdl_attach_target.mlir
+├── 12_convert_scf_to_cf.mlir
+├── 13_convert_cf_to_llvm.mlir
+├── 14_gpu_to_llvm.mlir
+├── 15_convert_vector_to_llvm.mlir
+├── 16_convert_arith_to_llvm.mlir
+├── 17_convert_func_to_llvm.mlir
+├── 18_reconcile_unrealized_casts.mlir
+├── 19_gpu_module_to_binary.mlir
+├── 20_llvm_ir.ll
+└── 21_final_isa.s                    # AMD ISA assembly (best-effort)
 ```
+
+If `FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1`, the debug-info pass adds an extra
+numbered dump before `gpu_module_to_binary`.
 
 ---
 

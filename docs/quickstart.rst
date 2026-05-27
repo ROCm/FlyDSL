@@ -113,14 +113,15 @@ then compiles it through the Fly MLIR pipeline. The pass list is built by
       │    fly-rewrite-func-signature → fly-canonicalize →       │
       │    fly-layout-lowering → fly-int-swizzle-simplify →      │
       │    canonicalize → fly-convert-atom-call-to-ssa-form →    │
-      │    fly-promote-regmem-to-vectorssa → convert-fly-to-rocdl│
-      │    → canonicalize → gpu.module(convert-scf-to-cf, cse,   │
+      │    fly-promote-regmem-to-vectorssa →                    │
+      │    convert-fly-to-rocdl → canonicalize →                 │
+      │    gpu.module(convert-scf-to-cf, cse,                    │
       │       convert-gpu-to-rocdl{...}, fly-rocdl-cluster-attr) │
       ├──────────────────────────────────────────────────────────┤
       │ B. binary_prep_fragments  (→ LLVM)                       │
-      │    rocdl-attach-target{chip=gfxNNN} → convert-scf-to-cf →│
-      │    convert-cf-to-llvm → gpu-to-llvm →                    │
-      │    convert-vector/arith/func-to-llvm →                   │
+      │    rocdl-attach-target{chip=gfxNNN} →                    │
+      │    convert-scf-to-cf → convert-cf-to-llvm →              │
+      │    gpu-to-llvm → convert-vector/arith/func-to-llvm →     │
       │    reconcile-unrealized-casts                            │
       ├──────────────────────────────────────────────────────────┤
       │ C. binary_fragment                                       │
