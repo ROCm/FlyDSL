@@ -218,6 +218,33 @@ def _unflatten_k(k_flat):
     return [[k_flat[td * (QKHELOOP * 2) + j] for j in range(QKHELOOP * 2)] for td in range(TLOOP)]
 
 
+def _flatten_v_results(v_results):
+    """v_results[vt][vhe] = i64x2 → flat list of 2 * VTLOOP * VHELOOP scalar i64
+    values, in the same order ``_unflatten_v_results`` expects.  Used to carry
+    V data through scf.for state (which only accepts scalar values)."""
+    flat = []
+    for vt in range(VTLOOP):
+        for vhe in range(VHELOOP):
+            v_i64x2 = fx.Vector(v_results[vt][vhe])
+            flat.append(v_i64x2[0])
+            flat.append(v_i64x2[1])
+    return flat
+
+
+def _unflatten_v_results(v_flat):
+    """Inverse of ``_flatten_v_results``: rebuild v_results[vt][vhe] = i64x2."""
+    v_results = []
+    idx = 0
+    for vt in range(VTLOOP):
+        vhe_data = []
+        for vhe in range(VHELOOP):
+            v_i64x2 = vector.from_elements(T.vec(2, T.i64), [v_flat[idx], v_flat[idx + 1]])
+            vhe_data.append(v_i64x2)
+            idx += 2
+        v_results.append(vhe_data)
+    return v_results
+
+
 def _build_pa_thread_invariants(
     warp_id,
     lane16id,
@@ -892,83 +919,6 @@ def _make_pa_phase_helpers(
             )
         return outs
 
-    def _finalize_block_split_group(
-        d_out,
-        v_ops,
-        partition_start,
-        causal_bound,
-        rmax,
-        rsum,
-        outs,
-        *,
-        seq_start=None,
-    ):
-        apply_range_mask = seq_start is not None
-
-        kv_tok_base = (
-            partition_start + kv_tok_thread_base if const_expr(apply_causal_mask or apply_range_mask) else None
-        )
-        qk_max = neg_inf
-        for td in range_constexpr(TLOOP):
-            logits_vec = d_out[td]
-            if const_expr(kv_tok_base is not None):
-                logits_vec = _apply_token_mask_vec(logits_vec, td, kv_tok_base, causal_bound, neg_inf)
-                d_out[td] = logits_vec
-            qk_max = qk_max.maximumf(fx.Vector(logits_vec).reduce("max"))
-        for sh in [32, 16]:
-            qk_max = qk_max.maximumf(qk_max.shuffle_xor(arith.constant(sh, type=T.i32), c_w))
-        vector.store(
-            fx.Vector.from_elements([qk_max], dtype=fx.Float32),
-            softmax_lds_f32,
-            [sm_max_off],
-        )
-
-        exp_sum = zero_f
-        safe_qk_max = arith.select(qk_max > neg_inf, qk_max, zero_f) if const_expr(kv_tok_base is not None) else qk_max
-        for td in range_constexpr(TLOOP):
-            diff_vec = fx.Vector(d_out[td]) - vector.broadcast(T.f32x4, arith.unwrap(safe_qk_max))
-            p_vec = _exp2_f32_fast(diff_vec * vector.broadcast(T.f32x4, arith.unwrap(fx.Float32(LOG2E))))
-            exp_sum = exp_sum + fx.Vector(p_vec).reduce("add")
-            d_out[td] = p_vec
-        for sh in [32, 16]:
-            exp_sum = exp_sum + exp_sum.shuffle_xor(arith.constant(sh, type=T.i32), c_w)
-        vector.store(
-            fx.Vector.from_elements([exp_sum], dtype=fx.Float32),
-            softmax_lds_f32,
-            [sm_sum_off],
-        )
-
-        if const_expr(per_token_kv):
-            v_max_warp = zero_f
-            for td in range_constexpr(TLOOP):
-                vs = _load_v_scale_vec(td)
-                for i in range_constexpr(4):
-                    if const_expr(kv_tok_base is not None):
-                        kv_tok = kv_tok_base + arith.constant(td * MFMA_N + i, type=T.i32)
-                        vs_i = vector.extract(vs, static_position=[i], dynamic_position=[])
-                        if const_expr(apply_causal_mask and apply_range_mask):
-                            in_range = (kv_tok < causal_bound) & (kv_tok >= seq_start)
-                            vs_i = arith.select(in_range, vs_i, zero_f)
-                        elif const_expr(apply_causal_mask):
-                            vs_i = arith.select(kv_tok < causal_bound, vs_i, zero_f)
-                        elif const_expr(apply_range_mask):
-                            vs_i = arith.select(kv_tok >= seq_start, vs_i, zero_f)
-                        vs = vector.insert(vs_i, vs, static_position=[i], dynamic_position=[])
-                v_max_warp = v_max_warp.maximumf(fx.Vector(vs).reduce("max"))
-            for sh in [32, 16]:
-                v_max_warp = v_max_warp.maximumf(v_max_warp.shuffle_xor(arith.constant(sh, type=T.i32), c_w))
-            vector.store(
-                fx.Vector.from_elements([v_max_warp], dtype=fx.Float32),
-                softmax_lds_f32,
-                [sm_vmax_wr_off],
-            )
-
-        gpu.barrier()
-        rmax, rsum, outs, v_correction = _cross_warp_softmax_and_prob_pack(d_out, rmax, rsum, outs, None)
-        gpu.barrier()
-        outs = _pv_mfma(v_ops, outs, v_correction)
-        return rmax, rsum, outs
-
     return (
         _load_kv_scale_scalars,
         _load_v_and_scales,
@@ -976,7 +926,6 @@ def _make_pa_phase_helpers(
         _qk_and_intra_softmax,
         _cross_warp_softmax_and_prob_pack,
         _pv_mfma,
-        _finalize_block_split_group,
     )
 
 
@@ -1278,7 +1227,6 @@ def compile_pa_decode_metadata(
                 _qk_and_intra_softmax,
                 _cross_warp_softmax_and_prob_pack,
                 _pv_mfma,
-                _finalize_block_split_group_unused,
             ) = _make_pa_phase_helpers(
                 trans_v=trans_v,
                 per_token_q=query_scale_in_kernel,
@@ -2199,7 +2147,6 @@ def compile_pa_decode_ps(
             _qk_and_intra_softmax,
             _cross_warp_softmax_and_prob_pack,
             _pv_mfma,
-            _finalize_block_split_group_unused,
         ) = _make_pa_phase_helpers(
             trans_v=trans_v,
             per_token_q=True,
@@ -2291,11 +2238,13 @@ def compile_pa_decode_ps(
 
         # Pack/unpack loop state.  State is `_mtp_groups` accumulators, each a
         # tuple of (rmax, rsum, outs...), plus the current sub-partition's K
-        # tiles (k_flat: _N_K i64 values, loop-carried so the body can use
-        # them while we prefetch the NEXT iteration's K).
+        # and V tiles (k_flat: _N_K i64 scalars, v_flat: 2 * _N_V i64 scalars
+        # — each V element is i64x2, flattened to two scalars).  Both K and V
+        # are loop-carried so the body can use them while we prefetch the
+        # NEXT iteration's K and V (ping-pong).
         state_width = 2 + VHELOOP
 
-        def _pack_states(states, k_flat, k_scale_scalar=None):
+        def _pack_states(states, k_flat, v_flat, k_scale_scalar=None):
             flat = []
             for st in states:
                 rmax, rsum = st[0], st[1]
@@ -2303,18 +2252,22 @@ def compile_pa_decode_ps(
                 flat.extend([_unwrap(rmax), _unwrap(rsum)])
                 flat.extend(_unwrap(out) for out in outs)
             flat.extend(_unwrap(v) for v in k_flat)
+            flat.extend(_unwrap(v) for v in v_flat)
             # When k_scale_per_token, the per-thread K-scale scalar is
             # cross-iter-prefetched into VGPR via the loop's init/yield path.
             if const_expr(k_scale_per_token):
                 flat.append(_unwrap(k_scale_scalar))
             return flat
 
+        _N_V_FLAT = 2 * VTLOOP * VHELOOP
+
         def _unpack_states(flat):
             base = state_width * _mtp_groups
             states = [tuple(flat[state_width * i + j] for j in range_constexpr(state_width)) for i in range_constexpr(_mtp_groups)]
             k_flat = list(flat[base : base + _N_K])
-            k_scale_scalar = flat[base + _N_K] if const_expr(k_scale_per_token) else None
-            return states, k_flat, k_scale_scalar
+            v_flat = list(flat[base + _N_K : base + _N_K + _N_V_FLAT])
+            k_scale_scalar = flat[base + _N_K + _N_V_FLAT] if const_expr(k_scale_per_token) else None
+            return states, k_flat, v_flat, k_scale_scalar
 
         init_states = [
             tuple(
@@ -2536,6 +2489,20 @@ def compile_pa_decode_ps(
         else:
             k_scale_init = None
         gpu.barrier()
+        # ── Prologue V load ──
+        # V is cross-iter prefetched (ping-pong with K).  Issue iter 0's V
+        # load here so the loop body can issue iter N+1's V at the END of
+        # iter N alongside K, both hidden behind the next iter's QK MFMA.
+        # `_pa_small_block_load_v_phys_blocks_from_lds` reads the LDS-staged
+        # first_phys_blocks written above; the barrier guarantees visibility.
+        _v_phys_blocks0 = _pa_small_block_load_v_phys_blocks_from_lds()
+        _v_results0 = _pa_small_block_load_v_trans(
+            v_global_ptr, kv_h,
+            stride_v_block, stride_v_head,
+            warp_id, lane16id, rowid, _v_phys_blocks0,
+            block_size=_block_size,
+        )
+        v_flat0 = _flatten_v_results(_v_results0)
         # Note: no runtime `if _is_valid:` wrapping this loop.  See earlier
         # commit log — the `ReplaceIfWithDispatch` rewriter copies the if-body
         # into a synthetic Python function, and since the body contains
@@ -2546,10 +2513,9 @@ def compile_pa_decode_ps(
         # (NEG_INF, 0, 0, 0), which is the right empty-slot semantics.
         for sub_part_ib, state in range(
             loop_start, loop_end, loop_step,
-            init=_pack_states(init_states, k_flat0, k_scale_init),
+            init=_pack_states(init_states, k_flat0, v_flat0, k_scale_init),
         ):
-            cur_states, k_flat, k_scale_cur = _unpack_states(state)
-            v_phys_blocks = _pa_small_block_load_v_phys_blocks_from_lds()
+            cur_states, k_flat, v_flat, k_scale_cur = _unpack_states(state)
             # Reverse iteration: scf.for walks sub_part_ib forward over
             # [local_partition_start, local_partition_end); remap to walk
             # sub_part_i32 from last_partition_idx down to local_partition_start
@@ -2558,18 +2524,12 @@ def compile_pa_decode_ps(
             sub_part_i32 = last_partition_idx - (_sub_raw_i32 - local_partition_start)
             sub_token_start = sub_part_i32 * c_cps
 
-            # V is loaded fresh per iter (no prefetch — V's load latency is
-            # naturally hidden by the QK MFMA that runs first).  K comes from
-            # the loop-carried state (prefetched at the END of the previous
-            # iteration, so its VMEM latency overlaps prev iter's PV MFMA).
+            # Both K and V come from the loop-carried state (prefetched at the
+            # END of the previous iteration).  K's VMEM latency overlaps prev
+            # iter's PV MFMA; V's latency overlaps the entire next iter QK +
+            # softmax compute before PV consumes it.
             k_ops = _unflatten_k(k_flat)
-
-            v_results = _pa_small_block_load_v_trans(
-                v_global_ptr, kv_h,
-                stride_v_block, stride_v_head,
-                warp_id, lane16id, rowid, v_phys_blocks,
-                block_size=_block_size,
-            )
+            v_results = _unflatten_v_results(v_flat)
 
             # ── K-scale staging from loop-carried VGPR ──
             # k_scale_cur was prefetched in the PREVIOUS iter (or prologue
@@ -2646,14 +2606,28 @@ def compile_pa_decode_ps(
                         phys_blocks=next_phys_blocks,
                     )
                 gpu.barrier()
-
                 outs = _pv_mfma(v_results, outs, v_correction)
                 new_states.append(tuple([rmax, rsum] + outs))
 
-            results = yield _pack_states(new_states, k_next_flat, k_scale_next)
+            # ── Cross-iter V prefetch (ping-pong) ──
+            # Issue NEXT iter's V load AFTER PV MFMA: the current iter's V
+            # vgprs are now consumed and can be reused.  V phys_blocks come
+            # from the LDS-staged `next_phys_blocks` written above (the
+            # barrier after K prefetch ensures cross-warp visibility).  The
+            # V VMEM latency is hidden behind next iter's QK MFMA + softmax.
+            _v_phys_blocks_next = _pa_small_block_load_v_phys_blocks_from_lds()
+            _v_next_results = _pa_small_block_load_v_trans(
+                v_global_ptr, kv_h,
+                stride_v_block, stride_v_head,
+                warp_id, lane16id, rowid, _v_phys_blocks_next,
+                block_size=_block_size,
+            )
+            v_next_flat = _flatten_v_results(_v_next_results)
+
+            results = yield _pack_states(new_states, k_next_flat, v_next_flat, k_scale_next)
 
         # Normalize and store one output slot per MTP group.
-        final_states, _final_k_flat, _final_k_scale = _unpack_states(results)
+        final_states, _final_k_flat, _final_v_flat, _final_k_scale = _unpack_states(results)
         for _mtp_g in range_constexpr(_mtp_groups):
             final_state = final_states[_mtp_g]
             rmax_raw, rsum_raw = final_state[0], final_state[1]
