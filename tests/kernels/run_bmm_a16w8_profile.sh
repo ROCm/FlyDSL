@@ -48,7 +48,8 @@ for CFG in "${CONFIGS[@]}"; do
 
     if rocprofv3 \
         -i "$YAML" \
-        --output-dir "$OUT" \
+        -d "$OUT" \
+        -f csv \
         -- python "$SCRIPT" "$CFG" \
         2>&1 | tee "$LOG"; then
         echo "    [$CFG] OK"
