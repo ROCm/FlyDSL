@@ -81,7 +81,9 @@ def default_f8_type() -> ir.Type:
     if arch.startswith("gfx11"):
         raise RuntimeError(
             f"default_f8_type(): no native FP8 support on {arch}; "
-            "FP8 instructions are available on gfx94*, gfx95*, and gfx12*."
+            "FP8 instructions are available on gfx94*, gfx95*, and gfx12*. "
+            "Use bf16/f16 GEMM via "
+            "`rdna3_f16_gemm.create_wmma_gemm_module` on gfx11* targets."
         )
     return Float8E4M3FNUZ.ir_type
 

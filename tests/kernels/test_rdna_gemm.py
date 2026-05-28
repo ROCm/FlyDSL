@@ -73,19 +73,28 @@ def create_wmma_gemm_module(*args, **kwargs):
         pytest.param(512, 512, 512, id="512x512x512", marks=pytest.mark.large_shape),
     ],
 )
-@pytest.mark.parametrize("dtype", ["bf16", "f16"])
-def test_f16_gemm_correctness(M, N, K, dtype):
+@pytest.mark.parametrize(
+    "in_dtype, out_dtype",
+    [
+        ("bf16", "bf16"),
+        ("f16", "bf16"),
+        ("f16", "f16"),
+        ("bf16", "f16"),
+    ],
+)
+def test_f16_gemm_correctness(M, N, K, in_dtype, out_dtype):
     """Test BF16/F16 GEMM correctness for various shapes and dtypes."""
     _requires_rdna_wmma()
 
-    torch_dtype = torch.bfloat16 if dtype == "bf16" else torch.float16
+    in_torch = torch.bfloat16 if in_dtype == "bf16" else torch.float16
+    out_torch = torch.bfloat16 if out_dtype == "bf16" else torch.float16
     torch.manual_seed(42)
 
-    launch_fn, BLOCK_M, BLOCK_N, BLOCK_K = create_wmma_gemm_module(M, N, K, in_dtype=dtype, out_dtype="bf16")
+    launch_fn, BLOCK_M, BLOCK_N, BLOCK_K = create_wmma_gemm_module(M, N, K, in_dtype=in_dtype, out_dtype=out_dtype)
 
-    A = torch.randn(M, K, dtype=torch_dtype, device="cuda") * 0.1
-    B_T = torch.randn(N, K, dtype=torch_dtype, device="cuda") * 0.1
-    C = torch.zeros(M, N, dtype=torch.bfloat16, device="cuda")
+    A = torch.randn(M, K, dtype=in_torch, device="cuda") * 0.1
+    B_T = torch.randn(N, K, dtype=in_torch, device="cuda") * 0.1
+    C = torch.zeros(M, N, dtype=out_torch, device="cuda")
 
     launch_fn(C, A, B_T, torch.cuda.current_stream())
     torch.cuda.synchronize()

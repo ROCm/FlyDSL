@@ -13,6 +13,8 @@ adapted for the legacy v16-operand WMMA ABI used by RDNA3/RDNA3.5:
     rows lanes 0-15 read. We just have all lanes do the LDS loads —
     duplicate loads are wasted bandwidth but simpler than a wave-half
     broadcast.
+    TODO(perf): lanes 16-31 could ``ds_swizzle_b32`` XOR 16 broadcast
+    from lanes 0-15 to halve LDS read bandwidth.
 
   * Accumulator (C/D) is still vector<8>, but the per-lane row mapping
     differs from gfx12: lane L holds D[2*si + (L/16)][L%16], i.e. even
@@ -329,6 +331,8 @@ def create_wmma_gemm_module(
                     val = accs[idx][si]
                     if const_expr(out_dtype == "bf16"):
                         val = val.to(fx.BFloat16)
+                    elif const_expr(out_dtype == "f16"):
+                        val = val.to(fx.Float16)
                     elem_off = g_row * N + g_col
                     buffer_ops.buffer_store(val, c_rsrc, elem_off)
 
