@@ -54,13 +54,13 @@ import torch
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.expr import arith, const_expr, range_constexpr, vector, buffer_ops
+from flydsl._mlir.dialects import llvm, rocdl
+from flydsl.expr import arith, buffer_ops, const_expr, range_constexpr, vector
 from flydsl.expr import math as fmath
 from flydsl.expr.arith import ArithValue, CmpFPredicate
-from flydsl.expr.typing import T, Int32, Stream
+from flydsl.expr.typing import Int32, Stream, T
 from flydsl.expr.vector import ReductionOp
 from flydsl.runtime.device import get_rocm_arch
-from flydsl._mlir.dialects import llvm, rocdl
 
 from .tensor_shim import GTensor, _to_raw
 

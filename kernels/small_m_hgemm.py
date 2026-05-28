@@ -42,11 +42,12 @@ import functools
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
-from flydsl._mlir.dialects import fly, llvm, memref, scf
+from flydsl._mlir.dialects import llvm, memref, scf
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, const_expr, gpu, range_constexpr, rocdl, vector
 from flydsl.expr.typing import T
-from flydsl.runtime.device import get_rocm_arch, get_rocm_arch as get_gfx
+from flydsl.runtime.device import get_rocm_arch
+from flydsl.runtime.device import get_rocm_arch as get_gfx
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 
 from .splitk_hgemm import (
