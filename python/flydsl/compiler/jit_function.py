@@ -239,9 +239,13 @@ def _use_external_binary_codegen() -> bool:
 
 def _get_underlying_func(obj):
     if isinstance(obj, KernelFunction):
-        return obj._func
+        # Prefer the pre-AST-rewrite func: its closure / co_names still
+        # reference helper callables, which is what the cache-key dependency
+        # collector needs to walk to detect helper source changes.  Fallback
+        # to `_func` for older KernelFunction instances without the field.
+        return getattr(obj, "_original_func", obj._func)
     if isinstance(obj, JitFunction):
-        return obj.func
+        return getattr(obj, "_original_func", obj.func)
     if isinstance(obj, types.MethodType):
         return obj.__func__
     if isinstance(obj, types.FunctionType):
@@ -1023,6 +1027,22 @@ class CallState:
 
 class JitFunction:
     def __init__(self, func: Callable, compile_hints: Optional[dict] = None):
+        # Same rationale as KernelFunction._original_func: ASTRewriter.transform
+        # mutates `func.__code__` in place, after which the JIT cache walker
+        # (`_get_underlying_func`) can no longer see closure-captured helpers
+        # via the original co_names / co_freevars.  Snapshot the pre-rewrite
+        # func here so the walker can recover those references.
+        import types as _types
+
+        _orig_code = func.__code__
+        self._original_func = _types.FunctionType(
+            _orig_code,
+            func.__globals__,
+            name=func.__name__,
+            argdefs=func.__defaults__,
+            closure=func.__closure__,
+        )
+        self._original_func.__kwdefaults__ = func.__kwdefaults__
         self.func = ASTRewriter.transform(func)
         self.compile_hints = dict(compile_hints) if compile_hints is not None else {}
         self.manager_key = None
