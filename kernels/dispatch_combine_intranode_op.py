@@ -477,8 +477,18 @@ class FlyDSLDispatchCombineIntraNodeOp:
         # every recv slot receives ``topk`` distinct partials; the
         # ``use_token_flag_sync=False`` path const_expr-elides every
         # access on this buffer.
+        # **Size 必须覆盖 row_i32 上界 ≤ num_valid_ids**.  aiter sorting
+        # 下 num_valid_ids 上界 = mr*k + npes*epr*tile_m_max (tile_m_max
+        # 是 GEMM2 编译时 m-tile 的保守上界).  早期版本误用 mr*k=
+        # npes*mt*k 作为 size, 在 BS≤8 + aiter sorting 下 row_i32 可达
+        # epr*tile_m=1024 (epr=32,tile_m=32) >> mr*k=256, 触发 OOB
+        # atomic ++ → 跨卡 ++ 永不触发 → combine spin 永远等不到 → hang.
+        # 这里按 tile_m_max=128 取保守上界, 多 ~16KB/rank 开销可忽略.
+        epr = cfg.num_experts_per_rank
+        tile_m_max = 128
+        local_counter_size = mr_worst * k + npes * epr * tile_m_max
         self.device_local_counter = torch.zeros(
-            mr_worst * k, dtype=torch.int32, device=self._dev,
+            local_counter_size, dtype=torch.int32, device=self._dev,
         )
 
     # ------------------------------------------------------------------
