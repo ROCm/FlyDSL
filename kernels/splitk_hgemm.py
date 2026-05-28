@@ -58,12 +58,8 @@ class WmmaHalf_m16n16k16(WmmaHalfBase):
         if self.dtype == "bf16":
             a_frag_vi16 = vector.bitcast(T.vec(self.WMMA_A_FRAG_VALUES, T.i16), a_frag)
             b_frag_vi16 = vector.bitcast(T.vec(self.WMMA_B_FRAG_VALUES, T.i16), b_frag)
-            return rocdl.mfma_f32_16x16x16bf16_1k(
-                T.f32x4, [a_frag_vi16, b_frag_vi16, c_frag, 0, 0, 0]
-            )
-        return rocdl.mfma_f32_16x16x16f16(
-            T.vec(self.WMMA_C_FRAG_VALUES, T.f32), [a_frag, b_frag, c_frag, 0, 0, 0]
-        )
+            return rocdl.mfma_f32_16x16x16bf16_1k(T.f32x4, [a_frag_vi16, b_frag_vi16, c_frag, 0, 0, 0])
+        return rocdl.mfma_f32_16x16x16f16(T.vec(self.WMMA_C_FRAG_VALUES, T.f32), [a_frag, b_frag, c_frag, 0, 0, 0])
 
 
 class WmmaHalf_m16n16k32(WmmaHalfBase):
@@ -82,9 +78,7 @@ class WmmaHalf_m16n16k32(WmmaHalfBase):
             return rocdl.mfma_f32_16x16x32_bf16(
                 T.vec(self.WMMA_C_FRAG_VALUES, T.f32), [a_frag, b_frag, c_frag, 0, 0, 0]
             )
-        return rocdl.mfma_f32_16x16x32_f16(
-            T.vec(self.WMMA_C_FRAG_VALUES, T.f32), [a_frag, b_frag, c_frag, 0, 0, 0]
-        )
+        return rocdl.mfma_f32_16x16x32_f16(T.vec(self.WMMA_C_FRAG_VALUES, T.f32), [a_frag, b_frag, c_frag, 0, 0, 0])
 
 
 class OnlineScheduler:
@@ -235,18 +229,12 @@ def compile_hgemm_kernel(
         if const_expr(HAS_BIAS):
             BIAS_ = GTensor(BIAS, dtype=dtype_, shape=(n,))
         base_ptr = allocator.get_base()
-        smem_a_ptr = SmemPtr(
-            base_ptr, smem_a_offset, dtype_, shape=(STAGES * BLOCK_M * BLOCK_K,)
-        )
+        smem_a_ptr = SmemPtr(base_ptr, smem_a_offset, dtype_, shape=(STAGES * BLOCK_M * BLOCK_K,))
         as_ = STensor(smem_a_ptr, dtype_, shape=(STAGES, BLOCK_M, BLOCK_K))
         if const_expr(B_TO_LDS):
-            smem_b_ptr = SmemPtr(
-                base_ptr, smem_b_offset, dtype_, shape=(STAGES * BLOCK_N * BLOCK_K,)
-            )
+            smem_b_ptr = SmemPtr(base_ptr, smem_b_offset, dtype_, shape=(STAGES * BLOCK_N * BLOCK_K,))
             bs_ = STensor(smem_b_ptr, dtype_, shape=(STAGES, BLOCK_N, BLOCK_K))
-        smem_c_ptr = SmemPtr(
-            base_ptr, smem_a_offset, dtype_, shape=(BLOCK_M * BLOCK_N,)
-        )
+        smem_c_ptr = SmemPtr(base_ptr, smem_a_offset, dtype_, shape=(BLOCK_M * BLOCK_N,))
         cs_ = STensor(smem_c_ptr, dtype_, shape=(BLOCK_M, BLOCK_N))
         if const_expr(IS_SPLIT_K):
             smem_bc_ptr = SmemPtr(base_ptr, smem_a_offset, T.i32, shape=(1,))
@@ -284,16 +272,10 @@ def compile_hgemm_kernel(
         def get_llvm_ptr(ptr, offset, dtype_bytes):
             base_ptr = fly.extract_aligned_pointer_as_index(_ptr_type, ptr)
             base_ptr = llvm.PtrToIntOp(_i64_type, base_ptr).result
-            byte_offset = arith.index_cast(
-                T.i64, fx.Index(offset) * fx.Index(dtype_bytes)
-            )
-            llvm_ptr = llvm.AddOp(
-                base_ptr, byte_offset, llvm.IntegerOverflowFlags(0)
-            ).result
+            byte_offset = arith.index_cast(T.i64, fx.Index(offset) * fx.Index(dtype_bytes))
+            llvm_ptr = llvm.AddOp(base_ptr, byte_offset, llvm.IntegerOverflowFlags(0)).result
             llvm_ptr = llvm.IntToPtrOp(_ptr_type, llvm_ptr).result
-            ptr_v = (
-                llvm_ptr._value if const_expr(hasattr(llvm_ptr, "_value")) else llvm_ptr
-            )
+            ptr_v = llvm_ptr._value if const_expr(hasattr(llvm_ptr, "_value")) else llvm_ptr
             return ptr_v
 
         def zero_c():
@@ -326,19 +308,11 @@ def compile_hgemm_kernel(
                     row_idx = m_offset + fx.Index(m_local_idx)
                     init_vec = zero_vec
                     if const_expr(HAS_BIAS):
-                        init_vec = BIAS_.vec_load(
-                            (n_offset + n_local_idx,), LDG_VEC_SIZE
-                        )
-                    cond_boundary = arith.cmpi(
-                        arith.CmpIPredicate.ult, row_idx, fx.Index(m)
-                    )
-                    cond_boundary_if = scf.IfOp(
-                        cond_boundary, results_=[], has_else=False
-                    )
+                        init_vec = BIAS_.vec_load((n_offset + n_local_idx,), LDG_VEC_SIZE)
+                    cond_boundary = arith.cmpi(arith.CmpIPredicate.ult, row_idx, fx.Index(m))
+                    cond_boundary_if = scf.IfOp(cond_boundary, results_=[], has_else=False)
                     with ir.InsertionPoint(cond_boundary_if.then_block):
-                        bytes_offset = C_.linear_offset(
-                            (row_idx, n_offset + n_local_idx)
-                        )
+                        bytes_offset = C_.linear_offset((row_idx, n_offset + n_local_idx))
                         bytes_offset_i32 = arith.index_cast(T.i32, bytes_offset)
                         c_ptr = get_llvm_ptr(C, bytes_offset_i32, DTYPE_BYTES)
                         llvm.InlineAsmOp(
@@ -383,9 +357,7 @@ def compile_hgemm_kernel(
                 after = ir.Block.create_at_start(w.after, [T.i32])
                 with ir.InsertionPoint(before):
                     cur = before.arguments[0]
-                    need_wait = arith.CmpIOp(
-                        arith.CmpIPredicate.eq, cur, arith.constant(0, type=T.i32)
-                    ).result
+                    need_wait = arith.CmpIOp(arith.CmpIPredicate.eq, cur, arith.constant(0, type=T.i32)).result
                     scf.ConditionOp(need_wait, [cur])
                 with ir.InsertionPoint(after):
                     signal_ptr = get_llvm_ptr(signal, signal_idx, 4)
@@ -515,15 +487,9 @@ def compile_hgemm_kernel(
                 global_offset = arith.index_cast(T.i32, global_offset)
                 # get lds ptr
                 if const_expr(i == 0):
-                    lds_offset = (
-                        as_.linear_offset((fx.Index(lds_stage), 0, 0)) * DTYPE_BYTES
-                    )
-                    lds_base = (
-                        memref.extract_aligned_pointer_as_index(as_.memptr) + lds_offset
-                    )
-                    lds_ptr_base = buffer_ops.create_llvm_ptr(
-                        arith.index_cast(T.i64, lds_base), address_space=3
-                    )
+                    lds_offset = as_.linear_offset((fx.Index(lds_stage), 0, 0)) * DTYPE_BYTES
+                    lds_base = memref.extract_aligned_pointer_as_index(as_.memptr) + lds_offset
+                    lds_ptr_base = buffer_ops.create_llvm_ptr(arith.index_cast(T.i64, lds_base), address_space=3)
                     lds_ptr = buffer_ops.get_element_ptr(lds_ptr_base, warp_offset)
                 else:
                     lds_ptr = buffer_ops.get_element_ptr(
@@ -560,15 +526,9 @@ def compile_hgemm_kernel(
                 global_offset = arith.index_cast(T.i32, global_offset)
                 # get lds ptr
                 if const_expr(i == 0):
-                    lds_offset = (
-                        bs_.linear_offset((fx.Index(lds_stage), 0, 0)) * DTYPE_BYTES
-                    )
-                    lds_base = (
-                        memref.extract_aligned_pointer_as_index(bs_.memptr) + lds_offset
-                    )
-                    lds_ptr_base = buffer_ops.create_llvm_ptr(
-                        arith.index_cast(T.i64, lds_base), address_space=3
-                    )
+                    lds_offset = bs_.linear_offset((fx.Index(lds_stage), 0, 0)) * DTYPE_BYTES
+                    lds_base = memref.extract_aligned_pointer_as_index(bs_.memptr) + lds_offset
+                    lds_ptr_base = buffer_ops.create_llvm_ptr(arith.index_cast(T.i64, lds_base), address_space=3)
                     lds_ptr = buffer_ops.get_element_ptr(lds_ptr_base, warp_offset)
                 else:
                     lds_ptr = buffer_ops.get_element_ptr(
@@ -594,9 +554,7 @@ def compile_hgemm_kernel(
                 for kk in range_constexpr(WARP_K_STEPS):
                     warp_atom_k_idx = kk * WARP_ATOM_K
                     row = warp_atom_m_idx + ldmatrix_a_m_idx
-                    col_in_bytes = (
-                        warp_atom_k_idx + ldmatrix_a_k_vec_idx
-                    ) * DTYPE_BYTES
+                    col_in_bytes = (warp_atom_k_idx + ldmatrix_a_k_vec_idx) * DTYPE_BYTES
                     col_in_bytes = swizzle_xor16(row, col_in_bytes, k_blocks16)
                     vec = as_.vec_load(
                         (s, row, col_in_bytes // DTYPE_BYTES),
@@ -613,9 +571,7 @@ def compile_hgemm_kernel(
                 for kk in range_constexpr(WARP_K_STEPS):
                     warp_atom_k_idx = kk * WARP_ATOM_K
                     row = warp_atom_n_idx + ldmatrix_b_n_idx
-                    col_in_bytes = (
-                        warp_atom_k_idx + ldmatrix_b_k_vec_idx
-                    ) * DTYPE_BYTES
+                    col_in_bytes = (warp_atom_k_idx + ldmatrix_b_k_vec_idx) * DTYPE_BYTES
                     col_in_bytes = swizzle_xor16(row, col_in_bytes, k_blocks16)
                     vec = bs_.vec_load(
                         (s, row, col_in_bytes // DTYPE_BYTES),
@@ -632,9 +588,7 @@ def compile_hgemm_kernel(
                     warp_atom_k_idx = kk * WARP_ATOM_K
                     n_idx = n_offset + warp_atom_n_idx + ldmatrix_b_n_idx
                     k_idx = k_offset + warp_atom_k_idx + ldmatrix_b_k_vec_idx
-                    vec = B_.vec_load(
-                        (n_idx, k_idx), WMMA_B_FRAG_VALUES * MFMA_PER_WARP_K
-                    )
+                    vec = B_.vec_load((n_idx, k_idx), WMMA_B_FRAG_VALUES * MFMA_PER_WARP_K)
                     vecs.append(vec)
             return vecs
 
@@ -649,32 +603,16 @@ def compile_hgemm_kernel(
                         if const_expr(MFMA_PER_WARP_K == 2):
                             # split a
                             a_i64x2 = vector.bitcast(T.i64x2, a_frag)
-                            a0_i64 = vector.extract(
-                                a_i64x2, static_position=[0], dynamic_position=[]
-                            )
-                            a1_i64 = vector.extract(
-                                a_i64x2, static_position=[1], dynamic_position=[]
-                            )
-                            a_v0 = vector.bitcast(
-                                T.f16x4, vector.from_elements(T.vec(1, T.i64), [a0_i64])
-                            )
-                            a_v1 = vector.bitcast(
-                                T.f16x4, vector.from_elements(T.vec(1, T.i64), [a1_i64])
-                            )
+                            a0_i64 = vector.extract(a_i64x2, static_position=[0], dynamic_position=[])
+                            a1_i64 = vector.extract(a_i64x2, static_position=[1], dynamic_position=[])
+                            a_v0 = vector.bitcast(T.f16x4, vector.from_elements(T.vec(1, T.i64), [a0_i64]))
+                            a_v1 = vector.bitcast(T.f16x4, vector.from_elements(T.vec(1, T.i64), [a1_i64]))
                             # split b
                             b_i64x2 = vector.bitcast(T.i64x2, b_frag)
-                            b0_i64 = vector.extract(
-                                b_i64x2, static_position=[0], dynamic_position=[]
-                            )
-                            b1_i64 = vector.extract(
-                                b_i64x2, static_position=[1], dynamic_position=[]
-                            )
-                            b_v0 = vector.bitcast(
-                                T.f16x4, vector.from_elements(T.vec(1, T.i64), [b0_i64])
-                            )
-                            b_v1 = vector.bitcast(
-                                T.f16x4, vector.from_elements(T.vec(1, T.i64), [b1_i64])
-                            )
+                            b0_i64 = vector.extract(b_i64x2, static_position=[0], dynamic_position=[])
+                            b1_i64 = vector.extract(b_i64x2, static_position=[1], dynamic_position=[])
+                            b_v0 = vector.bitcast(T.f16x4, vector.from_elements(T.vec(1, T.i64), [b0_i64]))
+                            b_v1 = vector.bitcast(T.f16x4, vector.from_elements(T.vec(1, T.i64), [b1_i64]))
                             # wmma
                             c_idx = ii * WARP_N_STEPS + jj
                             acc_in = c_frags_new[c_idx]
@@ -682,13 +620,9 @@ def compile_hgemm_kernel(
                             c_frags_new[c_idx] = WMMA_IMPL(a_v1, b_v1, acc_mid)
                         elif const_expr(MFMA_PER_WARP_K == 1):
                             c_idx = ii * WARP_N_STEPS + jj
-                            c_frags_new[c_idx] = WMMA_IMPL(
-                                a_frag, b_frag, c_frags_new[c_idx]
-                            )
+                            c_frags_new[c_idx] = WMMA_IMPL(a_frag, b_frag, c_frags_new[c_idx])
                         else:
-                            raise NotImplementedError(
-                                f"MFMA_PER_WARP_K={MFMA_PER_WARP_K} not supported"
-                            )
+                            raise NotImplementedError(f"MFMA_PER_WARP_K={MFMA_PER_WARP_K} not supported")
             return c_frags_new
 
         warp_offset = get_dma_copy_warp_offset()
@@ -705,15 +639,9 @@ def compile_hgemm_kernel(
             rocdl.sched_barrier(0)
 
             def hot_loop_scheduler():
-                MFMA_TOTAL = (
-                    WARP_K_STEPS * WARP_M_STEPS * WARP_N_STEPS * MFMA_PER_WARP_K
-                )
-                LDG_REG_A_COUNT_ = (
-                    LDG_REG_A_COUNT_AS if const_expr(ASYNC_COPY) else LDG_REG_A_COUNT
-                )
-                LDG_REG_B_COUNT_ = (
-                    LDG_REG_B_COUNT_AS if const_expr(ASYNC_COPY) else LDG_REG_B_COUNT
-                )
+                MFMA_TOTAL = WARP_K_STEPS * WARP_M_STEPS * WARP_N_STEPS * MFMA_PER_WARP_K
+                LDG_REG_A_COUNT_ = LDG_REG_A_COUNT_AS if const_expr(ASYNC_COPY) else LDG_REG_A_COUNT
+                LDG_REG_B_COUNT_ = LDG_REG_B_COUNT_AS if const_expr(ASYNC_COPY) else LDG_REG_B_COUNT
                 mfma_ = OnlineScheduler(MFMA_TOTAL, MFMA_TOTAL)
                 # ================ Ordered ================
                 for i in range_constexpr(WARP_K_STEPS * WARP_M_STEPS):
@@ -729,9 +657,7 @@ def compile_hgemm_kernel(
                 # ================ Reordered ================
                 rocdl.sched_barrier(0)
 
-            init_state = (
-                [ks_begin, arith.constant(0, index=True)] + c_frags + b_frags_next
-            )
+            init_state = [ks_begin, arith.constant(0, index=True)] + c_frags + b_frags_next
             for bki, state in range(0, BLOCK_K_LOOPS - 1, 1, init=init_state):
                 k_offset = state[0]
                 current_stage = fx.Index(state[1])
@@ -763,12 +689,8 @@ def compile_hgemm_kernel(
             rocdl.sched_barrier(0)
 
             def hot_loop_scheduler():
-                MFMA_TOTAL = (
-                    WARP_K_STEPS * WARP_M_STEPS * WARP_N_STEPS * MFMA_PER_WARP_K
-                )
-                LDG_REG_A_COUNT_ = (
-                    LDG_REG_A_COUNT_AS if const_expr(ASYNC_COPY) else LDG_REG_A_COUNT
-                )
+                MFMA_TOTAL = WARP_K_STEPS * WARP_M_STEPS * WARP_N_STEPS * MFMA_PER_WARP_K
+                LDG_REG_A_COUNT_ = LDG_REG_A_COUNT_AS if const_expr(ASYNC_COPY) else LDG_REG_A_COUNT
                 LDG_TOTAL = LDG_REG_A_COUNT_ + WARP_K_STEPS * WARP_N_STEPS
                 mfma_ = OnlineScheduler(MFMA_TOTAL, MFMA_TOTAL)
                 ldg_ = OnlineScheduler(LDG_TOTAL, LDG_TOTAL)
@@ -796,23 +718,14 @@ def compile_hgemm_kernel(
                         rocdl.sched_mfma(mfma_.consume(AVG_MFMA_COUNT))
                 rocdl.sched_barrier(0)
 
-            init_state = (
-                [ks_begin, arith.constant(0, index=True)] + c_frags + a_frags + b_frags
-            )
+            init_state = [ks_begin, arith.constant(0, index=True)] + c_frags + a_frags + b_frags
             for bki, state in range(1, BLOCK_K_LOOPS, init=init_state):
                 k_offset = state[0]
                 current_stage = fx.Index(state[1])
                 next_stage = 1 - current_stage
                 c_frags = state[2 : 2 + C_FRAGS_LEN]
                 a_frags = state[2 + C_FRAGS_LEN : 2 + C_FRAGS_LEN + A_FRAGS_LEN]
-                b_frags = state[
-                    2
-                    + C_FRAGS_LEN
-                    + A_FRAGS_LEN : 2
-                    + C_FRAGS_LEN
-                    + A_FRAGS_LEN
-                    + B_FRAGS_LEN
-                ]
+                b_frags = state[2 + C_FRAGS_LEN + A_FRAGS_LEN : 2 + C_FRAGS_LEN + A_FRAGS_LEN + B_FRAGS_LEN]
                 if const_expr(ASYNC_COPY):
                     ldg_sts_a_async(k_offset + BLOCK_K, next_stage)
                 else:
@@ -826,19 +739,10 @@ def compile_hgemm_kernel(
                 a_frags_next = lds_matrix_a(next_stage)
                 k_offset = k_offset + fx.Int32(BLOCK_K)
                 rocdl.sched_barrier(0)
-                results = (
-                    yield [k_offset, next_stage] + c_frags + a_frags_next + b_frags_next
-                )
+                results = yield [k_offset, next_stage] + c_frags + a_frags_next + b_frags_next
             c_frags = results[2 : 2 + C_FRAGS_LEN]
             a_frags = results[2 + C_FRAGS_LEN : 2 + C_FRAGS_LEN + A_FRAGS_LEN]
-            b_frags = results[
-                2
-                + C_FRAGS_LEN
-                + A_FRAGS_LEN : 2
-                + C_FRAGS_LEN
-                + A_FRAGS_LEN
-                + B_FRAGS_LEN
-            ]
+            b_frags = results[2 + C_FRAGS_LEN + A_FRAGS_LEN : 2 + C_FRAGS_LEN + A_FRAGS_LEN + B_FRAGS_LEN]
             c_frags = block_mma_sync(a_frags, b_frags, c_frags)
 
         # write to lds
@@ -871,21 +775,15 @@ def compile_hgemm_kernel(
                 n_local_idx = fx.Index(global_tid % LDG_C_X_THREADS * LDG_VEC_SIZE)
                 m_global_idx = m_offset + m_local_idx
                 n_global_idx = n_offset + n_local_idx
-                cond_boundary = arith.cmpi(
-                    arith.CmpIPredicate.ult, m_global_idx, fx.Index(m)
-                )
+                cond_boundary = arith.cmpi(arith.CmpIPredicate.ult, m_global_idx, fx.Index(m))
                 cond_boundary_if = scf.IfOp(cond_boundary, results_=[], has_else=False)
                 with ir.InsertionPoint(cond_boundary_if.then_block):
                     pk_val = cs_.vec_load((m_local_idx, n_local_idx), LDG_VEC_SIZE)
-                    linear_bytes_offset = (
-                        C_.linear_offset((m_global_idx, n_global_idx)) * DTYPE_BYTES
-                    )
+                    linear_bytes_offset = C_.linear_offset((m_global_idx, n_global_idx)) * DTYPE_BYTES
                     # split to vec2s
                     vec2_ty = T.vec(2, dtype_)
                     for vec_idx in range_constexpr(LDG_VEC_SIZE // 2):
-                        e0 = vector.extract(
-                            pk_val, static_position=[vec_idx * 2], dynamic_position=[]
-                        )
+                        e0 = vector.extract(pk_val, static_position=[vec_idx * 2], dynamic_position=[])
                         e1 = vector.extract(
                             pk_val,
                             static_position=[vec_idx * 2 + 1],
@@ -896,18 +794,10 @@ def compile_hgemm_kernel(
                             T.i64,
                             linear_bytes_offset + fx.Index(vec_idx * 2 * DTYPE_BYTES),
                         )
-                        pair_addr_i64 = llvm.AddOp(
-                            out_base_int, pair_byte_offset, llvm.IntegerOverflowFlags(0)
-                        ).result
+                        pair_addr_i64 = llvm.AddOp(out_base_int, pair_byte_offset, llvm.IntegerOverflowFlags(0)).result
                         pair_ptr = llvm.IntToPtrOp(_ptr_type, pair_addr_i64).result
-                        pair_ptr_v = (
-                            pair_ptr._value
-                            if const_expr(hasattr(pair_ptr, "_value"))
-                            else pair_ptr
-                        )
-                        pair_v = (
-                            pair._value if const_expr(hasattr(pair, "_value")) else pair
-                        )
+                        pair_ptr_v = pair_ptr._value if const_expr(hasattr(pair_ptr, "_value")) else pair_ptr
+                        pair_v = pair._value if const_expr(hasattr(pair, "_value")) else pair
                         llvm.AtomicRMWOp(
                             llvm.AtomicBinOp.fadd,
                             pair_ptr_v,
@@ -924,20 +814,14 @@ def compile_hgemm_kernel(
                 m_local_idx = fx.Index(global_tid // LDG_C_X_THREADS)
                 n_local_idx = fx.Index(global_tid % LDG_C_X_THREADS * LDG_VEC_SIZE)
                 m_global_idx = m_offset + m_local_idx
-                cond_boundary = arith.cmpi(
-                    arith.CmpIPredicate.ult, m_global_idx, fx.Index(m)
-                )
+                cond_boundary = arith.cmpi(arith.CmpIPredicate.ult, m_global_idx, fx.Index(m))
                 cond_boundary_if = scf.IfOp(cond_boundary, results_=[], has_else=False)
                 with ir.InsertionPoint(cond_boundary_if.then_block):
                     vec = cs_.vec_load((m_local_idx, n_local_idx), LDG_VEC_SIZE)
                     if const_expr(HAS_BIAS):
-                        bias_vec = BIAS_.vec_load(
-                            (n_offset + n_local_idx,), LDG_VEC_SIZE
-                        )
+                        bias_vec = BIAS_.vec_load((n_offset + n_local_idx,), LDG_VEC_SIZE)
                         vec = vec + bias_vec
-                    C_.vec_store(
-                        (m_global_idx, n_offset + n_local_idx), vec, LDG_VEC_SIZE
-                    )
+                    C_.vec_store((m_global_idx, n_offset + n_local_idx), vec, LDG_VEC_SIZE)
                     scf.YieldOp([])
         return
 

@@ -1,18 +1,18 @@
 # SPDX-License-Identifier: MIT
 # Copyright (C) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 
-import torch
-import numpy as np
-import flydsl.compiler as flyc
-from itertools import product
 from abc import ABC, abstractmethod
+from itertools import product
 
+import numpy as np
+import torch
+
+import flydsl.compiler as flyc
+from flydsl._mlir import ir
 from flydsl._mlir.dialects import fly, llvm
 from flydsl.compiler.protocol import extract_to_ir_values
-from flydsl._mlir import ir
+from flydsl.expr import arith, buffer_ops, range_constexpr, vector
 from flydsl.expr.typing import T
-
-from flydsl.expr import buffer_ops, range_constexpr, vector, arith
 
 
 def _run_compiled(exe, *args):
@@ -180,9 +180,7 @@ class TensorView:
         src_offset = src_tensor.base_offset
         dst_offset = self.base_offset
         for d in range_constexpr(ndim):
-            src_offset = (
-                src_offset + thread_idxs[d] * value_layout[d] * src_tensor.stride[d]
-            )
+            src_offset = src_offset + thread_idxs[d] * value_layout[d] * src_tensor.stride[d]
             dst_offset = dst_offset + thread_idxs[d] * value_layout[d] * self.stride[d]
         value_layout_v = value_layout[:-1] + (value_layout[-1] // vec_size,)
         coords = tuple(product(*(range_constexpr(s) for s in value_layout_v)))
@@ -191,12 +189,8 @@ class TensorView:
             dst_vec_offset = dst_offset
             for d in range_constexpr(len(coord)):
                 if d == len(coord) - 1:
-                    src_vec_offset = (
-                        src_vec_offset + coord[d] * src_tensor.stride[d] * vec_size
-                    )
-                    dst_vec_offset = (
-                        dst_vec_offset + coord[d] * self.stride[d] * vec_size
-                    )
+                    src_vec_offset = src_vec_offset + coord[d] * src_tensor.stride[d] * vec_size
+                    dst_vec_offset = dst_vec_offset + coord[d] * self.stride[d] * vec_size
                 else:
                     src_vec_offset = src_vec_offset + coord[d] * src_tensor.stride[d]
                     dst_vec_offset = dst_vec_offset + coord[d] * self.stride[d]
@@ -264,9 +258,7 @@ class TensorBase(ABC):
 
     def copy_(self, src_tensor, thread_layout, value_layout, thread_idxs, vec_size):
         self._lazy_init()
-        self.tensor_view.copy_(
-            src_tensor, thread_layout, value_layout, thread_idxs, vec_size
-        )
+        self.tensor_view.copy_(src_tensor, thread_layout, value_layout, thread_idxs, vec_size)
 
 
 class TorchTensor(TensorBase):
@@ -301,25 +293,17 @@ class GTensor(TensorBase):
         self.cache_modifier = cache_modifier
 
     def load(self, offset, vec_size=1):
-        return buffer_ops.buffer_load(
-            self.rsrc, offset, vec_width=vec_size, dtype=self.dtype
-        )
+        return buffer_ops.buffer_load(self.rsrc, offset, vec_width=vec_size, dtype=self.dtype)
 
     def store(self, offset, value, vec_size=1):
-        buffer_ops.buffer_store(
-            value, self.rsrc, offset, cache_modifier=self.cache_modifier
-        )
+        buffer_ops.buffer_store(value, self.rsrc, offset, cache_modifier=self.cache_modifier)
 
     def get_llvm_ptr(self, ptr, bytes_offset_i64, ptr_type="!llvm.ptr<1>"):
         bytes_offset_i64 = arith.index_cast(T.i64, bytes_offset_i64)
         _ptr_type = ir.Type.parse(ptr_type)
-        base_ptr = fly.extract_aligned_pointer_as_index(
-            _ptr_type, extract_to_ir_values(ptr)[0]
-        )
+        base_ptr = fly.extract_aligned_pointer_as_index(_ptr_type, extract_to_ir_values(ptr)[0])
         base_ptr = llvm.PtrToIntOp(T.i64, base_ptr).result
-        llvm_ptr = llvm.AddOp(
-            base_ptr, bytes_offset_i64, llvm.IntegerOverflowFlags(0)
-        ).result
+        llvm_ptr = llvm.AddOp(base_ptr, bytes_offset_i64, llvm.IntegerOverflowFlags(0)).result
         return llvm_ptr
 
 
