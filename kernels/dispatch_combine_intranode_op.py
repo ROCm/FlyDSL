@@ -110,6 +110,17 @@ class FlyDSLDispatchCombineConfig:
     # ``maxTokenTypeSize``). ``0`` derives from ``data_type``; set to
     # keep one op alive across dtype switches without re-alloc.
     max_token_type_size: int = 0
+    # Target ROCm chip ID, forwarded to JIT compile_hints (mostly
+    # consumed by the fused gemm2+combine path's resident-block
+    # estimator).  Default mirrors the dispatch_combine deployment.
+    chip: str = "gfx950"
+    # D-flag C-1: enable the fused gemm2+combine per-token cross-card
+    # flag-sync codepath.  ``False`` keeps the const_expr DCE branch
+    # (behaviour identical to baseline).  ``True`` requires a follow-up
+    # commit that allocates real shmem buffers and ports the dispatch
+    # kernel grid-stride memset of comb_flag plus the combine kernel
+    # stage-3 spin wait.
+    use_token_flag_sync: bool = False
 
     @property
     def is_fp4(self):
@@ -224,10 +235,16 @@ class FlyDSLDispatchCombineIntraNodeOp:
         self._p2p_comb_inp = torch.zeros(npes, dtype=torch.int64, device=self._dev)
         self._p2p_comb_inp_wts = torch.zeros(npes, dtype=torch.int64, device=self._dev)
         self._p2p_xdb_mem = torch.zeros(npes, dtype=torch.int64, device=self._dev)
+        # D-flag C-1: per-token flag P2P pointer table.  ``dest_pe -> remote
+        # base + flag offset`` lookup feeds the cross-card system-scope
+        # ``atomic_add_global_at`` in the fused gemm2 epilogue's last
+        # N-tile completion path.
+        self._p2p_comb_flag = torch.zeros(npes, dtype=torch.int64, device=self._dev)
         for pe in range(npes):
             self._p2p_comb_inp[pe] = ms.shmem_ptr_p2p(self.shmem_comb_inp_tok.data_ptr(), r, pe)
             self._p2p_comb_inp_wts[pe] = ms.shmem_ptr_p2p(self.shmem_comb_inp_wts.data_ptr(), r, pe)
             self._p2p_xdb_mem[pe] = ms.shmem_ptr_p2p(self.shmem_xdev_bar_mem.data_ptr(), r, pe)
+            self._p2p_comb_flag[pe] = ms.shmem_ptr_p2p(self.shmem_comb_token_flag.data_ptr(), r, pe)
 
         # Dispatch (encode) and combine (decode, Stage 3) must agree on this.
         self._effective_max_recv = config.effective_max_recv
@@ -280,10 +297,38 @@ class FlyDSLDispatchCombineIntraNodeOp:
         self._fx_disp_grid_bar = fx.Int64(self.disp_grid_bar.data_ptr())
         self._fx_disp_out_wts = fx.Int64(self.shmem_disp_out_wts.data_ptr())
 
-        # Lazy skip_stage1 variant for the fused GEMM2+combine path.
-        # Key includes dtype so a runtime dtype switch picks a fresh kernel.
+        # Fused GEMM2+combine launcher surface (D-flag C-1 per-token sync).
+        # _fx_tis aliases tok_id_to_src; comb_flag/local_counter/p2p_comb_flag
+        # back the per-token flag table consumed by combine stage 3.
+        # use_token_flag_sync=False pays only the alloc cost; const_expr
+        # DCE elides every kernel-side load/store.
+        self._fx_tis = self._fx_out_shmem_tok_id_to_src
+        self._fx_comb_flag = fx.Int64(self.shmem_comb_token_flag.data_ptr())
+        self._fx_local_counter = fx.Int64(self.device_local_counter.data_ptr())
+        self._fx_p2p_comb_flag = fx.Int64(self._p2p_comb_flag.data_ptr())
+
+        # Cached input-weights pointer from the most recent dispatch(). When
+        # use_token_flag_sync=ON, combine_no_stage1 stage 3b reads weights
+        # directly from this local buffer and bypasses the stage 1 P2P
+        # scatter. 0 until the first dispatch().
+        self._raw_input_wts_ptr = 0
+
+        # Lazy skip_stage1 variant for the fused path (stage 2 + stage 3
+        # only). Keyed by (input.dtype, enable_weights) so a runtime dtype
+        # switch (e.g. fp4 dispatch + bf16 combine) cannot reuse a stale
+        # specialization.
         self._comb_no_s1_fn: Dict[Tuple[torch.dtype, bool], Any] = {}
         self._comb_no_s1_compiled: Dict[Tuple[torch.dtype, bool], Any] = {}
+
+    def barrier(self):
+        """Cross-rank shmem barrier (fused launcher API surface)."""
+        ms.shmem_barrier_all()
+
+    def reset(self):
+        """Reset op state between graph captures.  Currently a barrier
+        is sufficient because all per-launch counters are device-side
+        ticket counters that derive their epoch from atomic_add."""
+        self.barrier()
 
     def _alloc_buffers(self):
         cfg = self.cfg
@@ -318,13 +363,26 @@ class FlyDSLDispatchCombineIntraNodeOp:
         self.shmem_comb_out_tok = mori_shmem_create_tensor((tok_i16_mt,), torch.int16)
         self.shmem_comb_out_wts = mori_shmem_create_tensor((mt * k,), torch.float32)
         self.shmem_xdev_bar_mem = mori_shmem_create_tensor((npes,), torch.int64)
+        # D-flag C-1 per-token flag buffer: fused gemm2 epilogue's last
+        # N-tile completion thread bumps remote ``flag[token_id] += 1``
+        # via system-scope atomic_add; combine kernel stage 3 entry
+        # spin-waits ``flag[tok_id] >= topk``.  Sized for the worst-case
+        # recv slot count (mr_worst = ws * M); dispatch entry resets the
+        # used prefix [0, cur_tok) at the start of each chain via
+        # grid-stride memset.  ``use_token_flag_sync=False`` callers
+        # pay only the ~32KB allocation; const_expr DCE elides every
+        # load/store.
+        self.shmem_comb_token_flag = mori_shmem_create_tensor((mr_worst,), torch.int32)
 
-        # shmem_malloc is uninitialized; zero the buffers combine reads
-        # so degenerate (unwritten) slots are harmless.
+        # shmem_malloc returns uninitialized memory; zero the buffers
+        # combine reads so degenerate (unwritten) slots are harmless.
+        # shmem_comb_token_flag is zeroed for the very first chain;
+        # the dispatch kernel grid-stride memset owns it afterwards.
         self.shmem_tok_id_to_src.zero_()
         self.shmem_comb_inp_tok.zero_()
         self.shmem_comb_inp_wts.zero_()
         self.shmem_xdev_bar_mem.zero_()
+        self.shmem_comb_token_flag.zero_()
 
         self.dest_pe_ctr = torch.zeros(npes, dtype=torch.int32, device=self._dev)
         self.disp_bar = torch.zeros(1, dtype=torch.int32, device=self._dev)
@@ -349,6 +407,16 @@ class FlyDSLDispatchCombineIntraNodeOp:
             self.packed_recv_src_info = torch.zeros(1, dtype=torch.int32, device=self._dev)
             self.disp_tok_to_ep_slot_map = torch.zeros(1, dtype=torch.int64, device=self._dev)
             self.disp_grid_bar = torch.zeros(1, dtype=torch.int64, device=self._dev)
+
+        # D-flag C-1 device-local counter (not symmetric). The fused gemm2
+        # epilogue does a device-scope atomic_add per (target_token, j) to
+        # count N-tile completions; the last completer issues the cross-
+        # card system-scope atomic_add against the remote flag and xchg-
+        # resets the local slot for the next chain. Sized mr_worst * topk
+        # for worst-case routing; elided when use_token_flag_sync=False.
+        self.device_local_counter = torch.zeros(
+            mr_worst * k, dtype=torch.int32, device=self._dev,
+        )
 
     # Config / runtime contract checks: fail fast on misuse instead of
     # OOB-writing or aborting deep in JIT codegen.
@@ -686,6 +754,7 @@ class FlyDSLDispatchCombineIntraNodeOp:
                 scale_type_size=cfg.scale_type_size,
                 enable_std_moe=cfg.enable_std_moe,
                 max_recv=self._effective_max_recv,
+                use_token_flag_sync=cfg.use_token_flag_sync,
             )
         return self._disp_jit_cache[d_dtype]
 
@@ -705,6 +774,14 @@ class FlyDSLDispatchCombineIntraNodeOp:
             if (indices.dtype == torch.int32 and indices.is_contiguous())
             else indices.to(torch.int32).contiguous()
         )
+
+        # D-flag C-1: stash the contiguous input-weights pointer for the
+        # Stage 3b local-read path inside ``combine_no_stage1`` (bypasses
+        # the Stage 1 weight P2P scatter when ``use_token_flag_sync`` is
+        # ON).  ``wts_c`` is contiguous and pinned to ``[max_tok_per_rank,
+        # topk] f32`` layout so ``(src_tok, lane)`` indexing matches the
+        # mori out_wts contract.
+        self._raw_input_wts_ptr = wts_c.data_ptr()
 
         sc_ptr = scales.data_ptr() if scales is not None else 0
         prx_ptr = packed_recv_x.data_ptr() if packed_recv_x is not None else 0
@@ -752,6 +829,7 @@ class FlyDSLDispatchCombineIntraNodeOp:
                 fx.Int64(sc_ptr),
                 self._fx_p2p_out_scales,
                 *_std_args,
+                self._fx_comb_flag,
                 inp_cur_tok,
                 stream,
             )
@@ -777,6 +855,7 @@ class FlyDSLDispatchCombineIntraNodeOp:
                 sc_ptr,
                 self._fx_p2p_out_scales,
                 *_std_args,
+                self._fx_comb_flag,
                 inp_cur_tok,
                 stream,
             )
@@ -836,6 +915,7 @@ class FlyDSLDispatchCombineIntraNodeOp:
                 skip_stage1=bool(zero_copy),
                 fp8_direct_cast=bool(fp8_dc),
                 max_recv=self._effective_max_recv,
+                use_token_flag_sync=cfg.use_token_flag_sync,
             )
         return self._comb_jit_cache[key], key
 
@@ -949,6 +1029,7 @@ class FlyDSLDispatchCombineIntraNodeOp:
                 self._fx_comb_out_wts,
                 self._fx_p2p_comb_inp_wts,
                 *_std_args_comb,
+                self._fx_comb_flag,
                 _cur_tok,
                 stream,
             )
@@ -974,6 +1055,7 @@ class FlyDSLDispatchCombineIntraNodeOp:
                 prx_ptr,
                 self._fx_disp_tok_map,
                 self._fx_disp_out_wts,
+                self._fx_comb_flag,
                 _cur_tok,
                 stream,
             )
@@ -988,10 +1070,10 @@ class FlyDSLDispatchCombineIntraNodeOp:
 
         return out_tok, out_wts
 
-    # Gated reserved API: only the fused GEMM2+combine path on
-    # ``yanbo/fused_gemm2_combine`` meets the pre-populated-buffer
-    # contract.
-    _ENABLE_COMBINE_NO_STAGE1 = False
+    # Gate for the reserved combine_no_stage1 API: default-on for the
+    # fused GEMM2+combine launcher. A dispatch_combine-only deployment
+    # can re-gate this off via a subclass override.
+    _ENABLE_COMBINE_NO_STAGE1 = True
 
     def combine_no_stage1(self, input, weights, indices, packed_recv_x=None, cur_tok=None, enable_weights: bool = True):
         """Skip-Stage1 combine (reserved for fused GEMM2+combine path).
@@ -1056,7 +1138,24 @@ class FlyDSLDispatchCombineIntraNodeOp:
                 f"cur_tok={_cur_tok} out of range " f"[0, max_num_inp_token_per_rank={cfg.max_num_inp_token_per_rank}]"
             )
 
-        wts_ptr = self.shmem_disp_out_wts.data_ptr() if weights is None else weights.data_ptr()
+        # D-flag C-1: when ``use_token_flag_sync`` is ON Stage 3b reads
+        # weights directly from the local raw input weights buffer
+        # ``[max_tok_per_rank, topk] f32`` instead of the P2P-scattered
+        # ``shmem_disp_out_wts`` -- so the launcher swaps in the cached
+        # ``_raw_input_wts_ptr`` (populated by the most-recent
+        # ``dispatch()`` call).  Caller-provided ``weights`` always wins
+        # if present (matches baseline semantics: e.g. the fused tester
+        # passes a fresh weight tensor for verification runs).
+        if cfg.use_token_flag_sync and weights is None:
+            if self._raw_input_wts_ptr == 0:
+                raise RuntimeError(
+                    "combine_no_stage1(use_token_flag_sync=True) requires a "
+                    "preceding dispatch() so ``_raw_input_wts_ptr`` is "
+                    "populated; no dispatch has been observed on this op yet."
+                )
+            wts_ptr = self._raw_input_wts_ptr
+        else:
+            wts_ptr = self.shmem_disp_out_wts.data_ptr() if weights is None else weights.data_ptr()
 
         _prx_ref = None
         if fp8_dc and packed_recv_x is not None:
@@ -1089,6 +1188,7 @@ class FlyDSLDispatchCombineIntraNodeOp:
                 # Must match dispatch's encoding stride so tok_map
                 # sentinel + (peer_pe, dest_lid) decode line up.
                 max_recv=self._effective_max_recv,
+                use_token_flag_sync=cfg.use_token_flag_sync,
             )
 
         if no_s1_key not in self._comb_no_s1_compiled:
@@ -1111,6 +1211,7 @@ class FlyDSLDispatchCombineIntraNodeOp:
                 fx.Int64(prx_ptr),
                 self._fx_disp_tok_map,
                 self._fx_disp_out_wts,
+                self._fx_comb_flag,
                 _cur_tok,
                 stream,
             )
@@ -1135,6 +1236,7 @@ class FlyDSLDispatchCombineIntraNodeOp:
                 prx_ptr,
                 self._fx_disp_tok_map,
                 self._fx_disp_out_wts,
+                self._fx_comb_flag,
                 _cur_tok,
                 stream,
             )
