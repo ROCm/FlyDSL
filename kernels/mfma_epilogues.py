@@ -107,6 +107,11 @@ def c_shuffle_epilog(
     write_row_to_lds: Callable,
     precompute_row: Callable | None = None,
     store_pair: Callable,
+    # Optional: called once after all n_reps_shuffle col_pair stores for a given
+    # row finish, with (row_local, row, row_ctx). Used by D-flag C-1 fused gemm2
+    # to fire the device-scope cross-CTA atomic + cross-card per-token flag once
+    # the row's tile_n SLC stores are issued. None preserves baseline behaviour.
+    after_row_stores: Callable | None = None,
     # When LDS overflows, split lds_out across two buffers by wave-group.
     # Pass the second buffer here; first buffer is `lds_out`.
     lds_out_split=None,
@@ -370,6 +375,10 @@ def c_shuffle_epilog(
                     col_g0=by_n_v + col_pair0,
                     frag=frag,
                 )
+            if after_row_stores is not None:
+                after_row_stores(
+                    row_local=row_local, row=row, row_ctx=row_ctx,
+                    n_lane=n_lane)
 
         if row_pred is not None:
             _if_row = scf.IfOp(row_pred)
@@ -408,6 +417,7 @@ def mfma_epilog(
     write_row_to_lds: Callable | None = None,
     precompute_row: Callable | None = None,
     store_pair: Callable | None = None,
+    after_row_stores: Callable | None = None,
     frag_elem_type: ir.Type | None = None,
 ):
     if not use_cshuffle:
@@ -446,4 +456,5 @@ def mfma_epilog(
         write_row_to_lds=write_row_to_lds,
         precompute_row=precompute_row,
         store_pair=store_pair,
+        after_row_stores=after_row_stores,
     )
