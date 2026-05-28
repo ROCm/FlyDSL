@@ -181,6 +181,19 @@ def _mfma_agpr_value_attrs():
     return {"passthrough": [["amdgpu-agpr-alloc", PA_MFMA_AGPR_ALLOC]]}
 
 
+def _maxnumf(a, b):
+    """Non-NaN-propagating max, equivalent to ``a.maximumf(b)`` for non-NaN
+    inputs but lowers to a single ``v_max_f32`` instead of the
+    ``v_max_f32 + v_cmp_o_f32 + s_nop 1 + v_cndmask`` chain that
+    ``arith.maximumf`` emits for IEEE 754 NaN-propagation semantics.
+
+    Safe for PA softmax: inputs are either finite or -inf (from masking),
+    never NaN.  Each call site saves ~3 instructions + a 1-cycle VCC→VALU
+    s_nop hazard in the cross-warp max chain.
+    """
+    return type(a)(arith.maxnumf(arith.unwrap(a), arith.unwrap(b)))
+
+
 def _load_k_flat(
     k_global_ptr,
     k_block_base_dw_i64,
@@ -421,10 +434,10 @@ def _finish_q_fragments(
         q_abs_i32 = q_i32 & abs_mask
         q_abs = q_abs_i32.bitcast(fx.Float32)
         chunk_max = q_abs.reduce("max")
-        local_max = local_max.maximumf(chunk_max)
+        local_max = _maxnumf(local_max, chunk_max)
 
     for sh in [8, 4, 2, 1]:
-        local_max = local_max.maximumf(dpp_utils.dpp_xor_f32(local_max, sh))
+        local_max = _maxnumf(local_max, dpp_utils.dpp_xor_f32(local_max, sh))
     query_scale_lane = fx.Float32(
         arith.select(
             local_max > c_zero_f,
@@ -716,9 +729,9 @@ def _make_pa_phase_helpers(
                         vs_i = vector.extract(vs, static_position=[i], dynamic_position=[])
                         vs_i = arith.select(kv_tok < seq_end, vs_i, zero_f)
                         vs = vector.insert(vs_i, vs, static_position=[i], dynamic_position=[])
-                v_max_warp = v_max_warp.maximumf(fx.Vector(vs).reduce("max"))
+                v_max_warp = _maxnumf(v_max_warp, fx.Vector(vs).reduce("max"))
             for sh in [32, 16]:
-                v_max_warp = v_max_warp.maximumf(v_max_warp.shuffle_xor(arith.constant(sh, type=T.i32), c_w))
+                v_max_warp = _maxnumf(v_max_warp, v_max_warp.shuffle_xor(arith.constant(sh, type=T.i32), c_w))
             vector.store(
                 fx.Vector.from_elements([v_max_warp], dtype=fx.Float32),
                 softmax_lds_f32,
@@ -786,9 +799,9 @@ def _make_pa_phase_helpers(
             if const_expr(kv_tok_base is not None):
                 logits_vec = _apply_token_mask_vec(logits_vec, td, kv_tok_base, causal_bound, neg_inf)
                 d_out[td] = logits_vec
-            qk_max = qk_max.maximumf(fx.Vector(logits_vec).reduce("max"))
+            qk_max = _maxnumf(qk_max, fx.Vector(logits_vec).reduce("max"))
         for sh in [32, 16]:
-            qk_max = qk_max.maximumf(qk_max.shuffle_xor(arith.constant(sh, type=T.i32), c_w))
+            qk_max = _maxnumf(qk_max, qk_max.shuffle_xor(arith.constant(sh, type=T.i32), c_w))
         vector.store(
             fx.Vector.from_elements([qk_max], dtype=fx.Float32),
             softmax_lds_f32,
@@ -804,9 +817,9 @@ def _make_pa_phase_helpers(
         partition_sum = zero_f
         max_vec = fx.Vector(vector.load_op(T.f32x4, softmax_lds_f32, [sm_rd_max_offs[0]]))
         for w in range_constexpr(NUM_WARPS):
-            partition_max = partition_max.maximumf(max_vec[w])
+            partition_max = _maxnumf(partition_max, max_vec[w])
 
-        new_rmax = rmax.maximumf(partition_max)
+        new_rmax = _maxnumf(rmax, partition_max)
         safe_eff_max = (
             arith.select(partition_max > neg_inf, new_rmax, zero_f)
             if const_expr(needs_mask)
@@ -853,7 +866,7 @@ def _make_pa_phase_helpers(
             vmax_vec = fx.Vector(vector.load_op(T.f32x4, softmax_lds_f32, [sm_vmax_rd_offs[0]]))
             for w in range_constexpr(NUM_WARPS):
                 w_vmax = vmax_vec[w]
-                v_max_global = v_max_global.maximumf(w_vmax)
+                v_max_global = _maxnumf(v_max_global, w_vmax)
             v_max_scaled = v_max_global * fx.Float32(1.0 / FP8_MAX).ir_value()
             v_max_safe_scaled = v_max_scaled + fx.Float32(1e-8 / FP8_MAX).ir_value()
             norm_factor = _rcp_f32(v_max_safe_scaled)
