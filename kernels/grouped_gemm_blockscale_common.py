@@ -389,7 +389,7 @@ def make_prefetch_scales(
 
             sa_sb = []
             for mi in range_constexpr(m_repeat):
-                sa_row = bx_m + arith.index(mi * 16) + lane_mod_16
+                sa_row = bx_m + (mi * 16) + lane_mod_16
                 sa_idx = sa_base_pf + sa_row
                 sa_i8 = buffer_ops.buffer_load(sa_rsrc, sa_idx, vec_width=1, dtype=T.i8)
                 sa_e8m0 = ArithValue(sa_i8).extui(T.i32)
@@ -462,7 +462,7 @@ def make_compute_tile(
                 for mi in range_constexpr(m_repeat):
                     s_a_row = []
                     for ii in range_constexpr(4):
-                        row_in_tile = arith.index(mi * 16) + row_off_base + fx.Index(ii)
+                        row_in_tile = (mi * 16) + row_off_base + fx.Index(ii)
                         row_global = bx_m + row_in_tile
                         sa_idx = sa_base + row_global
                         s_a_val = buffer_ops.buffer_load(sa_rsrc, sa_idx, vec_width=1, dtype=T.f32)
@@ -490,7 +490,7 @@ def make_compute_tile(
                 col_base1 = col_offset_base_bytes + fx.Index(ku1 * 64)
 
                 for mi in range_constexpr(m_repeat):
-                    curr_row_a_lds = lane_mod_16 + arith.index(mi * 16)
+                    curr_row_a_lds = lane_mod_16 + (mi * 16)
                     if a0_prefetch is not None and sb == 0 and mi == 0:
                         a0, a1 = a0_prefetch
                     else:
@@ -519,7 +519,7 @@ def make_compute_tile(
                         if a0_prefetch is not None and sb == 0 and ku_local == 0 and mi == 0:
                             a0, a1 = a0_prefetch
                         else:
-                            row_a_lds = lane_mod_16 + arith.index(mi * 16)
+                            row_a_lds = lane_mod_16 + (mi * 16)
                             col_a_base_bytes = lane_div_16 * fx.Index(16) + fx.Index(k_offset_bytes)
                             a0, a1 = lds_load_packs_k64(row_a_lds, col_a_base_bytes, lds_base)
 
@@ -747,7 +747,7 @@ def make_n_block_coords(
     c_scale_k = fx.Index(scale_k)
     n_block_for_scale = []
     for ni in range_constexpr(num_acc_n):
-        col_base = by_n + n_tile_base + arith.index(ni * 16)
+        col_base = by_n + n_tile_base + (ni * 16)
         n_blk = col_base // c_scale_block_n
         n_block_for_scale.append(n_blk)
 
@@ -765,7 +765,7 @@ def make_n_block_coords(
     n_intra_list = []
     group_n_off = group_idx * n_in
     for ni in range_constexpr(num_acc_n):
-        col_global = group_n_off + by_n + n_tile_base + arith.index(ni * 16) + lane_mod_16
+        col_global = group_n_off + by_n + n_tile_base + (ni * 16) + lane_mod_16
         coord_ni = fx.idx2crd(col_global, layout_n_blk_intra)
         n_blk_list.append(fx.get(coord_ni, 0))
         n_intra_list.append(fx.get(coord_ni, 1))
