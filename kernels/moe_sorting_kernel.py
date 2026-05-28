@@ -779,8 +779,7 @@ def compile_moe_sorting_oneshot_fused(
     cumsum_bufs = 2
     if r < (cumsum_bufs + sub_unroll):
         raise ValueError(
-            f"LDS too small for E={E}: need at least "
-            f"{(cumsum_bufs + sub_unroll) * smem_cols * 4} bytes"
+            f"LDS too small for E={E}: need at least " f"{(cumsum_bufs + sub_unroll) * smem_cols * 4} bytes"
         )
     r_for_sub = ((r - cumsum_bufs) // sub_unroll) * sub_unroll
     r_token_min = ((max_tokens + sub_unroll - 1) // sub_unroll) * sub_unroll
@@ -854,7 +853,9 @@ def compile_moe_sorting_oneshot_fused(
         cumdup_mr = SmemPtr(base_ptr, cumdup_offset, T.i32, shape=(smem_cols,)).get()
         mesh_mr = SmemPtr(base_ptr, mesh_offset, T.i32, shape=(sub_tokens * smem_cols,)).get()
         weights_lds_mr = SmemPtr(
-            base_ptr, weights_lds_offset, T.i32,
+            base_ptr,
+            weights_lds_offset,
+            T.i32,
             shape=(max_tokens * topk,),
         ).get()
 
@@ -1008,9 +1009,7 @@ def compile_moe_sorting_oneshot_fused(
                     ep_m = buffer_ops.buffer_load(mask_rsrc, ep_safe_eid, vec_width=1, dtype=T.i32)
                     should_zero = ep_valid & (ep_m == c_zero_i32)
                     ep_cs_ix = ArithValue(ep_valid.select(ep_eid + c_one_i32, c_zero_i32)).index_cast(T.index)
-                    _lds_store(cumsum_mr,
-                               should_zero.select(c_zero_i32, _lds_load(cumsum_mr, ep_cs_ix)),
-                               ep_cs_ix)
+                    _lds_store(cumsum_mr, should_zero.select(c_zero_i32, _lds_load(cumsum_mr, ep_cs_ix)), ep_cs_ix)
                 gpu.barrier()
 
             is_wave0 = wave == c_zero_i32
@@ -1026,8 +1025,9 @@ def compile_moe_sorting_oneshot_fused(
                 val = _dpp_intra_wave_prefix_sum(val, lane, WARP_SIZE)
                 val = val + prev_chunk_total
 
-                _lds_store(cumdup_mr, eid_ps_valid.select(val, c_zero_i32),
-                           eid_ps_valid.select(eid_ps + c_one_i32, c_zero_i32))
+                _lds_store(
+                    cumdup_mr, eid_ps_valid.select(val, c_zero_i32), eid_ps_valid.select(eid_ps + c_one_i32, c_zero_i32)
+                )
 
                 last_addr = fx.Int32((WARP_SIZE - 1) * 4)
                 prev_chunk_total = fly_rocdl.ds_bpermute(T.i32, last_addr, val)
@@ -1056,8 +1056,7 @@ def compile_moe_sorting_oneshot_fused(
                     ml_eid = fx.Int32(i_ml) + tid
                     ml_valid = ml_eid < c_E
                     safe_ml_eid = ml_valid.select(ml_eid, c_zero_i32)
-                    ml_mask = buffer_ops.buffer_load(
-                        mask_rsrc, safe_ml_eid, vec_width=1, dtype=T.i32)
+                    ml_mask = buffer_ops.buffer_load(mask_rsrc, safe_ml_eid, vec_width=1, dtype=T.i32)
                     ml_val = ml_valid.select(ml_mask, c_zero_i32)
                     ml_ix = ArithValue(ml_valid.select(ml_eid + c_one_i32, c_zero_i32)).index_cast(T.index)
                     _lds_store(cumdup_mr, ml_val, ml_ix)
@@ -1074,8 +1073,11 @@ def compile_moe_sorting_oneshot_fused(
 
                     mval = _dpp_intra_wave_prefix_sum(mval, lane, WARP_SIZE)
                     mval = mval + prev_chunk_total_m
-                    _lds_store(cumdup_mr, eid_m_valid.select(mval, c_zero_i32),
-                               eid_m_valid.select(eid_m + c_one_i32, c_zero_i32))
+                    _lds_store(
+                        cumdup_mr,
+                        eid_m_valid.select(mval, c_zero_i32),
+                        eid_m_valid.select(eid_m + c_one_i32, c_zero_i32),
+                    )
 
                     last_addr_m = fx.Int32((WARP_SIZE - 1) * 4)
                     prev_chunk_total_m = fly_rocdl.ds_bpermute(T.i32, last_addr_m, mval)
@@ -1128,8 +1130,8 @@ def compile_moe_sorting_oneshot_fused(
                 sc_expert_enabled = eid_sc_valid
                 if has_mask:
                     sc_mask_val = buffer_ops.buffer_load(
-                        mask_rsrc, eid_sc_valid.select(eid_sc, c_zero_i32),
-                        vec_width=1, dtype=T.i32)
+                        mask_rsrc, eid_sc_valid.select(eid_sc, c_zero_i32), vec_width=1, dtype=T.i32
+                    )
                     sc_expert_enabled = eid_sc_valid & (sc_mask_val != c_zero_i32)
 
                 cs_sc_ix = ArithValue(safe_eid_sc).index_cast(T.index)
@@ -1148,24 +1150,27 @@ def compile_moe_sorting_oneshot_fused(
                     cnt_raw = _unwrap(local_cnt)
                     zero_raw = _unwrap(c_zero_i32)
 
-                    remote = fly_rocdl.update_dpp(T.i32, zero_raw, cnt_raw,
-                                                  DPP_ROW_SHR_1, DPP_ROW_MASK, DPP_BANK_MASK, True)
+                    remote = fly_rocdl.update_dpp(
+                        T.i32, zero_raw, cnt_raw, DPP_ROW_SHR_1, DPP_ROW_MASK, DPP_BANK_MASK, True
+                    )
                     should_add = lane_group_os >= c_one_i32
                     local_cnt = should_add.select(local_cnt + fx.Int32(remote), local_cnt)
 
                     cnt_raw = _unwrap(local_cnt)
-                    remote = fly_rocdl.update_dpp(T.i32, zero_raw, cnt_raw,
-                                                  DPP_ROW_SHR_2, DPP_ROW_MASK, DPP_BANK_MASK, True)
+                    remote = fly_rocdl.update_dpp(
+                        T.i32, zero_raw, cnt_raw, DPP_ROW_SHR_2, DPP_ROW_MASK, DPP_BANK_MASK, True
+                    )
                     should_add = lane_group_os >= fx.Int32(2)
                     local_cnt = should_add.select(local_cnt + fx.Int32(remote), local_cnt)
 
                     cnt_raw = _unwrap(local_cnt)
-                    remote = fly_rocdl.update_dpp(T.i32, zero_raw, cnt_raw,
-                                                  DPP_ROW_SHR_4, DPP_ROW_MASK, DPP_BANK_MASK, True)
+                    remote = fly_rocdl.update_dpp(
+                        T.i32, zero_raw, cnt_raw, DPP_ROW_SHR_4, DPP_ROW_MASK, DPP_BANK_MASK, True
+                    )
                     should_add = lane_group_os >= fx.Int32(4)
                     local_cnt = should_add.select(local_cnt + fx.Int32(remote), local_cnt)
 
-                    last_lane_of_group = (tid | fx.Int32(7))
+                    last_lane_of_group = tid | fx.Int32(7)
                     last_addr = last_lane_of_group * c4_i32
                     batch_total = fly_rocdl.ds_bpermute(T.i32, last_addr, local_cnt)
                     batch_total = fx.Int32(batch_total)
@@ -1180,8 +1185,7 @@ def compile_moe_sorting_oneshot_fused(
                     # Fused: weight comes from LDS (gating staged it there)
                     # instead of HBM. `my_sub` is the per-token local index
                     # 0..max_tokens-1; topk_slot_sc identifies the K rank.
-                    w_lds_idx = my_has_token.select(
-                        my_sub * c_topk + topk_slot_sc, c_zero_i32)
+                    w_lds_idx = my_has_token.select(my_sub * c_topk + topk_slot_sc, c_zero_i32)
                     w_val_i32 = _lds_load(weights_lds_mr, w_lds_idx)
                     buffer_ops.buffer_store(w_val_i32, sorted_w_rsrc, safe_slot)
 
@@ -2421,11 +2425,7 @@ def moe_softmax_sort_flydsl(
                       `moe_sorting_flydsl` convention).
     """
     if num_local_tokens is not None:
-        M = (
-            num_local_tokens.item()
-            if isinstance(num_local_tokens, torch.Tensor)
-            else int(num_local_tokens)
-        )
+        M = num_local_tokens.item() if isinstance(num_local_tokens, torch.Tensor) else int(num_local_tokens)
     else:
         M = gating_logits.shape[0]
 
@@ -2465,16 +2465,26 @@ def moe_softmax_sort_flydsl(
 
         launch_moe_sorting_oneshot_fused_path(
             gating_logits,
-            sorted_ids, sorted_weights, sorted_expert_ids, num_valid_ids,
-            moe_buf_i32, mask_tensor, M, moe_buf_elems, n_grid_blocks,
-            num_experts=num_experts, topk=topk,
-            dtype_str=dtype_str, renormalize=renormalize,
-            max_tokens=max_tokens, unit_size=unit_size, has_mask=has_mask,
+            sorted_ids,
+            sorted_weights,
+            sorted_expert_ids,
+            num_valid_ids,
+            moe_buf_i32,
+            mask_tensor,
+            M,
+            moe_buf_elems,
+            n_grid_blocks,
+            num_experts=num_experts,
+            topk=topk,
+            dtype_str=dtype_str,
+            renormalize=renormalize,
+            max_tokens=max_tokens,
+            unit_size=unit_size,
+            has_mask=has_mask,
         )
     else:
         # Fallback: run gating and sort as two separate kernels.
-        topk_weights, topk_ids, tei = _alloc_topk_fallback(
-            device, M, topk, num_experts)
+        topk_weights, topk_ids, tei = _alloc_topk_fallback(device, M, topk, num_experts)
 
         builder_key = (num_experts, topk, dtype_str, renormalize)
         launch_topk = _topk_fallback_builder_cache.get(builder_key)
@@ -2484,6 +2494,7 @@ def moe_softmax_sort_flydsl(
             from kernels.topk_gating_softmax_kernel import (
                 build_topk_gating_softmax_module,
             )
+
             launch_topk = build_topk_gating_softmax_module(
                 num_experts=num_experts,
                 topk=topk,
@@ -2494,13 +2505,21 @@ def moe_softmax_sort_flydsl(
 
         stream = torch.cuda.current_stream()
         launch_topk(
-            gating_logits, topk_weights, topk_ids, tei, M,
+            gating_logits,
+            topk_weights,
+            topk_ids,
+            tei,
+            M,
             stream=stream,
         )
         moe_sorting_flydsl(
-            topk_ids, topk_weights,
-            sorted_ids, sorted_weights, sorted_expert_ids,
-            num_valid_ids, moe_buf,
+            topk_ids,
+            topk_weights,
+            sorted_ids,
+            sorted_weights,
+            sorted_expert_ids,
+            num_valid_ids,
+            moe_buf,
             num_experts,
             unit_size=unit_size,
             expert_mask=expert_mask,
@@ -2599,11 +2618,23 @@ def launch_moe_sorting_oneshot_path(
 
 def launch_moe_sorting_oneshot_fused_path(
     gating_logits,
-    sorted_ids, sorted_weights, sorted_expert_ids, num_valid_ids,
-    moe_buf_i32, expert_mask, i32_tokens, i32_moe_buf_elems, n_grid_blocks,
+    sorted_ids,
+    sorted_weights,
+    sorted_expert_ids,
+    num_valid_ids,
+    moe_buf_i32,
+    expert_mask,
+    i32_tokens,
+    i32_moe_buf_elems,
+    n_grid_blocks,
     *,
-    num_experts, topk, dtype_str, renormalize=True,
-    max_tokens=16, unit_size=UNIT_SIZE, has_mask=False,
+    num_experts,
+    topk,
+    dtype_str,
+    renormalize=True,
+    max_tokens=16,
+    unit_size=UNIT_SIZE,
+    has_mask=False,
 ):
     """Low-level launcher for the fused (gating + sort) oneshot path.
 
@@ -2612,17 +2643,23 @@ def launch_moe_sorting_oneshot_fused_path(
     scratch tensors — all per-token-K data is staged in LDS inside the
     kernel.
     """
-    cache_key = (num_experts, topk, max_tokens, unit_size, n_grid_blocks,
-                 dtype_str, renormalize, has_mask)
+    cache_key = (num_experts, topk, max_tokens, unit_size, n_grid_blocks, dtype_str, renormalize, has_mask)
     cf = _oneshot_fused_cf_cache.get(cache_key)
     if cf is not None:
         stream = torch.cuda.current_stream()
-        cf(gating_logits,
-           sorted_ids, sorted_weights, sorted_expert_ids, num_valid_ids,
-           moe_buf_i32, expert_mask,
-           i32_tokens, i32_moe_buf_elems,
-           n_grid_blocks,
-           fx.Stream(stream))
+        cf(
+            gating_logits,
+            sorted_ids,
+            sorted_weights,
+            sorted_expert_ids,
+            num_valid_ids,
+            moe_buf_i32,
+            expert_mask,
+            i32_tokens,
+            i32_moe_buf_elems,
+            n_grid_blocks,
+            fx.Stream(stream),
+        )
         return
 
     launch_fn = compile_moe_sorting_oneshot_fused(
@@ -2637,9 +2674,14 @@ def launch_moe_sorting_oneshot_fused_path(
     stream = torch.cuda.current_stream()
     launch_fn(
         gating_logits,
-        sorted_ids, sorted_weights, sorted_expert_ids, num_valid_ids,
-        moe_buf_i32, expert_mask,
-        i32_tokens, i32_moe_buf_elems,
+        sorted_ids,
+        sorted_weights,
+        sorted_expert_ids,
+        num_valid_ids,
+        moe_buf_i32,
+        expert_mask,
+        i32_tokens,
+        i32_moe_buf_elems,
         n_grid_blocks,
         stream=stream,
     )
@@ -2647,9 +2689,14 @@ def launch_moe_sorting_oneshot_fused_path(
     cf = flyc.compile(
         launch_fn,
         gating_logits,
-        sorted_ids, sorted_weights, sorted_expert_ids, num_valid_ids,
-        moe_buf_i32, expert_mask,
-        i32_tokens, i32_moe_buf_elems,
+        sorted_ids,
+        sorted_weights,
+        sorted_expert_ids,
+        num_valid_ids,
+        moe_buf_i32,
+        expert_mask,
+        i32_tokens,
+        i32_moe_buf_elems,
         n_grid_blocks,
         fx.Stream(stream),
     )

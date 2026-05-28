@@ -283,9 +283,7 @@ def emit_topk_gating_softmax_body(
     atom_reg_lay_in = fx.make_layout(ELEMS_PER_ATOM, 1)
 
     copy_atom_f32 = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), 32)
-    scalar_reg_ty_f32 = fx.MemRefType.get(
-        T.f32, fx.LayoutType.get(1, 1), register_addr_space
-    )
+    scalar_reg_ty_f32 = fx.MemRefType.get(T.f32, fx.LayoutType.get(1, 1), register_addr_space)
     scalar_reg_lay = fx.make_layout(1, 1)
 
     def _load_atom_in(divided, atom_index):
@@ -499,4 +497,3 @@ def build_topk_gating_softmax_module(
         )
 
     return launch_topk_gating_softmax
-

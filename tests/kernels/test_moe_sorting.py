@@ -656,9 +656,9 @@ def test_moe_sorting_vs_aiter(T, E, topk):
 _TORCH_DTYPE = {"f32": torch.float32, "f16": torch.float16, "bf16": torch.bfloat16}
 
 
-def _call_softmax_sort_fused(gating_logits, E, topk, dtype_str, *,
-                             model_dim=4096, unit_size=UNIT_SIZE,
-                             expert_mask=None, renormalize=True):
+def _call_softmax_sort_fused(
+    gating_logits, E, topk, dtype_str, *, model_dim=4096, unit_size=UNIT_SIZE, expert_mask=None, renormalize=True
+):
     """Allocate outputs and call moe_softmax_sort_flydsl. Mirrors
     `_call_flydsl` but takes raw gating logits and dispatches through the
     fused entry point."""
@@ -672,17 +672,24 @@ def _call_softmax_sort_fused(gating_logits, E, topk, dtype_str, *,
     nv = torch.empty(2, dtype=torch.int32, device=device)
     buf = torch.empty((M, model_dim), dtype=torch.bfloat16, device=device)
     return moe_softmax_sort_flydsl(
-        gating_logits, s_ids, s_w, s_eids, nv, buf,
-        E, topk, dtype_str,
+        gating_logits,
+        s_ids,
+        s_w,
+        s_eids,
+        nv,
+        buf,
+        E,
+        topk,
+        dtype_str,
         unit_size=unit_size,
         expert_mask=expert_mask,
         renormalize=renormalize,
     )
 
 
-def _two_kernel_reference(gating_logits, E, topk, dtype_str, *,
-                          model_dim=4096, unit_size=UNIT_SIZE,
-                          expert_mask=None, renormalize=True):
+def _two_kernel_reference(
+    gating_logits, E, topk, dtype_str, *, model_dim=4096, unit_size=UNIT_SIZE, expert_mask=None, renormalize=True
+):
     """Run gating + sort as two separate kernels; return the same output
     tuple as the fused path. Used as the regression oracle for the fused
     kernel: anything the fused kernel produces must match what these two
@@ -695,7 +702,10 @@ def _two_kernel_reference(gating_logits, E, topk, dtype_str, *,
     tei = torch.empty((M, topk), dtype=torch.int32, device=device)
 
     launch_topk = build_topk_gating_softmax_module(
-        num_experts=E, topk=topk, dtype_str=dtype_str, renormalize=renormalize,
+        num_experts=E,
+        topk=topk,
+        dtype_str=dtype_str,
+        renormalize=renormalize,
     )
     stream = torch.cuda.current_stream()
     launch_topk(gating_logits, topk_weights, topk_ids, tei, M, stream=stream)
@@ -708,8 +718,16 @@ def _two_kernel_reference(gating_logits, E, topk, dtype_str, *,
     nv = torch.empty(2, dtype=torch.int32, device=device)
     buf = torch.empty((M, model_dim), dtype=torch.bfloat16, device=device)
     return moe_sorting_flydsl(
-        topk_ids, topk_weights, s_ids, s_w, s_eids, nv, buf,
-        E, unit_size, expert_mask=expert_mask,
+        topk_ids,
+        topk_weights,
+        s_ids,
+        s_w,
+        s_eids,
+        nv,
+        buf,
+        E,
+        unit_size,
+        expert_mask=expert_mask,
     )
 
 
@@ -726,16 +744,21 @@ def _check_outputs_equal(ref_tuple, fused_tuple, *, topk, M, unit_size, label):
     passed = True
 
     nv_ok = torch.equal(ref_nv, fused_nv)
-    print(f"  [{label}/num_valid_ids] ref={ref_nv.tolist()} fused={fused_nv.tolist()} "
-          f"({'OK' if nv_ok else 'FAIL'})")
+    print(
+        f"  [{label}/num_valid_ids] ref={ref_nv.tolist()} fused={fused_nv.tolist()} " f"({'OK' if nv_ok else 'FAIL'})"
+    )
     passed &= nv_ok
 
     num_padded = ref_nv[0].item()
-    passed &= check_sorted_ids(
-        ref_ids, fused_ids, num_padded, topk, M, f"{label}/sorted_ids")
+    passed &= check_sorted_ids(ref_ids, fused_ids, num_padded, topk, M, f"{label}/sorted_ids")
     passed &= check_sorted_weights(
-        ref_w, fused_w, ref_ids, topk, M,
-        gpu_ids=fused_ids, num_padded=num_padded,
+        ref_w,
+        fused_w,
+        ref_ids,
+        topk,
+        M,
+        gpu_ids=fused_ids,
+        num_padded=num_padded,
         label=f"{label}/sorted_weights",
     )
     # Both paths leave the trailing blocks of `sorted_expert_ids`
@@ -743,7 +766,9 @@ def _check_outputs_equal(ref_tuple, fused_tuple, *, topk, M, unit_size, label):
     # and reference launchers), so compare only the in-range blocks.
     num_valid_blocks = num_padded // unit_size
     passed &= check_expert_ids(
-        ref_eids, fused_eids, f"{label}/sorted_expert_ids",
+        ref_eids,
+        fused_eids,
+        f"{label}/sorted_expert_ids",
         num_valid_blocks=num_valid_blocks,
     )
 
@@ -754,12 +779,10 @@ def _check_outputs_equal(ref_tuple, fused_tuple, *, topk, M, unit_size, label):
     return passed
 
 
-def _run_softmax_sort_fused_test(T, E, topk, dtype_str, *, renormalize=True,
-                                 unit_size=UNIT_SIZE, model_dim=4096):
+def _run_softmax_sort_fused_test(T, E, topk, dtype_str, *, renormalize=True, unit_size=UNIT_SIZE, model_dim=4096):
     """Generate gating logits, run both paths, compare. Returns bool."""
     print(f"\n{'=' * 60}")
-    print(f"Fused softmax_sort test: T={T}, E={E}, topk={topk}, "
-          f"dtype={dtype_str}, renorm={renormalize}")
+    print(f"Fused softmax_sort test: T={T}, E={E}, topk={topk}, " f"dtype={dtype_str}, renorm={renormalize}")
     print(f"{'=' * 60}")
 
     torch.manual_seed(42 + T * 1000 + E * 10 + topk + hash(dtype_str) % 100)
@@ -769,23 +792,35 @@ def _run_softmax_sort_fused_test(T, E, topk, dtype_str, *, renormalize=True,
     # reference path sees identical bytes. Without this, bf16/f16 boundary
     # ties at the top-K cutoff can swing differently in fp32 vs quantised
     # arithmetic and produce spurious mismatches.
-    gating_fp32 = (
-        torch.rand((T, E), device="cuda", dtype=torch.float32) * 4.0 - 2.0
-    )
+    gating_fp32 = torch.rand((T, E), device="cuda", dtype=torch.float32) * 4.0 - 2.0
     gating_dev = gating_fp32.to(torch_dtype).contiguous()
 
     fused_out = _call_softmax_sort_fused(
-        gating_dev, E, topk, dtype_str,
-        model_dim=model_dim, unit_size=unit_size, renormalize=renormalize,
+        gating_dev,
+        E,
+        topk,
+        dtype_str,
+        model_dim=model_dim,
+        unit_size=unit_size,
+        renormalize=renormalize,
     )
     ref_out = _two_kernel_reference(
-        gating_dev, E, topk, dtype_str,
-        model_dim=model_dim, unit_size=unit_size, renormalize=renormalize,
+        gating_dev,
+        E,
+        topk,
+        dtype_str,
+        model_dim=model_dim,
+        unit_size=unit_size,
+        renormalize=renormalize,
     )
     torch.cuda.synchronize()
 
     passed = _check_outputs_equal(
-        ref_out, fused_out, topk=topk, M=T, unit_size=unit_size,
+        ref_out,
+        fused_out,
+        topk=topk,
+        M=T,
+        unit_size=unit_size,
         label=f"fused(T={T},E={E},k={topk},{dtype_str})",
     )
     print(f"  >>> {'PASSED' if passed else 'FAILED'}")
@@ -806,7 +841,7 @@ FUSED_ONESHOT_CONFIGS = [
     (8, 256, 8, "f16"),
     (8, 256, 8, "f32"),
     # Edge cases
-    (7, 256, 8, "bf16"),   # M not a multiple of TOKENS_PER_BLOCK
+    (7, 256, 8, "bf16"),  # M not a multiple of TOKENS_PER_BLOCK
     (13, 256, 8, "bf16"),  # arbitrary M < TOKENS_PER_BLOCK
 ]
 
@@ -814,32 +849,32 @@ FUSED_ONESHOT_CONFIGS = [
 @pytest.mark.parametrize("T,E,topk,dtype_str", FUSED_ONESHOT_CONFIGS)
 def test_moe_softmax_sort_fused_oneshot(T, E, topk, dtype_str):
     assert _supports_fused_oneshot(E, topk, dtype_str), (
-        f"Test config {E=}/{topk=}/{dtype_str=} not supported by fused oneshot; "
-        "check FUSED_ONESHOT_CONFIGS"
+        f"Test config {E=}/{topk=}/{dtype_str=} not supported by fused oneshot; " "check FUSED_ONESHOT_CONFIGS"
     )
     passed = _run_softmax_sort_fused_test(T, E, topk, dtype_str)
     assert passed, (
-        f"moe_softmax_sort_flydsl fused oneshot mismatch for "
-        f"T={T}, E={E}, topk={topk}, dtype={dtype_str}"
+        f"moe_softmax_sort_flydsl fused oneshot mismatch for " f"T={T}, E={E}, topk={topk}, dtype={dtype_str}"
     )
 
 
-@pytest.mark.parametrize("T,E,topk,dtype_str", [
-    # M > FUSED_ONESHOT_MAX_T forces the fused entry to take its 2-kernel fallback
-    # (separate gating + moe_sorting launches). The gating layout must
-    # still be supported.
-    (32, 256, 8, "bf16"),
-    (64, 256, 8, "bf16"),
-    (128, 256, 8, "bf16"),
-    (1024, 256, 8, "bf16"),
-])
+@pytest.mark.parametrize(
+    "T,E,topk,dtype_str",
+    [
+        # M > FUSED_ONESHOT_MAX_T forces the fused entry to take its 2-kernel fallback
+        # (separate gating + moe_sorting launches). The gating layout must
+        # still be supported.
+        (32, 256, 8, "bf16"),
+        (64, 256, 8, "bf16"),
+        (128, 256, 8, "bf16"),
+        (1024, 256, 8, "bf16"),
+    ],
+)
 def test_moe_softmax_sort_fallback(T, E, topk, dtype_str):
     """The fused-path entry must remain correct when it falls back to the
     2-kernel chain because M exceeds the oneshot bound."""
     passed = _run_softmax_sort_fused_test(T, E, topk, dtype_str)
     assert passed, (
-        f"moe_softmax_sort_flydsl fallback path mismatch for "
-        f"T={T}, E={E}, topk={topk}, dtype={dtype_str}"
+        f"moe_softmax_sort_flydsl fallback path mismatch for " f"T={T}, E={E}, topk={topk}, dtype={dtype_str}"
     )
 
 
@@ -987,8 +1022,10 @@ def run_bench_comparison(token_sweep=None):
     print(f"  Device: {torch.cuda.get_device_name(0)}")
     props = torch.cuda.get_device_properties(0)
     print(f"  CUs: {props.multi_processor_count}, oneshot threshold: T<={sub_tokens}")
-    print(f"  Modes: eager (with L2 flush, median of {BENCH_MEASURE}), graph ({BENCH_MEASURE} replays), "
-          f"kernel (on-device dwell)")
+    print(
+        f"  Modes: eager (with L2 flush, median of {BENCH_MEASURE}), graph ({BENCH_MEASURE} replays), "
+        f"kernel (on-device dwell)"
+    )
     print(f"{'=' * 140}")
     print(
         f"{'T':>6s} | {'Path':>7s} | "
@@ -1067,8 +1104,7 @@ def run_bench_comparison(token_sweep=None):
     print()
 
 
-def run_fused_bench_comparison(token_sweep=None, dtype_str="bf16",
-                               num_experts=256, topk=8, model_dim=4096):
+def run_fused_bench_comparison(token_sweep=None, dtype_str="bf16", num_experts=256, topk=8, model_dim=4096):
     """Benchmark fused softmax+top-K+sort vs the unfused 2-kernel chain.
 
     Measures the routing stage (gating + sort) end-to-end across a range of
@@ -1095,31 +1131,40 @@ def run_fused_bench_comparison(token_sweep=None, dtype_str="bf16",
     torch_dtype = _TORCH_DTYPE[dtype_str]
 
     print(f"\n{'=' * 145}")
-    print(f"  MoE Fused Routing Benchmark: fused vs (gating + moe_sorting) "
-          f"(E={E}, topk={topk}, dtype={dtype_str}, "
-          f"model_dim={model_dim}, unit_size={UNIT_SIZE})")
+    print(
+        f"  MoE Fused Routing Benchmark: fused vs (gating + moe_sorting) "
+        f"(E={E}, topk={topk}, dtype={dtype_str}, "
+        f"model_dim={model_dim}, unit_size={UNIT_SIZE})"
+    )
     print(f"  Device: {torch.cuda.get_device_name(0)}")
-    print(f"  Modes: eager (with L2 flush, median of {BENCH_MEASURE}), "
-          f"graph ({BENCH_MEASURE} replays), kernel (sum of on-device kernel time)")
+    print(
+        f"  Modes: eager (with L2 flush, median of {BENCH_MEASURE}), "
+        f"graph ({BENCH_MEASURE} replays), kernel (sum of on-device kernel time)"
+    )
     print(f"{'=' * 145}")
-    print(f"{'T':>6s} | {'Path':>9s} | "
-          f"{'unfused eager':>14s} | {'fused eager':>13s} | "
-          f"{'unfused graph':>14s} | {'fused graph':>13s} | "
-          f"{'unfused kern':>13s} | {'fused kern':>12s} | "
-          f"{'Eager':>7s} | {'Graph':>7s} | {'Kern':>7s}")
+    print(
+        f"{'T':>6s} | {'Path':>9s} | "
+        f"{'unfused eager':>14s} | {'fused eager':>13s} | "
+        f"{'unfused graph':>14s} | {'fused graph':>13s} | "
+        f"{'unfused kern':>13s} | {'fused kern':>12s} | "
+        f"{'Eager':>7s} | {'Graph':>7s} | {'Kern':>7s}"
+    )
     print("-" * 145)
 
     # Cache the standalone gating launcher so the unfused path doesn't pay
     # compile time inside the measured region.
     launch_topk = build_topk_gating_softmax_module(
-        num_experts=E, topk=topk, dtype_str=dtype_str, renormalize=True,
+        num_experts=E,
+        topk=topk,
+        dtype_str=dtype_str,
+        renormalize=True,
     )
 
     for T in token_sweep:
         torch.manual_seed(42)
         gating_logits = (
-            torch.rand((T, E), device="cuda", dtype=torch.float32) * 4.0 - 2.0
-        ).to(torch_dtype).contiguous()
+            (torch.rand((T, E), device="cuda", dtype=torch.float32) * 4.0 - 2.0).to(torch_dtype).contiguous()
+        )
 
         max_num_tokens_padded = T * topk + E * UNIT_SIZE - topk
         max_num_m_blocks = (max_num_tokens_padded + UNIT_SIZE - 1) // UNIT_SIZE
@@ -1138,16 +1183,28 @@ def run_fused_bench_comparison(token_sweep=None, dtype_str="bf16",
             stream = torch.cuda.current_stream()
             launch_topk(gating_logits, u_topk_w, u_topk_ids, u_tei, T, stream=stream)
             moe_sorting_flydsl(
-                u_topk_ids, u_topk_w,
-                sorted_ids, sorted_w, sorted_eids, nvalid, moe_buf_2d,
-                E, UNIT_SIZE,
+                u_topk_ids,
+                u_topk_w,
+                sorted_ids,
+                sorted_w,
+                sorted_eids,
+                nvalid,
+                moe_buf_2d,
+                E,
+                UNIT_SIZE,
             )
 
         def fused_fn():
             moe_softmax_sort_flydsl(
                 gating_logits,
-                sorted_ids, sorted_w, sorted_eids, nvalid, moe_buf_2d,
-                E, topk, dtype_str,
+                sorted_ids,
+                sorted_w,
+                sorted_eids,
+                nvalid,
+                moe_buf_2d,
+                E,
+                topk,
+                dtype_str,
                 unit_size=UNIT_SIZE,
             )
 
@@ -1175,13 +1232,15 @@ def run_fused_bench_comparison(token_sweep=None, dtype_str="bf16",
             r = unfused / fused
             return f"  {r:.2f}x"
 
-        print(f"{T:>6d} | {path:>9s} | "
-              f"{fmt(unfused_eager)} | {fmt(fused_eager)} | "
-              f"{fmt(unfused_graph)} | {fmt(fused_graph)} | "
-              f"{fmt(unfused_kernel, 11)} | {fmt(fused_kernel, 10)} | "
-              f"{ratio(unfused_eager, fused_eager)} | "
-              f"{ratio(unfused_graph, fused_graph)} | "
-              f"{ratio(unfused_kernel, fused_kernel)}")
+        print(
+            f"{T:>6d} | {path:>9s} | "
+            f"{fmt(unfused_eager)} | {fmt(fused_eager)} | "
+            f"{fmt(unfused_graph)} | {fmt(fused_graph)} | "
+            f"{fmt(unfused_kernel, 11)} | {fmt(fused_kernel, 10)} | "
+            f"{ratio(unfused_eager, fused_eager)} | "
+            f"{ratio(unfused_graph, fused_graph)} | "
+            f"{ratio(unfused_kernel, fused_kernel)}"
+        )
 
     print("=" * 145)
     print("  Ratio > 1.0 = fused faster. Eager includes host launch overhead (2 launches vs 1);")
@@ -1201,21 +1260,27 @@ def main():
     parser.add_argument("--all", action="store_true", help="Run all configs")
     parser.add_argument("--aiter", action="store_true", help="Compare with aiter")
     parser.add_argument("--bench", action="store_true", help="Run benchmark sweep (eager + graph + kern, FlyDSL vs CK)")
-    parser.add_argument("--bench-fused", action="store_true",
-                        help="Run fused-vs-unfused benchmark for moe_softmax_sort_flydsl")
+    parser.add_argument(
+        "--bench-fused", action="store_true", help="Run fused-vs-unfused benchmark for moe_softmax_sort_flydsl"
+    )
     parser.add_argument(
         "--bench-tokens", type=str, default=None, help="Comma-separated T values for bench (default: all)"
     )
-    parser.add_argument("--bench-experts", type=int, default=256,
-                        help="Num experts E for --bench-fused (default 256)")
-    parser.add_argument("--bench-topk", type=int, default=8,
-                        help="topk for --bench-fused (default 8)")
-    parser.add_argument("--bench-dtype", type=str, default="bf16",
-                        choices=["bf16", "f16", "f32"],
-                        help="Gating-logits dtype for --bench-fused (default bf16)")
-    parser.add_argument("--bench-model-dim", type=int, default=4096,
-                        help="Hidden size (moe_buf width) for --bench-fused "
-                             "(DeepSeek R1: 7168; default 4096)")
+    parser.add_argument("--bench-experts", type=int, default=256, help="Num experts E for --bench-fused (default 256)")
+    parser.add_argument("--bench-topk", type=int, default=8, help="topk for --bench-fused (default 8)")
+    parser.add_argument(
+        "--bench-dtype",
+        type=str,
+        default="bf16",
+        choices=["bf16", "f16", "f32"],
+        help="Gating-logits dtype for --bench-fused (default bf16)",
+    )
+    parser.add_argument(
+        "--bench-model-dim",
+        type=int,
+        default=4096,
+        help="Hidden size (moe_buf width) for --bench-fused " "(DeepSeek R1: 7168; default 4096)",
+    )
     args = parser.parse_args()
 
     if args.bench:
