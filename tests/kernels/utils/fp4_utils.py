@@ -60,6 +60,63 @@ def f32_to_e8m0(x):
     return exponent.view(fp8_e8m0)
 
 
+def f32_to_e8m0_even(amax: Tensor, *, emax: int, mbits: int) -> Tensor:
+    """OCP MX v1.0 §6.3 ``even_round`` E8M0 scale assignment.
+
+    Given a per-block ``amax = max |x_i|`` (non-negative float32), returns the
+    E8M0 byte (uint8) that encodes the per-block scale
+    ``X_scale = 2^(floor(log2(amax_rounded)) - emax)``, where
+    ``amax_rounded`` is ``amax`` rounded to ``mbits``-of-mantissa precision via
+    round-half-to-even (i.e. add half-ULP at f32 mantissa bit
+    ``23 - mbits - 1`` and mask off the mantissa).
+
+    Args:
+        amax: float32 tensor of per-block absolute maxima. Must be
+            non-negative; NaN entries propagate to 0xFF.
+        emax: largest representable element-format exponent. For E2M1 use 2,
+            E2M3 use 2, E3M2 use 4, E4M3 use 8, etc. (= 2^(ebits-1) for
+            symmetric exponent-bias formats).
+        mbits: element-format mantissa width in bits. Used only to size the
+            half-ULP added to ``amax`` before truncation; controls
+            tie-breaking. E2M1: 1, E2M3: 3, E3M2: 2, E4M3: 3.
+
+    Returns:
+        uint8 tensor (viewed as fp8_e8m0 when supported) of the same shape as
+        ``amax`` holding the E8M0 codepoint ``k + 127`` where
+        ``k = floor(log2(amax_rounded)) - emax``.
+
+    Notes:
+        ``f32_to_e8m0`` above expects pre-divided input ``amax / max_normal``
+        and is biased one exponent step low on ~68% of blocks vs. the OCP
+        spec when ``max_normal != 2^emax`` (e.g. E2M3 max_normal = 7.5, so
+        ``1/max_normal`` lies in (0.5, 1) of a binade, dragging the rounded
+        exponent down by one). Use this function instead when producing
+        scales that need to interoperate with Quark / OCP-spec checkpoints.
+        See ``quark.torch.quantization.utils.even_round`` for the reference
+        implementation this matches bit-for-bit.
+    """
+    assert amax.dtype == torch.float32, f"amax must be float32, got {amax.dtype}"
+    amax = amax.contiguous()
+    amax_i32 = amax.view(torch.int32)
+    # Half-ULP at mantissa bit (23 - mbits - 1). On uint32 add this would
+    # carry cleanly into the exponent; we go through int64 because HIP
+    # doesn't implement uint32 ops.
+    val_to_add = 1 << (23 - mbits - 1)
+    sign_exp_mask = 0x7F800000  # sign bit is 0 since amax >= 0
+    rounded = ((amax_i32.to(torch.int64) & 0xFFFFFFFF) + val_to_add) & sign_exp_mask
+    # rounded_exp = f32 exponent field of amax_rounded = floor(log2(.)) + 127
+    rounded_exp = (rounded >> 23) & 0xFF
+    # E8M0 byte = (rounded_exp - 127) - emax + 127 = rounded_exp - emax
+    byte = (rounded_exp - emax).clamp_(min=0, max=254)
+    # Edge cases (per Quark): zero amax → smallest normal scale (byte=1);
+    # NaN amax → 0xFF.
+    nan_mask = ((amax_i32.to(torch.int64) >> 23) & 0xFF) == 0xFF
+    zero_mask = amax == 0
+    byte = torch.where(zero_mask, torch.full_like(byte, 1), byte)
+    byte = torch.where(nan_mask, torch.full_like(byte, 0xFF), byte)
+    return byte.to(torch.uint8).view(fp8_e8m0)
+
+
 def e8m0_to_f32(scale_e8m0_biased):
     scale_e8m0_biased = scale_e8m0_biased.view(torch.uint8)
     zero_case = scale_e8m0_biased == 0
