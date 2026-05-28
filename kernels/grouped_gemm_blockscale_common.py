@@ -16,7 +16,7 @@ import flydsl.expr as fx
 from flydsl.expr import arith, buffer_ops, gpu, rocdl, vector
 from flydsl.expr import range_constexpr
 from flydsl.expr.arith import ArithValue
-from flydsl.expr.typing import T
+from flydsl.expr.typing import T, Vector
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import scf
 from flydsl._mlir.dialects import math as math_dialect
@@ -216,7 +216,7 @@ def make_a_tile_loaders(
             else:
                 idx_i32 = a_tile_offset_div4 + row_global * _k_div4_factor + base_k_div4 + a_col_local_i32[i]
             a_vec = buffer_ops.buffer_load(a_rsrc, idx_i32, vec_width=4, dtype=T.i32)
-            parts.append(vector.bitcast(T.i32x4, a_vec))
+            parts.append(Vector(a_vec).bitcast(fx.Int32))
         return parts
 
     def store_a_tile_to_lds(a_parts, lds_base):
@@ -312,7 +312,7 @@ def pack_i64x4_to_i32x8(x0, x1, x2, x3):
     Used to assemble the K=128 MFMA A/B operands on gfx950.
     """
     v4 = vector.from_elements(T.vec(4, T.i64), [x0, x1, x2, x3])
-    return vector.bitcast(T.vec(8, T.i32), v4)
+    return Vector(v4).bitcast(fx.Int32)
 
 
 def make_hot_loop_scheduler(
@@ -667,15 +667,13 @@ def make_epilogue_writers(
             idx_out = d_group_off + row * c_n + col_g0
         byte_off = idx_out * 2
         if e_vec == 4:
-            frag_i32x2 = vector.bitcast(T.vec(2, T.i32), frag)
+            frag_i32x2 = Vector(frag).bitcast(fx.Int32)
             buffer_ops.buffer_store(
                 frag_i32x2, d_rsrc, byte_off, offset_is_bytes=True
             )
         else:
-            frag_i32x1 = vector.bitcast(T.vec(1, T.i32), frag)
-            frag_i32 = vector.extract(
-                frag_i32x1, static_position=[0], dynamic_position=[]
-            )
+            frag_i32x1 = Vector(frag).bitcast(fx.Int32)
+            frag_i32 = frag_i32x1[0]
             buffer_ops.buffer_store(
                 frag_i32, d_rsrc, byte_off, offset_is_bytes=True
             )
