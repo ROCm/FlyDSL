@@ -87,7 +87,8 @@ def create_wmma_gemm_module(
     assert K % BLOCK_K == 0
 
     num_k_tiles = K // BLOCK_K
-    assert num_k_tiles >= 2, "Need at least 2 K-tiles for prefetch pipeline"
+    if num_k_tiles < 2:
+        raise ValueError(f"Need at least 2 K-tiles for prefetch pipeline; got K={K}, BLOCK_K={BLOCK_K}")
 
     grid_m = M // BLOCK_M
     grid_n = N // BLOCK_N
