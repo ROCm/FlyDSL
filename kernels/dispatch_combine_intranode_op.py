@@ -412,10 +412,19 @@ class FlyDSLDispatchCombineIntraNodeOp:
         # epilogue does a device-scope atomic_add per (target_token, j) to
         # count N-tile completions; the last completer issues the cross-
         # card system-scope atomic_add against the remote flag and xchg-
-        # resets the local slot for the next chain. Sized mr_worst * topk
-        # for worst-case routing; elided when use_token_flag_sync=False.
+        # resets the local slot for the next chain. Elided when
+        # use_token_flag_sync=False.
+        #
+        # Size must cover the row_i32 upper bound (= num_valid_ids). Under
+        # aiter sorting num_valid_ids can reach mr*k + npes*epr*tile_m_max;
+        # tile_m_max=128 is a conservative GEMM2 m-tile bound. Earlier
+        # mr*k-only sizing caused OOB atomic increments and a combine
+        # spin-wait hang on small-BS aiter-sorted routings.
+        epr = cfg.num_experts_per_rank
+        tile_m_max = 128
+        local_counter_size = mr_worst * k + npes * epr * tile_m_max
         self.device_local_counter = torch.zeros(
-            mr_worst * k, dtype=torch.int32, device=self._dev,
+            local_counter_size, dtype=torch.int32, device=self._dev,
         )
 
     # Config / runtime contract checks: fail fast on misuse instead of

@@ -25,7 +25,10 @@ from flydsl.expr.rocdl import (
     cvt_scalef32_pk_f32_fp4,
     cvt_scalef32_pk_fp4_f32,
     readlane,
+    s_waitcnt,
 )
+import flydsl.expr.rocdl as rocdl
+from flydsl.expr import gpu
 from flydsl.expr.typing import Stream
 from flydsl.runtime.device import get_rocm_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr, check_smem_capacity
@@ -219,19 +222,23 @@ def make_dispatch_kernel(
         work_limit = inp_cur_tok * experts_per_token
 
         # D-flag C-1: grid-stride memset reset of the per-token flag at
-        # dispatch entry. Must complete before Phase 2 sends recv signals
-        # so all remote PEs see a clean flag table by the time the fused
-        # gemm2 epilogue issues its cross-card atomic_adds. No barrier
-        # needed: same-rank readers are gated by int32_wait_until_greater_than,
-        # cross-card visibility is established by the subsequent system-scope
-        # atomic chain. const_expr OFF -> the entire block is DCE'd.
+        # dispatch entry. Must complete before Phase 2 sends recv signals.
+        # Uses store_i32_system + release fence so the reset commits before
+        # any remote fused gemm2 epilogue's system-scope atomic_add (mixing
+        # relaxed stores with system atomics here previously raced and
+        # caused stale flag reads on the combine spin). const_expr OFF ->
+        # the entire reset block is DCE'd.
         if const_expr(use_token_flag_sync):
             mr_const = npes * max_tok_per_rank
             gtid = bid * (warp_num_per_block * 64) + tid
             gthrd_num = block_num * warp_num_per_block * 64
-            _r_comb_flag_reset = create_buffer_resource_from_addr(addr_comb_flag)
+            _zero_i32 = arith.constant(0)
             for i in range(gtid, mr_const, gthrd_num):
-                buffer_store(arith.constant(0), _r_comb_flag_reset, i)
+                store_i32_system(addr_comb_flag, i, _zero_i32)
+            gpu.barrier()
+            rocdl.s_waitcnt(0)
+            _llvm_d.FenceOp(
+                _llvm_d.AtomicOrdering.release, syncscope="one-as")
 
 
         _r_idx = create_buffer_resource_from_addr(addr_inp_idx)
@@ -1273,55 +1280,71 @@ def make_combine_kernel(
         # contribute zero (preserves the dup-aware math).
         if const_expr(enable_weights):
             rsrc_out_wts = create_buffer_resource_from_addr(addr_out_shmem_wts)
-            _tfs_fast_wts = const_expr(use_token_flag_sync and skip_stage1)
+            # ``_tfs_fast_wts`` is a plain Python ``bool`` -- both
+            # branches are emitted const_expr-style by mirroring it back
+            # into ``const_expr(...)`` at every gating site below.  The
+            # two branches are written as a top-level ``if/else`` over
+            # the boolean so the inactive branch never participates in
+            # IR emission (avoids ambiguous `continue` semantics inside
+            # ``range_constexpr``).
+            _tfs_fast_wts = bool(use_token_flag_sync and skip_stage1)
             if const_expr(_tfs_fast_wts):
                 _rsrc_inp_wts_local = create_buffer_resource_from_addr(addr_inp_wts)
-            for wt_tok_id in range(global_warp_id, cur_rank_num_token, global_warp_num):
-                wt_tm_off = wt_tok_id * experts_per_token
-
-                if lane < experts_per_token:
-                    wt_acc = arith.constant(0.0, type=T.f32())
-                    if const_expr(_tfs_fast_wts):
+                for wt_tok_id in range(global_warp_id, cur_rank_num_token, global_warp_num):
+                    wt_tm_off = wt_tok_id * experts_per_token
+                    if lane < experts_per_token:
+                        wt_acc = arith.constant(0.0, type=T.f32())
                         # D-flag C-1: one local load of ``me.weights[t, lane]``;
-                        # the per-slot loop below only contributes a vld
-                        # mask so dup k_slots contribute zero.
+                        # the per-slot loop below only contributes a
+                        # ``_wvld`` mask so duplicate / overflow k_slots
+                        # contribute zero (preserves ``unique_pe_count *
+                        # me.weights[t, lane]`` semantic on dup-heavy
+                        # routing).
                         _wv_local = buffer_load(
                             _rsrc_inp_wts_local,
                             wt_tok_id * experts_per_token + lane,
                             vec_width=1,
                             dtype=T.f32(),
                         )
-                    for k_slot in range_constexpr(experts_per_token):
-                        wt_enc = buffer_load(_rsrc_tok_map, wt_tm_off + k_slot, vec_width=1, dtype=T.i32())
-                        if const_expr(_log2_max_recv is not None):
-                            wt_pe = wt_enc >> _log2_max_recv
-                        else:
-                            wt_pe = wt_enc // max_recv
-                        wt_vld = wt_pe < npes
-                        wt_safe_pe = arith.select(wt_vld, wt_pe, rank)
-                        if const_expr(_tfs_fast_wts):
-                            # Local-read fast path: ``_wv_local`` already
-                            # holds ``me.weights[wt_tok_id, lane]``; this
-                            # k_slot only contributes if the routing
-                            # decision was a real (non-dup) target.
+                        for k_slot in range_constexpr(experts_per_token):
+                            wt_enc = buffer_load(_rsrc_tok_map, wt_tm_off + k_slot, vec_width=1, dtype=T.i32())
+                            if const_expr(_log2_max_recv is not None):
+                                wt_pe = wt_enc >> _log2_max_recv
+                            else:
+                                wt_pe = wt_enc // max_recv
+                            wt_vld = wt_pe < npes
                             wt_acc = wt_acc + arith.select(wt_vld, _wv_local, 0.0)
-                            continue
-                        if const_expr(zero_copy):
-                            wt_dtok = wt_enc % max_recv
-                            wt_safe_dtok = arith.select(wt_vld, wt_dtok, 0)
-                            wt_pe_base = SmemPtr.load(_lds_p2p_wt_bases, [wt_safe_pe])
-                            wt_src_off = _to_i64(wt_safe_dtok) * weight_bytes
-                            wt_rsrc = create_buffer_resource_from_addr(wt_pe_base + wt_src_off)
-                        else:
-                            wt_src_off = _to_i64(wt_safe_pe * max_tok_per_rank + wt_tok_id) * weight_bytes
-                            wt_rsrc = create_buffer_resource_from_addr(addr_shmem_wts + wt_src_off)
-                        wt_val = buffer_load(wt_rsrc, lane, vec_width=1, dtype=T.f32())
-                        if const_expr(npes >= experts_per_token):
-                            wt_acc = wt_acc + wt_val
-                        else:
-                            wt_acc = wt_acc + arith.select(wt_vld, wt_val, 0.0)
-                    wt_out_off = wt_tok_id * experts_per_token + lane
-                    buffer_store(wt_acc, rsrc_out_wts, wt_out_off)
+                        wt_out_off = wt_tok_id * experts_per_token + lane
+                        buffer_store(wt_acc, rsrc_out_wts, wt_out_off)
+            else:
+                for wt_tok_id in range(global_warp_id, cur_rank_num_token, global_warp_num):
+                    wt_tm_off = wt_tok_id * experts_per_token
+                    if lane < experts_per_token:
+                        wt_acc = arith.constant(0.0, type=T.f32())
+                        for k_slot in range_constexpr(experts_per_token):
+                            wt_enc = buffer_load(_rsrc_tok_map, wt_tm_off + k_slot, vec_width=1, dtype=T.i32())
+                            if const_expr(_log2_max_recv is not None):
+                                wt_pe = wt_enc >> _log2_max_recv
+                            else:
+                                wt_pe = wt_enc // max_recv
+                            wt_vld = wt_pe < npes
+                            wt_safe_pe = arith.select(wt_vld, wt_pe, rank)
+                            if const_expr(zero_copy):
+                                wt_dtok = wt_enc % max_recv
+                                wt_safe_dtok = arith.select(wt_vld, wt_dtok, 0)
+                                wt_pe_base = SmemPtr.load(_lds_p2p_wt_bases, [wt_safe_pe])
+                                wt_src_off = _to_i64(wt_safe_dtok) * weight_bytes
+                                wt_rsrc = create_buffer_resource_from_addr(wt_pe_base + wt_src_off)
+                            else:
+                                wt_src_off = _to_i64(wt_safe_pe * max_tok_per_rank + wt_tok_id) * weight_bytes
+                                wt_rsrc = create_buffer_resource_from_addr(addr_shmem_wts + wt_src_off)
+                            wt_val = buffer_load(wt_rsrc, lane, vec_width=1, dtype=T.f32())
+                            if const_expr(npes >= experts_per_token):
+                                wt_acc = wt_acc + wt_val
+                            else:
+                                wt_acc = wt_acc + arith.select(wt_vld, wt_val, 0.0)
+                        wt_out_off = wt_tok_id * experts_per_token + lane
+                        buffer_store(wt_acc, rsrc_out_wts, wt_out_off)
 
     ep_combine_intranode._allocator = allocator
     return ep_combine_intranode
