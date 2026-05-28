@@ -200,9 +200,9 @@ def test_benchmark_vector_add(vec_width):
     print("ROCm GPU Benchmark - Vector Addition with flydsl API")
     print(f"GPU: {get_rocm_arch()}")
     print("=" * 80)
-    assert benchmark_vector_add(vec_width=vec_width, size_multiplier=1024, run_benchmark=False), (
-        "Vector addition benchmark failed correctness check"
-    )
+    assert benchmark_vector_add(
+        vec_width=vec_width, size_multiplier=1024, run_benchmark=False
+    ), "Vector addition benchmark failed correctness check"
 
 
 if __name__ == "__main__":
