@@ -313,7 +313,7 @@ jobs:
           docker rm flydsl_test
 
   # ---------------------------------------------------------------------------
-  # Multi-GPU allreduce tests: ONLY for 8-GPU runners.
+  # Multi-GPU communication operator tests: ONLY for 8-GPU runners.
   # Runs on BOTH linux-flydsl-mi325-8 AND linux-flydsl-mi355-8 independently.
   # Triggered when PR has label "multi-gpu" (added by a maintainer), or when
   # the workflow is manually dispatched.
@@ -321,7 +321,7 @@ jobs:
   # ---------------------------------------------------------------------------
   multi-gpu:
     needs: test
-    name: Multi-GPU AllReduce Tests (${{ matrix.runners }})
+    name: Multi-GPU Communication Operator Tests (${{ matrix.runners }})
     timeout-minutes: 120
     if: |
       always() && (
@@ -424,22 +424,6 @@ jobs:
               -m multi_gpu -v --no-header --tb=short
           "
 
-      # Single entry-point that sweeps the full curated CI_CASES table
-      # (14 cases distilled from mori's gfx950 tuning configs plus
-      # StdMoE plus four mori-parity recv-cap paths: a baseline at
-      # cap=ws*M, a half-cap stress at cap=ws*M/2, a minimum cap of
-      # cap=ws (per-rank 1 slot), and a forced single-PE hot-spot
-      # routing case that drives the dispatch overflow guard under
-      # deterministic worst-case routing).  Each case
-      # is gated by (1) --mode verify for accuracy
-      # and, when applicable, (2) --mode profile --cudagraph for perf
-      # trace.  The script spawns a fresh distributed process per
-      # (case, phase) so symmetric shmem heap state from one case can't
-      # poison the next.  Arch-gated cases (fp4 on non-gfx950, StdMoE
-      # cudagraph) are flagged inside the script and downgraded to
-      # warnings instead of failing the sweep.  The zero-copy combine
-      # path is now validated by the FlyDSL self-check (k*inp round-
-      # trip) and participates in the full sweep.
       - name: Run multi-GPU dispatch/combine CI sweep (8-GPU, accuracy + cudagraph perf)
         timeout-minutes: 30
         run: |

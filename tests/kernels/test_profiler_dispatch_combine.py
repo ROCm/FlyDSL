@@ -41,6 +41,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import random
 import sys
 
 import torch
@@ -373,13 +374,57 @@ CI_CASES = [
         "zero_copy": False,
         "enable_std_moe": False,
     },
+    # ---- bs sweep: fp8_ocp dispatch -> bf16 combine, randomized zero_copy ----
+    # Three cases at distinct M (4 / 32 / 8192) to cover the small-batch,
+    # moderate-batch and large-batch regimes of the mixed-dtype path.  In
+    # each case ``zero_copy`` is picked at random (False or True) per
+    # spawn, so over enough CI runs both buffer modes get exercised at
+    # every M without doubling the case count.  ``random.choice`` runs
+    # once per case in the parent before spawn, so all 8 ranks see the
+    # same resolved value and the kernel launch geometry stays consistent.
+    {
+        "name": "mixed_fp8_dispatch_bf16_combine_bs4_random_zc",
+        "dtype": "fp8_ocp",
+        "combine_dtype": "bf16",
+        "max_tokens": 4,
+        "hidden_dim": 7168,
+        "quant_type": "none",
+        "enable_std_moe": False,
+        "_random_fields": {
+            "zero_copy": [False, True],
+        },
+    },
+    {
+        "name": "mixed_fp8_dispatch_bf16_combine_bs32_random_zc",
+        "dtype": "fp8_ocp",
+        "combine_dtype": "bf16",
+        "max_tokens": 32,
+        "hidden_dim": 7168,
+        "quant_type": "none",
+        "enable_std_moe": False,
+        "_random_fields": {
+            "zero_copy": [False, True],
+        },
+    },
+    {
+        "name": "mixed_fp8_dispatch_bf16_combine_bs8K_random_zc",
+        "dtype": "fp8_ocp",
+        "combine_dtype": "bf16",
+        "max_tokens": 8192,
+        "hidden_dim": 7168,
+        "quant_type": "none",
+        "enable_std_moe": False,
+        "_random_fields": {
+            "zero_copy": [False, True],
+        },
+    },
 ]
 
 
 # Fields in CI_CASES entries that are sweep-runner-only metadata and must
 # NOT be forwarded as ``args`` overrides (else argparse Namespace gains
 # bogus attrs that downstream code may consult).
-_CI_META_FIELDS = {"name", "skip_profile", "requires_arch", "known_failure", "skip_ci"}
+_CI_META_FIELDS = {"name", "skip_profile", "requires_arch", "known_failure", "skip_ci", "_random_fields"}
 
 
 def _current_gpu_arch_prefix() -> str:
@@ -2757,6 +2802,33 @@ def _load_cases_file(path: str) -> list:
     return cases
 
 
+def _resolve_random_fields(case):
+    """Materialise any ``_random_fields`` entries into concrete values.
+
+    A case may carry an optional ``"_random_fields"`` dict mapping a field
+    name to a non-empty list of choices, e.g.::
+
+        {"zero_copy": [False, True]}
+
+    Each invocation picks one value per random field via ``random.choice``
+    and returns a NEW case dict with the random fields collapsed to
+    concrete scalars (the resolved dict is what flows into the spawn so
+    all ranks see the same value).  Picks are also returned for logging.
+    """
+    rfs = case.get("_random_fields")
+    if not rfs:
+        return case, {}
+    resolved = {k: v for k, v in case.items() if k != "_random_fields"}
+    picks = {}
+    for fk, fv_choices in rfs.items():
+        if not isinstance(fv_choices, (list, tuple)) or not fv_choices:
+            raise ValueError(f"_random_fields[{fk!r}] must be a non-empty list/tuple of choices, got {fv_choices!r}")
+        picked = random.choice(list(fv_choices))
+        resolved[fk] = picked
+        picks[fk] = picked
+    return resolved, picks
+
+
 def _run_ci_sweep_main(ws, args):
     """Orchestrate CI sweep: one ``spawn`` per (case, phase).
 
@@ -2795,11 +2867,13 @@ def _run_ci_sweep_main(ws, args):
     print(f"{'#'*70}")
 
     for idx, case in enumerate(cases):
+        case, rand_picks = _resolve_random_fields(case)
         print(f"\n{'='*70}")
         print(f"# [case {idx + 1}/{len(cases)}] {case['name']}")
         for fk, fv in case.items():
             if fk != "name":
-                print(f"#   {fk:>22} = {fv}")
+                tag = "  (random pick)" if fk in rand_picks else ""
+                print(f"#   {fk:>22} = {fv}{tag}")
         print(f"{'='*70}")
 
         # Per-case world_size override: L2 accuracy edge cases run on
